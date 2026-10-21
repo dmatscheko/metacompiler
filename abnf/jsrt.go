@@ -2777,6 +2777,14 @@ func jsStaticsFind(start interface{}, name string) (interface{}, *jsObject, bool
 				return v, clsObj, true
 			}
 		}
+		// A constructor function's level (js_jsheritage): its own properties.
+		if fn, has := clsObj.props["__ctorfn"]; has && name != "prototype" {
+			if p := jsvFnPropsOf(fn); p != nil {
+				if v, found := p.props[name]; found {
+					return v, clsObj, true
+				}
+			}
+		}
 		cls = clsObj.props["__super"]
 	}
 	return nil, nil, false

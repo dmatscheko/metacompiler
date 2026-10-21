@@ -4686,6 +4686,53 @@ function s101(): void {
     check("dc101f", Object.keys(T101).join() === "k,z" && T101.z === 5 && delete v.z && V101.z === 1 && delete v.z && V101.z === 1);
 }
 
+// ===== SECTION 102: a class extending a plain constructor function =====
+// `class G extends F` with F an ordinary function: super() runs F on the new `this`,
+// G inherits F's own properties as statics (live, through the function) and
+// F.prototype's methods, and instanceof holds both ways. A prototype the program
+// wrote onto F is the parent prototype. Values read off tsc 6.0.3's default output
+// run by node 24.
+interface I102 { a: number; v: number; get(): number; who(): string; }
+const v102: number[] = [1, 2, 3, 7];
+function F102(this: any, v: number): void { this.a = v102[0]; this.v = v; }
+(F102 as any).x = v102[0];
+(F102 as any).sm = function (this: any): string { return "sm" + this.x; };
+F102.prototype.get = function (this: any): number { return this.v * 10; };
+F102.prototype.who = function (): string { return "F"; };
+const FC102 = F102 as unknown as new (v: number) => I102;
+class G102 extends FC102 {
+    static y: number = v102[1];
+    b: number;
+    constructor(v: number) { super(v + v102[0]); this.b = v102[2]; }
+    who(): string { return "G<" + super.who(); }
+}
+class K102 extends G102 { who(): string { return "K<" + super.who(); } }
+class H102 extends (F102 as any) {}
+function R102(this: any): void { this.r = v102[0]; }
+R102.prototype = { hello(this: any): string { return "hi" + this.r; } };
+class S102 extends (R102 as any) { static s: number = 1; }
+function s102(): void {
+    const G: any = G102;
+    check("fh102a", G102.y === 2 && G.x === 1 && new G102(4).a === 1);
+    const ks: string[] = [];
+    for (const k in G102) ks.push(k);
+    check("fh102b", ks.join() === "y,x,sm" && Object.keys(G102).join() === "y");
+    const g = new G102(4);
+    check("fh102c", g.v === 5 && g.b === 3 && g.get() === 50 && g.who() === "G<F" && new K102(1).who() === "K<G<F");
+    check("fh102d", g instanceof G102 && g instanceof F102 && !(new FC102(2) instanceof G102) && g.constructor === G102);
+    const h: any = new (H102 as any)(v102[3]);
+    check("fh102e", h.a === 1 && h.v === 7 && h.get() === 70 && h instanceof F102 && G.sm() === "sm1");
+    check("fh102f", Object.getPrototypeOf(G102) === F102 && Object.getPrototypeOf(G102.prototype) === F102.prototype &&
+        !G102.hasOwnProperty("x") && "x" in G102);
+    (F102 as any).later = v102[3];
+    F102.prototype.late = function (this: any): string { return "late" + this.v; };
+    check("fh102g", (K102 as any).later === 7 && (g as any).late() === "late5");
+    const s: any = new S102();
+    const sk: string[] = [];
+    for (const k in S102) sk.push(k);
+    check("fh102h", s.hello() === "hi1" && s instanceof R102 && Object.getPrototypeOf(S102) === R102 && sk.join() === "s");
+}
+
 // ===== END SECTIONS =====
 
 function main(): number {
@@ -4790,6 +4837,7 @@ function main(): number {
     s99(); // SECTION-CALL 99
     s100(); // SECTION-CALL 100
     s101(); // SECTION-CALL 101
+    s102(); // SECTION-CALL 102
     println("full: " + checks + " checks, " + failures + " failures");
     return failures;
 }

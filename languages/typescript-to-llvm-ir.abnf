@@ -5082,8 +5082,7 @@ NotFuncHead = :script(~~
             if (m == undefined || m.skip != undefined) { continue }
             if (m.cname != undefined) { info.name = m.cname; continue }
             // See the twin of this comment in js-to-llvm-ir.abnf.
-            if (m.ext == "Object") { m = {extT: makeVarRef("Object")} }
-            if (m.ext != undefined) { info.superName = m.ext; continue }
+            if (m.ext != undefined) { m = {extT: makeVarRef(m.ext)} }
             // See the twin of this comment in js-to-llvm-ir.abnf.
             if (m.extT != undefined) {
                 heritageSeq = heritageSeq + 1

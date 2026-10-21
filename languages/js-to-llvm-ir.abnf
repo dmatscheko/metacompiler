@@ -6939,13 +6939,13 @@ NotFuncHead = :script(~~
             var m = items[i]
             if (m == undefined || m.skip != undefined) { continue }
             if (m.cname != undefined) { info.name = m.cname; continue }
-            // `extends Object` is read as the heritage EXPRESSION `Object`, so that
-            // js_jsheritage below sees the value the name holds at run time.
-            if (m.ext == "Object") { m = {extT: makeVarRef("Object")} }
-            if (m.ext != undefined) { info.superName = m.ext; continue }
+            // `extends Name` is read as the heritage EXPRESSION `Name`, so that
+            // js_jsheritage below sees the value the name holds at run time (the Object
+            // global, a constructor function) and the parent is evaluated once.
+            if (m.ext != undefined) { m = {extT: makeVarRef(m.ext)} }
             // A heritage EXPRESSION. The value is bound to a synthetic scope name here, at
-            // BUILD time, so that emitClass and emitClassFunc keep resolving the parent by
-            // name exactly as they do for 'extends Name'. The '0' prefix is the same trick
+            // BUILD time, so that emitClass and emitClassFunc resolve the parent by that
+            // name. The '0' prefix is the same trick
             // ClassAnonName uses: no source identifier can collide with it.
             if (m.extT != undefined) {
                 heritageSeq = heritageSeq + 1

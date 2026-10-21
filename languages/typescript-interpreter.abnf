@@ -3688,7 +3688,7 @@ NotFuncHead = :script(~~
         }
         if (isClassDesc(v)) {
             if (v.__super === jsObjectRootClass) { return jsObjectGlobal }
-            if (v.__super != undefined && v.__super != null) { return v.__super }
+            if (v.__super != undefined && v.__super != null) { return hasOwn(v.__super, "__ctorfn") ? v.__super.__ctorfn : v.__super }
             return builtinProto(jsFunctionFn)
         }
         if (typeof v == "function") { return v === builtinProto(jsFunctionFn) ? jsObjectProto : builtinProto(jsFunctionFn) }
@@ -4998,6 +4998,12 @@ NotFuncHead = :script(~~
                     }
                 }
                 if (hasOwn(t, k) && (!hasOwn(t, "__gone") || t.__gone.indexOf(k) < 0)) { return {isacc: false, v: t[k]} }
+            }
+            // A constructor function's level (jsHeritage): its own properties.
+            if (fnPropsN > 0 && hasOwn(cl, "__ctorfn") && k !== "prototype") {
+                var fp = anytype // F's property map, or undefined.
+                fp = fnPropsFind(cl.__ctorfn)
+                if (fp !== undefined && fp.__keys.indexOf(k) >= 0) { return {isacc: false, v: fp[k]} }
             }
             guard = guard + 1
         }
@@ -7212,7 +7218,8 @@ NotFuncHead = :script(~~
         cl = c.__super
         var guard = 0
         while (isClassDesc(cl) && guard < 64) {
-            var vk = ownKeys(cl)
+            var vk = anytype // The level's enumerable own keys: a constructor function's own.
+            vk = hasOwn(cl, "__ctorfn") ? jsKeys(cl.__ctorfn) : ownKeys(cl)
             for (var i = 0; i < vk.length; i++) {
                 if (seen.indexOf(vk[i]) < 0) { out.push(vk[i]) }
             }
@@ -8252,9 +8259,37 @@ NotFuncHead = :script(~~
     // See the twin of this comment in js-interpreter.abnf.
     // See the twin of this comment in js-interpreter.abnf.
     var jsObjectRootClass = {"__isclass": true, "__name": "Object", "__ctor": function() { return undefined }}
+    // A plain CONSTRUCTOR FUNCTION F stands as the descriptor `new F()` files on its
+    // instances (ctorDescriptor), so F.prototype's methods and `instanceof F` already
+    // follow from the __super walk; its __ctor runs F on the new `this`, and the
+    // static walks read F's own properties through __ctorfn (classStaticFind). A
+    // prototype the program wrote onto F (`F.prototype = p`) is the parent prototype as
+    // it stands now, so that case gets a descriptor of its own whose view is p. A
+    // builtin global keeps the "unknown superclass" error.
     function jsHeritage(v) {
         if (v === jsObjectGlobal) { return jsObjectRootClass }
-        return v
+        if (typeof v != "function" || builtinProto(v) !== undefined) { return v }
+        var d = ctorDescriptor(fnNameOf(v), v)
+        if (fnPropsN > 0 && fnOwn(v, "prototype")) {
+            var p = anytype // The prototype the program wrote.
+            p = fnPropsFind(v)["prototype"]
+            if (jsTypeofVal(p) == "object" && p !== null && !Array.isArray(p)) {
+                d = {}
+                d["__isclass"] = true
+                d["__name"] = fnNameOf(v)
+                d["__ctorfn"] = v
+                d["__pview"] = p
+                if (p.__class != undefined) { d["__super"] = p.__class }
+            }
+        }
+        if (!hasOwn(d, "__ctor")) {
+            d["__ctor"] = function() {
+                var rest = []
+                for (var i = 1; i < arguments.length; i++) { rest.push(arguments[i]) }
+                return callWithThis(v, arguments[0], rest)
+            }
+        }
+        return d
     }
     // txt is a class EXPRESSION's source text: an anonymous one takes the name of the
     // binding it is assigned to (NamedEvaluation, see fnAnonNote) as its `name`, and

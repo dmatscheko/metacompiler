@@ -1445,7 +1445,9 @@ function jvStaticForInKeys(c, ks) {
     cl = c["__super"]
     var guard = 0
     while (jvIsClassDesc(cl) && guard < 64) {
-        var vk = jvStaticEnumKeys(cl)
+        var vk = anytype
+        vk = cl["__ctorfn"]
+        if (vk !== undefined) { vk = jvOwnKeys(vk) } else { vk = jvStaticEnumKeys(cl) }
         var i = 0
         while (i < vk.length) {
             if (seen.indexOf(vk[i]) < 0) { out.push(vk[i]) }
@@ -1786,6 +1788,20 @@ function jvStaticFind(o, k) {
         if (jvIsObj(t)) {
             var v = t[k]
             if (v !== undefined) { return v }
+        }
+        // A constructor function's level (js_jsheritage): its own properties.
+        if (jvFnPropsN > 0 && k !== "prototype") {
+            var cf = anytype
+            cf = cls["__ctorfn"]
+            if (cf !== undefined) {
+                var fp = anytype
+                fp = jvFnPropsOf(cf)
+                if (fp !== undefined) {
+                    var fv = anytype
+                    fv = fp[k]
+                    if (fv !== undefined) { return fv }
+                }
+            }
         }
         cls = cls["__super"]
         guard = guard + 1
@@ -2584,6 +2600,16 @@ function jvStaticValueFn(g, key) {
 var jvBuiltinProtos = []
 function jvBuiltinProto(f) {
     if (jvIsObjectGlobal(f)) { return jvObjProto }
+    var at = jvBuiltinAt(f)
+    if (at < 0) {
+        if (jvIsCallable(f)) { return jvProtoView(jvCtorDesc(f)) }
+        return undefined
+    }
+    return jvBuiltinProtoAt(at)
+}
+// Which builtin global f is, as jvBuiltinProtoAt's index; -1 for any other value, the
+// Object global included.
+function jvBuiltinAt(f) {
     var at = -1
     if (jvArrayFn !== undefined && f === jvArrayFn) { at = 0 }
     if (jvStringFn !== undefined && f === jvStringFn) { at = 1 }
@@ -2593,11 +2619,7 @@ function jvBuiltinProto(f) {
     if (jvBigIntFn !== undefined && f === jvBigIntFn) { at = 5 }
     if (jvBooleanFn !== undefined && f === jvBooleanFn) { at = 6 }
     if (jvFunctionFn !== undefined && f === jvFunctionFn) { at = 7 }
-    if (at < 0) {
-        if (jvIsCallable(f)) { return jvProtoView(jvCtorDesc(f)) }
-        return undefined
-    }
-    return jvBuiltinProtoAt(at)
+    return at
 }
 // The builtin prototype jvBuiltinProto's index `at` names, made at the first ask.
 function jvBuiltinProtoAt(at) {
@@ -3867,11 +3889,15 @@ function js_jsdelegclose(src) {
     return undefined
 }
 
-// `class A extends Object`: a class descriptor stands in for the Object global. Twin
-// of js_jsheritage in abnf/jsrtjsprint.go, which says why.
+// `class A extends Object`: a class descriptor stands in for the Object global, and
+// one for a plain constructor function. Twin of js_jsheritage in abnf/jsrtjsprint.go,
+// which says why.
 var jvObjectRoot = anytype
 function js_jsheritage(v) {
-    if (!jvIsObjectGlobal(v)) { return v }
+    if (!jvIsObjectGlobal(v)) {
+        if (jvIsCallable(v) && jvBuiltinAt(v) < 0) { return jvFnHeritage(v) }
+        return v
+    }
     if (jvObjectRoot === undefined) {
         var r = {}
         r["__isclass"] = true
@@ -3880,6 +3906,35 @@ function js_jsheritage(v) {
         jvObjectRoot = r
     }
     return jvObjectRoot
+}
+
+function jvFnHeritage(fn) {
+    var d = jvCtorDesc(fn)
+    if (jvFnPropsN > 0 && jvFnOwn(fn, "prototype")) {
+        var p = anytype
+        p = jvFnPropsFind(fn)["prototype"]
+        if (jvIsObj(p) && !jbIsBig(p) && !jvIsClassDesc(p) && p["__symkey"] === undefined) {
+            d = {}
+            d["__isclass"] = true
+            d["__ctorfn"] = fn
+            d["__pview"] = p
+            var pc = anytype
+            pc = p["__class"]
+            if (pc !== undefined) { d["__super"] = pc }
+        }
+    }
+    if (d["__ctor"] === undefined) {
+        d["__ctor"] = function () {
+            var rest = []
+            var i = 1
+            while (i < arguments.length) {
+                rest.push(arguments[i])
+                i = i + 1
+            }
+            return jvCallT(fn, arguments[0], rest)
+        }
+    }
+    return d
 }
 
 // Object.prototype's methods, applied to a receiver. No value here has the prototype
@@ -5129,7 +5184,12 @@ function jvGetProto(v) {
     if (jvIsClassDesc(v)) {
         sup = v["__super"]
         if (jvObjectRoot !== undefined && sup === jvObjectRoot) { return jvObjGlobal }
-        if (jvIsObj(sup)) { return sup }
+        if (jvIsObj(sup)) {
+            var sf = anytype
+            sf = sup["__ctorfn"]
+            if (sf !== undefined) { return sf }
+            return sup
+        }
         return jvBuiltinProtoAt(7)
     }
     if (v === jvObjProto || v["__nullproto"] === true) { return null }

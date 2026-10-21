@@ -1,4 +1,4 @@
-// Full-syntax test: JavaScript - part 3 of 4, sections 44-56, 58-71 and 73-100.
+// Full-syntax test: JavaScript - part 3 of 4, sections 44-56, 58-71, 73-100 and 109.
 //
 // THE JS RATCHET IS FOUR FILES: as one file its -frozen interpreter leg ran into
 // ./test.sh --full's time brake (peak memory grew superlinearly with the file), and
@@ -7,7 +7,7 @@
 //   tests/js-test-full.js     sections 01-35, the ECMAScript-2022 syntax walk
 //   tests/js-test-full.2.js   sections 36-43 and 101-108, engine agreement, generators,
 //                             Error, Math, builtin constructors, integrity levels
-//   tests/js-test-full.3.js   sections 44-56, 58-71 and 73-100, the call/class/private-name
+//   tests/js-test-full.3.js   sections 44-56, 58-71, 73-100 and 109, the call/class/private-name
 //                             model, the Unicode identifier tables, iterators, derived
 //                             constructors, JSON, guards, Set and Map, iterator closing,
 //                             hasOwnProperty, delete, Object.prototype, extends Object,
@@ -21,7 +21,7 @@
 //                             Object.create, a replaced constructor prototype,
 //                             getPrototypeOf / setPrototypeOf / defineProperty,
 //                             toLocaleString, primitive wrapper objects and property
-//                             attributes
+//                             attributes, a class extending a constructor function
 //   (section 72 is in tests/js-test-full.4.mjs, beside 57: it needs a file that
 //   names no builtin class but in a `new`)
 //   tests/js-test-full.4.mjs  section 57, export in a Module
@@ -2822,6 +2822,53 @@ function s100() {
         prim(() => `${nul}`) === "Cannot convert object to primitive value" && String(own) === "ok")
 }
 
+// ===== SECTION 109: a class extending a plain constructor function =====
+// `class G extends F` with F an ordinary function: super() runs F on the new `this`,
+// G inherits F's own properties as statics (live, through the function) and
+// F.prototype's methods, and instanceof holds both ways. A prototype the program
+// wrote onto F is the parent prototype. Values read off node 24.
+const v109 = [1, 2, 3, 7]
+function F109(v) { this.a = v109[0]; this.v = v }
+F109.x = v109[0]
+F109.sm = function () { return "sm" + this.x }
+F109.prototype.get = function () { return this.v * 10 }
+F109.prototype.who = function () { return "F" }
+class G109 extends F109 {
+    static y = v109[1]
+    constructor(v) { super(v + v109[0]); this.b = v109[2] }
+    who() { return "G<" + super.who() }
+    static ss() { return super.sm() + "/" + super.x }
+}
+class K109 extends G109 { who() { return "K<" + super.who() } }
+class H109 extends F109 {}
+function R109() { this.r = v109[0] }
+R109.prototype = { hello() { return "hi" + this.r } }
+class S109 extends R109 { static s = 1 }
+function P109() { return { replaced: true } }
+class Q109 extends P109 { constructor() { super(); this.q = v109[0] } }
+function s109() {
+    check("fh109a", G109.y === 2 && G109.x === 1 && new G109(4).a === 1)
+    const ks = []
+    for (const k in G109) ks.push(k)
+    check("fh109b", ks.join() === "y,x,sm" && Object.keys(G109).join() === "y")
+    const g = new G109(4)
+    check("fh109c", g.v === 5 && g.b === 3 && g.get() === 50 && g.who() === "G<F" && new K109(1).who() === "K<G<F")
+    check("fh109d", g instanceof G109 && g instanceof F109 && !(new F109(2) instanceof G109) && g.constructor === G109)
+    const h = new H109(v109[3])
+    check("fh109e", h.a === 1 && h.v === 7 && h.get() === 70 && h instanceof F109 && G109.sm() === "sm1" && G109.ss() === "sm1/1")
+    check("fh109f", Object.getPrototypeOf(G109) === F109 && Object.getPrototypeOf(G109.prototype) === F109.prototype &&
+        !G109.hasOwnProperty("x") && "x" in G109)
+    F109.later = v109[3]
+    F109.prototype.late = function () { return "late" + this.v }
+    check("fh109g", K109.later === 7 && g.late() === "late5")
+    const s = new S109()
+    const sk = []
+    for (const k in S109) sk.push(k)
+    check("fh109h", s.hello() === "hi1" && s instanceof R109 && Object.getPrototypeOf(S109) === R109 && sk.join() === "s")
+    const q = new Q109()
+    check("fh109i", q.replaced === true && q.q === 1 && !(q instanceof Q109))
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -2880,6 +2927,7 @@ function main() {
     s98() // SECTION-CALL 98
     s99() // SECTION-CALL 99
     s100() // SECTION-CALL 100
+    s109() // SECTION-CALL 109
     println("full: " + checks + " checks, " + failures + " failures")
     return failures
 }

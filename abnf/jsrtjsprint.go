@@ -2560,7 +2560,11 @@ func jsvStaticForInKeys(c *jsObject, ks []interface{}) []interface{} {
 	}
 	cl, _ := c.props["__super"].(*jsObject)
 	for guard := 0; cl != nil && isClassDesc(cl) && guard < 64; guard++ {
-		for _, k := range jsvStaticEnumKeys(cl) {
+		lvl := jsvStaticEnumKeys(cl)
+		if fn, has := cl.props["__ctorfn"]; has {
+			lvl = jsvOwnKeys(fn)
+		}
+		for _, k := range lvl {
 			if !seen[k] {
 				ks = append(ks, k)
 			}
@@ -5055,11 +5059,35 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 
 	// `class A extends Object`: the Object global is not a class descriptor here, so
 	// the heritage stands for this one - no members, and a constructor that does
-	// nothing, which is all Object's own construction gives a subclass instance. Any
-	// other heritage value comes back unchanged. Twins: js_jsheritage in
-	// languages/lib/js-rt.metajs and jsHeritage in both *-interpreter.abnf.
+	// nothing, which is all Object's own construction gives a subclass instance. A
+	// plain constructor FUNCTION F stands as the descriptor `new F()` files on its
+	// instances (descOf), or, once the program wrote F.prototype = p, as a fresh one
+	// whose view is p; its __ctor runs F on the new `this`, and jsStaticsFind reads
+	// F's own properties through __ctorfn. Any other heritage value comes back
+	// unchanged. Twins: js_jsheritage in languages/lib/js-rt.metajs and jsHeritage in
+	// both *-interpreter.abnf.
 	var objectRoot *jsObject
 	m["js_jsheritage"] = func(a []uint64) uint64 {
+		if fn, isFn := u(a[0]).(*jsClosure); isFn {
+			d := descOf(fn)
+			if p, has := jsvOwnProto(fn); has {
+				if po, isObj := p.(*jsObject); isObj && !isClassDesc(po) {
+					d = newJSObject()
+					d.set("__isclass", true)
+					d.set("__ctorfn", fn)
+					d.set("__pview", po)
+					if pc, hasC := po.props["__class"]; hasC {
+						d.set("__super", pc)
+					}
+				}
+			}
+			if _, has := d.props["__ctor"]; !has {
+				d.set("__ctor", jsHostFunc("", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+					return rt.call(fn, args[0], args[1:])
+				}))
+			}
+			return w(d)
+		}
 		if !jsvIsObjectGlobal(u(a[0])) {
 			return a[0]
 		}
@@ -5990,7 +6018,10 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 				if objectRoot != nil && sup == interface{}(objectRoot) {
 					return objGlobal
 				}
-				if _, ok := sup.(*jsObject); ok {
+				if so, ok := sup.(*jsObject); ok {
+					if fn, has := so.props["__ctorfn"]; has {
+						return fn
+					}
 					return sup
 				}
 				return builtinProtoNamed("Function")
