@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-715** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-717** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -72,11 +72,10 @@ its report; anything structural there is a CORE ticket.
 
 # JS — JavaScript and TypeScript
 
-### T-710 js: `Sub.from` / `Sub.of` on an Array subclass; `Symbol.species` reads; `typeof [].hasOwnProperty`; tagged-template strings array; `"01"` array key · P2 · JS · IN PROGRESS (JS worker, round 25) [V]
-`class C extends Array {}; C.from([1,2,3])` → "C.from is not a function" in all legs (node a C). `Array[Symbol.species]` /
-`Sub[Symbol.species]` → undefined (node the class). `typeof [].hasOwnProperty` → "undefined" (node "function"). A tagged template's
-strings object is array-like (node: a frozen array, `raw` non-enumerable). `a["01"] = 1` is index 1 via the floor's maybe_numeric /
-index_of_key (node: a named property) — the floor is shared; check other languages' expectations before changing it.
+### T-715 js: `K.constructor`; sparse array keys; defineProperty attributes on array named keys; template object identity · P3 · JS · OPEN [V]
+`class K {}; typeof K.constructor` → undefined (node function). `k=[]; k["1"]=7; Object.keys(k)` → `0,1` (node `1`: holes are not
+keys). `Object.defineProperty(arr, "n", {value, enumerable:false})` → still listed by keys / for-in, descriptor says enumerable (node
+hides it). A tagged template's strings object is rebuilt per call (node: one object per call site).
 
 ---
 
@@ -148,6 +147,12 @@ emitInit). Oracle: cc/clang.
 ---
 
 # CORE — MetaJS, the engines, shared runtime, tooling
+
+### T-716 core: a non-canonical numeric string key (`"01"`, `"1.0"`, `"+1"`, `" 1"`, `"-0"`) is an array index · P2 · CORE · OPEN [V]
+js `k=[]; k["01"]=7` → node: named property (length 0, `k[1]` undefined, keys `01`); llvm.Run/native: index 1 (length 2); interpreter
+stores it where keys/`in` cannot see it. Make rt.arrIndexOf (abnf/jsrt.go), index_of_key / maybe_numeric (runtime.c) and the
+interpreters' jsArrIndexKey accept only canonical indices for string keys in js mode (`ToString(ToUint32(k)) === k`, `< 2^32-1`);
+check lua / php / other languages' numeric-string coercion first (they may rely on it — gate by language if so).
 
 ### T-708 core: building a large string natively is quadratic in ar_block's free-list walk · P1 · CORE · IN PROGRESS (CORE worker, round 1) [V]
 python `s = "ab"*35000; print(len(s))` built with `-exe` takes ~20 s (CPython instant; llvm.Run instant): the time is in runtime.c
@@ -796,6 +801,7 @@ T-707 js: named properties on arrays; species for builtin subclasses — DONE 43
 T-709 bash: the interpreter is very slow building a long string (`printf -v s '%*s' 35000` + `${s// /ab}`) — DONE 17952f3c (fixed-length patterns test one candidate per start like bash's umatchlen, linear result building, freed candidates, one-allocation padding — 35000-char repro 0.3–1.8 s in every engine, = bash 5.3; follow-up T-711)
 T-711 bash: glob `?` and pattern elements match one UTF-16 unit in the interpreter — DONE 3e4a5ea7 (glob elements step whole characters in the interpreter — 4 legs = bash 5.3; follow-up T-712)
 T-712 bash: non-ASCII POSIX classes in globs; empty extglob matches in `${v//pat/rep}` — DONE 61c107ce (Unicode class table read off macOS iswctype replaces the print table in both engines, undecodable bytes in no class, pat_subst's empty-match rule — 4 legs = bash 5.3; follow-ups T-713/T-714)
+T-710 js: `Sub.from` / `Sub.of` on an Array subclass; `Symbol.species` reads; `typeof [].hasOwnProperty`; tagged-template strings array; `"01"` array key — DONE 19d778a0 (Symbol.species getters, Object.prototype methods as values on primitives/arrays, tagged-template strings as frozen arrays with hidden raw; Sub.from/of already worked — 4 legs = node; the "01" key moves to T-716 CORE; follow-up T-715)
 
 # Settled — do not re-open
 
