@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-723** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-725** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -68,13 +68,21 @@ its report; anything structural there is a CORE ticket.
 
 # RB — Ruby
 
-### T-722 ruby: an uncaught internal error lacks MRI's `file:line:in 'meth': ` prefix · P3 · RB · IN PROGRESS (RB worker, round 9) [V]
-An uncaught SystemStackError (and other internally raised errors) prints `stack level too deep (SystemStackError)`; ruby prints
-`rec.rb:1:in 'rec': stack level too deep (SystemStackError)` (2.6: `in `rec'`). All three engines.
+### T-724 ruby: builtin-raised errors print no `file:line:in 'meth': ` prefix; String + Integer concatenates · P2 · RB · OPEN [V]
+Uncaught ZeroDivisionError / TypeError / KeyError / ArgumentError / NoMethodError / NameError print without MRI's site: ruby 2.6
+`zd.rb:2:in `/'`, `ke.rb:2:in `fetch'`, `ie.rb:2:in `Integer'`, arity errors at the callee's def line (`ae.rb:1:in `f'`),
+NoMethodError at the call's line. Needs a frame-name parameter at each raise site (rubyRaiseErr / rubyNameErr / rubyArgCountErr /
+js_rtop in abnf/jsrt.go, rbRaiseErr in layer 2, raiseErr in the interpreter) and call-granular positions. Separately: `v = ["a", 1];
+p(v[0] + v[1])` → `"a1"` in all engines (ruby TypeError "no implicit conversion of Integer into String").
 
 ---
 
 # JS — JavaScript and TypeScript
+
+### T-723 js/ts: tests/srcpos-probe.sh reports -callgraph definition lines off by one · P1 · JS · OPEN [V]
+`tests/srcpos-probe.sh` on main: `FAIL js: definitions are on [1 5], -callgraph says [2 6]` (typescript the same); the other 24
+languages pass. A recent js/ts grammar change shifted the recorded definition position (suspects: function source spans
+js-fnsrc.js, class-in-try, new.target binding at entry). Bisect, fix, and wire srcpos-probe into the per-language verification.
 
 ### T-718 js: a strict-mode write to a getter-only property is silently dropped · P3 · JS · IN PROGRESS (JS worker, round 27) [V]
 `"use strict"; var o = { get acc(){ return 1 } }; o.acc = 2` → node "TypeError: Cannot set property acc of #<Object> which has only a
@@ -802,6 +810,7 @@ T-717 bash: native binaries exhaust the 4 MiB string arena on long-running progr
 T-708 core: building a large string natively is quadratic in ar_block's free-list walk — DONE 17370194 (big blocks on size-step free lists: python "ab"*35000 native 20.3 s → 0.16 s; 35000 appends 20–77 s → 0.5–5.6 s across 8 languages)
 T-674 go (CORE): native recursion capped at ~500 Go frames by the js_gotry jump-buffer stack — DONE 3c89e494 (jmp_buf pool doubles instead of capping at 512; native go recursion now bounded by the 8 MB C stack, ~16,500 frames; = go run on depth 5000 and 10000-deep json)
 T-505 java (and probably every language): unbounded recursion kills the process instead of raising — DONE 4b8bcb99 (one call counter in all four engines raising each language's own error — python RecursionError at CPython's 1000, js RangeError, java/kotlin StackOverflowError, ruby SystemStackError, lua catchable stack overflow, dart StackOverflowError, go fatal exit 2, swift SIGSEGV, csharp per .NET docs; non-python limit 10,000 frames, below the reference for java/lua/go but within what the native 8 MB C stack allows; php/metajs → T-721)
+T-722 ruby: an uncaught internal error lacks MRI's `file:line:in 'meth': ` prefix — DONE 3430e76e for SystemStackError (statement site register in both engines, = ruby 2.6 first line and backtrace[0]); builtin-raised errors need frame names at jsrt.go raise sites → T-724
 
 # Settled — do not re-open
 
