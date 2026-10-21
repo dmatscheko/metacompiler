@@ -2338,6 +2338,15 @@ s45() {
   check eg3 "[${s#@(a|X)}] $d45 $?" "[aXa] 0 1"
   check u81 "[${v%?}] [${v#?}] [${v%%?}] [${v/%?/Z}] [${v/#?/Z}]" "[h] [é] [h] [hZ] [Zé]"
   check u82 "[${w%?}] [${w%??}] [${w#?}] [${w/?/-}] [${w//?/-}]" "[éà] [é] [àü] [-àü] [---]"
+  # A long subject: padding and every pattern operator stay linear in its length.
+  local L45 Z45 T45 a b c d
+  printf -v L45 '%*s' 5000
+  printf -v Z45 '%05000d' 7
+  T45=${L45// /ab}
+  check rp5 "${#L45} ${#T45} ${T45:9996} ${#Z45} ${Z45//0/}" "5000 10000 abab 5000 7"
+  L45=${L45}é
+  a=${L45/%?/E} b=${L45#?} c=${L45%" é"} d=${Z45/#0/x}
+  check rp6 "${#a} [${a: -2}] ${#b} ${#c} ${d:0:2} ${#d}" "5001 [ E] 5000 4999 x0 5000"
 }
 
 # ===== SECTION 46: printf flags, operands and escapes =====

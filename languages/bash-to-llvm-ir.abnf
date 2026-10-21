@@ -1496,7 +1496,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var rtEgAlt = rtDecl("rt_egalt", false, [1, 0])
     var rtGlob = rtDecl("rt_glob", false, [1, 1])
     var rtEg = rtDecl("rt_eg", false, [1, 1, 0])
-    var rtMatchLen = rtDecl("rt_matchlen", false, [1, 1, 0])
+    var rtMatchLen = rtDecl("rt_matchlen", false, [1, 1, 0, 0, 0])
     var rtMatchEnd = rtDecl("rt_matchend", false, [1, 1])
 
     // ${v#p} ${v%p} ${v/p/r} ${v^} ${v@Q} ${v@E}, and `read`.

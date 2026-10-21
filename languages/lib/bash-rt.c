@@ -154,7 +154,7 @@ char *rt_substr(char *s, int off, int n);
 char *rt_csubstr(char *s, int off, int n);
 int rt_egclose(char *ecq);
 int rt_egalt(char *eaq, int eaa);
-int rt_matchlen(char *p, char *s, int i);
+int rt_matchlen(char *p, char *s, int len, int i, int pl);
 int rt_matchend(char *p, char *s);
 char *rt_strip(char *s, char *p, int mode);
 char *rt_replace(char *s, char *p, char *r, int mode);
@@ -562,9 +562,13 @@ int rt_clsid(char *nm) {
  * bash-interpreter.abnf. */
 int rt_cpw(char *s) {
     int c0 = (int)(unsigned char)s[0];
-    int c1 = (int)(unsigned char)s[1];
+    int c1;
     int w = 1;
     int i;
+    /* Below 0xC2 no sequence starts: ASCII, a stray continuation byte or an
+     * overlong lead. The glob matcher asks this per character, so it is first. */
+    if (c0 < 194) return 1;
+    c1 = (int)(unsigned char)s[1];
     if (c0 >= 194 && c0 <= 223) { w = 2; }
     else if (c0 >= 224 && c0 <= 239) { w = 3; }
     else if (c0 >= 240 && c0 <= 244) { w = 4; }
@@ -579,10 +583,12 @@ int rt_cpw(char *s) {
 }
 
 int rt_cpat(char *s) {
-    int w = rt_cpw(s);
     int c0 = (int)(unsigned char)s[0];
+    int w;
     int v;
     int i;
+    if (c0 < 194) return c0;
+    w = rt_cpw(s);
     if (w == 1) return c0;
     if (w == 2) { v = c0 - 192; }
     else if (w == 3) { v = c0 - 224; }
@@ -1652,42 +1658,94 @@ int rt_isbound(char *s, int k)
     return ((int)(unsigned char)s[k] & 192) != 128;
 }
 
-/* int rt_matchlen(char *p, char *s, int i): end index of the LONGEST match of
- * p starting at i, or -1. */
-int rt_matchlen(char *p, char *s, int i)
+/* int rt_patlen(char *p): the number of CHARACTERS every match of p spans, or
+ * -1 when "*" or an extglob lets it vary. Every other element matches exactly
+ * one character, so a search only has to try the candidates of that length -
+ * bash narrows its own search the same way (umatchlen). Twin of patFixedLen in
+ * bash-interpreter.abnf. */
+int rt_patlen(char *p)
 {
-    int j;
-    char *cand;
+    int n = 0;
+    int i = 0;
+    while (p[i] != 0) {
+        int pc = (int)(unsigned char)p[i];
+        int nc = (int)(unsigned char)p[i + 1];
+        if (pc == 42) return -1;
+        if ((pc == 64 || pc == 63 || pc == 43 || pc == 33) && nc == 40 && (opt_extglob != 0 || eg_force != 0)) return -1;
+        int cr = pc == 91 ? rt_class(&p[i], 0) : -1;
+        if (cr >= 0) i = i + cr / 2;
+        else if (pc == 92 && nc != 0) i = i + 1 + rt_cpw(&p[i + 1]);
+        else i = i + rt_cpw(&p[i]);
+        n = n + 1;
+    }
+    return n;
+}
 
-    j = rt_strlen(s);
-    while (1) {
-        if (j < i) return -1;
-        if (rt_isbound(s, j) != 0) {
-            cand = rt_substr(s, i, j - i);
-            if (rt_glob(p, cand) != 0) return j;
+/* char *rt_slice(char *s, int i, int n): the n bytes of s at offset i, which
+ * must lie inside s. rt_substr measures all of s first, which a loop over the
+ * positions of a long subject cannot afford. */
+char *rt_slice(char *s, int i, int n)
+{
+    char *d = rt_bump(n + 1);
+    int k = 0;
+    while (k < n) { d[k] = s[i + k]; k = k + 1; }
+    d[n] = 0;
+    return d;
+}
+
+/* int rt_globat(char *p, char *s, int i, int n): rt_glob of p against the n
+ * bytes of s at offset i. The candidate (and whatever rt_class takes) goes back
+ * to the arena afterwards: a search tries many candidates and keeps none. */
+int rt_globat(char *p, char *s, int i, int n)
+{
+    int mark = arena_pos;
+    int r = rt_glob(p, rt_slice(s, i, n));
+    arena_pos = mark;
+    return r;
+}
+
+/* int rt_matchlen(char *p, char *s, int len, int i, int pl): end index of the
+ * LONGEST match of p starting at i, or -1; len is rt_strlen(s) and pl is
+ * rt_patlen(p). rt_glob steps the subject by rt_cpw, so a match of pl
+ * characters can only end pl such steps after i: that is the one candidate. */
+int rt_matchlen(char *p, char *s, int len, int i, int pl)
+{
+    int j = len;
+    int lo = i;
+    int n = 0;
+    if (pl >= 0) {
+        j = i;
+        while (n < pl && j < len) {
+            j = j + rt_cpw(&s[j]);
+            n = n + 1;
         }
+        if (n < pl) return -1;
+        lo = j;
+    }
+    while (j >= lo) {
+        if (rt_isbound(s, j) != 0 && rt_globat(p, s, i, j - i) != 0) return j;
         j = j - 1;
     }
+    return -1;
 }
 
 /* int rt_matchend(char *p, char *s): start index of the LONGEST match of p
  * that reaches the end of s, or -1. */
 int rt_matchend(char *p, char *s)
 {
-    int len;
-    int i;
-    char *cand;
-
-    len = rt_strlen(s);
-    i = 0;
-    while (1) {
-        if (i > len) return -1;
-        if (rt_isbound(s, i) != 0) {
-            cand = rt_substr(s, i, -1);
-            if (rt_glob(p, cand) != 0) return i;
-        }
+    int len = rt_strlen(s);
+    int pl = rt_patlen(p);
+    int i = 0;
+    int hi = len;
+    if (pl >= 0) {
+        i = len - 4 * pl > 0 ? len - 4 * pl : 0;
+        hi = len - pl;
+    }
+    while (i <= hi) {
+        if (rt_isbound(s, i) != 0 && rt_globat(p, s, i, len - i) != 0) return i;
         i = i + 1;
     }
+    return -1;
 }
 
 /* ---- ${v#p} / ${v/p/r} / case conversion / quoting / read ----------------- */
@@ -1703,16 +1761,14 @@ char *rt_strip(char *s, char *p, int mode) {
     int len = rt_strlen(s);
     int isPre = (mode == 0) || (mode == 1);
     int asc = (mode == 0) || (mode == 3);
+    int pl = rt_patlen(p);
     int t = 0;
     while (t <= len) {
         int k = asc ? t : len - t;
-        char *pre = rt_substr(s, 0, k);
-        char *suf = rt_substr(s, k, -1);
-        char *cand = isPre ? pre : suf;
-        if (rt_isbound(s, k) != 0 && rt_glob(p, cand) != 0) {
-            char *rpre = rt_substr(s, k, -1);
-            char *rsuf = rt_substr(s, 0, k);
-            return isPre ? rpre : rsuf;
+        int clen = isPre ? k : len - k;
+        int fits = pl < 0 || (clen >= pl && clen <= 4 * pl);
+        if (fits && rt_isbound(s, k) != 0 && rt_globat(p, s, isPre ? 0 : k, clen) != 0) {
+            return isPre ? rt_substr(s, k, -1) : rt_substr(s, 0, k);
         }
         t = t + 1;
     }
@@ -1773,18 +1829,40 @@ char *rt_repescape(char *s) {
     return dst;
 }
 
+/* rt_replace collects its result in rp_buf, which doubles when full: appending
+ * to an arena string with rt_strcat copies all of it on every step, quadratic
+ * in time and arena over a long subject. */
+char *rp_buf;
+int rp_len;
+int rp_cap;
+
+void rp_add(char *b, int n) {
+    int i = 0;
+    if (rp_len + n + 1 > rp_cap) {
+        char *nb;
+        rp_cap = (rp_len + n + 1) * 2;
+        nb = rt_bump(rp_cap);
+        while (i < rp_len) { nb[i] = rp_buf[i]; i = i + 1; }
+        rp_buf = nb;
+    }
+    i = 0;
+    while (i < n) { rp_buf[rp_len + i] = b[i]; i = i + 1; }
+    rp_len = rp_len + n;
+    rp_buf[rp_len] = 0;
+}
+
 /* rt_replace: ${v/p/r} and friends; mode 0 = first, 1 = all, 2 = anchored at the
  * start (#), 3 = anchored at the end (%). An UNSET value is left alone, while an
  * empty one is a subject like any other, which a lone star pattern matches. */
 char *rt_replace(char *s, char *p, char *r, int mode) {
     int len = rt_strlen(s);
-    char *out = empty;
+    int pl = rt_patlen(p);
+    int from = 0;
     int i = 0;
-    int done = 0;
     if (s == &unset_marker[0]) return s;
     if (mode >= 2) {
         if (mode == 2) {
-            int jj = rt_matchlen(p, s, 0);
+            int jj = rt_matchlen(p, s, len, 0, pl);
             if (jj < 0) return s;
             return rt_strcat(rt_repsub(r, rt_substr(s, 0, jj)), rt_substr(s, jj, -1));
         }
@@ -1796,25 +1874,26 @@ char *rt_replace(char *s, char *p, char *r, int mode) {
         if (rt_glob(p, s) != 0) return rt_repsub(r, s);
         return s;
     }
-    while (1) {
-        if (i > len || done != 0) return out;
-        int j = rt_matchlen(p, s, i);
+    rp_buf = empty;
+    rp_len = 0;
+    rp_cap = 0;
+    while (i <= len) {
+        int j = rt_matchlen(p, s, len, i, pl);
         if (j > i) {
-            /* a real (non empty) match: append the replacement and jump past it */
-            out = rt_strcat(out, rt_repsub(r, rt_substr(s, i, j - i)));
+            /* a real (non empty) match: the text before it, then the replacement */
+            char *rep = rt_repsub(r, rt_slice(s, i, j - i));
+            rp_add(&s[from], i - from);
+            rp_add(rep, rt_strlen(rep));
             i = j;
-            if (mode == 0) {
-                out = rt_strcat(out, rt_substr(s, j, -1));
-                done = 1;
-            }
+            from = j;
+            if (mode == 0) break;
         } else {
-            /* no match here: carry one CHARACTER across */
-            int w = (i < len) ? rt_cpw(&s[i]) : 1;
-            out = rt_strcat(out, rt_substr(s, i, w));
-            i = i + w;
+            /* no match here: step one CHARACTER */
+            i = i + ((i < len) ? rt_cpw(&s[i]) : 1);
         }
     }
-    return out;
+    rp_add(&s[from], len - from);
+    return rp_len == 0 ? empty : rp_buf;
 }
 
 #include "case-simple.h"
@@ -2687,12 +2766,14 @@ char *rt_pf_value(char *s)
 char *pf_pad(char *s, int w, int left, int zero, int keep)
 {
     int len = pf_vlen(s);
-    char *fill = empty;
-    while (len < w) {
-        if (zero != 0) fill = rt_strcat(fill, "0");
-        else fill = rt_strcat(fill, " ");
-        len = len + 1;
+    int n = w > len ? w - len : 0;
+    char *fill = n > 0 ? rt_bump(n + 1) : &empty[0];
+    int i = 0;
+    while (i < n) {
+        fill[i] = zero != 0 ? 48 : 32;
+        i = i + 1;
     }
+    if (n > 0) fill[n] = 0;
     if (left != 0) return rt_strcat(s, fill);
     if (zero != 0) return rt_strcat(rt_strcat(rt_substr(s, 0, keep), fill), rt_substr(s, keep, -1));
     return rt_strcat(fill, s);

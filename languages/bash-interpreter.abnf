@@ -1552,22 +1552,46 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
 
     // ---- the pattern based ${...} forms, all built on the glob matcher ----
 
+    // The length every match of pat has, or -1 when "*" or an extglob lets it vary. Each
+    // other pattern element matches exactly one code unit, so a search tries one candidate
+    // per start instead of every end - bash narrows its own search the same way (umatchlen).
+    // Twin of rt_patlen in languages/lib/bash-rt.c.
+    function patFixedLen(pat) {
+        var n = 0
+        var pi = 0
+        while (pi < pat.length) {
+            var pc = pat.charCodeAt(pi)
+            if (pc == 42) { return -1 }
+            if ((pc == 64 || pc == 63 || pc == 43 || pc == 33) && pi + 1 < pat.length && pat.charCodeAt(pi + 1) == 40
+                && (optExtglob || egForce)) { return -1 }
+            if (pc == 91) { var cr = globClass(pat, pi, 0); pi = (cr.ok == 0) ? pi + 1 : cr.next }
+            else if (pc == 92 && pi + 1 < pat.length) { pi = pi + 2 }
+            else { pi = pi + 1 }
+            n = n + 1
+        }
+        return n
+    }
     // Shortest / longest prefix or suffix of v that matches pat, removed.
     function stripPat(v, pat, isPrefix, longest) {
         var n = v.length
+        var fl = patFixedLen(pat)
         var t = 0
         while (t <= n) {
             var k = (longest == isPrefix) ? (n - t) : t
-            var cand = isPrefix ? v.slice(0, k) : v.slice(k)
-            if (globMatch(pat, cand)) { return isPrefix ? v.slice(k) : v.slice(0, k) }
+            if (fl < 0 || (isPrefix ? k : n - k) == fl) {
+                var cand = isPrefix ? v.slice(0, k) : v.slice(k)
+                if (globMatch(pat, cand)) { return isPrefix ? v.slice(k) : v.slice(0, k) }
+            }
             t = t + 1
         }
         return v
     }
-    // The end index of the LONGEST match of pat starting at i, or -1.
-    function matchLenAt(pat, v, i) {
-        var j = v.length
-        while (j >= i) {
+    // The end index of the LONGEST match of pat starting at i, or -1; fl is patFixedLen(pat).
+    function matchLenAt(pat, v, i, fl) {
+        var j = (fl < 0) ? v.length : i + fl
+        var lo = (fl < 0) ? i : j
+        if (j > v.length) { return -1 }
+        while (j >= lo) {
             if (globMatch(pat, v.slice(i, j))) { return j }
             j = j - 1
         }
@@ -1575,16 +1599,22 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     // The start index of the LONGEST match of pat that reaches the end of v, or -1.
     function matchAtEnd(pat, v) {
-        var i = 0
+        var fl = patFixedLen(pat)
+        var i = (fl < 0) ? 0 : v.length - fl
+        if (i < 0) { return -1 }
         while (i <= v.length) {
             if (globMatch(pat, v.slice(i))) { return i }
+            if (fl >= 0) { return -1 }
             i = i + 1
         }
         return -1
     }
+    // The result is collected in parts and joined once: appending to one growing string
+    // would copy it on every step, quadratic over a long subject.
     function replacePat(v, pat, rep, mode) {
+        var fl = patFixedLen(pat)
         if (mode == "#") {
-            var j = matchLenAt(pat, v, 0)
+            var j = matchLenAt(pat, v, 0, fl)
             if (j < 0) { return v }
             return repSubst(rep, v.slice(0, j)) + v.slice(j)
         }
@@ -1595,21 +1625,24 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         // An empty subject is one like any other: e=""; ${e/*/R} is R.
         if (v == "") { return globMatch(pat, v) ? repSubst(rep, v) : v }
-        var out = ""
+        var parts = []
+        var from = 0
         var i = 0
         var done = false
         while (i <= v.length && !done) {
-            var j2 = matchLenAt(pat, v, i)
+            var j2 = matchLenAt(pat, v, i, fl)
             if (j2 > i) {
-                out = out + repSubst(rep, v.slice(i, j2))
+                parts.push(v.slice(from, i))
+                parts.push(repSubst(rep, v.slice(i, j2)))
                 i = j2
-                if (mode == "one") { out = out + v.slice(i); done = true }
+                from = i
+                if (mode == "one") { done = true }
             } else {
-                if (i < v.length) { var cch = chunkAt(v, i); out = out + cch; i = i + cch.length }
-                else { i = i + 1 }
+                i = i + ((i < v.length) ? chunkAt(v, i).length : 1)
             }
         }
-        return out
+        if (from < v.length) { parts.push(v.slice(from)) }
+        return parts.join("")
     }
     // pat is the OPTIONAL operand of ${v^pat} / ${v^^pat} / ${v,pat} / ${v,,pat}: a glob
     // matched against ONE character at a time, so only the characters it matches are
