@@ -1552,8 +1552,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
 
     // ---- the pattern based ${...} forms, all built on the glob matcher ----
 
-    // The length every match of pat has, or -1 when "*" or an extglob lets it vary. Each
-    // other pattern element matches exactly one code unit, so a search tries one candidate
+    // The length in CHARACTERS every match of pat has, or -1 when "*" or an extglob lets it
+    // vary. Each other pattern element matches exactly one character, so a search tries one candidate
     // per start instead of every end - bash narrows its own search the same way (umatchlen).
     // Twin of rt_patlen in languages/lib/bash-rt.c.
     function patFixedLen(pat) {
@@ -1565,47 +1565,66 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if ((pc == 64 || pc == 63 || pc == 43 || pc == 33) && pi + 1 < pat.length && pat.charCodeAt(pi + 1) == 40
                 && (optExtglob || egForce)) { return -1 }
             if (pc == 91) { var cr = globClass(pat, pi, 0); pi = (cr.ok == 0) ? pi + 1 : cr.next }
-            else if (pc == 92 && pi + 1 < pat.length) { pi = pi + 2 }
-            else { pi = pi + 1 }
+            else if (pc == 92 && pi + 1 < pat.length) { pi = pi + 1 + chW(pat, pi + 1) }
+            else { pi = pi + chW(pat, pi) }
             n = n + 1
         }
         return n
     }
-    // Shortest / longest prefix or suffix of v that matches pat, removed.
+    // The index c characters after s[i] / before s[j], or -1 when s runs out first.
+    function fwdChars(s, i, c) {
+        while (c > 0) { if (i >= s.length) { return -1 }; i = i + chW(s, i); c = c - 1 }
+        return i
+    }
+    function backChars(s, j, c) {
+        while (c > 0) { if (j <= 0) { return -1 }; j = j - chWBack(s, j); c = c - 1 }
+        return j
+    }
+    // Shortest / longest prefix or suffix of v that matches pat, removed. Candidates end on
+    // character boundaries, so a surrogate pair is never split.
     function stripPat(v, pat, isPrefix, longest) {
         var n = v.length
         var fl = patFixedLen(pat)
-        var t = 0
-        while (t <= n) {
-            var k = (longest == isPrefix) ? (n - t) : t
-            if (fl < 0 || (isPrefix ? k : n - k) == fl) {
-                var cand = isPrefix ? v.slice(0, k) : v.slice(k)
-                if (globMatch(pat, cand)) { return isPrefix ? v.slice(k) : v.slice(0, k) }
+        if (fl >= 0) {
+            var kf = isPrefix ? fwdChars(v, 0, fl) : backChars(v, n, fl)
+            if (kf >= 0 && globMatch(pat, isPrefix ? v.slice(0, kf) : v.slice(kf))) {
+                return isPrefix ? v.slice(kf) : v.slice(0, kf)
             }
-            t = t + 1
+            return v
         }
-        return v
+        var down = (longest == isPrefix)
+        var k = down ? n : 0
+        while (true) {
+            if (globMatch(pat, isPrefix ? v.slice(0, k) : v.slice(k))) { return isPrefix ? v.slice(k) : v.slice(0, k) }
+            if (down) { if (k == 0) { return v }; k = k - chWBack(v, k) }
+            else { if (k == n) { return v }; k = k + chW(v, k) }
+        }
     }
     // The end index of the LONGEST match of pat starting at i, or -1; fl is patFixedLen(pat).
     function matchLenAt(pat, v, i, fl) {
-        var j = (fl < 0) ? v.length : i + fl
-        var lo = (fl < 0) ? i : j
-        if (j > v.length) { return -1 }
-        while (j >= lo) {
+        if (fl >= 0) {
+            var jf = fwdChars(v, i, fl)
+            return (jf >= 0 && globMatch(pat, v.slice(i, jf))) ? jf : -1
+        }
+        var j = v.length
+        while (j >= i) {
             if (globMatch(pat, v.slice(i, j))) { return j }
-            j = j - 1
+            if (j == i) { return -1 }
+            j = j - chWBack(v, j)
         }
         return -1
     }
     // The start index of the LONGEST match of pat that reaches the end of v, or -1.
     function matchAtEnd(pat, v) {
         var fl = patFixedLen(pat)
-        var i = (fl < 0) ? 0 : v.length - fl
-        if (i < 0) { return -1 }
+        if (fl >= 0) {
+            var f = backChars(v, v.length, fl)
+            return (f >= 0 && globMatch(pat, v.slice(f))) ? f : -1
+        }
+        var i = 0
         while (i <= v.length) {
             if (globMatch(pat, v.slice(i))) { return i }
-            if (fl >= 0) { return -1 }
-            i = i + 1
+            i = i + ((i < v.length) ? chW(v, i) : 1)
         }
         return -1
     }
@@ -2524,6 +2543,21 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (cc >= 55296 && cc <= 56319 && i + 1 < s.length) { return s.slice(i, i + 2) }
         return s.charAt(i)
     }
+    // The UTF-16 width (1 or 2) of the character at s[i] / of the one that ENDS at s[j],
+    // with chunkAt's notion of a pair: what the glob matcher steps by.
+    function chW(s, i) {
+        var cc = s.charCodeAt(i)
+        return (cc >= 55296 && cc <= 56319 && i + 1 < s.length) ? 2 : 1
+    }
+    function chWBack(s, j) {
+        return (j >= 2 && chW(s, j - 2) == 2) ? 2 : 1
+    }
+    // The code point of the character at s[i]: what "?" and a bracket expression compare.
+    function cpAt(s, i) {
+        var cc = s.charCodeAt(i)
+        if (cc >= 55296 && cc <= 56319 && i + 1 < s.length) { return (cc - 55296) * 1024 + s.charCodeAt(i + 1) - 56320 + 65536 }
+        return cc
+    }
 
     // ---- glob (pathname-style) pattern matching: * ? [...] and a backslash escape ----
     // The same matcher backs case, [[ == ]] and the ${v#pat} family, exactly like the shell.
@@ -2572,7 +2606,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var k = si
             while (k <= s.length) {
                 if (!egAnyFull(alts, s.slice(si, k))) { if (globAt(rest, 0, s, k)) { return true } }
-                k = k + 1
+                k = k + ((k < s.length) ? chW(s, k) : 1)
             }
             return false
         }
@@ -2584,7 +2618,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 var k2 = si
                 while (k2 <= s.length) {
                     if (globAt(alts[i], 0, s.slice(si, k2), 0) && globAt(rest, 0, s, k2)) { return true }
-                    k2 = k2 + 1
+                    k2 = k2 + ((k2 < s.length) ? chW(s, k2) : 1)
                 }
             }
             return false
@@ -2594,13 +2628,13 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (op == 42 && globAt(rest, 0, s, si)) { return true }
         var j
         for (j = 0; j < alts.length; j++) {
-            var k3 = si + 1
+            var k3 = si + chW(s, si)
             while (k3 <= s.length) {
                 if (globAt(alts[j], 0, s.slice(si, k3), 0)) {
                     if (globAt(rest, 0, s, k3)) { return true }
                     if (egMatch(42, alts, rest, s, k3)) { return true }
                 }
-                k3 = k3 + 1
+                k3 = k3 + ((k3 < s.length) ? chW(s, k3) : 1)
             }
         }
         return false
@@ -2623,25 +2657,28 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 var k = si
                 while (k <= s.length) {
                     if (globAt(p, pi, s, k)) { return true }
-                    k = k + 1
+                    k = k + ((k < s.length) ? chW(s, k) : 1)
                 }
                 return false
             }
             if (si >= s.length) { return false }
-            var sc = s.charCodeAt(si)
-            if (pc == 63) { pi = pi + 1; si = si + 1 }          // "?"
+            // Every element below matches one CHARACTER, a surrogate pair included, as bash
+            // and rt_glob (bash-rt.c) do. A literal compares code units, so a literal pair
+            // matches unit by unit without being decoded.
+            if (pc == 63) { pi = pi + 1; si = si + chW(s, si) }  // "?"
             else if (pc == 91) {                                 // "["
-                var r = globClass(p, pi, sc)
-                if (r.ok == 0) { if (sc != 91) { return false }; pi = pi + 1; si = si + 1 }
+                var r = globClass(p, pi, cpAt(s, si))
+                if (r.ok == 0) { if (s.charCodeAt(si) != 91) { return false }; pi = pi + 1; si = si + 1 }
                 else if (r.hit == 0) { return false }
-                else { pi = r.next; si = si + 1 }
+                else { pi = r.next; si = si + chW(s, si) }
             }
             else if (pc == 92 && pi + 1 < p.length) {            // backslash escape
-                if (p.charCodeAt(pi + 1) != sc) { return false }
-                pi = pi + 2; si = si + 1
+                var ew = chW(p, pi + 1)
+                if (ew != chW(s, si) || cpAt(p, pi + 1) != cpAt(s, si)) { return false }
+                pi = pi + 1 + ew; si = si + ew
             }
             else {
-                if (pc != sc) { return false }
+                if (pc != s.charCodeAt(si)) { return false }
                 pi = pi + 1; si = si + 1
             }
         }
@@ -2704,14 +2741,15 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             }
             else {
                 first = false
-                var lo = cj
-                if (j + 2 < p.length && p.charCodeAt(j + 1) == 45 && p.charCodeAt(j + 2) != 93) {
-                    var hi = p.charCodeAt(j + 2)
+                var lo = cpAt(p, j)
+                var lw = chW(p, j)
+                if (j + lw + 1 < p.length && p.charCodeAt(j + lw) == 45 && p.charCodeAt(j + lw + 1) != 93) {
+                    var hi = cpAt(p, j + lw + 1)
                     if (ch >= lo && ch <= hi) { hit = true }
-                    j = j + 3
+                    j = j + lw + 1 + chW(p, j + lw + 1)
                 } else {
                     if (ch == lo) { hit = true }
-                    j = j + 1
+                    j = j + lw
                 }
             }
         }

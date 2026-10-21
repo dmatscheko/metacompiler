@@ -2338,6 +2338,17 @@ s45() {
   check eg3 "[${s#@(a|X)}] $d45 $?" "[aXa] 0 1"
   check u81 "[${v%?}] [${v#?}] [${v%%?}] [${v/%?/Z}] [${v/#?/Z}]" "[h] [é] [h] [hZ] [Zé]"
   check u82 "[${w%?}] [${w%??}] [${w#?}] [${w/?/-}] [${w//?/-}]" "[éà] [é] [àü] [-àü] [---]"
+  # An astral character (a UTF-16 surrogate pair) is ONE character to every pattern element.
+  local y="😀b😀c" z=a😀 m='[🎉-😀]' c45=""
+  check u83 "[${y#?}] [${y#??}] [${y%?}] [${y%%?*}] [${y/?/x}] [${y//?/x}] [${y/%?/Z}] [${z#a?}] [${z/#*?/Z}]" "[b😀c] [😀c] [😀b😀] [] [xb😀c] [xxxx] [😀b😀Z] [] [Z]"
+  case 😀 in ?) c45=1 ;; ??) c45=2 ;; *) c45=0 ;; esac
+  case a😀 in a$m) c45="$c45 r" ;; esac
+  case a😀 in a[!x]) c45="$c45 n" ;; esac
+  case 😀x in \😀?) c45="$c45 e" ;; esac
+  [[ 😀😀 == ?? ]] && c45="$c45 d"
+  [[ 😀😀b == +(😀)? ]] && c45="$c45 g"
+  [[ 😀😀b == !(b)b ]] && c45="$c45 x"
+  check u84 "$c45 [${y^^[😀b]}] [${y//[😀]/-}]" "1 r n e d g x [😀B😀c] [-b-c]"
   # A long subject: padding and every pattern operator stay linear in its length.
   local L45 Z45 T45 a b c d
   printf -v L45 '%*s' 5000
