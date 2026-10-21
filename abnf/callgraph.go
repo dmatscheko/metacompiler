@@ -446,7 +446,9 @@ func extractCallGraph(m *ir.Module) ([]cgDef, []cgCall) {
 					}
 					if s, ok2 := strOf[call.Args[1]]; ok2 {
 						if _, exists := fnName[fn]; !exists {
-							fnName[fn] = s
+							// A ruby top-level def is stored only under "$d$" + its
+							// name; the plain slot belongs to a local of that name.
+							fnName[fn] = strings.TrimPrefix(s, "$d$")
 						}
 						if !member {
 							boundTo[s] = append(boundTo[s], fn)
