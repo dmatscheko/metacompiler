@@ -679,8 +679,10 @@ NotTilde = :script(~~
     })()
 ~~) ;
 Target      <~~ push(makeTargetRef(takeAll())) ~~>
-            = ( NumLit <~~ push({texpr: pop()}) ~~> TargetStep | TargetHead ) { TargetStep } ;
-// A numeric literal is a head only with a step after it: `5.x = 1' calls Integer#x=.
+            = ( NumLit <~~ push({texpr: pop()}) ~~> TargetStep | Nil <~~ push({texpr: pop()}) ~~> TargetStep
+              | TargetHead ) { TargetStep } ;
+// A numeric literal or nil is a head only with a step after it: `5.x = 1' calls
+// Integer#x=, `nil.x = 1' NilClass#x=.
 TargetStep  = "." Id <~~ push({key: up.in, call: true}) ~~> | "&." Id <~~ push({key: up.in, call: true, safe: true}) ~~>
             | "::" Id <~~ push({key: up.in}) ~~> | TIndex ;
 // The '@@' alternative must come BEFORE '@' (PEG: the shorter one would win), and the
@@ -10207,6 +10209,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // foldCallMember) intercepts. `next` is local and simply ends this block run.
     function blkBind(params, args) {
         for (var i = 0; i < params.length; i++) {
+            if (params[i].kw === true || params[i].kwrest === true) { continue }
             var av = anytype
             av = i < args.length ? args[i] : null
             if (params[i].pgroup != undefined) {
@@ -10433,6 +10436,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
         var npos = av.length
         if (npos > 0 && isBlkArg(av[npos - 1])) { npos = npos - 1 }
+        if (kwIndex(params, av) >= 0) { npos = npos - 1 }
         var req = 0
         var star = false
         for (i = 0; i < posParams.length; i++) {
@@ -10538,6 +10542,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             var np = numberedParamCount(btext)
             for (var p = 1; p <= np; p++) { params.push({param: "_" + p}) }
         }
+        var hasKw = takesKw(params)
         // blkParams travels beside the block so that Kernel#lambda can arity-check
         // it (makeCall below). The arity REGISTRY cannot carry it: it is armed only
         // when the program names `arity', and behaviour must not depend on that.
@@ -10553,6 +10558,12 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 // A single array argument spreads over several block parameters
                 // (`hash.each { |k, v| }`, `[[1, 2]].each { |a, b| }`).
                 else if (args.length == 1 && params.length > 1 && Array.isArray(args[0])) { args = args[0] }
+                // Keyword parameters take the trailing keyword Hash, as a method's do.
+                var kw = null
+                if (hasKw) {
+                    var kwAt = kwIndex(params, args)
+                    if (kwAt >= 0) { kw = args[kwAt]; args = withoutAt(args, kwAt) }
+                }
                 var saved = scopes
                 scopes = captured.slice(0)
                 if (dm) {
@@ -10561,6 +10572,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 }
                 scopes.push({})
                 blkBind(params, args)
+                if (hasKw) { bindKw(params, kw) }
                 var site = rbSitePos
                 var depth = coreDepth + 1
                 coreDepth = depth
@@ -11248,19 +11260,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     function bindParams(params, args) {
         var i
         var kw = null
-        var wantsKw = false
-        for (i = 0; i < params.length; i++) { if (params[i].kw === true || params[i].kwrest === true) { wantsKw = true } }
         var pos = args
-        // The keyword Hash is the last argument BEFORE the trailing block slot, not
-        // the last argument outright: in `kw(a: 2) { }' the block sits behind the
-        // Hash. js_rkwargs of the compiler half searches the same two positions.
-        var kwAt = pos.length - 1
-        if (kwAt >= 0 && isBlkArg(pos[kwAt])) { kwAt = kwAt - 1 }
-        if (wantsKw && kwAt >= 0 && isDict(pos[kwAt])) {
+        var kwAt = kwIndex(params, pos)
+        if (kwAt >= 0) {
             kw = pos[kwAt]
-            var rest = []
-            for (i = 0; i < pos.length; i++) { if (i != kwAt) { rest.push(pos[i]) } }
-            pos = rest
+            pos = withoutAt(pos, kwAt)
         }
         var posParams = []
         for (i = 0; i < params.length; i++) {
@@ -11315,7 +11319,37 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             declVar(pp.param, ai < npos ? pos[ai] : null)
             ai = ai + 1
         }
+        bindKw(params, kw)
+        for (i = 0; i < params.length; i++) {
+            if (params[i].blockp === true) { declVar(params[i].param, currentBlock()) }
+        }
+    }
+    // The keyword Hash is the last argument BEFORE the trailing block slot, not the
+    // last argument outright: in `kw(a: 2) { }' the block sits behind the Hash.
+    // js_rkwargs of the compiler half searches the same two positions. -1 when the
+    // parameters take no keywords or the call passed none.
+    function takesKw(params) {
+        for (var i = 0; i < params.length; i++) { if (params[i].kw === true || params[i].kwrest === true) { return true } }
+        return false
+    }
+    function kwIndex(params, args) {
+        if (!takesKw(params)) { return -1 }
+        var kwAt = args.length - 1
+        if (kwAt >= 0 && isBlkArg(args[kwAt])) { kwAt = kwAt - 1 }
+        if (kwAt >= 0 && isDict(args[kwAt])) { return kwAt }
+        return -1
+    }
+    function withoutAt(args, at) {
+        var rest = []
+        for (var i = 0; i < args.length; i++) { if (i != at) { rest.push(args[i]) } }
+        return rest
+    }
+    // Binds the keyword and **rest parameters from the call's keyword Hash (null
+    // when it passed none).
+    function bindKw(params, kw) {
+        var i
         var claimed = []
+        var missing = []
         for (i = 0; i < params.length; i++) {
             if (params[i].kw !== true) { continue }
             var kname = params[i].param
@@ -11323,7 +11357,15 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             var found = kw != null ? dictFind(kw, mkSym(kname)) : -1
             if (found >= 0) { declVar(kname, kw.vals[found]) }
             else if (params[i].defT != undefined) { declVar(kname, params[i].defT()) }
-            else { fail("missing keyword: " + kname) }
+            else { missing.push(kname) }
+        }
+        // MRI names every absent required keyword. Twin of emitKwMissing in
+        // ruby-to-llvm-ir.abnf.
+        if (missing.length > 0) {
+            var me = anytype
+            me = mkExc(hostGlobals["ArgumentError"], (missing.length > 1 ? "missing keywords: " : "missing keyword: ") + missing.join(", "))
+            me.__rframe = ""
+            throw {__exc: true, v: me}
         }
         for (i = 0; i < params.length; i++) {
             if (params[i].kwrest !== true) { continue }
@@ -11337,9 +11379,6 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 }
             }
             if (params[i].param != null && params[i].param != undefined) { declVar(params[i].param, d) }
-        }
-        for (i = 0; i < params.length; i++) {
-            if (params[i].blockp === true) { declVar(params[i].param, currentBlock()) }
         }
     }
     function currentParamValues(params) {

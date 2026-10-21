@@ -4437,6 +4437,49 @@ def s100
   qe = begin; q.pw = v[2]; nil; rescue NoMethodError => e; e.name; end
   check("aw100m", qe == :pw= && q.instance_variables == [])
 end
+# ===== SECTION 101: Method#arity, inherited private setters, locals over methods, nil.x =, missing keywords =====
+# `obj.method(:m).arity' counts like a lambda's; a subclass may call an inherited
+# private setter through self; `A.new.x = v' constructs before it writes; a local
+# assigned so far hides a method of its name and `k = k' reads nil; `nil.x = v'
+# calls NilClass#x=; an absent required keyword is ArgumentError in a def, a proc
+# and a define_method body. /usr/bin/ruby 2.6 settles each.
+class S101D
+  def y(a); a; end
+  def z(a, b = 1); end
+  define_method(:q) { |a, b| a }
+  define_method(:k) { |a:| a }
+  define_method(:j) { |a:, b: 2| [a, b] }
+  def m; 7; end
+  def t; m = m; m; end
+  def u(v); m = v; m; end
+end
+class S101A; attr_accessor :x; private :x=; end
+class S101B < S101A; def w(v); self.x = v; x; end; end
+class NilClass; def s101=(v); $s101 = v; end; end
+def s101_k; 9; end
+s101_k = s101_k
+S101K = [s101_k]
+def s101_g(a:, b:, c: 3); [a, b, c]; end
+def s101
+  v = [4, 1, 2]
+  d = S101D.new
+  check("ar101a", d.method(:y).arity == 1 && d.method(:z).arity == -2 && d.method(:q).arity == 2)
+  check("ps101b", S101B.new.w(v[0]) == 4)
+  pe = begin; S101A.new.x = v[1]; nil; rescue NoMethodError => e; e.name; end
+  check("ps101c", pe == :x=)
+  check("lv101d", d.t.nil? && d.u(v[2]) == 2 && S101K == [nil])
+  nil.s101 = v[0]
+  check("ns101e", $s101 == 4)
+  m1 = begin; s101_g(b: v[1]); rescue ArgumentError => e; e.message; end
+  m2 = begin; s101_g; rescue ArgumentError => e; e.message; end
+  pr = proc { |a:| a }
+  m3 = begin; pr.call; rescue ArgumentError => e; e.message; end
+  m4 = begin; d.k; rescue ArgumentError => e; e.message; end
+  m5 = begin; d.j(b: v[2]); rescue ArgumentError => e; e.message; end
+  check("kw101f", m1 == "missing keyword: a" && m2 == "missing keywords: a, b" && m3 == "missing keyword: a" &&
+        m4 == "missing keyword: a" && m5 == "missing keyword: a")
+  check("kw101g", d.k(a: v[0]) == 4 && d.j(a: v[1]) == [1, 2] && pr.call(a: v[2]) == 2 && s101_g(a: v[1], b: v[2]) == [1, 2, 3])
+end
 
 s39() # SECTION-CALL 39
 s40() # SECTION-CALL 40
@@ -4500,5 +4543,6 @@ s97() # SECTION-CALL 97
 s98() # SECTION-CALL 98
 s99() # SECTION-CALL 99
 s100() # SECTION-CALL 100
+s101() # SECTION-CALL 101
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

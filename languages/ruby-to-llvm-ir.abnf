@@ -721,8 +721,10 @@ NotTilde = :script(~~
     })()
 ~~) ;
 Target      <~~ push(makeTargetRef(takeAll())) ~~>
-            = ( NumLit <~~ push({texpr: pop()}) ~~> TargetStep | TargetHead ) { TargetStep } ;
-// A numeric literal is a head only with a step after it: `5.x = 1' calls Integer#x=.
+            = ( NumLit <~~ push({texpr: pop()}) ~~> TargetStep | Nil <~~ push({texpr: pop()}) ~~> TargetStep
+              | TargetHead ) { TargetStep } ;
+// A numeric literal or nil is a head only with a step after it: `5.x = 1' calls
+// Integer#x=, `nil.x = 1' NilClass#x=.
 TargetStep  = "." Id <~~ push({key: up.in, call: true}) ~~> | "&." Id <~~ push({key: up.in, call: true, safe: true}) ~~>
             | "::" Id <~~ push({key: up.in}) ~~> | TIndex ;
 // The '@@' alternative must come BEFORE '@' (PEG: the shorter one would win), and the
@@ -4001,7 +4003,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // The same set for the code outside every def (the top level and the blocks in
     // it). A local and a def of one name are two things in MRI: a bare name bound
     // as a local so far reads the local, anything else calls the def - which lives
-    // under "$d$" + name as well, because the local overwrites the plain slot.
+    // under "$d$" + name, leaving the plain slot to the local.
     var curTopLocals = {m: {}, l: []}
     function topLocalAdd(name) {
         if (curTopLocals.m["$" + name] !== true) { curTopLocals.m["$" + name] = true; curTopLocals.l.push(name) }
@@ -4129,8 +4131,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         return {b: b, obj: o, key: kr.v, key2: k2V, dict: false, two: last.idx2 != undefined && last.idx2 != null}
     }
     // A `.name' / `&.name' step of a target path: a zero-argument call, which `&.'
-    // skips (nil) on a nil receiver. Twin of resolveRefRuby in ruby-interpreter.abnf.
+    // skips (nil) on a nil receiver. `.new' is the constructor, as in an expression
+    // chain. Twin of resolveRefRuby in ruby-interpreter.abnf.
     function emitStepCall(b, o, name, safe) {
+        if (!safe && name == "new") { return emitNew(b, o, []) }
         if (!safe) { return {b: b, v: callExt(b, "js_rxmcall", [o, emitStr(b, methodKey(name)), callExt(b, "js_arr_new", [])])} }
         var callB = curF.NewBlock("")
         var joinB = curF.NewBlock("")
@@ -5615,7 +5619,48 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             }
             b = emitParamDefault(b, p, "js_rundef")
         }
-        return b
+        return emitKwMissing(b, argsV, params, kwhV)
+    }
+    // A required keyword absent from the call is MRI's ArgumentError, naming every
+    // missing one: `missing keyword: a', `missing keywords: a, b'. Twin of the
+    // missing-keyword check in bindParams of ruby-interpreter.abnf.
+    function emitKwMissing(b, argsV, params, kwhV) {
+        var req = []
+        for (var i = 0; i < params.length; i++) {
+            if (typeof params[i] != "string" && params[i].kw === true && (params[i].defT == undefined || params[i].defT == null)) {
+                req.push(params[i].name)
+            }
+        }
+        if (req.length == 0) { return b }
+        if (kwhV == null) { kwhV = callExt(b, "js_rkwargs", [argsV]) }
+        var missV = callExt(b, "js_arr_new", [])
+        for (var k = 0; k < req.length; k++) {
+            var keyA = callExt(b, "js_arr_new", [])
+            callExt(b, "js_arr_push", [keyA, callExt(b, "js_sym", [emitStr(b, req[k])])])
+            var hasV = callExt(b, "js_rxmcall", [kwhV, emitStr(b, "key?"), keyA])
+            var addB = curF.NewBlock("")
+            var nextB = curF.NewBlock("")
+            b.NewCondBr(truthy(b, hasV), nextB, addB)
+            callExt(addB, "js_arr_push", [missV, emitStr(addB, req[k])])
+            addB.NewBr(nextB)
+            b = nextB
+        }
+        var lenV = callExt(b, "js_rxmcall", [missV, emitStr(b, "length"), callExt(b, "js_arr_new", [])])
+        var raiseB = curF.NewBlock("")
+        var okB = curF.NewBlock("")
+        b.NewCondBr(truthy(b, callExt(b, "js_rgt", [lenV, emitNum(b, 0)])), raiseB, okB)
+        var sepA = callExt(raiseB, "js_arr_new", [])
+        callExt(raiseB, "js_arr_push", [sepA, emitStr(raiseB, ", ")])
+        var namesV = callExt(raiseB, "js_rstr", [callExt(raiseB, "js_rxmcall", [missV, emitStr(raiseB, "join"), sepA])])
+        var many = truthy(raiseB, callExt(raiseB, "js_rgt", [lenV, emitNum(raiseB, 1)]))
+        var headV = raiseB.NewSelect(many, emitStr(raiseB, "missing keywords: "), emitStr(raiseB, "missing keyword: "))
+        var msgA = callExt(raiseB, "js_arr_new", [])
+        callExt(raiseB, "js_arr_push", [msgA, callExt(raiseB, "js_add", [headV, namesV])])
+        var e = callExt(raiseB, "js_rnew", [callExt(raiseB, "js_rclass", [emitStr(raiseB, "ArgumentError")]), msgA])
+        callExt(raiseB, "js_set", [e, emitStr(raiseB, "__rframe"), emitStr(raiseB, "")])
+        callExt(raiseB, "js_rraise", [e, hUndef])
+        raiseB.NewRet(hUndef)
+        return okB
     }
     // The default-value branch of one parameter. `test` is how "not given" is decided:
     // js_rundef for a positional one (absent, not nil), a nil compare for a keyword.
@@ -7004,20 +7049,22 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
         return function(b) {
             if (name === rhsLocal && curFrame === rhsFrame && !knownLocal(name)) { return {b: b, v: rhsLocalRead(b, name)} }
+            // A name assigned as a local so far reads the local, whatever method shares it.
+            var local = knownLocal(name)
             // A BARE `rand` is Kernel#rand called with no arguments, not a name. Guarded
             // exactly like the `rand(...)' call arm above, so a program that defines a rand
             // of its own still wins.
-            if (name == "rand" && rubyAllMethods["$rand"] !== true && !selfMethod(curClsName, "rand")) {
+            if (!local && name == "rand" && rubyAllMethods["$rand"] !== true && !selfMethod(curClsName, "rand")) {
                 return {b: b, v: callExt(b, "js_rrand", [callExt(b, "js_arr_new", [])])}
             }
             // Inside a method body a bare name that is a method of the SAME class (or
             // of one above it) is a call on the implicit self - `def intro; speak; end'.
-            if (selfMethod(curClsName, name) || classHasSMethod(curClsName, name) || builtinSelfMethod(curClsName, name) ||
-                excSelfMethod(curClsName, name)) {
+            if (!local && (selfMethod(curClsName, name) || classHasSMethod(curClsName, name) || builtinSelfMethod(curClsName, name) ||
+                excSelfMethod(curClsName, name))) {
                 var selfV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "self")])
                 return {b: b, v: callExt(b, "js_rxmcall", [selfV, emitStr(b, methodKey(name)), callExt(b, "js_arr_new", [])])}
             }
-            if (bareSelfCallNames.indexOf(name) >= 0 && isSelfCall(name)) { return makePlainCall(name, [])(b) }
+            if (!local && bareSelfCallNames.indexOf(name) >= 0 && isSelfCall(name)) { return makePlainCall(name, [])(b) }
             if (rubyMethods["$" + name] !== true && inDefFrame(name)) {
                 return {b: b, v: callExt(b, "js_rlvar", [curScopeV, emitStr(b, name)])}
             }
@@ -7128,10 +7175,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             curMethName = savedMN
             curMethParams = savedMP
             // Recorded for Proc#arity exactly as a class method is - see emitMethods.
-            // A local of the same name bound earlier keeps its slot (see
-            // curTopLocals); every call reads "$d$" + name.
+            // Only "$d$" + name is bound: the plain name is a LOCAL's slot (see
+            // curTopLocals), and `k = k` must read it unassigned.
             var cloV = emitArity(b, callExt(b, "js_closure", [handle(idx), curScopeV]), fn.params)
-            if (!knownLocal(fn.name)) { callExt(b, "js_scope_decl", [curScopeV, emitStr(b, fn.name), cloV]) }
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "$d$" + fn.name), cloV])
             // A top-level def is a private method of Object, which respond_to? with
             // include_all reports for every object (rubyRespondsPrivate).
@@ -7237,12 +7283,25 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // a stub that raises. A call written inside the declaring class is emitted with
     // the mangled key (methodKey below) and therefore reaches the real method, while
     // every call from outside finds the stub - which is exactly the rule for private,
-    // and for protected as far as the "same class may call it" case goes.
+    // and for protected as far as the "same class may call it" case goes. A subclass
+    // reaches an INHERITED restricted method the same way: the chain is walked up to
+    // the nearest class that declares the name, and its visibility decides.
     var restrictedMethods = {}
     function isRestricted(clsName, name) {
-        var r = restrictedMethods["$" + clsName]
-        if (r == undefined) { return false }
-        for (var i = 0; i < r.length; i++) { if (r[i] == name) { return true } }
+        var c = clsName
+        var hops = 0
+        while (c != undefined && c != "" && hops < 64) {
+            hops = hops + 1
+            var r = restrictedMethods["$" + c]
+            if (r != undefined) {
+                for (var i = 0; i < r.length; i++) { if (r[i] == name) { return true } }
+            }
+            var ms = classMethods["$" + c]
+            if (ms != undefined) {
+                for (var j = 0; j < ms.length; j++) { if (ms[j] == name) { return false } }
+            }
+            c = classSupers["$" + c]
+        }
         return false
     }
     function methodKey(name) {

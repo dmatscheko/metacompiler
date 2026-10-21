@@ -11181,14 +11181,20 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 				// asked here.
 				if _, userHas := rubyFindMethod(o, "method"); !userHas {
 					nm := rt.rubyStr(argAt(args, 0))
-					if _, found := rubyFindMethod(o, nm); !found {
+					m, found := rubyFindMethod(o, nm)
+					if !found {
 						rt.rubyRaiseErr(name, "NameError", "undefined method `"+nm+"' for class `"+rubyOwnerName(o)+"'")
 					}
 					recv := interface{}(o)
-					return rt.rubyMarkMethodVal(&hostFunc{name: "method:" + nm,
+					f := &hostFunc{name: "method:" + nm,
 						fn: func(rt *jsrt, this uint64, a []interface{}) interface{} {
 							return rt.rubyMethod(recv, nm, a)
-						}}, rubyOwnerName(recv), nm)
+						}}
+					// The method's arity record is carried over, as js_rmethodval does.
+					if ar, ok := rt.rubyArities[m]; ok {
+						rt.rubyArities[f] = ar
+					}
+					return rt.rubyMarkMethodVal(f, rubyOwnerName(recv), nm)
 				}
 			}
 		}
