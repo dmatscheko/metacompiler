@@ -68,7 +68,7 @@ its report; anything structural there is a CORE ticket.
 
 # RB — Ruby
 
-### T-740 ruby: `<<` through a method call reads a raw property; `=begin`/`=end`; dynamic define_method compiled; `p ?c` · P1 · RB · OPEN [V]
+### T-740 ruby: `<<` through a method call reads a raw property; `=begin`/`=end`; dynamic define_method compiled; `p ?c` · P1 · RB · IN PROGRESS (RB worker, round 14) [V]
 `a = [[1,2]]; a.first << 3; p a` → ruby `[[1, 2, 3]]`, ours "not a number in '<<'"; `h = {"abc"=>1}; h.keys[0] << "x"` mutates the
 hash's internal key (ruby FrozenError): an append statement's target path does `o[s.key]` for a `.name` step instead of calling the
 method (interpreter resolveRefRuby and the compiler) — P1. `=begin` / `=end` block comments fail to parse in both grammars — P2.
