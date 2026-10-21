@@ -68,7 +68,7 @@ its report; anything structural there is a CORE ticket.
 
 # RB — Ruby
 
-### T-746 ruby: private setters; `5.x = 1` crashes the interpreter; attr_writer in a module (compiler); local shadowing a method (interp); define_method arity · P2 · RB · OPEN [V]
+### T-746 ruby: private setters; `5.x = 1` crashes the interpreter; attr_writer in a module (compiler); local shadowing a method (interp); define_method arity · P2 · RB · IN PROGRESS (RB worker, round 19) [V]
 `private :x=` (in the class or a subclass of an attr_accessor class) lets an outside `o.x =` succeed or raise with a nil name (ruby
 NoMethodError `x=`). `5.x = 1` → interpreter host TypeError crash (ruby NoMethodError). Compiler: `attr_writer` inside a module is
 unsupported. Interp: `def k2; 9; end; def f; k2 = k2; p k2; end` prints 9 (ruby nil; makeVarRef tries selfMethod before
