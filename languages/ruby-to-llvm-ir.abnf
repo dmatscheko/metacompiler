@@ -596,6 +596,11 @@ PutsStmt    <~~ push(makePuts(takeAll())) ~~>
             = KwPuts <~~ push({cmd: up.in}) ~~> ( ParenNext "(" [ Expression { "," Expression } [ "," ] ] ")"
                                                 | [ SameLine ( CommandForm | Expression { "," Expression } ) ] ) ;
 
+// puts(...) / print(...) as a value (`x && puts("a")'): the parenthesised form of
+// PutsStmt, whose value is nil.
+PutsCall    <~~ push(makePuts(takeAll())) ~~>
+            = KwPuts <~~ push({cmd: up.in}) ~~> ParenNext "(" [ Expression { "," Expression } [ "," ] ] ")" ;
+
 ExprStmt    = Expression [ ";" ] ;
 
 // Every expression pushes exactly one thunk: function() -> value. A ternary
@@ -609,7 +614,8 @@ LowOr       <~~ push(makeOrAnd(takeAll(), true)) ~~>
             = LowAnd { OrWord LowAnd } ;
 LowAnd      <~~ push(makeOrAnd(takeAll(), false)) ~~>
             = LowNot { AndWord LowNot } ;
-LowNot      = LowNotOp | PatTest ;
+// `x and puts "a"': a puts / print command is an operand of the word operators.
+LowNot      = LowNotOp | PutsStmt | PatTest ;
 // EXPR in PATTERN is a boolean test (Ruby 3.0). SameLine is what keeps the `in` of a
 // `case SUBJ` newline `in ...' clause from being read as a test on the subject.
 PatTest     <~~ push(makePatTest(takeAll())) ~~>
@@ -1074,7 +1080,7 @@ Primary     = ParenCmd | "(" Expression ")" | ParenBody | LambdaLit | SingletonD
             | ArrayLit | HashLit
             | True | False | Nil | Self | FileLit | LineLit | DirLit
             | ClassDecl | ModuleDecl | DefExpr
-            | DefinedExpr | GvarNum | GvarRef | CvarRef | IvarRef | TopConst | ScopedConst | Call | VarRef ;
+            | DefinedExpr | GvarNum | GvarRef | CvarRef | IvarRef | TopConst | ScopedConst | PutsCall | Call | VarRef ;
 // `def m ... end` is an expression whose value is the Symbol :m (Ruby 2.1). Defining
 // the method is its side effect, which is what makeDefStmt already does.
 DefExpr     <~~ push(makeDefExpr(pop())) ~~>
@@ -3040,7 +3046,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         return n == "<" || n == ">" || n == "<=" || n == ">=" || n == "<=>"
     }
     function methodSfx(name, args) {
-        if (args.length == 1 && (isBinOpName(name) || name == "==" || name == "!=")) { return {kind: "mcall", name: "send", args: [makeConst(mkSym(name)), args[0]]} }
+        if (args.length == 1 && (isBinOpName(name) || name == "==" || name == "!=" || name == "===")) { return {kind: "mcall", name: "send", args: [makeConst(mkSym(name)), args[0]]} }
         return {kind: "mcall", name: name, args: args}
     }
     // A DOUBLE-QUOTED Ruby string's escapes. unescapeJs of the shared core is
@@ -3357,6 +3363,12 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                         var rea = emitArgs(b, unwrapArgs(s.args))
                         b = rea.b
                         cur = callExt(b, "js_rrespond", [cur, rea.v])
+                    } else if (s.name == "send" || s.name == "__send__" || s.name == "public_send") {
+                        // A top-level def answers a send the receiver has no method
+                        // for, and only the scope knows the defs.
+                        var esa = emitArgs(b, unwrapArgs(s.args))
+                        b = esa.b
+                        cur = callExt(b, "js_rselfsend", [curScopeV, cur, esa.v])
                     } else {
                         var ea = emitArgs(b, unwrapArgs(s.args))
                         b = ea.b

@@ -564,6 +564,11 @@ PutsStmt    <~~ push(makePuts(takeAll())) ~~>
             = KwPuts <~~ push({cmd: up.in}) ~~> ( ParenNext "(" [ Expression { "," Expression } [ "," ] ] ")"
                                                 | [ SameLine ( CommandForm | Expression { "," Expression } ) ] ) ;
 
+// puts(...) / print(...) as a value (`x && puts("a")'): the parenthesised form of
+// PutsStmt, whose value is nil.
+PutsCall    <~~ push(makePuts(takeAll())) ~~>
+            = KwPuts <~~ push({cmd: up.in}) ~~> ParenNext "(" [ Expression { "," Expression } [ "," ] ] ")" ;
+
 ExprStmt    = Expression [ ";" ] ;
 
 // Every expression pushes exactly one thunk: function() -> value. A ternary
@@ -577,7 +582,8 @@ LowOr       <~~ push(makeOrAnd(takeAll(), true)) ~~>
             = LowAnd { OrWord LowAnd } ;
 LowAnd      <~~ push(makeOrAnd(takeAll(), false)) ~~>
             = LowNot { AndWord LowNot } ;
-LowNot      = LowNotOp | PatTest ;
+// `x and puts "a"': a puts / print command is an operand of the word operators.
+LowNot      = LowNotOp | PutsStmt | PatTest ;
 // EXPR in PATTERN is a boolean test (Ruby 3.0). SameLine is what keeps the `in` of a
 // `case SUBJ` newline `in ...' clause from being read as a test on the subject.
 PatTest     <~~ push(makePatTest(takeAll())) ~~>
@@ -1044,7 +1050,7 @@ Primary     = ParenCmd | "(" Expression ")" | ParenBody | LambdaLit | SingletonD
             | ArrayLit | HashLit
             | True | False | Nil | Self | FileLit | LineLit | DirLit
             | ClassDecl | ModuleDecl | DefExpr
-            | DefinedExpr | GvarNum | GvarRef | CvarRef | IvarRef | TopConst | ScopedConst | Call | VarRef ;
+            | DefinedExpr | GvarNum | GvarRef | CvarRef | IvarRef | TopConst | ScopedConst | PutsCall | Call | VarRef ;
 // `def m ... end` is an expression whose value is the Symbol :m (Ruby 2.1). Defining
 // the method is its side effect, which is what makeDefStmt already does.
 DefExpr     <~~ push(makeDefExpr(pop())) ~~>
@@ -7198,7 +7204,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // `x.+(y)' calls an operator METHOD by name, which is exactly `x.send(:+, y)'.
     // Twin of methodSfx in ruby-to-llvm-ir.abnf.
     function methodSfx(name, args) {
-        if (args.length == 1 && (isBinOpName(name) || name == "==" || name == "!=")) { return {kind: "mcall", name: "send", args: [makeConst(mkSym(name)), args[0]]} }
+        if (args.length == 1 && (isBinOpName(name) || name == "==" || name == "!=" || name == "===")) { return {kind: "mcall", name: "send", args: [makeConst(mkSym(name)), args[0]]} }
         return {kind: "mcall", name: name, args: args}
     }
     // A DOUBLE-QUOTED Ruby string's escapes. unescapeJs of the shared core is
@@ -8354,7 +8360,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             // alone is not (it has no <=> arm, and spaceship is a separate body).
             // == / != by name are the operators themselves: rubyEq, which reaches a
             // user class's own #==.
-            if (args.length == 2 && (sname == "==" || sname == "!=")) { return binOps[sname](target, args[1]) }
+            if (args.length == 2 && (sname == "==" || sname == "!=" || sname == "===")) { return binOps[sname](target, args[1]) }
             if (args.length == 2 && isBinOpName(sname)) {
                 // `<<' is not in binOps: it is a statement form here (makeAppendStmt),
                 // because a Ruby String is mutable and ours is not.
@@ -8362,6 +8368,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 if (hasOwn(binOps, sname)) { return binOps[sname](target, args[1]) }
                 return rbin(sname, target, args[1])
             }
+            var tdf = anytype
+            tdf = recvSendDef(target, sname)
+            if (tdf !== undefined) { return tdf.apply(undefined, args.slice(1)) }
             return mcall(target, sname, args.slice(1), blk)
         }
         // A Proc / block closure: Proc#call, and the two call shorthands p.(x) and p[x].
@@ -10659,6 +10668,22 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // A receiver-less send(:name, ...) reaches a top-level def or a Kernel function,
     // both private Object methods in MRI, unless self has its own method of the name.
     // Twin of js_rselfsend in abnf/jsrtruby.go.
+    // send(:name, ...) WITH a receiver: a top-level def or a Kernel function, MRI's
+    // private Object methods, when the receiver has no method of the name. Twin of
+    // js_rselfsend in abnf/jsrtruby.go and lib/ruby-rt.metajs.
+    function recvSendDef(target, sn) {
+        if (isUserObj(target)) {
+            if (typeof lookupMethod(target.__class, sn) == "function") { return undefined }
+            if (target.__sing != undefined || target.__sext != undefined) {
+                if (typeof singFind(target, sn) == "function") { return undefined }
+            }
+        } else if (isClassObj(target)) {
+            if (typeof lookupMethod(target, "$s$" + sn) == "function" || typeof lookupMethod(target, "$x$" + sn) == "function") { return undefined }
+        } else if (rbResponds(classOf(target).__name, sn)) { return undefined }
+        if (rubyMethods["$" + sn] === true && hasVar("$d$" + sn)) { return getVar("$d$" + sn) }
+        if (kernelMethodIndex(sn) >= 0) { return function() { return kernelInvoke(sn, argsArray(arguments)) } }
+        return undefined
+    }
     function selfSendDef(argv) {
         if (argv.length == 0) { return undefined }
         var sn = rstr(argv[0])

@@ -1678,5 +1678,26 @@ check("sym-prefix", [:abc, :ab].sort, [:ab, :abc])
 check("sym-between", :a.between?(:a, :z), true)
 check("sym-keys-sort", {:b => 1, :a => 2}.keys.sort, [:a, :b])
 
+# ----- puts / print as values, send to a top-level def, === by name -----
+# puts and print are ordinary calls answering nil, so they are operands of && || and
+# or not; a top-level def is a private Object method, so send reaches it on any
+# receiver that has no method of the name; === by name is `when''s case equality.
+# Ruby-2 forms; every want is /usr/bin/ruby 2.6.10's answer.
+pe_v = [true, false, nil]
+pe_r = []
+pe_r << (pe_v[0] && print(""))
+pe_r << (pe_v[1] || print(""))
+pe_r << (pe_v[0] and print(""))
+pe_r << (pe_v[2] or print "")
+pe_r << (not pe_v[1] and print "")
+check("puts-expr", pe_r, [nil, nil, nil, nil, nil])
+def pe_h(n); n * 2; end
+class PeC; def pe_h(n); n * 3; end; end
+class PeD; end
+check("send-toplevel-def", [self.send(:pe_h, 6), PeD.new.send(:pe_h, 2), PeD.new.__send__(:pe_h, 1),
+                            3.send(:pe_h, 4), PeC.new.public_send(:pe_h, 1)], [12, 4, 2, 8, 3])
+check("caseeq-by-name", ["a".===("a"), "a".send(:===, "b"), 5.===(5), Integer.===(3), (1..3).===(2),
+                         /a/.===("cat"), String.send(:===, 1)], [true, false, true, true, true, true, false])
+
 puts "features: #{FEAT[0]} checks, #{FEAT[1]} failures"
 exit(FEAT[1])

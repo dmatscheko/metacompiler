@@ -10346,6 +10346,12 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 		// hold named methods, and + / << / <=> are evaluated by rubyBin.
 		// == / != by name are the operators themselves: rubyEq, which reaches a
 		// user class's own #==. Twin of mcall's send arm in ruby-interpreter.abnf.
+		// === by name is `when''s case equality, unless a user class has its own.
+		if len(args) == 2 && mn == "===" {
+			if _, own := rubyFindMethod(target, "==="); !own || !rubyUserObj(target) {
+				return rt.rubyCaseEqv(target, args[1])
+			}
+		}
 		if len(args) == 2 && (mn == "==" || mn == "!=") {
 			return rt.rubyEq(target, args[1]) == (mn == "==")
 		}

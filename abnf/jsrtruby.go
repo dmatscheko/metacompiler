@@ -175,15 +175,19 @@ func (rt *jsrt) addRubyFmtExterns(m map[string]func(args []uint64) uint64) {
 		rt.rubyNameErr("NameError", "undefined local variable or method `"+name+"' for "+rt.rubyNoMethodDesc(self), name, self)
 		return 0
 	}
-	// A receiver-less send(:name, ...): a top-level def and a Kernel function are
-	// MRI's private Object methods, so they answer when the receiver has no method
-	// of the name. Twin of
+	// send(:name, ...), with or without a receiver: a top-level def and a Kernel
+	// function are MRI's private Object methods, so they answer when the receiver
+	// has no method of the name. Twin of
 	// js_rselfsend in languages/lib/ruby-rt.metajs and selfSendDef in
 	// ruby-interpreter.abnf.
 	m["js_rselfsend"] = func(a []uint64) uint64 {
 		if arr, ok := u(a[2]).(*jsArray); ok && len(arr.elems) > 0 {
 			name := rt.rubyStr(arr.elems[0])
-			if _, found := rubyFindMethod(u(a[1]), name); !found {
+			_, found := rubyFindMethod(u(a[1]), name)
+			if cls := rt.rubyRespondClass(u(a[1])); cls != "" && rubyResponds(cls, name) {
+				found = true
+			}
+			if !found {
 				for sc := rt.scopeOf(a[0]); sc != nil; sc = sc.parent {
 					if v, ok := sc.get("$d$" + name); ok && isCallable(v) {
 						return w(rt.call(v, jsUndef, arr.elems[1:]))
@@ -2266,6 +2270,24 @@ func rubySVArgs(args []interface{}) []interface{} {
 		}
 	}
 	return args
+}
+
+// rubyCaseEqv is Ruby's === on a value that is not a user object with its own: a
+// Regexp matches, a class tests is_a?, a Range tests membership, everything else
+// is ==. Twin of js_rxwhen (regexp half, then js_rwhen).
+func (rt *jsrt) rubyCaseEqv(l, r interface{}) bool {
+	if rxIsRegexObj(l) {
+		return rt.rxMatchOp(l, r) != jsNull
+	}
+	if lo, ok := l.(*jsObject); ok {
+		if _, isCls := lo.props["__isclass"]; isCls {
+			return rt.rubyIsA(r, l)
+		}
+	}
+	if lo, isRng := rubyIsRange(l); isRng {
+		return rt.rubyOpenRangeCover(lo, r)
+	}
+	return rt.rubyEq(l, r)
 }
 
 // rubyStrMutator: the names that change a String in place - every bang method and

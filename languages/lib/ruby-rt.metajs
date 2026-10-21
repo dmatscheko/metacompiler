@@ -7014,6 +7014,10 @@ function rbMethod(target, name, args) {
         // js_rlt/js_rcmp family, exactly as the emitter spells them.
         // Twin of the == / != arm of rubyMethod's send in abnf/jsrt.go.
         if (args.length == 2 && (mn == "==" || mn == "!=")) { return rbEq(target, args[1]) == (mn == "==") }
+        // === by name is `when''s case equality, unless a user class has its own.
+        if (args.length == 2 && mn == "===" && !(rbUserObj(target) && rbFindMethod(target, "===") !== undefined)) {
+            return js_rxwhen(target, args[1])
+        }
         if (args.length == 2 && rbIsBinOpName(mn)) {
             if (mn == "<") { return rbCmp(target, args[1]) < 0 }
             if (mn == ">") { return rbCmp(target, args[1]) > 0 }
@@ -9021,7 +9025,8 @@ function rbArrCountArg(name, v) {
 function js_rselfsend(scope, self, args) {
     if (args.length > 0) {
         var n = rbStr(args[0])
-        if (rbFindMethod(self, n) === undefined) {
+        var rcls = rbRespondClass(self)
+        if (rbFindMethod(self, n) === undefined && (rcls == "" || !rbResponds(rcls, n))) {
             var s = anytype
             s = scope
             while (s !== undefined && s !== null) {
