@@ -829,7 +829,7 @@ PowExpr     <~~ push(makePow(takeAll())) ~~>
 // obj.method(args), obj.method do |x| ... end, obj.field, arr[i]. A trailing
 // block (do..end or {..}) becomes the last argument of the method call.
 PostfixExpr <~~ push(foldCallMember(takeAll())) ~~>
-            = Primary { CallSfx | CmdMethodSfx | MethodSfx | FieldSfx | SafeMethodSfx | SafeFieldSfx | IndexSfx } ;
+            = Primary PrimaryEnd { CallSfx | CmdMethodSfx | MethodSfx | FieldSfx | SafeMethodSfx | SafeFieldSfx | IndexSfx } ;
 // obj.m a, b - the parenthesis-less call WITH a receiver (`ScratchPad.record []`,
 // `self.class.send :define_method, m do |x| ... end`, `a.should_receive :m`). It has
 // to be a SUFFIX rather than a statement form of its own, because the suffix loop is
@@ -838,6 +838,8 @@ PostfixExpr <~~ push(foldCallMember(takeAll())) ~~>
 // receiver-less CommandStmt uses, so `a.b - 1`, `x ? a.b : c` and `a.b { }` are not
 // mistaken for argument lists; it comes BEFORE MethodSfx so the parenthesised form
 // still wins whenever there is a `(`.
+// The place (a variable) the primary reads, when the primary IS one: see notePlace.
+PrimaryEnd  = :whitespace() "" <~~ push({phead: hasOwn(placeAt, "p" + up.pos) ? placeAt["p" + up.pos] : null}) ~~> :whitespace(Whitespace) ;
 CmdMethodSfx <~~ push({kind: "mcall", name: popName(), args: takeAll()}) ~~>
             = "." MethodName <~~ push({mname: noteMName(up.in)}) ~~> SameLine CmdArgAhead Arg { "," Arg } [ Block ] ;
 MethodSfx   <~~ push(methodSfx(popName(), takeAll())) ~~>
@@ -1161,7 +1163,7 @@ ScopedConst <~~ push(makeScopedConst(up.in)) ~~>
 // it (`f(<<~A, x)`, `<<~A + <<~B`), which would need the body to be consumed at the
 // END of the line rather than at the marker; HdScan refuses those rather than
 // mis-parsing them, so they stay an honest parse failure.
-HeredocLit  <~~ push(makeHeredoc(up.in)) ~~>
+HeredocLit  <~~ push(makeStrLit(makeHeredoc(up.in))) ~~>
             = HdScan :whitespace(Whitespace) ;
 HdScan = :script(~~
     (function() {
@@ -1280,7 +1282,7 @@ HdScan = :script(~~
 //     where the line ends) matches the body lines and fills the oldest queued box.
 // Tags run on a WALK of the finished parse tree, left to right, so the queue is in
 // source order and nothing a rolled-back alternative did can reach it.
-HeredocRef  <~~ push(makeHeredocRef(up.in)) ~~>
+HeredocRef  <~~ push(makeStrLit(makeHeredocRef(up.in))) ~~>
             = HdMarkScan :whitespace(Whitespace) ;
 HdMarkScan = :script(~~
     (function() {
@@ -1448,7 +1450,8 @@ HdBodyScan = :script(~~
 // whitespace into an array of strings / symbols. Each form accepts the three usual
 // delimiter pairs ( ) [ ] { }; the body characters are spelled out per delimiter,
 // because the dialect has no parameterized rules.
-PercentLit  = PctQ | PctW | PctI | PctBigQ | PctBigW | PctBigI | PctR | PctBare | PctAny ;
+PercentLit  <~~ push(makePctLit(pop())) ~~>
+            = PctQ | PctW | PctI | PctBigQ | PctBigW | PctBigI | PctR | PctBare | PctAny ;
 // A % literal with an ARBITRARY delimiter. Ruby lets any non-alphanumeric character
 // delimit one (`%!a!`, `%@a@`, `%#a#`, `%r)a)`), and lets %s and %x use the bracket
 // pairs the rules above reserve for the other kinds. Writing every delimiter out as
@@ -1690,7 +1693,7 @@ RePipPlain  = "\x00"..."\x22" | "\x24"..."\x5b" | "\x5d"..."\x7b" | "\x7d"..."\U
 
 // ?a / ?\n: the one-character string literal. The body may not start with a space,
 // which is exactly what keeps the ternary `c ? a : b` out of it.
-CharLit     <~~ push(makeConst(charLitVal(up.in))) ~~>
+CharLit     <~~ push(makeStrLit(makeConst(charLitVal(up.in)))) ~~>
             = "?" :whitespace() CharBody :whitespace(Whitespace) ;
 // ?\C-z / ?\M-\C-z: the control and meta forms of a character literal. Longest first
 // (PEG), or the plain escape below would take the backslash and leave the rest.
@@ -1908,11 +1911,13 @@ BareName    = NotKw Id [ SfxGlued PredSfx ] ;
 PredName    = PredOk NotKw Id :whitespace() PredSfx :whitespace(Whitespace) ;
 PredSfx     = "?" | "!" ;
 
-VarRef      <~~ push(makeVarRef(up.in)) ~~>
+VarRef      <~~ push(makeVarRef(up.in)); notePlace(up.pos, {var: up.in}) ~~>
             = Name ;
-IvarRef     = "@" Id <~~ push(makeIvarRef(up.in)) ~~> ;
+IvarRef     <~~ notePlace(up.pos, {ivar: pop().ivar}) ~~>
+            = "@" Id <~~ push(makeIvarRef(up.in)); push({ivar: up.in}) ~~> ;
 // $global and @@classvar reads (their writes go through TargetHead above).
-GvarRef     = "$" Id <~~ push(makeGvarRef(up.in)) ~~> ;
+GvarRef     <~~ notePlace(up.pos, {gvar: pop().gvar}) ~~>
+            = "$" Id <~~ push(makeGvarRef(up.in)); push({gvar: up.in}) ~~> ;
 // The regexp match globals: $1..$9 are the capture groups of the last match and
 // $~ the MatchData itself. They are ordinary entries in the global table, so they
 // only need their own spelling here (Id does not start with a digit).
@@ -2036,7 +2041,7 @@ SymName     = ( "a"..."z" | "A"..."Z" | "_" | "\x7f"..."\U0010ffff" ) :whitespac
 
 // Two string literals that are only separated by whitespace are ONE string in Ruby
 // ("a" 'd' is "ad"), so a string primary is a run of pieces.
-StrLit      <~~ push(makeAdjacent(takeAll())) ~~>
+StrLit      <~~ push(makeStrLit(makeAdjacent(takeAll()))) ~~>
             = StrPiece { StrPiece } ;
 StrPiece    = DqStr | SqStr ;
 
@@ -3576,6 +3581,86 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     function isFlo(v) { return v !== null && v !== undefined && typeof v == "object" && v.__flo === true }
     function isRat(v) { return v !== null && v !== undefined && typeof v == "object" && v.__rat === true }
     function isCpx(v) { return v !== null && v !== undefined && typeof v == "object" && v.__cpx === true }
+    // ----- The mutable String -----
+    // A Ruby String is an OBJECT that every alias shares, so `t = s; s << "x"' shows
+    // in t. A string a literal builds (and dup / clone / +@ / freeze) is therefore the
+    // box {__rs: text, __fz: frozen}, and the mutators change __rs in place. A
+    // string any other method or operator builds stays a plain host string - an
+    // immutable value, which pays nothing - and becomes a box only when a mutator
+    // reaches it through a variable or element, which the box is written back to
+    // (foldCallMember, makeAppendStmt, rsetSlice). So a computed string that was
+    // copied BEFORE its first mutation keeps the old text in the copy. Twins: jsRStr
+    // in abnf/jsrtruby.go, rbIsRStr in lib/ruby-rt.metajs.
+    function isRStr(v) { return v !== null && v !== undefined && typeof v == "object" && typeof v.__rs == "string" }
+    function mkRStr(s) { return {__rs: s, __fz: false} }
+    function rsText(v) { return isRStr(v) ? v.__rs : v }
+    function rsTextList(a) {
+        var out = []
+        for (var i = 0; i < a.length; i++) { out.push(rsText(a[i])) }
+        return out
+    }
+    // A string literal: a fresh box at every evaluation, as MRI allocates one.
+    function makeStrLit(t) { return function() { return mkRStr(rstr(t())) } }
+    // %q / %Q / %w / %W are fresh Strings too (a %w array holds fresh boxes), while
+    // %i, %s, %r and %x build no String at all.
+    function makePctLit(t) {
+        return function() {
+            var v = anytype
+            v = t()
+            if (typeof v == "string") { return mkRStr(v) }
+            if (!Array.isArray(v)) { return v }
+            var out = []
+            for (var i = 0; i < v.length; i++) { out.push(typeof v[i] == "string" ? mkRStr(v[i]) : v[i]) }
+            return out
+        }
+    }
+    // The names that change a String in place: every bang method and the mutators
+    // that have none. Twins: rubyStrMutator in abnf/jsrtruby.go, rbStrMutator in
+    // lib/ruby-rt.metajs.
+    function strMutator(n) {
+        if (n.length > 1 && n.charAt(n.length - 1) == "!") { return true }
+        return n == "<<" || n == "concat" || n == "replace" || n == "insert" || n == "prepend"
+            || n == "clear" || n == "[]=" || n == "setbyte"
+    }
+    // What `s << x' / s.concat(x) appends: an Integer is a codepoint.
+    function strAppendText(r) {
+        if (typeof r == "number") { return charFromCode(r) }
+        return rstr(r)
+    }
+    // A mutator on a box: the new text replaces __rs. A bang method answers the box,
+    // or nil when nothing changed - which is what the plain-string arm already
+    // answers for the text, so it computes it.
+    function strMutate(b, name, args, blk) {
+        if (b.__fz) { raiseErr(name, "FrozenError", "can't modify frozen String") }
+        if (name == "<<" || name == "concat") {
+            var acc = b.__rs
+            for (var i = 0; i < args.length; i++) { acc = acc + strAppendText(args[i]) }
+            b.__rs = acc
+            return b
+        }
+        if (name == "replace") { b.__rs = rstr(args[0]); return b }
+        if (name == "clear") { b.__rs = ""; return b }
+        if (name == "[]=") {
+            var nv = anytype
+            nv = rsetSlice(b.__rs, args[0], args.length > 2 ? args[1] : undefined, args[args.length - 1])
+            b.__rs = rsText(nv)
+            return args[args.length - 1]
+        }
+        if (name == "slice!") {
+            var cut = anytype
+            cut = mcall(b.__rs, "slice", args, null)
+            if (cut === null || cut === undefined) { return null }
+            var rest = anytype
+            rest = rsetSlice(b.__rs, args[0], args.length > 1 ? args[1] : undefined, "")
+            b.__rs = rsText(rest)
+            return cut
+        }
+        var r = anytype
+        r = mcall(b.__rs, name, args, blk)
+        if (r === null || r === undefined) { return null }
+        b.__rs = rsText(r)
+        return b
+    }
     // THE BLOCK MARKER. A call's block is appended to the argument list (makeCall
     // and mcall below) WRAPPED, so it stays distinguishable from a Proc handed over
     // as an ordinary positional argument: `def m(f = 3); end; m(some_proc)' binds
@@ -3688,7 +3773,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         return b
     }
     function kernelConv(name, argv) {
-        var v = argv.length > 0 ? argv[0] : null
+        var v = argv.length > 0 ? rsText(argv[0]) : null
         if (name == "String") { return rstr(v) }
         // Kernel#Rational and Kernel#Complex, the ONLY spelling that builds either
         // from two parts (otherwise the name would reach the class arm below and build
@@ -4169,9 +4254,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             return {ok: true, v: target}
         }
         if (name == "dump") { return {ok: true, v: strInspect(target)} }
-        // String#slice! answers the REMOVED part; the removal itself is
-        // unrepresentable (a Ruby String is a value here), so the value is
-        // String#slice's.
+        // String#slice! on a plain string answers the REMOVED part; nothing holds
+        // the string to see the removal (a held one is a box, see strMutate).
         if (name == "slice!") { return {ok: true, v: mcall(target, "slice", args, blk)} }
         var bb = smBangBase(name)
         if (bb != "") {
@@ -4184,10 +4268,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     }
 
 
-    // The BANG forms of the case / trim / translate methods. A Ruby String is a VALUE
-    // in this model, so the in-place effect is unrepresentable (the same limitation
-    // sub! / gsub! already have) - but the RETURN VALUE is not: MRI answers the new
-    // string, or nil when nothing changed, and that is what these produce.
+    // The BANG forms of the case / trim / translate methods on a plain string: MRI
+    // answers the new string, or nil when nothing changed. strMutate stores that
+    // text into a box.
     function smBangBase(name) {
         if (name.length < 2 || name.charAt(name.length - 1) != "!") { return "" }
         var b = name.substring(0, name.length - 1)
@@ -5040,6 +5123,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (isRat(v)) { return mkRat(rneg(v.n), v.d) }
         if (isCpx(v)) { return mkCpx(rneg(v.re), rneg(v.im)) }
         if (isUserObj(v)) { return mcall(v, "-@", [], null) }
+        if (typeof v == "string" || isRStr(v)) { return mcall(v, "-@", [], null) }
         fail("cannot negate")
     }
     // `x = *v`: an Array is copied, anything else is wrapped in a one-element Array
@@ -5064,7 +5148,15 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     makeNeg = function(t) { return function() { return rneg(t()) } }
     // Unary plus: the identity. `+"str"` asks Ruby for an unfrozen copy of a frozen
     // string literal, and every string value here is already an ordinary mutable one.
-    function makePos(t) { return function() { return t() } }
+    // Unary plus is the identity on a number and String#+@ on a String.
+    function makePos(t) {
+        return function() {
+            var v = anytype
+            v = t()
+            if (typeof v == "string" || isRStr(v)) { return mcall(v, "+@", [], null) }
+            return v
+        }
+    }
     // ~x is -(x+1) at any size. Past 2^53 the double cannot hold the +1, so a
     // big goes through the exact path.
     function bitNotOf(v) {
@@ -5112,6 +5204,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     }
     function rbin(op, l, r) {
         if (isUserObj(l)) { return mcall(l, op, [r], null) }
+        if (isRStr(l) || isRStr(r)) { return rbin(op, rsText(l), rsText(r)) }
         if (Array.isArray(l)) {
             if (op == "-" && Array.isArray(r)) { return arrDiff(l, r) }
             // Array#* is repetition with an Integer and JOIN with a String.
@@ -5167,6 +5260,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     }
     function spaceship(l, r) {
         if (isUserObj(l)) { return mcall(l, "<=>", [r], null) }
+        if (isRStr(l) || isRStr(r)) { return spaceship(rsText(l), rsText(r)) }
         if (isNumV(l) && isNumV(r)) { return numCmp(l, r) }
         if (typeof l == "string" && typeof r == "string") { return l < r ? -1 : (l > r ? 1 : 0) }
         // A Symbol IS Comparable in Ruby - Symbol#<=> compares the NAMES - so
@@ -5210,7 +5304,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
 
     // ----- Ranges: lazy objects (Ruby's Range), not eager arrays. lo/hi may be
     // integers or strings, and hi may be nil for an endless range (5..). -----
-    function mkRange(lo, hi, excl) { return {__rng: true, lo: lo, hi: hi, excl: excl} }
+    function mkRange(lo, hi, excl) { return {__rng: true, lo: rsText(lo), hi: rsText(hi), excl: excl} }
     function isRange(v) { return v !== null && v !== undefined && typeof v == "object" && v.__rng === true }
     // "a".succ: increment the last character, carrying into the ones before it.
     function strSucc(s) {
@@ -5386,7 +5480,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 }
                 if (items[i].kwkeyT != undefined) {
                     if (kwd == null) { kwd = {__dict: true, keys: [], vals: []} }
-                    dictSet(kwd, items[i].kwkeyT(), items[i].kwT())
+                    dictSet(kwd, rsText(items[i].kwkeyT()), items[i].kwT())
                     continue
                 }
                 if (items[i].splat != undefined) {
@@ -5415,7 +5509,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 }
                 var k = items[i].hk()
                 var v = items[i].hv()
-                dictSet(d, k, v)
+                dictSet(d, rsText(k), v)
             }
             return d
         }
@@ -5524,6 +5618,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (v === true) { return "true" }
         if (v === false) { return "false" }
         if (typeof v == "string") { return v }
+        if (isRStr(v)) { return v.__rs }
         if (isSym(v)) { return v.s }
         if (isBig(v)) { return bigStr(v) }
         if (typeof v == "number") { return intStr(v) }
@@ -5637,6 +5732,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (isRegex(v)) { return "/" + reDescSrc(v.src) + "/" + reOpts(v.rflags, false) }
         if (isMatchD(v)) { return "#<MatchData " + rinspect(rxGroup(v.rev.prog, v.text, v.m, 0)) + ">" }
         if (typeof v == "string") { return strInspect(v) }
+        if (isRStr(v)) { return strInspect(v.__rs) }
         if (isSym(v)) { return symInspect(v.s) }
         if (isEnum(v)) { return enumInspect(v) }
         // Rational#inspect and Complex#inspect are PARENTHESIZED where #to_s is
@@ -5706,6 +5802,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (isExcObj(l) && typeof lookupMethod(l.__class, "+") != "function") { return rstr(l) + rstr(r) }
         if (isUserObj(l)) { return mcall(l, "+", [r], null) }
         if (typeof l == "string") { return l + strOperand(r) }
+        if (isRStr(l)) { return l.__rs + strOperand(r) }
         if (Array.isArray(l) && Array.isArray(r)) { return l.concat(r) }
         return numBin("+", l, r)
     }
@@ -5715,6 +5812,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // lib/ruby-rt.metajs.
     function strOperand(r) {
         if (typeof r == "string") { return r }
+        if (isRStr(r)) { return r.__rs }
         var cv = anytype
         cv = fmtUserConv(r, "to_str", "")
         if (typeof cv == "string") { return cv }
@@ -6300,8 +6398,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // when obj answers to_int. Same find-then-call shape rstr already uses for #to_s.
     function fmtUserConv(v, n1, n2) {
         if (!isUserObj(v)) { return null }
-        if (typeof lookupMethod(v.__class, n1) == "function") { return mcall(v, n1, [], null) }
-        if (n2 != "" && typeof lookupMethod(v.__class, n2) == "function") { return mcall(v, n2, [], null) }
+        if (typeof lookupMethod(v.__class, n1) == "function") { return rsText(mcall(v, n1, [], null)) }
+        if (n2 != "" && typeof lookupMethod(v.__class, n2) == "function") { return rsText(mcall(v, n2, [], null)) }
         return null
     }
     function fmtIntOperand(v) {
@@ -6672,7 +6770,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     function rformat(fmt, arg, frame) {
         var outerFrame = fmtFrame
         fmtFrame = frame
-        var args = Array.isArray(arg) ? arg : [arg]
+        // A format argument is read, never kept, so a box is read as its text.
+        var args = Array.isArray(arg) ? rsTextList(arg) : [rsText(arg)]
         var out = ""
         var st = {ai: 0}
         var i = 0
@@ -7243,6 +7342,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // A String's length is in CHARACTERS (a surrogate pair is one), the way the
         // compiled halves' js_pylen counts it.
         if (typeof v == "string") { return charCount(v) }
+        if (isRStr(v)) { return charCount(v.__rs) }
         if (Array.isArray(v)) { return v.length }
         return mcall(v, name, [], null)
     }
@@ -7269,6 +7369,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         return numBin("&", numBin(">>", n, i), 1)
     }
     function rindex(o, i) {
+        if (isRStr(o)) { return rindex(o.__rs, i) }
         // p[x] calls a Proc, obj[i] a user-defined def [].
         if (typeof o == "function") { return blockCall(o, [i]) }
         // m[1] / m[:name] on a MatchData reads a capture group.
@@ -7544,19 +7645,17 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     //   would not do: this half compares two boxes by JS identity while layer 2's
     //   `===' is the floor's strict_eq (manual 7.9), so the two halves would part.
     //
-    //   a String, a Rational and a Complex answer FALSE, always. MRI allocates a
-    //   fresh object for each of them ("a".equal?("a") is false, and so is
-    //   (1r/3r).equal?(1r/3r)), and this value model has no identity for any of the
-    //   three. The row that costs is the ALIASED one, `s = "a"; s.equal?(s)', true
-    //   in MRI and false here; it is the same trade in all four engines, and value
-    //   equality would get the literal row wrong AND disagree with the Go twin,
-    //   where a jsRat is a comparable Go STRUCT and two equal ones are `=='.
+    //   a plain String, a Rational and a Complex answer FALSE, always. MRI
+    //   allocates a fresh object for each of them ("a".equal?("a") is false, and so
+    //   is (1r/3r).equal?(1r/3r)), and none of the three has an identity here;
+    //   value equality would disagree with the Go twin, where a jsRat is a
+    //   comparable Go STRUCT and two equal ones are `=='.
     //
     //   everything else is a reference or an interned value and `===' IS identity:
     //   an Integer (a plain number), a Symbol (interned, manual 7.9), nil / true /
-    //   false, an Array, a Hash, a Range, a Proc, a big Integer (a distinct object
-    //   per value, which is MRI's answer for (2**70).equal?(2**70) too) and every
-    //   user instance and class object.
+    //   false, a String box (isRStr), an Array, a Hash, a Range, a Proc, a big
+    //   Integer (a distinct object per value, which is MRI's answer for
+    //   (2**70).equal?(2**70) too) and every user instance and class object.
     //
     // Left divergent on purpose, because it is MRI's flonum REPRESENTATION showing
     // through rather than a semantic: 1e300.equal?(1e300) and (-0.0).equal?(-0.0)
@@ -7584,7 +7683,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (isFlo(v)) { return hostGlobals["Float"] }
         if (isRat(v)) { return hostGlobals["Rational"] }
         if (isCpx(v)) { return hostGlobals["Complex"] }
-        if (typeof v == "string") { return hostGlobals["String"] }
+        if (typeof v == "string" || isRStr(v)) { return hostGlobals["String"] }
         if (isSym(v)) { return hostGlobals["Symbol"] }
         if (isRange(v)) { return hostGlobals["Range"] }
         if (isRegex(v)) { return hostGlobals["Regexp"] }
@@ -7654,9 +7753,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     }
     // Object#object_id. nil, true, false and an Integer have MRI's fixed ids (8, 20,
     // 0, 2n+1); anything else is numbered on first request, in a table searched with
-    // equal? - so the id is as distinct as identity is in this value model. A String,
-    // a Rational and a Complex have no identity here (equal? is false even to
-    // themselves), so they share the id of an eql? value: x.object_id stays stable.
+    // equal? - so the id is as distinct as identity is in this value model. A plain
+    // String, a Rational and a Complex have no identity here (equal? is false even
+    // to themselves), so they share the id of an eql? value: x.object_id stays
+    // stable.
     // Twins: rubyObjectId in abnf/jsrtruby.go, rbObjectId in lib/ruby-rt.metajs.
     var oidObjs = []
     function objectId(v) {
@@ -7696,6 +7796,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (v === null || v === undefined || v === true || v === false) { return strHash("n" + rinspect(v)) }
         if (typeof v == "number" || isBig(v)) { return strHash("i" + intText(v)) }
         if (typeof v == "string") { return strHash("s" + v) }
+        if (isRStr(v)) { return strHash("s" + v.__rs) }
         if (isSym(v)) { return strHash("y" + v.s) }
         if (isFlo(v)) { return strHash("f" + rinspect(v)) }
         if (isRat(v)) { return strHash("r" + rinspect(v)) }
@@ -8341,7 +8442,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             return valueIsA(target, args[0])
         }
         if (name == "nil?") { return target === null || target === undefined }
-        if (name == "frozen?") { return typeof target == "string" || isSym(target) || isNumV(target) }
+        // A literal String is not frozen (MRI 2.6 without the magic comment), and
+        // neither is one a method built; a box carries its own flag.
+        if (name == "frozen?") { return isRStr(target) ? target.__fz : (isSym(target) || isNumV(target)) }
         if (name == "equal?") { return identicalP(target, args[0]) }
         // Object#eql? is identity; a builtin value's is == within its own class.
         // Twins: the eql? arms of rubyMethod in abnf/jsrt.go and rbMethod in
@@ -8366,6 +8469,22 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (rcmp(target, args[0]) < 0) { return args[0] }
             if (rcmp(target, args[1]) > 0) { return args[1] }
             return target
+        }
+        // A box answers the identity-bearing methods itself and every other one on
+        // its text.
+        if (isRStr(target)) {
+            if (strMutator(name)) { return strMutate(target, name, args, blk) }
+            if (name == "freeze") { target.__fz = true; return target }
+            if (name == "dup" || name == "+@") { return name == "+@" && !target.__fz ? target : mkRStr(target.__rs) }
+            if (name == "clone") { var cl = mkRStr(target.__rs); cl.__fz = target.__fz; return cl }
+            if (name == "-@") {
+                if (target.__fz) { return target }
+                var fr = mkRStr(target.__rs)
+                fr.__fz = true
+                return fr
+            }
+            if (name == "to_s" || name == "to_str") { return target }
+            return mcall(target.__rs, name, args, blk)
         }
         if (isBig(target)) { return bigMethod(target, name, args, blk) }
         if (isNumV(target) && typeof target != "number") { return numberMethod(target, name, args, blk) }
@@ -8477,6 +8596,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             noMethod(target, name)
         }
         if (typeof target == "string") {
+            // No String method keeps an argument, so a box argument is read as its text.
+            for (var ai = 0; ai < args.length; ai++) { if (isRStr(args[ai])) { args = rsTextList(args); break } }
             // split and index take a plain string too, so they only route to the
             // regexp engine when the argument really IS a pattern.
             if (args.length > 0 && isRegex(args[0])) {
@@ -8484,7 +8605,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 if (name == "index") { return reMatchOp(args[0], target) }
             }
             if (name == "length" || name == "size") { return charCount(target) }
-            if (name == "to_s" || name == "to_str" || name == "dup" || name == "clone" || name == "freeze") { return target }
+            if (name == "to_s" || name == "to_str") { return target }
+            // A copy is a new mutable String, and freezing one makes it a box that
+            // carries the flag.
+            if (name == "dup" || name == "clone" || name == "+@") { return mkRStr(target) }
+            if (name == "freeze" || name == "-@") { var fz = mkRStr(target); fz.__fz = true; return fz }
             if (name == "to_sym" || name == "intern") { return mkSym(target) }
             if (name == "to_i") { return strToInum(target, args.length > 0 ? radixArg(args[0], false) : 10, false).v }
             if (name == "to_f") { return mkFlo(rbnStrToDbl(target, false)) }
@@ -8533,6 +8658,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 if (name == "match?") { return rxSearch(rv.prog, target, 0) !== null }
                 if (name == "=~") { return reMatchOp(rv, target) }
                 if (name == "scan") { return reScan(rv, target, blk) }
+                // sub! / gsub! answer nil when the pattern does not match at all.
+                if ((name == "sub!" || name == "gsub!") && rxSearch(rv.prog, target, 0) === null) { return null }
                 return reSub(rv, target, args, blk, name == "gsub" || name == "gsub!")
             }
             // The rest of the String surface (bytes / tr / center / ljust / rjust /
@@ -8636,7 +8763,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             }
             if (name == "invert") {
                 var iv = {__dict: true, keys: [], vals: []}
-                for (var ii = 0; ii < target.keys.length; ii++) { dictSet(iv, target.vals[ii], target.keys[ii]) }
+                for (var ii = 0; ii < target.keys.length; ii++) { dictSet(iv, rsText(target.vals[ii]), target.keys[ii]) }
                 return iv
             }
             if (name == "key") {
@@ -8650,7 +8777,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             }
             if (name == "transform_keys") {
                 var tk = {__dict: true, keys: [], vals: []}
-                for (var tj = 0; tj < target.keys.length; tj++) { dictSet(tk, blockCall(blk, [target.keys[tj]]), target.vals[tj]) }
+                for (var tj = 0; tj < target.keys.length; tj++) { dictSet(tk, rsText(blockCall(blk, [target.keys[tj]])), target.vals[tj]) }
                 return tk
             }
             // Everything else Enumerable is answered over the [key, value] PAIRS,
@@ -9059,7 +9186,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         var d = {__dict: true, keys: [], vals: []}
         if (src.__hdef != undefined) { d.__hdef = src.__hdef }
         if (src.__hdefp != undefined) { d.__hdefp = src.__hdefp }
-        for (var i = 0; i < pairs.length; i++) { dictSet(d, pairs[i][0], pairs[i][1]) }
+        for (var i = 0; i < pairs.length; i++) { dictSet(d, rsText(pairs[i][0]), pairs[i][1]) }
         return d
     }
     // The in-place forms (select!, reject!, keep_if, delete_if) answer the RECEIVER.
@@ -9420,7 +9547,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             var td = {__dict: true, keys: [], vals: []}
             for (i = 0; i < t.length; i++) {
                 var tix = dictFind(td, t[i])
-                if (tix < 0) { dictSet(td, t[i], 1) } else { td.vals[tix] = td.vals[tix] + 1 }
+                if (tix < 0) { dictSet(td, rsText(t[i]), 1) } else { td.vals[tix] = td.vals[tix] + 1 }
             }
             return td
         }
@@ -9600,7 +9727,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             for (i = 0; i < t.length; i++) {
                 var gk = blockCall(blk, [t[i]])
                 var gix = dictFind(gd, gk)
-                if (gix < 0) { dictSet(gd, gk, [t[i]]) } else { gd.vals[gix].push(t[i]) }
+                if (gix < 0) { dictSet(gd, rsText(gk), [t[i]]) } else { gd.vals[gix].push(t[i]) }
             }
             return gd
         }
@@ -9757,16 +9884,72 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         return catchBlkBreak(function() { return mcall(recv, s.name, argv, bf) })
     }
 
+    // The places a chain's primary can READ - a local, an @ivar, a $global - by the
+    // source position the reference ENDS at, which is where PrimaryEnd matches when
+    // the reference is the whole primary. Tags run in source order, so the entry
+    // PrimaryEnd finds is the reference just walked.
+    var placeAt = {}
+    function notePlace(pos, head) { placeAt["p" + pos] = head }
+    // A mutator reached a PLAIN string (see isRStr): the box it becomes replaces the
+    // string in the place it was read from, when that place still holds it. A name
+    // that is not a variable (a method call) holds nothing and is left alone.
+    function promotePlace(head, old, nb) {
+        if (head.ivar != undefined) {
+            var so = ivarSelf()
+            if (hasOwn(so, head.ivar) && so[head.ivar] === old) { ivarPut(so, head.ivar, nb) }
+            return
+        }
+        if (head.gvar != undefined) {
+            if (hasOwn(rubyGlobals, head.gvar) && rubyGlobals[head.gvar] === old) { scopePut(rubyGlobals, head.gvar, nb) }
+            return
+        }
+        for (var i = scopes.length - 1; i >= 0; i--) {
+            if (hasOwn(scopes[i], head.var)) {
+                if (scopes[i][head.var] === old) { scopePut(scopes[i], head.var, nb) }
+                return
+            }
+        }
+    }
+    function promoteElem(o, k, old, nb) {
+        if (Array.isArray(o)) {
+            var i = Math.trunc(toF(k))
+            if (i < 0) { i = i + o.length }
+            if (i >= 0 && i < o.length && o[i] === old) { o[i] = nb }
+            return
+        }
+        if (isDict(o)) {
+            var di = dictFind(o, k)
+            if (di >= 0 && o.vals[di] === old) { o.vals[di] = nb }
+        }
+    }
+    function sfxMutates(s) {
+        return (s.kind == "mcall" || s.kind == "smcall" || s.kind == "field" || s.kind == "sfield") && strMutator(s.name)
+    }
+
     // A member chain: primary followed by .method(args)/.field/[index] suffixes.
     foldCallMember = function(items) {
-        if (items.length == 1) { return items[0] }
+        if (items.length == 2) { return items[0] }
         var primary = items[0]
-        var suffixes = items.slice(1)
+        var head = anytype
+        head = items[1].phead
+        var suffixes = items.slice(2)
+        var mut = false
+        for (var q = 0; q < suffixes.length; q++) { if (sfxMutates(suffixes[q])) { mut = true } }
         return function() {
             var cur = anytype   // a member chain hops between types
             cur = primary()
+            var pObj = anytype
+            var pKey = anytype
+            pObj = undefined
             for (var i = 0; i < suffixes.length; i++) {
                 var s = suffixes[i]
+                if (mut && typeof cur == "string" && sfxMutates(s)) {
+                    var nb = mkRStr(cur)
+                    if (i == 0 && head !== null) { promotePlace(head, cur, nb) }
+                    else if (i > 0 && pObj !== undefined) { promoteElem(pObj, pKey, cur, nb) }
+                    cur = nb
+                }
+                if (mut) { pObj = undefined }
                 if (s.kind == "mcall") {
                     cur = invokeMcall(cur, s)
                 } else if (s.kind == "smcall") {
@@ -9776,12 +9959,12 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                     visCheck(cur, s.name)
                     if (isUserObj(cur)) { cur = mcall(cur, s.name, [], null) }
                     else if (s.name == "length" || s.name == "size") { cur = rlen(cur, s.name) }
-                    else if (s.name == "to_s") { cur = rstr(cur) }
+                    else if (s.name == "to_s") { cur = isRStr(cur) ? cur : rstr(cur) }
                     else { cur = mcall(cur, s.name, [], null) }
                 } else if (s.kind == "sfield") {
                     if (cur === null || cur === undefined) { cur = null }
                     else if (s.name == "length" || s.name == "size") { cur = rlen(cur, s.name) }
-                    else if (s.name == "to_s") { cur = rstr(cur) }
+                    else if (s.name == "to_s") { cur = isRStr(cur) ? cur : rstr(cur) }
                     else { cur = mcall(cur, s.name, []) }
                 } else if (s.idx2 != undefined && s.idx2 != null) {
                     // `x[start, len]': the two-argument subscript is the `[]' METHOD,
@@ -9789,7 +9972,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                     // `def [](a, b)' is reached with both arguments.
                     cur = mcall(cur, "[]", [s.idx(), s.idx2()], null)
                 } else {
-                    cur = rindex(cur, s.idx())
+                    var ik = anytype
+                    ik = s.idx()
+                    if (mut) { pObj = cur; pKey = ik }
+                    cur = rindex(cur, ik)
                 }
             }
             return cur
@@ -10173,7 +10359,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             // key rather than a symbol name.
             if (t.kwkeyT != undefined) {
                 if (kwd == null) { kwd = {__dict: true, keys: [], vals: []} }
-                dictSet(kwd, t.kwkeyT(), t.kwT())
+                dictSet(kwd, rsText(t.kwkeyT()), t.kwT())
                 continue
             }
             if (t.splatT != undefined) {
@@ -10384,9 +10570,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         return {obj: o, key: last.idx(), key2: k2, isIdx: true}
     }
     // The index-assignment tail, shared by every write site. rsetSlice answers the
-    // (possibly NEW) container, because a Ruby String is a VALUE in this model, so
-    // `s[0] = "H"' has to be written back to the variable - exactly what
-    // makeAppendStmt already does for `s << "x"'. The write-back is done only for a
+    // container, or the box a plain string became, so `s[0] = "H"' writes it back
+    // to the variable. The write-back is done only for a
     // one-step path with an assignable head, which is what the emitter's
     // emitPathSet can do too.
     function writePathRuby(ref, p, v) {
@@ -10427,7 +10612,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     function applyRuby(op, a, b) {
         if (op == "+=") { return radd(a, b) }
         if (op == "-=") { return rbin("-", a, b) }
-        if (op == "*=") { if (typeof a == "string") { return strRepeat(a, toF(b)) } return rbin("*", a, b) }
+        if (op == "*=") { if (typeof a == "string" || isRStr(a)) { return strRepeat(rsText(a), toF(b)) } return rbin("*", a, b) }
         if (op == "/=") { return rbin("/", a, b) }
         if (op == "%=") { return rbin("%", a, b) }
         if (op == "**=") { return rbin("**", a, b) }
@@ -11886,11 +12071,13 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
     }
 
-    // arr << x: push and yield the array (so a << b << c chains). On a string <<
-    // concatenates, on an integer it is the left shift.
+    // arr << x: push and yield the array (so a << b << c chains). On a String <<
+    // appends in place (a plain string answers the longer text), on an integer it
+    // is the left shift.
     function appendOp(l, r) {
         if (Array.isArray(l)) { l.push(r); return l }
-        if (typeof l == "string") { return l + rstr(r) }
+        if (isRStr(l)) { return strMutate(l, "<<", [r], null) }
+        if (typeof l == "string") { return l + strAppendText(r) }
         if (isUserObj(l)) { return mcall(l, "<<", [r], null) }
         return rbin("<<", l, r)
     }
@@ -11907,9 +12094,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             return v
         }
     }
-    // TARGET << V: the append statement, which writes the result BACK to the target.
-    // For an array that is the object it just mutated; for a string (immutable here,
-    // mutable in Ruby) it is the only way `s << "bc"` can be observable.
+    // TARGET << V: the append statement. A plain string in the target is made a box
+    // and written back first, so the append changes the object the target holds.
     function readTargetFull(ref) {
         if (ref.path.length == 0) { return readTarget(ref) }
         var p = resolveRefRuby(ref)
@@ -11928,8 +12114,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         return function() {
             var v = anytype
             v = readTargetFull(ref)
+            if (typeof v == "string") {
+                v = mkRStr(v)
+                assignTargetRef(ref, v)
+            }
             for (var i = 0; i < vals.length; i++) { v = appendOp(v, vals[i]()) }
-            assignTargetRef(ref, v)
             return v
         }
     }
@@ -11942,7 +12131,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     }
     // obj[k] = v: a hash entry, an array slot, an @ivar/field, or a user-defined []=.
     function rsetIndex(o, k, v) {
-        if (isDict(o)) { dictSet(o, k, v); return }
+        // A String key is stored as its text: MRI keys a Hash by a frozen COPY, so a
+        // later mutation of the key string does not move the entry.
+        if (isDict(o)) { dictSet(o, rsText(k), v); return }
         if (isUserObj(o) && typeof lookupMethod(o.__class, "[]=") == "function") {
             mcall(o, "[]=", [k, v], null)
             return
@@ -11985,21 +12176,28 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (st < 0) { st = st + n }
         return {s: st, l: ln}
     }
-    // a[i, len] = v / a[range] = v / s[i] = c. Answers the (possibly new) container:
-    // a Ruby String is a value here. Mirrors rubySetSlice of abnf/jsrt.go and
+    // a[i, len] = v / a[range] = v / s[i] = c. Answers the container, or the box a
+    // plain string became. Mirrors rubySetSlice of abnf/jsrt.go and
     // rbSetSlice of lib/ruby-rt.metajs.
     function rsetSlice(o, k1, k2, v) {
         if (isUserObj(o) && typeof lookupMethod(o.__class, "[]=") == "function") {
             mcall(o, "[]=", (k2 !== undefined && k2 !== null) ? [k1, k2, v] : [k1, v], null)
             return o
         }
-        if (isDict(o)) { dictSet(o, k1, v); return o }
+        if (isDict(o)) { dictSet(o, rsText(k1), v); return o }
+        // A box changes in place; a plain string answers a NEW box, which the
+        // caller writes back to the variable or element it was read from.
+        if (isRStr(o)) {
+            if (o.__fz) { raiseErr("[]=", "FrozenError", "can't modify frozen String") }
+            o.__rs = rsetSlice(o.__rs, k1, k2, v).__rs
+            return o
+        }
         if (typeof o == "string") {
             var sb = sliceBounds(o.length, k1, k2)
             if (sb.s < 0 || sb.s > o.length) { raiseErr("[]=", "IndexError", "index " + sb.s + " out of string") }
             var ls = sb.l
             if (sb.s + ls > o.length) { ls = o.length - sb.s }
-            return o.substring(0, sb.s) + rstr(v) + o.substring(sb.s + ls, o.length)
+            return mkRStr(o.substring(0, sb.s) + rstr(v) + o.substring(sb.s + ls, o.length))
         }
         if (!Array.isArray(o)) { rsetIndex(o, k1, v); return o }
         var plain = (k2 === undefined || k2 === null) && !isRange(k1)
@@ -12275,7 +12473,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 throw {__exc: true, v: excAt(mkExc(hostGlobals["RuntimeError"], "unhandled exception"), pos)}
             }
             var v = anytype
-            v = t()
+            v = rsText(t())
             var msg = anytype
             msg = mt != null ? rstr(mt()) : undefined
             if (typeof v == "string") { throw {__exc: true, v: excAt(mkExc(hostGlobals["RuntimeError"], v), pos)} }
@@ -12364,7 +12562,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (n == "Rational") { return isRat(v) }
             if (n == "Complex") { return isCpx(v) }
             if (n == "Numeric") { return isNumV(v) }
-            if (n == "String") { return typeof v == "string" }
+            if (n == "String") { return typeof v == "string" || isRStr(v) }
             if (n == "Symbol") { return isSym(v) }
             if (n == "Array") { return Array.isArray(v) }
             if (n == "Hash") { return isDict(v) }
@@ -12382,7 +12580,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             // Comparable is NOT universal: MRI answers false for a plain object and
             // true only for a Numeric, a String, or a class that included it - which
             // the userIsA walk below settles.
-            if (n == "Comparable") { return isNumV(v) || typeof v == "string" || userIsA(v, cls) }
+            if (n == "Comparable") { return isNumV(v) || typeof v == "string" || isRStr(v) || userIsA(v, cls) }
             // `A.instance_of?(Class)' / `M.is_a?(Module)'. A Class IS a Module in
             // MRI; a Module is not a Class.
             if (n == "Class" || n == "Module") {
@@ -12897,6 +13095,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // element / key by key), while every other value compares by identity. -----
     function rubyEq(l, r) {
         if (l === r) { return true }
+        if (isRStr(l) || isRStr(r)) { return rubyEq(rsText(l), rsText(r)) }
         if (isNumV(l) && isNumV(r)) { return numEq(l, r) }
         if (isRange(l) && isRange(r)) { return rubyEq(l.lo, r.lo) && rubyEq(l.hi, r.hi) && l.excl === r.excl }
         if (isUserObj(l) && typeof lookupMethod(l.__class, "==") == "function") { return rtest(mcall(l, "==", [r], null)) }
@@ -12950,9 +13149,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     binOps["<="] = function(l, r) { if (isClassObj(l) && isClassObj(r)) { return modRel(l, r, "<=") } return rcmp(l, r) <= 0 }
     binOps[">="] = function(l, r) { if (isClassObj(l) && isClassObj(r)) { return modRel(l, r, ">=") } return rcmp(l, r) >= 0 }
     binOps["-"]  = function(l, r) { return rbin("-", l, r) }
-    binOps["*"]  = function(l, r) { if (typeof l == "string") { return strRepeat(l, toF(r)) } return rbin("*", l, r) }
+    binOps["*"]  = function(l, r) { if (typeof l == "string" || isRStr(l)) { return strRepeat(rsText(l), toF(r)) } return rbin("*", l, r) }
     binOps["/"]  = function(l, r) { return rbin("/", l, r) }
-    binOps["%"]  = function(l, r) { if (typeof l == "string") { return rformat(l, r, "%") } return rbin("%", l, r) }
+    binOps["%"]  = function(l, r) { if (typeof l == "string" || isRStr(l)) { return rformat(rsText(l), r, "%") } return rbin("%", l, r) }
     binOps["**"] = function(l, r) { return rbin("**", l, r) }
     binOps["&"]  = function(l, r) { return rbin("&", l, r) }
     binOps["|"]  = function(l, r) { return rbin("|", l, r) }
@@ -12973,6 +13172,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // rbDictFind fallback have it.
     core.keyId = function(k) {
         if (isBig(k)) { return "b" + bigStr(k) }
+        if (isRStr(k)) { return "s" + k.__rs }
         return null
     }
     // An ARRAY is a VALUE key in Ruby (Array#hash and Array#eql? are structural),
@@ -12987,6 +13187,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // Hash#rehash. This compares at lookup time and therefore still finds it -
     // the same shape the compiled halves' fallback scans have.
     core.keyEq = function(a, b) {
+        if (isRStr(a) || isRStr(b)) { return rsText(a) === rsText(b) }
         if (Array.isArray(a) && Array.isArray(b)) { return rubyEq(a, b) }
         if (isDict(a) && isDict(b)) { return rubyEq(a, b) }
         // A Range is a VALUE key for the same reason an Array is: two range

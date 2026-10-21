@@ -85,7 +85,9 @@ func (rt *jsrt) addRubyFmtExterns(m map[string]func(args []uint64) uint64) {
 			}
 		}
 		counted := false
-		switch v.(type) {
+		switch t := v.(type) {
+		case *jsRStr:
+			return w(float64(rubyCharCount(t.s)))
 		case string, *jsArray:
 			counted = true
 		default:
@@ -103,7 +105,7 @@ func (rt *jsrt) addRubyFmtExterns(m map[string]func(args []uint64) uint64) {
 	// left operand is the base binding's modulo.
 	baseMod := m["js_rmod"]
 	m["js_rmod"] = func(a []uint64) uint64 {
-		if s, ok := u(a[0]).(string); ok {
+		if s, ok := rubySV(u(a[0])).(string); ok {
 			return rt.wrapStr(rt.rubyFormat2(s, u(a[1]), "%"))
 		}
 		return baseMod(a)
@@ -117,6 +119,19 @@ func (rt *jsrt) addRubyFmtExterns(m map[string]func(args []uint64) uint64) {
 		base := m[name]
 		m[name] = func(a []uint64) uint64 {
 			nm, args := rt.rubyRealCall(rt.toString(u(a[1])), u(a[2]))
+			// A String box answers through rubyMethod, which reaches the
+			// pattern-taking methods on its text itself; a plain string's sub! /
+			// gsub! is nil when nothing matches.
+			if _, isBox := u(a[0]).(*jsRStr); isBox {
+				if arr, ok := u(a[2]).(*jsArray); ok {
+					return w(rt.rubyMethod(u(a[0]), rt.toString(u(a[1])), arr.elems))
+				}
+			}
+			if s, isStr := u(a[0]).(string); isStr && (nm == "sub!" || nm == "gsub!") {
+				if arr, ok := args.(*jsArray); ok && rt.rubySubMisses(s, arr.elems) {
+					return jsHNull
+				}
+			}
 			// `Kernel.format(...)' with the module named explicitly does NOT go
 			// through js_rformat - rubyMethod answers it off the Kernel builtin -
 			// so it needs the same interception, or llvm.Run and the native binary
@@ -439,9 +454,10 @@ func (rt *jsrt) rubyFmtCheckConv(c byte) {
 func (rt *jsrt) rubyFormat2(spec string, arg interface{}, frame string) string {
 	outerFrame := rt.rubyFmtFrame
 	rt.rubyFmtFrame = frame
-	args := []interface{}{arg}
+	// A format argument is read, never kept, so a box is read as its text.
+	args := []interface{}{rubySV(arg)}
 	if a, ok := arg.(*jsArray); ok {
-		args = a.elems
+		args = rubySVArgs(a.elems)
 	}
 	ai := 0
 	// The next positional argument. Running off the end is MRI's ArgumentError,
@@ -2025,6 +2041,8 @@ func (rt *jsrt) rubyHashOf(v interface{}) float64 {
 		return rubyStrHash("i" + rt.rubyInspect(v))
 	case string:
 		return rubyStrHash("s" + t)
+	case *jsRStr:
+		return rubyStrHash("s" + t.s)
 	case jsSym:
 		return rubyStrHash("y" + t.s)
 	case jsFlo:
@@ -2214,4 +2232,249 @@ func (rt *jsrt) rubyBuiltinExtFind(v interface{}, name string) (interface{}, boo
 		return bm, true
 	}
 	return nil, false
+}
+
+// jsRStr is a MUTABLE Ruby String: what a string literal evaluates to, and what a
+// mutator makes of a plain string it reaches through a variable or an element. A
+// plain Go string stays the value every other String method or operator answers;
+// the rule, and the one case it leaves out, are at isRStr in
+// languages/ruby-interpreter.abnf. It is a pointer, so every alias shares it; fz is
+// #frozen?. Twin of the {__rs, __fz} box of lib/ruby-rt.metajs.
+type jsRStr struct {
+	s  string
+	fz bool
+	id jsHandleID
+}
+
+// rubySV reads a String box as its text and hands every other value back.
+func rubySV(v interface{}) interface{} {
+	if b, ok := v.(*jsRStr); ok {
+		return b.s
+	}
+	return v
+}
+
+// rubySVArgs is rubySV over an argument list, copying only when a box is in it.
+func rubySVArgs(args []interface{}) []interface{} {
+	for i, a := range args {
+		if _, ok := a.(*jsRStr); ok {
+			out := append([]interface{}{}, args[:i]...)
+			for _, b := range args[i:] {
+				out = append(out, rubySV(b))
+			}
+			return out
+		}
+	}
+	return args
+}
+
+// rubyStrMutator: the names that change a String in place - every bang method and
+// the mutators that have none. Twin of strMutator in ruby-interpreter.abnf.
+func rubyStrMutator(n string) bool {
+	if len(n) > 1 && n[len(n)-1] == '!' {
+		return true
+	}
+	switch n {
+	case "<<", "concat", "replace", "insert", "prepend", "clear", "[]=", "setbyte":
+		return true
+	}
+	return false
+}
+
+// rubyStrCall runs a method on a plain string, the pattern-taking ones included
+// (they live in the regexp half).
+func (rt *jsrt) rubyStrCall(s, name string, args []interface{}) interface{} {
+	if rxWantsPattern(name) {
+		if v, ok := rt.rxRegexMethod(s, name, args); ok {
+			return v
+		}
+	}
+	return rt.rubyMethod(s, name, args)
+}
+
+// rubySubMisses: sub! / gsub! answer nil, and change nothing, when the pattern
+// does not match at all. A String pattern matches literally.
+func (rt *jsrt) rubySubMisses(s string, args []interface{}) bool {
+	pos, _ := rubyBlockArgs(args)
+	reObj := argAt(pos, 0)
+	if !rxIsRegexObj(reObj) {
+		reObj = rxNewRegexObj(rxQuoteText(rt.rubyStr(reObj)), "mpn")
+	}
+	m, ok := rxObjRe(reObj).search([]rune(s), 0)
+	if !ok {
+		rt.fail("regexp: step limit exceeded")
+	}
+	return m == nil
+}
+
+// rubyStrAppendText is what `s << x' / s.concat(x) appends: an Integer is a
+// codepoint.
+func (rt *jsrt) rubyStrAppendText(r interface{}) string {
+	if f, ok := r.(float64); ok {
+		if f < 0 || f > 1114111 {
+			return ""
+		}
+		return string(rune(int(f)))
+	}
+	return rt.rubyStr(r)
+}
+
+// rubyStrMutate runs a mutator on a box. A bang method answers the box, or nil when
+// nothing changed - which the plain string's own method already answers for the
+// text, so it computes it. Twin of strMutate in ruby-interpreter.abnf.
+func (rt *jsrt) rubyStrMutate(b *jsRStr, name string, args []interface{}) interface{} {
+	if b.fz {
+		rt.rubyRaiseErr(name, "FrozenError", "can't modify frozen String")
+	}
+	switch name {
+	case "<<", "concat":
+		for _, a := range args {
+			b.s += rt.rubyStrAppendText(a)
+		}
+		return b
+	case "replace":
+		b.s = rt.rubyStr(argAt(args, 0))
+		return b
+	case "clear":
+		b.s = ""
+		return b
+	case "[]=":
+		var k2 interface{} = jsUndef
+		if len(args) > 2 {
+			k2 = args[1]
+		}
+		b.s = rt.rubyStr(rt.rubySetSlice(b.s, argAt(args, 0), k2, args[len(args)-1]))
+		return args[len(args)-1]
+	case "slice!":
+		cut := rt.rubyStrCall(b.s, "slice", args)
+		if isUndefOrNull(cut) {
+			return jsNull
+		}
+		var k2 interface{} = jsUndef
+		if len(args) > 1 {
+			k2 = args[1]
+		}
+		b.s = rt.rubyStr(rt.rubySetSlice(b.s, argAt(args, 0), k2, ""))
+		return cut
+	case "sub!", "gsub!":
+		if rt.rubySubMisses(b.s, args) {
+			return jsNull
+		}
+	}
+	r := rt.rubyStrCall(b.s, name, args)
+	if isUndefOrNull(r) {
+		return jsNull
+	}
+	b.s = rt.rubyStr(r)
+	return b
+}
+
+// rubyRStrMethod answers the methods a box answers itself - the mutators and the
+// ones that depend on WHICH object it is - or done=false, and rubyMethod then
+// answers the name on the text. Twin of the isRStr arm of mcall in
+// ruby-interpreter.abnf.
+func (rt *jsrt) rubyRStrMethod(b *jsRStr, name string, args []interface{}) (interface{}, bool) {
+	if rubyStrMutator(name) {
+		return rt.rubyStrMutate(b, name, args), true
+	}
+	switch name {
+	case "freeze":
+		b.fz = true
+		return b, true
+	case "frozen?":
+		return b.fz, true
+	case "dup", "+@":
+		if name == "+@" && !b.fz {
+			return b, true
+		}
+		return &jsRStr{s: b.s}, true
+	case "clone":
+		return &jsRStr{s: b.s, fz: b.fz}, true
+	case "-@":
+		if b.fz {
+			return b, true
+		}
+		return &jsRStr{s: b.s, fz: true}, true
+	case "to_s", "to_str", "itself":
+		return b, true
+	case "tap":
+		_, blk := rubyBlockArgs(args)
+		rt.call(blk, jsUndef, []interface{}{b})
+		return b, true
+	case "equal?":
+		return rubyIdenticalP(b, argAt(args, 0)), true
+	case "object_id":
+		return rt.rubyObjectId(b), true
+	}
+	return nil, false
+}
+
+// rubyStrPromote: a mutator is about to reach v. A plain string becomes a box, and
+// when v was read out of an Array or a Hash (o, k) the box replaces it there. Twin
+// of promoteElem in ruby-interpreter.abnf and rbStrPromote in lib/ruby-rt.metajs.
+func (rt *jsrt) rubyStrPromote(o, k, v interface{}) interface{} {
+	s, isStr := v.(string)
+	if !isStr {
+		return v
+	}
+	nb := &jsRStr{s: s}
+	if arr, ok := o.(*jsArray); ok {
+		i := int(math.Trunc(rubyToF(k)))
+		if i < 0 {
+			i += len(arr.elems)
+		}
+		if i >= 0 && i < len(arr.elems) && arr.elems[i] == v {
+			arr.elems[i] = nb
+		}
+	} else if keys, vals, ok := dictParts(o); ok {
+		if i := rt.rubyDictFind(keys, k); i >= 0 && vals.elems[i] == v {
+			vals.elems[i] = nb
+		}
+	}
+	return nb
+}
+
+// rubyPctLit is a %-literal's value: a String is a fresh box, an Array (%w / %W) a
+// fresh Array of fresh boxes, anything else (%i, %r, %s) itself.
+func rubyPctLit(v interface{}) interface{} {
+	switch t := v.(type) {
+	case string:
+		return &jsRStr{s: t}
+	case *jsArray:
+		out := &jsArray{}
+		for _, e := range t.elems {
+			if s, ok := e.(string); ok {
+				out.elems = append(out.elems, &jsRStr{s: s})
+			} else {
+				out.elems = append(out.elems, e)
+			}
+		}
+		return out
+	}
+	return v
+}
+
+func init() {
+	rxExtraExterns = append(rxExtraExterns, func(rt *jsrt, m map[string]func(args []uint64) uint64) {
+		u := rt.unwrap
+		w := rt.wrap
+		m["js_rsnew"] = func(a []uint64) uint64 { return w(&jsRStr{s: rt.rubyStr(u(a[0]))}) }
+		m["js_rspct"] = func(a []uint64) uint64 { return w(rubyPctLit(u(a[0]))) }
+		m["js_rsprom"] = func(a []uint64) uint64 { return w(rt.rubyStrPromote(u(a[0]), u(a[1]), u(a[2]))) }
+		// A bare `.to_s': js_rstr, except that a String box answers itself.
+		m["js_rtos"] = func(a []uint64) uint64 {
+			if _, isBox := u(a[0]).(*jsRStr); isBox {
+				return a[0]
+			}
+			return rt.wrapStr(rt.rubyStr(u(a[0])))
+		}
+		// Unary plus: the identity on a number, String#+@ on a String.
+		m["js_rpos"] = func(a []uint64) uint64 {
+			switch u(a[0]).(type) {
+			case string, *jsRStr:
+				return w(rt.rubyMethod(u(a[0]), "+@", nil))
+			}
+			return a[0]
+		}
+	})
 }

@@ -1665,6 +1665,8 @@ func (rt *jsrt) wrap(v interface{}) uint64 {
 		return rt.wrapID(&t.id, v)
 	case *jsClosure:
 		return rt.wrapID(&t.id, v)
+	case *jsRStr:
+		return rt.wrapID(&t.id, v)
 	case *boundMethod:
 		// Every member read builds a fresh one, so interning it by identity
 		// would only grow the intern map.
@@ -1929,6 +1931,8 @@ func (rt *jsrt) toString(v interface{}) string {
 	case jsChar: // Kotlin's Char renders as its glyph, not as its code.
 		return t.text()
 	case jsSym: // Ruby's Symbol renders as its bare name.
+		return t.s
+	case *jsRStr: // Ruby's mutable String renders as its text.
 		return t.s
 	case jsFlo: // Ruby's Float keeps its decimal point (1000.0), unlike an Integer.
 		return rubyFloStr(t.f)
@@ -3919,6 +3923,10 @@ func dictKeyable(v interface{}) bool {
 
 // dictAppend adds one entry to a dict's parallel arrays, keeping the index.
 func dictAppend(keys, vals *jsArray, k, v interface{}) {
+	// A Ruby String key is stored as its text: MRI keys a Hash by a frozen COPY.
+	if b, ok := k.(*jsRStr); ok {
+		k = b.s
+	}
 	keys.elems = append(keys.elems, k)
 	vals.elems = append(vals.elems, v)
 	if keys.dictIdx != nil {
@@ -6321,8 +6329,11 @@ func (rt *jsrt) rubyStrOperand(r interface{}) string {
 	if s, ok := r.(string); ok {
 		return s
 	}
+	if b, ok := r.(*jsRStr); ok {
+		return b.s
+	}
 	if v, conv := rt.rubyFmtUserConv(r, "to_str", ""); conv {
-		if s, ok := v.(string); ok {
+		if s, ok := rubySV(v).(string); ok {
 			return s
 		}
 	}
@@ -6373,6 +6384,17 @@ func (rt *jsrt) rubyBin(op string, l, r interface{}) interface{} {
 			}
 		}
 		return rt.rubyMethod(l, op, []interface{}{r})
+	}
+	// A String box is its text to every operator but <<, which appends in place;
+	// an Array keeps a box it is handed by <<.
+	if b, ok := l.(*jsRStr); ok {
+		if op == "<<" {
+			return rt.rubyStrMutate(b, "<<", []interface{}{r})
+		}
+		return rt.rubyBin(op, b.s, rubySV(r))
+	}
+	if _, ok := r.(*jsRStr); ok && op != "<<" {
+		return rt.rubyBin(op, l, rubySV(r))
 	}
 	switch op {
 	case "+":
@@ -6453,7 +6475,7 @@ func (rt *jsrt) rubyBin(op string, l, r interface{}) interface{} {
 			return la
 		}
 		if ls, ok := l.(string); ok {
-			return strConcat(ls, rt.rubyStr(r))
+			return strConcat(ls, rt.rubyStrAppendText(r))
 		}
 	}
 	return rt.rubyNumBin(op, l, r)
@@ -6756,7 +6778,7 @@ func rubyClassName(v interface{}) string {
 		return "Rational"
 	case jsCpx:
 		return "Complex"
-	case string:
+	case string, *jsRStr:
 		return "String"
 	case jsSym:
 		return "Symbol"
@@ -6980,8 +7002,8 @@ func (rt *jsrt) rubyRangeValue(lo, hi interface{}, excl bool) interface{} {
 func rubyOpenRange(lo, hi interface{}, excl bool) *jsObject {
 	o := newJSObject()
 	o.set("__rrange", true)
-	o.set("begin", lo)
-	o.set("end", hi)
+	o.set("begin", rubySV(lo))
+	o.set("end", rubySV(hi))
 	o.set("excl", excl)
 	return o
 }
@@ -8015,7 +8037,7 @@ func rubyStrToDbl(s string, badcheck bool) (float64, bool) {
 func (rt *jsrt) rubyKernelConv(name string, args []interface{}) interface{} {
 	var v interface{} = jsNull
 	if len(args) > 0 {
-		v = args[0]
+		v = rubySV(args[0])
 	}
 	switch name {
 	case "String":
@@ -8203,6 +8225,15 @@ func (rt *jsrt) rubySetSlice(o, k1, k2, v interface{}) interface{} {
 		rt.rubyIndexSet(o, k1, v)
 		return o
 	}
+	// A box changes in place; a plain string answers a NEW box, which the emitter
+	// writes back to the variable or element it was read from.
+	if b, isBox := o.(*jsRStr); isBox {
+		if b.fz {
+			rt.rubyRaiseErr("[]=", "FrozenError", "can't modify frozen String")
+		}
+		b.s = rt.rubySetSlice(b.s, k1, k2, v).(*jsRStr).s
+		return b
+	}
 	if str, isStr := o.(string); isStr {
 		n := rt.strLen(str)
 		s, l := rubySliceBounds(n, k1, k2)
@@ -8212,7 +8243,7 @@ func (rt *jsrt) rubySetSlice(o, k1, k2, v interface{}) interface{} {
 		if s+l > n {
 			l = n - s
 		}
-		return rt.strRange(str, 0, s) + rt.rubyStr(v) + rt.strRange(str, s+l, n)
+		return &jsRStr{s: rt.strRange(str, 0, s) + rt.rubyStr(v) + rt.strRange(str, s+l, n)}
 	}
 	arr, isArr := o.(*jsArray)
 	if !isArr {
@@ -8467,11 +8498,9 @@ func rubySmStrArr(ss []string) *jsArray {
 	return out
 }
 
-// The BANG forms of the case / trim / translate methods. A Ruby String is a VALUE
-// in this model, so the in-place effect is unrepresentable (the same limitation
-// sub! / gsub! already have) - but the RETURN VALUE is not: MRI answers the new
-// string, or nil when nothing changed. Mirrors smBangBase of the other two
-// engines.
+// The BANG forms of the case / trim / translate methods on a plain string: MRI
+// answers the new string, or nil when nothing changed. rubyStrMutate stores that
+// text into a box. Mirrors smBangBase of the other two engines.
 func rubySmBangBase(name string) string {
 	if len(name) < 2 || name[len(name)-1] != '!' {
 		return ""
@@ -8739,6 +8768,7 @@ func (rt *jsrt) rubyExc(cls *jsObject, args []interface{}) *jsObject {
 // The instance always carries `args', which is where rubyExcMessage reads the
 // message from, so a user exception class needs no code of its own.
 func (rt *jsrt) rubyMakeExc(v interface{}, msg interface{}) interface{} {
+	v, msg = rubySV(v), rubySV(msg)
 	if isUndefOrNull(v) {
 		if rt.rubyCurExc != nil {
 			return rt.rubyCurExc
@@ -8773,6 +8803,7 @@ func (rt *jsrt) rubyMakeExc(v interface{}, msg interface{}) interface{} {
 // caller can fall back to ordinary indexing. Mirrors rsubrange of
 // ruby-interpreter.abnf and js_rsubrange of lib/ruby-rt.metajs.
 func (rt *jsrt) rubySubrange(o, lo, hi interface{}, excl bool) (interface{}, bool) {
+	o = rubySV(o)
 	n := -1
 	switch t := o.(type) {
 	case *jsArray:
@@ -8818,6 +8849,7 @@ func (rt *jsrt) rubySubrange(o, lo, hi interface{}, excl bool) (interface{}, boo
 // - which is Ruby's Hash#[] / Array#[] / String#[], and what ruby-interpreter.abnf
 // does. js_rget and js_rsubrange's non-sequence fallback share it.
 func (rt *jsrt) rubyIndexGet(o, k interface{}) interface{} {
+	o = rubySV(o)
 	// A Proc answers p[x] by calling itself.
 	if isCallable(o) {
 		return rt.call(o, jsUndef, []interface{}{k})
@@ -8941,6 +8973,10 @@ func (rt *jsrt) rubyNeg(v interface{}) interface{} {
 	case *jsBigInt:
 		return rt.rubyBigNarrow(new(big.Int).Neg(t.v))
 	}
+	switch v.(type) {
+	case string, *jsRStr:
+		return rt.rubyMethod(v, "-@", nil)
+	}
 	if rubyUserObj(v) {
 		return rt.rubyMethod(v, "-@", nil)
 	}
@@ -8968,6 +9004,8 @@ func (rt *jsrt) rubyStr(v interface{}) string {
 	switch t := v.(type) {
 	case jsNullT, jsUndefT:
 		return ""
+	case *jsRStr:
+		return t.s
 	case float64:
 		return rubyIntStr(t)
 	case *jsBigInt:
@@ -9241,6 +9279,8 @@ func (rt *jsrt) rubyInspect(v interface{}) string {
 		return "nil"
 	case string:
 		return rubyStrInspect(t)
+	case *jsRStr:
+		return rubyStrInspect(t.s)
 	case jsSym:
 		return rubySymInspect(t.s)
 	// Rational#inspect and Complex#inspect are PARENTHESIZED where #to_s is not -
@@ -9360,6 +9400,12 @@ func rubyExcInspect(name, msg string) string {
 // user class's own == when it defines one, and the structural comparison of
 // Array/Hash (pyEqual) otherwise. A Symbol only equals another Symbol.
 func (rt *jsrt) rubyEq(l, r interface{}) bool {
+	if _, ok := l.(*jsRStr); ok {
+		return l == r || rt.rubyEq(rubySV(l), rubySV(r))
+	}
+	if _, ok := r.(*jsRStr); ok {
+		return rt.rubyEq(l, rubySV(r))
+	}
 	if rubyIsNum(l) && rubyIsNum(r) {
 		_, lc := l.(jsCpx)
 		if _, rc := r.(jsCpx); lc || rc {
@@ -9474,6 +9520,7 @@ func (rt *jsrt) rubyStructEq(l, r interface{}) bool {
 // hashes a key ONCE at insertion, so mutating a key array afterwards loses the
 // entry until Hash#rehash. This compares at lookup time and still finds it.
 func (rt *jsrt) rubyDictFind(keys *jsArray, k interface{}) int {
+	k = rubySV(k)
 	if i := rt.dictFind(keys, k); i >= 0 {
 		return i
 	}
@@ -9543,6 +9590,10 @@ func (rt *jsrt) rubySpaceship(l, r interface{}) (int, bool) {
 			return int(rubyToF(rt.call(m, jsUndef, []interface{}{l, r}))), true
 		}
 		return 0, false
+	}
+	_, lb := l.(*jsRStr)
+	if _, rb := r.(*jsRStr); lb || rb {
+		return rt.rubySpaceship(rubySV(l), rubySV(r))
 	}
 	if rubyIsNum(l) && rubyIsNum(r) {
 		if c, ok := rt.rubyRatExact(l, r); ok {
@@ -9946,11 +9997,11 @@ func (rt *jsrt) rubyFmtUserConv(v interface{}, n1, n2 string) (interface{}, bool
 		return nil, false
 	}
 	if m, has := rubyFindMethod(v, n1); has {
-		return rt.call(m, v, nil), true
+		return rubySV(rt.call(m, v, nil)), true
 	}
 	if n2 != "" {
 		if m, has := rubyFindMethod(v, n2); has {
-			return rt.call(m, v, nil), true
+			return rubySV(rt.call(m, v, nil)), true
 		}
 	}
 	return nil, false
@@ -10332,6 +10383,23 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 			return rt.call(bm, jsUndef, append([]interface{}{target}, args...))
 		}
 	}
+	// A String box answers the identity-bearing methods itself and every other one
+	// on its text; no String method keeps an argument, so a box argument is read as
+	// its text too.
+	if bx, isBox := target.(*jsRStr); isBox {
+		if v, done := rt.rubyRStrMethod(bx, name, args); done {
+			return v
+		}
+		if rxWantsPattern(name) {
+			if v, ok := rt.rxRegexMethod(bx.s, name, args); ok {
+				return v
+			}
+		}
+		target = bx.s
+	}
+	if _, isStr := target.(string); isStr {
+		args = rubySVArgs(args)
+	}
 	// Ruby's universal reflective methods, answered for every kind of value.
 	switch name {
 	case "class":
@@ -10464,9 +10532,10 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 			// A builtin value carries no instance variables.
 			return &jsArray{}
 		}
+	// A String a method built is not frozen (MRI 2.6 without the magic comment);
+	// a box answers its own flag before this.
 	case "frozen?":
-		_, isStr := target.(string)
-		return isStr || rubyIsNum(target)
+		return rubyIsNum(target)
 	case "equal?":
 		return rubyIdenticalP(target, argAt(args, 0))
 	case "eql?":
@@ -10728,10 +10797,14 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 				rt.call(blk, jsUndef, []interface{}{string(r)})
 			}
 			return o
-		case "dup", "clone", "freeze", "to_str", "+@", "-@", "itself":
-			// A Ruby String is mutable, so `s = "a".dup` hands back a copy; the
-			// compiler models a String as a value, which makes the copy the value.
+		case "to_str", "itself":
 			return o
+		// A copy is a new mutable String, and freezing one makes it a box that
+		// carries the flag.
+		case "dup", "clone", "+@":
+			return &jsRStr{s: o}
+		case "freeze", "-@":
+			return &jsRStr{s: o, fz: true}
 		}
 		// The rest of the String surface (bytes / tr / center / ljust / rjust /
 		// count / delete and their families).
@@ -10752,9 +10825,8 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 			return o
 		case "dump":
 			return rubyStrInspect(o)
-		// String#slice! answers the REMOVED part; the removal itself is
-		// unrepresentable (a Ruby String is a value here), so the value is
-		// String#slice's.
+		// String#slice! on a plain string answers the REMOVED part; nothing holds
+		// the string to see the removal (a held one is a box, see rubyStrMutate).
 		case "slice!":
 			return rt.rubyMethod(o, "slice", args)
 		case "each_byte", "each_codepoint", "each_line":
@@ -11586,7 +11658,7 @@ func (rt *jsrt) rubyPairsToHash(pairs *jsArray, src *jsObject) *jsObject {
 			ovals.elems[i] = row.elems[1]
 			continue
 		}
-		okeys.elems = append(okeys.elems, row.elems[0])
+		okeys.elems = append(okeys.elems, rubySV(row.elems[0]))
 		ovals.elems = append(ovals.elems, row.elems[1])
 	}
 	return out
@@ -11710,7 +11782,7 @@ func (rt *jsrt) rubyHashMethod(o *jsObject, keys, vals *jsArray, name string, ar
 				ovals.elems[j] = keys.elems[i]
 				continue
 			}
-			okeys.elems = append(okeys.elems, vals.elems[i])
+			okeys.elems = append(okeys.elems, rubySV(vals.elems[i]))
 			ovals.elems = append(ovals.elems, keys.elems[i])
 		}
 		return out, true
@@ -11739,7 +11811,7 @@ func (rt *jsrt) rubyHashMethod(o *jsObject, keys, vals *jsArray, name string, ar
 				ovals.elems[j] = vals.elems[i]
 				continue
 			}
-			okeys.elems = append(okeys.elems, nk)
+			okeys.elems = append(okeys.elems, rubySV(nk))
 			ovals.elems = append(ovals.elems, vals.elems[i])
 		}
 		return out, true
@@ -12347,7 +12419,7 @@ func (rt *jsrt) rubyArrayMethod(t *jsArray, name string, args []interface{}) int
 			if ix := rt.rubyDictFind(keys, e); ix >= 0 {
 				vals.elems[ix] = rubyToF(vals.elems[ix]) + 1
 			} else {
-				keys.elems = append(keys.elems, e)
+				keys.elems = append(keys.elems, rubySV(e))
 				vals.elems = append(vals.elems, float64(1))
 			}
 		}
@@ -12612,7 +12684,7 @@ func (rt *jsrt) rubyArrayMethod(t *jsArray, name string, args []interface{}) int
 				bucket := vals.elems[ix].(*jsArray)
 				bucket.elems = append(bucket.elems, e)
 			} else {
-				keys.elems = append(keys.elems, k)
+				keys.elems = append(keys.elems, rubySV(k))
 				vals.elems = append(vals.elems, &jsArray{elems: []interface{}{e}})
 			}
 		}
@@ -13775,9 +13847,8 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			return w(rt.rubyIndexGet(u(a[0]), u(a[1])))
 		},
 		// a[i, len] = v / a[range] = v / s[i] = c: SLICE assignment. It answers the
-		// (possibly new) CONTAINER, because a Ruby String is a VALUE in this model
-		// and the emitter has to write the result back - exactly what `s << "x"'
-		// already does.
+		// container, or the box a plain string became, which the emitter writes
+		// back.
 		"js_rsetsl": func(a []uint64) uint64 {
 			return w(rt.rubySetSlice(u(a[0]), u(a[1]), u(a[2]), u(a[3])))
 		},

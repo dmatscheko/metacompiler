@@ -1294,9 +1294,7 @@ check("t13-lstrip", "  hi  ".lstrip, "hi  ")
 check("t13-rstrip", "  hi  ".rstrip, "  hi")
 check("t13-ascii-only", "caf\u00e9".ascii_only?, false)
 check("t13-dump", "hello".dump, "\"hello\"")
-# The BANG forms answer the new string, or nil when nothing changed. The in-place
-# effect is unrepresentable: a Ruby String is a VALUE in this model, the same
-# limitation sub! / gsub! already have.
+# The BANG forms answer the new string, or nil when nothing changed.
 check("t13-upcase-bang", "hello".upcase!, "HELLO")
 check("t13-upcase-bang-nil", "HELLO".upcase!, nil)
 check("t13-strip-bang-nil", "hello".strip!, nil)
@@ -1307,6 +1305,86 @@ check("t13-each-byte", t13_bytes, [104, 105])
 t13_up = []
 "ab".upto("ad") { |x| t13_up << x }
 check("t13-upto", t13_up, ["ab", "ac", "ad"])
+
+# ----- A String is mutable: a mutator changes the OBJECT every alias holds -----
+# A literal is a fresh String at every evaluation, a String a method built becomes
+# shareable at its first in-place change through a variable or an element, and a
+# frozen one raises FrozenError. Ruby-2 forms; every want is /usr/bin/ruby 2.6.10's
+# answer.
+ms_a = "ab"
+ms_b = ms_a
+ms_a.upcase!
+check("mstr-bang-alias", [ms_a, ms_b], ["AB", "AB"])
+ms_a << "c" << 100
+check("mstr-append-alias", ms_b, "ABcd")
+ms_arr = [ms_a]
+ms_a.concat("e", "f")
+check("mstr-elem-alias", ms_arr[0], "ABcdef")
+ms_h = {k: "x"}
+ms_v = ms_h[:k]
+ms_v.replace("yz")
+check("mstr-hash-alias", ms_h[:k], "yz")
+def ms_add(buf)
+  buf << "!"
+  buf.capitalize!
+  nil
+end
+ms_c = "hi"
+ms_add(ms_c)
+check("mstr-param-alias", ms_c, "Hi!")
+@ms_iv = "iv"
+ms_iv2 = @ms_iv
+@ms_iv.swapcase!
+check("mstr-ivar-alias", ms_iv2, "IV")
+ms_s = "abc"
+ms_t = ms_s
+ms_s[0] = "X"
+ms_s.insert(1, "-")
+ms_s.prepend("<")
+check("mstr-index-set-alias", ms_t, "<X-bc")
+check("mstr-slice-bang", [ms_t.slice!(1, 2), ms_s], ["X-", "<bc"])
+ms_s.clear
+check("mstr-clear-alias", ms_t, "")
+ms_src = ["ab", "cd", 3]
+ms_d = ms_src[0] + ms_src[1]
+ms_d.reverse!
+ms_e = ms_d
+ms_d.chop!
+check("mstr-computed", [ms_d, ms_e], ["dcb", "dcb"])
+ms_l = [ms_src[0] + "1", ms_src[1] + "2"]
+ms_l[0].upcase!
+ms_l[1] << "z"
+check("mstr-computed-elem", ms_l, ["AB1", "cd2z"])
+ms_w = ms_src[2].to_s
+ms_w.concat("0")
+check("mstr-computed-int", ms_w, "30")
+def ms_lit; "lit"; end
+ms_f = ms_lit
+ms_f << "!"
+check("mstr-literal-fresh", [ms_f, ms_lit], ["lit!", "lit"])
+ms_words = %w[a b]
+ms_words.each { |w| w.upcase! }
+check("mstr-pct-w", ms_words, ["A", "B"])
+check("mstr-equal", ["a".equal?("a"), ms_f.equal?(ms_f), ms_f.to_s.equal?(ms_f), ms_f.dup.equal?(ms_f)],
+      [false, true, true, false])
+check("mstr-sub-nil", ["hello".sub!("z", "y"), "hello".gsub!(/z/, "y"), "aa".gsub!("a", "a")],
+      [nil, nil, "aa"])
+check("mstr-bang-nil", ["AB".upcase!, "ab".strip!, "x".succ!], [nil, nil, "y"])
+ms_z = "lit"
+ms_z2 = ms_z
+ms_z.freeze
+ms_err = begin
+  ms_z2 << "x"
+  "none"
+rescue FrozenError => e
+  e.message
+end
+check("mstr-frozen", [ms_err, ms_z2.frozen?, "abc".frozen?, "a".upcase.frozen?], ["can't modify frozen String", true, false, false])
+check("mstr-frozen-copies", [ms_z.dup.frozen?, ms_z.clone.frozen?, (+ms_z).frozen?, (-"q").frozen?], [false, true, false, true])
+ms_k = "key"
+ms_kh = {ms_k => 1}
+ms_k << "!"
+check("mstr-hash-key-copy", [ms_kh, ms_kh["key"], ms_k], [{"key" => 1}, 1, "key!"])
 
 # ----- mixins as ancestors: is_a?, ancestors, and the module operators -----
 # ruby-to-llvm-ir.abnf FLATTENS `include M' at build time - M's method bodies are

@@ -861,7 +861,7 @@ PowExpr     <~~ push(makePow(takeAll())) ~~>
 // obj.method(args), obj.method do |x| ... end, obj.field, arr[i]. A trailing
 // block (do..end or {..}) becomes the last argument of the method call.
 PostfixExpr <~~ push(foldCallMember(takeAll())) ~~>
-            = Primary { CallSfx | CmdMethodSfx | MethodSfx | FieldSfx | SafeMethodSfx | SafeFieldSfx | IndexSfx } ;
+            = Primary PrimaryEnd { CallSfx | CmdMethodSfx | MethodSfx | FieldSfx | SafeMethodSfx | SafeFieldSfx | IndexSfx } ;
 // obj.m a, b - the parenthesis-less call WITH a receiver (`ScratchPad.record []`,
 // `self.class.send :define_method, m do |x| ... end`, `a.should_receive :m`). It has
 // to be a SUFFIX rather than a statement form of its own, because the suffix loop is
@@ -870,6 +870,8 @@ PostfixExpr <~~ push(foldCallMember(takeAll())) ~~>
 // receiver-less CommandStmt uses, so `a.b - 1`, `x ? a.b : c` and `a.b { }` are not
 // mistaken for argument lists; it comes BEFORE MethodSfx so the parenthesised form
 // still wins whenever there is a `(`.
+// The place (a variable) the primary reads, when the primary IS one: see notePlace.
+PrimaryEnd  = :whitespace() "" <~~ push({phead: hasPlaceAt(up.pos) ? placeAt["p" + up.pos] : null}) ~~> :whitespace(Whitespace) ;
 CmdMethodSfx <~~ push({kind: "mcall", name: popName(), args: takeAll()}) ~~>
             = "." MethodName <~~ push({mname: noteMName(up.in)}) ~~> SameLine CmdArgAhead Arg { "," Arg } [ Block ] ;
 MethodSfx   <~~ push(methodSfx(popName(), takeAll())) ~~>
@@ -1186,7 +1188,8 @@ TopConst    <~~ push(makeScopedConst(up.in.substring(2))) ~~>
 // whitespace into an array of strings / symbols. Each form accepts the three usual
 // delimiter pairs ( ) [ ] { }; the body characters are spelled out per delimiter,
 // because the dialect has no parameterized rules.
-PercentLit  = PctQ | PctW | PctI | PctBigQ | PctBigW | PctBigI | PctR | PctBare | PctAny ;
+PercentLit  <~~ push(makePctLit(pop())) ~~>
+            = PctQ | PctW | PctI | PctBigQ | PctBigW | PctBigI | PctR | PctBare | PctAny ;
 // A % literal with an ARBITRARY delimiter. Ruby lets any non-alphanumeric character
 // delimit one (`%!a!`, `%@a@`, `%#a#`, `%r)a)`), and lets %s and %x use the bracket
 // pairs the rules above reserve for the other kinds. Writing every delimiter out as
@@ -1366,7 +1369,7 @@ PctBrcPlain = "\x00"..."\x22" | "\x24"..."\x5b" | "\x5d"..."\x7a" | "\x7c" | "\x
 // it (`f(<<~A, x)`, `<<~A + <<~B`), which would need the body to be consumed at the
 // END of the line rather than at the marker; HdScan refuses those rather than
 // mis-parsing them, so they stay an honest parse failure.
-HeredocLit  <~~ push(makeHeredoc(up.in)) ~~>
+HeredocLit  <~~ push(makeStrLit(makeHeredoc(up.in))) ~~>
             = HdScan :whitespace(Whitespace) ;
 HdScan = :script(~~
     (function() {
@@ -1485,7 +1488,7 @@ HdScan = :script(~~
 //     where the line ends) matches the body lines and fills the oldest queued box.
 // Tags run on a WALK of the finished parse tree, left to right, so the queue is in
 // source order and nothing a rolled-back alternative did can reach it.
-HeredocRef  <~~ push(makeHeredocRef(up.in)) ~~>
+HeredocRef  <~~ push(makeStrLit(makeHeredocRef(up.in))) ~~>
             = HdMarkScan :whitespace(Whitespace) ;
 HdMarkScan = :script(~~
     (function() {
@@ -1720,7 +1723,7 @@ RePipPlain  = "\x00"..."\x22" | "\x24"..."\x5b" | "\x5d"..."\x7b" | "\x7d"..."\U
 
 // ?a / ?\n: the one-character string literal. The body may not start with a space,
 // which is exactly what keeps the ternary `c ? a : b` out of it.
-CharLit     <~~ push(makeConst(charLitVal(up.in))) ~~>
+CharLit     <~~ push(makeStrLit(makeConst(charLitVal(up.in)))) ~~>
             = "?" :whitespace() CharBody :whitespace(Whitespace) ;
 // ?\C-z / ?\M-\C-z: the control and meta forms of a character literal. Longest first
 // (PEG), or the plain escape below would take the backslash and leave the rest.
@@ -1937,11 +1940,13 @@ BareName    = NotKw Id [ SfxGlued PredSfx ] ;
 PredName    = PredOk NotKw Id :whitespace() PredSfx :whitespace(Whitespace) ;
 PredSfx     = "?" | "!" ;
 
-VarRef      <~~ push(makeVarRef(up.in)) ~~>
+VarRef      <~~ push(makeVarRef(up.in)); notePlace(up.pos, {var: up.in}) ~~>
             = Name ;
-IvarRef     = "@" Id <~~ push(makeIvarRef(up.in)) ~~> ;
+IvarRef     <~~ notePlace(up.pos, {ivar: pop().ivar}) ~~>
+            = "@" Id <~~ push(makeIvarRef(up.in)); push({ivar: up.in}) ~~> ;
 // $global and @@classvar reads (their writes go through TargetHead above).
-GvarRef     = "$" Id <~~ push(makeGvarRef(up.in)) ~~> ;
+GvarRef     <~~ notePlace(up.pos, {gvar: pop().gvar}) ~~>
+            = "$" Id <~~ push(makeGvarRef(up.in)); push({gvar: up.in}) ~~> ;
 // The regexp match globals: $1..$9 are the capture groups of the last match, $~ the
 // MatchData and $& the whole match. They are ordinary entries in the global table,
 // so they only need their own spelling here (Id does not start with a digit).
@@ -2065,7 +2070,7 @@ SymName     = ( "a"..."z" | "A"..."Z" | "_" | "\x7f"..."\U0010ffff" ) :whitespac
 
 // Two string literals that are only separated by whitespace are ONE string in Ruby
 // ("a" 'd' is "ad"), so a string primary is a run of pieces.
-StrLit      <~~ push(makeAdjacent(takeAll())) ~~>
+StrLit      <~~ push(makeStrLit(makeAdjacent(takeAll()))) ~~>
             = StrPiece { StrPiece } ;
 StrPiece    = DqStr | SqStr ;
 
@@ -3253,23 +3258,80 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             return {b: r.b, v: callExt(r.b, "js_rneg", [r.v])}
         }
     }
-    // Unary plus: the identity. `+"str"` asks Ruby for an unfrozen copy of a frozen
-    // string literal, and every string value here is already an ordinary mutable one.
-    function makePos(t) { return t }
+    // Unary plus: the identity on a number, String#+@ on a String.
+    function makePos(t) {
+        return function(b) {
+            var r = t(b)
+            return {b: r.b, v: callExt(r.b, "js_rpos", [r.v])}
+        }
+    }
+    // The places a chain's primary can READ - a local, an @ivar, a $global - by the
+    // source position the reference ENDS at, which is where PrimaryEnd matches when
+    // the reference is the whole primary. Twin of notePlace in ruby-interpreter.abnf.
+    var placeAt = {}
+    function notePlace(pos, head) { placeAt["p" + pos] = head }
+    function hasPlaceAt(pos) { return placeAt["p" + pos] != undefined }
+    // The names that change a String in place. Twin of strMutator in
+    // ruby-interpreter.abnf.
+    function strMutator(n) {
+        if (n.length > 1 && n.charAt(n.length - 1) == "!") { return true }
+        return n == "<<" || n == "concat" || n == "replace" || n == "insert" || n == "prepend"
+            || n == "clear" || n == "[]=" || n == "setbyte"
+    }
+    function sfxMutates(s) {
+        return (s.kind == "mcall" || s.kind == "smcall" || s.kind == "field" || s.kind == "sfield") && strMutator(s.name)
+    }
+    // A bare name a chain reads as a LOCAL here (makeVarRef's own order): a method
+    // of self of the same name is a call, and no variable holds its result.
+    function varRefLocal(name) {
+        if (!knownLocal(name)) { return false }
+        return !(selfMethod(curClsName, name) || classHasSMethod(curClsName, name) || builtinSelfMethod(curClsName, name) ||
+                 excSelfMethod(curClsName, name))
+    }
+    // A mutator is about to reach cur, read from the variable `head': a plain string
+    // becomes a box (js_rsprom), which replaces it in the variable. Twin of
+    // promotePlace in ruby-interpreter.abnf.
+    function emitPromoteHead(b, head, cur) {
+        var nb = callExt(b, "js_rsprom", [hUndef, hUndef, cur])
+        if (head.var != undefined && !varRefLocal(head.var)) { return {b: b, v: nb} }
+        var setB = curF.NewBlock("")
+        var doneB = curF.NewBlock("")
+        b.NewCondBr(b.NewICmp(llvm.enum.IPredNE, nb, cur), setB, doneB)
+        var ref = {ivar: head.ivar, gvar: head.gvar, name: head.var, path: []}
+        setB = emitHeadSet(setB, ref, nb)
+        setB.NewBr(doneB)
+        return {b: doneB, v: nb}
+    }
 
     // js_rxget is js_rget plus MatchData indexing (m[1], m[:name]); it delegates to
     // js_rget for every other receiver, so nothing else changes.
     core.indexExt = "js_rxget"   // [i] over arrays, strings, hashes and MatchData
     foldCallMember = function(items) {
-        if (items.length == 1) { return items[0] }
+        if (items.length == 2) { return items[0] }
         var primary = items[0]
-        var suffixes = items.slice(1)
+        var head = items[1].phead
+        var suffixes = items.slice(2)
+        var mut = false
+        for (var q = 0; q < suffixes.length; q++) { if (sfxMutates(suffixes[q])) { mut = true } }
         return function(b) {
             var r = primary(b)
             b = r.b
             var cur = r.v
+            // The container and key the previous [] suffix read cur from.
+            var pObj = null
+            var pKey = null
             for (var i = 0; i < suffixes.length; i++) {
                 var s = suffixes[i]
+                if (mut && sfxMutates(s)) {
+                    if (i == 0 && head !== null) {
+                        var ph = emitPromoteHead(b, head, cur)
+                        b = ph.b
+                        cur = ph.v
+                    } else if (pObj !== null) {
+                        cur = callExt(b, "js_rsprom", [pObj, pKey, cur])
+                    }
+                }
+                pObj = null
                 if (s.kind == "mcall") {
                     if (s.name == "new") {
                         var rn = emitNew(b, cur, unwrapArgs(s.args))
@@ -3317,7 +3379,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                     } else if (s.name == "length" || s.name == "size") {
                         snRes = callExt(callBk, "js_rlen", [cur, emitStr(callBk, methodKey(s.name))])
                     } else if (s.name == "to_s") {
-                        snRes = callExt(callBk, "js_rstr", [cur])
+                        snRes = callExt(callBk, "js_rtos", [cur])
                     } else {
                         snRes = callExt(callBk, "js_rxmcall", [cur, emitStr(callBk, methodKey(s.name)), callExt(callBk, "js_arr_new", [])])
                     }
@@ -3329,9 +3391,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                     if (s.name == "length" || s.name == "size") {
                         cur = callExt(b, "js_rlen", [cur, emitStr(b, methodKey(s.name))])
                     } else if (s.name == "to_s") {
-                        // js_rstr is Ruby's to_s (nil -> "", a class -> its name, a
-                        // Float keeps its point), as the interpreter's rstr() is.
-                        cur = callExt(b, "js_rstr", [cur])
+                        // js_rtos is Ruby's to_s (nil -> "", a class -> its name, a
+                        // Float keeps its point), as the interpreter's rstr() is - and a
+                        // String answers itself.
+                        cur = callExt(b, "js_rtos", [cur])
                     } else if (s.name == "new") {
                         // Foo.new without parens: a zero argument constructor call.
                         var rn2 = emitNew(b, cur, [])
@@ -3345,6 +3408,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 } else if (s.idx2 == undefined || s.idx2 == null) {
                     var ir0 = s.idx(b)
                     b = ir0.b
+                    if (mut) { pObj = cur; pKey = ir0.v }
                     cur = callExt(b, core.indexExt, [cur, ir0.v])
                 } else {
                     // `x[start, len]': the two-argument subscript is the `[]' METHOD,
@@ -3850,9 +3914,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         return {b: b, obj: o, key: kr.v, key2: k2V, dict: false}
     }
     // The index-assignment tail, shared by every write site. js_rsetsl answers the
-    // (possibly NEW) container, because a Ruby String is a VALUE in this model, so
-    // `s[0] = "H"' has to be written back to the variable - exactly what
-    // makeAppendStmt already does for `s << "x"'. The write-back is emitted only for
+    // container, or the box a plain string became, so `s[0] = "H"' writes it back
+    // to the variable. The write-back is emitted only for
     // a one-step path with an assignable head; a deeper path would have to re-walk
     // itself and re-run its side effects.
     function emitPathSet(b, ref, p, v) {
@@ -4487,9 +4550,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             return {b: b, v: v}
         }
     }
-    // TARGET << V: the append statement. Arrays are mutated in place, so the write
-    // back to the target is what the interpreter does for a (mutable) Ruby string;
-    // here it is the same array and the append alone is enough.
+    // TARGET << V: the append statement. An Array and a String are both changed in
+    // place by js_rshl.
     function makeAppendStmt(items) {
         var ref = items[0]
         var vals = items.slice(1)
@@ -4506,14 +4568,21 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                     v = callExt(b, core.indexExt, [v, ri.v])
                 }
             }
+            // A plain string in the target becomes a box, written back first, so
+            // the append changes the object the target holds.
+            var nb = callExt(b, "js_rsprom", [hUndef, hUndef, v])
+            var setB = curF.NewBlock("")
+            var doneB = curF.NewBlock("")
+            b.NewCondBr(b.NewICmp(llvm.enum.IPredNE, nb, v), setB, doneB)
+            setB = emitAssignTarget(setB, ref, nb)
+            setB.NewBr(doneB)
+            b = doneB
+            v = nb
             for (var i = 0; i < vals.length; i++) {
                 var rv = vals[i](b)
                 b = rv.b
                 v = callExt(b, "js_rshl", [v, rv.v])
             }
-            // An array is mutated in place, but a Ruby string is a VALUE here, so the
-            // result has to be written back to the target for `s << "bc"` to update it.
-            b = emitAssignTarget(b, ref, v)
             return {b: b, v: v}
         }
     }
@@ -5737,6 +5806,21 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             }
         }
         return rubyBaseConst(v)
+    }
+    // A string literal is a fresh MUTABLE String at every evaluation (js_rsnew); a
+    // %-literal is one too, and a %w array holds fresh ones. Twin of makeStrLit /
+    // makePctLit in ruby-interpreter.abnf, which says why a String is a box.
+    function makeStrLit(t) {
+        return function(b) {
+            var r = t(b)
+            return {b: r.b, v: callExt(r.b, "js_rsnew", [r.v])}
+        }
+    }
+    function makePctLit(t) {
+        return function(b) {
+            var r = t(b)
+            return {b: r.b, v: callExt(r.b, "js_rspct", [r.v])}
+        }
     }
     // "a" 'd' is one string: adjacent literal pieces concatenate.
     function makeAdjacent(items) {

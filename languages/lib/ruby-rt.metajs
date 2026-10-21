@@ -210,6 +210,140 @@ function rbSym(name) {
     return s
 }
 
+// ================================================ the mutable String ========
+//
+// A string literal evaluates to the box {__rstr: true, __s: text, __fz: frozen},
+// which every alias shares and the mutators change in place; a plain string stays
+// the value every other method or operator answers. The rule, and the one case it
+// leaves out, are at isRStr in languages/ruby-interpreter.abnf; jsRStr in
+// abnf/jsrtruby.go is the Go twin.
+function rbMkRStr(s, fz) { return {__rstr: true, __s: s, __fz: fz} }
+function rbSV(v) {
+    if (typeof v == "object" && rtTag(v, "__rstr")) { return v["__s"] }
+    return v
+}
+// rbSV over an argument list, copying only when a box is in it.
+function rbSVArgs(args) {
+    var i = 0
+    while (i < args.length) {
+        if (typeof args[i] == "object" && rtTag(args[i], "__rstr")) {
+            var out = []
+            var j = 0
+            while (j < args.length) { out.push(rbSV(args[j])); j = j + 1 }
+            return out
+        }
+        i = i + 1
+    }
+    return args
+}
+// The names that change a String in place. Twin of strMutator in
+// ruby-interpreter.abnf.
+function rbStrMutator(n) {
+    if (n.length > 1 && n.charAt(n.length - 1) == "!") { return true }
+    return n == "<<" || n == "concat" || n == "replace" || n == "insert" || n == "prepend"
+        || n == "clear" || n == "[]=" || n == "setbyte"
+}
+// What `s << x' / s.concat(x) appends: an Integer is a codepoint.
+function rbStrAppendText(r) {
+    if (typeof r == "number") { return rbCharCode(r) }
+    return rbStr(r)
+}
+// A mutator on a box. Twin of strMutate in ruby-interpreter.abnf.
+function rbStrMutate(b, name, args) {
+    if (b["__fz"]) { rbRaiseErr(name, "FrozenError", "can't modify frozen String") }
+    if (name == "<<" || name == "concat") {
+        var acc = b["__s"]
+        var i = 0
+        while (i < args.length) { acc = acc + rbStrAppendText(args[i]); i = i + 1 }
+        b["__s"] = acc
+        return b
+    }
+    if (name == "replace") { b["__s"] = rbStr(rbArgAt(args, 0)); return b }
+    if (name == "clear") { b["__s"] = ""; return b }
+    if (name == "[]=") {
+        var k2 = anytype
+        k2 = undefined
+        if (args.length > 2) { k2 = args[1] }
+        b["__s"] = rbStr(js_rsetsl(b["__s"], args[0], k2, args[args.length - 1]))
+        return args[args.length - 1]
+    }
+    if (name == "slice!") {
+        var cut = js_rxmcall(b["__s"], "slice", args)
+        if (rtIsNil(cut)) { return null }
+        var k3 = anytype
+        k3 = undefined
+        if (args.length > 1) { k3 = args[1] }
+        b["__s"] = rbStr(js_rsetsl(b["__s"], args[0], k3, ""))
+        return cut
+    }
+    var r = js_rxmcall(b["__s"], name, args)
+    if (rtIsNil(r)) { return null }
+    b["__s"] = rbStr(r)
+    return b
+}
+// The methods a box answers itself - the mutators and the ones that depend on
+// WHICH object it is - or undefined, and rbMethod then answers the name on the
+// text. Twin of rubyRStrMethod in abnf/jsrtruby.go.
+function rbRStrMethod(b, name, args) {
+    if (rbStrMutator(name)) { return rbStrMutate(b, name, args) }
+    if (name == "freeze") { b["__fz"] = true; return b }
+    if (name == "frozen?") { return b["__fz"] }
+    if (name == "dup") { return rbMkRStr(b["__s"], false) }
+    if (name == "+@") {
+        if (!b["__fz"]) { return b }
+        return rbMkRStr(b["__s"], false)
+    }
+    if (name == "clone") { return rbMkRStr(b["__s"], b["__fz"]) }
+    if (name == "-@") {
+        if (b["__fz"]) { return b }
+        return rbMkRStr(b["__s"], true)
+    }
+    if (name == "to_s" || name == "to_str" || name == "itself") { return b }
+    if (name == "tap") { rbCall1(rbBlockOf(args), b); return b }
+    if (name == "equal?") { return rbIdenticalP(b, rbArgAt(args, 0)) }
+    if (name == "object_id") { return rbObjectId(b) }
+    return undefined
+}
+// A mutator is about to reach v: a plain string becomes a box, which replaces it
+// in the Array or Hash (o, k) it was read from. Twin of rubyStrPromote in
+// abnf/jsrtruby.go.
+function js_rsprom(o, k, v) {
+    if (typeof v != "string") { return v }
+    var nb = rbMkRStr(v, false)
+    if (rbIsArr(o)) {
+        var i = Math.trunc(rbToF(k))
+        if (i < 0) { i = i + o.length }
+        if (i >= 0 && i < o.length && o[i] === v) { o[i] = nb }
+    } else if (rbIsDict(o)) {
+        var di = rbDictFind(o["keys"], k)
+        if (di >= 0 && o["vals"][di] === v) { o["vals"][di] = nb }
+    }
+    return nb
+}
+function js_rsnew(s) { return rbMkRStr(rbStr(s), false) }
+// A %-literal: a String is a fresh box, a %w Array a fresh Array of fresh boxes.
+function js_rspct(v) {
+    if (typeof v == "string") { return rbMkRStr(v, false) }
+    if (!rbIsArr(v)) { return v }
+    var out = []
+    var i = 0
+    while (i < v.length) {
+        if (typeof v[i] == "string") { out.push(rbMkRStr(v[i], false)) } else { out.push(v[i]) }
+        i = i + 1
+    }
+    return out
+}
+// A bare `.to_s': js_rstr, except that a String box answers itself.
+function js_rtos(v) {
+    if (typeof v == "object" && rtTag(v, "__rstr")) { return v }
+    return rbStr(v)
+}
+// Unary plus: the identity on a number, String#+@ on a String.
+function js_rpos(v) {
+    if (typeof v == "string" || (typeof v == "object" && rtTag(v, "__rstr"))) { return rbMethod(v, "+@", []) }
+    return v
+}
+
 // ======================================== Integer at ARBITRARY PRECISION ====
 //
 // Ruby's Integer has no width at all: 2**100 is an exact 31-digit value and
@@ -1380,7 +1514,7 @@ function rbNumBin(op, l, r) {
     var rr = 0
     if (typeof l != "number") { rk = rbNumRank(l) }
     if (typeof r != "number") { rr = rbNumRank(r) }
-    if (rk < 0 || rr < 0) { rbNumOperandErr(op, l, r) }
+    if (rk < 0 || rr < 0) { return rbNonNumBin(op, l, r) }
     if (rr > rk) { rk = rr }
     if (rk == 3) { return rbCpxBin(op, l, r) }
     if (rk == 1) {
@@ -1614,6 +1748,7 @@ function rbNeg(v) {
     if (rbIsRat(v)) { return {__rat: true, n: rbNeg(v["n"]), d: v["d"]} }
     if (rbIsCpx(v)) { return rbMkCpx(rbNeg(v["re"]), rbNeg(v["im"])) }
     if (rbUserObj(v)) { return rbMethod(v, "-@", []) }
+    if (typeof v == "string" || (typeof v == "object" && rtTag(v, "__rstr"))) { return rbMethod(v, "-@", []) }
     fail("cannot negate a " + typeof v)
     return 0
 }
@@ -1655,6 +1790,7 @@ function rbStr(v) {
         if (v <= 9007199254740992 && v >= 0 - 9007199254740992) { return "" + v }
         return rbIntStr(v)
     }
+    if (rtTag(v, "__rstr")) { return v["__s"] }
     if (rtTag(v, "__bint")) { return rtABigStr(v) }
     if (rbIsFlo(v)) { return rbFloStr(v["f"]) }
     if (rbIsRat(v)) { return rbRatText(v) }
@@ -1785,6 +1921,7 @@ function rbSymInspect(s) { return rbSymPlain(s) ? ":" + s : ":" + rbStrInspect(s
 function rbInspect(v) {
     if (rtIsNil(v)) { return "nil" }
     if (typeof v == "string") { return rbStrInspect(v) }
+    if (typeof v == "object" && rtTag(v, "__rstr")) { return rbStrInspect(v["__s"]) }
     if (rbIsSym(v)) { return rbSymInspect(v["s"]) }
     // Rational#inspect and Complex#inspect are PARENTHESIZED where #to_s is not -
     // `(2/3)' against `2/3', `(3+4i)' against `3+4i' - and it is the one place the
@@ -2326,10 +2463,10 @@ function rbFmtConvName(v) {
 function rbFmtUserConv(v, n1, n2) {
     if (!rbUserObj(v)) { return null }
     var m = rbFindMethod(v, n1)
-    if (m !== undefined) { return m.apply(undefined, [v]) }
+    if (m !== undefined) { return rbSV(m.apply(undefined, [v])) }
     if (n2 != "") {
         var m2 = rbFindMethod(v, n2)
-        if (m2 !== undefined) { return m2.apply(undefined, [v]) }
+        if (m2 !== undefined) { return rbSV(m2.apply(undefined, [v])) }
     }
     return null
 }
@@ -2734,8 +2871,9 @@ var rbFmtFrame = ""
 function rbFormat(spec, arg, frame) {
     var outerFrame = rbFmtFrame
     rbFmtFrame = frame
-    var args = [arg]
-    if (rbIsArr(arg)) { args = arg }
+    // A format argument is read, never kept, so a box is read as its text.
+    var args = [rbSV(arg)]
+    if (rbIsArr(arg)) { args = rbSVArgs(arg) }
     var st = {ai: 0}
     var out = ""
     var i = 0
@@ -3066,6 +3204,8 @@ function rbDictFind(keys, k) {
     if (at >= 0) { return at }
     if (k === null) { return 0 - 1 }
     if (typeof k != "object") { return 0 - 1 }
+    // A String box is keyed by its text (rbDictSet stores the text).
+    if (rtTag(k, "__rstr")) { return rbDictFind(keys, k["__s"]) }
     // A Range is a VALUE key too - `h[1..3]' has to find the entry `h[1..3] = v'
     // made, and two range literals are two distinct objects that rtDictFind (an
     // identity/strictEq scan) can never match.
@@ -3097,7 +3237,8 @@ function rbDictSet(d, k, v) {
         d["vals"][i] = v
         return undefined
     }
-    keys.push(k)
+    // A String key is stored as its text: MRI keys a Hash by a frozen COPY.
+    keys.push(rbSV(k))
     d["vals"].push(v)
     return undefined
 }
@@ -3142,6 +3283,7 @@ function rbPyEqual(x, y) {
     // true natively too. rbEq settles two numbers without reaching this function
     // again.
     if (rbIsNum(x) && rbIsNum(y)) { return rbEq(x, y) }
+    if ((typeof x == "object" && rtTag(x, "__rstr")) || (typeof y == "object" && rtTag(y, "__rstr"))) { return rbSV(x) === rbSV(y) }
     // A Range is a VALUE for the same reason a boxed number is: two range literals
     // are two objects, and `[1..2] == [1..2]` is true in MRI (the Go twin reaches
     // rubyEq's own range arm through strictEq).
@@ -3205,6 +3347,8 @@ function rbEq(l, r) {
         }
         return rbToF(l) == rbToF(r)
     }
+    if (typeof l == "object" && rtTag(l, "__rstr")) { return l === r || rbEq(l["__s"], rbSV(r)) }
+    if (typeof r == "object" && rtTag(r, "__rstr")) { return rbEq(l, r["__s"]) }
     // Two Ranges compare by their endpoints, so `(1..3) == (1..3)' holds and a
     // Range can be a Hash KEY - rbEql, which is what rbDictFind scans with, lands
     // here.
@@ -3272,6 +3416,7 @@ function rbSpaceship(l, r) {
         return null
     }
     if (rbIsNum(l) && rbIsNum(r)) { return rbNumCmp(l, r) }
+    if ((typeof l == "object" && rtTag(l, "__rstr")) || (typeof r == "object" && rtTag(r, "__rstr"))) { return rbSpaceship(rbSV(l), rbSV(r)) }
     if (typeof l == "string" && typeof r == "string") {
         if (l < r) { return 0 - 1 }
         if (r < l) { return 1 }
@@ -3556,6 +3701,7 @@ function rbClassName(v) {
     if (typeof v == "number") { return "Integer" }
     if (rbIsBig(v)) { return "Integer" }
     if (typeof v == "string") { return "String" }
+    if (typeof v == "object" && rtTag(v, "__rstr")) { return "String" }
     if (rbIsFlo(v)) { return "Float" }
     if (rbIsRat(v)) { return "Rational" }
     if (rbIsCpx(v)) { return "Complex" }
@@ -3906,7 +4052,9 @@ function rbExcMessage(o) {
 //   a string         -> a RuntimeError carrying that message, as in MRI
 //   nil / undefined  -> a BARE raise: re-raise what the running rescue caught
 //   anything else    -> raised unchanged (raise ArgumentError.new("arg"))
-function rbMakeExc(v, msg) {
+function rbMakeExc(v0, msg0) {
+    var v = rbSV(v0)
+    var msg = rbSV(msg0)
     if (rtIsNil(v)) {
         if (rbCurExc !== null) { return rbCurExc }
         return rbExc(rbBuiltinClass("RuntimeError"), [])
@@ -4242,6 +4390,7 @@ function rbBin(op, l, r) {
         }
         // Array#* is repetition with an Integer and JOIN with a String.
         if (rbIsArr(l) && typeof r == "string") { return rbArrJoin(l, r) }
+        if (rbIsArr(l) && typeof r == "object" && rtTag(r, "__rstr")) { return rbArrJoin(l, r["__s"]) }
         if (rbIsArr(l)) {
             var rep = []
             var t = 0
@@ -4296,7 +4445,7 @@ function rbBin(op, l, r) {
             l.push(r)
             return l
         }
-        if (typeof l == "string") { return l + rbStr(r) }
+        if (typeof l == "string") { return l + rbStrAppendText(r) }
     }
     return rbNumBin(op, l, r)
 }
@@ -4653,6 +4802,8 @@ function rbRxMethod(target, name, args) {
         if (name == "match?") { return rxSearch(rbRxObjRe(pat), target, 0) !== null }
         if (name == "=~") { return rbRxMatchOp(pat, target) }
         if (name == "scan") { return rbRxScan(pat, target) }
+        // sub! / gsub! answer nil when the pattern does not match at all.
+        if ((name == "sub!" || name == "gsub!") && rxSearch(rbRxObjRe(pat), target, 0) === null) { return null }
         if (name == "sub" || name == "sub!") { return rxReplace(rbRxObjRe(pat), target, rbStr(rbArgAt(args, 1)), false) }
         if (name == "gsub" || name == "gsub!") { return rxReplace(rbRxObjRe(pat), target, rbStr(rbArgAt(args, 1)), true) }
         if (name == "split") { return rxSplit(rbRxObjRe(pat), target) }
@@ -6892,6 +7043,14 @@ function rbMethod(target, name, args) {
             return bxm.apply(undefined, bxa)
         }
     }
+    // A String box answers the identity-bearing methods itself and every other
+    // one on its text, the pattern-taking ones included.
+    if (typeof target == "object" && rtTag(target, "__rstr")) {
+        var bsv = anytype
+        bsv = rbRStrMethod(target, name, args)
+        if (bsv !== undefined) { return bsv }
+        return js_rxmcall(target["__s"], name, args)
+    }
     // Ruby's universal reflective methods, answered for every kind of value.
     if (name == "class") {
         var kind = rbClassName(target)
@@ -6979,10 +7138,9 @@ function rbMethod(target, name, args) {
             return []
         }
     }
-    if (name == "frozen?") {
-        if (typeof target == "string") { return true }
-        return rbIsNum(target)
-    }
+    // A String a method built is not frozen (MRI 2.6 without the magic comment);
+    // a box answers its own flag before this.
+    if (name == "frozen?") { return rbIsNum(target) }
     if (name == "equal?") { return rbIdenticalP(target, rbArgAt(args, 0)) }
     if (name == "eql?" && rbFindMethod(target, name) === undefined) {
         if (rbRespondClass(target) == "" || rbIsFn(target)) { return rbIdenticalP(target, rbArgAt(args, 0)) }
@@ -7073,6 +7231,9 @@ function rbMethod(target, name, args) {
         rbNoMethod(target, name)
     }
     if (typeof target == "string") {
+        // No String method keeps an argument, so a box argument is read as its text.
+        var svArgs = rbSVArgs(args)
+        if (svArgs !== args) { return rbMethod(target, name, svArgs) }
         if (name == "length" || name == "size") { return rbCharCount(target) }
         if (name == "to_s") { return target }
         // The QUOTED form, for `p` of a string or any .inspect reaching a String.
@@ -7135,8 +7296,11 @@ function rbMethod(target, name, args) {
             while (ec < ecl.length) { rbCall1(ecb, ecl[ec]); ec = ec + 1 }
             return target
         }
-        if (name == "dup" || name == "clone" || name == "freeze") { return target }
-        if (name == "to_str" || name == "+@" || name == "-@" || name == "itself") { return target }
+        // A copy is a new mutable String, and freezing one makes it a box that
+        // carries the flag.
+        if (name == "dup" || name == "clone" || name == "+@") { return rbMkRStr(target, false) }
+        if (name == "freeze" || name == "-@") { return rbMkRStr(target, true) }
+        if (name == "to_str" || name == "itself") { return target }
         // The rest of the String surface (bytes / tr / center / ljust / rjust /
         // count / delete and their families).
         var sx = rbStrExtra(target, name, args)
@@ -7384,6 +7548,7 @@ function rbGset(name, v) {
 
 function rbJStr(v) {
     if (typeof v == "string") { return v }
+    if (typeof v == "object" && rtTag(v, "__rstr")) { return v["__s"] }
     if (rtIsNil(v)) { return "null" }
     return "" + v
 }
@@ -7447,6 +7612,7 @@ function js_rlen(v, name) {
     // materializing, because for-in asks for it once and then indexes. See
     // js_pyget.
     if (rbIsRange(v)) { return rbRangeLen(v) }
+    if (rtTag(v, "__rstr")) { return rbCharCount(v["__s"]) }
     if (name === null) { fail("len() of a " + typeof v) }
     return js_rxmcall(v, name, [])
 }
@@ -7556,7 +7722,7 @@ function js_rrangearr(lo, hi, excl) {
 
 // THE Range constructor: 1..3, 1...3, (5..), (..9) - all of them.
 function js_rrangeopen(lo, hi, excl) {
-    return {__rrange: true, begin: lo, end: hi, excl: rbTruthy(excl)}
+    return {__rrange: true, begin: rbSV(lo), end: rbSV(hi), excl: rbTruthy(excl)}
 }
 
 // === (case equality): a Range matches by membership, an Array by membership,
@@ -7783,6 +7949,7 @@ function js_rget(o, k) {
         if (idx < 0 || idx >= o.length) { return null }
         return o.charAt(idx)
     }
+    if (rtTag(o, "__rstr")) { return js_rget(o["__s"], k) }
     if (rtIsNil(o)) { fail("indexing nil") }
     return o[k]
 }
@@ -7795,6 +7962,7 @@ function js_rget(o, k) {
 // nothing else changes. Mirrors rsubrange of ruby-interpreter.abnf and
 // rubySubrange of abnf/jsrt.go.
 function js_rsubrange(o, lo, hi, excl) {
+    if (typeof o == "object" && rtTag(o, "__rstr")) { return js_rsubrange(o["__s"], lo, hi, excl) }
     if (rbIsArr(o) || typeof o == "string") {
         var n = o.length
         var b0 = rtIsNil(lo) ? 0 : Math.trunc(rbToF(lo))
@@ -7853,15 +8021,21 @@ function rbSliceBounds(n, k1, k2) {
 }
 
 // a[i, len] = v / a[range] = v / s[i] = c: SLICE assignment. It answers the
-// (possibly NEW) container, because a Ruby String is a VALUE in this model and the
-// emitter writes the result back - exactly what `s << "x"` already does. Mirrors
-// rubySetSlice of abnf/jsrt.go and rsetSlice of ruby-interpreter.abnf.
+// container, or the box a plain string became, which the emitter writes back.
+// Mirrors rubySetSlice of abnf/jsrt.go and rsetSlice of ruby-interpreter.abnf.
 function js_rsetsl(o, k1, k2, v) {
     if (rbUserObj(o)) {
         if (rtIsNil(k2)) { rbMethod(o, "[]=", [k1, v]) } else { rbMethod(o, "[]=", [k1, k2, v]) }
         return o
     }
     if (rbIsDict(o)) { rbDictSet(o, k1, v); return o }
+    // A box changes in place; a plain string answers a NEW box, which the emitter
+    // writes back to the variable or element it was read from.
+    if (typeof o == "object" && rtTag(o, "__rstr")) {
+        if (o["__fz"]) { rbRaiseErr("[]=", "FrozenError", "can't modify frozen String") }
+        o["__s"] = js_rsetsl(o["__s"], k1, k2, v)["__s"]
+        return o
+    }
     if (typeof o == "string") {
         var sb = rbSliceBounds(o.length, k1, k2)
         if (sb["s"] < 0 || sb["s"] > o.length) {
@@ -7869,7 +8043,7 @@ function js_rsetsl(o, k1, k2, v) {
         }
         var ls = sb["l"]
         if (sb["s"] + ls > o.length) { ls = o.length - sb["s"] }
-        return o.substring(0, sb["s"]) + rbStr(v) + o.substring(sb["s"] + ls, o.length)
+        return rbMkRStr(o.substring(0, sb["s"]) + rbStr(v) + o.substring(sb["s"] + ls, o.length), false)
     }
     if (!rbIsArr(o)) { js_rset(o, k1, v); return o }
     // A RANGE key is a slice write, not an element write.
@@ -7971,10 +8145,25 @@ function rbBinAs(name, op, l, r) {
 // abnf/jsrt.go.
 function rbStrOperand(r) {
     if (typeof r == "string") { return r }
+    if (typeof r == "object" && rtTag(r, "__rstr")) { return r["__s"] }
     var cv = rbFmtUserConv(r, "to_str", "")
     if (typeof cv == "string") { return cv }
     rbRaiseErr("+", "TypeError", "no implicit conversion of " + rbFmtConvName(r) + " into String")
     return ""
+}
+
+// An operator rbBin's String and Array arms did not take, on a value that is not
+// a number. A String box is its text to every operator but <<, which appends in
+// place - answered here, off the numeric path, which pays a MetaJS frame per
+// test. Twin of the jsRStr arm of rubyBin in abnf/jsrt.go.
+function rbNonNumBin(op, l, r) {
+    if (typeof l == "object" && rtTag(l, "__rstr")) {
+        if (op == "<<") { return rbStrMutate(l, "<<", [r]) }
+        return rbBin(op, l["__s"], rbSV(r))
+    }
+    if (typeof r == "object" && rtTag(r, "__rstr")) { return rbBin(op, l, r["__s"]) }
+    rbNumOperandErr(op, l, r)
+    return null
 }
 
 // An arithmetic operator whose operands are not both numbers. Twin of
@@ -8242,8 +8431,9 @@ function rbRadixArg(v, negOK) {
 }
 
 function js_rkconv(name, args) {
-    var v = null
-    if (rbIsArr(args) && args.length > 0) { v = args[0] }
+    var v = anytype
+    v = null
+    if (rbIsArr(args) && args.length > 0) { v = rbSV(args[0]) }
     if (name == "String") { return rbStr(v) }
     // Kernel#Rational and Kernel#Complex, the ONLY spelling that builds either from
     // two parts. Rational(a) IS a.to_r and Rational(a, b) is a.to_r / b.to_r, so
@@ -8732,8 +8922,8 @@ function rbStrExtra(target, name, args) {
         return {ok: true, v: target}
     }
     if (name == "dump") { return {ok: true, v: rbStrInspect(target)} }
-    // String#slice! answers the REMOVED part; the removal itself is unrepresentable
-    // (a Ruby String is a value here), so the value is String#slice's.
+    // String#slice! on a plain string answers the REMOVED part; nothing holds the
+    // string to see the removal (a held one is a box, see rbStrMutate).
     if (name == "slice!") { return {ok: true, v: rbMethod(target, "slice", args)} }
     var bb = smBangBase(name)
     if (bb != "") {
@@ -8745,10 +8935,9 @@ function rbStrExtra(target, name, args) {
 }
 
 
-// The BANG forms of the case / trim / translate methods. A Ruby String is a VALUE
-// in this model, so the in-place effect is unrepresentable (the same limitation
-// sub! / gsub! already have) - but the RETURN VALUE is not: MRI answers the new
-// string, or nil when nothing changed, and that is what these produce.
+// The BANG forms of the case / trim / translate methods on a plain string: MRI
+// answers the new string, or nil when nothing changed. rbStrMutate stores that
+// text into a box.
 function smBangBase(name) {
     if (name.length < 2 || name.charAt(name.length - 1) != "!") { return "" }
     var b = name.substring(0, name.length - 1)
