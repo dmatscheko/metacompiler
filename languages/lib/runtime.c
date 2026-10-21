@@ -341,7 +341,11 @@ long to_uint32(long bits) {
  *          then 128 bytes of header padding, and the blocks
  *
  * A block over 1024 bytes gets a chunk of its own (one slot), so the scheme is
- * uniform and the sweep has no special case. Blocks are never moved, never
+ * uniform and the sweep has no special case. Its size is rounded up to one of
+ * eight steps per power of two (big_class), and a freed one goes on the free
+ * list of its step and kind, so reusing one is a list pop: a first-fit walk of
+ * one list is quadratic when a string grows a little at a time, because every
+ * block freed before is too small. Blocks are never moved, never
  * coalesced and never split, so a slot number means the same thing for ever.
  *
  * The mark bitmap is CLEARED at the start of a collection rather than carrying
@@ -360,7 +364,7 @@ long AR_CHUNKS;      /* head of the chunk list */
 long AR_PART[130];   /* the chunk a partition (class * 2 + kind) allocates from */
 long AR_CUR[130];    /* the slot in AR_PART to resume the search at */
 long AR_PHEAD[130];  /* the partition's first chunk; [7] links the rest */
-long GC_BIG;         /* free blocks over 1024 bytes: [0] next, [1] size, first fit */
+long GC_BIG[880];    /* free blocks over 1024 bytes by big_class * 2 + kind: [0] next */
 long GC_ON;          /* 0 during boot and inside a collection */
 long GC_MODE;        /* 0 auto, 1 never, 2 at every allocation, 3 = 2 + poison */
 long GC_ALLOCED;
@@ -601,31 +605,38 @@ long chunk_new(long bsize, long nblk, long kind) {
 /* Which chunk holds address v, or 0. */
 long chunk_of(long v) { return ar_ix_find(v); }
 
+/* The step of a block over 1024 bytes: for 2^k < need <= 2^(k+1) the size is
+ * rounded up to a multiple of 2^(k-3), at most 12.5% more, and the class is
+ * (k - 10) * 8 + the step's number. The rounded size is left in BIG_SIZE. */
+long BIG_SIZE;
+long big_class(long need) {
+	long k = 10;
+	long step;
+	while ((2048 << (k - 10)) < need) { k = k + 1; }
+	step = 128 << (k - 10);
+	BIG_SIZE = ((need + step - 1) / step) * step;
+	return (k - 10) * 8 + BIG_SIZE / step - 9;
+}
+
 /* A block of exactly `need` bytes and kind `kind`: the first clear alloc bit
  * at or after the partition's cursor, in its chunks in list order, then a new
  * chunk at the end of the list. A whole byte of set bits is skipped at once. A
- * block over 1024 bytes comes from the big free list or a chunk of its own. */
+ * block over 1024 bytes comes from its step's free list or a chunk of its own. */
 long ar_block(long need, long kind) {
 	long cls = need >> 4;
 	long b;
 	if (cls > 64) {
-		long prev = 0;
-		b = GC_BIG;
-		while (b != 0) {
+		long ix = big_class(need) * 2 + kind;
+		b = GC_BIG[ix];
+		if (b != 0) {
 			long *w = (long *)b;
-			if (w[1] >= need) {
-				long c = chunk_of(b);
-				long *cw = (long *)c;
-				if (prev == 0) { GC_BIG = w[0]; }
-				else { long *pw = (long *)prev; pw[0] = w[0]; }
-				bit_set(cw[4], 0);
-				return b;
-			}
-			prev = b;
-			{ long *nw = (long *)b; b = nw[0]; }
+			long *cw = (long *)chunk_of(b);
+			GC_BIG[ix] = w[0];
+			bit_set(cw[4], 0);
+			return b;
 		}
 		{
-			long c = chunk_new(need, 1, kind);
+			long c = chunk_new(BIG_SIZE, 1, kind);
 			long *cw = (long *)c;
 			cw[3] = 1;
 			bit_set(cw[4], 0);
@@ -715,7 +726,7 @@ char *ar_alloc(long n) { return ar_alloc_k(n, 0); }
 
 void ar_init(void) {
 	long i = 0;
-	AR_CHUNKS = 0; GC_BIG = 0; GC_ON = 0;
+	AR_CHUNKS = 0; GC_ON = 0;
 	AR_IX = 0; AR_IX_N = 0; AR_IX_CAP = 0;
 	AR_LO = 9223372036854775807; AR_HI = 0;
 	GC_ALLOCED = 0; GC_LIVE = 0; GC_HEAP = 0; GC_COUNT = 0; PIN_N = 0;
@@ -724,6 +735,8 @@ void ar_init(void) {
 	 * ever entering the collector. */
 	GC_THRESH = 1048576;
 	while (i < 130) { AR_PART[i] = 0; AR_CUR[i] = 0; AR_PHEAD[i] = 0; i = i + 1; }
+	i = 0;
+	while (i < 880) { GC_BIG[i] = 0; i = i + 1; }
 	GC_MSTACK = (long)malloc(65536 * 8);
 	GC_MTOP = 0;
 	GC_MCAP = 65536;
@@ -968,7 +981,8 @@ void gc_sweep(void) {
 					long q = 0;
 					while (q * 8 < bs) { pw[q] = 195948557; q = q + 1; }
 				} else {
-					pw[0] = GC_BIG; pw[1] = bs; GC_BIG = b;
+					long ix = big_class(bs) * 2 + cw[6];
+					pw[0] = GC_BIG[ix]; GC_BIG[ix] = b;
 				}
 			}
 			i = i + 1;

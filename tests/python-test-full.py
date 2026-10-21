@@ -7940,6 +7940,16 @@ def s161():
           and type("T", (), {"__annotate_func__": lambda f: {"k": 1}}).__annotations__ == {"k": 1})
     check("nscell", S161out[4:] == ["cell:<class 'cell'>", "cell:<class 'cell'>"])
 
+# ===== SECTION 181: a string built a little at a time =====
+# Every step of the repetition allocates a block a few bytes larger than any
+# freed before it, the pattern that makes a first-fit free list quadratic.
+def s181():
+    s = "ab" * 35000
+    t = ""
+    for i in range(3000):
+        t += "xy"
+    check("bigrep", len(s) == 70000 and s[69999] == "b" and s[:4] == "abab" and len(t) == 6000 and t[-1] == "y")
+
 def main():
     s01() # SECTION-CALL 01
     s02() # SECTION-CALL 02
@@ -8087,5 +8097,6 @@ def main():
     s159() # SECTION-CALL 159
     s160() # SECTION-CALL 160
     s161() # SECTION-CALL 161
+    s181() # SECTION-CALL 181
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]
