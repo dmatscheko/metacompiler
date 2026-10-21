@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-731** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-732** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -79,21 +79,11 @@ p(v[0] + v[1])` → `"a1"` in all engines (ruby TypeError "no implicit conversio
 
 # JS — JavaScript and TypeScript
 
-### T-725 js: accessors inherited through a prototype object; `Reflect` missing in the interpreter · P2 · JS · IN PROGRESS (JS worker, round 28) [V]
-`var c = Object.create({get acc(){return 1}}); c.acc` → node 1; interp undefined, llvm.Run a raw Go struct (`&{0x… <nil>}`), native
-`[object Object]`; same for `F.prototype` / `A.prototype` accessors set with defineProperty; inherited setters never run and writes
-create own properties (node `o.set 1` / `false`). Needs the getter/setter lookup through the prototype view (`__pview`) on read and
-write in all engines. `Reflect` → ReferenceError in the js interpreter while the compiled legs have it (halves diverge).
-
-### T-726 js: accessors on array indices / functions via defineProperty; Symbol-keyed properties under freeze and in messages · P3 · JS · IN PROGRESS (JS worker, round 28) [V]
-`Object.defineProperty(a, "0", {get(){…}})` and the same on a function value are ignored (all engines). `Object.freeze` does not
-protect Symbol-keyed properties (strict write accepted; node "Cannot assign to read only property 'Symbol(q)' of object"); refusal
-messages print the internal key (`__#@match`) where node prints `Symbol(Symbol.match)`.
-
-### T-723 js/ts: tests/srcpos-probe.sh reports -callgraph definition lines off by one · P1 · JS · IN PROGRESS (JS worker, round 28) [V]
-`tests/srcpos-probe.sh` on main: `FAIL js: definitions are on [1 5], -callgraph says [2 6]` (typescript the same); the other 24
-languages pass. A recent js/ts grammar change shifted the recorded definition position (suspects: function source spans
-js-fnsrc.js, class-in-try, new.target binding at entry). Bisect, fix, and wire srcpos-probe into the per-language verification.
+### T-731 js: accessors on array indices; -callgraph names js functions `jsf_N` · P3 · JS · OPEN [V]
+`Object.defineProperty(a, "0", {get(){…}})` is ignored in all engines: every array builtin, spread, for-of, JSON and the floor's numeric
+`a[i]` read element storage directly, so it needs one property-aware element read behind a counter gate in each engine (runtime.c
+included). `-callgraph` names js/ts function definitions `jsf_N` instead of their source names (the name pass maps
+`js_scope_decl(_, name, v)` to a js_closure, but v is the js_jsfnmeta wrapper's result); predates hoisting.
 
 ---
 
@@ -795,6 +785,9 @@ T-716 core: a non-canonical numeric string key (`"01"`, `"1.0"`, `"+1"`, `" 1"`,
 T-594 go (CORE): UTF-8-encoded surrogate bytes are rejoined by the shared string floor — DONE f60458b8 (go raw-string mode in the floor and twin, rune-counted width/precision, byte-preserving strings.Split; new byte fixture — = go run)
 T-640 js (CORE): arguments mapped through another function; array holes — DONE f69dba89 (arguments aliased through any reference via a hidden scope slot; real array holes in all engines skipped by keys/for-in/in/iteration — = node; other languages' benches within spread)
 T-729 bash: mapfile/readarray; attributes on array elements; unset of a scalar's element; `${!a[@]:0:3}` accepted — DONE 04af2aca 4600656e (mapfile/readarray with all options, attributes on element stores, unset of a scalar's element, indirection validation and ${!a[k]}, reclaimed long elements with copy-on-read safety — = bash 5.3; RSS 60.6 → 1.9 MB; follow-up T-730)
+T-723 js/ts: tests/srcpos-probe.sh reports -callgraph definition lines off by one — DONE f80983ea (bisected to e4a8fdc3 hoisting; emitFnInit records the declaration position; srcpos-probe 26/26 and now a gate in tests/gates.sh)
+T-725 js: accessors inherited through a prototype object; `Reflect` missing in the interpreter — DONE 4dc32dac (accessors through prototype objects and views in all engines, getter-only refusals naming the prototype's constructor, Reflect with all 13 methods — = node)
+T-726 js: accessors on array indices / functions via defineProperty; Symbol-keyed properties under freeze and in messages — DONE b036333f for functions and Symbol keys (defineProperty on functions with attributes and accessors; freeze/seal cover Symbol keys; Symbol(desc) in messages — = node); array-index accessors → T-731
 
 # Settled — do not re-open
 
