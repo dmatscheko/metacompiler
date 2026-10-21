@@ -68,7 +68,7 @@ its report; anything structural there is a CORE ticket.
 
 # RB — Ruby
 
-### T-744 ruby: Array/Hash#dig; values_at with ranges; rescue-skipped locals; singleton attr_accessor; alias of setters; class-body bare class-method calls · P2 · RB · OPEN [V]
+### T-744 ruby: Array/Hash#dig; values_at with ranges; rescue-skipped locals; singleton attr_accessor; alias of setters; class-body bare class-method calls · P2 · RB · IN PROGRESS (RB worker, round 17) [V]
 `[1,[2,{k:3}]].dig(1,1,:k)` → NoMethodError (ruby 3); `[2,1].values_at(0..5)` → `[2,1]` (ruby pads nils). `begin; raise "x"; ve = 1;
 rescue Exception; end; p ve` → ruby nil; interp NameError, compiler aborts "variable not defined: ve". `class << self; attr_accessor
 :cnt; end; C.cnt = 1` → NoMethodError. Compiler: `alias_method :b=, :a=` → NoMethodError; `alias b= a=` fails to parse in both halves.
