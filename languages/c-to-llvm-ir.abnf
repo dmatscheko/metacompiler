@@ -893,7 +893,32 @@ ArrQual     = PtrQual | "static" KwEnd ;
 // A declaration initializer: a brace list, a string literal (which initializes a
 // char array element by element, C11 6.7.9p14), or one ordinary expression.
 DInit       = BraceInit | StrInit | AssignExpr ;
-StrInit     <~~ push(makeStrInit(up.in)) ~~> = StrTok { StrTok } ;
+StrInit     <~~ push(makeStrInit(up.in)) ~~> = StrTok { StrTok } StrInitEnd ;
+// A literal is the WHOLE initializer only when the initializer ends after it;
+// '"abc" + 1' is an expression and goes to AssignExpr.
+StrInitEnd = :script(~~
+    (function() {
+        var s = 0 // Neither whitespace NOR COMMENTS are skipped before a :script.
+        while (true) {
+            var ch = c.peek(s)
+            if (ch === 32 || ch === 9 || ch === 10 || ch === 13 || ch === 12) { s++; continue }
+            if (ch === 47 && c.peek(s + 1) === 47) {
+                s += 2
+                while (c.peek(s) >= 0 && c.peek(s) !== 10) { s++ }
+                continue
+            }
+            if (ch === 47 && c.peek(s + 1) === 42) {
+                s += 2
+                while (c.peek(s) >= 0 && !(c.peek(s) === 42 && c.peek(s + 1) === 47)) { s++ }
+                s += 2
+                continue
+            }
+            break
+        }
+        var cc = c.peek(s)
+        return (cc === 44 || cc === 59 || cc === 125) ? undefined : abnf.newToken("\x01str-init-continues", 0)
+    })()
+~~) ;
 // A brace initializer collects its items; a trailing comma is allowed.
 BraceInit   <~~ push({list: takeAll()}) ~~>
             = "{" [ DItem { "," DItem } [ "," ] ] "}" ;
@@ -2395,6 +2420,9 @@ KwDefault   = "default" KwEnd ;
             storeTo(b, ct, addr, coerce(b, ct, r))
             return b
         }
+        // A string-literal item: the bytes of a char array, or the literal's address
+        // for a pointer ('char *a[] = { "x", "yy" }').
+        if (init.str != undefined) return strInitInto(b, ct, init, addr)
         var list = init.list
         if (ct.k == "arr") {
             var aty = ctLTy(ct)

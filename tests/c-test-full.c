@@ -620,6 +620,11 @@ int *s25_ptr = &s25_arr[1];              /* an address constant */
 int s25_expr = 2 * 3 + 1;
 double s25_d = 1.5;
 int (*s25_fp)(int);                      /* a function-pointer global */
+char *s25_names[3] = { "ab", "c" };     /* string literals as pointer elements */
+const char *s25_tab[] = { "x", "yz", 0 };
+char s25_rows[2][3] = { "ab", "c" };     /* string literals as char-array rows */
+struct S25K { const char *k; char t[3]; } s25_kv[2] = { { "one", "t" }, { .t = "u", .k = "two" } };
+const char *s25_tail = "hello" + 3;      /* a literal OPERAND, not the whole initializer */
 int s25_id(int v) { return v; }
 int s25(void) {
     check(2501, s25_arr[0] == 1 && s25_arr[2] == 3 && s25_arr[3] == 0);
@@ -633,6 +638,14 @@ int s25(void) {
     check(2509, *s25_ptr == 2 && s25_expr == 7 && s25_d * 2.0 == 3.0);
     s25_fp = s25_id;
     check(2510, s25_fp(4) == 4);
+    check(2511, s25_names[0][1] == 'b' && s25_names[1][0] == 'c' && s25_names[1][1] == 0 && s25_names[2] == 0);
+    check(2512, sizeof s25_tab == 3 * sizeof(char *) && s25_tab[1][1] == 'z' && s25_tab[2] == 0);
+    check(2513, s25_rows[0][1] == 'b' && s25_rows[1][0] == 'c' && s25_rows[1][1] == 0 && s25_rows[1][2] == 0);
+    check(2514, s25_kv[0].k[2] == 'e' && s25_kv[0].t[0] == 't' && s25_kv[1].k[1] == 'w' && s25_kv[1].t[0] == 'u');
+    const char *loc[] = { "pq", "r" };
+    check(2515, loc[0][1] == 'q' && loc[1][0] == 'r' && sizeof loc == 2 * sizeof(char *));
+    const char *mid = "abc" + 1, *arr2[] = { "xyz" + 2 };
+    check(2516, s25_tail[0] == 'l' && s25_tail[1] == 'o' && mid[0] == 'b' && arr2[0][0] == 'z');
     return 0;
 }
 
