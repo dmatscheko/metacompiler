@@ -1084,6 +1084,7 @@ function jvNumSlow(v) {
     return p - 0
 }
 import "./js-num.js"
+import "./js-arrmove.js"
 function jsnHRaise(t) { jbRaise(t) }
 
 // jsvToPrimitive: valueOf first, then toString.
@@ -1776,7 +1777,7 @@ function jvIndexKeys(n) {
 }
 
 // An array's indices as strings, but the absent ones (arrHole), and a
-// non-enumerable index accessor (jvIdxDefine) only when all asks for it.
+// non-enumerable index (jvIdxDefine) only when all asks for it.
 function jvArrIdxKeys(a, all) {
     var out = []
     var hid = anytype
@@ -1844,7 +1845,10 @@ function jvArrAcc(a, k) {
 }
 // An ACCESSOR ON AN INDEX lives in the table __iacc of the array's named-property
 // object, keyed by the index's string, outside its key order: the index stays an
-// index and its slot present. jvIdxAccN counts the definitions, so a program that
+// index and its slot present. An index's attributes are that object's __nonenum,
+// __ro and __nc tables under the same key, which jvWriteRefusal and jvDeleteRefusal
+// read as they read a named property's; __iacc is made by either. jvIdxAccN counts
+// the definitions, so a program that
 // made none pays one compare at each site that reads elements. Twin of jsIdxAccN and
 // its neighbours in js-interpreter.abnf, which state the rules; jsvIdxAccN in
 // abnf/jsrtjsprint.go.
@@ -1866,7 +1870,7 @@ function jvIdxAcc(a, k) {
     if (jvArrayIndex(k) >= a.length) { return r }
     return acc
 }
-// Removes index i's accessor, if it has one.
+// Removes index i's accessor and attributes, if it has any.
 function jvIdxDrop(a, i) {
     var p = anytype
     p = arrProps(a)
@@ -1878,6 +1882,7 @@ function jvIdxDrop(a, i) {
         t[k] = undefined
         jvAttrSet(p, "__nonenum", k, false)
         jvAttrSet(p, "__nc", k, false)
+        jvAttrSet(p, "__ro", k, false)
     }
     return undefined
 }
@@ -1889,76 +1894,110 @@ function jvElem(a, i) {
     return a[i]
 }
 // Object.defineProperty of index ix: an accessor joins the table (growing the array
-// to reach ix, the gap left absent), a value definition replaces one.
-// Its enumerable and configurable attributes are the named-property object's
-// __nonenum and __nc tables under the index's key; the rules are jsArrIdxDefine's in
-// js-interpreter.abnf.
+// to reach ix, the gap left absent), a data definition replaces one. Its attributes
+// are the named-property object's __nonenum, __ro and __nc tables under the index's
+// key; the rules are jsArrIdxDefine's in js-interpreter.abnf.
 function jvIdxDefine(a, ix, g, s, desc) {
     var k = jvStr(ix)
     var acc = anytype
     acc = jvIdxAcc(a, k)
+    var isAcc = g !== undefined || s !== undefined
+    var hasV = js_has(desc, "value")
+    var hasW = js_has(desc, "writable")
     var hasE = js_has(desc, "enumerable")
     var hasC = js_has(desc, "configurable")
-    if (acc !== undefined && jvArrNamedAttr(a, "__nc", k)) {
-        var bad = js_has(desc, "value") || js_has(desc, "writable")
+    var exists = acc !== undefined
+    if (!exists) {
+        if (ix < a.length) { exists = !arrHole(a, ix) }
+    }
+    var ro = false
+    if (exists && acc === undefined) { ro = jvArrNamedAttr(a, "__ro", k) }
+    if (exists && jvArrNamedAttr(a, "__nc", k)) {
+        var bad = false
         if (hasC && !js_jsnot(js_jsmget(desc, "configurable"))) { bad = true }
         if (hasE && !js_jsnot(js_jsmget(desc, "enumerable")) == jvArrNamedAttr(a, "__nonenum", k)) { bad = true }
-        if (g !== undefined && g !== acc["g"]) { bad = true }
-        if (s !== undefined && s !== acc["s"]) { bad = true }
+        if (acc !== undefined) {
+            if (hasV || hasW) { bad = true }
+            if (g !== undefined && g !== acc["g"]) { bad = true }
+            if (s !== undefined && s !== acc["s"]) { bad = true }
+        } else if (isAcc) {
+            bad = true
+        } else if (ro) {
+            if (hasW && !js_jsnot(js_jsmget(desc, "writable"))) { bad = true }
+            if (hasV && !jvSameValue(js_jsmget(desc, "value"), a[ix])) { bad = true }
+        }
         if (bad) { jbRaise("TypeError: Cannot redefine property: " + k) }
     }
-    if (g === undefined && s === undefined) {
-        jvIdxDrop(a, ix)
-        js_jsmset(a, ix, js_jsmget(desc, "value"))
-        return undefined
-    }
-    var en = ix < a.length
-    if (en) { en = !arrHole(a, ix) }
-    if (acc !== undefined) { en = !jvArrNamedAttr(a, "__nonenum", k) }
-    var cf = en
-    if (acc !== undefined) { cf = !jvArrNamedAttr(a, "__nc", k) }
+    var en = exists && !jvArrNamedAttr(a, "__nonenum", k)
+    var cf = exists && !jvArrNamedAttr(a, "__nc", k)
+    var wr = exists && acc === undefined && !ro
     if (hasE) { en = !js_jsnot(js_jsmget(desc, "enumerable")) }
     if (hasC) { cf = !js_jsnot(js_jsmget(desc, "configurable")) }
-    if (acc === undefined) {
-        if (ix >= a.length || arrHole(a, ix)) { js_jsmset(a, ix, undefined) }
-        var p = anytype
-        p = arrProps(a)
-        if (p === undefined) {
-            p = {}
-            arrPropsSet(a, p)
-        }
-        var t = anytype
-        t = p["__iacc"]
-        if (t === undefined) {
-            t = {}
-            p["__iacc"] = t
-        }
-        acc = {}
-        acc["__acc"] = 1
-        acc["g"] = undefined
-        acc["s"] = undefined
-        t[k] = acc
+    if (hasW) { wr = !js_jsnot(js_jsmget(desc, "writable")) }
+    if (!isAcc && en && cf && wr && !jvHasIdxAcc(a)) {
+        if (hasV || !exists) { js_jsmset(a, ix, js_jsmget(desc, "value")) }
+        return undefined
     }
-    if (jvIsCallable(g)) { acc["g"] = g }
-    if (jvIsCallable(s)) { acc["s"] = s }
+    var p = anytype
+    p = arrProps(a)
+    if (p === undefined) {
+        p = {}
+        arrPropsSet(a, p)
+    }
+    var t = anytype
+    t = p["__iacc"]
+    if (t === undefined) {
+        t = {}
+        p["__iacc"] = t
+    }
+    if (isAcc) {
+        if (acc === undefined) {
+            if (!exists) { js_jsmset(a, ix, undefined) }
+            acc = {}
+            acc["__acc"] = 1
+            acc["g"] = undefined
+            acc["s"] = undefined
+            t[k] = acc
+        }
+        if (jvIsCallable(g)) { acc["g"] = g }
+        if (jvIsCallable(s)) { acc["s"] = s }
+        wr = true
+        jvAccN = jvAccN + 1
+    } else {
+        t[k] = undefined
+        if (hasV || !exists || acc !== undefined) {
+            jvAttrSet(p, "__ro", k, false)
+            js_jsmset(a, ix, js_jsmget(desc, "value"))
+        }
+    }
+    jvAttrSet(arrProps(a), "__ro", k, !wr)
     jvAttrSet(arrProps(a), "__nonenum", k, !en)
     jvAttrSet(arrProps(a), "__nc", k, !cf)
     jvIdxAccN = jvIdxAccN + 1
-    jvAccN = jvAccN + 1
     return undefined
 }
-// Index i's accessor becomes a data element holding its getter's value.
-function jvIdxFlat(a, i) {
-    var acc = anytype
-    acc = jvIdxAcc(a, jvStr(i))
-    if (acc === undefined) { return undefined }
-    var v = anytype
-    v = jvAccGet(acc, a)
-    jvIdxDrop(a, i)
-    a[i] = v
-    return undefined
+// The length a shorter length n reaches on a, deleting the indices from the top
+// down: it stops above a non-configurable one. Twin of jsArrIdxTrim in
+// js-interpreter.abnf.
+function jvIdxTrim(a, n) {
+    var stop = a.length
+    var going = stop > n
+    while (going) {
+        if (jvArrNamedAttr(a, "__nc", jvStr(stop - 1)) && !arrHole(a, stop - 1)) {
+            going = false
+        } else {
+            stop = stop - 1
+            going = stop > n
+        }
+    }
+    var j = stop
+    while (j < a.length) {
+        jvIdxDrop(a, j)
+        j = j + 1
+    }
+    return stop
 }
-// Was an index accessor ever defined on a?
+// Was an index accessor or attribute ever defined on a?
 function jvHasIdxAcc(a) {
     var p = anytype
     p = arrProps(a)
@@ -1979,49 +2018,81 @@ function jvArrResolve(a) {
     }
     return c
 }
-// The array the Array method name runs on, for an a with an index accessor; the
-// rules are jsArrIdxMethod's in js-interpreter.abnf.
+// The array the Array method name runs on, for an a with an index accessor or
+// attribute; the rules are jsArrIdxMethod's in js-interpreter.abnf.
 function jvIdxMethod(a, name) {
-    if (name == "pop") {
-        if (a.length > 0) { jvIdxFlat(a, a.length - 1) }
-        return a
-    }
     if (jvIdxReaders.indexOf(name) >= 0) { return jvArrResolve(a) }
     return a
 }
-// A method that moves elements, on an a with an index accessor. Twin of
+// A method that moves elements, on an a with an index accessor or attribute. Twin of
 // jsArrIdxMove in js-interpreter.abnf, which states the rule.
 function jvIdxMove(a, name, args) {
+    if (name == "pop") {
+        var pv = anytype
+        pv = undefined
+        if (a.length > 0) {
+            var last = a.length - 1
+            pv = jvElem(a, last)
+            if (!arrHole(a, last)) { if (jvArrNamedAttr(a, "__nc", jvStr(last))) { jbRaise("TypeError: " + jvDelText(a, jvStr(last))) } }
+            jvIdxDrop(a, last)
+            js_jsmset(a, "length", last)
+        }
+        return pv
+    }
     var rd = jvArrResolve(a)
     var cp = rd.slice()
+    var n = rd.length
     var r = anytype
     r = jvArrMethod(cp, name, args)
+    var p = 0
+    var q = 0
+    var t = 0
+    if (name == "splice") {
+        p = jvNumArg(args, 0, 0)
+        if (args.length > 2) { q = args.length - 2 }
+    }
+    if (name == "fill") {
+        p = jvNumArg(args, 1, 0)
+        q = n
+        if (args.length > 2) { if (args[2] !== undefined) { q = jvToNumber(args[2]) } }
+    }
+    if (name == "copyWithin") {
+        p = jvNumArg(args, 0, 0)
+        q = jvNumArg(args, 1, 0)
+        t = n
+        if (args.length > 2) { if (args[2] !== undefined) { t = jvToNumber(args[2]) } }
+    }
+    var ord = jsamOrder(name, n, cp.length, p, q, t)
     var i = 0
-    while (i < cp.length) {
-        var was = i < rd.length
-        if (was) { was = !arrHole(rd, i) }
-        if (arrHole(cp, i)) {
-            if (was) {
-                jvIdxDrop(a, i)
-                arrUnset(a, i)
-            }
-        } else if (!was || !jvSameValue(cp[i], rd[i])) {
+    while (i < ord.length) {
+        var x = ord[i]
+        var k = jvStr(x)
+        var present = x < cp.length
+        if (present) { present = !arrHole(cp, x) }
+        if (present) {
             var acc = anytype
-            acc = jvIdxAcc(a, jvStr(i))
+            acc = jvIdxAcc(a, k)
             if (acc !== undefined) {
-                if (!jvIsCallable(acc["s"])) { jbRaise("TypeError: " + jvGetterOnlyText(jvStr(i), "[object Array]")) }
-                jvAccSet(acc, a, cp[i])
+                if (!jvIsCallable(acc["s"])) { jbRaise("TypeError: " + jvGetterOnlyText(k, "[object Array]")) }
+                jvAccSet(acc, a, cp[x])
             } else {
-                a[i] = cp[i]
+                if (x < a.length) { if (jvArrNamedAttr(a, "__ro", k)) { jbRaise("TypeError: " + jvRoText(a, k)) } }
+                js_jsmset(a, x, cp[x])
+            }
+        } else if (x < a.length) {
+            if (!arrHole(a, x)) {
+                if (jvArrNamedAttr(a, "__nc", k)) { jbRaise("TypeError: " + jvDelText(a, k)) }
+                jvIdxDrop(a, x)
+                arrUnset(a, x)
             }
         }
         i = i + 1
     }
-    if (cp.length < a.length) { js_jsmset(a, "length", cp.length) }
+    if (cp.length != a.length) { js_jsmset(a, "length", cp.length) }
     if (r === cp) { return a }
     return r
 }
-var jvIdxMovers = ["shift", "unshift", "splice", "reverse", "sort", "fill", "copyWithin"]
+var jvIdxMovers = ["pop", "shift", "unshift", "splice", "reverse", "sort", "fill", "copyWithin"]
 var jvIdxReaders = ["toString", "toLocaleString", "toReversed", "toSorted", "toSpliced", "with", "at", "join",
     "slice", "indexOf", "lastIndexOf", "includes", "concat", "map", "filter", "forEach", "some", "every", "find",
     "findIndex", "findLast", "findLastIndex", "reduce", "reduceRight", "flat", "flatMap"]
@@ -3436,15 +3507,19 @@ function js_jsmset(o, key, v) {
             }
         }
     }
-    // A shorter length removes the index accessors past it.
+    // A shorter length removes the index accessors and attributes past it, and stops
+    // above a non-configurable index (jvIdxTrim).
     if (jvIdxAccN > 0) {
         if (key === "length") {
             if (Array.isArray(o)) {
                 if (typeof v == "number") {
-                    var ti = v
-                    while (ti < o.length) {
-                        jvIdxDrop(o, ti)
-                        ti = ti + 1
+                    if (v >= 0 && v < o.length && v === Math.trunc(v)) {
+                        var tl = jvIdxTrim(o, v)
+                        if (tl > v) {
+                            js_jsmset(o, "length", tl)
+                            jvRefused = jvDelText(o, jvStr(tl - 1))
+                            return false
+                        }
                     }
                 }
             }
@@ -6424,7 +6499,7 @@ function jvDefineProp(o, key, desc) {
     s = js_jsmget(desc, "set")
     var isAcc = g !== undefined || s !== undefined
     if (Array.isArray(o)) {
-        if (isAcc || jvIdxAccN > 0) {
+        if (isAcc || jvArrLevel(o) == 0) {
             var dix = jvKeyIndex(key)
             if (dix >= 0) { return jvIdxDefine(o, dix, g, s, desc) }
         }
@@ -6697,7 +6772,9 @@ function jvObjectGlobalMethod(name, args) {
         return eo
     }
     if (name == "assign") {
-        if (!jvIsObj(src)) { fail("Object.assign needs an object target") }
+        if (!jvIsObjLike(src)) {
+            if (!jvIsCallable(src)) { fail("Object.assign needs an object target") }
+        }
         var ai = 1
         while (ai < args.length) {
             var s = args[ai]
@@ -6823,10 +6900,11 @@ function jvOwnDesc(o, k) {
             acc = jvArrAcc(o, kk)
         }
         if (jvIdxAccN > 0) {
-            var ia = anytype
-            ia = jvIdxAcc(o, kk)
-            if (ia !== undefined) {
-                acc = ia
+            if (jvHasIdxAcc(o) && jvKeyIndex(kk) >= 0) {
+                var ia = anytype
+                ia = jvIdxAcc(o, kk)
+                if (ia !== undefined) { acc = ia }
+                w = w && !jvArrNamedAttr(o, "__ro", kk)
                 cf = cf && !jvArrNamedAttr(o, "__nc", kk)
             }
         }

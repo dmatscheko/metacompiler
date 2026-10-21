@@ -693,7 +693,7 @@ func (rt *jsrt) jsvDefineProp(v interface{}, key string, desc interface{}) {
 		}
 	}
 	g, s := rt.jsvGetKey(desc, "get"), rt.jsvGetKey(desc, "set")
-	if a, isArr := v.(*jsArray); isArr && (!isUndefOrNull(g) || !isUndefOrNull(s) || jsvIdxAccN > 0) {
+	if a, isArr := v.(*jsArray); isArr && (!isUndefOrNull(g) || !isUndefOrNull(s) || jsvArrLevel(a) == 0) {
 		if ix := rt.arrIndexOf(key); ix >= 0 {
 			rt.jsvIdxDefine(a, ix, g, s, desc)
 			return
@@ -1086,7 +1086,9 @@ func jsvArrAccessor(v interface{}, k string) *jsAccessor {
 
 // An ACCESSOR ON AN INDEX lives in the table __iacc of the array's named-property
 // object, keyed by the index's string, outside the key order: the index stays an
-// index and its slot present. jsvIdxAccN counts the definitions, so a program that
+// index and its slot present. An index's attributes are that object's __hidden, __ro
+// and __nc sets under the same key, which jsvWriteRefusal and jsvDeleteRefusal read
+// as they read a named property's; __iacc is made by either. jsvIdxAccN counts the definitions, so a program that
 // made none pays one compare at each site that reads elements. Twin of jsIdxAccN and
 // its neighbours in js-interpreter.abnf, which state the rules; jvIdxAccN in
 // languages/lib/js-rt.metajs.
@@ -1115,7 +1117,7 @@ func jsvIdxAcc(a *jsArray, k string) *jsAccessor {
 
 func jsvIdxAccAt(a *jsArray, i int) *jsAccessor { return jsvIdxAcc(a, strconv.Itoa(i)) }
 
-// jsvIdxDrop removes index i's accessor, if it has one.
+// jsvIdxDrop removes index i's accessor and attributes, if it has any.
 func jsvIdxDrop(a *jsArray, i int) {
 	if p := jsvArrNamed(a); p != nil {
 		if t, _ := p.props["__iacc"].(*jsObject); t != nil {
@@ -1123,8 +1125,15 @@ func jsvIdxDrop(a *jsArray, i int) {
 			delete(t.props, k)
 			jsvAttrSet(p, "__hidden", k, false)
 			jsvAttrSet(p, "__nc", k, false)
+			jsvAttrSet(p, "__ro", k, false)
 		}
 	}
+}
+
+// jsvIdxAttr: is index i in the attribute set of a's named-property object?
+func jsvIdxAttr(a *jsArray, set string, i int) bool {
+	p := jsvArrNamed(a)
+	return p != nil && jsvAttrHas(p, set, strconv.Itoa(i))
 }
 
 // jsvElem is element i as a read sees it: its accessor's value, or the slot.
@@ -1136,10 +1145,9 @@ func (rt *jsrt) jsvElem(a *jsArray, i int) interface{} {
 }
 
 // jsvIdxDefine is Object.defineProperty of index ix: an accessor joins the table
-// (growing the array to reach ix, the gap left absent), a value definition replaces
-// one. Its enumerable and configurable attributes are the named-property object's
-// __hidden and __nc sets under the index's key; the rules are jsArrIdxDefine's in
-// js-interpreter.abnf.
+// (growing the array to reach ix, the gap left absent), a data definition replaces
+// one. Its attributes are the named-property object's __hidden, __ro and __nc sets
+// under the index's key; the rules are jsArrIdxDefine's in js-interpreter.abnf.
 func (rt *jsrt) jsvIdxDefine(a *jsArray, ix int, g, s, desc interface{}) {
 	k := strconv.Itoa(ix)
 	acc := jsvIdxAcc(a, k)
@@ -1152,72 +1160,96 @@ func (rt *jsrt) jsvIdxDefine(a *jsArray, ix int, g, s, desc interface{}) {
 		return found
 	}
 	flag := func(n string) bool { return rt.truthy(rt.jsvGetKey(desc, n)) }
-	p := jsvArrNamed(a)
-	if acc != nil && jsvAttrHas(p, "__nc", k) {
-		if has("value") || has("writable") || (has("configurable") && flag("configurable")) ||
-			(has("enumerable") && flag("enumerable") == jsvAttrHas(p, "__hidden", k)) ||
-			(isCallable(g) && g != acc.get) || (isCallable(s) && s != acc.set) {
+	isAcc := !isUndefOrNull(g) || !isUndefOrNull(s)
+	exists := acc != nil || (ix < len(a.elems) && a.elems[ix] != jsHole)
+	ro := exists && acc == nil && jsvIdxAttr(a, "__ro", ix)
+	if exists && jsvIdxAttr(a, "__nc", ix) {
+		bad := (has("configurable") && flag("configurable")) ||
+			(has("enumerable") && flag("enumerable") == jsvIdxAttr(a, "__hidden", ix))
+		switch {
+		case acc != nil:
+			bad = bad || has("value") || has("writable") || (isCallable(g) && g != acc.get) || (isCallable(s) && s != acc.set)
+		case isAcc:
+			bad = true
+		case ro:
+			bad = bad || (has("writable") && flag("writable")) ||
+				(has("value") && !rt.jsvSameValue(rt.jsvGetKey(desc, "value"), a.elems[ix]))
+		}
+		if bad {
 			rt.bigRaise("TypeError: Cannot redefine property: %s", k)
 		}
 	}
-	if isUndefOrNull(g) && isUndefOrNull(s) {
-		jsvIdxDrop(a, ix)
-		rt.setMember(a, float64(ix), rt.jsvGetKey(desc, "value"))
-		return
-	}
-	en := ix < len(a.elems) && a.elems[ix] != jsHole
-	if acc != nil {
-		en = !jsvAttrHas(p, "__hidden", k)
-	}
-	cf := en
-	if acc != nil {
-		cf = !jsvAttrHas(p, "__nc", k)
-	}
+	en := exists && !jsvIdxAttr(a, "__hidden", ix)
+	cf := exists && !jsvIdxAttr(a, "__nc", ix)
+	wr := exists && acc == nil && !ro
 	if has("enumerable") {
 		en = flag("enumerable")
 	}
 	if has("configurable") {
 		cf = flag("configurable")
 	}
-	if acc == nil {
-		if ix >= len(a.elems) || a.elems[ix] == jsHole {
-			rt.setMember(a, float64(ix), jsUndef)
-		}
-		p := jsvArrNamed(a)
-		if p == nil {
-			p = newJSObject()
-			a.props = p
-		}
-		t, _ := p.props["__iacc"].(*jsObject)
-		if t == nil {
-			t = newJSObject()
-			p.props["__iacc"] = t
-		}
-		acc = &jsAccessor{}
-		t.props[k] = acc
+	if has("writable") {
+		wr = flag("writable")
 	}
-	if isCallable(g) {
-		acc.get = g
+	if !isAcc && en && cf && wr && !jsvHasIdxAcc(a) {
+		if has("value") || !exists {
+			rt.setMember(a, float64(ix), rt.jsvGetKey(desc, "value"))
+		}
+		return
 	}
-	if isCallable(s) {
-		acc.set = s
+	p := jsvArrNamed(a)
+	if p == nil {
+		p = newJSObject()
+		a.props = p
+	}
+	t, _ := p.props["__iacc"].(*jsObject)
+	if t == nil {
+		t = newJSObject()
+		p.props["__iacc"] = t
+	}
+	if isAcc {
+		if acc == nil {
+			if !exists {
+				rt.setMember(a, float64(ix), jsUndef)
+			}
+			acc = &jsAccessor{}
+			t.props[k] = acc
+		}
+		if isCallable(g) {
+			acc.get = g
+		}
+		if isCallable(s) {
+			acc.set = s
+		}
+		wr = true
+	} else {
+		delete(t.props, k)
+		if has("value") || !exists || acc != nil {
+			rt.setMember(a, float64(ix), rt.jsvGetKey(desc, "value"))
+		}
 	}
 	p = jsvArrNamed(a)
+	jsvAttrSet(p, "__ro", k, !wr)
 	jsvAttrSet(p, "__hidden", k, !en)
 	jsvAttrSet(p, "__nc", k, !cf)
 	jsvIdxAccN++
 }
 
-// jsvIdxFlat makes index i's accessor a data element holding its getter's value.
-func (rt *jsrt) jsvIdxFlat(a *jsArray, i int) {
-	if acc := jsvIdxAccAt(a, i); acc != nil {
-		v := rt.jsvAccRead(acc, a)
-		jsvIdxDrop(a, i)
-		a.elems[i] = v
+// jsvIdxTrim is the length a shorter length n reaches on a, deleting the indices
+// from the top down: it stops above a non-configurable one. Twin of jsArrIdxTrim in
+// js-interpreter.abnf.
+func jsvIdxTrim(a *jsArray, n int) int {
+	stop := len(a.elems)
+	for stop > n && !(jsvIdxAttr(a, "__nc", stop-1) && a.elems[stop-1] != jsHole) {
+		stop--
 	}
+	for i := stop; i < len(a.elems); i++ {
+		jsvIdxDrop(a, i)
+	}
+	return stop
 }
 
-// jsvHasIdxAcc: was an index accessor ever defined on a?
+// jsvHasIdxAcc: was an index accessor or attribute ever defined on a?
 func jsvHasIdxAcc(a *jsArray) bool {
 	if p := jsvArrNamed(a); p != nil {
 		_, has := p.props["__iacc"]
@@ -1240,13 +1272,9 @@ func (rt *jsrt) jsvArrResolve(a *jsArray) *jsArray {
 }
 
 // jsvIdxMethod is the array the Array method name runs on, for an a with an index
-// accessor; the rules are jsArrIdxMethod's in js-interpreter.abnf.
+// accessor or attribute; the rules are jsArrIdxMethod's in js-interpreter.abnf.
 func (rt *jsrt) jsvIdxMethod(a *jsArray, name string) *jsArray {
 	switch name {
-	case "pop":
-		if len(a.elems) > 0 {
-			rt.jsvIdxFlat(a, len(a.elems)-1)
-		}
 	case "toString", "toLocaleString", "toReversed", "toSorted", "toSpliced", "with", "at", "join",
 		"slice", "indexOf", "lastIndexOf", "includes", "concat", "map", "filter", "forEach", "some", "every", "find",
 		"findIndex", "findLast", "findLastIndex", "reduce", "reduceRight", "flat", "flatMap":
@@ -1256,32 +1284,138 @@ func (rt *jsrt) jsvIdxMethod(a *jsArray, name string) *jsArray {
 }
 
 // jsvIdxMovers are the Array methods that move elements, which jsvIdxMove runs.
-var jsvIdxMovers = map[string]bool{"shift": true, "unshift": true, "splice": true, "reverse": true, "sort": true,
-	"fill": true, "copyWithin": true}
+var jsvIdxMovers = map[string]bool{"pop": true, "shift": true, "unshift": true, "splice": true, "reverse": true,
+	"sort": true, "fill": true, "copyWithin": true}
 
-// jsvIdxMove runs a method that moves elements on an a with an index accessor. Twin
-// of jsArrIdxMove in js-interpreter.abnf, which states the rule.
+// jsvMoveOrder is the order in which method name Sets and deletes the indices of an
+// array of length n that it leaves m long. Twin of jsamOrder in
+// languages/lib/js-arrmove.js, which states the rule.
+func jsvMoveOrder(name string, n, m int, p, q, r float64) []int {
+	var out []int
+	switch name {
+	case "reverse":
+		for i := 0; i < n/2; i++ {
+			out = append(out, i, n-1-i)
+		}
+	case "shift", "sort":
+		if name == "shift" || n > 1 {
+			for i := 0; i < n; i++ {
+				out = append(out, i)
+			}
+		}
+	case "unshift":
+		if argc := m - n; argc > 0 {
+			for i := n; i > 0; i-- {
+				out = append(out, i+argc-1)
+			}
+			for i := 0; i < argc; i++ {
+				out = append(out, i)
+			}
+		}
+	case "splice":
+		st, ic := jsvRelIndex(p, n), int(q)
+		dc := n - m + ic
+		if ic < dc {
+			for i := st; i < n-dc; i++ {
+				out = append(out, i+ic)
+			}
+			for i := n; i > n-dc+ic; i-- {
+				out = append(out, i-1)
+			}
+		}
+		if ic > dc {
+			for i := n - dc; i > st; i-- {
+				out = append(out, i+ic-1)
+			}
+		}
+		for i := 0; i < ic; i++ {
+			out = append(out, st+i)
+		}
+	case "fill":
+		for i := jsvRelIndex(p, n); i < jsvRelIndex(q, n); i++ {
+			out = append(out, i)
+		}
+	case "copyWithin":
+		to, from := jsvRelIndex(p, n), jsvRelIndex(q, n)
+		cnt := jsvRelIndex(r, n) - from
+		if n-to < cnt {
+			cnt = n - to
+		}
+		if from < to && to < from+cnt {
+			for i := cnt; i > 0; i-- {
+				out = append(out, to+i-1)
+			}
+		} else {
+			for i := 0; i < cnt; i++ {
+				out = append(out, to+i)
+			}
+		}
+	}
+	return out
+}
+
+// jsvIdxMove runs a method that moves elements on an a with an index accessor or
+// attribute. Twin of jsArrIdxMove in js-interpreter.abnf, which states the rule.
 func (rt *jsrt) jsvIdxMove(a *jsArray, name string, args []interface{}) (interface{}, bool) {
+	if name == "pop" {
+		if len(a.elems) == 0 {
+			return jsUndef, true
+		}
+		last := len(a.elems) - 1
+		v := rt.jsvElem(a, last)
+		if v == jsHole {
+			v = jsUndef
+		} else if jsvIdxAttr(a, "__nc", last) {
+			rt.bigRaise("TypeError: %s", rt.jsvDelText(a, strconv.Itoa(last)))
+		}
+		jsvIdxDrop(a, last)
+		a.dropIdx()
+		a.elems = a.elems[:last]
+		return v, true
+	}
 	rd := rt.jsvArrResolve(a)
+	n := len(rd.elems)
 	cp := &jsArray{elems: append([]interface{}{}, rd.elems...)}
 	r, ok := rt.jsvArrayMethod(cp, name, args)
-	for i, e := range cp.elems {
-		was := i < len(rd.elems) && rd.elems[i] != jsHole
-		switch {
-		case e == jsHole:
-			if was {
-				jsvIdxDrop(a, i)
-				a.elems[i] = jsHole
-			}
-		case !was || !rt.jsvSameValue(e, rd.elems[i]):
-			if acc := jsvIdxAccAt(a, i); acc != nil {
+	var p, q, t float64
+	switch name {
+	case "splice":
+		p = rt.jsvNumArg(args, 0, 0)
+		if len(args) > 2 {
+			q = float64(len(args) - 2)
+		}
+	case "fill":
+		p, q = rt.jsvNumArg(args, 1, 0), float64(n)
+		if len(args) > 2 && args[2] != jsUndef {
+			q = rt.jsvToNum(args[2])
+		}
+	case "copyWithin":
+		p, q, t = rt.jsvNumArg(args, 0, 0), rt.jsvNumArg(args, 1, 0), float64(n)
+		if len(args) > 2 && args[2] != jsUndef {
+			t = rt.jsvToNum(args[2])
+		}
+	}
+	for _, x := range jsvMoveOrder(name, n, len(cp.elems), p, q, t) {
+		k := strconv.Itoa(x)
+		if x < len(cp.elems) && cp.elems[x] != jsHole {
+			if acc := jsvIdxAccAt(a, x); acc != nil {
 				if acc.set == nil {
-					rt.bigRaise("TypeError: %s", jsvGetterOnlyText(strconv.Itoa(i), "[object Array]"))
+					rt.bigRaise("TypeError: %s", jsvGetterOnlyText(k, "[object Array]"))
 				}
-				rt.call(acc.set, a, []interface{}{e})
-			} else {
-				rt.setMember(a, float64(i), e)
+				rt.call(acc.set, a, []interface{}{cp.elems[x]})
+				continue
 			}
+			if x < len(a.elems) && jsvIdxAttr(a, "__ro", x) {
+				rt.bigRaise("TypeError: %s", rt.jsvRoText(a, k))
+			}
+			rt.setMember(a, float64(x), cp.elems[x])
+		} else if x < len(a.elems) && a.elems[x] != jsHole {
+			if jsvIdxAttr(a, "__nc", x) {
+				rt.bigRaise("TypeError: %s", rt.jsvDelText(a, k))
+			}
+			jsvIdxDrop(a, x)
+			a.dropIdx()
+			a.elems[x] = jsHole
 		}
 	}
 	for i := len(cp.elems); i < len(a.elems); i++ {
@@ -1687,7 +1821,7 @@ func jsvPropEnum(v interface{}, k string) bool {
 }
 
 // jsvArrIndexKeys is array o's own index keys, the elements present; a
-// non-enumerable index accessor (jsvIdxDefine) only when all asks for it.
+// non-enumerable index (jsvIdxDefine) only when all asks for it.
 func jsvArrIndexKeys(o *jsArray, all bool) []string {
 	var hid *jsObject
 	if p := jsvArrNamed(o); !all && jsvIdxAccN > 0 && p != nil {
@@ -3054,10 +3188,13 @@ func (rt *jsrt) jsvOwnDesc(v interface{}, k string, get func(interface{}, string
 	if slots != nil {
 		acc, _ = slots.props[k].(*jsAccessor)
 	}
-	if arr, isArr := v.(*jsArray); isArr && jsvIdxAccN > 0 {
-		if ia := jsvIdxAcc(arr, k); ia != nil {
-			acc = ia
-			cf = cf && !jsvAttrHas(jsvArrNamed(arr), "__nc", k)
+	if arr, isArr := v.(*jsArray); isArr && jsvIdxAccN > 0 && jsvHasIdxAcc(arr) {
+		if ix := rt.arrIndexOf(k); ix >= 0 {
+			if ia := jsvIdxAcc(arr, k); ia != nil {
+				acc = ia
+			}
+			wr = wr && !jsvIdxAttr(arr, "__ro", ix)
+			cf = cf && !jsvIdxAttr(arr, "__nc", ix)
 		}
 	}
 	if acc != nil {
@@ -4141,35 +4278,32 @@ func (rt *jsrt) jsvMethod(target interface{}, name string, args []interface{}) (
 			}
 			return out, true
 		case "assign":
-			dst, ok := argAt(args, 0).(*jsObject)
-			if !ok {
-				rt.fail("Object.assign needs an object target")
+			dst := argAt(args, 0)
+			switch dst.(type) {
+			case *jsObject, *jsArray:
+			default:
+				if !isCallable(dst) {
+					rt.fail("Object.assign needs an object target")
+				}
+			}
+			// Each write is a member assignment, and Object.assign is a builtin, and so
+			// strict code: a refused write raises.
+			put := func(k string, v interface{}) {
+				if rt.jsMset([]uint64{rt.wrap(dst), rt.wrapStr(k), rt.wrap(v)}) == jsHFalse {
+					msg := jsvRefused
+					jsvRefused = ""
+					rt.bigRaise("TypeError: %s", msg)
+				}
 			}
 			for _, src := range args[1:] {
 				if isUndefOrNull(src) {
 					continue
 				}
 				for _, k := range jsvOwnKeys(src) {
-					v := rt.jsvGetKey(src, k)
-					// Object.assign is a builtin, and so strict code: a refused write raises.
-					if jsvAttrN > 0 {
-						if msg := rt.jsvWriteRefusal(dst, k, v); msg != "" {
-							rt.bigRaise("TypeError: %s", msg)
-						}
-					}
-					if rt.accessorCount > 0 {
-						if h, acc := jsvAccHolder(dst, k); acc != nil {
-							if acc.set == nil {
-								rt.bigRaise("TypeError: %s", jsvGetterOnlyText(k, rt.jsvAccHolderText(dst, h)))
-							}
-							rt.call(acc.set, dst, []interface{}{v})
-							continue
-						}
-					}
-					rt.setMember(dst, k, v)
+					put(k, rt.jsvGetKey(src, k))
 				}
 				for _, k := range jsvSymKeys(src) {
-					rt.setMember(dst, k, rt.jsvGetKey(src, k))
+					put(k, rt.jsvGetKey(src, k))
 				}
 			}
 			return dst, true
@@ -6846,11 +6980,14 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 			rt.call(acc.set, u(a[0]), []interface{}{u(a[2])})
 			return 0
 		}
-		// A shorter length removes the index accessors past it.
+		// A shorter length removes the index accessors and attributes past it, and
+		// stops above a non-configurable index (jsvIdxTrim).
 		if jsvIdxAccN > 0 && isArr && rt.toString(u(a[1])) == "length" {
-			if n, isNum := u(a[2]).(float64); isNum && n >= 0 && n == math.Floor(n) {
-				for i := int(n); i < len(arr.elems); i++ {
-					jsvIdxDrop(arr, i)
+			if n, isNum := u(a[2]).(float64); isNum && n >= 0 && n == math.Floor(n) && int(n) < len(arr.elems) {
+				if stop := jsvIdxTrim(arr, int(n)); stop > int(n) {
+					baseSet([]uint64{a[0], a[1], w(float64(stop))})
+					jsvRefused = rt.jsvDelText(arr, strconv.Itoa(stop-1))
+					return boolH(false)
 				}
 			}
 		}
@@ -6860,6 +6997,7 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 		}
 		return r
 	}
+	rt.jsMset = m["js_jsmset"]
 
 	// (closure, name, length) -> closure. The emitter calls it at the creation site of
 	// every function that HAS a name or a parameter, which is python's js_pyfnname

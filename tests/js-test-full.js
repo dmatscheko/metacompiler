@@ -1288,6 +1288,81 @@ function s124() {
     check("idxacc16", Math.max.apply(null, q) == 20 && [q].flat(2).join(",") == "1,20,3" && Reflect.apply(Math.min, null, q) == 1)
 }
 
+// ===== SECTION 125: Object.assign onto an array; data attributes on an index =====
+// Object.assign writes each key as a member assignment does, so an array target
+// takes indices and named keys, and a getter-only accessor or a read-only index
+// raises. A data descriptor on an index sets its writable, enumerable and
+// configurable attributes: absent ones are false on a new index, kept on an element,
+// and writable is false on an accessor turned data. A read-only index drops a
+// sloppy write and raises a strict one, a non-enumerable one leaves Object.keys and
+// for-in, a non-configurable one refuses delete and stops a shorter length. The
+// methods that move elements Set and delete in the spec's order and raise at the
+// first refused one, after the writes before it. Values read off node 24.
+function s125() {
+    var srcs = [[1, 2], { x: 1 }]
+    check("arrattr1", Object.assign([0, 0, 9], srcs[0]).join() == "1,2,9")
+    var a = [5, 6]
+    var r = Object.assign(a, srcs[1], [7])
+    check("arrattr2", r === a && a.join() == "7,6" && a.x == 1 && JSON.stringify(Object.assign([], "ab")) == "[\"a\",\"b\"]")
+    var g = [1, 2]
+    Object.defineProperty(g, "1", { get: function () { return 42 } })
+    var e1 = ""
+    try { Object.assign(g, [8, 9]) } catch (e) { e1 = e.message }
+    check("arrattr3", e1 == "Cannot set property 1 of [object Array] which has only a getter" && g[0] == 8)
+    var b = [1, 2, 3]
+    Object.defineProperty(b, "0", { value: 10, writable: false })
+    b[0] = 99
+    var e2 = ""
+    try { (function () { "use strict"; b[0] = 7 })() } catch (e) { e2 = e.message }
+    var d = Object.getOwnPropertyDescriptor(b, "0")
+    check("arrattr4", b.join() == "10,2,3" && e2 == "Cannot assign to read only property '0' of object '[object Array]'" &&
+        d.writable === false && d.enumerable === true && d.configurable === true)
+    var e3 = ""
+    try { Object.assign(b, [5]) } catch (e) { e3 = e.message }
+    check("arrattr5", e3 == e2 && b[0] == 10)
+    var c = [1, 2]
+    Object.defineProperty(c, "4", { value: 5 })
+    d = Object.getOwnPropertyDescriptor(c, "4")
+    check("arrattr6", c.length == 5 && JSON.stringify(c) == "[1,2,null,null,5]" && !d.writable && !d.enumerable &&
+        !d.configurable && Object.keys(c).join() == "0,1" && delete c[4] === false)
+    var h = [1, 2, 3]
+    Object.defineProperty(h, "1", { enumerable: false })
+    var fk = []
+    for (var k in h) { fk.push(k) }
+    check("arrattr7", Object.keys(h).join() == "0,2" && fk.join() == "0,2" && h.join() == "1,2,3" && !h.propertyIsEnumerable("1"))
+    var n = [1, 2, 3]
+    Object.defineProperty(n, "1", { configurable: false })
+    n.length = 0
+    var e4 = ""
+    try { Object.defineProperty(n, "1", { enumerable: false }) } catch (e) { e4 = e.message }
+    check("arrattr8", n.length == 2 && n.join() == "1,2" && delete n[1] === false && e4 == "Cannot redefine property: 1")
+    var m = [1, 2]
+    Object.defineProperty(m, "0", { get: function () { return 5 }, configurable: true })
+    Object.defineProperty(m, "0", { value: 6 })
+    m[0] = 7
+    check("arrattr9", m.join() == "6,2" && Object.getOwnPropertyDescriptor(m, "0").writable === false)
+    var rv = [1, 2, 3, 4]
+    Object.defineProperty(rv, "2", { writable: false })
+    var e5 = ""
+    try { rv.reverse() } catch (e) { e5 = e.message }
+    var sh = [1, 2, 3, 4, 5]
+    Object.defineProperty(sh, "4", { configurable: false })
+    var e6 = ""
+    try { sh.shift() } catch (e) { e6 = e.message }
+    check("arrattr10", e5 == "Cannot assign to read only property '2' of object '[object Array]'" && rv.join() == "4,3,3,1" &&
+        e6 == "Cannot delete property '4' of [object Array]" && sh.join() == "2,3,4,5,5")
+    var us = [1, 2, 3, 4, 5]
+    Object.defineProperty(us, "4", { writable: false })
+    var e7 = ""
+    try { us.unshift(8, 9) } catch (e) { e7 = e.message }
+    var log = []
+    var st = [1, 2, 3]
+    Object.defineProperty(st, "0", { get: function () { return 1 }, set: function (v) { log.push("0=" + v) }, configurable: true })
+    st.sort()
+    check("arrattr11", e7 == "Cannot assign to read only property '4' of object '[object Array]'" && us.join() == "1,2,3,4,5,4,5" &&
+        us.length == 7 && log.join() == "0=1")
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -1331,6 +1406,7 @@ function main() {
     s122() // SECTION-CALL 122
     s123() // SECTION-CALL 123
     s124() // SECTION-CALL 124
+    s125() // SECTION-CALL 125
     println("full: " + checks + " checks, " + failures + " failures")
     return failures
 }

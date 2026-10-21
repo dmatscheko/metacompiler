@@ -661,6 +661,9 @@ type jsrt struct {
 	// jsSrc is a js program's function source text (js_jssrc); while it is nil a
 	// function prints as [function], as in every other language.
 	jsSrc *jsvSrcTable
+	// jsMset is the js_jsmset extern, for a builtin that writes as a member
+	// assignment does (Object.assign).
+	jsMset func(args []uint64) uint64
 }
 
 // luOutText decodes a Lua byte string (one unit per byte) as UTF-8 host text, a
