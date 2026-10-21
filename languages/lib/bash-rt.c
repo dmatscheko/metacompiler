@@ -331,53 +331,213 @@ void rt_die(char *what, int want, int used, int cap)
     rt_enum(used);
     rt_estr(" of ");
     rt_enum(cap);
-    rt_estr(" - the compiled program allocates and never frees ");
-    rt_estr("(languages/lib/bash-rt.c). Shorten the run or raise the limit there.\n");
+    rt_estr(" - a fixed limit of languages/lib/bash-rt.c. ");
+    rt_estr("Shorten the run or raise the limit there.\n");
     exit(70);
 }
 
 /* ---- the string heap ------------------------------------------------------
- * One byte arena plus a bump offset; rt_bump hands out slices and nothing is
- * ever freed (manual 7.8 - the arena is a decision, not an omission).
+ * Two heaps, each a chain of malloc'd chunks: heap 0 holds strings, heap 1
+ * FIELD LISTS. A value IS a list exactly when it lies in a heap-1 chunk or is
+ * list_nil (rt_islist); the 0x02 a list starts with is therefore not what
+ * makes it one, and a plain string may start with that byte too: `w=$'\x02x'`
+ * is one field holding three characters.
  *
- * The bounds check is essential: without it a program that outruns 4 MiB
- * writes over the globals after the arena and dies silently with SIGSEGV.
- * The comparison is written `n > list_pos - p` and not `p + n > list_pos` so it
- * cannot itself overflow: p is always in [0, list_pos] and n >= 0.
+ * A heap position is VIRTUAL: chunk k covers [h_cvs[k], h_cvs[k] + h_ccap[k])
+ * of one growing line, so positions compare across chunks. A request the
+ * current chunk cannot hold moves to the next chunk - the one after it if that
+ * is big enough, else a fresh one - and leaves the old chunk's tail unused, so
+ * every string stays contiguous.
  *
- * FIELD LISTS ARE ALLOCATED FROM THE OTHER END (rt_lbump), downward from
- * list_pos, and a value IS a list exactly when it lies in that region or is
- * list_nil (rt_islist). The 0x02 a list starts with is therefore not what makes
- * it one, and a plain string may start with that byte too: `w=$'\x02x'` is one
- * field holding three characters.
+ * RECLAIMING. There is no collector. The emitted program takes a MARK (both
+ * positions) before a loop and before each top-level line, and rt_release
+ * goes back to it ahead of every further pass, at the loop's exit and at the
+ * line's end; a chunk it leaves is reused when the heap grows again. That is
+ * sound because a string kept beyond that point is either older than the mark
+ * or written into a store that outlives it - a variable, an array, a
+ * positional parameter, a capture buffer, a subshell snapshot - and every such
+ * write raises the FLOOR (rt_pin): a string release never goes below it. A
+ * list is never stored (each store takes a joined string or one field), so
+ * its release has no floor. A scalar assignment also moves its value down
+ * onto the mark (rt_keep), so the garbage its own expansion made goes back
+ * too. A helper whose allocations are all scratch for one call (rt_eg,
+ * rt_globat, rt_patany) goes back to its entry position with rt_hset.
  */
-char arena[4194304];
-int arena_pos;
-int list_pos = 4194304;
+long h_pos[2];        /* the next free position                            */
+long h_cv[2];         /* the current chunk's first position ...            */
+long h_cend[2];       /* ... and the one past its end                       */
+long h_adj[2];        /* the address of position p is h_adj + p             */
+int h_ci[2];          /* its index                                          */
+int h_nch[2];         /* chunks allocated; those past h_ci hold nothing live */
+char *h_chunk[128];   /* chunk k of heap h is entry h * 64 + k              */
+long h_cvs[128];
+long h_ccap[128];
+long a_floor;
+char *fin_last;
+void *malloc(unsigned long n);
+void free(void *p);
+unsigned long strlen(const char *s);
+void *memmove(void *d, const void *s, unsigned long n);
 
-char *rt_bump(int n) {
-    int p = arena_pos;
-    if (n < 0 || n > list_pos - p) {
-        rt_die("string arena", n, p + (4194304 - list_pos), 4194304);
+/* Make chunk k of heap h current. */
+void rt_hcur(int h, int k) {
+    int at = h * 64 + k;
+    h_ci[h] = k;
+    h_adj[h] = (long)h_chunk[at] - h_cvs[at];
+    h_cv[h] = h_cvs[at];
+    h_cend[h] = h_cvs[at] + h_ccap[at];
+}
+
+/* rt_hbump's slow path: n bytes at the start of the next chunk. A spare chunk
+ * too small for them is freed with every one after it (none holds anything)
+ * and replaced. Chunk k is 1 MiB << k, up to 1 GiB, or the request. */
+char *rt_hgrow(int h, int n) {
+    int k = h_nch[h] == 0 ? 0 : h_ci[h] + 1;
+    int at = h * 64 + k;
+    long cv = h_nch[h] == 0 ? 0 : h_cend[h];
+    if (n < 0 || k >= 64) {
+        rt_die(h == 0 ? "string heap" : "field-list heap", n, k, 64);
     }
-    arena_pos = p + n;
-    return &arena[p];
+    if (k >= h_nch[h] || h_ccap[at] <= (long)n) {
+        long sz = (long)1048576 << (k < 10 ? k : 10);
+        char *c;
+        int j = k;
+        while (j < h_nch[h]) {
+            free(h_chunk[h * 64 + j]);
+            j = j + 1;
+        }
+        if (sz <= (long)n) sz = (long)n + 1;
+        c = (char *)malloc((unsigned long)sz);
+        if (c == 0) {
+            rt_die(h == 0 ? "string heap" : "field-list heap", n, k, 64);
+        }
+        h_chunk[at] = c;
+        h_cvs[at] = cv;
+        h_ccap[at] = sz;
+        h_nch[h] = k + 1;
+    }
+    rt_hcur(h, k);
+    h_pos[h] = cv + n;
+    return h_chunk[at];
+}
+
+/* `>=`, not `>`: before the first chunk the bounds are all 0 and even a
+ * request of 0 must make one. */
+char *rt_hbump(int h, int n) {
+    long p = h_pos[h];
+    if (n < 0 || (long)n >= h_cend[h] - p) {
+        return rt_hgrow(h, n);
+    }
+    h_pos[h] = p + n;
+    return (char *)(h_adj[h] + p);
+}
+
+/* rt_hbump of heap 0, spelled out: it is the runtime's hottest call. */
+char *rt_bump(int n) {
+    long p = h_pos[0];
+    if (n < 0 || (long)n >= h_cend[0] - p) {
+        return rt_hgrow(0, n);
+    }
+    h_pos[0] = p + n;
+    return (char *)(h_adj[0] + p);
 }
 
 char *rt_lbump(int n) {
-    int p = list_pos;
-    if (n < 0 || n > p - arena_pos) {
-        rt_die("string arena", n, arena_pos + (4194304 - p), 4194304);
-    }
-    list_pos = p - n;
-    return &arena[p - n];
+    return rt_hbump(1, n);
+}
+
+/* The index of the chunk of heap h that holds position p, which is not past
+ * h_pos[h]. */
+int rt_hchunk(int h, long p) {
+    int k = h_ci[h];
+    while (k > 0 && h_cvs[h * 64 + k] > p) k = k - 1;
+    return k;
+}
+
+/* Heap h back to position p, which is not past h_pos[h]: the chunk holding p
+ * becomes current again. */
+void rt_hset(int h, long p) {
+    if (p < h_cv[h]) rt_hcur(h, rt_hchunk(h, p));
+    h_pos[h] = p;
 }
 
 int rt_islist(char *v) {
-    char *lo;
+    int k;
     if (v[0] != 2) return 0;
-    lo = &arena[list_pos];
-    return (v == &list_nil[0] || (v >= lo && v < lo + (4194304 - list_pos))) ? 1 : 0;
+    if (v == &list_nil[0]) return 1;
+    k = 0;
+    while (k < h_nch[1]) {
+        if (v >= h_chunk[64 + k] && v < h_chunk[64 + k] + h_ccap[64 + k]) return 1;
+        k = k + 1;
+    }
+    return 0;
+}
+
+/* The virtual position of string v, or -1 for one in no live string chunk (a
+ * literal, a static). */
+long rt_vpos(char *v) {
+    int k = 0;
+    while (k <= h_ci[0] && k < h_nch[0]) {
+        if (v >= h_chunk[k] && v < h_chunk[k] + h_ccap[k]) return h_cvs[k] + (v - h_chunk[k]);
+        k = k + 1;
+    }
+    return -1;
+}
+
+/* Where a string release to mark m lands: m, or the floor above it. */
+long rt_alo(long m) {
+    return m > a_floor ? m : a_floor;
+}
+
+/* The release forgets rt_finlist's list: that is known by its address, which
+ * may now be handed out again. */
+int rt_release(long m, long lm) {
+    rt_hset(0, rt_alo(m));
+    rt_hset(1, lm);
+    fin_last = 0;
+    return 0;
+}
+
+/* Every string allocated so far may be reachable from a long-lived store. */
+int rt_pin(void) {
+    a_floor = h_pos[0];
+    return 0;
+}
+
+/* A scalar assignment's value v, with everything allocated since mark (m, lm)
+ * given back. A v below where the release lands (older, a literal, or stored
+ * by the expansion itself) stays put, and so does a list. A v above it that is
+ * shorter than the garbage below it moves down - to the release point, or to
+ * the start of the first later chunk with room, at the latest its own - so
+ * the copy frees at least what it costs; a longer v stays, and with it
+ * everything allocated so far. strlen and memmove are libc: the IR
+ * interpreter runs them as one step each (abnf/llvmmap.go, libcExterns). */
+char *rt_keep(long m, long lm, char *v) {
+    long lo = rt_alo(m);
+    long vp;
+    long n;
+    int k;
+    if (rt_islist(v) != 0) {
+        rt_hset(0, lo);
+        return v;
+    }
+    rt_hset(1, lm);
+    fin_last = 0;
+    vp = rt_vpos(v);
+    if (vp < lo) {
+        rt_hset(0, lo);
+        return v;
+    }
+    n = (long)strlen(v);
+    if (n >= vp - lo) return v;
+    k = rt_hchunk(0, lo);
+    while (lo + n + 1 > h_cvs[k] + h_ccap[k]) {
+        k = k + 1;
+        lo = h_cvs[k];
+    }
+    v = (char *)memmove(h_chunk[k] + (lo - h_cvs[k]), v, (unsigned long)(n + 1));
+    rt_hset(0, lo + n + 1);
+    return v;
 }
 
 /* The list a followed by the raw bytes b (more fields, already encoded). */
@@ -393,11 +553,13 @@ char *rt_lcat(char *a, char *b) {
     return dst;
 }
 
-/* The same, 8-byte aligned, for a block of pointers. */
+/* The same, 8-byte aligned, for a block of pointers. A chunk starts aligned,
+ * and the block starts n + 7 bytes below h_pos in the current chunk. */
 char *rt_bump8(int n) {
-    int pad = (8 - arena_pos % 8) % 8;
-    rt_bump(pad);
-    return rt_bump(n);
+    long q;
+    rt_bump(n + 7);
+    q = h_pos[0] - n - 7;
+    return (char *)(h_adj[0] + q + (8 - (q - h_cv[0]) % 8) % 8);
 }
 
 /* i32 rt_strlen(i8* s) */
@@ -1606,7 +1768,7 @@ int rt_eg(char *egp, char *egs, int egstar)
     int any;
     char *pre;
     char *alt;
-    int mark = arena_pos;
+    long mark = h_pos[0];
 
     kind = egstar != 0 ? 42 : (int)(unsigned char)egp[0];
     open = egp + 1;
@@ -1627,14 +1789,14 @@ int rt_eg(char *egp, char *egs, int egstar)
                 if ((int)(unsigned char)open[aend] == 41) break;
                 a = aend + 1;
             }
-            if (any == 0 && rt_glob(rest, egs + k) != 0) { arena_pos = mark; return 1; }
+            if (any == 0 && rt_glob(rest, egs + k) != 0) { rt_hset(0, mark); return 1; }
             k = k + (k < slen ? rt_cpw(egs + k) : 1);
         }
-        arena_pos = mark;
+        rt_hset(0, mark);
         return 0;
     }
 
-    if ((kind == 63 || kind == 42) && rt_glob(rest, egs) != 0) { arena_pos = mark; return 1; }
+    if ((kind == 63 || kind == 42) && rt_glob(rest, egs) != 0) { rt_hset(0, mark); return 1; }
     a = 1;
     while (a <= clo) {
         aend = rt_egalt(open, a);
@@ -1642,15 +1804,15 @@ int rt_eg(char *egp, char *egs, int egstar)
         k = 0;
         while (k <= slen) {
             if (rt_egone(alt, rt_substr(egs, 0, k)) != 0) {
-                if (rt_glob(rest, egs + k) != 0) { arena_pos = mark; return 1; }
-                if ((kind == 42 || kind == 43) && k > 0 && rt_eg(egp, egs + k, 1) != 0) { arena_pos = mark; return 1; }
+                if (rt_glob(rest, egs + k) != 0) { rt_hset(0, mark); return 1; }
+                if ((kind == 42 || kind == 43) && k > 0 && rt_eg(egp, egs + k, 1) != 0) { rt_hset(0, mark); return 1; }
             }
             k = k + (k < slen ? rt_cpw(egs + k) : 1);
         }
         if ((int)(unsigned char)open[aend] == 41) break;
         a = aend + 1;
     }
-    arena_pos = mark;
+    rt_hset(0, mark);
     return 0;
 }
 
@@ -1713,9 +1875,9 @@ char *rt_slice(char *s, int i, int n)
  * to the arena afterwards: a search tries many candidates and keeps none. */
 int rt_globat(char *p, char *s, int i, int n)
 {
-    int mark = arena_pos;
+    long mark = h_pos[0];
     int r = rt_glob(p, rt_slice(s, i, n));
-    arena_pos = mark;
+    rt_hset(0, mark);
     return r;
 }
 
@@ -1878,7 +2040,7 @@ void rp_add(char *b, int n) {
 int rt_patany(char *p, char *s, int mode, int wide)
 {
     int n = rt_strlen(p);
-    int mark = arena_pos;
+    long mark = h_pos[0];
     int lead = (int)(unsigned char)p[0] == 42 && !(opt_extglob != 0 && (int)(unsigned char)p[1] == 40);
     int bs = 0;
     int r;
@@ -1890,7 +2052,7 @@ int rt_patany(char *p, char *s, int mode, int wide)
         if ((int)(unsigned char)p[n - 1] != 42 || bs % 2 == 1) np = rt_strcat(np, "*");
     }
     r = rt_glob(np, s);
-    arena_pos = mark;
+    rt_hset(0, mark);
     return r;
 }
 
@@ -3486,6 +3648,7 @@ int rt_arr_find(char *nm, char *k) {
 /* i32 rt_arr_set(i8* nm, i8* k, i8* v) */
 int rt_arr_set(char *nm, char *k, char *v) {
     int at = rt_arr_find(nm, k);
+    rt_pin();
     if (at >= 0) {
         arr_v[at] = v;
         return 0;
@@ -3518,6 +3681,7 @@ int rt_arr_iset(char *nm, char *k, char *v) {
         arith_err = 1;
         return 0;
     }
+    rt_pin();
     /* The array's rows are already in order, so one scan from the END finds the
      * row to update or the place to insert; appending in ascending order - the
      * common case - stops at the array's last row. */
@@ -3753,7 +3917,6 @@ long rt_arr_nextidx(char *nm) {
  * <a b><>). The list is a fresh copy and is known by its ADDRESS, the last one
  * made, which nothing else can hand on; rt_uqlist returns it untouched. Twin of
  * dfltWord's {fin} in bash-interpreter.abnf. */
-char *fin_last;
 char *rt_finlist(char *v) {
     if (rt_islist(v) != 0) fin_last = rt_lcat(v, empty);
     else fin_last = rt_fput(list_nil, v);
@@ -4671,6 +4834,7 @@ int rt_argpush(char *v) {
         }
         argv[t] = rt_getfield(v, i);
         argv_top = t + 1;
+        rt_pin();
         i = i + 1;
     }
     return 0;
@@ -4791,6 +4955,7 @@ int rt_putc(int c)
                     t = t + 1;
                 }
                 cap_buf[d - 1] = nb;
+                rt_pin();
                 cap_sz[d - 1] = nsz;
                 buf = nb;
             }
@@ -4822,6 +4987,7 @@ int rt_cap_begin(int u)
     if (cap_sz[d] == 0) {
         buf = rt_bump(8192);
         cap_buf[d] = buf;
+        rt_pin();
         cap_sz[d] = 8192;
     }
     cap_len[d] = 0;
@@ -4896,6 +5062,7 @@ int rt_ss_save(int u)
     if (ss_cap[d] < arr_n || ss_cap[d] == 0) {
         int cap = arr_n < 64 ? 64 : arr_n * 2;
         ss_blk[d] = (char **)rt_bump8((nvars + 3 * cap) * 8);
+        rt_pin();
         ss_cap[d] = cap;
     }
     blk = ss_blk[d];
@@ -5190,6 +5357,7 @@ int rt_setvar_byname(char *n, char *v)
 {
     int i = rt_varslot(n);
     if (i >= 0) gvars[i] = v;
+    rt_pin();
     return 0;
 }
 

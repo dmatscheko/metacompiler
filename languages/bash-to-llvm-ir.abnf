@@ -8,9 +8,9 @@ i8* into a runtime string world. break and continue are ordinary branches to the
 blocks - the loop being emitted knows both targets - so no control signal travels at run time.
 
 Bash has one data type, the string, so the module is linked with a string runtime written in C
-(languages/lib/bash-rt.c, compiled to the checked-in bash-rt.ll): rt_bump bump-allocates from a
-global arena, rt_strlen / rt_streq / rt_strcmp / rt_strcat / rt_substr operate on NUL-terminated
-i8*, rt_int2str / rt_str2int convert to and from i64 (bash's arithmetic is 64-bit), rt_glob / rt_class are the glob matcher
+(languages/lib/bash-rt.c, compiled to the checked-in bash-rt.ll): rt_bump bump-allocates from
+growing heap chunks (handed back at loop and line marks, rt_release), rt_strlen / rt_streq /
+rt_strcmp / rt_strcat / rt_substr operate on NUL-terminated i8*, rt_int2str / rt_str2int convert to and from i64 (bash's arithmetic is 64-bit), rt_glob / rt_class are the glob matcher
 behind case and [[ == ]], rt_strip / rt_replace / rt_case implement the ${v#p} ${v/p/r} ${v^^}
 family, rt_putc / rt_cap_begin / rt_cap_end give command substitution and pipelines their output
 capture, rt_read_line / rt_field / rt_splitifs back read and word splitting, rt_arr_* are the
@@ -24,7 +24,7 @@ ret unwinds back to it. Positional parameters live in a second global stack with
 count, so \"$@\" can expand to any number of words and shift and set -- are ordinary writes; a
 call pushes its field-expanded arguments and restores base, count and top afterwards, which is
 what makes recursion nest. And a word whose expansion can yield several fields is carried as an
-encoded FIELD LIST (0x02, each field followed by 0x01, in the arena region rt_islist knows), so \"$@\", \"${a[@]}\" and an
+encoded FIELD LIST (0x02, each field followed by 0x01, in the list chunks rt_islist knows), so \"$@\", \"${a[@]}\" and an
 unquoted expansion split on IFS all flow through the same one representation; a builtin with a
 fixed argument list flattens it with rt_wordjoin.
 
@@ -35,8 +35,9 @@ unset from empty and how set -u recognises an unbound read. eval and `trap ... E
 their argument with THIS grammar and emit it inline; a computed eval is lowered only for the
 assignment form NAME=VALUE, through a runtime name-to-slot dispatch.
 
-The program plus its runtime needs no extern but putchar/getchar (and, in a native build only,
-write and fflush for standard error), so -exe links it with nothing else.
+The program plus its runtime needs no extern but libc: putchar/getchar, malloc/free and
+strlen/memmove (and, in a native build only, write and fflush for standard error), so -exe links
+it with nothing else.
 
 The generated module is printed (this is the compiler output); it is valid LLVM IR and can be
 handed to clang. Passing -exe PATH to mec links it into a native executable with clang directly
@@ -1326,7 +1327,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // upper/lower-cases every later write to the name, including one made by `read` or a
     // `for` head, so the case call belongs on the store funnel. It costs nothing for a name
     // with no case attribute - the maps are compile-time and the call is simply not emitted.
-    function storeVar(b, name, v) { b.NewStore(attrCase(b, name, v), varPtr(b, name)) }
+    function storeVar(b, name, v) { b.NewStore(attrCase(b, name, v), varPtr(b, name)); heapPin(b) }
     // The one store that must NOT be transformed: the unset marker is an identity, and
     // rt_case would hand back a fresh string that no longer compares equal to it.
     function storeVarRaw(b, name, v) { b.NewStore(v, varPtr(b, name)) }
@@ -1373,6 +1374,33 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // $0 as the RUNTIME sees it. The emitter answers $0 from c.file directly, but
     // rt_getvar_byname has to answer `z=0; echo "${!z}"`, so main's entry block hands it over.
     var gScriptName = rtGlobal("script_name", i8ptr)
+
+    // The heap's bump positions and string floor (bash-rt.c, "RECLAIMING"). A mark is the
+    // two positions; rt_release goes back to the mark taken before a loop ahead of each next
+    // pass (before a C-style for's step, whose store would pin the pass's garbage) and at the
+    // loop's exit, and to the one taken before a top-level line at its end.
+    // A store that outlives the statement (heapPin) raises the floor so no release can reach
+    // what it holds.
+    var hPosTy = llvm.types.NewArray(2, i64)
+    var gHPos = rtGlobal("h_pos", hPosTy)
+    var gAFloor = rtGlobal("a_floor", i64)
+    function hPos(b, h) { return b.NewLoad(i64, b.NewGetElementPtr(hPosTy, gHPos, zero, llvm.constant.NewInt(i32, h))) }
+    function heapMark(b) { return {a: hPos(b, 0), l: hPos(b, 1)} }
+    // The call is skipped when it could change nothing: no string above the floor (a
+    // release never goes below it) and no list since the mark. Returns the block to go on in.
+    function heapRelease(b, mk) {
+        var any = b.NewOr(b.NewICmp(llvm.enum.IPredNE, hPos(b, 0), b.NewLoad(i64, gAFloor)),
+                          b.NewICmp(llvm.enum.IPredNE, hPos(b, 1), mk.l))
+        var rel = curF.NewBlock(""), done = curF.NewBlock("")
+        b.NewCondBr(any, rel, done)
+        rel.NewCall(rtRelease, [mk.a, mk.l])
+        rel.NewBr(done)
+        return done
+    }
+    function heapPin(b) { b.NewStore(hPos(b, 0), gAFloor) }
+    // A scalar assignment's value, moved down onto the statement's mark (rt_keep); mk is
+    // null when the value's expansion allocates nothing besides the value itself.
+    function heapKeep(b, mk, v) { return mk == null ? v : b.NewCall(rtKeep, [mk.a, mk.l, v]) }
 
     // ===================================================================================
     //  Emitter state.
@@ -1446,8 +1474,11 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     //  types. The BODIES are languages/lib/bash-rt.c.
     // ===================================================================================
 
-    // i8* rt_bump(i32 n): return &arena[pos]; pos += n.
+    // i8* rt_bump(i32 n): n fresh bytes of the string heap.
     var rtBump = rtDecl("rt_bump", true, [0])
+    // i32 rt_release(i64 m, i64 lm) / i8* rt_keep(i64 m, i64 lm, i8* v): see heapMark.
+    var rtRelease = rtDecl("rt_release", false, [3, 3])
+    var rtKeep = rtDecl("rt_keep", true, [3, 3, 1])
     // i32 rt_strlen(i8* s)
     var rtStrlen = rtDecl("rt_strlen", false, [1])
     // i32 rt_charlen(i8* s): the number of CHARACTERS in s, which is what bash's ${#s}
@@ -2197,10 +2228,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // f: an unquoted $* under a null IFS is a field list (starArg).
         if (name == "*") { return {f: true, fn: function(b) { return {b: b, v: starParams(b)} }, c: undefined} }
         var multi = (name == "@")
-        return {f: multi, fn: function(b) { return {b: b, v: varString(b, name)} }, c: undefined}
+        return {f: multi, lean: true, fn: function(b) { return {b: b, v: varString(b, name)} }, c: undefined}
     }
     function mkArith(intThunk) {
-        return {fn: function(b) { var r = intThunk(b); return {b: r.b, v: r.b.NewCall(rtInt2str, r.v)} }, c: undefined}
+        return {lean: true, fn: function(b) { var r = intThunk(b); return {b: r.b, v: r.b.NewCall(rtInt2str, r.v)} }, c: undefined}
     }
     // An arithmetic text that held an expansion: expand the word, then rt_arith reads it.
     function mkArDyn(w) { return function(b) { var r = evalWord(b, w); return {b: r.b, v: r.b.NewCall(rtArith, r.v)} } }
@@ -2892,7 +2923,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     // An expansion error in a value abandons the command before anything is stored:
     // `k=$(( 1/0 ))` leaves k as it was. Twin of runAssign in bash-interpreter.abnf.
-    function emitAssign(b, a, assoc0) {
+    function emitAssign(b, a, assoc0, mk) {
         // Associative-ness is a property of the NAME (declare -A), not of this statement.
         var assoc = assoc0 || hasOwn(assocArrays, "$" + a.name)
         var nm = gepStr(b, a.name)
@@ -2926,7 +2957,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             }
             if (a.op == "+=") { rv = b.NewAdd(b.NewCall(rtStr2int, loadVar(b, a.name)), rv) }
             b = emitAbortCheck(b)
-            storeVar(b, a.name, b.NewCall(rtInt2str, rv))
+            storeVar(b, a.name, heapKeep(b, mk, b.NewCall(rtInt2str, rv)))
             return b
         }
         if (a.op == "+=") {
@@ -2935,7 +2966,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             b.NewCondBr(isA, arrB, strB)
             arrB.NewCall(rtArrAppend, [nm, v])
             arrB.NewBr(mg)
-            storeVar(strB, a.name, strB.NewCall(rtStrcat, [loadVar(strB, a.name), v]))
+            storeVar(strB, a.name, heapKeep(strB, mk, strB.NewCall(rtStrcat, [loadVar(strB, a.name), v])))
             strB.NewBr(mg)
             return mg
         }
@@ -2945,7 +2976,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         b.NewCondBr(isA2, arrB2, strB2)
         arrB2.NewCall(rtArrSet, [nm, gepStr(arrB2, "0"), v])
         arrB2.NewBr(mg2)
-        storeVar(strB2, a.name, v)
+        storeVar(strB2, a.name, heapKeep(strB2, mk, v))
         strB2.NewBr(mg2)
         return mg2
     }
@@ -2962,9 +2993,16 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 if (items[i].a.valT != null && items[i].a.valT.s == true) { subs = true }
             } else { redirs.push(items[i]) }
         }
+        // The values worth an rt_keep: an expansion that may leave garbage besides its value.
+        var keep = false
+        for (i = 0; i < as.length; i++) {
+            var vt = as[i].valT
+            if (as[i].lit == null && as[i].idxT == null && vt != null && vt.c == undefined && vt.lean != true) { keep = true }
+        }
         return function(b) {
             var k
-            for (k = 0; k < as.length; k++) { b = emitAssign(b, as[k], false) }
+            var mk = keep ? heapMark(b) : null
+            for (k = 0; k < as.length; k++) { b = emitAssign(b, as[k], false, mk) }
             if (!subs) { storeStatusI(b, 0) }
             if (redirs.length > 0) { var sv = emitOpenRedirs(b, redirs); b = sv.b; emitCloseRedirs(b, sv) }
             return b
@@ -3057,7 +3095,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 if ((isArray && asgs[j] != null) || (localize && curFrame != null)) { b.NewCall(rtArrClear, gepStr(b, names[j])) }
                 if (isArray && asgs[j] == null) { b.NewCall(rtArrDmark, gepStr(b, names[j])) }
                 if (asgs[j] != null) {
-                    b = emitAssign(b, asgs[j], assoc)
+                    b = emitAssign(b, asgs[j], assoc, null)
                 }
                 else if (localize && !isArray) { storeVarRaw(b, names[j], unsetPtr(b)) }
                 if (asgs[j] == null && !isArray && kw != "export" && kw != "readonly") { b.NewCall(rtArrSmark, gepStr(b, names[j])) }
@@ -3160,7 +3198,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             else { ns.push(it); sp.push(it) }
         }
         var w = mkWord(ns)
-        return {s: w.s, f: w.f, c: w.c, fn: w.fn, spw: mkWord(sp)}
+        return {s: w.s, f: w.f, c: w.c, lean: w.lean, fn: w.fn, spw: mkWord(sp)}
     }
     // Evaluate ONE word to a single string: a word that can produce several fields is
     // flattened (space-joined), which is what every builtin with a fixed argument list wants.
@@ -3494,6 +3532,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 if (!isLast) {
                     b.NewStore(b.NewCall(rtCapEnd, zero), gStdin)
                     b.NewStore(zero, gStdinPos)
+                    heapPin(b)
                 }
                 var stv = b.NewLoad(i32, gStatus)
                 b.NewCall(rtArrSet, [psName, gepStr(b, numToStr(k)), i2s(b, stv)])
@@ -4640,10 +4679,11 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var tgt = null
             if (r.target != null) { var rr = evalWord(b, r.target); b = rr.b; tgt = rr }
             var fd = (r.iofd == "") ? "1" : r.iofd
-            if (r.rd == "<<") { b.NewStore(tgt.v, gStdin); b.NewStore(zero, gStdinPos) }
+            if (r.rd == "<<") { b.NewStore(tgt.v, gStdin); b.NewStore(zero, gStdinPos); heapPin(b) }
             else if (r.rd == "<<<") {
                 b.NewStore(b.NewCall(rtStrcat, [tgt.v, gepStr(b, "\n")]), gStdin)
                 b.NewStore(zero, gStdinPos)
+                heapPin(b)
             }
             else if (r.rd == "<") { b.NewStore(emptyPtr(b), gStdin); b.NewStore(zero, gStdinPos) }
             else if (r.rd == ">&" || r.rd == "<&") {
@@ -4774,16 +4814,18 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return function(b) {
             var head = curF.NewBlock(""), body = curF.NewBlock(""), exit = curF.NewBlock("")
             var lst = loopStatusSlot(b)
+            var mk = heapMark(b)
             b.NewBr(head)
-            var hb = emitCond(condT, head)
+            var hb = emitCond(condT, heapRelease(head, mk))
             hb.NewCondBr(hb.NewICmp(llvm.enum.IPredEQ, hb.NewLoad(i32, gStatus), zero), body, exit)
             loopStack.push({brk: exit, cont: head, lst: lst, rd: redirStack.length})
             var bb = bodyT(body)
             loopStack.pop()
             bb.NewStore(bb.NewLoad(i32, gStatus), lst)
             bb.NewBr(head)
-            storeStatus(exit, exit.NewLoad(i32, lst))
-            return exit
+            var xb = heapRelease(exit, mk)
+            storeStatus(xb, xb.NewLoad(i32, lst))
+            return xb
         }
     }
 
@@ -4792,16 +4834,18 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return function(b) {
             var head = curF.NewBlock(""), body = curF.NewBlock(""), ex = curF.NewBlock("")
             var lst = loopStatusSlot(b)
+            var mk = heapMark(b)
             b.NewBr(head)
-            var hb = emitCond(condT, head)
+            var hb = emitCond(condT, heapRelease(head, mk))
             hb.NewCondBr(hb.NewICmp(llvm.enum.IPredEQ, hb.NewLoad(i32, gStatus), zero), ex, body)
             loopStack.push({brk: ex, cont: head, lst: lst, rd: redirStack.length})
             var bb = bodyT(body)
             loopStack.pop()
             bb.NewStore(bb.NewLoad(i32, gStatus), lst)
             bb.NewBr(head)
-            storeStatus(ex, ex.NewLoad(i32, lst))
-            return ex
+            var xb = heapRelease(ex, mk)
+            storeStatus(xb, xb.NewLoad(i32, lst))
+            return xb
         }
     }
     // items = [initExpr, condExpr, stepExpr, bodyThunk]
@@ -4814,6 +4858,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             b = r0.b
             var head = curF.NewBlock(""), body = curF.NewBlock(""), step = curF.NewBlock(""), ex = curF.NewBlock("")
             var bad = curF.NewBlock("")
+            var mk = heapMark(b)
             b.NewCondBr(takeArithErr(b), bad, head)
             var rc = condT(head)
             var go = curF.NewBlock("")
@@ -4824,12 +4869,13 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             loopStack.pop()
             bb.NewStore(bb.NewLoad(i32, gStatus), lst)
             bb.NewBr(step)
-            var rs = stepT(step)
+            var rs = stepT(heapRelease(step, mk))
             rs.b.NewCondBr(takeArithErr(rs.b), bad, head)
             bad.NewStore(one, lst)
             bad.NewBr(ex)
-            storeStatus(ex, ex.NewLoad(i32, lst))
-            return ex
+            var xb = heapRelease(ex, mk)
+            storeStatus(xb, xb.NewLoad(i32, lst))
+            return xb
         }
     }
 
@@ -4848,6 +4894,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // words can each expand to any number of fields ("${a[@]}", "$@", an unquoted
             // expansion), so the iteration count is not known while emitting.
             var listP = slotOf(i8ptr)
+            var mk0 = heapMark(b)
             if (wordThunks == null) {
                 b.NewStore(b.NewCall(rtParams, [gepStr(b, " "), zero]), listP)
             } else {
@@ -4859,15 +4906,20 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     b.NewStore(b.NewCall(rtCatFields, [b.NewLoad(i8ptr, listP), r.v]), listP)
                 }
             }
+            // The list holds its own copy of every field, so the strings its words expanded
+            // through are garbage once it is built.
+            b.NewCall(rtRelease, [mk0.a, hPos(b, 1)])
             var ip = slotOf(i32)
             b.NewStore(zero, ip)
             var lst = loopStatusSlot(b)
             var head = curF.NewBlock(""), body = curF.NewBlock("")
             var step = curF.NewBlock(""), ex = curF.NewBlock("")
+            var mk = heapMark(b)
             b.NewBr(head)
-            var list = head.NewLoad(i8ptr, listP)
-            var i = head.NewLoad(i32, ip)
-            head.NewCondBr(head.NewICmp(llvm.enum.IPredSLT, i, head.NewCall(rtNFields, list)), body, ex)
+            var hd = heapRelease(head, mk)
+            var list = hd.NewLoad(i8ptr, listP)
+            var i = hd.NewLoad(i32, ip)
+            hd.NewCondBr(hd.NewICmp(llvm.enum.IPredSLT, i, hd.NewCall(rtNFields, list)), body, ex)
             storeVar(body, fname, body.NewCall(rtGetField, [list, i]))
             loopStack.push({brk: ex, cont: step, lst: lst, rd: redirStack.length})
             var bb = bodyT(body)
@@ -4876,8 +4928,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             bb.NewBr(step)
             step.NewStore(step.NewAdd(i, one), ip)
             step.NewBr(head)
-            storeStatus(ex, ex.NewLoad(i32, lst))
-            return ex
+            var xb = heapRelease(ex, mk)
+            storeStatus(xb, xb.NewLoad(i32, lst))
+            return xb
         }
     }
 
@@ -4960,6 +5013,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var stmts = lines[li]
             var lineExit = main.NewBlock(""), next = main.NewBlock("")
             curExit = lineExit
+            var mk = heapMark(b)
             for (i = 0; i < stmts.length; i++) { b = stmts[i](b); b = emitErrExitCheck(b) }
             b = emitAbortCheck(b)
             b.NewBr(next)
@@ -4969,7 +5023,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             softB.NewStore(zero, gExited)
             storeStatusI(softB, 1)
             softB.NewBr(next)
-            b = next
+            b = heapRelease(next, mk)
         }
         curExit = mainExit
         var progTraps = trapList

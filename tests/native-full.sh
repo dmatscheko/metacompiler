@@ -48,10 +48,12 @@
 #
 # Real-language rows join them: lua/bytes, because what lua's print writes for a
 # string that is not valid UTF-8 is visible only in the output bytes (php/bytes and
-# bash/bytes - the NUL bytes printf writes - likewise), and bash/stack, whose
-# failure is a native stack overflow. Their fixtures are the real toolchain's
-# output, not blessed ones of ours - except batch/nest (output captures nested
-# twelve deep), whose fixture is the interpreter half's, as there is no cmd.exe.
+# bash/bytes - the NUL bytes printf writes - likewise), bash/stack, whose
+# failure is a native stack overflow, and bash/heap, a run far past the IR
+# interpreter's step brake whose failure is running out of string heap. Their
+# fixtures are the real toolchain's output, not blessed ones of ours - except
+# batch/nest (output captures nested twelve deep), whose fixture is the
+# interpreter half's, as there is no cmd.exe.
 #
 # EXPECT_ROWS covers those by comparing what the binary actually produced
 # against a checked-in fixture, which is the only thing left when there is no
@@ -126,6 +128,7 @@ EXPECT_ROWS="brainfuck:features:tests/brainfuck-test-features.txt:tests/brainfuc
              calculator:features:tests/calculator-test-features.txt:exit-only
              calculator:compiler:tests/calculator-compiler-features.txt:exit-only
              bash:bytes:tests/bash-test-bytes.sh:tests/bash-bytes.expected
+             bash:heap:tests/bash-native-heap.sh:tests/bash-heap.expected
              bash:stack:tests/bash-native-stack.sh:tests/bash-stack.expected
              bash:stderr:tests/bash-native-stderr.sh:tests/bash-stderr.expected
              batch:nest:tests/batch-native-nest.cmd:tests/batch-nest.expected

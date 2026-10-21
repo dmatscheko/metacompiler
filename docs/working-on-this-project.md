@@ -663,6 +663,10 @@ n ≥ shortest, where the contracts coincide.
 It **never moves an object** (conservative roots forbid it), **never returns
 memory to the OS**, is stop-the-world, and **only `runtime.c` has one** —
 `bash-rt.c`, `batch-rt.c` and the C interpreter keep uncollected arenas.
+`bash-rt.c`'s grows in chunks and is handed back by mark and release: the
+emitted program releases at every loop iteration and top-level line, and every
+store that outlives the statement raises a floor no release goes below (the
+"RECLAIMING" comment there).
 
 - **Requiring exact payload addresses is unsound at `-O2`.** In `u_slice` the only
   surviving reference while `str_from_units` allocated was `u + b`, an interior

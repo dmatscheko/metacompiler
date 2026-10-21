@@ -2789,6 +2789,34 @@ s59() {
   check egs4 "$r" 000
 }
 
+# ===== SECTION 60: what a loop keeps while its scratch is reused =====
+# A compiled loop gives back what each pass allocated, and a scalar assignment moves its
+# value down over its own scratch. What a pass stores - a scalar, a copy of the loop
+# variable, an array element, a positional parameter, a capture - has to survive every
+# later pass. (The long run itself is tests/bash-native-heap.sh.) Every expected value
+# is bash 5.3's.
+s60() {
+  local w ws=(alpha beta gamma) prev="" cur="" al="" acc="" i r=""
+  local -a kept=()
+  for w in "${ws[@]}" "${ws[@]}"; do
+    prev=$cur
+    al=$w
+    cur=${w//a/A}
+    kept+=("${w:1:2}${#acc}")
+    acc+="${w%a}."
+    : "$w$w$w$w"
+  done
+  check hr1 "$prev $cur $al ${kept[*]} $acc" "betA gAmmA gamma lp0 et5 am9 lp14 et19 am23 alph.bet.gamm.alph.bet.gamm."
+  set --
+  i=0
+  while [ $i -lt 4 ]; do
+    set -- "$@" "${ws[i % 3]^^}$i"
+    i=$((i + 1))
+  done
+  r=$(for w in "$@"; do printf '%s,' "${w,,}"; : "$w$w$w"; done)
+  check hr2 "$# $* $r" "4 ALPHA0 BETA1 GAMMA2 ALPHA3 alpha0,beta1,gamma2,alpha3,"
+}
+
 s01   # SECTION-CALL 01
 s02   # SECTION-CALL 02
 s03   # SECTION-CALL 03
@@ -2848,5 +2876,6 @@ s56   # SECTION-CALL 56
 s57   # SECTION-CALL 57
 s58   # SECTION-CALL 58
 s59   # SECTION-CALL 59
+s60   # SECTION-CALL 60
 echo "full: $checks checks, $fails failures"
 exit $fails

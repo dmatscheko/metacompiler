@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# A long run: 160 extended-glob patterns against 11 subjects through all eight pattern
+# expansions, twelve times over - some ten megabytes of strings that nothing keeps,
+# while n, tot and line are stored on every pass. A compiled loop hands back what each
+# pass allocated, so the string heap stays small however long the run. Checked from
+# outside: tests/native-full.sh compares the native binary's stdout with
+# tests/bash-heap.expected (real bash 5.3's output). Native only, and named outside
+# tests/bash-test-* for that reason: the run is far past the IR interpreter's step brake.
+shopt -s extglob
+subs=('' a ab abc aab xab bbx abab cab xx 'a*b')
+pats=()
+for op in '@' '?' '*' '+' '!'; do
+  for x in a b ab x '?' '*' '[ab]' c; do
+    for y in a b ab x; do pats+=("$op($x|$y)"); done
+  done
+done
+n=0
+tot=0
+for ((r = 0; r < 12; r++)); do
+  for p in "${pats[@]}"; do
+    for s in "${subs[@]}"; do
+      line="[$s] ${s#$p} ${s##$p} ${s%$p} ${s%%$p} ${s/$p/X} ${s//$p/X} ${s/#$p/X} ${s/%$p/X}"
+      n=$((n + 1))
+      tot=$((tot + ${#line}))
+      (( n % 997 == 0 )) && echo "$n $p $line"
+    done
+  done
+done
+echo "lines $n chars $tot"

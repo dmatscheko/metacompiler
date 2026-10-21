@@ -1,0 +1,22 @@
+997 *([ab]|ab) [bbx] bbx x bbx bbx Xx XXx Xx bbxX
+1994 @(*|b) [ab] ab  ab  X X X X
+2991 +(x|x) [xx] x  x  X X X X
+3988 ?(ab|ab) [xab] xab xab xab x Xxab XxX Xxab xX
+4985 !(b|b) [a] a  a  X X X X
+5982 ?(c|x) [cab] cab ab cab cab Xab XXaXb Xab cabX
+6979 !([ab]|ab) [aab] aab  aab  X X X X
+7976 *(*|b) []     X X X X
+8973 @(x|x) [abab] abab abab abab abab abab abab abab abab
+9970 +(ab|ab) [abc] c c abc abc Xc Xc Xc abc
+10967 ?(b|a) [a*b] a*b *b a*b a* X*b XX*X X*b a*X
+11964 +(c|x) [bbx] bbx bbx bb bb bbX bbX bbx bbX
+12961 ?([ab]|ab) [ab] ab  ab  X X X X
+13958 !(*|a) [xx] xx xx xx xx xx xx xx xx
+14955 *(x|x) [xab] xab ab xab xab Xab XXaXb Xab xabX
+15952 @(ab|ab) [a] a a a a a a a a
+16949 +(b|a) [cab] cab cab ca c cX cX cab cX
+17946 @(c|x) [aab] aab aab aab aab aab aab aab aab
+18943 +([ab]|ab) []        
+19940 ?(*|a) [abab] abab  abab  X X X X
+20937 !(x|x) [abc] abc  abc  X X X X
+lines 21120 chars 571080
