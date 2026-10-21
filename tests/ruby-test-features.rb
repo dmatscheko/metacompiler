@@ -73,7 +73,8 @@ sname = "world"
 check("str-interp", "hello #{sname}!", "hello world!")
 check("str-interp-expr", "sum=#{2 + 3}", "sum=5")
 check("str-concat", "a" + "b", "ab")
-check("str-plus-num", "n=" + 5, "n=5")
+# String#+ takes a String (or a #to_str object) only: MRI raises a TypeError.
+check("str-plus-num", ("n=" + 5 rescue $!.message), "no implicit conversion of Integer into String")
 check("str-to-s", "n=" + 5.to_s, "n=5")
 check("str-length", "hello".length, 5)
 check("str-size", "hello".size, 5)
@@ -243,7 +244,7 @@ while bi < 9
   if bi == 2
     break
   end
-  bstr = bstr + bi
+  bstr = bstr + bi.to_s
   bi += 1
 end
 check("while-break", bstr, "01")
@@ -255,7 +256,7 @@ while ni < 4
   if ni % 2 == 0
     next
   end
-  nstr = nstr + ni
+  nstr = nstr + ni.to_s
 end
 check("while-next", nstr, "13")
 
@@ -267,7 +268,7 @@ while oi < 2
     if ii == 1
       break
     end
-    nres = nres + oi + ii
+    nres = nres + oi.to_s + ii.to_s
     ii += 1
   end
   oi += 1
@@ -626,7 +627,7 @@ begin
   raise "boom"
   exlog = exlog + "X"
 rescue => e
-  exlog = exlog + "b" + e
+  exlog = exlog + "b" + e.message
 ensure
   exlog = exlog + "c"
 end

@@ -1965,6 +1965,78 @@ def s95
   how = begin; f.call(0); rescue Exception => e; e.class.to_s; end
   check("sse2", how == "SystemStackError" && s95deep(100) == 100)
 end
+# ===== SECTION 96: the frame of an error the runtime raises; String#+ =====
+# An error a builtin method raises has MRI's first backtrace frame too: the
+# statement's line, in the builtin's own name ("prog.rb:5:in `/'"), and that is
+# also the prefix of the uncaught-exception line. NoMethodError / NameError are
+# reported in the calling method, an argument count at the callee's def line.
+# String#+ takes a String only, and an arithmetic operator a number only.
+# /usr/bin/ruby 2.6 settles every value; lines are pinned through __LINE__.
+def s96_at(e, line, frame)
+  bt = e.backtrace
+  return false if bt.nil?
+  bt[0].end_with?(":" + line.to_s + ":in `" + frame + "\'")
+end
+S96L = [__LINE__ + 1]
+def s96one(a); a; end
+class S96Str; def to_str; "S"; end; end
+def s96err
+  yield
+  nil
+rescue Exception => e
+  e
+end
+def s96ens(z)
+  begin
+    10 / z
+  ensure
+    z = 1
+  end
+end
+def s96
+  v = [0, "a", 1, nil, {}, 5]
+  ln = __LINE__ + 1
+  e = s96err { v[2] / v[0] }
+  check("rf01", e.is_a?(ZeroDivisionError) && s96_at(e, ln, "/"))
+  ln = __LINE__ + 1
+  e = s96err { v[4].fetch(:k) }
+  check("rf02", e.is_a?(KeyError) && s96_at(e, ln, "fetch"))
+  ln = __LINE__ + 1
+  e = s96err { Integer(v[1]) }
+  check("rf03", e.is_a?(ArgumentError) && s96_at(e, ln, "Integer"))
+  e = s96err { s96one(v[2], v[2]) }
+  check("rf04", e.is_a?(ArgumentError) && s96_at(e, S96L[0], "s96one"))
+  # Outside any block: MRI names a block's frame "block in s96".
+  e = nil
+  ln = __LINE__ + 1
+  begin; v[2].no_such_method; rescue NoMethodError => x; e = x; end
+  check("rf05", !e.nil? && s96_at(e, ln, "s96"))
+  ln = __LINE__ + 1
+  e = s96err { v[5].modulo(v[0]) }
+  check("rf06", s96_at(e, ln, "modulo"))
+  # An ensure clause the exception passes through does not move its site, and a
+  # rescued one raised again keeps the site it was first given.
+  ln = S96L[0] + 10
+  e = s96err { s96ens(v[0]) }
+  check("rf07", s96_at(e, ln, "/"))
+  ln = __LINE__ + 1
+  e = s96err { begin; [].fetch(v[5]); rescue IndexError => x; raise x; end }
+  check("rf08", e.is_a?(IndexError) && s96_at(e, ln, "fetch"))
+  # String#+ concatenates a String or a #to_str object and nothing else.
+  ln = __LINE__ + 1
+  e = s96err { v[1] + v[2] }
+  check("rf09", e.is_a?(TypeError) && e.message == "no implicit conversion of Integer into String" &&
+        s96_at(e, ln, "+"))
+  check("rf10", s96err { v[1] + v[3] }.message == "no implicit conversion of nil into String" &&
+        v[1] + S96Str.new == "aS")
+  # A number with a non-number is a TypeError naming the right side; a left side
+  # with no such operator is a NoMethodError.
+  e = s96err { v[2] + v[1] }
+  check("rf11", e.is_a?(TypeError) && e.message == "String can't be coerced into Integer")
+  check("rf12", s96err { v[2] * v[3] }.message == "nil can't be coerced into Integer")
+  e = s96err { v[3] + v[2] }
+  check("rf13", e.is_a?(NoMethodError) && e.message == "undefined method `+' for nil:NilClass")
+end
 
 # ===== END SECTIONS =====
 s01() # SECTION-CALL 01
@@ -3992,5 +4064,6 @@ s87() # SECTION-CALL 87
 s88() # SECTION-CALL 88
 s89() # SECTION-CALL 89
 s95() # SECTION-CALL 95
+s96() # SECTION-CALL 96
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

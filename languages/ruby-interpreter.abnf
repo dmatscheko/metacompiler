@@ -2419,6 +2419,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     var defRanges = []
     function defAt(items, end) {
         var fn = makeFun(items.slice(1))
+        fn.pos = items[0]
         defRanges.push({s: items[0], e: end, n: fn.name})
         return fn
     }
@@ -3211,8 +3212,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // Ruby FLOORS: `-7 / 2` is -4 and `-7 % 3` is 2, so the truncating pair the
     // magnitudes give is corrected by one whenever the remainder is non-zero and
     // does not already carry the DIVISOR's sign. Same body as idiv/imod, exactly.
-    function bigDivMod(a, b) {
-        if (bigIsZero(b)) { raiseErr("ZeroDivisionError", "divided by 0") }
+    function bigDivMod(a, b, frame) {
+        if (bigIsZero(b)) { raiseErr(frame, "ZeroDivisionError", "divided by 0") }
         var dm = magDivMod(a.limbs, b.limbs)
         var qs = (a.sign == b.sign) ? 1 : -1
         var q = bigOb(qs, dm.q)
@@ -3394,8 +3395,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (op == "+") { return {v: bigOut(bigAdd(a, b))} }
         if (op == "-") { return {v: bigOut(bigAdd(a, bigNeg(b)))} }
         if (op == "*") { return {v: bigOut(bigOb(a.sign * b.sign, magMul(a.limbs, b.limbs)))} }
-        if (op == "/") { return {v: bigOut(bigDivMod(a, b).q)} }
-        if (op == "%") { return {v: bigOut(bigDivMod(a, b).r)} }
+        if (op == "/") { return {v: bigOut(bigDivMod(a, b, op).q)} }
+        if (op == "%") { return {v: bigOut(bigDivMod(a, b, op).r)} }
         if (op == "**") {
             if (b.sign < 0 && !bigIsZero(b)) {
                 if (typeof r == "number" && r >= -4096) { return {v: ratPow(mkRat(l, 1), r)} }
@@ -3647,7 +3648,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // abnf/jsrt.go.
     function radixArg(v, negOK) {
         var b = trunc0(toF(v))
-        if (b == 1 || b > 36 || b < -36 || (b < 0 && !negOK)) { raiseErr("ArgumentError", "invalid radix " + b) }
+        if (b == 1 || b > 36 || b < -36 || (b < 0 && !negOK)) { raiseErr("", "ArgumentError", "invalid radix " + b) }
         return b
     }
     function kernelConv(name, argv) {
@@ -3663,7 +3664,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             var rp = asRat(v)
             if (argv.length < 2) { return mkRat(rp.n, rp.d) }
             var rq = asRat(argv[1])
-            if (numEq(rq.n, 0)) { raiseErr("ZeroDivisionError", "divided by 0") }
+            if (numEq(rq.n, 0)) { raiseErr(name, "ZeroDivisionError", "divided by 0") }
             return mkRat(numBin("*", rp.n, rq.d), numBin("*", rp.d, rq.n))
         }
         if (name == "Complex") {
@@ -3683,26 +3684,26 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (name == "Integer") {
             var base = 0
             if (argv.length > 1) {
-                if (typeof v != "string") { raiseErr("ArgumentError", "base specified for non string value") }
+                if (typeof v != "string") { raiseErr(name, "ArgumentError", "base specified for non string value") }
                 base = radixArg(argv[1], true)
             }
-            if (v === null || v === undefined) { raiseErr("TypeError", "can't convert nil into Integer") }
+            if (v === null || v === undefined) { raiseErr(name, "TypeError", "can't convert nil into Integer") }
             if (typeof v == "string") {
                 var ri = strToInum(v, base, true)
                 if (ri.ok) { return ri.v }
-                raiseErr("ArgumentError", "invalid value for Integer(): " + strInspect(v))
+                raiseErr(name, "ArgumentError", "invalid value for Integer(): " + strInspect(v))
             }
             // A Float converts as Float#to_i does.
             if (isFlo(v)) { floDomainGuard(v.f); return intFromF(trunc0(v.f)) }
             return v
         }
         if (name == "Float") {
-            if (v === null || v === undefined) { raiseErr("TypeError", "can't convert nil into Float") }
+            if (v === null || v === undefined) { raiseErr(name, "TypeError", "can't convert nil into Float") }
             if (typeof v == "string") {
                 var rf = anytype
                 rf = rbnStrToDbl(v, true)
                 if (rf !== null) { return mkFlo(rf) }
-                raiseErr("ArgumentError", "invalid value for Float(): " + strInspect(v))
+                raiseErr(name, "ArgumentError", "invalid value for Float(): " + strInspect(v))
             }
             return mkFlo(toF(v))
         }
@@ -4399,7 +4400,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // make a Rational (3.quo(2) is (3/2), 4.quo(2) is (2/1)).
     function realQuo(a, b) {
         if (isFlo(a) || isFlo(b)) { return numBin("/", a, b) }
-        if (numEq(b, 0)) { raiseErr("ZeroDivisionError", "divided by 0") }
+        if (numEq(b, 0)) { raiseErr("", "ZeroDivisionError", "divided by 0") }
         return numBin("/", asRat(a), b)
     }
     // |x| of a real, keeping its type (a Float -0.0 is 0.0).
@@ -4462,10 +4463,15 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // Integer division and modulo FLOOR in Ruby (-7 / 2 is -4, -7 % 3 is 2).
     // Raise a builtin Ruby exception FROM THE RUNTIME, so `1/0 rescue "d"' and
     // `begin; 1/0; rescue ZeroDivisionError; end' work: a plain fail() is an ENGINE
-    // abort that no rescue clause can see. Twins: rubyRaiseErr of abnf/jsrt.go and
-    // rbRaiseErr of lib/ruby-rt.metajs.
-    function raiseErr(clsName, msg) {
-        throw {__exc: true, v: mkExc(hostGlobals[clsName], msg)}
+    // abort that no rescue clause can see. frame is the builtin method that raised
+    // ("/", "fetch"), MRI's first backtrace frame, kept in the hidden __rframe slot
+    // for excSite; "" when it is not known, and then no site is printed. Twins:
+    // rubyRaiseErr of abnf/jsrt.go and rbRaiseErr of lib/ruby-rt.metajs.
+    function raiseErr(frame, clsName, msg) {
+        var e = anytype
+        e = mkExc(hostGlobals[clsName], msg)
+        if (frame != "") { e.__rframe = frame }
+        throw {__exc: true, v: e}
     }
     // Every route from a Float to an Integer - #to_i, #to_int, #truncate, #round,
     // #floor, #ceil, and the %d / %x / %o / %b directives, whose operand MRI
@@ -4473,11 +4479,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // the float's own #to_s as the message. Twins: rbFloDomain in
     // languages/lib/ruby-rt.metajs and rubyFloDomain in abnf/jsrtruby.go.
     function floDomainGuard(x) {
-        if (x !== x) { raiseErr("FloatDomainError", "NaN") }
-        if (x - x !== 0) { raiseErr("FloatDomainError", x > 0 ? "Infinity" : "-Infinity") }
+        if (x !== x) { raiseErr("", "FloatDomainError", "NaN") }
+        if (x - x !== 0) { raiseErr("", "FloatDomainError", x > 0 ? "Infinity" : "-Infinity") }
     }
-    function idiv(a, b) { if (b == 0) { raiseErr("ZeroDivisionError", "divided by 0") } return Math.floor(a / b) }
-    function imod(a, b) { if (b == 0) { raiseErr("ZeroDivisionError", "divided by 0") } return fmaSub(a, Math.floor(a / b), b) }
+    function idiv(a, b) { if (b == 0) { raiseErr("/", "ZeroDivisionError", "divided by 0") } return Math.floor(a / b) }
+    function imod(a, b) { if (b == 0) { raiseErr("%", "ZeroDivisionError", "divided by 0") } return fmaSub(a, Math.floor(a / b), b) }
     // A zero carrying x's sign. `x * 0` does NOT work in this dialect: the tag
     // engine keeps an integral value as an integer, so `-4 * 0` is the integer 0
     // and the sign is gone. Dividing a zero by -1 is a float division in every
@@ -4762,7 +4768,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // lib/ruby-rt.metajs.
     function ratPow(p, k) {
         if (numCmp(k, 0) >= 0) { return mkRat(numBin("**", p.n, k), numBin("**", p.d, k)) }
-        if (numEq(p.n, 0)) { raiseErr("ZeroDivisionError", "divided by 0") }
+        if (numEq(p.n, 0)) { raiseErr("**", "ZeroDivisionError", "divided by 0") }
         var nk = anytype
         nk = rneg(k)
         return mkRat(numBin("**", p.d, nk), numBin("**", p.n, nk))
@@ -4778,11 +4784,27 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (nd == 0) { return k }
         return intDigitOp(k, 0 - nd, mode)
     }
+    // An arithmetic operator whose operands are not both numbers, worded as MRI 2.6
+    // does: a number on the left is a TypeError naming the right side (`1 + nil' is
+    // "nil can't be coerced into Integer"), and a left side with no such operator -
+    // nil, true, a Symbol, a Hash - is a NoMethodError. An Array on the left, and an
+    // operator other than the six arithmetic ones, stays an engine abort. Twins:
+    // rubyNumOperandErr in abnf/jsrt.go, rbNumOperandErr in lib/ruby-rt.metajs.
+    function numOperandErr(op, l, r) {
+        if (op == "+" || op == "-" || op == "*" || op == "/" || op == "%" || op == "**") {
+            if (numRank(l) >= 0) {
+                var desc = isSym(r) ? rinspect(r) : fmtConvName(r)
+                raiseErr(op, "TypeError", desc + " can't be coerced into " + classOf(l).__name)
+            }
+            if (!Array.isArray(l)) { noMethod(l, op) }
+        }
+        fail("not a number in '" + op + "'")
+    }
     function numBin(op, l, r) {
         var rk = numRank(l)
         var rr = numRank(r)
+        if (rk < 0 || rr < 0) { numOperandErr(op, l, r) }
         if (rr > rk) { rk = rr }
-        if (rk < 0) { fail("not a number in '" + op + "'") }
         if (rk == 3) { return cpxBin(op, l, r) }
         if (rk == 1) {
             var p = asRat(l)
@@ -5062,6 +5084,20 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
         return numBin(op, l, r)
     }
+    // rbin for a builtin METHOD that answers through an operator (Integer#modulo
+    // through %): an error the operator raises is reported in the method's own
+    // frame, as MRI does - `5.modulo(0)' raises in `modulo', not `%'. Twins:
+    // rubyBinAs in abnf/jsrt.go, rbBinAs in lib/ruby-rt.metajs.
+    function binAs(name, op, l, r) {
+        try {
+            return rbin(op, l, r)
+        } catch (e) {
+            if (excIsUser(e) && e.v !== null && typeof e.v == "object" && typeof e.v.__rframe == "string" && e.v.__rframe != "") {
+                e.v.__rframe = name
+            }
+            throw e
+        }
+    }
     function makePow(items) {
         if (items.length == 1) { return items[0] }
         var lt = items[0]
@@ -5251,7 +5287,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // which answers #to_a and #each the same way.
         if (name == "step") {
             var by = Math.trunc(toF(args[0]))
-            if (by <= 0) { raiseErr("ArgumentError", "step can't be 0 or negative") }
+            if (by <= 0) { raiseErr(name, "ArgumentError", "step can't be 0 or negative") }
             var src = anytype
             src = rangeToA(t)
             var picked = []
@@ -5621,9 +5657,21 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     function radd(l, r) {
         if (isExcObj(l) && typeof lookupMethod(l.__class, "+") != "function") { return rstr(l) + rstr(r) }
         if (isUserObj(l)) { return mcall(l, "+", [r], null) }
-        if (typeof l == "string" || typeof r == "string") { return rstr(l) + rstr(r) }
+        if (typeof l == "string") { return l + strOperand(r) }
         if (Array.isArray(l) && Array.isArray(r)) { return l.concat(r) }
         return numBin("+", l, r)
+    }
+    // The right side of String#+: a String, or an object that converts implicitly
+    // through #to_str; anything else is MRI's TypeError (`"a" + 1' does not
+    // concatenate). Twins: rubyStrOperand in abnf/jsrt.go, rbStrOperand in
+    // lib/ruby-rt.metajs.
+    function strOperand(r) {
+        if (typeof r == "string") { return r }
+        var cv = anytype
+        cv = fmtUserConv(r, "to_str", "")
+        if (typeof cv == "string") { return cv }
+        raiseErr("+", "TypeError", "no implicit conversion of " + fmtConvName(r) + " into String")
+        return ""
     }
     // "ab" * 3, and the format operator "%d-%d" % [3, 4] (Kernel#format).
     function strRepeat(s, n) {
@@ -6213,11 +6261,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (typeof v == "string") {
             var ri = strToInum(v, 0, true)
             if (ri.ok) { return ri.v }
-            raiseErr("ArgumentError", "invalid value for Integer(): " + strInspect(v))
+            raiseErr("", "ArgumentError", "invalid value for Integer(): " + strInspect(v))
         }
         var uc = fmtUserConv(v, "to_int", "to_i")
         if (uc !== null && fmtIsNumV(uc)) { return uc }
-        raiseErr("TypeError", "can't convert " + fmtConvName(v) + " into Integer")
+        raiseErr("", "TypeError", "can't convert " + fmtConvName(v) + " into Integer")
         return 0
     }
     function fmtFloOperand(v) {
@@ -6226,11 +6274,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             var rf = anytype
             rf = rbnStrToDbl(v, true)
             if (rf !== null) { return rf }
-            raiseErr("ArgumentError", "invalid value for Float(): " + strInspect(v))
+            raiseErr("", "ArgumentError", "invalid value for Float(): " + strInspect(v))
         }
         var uf = fmtUserConv(v, "to_f", "")
         if (uf !== null && fmtIsNumV(uf)) { return toF(uf) }
-        raiseErr("TypeError", "can't convert " + fmtConvName(v) + " into Float")
+        raiseErr("", "TypeError", "can't convert " + fmtConvName(v) + " into Float")
         return 0
     }
     // %c's message is NOT the Integer one, and MRI writes it TWO ways: nil is
@@ -6242,9 +6290,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         var uc = fmtUserConv(v, "to_int", "to_i")
         if (uc !== null && fmtIsNumV(uc)) { return toF(uc) }
         if (v === null || v === undefined) {
-            raiseErr("TypeError", "no implicit conversion from nil to integer")
+            raiseErr("", "TypeError", "no implicit conversion from nil to integer")
         }
-        raiseErr("TypeError", "no implicit conversion of " + fmtConvName(v) + " into Integer")
+        raiseErr("", "TypeError", "no implicit conversion of " + fmtConvName(v) + " into Integer")
         return 0
     }
     // MRI prints "Inf", "-Inf" and "NaN" for a non-finite float under every float
@@ -6433,7 +6481,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             // A String operand must be EXACTLY one character; MRI raises otherwise, and
             // the message is its own.
             if (typeof v == "string") {
-                if (charCount(v) != 1) { raiseErr("ArgumentError", "%c requires a character") }
+                if (charCount(v) != 1) { raiseErr("", "ArgumentError", "%c requires a character") }
                 body = v
             }
             else { body = charFromCode(Math.trunc(fmtCharOperand(v))) }
@@ -6495,7 +6543,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // rbFmtTooFew in languages/lib/ruby-rt.metajs and rubyFmtTooFew in
     // abnf/jsrtruby.go are the twins.
     function fmtTooFew() {
-        raiseErr("ArgumentError", "too few arguments")
+        raiseErr("", "ArgumentError", "too few arguments")
     }
     function fmtHashArg(args) {
         if (args.length == 1 && isDict(args[0])) { return args[0] }
@@ -6503,7 +6551,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     }
     function fmtNamed(args, name, open, close) {
         var h = fmtHashArg(args)
-        if (h === null) { raiseErr("ArgumentError", "one hash required") }
+        if (h === null) { raiseErr("", "ArgumentError", "one hash required") }
         // A SCAN and not dictFind: the key is the Symbol :name, and building one
         // here would depend on symTable's interning agreeing with whatever built
         // the hash. A String key does NOT match - MRI's "%{x}" % {"x" => 1} is a
@@ -6511,7 +6559,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         for (var i = 0; i < h.keys.length; i++) {
             if (isSym(h.keys[i]) && h.keys[i].s == name) { return h.vals[i] }
         }
-        raiseErr("KeyError", "key" + open + name + close + " not found")
+        raiseErr("", "KeyError", "key" + open + name + close + " not found")
         return null
     }
     // The value a `*` reads: the next positional argument, or the explicit one of
@@ -6565,9 +6613,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         var cc = c.charCodeAt(0)
         // % as the conversion of a non-empty head ("%5%"), and a newline or a NUL
         // that is NOT directly after the % ("%5\n"), are MRI's one message.
-        if (c == "%" || cc == 10 || cc == 0) { raiseErr("ArgumentError", "invalid format character - %") }
-        if (cc >= 32 && cc < 127) { raiseErr("ArgumentError", "malformed format string - %" + c) }
-        raiseErr("ArgumentError", "malformed format string")
+        if (c == "%" || cc == 10 || cc == 0) { raiseErr("", "ArgumentError", "invalid format character - %") }
+        if (cc >= 32 && cc < 127) { raiseErr("", "ArgumentError", "malformed format string - %" + c) }
+        raiseErr("", "ArgumentError", "malformed format string")
     }
     function rformat(fmt, arg) {
         var args = Array.isArray(arg) ? arg : [arg]
@@ -6579,7 +6627,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (ch != "%") { out += ch; i = i + 1; continue }
             // A MALFORMED directive is an ArgumentError in MRI; see isFmtConv above
             // for the messages.
-            if (i + 1 >= fmt.length) { raiseErr("ArgumentError", "incomplete format specifier; use %% (double %) instead") }
+            if (i + 1 >= fmt.length) { raiseErr("", "ArgumentError", "incomplete format specifier; use %% (double %) instead") }
             if (fmt.charAt(i + 1) == "%") { out += "%"; i = i + 2; continue }
             // A newline or a NUL DIRECTLY after the % is the one shape MRI writes
             // out instead of raising - "%\n" is "%\n" and "%\n%d" is "%\n5" - and
@@ -6628,7 +6676,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                     continue
                 }
                 if (c2 == ".") {
-                    if (prec >= 0) { raiseErr("ArgumentError", "precision given twice") }
+                    if (prec >= 0) { raiseErr("", "ArgumentError", "precision given twice") }
                     j = j + 1
                     tail = 2
                     if (j < fmt.length && fmt.charAt(j) == "*") {
@@ -6661,10 +6709,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             }
             var conv = "s"
             if (!brace) {
-                if (bad) { raiseErr("ArgumentError", "malformed name - unmatched parenthesis") }
+                if (bad) { raiseErr("", "ArgumentError", "malformed name - unmatched parenthesis") }
                 if (j >= fmt.length) {
-                    if (tail == 2) { raiseErr("ArgumentError", "malformed format string - %*[0-9]") }
-                    if (tail != 3) { raiseErr("ArgumentError", "invalid format character - %") }
+                    if (tail == 2) { raiseErr("", "ArgumentError", "malformed format string - %*[0-9]") }
+                    if (tail != 3) { raiseErr("", "ArgumentError", "invalid format character - %") }
                     // A selector or a <name> that ran off the end writes a bare "%"
                     // in MRI ("%1$" % 5 is "%"), but the name is still LOOKED UP -
                     // "%<x>" % 5 is *one hash required*.
@@ -7502,13 +7550,15 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         nameErr("NoMethodError", "undefined method `" + name + "' for " + noMethodDesc(r), name, r)
     }
     // A NameError / NoMethodError carrying MRI's #name and #receiver, in the hidden
-    // __nmname / __nmrecv slots. Twins: rubyNameErr in abnf/jsrt.go, rbNameErr in
-    // lib/ruby-rt.metajs.
+    // __nmname / __nmrecv slots. MRI reports both at the calling statement, in the
+    // calling method's own frame, which an empty __rframe asks excSite for. Twins:
+    // rubyNameErr in abnf/jsrt.go, rbNameErr in lib/ruby-rt.metajs.
     function nameErr(cls, msg, name, recv) {
         var e = anytype
         e = mkExc(hostGlobals[cls], msg)
         e.__nmname = mkSym(name)
         e.__nmrecv = recv
+        e.__rframe = ""
         throw {__exc: true, v: e}
     }
     // A Range, Hash or Enumerator answers most methods through an Array of its
@@ -7674,20 +7724,20 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (name == "zero?") { return bigIsZero(t) }
         if (name == "positive?") { return !bigIsZero(t) && t.sign > 0 }
         if (name == "negative?") { return t.sign < 0 }
-        if (name == "even?") { return bigIsZero(bigDivMod(t, bigFromNum(2)).r) }
-        if (name == "odd?") { return !bigIsZero(bigDivMod(t, bigFromNum(2)).r) }
+        if (name == "even?") { return bigIsZero(bigDivMod(t, bigFromNum(2), name).r) }
+        if (name == "odd?") { return !bigIsZero(bigDivMod(t, bigFromNum(2), name).r) }
         if (name == "succ" || name == "next") { return numBin("+", t, 1) }
         if (name == "pred") { return numBin("-", t, 1) }
         if (name == "integer?") { return true }
         if (name == "divmod") {
             var db = bigOf(args[0])
             if (db != null) {
-                var dm = bigDivMod(t, db)
+                var dm = bigDivMod(t, db, name)
                 return [bigOut(dm.q), bigOut(dm.r)]
             }
         }
         if (name == "fdiv") { return mkFlo(intFdiv(t, args[0])) }
-        if (name == "pow" && args.length < 2) { return rbin("**", t, args[0]) }
+        if (name == "pow" && args.length < 2) { return binAs(name, "**", t, args[0]) }
         return numberMethod(t, name, args, blk)
     }
     // ----- Numeric#div / #divmod / #modulo / #rationalize -----
@@ -7695,12 +7745,12 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // Float is involved it is MRI's flodivmod. Twins: rubyNumDivOp in abnf/jsrt.go and rbNumDivOp in lib/ruby-rt.metajs.
     function numDivOp(t, name, args) {
         if (name == "rationalize") { return numRationalize(t, args) }
-        if (name == "modulo") { return rbin("%", t, args[0]) }
+        if (name == "modulo") { return binAs(name, "%", t, args[0]) }
         var y = args[0]
         if (isFlo(t) || isFlo(y)) {
             if (name == "divmod") { return floDivmod(toF(t), toF(y)) }
         }
-        if (toF(y) == 0) { raiseErr("ZeroDivisionError", "divided by 0") }
+        if (toF(y) == 0) { raiseErr(name, "ZeroDivisionError", "divided by 0") }
         var q = anytype
         q = rbin("/", t, y)
         if (isFlo(q)) { floDomainGuard(q.f); q = intFromF(Math.floor(q.f)) }
@@ -7712,7 +7762,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // takes the divisor's sign.
     function floDivmod(x, y) {
         if (y !== y) { floDomainGuard(y) }
-        if (y == 0) { raiseErr("ZeroDivisionError", "divided by 0") }
+        if (y == 0) { raiseErr("divmod", "ZeroDivisionError", "divided by 0") }
         var xInf = x === x && x - x !== 0
         var yInf = y - y !== 0
         var mod = x
@@ -7873,7 +7923,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (name == "to_f") { into = "Float" }
         if (name == "to_r" || name == "rationalize") { into = "Rational" }
         if (into != "") {
-            if (!cpxExactReal(t)) { raiseErr("RangeError", "can't convert " + rstr(t) + " into " + into) }
+            if (!cpxExactReal(t)) { raiseErr(name, "RangeError", "can't convert " + rstr(t) + " into " + into) }
             return mcall(t.re, name, [], null)
         }
         return undefined
@@ -7993,7 +8043,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (name == "quo") {
             var qy = args[0]
             if (isFlo(t) || isFlo(qy)) { return numBin("/", mkFlo(toF(t)), qy) }
-            if (numEq(qy, 0)) { raiseErr("ZeroDivisionError", "divided by 0") }
+            if (numEq(qy, 0)) { raiseErr(name, "ZeroDivisionError", "divided by 0") }
             return numBin("/", asRat(t), asRat(qy))
         }
         // #remainder truncates where #modulo floors: the modulo, moved by one divisor
@@ -8016,7 +8066,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (name == "ord") { return t }
         if (name == "gcd" || name == "lcm" || name == "gcdlcm") {
             var gy = args[0]
-            if (typeof gy != "number" && !isBig(gy)) { raiseErr("TypeError", "not an integer") }
+            if (typeof gy != "number" && !isBig(gy)) { raiseErr(name, "TypeError", "not an integer") }
             var g = anytype
             g = numGcd(t, gy)
             if (name == "gcd") { return g }
@@ -8037,9 +8087,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (name == "digits") {
             var db = anytype
             db = args.length > 0 ? args[0] : 10
-            if (numCmp(db, 0) < 0) { raiseErr("ArgumentError", "negative radix") }
-            if (numCmp(db, 2) < 0) { raiseErr("ArgumentError", "invalid radix " + intText(db)) }
-            if (numCmp(t, 0) < 0) { raiseErr("Math::DomainError", "out of domain") }
+            if (numCmp(db, 0) < 0) { raiseErr(name, "ArgumentError", "negative radix") }
+            if (numCmp(db, 2) < 0) { raiseErr(name, "ArgumentError", "invalid radix " + intText(db)) }
+            if (numCmp(t, 0) < 0) { raiseErr(name, "Math::DomainError", "out of domain") }
             var dv = anytype
             dv = t
             var ds = [numBin("%", dv, db)]
@@ -8057,12 +8107,13 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             var pm = anytype
             pe = args[0]
             pm = args[1]
-            if (!(typeof pe == "number" || isBig(pe))) { raiseErr("TypeError", "Integer#pow() 2nd argument not allowed unless a 1st argument is integer") }
-            if (!(typeof pm == "number" || isBig(pm))) { raiseErr("TypeError", "Integer#pow() 2nd argument not allowed unless all arguments are integers") }
-            if (numCmp(pe, 0) < 0) { raiseErr("RangeError", "Integer#pow() 1st argument cannot be negative when 2nd argument specified") }
+            if (!(typeof pe == "number" || isBig(pe))) { raiseErr(name, "TypeError", "Integer#pow() 2nd argument not allowed unless a 1st argument is integer") }
+            if (!(typeof pm == "number" || isBig(pm))) { raiseErr(name, "TypeError", "Integer#pow() 2nd argument not allowed unless all arguments are integers") }
+            if (numCmp(pe, 0) < 0) { raiseErr(name, "RangeError", "Integer#pow() 1st argument cannot be negative when 2nd argument specified") }
             // MRI 2.6 answers a zero exponent with 1, reduced only by a NEGATIVE
             // modulus: 5.pow(0, 1) is 1 and 5.pow(0, -7) is -6.
             if (numEq(pe, 0)) { return numCmp(pm, 0) > 0 ? 1 : numBin("+", 1, pm) }
+            if (numEq(pm, 0)) { raiseErr(name, "ZeroDivisionError", "divided by 0") }
             var pr = anytype
             var pb = anytype
             pr = 1
@@ -8218,7 +8269,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (name == "method" && !isUserObj(target) && !isClassObj(target) && typeof target != "function") {
             var bmn = rstr(args[0])
             var bcn = classOf(target).__name
-            if (!rbResponds(bcn, bmn)) { raiseErr("NameError", "undefined method `" + bmn + "' for class `" + bcn + "'") }
+            if (!rbResponds(bcn, bmn)) { raiseErr(name, "NameError", "undefined method `" + bmn + "' for class `" + bcn + "'") }
             var brecv = anytype
             brecv = target
             return markMethodVal(function() { return mcall(brecv, bmn, argsArray(arguments), null) }, bcn, bmn)
@@ -8330,7 +8381,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (name == "integer?") { return true }
             // Integer#chr: one byte, so 0..255; anything else is a RangeError.
             if (name == "chr") {
-                if (target < 0 || target > 255) { raiseErr("RangeError", intStr(target) + " out of char range") }
+                if (target < 0 || target > 255) { raiseErr(name, "RangeError", intStr(target) + " out of char range") }
                 return String.fromCharCode(target)
             }
             // Integer is a real number with denominator 1, always finite.
@@ -8342,7 +8393,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (name == "infinite?") { return null }
             if (name == "div" || name == "divmod" || name == "modulo" || name == "rationalize") { return numDivOp(target, name, args) }
             if (name == "fdiv") { return mkFlo(intFdiv(target, args[0])) }
-            if (name == "pow" && args.length < 2) { return rbin("**", target, args[0]) }
+            if (name == "pow" && args.length < 2) { return binAs(name, "**", target, args[0]) }
             // Without a block, times / upto / downto answer an Enumerator over the
             // numbers they would yield.
             if (name == "times" || name == "upto" || name == "downto") {
@@ -8462,7 +8513,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 if (fi >= 0) { return target.vals[fi] }
                 if (args.length > 1) { return args[1] }
                 if (blk != null) { return blockCall(blk, [args[0]]) }
-                raiseErr("KeyError", "key not found: " + rinspect(args[0]))
+                raiseErr(name, "KeyError", "key not found: " + rinspect(args[0]))
             }
             // ----- the Hash-specific half of the Enumerable surface -----
             // merge / dup / clone CARRY THE RECEIVER'S DEFAULT over, which is what
@@ -9628,7 +9679,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (fj >= 0 && fj < t.length) { return t[fj] }
             if (args.length > 1) { return args[1] }
             if (blk != null) { return blockCall(blk, [args[0]]) }
-            raiseErr("IndexError", "index " + fx + " outside of array bounds: " + (0 - t.length) + "..." + t.length)
+            raiseErr(name, "IndexError", "index " + fx + " outside of array bounds: " + (0 - t.length) + "..." + t.length)
         }
         noMethod(t, name)
     }
@@ -9911,8 +9962,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (posParams[i].splat === true) { star = true }
             else if (posParams[i].defT == undefined) { req = req + 1 }
         }
-        if (npos < req) { argCountErr(npos, posParams) }
-        if (!star && npos > posParams.length) { argCountErr(npos, posParams) }
+        if (npos < req) { argCountErr(npos, posParams, false) }
+        if (!star && npos > posParams.length) { argCountErr(npos, posParams, false) }
     }
     // Kernel#lambda's block, made local-returning: the block itself still throws the
     // __blkret signal makeBlock builds, and this is the frame that stops it.
@@ -9949,9 +10000,13 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 var saved = scopes
                 scopes = captured.slice(0)
                 scopes.push({})
-                bindParams(params, args)
-                var r = anytype
+                // MRI names a lambda's frame "block in ...", which this model does
+                // not, so an argument count raised here carries no site.
                 var site = rbSitePos
+                rbSitePos = -1
+                bindParams(params, args)
+                rbSitePos = site
+                var r = anytype
                 try {
                     r = bodyT()
                 } catch (e) {
@@ -10493,6 +10548,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             body()
         } catch (e) {
             if (excIsUser(e)) {
+                excSite(e.v)
                 eprintln(excTopLine(e.v))
                 exit(1)
             }
@@ -10588,8 +10644,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // MRI's own wording, and the three shapes it writes the expectation in:
     // `expected 1` for a fixed list, `expected 1..2` when optionals follow, and
     // `expected 1+` when a *splat does. Mirrors rbArgCountErr of lib/ruby-rt.metajs
-    // and rubyArgCountErr of abnf/jsrt.go.
-    function argCountErr(given, posParams) {
+    // and rubyArgCountErr of abnf/jsrt.go. own marks a check made while the
+    // callee's def is the running site, which excSite may then print; Kernel#lambda
+    // checks at the caller's statement and passes false.
+    function argCountErr(given, posParams, own) {
         var req = 0
         var opt = 0
         var star = false
@@ -10601,8 +10659,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         var want = "" + req
         if (star) { want = want + "+" }
         else if (opt > 0) { want = want + ".." + (req + opt) }
-        throw {__exc: true, v: mkExc(hostGlobals["ArgumentError"],
-                                     "wrong number of arguments (given " + given + ", expected " + want + ")")}
+        var e = anytype
+        e = mkExc(hostGlobals["ArgumentError"], "wrong number of arguments (given " + given + ", expected " + want + ")")
+        if (own) { e.__rframe = "" }
+        throw {__exc: true, v: e}
     }
     function bindParams(params, args) {
         var i
@@ -10645,13 +10705,13 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // binds loosely and must not be checked. A CATCHABLE ArgumentError, not a
         // host abort - the class and the message are MRI's, and both compiled halves
         // raise the same ones (js_rposbind in lib/ruby-rt.metajs / abnf/jsrt.go).
-        if (npos < required) { argCountErr(npos, posParams) }
+        if (npos < required) { argCountErr(npos, posParams, true) }
         // TOO MANY IS AN ERROR TOO, and only a *splat lifts the ceiling
         // (`def one(a); end; one(1, 2)', `->(x) { }.call(1, 2)'). The two compiled
         // halves ask the same question in js_rposbind / js_rargchk.
         var hasStar = false
         for (i = 0; i < posParams.length; i++) { if (posParams[i].splat === true) { hasStar = true } }
-        if (!hasStar && npos > posParams.length) { argCountErr(npos, posParams) }
+        if (!hasStar && npos > posParams.length) { argCountErr(npos, posParams, true) }
         var spare = npos - required
         var ai = 0
         for (i = 0; i < posParams.length; i++) {
@@ -10741,13 +10801,18 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         declVar("$blk", currentBlock())
         declVar("$defclass", fn.owner)
         declVar("$mname", fn.name)
+        // The parameters are bound at the def's own line, which is where MRI reports
+        // an argument count or a default that raised; the caller's site is current
+        // again for the depth check below, as it is in the compiled half's js_call.
+        var site = rbSitePos
+        if (fn.pos !== undefined) { rbSitePos = fn.pos }
         bindParams(fn.params, args)
+        rbSitePos = site
         // A bare `super` forwards the current VALUES of the parameters (Ruby), not
         // the raw argument list - which is what makes `def initialize(msg = "d");
         // super; end` pass the default on.
         declVar("$sargs", currentParamValues(fn.params))
         var r = anytype
-        var site = rbSitePos
         var depth = coreDepth + 1
         coreDepth = depth
         // `return` inside a block returns from the enclosing METHOD, so the block's
@@ -11853,7 +11918,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (isDict(o)) { dictSet(o, k1, v); return o }
         if (typeof o == "string") {
             var sb = sliceBounds(o.length, k1, k2)
-            if (sb.s < 0 || sb.s > o.length) { raiseErr("IndexError", "index " + sb.s + " out of string") }
+            if (sb.s < 0 || sb.s > o.length) { raiseErr("[]=", "IndexError", "index " + sb.s + " out of string") }
             var ls = sb.l
             if (sb.s + ls > o.length) { ls = o.length - sb.s }
             return o.substring(0, sb.s) + rstr(v) + o.substring(sb.s + ls, o.length)
@@ -12029,6 +12094,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                     scopes = savedChain.slice()
                     coreDepth = savedDepth
                     if (!excIsUser(e)) { throw e }
+                    excSite(e.v)
                     var hit = null
                     for (var k = 0; k < clauses.length && hit == null; k++) {
                         if (rescueMatches(clauses[k], e.v)) { hit = clauses[k] }
@@ -12061,7 +12127,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                         box.v = elseT()
                     }
                     if (finallyT != undefined) {
+                        // An exception may still be on its way to its rescue, so
+                        // the ensure clause puts the site back for excSite there.
+                        var ensSite = rbSitePos
                         var fr = finallyT()
+                        rbSitePos = ensSite
                         // A return/break/next signal out of ensure must override the
                         // begin/rescue completion AND cancel a pending re-raise - only
                         // a return from the host finally block does both.
@@ -12104,6 +12174,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 scopes = savedChain.slice()
                 coreDepth = savedDepth
                 if (!excIsUser(e)) { throw e }
+                excSite(e.v)
                 var bang0 = anytype
                 bang0 = hasOwn(rubyGlobals, "!") ? rubyGlobals["!"] : null
                 scopePut(rubyGlobals, "!", e.v)
@@ -12158,6 +12229,19 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             rawSet(v, "__rwhere", raiseSite(pos))
         }
         return v
+    }
+    // An exception the RUNTIME raised gets its first backtrace frame where it is
+    // caught - a rescue clause or the top of the program - from rbSitePos, which is
+    // still the raising statement's there. __rframe names the builtin method that
+    // raised; an empty one keeps the site's own method. Twin of js_rsite in
+    // abnf/jsrt.go and lib/ruby-rt.metajs.
+    function excSite(v) {
+        if (rbSitePos < 0 || v === null || v === undefined || typeof v != "object") { return null }
+        if (typeof v.__rframe != "string" || hasOwn(v, "__rwhere")) { return null }
+        var site = siteAt(rbSitePos)
+        if (v.__rframe != "") { site = c.file + ":" + c.lineOf(rbSitePos) + ":in `" + v.__rframe + "'" }
+        rawSet(v, "__rwhere", site)
+        return null
     }
     // MRI's uncaught-exception line: "prog.rb:2:in `<main>': boom (RuntimeError)".
     // An exception raised by the RUNTIME rather than by a `raise' carries no site,
@@ -12431,7 +12515,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (name == "sqrt" || name == "log" || name == "log2" || name == "log10") { bad = x < 0 }
         else if (name == "asin" || name == "acos" || name == "atanh") { bad = x < -1 || x > 1 }
         else if (name == "acosh") { bad = x < 1 }
-        if (bad) { raiseErr("Math::DomainError", "Numerical argument is out of domain - \"" + name + "\"") }
+        if (bad) { raiseErr(name, "Math::DomainError", "Numerical argument is out of domain - \"" + name + "\"") }
         return x
     }
     // The exception hierarchy, enough of it that `rescue => e` (StandardError) and the

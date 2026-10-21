@@ -540,7 +540,7 @@ function rbABigStep(op, x, y) {
     if (op == "-") { return rtABigNarrow(rtABigSub(x, y)) }
     if (op == "*") { return rtABigNarrow(rtABigMul(x, y)) }
     if (op == "/" || op == "%") {
-        if (rtABigIsZero(y)) { rbRaiseErr("ZeroDivisionError", "divided by 0") }
+        if (rtABigIsZero(y)) { rbRaiseErr(op, "ZeroDivisionError", "divided by 0") }
         var dm = rbABigDivMod(x, y)
         if (op == "/") { return rtABigNarrow(dm["q"]) }
         return rtABigNarrow(dm["r"])
@@ -653,7 +653,7 @@ function rbABigMethod(t, name, args) {
     if (name == "divmod") {
         var d = rbABigOperand(rbArgAt(args, 0))
         if (d != null) {
-            if (rtABigIsZero(d)) { rbRaiseErr("ZeroDivisionError", "divided by 0") }
+            if (rtABigIsZero(d)) { rbRaiseErr(name, "ZeroDivisionError", "divided by 0") }
             var dm = rbABigDivMod(t, d)
             return [rtABigNarrow(dm["q"]), rtABigNarrow(dm["r"])]
         }
@@ -1163,7 +1163,7 @@ function rbCpxConj(c) { return rbMkCpx(c["re"], rbNeg(c["im"])) }
 // Numeric#quo on two reals. Twin of realQuo in ruby-interpreter.abnf.
 function rbRealQuo(a, b) {
     if (rbIsFlo(a) || rbIsFlo(b)) { return rbNumBin("/", a, b) }
-    if (rbEq(b, 0)) { rbRaiseErr("ZeroDivisionError", "divided by 0") }
+    if (rbEq(b, 0)) { rbRaiseErr("", "ZeroDivisionError", "divided by 0") }
     return rbNumBin("/", rbAsRat(a), b)
 }
 function rbRealAbs(v) {
@@ -1342,7 +1342,7 @@ function rbRatIntOpBig(n, d, mode) {
 // A Rational to an Integer power, exactly. Twin of ratPow in ruby-interpreter.abnf.
 function rbRatPow(p, k) {
     if (rbNumCmp(k, 0) >= 0) { return rbMkRat(rbNumBin("**", p["n"], k), rbNumBin("**", p["d"], k)) }
-    if (rbEq(p["n"], 0)) { rbRaiseErr("ZeroDivisionError", "divided by 0") }
+    if (rbEq(p["n"], 0)) { rbRaiseErr("**", "ZeroDivisionError", "divided by 0") }
     var nk = rbNeg(k)
     return rbMkRat(rbNumBin("**", p["d"], nk), rbNumBin("**", p["n"], nk))
 }
@@ -1362,12 +1362,12 @@ function rbRatDigitOp(v, mode, nd) {
 
 // Integer division and modulo FLOOR in Ruby (-7 / 2 is -4, -7 % 3 is 2).
 function rbIDiv(a, b) {
-    if (b == 0) { rbRaiseErr("ZeroDivisionError", "divided by 0") }
+    if (b == 0) { rbRaiseErr("/", "ZeroDivisionError", "divided by 0") }
     return Math.floor(a / b)
 }
 
 function rbIMod(a, b) {
-    if (b == 0) { rbRaiseErr("ZeroDivisionError", "divided by 0") }
+    if (b == 0) { rbRaiseErr("%", "ZeroDivisionError", "divided by 0") }
     return rbFmaSub(a, Math.floor(a / b), b)
 }
 
@@ -1380,7 +1380,7 @@ function rbNumBin(op, l, r) {
     var rr = 0
     if (typeof l != "number") { rk = rbNumRank(l) }
     if (typeof r != "number") { rr = rbNumRank(r) }
-    if (rk < 0 || rr < 0) { fail("not a number in '" + op + "'") }
+    if (rk < 0 || rr < 0) { rbNumOperandErr(op, l, r) }
     if (rr > rk) { rk = rr }
     if (rk == 3) { return rbCpxBin(op, l, r) }
     if (rk == 1) {
@@ -2342,11 +2342,11 @@ function rbFmtIntOperand(v) {
     if (typeof v == "string") {
         var ri = rbStrToInum(v, 0, true)
         if (ri["ok"]) { return ri["v"] }
-        rbRaiseErr("ArgumentError", "invalid value for Integer(): " + rbStrInspect(v))
+        rbRaiseErr("", "ArgumentError", "invalid value for Integer(): " + rbStrInspect(v))
     }
     var uc = rbFmtUserConv(v, "to_int", "to_i")
     if (uc !== null && rbFmtIsNumV(uc)) { return uc }
-    rbRaiseErr("TypeError", "can't convert " + rbFmtConvName(v) + " into Integer")
+    rbRaiseErr("", "TypeError", "can't convert " + rbFmtConvName(v) + " into Integer")
     return 0
 }
 function rbFmtFloOperand(v) {
@@ -2355,11 +2355,11 @@ function rbFmtFloOperand(v) {
         var rf = anytype
         rf = rbnStrToDbl(v, true)
         if (rf !== null) { return rf }
-        rbRaiseErr("ArgumentError", "invalid value for Float(): " + rbStrInspect(v))
+        rbRaiseErr("", "ArgumentError", "invalid value for Float(): " + rbStrInspect(v))
     }
     var uf = rbFmtUserConv(v, "to_f", "")
     if (uf !== null && rbFmtIsNumV(uf)) { return rbToF(uf) }
-    rbRaiseErr("TypeError", "can't convert " + rbFmtConvName(v) + " into Float")
+    rbRaiseErr("", "TypeError", "can't convert " + rbFmtConvName(v) + " into Float")
     return 0
 }
 // %c's message is NOT the Integer one, and MRI writes it TWO ways: nil is
@@ -2370,8 +2370,8 @@ function rbFmtCharOperand(v) {
     if (rbFmtIsNumV(v)) { return rbToF(v) }
     var uc = rbFmtUserConv(v, "to_int", "to_i")
     if (uc !== null && rbFmtIsNumV(uc)) { return rbToF(uc) }
-    if (rtIsNil(v)) { rbRaiseErr("TypeError", "no implicit conversion from nil to integer") }
-    rbRaiseErr("TypeError", "no implicit conversion of " + rbFmtConvName(v) + " into Integer")
+    if (rtIsNil(v)) { rbRaiseErr("", "TypeError", "no implicit conversion from nil to integer") }
+    rbRaiseErr("", "TypeError", "no implicit conversion of " + rbFmtConvName(v) + " into Integer")
     return 0
 }
 
@@ -2624,8 +2624,8 @@ function rbHexBody(fv, prec, alt, upper) {
 // own #to_s as the message. floDomainGuard in languages/ruby-interpreter.abnf and
 // rubyFloDomain in abnf/jsrtruby.go are the twins.
 function rbFloDomain(x) {
-    if (x !== x) { rbRaiseErr("FloatDomainError", "NaN") }
-    if (x - x !== 0) { rbRaiseErr("FloatDomainError", x > 0 ? "Infinity" : "-Infinity") }
+    if (x !== x) { rbRaiseErr("", "FloatDomainError", "NaN") }
+    if (x - x !== 0) { rbRaiseErr("", "FloatDomainError", x > 0 ? "Infinity" : "-Infinity") }
 }
 
 // ----- the ARGUMENT SELECTORS ----------------------------------------------
@@ -2648,7 +2648,7 @@ function rbFloDomain(x) {
 // abnf/jsrtruby.go is the other twin. NOT implemented: MRI's four
 // ArgumentErrors for MIXING the numbered, unnumbered and named styles.
 function rbFmtTooFew() {
-    rbRaiseErr("ArgumentError", "too few arguments")
+    rbRaiseErr("", "ArgumentError", "too few arguments")
 }
 
 function rbFmtHashArg(args) {
@@ -2658,7 +2658,7 @@ function rbFmtHashArg(args) {
 
 function rbFmtNamed(args, name, open, close) {
     var h = rbFmtHashArg(args)
-    if (h === null) { rbRaiseErr("ArgumentError", "one hash required") }
+    if (h === null) { rbRaiseErr("", "ArgumentError", "one hash required") }
     // A SCAN and not rbDictFind: the key is the Symbol :name and a String key does
     // NOT match - MRI's "%{x}" % {"x" => 1} is a KeyError.
     var keys = h["keys"]
@@ -2668,7 +2668,7 @@ function rbFmtNamed(args, name, open, close) {
         if (rbIsSym(keys[i]) && keys[i]["s"] == name) { return vals[i] }
         i = i + 1
     }
-    rbRaiseErr("KeyError", "key" + open + name + close + " not found")
+    rbRaiseErr("", "KeyError", "key" + open + name + close + " not found")
     return null
 }
 
@@ -2721,9 +2721,9 @@ function rbFmtCheckConv(c) {
     var cc = c.charCodeAt(0)
     // % as the conversion of a non-empty head ("%5%"), and a newline or a NUL that
     // is NOT directly after the % ("%5\n"), are MRI's one message.
-    if (c == "%" || cc == 10 || cc == 0) { rbRaiseErr("ArgumentError", "invalid format character - %") }
-    if (cc >= 32 && cc < 127) { rbRaiseErr("ArgumentError", "malformed format string - %" + c) }
-    rbRaiseErr("ArgumentError", "malformed format string")
+    if (c == "%" || cc == 10 || cc == 0) { rbRaiseErr("", "ArgumentError", "invalid format character - %") }
+    if (cc >= 32 && cc < 127) { rbRaiseErr("", "ArgumentError", "malformed format string - %" + c) }
+    rbRaiseErr("", "ArgumentError", "malformed format string")
 }
 
 function rbFormat(spec, arg) {
@@ -2741,7 +2741,7 @@ function rbFormat(spec, arg) {
         i = i + 1
         // A MALFORMED directive is an ArgumentError in MRI; rbFmtCheckConv
         // carries the table.
-        if (i >= spec.length) { rbRaiseErr("ArgumentError", "incomplete format specifier; use %% (double %) instead") }
+        if (i >= spec.length) { rbRaiseErr("", "ArgumentError", "incomplete format specifier; use %% (double %) instead") }
         if (spec.charAt(i) == "%") {
             out = out + "%"
             i = i + 1
@@ -2816,7 +2816,7 @@ function rbFormat(spec, arg) {
                 continue
             }
             if (fc == ".") {
-                if (prec >= 0) { rbRaiseErr("ArgumentError", "precision given twice") }
+                if (prec >= 0) { rbRaiseErr("", "ArgumentError", "precision given twice") }
                 i = i + 1
                 tail = 2
                 if (i < spec.length && spec.charAt(i) == "*") {
@@ -2859,10 +2859,10 @@ function rbFormat(spec, arg) {
         }
         var conv = "s"
         if (!brace) {
-            if (bad) { rbRaiseErr("ArgumentError", "malformed name - unmatched parenthesis") }
+            if (bad) { rbRaiseErr("", "ArgumentError", "malformed name - unmatched parenthesis") }
             if (i >= spec.length) {
-                if (tail == 2) { rbRaiseErr("ArgumentError", "malformed format string - %*[0-9]") }
-                if (tail != 3) { rbRaiseErr("ArgumentError", "invalid format character - %") }
+                if (tail == 2) { rbRaiseErr("", "ArgumentError", "malformed format string - %*[0-9]") }
+                if (tail != 3) { rbRaiseErr("", "ArgumentError", "invalid format character - %") }
                 // A selector or a <name> that ran off the end writes a bare "%" in
                 // MRI ("%1$" % 5 is "%"), but the name is still LOOKED UP -
                 // "%<x>" % 5 is *one hash required*.
@@ -2960,7 +2960,7 @@ function rbFormat(spec, arg) {
             // a numeric directive - "%05c" % 65 is "    A" - and MRI ignores a
             // precision on it outright ("%.0c" % 65 is "A").
             if (typeof nx == "string") {
-                if (rbCharCount(nx) != 1) { rbRaiseErr("ArgumentError", "%c requires a character") }
+                if (rbCharCount(nx) != 1) { rbRaiseErr("", "ArgumentError", "%c requires a character") }
                 body = nx
             }
             else { body = rbCharCode(Math.trunc(rbFmtCharOperand(nx))) }
@@ -3612,7 +3612,7 @@ function rbMathArg(name, x) {
     if (name == "sqrt" || name == "log" || name == "log2" || name == "log10") { bad = x < 0 }
     else if (name == "asin" || name == "acos" || name == "atanh") { bad = x < -1 || x > 1 }
     else if (name == "acosh") { bad = x < 1 }
-    if (bad) { rbRaiseErr("Math::DomainError", "Numerical argument is out of domain - \"" + name + "\"") }
+    if (bad) { rbRaiseErr(name, "Math::DomainError", "Numerical argument is out of domain - \"" + name + "\"") }
     return x
 }
 
@@ -4155,7 +4155,7 @@ function rbRangeMethod(t, name, args) {
     // Enumerator, which answers #to_a and #each the same way.
     if (name == "step") {
         var by = Math.trunc(rbToF(rbArgAt(args, 0)))
-        if (by <= 0) { rbRaiseErr("ArgumentError", "step can't be 0 or negative") }
+        if (by <= 0) { rbRaiseErr(name, "ArgumentError", "step can't be 0 or negative") }
         var src = rbRangeToArr(t)
         var picked = []
         var si = 0
@@ -4215,8 +4215,7 @@ function rbBin(op, l, r) {
         return rbMethod(l, op, [r])
     }
     if (op == "+") {
-        if (typeof l == "string") { return rbStr(l) + rbStr(r) }
-        if (typeof r == "string") { return rbStr(l) + rbStr(r) }
+        if (typeof l == "string") { return l + rbStrOperand(r) }
         if (rbIsArr(l) && rbIsArr(r)) {
             var out = rtCopyArr(l)
             var i = 0
@@ -4675,9 +4674,9 @@ function rbCall3(f, a, b, c) { return f.apply(undefined, [a, b, c]) }
 function rbNumDivOp(t, name, args) {
     var y = rbArgAt(args, 0)
     if (name == "rationalize") { return rbRationalize(t, args) }
-    if (name == "modulo") { return rbNumBin("%", t, y) }
+    if (name == "modulo") { return rbBinAs(name, "%", t, y) }
     if (name == "divmod" && (rbIsFlo(t) || rbIsFlo(y))) { return rbFloDivmod(rbToF(t), rbToF(y)) }
-    if (rbToF(y) == 0) { rbRaiseErr("ZeroDivisionError", "divided by 0") }
+    if (rbToF(y) == 0) { rbRaiseErr(name, "ZeroDivisionError", "divided by 0") }
     var q = anytype
     q = rbNumBin("/", t, y)
     if (rbIsFlo(q)) {
@@ -4694,7 +4693,7 @@ function rbNumDivOp(t, name, args) {
 // fmod carries and the tag engine drops.
 function rbFloDivmod(x, y) {
     if (y !== y) { rbFloDomain(y) }
-    if (y == 0) { rbRaiseErr("ZeroDivisionError", "divided by 0") }
+    if (y == 0) { rbRaiseErr("divmod", "ZeroDivisionError", "divided by 0") }
     var xInf = x === x && x - x !== 0
     var yInf = y - y !== 0
     var mod = x
@@ -4878,7 +4877,7 @@ function rbCpxMethod(t, name) {
     if (name == "to_f") { into = "Float" }
     if (name == "to_r" || name == "rationalize") { into = "Rational" }
     if (into != "") {
-        if (rbIsFlo(im) || !rbEq(im, 0)) { rbRaiseErr("RangeError", "can't convert " + rbStr(t) + " into " + into) }
+        if (rbIsFlo(im) || !rbEq(im, 0)) { rbRaiseErr(name, "RangeError", "can't convert " + rbStr(t) + " into " + into) }
         return rbMethod(re, name, [])
     }
     return undefined
@@ -4978,7 +4977,7 @@ function rbNumMethod(t, name, args) {
     if (name == "pred") { return rbNumBin("-", t, 1) }
     // Integer#chr: one byte, so 0..255; anything else is a RangeError.
     if (name == "chr") {
-        if (x < 0 || x > 255) { rbRaiseErr("RangeError", rbStr(t) + " out of char range") }
+        if (x < 0 || x > 255) { rbRaiseErr(name, "RangeError", rbStr(t) + " out of char range") }
         return String.fromCharCode(Math.trunc(x))
     }
     if (name == "integer?") { return isInt }
@@ -5105,7 +5104,7 @@ function rbNumMore(t, name, args) {
     }
     if (name == "quo") {
         if (rbIsFlo(t) || rbIsFlo(a0)) { return rbNumBin("/", rbMkFlo(rbToF(t)), a0) }
-        if (rbEq(a0, 0)) { rbRaiseErr("ZeroDivisionError", "divided by 0") }
+        if (rbEq(a0, 0)) { rbRaiseErr(name, "ZeroDivisionError", "divided by 0") }
         return rbNumBin("/", rbAsRat(t), rbAsRat(a0))
     }
     if (name == "remainder") {
@@ -5121,7 +5120,7 @@ function rbNumMore(t, name, args) {
     if (!isI) { return undefined }
     if (name == "ord") { return t }
     if (name == "gcd" || name == "lcm" || name == "gcdlcm") {
-        if (typeof a0 != "number" && !rbIsBig(a0)) { rbRaiseErr("TypeError", "not an integer") }
+        if (typeof a0 != "number" && !rbIsBig(a0)) { rbRaiseErr(name, "TypeError", "not an integer") }
         var g = rbNumGcd(t, a0)
         if (name == "gcd") { return g }
         var l = anytype
@@ -5143,9 +5142,9 @@ function rbNumMore(t, name, args) {
         var db = anytype
         db = 10
         if (n > 0) { db = a0 }
-        if (rbNumCmp(db, 0) < 0) { rbRaiseErr("ArgumentError", "negative radix") }
-        if (rbNumCmp(db, 2) < 0) { rbRaiseErr("ArgumentError", "invalid radix " + rbStr(db)) }
-        if (rbNumCmp(t, 0) < 0) { rbRaiseErr("Math::DomainError", "out of domain") }
+        if (rbNumCmp(db, 0) < 0) { rbRaiseErr(name, "ArgumentError", "negative radix") }
+        if (rbNumCmp(db, 2) < 0) { rbRaiseErr(name, "ArgumentError", "invalid radix " + rbStr(db)) }
+        if (rbNumCmp(t, 0) < 0) { rbRaiseErr(name, "Math::DomainError", "out of domain") }
         var dv = anytype
         dv = rbNumBin("/", t, db)
         var ds = [rbNumBin("%", t, db)]
@@ -5156,15 +5155,16 @@ function rbNumMore(t, name, args) {
         return ds
     }
     if (name == "pow") {
-        if (n < 2) { return rbBin("**", t, a0) }
+        if (n < 2) { return rbBinAs(name, "**", t, a0) }
         var pm = rbPosAt(args, n, 1)
-        if (typeof a0 != "number" && !rbIsBig(a0)) { rbRaiseErr("TypeError", "Integer#pow() 2nd argument not allowed unless a 1st argument is integer") }
-        if (typeof pm != "number" && !rbIsBig(pm)) { rbRaiseErr("TypeError", "Integer#pow() 2nd argument not allowed unless all arguments are integers") }
-        if (rbNumCmp(a0, 0) < 0) { rbRaiseErr("RangeError", "Integer#pow() 1st argument cannot be negative when 2nd argument specified") }
+        if (typeof a0 != "number" && !rbIsBig(a0)) { rbRaiseErr(name, "TypeError", "Integer#pow() 2nd argument not allowed unless a 1st argument is integer") }
+        if (typeof pm != "number" && !rbIsBig(pm)) { rbRaiseErr(name, "TypeError", "Integer#pow() 2nd argument not allowed unless all arguments are integers") }
+        if (rbNumCmp(a0, 0) < 0) { rbRaiseErr(name, "RangeError", "Integer#pow() 1st argument cannot be negative when 2nd argument specified") }
         if (rbEq(a0, 0)) {
             if (rbNumCmp(pm, 0) > 0) { return 1 }
             return rbNumBin("+", 1, pm)
         }
+        if (rbEq(pm, 0)) { rbRaiseErr(name, "ZeroDivisionError", "divided by 0") }
         var pe = anytype
         var pr = anytype
         var pb = anytype
@@ -6748,7 +6748,7 @@ function rbArrayMethod(t, name, args) {
         if (fj >= 0 && fj < t.length) { return t[fj] }
         if (nPos > 1) { return rbArgAt(args, 1) }
         if (blk !== null) { return rbCall1(blk, rbArgAt(args, 0)) }
-        rbRaiseErr("IndexError", "index " + fx + " outside of array bounds: " + (0 - t.length) + "..." + t.length)
+        rbRaiseErr(name, "IndexError", "index " + fx + " outside of array bounds: " + (0 - t.length) + "..." + t.length)
     }
     rbNoMethod(t, name)
     return null
@@ -7186,7 +7186,7 @@ function rbMethod(target, name, args) {
                 if (rbNPos(args) > 1) { return rbArgAt(args, 1) }
                 var fblk = rbBlockOf(args)
                 if (fblk !== null) { return rbCall1(fblk, rbArgAt(args, 0)) }
-                rbRaiseErr("KeyError", "key not found: " + rbInspect(rbArgAt(args, 0)))
+                rbRaiseErr(name, "KeyError", "key not found: " + rbInspect(rbArgAt(args, 0)))
             }
             var hres = rbHashMethod(target, keys, vals, name, args)
             if (hres !== rbHashUnknown) { return hres }
@@ -7242,7 +7242,7 @@ function rbMethod(target, name, args) {
             if (name == "method" && rbFindMethod(target, "method") === undefined) {
                 var mnm = rbStr(rbArgAt(args, 0))
                 var mm = rbFindMethod(target, mnm)
-                if (mm === undefined) { rbRaiseErr("NameError", "undefined method `" + mnm + "' for class `" + rbOwnerName(target) + "'") }
+                if (mm === undefined) { rbRaiseErr(name, "NameError", "undefined method `" + mnm + "' for class `" + rbOwnerName(target) + "'") }
                 return rbBindMethod(target, mnm, mm)
             }
         }
@@ -7694,7 +7694,7 @@ function js_rcivset(o, k, v) {
 // Object#instance_variable_get / _set. Twin of ivarAccess in ruby-interpreter.abnf.
 function rbIvarAccess(o, name, args) {
     var n = rbStr(rbArgAt(args, 0))
-    if (!rbIvarNameOk(n)) { rbRaiseErr("NameError", "`" + n + "' is not allowed as an instance variable name") }
+    if (!rbIvarNameOk(n)) { rbRaiseErr(name, "NameError", "`" + n + "' is not allowed as an instance variable name") }
     var k = n.substring(1)
     if (name == "instance_variable_set") {
         var v = rbArgAt(args, 1)
@@ -7856,7 +7856,7 @@ function js_rsetsl(o, k1, k2, v) {
     if (typeof o == "string") {
         var sb = rbSliceBounds(o.length, k1, k2)
         if (sb["s"] < 0 || sb["s"] > o.length) {
-            rbRaiseErr("IndexError", "index " + sb["s"] + " out of string")
+            rbRaiseErr("[]=", "IndexError", "index " + sb["s"] + " out of string")
         }
         var ls = sb["l"]
         if (sb["s"] + ls > o.length) { ls = o.length - sb["s"] }
@@ -7936,10 +7936,50 @@ function js_rnew(cls, args) {
 }
 
 // Raise a builtin Ruby exception FROM THE RUNTIME, so `1/0 rescue "d"' works. A
-// plain fail() is an ENGINE abort no rescue clause can see. Mirrors rubyRaiseErr
-// of abnf/jsrt.go and raiseErr of ruby-interpreter.abnf.
-function rbRaiseErr(clsName, msg) {
-    js_rraise(rbBuiltinClass(clsName), msg)
+// plain fail() is an ENGINE abort no rescue clause can see. frame names the
+// builtin method that raised, for js_rsite; "" when it is not known. Mirrors
+// rubyRaiseErr of abnf/jsrt.go and raiseErr of ruby-interpreter.abnf.
+function rbRaiseErr(frame, clsName, msg) {
+    var e = rbExc(rbBuiltinClass(clsName), [msg])
+    if (frame != "") { e["__rframe"] = frame }
+    js_rraise(e, undefined)
+}
+
+// rbBin for a builtin METHOD that answers through an operator (Integer#modulo
+// through %): an error the operator raises is reported in the method's own
+// frame, as MRI does. Twin of rubyBinAs in abnf/jsrt.go.
+function rbBinAs(name, op, l, r) {
+    try {
+        return rbBin(op, l, r)
+    } catch (e) {
+        if (rbIsObj(e) && typeof e["__rframe"] == "string" && e["__rframe"] != "") { e["__rframe"] = name }
+        throw e
+    }
+}
+
+// The right side of String#+: a String, or an object that converts implicitly
+// through #to_str; anything else is MRI's TypeError. Twin of rubyStrOperand in
+// abnf/jsrt.go.
+function rbStrOperand(r) {
+    if (typeof r == "string") { return r }
+    var cv = rbFmtUserConv(r, "to_str", "")
+    if (typeof cv == "string") { return cv }
+    rbRaiseErr("+", "TypeError", "no implicit conversion of " + rbFmtConvName(r) + " into String")
+    return ""
+}
+
+// An arithmetic operator whose operands are not both numbers. Twin of
+// rubyNumOperandErr in abnf/jsrt.go, which states the rule.
+function rbNumOperandErr(op, l, r) {
+    if (op == "+" || op == "-" || op == "*" || op == "/" || op == "%" || op == "**") {
+        if (rbNumRank(l) >= 0) {
+            var desc = rbFmtConvName(r)
+            if (rbIsSym(r)) { desc = rbInspect(r) }
+            rbRaiseErr(op, "TypeError", desc + " can't be coerced into " + rbOwnerName(l))
+        }
+        if (!rbIsArr(l)) { rbNoMethod(l, op) }
+    }
+    fail("not a number in '" + op + "'")
 }
 
 // Object#object_id. Twin of objectId in ruby-interpreter.abnf, which states the
@@ -8021,6 +8061,7 @@ function rbNameErr(cls, msg, name, recv) {
     var e = rbExc(rbBuiltinClass(cls), [msg])
     e["__nmname"] = rbSym(name)
     e["__nmrecv"] = recv
+    e["__rframe"] = ""
     js_rraise(e, undefined)
 }
 
@@ -8187,7 +8228,7 @@ function rbStrToInum(s, base0, badcheck) {
 // abnf/jsrt.go.
 function rbRadixArg(v, negOK) {
     var b = Math.trunc(rbToF(v))
-    if (b == 1 || b > 36 || b < -36 || (b < 0 && !negOK)) { rbRaiseErr("ArgumentError", "invalid radix " + b) }
+    if (b == 1 || b > 36 || b < -36 || (b < 0 && !negOK)) { rbRaiseErr("", "ArgumentError", "invalid radix " + b) }
     return b
 }
 
@@ -8202,7 +8243,7 @@ function js_rkconv(name, args) {
         var rp = rbAsRat(v)
         if (!rbIsArr(args) || args.length < 2) { return rbMkRat(rp["n"], rp["d"]) }
         var rq = rbAsRat(args[1])
-        if (rbEq(rq["n"], 0)) { rbRaiseErr("ZeroDivisionError", "divided by 0") }
+        if (rbEq(rq["n"], 0)) { rbRaiseErr(name, "ZeroDivisionError", "divided by 0") }
         return rbMkRat(rbNumBin("*", rp["n"], rq["d"]), rbNumBin("*", rp["d"], rq["n"]))
     }
     if (name == "Complex") {
@@ -8227,14 +8268,14 @@ function js_rkconv(name, args) {
     if (name == "Integer") {
         var base = 0
         if (rbIsArr(args) && args.length > 1) {
-            if (typeof v != "string") { rbRaiseErr("ArgumentError", "base specified for non string value") }
+            if (typeof v != "string") { rbRaiseErr(name, "ArgumentError", "base specified for non string value") }
             base = rbRadixArg(args[1], true)
         }
-        if (rtIsNil(v)) { rbRaiseErr("TypeError", "can't convert nil into Integer") }
+        if (rtIsNil(v)) { rbRaiseErr(name, "TypeError", "can't convert nil into Integer") }
         if (typeof v == "string") {
             var ri = rbStrToInum(v, base, true)
             if (ri["ok"]) { return ri["v"] }
-            rbRaiseErr("ArgumentError", "invalid value for Integer(): " + rbStrInspect(v))
+            rbRaiseErr(name, "ArgumentError", "invalid value for Integer(): " + rbStrInspect(v))
         }
         // A Float converts as Float#to_i does.
         if (rbIsFlo(v)) {
@@ -8244,12 +8285,12 @@ function js_rkconv(name, args) {
         return v
     }
     if (name == "Float") {
-        if (rtIsNil(v)) { rbRaiseErr("TypeError", "can't convert nil into Float") }
+        if (rtIsNil(v)) { rbRaiseErr(name, "TypeError", "can't convert nil into Float") }
         if (typeof v == "string") {
             var rf = anytype
             rf = rbnStrToDbl(v, true)
             if (rf !== null) { return rbMkFlo(rf) }
-            rbRaiseErr("ArgumentError", "invalid value for Float(): " + rbStrInspect(v))
+            rbRaiseErr(name, "ArgumentError", "invalid value for Float(): " + rbStrInspect(v))
         }
         return rbMkFlo(rbToF(v))
     }
@@ -8826,6 +8867,23 @@ function js_rraiseat(v, msg, where) {
 // ("[object Object]"). This is MRI's own first line, on stderr as MRI writes it,
 // and rbExcTopLine is shared with the interpreter half's runProgram so all three
 // engines print the SAME text.
+// (exception, site): an exception the RUNTIME raised gets its first backtrace
+// frame where it is caught. Twin of js_rsite in abnf/jsrt.go, which states the
+// rule.
+function js_rsite(exc, site) {
+    if (!rbIsObj(exc) || typeof site != "string") { return undefined }
+    var frame = exc["__rframe"]
+    if (typeof frame != "string" || exc["__rwhere"] !== undefined) { return undefined }
+    var s = site
+    if (frame != "") {
+        var at = s.length - 5
+        while (at >= 0 && s.slice(at, at + 5) != ":in `") { at = at - 1 }
+        if (at >= 0) { s = s.slice(0, at) + ":in `" + frame + "'" }
+    }
+    exc["__rwhere"] = s
+    return undefined
+}
+
 function js_rtop(exc) {
     eprintln(rbExcTopLine(exc))
     exit(1)
@@ -8858,8 +8916,9 @@ function js_rundef(v) { return v === undefined }
 // expectation: `expected 1` for a fixed list, `expected 1..2` when optionals
 // follow, `expected 1+` when a *splat does. `kinds` is js_rposbind's
 // per-parameter code string ("0" required, "1" optional, "2" splat). Mirrors
-// argCountErr of ruby-interpreter.abnf and rubyArgCountErr of abnf/jsrt.go.
-function rbArgCountErr(given, kinds) {
+// argCountErr of ruby-interpreter.abnf and rubyArgCountErr of abnf/jsrt.go, which
+// states what own means.
+function rbArgCountErr(given, kinds, own) {
     var req = 0
     var opt = 0
     var star = false
@@ -8874,8 +8933,9 @@ function rbArgCountErr(given, kinds) {
     var want = "" + req
     if (star) { want = want + "+" }
     else if (opt > 0) { want = want + ".." + (req + opt) }
-    js_rraise(rbBuiltinClass("ArgumentError"),
-              "wrong number of arguments (given " + given + ", expected " + want + ")")
+    var e = rbExc(rbBuiltinClass("ArgumentError"), ["wrong number of arguments (given " + given + ", expected " + want + ")"])
+    if (own) { e["__rframe"] = "" }
+    js_rraise(e, undefined)
 }
 
 // The count check of the FAST PATH. emitParams binds an all-required parameter
@@ -8896,7 +8956,7 @@ function js_rargchk(args, off_raw, req_raw) {
     var kinds = ""
     var i = 0
     while (i < req) { kinds = kinds + "0"; i = i + 1 }
-    rbArgCountErr(npos, kinds)
+    rbArgCountErr(npos, kinds, true)
     return null
 }
 
@@ -8974,7 +9034,7 @@ function js_rmethodval(scope, name) {
 // answer the 0 an unrecorded closure answers.
 function rbBuiltinMethodVal(recv, kind, name) {
     if (js_rrespond(recv, [rbSym(name)]) !== true) {
-        rbRaiseErr("NameError", "undefined method `" + name + "' for class `" + kind + "'")
+        rbRaiseErr("method", "NameError", "undefined method `" + name + "' for class `" + kind + "'")
     }
     var w = function() {
         var args = []
@@ -9134,7 +9194,7 @@ function js_rposbind(args, off_raw, kinds, wantsKw) {
     // entirely and asks it separately, through js_rargchk. A BLOCK never reaches
     // here - the emitter binds one with js_rblockarg, and Ruby arity-checks
     // methods and lambdas only.
-    if (npos < required) { rbArgCountErr(npos, kinds) }
+    if (npos < required) { rbArgCountErr(npos, kinds, true) }
     // TOO MANY IS AN ERROR TOO, and only a *splat lifts the ceiling. MRI raises for
     // `->(x, y = 2) { }.call(1, 2, 3)' exactly as it does for too few.
     // bindParams of ruby-interpreter.abnf and js_rargchk's fast path ask the same
@@ -9145,7 +9205,7 @@ function js_rposbind(args, off_raw, kinds, wantsKw) {
         if (kinds.charAt(s0) == "2") { star = true }
         s0 = s0 + 1
     }
-    if (!star && npos > kinds.length) { rbArgCountErr(npos, kinds) }
+    if (!star && npos > kinds.length) { rbArgCountErr(npos, kinds, true) }
     var spare = npos - required
     var ai = 0
     var k = 0
@@ -9285,8 +9345,8 @@ function rbLamArity(av, kinds) {
         else if (c != "1") { req = req + 1 }
         i = i + 1
     }
-    if (npos < req) { rbArgCountErr(npos, kinds) }
-    if (!star && npos > kinds.length) { rbArgCountErr(npos, kinds) }
+    if (npos < req) { rbArgCountErr(npos, kinds, false) }
+    if (!star && npos > kinds.length) { rbArgCountErr(npos, kinds, false) }
     return undefined
 }
 

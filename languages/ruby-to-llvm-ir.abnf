@@ -75,7 +75,7 @@ KwNilPath   = "nil" KwEnd "::" Name ;
 // receiver (def self.m / def obj.m) defines a singleton method. The parameter list
 // accepts default / splat / double-splat / block / keyword parameters.
 Def         <~~ push(makeFun(takeAll())) ~~>
-            = KwDef [ SelfRecv ] DefName <~~ push(up.in) ~~> [ ParamList ] DefTail ;
+            = "" <~~ push(up.pos) ~~> KwDef [ SelfRecv ] DefName <~~ push(up.in) ~~> [ ParamList ] DefTail ;
 // The name a def may carry. SetterName comes FIRST (PEG): `def name=(v)` declares the
 // assignment method `name=`, and it is told apart from the endless `def name = EXPR`
 // by the `=` being GLUED to the name - which is exactly Ruby's own rule, and has to
@@ -2604,6 +2604,19 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         b.NewStore(sv.p, gRbSite)
         b.NewStore(sv.n, gRbSiteLen)
     }
+    // An exception the runtime raised takes its first backtrace frame where it is
+    // caught: js_rsite combines the running site, still the raising statement's,
+    // with the builtin method the exception names. Emitted at the entry of every
+    // rescue and of the top-level handler, never on the path of a statement.
+    function rbSiteStamp(b, excV) {
+        var sv = rbSiteLoad(b)
+        var setB = curF.NewBlock("")
+        var doneB = curF.NewBlock("")
+        b.NewCondBr(b.NewICmp(llvm.enum.IPredNE, sv.n, handle(0)), setB, doneB)
+        callExt(setB, "js_rsite", [excV, callExt(setB, "js_str_mem", [sv.p, sv.n])])
+        setB.NewBr(doneB)
+        return doneB
+    }
     var coreRetStmt = retStmt
     retStmt = function(b, v) {
         if (curSiteSave !== null && !inCtlBody()) { rbSiteStore(b, curSiteSave) }
@@ -3469,7 +3482,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         for (var q = 0; q < bps.length; q++) { params.push(bps[q]) }
         var bodyStmt = blockBodyOf(items)
         return function(b) {
-            var idx = emitFunc(params, bodyStmt, false)
+            var idx = emitFunc(params, bodyStmt, false, false, false, false, -1)
             return {b: b, v: callExt(b, "js_rlambda",
                         [emitArity(b, callExt(b, "js_closure", [handle(idx), curScopeV]), params)])}
         }
@@ -4681,6 +4694,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             catchT = function(b) {
                 curInRescue = true
                 var excV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "$exc")])
+                b = rbSiteStamp(b, excV)
                 callExt(b, "js_rgset", [emitStr(b, "!"), excV])
                 hidCount++
                 var rName = "$resc" + hidCount
@@ -4740,7 +4754,15 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             }
             var finClo = hUndef
             if (finallyT != undefined) {
-                finClo = callExt(b, "js_closure", [handle(emitFunc([], finallyT, false, true)), curScopeV])
+                // An ensure clause runs while an exception may still be on its way
+                // to its rescue, so it puts the site back for rbSiteStamp there.
+                var ensT = function(eb) {
+                    var es = rbSiteLoad(eb)
+                    var er = finallyT(eb)
+                    rbSiteStore(er.b, es)
+                    return er
+                }
+                finClo = callExt(b, "js_closure", [handle(emitFunc([], ensT, false, true)), curScopeV])
             }
             // $! is the exception being handled (the catch closure sets it); once
             // the begin completes it reverts to what it was before. An exception
@@ -5213,7 +5235,12 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // their own scope as `$blk'. A ctl closure (begin/rescue/ensure, `x rescue y', the
     // block-break wrapper), a literal block and a lambda deliberately do NOT - so a
     // `yield' inside any of them chains out to the enclosing method, which is Ruby.
-    function emitFunc(params, bodyStmt, isMethod, isCtl, isBlock, declBlk) {
+    // sitePos is where the function's own frame starts: a def's position (its
+    // parameters are bound, and an argument count checked, at the `def' line, as
+    // MRI reports it), -1 for a lambda literal, whose frame MRI names "block in
+    // ..." and this model does not, so a site there is left unset. Without it the
+    // running site is the caller's.
+    function emitFunc(params, bodyStmt, isMethod, isCtl, isBlock, declBlk, sitePos) {
         funcCount++
         var idx = funcCount
         var savedTag = curFTag
@@ -5278,6 +5305,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (isCtl) { ctlEnter(idx) }
         var b = f.NewBlock("entry")
         curSiteSave = isCtl === true ? null : rbSiteLoad(b)
+        if (sitePos !== undefined) {
+            if (sitePos < 0) { rbSiteStore(b, {p: llvm.constant.NewNull(llvm.types.I8Ptr), n: handle(0)}) }
+            else { rbSiteMark(b, sitePos) }
+        }
         curScopeV = callExt(b, "js_scope_new", [f.Params[0]])
         var off = 0
         if (isMethod) {
@@ -5328,7 +5359,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         var body = null
         var singleton = false
         var srecv = ""
-        for (var i = 0; i < items.length; i++) {
+        var pos = items[0]
+        for (var i = 1; i < items.length; i++) {
             if (items[i] == undefined) { continue }
             if (items[i].selfrecv === true) { singleton = true; srecv = srecvText(items[i].srecv) }
             else if (typeof items[i] == "string") { name = items[i] }
@@ -5338,7 +5370,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 params.push(paramDesc(items[i]))
             }
         }
-        return {name: name, params: params, singleton: singleton, srecv: srecv,
+        return {name: name, params: params, singleton: singleton, srecv: srecv, pos: pos,
                 body: body != null ? body : makeBody([])}
     }
     // The receiver of a `def X.m', with the whitespace the token match may have
@@ -5374,7 +5406,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         var savedParams = curMethParams
         curMethName = m.name
         curMethParams = paramNames(m.params)
-        var idx = emitFunc(m.params, m.body, true, false, false, true)
+        var idx = emitFunc(m.params, m.body, true, false, false, true, m.pos)
         curMethName = savedMeth
         curMethParams = savedParams
         var fnV = emitArity(b, callExt(b, "js_closure", [handle(idx), curScopeV]), m.params)
@@ -6454,6 +6486,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             var tryClo = callExt(b, "js_closure", [handle(emitFunc([], exprT, false, false)), curScopeV])
             var catchT = function(bb) {
                 var excV = callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, "$exc")])
+                bb = rbSiteStamp(bb, excV)
                 var okB = curF.NewBlock("")
                 var noB = curF.NewBlock("")
                 var notMark = callExt(bb, "js_not", [callExt(bb, "js_is_type", [excV, emitStr(bb, blkBrkName)])])
@@ -6619,7 +6652,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             var savedMP = curMethParams
             curMethName = fn.name
             curMethParams = paramNames(fn.params)
-            var idx = emitFunc(fn.params, fn.body, false, false, false, true)
+            var idx = emitFunc(fn.params, fn.body, false, false, false, true, fn.pos)
             curMethName = savedMN
             curMethParams = savedMP
             // Recorded for Proc#arity exactly as a class method is - see emitMethods.
@@ -6805,11 +6838,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             }
             if (it.method != undefined) {
                 var fn = it.method
-                if (fn.singleton === true) { r.sdefs.push({name: fn.name, params: fn.params, body: fn.body}) }
+                if (fn.singleton === true) { r.sdefs.push({name: fn.name, params: fn.params, body: fn.body, pos: fn.pos}) }
                 else {
-                    r.methods.push({name: fn.name, params: fn.params, body: fn.body})
+                    r.methods.push({name: fn.name, params: fn.params, body: fn.body, pos: fn.pos})
                     if (vis == "private" || vis == "protected") { r.restricted.push({name: fn.name, kind: vis}) }
-                    if (vis == "module_function") { r.sdefs.push({name: fn.name, params: fn.params, body: fn.body}) }
+                    if (vis == "module_function") { r.sdefs.push({name: fn.name, params: fn.params, body: fn.body, pos: fn.pos}) }
                 }
                 continue
             }
@@ -6846,7 +6879,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             curMethName = m.name
             curMethParams = paramNames(m.params)
             nextSelfIsCls = prefix == "$s$"
-            var idx = emitFunc(m.params, m.body, true, false, false, true)
+            var idx = emitFunc(m.params, m.body, true, false, false, true, m.pos)
             // A method closure enters the arity registry the way a block and a lambda
             // already did, so `method(:inst).arity` answers the parameter count rather
             // than the 0 an UNRECORDED closure answers. emitArity is the gate as well
@@ -7578,6 +7611,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
         var topCatchT = function(bb) {
             var excV = callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, "$exc")])
+            bb = rbSiteStamp(bb, excV)
             callExt(bb, "js_rtop", [excV])
             return {b: bb, v: hNull}
         }

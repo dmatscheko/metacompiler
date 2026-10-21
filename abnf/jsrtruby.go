@@ -346,13 +346,13 @@ func (rt *jsrt) rubyFloDomainGuard(target interface{}, name string, args interfa
 // rubyFloDomain is the raise itself, with the float's own #to_s as the message.
 func rubyFloDomain(rt *jsrt, x float64) {
 	if math.IsNaN(x) {
-		rt.rubyRaiseErr("FloatDomainError", "NaN")
+		rt.rubyRaiseErr("", "FloatDomainError", "NaN")
 	}
 	if math.IsInf(x, 1) {
-		rt.rubyRaiseErr("FloatDomainError", "Infinity")
+		rt.rubyRaiseErr("", "FloatDomainError", "Infinity")
 	}
 	if math.IsInf(x, -1) {
-		rt.rubyRaiseErr("FloatDomainError", "-Infinity")
+		rt.rubyRaiseErr("", "FloatDomainError", "-Infinity")
 	}
 }
 
@@ -397,7 +397,7 @@ func rubyIsFmtConv(c byte) bool {
 }
 
 func (rt *jsrt) rubyFmtTooFew() {
-	rt.rubyRaiseErr("ArgumentError", "too few arguments")
+	rt.rubyRaiseErr("", "ArgumentError", "too few arguments")
 }
 
 func (rt *jsrt) rubyFmtCheckConv(c byte) {
@@ -407,12 +407,12 @@ func (rt *jsrt) rubyFmtCheckConv(c byte) {
 	// % as the conversion of a non-empty head ("%5%"), and a newline or a NUL that
 	// is NOT directly after the % ("%5\n"), are MRI's one message.
 	if c == '%' || c == '\n' || c == 0 {
-		rt.rubyRaiseErr("ArgumentError", "invalid format character - %")
+		rt.rubyRaiseErr("", "ArgumentError", "invalid format character - %")
 	}
 	if c >= 32 && c < 127 {
-		rt.rubyRaiseErr("ArgumentError", "malformed format string - %"+string(c))
+		rt.rubyRaiseErr("", "ArgumentError", "malformed format string - %"+string(c))
 	}
-	rt.rubyRaiseErr("ArgumentError", "malformed format string")
+	rt.rubyRaiseErr("", "ArgumentError", "malformed format string")
 }
 
 func (rt *jsrt) rubyFormat2(spec string, arg interface{}) string {
@@ -462,7 +462,7 @@ func (rt *jsrt) rubyFormat2(spec string, arg interface{}) string {
 		// A MALFORMED directive is an ArgumentError in MRI. rubyFmtCheckConv
 		// carries the rule.
 		if i+1 >= len(spec) {
-			rt.rubyRaiseErr("ArgumentError", "incomplete format specifier; use %% (double %) instead")
+			rt.rubyRaiseErr("", "ArgumentError", "incomplete format specifier; use %% (double %) instead")
 		}
 		if spec[i+1] == '%' {
 			out.WriteString("%")
@@ -531,7 +531,7 @@ func (rt *jsrt) rubyFormat2(spec string, arg interface{}) string {
 			}
 			if c == '.' {
 				if prec >= 0 {
-					rt.rubyRaiseErr("ArgumentError", "precision given twice")
+					rt.rubyRaiseErr("", "ArgumentError", "precision given twice")
 				}
 				j++
 				tail = 2
@@ -574,14 +574,14 @@ func (rt *jsrt) rubyFormat2(spec string, arg interface{}) string {
 		conv := byte('s')
 		if !brace {
 			if bad {
-				rt.rubyRaiseErr("ArgumentError", "malformed name - unmatched parenthesis")
+				rt.rubyRaiseErr("", "ArgumentError", "malformed name - unmatched parenthesis")
 			}
 			if j >= len(spec) {
 				if tail == 2 {
-					rt.rubyRaiseErr("ArgumentError", "malformed format string - %*[0-9]")
+					rt.rubyRaiseErr("", "ArgumentError", "malformed format string - %*[0-9]")
 				}
 				if tail != 3 {
-					rt.rubyRaiseErr("ArgumentError", "invalid format character - %")
+					rt.rubyRaiseErr("", "ArgumentError", "invalid format character - %")
 				}
 				// A selector or a <name> that ran off the end writes a bare "%"
 				// in MRI ("%1$" % 5 is "%"), but the name is still LOOKED UP -
@@ -679,7 +679,7 @@ func (rt *jsrt) rubyFmtNamed(args []interface{}, name, open, close string) inter
 		}
 	}
 	if h == nil {
-		rt.rubyRaiseErr("ArgumentError", "one hash required")
+		rt.rubyRaiseErr("", "ArgumentError", "one hash required")
 	}
 	keys, _ := h.props["keys"].(*jsArray)
 	vals, _ := h.props["vals"].(*jsArray)
@@ -690,7 +690,7 @@ func (rt *jsrt) rubyFmtNamed(args []interface{}, name, open, close string) inter
 			}
 		}
 	}
-	rt.rubyRaiseErr("KeyError", "key"+open+name+close+" not found")
+	rt.rubyRaiseErr("", "KeyError", "key"+open+name+close+" not found")
 	return jsNull
 }
 
@@ -879,7 +879,7 @@ func (rt *jsrt) rubyNumDivOp(t interface{}, name string, args []interface{}) int
 	case "rationalize":
 		return rt.rubyRationalize(t, args)
 	case "modulo":
-		return rt.rubyNumBin("%", t, y)
+		return rt.rubyBinAs(name, "%", t, y)
 	}
 	_, tf := t.(jsFlo)
 	_, yf := y.(jsFlo)
@@ -887,7 +887,7 @@ func (rt *jsrt) rubyNumDivOp(t interface{}, name string, args []interface{}) int
 		return rt.rubyFloDivmod(rubyToF(t), rubyToF(y))
 	}
 	if rubyToF(y) == 0 {
-		rt.rubyRaiseErr("ZeroDivisionError", "divided by 0")
+		rt.rubyRaiseErr(name, "ZeroDivisionError", "divided by 0")
 	}
 	q := rt.rubyNumBin("/", t, y)
 	switch qv := q.(type) {
@@ -903,13 +903,34 @@ func (rt *jsrt) rubyNumDivOp(t interface{}, name string, args []interface{}) int
 	return &jsArray{elems: []interface{}{q, rt.rubyNumBin("-", t, rt.rubyNumBin("*", y, q))}}
 }
 
+// rubyBinAs is rubyBin for a builtin METHOD that answers through an operator
+// (Integer#modulo through %): an error the operator raises is reported in the
+// method's own frame, as MRI does - `5.modulo(0)' raises in `modulo', not `%'.
+// Only an error that names its frame is renamed. Twins: binAs in
+// ruby-interpreter.abnf, rbBinAs in lib/ruby-rt.metajs.
+func (rt *jsrt) rubyBinAs(name, op string, l, r interface{}) interface{} {
+	defer func() {
+		if p := recover(); p != nil {
+			if th, isThrown := p.(*jsThrown); isThrown {
+				if o, isObj := th.value.(*jsObject); isObj {
+					if f, framed := o.props["__rframe"].(string); framed && f != "" {
+						o.set("__rframe", name)
+					}
+				}
+			}
+			panic(p)
+		}
+	}()
+	return rt.rubyBin(op, l, r)
+}
+
 // rubyFloDivmod is MRI's flodivmod.
 func (rt *jsrt) rubyFloDivmod(x, y float64) interface{} {
 	if y != y {
 		rubyFloDomain(rt, y)
 	}
 	if y == 0 {
-		rt.rubyRaiseErr("ZeroDivisionError", "divided by 0")
+		rt.rubyRaiseErr("divmod", "ZeroDivisionError", "divided by 0")
 	}
 	xInf, yInf := math.IsInf(x, 0), math.IsInf(y, 0)
 	mod := x
@@ -1114,7 +1135,7 @@ func (rt *jsrt) rubyRatPow(p jsRat, k *big.Int) interface{} {
 	n, d := rubyRatParts(p)
 	if k.Sign() < 0 {
 		if n.Sign() == 0 {
-			rt.rubyRaiseErr("ZeroDivisionError", "divided by 0")
+			rt.rubyRaiseErr("**", "ZeroDivisionError", "divided by 0")
 		}
 		n, d = d, n
 		k = new(big.Int).Neg(k)
@@ -1381,7 +1402,7 @@ func (rt *jsrt) rubyIvarAccess(o *jsObject, name string, args []interface{}) int
 	pos, _ := rubyBlockArgs(args)
 	n := rt.rubyStr(argAt(pos, 0))
 	if !rubyIvarNameOk(n) {
-		rt.rubyRaiseErr("NameError", "`"+n+"' is not allowed as an instance variable name")
+		rt.rubyRaiseErr(name, "NameError", "`"+n+"' is not allowed as an instance variable name")
 	}
 	if name == "instance_variable_set" {
 		v := argAt(pos, 1)
@@ -1556,7 +1577,7 @@ func (rt *jsrt) rubyCpxMethod(t jsCpx, name string) (interface{}, bool) {
 	into := map[string]string{"to_i": "Integer", "to_int": "Integer", "to_f": "Float", "to_r": "Rational", "rationalize": "Rational"}[name]
 	if into != "" {
 		if _, imF := t.im.(jsFlo); imF || !rt.rubyEq(t.im, 0.0) {
-			rt.rubyRaiseErr("RangeError", "can't convert "+rt.rubyStr(t)+" into "+into)
+			rt.rubyRaiseErr(name, "RangeError", "can't convert "+rt.rubyStr(t)+" into "+into)
 		}
 		return rt.rubyMethod(t.re, name, nil), true
 	}
@@ -1644,7 +1665,7 @@ func (rt *jsrt) rubyRealQuo(a, b interface{}) interface{} {
 		return rt.rubyNumBin("/", a, b)
 	}
 	if rt.rubyEq(b, 0.0) {
-		rt.rubyRaiseErr("ZeroDivisionError", "divided by 0")
+		rt.rubyRaiseErr("", "ZeroDivisionError", "divided by 0")
 	}
 	return rt.rubyNumBin("/", rt.rubyAsRat(a), b)
 }
@@ -1774,7 +1795,7 @@ func (rt *jsrt) rubyNumMore(t interface{}, name string, args []interface{}) (int
 			return rt.rubyNumBin("/", jsFlo{f: rubyToF(t)}, a0), true
 		}
 		if rt.rubyEq(a0, 0.0) {
-			rt.rubyRaiseErr("ZeroDivisionError", "divided by 0")
+			rt.rubyRaiseErr(name, "ZeroDivisionError", "divided by 0")
 		}
 		return rt.rubyNumBin("/", rt.rubyAsRat(t), rt.rubyAsRat(a0)), true
 	case "remainder":
@@ -1803,7 +1824,7 @@ func (rt *jsrt) rubyNumMore(t interface{}, name string, args []interface{}) (int
 	case "gcd", "lcm", "gcdlcm":
 		y, yI := rubyIntBig(a0)
 		if !yI {
-			rt.rubyRaiseErr("TypeError", "not an integer")
+			rt.rubyRaiseErr(name, "TypeError", "not an integer")
 		}
 		g := new(big.Int).GCD(nil, nil, new(big.Int).Abs(ti), new(big.Int).Abs(y))
 		if name == "gcd" {
@@ -1840,13 +1861,13 @@ func (rt *jsrt) rubyNumMore(t interface{}, name string, args []interface{}) (int
 			base, _ = rubyIntBig(a0)
 		}
 		if base.Sign() < 0 {
-			rt.rubyRaiseErr("ArgumentError", "negative radix")
+			rt.rubyRaiseErr(name, "ArgumentError", "negative radix")
 		}
 		if base.Cmp(big.NewInt(2)) < 0 {
-			rt.rubyRaiseErr("ArgumentError", "invalid radix "+base.String())
+			rt.rubyRaiseErr(name, "ArgumentError", "invalid radix "+base.String())
 		}
 		if ti.Sign() < 0 {
-			rt.rubyRaiseErr("Math::DomainError", "out of domain")
+			rt.rubyRaiseErr(name, "Math::DomainError", "out of domain")
 		}
 		out := &jsArray{}
 		v := new(big.Int).Set(ti)
@@ -1860,18 +1881,18 @@ func (rt *jsrt) rubyNumMore(t interface{}, name string, args []interface{}) (int
 		}
 	case "pow":
 		if len(pos) < 2 {
-			return rt.rubyBin("**", t, a0), true
+			return rt.rubyBinAs(name, "**", t, a0), true
 		}
 		e, eI := rubyIntBig(a0)
 		if !eI {
-			rt.rubyRaiseErr("TypeError", "Integer#pow() 2nd argument not allowed unless a 1st argument is integer")
+			rt.rubyRaiseErr(name, "TypeError", "Integer#pow() 2nd argument not allowed unless a 1st argument is integer")
 		}
 		m, mI := rubyIntBig(argAt(pos, 1))
 		if !mI {
-			rt.rubyRaiseErr("TypeError", "Integer#pow() 2nd argument not allowed unless all arguments are integers")
+			rt.rubyRaiseErr(name, "TypeError", "Integer#pow() 2nd argument not allowed unless all arguments are integers")
 		}
 		if e.Sign() < 0 {
-			rt.rubyRaiseErr("RangeError", "Integer#pow() 1st argument cannot be negative when 2nd argument specified")
+			rt.rubyRaiseErr(name, "RangeError", "Integer#pow() 1st argument cannot be negative when 2nd argument specified")
 		}
 		if e.Sign() == 0 {
 			if m.Sign() > 0 {
@@ -1880,7 +1901,7 @@ func (rt *jsrt) rubyNumMore(t interface{}, name string, args []interface{}) (int
 			return narrow(new(big.Int).Add(m, big.NewInt(1))), true
 		}
 		if m.Sign() == 0 {
-			rt.rubyRaiseErr("ZeroDivisionError", "divided by 0")
+			rt.rubyRaiseErr(name, "ZeroDivisionError", "divided by 0")
 		}
 		am := new(big.Int).Abs(m)
 		r := new(big.Int).Exp(new(big.Int).Mod(ti, am), e, am)

@@ -4664,7 +4664,7 @@ func (rt *jsrt) rubyBigArith(op string, l, r interface{}) (interface{}, bool) {
 		return rt.rubyBigNarrow(new(big.Int).Mul(x, y)), true
 	case "/", "%":
 		if y.Sign() == 0 {
-			rt.rubyRaiseErr("ZeroDivisionError", "divided by 0")
+			rt.rubyRaiseErr(op, "ZeroDivisionError", "divided by 0")
 		}
 		q, m := new(big.Int), new(big.Int)
 		q.QuoRem(x, y, m)
@@ -5924,7 +5924,7 @@ func rubyFloMod(x, y float64) float64 {
 func (rt *jsrt) rubyNumBin(op string, l, r interface{}) interface{} {
 	rk, rr := rubyNumRank(l), rubyNumRank(r)
 	if rk < 0 || rr < 0 {
-		rt.fail("not a number in '%s'", op)
+		rt.rubyNumOperandErr(op, l, r)
 	}
 	if rr > rk {
 		rk = rr
@@ -5990,12 +5990,12 @@ func (rt *jsrt) rubyNumBin(op string, l, r interface{}) interface{} {
 		return rt.rubyBigPromote(op, x, y)
 	case "/":
 		if y == 0 {
-			rt.rubyRaiseErr("ZeroDivisionError", "divided by 0")
+			rt.rubyRaiseErr(op, "ZeroDivisionError", "divided by 0")
 		}
 		return math.Floor(x / y)
 	case "%":
 		if y == 0 {
-			rt.rubyRaiseErr("ZeroDivisionError", "divided by 0")
+			rt.rubyRaiseErr(op, "ZeroDivisionError", "divided by 0")
 		}
 		// math.FMA AND NOT `x - math.Floor(x/y)*y`: the product and the subtract must
 		// round ONCE, so 9007199254740991 % -3 is -2 as in real ruby (rounding twice
@@ -6294,6 +6294,47 @@ func (rt *jsrt) rubyLogicBin(op string, l, r interface{}) interface{} {
 	return rt.rubyBin(op, l, r)
 }
 
+// rubyStrOperand is the right side of String#+: a String, or an object that
+// converts implicitly through #to_str; anything else is MRI's TypeError (`"a" + 1'
+// does not concatenate). Twins: strOperand in ruby-interpreter.abnf, rbStrOperand
+// in lib/ruby-rt.metajs.
+func (rt *jsrt) rubyStrOperand(r interface{}) string {
+	if s, ok := r.(string); ok {
+		return s
+	}
+	if v, conv := rt.rubyFmtUserConv(r, "to_str", ""); conv {
+		if s, ok := v.(string); ok {
+			return s
+		}
+	}
+	rt.rubyRaiseErr("+", "TypeError", "no implicit conversion of "+rubyFmtConvName(r)+" into String")
+	return ""
+}
+
+// rubyNumOperandErr raises for an arithmetic operator whose operands are not
+// both numbers, worded as MRI 2.6 does: a number on the left is a TypeError
+// naming the right side (`1 + nil' is "nil can't be coerced into Integer"), and
+// a left side with no such operator - nil, true, a Symbol, a Hash - is a
+// NoMethodError. An Array on the left, and an operator other than the six
+// arithmetic ones, stays an engine abort. Twins: numOperandErr in
+// ruby-interpreter.abnf, rbNumOperandErr in lib/ruby-rt.metajs.
+func (rt *jsrt) rubyNumOperandErr(op string, l, r interface{}) {
+	switch op {
+	case "+", "-", "*", "/", "%", "**":
+		if rubyIsNum(l) {
+			desc := rubyFmtConvName(r)
+			if sym, isSym := r.(jsSym); isSym {
+				desc = rt.rubyInspect(sym)
+			}
+			rt.rubyRaiseErr(op, "TypeError", desc+" can't be coerced into "+rubyOwnerName(l))
+		}
+		if _, isArr := l.(*jsArray); !isArr {
+			rt.rubyNoMethod(l, op)
+		}
+	}
+	rt.fail("not a number in '%s'", op)
+}
+
 // rubyBin is the one binary operator step of ruby-to-llvm-ir.abnf (js_radd and
 // friends below), mirroring radd/rbin of ruby-interpreter.abnf: a user object
 // dispatches to its own operator method, strings and arrays get their Ruby
@@ -6316,11 +6357,8 @@ func (rt *jsrt) rubyBin(op string, l, r interface{}) interface{} {
 	}
 	switch op {
 	case "+":
-		if _, ok := l.(string); ok {
-			return strConcat(rt.rubyStr(l), rt.rubyStr(r))
-		}
-		if _, ok := r.(string); ok {
-			return strConcat(rt.rubyStr(l), rt.rubyStr(r))
+		if ls, ok := l.(string); ok {
+			return strConcat(ls, rt.rubyStrOperand(r))
 		}
 		if la, ok := l.(*jsArray); ok {
 			if ra, ok2 := r.(*jsArray); ok2 {
@@ -6512,7 +6550,7 @@ func (rt *jsrt) rubyNumMethod(t interface{}, name string, args []interface{}) (i
 	// Integer#chr: one byte, so 0..255; anything else is a RangeError.
 	case "chr":
 		if x < 0 || x > 255 {
-			rt.rubyRaiseErr("RangeError", rubyIntStr(x)+" out of char range")
+			rt.rubyRaiseErr(name, "RangeError", rubyIntStr(x)+" out of char range")
 		}
 		return string(rune(int32(x))), true
 	case "integer?":
@@ -6628,6 +6666,9 @@ func (rt *jsrt) rubyBigMethod(t *jsBigInt, name string, args []interface{}) (int
 	case "integer?":
 		return true, true
 	case "divmod":
+		if z, isNum := argAt(args, 0).(float64); isNum && z == 0 {
+			rt.rubyRaiseErr(name, "ZeroDivisionError", "divided by 0")
+		}
 		if q, ok := rt.rubyBigArith("/", t, argAt(args, 0)); ok {
 			m, _ := rt.rubyBigArith("%", t, argAt(args, 0))
 			return &jsArray{elems: []interface{}{q, m}}, true
@@ -6840,7 +6881,7 @@ func (rt *jsrt) rubyMathArg(name string, x float64) float64 {
 		bad = x < 1
 	}
 	if bad {
-		rt.rubyRaiseErr("Math::DomainError", "Numerical argument is out of domain - \""+name+"\"")
+		rt.rubyRaiseErr(name, "Math::DomainError", "Numerical argument is out of domain - \""+name+"\"")
 	}
 	return x
 }
@@ -7096,7 +7137,7 @@ func (rt *jsrt) rubyRangeMethod(t *jsObject, name string, args []interface{}) in
 	case "step":
 		by := int(math.Trunc(rubyToF(argAt(pos, 0))))
 		if by <= 0 {
-			rt.rubyRaiseErr("ArgumentError", "step can't be 0 or negative")
+			rt.rubyRaiseErr(name, "ArgumentError", "step can't be 0 or negative")
 		}
 		src := rt.rubyRangeToArr(t)
 		picked := &jsArray{}
@@ -7482,9 +7523,17 @@ func (rt *jsrt) rubyModRel(l, r interface{}, op string) interface{} {
 // shape the message reader and the rescue type test below both understand.
 // rubyRaiseErr raises a builtin Ruby exception FROM THE RUNTIME, so `1/0 rescue
 // "d"' and `begin; 1/0; rescue ZeroDivisionError; end' work. A plain rt.fail is an
-// ENGINE abort that no rescue clause can see.
-func (rt *jsrt) rubyRaiseErr(cls, msg string) {
-	panic(&jsThrown{value: rt.rubyExc(rt.rubyBuiltinClass(cls), []interface{}{msg})})
+// ENGINE abort that no rescue clause can see. frame is the builtin method that
+// raised ("/", "fetch"), MRI's first backtrace frame, recorded in the hidden
+// __rframe slot for js_rsite; "" when the raising method is not known, and then
+// no site is printed. Twins: raiseErr in ruby-interpreter.abnf, rbRaiseErr in
+// lib/ruby-rt.metajs.
+func (rt *jsrt) rubyRaiseErr(frame, cls, msg string) {
+	e := rt.rubyExc(rt.rubyBuiltinClass(cls), []interface{}{msg})
+	if frame != "" {
+		e.set("__rframe", frame)
+	}
+	panic(&jsThrown{value: e})
 }
 
 // rubyNoMethod raises NoMethodError for a name no method table answers, worded as
@@ -7501,10 +7550,14 @@ func (rt *jsrt) rubyNoMethod(t interface{}, name string) {
 // rubyNameErr raises a NameError / NoMethodError carrying MRI's #name and
 // #receiver in the hidden __nmname / __nmrecv slots. Twins: nameErr in
 // ruby-interpreter.abnf, rbNameErr in lib/ruby-rt.metajs.
+//
+// MRI reports both at the calling statement, in the calling method's own frame,
+// which an empty __rframe asks js_rsite for.
 func (rt *jsrt) rubyNameErr(cls, msg, name string, recv interface{}) {
 	e := rt.rubyExc(rt.rubyBuiltinClass(cls), []interface{}{msg})
 	e.set("__nmname", jsSym{s: name})
 	e.set("__nmrecv", recv)
+	e.set("__rframe", "")
 	panic(&jsThrown{value: e})
 }
 
@@ -7716,7 +7769,7 @@ func rubyStrToInum(s string, base int, badcheck bool) (*big.Int, bool) {
 func (rt *jsrt) rubyRadixArg(v interface{}, negOK bool) int {
 	base := int(rt.toNumber(v))
 	if base == 1 || base > 36 || base < -36 || (base < 0 && !negOK) {
-		rt.rubyRaiseErr("ArgumentError", "invalid radix "+strconv.Itoa(base))
+		rt.rubyRaiseErr("", "ArgumentError", "invalid radix "+strconv.Itoa(base))
 	}
 	return base
 }
@@ -7958,7 +8011,7 @@ func (rt *jsrt) rubyKernelConv(name string, args []interface{}) interface{} {
 		}
 		q := rt.rubyAsRat(args[1])
 		if q.n == 0 {
-			rt.rubyRaiseErr("ZeroDivisionError", "divided by 0")
+			rt.rubyRaiseErr(name, "ZeroDivisionError", "divided by 0")
 		}
 		return rt.rubyRatArith("/", p, q)
 	case "Complex":
@@ -7993,18 +8046,18 @@ func (rt *jsrt) rubyKernelConv(name string, args []interface{}) interface{} {
 		base := 0
 		if len(args) > 1 {
 			if _, isStr := v.(string); !isStr {
-				rt.rubyRaiseErr("ArgumentError", "base specified for non string value")
+				rt.rubyRaiseErr(name, "ArgumentError", "base specified for non string value")
 			}
 			base = rt.rubyRadixArg(args[1], true)
 		}
 		if isUndefOrNull(v) {
-			rt.rubyRaiseErr("TypeError", "can't convert nil into Integer")
+			rt.rubyRaiseErr(name, "TypeError", "can't convert nil into Integer")
 		}
 		if s, isStr := v.(string); isStr {
 			if n, ok := rubyStrToInum(s, base, true); ok {
 				return rt.rubyBigNarrow(n)
 			}
-			rt.rubyRaiseErr("ArgumentError", "invalid value for Integer(): "+rubyStrInspect(s))
+			rt.rubyRaiseErr(name, "ArgumentError", "invalid value for Integer(): "+rubyStrInspect(s))
 		}
 		// A Float converts as Float#to_i does.
 		if f, isFlo := v.(jsFlo); isFlo {
@@ -8014,13 +8067,13 @@ func (rt *jsrt) rubyKernelConv(name string, args []interface{}) interface{} {
 		return v
 	case "Float":
 		if isUndefOrNull(v) {
-			rt.rubyRaiseErr("TypeError", "can't convert nil into Float")
+			rt.rubyRaiseErr(name, "TypeError", "can't convert nil into Float")
 		}
 		if s, isStr := v.(string); isStr {
 			if f, ok := rubyStrToDbl(s, true); ok {
 				return jsFlo{f: f}
 			}
-			rt.rubyRaiseErr("ArgumentError", "invalid value for Float(): "+rubyStrInspect(s))
+			rt.rubyRaiseErr(name, "ArgumentError", "invalid value for Float(): "+rubyStrInspect(s))
 		}
 		return jsFlo{f: rubyToF(v)}
 	}
@@ -8135,7 +8188,7 @@ func (rt *jsrt) rubySetSlice(o, k1, k2, v interface{}) interface{} {
 		n := rt.strLen(str)
 		s, l := rubySliceBounds(n, k1, k2)
 		if s < 0 || s > n {
-			rt.rubyRaiseErr("IndexError", "index "+jsNumString(float64(s))+" out of string")
+			rt.rubyRaiseErr("[]=", "IndexError", "index "+jsNumString(float64(s))+" out of string")
 		}
 		if s+l > n {
 			l = n - s
@@ -9900,12 +9953,12 @@ func (rt *jsrt) rubyFmtIntOperand(v interface{}) interface{} {
 		if n, ok := rubyStrToInum(s, 0, true); ok {
 			return rt.rubyBigNarrow(n)
 		}
-		rt.rubyRaiseErr("ArgumentError", "invalid value for Integer(): "+rubyStrInspect(s))
+		rt.rubyRaiseErr("", "ArgumentError", "invalid value for Integer(): "+rubyStrInspect(s))
 	}
 	if uc, has := rt.rubyFmtUserConv(v, "to_int", "to_i"); has && rubyFmtIsNumV(uc) {
 		return uc
 	}
-	rt.rubyRaiseErr("TypeError", "can't convert "+rubyFmtConvName(v)+" into Integer")
+	rt.rubyRaiseErr("", "TypeError", "can't convert "+rubyFmtConvName(v)+" into Integer")
 	return float64(0)
 }
 
@@ -9917,12 +9970,12 @@ func (rt *jsrt) rubyFmtFloOperand(v interface{}) float64 {
 		if f, ok := rubyStrToDbl(s, true); ok {
 			return f
 		}
-		rt.rubyRaiseErr("ArgumentError", "invalid value for Float(): "+rubyStrInspect(s))
+		rt.rubyRaiseErr("", "ArgumentError", "invalid value for Float(): "+rubyStrInspect(s))
 	}
 	if uf, has := rt.rubyFmtUserConv(v, "to_f", ""); has && rubyFmtIsNumV(uf) {
 		return rubyToF(uf)
 	}
-	rt.rubyRaiseErr("TypeError", "can't convert "+rubyFmtConvName(v)+" into Float")
+	rt.rubyRaiseErr("", "TypeError", "can't convert "+rubyFmtConvName(v)+" into Float")
 	return 0
 }
 
@@ -9938,9 +9991,9 @@ func (rt *jsrt) rubyFmtCharOperand(v interface{}) float64 {
 		return rubyToF(uc)
 	}
 	if isUndefOrNull(v) {
-		rt.rubyRaiseErr("TypeError", "no implicit conversion from nil to integer")
+		rt.rubyRaiseErr("", "TypeError", "no implicit conversion from nil to integer")
 	}
-	rt.rubyRaiseErr("TypeError", "no implicit conversion of "+rubyFmtConvName(v)+" into Integer")
+	rt.rubyRaiseErr("", "TypeError", "no implicit conversion of "+rubyFmtConvName(v)+" into Integer")
 	return 0
 }
 
@@ -10134,7 +10187,7 @@ func (rt *jsrt) rubyFormat(spec string, arg interface{}) string {
 				// first and said so at the site; MRI raises, and the message is
 				// its own.
 				if rubyCharCount(s) != 1 {
-					rt.rubyRaiseErr("ArgumentError", "%c requires a character")
+					rt.rubyRaiseErr("", "ArgumentError", "%c requires a character")
 				}
 				body = s
 			} else {
@@ -10274,7 +10327,7 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 		if kind := rt.rubyClassNameRT(target); kind != "" && !rubyUserObj(target) && !isCls && !isCallable(target) {
 			nm := rt.rubyStr(argAt(args, 0))
 			if rt.rubyRespond(target, []interface{}{jsSym{s: nm}}) != true {
-				rt.rubyRaiseErr("NameError", "undefined method `"+nm+"' for class `"+kind+"'")
+				rt.rubyRaiseErr(name, "NameError", "undefined method `"+nm+"' for class `"+kind+"'")
 			}
 			recv := target
 			return rt.rubyMarkMethodVal(&hostFunc{name: "method:" + nm,
@@ -10782,7 +10835,7 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 				if blk != nil {
 					return rt.call(blk, jsUndef, []interface{}{argAt(pos, 0)})
 				}
-				rt.rubyRaiseErr("KeyError", "key not found: "+rt.rubyInspect(argAt(pos, 0)))
+				rt.rubyRaiseErr(name, "KeyError", "key not found: "+rt.rubyInspect(argAt(pos, 0)))
 			}
 			if v, handled := rt.rubyHashMethod(o, keys, vals, name, args); handled {
 				return v
@@ -10845,7 +10898,7 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 				if _, userHas := rubyFindMethod(o, "method"); !userHas {
 					nm := rt.rubyStr(argAt(args, 0))
 					if _, found := rubyFindMethod(o, nm); !found {
-						rt.rubyRaiseErr("NameError", "undefined method `"+nm+"' for class `"+rubyOwnerName(o)+"'")
+						rt.rubyRaiseErr(name, "NameError", "undefined method `"+nm+"' for class `"+rubyOwnerName(o)+"'")
 					}
 					recv := interface{}(o)
 					return rt.rubyMarkMethodVal(&hostFunc{name: "method:" + nm,
@@ -11062,14 +11115,18 @@ func (rt *jsrt) rubyLamArity(args []interface{}, kinds string) {
 		}
 	}
 	if npos < req {
-		rt.rubyArgCountErr(npos, kinds)
+		rt.rubyArgCountErr(npos, kinds, false)
 	}
 	if !star && npos > len(kinds) {
-		rt.rubyArgCountErr(npos, kinds)
+		rt.rubyArgCountErr(npos, kinds, false)
 	}
 }
 
-func (rt *jsrt) rubyArgCountErr(given int, kinds string) {
+//
+// own marks a check made in the callee's own entry, where the running site is
+// the def's line (MRI's `prog.rb:1:in `f'') and js_rsite may print it; Kernel#lambda
+// checks before its block runs, at the caller's statement, so it passes false.
+func (rt *jsrt) rubyArgCountErr(given int, kinds string, own bool) {
 	req, opt, star := 0, 0, false
 	for i := 0; i < len(kinds); i++ {
 		switch kinds[i] {
@@ -11087,9 +11144,13 @@ func (rt *jsrt) rubyArgCountErr(given int, kinds string) {
 	} else if opt > 0 {
 		want += ".." + strconv.Itoa(req+opt)
 	}
-	panic(&jsThrown{value: rt.rubyExc(rt.rubyBuiltinClass("ArgumentError"),
+	e := rt.rubyExc(rt.rubyBuiltinClass("ArgumentError"),
 		[]interface{}{"wrong number of arguments (given " + strconv.Itoa(given) +
-			", expected " + want + ")"})})
+			", expected " + want + ")"})
+	if own {
+		e.set("__rframe", "")
+	}
+	panic(&jsThrown{value: e})
 }
 
 // rubyArityOf is Proc#arity. The SHAPE is stored rather than the answer because
@@ -12697,7 +12758,7 @@ func (rt *jsrt) rubyArrayMethod(t *jsArray, name string, args []interface{}) int
 		if blk != nil {
 			return rt.call(blk, jsUndef, []interface{}{argAt(pos, 0)})
 		}
-		rt.rubyRaiseErr("IndexError", fmt.Sprintf("index %d outside of array bounds: %d...%d", fx, -n, n))
+		rt.rubyRaiseErr(name, "IndexError", fmt.Sprintf("index %d outside of array bounds: %d...%d", fx, -n, n))
 	}
 	rt.rubyNoMethod(t, name)
 	return nil
@@ -14019,6 +14080,32 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			}
 			panic(&jsThrown{value: e})
 		},
+		// (exception, site): an exception the RUNTIME raised gets its first
+		// backtrace frame where it is caught - a rescue clause or the top of the
+		// program - from the running statement's site, which is still the raising
+		// one there. __rframe names the builtin method that raised (the frame
+		// becomes "prog.rb:2:in `/'"); an empty one keeps the site's own method.
+		// An exception without __rframe, or one that already has a site, is left
+		// alone. Twins: excSite in ruby-interpreter.abnf, js_rsite in
+		// lib/ruby-rt.metajs.
+		"js_rsite": func(a []uint64) uint64 {
+			o, isObj := u(a[0]).(*jsObject)
+			site, isStr := u(a[1]).(string)
+			if !isObj || !isStr {
+				return jsHUndefined
+			}
+			frame, framed := o.props["__rframe"].(string)
+			if _, had := o.props["__rwhere"]; had || !framed {
+				return jsHUndefined
+			}
+			if frame != "" {
+				if at := strings.LastIndex(site, ":in `"); at >= 0 {
+					site = site[:at] + ":in `" + frame + "'"
+				}
+			}
+			rt.setMember(o, "__rwhere", site)
+			return jsHUndefined
+		},
 		// THE TOP OF THE PROGRAM: an exception nobody rescued, printed with its
 		// message and class rather than by the generic uncaught-throw handler,
 		// on stderr as MRI writes it.
@@ -14480,14 +14567,14 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			// BLOCK never reaches here - the emitter binds one with js_rblockarg,
 			// and Ruby arity-checks methods and lambdas only.
 			if npos < required {
-				rt.rubyArgCountErr(npos, kinds)
+				rt.rubyArgCountErr(npos, kinds, true)
 			}
 			// TOO MANY IS AN ERROR TOO, and only a *splat lifts the ceiling. MRI
 			// raises for `->(x, y = 2) { }.call(1, 2, 3)` exactly as it does for
 			// too few. bindParams of ruby-interpreter.abnf and js_rargchk's fast
 			// path ask the same question.
 			if !strings.ContainsRune(kinds, '2') && npos > len(kinds) {
-				rt.rubyArgCountErr(npos, kinds)
+				rt.rubyArgCountErr(npos, kinds, true)
 			}
 			spare := npos - required
 			ai := 0
@@ -14745,7 +14832,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			// TOO MANY is an error as well: this arm's parameter list is
 			// all-required, so the count must be EXACTLY req.
 			if npos != req {
-				rt.rubyArgCountErr(npos, strings.Repeat("0", req))
+				rt.rubyArgCountErr(npos, strings.Repeat("0", req), true)
 			}
 			return jsHUndefined
 		},
