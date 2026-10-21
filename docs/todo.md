@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-740** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-741** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -68,11 +68,14 @@ its report; anything structural there is a CORE ticket.
 
 # RB — Ruby
 
-### T-738 ruby: strings produced by methods are not boxes; Array#to_h; define_method compiled; frozen hash keys; frozen_string_literal · P2 · RB · IN PROGRESS (RB worker, round 13) [V]
-`a = "a b".split; a.each { |w| w.upcase! }; p a` → ruby `["A", "B"]`, ours unchanged: a computed string copied into an array before its
-first mutation keeps the old text (every string-producing method must return a box, or promotion must reach the shared element).
-`[["x",1]].to_h` → NoMethodError in all engines (ruby `{"x"=>1}`). `define_method("bar") { }` in a class body → NoMethodError in the
-compiler legs only. `h.keys[0].frozen?` → false (ruby true: string keys are frozen copies). `# frozen_string_literal: true` is ignored.
+### T-740 ruby: `<<` through a method call reads a raw property; `=begin`/`=end`; dynamic define_method compiled; `p ?c` · P1 · RB · OPEN [V]
+`a = [[1,2]]; a.first << 3; p a` → ruby `[[1, 2, 3]]`, ours "not a number in '<<'"; `h = {"abc"=>1}; h.keys[0] << "x"` mutates the
+hash's internal key (ruby FrozenError): an append statement's target path does `o[s.key]` for a `.name` step instead of calling the
+method (interpreter resolveRefRuby and the compiler) — P1. `=begin` / `=end` block comments fail to parse in both grammars — P2.
+`[:a,:b].each { |n| define_method(n) { } }` / `define_method(var)` → NoMethodError in the compiler legs (needs runtime method
+installation). `p ?c.frozen?` → interpreter prints nothing, compiler NameError for `p` (ruby false; `?c` read as a ternary).
+Residue: `[]` on a String, format/sprintf/gets results and builtin-yielded block args (each_char) are unboxed until read through a
+place; read-out key boxes are distinct (`h.keys[0].equal?(h.keys[0])` false, ruby true).
 
 ---
 
@@ -787,6 +790,7 @@ T-734 js: `Object.assign` onto an array aborts compiled; data attributes on arra
 T-735 tooling: -callgraph definition names for python (`jsf_N`), php (body line, not header), swift (mangled `f$1`) — DONE a130da28 (python name pass follows js_pysig/js_pyfnname, php hoisted defs at their header, swift single definitions by source name — srcpos 26/26; follow-up T-737)
 T-736 ruby: bang methods on strings do not mutate; `puts` inside an expression; send with a receiver to a top-level def; `===` — DONE 942cfc07 4db06632 (strings are mutable boxes per literal, promoted in place on first mutation through any place; frozen strings, identity; puts in expressions; receiver send to top-level defs; === by name — = ruby 2.6; ruby bench unchanged; follow-up T-738)
 T-737 tooling + js: swift overloads and module bodies in -callgraph; `Object.assign(5, {...})` compiled — DONE ca9a0474 6763ce45 (swift overloads by source name, module bodies as <module>, unescaped jsonl; Object.assign ToObject's a primitive target incl. host objects — srcpos 26/26, = node; follow-up T-739)
+T-738 ruby: strings produced by methods are not boxes; Array#to_h; define_method compiled; frozen hash keys; frozen_string_literal — DONE bfe97792 4235b67f (method/operator results are fresh string boxes incl. arrays of them, Array#to_h, define_method by String/Symbol in the compiler, frozen hash keys and immediates, frozen_string_literal per file — = ruby 2.6; follow-up T-740)
 
 # Settled — do not re-open
 
