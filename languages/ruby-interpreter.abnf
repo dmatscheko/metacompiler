@@ -3591,15 +3591,29 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     function isCpx(v) { return v !== null && v !== undefined && typeof v == "object" && v.__cpx === true }
     // ----- The mutable String -----
     // A Ruby String is an OBJECT that every alias shares, so `t = s; s << "x"' shows
-    // in t. A string a literal builds (and dup / clone / +@ / freeze) is therefore the
-    // box {__rs: text, __fz: frozen}, and the mutators change __rs in place. A
-    // string any other method or operator builds stays a plain host string - an
-    // immutable value, which pays nothing - and becomes a box only when a mutator
-    // reaches it through a variable or element, which the box is written back to
-    // (foldCallMember, makeAppendStmt, rsetSlice). So a computed string that was
-    // copied BEFORE its first mutation keeps the old text in the copy. Twins: jsRStr
-    // in abnf/jsrtruby.go, rbIsRStr in lib/ruby-rt.metajs.
+    // in t. What the program gets from a string literal, a method call (boxOut), a
+    // String operator (+ * %) or to_s is therefore the box {__rs: text, __fz:
+    // frozen}, and the mutators change __rs in place; an Array a String method
+    // builds holds boxes. Inside the runtime a String stays a plain host string,
+    // and one that still reaches the program plain - a `[]' read of a String, a
+    // Kernel function's answer, a block argument a builtin yields - becomes a box
+    // when a mutator reaches it through a variable or element, which the box is
+    // written back to (foldCallMember, makeAppendStmt, rsetSlice); a copy taken
+    // before that keeps the old text. Twins: jsRStr in abnf/jsrtruby.go, the
+    // {__rstr} box of lib/ruby-rt.metajs.
     function isRStr(v) { return v !== null && v !== undefined && typeof v == "object" && typeof v.__rs == "string" }
+    // A method call's answer as the program sees it: a String the call built is a
+    // new box, and an Array a String method answers (split, chars, lines, scan,
+    // partition - always a new Array) holds boxes. Twins: rubyBoxOut in
+    // abnf/jsrtruby.go, rbBoxOut in lib/ruby-rt.metajs.
+    function boxOut(recv, v) {
+        if (typeof v == "string") { return mkRStr(v) }
+        if (Array.isArray(v) && (typeof recv == "string" || isRStr(recv))) {
+            for (var i = 0; i < v.length; i++) { if (typeof v[i] == "string") { v[i] = mkRStr(v[i]) } }
+        }
+        return v
+    }
+
     function mkRStr(s) { return {__rs: s, __fz: false} }
     function rsText(v) { return isRStr(v) ? v.__rs : v }
     function rsTextList(a) {
@@ -3608,6 +3622,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         return out
     }
     // A string literal: a fresh box at every evaluation, as MRI allocates one. Under
+
     // `# frozen_string_literal: true' (lib/ruby-magic.js) it is frozen instead, and
     // one shared object per text unless it interpolates (dyn).
     function makeStrLit(t, dyn) {
@@ -5828,11 +5843,12 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     function isExcObj(v) {
         return isUserObj(v) && valueIsA(v, hostGlobals["Exception"])
     }
+    // String#+ (and #*, #% in binOps) answer a new String: a box.
     function radd(l, r) {
         if (isExcObj(l) && typeof lookupMethod(l.__class, "+") != "function") { return rstr(l) + rstr(r) }
         if (isUserObj(l)) { return mcall(l, "+", [r], null) }
-        if (typeof l == "string") { return l + strOperand(r) }
-        if (isRStr(l)) { return l.__rs + strOperand(r) }
+        if (typeof l == "string") { return mkRStr(l + strOperand(r)) }
+        if (isRStr(l)) { return mkRStr(l.__rs + strOperand(r)) }
         if (Array.isArray(l) && Array.isArray(r)) { return l.concat(r) }
         return numBin("+", l, r)
     }
@@ -8534,7 +8550,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (name == "upcase" || name == "downcase" || name == "swapcase" || name == "capitalize"
                 || name == "succ" || name == "next") { return mkSym(rstr(mcall(target.s, name, args, null))) }
             if (name == "empty?") { return target.s == "" }
-            if (name == "to_proc") { return function(x) { return mcall(x, target.s, [], null) } }
+            if (name == "to_proc") { return function(x) { return boxOut(x, mcall(x, target.s, [], null)) } }
             noMethod(target, name)
         }
         if (isRange(target)) { return rangeMethod(target, name, args, blk) }
@@ -10014,21 +10030,21 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 }
                 if (mut) { pObj = undefined }
                 if (s.kind == "mcall") {
-                    cur = invokeMcall(cur, s)
+                    cur = boxOut(cur, invokeMcall(cur, s))
                 } else if (s.kind == "smcall") {
                     if (cur === null || cur === undefined) { cur = null }
-                    else { cur = invokeMcall(cur, s) }
+                    else { cur = boxOut(cur, invokeMcall(cur, s)) }
                 } else if (s.kind == "field") {
                     visCheck(cur, s.name)
-                    if (isUserObj(cur)) { cur = mcall(cur, s.name, [], null) }
+                    if (isUserObj(cur)) { cur = boxOut(cur, mcall(cur, s.name, [], null)) }
                     else if (s.name == "length" || s.name == "size") { cur = rlen(cur, s.name) }
-                    else if (s.name == "to_s") { cur = isRStr(cur) ? cur : rstr(cur) }
-                    else { cur = mcall(cur, s.name, [], null) }
+                    else if (s.name == "to_s") { cur = isRStr(cur) ? cur : mkRStr(rstr(cur)) }
+                    else { cur = boxOut(cur, mcall(cur, s.name, [], null)) }
                 } else if (s.kind == "sfield") {
                     if (cur === null || cur === undefined) { cur = null }
                     else if (s.name == "length" || s.name == "size") { cur = rlen(cur, s.name) }
-                    else if (s.name == "to_s") { cur = isRStr(cur) ? cur : rstr(cur) }
-                    else { cur = mcall(cur, s.name, []) }
+                    else if (s.name == "to_s") { cur = isRStr(cur) ? cur : mkRStr(rstr(cur)) }
+                    else { cur = boxOut(cur, mcall(cur, s.name, [])) }
                 } else if (s.idx2 != undefined && s.idx2 != null) {
                     // `x[start, len]': the two-argument subscript is the `[]' METHOD,
                     // so String / Array answer a subsequence and a user class' own
@@ -10487,7 +10503,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             v = t()
             if (typeof v == "function") { return v }
             if (isSym(v)) {
-                return function(x) { return mcall(x, v.s, [], null) }
+                return function(x) { return boxOut(x, mcall(x, v.s, [], null)) }
             }
             // `&nil' is Ruby for "no block", and it is how a method FORWARDS the
             // block it may not have been given: `def a(*r, &b); c(*r, &b); end'
@@ -10776,8 +10792,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 if (hasOwn(scopes[si], name)) { f = scopes[si][name] }
             }
             if (f == undefined && typeof selfMethod(name) == "function") {
-                if (bf == null) { return mcall(findSelf(), name, argv, null) }
-                return catchBlkBreak(function() { return mcall(findSelf(), name, argv, bf) })
+                if (bf == null) { return boxOut(findSelf(), mcall(findSelf(), name, argv, null)) }
+                return boxOut(findSelf(), catchBlkBreak(function() { return mcall(findSelf(), name, argv, bf) }))
             }
             if (f == undefined && (name == "send" || name == "__send__") && !hasVar(name)) {
                 var sdf = anytype
@@ -10786,8 +10802,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             }
             // An Object method a bare call reaches on the implicit self.
             if (f == undefined && selfCallNames.indexOf(name) >= 0 && rubyMethods["$" + name] !== true && !hasVar(name)) {
-                if (bf == null) { return mcall(ivarSelf(), name, argv, null) }
-                return catchBlkBreak(function() { return mcall(ivarSelf(), name, argv, bf) })
+                if (bf == null) { return boxOut(ivarSelf(), mcall(ivarSelf(), name, argv, null)) }
+                return boxOut(ivarSelf(), catchBlkBreak(function() { return mcall(ivarSelf(), name, argv, bf) }))
             }
             if ((f == undefined || typeof f != "function") && rubyMethods["$" + name] === true && hasVar("$d$" + name)) {
                 f = getVar("$d$" + name)
@@ -11541,7 +11557,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (name == "rand" && rubyMethods["$rand"] !== true) { return hostGlobals["rand"](null) }
             var sm2 = anytype
             sm2 = selfMethod(name)
-            if (typeof sm2 == "function") { return mcall(findSelf(), name, [], null) }
+            if (typeof sm2 == "function") { return boxOut(findSelf(), mcall(findSelf(), name, [], null)) }
             // A def, unless a top-level local of its name has been bound (a def body
             // cannot see that local).
             if (rubyMethods["$" + name] === true && hasVar("$d$" + name)) {
@@ -11550,8 +11566,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 if (frameScopeOf(scopes) != null || !hasOwn(globalScope, name) || globalScope[name] === f) { return f() }
             }
             if (bareSelfCallNames.indexOf(name) >= 0 && rubyMethods["$" + name] !== true && !hasVar(name)) {
-                return mcall(ivarSelf(), name, [], null)
+                return boxOut(ivarSelf(), mcall(ivarSelf(), name, [], null))
             }
+
             // A def does not see the locals around it: inside a method the loop above
             // searched its whole own frame, and what globalScope holds under a local
             // name is a top-level LOCAL unless it is a method. Twin of js_rlvar in
@@ -13228,9 +13245,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     binOps["<="] = function(l, r) { if (isClassObj(l) && isClassObj(r)) { return modRel(l, r, "<=") } return rcmp(l, r) <= 0 }
     binOps[">="] = function(l, r) { if (isClassObj(l) && isClassObj(r)) { return modRel(l, r, ">=") } return rcmp(l, r) >= 0 }
     binOps["-"]  = function(l, r) { return rbin("-", l, r) }
-    binOps["*"]  = function(l, r) { if (typeof l == "string" || isRStr(l)) { return strRepeat(rsText(l), toF(r)) } return rbin("*", l, r) }
+    binOps["*"]  = function(l, r) { if (typeof l == "string" || isRStr(l)) { return mkRStr(strRepeat(rsText(l), toF(r))) } return rbin("*", l, r) }
     binOps["/"]  = function(l, r) { return rbin("/", l, r) }
-    binOps["%"]  = function(l, r) { if (typeof l == "string" || isRStr(l)) { return rformat(rsText(l), r, "%") } return rbin("%", l, r) }
+    binOps["%"]  = function(l, r) { if (typeof l == "string" || isRStr(l)) { return mkRStr(rformat(rsText(l), r, "%")) } return rbin("%", l, r) }
     binOps["**"] = function(l, r) { return rbin("**", l, r) }
     binOps["&"]  = function(l, r) { return rbin("&", l, r) }
     binOps["|"]  = function(l, r) { return rbin("|", l, r) }

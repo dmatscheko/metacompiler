@@ -106,8 +106,9 @@ func (rt *jsrt) addRubyFmtExterns(m map[string]func(args []uint64) uint64) {
 	baseMod := m["js_rmod"]
 	m["js_rmod"] = func(a []uint64) uint64 {
 		if s, ok := rubySV(u(a[0])).(string); ok {
-			return rt.wrapStr(rt.rubyFormat2(s, u(a[1]), "%"))
+			return w(&jsRStr{s: rt.rubyFormat2(s, u(a[1]), "%")})
 		}
+
 		return baseMod(a)
 	}
 
@@ -117,7 +118,7 @@ func (rt *jsrt) addRubyFmtExterns(m map[string]func(args []uint64) uint64) {
 	// call reaches the base binding after one type switch.
 	for _, name := range []string{"js_rmcall", "js_rxmcall"} {
 		base := m[name]
-		m[name] = func(a []uint64) uint64 {
+		call := func(a []uint64) uint64 {
 			nm, args := rt.rubyRealCall(rt.toString(u(a[1])), u(a[2]))
 			// A String box answers through rubyMethod, which reaches the
 			// pattern-taking methods on its text itself; a plain string's sub! /
@@ -147,6 +148,16 @@ func (rt *jsrt) addRubyFmtExterns(m map[string]func(args []uint64) uint64) {
 			}
 			rt.rubyFloDomainGuard(u(a[0]), nm, args)
 			return base(a)
+		}
+		m[name] = func(a []uint64) uint64 {
+			h := call(a)
+			if v := u(h); v != nil {
+				switch v.(type) {
+				case string, *jsArray:
+					return w(rubyBoxOut(u(a[0]), v))
+				}
+			}
+			return h
 		}
 	}
 
@@ -2238,16 +2249,37 @@ func (rt *jsrt) rubyBuiltinExtFind(v interface{}, name string) (interface{}, boo
 	return nil, false
 }
 
-// jsRStr is a MUTABLE Ruby String: what a string literal evaluates to, and what a
-// mutator makes of a plain string it reaches through a variable or an element. A
-// plain Go string stays the value every other String method or operator answers;
-// the rule, and the one case it leaves out, are at isRStr in
-// languages/ruby-interpreter.abnf. It is a pointer, so every alias shares it; fz is
-// #frozen?. Twin of the {__rs, __fz} box of lib/ruby-rt.metajs.
+// jsRStr is a MUTABLE Ruby String: what a string literal, a method call, a String
+// operator and to_s evaluate to, and what a mutator makes of a plain string it
+// reaches through a variable or an element. The rule, and what it leaves out, are
+// at isRStr in languages/ruby-interpreter.abnf. It is a pointer, so every alias
+// shares it; fz is #frozen?. Twin of the {__rs, __fz} box of lib/ruby-rt.metajs.
 type jsRStr struct {
 	s  string
 	fz bool
 	id jsHandleID
+}
+
+// rubyBoxOut is a method call's answer as the program sees it: a String the call
+// built is a new object, so a plain string becomes a box, and an Array a String
+// method answers (split, chars, lines, scan, partition) holds boxes - such an
+// Array is always new. Twin of boxOut in ruby-interpreter.abnf and the tail of
+// js_rxmcall in lib/ruby-rt.metajs.
+func rubyBoxOut(recv, v interface{}) interface{} {
+	switch t := v.(type) {
+	case string:
+		return &jsRStr{s: t}
+	case *jsArray:
+		switch recv.(type) {
+		case string, *jsRStr:
+			for i, e := range t.elems {
+				if s, ok := e.(string); ok {
+					t.elems[i] = &jsRStr{s: s}
+				}
+			}
+		}
+	}
+	return v
 }
 
 // rubySV reads a String box as its text and hands every other value back.
@@ -2525,12 +2557,13 @@ func init() {
 
 		m["js_rspct"] = func(a []uint64) uint64 { return w(rubyPctLit(u(a[0]))) }
 		m["js_rsprom"] = func(a []uint64) uint64 { return w(rt.rubyStrPromote(u(a[0]), u(a[1]), u(a[2]))) }
-		// A bare `.to_s': js_rstr, except that a String box answers itself.
+		// A bare `.to_s': a new String of js_rstr's text, except that a String box
+		// answers itself.
 		m["js_rtos"] = func(a []uint64) uint64 {
 			if _, isBox := u(a[0]).(*jsRStr); isBox {
 				return a[0]
 			}
-			return rt.wrapStr(rt.rubyStr(u(a[0])))
+			return w(&jsRStr{s: rt.rubyStr(u(a[0]))})
 		}
 		// Unary plus: the identity on a number, String#+@ on a String.
 		m["js_rpos"] = func(a []uint64) uint64 {

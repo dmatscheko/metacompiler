@@ -212,11 +212,12 @@ function rbSym(name) {
 
 // ================================================ the mutable String ========
 //
-// A string literal evaluates to the box {__rstr: true, __s: text, __fz: frozen},
-// which every alias shares and the mutators change in place; a plain string stays
-// the value every other method or operator answers. The rule, and the one case it
-// leaves out, are at isRStr in languages/ruby-interpreter.abnf; jsRStr in
-// abnf/jsrtruby.go is the Go twin.
+// A string literal, a method call (rbBoxOut), a String operator and to_s evaluate
+// to the box {__rstr: true, __s: text, __fz: frozen}, which every alias shares and
+// the mutators change in place; inside the runtime a String is a plain string. The
+// rule, and what it leaves out, are at isRStr in languages/ruby-interpreter.abnf;
+// jsRStr in abnf/jsrtruby.go is the Go twin.
+
 function rbMkRStr(s, fz) { return {__rstr: true, __s: s, __fz: fz} }
 function rbSV(v) {
     if (typeof v == "object" && rtTag(v, "__rstr")) { return v["__s"] }
@@ -357,10 +358,11 @@ function js_rspct(v) {
     }
     return out
 }
-// A bare `.to_s': js_rstr, except that a String box answers itself.
+// A bare `.to_s': a new String of js_rstr's text, except that a String box
+// answers itself.
 function js_rtos(v) {
     if (typeof v == "object" && rtTag(v, "__rstr")) { return v }
-    return rbStr(v)
+    return rbMkRStr(rbStr(v), false)
 }
 // Unary plus: the identity on a number, String#+@ on a String.
 function js_rpos(v) {
@@ -4394,8 +4396,9 @@ function rbBin(op, l, r) {
         }
         return rbMethod(l, op, [r])
     }
+    // String#+, #* and #% answer a new String: a box.
     if (op == "+") {
-        if (typeof l == "string") { return l + rbStrOperand(r) }
+        if (typeof l == "string") { return rbMkRStr(l + rbStrOperand(r), false) }
         if (rbIsArr(l) && rbIsArr(r)) {
             var out = rtCopyArr(l)
             var i = 0
@@ -4410,7 +4413,7 @@ function rbBin(op, l, r) {
         if (typeof l == "string") {
             var n = Math.trunc(rbToF(r))
             if (n < 0) { n = 0 }
-            return rtRepeat(l, n)
+            return rbMkRStr(rtRepeat(l, n), false)
         }
         // Array#* is repetition with an Integer and JOIN with a String.
         if (rbIsArr(l) && typeof r == "string") { return rbArrJoin(l, r) }
@@ -4462,8 +4465,9 @@ function rbBin(op, l, r) {
         if (rbIsArr(l) && rbIsArr(r)) { return rbArrOr(l, r) }
     }
     if (op == "%") {
-        if (typeof l == "string") { return rbFormat(l, r, "%") }
+        if (typeof l == "string") { return rbMkRStr(rbFormat(l, r, "%"), false) }
     }
+
     if (op == "<<") {
         if (rbIsArr(l)) {
             l.push(r)
@@ -9676,7 +9680,8 @@ function js_rsymproc(v) {
         var rest = []
         if (a1 !== undefined) { rest.push(a1) }
         if (a2 !== undefined) { rest.push(a2) }
-        return rbMethod(recv, name, rest)
+        return rbBoxOut(recv, rbMethod(recv, name, rest))
+
     }
 }
 
@@ -9814,6 +9819,8 @@ function js_rxnew(src, flags) {
 
 function js_rxmcall(target, name, args) {
     var mn = rbStr(name)
+    var r = anytype
+    r = undefined
     // A STRING PATTERN reaches the regexp half too: Ruby compiles a String
     // pattern to a Regexp, so `s.sub("a", "z")` (and gsub, sub!, gsub!, match,
     // match?, =~, scan) must reach rbRxMethod, which normalizes a String
@@ -9821,10 +9828,26 @@ function js_rxmcall(target, name, args) {
     if (rbRxIsRegex(target) || rbRxIsMatch(target)
         || (rbIsArr(args) && args.length > 0 && rbRxIsRegex(args[0]))
         || (typeof target == "string" && rbRxWantsPattern(mn))) {
-        var v = rbRxMethod(target, mn, args)
-        if (v !== undefined) { return v }
+        r = rbRxMethod(target, mn, args)
     }
-    return rbMethod(target, mn, args)
+    if (r === undefined) { r = rbMethod(target, mn, args) }
+    if (typeof r == "string" || typeof target == "string") { return rbBoxOut(target, r) }
+    return r
+}
+// A method call's answer as the program sees it: a String the call built is a new
+// box, and so is every String in an Array a String method built (a box receiver
+// answers through a call on its text, so it is covered). Twin of rubyBoxOut in
+// abnf/jsrtruby.go.
+function rbBoxOut(recv, r) {
+    if (typeof r == "string") { return rbMkRStr(r, false) }
+    if (typeof recv == "string" && rbIsArr(r)) {
+        var i = 0
+        while (i < r.length) {
+            if (typeof r[i] == "string") { r[i] = rbMkRStr(r[i], false) }
+            i = i + 1
+        }
+    }
+    return r
 }
 // The String methods whose argument is a PATTERN. split and index are left out on
 // purpose: with a plain-string argument they are ordinary string operations and

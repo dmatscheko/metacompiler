@@ -3030,7 +3030,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                     // like #inspect, a Symbol is its bare name.
                     pv = callExt(b, "js_rstr", [r.v])
                 }
-                v = callExt(b, "js_radd", [v, pv])
+                // Both sides are plain text, so the plain concatenation: String#+
+                // (js_radd) would box every intermediate piece.
+                v = callExt(b, "js_add", [v, pv])
             }
             return {b: b, v: v}
         }
@@ -5754,12 +5756,13 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         return function(b) {
             var srcV = emitStr(b, "")
             for (var j = 0; j < parts.length; j++) {
-                if (parts[j].s != undefined) { srcV = callExt(b, "js_radd", [srcV, emitStr(b, parts[j].s)]) }
+                if (parts[j].s != undefined) { srcV = callExt(b, "js_add", [srcV, emitStr(b, parts[j].s)]) }
                 else {
                     var r = parts[j].e(b)
                     b = r.b
-                    srcV = callExt(b, "js_radd", [srcV, callExt(b, "js_rstr", [r.v])])
+                    srcV = callExt(b, "js_add", [srcV, callExt(b, "js_rstr", [r.v])])
                 }
+
             }
             return {b: b, v: callExt(b, "js_rxnew", [srcV, emitStr(b, neutral)])}
         }

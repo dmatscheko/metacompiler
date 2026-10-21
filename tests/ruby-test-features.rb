@@ -1307,10 +1307,10 @@ t13_up = []
 check("t13-upto", t13_up, ["ab", "ac", "ad"])
 
 # ----- A String is mutable: a mutator changes the OBJECT every alias holds -----
-# A literal is a fresh String at every evaluation, a String a method built becomes
-# shareable at its first in-place change through a variable or an element, and a
-# frozen one raises FrozenError. Ruby-2 forms; every want is /usr/bin/ruby 2.6.10's
-# answer.
+# A literal is a fresh String at every evaluation, and so is a String a method
+# call, an operator or to_s builds - an Array a String method builds holds fresh
+# ones; a frozen one raises FrozenError. Ruby-2 forms; every want is
+# /usr/bin/ruby 2.6.10's answer.
 ms_a = "ab"
 ms_b = ms_a
 ms_a.upcase!
@@ -1385,6 +1385,30 @@ ms_k = "key"
 ms_kh = {ms_k => 1}
 ms_k << "!"
 check("mstr-hash-key-copy", [ms_kh, ms_kh["key"], ms_k], [{"key" => 1}, 1, "key!"])
+cb_src = ["a b", "xy", 7]
+cb_w = cb_src[0].split
+cb_w.each { |w| w.upcase! }
+cb_c = cb_src[1].chars
+cb_c.each { |c| c << "!" }
+cb_m = cb_w.map(&:downcase)
+cb_m.each { |w| w << "1" }
+check("mstr-computed-array", [cb_w, cb_c, cb_m], [["A", "B"], ["x!", "y!"], ["a1", "b1"]])
+cb_a = cb_src[1] + "z"
+cb_b = cb_a
+cb_a << "+"
+cb_t = cb_src[2].to_s
+cb_u = cb_t
+cb_t.concat("0")
+cb_f = "%s." % cb_src[1]
+cb_g = cb_f
+cb_f.upcase!
+cb_r = cb_src[1].reverse
+cb_s = cb_r
+cb_r.capitalize!
+check("mstr-computed-alias", [cb_b, cb_u, cb_g, cb_s], ["xyz+", "70", "XY.", "Yx"])
+check("mstr-computed-identity", [cb_r.equal?(cb_r.to_s), cb_src[1].upcase.equal?(cb_src[1].upcase), cb_r.frozen?],
+      [true, false, false])
+
 
 # ----- mixins as ancestors: is_a?, ancestors, and the module operators -----
 # ruby-to-llvm-ir.abnf FLATTENS `include M' at build time - M's method bodies are

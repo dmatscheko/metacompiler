@@ -6400,10 +6400,11 @@ func (rt *jsrt) rubyBin(op string, l, r interface{}) interface{} {
 	if _, ok := r.(*jsRStr); ok && op != "<<" {
 		return rt.rubyBin(op, l, rubySV(r))
 	}
+	// String#+, #* and #% answer a new String: a box.
 	switch op {
 	case "+":
 		if ls, ok := l.(string); ok {
-			return strConcat(ls, rt.rubyStrOperand(r))
+			return &jsRStr{s: strConcat(ls, rt.rubyStrOperand(r))}
 		}
 		if la, ok := l.(*jsArray); ok {
 			if ra, ok2 := r.(*jsArray); ok2 {
@@ -6418,7 +6419,7 @@ func (rt *jsrt) rubyBin(op string, l, r interface{}) interface{} {
 			if n < 0 {
 				n = 0
 			}
-			return strings.Repeat(ls, n)
+			return &jsRStr{s: strings.Repeat(ls, n)}
 		}
 		if la, ok := l.(*jsArray); ok {
 			// Array#* is repetition with an Integer and JOIN with a String.
@@ -6470,7 +6471,7 @@ func (rt *jsrt) rubyBin(op string, l, r interface{}) interface{} {
 		}
 	case "%":
 		if ls, ok := l.(string); ok {
-			return rt.rubyFormat2(ls, r, "%")
+			return &jsRStr{s: rt.rubyFormat2(ls, r, "%")}
 		}
 	case "<<":
 		if la, ok := l.(*jsArray); ok {
@@ -11181,8 +11182,9 @@ func (rt *jsrt) rubySymProc(name string) *hostFunc {
 		if len(args) > 1 {
 			rest = args[1:]
 		}
-		return rt.rubyMethod(argAt(args, 0), name, rest)
+		return rubyBoxOut(argAt(args, 0), rt.rubyMethod(argAt(args, 0), name, rest))
 	}}
+
 }
 
 // rubyBlockArgs splits a Ruby argument list into its positional part and the
