@@ -77,7 +77,7 @@ BodyItem    = HdBodyItem | AliasTop | Statement ;
 
 // module M ... end: creates (or reopens) the module object and runs its body, a program
 // of the same items. A nested module recurses.
-ModuleDecl  <~~ push(makeModuleStmt(takeAll(), up.pos)) ~~>
+ModuleDecl  <~~ clsRanges.push({s: up.start, e: up.pos}); push(makeModuleStmt(takeAll(), up.pos)) ~~>
             = KwModule ScopedName <~~ push(up.in) ~~>
               { Semi | Def <~~ push({method: pop()}) ~~> | ClassDecl <~~ push({nested: pop()}) ~~>
               | ModuleDecl <~~ push({nested: pop()}) ~~> | AliasStmt | ClassBodyStmt } [ ClassGuard ] End ;
@@ -180,7 +180,7 @@ OpMethodName = "[]=" | "[]" | "<=>" | "===" | "==" | "!=" | "<<" | ">>" | "<=" |
 
 // class C ... end with instance methods; C.new builds an instance. attr_reader /
 // attr_writer / attr_accessor declare @ivar getters/setters on the class.
-ClassDecl   <~~ push(makeClassStmt(takeAll(), up.pos)) ~~>
+ClassDecl   <~~ clsRanges.push({s: up.start, e: up.pos}); push(makeClassStmt(takeAll(), up.pos)) ~~>
             = KwClass ClassPath <~~ push(up.in) ~~> [ Superclass ] ClassItems [ ClassGuard ] End ;
 ClassItems  = { Semi | SingletonBlock | Def <~~ push({method: pop()}) ~~> | AttrDecl
               | AliasStmt | ClassDecl <~~ push({cstmt: pop()}) ~~>
@@ -196,7 +196,7 @@ ClassGuard  <~~ push({cguard: takeAll()}) ~~>
 // class << self ... end inside a class body: every def inside it is a method of the
 // class object. Written as its own alternative of the class body so the defs can be
 // folded straight into the enclosing class rather than run as a nested statement.
-SingletonBlock <~~ push({sblock: takeAll()}) ~~>
+SingletonBlock <~~ clsRanges.push({s: up.start, e: up.pos}); push({sblock: takeAll()}) ~~>
             = KwClass "<<" KwSelf SgItems [ ClassGuard ] End ;
 // class << EXPR ... end anywhere else: the singleton ("eigen") class of a VALUE.
 // `class << obj`, `class << true`, `class << CONST` all open it. We approximate the
@@ -205,7 +205,7 @@ SingletonBlock <~~ push({sblock: takeAll()}) ~~>
 // singleton method when the value IS a class (the `class << self` case) and an
 // ordinary method of its class otherwise. It is a PRIMARY and not only a statement:
 // `class << true; self; end.should == TrueClass` takes a method suffix on the `end`.
-SingletonDecl <~~ push(makeSingletonStmt(takeAll(), up.pos)) ~~>
+SingletonDecl <~~ clsRanges.push({s: up.start, e: up.pos}); push(makeSingletonStmt(takeAll(), up.pos)) ~~>
             = KwClass "<<" SgTarget SgItems [ ClassGuard ] End ;
 SgTarget    = KwSelf <~~ push({sgself: true}) ~~> | Expression <~~ push({sgexpr: pop()}) ~~> ;
 SgItems     = { Semi | Def <~~ push({method: pop()}) ~~> | AttrDecl | AliasStmt
@@ -226,10 +226,11 @@ AliasDqInterp = ":" ColonGlued DqStr ;
 // alias NEW OLD (a keyword, unlike alias_method which is an ordinary call).
 AliasStmt   <~~ push({alias: takeAll()}) ~~>
             = KwAlias AliasName AliasName ;
-// An alias names a method as a bare word, as a symbol (:name, :"name", :'name') or -
+// An alias names a method as a bare word (a setter `name=' too), as a symbol
+// (:name, :name=, :"name", :'name') or -
 // for the global-variable form of alias - as a $global.
-AliasName   = AliasSq | AliasDq | ":" :whitespace() SymName <~~ push(up.in) ~~> :whitespace(Whitespace)
-            | AliasGvarP | AliasGvar | MethodName <~~ push(up.in) ~~> ;
+AliasName   = AliasSq | AliasDq | ":" :whitespace() SymNameSfx <~~ push(up.in) ~~> :whitespace(Whitespace)
+            | AliasGvarP | AliasGvar | SetterName <~~ push(up.in) ~~> | MethodName <~~ push(up.in) ~~> ;
 AliasSq     = ":" :whitespace() "'" SymName <~~ push(up.in) ~~> "'" :whitespace(Whitespace) ;
 AliasDq     = ":" :whitespace() '"' SymName <~~ push(up.in) ~~> '"' :whitespace(Whitespace) ;
 AliasGvarP  = "$" :whitespace() GvarNumCh <~~ push("$" + up.in) ~~> :whitespace(Whitespace) ;
@@ -571,7 +572,7 @@ DqPathChar  = "\x20"..."\x21" | "\x23"..."\x5b" | "\x5d"..."\U0010ffff" | @"\t" 
 // before any target is written; a single right-hand array is unpacked positionally.
 // Kept at statement level (needs a comma after the first target) so it never
 // interferes with a nested expression.
-MultiAssign <~~ push(makeMultiAssign(takeAll())) ~~>
+MultiAssign <~~ var mi = takeAll(); noteLexAssign(mi, up.start); push(makeMultiAssign(mi)) ~~>
             = MSplat "=" !"=" RetVal { "," RetVal } [ ";" ]
             | MGroup "=" !"=" RetVal { "," RetVal } [ ";" ]
             | MTarget "=" !"=" NotTilde RetVal "," RetVal { "," RetVal } [ ";" ]
@@ -631,7 +632,7 @@ AssignExpr  = StructDecl | Assignment | Ternary ;
 Ternary     <~~ push(makeTernary(takeAll())) ~~>
             = OrExpr [ "?" Expression ":" Expression ] ;
 
-Assignment  <~~ push(makeAssign(takeAll(), up.pos)) ~~>
+Assignment  <~~ var ai = takeAll(); noteLexAssign([ai[0]], up.start); push(makeAssign(ai, up.pos)) ~~>
             = Target AssignOp <~~ push(up.in) ~~> AssignRhs ;
 // `x = *arr` copies the array (and wraps a non-array in one); `x = f a, b` is a
 // paren-less call. Both are tried before the ordinary expression, and both fail on
@@ -1950,7 +1951,7 @@ BareName    = NotKw Id [ SfxGlued PredSfx ] ;
 PredName    = PredOk NotKw Id :whitespace() PredSfx :whitespace(Whitespace) ;
 PredSfx     = "?" | "!" ;
 
-VarRef      <~~ push(makeVarRef(up.in)); notePlace(up.pos, {var: up.in}) ~~>
+VarRef      <~~ push(makeVarRef(up.in, up.start)); notePlace(up.pos, {var: up.in}) ~~>
             = Name ;
 IvarRef     <~~ notePlace(up.pos, {ivar: pop().ivar}) ~~>
             = "@" Id <~~ push(makeIvarRef(up.in)); push({ivar: up.in}) ~~> ;
@@ -2505,6 +2506,41 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // "block (N levels) in NAME" - a LEXICAL property of the block's code. Twin of
     // curBlkDepth in ruby-to-llvm-ir.abnf.
     var blkRanges = []
+    // A name is a LOCAL from the first assignment to it onward, whether or not that
+    // assignment ran (MRI decides at parse time; an unrun one leaves nil). Every
+    // local assignment's start is noted per name, and a read that finds no binding
+    // is nil when one of them precedes it in a scope the read can see: not hidden
+    // in a block the read is outside of, and not across a def / class / module
+    // boundary. Twin of frameLocalNew in ruby-to-llvm-ir.abnf.
+    var lexAssigns = {}
+    var clsRanges = []
+    function noteLexAssign(tgts, at) {
+        for (var i = 0; i < tgts.length; i++) {
+            var t = anytype
+            t = tgts[i]
+            if (t === null || typeof t != "object") { continue }
+            if (t.group != undefined) { noteLexAssign(t.group, at); continue }
+            if (t.splat != undefined) { noteLexAssign([t.splat], at); continue }
+            if (typeof t.name == "string" && t.path != undefined && t.path.length == 0 && isLocalName(t.name)) {
+                if (lexAssigns["$" + t.name] === undefined) { lexAssigns["$" + t.name] = [] }
+                lexAssigns["$" + t.name].push(at)
+            }
+        }
+    }
+    function inRange(r, p) { return r.s <= p && p < r.e }
+    function lexSees(a, at) {
+        var i
+        for (i = 0; i < blkRanges.length; i++) { if (inRange(blkRanges[i], a) && !inRange(blkRanges[i], at)) { return false } }
+        for (i = 0; i < defRanges.length; i++) { if (inRange(defRanges[i], a) != inRange(defRanges[i], at)) { return false } }
+        for (i = 0; i < clsRanges.length; i++) { if (inRange(clsRanges[i], a) != inRange(clsRanges[i], at)) { return false } }
+        return true
+    }
+    function lexLocalAt(name, at) {
+        var as = lexAssigns["$" + name]
+        if (as === undefined || at === undefined) { return false }
+        for (var i = 0; i < as.length; i++) { if (as[i] < at && lexSees(as[i], at)) { return true } }
+        return false
+    }
     function blkSpan(items, end) {
         blkRanges.push({s: items[0], e: end})
         return items.slice(1)
@@ -5060,6 +5096,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 return mkFlo(fm)
             }
             if (op == "**") { return mkFlo(Math.pow(x, y)) }
+            // A Float or Rational receiver has no bit operators (<< >> & | ^).
+            // Twin of rubyNumBin in abnf/jsrt.go and rbNumBin in lib/ruby-rt.metajs.
+            if (numRank(l) >= 1) { noMethod(l, op) }
             fail("Float does not support '" + op + "'")
         }
         // Two Integers. One of them past 2^53 goes straight to the exact path;
@@ -8860,6 +8899,15 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 }
                 return va
             }
+            // dig: self[k], then the rest of the path is dug out of that value by
+            // its own #dig; nil stops the walk. Twin of Hash#dig in abnf/jsrt.go
+            // and lib/ruby-rt.metajs.
+            if (name == "dig") {
+                var df = dictFind(target, args[0])
+                var dv = df < 0 ? hashDefault(target, args[0]) : target.vals[df]
+                if (args.length == 1 || dv === null || dv === undefined) { return dv }
+                return mcall(dv, "dig", args.slice(1), null)
+            }
             if (name == "invert") {
                 var iv = {__dict: true, keys: [], vals: []}
                 for (var ii = 0; ii < target.keys.length; ii++) { dictSet(iv, rsText(target.vals[ii]), keyOut(target.keys[ii])) }
@@ -9873,13 +9921,39 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             for (i = 0; i < t.length; i++) { rot.push(t[(i + rn) % t.length]) }
             return rot
         }
+        // A Range selects its span and pads with nil past the end: values_at
+        // resolves it with rb_range_beg_len's raising mode, so only a start
+        // still negative after counting from the end is a RangeError.
+        // Twin of rubyArray "values_at" in abnf/jsrt.go and lib/ruby-rt.metajs.
         if (name == "values_at") {
             var va = []
             for (i = 0; i < args.length; i++) {
+                if (isRange(args[i])) {
+                    var vr = args[i]
+                    var vb = vr.lo === null || vr.lo === undefined ? 0 : Math.trunc(toF(vr.lo))
+                    if (vb < 0) { vb = vb + t.length }
+                    if (vb < 0) { raiseErr(name, "RangeError", rinspect(vr) + " out of range") }
+                    var ve = t.length
+                    if (vr.hi !== null && vr.hi !== undefined) {
+                        ve = Math.trunc(toF(vr.hi))
+                        if (ve < 0) { ve = ve + t.length }
+                        if (vr.excl !== true) { ve = ve + 1 }
+                    }
+                    for (var vj = vb; vj < ve; vj++) { va.push(vj < t.length ? t[vj] : null) }
+                    continue
+                }
                 var vi = arrNorm(t, args[i])
                 va.push(vi >= 0 && vi < t.length ? t[vi] : null)
             }
             return va
+        }
+        // dig: as Hash#dig, with an index. Twin of Array#dig in abnf/jsrt.go and
+        // lib/ruby-rt.metajs.
+        if (name == "dig") {
+            var di = arrNorm(t, args[0])
+            var dv = di >= 0 && di < t.length ? t[di] : null
+            if (args.length == 1 || dv === null || dv === undefined) { return dv }
+            return mcall(dv, "dig", args.slice(1), null)
         }
         if (name == "slice") {
             if (isRange(args[0])) {
@@ -10316,12 +10390,26 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // lib/ruby-rt.metajs and abnf/jsrt.go are the compiled halves' twins.
     function lamArityWrap(f, params) {
         if (typeof f != "function" || params == undefined || params == null) { return f }
-        return function() {
+        return wrapNote(function() {
             var av = []
             for (var i = 0; i < arguments.length; i++) { av.push(arguments[i]) }
             lamArity(av, params)
             return f.apply(undefined, av)
+        }, f)
+    }
+    // The wrappers Kernel#lambda puts around a block, each beside what it wraps
+    // (wrapPairs holds wrapper, inner, wrapper, inner, ...), so define_method can
+    // find the block underneath and bind self in it.
+    var wrapPairs = []
+    function wrapNote(w, inner) { wrapPairs.push(w); wrapPairs.push(inner); return w }
+    function wrapCore(f) {
+        var cur = anytype
+        cur = f
+        var i = 0
+        while (i < wrapPairs.length) {
+            if (wrapPairs[i] === cur) { cur = wrapPairs[i + 1]; i = 0 } else { i = i + 2 }
         }
+        return cur
     }
     function lamArity(av, params) {
         var posParams = []
@@ -10346,7 +10434,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // __blkret signal makeBlock builds, and this is the frame that stops it.
     function lambdaWrap(blk) {
         if (typeof blk != "function") { return blk }
-        return function() {
+        return wrapNote(function() {
             var args = []
             for (var i = 0; i < arguments.length; i++) { args.push(arguments[i]) }
             try {
@@ -10355,7 +10443,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 if (e !== null && e !== undefined && e.__blkret === true) { return e.v }
                 throw e
             }
-        }
+        }, blk)
     }
     // -> (params) { body }: a callable value. `return` inside it is LOCAL (it returns
     // from the lambda), which is the one behavioural difference from a block.
@@ -10718,9 +10806,13 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // `obj.name = v' calls a `name=' the object (or its class, for a class object)
     // has, and writes the slot otherwise - which is all attr_writer's setter does,
     // so those are not noted. setterNames holds every other installed `name='
-    // ("$" + name), so a write no setter can answer costs one lookup. Twin of
-    // js_rattrset in abnf/jsrtruby.go and lib/ruby-rt.metajs.
+    // ("$" + name), so a write no setter can answer costs one lookup. attrWNames
+    // holds the attr_writer / attr_accessor names: an instance written through a
+    // name in neither set has no setter of it, which is MRI's NoMethodError (or
+    // its method_missing). Twin of js_rattrset in abnf/jsrtruby.go and
+    // lib/ruby-rt.metajs.
     var setterNames = {}
+    var attrWNames = {}
     function setterNote(name) {
         var n = name.length
         if (n > 1 && name.charCodeAt(n - 1) == 61) { setterNames["$" + name.slice(0, n - 1)] = true }
@@ -10731,7 +10823,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             mcall(o, k + "=", [v], null)
             return
         }
-        if (isUserObj(o)) { ivarPut(o, k, v); return }
+        if (isUserObj(o)) {
+            if (attrWNames["$" + k] !== true) { mcall(o, k + "=", [v], null); return }
+            ivarPut(o, k, v)
+            return
+        }
         rsetIndex(o, k, v)
     }
     // The index-assignment tail, shared by every write site. rsetSlice answers the
@@ -11378,7 +11474,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         var fn = function() {
             var a = []
             for (var i = 1; i < arguments.length; i++) { a.push(arguments[i]) }
-            blkSelfFor = body
+            blkSelfFor = wrapCore(body)
             blkSelf = arguments[0]
             return blockCall(body, a)
         }
@@ -11811,7 +11907,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             return mcall(a[0], name, a.slice(1), null)
         }
     }
-    makeVarRef = function(name) {
+    makeVarRef = function(name, at) {
         return function() {
             for (var i = scopes.length - 1; i >= 1; i--) {
                 if (hasOwn(scopes[i], name)) { return scopes[i][name] }
@@ -11847,9 +11943,15 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (isLocalName(name) && frameScopeOf(scopes) != null) {
                 var gv = anytype
                 gv = hasOwn(globalScope, name) ? globalScope[name] : undefined
-                if (hasOwn(globalScope, name) ? typeof gv != "function" : !hasVar(name)) { undefinedName(name) }
+                if (hasOwn(globalScope, name) ? typeof gv != "function" : !hasVar(name)) {
+                    if (lexLocalAt(name, at)) { return null }
+                    undefinedName(name)
+                }
             }
-            if (!hasVar(name)) { undefinedName(name) }
+            if (!hasVar(name)) {
+                if (lexLocalAt(name, at)) { return null }
+                undefinedName(name)
+            }
             return getVar(name)
         }
     }
@@ -11923,6 +12025,14 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 if (it.method != undefined) { declareMethods(cls, [it.method]) }
                 else if (it.sblock != undefined) {
                     for (var sb = 0; sb < it.sblock.length; sb++) {
+                        // attr_* in `class << self' defines the accessors on the class object.
+                        var sa = it.sblock[sb].attr
+                        if (sa != undefined) {
+                            for (var sj = 0; sj < sa.names.length; sj++) {
+                                if (sa.kind != "attr_writer") { singDeclare(true, cls, cls, attrGetterFn(sa.names[sj])) }
+                                if (sa.kind != "attr_reader") { singDeclare(true, cls, cls, attrSetterFn(sa.names[sj])) }
+                            }
+                        }
                         if (it.sblock[sb].method == undefined) { continue }
                         var sm = it.sblock[sb].method
                         sm.singleton = true
@@ -12023,10 +12133,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             return last
         }
     }
-    // One attr_ / def descriptor from a `class << X' body: onto the class when X is a
-    // class object, into X's own singleton table otherwise.
+    // One attr_ / def descriptor from a `class << X' body: a singleton method of X,
+    // kept on X itself when X is a class object, in X's own singleton table otherwise.
     function singDeclare(isCls, cls, obj, fn) {
-        if (isCls) { declareMethods(cls, [fn]); return null }
+        if (isCls) { fn.singleton = true; declareMethods(cls, [fn]); return null }
         fn.owner = cls
         return singPut(obj, fn.name, makeMethodClosure(fn))
     }
@@ -12143,6 +12253,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     }
     function attrGetterFn(n) { return {name: n, params: [], body: makeIvarRef(n)} }
     function attrSetterFn(n) {
+        attrWNames["$" + n] = true
         var body = function() {
             var s = findSelf()
             if (s === null || s === undefined) { fail("@" + n + " outside of a method") }
@@ -12150,7 +12261,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             ivarPut(s, n, v)
             return v
         }
-        return {name: n + "=", params: ["v"], body: body, attrw: true}
+        return {name: n + "=", params: [{param: "v"}], body: body, attrw: true}
     }
 
     // ----- case / ternary / << / multiple assignment / begin / raise -----

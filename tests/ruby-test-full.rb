@@ -4333,6 +4333,99 @@ def s99
   check("se99n", S99D.new.mk(v[1]) == [S99D, 10] && S99D.new.pk == S99D && blk.call == Object && so.me)
 end
 
+# ===== SECTION 100: dig, values_at ranges, unrun locals, singleton attrs, setter aliases =====
+# Array#dig / Hash#dig walk a path and stop at nil; Array#values_at takes a Range
+# and pads with nil past the end. A local whose assignment never ran (a raise
+# skipped it, a branch did not take it) is nil. attr_accessor inside
+# `class << self' defines accessors on the class; `alias b= a=' and
+# `alias_method :b=, :a=' alias setters; a class body calls its own and inherited
+# class methods bare; a Float has no `<<'; define_method(&lambda) binds self to
+# the receiver; `o.x = v' with no setter `x=' is a NoMethodError.
+# /usr/bin/ruby 2.6 settles each.
+class S100C
+  class << self
+    attr_accessor :cnt
+    attr_writer :wo
+    def bump; self.cnt = (cnt || 0) + 1; end
+  end
+end
+class S100A
+  attr_accessor :a
+  alias_method :b=, :a=
+  alias c= a=
+  alias :d= :a=
+  def e=(v); @a = v * 2; end
+  alias f= e=
+end
+class S100W
+  @made = []
+  def self.make(n, &blk); @made << (blk ? blk.call(n) : n); end
+  def self.made; @made; end
+  make(:w) { |x| [x] }
+  make :v
+end
+class S100V < S100W
+  @made = []
+  make(:sub)
+end
+class S100R
+  begin
+    raise "x"
+    rv = 1
+  rescue RuntimeError
+  end
+  RV = [rv]
+end
+class S100D
+  define_method(:y, &lambda { self.class })
+  def initialize; @x = 1; end
+  def x; @x; end
+end
+def s100
+  v = [1, 0, 5, 2, 3]
+  a = [v[0], [v[3], {k: v[4]}]]
+  h = {a: {b: [v[2], v[4]]}}
+  check("dg100a", a.dig(1, 1, :k) == 3 && a.dig(1, 0) == 2 && a.dig(5, 1).nil? &&
+        h.dig(:a, :b, 1) == 3 && h.dig(:x, :b).nil?)
+  x = [v[3], v[0]]
+  re = begin; x.values_at(-5..v[0]); nil; rescue RangeError => e; e.message; end
+  check("va100b", x.values_at(v[1]..v[2]) == [2, 1, nil, nil, nil, nil] &&
+        x.values_at(v[0], v[1]..v[4], v[1]) == [1, 2, 1, nil, nil, 2] && x.values_at(v[0]..-1) == [1] &&
+        x.values_at(v[3]...v[4]) == [nil] && x.values_at(v[0]..v[1]) == [] && re == "-5..1 out of range")
+  begin
+    raise "x"
+    ve = 1
+  rescue RuntimeError
+  end
+  w = v[3] if v[1] > 0
+  seen = []
+  v.first(3).each_with_index { |n, i| t = n if i == 0; seen << t }
+  check("lv100c", ve.nil? && w.nil? && seen == [1, nil, nil] && S100R::RV == [nil])
+  S100C.cnt = v[0]
+  S100C.cnt += v[3]
+  S100C.bump
+  S100C.wo = v[2]
+  check("sa100d", S100C.cnt == 4 && S100C.instance_variable_get(:@wo) == 5)
+  o = S100A.new
+  o.b = v[2]
+  r1 = o.a
+  o.c = v[3]
+  r2 = o.a
+  o.d = v[4]
+  r3 = o.a
+  o.f = v[3]
+  check("al100e", [r1, r2, r3, o.a] == [5, 2, 3, 4])
+  check("cb100f", S100W.made == [[:w], :v] && S100V.made == [:sub])
+  f = [1.5, 2.0]
+  fe = begin; f[0] << v[0]; nil; rescue NoMethodError => e; e.class; end
+  ge = begin; f[1] >> v[0]; nil; rescue NoMethodError => e; e.class; end
+  check("fl100g", fe == NoMethodError && ge == NoMethodError && (v[4] << v[3]) == 12)
+  d = S100D.new
+  check("dm100h", d.y == S100D)
+  we = begin; d.x = v[2]; nil; rescue NoMethodError => e; e.class; end
+  check("ws100i", we == NoMethodError && d.x == 1)
+end
+
 s39() # SECTION-CALL 39
 s40() # SECTION-CALL 40
 s41() # SECTION-CALL 41
@@ -4394,5 +4487,6 @@ s96() # SECTION-CALL 96
 s97() # SECTION-CALL 97
 s98() # SECTION-CALL 98
 s99() # SECTION-CALL 99
+s100() # SECTION-CALL 100
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

@@ -5997,6 +5997,11 @@ func (rt *jsrt) rubyNumBin(op string, l, r interface{}) interface{} {
 		case "**":
 			return jsFlo{f: crPow(x, y)}
 		}
+		// A Float or Rational receiver has no bit operators (<< >> & | ^). Twin of
+		// numBin in ruby-interpreter.abnf and rbNumBin in lib/ruby-rt.metajs.
+		if rubyNumRank(l) >= 1 {
+			rt.rubyNoMethod(l, op)
+		}
 		rt.fail("Float does not support '%s'", op)
 	}
 	// Two Integers. One of them past 2^53 goes straight to the exact path;
@@ -11931,6 +11936,21 @@ func (rt *jsrt) rubyHashMethod(o *jsObject, keys, vals *jsArray, name string, ar
 			}
 		}
 		return out, true
+	case "dig":
+		// self[k], then the rest of the path is dug out of that value by its own
+		// #dig; nil stops the walk. Twin of Hash#dig in ruby-interpreter.abnf and
+		// lib/ruby-rt.metajs.
+		k := argAt(pos, 0)
+		var v interface{}
+		if i := rt.rubyDictFind(keys, k); i >= 0 {
+			v = vals.elems[i]
+		} else {
+			v = rt.rubyHashDefault(o, k)
+		}
+		if len(pos) <= 1 || isUndefOrNull(v) {
+			return v, true
+		}
+		return rt.rubyMethod(v, "dig", pos[1:]), true
 	case "invert":
 		out := rt.rubyPairsToHash(&jsArray{}, o)
 		okeys, ovals, _ := dictParts(out)
@@ -12897,8 +12917,41 @@ func (rt *jsrt) rubyArrayMethod(t *jsArray, name string, args []interface{}) int
 		}
 		return out
 	case "values_at":
+		// A Range selects its span, padded with nil past the end (rb_range_beg_len
+		// in raising mode). Twin of values_at in ruby-interpreter.abnf and
+		// lib/ruby-rt.metajs.
 		out := &jsArray{}
 		for _, a := range pos {
+			if r, isRng := rubyIsRange(a); isRng {
+				n := len(t.elems)
+				b, e := 0, n
+				if lo := r.props["begin"]; !isUndefOrNull(lo) {
+					b = int(math.Trunc(rubyToF(lo)))
+				}
+				if b < 0 {
+					b += n
+				}
+				if b < 0 {
+					rt.rubyRaiseErr(name, "RangeError", rt.rubyInspect(r)+" out of range")
+				}
+				if hi := r.props["end"]; !isUndefOrNull(hi) {
+					e = int(math.Trunc(rubyToF(hi)))
+					if e < 0 {
+						e += n
+					}
+					if !rt.truthy(r.props["excl"]) {
+						e++
+					}
+				}
+				for j := b; j < e; j++ {
+					if j < n {
+						out.elems = append(out.elems, t.elems[j])
+					} else {
+						out.elems = append(out.elems, jsNull)
+					}
+				}
+				continue
+			}
 			ix := rubyArrNorm(t, a)
 			if ix >= 0 && ix < len(t.elems) {
 				out.elems = append(out.elems, t.elems[ix])
@@ -12907,6 +12960,17 @@ func (rt *jsrt) rubyArrayMethod(t *jsArray, name string, args []interface{}) int
 			}
 		}
 		return out
+	case "dig":
+		// As Hash#dig, with an index. Twin of Array#dig in ruby-interpreter.abnf
+		// and lib/ruby-rt.metajs.
+		var v interface{} = jsNull
+		if ix := rubyArrNorm(t, argAt(pos, 0)); ix >= 0 && ix < len(t.elems) {
+			v = t.elems[ix]
+		}
+		if len(pos) <= 1 || isUndefOrNull(v) {
+			return v
+		}
+		return rt.rubyMethod(v, "dig", pos[1:])
 	case "slice":
 		// A Range argument is a SUBSEQUENCE, read from its own endpoints.
 		if r, isRng := rubyIsRange(argAt(pos, 0)); isRng {
@@ -15235,12 +15299,14 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		// the program's main scope - and never beyond it: not the top-level
 		// locals from inside a def, nor the host's root scope (MetaJS's own
 		// print/printf/sprintf). A name bound nowhere is "method" when self has
-		// one. Twin of js_rdefined in languages/lib/ruby-rt.metajs.
+		// one. A slot holding undefined is a local declared ahead of its first
+		// assignment, not yet a local here. Twin of js_rdefined in
+		// languages/lib/ruby-rt.metajs.
 		"js_rdefined": func(a []uint64) uint64 {
 			name := rt.toString(u(a[1]))
 			var self interface{} = jsNull
 			for s := rt.scopeOf(a[0]); s != nil; s = s.parent {
-				if s.has(name) {
+				if v, ok := s.get(name); ok && v != jsUndef {
 					return w(u(a[2]))
 				}
 				if v, ok := s.get("self"); ok && isUndefOrNull(self) {

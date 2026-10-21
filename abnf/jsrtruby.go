@@ -168,12 +168,14 @@ func (rt *jsrt) addRubyFmtExterns(m map[string]func(args []uint64) uint64) {
 	// a top-level def - still answers a read; anything else is MRI's NameError. A
 	// write that finds no binding binds a[3] scopes up from where it stands, past
 	// the begin/rescue/ensure closures Ruby has no scope for. Twins: js_rlvar /
-	// js_rlset in languages/lib/ruby-rt.metajs.
+	// js_rlset in languages/lib/ruby-rt.metajs. A slot holding undefined is a
+	// local declared ahead of its first assignment (the emitter's frameLocalNew),
+	// which a read before that assignment does not see.
 	m["js_rlvar"] = func(a []uint64) uint64 {
 		name := rt.toString(u(a[1]))
 		inFrame := true
 		for sc := rt.scopeOf(a[0]); sc != nil; sc = sc.parent {
-			if v, ok := sc.get(name); ok {
+			if v, ok := sc.get(name); ok && v != jsUndef {
 				if inFrame || isCallable(v) {
 					return w(v)
 				}
@@ -258,12 +260,17 @@ func (rt *jsrt) addRubyFmtExterns(m map[string]func(args []uint64) uint64) {
 	}
 	// obj.name = v where a setter may exist: (object, slot key, value, setter key).
 	// The setter is called when the object (or its class, for a class object) has
-	// one, and the slot is written otherwise. Twin of js_rattrset in
-	// languages/lib/ruby-rt.metajs and attrSet in ruby-interpreter.abnf.
+	// one; an instance without one takes the call anyway, which is MRI's
+	// NoMethodError (or its method_missing); anything else has the slot written.
+	// Twin of js_rattrset in languages/lib/ruby-rt.metajs and attrSet in
+	// ruby-interpreter.abnf.
 	m["js_rattrset"] = func(a []uint64) uint64 {
-		if o, ok := u(a[0]).(*jsObject); ok && rubySingRespond(o, rt.toString(u(a[3]))) {
-			m["js_rxmcall"]([]uint64{a[0], a[3], w(&jsArray{elems: []interface{}{u(a[2])}})})
-			return 0
+		if o, ok := u(a[0]).(*jsObject); ok {
+			_, isCls := o.props["__isclass"]
+			if rubySingRespond(o, rt.toString(u(a[3]))) || rubyUserObj(o) && !isCls {
+				m["js_rxmcall"]([]uint64{a[0], a[3], w(&jsArray{elems: []interface{}{u(a[2])}})})
+				return 0
+			}
 		}
 		return m["js_set"](a[:3])
 	}

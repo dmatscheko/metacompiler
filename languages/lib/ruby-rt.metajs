@@ -1583,6 +1583,9 @@ function rbNumBin(op, l, r) {
             return rbMkFlo(fm)
         }
         if (op == "**") { return rbMkFlo(Math.pow(x, y)) }
+        // A Float or Rational receiver has no bit operators. Twin of rubyNumBin in
+        // abnf/jsrt.go.
+        if (typeof l != "number" && rbNumRank(l) >= 1) { rbNoMethod(l, op) }
         fail("Float does not support '" + op + "'")
     }
     // Two Integers. One of them past 2^53 goes straight to the exact path;
@@ -6214,6 +6217,15 @@ function rbHashMethod(o, keys, vals, name, args) {
         }
         return va
     }
+    // dig: self[k], then the rest of the path is dug out of that value by its own
+    // #dig; nil stops the walk. Twin of Hash#dig in ruby-interpreter.abnf and
+    // abnf/jsrt.go.
+    if (name == "dig") {
+        var df = rbDictFind(keys, args[0])
+        var dv = df < 0 ? rbHashDefault(o, args[0]) : vals[df]
+        if (nPos <= 1 || rtIsNil(dv)) { return dv }
+        return rbMethod(dv, "dig", rbArrSub(args, 1, nPos - 1))
+    }
     if (name == "invert") {
         var iv = js_dict_new()
         while (i < keys.length) {
@@ -6882,15 +6894,45 @@ function rbArrayMethod(t, name, args) {
         }
         return rot
     }
+    // A Range selects its span, padded with nil past the end (rb_range_beg_len
+    // in raising mode). Twin of values_at in ruby-interpreter.abnf and abnf/jsrt.go.
     if (name == "values_at") {
         var va = []
         var vj = 0
         while (vj < nPos) {
+            var vr = args[vj]
+            if (rbIsRange(vr)) {
+                var vb = rtIsNil(vr["begin"]) ? 0 : Math.trunc(rbToF(vr["begin"]))
+                if (vb < 0) { vb = vb + t.length }
+                if (vb < 0) { rbRaiseErr(name, "RangeError", rbInspect(vr) + " out of range") }
+                var ve = t.length
+                if (!rtIsNil(vr["end"])) {
+                    ve = Math.trunc(rbToF(vr["end"]))
+                    if (ve < 0) { ve = ve + t.length }
+                    if (!rbTruthy(vr["excl"])) { ve = ve + 1 }
+                }
+                while (vb < ve) {
+                    if (vb < t.length) { va.push(t[vb]) } else { va.push(null) }
+                    vb = vb + 1
+                }
+                vj = vj + 1
+                continue
+            }
             var vix = rbArrNorm(t, args[vj])
             if (vix >= 0 && vix < t.length) { va.push(t[vix]) } else { va.push(null) }
             vj = vj + 1
         }
         return va
+    }
+    // dig: as Hash#dig, with an index. Twin of Array#dig in ruby-interpreter.abnf
+    // and abnf/jsrt.go.
+    if (name == "dig") {
+        var dix = rbArrNorm(t, rbPosAt(args, nPos, 0))
+        var dav = anytype
+        dav = null
+        if (dix >= 0 && dix < t.length) { dav = t[dix] }
+        if (nPos <= 1 || rtIsNil(dav)) { return dav }
+        return rbMethod(dav, "dig", rbArrSub(args, 1, nPos - 1))
     }
     if (name == "slice") {
         // A Range argument is a SUBSEQUENCE, read from its own endpoints.
@@ -8275,7 +8317,7 @@ function js_rsingdef(obj, name, fn) {
 // obj.name = v where a setter may exist. Twin of js_rattrset in abnf/jsrtruby.go.
 function js_rattrset(o, k, v, sk) {
     var sn = rbStr(sk)
-    if (rbIsObj(o) && rbSingRespond(o, sn)) {
+    if (rbIsObj(o) && (rbSingRespond(o, sn) || rbUserObj(o))) {
         js_rxmcall(o, sn, [v])
         return undefined
     }
@@ -9421,8 +9463,9 @@ function js_rraise(v, msg) {
 // walk stops at the frame, the scope holding "$blk"; past it only a callable (a
 // top-level def) still answers a read, anything else is MRI's NameError. A write
 // that finds no binding binds `depth` scopes up from where it stands, past the
-// begin/rescue/ensure closures Ruby has no scope for. Twins: js_rlvar / js_rlset
-// in abnf/jsrtruby.go.
+// begin/rescue/ensure closures Ruby has no scope for. A slot holding undefined is
+// a local declared ahead of its first assignment, which a read before that
+// assignment does not see. Twins: js_rlvar / js_rlset in abnf/jsrtruby.go.
 function js_rlvar(scope, name) {
     var n = rbStr(name)
     var s = anytype
@@ -9430,7 +9473,7 @@ function js_rlvar(scope, name) {
     var inFrame = true
     s = scope
     while (s !== undefined && s !== null) {
-        if (scopeHas(s, n)) {
+        if (scopeHas(s, n) && scopeGet(s, n) !== undefined) {
             v = scopeGet(s, n)
             if (inFrame || typeof v == "function") { return v }
             break
@@ -10113,8 +10156,9 @@ function js_rgdefined(name, kind) {
 // A Ruby local is visible up to the nearest scope declaring "$blk" - the
 // method's own frame, or the program's main scope - and never beyond it, which
 // also keeps out the host's root scope (MetaJS's own print/printf/sprintf). A
-// name bound nowhere is "method" when self has one. Twin of js_rdefined in
-// abnf/jsrt.go.
+// name bound nowhere is "method" when self has one. A slot holding undefined is a
+// local declared ahead of its first assignment, not yet a local here. Twin of
+// js_rdefined in abnf/jsrt.go.
 function js_rdefined(scope, name, kind) {
     var n = rbStr(name)
     var s = anytype
@@ -10122,7 +10166,7 @@ function js_rdefined(scope, name, kind) {
     s = scope
     self = null
     while (s !== undefined && s !== null) {
-        if (scopeHas(s, n)) { return kind }
+        if (scopeHas(s, n) && scopeGet(s, n) !== undefined) { return kind }
         if (self === null && scopeHas(s, "self")) { self = scopeGet(s, "self") }
         if (scopeHas(s, "$blk")) {
             s = null

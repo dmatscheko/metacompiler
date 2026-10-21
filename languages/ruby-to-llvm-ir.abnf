@@ -230,10 +230,11 @@ AliasDqInterp = ":" ColonGlued DqStr ;
 // alias NEW OLD (a keyword, unlike alias_method which is an ordinary call).
 AliasStmt   <~~ push({alias: takeAll()}) ~~>
             = KwAlias AliasName AliasName ;
-// An alias names a method as a bare word, as a symbol (:name, :"name", :'name') or -
+// An alias names a method as a bare word (a setter `name=' too), as a symbol
+// (:name, :name=, :"name", :'name') or -
 // for the global-variable form of alias - as a $global.
-AliasName   = AliasSq | AliasDq | ":" :whitespace() SymName <~~ push(up.in) ~~> :whitespace(Whitespace)
-            | AliasGvarP | AliasGvar | MethodName <~~ push(up.in) ~~> ;
+AliasName   = AliasSq | AliasDq | ":" :whitespace() SymNameSfx <~~ push(up.in) ~~> :whitespace(Whitespace)
+            | AliasGvarP | AliasGvar | SetterName <~~ push(up.in) ~~> | MethodName <~~ push(up.in) ~~> ;
 AliasSq     = ":" :whitespace() "'" SymName <~~ push(up.in) ~~> "'" :whitespace(Whitespace) ;
 AliasDq     = ":" :whitespace() '"' SymName <~~ push(up.in) ~~> '"' :whitespace(Whitespace) ;
 AliasGvarP  = "$" :whitespace() GvarNumCh <~~ push("$" + up.in) ~~> :whitespace(Whitespace) ;
@@ -3975,7 +3976,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             var selfC = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "self")])
             return {b: b, v: callExt(b, "js_rcvget", [selfC, emitStr(b, ref.cvar)])}
         }
-        return {b: b, v: callExt(b, inDefFrame(ref.name) ? "js_rlvar" : "js_scope_get", [curScopeV, emitStr(b, ref.name)])}
+        if (inDefFrame(ref.name)) { return {b: b, v: callExt(b, "js_rlvar", [curScopeV, emitStr(b, ref.name)])} }
+        return {b: b, v: frameLocalRead(b, ref.name, callExt(b, "js_scope_get", [curScopeV, emitStr(b, ref.name)]))}
     }
     // A def does not see the locals of the code around it, so inside one a local is
     // only ever looked up as far as the method's own frame. curDefLocals is the set
@@ -4016,8 +4018,32 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // the clause as it does in MRI.
     var curDefFn = false
     var curCtlDepth = 0
+    // A name is a LOCAL from its first assignment onward whether or not that
+    // assignment runs (MRI decides at parse time), so a later read of one skipped
+    // by a branch, a loop or a raise is nil. curFrame is the function holding the
+    // locals' scope (a def, block, lambda, class body or the top level; `up` is the
+    // enclosing one). A new local first bound anywhere but the straight-line start
+    // of that function is declared UNDEFINED in its prologue: a read the emitter
+    // knows is a local maps that to nil (frameLocalRead), and an earlier read, which
+    // is not yet a local, still misses in js_rlvar. Twin of lexLocalAt in
+    // ruby-interpreter.abnf.
+    var curFrame = null
+    function frameLocalNew(name) {
+        if (curFrame === null || knownLocal(name)) { return }
+        if (curFTag == curFrame.tag && curF.Blocks.length == curFrame.nb) { return }
+        if (curFrame.pre.indexOf(name) < 0) { curFrame.pre.push(name) }
+    }
+    function frameLocalRead(b, name, v) {
+        var fr = curFrame
+        while (fr !== null) {
+            if (fr.pre.indexOf(name) >= 0) { return b.NewSelect(b.NewICmp(llvm.enum.IPredEQ, v, hUndef), hNull, v) }
+            fr = fr.up
+        }
+        return v
+    }
     function emitLocalSet(b, name, v) {
         var local = isLocalName(name)
+        if (local) { frameLocalNew(name) }
         // A class first assigned to a constant takes its name (`S = Struct.new(:a)').
         if (!local) { v = callExt(b, "js_rconstname", [v, emitStr(b, name)]) }
         if (local && curDefFn) {
@@ -4107,10 +4133,15 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         return b
     }
     // The write of a `.name' target: a call of the setter where one may exist (see
-    // attrDispatches), the slot otherwise. js_rattrset takes the setter's method key
-    // too, because a private one inside its own class is reached as "$q$name=".
+    // attrDispatches), the slot where only an attr_writer / attr_accessor of the name
+    // does (rubyAttrWNames; all such a setter does is write it). Where no setter of
+    // the name exists, js_rattrset raises MRI's NoMethodError on a user object.
+    // js_rattrset takes the setter's method key too, because a private one inside
+    // its own class is reached as "$q$name=". Twin of attrSet in
+    // ruby-interpreter.abnf.
+    var rubyAttrWNames = {}
     function emitAttrSet(b, p, v) {
-        if (!attrDispatches(p.name)) { callExt(b, "js_set", [p.obj, p.key, v]); return }
+        if (!attrDispatches(p.name) && rubyAttrWNames["$" + p.name] === true) { callExt(b, "js_set", [p.obj, p.key, v]); return }
         callExt(b, "js_rattrset", [p.obj, p.key, v, emitStr(b, methodKey(p.name + "="))])
     }
     // Bind the raised value to a rescue clause's `=> TARGET` - an ordinary assignment:
@@ -5322,7 +5353,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
         var callHasBlk = hasBlockArg(args)
         return function(b) {
-            if (selfMethod(curClsName, name) || isSelfCall(name)) {
+            if (selfCallOf(name)) {
                 if (callHasBlk) {
                     return emitBlkBreakCall(b, function(bb) {
                         var sV = emitIvarSelf(bb)
@@ -5370,6 +5401,21 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     function isSelfCall(name) {
         return selfCallNames.indexOf(name) >= 0 && rubyAllMethods["$" + name] !== true && !knownLocal(name)
     }
+    // A bare `name(args)' that is a call on the implicit self: an instance method of
+    // the class, one of the Object methods above, or - where self IS the class (its
+    // body, a `def self.m') - a class method, the class's own or an inherited one.
+    function selfCallOf(name) {
+        if (selfMethod(curClsName, name) || isSelfCall(name)) { return true }
+        if (!curSelfIsCls) { return false }
+        var c = curClsName
+        var hops = 0
+        while (c != undefined && c != "" && hops < 64) {
+            if (classHasSMethod(c, name)) { return true }
+            c = classSupers["$" + c]
+            hops = hops + 1
+        }
+        return false
+    }
     // A call on the implicit self. A receiver-less send also reaches a top-level
     // def, which needs the scope (js_rselfsend; selfSendDef in the interpreter).
     function emitSelfMcall(b, selfV, name, argsV) {
@@ -5380,7 +5426,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     }
     function makePlainCall(name, args) {
         return function(b) {
-            if (selfMethod(curClsName, name) || isSelfCall(name)) {
+            if (selfCallOf(name)) {
                 var selfV = emitIvarSelf(b)
                 var eam = emitArgs(b, args)
                 b = eam.b
@@ -5599,6 +5645,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (isCtl !== true) { curClsBodyFn = false }
         curDefFn = declBlk === true
         curCtlDepth = isCtl === true ? curCtlDepth + 1 : 0
+        var savedFrame = curFrame
         if (declBlk === true) { curDefLocals = {m: {}, l: []} }
         else if (isCtl !== true && curDefLocals != null) {
             var outer = curDefLocals
@@ -5648,6 +5695,16 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                                          callExt(b, "js_rblock", [f.Params[1]])])
         }
         b = emitParams(b, f.Params[1], params, off, isBlock)
+        // The prologue that frameLocalNew fills is left open until the body is
+        // emitted; it runs once per call, before any `redo' target.
+        var preB = null
+        var startB = null
+        if (isCtl !== true || curCtlDepth == 0) {
+            preB = b
+            startB = f.NewBlock("")
+            b = startB
+            curFrame = {tag: idx, nb: f.Blocks.length, pre: [], up: savedFrame}
+        }
         // A block body starts its own basic block, so `redo' has somewhere to branch
         // back to that is AFTER the parameter binding (redo keeps the bindings).
         if (isBlock === true) {
@@ -5655,8 +5712,15 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             b.NewBr(redoB)
             b = redoB
             curRedoB = redoB
+            if (preB !== null) { curFrame.nb = f.Blocks.length }
         }
         var endB = bodyStmt(b)
+        if (preB !== null) {
+            for (var fp = 0; fp < curFrame.pre.length; fp++) {
+                callExt(preB, "js_scope_decl", [curScopeV, emitStr(preB, curFrame.pre[fp]), hUndef])
+            }
+            preB.NewBr(startB)
+        }
         if (curSiteSave !== null) { rbSiteStore(endB.b, curSiteSave) }
         endB.b.NewRet(endB.v)
         if (isCtl) { ctlLeave() }
@@ -5681,6 +5745,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         curSiteSave = savedSiteSave
         curBlkDepth = savedBlkDepth
         curClsBodyFn = savedClsBodyFn
+        curFrame = savedFrame
         return idx
     }
     function makeFun(items) {
@@ -6347,8 +6412,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     }
     // ----- the scope probe -----
     //
-    // js_rdefined is an EXTERN (abnf/jsrt.go's under llvm.Run, lib/ruby-rt.metajs's
-    // under -exe) because the full question needs scopeHas + scopeParent, MetaJS
+    // It answers defined? for a constant or a def's name; definedOf answers a
+    // lowercase local itself. js_rdefined is an EXTERN (abnf/jsrt.go's under
+    // llvm.Run, lib/ruby-rt.metajs's under -exe) because the full question needs scopeHas + scopeParent, MetaJS
     // HOST BUILTINS reachable only from a layer-2 file. js_scope_typeof alone cannot
     // answer it: it says "undefined" for a slot that HOLDS undefined and for an
     // absent name alike (docs/working-on-this-project.md 7.3), and a BLOCK OR
@@ -6688,6 +6754,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // MetaJS's own print/printf/sprintf, which js_rdefined never reaches.
         if (definedKernelNames.indexOf(txt) >= 0 && rubyAllMethods["$" + txt] !== true) {
             return function(b) {
+                if (knownLocal(txt)) { return {b: b, v: emitStr(b, "local-variable")} }
                 var kv = callExt(b, "js_rdefined", [curScopeV, emitStr(b, txt), emitStr(b, "local-variable")])
                 return {b: b, v: b.NewSelect(b.NewICmp(llvm.enum.IPredEQ, kv, hNull), emitStr(b, "method"), kv)}
             }
@@ -6726,9 +6793,15 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         return function(b) {
             // A def of that name is a method, whatever else the scope holds.
             var k = rubyAllMethods["$" + txt] === true ? "method" : kind
+            // A name the emitter knows as a local is one, assigned or not (MRI
+            // answers this at parse time); so is a parameter its caller left out.
+            if (k == "local-variable" && knownLocal(txt)) { return {b: b, v: emitStr(b, k)} }
             // Inside a def the fast probe would see the top-level locals through the
             // scope chain; js_rdefined stops at the method's own frame.
-            if (curMethodTag != 0 && k == "local-variable") {
+            // Any other lowercase name is not a local here, though its slot may
+            // exist already, declared ahead of a later assignment (frameLocalNew);
+            // js_rdefined passes over that, and inside a def stops at its frame.
+            if (k == "local-variable") {
                 return {b: b, v: callExt(b, "js_rdefined", [curScopeV, emitStr(b, txt), emitStr(b, k)])}
             }
             return {b: b, v: rbScopeProbe(b, emitStr(b, txt), emitStr(b, k))}
@@ -6918,7 +6991,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             // A top-level name not bound as a local so far may be bound by nothing:
             // js_rlvar raises MRI's NameError for that.
             var walk = inDefFrame(name) || (curDefLocals == null && isLocalName(name) && !knownLocal(name))
-            return {b: b, v: callExt(b, walk ? "js_rlvar" : "js_scope_get", [curScopeV, emitStr(b, name)])}
+            if (walk) { return {b: b, v: callExt(b, "js_rlvar", [curScopeV, emitStr(b, name)])} }
+            return {b: b, v: frameLocalRead(b, name, callExt(b, "js_scope_get", [curScopeV, emitStr(b, name)]))}
         }
     }
     // The class registry: filled by makeClassStmt while the tags run, consulted while
@@ -7046,6 +7120,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }}
     }
     function attrSetterMethod(n) {
+        rubyAttrWNames["$" + n] = true
         return {name: n + "=", params: ["v"], body: function(b) {
             var selfV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "self")])
             var vv = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "v")])
@@ -7189,11 +7264,24 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 else { r.extends.push(it.mixname) }
                 continue
             }
-            if (it.alias != undefined) { r.aliases.push({to: it.alias[0], from: it.alias[1]}); continue }
+            if (it.alias != undefined) {
+                r.aliases.push({to: it.alias[0], from: it.alias[1]})
+                // An aliased `name=' is a setter `obj.name = v' has to call (attrDispatches).
+                rubyDefNames["$" + it.alias[0]] = true
+                continue
+            }
             if (it.defm != undefined) { r.methods.push({name: it.defm, params: it.defmparams, body: it.defmbody}); continue }
             if (it.sblock != undefined) {
                 var sb = it.sblock
                 for (var q = 0; q < sb.length; q++) {
+                    // attr_* in `class << self' defines the accessors on the class object.
+                    var sa = sb[q].attr
+                    if (sa != undefined) {
+                        for (var sj = 0; sj < sa.names.length; sj++) {
+                            if (sa.kind != "attr_writer") { r.sdefs.push(attrGetterMethod(sa.names[sj])) }
+                            if (sa.kind != "attr_reader") { r.sdefs.push(attrSetterMethod(sa.names[sj])) }
+                        }
+                    }
                     if (sb[q].method != undefined) {
                         var sm = sb[q].method
                         r.sdefs.push({name: sm.name, params: sm.params, body: sm.body})
@@ -7487,9 +7575,6 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             b = emitNameList(b, clsV, snames, "__snames")
             var savedCls = curClsName
             curClsName = name
-            var cb = emitClassBody(b, clsV, r)
-            b = cb.b
-            var lastV = cb.v
             // `class MyErr < StandardError; def initialize(m); super(m); end; end'.
             // The superclass is a BUILTIN, which carries no compiled `initialize'
             // for js_supercall to find.
@@ -7531,7 +7616,6 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             b = emitMethods(b, clsV, front, "", name, [])
             b = emitMethods(b, clsV, sdefs, "$s$", name, [])
             b = emitAliases(b, ownDstV, r)
-            curClsName = savedCls
             // A subclass with no initialize of its own INHERITS one, so the default is
             // only emitted when nothing above supplies it: a root class, or one whose
             // superclass is a BUILTIN (`class MyErr < StandardError'), which carries no
@@ -7551,8 +7635,13 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 callExt(b, "js_set", [initDstV, emitStr(b, "initialize"),
                                       callExt(b, "js_closure", [handle(iidx), curScopeV])])
             }
-            // A class body is an EXPRESSION: its value is its last statement's.
-            return {b: b, v: lastV}
+            // The body runs once the class is complete - superclass, methods and
+            // aliases installed - so a statement in it can call a class method
+            // (`def self.make ...; make(:w)'), its own or an inherited one. A class
+            // body is an EXPRESSION: its value is its last statement's.
+            var cb = emitClassBody(b, clsV, r)
+            curClsName = savedCls
+            return cb
         }
     }
 
@@ -7651,8 +7740,6 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
         var savedCls = curClsName
         curClsName = name
-        var cb = emitClassBody(b, clsV, r)
-        b = cb.b
         var own = mixinDefsAll(newAnc)
         if (nameIn(newAnc, "Comparable")) { own.push(comparableBetween()) }
         for (var m = 0; m < r.methods.length; m++) { own.push(r.methods[m]) }
@@ -7660,8 +7747,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         b = emitMethods(b, ownDstV, own, "", name, r.restricted)
         b = emitMethods(b, clsV, r.sdefs, "$s$", name, [])
         b = emitAliases(b, ownDstV, r)
+        // As in makeClassStmt, the body runs with the reopening's methods in place.
+        var cb = emitClassBody(b, clsV, r)
         curClsName = savedCls
-        return {b: b, v: cb.v}
+        return cb
     }
 
     // class << VALUE ... end - the singleton class of a value. The class machinery here
