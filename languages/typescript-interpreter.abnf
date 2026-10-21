@@ -3628,7 +3628,7 @@ NotFuncHead = :script(~~
         }
         var d = {}
         d["__keys"] = []
-        if (acc !== undefined && (hasOwn(acc, "get:" + kk) || hasOwn(acc, "set:" + kk))) {
+        if (acc !== undefined && (accSlot(acc, "get:" + kk) !== undefined || accSlot(acc, "set:" + kk) !== undefined)) {
             setMember(d, "get", accSlot(acc, "get:" + kk))
             setMember(d, "set", accSlot(acc, "set:" + kk))
         } else {
@@ -4990,10 +4990,12 @@ NotFuncHead = :script(~~
                     var tb = t["__acc"]
                     // See the twin of this comment in js-interpreter.abnf.
                     if (hasOwn(tb, "get:" + k) || hasOwn(tb, "set:" + k)) {
-                        return {isacc: true, g: accSlot(tb, "get:" + k), s: accSlot(tb, "set:" + k)}
+                        var hr = {isacc: true, g: accSlot(tb, "get:" + k), s: accSlot(tb, "set:" + k)}
+                        // A deleted accessor's halves are both undefined (staticDelete).
+                        if (hr.g !== undefined || hr.s !== undefined) { return hr }
                     }
                 }
-                if (hasOwn(t, k)) { return {isacc: false, v: t[k]} }
+                if (hasOwn(t, k) && (!hasOwn(t, "__gone") || t.__gone.indexOf(k) < 0)) { return {isacc: false, v: t[k]} }
             }
             guard = guard + 1
         }
@@ -5041,6 +5043,13 @@ NotFuncHead = :script(~~
         }
         if (o.__statics == undefined) { scopePut(o, "__statics", newStaticsTable()) }
         var had = hasOwn(o.__statics, k)
+        if (had && hasOwn(o.__statics, "__gone")) {
+            var ga = o.__statics.__gone.indexOf(k)
+            if (ga >= 0) {
+                scopePut(o.__statics, "__gone", jsListDrop(o.__statics.__gone, ga))
+                had = false
+            }
+        }
         scopePut(o.__statics, k, v)
         // `C.zz = 1` at run time creates an ENUMERABLE own property of the class
         // object, exactly as it does on any other object; a write over an existing
@@ -5054,9 +5063,27 @@ NotFuncHead = :script(~~
     function classOwnsStatic(o, k) {
         var t = o.__statics
         if (t == undefined) { return false }
-        if (hasOwn(t, k)) { return true }
+        if (hasOwn(t, k) && (!hasOwn(t, "__gone") || t.__gone.indexOf(k) < 0)) { return true }
         if (!hasOwn(t, "__acc")) { return false }
-        return hasOwn(t["__acc"], "get:" + k) || hasOwn(t["__acc"], "set:" + k)
+        return accSlot(t["__acc"], "get:" + k) !== undefined || accSlot(t["__acc"], "set:" + k) !== undefined
+    }
+    // See the twin of this comment in js-interpreter.abnf.
+    function staticDelete(o, k) {
+        if (k == "name" || k == "length") { scopePut(o, "__del" + k, true) }
+        if (!classOwnsStatic(o, k)) { return }
+        var t = o.__statics
+        if (hasOwn(t, "__acc") && (hasOwn(t.__acc, "get:" + k) || hasOwn(t.__acc, "set:" + k))) {
+            scopePut(t.__acc, "get:" + k, undefined)
+            scopePut(t.__acc, "set:" + k, undefined)
+        }
+        if (hasOwn(t, k)) {
+            if (!hasOwn(t, "__gone")) { scopePut(t, "__gone", []) }
+            t.__gone.push(k)
+        }
+        var ni = t.__names.indexOf(k)
+        if (ni >= 0) { scopePut(t, "__names", jsListDrop(t.__names, ni)) }
+        var ki = t.__keys.indexOf(k)
+        if (ki >= 0) { scopePut(t, "__keys", jsListDrop(t.__keys, ki)) }
     }
     // A static table, with the enumerable-key list makeClassValue gives the ones it
     // builds. Out of line because MetaJS is typed and the literal needs its slot.
@@ -7001,11 +7028,15 @@ NotFuncHead = :script(~~
                     return false
                 }
             }
-            // A class's own name / length: a read then finds the parent class's, or
-            // Function.prototype's (staticSideRead).
-            if (isClassDesc(p.obj) && (p.key === "name" || p.key === "length") && !classOwnsStatic(p.obj, p.key)) {
-                scopePut(p.obj, "__del" + p.key, true)
-                return true
+            // A class object's own properties are its statics; the descriptor's own
+            // slots are the instance methods, which a delete on the class never reaches.
+            if (isClassDesc(p.obj)) {
+                var sk = anytype // The key as text: a static table is keyed by strings.
+                sk = (typeof p.key == "number") ? "" + p.key : p.key
+                if (isStaticSide(p.obj, sk)) {
+                    staticDelete(p.obj, sk)
+                    return true
+                }
             }
             if (typeof p.obj == "function" && (p.key === "name" || p.key === "length")) {
                 var dr2 = {}

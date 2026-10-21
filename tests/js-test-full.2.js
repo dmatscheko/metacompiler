@@ -1382,10 +1382,16 @@ function s107() {
 // indices are read-only, and a class body's members are writable and configurable but
 // not enumerable. A builtin method read as a value carries its own name and length,
 // which String(f) shows. `delete` removes a class's own name or length, and the read
-// then finds the parent class's, or Function.prototype's. Values read off node 24.
+// then finds the parent class's, or Function.prototype's; it removes a static member
+// the same way, and never the instance method of that name. Values read off node 24.
 class P108 { constructor(a, b) {} }
 class K108 extends P108 {}
 class E108 {}
+class T108 { static z = 1; static m() {} static k = 2; m() { return "inst" } }
+class W108 { static z = 1 }
+class V108 extends W108 { static z = 9 }
+class S108 { static name = "custom" }
+class A108 { static get g() { return "g" } }
 class C108 {
     static sf = 3
     static sm() {}
@@ -1454,6 +1460,14 @@ function s108() {
         !K108.hasOwnProperty("name") && Object.getOwnPropertyNames(K108).join() === "prototype" && G(K108, "name") === undefined &&
         delete E108.name && E108.name === "" && delete E108.length && E108.length === 0 && String(E108) === "class E108 {}" &&
         err(() => { "use strict"; E108.name = "z" }).indexOf("Cannot assign to read only property 'name'") === 0)
+    check("dc108h", delete T108.z && delete T108.m && T108.z === undefined && T108.m === undefined &&
+        Object.keys(T108).join() === "k" && !T108.hasOwnProperty("z") && !("m" in T108) && new T108().m() === "inst" &&
+        Object.getOwnPropertyNames(T108).join() === "length,name,prototype,k" && delete S108.name && S108.name === "" &&
+        !S108.hasOwnProperty("name") && Object.getOwnPropertyNames(S108).join() === "length,prototype")
+    T108.z = 5
+    check("dc108i", Object.keys(T108).join() === "k,z" && T108.z === 5 && delete V108.z && V108.z === 1 &&
+        delete V108.z && V108.z === 1 && delete A108.g && A108.g === undefined && G(A108, "g") === undefined &&
+        (A108.g = 3) === 3 && A108.g === 3 && Object.keys(A108).join() === "g")
 }
 
 // ===== END SECTIONS =====

@@ -4626,9 +4626,14 @@ function s100(): void {
 // the fixed ones of the intrinsic properties (js-test-full.2.js SECTION 108 states
 // them); a builtin method read as a value carries its own name and length; `delete`
 // removes a class's own name or length, and the read then finds the parent class's, or
-// Function.prototype's. Values read off tsc 6.0.3's default output run by node 24.
+// Function.prototype's; it removes a static member the same way, and never the instance
+// method of that name. Values read off tsc 6.0.3's default output run by node 24.
 class P101 { constructor(a: number, b: number) {} }
 class K101 extends P101 {}
+class T101 { static z: number = 1; static m(): void {} static k: number = 2; m(): string { return "inst"; } }
+class W101 { static z: number = 1; }
+class V101 extends W101 { static z: number = 9; }
+class S101 { static name: string = "custom"; }
 class C101 {
     static sf: number = 3;
     static sm(): void {}
@@ -4656,6 +4661,14 @@ function s101(): void {
     const k: any = K101;
     check("dc101d", delete k.name && delete k.length && K101.name === "P101" && K101.length === 2 &&
         !K101.hasOwnProperty("name") && Object.getOwnPropertyNames(K101).join() === "prototype");
+    const t: any = T101;
+    const v: any = V101;
+    const sn: any = S101;
+    check("dc101e", delete t.z && delete t.m && T101.z === undefined && t.m === undefined && Object.keys(T101).join() === "k" &&
+        !T101.hasOwnProperty("z") && new T101().m() === "inst" && Object.getOwnPropertyNames(T101).join() === "length,name,prototype,k" &&
+        delete sn.name && S101.name === "" && !S101.hasOwnProperty("name"));
+    T101.z = 5;
+    check("dc101f", Object.keys(T101).join() === "k,z" && T101.z === 5 && delete v.z && V101.z === 1 && delete v.z && V101.z === 1);
 }
 
 // ===== END SECTIONS =====

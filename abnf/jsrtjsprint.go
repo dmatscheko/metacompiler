@@ -932,6 +932,44 @@ func jsvOwnsStatic(cls *jsObject, name string) bool {
 	return found
 }
 
+// jsvStaticDel is `delete C.k` on a class object: the static member leaves the table,
+// its key order and the enumerable list, so a read falls through to the parent class.
+// A deleted own `name` or `length` reads the parent's, or Function.prototype's
+// (jsvStaticSideRead). Twins: staticDelete in both *-interpreter.abnf, jvStaticDel in
+// languages/lib/js-rt.metajs.
+func jsvStaticDel(cls *jsObject, name string) {
+	if name == "name" || name == "length" {
+		cls.props["__del"+name] = true
+	}
+	t := jsStaticsOf(cls, false)
+	if t == nil {
+		return
+	}
+	jsvObjDel(t, name)
+	if lst, _ := t.props[jsvSFieldKeys].(*jsArray); lst != nil {
+		for i, e := range lst.elems {
+			if s, ok := e.(string); ok && s == name {
+				lst.elems = append(lst.elems[:i], lst.elems[i+1:]...)
+				break
+			}
+		}
+	}
+}
+
+// jsvObjDel drops an own property and its key-order entry.
+func jsvObjDel(o *jsObject, name string) {
+	if _, found := o.props[name]; !found {
+		return
+	}
+	delete(o.props, name)
+	for i, k := range o.keys {
+		if k == name {
+			o.keys = append(o.keys[:i], o.keys[i+1:]...)
+			break
+		}
+	}
+}
+
 // jsvStaticWrite is a write onto class cls's static namespace: a setter anywhere on
 // the static chain wins over a fresh own slot, the same rule js_set follows for an
 // ordinary object. Twin of jvStaticWrite in languages/lib/js-rt.metajs.
@@ -4923,13 +4961,11 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 			}
 			return boolH(true)
 		}
-		// A class's own name / length: a read then finds the parent class's, or
-		// Function.prototype's (jsvStaticSideRead).
-		if cls, isObj := u(a[0]).(*jsObject); isObj && isClassDesc(cls) {
-			if n := rt.toString(u(a[1])); (n == "name" || n == "length") && !jsvOwnsStatic(cls, n) {
-				cls.props["__del"+n] = true
-				return boolH(true)
-			}
+		// A class object's own properties are its statics; the descriptor's own slots
+		// are the instance methods, which a delete on the class never reaches.
+		if cls, isStatic := jsvIsStaticSide(u(a[0]), rt.toString(u(a[1]))); isStatic {
+			jsvStaticDel(cls, rt.toString(u(a[1])))
+			return boolH(true)
 		}
 		if jsvIsFnLike(u(a[0])) {
 			if n := rt.toString(u(a[1])); n == "name" || n == "length" {
@@ -4941,16 +4977,7 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 		}
 		// A function's own properties live in the side table.
 		if p := jsvFnPropsOf(u(a[0])); p != nil {
-			name := rt.toString(u(a[1]))
-			if _, found := p.props[name]; found {
-				delete(p.props, name)
-				for i, k := range p.keys {
-					if k == name {
-						p.keys = append(p.keys[:i], p.keys[i+1:]...)
-						break
-					}
-				}
-			}
+			jsvObjDel(p, rt.toString(u(a[1])))
 			return boolH(true)
 		}
 		return baseDel(a)

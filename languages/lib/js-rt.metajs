@@ -1298,13 +1298,13 @@ function js_jsdel(o, key) {
             return true
         }
     }
-    // A class's own name / length: a read then finds the parent class's, or
-    // Function.prototype's (jvStaticSideRead).
+    // A class object's own properties are its statics; the descriptor's own slots
+    // are the instance methods, which a delete on the class never reaches.
     if (jvClsN > 0) {
         if (jvIsClassDesc(o)) {
             var dk = jvStr(key)
-            if ((dk == "name" || dk == "length") && !jvClassOwnsStatic(o, dk)) {
-                o["__del" + dk] = true
+            if (jvIsStaticSide(o, dk)) {
+                jvStaticDel(o, dk)
                 return true
             }
         }
@@ -2832,6 +2832,29 @@ function jvClassOwnsStatic(o, sk) {
     var st = o["__statics"]
     if (!jvIsObj(st)) { return false }
     return jvSlotHas(st, sk)
+}
+
+// `delete C.k` on a class object: the static member leaves the table and the
+// enumerable list, so a read falls through to the parent class. A deleted own `name`
+// or `length` reads the parent's, or Function.prototype's (jvStaticSideRead). Twins:
+// jsvStaticDel in abnf/jsrtjsprint.go, staticDelete in both *-interpreter.abnf.
+function jvStaticDel(o, k) {
+    if (k == "name" || k == "length") { o["__del" + k] = true }
+    var st = anytype
+    st = o["__statics"]
+    if (!jvIsObj(st)) { return undefined }
+    delKey(st, k)
+    var lst = anytype
+    lst = st["__sfk"]
+    if (!Array.isArray(lst)) { return undefined }
+    var keep = []
+    var i = 0
+    while (i < lst.length) {
+        if (lst[i] != k) { keep.push(lst[i]) }
+        i = i + 1
+    }
+    st["__sfk"] = keep
+    return undefined
 }
 
 // js_jsmset has NO Go twin: it is emitted only under -exe, because the C floor's
