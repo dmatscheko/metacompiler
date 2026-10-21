@@ -752,7 +752,7 @@ ShorthandProp <~~ push(makeProp(makeVarRef(idName(up.in)), idName(up.in))) ~~>
 ArrayLit    <~~ push(makeArray(takeAll())) ~~>
             = "[" [ ArrayElem { "," ArrayElem } ] [ "," ] "]" ;
 ArrayElem   = Arg | ArrayHole ;
-ArrayHole   <~~ push(makeConst(undefined)) ~~>
+ArrayHole   <~~ push({hole: true}) ~~>
             = !"]" ;
 
 // See the twin of this comment in js-interpreter.abnf.
@@ -2696,9 +2696,9 @@ NotFuncHead = :script(~~
     // See the twin of this comment in js-interpreter.abnf.
     function jsSortArr(a, cmp) {
         var vals = []
-        var undefs = 0
+        var holes = 0
         for (var i = 0; i < a.length; i++) {
-            if (a[i] === undefined) { undefs = undefs + 1 } else { vals.push(a[i]) }
+            if (arrHole(a, i)) { holes = holes + 1 } else if (a[i] !== undefined) { vals.push(a[i]) }
         }
         for (var j = 1; j < vals.length; j++) {
             var cur = anytype
@@ -2707,8 +2707,12 @@ NotFuncHead = :script(~~
             while (k >= 0 && jsSortLess(cur, vals[k], cmp)) { vals[k + 1] = vals[k]; k = k - 1 }
             vals[k + 1] = cur
         }
+        // The undefined elements follow the sorted ones, and the absent ones come last.
         for (var p = 0; p < vals.length; p++) { a[p] = vals[p] }
-        for (var q = vals.length; q < a.length; q++) { a[q] = undefined }
+        for (var q = vals.length; q < a.length; q++) {
+            a[q] = undefined
+            if (q >= a.length - holes) { arrUnset(a, q) }
+        }
         return a
     }
     function jsSortLess(x, y, cmp) {
@@ -2717,9 +2721,16 @@ NotFuncHead = :script(~~
     }
     function jsFlatten(out, elems, depth) {
         for (var i = 0; i < elems.length; i++) {
+            if (arrHole(elems, i)) { continue }
             if (Array.isArray(elems[i]) && depth > 0) { jsFlatten(out, elems[i], depth - 1); continue }
             out.push(elems[i])
         }
+    }
+    // Append element i of a to out, an absent one as absent: what slice, concat and
+    // reverse carry over. The iteration methods skip one (arrHole).
+    function jsCopyElem(out, a, i) {
+        out.push(a[i])
+        if (arrHole(a, i)) { arrUnset(out, out.length - 1) }
     }
 
     // ----- The Object global -----
@@ -2845,7 +2856,7 @@ NotFuncHead = :script(~~
             if (argsWant && jsIsArgs(self)) { return jsArgsHas(self, kk) }
             if (Array.isArray(self) && jsArrNamedHas(self, kk)) { return true }
             var n = kk - 0
-            return ("" + n) === kk && n >= 0 && n < self.length && Math.floor(n) === n
+            return ("" + n) === kk && n >= 0 && n < self.length && Math.floor(n) === n && !arrHole(self, n)
         }
         if (self == undefined || self == null || typeof self != "object") { return false }
         // A String wrapper owns its string's indices and length.
@@ -4350,8 +4361,12 @@ NotFuncHead = :script(~~
                 var hi = n - 1 - lo
                 var tmp = anytype
                 tmp = a[lo]
+                var lh = arrHole(a, lo)
+                var hh = arrHole(a, hi)
                 a[lo] = a[hi]
                 a[hi] = tmp
+                if (hh) { arrUnset(a, lo) }
+                if (lh) { arrUnset(a, hi) }
             }
             return {v: a}
         }
@@ -4359,7 +4374,7 @@ NotFuncHead = :script(~~
             var b1 = jsRelIndex(jsArgNum(args, 0, 0), n)
             var e1 = jsRelIndex(jsArgNum(args, 1, n), n)
             var out = []
-            for (var si = b1; si < e1; si++) { out.push(a[si]) }
+            for (var si = b1; si < e1; si++) { jsCopyElem(out, a, si) }
             return {v: out}
         }
         if (name == "splice") {
@@ -4368,25 +4383,25 @@ NotFuncHead = :script(~~
             if (dc < 0) { dc = 0 }
             if (st + dc > n) { dc = n - st }
             var removed = []
-            for (var di = st; di < st + dc; di++) { removed.push(a[di]) }
+            for (var di = st; di < st + dc; di++) { jsCopyElem(removed, a, di) }
             var next = []
-            for (var k1 = 0; k1 < st; k1++) { next.push(a[k1]) }
+            for (var k1 = 0; k1 < st; k1++) { jsCopyElem(next, a, k1) }
             for (var k2 = 2; k2 < args.length; k2++) { next.push(args[k2]) }
-            for (var k3 = st + dc; k3 < n; k3++) { next.push(a[k3]) }
+            for (var k3 = st + dc; k3 < n; k3++) { jsCopyElem(next, a, k3) }
             while (a.length > 0) { a.pop() }
-            for (var k4 = 0; k4 < next.length; k4++) { a.push(next[k4]) }
+            for (var k4 = 0; k4 < next.length; k4++) { jsCopyElem(a, next, k4) }
             return {v: removed}
         }
         if (name == "indexOf") {
             var from = (args.length > 1) ? jsRelIndex(jsArgNum(args, 1, 0), n) : 0
-            for (var ii = from; ii < n; ii++) { if (a[ii] === cb) { return {v: ii} } }
+            for (var ii = from; ii < n; ii++) { if (a[ii] === cb && !arrHole(a, ii)) { return {v: ii} } }
             return {v: -1}
         }
         if (name == "lastIndexOf") {
             var lf = (args.length > 1) ? jsnToInt(jsArgNum(args, 1, 0)) : n - 1
             if (lf < 0) { lf = n + lf }
             if (lf > n - 1) { lf = n - 1 }
-            for (var li = lf; li >= 0; li--) { if (a[li] === cb) { return {v: li} } }
+            for (var li = lf; li >= 0; li--) { if (a[li] === cb && !arrHole(a, li)) { return {v: li} } }
             return {v: -1}
         }
         if (name == "includes") {
@@ -4399,9 +4414,9 @@ NotFuncHead = :script(~~
         }
         if (name == "concat") {
             var co = []
-            for (var c1 = 0; c1 < n; c1++) { co.push(a[c1]) }
+            for (var c1 = 0; c1 < n; c1++) { jsCopyElem(co, a, c1) }
             for (var c2 = 0; c2 < args.length; c2++) {
-                if (Array.isArray(args[c2])) { for (var c3 = 0; c3 < args[c2].length; c3++) { co.push(args[c2][c3]) } }
+                if (Array.isArray(args[c2])) { for (var c3 = 0; c3 < args[c2].length; c3++) { jsCopyElem(co, args[c2], c3) } }
                 else { co.push(args[c2]) }
             }
             return {v: co}
@@ -4409,24 +4424,28 @@ NotFuncHead = :script(~~
         if (name == "sort") { return {v: jsSortArr(a, cb)} }
         if (name == "map") {
             var mo = []
-            for (var mi = 0; mi < n && mi < a.length; mi++) { mo.push(callWithThis(cb, args[1], [a[mi], mi, a])) }
+            // An absent element is skipped and stays absent in the result.
+            for (var mi = 0; mi < n && mi < a.length; mi++) {
+                if (arrHole(a, mi)) { mo.push(undefined); arrUnset(mo, mi) }
+                else { mo.push(callWithThis(cb, args[1], [a[mi], mi, a])) }
+            }
             return {v: mo}
         }
         if (name == "filter") {
             var fo = []
-            for (var fi = 0; fi < n && fi < a.length; fi++) { if (callWithThis(cb, args[1], [a[fi], fi, a])) { fo.push(a[fi]) } }
+            for (var fi = 0; fi < n && fi < a.length; fi++) { if (!arrHole(a, fi) && callWithThis(cb, args[1], [a[fi], fi, a])) { fo.push(a[fi]) } }
             return {v: fo}
         }
         if (name == "forEach") {
-            for (var ei = 0; ei < n && ei < a.length; ei++) { callWithThis(cb, args[1], [a[ei], ei, a]) }
+            for (var ei = 0; ei < n && ei < a.length; ei++) { if (!arrHole(a, ei)) { callWithThis(cb, args[1], [a[ei], ei, a]) } }
             return {v: undefined}
         }
         if (name == "some") {
-            for (var oi = 0; oi < n && oi < a.length; oi++) { if (callWithThis(cb, args[1], [a[oi], oi, a])) { return {v: true} } }
+            for (var oi = 0; oi < n && oi < a.length; oi++) { if (!arrHole(a, oi) && callWithThis(cb, args[1], [a[oi], oi, a])) { return {v: true} } }
             return {v: false}
         }
         if (name == "every") {
-            for (var vi = 0; vi < n && vi < a.length; vi++) { if (!callWithThis(cb, args[1], [a[vi], vi, a])) { return {v: false} } }
+            for (var vi = 0; vi < n && vi < a.length; vi++) { if (!arrHole(a, vi) && !callWithThis(cb, args[1], [a[vi], vi, a])) { return {v: false} } }
             return {v: true}
         }
         if (name == "find") {
@@ -4447,13 +4466,13 @@ NotFuncHead = :script(~~
         }
         if (name == "reduce" || name == "reduceRight") {
             var order = []
-            if (name == "reduce") { for (var r1 = 0; r1 < n; r1++) { order.push(r1) } }
-            else { for (var r2 = n - 1; r2 >= 0; r2--) { order.push(r2) } }
+            if (name == "reduce") { for (var r1 = 0; r1 < n; r1++) { if (!arrHole(a, r1)) { order.push(r1) } } }
+            else { for (var r2 = n - 1; r2 >= 0; r2--) { if (!arrHole(a, r2)) { order.push(r2) } } }
             var at = 0
             var acc = anytype
             if (args.length > 1) { acc = args[1] }
             else {
-                if (n == 0) { biRaise("TypeError: Reduce of empty array with no initial value") }
+                if (order.length == 0) { biRaise("TypeError: Reduce of empty array with no initial value") }
                 acc = a[order[0]]
                 at = 1
             }
@@ -4476,9 +4495,10 @@ NotFuncHead = :script(~~
         if (name == "flatMap") {
             var fmo = []
             for (var gi = 0; gi < n && gi < a.length; gi++) {
+                if (arrHole(a, gi)) { continue }
                 var gv = anytype
                 gv = callWithThis(cb, args[1], [a[gi], gi, a])
-                if (Array.isArray(gv)) { for (var gj = 0; gj < gv.length; gj++) { fmo.push(gv[gj]) } }
+                if (Array.isArray(gv)) { for (var gj = 0; gj < gv.length; gj++) { if (!arrHole(gv, gj)) { fmo.push(gv[gj]) } } }
                 else { fmo.push(gv) }
             }
             return {v: fmo}
@@ -4547,7 +4567,7 @@ NotFuncHead = :script(~~
         if (arguments.length == 1 && typeof arguments[0] == "number") {
             var n = arguments[0]
             if (!(n >= 0 && n <= 4294967295 && Math.floor(n) === n)) { biRaise("RangeError: Invalid array length") }
-            for (var i = 0; i < n; i++) { out.push(undefined) }
+            out.length = n // n absent elements
             return out
         }
         for (var j = 0; j < arguments.length; j++) { out.push(arguments[j]) }
@@ -4668,7 +4688,8 @@ NotFuncHead = :script(~~
     // languages/lib/js-rt.metajs.
     function jsArgsHas(v, k) {
         var n = k - 0
-        return ("" + n) === ("" + k) && n >= 0 && Math.floor(n) === n && n < v.length && (n < jsArgsLen(v) || v[n] !== undefined)
+        return ("" + n) === ("" + k) && n >= 0 && Math.floor(n) === n && n < v.length && (n < jsArgsLen(v) || v[n] !== undefined) &&
+            !arrHole(v, n)
     }
     function jsArgsView(v) {
         var out = []
@@ -4707,6 +4728,11 @@ NotFuncHead = :script(~~
     function jsArgMap(sc, names, args) {
         if (names === null || !argsWant) { return }
         sc["0argm"] = names.slice(0, names.length < args.length ? names.length : args.length)
+        // The call's scope, filed on the arguments object (a hidden slot of its
+        // named-property object) for jsArgPut.
+        var np = anytype
+        np = jsArrNamed(args, true)
+        np["__argsc"] = sc
     }
     function jsArgSync(name, v) {
         if (!argsWant || paramSeen["$" + name] !== true) { return }
@@ -4728,17 +4754,14 @@ NotFuncHead = :script(~~
     // takes v, or k stops being mapped.
     function jsArgPut(obj, k, v, unmap) {
         if (!argsWant || !jsIsArgs(obj)) { return }
-        for (var i = scopes.length - 1; i >= 0; i--) {
-            var s = scopes[i]
-            if (objHasOwn.call(s, "arguments")) {
-                if (s["arguments"] !== obj || !objHasOwn.call(s, "0argm")) { return }
-                var ix = jsToNum(k)
-                var ns = s["0argm"]
-                if (ix >= 0 && ix < ns.length && Math.floor(ix) === ix && jsStr(ix) === jsStr(k) && ns[ix] !== "") {
-                    if (unmap) { ns[ix] = "" } else { scopePut(s, ns[ix], v) }
-                }
-                return
-            }
+        var np = anytype // The named-property object, which files the call's scope.
+        np = arrProps(obj)
+        if (np === undefined || !objHasOwn.call(np, "__argsc")) { return }
+        var s = np["__argsc"]
+        var ix = jsToNum(k)
+        var ns = s["0argm"]
+        if (ix >= 0 && ix < ns.length && Math.floor(ix) === ix && jsStr(ix) === jsStr(k) && ns[ix] !== "") {
+            if (unmap) { ns[ix] = "" } else { scopePut(s, ns[ix], v) }
         }
     }
     function jsonHIsObj(v) {
@@ -5921,7 +5944,7 @@ NotFuncHead = :script(~~
         }
         if (Array.isArray(v)) {
             var a = []
-            for (var j = 0; j < v.length; j++) { a.push("" + j) }
+            for (var j = 0; j < v.length; j++) { if (!arrHole(v, j)) { a.push("" + j) } }
             var np = anytype // The array's named properties, or undefined (jsArrNamed).
             np = jsArrNamed(v, false)
             if (np !== undefined) { return a.concat(ownKeys(np)) }
@@ -5997,6 +6020,12 @@ NotFuncHead = :script(~~
         for (var i = 0; i < items.length; i++) {
             var it = items[i]
             if (typeof it == "function") { out.push(it()); continue }
+            // An elision is an absent element (arrUnset), which reads as undefined.
+            if (it.hole === true) {
+                out.push(undefined)
+                arrUnset(out, out.length - 1)
+                continue
+            }
             var v = anytype // The spread operand: an array, a string or an iterator.
             v = it.t()
             v = iterArr(v, -1)
@@ -7141,7 +7170,7 @@ NotFuncHead = :script(~~
         if (Array.isArray(o)) {
             if (jsArrNamedHas(o, "" + k)) { return true }
             var n = jsArrIndexKey(k)
-            return n >= 0 && n < o.length
+            return n >= 0 && n < o.length && !arrHole(o, n)
         }
         if (jsIsWrap(o) && typeof o.__bvof == "string" && jsHasOwn(o.__bvof, k)) { return true }
         // `"m" in C` asks the STATIC namespace and nothing else: the descriptor's own
@@ -7292,7 +7321,9 @@ NotFuncHead = :script(~~
                 if (tgt === undefined) { return true }
             }
             if (typeof tgt != "function") {
-                scopePut(tgt, p.key, undefined)
+                // An index of an array is left absent (arrUnset), not undefined.
+                if (Array.isArray(tgt) && jsArrIndexKey(p.key) >= 0) { arrUnset(tgt, jsArrIndexKey(p.key)) }
+                else { scopePut(tgt, p.key, undefined) }
                 jsAccDrop(tgt, "" + p.key)
                 if (typeof p.key == "string") { jsSymUntrack(tgt, p.key) }
                 jsArgPut(tgt, p.key, undefined, true)

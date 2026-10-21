@@ -621,7 +621,8 @@ func fnMetaBindings(b map[string]interface{}) {
 // arrKind answers 0 for an untagged array and for a non-array; arrKindSet ignores
 // a non-array and answers its first argument. arrProps(a) and arrPropsSet(a, o),
 // host ids 106/107, are the same pair for the object holding an array's named
-// properties (jsArray.props), undefined until set. The frozen grammar host binds
+// properties (jsArray.props), undefined until set; arrHole and arrUnset, 108/109,
+// ask and make an absent element (jsHole). The frozen grammar host binds
 // them too (frozenBaseBindings), and commonscript.go binds the goja twin, because
 // an interpreter half keeps the same kinds as its compiler half.
 func arrKindBindings(b map[string]interface{}) {
@@ -648,6 +649,21 @@ func arrKindBindings(b map[string]interface{}) {
 		v := argAt(args, 0)
 		if a, ok := v.(*jsArray); ok {
 			a.props = argAt(args, 1)
+		}
+		return v
+	})
+	// arrHole(a, i) / arrUnset(a, i), host ids 108/109: is element i (below the
+	// length) absent (jsHole), and make it so.
+	b["arrHole"] = jsHostFunc("arrHole", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		a, ok := argAt(args, 0).(*jsArray)
+		i := int(jsToInt(rt.toNumber(argAt(args, 1))))
+		return ok && i >= 0 && i < len(a.elems) && a.elems[i] == jsHole
+	})
+	b["arrUnset"] = jsHostFunc("arrUnset", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		v := argAt(args, 0)
+		i := int(jsToInt(rt.toNumber(argAt(args, 1))))
+		if a, ok := v.(*jsArray); ok && i >= 0 && i < len(a.elems) {
+			a.elems[i] = jsHole
 		}
 		return v
 	})

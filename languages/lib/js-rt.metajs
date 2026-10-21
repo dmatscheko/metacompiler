@@ -133,6 +133,7 @@ function jvArgsHas(v, k) {
     if (n < 0) { return false }
     if (Math.floor(n) !== n) { return false }
     if (n >= v.length) { return false }
+    if (arrHole(v, n)) { return false }
     if (n < jvArgsLen(v)) { return true }
     return v[n] !== undefined
 }
@@ -165,13 +166,22 @@ function js_jsargs(a, off) {
 // The MAPPED arguments object of a sloppy function with plain parameters (ECMA-262
 // 10.4.4.7). js_jsargmap(names, arguments) is the names mapped to arguments[0..n),
 // the parameters below the argument count, which the call's scope keeps under
-// "0argm". js_jsargsync(scope, name, v), after a store to a name, copies v into
-// arguments when the binding the store reached is a mapped parameter; js_jsargput
-// (scope, obj, k, v, unmap), after a store to obj[k], copies v into the parameter k
-// maps to when obj is the arguments object of the call whose scope the chain reaches
-// first (after a delete, unmap true, k stops being mapped). Twins: the same externs in abnf/jsrtjsprint.go, jsArgSync / jsArgPut in both
-// *-interpreter.abnf.
-function js_jsargmap(names, args) {
+// "0argm"; js_jsargmap(names, arguments, scope) also files the call's scope on the
+// arguments object (the hidden slot __argsc of its named-property object).
+// js_jsargsync(scope, name, v), after a store to a name, copies v into arguments when
+// the binding the store reached is a mapped parameter; js_jsargput(obj, k, v, unmap),
+// after a store to obj[k] through any reference, copies v into the parameter k maps
+// to when obj is a mapped arguments object (after a delete, unmap true, k stops being
+// mapped). Twins: the same externs in abnf/jsrtjsprint.go, jsArgSync / jsArgPut in
+// both *-interpreter.abnf.
+function js_jsargmap(names, args, sc) {
+    var p = anytype
+    p = arrProps(args)
+    if (p === undefined) {
+        p = {}
+        arrPropsSet(args, p)
+    }
+    p["__argsc"] = sc
     var out = []
     var i = 0
     while (i < names.length) {
@@ -207,31 +217,22 @@ function js_jsargsync(sc, name, v) {
     }
     return undefined
 }
-function js_jsargput(sc, obj, key, v, unmap) {
+function js_jsargput(obj, key, v, unmap) {
     if (!jvIsArgs(obj)) { return undefined }
+    var p = anytype
+    p = arrProps(obj)
+    if (p === undefined) { return undefined }
     var s = anytype
-    s = sc
-    while (s !== undefined) {
-        if (scopeHas(s, "arguments")) {
-            if (scopeGet(s, "arguments") !== obj) { return undefined }
-            if (scopeHas(s, "0argm")) {
-                var ns = scopeGet(s, "0argm")
-                var ix = jvToNumber(key)
-                if (ix >= 0) {
-                    if (ix < ns.length) {
-                        if (jvStr(ix) === jvStr(key)) {
-                            if (Math.floor(ix) === ix) {
-                                if (ns[ix] !== "") {
-                                    if (unmap) { ns[ix] = "" } else { scopeDecl(s, ns[ix], v) }
-                                }
-                            }
-                        }
-                    }
-                }
+    s = p["__argsc"]
+    if (s === undefined) { return undefined }
+    var ns = scopeGet(s, "0argm")
+    var ix = jvKeyIndex(key)
+    if (ix >= 0) {
+        if (ix < ns.length) {
+            if (ns[ix] !== "") {
+                if (unmap) { ns[ix] = "" } else { scopeDecl(s, ns[ix], v) }
             }
-            return undefined
         }
-        s = scopeParent(s)
     }
     return undefined
 }
@@ -1295,7 +1296,7 @@ function js_jsdel(o, key) {
     if (Array.isArray(o)) {
         var idx = jvKeyIndex(key)
         if (idx >= 0) {
-            if (idx < o.length) { o[idx] = undefined }
+            arrUnset(o, idx)
             return true
         }
         var dp = anytype
@@ -1622,6 +1623,7 @@ function jvHasOwn(self, k) {
             if (jvArrNamedHas(self, kk)) { return true }
         }
         if (jvStr(jvToNumber(kk)) !== kk) { return false }
+        if (Array.isArray(self)) { return jvElemIn(self, kk) }
         return jvIndexIn(kk, self.length)
     }
     if (!jvIsObj(self)) { return false }
@@ -1732,13 +1734,23 @@ function jvIndexKeys(n) {
     return out
 }
 
-// An array's own enumerable keys: its indices, then its enumerable NAMED properties
+// An array's indices as strings, but the absent ones (arrHole).
+function jvArrIdxKeys(a) {
+    var out = []
+    var j = 0
+    while (j < a.length) {
+        if (!arrHole(a, j)) { out.push("" + j) }
+        j = j + 1
+    }
+    return out
+}
+// An array's own enumerable keys: its indices but the absent ones, then its enumerable NAMED properties
 // in insertion order (node's OrdinaryOwnPropertyKeys). The floor's set_member keeps
 // a key that is no index in an object in the array cell's field e, which arrProps
 // (host id 106) answers, undefined while there is none. Twin: jsvArrNamed in
 // abnf/jsrtjsprint.go.
 function jvArrKeys(a) {
-    var out = jvIndexKeys(a.length)
+    var out = jvArrIdxKeys(a)
     var p = anytype
     p = arrProps(a)
     if (p !== undefined) {
@@ -3230,6 +3242,14 @@ function jvIndexIn(key, n) {
     if (idx < 0) { return false }
     return idx < n
 }
+// Whether key names an element array a holds: an index below its length that is
+// not absent (arrHole).
+function jvElemIn(a, key) {
+    var idx = jvKeyIndex(key)
+    if (idx < 0) { return false }
+    if (idx >= a.length) { return false }
+    return !arrHole(a, idx)
+}
 
 // 'key in obj' / Object.prototype.hasOwnProperty: own properties of an object,
 // index and 'length' of an array or string.
@@ -3249,7 +3269,7 @@ function js_has(o, key) {
     }
     if (Array.isArray(o)) {
         if (key === "length") { return true }
-        return jvIndexIn(key, o.length)
+        return jvElemIn(o, key)
     }
     if (typeof o == "string") {
         if (key === "length") { return true }
@@ -4590,8 +4610,7 @@ function js_jsarrayfn() {
             if (arguments.length === 1 && typeof arguments[0] == "number") {
                 var n = arguments[0]
                 if (!(n >= 0 && n <= 4294967295 && Math.floor(n) === n)) { jbRaise("RangeError: Invalid array length") }
-                var i = 0
-                while (i < n) { out.push(undefined); i = i + 1 }
+                out.length = n // n absent elements
                 return out
             }
             var j = 0
@@ -5102,9 +5121,12 @@ function jvSortLess(x, y, cmp) {
 // form. V8's sort is stable, so a stable sort (insertion) is what this is.
 function jvSort(a, cmp) {
     var vals = []
+    var holes = 0
     var i = 0
     while (i < a.length) {
-        if (a[i] !== undefined) { vals.push(a[i]) }
+        if (arrHole(a, i)) {
+            holes = holes + 1
+        } else if (a[i] !== undefined) { vals.push(a[i]) }
         i = i + 1
     }
     var j = 1
@@ -5124,8 +5146,10 @@ function jvSort(a, cmp) {
         a[w] = vals[w]
         w = w + 1
     }
+    // The undefined elements follow the sorted ones, and the absent ones come last.
     while (w < a.length) {
         a[w] = undefined
+        if (w >= a.length - holes) { arrUnset(a, w) }
         w = w + 1
     }
     return undefined
@@ -5135,13 +5159,23 @@ function jvFlatten(out, elems, depth) {
     var i = 0
     while (i < elems.length) {
         var e = elems[i]
-        if (Array.isArray(e) && depth > 0) {
+        if (arrHole(elems, i)) {
+            e = undefined
+        } else if (Array.isArray(e) && depth > 0) {
             jvFlatten(out, e, depth - 1)
         } else {
             out.push(e)
         }
         i = i + 1
     }
+    return undefined
+}
+// Append element i of a to out, an absent one as absent: what slice and concat carry
+// over. The iteration methods skip one (arrHole). Twin of jsCopyElem in both
+// *-interpreter.abnf.
+function jvCopyElem(out, a, i) {
+    out.push(a[i])
+    if (arrHole(a, i)) { arrUnset(out, out.length - 1) }
     return undefined
 }
 
@@ -5151,7 +5185,7 @@ function jvReplaceAll(a, next) {
     while (a.length > 0) { a.pop() }
     var i = 0
     while (i < next.length) {
-        a.push(next[i])
+        jvCopyElem(a, next, i)
         i = i + 1
     }
     return undefined
@@ -5262,7 +5296,7 @@ function jvArrMethod(a, name, args) {
         var so = []
         var sk = jvBegin
         while (sk < jvEnd) {
-            so.push(a[sk])
+            jvCopyElem(so, a, sk)
             sk = sk + 1
         }
         return so
@@ -5277,13 +5311,13 @@ function jvArrMethod(a, name, args) {
         var removed = []
         var si = start
         while (si < start + del) {
-            removed.push(a[si])
+            jvCopyElem(removed, a, si)
             si = si + 1
         }
         var nx = []
         var k = 0
         while (k < start) {
-            nx.push(a[k])
+            jvCopyElem(nx, a, k)
             k = k + 1
         }
         var ii = 2
@@ -5293,7 +5327,7 @@ function jvArrMethod(a, name, args) {
         }
         k = start + del
         while (k < n) {
-            nx.push(a[k])
+            jvCopyElem(nx, a, k)
             k = k + 1
         }
         jvReplaceAll(a, nx)
@@ -5304,7 +5338,7 @@ function jvArrMethod(a, name, args) {
         if (args.length > 1) { from = jvRelIndex(jvToNumber(args[1]), n) }
         var qi = from
         while (qi < n) {
-            if (a[qi] === cb) { return qi }
+            if (a[qi] === cb) { if (!arrHole(a, qi)) { return qi } }
             qi = qi + 1
         }
         return -1
@@ -5317,7 +5351,7 @@ function jvArrMethod(a, name, args) {
             if (li > n - 1) { li = n - 1 }
         }
         while (li >= 0) {
-            if (a[li] === cb) { return li }
+            if (a[li] === cb) { if (!arrHole(a, li)) { return li } }
             li = li - 1
         }
         return -1
@@ -5356,7 +5390,7 @@ function jvArrMethod(a, name, args) {
         var co = []
         var xi = 0
         while (xi < n) {
-            co.push(a[xi])
+            jvCopyElem(co, a, xi)
             xi = xi + 1
         }
         var yi = 0
@@ -5365,7 +5399,7 @@ function jvArrMethod(a, name, args) {
             if (Array.isArray(x)) {
                 var zi = 0
                 while (zi < x.length) {
-                    co.push(x[zi])
+                    jvCopyElem(co, x, zi)
                     zi = zi + 1
                 }
             } else {
@@ -5382,8 +5416,14 @@ function jvArrMethod(a, name, args) {
     if (name == "map") {
         var mo = []
         var mi = 0
+        // An absent element is skipped and stays absent in the result.
         while (mi < n && mi < a.length) {
-            mo.push(jvCallT(cb, jvArg(args, 1), [a[mi], mi, a]))
+            if (arrHole(a, mi)) {
+                mo.push(undefined)
+                arrUnset(mo, mi)
+            } else {
+                mo.push(jvCallT(cb, jvArg(args, 1), [a[mi], mi, a]))
+            }
             mi = mi + 1
         }
         return mo
@@ -5392,7 +5432,9 @@ function jvArrMethod(a, name, args) {
         var fo = []
         var fi = 0
         while (fi < n && fi < a.length) {
-            if (jvCallT(cb, jvArg(args, 1), [a[fi], fi, a])) { fo.push(a[fi]) }
+            if (!arrHole(a, fi)) {
+                if (jvCallT(cb, jvArg(args, 1), [a[fi], fi, a])) { fo.push(a[fi]) }
+            }
             fi = fi + 1
         }
         return fo
@@ -5400,7 +5442,7 @@ function jvArrMethod(a, name, args) {
     if (name == "forEach") {
         var ei = 0
         while (ei < n && ei < a.length) {
-            jvCallT(cb, jvArg(args, 1), [a[ei], ei, a])
+            if (!arrHole(a, ei)) { jvCallT(cb, jvArg(args, 1), [a[ei], ei, a]) }
             ei = ei + 1
         }
         return undefined
@@ -5408,7 +5450,9 @@ function jvArrMethod(a, name, args) {
     if (name == "some") {
         var oi = 0
         while (oi < n && oi < a.length) {
-            if (jvCallT(cb, jvArg(args, 1), [a[oi], oi, a])) { return true }
+            if (!arrHole(a, oi)) {
+                if (jvCallT(cb, jvArg(args, 1), [a[oi], oi, a])) { return true }
+            }
             oi = oi + 1
         }
         return false
@@ -5416,7 +5460,9 @@ function jvArrMethod(a, name, args) {
     if (name == "every") {
         var vi = 0
         while (vi < n && vi < a.length) {
-            if (!jvCallT(cb, jvArg(args, 1), [a[vi], vi, a])) { return false }
+            if (!arrHole(a, vi)) {
+                if (!jvCallT(cb, jvArg(args, 1), [a[vi], vi, a])) { return false }
+            }
             vi = vi + 1
         }
         return true
@@ -5458,13 +5504,13 @@ function jvArrMethod(a, name, args) {
         if (name == "reduce") {
             var ri = 0
             while (ri < n) {
-                idx.push(ri)
+                if (!arrHole(a, ri)) { idx.push(ri) }
                 ri = ri + 1
             }
         } else {
             var rj = n - 1
             while (rj >= 0) {
-                idx.push(rj)
+                if (!arrHole(a, rj)) { idx.push(rj) }
                 rj = rj - 1
             }
         }
@@ -5473,7 +5519,7 @@ function jvArrMethod(a, name, args) {
         if (args.length > 1) {
             acc = args[1]
         } else {
-            if (n === 0) { jbRaise("TypeError: Reduce of empty array with no initial value") }
+            if (idx.length === 0) { jbRaise("TypeError: Reduce of empty array with no initial value") }
             acc = a[idx[0]]
             at = 1
         }
@@ -5500,11 +5546,15 @@ function jvArrMethod(a, name, args) {
         var mo2 = []
         var mi2 = 0
         while (mi2 < n && mi2 < a.length) {
+            if (arrHole(a, mi2)) {
+                mi2 = mi2 + 1
+                continue
+            }
             var v = jvCallT(cb, jvArg(args, 1), [a[mi2], mi2, a])
             if (Array.isArray(v)) {
                 var wi = 0
                 while (wi < v.length) {
-                    mo2.push(v[wi])
+                    if (!arrHole(v, wi)) { mo2.push(v[wi]) }
                     wi = wi + 1
                 }
             } else {
@@ -6254,7 +6304,7 @@ function jvObjectGlobalMethod(name, args) {
             var gp = anytype
             gp = arrProps(src)
             if (gp !== undefined) {
-                ks = jvIndexKeys(src.length)
+                ks = jvArrIdxKeys(src)
                 var gpk = keysOf(gp)
                 var gpi = 0
                 while (gpi < gpk.length) {
@@ -6270,7 +6320,7 @@ function jvObjectGlobalMethod(name, args) {
             if (typeof src == "string") { lenAt = ks.length }
             if (Array.isArray(src)) {
                 lenAt = ks.length
-                if (!jvIsArgs(src)) { lenAt = src.length }
+                if (!jvIsArgs(src)) { lenAt = jvArrIdxKeys(src).length }
             }
         }
         var i = 0

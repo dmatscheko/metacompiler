@@ -727,6 +727,27 @@ func installGojaArrKind(vm *goja.Runtime) {
 		}
 		return a
 	})
+	// arrHole / arrUnset: a goja array's own holes, which `delete a[i]` and a write
+	// past the length make.
+	vm.Set("arrHole", func(call goja.FunctionCall) goja.Value {
+		o := arrObj(call.Argument(0))
+		i := call.Argument(1).ToInteger()
+		if o == nil || i < 0 || i >= o.Get("length").ToInteger() {
+			return vm.ToValue(false)
+		}
+		return vm.ToValue(o.Get(strconv.FormatInt(i, 10)) == nil)
+	})
+	vm.Set("arrUnset", func(call goja.FunctionCall) goja.Value {
+		a := call.Argument(0)
+		o := arrObj(a)
+		i := call.Argument(1).ToInteger()
+		if o != nil && i >= 0 && i < o.Get("length").ToInteger() {
+			if err := o.Delete(strconv.FormatInt(i, 10)); err != nil {
+				panic(err)
+			}
+		}
+		return a
+	})
 }
 
 // installGojaCoroutines binds coNew(f), coResume(co, v) and coYield(v), the

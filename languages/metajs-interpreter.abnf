@@ -1088,6 +1088,9 @@ KwDefault   = "default" KwEnd ;
         // an array's named properties; bound by both grammar hosts likewise.
         "arrProps": arrProps,
         "arrPropsSet": arrPropsSet,
+        // arrHole(a, i) / arrUnset(a, i): host ids 108/109, an absent element.
+        "arrHole": arrHole,
+        "arrUnset": arrUnset,
         // byteAt(s, i) / byteSub(s, lo, hi) / bytesStr(a): host ids 101..103, a
         // string as its bytes; bound by both grammar hosts like the arrKind pair.
         "byteAt": byteAt,

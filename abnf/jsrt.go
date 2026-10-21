@@ -93,11 +93,18 @@ func numValue(h uint64) float64 {
 }
 
 // jsUndef and jsNull are the singleton marker values inside the table.
-type jsUndefT struct{}
+type jsUndefT struct{ hole bool }
 type jsNullT struct{}
 
 var jsUndef = jsUndefT{}
 var jsNull = jsNullT{}
+
+// jsHole is an array element that is ABSENT (js: `delete a[1]`, a write past
+// the length, `new Array(n)`, an elision). It IS a jsUndefT, so every type
+// switch reads it as undefined and wrap hands the IR the undefined handle;
+// getMember answers jsUndef for it, and only arrHole tells it apart. Twin of
+// H_HOLE in languages/lib/runtime.c.
+var jsHole = jsUndefT{hole: true}
 
 // jsAnyT is the value of the host global 'anytype'. Declaring a variable with
 // it (var v = anytype) starts the variable as undefined WITHOUT pinning: it may
@@ -1543,7 +1550,7 @@ var jsThroughArgs = map[string]uint32{
 	"js_kget": 1 << 0, "js_kset": 1 << 0, "js_tdecl": 1 << 0, "js_tset": 1 << 0,
 	"js_pyset_var": 1 << 0, "js_pyglobal": 1 << 0, "js_pynonlocal": 1 << 0,
 
-	"js_arr_push": 1 << 0, "js_arg": 1 << 0, "js_pyargd": 1 << 0, "js_pyrest": 1 << 0,
+	"js_arr_push": 1 << 0, "js_arr_pushhole": 1 << 0, "js_arg": 1 << 0, "js_pyargd": 1 << 0, "js_pyrest": 1 << 0,
 	"js_pyprint": 1 << 0, "js_pyexc": 1 << 1,
 	"js_call": 1 << 2, "js_mcall": 1 << 2, "js_rmcall": 1 << 2, "js_supercall": 1 << 3,
 }
@@ -3051,7 +3058,7 @@ func (rt *jsrt) getMember(obj interface{}, key interface{}) interface{} {
 			}
 		}
 		if i := rt.arrIndexOf(key); i >= 0 {
-			if i < len(o.elems) {
+			if i < len(o.elems) && o.elems[i] != jsHole {
 				return o.elems[i]
 			}
 			return jsUndef
@@ -3287,7 +3294,7 @@ func (rt *jsrt) setMember(obj interface{}, key interface{}, val interface{}) {
 				o.elems = o.elems[:len(o.elems)-1]
 			}
 			for len(o.elems) < ln {
-				o.elems = append(o.elems, jsUndef)
+				o.elems = append(o.elems, jsHole)
 			}
 			return
 		}
@@ -3305,8 +3312,12 @@ func (rt *jsrt) setMember(obj interface{}, key interface{}, val interface{}) {
 			return
 		}
 		o.dropIdx()
-		for len(o.elems) <= i {
-			o.elems = append(o.elems, jsUndef)
+		for len(o.elems) < i {
+			o.elems = append(o.elems, jsHole)
+		}
+		if i == len(o.elems) {
+			o.elems = append(o.elems, val)
+			return
 		}
 		o.elems[i] = val
 	default:
@@ -12743,6 +12754,18 @@ func (rt *jsrt) builtinMethod(m *boundMethod, args []interface{}) interface{} {
 				arr = jsvArgsView(arr)
 			}
 			callArgs = arr.elems
+			// An absent element is passed as undefined (the floor's apply_args).
+			for i, e := range callArgs {
+				if e == jsHole {
+					callArgs = append([]interface{}{}, callArgs...)
+					for j := i; j < len(callArgs); j++ {
+						if callArgs[j] == jsHole {
+							callArgs[j] = jsUndef
+						}
+					}
+					break
+				}
+			}
 		}
 		return rt.call(m.recv, argAt(args, 0), callArgs)
 	}
@@ -13546,6 +13569,14 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			arr.elems = append(arr.elems, u(a[1]))
 			return 0
 		},
+		// An array literal's elision ('[1,,3]'): an absent element. Twin of
+		// js_arr_pushhole in languages/lib/runtime.c.
+		"js_arr_pushhole": func(a []uint64) uint64 {
+			arr := u(a[0]).(*jsArray)
+			arr.dropIdx()
+			arr.elems = append(arr.elems, jsHole)
+			return 0
+		},
 		// js_keys returns an object's own keys in insertion order (deterministic, so
 		// for-in / Lua pairs / dict key enumeration stay byte-identical across engines).
 		// A dict ({__dict,keys,vals}) yields its key array; a plain object yields its
@@ -14152,7 +14183,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 					return boolH(true)
 				}
 				idx := rt.arrIndexOf(u(a[1]))
-				return boolH(idx >= 0 && idx < len(o.elems))
+				return boolH(idx >= 0 && idx < len(o.elems) && o.elems[idx] != jsHole)
 			case string:
 				if key == "length" {
 					return boolH(true)

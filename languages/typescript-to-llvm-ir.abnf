@@ -2616,7 +2616,7 @@ NotFuncHead = :script(~~
     function pushArgs(b, arrV, items) {
         for (var i = 0; i < items.length; i++) {
             if (items[i].hole == true) {
-                callExt(b, "js_arr_push", [arrV, hUndef])
+                callExt(b, "js_arr_pushhole", [arrV])
             } else if (items[i].spreadT != undefined) {
                 b = emitSpreadInto(b, arrV, items[i].spreadT)
             } else {
@@ -3937,7 +3937,6 @@ NotFuncHead = :script(~~
         var savedAsyncGen = inAsyncGen
         var savedPlainGen = inPlainGen
         var savedStrict = emitStrict
-        var savedAlias = argsAliasOn
         if (ownStrict === true) { emitStrict = true }
         if (!isCtl) { inAsyncFn = pendingAsyncFn; inAsyncGen = pendingAsyncGen; inPlainGen = pendingPlainGen }
         pendingAsyncFn = false
@@ -3968,11 +3967,10 @@ NotFuncHead = :script(~~
         if (!isCtl && isArrow !== true) {
             var argsV = argsWant ? callExt(b, "js_jsargs", [f.Params[1], callExt(b, "js_num_i", [handle(0)])]) : f.Params[1]
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "arguments"), argsV])
-            argsAliasOn = argsWant && argsMapped(paramNames)
-            if (argsAliasOn) {
+            if (argsWant && argsMapped(paramNames)) {
                 var pnV = callExt(b, "js_arr_new", [])
                 for (var pi = 0; pi < paramNames.length; pi++) { callExt(b, "js_arr_push", [pnV, emitStr(b, paramNames[pi])]) }
-                callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0argm"), callExt(b, "js_jsargmap", [pnV, argsV])])
+                callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0argm"), callExt(b, "js_jsargmap", [pnV, argsV, curScopeV])])
             }
         }
         var endB = bodyT(b)
@@ -3987,7 +3985,6 @@ NotFuncHead = :script(~~
         inAsyncFn = savedAsync
         inAsyncGen = savedAsyncGen
         inPlainGen = savedPlainGen
-        argsAliasOn = savedAlias
         emitStrict = savedStrict
         emitParams = savedParams
         return idx
@@ -4980,8 +4977,6 @@ NotFuncHead = :script(~~
         var savedAsyncGen = inAsyncGen
         var savedStrict = emitStrict
         emitStrict = true // A class body is strict code, always.
-        var savedAlias = argsAliasOn
-        argsAliasOn = false
         var savedParams = emitParams
         emitParams = params
         var savedPlainGen = inPlainGen
@@ -5043,7 +5038,6 @@ NotFuncHead = :script(~~
         inAsyncFn = savedAsync
         inAsyncGen = savedAsyncGen
         inPlainGen = savedPlainGen
-        argsAliasOn = savedAlias
         emitStrict = savedStrict
         emitParams = savedParams
         return idx
@@ -5804,13 +5798,12 @@ NotFuncHead = :script(~~
         failB.NewBr(okB)
         return okB
     }
-    var argsAliasOn = false
     // After a store of v to objV[keyV] (unmapV true: a delete of it), the copy into the
-    // mapped parameter it may be.
+    // mapped parameter it may be. Any reference can reach an arguments object (a
+    // callee's parameter, a closure's variable), so in a program that names
+    // `arguments` every member store pays the extern.
     function emitArgPut(b, ref, objV, keyV, v, unmapV) {
-        if (argsWant && (argsAliasOn || (ref.name === "arguments" && ref.path.length == 1))) {
-            callExt(b, "js_jsargput", [curScopeV, objV, keyV, v, unmapV])
-        }
+        if (argsWant) { callExt(b, "js_jsargput", [objV, keyV, v, unmapV]) }
     }
     // The temporal dead zone: see the twin of this comment in js-to-llvm-ir.abnf.
     var tdzGH = [] // [the sentinel's module global, jstdzchk]

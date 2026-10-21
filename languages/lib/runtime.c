@@ -775,6 +775,11 @@ long H_UNDEF;
 long H_NULL;
 long H_FALSE;
 long H_TRUE;
+/* H_HOLE is an array element that is ABSENT (js: `delete a[1]`, a write past the
+ * length, `new Array(n)`, an elision): a permanent cell of tag 0, so it reads as
+ * undefined everywhere a tag is asked, and arr_get answers H_UNDEF for it - only
+ * arrHole (host id 108) tells it apart. Twin of jsHole in abnf/jsrt.go. */
+long H_HOLE;
 
 long cell_new(long tag) {
 	struct Cell *p = (struct Cell *)ar_alloc_k(56, 1);
@@ -1508,7 +1513,18 @@ long mk_arr(void) {
 long arr_len(long h) { return fb(h); }
 long arr_get(long h, long i) {
 	long *p = (long *)fa(h);
+	long v;
 	if (i < 0 || i >= fb(h)) { return H_UNDEF; }
+	v = p[i];
+	if (v == H_HOLE) { return H_UNDEF; }
+	return v;
+}
+/* Element i as stored, an absent one as H_HOLE: what a copy that keeps absent
+ * elements absent (shift, unshift, reverse, slice, concat) reads, and what an
+ * ARGUMENT array is read with - one never holds an absent element (fn.apply
+ * copies a holey array, apply_args), so the hottest reads skip the check. */
+long arr_raw(long h, long i) {
+	long *p = (long *)fa(h);
 	return p[i];
 }
 void arr_set(long h, long i, long v) {
@@ -3939,7 +3955,7 @@ void set_member(long obj, long key, long val) {
 			if (!d_is_integral(n) || d_sign(n)) { die2("invalid array length ", val); }
 			ln = d_to_long(n);
 			while (arr_len(obj) > ln) { sb(obj, arr_len(obj) - 1); }
-			while (arr_len(obj) < ln) { arr_push(obj, H_UNDEF); }
+			while (arr_len(obj) < ln) { arr_push(obj, H_HOLE); }
 			return;
 		}
 		idx = index_of_key(key);
@@ -3950,7 +3966,8 @@ void set_member(long obj, long key, long val) {
 			obj_put(fe(obj), to_string(key), val);
 			return;
 		}
-		while (arr_len(obj) <= idx) { arr_push(obj, H_UNDEF); }
+		while (arr_len(obj) < idx) { arr_push(obj, H_HOLE); }
+		if (idx == arr_len(obj)) { arr_push(obj, val); return; }
 		arr_set(obj, idx, val);
 		return;
 	}
@@ -4225,11 +4242,11 @@ long js_throw(long v);
 
 /* ------------------------------------------------------------- the calls - */
 
-long arg_at(long args, long i) { if (i < arr_len(args)) { return arr_get(args, i); } return H_UNDEF; }
-long arg_num(long args, long i) { if (i < arr_len(args)) { return to_number(arr_get(args, i)); } return DNAN; }
+long arg_at(long args, long i) { if (i < arr_len(args)) { return arr_raw(args, i); } return H_UNDEF; }
+long arg_num(long args, long i) { if (i < arr_len(args)) { return to_number(arr_raw(args, i)); } return DNAN; }
 /* An argument as a whole number: truncated, a NaN 0 (the Go twin's jsToInt). */
 long arg_idx(long args, long i) { long v = arg_num(args, i); return d_is_nan(v) ? 0 : d_to_long(v); }
-long arg_str(long args, long i) { if (i < arr_len(args)) { return to_string(arr_get(args, i)); } return mk_cstr(""); }
+long arg_str(long args, long i) { if (i < arr_len(args)) { return to_string(arr_raw(args, i)); } return mk_cstr(""); }
 
 long host_call(long id, long self, long args);
 long builtin_method(long recv, long mid, long args);
@@ -4814,6 +4831,21 @@ void sort_merge(long cmp, long a, long tmp, long lo, long hi) {
 	while (k < hi) { arr_set(a, k, arr_get(tmp, k)); k = k + 1; }
 }
 
+/* fn.apply's argument array: the array itself, or a copy with an absent element
+ * as undefined when it holds one - an argument array is read without the check
+ * (arr_raw). */
+long apply_args(long a) {
+	long n = arr_len(a);
+	long i = 0;
+	long out;
+	while (i < n && arr_raw(a, i) != H_HOLE) { i = i + 1; }
+	if (i == n) { return a; }
+	out = mk_arr();
+	i = 0;
+	while (i < n) { arr_push(out, arr_get(a, i)); i = i + 1; }
+	return out;
+}
+
 long builtin_method(long recv, long mid, long args) {
 	long t = tag_of(recv);
 	if (mid == 60) { return gen_next(recv, args); }   /* generator.next(v) */
@@ -4822,7 +4854,7 @@ long builtin_method(long recv, long mid, long args) {
 	if (mid == 40) {          /* fn.apply(this, argsArray) */
 		long a = arg_at(args, 1);
 		if (tag_of(a) != 5) { a = mk_arr(); }
-		return js_call(recv, arg_at(args, 0), a);
+		return js_call(recv, arg_at(args, 0), apply_args(a));
 	}
 	if (mid == 41) {          /* fn.call(this, ...) */
 		long a = mk_arr();
@@ -4850,7 +4882,7 @@ long builtin_method(long recv, long mid, long args) {
 			long i = 0;
 			if (n == 0) { return H_UNDEF; }
 			v = arr_get(recv, 0);
-			while (i + 1 < n) { arr_set(recv, i, arr_get(recv, i + 1)); i = i + 1; }
+			while (i + 1 < n) { arr_set(recv, i, arr_raw(recv, i + 1)); i = i + 1; }
 			sb(recv, n - 1);
 			return v;
 		}
@@ -4861,7 +4893,7 @@ long builtin_method(long recv, long mid, long args) {
 			long i = 0;
 			while (i < m) { arr_push(out, arr_get(args, i)); i = i + 1; }
 			i = 0;
-			while (i < n) { arr_push(out, arr_get(recv, i)); i = i + 1; }
+			while (i < n) { arr_push(out, arr_raw(recv, i)); i = i + 1; }
 			sa(recv, fa(out)); sb(recv, fb(out)); sc(recv, fc(out));
 			return mk_num(d_from_long(arr_len(recv)));
 		}
@@ -4869,8 +4901,8 @@ long builtin_method(long recv, long mid, long args) {
 			long i = 0;
 			long j = arr_len(recv) - 1;
 			while (i < j) {
-				long v = arr_get(recv, i);
-				arr_set(recv, i, arr_get(recv, j));
+				long v = arr_raw(recv, i);
+				arr_set(recv, i, arr_raw(recv, j));
 				arr_set(recv, j, v);
 				i = i + 1; j = j - 1;
 			}
@@ -4881,7 +4913,7 @@ long builtin_method(long recv, long mid, long args) {
 			long i;
 			slice_range(arr_len(recv), args);
 			i = G_BEGIN;
-			while (i < G_END) { arr_push(out, arr_get(recv, i)); i = i + 1; }
+			while (i < G_END) { arr_push(out, arr_raw(recv, i)); i = i + 1; }
 			return out;
 		}
 		if (mid == 7) {                                       /* indexOf */
@@ -4912,13 +4944,13 @@ long builtin_method(long recv, long mid, long args) {
 			long out = mk_arr();
 			long i = 0;
 			long n = arr_len(recv);
-			while (i < n) { arr_push(out, arr_get(recv, i)); i = i + 1; }
+			while (i < n) { arr_push(out, arr_raw(recv, i)); i = i + 1; }
 			i = 0;
 			while (i < arr_len(args)) {
 				long a = arr_get(args, i);
 				if (tag_of(a) == 5) {
 					long j = 0;
-					while (j < arr_len(a)) { arr_push(out, arr_get(a, j)); j = j + 1; }
+					while (j < arr_len(a)) { arr_push(out, arr_raw(a, j)); j = j + 1; }
 				} else { arr_push(out, a); }
 				i = i + 1;
 			}
@@ -6664,6 +6696,22 @@ long host_call(long id, long self, long args) {
 		if (tag_of(a) == 5) { se(a, arg_at(args, 1)); }
 		return a;
 	}
+	/* arrHole(a, i): is element i (below the length) absent? arrUnset(a, i) makes
+	 * it so (H_HOLE). Twins in abnf/jsrtint.go (arrKindBindings). */
+	case 108: {
+		long a = arg_at(args, 0);
+		long i = d_to_long(arg_num(args, 1));
+		long *p;
+		if (tag_of(a) != 5 || i < 0 || i >= arr_len(a)) { return H_FALSE; }
+		p = (long *)fa(a);
+		return mk_bool(p[i] == H_HOLE);
+	}
+	case 109: {
+		long a = arg_at(args, 0);
+		long i = d_to_long(arg_num(args, 1));
+		if (tag_of(a) == 5 && i >= 0 && i < arr_len(a)) { arr_set(a, i, H_HOLE); }
+		return a;
+	}
 	/* byteAt(s, i) / byteSub(s, lo, hi) / bytesStr(a): a string as the BYTES a
 	 * cell holds (UTF-8, WTF-8 for a lone surrogate), for a language whose
 	 * strings are byte strings (go). byteAt is the i-th byte, -1 outside s;
@@ -7034,7 +7082,9 @@ long js_num_str(long h) { return mk_num(str_to_num(h)); }
 long js_obj_new(void)   { return mk_obj(); }
 long js_arr_new(void)   { return mk_arr(); }
 long js_arr_push(long a, long v) { arr_push(a, v); return 0; }
-long js_arg(long args, long i)   { if (i < arr_len(args)) { return arr_get(args, i); } return H_UNDEF; }
+/* An array literal's elision ('[1,,3]'): an absent element (H_HOLE). */
+long js_arr_pushhole(long a) { arr_push(a, H_HOLE); return 0; }
+long js_arg(long args, long i)   { if (i < arr_len(args)) { return arr_raw(args, i); } return H_UNDEF; }
 /* A variadic parameter (Go's ...T, Python's *args, Kotlin's vararg): the call
  * arguments from index `from` (a raw integer) on, as a new array. Twins of
  * js_gorest and js_pyrest in abnf/jsrt.go. */
@@ -7670,6 +7720,7 @@ void boot(void) {
 	H_NULL = 1;
 	H_FALSE = 2;
 	H_TRUE = 3;
+	H_HOLE = cell_new(0);
 	RETSLOT = H_UNDEF;
 	JB_DEPTH = 0;
 	THROWN = 0;
@@ -7732,6 +7783,8 @@ void boot(void) {
 	seed_root("arrKindSet", mk_host(100));
 	seed_root("arrProps", mk_host(106));
 	seed_root("arrPropsSet", mk_host(107));
+	seed_root("arrHole", mk_host(108));
+	seed_root("arrUnset", mk_host(109));
 	seed_root("byteAt", mk_host(101));
 	seed_root("byteSub", mk_host(102));
 	seed_root("bytesStr", mk_host(103));

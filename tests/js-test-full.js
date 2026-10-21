@@ -1138,6 +1138,67 @@ function s121() {
     check("canon6", str["01"] === undefined && str["1"] === "b")
 }
 
+// ===== SECTION 122: an absent array element (a hole) =====
+// `delete a[i]`, a write past the length, a longer `length`, `new Array(n)` and an
+// elision leave an element ABSENT: it reads as undefined, but `in`,
+// hasOwnProperty, Object.keys and for-in skip it, the iteration methods skip it,
+// and slice, concat, splice and reverse carry it over; sort moves it last.
+function s122ks(a) { return Object.keys(a).join(",") + "/" + a.length }
+function s122() {
+    var a = [1, 2, 3]
+    delete a[1]
+    check("hole1", s122ks(a) == "0,2/3" && !(1 in a) && !a.hasOwnProperty(1) && a[1] === undefined)
+    var b = [1]
+    b[3] = undefined
+    check("hole2", s122ks(b) == "0,3/4" && !(1 in b) && (3 in b))
+    var k = []
+    k["1"] = 7
+    var h = [1, 2, 3]
+    h[6] = 9
+    var fi = ""
+    for (var p in h) { fi = fi + p + "," }
+    check("hole3", s122ks(k) == "1/2" && s122ks(h) == "0,1,2,6/7" && fi == "0,1,2,6," && h.join("-") == "1-2-3----9")
+    var c = [1, , 3]
+    var d = [5, 6]
+    d.length = 4
+    var n = new Array(2)
+    check("hole4", s122ks(c) == "0,2/3" && s122ks(d) == "0,1/4" && s122ks(n) == "/2" && JSON.stringify(c) == "[1,null,3]")
+    var seen = []
+    h.forEach(function(v, i) { seen.push(i) })
+    var m = h.map(function(v) { return v * 2 })
+    check("hole5", seen.join(",") == "0,1,2,6" && s122ks(m) == "0,1,2,6/7" && h.indexOf(undefined) == -1 && h.includes(undefined) &&
+        h.reduce(function(x, y) { return x + y }) == 15)
+    var r = [1, , 3, , 5].slice(1)
+    r.reverse()
+    var s = [3, , 1, undefined, 2]
+    s.sort()
+    check("hole6", s122ks(r) == "0,2/4" && s122ks([1, , 3].concat([, 7])) == "0,2,4/5" && s122ks(s) == "0,1,2,3/5" &&
+        s122ks([1, , 3].splice(0, 2)) == "0/2")
+    // fn.apply hands an absent element over as an undefined argument.
+    check("hole7", s122f.apply(null, [1, , 3]) == "1,true,3,3,true")
+}
+function s122f(a, b, c) { return [a, b === undefined, c, arguments.length, 1 in arguments].join(",") }
+
+// ===== SECTION 123: a mapped arguments object reached through another reference =====
+// In a sloppy function with plain parameters, arguments[i] and parameter i are one
+// binding through ANY reference to the object: a callee's parameter, a closure's
+// variable, an arrow's, after the call has returned too.
+function s123h(a) { a[0] = 9 }
+function s123f(p) { s123h(arguments); return p }
+function s123g(p, q) {
+    var a = arguments
+    var w = function () { a[1] = 7; a[0] = 5 }
+    w()
+    return p + "," + q
+}
+function s123k(p) { var a = arguments; return function () { a[0] = 42; return p } }
+function s123s(p) { "use strict"; s123h(arguments); return p }
+function s123d(p) { delete arguments[0]; s123h(arguments); return p + ":" + arguments[0] + ":" + (0 in arguments) }
+function s123() {
+    check("argalias1", s123f(1) == 9 && s123g(1, 2) == "5,7" && s123k(1)() == 42)
+    check("argalias2", s123s(1) == 1 && s123d(1) == "1:9:true")
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -1178,6 +1239,8 @@ function main() {
     s35() // SECTION-CALL 35
     s120() // SECTION-CALL 120
     s121() // SECTION-CALL 121
+    s122() // SECTION-CALL 122
+    s123() // SECTION-CALL 123
     println("full: " + checks + " checks, " + failures + " failures")
     return failures
 }

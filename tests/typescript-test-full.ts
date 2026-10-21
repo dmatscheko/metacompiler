@@ -5001,6 +5001,47 @@ function s121(): void {
     check("canon6", str["01"] === undefined && str["1"] === "b")
 }
 
+// ===== SECTION 122: an absent array element (a hole) =====
+// `delete a[i]`, a write past the length, a longer `length`, `new Array(n)` and an
+// elision leave an element ABSENT: it reads as undefined, but `in`,
+// hasOwnProperty, Object.keys and for-in skip it, the iteration methods skip it,
+// and slice, concat, splice and reverse carry it over; sort moves it last.
+function s122ks(a: any): string { return Object.keys(a).join(",") + "/" + a.length }
+function s122(): void {
+    var a: any[] = [1, 2, 3]
+    delete a[1]
+    check("hole1", s122ks(a) == "0,2/3" && !(1 in a) && !a.hasOwnProperty(1) && a[1] === undefined)
+    var b: any[] = [1]
+    b[3] = undefined
+    check("hole2", s122ks(b) == "0,3/4" && !(1 in b) && (3 in b))
+    var k: any[] = []
+    k["1"] = 7
+    var h: any[] = [1, 2, 3]
+    h[6] = 9
+    var fi = ""
+    for (var p in h) { fi = fi + p + "," }
+    check("hole3", s122ks(k) == "1/2" && s122ks(h) == "0,1,2,6/7" && fi == "0,1,2,6," && h.join("-") == "1-2-3----9")
+    var c: any[] = [1, , 3]
+    var d: any[] = [5, 6]
+    d.length = 4
+    var n: any[] = new Array(2)
+    check("hole4", s122ks(c) == "0,2/3" && s122ks(d) == "0,1/4" && s122ks(n) == "/2" && JSON.stringify(c) == "[1,null,3]")
+    var seen: any[] = []
+    h.forEach(function(v: any, i: number) { seen.push(i) })
+    var m: any = h.map(function(v: any) { return v * 2 })
+    check("hole5", seen.join(",") == "0,1,2,6" && s122ks(m) == "0,1,2,6/7" && h.indexOf(undefined) == -1 && h.includes(undefined) &&
+        h.reduce(function(x: any, y: any) { return x + y }) == 15)
+    var r: any[] = [1, , 3, , 5].slice(1)
+    r.reverse()
+    var s: any[] = [3, , 1, undefined, 2]
+    s.sort()
+    check("hole6", s122ks(r) == "0,2/4" && s122ks([1, , 3].concat([, 7])) == "0,2,4/5" && s122ks(s) == "0,1,2,3/5" &&
+        s122ks([1, , 3].splice(0, 2)) == "0/2")
+    // fn.apply hands an absent element over as an undefined argument.
+    check("hole7", s122f.apply(null, [1, , 3]) == "1,true,3,3,true")
+}
+function s122f(a: any, b: any, c: any): string { return [a, b === undefined, c, arguments.length, 1 in arguments].join(",") }
+
 // ===== END SECTIONS =====
 
 function main(): number {
@@ -5112,6 +5153,7 @@ function main(): number {
     s106(); // SECTION-CALL 106
     s120(); // SECTION-CALL 120
     s121(); // SECTION-CALL 121
+    s122(); // SECTION-CALL 122
     println("full: " + checks + " checks, " + failures + " failures");
     return failures;
 }

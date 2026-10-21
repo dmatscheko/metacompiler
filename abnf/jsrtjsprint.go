@@ -1909,9 +1909,11 @@ func jsvOwnKeys(v interface{}) []string {
 		if jsvIsArgs(o) {
 			return jsvArgsKeys(o)
 		}
-		out := make([]string, len(o.elems))
-		for i := range o.elems {
-			out[i] = strconv.Itoa(i)
+		out := make([]string, 0, len(o.elems))
+		for i, e := range o.elems {
+			if e != jsHole {
+				out = append(out, strconv.Itoa(i))
+			}
 		}
 		if p := jsvArrNamed(o); p != nil {
 			out = append(out, jsvOwnKeys(p)...)
@@ -2006,7 +2008,12 @@ func jsvGopnKeys(v interface{}) []string {
 			ks := jsvOwnKeys(v)
 			n := len(ks)
 			if !jsvIsArgs(t) {
-				n = len(t.elems)
+				n = 0
+				for _, e := range t.elems {
+					if e != jsHole {
+						n++
+					}
+				}
 			}
 			out := append(append([]string{}, ks[:n]...), "length")
 			if jsvIsArgs(t) {
@@ -2636,6 +2643,7 @@ func (rt *jsrt) jsvHasOwn(v interface{}, k string) bool {
 		return jsvFnOwn(v, k)
 	}
 	n := -1
+	var arr *jsArray
 	switch o := v.(type) {
 	case *jsObject:
 		if own, ok := jsvErrOwn(o, k); ok {
@@ -2663,6 +2671,7 @@ func (rt *jsrt) jsvHasOwn(v interface{}, k string) bool {
 			}
 		}
 		n = len(o.elems)
+		arr = o
 	case string:
 		n = rt.strLen(o)
 	default:
@@ -2672,7 +2681,7 @@ func (rt *jsrt) jsvHasOwn(v interface{}, k string) bool {
 		return true
 	}
 	i, err := strconv.Atoi(k)
-	return err == nil && strconv.Itoa(i) == k && i >= 0 && i < n
+	return err == nil && strconv.Itoa(i) == k && i >= 0 && i < n && (arr == nil || arr.elems[i] != jsHole)
 }
 
 // jsvOwnDesc is Object.getOwnPropertyDescriptor(v, k) for a key in the object's own
@@ -3301,7 +3310,7 @@ func jsvArgsHas(a *jsArray, k string) bool {
 		return false
 	}
 	_, undef := a.elems[i].(jsUndefT)
-	return int(i) < a.kind>>5 || !(undef || a.elems[i] == nil)
+	return a.elems[i] != jsHole && (int(i) < a.kind>>5 || !(undef || a.elems[i] == nil))
 }
 
 func jsvArgsView(a *jsArray) *jsArray {
@@ -3689,10 +3698,10 @@ func jsvRadixString(x float64, radix int) string {
 // other element compares as its STRING form. V8's sort is stable, so a stable sort
 // is what both halves implement.
 func (rt *jsrt) jsvSort(elems []interface{}, cmp interface{}) {
-	undef := 0
+	holes := 0
 	for i := 0; i < len(elems); i++ {
-		if _, isU := elems[i].(jsUndefT); isU {
-			undef++
+		if elems[i] == jsHole {
+			holes++
 		}
 	}
 	vals := make([]interface{}, 0, len(elems))
@@ -3708,15 +3717,21 @@ func (rt *jsrt) jsvSort(elems []interface{}, cmp interface{}) {
 		return jsvStrCmp(rt.jsvString(vals[i]), rt.jsvString(vals[j])) < 0
 	}
 	sort.SliceStable(vals, less)
+	// The undefined elements follow the sorted ones, and the absent ones come last.
 	copy(elems, vals)
 	for i := len(vals); i < len(elems); i++ {
 		elems[i] = jsUndef
+		if i >= len(elems)-holes {
+			elems[i] = jsHole
+		}
 	}
-	_ = undef
 }
 
 func (rt *jsrt) jsvFlatten(out *[]interface{}, elems []interface{}, depth int) {
 	for _, e := range elems {
+		if e == jsHole {
+			continue
+		}
 		if arr, ok := e.(*jsArray); ok && depth > 0 {
 			rt.jsvFlatten(out, arr.elems, depth-1)
 			continue
@@ -4453,7 +4468,7 @@ func (rt *jsrt) jsvArrayMethod(a *jsArray, name string, args []interface{}) (int
 			from = jsvRelIndex(rt.toNumber(args[1]), n)
 		}
 		for i := from; i < n; i++ {
-			if rt.strictEq(a.elems[i], cb) {
+			if a.elems[i] != jsHole && rt.strictEq(a.elems[i], cb) {
 				return float64(i), true
 			}
 		}
@@ -4470,7 +4485,7 @@ func (rt *jsrt) jsvArrayMethod(a *jsArray, name string, args []interface{}) (int
 			}
 		}
 		for i := from; i >= 0; i-- {
-			if rt.strictEq(a.elems[i], cb) {
+			if a.elems[i] != jsHole && rt.strictEq(a.elems[i], cb) {
 				return float64(i), true
 			}
 		}
@@ -4518,35 +4533,43 @@ func (rt *jsrt) jsvArrayMethod(a *jsArray, name string, args []interface{}) (int
 		a.dropIdx()
 		rt.jsvSort(a.elems, cb)
 		return a, true
+	// The iteration methods skip an absent element (jsHole); map's result keeps it
+	// absent.
 	case "map":
 		out := &jsArray{}
 		for i := 0; i < n && i < len(a.elems); i++ {
+			if a.elems[i] == jsHole {
+				out.elems = append(out.elems, jsHole)
+				continue
+			}
 			out.elems = append(out.elems, call3(i))
 		}
 		return out, true
 	case "filter":
 		out := &jsArray{}
 		for i := 0; i < n && i < len(a.elems); i++ {
-			if rt.truthy(call3(i)) {
+			if a.elems[i] != jsHole && rt.truthy(call3(i)) {
 				out.elems = append(out.elems, a.elems[i])
 			}
 		}
 		return out, true
 	case "forEach":
 		for i := 0; i < n && i < len(a.elems); i++ {
-			call3(i)
+			if a.elems[i] != jsHole {
+				call3(i)
+			}
 		}
 		return jsUndef, true
 	case "some":
 		for i := 0; i < n && i < len(a.elems); i++ {
-			if rt.truthy(call3(i)) {
+			if a.elems[i] != jsHole && rt.truthy(call3(i)) {
 				return true, true
 			}
 		}
 		return false, true
 	case "every":
 		for i := 0; i < n && i < len(a.elems); i++ {
-			if !rt.truthy(call3(i)) {
+			if a.elems[i] != jsHole && !rt.truthy(call3(i)) {
 				return false, true
 			}
 		}
@@ -4583,11 +4606,15 @@ func (rt *jsrt) jsvArrayMethod(a *jsArray, name string, args []interface{}) (int
 		idx := make([]int, 0, n)
 		if name == "reduce" {
 			for i := 0; i < n; i++ {
-				idx = append(idx, i)
+				if a.elems[i] != jsHole {
+					idx = append(idx, i)
+				}
 			}
 		} else {
 			for i := n - 1; i >= 0; i-- {
-				idx = append(idx, i)
+				if a.elems[i] != jsHole {
+					idx = append(idx, i)
+				}
 			}
 		}
 		at := 0
@@ -4595,7 +4622,7 @@ func (rt *jsrt) jsvArrayMethod(a *jsArray, name string, args []interface{}) (int
 		if len(args) > 1 {
 			acc = args[1]
 		} else {
-			if n == 0 {
+			if len(idx) == 0 {
 				rt.bigRaise("TypeError: Reduce of empty array with no initial value")
 			}
 			acc = a.elems[idx[0]]
@@ -4622,9 +4649,16 @@ func (rt *jsrt) jsvArrayMethod(a *jsArray, name string, args []interface{}) (int
 	case "flatMap":
 		out := []interface{}{}
 		for i := 0; i < n && i < len(a.elems); i++ {
+			if a.elems[i] == jsHole {
+				continue
+			}
 			v := call3(i)
 			if va, ok := v.(*jsArray); ok {
-				out = append(out, va.elems...)
+				for _, e := range va.elems {
+					if e != jsHole {
+						out = append(out, e)
+					}
+				}
 			} else {
 				out = append(out, v)
 			}
@@ -4889,7 +4923,7 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 					}
 					out := &jsArray{elems: make([]interface{}, int(n))}
 					for i := range out.elems {
-						out.elems[i] = jsUndef
+						out.elems[i] = jsHole
 					}
 					return out
 				}
@@ -5162,18 +5196,28 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 		return w(c)
 	}
 	// The MAPPED arguments object of a sloppy function with plain parameters (ECMA-262
-	// 10.4.4.7). js_jsargmap(names, arguments) is the names mapped to arguments[0..n),
-	// the parameters below the argument count, which the call's scope keeps under
-	// "0argm". js_jsargsync(scope, name, v), after a store to a name, copies v into
-	// arguments when the binding the store reached is a mapped parameter;
-	// js_jsargput(scope, obj, k, v, unmap), after a store to obj[k], copies v into the
-	// parameter k maps to when obj is the arguments object of the call whose scope the
-	// chain reaches first (after a delete, unmap true, k stops being mapped). Twins: the same externs in languages/lib/js-rt.metajs,
-	// jsArgSync / jsArgPut in both *-interpreter.abnf.
+	// 10.4.4.7). js_jsargmap(names, arguments, scope) is the names mapped to
+	// arguments[0..n), the parameters below the argument count, which the call's scope
+	// keeps under "0argm"; it files the scope on the arguments object (the hidden slot
+	// __argsc of its named properties). js_jsargsync(scope, name, v), after a store to
+	// a name, copies v into arguments when the binding the store reached is a mapped
+	// parameter; js_jsargput(obj, k, v, unmap), after a store to obj[k] through any
+	// reference, copies v into the parameter k maps to when obj is a mapped arguments
+	// object (after a delete, unmap true, k stops being mapped). Twins: the same
+	// externs in languages/lib/js-rt.metajs, jsArgSync / jsArgPut in both
+	// *-interpreter.abnf.
 	m["js_jsargmap"] = func(a []uint64) uint64 {
 		names, _ := u(a[0]).(*jsArray)
 		args, _ := u(a[1]).(*jsArray)
 		out := &jsArray{}
+		if args != nil {
+			p := jsvArrNamed(args)
+			if p == nil {
+				p = newJSObject()
+				args.props = p
+			}
+			p.set("__argsc", rt.scopeOf(a[2]))
+		}
 		if names != nil && args != nil {
 			n := len(names.elems)
 			if len(args.elems) < n {
@@ -5208,29 +5252,31 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 		return 0
 	}
 	m["js_jsargput"] = func(a []uint64) uint64 {
-		obj := u(a[1])
+		obj := u(a[0])
 		if !jsvIsArgs(obj) {
 			return 0
 		}
-		for s := rt.scopeOf(a[0]); s != nil; s = s.parent {
-			if !s.has("arguments") {
-				continue
-			}
-			av, _ := s.get("arguments")
-			mv, mapped := s.get("0argm")
-			names, _ := mv.(*jsArray)
-			if av == obj && mapped && names != nil {
-				if i, isIdx := jsvArrayIndex(rt.toString(u(a[2]))); isIdx && i < uint64(len(names.elems)) {
-					if n := rt.toString(names.elems[i]); n != "" {
-						if rt.truthy(u(a[4])) {
-							names.elems[i] = ""
-						} else {
-							s.put(n, u(a[3]))
-						}
-					}
+		p := jsvArrNamed(obj.(*jsArray))
+		if p == nil {
+			return 0
+		}
+		s, filed := p.props["__argsc"].(*jsScope)
+		if !filed {
+			return 0
+		}
+		mv, _ := s.get("0argm")
+		names, _ := mv.(*jsArray)
+		if names == nil {
+			return 0
+		}
+		if i := rt.arrIndexOf(u(a[1])); i >= 0 && i < len(names.elems) {
+			if n := rt.toString(names.elems[i]); n != "" {
+				if rt.truthy(u(a[3])) {
+					names.elems[i] = ""
+				} else {
+					s.put(n, u(a[2]))
 				}
 			}
-			break
 		}
 		return 0
 	}
@@ -5353,7 +5399,7 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 		if arr, ok := u(a[0]).(*jsArray); ok {
 			if i := rt.arrIndexOf(u(a[1])); i >= 0 {
 				if i < len(arr.elems) {
-					arr.elems[i] = jsUndef
+					arr.elems[i] = jsHole
 				}
 			} else if p := jsvArrNamed(arr); p != nil {
 				jsvObjDel(p, rt.toString(u(a[1])))
@@ -6286,7 +6332,12 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 				}
 				return w(out)
 			}
-			out := jsvIndexKeys(len(v.elems))
+			out := &jsArray{}
+			for i, e := range v.elems {
+				if e != jsHole {
+					out.elems = append(out.elems, strconv.Itoa(i))
+				}
+			}
 			if p := jsvArrNamed(v); p != nil {
 				for _, k := range jsvOwnKeys(p) {
 					out.elems = append(out.elems, k)
