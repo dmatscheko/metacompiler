@@ -3679,7 +3679,7 @@ NotFuncHead = :script(~~
         return true
     }
 
-    // lib/js-builtins.js (Set, Map, Array.from, Array.of, Boolean, isNaN, isFinite, structuredClone) is JavaScript,
+    // lib/js-builtins.js (Set, Map, Array.from, Array.of, Boolean, isNaN, isFinite, structuredClone, Reflect) is JavaScript,
     // compiled into a program that names one of them (jsbRef, at the
     // VarRef, typeof-name and new-name tags), like an imported file but emitted FIRST,
     // before every imported file's top level, since any of them may use it. Twin of
@@ -3688,7 +3688,7 @@ NotFuncHead = :script(~~
     var jsbDone = false
     function jsbRef(name) {
         if (name == "Set" || name == "Map" || name == "Array" || name == "isNaN" || name == "isFinite" ||
-            name == "structuredClone") { jsbWant = true }
+            name == "structuredClone" || name == "Reflect") { jsbWant = true }
         return name
     }
     function jsbLoad() {

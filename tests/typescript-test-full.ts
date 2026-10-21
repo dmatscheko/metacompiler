@@ -4959,6 +4959,54 @@ function s106(): void {
         Object.keys(p).join() === "k" && delete a.nm && e106(() => { a.nm = 6; }) === "ok" && a.nm === 6);
 }
 
+// ===== SECTION 107: accessors inherited through a prototype object; Reflect =====
+// An accessor of a prototype object - Object.create's argument, or one defined onto
+// F.prototype or a class's prototype - is the inherited property of every object
+// below it: a read runs its getter and a write its setter, both with the object read
+// or written as `this`, and a getter-only one refuses the write (OrdinaryGet /
+// OrdinarySet, ECMA-262 10.1.8.1 and 10.1.9.2), naming the prototype's constructor.
+// Reflect performs each internal method on its target (ECMA-262 28.1). Values read
+// off tsc 6.0.3's output run by node 24.
+function F107(): void {}
+Object.defineProperty(F107.prototype, "g", { get() { return 2; }, set(v: number) { (this as any).seen = v; }, configurable: true });
+class A107 {}
+Object.defineProperty(A107.prototype, "x", { get() { return this === B107.prototype; }, configurable: true });
+class B107 extends A107 {}
+class P107 { s: number; tag: any; constructor(a: number, b: number) { this.s = a + b; } get g(): any { return this.tag; } }
+function e107(f: () => any): string { try { return String(f()); } catch (e) { return e instanceof TypeError ? e.message : "?"; } }
+function s107(): void {
+    const vals: number[] = [5, 7];
+    const c: any = Object.create({ get acc() { return 1; }, set acc(v: number) { (this as any).got = v; } });
+    c.acc = vals[0];
+    const f: any = new (F107 as any)();
+    f.g = vals[1];
+    const deep: any = Object.create(Object.create({ get d() { return "deep"; } }));
+    check("pa107a", c.acc === 1 && c.got === 5 && !c.hasOwnProperty("acc") && f.g === 2 && f.seen === 7 &&
+        !f.hasOwnProperty("g") && deep.d === "deep" && (B107.prototype as any).x === true);
+    const o: any = Object.create({ get only() { return 3; } });
+    const t: any = Object.create({ set s(v: number) { (this as any).got = v + 1; } });
+    Object.assign(t, { s: 1 });
+    check("pa107b", e107(() => { o.only = vals[0]; }) === "Cannot set property only of #<Object> which has only a getter" &&
+        o.only === 3 && !o.hasOwnProperty("only") && t.got === 2 && Object.keys(t).join() === "got" &&
+        e107(() => { f.g = 1; Object.create(Object.create({ get g() { return 1; } })).g = 1; }) === "Cannot set property g of #<Object> which has only a getter" &&
+        e107(() => Object.assign(Object.create({ get g() { return 1; } }), { g: 2 })) === "Cannot set property g of #<Object> which has only a getter");
+    const r: any = { a: 1, b: 2 };
+    check("pa107c", typeof Reflect === "object" && Object.keys(Reflect).length === 0 && Reflect.has(r, "a") && !Reflect.has(r, "z") &&
+        Reflect.get(r, "b") === 2 && Reflect.get(new P107(1, 2), "g", { tag: "R" }) === "R" &&
+        Reflect.set(r, "c", 9) && r.c === 9 && !Reflect.set(Object.freeze({ x: 1 }), "x", 2) &&
+        Reflect.ownKeys(r).join() === "a,b,c" && Reflect.ownKeys([5, 6]).join() === "0,1,length");
+    const u: any = {};
+    const v: any = {};
+    check("pa107d", Reflect.apply(Math.max, null, [1, 7, 3]) === 7 &&
+        Reflect.construct(P107, [2, 3]).s === 5 && Reflect.construct(P107, [2, 3]) instanceof P107 &&
+        Reflect.defineProperty(u, "z", { value: 4 }) && u.z === 4 && !Reflect.defineProperty(Object.freeze({}), "z", { value: 4 }) &&
+        Reflect.deleteProperty(r, "c") && !("c" in r) && !Reflect.deleteProperty(Object.freeze({ q: 1 }), "q") &&
+        Reflect.getPrototypeOf(new P107(1, 1)) === P107.prototype && Reflect.setPrototypeOf(v, P107.prototype) && v instanceof P107 &&
+        Reflect.isExtensible({}) && !Reflect.isExtensible(Object.seal({})) && Reflect.preventExtensions(u) && !Object.isExtensible(u));
+    check("pa107e", e107(() => Reflect.get(1 as any, "a")) === "Reflect.get called on non-object" &&
+        e107(() => Reflect.construct(1 as any, [])) === "1 is not a constructor");
+}
+
 // ===== SECTION 120: unbounded recursion =====
 // A call nested past the stack is a catchable RangeError, and the depth a caught
 // one unwound is given back: the recursion after it goes as deep as before.
@@ -5151,6 +5199,7 @@ function main(): number {
     s104(); // SECTION-CALL 104
     s105(); // SECTION-CALL 105
     s106(); // SECTION-CALL 106
+    s107(); // SECTION-CALL 107
     s120(); // SECTION-CALL 120
     s121(); // SECTION-CALL 121
     s122(); // SECTION-CALL 122

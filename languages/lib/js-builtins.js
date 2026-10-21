@@ -1,7 +1,7 @@
 // js-builtins.js -- JAVASCRIPT, not MetaJS: the Set and Map classes, Array.from /
-// Array.of, isNaN, isFinite and structuredClone, written in the language itself and compiled
+// Array.of, isNaN, isFinite, structuredClone and Reflect, written in the language itself and compiled
 // INTO a program by the js grammars, both halves (jsbLoad in js-interpreter.abnf and js-to-llvm-ir.abnf).
-// A program that names Set, Map, Array, isNaN, isFinite or structuredClone gets this file in
+// A program that names Set, Map, Array, isNaN, isFinite, structuredClone or Reflect gets this file in
 // front of it; one that does not pays nothing. Being one JavaScript source compiled by the same grammars is what
 // makes the interpreter, llvm.Run and a native binary agree on every answer here.
 //
@@ -313,3 +313,111 @@ function __clone(v, seen, made) {
     for (var n = 0; n < ks.length; n++) { o[ks[n]] = __clone(v[ks[n]], seen, made) }
     return o
 }
+
+// Reflect (ECMA-262 28.1): each function performs the internal method it is named
+// after on its target, written with the operator or Object function that performs it.
+// Its functions are non-enumerable, as a builtin's are.
+function __reflObj(o, fn) {
+    if ((typeof o !== "object" || o === null) && typeof o !== "function") {
+        throw new TypeError("Reflect." + fn + " called on non-object")
+    }
+    return o
+}
+// [[Set]] the way strict code performs it: a refused write throws.
+function __reflSet(o, k, v) { "use strict"; o[k] = v }
+var Reflect = (function () {
+    var fns = {
+        apply: function apply(f, self, args) {
+            if (typeof f !== "function") {
+                var t = typeof f
+                throw new TypeError("Function.prototype.apply was called on " + String(f) + ", which is " +
+                    ("aeiou".indexOf(t.charAt(0)) >= 0 ? "an " : "a ") + t + " and not a function")
+            }
+            if ((typeof args !== "object" || args === null) && typeof args !== "function") {
+                throw new TypeError("CreateListFromArrayLike called on non-object")
+            }
+            return f.apply(self, args)
+        },
+        construct: function construct(C, args) {
+            if (typeof C !== "function") { throw new TypeError(String(C) + " is not a constructor") }
+            if ((typeof args !== "object" || args === null) && typeof args !== "function") {
+                throw new TypeError("CreateListFromArrayLike called on non-object")
+            }
+            return new C(...args)
+        },
+        defineProperty: function defineProperty(o, k, d) {
+            __reflObj(o, "defineProperty")
+            if ((typeof d !== "object" || d === null) && typeof d !== "function") { Object.defineProperty(o, k, d) }
+            try {
+                Object.defineProperty(o, k, d)
+                return true
+            } catch (e) {
+                if (e instanceof TypeError) { return false }
+                throw e
+            }
+        },
+        // A refused delete answers false in sloppy code and throws in strict code,
+        // which is how the typescript grammars compile this file.
+        deleteProperty: function deleteProperty(o, k) {
+            __reflObj(o, "deleteProperty")
+            try {
+                return delete o[k]
+            } catch (e) {
+                if (e instanceof TypeError) { return false }
+                throw e
+            }
+        },
+        get: function get(o, k) {
+            __reflObj(o, "get")
+            if (arguments.length < 3) { return o[k] }
+            // An accessor runs with the receiver as `this`.
+            for (var p = o; p !== null; p = Object.getPrototypeOf(p)) {
+                var d = Object.getOwnPropertyDescriptor(p, k)
+                if (d !== undefined) {
+                    if (!("get" in d) && !("set" in d)) { return d.value }
+                    return d.get === undefined ? undefined : d.get.call(arguments[2])
+                }
+            }
+            return undefined
+        },
+        getOwnPropertyDescriptor: function getOwnPropertyDescriptor(o, k) {
+            return Object.getOwnPropertyDescriptor(__reflObj(o, "getOwnPropertyDescriptor"), k)
+        },
+        getPrototypeOf: function getPrototypeOf(o) { return Object.getPrototypeOf(__reflObj(o, "getPrototypeOf")) },
+        has: function has(o, k) { return k in __reflObj(o, "has") },
+        isExtensible: function isExtensible(o) { return Object.isExtensible(__reflObj(o, "isExtensible")) },
+        ownKeys: function ownKeys(o) {
+            __reflObj(o, "ownKeys")
+            return Object.getOwnPropertyNames(o).concat(Object.getOwnPropertySymbols(o))
+        },
+        preventExtensions: function preventExtensions(o) {
+            Object.preventExtensions(__reflObj(o, "preventExtensions"))
+            return true
+        },
+        set: function set(o, k, v) {
+            __reflObj(o, "set")
+            try {
+                __reflSet(o, k, v)
+                return true
+            } catch (e) {
+                if (e instanceof TypeError) { return false }
+                throw e
+            }
+        },
+        setPrototypeOf: function setPrototypeOf(o, p) {
+            __reflObj(o, "setPrototypeOf")
+            if (p === undefined || (typeof p !== "object" && typeof p !== "function")) {
+                throw new TypeError("Object prototype may only be an Object or null: " + String(p))
+            }
+            if (!Object.isExtensible(o)) { return Object.getPrototypeOf(o) === p }
+            Object.setPrototypeOf(o, p)
+            return true
+        }
+    }
+    var r = {}
+    var ks = Object.keys(fns)
+    for (var i = 0; i < ks.length; i++) {
+        Object.defineProperty(r, ks[i], { value: fns[ks[i]], writable: true, configurable: true })
+    }
+    return r
+})()

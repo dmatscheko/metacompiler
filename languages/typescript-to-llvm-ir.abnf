@@ -2565,7 +2565,7 @@ NotFuncHead = :script(~~
     var jsbDone = false
     function jsbRef(name) {
         if (name == "Set" || name == "Map" || name == "Array" || name == "isNaN" || name == "isFinite" ||
-            name == "structuredClone") { jsbWant = true }
+            name == "structuredClone" || name == "Reflect") { jsbWant = true }
         return name
     }
     function jsbLoad() {

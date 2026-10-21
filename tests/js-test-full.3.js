@@ -1,4 +1,4 @@
-// Full-syntax test: JavaScript - part 3 of 4, sections 44-56, 58-71, 73-100, 109-113.
+// Full-syntax test: JavaScript - part 3 of 4, sections 44-56, 58-71, 73-100, 109-114.
 //
 // THE JS RATCHET IS FOUR FILES: as one file its -frozen interpreter leg ran into
 // ./test.sh --full's time brake (peak memory grew superlinearly with the file), and
@@ -7,7 +7,7 @@
 //   tests/js-test-full.js     sections 01-35, the ECMAScript-2022 syntax walk
 //   tests/js-test-full.2.js   sections 36-43 and 101-108, engine agreement, generators,
 //                             Error, Math, builtin constructors, integrity levels
-//   tests/js-test-full.3.js   sections 44-56, 58-71, 73-100, 109-113, the call/class/private-name
+//   tests/js-test-full.3.js   sections 44-56, 58-71, 73-100, 109-114, the call/class/private-name
 //                             model, the Unicode identifier tables, iterators, derived
 //                             constructors, JSON, guards, Set and Map, iterator closing,
 //                             hasOwnProperty, delete, Object.prototype, extends Object,
@@ -23,7 +23,8 @@
 //                             toLocaleString, primitive wrapper objects and property
 //                             attributes, a class extending a constructor function,
 //                             new.target and a class extending a builtin, a
-//                             class declared inside a try block
+//                             class declared inside a try block, accessors of a
+//                             prototype object, Reflect
 //   (section 72 is in tests/js-test-full.4.mjs, beside 57: it needs a file that
 //   names no builtin class but in a `new`)
 //   tests/js-test-full.4.mjs  section 57, export in a Module
@@ -3103,6 +3104,59 @@ function s113() {
         Object.keys(p).join() === "k" && delete a.nm && e113(function () { "use strict"; a.nm = 6 }) === "ok" && a.nm === 6)
 }
 
+// ===== SECTION 114: accessors inherited through a prototype object; Reflect =====
+// An accessor of a prototype object - Object.create's argument, or one defined onto
+// F.prototype or a class's prototype - is the inherited property of every object
+// below it: a read runs its getter and a write its setter, both with the object read
+// or written as `this`, and a getter-only one refuses the write (OrdinaryGet /
+// OrdinarySet, ECMA-262 10.1.8.1 and 10.1.9.2), naming the prototype's constructor.
+// Reflect performs each internal method on its target (ECMA-262 28.1). Values read
+// off node 24.
+function F114() {}
+Object.defineProperty(F114.prototype, "g", { get() { return 2 }, set(v) { this.seen = v }, configurable: true })
+class A114 {}
+Object.defineProperty(A114.prototype, "x", { get() { return this === B114.prototype }, configurable: true })
+class B114 extends A114 {}
+class P114 { constructor(a, b) { this.s = a + b } get g() { return this.tag } }
+function e114(f) { try { return String(f()) } catch (e) { return e instanceof TypeError ? e.message : "?" } }
+function s114() {
+    const vals = [5, 7]
+    const c = Object.create({ get acc() { return 1 }, set acc(v) { this.got = v } })
+    c.acc = vals[0]
+    const f = new F114()
+    f.g = vals[1]
+    const deep = Object.create(Object.create({ get d() { return "deep" } }))
+    check("pa114a", c.acc === 1 && c.got === 5 && !c.hasOwnProperty("acc") && f.g === 2 && f.seen === 7 &&
+        !f.hasOwnProperty("g") && deep.d === "deep" && B114.prototype.x === true)
+    const o = Object.create({ get only() { return 3 } })
+    o.only = vals[0]
+    const t = Object.create({ set s(v) { this.got = v + 1 } })
+    Object.assign(t, { s: 1 })
+    check("pa114b", o.only === 3 && !o.hasOwnProperty("only") && t.got === 2 && Object.keys(t).join() === "got")
+    check("pa114c", e114(function () { "use strict"; o.only = 1 }) === "Cannot set property only of #<Object> which has only a getter" &&
+        e114(function () { "use strict"; Object.create(Object.create({ get g() { return 1 } })).g = 1 }) === "Cannot set property g of #<Object> which has only a getter" &&
+        e114(() => Object.assign(Object.create({ get g() { return 1 } }), { g: 2 })) === "Cannot set property g of #<Object> which has only a getter")
+    const r = { a: 1, b: 2 }
+    check("pa114d", typeof Reflect === "object" && Object.keys(Reflect).length === 0 && Reflect.has(r, "a") && !Reflect.has(r, "z") &&
+        Reflect.has(r, "toString") && Reflect.get(r, "b") === 2 && Reflect.get(new P114(1, 2), "g", { tag: "R" }) === "R" &&
+        Reflect.set(r, "c", 9) && r.c === 9 && !Reflect.set(Object.freeze({ x: 1 }), "x", 2) &&
+        Reflect.ownKeys(r).join() === "a,b,c" && Reflect.ownKeys([5, 6]).join() === "0,1,length")
+    const u = {}
+    const v = {}
+    check("pa114e", Reflect.apply(Math.max, null, [1, 7, 3]) === 7 && Reflect.apply(function (x) { return this.k + x }, { k: 10 }, [5]) === 15 &&
+        Reflect.construct(P114, [2, 3]).s === 5 && Reflect.construct(P114, [2, 3]) instanceof P114 &&
+        Reflect.defineProperty(u, "z", { value: 4 }) && u.z === 4 && !Reflect.defineProperty(Object.freeze({}), "z", { value: 4 }) &&
+        Reflect.deleteProperty(r, "c") && !("c" in r) && !Reflect.deleteProperty(Object.freeze({ q: 1 }), "q") &&
+        Reflect.getOwnPropertyDescriptor(r, "a").value === 1 && Reflect.getPrototypeOf(new P114(1, 1)) === P114.prototype &&
+        Reflect.setPrototypeOf(v, P114.prototype) && v instanceof P114 && !Reflect.setPrototypeOf(Object.preventExtensions({}), P114.prototype) &&
+        Reflect.isExtensible({}) && !Reflect.isExtensible(Object.seal({})) && Reflect.preventExtensions(u) && !Object.isExtensible(u))
+    check("pa114f", e114(() => Reflect.get(1, "a")) === "Reflect.get called on non-object" &&
+        e114(() => Reflect.has("s", "length")) === "Reflect.has called on non-object" &&
+        e114(() => Reflect.ownKeys(null)) === "Reflect.ownKeys called on non-object" &&
+        e114(() => Reflect.apply(1, null, [])) === "Function.prototype.apply was called on 1, which is a number and not a function" &&
+        e114(() => Reflect.construct(1, [])) === "1 is not a constructor")
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -3166,6 +3220,7 @@ function main() {
     s111() // SECTION-CALL 111
     s112() // SECTION-CALL 112
     s113() // SECTION-CALL 113
+    s114() // SECTION-CALL 114
     println("full: " + checks + " checks, " + failures + " failures")
     return failures
 }

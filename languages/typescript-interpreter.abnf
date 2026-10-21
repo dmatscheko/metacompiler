@@ -3978,10 +3978,10 @@ NotFuncHead = :script(~~
         if (jsNoObjProto(o)) { return "[object Object]" }
         var c = anytype // The constructor whose name V8 prints.
         c = getMember(o, "constructor")
-        var nm = anytype
-        nm = (c === undefined || c === null) ? "" : getMember(c, "name")
-        return "#<" + (typeof nm == "string" && nm != "" ? nm : "Object") + ">"
+        return jsCtorText((c === undefined || c === null) ? "" : getMember(c, "name"))
     }
+    // V8's "#<Name>" for an object whose constructor's name is nm.
+    function jsCtorText(nm) { return "#<" + (typeof nm == "string" && nm != "" ? nm : "Object") + ">" }
     function jsRoText(o, key) { return "Cannot assign to read only property '" + jsStr(jsKeyUnesc(key)) + "' of object '" + jsObjText(o) + "'" }
     // See the twin of this comment in js-interpreter.abnf.
     function jsFnRoText(f, key) { return "Cannot assign to read only property '" + key + "' of function '" + jsStr(f) + "'" }
@@ -5863,10 +5863,17 @@ NotFuncHead = :script(~~
         // A class descriptor's own __acc holds its INSTANCE accessors, which an
         // instance inherits along __class; its STATIC ones are in __statics and are
         // answered by staticSideRead before this function is ever reached.
-        var start = anytype // The chain head is a class descriptor or undefined.
-        start = o.__class
+        var start = anytype // A prototype view starts at its own descriptor, anything else at its class.
+        start = hasOwn(o, "__protoof") ? o.__protoof : o.__class
         for (var cl = start; cl != undefined && cl != null; cl = cl.__super) {
             if (hasOwn(cl, "__acc") && hasOwn(cl["__acc"], name)) { return cl["__acc"][name] }
+            // An accessor of the level's prototype object (Object.create's argument,
+            // or one defined onto X.prototype).
+            if (hasOwn(cl, "__pview")) {
+                var pv = anytype
+                pv = cl.__pview
+                if (hasOwn(pv, "__acc") && hasOwn(pv["__acc"], name)) { return pv["__acc"][name] }
+            }
         }
         return undefined
     }
@@ -5875,10 +5882,11 @@ NotFuncHead = :script(~~
         var r = anytype
         r = undefined
         if (hasOwn(o, "__acc") && jsIsAccKey(o, "" + k)) { return o }
-        var start = anytype // The chain head is a class descriptor or undefined.
-        start = o.__class
+        var start = anytype // A prototype view starts at its own descriptor, anything else at its class.
+        start = hasOwn(o, "__protoof") ? o.__protoof : o.__class
         for (var cl = start; cl != undefined && cl != null; cl = cl.__super) {
             if (hasOwn(cl, "__acc") && jsIsAccKey(cl, "" + k)) { return cl }
+            if (hasOwn(cl, "__pview") && jsIsAccKey(cl.__pview, "" + k)) { return cl.__pview }
         }
         return r
     }
@@ -5886,7 +5894,13 @@ NotFuncHead = :script(~~
     function jsGetterOnlyText(k, holder) { return "Cannot set property " + jsStr(jsKeyUnesc("" + k)) + " of " + holder + " which has only a getter" }
     function jsAccHolderText(o, h) {
         if (h === o) { return jsObjText(o) }
-        return (typeof h.__name == "string" && h.__name != "") ? "#<" + h.__name + ">" : "[object Object]"
+        // A prototype is named by its class or constructor function, any other object
+        // by its constructor.
+        var d = anytype
+        d = hasOwn(h, "__protoof") ? h.__protoof : h
+        if (hasOwn(d, "__ctorfn")) { return jsCtorText(getMember(d.__ctorfn, "name")) }
+        if (!isClassDesc(d)) { return jsObjText(h) }
+        return (typeof d.__name == "string" && d.__name != "") ? "#<" + d.__name + ">" : "[object Object]"
     }
     // Records one accessor in an object's (or class descriptor's) hidden table, creating
     // the table on first use. The two kinds share one table under a prefixed key, so a
@@ -10687,7 +10701,7 @@ NotFuncHead = :script(~~
     var jsbDone = false
     function jsbRef(name) {
         if (name == "Set" || name == "Map" || name == "Array" || name == "isNaN" || name == "isFinite" ||
-            name == "structuredClone") { jsbWant = true }
+            name == "structuredClone" || name == "Reflect") { jsbWant = true }
         if (name == "arguments") { argsWant = true }
         return name
     }

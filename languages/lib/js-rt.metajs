@@ -1336,31 +1336,46 @@ function js_jsdel(o, key) {
 // ===================================================== accessors ==========
 
 // findClassAccessor (abnf/jsrt.go): an instance does not carry its class's
-// accessors; they live on the __class descriptor and its __super chain.
+// accessors; they live on the __class descriptor and its __super chain, or on a
+// level's prototype object (Object.create's argument, or one defined onto
+// X.prototype). Twins: findAccessor in both *-interpreter.abnf, jsvChainGet in
+// abnf/jsrtjsprint.go.
 function jvFindClassAcc(o, name) {
-    var cls = o["__class"]
+    // A prototype view starts at its own descriptor, anything else at its class.
+    var cls = o["__protoof"]
+    if (cls === undefined) { cls = o["__class"] }
     while (jvIsObj(cls)) {
         var v = cls[name]
         if (v !== undefined) {
             if (jvIsAcc(v)) { return v }
             return undefined
         }
+        var pv = cls["__pview"]
+        if (pv !== undefined) {
+            var pa = pv[name]
+            if (jvIsAcc(pa)) { return pa }
+        }
         cls = cls["__super"]
     }
     return undefined
 }
-// The class descriptor holding the accessor jvFindClassAcc finds, for a write that
+// The class descriptor or prototype object holding the accessor jvFindClassAcc finds, for a write that
 // must name it. Twins: accHolder in both *-interpreter.abnf, jsvAccHolder in
 // abnf/jsrtjsprint.go.
 function jvClassAccHolder(o, name) {
     var r = anytype
     r = undefined
-    var cls = o["__class"]
+    var cls = o["__protoof"]
+    if (cls === undefined) { cls = o["__class"] }
     while (jvIsObj(cls)) {
         var v = cls[name]
         if (v !== undefined) {
             if (jvIsAcc(v)) { return cls }
             return r
+        }
+        var pv = cls["__pview"]
+        if (pv !== undefined) {
+            if (jvIsAcc(pv[name])) { return pv }
         }
         cls = cls["__super"]
     }
@@ -1373,6 +1388,15 @@ function jvClassAccHolder(o, name) {
 function jvGetterOnlyText(k, holder) { return "Cannot set property " + jvKeyUnesc(k) + " of " + holder + " which has only a getter" }
 function jvAccHolderText(o, h) {
     if (h === o) { return jvObjText(o) }
+    // A prototype is named by its class or constructor function, any other object by
+    // its constructor.
+    var d = anytype
+    d = h["__protoof"]
+    if (d !== undefined) { h = d }
+    var cf = anytype
+    cf = h["__ctorfn"]
+    if (cf !== undefined) { return jvCtorText(js_jsvget(cf, "name")) }
+    if (!jvIsClassDesc(h)) { return jvObjText(h) }
     var n = h["__name"]
     if (typeof n == "string") { if (n != "") { return "#<" + n + ">" } }
     return "[object Object]"
@@ -5897,8 +5921,12 @@ function jvObjText(o) {
     var nm = anytype
     nm = undefined
     if (c !== undefined) { nm = js_jsvget(c, "name") }
-    if (typeof nm != "string") { nm = "Object" }
-    if (nm == "") { nm = "Object" }
+    return jvCtorText(nm)
+}
+// V8's "#<Name>" for an object whose constructor's name is nm.
+function jvCtorText(nm) {
+    if (typeof nm != "string") { return "#<Object>" }
+    if (nm == "") { return "#<Object>" }
     return "#<" + nm + ">"
 }
 function jvRoText(o, key) { return "Cannot assign to read only property '" + jvKeyUnesc(key) + "' of object '" + jvObjText(o) + "'" }

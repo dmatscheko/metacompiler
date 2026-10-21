@@ -107,9 +107,9 @@ func jsvFindMethodFrom(cls interface{}, name string) (interface{}, bool) {
 
 // jsvChainRead is a read that missed an object's own slots, along the prototype
 // chain from descriptor cls up: at each level the class body's method, as its value,
-// else an own property of that level's prototype view - which is how
+// or its accessor, else an own property of that level's prototype view - which is how
 // `B.prototype.x = 1` and Object.create's prototype object reach the objects below
-// them. Twins: protoChainRead in both *-interpreter.abnf, jvChainRead in
+// them. An accessor is answered as itself, for jsvChainGet. Twins: protoChainRead in both *-interpreter.abnf, jvChainRead in
 // languages/lib/js-rt.metajs.
 func jsvChainRead(cls interface{}, name string) (interface{}, bool) {
 	for guard := 0; cls != nil && guard < 64; guard++ {
@@ -119,6 +119,8 @@ func jsvChainRead(cls interface{}, name string) (interface{}, bool) {
 		}
 		if m, has := d.props[name]; has && isCallable(m) {
 			return jsvMethodValue(name, m), true
+		} else if _, isAcc := m.(*jsAccessor); isAcc {
+			return m, true
 		}
 		if v, hasView := d.props["__pview"].(*jsObject); hasView {
 			if pv, has := v.props[name]; has {
@@ -128,6 +130,19 @@ func jsvChainRead(cls interface{}, name string) (interface{}, bool) {
 		cls = d.props["__super"]
 	}
 	return nil, false
+}
+
+// jsvChainGet reads a value jsvChainRead found for receiver recv: an accessor of a
+// prototype object runs its getter with recv as `this`. Twins: findAccessor in both
+// *-interpreter.abnf, jvFindClassAcc in languages/lib/js-rt.metajs.
+func (rt *jsrt) jsvChainGet(v, recv interface{}) interface{} {
+	if acc, isAcc := v.(*jsAccessor); isAcc {
+		if acc.get == nil {
+			return jsUndef
+		}
+		return rt.call(acc.get, recv, nil)
+	}
+	return v
 }
 
 // jsvViewFn is the function a method CALL finds on a prototype view before any class
@@ -941,6 +956,11 @@ func (rt *jsrt) jsvObjText(v interface{}) string {
 	default:
 		name = jsvFnMeta(c).name
 	}
+	return jsvCtorText(name)
+}
+
+// jsvCtorText is V8's "#<Name>" for an object whose constructor's name is name.
+func jsvCtorText(name string) string {
 	if name == "" {
 		name = "Object"
 	}
@@ -1088,8 +1108,8 @@ func (rt *jsrt) jsvStaticWrite(cls *jsObject, name string, v interface{}) *jsObj
 }
 
 // jsvAccHolder answers the object holding name's accessor for a write to o and that
-// accessor: o itself, else the nearest class descriptor on its __class chain, or nil
-// when the write meets a data property or nothing. Twins: accHolder in both
+// accessor: o itself, else the nearest class descriptor or prototype object on its
+// __class chain, or nil when the write meets a data property or nothing. Twins: accHolder in both
 // *-interpreter.abnf, jvClassAccHolder in languages/lib/js-rt.metajs.
 func jsvAccHolder(o *jsObject, name string) (*jsObject, *jsAccessor) {
 	if v, own := o.props[name]; own {
@@ -1098,7 +1118,12 @@ func jsvAccHolder(o *jsObject, name string) (*jsObject, *jsAccessor) {
 		}
 		return nil, nil
 	}
-	for cls, guard := o.props["__class"], 0; cls != nil && guard < 64; guard++ {
+	// A prototype view starts at its own descriptor, anything else at its class.
+	start := o.props["__class"]
+	if d, isView := o.props["__protoof"]; isView {
+		start = d
+	}
+	for cls, guard := start, 0; cls != nil && guard < 64; guard++ {
 		c, ok := cls.(*jsObject)
 		if !ok {
 			break
@@ -1108,6 +1133,11 @@ func jsvAccHolder(o *jsObject, name string) (*jsObject, *jsAccessor) {
 				return c, acc
 			}
 			return nil, nil
+		}
+		if pv, hasView := c.props["__pview"].(*jsObject); hasView {
+			if acc, isAcc := pv.props[name].(*jsAccessor); isAcc {
+				return pv, acc
+			}
 		}
 		cls = c.props["__super"]
 	}
@@ -1127,6 +1157,17 @@ func jsvGetterOnlyText(key, holder string) string {
 func (rt *jsrt) jsvAccHolderText(o, h *jsObject) string {
 	if h == o {
 		return rt.jsvObjText(o)
+	}
+	// A prototype is named by its class or constructor function, any other object by
+	// its constructor.
+	if d, isView := h.props["__protoof"].(*jsObject); isView {
+		h = d
+	}
+	if fn, isFn := h.props["__ctorfn"]; isFn {
+		return jsvCtorText(jsvFnMeta(fn).name)
+	}
+	if !isClassDesc(h) {
+		return rt.jsvObjText(h)
 	}
 	if n, _ := h.props["__name"].(string); n != "" {
 		return "#<" + n + ">"
@@ -3837,8 +3878,12 @@ func (rt *jsrt) jsvMethod(target interface{}, name string, args []interface{}) (
 						}
 					}
 					if rt.accessorCount > 0 {
-						if h, acc := jsvAccHolder(dst, k); acc != nil && acc.set == nil {
-							rt.bigRaise("TypeError: %s", jsvGetterOnlyText(k, rt.jsvAccHolderText(dst, h)))
+						if h, acc := jsvAccHolder(dst, k); acc != nil {
+							if acc.set == nil {
+								rt.bigRaise("TypeError: %s", jsvGetterOnlyText(k, rt.jsvAccHolderText(dst, h)))
+							}
+							rt.call(acc.set, dst, []interface{}{v})
+							continue
 						}
 					}
 					rt.setMember(dst, k, v)
@@ -5915,14 +5960,14 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 					}
 				}
 				if v, found := jsvChainRead(cls, name); found {
-					return w(v)
+					return w(rt.jsvChainGet(v, recv))
 				}
 			}
 			return vget([]uint64{w(p), a[1]})
 		}
 		if d, isView := recv.props["__protoof"].(*jsObject); isView {
 			if v := protoRead(d, name); v != nil {
-				return w(v)
+				return w(rt.jsvChainGet(v, recv))
 			}
 			return r
 		}
@@ -5937,7 +5982,7 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 			}
 		}
 		if v, found := jsvChainRead(recv.props["__class"], name); found {
-			return w(v)
+			return w(rt.jsvChainGet(v, recv))
 		}
 		return r
 	}
@@ -6460,13 +6505,17 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 			return 0
 		}
 		if o, isObj := u(a[0]).(*jsObject); isObj {
-			// An accessor with no setter refuses the write; js_jsrefuse raises it in
-			// strict code.
+			// A setter found on o or its chain runs with o as `this`; an accessor with no
+			// setter refuses the write, and js_jsrefuse raises it in strict code.
 			if rt.accessorCount > 0 {
 				name := rt.toString(u(a[1]))
-				if h, acc := jsvAccHolder(o, name); acc != nil && acc.set == nil {
-					jsvRefused = jsvGetterOnlyText(name, rt.jsvAccHolderText(o, h))
-					return boolH(false)
+				if h, acc := jsvAccHolder(o, name); acc != nil {
+					if acc.set == nil {
+						jsvRefused = jsvGetterOnlyText(name, rt.jsvAccHolderText(o, h))
+						return boolH(false)
+					}
+					rt.call(acc.set, o, []interface{}{u(a[2])})
+					return 0
 				}
 			}
 			if rt.toString(u(a[1])) == "name" {
