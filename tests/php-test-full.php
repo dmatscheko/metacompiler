@@ -4348,6 +4348,9 @@ function s79() {
     $te = "";
     try { preg_match('/a/', ['x']); } catch (TypeError $e) { $te = $e->getMessage(); }
     check("pg58", $te === 'preg_match(): Argument #2 ($subject) must be of type string, array given');
+    // Linear work on a long subject is never cut off by the step limit.
+    $lng = str_repeat("ab", 20000);
+    check("pg59", preg_match('/(?:t|u|v|w|x|y|a|b){2,}/', $lng, $m) === 1 && strlen($m[0]) === 40000);
 }
 
 // ===== END SECTIONS =====

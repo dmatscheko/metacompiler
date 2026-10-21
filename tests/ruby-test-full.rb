@@ -729,6 +729,9 @@ def s20
   # Ruby is on the OTHER side of the repeat-semantics divide from JavaScript and bash:
   # the empty final iteration is KEPT, so group 1 reads "" and not "aaa".
   check("rex14", /^(a*)*$/.match("aaa")[1] == "")
+  # Linear work on a long subject is never cut off by the matcher's step limit.
+  lng = "ab" * 35000
+  check("rex15", /(?:x|y|a|b){2,}/.match(lng)[0].length == 70000)
 end
 # ===== SECTION 21: pattern matching with case/in =====
 def s21_pm(v)

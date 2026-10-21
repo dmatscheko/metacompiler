@@ -240,7 +240,10 @@ var RX_SPND = 16   // Python's Unicode \D
 var RX_SPS = 17    // Python's Unicode \s (rxPySpaceHit)
 var RX_SPNS = 18   // Python's Unicode \S
 
-// Step cap for one rxSearch attempt. A pathological pattern reports
+// Step cap for one rxSearch attempt, on top of one step per (instruction,
+// position) pair: a match that visits each of those states a bounded number of
+// times is linear work and never reaches it, while the revisiting a
+// pathological pattern does (exponential or polynomial in the input) reports
 // "regexp: step limit exceeded" rather than hanging the whole run.
 var RX_STEPS = 400000
 
@@ -6592,7 +6595,9 @@ function rxAttempt(re, text, at, mustEnd, gpos, glast, adv) {
         cbeg.push(-1)
         i = i + 1
     }
-    var st = {steps: 0, over: false, mustEnd: mustEnd, lbt: -1, ctr: ctr, cbeg: cbeg,
+    // The counter starts below zero by the size of the state space, so rxRun
+    // compares it against the fixed RX_STEPS.
+    var st = {steps: 0 - (text.length + 1) * re.ops.length, over: false, mustEnd: mustEnd, lbt: -1, ctr: ctr, cbeg: cbeg,
               gpos: gpos, glast: glast, adv: adv, wrap: 0 - 1, verb: 0}
     var end = rxRun(re, text, 0, at, caps, marks, st, 0, 0)
     // Under C the outcomes besides a match and none are records with a

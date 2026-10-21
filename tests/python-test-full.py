@@ -787,6 +787,8 @@ def s22():
     # stack of its own, not the native one.
     long = "ab" * 35000
     check("re41", re.match(r"^.*$", long).end() == 70000 and re.fullmatch(r"(ab)*", long).span(1) == (69998, 70000))
+    # Linear work on a long subject is never cut off by the matcher's step limit.
+    check("re45", len(re.search(r"(?:x|y|a|b){2,}", long).group(0)) == 70000)
     # IGNORECASE matches a character whose lowercase is in the set of the
     # pattern's lowercases, plus re._casefix's extra pairs (U+0390 and U+1FD3,
     # beta and its symbol form); a long range is folded like a short one. A

@@ -781,6 +781,9 @@ function s21() {
     check("re59", /^((a)|b*)*$/.exec("ab")[1] === "b" &&
                   /^((a)|b*)*$/.exec("ab")[2] === undefined &&
                   /(?:(a)|b){2}/.exec("ab")[1] === undefined);
+    // Linear work on a long subject is never cut off by the matcher's step limit.
+    const lng: string = "ab".repeat(35000);
+    check("re60", /(?:x|y|a|b){2,}/.exec(lng)![0].length === 70000);
 }
 
 // ===== SECTION 22: JavaScript value semantics (rendering, ==, instanceof, methods) =====

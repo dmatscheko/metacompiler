@@ -1494,6 +1494,9 @@ void s35() {
   var bad = false;
   try { RegExp(r'('); } on FormatException { bad = true; }
   check("rx10", bad && re.pattern == "(a)|(b)" && re.isCaseSensitive && !re.isMultiLine);
+  // Linear work on a long subject is never cut off by the matcher's step limit.
+  var lng = "ab" * 35000;
+  check("rx11", RegExp(r'(?:x|y|a|b){2,}').firstMatch(lng)!.end == 70000);
   var xs = [3, 1, 2, 4];
   check("li1", xs.map((x) => x * 2).toList()[3] == 8 && xs.where((x) => x.isEven).toList().length == 2);
   var cp = xs.toList();

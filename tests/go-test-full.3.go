@@ -250,6 +250,8 @@ func s98() {
 	// stack of its own, not the native one.
 	long := strings.Repeat("ab", 35000)
 	check("rx6", regexp.MustCompile(`^.*$`).MatchString(long) && len(regexp.MustCompile(`(ab)+`).FindString(long)) == 70000)
+	// Linear work on a long subject is never cut off by the matcher's step limit.
+	check("rx7", len(regexp.MustCompile(`(?:a|b){2,}`).FindString(long)) == 70000)
 	defer func() {
 		check("rx5", fmt.Sprint(recover()) == "regexp: Compile(`a\tb(`): error parsing regexp: missing closing ): `a\tb(`")
 	}()

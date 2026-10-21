@@ -5005,10 +5005,12 @@ int rt_fskind(char *p)
  * caps is caller-allocated, ncaps SLOTS (ncaps/2 pairs), pre-filled with -1 so a
  * group that did not participate reads -1/-1. Offsets are BYTES into the subject.
  *
- * Design: Thompson-style codegen plus a recursive backtracking VM.
+ * Design: Thompson-style codegen plus a backtracking VM.
  *   * re_alt/re_cat/re_rep/re_atom parse the ERE and emit 4-word instructions
  *     into re_prog. Recursion is the C call stack, as rt_glob already does it.
- *   * re_run walks that program, recursing at SPLIT. Leftmost-first, greedy.
+ *   * re_run walks that program over an explicit backtrack stack (re_bx,
+ *     re_by), so a long subject cannot exhaust the C stack. Leftmost-first,
+ *     greedy.
  *   * a * or + loop is fenced by SAVE/PROG on a scratch slot, so an iteration
  *     that consumed nothing cannot repeat.
  *
@@ -5019,8 +5021,10 @@ int rt_fskind(char *p)
  *   RE_NCAP   128   capture slots (64 pairs)
  *   RE_NMARK   64   empty-iteration guard slots
  *   RE_SLOTS  192   = RE_NCAP + RE_NMARK             -> re_slot[192]
- *   RE_STEPS 400000 total VM steps per rt_regex_search call
- *   RE_CSTK  8192   the OP_CLEAR undo stack          -> re_cstk[8192]
+ *   RE_BT  1048576  backtrack-stack entries          -> re_bx, re_by
+ *   RE_STEPS 400000 VM steps per start position, on top of one per
+ *            (instruction, subject position) pair: linear work never
+ *            reaches it, the revisiting of a pathological pattern does
  *
  * Opcodes, as literals:
  *   1 CHAR   2 ANY   3 CLASS   4 SPLIT   5 JMP   6 SAVE
@@ -5043,14 +5047,12 @@ int re_depth;                 /* NEW GLOBAL: open-group depth               */
 char *re_err;                 /* NEW GLOBAL: last compile error text        */
 char *re_subj;                /* NEW GLOBAL: the subject being searched     */
 int re_slen;                  /* NEW GLOBAL: its length in bytes            */
-int re_steps;                 /* NEW GLOBAL: VM steps used                  */
-/* The undo stack for OP_CLEAR. A cleared slot has to come BACK when the
- * iteration that cleared it fails, exactly as OP_SAVE puts its old offset back -
- * but a CLEAR writes a whole range, too big for the re_run frame (one frame per
- * backtracking choice). So the old values go on a stack of their own, and an
- * overrun fails the attempt the way the step cap does. */
-int re_cstk[8192];            /* NEW GLOBAL                                 */
-int re_ctop;                  /* NEW GLOBAL                                 */
+long re_steps;                /* NEW GLOBAL: VM steps used                  */
+long re_cap;                  /* NEW GLOBAL: the step cap of one start      */
+/* The backtrack stack, RE_BT entries: an alternative's pc and sp, or a
+ * slot's undo (-1 - slot, its old value). */
+int re_bx[1048576];           /* NEW GLOBAL                                 */
+int re_by[1048576];           /* NEW GLOBAL                                 */
 int re_fold;                  /* NEW GLOBAL: the "i" flag                   */
 int re_bad;                   /* NEW GLOBAL: compile error code, 0 = fine   */
 
@@ -5837,12 +5839,15 @@ int re_alt(void)
     return 0;
 }
 
-/* the backtracking VM. 1 match, 0 fail, -2 step cap. */
+/* the backtracking VM. 1 match, 0 fail, -2 step cap (or a backtrack stack
+ * deeper than RE_BT). A SPLIT pushes the alternative not taken, a SAVE or
+ * CLEAR the old value of each slot it writes; a failure pops back to the
+ * latest alternative, putting the slots back on the way. */
 int re_run(int rpc, int rsp)
 {
     int pc;
     int sp;
-    int st;
+    long st;
     int op;
     int vx;
     int vy;
@@ -5855,140 +5860,138 @@ int re_run(int rpc, int rsp)
     int lb;
     int byt;
     int got;
-    int sr;
-    int old;
-    int vr;
-    int cbase;
-    int cn;
-    int cr;
+    int top;
+    int fail;
     int i;
+    int bx;
 
     pc = rpc;
     sp = rsp;
+    top = 0;
+    slen = re_slen;
+    subj = re_subj;
     while (1) {
         st = re_steps;
-        if (st >= 400000) {
+        if (st >= re_cap) {
             return -2;
         }
         re_steps = st + 1;
         op = re_get(pc, 0);
         vx = re_get(pc, 1);
         vy = re_get(pc, 2);
-        slen = re_slen;
-        subj = re_subj;
         atEnd = (sp >= slen);
         pc1 = pc + 1;
         sp1 = sp + 1;
+        fail = 0;
 
         /* Every byte read is fenced by sp < slen, so no path loads the NUL
          * terminator or anything after it. */
         if (op == 1) {                        /* OP_CHAR */
             if (atEnd) {
-                return 0;
+                fail = 1;
+            } else {
+                cb = re_fold1((int)(unsigned char)subj[sp]);
+                if (cb != vx) {
+                    fail = 1;
+                } else {
+                    pc = pc1;
+                    sp = sp1;
+                }
             }
-            cb = re_fold1((int)(unsigned char)subj[sp]);
-            if (cb != vx) {
-                return 0;
-            }
-            pc = pc1;
-            sp = sp1;
-            continue;
-        }
-        if (op == 2) {                        /* OP_ANY */
+        } else if (op == 2) {                 /* OP_ANY */
             if (atEnd) {
-                return 0;
+                fail = 1;
+            } else {
+                pc = pc1;
+                sp = sp1;
             }
-            pc = pc1;
-            sp = sp1;
-            continue;
-        }
-        if (op == 3) {                        /* OP_CLASS */
+        } else if (op == 3) {                 /* OP_CLASS */
             if (atEnd) {
-                return 0;
+                fail = 1;
+            } else {
+                lb = re_fold1((int)(unsigned char)subj[sp]);
+                byt = (int)(unsigned char)re_cls[vx * 32 + lb / 8];
+                got = (byt >> (lb % 8)) & 1;
+                if (got == 0) {
+                    fail = 1;
+                } else {
+                    pc = pc1;
+                    sp = sp1;
+                }
             }
-            lb = re_fold1((int)(unsigned char)subj[sp]);
-            byt = (int)(unsigned char)re_cls[vx * 32 + lb / 8];
-            got = (byt >> (lb % 8)) & 1;
-            if (got == 0) {
-                return 0;
+        } else if (op == 4) {                 /* OP_SPLIT */
+            if (top == 1048576) {
+                return -2;
             }
-            pc = pc1;
-            sp = sp1;
-            continue;
-        }
-        if (op == 4) {                        /* OP_SPLIT */
-            /* The C call stack IS the backtracking stack. */
-            sr = re_run(vx, sp);
-            if (sr != 0) {
-                return sr;
-            }
-            pc = vy;
-            continue;
-        }
-        if (op == 5) {                        /* OP_JMP */
+            re_bx[top] = vy;
+            re_by[top] = sp;
+            top = top + 1;
             pc = vx;
-            continue;
-        }
-        if (op == 6) {                        /* OP_SAVE */
+        } else if (op == 5) {                 /* OP_JMP */
+            pc = vx;
+        } else if (op == 6) {                 /* OP_SAVE */
             /* A capture (or a loop's empty-iteration mark) is UNDONE when the
              * branch that set it fails, so a dead alternative cannot leave an
              * offset behind. */
-            old = re_slot[vx];
+            if (top == 1048576) {
+                return -2;
+            }
+            re_bx[top] = -1 - vx;
+            re_by[top] = re_slot[vx];
+            top = top + 1;
             re_slot[vx] = sp;
-            vr = re_run(pc1, sp);
-            if (vr == 0) {
-                re_slot[vx] = old;
-            }
-            return vr;
-        }
-        if (op == 7) {                        /* OP_MATCH */
+            pc = pc1;
+        } else if (op == 7) {                 /* OP_MATCH */
             return 1;
-        }
-        if (op == 8) {                        /* OP_BOL */
+        } else if (op == 8) {                 /* OP_BOL */
             if (sp != 0) {
-                return 0;
+                fail = 1;
+            } else {
+                pc = pc1;
             }
-            pc = pc1;
-            continue;
-        }
-        if (op == 9) {                        /* OP_EOL */
+        } else if (op == 9) {                 /* OP_EOL */
             if (sp != slen) {
-                return 0;
+                fail = 1;
+            } else {
+                pc = pc1;
             }
-            pc = pc1;
-            continue;
-        }
-        if (op == 10) {                       /* OP_PROG */
+        } else if (op == 10) {                /* OP_PROG */
             if (sp == re_slot[vx]) {
-                return 0;
+                fail = 1;
+            } else {
+                pc = pc1;
             }
-            pc = pc1;
-            continue;
-        }
-        if (op == 11) {                       /* OP_CLEAR */
-            /* The same write / recurse / put-it-back discipline as OP_SAVE, over
-             * a RANGE of slots. The old values go on re_cstk, and an overrun of
-             * that stack fails the attempt rather than writing past it. */
-            cbase = re_ctop;
-            cn = vy - vx + 1;
-            if (cbase + cn > 8192) {
-                return 0;
+        } else if (op == 11) {                /* OP_CLEAR */
+            /* OP_SAVE's undo, once per slot of the range. */
+            if (top + (vy - vx + 1) > 1048576) {
+                return -2;
             }
             for (i = vx; i < vy + 1; i++) {
-                re_cstk[cbase + (i - vx)] = re_slot[i];
+                re_bx[top] = -1 - i;
+                re_by[top] = re_slot[i];
+                top = top + 1;
                 re_slot[i] = -1;
             }
-            re_ctop = cbase + cn;
-            cr = re_run(pc1, sp);
-            re_ctop = cbase;
-            if (cr == 0) {
-                for (i = vx; i < vy + 1; i++) {
-                    re_slot[i] = re_cstk[cbase + (i - vx)];
-                }
-            }
-            return cr;
+            pc = pc1;
+        } else {
+            fail = 1;
         }
-        return 0;
+
+        if (fail != 0) {
+            while (1) {
+                if (top == 0) {
+                    return 0;
+                }
+                top = top - 1;
+                bx = re_bx[top];
+                if (bx >= 0) {
+                    pc = bx;
+                    sp = re_by[top];
+                    break;
+                }
+                re_slot[-1 - bx] = re_by[top];
+            }
+        }
     }
     return 0;
 }
@@ -6075,8 +6078,7 @@ int rt_regex_search(char *pat, char *subj, char *flags, int *caps, int ncaps)
     slen = rt_strlen(subj);
     re_subj = subj;
     re_slen = slen;
-    re_steps = 0;
-    re_ctop = 0;
+    re_cap = 400000 + (long)(slen + 1) * (long)re_pc;
     pairs = re_ng + 1;
 
     /* ---- search: leftmost wins, so the start position is tried in order. */
@@ -6085,6 +6087,7 @@ int rt_regex_search(char *pat, char *subj, char *flags, int *caps, int ncaps)
         for (k = 0; k < 192; k++) {
             re_slot[k] = -1;
         }
+        re_steps = 0;
         r = re_run(0, start);
         if (r == -2) {
             return -2;

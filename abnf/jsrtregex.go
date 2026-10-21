@@ -135,8 +135,9 @@ const (
 	rxSPNS = 18
 )
 
-// rxSteps caps one rxSearch attempt, so a pathological pattern reports an error
-// instead of hanging the run. Same number as RX_STEPS in lib/regex.js.
+// rxSteps caps one rxSearch attempt on top of one step per (instruction,
+// position) pair, so linear work never reaches it and a pathological pattern
+// reports an error instead of hanging the run. Twin of RX_STEPS in lib/regex.js.
 const rxSteps = 400000
 
 // ===== Character classes =====
@@ -7053,7 +7054,7 @@ func (re *rxRe) attempt(text []rune, at, mustEnd, gpos, glast, adv int) (*rxMatc
 	for i := range marks {
 		marks[i] = -1
 	}
-	st := &rxRunSt{mustEnd: mustEnd, lbt: -1, gpos: gpos, glast: glast, adv: adv, wrap: -1, bt: re.bt[:0]}
+	st := &rxRunSt{steps: -(len(text) + 1) * len(re.ops), mustEnd: mustEnd, lbt: -1, gpos: gpos, glast: glast, adv: adv, wrap: -1, bt: re.bt[:0]}
 	defer func() { re.bt = st.bt[:0] }()
 	if len(re.cmin) > 0 {
 		st.ctr = make([]int, len(re.cmin))

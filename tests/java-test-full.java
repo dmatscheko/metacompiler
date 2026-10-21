@@ -4992,6 +4992,11 @@ class S89 {
             cut = cut + " ";
         }
         Main.check("cut89", cut.equals("FHFHFH T01HFHT01H T01HT01HT01H T02hFhT02h FhFhFH FHFHFH FHFHFH T00hFhT00h "));
+        // Linear work on a long subject is never cut off by the matcher's step
+        // limit (a pattern java.util.regex runs without recursing per iteration).
+        String lng = "ab".repeat(35000);
+        Matcher lm = Pattern.compile("(?>a|b)+").matcher(lng);
+        Main.check("lin89", lm.find() && lm.end() == 70000);
         Matcher g = Pattern.compile("\\Ga").matcher("a");
         String gs = op89(g, 1) + op89(g, 0);
         Matcher g2 = Pattern.compile("\\G").matcher("a");

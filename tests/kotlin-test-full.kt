@@ -729,6 +729,10 @@ fun s23() {
                   + Regex("a.b", setOf(RegexOption.MULTILINE, RegexOption.LITERAL)).options == "[IGNORE_CASE][IGNORE_CASE][][MULTILINE][MULTILINE, LITERAL]"
                   && Regex("(?s)x").options == setOf(RegexOption.DOT_MATCHES_ALL) && Regex("a").options.isEmpty()
                   && Regex("a.b", RegexOption.LITERAL).pattern == "a.b" && "" + Regex("a.b", RegexOption.LITERAL) == "a.b")
+    // Linear work on a long subject is never cut off by the matcher's step limit
+    // (a pattern java.util.regex runs without recursing per iteration).
+    val lng = "ab".repeat(35000)
+    check("re65", Regex("(?>a|b)+").find(lng)!!.value.length == 70000)
 }
 
 // ===== SECTION 24: floating point arithmetic =====
