@@ -79,18 +79,18 @@ p(v[0] + v[1])` → `"a1"` in all engines (ruby TypeError "no implicit conversio
 
 # JS — JavaScript and TypeScript
 
-### T-725 js: accessors inherited through a prototype object; `Reflect` missing in the interpreter · P2 · JS · OPEN [V]
+### T-725 js: accessors inherited through a prototype object; `Reflect` missing in the interpreter · P2 · JS · IN PROGRESS (JS worker, round 28) [V]
 `var c = Object.create({get acc(){return 1}}); c.acc` → node 1; interp undefined, llvm.Run a raw Go struct (`&{0x… <nil>}`), native
 `[object Object]`; same for `F.prototype` / `A.prototype` accessors set with defineProperty; inherited setters never run and writes
 create own properties (node `o.set 1` / `false`). Needs the getter/setter lookup through the prototype view (`__pview`) on read and
 write in all engines. `Reflect` → ReferenceError in the js interpreter while the compiled legs have it (halves diverge).
 
-### T-726 js: accessors on array indices / functions via defineProperty; Symbol-keyed properties under freeze and in messages · P3 · JS · OPEN [V]
+### T-726 js: accessors on array indices / functions via defineProperty; Symbol-keyed properties under freeze and in messages · P3 · JS · IN PROGRESS (JS worker, round 28) [V]
 `Object.defineProperty(a, "0", {get(){…}})` and the same on a function value are ignored (all engines). `Object.freeze` does not
 protect Symbol-keyed properties (strict write accepted; node "Cannot assign to read only property 'Symbol(q)' of object"); refusal
 messages print the internal key (`__#@match`) where node prints `Symbol(Symbol.match)`.
 
-### T-723 js/ts: tests/srcpos-probe.sh reports -callgraph definition lines off by one · P1 · JS · OPEN [V]
+### T-723 js/ts: tests/srcpos-probe.sh reports -callgraph definition lines off by one · P1 · JS · IN PROGRESS (JS worker, round 28) [V]
 `tests/srcpos-probe.sh` on main: `FAIL js: definitions are on [1 5], -callgraph says [2 6]` (typescript the same); the other 24
 languages pass. A recent js/ts grammar change shifted the recorded definition position (suspects: function source spans
 js-fnsrc.js, class-in-try, new.target binding at entry). Bisect, fix, and wire srcpos-probe into the per-language verification.
