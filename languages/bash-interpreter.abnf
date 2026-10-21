@@ -204,7 +204,10 @@ CompoundCmd <~~ push({cpd: 1}) ~~> = CompoundRedir | Subshell | BraceGroup ;
 CompoundRedir <~~ push(mkRedirected(takeAll())) ~~> = CompoundCore [ RedirList ] ;
 // "((" must be tried before "(" or an arithmetic command parses as nested subshells, which
 // is why CompoundRedir comes before Subshell rather than after it.
-CompoundCore = ArithCmd | CondCmd | IfStmt | CForStmt | ForStmt | WhileStmt | UntilStmt | CaseStmt | FuncDef ;
+CompoundCore = ArithCmd | CondCmd | FlowCmd ;
+// The compound commands set -e does not look at as a whole (eeExempt): what failed in them was
+// answered there.
+FlowCmd     <~~ push(eeExempt(pop())) ~~> = IfStmt | CForStmt | ForStmt | WhileStmt | UntilStmt | CaseStmt | FuncDef ;
 
 // NAME=VALUE... COMMAND ARGS : the assignments apply only for the duration of the command.
 // Tried before a bare Assignment, which is the same shape without a command word after it.
@@ -219,7 +222,7 @@ Subshell    <~~ push(makeSubshellR(takeAll())) ~~> = "(" CompoundList ")" [ Redi
 // { LIST; } is a plain grouping: it runs in the CURRENT shell. "{" only opens a group when
 // it is a WORD OF ITS OWN - `{ls; }` is the word "{ls" followed by a stray "}", which real
 // bash refuses ("syntax error near unexpected token `}'"), so BraceKwEnd demands the blank.
-BraceGroup  <~~ push(makeGroupR(takeAll())) ~~> = "{" BraceKwEnd CompoundList "}" [ RedirList ] ;
+BraceGroup  <~~ push(eeExempt(makeGroupR(takeAll()))) ~~> = "{" BraceKwEnd CompoundList "}" [ RedirList ] ;
 // (( expr )) as a command: status 0 when the value is non-zero.
 // (( EXPR )): a text holding an expansion is expanded first and then evaluated, exactly as
 // $(( EXPR )) is (see ArithExp).
@@ -1413,6 +1416,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var optPipefail = false
     var exitTrap = null      // a statement thunk, or null
     var condDepth = 0        // >0 while a command runs as a CONDITION (set -e does not fire)
+    // Set by a statement that answered set -e itself or is exempt from it - a compound command,
+    // an && / || list, a ! pipeline - for the statement list around it (see makeSeq).
+    var eeDone = false
     var abortSignal = null   // set by a set -u or ${v:?} failure during expansion
 
     // $0 and the prefix on every diagnostic: the program's own path, exactly as this
@@ -2635,7 +2641,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (o == "-") { return blank ? dfltWord(wordT) : v }
             if (o == "+") { return blank ? "" : dfltWord(wordT) }
             if (o == "=") {
-                if (blank) { var d = (wordT != null) ? wordJoin(wordT()) : ""; if (tn != null) { setVarVal(tn, d) }; return d }
+                if (blank) { var d = (wordT != null) ? wordJoin(wordT()) : ""; if (tn != null) { d = storeAttr(tn, d) }; return d }
                 return v
             }
             if (o == "?") {
@@ -2698,8 +2704,14 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         abortSignal = {ret: 1, isExit: 1}
     }
 
-    // items = [{dkw}, {dflag}*, ({dname} | {aname, val})*]
-    function makeDecl(items) {
+    // items = [{dkw}, {dflag}*, ({dname} | {aname, val})*]. A declaration runs in two phases,
+    // as bash's does: its WORDS are expanded first, before its redirections apply, and an array
+    // literal is assigned right then, in order (`declare -ai k=(1 x+) 2>/dev/null` still reports
+    // x+, and `declare -a c=(7) d=${c[0]}` sees 7); the builtin then declares the names and
+    // stores the other values, already expanded (`a=0; declare a=1 b=$a` makes b 0), under the
+    // redirections (`declare -i n=1+ 2>/dev/null` is silent). Twin of makeDecl in
+    // bash-to-llvm-ir.abnf.
+    function makeDecl(items, redirs) {
         var kw = items[0].dkw
         var flags = ""
         var names = []
@@ -2722,8 +2734,44 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // the name a fresh unset local.
         var query = (flags.indexOf("p") >= 0) || (flags.indexOf("f") >= 0) || (flags.indexOf("F") >= 0)
         var isPrint = (flags.indexOf("p") >= 0) && (flags.indexOf("f") < 0) && (flags.indexOf("F") < 0)
-        return function() {
+        // One name: its attributes, then its value (v, or the assignment's own literal).
+        var declOne = function(k, v) {
+            // WHICH KEYWORDS ARE LOCAL. bash 5.3: `local`, `declare` and `typeset` inside a
+            // function declare a function-local name (value AND attributes restored on
+            // return) unless -g is given; `export` and `readonly` always act on the global.
+            var localize = !global && (kw == "local" || ((kw == "declare" || kw == "typeset") && localFrames.length > 0))
+            touchState(names[k])
+            if (localize) {
+                declareLocal(names[k])
+                // A local declaration starts from a CLEAN SLATE. bash does not inherit
+                // the global's attributes or its array: `declare -i g; f(){ local g;
+                // g=1+1; }` prints 1+1, and `arr=(a b); f(){ local arr=Q; }` sees a
+                // one-element array. declareLocal has just saved all of it for the return.
+                dropAttrs(names[k])
+                arrs[arrKey(names[k])] = null
+            }
+            if (integer) { intVars["$" + names[k]] = true }
+            if (upper) { upVars["$" + names[k]] = true; loVars["$" + names[k]] = false }
+            if (lower) { loVars["$" + names[k]] = true; upVars["$" + names[k]] = false }
+            // A global `declare -a a` keeps a's elements; only a value or a local starts empty.
+            if (isArray && asgs[k] == null) {
+                if (!assoc && !localize) { arrAdopt(names[k]) }
+                arrEnsure(names[k], assoc)
+                arrs[arrKey(names[k])].decl = true
+            }
+            if (asgs[k] != null) {
+                if (isArray) { arrNew(names[k], assoc) }
+                if (asgs[k].lit != null) { runAssign(asgs[k], assoc) } else { runAssignV(asgs[k], assoc, v) }
+            }
+            else if (localize) { unsetVar(names[k]) }
+            if (asgs[k] == null && !isArray && kw != "export" && kw != "readonly") { dclVars["$" + names[k]] = true }
+        }
+        // The expanded values, one array per running declaration: the expansion of a value can
+        // run this same declaration again (`local x=$(f)` inside a recursive f).
+        var valStack = []
+        var body = function() {
             var k
+            var vals = valStack[valStack.length - 1]
             if (query) {
                 // -p with names PRINTS; -p bare and -f/-F stay silent (declLine's comment
                 // says why), and a name that is not set is a diagnostic and status 1.
@@ -2739,46 +2787,39 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 }
                 setStatus(0); return 0
             }
-            // WHICH KEYWORDS ARE LOCAL. bash 5.3: `local`, `declare` and `typeset` inside a
-            // function declare a function-local name (value AND attributes restored on
-            // return) unless -g is given; `export` and `readonly` always act on the global.
-            var localize = !global && (kw == "local" || ((kw == "declare" || kw == "typeset") && localFrames.length > 0))
             for (k = 0; k < names.length; k++) {
-                touchState(names[k])
-                if (localize) {
-                    declareLocal(names[k])
-                    // A local declaration starts from a CLEAN SLATE. bash does not inherit
-                    // the global's attributes or its array: `declare -i g; f(){ local g;
-                    // g=1+1; }` prints 1+1, and `arr=(a b); f(){ local arr=Q; }` sees a
-                    // one-element array. declareLocal has just saved all of it for the return.
-                    dropAttrs(names[k])
-                    arrs[arrKey(names[k])] = null
-                }
-                if (integer) { intVars["$" + names[k]] = true }
-                if (upper) { upVars["$" + names[k]] = true; loVars["$" + names[k]] = false }
-                if (lower) { loVars["$" + names[k]] = true; upVars["$" + names[k]] = false }
-                // A global `declare -a a` keeps a's elements; only a value or a local starts empty.
-                if (isArray && asgs[k] == null) {
-                    if (!assoc && !localize) { arrAdopt(names[k]) }
-                    arrEnsure(names[k], assoc)
-                    arrs[arrKey(names[k])].decl = true
-                }
-                if (asgs[k] != null) {
-                    if (isArray) { arrNew(names[k], assoc) }
-                    runAssign(asgs[k], assoc)
-                }
-                else if (localize) { unsetVar(names[k]) }
-                if (asgs[k] == null && !isArray && kw != "export" && kw != "readonly") { dclVars["$" + names[k]] = true }
+                if (asgs[k] == null || asgs[k].lit == null) { declOne(k, vals[k]) }
             }
             var ab = takeAbort()
             if (ab != null) { return ab }
             setStatus(0)
             return 0
         }
+        var run = body
+        if (redirs.length > 0) {
+            var wrapped = [body]
+            for (i = 0; i < redirs.length; i++) { wrapped.push(redirs[i]) }
+            run = mkRedirected(wrapped)
+        }
+        return function() {
+            var k
+            var vals = []
+            for (k = 0; k < names.length && !query; k++) {
+                var a = asgs[k]
+                if (a != null && a.lit != null) { declOne(k, "") }
+                vals.push((a != null && a.lit == null && a.valT != null) ? wordJoin(a.valT()) : "")
+                var ab = takeAbort()
+                if (ab != null) { return ab }
+            }
+            valStack.push(vals)
+            var r = anytype
+            r = run()
+            valStack.pop()
+            return r
+        }
     }
     // A declaration CARRYING ITS OWN redirections. The declaration items are the ones
-    // makeDecl understands; anything else on the stack is a redirection record and is
-    // handed to mkRedirected, exactly as makeSubshellR / makeGroupR do it.
+    // makeDecl understands; anything else on the stack is a redirection record.
     function makeDeclR(items) {
         var core = []
         var reds = []
@@ -2788,10 +2829,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (it.dkw != undefined || it.dflag != undefined || it.dname != undefined || it.a != undefined) { core.push(it) }
             else { reds.push(it) }
         }
-        if (reds.length == 0) { return makeDecl(core) }
-        var wrapped = [makeDecl(core)]
-        for (i = 0; i < reds.length; i++) { wrapped.push(reds[i]) }
-        return mkRedirected(wrapped)
+        return makeDecl(core, reds)
     }
     function mkDeclItem(items) { return {a: parseAssign(items)} }
 
@@ -3585,18 +3623,21 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var saved = saveShellState()
             var savedFrames = localFrames
             localFrames = []
+            exitTrap = null
+            // set -e is not inherited by a command substitution (bash without inherit_errexit)
+            optErrExit = false
             var r = anytype
             var svq = uqStar
             uqStar = false
             r = bodyT()
             uqStar = svq
-            runExitTrap()
+            var st = runExitTrap(endStatus(r))
             restoreShellState(saved)
             localFrames = savedFrames
             var nulGone = capNul["$" + capStack.length]
             var out = capStack.pop()
             if (nulGone) { emitErr("bash: warning: command substitution: ignored null byte in input\n") }
-            if (typeof r == "object") { setStatus((r.ret != undefined) ? r.ret : sigStatus(r)) } else { setStatus(r) }
+            setStatus(st)
             cmdSubRan = true
             return stripTrailNL(out)
         }
@@ -4778,7 +4819,11 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             applyArrayLit(a.name, lv, a.op == "+=", assoc)
             return
         }
-        var v = (a.valT != null) ? wordJoin(a.valT()) : ""
+        runAssignV(a, assoc, (a.valT != null) ? wordJoin(a.valT()) : "")
+    }
+    // The same, with the value already expanded.
+    function runAssignV(a, assoc, v) {
+        var isAs = assocFact(a.name, assoc)
         if (a.idxT != null) {
             var key = subKey(a.name, wordJoin(a.idxT()))
             if (arithErr || abortSignal != null) { return }
@@ -4795,9 +4840,21 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             else { setVarVal(a.name, getVarVal(a.name) + v) }
             return
         }
-        // `declare -i n` makes n=EXPR evaluate EXPR as arithmetic.
-        if (attrOn(intVars, a.name)) { var iv = arEval(v); if (!arithErr) { setVarVal(a.name, numToStr(iv)) }; return }
-        setVarVal(a.name, v)
+        storeAttr(a.name, v)
+    }
+    // v stored as NAME's value the way `NAME=v` stores it: element 0 of an array name, the
+    // value of v as arithmetic under -i (`declare -i n` makes n=EXPR evaluate EXPR; an error
+    // stores nothing), the case map under -u / -l. read, printf -v, a for loop's name and
+    // ${v:=w} store this way too. Answers the stored text. Twin of emitStoreAttr in
+    // bash-to-llvm-ir.abnf.
+    function storeAttr(name, v) {
+        if (isArr(name)) { elemSet(name, "0", null, v); return arrGet(name, "0") }
+        if (attrOn(intVars, name)) {
+            var iv = arEval(v)
+            if (arithErr) { return "" }
+            setVarVal(name, numToStr(iv))
+        } else { setVarVal(name, v) }
+        return getVarVal(name)
     }
 
     // items[0] is the command word thunk; the rest are argument word thunks and redirections.
@@ -4883,12 +4940,20 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function compileSnippet(src) {
         return arCompile(src, "CompoundList", false)
     }
-    function runExitTrap() {
-        if (exitTrap == null) { return }
+    // The EXIT trap, run once, with $? the status st the shell is leaving with. That status
+    // stands - what the trap runs does not change it - unless the trap itself exits. Answers
+    // the status to leave with.
+    function runExitTrap(st) {
+        if (exitTrap == null) { return st }
         var t = exitTrap
         exitTrap = null
+        setStatus(st)
         var r = anytype
         r = t()
+        var out = st
+        if (typeof r == "object" && r.isExit != undefined) { out = r.ret }
+        setStatus(out)
+        return out
     }
 
     // printf [-v NAME] [--] FORMAT [ARG...]. The format is reused until the operands run out;
@@ -5156,7 +5221,12 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             used = pf.ai > before
         }
         var res = normBytes(pf.e)
-        if (dest != null) { setVarVal(dest, cutNul(res)) } else { emitOut(res) }
+        if (dest != null) {
+            var svp = arPfx
+            arPfx = "printf: "
+            storeAttr(dest, cutNul(res))
+            arPfx = svp
+        } else { emitOut(res) }
         return pf.rc
     }
     // printf's %x/%X/%o/%u: the operand as an UNSIGNED 64-bit value in the given base.
@@ -5379,7 +5449,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         if (stdinPos >= stdinBuf.length) {
             var z
-            for (z = 0; z < names.length; z++) { setVarVal(names[z], "") }
+            for (z = 0; z < names.length; z++) { storeAttr(names[z], "") }
             // At end of file bash CLEARS what it would have set, REPLY included:
             // `REPLY=keep; read -r </dev/null; echo "[$REPLY]"` prints [].
             if (arrName == null && names.length == 0) { setVarVal("REPLY", "") }
@@ -5400,14 +5470,14 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return 0
         }
         if (names.length == 0) { setVarVal("REPLY", line); return 0 }
+        // An -i name's arithmetic error leaves it and the names after it as they were.
+        var svp2 = arPfx
+        arPfx = "read: "
         var k
-        for (k = 0; k < names.length; k++) {
-            if (k == names.length - 1) {
-                setVarVal(names[k], readRest(line, rec, k))
-            } else {
-                setVarVal(names[k], (k < fields.length) ? fields[k] : "")
-            }
+        for (k = 0; k < names.length && !arithErr; k++) {
+            storeAttr(names[k], (k == names.length - 1) ? readRest(line, rec, k) : ((k < fields.length) ? fields[k] : ""))
         }
+        arPfx = svp2
         return 0
     }
     // WHAT THE LAST NAME OF A `read` GETS, which is not "the remaining fields joined":
@@ -5740,7 +5810,13 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             setStatus(er)
             return er
         }
-        if (cmd == "printf") { var pst = printfBuiltin(args); setStatus(pst); return pst }
+        if (cmd == "printf") {
+            var pst = printfBuiltin(args)
+            var pab = takeAbort()
+            if (pab != null) { setStatus(1); return pab }
+            setStatus(pst)
+            return pst
+        }
         if (cmd == "mapfile" || cmd == "readarray") {
             var mst = anytype
             mst = mapfileBuiltin(cmd, args)
@@ -5827,10 +5903,14 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 var runIt = (op == "&&") ? (st == 0) : (st != 0)
                 if (runIt) {
                     var isLast = (i + 2 >= items.length)
+                    // set -e looks only at the LAST command of the list, when it runs
+                    eeDone = false
                     st = isLast ? items[i + 1]() : runCond(items[i + 1])
                     if (typeof st == "object") { return st }
+                    if (isLast && !eeDone && optErrExit && st != 0 && condDepth == 0) { return {ret: st, isExit: 1} }
                 }
             }
+            eeDone = true
             return st
         }
     }
@@ -5858,8 +5938,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             lastBgPid = lastBgPid + 1
             var saved = saveShellState()
             localFrames = []
+            exitTrap = null
             var r = anytype
             r = t()
+            runExitTrap(endStatus(r))
             restoreShellState(saved)
             setStatus(0)
             return 0
@@ -5867,19 +5949,33 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
 
     // A statement sequence: the value is the last statement's status; a {ret} unwinds.
+    // set -e: leave on the first failing statement, unless it is a CONDITION or answered set -e
+    // itself or is exempt (eeDone). Twin of makeSeq in bash-to-llvm-ir.abnf.
     function makeSeq(thunks) {
         return function() {
             var last = 0
             var r = anytype
             var i
             for (i = 0; i < thunks.length; i++) {
+                eeDone = false
                 r = thunks[i]()
+                var done = eeDone
+                eeDone = false
                 if (typeof r == "object") { return r }
                 last = r
-                // set -e: leave on the first failing command, unless it is a CONDITION.
-                if (optErrExit && last != 0 && condDepth == 0) { return {ret: last, isExit: 1} }
+                if (optErrExit && last != 0 && condDepth == 0 && !done) { return {ret: last, isExit: 1} }
             }
             return last
+        }
+    }
+    // A compound command (if, the loops, case, { }) is exempt from set -e: what failed in it
+    // was answered there, or was exempt (`if true; then false && true; fi` goes on).
+    function eeExempt(t) {
+        return function() {
+            var r = anytype
+            r = t()
+            eeDone = true
+            return r
         }
     }
     // Run a thunk as a CONDITION: its failure must not trip set -e.
@@ -5984,6 +6080,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // set -o pipefail: the pipeline reports the first failing stage.
             if (optPipefail && st == 0 && firstFail != 0) { st = firstFail }
             if (bang) { st = (st == 0) ? 1 : 0 }
+            // a ! pipeline is exempt from set -e; any other answers it by its status
+            eeDone = bang
             setStatus(st)
             return st
         }
@@ -6007,7 +6105,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         exitTrap = st.tr
     }
     // ( LIST ) : variables and positional parameters are restored afterwards, and both a
-    // `return` and an `exit` inside end only the subshell. It starts outside every loop,
+    // `return` and an `exit` inside end only the subshell. No EXIT trap is inherited. It starts outside every loop,
     // except a SIMPLE command run as a pipeline stage (keepLoops): there `break` and
     // `continue` see the loops around it and end the subshell with the signal's status.
     // Twin of subshellOf in bash-to-llvm-ir.abnf.
@@ -6016,18 +6114,24 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return function() {
             var saved = saveShellState()
             localFrames = []
+            exitTrap = null
             var savedLoops = loopDepth
             if (!keepLoops) { loopDepth = 0 }
             var r = anytype
             r = bodyT()
             loopDepth = savedLoops
-            runExitTrap()
+            var st = runExitTrap(endStatus(r))
             restoreShellState(saved)
-            var st = 0
-            if (typeof r == "object") { st = (r.ret != undefined) ? r.ret : sigStatus(r) } else { st = r }
+            eeDone = false
             setStatus(st)
             return st
         }
+    }
+    // The status a subshell body's result ends it with: a number, or an exit / return / loop
+    // signal.
+    function endStatus(r) {
+        if (typeof r != "object") { return r }
+        return (r.ret != undefined) ? r.ret : sigStatus(r)
     }
     // { LIST; } runs in the current shell, so it is just its body.
     function makeGroup(bodyT) { return bodyT }
@@ -6516,7 +6620,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var r = anytype
             var k
             for (k = 0; k < vals.length; k++) {
-                setVarVal(fname, vals[k])
+                storeAttr(fname, vals[k])
                 r = bodyT()
                 if (typeof r == "object") {
                     var sg = loopSignal(r)
@@ -6569,25 +6673,29 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         for (li = 0; li < lines.length; li++) {
             var stmts = lines[li]
             for (i = 0; i < stmts.length; i++) {
+                eeDone = false
                 r = stmts[i]()
+                var done = eeDone
+                eeDone = false
+                if (typeof r != "object" && optErrExit && r != 0 && condDepth == 0 && !done) { r = {ret: r, isExit: 1} }
                 if (typeof r == "object") {
                     // An expansion error abandons the rest of its line, with status 1.
                     if (r.soft != undefined) { setStatus(1); i = stmts.length; continue }
-                    if (r.isExit != undefined) { setStatus(r.ret); runExitTrap(); flushErrTail(); exit(r.ret) }
+                    if (r.isExit != undefined) { var xc = runExitTrap(r.ret); flushErrTail(); exit(xc) }
                     setStatus(r.ret)
                 }
             }
             r = takeAbort()
             if (r != null) {
-                if (r.soft == undefined) { setStatus(r.ret); runExitTrap(); flushErrTail(); exit(r.ret) }
+                if (r.soft == undefined) { var ac = runExitTrap(r.ret); flushErrTail(); exit(ac) }
                 setStatus(1)
             }
         }
-        runExitTrap()
+        var fc = runExitTrap(lastStatus)
         // A `printf x >&2` with no trailing newline is still sitting in errBuf; hand it over
         // (see writeChan) rather than losing it.
         flushErrTail()
-        exit(lastStatus)
+        exit(fc)
     }
 
     c.compile(c.asg)

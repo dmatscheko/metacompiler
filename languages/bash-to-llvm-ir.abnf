@@ -195,7 +195,10 @@ CompoundCmd <~~ push({cpd: 1}) ~~> = CompoundRedir | Subshell | BraceGroup ;
 CompoundRedir <~~ push(mkRedirected(takeAll())) ~~> = CompoundCore [ RedirList ] ;
 // "((" must be tried before "(" or an arithmetic command parses as nested subshells, which
 // is why CompoundRedir comes before Subshell rather than after it.
-CompoundCore = ArithCmd | CondCmd | IfStmt | CForStmt | ForStmt | WhileStmt | UntilStmt | CaseStmt | FuncDef ;
+CompoundCore = ArithCmd | CondCmd | FlowCmd ;
+// The compound commands set -e does not look at as a whole (eeExempt): what failed in them was
+// answered there.
+FlowCmd     <~~ push(eeExempt(pop())) ~~> = IfStmt | CForStmt | ForStmt | WhileStmt | UntilStmt | CaseStmt | FuncDef ;
 
 // NAME=VALUE... COMMAND ARGS : the assignments apply only for the duration of the command.
 // Tried before a bare Assignment, which is the same shape without a command word after it.
@@ -210,7 +213,7 @@ Subshell    <~~ push(makeSubshellR(takeAll())) ~~> = "(" CompoundList ")" [ Redi
 // { LIST; } is a plain grouping: it runs in the CURRENT shell.
 // "{" only opens a group when it is a WORD OF ITS OWN: `{ls; }` is the word "{ls" plus a
 // stray "}", which real bash refuses.
-BraceGroup  <~~ push(makeGroupR(takeAll())) ~~> = "{" BraceKwEnd CompoundList "}" [ RedirList ] ;
+BraceGroup  <~~ push(eeExempt(makeGroupR(takeAll()))) ~~> = "{" BraceKwEnd CompoundList "}" [ RedirList ] ;
 // (( expr )) as a command: status 0 when the value is non-zero.
 // (( EXPR )): a text holding an expansion is expanded first and then evaluated, exactly as
 // $(( EXPR )) is. Twin of ArithCmd in bash-interpreter.abnf.
@@ -431,6 +434,12 @@ ArithSt     <~~ arClaim(up.start + 3, up.pos - 2); push(mkArith(pop())) ~~> = "$
 ArithDyn    <~~ push(mkArith(mkArDyn(pop()))) ~~> = "$((" :whitespace() ArHasExp ArDynWord "))" ;
 ArithRaw    <~~ push(mkArith(mkArDyn(pop()))) ~~> = "$((" :whitespace() ArDynWord "))" ;
 ArDynWord   <~~ push(mkNsWord(takeAll())) ~~> = { ArDynSeg } ;
+// The literal value of an -i assignment, which emitAssign wraps as $(( TEXT )): emitted as
+// arithmetic when it is an expression, else read by rt_arith at run time, which reports
+// bash's error (`declare -i n; n=1+`).
+ArIAsg      = ArIAsgSt | ArIAsgRaw ;
+ArIAsgSt    <~~ arClaim(up.start + 3, up.pos - 2) ~~> = "$((" :whitespace(Whitespace) ArList "))" ;
+ArIAsgRaw   <~~ push(mkArDyn(pop())) ~~> = "$((" :whitespace() ArDynWord "))" ;
 ArDynSeg    = DqSeg | ExpSeg | ArDynParen | ArDynBare ;
 ArDynParen  = ArDynOpen { ArDynSeg } ArDynClose ;
 ArDynOpen   <~~ push(makeConst("(")) ~~> = "(" ;
@@ -1363,6 +1372,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var gOptE = rtGlobal("opt_errexit", i32)
     var gOptU = rtGlobal("opt_nounset", i32)
     var gOptPf = rtGlobal("opt_pipefail", i32)
+    var gCondRt = rtGlobal("cond_depth", i32)
     var gAbort = rtGlobal("abort_flag", i32)
     var gArithErr = rtGlobal("arith_err", i32)   // an arithmetic or substring error (rt_arith_fail)
     var gCondErr = rtGlobal("cond_err", i32)   // a [[ ]] that could not be evaluated
@@ -1441,6 +1451,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var redirStack = []
     var curFrame = null    // null at top level, else {params: [9 i8* values], argc: i32 value}
     var condDepth = 0      // >0 while emitting a CONDITION (set -e must not fire there)
+    // Set by a statement that answered set -e itself or is exempt from it - a compound command,
+    // an && / || list, a ! pipeline - for the statement list around it (see makeSeq).
+    var eeDone = false
     var loopStack = []     // {brk, cont} target blocks of the loops being emitted
     var retInSub = false   // inside a ( ) / $( ) of the function being emitted: return ends it
     var trapList = []      // EXIT traps registered in the (sub)shell being emitted
@@ -1491,6 +1504,14 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var fnCount = 0
 
     function bashFnParams() { return [] }
+    // The call of a user function; its status is $?. A call made as a CONDITION counts itself
+    // in cond_depth for as long as it runs, which keeps set -e off in the body: the body is
+    // emitted once, so only the run time knows how it was called.
+    function emitFnCall(b, f) {
+        if (condDepth > 0) { b.NewStore(b.NewAdd(b.NewLoad(i32, gCondRt), one), gCondRt) }
+        storeStatus(b, b.NewCall(f))
+        if (condDepth > 0) { b.NewStore(b.NewSub(b.NewLoad(i32, gCondRt), one), gCondRt) }
+    }
     // The IR function for a bash function name, declared on first reference. A forward call
     // (`f` above its `f() {...}`) is ordinary in a shell script, so it must not fall through
     // to "command not found".
@@ -1765,6 +1786,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             curExitRd = redirStack.length
             b.NewCall(rtSsSave, zero)
             var optSave = saveOpts(b)
+            // set -e is not inherited by a command substitution (bash without inherit_errexit)
+            b.NewStore(zero, gOptE)
             var savedLoops = loopStack, savedRetSub = retInSub
             loopStack = subLoops(savedLoops, subEnd)
             retInSub = true
@@ -1783,13 +1806,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             curExitRd = savedExitRd
             var myTraps = trapList
             trapList = savedTraps
-            subEnd = emitTraps(subEnd, myTraps)
-            var wasEx = subEnd.NewICmp(llvm.enum.IPredNE, subEnd.NewLoad(i32, gExited), zero)
-            var st = subEnd.NewSelect(wasEx, subEnd.NewLoad(i32, gExitCode), subEnd.NewLoad(i32, gStatus))
-            subEnd.NewStore(zero, gExited)
-            subEnd.NewCall(rtSsRestore, zero)
-            restoreOpts(subEnd, optSave)
-            subEnd.NewStore(st, gStatus)
+            subEnd = subshellEnd(subEnd, myTraps, optSave)
             var v = subEnd.NewCall(rtCapEnd, one)
             return {b: subEnd, v: v}
         }}
@@ -2284,7 +2301,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         // ${!ref OP arg} and ${!a[k] OP arg}: the operator applies to the variable the
         // indirection LANDED on (cell.tg, see mkParamExp), so every leaf below starts from
-        // targetOf and reads and writes through valOf/setOf instead of the fixed slot.
+        // targetOf and reads through valOf (and `=` writes through rt_setvar_byname) instead
+        // of the fixed slot.
         var indirect = indp
         function targetOf(b) {
             if (!indirect) { return {b: b, v: null} }
@@ -2293,10 +2311,6 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         function valOf(b, tg) {
             if (indirect) { return b.NewCall(rtGetByName, tg) }
             return varString(b, name)
-        }
-        function setOf(b, tg, v) {
-            if (indirect) { b.NewCall(rtSetByName, [tg, v]); return }
-            storeVar(b, name, v)
         }
         // The @-transforms (see applyXf above). The value is read ONCE and rt_isset asks whether
         // it is the unset marker, so `set -u` fires exactly as for a plain read.
@@ -2411,7 +2425,17 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 return {b: b, v: b.NewCall(rtPcheck, [v, b.NewZExt(blank, i32), gepStr(b, indirect ? "!" + name : name), msg])}
             }
             var picked = b.NewSelect(blank, d, v)
-            if (o == "=") { setOf(b, t6.v, picked) }
+            if (o == "=" && indirect) { b.NewCall(rtSetByName, [t6.v, picked]) }
+            if (o == "=" && !indirect) {
+                // the default is stored under the name's attributes, and expands as stored
+                var setB = curF.NewBlock(""), joinB = curF.NewBlock("")
+                b.NewCondBr(blank, setB, joinB)
+                var sb = emitStoreAttr(setB, name, d)
+                var stored = sb.NewCall(rtGetByName, gepStr(sb, name))
+                sb.NewBr(joinB)
+                picked = joinB.NewPhi([llvm.ir.NewIncoming(stored, sb), llvm.ir.NewIncoming(v, b)])
+                b = joinB
+            }
             return {b: b, v: picked}
         }}
     }
@@ -3144,7 +3168,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var r = a.valT.fn(b)
             b = r.b
             v = (a.valT.f == true) ? wordJoin(b, r.v) : r.v
-            if (a.valT.c == undefined) { b = emitAbortCheck(b) }
+            if (a.valT.c == undefined && a.valT.done != true) { b = emitAbortCheck(b) }
         }
         if (a.idxT != null) {
             var rk = subKeyOf(b, a.name, a.idxT, null)
@@ -3170,7 +3194,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (attrOn(intVars, a.name) && a.valT != null) {
             var rv = null
             if (a.valT.c != undefined) {
-                var ra = arCompile(a.valT.c, "ArList", true)(b)
+                var ra = arCompile("$((" + a.valT.c + "))", "ArIAsg", false)(b)
                 b = ra.b
                 rv = ra.v
             } else {
@@ -3189,6 +3213,15 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         b.NewBr(mg)
         return mg
     }
+    // v (already expanded) stored as NAME's value the way `NAME=v` stores it: element 0 of an
+    // array name, the value of v as arithmetic under -i (an error abandons the line), the case
+    // map under -u / -l. read, printf -v, a for loop's name, ${v:=w} and a declaration's
+    // expanded value store this way. Twin of storeAttr in bash-interpreter.abnf.
+    function emitStoreAttr(b, name, v) {
+        return emitAssign(b, {name: name, op: "=", idxT: null, lit: null, valT: doneWord(v)}, false, null)
+    }
+    // A word whose value is already expanded.
+    function doneWord(v) { return {fn: function(b) { return {b: b, v: v} }, c: undefined, done: true} }
     // Stores v as element `key` of array `name` (nm, its name as an i8*) under the array's
     // attributes; old is the element's value for `+=`, else null. -i's arithmetic error
     // abandons the line before the store. An assignment command passes its statement's mark
@@ -3246,8 +3279,11 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         b.NewRet(v)
     }
 
-    // items = [{dkw}, {dflag}*, ({dname} | {a: assignment})*]
-    function makeDecl(items) {
+    // items = [{dkw}, {dflag}*, ({dname} | {a: assignment})*]. A declaration runs in two phases,
+    // as bash's does: its words are expanded, and an array literal is assigned, before its
+    // redirections apply; then the names are declared and the expanded values stored under
+    // them. Twin of makeDecl in bash-interpreter.abnf, which has the cases.
+    function makeDecl(items, redirs) {
         var kw = items[0].dkw
         var flags = ""
         var names = []
@@ -3277,7 +3313,46 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         for (k = 0; k < names.length; k++) {
             if (assoc && !query && !hasOwn(assocArrays, "$" + names[k])) { assocArrays["$" + names[k]] = true; assocList.push(names[k]) }
         }
-        return function(b) {
+        // One name: its attributes, then its value (v expanded, or null for the assignment's own).
+        var declOne = function(b, j, v) {
+            // WHICH KEYWORDS ARE LOCAL. bash 5.3: `local`, `declare` and `typeset` inside a
+            // function declare a function-local name (value AND attributes restored on
+            // return) unless -g is given; `export` and `readonly` always act on the global.
+            var localize = !global && (kw == "local" || ((kw == "declare" || kw == "typeset") && curFrame != null))
+            // The attribute undo record is owed to a SUBSHELL as well as to a function body:
+            // `n=5; ( declare -i n; n=2+3 )` leaves n a plain string. -g does not exempt it, which is
+            // why subDepth is tested beside `localize` and not inside it.
+            if (subDepth > 0 && !(localize && curFrame != null)) { attrPushUndo(names[j]) }
+            if (localize && curFrame != null) {
+                curFrame.locs["$" + names[j]] = true
+                attrPushUndo(names[j])
+                b.NewCall(rtPushLocal, llvm.constant.NewInt(i32, getVarId(names[j])))
+                // A local declaration starts from a CLEAN SLATE. bash does not inherit
+                // the global's attributes or its array: `declare -i g; f(){ local g;
+                // g=1+1; }` prints 1+1, and `arr=(a b); f(){ local arr=Q; }` sees a
+                // one-element array. rt_push_local has just saved all of it for the return.
+                intVars["$" + names[j]] = false
+                upVars["$" + names[j]] = false
+                loVars["$" + names[j]] = false
+            }
+            if (integer) { intVars["$" + names[j]] = true }
+            if (upper) { upVars["$" + names[j]] = true; loVars["$" + names[j]] = false }
+            if (lower) { loVars["$" + names[j]] = true; upVars["$" + names[j]] = false }
+            // A global `declare -a a` keeps a's elements; only a value or a local starts empty.
+            if ((isArray && asgs[j] != null) || (localize && curFrame != null)) { b.NewCall(rtArrClear, gepStr(b, names[j])) }
+            if (isArray && asgs[j] == null) { b.NewCall(rtArrDmark, gepStr(b, names[j])) }
+            if (asgs[j] != null) {
+                var a = asgs[j]
+                if (v != null) { a = {name: a.name, op: a.op, idxT: a.idxT, lit: null, valT: doneWord(v)} }
+                b = emitAssign(b, a, assoc, null)
+            }
+            else if (localize) { storeVarRaw(b, names[j], unsetPtr(b)) }
+            if (asgs[j] == null && !isArray && kw != "export" && kw != "readonly") { b.NewCall(rtArrSmark, gepStr(b, names[j])) }
+            return b
+        }
+        // The values phase one expanded, per declaration being emitted (null: emitAssign's own).
+        var pre = {vals: []}
+        var body = function(b) {
             var j
             if (query) {
                 // `declare -p NAME` PRINTS. The attribute letter is decided HERE because -i/-u/-l are
@@ -3296,46 +3371,42 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 }
                 storeStatusI(b, 0); return b
             }
-            // WHICH KEYWORDS ARE LOCAL. bash 5.3: `local`, `declare` and `typeset` inside a
-            // function declare a function-local name (value AND attributes restored on
-            // return) unless -g is given; `export` and `readonly` always act on the global.
-            var localize = !global && (kw == "local" || ((kw == "declare" || kw == "typeset") && curFrame != null))
             for (j = 0; j < names.length; j++) {
-                // The attribute undo record is owed to a SUBSHELL as well as to a function body:
-                // `n=5; ( declare -i n; n=2+3 )` leaves n a plain string. -g does not exempt it, which is
-                // why subDepth is tested beside `localize` and not inside it.
-                if (subDepth > 0 && !(localize && curFrame != null)) { attrPushUndo(names[j]) }
-                if (localize && curFrame != null) {
-                    curFrame.locs["$" + names[j]] = true
-                    attrPushUndo(names[j])
-                    b.NewCall(rtPushLocal, llvm.constant.NewInt(i32, getVarId(names[j])))
-                    // A local declaration starts from a CLEAN SLATE. bash does not inherit
-                    // the global's attributes or its array: `declare -i g; f(){ local g;
-                    // g=1+1; }` prints 1+1, and `arr=(a b); f(){ local arr=Q; }` sees a
-                    // one-element array. rt_push_local has just saved all of it for the return.
-                    intVars["$" + names[j]] = false
-                    upVars["$" + names[j]] = false
-                    loVars["$" + names[j]] = false
-                }
-                if (integer) { intVars["$" + names[j]] = true }
-                if (upper) { upVars["$" + names[j]] = true; loVars["$" + names[j]] = false }
-                if (lower) { loVars["$" + names[j]] = true; upVars["$" + names[j]] = false }
-                // A global `declare -a a` keeps a's elements; only a value or a local starts empty.
-                if ((isArray && asgs[j] != null) || (localize && curFrame != null)) { b.NewCall(rtArrClear, gepStr(b, names[j])) }
-                if (isArray && asgs[j] == null) { b.NewCall(rtArrDmark, gepStr(b, names[j])) }
-                if (asgs[j] != null) {
-                    b = emitAssign(b, asgs[j], assoc, null)
-                }
-                else if (localize) { storeVarRaw(b, names[j], unsetPtr(b)) }
-                if (asgs[j] == null && !isArray && kw != "export" && kw != "readonly") { b.NewCall(rtArrSmark, gepStr(b, names[j])) }
+                if (asgs[j] == null || asgs[j].lit == null) { b = declOne(b, j, pre.vals[j]) }
             }
             storeStatusI(b, 0)
             return b
         }
+        var run = body
+        if (redirs.length > 0) {
+            var wrapped = [body]
+            for (k = 0; k < redirs.length; k++) { wrapped.push(redirs[k]) }
+            run = mkRedirected(wrapped)
+        }
+        return function(b) {
+            var j
+            var vals = []
+            for (j = 0; j < names.length && !query; j++) {
+                var a = asgs[j]
+                vals.push(null)
+                if (a != null && a.lit != null) { b = declOne(b, j, null) }
+                // A literal value has nothing to expand: emitAssign keeps its compile-time forms.
+                else if (a != null && a.valT != null && a.valT.c == undefined) {
+                    var r = a.valT.fn(b)
+                    b = r.b
+                    vals[j] = (a.valT.f == true) ? wordJoin(b, r.v) : r.v
+                    b = emitAbortCheck(b)
+                }
+            }
+            var saved = pre.vals
+            pre.vals = vals
+            b = run(b)
+            pre.vals = saved
+            return b
+        }
     }
     // A declaration CARRYING ITS OWN redirections. The declaration items are the ones
-    // makeDecl understands; anything else on the stack is a redirection record and is
-    // handed to mkRedirected, exactly as makeSubshellR / makeGroupR do it.
+    // makeDecl understands; anything else on the stack is a redirection record.
     function makeDeclR(items) {
         var core = []
         var reds = []
@@ -3345,10 +3416,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (it.dkw != undefined || it.dflag != undefined || it.dname != undefined || it.a != undefined) { core.push(it) }
             else { reds.push(it) }
         }
-        if (reds.length == 0) { return makeDecl(core) }
-        var wrapped = [makeDecl(core)]
-        for (i = 0; i < reds.length; i++) { wrapped.push(reds[i]) }
-        return mkRedirected(wrapped)
+        return makeDecl(core, reds)
     }
     function mkDeclItem(items) { return {a: parseAssign(items)} }
     // ---- variable attributes -------------------------------------------------------------
@@ -3798,6 +3866,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (bang) {
                 storeStatus(b, b.NewSelect(b.NewICmp(llvm.enum.IPredEQ, b.NewLoad(i32, gStatus), zero), one, zero))
             }
+            // a ! pipeline is exempt from set -e; any other answers it by its status
+            eeDone = bang
             return b
         }
     }
@@ -3808,6 +3878,33 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // (keepLoops): there every loop level of `break` / `continue` ends the subshell, with the
     // signal's status. Twin of subshellOf in bash-interpreter.abnf.
     function makeSubshell(bodyT) { return subshellOf(bodyT, false) }
+    // The end of a ( ) or $( ): its EXIT traps run, with $? the subshell's status and an
+    // `exit` in one ending the subshell with that status; then the variables and options come
+    // back and $? is the subshell's status.
+    function subshellEnd(subEnd, traps, optSave) {
+        var b = subEnd
+        if (traps.length > 0) {
+            var ex0 = b.NewICmp(llvm.enum.IPredNE, b.NewLoad(i32, gExited), zero)
+            storeStatus(b, b.NewSelect(ex0, b.NewLoad(i32, gExitCode), b.NewLoad(i32, gStatus)))
+            b.NewStore(zero, gExited)
+            var tEnd = curF.NewBlock("")
+            var savedExit = curExit, savedExitRd = curExitRd
+            curExit = tEnd
+            curExitRd = redirStack.length
+            b = emitTraps(b, traps)
+            curExit = savedExit
+            curExitRd = savedExitRd
+            b.NewBr(tEnd)
+            b = tEnd
+        }
+        var wasEx = b.NewICmp(llvm.enum.IPredNE, b.NewLoad(i32, gExited), zero)
+        var st = b.NewSelect(wasEx, b.NewLoad(i32, gExitCode), b.NewLoad(i32, gStatus))
+        b.NewStore(zero, gExited)
+        b.NewCall(rtSsRestore, zero)
+        restoreOpts(b, optSave)
+        b.NewStore(st, gStatus)
+        return b
+    }
     // The loop frames of a subshell that sees the loops around it: each level branches to the
     // subshell's end, and the signal's status lands in $? (its loop status slot).
     function subLoops(outer, subEnd) {
@@ -3841,13 +3938,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             curExitRd = savedExitRd
             var myTraps = trapList
             trapList = savedTraps
-            subEnd = emitTraps(subEnd, myTraps)
-            var wasEx = subEnd.NewICmp(llvm.enum.IPredNE, subEnd.NewLoad(i32, gExited), zero)
-            var st = subEnd.NewSelect(wasEx, subEnd.NewLoad(i32, gExitCode), subEnd.NewLoad(i32, gStatus))
-            subEnd.NewStore(zero, gExited)
-            subEnd.NewCall(rtSsRestore, zero)
-            restoreOpts(subEnd, optSave)
-            subEnd.NewStore(st, gStatus)
+            subEnd = subshellEnd(subEnd, myTraps, optSave)
+            eeDone = false
             return subEnd
         }
     }
@@ -4197,7 +4289,11 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         b = emitAbortCheck(b)
         var out = b.NewCall(rtPrintf, [rf.v, listV])
-        if (dest != null) { storeVar(b, dest, b.NewCall(rtPfValue, out)) } else { b.NewCall(rtPfOut, out) }
+        if (dest != null) {
+            b.NewStore(gepStr(b, "printf: "), gArPfx)
+            b = emitStoreAttr(b, dest, b.NewCall(rtPfValue, out))
+            b.NewStore(emptyPtr(b), gArPfx)
+        } else { b.NewCall(rtPfOut, out) }
         storeStatus(b, b.NewLoad(i32, gPrintfRc))
         return b
     }
@@ -4225,7 +4321,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var eofB = curF.NewBlock(""), okB = curF.NewBlock(""), merge = curF.NewBlock("")
         b.NewCondBr(eof, eofB, okB)
         var k
-        for (k = 0; k < names.length; k++) { storeVar(eofB, names[k], emptyPtr(eofB)) }
+        for (k = 0; k < names.length; k++) { eofB = emitStoreAttr(eofB, names[k], emptyPtr(eofB)) }
         if (rawReply) { storeVar(eofB, "REPLY", emptyPtr(eofB)) }
         if (arrName != null) { eofB.NewCall(rtArrClear, gepStr(eofB, arrName)) }
         eofB.NewStore(one, gStatus)
@@ -4245,11 +4341,14 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             }
         }
         if (rawReply) { storeVar(okB, "REPLY", line) }
+        // An -i name's arithmetic error abandons the line: the names after it keep their values.
+        okB.NewStore(gepStr(okB, "read: "), gArPfx)
         for (k = 0; k < names.length; k++) {
             var isLast = (k == names.length - 1) ? 1 : 0
-            storeVar(okB, names[k], okB.NewCall(rtField, [line, ifs, llvm.constant.NewInt(i32, k),
-                                                          llvm.constant.NewInt(i32, isLast)]))
+            okB = emitStoreAttr(okB, names[k], okB.NewCall(rtField, [line, ifs, llvm.constant.NewInt(i32, k),
+                                                                     llvm.constant.NewInt(i32, isLast)]))
         }
+        okB.NewStore(emptyPtr(okB), gArPfx)
         okB.NewStore(zero, gStatus)
         okB.NewBr(merge)
         return merge
@@ -4403,6 +4502,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         b.NewCondBr(b.NewOr(isAb, isAr), kill, cont)
         kill.NewStore(zero, gAbort)
         kill.NewStore(zero, gArithErr)
+        kill.NewStore(emptyPtr(kill), gArPfx)   // no command prefix outlives the line
         kill.NewStore(one, gExitCode)
         kill.NewStore(kill.NewSelect(isAb, one, llvm.constant.NewInt(i32, 2)), gExited)
         kill.NewBr(viaUnwind(curExit, curExitRd))
@@ -4421,6 +4521,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var st = b.NewLoad(i32, gStatus)
         var bad = b.NewAnd(b.NewICmp(llvm.enum.IPredNE, b.NewLoad(i32, gOptE), zero),
                            b.NewICmp(llvm.enum.IPredNE, st, zero))
+        bad = b.NewAnd(bad, b.NewICmp(llvm.enum.IPredEQ, b.NewLoad(i32, gCondRt), zero))
         var kill = curF.NewBlock(""), cont = curF.NewBlock("")
         b.NewCondBr(bad, kill, cont)
         kill.NewStore(st, gExitCode)
@@ -4471,9 +4572,13 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return b
     }
 
-    // Emit the EXIT traps a (sub)shell registered, each behind its own flag.
+    // Emit the EXIT traps a (sub)shell registered, each behind its own flag. What they run
+    // leaves $? as it was: bash's status at exit is the one the trap started with.
     function emitTraps(b, list) {
         var i
+        if (list.length == 0) { return b }
+        var sv = slotOf(i32)
+        b.NewStore(b.NewLoad(i32, gStatus), sv)
         for (i = 0; i < list.length; i++) {
             var tr = list[i]
             var run = curF.NewBlock(""), skip = curF.NewBlock("")
@@ -4483,6 +4588,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             rb.NewBr(skip)
             b = skip
         }
+        b.NewStore(b.NewLoad(i32, sv), gStatus)
         return b
     }
 
@@ -4545,7 +4651,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 var base = hb.NewLoad(i32, savedTop)
                 hb.NewStore(base, gFrameBase)
                 hb.NewStore(hb.NewSub(hb.NewLoad(i32, gArgvTop), base), gFrameN)
-                storeStatus(hb, hb.NewCall(f))
+                emitFnCall(hb, f)
                 hb.NewStore(hb.NewLoad(i32, savedBase), gFrameBase)
                 hb.NewStore(hb.NewLoad(i32, savedN), gFrameN)
                 hb.NewStore(hb.NewLoad(i32, savedTop), gArgvTop)
@@ -4777,7 +4883,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 var base = b.NewLoad(i32, savedTop)
                 b.NewStore(base, gFrameBase)
                 b.NewStore(b.NewSub(b.NewLoad(i32, gArgvTop), base), gFrameN)
-                storeStatus(b, b.NewCall(f))
+                emitFnCall(b, f)
                 b.NewStore(b.NewLoad(i32, savedBase), gFrameBase)
                 b.NewStore(b.NewLoad(i32, savedN), gFrameN)
                 b.NewStore(b.NewLoad(i32, savedTop), gArgvTop)
@@ -4899,24 +5005,37 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 var isZero = b.NewICmp(llvm.enum.IPredEQ, b.NewLoad(i32, gStatus), zero)
                 if (op == "&&") { b.NewCondBr(isZero, runB, merge) } else { b.NewCondBr(isZero, merge, runB) }
                 var isLast = (i + 2 >= items.length)
+                // set -e looks only at the LAST command of the list, when it runs
+                eeDone = false
                 var rb = isLast ? items[i + 1](runB) : emitCond(items[i + 1], runB)
+                if (isLast && !eeDone) { rb = emitErrExitCheck(rb) }
                 rb.NewBr(merge)
                 b = merge
             }
+            eeDone = true
             return b
         }
     }
 
+    // set -e is answered after each statement, except one that answered it itself or is
+    // exempt (eeDone). Twin of makeSeq in bash-interpreter.abnf.
     function makeSeq(thunks) {
         return function(b) {
             var i
-            for (i = 0; i < thunks.length; i++) {
-                b = thunks[i](b)
-                b = emitErrExitCheck(b)
-            }
+            for (i = 0; i < thunks.length; i++) { b = emitStmt(b, thunks[i]) }
             return b
         }
     }
+    function emitStmt(b, t) {
+        eeDone = false
+        b = t(b)
+        var done = eeDone
+        eeDone = false
+        return done ? b : emitErrExitCheck(b)
+    }
+    // A compound command (if, the loops, case, { }) is exempt from set -e: what failed in it
+    // was answered there, or was exempt (`if true; then false && true; fi` goes on).
+    function eeExempt(t) { return function(b) { b = t(b); eeDone = true; return b } }
 
     // items = [{pats}, bodyThunk, {cterm}?]
     function mkCaseClause(items) {
@@ -5296,9 +5415,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var list = hd.NewLoad(i8ptr, listP)
             var i = hd.NewLoad(i32, ip)
             hd.NewCondBr(hd.NewICmp(llvm.enum.IPredSGE, i, zero), body, ex)
-            storeVar(body, fname, body.NewCall(rtFAt, [list, i]))
+            var body2 = emitStoreAttr(body, fname, body.NewCall(rtFAt, [list, i]))
             loopStack.push({brk: ex, cont: step, lst: lst, rd: redirStack.length})
-            var bb = bodyT(body)
+            var bb = bodyT(body2)
             loopStack.pop()
             bb.NewStore(bb.NewLoad(i32, gStatus), lst)
             bb.NewBr(step)
@@ -5391,7 +5510,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var lineExit = main.NewBlock(""), next = main.NewBlock("")
             curExit = lineExit
             var mk = heapMark(b)
-            for (i = 0; i < stmts.length; i++) { b = stmts[i](b); b = emitErrExitCheck(b) }
+            for (i = 0; i < stmts.length; i++) { b = emitStmt(b, stmts[i]) }
             b = emitAbortCheck(b)
             b.NewBr(next)
             var soft = lineExit.NewICmp(llvm.enum.IPredEQ, lineExit.NewLoad(i32, gExited), llvm.constant.NewInt(i32, 2))
@@ -5407,6 +5526,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         b = emitTraps(b, progTraps)
         b.NewRet(b.NewLoad(i32, gStatus)) // normal completion -> exit code is $?
         // ... and so does an explicit `exit N`, which lands in main's exit block.
+        // ($? in the trap is the exit status)
+        mainExit.NewStore(mainExit.NewLoad(i32, gExitCode), gStatus)
         var xb = emitTraps(mainExit, progTraps)
         xb.NewRet(xb.NewLoad(i32, gExitCode))
         // languages/c-to-llvm-ir.abnf does not put a global's initializer in the global

@@ -766,6 +766,77 @@ s66() {
   o=$( { echo "${e[@]:?empty}"; echo never; } 2>&1 ); r=$?
   check ix10 "$r $(s66m "$o")" "1 e[@]: empty"
 }
+# ===== SECTION 67: every store honours the attributes; a declaration expands first =====
+# read, printf -v, a for loop's name and ${v:=w} store a value the way NAME=v does: -i
+# evaluates it (an error abandons the line and stores nothing), -u / -l map its case, and an
+# array name takes it as element 0. A declaration expands its words - and assigns an array
+# literal - before its redirections apply and before it stores anything. Every expected
+# value is bash 5.3's.
+s67m() { local m=${1#bash: }; m=${m#*line [0-9]*: }; printf '%s' "${m%%$'\n'*}"; }
+s67() {
+  local -i c=5 c2 f p fi n=4 r1=1 r2=2
+  local -u u g q
+  local -l h
+  local -au d=(ab)
+  local acc="" o
+  read c <<< "1+2"
+  read c2 <<< "c+4"
+  read u <<< "ab cd"
+  read d <<< xy
+  check at1 "$c $c2 $u ${d[0]} ${#d[@]}" "3 7 AB CD XY 1"
+  check at2 "${f:=2+3} $f ${g:=xy} $g ${h:=AbC} $h" "5 5 XY XY abc abc"
+  printf -v p '%s' 6*7
+  printf -v q '%s' hi
+  for fi in 1+1 3*3; do acc="$acc $fi"; done
+  check at3 "$p $q$acc" "42 HI 2 9"
+  o=$( { read r1 r2 <<< "2*3 4+4 5"; echo never; } 2>&1 )
+  check at4 "$(s67m "$o")" 'read: 4+4 5: arithmetic syntax error in expression (error token is "5")'
+  o=$( { n=1+; echo never; } 2>&1 )
+  check at5 "$(s67m "$o")" '1+: arithmetic syntax error: operand expected (error token is "+")'
+  s67x=0
+  local s67x=1 y6=$s67x
+  local -a c6=(7) d6=${c6[0]}
+  check at6 "$y6 $d6" "0 7"
+  o=$( { local -ai k6=(1 x+ 3) 2>/dev/null; echo never; } 2>&1 )
+  check at7 "$(s67m "$o")" 'x+: arithmetic syntax error: operand expected (error token is "+")'
+  o=$( { local -i n6=1+ 2>/dev/null; echo never; } 2>&1 )
+  check at8 "[$o]" "[]"
+  o=$( { local v6=$((2+)) 2>/dev/null; echo never; } 2>&1 )
+  check at9 "$(s67m "$o")" '2+: arithmetic syntax error: operand expected (error token is "+")'
+}
+# ===== SECTION 68: what set -e looks at; a subshell's own EXIT trap =====
+# set -e ends the shell on a failing simple command, ( ), pipeline or function call - and on
+# the LAST command of an && / || list - but not on a ! pipeline, a compound command whose
+# failure was exempt inside it, or anything run as a condition (a function called from one
+# included); a command substitution does not inherit it. A subshell starts with no EXIT
+# trap, and the status it leaves with is the one its own trap started with, unless the trap
+# exits. Every expected value is bash 5.3's.
+s68f() { false; echo inf; }
+s68g() { false && true; }
+s68() {
+  local o r=""
+  o=$( set -e; false && true; ! true; if true; then false && true; fi; { false && true; }
+       for i in 1; do false && true; done; case x in x) false && true;; esac; while false; do :; done
+       s68f || true; x=$(false; echo hi); echo "$x survived" )
+  check ee1 "$o" "inf
+hi survived"
+  ( set -e; true && false; echo no ); r="$r $?"
+  ( set -e; ! false && false; echo no ); r="$r $?"
+  ( set -e; s68g; echo no ); r="$r $?"
+  ( set -e; (( 0 )); echo no ); r="$r $?"
+  ( set -e; ( false && true ); echo no ); r="$r $?"
+  ( set -e; echo x | { false && true; }; echo no ); r="$r $?"
+  check ee2 "$r" " 1 1 1 1 1 1"
+  o=$( trap 'echo outer' EXIT; x=$( exit 4 ); y=$( echo in ); echo "$x|$y" )
+  check tr1 "$o" "|in
+outer"
+  o=$( ( trap 'false' EXIT; true ); echo "$?"; ( trap 'echo "[$?]"; exit 3' EXIT; false ); echo "$?" )
+  check tr2 "$o" "0
+[1]
+3"
+  o=$( r=$( trap 'echo T' EXIT; false ); echo "$? $r" )
+  check tr3 "$o" "1 T"
+}
 # ===== END SECTIONS =====
 
 s47   # SECTION-CALL 47
@@ -787,5 +858,7 @@ s63   # SECTION-CALL 63
 s64   # SECTION-CALL 64
 s65   # SECTION-CALL 65
 s66   # SECTION-CALL 66
+s67   # SECTION-CALL 67
+s68   # SECTION-CALL 68
 echo "full: $checks checks, $fails failures"
 exit $fails

@@ -105,12 +105,15 @@ char *stdin_buf;
 int stdin_pos;
 
 /* Shell options (set -e / -u / -o pipefail) and the abort flag a set -u failure
- * raises during expansion, plus a [[ ]] that could not be evaluated. */
+ * raises during expansion, plus a [[ ]] that could not be evaluated. cond_depth
+ * counts the function calls in progress that were made as a CONDITION (`if f`,
+ * `f || x`): set -e is off inside them. */
 int opt_errexit;
 int opt_nounset;
 int opt_pipefail;
 int abort_flag;
 int cond_err;
+int cond_depth;
 
 /* Two output channels. 0 = standard output (captured by $( ) when one is open),
  * 1 = the standard error channel, 2 = discarded. */

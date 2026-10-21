@@ -35,6 +35,7 @@
 @opt_pipefail = global i32 zeroinitializer
 @abort_flag = global i32 zeroinitializer
 @cond_err = global i32 zeroinitializer
+@cond_depth = global i32 zeroinitializer
 @sink_out = global i32 zeroinitializer
 @sink_err = global i32 zeroinitializer
 @err_native = global i32 zeroinitializer

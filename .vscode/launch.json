@@ -2938,6 +2938,18 @@
             "program": "${workspaceFolder}","args": ["languages/bash-to-llvm-ir.abnf", "tests/bash-abort-test.sh", "-q", "-exe", "tests/bash-abort.out"]
         },
         {
+            "name": "Bash abort probe, set -e at the top level (interpreter, SHOULD FAIL)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/bash-interpreter.abnf", "tests/bash-abort-test-errexit.sh", "-q"]
+        },
+        {
+            "name": "Bash abort probe, set -e at the top level, native binary SHOULD ABORT, ALL HALVES (interpreter vs llvm.Run vs native)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/bash-to-llvm-ir.abnf", "tests/bash-abort-test-errexit.sh", "-q", "-exe", "tests/bash-abort-errexit.out"]
+        },
+        {
             "name": "Speed Test",
             "type": "go",
             "request": "launch",
