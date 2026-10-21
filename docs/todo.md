@@ -114,7 +114,7 @@ not change the renderer.
 
 # PHP — PHP  (no php here: spec-only, php.net / php-src behaviour)
 
-### T-705 php preg: PCRE2's empty-iteration loop rule; long `\p{...}` names; PCRE2 start-optimization residue; `(*ACCEPT)` scope; `MARK` · P3 · PHP · OPEN [V]
+### T-705 php preg: PCRE2's empty-iteration loop rule; long `\p{...}` names; PCRE2 start-optimization residue; `(*ACCEPT)` scope; `MARK` · P3 · PHP · IN PROGRESS (RX worker, round 2) [V]
 C dialect follows Java's loop rule: `((?(1)a|))+` on "aaa" → PCRE2 "", ours "aaa"; `((?(1)a|)){1,3}` → PCRE2 "aa", ours "". `\p{Lowercase_Letter}`
 accepted (PCRE2 10.48 rejects). ~10 of 1,000 fuzzed left-recursive patterns differ (PCRE2 optimizations skip the attempt; we raise
 RECURSELOOP or match). `(*ACCEPT)` inside an atomic group / a subroutine called from a lookahead ends only that body. `(*MARK)` not
@@ -144,7 +144,7 @@ parameter), which no engine prints either.
 
 # CORE — MetaJS, the engines, shared runtime, tooling
 
-### T-706 regex (CORE): the per-attempt step cap fires on long linear inputs · P2 · CORE · OPEN [V]
+### T-706 regex (CORE): the per-attempt step cap fires on long linear inputs · P2 · CORE · IN PROGRESS (RX worker, round 2) [V]
 `regexp.MustCompile("(?:a|b){2,}").FindString(strings.Repeat("ab",35000))` → "step limit exceeded" in all engines (go 70000);
 RX_STEPS (400000) caps one attempt regardless of input length. Scale the cap with the input (or count only backtracks) so linear
 work never trips it, keeping catastrophic-backtracking protection. All regex dialects. Regex owner.
