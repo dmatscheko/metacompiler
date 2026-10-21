@@ -4823,6 +4823,36 @@ function s103(): void {
     check("xb103d", n.half() === 15 && (n as any) + 0 === 30 && n instanceof Number && n.toFixed(1) === "30.0" && new B103b(false).neg());
 }
 
+// ===== SECTION 104: a class declared inside a try, catch or finally block =====
+// Its methods, accessors and constructor return to their caller like any other
+// class's; the block's own control flow is not theirs. Values read off tsc 6.0.3's
+// default output run by node 24.
+const v104: number[] = [1, 2, 3];
+function s104(): void {
+    let r = 0;
+    try {
+        class K104 {
+            n: number;
+            constructor(n: number) { this.n = n; return; }
+            m(): number { return this.n + v104[0]; }
+            get g(): number { return this.n * 2; }
+            static s(): number { return v104[2]; }
+        }
+        const k = new K104(v104[1]);
+        r = k.m() + k.g + K104.s();
+    } catch (e) { r = -1; }
+    check("tc104a", r === 10);
+    let c = "";
+    try { throw new Error("x"); } catch (e) {
+        class C104 { who(): string { return "c" + (e as Error).message; } }
+        c = new C104().who();
+    } finally {
+        class F104 { tail(): string { for (const x of v104) { if (x > 1) { return "f" + x; } } return "none"; } }
+        c = c + new F104().tail();
+    }
+    check("tc104b", c === "cxf2");
+}
+
 // ===== END SECTIONS =====
 
 function main(): number {
@@ -4929,6 +4959,7 @@ function main(): number {
     s101(); // SECTION-CALL 101
     s102(); // SECTION-CALL 102
     s103(); // SECTION-CALL 103
+    s104(); // SECTION-CALL 104
     println("full: " + checks + " checks, " + failures + " failures");
     return failures;
 }

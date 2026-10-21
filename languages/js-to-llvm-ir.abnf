@@ -6845,6 +6845,10 @@ NotFuncHead = :script(~~
         pendingAsyncGen = false
         pendingPlainGen = false
         curF = f
+        // The method's own tag, so a `return` in a class declared inside a try body is a
+        // ret of the method and not that body's control signal (inCtlBody).
+        var savedTag = curFTag
+        curFTag = idx
         loopStack = []
         forOfIters = []
         var b = f.NewBlock("entry")
@@ -6895,6 +6899,7 @@ NotFuncHead = :script(~~
         superFields = savedSuperFields
         derivedCtorF = savedDerivedF
         curF = savedF
+        curFTag = savedTag
         curScopeV = savedScope
         loopStack = savedLoops
         forOfIters = savedForOf

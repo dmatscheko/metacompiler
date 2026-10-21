@@ -1,4 +1,4 @@
-// Full-syntax test: JavaScript - part 3 of 4, sections 44-56, 58-71, 73-100, 109-110.
+// Full-syntax test: JavaScript - part 3 of 4, sections 44-56, 58-71, 73-100, 109-111.
 //
 // THE JS RATCHET IS FOUR FILES: as one file its -frozen interpreter leg ran into
 // ./test.sh --full's time brake (peak memory grew superlinearly with the file), and
@@ -7,7 +7,7 @@
 //   tests/js-test-full.js     sections 01-35, the ECMAScript-2022 syntax walk
 //   tests/js-test-full.2.js   sections 36-43 and 101-108, engine agreement, generators,
 //                             Error, Math, builtin constructors, integrity levels
-//   tests/js-test-full.3.js   sections 44-56, 58-71, 73-100, 109-110, the call/class/private-name
+//   tests/js-test-full.3.js   sections 44-56, 58-71, 73-100, 109-111, the call/class/private-name
 //                             model, the Unicode identifier tables, iterators, derived
 //                             constructors, JSON, guards, Set and Map, iterator closing,
 //                             hasOwnProperty, delete, Object.prototype, extends Object,
@@ -22,7 +22,8 @@
 //                             getPrototypeOf / setPrototypeOf / defineProperty,
 //                             toLocaleString, primitive wrapper objects and property
 //                             attributes, a class extending a constructor function,
-//                             new.target and a class extending a builtin
+//                             new.target and a class extending a builtin, a
+//                             class declared inside a try block
 //   (section 72 is in tests/js-test-full.4.mjs, beside 57: it needs a file that
 //   names no builtin class but in a `new`)
 //   tests/js-test-full.4.mjs  section 57, export in a Module
@@ -2958,6 +2959,29 @@ function s110() {
     check("xb110d", n.half() === 15 && n + 0 === 30 && n instanceof Number && n.toFixed(1) === "30.0" && new B110b(false).neg())
 }
 
+// ===== SECTION 111: a class declared inside a try, catch or finally block =====
+// Its methods, accessors and constructor return to their caller like any other
+// class's; the block's own control flow is not theirs. Values read off node 24.
+const v111 = [1, 2, 3]
+function s111() {
+    let r = 0
+    try {
+        class K111 { constructor(n) { this.n = n; return } m() { return this.n + v111[0] } get g() { return this.n * 2 } static s() { return v111[2] } }
+        const k = new K111(v111[1])
+        r = k.m() + k.g + K111.s()
+    } catch (e) { r = -1 }
+    check("tc111a", r === 10)
+    let c = ""
+    try { throw new Error("x") } catch (e) {
+        class C111 { who() { return "c" + e.message } }
+        c = new C111().who()
+    } finally {
+        class F111 { tail() { for (const x of v111) { if (x > 1) { return "f" + x } } return "none" } }
+        c = c + new F111().tail()
+    }
+    check("tc111b", c === "cxf2")
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -3018,6 +3042,7 @@ function main() {
     s100() // SECTION-CALL 100
     s109() // SECTION-CALL 109
     s110() // SECTION-CALL 110
+    s111() // SECTION-CALL 111
     println("full: " + checks + " checks, " + failures + " failures")
     return failures
 }
