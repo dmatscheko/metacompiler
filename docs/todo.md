@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-719** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-721** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -129,10 +129,12 @@ parameter), which no engine prints either.
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-717 bash: native binaries exhaust the 4 MiB string arena on long-running programs · P2 · SH · IN PROGRESS (SH worker, round 15) [V]
-bash-rt.c allocates strings and never frees them, so a long program dies: a generated script running 400 extglob patterns × 11
-subjects × 8 `${}` forms exits 70 "string arena exhausted" after ~288 lines (bash 5.3 and the interpreter finish). Reclaim dead
-strings (scope-end / statement-end release, or a growable arena with reuse) without slowing the bench.
+### T-719 bash native: quadratic list/word building; O(n²) `for w in $list`; positional stack capped at 4096 · P2 · SH · OPEN [V]
+bash-rt.c: `rt_arr_list` builds `"${a[@]}"` / `${#a[@]}` element by element with rt_fput/rt_strcat (one `echo "${#keep[@]}"` over
+3,000 elements allocates ~255 MB); `mkWord` joins an N-part quoted word with N−1 rt_strcat (104 × 11 KB parts → ~60 MB); `for w in
+$list` re-walks from the list start each pass (rt_nfields/rt_getfield; 208,000 fields ran for minutes); `s+=x` pins every intermediate
+value (2,000 passes pin 11 MB); `set -- $s2` with 208,000 words exits 70 (fixed 4096 positional stack; bash unlimited). Make each
+linear; bench bash.
 
 ---
 
@@ -141,6 +143,11 @@ strings (scope-end / statement-end release, or a growable arena with reuse) with
 ---
 
 # CORE — MetaJS, the engines, shared runtime, tooling
+
+### T-720 tooling: tests/bash-test-full.sh is at ~97M of llvm.Run's 100M step brake · P3 · CORE · OPEN [V]
+`--full` runs bash-test-full.sh under llvm.Run at ~96.9M steps; the next sections will trip the brake and read as RUN-FAILED.
+Split the file (as go/js did with .2/.3/.4 parts, wired into test.sh / native-full.sh / gates) or raise -max-steps for --full with
+a documented reason.
 
 ### T-716 core: a non-canonical numeric string key (`"01"`, `"1.0"`, `"+1"`, `" 1"`, `"-0"`) is an array index · P2 · CORE · OPEN [V]
 js `k=[]; k["01"]=7` → node: named property (length 0, `k[1]` undefined, keys `01`); llvm.Run/native: index 1 (length 2); interpreter
@@ -799,6 +806,7 @@ T-710 js: `Sub.from` / `Sub.of` on an Array subclass; `Symbol.species` reads; `t
 T-714 c: string literals over 4096 bytes break llvm.Run; global `char *a[N] = {...}` crashes the compiler — DONE 7c1446cd 24ac13e0 (llvm.Run's IR reader accepts llir's u0x GEP indices on all three parse paths; string-literal brace items and literal-operand initializers in the C grammars — = cc)
 T-713 bash: extglob edge cases — `*` before `@(`/`!(`/`+(`, `**(a)`, halves split on `*@(a|)` — DONE abdce695 (bash 5.3 sm_loop.c rules: star skips the empty tail, top-level trailing !(, empty +(/*( occurrences, match_upattern prefilter; rt_eg empty last alternative and UTF-8 steps — 4 legs = bash 5.3, 640-pattern fuzz; follow-up T-717)
 T-715 js: `K.constructor`; sparse array keys; defineProperty attributes on array named keys; template object identity — DONE f35c764b 2a48d3ba (class .constructor, attributes and accessors on array named keys incl. integrity levels, one template object per call site — 4 legs = node, TS via tsc 6; sparse-array keys moved into T-640; follow-up T-718)
+T-717 bash: native binaries exhaust the 4 MiB string arena on long-running programs — DONE 9dea2e18 (growable chunked heap with mark/release per loop pass and line, a floor for every outliving store — 352,000-line ticket shape = bash 5.3 at 3.8 MB; bash bench +1.16%, ~11 instructions per minimal loop pass, accepted for unbounded run length; follow-ups T-719/T-720)
 
 # Settled — do not re-open
 
