@@ -68,7 +68,7 @@ its report; anything structural there is a CORE ticket.
 
 # RB — Ruby
 
-### T-724 ruby: builtin-raised errors print no `file:line:in 'meth': ` prefix; String + Integer concatenates · P2 · RB · OPEN [V]
+### T-724 ruby: builtin-raised errors print no `file:line:in 'meth': ` prefix; String + Integer concatenates · P2 · RB · IN PROGRESS (RB worker, round 10) [V]
 Uncaught ZeroDivisionError / TypeError / KeyError / ArgumentError / NoMethodError / NameError print without MRI's site: ruby 2.6
 `zd.rb:2:in `/'`, `ke.rb:2:in `fetch'`, `ie.rb:2:in `Integer'`, arity errors at the callee's def line (`ae.rb:1:in `f'`),
 NoMethodError at the call's line. Needs a frame-name parameter at each raise site (rubyRaiseErr / rubyNameErr / rubyArgCountErr /
