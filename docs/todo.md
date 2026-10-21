@@ -68,7 +68,7 @@ its report; anything structural there is a CORE ticket.
 
 # RB — Ruby
 
-### T-736 ruby: bang methods on strings do not mutate; `puts` inside an expression; send with a receiver to a top-level def; `===` · P1 · RB · OPEN [V]
+### T-736 ruby: bang methods on strings do not mutate; `puts` inside an expression; send with a receiver to a top-level def; `===` · P1 · RB · IN PROGRESS (RB worker, round 12) [V]
 `s = "ab"; s.upcase!; puts s` → ruby `AB`, all engines `ab` (strings are immutable host strings; upcase!/downcase!/capitalize!/
 swapcase!/reverse!/strip!/chomp!/squeeze!/sub!/gsub!/replace/<<  on a String must mutate the object every alias sees) — P1.
 `x && puts("a")`, `x || puts("a")`, `x and puts("a")` do not parse (puts/print exist only as statements, KwPuts) — P2.
