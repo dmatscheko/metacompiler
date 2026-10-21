@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-702** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-703** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -76,10 +76,10 @@ non-ASCII class range spanning 256 or more characters only gets the text-side up
 
 # JS — JavaScript and TypeScript
 
-### T-701 js: `delete` of a class static field or method does nothing · P3 · JS · IN PROGRESS (JS worker, round 20) [V]
-`class T { static z = 1; static m(){} }; delete T.z; delete T.m; T.z, T.m, Object.keys(T).length, T.hasOwnProperty("z")` → node
-`undefined undefined 0 false`, all our legs `1 m() {} 1 true`. Same cause: `class S { static name = "custom" }; delete S.name` leaves
-"custom" (node "").
+### T-702 js: numeric-key class statics; for-in over a subclass skips inherited statics · P2 · JS · OPEN [V]
+`class A { static 7 = "seven" }; let i = 7; A[7], A["7"], A[i]` → node `seven seven seven`; interp and native `undefined seven
+undefined` (llvm.Run right): halves diverge, interpreter grammar and layer 2. `class A { static 7 = "seven"; static k = 1 } class B
+extends A {}; for (k in B)` → node `7,k`, all legs empty (js and ts).
 
 ---
 
@@ -784,6 +784,7 @@ T-699 go: `int / 2.0` gives a float; `z, w := nil, 5` redeclaring a slice; conve
 T-694 js/ts: valid numeric literals rejected — `0x1_0`, `0.0_1`, `08e1` / `09.5e1` — DONE f25a0f10 (one separator rule for every digit run in all four grammars, sloppy 08e1/09.5e1, exact radix rounding — 92-form sweep = node / tsc)
 T-695 js: no function source text; defineProperty / delete of a function's `name` / `length` — DONE 03feaa8f c665a638 (defineProperty/delete of fn name/length via the own-property side table; js function and class source text from recorded spans, V8 elision in messages — 4 legs = node; TS keeps [function], see Settled; follow-up T-700)
 T-700 js: Object.getOwnPropertyDescriptor missing; builtin methods read as values have no name; `delete K.name` on a class — DONE 86530e0c (getOwnPropertyDescriptor(s) in all engines, builtin methods carry node's name/length, delete of a class's name/length, interpreter hasOwnProperty of literal accessors — 4 legs = node, TS via tsc 6; follow-up T-701)
+T-701 js: `delete` of a class static field or method does nothing — DONE e52a2e65 (delete of class static fields/methods/accessors in all engines without touching instance methods — 4 legs = node; follow-up T-702)
 
 # Settled — do not re-open
 
