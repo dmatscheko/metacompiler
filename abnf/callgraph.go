@@ -244,9 +244,10 @@ func extractCallGraph(m *ir.Module) ([]cgDef, []cgCall) {
 					lastPos = -1
 				}
 			}
-		case "js_jsfnmeta":
-			// js/ts wrap a closure to give it `name`/`length` and store the
-			// wrapper's result, which is the same function.
+		case "js_jsfnmeta", "js_pysig", "js_pyfnname":
+			// js/ts/php wrap a closure to give it `name`/`length`, python its
+			// signature and `__name__`, and store the wrapper's result, which is
+			// the same function.
 			if len(call.Args) > 0 {
 				if fn, ok := closureFn[call.Args[0]]; ok {
 					closureFn[call] = fn
@@ -286,7 +287,7 @@ func extractCallGraph(m *ir.Module) ([]cgDef, []cgCall) {
 					}
 				}
 			}
-		case "js_tdecl", "js_scope_decl", "js_pyset_var", "js_tset", "js_scope_set", "js_kset", "js_set":
+		case "js_tdecl", "js_scope_decl", "js_pyset_var", "py_setvar", "js_tset", "js_scope_set", "js_kset", "js_set":
 			if len(call.Args) >= 3 {
 				if fn, ok := closureFn[call.Args[2]]; ok {
 					if callee == "js_set" && !closureSite[fn].adj {

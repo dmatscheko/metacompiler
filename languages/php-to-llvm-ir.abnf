@@ -87,7 +87,7 @@ TopItem     = HaltTail | TopDecl | Statement ;
 // __halt_compiler(); ends the program text. Twin of HaltTail in php-interpreter.abnf.
 HaltTail    = ( "__halt_compiler" | "__HALT_COMPILER" ) "(" ")" ( ";" | "?>" )
               :whitespace() { "\x00"..."\U0010ffff" } :whitespace(Whitespace) ;
-TopDecl     <~~ push(phStmtPos(takeAll())) ~~>
+TopDecl     <~~ push(phStmtPos(phTopPos(takeAll()))) ~~>
             = "" <~~ push(up.pos) ~~>
               ( Def <~~ push(makeTopDef(pop())) ~~> | ClassDecl <~~ push(makeTopClass(pop())) ~~> | EnumDecl | ConstDecl
               | TypeDecl <~~ push(makeTopClass(pop())) ~~> | NsDecl | UseDecl ) ;
@@ -7754,8 +7754,25 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             fn.chk = ar[0] == 0 && ar[1] < 0 ? null
                 : {req: ar[0], max: ar[1], rest: fn.rest, who: fn.name, sig: sigText(fn.params, fn.rest), clo: false, lib: true}
         }
-        topDefs.push(makeDefStmt(fn))
+        var t = makeDefStmt(fn)
+        // The hoisted closure is created away from its declaration, so defPos names
+        // the declaration line: phTopPos fills in where it starts.
+        var at = {pos: undefined}
+        topDefAt = at
+        topDefs.push(function(b) {
+            defPos(b, at.pos)
+            return t(b)
+        })
         return function(b) { return b }
+    }
+    var topDefAt = undefined // The position record of the top-level function just declared.
+    // TopDecl's items, after handing a top-level function its declaration's position.
+    function phTopPos(items) {
+        if (topDefAt !== undefined) {
+            topDefAt.pos = items[0]
+            topDefAt = undefined
+        }
+        return items
     }
     // A class, interface or trait declared at a file's top level is bound before the
     // file's statements run too, when PHP can link it at compile time

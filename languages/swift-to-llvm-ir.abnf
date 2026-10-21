@@ -9694,10 +9694,11 @@ KwContinue  = "continue" KwEnd ;
             var idx = emitFunc(f.params, f.body, false, false, f.rlabels, f.rtype)
             defPos(b, f.pos)
             var cloV = callExt(b, "js_closure", [handle(idx), curScopeV])
+            // The source name is bound first: -callgraph names a closure by its first
+            // store, and the overload slot is a key of this emitter's own.
+            if (lst.length == 1) { callExt(b, "js_scope_decl", [curScopeV, emitStr(b, f.name), cloV]) }
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, slot), cloV])
-            if (lst.length == 1) {
-                callExt(b, "js_scope_decl", [curScopeV, emitStr(b, f.name), cloV])
-            } else {
+            if (lst.length != 1) {
                 var didx = emitOverloadDispatch(f.name, lst)
                 callExt(b, "js_scope_decl", [curScopeV, emitStr(b, f.name),
                                              callExt(b, "js_closure", [handle(didx), curScopeV])])

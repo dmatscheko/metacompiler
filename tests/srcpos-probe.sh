@@ -139,9 +139,9 @@ done
 
 # LANG:EXT:the header lines (or NAME@LINE) of the definitions in def_src_for().
 DEF_CASES=(
-    "python:py:1"
+    "python:py:f@1"
     "ruby:rb:f@1"
-    "php:php:2"
+    "php:php:f@2"
     "js:js:f@1 main@5"
     "typescript:ts:f@1 main@5"
     "metajs:metajs:f@1 main@5"
@@ -150,7 +150,7 @@ DEF_CASES=(
     "kotlin:kt:f@1 main@5"
     "java:java:f@2 main@6"
     "csharp:cs:F@3 Main@7"
-    "swift:swift:1"
+    "swift:swift:f@1"
     "go:go:f@3 main@8"
 )
 def_src_for() {
