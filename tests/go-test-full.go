@@ -4490,6 +4490,28 @@ func s82() {
 
 type U82 uint8
 
+// ===== SECTION 90: deep recursion =====
+// Every call is as deep as the try barriers it nests in, natively too.
+func s90depth(n int) int {
+	if n == 0 {
+		return 0
+	}
+	return 1 + s90depth(n-1)
+}
+
+func s90defer(n int) (r int) {
+	defer func() { r++ }()
+	if n == 0 {
+		return 0
+	}
+	return s90defer(n - 1)
+}
+
+func s90() {
+	check("deep1", s90depth(5000) == 5000)
+	check("deep2", s90defer(3000) == 3001)
+}
+
 func main() {
 	s01() // SECTION-CALL 01
 	s02() // SECTION-CALL 02
@@ -4573,6 +4595,7 @@ func main() {
 	s80() // SECTION-CALL 80
 	s81() // SECTION-CALL 81
 	s82() // SECTION-CALL 82
+	s90() // SECTION-CALL 90
 	fmt.Println("full:", checks, "checks,", fails, "failures")
 	os.Exit(fails)
 }

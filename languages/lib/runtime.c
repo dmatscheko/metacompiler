@@ -4173,9 +4173,22 @@ long JB_CAP;         /* its length in slots */
 long JB_MAIN;        /* main's own pool, so the swap has something to go back to */
 long JB_DEPTH;
 
+/* The pool doubles when a try nests past its length (every go function body is
+ * one, so a recursion is as deep as its pool). The buffers themselves do not
+ * move, only the array of pointers to them, and the running stack's owner -
+ * main's JB_MAIN or the running generator's cb[9]/cb[12] - takes the new one. */
+long coro_grow(long arr, long cap, long newcap);
 long jb_at(long d) {
-	long *p = (long *)JBP;
-	if (d >= JB_CAP) { die("try nested too deeply"); }
+	long *p;
+	if (d >= JB_CAP) {
+		long ncap = JB_CAP * 2;
+		long np = coro_grow(JBP, JB_CAP, ncap);
+		if (JBP == JB_MAIN) { JB_MAIN = np; }
+		else { long *cb = (long *)fc(CUR_GEN); cb[9] = np; cb[12] = ncap; }
+		JBP = np;
+		JB_CAP = ncap;
+	}
+	p = (long *)JBP;
 	if (p[d] == 0) { p[d] = (long)malloc(512); }
 	return p[d];
 }
