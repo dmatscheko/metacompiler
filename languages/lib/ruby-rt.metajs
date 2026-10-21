@@ -5963,9 +5963,10 @@ function rbEnumMethod(t, name, args) {
 var rbHashUnknown = {__hashunknown: true}
 
 // A Hash key as a reader sees it: a String key is stored as its text and read out
-// FROZEN. Twin of rubyKeyOut in abnf/jsrtruby.go, which states the rule.
+// FROZEN, one object per text. Twin of rubyKeyOut in abnf/jsrtruby.go, which
+// states the rule.
 function rbKeyOut(k) {
-    if (typeof k == "string") { return rbMkRStr(k, true) }
+    if (typeof k == "string") { return js_rsfz(k, true) }
     return k
 }
 
@@ -7361,7 +7362,7 @@ function rbMethod(target, name, args) {
             var ecl = rbStrChars(target)
             if (ecb === null) { return rbEnumAt(rbMkEnum(ecl), target, name, args) }
             var ec = 0
-            while (ec < ecl.length) { rbCall1(ecb, ecl[ec]); ec = ec + 1 }
+            while (ec < ecl.length) { rbCall1(ecb, rbMkRStr(ecl[ec], false)); ec = ec + 1 }
             return target
         }
         // A copy is a new mutable String, and freezing one makes it a box that
@@ -7890,16 +7891,17 @@ function js_rp(args) {
 }
 
 // Kernel#format / sprintf / printf: the argument array is [format, args...], and
-// frame is the method's name.
+// frame is the method's name. The answer is a new String, so a box. Twin of
+// js_rformat in abnf/jsrtruby.go.
 function js_rformat(args, frame) {
-    if (!rbIsArr(args) || args.length == 0) { return "" }
+    if (!rbIsArr(args) || args.length == 0) { return rbMkRStr("", false) }
     var rest = []
     var i = 1
     while (i < args.length) {
         rest.push(args[i])
         i = i + 1
     }
-    return rbFormat(rbStr(args[0]), rest, rbStr(frame))
+    return rbMkRStr(rbFormat(rbStr(args[0]), rest, rbStr(frame)), false)
 }
 
 // Kernel#rand, as a call the emitter makes for the bare name. See rbRand.
@@ -8006,9 +8008,10 @@ function js_rget(o, k) {
     // a[0..2] / s[6..] / a[1..-1]: a Range as the subscript of an Array or a String
     // is a SUBSEQUENCE, EXACT for every range, because the range carries its own
     // raw endpoints.
-    if (rbIsRange(k) && (rbIsArr(o) || typeof o == "string")) {
-        return js_rsubrange(o, k["begin"], k["end"], k["excl"])
-    }
+    if (rbIsRange(k) && rbIsArr(o)) { return js_rsubrange(o, k["begin"], k["end"], k["excl"]) }
+    // A String's s[i] / s[a..b] is a new String, so it answers a box. Twin of the
+    // js_rget extern in abnf/jsrt.go.
+    if (rbIsRange(k) && typeof o == "string") { return rbBoxOut(o, js_rsubrange(o, k["begin"], k["end"], k["excl"])) }
     var idx = Math.trunc(rbToF(k))
     if (rbIsArr(o)) {
         if (idx < 0) { idx = idx + o.length }
@@ -8018,7 +8021,7 @@ function js_rget(o, k) {
     if (typeof o == "string") {
         if (idx < 0) { idx = idx + o.length }
         if (idx < 0 || idx >= o.length) { return null }
-        return o.charAt(idx)
+        return rbMkRStr(o.charAt(idx), false)
     }
     if (rtTag(o, "__rstr")) { return js_rget(o["__s"], k) }
     if (rtIsNil(o)) { fail("indexing nil") }
@@ -8989,7 +8992,7 @@ function rbStrExtra(target, name, args) {
         if (name == "upto") { list = smUptoList(target, sargs.length > 0 ? sargs[0] : target, pos.length > 1 && rbTruthy(pos[1])) }
         if (blk === null) { return {ok: true, v: rbEnumAt(rbMkEnum(list), target, name, args)} }
         var k = 0
-        while (k < list.length) { rbCall1(blk, list[k]); k = k + 1 }
+        while (k < list.length) { rbCall1(blk, rbBoxOut(target, list[k])); k = k + 1 }
         return {ok: true, v: target}
     }
     if (name == "dump") { return {ok: true, v: rbStrInspect(target)} }

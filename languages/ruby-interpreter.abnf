@@ -4325,7 +4325,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (name == "each_line") { list = smLines(target) }
             if (name == "upto") { list = smUptoList(target, sargs.length > 0 ? sargs[0] : target, args.length > 1 && rtest(args[1])) }
             if (blk == null) { return {ok: true, v: enumAt(mkEnum(list), target, name, args)} }
-            for (var k = 0; k < list.length; k++) { blockCall(blk, [list[k]]) }
+            for (var k = 0; k < list.length; k++) { blockCall(blk, [boxOut(target, list[k])]) }
             return {ok: true, v: target}
         }
         if (name == "dump") { return {ok: true, v: strInspect(target)} }
@@ -8725,7 +8725,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (name == "each_char") {
                 var ecs = target.split("")
                 if (blk == null) { return enumAt(mkEnum(ecs), target, name, args) }
-                for (var sc = 0; sc < ecs.length; sc++) { blockCall(blk, [ecs[sc]]) }
+                for (var sc = 0; sc < ecs.length; sc++) { blockCall(blk, [mkRStr(ecs[sc])]) }
                 return target
             }
             if (name == "include?") { return target.indexOf(rstr(args[0])) >= 0 }
@@ -9260,10 +9260,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         return out
     }
     // A Hash key as a reader sees it: a String key is stored as its text and read
-    // out FROZEN, as MRI's key is a frozen copy. Twins: rubyKeyOut in
-    // abnf/jsrtruby.go, rbKeyOut in lib/ruby-rt.metajs.
+    // out FROZEN, one object per text, as MRI's key is a deduplicated frozen copy.
+    // Twins: rubyKeyOut in abnf/jsrtruby.go, rbKeyOut in lib/ruby-rt.metajs.
     function keyOut(k) {
-        if (typeof k == "string") { return {__rs: k, __fz: true} }
+        if (typeof k == "string") { return fzLit(k, true) }
         return k
     }
 
@@ -10080,12 +10080,15 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                     // `x[start, len]': the two-argument subscript is the `[]' METHOD,
                     // so String / Array answer a subsequence and a user class' own
                     // `def [](a, b)' is reached with both arguments.
-                    cur = mcall(cur, "[]", [s.idx(), s.idx2()], null)
+                    cur = boxOut(cur, mcall(cur, "[]", [s.idx(), s.idx2()], null))
                 } else {
                     var ik = anytype
                     ik = s.idx()
                     if (mut) { pObj = cur; pKey = ik }
-                    cur = rindex(cur, ik)
+                    // A String's s[i] / s[a..b] is a new String. Twin of the js_rget
+                    // extern in abnf/jsrt.go and js_rget in lib/ruby-rt.metajs.
+                    if (typeof cur == "string" || isRStr(cur)) { cur = boxOut(cur, rindex(cur, ik)) }
+                    else { cur = rindex(cur, ik) }
                 }
             }
             return cur
@@ -13193,13 +13196,15 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
         return markMethodVal(copyArity(w, m), classOf(self).__name, name)
     }
+    // format / sprintf answer a new String. Twins: js_rformat in abnf/jsrtruby.go
+    // and lib/ruby-rt.metajs.
     hostGlobals["format"] = function() {
         var a = argsArray(arguments)
-        return rformat(rstr(a[0]), a.slice(1), "format")
+        return mkRStr(rformat(rstr(a[0]), a.slice(1), "format"))
     }
     hostGlobals["sprintf"] = function() {
         var sa = argsArray(arguments)
-        return rformat(rstr(sa[0]), sa.slice(1), "sprintf")
+        return mkRStr(rformat(rstr(sa[0]), sa.slice(1), "sprintf"))
     }
     // Kernel#printf is print(format(...)) - Ruby's format, not the shared host
     // printf.

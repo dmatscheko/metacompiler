@@ -10810,8 +10810,9 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 				}
 				return rubyEnumAt(rubyMkEnum(chars), o, name, cpos)
 			}
+			// Each yielded character is a new String.
 			for _, r := range o {
-				rt.call(blk, jsUndef, []interface{}{string(r)})
+				rt.call(blk, jsUndef, []interface{}{&jsRStr{s: string(r)}})
 			}
 			return o
 		case "to_str", "itself":
@@ -10837,7 +10838,7 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 				return rubyEnumAt(rubyMkEnum(rubySmStrArr(ul)), o, name, spos)
 			}
 			for _, e := range ul {
-				rt.call(sblk, jsUndef, []interface{}{e})
+				rt.call(sblk, jsUndef, []interface{}{rubyBoxOut(o, e)})
 			}
 			return o
 		case "dump":
@@ -10861,7 +10862,7 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 				return rubyEnumAt(rubyMkEnum(&jsArray{elems: list}), o, name, spos)
 			}
 			for _, e := range list {
-				rt.call(sblk, jsUndef, []interface{}{e})
+				rt.call(sblk, jsUndef, []interface{}{rubyBoxOut(o, e)})
 			}
 			return o
 		}
@@ -10900,14 +10901,14 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 			case "keys":
 				out := &jsArray{elems: make([]interface{}, len(keys.elems))}
 				for i, k := range keys.elems {
-					out.elems[i] = rubyKeyOut(k)
+					out.elems[i] = rt.rubyKeyOut(k)
 				}
 				return out
 			case "values":
 				return &jsArray{elems: append([]interface{}{}, vals.elems...)}
 			case "to_a", "entries":
 				// Hash#to_a is the list of [key, value] PAIRS, as in MRI.
-				return rubyHashPairs(keys, vals)
+				return rt.rubyHashPairs(keys, vals)
 			// Hash#[] as a METHOD (h.send(:[], k)); the subscript itself goes
 			// through js_rget. String and Array answer it too.
 			case "[]":
@@ -10920,10 +10921,10 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 			case "each":
 				epos, eblk := rubyBlockArgs(args)
 				if eblk == nil {
-					return rubyEnumAt(rubyMkEnum(rubyHashPairs(keys, vals)), o, name, epos)
+					return rubyEnumAt(rubyMkEnum(rt.rubyHashPairs(keys, vals)), o, name, epos)
 				}
 				for i := range keys.elems {
-					rt.call(eblk, jsUndef, []interface{}{rubyKeyOut(keys.elems[i]), vals.elems[i]})
+					rt.call(eblk, jsUndef, []interface{}{rt.rubyKeyOut(keys.elems[i]), vals.elems[i]})
 				}
 				return o
 			case "default":
@@ -11648,10 +11649,10 @@ func (rt *jsrt) rubyArrNew(args []interface{}) *jsArray {
 // rubyHashPairs is the [key, value] pair list a Hash yields to every Enumerable
 // method. Mirrors hashPairs of ruby-interpreter.abnf and rbHashPairs of
 // lib/ruby-rt.metajs.
-func rubyHashPairs(keys, vals *jsArray) *jsArray {
+func (rt *jsrt) rubyHashPairs(keys, vals *jsArray) *jsArray {
 	out := &jsArray{}
 	for i := range keys.elems {
-		out.elems = append(out.elems, &jsArray{elems: []interface{}{rubyKeyOut(keys.elems[i]), vals.elems[i]}})
+		out.elems = append(out.elems, &jsArray{elems: []interface{}{rt.rubyKeyOut(keys.elems[i]), vals.elems[i]}})
 	}
 	return out
 }
@@ -11756,7 +11757,7 @@ func (rt *jsrt) rubyHashMethod(o *jsObject, keys, vals *jsArray, name string, ar
 		if blk == nil {
 			return o, true
 		}
-		return rt.rubyArrayMethod(rubyHashPairs(keys, vals), name, args), true
+		return rt.rubyArrayMethod(rt.rubyHashPairs(keys, vals), name, args), true
 	case "delete":
 		i := rt.rubyDictFind(keys, argAt(pos, 0))
 		if i < 0 {
@@ -11777,15 +11778,15 @@ func (rt *jsrt) rubyHashMethod(o *jsObject, keys, vals *jsArray, name string, ar
 		return o, true
 	case "each_pair":
 		if blk == nil {
-			return rubyEnumAt(rubyMkEnum(rubyHashPairs(keys, vals)), o, name, pos), true
+			return rubyEnumAt(rubyMkEnum(rt.rubyHashPairs(keys, vals)), o, name, pos), true
 		}
 		for i := range keys.elems {
-			rt.call(blk, jsUndef, []interface{}{rubyKeyOut(keys.elems[i]), vals.elems[i]})
+			rt.call(blk, jsUndef, []interface{}{rt.rubyKeyOut(keys.elems[i]), vals.elems[i]})
 		}
 		return o, true
 	case "each_key":
 		for _, k := range append([]interface{}{}, keys.elems...) {
-			rt.call(blk, jsUndef, []interface{}{rubyKeyOut(k)})
+			rt.call(blk, jsUndef, []interface{}{rt.rubyKeyOut(k)})
 		}
 		return o, true
 	case "each_value":
@@ -11812,17 +11813,17 @@ func (rt *jsrt) rubyHashMethod(o *jsObject, keys, vals *jsArray, name string, ar
 		delete(out.props, "__hdefp")
 		for i := range keys.elems {
 			if j := rt.rubyDictFind(okeys, vals.elems[i]); j >= 0 {
-				ovals.elems[j] = rubyKeyOut(keys.elems[i])
+				ovals.elems[j] = rt.rubyKeyOut(keys.elems[i])
 				continue
 			}
 			okeys.elems = append(okeys.elems, rubySV(vals.elems[i]))
-			ovals.elems = append(ovals.elems, rubyKeyOut(keys.elems[i]))
+			ovals.elems = append(ovals.elems, rt.rubyKeyOut(keys.elems[i]))
 		}
 		return out, true
 	case "key":
 		for i := range vals.elems {
 			if rt.rubyEq(vals.elems[i], argAt(pos, 0)) {
-				return rubyKeyOut(keys.elems[i]), true
+				return rt.rubyKeyOut(keys.elems[i]), true
 			}
 		}
 		return jsNull, true
@@ -11839,7 +11840,7 @@ func (rt *jsrt) rubyHashMethod(o *jsObject, keys, vals *jsArray, name string, ar
 		delete(out.props, "__hdefp")
 		okeys, ovals, _ := dictParts(out)
 		for i := range keys.elems {
-			nk := rt.call(blk, jsUndef, []interface{}{rubyKeyOut(keys.elems[i])})
+			nk := rt.call(blk, jsUndef, []interface{}{rt.rubyKeyOut(keys.elems[i])})
 			if j := rt.rubyDictFind(okeys, nk); j >= 0 {
 				ovals.elems[j] = vals.elems[i]
 				continue
@@ -11856,7 +11857,7 @@ func (rt *jsrt) rubyHashMethod(o *jsObject, keys, vals *jsArray, name string, ar
 	// what MRI's Hash does (Hash includes Enumerable and yields a pair). select /
 	// filter / reject answer a HASH again, everything else the Array that
 	// Enumerable builds.
-	hp := rubyHashPairs(keys, vals)
+	hp := rt.rubyHashPairs(keys, vals)
 	switch name {
 	case "select", "filter", "reject", "select!", "filter!", "reject!", "keep_if", "delete_if":
 		if blk == nil {
@@ -13900,8 +13901,18 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		// Ruby indexing: a[i], h[k], s[i]. Identical to js_pyget except that a missing
 		// Hash key and an out-of-range index answer NIL instead of raising - which is
 		// Ruby's Hash#[] / Array#[] / String#[], and what ruby-interpreter.abnf does.
+		// A String's s[i] / s[a..b] is a new String, so it answers a box. Twin of
+		// js_rget in lib/ruby-rt.metajs and of foldCallMember in
+		// ruby-interpreter.abnf.
 		"js_rget": func(a []uint64) uint64 {
-			return w(rt.rubyIndexGet(u(a[0]), u(a[1])))
+			v := rt.rubyIndexGet(u(a[0]), u(a[1]))
+			if s, isStr := v.(string); isStr {
+				switch u(a[0]).(type) {
+				case string, *jsRStr:
+					return w(&jsRStr{s: s})
+				}
+			}
+			return w(v)
 		},
 		// a[i, len] = v / a[range] = v / s[i] = c: SLICE assignment. It answers the
 		// container, or the box a plain string became, which the emitter writes

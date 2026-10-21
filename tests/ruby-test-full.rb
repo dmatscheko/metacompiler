@@ -4143,6 +4143,40 @@ def s94
   S94C.send(:define_method, :w) { 7 }
   check("dm94b", r == :z && o.z(3) == 6 && o.w == 7 && o.respond_to?(:a))
 end
+# ===== SECTION 97: Strings a builtin builds are new objects =====
+# s[i], s[a..b], s[i, n], format / sprintf and the Strings each_char / each_line /
+# upto yield are new mutable Strings: changing one leaves the source alone and is
+# seen through every reference to it. A Hash's String key reads out as one frozen
+# object, the same for every read and for every Hash keyed by that text.
+# /usr/bin/ruby 2.6 settles each.
+def s97
+  v = ["hello", "%d-x", 5, "a\nb\n", "a", "c"]
+  s = v[0]
+  t = s[1, 3]
+  t2 = t
+  t2 << "!"
+  c = s[0]
+  c2 = c
+  c2 << "Z"
+  rg = s[0..1]
+  rg << "Q"
+  check("sb97a", s == "hello" && t == "ell!" && c == "hZ" && rg == "heQ")
+  f = format(v[1], v[2])
+  g = f
+  g << "y"
+  f2 = sprintf(v[1], v[2])
+  check("sb97b", f == "5-xy" && f.equal?(g) && f2.equal?(f2) && !f2.frozen?)
+  outs = []
+  s.each_char { |ch| x = ch; x << "1"; outs << ch }
+  ls = []
+  v[3].each_line { |l| l << "!"; ls << l }
+  us = []
+  v[4].upto(v[5]) { |ch| ch << "."; us << ch }
+  check("sb97c", outs == ["h1", "e1", "l1", "l1", "o1"] && ls == ["a\n!", "b\n!"] && us == ["a.", "b.", "c."])
+  h1 = {s.dup => 1}
+  h2 = {(v[4] + "x") => 2, ("he" + "llo") => 3}
+  check("sb97d", h1.keys[0].equal?(h1.keys[0]) && h1.keys[0].equal?(h2.keys[1]) && !h1.keys[0].equal?(s))
+end
 
 s39() # SECTION-CALL 39
 s40() # SECTION-CALL 40
@@ -4202,5 +4236,6 @@ s93() # SECTION-CALL 93
 s94() # SECTION-CALL 94
 s95() # SECTION-CALL 95
 s96() # SECTION-CALL 96
+s97() # SECTION-CALL 97
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

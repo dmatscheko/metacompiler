@@ -46,13 +46,14 @@ func (rt *jsrt) addRubyFmtExterns(m map[string]func(args []uint64) uint64) {
 	u := rt.unwrap
 	w := rt.wrap
 
-	// Kernel#format / #sprintf / #printf: (arguments, the method's name).
+	// Kernel#format / #sprintf / #printf: (arguments, the method's name). The answer
+	// is a new String, so a box. Twin of js_rformat in lib/ruby-rt.metajs.
 	m["js_rformat"] = func(a []uint64) uint64 {
 		arr, ok := u(a[0]).(*jsArray)
 		if !ok || len(arr.elems) == 0 {
-			return rt.wrapStr("")
+			return w(&jsRStr{})
 		}
-		return rt.wrapStr(rt.rubyFormat2(rt.rubyStr(arr.elems[0]), &jsArray{elems: arr.elems[1:]}, rt.toString(u(a[1]))))
+		return w(&jsRStr{s: rt.rubyFormat2(rt.rubyStr(arr.elems[0]), &jsArray{elems: arr.elems[1:]}, rt.toString(u(a[1])))})
 	}
 
 	m["js_rrespond"] = func(a []uint64) uint64 {
@@ -2292,11 +2293,13 @@ func rubySV(v interface{}) interface{} {
 
 // rubyKeyOut is a Hash key as a reader sees it. A String key is stored as its
 // text (dictAppend) and read out as a FROZEN String, which is what MRI's key - a
-// frozen copy of the String it was stored under - is. Twin of keyOut in
-// ruby-interpreter.abnf and rbKeyOut in lib/ruby-rt.metajs.
-func rubyKeyOut(k interface{}) interface{} {
+// frozen copy of the String it was stored under - is. MRI deduplicates that copy
+// (the fstring table a frozen literal is also in), so every read of one text is the
+// same object. Twin of keyOut in ruby-interpreter.abnf and rbKeyOut in
+// lib/ruby-rt.metajs.
+func (rt *jsrt) rubyKeyOut(k interface{}) interface{} {
 	if s, ok := k.(string); ok {
-		return &jsRStr{s: s, fz: true}
+		return rt.rubyFzLit(s, true)
 	}
 	return k
 }
