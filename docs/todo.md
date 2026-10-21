@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-730** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-731** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -147,11 +147,13 @@ parameter), which no engine prints either.
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-729 bash: mapfile/readarray; attributes on array elements; unset of a scalar's element; `${!a[@]:0:3}` accepted · P2 · SH · IN PROGRESS (SH worker, round 18) [V]
-`mapfile` / `readarray` → "command not found" exit 127 in all engines (bash 5.3 builtin). `declare -i n=5; n[1]=3+4; echo "${n[*]}"`
-→ bash `5 7`, ours `5 3+4`; `declare -l lo=ABC; lo[1]=XY` → bash `abc xy`, ours `abc XY`. `p2=ab; unset 'p2[1]'` → bash "not an array
-variable" status 1, ours silent 0. `"${!a[@]:0:3}"` → bash "bad substitution", ours expands. Long overwritten array element values
-are still never reclaimed (needs an element ownership table; `x="${a[0]}$((a[0]=1))"` must stay safe).
+### T-730 bash: a pipeline's last stage runs in the current shell; scalar `-i`/`-u` ignored by read and `${v:=}`; smaller gaps · P2 · SH · OPEN [V]
+`echo a | read v; echo "[$v]"` → bash `[]` (every pipeline stage is a subshell without lastpipe), all engines `[a]`; same for `mapfile`
+in a pipe. `declare -i c; read c <<< "1+2"` → bash 3, ours `1+2`; `declare -i f; ${f:=2+3}` → 5 vs `2+3`; `declare -u c; echo
+"${c:=xy}"` → XY vs xy. Compiler only: `declare -u d=(ab); read d <<< xy` writes the scalar slot (bash and interp `XY` in element 0).
+`set -- p q; x='@'; ${!x:1}` → bash `p q`, interp `pq`, compiler ` q` (halves diverge). An EXIT trap inside `$( )` runs after an
+expansion error abandons the substitution (bash does not). A second `local` of a name in one function starts fresh (bash keeps the
+value). `declare -ai k=(1 x+ 3) 2>/dev/null` silences the arithmetic error (bash still prints it).
 
 ---
 
@@ -792,6 +794,7 @@ T-721 php / metajs: unbounded recursion still kills the process — DONE c0d681d
 T-716 core: a non-canonical numeric string key (`"01"`, `"1.0"`, `"+1"`, `" 1"`, `"-0"`) is an array index — DONE 3a10c7c1 (only canonical numeric strings index arrays, in the floor, twin, interpreters and layer 2; lua/php unchanged — = node)
 T-594 go (CORE): UTF-8-encoded surrogate bytes are rejoined by the shared string floor — DONE f60458b8 (go raw-string mode in the floor and twin, rune-counted width/precision, byte-preserving strings.Split; new byte fixture — = go run)
 T-640 js (CORE): arguments mapped through another function; array holes — DONE f69dba89 (arguments aliased through any reference via a hidden scope slot; real array holes in all engines skipped by keys/for-in/in/iteration — = node; other languages' benches within spread)
+T-729 bash: mapfile/readarray; attributes on array elements; unset of a scalar's element; `${!a[@]:0:3}` accepted — DONE 04af2aca 4600656e (mapfile/readarray with all options, attributes on element stores, unset of a scalar's element, indirection validation and ${!a[k]}, reclaimed long elements with copy-on-read safety — = bash 5.3; RSS 60.6 → 1.9 MB; follow-up T-730)
 
 # Settled — do not re-open
 
