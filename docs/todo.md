@@ -140,7 +140,7 @@ ours `xyZ`). `**(a)` never matches in our engines (interp globAt's star-run coll
 
 # C — C subset
 
-### T-714 c: string literals over 4096 bytes break llvm.Run; global `char *a[N] = {...}` crashes the compiler · P2 · C · OPEN [V]
+### T-714 c: string literals over 4096 bytes break llvm.Run; global `char *a[N] = {...}` crashes the compiler · P2 · C · IN PROGRESS (C worker, round 5) [V]
 A string literal longer than 4096 bytes is emitted with array indices like `u0x1000`, which llvm.Run rejects ("unable to parse
 integer u0x1000"); native builds are fine. A global `char *a[N] = {"..", ...}` initializer crashes c-to-llvm-ir (TypeError in
 emitInit). Oracle: cc/clang.
