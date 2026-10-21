@@ -859,6 +859,22 @@ s69() {
   check lo1 "$(s69f)" "5 2 4 1 2 CD [ 0] [] [1] []"
   check lo2 "$s69g" "G"
 }
+# ===== SECTION 70: `let` of a word that is no expression; one EXIT trap =====
+# let evaluates every argument at run time, so one that is no expression is an error and
+# status 1, not an unknown command. A shell has one EXIT trap: a new one replaces it and ''
+# or - removes it. Every expected value is bash 5.3's.
+s70m() { local m=${1#bash: }; m=${m#*line [0-9]*: }; printf '%s' "${m%%$'\n'*}"; }
+s70() {
+  local o
+  o=$( let "3+" 2>&1; echo " $?" )
+  check lt1 "$(s70m "$o")" 'let: 3+: arithmetic syntax error: operand expected (error token is "+")'
+  check lt2 "${o##*$'\n'}" " 1"
+  o=$( trap 'echo a' EXIT; trap 'echo b' EXIT; echo in )
+  check tr4 "$o" "in
+b"
+  o=$( trap 'echo a' EXIT; trap '' EXIT; echo in; ( trap 'echo c' EXIT; trap - EXIT ) )
+  check tr5 "$o" "in"
+}
 # ===== END SECTIONS =====
 
 s47   # SECTION-CALL 47
@@ -883,5 +899,6 @@ s66   # SECTION-CALL 66
 s67   # SECTION-CALL 67
 s68   # SECTION-CALL 68
 s69   # SECTION-CALL 69
+s70   # SECTION-CALL 70
 echo "full: $checks checks, $fails failures"
 exit $fails

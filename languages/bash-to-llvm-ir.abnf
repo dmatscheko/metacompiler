@@ -239,11 +239,13 @@ LetItem     = RedirItem | NotIoRedir LetArg ;
 // arguments x=1 + 2*2 (x=1, then a syntax error). A word with no expansion is parsed here
 // instead, unless the next word would read as the rest of its expression (`let c=1 + d=2`,
 // `let x=0 || y`): LetIsWord decides.
-LetArg      = LetWord | LetDq | LetSq | LetAr ;
+LetArg      = LetWord | LetDq | LetSq | LetAr | LetRaw ;
 LetAr       <~~ arClaim(up.start, up.pos); push(pop()) ~~> = ArAssign ;
 LetWord     <~~ push({letws: takeAll()}) ~~> = LetIsWord CWord ;
 LetDq       <~~ arClaim(up.start + 1, up.pos - 1); push(pop()) ~~> = '"' :whitespace(Whitespace) ArList '"' ;
 LetSq       <~~ arClaim(up.start + 1, up.pos - 1); push(pop()) ~~> = "'" :whitespace(Whitespace) ArList "'" ;
+// A word that is no expression at all (`let "3+"`) is evaluated at run time, which reports it.
+LetRaw      <~~ push({letws: takeAll()}) ~~> = CWord ;
 
 // local / declare / typeset / export / readonly [-flags] NAME[=WORD] ...
 // Spelled as its own production (rather than an ordinary command with word arguments)
@@ -4804,6 +4806,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     fail("trap needs a literal handler in this compiler")
                 }
                 var src = argTs[0].c
+                // One EXIT trap, as in the interpreter: a new one replaces the one before, and
+                // '' or - removes it.
+                var ti
+                for (ti = 0; ti < trapList.length; ti++) { b.NewStore(zero, trapList[ti].flag) }
                 if (src != "" && src != "-") {
                     var flag = m.NewGlobalDef("trap_flag" + trapCount, zero)
                     trapCount = trapCount + 1
