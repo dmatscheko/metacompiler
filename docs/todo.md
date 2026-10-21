@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-710** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-711** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -72,11 +72,11 @@ its report; anything structural there is a CORE ticket.
 
 # JS — JavaScript and TypeScript
 
-### T-707 js: named properties on arrays; species for builtin subclasses · P2 · JS · IN PROGRESS (JS worker, round 24) [V]
-`var a = [1,2]; a.foo = 5; Object.keys(a)` → llvm.Run / native "invalid array index foo", goja interp accepts the write but keys miss
-it (node `0,1,foo`); so `this.x = …` and class fields on Array subclass instances fail compiled. map/filter/slice on a subclass
-instance do not run the subclass constructor (Symbol.species); `P.resolve()` / `then()` on a Promise subclass return a plain Promise
-(node the subclass).
+### T-710 js: `Sub.from` / `Sub.of` on an Array subclass; `Symbol.species` reads; `typeof [].hasOwnProperty`; tagged-template strings array; `"01"` array key · P2 · JS · OPEN [V]
+`class C extends Array {}; C.from([1,2,3])` → "C.from is not a function" in all legs (node a C). `Array[Symbol.species]` /
+`Sub[Symbol.species]` → undefined (node the class). `typeof [].hasOwnProperty` → "undefined" (node "function"). A tagged template's
+strings object is array-like (node: a frozen array, `raw` non-enumerable). `a["01"] = 1` is index 1 via the floor's maybe_numeric /
+index_of_key (node: a named property) — the floor is shared; check other languages' expectations before changing it.
 
 ---
 
@@ -785,6 +785,7 @@ T-692 php: preg_* remainder — recursion/subroutines, conditionals, branch rese
 T-704 js: `new.target`; a class extending Array / Map / Set and the other builtins — DONE e69952fb..74fb6177 (new.target through construction and super(), Array/Promise/RegExp/wrapper subclasses with statics, overrides and super.m(); also classes declared in try blocks in the compiled halves — 4 legs = node, TS via tsc 6; follow-up T-707)
 T-706 regex (CORE): the per-attempt step cap fires on long linear inputs — DONE c336f5ba 2dd9391b (one step budget per search scaled by program × subject, bash ERE VM on an explicit stack; pathological patterns still stop — = go/python/node/ruby/java/pcre2/bash on 70 KB)
 T-705 php preg: PCRE2's empty-iteration loop rule; long `\p{...}` names; PCRE2 start-optimization residue; `(*ACCEPT)` scope; `MARK` — DONE d4599b4d (PCRE2 loop rule, loose \p names per 10.48, (*ACCEPT) scope, MARK reporting, minlength; residue declined, see Settled)
+T-707 js: named properties on arrays; species for builtin subclasses — DONE 438be4a4 6c1f2bdd (named array properties in a side object on the non-index path in all engines, ArraySpeciesCreate / Promise SpeciesConstructor, regex match records are arrays — 4 legs = node; other languages' benches paired-neutral; follow-up T-710)
 
 # Settled — do not re-open
 
