@@ -511,6 +511,10 @@ type jsrt struct {
 	// only ever read by js_rraise.
 	rubyCurExc interface{}
 
+	// rubyFzLits holds the one frozen String each text of a non-interpolating
+	// literal is under `# frozen_string_literal: true' (rubyFzLit).
+	rubyFzLits map[string]*jsRStr
+
 	// goPanics is Go's panic state, one entry per compiled Go frame currently
 	// unwinding-aware (js_gotry pushes, js_gorepanic pops). An entry is nil while
 	// the frame runs normally and holds the panic value once one was caught, so a
@@ -10539,9 +10543,15 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 			return &jsArray{}
 		}
 	// A String a method built is not frozen (MRI 2.6 without the magic comment);
-	// a box answers its own flag before this.
+	// a box answers its own flag before this. nil, true, false, a Symbol and a
+	// number are frozen.
 	case "frozen?":
+		switch target.(type) {
+		case jsNullT, jsUndefT, bool, jsSym:
+			return true
+		}
 		return rubyIsNum(target)
+
 	case "equal?":
 		return rubyIdenticalP(target, argAt(args, 0))
 	case "eql?":
@@ -10887,16 +10897,16 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 			case "size", "length":
 				return float64(len(keys.elems))
 			case "keys":
-				return &jsArray{elems: append([]interface{}{}, keys.elems...)}
+				out := &jsArray{elems: make([]interface{}, len(keys.elems))}
+				for i, k := range keys.elems {
+					out.elems[i] = rubyKeyOut(k)
+				}
+				return out
 			case "values":
 				return &jsArray{elems: append([]interface{}{}, vals.elems...)}
 			case "to_a", "entries":
 				// Hash#to_a is the list of [key, value] PAIRS, as in MRI.
-				out := &jsArray{}
-				for i := range keys.elems {
-					out.elems = append(out.elems, &jsArray{elems: []interface{}{keys.elems[i], vals.elems[i]}})
-				}
-				return out
+				return rubyHashPairs(keys, vals)
 			// Hash#[] as a METHOD (h.send(:[], k)); the subscript itself goes
 			// through js_rget. String and Array answer it too.
 			case "[]":
@@ -10912,7 +10922,7 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 					return rubyEnumAt(rubyMkEnum(rubyHashPairs(keys, vals)), o, name, epos)
 				}
 				for i := range keys.elems {
-					rt.call(eblk, jsUndef, []interface{}{keys.elems[i], vals.elems[i]})
+					rt.call(eblk, jsUndef, []interface{}{rubyKeyOut(keys.elems[i]), vals.elems[i]})
 				}
 				return o
 			case "default":
@@ -11625,7 +11635,7 @@ func (rt *jsrt) rubyArrNew(args []interface{}) *jsArray {
 func rubyHashPairs(keys, vals *jsArray) *jsArray {
 	out := &jsArray{}
 	for i := range keys.elems {
-		out.elems = append(out.elems, &jsArray{elems: []interface{}{keys.elems[i], vals.elems[i]}})
+		out.elems = append(out.elems, &jsArray{elems: []interface{}{rubyKeyOut(keys.elems[i]), vals.elems[i]}})
 	}
 	return out
 }
@@ -11730,6 +11740,7 @@ func (rt *jsrt) rubyHashMethod(o *jsObject, keys, vals *jsArray, name string, ar
 		if blk == nil {
 			return o, true
 		}
+		return rt.rubyArrayMethod(rubyHashPairs(keys, vals), name, args), true
 	case "delete":
 		i := rt.rubyDictFind(keys, argAt(pos, 0))
 		if i < 0 {
@@ -11753,12 +11764,12 @@ func (rt *jsrt) rubyHashMethod(o *jsObject, keys, vals *jsArray, name string, ar
 			return rubyEnumAt(rubyMkEnum(rubyHashPairs(keys, vals)), o, name, pos), true
 		}
 		for i := range keys.elems {
-			rt.call(blk, jsUndef, []interface{}{keys.elems[i], vals.elems[i]})
+			rt.call(blk, jsUndef, []interface{}{rubyKeyOut(keys.elems[i]), vals.elems[i]})
 		}
 		return o, true
 	case "each_key":
 		for _, k := range append([]interface{}{}, keys.elems...) {
-			rt.call(blk, jsUndef, []interface{}{k})
+			rt.call(blk, jsUndef, []interface{}{rubyKeyOut(k)})
 		}
 		return o, true
 	case "each_value":
@@ -11785,17 +11796,17 @@ func (rt *jsrt) rubyHashMethod(o *jsObject, keys, vals *jsArray, name string, ar
 		delete(out.props, "__hdefp")
 		for i := range keys.elems {
 			if j := rt.rubyDictFind(okeys, vals.elems[i]); j >= 0 {
-				ovals.elems[j] = keys.elems[i]
+				ovals.elems[j] = rubyKeyOut(keys.elems[i])
 				continue
 			}
 			okeys.elems = append(okeys.elems, rubySV(vals.elems[i]))
-			ovals.elems = append(ovals.elems, keys.elems[i])
+			ovals.elems = append(ovals.elems, rubyKeyOut(keys.elems[i]))
 		}
 		return out, true
 	case "key":
 		for i := range vals.elems {
 			if rt.rubyEq(vals.elems[i], argAt(pos, 0)) {
-				return keys.elems[i], true
+				return rubyKeyOut(keys.elems[i]), true
 			}
 		}
 		return jsNull, true
@@ -11812,7 +11823,7 @@ func (rt *jsrt) rubyHashMethod(o *jsObject, keys, vals *jsArray, name string, ar
 		delete(out.props, "__hdefp")
 		okeys, ovals, _ := dictParts(out)
 		for i := range keys.elems {
-			nk := rt.call(blk, jsUndef, []interface{}{keys.elems[i]})
+			nk := rt.call(blk, jsUndef, []interface{}{rubyKeyOut(keys.elems[i])})
 			if j := rt.rubyDictFind(okeys, nk); j >= 0 {
 				ovals.elems[j] = vals.elems[i]
 				continue
@@ -12427,6 +12438,30 @@ func (rt *jsrt) rubyArrayMethod(t *jsArray, name string, args []interface{}) int
 			} else {
 				keys.elems = append(keys.elems, rubySV(e))
 				vals.elems = append(vals.elems, float64(1))
+			}
+		}
+		return d
+	// Array#to_h: every element (or the block's answer for it) is a [key, value]
+	// pair. Twin of to_h in ruby-interpreter.abnf's arrayMethod.
+	case "to_h":
+		d := rubyNewDict()
+		keys := d.props["keys"].(*jsArray)
+		vals := d.props["vals"].(*jsArray)
+		for i, e := range t.elems {
+			if blk != nil {
+				e = rt.call(blk, jsUndef, []interface{}{e})
+			}
+			pr, isArr := e.(*jsArray)
+			if !isArr {
+				rt.rubyRaiseErr(name, "TypeError", fmt.Sprintf("wrong element type %s at %d (expected array)", rubyOwnerName(e), i))
+			}
+			if len(pr.elems) != 2 {
+				rt.rubyRaiseErr(name, "ArgumentError", fmt.Sprintf("wrong array length at %d (expected 2, was %d)", i, len(pr.elems)))
+			}
+			if ix := rt.rubyDictFind(keys, pr.elems[0]); ix >= 0 {
+				vals.elems[ix] = pr.elems[1]
+			} else {
+				dictAppend(keys, vals, pr.elems[0], pr.elems[1])
 			}
 		}
 		return d

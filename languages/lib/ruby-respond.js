@@ -91,7 +91,7 @@ function rbRespondRows() {
          "reject", "reject!", "reverse", "reverse!", "reverse_each", "rindex", "rotate",
          "sample", "select", "select!", "send", "shift", "shuffle", "shuffle!", "size",
          "slice", "sort", "sort!", "sort_by", "sort_by!", "sum", "take", "take_while",
-         "tally", "to_a", "uniq", "uniq!", "unshift", "values_at", "zip", "|"],
+         "tally", "to_a", "to_h", "uniq", "uniq!", "unshift", "values_at", "zip", "|"],
         ["Hash", "<", "<=", "<=>", ">", ">=", "[]", "all?", "any?", "assoc", "clear",
          "clone", "collect", "collect_concat", "count", "default", "delete", "delete_if",
          "detect", "drop", "drop_while", "dup", "each", "each_cons", "each_key",

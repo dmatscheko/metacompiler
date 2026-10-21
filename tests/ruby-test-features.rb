@@ -1699,5 +1699,51 @@ check("send-toplevel-def", [self.send(:pe_h, 6), PeD.new.send(:pe_h, 2), PeD.new
 check("caseeq-by-name", ["a".===("a"), "a".send(:===, "b"), 5.===(5), Integer.===(3), (1..3).===(2),
                          /a/.===("cat"), String.send(:===, 1)], [true, false, true, true, true, true, false])
 
+# ----- Array#to_h, define_method by String name, frozen Strings -----
+# A Hash key is a frozen copy of the String it was stored under; nil, true, false,
+# a Symbol and a number are frozen; `# frozen_string_literal: true' (in the
+# required file) freezes that file's literals and shares the plain ones. Ruby-2
+# forms; every want is /usr/bin/ruby 2.6.10's answer.
+th_p = [["x", 1], [:y, 2], ["x", 3]]
+check("array-to-h", [th_p.to_h, [].to_h, [1, 2].to_h { |x| [x, x * 2] }, {a: 1}.to_h { |k, v| [v, k] },
+                     [].respond_to?(:to_h)], [{"x" => 3, :y => 2}, {}, {1 => 2, 2 => 4}, {1 => :a}, true])
+th_e = [[1], [[1, 2, 3]]].map do |a|
+  begin
+    a.to_h
+  rescue TypeError, ArgumentError => e
+    "#{e.class}: #{e.message}"
+  end
+end
+check("array-to-h-errors", th_e, ["TypeError: wrong element type Integer at 0 (expected array)",
+                                  "ArgumentError: wrong array length at 0 (expected 2, was 3)"])
+class DmC
+  define_method("dm_str") { 42 }
+  define_method('dm_sq') { |a, b| a + b }
+  define_method(:dm_q?) { true }
+end
+check("define-method-names", [DmC.new.dm_str, DmC.new.dm_sq(1, 2), DmC.new.dm_q?], [42, 3, true])
+fk_k = "key"
+fk_h = {fk_k => 1, :s => 2}
+fk_k2 = fk_h.keys[0]
+fk_err = begin
+  fk_k2 << "x"
+  "none"
+rescue FrozenError => e
+  e.message
+end
+fk_fz = []
+fk_h.each { |k, v| fk_fz << k.frozen? }
+check("frozen-hash-key", [fk_err, fk_k.frozen?, fk_h.first[0].frozen?, fk_h.key(1).frozen?, fk_h.invert[1].frozen?, fk_fz],
+      ["can't modify frozen String", false, true, true, true, [true, true]])
+check("frozen-immediates", [nil.frozen?, true.frozen?, false.frozen?, :s.frozen?, 1.frozen?, [].frozen?],
+      [true, true, true, true, true, false])
+require_relative 'imports/frozenlit'
+check("frozen-magic-comment", [fzl_lit.frozen?, fzl_interp(1).frozen?, fzl_words[1].frozen?, fzl_heredoc.frozen?,
+                               fzl_append, "lit".frozen?, fzl_lit.dup.frozen?],
+      [true, true, true, true, "can't modify frozen String", false, false])
+check("frozen-magic-shared", [fzl_lit.equal?(fzl_lit), fzl_interp(1).equal?(fzl_interp(1)), fzl_words[0].equal?(fzl_words[0])],
+      [true, false, true])
+
 puts "features: #{FEAT[0]} checks, #{FEAT[1]} failures"
+
 exit(FEAT[1])

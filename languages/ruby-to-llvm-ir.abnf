@@ -233,7 +233,10 @@ DefineMethodStmt <~~ push(makeDefineMethod(takeAll())) ~~>
 DmBody      = KwDo [ BlockParams ] BlockBody End
             | "{" [ BlockParams ] BlockBody "}" ;
 DmName      = "(" DmSym ")" | DmSym ;
-DmSym       = ":" SymName <~~ push(up.in) ~~> ;
+// The name is a Symbol or a String literal without interpolation (MRI takes both).
+DmSym       = ":" SymNameSfx <~~ push(up.in) ~~>
+            | "\"" :whitespace() SymNameSfx <~~ push(up.in) ~~> "\"" :whitespace(Whitespace)
+            | "'" :whitespace() SymNameSfx <~~ push(up.in) ~~> "'" :whitespace(Whitespace) ;
 // include M / extend M / prepend M.
 MixinStmt   <~~ var n = takeAll(); push({mixkind: n[0], mixname: n[1]}) ~~>
             = MixKind MixName ;
@@ -1194,7 +1197,7 @@ TopConst    <~~ push(makeScopedConst(up.in.substring(2))) ~~>
 // whitespace into an array of strings / symbols. Each form accepts the three usual
 // delimiter pairs ( ) [ ] { }; the body characters are spelled out per delimiter,
 // because the dialect has no parameterized rules.
-PercentLit  <~~ push(makePctLit(pop())) ~~>
+PercentLit  <~~ push(makePctLit(pop(), rbMgInterp(up.in))) ~~>
             = PctQ | PctW | PctI | PctBigQ | PctBigW | PctBigI | PctR | PctBare | PctAny ;
 // A % literal with an ARBITRARY delimiter. Ruby lets any non-alphanumeric character
 // delimit one (`%!a!`, `%@a@`, `%#a#`, `%r)a)`), and lets %s and %x use the bracket
@@ -1375,7 +1378,7 @@ PctBrcPlain = "\x00"..."\x22" | "\x24"..."\x5b" | "\x5d"..."\x7a" | "\x7c" | "\x
 // it (`f(<<~A, x)`, `<<~A + <<~B`), which would need the body to be consumed at the
 // END of the line rather than at the marker; HdScan refuses those rather than
 // mis-parsing them, so they stay an honest parse failure.
-HeredocLit  <~~ push(makeStrLit(makeHeredoc(up.in))) ~~>
+HeredocLit  <~~ push(makeStrLit(makeHeredoc(up.in), rbMgInterp(up.in))) ~~>
             = HdScan :whitespace(Whitespace) ;
 HdScan = :script(~~
     (function() {
@@ -1494,7 +1497,7 @@ HdScan = :script(~~
 //     where the line ends) matches the body lines and fills the oldest queued box.
 // Tags run on a WALK of the finished parse tree, left to right, so the queue is in
 // source order and nothing a rolled-back alternative did can reach it.
-HeredocRef  <~~ push(makeStrLit(makeHeredocRef(up.in))) ~~>
+HeredocRef  <~~ push(makeStrLit(makeHeredocRef(up.in), true)) ~~>
             = HdMarkScan :whitespace(Whitespace) ;
 HdMarkScan = :script(~~
     (function() {
@@ -1729,7 +1732,7 @@ RePipPlain  = "\x00"..."\x22" | "\x24"..."\x5b" | "\x5d"..."\x7b" | "\x7d"..."\U
 
 // ?a / ?\n: the one-character string literal. The body may not start with a space,
 // which is exactly what keeps the ternary `c ? a : b` out of it.
-CharLit     <~~ push(makeStrLit(makeConst(charLitVal(up.in)))) ~~>
+CharLit     <~~ push(makeStrLit(makeConst(charLitVal(up.in)), false)) ~~>
             = "?" :whitespace() CharBody :whitespace(Whitespace) ;
 // ?\C-z / ?\M-\C-z: the control and meta forms of a character literal. Longest first
 // (PEG), or the plain escape below would take the backslash and leave the rest.
@@ -2076,7 +2079,8 @@ SymName     = ( "a"..."z" | "A"..."Z" | "_" | "\x7f"..."\U0010ffff" ) :whitespac
 
 // Two string literals that are only separated by whitespace are ONE string in Ruby
 // ("a" 'd' is "ad"), so a string primary is a run of pieces.
-StrLit      <~~ push(makeStrLit(makeAdjacent(takeAll()))) ~~>
+StrLit      <~~ push(makeStrLit(makeAdjacent(takeAll()), rbMgInterp(up.in))) ~~>
+
             = StrPiece { StrPiece } ;
 StrPiece    = DqStr | SqStr ;
 
@@ -2448,6 +2452,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // The builtin method names, for a bare name inside a method added to a builtin
     // class (builtinSelfMethod).
     include("lib/ruby-respond.js")
+    // The `# frozen_string_literal: true' magic comment (makeStrLit).
+    include("lib/ruby-magic.js")
 
     var hidCount = 0
     // The argument array of the function being emitted (js_rblock reads the block out
@@ -5821,19 +5827,19 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     }
     // A string literal is a fresh MUTABLE String at every evaluation (js_rsnew); a
     // %-literal is one too, and a %w array holds fresh ones. Twin of makeStrLit /
-    // makePctLit in ruby-interpreter.abnf, which says why a String is a box.
-    function makeStrLit(t) {
+    // makePctLit in ruby-interpreter.abnf, which says why a String is a box. Under
+    // `# frozen_string_literal: true' both are js_rsfz's frozen literal instead.
+    function makeStrLit(t, dyn) { return makeLitVia(t, dyn, "js_rsnew") }
+    function makePctLit(t, dyn) { return makeLitVia(t, dyn, "js_rspct") }
+    function makeLitVia(t, dyn, ext) {
+        var fz = rbFrozenLits()
         return function(b) {
             var r = t(b)
-            return {b: r.b, v: callExt(r.b, "js_rsnew", [r.v])}
+            if (fz) { return {b: r.b, v: callExt(r.b, "js_rsfz", [r.v, dyn ? hFalse : hTrue])} }
+            return {b: r.b, v: callExt(r.b, ext, [r.v])}
         }
     }
-    function makePctLit(t) {
-        return function(b) {
-            var r = t(b)
-            return {b: r.b, v: callExt(r.b, "js_rspct", [r.v])}
-        }
-    }
+
     // "a" 'd' is one string: adjacent literal pieces concatenate.
     function makeAdjacent(items) {
         if (items.length == 1) { return items[0] }

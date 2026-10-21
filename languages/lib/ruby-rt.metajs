@@ -321,6 +321,30 @@ function js_rsprom(o, k, v) {
     return nb
 }
 function js_rsnew(s) { return rbMkRStr(rbStr(s), false) }
+// A literal under `# frozen_string_literal: true'. Twin of rubyFzLit in
+// abnf/jsrtruby.go, which states the rule.
+var rbFzLits = {}
+function js_rsfz(v, shared) {
+    if (rbIsArr(v)) {
+        var out = []
+        var i = 0
+        while (i < v.length) {
+            out.push(js_rsfz(v[i], shared))
+            i = i + 1
+        }
+        return out
+    }
+    if (typeof v != "string") { return v }
+    if (shared !== true) { return rbMkRStr(v, true) }
+    var k = "$" + v
+    var got = rbFzLits[k]
+    if (got === undefined) {
+        got = rbMkRStr(v, true)
+        rbFzLits[k] = got
+    }
+    return got
+}
+
 // A %-literal: a String is a fresh box, a %w Array a fresh Array of fresh boxes.
 function js_rspct(v) {
     if (typeof v == "string") { return rbMkRStr(v, false) }
@@ -5933,12 +5957,20 @@ function rbEnumMethod(t, name, args) {
 // of mcall in ruby-interpreter.abnf and rubyHashMethod of abnf/jsrt.go.
 var rbHashUnknown = {__hashunknown: true}
 
+// A Hash key as a reader sees it: a String key is stored as its text and read out
+// FROZEN. Twin of rubyKeyOut in abnf/jsrtruby.go, which states the rule.
+function rbKeyOut(k) {
+    if (typeof k == "string") { return rbMkRStr(k, true) }
+    return k
+}
+
 // The [key, value] pair list a Hash yields to every Enumerable method.
 function rbHashPairs(keys, vals) {
+
     var out = []
     var i = 0
     while (i < keys.length) {
-        out.push([keys[i], vals[i]])
+        out.push([rbKeyOut(keys[i]), vals[i]])
         i = i + 1
     }
     return out
@@ -6028,7 +6060,10 @@ function rbHashMethod(o, keys, vals, name, args) {
         return mg
     }
     if (name == "dup" || name == "clone") { return rbHashCopy(o) }
-    if (name == "to_h" && blk === null) { return o }
+    if (name == "to_h") {
+        if (blk === null) { return o }
+        return rbArrayMethod(rbHashPairs(keys, vals), name, args)
+    }
     if (name == "delete") {
         var di = rbDictFind(keys, rbArgAt(args, 0))
         if (di < 0) {
@@ -6056,14 +6091,14 @@ function rbHashMethod(o, keys, vals, name, args) {
     if (name == "each_pair") {
         if (blk === null) { return rbEnumAt(rbMkEnum(rbHashPairs(keys, vals)), o, name, args) }
         while (i < keys.length) {
-            rbCall2(blk, keys[i], vals[i])
+            rbCall2(blk, rbKeyOut(keys[i]), vals[i])
             i = i + 1
         }
         return o
     }
     if (name == "each_key") {
         while (i < keys.length) {
-            rbCall1(blk, keys[i])
+            rbCall1(blk, rbKeyOut(keys[i]))
             i = i + 1
         }
         return o
@@ -6089,14 +6124,14 @@ function rbHashMethod(o, keys, vals, name, args) {
     if (name == "invert") {
         var iv = js_dict_new()
         while (i < keys.length) {
-            rbDictSet(iv, vals[i], keys[i])
+            rbDictSet(iv, vals[i], rbKeyOut(keys[i]))
             i = i + 1
         }
         return iv
     }
     if (name == "key") {
         while (i < vals.length) {
-            if (rbEq(vals[i], rbArgAt(args, 0))) { return keys[i] }
+            if (rbEq(vals[i], rbArgAt(args, 0))) { return rbKeyOut(keys[i]) }
             i = i + 1
         }
         return null
@@ -6112,7 +6147,7 @@ function rbHashMethod(o, keys, vals, name, args) {
     if (name == "transform_keys") {
         var tk = js_dict_new()
         while (i < keys.length) {
-            rbDictSet(tk, rbCall1(blk, keys[i]), vals[i])
+            rbDictSet(tk, rbCall1(blk, rbKeyOut(keys[i])), vals[i])
             i = i + 1
         }
         return tk
@@ -6459,6 +6494,25 @@ function rbArrayMethod(t, name, args) {
             ti = ti + 1
         }
         return td
+    }
+    // Array#to_h. Twin of rubyArrayMethod's to_h in abnf/jsrt.go.
+    if (name == "to_h") {
+        var hd = rbNewDict()
+        var hi = 0
+        while (hi < t.length) {
+            var pr = anytype
+            pr = t[hi]
+            if (blk !== null) { pr = rbCall1(blk, pr) }
+            if (!rbIsArr(pr)) {
+                rbRaiseErr(name, "TypeError", "wrong element type " + rbOwnerName(pr) + " at " + hi + " (expected array)")
+            }
+            if (pr.length != 2) {
+                rbRaiseErr(name, "ArgumentError", "wrong array length at " + hi + " (expected 2, was " + pr.length + ")")
+            }
+            rbDictSet(hd, pr[0], pr[1])
+            hi = hi + 1
+        }
+        return hd
     }
     if (name == "flatten" || name == "flatten!") {
         var fdepth = nPos == 0 ? 0 - 1 : Math.trunc(rbToF(args[0]))
@@ -7143,8 +7197,13 @@ function rbMethod(target, name, args) {
         }
     }
     // A String a method built is not frozen (MRI 2.6 without the magic comment);
-    // a box answers its own flag before this.
-    if (name == "frozen?") { return rbIsNum(target) }
+    // a box answers its own flag before this. nil, true, false, a Symbol and a
+    // number are frozen.
+    if (name == "frozen?") {
+        if (rtIsNil(target) || target === true || target === false) { return true }
+        return rbIsSym(target) || rbIsNum(target)
+    }
+
     if (name == "equal?") { return rbIdenticalP(target, rbArgAt(args, 0)) }
     if (name == "eql?" && rbFindMethod(target, name) === undefined) {
         if (rbRespondClass(target) == "" || rbIsFn(target)) { return rbIdenticalP(target, rbArgAt(args, 0)) }
@@ -7320,17 +7379,17 @@ function rbMethod(target, name, args) {
             var vals = target["vals"]
             if (name == "inspect") { return rbInspect(target) }
             if (name == "size" || name == "length") { return keys.length }
-            if (name == "keys") { return rtCopyArr(keys) }
-            if (name == "values") { return rtCopyArr(vals) }
-            if (name == "to_a" || name == "entries") {
-                var pairs = []
-                var p = 0
-                while (p < keys.length) {
-                    pairs.push([keys[p], vals[p]])
-                    p = p + 1
+            if (name == "keys") {
+                var ks = []
+                var kp = 0
+                while (kp < keys.length) {
+                    ks.push(rbKeyOut(keys[kp]))
+                    kp = kp + 1
                 }
-                return pairs
+                return ks
             }
+            if (name == "values") { return rtCopyArr(vals) }
+            if (name == "to_a" || name == "entries") { return rbHashPairs(keys, vals) }
             // Hash#[] as a METHOD (h.send(:[], k)); the subscript itself goes through
             // js_rget. String and Array answer it too.
             if (name == "[]") { return js_rget(target, rbArgAt(args, 0)) }
@@ -7342,7 +7401,7 @@ function rbMethod(target, name, args) {
                 if (eblk === null) { return rbEnumAt(rbMkEnum(rbHashPairs(keys, vals)), target, name, args) }
                 var e = 0
                 while (e < keys.length) {
-                    rbCall2(eblk, keys[e], vals[e])
+                    rbCall2(eblk, rbKeyOut(keys[e]), vals[e])
                     e = e + 1
                 }
                 return target

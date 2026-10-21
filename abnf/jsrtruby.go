@@ -1291,7 +1291,7 @@ var rubyRespondNames = map[string][]string{
 		"partition", "permutation", "pop", "prepend", "product", "public_send", "push", "reduce",
 		"reject", "reject!", "reverse", "reverse!", "reverse_each", "rindex", "rotate", "sample",
 		"select", "select!", "send", "shift", "shuffle", "shuffle!", "size", "slice", "sort",
-		"sort!", "sort_by", "sort_by!", "sum", "take", "take_while", "tally", "to_a", "uniq",
+		"sort!", "sort_by", "sort_by!", "sum", "take", "take_while", "tally", "to_a", "to_h", "uniq",
 		"uniq!", "unshift", "values_at", "zip", "|"},
 	"Hash": {"<", "<=", "<=>", ">", ">=", "[]", "all?", "any?", "assoc", "clear", "clone",
 		"collect", "collect_concat", "count", "default", "delete", "delete_if", "detect", "drop",
@@ -2258,6 +2258,17 @@ func rubySV(v interface{}) interface{} {
 	return v
 }
 
+// rubyKeyOut is a Hash key as a reader sees it. A String key is stored as its
+// text (dictAppend) and read out as a FROZEN String, which is what MRI's key - a
+// frozen copy of the String it was stored under - is. Twin of keyOut in
+// ruby-interpreter.abnf and rbKeyOut in lib/ruby-rt.metajs.
+func rubyKeyOut(k interface{}) interface{} {
+	if s, ok := k.(string); ok {
+		return &jsRStr{s: s, fz: true}
+	}
+	return k
+}
+
 // rubySVArgs is rubySV over an argument list, copying only when a box is in it.
 func rubySVArgs(args []interface{}) []interface{} {
 	for i, a := range args {
@@ -2476,11 +2487,42 @@ func rubyPctLit(v interface{}) interface{} {
 	return v
 }
 
+// rubyFzLit is a literal's value under `# frozen_string_literal: true`: a frozen
+// String - the same object for the same text when the literal does not
+// interpolate - and for %w an Array of them. Twin of fzLit in
+// ruby-interpreter.abnf and js_rsfz in lib/ruby-rt.metajs.
+func (rt *jsrt) rubyFzLit(v interface{}, shared bool) interface{} {
+	switch t := v.(type) {
+	case *jsArray:
+		out := &jsArray{}
+		for _, e := range t.elems {
+			out.elems = append(out.elems, rt.rubyFzLit(e, shared))
+		}
+		return out
+	case string:
+		if !shared {
+			return &jsRStr{s: t, fz: true}
+		}
+		if b, ok := rt.rubyFzLits[t]; ok {
+			return b
+		}
+		if rt.rubyFzLits == nil {
+			rt.rubyFzLits = map[string]*jsRStr{}
+		}
+		b := &jsRStr{s: t, fz: true}
+		rt.rubyFzLits[t] = b
+		return b
+	}
+	return v
+}
+
 func init() {
 	rxExtraExterns = append(rxExtraExterns, func(rt *jsrt, m map[string]func(args []uint64) uint64) {
 		u := rt.unwrap
 		w := rt.wrap
 		m["js_rsnew"] = func(a []uint64) uint64 { return w(&jsRStr{s: rt.rubyStr(u(a[0]))}) }
+		m["js_rsfz"] = func(a []uint64) uint64 { return w(rt.rubyFzLit(u(a[0]), u(a[1]) == true)) }
+
 		m["js_rspct"] = func(a []uint64) uint64 { return w(rubyPctLit(u(a[0]))) }
 		m["js_rsprom"] = func(a []uint64) uint64 { return w(rt.rubyStrPromote(u(a[0]), u(a[1]), u(a[2]))) }
 		// A bare `.to_s': js_rstr, except that a String box answers itself.

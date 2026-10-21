@@ -1169,7 +1169,7 @@ ScopedConst <~~ push(makeScopedConst(up.in)) ~~>
 // it (`f(<<~A, x)`, `<<~A + <<~B`), which would need the body to be consumed at the
 // END of the line rather than at the marker; HdScan refuses those rather than
 // mis-parsing them, so they stay an honest parse failure.
-HeredocLit  <~~ push(makeStrLit(makeHeredoc(up.in))) ~~>
+HeredocLit  <~~ push(makeStrLit(makeHeredoc(up.in), rbMgInterp(up.in))) ~~>
             = HdScan :whitespace(Whitespace) ;
 HdScan = :script(~~
     (function() {
@@ -1288,7 +1288,7 @@ HdScan = :script(~~
 //     where the line ends) matches the body lines and fills the oldest queued box.
 // Tags run on a WALK of the finished parse tree, left to right, so the queue is in
 // source order and nothing a rolled-back alternative did can reach it.
-HeredocRef  <~~ push(makeStrLit(makeHeredocRef(up.in))) ~~>
+HeredocRef  <~~ push(makeStrLit(makeHeredocRef(up.in), true)) ~~>
             = HdMarkScan :whitespace(Whitespace) ;
 HdMarkScan = :script(~~
     (function() {
@@ -1456,7 +1456,7 @@ HdBodyScan = :script(~~
 // whitespace into an array of strings / symbols. Each form accepts the three usual
 // delimiter pairs ( ) [ ] { }; the body characters are spelled out per delimiter,
 // because the dialect has no parameterized rules.
-PercentLit  <~~ push(makePctLit(pop())) ~~>
+PercentLit  <~~ push(makePctLit(pop(), rbMgInterp(up.in))) ~~>
             = PctQ | PctW | PctI | PctBigQ | PctBigW | PctBigI | PctR | PctBare | PctAny ;
 // A % literal with an ARBITRARY delimiter. Ruby lets any non-alphanumeric character
 // delimit one (`%!a!`, `%@a@`, `%#a#`, `%r)a)`), and lets %s and %x use the bracket
@@ -1699,7 +1699,7 @@ RePipPlain  = "\x00"..."\x22" | "\x24"..."\x5b" | "\x5d"..."\x7b" | "\x7d"..."\U
 
 // ?a / ?\n: the one-character string literal. The body may not start with a space,
 // which is exactly what keeps the ternary `c ? a : b` out of it.
-CharLit     <~~ push(makeStrLit(makeConst(charLitVal(up.in)))) ~~>
+CharLit     <~~ push(makeStrLit(makeConst(charLitVal(up.in)), false)) ~~>
             = "?" :whitespace() CharBody :whitespace(Whitespace) ;
 // ?\C-z / ?\M-\C-z: the control and meta forms of a character literal. Longest first
 // (PEG), or the plain escape below would take the backslash and leave the rest.
@@ -2047,7 +2047,8 @@ SymName     = ( "a"..."z" | "A"..."Z" | "_" | "\x7f"..."\U0010ffff" ) :whitespac
 
 // Two string literals that are only separated by whitespace are ONE string in Ruby
 // ("a" 'd' is "ad"), so a string primary is a run of pieces.
-StrLit      <~~ push(makeStrLit(makeAdjacent(takeAll()))) ~~>
+StrLit      <~~ push(makeStrLit(makeAdjacent(takeAll()), rbMgInterp(up.in))) ~~>
+
             = StrPiece { StrPiece } ;
 StrPiece    = DqStr | SqStr ;
 
@@ -2410,6 +2411,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // Ruby runtime error.
     include("lib/regex.js")
     include("lib/ruby-respond.js")
+    include("lib/ruby-magic.js")
     rxFail = function (msg) { fail(msg) }
 
     // String#to_f and Float(String), MRI's rb_cstr_to_dbl (rbnStrToDbl).
@@ -3605,15 +3607,37 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         for (var i = 0; i < a.length; i++) { out.push(rsText(a[i])) }
         return out
     }
-    // A string literal: a fresh box at every evaluation, as MRI allocates one.
-    function makeStrLit(t) { return function() { return mkRStr(rstr(t())) } }
+    // A string literal: a fresh box at every evaluation, as MRI allocates one. Under
+    // `# frozen_string_literal: true' (lib/ruby-magic.js) it is frozen instead, and
+    // one shared object per text unless it interpolates (dyn).
+    function makeStrLit(t, dyn) {
+        if (rbFrozenLits()) { return function() { return fzLit(rstr(t()), !dyn) } }
+        return function() { return mkRStr(rstr(t())) }
+    }
+    // The frozen literal. Twins: rubyFzLit in abnf/jsrtruby.go, js_rsfz in
+    // lib/ruby-rt.metajs.
+    var fzLits = {}
+    function fzLit(v, shared) {
+        if (Array.isArray(v)) {
+            var out = []
+            for (var i = 0; i < v.length; i++) { out.push(fzLit(v[i], shared)) }
+            return out
+        }
+        if (typeof v != "string") { return v }
+        if (!shared) { return {__rs: v, __fz: true} }
+        var k = "$" + v
+        if (!hasOwn(fzLits, k)) { fzLits[k] = {__rs: v, __fz: true} }
+        return fzLits[k]
+    }
     // %q / %Q / %w / %W are fresh Strings too (a %w array holds fresh boxes), while
     // %i, %s, %r and %x build no String at all.
-    function makePctLit(t) {
+    function makePctLit(t, dyn) {
+        if (rbFrozenLits()) { return function() { return fzLit(t(), !dyn) } }
         return function() {
             var v = anytype
             v = t()
             if (typeof v == "string") { return mkRStr(v) }
+
             if (!Array.isArray(v)) { return v }
             var out = []
             for (var i = 0; i < v.length; i++) { out.push(typeof v[i] == "string" ? mkRStr(v[i]) : v[i]) }
@@ -8453,7 +8477,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (name == "nil?") { return target === null || target === undefined }
         // A literal String is not frozen (MRI 2.6 without the magic comment), and
         // neither is one a method built; a box carries its own flag.
-        if (name == "frozen?") { return isRStr(target) ? target.__fz : (isSym(target) || isNumV(target)) }
+        // nil, true, false, a Symbol and a number are frozen; a box carries its flag.
+        if (name == "frozen?") {
+            if (target === null || target === undefined || typeof target == "boolean") { return true }
+            return isRStr(target) ? target.__fz : (isSym(target) || isNumV(target))
+        }
         if (name == "equal?") { return identicalP(target, args[0]) }
         // Object#eql? is identity; a builtin value's is == within its own class.
         // Twins: the eql? arms of rubyMethod in abnf/jsrt.go and rbMethod in
@@ -8680,21 +8708,21 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (isDict(target)) {
             if (name == "inspect") { return rinspect(target) }
             if (name == "size" || name == "length") { return target.keys.length }
-            if (name == "keys") { return target.keys.slice(0) }
+            if (name == "keys") {
+                var dks = []
+                for (var dk = 0; dk < target.keys.length; dk++) { dks.push(keyOut(target.keys[dk])) }
+                return dks
+            }
             if (name == "values") { return target.vals.slice(0) }
             // Hash#to_a is the list of [key, value] PAIRS, as in MRI.
-            if (name == "to_a" || name == "entries") {
-                var dpairs = []
-                for (var dp = 0; dp < target.keys.length; dp++) { dpairs.push([target.keys[dp], target.vals[dp]]) }
-                return dpairs
-            }
+            if (name == "to_a" || name == "entries") { return hashPairs(target) }
             // Hash#[] as a METHOD (h.send(:[], k)); the subscript itself goes through
             // rindex. String and Array answer it too.
             if (name == "[]") { return rindex(target, args[0]) }
             if (name == "include?" || name == "has_key?" || name == "key?") { return dictFind(target, args[0]) >= 0 }
             if (name == "each") {
                 if (blk == null) { return enumAt(mkEnum(hashPairs(target)), target, name, args) }
-                for (var di = 0; di < target.keys.length; di++) { blockCall(blk, [target.keys[di], target.vals[di]]) }
+                for (var di = 0; di < target.keys.length; di++) { blockCall(blk, [keyOut(target.keys[di]), target.vals[di]]) }
                 return target
             }
             // Hash#default is the value Hash.new(v) recorded; a hash built with a
@@ -8731,7 +8759,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 return mg
             }
             if (name == "dup" || name == "clone") { return hashCopy(target) }
-            if (name == "to_h" && blk == null) { return target }
+            // Hash#to_h with a block maps each pair through it, as Array#to_h does.
+            if (name == "to_h") { return blk == null ? target : arrayMethod(hashPairs(target), name, args, blk) }
             if (name == "delete") {
                 var xi = dictFind(target, args[0])
                 if (xi < 0) { return blk != null ? blockCall(blk, [args[0]]) : null }
@@ -8749,11 +8778,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (name == "clear") { arrReplace(target.keys, []); arrReplace(target.vals, []); return target }
             if (name == "each_pair") {
                 if (blk == null) { return enumAt(mkEnum(hashPairs(target)), target, name, args) }
-                for (var ep = 0; ep < target.keys.length; ep++) { blockCall(blk, [target.keys[ep], target.vals[ep]]) }
+                for (var ep = 0; ep < target.keys.length; ep++) { blockCall(blk, [keyOut(target.keys[ep]), target.vals[ep]]) }
                 return target
             }
             if (name == "each_key") {
-                for (var ek = 0; ek < target.keys.length; ek++) { blockCall(blk, [target.keys[ek]]) }
+                for (var ek = 0; ek < target.keys.length; ek++) { blockCall(blk, [keyOut(target.keys[ek])]) }
                 return target
             }
             if (name == "each_value") {
@@ -8772,11 +8801,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             }
             if (name == "invert") {
                 var iv = {__dict: true, keys: [], vals: []}
-                for (var ii = 0; ii < target.keys.length; ii++) { dictSet(iv, rsText(target.vals[ii]), target.keys[ii]) }
+                for (var ii = 0; ii < target.keys.length; ii++) { dictSet(iv, rsText(target.vals[ii]), keyOut(target.keys[ii])) }
                 return iv
             }
             if (name == "key") {
-                for (var ky = 0; ky < target.vals.length; ky++) { if (rubyEq(target.vals[ky], args[0])) { return target.keys[ky] } }
+                for (var ky = 0; ky < target.vals.length; ky++) { if (rubyEq(target.vals[ky], args[0])) { return keyOut(target.keys[ky]) } }
                 return null
             }
             if (name == "transform_values") {
@@ -8786,7 +8815,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             }
             if (name == "transform_keys") {
                 var tk = {__dict: true, keys: [], vals: []}
-                for (var tj = 0; tj < target.keys.length; tj++) { dictSet(tk, rsText(blockCall(blk, [target.keys[tj]])), target.vals[tj]) }
+                for (var tj = 0; tj < target.keys.length; tj++) { dictSet(tk, rsText(blockCall(blk, [keyOut(target.keys[tj])])), target.vals[tj]) }
                 return tk
             }
             // Everything else Enumerable is answered over the [key, value] PAIRS,
@@ -9180,9 +9209,17 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // The [key, value] pair list a Hash yields to every Enumerable method.
     function hashPairs(o) {
         var out = []
-        for (var i = 0; i < o.keys.length; i++) { out.push([o.keys[i], o.vals[i]]) }
+        for (var i = 0; i < o.keys.length; i++) { out.push([keyOut(o.keys[i]), o.vals[i]]) }
         return out
     }
+    // A Hash key as a reader sees it: a String key is stored as its text and read
+    // out FROZEN, as MRI's key is a frozen copy. Twins: rubyKeyOut in
+    // abnf/jsrtruby.go, rbKeyOut in lib/ruby-rt.metajs.
+    function keyOut(k) {
+        if (typeof k == "string") { return {__rs: k, __fz: true} }
+        return k
+    }
+
     // A shallow copy that KEEPS THE DEFAULT: MRI's Hash#dup, #clone and #merge all
     // carry the receiver's default value / default_proc into the new Hash.
     function hashCopy(o) {
@@ -9559,6 +9596,23 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 if (tix < 0) { dictSet(td, rsText(t[i]), 1) } else { td.vals[tix] = td.vals[tix] + 1 }
             }
             return td
+        }
+        // Array#to_h: every element (or the block's answer for it) is a [key, value]
+        // pair; a later duplicate key overwrites. Twin of rbArrToH / rubyArrToH.
+        if (name == "to_h") {
+            var hd = {__dict: true, keys: [], vals: []}
+            for (i = 0; i < t.length; i++) {
+                var pr = anytype
+                pr = blk != null ? blockCall(blk, [t[i]]) : t[i]
+                if (!Array.isArray(pr)) {
+                    raiseErr(name, "TypeError", "wrong element type " + classOf(pr).__name + " at " + i + " (expected array)")
+                }
+                if (pr.length != 2) {
+                    raiseErr(name, "ArgumentError", "wrong array length at " + i + " (expected 2, was " + pr.length + ")")
+                }
+                dictSet(hd, rsText(pr[0]), pr[1])
+            }
+            return hd
         }
         if (name == "flatten" || name == "flatten!") {
             var fdepth = args.length == 0 ? -1 : Math.trunc(toF(args[0]))
