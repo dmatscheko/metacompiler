@@ -27,14 +27,15 @@
 #
 # 3. -callgraph names each definition by its HEADER line, not by its body's
 #    first statement (DEF_CASES): every header line is reported. Extra lines are
-#    allowed, as above - go's function body is a closure of its own, named by
-#    its first statement. A NAME@LINE entry also demands the definition there
+#    allowed, as above. A NAME@LINE entry also demands the definition there
 #    carry its source name, not the IR function's (jsf_N): each swift overload
 #    its own name at its own line, a module top level run as a closure <module>.
 #
-# 4. -callgraph recovers the static call edges top -> g -> h (EDGE_CASES),
-#    whichever helper a compiler reads a name through, and does not report that
-#    helper as a callee.
+# 4. -callgraph recovers the static call edges top -> m -> g -> h (EDGE_CASES),
+#    m a method called through the language's own method-call extern, whichever
+#    helper a compiler reads a name through. Runtime fabric - a compiler's helper
+#    functions, the jsnum.N constant builders, the entry function - is neither a
+#    definition nor an edge end; the entry's edges come from (top) or <module>.
 #
 # A language in the list below that emits NO markers at all is a FAILURE: the
 # list is exactly the handle-IR compilers, all of which are supposed to have
@@ -208,34 +209,37 @@ done
 
 # LANG:EXT:the FROM->TO call edges -callgraph must recover from edge_src_for(),
 # and (!FROM->TO) edges it must not report: a compiler's own name-access helper
-# (py_getvar, sw_kget, ...) is runtime fabric, not a callee.
+# (py_getvar, sw_kget, ...) is runtime fabric, not a callee; python's entry calls
+# main() only when the module defines one.
 EDGE_CASES=(
-    "python:py:<module>->g g->h !<module>->py_getvar !g->py_getvar"
-    "ruby:rb:<module>->g g->h"
-    "php:php:phpmain->g g->h"
-    "js:js:main->g g->h"
-    "typescript:ts:main->g g->h"
+    "python:py:<module>->m m->g g->h !<module>->py_getvar !g->py_getvar !<module>->main !<module>->py_clsfill1"
+    "ruby:rb:<module>->m m->g g->h"
+    "php:php:(top)->m m->g g->h"
+    "js:js:(top)->main main->m m->g g->h"
+    "typescript:ts:(top)->main main->m m->g g->h"
     "metajs:metajs:main->g g->h"
     "lua:lua:<module>->g g->h !g->lua_getvar"
-    "dart:dart:main->g g->h !main->dt_kcall"
-    "kotlin:kt:main->g g->h"
-    "java:java:main->g g->h"
-    "csharp:cs:Main->g g->h"
-    "swift:swift:<module>->g g->h !<module>->sw_kget !g->sw_kget"
+    "dart:dart:(top)->main main->m m->g g->h !main->dt_kcall"
+    "kotlin:kt:(top)->main main->m m->g g->h"
+    "java:java:(top)->main main->m m->g g->h"
+    "csharp:cs:(top)->Main Main->M M->g g->h"
+    "swift:swift:<module>->m m->g g->h !<module>->sw_kget !g->sw_kget"
+    "go:go:(top)->main main->m m->g g->h"
 )
 edge_src_for() {
     case "$1" in
-    python) printf 'def h(a):\n    return a\ndef g(a):\n    return h(a)\nprint(g(1))\n' ;;
-    ruby)   printf 'def h(a)\n  a\nend\ndef g(a)\n  h(a)\nend\nputs g(1)\n' ;;
-    php)    printf '<?php\nfunction h($a) { return $a; }\nfunction g($a) { return h($a); }\necho g(1);\n' ;;
-    js|typescript) printf 'function h(a) { return a }\nfunction g(a) { return h(a) }\nfunction main() { g(1) }\n' ;;
+    python) printf 'def h(a):\n    return a\ndef g(a):\n    return h(a)\nclass C:\n    def m(self):\n        return g(1)\nprint(C().m())\n' ;;
+    ruby)   printf 'def h(a)\n  a\nend\ndef g(a)\n  h(a)\nend\nclass C\n  def m\n    g(1)\n  end\nend\nputs C.new.m\n' ;;
+    php)    printf '<?php\nfunction h($a) { return $a; }\nfunction g($a) { return h($a); }\nclass C { function m() { return g(1); } }\necho (new C())->m();\n' ;;
+    js|typescript) printf 'function h(a) { return a }\nfunction g(a) { return h(a) }\nclass C { m() { return g(1) } }\nfunction main() { new C().m() }\n' ;;
     metajs) printf 'function h(a) { return a }\nfunction g(a) { return h(a) }\nfunction main() { print(g(1)) }\n' ;;
     lua)    printf 'local function h(a) return a end\nlocal function g(a) return h(a) end\nprint(g(1))\n' ;;
-    dart)   printf 'int h(int a) { return a; }\nint g(int a) { return h(a); }\nvoid main() { print(g(1)); }\n' ;;
-    kotlin) printf 'fun h(a: Int): Int { return a }\nfun g(a: Int): Int { return h(a) }\nfun main() { println(g(1)) }\n' ;;
-    java)   printf 'public class Main {\n  static int h(int a) { return a; }\n  static int g(int a) { return h(a); }\n  public static void main(String[] x) { System.out.println(g(1)); }\n}\n' ;;
-    csharp) printf 'using System;\nclass Program {\n  static int h(int a) { return a; }\n  static int g(int a) { return h(a); }\n  static void Main() { Console.WriteLine(g(1)); }\n}\n' ;;
-    swift)  printf 'func h(_ a: Int) -> Int { return a }\nfunc h(_ a: String) -> String { return a }\nfunc g(_ a: Int) -> Int { return h(a) }\nlet r = g(1)\nprint(r)\n' ;;
+    dart)   printf 'int h(int a) { return a; }\nint g(int a) { return h(a); }\nclass C { int m() { return g(1); } }\nvoid main() { print(C().m()); }\n' ;;
+    kotlin) printf 'fun h(a: Int): Int { return a }\nfun g(a: Int): Int { return h(a) }\nclass C { fun m(): Int { return g(1) } }\nfun main() { println(C().m()) }\n' ;;
+    java)   printf 'public class Main {\n  static int h(int a) { return a; }\n  static int g(int a) { return h(a); }\n  int m() { return g(1); }\n  public static void main(String[] x) { System.out.println(new Main().m()); }\n}\n' ;;
+    csharp) printf 'using System;\nclass C {\n  public int M() { return Program.g(1); }\n}\nclass Program {\n  static int h(int a) { return a; }\n  public static int g(int a) { return h(a); }\n  static void Main() { Console.WriteLine(new C().M()); }\n}\n' ;;
+    swift)  printf 'func h(_ a: Int) -> Int { return a }\nfunc h(_ a: String) -> String { return a }\nfunc g(_ a: Int) -> Int { return h(a) }\nclass C {\n  func m() -> Int { return g(1) }\n}\nprint(C().m())\n' ;;
+    go)     printf 'package main\n\nimport "fmt"\n\nfunc h(a int) int { return a }\nfunc g(a int) int { return h(a) }\n\ntype T struct{}\n\nfunc (t T) m() int { return g(1) }\n\nfunc main() { fmt.Println(T{}.m()) }\n' ;;
     esac
 }
 for c in "${EDGE_CASES[@]}"; do
@@ -254,6 +258,8 @@ for c in "${EDGE_CASES[@]}"; do
     fi
     edges=$(grep '"ev":"scall"' "$cg" | sed -nE 's/.*"name":"([^"]*)","key":"([^"]*)".*/\1->\2/p' | sort -u | paste -sd' ' -)
     bad=""
+    fabric=$(grep -E '"ev":"s(def|call)"' "$cg" | grep -oE '"(name|key)":"(jsnum\.[0-9]+|jsmain|jsrun|phpmain|dartmain)"' | sed -E 's/.*:"(.*)"/\1/' | sort -u | paste -sd' ' -)
+    [ -n "$fabric" ] && bad="$bad runtime fabric reported: $fabric"
     for w in $want; do
         case "$w" in
         !*) case " $edges " in *" ${w#!} "*) bad="$bad $w" ;; esac ;;

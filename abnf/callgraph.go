@@ -203,8 +203,38 @@ var (
 // (the first js_arr_push into it) is the function to call.
 const cgTailCaller = "lua_tramp"
 
+// cgPassThrough answers its first argument (js's temporal-dead-zone check of a
+// `let`/`class` binding), so a name read through it is still that name.
+const cgPassThrough = "jstdzchk"
+
 func cgHelper(n string) bool {
 	return cgNameReaders[n] || cgNameWriters[n] || cgNameCallers[n] || cgValueCallers[n] || n == cgTailCaller
+}
+
+// cgMethodCall: every language's method-call extern takes (receiver, method
+// name, ...): js_mcall and its per-language variants (js_pymcall, js_swmcall,
+// js_phmcallv, ..., dart's js_dartnm).
+func cgMethodCall(n string) bool {
+	return n == "js_dartnm" || strings.HasPrefix(n, "js_") && (strings.HasSuffix(n, "mcall") || strings.HasSuffix(n, "mcallv"))
+}
+
+// cgEntryFuncs are the module entry functions the handle-IR compilers emit: the
+// shared jsmain (and its shared-scope variant jsrun), php's and dart's own.
+var cgEntryFuncs = map[string]bool{"jsmain": true, "jsrun": true, "phpmain": true, "dartmain": true}
+
+// cgUserFunc: in a handle-IR module every function of the program is a closure
+// body jsf_N; any other defined function (jsnum.N constant builders, sw_*,
+// lua_*, php_* helpers, ...) is runtime fabric.
+func cgUserFunc(n string) bool {
+	if !strings.HasPrefix(n, "jsf_") {
+		return false
+	}
+	for _, r := range n[4:] {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return len(n) > 4
 }
 
 // extractCallGraph walks a module and recovers definitions and call edges.
@@ -242,19 +272,61 @@ func extractCallGraph(m *ir.Module) ([]cgDef, []cgCall) {
 		}
 	}
 
-	// The module entry scaffolding (jsmain and the shared-scope variant jsrun) is
-	// not program structure: its edges come from "(top)" and it never registers
-	// as a definition.
-	scaffold := func(n string) bool { return n == "jsmain" || n == "jsrun" }
+	// The module entry scaffolding is not program structure: its edges come from
+	// "(top)" and it never registers as a definition. Several entries end by
+	// running the program as a closure through js_try / js_gotry (entryRun): the
+	// last such call of a block that returns. A top-level try statement of the
+	// program is never that call - its block goes on to dispatch the try's
+	// control signal.
+	handleIR := false
+	entryThunk := map[string]bool{}
+	definedFn := map[string]bool{}
+	hasMarker := map[string]bool{} // the function emits a statement marker
+	entryRun := map[value.Value]bool{}
+	for _, f := range m.Funcs {
+		if len(f.Blocks) > 0 {
+			definedFn[f.Name()] = true
+			handleIR = handleIR || cgUserFunc(f.Name()) || cgEntryFuncs[f.Name()]
+		}
+		if cgEntryFuncs[f.Name()] {
+			for _, b := range f.Blocks {
+				if _, ok := b.Term.(*ir.TermRet); !ok {
+					continue
+				}
+				for i := len(b.Insts) - 1; i >= 0; i-- {
+					if call, ok := b.Insts[i].(*ir.InstCall); ok {
+						if n := call.Callee.Ident(); n == "@js_try" || n == "@js_gotry" {
+							entryRun[call] = true
+							break
+						}
+					}
+				}
+			}
+		}
+	}
+	forEachCall(func(f *ir.Func, call *ir.InstCall, callee string) {
+		hasMarker[f.Name()] = hasMarker[f.Name()] || callee == "js_srcpos"
+	})
+	scaffold := func(n string) bool { return cgEntryFuncs[n] || entryThunk[n] }
 	fnName := map[string]string{} // jsf_N -> its source name
+	// A try statement runs its body, handler and finally block as closures
+	// through js_try, and go runs every function body as a closure through
+	// js_gotry (its frame holds the defer list): those closures are part of the
+	// function that creates them, which bodyOf maps them to.
+	bodyOf := map[string]string{}
+	// An unnamed closure the entry function creates before its first statement
+	// marker is a runtime hook (js_rt_deep's overflow reporter, python's uncaught
+	// handler) or a prelude initialiser: runtime fabric, not program code.
+	hook := map[string]bool{}
 
 	// Pass 1: string literals and closure creations (values compare by pointer).
 	var posFn *ir.Func
 	lastPos := -1
 	adj := false
+	marked := false // posFn has emitted a statement marker
 	forEachCall(func(f *ir.Func, call *ir.InstCall, callee string) {
 		if f != posFn {
-			posFn, lastPos, adj = f, -1, false
+			posFn, lastPos, adj, marked = f, -1, false, false
 		}
 		switch callee {
 		case "js_str_mem":
@@ -267,6 +339,7 @@ func extractCallGraph(m *ir.Module) ([]cgDef, []cgCall) {
 				if ci, ok := call.Args[0].(*constant.Int); ok {
 					lastPos = int(ci.X.Int64())
 					adj = true
+					marked = true
 					return
 				}
 			}
@@ -277,6 +350,9 @@ func extractCallGraph(m *ir.Module) ([]cgDef, []cgCall) {
 					closureFn[call] = fn
 					if _, seen := closureSite[fn]; !seen && lastPos >= 0 {
 						closureSite[fn] = cgSite{f, lastPos, adj}
+					}
+					if cgEntryFuncs[f.Name()] && !marked {
+						hook[fn] = true
 					}
 					lastPos = -1
 				}
@@ -291,13 +367,24 @@ func extractCallGraph(m *ir.Module) ([]cgDef, []cgCall) {
 				}
 			}
 			return
-		case "js_try":
-			// The try body the entry scaffold runs is the module top level (python
-			// and swift run the whole program inside one js_try); it is named as
-			// python's traceback names it.
-			if scaffold(f.Name()) && len(call.Args) > 0 {
-				if fn, ok := closureFn[call.Args[0]]; ok {
+		case "js_try", "js_gotry":
+			// The body the entry runs is the module top level (python and swift
+			// run the whole program inside one js_try); it is named as python's
+			// traceback names it. A body without statements only calls main
+			// (java, kotlin, C#, go): scaffolding. The entry's handler reports an
+			// uncaught exception: a runtime hook.
+			for i, a := range call.Args {
+				fn, ok := closureFn[a]
+				switch {
+				case !ok:
+				case !entryRun[call]:
+					bodyOf[fn] = f.Name()
+				case i == 0 && hasMarker[fn]:
 					fnName[fn] = "<module>"
+				case i == 0:
+					entryThunk[fn] = true
+				default:
+					hook[fn] = true
 				}
 			}
 		}
@@ -342,18 +429,26 @@ func extractCallGraph(m *ir.Module) ([]cgDef, []cgCall) {
 					}
 				}
 			}
+		case cgPassThrough:
+			if len(call.Args) >= 1 {
+				if s, ok := nameRead[call.Args[0]]; ok {
+					nameRead[call] = s
+					scopeRead[call] = scopeRead[call.Args[0]]
+				}
+			}
 		case "js_tdecl", "js_scope_decl", "js_pyset_var", "py_setvar", "sw_kset", "dt_kset", "kt_kset",
-			"js_tset", "js_scope_set", "js_kset", "js_set":
+			"js_tset", "js_scope_set", "js_kset", "js_set", "js_phmset":
 			if len(call.Args) >= 3 {
 				if fn, ok := closureFn[call.Args[2]]; ok {
-					if callee == "js_set" && !closureSite[fn].adj {
+					member := callee == "js_set" || callee == "js_phmset"
+					if member && !closureSite[fn].adj {
 						delete(closureSite, fn)
 					}
 					if s, ok2 := strOf[call.Args[1]]; ok2 {
 						if _, exists := fnName[fn]; !exists {
 							fnName[fn] = s
 						}
-						if callee != "js_set" {
+						if !member {
 							boundTo[s] = append(boundTo[s], fn)
 						}
 					}
@@ -361,11 +456,34 @@ func extractCallGraph(m *ir.Module) ([]cgDef, []cgCall) {
 			}
 		}
 	})
+	// root is the function a closure body belongs to (itself, if none).
+	root := func(n string) string {
+		for {
+			frame, ok := bodyOf[n]
+			if !ok {
+				return n
+			}
+			n = frame
+		}
+	}
 	display := func(irName string) string {
+		irName = root(irName)
 		if s, ok := fnName[irName]; ok {
 			return s
 		}
 		return irName
+	}
+	// Runtime fabric: neither a definition, nor a caller, nor a callee.
+	fabric := func(n string) bool {
+		n = root(n)
+		if !handleIR || scaffold(n) {
+			return false
+		}
+		if !cgUserFunc(n) {
+			return true
+		}
+		_, named := fnName[n]
+		return hook[n] && !named
 	}
 	// A function also bound under a compiler-made second name (a swift overload
 	// as "f$1" beside "f", a ruby method as "$d$f") is called through that name:
@@ -417,17 +535,24 @@ func extractCallGraph(m *ir.Module) ([]cgDef, []cgCall) {
 
 	var defs []cgDef
 	var calls []cgCall
+	defAt := map[string]int{} // IR function -> its index in defs
+	bodyLine := map[string]int{}
+	// A call through a name the same function first tests with typeof (python's
+	// `if main is defined: main()` entry) happens only when something defines
+	// that name: conditional[i] marks such a call in calls.
+	conditional := map[int]bool{}
 	unattributed := 0
 	for _, f := range m.Funcs {
-		if len(f.Blocks) == 0 || cgHelper(f.Name()) {
-			continue // Extern declaration or runtime helper, not a definition.
+		if len(f.Blocks) == 0 || cgHelper(f.Name()) || fabric(f.Name()) {
+			continue // Extern declaration or runtime fabric, not a definition.
 		}
 		from := display(f.Name())
-		if scaffold(f.Name()) {
+		typeofTested := map[string]bool{}
+		if scaffold(root(f.Name())) {
 			from = "(top)"
 		}
 		file, starts := srcOf(f)
-		if file == "" && !scaffold(f.Name()) {
+		if file == "" && !scaffold(root(f.Name())) {
 			unattributed++
 		}
 		line := 0
@@ -447,6 +572,12 @@ func extractCallGraph(m *ir.Module) ([]cgDef, []cgCall) {
 							}
 						}
 					}
+				case callee == "js_scope_typeof":
+					if len(call.Args) >= 2 {
+						if s, ok := strOf[call.Args[1]]; ok {
+							typeofTested[s] = true
+						}
+					}
 				case callee == "js_call" || cgValueCallers[callee] || callee == cgTailCaller:
 					to := "(dynamic)"
 					if len(call.Args) > 0 {
@@ -454,8 +585,14 @@ func extractCallGraph(m *ir.Module) ([]cgDef, []cgCall) {
 						if callee == cgTailCaller {
 							fv = firstPush[fv]
 						}
+						if fn, ok := closureFn[fv]; ok && fabric(fn) {
+							break // the entry running a prelude initialiser
+						}
 						if s, ok := callTarget(fv); ok {
 							to = s
+						}
+						if s, ok := nameRead[fv]; ok && scopeRead[fv] && typeofTested[s] {
+							conditional[len(calls)] = true
 						}
 					}
 					calls = append(calls, cgCall{from, to, file})
@@ -472,7 +609,7 @@ func extractCallGraph(m *ir.Module) ([]cgDef, []cgCall) {
 					calls = append(calls, cgCall{from, to, file})
 				case cgHelper(callee):
 					// Runtime fabric, like the js_ externs.
-				case callee == "js_mcall":
+				case cgMethodCall(callee):
 					to := "(dynamic)"
 					if len(call.Args) >= 2 {
 						if s, ok := strOf[call.Args[1]]; ok {
@@ -490,8 +627,8 @@ func extractCallGraph(m *ir.Module) ([]cgDef, []cgCall) {
 					calls = append(calls, cgCall{from, to, file})
 				case strings.HasPrefix(callee, "js_"):
 					// Runtime fabric, not program structure.
-				case scaffold(callee):
-					// jsmain calling jsrun: scaffolding, not an edge.
+				case scaffold(callee) || definedFn[callee] && fabric(callee):
+					// jsmain calling jsrun, or a runtime helper: not an edge.
 				default:
 					// A direct call (the integer-IR languages, putchar, ...).
 					calls = append(calls, cgCall{from, callee, file})
@@ -507,9 +644,33 @@ func extractCallGraph(m *ir.Module) ([]cgDef, []cgCall) {
 				line = l
 			}
 		}
-		if !scaffold(f.Name()) {
+		if frame := root(f.Name()); frame != f.Name() {
+			// Part of the creating function's definition, not one of its own.
+			if l, seen := bodyLine[frame]; line > 0 && (!seen || line < l) {
+				bodyLine[frame] = line
+			}
+		} else if !scaffold(f.Name()) {
+			defAt[f.Name()] = len(defs)
 			defs = append(defs, cgDef{Name: from, File: file, Line: line})
 		}
+	}
+	for frame, l := range bodyLine {
+		if i, ok := defAt[frame]; ok && (defs[i].Line == 0 || l < defs[i].Line) {
+			defs[i].Line = l
+		}
+	}
+	if len(conditional) > 0 {
+		defName := map[string]bool{}
+		for _, d := range defs {
+			defName[d.Name] = true
+		}
+		kept := calls[:0]
+		for i, c := range calls {
+			if !conditional[i] || defName[c.To] {
+				kept = append(kept, c)
+			}
+		}
+		calls = kept
 	}
 	if unattributed > 0 {
 		fmt.Fprintf(os.Stderr, "callgraph: %d function(s) had no source file (attribution incomplete)\n", unattributed)
