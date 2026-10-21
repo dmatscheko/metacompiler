@@ -244,6 +244,15 @@ func extractCallGraph(m *ir.Module) ([]cgDef, []cgCall) {
 					lastPos = -1
 				}
 			}
+		case "js_jsfnmeta":
+			// js/ts wrap a closure to give it `name`/`length` and store the
+			// wrapper's result, which is the same function.
+			if len(call.Args) > 0 {
+				if fn, ok := closureFn[call.Args[0]]; ok {
+					closureFn[call] = fn
+				}
+			}
+			return
 		}
 		adj = false
 	})

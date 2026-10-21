@@ -28,7 +28,8 @@
 # 3. -callgraph names each definition by its HEADER line, not by its body's
 #    first statement (DEF_CASES): every header line is reported. Extra lines are
 #    allowed, as above - go's function body is a closure of its own, named by
-#    its first statement.
+#    its first statement. A NAME@LINE entry also demands the definition there
+#    carry its source name, not the IR function's (jsf_N).
 #
 # A language in the list below that emits NO markers at all is a FAILURE: the
 # list is exactly the handle-IR compilers, all of which are supposed to have
@@ -44,7 +45,7 @@ WANT=()
 for a in "$@"; do
     case "$a" in
         -v|--verbose) VERBOSE=1 ;;
-        -h|--help) sed -n "2,37p" "$0"; exit 0 ;;
+        -h|--help) sed -n "2,39p" "$0"; exit 0 ;;
         *) WANT+=("$a") ;;
     esac
 done
@@ -136,21 +137,21 @@ for c in "${CASES[@]}"; do
     fi
 done
 
-# LANG:EXT:the header lines of the definitions in def_src_for().
+# LANG:EXT:the header lines (or NAME@LINE) of the definitions in def_src_for().
 DEF_CASES=(
     "python:py:1"
-    "ruby:rb:1"
+    "ruby:rb:f@1"
     "php:php:2"
-    "js:js:1 5"
-    "typescript:ts:1 5"
-    "metajs:metajs:1 5"
-    "lua:lua:1"
-    "dart:dart:1 5"
-    "kotlin:kt:1 5"
-    "java:java:2 6"
-    "csharp:cs:3 7"
+    "js:js:f@1 main@5"
+    "typescript:ts:f@1 main@5"
+    "metajs:metajs:f@1 main@5"
+    "lua:lua:f@1"
+    "dart:dart:f@1 main@5"
+    "kotlin:kt:f@1 main@5"
+    "java:java:f@2 main@6"
+    "csharp:cs:F@3 Main@7"
     "swift:swift:1"
-    "go:go:3 8"
+    "go:go:f@3 main@8"
 )
 def_src_for() {
     case "$1" in
@@ -183,15 +184,19 @@ for c in "${DEF_CASES[@]}"; do
         fail=$((fail+1)); continue
     fi
     got=$(grep '"ev":"sdef"' "$cg" | grep -o '"line":[0-9]*' | sed 's/"line"://' | sort -n -u | paste -sd' ' -)
+    named=$(grep '"ev":"sdef"' "$cg" | sed -nE 's/.*"line":([0-9]+),"name":"([^"]*)".*/\2@\1/p' | paste -sd' ' -)
     missing=""
     for w in $want; do
-        case " $got " in *" $w "*) ;; *) missing="$missing $w" ;; esac
+        case "$w" in
+        *@*) case " $named " in *" $w "*) ;; *) missing="$missing $w" ;; esac ;;
+        *) case " $got " in *" $w "*) ;; *) missing="$missing $w" ;; esac ;;
+        esac
     done
     if [ -z "$missing" ]; then
         pass=$((pass+1))
-        [ $VERBOSE = 1 ] && echo "ok    $lang: definitions on [$want], -callgraph says [$got]"
+        [ $VERBOSE = 1 ] && echo "ok    $lang: definitions on [$want], -callgraph says [$named]"
     else
-        echo "FAIL  $lang: definitions are on [$want], -callgraph says [$got]"
+        echo "FAIL  $lang: definitions are on [$want], -callgraph says [$named]"
         fail=$((fail+1))
     fi
 done
