@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-744** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-745** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -68,13 +68,13 @@ its report; anything structural there is a CORE ticket.
 
 # RB — Ruby
 
-### T-743 ruby: `obj.x = v` never calls a user-defined `x=`; `nil << x` aborts; private :name and instance_methods in the compiler · P1 · RB · IN PROGRESS (RB worker, round 16) [V]
-`class A; def a=(v); @q = v; end; def q; @q; end; end; x = A.new; x.a = 5; p x.q` → ruby 5, ours nil in both halves: attribute writes
-store into slot `x` instead of dispatching to `x=` (also `s.a += 1` reads the slot) — P1; needs setter dispatch on the attribute-write
-path with a perf check (Struct members then move out of member-named slots, so `instance_variables` is empty as in MRI). `nil << x`
-aborts "not a number in '<<'" instead of a rescuable NoMethodError (all engines). Compiler only: `private :name` → NoMethodError
-`private`; `define_method(:x, &blk)` with a non-literal block keeps the defining self; `instance_methods` with no argument →
-NoMethodError (interp `[]`; MRI includes inherited and Object methods). Struct: `each`, `hash`, `dig`, `values_at` missing.
+### T-744 ruby: Array/Hash#dig; values_at with ranges; rescue-skipped locals; singleton attr_accessor; alias of setters; class-body bare class-method calls · P2 · RB · OPEN [V]
+`[1,[2,{k:3}]].dig(1,1,:k)` → NoMethodError (ruby 3); `[2,1].values_at(0..5)` → `[2,1]` (ruby pads nils). `begin; raise "x"; ve = 1;
+rescue Exception; end; p ve` → ruby nil; interp NameError, compiler aborts "variable not defined: ve". `class << self; attr_accessor
+:cnt; end; C.cnt = 1` → NoMethodError. Compiler: `alias_method :b=, :a=` → NoMethodError; `alias b= a=` fails to parse in both halves.
+Compiler: a class method called bare in its own class body (`def self.make..; make(:w) {}`) → NoMethodError. `1.5 << 1` aborts
+instead of NoMethodError. Interp: `define_method(:y, &lambda { self.class })` → Class (ruby D). `o.x = v` with no setter writes the
+slot (ruby NoMethodError).
 
 ---
 
@@ -789,6 +789,7 @@ T-739 tooling: -callgraph loses swift and python call edges — DONE 3b5a140e (n
 T-740 ruby: `<<` through a method call reads a raw property; `=begin`/`=end`; dynamic define_method compiled; `p ?c` — DONE c73ddb45..968722e3 (append/assign path .name steps call the method, =begin/=end, `f ?c`, run-time define_method on class objects in all engines, builtin-built strings are boxes, one key object per text — = ruby 2.6; follow-up T-742)
 T-741 tooling: -callgraph residue — go function bodies unnamed, runtime helpers as nodes, method-call externs, entry functions — DONE 2e091671 (closure bodies fold into their function, runtime fabric and entry scaffolding dropped, guarded python main, all method-call externs give edges — srcpos 39/39 incl. go; no named definition or edge lost across 13 feature files)
 T-742 ruby: Struct; `self` in a define_method block; class-body locals in constants (compiler); instance_methods(false) — DONE b7e9eee4 (Struct in all engines, define_method blocks with the instance as self, class bodies run in order with constants bound up, instance_methods(false), includers see module define_method, &. and a[i,n] append targets — = ruby 2.6; follow-up T-743)
+T-743 ruby: `obj.x = v` never calls a user-defined `x=`; `nil << x` aborts; private :name and instance_methods in the compiler — DONE b89d3f62 35a63044 (setter dispatch on attribute writes and compound assignment gated at compile time, Struct members in a hidden array with each/hash/dig/values_at, rescuable nil << x, compiler private :names, instance_methods, define_method(&blk) — = ruby 2.6; follow-up T-744)
 
 # Settled — do not re-open
 
