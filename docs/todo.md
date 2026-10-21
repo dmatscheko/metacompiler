@@ -130,7 +130,7 @@ parameter), which no engine prints either.
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-712 bash: non-ASCII POSIX classes in globs; empty extglob matches in `${v//pat/rep}` · P3 · SH · OPEN [V]
+### T-712 bash: non-ASCII POSIX classes in globs; empty extglob matches in `${v//pat/rep}` · P3 · SH · IN PROGRESS (SH worker, round 13) [V]
 `x="é😀"; echo "${x#[[:alpha:]]}"` → bash 5.3 `😀`, all our engines `é😀` (globCtype / re_ctype are ASCII-only; re_ctype is shared with
 the bash regex side). With `shopt -s extglob`: `v=abac; ${v//*(a)/Z}` → bash `ZZbZZc`, ours `ZbZc`; `v=xy; ${v//*(a)/Z}` → `ZxZy`
 vs `xy`; `e=""; ${e//!(b)/Z}` / `${e//?(a)/Z}` → bash empty, ours `Z`. All engines agree with each other.
