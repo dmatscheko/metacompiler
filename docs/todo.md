@@ -139,7 +139,7 @@ parameter), which no engine prints either.
 
 # CORE — MetaJS, the engines, shared runtime, tooling
 
-### T-737 tooling + js: swift overloads and module bodies in -callgraph; `Object.assign(5, {...})` compiled · P3 · CORE · OPEN [V]
+### T-737 tooling + js: swift overloads and module bodies in -callgraph; `Object.assign(5, {...})` compiled · P3 · CORE · IN PROGRESS (CORE worker, round 3) [V]
 -callgraph names swift overloads `g$1@12` / `g$2@13` (the name `g` goes to the line-less dispatch closure): name each overload `g` at
 its own line. Python and swift module bodies appear as `jsf_N@line`; name them `<module>` (as python tracebacks do) or `main`.
 `Object.assign(5, {a:1})` fails in the compiled js halves; node returns a Number wrapper (wrapper objects exist since T-669).
