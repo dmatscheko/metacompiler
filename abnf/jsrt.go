@@ -477,6 +477,9 @@ type jsrt struct {
 	// rubyLambdas remembers which closures came from a lambda literal (->) or
 	// Kernel#lambda, which is all that Proc#lambda? needs. Filled by js_rlambda.
 	rubyLambdas map[interface{}]bool
+	// rubyMTwins maps a Proc to the same body compiled in the method convention,
+	// which define_method installs in its place. Filled by js_rmtwin.
+	rubyMTwins map[interface{}]interface{}
 
 	// rubyOids is Object#object_id's table: the values numbered so far, in order
 	// (see rubyObjectId in jsrtruby.go).
@@ -11409,6 +11412,11 @@ func (rt *jsrt) rubyBlockMethod(args []interface{}) (string, interface{}) {
 	body := blk
 	if body == nil && len(pos) > 1 {
 		body = pos[1]
+	}
+	// A Proc whose method-convention twin the emitter recorded runs with the
+	// receiver as self (instance_exec), as MRI's define_method does.
+	if twin, has := rt.rubyMTwins[body]; has {
+		return nm, twin
 	}
 	return nm, &hostFunc{name: "method:" + nm,
 		fn: func(rt *jsrt, this uint64, a []interface{}) interface{} {

@@ -3666,16 +3666,39 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 dm = txt.slice(at, at + sym.length) == sym && (nx == "," || nx == ")")
             }
         }
-        if (!dm) { return args }
-        rubyDynDefs = true
         var out = []
+        var lit = false
         for (var i = 0; i < args.length; i++) {
             var a = args[i]
             if (a != null && a != undefined && typeof a != "function" && a.blkMethT != undefined) {
-                out.push({blkKinds: a.blkKinds, blkT: a.blkMethT, blkSelf: true})
+                lit = true
+                if (dm) { out.push({blkKinds: a.blkKinds, blkT: a.blkMethT, blkSelf: true}) }
+                else { out.push({blkKinds: a.blkKinds, blkT: a.blkT, blkMethT: a.blkMethT, twinCall: name}) }
             } else { out.push(a) }
         }
+        if (dm) {
+            rubyDynDefs = true
+            if (!lit) { dmTakesValue = true }
+        }
         return out
+    }
+    // A Proc VALUE given to define_method runs instance_exec-style too, but it was
+    // compiled in the block convention, its self fixed where it was written. So once
+    // the program hands define_method anything but a literal block (dmTakesValue),
+    // every block literal that can become such a value - one given to proc / lambda
+    // or to a method some def takes a &block in - is also emitted in the method
+    // convention, and js_rmtwin records that twin for the runtime's define_method to
+    // install instead. Twins: rubyBlockMethod in abnf/jsrt.go, js_rmtwin in
+    // lib/ruby-rt.metajs.
+    var dmTakesValue = false
+    var rubyAmpDefs = {}
+    function needsMethTwin(callName) {
+        return dmTakesValue && (callName == "proc" || callName == "lambda" || rubyAmpDefs["$" + callName] === true)
+    }
+    function emitMethTwin(b, blkV, blkMethT) {
+        var rm = blkMethT(b)
+        callExt(rm.b, "js_rmtwin", [blkV, rm.v])
+        return rm.b
     }
     function dmCallItems(items, txt) {
         if (items.length < 2) { return items }
@@ -3718,12 +3741,14 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         var kw = []
         var blkT = null
         var blkSelf = false
+        var blkTwin = null
         var j
         for (j = 0; j < args.length; j++) {
             var a = args[j]
             if (a != null && a != undefined && typeof a != "function" && a.blkT != undefined) {
                 blkT = a.blkT
                 blkSelf = a.blkSelf === true
+                blkTwin = a.twinCall != undefined && needsMethTwin(a.twinCall) ? a.blkMethT : null
             }
         }
         for (j = 0; j < args.length; j++) {
@@ -3769,6 +3794,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (blkT != null) {
             var rb = blkT(b)
             b = rb.b
+            if (blkTwin != null) { b = emitMethTwin(b, rb.v, blkTwin) }
             // THE BLOCK MARKER. js_rblkwrap puts the block in a one-slot object
             // nothing else produces, so it stays distinguishable from a Proc
             // passed as an ordinary positional argument (`def m(f = 3); end;
@@ -5115,9 +5141,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if ((name == "lambda" || name == "proc") && args.length > 0) {
             var blkT = null
             var blkKinds = null
+            var blkMethT = null
             for (var q = 0; q < args.length; q++) {
                 if (args[q] != undefined && typeof args[q] != "function" && args[q].blkT != undefined) {
                     blkT = args[q].blkT
+                    blkMethT = args[q].blkMethT != undefined ? args[q].blkMethT : null
                     if (typeof args[q].blkKinds == "string") { blkKinds = args[q].blkKinds }
                 }
             }
@@ -5132,7 +5160,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                     emitBlkArg = false
                     var r = blkT(b)
                     emitBlkArg = savedBA
-                    if (!isLam) { return r }
+                    var twin = blkMethT != null && needsMethTwin(name)
+                    if (!isLam) {
+                        if (twin) { return {b: emitMethTwin(r.b, r.v, blkMethT), v: r.v} }
+                        return r
+                    }
                     // A LAMBDA IS ARITY-CHECKED AND A BLOCK IS NOT, so Kernel#lambda
                     // has to wrap: the block binds loosely (a missing parameter is
                     // nil, an extra argument is dropped) and that stays true for
@@ -5145,7 +5177,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                     // Procs. Neither is observable in Ruby - a block literal is not a value there at all.
                     var lv = r.v
                     if (blkKinds != null) { lv = callExt(r.b, "js_rlamchk", [lv, emitStr(r.b, blkKinds)]) }
-                    return {b: r.b, v: callExt(r.b, "js_rlambda", [lv])}
+                    var lamV = callExt(r.b, "js_rlambda", [lv])
+                    if (twin) { return {b: emitMethTwin(r.b, lamV, blkMethT), v: lamV} }
+                    return {b: r.b, v: lamV}
                 }
             }
         }
@@ -5667,6 +5701,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             }
         }
         rubyDefNames["$" + name] = true
+        for (var bp = 0; bp < params.length; bp++) {
+            if (params[bp].blockp === true) { rubyAmpDefs["$" + (name == "initialize" ? "new" : name)] = true }
+        }
         return {name: name, params: params, singleton: singleton, srecv: srecv, pos: pos,
                 body: body != null ? body : makeBody([])}
     }

@@ -150,6 +150,8 @@ var rbGlobalNames = {}   // "$name" -> true once assigned (defined? needs presen
 var rbLambdas = []       // the closures a lambda literal produced (identity scan)
 var rbArityFns = []      // the closures js_rarity has recorded a shape for
 var rbArityRec = []      // [required, optional, hasSplat] for rbArityFns[i]
+var rbMTwinFns = []      // the Procs js_rmtwin has recorded a method twin for
+var rbMTwinVals = []     // the method-convention twin of rbMTwinFns[i]
 // The function values `method(:x)' handed out. MRI's Method is a class of its own
 // - #class is Method, #to_s is `#<Method: Object#x>' and #arity counts optionals
 // like a lambda's. A side table and not a property on the value, exactly as
@@ -7563,7 +7565,10 @@ function rbMethod(target, name, args) {
                 if (dbody !== null && args[args.length - 1]["__rself"] === true) { dfn = dbody }
                 else {
                     if (dbody === null && rbNPos(args) > 1) { dbody = rbArgAt(args, 1) }
-                    dfn = rbBlockMethod(dbody)
+                    // A Proc with a recorded method twin (js_rmtwin) runs with the
+                    // receiver as self.
+                    var twin = rtPairGet(rbMTwinFns, rbMTwinVals, dbody)
+                    if (twin !== undefined) { dfn = twin } else { dfn = rbBlockMethod(dbody) }
                 }
                 if (name == "define_method") {
                     target[dnm] = dfn
@@ -9434,6 +9439,9 @@ function js_rlvar(scope, name) {
         s = scopeParent(s)
     }
     var lself = rbScopeSelf(scope)
+    // A bare name that is no local is a call on self - one the emitter could not
+    // see, as in a Proc that define_method runs with another self.
+    if (rbIsObj(lself) && rbSingRespond(lself, n)) { return js_rxmcall(lself, n, []) }
     rbNameErr("NameError", "undefined local variable or method `" + n + "' for " + rbNoMethodDesc(lself), n, lself)
     return null
 }
@@ -10017,6 +10025,14 @@ function rbLamArity(av, kinds) {
 // The parameter shape of the closure just built, for Proc#arity - the closure
 // itself is handed straight back, exactly as js_rlambda does. See rbProcArity for
 // why the three counts are stored rather than the answer.
+// (proc, method twin): see needsMethTwin in ruby-to-llvm-ir.abnf. Twin of
+// js_rmtwin in abnf/jsrtruby.go.
+function js_rmtwin(f, m) {
+    rbMTwinFns.push(f)
+    rbMTwinVals.push(m)
+    return undefined
+}
+
 function js_rarity(f, req, opt, star) {
     rbArityFns.push(f)
     rbArityRec.push([rbToF(req), rbToF(opt), rbTruthy(star)])

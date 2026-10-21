@@ -4275,6 +4275,11 @@ class S99W
   private
   def sec=(v); @s = v * 7; end
 end
+class S99D
+  def self.make(name, &b); define_method(name, &b); end
+  attr_reader :dv
+  def initialize; @dv = 7; end
+end
 class S99P
   def pub; 1; end
   def hid; 2; end
@@ -4321,6 +4326,11 @@ def s99
   so.z = v[2]
   se = begin; w.sec = 1; nil; rescue NoMethodError => x; x.class; end
   check("se99m", w.m == 6 && w.w == 9 && z == 3 && w.r == "boom!" && so.z == 21 && w.go(v[3]) == 28 && se == NoMethodError)
+  S99D.make(:mk) { |k| [self.class, dv + k] }
+  blk = proc { self.class }
+  S99D.send(:define_method, :pk, &blk)
+  so.define_singleton_method(:me, &proc { equal?(so) })
+  check("se99n", S99D.new.mk(v[1]) == [S99D, 10] && S99D.new.pk == S99D && blk.call == Object && so.me)
 end
 
 s39() # SECTION-CALL 39

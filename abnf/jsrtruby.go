@@ -184,6 +184,11 @@ func (rt *jsrt) addRubyFmtExterns(m map[string]func(args []uint64) uint64) {
 			}
 		}
 		self := rubyScopeSelf(rt, a[0])
+		// A bare name that is no local is a call on self - one the emitter could
+		// not see, as in a Proc that define_method runs with another self.
+		if o, isObj := self.(*jsObject); isObj && rubySingRespond(o, name) {
+			return m["js_rxmcall"]([]uint64{w(self), a[1], w(&jsArray{})})
+		}
 		rt.rubyNameErr("NameError", "undefined local variable or method `"+name+"' for "+rt.rubyNoMethodDesc(self), name, self)
 		return 0
 	}
@@ -261,6 +266,15 @@ func (rt *jsrt) addRubyFmtExterns(m map[string]func(args []uint64) uint64) {
 			return 0
 		}
 		return m["js_set"](a[:3])
+	}
+	// (proc, method twin): see needsMethTwin in ruby-to-llvm-ir.abnf. Twin of
+	// js_rmtwin in languages/lib/ruby-rt.metajs.
+	m["js_rmtwin"] = func(a []uint64) uint64 {
+		if rt.rubyMTwins == nil {
+			rt.rubyMTwins = map[interface{}]interface{}{}
+		}
+		rt.rubyMTwins[u(a[0])] = u(a[1])
+		return 0
 	}
 	// A class first assigned to a constant takes its name (`S = Struct.new(:a)').
 	// Twin of js_rconstname in languages/lib/ruby-rt.metajs and constName in
