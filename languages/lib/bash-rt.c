@@ -5606,9 +5606,11 @@ int rt_declp(char *nm, char *flag, int assoc) {
  * starts at the first element whose index is >= off (a negative off is relative
  * to one past the highest index) and takes len elements, all of them when haslen
  * is 0. bash 5.3 with sp[2]=x sp[5]=y sp[9]=z: ${sp[*]:3} is "y z", ${sp[*]: -4}
- * is "z". A name with no rows (a scalar, one element at index 0) is sliced by
- * position, which for it is the same thing. A negative len is bash's "substring
- * expression < 0". */
+ * is "z". A name that is no array is a SCALAR, and the slice is the substring
+ * of its value as for ${NAME:off:len}, a negative len counting from its end
+ * (bash 5.3: s=hello; "${s[@]:1:-1}" is ell); an unset one or an offset outside
+ * the value is no word for [@]. On an array a negative len is bash's "substring
+ * expression < 0". Twin of the substr arm of mkParamExp in bash-interpreter.abnf. */
 char *rt_arr_slice(char *nm, long off, long len, int haslen, char *sep, int star) {
     int r = rt_ar_find(nm);
     int n = r >= 0 ? ar_n[r] : 0;
@@ -5616,17 +5618,28 @@ char *rt_arr_slice(char *nm, long off, long len, int haslen, char *sep, int star
     char *out = isStar ? empty : list_nil;
     int i = 0;
     long taken = 0;
+    if (rt_arr_any(nm) == 0) {
+        char *v = rt_getvar_byname(nm);
+        long vl;
+        if (v == &unset_marker[0]) return out;
+        vl = (long)rt_charlen(v);
+        if (off < 0) off = off + vl;
+        if (off < 0 || off > vl) return out;
+        if (haslen == 0) len = vl - off;
+        else if (len < 0) {
+            if (vl + len < off) {
+                rt_arith_fail(rt_int2str(len), "substring expression < 0", empty);
+                return out;
+            }
+            len = vl + len - off;
+        }
+        else if (len > vl - off) len = vl - off;
+        v = rt_csubstr(v, (int)off, (int)len);
+        return isStar ? v : rt_fadd(list_nil, v);
+    }
     if (haslen != 0 && len < 0) {
         rt_arith_fail(rt_int2str(len), "substring expression < 0", empty);
         return out;
-    }
-    if (rt_arr_any(nm) == 0) {
-        char *all = rt_sc_list(nm, sep, 0, 0);
-        int cnt = rt_nfields(all);
-        if (off < 0) off = off + cnt;
-        if (off < 0 || off > cnt) return out;
-        if (haslen == 0 || len > cnt) len = cnt;
-        return rt_slicefields(all, (int)off, (int)len, sep, star);
     }
     if (off < 0) {
         off = rt_arr_nextidx(nm) + off;
@@ -6450,6 +6463,39 @@ char *rt_indname(char *nm, char *sub, char *v, int strict)
     rt_berr("", v, "invalid variable name");
     arith_err = 1;
     return &unset_marker[0];
+}
+
+/* The '[' of a NAME[SUB] that rt_isref accepted, or -1 for any other target. */
+int rt_indbr(char *v)
+{
+    int len = rt_strlen(v);
+    int i = 0;
+    if (len < 4 || v[len - 1] != 93) return -1;
+    while (i < len && v[i] != 91) i = i + 1;
+    return i < len ? i : -1;
+}
+
+/* What an indirection with an operator landed on (rt_indname's answer): 0 a
+ * plain NAME (or a special parameter), 1 the positional parameters @ / *, 2 a
+ * NAME[SUB] of an associative array, 3 any other NAME[SUB]. Twin of the target
+ * test in mkParamExp of bash-interpreter.abnf. */
+int rt_indlist(char *v)
+{
+    int br;
+    if (rt_strlen(v) == 1 && (v[0] == 64 || v[0] == 42)) return 1;
+    br = rt_indbr(v);
+    if (br < 0) return 0;
+    return rt_isassoc(rt_substr(v, 0, br)) != 0 ? 2 : 3;
+}
+
+/* The name (sub 0) or the subscript text (sub 1) of a target rt_indlist does not
+ * answer 0 for: @ and * are both. */
+char *rt_indpart(char *v, int sub)
+{
+    int br = rt_indbr(v);
+    if (br < 0) return v;
+    if (sub != 0) return rt_substr(v, br + 1, rt_strlen(v) - br - 2);
+    return rt_substr(v, 0, br);
 }
 
 /* `unset WORD` where the word came out of an expansion: NAME[SUB] removes the

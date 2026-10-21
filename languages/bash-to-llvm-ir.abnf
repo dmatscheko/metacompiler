@@ -1477,6 +1477,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // the variable an indirection lands on (bash-rt.c).
     var rtIndSub = rtDecl("rt_indsub", true, [1, 1, 0])
     var rtIndName = rtDecl("rt_indname", true, [1, 1, 1, 0])
+    // i32 rt_indlist(i8* tg) / i8* rt_indpart(i8* tg, i32 sub): which kind of target, and its
+    // name and subscript (bash-rt.c).
+    var rtIndList = rtDecl("rt_indlist", false, [1])
+    var rtIndPart = rtDecl("rt_indpart", true, [1, 0])
 
     var funcs = {}        // user functions: "$"+name -> IR func (bashfn_NAME)
     var declaredFuncs = {}  // every name the program DEFINES somewhere (collected during the
@@ -1839,19 +1843,103 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return 0
     }
 
-    // ${...} : items are [{pname}, {pe}?, {op}?, {anchor}?, word objects / arithmetic thunks]
+    // ${!REF OP ...}: the operator applies to whatever the indirection lands on, found ONCE
+    // per expansion (rt_indname), exactly as if the target had been written there: on @ or *
+    // and on NAME[SUB] it takes the subscripted path, so a list target is operated on
+    // element-wise (set -- p q; x=@; "${!x:1}" is "${@:1}"). So four expansions are emitted
+    // and rt_indlist picks one at run time: the scalar arms for a plain NAME (reading it from
+    // `cell.tg`), and the subscripted path for the positional parameters, an associative
+    // array and any other NAME[SUB], whose name and subscript come from the target (cell.nm,
+    // cell.sub). A ${!REF:?} error names "!REF". Twin of mkParamExp in bash-interpreter.abnf.
     function mkParamExp(items) {
+        var name = "", indp = false, hasIdx = false, bare = true, pfx = false
+        var wordObjs = []
+        var rest = []
+        var i
+        for (i = 0; i < items.length; i++) {
+            var it = items[i]
+            if (typeof it != "function" && it.fn != undefined) { wordObjs.push(it); continue }
+            if (typeof it != "function") {
+                if (it.indp != undefined) { indp = true; continue }
+                if (it.pname != undefined) { name = it.pname; continue }
+                if (it.hasIdx != undefined) { hasIdx = true; continue }
+                if (it.op != undefined || it.pe != undefined || it.xf != undefined) { bare = false }
+                if (it.pfx != undefined) { pfx = true }
+            }
+            rest.push(it)
+        }
+        if (!indp || bare || pfx) { return paramCore(items, null) }
+        var idxW = hasIdx ? wordObjs[0] : null
+        for (i = hasIdx ? 1 : 0; i < wordObjs.length; i++) { rest.push(wordObjs[i]) }
+        var cell = {tg: null, nm: null, sub: null}
+        var subW = {fn: function(b) { return {b: b, v: cell.sub} }, c: undefined}
+        var qn = {qname: "!" + name}
+        var forms = [paramCore(items, cell),
+                     paramCore(targetItems("@", qn, null, subW, rest), cell),
+                     paramCore(targetItems("", qn, {rtAssoc: 1}, subW, rest), cell),
+                     paramCore(targetItems("", qn, {rtNm: 1}, subW, rest), cell)]
+        return {c: undefined, f: true, fn: function(b) {
+            var tg = null
+            if (idxW == null) {
+                tg = b.NewCall(rtIndName, [gepStr(b, name), nullStr, varString(b, name), one])
+            } else {
+                var rs = subKeyOf(b, name, idxW, null)
+                b = rs.b
+                var sv = b.NewCall(rtIndSub, [gepStr(b, name), rs.k, subKind(b, subKindC(idxW), rs.v)])
+                tg = b.NewCall(rtIndName, [gepStr(b, name), rs.v, sv, zero])
+            }
+            var cls = b.NewCall(rtIndList, tg)
+            cell.tg = tg
+            cell.nm = b.NewCall(rtIndPart, [tg, zero])
+            cell.sub = b.NewCall(rtIndPart, [tg, one])
+            var merge = curF.NewBlock("")
+            var incs = []
+            var blks = []
+            var k
+            for (k = 0; k < forms.length; k++) { blks.push(curF.NewBlock("")) }
+            // cls 0..3 picks forms[cls]: a chain of tests, the last one falling through to 3
+            var test = b
+            for (k = 0; k < forms.length - 1; k++) {
+                var nxt = (k == forms.length - 2) ? blks[k + 1] : curF.NewBlock("")
+                test.NewCondBr(test.NewICmp(llvm.enum.IPredEQ, cls, llvm.constant.NewInt(i32, k)), blks[k], nxt)
+                test = nxt
+            }
+            for (k = 0; k < forms.length; k++) {
+                var r = forms[k].fn(blks[k])
+                r.b.NewBr(merge)
+                incs.push(llvm.ir.NewIncoming(r.v, r.b))
+            }
+            return {b: merge, v: merge.NewPhi(incs)}
+        }}
+    }
+    // The items of ${@[SUB] OP ...} / ${NAME[SUB] OP ...} for a target, around the operator's:
+    // `mark` makes the name the target's (rtNm) or also an associative array's (rtAssoc).
+    function targetItems(nm, qn, mark, subW, rest) {
+        var out = [qn, {pname: nm}, {hasIdx: 1}, subW]
+        if (mark != null) { out.push(mark) }
+        var i
+        for (i = 0; i < rest.length; i++) { out.push(rest[i]) }
+        return out
+    }
+    // ${...} : items are [{pname}, {pe}?, {op}?, {anchor}?, word objects / arithmetic thunks];
+    // `cell` carries the run-time target of an indirection with an operator (see mkParamExp).
+    function paramCore(items, cell) {
         var pe = "", name = "", op = "", anchor = "", xf = "", pfx = ""
         var lenp = false, indp = false
         var words = []     // word objects {fn, c}
         var ariths = []    // bare arithmetic thunks (the ${v:off:len} offsets)
         var wordT = null
         var hasIdx = false
+        var rtNm = false, rtAssoc = false
+        var errName = null
         var i
         for (i = 0; i < items.length; i++) {
             var it = items[i]
             if (typeof it == "function") { ariths.push(it) }
+            else if (it.qname != undefined) { errName = it.qname }
             else if (it.hasIdx != undefined) { hasIdx = true }
+            else if (it.rtNm != undefined) { rtNm = true }
+            else if (it.rtAssoc != undefined) { rtNm = true; rtAssoc = true }
             else if (it.fn != undefined) { words.push(it); wordT = it }
             else if (it.lenp != undefined) { lenp = true }
             else if (it.indp != undefined) { indp = true }
@@ -1902,7 +1990,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // because `q=(1 2)` declares nothing, hence the select.
         function attrLetters(b, nmv) {
             var sc = scalarAttrLetters(xfName)
-            if (hasOwn(assocArrays, "$" + xfName)) { return gepStr(b, "A" + sc) }
+            if (rtAssoc || hasOwn(assocArrays, "$" + xfName)) { return gepStr(b, "A" + sc) }
             var isArrRt = b.NewICmp(llvm.enum.IPredNE, b.NewCall(rtArrAny, nmv), zero)
             return b.NewSelect(isArrRt, gepStr(b, "a" + sc), gepStr(b, sc))
         }
@@ -1919,8 +2007,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return b.NewCall(rtShq, [v, isset])
         }
         // NAME[SUBSCRIPT]: the first word is the subscript, the rest belong to the operator.
-        // ${!a[k] OP arg} is an indirection through a[k] (indIdxW, the scalar arms below);
-        // only the bare ${!a[@]} / ${!a[*]} list the keys.
+        // ${!a[k] OP arg} is an indirection through a[k] (resolved by mkParamExp; the scalar
+        // arms below); only the bare ${!a[@]} / ${!a[*]} list the keys.
         var indIdxW = null
         if (hasIdx && words.length > 0 && indp && !bare) {
             indIdxW = words[0]
@@ -1931,12 +2019,12 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var idxW = words[0]
             words = words.slice(1)
             wordT = (words.length > 0) ? words[words.length - 1] : null
-            var isAssoc = hasOwn(assocArrays, "$" + name)
-            var nmOf = function(b) { return gepStr(b, name) }
+            var isAssoc = rtAssoc || hasOwn(assocArrays, "$" + name)
+            var nmOf = function(b) { return rtNm ? cell.nm : gepStr(b, name) }
             // The subscript, and the key it names: an associative array's is the text, an
             // indexed array's an arithmetic expression (rt_arr_key; a canonical literal index
             // needs no evaluation). Computed ONCE per expansion, so `${a[i++]}` steps i once.
-            var subOf = function(b) { return subKeyOf(b, name, idxW) }
+            var subOf = function(b) { return subKeyOf(b, name, idxW, rtNm ? cell.nm : null) }
             var kindC = subKindC(idxW)
             var kindOf = function(b, sub) { return subKind(b, kindC, sub) }
             if (pe == "len") {
@@ -2107,7 +2195,11 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     if (idxO == "?") {
                         var qmsg = gepStr(b, idxColon ? "parameter null or not set" : "parameter not set")
                         if (idxWordT != null) { qmsg = b.NewSelect(isEmptyStr(b, de), qmsg, de) }
-                        var qnm = b.NewCall(rtStrcat, [b.NewCall(rtStrcat, [gepStr(b, name + "["), rs.v]), gepStr(b, "]")])
+                        // the target's name: !REF for an indirection, @ / * for the positionals
+                        var qnm = gepStr(b, (errName != null) ? errName : name)
+                        if (errName == null && name != "@" && name != "*") {
+                            qnm = b.NewCall(rtStrcat, [b.NewCall(rtStrcat, [gepStr(b, name + "["), rs.v]), gepStr(b, "]")])
+                        }
                         // ONE check covers both arms: the subscript decides which emptiness counts.
                         var qbad = b.NewSelect(whole, blankL, blankE)
                         pickedE = b.NewCall(rtPcheck, [one1, b.NewZExt(qbad, i32), qnm, qmsg])
@@ -2191,19 +2283,12 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             }}
         }
         // ${!ref OP arg} and ${!a[k] OP arg}: the operator applies to the variable the
-        // indirection LANDED on (rt_indname), so every leaf below starts from targetOf - once
-        // per expansion - and reads and writes through valOf/setOf instead of the fixed slot.
+        // indirection LANDED on (cell.tg, see mkParamExp), so every leaf below starts from
+        // targetOf and reads and writes through valOf/setOf instead of the fixed slot.
         var indirect = indp
-        var indKindC = (indIdxW != null) ? subKindC(indIdxW) : 0
         function targetOf(b) {
             if (!indirect) { return {b: b, v: null} }
-            if (indIdxW == null) {
-                return {b: b, v: b.NewCall(rtIndName, [gepStr(b, name), nullStr, varString(b, name), one])}
-            }
-            var rs = subKeyOf(b, name, indIdxW)
-            b = rs.b
-            var sv = b.NewCall(rtIndSub, [gepStr(b, name), rs.k, subKind(b, indKindC, rs.v)])
-            return {b: b, v: b.NewCall(rtIndName, [gepStr(b, name), rs.v, sv, zero])}
+            return {b: b, v: cell.tg}
         }
         function valOf(b, tg) {
             if (indirect) { return b.NewCall(rtGetByName, tg) }
@@ -2323,7 +2408,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (o == "?") {
                 var dmsg = gepStr(b, colon ? "parameter null or not set" : "parameter not set")
                 var msg = (wordT != null) ? b.NewSelect(isEmptyStr(b, d), dmsg, d) : dmsg
-                return {b: b, v: b.NewCall(rtPcheck, [v, b.NewZExt(blank, i32), gepStr(b, name), msg])}
+                return {b: b, v: b.NewCall(rtPcheck, [v, b.NewZExt(blank, i32), gepStr(b, indirect ? "!" + name : name), msg])}
             }
             var picked = b.NewSelect(blank, d, v)
             if (o == "=") { setOf(b, t6.v, picked) }
@@ -2789,14 +2874,14 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function mkArElem(items) {
         var name = items[0].lhs, w = items[1]
         return function(b) {
-            var rk = subKeyOf(b, name, w)
+            var rk = subKeyOf(b, name, w, null)
             return {b: rk.b, v: rk.b.NewCall(rtArith, rk.b.NewCall(rtScGet, [gepStr(rk.b, name), rk.k]))}
         }
     }
     // An assignment target's key ({b, k}, k null for a plain name), its value, and the store.
     function arLhsKey(b, lhs) {
         if (lhs.sub == undefined) { return {b: b, k: null} }
-        return subKeyOf(b, lhs.lhs, lhs.sub)
+        return subKeyOf(b, lhs.lhs, lhs.sub, null)
     }
     function arLhsGet(b, name, k) {
         if (k == null) { return b.NewCall(rtArith, varString(b, name)) }
@@ -3062,7 +3147,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (a.valT.c == undefined) { b = emitAbortCheck(b) }
         }
         if (a.idxT != null) {
-            var rk = subKeyOf(b, a.name, a.idxT)
+            var rk = subKeyOf(b, a.name, a.idxT, null)
             b = rk.b
             b = emitAbortCheck(b)
             if (!assoc) { b.NewCall(rtArrAdopt, [nm, llvm.constant.NewInt(i32, getVarId(a.name))]) }
@@ -3469,10 +3554,12 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // (rt_arr_key, negative from the end). Evaluated ONCE per use, so `${a[i++]}` steps i once.
     // A literal subscript that is a canonical index needs no evaluation, and one that is a
     // plain variable name reads that variable's slot directly.
-    function subKeyOf(b, name, w) {
+    // nmv, when not null, is the array's name as a run-time value (an indirection's target).
+    function subKeyOf(b, name, w, nmv) {
         var r = evalWord(b, w)
         var key = r.v
-        if (hasOwn(assocArrays, "$" + name)) { key = r.v }
+        if (nmv != null) { key = r.b.NewCall(rtArrKey, [nmv, r.v]) }
+        else if (hasOwn(assocArrays, "$" + name)) { key = r.v }
         else if (w.c != undefined && isIndexLit(w.c)) { key = gepStr(r.b, w.c) }
         else if (w.c != undefined && isIdentText(w.c)) {
             // (a name declared associative later in the file is still a literal key)

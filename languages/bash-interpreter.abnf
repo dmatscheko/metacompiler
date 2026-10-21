@@ -1748,11 +1748,16 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return i
     }
     function sliceStr(v, offT, lenT) {
+        var r = sliceAt(v, arNum(offT()), lenT)
+        return (r == null) ? "" : r
+    }
+    // The same, from an evaluated offset; null when the offset is outside the value.
+    function sliceAt(v, off0, lenT) {
         var vlen = charLen(v)
-        var off = arNum(offT())
+        var off = off0
         // x=abc; "${x: -5}" is empty: a negative offset past the start selects nothing.
-        if (off < 0) { off = vlen + off; if (off < 0) { return "" } }
-        if (off > vlen) { return "" }
+        if (off < 0) { off = vlen + off; if (off < 0) { return null } }
+        if (off > vlen) { return null }
         if (lenT == null) { return v.slice(charIdx(v, off)) }
         var ln = arNum(lenT())
         if (ln < 0) {
@@ -2292,17 +2297,77 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return stripPat(v, pat, (pe == "#" || pe == "##"), (pe == "##" || pe == "%%"))
     }
 
-    // ${...} : items are [{pname}, {pe}?, {op}?, {anchor}?, wordThunk / arithThunk ...]
+    // ${!REF OP ...}: the operator applies to whatever the indirection lands on, found ONCE
+    // per expansion, exactly as if the target had been written there: on @ or * and on
+    // NAME[SUB] it takes the subscripted path, so a list target is operated on element-wise
+    // (set -- p q; x=@; "${!x:1}" is "${@:1}", the words p q). That expansion is built on
+    // first use, once per target text. A plain NAME is handed to the scalar arms through
+    // `cell`. A ${!REF:?} error names "!REF". Twin of mkParamExp in bash-to-llvm-ir.abnf.
     function mkParamExp(items) {
+        var name = "", indp = false, hasIdx = false, bare = true, pfx = false
+        var fns = []
+        var rest = []
+        var i
+        for (i = 0; i < items.length; i++) {
+            var it = items[i]
+            if (typeof it == "function") { fns.push(it); continue }
+            if (it.indp != undefined) { indp = true; continue }
+            if (it.pname != undefined) { name = it.pname; continue }
+            if (it.hasIdx != undefined) { hasIdx = true; continue }
+            if (it.op != undefined || it.pe != undefined || it.xf != undefined) { bare = false }
+            if (it.pfx != undefined) { pfx = true }
+            rest.push(it)
+        }
+        if (!indp || bare || pfx) { return paramCore(items, null) }
+        var idxT = hasIdx ? fns[0] : null
+        for (i = hasIdx ? 1 : 0; i < fns.length; i++) { rest.push(fns[i]) }
+        var cell = {v: "", ok: false}
+        var scalarT = paramCore(items, cell)
+        var byTarget = {}
+        var refName = name
+        return function() {
+            var tg = anytype
+            if (idxT == null) { tg = indName(refName, null, null) }
+            else { var raw = wordJoin(idxT()); tg = indName(refName, subKey(refName, raw), raw) }
+            if (tg != null && (tg == "@" || tg == "*" || isElemRef(tg))) {
+                var key = "$" + tg
+                if (!hasOwn(byTarget, key)) { byTarget[key] = paramCore(targetItems(tg, "!" + refName, rest), null) }
+                return byTarget[key]()
+            }
+            cell.ok = (tg != null)
+            cell.v = cell.ok ? tg : ""
+            return scalarT()
+        }
+    }
+    // The items of ${@ OP ...} / ${NAME[SUB] OP ...} for a target, around the operator's.
+    function targetItems(tg, qname, rest) {
+        var out = [{qname: qname}]
+        if (tg == "@" || tg == "*") { out.push({pname: tg}) }
+        else {
+            var sp = splitSubscript(tg)
+            var sub = sp.key
+            out.push({pname: sp.name})
+            out.push({hasIdx: 1})
+            out.push(function() { return sub })
+        }
+        var i
+        for (i = 0; i < rest.length; i++) { out.push(rest[i]) }
+        return out
+    }
+    // ${...} : items are [{pname}, {pe}?, {op}?, {anchor}?, wordThunk / arithThunk ...]; `cell`
+    // holds the target of an indirection with an operator (see mkParamExp), else null.
+    function paramCore(items, cell) {
         var pe = "", name = "", op = "", anchor = "", xf = "", pfx = ""
         var lenp = false, indp = false
         var args = []
         var wordT = null
         var hasIdx = false
+        var errName = null
         var i
         for (i = 0; i < items.length; i++) {
             var it = items[i]
             if (typeof it == "function") { args.push(it); wordT = it }
+            else if (it.qname != undefined) { errName = it.qname }
             else if (it.hasIdx != undefined) { hasIdx = true }
             else if (it.lenp != undefined) { lenp = true }
             else if (it.indp != undefined) { indp = true }
@@ -2375,6 +2440,14 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 return function() {
                     var sub = readIdx()
                     if (sub != "@" && sub != "*") { return sliceStr(scGet(name, sub), offT, lenT) }
+                    // NAME[@] / NAME[*] of a SCALAR is the substring of its value, as ${NAME:off}
+                    // (bash 5.3: s=hello; "${s[@]:1:-1}" is ell); an offset outside the value
+                    // is no word for [@]. Twin of the scalar arm of rt_arr_slice.
+                    if (!isPosName(name) && !isArr(name)) {
+                        var sv = isSetVar(name) ? sliceAt(getVarVal(name), arNum(offT()), lenT) : null
+                        if (sv == null) { return (sub == "@") ? encFields([]) : "" }
+                        return (sub == "@") ? encFields([sv]) : sv
+                    }
                     // The positional list counts from $0: "${@:1}" is $1 on and "${@:0}"
                     // starts with the script name.
                     var vals = scValList(name)
@@ -2486,8 +2559,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var idxWordT = wordT
             return function() {
                 var sub = readIdx()
-                if (sub == "@" || sub == "*") { return listOpValue(name, sub, idxOp, idxWordT) }
-                return elemOpValue(name, sub, idxOp, idxWordT)
+                var qn = (errName != null) ? errName : (isPosName(name) ? name : name + "[" + sub + "]")
+                if (sub == "@" || sub == "*") { return listOpValue(name, sub, idxOp, idxWordT, qn) }
+                return elemOpValue(name, sub, idxOp, idxWordT, qn)
             }
         }
         // ${#v} counts CHARACTERS in bash; .length counts UTF-16 code units.
@@ -2508,16 +2582,14 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         //     $ echo "${#x-default}"   ->  bash: ${#x-default}: bad substitution
         if (lenp) { var badName = name; return function() { fail("${#" + badName + "...}: bad substitution"); return "" } }
         // ${!ref OP arg} and ${!a[k] OP arg}: the operator applies to the variable the
-        // indirection LANDED on (indName), so every leaf below reads its name through nameOf()
-        // - once per expansion - instead of closing over `name`; null is an unset target.
+        // indirection LANDED on (cell, see mkParamExp), so every leaf below reads its name
+        // through nameOf() - once per expansion - instead of closing over `name`; null is an
+        // unset target.
         var baseName = name
         var indirect = indp
-        var indIdxT = idxT
         var nameOf = function() {
             if (!indirect) { return baseName }
-            if (indIdxT == null) { return indName(baseName, null, null) }
-            var raw = wordJoin(indIdxT())
-            return indName(baseName, subKey(baseName, raw), raw)
+            return cell.ok ? cell.v : null
         }
         // The transform operators. @P (prompt expansion) is the only one that is not a pure
         // string function; promptExpand implements the escapes bash documents for PS1.
@@ -2567,7 +2639,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 return v
             }
             if (o == "?") {
-                if (blank) { paramErr((tn == null) ? baseName : tn, wordT, colon) }
+                if (blank) { paramErr(indirect ? "!" + baseName : baseName, wordT, colon) }
                 return v
             }
             return v
@@ -3362,7 +3434,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // ${a[@]-default}: bash 5.3 tests whether the array has ANY element - `unset a;
     // echo "${a[@]-D}"` is D - and the ":" forms additionally test the joined value, so
     // `d=(""); echo "${d[@]-D}"` is empty while "${d[@]:-D}" is D.
-    function listOpValue(name, sub, op, wordT) {
+    function listOpValue(name, sub, op, wordT, qn) {
         var vals = scValList(name)
         var joined = (sub == "@") ? encFields(vals) : starJoin(vals)
         if (op == "") { return joined }
@@ -3372,12 +3444,16 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (colon && !blank) { blank = (joinList(vals, ifsFirst()) == "") }
         // An unset or empty [@] list under + stays that empty list: "${a[@]+x}" is no word.
         if (o == "+") { return blank ? ((sub == "@") ? encFields([]) : "") : dfltWord(wordT) }
+        if (o == "?") {
+            if (blank) { paramErr(qn, wordT, colon) }
+            return joined
+        }
         if (blank) { return (o == "-") ? dfltWord(wordT) : ((wordT != null) ? wordJoin(wordT()) : "") }
         return joined
     }
     // ${a[k]-default} and its three siblings: the scalar arms with "is it set" asked of
     // the ELEMENT.
-    function elemOpValue(name, sub, op, wordT) {
+    function elemOpValue(name, sub, op, wordT, qn) {
         var v = scGet(name, sub)
         if (op == "") { return v }
         var colon = (op.charAt(0) == ":")
@@ -3391,7 +3467,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return v
         }
         if (o == "?") {
-            if (blank) { paramErr(name + "[" + sub + "]", wordT, colon) }
+            if (blank) { paramErr(qn, wordT, colon) }
             return v
         }
         return v

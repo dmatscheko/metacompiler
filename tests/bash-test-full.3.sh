@@ -734,6 +734,38 @@ y2"
   for i in 1 2; do v=$(continue; echo no); out="$out [$v$?]"; done
   check pl5 "$out" " b1 b2 10 20 c1 c2 [0] [0]"
 }
+# ===== SECTION 66: ${!REF OP} acts on the target as if it were written there =====
+# An indirection with an operator applies it to what REF names: @, * and NAME[@] / NAME[*]
+# are lists, sliced and mapped element by element, and NAME[SUB] is that element. A scalar's
+# NAME[@] is the substring of its value. A ${!REF:?} error names "!REF". Every expected value
+# is bash 5.3's (with the default IFS).
+s66p() { printf '<%s>' "$@"; }
+s66m() { local m=${1#bash: }; m=${m#*line [0-9]*: }; printf '%s' "${m%%$'\n'*}"; }
+s66() {
+  local -a a=(aa bb 'c c' dd) e=()
+  local s=hello x o r
+  set -- p q 'r s'
+  x='@'
+  check ix1 "$(s66p "${!x:1}" / "${!x: -1}" / "${!x:2:1}" / "${!x#?}" / "${!x^^}" / ${!x:1})" \
+    "<p><q><r s></><r s></><q></><><>< s></><P><Q><R S></><p><q><r><s>"
+  check ix2 "$(s66p "${!x@Q}" "${!x:-d}")|$(set --; s66p "${!x:-d}" "${!x:+alt}")" "<'p'><'q'><'r s'><p><q><r s>|<d>"
+  x='a[@]'
+  check ix3 "$(s66p "${!x:1:2}" / "${!x/?/Z}" / "${!x%?}" / "${!x: -1}")" "<bb><c c></><Za><Zb><Z c><Zd></><a><b><c ><d></><dd>"
+  x='a[*]'
+  check ix4 "$(s66p "${!x:1}" "${!x//[ac]/Y}")" "<bb c c dd><YY bb Y Y dd>"
+  x='a[2]'
+  check ix5 "$(s66p "${!x:1}" "${!x^}" "${!x@Q}" "${!x:-d}")" "< c><C c><'c c'><c c>"
+  x='s[@]'
+  check ix6 "$(s66p "${!x:1:-1}" / "${s[@]:1}" / "${s[@]:9}" / "${s[*]:9}" / "${s[@]: -2}")" "<ell></><ello></></><></><lo>"
+  x='e[@]'
+  check ix7 "$(s66p "${!x:-d}" "${!x-u}")|$(s66p "${!x:+alt}")" "<d><u>|<>"
+  o=$( { echo "${!x:?gone}"; echo never; } 2>&1 ); r=$?
+  check ix8 "$r $(s66m "$o")" "1 !x: gone"
+  o=$( { x=nosuch; echo "${!x:?}"; echo never; } 2>&1 ); r=$?
+  check ix9 "$r $(s66m "$o")" "1 !x: parameter null or not set"
+  o=$( { echo "${e[@]:?empty}"; echo never; } 2>&1 ); r=$?
+  check ix10 "$r $(s66m "$o")" "1 e[@]: empty"
+}
 # ===== END SECTIONS =====
 
 s47   # SECTION-CALL 47
@@ -754,5 +786,6 @@ s62   # SECTION-CALL 62
 s63   # SECTION-CALL 63
 s64   # SECTION-CALL 64
 s65   # SECTION-CALL 65
+s66   # SECTION-CALL 66
 echo "full: $checks checks, $fails failures"
 exit $fails
