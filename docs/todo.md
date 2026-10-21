@@ -136,11 +136,6 @@ parameter), which no engine prints either.
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-733 bash: `o=$(nosuchcmd)` halves diverge; `exec` unsupported · P3 · SH · IN PROGRESS (SH worker, round 20) [V]
-`o=$(nosuchcmd)` → bash prints "nosuchcmd: command not found" on stderr, o empty, script continues; interpreter aborts the whole
-program with 127; compiler ends only the substitution and writes the message into o. `exec 2>&1` (and `exec` redirection-only forms)
-→ "command not found: exec" in both halves (bash applies the redirections to the shell).
-
 ---
 
 # C — C subset
@@ -786,6 +781,7 @@ T-725 js: accessors inherited through a prototype object; `Reflect` missing in t
 T-726 js: accessors on array indices / functions via defineProperty; Symbol-keyed properties under freeze and in messages — DONE b036333f for functions and Symbol keys (defineProperty on functions with attributes and accessors; freeze/seal cover Symbol keys; Symbol(desc) in messages — = node); array-index accessors → T-731
 T-724 ruby: builtin-raised errors print no `file:line:in 'meth': ` prefix; String + Integer concatenates — DONE 557c085e (raise helpers carry the builtin's frame name, sites stamped at rescue entry, def-line arity errors, String#+ / numeric coercion TypeErrors — 252-row operator matrix and uncaught lines = ruby 2.6; a features assertion that asserted the wrong answer corrected; follow-up T-732)
 T-730 bash: a pipeline's last stage runs in the current shell; scalar `-i`/`-u` ignored by read and `${v:=}`; smaller gaps — DONE ffd8ba03..751ce5c1 (pipeline stages as subshells, ${!REF OP} on its target, attribute-aware stores everywhere, two-phase declarations, subshell trap reset, repeated local, plus set -e, let, compiler EXIT traps and capture fd copies — = bash 5.3; follow-up T-733)
+T-733 bash: `o=$(nosuchcmd)` halves diverge; `exec` unsupported — DONE 820fcdfe (command not found on stderr ending its own subshell in both halves, redirection-only and bare exec — = bash 5.3)
 
 # Settled — do not re-open
 
