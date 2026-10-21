@@ -147,7 +147,7 @@ parameter), which no engine prints either.
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-729 bash: mapfile/readarray; attributes on array elements; unset of a scalar's element; `${!a[@]:0:3}` accepted · P2 · SH · OPEN [V]
+### T-729 bash: mapfile/readarray; attributes on array elements; unset of a scalar's element; `${!a[@]:0:3}` accepted · P2 · SH · IN PROGRESS (SH worker, round 18) [V]
 `mapfile` / `readarray` → "command not found" exit 127 in all engines (bash 5.3 builtin). `declare -i n=5; n[1]=3+4; echo "${n[*]}"`
 → bash `5 7`, ours `5 3+4`; `declare -l lo=ABC; lo[1]=XY` → bash `abc xy`, ours `abc XY`. `p2=ab; unset 'p2[1]'` → bash "not an array
 variable" status 1, ours silent 0. `"${!a[@]:0:3}"` → bash "bad substitution", ours expands. Long overwritten array element values
