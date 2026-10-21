@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-711** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-712** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -130,9 +130,9 @@ parameter), which no engine prints either.
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-709 bash: the interpreter is very slow building a long string (`printf -v s '%*s' 35000` + `${s// /ab}`) · P2 · SH · IN PROGRESS (SH worker, round 11) [V]
-Still running after 600 s in the bash interpreter (bash 5.3 instant). Find the quadratic step (pattern substitution over a long
-value, or printf padding) and make it linear in all engines.
+### T-711 bash: glob `?` and pattern elements match one UTF-16 unit in the interpreter · P3 · SH · OPEN [V]
+In bash-interpreter.abnf a glob `?` (and every pattern element) consumes one UTF-16 code unit, so an astral character (emoji) counts
+as two to `${v#?}`, `${v/?/x}`, `case` patterns; bash-rt.c (llvm.Run, native) and bash 5.3 count one character. Halves diverge.
 
 ---
 
@@ -786,6 +786,7 @@ T-704 js: `new.target`; a class extending Array / Map / Set and the other builti
 T-706 regex (CORE): the per-attempt step cap fires on long linear inputs — DONE c336f5ba 2dd9391b (one step budget per search scaled by program × subject, bash ERE VM on an explicit stack; pathological patterns still stop — = go/python/node/ruby/java/pcre2/bash on 70 KB)
 T-705 php preg: PCRE2's empty-iteration loop rule; long `\p{...}` names; PCRE2 start-optimization residue; `(*ACCEPT)` scope; `MARK` — DONE d4599b4d (PCRE2 loop rule, loose \p names per 10.48, (*ACCEPT) scope, MARK reporting, minlength; residue declined, see Settled)
 T-707 js: named properties on arrays; species for builtin subclasses — DONE 438be4a4 6c1f2bdd (named array properties in a side object on the non-index path in all engines, ArraySpeciesCreate / Promise SpeciesConstructor, regex match records are arrays — 4 legs = node; other languages' benches paired-neutral; follow-up T-710)
+T-709 bash: the interpreter is very slow building a long string (`printf -v s '%*s' 35000` + `${s// /ab}`) — DONE 17952f3c (fixed-length patterns test one candidate per start like bash's umatchlen, linear result building, freed candidates, one-allocation padding — 35000-char repro 0.3–1.8 s in every engine, = bash 5.3; follow-up T-711)
 
 # Settled — do not re-open
 
