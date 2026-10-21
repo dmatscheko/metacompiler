@@ -196,6 +196,15 @@ func (rt *jsrt) jsvStaticSideRead(o *jsObject, name string) uint64 {
 		}
 		return rt.wrap(v)
 	}
+	if (name == "name" || name == "length") && o.props["__del"+name] == true {
+		if sup, isObj := o.props["__super"].(*jsObject); isObj && isClassDesc(sup) {
+			return rt.jsvStaticSideRead(sup, name)
+		}
+		if name == "name" {
+			return rt.wrap("")
+		}
+		return rt.wrap(float64(0))
+	}
 	if name == "name" {
 		if n, has := o.props["__name"]; has {
 			return rt.wrap(n)
@@ -1192,9 +1201,9 @@ var jsvProtoFns = func() map[string]*hostFunc {
 	out := map[string]*hostFunc{}
 	for _, n := range jsvProtoNames {
 		name := n
-		out[name] = jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		out[name] = jsvNativeFn(jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
 			return rt.jsvProtoApply(rt.unwrap(this), name, args)
-		})
+		}), name, 0)
 	}
 	return out
 }()
@@ -2170,23 +2179,44 @@ func (rt *jsrt) jsvFnMethod(recv interface{}, name string) interface{} {
 	switch name {
 	case "hasOwnProperty", "propertyIsEnumerable":
 		enumerable := name == "propertyIsEnumerable"
-		return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		return jsvNativeFn(jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
 			k := rt.toString(argAt(args, 0))
 			if enumerable {
 				return jsvPropEnum(recv, k)
 			}
 			return jsvFnOwn(recv, k)
-		})
+		}), name, 0)
 	case "toString":
-		return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		return jsvNativeFn(jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
 			return rt.jsvString(recv)
-		})
+		}), name, 0)
 	case "valueOf":
-		return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		return jsvNativeFn(jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
 			return recv
-		})
+		}), name, 0)
 	}
 	return nil
+}
+
+// jsvNativeFn gives f a builtin method's own `name` and `length`. Twin of jsNativeFn
+// in js-interpreter.abnf, which states the rule; jvNativeFn in
+// languages/lib/js-rt.metajs.
+func jsvNativeFn(f *hostFunc, k string, fam byte) *hostFunc {
+	n := 1
+	switch k {
+	case "slice", "substring", "substr", "split", "replace", "replaceAll", "splice", "toSpliced", "with",
+		"copyWithin", "apply":
+		n = 2
+	case "toUpperCase", "toLowerCase", "trim", "trimStart", "trimEnd", "normalize", "pop", "shift", "reverse",
+		"flat", "keys", "values", "entries", "toReversed", "toLocaleString", "valueOf":
+		n = 0
+	case "toString":
+		if fam != 'n' {
+			n = 0
+		}
+	}
+	jsvFnMetaSet(f, k, n)
+	return f
 }
 
 func jsvInternalKey(k string) bool {
@@ -2294,13 +2324,128 @@ func (rt *jsrt) jsvHasOwn(v interface{}, k string) bool {
 	return err == nil && strconv.Itoa(i) == k && i >= 0 && i < n
 }
 
+// jsvOwnDesc is Object.getOwnPropertyDescriptor(v, k) for a key in the object's own
+// spelling, nil for one v does not own; get is the VALUE read of a member (js_jsvget).
+// Twin of jsOwnDesc in js-interpreter.abnf, which states the rule; jvOwnDesc in
+// languages/lib/js-rt.metajs.
+func (rt *jsrt) jsvOwnDesc(v interface{}, k string, get func(interface{}, string) interface{}) *jsObject {
+	if isUndefOrNull(v) {
+		rt.bigRaise("TypeError: Cannot convert undefined or null to object")
+	}
+	if !rt.jsvHasOwn(v, k) {
+		return nil
+	}
+	en := jsvPropEnum(v, k)
+	wr, cf := true, true
+	var at *jsObject    // the object whose attribute sets hold k
+	var slots *jsObject // the map that may hold k's accessor
+	switch o := v.(type) {
+	case string:
+		wr, cf = false, false
+	case *jsArray:
+		if !jsvIsArgs(o) {
+			lv := jsvArrLevel(o)
+			wr, cf = lv < 3, k != "length" && lv < 2
+		}
+	case *jsObject:
+		if p, isStr := o.props["__bvof"].(string); isStr && rt.jsvHasOwn(p, k) {
+			wr, cf = false, false
+			break
+		}
+		if isClassDesc(o) {
+			switch {
+			case k == "prototype":
+				wr, cf = false, false
+			case (k == "name" || k == "length") && !jsvOwnsStatic(o, k):
+				wr = false
+			default:
+				slots = jsStaticsOf(o, false)
+			}
+			break
+		}
+		at, slots = o, o
+		if d, isView := o.props["__protoof"].(*jsObject); isView {
+			if _, own := o.props[k]; !own {
+				slots = d
+			}
+		}
+	default:
+		if !jsvIsFnLike(v) {
+			break
+		}
+		switch k {
+		case "name", "length":
+			r := jsvFnIntrRec(v, k)
+			wr, cf = r != nil && r.props["w"] == true, jsvIntegrity(v) < 2
+		case "prototype":
+			wr, cf = false, false
+		default:
+			at = jsvFnPropsOf(v)
+		}
+	}
+	if strings.HasPrefix(k, "__#@") {
+		en = at == nil || !jsvAttrHas(at, "__hidden", k)
+	}
+	if at != nil {
+		wr, cf = !jsvAttrHas(at, "__ro", k), !jsvAttrHas(at, "__nc", k)
+	}
+	d := newJSObject()
+	var acc *jsAccessor
+	if slots != nil {
+		acc, _ = slots.props[k].(*jsAccessor)
+	}
+	if acc != nil {
+		d.set("get", jsvOrUndef(acc.get))
+		d.set("set", jsvOrUndef(acc.set))
+	} else {
+		d.set("value", get(v, k))
+		d.set("writable", wr)
+	}
+	d.set("enumerable", en)
+	d.set("configurable", cf)
+	return d
+}
+
+// jsvOrUndef is v, or undefined for an absent (nil) half of an accessor.
+func jsvOrUndef(v interface{}) interface{} {
+	if v == nil {
+		return jsUndef
+	}
+	return v
+}
+
+// jsvOwnDescs is Object.getOwnPropertyDescriptor and Object.getOwnPropertyDescriptors.
+func (rt *jsrt) jsvOwnDescs(name string, args []interface{}, get func(interface{}, string) interface{}) interface{} {
+	src := argAt(args, 0)
+	if name == "getOwnPropertyDescriptor" {
+		if d := rt.jsvOwnDesc(src, rt.jsvPropKey(argAt(args, 1)), get); d != nil {
+			return d
+		}
+		return jsUndef
+	}
+	if isUndefOrNull(src) {
+		rt.bigRaise("TypeError: Cannot convert undefined or null to object")
+	}
+	out := newJSObject()
+	for _, k := range append(jsvGopnKeys(src), jsvSymKeys(src)...) {
+		out.set(k, rt.jsvOwnDesc(src, k, get))
+	}
+	return out
+}
+
 // jsvClassOwnNames are the own property names of a class object: `length`, `name`
 // and `prototype`, then its static members and what the program wrote onto it, in
 // the order they were defined, which is the static table's own key order. Twins:
 // jsClassOwnNames in both *-interpreter.abnf, jvClassOwnNames in
 // languages/lib/js-rt.metajs.
 func jsvClassOwnNames(c *jsObject) []string {
-	out := []string{"length", "name", "prototype"}
+	out := []string{}
+	for _, k := range []string{"length", "name"} {
+		if c.props["__del"+k] != true {
+			out = append(out, k)
+		}
+	}
+	out = append(out, "prototype")
 	if t := jsStaticsOf(c, false); t != nil {
 		for _, k := range t.keys {
 			if !jsvInternalKey(k) && !jsvInNames(out, k) {
@@ -4778,6 +4923,14 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 			}
 			return boolH(true)
 		}
+		// A class's own name / length: a read then finds the parent class's, or
+		// Function.prototype's (jsvStaticSideRead).
+		if cls, isObj := u(a[0]).(*jsObject); isObj && isClassDesc(cls) {
+			if n := rt.toString(u(a[1])); (n == "name" || n == "length") && !jsvOwnsStatic(cls, n) {
+				cls.props["__del"+n] = true
+				return boolH(true)
+			}
+		}
 		if jsvIsFnLike(u(a[0])) {
 			if n := rt.toString(u(a[1])); n == "name" || n == "length" {
 				r := newJSObject()
@@ -5050,6 +5203,7 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 			}
 			return u(m["js_jsmcall"]([]uint64{w(recv), w(name), w(&jsArray{elems: append([]interface{}{}, args...)})}))
 		})
+		jsvNativeFn(f, name, fam)
 		builtinVals[key] = f
 		return f
 	}
@@ -5108,6 +5262,20 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 	vget = func(a []uint64) uint64 {
 		if fam := jsvBuiltinFam(u(a[0]), rt.toString(u(a[1]))); fam != 0 {
 			return w(builtinValue(fam, rt.toString(u(a[1]))))
+		}
+		// Function.prototype's call / apply / bind read as a value: a function over the
+		// receiver that makes the same call `f.call(...)` makes. Twins: fnCallShim and
+		// its neighbours in both *-interpreter.abnf, jvCallShim and its neighbours in
+		// languages/lib/js-rt.metajs.
+		if k := rt.toString(u(a[1])); (k == "call" || k == "apply" || k == "bind") && jsvIsFnLike(u(a[0])) {
+			fn := u(a[0])
+			return w(jsvNativeFn(jsHostFunc(k, func(rt *jsrt, this uint64, args []interface{}) interface{} {
+				if k == "bind" {
+					v, _ := rt.jsvMethod(fn, k, args)
+					return v
+				}
+				return rt.builtinMethod(&boundMethod{recv: fn, name: k}, args)
+			}), k, 0))
 		}
 		// A CLASS DESCRIPTOR reads from its static namespace and from nowhere else,
 		// its prototype aside. Ordered in front of baseGet because the descriptor's own
@@ -5820,8 +5988,15 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 				rt.bigRaise("TypeError: %s is not extensible", rt.jsvObjText(o))
 			}
 		}
-		if jsvIsObjectGlobal(u(a[0])) && rt.toString(u(a[1])) == "getPrototypeOf" {
-			return w(getProto(u(a[0]), argAt(arr.elems, 0)))
+		if jsvIsObjectGlobal(u(a[0])) {
+			switch name := rt.toString(u(a[1])); name {
+			case "getPrototypeOf":
+				return w(getProto(u(a[0]), argAt(arr.elems, 0)))
+			case "getOwnPropertyDescriptor", "getOwnPropertyDescriptors":
+				return w(rt.jsvOwnDescs(name, arr.elems, func(v interface{}, k string) interface{} {
+					return u(m["js_jsvget"]([]uint64{w(v), w(k)}))
+				}))
+			}
 		}
 		if v, handled := rt.jsvMethod(u(a[0]), rt.toString(u(a[1])), arr.elems); handled {
 			return w(v)

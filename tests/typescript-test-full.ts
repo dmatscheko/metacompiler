@@ -4621,6 +4621,43 @@ function s100(): void {
         err(() => put(g100, "length", 4)) === "TypeError");
 }
 
+// ===== SECTION 101: property descriptors, builtin methods' names, deleting a class's name and length =====
+// Object.getOwnPropertyDescriptor answers the attributes the value model keeps and
+// the fixed ones of the intrinsic properties (js-test-full.2.js SECTION 108 states
+// them); a builtin method read as a value carries its own name and length; `delete`
+// removes a class's own name or length, and the read then finds the parent class's, or
+// Function.prototype's. Values read off tsc 6.0.3's default output run by node 24.
+class P101 { constructor(a: number, b: number) {} }
+class K101 extends P101 {}
+class C101 {
+    static sf: number = 3;
+    static sm(): void {}
+    m(): void {}
+    get g(): number { return 2; }
+}
+function s101(): void {
+    const show = (d: any): string => d === undefined ? "-" : Object.keys(d).map((k: string) => k + "=" +
+        (typeof d[k] === "function" ? "fn " + d[k].name : String(d[k]))).join(",");
+    const G = Object.getOwnPropertyDescriptor;
+    const o = { x: 1, get g(): number { return 2; } };
+    check("od101a", show(G(o, "x")) === "value=1,writable=true,enumerable=true,configurable=true" &&
+        show(G(o, "g")) === "get=fn get g,set=undefined,enumerable=true,configurable=true" && G(o, "no") === undefined &&
+        show(G(Object.freeze({ a: 1 }), "a")) === "value=1,writable=false,enumerable=true,configurable=false" &&
+        show(G([5], "length")) === "value=1,writable=true,enumerable=false,configurable=false");
+    check("od101b", show(G(C101, "sf")) + " " + show(G(C101, "sm")) ===
+        "value=3,writable=true,enumerable=true,configurable=true value=fn sm,writable=true,enumerable=false,configurable=true" &&
+        show(G(C101.prototype, "g")) === "get=fn get g,set=undefined,enumerable=false,configurable=true" &&
+        show(G(P101, "length")) === "value=2,writable=false,enumerable=false,configurable=true" &&
+        Object.keys(Object.getOwnPropertyDescriptors({ a: 1, b: 2 })).join() === "a,b");
+    const f = function (this: any, x: number): number { return this.v + x; };
+    check("bn101c", [[].push, "".slice, (5).toString, "".trimEnd].map((m: any) => m.name + "/" + m.length).join() ===
+        "push/1,slice/2,toString/1,trimEnd/0" && ({}).hasOwnProperty.name === "hasOwnProperty" &&
+        [f.call, f.apply, f.bind].map((m: any) => m.name + "/" + m.length).join() === "call/1,apply/2,bind/1");
+    const k: any = K101;
+    check("dc101d", delete k.name && delete k.length && K101.name === "P101" && K101.length === 2 &&
+        !K101.hasOwnProperty("name") && Object.getOwnPropertyNames(K101).join() === "prototype");
+}
+
 // ===== END SECTIONS =====
 
 function main(): number {
@@ -4724,6 +4761,7 @@ function main(): number {
     s98(); // SECTION-CALL 98
     s99(); // SECTION-CALL 99
     s100(); // SECTION-CALL 100
+    s101(); // SECTION-CALL 101
     println("full: " + checks + " checks, " + failures + " failures");
     return failures;
 }

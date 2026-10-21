@@ -3847,6 +3847,20 @@ NotFuncHead = :script(~~
         if (getMemberRaw(target, name) !== undefined) { return null }
         return {v: jsProtoApply(target, name, args)}
     }
+    // A builtin method's own `name` and `length`, node's: the method's name, and the
+    // count of its parameters before the first optional one. fam is builtinFam's
+    // kind, "" for the Object.prototype and Function.prototype methods. Twins:
+    // jsvNativeFn in abnf/jsrtjsprint.go, jvNativeFn in languages/lib/js-rt.metajs.
+    function jsNativeFn(f, k, fam) {
+        var n = 1
+        if (k == "slice" || k == "substring" || k == "substr" || k == "split" || k == "replace" || k == "replaceAll" ||
+            k == "splice" || k == "toSpliced" || k == "with" || k == "copyWithin" || k == "apply") { n = 2 }
+        if (k == "toUpperCase" || k == "toLowerCase" || k == "trim" || k == "trimStart" || k == "trimEnd" ||
+            k == "normalize" || k == "pop" || k == "shift" || k == "reverse" || k == "flat" || k == "keys" ||
+            k == "values" || k == "entries" || k == "toReversed" || k == "toLocaleString" || k == "valueOf" ||
+            (k == "toString" && fam != "n")) { n = 0 }
+        return fnMetaSet(f, k, n)
+    }
     // One of them READ AS A VALUE: one function per name, the one Object.prototype
     // holds, so `o.valueOf === o.valueOf` and `o.valueOf === Object.prototype.valueOf`
     // as in node. It takes its receiver from the call site.
@@ -3854,7 +3868,7 @@ NotFuncHead = :script(~~
     function jsProtoShim(name) {
         var key = "$" + name
         if (hasOwn(jsProtoFns, key)) { return jsProtoFns[key] }
-        var f = jsProtoFn(name)
+        var f = jsNativeFn(jsProtoFn(name), name, "")
         jsProtoFns[key] = f
         return f
     }
@@ -3938,7 +3952,8 @@ NotFuncHead = :script(~~
         var eo = anytype // true, false, or undefined for a key jsErrOwn does not judge.
         eo = jsErrOwn(self, kk)
         if (eo !== undefined) { return eo }
-        return hasOwn(self, kk)
+        // An object literal's accessor lives in its accessor table, not in a slot.
+        return hasOwn(self, kk) || jsIsAccKey(self, kk)
     }
     // The own property names of a class object: `length`, `name` and `prototype`,
     // then its static members and what the program wrote onto it, in the order they
@@ -3946,7 +3961,10 @@ NotFuncHead = :script(~~
     // jsvClassOwnNames in abnf/jsrtjsprint.go, jvClassOwnNames in
     // languages/lib/js-rt.metajs.
     function jsClassOwnNames(c) {
-        var out = ["length", "name", "prototype"]
+        var out = []
+        if (!hasOwn(c, "__dellength")) { out.push("length") }
+        if (!hasOwn(c, "__delname")) { out.push("name") }
+        out.push("prototype")
         var t = anytype // The static table, absent on the Object heritage stand-in.
         t = c.__statics
         if (t == undefined || !hasOwn(t, "__names")) { return out }
@@ -4737,7 +4755,88 @@ NotFuncHead = :script(~~
         if (name == "isSealed") { return {v: jsIntegrity(src) >= 2} }
         if (name == "isExtensible") { return {v: jsIntegrity(src) == 0 && src !== undefined && src !== null && (typeof src == "object" || typeof src == "function") && !isBigInt(src) && !jsIsSym(src)} }
         if (name == "is") { return {v: sameValue(args[0], args[1])} }
+        if (name == "getOwnPropertyDescriptor") { return {v: jsOwnDesc(src, args.length > 1 ? args[1] : undefined)} }
+        if (name == "getOwnPropertyDescriptors") {
+            if (src === undefined || src === null) { biRaise("TypeError: Cannot convert undefined or null to object") }
+            var ds = {}
+            ds["__keys"] = []
+            var dn = jsKeysUnesc(jsGopnKeys(src))
+            for (var di = 0; di < dn.length; di++) { setMember(ds, jsKeyStr(dn[di]), jsOwnDesc(src, dn[di])) }
+            var dsk = jsSymKeysOf(src)
+            for (var dj = 0; dj < dsk.length; dj++) { setMember(ds, dsk[dj], jsOwnDesc(src, jsSymByKey["$" + dsk[dj]])) }
+            return {v: ds}
+        }
         return null
+    }
+    // Object.getOwnPropertyDescriptor(o, k) (ECMA-262 20.1.2.8): undefined for a key o
+    // does not own, else a fresh {value, writable, enumerable, configurable}, or
+    // {get, set, enumerable, configurable} for an accessor. The attributes are the ones
+    // the value model keeps (jsDefineKey's lists, an array's integrity level) and the
+    // fixed ones of the intrinsic properties: a function's or a class's name and length
+    // are configurable only, a class's prototype and an array's length are not
+    // configurable, a string's indices and length are neither writable nor
+    // configurable, and a class body's members are writable and configurable. Twins:
+    // jsvOwnDesc in abnf/jsrtjsprint.go, jvOwnDesc in languages/lib/js-rt.metajs.
+    function jsOwnDesc(o, k) {
+        if (o === undefined || o === null) { biRaise("TypeError: Cannot convert undefined or null to object") }
+        var none = anytype
+        none = undefined
+        if (!jsHasOwn(o, k)) { return none }
+        var kk = jsKeyStr(k)
+        var en = jsIsSym(k) ? !(typeof o == "object" && jsAttrHas(o, "__hidden", kk)) : jsPropEnum(o, k)
+        var w = true
+        var cf = true
+        var at = anytype // The object whose attribute lists hold kk, if any.
+        at = undefined
+        var acc = anytype // The accessor table that may hold kk.
+        acc = undefined
+        if (typeof o == "string" || (jsIsWrap(o) && typeof o.__bvof == "string" && jsHasOwn(o.__bvof, kk))) {
+            w = false
+            cf = false
+        } else if (Array.isArray(o)) {
+            if (!jsIsArgs(o)) {
+                var lv = jsArrLevel(o)
+                w = lv < 3
+                cf = kk != "length" && lv < 2
+            }
+        } else if (typeof o == "function") {
+            if (kk == "name" || kk == "length") {
+                var ir = anytype // A defined name / length (fnIntrRec).
+                ir = fnIntrRec(o, kk)
+                w = ir !== undefined && ir.w === true
+                cf = jsIntegrity(o) < 2
+            } else if (kk == "prototype") {
+                w = false
+                cf = false
+            } else if (fnPropsN > 0) { at = fnPropsOf(o) }
+        } else if (isClassDesc(o)) {
+            if (kk == "prototype") {
+                w = false
+                cf = false
+            } else if ((kk == "name" || kk == "length") && !classOwnsStatic(o, kk)) {
+                w = false
+            } else if (o.__statics != undefined && hasOwn(o.__statics, "__acc")) { acc = o.__statics.__acc }
+        } else if (typeof o == "object") {
+            at = o
+            if (hasOwn(o, "__acc")) { acc = o.__acc }
+            else if (hasOwn(o, "__protoof") && hasOwn(o.__protoof, "__acc")) { acc = o.__protoof.__acc }
+        }
+        if (at !== undefined) {
+            w = !jsAttrHas(at, "__ro", kk)
+            cf = !jsAttrHas(at, "__nc", kk)
+        }
+        var d = {}
+        d["__keys"] = []
+        if (acc !== undefined && (hasOwn(acc, "get:" + kk) || hasOwn(acc, "set:" + kk))) {
+            setMember(d, "get", accSlot(acc, "get:" + kk))
+            setMember(d, "set", accSlot(acc, "set:" + kk))
+        } else {
+            setMember(d, "value", getMember(o, kk))
+            setMember(d, "writable", w)
+        }
+        setMember(d, "enumerable", en)
+        setMember(d, "configurable", cf)
+        return d
     }
     // Object.create(p): an object whose prototype is p. A class's prototype view makes
     // it an instance of that class whose constructor never ran. Any other object
@@ -6126,9 +6225,9 @@ NotFuncHead = :script(~~
         // 'this', which the closures built here never read - they take it from the one-shot
         // pendingThis slot - so the three are re-implemented on top of callWithThis.
         if (typeof o == "function") {
-            if (k == "call") { return fnCallShim(o) }
-            if (k == "apply") { return fnApplyShim(o) }
-            if (k == "bind") { return fnBindShim(o) }
+            if (k == "call") { return jsNativeFn(fnCallShim(o), k, "") }
+            if (k == "apply") { return jsNativeFn(fnApplyShim(o), k, "") }
+            if (k == "bind") { return jsNativeFn(fnBindShim(o), k, "") }
             // `f.name` and `f.length` - the two own properties every function has and
             // no program writes. Asked BEFORE the own-property side table because both
             // are non-writable in node, so an `f.name = "q"` that reached the table
@@ -6168,9 +6267,9 @@ NotFuncHead = :script(~~
             //
             // toString answers jsStr's "[function]" and not node's source text: no
             // engine here keeps the source, and it agrees with String(f) in all four legs.
-            if (k == "hasOwnProperty" || k == "propertyIsEnumerable") { return fnHasOwnShim(o, k == "propertyIsEnumerable") }
-            if (k == "toString") { return fnToStringShim(o) }
-            if (k == "valueOf") { return fnValueOfShim(o) }
+            if (k == "hasOwnProperty" || k == "propertyIsEnumerable") { return jsNativeFn(fnHasOwnShim(o, k == "propertyIsEnumerable"), k, "") }
+            if (k == "toString") { return jsNativeFn(fnToStringShim(o), k, "") }
+            if (k == "valueOf") { return jsNativeFn(fnValueOfShim(o), k, "") }
             if (jsIsProtoName(k)) { return jsProtoShim(k) }
         }
         // Plain objects (instances, literals) read own properties only: a bare o[k]
@@ -6293,6 +6392,12 @@ NotFuncHead = :script(~~
                 return callWithThis(hit.g, o, [])
             }
             return hit.v
+        }
+        if ((k == "name" || k == "length") && hasOwn(o, "__del" + k)) {
+            var sup = anytype // The parent class, whose own name / length a deleted one reads.
+            sup = o.__super
+            if (isClassDesc(sup)) { return staticSideRead(sup, k) }
+            return k == "name" ? "" : 0
         }
         if (k == "name") { return o.__name }
         if (k == "length") { return fnLenOf(o.__ctor) }
@@ -6577,7 +6682,7 @@ NotFuncHead = :script(~~
     function builtinValue(fam, k) {
         var key = "$" + fam + k
         if (hasOwn(bvFns, key)) { return bvFns[key] }
-        var f = builtinValueFn(fam, k)
+        var f = jsNativeFn(builtinValueFn(fam, k), k, fam)
         bvFns[key] = f
         return f
     }
@@ -8642,6 +8747,12 @@ NotFuncHead = :script(~~
                     jsRefuse(dr)
                     return false
                 }
+            }
+            // A class's own name / length: a read then finds the parent class's, or
+            // Function.prototype's (staticSideRead).
+            if (isClassDesc(p.obj) && (p.key === "name" || p.key === "length") && !classOwnsStatic(p.obj, p.key)) {
+                scopePut(p.obj, "__del" + p.key, true)
+                return true
             }
             if (typeof p.obj == "function" && (p.key === "name" || p.key === "length")) {
                 var dr2 = {}

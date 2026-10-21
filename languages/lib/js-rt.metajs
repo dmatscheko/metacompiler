@@ -1298,6 +1298,17 @@ function js_jsdel(o, key) {
             return true
         }
     }
+    // A class's own name / length: a read then finds the parent class's, or
+    // Function.prototype's (jvStaticSideRead).
+    if (jvClsN > 0) {
+        if (jvIsClassDesc(o)) {
+            var dk = jvStr(key)
+            if ((dk == "name" || dk == "length") && !jvClassOwnsStatic(o, dk)) {
+                o["__del" + dk] = true
+                return true
+            }
+        }
+    }
     if (jvFnPropsN > 0) {
         var fp = anytype
         fp = jvFnPropsOf(o)
@@ -1585,7 +1596,10 @@ function jvSlotHas(o, k) {
 // defined, which is the static table's own key order. Twins: jsvClassOwnNames in
 // abnf/jsrtjsprint.go, jsClassOwnNames in both *-interpreter.abnf.
 function jvClassOwnNames(c) {
-    var out = ["length", "name", "prototype"]
+    var out = []
+    if (c["__dellength"] !== true) { out.push("length") }
+    if (c["__delname"] !== true) { out.push("name") }
+    out.push("prototype")
     var t = anytype
     t = c["__statics"]
     if (!jvIsObj(t)) { return out }
@@ -1622,15 +1636,15 @@ function jvFnMethod(o, key) {
     var r = anytype
     r = undefined
     if (key == "hasOwnProperty" || key == "propertyIsEnumerable") {
-        if (jvIsCallable(o)) { return jvFnHasOwnShim(o, key == "propertyIsEnumerable") }
+        if (jvIsCallable(o)) { return jvNativeFn(jvFnHasOwnShim(o, key == "propertyIsEnumerable"), key, "") }
         return r
     }
     if (key == "toString") {
-        if (jvIsCallable(o)) { return jvFnToStringShim(o) }
+        if (jvIsCallable(o)) { return jvNativeFn(jvFnToStringShim(o), key, "") }
         return r
     }
     if (key == "valueOf") {
-        if (jvIsCallable(o)) { return jvFnValueOfShim(o) }
+        if (jvIsCallable(o)) { return jvNativeFn(jvFnValueOfShim(o), key, "") }
         return r
     }
     return r
@@ -1764,6 +1778,15 @@ function jvStaticSideRead(o, k) {
     v = jvStaticFind(o, k)
     if (jvIsAcc(v)) { return jvAccGet(v, o) }
     if (v !== undefined) { return v }
+    if (k == "name" || k == "length") {
+        if (o["__del" + k] === true) {
+            var sup = anytype
+            sup = o["__super"]
+            if (jvIsClassDesc(sup)) { return jvStaticSideRead(sup, k) }
+            if (k == "name") { return "" }
+            return 0
+        }
+    }
     if (k == "name") { return o["__name"] }
     if (k == "length") {
         var c = o["__ctor"]
@@ -2187,8 +2210,22 @@ function jvBuiltinValue(fam, name) {
         }
         return js_jsmcall(recv, name, a)
     }
+    f = jvNativeFn(f, name, fam)
     jvBuiltinVals[k] = f
     return f
+}
+
+// A builtin method's own `name` and `length`. Twin of jsNativeFn in
+// js-interpreter.abnf, which states the rule; jsvNativeFn in abnf/jsrtjsprint.go.
+function jvNativeFn(f, k, fam) {
+    var n = 1
+    if (k == "slice" || k == "substring" || k == "substr" || k == "split" || k == "replace" || k == "replaceAll" ||
+        k == "splice" || k == "toSpliced" || k == "with" || k == "copyWithin" || k == "apply") { n = 2 }
+    if (k == "toUpperCase" || k == "toLowerCase" || k == "trim" || k == "trimStart" || k == "trimEnd" ||
+        k == "normalize" || k == "pop" || k == "shift" || k == "reverse" || k == "flat" || k == "keys" ||
+        k == "values" || k == "entries" || k == "toReversed" || k == "toLocaleString" || k == "valueOf") { n = 0 }
+    if (k == "toString" && fam != "n") { n = 0 }
+    return fnMetaSet(f, k, n)
 }
 // The receiver a builtin method value runs on, with node's TypeErrors. Twin of
 // jsvBuiltinRecv in abnf/jsrtjsprint.go, which states the rule.
@@ -2269,9 +2306,9 @@ function js_jsvget(o, key) {
         // up. That keeps three string comparisons off every member read.
         if (key == "call" || key == "apply" || key == "bind") {
             if (jvIsCallable(o)) {
-                if (key == "call") { return jvCallShim(o) }
-                if (key == "bind") { return jvBindShim(o) }
-                return jvApplyShim(o)
+                if (key == "call") { return jvNativeFn(jvCallShim(o), key, "") }
+                if (key == "bind") { return jvNativeFn(jvBindShim(o), key, "") }
+                return jvNativeFn(jvApplyShim(o), key, "")
             }
         }
         // The static namespace, exactly as in js_jsmget, its prototype aside.
@@ -3859,7 +3896,7 @@ function jvProtoShim(name) {
     var f = anytype
     f = jvProtoFns[k]
     if (f !== undefined) { return f }
-    f = jvProtoFn(name)
+    f = jvNativeFn(jvProtoFn(name), name, "")
     jvProtoFns[k] = f
     return f
 }
@@ -5676,7 +5713,107 @@ function jvObjectGlobalMethod(name, args) {
     if (name == "isSealed") { return jvIntegrity(src) >= 2 }
     if (name == "isExtensible") { return jvIsExtensible(src) }
     if (name == "is") { return jvSameValue(jvArg(args, 0), jvArg(args, 1)) }
+    if (name == "getOwnPropertyDescriptor") { return jvOwnDesc(src, jvArg(args, 1)) }
+    if (name == "getOwnPropertyDescriptors") {
+        if (jvUndefOrNull(src)) { jbRaise("TypeError: Cannot convert undefined or null to object") }
+        var ds = {}
+        var dn = jvObjectGlobalMethod("getOwnPropertyNames", [src])
+        var di = 0
+        while (di < dn.length) {
+            ds[js_jskeyesc(dn[di])] = jvOwnDesc(src, dn[di])
+            di = di + 1
+        }
+        var dsk = jvSymKeys(src)
+        var dj = 0
+        while (dj < dsk.length) {
+            js_jsmset(ds, dsk[dj], jvOwnDesc(src, jvSymByKey["$" + dsk[dj]]))
+            dj = dj + 1
+        }
+        return ds
+    }
     return jvMiss
+}
+
+// Object.getOwnPropertyDescriptor(o, k). Twin of jsOwnDesc in js-interpreter.abnf,
+// which states the rule; jsvOwnDesc in abnf/jsrtjsprint.go.
+function jvOwnDesc(o, k) {
+    if (jvUndefOrNull(o)) { jbRaise("TypeError: Cannot convert undefined or null to object") }
+    var none = anytype
+    none = undefined
+    if (!jvHasOwn(o, k)) { return none }
+    var kk = jvPropKey(k)
+    var en = true
+    var w = true
+    var cf = true
+    var at = anytype
+    at = undefined
+    var acc = anytype
+    acc = undefined
+    if (typeof o == "string") {
+        w = false
+        cf = false
+    } else if (Array.isArray(o)) {
+        if (!jvIsArgs(o)) {
+            var lv = jvArrLevel(o)
+            w = lv < 3
+            cf = kk != "length" && lv < 2
+        }
+    } else if (jvIsCallable(o)) {
+        if (kk == "name" || kk == "length") {
+            var ir = anytype
+            ir = jvFnIntrRec(o, kk)
+            w = false
+            if (ir !== undefined) { w = ir["w"] === true }
+            cf = jvIntegrity(o) < 2
+        } else if (kk == "prototype") {
+            w = false
+            cf = false
+        } else if (jvFnPropsN > 0) { at = jvFnPropsOf(o) }
+    } else if (jvIsClassDesc(o)) {
+        if (kk == "prototype") {
+            w = false
+            cf = false
+        } else if ((kk == "name" || kk == "length") && !jvClassOwnsStatic(o, kk)) {
+            w = false
+        } else {
+            var st = anytype
+            st = o["__statics"]
+            if (jvIsObj(st)) { acc = st[kk] }
+        }
+    } else if (jvIsObj(o)) {
+        var bv = anytype
+        bv = o["__bvof"]
+        if (typeof bv == "string" && jvHasOwn(bv, kk)) {
+            w = false
+            cf = false
+        } else {
+            at = o
+            acc = o[kk]
+            var pd = anytype
+            pd = o["__protoof"]
+            if (pd !== undefined && !jvSlotHas(o, kk)) { acc = pd[kk] }
+        }
+    }
+    if (jvIsSymKey(kk)) {
+        if (at !== undefined) { en = !jvAttrHas(at, "__nonenum", kk) }
+    } else {
+        en = jvPropEnum(o, k)
+    }
+    if (at !== undefined) {
+        w = !jvAttrHas(at, "__ro", kk)
+        cf = !jvAttrHas(at, "__nc", kk)
+    }
+    var d = {}
+    if (jvIsAcc(acc)) {
+        d["get"] = acc["g"]
+        d["set"] = acc["s"]
+    } else {
+        d["value"] = js_jsvget(o, kk)
+        d["writable"] = w
+    }
+    d["enumerable"] = en
+    d["configurable"] = cf
+    return d
 }
 
 // The values an iterable yields, for the statics that take one (Object.fromEntries,

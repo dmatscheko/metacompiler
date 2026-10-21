@@ -1,11 +1,11 @@
-// Full-syntax test: JavaScript - part 2 of 4, sections 36-43 and 101-107.
+// Full-syntax test: JavaScript - part 2 of 4, sections 36-43 and 101-108.
 //
 // THE JS RATCHET IS FOUR FILES: as one file its -frozen interpreter leg ran into
 // ./test.sh --full's time brake (peak memory grew superlinearly with the file), and
 // the fourth is a Module, the one goal symbol in which 'export' may stand.
 //
 //   tests/js-test-full.js     sections 01-35, the ECMAScript-2022 syntax walk
-//   tests/js-test-full.2.js   sections 36-43 and 101-107, engine agreement, generators,
+//   tests/js-test-full.2.js   sections 36-43 and 101-108, engine agreement, generators,
 //                             Error, Math, builtin constructors, integrity levels
 //   tests/js-test-full.3.js   sections 44-56, 58-71 and 73-100, the call/class/
 //                             private-name model, iterators, the arguments object and
@@ -1374,6 +1374,88 @@ function s107() {
             String(K107).substring(0, 111) + "...<omitted>...\n}'")
 }
 
+// ===== SECTION 108: property descriptors, builtin methods' names, deleting a class's name and length =====
+// Object.getOwnPropertyDescriptor answers the attributes the value model keeps: an
+// object's (defineProperty's, the integrity level's), and the fixed ones of the
+// intrinsic properties - a function's and a class's name and length are configurable
+// only, a class's prototype and an array's length are not configurable, a string's
+// indices are read-only, and a class body's members are writable and configurable but
+// not enumerable. A builtin method read as a value carries its own name and length,
+// which String(f) shows. `delete` removes a class's own name or length, and the read
+// then finds the parent class's, or Function.prototype's. Values read off node 24.
+class P108 { constructor(a, b) {} }
+class K108 extends P108 {}
+class E108 {}
+class C108 {
+    static sf = 3
+    static sm() {}
+    static get sg() { return 1 }
+    f = 1
+    m() {}
+    get g() { return 2 }
+    set g(v) {}
+}
+function s108() {
+    const show = (d) => d === undefined ? "-" : Object.keys(d).map((k) => k + "=" +
+        (typeof d[k] === "function" ? "fn " + d[k].name : String(d[k]))).join(",")
+    const G = Object.getOwnPropertyDescriptor
+    const o = { x: 1, get g() { return 2 }, set g(v) {} }
+    check("od108a", show(G(o, "x")) === "value=1,writable=true,enumerable=true,configurable=true" &&
+        show(G(o, "g")) === "get=fn get g,set=fn set g,enumerable=true,configurable=true" && G(o, "no") === undefined &&
+        o.hasOwnProperty("g") && G(5, "x") === undefined && G("ab", "1").value === "b")
+    const d = Object.defineProperty({}, "h", { value: 1, writable: true })
+    Object.defineProperty(d, "q", { get: function qq() { return 1 }, configurable: true })
+    check("od108b", show(G(d, "h")) === "value=1,writable=true,enumerable=false,configurable=false" &&
+        show(G(d, "q")) === "get=fn qq,set=undefined,enumerable=false,configurable=true" &&
+        show(G(Object.freeze({ a: 1 }), "a")) === "value=1,writable=false,enumerable=true,configurable=false" &&
+        show(G(Object.seal({ a: 1 }), "a")) === "value=1,writable=true,enumerable=true,configurable=false" &&
+        show(G(Object.freeze([7]), "0")) + " " + show(G(Object.seal([7]), "length")) ===
+        "value=7,writable=false,enumerable=true,configurable=false value=1,writable=true,enumerable=false,configurable=false" &&
+        show(G([5], "length")) === "value=1,writable=true,enumerable=false,configurable=false")
+    function f108(a) {}
+    f108.extra = 5
+    const c = new C108()
+    check("od108c", show(G(f108, "name")) === "value=f108,writable=false,enumerable=false,configurable=true" &&
+        show(G(f108, "extra")) === "value=5,writable=true,enumerable=true,configurable=true" &&
+        show(G(C108, "length")) === "value=0,writable=false,enumerable=false,configurable=true" &&
+        show(G(C108, "prototype")).indexOf(",writable=false,enumerable=false,configurable=false") > 0 &&
+        show(G(C108, "sf")) + " " + show(G(C108, "sm")) + " " + show(G(C108, "sg")) ===
+        "value=3,writable=true,enumerable=true,configurable=true value=fn sm,writable=true,enumerable=false,configurable=true " +
+        "get=fn get sg,set=undefined,enumerable=false,configurable=true" &&
+        show(G(C108.prototype, "m")) + " " + show(G(C108.prototype, "g")) ===
+        "value=fn m,writable=true,enumerable=false,configurable=true get=fn get g,set=fn set g,enumerable=false,configurable=true" &&
+        show(G(c, "f")) === "value=1,writable=true,enumerable=true,configurable=true" && G(c, "m") === undefined)
+    const sym = Symbol("t")
+    const so = { 1: "one" }
+    so[sym] = 9
+    const err = (f) => { try { f(); return "ok" } catch (e) { return e.message } }
+    check("od108d", show(G(so, sym)) === "value=9,writable=true,enumerable=true,configurable=true" && G(so, 1).value === "one" &&
+        show(G(new String("hi"), "0")) === "value=h,writable=false,enumerable=true,configurable=false" &&
+        err(() => G(undefined, "x")) === "Cannot convert undefined or null to object" &&
+        err(() => Object.getOwnPropertyDescriptors(null)) === "Cannot convert undefined or null to object" &&
+        Object.getOwnPropertyDescriptor.length === 2 && Object.getOwnPropertyDescriptors.length === 1)
+    const ds = Object.getOwnPropertyDescriptors({ a: 1, get b() { return 2 } })
+    const da = Object.getOwnPropertyDescriptors([5])
+    check("od108e", Object.keys(ds).join() === "a,b" && show(ds.b) === "get=fn get b,set=undefined,enumerable=true,configurable=true" &&
+        Object.keys(da).join() === "0,length" && da.length.writable === true &&
+        Object.keys(Object.getOwnPropertyDescriptors(class Q { static z() {} })).join() === "length,name,prototype,z")
+    const f = function (x) { return this.v + x }
+    const pu = [].push
+    const arr = [1]
+    pu.call(arr, 2, 3)
+    check("bn108f", [[].push, "".slice, [].map, (5).toFixed, (5).toString, true.toString, "".trimEnd, [].splice]
+        .map((m) => m.name + "/" + m.length).join() ===
+        "push/1,slice/2,map/1,toFixed/1,toString/1,toString/0,trimEnd/0,splice/2" &&
+        String([].push) === "function push() { [native code] }" && String("".slice) === "function slice() { [native code] }" &&
+        arr.join() === "1,2,3" && ({}).hasOwnProperty.name === "hasOwnProperty" && ({}).isPrototypeOf.length === 1 &&
+        [f.call, f.apply, f.bind].map((m) => m.name + "/" + m.length).join() === "call/1,apply/2,bind/1" &&
+        f.call.call(f, { v: 1 }, 2) === 3 && f.hasOwnProperty.name === "hasOwnProperty" && f.toString.name === "toString")
+    check("dc108g", delete K108.name && delete K108.length && K108.name === "P108" && K108.length === 2 &&
+        !K108.hasOwnProperty("name") && Object.getOwnPropertyNames(K108).join() === "prototype" && G(K108, "name") === undefined &&
+        delete E108.name && E108.name === "" && delete E108.length && E108.length === 0 && String(E108) === "class E108 {}" &&
+        err(() => { "use strict"; E108.name = "z" }).indexOf("Cannot assign to read only property 'name'") === 0)
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -1392,6 +1474,7 @@ function main() {
     s105() // SECTION-CALL 105
     s106() // SECTION-CALL 106
     s107() // SECTION-CALL 107
+    s108() // SECTION-CALL 108
     println("full: " + checks + " checks, " + failures + " failures")
     return failures
 }
