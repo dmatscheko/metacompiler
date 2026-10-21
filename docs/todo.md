@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-705** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-707** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -64,10 +64,6 @@ its report; anything structural there is a CORE ticket.
 
 # PY — Python
 
-### T-680 python re: IGNORECASE pairs from CPython's `_ignorecase_fixes`; non-ASCII ranges of 256+ chars · P3 · PY · IN PROGRESS (RX worker, round 1) [V]
-`re.match("(?i)\u0390", "\u1fd3")` matches in CPython (full-fold extra pairs, sre_compile `_ignorecase_fixes`), not here. A
-non-ASCII class range spanning 256 or more characters only gets the text-side upper/lower test under (?i). Regex owner only.
-
 ---
 
 # RB — Ruby
@@ -85,11 +81,6 @@ works (`1 true`, `1`); interp "unknown superclass: Array", compiled "call of a n
 ---
 
 # JV — Java
-
-### T-698 java regex: a region end cutting a surrogate pair; `\G` in matches()/lookingAt() after an earlier match · P3 · JV · IN PROGRESS (RX worker, round 1) [V]
-Pattern ".", text "😀", region(0,1), lookingAt() → java false / hitEnd true, ours true / false (java reads the code point across the
-region end; we substring); `[a&&[^b]]+`, `\p{L}+`, a supplementary literal differ in hitEnd. Pattern "\\Ga" on "a": matches() true
-then lookingAt() → java false (\G is oldLast), ours true (gpos=from); needs a gpos parameter on rxMatchAt/rxMatchWhole. Regex owner.
 
 ---
 
@@ -123,11 +114,11 @@ not change the renderer.
 
 # PHP — PHP  (no php here: spec-only, php.net / php-src behaviour)
 
-### T-692 php: preg_* remainder — recursion/subroutines, conditionals, branch reset, verbs; `(?xx)`; `[:lower:]` under /iu; PREG_BACKTRACK_LIMIT_ERROR · P3 · PHP · IN PROGRESS (RX worker, round 1) [V]
-`(?R)`, `(?1)`, `(?&n)`, `\g<n>`, `(?(1)a|b)`, `(?|...)`, `(*VERB)`/`(*UTF)`, callouts raise "preg_*(): unsupported ..." (the J
-rewrite cannot number branch-reset groups and has no recursion). `(?xx)` and `[:lower:]`/`[:upper:]` under /iu unhandled. Step-budget
-exhaustion is fatal instead of `false` + PREG_BACKTRACK_LIMIT_ERROR. An array subject is cast to string instead of the TypeError.
-Oracle: libpcre2 10.48 + the php_pcre.c-port harness (needs the regex owner).
+### T-705 php preg: PCRE2's empty-iteration loop rule; long `\p{...}` names; PCRE2 start-optimization residue; `(*ACCEPT)` scope; `MARK` · P3 · PHP · OPEN [V]
+C dialect follows Java's loop rule: `((?(1)a|))+` on "aaa" → PCRE2 "", ours "aaa"; `((?(1)a|)){1,3}` → PCRE2 "aa", ours "". `\p{Lowercase_Letter}`
+accepted (PCRE2 10.48 rejects). ~10 of 1,000 fuzzed left-recursive patterns differ (PCRE2 optimizations skip the attempt; we raise
+RECURSELOOP or match). `(*ACCEPT)` inside an atomic group / a subroutine called from a lookahead ends only that body. `(*MARK)` not
+reported as `$matches['MARK']`. Oracle: libpcre2 10.48 + scratchpad php_pcre.c harness. Regex owner.
 
 ### T-596 php: binding and undefined-variable warnings are never printed · P3 · PHP · BLOCKED - needs a user decision
 PHP CLI prints `Warning: Cannot unbind $this of closure using $this in <file> on line <n>` (and undefined-variable/-index
@@ -153,14 +144,15 @@ parameter), which no engine prints either.
 
 # CORE — MetaJS, the engines, shared runtime, tooling
 
+### T-706 regex (CORE): the per-attempt step cap fires on long linear inputs · P2 · CORE · OPEN [V]
+`regexp.MustCompile("(?:a|b){2,}").FindString(strings.Repeat("ab",35000))` → "step limit exceeded" in all engines (go 70000);
+RX_STEPS (400000) caps one attempt regardless of input length. Scale the cap with the input (or count only backtracks) so linear
+work never trips it, keeping catastrophic-backtracking protection. All regex dialects. Regex owner.
+
 ### T-674 go (CORE): native recursion capped at ~500 Go frames by the js_gotry jump-buffer stack · P2 · CORE · OPEN [V]
 Every Go function runs through js_gotry and runtime.c caps the setjmp stack at JB_CAP=512 (`die("try nested too deeply")`), so a
 native Go program recursing ~500 deep dies (also json.Unmarshal of a valid 10000-deep value); interp and llvm.Run are fine, go
 itself handles millions. Related to T-505 (what a too-deep recursion should raise).
-
-### T-675 regex (CORE): the shared backtracking matcher recurses per SPLIT and overflows the native stack · P3 · CORE · IN PROGRESS (RX worker, round 1) [V]
-`re.match(r"^.*$", "ab"*35000)` (python) and Go `regexp.MustCompile("^.*$").MatchString(70 KB)` exit 139 natively; CPython and go
-match. lib/regex.js's matcher needs an explicit backtrack stack (or loop-for-greedy-star) instead of a call per SPLIT.
 
 ### T-640 js (CORE): arguments mapped through another function; array holes · P3 · CORE · OPEN [V]
 `function h(a){ a[0] = 9 } function f(p){ h(arguments); return p }; f(1)` → all legs 1 (node 9); likewise a closure writing through
@@ -788,6 +780,10 @@ T-700 js: Object.getOwnPropertyDescriptor missing; builtin methods read as value
 T-701 js: `delete` of a class static field or method does nothing — DONE e52a2e65 (delete of class static fields/methods/accessors in all engines without touching instance methods — 4 legs = node; follow-up T-702)
 T-702 js: numeric-key class statics; for-in over a subclass skips inherited statics — DONE 686732d0 (numeric static keys by their string form in interp and layer 2, for-in walks inherited enumerable statics with shadowing — 4 legs = node; follow-up T-703)
 T-703 js: a class cannot extend a plain constructor function — DONE d1dbefda (a constructor function as heritage via its instance descriptor, __ctor runs F on the new this, live statics through __ctorfn — 4 legs = node, TS via tsc 6; follow-up T-704)
+T-675 regex (CORE): the shared backtracking matcher recurses per SPLIT and overflows the native stack — DONE 108459ea (explicit backtrack stack in regex.js and the Go twin; ^.*$ over 70 KB natively = python3/go run; regex-heavy native −19% python, −11% ruby)
+T-698 java regex: a region end cutting a surrogate pair; `\G` in matches()/lookingAt() after an earlier match — DONE 3a5c52e3 (region cut inside a pair per CharProperty/CharPropertyGreedy, Matcher first/last/oldLast for \G — 1,312-row probe = java 24)
+T-680 python re: IGNORECASE pairs from CPython's `_ignorecase_fixes`; non-ASCII ranges of 256+ chars — DONE 4777026e (IN_UNI_IGNORE lowercase lookup with re._casefix extras, any range size, caseless backrefs by lowercase — 104-row probe = python3)
+T-692 php: preg_* remainder — recursion/subroutines, conditionals, branch reset, verbs; `(?xx)`; `[:lower:]` under /iu; PREG_BACKTRACK_LIMIT_ERROR — DONE d79a88e5 (recursion/subroutines, conditionals, branch reset, verbs, start options, (?xx), backtrack-limit error, TypeError, PCRE2 start optimizations — = libpcre2 10.48 harness; follow-ups T-705/T-706)
 
 # Settled — do not re-open
 
@@ -821,7 +817,7 @@ named function expression's inner name immutable (needs a const flag on the floo
 scope, or a scope-walking extern on every plain-name assignment, measured at
 +21%..+43% elsewhere on that path).
 
-**DECLINED after measurement.** js a detached builtin `apply`/`call` (`var ap = Math.max.apply; ap(null, [3,9,4])`) answering instead of node's TypeError (all legs agree; only an error case differs) · typescript function source text (the oracle prints tsc's re-emitted JavaScript, which the engines do not reproduce; .ts functions print `[function]`) · php heredoc `{$...}` / `${...}` end found by brace counting (a `}` inside a quoted string within the interpolated expression ends it early; double-quoted strings parse the expression properly) · python `__firstlineno__` / `__static_attributes__` / `__annotate_func__` on plain (non-metaclass) classes and their `__dict__` listing (introspection only; the metaclass namespace, where programs observe them, matches 3.14) · python rejecting `(p).k: int = 7` as a SyntaxError (an invalid program we accept; no valid program changes) · js `Function("src")` compiling source at run time (no engine here compiles at run time; it raises the EvalError text node gives when code generation is disallowed) · php per-file strict_types (the probes and suites are single-file programs; the whole-program flag equals per-file there) · php handle reuse after free (needs refcounts) · swift's module-qualified enum names in collections (`[o.Dir.up]` depends on swiftc's module name) · rbUserObj / rbIsClassObj frame elimination (no gain over 15 pairs) · a real suspension for the replay generators (impossible under the pinned goja; ~3,600 lines pure-MetaJS) · CPS coroutines in the emitter · full correct rounding of the transcendentals · a shared nominal type id on boxed values (cheap to store, but every consumer needs static types the grammars do not have; split per language) · matching Apple libm's last digit (ruby atan2: no portable algorithm reproduces it, 1.6% of pairs differ even from the correctly rounded value) · js sloppy-mode primitive `this` boxing (needs wrapper objects in every engine) · a generator's `finally` at collection (python needs refcount timing; no finalizers, manual 7.8) · `i in arr` after `delete` · iterator close on
+**DECLINED after measurement.** java `(?:\\G.)+` after earlier Matcher operations (GroupCurly's internal accept node moves Matcher.last: a JDK implementation quirk, not specified) · js a detached builtin `apply`/`call` (`var ap = Math.max.apply; ap(null, [3,9,4])`) answering instead of node's TypeError (all legs agree; only an error case differs) · typescript function source text (the oracle prints tsc's re-emitted JavaScript, which the engines do not reproduce; .ts functions print `[function]`) · php heredoc `{$...}` / `${...}` end found by brace counting (a `}` inside a quoted string within the interpolated expression ends it early; double-quoted strings parse the expression properly) · python `__firstlineno__` / `__static_attributes__` / `__annotate_func__` on plain (non-metaclass) classes and their `__dict__` listing (introspection only; the metaclass namespace, where programs observe them, matches 3.14) · python rejecting `(p).k: int = 7` as a SyntaxError (an invalid program we accept; no valid program changes) · js `Function("src")` compiling source at run time (no engine here compiles at run time; it raises the EvalError text node gives when code generation is disallowed) · php per-file strict_types (the probes and suites are single-file programs; the whole-program flag equals per-file there) · php handle reuse after free (needs refcounts) · swift's module-qualified enum names in collections (`[o.Dir.up]` depends on swiftc's module name) · rbUserObj / rbIsClassObj frame elimination (no gain over 15 pairs) · a real suspension for the replay generators (impossible under the pinned goja; ~3,600 lines pure-MetaJS) · CPS coroutines in the emitter · full correct rounding of the transcendentals · a shared nominal type id on boxed values (cheap to store, but every consumer needs static types the grammars do not have; split per language) · matching Apple libm's last digit (ruby atan2: no portable algorithm reproduces it, 1.6% of pairs differ even from the correctly rounded value) · js sloppy-mode primitive `this` boxing (needs wrapper objects in every engine) · a generator's `finally` at collection (python needs refcount timing; no finalizers, manual 7.8) · `i in arr` after `delete` · iterator close on
 `throw` (a depth stack cannot survive `for await`) · a catchable unknown-name error
 in java/go/swift/csharp/metajs (COMPILE-time in each real toolchain) · kotlin
 `:script` → `!"token"` · `case_map` into layer 2 (135×) · retiring the Go twin
