@@ -161,34 +161,6 @@ are still never reclaimed (needs an element ownership table; `x="${a[0]}$((a[0]=
 
 # CORE — MetaJS, the engines, shared runtime, tooling
 
-### T-721 php / metajs: unbounded recursion still kills the process · P3 · CORE · IN PROGRESS (CORE worker, round 2) [U spec-only]
-php and metajs have no deep-recursion hook (T-505's js_rt_deep / coreDeepHook): interp and llvm.Run die with Go's fatal stack
-overflow, native SIGSEGV. php 8.3+ throws an Error whose message embeds a platform-dependent size (zend.max_allowed_stack_size /
-"Maximum call stack size of N bytes reached"); settle the text from php-src. metajs needs the hook in metajs-to-llvm-ir plus a re-freeze.
-
-### T-716 core: a non-canonical numeric string key (`"01"`, `"1.0"`, `"+1"`, `" 1"`, `"-0"`) is an array index · P2 · CORE · IN PROGRESS (CORE worker, round 2) [V]
-js `k=[]; k["01"]=7` → node: named property (length 0, `k[1]` undefined, keys `01`); llvm.Run/native: index 1 (length 2); interpreter
-stores it where keys/`in` cannot see it. Make rt.arrIndexOf (abnf/jsrt.go), index_of_key / maybe_numeric (runtime.c) and the
-interpreters' jsArrIndexKey accept only canonical indices for string keys in js mode (`ToString(ToUint32(k)) === k`, `< 2^32-1`);
-check lua / php / other languages' numeric-string coercion first (they may rely on it — gate by language if so).
-
-### T-640 js (CORE): arguments mapped through another function; array holes · P3 · CORE · IN PROGRESS (CORE worker, round 2) [V]
-`function h(a){ a[0] = 9 } function f(p){ h(arguments); return p }; f(1)` → all legs 1 (node 9); likewise a closure writing through
-`var a = arguments`. Needs a back-pointer from the arguments array to its call scope: a traced field on the floor's array cell
-(gc_trace_cell's tag-5 arm pays a gc_try per array per collection, every language), get/set host ids in three engines, a jsArray field
-in abnf/jsrt.go, and the goja/frozen hosts. A floor-free alternative: in a mapped function that names `arguments`, read each mapped
-parameter through arguments[i] (cost on every such read). Holes: `delete arr[1]` and `b[3] = undefined` past length → node `h1 0,2
-false false 3`, `h2 0,3 false true 4`; needs a hole marker distinct from undefined that every array read maps back (arr_get/js_get
-shared by all languages). Measure with tests/bench.sh for all languages. Also: `Object.keys` / for-in list holes (`k=[]; k["1"]=7; Object.keys(k)` → node `1`, ours `0,1`; `h[6]=9` on `[1,2,3]` → node `0,1,2,6`).
-
-### T-594 go (CORE): UTF-8-encoded surrogate bytes are rejoined by the shared string floor · P3 · CORE · IN PROGRESS (CORE worker, round 2) [V]
-`s := "\xed\xa0\x80" + "\xed\xb0\x80"; fmt.Println(len(s), []byte(s))` → go `6 [237 160 128 237 176 128]` and raw output;
-interp right; llvm.Run and native `4 [240 144 128 128]`, a lone triple prints EF BF BD. The floor's str_cat / strConcat and
-the print path (print_val → fmt_top → wtf8_clean, writeBytes writes code units) read the bytes as WTF-8. Needs a go-mode raw
-concatenation and a raw print primitive in the floor and twin, and an audit of go-rt.metajs / go-fmt.js concatenations that
-rely on rejoining (go-rt.metajs ~1208 builds an astral character from two fromCharCode halves). Full matrix, native-full and
-bench for all languages.
-
 ### T-184 dart: `IndexError` vs `RangeError` text for `[1,2,3][7]` · P3 · DA · BLOCKED - needs a Dart VM to settle [U spec-only]
 A reviewer argued the VM prints `RangeError (index): Invalid value: Not in inclusive
 range 0..2: 7` (a plain RangeError); the current engines print the IndexError form
@@ -816,6 +788,10 @@ T-720 tooling: tests/bash-test-full.sh is at ~97M of llvm.Run's 100M step brake 
 T-719 bash native: quadratic list/word building; O(n²) `for w in $list`; positional stack capped at 4096 — DONE 9936078f (in-place list growth, field cursors, one-pass word and printf building, guarded in-place s+=, doubling positionals — native probes 334 MB → 2 MB, minutes → 0.4 s, = bash 5.3; bash bench +0.56%; follow-ups T-727/T-728)
 T-727 bash: assigning an element to a scalar drops the scalar — DONE 6e13d2ea (a scalar becomes element 0 on element assignment, plus local -a, unset element, index order — 4 legs = bash 5.3)
 T-728 bash native: arrays scan a flat table on every scalar access, cap at 4096 rows; stored values never freed — DONE 6e13d2ea 679f55e2 (per-name array records with bisect/hash, no row cap, long stored values in reusable per-slot buffers guarded by holders — 2.54G → 28M instructions, 2.8 GB → 3.8 MB; bash bench −12.5%; follow-up T-729)
+T-721 php / metajs: unbounded recursion still kills the process — DONE c0d681d6 (php: plain recursion ends with the CLI's "Allowed memory size" fatal, exit 255, per php-src's VM stack — the max_allowed_stack_size Error only applies to internal re-entry, not modelled; metajs: Maximum call stack size exceeded, re-frozen)
+T-716 core: a non-canonical numeric string key (`"01"`, `"1.0"`, `"+1"`, `" 1"`, `"-0"`) is an array index — DONE 3a10c7c1 (only canonical numeric strings index arrays, in the floor, twin, interpreters and layer 2; lua/php unchanged — = node)
+T-594 go (CORE): UTF-8-encoded surrogate bytes are rejoined by the shared string floor — DONE f60458b8 (go raw-string mode in the floor and twin, rune-counted width/precision, byte-preserving strings.Split; new byte fixture — = go run)
+T-640 js (CORE): arguments mapped through another function; array holes — DONE f69dba89 (arguments aliased through any reference via a hidden scope slot; real array holes in all engines skipped by keys/for-in/in/iteration — = node; other languages' benches within spread)
 
 # Settled — do not re-open
 
