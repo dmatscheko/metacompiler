@@ -109,8 +109,8 @@ func jsvFindMethodFrom(cls interface{}, name string) (interface{}, bool) {
 // chain from descriptor cls up: at each level the class body's method, as its value,
 // or its accessor, else an own property of that level's prototype view - which is how
 // `B.prototype.x = 1` and Object.create's prototype object reach the objects below
-// them. An accessor is answered as itself, for jsvChainGet. Twins: protoChainRead in both *-interpreter.abnf, jvChainRead in
-// languages/lib/js-rt.metajs.
+// them. An accessor is answered as itself, for jsvAccRead. Twins: protoChainRead in
+// both *-interpreter.abnf, jvChainRead in languages/lib/js-rt.metajs.
 func jsvChainRead(cls interface{}, name string) (interface{}, bool) {
 	for guard := 0; cls != nil && guard < 64; guard++ {
 		d, ok := cls.(*jsObject)
@@ -132,10 +132,11 @@ func jsvChainRead(cls interface{}, name string) (interface{}, bool) {
 	return nil, false
 }
 
-// jsvChainGet reads a value jsvChainRead found for receiver recv: an accessor of a
-// prototype object runs its getter with recv as `this`. Twins: findAccessor in both
-// *-interpreter.abnf, jvFindClassAcc in languages/lib/js-rt.metajs.
-func (rt *jsrt) jsvChainGet(v, recv interface{}) interface{} {
+// jsvAccRead is a property value v read for receiver recv: an accessor - of a
+// prototype object jsvChainRead found, or a function's own - runs its getter with
+// recv as `this`. Twins: findAccessor in both *-interpreter.abnf, jvFindClassAcc and
+// jvAccGet in languages/lib/js-rt.metajs.
+func (rt *jsrt) jsvAccRead(v, recv interface{}) interface{} {
 	if acc, isAcc := v.(*jsAccessor); isAcc {
 		if acc.get == nil {
 			return jsUndef
@@ -701,9 +702,15 @@ func (rt *jsrt) jsvDefineProp(v interface{}, key string, desc interface{}) {
 			a.props = p
 		}
 		if _, has := p.props[key]; !has && jsvArrLevel(a) > 0 {
-			rt.bigRaise("TypeError: Cannot define property %s, object is not extensible", jsvKeyUnesc(key))
+			rt.bigRaise("TypeError: Cannot define property %s, object is not extensible", jsvKeyText(key))
 		}
 		rt.jsvDefineProp(p, key, desc)
+		return
+	}
+	// A function's own properties are its side table's, defined there by the rules
+	// below.
+	if jsvIsFnLike(v) && key != "name" && key != "length" {
+		rt.jsvDefineProp(jsvFnPropsMake(v), key, desc)
 		return
 	}
 	o, ok := v.(*jsObject)
@@ -740,7 +747,7 @@ func (rt *jsrt) jsvDefineProp(v interface{}, key string, desc interface{}) {
 	cur, exists := o.props[key]
 	curAcc, _ := cur.(*jsAccessor)
 	if !exists && o.props["__noext"] == true {
-		rt.bigRaise("TypeError: Cannot define property %s, object is not extensible", jsvKeyUnesc(key))
+		rt.bigRaise("TypeError: Cannot define property %s, object is not extensible", jsvKeyText(key))
 	}
 	if exists && jsvAttrHas(o, "__nc", key) {
 		bad := has("configurable") && flag("configurable")
@@ -758,7 +765,7 @@ func (rt *jsrt) jsvDefineProp(v interface{}, key string, desc interface{}) {
 				(has("value") && !rt.jsvSameValue(rt.jsvGetKey(desc, "value"), cur))
 		}
 		if bad {
-			rt.bigRaise("TypeError: Cannot redefine property: %s", jsvKeyUnesc(key))
+			rt.bigRaise("TypeError: Cannot redefine property: %s", jsvKeyText(key))
 		}
 	}
 	switch {
@@ -858,7 +865,7 @@ func (rt *jsrt) jsvSetIntegrity(v interface{}, lv int) interface{} {
 		if lv == 1 {
 			return v
 		}
-		for _, k := range jsvErrGopn(o, jsvOwnSlotKeys(o)) {
+		for _, k := range jsvIntegrityKeys(o) {
 			jsvAttrSet(o, "__nc", k, true)
 			if _, isAcc := o.props[k].(*jsAccessor); lv == 3 && !isAcc {
 				jsvAttrSet(o, "__ro", k, true)
@@ -877,6 +884,12 @@ func jsvOwnSlotKeys(o *jsObject) []string {
 		}
 	}
 	return out
+}
+
+// jsvIntegrityKeys are the own keys an integrity level marks: every string key and
+// every symbol key. Twin of jsIntegrityKeys in both *-interpreter.abnf.
+func jsvIntegrityKeys(o *jsObject) []string {
+	return append(jsvErrGopn(o, jsvOwnSlotKeys(o)), jsvSymKeys(o)...)
 }
 
 // jsvArrLevel is an array's integrity level: 3 frozen, 2 sealed, 1 not extensible.
@@ -913,7 +926,7 @@ func jsvIntegrity(v interface{}) int {
 			return 0
 		}
 		lv := 3
-		for _, k := range jsvErrGopn(o, jsvOwnSlotKeys(o)) {
+		for _, k := range jsvIntegrityKeys(o) {
 			if !jsvAttrHas(o, "__nc", k) {
 				return 1
 			}
@@ -968,14 +981,14 @@ func jsvCtorText(name string) string {
 }
 
 func (rt *jsrt) jsvRoText(o interface{}, key string) string {
-	return "Cannot assign to read only property '" + jsvKeyUnesc(key) + "' of object '" + rt.jsvObjText(o) + "'"
+	return "Cannot assign to read only property '" + jsvKeyText(key) + "' of object '" + rt.jsvObjText(o) + "'"
 }
 
 // jsvFnRoText is V8's text for a refused write to a function's `name` or `length`,
 // which names the function by its String(f). Twin of jsFnRoText in both
 // *-interpreter.abnf.
 func (rt *jsrt) jsvFnRoText(f interface{}, key string) string {
-	return "Cannot assign to read only property '" + key + "' of function '" + jsvElide(rt.jsvString(f)) + "'"
+	return "Cannot assign to read only property '" + jsvKeyText(key) + "' of function '" + jsvElide(rt.jsvString(f)) + "'"
 }
 
 // jsvElide is a function's text inside a V8 error message: past 128 UTF-16 units, its
@@ -1148,7 +1161,7 @@ func jsvAccHolder(o *jsObject, name string) (*jsObject, *jsAccessor) {
 // naming the object holding it. Twins: jsGetterOnlyText in both *-interpreter.abnf,
 // jvGetterOnlyText in languages/lib/js-rt.metajs.
 func jsvGetterOnlyText(key, holder string) string {
-	return "Cannot set property " + jsvKeyUnesc(key) + " of " + holder + " which has only a getter"
+	return "Cannot set property " + jsvKeyText(key) + " of " + holder + " which has only a getter"
 }
 
 // jsvAccHolderText names holder h of o's accessor: o as a refused write names it, a
@@ -1176,11 +1189,11 @@ func (rt *jsrt) jsvAccHolderText(o, h *jsObject) string {
 }
 
 func jsvAddText(key string) string {
-	return "Cannot add property " + jsvKeyUnesc(key) + ", object is not extensible"
+	return "Cannot add property " + jsvKeyText(key) + ", object is not extensible"
 }
 
 func (rt *jsrt) jsvDelText(o interface{}, key string) string {
-	return "Cannot delete property '" + jsvKeyUnesc(key) + "' of " + rt.jsvObjText(o)
+	return "Cannot delete property '" + jsvKeyText(key) + "' of " + rt.jsvObjText(o)
 }
 
 // jsvWriteRefusal is the TypeError text a write of v to o[key] meets under o's
@@ -3307,6 +3320,24 @@ func jsvKeyEsc(k string) string {
 	}
 	return k
 }
+
+// jsvSymByKey is every symbol of the running program by its key, for
+// Object.getOwnPropertySymbols and for a key in a message.
+var jsvSymByKey map[string]*jsObject
+
+// jsvKeyText is a property key as V8 prints it in a message: a symbol's key as its
+// symbol. Twins: jsKeyText in both *-interpreter.abnf, jvKeyText in
+// languages/lib/js-rt.metajs.
+func jsvKeyText(k string) string {
+	if s := jsvSymByKey[k]; s != nil && strings.HasPrefix(k, "__#@") {
+		if d, isStr := s.props["__symdesc"].(string); isStr {
+			return "Symbol(" + d + ")"
+		}
+		return "Symbol()"
+	}
+	return jsvKeyUnesc(k)
+}
+
 func jsvKeyUnesc(k string) string {
 	if len(k) > 0 && k[0] == 1 {
 		return k[1:]
@@ -5059,13 +5090,12 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 	symN := 0
 	symWK := map[string]*jsObject{}
 	symReg := map[string]*jsObject{}
-	// Every symbol by its key, for Object.getOwnPropertySymbols.
-	symByKey := map[string]*jsObject{}
+	jsvSymByKey = map[string]*jsObject{}
 	symMake := func(desc interface{}, key string) *jsObject {
 		s := newJSObject()
 		s.set("__symdesc", desc)
 		s.set("__symkey", key)
-		symByKey[key] = s
+		jsvSymByKey[key] = s
 		return s
 	}
 	symWellKnown := func(n string) *jsObject {
@@ -5914,7 +5944,7 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 			// on the closure.
 			if p := jsvFnPropsOf(u(a[0])); p != nil {
 				if v, found := p.props[rt.toString(u(a[1]))]; found {
-					return w(v)
+					return w(rt.jsvAccRead(v, u(a[0])))
 				}
 			}
 			// ...and a function's Object.prototype surface, AFTER the side table so
@@ -5960,14 +5990,14 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 					}
 				}
 				if v, found := jsvChainRead(cls, name); found {
-					return w(rt.jsvChainGet(v, recv))
+					return w(rt.jsvAccRead(v, recv))
 				}
 			}
 			return vget([]uint64{w(p), a[1]})
 		}
 		if d, isView := recv.props["__protoof"].(*jsObject); isView {
 			if v := protoRead(d, name); v != nil {
-				return w(rt.jsvChainGet(v, recv))
+				return w(rt.jsvAccRead(v, recv))
 			}
 			return r
 		}
@@ -5982,7 +6012,7 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 			}
 		}
 		if v, found := jsvChainRead(recv.props["__class"], name); found {
-			return w(rt.jsvChainGet(v, recv))
+			return w(rt.jsvAccRead(v, recv))
 		}
 		return r
 	}
@@ -6166,7 +6196,7 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 		// so a program that never writes one pays one map-length test.
 		if p := jsvFnPropsOf(u(a[0])); p != nil {
 			if v, found := p.props[rt.toString(u(a[1]))]; found {
-				return w(v)
+				return w(rt.jsvAccRead(v, u(a[0])))
 			}
 		}
 		// ...and a function's Object.prototype surface. This is the arm the CALL site
@@ -6490,6 +6520,23 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 		// *hostFunc has a property map.
 		// A write the attributes or the integrity level refuse answers false, and
 		// js_jsrefuse raises it in strict code (jsvWriteRefusal).
+		// A function's own accessor runs its setter on the function, and a read-only
+		// own property is named by the function's text.
+		if p := jsvFnPropsOf(u(a[0])); p != nil {
+			name := rt.toString(u(a[1]))
+			if acc, isAcc := p.props[name].(*jsAccessor); isAcc {
+				if acc.set == nil {
+					jsvRefused = jsvGetterOnlyText(name, jsvElide(rt.jsvString(u(a[0]))))
+					return boolH(false)
+				}
+				rt.call(acc.set, u(a[0]), []interface{}{u(a[2])})
+				return 0
+			}
+			if jsvAttrN > 0 && jsvAttrHas(p, "__ro", name) {
+				jsvRefused = rt.jsvFnRoText(u(a[0]), name)
+				return boolH(false)
+			}
+		}
 		if jsvAttrN > 0 {
 			t := u(a[0])
 			if p := jsvFnPropsOf(t); p != nil {
@@ -7003,7 +7050,7 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 			}
 			out := &jsArray{}
 			for _, k := range jsvSymKeys(arg0) {
-				out.elems = append(out.elems, symByKey[k])
+				out.elems = append(out.elems, jsvSymByKey[k])
 			}
 			return w(out)
 		}

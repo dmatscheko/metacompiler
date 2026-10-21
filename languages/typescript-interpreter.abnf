@@ -2357,6 +2357,13 @@ NotFuncHead = :script(~~
         return out
     }
     function jsSymStr(s) { return "Symbol(" + ((s.__symdesc === undefined) ? "" : s.__symdesc) + ")" }
+    // A property key as V8 prints it in a message: a symbol's key as its symbol.
+    // Twins: jsvKeyText in abnf/jsrtjsprint.go, jvKeyText in languages/lib/js-rt.metajs.
+    function jsKeyText(k) {
+        var key = "" + k
+        if (jsIsSymKey(key) && hasOwn(jsSymByKey, "$" + key)) { return jsSymStr(jsSymByKey["$" + key]) }
+        return jsStr(jsKeyUnesc(key))
+    }
     function jsSymWellKnown(n) {
         if (!hasOwn(jsSymWK, n)) { jsSymWK[n] = jsSymMake("Symbol." + n, "__#@" + n) }
         return jsSymWK[n]
@@ -3836,8 +3843,14 @@ NotFuncHead = :script(~~
         s = getMember(desc, "set")
         // See the twin of this comment in js-interpreter.abnf.
         if (Array.isArray(o) && key !== "length" && jsArrIndexKey(key) < 0) {
-            if (jsArrLevel(o) > 0 && !jsArrNamedHas(o, key)) { biRaise("TypeError: Cannot define property " + jsStr(jsKeyUnesc(key)) + ", object is not extensible") }
+            if (jsArrLevel(o) > 0 && !jsArrNamedHas(o, key)) { biRaise("TypeError: Cannot define property " + jsKeyText(key) + ", object is not extensible") }
             jsDefineKey(jsArrNamed(o, true), key, desc)
+            return
+        }
+        // A function's own properties are its side table's (fnPropsMake), defined
+        // there by the rules below.
+        if (typeof o == "function" && key !== "name" && key !== "length") {
+            jsDefineKey(fnPropsMake(o), key, desc)
             return
         }
         if (typeof o != "object" || Array.isArray(o) || isClassDesc(o)) {
@@ -3853,12 +3866,13 @@ NotFuncHead = :script(~~
         }
         var isAcc = g !== undefined || s !== undefined
         var exists = hasOwn(o, "__keys") && o.__keys.indexOf(key) >= 0
+        if (!exists && jsIsSymKey(key)) { exists = jsSymKeysOf(o).indexOf(key) >= 0 }
         var hasVal = propIn("value", desc)
         var hasW = propIn("writable", desc)
         var hasE = propIn("enumerable", desc)
         var hasC = propIn("configurable", desc)
         var curAcc = jsIsAccKey(o, key)
-        if (!exists && o.__noext === true) { biRaise("TypeError: Cannot define property " + jsStr(jsKeyUnesc(key)) + ", object is not extensible") }
+        if (!exists && o.__noext === true) { biRaise("TypeError: Cannot define property " + jsKeyText(key) + ", object is not extensible") }
         if (exists && jsAttrHas(o, "__nc", key)) {
             var bad = hasC && jsTruthy(getMember(desc, "configurable"))
             if (hasE && jsTruthy(getMember(desc, "enumerable")) == jsAttrHas(o, "__hidden", key)) { bad = true }
@@ -3872,7 +3886,7 @@ NotFuncHead = :script(~~
                 if (hasW && jsTruthy(getMember(desc, "writable"))) { bad = true }
                 if (hasVal && !sameValue(getMember(desc, "value"), getMember(o, key))) { bad = true }
             }
-            if (bad) { biRaise("TypeError: Cannot redefine property: " + jsStr(jsKeyUnesc(key))) }
+            if (bad) { biRaise("TypeError: Cannot redefine property: " + jsKeyText(key)) }
         }
         if (isAcc) {
             if (g !== undefined) { addAccessor(o, "get", key, g) }
@@ -3925,13 +3939,20 @@ NotFuncHead = :script(~~
             return o
         }
         scopePut(o, "__noext", true)
-        if (lv == 1 || !hasOwn(o, "__keys")) { return o }
-        var ks = jsErrGopn(o, o.__keys)
+        if (lv == 1) { return o }
+        var ks = jsIntegrityKeys(o)
         for (var i = 0; i < ks.length; i++) {
             jsAttrSet(o, "__nc", ks[i], true)
             if (lv == 3 && !jsIsAccKey(o, ks[i])) { jsAttrSet(o, "__ro", ks[i], true) }
         }
         return o
+    }
+    // The own keys an integrity level marks: every string key and every symbol key.
+    function jsIntegrityKeys(o) {
+        var ks = hasOwn(o, "__keys") ? jsErrGopn(o, o.__keys).slice() : []
+        var sk = jsSymKeysOf(o)
+        for (var i = 0; i < sk.length; i++) { ks.push(sk[i]) }
+        return ks
     }
     // An array's integrity level: 3 frozen, 2 sealed, 1 not extensible, 0 none.
     function jsArrLevel(a) {
@@ -3962,8 +3983,7 @@ NotFuncHead = :script(~~
         }
         if (o.__noext !== true) { return 0 }
         var lv = 3
-        if (!hasOwn(o, "__keys")) { return lv }
-        var ks = jsErrGopn(o, o.__keys)
+        var ks = jsIntegrityKeys(o)
         for (var i = 0; i < ks.length; i++) {
             if (!jsAttrHas(o, "__nc", ks[i])) { return 1 }
             if (!jsIsAccKey(o, ks[i]) && !jsAttrHas(o, "__ro", ks[i])) { lv = 2 }
@@ -3982,11 +4002,11 @@ NotFuncHead = :script(~~
     }
     // V8's "#<Name>" for an object whose constructor's name is nm.
     function jsCtorText(nm) { return "#<" + (typeof nm == "string" && nm != "" ? nm : "Object") + ">" }
-    function jsRoText(o, key) { return "Cannot assign to read only property '" + jsStr(jsKeyUnesc(key)) + "' of object '" + jsObjText(o) + "'" }
+    function jsRoText(o, key) { return "Cannot assign to read only property '" + jsKeyText(key) + "' of object '" + jsObjText(o) + "'" }
     // See the twin of this comment in js-interpreter.abnf.
-    function jsFnRoText(f, key) { return "Cannot assign to read only property '" + key + "' of function '" + jsStr(f) + "'" }
-    function jsAddText(key) { return "Cannot add property " + jsStr(jsKeyUnesc(key)) + ", object is not extensible" }
-    function jsDelText(o, key) { return "Cannot delete property '" + jsStr(jsKeyUnesc(key)) + "' of " + jsObjText(o) }
+    function jsFnRoText(f, key) { return "Cannot assign to read only property '" + jsKeyText(key) + "' of function '" + jsStr(f) + "'" }
+    function jsAddText(key) { return "Cannot add property " + jsKeyText(key) + ", object is not extensible" }
+    function jsDelText(o, key) { return "Cannot delete property '" + jsKeyText(key) + "' of " + jsObjText(o) }
     // The TypeError text a write of v to o[k] meets under o's marks, or "".
     function jsWriteRefusal(o, k, v) {
         var key = "" + k
@@ -5013,7 +5033,7 @@ NotFuncHead = :script(~~
         if (isStaticSide(o, k)) { return staticSideRead(o, "" + k) }
         // Catches null and undefined. node's TypeError, catchable, with node's own
         // wording; the compiler half reaches it through js_rt_missmem.
-        if (o == undefined) { biRaise("TypeError: Cannot read properties of " + jsStr(o) + " (reading '" + jsStr(jsKeyUnesc(k)) + "')") }
+        if (o == undefined) { biRaise("TypeError: Cannot read properties of " + jsStr(o) + " (reading '" + jsKeyText(k) + "')") }
         // then/catch/finally READ AS A VALUE. Promise method dispatch is table-based
         // (jsBuiltin -> jpMethod), so a promise has no own slot of that name. Same
         // arm in abnf/jsrtjsprint.go's js_jsmget and languages/lib/js-rt.metajs's.
@@ -5050,7 +5070,14 @@ NotFuncHead = :script(~~
                 fp = fnPropsFind(o)
                 if (fp !== undefined) {
                     // See the twin of this comment in js-interpreter.abnf.
-                    if (fp["__keys"].indexOf("" + k) >= 0) { return fp["" + k] }
+                    if (fp["__keys"].indexOf("" + k) >= 0) {
+                        if (jsIsAccKey(fp, "" + k)) {
+                            var fg = anytype // The own accessor's getter, run on the function.
+                            fg = findAccessor(fp, "get", "" + k)
+                            return fg === undefined ? undefined : callWithThis(fg, o, [])
+                        }
+                        return fp["" + k]
+                    }
                 }
             }
             // See the twin of this comment in js-interpreter.abnf.
@@ -5737,7 +5764,14 @@ NotFuncHead = :script(~~
                 return
             }
             var fp = fnPropsMake(o)
+            if (jsIsAccKey(fp, "" + k)) {
+                var fs = anytype // The own accessor's setter, run on the function.
+                fs = findAccessor(fp, "set", "" + k)
+                if (fs !== undefined) { callWithThis(fs, o, [v]) } else { jsRefuse(jsGetterOnlyText(k, jsStr(o))) }
+                return
+            }
             if (jsAttrN > 0) {
+                if (jsAttrHas(fp, "__ro", "" + k)) { jsRefuse(jsFnRoText(o, k)); return }
                 var fr = jsWriteRefusal(fp, k, v)
                 if (fr != "") { jsRefuse(fr); return }
             }
@@ -5891,7 +5925,7 @@ NotFuncHead = :script(~~
         return r
     }
     // See the twin of this comment in js-interpreter.abnf.
-    function jsGetterOnlyText(k, holder) { return "Cannot set property " + jsStr(jsKeyUnesc("" + k)) + " of " + holder + " which has only a getter" }
+    function jsGetterOnlyText(k, holder) { return "Cannot set property " + jsKeyText(k) + " of " + holder + " which has only a getter" }
     function jsAccHolderText(o, h) {
         if (h === o) { return jsObjText(o) }
         // A prototype is named by its class or constructor function, any other object
@@ -5980,8 +6014,8 @@ NotFuncHead = :script(~~
             var fp = anytype
             fp = fnPropsOf(v)
             if (fp !== undefined) {
-                if (v === jsArrayFn) { return jsArrayStaticKeys(jsIndexOrder(fp["__keys"])) }
-                return jsIndexOrder(fp["__keys"])
+                if (v === jsArrayFn) { return jsArrayStaticKeys(ownKeys(fp)) }
+                return ownKeys(fp)
             }
         }
         return []

@@ -5007,6 +5007,46 @@ function s107(): void {
         e107(() => Reflect.construct(1 as any, [])) === "1 is not a constructor");
 }
 
+// ===== SECTION 108: a function's defined properties; symbol keys under integrity levels =====
+// Object.defineProperty on a function defines an own property of it with the
+// descriptor's attributes - an accessor runs on the function, a non-enumerable key
+// stays out of Object.keys, a read-only one refuses the write naming the function's
+// text (tsc reprints a function's source, so only the message head is compared).
+// Object.freeze / seal mark the symbol-keyed properties too
+// (SetIntegrityLevel, ECMA-262 7.3.15, walks [[OwnPropertyKeys]]), and a refusal
+// prints a symbol key as Symbol(desc). Values read off tsc 6.0.3's output run by
+// node 24.
+function e108(f: () => any): string { try { return String(f()); } catch (e) { return e instanceof TypeError ? e.message : "?"; } }
+function s108(): void {
+    const vals: number[] = [4, 3];
+    const f: any = function () {};
+    let n = 0;
+    Object.defineProperty(f, "p", { get() { n++; return this === f; }, configurable: true });
+    Object.defineProperty(f, "s", { get() { return this.sv; }, set(v: number) { this.sv = v * 2; }, configurable: true, enumerable: true });
+    f.s = vals[0];
+    check("fd108a", f.p === true && n === 1 && f.s === 8 && Object.keys(f).join() === "s,sv" && "p" in f && f.hasOwnProperty("p"));
+    const g: any = function g() {};
+    Object.defineProperty(g, "v", { value: 1, writable: false });
+    check("fd108b", g.v === 1 && Object.keys(g).length === 0 &&
+        e108(() => { g.v = vals[1]; }).indexOf("Cannot assign to read only property 'v' of function '") === 0 &&
+        e108(() => { f.p = 1; }).indexOf("Cannot set property p of ") === 0);
+    delete f.p;
+    const q = Symbol("q");
+    const o: any = { [q]: 1 };
+    Object.freeze(o);
+    check("fd108c", f.p === undefined && !("p" in f) && Object.isFrozen(o) &&
+        e108(() => { o[q] = 2; }) === "Cannot assign to read only property 'Symbol(q)' of object '#<Object>'" &&
+        e108(() => { delete o[q]; }) === "Cannot delete property 'Symbol(q)' of #<Object>" && o[q] === 1);
+    const m: any = {};
+    m[Symbol.match] = 1;
+    Object.seal(m);
+    const ne: any = Object.preventExtensions({});
+    check("fd108d", Object.isSealed(m) && !Object.isFrozen(m) &&
+        e108(() => { delete m[Symbol.match]; }) === "Cannot delete property 'Symbol(Symbol.match)' of #<Object>" &&
+        e108(() => { ne[Symbol.iterator] = 2; }) === "Cannot add property Symbol(Symbol.iterator), object is not extensible" &&
+        e108(() => { ne[q] = 2; }) === "Cannot add property Symbol(q), object is not extensible");
+}
+
 // ===== SECTION 120: unbounded recursion =====
 // A call nested past the stack is a catchable RangeError, and the depth a caught
 // one unwound is given back: the recursion after it goes as deep as before.
@@ -5200,6 +5240,7 @@ function main(): number {
     s105(); // SECTION-CALL 105
     s106(); // SECTION-CALL 106
     s107(); // SECTION-CALL 107
+    s108(); // SECTION-CALL 108
     s120(); // SECTION-CALL 120
     s121(); // SECTION-CALL 121
     s122(); // SECTION-CALL 122

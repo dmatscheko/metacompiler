@@ -715,6 +715,16 @@ function js_jskeyesc(k) {
     if (k >= jvKeyMark) { return jvKeyMark + k }
     return k
 }
+// A property key as V8 prints it in a message: a symbol's key as its symbol. Twins:
+// jsKeyText in both *-interpreter.abnf, jsvKeyText in abnf/jsrtjsprint.go.
+function jvKeyText(k) {
+    if (jvSymN > 0) {
+        var s = anytype
+        s = jvSymByKey["$" + k]
+        if (s !== undefined) { return jvSymStr(s) }
+    }
+    return jvKeyUnesc(k)
+}
 function jvKeyUnesc(k) {
     if (k.length > 0) { if (k.charCodeAt(0) == 1) { return k.substring(1, k.length) } }
     return k
@@ -1338,7 +1348,7 @@ function js_jsdel(o, key) {
 // findClassAccessor (abnf/jsrt.go): an instance does not carry its class's
 // accessors; they live on the __class descriptor and its __super chain, or on a
 // level's prototype object (Object.create's argument, or one defined onto
-// X.prototype). Twins: findAccessor in both *-interpreter.abnf, jsvChainGet in
+// X.prototype). Twins: findAccessor in both *-interpreter.abnf, jsvAccRead in
 // abnf/jsrtjsprint.go.
 function jvFindClassAcc(o, name) {
     // A prototype view starts at its own descriptor, anything else at its class.
@@ -1385,7 +1395,7 @@ function jvClassAccHolder(o, name) {
 // holding it: o as a refused write names it, a class by its own name, an anonymous
 // one as "[object Object]". Twins: jsvGetterOnlyText / jsvAccHolderText in
 // abnf/jsrtjsprint.go, jsGetterOnlyText / jsAccHolderText in both *-interpreter.abnf.
-function jvGetterOnlyText(k, holder) { return "Cannot set property " + jvKeyUnesc(k) + " of " + holder + " which has only a getter" }
+function jvGetterOnlyText(k, holder) { return "Cannot set property " + jvKeyText(k) + " of " + holder + " which has only a getter" }
 function jvAccHolderText(o, h) {
     if (h === o) { return jvObjText(o) }
     // A prototype is named by its class or constructor function, any other object by
@@ -2259,7 +2269,10 @@ function js_jsmget(o, key) {
             if (fp !== undefined) {
                 var fv = anytype
                 fv = fp[key]
-                if (fv !== undefined) { return fv }
+                if (fv !== undefined) {
+                    if (jvIsAcc(fv)) { return jvAccGet(fv, o) }
+                    return fv
+                }
             }
         }
         // ...and a function's Object.prototype surface. This is the arm the CALL site
@@ -2571,7 +2584,10 @@ function js_jsvget(o, key) {
             if (fp !== undefined) {
                 var fv = anytype
                 fv = fp[key]
-                if (fv !== undefined) { return fv }
+                if (fv !== undefined) {
+                    if (jvIsAcc(fv)) { return jvAccGet(fv, o) }
+                    return fv
+                }
             }
         }
         // ...and a function's Object.prototype surface, AFTER the side table so an own
@@ -3200,7 +3216,16 @@ function js_jsmset(o, key, v) {
     if (jvAttrN > 0) {
         var wt = anytype
         wt = o
-        if (jvIsCallable(o)) { wt = jvFnPropsOf(o) }
+        if (jvIsCallable(o)) {
+            wt = jvFnPropsOf(o)
+            // A function's read-only property is named by the function's text.
+            if (wt !== undefined) {
+                if (jvAttrHas(wt, "__ro", jvStr(key))) {
+                    jvRefused = jvFnRoText(o, jvStr(key))
+                    return false
+                }
+            }
+        }
         var wr = jvWriteRefusal(wt, key, v)
         if (wr != "") {
             jvRefused = wr
@@ -3220,7 +3245,20 @@ function js_jsmset(o, key, v) {
             return false
         }
         var fp = jvFnPropsMake(o)
-        fp[jvStr(key)] = v
+        // An own accessor runs its setter on the function.
+        if (jvAccN > 0) {
+            var fa = anytype
+            fa = fp[wk]
+            if (jvIsAcc(fa)) {
+                if (!jvIsCallable(fa["s"])) {
+                    jvRefused = jvGetterOnlyText(wk, jvElide(jvStr(o)))
+                    return false
+                }
+                jvAccSet(fa, o, v)
+                return undefined
+            }
+        }
+        fp[wk] = v
         return undefined
     }
     if (jvErrN > 0) {
@@ -4710,8 +4748,8 @@ function jvOwnKeys(v) {
         var fp = anytype
         fp = jvFnPropsOf(v)
         if (fp !== undefined) {
-            if (jvArrayFn !== undefined && v === jvArrayFn) { return jvArrayStaticKeys(jvIndexOrder(keysOf(fp))) }
-            return jvIndexOrder(keysOf(fp))
+            if (jvArrayFn !== undefined && v === jvArrayFn) { return jvArrayStaticKeys(jvEnumKeys(fp, jvIndexOrder(keysOf(fp)))) }
+            return jvEnumKeys(fp, jvIndexOrder(keysOf(fp)))
         }
     }
     if (Array.isArray(v)) {
@@ -5858,7 +5896,7 @@ function jvSetIntegrity(o, lv) {
     jvAttrN = jvAttrN + 1
     o["__noext"] = true
     if (lv == 1) { return o }
-    var ks = keysOf(o)
+    var ks = jvIntegrityKeys(o)
     var i = 0
     while (i < ks.length) {
         jvAttrSet(o, "__nc", ks[i], true)
@@ -5868,6 +5906,18 @@ function jvSetIntegrity(o, lv) {
         i = i + 1
     }
     return o
+}
+// The own keys an integrity level marks: every string key and every symbol key.
+// Twin of jsIntegrityKeys in both *-interpreter.abnf.
+function jvIntegrityKeys(o) {
+    var ks = keysOf(o).slice()
+    var sk = jvSymKeys(o)
+    var i = 0
+    while (i < sk.length) {
+        ks.push(sk[i])
+        i = i + 1
+    }
+    return ks
 }
 // An array's integrity level: 3 frozen, 2 sealed, 1 not extensible, 0 none.
 function jvArrLevel(a) {
@@ -5895,7 +5945,7 @@ function jvIntegrity(o) {
     if (jbIsBig(o) || jvIsSym(o)) { return 3 }
     if (o["__noext"] !== true) { return 0 }
     var lv = 3
-    var ks = keysOf(o)
+    var ks = jvIntegrityKeys(o)
     var i = 0
     while (i < ks.length) {
         if (!jvAttrHas(o, "__nc", ks[i])) { return 1 }
@@ -5929,18 +5979,18 @@ function jvCtorText(nm) {
     if (nm == "") { return "#<Object>" }
     return "#<" + nm + ">"
 }
-function jvRoText(o, key) { return "Cannot assign to read only property '" + jvKeyUnesc(key) + "' of object '" + jvObjText(o) + "'" }
+function jvRoText(o, key) { return "Cannot assign to read only property '" + jvKeyText(key) + "' of object '" + jvObjText(o) + "'" }
 // V8 names a function in a refused write by its String(f). Twin of jsFnRoText in
 // both *-interpreter.abnf.
-function jvFnRoText(f, key) { return "Cannot assign to read only property '" + key + "' of function '" + jvElide(jvStr(f)) + "'" }
+function jvFnRoText(f, key) { return "Cannot assign to read only property '" + jvKeyText(key) + "' of function '" + jvElide(jvStr(f)) + "'" }
 // A function's text inside a V8 error message: past 128 UTF-16 units, its first 111
 // and its last 2 around "...<omitted>...". Twin of fsElide in lib/js-fnsrc.js.
 function jvElide(t) {
     if (t.length <= 128) { return t }
     return t.substring(0, 111) + "...<omitted>..." + t.substring(t.length - 2, t.length)
 }
-function jvAddText(key) { return "Cannot add property " + jvKeyUnesc(key) + ", object is not extensible" }
-function jvDelText(o, key) { return "Cannot delete property '" + jvKeyUnesc(key) + "' of " + jvObjText(o) }
+function jvAddText(key) { return "Cannot add property " + jvKeyText(key) + ", object is not extensible" }
+function jvDelText(o, key) { return "Cannot delete property '" + jvKeyText(key) + "' of " + jvObjText(o) }
 // The TypeError text a write of v to o[key] meets under o's marks, or "".
 function jvWriteRefusal(o, key, v) {
     if (Array.isArray(o)) {
@@ -6135,8 +6185,16 @@ function jvDefineProp(o, key, desc) {
             np = {}
             arrPropsSet(o, np)
         }
-        if (jvArrLevel(o) > 0 && !jvSlotHas(np, key)) { jbRaise("TypeError: Cannot define property " + jvKeyUnesc(key) + ", object is not extensible") }
+        if (jvArrLevel(o) > 0 && !jvSlotHas(np, key)) { jbRaise("TypeError: Cannot define property " + jvKeyText(key) + ", object is not extensible") }
         return jvDefineProp(np, key, desc)
+    }
+    // A function's own properties are its side table's, defined there by the rules
+    // below.
+    if (jvIsCallable(o)) {
+        var fk = jvStr(key)
+        if (fk != "name") {
+            if (fk != "length") { return jvDefineProp(jvFnPropsMake(o), key, desc) }
+        }
     }
     if (!jvIsObj(o) || jvIsClassDesc(o)) {
         if (isAcc) { return undefined }
@@ -6168,7 +6226,7 @@ function jvDefineProp(o, key, desc) {
     var hasW = js_has(desc, "writable")
     var hasE = js_has(desc, "enumerable")
     var hasC = js_has(desc, "configurable")
-    if (!exists) { if (o["__noext"] === true) { jbRaise("TypeError: Cannot define property " + jvKeyUnesc(key) + ", object is not extensible") } }
+    if (!exists) { if (o["__noext"] === true) { jbRaise("TypeError: Cannot define property " + jvKeyText(key) + ", object is not extensible") } }
     if (exists && jvAttrHas(o, "__nc", key)) {
         var no = hasC && !js_jsnot(js_jsmget(desc, "configurable"))
         if (hasE && !js_jsnot(js_jsmget(desc, "enumerable")) == jvAttrHas(o, "__nonenum", key)) { no = true }
@@ -6182,7 +6240,7 @@ function jvDefineProp(o, key, desc) {
             if (hasW && !js_jsnot(js_jsmget(desc, "writable"))) { no = true }
             if (hasVal && !jvSameValue(js_jsmget(desc, "value"), cur)) { no = true }
         }
-        if (no) { jbRaise("TypeError: Cannot redefine property: " + jvKeyUnesc(key)) }
+        if (no) { jbRaise("TypeError: Cannot redefine property: " + jvKeyText(key)) }
     }
     if (isAcc) { js_defprop(o, key, g, s) } else if (hasVal || !exists) { o[key] = js_jsmget(desc, "value") }
     if (hasE) { jvAttrSet(o, "__nonenum", key, js_jsnot(js_jsmget(desc, "enumerable"))) } else if (!exists) { jvAttrSet(o, "__nonenum", key, true) }

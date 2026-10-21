@@ -1,4 +1,4 @@
-// Full-syntax test: JavaScript - part 3 of 4, sections 44-56, 58-71, 73-100, 109-114.
+// Full-syntax test: JavaScript - part 3 of 4, sections 44-56, 58-71, 73-100, 109-115.
 //
 // THE JS RATCHET IS FOUR FILES: as one file its -frozen interpreter leg ran into
 // ./test.sh --full's time brake (peak memory grew superlinearly with the file), and
@@ -7,7 +7,7 @@
 //   tests/js-test-full.js     sections 01-35, the ECMAScript-2022 syntax walk
 //   tests/js-test-full.2.js   sections 36-43 and 101-108, engine agreement, generators,
 //                             Error, Math, builtin constructors, integrity levels
-//   tests/js-test-full.3.js   sections 44-56, 58-71, 73-100, 109-114, the call/class/private-name
+//   tests/js-test-full.3.js   sections 44-56, 58-71, 73-100, 109-115, the call/class/private-name
 //                             model, the Unicode identifier tables, iterators, derived
 //                             constructors, JSON, guards, Set and Map, iterator closing,
 //                             hasOwnProperty, delete, Object.prototype, extends Object,
@@ -24,7 +24,8 @@
 //                             attributes, a class extending a constructor function,
 //                             new.target and a class extending a builtin, a
 //                             class declared inside a try block, accessors of a
-//                             prototype object, Reflect
+//                             prototype object, Reflect, a function's defined
+//                             properties, symbol keys under integrity levels
 //   (section 72 is in tests/js-test-full.4.mjs, beside 57: it needs a file that
 //   names no builtin class but in a `new`)
 //   tests/js-test-full.4.mjs  section 57, export in a Module
@@ -3157,6 +3158,50 @@ function s114() {
         e114(() => Reflect.construct(1, [])) === "1 is not a constructor")
 }
 
+// ===== SECTION 115: a function's defined properties; symbol keys under integrity levels =====
+// Object.defineProperty on a function defines an own property of it with the
+// descriptor's attributes - an accessor runs on the function, a non-enumerable key
+// stays out of Object.keys, a read-only one refuses the write naming the function's
+// text. Object.freeze / seal mark the symbol-keyed properties too
+// (SetIntegrityLevel, ECMA-262 7.3.15, walks [[OwnPropertyKeys]]), and a refusal
+// prints a symbol key as Symbol(desc). Values read off node 24.
+function e115(f) { try { return String(f()) } catch (e) { return e instanceof TypeError ? e.message : "?" } }
+function s115() {
+    const vals = [4, 3]
+    const f = function () {}
+    let n = 0
+    Object.defineProperty(f, "p", { get() { n++; return this === f }, configurable: true })
+    Object.defineProperty(f, "s", { get() { return this.sv }, set(v) { this.sv = v * 2 }, configurable: true, enumerable: true })
+    f.s = vals[0]
+    check("fd115a", f.p === true && n === 1 && f.s === 8 && Object.keys(f).join() === "s,sv" && "p" in f && f.hasOwnProperty("p"))
+    function g() {}
+    Object.defineProperty(g, "v", { value: 1, writable: false })
+    g.v = vals[1]
+    check("fd115b", g.v === 1 && Object.keys(g).length === 0 &&
+        e115(function () { "use strict"; g.v = 3 }) === "Cannot assign to read only property 'v' of function 'function g() {}'" &&
+        e115(function () { "use strict"; f.p = 1 }) === "Cannot set property p of function () {} which has only a getter")
+    delete f.p
+    const q = Symbol("q")
+    const o = { [q]: 1 }
+    Object.freeze(o)
+    o[q] = vals[1]
+    check("fd115c", f.p === undefined && !("p" in f) && o[q] === 1 && Object.isFrozen(o) &&
+        e115(function () { "use strict"; o[q] = 2 }) === "Cannot assign to read only property 'Symbol(q)' of object '#<Object>'" &&
+        e115(function () { "use strict"; delete o[q] }) === "Cannot delete property 'Symbol(q)' of #<Object>")
+    const m = {}
+    m[Symbol.match] = 1
+    Object.seal(m)
+    const ne = Object.preventExtensions({})
+    const gs = {}
+    Object.defineProperty(gs, Symbol.match, { get() { return 1 } })
+    check("fd115d", Object.isSealed(m) && !Object.isFrozen(m) &&
+        e115(function () { "use strict"; delete m[Symbol.match] }) === "Cannot delete property 'Symbol(Symbol.match)' of #<Object>" &&
+        e115(function () { "use strict"; ne[Symbol.iterator] = 2 }) === "Cannot add property Symbol(Symbol.iterator), object is not extensible" &&
+        e115(function () { "use strict"; ne[q] = 2 }) === "Cannot add property Symbol(q), object is not extensible" &&
+        e115(function () { "use strict"; gs[Symbol.match] = 2 }) === "Cannot set property Symbol(Symbol.match) of #<Object> which has only a getter" &&
+        e115(() => Object.defineProperty(Object.freeze({ [q]: 1 }), q, { value: 2 })) === "Cannot redefine property: Symbol(q)")
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -3221,6 +3266,7 @@ function main() {
     s112() // SECTION-CALL 112
     s113() // SECTION-CALL 113
     s114() // SECTION-CALL 114
+    s115() // SECTION-CALL 115
     println("full: " + checks + " checks, " + failures + " failures")
     return failures
 }
