@@ -130,7 +130,7 @@ parameter), which no engine prints either.
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-713 bash: extglob edge cases — `*` before `@(`/`!(`/`+(`, `**(a)`, halves split on `*@(a|)` · P3 · SH · OPEN [V]
+### T-713 bash: extglob edge cases — `*` before `@(`/`!(`/`+(`, `**(a)`, halves split on `*@(a|)` · P3 · SH · IN PROGRESS (SH worker, round 14) [V]
 bash 5.3 says false, all our engines true: `[[ b == *!(b) ]]`, `[[ a == *!(a) ]]`, `[[ xy == *@(|a) ]]`, `[[ "" == *@(|a) ]]`,
 `[[ xy == x*@(|a) ]]` (a `*` before an `@(`/`!(`/`+(` group never matches an empty tail in bash; drives `${v/%@(|a)/Z}` → bash `xy`,
 ours `xyZ`). `**(a)` never matches in our engines (interp globAt's star-run collapse eats the `*` of `*(`); bash matches every string.
