@@ -3556,6 +3556,13 @@ NotFuncHead = :script(~~
                         var ar = jsWriteRefusal(src, ka[b], av)
                         if (ar != "") { biRaise("TypeError: " + ar) }
                     }
+                    if (typeof src == "object" && src !== null && !Array.isArray(src)) {
+                        var gh = anytype // The holder of a getter-only accessor, or undefined.
+                        gh = accHolder(src, ka[b])
+                        if (gh !== undefined && accSlot(gh.__acc, "set:" + ka[b]) === undefined) {
+                            biRaise("TypeError: " + jsGetterOnlyText(ka[b], jsAccHolderText(src, gh)))
+                        }
+                    }
                     setMember(src, ka[b], av)
                 }
                 var sa = jsSymKeysOf(args[a])
@@ -3839,7 +3846,7 @@ NotFuncHead = :script(~~
         var hasW = propIn("writable", desc)
         var hasE = propIn("enumerable", desc)
         var hasC = propIn("configurable", desc)
-        var curAcc = hasOwn(o, "__acc") && (hasOwn(o.__acc, "get:" + key) || hasOwn(o.__acc, "set:" + key))
+        var curAcc = jsIsAccKey(o, key)
         if (!exists && o.__noext === true) { biRaise("TypeError: Cannot define property " + jsStr(jsKeyUnesc(key)) + ", object is not extensible") }
         if (exists && jsAttrHas(o, "__nc", key)) {
             var bad = hasC && jsTruthy(getMember(desc, "configurable"))
@@ -3860,6 +3867,7 @@ NotFuncHead = :script(~~
             if (g !== undefined) { addAccessor(o, "get", key, g) }
             if (s !== undefined) { addAccessor(o, "set", key, s) }
         } else if (hasVal || !exists) {
+            if (curAcc) { jsAccDrop(o, key) }
             scopePut(o, key, getMember(desc, "value"))
         }
         if (!hasOwn(o, "__keys")) { return }
@@ -3919,7 +3927,12 @@ NotFuncHead = :script(~~
         var k = arrKind(a) % 32
         return (k >= 20 && k <= 22) ? 23 - k : 0
     }
-    function jsIsAccKey(o, k) { return hasOwn(o, "__acc") && (hasOwn(o.__acc, "get:" + k) || hasOwn(o.__acc, "set:" + k)) }
+    function jsIsAccKey(o, k) { return hasOwn(o, "__acc") && (accSlot(o.__acc, "get:" + k) !== undefined || accSlot(o.__acc, "set:" + k) !== undefined) }
+    function jsAccDrop(o, k) {
+        if (!jsIsAccKey(o, k)) { return }
+        scopePut(o.__acc, "get:" + k, undefined)
+        scopePut(o.__acc, "set:" + k, undefined)
+    }
     // TestIntegrityLevel as a number: 3 frozen, 2 sealed, 1 not extensible, 0 none. A
     // primitive is all three; an array's `length` is a writable, non-configurable
     // property, so an empty array that is not extensible is sealed, not frozen.
@@ -5104,7 +5117,7 @@ NotFuncHead = :script(~~
                     var tb = t["__acc"]
                     // See the twin of this comment in js-interpreter.abnf.
                     if (hasOwn(tb, "get:" + k) || hasOwn(tb, "set:" + k)) {
-                        var hr = {isacc: true, g: accSlot(tb, "get:" + k), s: accSlot(tb, "set:" + k)}
+                        var hr = {isacc: true, g: accSlot(tb, "get:" + k), s: accSlot(tb, "set:" + k), c: cl}
                         // A deleted accessor's halves are both undefined (staticDelete).
                         if (hr.g !== undefined || hr.s !== undefined) { return hr }
                     }
@@ -5157,11 +5170,13 @@ NotFuncHead = :script(~~
     // The write half: a setter anywhere on the static chain wins over a fresh own slot,
     // the same rule setMember follows for an ordinary object.
     function staticSideWrite(o, k, v) {
+        var r = anytype // The class whose static accessor has no setter, or undefined.
+        r = undefined
         var hit = classStaticFind(o, k)
         if (hit != undefined) {
             if (hit.isacc) {
-                if (hit.s != undefined) { callWithThis(hit.s, o, [v]) }
-                return
+                if (hit.s != undefined) { callWithThis(hit.s, o, [v]) } else { r = hit.c }
+                return r
             }
         }
         if (o.__statics == undefined) { scopePut(o, "__statics", newStaticsTable()) }
@@ -5181,6 +5196,7 @@ NotFuncHead = :script(~~
             jsStaticName(o.__statics, k)
             trackKey(o.__statics, k)
         }
+        return r
     }
     // See the twin of this comment in js-interpreter.abnf.
     function classOwnsStatic(o, k) {
@@ -5671,12 +5687,20 @@ NotFuncHead = :script(~~
         if (isStaticSide(o, k)) {
             // See the twin of this comment in js-interpreter.abnf.
             if ((k == "name" || k == "length") && !classOwnsStatic(o, k)) { jsRefuse(jsFnRoText(o, k)); return }
-            staticSideWrite(o, "" + k, v)
+            var gc = anytype // The class whose getter-only static accessor met the write.
+            gc = staticSideWrite(o, "" + k, v)
+            if (gc !== undefined) { jsRefuse(jsGetterOnlyText(k, jsStr(gc))) }
             return
         }
         if (o != undefined && o != null && typeof o == "object" && !Array.isArray(o)) {
-            var s = findAccessor(o, "set", k)
-            if (s != undefined) { callWithThis(s, o, [v]); return }
+            var ah = anytype // The object or class descriptor holding k's accessor.
+            ah = accHolder(o, k)
+            if (ah !== undefined) {
+                var s = anytype
+                s = accSlot(ah.__acc, "set:" + k)
+                if (s !== undefined) { callWithThis(s, o, [v]) } else { jsRefuse(jsGetterOnlyText(k, jsAccHolderText(o, ah))) }
+                return
+            }
         }
         // A write onto a FUNCTION goes to the side table: the host's function value
         // cannot carry an expando under -frozen.
@@ -5720,7 +5744,7 @@ NotFuncHead = :script(~~
             if (jsIsAccKey(np, "" + k)) {
                 var as = anytype // The named accessor's setter, or undefined.
                 as = findAccessor(np, "set", "" + k)
-                if (as !== undefined) { callWithThis(as, o, [v]) }
+                if (as !== undefined) { callWithThis(as, o, [v]) } else { jsRefuse(jsGetterOnlyText(k, jsObjText(o))) }
                 return
             }
             scopePut(np, k, v)
@@ -5822,6 +5846,24 @@ NotFuncHead = :script(~~
             if (hasOwn(cl, "__acc") && hasOwn(cl["__acc"], name)) { return cl["__acc"][name] }
         }
         return undefined
+    }
+    // See the twin of this comment in js-interpreter.abnf.
+    function accHolder(o, k) {
+        var r = anytype
+        r = undefined
+        if (hasOwn(o, "__acc") && jsIsAccKey(o, "" + k)) { return o }
+        var start = anytype // The chain head is a class descriptor or undefined.
+        start = o.__class
+        for (var cl = start; cl != undefined && cl != null; cl = cl.__super) {
+            if (hasOwn(cl, "__acc") && jsIsAccKey(cl, "" + k)) { return cl }
+        }
+        return r
+    }
+    // See the twin of this comment in js-interpreter.abnf.
+    function jsGetterOnlyText(k, holder) { return "Cannot set property " + jsStr(jsKeyUnesc("" + k)) + " of " + holder + " which has only a getter" }
+    function jsAccHolderText(o, h) {
+        if (h === o) { return jsObjText(o) }
+        return (typeof h.__name == "string" && h.__name != "") ? "#<" + h.__name + ">" : "[object Object]"
     }
     // Records one accessor in an object's (or class descriptor's) hidden table, creating
     // the table on first use. The two kinds share one table under a prefixed key, so a
@@ -7248,6 +7290,7 @@ NotFuncHead = :script(~~
             }
             if (typeof tgt != "function") {
                 scopePut(tgt, p.key, undefined)
+                jsAccDrop(tgt, "" + p.key)
                 if (typeof p.key == "string") { jsSymUntrack(tgt, p.key) }
                 jsArgPut(tgt, p.key, undefined, true)
             }

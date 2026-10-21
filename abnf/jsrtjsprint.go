@@ -1063,14 +1063,16 @@ func jsvObjDel(o *jsObject, name string) {
 
 // jsvStaticWrite is a write onto class cls's static namespace: a setter anywhere on
 // the static chain wins over a fresh own slot, the same rule js_set follows for an
-// ordinary object. Twin of jvStaticWrite in languages/lib/js-rt.metajs.
-func (rt *jsrt) jsvStaticWrite(cls *jsObject, name string, v interface{}) {
-	if sv, _, found := jsStaticsFind(cls, name); found {
+// ordinary object. It answers the class whose static accessor has no setter, which
+// refuses the write, else nil. Twin of jvStaticWrite in languages/lib/js-rt.metajs.
+func (rt *jsrt) jsvStaticWrite(cls *jsObject, name string, v interface{}) *jsObject {
+	if sv, holder, found := jsStaticsFind(cls, name); found {
 		if acc, isAcc := sv.(*jsAccessor); isAcc {
-			if acc.set != nil {
-				rt.call(acc.set, cls, []interface{}{v})
+			if acc.set == nil {
+				return holder
 			}
-			return
+			rt.call(acc.set, cls, []interface{}{v})
+			return nil
 		}
 	}
 	t := jsStaticsOf(cls, true)
@@ -1082,6 +1084,54 @@ func (rt *jsrt) jsvStaticWrite(cls *jsObject, name string, v interface{}) {
 	if !had {
 		jsvSfTrack(t, name)
 	}
+	return nil
+}
+
+// jsvAccHolder answers the object holding name's accessor for a write to o and that
+// accessor: o itself, else the nearest class descriptor on its __class chain, or nil
+// when the write meets a data property or nothing. Twins: accHolder in both
+// *-interpreter.abnf, jvClassAccHolder in languages/lib/js-rt.metajs.
+func jsvAccHolder(o *jsObject, name string) (*jsObject, *jsAccessor) {
+	if v, own := o.props[name]; own {
+		if acc, isAcc := v.(*jsAccessor); isAcc {
+			return o, acc
+		}
+		return nil, nil
+	}
+	for cls, guard := o.props["__class"], 0; cls != nil && guard < 64; guard++ {
+		c, ok := cls.(*jsObject)
+		if !ok {
+			break
+		}
+		if v, found := c.props[name]; found {
+			if acc, isAcc := v.(*jsAccessor); isAcc {
+				return c, acc
+			}
+			return nil, nil
+		}
+		cls = c.props["__super"]
+	}
+	return nil, nil
+}
+
+// jsvGetterOnlyText is V8's TypeError text for a write to an accessor with no setter,
+// naming the object holding it. Twins: jsGetterOnlyText in both *-interpreter.abnf,
+// jvGetterOnlyText in languages/lib/js-rt.metajs.
+func jsvGetterOnlyText(key, holder string) string {
+	return "Cannot set property " + jsvKeyUnesc(key) + " of " + holder + " which has only a getter"
+}
+
+// jsvAccHolderText names holder h of o's accessor: o as a refused write names it, a
+// class by its own name, an anonymous one as "[object Object]". Twins: jsAccHolderText
+// in both *-interpreter.abnf, jvAccHolderText in languages/lib/js-rt.metajs.
+func (rt *jsrt) jsvAccHolderText(o, h *jsObject) string {
+	if h == o {
+		return rt.jsvObjText(o)
+	}
+	if n, _ := h.props["__name"].(string); n != "" {
+		return "#<" + n + ">"
+	}
+	return "[object Object]"
 }
 
 func jsvAddText(key string) string {
@@ -3771,10 +3821,15 @@ func (rt *jsrt) jsvMethod(target interface{}, name string, args []interface{}) (
 							rt.bigRaise("TypeError: %s", msg)
 						}
 					}
-					dst.set(k, v)
+					if rt.accessorCount > 0 {
+						if h, acc := jsvAccHolder(dst, k); acc != nil && acc.set == nil {
+							rt.bigRaise("TypeError: %s", jsvGetterOnlyText(k, rt.jsvAccHolderText(dst, h)))
+						}
+					}
+					rt.setMember(dst, k, v)
 				}
 				for _, k := range jsvSymKeys(src) {
-					dst.set(k, rt.jsvGetKey(src, k))
+					rt.setMember(dst, k, rt.jsvGetKey(src, k))
 				}
 			}
 			return dst, true
@@ -6315,7 +6370,10 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 					return boolH(false)
 				}
 			}
-			rt.jsvStaticWrite(cls, name, u(a[2]))
+			if h := rt.jsvStaticWrite(cls, name, u(a[2])); h != nil {
+				jsvRefused = jsvGetterOnlyText(name, jsvElide(rt.jsvString(h)))
+				return boolH(false)
+			}
 			return 0
 		}
 		// `name` and `length` are NON-WRITABLE: node drops `f.name = "q"` in sloppy
@@ -6351,6 +6409,15 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 			return 0
 		}
 		if o, isObj := u(a[0]).(*jsObject); isObj {
+			// An accessor with no setter refuses the write; js_jsrefuse raises it in
+			// strict code.
+			if rt.accessorCount > 0 {
+				name := rt.toString(u(a[1]))
+				if h, acc := jsvAccHolder(o, name); acc != nil && acc.set == nil {
+					jsvRefused = jsvGetterOnlyText(name, rt.jsvAccHolderText(o, h))
+					return boolH(false)
+				}
+			}
 			if rt.toString(u(a[1])) == "name" {
 				jsvErrNameWrite(o)
 			}
@@ -6371,9 +6438,11 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 		}
 		// A named accessor of an array runs its setter, with the array as `this`.
 		if acc := jsvArrAccessor(u(a[0]), rt.toString(u(a[1]))); acc != nil {
-			if acc.set != nil {
-				rt.call(acc.set, u(a[0]), []interface{}{u(a[2])})
+			if acc.set == nil {
+				jsvRefused = jsvGetterOnlyText(rt.toString(u(a[1])), "[object Array]")
+				return boolH(false)
 			}
+			rt.call(acc.set, u(a[0]), []interface{}{u(a[2])})
 			return 0
 		}
 		r := baseSet(a)

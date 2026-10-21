@@ -1,4 +1,4 @@
-// Full-syntax test: JavaScript - part 3 of 4, sections 44-56, 58-71, 73-100, 109-111.
+// Full-syntax test: JavaScript - part 3 of 4, sections 44-56, 58-71, 73-100, 109-113.
 //
 // THE JS RATCHET IS FOUR FILES: as one file its -frozen interpreter leg ran into
 // ./test.sh --full's time brake (peak memory grew superlinearly with the file), and
@@ -7,7 +7,7 @@
 //   tests/js-test-full.js     sections 01-35, the ECMAScript-2022 syntax walk
 //   tests/js-test-full.2.js   sections 36-43 and 101-108, engine agreement, generators,
 //                             Error, Math, builtin constructors, integrity levels
-//   tests/js-test-full.3.js   sections 44-56, 58-71, 73-100, 109-111, the call/class/private-name
+//   tests/js-test-full.3.js   sections 44-56, 58-71, 73-100, 109-113, the call/class/private-name
 //                             model, the Unicode identifier tables, iterators, derived
 //                             constructors, JSON, guards, Set and Map, iterator closing,
 //                             hasOwnProperty, delete, Object.prototype, extends Object,
@@ -3056,6 +3056,53 @@ function s112() {
         tag112`x` !== tag112`x` && t112(1) !== r[0])
 }
 
+// ===== SECTION 113: a write to an accessor with no setter =====
+// [[Set]] on an accessor property whose setter is undefined fails (OrdinarySet,
+// ECMA-262 10.1.9.2): sloppy code drops the write and makes no own data property,
+// strict code - a "use strict" body, a class body, Object.assign - raises node's
+// TypeError naming the object that HOLDS the accessor: the literal, the class whose
+// prototype declares it (the superclass for a subclass's instance), the class itself
+// for a static one, "[object Array]" for an array's named property. A compound
+// assignment, an update and a destructuring target are writes too. Deleting the
+// accessor, or redefining it as data, makes the key writable again. Values read off
+// node 24.
+class G113 { get acc() { return 1 } static get sg() { return 2 } set w(v) { this.ws = v } }
+class H113 extends G113 { get w() { return 3 } }
+function e113(f) { try { f(); return "ok" } catch (e) { return e instanceof TypeError ? e.message : "?" } }
+function s113() {
+    const vals = [2, 5]
+    const o = { get acc() { return 1 }, set both(v) { this.b = v }, get both() { return 0 } }
+    o.acc = vals[0]
+    const i = new G113()
+    i.acc = vals[0]
+    check("go113a", o.acc === 1 && Object.keys(o).join() === "acc,both" && i.acc === 1 && !i.hasOwnProperty("acc") &&
+        JSON.stringify(i) === "{}")
+    const m = "Cannot set property acc of #<Object> which has only a getter"
+    check("go113b", e113(function () { "use strict"; o.acc = vals[0] }) === m &&
+        e113(function () { "use strict"; o["acc"] = vals[1] }) === m &&
+        e113(function () { "use strict"; o.acc += 1 }) === m && e113(function () { "use strict"; o.acc++ }) === m &&
+        e113(function () { "use strict"; [o.acc] = vals }) === m && e113(function () { "use strict"; ({ x: o.acc } = { x: 1 }) }) === m &&
+        e113(() => Object.assign(o, { acc: vals[1] })) === m && o.acc === 1 &&
+        e113(function () { "use strict"; o.both = vals[1] }) === "ok" && o.b === 5)
+    check("go113c", e113(function () { "use strict"; i.acc = 3 }) === "Cannot set property acc of #<G113> which has only a getter" &&
+        e113(function () { "use strict"; new H113().acc = 3 }) === "Cannot set property acc of #<G113> which has only a getter" &&
+        e113(function () { "use strict"; new H113().w = 3 }) === "Cannot set property w of #<H113> which has only a getter" &&
+        e113(function () { "use strict"; G113.sg = 3 }) === "Cannot set property sg of " + String(G113) + " which has only a getter" &&
+        e113(function () { "use strict"; H113.sg = 3 }) === "Cannot set property sg of " + String(G113) + " which has only a getter" &&
+        G113.sg === 2 && e113(() => Object.assign(new G113(), { acc: 1 })) === "Cannot set property acc of #<G113> which has only a getter")
+    const a = [1]
+    Object.defineProperty(a, "nm", { get() { return 4 }, configurable: true })
+    const d = {}
+    Object.defineProperty(d, "x", { get() { return 1 }, configurable: true })
+    check("go113d", e113(function () { "use strict"; a.nm = 3 }) === "Cannot set property nm of [object Array] which has only a getter" &&
+        e113(function () { "use strict"; d.x = 3 }) === "Cannot set property x of #<Object> which has only a getter" && a.nm === 4)
+    const p = { get k() { return 1 } }
+    delete p.k
+    Object.defineProperty(d, "x", { value: 7, writable: true })
+    check("go113e", e113(function () { "use strict"; p.k = vals[0]; d.x = vals[1] }) === "ok" && p.k === 2 && d.x === 5 &&
+        Object.keys(p).join() === "k" && delete a.nm && e113(function () { "use strict"; a.nm = 6 }) === "ok" && a.nm === 6)
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -3118,6 +3165,7 @@ function main() {
     s110() // SECTION-CALL 110
     s111() // SECTION-CALL 111
     s112() // SECTION-CALL 112
+    s113() // SECTION-CALL 113
     println("full: " + checks + " checks, " + failures + " failures")
     return failures
 }

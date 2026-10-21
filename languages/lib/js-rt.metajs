@@ -1350,6 +1350,34 @@ function jvFindClassAcc(o, name) {
     }
     return undefined
 }
+// The class descriptor holding the accessor jvFindClassAcc finds, for a write that
+// must name it. Twins: accHolder in both *-interpreter.abnf, jsvAccHolder in
+// abnf/jsrtjsprint.go.
+function jvClassAccHolder(o, name) {
+    var r = anytype
+    r = undefined
+    var cls = o["__class"]
+    while (jvIsObj(cls)) {
+        var v = cls[name]
+        if (v !== undefined) {
+            if (jvIsAcc(v)) { return cls }
+            return r
+        }
+        cls = cls["__super"]
+    }
+    return r
+}
+// V8's TypeError text for a write to an accessor with no setter, naming the object
+// holding it: o as a refused write names it, a class by its own name, an anonymous
+// one as "[object Object]". Twins: jsvGetterOnlyText / jsvAccHolderText in
+// abnf/jsrtjsprint.go, jsGetterOnlyText / jsAccHolderText in both *-interpreter.abnf.
+function jvGetterOnlyText(k, holder) { return "Cannot set property " + jvKeyUnesc(k) + " of " + holder + " which has only a getter" }
+function jvAccHolderText(o, h) {
+    if (h === o) { return jvObjText(o) }
+    var n = h["__name"]
+    if (typeof n == "string") { if (n != "") { return "#<" + n + ">" } }
+    return "[object Object]"
+}
 
 // ================================================ the STATIC namespace ====
 //
@@ -2995,13 +3023,17 @@ function jvHas(o, key) {
 }
 
 // A static write onto class o: a setter anywhere on the static chain wins over a
-// fresh own slot, the same rule js_jsmset follows for an ordinary object.
+// fresh own slot, the same rule js_jsmset follows for an ordinary object. Answers the
+// class whose static accessor has no setter, which refuses the write, else undefined.
 function jvStaticWrite(o, sk, v) {
+    var r = anytype
+    r = undefined
     var sv = anytype
     sv = jvStaticFind(o, sk)
     if (jvIsAcc(sv)) {
+        if (!jvIsCallable(sv["s"])) { return jvStaticHolder(o, sk) }
         jvAccSet(sv, o, v)
-        return undefined
+        return r
     }
     var st = o["__statics"]
     if (!jvIsObj(st)) { st = js_jsstatics(o) }
@@ -3011,7 +3043,17 @@ function jvStaticWrite(o, sk, v) {
     // exactly as it does on any other object; a write over an existing one (a static
     // method, say) keeps its enumerability.
     if (!had) { jvSfTrack(st, sk) }
-    return undefined
+    return r
+}
+// The class on o's static chain whose table holds sk.
+function jvStaticHolder(o, sk) {
+    var cls = o
+    while (jvIsObj(cls)) {
+        var t = cls["__statics"]
+        if (jvIsObj(t)) { if (t[sk] !== undefined) { return cls } }
+        cls = cls["__super"]
+    }
+    return o
 }
 // Does class o itself (not a superclass) declare a static member sk?
 function jvClassOwnsStatic(o, sk) {
@@ -3067,7 +3109,12 @@ function js_jsmset(o, key, v) {
                     return false
                 }
             }
-            jvStaticWrite(o, sk, v)
+            var gc = anytype
+            gc = jvStaticWrite(o, sk, v)
+            if (gc !== undefined) {
+                jvRefused = jvGetterOnlyText(sk, jvElide(jvStr(gc)))
+                return false
+            }
             return undefined
         }
     }
@@ -3075,22 +3122,30 @@ function js_jsmset(o, key, v) {
         if (jvIsObj(o)) {
             var k = jvStr(key)
             var cur = o[k]
-            if (jvIsAcc(cur)) {
-                jvAccSet(cur, o, v)
-                return undefined
-            }
-            if (cur === undefined) {
-                var acc = jvFindClassAcc(o, k)
-                if (acc !== undefined) {
-                    jvAccSet(acc, o, v)
-                    return undefined
+            // An accessor with no setter refuses the write; js_jsrefuse raises it in
+            // strict code.
+            var ah = anytype
+            ah = undefined
+            if (jvIsAcc(cur)) { ah = o }
+            if (cur === undefined) { ah = jvClassAccHolder(o, k) }
+            if (ah !== undefined) {
+                var acc = ah[k]
+                if (!jvIsCallable(acc["s"])) {
+                    jvRefused = jvGetterOnlyText(k, jvAccHolderText(o, ah))
+                    return false
                 }
+                jvAccSet(acc, o, v)
+                return undefined
             }
         }
         if (Array.isArray(o)) {
             var aas = anytype
             aas = jvArrAcc(o, jvStr(key))
             if (aas !== undefined) {
+                if (!jvIsCallable(aas["s"])) {
+                    jvRefused = jvGetterOnlyText(jvStr(key), "[object Array]")
+                    return false
+                }
                 jvAccSet(aas, o, v)
                 return undefined
             }
@@ -6258,17 +6313,13 @@ function jvObjectGlobalMethod(name, args) {
                     var av = anytype
                     av = js_jsmget(s, sk[sj])
                     // Object.assign is a builtin, and so strict code: a refused write raises.
-                    if (jvAttrN > 0) {
-                        var ar = jvWriteRefusal(src, sk[sj], av)
-                        if (ar != "") { jbRaise("TypeError: " + ar) }
-                    }
-                    js_jsmset(src, sk[sj], av)
+                    if (js_jsmset(src, sk[sj], av) === false) { js_jsrefuse() }
                     sj = sj + 1
                 }
                 var ss = jvSymKeys(s)
                 var si = 0
                 while (si < ss.length) {
-                    js_jsmset(src, ss[si], js_jsmget(s, ss[si]))
+                    if (js_jsmset(src, ss[si], js_jsmget(s, ss[si])) === false) { js_jsrefuse() }
                     si = si + 1
                 }
             }

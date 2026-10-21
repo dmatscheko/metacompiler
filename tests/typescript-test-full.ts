@@ -4916,6 +4916,49 @@ function s105(): void {
         tag105`x` !== tag105`x`);
 }
 
+// ===== SECTION 106: a write to an accessor with no setter =====
+// [[Set]] on an accessor property whose setter is undefined fails (OrdinarySet,
+// ECMA-262 10.1.9.2), and every TypeScript file is strict code, so the write raises
+// node's TypeError naming the object that HOLDS the accessor: the literal, the class
+// whose prototype declares it (the superclass for a subclass's instance), the class
+// itself for a static one, "[object Array]" for an array's named property; no own
+// data property appears. A compound assignment, an update, a destructuring target
+// and Object.assign are writes too. Deleting the accessor, or redefining it as data,
+// makes the key writable again. A static accessor's message carries the class's
+// source text, which node prints from tsc's output and not from the .ts source, so
+// only its head is compared. Values read off tsc 6.0.3's default output run by
+// node 24.
+class G106 { get acc(): number { return 1; } static get sg(): number { return 2; } set w(v: number) { (this as any).ws = v; } }
+class H106 extends G106 { get w(): number { return 3; } }
+function e106(f: () => void): string { try { f(); return "ok"; } catch (e) { return e instanceof TypeError ? e.message : "?"; } }
+function s106(): void {
+    const vals: number[] = [2, 5];
+    const o: any = { get acc() { return 1; }, set both(v: number) { (this as any).b = v; }, get both() { return 0; } };
+    const m = "Cannot set property acc of #<Object> which has only a getter";
+    check("go106a", e106(() => { o.acc = vals[0]; }) === m && e106(() => { o["acc"] = vals[1]; }) === m &&
+        e106(() => { o.acc += 1; }) === m && e106(() => { o.acc++; }) === m && e106(() => { [o.acc] = vals; }) === m &&
+        e106(() => Object.assign(o, { acc: vals[1] })) === m && o.acc === 1 && Object.keys(o).join() === "acc,both" &&
+        e106(() => { o.both = vals[1]; }) === "ok" && o.b === 5);
+    const i: any = new G106();
+    check("go106b", e106(() => { i.acc = 3; }) === "Cannot set property acc of #<G106> which has only a getter" &&
+        e106(() => { (new H106() as any).acc = 3; }) === "Cannot set property acc of #<G106> which has only a getter" &&
+        e106(() => { (new H106() as any).w = 3; }) === "Cannot set property w of #<H106> which has only a getter" &&
+        e106(() => { (G106 as any).sg = 3; }).indexOf("Cannot set property sg of ") === 0 &&
+        e106(() => { (H106 as any).sg = 3; }).indexOf("Cannot set property sg of ") === 0 &&
+        G106.sg === 2 && i.acc === 1 && !i.hasOwnProperty("acc"));
+    const a: any = [1];
+    Object.defineProperty(a, "nm", { get() { return 4; }, configurable: true });
+    const d: any = {};
+    Object.defineProperty(d, "x", { get() { return 1; }, configurable: true });
+    check("go106c", e106(() => { a.nm = 3; }) === "Cannot set property nm of [object Array] which has only a getter" &&
+        e106(() => { d.x = 3; }) === "Cannot set property x of #<Object> which has only a getter" && a.nm === 4);
+    const p: any = { get k() { return 1; } };
+    delete p.k;
+    Object.defineProperty(d, "x", { value: 7, writable: true });
+    check("go106d", e106(() => { p.k = vals[0]; d.x = vals[1]; }) === "ok" && p.k === 2 && d.x === 5 &&
+        Object.keys(p).join() === "k" && delete a.nm && e106(() => { a.nm = 6; }) === "ok" && a.nm === 6);
+}
+
 // ===== SECTION 120: unbounded recursion =====
 // A call nested past the stack is a catchable RangeError, and the depth a caught
 // one unwound is given back: the recursion after it goes as deep as before.
@@ -5044,6 +5087,7 @@ function main(): number {
     s103(); // SECTION-CALL 103
     s104(); // SECTION-CALL 104
     s105(); // SECTION-CALL 105
+    s106(); // SECTION-CALL 106
     s120(); // SECTION-CALL 120
     println("full: " + checks + " checks, " + failures + " failures");
     return failures;
