@@ -78,7 +78,7 @@ The format family (`"%d" % nil`, format, sprintf) records no frame name; frames 
 
 # JS — JavaScript and TypeScript
 
-### T-734 js: `Object.assign` onto an array aborts compiled; data attributes on array indices · P2 · JS · OPEN [V]
+### T-734 js: `Object.assign` onto an array aborts compiled; data attributes on array indices · P2 · JS · IN PROGRESS (JS worker, round 30) [V]
 `Object.assign([0,0,9], [1,2]).join()` → node and the interpreters `1,2,9`; llvm.Run and native abort "Object.assign needs an object
 target" (halves diverge). `Object.defineProperty(a, "0", {value: 1, writable: false})` (any data attribute on an index, including
 turning an index accessor back into data — node then reports writable false) is ignored; the element stays writable.
@@ -143,7 +143,7 @@ parameter), which no engine prints either.
 
 # CORE — MetaJS, the engines, shared runtime, tooling
 
-### T-735 tooling: -callgraph definition names for python (`jsf_N`), php (body line, not header), swift (mangled `f$1`) · P3 · CORE · OPEN [V]
+### T-735 tooling: -callgraph definition names for python (`jsf_N`), php (body line, not header), swift (mangled `f$1`) · P3 · CORE · IN PROGRESS (JS worker, round 30) [V]
 `-callgraph` names python `def f` as `jsf_70@1` (like js before its fix: the name pass misses the wrapper the closure goes through),
 puts a php `function f` at its body's first line instead of the header line, and reports swift `f` as `f$1`. Extend
 tests/srcpos-probe.sh's NAME@LINE cases to these languages and fix the name/position recovery in abnf/callgraph.go or the emitters.
