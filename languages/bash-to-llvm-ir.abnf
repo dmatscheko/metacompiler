@@ -178,7 +178,7 @@ AndOrOp     <~~ push({op: up.in}) ~~>
             = "&&" | "||" ;
 
 // A pipeline is what && / || and ! actually operate on. Each stage runs with its stdout
-// captured and handed to the next stage as its standard input.
+// captured and handed to the next stage as its standard input, and in a subshell.
 AndOrList   <~~ push(makeAndOr(takeAll())) ~~>
             = Pipeline { AndOrOp Pipeline } ;
 Pipeline    <~~ push(makePipeline(takeAll())) ~~>
@@ -188,8 +188,10 @@ PipeOp      = "|" NotBar ;
 
 // A compound command is an ordinary Command, so it can be a pipeline stage
 // (`echo x | while read l; do ...; done`) and can carry redirections that apply to the
-// whole thing (`while read l; do ...; done < file`, `for x in ...; done <<EOF`).
-Command     = CompoundRedir | Subshell | BraceGroup | LetCmd | DeclCommand | PrefixCommand | Assignment | SimpleCommand ;
+// whole thing (`while read l; do ...; done < file`, `for x in ...; done <<EOF`). Its
+// {cpd} marker tells makePipeline that, as a stage, it starts outside every loop.
+Command     = CompoundCmd | LetCmd | DeclCommand | PrefixCommand | Assignment | SimpleCommand ;
+CompoundCmd <~~ push({cpd: 1}) ~~> = CompoundRedir | Subshell | BraceGroup ;
 CompoundRedir <~~ push(mkRedirected(takeAll())) ~~> = CompoundCore [ RedirList ] ;
 // "((" must be tried before "(" or an arithmetic command parses as nested subshells, which
 // is why CompoundRedir comes before Subshell rather than after it.
@@ -1440,6 +1442,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var curFrame = null    // null at top level, else {params: [9 i8* values], argc: i32 value}
     var condDepth = 0      // >0 while emitting a CONDITION (set -e must not fire there)
     var loopStack = []     // {brk, cont} target blocks of the loops being emitted
+    var retInSub = false   // inside a ( ) / $( ) of the function being emitted: return ends it
     var trapList = []      // EXIT traps registered in the (sub)shell being emitted
     var trapCount = 0
     var deadCount = 0
@@ -1746,6 +1749,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return {fn: function(b) { return {b: b, v: gepStr(b, s)} }, c: s}
     }
     // Command substitution: divert output into a capture buffer, run the list, take the buffer.
+    // Unlike ( ), it sees the loops around it: `break` there ends the substitution.
     function mkCmdSub(bodyT) {
         return {s: true, c: undefined, fn: function(b) {
             b.NewCall(rtCapBegin, zero)
@@ -1757,6 +1761,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             curExitRd = redirStack.length
             b.NewCall(rtSsSave, zero)
             var optSave = saveOpts(b)
+            var savedLoops = loopStack, savedRetSub = retInSub
+            loopStack = subLoops(savedLoops, subEnd)
+            retInSub = true
             var undoBase = attrUndo.length
             subDepth = subDepth + 1
             var svq = uqStarEmit
@@ -1766,6 +1773,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             subDepth = subDepth - 1
             attrUnwind(undoBase)
             eb.NewBr(subEnd)
+            loopStack = savedLoops
+            retInSub = savedRetSub
             curExit = savedExit
             curExitRd = savedExitRd
             var myTraps = trapList
@@ -3650,15 +3659,23 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
 
     // ---- pipelines, subshells, groups, (( )), [[ ]], redirections ----
 
+    // items = [{bang}?, (stageThunk {cpd}?)...] : with two stages or more every stage runs in
+    // a subshell (bash without lastpipe). Twin of makePipeline in bash-interpreter.abnf.
     function makePipeline(items) {
         var bang = false
         var stages = []
+        var cpds = []
         var i
         for (i = 0; i < items.length; i++) {
             var it = items[i]
-            if (typeof it == "function") { stages.push(it) } else { bang = true }
+            if (typeof it == "function") { stages.push(it); cpds.push(false) }
+            else if (it.cpd != undefined) { cpds[cpds.length - 1] = true }
+            else { bang = true }
         }
         if (!bang && stages.length == 1) { return stages[0] }
+        if (stages.length > 1) {
+            for (i = 0; i < stages.length; i++) { stages[i] = subshellOf(stages[i], !cpds[i]) }
+        }
         return function(b) {
             var ff = slotOf(i32)
             b.NewStore(zero, ff)
@@ -3672,7 +3689,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             for (k = 0; k < stages.length; k++) {
                 var isLast = (k == stages.length - 1)
                 if (!isLast) { b.NewCall(rtCapBegin, zero) }
-                b = isLast ? stages[k](b) : emitCond(stages[k], b)
+                b = stages[k](b)
                 if (!isLast) {
                     b.NewStore(b.NewCall(rtCapEnd, zero), gStdin)
                     b.NewStore(zero, gStdinPos)
@@ -3699,8 +3716,20 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
 
     // ( LIST ) : the variable array is snapshotted and restored, and an `exit` inside branches
-    // to the subshell's own end block instead of the enclosing function's.
-    function makeSubshell(bodyT) {
+    // to the subshell's own end block instead of the enclosing function's. So does a
+    // `return`. It starts outside every loop, except a SIMPLE command run as a pipeline stage
+    // (keepLoops): there every loop level of `break` / `continue` ends the subshell, with the
+    // signal's status. Twin of subshellOf in bash-interpreter.abnf.
+    function makeSubshell(bodyT) { return subshellOf(bodyT, false) }
+    // The loop frames of a subshell that sees the loops around it: each level branches to the
+    // subshell's end, and the signal's status lands in $? (its loop status slot).
+    function subLoops(outer, subEnd) {
+        var out = []
+        var k
+        for (k = 0; k < outer.length; k++) { out.push({brk: subEnd, cont: subEnd, lst: gStatus, rd: curExitRd}) }
+        return out
+    }
+    function subshellOf(bodyT, keepLoops) {
         return function(b) {
             b.NewCall(rtSsSave, zero)
             var optSave = saveOpts(b)
@@ -3710,12 +3739,17 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var subEnd = curF.NewBlock("")
             curExit = subEnd
             curExitRd = redirStack.length
+            var savedLoops = loopStack, savedRetSub = retInSub
+            loopStack = keepLoops ? subLoops(savedLoops, subEnd) : []
+            retInSub = true
             var undoBase = attrUndo.length
             subDepth = subDepth + 1
             var eb = bodyT(b)
             subDepth = subDepth - 1
             attrUnwind(undoBase)
             eb.NewBr(subEnd)
+            loopStack = savedLoops
+            retInSub = savedRetSub
             curExit = savedExit
             curExitRd = savedExitRd
             var myTraps = trapList
@@ -4487,6 +4521,12 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 // `return N` is N modulo 256, like an exit status: 300 is 44, -1 is 255.
                 if (argTs.length > 0) { var r2 = evalWord(b, argTs[0]); b = r2.b; rv = b.NewAnd(s2i(b, r2.v), llvm.constant.NewInt(i32, 255)) }
                 else { rv = b.NewLoad(i32, gStatus) }
+                if (curFrame != null && retInSub) {
+                    b.NewStore(rv, gExitCode)
+                    b.NewStore(one, gExited)
+                    b.NewBr(viaUnwind(curExit, curExitRd))
+                    return deadBlock()
+                }
                 if (curFrame != null) { emitFnRet(b, rv); return deadBlock() }
                 storeStatus(b, rv); return b
             }
@@ -5209,8 +5249,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             definedFuncs[key] = true
             // bash's loops do not reach into a called function: the body starts with none.
             var savedF = curF, savedEntry = curEntry, savedExit = curExit, savedFrame = curFrame, savedLoops = loopStack
-            var savedExitRd = curExitRd, savedRedirs = redirStack
+            var savedExitRd = curExitRd, savedRedirs = redirStack, savedRetSub = retInSub
             loopStack = []
+            retInSub = false
             redirStack = []
             curExitRd = 0
             curF = f
@@ -5231,7 +5272,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             emitFnRet(endb, endb.NewLoad(i32, gStatus))
             attrUnwind(undoBase)
             curF = savedF; curEntry = savedEntry; curExit = savedExit; curFrame = savedFrame; loopStack = savedLoops
-            curExitRd = savedExitRd; redirStack = savedRedirs
+            curExitRd = savedExitRd; redirStack = savedRedirs; retInSub = savedRetSub
             storeStatusI(b, 0)
             return b
         }

@@ -26,8 +26,9 @@ All 22 sections of tests/bash-test-full.sh pass, goja and -frozen byte-identical
   - indexed and associative arrays: a=(x y z) a[i]=v a+=(w) ${a[i]} ${a[@]} ${a[*]} ${!a[*]}
     ${#a[@]} ${a[*]:o:n}, unset a[i], declare -a/-A/-i/-u/-l, and read -a
   - word splitting on IFS, brace expansion (lists, ranges and cross products) and tilde
-  - pipelines with |, ! to negate one, PIPESTATUS, && and || lists; each stage runs with its
-    stdout captured and handed to the next stage as standard input, which read consumes
+  - pipelines with |, ! to negate one, PIPESTATUS, && and || lists; each stage runs in a
+    subshell (no lastpipe) with its stdout captured and handed to the next stage as
+    standard input, which read consumes
   - subshells ( LIST ) with variable, positional-parameter, option and exit isolation, and
     brace groups { LIST; } that run in the current shell
   - redirections > >> < >& <& &> >| , here-strings <<< and here-documents << and <<-
@@ -186,7 +187,7 @@ AndOrOp     <~~ push({op: up.in}) ~~>
             = "&&" | "||" ;
 
 // A pipeline is what && / || and ! actually operate on. Each stage runs with its stdout
-// captured and handed to the next stage as its standard input.
+// captured and handed to the next stage as its standard input, and in a subshell.
 AndOrList   <~~ push(makeAndOr(takeAll())) ~~>
             = Pipeline { AndOrOp Pipeline } ;
 Pipeline    <~~ push(makePipeline(takeAll())) ~~>
@@ -196,8 +197,10 @@ PipeOp      = "|" NotBar ;
 
 // A compound command is an ordinary Command, so it can be a pipeline stage
 // (`echo x | while read l; do ...; done`) and can carry redirections that apply to the
-// whole thing (`while read l; do ...; done < file`, `for x in ...; done <<EOF`).
-Command     = CompoundRedir | Subshell | BraceGroup | LetCmd | DeclCommand | PrefixCommand | Assignment | SimpleCommand ;
+// whole thing (`while read l; do ...; done < file`, `for x in ...; done <<EOF`). Its
+// {cpd} marker tells makePipeline that, as a stage, it starts outside every loop.
+Command     = CompoundCmd | LetCmd | DeclCommand | PrefixCommand | Assignment | SimpleCommand ;
+CompoundCmd <~~ push({cpd: 1}) ~~> = CompoundRedir | Subshell | BraceGroup ;
 CompoundRedir <~~ push(mkRedirected(takeAll())) ~~> = CompoundCore [ RedirList ] ;
 // "((" must be tried before "(" or an arithmetic command parses as nested subshells, which
 // is why CompoundRedir comes before Subshell rather than after it.
@@ -1390,6 +1393,11 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var k = "$" + varNames[i]
             vars[k] = snap[i].v
             varsHas[k] = snap[i].h
+        }
+        // a name first created inside the subshell is unset again
+        for (i = snap.length; i < varNames.length; i++) {
+            vars["$" + varNames[i]] = ""
+            varsHas["$" + varNames[i]] = false
         }
     }
 
@@ -3492,7 +3500,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         while (n > 0 && s.charAt(n - 1) == "\n") { n = n - 1 }
         return s.slice(0, n)
     }
-    // A dropped NUL byte is warned about, as bash 5.3 does. Twin of rt_cap_end.
+    // A dropped NUL byte is warned about, as bash 5.3 does. Twin of rt_cap_end. Unlike ( ),
+    // the substitution sees the loops around it: `break` there ends it with the status 0.
     function mkCmdSub(bodyT) {
         return function() {
             capStack.push("")
@@ -3511,7 +3520,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var nulGone = capNul["$" + capStack.length]
             var out = capStack.pop()
             if (nulGone) { emitErr("bash: warning: command substitution: ignored null byte in input\n") }
-            if (typeof r == "object") { setStatus(r.ret) } else { setStatus(r) }
+            if (typeof r == "object") { setStatus((r.ret != undefined) ? r.ret : sigStatus(r)) } else { setStatus(r) }
             cmdSubRan = true
             return stripTrailNL(out)
         }
@@ -5854,17 +5863,24 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
 
     // ---- pipelines, subshells, groups, (( )), [[ ]], redirections ----
 
-    // items = [{bang}?, stageThunk...] : each stage but the last runs with its stdout
-    // captured, and that capture becomes the next stage's standard input.
+    // items = [{bang}?, (stageThunk {cpd}?)...] : with two stages or more every stage runs in
+    // a subshell (bash without lastpipe), and each but the last has its stdout captured as
+    // the next stage's standard input. A lone `! CMD` runs in the current shell.
     function makePipeline(items) {
         var bang = false
         var stages = []
+        var cpds = []
         var i
         for (i = 0; i < items.length; i++) {
             var it = items[i]
-            if (typeof it == "function") { stages.push(it) } else { bang = true }
+            if (typeof it == "function") { stages.push(it); cpds.push(false) }
+            else if (it.cpd != undefined) { cpds[cpds.length - 1] = true }
+            else { bang = true }
         }
         if (!bang && stages.length == 1) { return stages[0] }
+        if (stages.length > 1) {
+            for (i = 0; i < stages.length; i++) { stages[i] = subshellOf(stages[i], !cpds[i]) }
+        }
         return function() {
             var savedIn = stdinBuf, savedPos = stdinPos
             var st = anytype
@@ -5875,7 +5891,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             for (k = 0; k < stages.length; k++) {
                 var lastStage = (k == stages.length - 1)
                 if (!lastStage) { capStack.push("") }
-                st = lastStage ? stages[k]() : runCond(stages[k])
+                st = stages[k]()
                 statuses.push((typeof st == "object") ? st.ret : st)
                 if (typeof st != "object" && st != 0 && firstFail == 0) { firstFail = st }
                 if (!lastStage) {
@@ -5915,17 +5931,24 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         exitTrap = st.tr
     }
     // ( LIST ) : variables and positional parameters are restored afterwards, and both a
-    // `return` and an `exit` inside end only the subshell.
-    function makeSubshell(bodyT) {
+    // `return` and an `exit` inside end only the subshell. It starts outside every loop,
+    // except a SIMPLE command run as a pipeline stage (keepLoops): there `break` and
+    // `continue` see the loops around it and end the subshell with the signal's status.
+    // Twin of subshellOf in bash-to-llvm-ir.abnf.
+    function makeSubshell(bodyT) { return subshellOf(bodyT, false) }
+    function subshellOf(bodyT, keepLoops) {
         return function() {
             var saved = saveShellState()
             localFrames = []
+            var savedLoops = loopDepth
+            if (!keepLoops) { loopDepth = 0 }
             var r = anytype
             r = bodyT()
+            loopDepth = savedLoops
             runExitTrap()
             restoreShellState(saved)
             var st = 0
-            if (typeof r == "object") { st = r.ret } else { st = r }
+            if (typeof r == "object") { st = (r.ret != undefined) ? r.ret : sigStatus(r) } else { st = r }
             setStatus(st)
             return st
         }

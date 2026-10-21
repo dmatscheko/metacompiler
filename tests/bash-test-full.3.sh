@@ -699,6 +699,41 @@ s64() {
   sub=$( (( a[0] = 1 )); a[1]="${L64}q"; a=(); a[2]="${L64}p"; echo "${a[2]:72}" )
   check eb4 "${a[0]:72} $sub ${#a[@]}" "o p 4"
 }
+# ===== SECTION 65: every pipeline stage is a subshell =====
+# Without lastpipe each stage of a pipeline runs in a subshell, the last one too: what it
+# assigns, reads or maps is gone afterwards, and exit / return / set -e end only the stage.
+# A ( ) starts outside every loop; a simple command run as a stage and a $( ) still see the
+# loops around them, and break / continue there end only the subshell. Every expected value
+# is bash 5.3's.
+s65r() { local v=1; v=2 | true; echo in | return 7; echo "$v $?"; (return 3); echo "r$?"; }
+s65() {
+  local x=1 out="" i
+  echo a | read x
+  x=2 | true
+  printf 'p\nq\n' | mapfile -t s65m
+  echo z | { read s65n; s65o=1; }
+  check pl1 "$x ${#s65m[@]} ${s65n-unset} ${s65o-unset}" "1 0 unset unset"
+  local -a a=(1)
+  a[1]=2 | true
+  local -A s65h=([k]=v)
+  s65h[j]=w | true
+  check pl2 "${#a[@]} ${#s65h[@]}" "1 1"
+  exit 3 | true
+  out="$?"
+  echo z | exit 4
+  out="$out $? $(s65r)"
+  check pl3 "$out" "0 4 1 7
+r3"
+  out=$( set -e; { false; echo no; } | true; echo y1; f() { false; echo no; }; f | true; echo y2; true | false; echo no )
+  check pl4 "$? $out" "1 y1
+y2"
+  out=""
+  for i in 1 2; do out="$out $( (break; echo "b$i") 2>/dev/null )"; done
+  for i in 1 2; do true | break; out="$out $i${PIPESTATUS[1]}"; done
+  for i in 1 2; do out="$out $(true | { continue; echo "c$i"; } 2>/dev/null)"; done
+  for i in 1 2; do v=$(continue; echo no); out="$out [$v$?]"; done
+  check pl5 "$out" " b1 b2 10 20 c1 c2 [0] [0]"
+}
 # ===== END SECTIONS =====
 
 s47   # SECTION-CALL 47
@@ -718,5 +753,6 @@ s60   # SECTION-CALL 60
 s62   # SECTION-CALL 62
 s63   # SECTION-CALL 63
 s64   # SECTION-CALL 64
+s65   # SECTION-CALL 65
 echo "full: $checks checks, $fails failures"
 exit $fails
