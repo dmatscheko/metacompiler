@@ -174,6 +174,25 @@ var RX_ATOMEND = 20
 var RX_GPOS = 21   // \G: where the previous match ended (J only)
 var RX_XGRAPH = 22 // \X: one extended grapheme cluster (J only)
 var RX_GBOUND = 23 // \b{g}: a grapheme cluster boundary, as Java finds one (J only)
+// The C dialect's own (rxParseStarC):
+var RX_COND = 24   // on to the next op when group a is set, else to b
+var RX_CONDR = 25  // on when in a subroutine call (of group a, or any for -1), else to b
+var RX_CALL = 26   // call the subroutine at a, the body of group b
+var RX_RET = 27    // return from the innermost call
+var RX_ACCEPT = 28 // (*ACCEPT)
+var RX_VERB = 29   // a backtracking verb: a its kind (RX_V*), b a mark name or (*THEN)'s target
+var RX_FAIL = 30
+var RX_NOEMPTY = 31 // (*NOTEMPTY): fail when the match is empty; a = 1: only at \G
+var RX_SPSET = 32  // back to the position marks[a] holds
+var RX_MINLEN = 33 // fail unless a units are left (PCRE2's minimum length)
+var RX_REQCU = 34  // fail when the class clss[pc] matches nothing from b units on (rxReqCU)
+var RX_CSRESET = 35 // no calls in progress (rxCsn)
+var RX_VCOMMIT = 1
+var RX_VPRUNE = 2
+var RX_VSKIP = 3
+var RX_VTHEN = 4
+var RX_VMARK = 5
+var RX_VLOOP = 6   // not a verb: st.verb for a recursion that would loop
 
 // ----- Assertion kinds -----
 var RX_BOL = 1     // ^
@@ -725,8 +744,10 @@ function rxNode(t) {
     // to a group number; it stays "" for every other node.
     // cnt marks a J {n,m} repeat, which is emitted as a counted loop; closed marks
     // a capturing group whose ")" has been read (P's open-group reference check).
+    // thens are the (*THEN)s an "alt" of the C dialect is the innermost
+    // alternation of (rxThenTarget).
     return {t: t, items: [], cls: rxNewCls(), min: 0, max: 0, greedy: true, gidx: -1, bname: "",
-            cnt: false, closed: false}
+            cnt: false, closed: false, thens: []}
 }
 
 // rxNameIdx is the group NUMBER a name was declared for, or -1.
@@ -1586,7 +1607,16 @@ function rxParseGroup(st) {
             st.i = st.i + 1
             var lk = rxNode("look")
             if (k == 33) { lk.gidx = 1 }
+            // Under C an (*ACCEPT) or (*THEN) in the body is the body's own.
+            var lopen = st.open
+            var lthen = st.tctx
+            st.open = []
+            st.tctx = []
+            st.inlook = st.inlook + 1
             lk.items.push(rxParseAlt(st))
+            st.inlook = st.inlook - 1
+            st.open = lopen
+            st.tctx = lthen
             rxExpect(st, 41, "unterminated lookahead")
             return lk
         }
@@ -1597,7 +1627,15 @@ function rxParseGroup(st) {
                     st.i = st.i + 2
                     var lb = rxNode("lookb")
                     if (k2 == 33) { lb.gidx = 1 }
+                    var bopen = st.open
+                    var bthen = st.tctx
+                    st.open = []
+                    st.tctx = []
+                    st.inlook = st.inlook + 1
                     lb.items.push(rxParseAlt(st))
+                    st.inlook = st.inlook - 1
+                    st.open = bopen
+                    st.tctx = bthen
                     rxExpect(st, 41, "unterminated group")
                     return lb
                 }
@@ -1621,12 +1659,15 @@ function rxParseGroup(st) {
             st.ngroups = st.ngroups + 1
             ng.gidx = st.ngroups
             var ngn = st.gnodes
-            ngn.push(ng)
+            if (ng.gidx == ngn.length) { ngn.push(ng) }
             var names = st.names
             var nidx = st.nameGroups
             names.push(nm)
             nidx.push(ng.gidx)
+            var nop = st.open
+            nop.push(ng.gidx)
             ng.items.push(rxParseAlt(st))
+            nop.pop()
             rxExpect(st, 41, "unterminated group")
             ng.closed = true
             return ng
@@ -1636,10 +1677,14 @@ function rxParseGroup(st) {
             if (k == 62) { // (?>X): X matched once, never backtracked into
                 st.i = st.i + 1
                 var at = rxNode("atom")
+                var athen = st.tctx
+                st.tctx = []
                 at.items.push(rxParseAlt(st))
+                st.tctx = athen
                 rxExpect(st, 41, "unterminated group")
                 return at
             }
+            if (k == 42 && st.pcre) { return rxParseStarC(st) }
             if (k == 36 || k == 64) { // (?$ (?@
                 rxErrAt(st, "Unknown group type", st.i)
                 return rxNode("empty")
@@ -1653,13 +1698,180 @@ function rxParseGroup(st) {
     st.ngroups = st.ngroups + 1
     cg.gidx = st.ngroups
     var cgn = st.gnodes
-    cgn.push(cg)
+    // In a branch reset a later group of the same number is not the one a
+    // call names.
+    if (cg.gidx == cgn.length) { cgn.push(cg) }
     st.depth = st.depth + 1
+    var cop = st.open
+    cop.push(cg.gidx)
     cg.items.push(rxParseAlt(st))
+    cop.pop()
     st.depth = st.depth - 1
     rxExpect(st, 41, st.ere ? "Unmatched ( or \\(" : "unterminated group")
     cg.closed = true
     return cg
+}
+
+// rxThenUp hands the (*THEN)s of alt, which is no alternation (one branch, or
+// a conditional's yes and no), to the enclosing alternation, as the branch it
+// is reading; with none they act as (*PRUNE), or in an assertion as its
+// failure.
+function rxThenUp(st, alt) {
+    var tctx = st.tctx
+    var ts = alt.thens
+    var i = 0
+    while (i < ts.length) {
+        if (tctx.length == 0) { ts[i].min = st.inlook > 0 ? 0 - 2 : 0 - 1 }
+        else {
+            var up = tctx[tctx.length - 1]
+            ts[i].min = up.items.length
+            var uts = up.thens
+            uts.push(ts[i])
+        }
+        i = i + 1
+    }
+    alt.thens = []
+}
+
+// rxParseStarC reads the C dialect's (?* groups, which rxPcre writes for what
+// J cannot say; st.i is at the "*":
+//   (?*|...)          a branch reset
+//   (?*Cg,g:yes|no)   a conditional on any of the groups g being set
+//   (?*Rg:yes|no)     a conditional on being in a call of group g (-1: any)
+//   (?*A(?=..)yes|no) a conditional on an assertion
+//   (?*D...)          a DEFINE group, matched only through calls
+//   (?*Kg)            a call of group g (0: the whole pattern)
+//   (?*!)             (*ACCEPT)
+//   (?*Vk) (?*Vkn)    a verb: k is C(OMMIT) P(RUNE) S(KIP) T(HEN) M(ARK), n a
+//                     mark name's id
+//   (?*E0) (?*E1)     (*NOTEMPTY), (*NOTEMPTY_ATSTART)
+//   (?*N...)          a non-atomic positive lookahead
+//   (?*S)             the start-of-match optimization is on (rxStartOpt)
+function rxParseStarC(st) {
+    var p = st.p
+    st.i = st.i + 1
+    var k = p.charCodeAt(st.i)
+    st.i = st.i + 1
+    if (k == 124) {
+        var bg = rxNode("group")
+        st.brbase = st.ngroups
+        bg.items.push(rxParseAlt(st))
+        rxExpect(st, 41, "unterminated group")
+        return bg
+    }
+    if (k == 67 || k == 82) {
+        var e = st.i
+        while (e < st.n && p.charCodeAt(e) != 58) { e = e + 1 }
+        var cn = rxNode(k == 67 ? "cond" : "condr")
+        cn.bname = p.substring(st.i, e)
+        cn.gidx = k == 82 ? rxStrInt(cn.bname) : 0
+        st.i = e + 1
+        rxParseArms(st, cn)
+        return cn
+    }
+    if (k == 65) {
+        var ca = rxNode("conda")
+        ca.items.push(rxParseAtom(st))
+        rxParseArms(st, ca)
+        return ca
+    }
+    if (k == 68) {
+        rxParseAlt(st)
+        rxExpect(st, 41, "unterminated group")
+        return rxNode("empty")
+    }
+    if (k == 75) {
+        var cl = rxNode("call")
+        var ce = st.i
+        while (ce < st.n && p.charCodeAt(ce) != 41) { ce = ce + 1 }
+        cl.gidx = rxStrInt(p.substring(st.i, ce))
+        st.i = ce + 1
+        return cl
+    }
+    if (k == 78) {
+        var na = rxNode("napla")
+        na.items.push(rxParseAlt(st))
+        rxExpect(st, 41, "unterminated group")
+        return na
+    }
+    if (k == 83) {
+        st.startopt = true
+        st.i = st.i + 1
+        return rxNode("empty")
+    }
+    if (k == 69) {
+        var ne = rxNode("op")
+        ne.gidx = RX_NOEMPTY
+        ne.min = p.charCodeAt(st.i) - 48
+        st.i = st.i + 2
+        return ne
+    }
+    if (k == 33) {
+        var ac = rxNode("accept")
+        ac.items = []
+        var op = st.open
+        var oi = 0
+        while (oi < op.length) {
+            var og = rxNode("empty")
+            og.gidx = op[oi]
+            ac.items.push(og)
+            oi = oi + 1
+        }
+        rxExpect(st, 41, "unterminated group")
+        return ac
+    }
+    // V: a verb.
+    var vk = p.charCodeAt(st.i)
+    st.i = st.i + 1
+    var ve = st.i
+    while (ve < st.n && p.charCodeAt(ve) != 41) { ve = ve + 1 }
+    var arg = ve > st.i ? rxStrInt(p.substring(st.i, ve)) : 0 - 1
+    st.i = ve + 1
+    var v = rxNode("op")
+    v.gidx = RX_VERB
+    v.max = arg
+    if (vk == 67) { v.min = RX_VCOMMIT }
+    else if (vk == 80) { v.min = RX_VPRUNE }
+    else if (vk == 83) { v.min = RX_VSKIP }
+    else if (vk == 77) { v.min = RX_VMARK }
+    else {
+        v.t = "then"
+        v.min = st.inlook > 0 ? 0 - 2 : 0 - 1
+        var tctx = st.tctx
+        if (tctx.length > 0) {
+            var up = tctx[tctx.length - 1]
+            v.min = up.items.length
+            var uts = up.thens
+            uts.push(v)
+        }
+    }
+    return v
+}
+
+// The yes and no branches of a conditional, into cn's items, and the ")".
+function rxParseArms(st, cn) {
+    var arms = rxParseAlt(st)
+    if (arms.t == "alt" && arms.items.length == 2) {
+        rxThenUp(st, arms)
+        cn.items.push(arms.items[0])
+        cn.items.push(arms.items[1])
+    } else {
+        cn.items.push(arms)
+        cn.items.push(rxNode("empty"))
+    }
+    rxExpect(st, 41, "unterminated group")
+}
+
+// The integer s spells, which may be negative.
+function rxStrInt(s) {
+    var neg = s.length > 0 && s.charCodeAt(0) == 45
+    var v = 0
+    var i = neg ? 1 : 0
+    while (i < s.length) {
+        v = v * 10 + s.charCodeAt(i) - 48
+        i = i + 1
+    }
+    return neg ? 0 - v : v
 }
 
 // rxParseFlagsP reads Python's inline flags; st.i is at the first letter after
@@ -2261,11 +2473,27 @@ function rxParseCat(st) {
 function rxParseAlt(st) {
     var alt = rxNode("alt")
     var items = alt.items
+    // Under C: a branch reset numbers each branch's groups from the same point
+    // (st.brbase), and the (*THEN)s of a branch belong to this alternation.
+    var brbase = st.brbase
+    st.brbase = 0 - 1
+    var most = st.ngroups
+    var tctx = st.tctx
+    if (st.pcre) { tctx.push(alt) }
     items.push(rxParseCat(st))
     while (st.i < st.n && st.p.charCodeAt(st.i) == 124) {
         st.i = st.i + 1
+        if (brbase >= 0) {
+            if (st.ngroups > most) { most = st.ngroups }
+            st.ngroups = brbase
+        }
         items.push(rxParseCat(st))
         if (st.err != "") { break }
+    }
+    if (brbase >= 0 && most > st.ngroups) { st.ngroups = most }
+    if (st.pcre) {
+        tctx.pop()
+        if (items.length == 1) { rxThenUp(st, alt) }
     }
     // A POSIX ERE branch may not be empty: bash rejects "", "a|", "|a", "(a|)" and
     // "(|a)" alike with "empty (sub)expression". The one exception is a group whose
@@ -2296,7 +2524,7 @@ function rxParseAlt(st) {
 // the length range of lookbehind i (-1: unbounded).
 function rxNewProg() {
     return {ops: [], as: [], bs: [], clss: [], nmarks: 0, jsrep: false, java: false, re2: false, dummy: rxNewCls(),
-            cmin: [], cmax: [], cgreedy: [], lbmin: [], lbmax: []}
+            cmin: [], cmax: [], cgreedy: [], lbmin: [], lbmax: [], calls: [], thens: [], thenNodes: []}
 }
 
 // The smallest / largest group NUMBER declared inside a subtree, or -1 for none.
@@ -2382,7 +2610,9 @@ function rxEmit(pg, node) {
         return
     }
     if (t == "look") {
-        var lk = rxAdd(pg, RX_LOOK, 0, node.gidx == 1 ? 1 : 0, pg.dummy)
+        // b: 0 positive, 1 negative, 2 the positive assertion of a conditional
+        // (node.min 1).
+        var lk = rxAdd(pg, RX_LOOK, 0, node.gidx == 1 ? 1 : node.min == 1 ? 2 : 0, pg.dummy)
         var lkids = node.items
         if (lkids.length > 0) { rxEmit(pg, lkids[0]) }
         rxAdd(pg, RX_LOOKEND, 0, 0, pg.dummy)
@@ -2390,7 +2620,7 @@ function rxEmit(pg, node) {
         return
     }
     if (t == "op") {
-        rxAdd(pg, node.gidx, 0, 0, pg.dummy)
+        rxAdd(pg, node.gidx, node.min, node.max, pg.dummy)
         return
     }
     if (t == "atom") {
@@ -2421,6 +2651,331 @@ function rxEmit(pg, node) {
         }
         rxEmitRep(pg, node)
         return
+    }
+    rxEmitC(pg, node)
+}
+
+// rxEmitC emits the C dialect's nodes (rxParseStarC).
+function rxEmitC(pg, node) {
+    var t = node.t
+    var kids = node.items
+    if (t == "cond" || t == "condr" || t == "conda") {
+        var yes = 0
+        var no = 0
+        var lno = []
+        if (t == "conda") {
+            // The assertion, or its negation before the no branch.
+            var sa = rxAdd(pg, RX_SPLIT, 0, 0, pg.dummy)
+            rxSetA(pg, sa, rxHere(pg))
+            kids[0].min = 1
+            rxEmit(pg, kids[0])
+            lno.push(sa)
+            yes = 1
+            no = 2
+        } else if (t == "condr") {
+            lno.push(rxAdd(pg, RX_CONDR, node.gidx, 0, pg.dummy))
+            no = 1
+        } else {
+            // Any of the groups set: each test but the last goes on to the
+            // next when its group is unset, or jumps to the yes branch.
+            var gs = node.bname
+            var toYes = []
+            var a = 0
+            while (a < gs.length) {
+                var b = a
+                while (b < gs.length && gs.charCodeAt(b) != 44) { b = b + 1 }
+                var g = rxStrInt(gs.substring(a, b))
+                var c = rxAdd(pg, RX_COND, g, 0, pg.dummy)
+                if (b < gs.length) {
+                    rxSetB(pg, c, c + 2)
+                    toYes.push(rxAdd(pg, RX_JMP, 0, 0, pg.dummy))
+                } else { lno.push(c) }
+                a = b + 1
+            }
+            var ty = 0
+            while (ty < toYes.length) {
+                rxSetA(pg, toYes[ty], rxHere(pg))
+                ty = ty + 1
+            }
+            no = 1
+        }
+        rxEmit(pg, kids[yes])
+        var j = rxAdd(pg, RX_JMP, 0, 0, pg.dummy)
+        rxSetB(pg, lno[0], rxHere(pg))
+        if (t == "conda") {
+            var neg = rxNode(kids[0].t)
+            neg.items = kids[0].items
+            neg.gidx = kids[0].gidx == 1 ? 0 - 1 : 1
+            rxEmit(pg, neg)
+        }
+        rxEmit(pg, kids[no])
+        rxSetA(pg, j, rxHere(pg))
+        return
+    }
+    if (t == "napla") {
+        // The body matched in place, then the position put back: what it
+        // matched stays open to backtracking.
+        var mk = pg.nmarks
+        pg.nmarks = mk + 1
+        rxAdd(pg, RX_MARK, mk, 0, pg.dummy)
+        rxEmit(pg, kids[0])
+        rxAdd(pg, RX_SPSET, mk, 0, pg.dummy)
+        return
+    }
+    if (t == "call") {
+        var cp = pg.calls
+        cp.push(rxAdd(pg, RX_CALL, 0, node.gidx, pg.dummy))
+        return
+    }
+    if (t == "accept") {
+        var oi = 0
+        while (oi < kids.length) {
+            rxAdd(pg, RX_SAVE, 2 * kids[oi].gidx + 1, 0, pg.dummy)
+            oi = oi + 1
+        }
+        rxAdd(pg, RX_ACCEPT, 0, 0, pg.dummy)
+        return
+    }
+    if (t == "then") {
+        // Without an alternation (*THEN) is (*PRUNE) (-1), in an assertion
+        // the assertion's failure (-2).
+        var tp = pg.thens
+        tp.push(rxAdd(pg, RX_VERB, RX_VTHEN, node.min < 0 ? node.min : 0 - 1, pg.dummy))
+        var tn = pg.thenNodes
+        tn.push(node)
+    }
+}
+
+// rxStartOpt is PCRE2's first code unit optimization, which is observable
+// through the verbs: a match can only start at the character every match
+// starts with (one class of one character, or of its two cases), when there
+// is one, so the program starts with a lookahead for it. Zero-width items,
+// verbs among them, are passed over; another first item, or a choice that
+// does not settle on one character, leaves the program as it is.
+function rxStartOpt(pg, ast) {
+    var c = rxFirstCU(ast)
+    if (c == null) { return }
+    var lk = rxNode("look")
+    lk.items.push(c)
+    rxEmit(pg, lk)
+}
+
+// rxFirstCU: the class node of the first character every match of node
+// starts with, or null.
+function rxFirstCU(node) {
+    var t = node.t
+    if (t == "cls") { return rxClsOneCU(node.cls) ? node : null }
+    if (t == "group" || t == "atom") { return node.items.length > 0 ? rxFirstCU(node.items[0]) : null }
+    if (t == "rep") { return node.min > 0 ? rxFirstCU(node.items[0]) : null }
+    if (t == "cat") {
+        var items = node.items
+        var i = 0
+        while (i < items.length) {
+            var it = items[i]
+            if (rxMaxLen(it) != 0) { return rxFirstCU(it) }
+            i = i + 1
+        }
+        return null
+    }
+    if (t == "alt") {
+        var first = rxFirstCU(node.items[0])
+        var k = 1
+        while (first != null && k < node.items.length) {
+            var o = rxFirstCU(node.items[k])
+            if (o == null || !rxClsSame(o.cls, first.cls)) { first = null }
+            k = k + 1
+        }
+        return first
+    }
+    return null
+}
+
+// rxMinLenC is PCRE2's minimum length of node (find_minlength): rxMinLen, a
+// call or backreference counting its group's (0 for a group open around it,
+// open holding their numbers), a conditional its shorter arm; with an
+// (*ACCEPT) anywhere, 0.
+function rxMinLenC(node, gnodes, open) {
+    var t = node.t
+    var items = node.items
+    if (t == "accept") { return 0 - 1 }
+    if (t == "call" || t == "bref") {
+        var g = node.gidx
+        var k = 0
+        while (k < open.length) {
+            if (open[k] == g) { return 0 }
+            k = k + 1
+        }
+        if (g >= gnodes.length || (t == "bref" && g == 0)) { return 0 }
+        open.push(g)
+        var gm = rxMinLenC(gnodes[g].items[0], gnodes, open)
+        open.pop()
+        return gm
+    }
+    if (t == "cond" || t == "condr" || t == "conda") {
+        var y = rxMinLenC(items[items.length - 2], gnodes, open)
+        var z = rxMinLenC(items[items.length - 1], gnodes, open)
+        if (y < 0 || z < 0) { return 0 - 1 }
+        return y < z ? y : z
+    }
+    if (t == "cat") {
+        var sum = 0
+        var i = 0
+        while (i < items.length) {
+            var m = rxMinLenC(items[i], gnodes, open)
+            if (m < 0) { return 0 - 1 }
+            sum = rxLenCap(sum + m)
+            i = i + 1
+        }
+        return sum
+    }
+    if (t == "alt") {
+        var best = 0 - 2
+        var a = 0
+        while (a < items.length) {
+            var am = rxMinLenC(items[a], gnodes, open)
+            if (am < 0) { return 0 - 1 }
+            if (best < 0 || am < best) { best = am }
+            a = a + 1
+        }
+        return best < 0 ? 0 : best
+    }
+    if (t == "group" && node.gidx > 0 && items.length > 0) {
+        open.push(node.gidx)
+        var cm = rxMinLenC(items[0], gnodes, open)
+        open.pop()
+        return cm
+    }
+    if (t == "group" || t == "atom") { return items.length > 0 ? rxMinLenC(items[0], gnodes, open) : 0 }
+    if (t == "rep") {
+        var rm = rxMinLenC(items[0], gnodes, open)
+        if (rm < 0) { return 0 - 1 }
+        return rxLenCap(node.min * rm)
+    }
+    if (t == "look" || t == "lookb" || t == "napla") {
+        return rxMinLenC(items[0], gnodes, open) < 0 ? 0 - 1 : 0
+    }
+    return rxMinLen(node)
+}
+
+// rxReqCU: the class node of the last character, of one class of one
+// character (rxClsOneCU), every match of node holds after req (the one
+// before node), or req. A choice keeps req unless every branch has the same
+// last one; an optional item, or one of another kind, passes req on.
+function rxReqCU(node, req) {
+    var t = node.t
+    var items = node.items
+    if (t == "cls") { return rxClsOneCU(node.cls) ? node : req }
+    if (t == "group" || t == "atom") { return items.length > 0 ? rxReqCU(items[0], req) : req }
+    if (t == "rep") { return node.min > 0 ? rxReqCU(items[0], req) : req }
+    if (t == "cat") {
+        var r = req
+        var i = 0
+        while (i < items.length) {
+            r = rxReqCU(items[i], r)
+            i = i + 1
+        }
+        return r
+    }
+    if (t == "alt") {
+        var one = rxReqCU(items[0], null)
+        var k = 1
+        while (one != null && k < items.length) {
+            var o = rxReqCU(items[k], null)
+            if (o == null || !rxClsSame(o.cls, one.cls)) { one = null }
+            k = k + 1
+        }
+        return one == null ? req : one
+    }
+    return req
+}
+
+// The last subject and class rxReqSeen searched, from where, and where it
+// found the character (-1: nowhere): pcre2_match's req_cu_ptr, so that a
+// search does not read the subject again for every start.
+var rxReqText = ""
+var rxReqCls = rxNewCls()
+var rxReqFrom = 0 - 1
+var rxReqAt = 0 - 1
+
+// rxReqSeen: may the character of cls be found in text from p on? As
+// pcre2_match, only a subject end closer than 5000 units is searched for it.
+function rxReqSeen(text, p, cls) {
+    var n = text.length
+    if (n - p >= 5000) { return true }
+    if (rxReqFrom >= 0 && rxReqFrom <= p && cls == rxReqCls && text == rxReqText) {
+        if (rxReqAt < 0) { return false }
+        if (rxReqAt >= p) { return true }
+    }
+    var i = p
+    while (i < n && !rxClsMatch(cls, text.charCodeAt(i), false)) { i = i + 1 }
+    rxReqText = text
+    rxReqCls = cls
+    rxReqFrom = p
+    rxReqAt = i < n ? i : 0 - 1
+    return i < n
+}
+
+// rxHasCalls: does node hold a call, or what reads rxCsn: a conditional on
+// a call or an (*ACCEPT)?
+function rxHasCalls(node) {
+    if (node.t == "call" || node.t == "condr" || node.t == "accept") { return true }
+    var items = node.items
+    var i = 0
+    while (i < items.length) {
+        if (rxHasCalls(items[i])) { return true }
+        i = i + 1
+    }
+    return false
+}
+
+// rxClsOneCU: is cls one character, or one ASCII letter in its two cases?
+function rxClsOneCU(cls) {
+    if (cls.neg || cls.u || cls.sp.length > 0 || cls.props.length > 0 || cls.subs.length > 0
+        || cls.ands.length > 0) { return false }
+    var lo = cls.lo
+    var hi = cls.hi
+    if (lo.length == 1) { return lo[0] == hi[0] }
+    return lo.length == 2 && lo[0] == hi[0] && lo[1] == hi[1] && rxSwapCase(lo[0]) == lo[1]
+}
+
+function rxClsSame(a, b) {
+    var al = a.lo
+    var bl = b.lo
+    if (al.length != bl.length) { return false }
+    var i = 0
+    while (i < al.length) {
+        if (al[i] != bl[i] || a.hi[i] != b.hi[i]) { return false }
+        i = i + 1
+    }
+    return true
+}
+
+// rxEmitSubs emits a subroutine for every group a call names, its body and an
+// RX_RET (the whole pattern for group 0), and points the calls at them.
+function rxEmitSubs(pg, ast, gnodes) {
+    var calls = pg.calls
+    var as = pg.as
+    var bs = pg.bs
+    var subG = []
+    var subAt = []
+    var i = 0
+    while (i < calls.length) {
+        var g = bs[calls[i]]
+        var at = 0 - 1
+        var k = 0
+        while (k < subG.length) {
+            if (subG[k] == g) { at = subAt[k] }
+            k = k + 1
+        }
+        if (at < 0) {
+            at = rxHere(pg)
+            subG.push(g)
+            subAt.push(at)
+            rxEmit(pg, g == 0 ? ast : gnodes[g].items[0])
+            rxAdd(pg, RX_RET, 0, 0, pg.dummy)
+        }
+        rxSetA(pg, calls[i], at)
+        i = i + 1
     }
 }
 
@@ -2547,6 +3102,14 @@ function rxMaxLen(node) {
         if (b < 0 || node.max < 0) { return -1 }
         return rxLenCap(node.max * b)
     }
+    // The C dialect's: a call is unbounded, a conditional its longer arm.
+    if (t == "call") { return -1 }
+    if (t == "cond" || t == "condr" || t == "conda") {
+        var y = rxMaxLen(items[items.length - 2])
+        var z = rxMaxLen(items[items.length - 1])
+        if (y < 0 || z < 0) { return -1 }
+        return y > z ? y : z
+    }
     return 0
 }
 
@@ -2573,6 +3136,16 @@ function rxEmitAlt(pg, node) {
     var splits = []
     var jumps = []
     var i = 0
+    // An alternation with a (*THEN) in its last branch starts with a choice of
+    // RX_FAIL, which that (*THEN) backtracks to (rxThenTarget).
+    var fail = 0 - 1
+    var th0 = pg.thens.length
+    if (node.thens.length > 0) {
+        var fs = rxAdd(pg, RX_SPLIT, 0, 0, pg.dummy)
+        fail = rxAdd(pg, RX_FAIL, 0, 0, pg.dummy)
+        rxSetA(pg, fs, fail + 1)
+        rxSetB(pg, fs, fail)
+    }
     while (i < items.length) {
         if (i < items.length - 1) {
             var s = rxAdd(pg, RX_SPLIT, 0, 0, pg.dummy)
@@ -2591,6 +3164,29 @@ function rxEmitAlt(pg, node) {
     i = 0
     while (i < jumps.length) {
         rxSetA(pg, jumps[i], end)
+        i = i + 1
+    }
+    if (fail >= 0) { rxThenTarget(pg, node, splits, fail, th0) }
+}
+
+// rxThenTarget points each (*THEN) of node emitted since th0 at what failing
+// its branch backtracks to: the next branch's start, or for the last branch
+// the alternation's RX_FAIL.
+function rxThenTarget(pg, node, splits, fail, th0) {
+    var thens = pg.thens
+    var tnodes = pg.thenNodes
+    var mine = node.thens
+    var bs = pg.bs
+    var i = th0
+    while (i < thens.length) {
+        var k = 0
+        while (k < mine.length) {
+            if (mine[k] == tnodes[i]) {
+                var br = mine[k].min
+                bs[thens[i]] = br < splits.length ? bs[splits[br]] : fail
+            }
+            k = k + 1
+        }
         i = i + 1
     }
 }
@@ -3444,9 +4040,12 @@ function rxRe2(pattern) {
 // points and the classes Unicode's. What the J spelling cannot say is spelled
 // out: every literal as \x{..}, a capture always a plain "(" (the names stay in
 // t.names), a backreference as (?:\n), ^ $ . per the m s D in force, U by
-// swapping each quantifier's greed, \K as J's \K under C. Recursion, subroutine
-// calls, conditionals, branch reset and (*VERB)s are not implemented: their
-// re.err starts with "unsupported".
+// swapping each quantifier's greed, \K as J's \K under C. What J has no
+// spelling for is written in a syntax of (?* groups that only the C dialect
+// reads (rxParseStarC): a conditional, a branch reset, a DEFINE group, a
+// subroutine call, (*ACCEPT) and the backtracking verbs. Non-atomic and
+// script-run assertions and newline conventions other than LF are not
+// implemented: their re.err starts with "unsupported".
 
 // The J items of PCRE2's UCP \w (L, N, Mn, Pc) and \s (Z, \h, \v).
 var RX_PCRE_UW = "\\p{L}\\p{N}_\\p{Mn}\\p{Pc}"
@@ -3465,6 +4064,12 @@ function rxPcreEmit(t, s, okq) {
     t.okq = okq
 }
 
+// rxPcreLit emits the literal c; a CR or LF is PCRE2_HASCRORLF.
+function rxPcreLit(t, c) {
+    if (c == 10 || c == 13) { t.crlf = true }
+    rxPcreEmit(t, rxPcreLitText(c), true)
+}
+
 // A literal character: an ASCII letter or digit as itself, anything else as
 // \x{..}; one atom either way.
 function rxPcreLitText(c) {
@@ -3472,8 +4077,13 @@ function rxPcreLitText(c) {
     return rxRe2Hex(c)
 }
 
-// The frame of flags in force; one per open group, restored at its ")".
-function rxPcreFrame(t) { return {i: t.fi, m: t.fm, s: t.fs, x: t.fx, U: t.fU, n: t.fn, J: t.fJ} }
+// The frame of flags in force; one per open group, restored at its ")". k is
+// the group's kind: 0 any other, 1 a branch reset (b the group count it
+// started from, mx the most any branch reached), 2 a conditional and 3 a
+// DEFINE group (br their "|"s so far).
+function rxPcreFrame(t) {
+    return {i: t.fi, m: t.fm, s: t.fs, x: t.fx, xx: t.fxx, U: t.fU, n: t.fn, J: t.fJ, k: 0, b: 0, mx: 0, br: 0}
+}
 
 function rxPcreOpen(t) {
     var fr = t.frames
@@ -3487,10 +4097,12 @@ function rxPcreClose(t) {
         return
     }
     var f = fr.pop()
+    if (f.k == 1 && f.mx > t.ncap) { t.ncap = f.mx }
     t.fi = f.i
     t.fm = f.m
     t.fs = f.s
     t.fx = f.x
+    t.fxx = f.xx
     t.fU = f.U
     t.fn = f.n
     t.fJ = f.J
@@ -3651,14 +4263,19 @@ function rxPcreName(t, term) {
 
 // A backreference: group n now, or the group a name stands for, resolved when
 // the whole pattern is read (a forward reference is legal).
-function rxPcreRef(t, n, name, at) {
+function rxPcreRef(t, n, name, at) { rxPcreRefK(t, n, name, at, 0) }
+
+// rxPcreRef for a reference of kind k: 0 a backreference, 1 a subroutine call,
+// 2 a conditional's group, 3 a conditional's recursion; the J text is written
+// when the names are all known.
+function rxPcreRefK(t, n, name, at, k) {
     var parts = t.parts
     parts.push(t.out)
     var refs = t.refs
-    refs.push({part: parts.length, n: n, name: name, at: at})
+    refs.push({part: parts.length, n: n, name: name, at: at, k: k})
     parts.push("")
     t.out = ""
-    rxPcreEmit(t, "", true)
+    rxPcreEmit(t, "", k < 2)
 }
 
 // The digits at t.i as a number (capped).
@@ -3679,7 +4296,7 @@ function rxPcreNum(t) {
 // ASCII ones, or under u the UCP ones; a complement under u is a nested class.
 function rxPcreShort(t, cls, c) {
     var lc = c >= 65 && c <= 90 ? c + 32 : c
-    if (!t.utf) {
+    if (!t.ucp) {
         rxRe2Group(cls, rxRe2Spec(String.fromCharCode(lc)), lc != c)
         return
     }
@@ -3714,7 +4331,10 @@ function rxPcreProp(t, cls, neg) {
     }
     var key = rxRe2Canon(name)
     var items = ""
-    if (name == "L&" || key == "Lc" || key == "L&") { items = "\\p{LC}" }
+    // Caseless, Lu Ll and Lt each match any cased letter.
+    if (name == "L&" || key == "Lc" || key == "L&" || (t.fi && (key == "Lu" || key == "Ll" || key == "Lt"))) {
+        items = "\\p{LC}"
+    }
     else if (key == "Xan") { items = "\\p{L}\\p{N}" }
     else if (key == "Xwd") { items = RX_PCRE_UW }
     else if (key == "Xsp" || key == "Xps") { items = RX_PCRE_US }
@@ -3787,6 +4407,7 @@ function rxPcreChar(t, inClass) {
             t.i = t.i + 1
             xk = xk + 1
         }
+        if (xk == 0) { rxPcreFail(t, "digits missing after \\x or in \\x{} or \\o{} or \\N{U+}", t.i) }
         return xv
     }
     if (c == 99) { // \cX
@@ -3878,7 +4499,7 @@ function rxPcrePosix(t, cls) {
         return true
     }
     t.i = e + 2
-    if (!t.utf || name == "ascii") {
+    if (!t.ucp || name == "ascii") {
         rxRe2Group(cls, spec, neg)
         return true
     }
@@ -3936,6 +4557,10 @@ function rxPcreClass(t) {
         } else if (c == 93 && !first) {
             t.i = t.i + 1
             break
+        } else if (t.fxx && (c == 32 || c == 9)) {
+            // (?xx): a class ignores unescaped spaces and tabs.
+            t.i = t.i + 1
+            continue
         } else if (c == 91 && rxPcrePosix(t, cls)) {
             if (dash) {
                 rxPcreFail(t, "invalid range in character class", t.i)
@@ -4005,6 +4630,7 @@ function rxPcreClass(t) {
             t.i = t.i + (c > 65535 ? 2 : 1)
         }
         first = false
+        if (c == 10 || c == 13) { t.crlf = true }
         if (dash) {
             if (c < pend) {
                 rxPcreFail(t, "range out of order in character class", t.i - 1)
@@ -4039,6 +4665,7 @@ function rxPcreFlags(t) {
         t.fn = false
         t.fs = false
         t.fx = false
+        t.fxx = false
         hyph = false
         t.i = t.i + 1
     }
@@ -4051,7 +4678,12 @@ function rxPcreFlags(t) {
         else if (c == "m") { t.fm = on }
         else if (c == "n") { t.fn = on }
         else if (c == "s") { t.fs = on }
-        else if (c == "x") { t.fx = on }
+        else if (c == "x") {
+            // x alone sets extended and clears xx; xx sets both; -x clears both.
+            t.fx = on
+            t.fxx = on && t.i + 1 < t.n && p.charCodeAt(t.i + 1) == 120
+            if (t.i + 1 < t.n && p.charCodeAt(t.i + 1) == 120) { t.i = t.i + 1 }
+        }
         else if (c == "J") { t.fJ = on }
         else if (c == "U") { t.fU = on }
         else {
@@ -4081,6 +4713,13 @@ function rxPcreFlags(t) {
 function rxPcreNamed(t, term) {
     var nm = rxPcreName(t, term)
     if (t.err != "") { return }
+    // A branch reset gives one name to the same group in several branches.
+    if (rxNameIdx(t.names, t.nameGroups, nm) == t.ncap + 1) {
+        t.ncap = t.ncap + 1
+        rxPcreOpen(t)
+        rxPcreEmit(t, "(", false)
+        return
+    }
     if (!t.fJ && !t.dup && rxNameIdx(t.names, t.nameGroups, nm) >= 0) {
         rxPcreFail(t, "two named subpatterns have the same name (PCRE2_DUPNAMES not set)", t.i - 1)
         return
@@ -4100,7 +4739,7 @@ function rxPcreParen(t) {
     var at = t.i
     t.i = t.i + 1
     if (t.i < t.n && p.charCodeAt(t.i) == 42) {
-        rxPcreFail(t, "unsupported (*VERB) or alpha assertion", at)
+        rxPcreVerb(t, at)
         return
     }
     if (t.i >= t.n || p.charCodeAt(t.i) != 63) {
@@ -4151,18 +4790,374 @@ function rxPcreParen(t) {
             return
         }
         if (c2 == 62) {
-            rxPcreFail(t, "unsupported subroutine call", at)
+            t.i = t.i + 2
+            var pn = rxPcreName(t, 41)
+            if (t.err == "") { rxPcreRefK(t, 0, pn, at, 1) }
             return
         }
         rxPcreFail(t, "unrecognized character after (?P", t.i + 1)
         return
     }
-    if (c == 124 || c == 40 || c == 82 || c == 38 || c == 67 || c == 43 || (c == 45 && rxIsDigitCode(c2))
-        || rxIsDigitCode(c)) {
-        rxPcreFail(t, "unsupported branch reset, conditional, recursion or callout group", at)
+    if (c == 124) { // (?|
+        t.i = t.i + 1
+        rxPcreOpen(t)
+        var bf = t.frames
+        var bt = bf[bf.length - 1]
+        bt.k = 1
+        bt.b = t.ncap
+        bt.mx = t.ncap
+        rxPcreEmit(t, "(?*|", false)
+        return
+    }
+    if (c == 40) { // (?(
+        rxPcreCond(t, at)
+        return
+    }
+    if (c == 67) { // (?C
+        rxPcreCallout(t)
+        return
+    }
+    if (c == 82 || c == 38 || c == 43 || (c == 45 && rxIsDigitCode(c2)) || rxIsDigitCode(c)) {
+        rxPcreCallGroup(t, at)
         return
     }
     rxPcreFlags(t)
+}
+
+// A subroutine call at t.i (after "(?"): (?R) (?n) (?+n) (?-n) (?&name).
+function rxPcreCallGroup(t, at) {
+    var p = t.p
+    var c = p.charCodeAt(t.i)
+    if (c == 38) {
+        t.i = t.i + 1
+        var nm = rxPcreName(t, 41)
+        if (t.err == "") { rxPcreRefK(t, 0, nm, at, 1) }
+        return
+    }
+    if (c == 82) {
+        t.i = t.i + 1
+        if (t.i >= t.n || p.charCodeAt(t.i) != 41) {
+            rxPcreFail(t, "(?R (recursive pattern call) must be followed by )", t.i)
+            return
+        }
+        t.i = t.i + 1
+        rxPcreRefK(t, 0, "", at, 1)
+        return
+    }
+    var n = rxPcreGroupNum(t)
+    if (t.err != "") { return }
+    if (t.i >= t.n || p.charCodeAt(t.i) != 41) {
+        rxPcreFail(t, "missing closing parenthesis", t.i)
+        return
+    }
+    t.i = t.i + 1
+    rxPcreRefK(t, n, "", at, 1)
+}
+
+// A group number at t.i, plain or relative (+n the n-th group after this
+// point, -n the n-th before it).
+function rxPcreGroupNum(t) {
+    var p = t.p
+    var sign = 0
+    var c = p.charCodeAt(t.i)
+    if (c == 43 || c == 45) {
+        sign = c == 45 ? 0 - 1 : 1
+        t.i = t.i + 1
+    }
+    if (t.i >= t.n || !rxIsDigitCode(p.charCodeAt(t.i))) {
+        rxPcreFail(t, "digit expected after (?+ or (?-", t.i)
+        return 0
+    }
+    var n = rxPcreNum(t)
+    if (sign != 0 && n == 0) {
+        rxPcreFail(t, "a relative value of zero is not allowed", t.i)
+        return 0
+    }
+    if (sign < 0) { n = t.ncap - n + 1 }
+    else if (sign > 0) { n = t.ncap + n }
+    if (n < 0) {
+        rxPcreFail(t, "reference to non-existent subpattern", t.i)
+        return 0
+    }
+    return n
+}
+
+// A conditional group at t.i (the second "(" of "(?("): its condition, then
+// a frame whose "|" separates yes from no (rxParseStarC).
+function rxPcreCond(t, at) {
+    var p = t.p
+    var lp = t.i
+    t.i = t.i + 1
+    var c = t.i < t.n ? p.charCodeAt(t.i) : 0
+    var c2 = t.i + 1 < t.n ? p.charCodeAt(t.i + 1) : 0
+    if (c == 63 && (c2 == 61 || c2 == 33 || c2 == 60)) { // (?(?= (?(?! (?(?<= (?(?<!
+        rxPcreCondFrame(t, 2)
+        rxPcreEmit(t, "(?*A", false)
+        t.i = lp
+        rxPcreParen(t)
+        return
+    }
+    var e = t.i
+    while (e < t.n && p.charCodeAt(e) != 41) { e = e + 1 }
+    if (e >= t.n) {
+        rxPcreFail(t, "missing closing parenthesis for condition", t.n)
+        return
+    }
+    var s = p.substring(t.i, e)
+    if (s == "DEFINE") {
+        t.i = e + 1
+        rxPcreCondFrame(t, 3)
+        rxPcreEmit(t, "(?*D", false)
+        return
+    }
+    if (s.length > 0 && s.charCodeAt(0) == 82 && (s.length == 1 || rxIsDigitCode(s.charCodeAt(1))
+                                                  || s.charCodeAt(1) == 38)) {
+        if (s.length == 1) {
+            t.i = e + 1
+            rxPcreEmit(t, "(?*R-1:", false)
+        } else if (s.charCodeAt(1) == 38) {
+            t.i = t.i + 2
+            var rn = rxPcreName(t, 41)
+            if (t.err != "") { return }
+            rxPcreRefK(t, 0, rn, at, 3)
+        } else {
+            t.i = t.i + 1
+            var rg = rxPcreNum(t)
+            if (t.i != e) {
+                rxPcreFail(t, "malformed number or name after (?(", t.i)
+                return
+            }
+            t.i = e + 1
+            rxPcreRefK(t, rg, "", at, 3)
+        }
+        rxPcreCondFrame(t, 2)
+        return
+    }
+    if (c == 60 || c == 39) {
+        t.i = t.i + 1
+        var cn = rxPcreName(t, c == 60 ? 62 : 39)
+        if (t.err != "") { return }
+        if (t.i >= t.n || p.charCodeAt(t.i) != 41) {
+            rxPcreFail(t, "missing closing parenthesis for condition", t.i)
+            return
+        }
+        t.i = t.i + 1
+        rxPcreRefK(t, 0, cn, at, 2)
+        rxPcreCondFrame(t, 2)
+        return
+    }
+    if (rxIsDigitCode(c) || c == 43 || c == 45) {
+        var g = rxPcreGroupNum(t)
+        if (t.err != "") { return }
+        if (t.i != e) {
+            rxPcreFail(t, "malformed number or name after (?(", t.i)
+            return
+        }
+        t.i = e + 1
+        if (g == 0) {
+            rxPcreFail(t, "assertion expected after (?( or (?(?C)", at + 3)
+            return
+        }
+        rxPcreRefK(t, g, "", at, 2)
+        rxPcreCondFrame(t, 2)
+        return
+    }
+    var bn = rxPcreName(t, 41)
+    if (t.err != "") { return }
+    rxPcreRefK(t, 0, bn, at, 2)
+    rxPcreCondFrame(t, 2)
+}
+
+// Opens the frame of a conditional (k 2) or DEFINE (k 3) group.
+function rxPcreCondFrame(t, k) {
+    rxPcreOpen(t)
+    var cf = t.frames
+    var top = cf[cf.length - 1]
+    top.k = k
+}
+
+// A callout at t.i (the "C" of "(?C"): (?C), (?Cn) or (?C"text"). PHP sets no
+// callout function, so it is matched as nothing.
+function rxPcreCallout(t) {
+    var p = t.p
+    t.i = t.i + 1
+    var c = t.i < t.n ? p.charCodeAt(t.i) : 0
+    if (rxIsDigitCode(c)) {
+        if (rxPcreNum(t) > 255) {
+            rxPcreFail(t, "number after (?C is greater than 255", t.i)
+            return
+        }
+    } else if (c != 41 && "`'\"^%#${".indexOf(String.fromCharCode(c)) >= 0) {
+        var close = c == 123 ? 125 : c
+        t.i = t.i + 1
+        var done = false
+        while (!done && t.i < t.n) {
+            if (p.charCodeAt(t.i) == close) {
+                if (t.i + 1 < t.n && p.charCodeAt(t.i + 1) == close) { t.i = t.i + 2 }
+                else {
+                    t.i = t.i + 1
+                    done = true
+                }
+            } else { t.i = t.i + 1 }
+        }
+        if (!done) {
+            rxPcreFail(t, "missing terminating delimiter for callout with string argument", t.i)
+            return
+        }
+    } else if (c != 41) {
+        rxPcreFail(t, "unrecognized string delimiter follows (?C", t.i)
+        return
+    }
+    if (t.i >= t.n || p.charCodeAt(t.i) != 41) {
+        rxPcreFail(t, "closing parenthesis for (?C expected", t.i)
+        return
+    }
+    t.i = t.i + 1
+    rxPcreEmit(t, "", false)
+}
+
+// A "|" at the frame level: a branch reset's next branch numbers its groups
+// from where the group started; a conditional has two branches, a DEFINE
+// group one.
+function rxPcreBar(t) {
+    var fr = t.frames
+    if (fr.length == 0) { return }
+    var top = fr[fr.length - 1]
+    if (top.k == 1) {
+        if (t.ncap > top.mx) { top.mx = t.ncap }
+        t.ncap = top.b
+    } else if (top.k == 2) {
+        top.br = top.br + 1
+        if (top.br > 1) { rxPcreFail(t, "conditional subpattern contains more than two branches", t.i) }
+    } else if (top.k == 3) {
+        rxPcreFail(t, "DEFINE subpattern contains more than one branch", t.i)
+    }
+}
+
+// One newline under the convention t.nl (0 LF, 1 CR, 2 CRLF, 3 ANYCRLF, 4
+// ANY, 5 NUL), longest first.
+function rxPcreNl(t) {
+    if (t.nl == 1) { return "\\x{D}" }
+    if (t.nl == 2) { return "\\x{D}\\x{A}" }
+    if (t.nl == 3) { return "\\x{D}\\x{A}|\\x{A}|\\x{D}" }
+    if (t.nl == 4) { return "\\x{D}\\x{A}|[\\x{A}-\\x{D}\\x{85}\\x{2028}\\x{2029}]" }
+    if (t.nl == 5) { return "\\x{0}" }
+    return "\\x{A}"
+}
+
+// $ without m, and \Z: the end, or before a newline that ends the subject.
+function rxPcreEndNl(t) { return "(?=(?:" + rxPcreNl(t) + ")?\\z)" }
+
+// . without s, and \N: not a newline character, and under CRLF not the CR
+// of one.
+function rxPcreDot(t) {
+    if (t.nl == 1) { return "[^\\x{D}]" }
+    if (t.nl == 2) { return "(?:(?!\\x{D}\\x{A})(?s:.))" }
+    if (t.nl == 3) { return "[^\\x{A}\\x{D}]" }
+    if (t.nl == 4) { return "[^\\x{A}-\\x{D}\\x{85}\\x{2028}\\x{2029}]" }
+    if (t.nl == 5) { return "[^\\x{0}]" }
+    return "[^\\x{A}]"
+}
+
+// The id of a (*MARK) name, numbering the names of the pattern.
+function rxPcreMarkId(t, name) {
+    var ms = t.marks
+    var i = 0
+    while (i < ms.length) {
+        if (ms[i] == name) { return i }
+        i = i + 1
+    }
+    ms.push(name)
+    return ms.length - 1
+}
+
+// A (* item at t.i (the "*"): an alpha assertion or a verb.
+function rxPcreVerb(t, at) {
+    var p = t.p
+    t.i = t.i + 1
+    var s = t.i
+    while (t.i < t.n && p.charCodeAt(t.i) != 41 && p.charCodeAt(t.i) != 58) { t.i = t.i + 1 }
+    var name = p.substring(s, t.i)
+    if (t.i < t.n && p.charCodeAt(t.i) == 58 && name.length > 0 && name.charCodeAt(0) >= 97) {
+        var open = ""
+        if (name == "pla" || name == "positive_lookahead") { open = "(?=" }
+        else if (name == "nla" || name == "negative_lookahead") { open = "(?!" }
+        else if (name == "plb" || name == "positive_lookbehind") { open = "(?<=" }
+        else if (name == "nlb" || name == "negative_lookbehind") { open = "(?<!" }
+        else if (name == "atomic") { open = "(?>" }
+        else if (name == "napla" || name == "non_atomic_positive_lookahead") { open = "(?*N" }
+        if (open == "") {
+            rxPcreFail(t, "unsupported (*VERB) or alpha assertion", at)
+            return
+        }
+        t.i = t.i + 1
+        rxPcreOpen(t)
+        rxPcreEmit(t, open, false)
+        return
+    }
+    var arg = ""
+    var hasArg = false
+    if (t.i < t.n && p.charCodeAt(t.i) == 58) {
+        hasArg = true
+        var a = t.i + 1
+        while (t.i < t.n && p.charCodeAt(t.i) != 41) { t.i = t.i + 1 }
+        arg = p.substring(a, t.i)
+    }
+    if (t.i >= t.n) {
+        rxPcreFail(t, "(*VERB) not recognized or malformed", t.i)
+        return
+    }
+    t.i = t.i + 1
+    if (hasArg && arg == "" && name != "") {
+        rxPcreFail(t, "(*MARK) must have an argument", t.i - 1)
+        return
+    }
+    var mark = hasArg ? "(?*VM" + rxPcreMarkId(t, arg) + ")" : ""
+    if (name == "ACCEPT") { rxPcreEmit(t, mark + "(?*!)", false) }
+    else if (name == "FAIL" || name == "F") { rxPcreEmit(t, mark + "(?!)", false) }
+    else if (name == "COMMIT") { rxPcreEmit(t, mark + "(?*VC)", false) }
+    else if (name == "PRUNE") { rxPcreEmit(t, mark + "(?*VP)", false) }
+    else if (name == "THEN") { rxPcreEmit(t, mark + "(?*VT)", false) }
+    else if (name == "SKIP") { rxPcreEmit(t, hasArg ? "(?*VS" + rxPcreMarkId(t, arg) + ")" : "(?*VS)", false) }
+    else if ((name == "MARK" || name == "") && hasArg) { rxPcreEmit(t, mark, false) }
+    else if (name == "MARK" || name == "") {
+        rxPcreFail(t, "(*MARK) must have an argument", t.i - 1)
+    } else {
+        rxPcreFail(t, "(*VERB) not recognized or malformed", t.i - 1)
+    }
+}
+
+// The options a pattern may start with: (*UTF) (*UCP), the newline
+// conventions (rxPcreNl) and the ones that change nothing here.
+function rxPcreStart(t) {
+    var p = t.p
+    while (t.err == "" && t.i + 2 < t.n && p.charCodeAt(t.i) == 40 && p.charCodeAt(t.i + 1) == 42) {
+        var e = t.i + 2
+        while (e < t.n && p.charCodeAt(e) != 41) { e = e + 1 }
+        if (e >= t.n) { return }
+        var name = p.substring(t.i + 2, e)
+        var eq = name.indexOf("=")
+        var head = eq >= 0 ? name.substring(0, eq + 1) : name
+        if (name == "UTF" || name == "UTF8") { t.utf = true }
+        else if (name == "UCP") { t.ucp = true }
+        else if (name == "BSR_ANYCRLF") { t.bsr = true }
+        else if (name == "BSR_UNICODE") { t.bsr = false }
+        else if (name == "NOTEMPTY") { t.notempty = 1 }
+        else if (name == "NO_START_OPT") { t.nostart = true }
+        else if (name == "NOTEMPTY_ATSTART") { if (t.notempty == 0) { t.notempty = 2 } }
+        else if (name == "LF") { t.nl = 0 }
+        else if (name == "CR") { t.nl = 1 }
+        else if (name == "CRLF") { t.nl = 2 }
+        else if (name == "ANYCRLF") { t.nl = 3 }
+        else if (name == "ANY") { t.nl = 4 }
+        else if (name == "NUL") { t.nl = 5 }
+        else if (!(name == "NO_AUTO_POSSESS" || name == "NO_DOTSTAR_ANCHOR" || name == "NO_JIT"
+                     || ((head == "LIMIT_HEAP=" || head == "LIMIT_MATCH="
+                     || head == "LIMIT_DEPTH=" || head == "LIMIT_RECURSION=") && name.length > head.length))) {
+            return
+        }
+        t.i = e + 1
+    }
 }
 
 // An escape at t.i (the backslash), outside a class.
@@ -4177,7 +5172,7 @@ function rxPcreEscape(t) {
     var c = p.charCodeAt(t.i)
     if (c == 100 || c == 68 || c == 115 || c == 83 || c == 119 || c == 87) {
         t.i = t.i + 1
-        if (!t.utf) {
+        if (!t.ucp) {
             rxPcreEmit(t, "\\" + String.fromCharCode(c), true)
             return
         }
@@ -4200,13 +5195,13 @@ function rxPcreEscape(t) {
     }
     if (c == 82) {
         t.i = t.i + 1
-        rxPcreEmit(t, "(?>\\x{D}\\x{A}|[\\x{A}-\\x{D}\\x{85}\\x{2028}\\x{2029}])", true)
+        rxPcreEmit(t, t.bsr ? "(?>\\x{D}\\x{A}|\\x{A}|\\x{D})" : "(?>\\x{D}\\x{A}|[\\x{A}-\\x{D}\\x{85}\\x{2028}\\x{2029}])", true)
         return
     }
     if (c == 78 && !(t.i + 3 < t.n && p.charCodeAt(t.i + 1) == 123 && p.charCodeAt(t.i + 2) == 85
                      && p.charCodeAt(t.i + 3) == 43)) { // \N, which a {..} may quantify
         t.i = t.i + 1
-        rxPcreEmit(t, "[^\\x{A}]", true)
+        rxPcreEmit(t, rxPcreDot(t), true)
         return
     }
     if (c == 67) { // \C
@@ -4220,12 +5215,12 @@ function rxPcreEscape(t) {
     }
     if (c == 65 || c == 122 || c == 90 || c == 71 || c == 75) { // \A \z \Z \G \K
         t.i = t.i + 1
-        rxPcreEmit(t, "\\" + String.fromCharCode(c), false)
+        rxPcreEmit(t, c == 90 && t.nl != 0 ? rxPcreEndNl(t) : "\\" + String.fromCharCode(c), false)
         return
     }
     if (c == 98 || c == 66) { // \b \B
         t.i = t.i + 1
-        if (!t.utf) { rxPcreEmit(t, "\\" + String.fromCharCode(c), false) }
+        if (!t.ucp) { rxPcreEmit(t, "\\" + String.fromCharCode(c), false) }
         else {
             var w = "[" + RX_PCRE_UW + "]"
             rxPcreEmit(t, c == 98 ? "(?:(?<=" + w + ")(?!" + w + ")|(?<!" + w + ")(?=" + w + "))"
@@ -4243,7 +5238,7 @@ function rxPcreEscape(t) {
         t.i = s
         if (c >= 56) {
             t.i = t.i + 1
-            rxPcreEmit(t, rxPcreLitText(c), true)
+            rxPcreLit(t, c)
             return
         }
         var ov = 0
@@ -4254,14 +5249,29 @@ function rxPcreEscape(t) {
             ok = ok + 1
         }
         if (!t.utf && ov > 255) { rxPcreFail(t, "octal value is greater than \\377 in 8-bit non-UTF-8 mode", t.i) }
-        rxPcreEmit(t, rxPcreLitText(ov), true)
+        rxPcreLit(t, ov)
         return
     }
     if (c == 103) { // \g
         t.i = t.i + 1
         var gc = t.i < t.n ? p.charCodeAt(t.i) : 0
-        if (gc == 60 || gc == 39) {
-            rxPcreFail(t, "unsupported subroutine call", at)
+        if (gc == 60 || gc == 39) { // \g<n> \g'n' \g<name>: a subroutine call
+            var gclose = gc == 60 ? 62 : 39
+            t.i = t.i + 1
+            var gk = t.i < t.n ? p.charCodeAt(t.i) : 0
+            if (rxIsDigitCode(gk) || gk == 43 || gk == 45) {
+                var cg = rxPcreGroupNum(t)
+                if (t.err != "") { return }
+                if (t.i >= t.n || p.charCodeAt(t.i) != gclose) {
+                    rxPcreFail(t, "\\g is not followed by a braced, angle-bracketed, or quoted name/number or by a plain number", t.i)
+                    return
+                }
+                t.i = t.i + 1
+                rxPcreRefK(t, cg, "", at, 1)
+                return
+            }
+            var gname0 = rxPcreName(t, gclose)
+            if (t.err == "") { rxPcreRefK(t, 0, gname0, at, 1) }
             return
         }
         var braced = gc == 123
@@ -4317,19 +5327,23 @@ function rxPcreEscape(t) {
                       : "unrecognized character follows \\", t.i)
         return
     }
-    rxPcreEmit(t, rxPcreLitText(ch), true)
+    rxPcreLit(t, ch)
 }
 
 // rxPcre itself: {out, err, errAt, names, nameGroups} - see the head of this
 // section.
 function rxPcre(pattern, mods) {
     var t = {p: pattern, i: 0, n: pattern.length, err: "", errAt: 0 - 1, out: "", parts: [], refs: [],
-             frames: [], ncap: 0, names: [], nameGroups: [], okq: false,
-             utf: mods.indexOf("u") >= 0, dup: mods.indexOf("J") >= 0, dollarEnd: mods.indexOf("D") >= 0,
+             frames: [], ncap: 0, names: [], nameGroups: [], okq: false, marks: [],
+             utf: mods.indexOf("u") >= 0, ucp: mods.indexOf("u") >= 0, bsr: false, notempty: 0, nostart: false,
+             nl: 0, crlf: false,
+             dup: mods.indexOf("J") >= 0, dollarEnd: mods.indexOf("D") >= 0,
              fi: mods.indexOf("i") >= 0, fm: mods.indexOf("m") >= 0, fs: mods.indexOf("s") >= 0,
-             fx: mods.indexOf("x") >= 0, fU: mods.indexOf("U") >= 0, fn: mods.indexOf("n") >= 0, fJ: false}
+             fx: mods.indexOf("x") >= 0, fxx: false, fU: mods.indexOf("U") >= 0, fn: mods.indexOf("n") >= 0,
+             fJ: false}
     var p = pattern
     var inq = false
+    rxPcreStart(t)
     while (t.err == "") {
         if (!inq) { rxPcreSkip(t) }
         if (t.err != "" || t.i >= t.n) { break }
@@ -4342,7 +5356,7 @@ function rxPcre(pattern, mods) {
             }
             var qc = rxCpAt(p, t.i)
             t.i = t.i + (qc > 65535 ? 2 : 1)
-            rxPcreEmit(t, rxPcreLitText(qc), true)
+            rxPcreLit(t, qc)
             continue
         }
         if (c == 92 && t.i + 1 < t.n && p.charCodeAt(t.i + 1) == 81) {
@@ -4358,16 +5372,25 @@ function rxPcre(pattern, mods) {
             rxPcreClose(t)
         } else if (c == 124) {
             t.i = t.i + 1
+            rxPcreBar(t)
             rxPcreEmit(t, "|", false)
         } else if (c == 94) {
             t.i = t.i + 1
-            rxPcreEmit(t, t.fm ? "(?:\\A|(?m:^))" : "^", false)
+            if (t.nl == 0) { rxPcreEmit(t, t.fm ? "(?:\\A|(?m:^))" : "^", false) }
+            else {
+                // After a newline, not at the end, nor inside a CR LF.
+                rxPcreEmit(t, t.fm ? "(?:\\A|(?<=" + rxPcreNl(t) + ")(?!\\z)"
+                                     + (t.nl == 3 || t.nl == 4 ? "(?<!\\x{D}(?=\\x{A}))" : "") + ")" : "^", false)
+            }
         } else if (c == 36) {
             t.i = t.i + 1
-            rxPcreEmit(t, t.fm ? "(?m:$)" : t.dollarEnd ? "\\z" : "$", false)
+            if (t.nl == 0) { rxPcreEmit(t, t.fm ? "(?m:$)" : t.dollarEnd ? "\\z" : "$", false) }
+            else {
+                rxPcreEmit(t, t.fm ? "(?=" + rxPcreNl(t) + "|\\z)" : t.dollarEnd ? "\\z" : rxPcreEndNl(t), false)
+            }
         } else if (c == 46) {
             t.i = t.i + 1
-            rxPcreEmit(t, t.fs ? "(?s:.)" : ".", true)
+            rxPcreEmit(t, t.fs ? "(?s:.)" : rxPcreDot(t), true)
         } else if (c == 91) {
             rxPcreClass(t)
         } else if (c == 92) {
@@ -4375,7 +5398,7 @@ function rxPcre(pattern, mods) {
         } else {
             var lc = rxCpAt(p, t.i)
             t.i = t.i + (lc > 65535 ? 2 : 1)
-            rxPcreEmit(t, rxPcreLitText(lc), true)
+            rxPcreLit(t, lc)
         }
     }
     if (t.err == "" && t.frames.length > 0) { rxPcreFail(t, "missing closing parenthesis", t.n) }
@@ -4386,13 +5409,24 @@ function rxPcre(pattern, mods) {
     while (t.err == "" && ri < refs.length) {
         var r = refs[ri]
         var g = r.n
+        var gl = "" + g
         if (r.name != "") {
             g = rxNameIdx(t.names, t.nameGroups, r.name)
             if (g < 0) { rxPcreFail(t, "reference to non-existent subpattern", r.at) }
+            // A condition on a name several groups share holds when any is set.
+            gl = ""
+            var ni = 0
+            while (ni < t.names.length) {
+                if (t.names[ni] == r.name) { gl = gl + (gl == "" ? "" : ",") + t.nameGroups[ni] }
+                ni = ni + 1
+            }
         } else if (g > t.ncap) {
             rxPcreFail(t, "reference to non-existent subpattern", r.at)
         }
-        parts[r.part] = "(?:\\" + g + ")"
+        if (r.k == 0) { parts[r.part] = "(?:\\" + g + ")" }
+        else if (r.k == 1) { parts[r.part] = "(?*K" + g + ")" }
+        else if (r.k == 2) { parts[r.part] = "(?*C" + gl + ":" }
+        else { parts[r.part] = "(?*R" + g + ":" }
         ri = ri + 1
     }
     var out = ""
@@ -4404,8 +5438,18 @@ function rxPcre(pattern, mods) {
     // i from the start; A (PCRE2_ANCHORED): only at the search's start.
     if (mods.indexOf("i") >= 0) { out = "(?i)" + out }
     if (mods.indexOf("A") >= 0) { out = "\\G(?:" + out + ")" }
+    if (t.notempty > 0) { out = "(?:" + out + ")(?*E" + (t.notempty - 1) + ")" }
+    // Under CRLF, ANYCRLF and ANY a search does not start between the CR and
+    // LF of a newline, unless at its own start or the pattern has a CR or LF
+    // of its own (pcre2_match's bumpalong).
+    if ((t.nl == 2 || t.nl == 3 || t.nl == 4) && !t.crlf) { out = "(?:\\G|(?<!\\x{D})|(?!\\x{A}))" + out }
+    // A (*COMMIT), (*PRUNE) or (*SKIP) makes PCRE2's start-of-match
+    // optimization observable (rxStartOpt).
+    if (!t.nostart && (out.indexOf("(?*VC") >= 0 || out.indexOf("(?*VP") >= 0 || out.indexOf("(?*VS") >= 0)) {
+        out = "(?*S)" + out
+    }
     return {out: t.err == "" ? out : "", err: t.err, errAt: t.errAt, names: t.names, nameGroups: t.nameGroups,
-            ncap: t.ncap}
+            ncap: t.ncap, utf: t.utf}
 }
 
 // ===== Compilation =====
@@ -4518,7 +5562,7 @@ function rxCompile(pattern, flags) {
     if (pcre) {
         java = true
         unix = true
-        ucase = mods.indexOf("u") >= 0
+        ucase = tp.utf
     }
     if (java || py) { bfail = true }
     // The POSIX ERE dialect (bash's [[ =~ ]]). What it changes is spelled out at each
@@ -4548,7 +5592,8 @@ function rxCompile(pattern, flags) {
         depth: 0, java: java, errAt: -1, pcls: rxNewCls(), gnodes: [rxNode("empty")],
         py: py, icase: icase, multi: multi, gend: 0, gflags: "",
         ucase: ucase && java, uclass: false, unix: unix && java, inl: false, supp: false,
-        canon: false, pyuni: py && !pyascii, re2: re2, pcre: pcre
+        canon: false, pyuni: py && !pyascii, re2: re2, pcre: pcre, open: [], tctx: [], brbase: 0 - 1,
+        inlook: 0, startopt: false
     }
     // Under P and J case folding and line anchoring are decided per atom while
     // parsing.
@@ -4595,10 +5640,29 @@ function rxCompile(pattern, flags) {
     pg.jsrep = jsrep
     pg.java = java
     pg.re2 = re2
+    if (st.startopt) { rxStartOpt(pg, ast) }
+    if (pcre) {
+        // pcre2_match tries no start that leaves fewer units than the
+        // shortest match; observable through a recursion that loops.
+        var g0 = rxNode("group")
+        g0.items.push(ast)
+        var gns = st.gnodes
+        gns[0] = g0
+        var cmin = rxMinLenC(ast, gns, [0])
+        if (cmin > 0) { rxAdd(pg, RX_MINLEN, cmin, 0, pg.dummy) }
+        // And none where a character every match holds after its first is
+        // missing (pcre2_match's required code unit); an (*ACCEPT) can end a
+        // match before it.
+        var first = rxFirstCU(ast)
+        var req = cmin < 0 ? null : rxReqCU(ast, null)
+        if (req != null && req != first) { rxAdd(pg, RX_REQCU, 0, first == null ? 0 : 1, req.cls) }
+        if (rxHasCalls(ast)) { rxAdd(pg, RX_CSRESET, 0, 0, pg.dummy) }
+    }
     rxAdd(pg, RX_SAVE, 0, 0, pg.dummy)
     rxEmit(pg, ast)
     rxAdd(pg, RX_SAVE, 1, 0, pg.dummy)
     rxAdd(pg, RX_MATCH, 0, 0, pg.dummy)
+    if (pg.calls.length > 0) { rxEmitSubs(pg, ast, st.gnodes) }
     var jbegin = java && rxBeginJ(ast)
     // Go's and PCRE2's searches have no Start node to model (R, C).
     var jmin = java && !re2 && !pcre && !jbegin ? rxMinLen(ast) : 0
@@ -4768,21 +5832,48 @@ var RX_BT_MARK = 2
 var RX_BT_CTR = 3
 var RX_BT_CBEG = 4
 var RX_BT_ITER = 5
+// The C dialect's: an RX_CALL (undone by leaving the call), an RX_RET (x the
+// frame, undone by re-entering it), a verb (x its kind, y the position or
+// target it carries) and a (*MARK) (x its name, y where it was passed).
+var RX_BT_CALL = 6
+var RX_BT_RET = 7
+var RX_BT_VERB = 8
+var RX_BT_MARKN = 9
+// The C dialect's subroutine calls: rxCs[0 .. rxCsn) are the frames of the
+// calls in progress, innermost last; frame f returns to rxFrRet[f], was a call
+// of group rxFrG[f] at rxFrSp[f], and holds the registers as they were at the
+// call, which the return puts back (PCRE2's rule for captures). rxFrn frames
+// are in use; RX_CSRESET starts an attempt with none. rxRetPc is where the
+// latest return goes, and rxSkip where a (*SKIP) that ended the run goes.
+var rxCsn = 0
+var rxFrn = 0
+var rxRetPc = 0
+var rxSkip = 0
+var rxCs = []
+var rxFrRet = []
+var rxFrG = []
+var rxFrSp = []
+var rxFrCaps = []
+var rxFrMarks = []
+var rxFrCtr = []
+var rxFrCbeg = []
 
 // rxRun is the backtracking VM. It answers the end position of a match starting at
-// the given pc/sp, or -1. A choice (SPLIT, a counted loop's CLOOP) pushes the
-// alternative not taken onto the backtrack stack, from entry base up, and a write
-// that has to be undone (SAVE, MARK, CLEAR, the counted-loop registers) pushes the
-// old value. A failure leaves the forward loop, pops back to the latest choice,
-// undoing the writes on the way, and runs forward again from it - so a long
-// subject cannot exhaust the native stack. A write is undone only above lim:
-// unless keep (the nested run of a lookaround or atomic group body, whose failure
-// must leave everything as it found it), that is only when a choice lies below
-// it, as a failed attempt's registers are thrown away. A nested run works above
-// this one's top, and a body that succeeds leaves its entries there, never
-// revisited.
+// the given pc/sp, or -1 (-2 at the top when a verb or a recursion that loops
+// ended the match, st.verb saying which). A choice (SPLIT, a counted loop's CLOOP)
+// pushes the alternative not taken onto the backtrack stack, from entry base up,
+// and a write that has to be undone (SAVE, MARK, CLEAR, the counted-loop
+// registers) pushes the old value. A failure leaves the forward loop, pops back to
+// the latest choice, undoing the writes on the way, and runs forward again from it
+// - so a long subject cannot exhaust the native stack. A write is undone only
+// above lim: unless keep (the nested run of a lookaround or atomic group body,
+// whose failure must leave everything as it found it: 1 a body whose verbs act on
+// it alone, 2 an atomic group's, 3 a positive assertion's, whose verbs act on the
+// match), that is only when a choice lies below it, as a failed attempt's
+// registers are thrown away. A nested run works above this one's top, and a body
+// that succeeds leaves its entries there, never revisited.
 function rxRun(re, text, pcIn, spIn, caps, marks, st, base, keep) {
-    var lim = keep ? base - 1 : base
+    var lim = keep > 0 ? base - 1 : base
     var ops = re.ops
     var as = re.as
     var bs = re.bs
@@ -4912,12 +6003,16 @@ function rxRun(re, text, pcIn, spIn, caps, marks, st, base, keep) {
                 }
                 st.wrap = 0 - 1
                 // Pattern.Neg: more text could make the body match.
-                if (sp >= n && bs[pc] != 0) { re.reqEnd = true }
-                var rl = rxRun(re, text, pc + 1, sp, caps, marks, st, top, true)
+                if (sp >= n && bs[pc] == 1) { re.reqEnd = true }
+                // A verb backtracked onto in a positive assertion of its own
+                // acts on the match (keep 3); in a negative one, or a
+                // conditional's, only on the assertion (keep 1).
+                var rl = rxRun(re, text, pc + 1, sp, caps, marks, st, top, bs[pc] == 0 ? 3 : 1)
                 btn = bk.length
                 if (st.over) { return -1 }
+                if (st.verb != 0) { return keep == 0 ? 0 - 2 : -1 }
                 var hit = rl >= 0
-                var want = bs[pc] == 0
+                var want = bs[pc] != 1
                 if (hit != want) {
                     break
                 }
@@ -5108,8 +6203,9 @@ function rxRun(re, text, pcIn, spIn, caps, marks, st, base, keep) {
                 st.lbt = sp
                 var lhit = false
                 while (!lhit && lfrom >= lto) {
-                    if (rxRun(re, text, pc + 1, lfrom, caps, marks, st, top, true) >= 0) { lhit = true }
+                    if (rxRun(re, text, pc + 1, lfrom, caps, marks, st, top, lneg ? 1 : 3) >= 0) { lhit = true }
                     if (st.over) { return -1 }
+                    if (st.verb != 0) { return keep == 0 ? 0 - 2 : -1 }
                     lfrom = re.py ? rxCpBack(text, lfrom) : lfrom - 1
                 }
                 btn = bk.length
@@ -5135,9 +6231,11 @@ function rxRun(re, text, pcIn, spIn, caps, marks, st, base, keep) {
                     continue
                 }
                 st.wrap = 0 - 1
-                var ra = rxRun(re, text, pc + 1, sp, caps, marks, st, top, true)
+                var ra = rxRun(re, text, pc + 1, sp, caps, marks, st, top, 2)
                 btn = bk.length
+                // A verb backtracked onto inside the group ends the match.
                 if (st.over) { return -1 }
+                if (ra < 0 && st.verb != 0) { return keep == 0 ? 0 - 2 : -1 }
                 if (ra < 0) {
                     break
                 }
@@ -5171,6 +6269,61 @@ function rxRun(re, text, pcIn, spIn, caps, marks, st, base, keep) {
                     re.hitEnd = true
                     re.reqEnd = true
                 }
+                pc = pc + 1
+            } else if (op == RX_COND) {
+                var cg = 2 * as[pc] + 1
+                pc = cg < caps.length && caps[cg] >= 0 ? pc + 1 : bs[pc]
+            } else if (op == RX_CONDR) {
+                pc = rxInCall(as[pc]) ? pc + 1 : bs[pc]
+            } else if (op == RX_CALL) {
+                // PCRE2_ERROR_RECURSELOOP: a call of a group whose latest
+                // call in progress began here.
+                if (rxCallLoops(bs[pc], sp)) {
+                    st.verb = RX_VLOOP
+                    return keep == 0 ? 0 - 2 : -1
+                }
+                rxCallPush(st, pc + 1, bs[pc], sp, caps, marks)
+                if (top > lim) { top = rxBtPush(top, RX_BT_CALL, 0, 0) }
+                btn = bk.length
+                pc = as[pc]
+            } else if (op == RX_RET || (op == RX_ACCEPT && keep == 0 && rxCsn > 0)) {
+                // (*ACCEPT) in a call returns from it.
+                top = rxRet(st, caps, marks, top, lim)
+                btn = bk.length
+                pc = rxRetPc
+            } else if (op == RX_ACCEPT) {
+                // In an assertion or atomic group's body (*ACCEPT) ends the body.
+                if (keep != 0) { return sp }
+                caps[1] = sp
+                if ((st.mustEnd >= 0 && sp != st.mustEnd) || sp == st.adv) {
+                    break
+                }
+                return sp
+            } else if (op == RX_CSRESET) {
+                rxCsn = 0
+                rxFrn = 0
+                pc = pc + 1
+            } else if (op == RX_REQCU) {
+                if (!rxReqSeen(text, sp + bs[pc], clss[pc])) {
+                    break
+                }
+                pc = pc + 1
+            } else if (op == RX_MINLEN) {
+                if (n - sp < as[pc]) {
+                    break
+                }
+                pc = pc + 1
+            } else if (op == RX_SPSET) {
+                sp = marks[as[pc]]
+                pc = pc + 1
+            } else if (op == RX_NOEMPTY) {
+                if (sp == caps[0] && (as[pc] == 0 || sp == st.gpos)) {
+                    break
+                }
+                pc = pc + 1
+            } else if (op == RX_VERB) {
+                top = rxVerb(as[pc], bs[pc], sp, top)
+                btn = bk.length
                 pc = pc + 1
             } else {
                 break
@@ -5207,12 +6360,169 @@ function rxRun(re, text, pcIn, spIn, caps, marks, st, base, keep) {
                 marks[ux] = uy
             } else if (uk == RX_BT_CTR) {
                 st.ctr[ux] = uy
-            } else {
+            } else if (uk == RX_BT_CBEG) {
                 st.cbeg[ux] = uy
+            } else if (uk == RX_BT_CALL) {
+                rxCsn = rxCsn - 1
+            } else if (uk == RX_BT_RET) {
+                rxCsPush(ux)
+            } else if (uk == RX_BT_VERB) {
+                // (*THEN) backtracks to its alternation's next branch; the
+                // others fail the match here, and inside an assertion only
+                // the assertion.
+                if (ux == RX_VTHEN && uy == 0 - 2) { return -1 }
+                if (ux == RX_VTHEN && uy >= 0) {
+                    top = rxThenPop(top, base, uy, caps, marks, st)
+                    if (top < 0) { return -1 }
+                    pc = uy
+                    sp = by[top]
+                    break
+                }
+                if (keep == 1) { return -1 }
+                st.verb = ux == RX_VTHEN ? RX_VPRUNE : ux
+                rxSkip = uy
+                return keep == 0 ? 0 - 2 : -1
             }
         }
     }
     return -1
+}
+
+// rxBtPush pushes the entry kind, x, y above top, and answers the new top.
+function rxBtPush(top, kind, x, y) {
+    if (top == rxBk.length) { rxBtGrow() }
+    var bk = rxBk
+    var bx = rxBx
+    var by = rxBy
+    bk[top] = kind
+    bx[top] = x
+    by[top] = y
+    return top + 1
+}
+
+// rxThenPop backtracks from top to the RX_BT_ALT entry that resumes at
+// target, undoing writes and dropping choices on the way, and answers its
+// index, or -1 when none lies above base.
+function rxThenPop(top, base, target, caps, marks, st) {
+    var bk = rxBk
+    var bx = rxBx
+    var by = rxBy
+    var t = top
+    while (t > base) {
+        t = t - 1
+        var k = bk[t]
+        var x = bx[t]
+        if (k == RX_BT_ALT && x == target) { return t }
+        if (k == RX_BT_CAP) { caps[x] = by[t] }
+        else if (k == RX_BT_MARK) { marks[x] = by[t] }
+        else if (k == RX_BT_CTR) { st.ctr[x] = by[t] }
+        else if (k == RX_BT_CBEG) { st.cbeg[x] = by[t] }
+        else if (k == RX_BT_CALL) { rxCsn = rxCsn - 1 }
+        else if (k == RX_BT_RET) { rxCsPush(x) }
+    }
+    return 0 - 1
+}
+
+// rxVerb passes a verb of kind with operand b at sp: a (*MARK) or a verb
+// goes onto the backtrack stack whatever lies below, as it acts when
+// backtracked onto. (*SKIP:NAME) carries where the latest (*MARK:NAME) on the
+// path was passed, and is ignored without one.
+function rxVerb(kind, b, sp, top) {
+    if (kind == RX_VMARK) { return rxBtPush(top, RX_BT_MARKN, b, sp) }
+    var y = sp
+    if (kind == RX_VTHEN) { y = b }
+    if (kind == RX_VSKIP && b >= 0) {
+        var bk = rxBk
+        var bx = rxBx
+        var by = rxBy
+        y = 0 - 1
+        var i = top - 1
+        while (i >= 0 && y < 0) {
+            if (bk[i] == RX_BT_MARKN && bx[i] == b) { y = by[i] }
+            i = i - 1
+        }
+        if (y < 0) { return top }
+    }
+    return rxBtPush(top, RX_BT_VERB, kind, y)
+}
+
+// rxInCall: is the run in a call of group g (any call for -1)?
+function rxInCall(g) {
+    if (rxCsn == 0) { return false }
+    return g < 0 || rxFrG[rxCs[rxCsn - 1]] == g
+}
+
+function rxCsPush(f) {
+    rxSetAt(rxCs, rxCsn, f)
+    rxCsn = rxCsn + 1
+}
+
+// a[i] = v, where i is at most a's length.
+function rxSetAt(a, i, v) {
+    if (i == a.length) { a.push(v) } else { a[i] = v }
+}
+
+function rxCopy(a) {
+    var out = []
+    var i = 0
+    while (i < a.length) {
+        out.push(a[i])
+        i = i + 1
+    }
+    return out
+}
+
+// rxCallLoops: did the latest call of group g in progress begin at sp?
+function rxCallLoops(g, sp) {
+    var i = rxCsn - 1
+    while (i >= 0) {
+        var f = rxCs[i]
+        if (rxFrG[f] == g) { return rxFrSp[f] == sp }
+        i = i - 1
+    }
+    return false
+}
+
+// rxCallPush enters a call of group g at sp that returns to ret.
+function rxCallPush(st, ret, g, sp, caps, marks) {
+    var f = rxFrn
+    rxFrn = f + 1
+    rxSetAt(rxFrRet, f, ret)
+    rxSetAt(rxFrG, f, g)
+    rxSetAt(rxFrSp, f, sp)
+    rxSetAt(rxFrCaps, f, rxCopy(caps))
+    rxSetAt(rxFrMarks, f, rxCopy(marks))
+    rxSetAt(rxFrCtr, f, rxCopy(st.ctr))
+    rxSetAt(rxFrCbeg, f, rxCopy(st.cbeg))
+    rxCsPush(f)
+}
+
+// rxRet leaves the innermost call: the registers are put back as they were at
+// the call, each write undoable above lim, and rxRetPc is where it returns.
+// Answers the new top.
+function rxRet(st, caps, marks, top, lim) {
+    var f = rxCs[rxCsn - 1]
+    rxCsn = rxCsn - 1
+    var t = rxRestore(top, lim, RX_BT_CAP, caps, rxFrCaps[f])
+    t = rxRestore(t, lim, RX_BT_MARK, marks, rxFrMarks[f])
+    t = rxRestore(t, lim, RX_BT_CTR, st.ctr, rxFrCtr[f])
+    t = rxRestore(t, lim, RX_BT_CBEG, st.cbeg, rxFrCbeg[f])
+    if (t > lim) { t = rxBtPush(t, RX_BT_RET, f, 0) }
+    rxRetPc = rxFrRet[f]
+    return t
+}
+
+function rxRestore(top, lim, kind, cur, saved) {
+    var t = top
+    var i = 0
+    while (i < cur.length) {
+        if (cur[i] != saved[i]) {
+            if (t > lim) { t = rxBtPush(t, kind, i, cur[i]) }
+            cur[i] = saved[i]
+        }
+        i = i + 1
+    }
+    return t
 }
 
 // rxUndoAll pushes every capture's current value onto the backtrack stack
@@ -5283,10 +6593,21 @@ function rxAttempt(re, text, at, mustEnd, gpos, glast, adv) {
         i = i + 1
     }
     var st = {steps: 0, over: false, mustEnd: mustEnd, lbt: -1, ctr: ctr, cbeg: cbeg,
-              gpos: gpos, glast: glast, adv: adv, wrap: 0 - 1}
-    var end = rxRun(re, text, 0, at, caps, marks, st, 0, false)
-    if (st.over) { rxFail("step limit exceeded") }
+              gpos: gpos, glast: glast, adv: adv, wrap: 0 - 1, verb: 0}
+    var end = rxRun(re, text, 0, at, caps, marks, st, 0, 0)
+    // Under C the outcomes besides a match and none are records with a
+    // negative begin: -2 the step limit (PHP's backtrack limit), -4 a
+    // recursion that would loop, -1 a (*COMMIT) (no match from any start)
+    // and -3 a (*SKIP) to end. A run a verb ended answers -2.
+    if (st.over) {
+        if (re.pcre) { return {begin: 0 - 2, end: 0 - 1, caps: caps} }
+        rxFail("step limit exceeded")
+    }
     if (end >= 0) { return {begin: caps[0], end: caps[1], caps: caps} }
+    if (end == 0 - 1) { return null }
+    if (st.verb == RX_VCOMMIT) { return {begin: 0 - 1, end: 0 - 1, caps: caps} }
+    if (st.verb == RX_VSKIP) { return {begin: 0 - 3, end: rxSkip, caps: caps} }
+    if (st.verb == RX_VLOOP) { return {begin: 0 - 4, end: 0 - 1, caps: caps} }
     return null
 }
 
@@ -5297,7 +6618,14 @@ function rxSearch(re, text, start) {
     var at = from
     while (at <= text.length) {
         var m = rxAttempt(re, text, at, -1, from, 0, -1)
-        if (m != null) { return m }
+        if (m != null) {
+            if (m.begin == 0 - 3 && m.end > at) {
+                at = m.end
+                continue
+            }
+            if (m.begin == 0 - 1) { return null }
+            if (m.begin != 0 - 3) { return m }
+        }
         // After a failed attempt a J pattern with re.supp steps over a surrogate
         // pair whole, as java.util.regex's StartS does; any other steps one
         // unit, as Start does.
@@ -5312,7 +6640,9 @@ function rxSearch(re, text, start) {
 function rxSearchAdv(re, text, start, adv) {
     if (!adv || start < 0 || start > text.length) { return rxSearch(re, text, start) }
     var m = rxAttempt(re, text, start, -1, start, 0, start)
-    if (m != null) { return m }
+    // The refusal of an empty match is an attempt of its own (PHP's anchored
+    // retry), so a (*COMMIT) or (*SKIP) there only ends that attempt.
+    if (m != null && m.begin != 0 - 1 && m.begin != 0 - 3) { return m }
     return rxSearch(re, text, start + (re.supp && start + 1 < text.length && rxCpAt(text, start) > 65535 ? 2 : 1))
 }
 

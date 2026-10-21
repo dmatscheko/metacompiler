@@ -1384,7 +1384,7 @@ function __mec_pregerr($code = null) {
 // pcre_get_compiled_regex_cache_ex: [key, group names] for $regex, or false
 // (PREG_INTERNAL_ERROR) for an empty pattern, a bad delimiter, a missing end
 // delimiter, an unknown modifier or a pattern PCRE2 refuses. A construct the
-// engine does not implement (recursion, conditionals, verbs) is an Error.
+// engine does not implement (script runs, non-atomic lookbehinds) is an Error.
 function __mec_pregkey($fn, $regex) {
     static $cache = [];
     $regex = (string)$regex;
@@ -1436,6 +1436,14 @@ function __mec_pregkey($fn, $regex) {
     return $got;
 }
 
+// A string parameter as zpp reads it: an array is a TypeError.
+function __mec_pregstr($fn, $n, $name, $v) {
+    if (is_array($v)) {
+        throw new TypeError($fn . "(): Argument #" . $n . " (\$" . $name . ") must be of type string, array given");
+    }
+    return (string)$v;
+}
+
 // The start offset, negative from the end; null (PREG_INTERNAL_ERROR) past it.
 function __mec_pregoff($subject, $offset) {
     $n = strlen($subject);
@@ -1479,11 +1487,12 @@ function __mec_pregsub($s, $o, $names, $flags) {
 }
 
 function preg_match($pattern, $subject, &$matches = null, $flags = 0, $offset = 0) {
+    $pattern = __mec_pregstr("preg_match", 1, "pattern", $pattern);
+    $subject = __mec_pregstr("preg_match", 2, "subject", $subject);
     $c = __mec_pregkey("preg_match", $pattern);
     if ($c === false) { return false; }
     $matches = [];
     if ($flags & 0xff) { throw new ValueError("preg_match(): Argument #4 (\$flags) must be a PREG_* constant"); }
-    $subject = (string)$subject;
     $offset = __mec_pregoff($subject, $offset);
     if ($offset === null) { return false; }
     __mec_pregerr(PREG_NO_ERROR);
@@ -1498,6 +1507,8 @@ function preg_match($pattern, $subject, &$matches = null, $flags = 0, $offset = 
 }
 
 function preg_match_all($pattern, $subject, &$matches = null, $flags = 0, $offset = 0) {
+    $pattern = __mec_pregstr("preg_match_all", 1, "pattern", $pattern);
+    $subject = __mec_pregstr("preg_match_all", 2, "subject", $subject);
     $c = __mec_pregkey("preg_match_all", $pattern);
     if ($c === false) { return false; }
     $matches = [];
@@ -1508,7 +1519,6 @@ function preg_match_all($pattern, $subject, &$matches = null, $flags = 0, $offse
             throw new ValueError("preg_match_all(): Argument #4 (\$flags) must be a PREG_* constant");
         }
     }
-    $subject = (string)$subject;
     $offset = __mec_pregoff($subject, $offset);
     if ($offset === null) { return false; }
     __mec_pregerr(PREG_NO_ERROR);
@@ -1697,9 +1707,10 @@ function preg_replace_callback_array($pattern, $subject, $limit = -1, &$count = 
 }
 
 function preg_split($pattern, $subject, $limit = -1, $flags = 0) {
+    $pattern = __mec_pregstr("preg_split", 1, "pattern", $pattern);
+    $s = __mec_pregstr("preg_split", 2, "subject", $subject);
     $c = __mec_pregkey("preg_split", $pattern);
     if ($c === false) { return false; }
-    $s = (string)$subject;
     $n = strlen($s);
     $noEmpty = $flags & PREG_SPLIT_NO_EMPTY;
     $delim = $flags & PREG_SPLIT_DELIM_CAPTURE;
@@ -1743,7 +1754,7 @@ function preg_split($pattern, $subject, $limit = -1, $flags = 0) {
 
 // The characters preg_quote escapes, and NUL as \000.
 function preg_quote($str, $delimiter = null) {
-    $str = (string)$str;
+    $str = __mec_pregstr("preg_quote", 1, "str", $str);
     $d = $delimiter === null || $delimiter === "" ? "" : $delimiter[0];
     $n = strlen($str);
     $out = "";
@@ -1762,6 +1773,7 @@ function preg_quote($str, $delimiter = null) {
 }
 
 function preg_grep($pattern, $array, $flags = 0) {
+    $pattern = __mec_pregstr("preg_grep", 1, "pattern", $pattern);
     $c = __mec_pregkey("preg_grep", $pattern);
     if ($c === false) { return false; }
     __mec_pregerr(PREG_NO_ERROR);

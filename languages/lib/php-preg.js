@@ -46,12 +46,27 @@ function phpRxHasByte(s) {
     return false
 }
 
-// The compiled pattern of key; null under u when the pattern is not UTF-8.
+// Does key read the pattern and the subject as UTF-8: the u modifier, or
+// (*UTF) among the options the pattern starts with?
+function phpRxKeyUtf(key) {
+    var k = key.indexOf("/")
+    if (key.substring(0, k).indexOf("u") >= 0) { return true }
+    var i = k + 1
+    while (key.charCodeAt(i) == 40 && key.charCodeAt(i + 1) == 42) {
+        var e = key.indexOf(")", i)
+        if (e < 0) { return false }
+        if (key.substring(i + 2, e) == "UTF" || key.substring(i + 2, e) == "UTF8") { return true }
+        i = e + 1
+    }
+    return false
+}
+
+// The compiled pattern of key; null under UTF when the pattern is not UTF-8.
 function phpRxRe(key) {
     var k = key.indexOf("/")
     var mods = key.substring(0, k)
     var pat = key.substring(k + 1, key.length)
-    if (mods.indexOf("u") < 0) { return rxGet(phpRxBytes(pat), "C" + mods) }
+    if (!phpRxKeyUtf(key)) { return rxGet(phpRxBytes(pat), "C" + mods) }
     if (phpRxHasByte(pat)) { return null }
     return rxGet(pat, "C" + mods)
 }
@@ -127,13 +142,13 @@ function phpRxUnit(b) {
 
 // __mec_pregx: the match of key in s from byte offset pos, as byte offsets
 // (-1 for a group that did not take part), [] for none, or the PREG error code
-// (4 the subject is not UTF-8, 5 the offset is inside a character). A pos of
+// (1 a recursion that would loop, 2 the step limit, 4 the subject is not
+// UTF-8, 5 the offset is inside a character). A pos of
 // -o - 1 asks for the match after an empty one at o: a non-empty one at o, else
 // the search from the next character (rxSearchAdv).
 function phpPregExec(key, s, pos) {
     var re = phpRxRe(key)
-    var utf = key.indexOf("u") >= 0 && key.indexOf("u") < key.indexOf("/")
-    phpRxText(s, utf)
+    phpRxText(s, phpRxKeyUtf(key))
     if (phpRxBad) { return 4 }
     var retry = pos < 0
     var at = phpRxUnit(retry ? 0 - pos - 1 : pos)
@@ -141,6 +156,7 @@ function phpPregExec(key, s, pos) {
     var m = retry ? rxSearchAdv(re, phpRxT, at, true) : rxSearch(re, phpRxT, at)
     var out = []
     if (m == null) { return out }
+    if (m.begin < 0) { return m.begin == 0 - 4 ? 1 : 2 }
     var caps = m.caps
     var off = phpRxOff
     var i = 0

@@ -28,11 +28,31 @@ func phpRxUnits(s string) []rune {
 // phpRxHasByte: does s hold a byte that is not part of a character?
 func phpRxHasByte(s string) bool { return phpRaw(s) != s }
 
-// phpRxRe is phpRxRe in lib/php-preg.js: nil under u when the pattern is not UTF-8.
+// phpRxKeyUtf is phpRxKeyUtf in lib/php-preg.js: the u modifier, or (*UTF)
+// among the options the pattern starts with.
+func phpRxKeyUtf(key string) bool {
+	k := strings.IndexByte(key, '/')
+	if strings.ContainsRune(key[:k], 'u') {
+		return true
+	}
+	for i := k + 1; strings.HasPrefix(key[i:], "(*"); {
+		e := strings.IndexByte(key[i:], ')')
+		if e < 0 {
+			return false
+		}
+		if o := key[i+2 : i+e]; o == "UTF" || o == "UTF8" {
+			return true
+		}
+		i += e + 1
+	}
+	return false
+}
+
+// phpRxRe is phpRxRe in lib/php-preg.js: nil under UTF when the pattern is not UTF-8.
 func phpRxRe(key string) *rxRe {
 	k := strings.IndexByte(key, '/')
 	mods, pat := key[:k], key[k+1:]
-	if !strings.ContainsRune(mods, 'u') {
+	if !phpRxKeyUtf(key) {
 		return rxGet(string(phpRxUnits(pat)), "C"+mods)
 	}
 	if phpRxHasByte(pat) {
@@ -135,8 +155,7 @@ func init() {
 		m["js_phpregx"] = func(a []uint64) uint64 {
 			key := rt.phpStr(u(a[0]))
 			re := phpRxRe(key)
-			slash := strings.IndexByte(key, '/')
-			phpRxText(rt.phpStr(u(a[1])), strings.ContainsRune(key[:slash], 'u'))
+			phpRxText(rt.phpStr(u(a[1])), phpRxKeyUtf(key))
 			if phpRxLast.bad {
 				return w(phpMkInt(4))
 			}
@@ -160,6 +179,13 @@ func init() {
 				rt.fail("regexp: step limit exceeded")
 			}
 			out := []interface{}{}
+			if mt != nil && mt.begin < 0 {
+				// The step limit, or a recursion that loops.
+				if mt.begin == -4 {
+					return w(phpMkInt(1))
+				}
+				return w(phpMkInt(2))
+			}
 			if mt != nil {
 				for _, c := range mt.caps {
 					switch {

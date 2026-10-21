@@ -4312,6 +4312,42 @@ function s79() {
         && preg_quote("a/b#c", "/") === "a\\/b\\#c" && preg_quote("a\0b") === "a\\000b" && preg_quote("h\xC3\xA9llo.") === "h\xC3\xA9llo\\.");
     check("pg51", preg_grep('/^\d+$/', ['1', 'a', 'x' => '22']) === [0 => '1', 'x' => '22']
         && preg_grep('/^\d+$/', ['1', 'a', 'x' => '22'], PREG_GREP_INVERT) === [1 => 'a']);
+    // Recursion and subroutine calls: a call's captures are undone when it
+    // returns; DEFINE groups are matched only through calls.
+    check("pg52", preg_match('/\((?:[^()]|(?R))*\)/', 'x(a(b)c)y', $m) === 1 && $m[0] === '(a(b)c)'
+        && preg_match('/^((.)(?1)\2|.?)$/', 'abcba', $m) === 1 && s79d($m) === "[0=>'abcba',1=>'abcba',2=>'a']"
+        && preg_match('/(?<p>\[(?:[^\[\]]|(?&p))*\])/', 'z[a[b]]', $m) === 1 && $m[0] === '[a[b]]'
+        && preg_match('/(a|b\g<1>)/', 'bba', $m) === 1 && $m[1] === 'bba'
+        && preg_match('/(\d)(?1)/', '12', $m) === 1 && s79d($m) === "[0=>'12',1=>'1']"
+        && preg_match('/(?(DEFINE)(?<d>\d+)(?<op>[+-]))^(?&d)(?:(?&op)(?&d))*$/', '12+3-4') === 1);
+    // Conditionals on a group, a name, an assertion and recursion.
+    check("pg53", preg_match('/(a)?(?(1)b|c)/', 'ab', $m) === 1 && s79d($m) === "[0=>'ab',1=>'a']"
+        && preg_match('/(a)?(?(1)b|c)/', 'c', $m) === 1 && $m === ['c'] && preg_match('/^(a)?(?(1)b|c)$/', 'ac') === 0
+        && preg_match('/(?<q>")?\w+(?(q)")/', '"ab"', $m) === 1 && $m[0] === '"ab"'
+        && preg_match('/(?(?=\d)\d\d|[a-z])/', '5x', $m) === 1 && $m[0] === 'x'
+        && preg_match('/(?(R)a|b)/', 'b') === 1 && preg_match('/(?(1)a|b|c)/', 'a') === false);
+    // A branch reset numbers each branch's groups from the same point.
+    check("pg54", preg_match('/(?|(a)(x)|(b))(y)/', 'by', $m) === 1 && s79d($m) === "[0=>'by',1=>'b',2=>'',3=>'y']"
+        && preg_match('/(?|(?<n>a)|(?<n>b))/', 'b', $m) === 1 && s79d($m) === "[0=>'b','n'=>'b',1=>'b']");
+    // The backtracking verbs, with PCRE2's first code unit optimization.
+    check("pg55", preg_match('/a+(*COMMIT)b/', 'aaac aaab') === 0 && preg_match('/aa(*SKIP)b|a+c/', 'aaac', $m) === 1
+        && $m[0] === 'ac' && preg_match('/(a(*THEN)b|ac)/', 'ac', $m) === 1 && $m[0] === 'ac'
+        && preg_match('/a(*ACCEPT)b/', 'ac', $m) === 1 && $m[0] === 'a' && preg_match('/(*COMMIT)abc/', 'xyzabc') === 1
+        && preg_match('/(*COMMIT)[ab]c/', 'xbc') === 0 && preg_replace('/(*COMMIT)/', '<$0>', 'a1b2') === "<>a<>1<>b<>2<>");
+    // Pattern start options, callouts, (?xx), and caseless \p{Lu} against
+    // [[:lower:]].
+    check("pg56", preg_match('/(*UTF)^.$/', "\xC3\xA9") === 1 && preg_match('/(*CRLF)a$/', "a\r\n") === 1
+        && preg_match('/a(?C1)b/', 'ab') === 1 && preg_match('/(?xx)[a b]+/', 'a b', $m) === 1 && $m[0] === 'a'
+        && preg_match('/\p{Lu}/iu', 'a') === 1 && preg_match('/[[:lower:]]/iu', 'B') === 0);
+    // The step limit is PREG_BACKTRACK_LIMIT_ERROR; a recursion that cannot
+    // advance PCRE2's internal error.
+    check("pg57", preg_match('/(?:\D+|<\d+>)*[!?]/', 'foobar foobar foobar') === false
+        && preg_last_error() === PREG_BACKTRACK_LIMIT_ERROR && preg_last_error_msg() === "Backtrack limit exhausted"
+        && preg_match('/(?R)/', 'a') === false && preg_last_error() === PREG_INTERNAL_ERROR);
+    // An array where a string parameter stands is a TypeError.
+    $te = "";
+    try { preg_match('/a/', ['x']); } catch (TypeError $e) { $te = $e->getMessage(); }
+    check("pg58", $te === 'preg_match(): Argument #2 ($subject) must be of type string, array given');
 }
 
 // ===== END SECTIONS =====
