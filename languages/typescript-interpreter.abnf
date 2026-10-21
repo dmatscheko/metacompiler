@@ -3570,6 +3570,11 @@ NotFuncHead = :script(~~
             return {v: es}
         }
         if (name == "assign") {
+            // The target is ToObject(target). Twin of Object.assign in
+            // js-interpreter.abnf, which states the rule.
+            if (src === undefined || src === null) { biRaise("TypeError: Cannot convert undefined or null to object") }
+            var to = anytype // The target as an object.
+            to = jsToObject(src)
             for (var a = 1; a < args.length; a++) {
                 if (args[a] === undefined || args[a] === null) { continue }
                 var ka = jsOwnKeys(args[a])
@@ -3577,31 +3582,31 @@ NotFuncHead = :script(~~
                     var av = anytype // The value copied.
                     av = getMember(args[a], ka[b])
                     // Object.assign is a builtin, and so strict code: a refused write raises.
-                    if (jsAttrN > 0 && typeof src == "object" && src !== null) {
-                        var ar = jsWriteRefusal(src, ka[b], av)
+                    if (jsAttrN > 0 && typeof to == "object" && to !== null) {
+                        var ar = jsWriteRefusal(to, ka[b], av)
                         if (ar != "") { biRaise("TypeError: " + ar) }
                     }
-                    if (typeof src == "object" && src !== null && !Array.isArray(src)) {
+                    if (typeof to == "object" && to !== null && !Array.isArray(to)) {
                         var gh = anytype // The holder of a getter-only accessor, or undefined.
-                        gh = accHolder(src, ka[b])
+                        gh = accHolder(to, ka[b])
                         if (gh !== undefined && accSlot(gh.__acc, "set:" + ka[b]) === undefined) {
-                            biRaise("TypeError: " + jsGetterOnlyText(ka[b], jsAccHolderText(src, gh)))
+                            biRaise("TypeError: " + jsGetterOnlyText(ka[b], jsAccHolderText(to, gh)))
                         }
                     }
-                    if (Array.isArray(src) && arrProps(src) !== undefined) {
+                    if (Array.isArray(to) && arrProps(to) !== undefined) {
                         // An array's accessor, on an index or a named key.
-                        var aak = (jsIdxAccN > 0) ? jsArrIdxAccKey(src, ka[b]) : ""
-                        if (aak == "" && ka[b] !== "length" && jsArrIndexKey(ka[b]) < 0 && jsIsAccKey(arrProps(src), "" + ka[b])) { aak = "" + ka[b] }
-                        if (aak != "" && accSlot(arrProps(src).__acc, "set:" + aak) === undefined) {
-                            biRaise("TypeError: " + jsGetterOnlyText(aak, jsObjText(src)))
+                        var aak = (jsIdxAccN > 0) ? jsArrIdxAccKey(to, ka[b]) : ""
+                        if (aak == "" && ka[b] !== "length" && jsArrIndexKey(ka[b]) < 0 && jsIsAccKey(arrProps(to), "" + ka[b])) { aak = "" + ka[b] }
+                        if (aak != "" && accSlot(arrProps(to).__acc, "set:" + aak) === undefined) {
+                            biRaise("TypeError: " + jsGetterOnlyText(aak, jsObjText(to)))
                         }
                     }
-                    setMember(src, ka[b], av)
+                    setMember(to, ka[b], av)
                 }
                 var sa = jsSymKeysOf(args[a])
-                for (var c = 0; c < sa.length; c++) { setMember(src, sa[c], getMember(args[a], sa[c])) }
+                for (var c = 0; c < sa.length; c++) { setMember(to, sa[c], getMember(args[a], sa[c])) }
             }
-            return {v: src}
+            return {v: to}
         }
         if (name == "fromEntries") {
             var o = {}

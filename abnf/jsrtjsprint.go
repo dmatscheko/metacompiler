@@ -4278,7 +4278,13 @@ func (rt *jsrt) jsvMethod(target interface{}, name string, args []interface{}) (
 			}
 			return out, true
 		case "assign":
+			// The target is ToObject(target). Twin of Object.assign in
+			// js-interpreter.abnf, which states the rule.
 			dst := argAt(args, 0)
+			if isUndefOrNull(dst) {
+				rt.bigRaise("TypeError: Cannot convert undefined or null to object")
+			}
+			dst = jsvToObject(dst)
 			switch dst.(type) {
 			case *jsObject, *jsArray:
 			default:

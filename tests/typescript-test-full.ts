@@ -5230,8 +5230,9 @@ function s124(): void {
 // write (strict code), a non-enumerable one leaves Object.keys and for-in, a
 // non-configurable one refuses delete and stops a shorter length. The methods that
 // move elements Set and delete in the spec's order and raise at the first refused
-// one, after the writes before it. Values read off tsc 6.0.3's default output run
-// by node 24.
+// one, after the writes before it. A primitive target is written into, and answered
+// as, its wrapper object; null and undefined raise. Values read off tsc 6.0.3's
+// default output run by node 24.
 function s125(): void {
     var srcs: any[] = [[1, 2], { x: 1 }]
     check("arrattr1", Object.assign([0, 0, 9], srcs[0]).join() == "1,2,9")
@@ -5299,6 +5300,14 @@ function s125(): void {
     st.sort()
     check("arrattr11", e7 == "Cannot assign to read only property '4' of object '[object Array]'" && us.join() == "1,2,3,4,5,4,5" &&
         us.length == 7 && log.join() == "0=1")
+    var prims: any[] = [5, "ab", true, null]
+    var pn: any = Object.assign(prims[0], { a: 1 }, null)
+    var ps: any = Object.assign(prims[1], { a: 1 })
+    var e8 = ""
+    try { Object.assign(prims[3], { a: 1 }) } catch (e: any) { e8 = e.message }
+    check("arrattr12", typeof pn == "object" && pn instanceof Number && pn + 1 == 6 && pn.a == 1 &&
+        Object.keys(ps).join() == "0,1,a" && String(ps) == "ab" && typeof Object.assign(prims[2], {}) == "object" &&
+        e8 == "Cannot convert undefined or null to object")
 }
 
 // ===== END SECTIONS =====

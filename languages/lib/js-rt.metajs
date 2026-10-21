@@ -6772,8 +6772,13 @@ function jvObjectGlobalMethod(name, args) {
         return eo
     }
     if (name == "assign") {
-        if (!jvIsObjLike(src)) {
-            if (!jvIsCallable(src)) { fail("Object.assign needs an object target") }
+        // The target is ToObject(target). Twin of Object.assign in
+        // js-interpreter.abnf, which states the rule.
+        if (jvUndefOrNull(src)) { jbRaise("TypeError: Cannot convert undefined or null to object") }
+        var to = anytype
+        to = jvToObject(src)
+        if (!jvIsObjLike(to)) {
+            if (!jvIsCallable(to)) { fail("Object.assign needs an object target") }
         }
         var ai = 1
         while (ai < args.length) {
@@ -6785,19 +6790,19 @@ function jvObjectGlobalMethod(name, args) {
                     var av = anytype
                     av = js_jsmget(s, sk[sj])
                     // Object.assign is a builtin, and so strict code: a refused write raises.
-                    if (js_jsmset(src, sk[sj], av) === false) { js_jsrefuse() }
+                    if (js_jsmset(to, sk[sj], av) === false) { js_jsrefuse() }
                     sj = sj + 1
                 }
                 var ss = jvSymKeys(s)
                 var si = 0
                 while (si < ss.length) {
-                    if (js_jsmset(src, ss[si], js_jsmget(s, ss[si])) === false) { js_jsrefuse() }
+                    if (js_jsmset(to, ss[si], js_jsmget(s, ss[si])) === false) { js_jsrefuse() }
                     si = si + 1
                 }
             }
             ai = ai + 1
         }
-        return src
+        return to
     }
     if (name == "fromEntries") {
         var fo = {}
