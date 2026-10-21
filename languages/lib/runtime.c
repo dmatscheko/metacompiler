@@ -3827,20 +3827,28 @@ long method_id_string(long name) {
 
 /* ------------------------------------------------------- member access --- */
 
-/* maybeNumeric, matching abnf/jsrt.go: a non-string key is always an index
- * candidate, and a string one is only when it could parse as a number. */
-int maybe_numeric(long key) {
-	int c;
-	if (tag_of(key) != 4) { return 1; }
-	if (str_len(key) == 0) { return 1; }
-	c = (int)str_ptr(key)[0] & 255;
-	return c <= 32 || (c >= 48 && c <= 57) || c == 43 || c == 45 || c == 46 ||
-	       c == 73 || c == 105 || c == 78 || c == 110;
-}
-
-/* An index that is a non-negative integer, or -1. */
+/* The array (or string) index a member key names, or -1 for a property name:
+ * a number that is a non-negative integer, or a string spelling one
+ * canonically below 2^32 - 1 (the ECMAScript array index, so "01", "1.0",
+ * "+1", " 1", "-0" and "" are names). Twin of rt.arrIndexOf in abnf/jsrt.go. */
 long index_of_key(long key) {
-	long n = to_number(key);
+	long n;
+	if (tag_of(key) == 4) {
+		long len = str_len(key);
+		const char *p = str_ptr(key);
+		long v = 0;
+		long i = 0;
+		if (len == 0 || len > 10 || (p[0] == 48 && len > 1)) { return -1; }
+		while (i < len) {
+			int c = (int)p[i] & 255;
+			if (c < 48 || c > 57) { return -1; }
+			v = v * 10 + (c - 48);
+			i = i + 1;
+		}
+		if (v >= 4294967295) { return -1; }
+		return v;
+	}
+	n = to_number(key);
 	if (d_is_nan(n) || d_is_inf(n)) { return -1; }
 	if (!d_is_integral(n)) { return -1; }
 	if (!d_in_long(n)) { return -1; }
@@ -3886,7 +3894,7 @@ long get_member(long obj, long key) {
 			mid = method_id_array(key);
 			if (mid != 0) { return mk_bound(obj, mid); }
 		}
-		idx = maybe_numeric(key) ? index_of_key(key) : -1;
+		idx = index_of_key(key);
 		if (idx >= 0) { return arr_get(obj, idx); }
 		/* A key that is no index names a property in field e (set_member). */
 		if (fe(obj) != H_UNDEF) { return obj_get(fe(obj), to_string(key)); }
@@ -3899,7 +3907,6 @@ long get_member(long obj, long key) {
 			mid = method_id_string(key);
 			if (mid != 0) { return mk_bound(obj, mid); }
 		}
-		if (!maybe_numeric(key)) { return H_UNDEF; }
 		idx = index_of_key(key);
 		if (idx >= 0 && idx < str_ulen(obj)) { return u_slice(obj, idx, idx + 1); }
 		return H_UNDEF;
@@ -3928,7 +3935,7 @@ void set_member(long obj, long key, long val) {
 			while (arr_len(obj) < ln) { arr_push(obj, H_UNDEF); }
 			return;
 		}
-		idx = maybe_numeric(key) ? index_of_key(key) : -1;
+		idx = index_of_key(key);
 		/* A key that is no index is a NAMED property: it lives in an object
 		 * kept in field e (arrProps), made at the first such write. */
 		if (idx < 0) {

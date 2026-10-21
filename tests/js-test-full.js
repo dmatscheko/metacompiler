@@ -1116,6 +1116,28 @@ function s120() {
     check("rec3", s120deep(100) == 100)
 }
 
+// ===== SECTION 121: an array index is a canonical numeric string =====
+// A string key is an array index only when it is the canonical spelling of an
+// integer below 2^32 - 1; "01", "1.0", "+1", " 1", "-0" and "" name ordinary
+// properties, as does a fractional number.
+function s121() {
+    var k = []
+    k["01"] = 7
+    check("canon1", k.length == 0 && k[1] === undefined && k["01"] === 7)
+    check("canon2", Object.keys(k).join("|") == "01" && ("01" in k) && !("1" in k))
+    var a = [10, 20, 30]
+    var ks = ["01", "1.0", "+1", " 1", "-0", "", "1"]
+    var got = ""
+    for (var i = 0; i < ks.length; i++) { got = got + a[ks[i]] + "," + (ks[i] in a) + ";" }
+    check("canon3", got == "undefined,false;undefined,false;undefined,false;undefined,false;undefined,false;undefined,false;20,true;")
+    a["-0"] = 5
+    a[" 2"] = 6
+    check("canon4", a.length == 3 && a[0] === 10 && a[2] === 30 && Object.keys(a).join("|") == "0|1|2|-0| 2")
+    check("canon5", (delete a["-0"]) && Object.keys(a).join("|") == "0|1|2| 2" && !(1.5 in a))
+    var str = "abc"
+    check("canon6", str["01"] === undefined && str["1"] === "b")
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -1155,6 +1177,7 @@ function main() {
     s34() // SECTION-CALL 34
     s35() // SECTION-CALL 35
     s120() // SECTION-CALL 120
+    s121() // SECTION-CALL 121
     println("full: " + checks + " checks, " + failures + " failures")
     return failures
 }

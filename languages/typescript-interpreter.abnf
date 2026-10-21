@@ -5900,9 +5900,12 @@ NotFuncHead = :script(~~
         p = arrProps(a)
         return p !== undefined && jsAttrHas(p, list, k)
     }
-    // The array index member key k names, or -1 when it names a property: ToNumber of
-    // k must be a non-negative integer. Twin of rt.arrIndexOf in abnf/jsrt.go.
+    // The array index member key k names, or -1 when it names a property: a number
+    // must be a non-negative integer, a string the canonical spelling of one below
+    // 2^32 - 1 (jsArrayIndex), so "01", "1.0" and "-0" name properties. Twin of
+    // rt.arrIndexOf in abnf/jsrt.go.
     function jsArrIndexKey(k) {
+        if (typeof k == "string") { return jsArrayIndex(k) }
         var n = anytype // ToNumber of the key.
         n = (typeof k == "number") ? k : k - 0
         if (!(n >= 0) || n === Infinity || Math.floor(n) !== n) { return 0 - 1 }
@@ -7137,7 +7140,7 @@ NotFuncHead = :script(~~
         if (jsArrClasses.length > 0 && Array.isArray(o) && jsArrClassOf(o) !== undefined && jsProtoChainHas(jsArrClassOf(o), "" + k)) { return true }
         if (Array.isArray(o)) {
             if (jsArrNamedHas(o, "" + k)) { return true }
-            var n = k - 0
+            var n = jsArrIndexKey(k)
             return n >= 0 && n < o.length
         }
         if (jsIsWrap(o) && typeof o.__bvof == "string" && jsHasOwn(o.__bvof, k)) { return true }

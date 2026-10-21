@@ -1293,12 +1293,10 @@ function js_jsdel(o, key) {
         }
     }
     if (Array.isArray(o)) {
-        var idx = jvToNumber(key)
-        if (idx === Math.trunc(idx)) {
-            if (idx >= 0) {
-                if (idx < o.length) { o[idx] = undefined }
-                return true
-            }
+        var idx = jvKeyIndex(key)
+        if (idx >= 0) {
+            if (idx < o.length) { o[idx] = undefined }
+            return true
         }
         var dp = anytype
         dp = arrProps(o)
@@ -1783,8 +1781,18 @@ function jvArrAcc(a, k) {
 // Whether key names an array property rather than an index or the length.
 function jvArrNamedKey(key) {
     if (key === "length") { return false }
+    return jvKeyIndex(key) < 0
+}
+// The array index a member key names, or -1: a number that is a finite
+// non-negative integer, a string only in its canonical spelling (jvArrayIndex).
+// Twin of rt.arrIndexOf in abnf/jsrt.go.
+function jvKeyIndex(key) {
+    if (typeof key == "string") { return jvArrayIndex(key) }
     var idx = jvToNumber(key)
-    return !(idx === Math.trunc(idx) && idx >= 0)
+    if (idx !== Math.trunc(idx)) { return -1 }
+    if (idx < 0) { return -1 }
+    if (idx - idx !== 0) { return -1 }
+    return idx
 }
 
 // A tagged template's strings array. Twin of js_jstagstrs in abnf/jsrtjsprint.go,
@@ -3218,9 +3226,7 @@ function js_jsmset(o, key, v) {
 // ===================================================== 'in' ===============
 
 function jvIndexIn(key, n) {
-    var idx = jvToNumber(key)
-    if (idx !== idx) { return false }
-    if (idx !== Math.trunc(idx)) { return false }
+    var idx = jvKeyIndex(key)
     if (idx < 0) { return false }
     return idx < n
 }

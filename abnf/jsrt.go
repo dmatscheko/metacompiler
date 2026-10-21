@@ -2899,17 +2899,25 @@ func isCallable(v interface{}) bool {
 // they are an index, and a failing ParseFloat costs a formatted error - so the
 // ordinary property name is rejected by its first byte instead. Only a digit,
 // a sign, a dot, leading space or the start of Infinity/NaN can begin a number.
-func maybeNumeric(key interface{}) bool {
-	s, isStr := key.(string)
-	if !isStr {
-		return true
+// canonIndex is the array index s spells canonically, or -1: decimal digits
+// with no leading zero, below 2^32 - 1.
+func canonIndex(s string) int {
+	n := len(s)
+	if n == 0 || n > 10 || (s[0] == '0' && n > 1) {
+		return -1
 	}
-	if s == "" {
-		return true // "" converts to 0, like it always did.
+	v := 0
+	for i := 0; i < n; i++ {
+		c := s[i]
+		if c < '0' || c > '9' {
+			return -1
+		}
+		v = v*10 + int(c-'0')
 	}
-	c := s[0]
-	return c <= ' ' || (c >= '0' && c <= '9') || c == '+' || c == '-' || c == '.' ||
-		c == 'I' || c == 'i' || c == 'N' || c == 'n'
+	if v >= 4294967295 {
+		return -1
+	}
+	return v
 }
 
 // atoiName is strconv.Atoi for a property name, without the error allocation
@@ -3134,12 +3142,8 @@ func (rt *jsrt) getMember(obj interface{}, key interface{}) interface{} {
 				return &boundMethod{recv: o, name: ks}
 			}
 		}
-		if !maybeNumeric(key) {
-			return jsUndef
-		}
-		idx := rt.toNumber(key)
-		if idx == math.Trunc(idx) && idx >= 0 {
-			if ch := rt.strAt(o, int(idx)); ch != "" {
+		if idx := rt.arrIndexOf(key); idx >= 0 {
+			if ch := rt.strAt(o, idx); ch != "" {
 				return ch
 			}
 		}
@@ -3227,12 +3231,15 @@ func (rt *jsrt) importGoValue(v interface{}) interface{} {
 	}
 }
 
-// arrIndexOf is the array index a member key names, or -1 for a key that is
-// no index (a property name, a negative or fractional number). Twin of
-// maybe_numeric + index_of_key in languages/lib/runtime.c.
+// arrIndexOf is the array (or string) index a member key names, or -1 for a
+// key that is no index: a property name, a negative or fractional number. A
+// string key is an index only in its canonical spelling below 2^32 - 1, the
+// ECMAScript array index (ToString(ToUint32(k)) === k), so "01", "1.0", "+1",
+// " 1", "-0" and "" name properties. Twin of index_of_key in
+// languages/lib/runtime.c.
 func (rt *jsrt) arrIndexOf(key interface{}) int {
-	if !maybeNumeric(key) {
-		return -1
+	if s, isStr := key.(string); isStr {
+		return canonIndex(s)
 	}
 	idx := rt.toNumber(key)
 	if idx != math.Trunc(idx) || idx < 0 || idx > math.MaxInt64/2 {
@@ -14144,20 +14151,14 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				if key == "length" {
 					return boolH(true)
 				}
-				if !maybeNumeric(u(a[1])) {
-					return boolH(false)
-				}
-				idx := rt.toNumber(u(a[1]))
-				return boolH(idx == math.Trunc(idx) && idx >= 0 && int(idx) < len(o.elems))
+				idx := rt.arrIndexOf(u(a[1]))
+				return boolH(idx >= 0 && idx < len(o.elems))
 			case string:
 				if key == "length" {
 					return boolH(true)
 				}
-				if !maybeNumeric(u(a[1])) {
-					return boolH(false)
-				}
-				idx := rt.toNumber(u(a[1]))
-				return boolH(idx == math.Trunc(idx) && idx >= 0 && int(idx) < rt.strLen(o))
+				idx := rt.arrIndexOf(u(a[1]))
+				return boolH(idx >= 0 && idx < rt.strLen(o))
 			}
 			rt.fail("'in' needs an object on the right side")
 			return boolH(false)
