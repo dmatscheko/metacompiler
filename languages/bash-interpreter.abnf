@@ -2740,8 +2740,11 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // function declare a function-local name (value AND attributes restored on
             // return) unless -g is given; `export` and `readonly` always act on the global.
             var localize = !global && (kw == "local" || ((kw == "declare" || kw == "typeset") && localFrames.length > 0))
+            // A second `local` of a name in the same call keeps its value, array and
+            // attributes (bash 5.3: f() { local a=5; local a; echo $a; } prints 5).
+            var fresh = localize && !localHere(names[k])
             touchState(names[k])
-            if (localize) {
+            if (fresh) {
                 declareLocal(names[k])
                 // A local declaration starts from a CLEAN SLATE. bash does not inherit
                 // the global's attributes or its array: `declare -i g; f(){ local g;
@@ -2755,6 +2758,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (lower) { loVars["$" + names[k]] = true; upVars["$" + names[k]] = false }
             // A global `declare -a a` keeps a's elements; only a value or a local starts empty.
             if (isArray && asgs[k] == null) {
+                // A local scalar declared an array again becomes an empty one (bash 5.3).
+                if (localize && !isArr(names[k])) { unsetVar(names[k]) }
                 if (!assoc && !localize) { arrAdopt(names[k]) }
                 arrEnsure(names[k], assoc)
                 arrs[arrKey(names[k])].decl = true
@@ -2763,7 +2768,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 if (isArray) { arrNew(names[k], assoc) }
                 if (asgs[k].lit != null) { runAssign(asgs[k], assoc) } else { runAssignV(asgs[k], assoc, v) }
             }
-            else if (localize) { unsetVar(names[k]) }
+            else if (fresh) { unsetVar(names[k]) }
             if (asgs[k] == null && !isArray && kw != "export" && kw != "readonly") { dclVars["$" + names[k]] = true }
         }
         // The expanded values, one array per running declaration: the expansion of a value can

@@ -1733,6 +1733,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var rtSsRestore = rtDecl("rt_ss_restore", false, [0])
     var rtPushLocal = rtDecl("rt_push_local", false, [0])
     var rtPopLocals = rtDecl("rt_pop_locals", false, [0])
+    var rtLocalHere = rtDecl("rt_local_here", false, [0, 0])
     var rtUnsetUp = rtDecl("rt_unset_up", false, [0, 0, 0])
 
     // ===================================================================================
@@ -3324,31 +3325,57 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // why subDepth is tested beside `localize` and not inside it.
             if (subDepth > 0 && !(localize && curFrame != null)) { attrPushUndo(names[j]) }
             if (localize && curFrame != null) {
-                curFrame.locs["$" + names[j]] = true
-                attrPushUndo(names[j])
-                b.NewCall(rtPushLocal, llvm.constant.NewInt(i32, getVarId(names[j])))
-                // A local declaration starts from a CLEAN SLATE. bash does not inherit
+                var key = "$" + names[j]
+                // A second `local` of a name in the same call keeps its value, array and
+                // attributes; only the first starts from a CLEAN SLATE. bash does not inherit
                 // the global's attributes or its array: `declare -i g; f(){ local g;
                 // g=1+1; }` prints 1+1, and `arr=(a b); f(){ local arr=Q; }` sees a
-                // one-element array. rt_push_local has just saved all of it for the return.
-                intVars["$" + names[j]] = false
-                upVars["$" + names[j]] = false
-                loVars["$" + names[j]] = false
+                // one-element array. rt_push_local saves all of it for the return.
+                var lexAgain = hasOwn(curFrame.locs, key)
+                curFrame.locs[key] = true
+                attrPushUndo(names[j])
+                if (!lexAgain) {
+                    intVars[key] = false
+                    upVars[key] = false
+                    loVars[key] = false
+                }
+                // Lexically first and in no loop, it is the first at run time too; otherwise
+                // rt_local_here asks.
+                if (lexAgain || loopStack.length > 0) {
+                    var freshB = curF.NewBlock(""), joinB = curF.NewBlock("")
+                    var here = b.NewCall(rtLocalHere, [llvm.constant.NewInt(i32, getVarId(names[j])), b.NewLoad(i32, curFrame.depth)])
+                    b.NewCondBr(b.NewICmp(llvm.enum.IPredEQ, here, zero), freshB, joinB)
+                    freshLocal(freshB, j)
+                    freshB.NewBr(joinB)
+                    b = joinB
+                } else { freshLocal(b, j) }
             }
             if (integer) { intVars["$" + names[j]] = true }
             if (upper) { upVars["$" + names[j]] = true; loVars["$" + names[j]] = false }
             if (lower) { loVars["$" + names[j]] = true; upVars["$" + names[j]] = false }
             // A global `declare -a a` keeps a's elements; only a value or a local starts empty.
-            if ((isArray && asgs[j] != null) || (localize && curFrame != null)) { b.NewCall(rtArrClear, gepStr(b, names[j])) }
+            if (isArray && asgs[j] != null) { b.NewCall(rtArrClear, gepStr(b, names[j])) }
+            if (isArray && asgs[j] == null && localize && curFrame != null) {
+                // A local scalar declared an array again becomes an empty one (bash 5.3).
+                var keepV = assoc ? null : b.NewICmp(llvm.enum.IPredNE, b.NewCall(rtArrAny, gepStr(b, names[j])), zero)
+                storeVarRaw(b, names[j], assoc ? unsetPtr(b) : b.NewSelect(keepV, loadVar(b, names[j]), unsetPtr(b)))
+            }
             if (isArray && asgs[j] == null) { b.NewCall(rtArrDmark, gepStr(b, names[j])) }
             if (asgs[j] != null) {
                 var a = asgs[j]
                 if (v != null) { a = {name: a.name, op: a.op, idxT: a.idxT, lit: null, valT: doneWord(v)} }
                 b = emitAssign(b, a, assoc, null)
             }
-            else if (localize) { storeVarRaw(b, names[j], unsetPtr(b)) }
+            else if (localize && curFrame == null) { storeVarRaw(b, names[j], unsetPtr(b)) }
             if (asgs[j] == null && !isArray && kw != "export" && kw != "readonly") { b.NewCall(rtArrSmark, gepStr(b, names[j])) }
             return b
+        }
+        // A name's first `local` in a call: saved for the return, then empty and unset unless
+        // the declaration assigns it.
+        var freshLocal = function(b, j) {
+            b.NewCall(rtPushLocal, llvm.constant.NewInt(i32, getVarId(names[j])))
+            b.NewCall(rtArrClear, gepStr(b, names[j]))
+            if (asgs[j] == null) { storeVarRaw(b, names[j], unsetPtr(b)) }
         }
         // The values phase one expanded, per declaration being emitted (null: emitAssign's own).
         var pre = {vals: []}

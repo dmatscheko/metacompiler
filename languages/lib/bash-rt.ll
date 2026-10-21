@@ -8071,7 +8071,7 @@ entry:
 	%152 = icmp ne i32 %151, 0
 	br i1 %152, label %153, label %156
 
-dead620:
+dead622:
 	br label %138
 
 153:
@@ -8088,10 +8088,10 @@ dead620:
 	%162 = bitcast i32* %161 to i32*
 	ret i32* %162
 
-dead621:
+dead623:
 	br label %156
 
-dead622:
+dead624:
 	br label %115
 
 163:
@@ -8116,7 +8116,7 @@ dead622:
 	%178 = icmp ne i32 %177, 0
 	br i1 %178, label %179, label %184
 
-dead623:
+dead625:
 	br label %168
 
 179:
@@ -8143,7 +8143,7 @@ dead623:
 	%196 = icmp ne i32 %195, 0
 	br i1 %196, label %209, label %197
 
-dead624:
+dead626:
 	br label %184
 
 197:
@@ -8189,7 +8189,7 @@ dead624:
 	%227 = icmp ne i32 %226, 0
 	br i1 %227, label %228, label %236
 
-dead625:
+dead627:
 	br label %217
 
 228:
@@ -8222,7 +8222,7 @@ dead625:
 	%246 = icmp ne i32 %245, 0
 	br i1 %246, label %247, label %252
 
-dead626:
+dead628:
 	br label %236
 
 247:
@@ -8249,7 +8249,7 @@ dead626:
 	%262 = icmp ne i32 %261, 0
 	br i1 %262, label %263, label %269
 
-dead627:
+dead629:
 	br label %252
 
 263:
@@ -8274,7 +8274,7 @@ dead627:
 	%276 = icmp ne i32 %275, 0
 	br i1 %276, label %277, label %278
 
-dead628:
+dead630:
 	br label %269
 
 277:
@@ -8382,10 +8382,10 @@ dead628:
 	%345 = bitcast i32* %344 to i32*
 	ret i32* %345
 
-dead629:
+dead631:
 	br label %342
 
-dead630:
+dead632:
 	br label %329
 
 346:
@@ -8441,10 +8441,10 @@ dead630:
 	%383 = bitcast i32* %382 to i32*
 	ret i32* %383
 
-dead631:
+dead633:
 	br label %381
 
-dead632:
+dead634:
 	ret i32* null
 }
 
@@ -9562,7 +9562,7 @@ entry:
 	%18 = call i32 @rt_pin()
 	ret i32 0
 
-dead633:
+dead635:
 	ret i32 0
 }
 
@@ -13829,7 +13829,7 @@ entry:
 	%391 = phi i32 [ 1, %388 ], [ 0, %389 ]
 	br label %376
 
-dead677:
+dead679:
 	ret i32 0
 }
 
@@ -37440,10 +37440,10 @@ entry:
 	store i32 %72, i32* %2
 	br label %44
 
-dead613:
+dead615:
 	br label %69
 
-dead614:
+dead616:
 	ret i32 0
 }
 
@@ -49383,6 +49383,54 @@ dead608:
 	ret i32 0
 }
 
+define i32 @rt_local_here(i32 %0, i32 %1) {
+entry:
+	%2 = alloca i32
+	store i32 %0, i32* %2
+	%3 = alloca i32
+	store i32 %1, i32* %3
+	%4 = alloca i32
+	%5 = load i32, i32* %3
+	store i32 %5, i32* %4
+	br label %6
+
+6:
+	%7 = load i32, i32* %4
+	%8 = load i32, i32* @ls_top
+	%9 = icmp slt i32 %7, %8
+	%10 = zext i1 %9 to i32
+	%11 = icmp ne i32 %10, 0
+	br i1 %11, label %12, label %20
+
+12:
+	%13 = load i32, i32* %4
+	%14 = getelementptr [512 x i32], [512 x i32]* @ls_id, i32 0, i32 %13
+	%15 = load i32, i32* %14
+	%16 = load i32, i32* %2
+	%17 = icmp eq i32 %15, %16
+	%18 = zext i1 %17 to i32
+	%19 = icmp ne i32 %18, 0
+	br i1 %19, label %21, label %22
+
+20:
+	ret i32 0
+
+21:
+	ret i32 1
+
+22:
+	%23 = load i32, i32* %4
+	%24 = add i32 %23, 1
+	store i32 %24, i32* %4
+	br label %6
+
+dead609:
+	br label %22
+
+dead610:
+	ret i32 0
+}
+
 define i32 @rt_pop_locals(i32 %0) {
 entry:
 	%1 = alloca i32
@@ -49439,7 +49487,7 @@ entry:
 	store i32 %35, i32* %2
 	br label %4
 
-dead609:
+dead611:
 	ret i32 0
 }
 
@@ -49586,10 +49634,10 @@ entry:
 	store i32 %91, i32* %47
 	br label %71
 
-dead610:
+dead612:
 	br label %50
 
-dead611:
+dead613:
 	ret i32 0
 }
 
@@ -49603,7 +49651,7 @@ entry:
 	%5 = and i32 %4, 4095
 	ret i32 %5
 
-dead612:
+dead614:
 	ret i32 0
 }
 
@@ -49648,10 +49696,10 @@ entry:
 	%25 = bitcast i32* %24 to i32*
 	ret i32* %25
 
-dead615:
+dead617:
 	br label %21
 
-dead616:
+dead618:
 	ret i32* null
 }
 
@@ -49694,7 +49742,7 @@ entry:
 	%27 = icmp ne i32 %26, 0
 	br i1 %27, label %28, label %39
 
-dead617:
+dead619:
 	br label %21
 
 28:
@@ -49771,10 +49819,10 @@ dead617:
 	%85 = bitcast i32* %84 to i32*
 	ret i32* %85
 
-dead618:
+dead620:
 	br label %81
 
-dead619:
+dead621:
 	ret i32* null
 }
 
@@ -49847,7 +49895,7 @@ entry:
 	%46 = icmp ne i32 %45, 0
 	br i1 %46, label %47, label %48
 
-dead634:
+dead636:
 	br label %40
 
 47:
@@ -49860,7 +49908,7 @@ dead634:
 	%52 = icmp ne i32 %51, 0
 	br i1 %52, label %53, label %54
 
-dead635:
+dead637:
 	br label %48
 
 53:
@@ -49941,7 +49989,7 @@ dead635:
 	%103 = icmp ne i32 %102, 0
 	br i1 %103, label %115, label %104
 
-dead636:
+dead638:
 	br label %97
 
 104:
@@ -49969,7 +50017,7 @@ dead636:
 	store i32 0, i32* %6
 	br label %120
 
-dead637:
+dead639:
 	br label %119
 
 120:
@@ -50044,10 +50092,10 @@ dead637:
 	%171 = call i32 @rt_isname(i32* %170)
 	ret i32 %171
 
-dead638:
+dead640:
 	br label %163
 
-dead639:
+dead641:
 	ret i32 0
 }
 
@@ -50113,7 +50161,7 @@ entry:
 	%45 = icmp ne i32 %44, 0
 	br i1 %45, label %46, label %53
 
-dead640:
+dead642:
 	br label %41
 
 46:
@@ -50150,7 +50198,7 @@ dead640:
 	%71 = icmp ne i32 %70, 0
 	br i1 %71, label %72, label %77
 
-dead641:
+dead643:
 	br label %65
 
 72:
@@ -50174,7 +50222,7 @@ dead641:
 	%84 = bitcast i32* %83 to i32*
 	ret i32* %84
 
-dead642:
+dead644:
 	br label %53
 
 85:
@@ -50191,10 +50239,10 @@ dead642:
 	%94 = bitcast i32* %93 to i32*
 	ret i32* %94
 
-dead643:
+dead645:
 	br label %88
 
-dead644:
+dead646:
 	ret i32* null
 }
 
@@ -50367,7 +50415,7 @@ entry:
 	%113 = bitcast i8* %112 to i32*
 	ret i32* %113
 
-dead645:
+dead647:
 	br label %49
 
 114:
@@ -50384,7 +50432,7 @@ dead645:
 	%123 = icmp ne i32 %122, 0
 	br i1 %123, label %124, label %127
 
-dead646:
+dead648:
 	br label %117
 
 124:
@@ -50451,10 +50499,10 @@ dead646:
 	%159 = bitcast i8* %158 to i32*
 	ret i32* %159
 
-dead647:
+dead649:
 	br label %127
 
-dead648:
+dead650:
 	ret i32* null
 }
 
@@ -50501,7 +50549,7 @@ entry:
 28:
 	br label %29
 
-dead649:
+dead651:
 	br label %28
 
 29:
@@ -50556,7 +50604,7 @@ dead649:
 	%63 = phi i32 [ %60, %59 ], [ -1, %61 ]
 	ret i32 %63
 
-dead650:
+dead652:
 	ret i32 0
 }
 
@@ -50623,7 +50671,7 @@ entry:
 	%45 = icmp ne i32 %44, 0
 	br i1 %45, label %46, label %47
 
-dead651:
+dead653:
 	br label %38
 
 46:
@@ -50641,7 +50689,7 @@ dead651:
 	%56 = icmp ne i32 %55, 0
 	br i1 %56, label %57, label %58
 
-dead652:
+dead654:
 	br label %47
 
 57:
@@ -50654,7 +50702,7 @@ dead652:
 	%60 = phi i32 [ 2, %57 ], [ 3, %58 ]
 	ret i32 %60
 
-dead653:
+dead655:
 	ret i32 0
 }
 
@@ -50687,7 +50735,7 @@ entry:
 	%19 = icmp ne i32 %18, 0
 	br i1 %19, label %20, label %33
 
-dead654:
+dead656:
 	br label %15
 
 20:
@@ -50713,10 +50761,10 @@ dead654:
 	%38 = bitcast i32* %37 to i32*
 	ret i32* %38
 
-dead655:
+dead657:
 	br label %33
 
-dead656:
+dead658:
 	ret i32* null
 }
 
@@ -50850,10 +50898,10 @@ entry:
 96:
 	br label %28
 
-dead657:
+dead659:
 	br label %96
 
-dead658:
+dead660:
 	ret i32 0
 }
 
@@ -50913,10 +50961,10 @@ entry:
 	store i32 %38, i32* %3
 	br label %7
 
-dead659:
+dead661:
 	br label %36
 
-dead660:
+dead662:
 	ret i32 0
 }
 
@@ -51419,7 +51467,7 @@ entry:
 	%290 = load i32, i32* %2
 	ret i32 %290
 
-dead661:
+dead663:
 	ret i32 0
 }
 
@@ -51437,7 +51485,7 @@ entry:
 	%9 = load i32, i32* %8
 	ret i32 %9
 
-dead662:
+dead664:
 	ret i32 0
 }
 
@@ -51458,7 +51506,7 @@ entry:
 	store i32 %11, i32* %10
 	ret i32 0
 
-dead663:
+dead665:
 	ret i32 0
 }
 
@@ -51499,10 +51547,10 @@ entry:
 	%25 = load i32, i32* %6
 	ret i32 %25
 
-dead664:
+dead666:
 	br label %13
 
-dead665:
+dead667:
 	ret i32 0
 }
 
@@ -51519,7 +51567,7 @@ entry:
 	%6 = add i32 128, %5
 	ret i32 %6
 
-dead666:
+dead668:
 	ret i32 0
 }
 
@@ -51592,10 +51640,10 @@ entry:
 	store i32 %43, i32* %4
 	br label %9
 
-dead667:
+dead669:
 	br label %39
 
-dead668:
+dead670:
 	ret i32 0
 }
 
@@ -51650,7 +51698,7 @@ entry:
 	%30 = icmp ne i32 %29, 0
 	br i1 %30, label %31, label %37
 
-dead669:
+dead671:
 	br label %26
 
 31:
@@ -51672,7 +51720,7 @@ dead669:
 	store i32 %41, i32* @re_pos
 	br label %2
 
-dead670:
+dead672:
 	ret i32 0
 }
 
@@ -51737,7 +51785,7 @@ entry:
 	%42 = phi i32 [ 1, %39 ], [ 0, %40 ]
 	ret i32 %42
 
-dead671:
+dead673:
 	ret i32 0
 }
 
@@ -51797,7 +51845,7 @@ entry:
 	%36 = phi i32 [ %32, %30 ], [ %34, %33 ]
 	ret i32 %36
 
-dead672:
+dead674:
 	ret i32 0
 }
 
@@ -51831,7 +51879,7 @@ entry:
 	store i8 %23, i8* %11
 	ret i32 0
 
-dead673:
+dead675:
 	ret i32 0
 }
 
@@ -51929,7 +51977,7 @@ entry:
 	%65 = call i32 @re_bit1(i32 %53, i32 %64)
 	br label %56
 
-dead674:
+dead676:
 	ret i32 0
 }
 
@@ -51972,7 +52020,7 @@ entry:
 22:
 	ret i32 0
 
-dead675:
+dead677:
 	ret i32 0
 }
 
@@ -52022,7 +52070,7 @@ entry:
 29:
 	ret i32 0
 
-dead676:
+dead678:
 	ret i32 0
 }
 
@@ -52070,7 +52118,7 @@ entry:
 	%25 = icmp ne i32 %24, 0
 	br i1 %25, label %26, label %34
 
-dead678:
+dead680:
 	br label %19
 
 26:
@@ -52097,7 +52145,7 @@ dead678:
 	store i32 %40, i32* %0
 	br label %4
 
-dead679:
+dead681:
 	br label %38
 
 41:
@@ -52159,10 +52207,10 @@ dead679:
 	%84 = load i32, i32* %3
 	ret i32 %84
 
-dead680:
+dead682:
 	br label %79
 
-dead681:
+dead683:
 	ret i32 0
 }
 
@@ -52213,7 +52261,7 @@ entry:
 	%32 = icmp ne i32 %31, 0
 	br i1 %32, label %33, label %34
 
-dead682:
+dead684:
 	br label %20
 
 33:
@@ -52279,7 +52327,7 @@ dead682:
 	%67 = icmp ne i32 %66, 0
 	br i1 %67, label %68, label %74
 
-dead683:
+dead685:
 	br label %61
 
 68:
@@ -52308,7 +52356,7 @@ dead683:
 	%84 = icmp ne i32 %83, 0
 	br i1 %84, label %85, label %91
 
-dead684:
+dead686:
 	br label %78
 
 85:
@@ -52362,7 +52410,7 @@ dead684:
 	store i32 0, i32* %7
 	br label %116
 
-dead685:
+dead687:
 	br label %115
 
 116:
@@ -52444,10 +52492,10 @@ dead685:
 166:
 	br label %45
 
-dead686:
+dead688:
 	br label %166
 
-dead687:
+dead689:
 	br label %102
 
 167:
@@ -52521,7 +52569,7 @@ dead687:
 	%215 = icmp ne i32 %214, 0
 	br i1 %215, label %216, label %217
 
-dead688:
+dead690:
 	br label %208
 
 216:
@@ -52536,7 +52584,7 @@ dead688:
 	store i32 %220, i32* %7
 	br label %221
 
-dead689:
+dead691:
 	br label %217
 
 221:
@@ -52562,7 +52610,7 @@ dead689:
 234:
 	br label %45
 
-dead690:
+dead692:
 	br label %194
 
 235:
@@ -52575,7 +52623,7 @@ dead690:
 	%240 = call i32 @re_emit(i32 3, i32 %239, i32 0)
 	ret i32 0
 
-dead691:
+dead693:
 	ret i32 0
 }
 
@@ -52719,7 +52767,7 @@ entry:
 	%100 = call i32 @re_emit(i32 %97, i32 %98, i32 %99)
 	br label %62
 
-dead692:
+dead694:
 	ret i32 0
 }
 
@@ -52793,7 +52841,7 @@ entry:
 	%46 = icmp ne i32 %45, 0
 	br i1 %46, label %47, label %48
 
-dead693:
+dead695:
 	br label %42
 
 47:
@@ -52808,7 +52856,7 @@ dead693:
 	%52 = icmp ne i32 %51, 0
 	br i1 %52, label %53, label %58
 
-dead694:
+dead696:
 	br label %48
 
 53:
@@ -52821,7 +52869,7 @@ dead694:
 58:
 	ret i32 0
 
-dead695:
+dead697:
 	br label %22
 
 59:
@@ -52838,7 +52886,7 @@ dead695:
 	%67 = icmp ne i32 %66, 0
 	br i1 %67, label %68, label %72
 
-dead696:
+dead698:
 	br label %63
 
 68:
@@ -52855,7 +52903,7 @@ dead696:
 	%76 = icmp ne i32 %75, 0
 	br i1 %76, label %77, label %81
 
-dead697:
+dead699:
 	br label %72
 
 77:
@@ -52872,7 +52920,7 @@ dead697:
 	%85 = icmp ne i32 %84, 0
 	br i1 %85, label %86, label %88
 
-dead698:
+dead700:
 	br label %81
 
 86:
@@ -52886,7 +52934,7 @@ dead698:
 	%92 = icmp ne i32 %91, 0
 	br i1 %92, label %93, label %99
 
-dead699:
+dead701:
 	br label %88
 
 93:
@@ -52920,10 +52968,10 @@ dead699:
 	%112 = call i32 @re_emit(i32 1, i32 %111, i32 0)
 	ret i32 0
 
-dead700:
+dead702:
 	br label %107
 
-dead701:
+dead703:
 	br label %99
 
 113:
@@ -52965,10 +53013,10 @@ dead701:
 	%137 = call i32 @re_emit(i32 1, i32 %136, i32 0)
 	ret i32 0
 
-dead702:
+dead704:
 	br label %132
 
-dead703:
+dead705:
 	ret i32 0
 }
 
@@ -53054,7 +53102,7 @@ entry:
 	%48 = icmp ne i32 %47, 0
 	br i1 %48, label %49, label %50
 
-dead719:
+dead721:
 	br label %44
 
 49:
@@ -53079,7 +53127,7 @@ dead719:
 	%63 = call i32 @re_set(i32 %61, i32 2, i32 %62)
 	br label %9
 
-dead720:
+dead722:
 	br label %50
 
 64:
@@ -53126,7 +53174,7 @@ dead720:
 94:
 	ret i32 0
 
-dead721:
+dead723:
 	ret i32 0
 }
 
@@ -53267,7 +53315,7 @@ entry:
 	%95 = icmp ne i32 %94, 0
 	br i1 %95, label %96, label %103
 
-dead704:
+dead706:
 	br label %87
 
 96:
@@ -53398,7 +53446,7 @@ dead704:
 168:
 	br label %162
 
-dead705:
+dead707:
 	br label %168
 
 169:
@@ -53417,7 +53465,7 @@ dead705:
 	%180 = icmp ne i32 %179, 0
 	br i1 %180, label %181, label %193
 
-dead706:
+dead708:
 	br label %176
 
 181:
@@ -53441,7 +53489,7 @@ dead706:
 	%197 = icmp ne i32 %196, 0
 	br i1 %197, label %198, label %215
 
-dead707:
+dead709:
 	br label %193
 
 198:
@@ -53487,10 +53535,10 @@ dead707:
 	%233 = call i32 @re_set(i32 %231, i32 2, i32 %232)
 	ret i32 0
 
-dead708:
+dead710:
 	br label %215
 
-dead709:
+dead711:
 	br label %124
 
 234:
@@ -53547,7 +53595,7 @@ dead709:
 	%263 = icmp ne i32 %262, 0
 	br i1 %263, label %264, label %271
 
-dead710:
+dead712:
 	br label %253
 
 264:
@@ -53575,7 +53623,7 @@ dead710:
 	%279 = icmp ne i32 %278, 0
 	br i1 %279, label %280, label %281
 
-dead711:
+dead713:
 	br label %275
 
 280:
@@ -53591,7 +53639,7 @@ dead711:
 	%287 = icmp ne i32 %286, 0
 	br i1 %287, label %288, label %294
 
-dead712:
+dead714:
 	br label %281
 
 288:
@@ -53620,7 +53668,7 @@ dead712:
 	%305 = icmp ne i32 %304, 0
 	br i1 %305, label %306, label %311
 
-dead713:
+dead715:
 	br label %301
 
 306:
@@ -53669,7 +53717,7 @@ dead713:
 	store i32 1, i32* %0
 	br label %342
 
-dead714:
+dead716:
 	br label %335
 
 342:
@@ -53730,7 +53778,7 @@ dead714:
 	%383 = icmp ne i32 %382, 0
 	br i1 %383, label %350, label %357
 
-dead715:
+dead717:
 	br label %311
 
 384:
@@ -53922,7 +53970,7 @@ dead715:
 508:
 	ret i32 0
 
-dead716:
+dead718:
 	ret i32 0
 }
 
@@ -53982,10 +54030,10 @@ entry:
 	store i32 %36, i32* %0
 	br label %4
 
-dead717:
+dead719:
 	br label %33
 
-dead718:
+dead720:
 	ret i32 0
 }
 
@@ -54078,7 +54126,7 @@ entry:
 	%60 = icmp ne i32 %59, 0
 	br i1 %60, label %61, label %69
 
-dead722:
+dead724:
 	br label %39
 
 61:
@@ -54269,7 +54317,7 @@ dead722:
 	store i32 %171, i32* %4
 	br label %155
 
-dead723:
+dead725:
 	br label %162
 
 172:
@@ -54330,7 +54378,7 @@ dead723:
 	store i32 %207, i32* %4
 	br label %185
 
-dead724:
+dead726:
 	br label %192
 
 208:
@@ -54346,7 +54394,7 @@ dead724:
 	%214 = icmp ne i32 %213, 0
 	br i1 %214, label %215, label %221
 
-dead725:
+dead727:
 	br label %209
 
 215:
@@ -54467,7 +54515,7 @@ dead725:
 	store i32 %278, i32* %21
 	br label %279
 
-dead726:
+dead728:
 	br label %277
 
 279:
@@ -54547,7 +54595,7 @@ dead726:
 	%325 = icmp ne i32 %324, 0
 	br i1 %325, label %326, label %331
 
-dead727:
+dead729:
 	br label %316
 
 326:
@@ -54569,10 +54617,10 @@ dead727:
 	store i32 %337, i32* %334
 	br label %307
 
-dead728:
+dead730:
 	br label %331
 
-dead729:
+dead731:
 	ret i32 0
 }
 
@@ -54694,7 +54742,7 @@ entry:
 	%80 = icmp ne i32 %79, 0
 	br i1 %80, label %81, label %82
 
-dead730:
+dead732:
 	br label %76
 
 81:
@@ -55347,7 +55395,7 @@ dead730:
 	store i32* %424, i32** @re_err
 	ret i32 -1
 
-dead731:
+dead733:
 	br label %106
 
 425:
@@ -55404,7 +55452,7 @@ dead731:
 	%456 = icmp ne i32 %455, 0
 	br i1 %456, label %457, label %465
 
-dead732:
+dead734:
 	br label %452
 
 457:
@@ -55481,10 +55529,10 @@ dead732:
 	%499 = load i32, i32* %19
 	ret i32 %499
 
-dead733:
+dead735:
 	br label %465
 
-dead734:
+dead736:
 	ret i32 0
 }
 
@@ -55512,10 +55560,10 @@ entry:
 	%14 = bitcast i32* %13 to i32*
 	ret i32* %14
 
-dead735:
+dead737:
 	br label %12
 
-dead736:
+dead738:
 	ret i32* null
 }
 
@@ -55523,7 +55571,7 @@ define i32 @__mec_body_main() {
 entry:
 	ret i32 0
 
-dead737:
+dead739:
 	ret i32 0
 }
 

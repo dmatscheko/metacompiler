@@ -6225,6 +6225,19 @@ int rt_ls_restore(int t, int rows)
 
 /* Restore every entry above `d` (innermost first). An id of -1 is an entry
  * rt_unset_up already retired: it only releases its array rows. */
+/* Is gvars[id] on the local save stack above depth d already - a second
+ * `local` of the name in the same call, which keeps its value and attributes
+ * (bash 5.3: f() { local a=5; local a; echo $a; } prints 5)? */
+int rt_local_here(int id, int d)
+{
+    int t = d;
+    while (t < ls_top) {
+        if (ls_id[t] == id) return 1;
+        t = t + 1;
+    }
+    return 0;
+}
+
 int rt_pop_locals(int d)
 {
     int t;

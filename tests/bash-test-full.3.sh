@@ -837,6 +837,28 @@ outer"
   o=$( r=$( trap 'echo T' EXIT; false ); echo "$? $r" )
   check tr3 "$o" "1 T"
 }
+# ===== SECTION 69: a second `local` of a name in the same call =====
+# Only the first `local` of a name in a call starts it unset and plain; a second one keeps
+# its value, array and attributes, and adds its own - except that a scalar declared an array
+# again becomes an empty one. The first at RUN time counts: one in a loop or behind an `if`
+# that did not run is not a second. Every expected value is bash 5.3's.
+s69g=G
+s69f() {
+  local a=5; local a
+  local b=6; local -i b; b=1+1
+  local -i c=3; local c; c=2+2
+  local -a d=(1 2); local d
+  local -u h=ab; local h; h=cd
+  local x=5; local -a x
+  local out="$a $b $c ${d[*]} $h [${x[0]} ${#x[@]}]" i v
+  for i in 1 2; do local v; out="$out [$v]"; v=$i; done
+  if false; then local s69g=1; fi; local s69g; out="$out [$s69g]"
+  echo "$out"
+}
+s69() {
+  check lo1 "$(s69f)" "5 2 4 1 2 CD [ 0] [] [1] []"
+  check lo2 "$s69g" "G"
+}
 # ===== END SECTIONS =====
 
 s47   # SECTION-CALL 47
@@ -860,5 +882,6 @@ s65   # SECTION-CALL 65
 s66   # SECTION-CALL 66
 s67   # SECTION-CALL 67
 s68   # SECTION-CALL 68
+s69   # SECTION-CALL 69
 echo "full: $checks checks, $fails failures"
 exit $fails
