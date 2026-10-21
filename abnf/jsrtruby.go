@@ -251,6 +251,17 @@ func (rt *jsrt) addRubyFmtExterns(m map[string]func(args []uint64) uint64) {
 		home.put(name, u(a[2]))
 		return 0
 	}
+	// obj.name = v where a setter may exist: (object, slot key, value, setter key).
+	// The setter is called when the object (or its class, for a class object) has
+	// one, and the slot is written otherwise. Twin of js_rattrset in
+	// languages/lib/ruby-rt.metajs and attrSet in ruby-interpreter.abnf.
+	m["js_rattrset"] = func(a []uint64) uint64 {
+		if o, ok := u(a[0]).(*jsObject); ok && rubySingRespond(o, rt.toString(u(a[3]))) {
+			m["js_rxmcall"]([]uint64{a[0], a[3], w(&jsArray{elems: []interface{}{u(a[2])}})})
+			return 0
+		}
+		return m["js_set"](a[:3])
+	}
 	// A class first assigned to a constant takes its name (`S = Struct.new(:a)').
 	// Twin of js_rconstname in languages/lib/ruby-rt.metajs and constName in
 	// ruby-interpreter.abnf.
@@ -266,9 +277,11 @@ func (rt *jsrt) addRubyFmtExterns(m map[string]func(args []uint64) uint64) {
 
 // rubyStructNew is Struct.new(:a, :b [, keyword_init: true]): a new class, a
 // subclass of Struct, with a reader and a writer per member and the Struct
-// instance methods. A member's value lives in the instance slot of its name, which
-// is what `s.a = v' writes (structNew in ruby-interpreter.abnf says why). Twins:
-// rbStructNew in languages/lib/ruby-rt.metajs, structNew in ruby-interpreter.abnf.
+// instance methods. The member values live in the hidden array slot __sv, in member
+// order, so they are not instance variables (MRI: a Struct's `@a' is a different
+// variable from its member `a', and #instance_variables does not list members).
+// Twins: rbStructNew in languages/lib/ruby-rt.metajs, structNew in
+// ruby-interpreter.abnf.
 func (rt *jsrt) rubyStructNew(argv []interface{}) interface{} {
 	pos, _ := rubyBlockArgs(argv)
 	var names []string
@@ -288,50 +301,63 @@ func (rt *jsrt) rubyStructNew(argv []interface{}) interface{} {
 	cls.set("__isclass", true)
 	cls.set("__name", "")
 	cls.set("__super", rt.rubyBuiltinClass("Struct"))
-	put := func(n string, f func(self *jsObject, args []interface{}) interface{}) {
+	// putRaw's method sees the block marker among its arguments; put's does not.
+	putRaw := func(n string, f func(self *jsObject, args []interface{}) interface{}) {
 		cls.set(n, &hostFunc{name: "method:" + n, fn: func(rt *jsrt, this uint64, a []interface{}) interface{} {
 			self, _ := a[0].(*jsObject)
-			pa, _ := rubyBlockArgs(a[1:])
-			return f(self, pa)
+			return f(self, a[1:])
 		}})
 		rubyIMNote(cls, n)
 	}
-	vals := func(self *jsObject) *jsArray {
-		out := &jsArray{}
-		for _, n := range names {
-			out.elems = append(out.elems, self.props[n])
-		}
-		return out
+	put := func(n string, f func(self *jsObject, args []interface{}) interface{}) {
+		putRaw(n, func(self *jsObject, args []interface{}) interface{} {
+			pa, _ := rubyBlockArgs(args)
+			return f(self, pa)
+		})
 	}
-	put("initialize", func(self *jsObject, args []interface{}) interface{} {
-		for _, n := range names {
-			self.set(n, jsNull)
+	// The value array; an instance whose own initialize never reached Struct's has
+	// every member nil.
+	fresh := func(self *jsObject) *jsArray {
+		arr := &jsArray{elems: make([]interface{}, len(names))}
+		for i := range arr.elems {
+			arr.elems[i] = jsNull
 		}
+		self.set("__sv", arr)
+		return arr
+	}
+	sv := func(self *jsObject) *jsArray {
+		if arr, ok := self.props["__sv"].(*jsArray); ok {
+			return arr
+		}
+		return fresh(self)
+	}
+	vals := func(self *jsObject) *jsArray { return &jsArray{elems: append([]interface{}{}, sv(self).elems...)} }
+	put("initialize", func(self *jsObject, args []interface{}) interface{} {
+		vs := fresh(self)
 		if kwi {
 			if keys, kv, isDict := dictParts(argAt(args, 0)); isDict && len(args) > 0 {
 				for i, k := range keys.elems {
 					kn := rt.rubyStr(k)
-					if strIndex(names, kn) < 0 {
+					ix := strIndex(names, kn)
+					if ix < 0 {
 						rt.rubyRaiseErr("initialize", "ArgumentError", "unknown keywords: "+kn)
 					}
-					self.set(kn, kv.elems[i])
+					vs.elems[ix] = kv.elems[i]
 				}
 			}
 		} else {
 			if len(args) > len(names) {
 				rt.rubyRaiseErr("initialize", "ArgumentError", "struct size differs")
 			}
-			for i, v := range args {
-				self.set(names[i], v)
-			}
+			copy(vs.elems, args)
 		}
 		return jsNull
 	})
-	for _, n := range names {
-		n := n
-		put(n, func(self *jsObject, args []interface{}) interface{} { return self.props[n] })
+	for i, n := range names {
+		i := i
+		put(n, func(self *jsObject, args []interface{}) interface{} { return sv(self).elems[i] })
 		put(n+"=", func(self *jsObject, args []interface{}) interface{} {
-			self.set(n, argAt(args, 0))
+			sv(self).elems[i] = argAt(args, 0)
 			return argAt(args, 0)
 		})
 	}
@@ -354,7 +380,7 @@ func (rt *jsrt) rubyStructNew(argv []interface{}) interface{} {
 		d := rubyNewDict()
 		keys, dv, _ := dictParts(d)
 		for i, n := range names {
-			dictAppend(keys, dv, jsSym{s: n}, self.props[names[i]])
+			dictAppend(keys, dv, jsSym{s: n}, sv(self).elems[i])
 		}
 		return d
 	})
@@ -370,12 +396,66 @@ func (rt *jsrt) rubyStructNew(argv []interface{}) interface{} {
 		o, ok := same(self, argAt(args, 0))
 		return ok && rt.rubyEqlDeep(vals(self), vals(o))
 	})
+	// The class name takes part, so two Struct classes' equal values hash apart.
+	put("hash", func(self *jsObject, args []interface{}) interface{} {
+		return rt.rubyHashOf(&jsArray{elems: append([]interface{}{rubyInstClassName(self)}, sv(self).elems...)})
+	})
 	put("[]", func(self *jsObject, args []interface{}) interface{} {
-		return self.props[names[rt.rubyStructSlot(names, argAt(args, 0))]]
+		return sv(self).elems[rt.rubyStructSlot(names, argAt(args, 0))]
 	})
 	put("[]=", func(self *jsObject, args []interface{}) interface{} {
-		self.set(names[rt.rubyStructSlot(names, argAt(args, 0))], argAt(args, 1))
+		sv(self).elems[rt.rubyStructSlot(names, argAt(args, 0))] = argAt(args, 1)
 		return argAt(args, 1)
+	})
+	// each is Array#each over the values, answering the struct itself when it ran
+	// a block.
+	putRaw("each", func(self *jsObject, args []interface{}) interface{} {
+		r := rt.rubyMethod(vals(self), "each", args)
+		if _, blk := rubyBlockArgs(args); blk == nil {
+			return r
+		}
+		return self
+	})
+	// values_at: a position must name a member (IndexError otherwise, as #[]
+	// says), and a Range selects as Array#values_at does.
+	put("values_at", func(self *jsObject, args []interface{}) interface{} {
+		out := &jsArray{}
+		for _, k := range args {
+			if _, isNum := k.(float64); isNum {
+				out.elems = append(out.elems, sv(self).elems[rt.rubyStructSlot(names, k)])
+			} else if sel, isArr := rt.rubyMethod(vals(self), "values_at", []interface{}{k}).(*jsArray); isArr {
+				out.elems = append(out.elems, sel.elems...)
+			}
+		}
+		return out
+	})
+	// dig: the member (nil for an unknown one or a position out of range), then
+	// each further key into an Array / Hash, or through the value's own #dig.
+	put("dig", func(self *jsObject, args []interface{}) interface{} {
+		var cur interface{} = jsNull
+		if f, isNum := argAt(args, 0).(float64); isNum {
+			if i := int(f); i < 0 && i+len(names) >= 0 {
+				cur = sv(self).elems[i+len(names)]
+			} else if i >= 0 && i < len(names) {
+				cur = sv(self).elems[i]
+			}
+		} else if ix := strIndex(names, rt.rubyStr(argAt(args, 0))); ix >= 0 {
+			cur = sv(self).elems[ix]
+		}
+		for i := 1; i < len(args); i++ {
+			if isUndefOrNull(cur) {
+				return jsNull
+			}
+			if rubyUserObj(cur) {
+				return rt.rubyMethod(cur, "dig", args[i:])
+			}
+			_, _, isDict := dictParts(cur)
+			if _, isArr := cur.(*jsArray); !isArr && !isDict {
+				rt.rubyRaiseErr("dig", "TypeError", rt.rubyRespondClass(cur)+" does not have #dig method")
+			}
+			cur = rt.rubyIndexGet(cur, args[i])
+		}
+		return cur
 	})
 	text := func(self *jsObject, args []interface{}) interface{} {
 		var sb strings.Builder
@@ -387,7 +467,7 @@ func (rt *jsrt) rubyStructNew(argv []interface{}) interface{} {
 			if i > 0 {
 				sb.WriteString(", ")
 			}
-			sb.WriteString(n + "=" + rt.rubyInspect(self.props[names[i]]))
+			sb.WriteString(n + "=" + rt.rubyInspect(sv(self).elems[i]))
 		}
 		sb.WriteString(">")
 		return sb.String()

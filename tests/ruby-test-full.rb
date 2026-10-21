@@ -4244,6 +4244,85 @@ def s98
   check("st98f", S98L::QQ == 10 && S98L.instance_methods(false).sort == [:f, :g, :h])
 end
 
+# ===== SECTION 99: setter methods, Struct members, private :name, instance_methods =====
+# `o.a = v' calls a def `a=' (also `self.a = v', a class's `def self.a=', and the
+# read half of `o.a += v'); a Struct's members are not instance variables and its
+# each / hash / dig / values_at answer as MRI's; `nil << x' is a NoMethodError;
+# `private :name' hides a method; instance_methods without an argument adds the
+# inherited ones. /usr/bin/ruby 2.6 settles each.
+class S99A
+  attr_reader :q
+  def a=(v); @q = v * 2; end
+  def a; @q + 1; end
+  def set(v); self.a = v; end
+  def self.cfg=(v); @@cfg = v + 100; end
+  def self.cfg; @@cfg; end
+end
+class S99B < S99A
+  def b1; end
+end
+S99S = Struct.new(:x, :y) do
+  def bump; @x = 99; x; end
+end
+S99T = Struct.new(:x, :y)
+module S99M; def m=(v); @m = v + 1; end; def m; @m; end; end
+class S99W
+  include S99M
+  define_method(:w=) { |v| @w = v - 1 }
+  attr_reader :w, :r
+  def r=(e); @r = e.message + "!"; end
+  def go(v); self.sec = v; @s; end
+  private
+  def sec=(v); @s = v * 7; end
+end
+class S99P
+  def pub; 1; end
+  def hid; 2; end
+  private :hid
+end
+def s99
+  v = [5, 3, 7, 4, 10, 20]
+  o = S99A.new
+  o.a = v[0]
+  r = (o.a = v[1])
+  check("se99a", o.q == 6 && r == 3)
+  o.set(v[2])
+  o.a += v[3]
+  check("se99b", o.q == 38)
+  S99A.cfg = v[0]
+  check("se99c", S99A.cfg == 105)
+  s = S99S.new(v[0], [v[4], {k: v[5]}])
+  s.x += v[1]
+  check("se99d", s.x == 8 && s.instance_variables == [] && s.bump == 8 && s.instance_variables == [:@x])
+  d = s.dup
+  d.x = v[3]
+  check("se99e", s.x == 8 && d.x == 4)
+  seen = []
+  e = s.each { |m| seen << m }
+  check("se99f", seen == [8, [10, {k: 20}]] && e.equal?(s))
+  check("se99g", s.hash == S99S.new(8, [10, {k: 20}]).hash && s.hash != S99S.new(1, 2).hash && S99T.new(1, 2).hash != S99S.new(1, 2).hash)
+  check("se99h", s.dig(:y, 1, :k) == 20 && s.dig(:zz).nil? && s.dig(0) == 8 && s.values_at(1, 0) == [[10, {k: 20}], 8])
+  ve = begin; s.values_at(v[0]); nil; rescue IndexError => x; x.message; end
+  check("se99i", ve == "offset 5 too large for struct(size:2)")
+  n = nil
+  ne = begin; n << v[0]; nil; rescue NoMethodError => x; x.message; end
+  check("se99j", ne == "undefined method `<<' for nil:NilClass")
+  pe = begin; S99P.new.hid; nil; rescue NoMethodError => x; x.class; end
+  check("se99k", S99P.new.pub == 1 && pe == NoMethodError && S99P.instance_methods(false) == [:pub])
+  im = S99B.instance_methods
+  check("se99l", im.include?(:b1) && im.include?(:a=) && im.include?(:to_s) && (im - Object.instance_methods).sort == [:a, :a=, :b1, :q, :set])
+  w = S99W.new
+  w.m = v[0]
+  z, w.w = v[1], v[4]
+  begin; raise "boom"; rescue => w.r; end
+  so = Object.new
+  def so.z=(v); @z = v * 3; end
+  def so.z; @z; end
+  so.z = v[2]
+  se = begin; w.sec = 1; nil; rescue NoMethodError => x; x.class; end
+  check("se99m", w.m == 6 && w.w == 9 && z == 3 && w.r == "boom!" && so.z == 21 && w.go(v[3]) == 28 && se == NoMethodError)
+end
+
 s39() # SECTION-CALL 39
 s40() # SECTION-CALL 40
 s41() # SECTION-CALL 41
@@ -4304,5 +4383,6 @@ s95() # SECTION-CALL 95
 s96() # SECTION-CALL 96
 s97() # SECTION-CALL 97
 s98() # SECTION-CALL 98
+s99() # SECTION-CALL 99
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

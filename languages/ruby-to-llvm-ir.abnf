@@ -185,7 +185,7 @@ OpMethodName = "[]=" | "[]" | "<=>" | "===" | "==" | "!=" | "<<" | ">>" | "<=" |
 ClassDecl   <~~ push(makeClassStmt(takeAll(), up.pos)) ~~>
             = KwClass ClassPath <~~ push(up.in) ~~> [ Superclass ] ClassItems [ ClassGuard ] End ;
 ClassItems  = { Semi | SingletonBlock | Def <~~ push({method: pop()}) ~~> | AttrDecl
-              | AliasStmt | AliasMethodStmt | DefineMethodStmt | MixinStmt | VisStmt
+              | AliasStmt | AliasMethodStmt | DefineMethodStmt | MixinStmt | VisStmt | VisNamesStmt
               | ClassDecl <~~ push({nested: pop(), nestedName: lastDeclName}) ~~>
               | ModuleDecl <~~ push({nested: pop(), nestedName: lastDeclName}) ~~>
               | ClassBodyStmt } ;
@@ -268,6 +268,12 @@ MixName     <~~ push(up.in) ~~> = ScopedName ;
 // what LineEnd checks.
 VisStmt     <~~ push({vis: up.in}) ~~> = VisWord KwEnd LineEnd ;
 VisWord     = "private" | "protected" | "public" | "module_function" ;
+// `private :a, :b' (protected, public): the visibility of the named methods, wherever
+// in the body they are defined.
+VisNamesStmt <~~ var n = takeAll(); push({visnames: n.slice(1), vis: n[0]}) ~~>
+            = VisNameWord VisName { "," VisName } LineEnd ;
+VisNameWord <~~ push(up.in) ~~> = ( "private" | "protected" | "public" ) KwEnd ;
+VisName     = ":" :whitespace() SymNameSfx <~~ push(up.in) ~~> :whitespace(Whitespace) ;
 // class D < Base: real inheritance (method lookup walks __super, and `super` calls
 // the overridden method).
 Superclass  = "<" !"<" KwSelf <~~ push({supername: "self"}) ~~>
@@ -3661,6 +3667,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             }
         }
         if (!dm) { return args }
+        rubyDynDefs = true
         var out = []
         for (var i = 0; i < args.length; i++) {
             var a = args[i]
@@ -4068,10 +4075,17 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // a one-step path with an assignable head; a deeper path would have to re-walk
     // itself and re-run its side effects.
     function emitPathSet(b, ref, p, v) {
-        if (p.dict) { callExt(b, "js_set", [p.obj, p.key, v]); return b }
+        if (p.dict) { emitAttrSet(b, p, v); return b }
         var nv = callExt(b, "js_rsetsl", [p.obj, p.key, p.key2, v])
         if (ref.path.length == 1 && ref.texpr == undefined) { return emitHeadSet(b, ref, nv) }
         return b
+    }
+    // The write of a `.name' target: a call of the setter where one may exist (see
+    // attrDispatches), the slot otherwise. js_rattrset takes the setter's method key
+    // too, because a private one inside its own class is reached as "$q$name=".
+    function emitAttrSet(b, p, v) {
+        if (!attrDispatches(p.name)) { callExt(b, "js_set", [p.obj, p.key, v]); return }
+        callExt(b, "js_rattrset", [p.obj, p.key, v, emitStr(b, methodKey(p.name + "="))])
     }
     // Bind the raised value to a rescue clause's `=> TARGET` - an ordinary assignment:
     // a bare name is a local of the code around the begin (emitLocalSet reaches past
@@ -4110,11 +4124,18 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 // A .field path targets an object property (js_get/js_set); a
                 // [i] path targets an array/hash element (js_pyget/js_pyset).
                 if (p.dict) {
+                    // `o.a += v' is `o.a = o.a + v': the read is the getter call
+                    // wherever the write is a setter call or a def names the getter.
                     if (op != "=") {
-                        var oldf = callExt(b, "js_get", [p.obj, p.key])
+                        var oldf = hUndef
+                        if (attrDispatches(p.name) || rubyDefNames["$" + p.name] === true) {
+                            var rg = emitStepCall(b, p.obj, p.name, false)
+                            b = rg.b
+                            oldf = rg.v
+                        } else { oldf = callExt(b, "js_get", [p.obj, p.key]) }
                         v = emitBin(b, op, oldf, v)
                     }
-                    callExt(b, "js_set", [p.obj, p.key, v])
+                    emitAttrSet(b, p, v)
                 } else {
                     if (op != "=") {
                         var oldm = callExt(b, core.indexExt, [p.obj, p.key])
@@ -5645,6 +5666,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 params.push(paramDesc(items[i]))
             }
         }
+        rubyDefNames["$" + name] = true
         return {name: name, params: params, singleton: singleton, srecv: srecv, pos: pos,
                 body: body != null ? body : makeBody([])}
     }
@@ -6815,7 +6837,18 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // the same set as rubyMethods and is kept separate because the two are read in
     // different places and one of them may narrow again.
     var rubyAllMethods = {}
+    // `obj.name = v' calls a user-defined `name=' (MRI), and the plain slot write
+    // that attr_writer's setter amounts to is all it needs otherwise. rubyDefNames
+    // holds every def / literal define_method name of the file and is complete when
+    // the write is EMITTED, so a write whose key no def names costs nothing at run
+    // time; rubyDynDefs is set by what can install a setter under a name the source
+    // does not spell (a runtime define_method, a Struct's member writers), and
+    // then every attribute write dispatches.
+    var rubyDefNames = {}
+    var rubyDynDefs = false
+    function attrDispatches(name) { return rubyDynDefs || rubyDefNames["$" + name + "="] === true }
     makeVarRef = function(name) {
+        if (name == "Struct") { rubyDynDefs = true }
         // __method__ is a bare name, not a call: the method being compiled, as a Symbol.
         if (name == "__method__") {
             return function(b) {
@@ -7069,7 +7102,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     }
     function restrictedStub(kind, name) {
         return function(b) {
-            callExt(b, "js_rraise", [emitStr(b, kind + " method '" + name + "' called"), hUndef])
+            callExt(b, "js_rraise", [callExt(b, "js_rclass", [emitStr(b, "NoMethodError")]),
+                                     emitStr(b, kind + " method '" + name + "' called")])
             b.NewRet(hUndef)
             return {b: deadBlock(), v: hNull}
         }
@@ -7104,11 +7138,13 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         var r = {supername: "", methods: [], sdefs: [], cstmts: [], consts: [],
                  aliases: [], includes: [], prepends: [], extends: [], restricted: []}
         var vis = "public"
+        var named = []
         for (var i = from; i < items.length; i++) {
             var it = items[i]
             if (it == undefined) { continue }
             if (it.supername != undefined) { r.supername = it.supername; continue }
             if (it.superexpr != undefined) { r.superexpr = it.superexpr; r.smembers = it.smembers; continue }
+            if (it.visnames != undefined) { named.push(it); continue }
             if (it.vis != undefined) { vis = visWordOf(it.vis); continue }
             if (it.mixkind != undefined) {
                 if (it.mixkind == "include") { r.includes.push(it.mixname) }
@@ -7152,6 +7188,18 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 if (cn != "") { r.consts.push(cn) }
                 r.cstmts.push({t: it.cstmt, name: cn})
                 continue
+            }
+        }
+        // `private :m' applies to m wherever the body defines it; a later one for the
+        // same name replaces an earlier one.
+        for (var ni = 0; ni < named.length; ni++) {
+            var nk = visWordOf(named[ni].vis)
+            for (var nj = 0; nj < named[ni].visnames.length; nj++) {
+                var nn = named[ni].visnames[nj]
+                var kept = []
+                for (var nr = 0; nr < r.restricted.length; nr++) { if (r.restricted[nr].name != nn) { kept.push(r.restricted[nr]) } }
+                if (nk != "public") { kept.push({name: nn, kind: nk}) }
+                r.restricted = kept
             }
         }
         return r
@@ -7288,6 +7336,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         for (var i = 1; i < items.length; i++) {
             if (items[i].body != undefined) { body = items[i].body }
         }
+        rubyDefNames["$" + name] = true
         return {defm: name, defmparams: params, defmbody: body != null ? body : makeBody([])}
     }
     // `alias' reached as a statement rather than in a class body. The method tables here

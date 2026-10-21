@@ -6231,6 +6231,40 @@ func rubyOwnIMethods(o *jsObject) *jsArray {
 	return out
 }
 
+// rubyAllIMethods is Module#instance_methods with inheritance: each ancestor's own
+// names in ancestor order, once each, and for Object the methods every value
+// answers (row "*" of rubyRespondNames - the ones all three engines dispatch, a
+// subset of MRI's). Twins: rbAllIMethods in lib/ruby-rt.metajs,
+// allInstanceMethods in ruby-interpreter.abnf.
+func (rt *jsrt) rubyAllIMethods(o *jsObject) *jsArray {
+	out := &jsArray{}
+	seen := map[string]bool{}
+	add := func(n string) {
+		if !seen[n] {
+			seen[n] = true
+			out.elems = append(out.elems, jsSym{s: n})
+		}
+	}
+	for _, a := range rt.rubyAncestors(o).elems {
+		ao, isObj := a.(*jsObject)
+		if !isObj {
+			continue
+		}
+		if bn, isBuiltin := ao.props["__rbuiltin"].(string); isBuiltin {
+			if bn == "Object" {
+				for _, n := range rubyRespondNames["*"] {
+					add(n)
+				}
+			}
+			continue
+		}
+		for _, e := range rubyOwnIMethods(ao).elems {
+			add(e.(jsSym).s)
+		}
+	}
+	return out
+}
+
 func (rt *jsrt) rubySingNames(o *jsObject) *jsArray {
 	out := &jsArray{}
 	seen := map[string]bool{}
@@ -6300,6 +6334,10 @@ func rubySingCopy(o *jsObject, withSing bool) *jsObject {
 	// An exception's message travels with the copy.
 	if a, has := o.props["__args"]; has {
 		out.set("__args", a)
+	}
+	// A Struct's member values, which the copy owns separately.
+	if sv, has := o.props["__sv"].(*jsArray); has {
+		out.set("__sv", &jsArray{elems: append([]interface{}{}, sv.elems...)})
 	}
 	if !withSing {
 		return out
@@ -6410,9 +6448,9 @@ func (rt *jsrt) rubyStrOperand(r interface{}) string {
 // both numbers, worded as MRI 2.6 does: a number on the left is a TypeError
 // naming the right side (`1 + nil' is "nil can't be coerced into Integer"), and
 // a left side with no such operator - nil, true, a Symbol, a Hash - is a
-// NoMethodError. An Array on the left, and an operator other than the six
-// arithmetic ones, stays an engine abort. Twins: numOperandErr in
-// ruby-interpreter.abnf, rbNumOperandErr in lib/ruby-rt.metajs.
+// NoMethodError; so is << / >> on a left side that is not a number (`nil << x').
+// An Array on the left, and any other operator, stays an engine abort. Twins:
+// numOperandErr in ruby-interpreter.abnf, rbNumOperandErr in lib/ruby-rt.metajs.
 func (rt *jsrt) rubyNumOperandErr(op string, l, r interface{}) {
 	switch op {
 	case "+", "-", "*", "/", "%", "**":
@@ -6424,6 +6462,10 @@ func (rt *jsrt) rubyNumOperandErr(op string, l, r interface{}) {
 			rt.rubyRaiseErr(op, "TypeError", desc+" can't be coerced into "+rubyOwnerName(l))
 		}
 		if _, isArr := l.(*jsArray); !isArr {
+			rt.rubyNoMethod(l, op)
+		}
+	case "<<", ">>":
+		if !rubyIsNum(l) {
 			rt.rubyNoMethod(l, op)
 		}
 	}
@@ -11055,6 +11097,8 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 			case "instance_methods":
 				if pos, _ := rubyBlockArgs(args); objIsCls && len(pos) > 0 && !rubyTruthy(pos[0]) {
 					return rubyOwnIMethods(o)
+				} else if objIsCls {
+					return rt.rubyAllIMethods(o)
 				}
 			case "singleton_methods":
 				return rt.rubySingNames(o)

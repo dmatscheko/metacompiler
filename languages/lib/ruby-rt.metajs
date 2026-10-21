@@ -3610,6 +3610,38 @@ function rbOwnIMethods(o) {
     }
     return out
 }
+// Module#instance_methods with inheritance. Twin of rubyAllIMethods in
+// abnf/jsrt.go, which states the rule.
+function rbAllIMethods(o) {
+    var out = []
+    var seen = {}
+    var anc = rbAncestors(o)
+    var i = 0
+    while (i < anc.length) {
+        var a = anc[i]
+        var names = []
+        if (typeof a["__rbuiltin"] == "string") {
+            if (a["__rbuiltin"] == "Object") { names = rbArgsFrom(rbRespondRows()[0], 1) }
+        } else {
+            var own = rbOwnIMethods(a)
+            var j = 0
+            while (j < own.length) {
+                names.push(own[j]["s"])
+                j = j + 1
+            }
+        }
+        var k = 0
+        while (k < names.length) {
+            if (seen["$" + names[k]] !== true) {
+                seen["$" + names[k]] = true
+                out.push(rbSym(names[k]))
+            }
+            k = k + 1
+        }
+        i = i + 1
+    }
+    return out
+}
 function rbSingExtend(o, m) {
     if (!rbIsObj(m)) { return undefined }
     var xs = anytype
@@ -3691,6 +3723,8 @@ function rbSingCopy(o, withSing) {
     }
     // An exception's message travels with the copy.
     if (o["__args"] !== undefined) { out["__args"] = o["__args"] }
+    // A Struct's member values, which the copy owns separately.
+    if (o["__sv"] !== undefined) { out["__sv"] = rbArgsFrom(o["__sv"], 0) }
     if (!withSing) { return out }
     var t = o["__sing"]
     if (t !== undefined && t !== null) {
@@ -7539,8 +7573,9 @@ function rbMethod(target, name, args) {
                 else { rbSingPut(target, dnm, dfn) }
                 return rbSym(dnm)
             }
-            if (name == "instance_methods" && target["__isclass"] === true && rbNPos(args) > 0 && !rbTruthy(rbArgAt(args, 0))) {
-                return rbOwnIMethods(target)
+            if (name == "instance_methods" && target["__isclass"] === true) {
+                if (rbNPos(args) > 0 && !rbTruthy(rbArgAt(args, 0))) { return rbOwnIMethods(target) }
+                return rbAllIMethods(target)
             }
             if (name == "singleton_methods") { return rbSingNames(target) }
             if (name == "respond_to?") { return js_rrespond(target, args) }
@@ -8232,6 +8267,17 @@ function js_rsingdef(obj, name, fn) {
     return undefined
 }
 
+// obj.name = v where a setter may exist. Twin of js_rattrset in abnf/jsrtruby.go.
+function js_rattrset(o, k, v, sk) {
+    var sn = rbStr(sk)
+    if (rbIsObj(o) && rbSingRespond(o, sn)) {
+        js_rxmcall(o, sn, [v])
+        return undefined
+    }
+    o[rbStr(k)] = v
+    return undefined
+}
+
 // C.new(args): build an instance of a compiled class and run its initialize. Two
 // builtin classes are constructed directly: Proc.new { } is its block, and an
 // exception class makes the {__class, args} shape the rescue clauses read.
@@ -8262,11 +8308,7 @@ function rbStructNew(argv) {
     }
     var cls = {__isclass: true, __name: "", __super: rbBuiltinClass("Struct")}
     rbStructPut(cls, "initialize", function(self) {
-        var j = 0
-        while (j < names.length) {
-            self[names[j]] = null
-            j = j + 1
-        }
+        var vs = rbStructFresh(self, names.length)
         var na = rbNPos(arguments)
         if (kwi) {
             if (na > 1 && rbIsDict(arguments[1])) {
@@ -8274,8 +8316,9 @@ function rbStructNew(argv) {
                 var q = 0
                 while (q < d["keys"].length) {
                     var kn = rbStr(d["keys"][q])
-                    if (rbStrIndex(names, kn) < 0) { rbRaiseErr("initialize", "ArgumentError", "unknown keywords: " + kn) }
-                    self[kn] = d["vals"][q]
+                    var ix = rbStrIndex(names, kn)
+                    if (ix < 0) { rbRaiseErr("initialize", "ArgumentError", "unknown keywords: " + kn) }
+                    vs[ix] = d["vals"][q]
                     q = q + 1
                 }
             }
@@ -8283,7 +8326,7 @@ function rbStructNew(argv) {
             if (na - 1 > names.length) { rbRaiseErr("initialize", "ArgumentError", "struct size differs") }
             var p = 1
             while (p < na) {
-                self[names[p - 1]] = arguments[p]
+                vs[p - 1] = arguments[p]
                 p = p + 1
             }
         }
@@ -8291,7 +8334,7 @@ function rbStructNew(argv) {
     })
     var m = 0
     while (m < names.length) {
-        rbStructAccessors(cls, names[m])
+        rbStructAccessors(cls, names, m)
         m = m + 1
     }
     var members = function(self) {
@@ -8304,10 +8347,11 @@ function rbStructNew(argv) {
         return out
     }
     var vals = function(self) {
+        var vs = rbStructVals(self, names.length)
         var out = []
         var j = 0
-        while (j < names.length) {
-            out.push(self[names[j]])
+        while (j < vs.length) {
+            out.push(vs[j])
             j = j + 1
         }
         return out
@@ -8320,10 +8364,11 @@ function rbStructNew(argv) {
     rbStructPut(cls, "size", size)
     rbStructPut(cls, "length", size)
     rbStructPut(cls, "to_h", function(self) {
+        var vs = rbStructVals(self, names.length)
         var d = rbNewDict()
         var j = 0
         while (j < names.length) {
-            rbDictSet(d, rbSym(names[j]), self[names[j]])
+            rbDictSet(d, rbSym(names[j]), vs[j])
             j = j + 1
         }
         return d
@@ -8334,19 +8379,62 @@ function rbStructNew(argv) {
     rbStructPut(cls, "eql?", function(self, o) {
         return rbIsObj(o) && o["__class"] === self["__class"] && rbEqlDeep(vals(self), vals(o))
     })
-    rbStructPut(cls, "[]", function(self, k) { return self[names[rbStructSlot(names, k)]] })
+    // The class name takes part, so two Struct classes' equal values hash apart.
+    rbStructPut(cls, "hash", function(self) {
+        var hv = [rbInstClassName(self)]
+        var vs = rbStructVals(self, names.length)
+        var j = 0
+        while (j < vs.length) {
+            hv.push(vs[j])
+            j = j + 1
+        }
+        return rbHashOf(hv)
+    })
+    rbStructPut(cls, "[]", function(self, k) { return rbStructVals(self, names.length)[rbStructSlot(names, k)] })
     rbStructPut(cls, "[]=", function(self, k, v) {
-        self[names[rbStructSlot(names, k)]] = v
+        rbStructVals(self, names.length)[rbStructSlot(names, k)] = v
         return v
     })
+    // each is Array#each over the values, answering the struct itself when it ran
+    // a block.
+    rbStructPut(cls, "each", function(self) {
+        var r = rbMethod(vals(self), "each", rbArgsFrom(arguments, 1))
+        if (rbNPos(arguments) == arguments.length) { return r }
+        return self
+    })
+    // values_at: a position must name a member (IndexError otherwise, as #[]
+    // says), and a Range selects as Array#values_at does.
+    rbStructPut(cls, "values_at", function(self) {
+        var out = []
+        var na = rbNPos(arguments)
+        var q = 1
+        while (q < na) {
+            var k = arguments[q]
+            if (typeof k == "number") { out.push(rbStructVals(self, names.length)[rbStructSlot(names, k)]) }
+            else {
+                var sel = rbMethod(vals(self), "values_at", [k])
+                var j = 0
+                while (j < sel.length) {
+                    out.push(sel[j])
+                    j = j + 1
+                }
+            }
+            q = q + 1
+        }
+        return out
+    })
+    rbStructPut(cls, "dig", function(self) {
+        return rbStructDig(self, names, rbArgsFrom(arguments, 1))
+    })
     var text = function(self) {
+        var vs = rbStructVals(self, names.length)
         var out = "#<struct "
         var cn = rbInstClassName(self)
         if (cn != "") { out = out + cn + " " }
         var j = 0
         while (j < names.length) {
             if (j > 0) { out = out + ", " }
-            out = out + names[j] + "=" + rbInspect(self[names[j]])
+            out = out + names[j] + "=" + rbInspect(vs[j])
             j = j + 1
         }
         return out + ">"
@@ -8360,13 +8448,70 @@ function rbStructPut(cls, n, f) {
     rbIMNote(cls, n)
     return undefined
 }
-function rbStructAccessors(cls, n) {
-    rbStructPut(cls, n, function(self) { return self[n] })
-    rbStructPut(cls, n + "=", function(self, v) {
-        self[n] = v
+// The member values, in the hidden slot __sv (see rubyStructNew in
+// abnf/jsrtruby.go); an instance whose own initialize never reached Struct's has
+// every member nil.
+function rbStructFresh(self, n) {
+    var vs = []
+    var j = 0
+    while (j < n) {
+        vs.push(null)
+        j = j + 1
+    }
+    self["__sv"] = vs
+    return vs
+}
+function rbStructVals(self, n) {
+    var vs = self["__sv"]
+    if (vs === undefined) { return rbStructFresh(self, n) }
+    return vs
+}
+function rbStructAccessors(cls, names, i) {
+    var n = names.length
+    rbStructPut(cls, names[i], function(self) { return rbStructVals(self, n)[i] })
+    rbStructPut(cls, names[i] + "=", function(self, v) {
+        rbStructVals(self, n)[i] = v
         return v
     })
     return undefined
+}
+// Struct#dig: the member (nil for an unknown one or a position out of range), then
+// each further key into an Array / Hash, or through the value's own #dig. Twin of
+// the dig of rubyStructNew in abnf/jsrtruby.go.
+function rbStructDig(self, names, keys) {
+    var vs = rbStructVals(self, names.length)
+    var cur = anytype
+    cur = null
+    var k0 = rbArgAt(keys, 0)
+    if (typeof k0 == "number") {
+        var i = Math.trunc(k0)
+        if (i < 0) { i = i + names.length }
+        if (i >= 0 && i < names.length) { cur = vs[i] }
+    } else {
+        var ix = rbStrIndex(names, rbStr(k0))
+        if (ix >= 0) { cur = vs[ix] }
+    }
+    var q = 1
+    while (q < keys.length) {
+        if (rtIsNil(cur)) { return null }
+        if (rbUserObj(cur)) { return rbMethod(cur, "dig", rbArgsFrom(keys, q)) }
+        if (!rbIsArr(cur) && !rbIsDict(cur)) {
+            rbRaiseErr("dig", "TypeError", rbRespondClass(cur) + " does not have #dig method")
+        }
+        cur = js_rget(cur, keys[q])
+        q = q + 1
+    }
+    return cur
+}
+// The arguments from position start on, the block marker included.
+function rbArgsFrom(args, start) {
+    var out = []
+    var i = start
+    while (i < args.length) {
+        out.push(args[i])
+        i = i + 1
+    }
+    return out
 }
 // A Struct subscript: a member position (negative from the end) or a member name.
 function rbStructSlot(names, k) {
@@ -8471,6 +8616,7 @@ function rbNumOperandErr(op, l, r) {
         }
         if (!rbIsArr(l)) { rbNoMethod(l, op) }
     }
+    if ((op == "<<" || op == ">>") && rbNumRank(l) < 0) { rbNoMethod(l, op) }
     fail("not a number in '" + op + "'")
 }
 
