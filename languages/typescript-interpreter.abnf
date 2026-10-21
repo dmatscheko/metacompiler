@@ -6518,22 +6518,16 @@ NotFuncHead = :script(~~
     // See the twin of this comment in js-interpreter.abnf.
     function reResult(rv, s, m) {
         var prog = rv.prog
-        var o = {}
-        var keys = []
+        var o = []
         var n = rxGroupCount(prog)
         var gv = anytype
         for (var i = 0; i <= n; i++) {
             gv = rxGroup(prog, s, m, i)
             if (gv === null) { gv = undefined }
-            scopePut(o, "" + i, gv)
-            keys.push("" + i)
+            o.push(gv)
         }
-        scopePut(o, "length", n + 1)
-        keys.push("index")
-        keys.push("input")
-        keys.push("groups")
-        scopePut(o, "index", m.begin)
-        scopePut(o, "input", s)
+        setMember(o, "index", m.begin)
+        setMember(o, "input", s)
         var named = anytype
         named = undefined
         var gobj = {}
@@ -6548,8 +6542,7 @@ NotFuncHead = :script(~~
             }
         }
         if (gkeys.length > 0) { scopePut(gobj, "__keys", gkeys); named = gobj }
-        scopePut(o, "groups", named)
-        scopePut(o, "__keys", keys)
+        setMember(o, "groups", named)
         return o
     }
     // RegExp#exec. This is where g and y live: both read the search start out of

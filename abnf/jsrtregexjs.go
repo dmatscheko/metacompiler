@@ -142,21 +142,20 @@ func jsxNameAt(re *rxRe, i int) string {
 	return ""
 }
 
-// jsxResult is the match record. JavaScript models it as an Array carrying three extra
-// properties; neither runtime here allows a non-index property on an array (both report
-// "invalid array index"), so it is an array-LIKE object instead - m[0], m.length, m.index,
-// m.input and m.groups all read back, and only Array.isArray(m) tells the difference. The
-// interpreter side builds exactly the same shape.
-func (rt *jsrt) jsxResult(re *rxRe, text []rune, m *rxMatch, input string) *jsObject {
-	o := newJSObject()
+// jsxResult is the match record: an array of the groups carrying three named
+// properties, index, input and groups (jsArray.props). Twins: jxResult in
+// languages/lib/js-rt.metajs, reResult in both *-interpreter.abnf.
+func (rt *jsrt) jsxResult(re *rxRe, text []rune, m *rxMatch, input string) *jsArray {
+	a := &jsArray{}
 	for i := 0; i <= re.ngroups; i++ {
 		if g, ok := re.group(text, m, i); ok {
-			o.set(itoaSmall(i), g)
+			a.elems = append(a.elems, g)
 		} else {
-			o.set(itoaSmall(i), jsUndef)
+			a.elems = append(a.elems, jsUndef)
 		}
 	}
-	o.set("length", float64(re.ngroups+1))
+	o := newJSObject()
+	a.props = o
 	o.set("index", float64(m.begin))
 	o.set("input", input)
 	var groups interface{} = jsUndef
@@ -176,14 +175,7 @@ func (rt *jsrt) jsxResult(re *rxRe, text []rune, m *rxMatch, input string) *jsOb
 		groups = g
 	}
 	o.set("groups", groups)
-	return o
-}
-
-func itoaSmall(i int) string {
-	if i < 10 {
-		return string(rune('0' + i))
-	}
-	return itoaSmall(i/10) + string(rune('0'+i%10))
+	return a
 }
 
 // jsxExec is RegExp#exec: g and y both read the search start out of lastIndex and reset it

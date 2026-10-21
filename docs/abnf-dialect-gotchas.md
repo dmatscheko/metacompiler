@@ -603,9 +603,10 @@ the conversion's recorded position exactly:
               { SameLine MulOp <~~ push(up.in) ~~> UnaryExpr <~~ push({at: up.pos}) ~~> } ;
 
 Positions are plain numbers, so they survive the round trip unchanged. Do not
-reach for a property on the thunk either: the frozen runtime rejects a non-index
-property on an array (`invalid array index goarr`), and a function property does
-not survive the goja round trip at all.
+reach for a property on the thunk either: the two hosts keep a non-index property
+of an array in different places (goja on the array itself, `-frozen` in
+`jsArray.props`), so their own enumerations disagree about it, and a function
+property does not survive the goja round trip at all.
 
 ## Go-style semicolon insertion applies at the BINARY OPERATOR level
 
@@ -639,9 +640,10 @@ Worth two points of Go corpus coverage on its own.
 Go arrays and Go slices were both a plain host array, so nothing at runtime told
 them apart — and the two things that needed telling apart pull in opposite
 directions: an array must be COPIED on assignment, a slice must SHARE its
-backing storage. A marker property is not available (the frozen runtime answers
-`invalid array index goarr` for any non-index key on an array), and a side table
-keyed by array identity grows without bound.
+backing storage. A marker property is not available (the two hosts keep a
+non-index key of an array in different places, goja on the array and `-frozen`
+in `jsArray.props`, and a copy keeps it in neither), and a side table keyed by
+array identity grows without bound.
 
 What works is to move only ONE of the two off the plain representation. Making
 the SLICE a header `{a, o, n, c}` leaves `Array.isArray(v)` meaning exactly "v is

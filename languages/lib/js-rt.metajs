@@ -8055,11 +8055,9 @@ function jxToNum(v) {
 
 // ----- the match record --------------------------------------------------------
 //
-// JavaScript models it as an Array carrying three extra properties; neither runtime
-// here allows a non-index property on an array (both report "invalid array index"),
-// so it is an array-LIKE object instead - m[0], m.length, m.index, m.input and
-// m.groups all read back, and only Array.isArray(m) tells the difference. The
-// interpreter side and abnf/jsrtregexjs.go build exactly the same shape.
+// An array of the groups carrying three named properties, index, input and groups,
+// which the floor's set_member keeps beside the elements (jvArrKeys). Twins:
+// jsxResult in abnf/jsrtregexjs.go, reResult in both *-interpreter.abnf.
 
 function jxNameAt(re, i) {
     var names = re["names"]
@@ -8073,15 +8071,14 @@ function jxNameAt(re, i) {
 }
 
 function jxResult(re, text, m, input) {
-    var o = {}
+    var o = []
     var n = re["ngroups"]
     var i = 0
     while (i <= n) {
         var g = rxGroup(re, text, m, i)
-        if (g === null) { o["" + i] = undefined } else { o["" + i] = g }
+        if (g === null) { o.push(undefined) } else { o.push(g) }
         i = i + 1
     }
-    o["length"] = n + 1
     o["index"] = m["begin"]
     o["input"] = input
     var groups = anytype

@@ -937,6 +937,17 @@ check("promise-subclass-species", (function () {
         && spLog.join() === "p,p,p,p,p,p,p,p,p,p,p,p";
 })());
 
+// ----- a match record is an array carrying index, input and groups -----
+check("regex-match-record-array", (function () {
+    var rs: RegExp[] = [/(\d+)-(?<w>[a-z]+)/, /\d+/g];
+    var m: any = "x 12-ab y".match(rs[0]);
+    var all: any[] = [..."a1b22".matchAll(rs[1])];
+    return Array.isArray(m) && String(m) === "12-ab,12,ab" && JSON.stringify(m) === '["12-ab","12","ab"]'
+        && Object.keys(m).join(",") === "0,1,2,index,input,groups" && m.slice(1).join("|") === "12|ab"
+        && m.index === 2 && m.input === "x 12-ab y" && m.groups.w === "ab" && m.length === 3
+        && Array.isArray(all[1]) && all[1].index === 3 && all[1][0] === "22";
+})());
+
 function main(): number {
     println("features: " + checks + " checks, " + failures + " failures");
     return failures;
