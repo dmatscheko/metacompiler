@@ -129,7 +129,7 @@ parameter), which no engine prints either.
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-719 bash native: quadratic list/word building; O(n²) `for w in $list`; positional stack capped at 4096 · P2 · SH · OPEN [V]
+### T-719 bash native: quadratic list/word building; O(n²) `for w in $list`; positional stack capped at 4096 · P2 · SH · IN PROGRESS (SH worker, round 16) [V]
 bash-rt.c: `rt_arr_list` builds `"${a[@]}"` / `${#a[@]}` element by element with rt_fput/rt_strcat (one `echo "${#keep[@]}"` over
 3,000 elements allocates ~255 MB); `mkWord` joins an N-part quoted word with N−1 rt_strcat (104 × 11 KB parts → ~60 MB); `for w in
 $list` re-walks from the list start each pass (rt_nfields/rt_getfield; 208,000 fields ran for minutes); `s+=x` pins every intermediate
@@ -144,7 +144,7 @@ linear; bench bash.
 
 # CORE — MetaJS, the engines, shared runtime, tooling
 
-### T-720 tooling: tests/bash-test-full.sh is at ~97M of llvm.Run's 100M step brake · P3 · CORE · OPEN [V]
+### T-720 tooling: tests/bash-test-full.sh is at ~97M of llvm.Run's 100M step brake · P3 · CORE · IN PROGRESS (SH worker, round 16) [V]
 `--full` runs bash-test-full.sh under llvm.Run at ~96.9M steps; the next sections will trip the brake and read as RUN-FAILED.
 Split the file (as go/js did with .2/.3/.4 parts, wired into test.sh / native-full.sh / gates) or raise -max-steps for --full with
 a documented reason.
