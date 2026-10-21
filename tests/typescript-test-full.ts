@@ -4866,6 +4866,47 @@ function s104(): void {
     check("tc104b", c === "cxf2");
 }
 
+// ===== SECTION 105: a class's constructor, attributes of an array's named property, a template's identity =====
+// A class is a function, so its inherited `constructor` is Function. defineProperty
+// on an array's named (non-index) key keeps the attributes it is given: a
+// non-enumerable one is left out of Object.keys and for-in and its descriptor says
+// so, a read-only one refuses a write in strict code and a non-configurable one a
+// delete. A tagged template passes ONE strings object per call site, the same on
+// every evaluation, while two sites never share one. Values read off tsc 6.0.3's
+// default output run by node 24.
+class K105 {}
+function tag105(s: TemplateStringsArray): TemplateStringsArray { return s; }
+function t105(x: number): TemplateStringsArray { return tag105`a${x}b`; }
+function s105(): void {
+    check("cc105a", typeof K105.constructor === "function" && K105.constructor === Function && new K105().constructor === K105);
+    const a: number[] = [1, 2];
+    Object.defineProperty(a, "n", { value: 5, enumerable: false });
+    let fi = "";
+    for (const i in a) fi += i + ";";
+    const d = Object.getOwnPropertyDescriptor(a, "n")!;
+    check("ap105b", Object.keys(a).join() === "0,1" && fi === "0;1;" && (a as any).n === 5 &&
+        [d.value, d.writable, d.enumerable, d.configurable].join() === "5,false,false,false" &&
+        !a.propertyIsEnumerable("n") && Object.getOwnPropertyNames(a).join() === "0,1,length,n");
+    let wm = "", dm = "";
+    try { (function () { "use strict"; (a as any).n = 6; })(); } catch (e) { wm = (e as Error).message; }
+    try { (function () { "use strict"; delete (a as any).n; })(); } catch (e) { dm = (e as Error).message; }
+    check("ap105c", wm === "Cannot assign to read only property 'n' of object '[object Array]'" &&
+        dm === "Cannot delete property 'n' of [object Array]");
+    const sl: number[] = [1];
+    (sl as any).foo = 1;
+    Object.seal(sl);
+    (sl as any).foo = 3;
+    let rm = "";
+    try { Object.defineProperty(sl, "foo", { enumerable: false }); } catch (e) { rm = (e as Error).message; }
+    const fd = Object.getOwnPropertyDescriptor(Object.freeze(sl), "foo")!;
+    check("ap105e", !fd.writable && !fd.configurable && (sl as any).foo === 3 &&
+        rm === "Cannot redefine property: foo" && Object.keys(sl).join() === "0,foo");
+    const r: TemplateStringsArray[] = [];
+    for (let i = 0; i < 2; i++) r.push(tag105`y${i}`);
+    check("tp105d", t105(1) === t105(2) && r[0] === r[1] && r[0].raw === r[1].raw && Object.isFrozen(r[0]) &&
+        tag105`x` !== tag105`x`);
+}
+
 // ===== END SECTIONS =====
 
 function main(): number {
@@ -4973,6 +5014,7 @@ function main(): number {
     s102(); // SECTION-CALL 102
     s103(); // SECTION-CALL 103
     s104(); // SECTION-CALL 104
+    s105(); // SECTION-CALL 105
     println("full: " + checks + " checks, " + failures + " failures");
     return failures;
 }

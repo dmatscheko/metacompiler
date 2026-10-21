@@ -2992,6 +2992,61 @@ function s111() {
     check("tc111b", c === "cxf2")
 }
 
+// ===== SECTION 112: a class's constructor, attributes of an array's named property, a template's identity =====
+// A class is a function, so its inherited `constructor` is Function. defineProperty
+// on an array's named (non-index) key keeps the attributes it is given: a
+// non-enumerable one is left out of Object.keys and for-in and its descriptor says
+// so, a read-only one refuses a write in strict code and a non-configurable one a
+// delete. A tagged template passes ONE strings object per call site, the same on
+// every evaluation, while two sites never share one. Values read off node 24.
+class K112 {}
+class S112 { static constructor() { return "own" } }
+function tag112(s) { return s }
+function t112(x) { return tag112`a${x}b` }
+function s112() {
+    check("cc112a", typeof K112.constructor === "function" && K112.constructor === Function &&
+        S112.constructor() === "own" && new K112().constructor === K112)
+    const a = [1, 2]
+    Object.defineProperty(a, "n", { value: 5, enumerable: false })
+    let fi = ""
+    for (const i in a) fi += i + ";"
+    const d = Object.getOwnPropertyDescriptor(a, "n")
+    check("ap112b", Object.keys(a).join() === "0,1" && fi === "0;1;" && a.n === 5 &&
+        [d.value, d.writable, d.enumerable, d.configurable].join() === "5,false,false,false" &&
+        !a.propertyIsEnumerable("n") && a.hasOwnProperty("n") &&
+        Object.getOwnPropertyNames(a).join() === "0,1,length,n" && JSON.stringify(Object.entries(a)) === '[["0",1],["1",2]]')
+    let wm = "", dm = ""
+    try { (function () { "use strict"; a.n = 6 })() } catch (e) { wm = e.message }
+    try { (function () { "use strict"; delete a.n })() } catch (e) { dm = e.message }
+    check("ap112c", wm === "Cannot assign to read only property 'n' of object '[object Array]'" &&
+        dm === "Cannot delete property 'n' of [object Array]" && a.n === 5)
+    const b = []
+    b.x = 1
+    Object.defineProperty(b, "x", { enumerable: false })
+    const bd = Object.getOwnPropertyDescriptor(b, "x")
+    b.x = 2
+    let fm = ""
+    try { Object.defineProperty(Object.freeze([1]), "q", { value: 1 }) } catch (e) { fm = e.message }
+    check("ap112d", Object.keys(b).length === 0 && b.x === 2 && [bd.value, bd.writable, bd.enumerable, bd.configurable].join() === "1,true,false,true" &&
+        fm === "Cannot define property q, object is not extensible")
+    const fz = [1]
+    fz.foo = 1
+    Object.freeze(fz)
+    const fd = Object.getOwnPropertyDescriptor(fz, "foo")
+    const sl = [1]
+    sl.foo = 1
+    Object.seal(sl)
+    sl.foo = 3
+    let rm = ""
+    try { Object.defineProperty(sl, "foo", { enumerable: false }) } catch (e) { rm = e.message }
+    check("ap112f", !fd.writable && !fd.configurable && fd.enumerable && sl.foo === 3 &&
+        rm === "Cannot redefine property: foo" && Object.keys(sl).join() === "0,foo")
+    const r = []
+    for (let i = 0; i < 2; i++) r.push(tag112`y${i}`)
+    check("tp112e", t112(1) === t112(2) && r[0] === r[1] && r[0].raw === r[1].raw && Object.isFrozen(r[0]) &&
+        tag112`x` !== tag112`x` && t112(1) !== r[0])
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -3053,6 +3108,7 @@ function main() {
     s109() // SECTION-CALL 109
     s110() // SECTION-CALL 110
     s111() // SECTION-CALL 111
+    s112() // SECTION-CALL 112
     println("full: " + checks + " checks, " + failures + " failures")
     return failures
 }

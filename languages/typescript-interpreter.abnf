@@ -3651,6 +3651,11 @@ NotFuncHead = :script(~~
                 w = lv < 3
                 cf = kk != "length" && lv < 2
             }
+            // See the twin of this comment in js-interpreter.abnf.
+            if (jsArrNamedHas(o, kk)) {
+                w = w && !jsArrNamedAttr(o, "__ro", kk)
+                cf = cf && !jsArrNamedAttr(o, "__nc", kk)
+            }
         } else if (typeof o == "function") {
             if (kk == "name" || kk == "length") {
                 var ir = anytype // A defined name / length (fnIntrRec).
@@ -3798,6 +3803,12 @@ NotFuncHead = :script(~~
         g = getMember(desc, "get")
         var s = anytype
         s = getMember(desc, "set")
+        // See the twin of this comment in js-interpreter.abnf.
+        if (Array.isArray(o) && g === undefined && s === undefined && key !== "length" && jsArrIndexKey(key) < 0) {
+            if (jsArrLevel(o) > 0 && !jsArrNamedHas(o, key)) { biRaise("TypeError: Cannot define property " + jsStr(jsKeyUnesc(key)) + ", object is not extensible") }
+            jsDefineKey(jsArrNamed(o, true), key, desc)
+            return
+        }
         if (typeof o != "object" || Array.isArray(o) || isClassDesc(o)) {
             // See the twin of this comment in js-interpreter.abnf.
             if (g === undefined && s === undefined) {
@@ -3875,6 +3886,10 @@ NotFuncHead = :script(~~
         jsAttrN = jsAttrN + 1
         if (Array.isArray(o)) {
             if (lv > jsArrLevel(o)) { arrKindSet(o, arrKind(o) - arrKind(o) % 32 + 23 - lv) }
+            // See the twin of this comment in js-interpreter.abnf.
+            var np = anytype
+            np = jsArrNamed(o, false)
+            if (np !== undefined) { jsSetIntegrity(np, lv) }
             return o
         }
         scopePut(o, "__noext", true)
@@ -3939,6 +3954,7 @@ NotFuncHead = :script(~~
     function jsWriteRefusal(o, k, v) {
         var key = "" + k
         if (Array.isArray(o)) {
+            if (jsArrNamedAttr(o, "__ro", key)) { return jsRoText(o, key) }
             var lv = jsArrLevel(o)
             if (lv == 0) { return "" }
             if (key === "length") {
@@ -3947,7 +3963,7 @@ NotFuncHead = :script(~~
                 return ""
             }
             var ix = jsArrayIndex(key)
-            if (ix < 0 || ix >= o.length) { return jsAddText(key) }
+            if ((ix < 0 && !jsArrNamedHas(o, key)) || ix >= o.length) { return jsAddText(key) }
             return (lv == 3) ? jsRoText(o, key) : ""
         }
         if (jsAttrHas(o, "__ro", key)) { return jsRoText(o, key) }
@@ -3958,6 +3974,7 @@ NotFuncHead = :script(~~
     function jsDeleteRefusal(o, k) {
         var key = "" + k
         if (Array.isArray(o)) {
+            if (jsArrNamedAttr(o, "__nc", key)) { return jsDelText(o, key) }
             var ix = jsArrayIndex(key)
             if (jsArrLevel(o) >= 2 && ix >= 0 && ix < o.length) { return jsDelText(o, key) }
             return ""
@@ -5098,6 +5115,8 @@ NotFuncHead = :script(~~
         }
         if (k == "name") { return o.__name }
         if (k == "length") { return fnLenOf(o.__ctor) }
+        // See the twin of this comment in js-interpreter.abnf.
+        if (k == "constructor") { return jsFunctionFn }
         // A class object inherits Object.prototype's methods too.
         if (jsIsProtoName(k)) { return jsProtoShim(k) }
         return undefined
@@ -5793,6 +5812,12 @@ NotFuncHead = :script(~~
         var p = anytype // The named-property object, or undefined.
         p = arrProps(a)
         return p !== undefined && p.__keys.indexOf(k) >= 0
+    }
+    // See the twin of this comment in js-interpreter.abnf.
+    function jsArrNamedAttr(a, list, k) {
+        var p = anytype // The named-property object, or undefined.
+        p = arrProps(a)
+        return p !== undefined && jsAttrHas(p, list, k)
     }
     // The array index member key k names, or -1 when it names a property: ToNumber of
     // k must be a non-negative integer. Twin of rt.arrIndexOf in abnf/jsrt.go.
@@ -7607,10 +7632,22 @@ NotFuncHead = :script(~~
     }
 
     // See the twin of this comment in js-interpreter.abnf.
-    function tagArgs(parts) {
+    var tagSites = []
+    function tagArgs(site) {
+        var parts = site.parts
+        var subs = []
+        for (var i = 0; i < parts.length; i++) {
+            if (parts[i].expr != undefined) { subs.push(parts[i].expr()) }
+        }
+        if (!hasOwn(site, "tix")) {
+            site["tix"] = tagSites.length
+            tagSites.push(tagStrings(parts))
+        }
+        return concat2impl([tagSites[site.tix]], subs)
+    }
+    function tagStrings(parts) {
         var cooked = []
         var raws = []
-        var subs = []
         var cur = ""
         var raw = ""
         for (var i = 0; i < parts.length; i++) {
@@ -7619,7 +7656,6 @@ NotFuncHead = :script(~~
                 raws.push(raw)
                 cur = ""
                 raw = ""
-                subs.push(parts[i].expr())
             } else {
                 cur = cur + parts[i].str
                 raw = raw + parts[i].raw
@@ -7632,7 +7668,7 @@ NotFuncHead = :script(~~
         jsAttrSet(jsArrNamed(cooked, false), "__hidden", "raw", true)
         jsSetIntegrity(raws, 3)
         jsSetIntegrity(cooked, 3)
-        return concat2impl([cooked], subs)
+        return cooked
     }
 
     // ----- Generators -----
@@ -9794,7 +9830,7 @@ NotFuncHead = :script(~~
                     // A tagged template: the tag gets the literal chunks first, then one
                     // argument per substitution.
                     if (typeof cur != "function") { biRaise("TypeError: " + sTexts[i] + " is not a function") }
-                    cur = callWithThis(cur, curThis, tagArgs(s.parts))
+                    cur = callWithThis(cur, curThis, tagArgs(s))
                     curThis = undefined
                 } else {
                     var argv = evalArgs(s.args)

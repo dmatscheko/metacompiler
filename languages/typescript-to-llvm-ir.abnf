@@ -4126,6 +4126,7 @@ NotFuncHead = :script(~~
     }
 
     // See the twin of this comment in js-to-llvm-ir.abnf.
+    var tplCount = 0 // The tagged-template call sites emitted so far (emitTagCall).
     function emitTagCall(b, fnV, thisV, parts, site) {
         var cooked = []
         var raws = []
@@ -4146,13 +4147,23 @@ NotFuncHead = :script(~~
         }
         cooked.push(curStr)
         raws.push(curRaw)
-        var cookedV = callExt(b, "js_arr_new", [])
-        var rawV = callExt(b, "js_arr_new", [])
+        tplCount++
+        var g = m.NewGlobalDef("jstpl." + tplCount, llvm.constant.NewInt(i64, 0))
+        var mkB = curF.NewBlock("")
+        var okB = curF.NewBlock("")
+        var had = b.NewLoad(i64, g)
+        b.NewCondBr(b.NewICmp(llvm.enum.IPredEQ, had, handle(0)), mkB, okB)
+        var cookedV = callExt(mkB, "js_arr_new", [])
+        var rawV = callExt(mkB, "js_arr_new", [])
         for (var j = 0; j < cooked.length; j++) {
-            callExt(b, "js_arr_push", [cookedV, emitStr(b, cooked[j])])
-            callExt(b, "js_arr_push", [rawV, emitStr(b, raws[j])])
+            callExt(mkB, "js_arr_push", [cookedV, emitStr(mkB, cooked[j])])
+            callExt(mkB, "js_arr_push", [rawV, emitStr(mkB, raws[j])])
         }
-        var stringsV = callExt(b, "js_jstagstrs", [cookedV, rawV])
+        var made = callExt(mkB, "js_gc_pin", [callExt(mkB, "js_jstagstrs", [cookedV, rawV])])
+        mkB.NewStore(made, g)
+        mkB.NewBr(okB)
+        var stringsV = okB.NewPhi([llvm.ir.NewIncoming(had, b), llvm.ir.NewIncoming(made, mkB)])
+        b = okB
         var argsV = callExt(b, "js_arr_new", [])
         callExt(b, "js_arr_push", [argsV, stringsV])
         for (var k = 0; k < exprs.length; k++) {

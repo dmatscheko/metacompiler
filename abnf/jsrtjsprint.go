@@ -216,6 +216,10 @@ func (rt *jsrt) jsvStaticSideRead(o *jsObject, name string) uint64 {
 	if name == "length" {
 		return rt.wrap(float64(jsvFnMeta(o.props["__ctor"]).length))
 	}
+	// A class is a function, so its inherited `constructor` is Function.
+	if name == "constructor" {
+		return rt.wrap(rt.jsGlobals["Function"])
+	}
 	if jsvIsProtoName(name) {
 		return rt.wrap(jsvProtoShim(name))
 	}
@@ -673,6 +677,20 @@ func (rt *jsrt) jsvDefineProp(v interface{}, key string, desc interface{}) {
 		}
 	}
 	g, s := rt.jsvGetKey(desc, "get"), rt.jsvGetKey(desc, "set")
+	// An array's named data property keeps its attributes on the object that holds it
+	// (jsvArrNamed), so the rules below apply there unchanged.
+	if a, isArr := v.(*jsArray); isArr && isUndefOrNull(g) && isUndefOrNull(s) && key != "length" && rt.arrIndexOf(key) < 0 {
+		p := jsvArrNamed(a)
+		if p == nil {
+			p = newJSObject()
+			a.props = p
+		}
+		if _, has := p.props[key]; !has && jsvArrLevel(a) > 0 {
+			rt.bigRaise("TypeError: Cannot define property %s, object is not extensible", jsvKeyUnesc(key))
+		}
+		rt.jsvDefineProp(p, key, desc)
+		return
+	}
 	o, ok := v.(*jsObject)
 	if !ok || isClassDesc(o) {
 		if !isUndefOrNull(g) || !isUndefOrNull(s) {
@@ -811,6 +829,10 @@ func (rt *jsrt) jsvSetIntegrity(v interface{}, lv int) interface{} {
 		jsvAttrN++
 		if lv > jsvArrLevel(o) {
 			o.kind = o.kind&^31 + 23 - lv
+		}
+		// Its named properties are ordinary ones (jsvArrNamed).
+		if p := jsvArrNamed(o); p != nil {
+			rt.jsvSetIntegrity(p, lv)
 		}
 	case *jsObject:
 		if isClassDesc(o) || jsvIsSym(o) {
@@ -992,6 +1014,15 @@ func jsvArrNamed(a *jsArray) *jsObject {
 	return p
 }
 
+// jsvArrNamedHas: does array a hold the named property k?
+func jsvArrNamedHas(a *jsArray, k string) bool {
+	if p := jsvArrNamed(a); p != nil {
+		_, has := p.props[k]
+		return has
+	}
+	return false
+}
+
 func jsvObjDel(o *jsObject, name string) {
 	if _, found := o.props[name]; !found {
 		return
@@ -1041,6 +1072,9 @@ func (rt *jsrt) jsvDelText(o interface{}, key string) string {
 func (rt *jsrt) jsvWriteRefusal(o interface{}, key string, v interface{}) string {
 	switch t := o.(type) {
 	case *jsArray:
+		if p := jsvArrNamed(t); p != nil && jsvAttrHas(p, "__ro", key) {
+			return rt.jsvRoText(o, key)
+		}
 		lv := jsvArrLevel(t)
 		n := len(t.elems)
 		switch {
@@ -1053,7 +1087,7 @@ func (rt *jsrt) jsvWriteRefusal(o interface{}, key string, v interface{}) string
 		case key == "length":
 			return ""
 		}
-		if ix, isIdx := jsvArrayIndex(key); !isIdx || ix >= uint64(n) {
+		if ix, isIdx := jsvArrayIndex(key); (!isIdx && !jsvArrNamedHas(t, key)) || (isIdx && ix >= uint64(n)) {
 			return jsvAddText(key)
 		}
 		if lv == 3 {
@@ -1074,6 +1108,9 @@ func (rt *jsrt) jsvWriteRefusal(o interface{}, key string, v interface{}) string
 func (rt *jsrt) jsvDeleteRefusal(o interface{}, key string) string {
 	switch t := o.(type) {
 	case *jsArray:
+		if p := jsvArrNamed(t); p != nil && jsvAttrHas(p, "__nc", key) {
+			return rt.jsvDelText(o, key)
+		}
 		if ix, isIdx := jsvArrayIndex(key); isIdx && ix < uint64(len(t.elems)) && jsvArrLevel(t) >= 2 {
 			return rt.jsvDelText(o, key)
 		}
@@ -2585,6 +2622,13 @@ func (rt *jsrt) jsvOwnDesc(v interface{}, k string, get func(interface{}, string
 		if !jsvIsArgs(o) {
 			lv := jsvArrLevel(o)
 			wr, cf = lv < 3, k != "length" && lv < 2
+		}
+		// A named property's own attributes narrow what the array's level allows.
+		if p := jsvArrNamed(o); p != nil {
+			if _, named := p.props[k]; named {
+				wr = wr && !jsvAttrHas(p, "__ro", k)
+				cf = cf && !jsvAttrHas(p, "__nc", k)
+			}
 		}
 	case *jsObject:
 		if p, isStr := o.props["__bvof"].(string); isStr && rt.jsvHasOwn(p, k) {

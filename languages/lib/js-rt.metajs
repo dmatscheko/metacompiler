@@ -1732,6 +1732,19 @@ function jvArrNamedHas(a, k) {
     if (p === undefined) { return false }
     return jvSlotHas(p, k)
 }
+// Whether array a's named property k is in that object's attribute table (jvDefineProp).
+function jvArrNamedAttr(a, table, k) {
+    var p = anytype
+    p = arrProps(a)
+    if (p === undefined) { return false }
+    return jvAttrHas(p, table, jvStr(k))
+}
+// Whether key names an array property rather than an index or the length.
+function jvArrNamedKey(key) {
+    if (key === "length") { return false }
+    var idx = jvToNumber(key)
+    return !(idx === Math.trunc(idx) && idx >= 0)
+}
 
 // A tagged template's strings array. Twin of js_jstagstrs in abnf/jsrtjsprint.go,
 // which states the rule.
@@ -1891,6 +1904,8 @@ function jvStaticSideRead(o, k) {
         if (typeof c == "function") { return jvFnLenOf(c) }
         return 0
     }
+    // A class is a function, so its inherited `constructor` is Function.
+    if (k == "constructor") { return js_jsfunctionfn() }
     // A class object inherits Object.prototype's methods too.
     if (jvIsProtoName(k)) { return jvProtoShim(k) }
     return undefined
@@ -5666,6 +5681,10 @@ function jvSetIntegrity(o, lv) {
         if (jvIsArgs(o)) { return o }
         jvAttrN = jvAttrN + 1
         if (lv > jvArrLevel(o)) { arrKindSet(o, arrKind(o) - arrKind(o) % 32 + 23 - lv) }
+        // Its named properties are ordinary ones (arrProps).
+        var np = anytype
+        np = arrProps(o)
+        if (np !== undefined) { jvSetIntegrity(np, lv) }
         return o
     }
     if (!jvIsObj(o)) { return o }
@@ -5755,6 +5774,7 @@ function jvDelText(o, key) { return "Cannot delete property '" + jvKeyUnesc(key)
 // The TypeError text a write of v to o[key] meets under o's marks, or "".
 function jvWriteRefusal(o, key, v) {
     if (Array.isArray(o)) {
+        if (jvArrNamedAttr(o, "__ro", key)) { return jvRoText(o, jvStr(key)) }
         var lv = jvArrLevel(o)
         if (lv == 0) { return "" }
         if (key === "length") {
@@ -5762,7 +5782,9 @@ function jvWriteRefusal(o, key, v) {
             if (lv == 2) { if (jvToNumber(v) < o.length) { return jvDelText(o, "" + (o.length - 1)) } }
             return ""
         }
-        if (!jvIndexIn(key, o.length)) { return jvAddText(jvStr(key)) }
+        if (jvArrNamedKey(key)) {
+            if (!jvArrNamedHas(o, jvStr(key))) { return jvAddText(jvStr(key)) }
+        } else if (!jvIndexIn(key, o.length)) { return jvAddText(jvStr(key)) }
         if (lv == 3) { return jvRoText(o, jvStr(key)) }
         return ""
     }
@@ -5779,6 +5801,7 @@ function jvWriteRefusal(o, key, v) {
 // The TypeError text a delete of o[key] meets, or "".
 function jvDeleteRefusal(o, key) {
     if (Array.isArray(o)) {
+        if (jvArrNamedAttr(o, "__nc", key)) { return jvDelText(o, jvStr(key)) }
         if (jvArrLevel(o) >= 2) { if (jvIndexIn(key, o.length)) { return jvDelText(o, jvStr(key)) } }
         return ""
     }
@@ -5933,6 +5956,18 @@ function jvDefineProp(o, key, desc) {
     var s = anytype
     s = js_jsmget(desc, "set")
     var isAcc = g !== undefined || s !== undefined
+    // An array's named data property keeps its attributes on the object that holds
+    // it (arrProps), so the rules below apply there unchanged.
+    if (Array.isArray(o) && !isAcc && jvArrNamedKey(key)) {
+        var np = anytype
+        np = arrProps(o)
+        if (np === undefined) {
+            np = {}
+            arrPropsSet(o, np)
+        }
+        if (jvArrLevel(o) > 0 && !jvSlotHas(np, key)) { jbRaise("TypeError: Cannot define property " + jvKeyUnesc(key) + ", object is not extensible") }
+        return jvDefineProp(np, key, desc)
+    }
     if (!jvIsObj(o) || jvIsClassDesc(o)) {
         if (isAcc) { return undefined }
         // Unlike `=`, a definition replaces a function's or a class's own `name` or
@@ -6303,6 +6338,11 @@ function jvOwnDesc(o, k) {
             var lv = jvArrLevel(o)
             w = lv < 3
             cf = kk != "length" && lv < 2
+        }
+        // A named property's own attributes narrow what the array's level allows.
+        if (jvArrNamedHas(o, kk)) {
+            w = w && !jvArrNamedAttr(o, "__ro", kk)
+            cf = cf && !jvArrNamedAttr(o, "__nc", kk)
         }
     } else if (jvIsCallable(o)) {
         if (kk == "name" || kk == "length") {
