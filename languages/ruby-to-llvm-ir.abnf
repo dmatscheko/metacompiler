@@ -5204,7 +5204,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // exists. Twin of selfCallNames in ruby-interpreter.abnf.
     var selfCallNames = ["respond_to?", "send", "__send__", "public_send", "is_a?", "kind_of?",
                          "instance_of?", "instance_variable_get", "instance_variable_set",
-                         "singleton_methods", "define_singleton_method", "frozen?", "equal?",
+                         "singleton_methods", "define_singleton_method", "define_method", "frozen?", "equal?",
                          "instance_variables"]
     // The ones of them that also stand alone, as a bare name with no arguments.
     // Twin of bareSelfCallNames in ruby-interpreter.abnf.

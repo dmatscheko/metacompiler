@@ -3547,10 +3547,11 @@ function rbSingPut(o, name, fn) {
     t[name] = fn
     return undefined
 }
-// A #define_singleton_method body as a method closure: the dispatch prepends the
-// receiver exactly as it does for a compiled method, and the block does not take
-// it (it closes over its defining scope instead).
-function rbSingWrap(body) {
+// A #define_singleton_method / #define_method body as a method closure: the
+// dispatch prepends the receiver exactly as it does for a compiled method, and the
+// block does not take it (it closes over its defining scope instead). Twin of
+// rubyBlockMethod in abnf/jsrt.go.
+function rbBlockMethod(body) {
     return function() {
         var a = []
         var i = 1
@@ -7464,12 +7465,15 @@ function rbMethod(target, name, args) {
                 }
                 return target
             }
-            if (name == "define_singleton_method") {
+            // Module#define_method run at run time (a literal one in a class body is
+            // compiled as a def) adds an instance method to the class.
+            if (name == "define_singleton_method" || (name == "define_method" && target["__isclass"] === true)) {
                 var dnm = rbStr(rbArgAt(args, 0))
                 var dbody = anytype
                 dbody = rbBlockOf(args)
                 if (dbody === null && rbNPos(args) > 1) { dbody = rbArgAt(args, 1) }
-                rbSingPut(target, dnm, rbSingWrap(dbody))
+                if (name == "define_method") { target[dnm] = rbBlockMethod(dbody) }
+                else { rbSingPut(target, dnm, rbBlockMethod(dbody)) }
                 return rbSym(dnm)
             }
             if (name == "singleton_methods") { return rbSingNames(target) }

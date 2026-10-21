@@ -29,7 +29,7 @@
 # covered, section 38), flip-flops, BEGIN/END
 # blocks, magic comments (frozen_string_literal), refinements, __END__/DATA,
 # and the 3.4 'it' parameter. Rational 1r / Complex 2i literals ARE covered
-# (literal syntax); define_method appears exactly once. Sections 21-23 need
+# (literal syntax); define_method is section 94. Sections 21-23 need
 # MRI >= 3.1 (case/in, endless def, hash shorthand); 01-20 run on MRI >= 2.6.
 # Section 31 needs MRI >= 3.1 as well; its expected values come from ruby/spec's own
 # descriptions in language/pattern_matching_spec.rb, which name each form outright.
@@ -4121,6 +4121,28 @@ def s93
   check("cl93a", (s93f ?c.frozen?) == false && (s93f ?x) == "x" && r == 1)
   check("cl93b", (s93f ?\n) == "\n" && (t ? ?y:?z) == "y")
 end
+# ===== SECTION 94: define_method with a name known only at run time =====
+# A define_method whose name is a variable, a loop parameter or an interpolated
+# String installs an instance method when it runs; a Proc argument is the body,
+# and Module#define_method (public since 2.5) answers the name as a Symbol.
+# /usr/bin/ruby 2.6 settles each.
+class S94C
+  [:a, :b].each { |n| define_method(n) { n.to_s * 2 } }
+  nm = "c"
+  define_method(nm) { |x| x + 1 }
+  %w[d e].each do |w|
+    define_method("#{w}?") { true }
+  end
+  pr = proc { |x| x * 3 }
+  define_method(:tr, pr)
+end
+def s94
+  o = S94C.new
+  check("dm94a", [o.a, o.b, o.c(4), o.d?, o.e?, o.tr(5)] == ["aa", "bb", 5, true, true, 15])
+  r = S94C.define_method(:z) { |a| a * 2 }
+  S94C.send(:define_method, :w) { 7 }
+  check("dm94b", r == :z && o.z(3) == 6 && o.w == 7 && o.respond_to?(:a))
+end
 
 s39() # SECTION-CALL 39
 s40() # SECTION-CALL 40
@@ -4177,6 +4199,7 @@ s90() # SECTION-CALL 90
 s91() # SECTION-CALL 91
 s92() # SECTION-CALL 92
 s93() # SECTION-CALL 93
+s94() # SECTION-CALL 94
 s95() # SECTION-CALL 95
 s96() # SECTION-CALL 96
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"

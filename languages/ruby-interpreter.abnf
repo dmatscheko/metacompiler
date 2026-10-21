@@ -8918,7 +8918,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 return target
             }
             if (name == "define_singleton_method") {
-                return singDefine(target, args, blk)
+                return blockMethodDef(target, true, args, blk)
             }
             if (name == "singleton_methods") { return singNames(target) }
             if (name == "respond_to?") { return respondTo(target, args) }
@@ -9046,7 +9046,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 for (var cxi = 0; cxi < args.length; cxi++) { singExtend(target, args[cxi]) }
                 return target
             }
-            if (name == "define_singleton_method") { return singDefine(target, args, blk) }
+            if (name == "define_singleton_method") { return blockMethodDef(target, true, args, blk) }
+            if (name == "define_method") { return blockMethodDef(target, false, args, blk) }
             if (name == "singleton_methods") { return singNames(target) }
             if (name == "respond_to?") { return respondTo(target, args) }
             // A class method is stored under a "$s$" prefix so it cannot collide with
@@ -10764,7 +10765,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // local of the name exists. Twin of selfCallNames in ruby-to-llvm-ir.abnf.
     var selfCallNames = ["respond_to?", "send", "__send__", "public_send", "is_a?", "kind_of?",
                          "instance_of?", "instance_variable_get", "instance_variable_set",
-                         "singleton_methods", "define_singleton_method", "frozen?", "equal?",
+                         "singleton_methods", "define_singleton_method", "define_method", "frozen?", "equal?",
                          "instance_variables"]
     // The ones of them that also stand alone, as a bare name with no arguments.
     // Twin of bareSelfCallNames in ruby-to-llvm-ir.abnf.
@@ -11309,18 +11310,22 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         blockStack.pop()
         return mr
     }
-    // Object#define_singleton_method(:name) { }: the block becomes a singleton method
-    // and the answer is the name as a Symbol, which is what MRI returns.
-    function singDefine(o, args, blk) {
+    // Object#define_singleton_method(:name) { } (sing) and Module#define_method
+    // (an instance method of the class o): the block, or a second argument, becomes
+    // the method, and the answer is the name as a Symbol, as in MRI. The dispatch
+    // prepends the receiver; the block does not take it. Twin of rubyBlockMethod in
+    // abnf/jsrt.go and rbBlockMethod in lib/ruby-rt.metajs.
+    function blockMethodDef(o, sing, args, blk) {
         var nm = rstr(args[0])
         var body = anytype
         body = blk
         if (body == null && args.length > 1) { body = args[1] }
-        singPut(o, nm, function() {
+        var fn = function() {
             var a = []
             for (var i = 1; i < arguments.length; i++) { a.push(arguments[i]) }
             return blockCall(body, a)
-        })
+        }
+        if (sing) { singPut(o, nm, fn) } else { scopePut(o, nm, fn) }
         return mkSym(nm)
     }
     // A module's instance-method names, its own included modules' first - the same
@@ -13087,15 +13092,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         return null
     }
     hostGlobals["alias_method"] = function(nu, old) { doAlias(directiveClass(), rstr(nu), rstr(old)); return null }
-    hostGlobals["define_method"] = function(nm, blk) {
-        var c = directiveClass()
-        scopePut(c, rstr(nm), function() {
-            var a = []
-            for (var i = 1; i < arguments.length; i++) { a.push(arguments[i]) }
-            return blockCall(blk, a)
-        })
-        return null
-    }
+    hostGlobals["define_method"] = function(nm, blk) { return blockMethodDef(directiveClass(), false, [nm], blk) }
     // private / protected / public: with no argument they switch the mode for the
     // defs that follow, with arguments they mark exactly those methods.
     function visDirective(mode, args) {

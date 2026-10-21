@@ -10977,27 +10977,17 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 				}
 				return o
 			case "define_singleton_method":
-				pos, blk := rubyBlockArgs(args)
-				if len(pos) == 0 {
-					rt.fail("no method name given")
-				}
-				body := blk
-				if body == nil && len(pos) > 1 {
-					body = pos[1]
-				}
-				nm := rt.rubyStr(pos[0])
-				fn := body
-				rubySingPut(o, nm, &hostFunc{name: "singleton:" + nm,
-					fn: func(rt *jsrt, this uint64, a []interface{}) interface{} {
-						// The receiver is prepended by the dispatch above, exactly
-						// as it is for a compiled method; the block body does not
-						// take it (it closes over its defining scope instead).
-						if len(a) > 0 {
-							a = a[1:]
-						}
-						return rt.call(fn, jsUndef, a)
-					}})
+				nm, fn := rt.rubyBlockMethod(args)
+				rubySingPut(o, nm, fn)
 				return jsSym{s: nm}
+			case "define_method":
+				// Module#define_method run at run time (a literal one in a class
+				// body is compiled as a def): an instance method of the class.
+				if objIsCls {
+					nm, fn := rt.rubyBlockMethod(args)
+					o.props[nm] = fn
+					return jsSym{s: nm}
+				}
 			case "singleton_methods":
 				return rt.rubySingNames(o)
 			case "respond_to?":
@@ -11285,6 +11275,30 @@ func (rt *jsrt) rubyArityOf(f interface{}) float64 {
 		return float64(-(a.req + 1))
 	}
 	return float64(a.req)
+}
+
+// rubyBlockMethod is the (name, body) of #define_method / #define_singleton_method
+// as a method closure. The receiver is prepended by the dispatch, exactly as it is
+// for a compiled method; the block body does not take it (it closes over its
+// defining scope instead). Twin of rbBlockMethod in lib/ruby-rt.metajs and
+// blockMethodDef in ruby-interpreter.abnf.
+func (rt *jsrt) rubyBlockMethod(args []interface{}) (string, interface{}) {
+	pos, blk := rubyBlockArgs(args)
+	if len(pos) == 0 {
+		rt.fail("no method name given")
+	}
+	body := blk
+	if body == nil && len(pos) > 1 {
+		body = pos[1]
+	}
+	nm := rt.rubyStr(pos[0])
+	return nm, &hostFunc{name: "method:" + nm,
+		fn: func(rt *jsrt, this uint64, a []interface{}) interface{} {
+			if len(a) > 0 {
+				a = a[1:]
+			}
+			return rt.call(body, jsUndef, a)
+		}}
 }
 
 // THE BLOCK MARKER. A Ruby block travels as the last element of the argument
