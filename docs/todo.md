@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-718** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-719** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -72,10 +72,10 @@ its report; anything structural there is a CORE ticket.
 
 # JS — JavaScript and TypeScript
 
-### T-715 js: `K.constructor`; sparse array keys; defineProperty attributes on array named keys; template object identity · P3 · JS · IN PROGRESS (JS worker, round 26) [V]
-`class K {}; typeof K.constructor` → undefined (node function). `k=[]; k["1"]=7; Object.keys(k)` → `0,1` (node `1`: holes are not
-keys). `Object.defineProperty(arr, "n", {value, enumerable:false})` → still listed by keys / for-in, descriptor says enumerable (node
-hides it). A tagged template's strings object is rebuilt per call (node: one object per call site).
+### T-718 js: a strict-mode write to a getter-only property is silently dropped · P3 · JS · OPEN [V]
+`"use strict"; var o = { get acc(){ return 1 } }; o.acc = 2` → node "TypeError: Cannot set property acc of #<Object> which has only a
+getter" (`of [object Array]` for an array named key; classes' getters likewise); all our engines drop the write. Every .ts file runs
+strict, so this affects all TypeScript.
 
 ---
 
@@ -165,7 +165,7 @@ itself handles millions. Related to T-505 (what a too-deep recursion should rais
 in abnf/jsrt.go, and the goja/frozen hosts. A floor-free alternative: in a mapped function that names `arguments`, read each mapped
 parameter through arguments[i] (cost on every such read). Holes: `delete arr[1]` and `b[3] = undefined` past length → node `h1 0,2
 false false 3`, `h2 0,3 false true 4`; needs a hole marker distinct from undefined that every array read maps back (arr_get/js_get
-shared by all languages). Measure with tests/bench.sh for all languages.
+shared by all languages). Measure with tests/bench.sh for all languages. Also: `Object.keys` / for-in list holes (`k=[]; k["1"]=7; Object.keys(k)` → node `1`, ours `0,1`; `h[6]=9` on `[1,2,3]` → node `0,1,2,6`).
 
 ### T-594 go (CORE): UTF-8-encoded surrogate bytes are rejoined by the shared string floor · P3 · CORE · OPEN [V]
 `s := "\xed\xa0\x80" + "\xed\xb0\x80"; fmt.Println(len(s), []byte(s))` → go `6 [237 160 128 237 176 128]` and raw output;
@@ -798,6 +798,7 @@ T-712 bash: non-ASCII POSIX classes in globs; empty extglob matches in `${v//pat
 T-710 js: `Sub.from` / `Sub.of` on an Array subclass; `Symbol.species` reads; `typeof [].hasOwnProperty`; tagged-template strings array; `"01"` array key — DONE 19d778a0 (Symbol.species getters, Object.prototype methods as values on primitives/arrays, tagged-template strings as frozen arrays with hidden raw; Sub.from/of already worked — 4 legs = node; the "01" key moves to T-716 CORE; follow-up T-715)
 T-714 c: string literals over 4096 bytes break llvm.Run; global `char *a[N] = {...}` crashes the compiler — DONE 7c1446cd 24ac13e0 (llvm.Run's IR reader accepts llir's u0x GEP indices on all three parse paths; string-literal brace items and literal-operand initializers in the C grammars — = cc)
 T-713 bash: extglob edge cases — `*` before `@(`/`!(`/`+(`, `**(a)`, halves split on `*@(a|)` — DONE abdce695 (bash 5.3 sm_loop.c rules: star skips the empty tail, top-level trailing !(, empty +(/*( occurrences, match_upattern prefilter; rt_eg empty last alternative and UTF-8 steps — 4 legs = bash 5.3, 640-pattern fuzz; follow-up T-717)
+T-715 js: `K.constructor`; sparse array keys; defineProperty attributes on array named keys; template object identity — DONE f35c764b 2a48d3ba (class .constructor, attributes and accessors on array named keys incl. integrity levels, one template object per call site — 4 legs = node, TS via tsc 6; sparse-array keys moved into T-640; follow-up T-718)
 
 # Settled — do not re-open
 
