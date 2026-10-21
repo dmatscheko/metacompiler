@@ -130,7 +130,7 @@ parameter), which no engine prints either.
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-709 bash: the interpreter is very slow building a long string (`printf -v s '%*s' 35000` + `${s// /ab}`) · P2 · SH · OPEN [V]
+### T-709 bash: the interpreter is very slow building a long string (`printf -v s '%*s' 35000` + `${s// /ab}`) · P2 · SH · IN PROGRESS (SH worker, round 11) [V]
 Still running after 600 s in the bash interpreter (bash 5.3 instant). Find the quadratic step (pattern substitution over a long
 value, or printf padding) and make it linear in all engines.
 
