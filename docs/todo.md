@@ -68,7 +68,7 @@ its report; anything structural there is a CORE ticket.
 
 # RB — Ruby
 
-### T-742 ruby: Struct; `self` in a define_method block; class-body locals in constants (compiler); instance_methods(false) · P2 · RB · OPEN [V]
+### T-742 ruby: Struct; `self` in a define_method block; class-body locals in constants (compiler); instance_methods(false) · P2 · RB · IN PROGRESS (RB worker, round 15) [V]
 `Struct.new(:a, :b)` → NameError in the interpreter (unsupported in all engines; ruby builds a class with accessors, ==, to_a,
 members, keyword_init). `define_method(:me) { self.class }` → `Class` in all engines (ruby `K`: the block runs instance_exec-style).
 `class K; r = 5; QQ = r; end` → compiler NameError for `r` (the constant is hoisted to the enclosing scope). `A.instance_methods(false)`
