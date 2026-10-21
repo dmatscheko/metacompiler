@@ -76,7 +76,7 @@ non-ASCII class range spanning 256 or more characters only gets the text-side up
 
 # JS — JavaScript and TypeScript
 
-### T-703 js: a class cannot extend a plain constructor function · P2 · JS · OPEN [V]
+### T-703 js: a class cannot extend a plain constructor function · P2 · JS · IN PROGRESS (JS worker, round 22) [V]
 `function F(){this.a=1}; F.x=1; class G extends F { static y = 2 }` then `G.y, G.x, new G().a` → node `2 1 1`, `for (k in G)` →
 `y,x`. Interp "unknown superclass: F"; llvm.Run `2` then undefined then "call of a non function value"; native `2` then "variable
 'cls' has type object and cannot hold a function". js and ts, all engines.
