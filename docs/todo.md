@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-721** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-723** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -67,6 +67,10 @@ its report; anything structural there is a CORE ticket.
 ---
 
 # RB — Ruby
+
+### T-722 ruby: an uncaught internal error lacks MRI's `file:line:in 'meth': ` prefix · P3 · RB · OPEN [V]
+An uncaught SystemStackError (and other internally raised errors) prints `stack level too deep (SystemStackError)`; ruby prints
+`rec.rb:1:in 'rec': stack level too deep (SystemStackError)` (2.6: `in `rec'`). All three engines.
 
 ---
 
@@ -144,6 +148,11 @@ linear; bench bash.
 
 # CORE — MetaJS, the engines, shared runtime, tooling
 
+### T-721 php / metajs: unbounded recursion still kills the process · P3 · CORE · OPEN [U spec-only]
+php and metajs have no deep-recursion hook (T-505's js_rt_deep / coreDeepHook): interp and llvm.Run die with Go's fatal stack
+overflow, native SIGSEGV. php 8.3+ throws an Error whose message embeds a platform-dependent size (zend.max_allowed_stack_size /
+"Maximum call stack size of N bytes reached"); settle the text from php-src. metajs needs the hook in metajs-to-llvm-ir plus a re-freeze.
+
 ### T-720 tooling: tests/bash-test-full.sh is at ~97M of llvm.Run's 100M step brake · P3 · CORE · IN PROGRESS (SH worker, round 16) [V]
 `--full` runs bash-test-full.sh under llvm.Run at ~96.9M steps; the next sections will trip the brake and read as RUN-FAILED.
 Split the file (as go/js did with .2/.3/.4 parts, wired into test.sh / native-full.sh / gates) or raise -max-steps for --full with
@@ -154,16 +163,6 @@ js `k=[]; k["01"]=7` → node: named property (length 0, `k[1]` undefined, keys 
 stores it where keys/`in` cannot see it. Make rt.arrIndexOf (abnf/jsrt.go), index_of_key / maybe_numeric (runtime.c) and the
 interpreters' jsArrIndexKey accept only canonical indices for string keys in js mode (`ToString(ToUint32(k)) === k`, `< 2^32-1`);
 check lua / php / other languages' numeric-string coercion first (they may rely on it — gate by language if so).
-
-### T-708 core: building a large string natively is quadratic in ar_block's free-list walk · P1 · CORE · IN PROGRESS (CORE worker, round 1) [V]
-python `s = "ab"*35000; print(len(s))` built with `-exe` takes ~20 s (CPython instant; llvm.Run instant): the time is in runtime.c
-`ar_block` walking the big-block free list. Profile which allocation pattern grows the list and make big-block allocation O(1)
-amortised (size-segregated lists or a bump region); check other languages' string building too; bench all languages.
-
-### T-674 go (CORE): native recursion capped at ~500 Go frames by the js_gotry jump-buffer stack · P2 · CORE · IN PROGRESS (CORE worker, round 1) [V]
-Every Go function runs through js_gotry and runtime.c caps the setjmp stack at JB_CAP=512 (`die("try nested too deeply")`), so a
-native Go program recursing ~500 deep dies (also json.Unmarshal of a valid 10000-deep value); interp and llvm.Run are fine, go
-itself handles millions. Related to T-505 (what a too-deep recursion should raise).
 
 ### T-640 js (CORE): arguments mapped through another function; array holes · P3 · CORE · OPEN [V]
 `function h(a){ a[0] = 9 } function f(p){ h(arguments); return p }; f(1)` → all legs 1 (node 9); likewise a closure writing through
@@ -187,13 +186,6 @@ A reviewer argued the VM prints `RangeError (index): Invalid value: Not in inclu
 range 0..2: 7` (a plain RangeError); the current engines print the IndexError form
 `RangeError (index): Index out of range: index should be less than 3: 7`, which is
 believed to be the modern VM's. Leave as is unless a real dart run settles it.
-
-### T-505 java (and probably every language): unbounded recursion kills the process instead of raising · P2 · CORE · IN PROGRESS (CORE worker, round 1) [V finder only]
-`static void rec(int n){ rec(n+1); }` inside `try { } catch (StackOverflowError e)`: interp and run die with Go "fatal
-error: stack overflow" (exit 2), native SIGSEGV (exit 139); java catches it. Needs a depth limit in the engines; probe the
-other languages' equivalents (python RecursionError, js RangeError "Maximum call stack size exceeded", kotlin, csharp).
-Lua (reproduced by the lua finder): `pcall(nt, 1000000)` of a non-tail recursion → lua `false ...: stack overflow`
-then `after`; interp and run die with Go's fatal stack overflow (exit 2), native SIGSEGV. One mechanism for every language.
 
 ---
 
@@ -807,6 +799,9 @@ T-714 c: string literals over 4096 bytes break llvm.Run; global `char *a[N] = {.
 T-713 bash: extglob edge cases — `*` before `@(`/`!(`/`+(`, `**(a)`, halves split on `*@(a|)` — DONE abdce695 (bash 5.3 sm_loop.c rules: star skips the empty tail, top-level trailing !(, empty +(/*( occurrences, match_upattern prefilter; rt_eg empty last alternative and UTF-8 steps — 4 legs = bash 5.3, 640-pattern fuzz; follow-up T-717)
 T-715 js: `K.constructor`; sparse array keys; defineProperty attributes on array named keys; template object identity — DONE f35c764b 2a48d3ba (class .constructor, attributes and accessors on array named keys incl. integrity levels, one template object per call site — 4 legs = node, TS via tsc 6; sparse-array keys moved into T-640; follow-up T-718)
 T-717 bash: native binaries exhaust the 4 MiB string arena on long-running programs — DONE 9dea2e18 (growable chunked heap with mark/release per loop pass and line, a floor for every outliving store — 352,000-line ticket shape = bash 5.3 at 3.8 MB; bash bench +1.16%, ~11 instructions per minimal loop pass, accepted for unbounded run length; follow-ups T-719/T-720)
+T-708 core: building a large string natively is quadratic in ar_block's free-list walk — DONE 17370194 (big blocks on size-step free lists: python "ab"*35000 native 20.3 s → 0.16 s; 35000 appends 20–77 s → 0.5–5.6 s across 8 languages)
+T-674 go (CORE): native recursion capped at ~500 Go frames by the js_gotry jump-buffer stack — DONE 3c89e494 (jmp_buf pool doubles instead of capping at 512; native go recursion now bounded by the 8 MB C stack, ~16,500 frames; = go run on depth 5000 and 10000-deep json)
+T-505 java (and probably every language): unbounded recursion kills the process instead of raising — DONE 4b8bcb99 (one call counter in all four engines raising each language's own error — python RecursionError at CPython's 1000, js RangeError, java/kotlin StackOverflowError, ruby SystemStackError, lua catchable stack overflow, dart StackOverflowError, go fatal exit 2, swift SIGSEGV, csharp per .NET docs; non-python limit 10,000 frames, below the reference for java/lua/go but within what the native 8 MB C stack allows; php/metajs → T-721)
 
 # Settled — do not re-open
 
