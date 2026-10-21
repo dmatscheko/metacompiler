@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-736** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-737** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -68,11 +68,12 @@ its report; anything structural there is a CORE ticket.
 
 # RB — Ruby
 
-### T-732 ruby: `3r % 0` hangs the interpreter; `!x` after a newline read as a method suffix; operator/arity gaps · P2 · RB · IN PROGRESS (RB worker, round 11) [V]
-`3r % 0` → interpreter hangs, llvm.Run aborts "division by zero" (ruby ZeroDivisionError). Parser: `bt = e.backtrace` then a line
-starting `!bt.nil?` is read as a call to `backtrace!` (all engines). `"a".+("c")` → NoMethodError (ruby "ac"). `def h(a); end;
-send(:h)` → NoMethodError (ruby ArgumentError in `h'). `[1,2].first(-1)` raises nothing (ruby ArgumentError "negative array size").
-The format family (`"%d" % nil`, format, sprintf) records no frame name; frames in blocks are not "block in X".
+### T-736 ruby: bang methods on strings do not mutate; `puts` inside an expression; send with a receiver to a top-level def; `===` · P1 · RB · OPEN [V]
+`s = "ab"; s.upcase!; puts s` → ruby `AB`, all engines `ab` (strings are immutable host strings; upcase!/downcase!/capitalize!/
+swapcase!/reverse!/strip!/chomp!/squeeze!/sub!/gsub!/replace/<<  on a String must mutate the object every alias sees) — P1.
+`x && puts("a")`, `x || puts("a")`, `x and puts("a")` do not parse (puts/print exist only as statements, KwPuts) — P2.
+`self.send(:h, 6)`, `C.new.send(:h, 2)` to a top-level def → NoMethodError (ruby 12 / 4). `"a".===("a")` / `send(:===)` →
+NoMethodError (ruby true).
 
 ---
 
@@ -787,6 +788,7 @@ T-724 ruby: builtin-raised errors print no `file:line:in 'meth': ` prefix; Strin
 T-730 bash: a pipeline's last stage runs in the current shell; scalar `-i`/`-u` ignored by read and `${v:=}`; smaller gaps — DONE ffd8ba03..751ce5c1 (pipeline stages as subshells, ${!REF OP} on its target, attribute-aware stores everywhere, two-phase declarations, subshell trap reset, repeated local, plus set -e, let, compiler EXIT traps and capture fd copies — = bash 5.3; follow-up T-733)
 T-733 bash: `o=$(nosuchcmd)` halves diverge; `exec` unsupported — DONE 820fcdfe (command not found on stderr ending its own subshell in both halves, redirection-only and bare exec — = bash 5.3)
 T-731 js: accessors on array indices; -callgraph names js functions `jsf_N` — DONE 389e9440 f9c16192 (-callgraph source names for js/ts with srcpos-probe checking NAME@LINE in 10 languages; index accessors honoured by reads, iteration, methods and introspection behind a counter gate — = node, all benches within spread; follow-ups T-734/T-735)
+T-732 ruby: `3r % 0` hangs the interpreter; `!x` after a newline read as a method suffix; operator/arity gaps — DONE 82d93a95 (Rational zero divisors raise, glued ?/! suffixes, x.OP(y) as send, receiver-less send to top-level defs, negative array sizes, frames for format and blocks — = ruby 2.6; follow-up T-736)
 
 # Settled — do not re-open
 
