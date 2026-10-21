@@ -76,7 +76,7 @@ non-ASCII class range spanning 256 or more characters only gets the text-side up
 
 # JS — JavaScript and TypeScript
 
-### T-704 js: `new.target`; a class extending Array / Map / Set and the other builtins · P2 · JS · OPEN [V]
+### T-704 js: `new.target`; a class extending Array / Map / Set and the other builtins · P2 · JS · IN PROGRESS (JS worker, round 23) [V]
 `class A { constructor(){ this.t = typeof new.target; this.e = new.target === A; this.n = new.target === B } }; class B extends A
 {}` → node `function true false function false true`; interp "ReferenceError: new.target is not defined", llvm.Run/native
 `undefined false false ...`; also inside F reached through super(). `class A1 extends Array {}` / `class M1 extends Map {}` → node
