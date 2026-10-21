@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-732** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-733** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -68,12 +68,11 @@ its report; anything structural there is a CORE ticket.
 
 # RB — Ruby
 
-### T-724 ruby: builtin-raised errors print no `file:line:in 'meth': ` prefix; String + Integer concatenates · P2 · RB · IN PROGRESS (RB worker, round 10) [V]
-Uncaught ZeroDivisionError / TypeError / KeyError / ArgumentError / NoMethodError / NameError print without MRI's site: ruby 2.6
-`zd.rb:2:in `/'`, `ke.rb:2:in `fetch'`, `ie.rb:2:in `Integer'`, arity errors at the callee's def line (`ae.rb:1:in `f'`),
-NoMethodError at the call's line. Needs a frame-name parameter at each raise site (rubyRaiseErr / rubyNameErr / rubyArgCountErr /
-js_rtop in abnf/jsrt.go, rbRaiseErr in layer 2, raiseErr in the interpreter) and call-granular positions. Separately: `v = ["a", 1];
-p(v[0] + v[1])` → `"a1"` in all engines (ruby TypeError "no implicit conversion of Integer into String").
+### T-732 ruby: `3r % 0` hangs the interpreter; `!x` after a newline read as a method suffix; operator/arity gaps · P2 · RB · OPEN [V]
+`3r % 0` → interpreter hangs, llvm.Run aborts "division by zero" (ruby ZeroDivisionError). Parser: `bt = e.backtrace` then a line
+starting `!bt.nil?` is read as a call to `backtrace!` (all engines). `"a".+("c")` → NoMethodError (ruby "ac"). `def h(a); end;
+send(:h)` → NoMethodError (ruby ArgumentError in `h'). `[1,2].first(-1)` raises nothing (ruby ArgumentError "negative array size").
+The format family (`"%d" % nil`, format, sprintf) records no frame name; frames in blocks are not "block in X".
 
 ---
 
@@ -788,6 +787,7 @@ T-729 bash: mapfile/readarray; attributes on array elements; unset of a scalar's
 T-723 js/ts: tests/srcpos-probe.sh reports -callgraph definition lines off by one — DONE f80983ea (bisected to e4a8fdc3 hoisting; emitFnInit records the declaration position; srcpos-probe 26/26 and now a gate in tests/gates.sh)
 T-725 js: accessors inherited through a prototype object; `Reflect` missing in the interpreter — DONE 4dc32dac (accessors through prototype objects and views in all engines, getter-only refusals naming the prototype's constructor, Reflect with all 13 methods — = node)
 T-726 js: accessors on array indices / functions via defineProperty; Symbol-keyed properties under freeze and in messages — DONE b036333f for functions and Symbol keys (defineProperty on functions with attributes and accessors; freeze/seal cover Symbol keys; Symbol(desc) in messages — = node); array-index accessors → T-731
+T-724 ruby: builtin-raised errors print no `file:line:in 'meth': ` prefix; String + Integer concatenates — DONE 557c085e (raise helpers carry the builtin's frame name, sites stamped at rescue entry, def-line arity errors, String#+ / numeric coercion TypeErrors — 252-row operator matrix and uncaught lines = ruby 2.6; a features assertion that asserted the wrong answer corrected; follow-up T-732)
 
 # Settled — do not re-open
 
