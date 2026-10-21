@@ -68,7 +68,7 @@ its report; anything structural there is a CORE ticket.
 
 # RB — Ruby
 
-### T-745 ruby: `&->` lambda self in define_method; compiler `k = k`; interp nil class constant; shared attr_writer name · P3 · RB · OPEN [V]
+### T-745 ruby: `&->` lambda self in define_method; compiler `k = k`; interp nil class constant; shared attr_writer name · P3 · RB · IN PROGRESS (RB worker, round 18) [V]
 `define_method(:v, &->(q) { [self.class, q] })` → `[Class, 5]` both halves (ruby `[D, 5]`; the `&lambda {}` form works). Compiler:
 `k = k` → NameError (ruby nil; the right side compiles before the name counts as a local). Interpreter: `class R; rv = nil; RV = rv;
 end; R::RV` → "uninitialized constant R::RV" (ruby nil). Compiler: when any class has an attr_writer/attr_accessor of a name, `o.x = v`
