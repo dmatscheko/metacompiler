@@ -197,6 +197,18 @@
             "program": "${workspaceFolder}","args": ["languages/metajs-to-llvm-ir.abnf", "tests/metajs-fail-test-anytype.js", "-q", "-exe", "tests/metajs-native-fail-anytype.out"]
         },
         {
+            "name": "MetaJS abort probe, unbounded recursion (interpreter, SHOULD FAIL)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/metajs-interpreter.abnf", "tests/metajs-abort-test-deep.js", "-q"]
+        },
+        {
+            "name": "MetaJS abort probe, unbounded recursion, native binary SHOULD ABORT, ALL HALVES (interpreter vs llvm.Run vs native)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/metajs-to-llvm-ir.abnf", "tests/metajs-abort-test-deep.js", "-q", "-exe", "tests/metajs-abort-deep.out"]
+        },
+        {
             "name": "C (subset) interpreter",
             "type": "go",
             "request": "launch",
@@ -2768,6 +2780,18 @@
             "type": "go",
             "request": "launch",
             "program": "${workspaceFolder}","args": ["languages/php-to-llvm-ir.abnf", "tests/php-abort-test.php", "-q", "-exe", "tests/php-abort.out"]
+        },
+        {
+            "name": "PHP abort probe, unbounded recursion (interpreter, SHOULD FAIL)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/php-interpreter.abnf", "tests/php-abort-test-deep.php", "-q"]
+        },
+        {
+            "name": "PHP abort probe, unbounded recursion, native binary SHOULD ABORT, ALL HALVES (interpreter vs llvm.Run vs native)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/php-to-llvm-ir.abnf", "tests/php-abort-test-deep.php", "-q", "-exe", "tests/php-abort-deep.out"]
         },
         {
             "name": "Kotlin abort probe, uncaught RuntimeException (interpreter, SHOULD FAIL)",

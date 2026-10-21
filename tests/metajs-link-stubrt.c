@@ -4,7 +4,7 @@
  * WHAT IT IS FOR
  *
  * metajs-to-llvm-ir.abnf emits HANDLE IR: every value is an i64 handle and the
- * semantics live in js_* externs. This file defines exactly the eleven symbols
+ * semantics live in js_* externs. This file defines exactly the symbols
  * that tests/metajs-link-hello.js declares - by hand, one line each - and a main()
  * that calls jsmain(). That is enough to prove the LINKING FEATURE end to end:
  *
@@ -44,6 +44,7 @@ h js_call(h fn, h self, h args) { return fn * 0 + self * 0 + args * 0; }
 h js_getret(void) { return 0; }
 h js_setret(h v) { return v * 0; }
 h js_gc_pin(h v) { return v; }
+h js_rt_deep(h limit, h hook, h status) { return limit * 0 + hook * 0 + status * 0; }
 
 int main(void) {
 	jsmain(0, 0);

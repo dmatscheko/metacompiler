@@ -8829,6 +8829,13 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         mnb.NewRet(callExt(mnb, "js_phmissname",
                            [callExt(mnb, "js_arg", [mnf.Params[1], handle(0)])]))
         callExt(b, "js_rt_missvar", [callExt(b, "js_closure", [handle(mnIdx), curScopeV])])
+        // A recursion with no base case exhausts PHP's memory limit (a userland
+        // call takes VM stack, not C stack): an uncatchable fatal error, exit
+        // status 255. Twin of coreDeepHook in php-interpreter.abnf, which cites
+        // the engine.
+        callExt(b, "js_rt_deep", [emitNum(b, 10000),
+            emitStr(b, "PHP Fatal error:  Allowed memory size of 134217728 bytes exhausted (tried to allocate 262144 bytes)\n"),
+            emitNum(b, 255)])
         b = emitStaticSlots(b) // one reference cell per 'static $x' declaration site
         b = emitImported(b)   // imported files' items, each under its own source
         b = makeBody(all)(b) // a statement list like any body: labels work here too

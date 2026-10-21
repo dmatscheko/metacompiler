@@ -1189,7 +1189,11 @@ KwDefault   = "default" KwEnd ;
             }
             sc["arguments"] = {v: args, t: "object"}
             scopes.push(sc)
+            var depth = coreDepth + 1
+            coreDepth = depth
+            if (depth > coreDepthMax) { coreTooDeep() }
             var r = bodyT()
+            coreDepth = depth - 1
             scopes = saved
             return (r != undefined && r.isRet) ? r.v : undefined
         }
@@ -1646,11 +1650,13 @@ KwDefault   = "default" KwEnd ;
         }
         return function() {
             var savedChain = scopes.slice()
+            var savedDepth = coreDepth
             var box = {sig: undefined}
             try {
                 box.sig = tryT()
             } catch (e) {
                 scopes = savedChain.slice()
+                coreDepth = savedDepth
                 if (isUserExc(e) && catchT != undefined) {
                     var sc = {}
                     if (catchName != undefined) { sc[catchName] = {v: e.v, t: typeClass(e.v)} }
@@ -1719,6 +1725,11 @@ KwDefault   = "default" KwEnd ;
 
     // ----- Core library config (see lib/interp-core.js) -----
     core.lang = "js"
+    // A call nested past the limit is a runtime error, like a type-pinning
+    // violation: no catch sees it. Twin of the js_rt_deep hook
+    // metajs-to-llvm-ir.abnf registers in jsmain.
+    coreDepthMax = 10000
+    coreDeepHook = function() { failHost("Maximum call stack size exceeded") }
 
     // ----- Project-file imports (see the ImportStmt rule) -----
     function metajsImport(items, pos) {

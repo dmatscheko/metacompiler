@@ -5136,7 +5136,11 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             scopes.push(fr)
             bindParams(params, argset, who, CLO_SCOPE)
             var r = anytype
+            var depth = coreDepth + 1
+            coreDepth = depth
+            if (depth > coreDepthMax) { coreTooDeep() }
             r = body()
+            coreDepth = depth - 1
             scopes = saved
             if (isSig(r) && r.ret === true) { return r.v }
             return null
@@ -6509,7 +6513,11 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             }
         }
         var r = anytype
+        var depth = coreDepth + 1
+        coreDepth = depth
+        if (depth > coreDepthMax) { coreTooDeep() }
         r = fn.body()
+        coreDepth = depth - 1
         scopes = saved
         if (isSig(r) && r.ret === true) { return r.v }
         return null
@@ -8337,6 +8345,18 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
 
     // ----- core config -----
     core.lang = "php"
+    // A userland call runs on the VM stack, not the C stack, so a recursion with no
+    // base case is not the stack-limit Error (zend_call_stack_size_error, checked
+    // only where the engine re-enters execute_ex or zend_call_function) but the
+    // memory limit: an uncatchable fatal error, exit status 255, when the next
+    // 256 KiB VM stack page (ZEND_VM_STACK_PAGE_SIZE) passes the default 128 MiB
+    // memory_limit. Written as the CLI's stderr log line, without its " in FILE on
+    // line N". Twin of the js_rt_deep hook php-to-llvm-ir.abnf registers.
+    coreDepthMax = 10000
+    coreDeepHook = function() {
+        eprintln("PHP Fatal error:  Allowed memory size of 134217728 bytes exhausted (tried to allocate 262144 bytes)")
+        exit(255)
+    }
     core.test = phptest
     binOp = function(op, l, r) {
         if (op == ".") { return phpConcat(l, r) }

@@ -13487,6 +13487,17 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			rt.deepExit = int(jsToInt(rt.toNumber(u(a[2]))))
 			return 0
 		},
+		// A call the emitter makes directly rather than through js_call (MetaJS's
+		// direct calls), counted around the call. A throw skips js_deep_out, so
+		// js_try restores the count. Twins in languages/lib/runtime.c.
+		"js_deep_in": func(a []uint64) uint64 {
+			rt.deepN++
+			if rt.deepMax > 0 && rt.deepN > rt.deepMax {
+				rt.tooDeep()
+			}
+			return 0
+		},
+		"js_deep_out": func(a []uint64) uint64 { rt.deepN--; return 0 },
 		"js_rt_missmem": func(a []uint64) uint64 { rt.missMem = u(a[0]); return 0 },
 		// The WRITE sibling of missMem: a hook of its own because node's two
 		// messages differ ("Cannot read properties of" / "Cannot set properties of").
@@ -13996,8 +14007,12 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				// `this` stack has to be cut back to the depth of this try.
 				depth := len(rt.thisStack)
 				ntDepth := len(rt.newTargetStack)
+				calls := rt.deepN
 				defer func() {
-					if caught = recover(); caught != nil && rt.trackThis {
+					if caught = recover(); caught != nil {
+						rt.deepN = calls
+					}
+					if caught != nil && rt.trackThis {
 						if len(rt.thisStack) > depth {
 							rt.thisStack = rt.thisStack[:depth]
 						}

@@ -532,6 +532,11 @@ KwDefault   = "default" KwEnd ;
     }
     // True while jsrun's statements are emitted (not -rt-prims' jsrtprims).
     var jsrunTop = false
+    // True when the module is a PROGRAM: the driver sets it, so a runtime library
+    // (-rt-lib), the frozen bootstrap and the tag scripts compiled under -frozen
+    // keep false. A program's direct calls are then counted like js_call counts
+    // its closures (js_deep_in / js_deep_out), and jsmain registers the limit.
+    var deepCount = false
     // A call with no receiver: js_call0..3 (lib/runtime.c) build the argument array
     // only when the callee can keep it.
     function emitPlainCall(b, avs) {
@@ -549,7 +554,9 @@ KwDefault   = "default" KwEnd ;
         b.NewCondBr(b.NewICmp(llvm.enum.IPredEQ, avs[0], b.NewLoad(i64, d.clo)), okB, slowB)
         var dargs = [okB.NewLoad(i64, d.env)]
         for (var i = 0; i < d.np; i++) { dargs.push(i + 1 < avs.length ? avs[i + 1] : hUndef) }
+        if (deepCount) { callExt(okB, "js_deep_in", []) }
         var rd = okB.NewCall(d.fn, dargs)
+        if (deepCount) { callExt(okB, "js_deep_out", []) }
         okB.NewBr(mergeB)
         var rs = emitPlainCall(slowB, avs)
         slowB.NewBr(mergeB)
@@ -1281,6 +1288,12 @@ KwDefault   = "default" KwEnd ;
         var fm = m.NewFunc("jsmain", i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
         curF = fm
         var bm = fm.NewBlock("entry")
+        // A call nested past the limit is a runtime error, which no catch sees.
+        // Twin of coreDeepHook in metajs-interpreter.abnf.
+        if (deepCount) {
+            callExt(bm, "js_rt_deep", [emitNum(bm, 10000),
+                emitStr(bm, "js runtime error: Maximum call stack size exceeded\n"), emitNum(bm, 1)])
+        }
         var sc = callExt(bm, "js_scope_new", [fm.Params[0]])
         bm.NewCall(f, [sc, fm.Params[1]])
         // The entry point defaults to main() but -main (c.mainName) can name another.
@@ -1322,6 +1335,7 @@ KwDefault   = "default" KwEnd ;
     //     resolves it through the one global jsdispatch; chaining is what lets two
     //     separately compiled modules share that one entry point.
     var rtLib = (c.rtLib == true)
+    deepCount = !rtLib
     if (rtLib) {
         funcCount = 1000000
         strCount = 1000000

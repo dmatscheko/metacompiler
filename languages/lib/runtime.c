@@ -4269,6 +4269,19 @@ long js_rt_deep(long limit, long hook, long status) {
 	return 0;
 }
 
+/* A call the emitter makes directly rather than through js_call (MetaJS's
+ * direct calls), counted around the call; a throw skips js_deep_out and js_try
+ * restores the count. Twins in abnf/jsrt.go. */
+long js_deep_in(void) {
+	CALL_DEPTH = CALL_DEPTH + 1;
+	if (CALL_DEPTH > CALL_MAX) { call_too_deep(); }
+	return 0;
+}
+long js_deep_out(void) {
+	CALL_DEPTH = CALL_DEPTH - 1;
+	return 0;
+}
+
 long js_call(long callee, long self, long args) {
 	long t = tag_of(callee);
 	if (t == 7) {
