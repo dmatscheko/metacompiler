@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"14.gy/mec/abnf/r"
-	"github.com/llir/llvm/asm"
 	"github.com/llir/llvm/ir"
 )
 
@@ -85,7 +84,7 @@ func frozenKernel() *fkernel {
 // cache never pays for parsing the ~650K snapshot.
 func (k *fkernel) boot() *ir.Module {
 	if k.bootMod == nil {
-		mod, err := asm.ParseString("jsbootstrap.ll", jsBootstrapLL)
+		mod, err := parseIR("jsbootstrap.ll", jsBootstrapLL)
 		if err != nil {
 			panic("cannot parse the frozen bootstrap module: " + err.Error())
 		}

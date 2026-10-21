@@ -25,7 +25,6 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/llir/llvm/asm"
 	"github.com/llir/llvm/ir"
 )
 
@@ -89,7 +88,7 @@ func loadCachedScript(code string) *ir.Module {
 		if mod, err = decodeModule(dat); err != nil {
 			return nil // Corrupt entry: compileScript recompiles and overwrites it.
 		}
-	} else if mod, err = asm.ParseString(path, string(dat)); err != nil {
+	} else if mod, err = parseIR(path, string(dat)); err != nil {
 		return nil
 	}
 	// Every compiled script is executed through its jsrun entry (runScriptModule),

@@ -3,6 +3,7 @@ package abnf
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/llir/llvm/asm"
@@ -45,6 +46,59 @@ import (
 // NOT disagree is the size, so that is checked rather than assumed - a declaration
 // narrower than its definition would silently address the wrong slot.
 
+// parseIR parses LLVM assembly text. llir PRINTS a positive low-entropy integer
+// constant >= 4096 in LLVM's unsigned-hex spelling (`i32 u0x1000`), which clang
+// accepts everywhere, but llir's own parser reads a getelementptr index - in an
+// instruction or a constant expression - with a base-10 ParseInt and panics on it.
+// So on every getelementptr line, outside quoted text, an `iN u0xH` whose value
+// is below 2^(N-1) is respelled in decimal: the same value in any operand position.
+func parseIR(name, text string) (*ir.Module, error) {
+	if strings.Contains(text, "u0x") {
+		lines := strings.Split(text, "\n")
+		for i, ln := range lines {
+			if strings.Contains(ln, "getelementptr") && strings.Contains(ln, "u0x") {
+				lines[i] = decimalHexInts(ln)
+			}
+		}
+		text = strings.Join(lines, "\n")
+	}
+	return asm.ParseString(name, text)
+}
+
+// decimalHexInts respells the `iN u0xH` operands of one IR line as parseIR describes.
+func decimalHexInts(ln string) string {
+	var sb strings.Builder
+	inQuote := false
+	for i := 0; i < len(ln); i++ {
+		c := ln[i]
+		if c == '"' {
+			inQuote = !inQuote // IR text escapes a quote as \22, so no \" exists
+		}
+		if !inQuote && c == 'i' && (i == 0 || strings.IndexByte(" ,([{<", ln[i-1]) >= 0) {
+			j := i + 1
+			for j < len(ln) && ln[j] >= '0' && ln[j] <= '9' {
+				j++
+			}
+			if j > i+1 && strings.HasPrefix(ln[j:], " u0x") {
+				bits, _ := strconv.Atoi(ln[i+1 : j])
+				h := j + 4
+				e := h
+				for e < len(ln) && strings.IndexByte("0123456789ABCDEFabcdef", ln[e]) >= 0 {
+					e++
+				}
+				v, err := strconv.ParseUint(ln[h:e], 16, 64)
+				if err == nil && bits >= 2 && bits <= 64 && v < uint64(1)<<(bits-1) {
+					sb.WriteString(ln[i:j] + " " + strconv.FormatUint(v, 10))
+					i = e - 1
+					continue
+				}
+			}
+		}
+		sb.WriteByte(c)
+	}
+	return sb.String()
+}
+
 // linkRuntimeModules parses each .ll runtime input and wires it into the machine.
 // Non-.ll entries (.c/.o/.a, which only clang can consume) are ignored, so the same
 // list a grammar hands to llvm.BuildExecutable can be handed to llvm.Run.
@@ -81,7 +135,7 @@ func (ma *machine) linkRuntimeModules(m *ir.Module, paths []string) {
 		if err != nil {
 			panic("llvm.Run(): cannot read the runtime module " + p + ": " + err.Error())
 		}
-		rm, err := asm.ParseString(p, string(data))
+		rm, err := parseIR(p, string(data))
 		if err != nil {
 			panic("llvm.Run(): cannot parse the runtime module " + p + ": " + err.Error())
 		}
