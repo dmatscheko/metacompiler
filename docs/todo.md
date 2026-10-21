@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-717** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-718** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -129,11 +129,10 @@ parameter), which no engine prints either.
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-713 bash: extglob edge cases — `*` before `@(`/`!(`/`+(`, `**(a)`, halves split on `*@(a|)` · P3 · SH · IN PROGRESS (SH worker, round 14) [V]
-bash 5.3 says false, all our engines true: `[[ b == *!(b) ]]`, `[[ a == *!(a) ]]`, `[[ xy == *@(|a) ]]`, `[[ "" == *@(|a) ]]`,
-`[[ xy == x*@(|a) ]]` (a `*` before an `@(`/`!(`/`+(` group never matches an empty tail in bash; drives `${v/%@(|a)/Z}` → bash `xy`,
-ours `xyZ`). `**(a)` never matches in our engines (interp globAt's star-run collapse eats the `*` of `*(`); bash matches every string.
-`[[ s == *@(a|) ]]` for s = "", b, xy: interpreter true, compiled and bash false (halves diverge).
+### T-717 bash: native binaries exhaust the 4 MiB string arena on long-running programs · P2 · SH · OPEN [V]
+bash-rt.c allocates strings and never frees them, so a long program dies: a generated script running 400 extglob patterns × 11
+subjects × 8 `${}` forms exits 70 "string arena exhausted" after ~288 lines (bash 5.3 and the interpreter finish). Reclaim dead
+strings (scope-end / statement-end release, or a growable arena with reuse) without slowing the bench.
 
 ---
 
@@ -798,6 +797,7 @@ T-711 bash: glob `?` and pattern elements match one UTF-16 unit in the interpret
 T-712 bash: non-ASCII POSIX classes in globs; empty extglob matches in `${v//pat/rep}` — DONE 61c107ce (Unicode class table read off macOS iswctype replaces the print table in both engines, undecodable bytes in no class, pat_subst's empty-match rule — 4 legs = bash 5.3; follow-ups T-713/T-714)
 T-710 js: `Sub.from` / `Sub.of` on an Array subclass; `Symbol.species` reads; `typeof [].hasOwnProperty`; tagged-template strings array; `"01"` array key — DONE 19d778a0 (Symbol.species getters, Object.prototype methods as values on primitives/arrays, tagged-template strings as frozen arrays with hidden raw; Sub.from/of already worked — 4 legs = node; the "01" key moves to T-716 CORE; follow-up T-715)
 T-714 c: string literals over 4096 bytes break llvm.Run; global `char *a[N] = {...}` crashes the compiler — DONE 7c1446cd 24ac13e0 (llvm.Run's IR reader accepts llir's u0x GEP indices on all three parse paths; string-literal brace items and literal-operand initializers in the C grammars — = cc)
+T-713 bash: extglob edge cases — `*` before `@(`/`!(`/`+(`, `**(a)`, halves split on `*@(a|)` — DONE abdce695 (bash 5.3 sm_loop.c rules: star skips the empty tail, top-level trailing !(, empty +(/*( occurrences, match_upattern prefilter; rt_eg empty last alternative and UTF-8 steps — 4 legs = bash 5.3, 640-pattern fuzz; follow-up T-717)
 
 # Settled — do not re-open
 
