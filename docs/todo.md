@@ -68,7 +68,7 @@ its report; anything structural there is a CORE ticket.
 
 # RB — Ruby
 
-### T-743 ruby: `obj.x = v` never calls a user-defined `x=`; `nil << x` aborts; private :name and instance_methods in the compiler · P1 · RB · OPEN [V]
+### T-743 ruby: `obj.x = v` never calls a user-defined `x=`; `nil << x` aborts; private :name and instance_methods in the compiler · P1 · RB · IN PROGRESS (RB worker, round 16) [V]
 `class A; def a=(v); @q = v; end; def q; @q; end; end; x = A.new; x.a = 5; p x.q` → ruby 5, ours nil in both halves: attribute writes
 store into slot `x` instead of dispatching to `x=` (also `s.a += 1` reads the slot) — P1; needs setter dispatch on the attribute-write
 path with a perf check (Struct members then move out of member-named slots, so `instance_variables` is empty as in MRI). `nil << x`
