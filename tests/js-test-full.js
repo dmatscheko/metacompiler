@@ -1176,6 +1176,10 @@ function s122() {
         s122ks([1, , 3].splice(0, 2)) == "0/2")
     // fn.apply hands an absent element over as an undefined argument.
     check("hole7", s122f.apply(null, [1, , 3]) == "1,true,3,3,true")
+    // getOwnPropertyNames puts `length` after the indices present, before a name.
+    var g = [1, , 3]
+    g.x = 5
+    check("hole8", Object.getOwnPropertyNames(g).join(",") == "0,2,length,x")
 }
 function s122f(a, b, c) { return [a, b === undefined, c, arguments.length, 1 in arguments].join(",") }
 
@@ -1197,6 +1201,91 @@ function s123d(p) { delete arguments[0]; s123h(arguments); return p + ":" + argu
 function s123() {
     check("argalias1", s123f(1) == 9 && s123g(1, 2) == "5,7" && s123k(1)() == 42)
     check("argalias2", s123s(1) == 1 && s123d(1) == "1:9:true")
+}
+
+// ===== SECTION 124: an accessor on an array index =====
+// Object.defineProperty with get/set on an index makes the element an accessor: a
+// read runs the getter and a write the setter, and so does every builtin that reads
+// the element - join, String, JSON.stringify, spread, for-of, Array.from and the
+// iteration and search methods. A definition past the end grows the array, a value
+// definition replaces the accessor again, and pop, a shorter length and delete
+// remove it. Values read off node 24.
+function s124() {
+    var n = 0
+    var a = [1, 2, 3]
+    Object.defineProperty(a, "0", { get: function () { n = n + 1; return 10 + n }, configurable: true })
+    var i = 0
+    check("idxacc1", a[0] == 11 && a[i] == 12 && a.length == 3 && n == 2 && (0 in a) && a.hasOwnProperty(0))
+    check("idxacc2", a.join(",") == "13,2,3" && String(a) == "14,2,3" && JSON.stringify(a) == "[15,2,3]" && n == 5)
+    var s = 0
+    for (var v of a) { s = s + v }
+    check("idxacc3", [...a].join(",") == "17,2,3" && s == 21 && Array.from(a)[0] == 18 && n == 8)
+    check("idxacc4", a.map(function (x) { return x * 2 }).join(",") == "38,4,6" && a.indexOf(20) == 0 &&
+        a.includes(21) && a.slice(0, 2).join(",") == "22,2" && a.filter(function (x) { return x > 2 }).length == 2 &&
+        a.reduce(function (x, y) { return x + y }) == 29 && n == 14)
+    var d = Object.getOwnPropertyDescriptor(a, "0")
+    check("idxacc5", typeof d.get == "function" && d.set === undefined && d.enumerable === true && d.configurable === true)
+    var b = [5, 6]
+    Object.defineProperty(b, 1, { get: function () { return "g" } })
+    check("idxacc6", b[1] == "g" && b.join("-") == "5-g" && b.length == 2)
+    var w = []
+    var log = []
+    Object.defineProperty(w, "2", { set: function (x) { log.push(x) }, get: function () { return 99 } })
+    w[2] = 7
+    w[2] = 8
+    check("idxacc7", w[2] == 99 && w.length == 3 && log.join(",") == "7,8" && !(0 in w) && (2 in w))
+    Object.defineProperty(a, "0", { value: 42 })
+    check("idxacc8", a[0] == 42 && a.join(",") == "42,2,3" && n == 14)
+    var c = [1, 2]
+    var k = 0
+    Object.defineProperty(c, "0", { get: function () { k = k + 1; return 7 }, configurable: true })
+    c[0] = 3
+    check("idxacc9", c[0] == 7 && c.pop() == 2 && c.length == 1 && k == 1)
+    c.push(4)
+    check("idxacc10", c.join(",") == "7,4" && c.pop() == 4 && c.pop() == 7 && k == 3 && c.length == 0)
+    c.push(5)
+    var e = [1, 2, 3]
+    Object.defineProperty(e, "1", { get: function () { return 8 }, configurable: true })
+    e.length = 1
+    e.push(6)
+    var f = [1, 2]
+    Object.defineProperty(f, "1", { get: function () { return 8 }, configurable: true })
+    delete f[1]
+    check("idxacc11", c[0] == 5 && e.join(",") == "1,6" && f.length == 2 && f[1] === undefined && !(1 in f))
+    // A new index takes false for an attribute the descriptor does not name, a
+    // redefined element keeps its own; a non-configurable accessor stays.
+    var g = [1, 2, 3]
+    Object.defineProperty(g, "1", { get: function () { return 7 }, enumerable: false, configurable: true })
+    Object.defineProperty(g, "4", { get: function () { return 8 } })
+    Object.defineProperty(g, "2", { get: function () { return 9 } })
+    var gd = Object.getOwnPropertyDescriptor(g, "4")
+    var gk = ""
+    for (var p in g) { gk = gk + p + "," }
+    check("idxacc12", Object.keys(g).join(",") == "0,2" && Object.getOwnPropertyNames(g).join(",") == "0,1,2,4,length" &&
+        gk == "0,2," && JSON.stringify(Object.entries(g)) == '[["0",1],["2",9]]' && gd.enumerable === false &&
+        gd.configurable === false && !g.propertyIsEnumerable(1) && Object.getOwnPropertyDescriptor(g, "2").configurable === true)
+    var gerr = ""
+    try { Object.defineProperty(g, "4", { get: function () { return 0 } }) } catch (x) { gerr = x.message }
+    check("idxacc13", !(delete g[4]) && g[4] == 8 && gerr == "Cannot redefine property: 4" && (delete g[1]) && !(1 in g))
+    // A method that moves elements reads each getter once and writes a moved
+    // element through the setter; a getter-only one refuses the write.
+    var mlog = []
+    var m = [1, 2, 3, 4]
+    Object.defineProperty(m, "1", { get: function () { mlog.push("g"); return 20 }, set: function (x) { mlog.push("s" + x) },
+        configurable: true })
+    m.reverse()
+    var m2 = [1, 2, 3]
+    Object.defineProperty(m2, "0", { get: function () { return 9 }, configurable: true })
+    var merr = ""
+    try { m2.reverse() } catch (x) { merr = x.message }
+    check("idxacc14", m.join(",") == "4,20,20,1" && mlog.join(" ") == "g s3 g" &&
+        merr == "Cannot set property 0 of [object Array] which has only a getter" && m2.join(",") == "9,2,3")
+    mlog = []
+    m[1] += 1
+    check("idxacc15", mlog.join(" ") == "g s21" && [0].concat(m).join(",") == "0,4,20,20,1")
+    var q = [1, 2, 3]
+    Object.defineProperty(q, "1", { get: function () { return 20 } })
+    check("idxacc16", Math.max.apply(null, q) == 20 && [q].flat(2).join(",") == "1,20,3" && Reflect.apply(Math.min, null, q) == 1)
 }
 
 // ===== END SECTIONS =====
@@ -1241,6 +1330,7 @@ function main() {
     s121() // SECTION-CALL 121
     s122() // SECTION-CALL 122
     s123() // SECTION-CALL 123
+    s124() // SECTION-CALL 124
     println("full: " + checks + " checks, " + failures + " failures")
     return failures
 }

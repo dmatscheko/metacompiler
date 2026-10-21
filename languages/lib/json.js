@@ -9,6 +9,8 @@
 // goes through a HOOK the includer defines:
 //   jsonHKeys(o)            the enumerable own string keys of an object, in order
 //   jsonHGet(o, k)          a property read, getters included
+//   jsonHElems(a)           the elements of array a as its reads see them: a itself,
+//                           or a copy holding an index accessor's value
 //   jsonHPut(o, k, v)       create or overwrite an enumerable own data property
 //   jsonHDel(o, k)          delete an own property
 //   jsonHNew()              a fresh plain object
@@ -163,10 +165,11 @@ function jsonArr(st, a) {
     var stepback = st["indent"]
     st["indent"] = stepback + st["gap"]
     var parts = []
+    var el = jsonHElems(a)
     var i = 0
-    while (i < a.length) {
+    while (i < el.length) {
         var s = anytype // A text, or undefined for a skipped element.
-        s = jsonSer(st, a, jsonHStr(i), a[i])
+        s = jsonSer(st, a, jsonHStr(i), el[i])
         if (s === undefined) { s = "null" }
         parts.push(s)
         i = i + 1

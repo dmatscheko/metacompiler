@@ -235,9 +235,13 @@ func (rt *jsrt) jsonArr(st *jsonState, a *jsArray) string {
 	rt.jsonEnter(st, a)
 	stepback := st.indent
 	st.indent = stepback + st.gap
-	parts := make([]string, 0, len(a.elems))
-	for i := 0; i < len(a.elems); i++ {
-		s, ok := rt.jsonSer(st, a, strconv.Itoa(i), a.elems[i])
+	el := a
+	if jsvIdxAccN > 0 {
+		el = rt.jsvArrResolve(a)
+	}
+	parts := make([]string, 0, len(el.elems))
+	for i := 0; i < len(el.elems); i++ {
+		s, ok := rt.jsonSer(st, a, strconv.Itoa(i), el.elems[i])
 		if !ok {
 			s = "null"
 		}

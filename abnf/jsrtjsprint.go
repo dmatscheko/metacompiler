@@ -693,6 +693,12 @@ func (rt *jsrt) jsvDefineProp(v interface{}, key string, desc interface{}) {
 		}
 	}
 	g, s := rt.jsvGetKey(desc, "get"), rt.jsvGetKey(desc, "set")
+	if a, isArr := v.(*jsArray); isArr && (!isUndefOrNull(g) || !isUndefOrNull(s) || jsvIdxAccN > 0) {
+		if ix := rt.arrIndexOf(key); ix >= 0 {
+			rt.jsvIdxDefine(a, ix, g, s, desc)
+			return
+		}
+	}
 	// An array's named data property keeps its attributes on the object that holds it
 	// (jsvArrNamed), so the rules below apply there unchanged.
 	if a, isArr := v.(*jsArray); isArr && key != "length" && rt.arrIndexOf(key) < 0 {
@@ -1061,15 +1067,234 @@ func (rt *jsrt) jsvArrAccRead(v interface{}, k string) (interface{}, bool) {
 	return rt.call(acc.get, v, nil), true
 }
 
-// jsvArrAccessor is the accessor v's named property k holds when v is an array, or nil.
+// jsvArrAccessor is the accessor v's named property k holds when v is an array, or nil;
+// an index accessor too.
 func jsvArrAccessor(v interface{}, k string) *jsAccessor {
 	if a, isArr := v.(*jsArray); isArr {
 		if p := jsvArrNamed(a); p != nil {
+			if jsvIdxAccN > 0 {
+				if acc := jsvIdxAcc(a, k); acc != nil {
+					return acc
+				}
+			}
 			acc, _ := p.props[k].(*jsAccessor)
 			return acc
 		}
 	}
 	return nil
+}
+
+// An ACCESSOR ON AN INDEX lives in the table __iacc of the array's named-property
+// object, keyed by the index's string, outside the key order: the index stays an
+// index and its slot present. jsvIdxAccN counts the definitions, so a program that
+// made none pays one compare at each site that reads elements. Twin of jsIdxAccN and
+// its neighbours in js-interpreter.abnf, which state the rules; jvIdxAccN in
+// languages/lib/js-rt.metajs.
+var jsvIdxAccN = 0
+
+// jsvIdxAcc is a's live accessor at index key k, or nil; one at or past the length
+// was removed with the element.
+func jsvIdxAcc(a *jsArray, k string) *jsAccessor {
+	p := jsvArrNamed(a)
+	if p == nil {
+		return nil
+	}
+	t, _ := p.props["__iacc"].(*jsObject)
+	if t == nil {
+		return nil
+	}
+	acc, _ := t.props[k].(*jsAccessor)
+	if acc == nil {
+		return nil
+	}
+	if i, err := strconv.Atoi(k); err != nil || i >= len(a.elems) {
+		return nil
+	}
+	return acc
+}
+
+func jsvIdxAccAt(a *jsArray, i int) *jsAccessor { return jsvIdxAcc(a, strconv.Itoa(i)) }
+
+// jsvIdxDrop removes index i's accessor, if it has one.
+func jsvIdxDrop(a *jsArray, i int) {
+	if p := jsvArrNamed(a); p != nil {
+		if t, _ := p.props["__iacc"].(*jsObject); t != nil {
+			k := strconv.Itoa(i)
+			delete(t.props, k)
+			jsvAttrSet(p, "__hidden", k, false)
+			jsvAttrSet(p, "__nc", k, false)
+		}
+	}
+}
+
+// jsvElem is element i as a read sees it: its accessor's value, or the slot.
+func (rt *jsrt) jsvElem(a *jsArray, i int) interface{} {
+	if acc := jsvIdxAccAt(a, i); acc != nil {
+		return rt.jsvAccRead(acc, a)
+	}
+	return a.elems[i]
+}
+
+// jsvIdxDefine is Object.defineProperty of index ix: an accessor joins the table
+// (growing the array to reach ix, the gap left absent), a value definition replaces
+// one. Its enumerable and configurable attributes are the named-property object's
+// __hidden and __nc sets under the index's key; the rules are jsArrIdxDefine's in
+// js-interpreter.abnf.
+func (rt *jsrt) jsvIdxDefine(a *jsArray, ix int, g, s, desc interface{}) {
+	k := strconv.Itoa(ix)
+	acc := jsvIdxAcc(a, k)
+	eo, _ := desc.(*jsObject)
+	has := func(n string) bool {
+		if eo == nil {
+			return false
+		}
+		_, found := eo.props[n]
+		return found
+	}
+	flag := func(n string) bool { return rt.truthy(rt.jsvGetKey(desc, n)) }
+	p := jsvArrNamed(a)
+	if acc != nil && jsvAttrHas(p, "__nc", k) {
+		if has("value") || has("writable") || (has("configurable") && flag("configurable")) ||
+			(has("enumerable") && flag("enumerable") == jsvAttrHas(p, "__hidden", k)) ||
+			(isCallable(g) && g != acc.get) || (isCallable(s) && s != acc.set) {
+			rt.bigRaise("TypeError: Cannot redefine property: %s", k)
+		}
+	}
+	if isUndefOrNull(g) && isUndefOrNull(s) {
+		jsvIdxDrop(a, ix)
+		rt.setMember(a, float64(ix), rt.jsvGetKey(desc, "value"))
+		return
+	}
+	en := ix < len(a.elems) && a.elems[ix] != jsHole
+	if acc != nil {
+		en = !jsvAttrHas(p, "__hidden", k)
+	}
+	cf := en
+	if acc != nil {
+		cf = !jsvAttrHas(p, "__nc", k)
+	}
+	if has("enumerable") {
+		en = flag("enumerable")
+	}
+	if has("configurable") {
+		cf = flag("configurable")
+	}
+	if acc == nil {
+		if ix >= len(a.elems) || a.elems[ix] == jsHole {
+			rt.setMember(a, float64(ix), jsUndef)
+		}
+		p := jsvArrNamed(a)
+		if p == nil {
+			p = newJSObject()
+			a.props = p
+		}
+		t, _ := p.props["__iacc"].(*jsObject)
+		if t == nil {
+			t = newJSObject()
+			p.props["__iacc"] = t
+		}
+		acc = &jsAccessor{}
+		t.props[k] = acc
+	}
+	if isCallable(g) {
+		acc.get = g
+	}
+	if isCallable(s) {
+		acc.set = s
+	}
+	p = jsvArrNamed(a)
+	jsvAttrSet(p, "__hidden", k, !en)
+	jsvAttrSet(p, "__nc", k, !cf)
+	jsvIdxAccN++
+}
+
+// jsvIdxFlat makes index i's accessor a data element holding its getter's value.
+func (rt *jsrt) jsvIdxFlat(a *jsArray, i int) {
+	if acc := jsvIdxAccAt(a, i); acc != nil {
+		v := rt.jsvAccRead(acc, a)
+		jsvIdxDrop(a, i)
+		a.elems[i] = v
+	}
+}
+
+// jsvHasIdxAcc: was an index accessor ever defined on a?
+func jsvHasIdxAcc(a *jsArray) bool {
+	if p := jsvArrNamed(a); p != nil {
+		_, has := p.props["__iacc"]
+		return has
+	}
+	return false
+}
+
+// jsvArrResolve is the array a builtin reads in a's place: a itself, or while a has
+// an index accessor a copy holding each getter's value, read once in index order.
+func (rt *jsrt) jsvArrResolve(a *jsArray) *jsArray {
+	if !jsvHasIdxAcc(a) {
+		return a
+	}
+	c := &jsArray{elems: make([]interface{}, len(a.elems))}
+	for i := range a.elems {
+		c.elems[i] = rt.jsvElem(a, i)
+	}
+	return c
+}
+
+// jsvIdxMethod is the array the Array method name runs on, for an a with an index
+// accessor; the rules are jsArrIdxMethod's in js-interpreter.abnf.
+func (rt *jsrt) jsvIdxMethod(a *jsArray, name string) *jsArray {
+	switch name {
+	case "pop":
+		if len(a.elems) > 0 {
+			rt.jsvIdxFlat(a, len(a.elems)-1)
+		}
+	case "toString", "toLocaleString", "toReversed", "toSorted", "toSpliced", "with", "at", "join",
+		"slice", "indexOf", "lastIndexOf", "includes", "concat", "map", "filter", "forEach", "some", "every", "find",
+		"findIndex", "findLast", "findLastIndex", "reduce", "reduceRight", "flat", "flatMap":
+		return rt.jsvArrResolve(a)
+	}
+	return a
+}
+
+// jsvIdxMovers are the Array methods that move elements, which jsvIdxMove runs.
+var jsvIdxMovers = map[string]bool{"shift": true, "unshift": true, "splice": true, "reverse": true, "sort": true,
+	"fill": true, "copyWithin": true}
+
+// jsvIdxMove runs a method that moves elements on an a with an index accessor. Twin
+// of jsArrIdxMove in js-interpreter.abnf, which states the rule.
+func (rt *jsrt) jsvIdxMove(a *jsArray, name string, args []interface{}) (interface{}, bool) {
+	rd := rt.jsvArrResolve(a)
+	cp := &jsArray{elems: append([]interface{}{}, rd.elems...)}
+	r, ok := rt.jsvArrayMethod(cp, name, args)
+	for i, e := range cp.elems {
+		was := i < len(rd.elems) && rd.elems[i] != jsHole
+		switch {
+		case e == jsHole:
+			if was {
+				jsvIdxDrop(a, i)
+				a.elems[i] = jsHole
+			}
+		case !was || !rt.jsvSameValue(e, rd.elems[i]):
+			if acc := jsvIdxAccAt(a, i); acc != nil {
+				if acc.set == nil {
+					rt.bigRaise("TypeError: %s", jsvGetterOnlyText(strconv.Itoa(i), "[object Array]"))
+				}
+				rt.call(acc.set, a, []interface{}{e})
+			} else {
+				rt.setMember(a, float64(i), e)
+			}
+		}
+	}
+	for i := len(cp.elems); i < len(a.elems); i++ {
+		jsvIdxDrop(a, i)
+	}
+	if len(cp.elems) < len(a.elems) {
+		a.dropIdx()
+		a.elems = a.elems[:len(cp.elems)]
+	}
+	if r == interface{}(cp) {
+		r = a
+	}
+	return r, ok
 }
 
 // jsvArrNamedHas: does array a hold the named property k?
@@ -1461,6 +1686,22 @@ func jsvPropEnum(v interface{}, k string) bool {
 	return false
 }
 
+// jsvArrIndexKeys is array o's own index keys, the elements present; a
+// non-enumerable index accessor (jsvIdxDefine) only when all asks for it.
+func jsvArrIndexKeys(o *jsArray, all bool) []string {
+	var hid *jsObject
+	if p := jsvArrNamed(o); !all && jsvIdxAccN > 0 && p != nil {
+		hid, _ = p.props["__hidden"].(*jsObject)
+	}
+	out := make([]string, 0, len(o.elems))
+	for i, e := range o.elems {
+		if k := strconv.Itoa(i); e != jsHole && (hid == nil || hid.props[k] != true) {
+			out = append(out, k)
+		}
+	}
+	return out
+}
+
 // The own property names of the Object and Array globals, in node's order. None of
 // them is enumerable. Twins: jsObjectOwnNames / jsArrayOwnNames in both
 // *-interpreter.abnf and in languages/lib/js-rt.metajs.
@@ -1582,6 +1823,9 @@ func (rt *jsrt) jsvString(v interface{}) string {
 				return rt.jsvString(r)
 			}
 		}
+		if jsvIdxAccN > 0 {
+			t = rt.jsvArrResolve(t)
+		}
 		parts := make([]string, len(t.elems))
 		for i, e := range t.elems {
 			if isUndefOrNull(e) {
@@ -1692,13 +1936,17 @@ func jsvSeqIter(src interface{}, kind int) *jsObject {
 		}
 		r := newJSObject()
 		if i < len(elems) {
+			e := elems[i]
+			if a, isArr := src.(*jsArray); isArr && jsvIdxAccN > 0 && kind != 0 {
+				e = rt.jsvElem(a, i)
+			}
 			switch kind {
 			case 0:
 				r.set("value", float64(i))
 			case 2:
-				r.set("value", &jsArray{elems: []interface{}{float64(i), elems[i]}})
+				r.set("value", &jsArray{elems: []interface{}{float64(i), e}})
 			default:
-				r.set("value", elems[i])
+				r.set("value", e)
 			}
 			r.set("done", false)
 			i++
@@ -1963,12 +2211,7 @@ func jsvOwnKeys(v interface{}) []string {
 		if jsvIsArgs(o) {
 			return jsvArgsKeys(o)
 		}
-		out := make([]string, 0, len(o.elems))
-		for i, e := range o.elems {
-			if e != jsHole {
-				out = append(out, strconv.Itoa(i))
-			}
-		}
+		out := jsvArrIndexKeys(o, false)
 		if p := jsvArrNamed(o); p != nil {
 			out = append(out, jsvOwnKeys(p)...)
 		}
@@ -2060,16 +2303,11 @@ func jsvGopnKeys(v interface{}) []string {
 			return append(jsvOwnKeys(v), "length")
 		case *jsArray:
 			ks := jsvOwnKeys(v)
-			n := len(ks)
+			idx, n := ks, len(ks)
 			if !jsvIsArgs(t) {
-				n = 0
-				for _, e := range t.elems {
-					if e != jsHole {
-						n++
-					}
-				}
+				idx, n = jsvArrIndexKeys(t, true), len(jsvArrIndexKeys(t, false))
 			}
-			out := append(append([]string{}, ks[:n]...), "length")
+			out := append(append([]string{}, idx...), "length")
 			if jsvIsArgs(t) {
 				out = append(out, "callee")
 			}
@@ -2816,6 +3054,12 @@ func (rt *jsrt) jsvOwnDesc(v interface{}, k string, get func(interface{}, string
 	if slots != nil {
 		acc, _ = slots.props[k].(*jsAccessor)
 	}
+	if arr, isArr := v.(*jsArray); isArr && jsvIdxAccN > 0 {
+		if ia := jsvIdxAcc(arr, k); ia != nil {
+			acc = ia
+			cf = cf && !jsvAttrHas(jsvArrNamed(arr), "__nc", k)
+		}
+	}
 	if acc != nil {
 		d.set("get", jsvOrUndef(acc.get))
 		d.set("set", jsvOrUndef(acc.set))
@@ -3398,9 +3642,11 @@ func jsvArgsView(a *jsArray) *jsArray {
 
 // jsvArgsIterFn is an arguments object's [Symbol.iterator] (Array.prototype.values),
 // which the iteration sites probe under the key it stands for; nil for anything else.
+// An array with an index accessor answers it too, so the sites take the iterator,
+// which reads each element when it steps, and not the slots.
 func jsvArgsIterFn(v interface{}, name string) *hostFunc {
 	arr, isArr := v.(*jsArray)
-	if !isArr || !jsvIsArgs(arr) || name != "__#@iterator" {
+	if !isArr || name != "__#@iterator" || !(jsvIsArgs(arr) || jsvIdxAccN > 0 && jsvHasIdxAcc(arr)) {
 		return nil
 	}
 	return jsHostFunc("values", func(rt *jsrt, this uint64, args []interface{}) interface{} {
@@ -3805,6 +4051,9 @@ func (rt *jsrt) jsvFlatten(out *[]interface{}, elems []interface{}, depth int) {
 			continue
 		}
 		if arr, ok := e.(*jsArray); ok && depth > 0 {
+			if jsvIdxAccN > 0 {
+				arr = rt.jsvArrResolve(arr)
+			}
 			rt.jsvFlatten(out, arr.elems, depth-1)
 			continue
 		}
@@ -4420,6 +4669,12 @@ func jsvExpandDollar(repl, match, before, after string) string {
 }
 
 func (rt *jsrt) jsvArrayMethod(a *jsArray, name string, args []interface{}) (interface{}, bool) {
+	if jsvIdxAccN > 0 && jsvHasIdxAcc(a) {
+		if jsvIdxMovers[name] {
+			return rt.jsvIdxMove(a, name, args)
+		}
+		a = rt.jsvIdxMethod(a, name)
+	}
 	n := len(a.elems)
 	cb := argAt(args, 0)
 	call3 := func(i int) interface{} {
@@ -4599,6 +4854,9 @@ func (rt *jsrt) jsvArrayMethod(a *jsArray, name string, args []interface{}) (int
 		out := &jsArray{elems: append([]interface{}{}, a.elems...)}
 		for _, x := range args {
 			if xa, ok := x.(*jsArray); ok {
+				if jsvIdxAccN > 0 {
+					xa = rt.jsvArrResolve(xa)
+				}
 				out.elems = append(out.elems, xa.elems...)
 			} else {
 				out.elems = append(out.elems, x)
@@ -5475,6 +5733,9 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 			if i := rt.arrIndexOf(u(a[1])); i >= 0 {
 				if i < len(arr.elems) {
 					arr.elems[i] = jsHole
+					if jsvIdxAccN > 0 {
+						jsvIdxDrop(arr, i)
+					}
 				}
 			} else if p := jsvArrNamed(arr); p != nil {
 				jsvObjDel(p, rt.toString(u(a[1])))
@@ -6408,15 +6669,8 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 				return w(out)
 			}
 			out := &jsArray{}
-			for i, e := range v.elems {
-				if e != jsHole {
-					out.elems = append(out.elems, strconv.Itoa(i))
-				}
-			}
-			if p := jsvArrNamed(v); p != nil {
-				for _, k := range jsvOwnKeys(p) {
-					out.elems = append(out.elems, k)
-				}
+			for _, k := range jsvOwnKeys(v) {
+				out.elems = append(out.elems, k)
 			}
 			return w(out)
 		case string:
@@ -6591,6 +6845,14 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 			}
 			rt.call(acc.set, u(a[0]), []interface{}{u(a[2])})
 			return 0
+		}
+		// A shorter length removes the index accessors past it.
+		if jsvIdxAccN > 0 && isArr && rt.toString(u(a[1])) == "length" {
+			if n, isNum := u(a[2]).(float64); isNum && n >= 0 && n == math.Floor(n) {
+				for i := int(n); i < len(arr.elems); i++ {
+					jsvIdxDrop(arr, i)
+				}
+			}
 		}
 		r := baseSet(a)
 		if argsLen {

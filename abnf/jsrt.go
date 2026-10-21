@@ -3058,6 +3058,12 @@ func (rt *jsrt) getMember(obj interface{}, key interface{}) interface{} {
 			}
 		}
 		if i := rt.arrIndexOf(key); i >= 0 {
+			// A js accessor on the index (jsvIdxAcc in jsrtjsprint.go).
+			if jsvIdxAccN > 0 {
+				if acc := jsvIdxAccAt(o, i); acc != nil {
+					return rt.jsvAccRead(acc, o)
+				}
+			}
 			if i < len(o.elems) && o.elems[i] != jsHole {
 				return o.elems[i]
 			}
@@ -12813,6 +12819,9 @@ func (rt *jsrt) builtinMethod(m *boundMethod, args []interface{}) interface{} {
 			// A JavaScript arguments object is read up to its own `length`.
 			if jsvIsArgs(arr) {
 				arr = jsvArgsView(arr)
+			}
+			if jsvIdxAccN > 0 {
+				arr = rt.jsvArrResolve(arr)
 			}
 			callArgs = arr.elems
 			// An absent element is passed as undefined (the floor's apply_args).

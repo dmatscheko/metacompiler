@@ -5127,8 +5127,99 @@ function s122(): void {
         s122ks([1, , 3].splice(0, 2)) == "0/2")
     // fn.apply hands an absent element over as an undefined argument.
     check("hole7", s122f.apply(null, [1, , 3]) == "1,true,3,3,true")
+    // getOwnPropertyNames puts `length` after the indices present, before a name.
+    var g: any = [1, , 3]
+    g.x = 5
+    check("hole8", Object.getOwnPropertyNames(g).join(",") == "0,2,length,x")
 }
 function s122f(a: any, b: any, c: any): string { return [a, b === undefined, c, arguments.length, 1 in arguments].join(",") }
+
+// ===== SECTION 124: an accessor on an array index =====
+// Object.defineProperty with get/set on an index makes the element an accessor: a
+// read runs the getter and a write the setter (a getter-only one refuses it), and
+// so does every builtin that reads the element - join, String, JSON.stringify,
+// spread, for-of, Array.from and the iteration and search methods. A definition
+// past the end grows the array, a value definition replaces the accessor again,
+// and pop, a shorter length and delete remove it. Values read off tsc 6.0.3's
+// default output run by node 24.
+function s124(): void {
+    var n = 0
+    var a: any[] = [1, 2, 3]
+    Object.defineProperty(a, "0", { get: function () { n = n + 1; return 10 + n }, configurable: true })
+    var i = 0
+    check("idxacc1", a[0] == 11 && a[i] == 12 && a.length == 3 && n == 2 && (0 in a) && a.hasOwnProperty(0))
+    check("idxacc2", a.join(",") == "13,2,3" && String(a) == "14,2,3" && JSON.stringify(a) == "[15,2,3]" && n == 5)
+    var s = 0
+    for (var v of a) { s = s + v }
+    check("idxacc3", [...a].join(",") == "17,2,3" && s == 21 && Array.from(a)[0] == 18 && n == 8)
+    check("idxacc4", a.map(function (x: any) { return x * 2 }).join(",") == "38,4,6" && a.indexOf(20) == 0 &&
+        a.includes(21) && a.slice(0, 2).join(",") == "22,2" && a.filter(function (x: any) { return x > 2 }).length == 2 &&
+        a.reduce(function (x: any, y: any) { return x + y }) == 29 && n == 14)
+    var d: any = Object.getOwnPropertyDescriptor(a, "0")
+    check("idxacc5", typeof d.get == "function" && d.set === undefined && d.enumerable === true && d.configurable === true)
+    var b: any[] = [5, 6]
+    Object.defineProperty(b, 1, { get: function () { return "g" } })
+    check("idxacc6", b[1] == "g" && b.join("-") == "5-g" && b.length == 2)
+    var w: any[] = []
+    var log: any[] = []
+    Object.defineProperty(w, "2", { set: function (x: any) { log.push(x) }, get: function () { return 99 } })
+    w[2] = 7
+    w[2] = 8
+    check("idxacc7", w[2] == 99 && w.length == 3 && log.join(",") == "7,8" && !(0 in w) && (2 in w))
+    Object.defineProperty(a, "0", { value: 42 })
+    check("idxacc8", a[0] == 42 && a.join(",") == "42,2,3" && n == 14)
+    var c: any[] = [1, 2]
+    var k = 0
+    Object.defineProperty(c, "0", { get: function () { k = k + 1; return 7 }, configurable: true })
+    var msg = ""
+    try { c[0] = 3 } catch (e) { msg = (e as any).message }
+    check("idxacc9", msg == "Cannot set property 0 of [object Array] which has only a getter" && c[0] == 7 &&
+        c.pop() == 2 && c.length == 1 && k == 1)
+    c.push(4)
+    check("idxacc10", c.join(",") == "7,4" && c.pop() == 4 && c.pop() == 7 && k == 3 && c.length == 0)
+    c.push(5)
+    var e: any[] = [1, 2, 3]
+    Object.defineProperty(e, "1", { get: function () { return 8 }, configurable: true })
+    e.length = 1
+    e.push(6)
+    var f: any[] = [1, 2]
+    Object.defineProperty(f, "1", { get: function () { return 8 }, configurable: true })
+    delete f[1]
+    check("idxacc11", c[0] == 5 && e.join(",") == "1,6" && f.length == 2 && f[1] === undefined && !(1 in f))
+    var g: any[] = [1, 2, 3]
+    Object.defineProperty(g, "1", { get: function () { return 7 }, enumerable: false, configurable: true })
+    Object.defineProperty(g, "4", { get: function () { return 8 } })
+    Object.defineProperty(g, "2", { get: function () { return 9 } })
+    var gd: any = Object.getOwnPropertyDescriptor(g, "4")
+    var gk = ""
+    for (var p in g) { gk = gk + p + "," }
+    check("idxacc12", Object.keys(g).join(",") == "0,2" && Object.getOwnPropertyNames(g).join(",") == "0,1,2,4,length" &&
+        gk == "0,2," && JSON.stringify(Object.entries(g)) == '[["0",1],["2",9]]' && gd.enumerable === false &&
+        gd.configurable === false && !g.propertyIsEnumerable(1) && (Object.getOwnPropertyDescriptor(g, "2") as any).configurable === true)
+    var gerr = ""
+    try { Object.defineProperty(g, "4", { get: function () { return 0 } }) } catch (x) { gerr = (x as any).message }
+    var derr = ""
+    try { delete g[4] } catch (x) { derr = (x as any).message }
+    check("idxacc13", derr == "Cannot delete property '4' of [object Array]" && g[4] == 8 &&
+        gerr == "Cannot redefine property: 4" && (delete g[1]) && !(1 in g))
+    var mlog: any[] = []
+    var m: any[] = [1, 2, 3, 4]
+    Object.defineProperty(m, "1", { get: function () { mlog.push("g"); return 20 }, set: function (x: any) { mlog.push("s" + x) },
+        configurable: true })
+    m.reverse()
+    var m2: any[] = [1, 2, 3]
+    Object.defineProperty(m2, "0", { get: function () { return 9 }, configurable: true })
+    var merr = ""
+    try { m2.reverse() } catch (x) { merr = (x as any).message }
+    check("idxacc14", m.join(",") == "4,20,20,1" && mlog.join(" ") == "g s3 g" &&
+        merr == "Cannot set property 0 of [object Array] which has only a getter" && m2.join(",") == "9,2,3")
+    mlog = []
+    m[1] += 1
+    check("idxacc15", mlog.join(" ") == "g s21" && [0].concat(m).join(",") == "0,4,20,20,1")
+    var q: any[] = [1, 2, 3]
+    Object.defineProperty(q, "1", { get: function () { return 20 } })
+    check("idxacc16", Math.max.apply(null, q) == 20 && [q].flat(2).join(",") == "1,20,3" && Reflect.apply(Math.min, null, q) == 1)
+}
 
 // ===== END SECTIONS =====
 
@@ -5244,6 +5335,7 @@ function main(): number {
     s120(); // SECTION-CALL 120
     s121(); // SECTION-CALL 121
     s122(); // SECTION-CALL 122
+    s124(); // SECTION-CALL 124
     println("full: " + checks + " checks, " + failures + " failures");
     return failures;
 }

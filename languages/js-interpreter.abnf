@@ -3478,9 +3478,10 @@ NotFuncHead = :script(~~
             var n = src.length
             if (st.i < n) {
                 var v = anytype // An element, an index or a pair.
-                v = src[st.i]
                 if (kind == 0) { v = st.i }
-                if (kind == 2) { v = [st.i, src[st.i]] }
+                else if (jsIdxAccN > 0 && Array.isArray(src)) { v = jsArrElem(src, st.i) }
+                else { v = src[st.i] }
+                if (kind == 2) { v = [st.i, v] }
                 r["value"] = v
                 r["done"] = false
                 st.i = st.i + 1
@@ -3526,6 +3527,7 @@ NotFuncHead = :script(~~
                 ts = jsArrSubCall(v, "toString", [])
                 if (ts != null) { return jsStr(ts.v) }
             }
+            if (jsIdxAccN > 0) { v = jsArrResolve(v) }
             var out = ""
             for (var i = 0; i < v.length; i++) {
                 if (i > 0) { out = out + "," }
@@ -3798,7 +3800,7 @@ NotFuncHead = :script(~~
     function jsFlatten(out, elems, depth) {
         for (var i = 0; i < elems.length; i++) {
             if (arrHole(elems, i)) { continue }
-            if (Array.isArray(elems[i]) && depth > 0) { jsFlatten(out, elems[i], depth - 1); continue }
+            if (Array.isArray(elems[i]) && depth > 0) { jsFlatten(out, (jsIdxAccN > 0) ? jsArrResolve(elems[i]) : elems[i], depth - 1); continue }
             out.push(elems[i])
         }
     }
@@ -4095,8 +4097,12 @@ NotFuncHead = :script(~~
         // properties, an arguments object's `callee` after that.
         if (typeof v == "string" || Array.isArray(v)) {
             var ak = jsOwnKeys(v)
-            var lenAt = (Array.isArray(v) && !jsIsArgs(v)) ? v.length : ak.length
+            var lenAt = ak.length
             var gk = ak.slice(0, lenAt)
+            if (Array.isArray(v) && !jsIsArgs(v)) {
+                gk = jsArrIndexKeys(v, true)
+                lenAt = jsArrIndexKeys(v, false).length
+            }
             gk.push("length")
             if (jsIsArgs(v)) { gk.push("callee") }
             // The named properties, the non-enumerable ones too.
@@ -4895,6 +4901,10 @@ NotFuncHead = :script(~~
                 np = jsArrNamed(o, false)
                 if (hasOwn(np, "__acc")) { acc = np.__acc }
             }
+            if (jsIdxAccN > 0 && jsArrIdxAccKey(o, kk) != "") {
+                acc = arrProps(o).__acc
+                cf = cf && !jsArrNamedAttr(o, "__nc", kk)
+            }
         } else if (typeof o == "function") {
             if (kk == "name" || kk == "length") {
                 var ir = anytype // A defined name / length (fnIntrRec).
@@ -5076,6 +5086,10 @@ NotFuncHead = :script(~~
         g = getMember(desc, "get")
         var s = anytype
         s = getMember(desc, "set")
+        if (Array.isArray(o) && (g !== undefined || s !== undefined || jsIdxAccN > 0) && jsArrIndexKey(key) >= 0) {
+            jsArrIdxDefine(o, jsArrIndexKey(key), g, s, desc)
+            return
+        }
         // An array's named data property keeps its attributes on the object that holds
         // it (jsArrNamed), so the rules below apply there unchanged.
         if (Array.isArray(o) && key !== "length" && jsArrIndexKey(key) < 0) {
@@ -5601,6 +5615,12 @@ NotFuncHead = :script(~~
                 if (mr != "") { biRaise("TypeError: " + mr) }
             }
         }
+        if (jsIdxAccN > 0) {
+            if (jsArrHasIdxAcc(a)) {
+                if (jsArrIdxMovers.indexOf(name) >= 0) { return jsArrIdxMove(a, name, args) }
+                a = jsArrIdxMethod(a, name)
+            }
+        }
         var n = a.length
         var cb = args[0]
         if (name == "toString") { return {v: jsJoin(a, ",")} }
@@ -5706,7 +5726,11 @@ NotFuncHead = :script(~~
             var co = []
             for (var c1 = 0; c1 < n; c1++) { jsCopyElem(co, a, c1) }
             for (var c2 = 0; c2 < args.length; c2++) {
-                if (Array.isArray(args[c2])) { for (var c3 = 0; c3 < args[c2].length; c3++) { jsCopyElem(co, args[c2], c3) } }
+                if (Array.isArray(args[c2])) {
+                    var ca = anytype // The argument's elements as a read sees them.
+                    ca = (jsIdxAccN > 0) ? jsArrResolve(args[c2]) : args[c2]
+                    for (var c3 = 0; c3 < ca.length; c3++) { jsCopyElem(co, ca, c3) }
+                }
                 else { co.push(args[c2]) }
             }
             return {v: co}
@@ -5964,6 +5988,10 @@ NotFuncHead = :script(~~
     }
     function jsonHKeys(o) { return jsKeysUnesc(jsOwnKeys(o)) }
     function jsonHGet(o, k) { return getMember(o, jsKeyEsc(k)) }
+    function jsonHElems(a) {
+        if (jsIdxAccN > 0) { return jsArrResolve(a) }
+        return a
+    }
     function jsonHPut(o, k0, v) {
         var k = jsKeyEsc(k0)
         scopePut(o, k, v)
@@ -6677,6 +6705,10 @@ NotFuncHead = :script(~~
     // allocating a closure it would throw away. Twins: js_jsvget in
     // abnf/jsrtjsprint.go and in languages/lib/js-rt.metajs.
     function getMember(o, k) {
+        if (jsIdxAccN > 0 && Array.isArray(o)) {
+            var iak = jsArrIdxAccKey(o, k)
+            if (iak != "") { return jsArrIdxGet(o, iak) }
+        }
         if (jsArrClasses.length > 0 && typeof k == "string" && Array.isArray(o)) {
             var am = anytype // An Array subclass instance's own member, or absent.
             am = jsArrSubRead(o, k)
@@ -7266,6 +7298,14 @@ NotFuncHead = :script(~~
             if (gc !== undefined) { jsRefuse(jsGetterOnlyText(k, fsElide(jsStr(gc)))) }
             return
         }
+        if (jsIdxAccN > 0 && Array.isArray(o)) {
+            var iak = jsArrIdxAccKey(o, k)
+            if (iak != "") {
+                jsArrIdxSet(o, iak, v)
+                return
+            }
+            if (k === "length" && typeof v == "number") { jsArrIdxTrim(o, v) }
+        }
         if (o != undefined && o != null && typeof o == "object" && !Array.isArray(o)) {
             var ah = anytype // The object or class descriptor holding k's accessor.
             ah = accHolder(o, k)
@@ -7397,6 +7437,7 @@ NotFuncHead = :script(~~
             var a = anytype // The argument list: an array, or an arguments object's view.
             a = (arguments.length > 1 && arguments[1] != undefined) ? arguments[1] : []
             if (argsWant && jsIsArgs(a)) { a = jsArgsView(a) }
+            if (jsIdxAccN > 0 && Array.isArray(a)) { a = jsArrResolve(a) }
             return callWithThis(fn, self, a)
         }
     }
@@ -7527,6 +7568,163 @@ NotFuncHead = :script(~~
         p = arrProps(a)
         return p !== undefined && jsAttrHas(p, list, k)
     }
+    // An ACCESSOR ON AN INDEX (Object.defineProperty(a, "0", {get})) is filed in the
+    // accessor table of the array's named-property object under the index's string,
+    // with no __keys entry, and the element slot stays present: the index is still an
+    // index. A read and a write of the element run it, and a builtin that reads the
+    // elements reads the array jsArrResolve answers. jsIdxAccN counts the definitions,
+    // so a program that made none pays one compare at each of those sites. Twins:
+    // jsvIdxAcc* in abnf/jsrtjsprint.go, jvIdxAcc* in languages/lib/js-rt.metajs.
+    var jsIdxAccN = 0
+    // The index key of a's live accessor at member key k, or "" when there is none.
+    // One at or past the length was removed with the element.
+    function jsArrIdxAccKey(a, k) {
+        var np = anytype // The named properties, whose accessor table may hold k.
+        np = arrProps(a)
+        if (np === undefined || !hasOwn(np, "__iacc")) { return "" }
+        var ix = jsArrIndexKey(k)
+        if (ix < 0 || ix >= a.length || !jsIsAccKey(np, "" + ix)) { return "" }
+        return "" + ix
+    }
+    function jsArrIdxGet(a, ik) {
+        var g = anytype // The getter, or undefined.
+        g = accSlot(arrProps(a).__acc, "get:" + ik)
+        if (g === undefined) { return undefined }
+        return callWithThis(g, a, [])
+    }
+    function jsArrIdxSet(a, ik, v) {
+        var s = anytype // The setter, or undefined.
+        s = accSlot(arrProps(a).__acc, "set:" + ik)
+        if (s !== undefined) { callWithThis(s, a, [v]) } else { jsRefuse(jsGetterOnlyText(ik, jsObjText(a))) }
+    }
+    // Element i as a read sees it: its accessor's value, or the slot.
+    function jsArrElem(a, i) {
+        var ik = jsArrIdxAccKey(a, i)
+        if (ik != "") { return jsArrIdxGet(a, ik) }
+        return a[i]
+    }
+    // Object.defineProperty of index ix: an accessor joins the table (growing the
+    // array to reach ix, the gap left absent), a value definition replaces one.
+    // Its enumerable and configurable attributes are the named properties' lists
+    // __hidden and __nc under the index's key: a new index takes false for an
+    // attribute desc does not name, an element or an accessor keeps its own, and a
+    // non-configurable accessor refuses any change (jsDefineKey's rules).
+    function jsArrIdxDefine(a, ix, g, s, desc) {
+        var ik = "" + ix
+        var had = jsArrIdxAccKey(a, ix) != ""
+        if (had && jsArrNamedAttr(a, "__nc", ik)) {
+            var acc = arrProps(a).__acc
+            var bad = propIn("value", desc) || propIn("writable", desc) ||
+                (propIn("configurable", desc) && jsTruthy(getMember(desc, "configurable"))) ||
+                (propIn("enumerable", desc) && jsTruthy(getMember(desc, "enumerable")) == jsArrNamedAttr(a, "__hidden", ik)) ||
+                (g !== undefined && g !== accSlot(acc, "get:" + ik)) || (s !== undefined && s !== accSlot(acc, "set:" + ik))
+            if (bad) { biRaise("TypeError: Cannot redefine property: " + ik) }
+        }
+        if (g === undefined && s === undefined) {
+            jsArrIdxDrop(a, ix)
+            setMember(a, ik, getMember(desc, "value"))
+            return
+        }
+        var en = had ? !jsArrNamedAttr(a, "__hidden", ik) : ix < a.length && !arrHole(a, ix)
+        var cf = had ? !jsArrNamedAttr(a, "__nc", ik) : en
+        if (propIn("enumerable", desc)) { en = jsTruthy(getMember(desc, "enumerable")) }
+        if (propIn("configurable", desc)) { cf = jsTruthy(getMember(desc, "configurable")) }
+        var np = jsArrNamed(a, true)
+        if (!had) {
+            if (ix >= a.length || arrHole(a, ix)) { setMember(a, ik, undefined) }
+            jsAccDrop(np, ik)
+            scopePut(np, "__iacc", true)
+        }
+        if (g !== undefined) { addAccessor(np, "get", ik, g) }
+        if (s !== undefined) { addAccessor(np, "set", ik, s) }
+        jsAttrSet(np, "__hidden", ik, !en)
+        jsAttrSet(np, "__nc", ik, !cf)
+        jsIdxAccN = jsIdxAccN + 1
+    }
+    // Removes index i's accessor and its attributes, if it has one: a delete.
+    function jsArrIdxDrop(a, i) {
+        var ik = jsArrIdxAccKey(a, i)
+        if (ik == "") { return }
+        var np = anytype // The named properties, which hold the accessor.
+        np = arrProps(a)
+        jsAccDrop(np, ik)
+        jsAttrSet(np, "__hidden", ik, false)
+        jsAttrSet(np, "__nc", ik, false)
+    }
+    // Removes the accessors at index n and up, which a shorter length deleted.
+    function jsArrIdxTrim(a, n) {
+        for (var i = n; i < a.length; i++) { jsArrIdxDrop(a, i) }
+    }
+    // Index i's accessor becomes a data element holding its getter's value.
+    function jsArrIdxFlat(a, i) {
+        var ik = jsArrIdxAccKey(a, i)
+        if (ik == "") { return }
+        var v = anytype // The getter's value.
+        v = jsArrIdxGet(a, ik)
+        jsArrIdxDrop(a, i)
+        a[i] = v
+    }
+    // Was an index accessor ever defined on a?
+    function jsArrHasIdxAcc(a) {
+        var np = anytype // The named properties, marked once an index accessor was made.
+        np = arrProps(a)
+        return np !== undefined && hasOwn(np, "__iacc")
+    }
+    // The array a builtin reads in a's place: a itself, or while a has an index
+    // accessor a copy holding each getter's value, read once in index order.
+    function jsArrResolve(a) {
+        if (!jsArrHasIdxAcc(a)) { return a }
+        var c = []
+        for (var i = 0; i < a.length; i++) {
+            var ik = jsArrIdxAccKey(a, i)
+            if (ik != "") { c.push(jsArrIdxGet(a, ik)) } else { jsCopyElem(c, a, i) }
+        }
+        return c
+    }
+    // The array an Array method named name runs on, for an a with an index accessor:
+    // pop reads its last element through the accessor before removing it, the
+    // methods that only read elements read jsArrResolve's array, and the rest (push,
+    // the iterators) run on a.
+    function jsArrIdxMethod(a, name) {
+        if (name == "pop") {
+            jsArrIdxFlat(a, a.length - 1)
+            return a
+        }
+        if (jsArrIdxReaders.indexOf(name) >= 0) { return jsArrResolve(a) }
+        return a
+    }
+    // A method that MOVES elements, on an a with an index accessor: it runs on a copy
+    // of jsArrResolve's array, and each index whose value it changed is then written
+    // back to a - through a setter, where a getter-only accessor is the TypeError a
+    // builtin's Set raises in sloppy code too - a gap deleted, and a shorter length
+    // set. Every getter is read once and every moved element written once, as the
+    // spec's Get / Set sequence does, in an order of its own.
+    function jsArrIdxMove(a, name, args) {
+        var rd = jsArrResolve(a)
+        var cp = []
+        for (var j = 0; j < rd.length; j++) { jsCopyElem(cp, rd, j) }
+        var r = jsArrayMethod(cp, name, args)
+        for (var i = 0; i < cp.length; i++) {
+            var was = i < rd.length && !arrHole(rd, i)
+            if (arrHole(cp, i)) {
+                if (was) {
+                    jsArrIdxDrop(a, i)
+                    arrUnset(a, i)
+                }
+            } else if (!was || !sameValue(cp[i], rd[i])) {
+                var ik = jsArrIdxAccKey(a, i)
+                if (ik != "" && accSlot(arrProps(a).__acc, "set:" + ik) === undefined) { biRaise("TypeError: " + jsGetterOnlyText(ik, jsObjText(a))) }
+                setMember(a, "" + i, cp[i])
+            }
+        }
+        if (cp.length < a.length) { setMember(a, "length", cp.length) }
+        if (r.v === cp) { return {v: a} }
+        return r
+    }
+    var jsArrIdxMovers = ["shift", "unshift", "splice", "reverse", "sort", "fill", "copyWithin"]
+    var jsArrIdxReaders = ["toString", "toLocaleString", "toReversed", "toSorted", "toSpliced", "with", "at", "join",
+        "slice", "indexOf", "lastIndexOf", "includes", "concat", "map", "filter", "forEach", "some", "every", "find",
+        "findIndex", "findLast", "findLastIndex", "reduce", "reduceRight", "flat", "flatMap"]
     // The array index member key k names, or -1 when it names a property: a number
     // must be a non-negative integer, a string the canonical spelling of one below
     // 2^32 - 1 (jsArrayIndex), so "01", "1.0" and "-0" name properties. Twin of
@@ -7538,6 +7736,16 @@ NotFuncHead = :script(~~
         if (!(n >= 0) || n === Infinity || Math.floor(n) !== n) { return 0 - 1 }
         return n
     }
+    // An array's own index keys, the elements present; a non-enumerable index
+    // accessor (jsArrIdxDefine) only when all asks for it.
+    function jsArrIndexKeys(v, all) {
+        var out = []
+        var hid = !all && jsIdxAccN > 0 && jsArrHasIdxAcc(v)
+        for (var j = 0; j < v.length; j++) {
+            if (!arrHole(v, j) && !(hid && jsArrNamedAttr(v, "__hidden", "" + j))) { out.push("" + j) }
+        }
+        return out
+    }
     function ownKeys(v) {
         if (v == undefined || v == null) { return [] }
         if (isClassDesc(v)) { return ownKeys(v.__statics) }
@@ -7547,8 +7755,7 @@ NotFuncHead = :script(~~
             return r
         }
         if (Array.isArray(v)) {
-            var a = []
-            for (var j = 0; j < v.length; j++) { if (!arrHole(v, j)) { a.push("" + j) } }
+            var a = jsArrIndexKeys(v, false)
             var np = anytype // The array's named properties, or undefined (jsArrNamed).
             np = jsArrNamed(v, false)
             if (np !== undefined) { return a.concat(ownKeys(np)) }
@@ -9135,7 +9342,10 @@ NotFuncHead = :script(~~
             }
             if (typeof tgt != "function") {
                 // An index of an array is left absent (arrUnset), not undefined.
-                if (Array.isArray(tgt) && jsArrIndexKey(p.key) >= 0) { arrUnset(tgt, jsArrIndexKey(p.key)) }
+                if (Array.isArray(tgt) && jsArrIndexKey(p.key) >= 0) {
+                    if (jsIdxAccN > 0) { jsArrIdxDrop(tgt, jsArrIndexKey(p.key)) }
+                    arrUnset(tgt, jsArrIndexKey(p.key))
+                }
                 else { scopePut(tgt, p.key, undefined) }
                 jsAccDrop(tgt, "" + p.key)
                 if (typeof p.key == "string") { jsSymUntrack(tgt, p.key) }
@@ -9465,7 +9675,11 @@ NotFuncHead = :script(~~
         // is iterated by code point.
         if (typeof v == "string") { return jsSeqIter(v, 1) }
         if (argsWant && jsIsArgs(v)) { return jsArgsView(v) }
-        if (Array.isArray(v)) { return v }
+        if (Array.isArray(v)) {
+            // An index accessor is read at each step, as the iterator reads it.
+            if (jsIdxAccN > 0 && jsArrHasIdxAcc(v)) { return jsSeqIter(v, 1) }
+            return v
+        }
         var f = anytype // The [Symbol.iterator] member, of any type at all.
         f = undefined
         if (v != undefined && v != null && (typeof v == "object" || typeof v == "function")) { f = getMember(v, "__#@iterator") }
