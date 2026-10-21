@@ -247,7 +247,7 @@ fi
 if [ "$QUICK" = 0 ]; then
     # 6 and 7 are THE ONLY GATES THAT SEE LAYER 2.
     # CLANG_MODULES is a FLOOR, like FULL_ASSERTIONS: it may grow, never shrink.
-    CLANG_MODULES=29
+    CLANG_MODULES=30
     crc=$(rc_of clang)
     held=$(grep -c 'row HELD' "$log/clang")
     ok=$(grep -c 'the clang executable agrees' "$log/clang")

@@ -116,10 +116,10 @@ trap 'rm -rf "$OUT"' EXIT
 #   python   have several ratchet files (split so each leg stays well
 #   go, bash under the IR interpreter's step brake): tests/<lang>-test-full.<ext>,
 #            tests/<lang>-test-full.2.<ext> and tests/<lang>-test-full.3.<ext>, the
-#            kinds `full`, `full.2` and `full.3`; go and python also have full.4,
-#            python full.5.
+#            kinds `full`, `full.2` and `full.3`; go, bash and python also have
+#            full.4, python full.5.
 #   lua      has tests/lua-test-full.2.lua beside its ratchet, for the same reason.
-ROWS="bash:sh:full,features,full.2,full.3 batch:cmd c:c csharp:cs dart:dart go:go:full,features,full.2,full.3,full.4 java:java kotlin:kt
+ROWS="bash:sh:full,features,full.2,full.3,full.4 batch:cmd c:c csharp:cs dart:dart go:go:full,features,full.2,full.3,full.4 java:java kotlin:kt
       js:js:full,features,full.2,full.3,full.4.mjs
       lua:lua:full,features,full.2 metajs:js php:php python:py:full,features,full.2,full.3,full.4,full.5 ruby:rb swift:swift typescript:ts
       lisp:txt:features tinyc:txt:features"

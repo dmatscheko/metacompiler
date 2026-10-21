@@ -120,8 +120,9 @@ int sink_err = 1;
 int err_native;
 
 /* Positional parameters live in ONE global stack rather than in function
- * arguments, so "$@" can expand to any number of words. NARGV = 4096. */
-char *argv[4096];
+ * arguments, so "$@" can expand to any number of words. rt_argpush grows it. */
+char **argv;
+int argv_cap;
 int argv_top;
 int frame_base;
 int frame_n;
@@ -173,7 +174,12 @@ char *rt_radix(char *s, int base, int upper, int alt);
 char *rt_pfq(char *s);
 int rt_nfields(char *v);
 char *rt_getfield(char *v, int k);
-char *rt_wordjoin(char *v);
+char *rt_ljoin(char *l, char *sep);
+char *rt_fput(char *acc, char *f);
+char *rt_fadd(char *acc, char *f);
+int rt_fpos(char *v);
+int rt_fnext(char *v, int p);
+char *rt_fat(char *v, int p);
 char *rt_uqlist(char *l, char *ifs);
 char *rt_splitifs(char *v, char *ifs);
 int rt_ifsws(char *ifs, int ch);
@@ -374,6 +380,10 @@ long h_cvs[128];
 long h_ccap[128];
 long a_floor;
 char *fin_last;
+/* The list rt_fput or rt_fadd made last and its length in bytes: the one list
+ * rt_fadd may extend in place (a release of heap 1 forgets it). */
+char *fa_last;
+int fa_len;
 void *malloc(unsigned long n);
 void free(void *p);
 unsigned long strlen(const char *s);
@@ -489,12 +499,13 @@ long rt_alo(long m) {
     return m > a_floor ? m : a_floor;
 }
 
-/* The release forgets rt_finlist's list: that is known by its address, which
- * may now be handed out again. */
+/* The release forgets rt_finlist's list and rt_fadd's: each is known by its
+ * address, which may now be handed out again. */
 int rt_release(long m, long lm) {
     rt_hset(0, rt_alo(m));
     rt_hset(1, lm);
     fin_last = 0;
+    fa_last = 0;
     return 0;
 }
 
@@ -523,6 +534,7 @@ char *rt_keep(long m, long lm, char *v) {
     }
     rt_hset(1, lm);
     fin_last = 0;
+    fa_last = 0;
     vp = rt_vpos(v);
     if (vp < lo) {
         rt_hset(0, lo);
@@ -641,6 +653,102 @@ char *rt_strcat(char *a, char *b) {
     while (b[i] != 0) { dst[d] = b[i]; d = d + 1; i = i + 1; }
     dst[d] = 0;
     return dst;
+}
+
+/* rt_sput: s copied to d and terminated; answers where the next part goes. A
+ * word of many parts is one rt_bump of their summed lengths and an rt_sput per
+ * part (bash-to-llvm-ir.abnf's mkWord), where a chain of rt_strcat would copy
+ * the growing prefix once per part. */
+char *rt_sput(char *d, char *s) {
+    int n = (int)strlen(s);
+    memmove(d, s, (unsigned long)(n + 1));
+    return d + n;
+}
+
+/* ---- append buffers --------------------------------------------------------
+ * `s+=x` in a loop would pin every intermediate value of s in the arena, which
+ * is quadratic in the final length. Instead slot id's value lives in its own
+ * malloc'd buffer (ab_buf[id], ab_len bytes used of ab_cap), and rt_sapp
+ * appends in place, doubling the buffer when it is full, as long as nothing
+ * but slot id can see the buffer: an array element or a positional parameter
+ * that took a pointer into it marks it shared (rt_abheld), and another
+ * variable, a `local` save or standard input holding one is found by the scan
+ * in rt_abmine. A subshell snapshots the variables, so a buffer is only
+ * written at the subshell depth that made it. A buffer that stops being its
+ * slot's value is freed when the next one replaces it, if nothing holds it. */
+char *ab_buf[1024];
+int ab_len[1024];
+int ab_cap[1024];
+int ab_shared[1024];
+int ab_depth[1024];
+int ab_ids[1024];     /* the slots that have a buffer, ab_n of them */
+int ab_n;
+
+/* Does slot id's buffer hold the address v? */
+int rt_abin(int id, char *v) {
+    char *b = ab_buf[id];
+    return b != 0 && v >= b && v < b + ab_cap[id] ? 1 : 0;
+}
+
+/* A store outside the variables is taking v: a buffer holding it is shared. */
+int rt_abheld(char *v) {
+    int i = 0;
+    while (i < ab_n) {
+        if (rt_abin(ab_ids[i], v) != 0) ab_shared[ab_ids[i]] = 1;
+        i = i + 1;
+    }
+    return 0;
+}
+
+/* 1 when slot id's buffer may be written or freed: nothing but slot id holds it. */
+int rt_abmine(int id) {
+    int j = 0;
+    if (ab_buf[id] == 0 || ab_shared[id] != 0 || ab_depth[id] != ss_depth) return 0;
+    if (rt_abin(id, stdin_buf) != 0) return 0;
+    while (j < nvars) {
+        if (j != id && rt_abin(id, gvars[j]) != 0) return 0;
+        j = j + 1;
+    }
+    j = 0;
+    while (j < ls_top) {
+        if (rt_abin(id, ls_val[j]) != 0) return 0;
+        j = j + 1;
+    }
+    return 1;
+}
+
+/* The value o + x for slot id, whose value is o (`s+=x`). */
+char *rt_sapp(int id, char *o, char *x) {
+    int lx = (int)strlen(x);
+    int lo;
+    int cap;
+    char *nb;
+    int mine;
+    if (lx == 0) return rt_strcat(o, x);
+    mine = rt_abmine(id);
+    if (o == ab_buf[id] && mine != 0 && ab_len[id] + lx < ab_cap[id]) {
+        memmove(o + ab_len[id], x, (unsigned long)(lx + 1));
+        ab_len[id] = ab_len[id] + lx;
+        return o;
+    }
+    lo = o == ab_buf[id] ? ab_len[id] : (int)strlen(o);
+    cap = 2 * (lo + lx) + 16;
+    nb = (char *)malloc((unsigned long)cap);
+    if (nb == 0) rt_die("append buffer", cap, lo, cap);
+    memmove(nb, o, (unsigned long)lo);
+    memmove(nb + lo, x, (unsigned long)(lx + 1));
+    if (ab_buf[id] == 0) {
+        ab_ids[ab_n] = id;
+        ab_n = ab_n + 1;
+    } else if (mine != 0) {
+        free(ab_buf[id]);
+    }
+    ab_buf[id] = nb;
+    ab_len[id] = lo + lx;
+    ab_cap[id] = cap;
+    ab_shared[id] = 0;
+    ab_depth[id] = ss_depth;
+    return nb;
 }
 
 /* rt_int2str: decimal string in the arena (mirrors the interpreter's numToStr).
@@ -2787,8 +2895,9 @@ char *rt_pfq(char *s) {
  * Twin of printfBuiltin in bash-interpreter.abnf. */
 int printf_rc;
 int pf_stop;      /* a %b operand's \c: no further output                 */
-char *pf_e;       /* the text pf_escape appends to                         */
+char *pf_e;       /* the text pf_escape appends to, a field list of pieces */
 int pf_ai;        /* the next operand                                      */
+int pf_ap;        /* where it starts in the operand list (rt_fpos)         */
 int pf_have;      /* the operand pf_arg answered existed                   */
 
 /* One byte as encoded text (see above). */
@@ -2881,7 +2990,7 @@ int pf_escape(char *s, int i, int pctb)
     int maxd;
     char *t = 0;
     if (c == 0) {
-        pf_e = rt_strcat(pf_e, "\\");
+        pf_e = rt_fadd(pf_e, "\\");
         return 1;
     }
     if (c == 97) t = pf_chr(7);
@@ -2899,7 +3008,7 @@ int pf_escape(char *s, int i, int pctb)
         if (c == 63) t = "?";
     }
     if (t != 0) {
-        pf_e = rt_strcat(pf_e, t);
+        pf_e = rt_fadd(pf_e, t);
         return 2;
     }
     if (c >= 48 && c <= 55 && (pctb != 2 || c == 48)) {
@@ -2912,7 +3021,7 @@ int pf_escape(char *s, int i, int pctb)
             v = v * 8 + (long)(s[n + k] - 48);
             k = k + 1;
         }
-        pf_e = rt_strcat(pf_e, pf_chr((int)(v & 255)));
+        pf_e = rt_fadd(pf_e, pf_chr((int)(v & 255)));
         return n + k - i;
     }
     if (c == 120 || c == 117 || c == 85) {
@@ -2924,18 +3033,18 @@ int pf_escape(char *s, int i, int pctb)
             k = k + 1;
         }
         if (k == 0) {
-            pf_e = rt_strcat(pf_e, rt_substr(s, i, 2));
+            pf_e = rt_fadd(pf_e, rt_substr(s, i, 2));
             return 2;
         }
-        if (c == 120) pf_e = rt_strcat(pf_e, pf_chr((int)v));
-        else pf_e = rt_strcat(pf_e, pf_utf8(v));
+        if (c == 120) pf_e = rt_fadd(pf_e, pf_chr((int)v));
+        else pf_e = rt_fadd(pf_e, pf_utf8(v));
         return 2 + k;
     }
     if (c == 99 && pctb != 0) {
         pf_stop = 1;
         return 2;
     }
-    pf_e = rt_strcat(pf_e, rt_substr(s, i, 2));
+    pf_e = rt_fadd(pf_e, rt_substr(s, i, 2));
     return 2;
 }
 
@@ -2944,18 +3053,26 @@ int pf_escape(char *s, int i, int pctb)
 char *pf_bstr(char *s, int mode)
 {
     char *saved = pf_e;
+    char *sfa = fa_last;
+    int sfl = fa_len;
+    long lpos = h_pos[1];
     char *r;
     int i = 0;
-    pf_e = empty;
+    pf_e = list_nil;
     while (s[i] != 0 && pf_stop == 0) {
         if (s[i] == 92) {
             i = i + pf_escape(s, i, mode);
         } else {
-            pf_e = rt_strcat(pf_e, s[i] == 1 ? pf_chr(1) : rt_substr(s, i, 1));
+            pf_e = rt_fadd(pf_e, pf_chr((int)(unsigned char)s[i]));
             i = i + 1;
         }
     }
-    r = pf_e;
+    /* The pieces are garbage once joined; dropping them leaves the caller's list
+     * the last one made, so its rt_fadd goes on in place. */
+    r = rt_ljoin(pf_e, empty);
+    rt_hset(1, lpos);
+    fa_last = sfa;
+    fa_len = sfl;
     pf_e = saved;
     return r;
 }
@@ -3164,10 +3281,13 @@ char *pf_int(long v, int conv, int left, int plus, int space, int alt, int zero,
 char *pf_arg(char *args, int nargs)
 {
     int k = pf_ai;
+    char *a;
     pf_ai = k + 1;
     pf_have = k < nargs ? 1 : 0;
     if (k >= nargs) return empty;
-    return rt_getfield(args, k);
+    a = rt_fat(args, pf_ap);
+    pf_ap = rt_fnext(args, pf_ap);
+    return a;
 }
 
 /* The conversion at fmt[i] (just past the "%"), appended to pf_e; answers the index
@@ -3243,7 +3363,7 @@ int pf_conv(char *fmt, int i, char *args, int nargs)
         if (prec >= 0 && cv != 99) piece = pf_vcut(piece, prec);
         piece = pf_pad(piece, w, left, zero, 0);
     }
-    pf_e = rt_strcat(pf_e, piece);
+    pf_e = rt_fadd(pf_e, piece);
     return i;
 }
 
@@ -3255,9 +3375,10 @@ char *rt_printf(char *fmt, char *args)
     int used = 0;
     int i;
     int c;
-    pf_e = empty;
+    pf_e = list_nil;
     pf_stop = 0;
     pf_ai = 0;
+    pf_ap = rt_fpos(args);
     printf_rc = 0;
     while (pass == 0 || (used != 0 && pf_ai < nargs && pf_stop == 0)) {
         int before = pf_ai;
@@ -3268,19 +3389,19 @@ char *rt_printf(char *fmt, char *args)
             if (c == 92) {
                 i = i + pf_escape(fmt, i, 0);
             } else if (c == 37 && fmt[i + 1] == 37) {
-                pf_e = rt_strcat(pf_e, "%");
+                pf_e = rt_fadd(pf_e, "%");
                 i = i + 2;
             } else if (c == 37) {
                 i = pf_conv(fmt, i + 1, args, nargs);
-                if (i < 0) return pf_e;
+                if (i < 0) return rt_ljoin(pf_e, empty);
             } else {
-                pf_e = rt_strcat(pf_e, c == 1 ? pf_chr(1) : rt_substr(fmt, i, 1));
+                pf_e = rt_fadd(pf_e, pf_chr(c));
                 i = i + 1;
             }
         }
         used = pf_ai > before ? 1 : 0;
     }
-    return pf_e;
+    return rt_ljoin(pf_e, empty);
 }
 
 /* ---- field lists ----------------------------------------------------------
@@ -3290,28 +3411,149 @@ char *rt_printf(char *fmt, char *args)
  * is one operand): rt_fput writes a field so, rt_getfield reads it back. Twin of
  * encFields / decFields in bash-interpreter.abnf. */
 
-/* The list acc followed by the field f, escaped, and its terminator. */
-char *rt_fput(char *acc, char *f) {
-    int la = rt_strlen(acc);
-    int lf = 0, ne = 0;
-    int i = 0, d;
-    char *dst;
-    while (f[lf] != 0) {
-        if (f[lf] == 1 || f[lf] == 2) ne = ne + 1;
-        lf = lf + 1;
-    }
-    dst = rt_lbump(la + lf + ne + 2);
-    while (i < la) { dst[i] = acc[i]; i = i + 1; }
-    d = la;
-    i = 0;
-    while (i < lf) {
-        if (f[i] == 1 || f[i] == 2) { dst[d] = 2; d = d + 1; }
-        dst[d] = f[i];
-        d = d + 1;
-        i = i + 1;
+/* The field f, escaped, and its terminator, written at dst + d; answers where
+ * the list's NUL went. lf and ne are f's length and its count of 0x01 / 0x02. */
+int rt_fwrite(char *dst, int d, char *f, int lf, int ne) {
+    int i = 0;
+    if (ne == 0) {
+        memmove(dst + d, f, (unsigned long)lf);
+        d = d + lf;
+    } else {
+        while (i < lf) {
+            if (f[i] == 1 || f[i] == 2) { dst[d] = 2; d = d + 1; }
+            dst[d] = f[i];
+            d = d + 1;
+            i = i + 1;
+        }
     }
     dst[d] = 1;
     dst[d + 1] = 0;
+    return d + 1;
+}
+
+/* The count of bytes of f that rt_fwrite escapes. */
+int rt_fesc(char *f) {
+    int i = 0, ne = 0;
+    while (f[i] != 0) {
+        if (f[i] == 1 || f[i] == 2) ne = ne + 1;
+        i = i + 1;
+    }
+    return ne;
+}
+
+/* The list acc followed by the field f, escaped, and its terminator. acc is
+ * left as it was. */
+char *rt_fput(char *acc, char *f) {
+    int la = (int)strlen(acc);
+    int lf = (int)strlen(f);
+    int ne = rt_fesc(f);
+    char *dst = rt_lbump(la + lf + ne + 2);
+    memmove(dst, acc, (unsigned long)la);
+    fa_len = rt_fwrite(dst, la, f, lf, ne);
+    fa_last = dst;
+    return dst;
+}
+
+/* 1 when the list acc can grow by n bytes in place: it is the list made last,
+ * nothing has been allocated in heap 1 since, and its chunk has the room. */
+int rt_ftop(char *acc, int n) {
+    if (acc != fa_last || h_adj[1] + h_pos[1] != (long)(acc + fa_len + 1)) return 0;
+    return (long)n < h_cend[1] - h_pos[1] ? 1 : 0;
+}
+
+/* rt_fput for a caller that OWNS acc and never reads it again (a builder's
+ * accumulator): f is written onto acc's end in place when rt_ftop allows, so a
+ * loop of them is linear where a loop of rt_fput copies the whole list every
+ * time. */
+char *rt_fadd(char *acc, char *f) {
+    int lf = (int)strlen(f);
+    int ne = rt_fesc(f);
+    if (rt_ftop(acc, lf + ne + 1) == 0) return rt_fput(acc, f);
+    h_pos[1] = h_pos[1] + lf + ne + 1;
+    fa_len = rt_fwrite(acc, fa_len, f, lf, ne);
+    return acc;
+}
+
+/* WALKING A LIST: rt_fpos(v) is where its first field starts (-1: there is
+ * none), rt_fnext(v, p) where the field after the one at p starts, rt_fat(v, p)
+ * the field at p. A plain string is one field, at 0; a list's fields start at 1
+ * or later. Each step reads only its own field, so a walk is linear where
+ * rt_getfield(v, i) for every i is quadratic. */
+int rt_fpos(char *v) {
+    if (rt_islist(v) == 0) return 0;
+    return v[1] == 0 ? -1 : 1;
+}
+
+int rt_fnext(char *v, int p) {
+    int i = p;
+    if (p == 0) return -1;
+    while (v[i] != 0 && v[i] != 1) {
+        if (v[i] == 2 && v[i + 1] != 0) i = i + 1;
+        i = i + 1;
+    }
+    if (v[i] == 0) return -1;
+    i = i + 1;
+    return v[i] == 0 ? -1 : i;
+}
+
+char *rt_fat(char *v, int p) {
+    int i = p, ne = 0, o = 0;
+    char *dst;
+    if (p == 0) return v;
+    while (v[i] != 0 && v[i] != 1) {
+        if (v[i] == 2 && v[i + 1] != 0) { i = i + 1; ne = ne + 1; }
+        i = i + 1;
+    }
+    dst = rt_bump(i - p - ne + 1);
+    if (ne == 0) {
+        memmove(dst, v + p, (unsigned long)(i - p));
+        dst[i - p] = 0;
+        return dst;
+    }
+    while (p < i) {
+        if (v[p] == 2) p = p + 1;
+        dst[o] = v[p];
+        o = o + 1;
+        p = p + 1;
+    }
+    dst[o] = 0;
+    return dst;
+}
+
+/* The fields of the list l joined with sep into one string, in one
+ * allocation. A plain l is its own one field. */
+char *rt_ljoin(char *l, char *sep) {
+    int ls;
+    int n = 0, nf = 0, i = 1, o = 0;
+    char *dst;
+    if (rt_islist(l) == 0) return l;
+    ls = (int)strlen(sep);
+    while (l[i] != 0) {
+        if (l[i] == 2 && l[i + 1] != 0) i = i + 1;
+        else if (l[i] == 1) nf = nf + 1;
+        n = n + 1;
+        i = i + 1;
+    }
+    if (nf == 0) return &empty[0];
+    dst = rt_bump(n - nf + (nf - 1) * ls + 1);
+    i = 1;
+    while (l[i] != 0) {
+        if (l[i] == 2 && l[i + 1] != 0) {
+            i = i + 1;
+            dst[o] = l[i];
+            o = o + 1;
+        } else if (l[i] == 1) {
+            if (l[i + 1] != 0) {
+                memmove(dst + o, sep, (unsigned long)ls);
+                o = o + ls;
+            }
+        } else {
+            dst[o] = l[i];
+            o = o + 1;
+        }
+        i = i + 1;
+    }
+    dst[o] = 0;
     return dst;
 }
 
@@ -3328,38 +3570,12 @@ int rt_nfields(char *v) {
 
 /* Field k of a list, its escapes removed. */
 char *rt_getfield(char *v, int k) {
-    int i = 1, n = 0, s = 1, ne = 0;
-    char *dst;
-    int j, o;
-    if (rt_islist(v) == 0) {
-        if (k == 0) return v;
-        return &empty[0];
+    int p = k < 0 ? -1 : rt_fpos(v);
+    while (k > 0 && p >= 0) {
+        p = rt_fnext(v, p);
+        k = k - 1;
     }
-    while (v[i] != 0) {
-        if (v[i] == 2 && v[i + 1] != 0) {
-            i = i + 1;
-            if (n == k) ne = ne + 1;
-        } else if (v[i] == 1) {
-            if (n == k) {
-                if (ne == 0) return rt_substr(v, s, i - s);
-                dst = rt_bump(i - s - ne + 1);
-                j = s;
-                o = 0;
-                while (j < i) {
-                    if (v[j] == 2) j = j + 1;
-                    dst[o] = v[j];
-                    o = o + 1;
-                    j = j + 1;
-                }
-                dst[o] = 0;
-                return dst;
-            }
-            n = n + 1;
-            s = i + 1;
-        }
-        i = i + 1;
-    }
-    return &empty[0];
+    return p < 0 ? &empty[0] : rt_fat(v, p);
 }
 
 /* AN UNQUOTED FIELD LIST ("$@", ${a[@]} and their transforms outside quotes) IS
@@ -3409,24 +3625,6 @@ char *rt_uqlist(char *l, char *ifs) {
     }
     dst[o] = 0;
     return dst;
-}
-
-/* rt_wordjoin: a field list flattened back to one string, fields space-joined. */
-char *rt_wordjoin(char *v) {
-    int n = rt_nfields(v);
-    char *op = &empty[0];
-    int i = 0;
-    if (rt_islist(v) == 0) return v;
-    while (i < n) {
-        char *cur = op;
-        char *withsp = rt_strcat(cur, " ");
-        char *fld;
-        if (i > 0) cur = withsp;
-        fld = rt_getfield(v, i);
-        op = rt_strcat(cur, fld);
-        i = i + 1;
-    }
-    return op;
 }
 
 /* One IFS WHITESPACE character: space, tab or newline AND a member of IFS. See
@@ -3509,7 +3707,7 @@ char *rt_splitifs(char *v, char *ifs) {
             /* EXACTLY ONE FIELD AND NO SEPARATOR BYTE AT ALL - by far the
              * commonest case, and it needs no allocation, because a plain string
              * IS a one-field list in this protocol: rt_nfields answers 1 for it,
-             * rt_getfield(v, 0) answers v, rt_wordjoin returns it unchanged, and
+             * rt_getfield(v, 0) answers v, rt_ljoin returns it unchanged, and
              * rt_bnd_acc/rt_bnd_open both go through rt_nfields. */
             if (nf == 1 && tot == len) return v;
             dst = rt_lbump(1 + tot + ne + nf + 1);
@@ -3526,15 +3724,19 @@ char *rt_splitifs(char *v, char *ifs) {
  *   n == 0   nothing changes
  *   n == 1   open = open + f[0]
  *   n >= 2   acc = acc + (open + f[0]) + f[1] .. f[n-2], each closed; open = f[n-1]
+ * acc is the word's own accumulator, never read again once passed in, so it
+ * grows with rt_fadd (and so does rt_bnd_acc2's).
  */
 char *rt_bnd_acc(char *acc, char *open, char *f) {
     int n = rt_nfields(f);
     char *op = acc;
     int i = 1;
+    int p = rt_fpos(f);
     if (n < 2) return op;
-    op = rt_fput(acc, rt_strcat(open, rt_getfield(f, 0)));
+    op = rt_fadd(acc, rt_strcat(open, rt_fat(f, p)));
     while (i < n - 1) {
-        op = rt_fput(op, rt_getfield(f, i));
+        p = rt_fnext(f, p);
+        op = rt_fadd(op, rt_fat(f, p));
         i = i + 1;
     }
     return op;
@@ -3580,24 +3782,26 @@ char *rt_bnd_acc2(char *acc, char *open, int opened, char *f, int lead, int trai
     char *cur = open;
     int isopen = opened;
     int i = 1;
+    int p = rt_fpos(f);
     if (lead != 0 && isopen != 0) {
-        op = rt_fput(op, cur);
+        op = rt_fadd(op, cur);
         cur = &empty[0];
         isopen = 0;
     }
     if (n >= 2) {
-        op = rt_fput(op, rt_strcat(cur, rt_getfield(f, 0)));
-        while (i < n - 1) {
-            op = rt_fput(op, rt_getfield(f, i));
+        op = rt_fadd(op, rt_strcat(cur, rt_fat(f, p)));
+        while (i < n) {
+            p = rt_fnext(f, p);
+            cur = rt_fat(f, p);
+            if (i < n - 1) op = rt_fadd(op, cur);
             i = i + 1;
         }
-        cur = rt_getfield(f, n - 1);
         isopen = 1;
     } else if (n == 1) {
-        cur = rt_strcat(cur, rt_getfield(f, 0));
+        cur = rt_strcat(cur, rt_fat(f, p));
         isopen = 1;
     }
-    if (trail != 0 && isopen != 0) op = rt_fput(op, cur);
+    if (trail != 0 && isopen != 0) op = rt_fadd(op, cur);
     return op;
 }
 
@@ -3649,6 +3853,8 @@ int rt_arr_find(char *nm, char *k) {
 int rt_arr_set(char *nm, char *k, char *v) {
     int at = rt_arr_find(nm, k);
     rt_pin();
+    rt_abheld(k);
+    rt_abheld(v);
     if (at >= 0) {
         arr_v[at] = v;
         return 0;
@@ -3677,6 +3883,7 @@ int rt_arr_iset(char *nm, char *k, char *v) {
     int pos;
     int i;
     long kv;
+    rt_abheld(v);
     if (k == &bad_key[0]) {
         arith_err = 1;
         return 0;
@@ -3789,24 +3996,22 @@ long rt_arr_litkey(char *nm, char *k, char *v, long next) {
  * Twin of the letws arm of makeLetCmd in bash-interpreter.abnf. */
 long rt_letfields(char *list, int need)
 {
-    int n = rt_nfields(list);
-    int i = 0;
+    int p = rt_fpos(list);
     long v = 0;
-    if (n == 0 && need != 0) rt_arith_fail("let", "expression expected", empty);
-    while (i < n && arith_err == 0) {
-        v = rt_arith(rt_getfield(list, i));
-        i = i + 1;
+    if (p < 0 && need != 0) rt_arith_fail("let", "expression expected", empty);
+    while (p >= 0 && arith_err == 0) {
+        v = rt_arith(rt_fat(list, p));
+        p = rt_fnext(list, p);
     }
     return v;
 }
 
 long rt_arr_litwords(char *nm, char *f, long next) {
-    int n = rt_nfields(f);
-    int i = 0;
-    while (i < n) {
-        rt_arr_iset(nm, rt_int2str(next), rt_getfield(f, i));
+    int p = rt_fpos(f);
+    while (p >= 0) {
+        rt_arr_iset(nm, rt_int2str(next), rt_fat(f, p));
         next = next + 1;
-        i = i + 1;
+        p = rt_fnext(f, p);
     }
     return next;
 }
@@ -3876,24 +4081,13 @@ int rt_arr_count(char *nm) {
  * of an array, as a field list (star == 0) or joined with sep (star != 0). */
 char *rt_arr_list(char *nm, char *sep, int star, int keys) {
     int n = arr_n;
-    int isStar = star != 0;
-    char *out = isStar ? empty : list_nil;
-    int i = 0, c = 0;
+    char *out = list_nil;
+    int i = 0;
     while (i < n) {
-        int same = rt_streq(nm, arr_nm[i]) != 0;
-        if (same) {
-            char *kv = keys != 0 ? arr_k[i] : arr_v[i];
-            char *cur = out;
-            int needSep = isStar && c > 0;
-            char *withSep = rt_strcat(cur, sep);
-            if (needSep) cur = withSep;
-            cur = isStar ? rt_strcat(cur, kv) : rt_fput(cur, kv);
-            out = cur;
-            c = c + 1;
-        }
+        if (rt_streq(nm, arr_nm[i]) != 0) out = rt_fadd(out, keys != 0 ? arr_k[i] : arr_v[i]);
         i = i + 1;
     }
-    return out;
+    return star != 0 ? rt_ljoin(out, sep) : out;
 }
 
 /* rt_arr_nextidx(nm): one past the largest numeric key, 0 for none. */
@@ -4094,7 +4288,6 @@ char *rt_pfxnames(char *p, char *sep, int star) {
     int dup;
     char *v;
     char *out;
-    char *t;
     while (i < total) {
         v = i < nvars ? varnames[i] : arr_nm[i - nvars];
         if ((int)(unsigned char)v[0] == 3) v = rt_substr(v, 1, rt_strlen(v) - 1);
@@ -4118,16 +4311,13 @@ char *rt_pfxnames(char *p, char *sep, int star) {
         }
         i = i + 1;
     }
-    out = star != 0 ? empty : list_nil;
+    out = list_nil;
     i = 0;
     while (i < n) {
-        t = out;
-        if (star != 0 && i > 0) t = rt_strcat(t, sep);
-        if (star != 0) t = rt_strcat(t, nm[i]); else t = rt_fput(t, nm[i]);
-        out = t;
+        out = rt_fadd(out, nm[i]);
         i = i + 1;
     }
-    return out;
+    return star != 0 ? rt_ljoin(out, sep) : out;
 }
 
 /* ---- declare -p ------------------------------------------------------------
@@ -4348,13 +4538,12 @@ char *rt_declpos(char *ifs, char *sep, int star) {
     int n;
     if (star != 0) {
         if (cnt == 0) return empty;
-        out = "set -- ";
+        out = list_nil;
         while (i < cnt) {
-            if (i > 0) out = rt_strcat(out, sep);
-            out = rt_strcat(out, rt_shquote(argv[frame_base + i]));
+            out = rt_fadd(out, rt_shquote(argv[frame_base + i]));
             i = i + 1;
         }
-        return out;
+        return rt_strcat("set -- ", rt_ljoin(out, sep));
     }
     if (cnt == 0) return list_nil;
     if (ifs[0] == 0) {
@@ -4373,7 +4562,7 @@ char *rt_declpos(char *ifs, char *sep, int star) {
         }
     }
     while (i < cnt) {
-        out = rt_fput(out, rt_shquote(argv[frame_base + i]));
+        out = rt_fadd(out, rt_shquote(argv[frame_base + i]));
         i = i + 1;
     }
     return out;
@@ -4382,45 +4571,32 @@ char *rt_declpos(char *ifs, char *sep, int star) {
 /* ${a[@]@K}: `key "value"` pairs as ONE field, with the trailing space bash
  * writes for the associative form only. */
 char *rt_kvq(char *nm, int assoc, char *v, int isset) {
-    char *out = empty;
+    char *out = list_nil;
     int c = 0;
     int i = 0;
     if (rt_arr_any(nm) == 0 && assoc == 0) return rt_shq(v, isset);
     while (i < arr_n) {
         if (rt_streq(nm, arr_nm[i]) != 0) {
-            if (c > 0) out = rt_strcat(out, " ");
-            out = rt_strcat(out, rt_keymeta(arr_k[i]) != 0 ? rt_dqs(arr_k[i]) : arr_k[i]);
-            out = rt_strcat(out, " ");
-            out = rt_strcat(out, rt_dqs(arr_v[i]));
+            out = rt_fadd(out, rt_keymeta(arr_k[i]) != 0 ? rt_dqs(arr_k[i]) : arr_k[i]);
+            out = rt_fadd(out, rt_dqs(arr_v[i]));
             c = c + 1;
         }
         i = i + 1;
     }
-    if (assoc != 0 && c > 0) out = rt_strcat(out, " ");
-    return out;
+    if (assoc != 0 && c > 0) out = rt_fadd(out, empty);
+    return rt_ljoin(out, " ");
 }
 
 /* ${a[@]@k}: the same pairs, unquoted, as separate FIELDS. */
 char *rt_kvp(char *nm, char *sep, int star, char *v, int isset) {
-    char *out = star != 0 ? empty : list_nil;
-    int c = 0;
+    char *out = list_nil;
     int i = 0;
     if (rt_arr_any(nm) == 0) return rt_shq(v, isset);
     while (i < arr_n) {
-        if (rt_streq(nm, arr_nm[i]) != 0) {
-            if (star != 0) {
-                if (c > 0) out = rt_strcat(out, sep);
-                out = rt_strcat(out, arr_k[i]);
-                out = rt_strcat(out, sep);
-                out = rt_strcat(out, arr_v[i]);
-            } else {
-                out = rt_fput(rt_fput(out, arr_k[i]), arr_v[i]);
-            }
-            c = c + 1;
-        }
+        if (rt_streq(nm, arr_nm[i]) != 0) out = rt_fadd(rt_fadd(out, arr_k[i]), arr_v[i]);
         i = i + 1;
     }
-    return out;
+    return star != 0 ? rt_ljoin(out, sep) : out;
 }
 
 /* ${a[@]@a}: the attribute letters, ONCE PER ELEMENT - `a=(pa pb)` answers
@@ -4434,17 +4610,12 @@ char *rt_attrf(char *nm, char *at, char *sep, int star) {
     } else if (n == 0) {
         n = 1;
     }
-    out = star != 0 ? empty : list_nil;
+    out = list_nil;
     while (i < n) {
-        if (star != 0) {
-            if (i > 0) out = rt_strcat(out, sep);
-            out = rt_strcat(out, at);
-        } else {
-            out = rt_fput(out, at);
-        }
+        out = rt_fadd(out, at);
         i = i + 1;
     }
-    return out;
+    return star != 0 ? rt_ljoin(out, sep) : out;
 }
 
 /* ${v@P}: PS1-style prompt expansion. This is promptExpand from
@@ -4611,14 +4782,10 @@ int rt_declp(char *nm, char *flag, int assoc) {
 /* i32 rt_arr_append(i8* nm, i8* fields): append every field with the next
  * numeric index. */
 int rt_arr_append(char *nm, char *f) {
-    int n = rt_nfields(f);
-    int i = 0;
-    while (i < n) {
-        long idx = rt_arr_nextidx(nm);
-        char *ks = rt_int2str(idx);
-        char *vs = rt_getfield(f, i);
-        rt_arr_set(nm, ks, vs);
-        i = i + 1;
+    int p = rt_fpos(f);
+    while (p >= 0) {
+        rt_arr_set(nm, rt_int2str(rt_arr_nextidx(nm)), rt_fat(f, p));
+        p = rt_fnext(f, p);
     }
     return 0;
 }
@@ -4652,37 +4819,32 @@ char *rt_arr_slice(char *nm, long off, long len, int haslen, char *sep, int star
         off = rt_arr_nextidx(nm) + off;
         if (off < 0) return out;
     }
+    out = list_nil;
     while (i < n) {
         if (rt_streq(nm, arr_nm[i]) != 0 && rt_str2int(arr_k[i]) >= off && (haslen == 0 || taken < len)) {
-            char *cur = out;
-            if (isStar && taken > 0) cur = rt_strcat(cur, sep);
-            cur = isStar ? rt_strcat(cur, arr_v[i]) : rt_fput(cur, arr_v[i]);
-            out = cur;
+            out = rt_fadd(out, arr_v[i]);
             taken = taken + 1;
         }
         i = i + 1;
     }
-    return out;
+    return isStar ? rt_ljoin(out, sep) : out;
 }
 
 /* i8* rt_slicefields(i8* f, i32 off, i32 n, i8* sep, i32 star) */
 char *rt_slicefields(char *f, int off, int n, char *sep, int star) {
-    int cnt = rt_nfields(f);
-    int isStar = star != 0;
-    char *out = isStar ? empty : list_nil;
-    int i = off, taken = 0;
-    while (i < cnt && taken < n) {
-        char *cur = out;
-        int needSep = isStar && taken > 0;
-        char *withSep = rt_strcat(cur, sep);
-        if (needSep) cur = withSep;
-        char *fld = rt_getfield(f, i);
-        cur = isStar ? rt_strcat(cur, fld) : rt_fput(cur, fld);
-        out = cur;
-        i = i + 1;
+    char *out = list_nil;
+    int p = off < 0 ? -1 : rt_fpos(f);
+    int taken = 0;
+    while (off > 0 && p >= 0) {
+        p = rt_fnext(f, p);
+        off = off - 1;
+    }
+    while (p >= 0 && taken < n) {
+        out = rt_fadd(out, rt_fat(f, p));
+        p = rt_fnext(f, p);
         taken = taken + 1;
     }
-    return out;
+    return star != 0 ? rt_ljoin(out, sep) : out;
 }
 
 /* i8* rt_globescape(i8* s): make every glob metacharacter of s literal, which
@@ -4743,12 +4905,10 @@ char *rt_rxescape(char *s) {
  * would answer "Qa ba". languages/bash-interpreter.abnf's applyPatOp is the
  * same three arms, driven by the same walk. */
 char *rt_mapf(char *v, int op, char *p, char *r, int mode, char *sep, int star) {
-    int n = rt_nfields(v);
-    int i = 0;
-    char *out;
-    if (star != 0) out = &empty[0]; else out = list_nil;
-    while (i < n) {
-        char *f = rt_getfield(v, i);
+    int at = rt_fpos(v);
+    char *out = list_nil;
+    while (at >= 0) {
+        char *f = rt_fat(v, at);
         char *g;
         if (op == 0) g = rt_strip(f, p, mode);
         else if (op == 1) g = rt_replace(f, p, r, mode);
@@ -4756,22 +4916,29 @@ char *rt_mapf(char *v, int op, char *p, char *r, int mode, char *sep, int star) 
         else if (op == 4) g = rt_ansic(f);
         else if (op == 5) g = rt_prompt(f);
         else g = rt_case(f, mode, p);
-        if (star != 0) {
-            if (i > 0) out = rt_strcat(out, sep);
-            out = rt_strcat(out, g);
-        } else {
-            out = rt_fput(out, g);
-        }
-        i = i + 1;
+        out = rt_fadd(out, g);
+        at = rt_fnext(v, at);
     }
-    return out;
+    return star != 0 ? rt_ljoin(out, sep) : out;
 }
 
 /* i8* rt_catfields(i8* a, i8* b): the list a followed by b's fields, a plain b
- * being one field. */
+ * being one field. a is the caller's accumulator (a command's argument list),
+ * so it grows in place like rt_fadd's. */
 char *rt_catfields(char *a, char *b) {
-    if (rt_islist(b) != 0) return rt_lcat(a, &b[1]);
-    return rt_fput(a, b);
+    int lb;
+    if (rt_islist(b) == 0) return rt_fadd(a, b);
+    lb = (int)strlen(b) - 1;
+    if (rt_ftop(a, lb) != 0) {
+        h_pos[1] = h_pos[1] + lb;
+        memmove(a + fa_len, b + 1, (unsigned long)(lb + 1));
+        fa_len = fa_len + lb;
+        return a;
+    }
+    a = rt_lcat(a, &b[1]);
+    fa_last = a;
+    fa_len = (int)strlen(a);
+    return a;
 }
 
 /* `echo` with the FLAG SCAN AT RUN TIME, so `opts="-n"; echo $opts x` treats
@@ -4792,13 +4959,13 @@ int echo_flags(char *f) {
 }
 
 int rt_echo(char *fields, int newline, int escapes) {
-    int n = rt_nfields(fields);
-    int i = 0;
+    int p = rt_fpos(fields);
     int flagging = 1;
     int first = 1;
     pf_stop = 0;
-    while (i < n) {
-        char *f = rt_getfield(fields, i);
+    while (p >= 0) {
+        char *f = rt_fat(fields, p);
+        p = rt_fnext(fields, p);
         if (flagging != 0) {
             if (echo_flags(f) != 0) {
                 int j = 1;
@@ -4807,7 +4974,6 @@ int rt_echo(char *fields, int newline, int escapes) {
                     else escapes = f[j] == 101 ? 1 : 0;
                     j = j + 1;
                 }
-                i = i + 1;
                 continue;
             }
             flagging = 0;
@@ -4817,25 +4983,31 @@ int rt_echo(char *fields, int newline, int escapes) {
         else rt_prints(f);
         if (pf_stop != 0) return 0;     /* \c: no further output, not even the newline */
         first = 0;
-        i = i + 1;
     }
     if (newline != 0) rt_putc(10);
     return 0;
 }
 
-/* i32 rt_argpush(i8* v): append every FIELD of v to the argv stack. */
+/* i32 rt_argpush(i8* v): append every FIELD of v to the argv stack, doubling
+ * the stack when it is full. */
 int rt_argpush(char *v) {
-    int n = rt_nfields(v);
-    int i = 0;
-    while (i < n) {
+    int p = rt_fpos(v);
+    char **na;
+    while (p >= 0) {
         int t = argv_top;
-        if (t >= 4096) {           /* ARGVMAX; there was no test here either */
-            rt_die("positional-parameter stack", 1, t, 4096);
+        if (t >= argv_cap) {
+            argv_cap = argv_cap == 0 ? 4096 : argv_cap * 2;
+            na = (char **)malloc((unsigned long)argv_cap * 8);
+            if (na == 0) rt_die("positional-parameter stack", 1, t, argv_cap);
+            if (t > 0) memmove(na, argv, (unsigned long)t * 8);
+            if (argv != 0) free(argv);
+            argv = na;
         }
-        argv[t] = rt_getfield(v, i);
+        argv[t] = rt_fat(v, p);
+        rt_abheld(argv[t]);
         argv_top = t + 1;
         rt_pin();
-        i = i + 1;
+        p = rt_fnext(v, p);
     }
     return 0;
 }
@@ -4857,20 +5029,13 @@ char *rt_param(int n) {
 char *rt_params(char *sep, int star) {
     int cnt = frame_n;
     int base = frame_base;
-    int isStar = star != 0;
-    char *out = isStar ? empty : list_nil;
+    char *out = list_nil;
     int i = 0;
     while (i < cnt) {
-        char *v = argv[base + i];
-        char *cur = out;
-        int needSep = isStar && i > 0;
-        char *withSep = rt_strcat(cur, sep);
-        if (needSep) cur = withSep;
-        cur = isStar ? rt_strcat(cur, v) : rt_fput(cur, v);
-        out = cur;
+        out = rt_fadd(out, argv[base + i]);
         i = i + 1;
     }
-    return out;
+    return star != 0 ? rt_ljoin(out, sep) : out;
 }
 
 /* ---- output, capture stack, subshell snapshots, local save stack --------- */

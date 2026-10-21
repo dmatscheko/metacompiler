@@ -26,7 +26,7 @@ call pushes its field-expanded arguments and restores base, count and top afterw
 what makes recursion nest. And a word whose expansion can yield several fields is carried as an
 encoded FIELD LIST (0x02, each field followed by 0x01, in the list chunks rt_islist knows), so \"$@\", \"${a[@]}\" and an
 unquoted expansion split on IFS all flow through the same one representation; a builtin with a
-fixed argument list flattens it with rt_wordjoin.
+fixed argument list flattens it with rt_ljoin.
 
 A subshell snapshots the whole variable array (rt_ss_save) plus the shell options, and redirects
 the emitter's exit target so an `exit` inside it ends only the subshell. A variable that was
@@ -1493,6 +1493,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var rtStrcmp = rtDecl("rt_strcmp", false, [1, 1])
     // i8* rt_strcat(i8* a, i8* b): fresh arena string = a followed by b.
     var rtStrcat = rtDecl("rt_strcat", true, [1, 1])
+    // i8* rt_sput(i8* d, i8* s): s copied to d, answering where the next part goes.
+    var rtSput = rtDecl("rt_sput", true, [1, 1])
+    // i8* rt_sapp(i32 slot, i8* old, i8* x): the slot's `+=`, appended in place when it can be.
+    var rtSapp = rtDecl("rt_sapp", true, [0, 1, 1])
     // i8* rt_int2str(i64 n): decimal string in the arena (mirrors the interpreter's numToStr).
     var rtInt2str = rtDecl("rt_int2str", true, [3])
     // i64 rt_str2int(i8* s): leading spaces/tabs, one +/- sign, digits until non-digit.
@@ -1550,7 +1554,13 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var gPrintfRc = rtGlobal("printf_rc", i32)
     var rtNFields = rtDecl("rt_nfields", false, [1])
     var rtGetField = rtDecl("rt_getfield", true, [1, 0])
-    var rtWordJoin = rtDecl("rt_wordjoin", true, [1])
+    var rtFPos = rtDecl("rt_fpos", false, [1])
+    var rtFNext = rtDecl("rt_fnext", false, [1, 0])
+    var rtFAt = rtDecl("rt_fat", true, [1, 0])
+    // rt_ljoin(list, sep): the fields joined with sep. A field list flattened to one word is
+    // wordJoin, the fields space-joined.
+    var rtLJoin = rtDecl("rt_ljoin", true, [1, 1])
+    function wordJoin(b, v) { return b.NewCall(rtLJoin, [v, gepStr(b, " ")]) }
     var rtSplitIfs = rtDecl("rt_splitifs", true, [1, 1])
     var rtUqList = rtDecl("rt_uqlist", true, [1, 1])
     var rtBndAcc = rtDecl("rt_bnd_acc", true, [1, 1, 1])
@@ -2417,17 +2427,24 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         if (allConst) { return makeConst(joined) }
         if (!anyField && segs.length == 1) { return segs[0] }
+        // Two parts are one rt_strcat; more are expanded first and then copied once into
+        // one allocation of their summed length (rt_sput), which stays linear in the parts.
         if (!anyField) {
             return {s: anySub, fn: function(b) {
-                var r = segs[0].fn(b)
-                var bb = r.b, v = r.v
+                var vs = []
                 var k
-                for (k = 1; k < segs.length; k++) {
-                    var r2 = segs[k].fn(bb)
-                    bb = r2.b
-                    v = bb.NewCall(rtStrcat, [v, r2.v])
+                for (k = 0; k < segs.length; k++) {
+                    var r = segs[k].fn(b)
+                    b = r.b
+                    vs.push(r.v)
                 }
-                return {b: bb, v: v}
+                if (vs.length == 2) { return {b: b, v: b.NewCall(rtStrcat, [vs[0], vs[1]])} }
+                var tot = one
+                for (k = 0; k < vs.length; k++) { tot = b.NewAdd(tot, b.NewCall(rtStrlen, vs[k])) }
+                var d = b.NewCall(rtBump, tot)
+                var q = d
+                for (k = 0; k < vs.length; k++) { q = b.NewCall(rtSput, [q, vs[k]]) }
+                return {b: b, v: d}
             }, c: undefined}
         }
         // ONE UNQUOTED EXPANSION AND NOTHING ELSE - `$i`, `$@`, `${a[@]}` - IS ITS OWN FIELD
@@ -2888,7 +2905,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (it.kv != undefined) {
                 var rk = it.key.fn(b); b = rk.b
                 var rv = it.val.fn(b); b = rv.b
-                vals.push({k: b.NewCall(rtWordJoin, rk.v), v: b.NewCall(rtWordJoin, rv.v)})
+                vals.push({k: wordJoin(b, rk.v), v: wordJoin(b, rv.v)})
             } else {
                 var rw = it.fn(b); b = rw.b
                 vals.push({k: null, v: rw.v})
@@ -2905,7 +2922,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var pendKey = null
             for (i = 0; i < vals.length; i++) {
                 if (vals[i].k != null) { b.NewCall(rtArrSet, [nm, vals[i].k, vals[i].v]); continue }
-                var w = b.NewCall(rtWordJoin, vals[i].v)
+                var w = wordJoin(b, vals[i].v)
                 if (pendKey == null) { pendKey = w } else { b.NewCall(rtArrSet, [nm, pendKey, w]); pendKey = null }
             }
             if (pendKey != null) { b.NewCall(rtArrSet, [nm, pendKey, emptyPtr(b)]) }
@@ -2932,7 +2949,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (a.valT != null) {
             var r = a.valT.fn(b)
             b = r.b
-            v = (a.valT.f == true) ? b.NewCall(rtWordJoin, r.v) : r.v
+            v = (a.valT.f == true) ? wordJoin(b, r.v) : r.v
             if (a.valT.c == undefined) { b = emitAbortCheck(b) }
         }
         if (a.idxT != null) {
@@ -2966,7 +2983,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             b.NewCondBr(isA, arrB, strB)
             arrB.NewCall(rtArrAppend, [nm, v])
             arrB.NewBr(mg)
-            storeVar(strB, a.name, heapKeep(strB, mk, strB.NewCall(rtStrcat, [loadVar(strB, a.name), v])))
+            // rt_sapp appends in place to the slot's own buffer (bash-rt.c, "append buffers").
+            var sid = llvm.constant.NewInt(i32, getVarId(a.name))
+            storeVar(strB, a.name, heapKeep(strB, mk, strB.NewCall(rtSapp, [sid, loadVar(strB, a.name), v])))
             strB.NewBr(mg)
             return mg
         }
@@ -3207,7 +3226,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         uqStarEmit = false
         var r = w.fn(b)
         uqStarEmit = svq
-        if (w.f == true) { return {b: r.b, v: r.b.NewCall(rtWordJoin, r.v)} }
+        if (w.f == true) { return {b: r.b, v: wordJoin(r.b, r.v)} }
         return r
     }
     // Evaluate argument word objects in order, threading b via a box; returns [{v, c}].
@@ -4909,8 +4928,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // The list holds its own copy of every field, so the strings its words expanded
             // through are garbage once it is built.
             b.NewCall(rtRelease, [mk0.a, hPos(b, 1)])
+            // ip is the position of the next field in the list (rt_fpos / rt_fnext), -1 past
+            // the last, so each pass reads only its own field.
             var ip = slotOf(i32)
-            b.NewStore(zero, ip)
+            b.NewStore(b.NewCall(rtFPos, b.NewLoad(i8ptr, listP)), ip)
             var lst = loopStatusSlot(b)
             var head = curF.NewBlock(""), body = curF.NewBlock("")
             var step = curF.NewBlock(""), ex = curF.NewBlock("")
@@ -4919,14 +4940,14 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var hd = heapRelease(head, mk)
             var list = hd.NewLoad(i8ptr, listP)
             var i = hd.NewLoad(i32, ip)
-            hd.NewCondBr(hd.NewICmp(llvm.enum.IPredSLT, i, hd.NewCall(rtNFields, list)), body, ex)
-            storeVar(body, fname, body.NewCall(rtGetField, [list, i]))
+            hd.NewCondBr(hd.NewICmp(llvm.enum.IPredSGE, i, zero), body, ex)
+            storeVar(body, fname, body.NewCall(rtFAt, [list, i]))
             loopStack.push({brk: ex, cont: step, lst: lst, rd: redirStack.length})
             var bb = bodyT(body)
             loopStack.pop()
             bb.NewStore(bb.NewLoad(i32, gStatus), lst)
             bb.NewBr(step)
-            step.NewStore(step.NewAdd(i, one), ip)
+            step.NewStore(step.NewCall(rtFNext, [list, i]), ip)
             step.NewBr(head)
             var xb = heapRelease(ex, mk)
             storeStatus(xb, xb.NewLoad(i32, lst))

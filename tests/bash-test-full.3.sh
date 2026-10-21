@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Full-syntax test: Bash (the practical POSIX-plus-bash shell language) - part 3
-# of 3, sections 47 on; a new section goes here. The split is explained in
+# of 4, sections 47 to 60; a new section goes here. The split is explained in
 # tests/bash-test-full.sh.
 #
 # This file belongs to the SECOND test group (./test.sh --full): it is NOT part

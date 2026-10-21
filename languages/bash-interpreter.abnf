@@ -3165,11 +3165,16 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (!hasOwn(a.vals, "$" + kk)) {
             if (a.assoc) { a.keys.push(kk) }
             else {
-                // keep the index list in numeric order, so ${!a[*]} and ${a[@]} are sorted
+                // keep the index list in numeric order, so ${!a[*]} and ${a[@]} are sorted; the
+                // scan runs from the end and stops at the first smaller index, so appending in
+                // order stays linear. Twin of rt_arr_iset in bash-rt.c.
                 var n = arStr(kk)
                 var at = a.keys.length
                 var i
-                for (i = a.keys.length - 1; i >= 0; i--) { if (arOp(">", arStr(a.keys[i]), n) == 1) { at = i } }
+                for (i = a.keys.length - 1; i >= 0; i--) {
+                    if (arOp(">", arStr(a.keys[i]), n) != 1) { break }
+                    at = i
+                }
                 a.keys.push("")
                 var j
                 for (j = a.keys.length - 1; j > at; j--) { a.keys[j] = a.keys[j - 1] }
