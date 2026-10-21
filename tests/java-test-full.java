@@ -4914,8 +4914,12 @@ class S88G<T> { T v; S88G(T v) { this.v = v; } class Inner { String get() { retu
 // a Matcher's region bounds what it sees (opaque, anchoring), usePattern
 // keeps its position and results() streams the further matches; hitEnd and
 // requireEnd tell whether the last match operation read the end of the region
-// and whether more text could break its match (neither cleared by reset).
-// Every expected value is java 24.0.2's.
+// and whether more text could break its match (neither cleared by reset);
+// a region end that splits a surrogate pair is read across by a character
+// class (which then fails, having hit the end), a greedy class loop and \X;
+// \G stands where the previous operation's match ended, matches() and
+// lookingAt() included, and find() goes on from the last match after a
+// failed one. Every expected value is java 24.0.2's.
 class S89 {
     static void run() {
         Object[] os = { new ArrayList<Integer>(), new LinkedList<Integer>(), new HashMap<String, Integer>(), new TreeSet<Integer>(),
@@ -4974,6 +4978,32 @@ class S89 {
         he = he + hr.hitEnd() + hr.find() + hr.hitEnd() + hr.lookingAt() + hr.hitEnd();
         Main.check("he89", he.equals("HrmHr 0Hrmhr 03HrMHr hrmhr Hrmhr 0HrMHR 0Hrmhr 0HrMHR HrmHr 0HrMHr Hrmhr 1HRmhr "
             + "falsefalsetruetruetruefalsefalsefalse"));
+        String e = "\uD83D\uDE00";
+        String[] cp = {".", "\\p{L}+", "(?s).+", "\\X", "[a&&[^b]]+", "a" + e, "a.", "\\b"};
+        String[] ct = {e, "a" + e, e, e, e + e, "a" + e, "a" + e, "a" + e};
+        int[] ce = {1, 2, 1, 1, 3, 2, 2, 2};
+        String cut = "";
+        for (int i = 0; i < cp.length; i++) {
+            for (int op = 0; op < 3; op++) {
+                Matcher c = Pattern.compile(cp[i]).matcher(ct[i]);
+                c.region(0, ce[i]);
+                cut = cut + op89(c, op);
+            }
+            cut = cut + " ";
+        }
+        Main.check("cut89", cut.equals("FHFHFH T01HFHT01H T01HT01HT01H T02hFhT02h FhFhFH FHFHFH FHFHFH T00hFhT00h "));
+        Matcher g = Pattern.compile("\\Ga").matcher("a");
+        String gs = op89(g, 1) + op89(g, 0);
+        Matcher g2 = Pattern.compile("\\G").matcher("a");
+        gs = gs + op89(g2, 2) + op89(g2, 2) + op89(g2, 2);
+        Matcher g3 = Pattern.compile("\\Ga*").matcher("aab");
+        gs = gs + op89(g3, 2) + op89(g3, 2) + op89(g3, 2) + op89(g3, 0);
+        Main.check("gp89", gs.equals("T01hFhT00hFHT00hT02hT22hFHFh"));
+    }
+    // lookingAt (0), matches (1) or find (2): the match's bounds and hitEnd.
+    static String op89(Matcher m, int op) {
+        boolean b = op == 0 ? m.lookingAt() : op == 1 ? m.matches() : m.find();
+        return (b ? "T" + m.start() + m.end() : "F") + (m.hitEnd() ? "H" : "h");
     }
 }
 

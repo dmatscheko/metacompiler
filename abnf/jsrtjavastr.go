@@ -367,18 +367,19 @@ func (rt *jsrt) jxRxPrim(s, name string, num func(int) int, arg func(int) interf
 		}
 		return rt.jxExpand(re, text, &rxMatch{begin: caps[0], end: caps[1], caps: caps}, []rune(rt.jxArgStr(arg(3))))
 	}
-	from, gpos, mode := num(2), num(3), num(4)
+	from, gpos, glast, mode := num(2), num(3), num(4), num(5)
 	var mt *rxMatch
 	ok := true
-	re.hitEnd, re.reqEnd = false, false
+	re.hitEnd, re.reqEnd, re.jcut = false, false, rune(num(6))
 	switch mode {
 	case 1:
-		mt, ok = re.matchWhole(text, from)
+		mt, ok = re.attempt(text, from, len(text), gpos, glast, -1)
 	case 2:
-		mt, ok = re.matchAt(text, from)
+		mt, ok = re.attempt(text, from, -1, gpos, glast, -1)
 	default:
-		mt, ok = re.searchFrom(text, from, gpos, gpos)
+		mt, ok = re.searchFrom(text, from, gpos, glast)
 	}
+	re.jcut = 0
 	if !ok {
 		rt.fail("regexp: step limit exceeded")
 	}

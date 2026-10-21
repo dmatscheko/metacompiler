@@ -132,6 +132,8 @@ type rxCls struct {
 	// u marks ranges read under Java's (?iu) (see lib/regex.js); pu additionally
 	// under P, whose ASCII letters are folded already (fold).
 	u, pu bool
+	// cpg marks the class of a J CharPropertyGreedy (see lib/regex.js).
+	cpg bool
 }
 
 func rxNewCls() *rxCls { return &rxCls{} }
@@ -2207,6 +2209,10 @@ func (st *rxSt) parsePiece() *rxNode {
 		}
 		// Outside J a possessive quantifier is read as greedy; under J it is
 		// (?>(?>X)*), as in lib/regex.js.
+		// Pattern's CharPropertyGreedy (see lib/regex.js).
+		if st.java && rep.greedy && !poss && maxV < 0 && atom.t == "cls" {
+			atom.cls.cpg = true
+		}
 		if poss && atom.t != "cls" {
 			inner := rxNewNode("atom")
 			inner.items = append(inner.items, atom)
@@ -3630,6 +3636,9 @@ type rxRe struct {
 	// shortest match (searchFrom). Twins of the fields in lib/regex.js.
 	hitEnd, reqEnd, jbegin bool
 	jmin                   int
+	// jcut is re.jcut in lib/regex.js: the low surrogate a Matcher's region
+	// end splits from the text, or 0.
+	jcut rune
 }
 
 // ===== The C dialect: PCRE2, as PHP's preg_* compile it =====
@@ -5142,6 +5151,9 @@ func (re *rxRe) assertJ(text []rune, kind, sp int) bool {
 	after := false
 	if sp < n {
 		c, _ := rxCpAt(text, sp)
+		if sp+1 == n && re.jcut != 0 && isHighSurr(c) {
+			c = 0x10000 + (c-0xD800)*1024 + re.jcut - 0xDC00
+		}
 		after = rxIsWordJ(text, c, sp, uw)
 	}
 	if kind == rxJWordB || kind == rxJUWordB {
@@ -5233,7 +5245,15 @@ func (re *rxRe) run(text []rune, pcIn, spIn int, caps, marks []int, st *rxRunSt,
 				}
 				c, w := text[sp], 1
 				if re.java && isHighSurr(c) {
-					c, w = rxCpAt(text, sp)
+					// A pair a region end splits (see RX_CLASS in lib/regex.js).
+					if sp+1 == n && re.jcut != 0 && !rxClsBmpJ(re.clss[pc]) {
+						re.hitEnd = true
+						if !re.clss[pc].cpg {
+							break fwd
+						}
+					} else {
+						c, w = rxCpAt(text, sp)
+					}
 				}
 				if !re.clss[pc].match(c, re.icase) {
 					break fwd
@@ -5357,6 +5377,12 @@ func (re *rxRe) run(text []rune, pcIn, spIn int, caps, marks []int, st *rxRunSt,
 					break fwd
 				}
 				c, w := rxCpAt(text, sp)
+				if sp+1 == n && re.jcut != 0 && isHighSurr(c) && !rxClsBmpJ(re.clss[pc]) {
+					re.hitEnd = true
+					if !re.clss[pc].cpg {
+						break fwd
+					}
+				}
 				if !re.clss[pc].matchX(c, re.icase) {
 					break fwd
 				}
@@ -5459,7 +5485,11 @@ func (re *rxRe) run(text []rune, pcIn, spIn int, caps, marks []int, st *rxRunSt,
 					re.hitEnd = true
 					break fwd
 				}
-				sp = jxGraphNext(text, sp, n)
+				if re.jcut == 0 {
+					sp = jxGraphNext(text, sp, n)
+				} else {
+					sp = jxGraphNext(append(text[:n:n], re.jcut), sp, n)
+				}
 				pc++
 			case rxOpGBound:
 				// Pattern.GraphemeBound: not between a surrogate pair, and not before

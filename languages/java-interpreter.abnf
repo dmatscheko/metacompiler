@@ -4012,7 +4012,7 @@ HasStatic   = :script(~~
         if (name == "matches") { return jxMatches(s, jStrArg(a0)) }
         if (name == "split") { return jxSplit(s, jStrArg(a0), n1 ? jI(args[1]) : 0) }
         // lib/java-pattern.java's primitives (lib/java-strings.js).
-        if (name == "__rxfind") { return jxRxFind(s, jI(a0), jStrArg(args[1]), jI(args[2]), jI(args[3]), jI(args[4])) }
+        if (name == "__rxfind") { return jxRxFind(s, jI(a0), jStrArg(args[1]), jI(args[2]), jI(args[3]), jI(args[4]), jI(args[5]), jI(args[6])) }
         if (name == "__rxcount") { return rxGroupCount(jxReF(s, jI(a0))) }
         if (name == "__rxname") { return rxIndexOfName(jxReF(s, jI(a0)), jStrArg(args[1])) }
         if (name == "__rxexpand") { return jxRxExpand(s, jI(a0), jStrArg(args[1]), args[2], jStrArg(args[3])) }

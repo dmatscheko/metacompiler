@@ -5,7 +5,7 @@
 // String primitives of the pattern's text (__rxfind, __rxcount, __rxname,
 // __rxexpand, __rxflags; lib/java-strings.js and abnf/jsrtjavastr.go), which
 // answer a match's group bounds as an int[] and throw PatternSyntaxException.
-// Not modelled: hitEnd/requireEnd, and transparent or non-anchoring bounds.
+// Not modelled: transparent or non-anchoring bounds.
 package java.util.regex;
 
 interface MatchResult {
@@ -107,10 +107,14 @@ final class Matcher implements MatchResult {
     // The last match's group bounds (2 per group, -1 for one that took no
     // part), or null when there is none.
     int[] caps;
-    // Where the next find() searches from, and where the previous match ended
-    // (\G and appendReplacement's position).
-    int next;
+    // java's Matcher.first and last, where the last successful match began
+    // (-1 after a reset or a failed operation) and ended (0 after a reset):
+    // find() goes on from last, one further after an empty match, and \b{g}
+    // reads from last; java's oldLast, where \G stands, -1 until the first
+    // match operation after a reset.
+    int first = -1;
     int last;
+    int oldLast = -1;
     int appendPos;
     // The region [from, to) the matching sees, with java's default opaque
     // and anchoring bounds: the engine is handed that part of the text, so a
@@ -129,8 +133,9 @@ final class Matcher implements MatchResult {
     public Pattern pattern() { return pat; }
     public Matcher reset() {
         caps = null;
-        next = 0;
+        first = -1;
         last = 0;
+        oldLast = -1;
         appendPos = 0;
         from = 0;
         to = text.length();
@@ -162,45 +167,57 @@ final class Matcher implements MatchResult {
     }
     // The engine over the region: positions in and out are the text's. The
     // primitive's last element is the ends bits, and alone when nothing matched.
-    int[] run(int start, int lastEnd, int mode) {
+    // A region end that splits a surrogate pair hands the engine the low half,
+    // which java.util.regex reads past the end. Like Matcher.match and search,
+    // a run sets last on success and oldLast to last.
+    int[] run(int start, int mode) {
         boolean whole = from == 0 && to == text.length();
-        int[] c = pat.text.__rxfind(pat.given, whole ? text : text.substring(from, to), start - from, lastEnd - from, mode);
+        int cut = 0;
+        if (to > from && to < text.length()) {
+            int h = text.charAt(to - 1);
+            int l = text.charAt(to);
+            if (h >= 0xD800 && h <= 0xDBFF && l >= 0xDC00 && l <= 0xDFFF) { cut = l; }
+        }
+        int gpos = oldLast < 0 ? start : oldLast;
+        // \b{g} reads the text from last, which the engine sees from the region on.
+        int glast = last < from ? from : last;
+        int[] c = pat.text.__rxfind(pat.given, whole ? text : text.substring(from, to), start - from, gpos - from, glast - from, mode, cut);
         int k = c.length - 1;
         ends = c[k];
-        if (k == 0) { return null; }
+        if (k == 0) {
+            first = -1;
+            oldLast = last;
+            return null;
+        }
         if (!whole) {
             for (int i = 0; i < k; i++) {
                 if (c[i] >= 0) { c[i] = c[i] + from; }
             }
         }
+        first = c[0];
+        last = c[1];
+        oldLast = last;
         return c;
     }
     public boolean hitEnd() { return (ends & 1) != 0; }
     public boolean requireEnd() { return (ends & 2) != 0; }
     public boolean matches() {
-        caps = run(from, from, 1);
-        if (caps != null) { next = caps[1] == caps[0] ? caps[1] + 1 : caps[1]; last = caps[1]; }
+        caps = run(from, 1);
         return caps != null;
     }
     public boolean lookingAt() {
-        caps = run(from, from, 2);
-        if (caps != null) { next = caps[1] == caps[0] ? caps[1] + 1 : caps[1]; last = caps[1]; }
+        caps = run(from, 2);
         return caps != null;
     }
     public boolean find() {
-        int start = next < from ? from : next;
+        int start = last == first ? last + 1 : last;
+        if (start < from) { start = from; }
         if (start > to) {
             caps = null;
             return false;
         }
-        caps = run(start, last < from ? from : last, 0);
-        if (caps == null) {
-            next = to + 1;
-            return false;
-        }
-        next = caps[1] == caps[0] ? caps[1] + 1 : caps[1];
-        last = caps[1];
-        return true;
+        caps = run(start, 0);
+        return caps != null;
     }
     // Every further match, as find() would answer them.
     public java.util.stream.Stream<MatchResult> results() {
@@ -211,9 +228,8 @@ final class Matcher implements MatchResult {
     public boolean find(int start) {
         if (start < 0 || start > text.length()) { throw new IndexOutOfBoundsException("Illegal start index"); }
         reset();
-        next = start;
-        last = start;
-        return find();
+        caps = run(start, 0);
+        return caps != null;
     }
     void check(int group) {
         if (caps == null) { throw new IllegalStateException("No match found"); }

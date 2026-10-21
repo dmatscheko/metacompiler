@@ -129,6 +129,11 @@
 //                                            search does not set hitEnd by itself
 //                                            (rxBeginJ), re.jmin is Start's
 //                                            shortest match (rxSearchFrom).
+//   re.jcut                                   0, or under J the low surrogate
+//                                            after the text when a Matcher's
+//                                            region end splits a pair there,
+//                                            which java.util.regex reads (set
+//                                            and cleared by the caller)
 //   rxTest(re, text) -> bool
 //   rxGroup(re, text, m, i) -> string|null   i is 0 for the whole match
 //   rxGroupNamed(re, text, m, name)
@@ -236,7 +241,8 @@ var RX_STEPS = 400000
 // range (Pattern.java's CIRangeU and SingleU).
 
 function rxNewCls() {
-    return {neg: false, lo: [], hi: [], sp: [], subs: [], ands: [], props: [], x: false, u: false, pu: false}
+    return {neg: false, lo: [], hi: [], sp: [], subs: [], ands: [], props: [], x: false, u: false, pu: false,
+            cpg: false}
 }
 
 function rxClsAdd(cls, from, to) {
@@ -2156,6 +2162,10 @@ function rxParsePiece(st) {
         // Outside J a possessive quantifier is read as greedy. Under J, X*+ is
         // Pattern.java's possessive Curly: every iteration of X is its first
         // success, and the loop never gives one back - (?>(?>X)*).
+        // Under J a greedy X*, X+ or X{n,} of one class is Pattern's
+        // CharPropertyGreedy, which reads a pair a region end splits as its
+        // high half (RX_CLASS).
+        if (st.java && rep.greedy && !poss && maxV < 0 && atom.t == "cls") { atom.cls.cpg = true }
         if (poss && atom.t != "cls") {
             var inner = rxNode("atom")
             inner.items.push(atom)
@@ -4521,7 +4531,7 @@ function rxCompile(pattern, flags) {
                 icase: icase, dotall: dotall, multi: multi, jsrep: jsrep, java: java,
                 py: false, supp: false, bfail: bfail, gflags: "",
                 cmin: [], cmax: [], cgreedy: [], lbmin: [], lbmax: [],
-                src: pattern, flags: flags, hitEnd: false, reqEnd: false, jbegin: false, jmin: 0}
+                src: pattern, flags: flags, hitEnd: false, reqEnd: false, jbegin: false, jmin: 0, jcut: 0}
     }
     var pg = rxNewProg()
     pg.jsrep = jsrep
@@ -4541,7 +4551,8 @@ function rxCompile(pattern, flags) {
         icase: icase, dotall: dotall, multi: multi, jsrep: jsrep, java: java,
         py: py, supp: supp, bfail: bfail, gflags: java ? rxFlagsGet(st) : st.gflags, pcre: pcre,
         cmin: pg.cmin, cmax: pg.cmax, cgreedy: pg.cgreedy, lbmin: pg.lbmin, lbmax: pg.lbmax,
-        src: pattern, flags: flags, hitEnd: false, reqEnd: false, jbegin: jbegin, jmin: jmin
+        src: pattern, flags: flags, hitEnd: false, reqEnd: false, jbegin: jbegin, jmin: jmin,
+        jcut: 0
     }
 }
 
@@ -4655,7 +4666,13 @@ function rxAssertJ(re, text, kind, sp) {
         }
         before = rxIsWordJ(text, bc, sp - 1, uw)
     }
-    var after = sp < n && rxIsWordJ(text, rxCpAt(text, sp), sp, uw)
+    var after = false
+    if (sp < n) {
+        var ac = rxCpAt(text, sp)
+        // Character.codePointAt reads a pair a region end splits (re.jcut).
+        if (sp + 1 == n && re.jcut != 0 && ac >= 55296 && ac <= 56319) { ac = 65536 + (ac - 55296) * 1024 + re.jcut - 56320 }
+        after = rxIsWordJ(text, ac, sp, uw)
+    }
     if (kind == RX_JWORDB || kind == RX_JUWORDB) { return before != after }
     return before == after
 }
@@ -4735,7 +4752,18 @@ function rxRun(re, text, pcIn, spIn, caps, marks, st, base, keep) {
                 }
                 var cc = text.charCodeAt(sp)
                 // J and P read a surrogate pair as one character.
-                if (cc >= 55296 && cc <= 56319 && (re.java || re.py)) { cc = rxCpAt(text, sp) }
+                if (cc >= 55296 && cc <= 56319 && (re.java || re.py)) {
+                    // Pattern.CharProperty reads a pair a region end splits
+                    // (re.jcut) and fails past the end; CharPropertyGreedy
+                    // (cls.cpg) reads its high half, as a BmpCharProperty
+                    // does, but has hit the end.
+                    if (sp + 1 == n && re.jcut != 0 && !rxClsBmpJ(clss[pc])) {
+                        re.hitEnd = true
+                        if (!clss[pc].cpg) { break }
+                    } else {
+                        cc = rxCpAt(text, sp)
+                    }
+                }
                 if (!rxClsMatch(clss[pc], cc, re.icase)) {
                     break
                 }
@@ -4912,6 +4940,10 @@ function rxRun(re, text, pcIn, spIn, caps, marks, st, base, keep) {
                     break
                 }
                 var xc = rxCpAt(text, sp)
+                if (sp + 1 == n && re.jcut != 0 && xc >= 55296 && xc <= 56319 && !rxClsBmpJ(clss[pc])) {
+                    re.hitEnd = true
+                    if (!clss[pc].cpg) { break }
+                }
                 if (!rxClsMatchX(clss[pc], xc, re.icase)) {
                     break
                 }
@@ -5062,7 +5094,8 @@ function rxRun(re, text, pcIn, spIn, caps, marks, st, base, keep) {
                     re.hitEnd = true
                     break
                 }
-                sp = rxGraphNext(text, sp, n)
+                // Grapheme.nextBoundary reads a pair a region end splits whole.
+                sp = re.jcut == 0 ? rxGraphNext(text, sp, n) : rxGraphNext(text + String.fromCharCode(re.jcut), sp, n)
                 pc = pc + 1
             } else if (op == RX_GBOUND) {
                 // Pattern.GraphemeBound: not between a surrogate pair, and not before

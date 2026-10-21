@@ -534,19 +534,24 @@ function jxReF(pattern, bits) {
     if (!re.ok) { jxkThrowPse(pattern, re.err, re.errAt) }
     return re
 }
-// One match attempt: mode 0 is Matcher.find from `from` (gpos, the previous
-// match's end, for \G), 1 matches() and 2 lookingAt() of the text from `from`.
-// The group bounds (rxSearch's caps) followed by one more element, the
-// attempt's hitEnd (1) and requireEnd (2) bits; no match answers that element
-// alone. A find that fails through Pattern's Start node has hit the end.
-function jxRxFind(pattern, bits, text, from, gpos, mode) {
+// One match attempt: mode 0 is Matcher.find from `from`, 1 matches() and 2
+// lookingAt() of the text from `from`; gpos is the Matcher's oldLast (\G),
+// glast its last (\b{g}), and cut the low surrogate after the text when the
+// region end splits a pair (re.jcut), else 0. The group bounds (rxSearch's
+// caps) followed by one more element, the attempt's hitEnd (1) and
+// requireEnd (2) bits; no match answers that element alone. A find that fails
+// through Pattern's Start node has hit the end.
+function jxRxFind(pattern, bits, text, from, gpos, glast, mode, cut) {
     var re = jxReF(pattern, bits)
     re.hitEnd = false
     re.reqEnd = false
+    re.jcut = cut
     var m = null
-    if (mode == 1) { m = rxMatchWhole(re, text, from) }
-    else if (mode == 2) { m = rxMatchAt(re, text, from) }
-    else { m = rxSearchFrom(re, text, from, gpos, gpos) }
+    // rxMatchWhole and rxMatchAt with a Matcher's \G and \b{g} state.
+    if (mode == 1) { m = rxAttempt(re, text, from, text.length, gpos, glast, -1) }
+    else if (mode == 2) { m = rxAttempt(re, text, from, -1, gpos, glast, -1) }
+    else { m = rxSearchFrom(re, text, from, gpos, glast) }
+    re.jcut = 0
     if (m == null && mode == 0 && !re.jbegin) { re.hitEnd = true }
     var ends = (re.hitEnd ? 1 : 0) + (re.reqEnd ? 2 : 0)
     if (m == null) { return [ends] }
