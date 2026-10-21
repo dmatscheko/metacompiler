@@ -8324,6 +8324,37 @@ function js_rattrset(o, k, v, sk) {
     o[rbStr(k)] = v
     return undefined
 }
+// js_rattrset with the attr_writer fast path. Twin of js_rattrw in
+// abnf/jsrtruby.go, which says when it is emitted and what the marker is.
+function js_rattrw(o, k, v, sk, mk) {
+    // The common case, the instance's own class holding the marker, is kept to a
+    // few statements (each is a scope lookup in layer 2); the rest walks on. A
+    // non-object answers no __class.
+    if (o !== null && o !== undefined) {
+        var cls = o["__class"]
+        if (cls !== undefined && cls[mk] === true) {
+            o[k] = v
+            return undefined
+        }
+        if (rbAttrWMarked(cls, sk, mk)) {
+            o[k] = v
+            return undefined
+        }
+    }
+    return js_rattrset(o, k, v, sk)
+}
+// Whether a class chain reaches the attr_writer marker mk before any other
+// setter sk. Twin of the walk in js_rattrw in abnf/jsrtruby.go.
+function rbAttrWMarked(cls, sk, mk) {
+    var d = 0
+    while (cls !== undefined && cls !== null && d < 64) {
+        if (cls[mk] === true) { return true }
+        if (cls[sk] !== undefined) { return false }
+        cls = cls["__super"]
+        d = d + 1
+    }
+    return false
+}
 
 // C.new(args): build an instance of a compiled class and run its initialize. Two
 // builtin classes are constructed directly: Proc.new { } is its block, and an

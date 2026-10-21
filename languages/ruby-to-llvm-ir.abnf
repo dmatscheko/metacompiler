@@ -4152,9 +4152,18 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // which raises MRI's NoMethodError where its class has none - an attr_writer of
     // the name in some other class does not make the write a plain slot store. It
     // takes the setter's method key too, because a private one inside its own class
-    // is reached as "$q$name=". Twin of attrSet in ruby-interpreter.abnf.
+    // is reached as "$q$name=". Where only attr_writers can answer the name
+    // (rubyAttrWNames, no def or dynamic definition of it), js_rattrw writes the
+    // slot directly for an instance whose class chain carries the attr_writer's
+    // marker (emitMethods). Twin of attrSet in ruby-interpreter.abnf.
+    var rubyAttrWNames = {}
     function emitAttrSet(b, p, v) {
-        callExt(b, "js_rattrset", [p.obj, p.key, v, emitStr(b, methodKey(p.name + "="))])
+        var sk = emitStr(b, methodKey(p.name + "="))
+        if (!attrDispatches(p.name) && rubyAttrWNames["$" + p.name] === true) {
+            callExt(b, "js_rattrw", [p.obj, p.key, v, sk, emitStr(b, "$aw$" + p.name)])
+            return
+        }
+        callExt(b, "js_rattrset", [p.obj, p.key, v, sk])
     }
     // Bind the raised value to a rescue clause's `=> TARGET` - an ordinary assignment:
     // a bare name is a local of the code around the begin (emitLocalSet reaches past
@@ -7143,7 +7152,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }}
     }
     function attrSetterMethod(n) {
-        return {name: n + "=", params: ["v"], body: function(b) {
+        rubyAttrWNames["$" + n] = true
+        return {name: n + "=", attrw: n, params: ["v"], body: function(b) {
             var selfV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "self")])
             var vv = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "v")])
             callExt(b, "js_set", [selfV, emitStr(b, n), vv])
@@ -7374,6 +7384,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             // keeps the registry's retention cost off every program that does not ask.
             var fnV = emitArity(b, callExt(b, "js_closure", [handle(idx), curScopeV]), m.params)
             callExt(b, "js_set", [dstV, emitStr(b, key), fnV])
+            // The marker js_rattrw looks for: a public attr_writer of an instance method.
+            if (m.attrw != undefined && rk == "" && prefix == "") { callExt(b, "js_set", [dstV, emitStr(b, "$aw$" + m.attrw), hTrue]) }
             if (rk != "" && prefix == "") {
                 var sidx = emitFunc([], restrictedStub(rk, m.name), true)
                 callExt(b, "js_set", [dstV, emitStr(b, m.name),

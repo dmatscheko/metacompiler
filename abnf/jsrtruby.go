@@ -274,6 +274,29 @@ func (rt *jsrt) addRubyFmtExterns(m map[string]func(args []uint64) uint64) {
 		}
 		return m["js_set"](a[:3])
 	}
+	// js_rattrset with a fast path, emitted where no def or dynamic definition
+	// names the setter, so only an attr_writer can answer it: (object, slot key,
+	// value, setter key, marker key). A class holding a public attr_writer of the
+	// name carries the marker (emitMethods); an instance whose class chain reaches
+	// a marker before any other setter of the name has the slot written directly.
+	// Twin of js_rattrw in languages/lib/ruby-rt.metajs.
+	m["js_rattrw"] = func(a []uint64) uint64 {
+		if o, ok := u(a[0]).(*jsObject); ok {
+			mk := rt.toString(u(a[4]))
+			sk := rt.toString(u(a[3]))
+			cls, _ := o.props["__class"].(*jsObject)
+			for d := 0; cls != nil && d < 64; d++ {
+				if cls.props[mk] == true {
+					return m["js_set"](a[:3])
+				}
+				if _, has := cls.props[sk]; has {
+					break
+				}
+				cls, _ = cls.props["__super"].(*jsObject)
+			}
+		}
+		return m["js_rattrset"](a[:4])
+	}
 	// (proc, method twin): see needsMethTwin in ruby-to-llvm-ir.abnf. Twin of
 	// js_rmtwin in languages/lib/ruby-rt.metajs.
 	m["js_rmtwin"] = func(a []uint64) uint64 {
