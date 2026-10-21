@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-707** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-708** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -72,11 +72,11 @@ its report; anything structural there is a CORE ticket.
 
 # JS — JavaScript and TypeScript
 
-### T-704 js: `new.target`; a class extending Array / Map / Set and the other builtins · P2 · JS · IN PROGRESS (JS worker, round 23) [V]
-`class A { constructor(){ this.t = typeof new.target; this.e = new.target === A; this.n = new.target === B } }; class B extends A
-{}` → node `function true false function false true`; interp "ReferenceError: new.target is not defined", llvm.Run/native
-`undefined false false ...`; also inside F reached through super(). `class A1 extends Array {}` / `class M1 extends Map {}` → node
-works (`1 true`, `1`); interp "unknown superclass: Array", compiled "call of a non function value: undefined".
+### T-707 js: named properties on arrays; species for builtin subclasses · P2 · JS · OPEN [V]
+`var a = [1,2]; a.foo = 5; Object.keys(a)` → llvm.Run / native "invalid array index foo", goja interp accepts the write but keys miss
+it (node `0,1,foo`); so `this.x = …` and class fields on Array subclass instances fail compiled. map/filter/slice on a subclass
+instance do not run the subclass constructor (Symbol.species); `P.resolve()` / `then()` on a Promise subclass return a plain Promise
+(node the subclass).
 
 ---
 
@@ -784,6 +784,7 @@ T-675 regex (CORE): the shared backtracking matcher recurses per SPLIT and overf
 T-698 java regex: a region end cutting a surrogate pair; `\G` in matches()/lookingAt() after an earlier match — DONE 3a5c52e3 (region cut inside a pair per CharProperty/CharPropertyGreedy, Matcher first/last/oldLast for \G — 1,312-row probe = java 24)
 T-680 python re: IGNORECASE pairs from CPython's `_ignorecase_fixes`; non-ASCII ranges of 256+ chars — DONE 4777026e (IN_UNI_IGNORE lowercase lookup with re._casefix extras, any range size, caseless backrefs by lowercase — 104-row probe = python3)
 T-692 php: preg_* remainder — recursion/subroutines, conditionals, branch reset, verbs; `(?xx)`; `[:lower:]` under /iu; PREG_BACKTRACK_LIMIT_ERROR — DONE d79a88e5 (recursion/subroutines, conditionals, branch reset, verbs, start options, (?xx), backtrack-limit error, TypeError, PCRE2 start optimizations — = libpcre2 10.48 harness; follow-ups T-705/T-706)
+T-704 js: `new.target`; a class extending Array / Map / Set and the other builtins — DONE e69952fb..74fb6177 (new.target through construction and super(), Array/Promise/RegExp/wrapper subclasses with statics, overrides and super.m(); also classes declared in try blocks in the compiled halves — 4 legs = node, TS via tsc 6; follow-up T-707)
 
 # Settled — do not re-open
 
@@ -817,7 +818,7 @@ named function expression's inner name immutable (needs a const flag on the floo
 scope, or a scope-walking extern on every plain-name assignment, measured at
 +21%..+43% elsewhere on that path).
 
-**DECLINED after measurement.** java `(?:\\G.)+` after earlier Matcher operations (GroupCurly's internal accept node moves Matcher.last: a JDK implementation quirk, not specified) · js a detached builtin `apply`/`call` (`var ap = Math.max.apply; ap(null, [3,9,4])`) answering instead of node's TypeError (all legs agree; only an error case differs) · typescript function source text (the oracle prints tsc's re-emitted JavaScript, which the engines do not reproduce; .ts functions print `[function]`) · php heredoc `{$...}` / `${...}` end found by brace counting (a `}` inside a quoted string within the interpolated expression ends it early; double-quoted strings parse the expression properly) · python `__firstlineno__` / `__static_attributes__` / `__annotate_func__` on plain (non-metaclass) classes and their `__dict__` listing (introspection only; the metaclass namespace, where programs observe them, matches 3.14) · python rejecting `(p).k: int = 7` as a SyntaxError (an invalid program we accept; no valid program changes) · js `Function("src")` compiling source at run time (no engine here compiles at run time; it raises the EvalError text node gives when code generation is disallowed) · php per-file strict_types (the probes and suites are single-file programs; the whole-program flag equals per-file there) · php handle reuse after free (needs refcounts) · swift's module-qualified enum names in collections (`[o.Dir.up]` depends on swiftc's module name) · rbUserObj / rbIsClassObj frame elimination (no gain over 15 pairs) · a real suspension for the replay generators (impossible under the pinned goja; ~3,600 lines pure-MetaJS) · CPS coroutines in the emitter · full correct rounding of the transcendentals · a shared nominal type id on boxed values (cheap to store, but every consumer needs static types the grammars do not have; split per language) · matching Apple libm's last digit (ruby atan2: no portable algorithm reproduces it, 1.6% of pairs differ even from the correctly rounded value) · js sloppy-mode primitive `this` boxing (needs wrapper objects in every engine) · a generator's `finally` at collection (python needs refcount timing; no finalizers, manual 7.8) · `i in arr` after `delete` · iterator close on
+**DECLINED after measurement.** js duplicate `class` / `const` / `let` in one scope accepted instead of node's SyntaxError (an invalid program we accept; no valid program changes) · java `(?:\\G.)+` after earlier Matcher operations (GroupCurly's internal accept node moves Matcher.last: a JDK implementation quirk, not specified) · js a detached builtin `apply`/`call` (`var ap = Math.max.apply; ap(null, [3,9,4])`) answering instead of node's TypeError (all legs agree; only an error case differs) · typescript function source text (the oracle prints tsc's re-emitted JavaScript, which the engines do not reproduce; .ts functions print `[function]`) · php heredoc `{$...}` / `${...}` end found by brace counting (a `}` inside a quoted string within the interpolated expression ends it early; double-quoted strings parse the expression properly) · python `__firstlineno__` / `__static_attributes__` / `__annotate_func__` on plain (non-metaclass) classes and their `__dict__` listing (introspection only; the metaclass namespace, where programs observe them, matches 3.14) · python rejecting `(p).k: int = 7` as a SyntaxError (an invalid program we accept; no valid program changes) · js `Function("src")` compiling source at run time (no engine here compiles at run time; it raises the EvalError text node gives when code generation is disallowed) · php per-file strict_types (the probes and suites are single-file programs; the whole-program flag equals per-file there) · php handle reuse after free (needs refcounts) · swift's module-qualified enum names in collections (`[o.Dir.up]` depends on swiftc's module name) · rbUserObj / rbIsClassObj frame elimination (no gain over 15 pairs) · a real suspension for the replay generators (impossible under the pinned goja; ~3,600 lines pure-MetaJS) · CPS coroutines in the emitter · full correct rounding of the transcendentals · a shared nominal type id on boxed values (cheap to store, but every consumer needs static types the grammars do not have; split per language) · matching Apple libm's last digit (ruby atan2: no portable algorithm reproduces it, 1.6% of pairs differ even from the correctly rounded value) · js sloppy-mode primitive `this` boxing (needs wrapper objects in every engine) · a generator's `finally` at collection (python needs refcount timing; no finalizers, manual 7.8) · `i in arr` after `delete` · iterator close on
 `throw` (a depth stack cannot survive `for await`) · a catchable unknown-name error
 in java/go/swift/csharp/metajs (COMPILE-time in each real toolchain) · kotlin
 `:script` → `!"token"` · `case_map` into layer 2 (135×) · retiring the Go twin
