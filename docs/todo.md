@@ -72,7 +72,7 @@ its report; anything structural there is a CORE ticket.
 
 # JS — JavaScript and TypeScript
 
-### T-718 js: a strict-mode write to a getter-only property is silently dropped · P3 · JS · OPEN [V]
+### T-718 js: a strict-mode write to a getter-only property is silently dropped · P3 · JS · IN PROGRESS (JS worker, round 27) [V]
 `"use strict"; var o = { get acc(){ return 1 } }; o.acc = 2` → node "TypeError: Cannot set property acc of #<Object> which has only a
 getter" (`of [object Array]` for an array named key; classes' getters likewise); all our engines drop the write. Every .ts file runs
 strict, so this affects all TypeScript.
