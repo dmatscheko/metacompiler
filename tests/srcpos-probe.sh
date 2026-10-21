@@ -32,6 +32,10 @@
 #    carry its source name, not the IR function's (jsf_N): each swift overload
 #    its own name at its own line, a module top level run as a closure <module>.
 #
+# 4. -callgraph recovers the static call edges top -> g -> h (EDGE_CASES),
+#    whichever helper a compiler reads a name through, and does not report that
+#    helper as a callee.
+#
 # A language in the list below that emits NO markers at all is a FAILURE: the
 # list is exactly the handle-IR compilers, all of which are supposed to have
 # them. (The self-contained-IR ones - c, bash, batch, the toys - are not listed.)
@@ -46,7 +50,7 @@ WANT=()
 for a in "$@"; do
     case "$a" in
         -v|--verbose) VERBOSE=1 ;;
-        -h|--help) sed -n "2,39p" "$0"; exit 0 ;;
+        -h|--help) sed -n "2,43p" "$0"; exit 0 ;;
         *) WANT+=("$a") ;;
     esac
 done
@@ -198,6 +202,69 @@ for c in "${DEF_CASES[@]}"; do
         [ $VERBOSE = 1 ] && echo "ok    $lang: definitions on [$want], -callgraph says [$named]"
     else
         echo "FAIL  $lang: definitions are on [$want], -callgraph says [$named]"
+        fail=$((fail+1))
+    fi
+done
+
+# LANG:EXT:the FROM->TO call edges -callgraph must recover from edge_src_for(),
+# and (!FROM->TO) edges it must not report: a compiler's own name-access helper
+# (py_getvar, sw_kget, ...) is runtime fabric, not a callee.
+EDGE_CASES=(
+    "python:py:<module>->g g->h !<module>->py_getvar !g->py_getvar"
+    "ruby:rb:<module>->g g->h"
+    "php:php:phpmain->g g->h"
+    "js:js:main->g g->h"
+    "typescript:ts:main->g g->h"
+    "metajs:metajs:main->g g->h"
+    "lua:lua:<module>->g g->h !g->lua_getvar"
+    "dart:dart:main->g g->h !main->dt_kcall"
+    "kotlin:kt:main->g g->h"
+    "java:java:main->g g->h"
+    "csharp:cs:Main->g g->h"
+    "swift:swift:<module>->g g->h !<module>->sw_kget !g->sw_kget"
+)
+edge_src_for() {
+    case "$1" in
+    python) printf 'def h(a):\n    return a\ndef g(a):\n    return h(a)\nprint(g(1))\n' ;;
+    ruby)   printf 'def h(a)\n  a\nend\ndef g(a)\n  h(a)\nend\nputs g(1)\n' ;;
+    php)    printf '<?php\nfunction h($a) { return $a; }\nfunction g($a) { return h($a); }\necho g(1);\n' ;;
+    js|typescript) printf 'function h(a) { return a }\nfunction g(a) { return h(a) }\nfunction main() { g(1) }\n' ;;
+    metajs) printf 'function h(a) { return a }\nfunction g(a) { return h(a) }\nfunction main() { print(g(1)) }\n' ;;
+    lua)    printf 'local function h(a) return a end\nlocal function g(a) return h(a) end\nprint(g(1))\n' ;;
+    dart)   printf 'int h(int a) { return a; }\nint g(int a) { return h(a); }\nvoid main() { print(g(1)); }\n' ;;
+    kotlin) printf 'fun h(a: Int): Int { return a }\nfun g(a: Int): Int { return h(a) }\nfun main() { println(g(1)) }\n' ;;
+    java)   printf 'public class Main {\n  static int h(int a) { return a; }\n  static int g(int a) { return h(a); }\n  public static void main(String[] x) { System.out.println(g(1)); }\n}\n' ;;
+    csharp) printf 'using System;\nclass Program {\n  static int h(int a) { return a; }\n  static int g(int a) { return h(a); }\n  static void Main() { Console.WriteLine(g(1)); }\n}\n' ;;
+    swift)  printf 'func h(_ a: Int) -> Int { return a }\nfunc h(_ a: String) -> String { return a }\nfunc g(_ a: Int) -> Int { return h(a) }\nlet r = g(1)\nprint(r)\n' ;;
+    esac
+}
+for c in "${EDGE_CASES[@]}"; do
+    lang=${c%%:*}; rest=${c#*:}; ext=${rest%%:*}; want=${rest#*:}
+    if [ ${#WANT[@]} -gt 0 ]; then
+        keep=0
+        for w in "${WANT[@]}"; do [ "$w" = "$lang" ] && keep=1; done
+        [ $keep = 1 ] || continue
+    fi
+    src="$WORK/e.$ext"
+    edge_src_for "$lang" > "$src"
+    cg="$WORK/$lang.edges.jsonl"
+    if ! ./mec "languages/$lang-to-llvm-ir.abnf" "$src" -qq -callgraph "$cg" >/dev/null 2>&1; then
+        echo "FAIL  $lang: the edge probe did not compile/run"
+        fail=$((fail+1)); continue
+    fi
+    edges=$(grep '"ev":"scall"' "$cg" | sed -nE 's/.*"name":"([^"]*)","key":"([^"]*)".*/\1->\2/p' | sort -u | paste -sd' ' -)
+    bad=""
+    for w in $want; do
+        case "$w" in
+        !*) case " $edges " in *" ${w#!} "*) bad="$bad $w" ;; esac ;;
+        *)  case " $edges " in *" $w "*) ;; *) bad="$bad $w" ;; esac ;;
+        esac
+    done
+    if [ -z "$bad" ]; then
+        pass=$((pass+1))
+        [ $VERBOSE = 1 ] && echo "ok    $lang: edges [$want]"
+    else
+        echo "FAIL  $lang: edges wanted [$want], violated [$bad ], -callgraph says [$edges]"
         fail=$((fail+1))
     fi
 done

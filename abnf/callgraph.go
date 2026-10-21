@@ -180,11 +180,41 @@ func appendCallgraphRecords(defs []cgDef, calls []cgCall) {
 	}
 }
 
+// Name-access and call helpers some compilers emit into the module as IR
+// functions rather than calling the js_scope_get/js_scope_set/js_call externs
+// directly. The name helpers take (scope, name, ...): a reader's result is the
+// variable, so a js_call of it calls that name. All of them are runtime fabric,
+// neither definitions nor callees.
+var (
+	cgNameReaders = map[string]bool{
+		"py_getvar": true, "sw_kget": true, "dt_kget": true, "lua_getvar": true,
+		"kt_ktget": true, "kt_ktgetp": true, "kt_bareref": true,
+	}
+	cgNameWriters = map[string]bool{
+		"py_setvar": true, "sw_kset": true, "dt_kset": true, "kt_kset": true,
+	}
+	// (scope, name, args): resolve the name and call it.
+	cgNameCallers = map[string]bool{"dt_kcall": true, "kt_barecall": true}
+	// (fn, args, ...): call a function value, as js_call does.
+	cgValueCallers = map[string]bool{"js_pycall": true, "sw_callval": true, "sw_dyncall": true}
+)
+
+// cgTailCaller is lua's tail call: its argument is an array whose first element
+// (the first js_arr_push into it) is the function to call.
+const cgTailCaller = "lua_tramp"
+
+func cgHelper(n string) bool {
+	return cgNameReaders[n] || cgNameWriters[n] || cgNameCallers[n] || cgValueCallers[n] || n == cgTailCaller
+}
+
 // extractCallGraph walks a module and recovers definitions and call edges.
 func extractCallGraph(m *ir.Module) ([]cgDef, []cgCall) {
-	strOf := map[value.Value]string{}     // js_str_mem call -> its string literal
-	nameRead := map[value.Value]string{}  // js_scope_get/js_kget call -> the variable name
-	closureFn := map[value.Value]string{} // js_closure call -> IR function name jsf_N
+	strOf := map[value.Value]string{}          // js_str_mem call -> its string literal
+	nameRead := map[value.Value]string{}       // js_scope_get/js_kget call -> the variable name
+	scopeRead := map[value.Value]bool{}        // nameRead entries that read a variable, not a member
+	boundTo := map[string][]string{}           // variable name -> the jsf_N closures stored in it
+	firstPush := map[value.Value]value.Value{} // array -> the first value pushed into it
+	closureFn := map[value.Value]string{}      // js_closure call -> IR function name jsf_N
 	// jsf_N -> the statement that creates its closure: the js_srcpos marker right
 	// before the js_closure in the creating function. That statement is the
 	// definition (`def f`, `function f`), so its line names the function rather
@@ -278,11 +308,21 @@ func extractCallGraph(m *ir.Module) ([]cgDef, []cgCall) {
 	// gets its name where it is stored: a declaration, an assignment, or the
 	// method slot of a class descriptor).
 	forEachCall(func(f *ir.Func, call *ir.InstCall, callee string) {
+		if cgNameReaders[callee] {
+			callee = "js_scope_get"
+		}
 		switch callee {
 		case "js_scope_get", "js_kget", "js_ktget":
 			if len(call.Args) >= 2 {
 				if s, ok := strOf[call.Args[1]]; ok {
 					nameRead[call] = s
+					scopeRead[call] = true
+				}
+			}
+		case "js_arr_push":
+			if len(call.Args) >= 2 {
+				if _, seen := firstPush[call.Args[0]]; !seen {
+					firstPush[call.Args[0]] = call.Args[1]
 				}
 			}
 		case "js_get":
@@ -302,7 +342,8 @@ func extractCallGraph(m *ir.Module) ([]cgDef, []cgCall) {
 					}
 				}
 			}
-		case "js_tdecl", "js_scope_decl", "js_pyset_var", "py_setvar", "js_tset", "js_scope_set", "js_kset", "js_set":
+		case "js_tdecl", "js_scope_decl", "js_pyset_var", "py_setvar", "sw_kset", "dt_kset", "kt_kset",
+			"js_tset", "js_scope_set", "js_kset", "js_set":
 			if len(call.Args) >= 3 {
 				if fn, ok := closureFn[call.Args[2]]; ok {
 					if callee == "js_set" && !closureSite[fn].adj {
@@ -311,6 +352,9 @@ func extractCallGraph(m *ir.Module) ([]cgDef, []cgCall) {
 					if s, ok2 := strOf[call.Args[1]]; ok2 {
 						if _, exists := fnName[fn]; !exists {
 							fnName[fn] = s
+						}
+						if callee != "js_set" {
+							boundTo[s] = append(boundTo[s], fn)
 						}
 					}
 				}
@@ -322,6 +366,40 @@ func extractCallGraph(m *ir.Module) ([]cgDef, []cgCall) {
 			return s
 		}
 		return irName
+	}
+	// A function also bound under a compiler-made second name (a swift overload
+	// as "f$1" beside "f", a ruby method as "$d$f") is called through that name:
+	// a read of it resolves to the function's source name, unless the name is
+	// itself some function's source name or holds functions of different names.
+	ownName := map[string]bool{}
+	for _, s := range fnName {
+		ownName[s] = true
+	}
+	alias := map[string]string{}
+	for s, fns := range boundTo {
+		if ownName[s] {
+			continue
+		}
+		d := display(fns[0])
+		same := true
+		for _, fn := range fns[1:] {
+			same = same && display(fn) == d
+		}
+		if same {
+			alias[s] = d
+		}
+	}
+	callTarget := func(v value.Value) (string, bool) {
+		if s, ok := nameRead[v]; ok {
+			if a, ok := alias[s]; ok && scopeRead[v] {
+				return a, true
+			}
+			return s, true
+		}
+		if fn, ok := closureFn[v]; ok {
+			return display(fn), true
+		}
+		return "", false
 	}
 
 	// Pass 3: definitions and edges.
@@ -341,8 +419,8 @@ func extractCallGraph(m *ir.Module) ([]cgDef, []cgCall) {
 	var calls []cgCall
 	unattributed := 0
 	for _, f := range m.Funcs {
-		if len(f.Blocks) == 0 {
-			continue // Extern declaration, not a definition.
+		if len(f.Blocks) == 0 || cgHelper(f.Name()) {
+			continue // Extern declaration or runtime helper, not a definition.
 		}
 		from := display(f.Name())
 		if scaffold(f.Name()) {
@@ -369,16 +447,31 @@ func extractCallGraph(m *ir.Module) ([]cgDef, []cgCall) {
 							}
 						}
 					}
-				case callee == "js_call":
+				case callee == "js_call" || cgValueCallers[callee] || callee == cgTailCaller:
 					to := "(dynamic)"
 					if len(call.Args) > 0 {
-						if s, ok := nameRead[call.Args[0]]; ok {
+						fv := call.Args[0]
+						if callee == cgTailCaller {
+							fv = firstPush[fv]
+						}
+						if s, ok := callTarget(fv); ok {
 							to = s
-						} else if fn, ok := closureFn[call.Args[0]]; ok {
-							to = display(fn)
 						}
 					}
 					calls = append(calls, cgCall{from, to, file})
+				case cgNameCallers[callee]:
+					to := "(dynamic)"
+					if len(call.Args) >= 2 {
+						if s, ok := strOf[call.Args[1]]; ok {
+							to = s
+							if a, ok := alias[s]; ok {
+								to = a
+							}
+						}
+					}
+					calls = append(calls, cgCall{from, to, file})
+				case cgHelper(callee):
+					// Runtime fabric, like the js_ externs.
 				case callee == "js_mcall":
 					to := "(dynamic)"
 					if len(call.Args) >= 2 {
