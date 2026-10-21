@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-704** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-705** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -76,10 +76,11 @@ non-ASCII class range spanning 256 or more characters only gets the text-side up
 
 # JS — JavaScript and TypeScript
 
-### T-703 js: a class cannot extend a plain constructor function · P2 · JS · IN PROGRESS (JS worker, round 22) [V]
-`function F(){this.a=1}; F.x=1; class G extends F { static y = 2 }` then `G.y, G.x, new G().a` → node `2 1 1`, `for (k in G)` →
-`y,x`. Interp "unknown superclass: F"; llvm.Run `2` then undefined then "call of a non function value"; native `2` then "variable
-'cls' has type object and cannot hold a function". js and ts, all engines.
+### T-704 js: `new.target`; a class extending Array / Map / Set and the other builtins · P2 · JS · OPEN [V]
+`class A { constructor(){ this.t = typeof new.target; this.e = new.target === A; this.n = new.target === B } }; class B extends A
+{}` → node `function true false function false true`; interp "ReferenceError: new.target is not defined", llvm.Run/native
+`undefined false false ...`; also inside F reached through super(). `class A1 extends Array {}` / `class M1 extends Map {}` → node
+works (`1 true`, `1`); interp "unknown superclass: Array", compiled "call of a non function value: undefined".
 
 ---
 
@@ -786,6 +787,7 @@ T-695 js: no function source text; defineProperty / delete of a function's `name
 T-700 js: Object.getOwnPropertyDescriptor missing; builtin methods read as values have no name; `delete K.name` on a class — DONE 86530e0c (getOwnPropertyDescriptor(s) in all engines, builtin methods carry node's name/length, delete of a class's name/length, interpreter hasOwnProperty of literal accessors — 4 legs = node, TS via tsc 6; follow-up T-701)
 T-701 js: `delete` of a class static field or method does nothing — DONE e52a2e65 (delete of class static fields/methods/accessors in all engines without touching instance methods — 4 legs = node; follow-up T-702)
 T-702 js: numeric-key class statics; for-in over a subclass skips inherited statics — DONE 686732d0 (numeric static keys by their string form in interp and layer 2, for-in walks inherited enumerable statics with shadowing — 4 legs = node; follow-up T-703)
+T-703 js: a class cannot extend a plain constructor function — DONE d1dbefda (a constructor function as heritage via its instance descriptor, __ctor runs F on the new this, live statics through __ctorfn — 4 legs = node, TS via tsc 6; follow-up T-704)
 
 # Settled — do not re-open
 
