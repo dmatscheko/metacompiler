@@ -2336,6 +2336,13 @@ s45() {
   [[ aXa == @(a|X)Xa ]]; local d45=$?
   shopt -q extglob
   check eg3 "[${s#@(a|X)}] $d45 $?" "[aXa] 0 1"
+  # An EMPTY match counts: after one the character it sits on is copied and the search goes
+  # on behind it. At the end of the subject only a pattern starting with "*" is tried, so an
+  # empty subject is matched by *(a) but not by ?(a) or !(b).
+  local g45=abac x45=xy a45=(xy ab "")
+  shopt -s extglob
+  check eg4 "[${g45//*(a)/Z}] [${x45//*(a)/Z}] [${x45/?(a)/Z}] [${e//!(b)/Z}] [${e//?(a)/Z}] [${e/#?(a)/Z}] [${e//*(a)/Z}] [${g45//*(a)/<&>}] [${a45[*]//*(a)/Z}]" "[ZZbZZc] [ZxZy] [Zxy] [] [] [] [Z] [<a><>b<a><>c] [ZxZy ZZb Z]"
+  shopt -u extglob
   check u81 "[${v%?}] [${v#?}] [${v%%?}] [${v/%?/Z}] [${v/#?/Z}]" "[h] [é] [h] [hZ] [Zé]"
   check u82 "[${w%?}] [${w%??}] [${w#?}] [${w/?/-}] [${w//?/-}]" "[éà] [é] [àü] [-àü] [---]"
   # An astral character (a UTF-16 surrogate pair) is ONE character to every pattern element.
@@ -2349,6 +2356,20 @@ s45() {
   [[ 😀😀b == +(😀)? ]] && c45="$c45 g"
   [[ 😀😀b == !(b)b ]] && c45="$c45 x"
   check u84 "$c45 [${y^^[😀b]}] [${y//[😀]/-}]" "1 r n e d g x [😀B😀c] [-b-c]"
+  # A POSIX class holds characters of every script, as the locale's iswctype classifies them:
+  # a digit of any script is also xdigit, a titlecase letter is neither upper nor lower,
+  # U+3000 is space but not blank, a combining mark is graph but not punct. A byte that
+  # starts no character is in no class.
+  local x85="é😀" y85="a١²中 ¡　€ÀÿƀǅＡ" r85=$'a\xe9b' c85=""
+  check u85 "[${x85#[[:alpha:]]}] [${x85%[[:print:]]}] [${y85//[[:alpha:]]/A}] [${y85//[[:digit:]]/D}] [${y85//[[:upper:]]/U}] [${y85//[[:lower:]]/L}]" "[😀] [é] [A١²A ¡　€AAAAA] [aD²中 ¡　€ÀÿƀǅＡ] [a١²中 ¡　€UÿƀǅU] [L١²中 ¡　€ÀLLǅＡ]"
+  case $'́' in [[:punct:]]) c85=p ;; [[:graph:]]) c85=g ;; esac
+  [[ ǅ == [[:upper:]] || ǅ == [[:lower:]] ]] || c85="$c85 t"
+  [[ $'\u0085' == [[:cntrl:]] ]] && c85="$c85 c"
+  [[ $' ' == [[:blank:]] ]] || c85="$c85 b"
+  [[ $'\U000e0001' == [[:cntrl:]] ]] && c85="$c85 f"
+  [[ $'\U0010fffd' == [[:print:]] ]] && c85="$c85 u"
+  [[ $'\xe9' == [[:alpha:]] ]] || c85="$c85 r"
+  check u86 "[${y85//[[:punct:]]/P}] [${y85//[[:space:]]/S}] [${y85//[[:xdigit:]]/X}] [${y85//[[:word:]]/W}] [${y85//[![:graph:]]/N}] [${r85//[![:alpha:]]/N}] $c85" "[a١²中 P　€ÀÿƀǅＡ] [a١²中S¡S€ÀÿƀǅＡ] [XX²中 ¡　€ÀÿƀǅＡ] [WW²W ¡　€WWWWW] [a١²中N¡N€ÀÿƀǅＡ] [aNb] g t c b f u r"
   # A long subject: padding and every pattern operator stay linear in its length.
   local L45 Z45 T45 a b c d
   printf -v L45 '%*s' 5000

@@ -146,6 +146,8 @@ int rt_arith_fail(char *expr, char *msg, char *tok);
 int rt_class(char *p, int ch);
 int rt_cpw(char *s);
 int rt_cpat(char *s);
+int rt_gch(char *s);
+int rt_uctype(int ctid, int ctch);
 int rt_clsid(char *nm);
 int re_ctype(int ctid, int ctch);
 int rt_eg(char *egp, char *egs, int egstar);
@@ -599,6 +601,16 @@ int rt_cpat(char *s) {
         i = i + 1;
     }
     return v;
+}
+
+/* The character at s as the glob matcher compares it: rt_cpat, except that a
+ * byte from 0x80 up that starts no well-formed character is U+DC00 plus the
+ * byte, as the interpreter's bytesStr reads it. So a raw 0xE9 is not "é": it
+ * equals only a raw 0xE9 in the pattern and is in no POSIX class. */
+int rt_gch(char *s) {
+    int c = rt_cpat(s);
+    if (c >= 128 && rt_cpw(s) == 1) return 56320 + c;
+    return c;
 }
 
 /* ${v?word} / ${v:?word} on an unset (or, with the colon, empty) value: the word
@@ -1255,22 +1267,22 @@ int rt_class(char *p, int ch) {
                 while (t < d) { nm[t] = p[j + 2 + t]; t = t + 1; }
                 nm[d] = 0;
                 cid = rt_clsid(nm);
-                if (cid != 0 && re_ctype(cid, ch) != 0) m = 1;
+                if (cid != 0 && (ch < 128 ? re_ctype(cid, ch) : rt_uctype(cid, ch)) != 0) m = 1;
                 j = j + d + 4;
                 continue;
             }
             /* no ":]" at all: fall through and treat "[" as an ordinary member */
         }
         /* A member - and a range endpoint - is a CHARACTER, not a byte; `ch` is
-         * the subject's codepoint (rt_glob decodes it). See rt_cpw. */
+         * the subject's character as rt_gch reads it (rt_glob decodes it). */
         int mw = rt_cpw(&p[j]);
-        int mc = rt_cpat(&p[j]);
+        int mc = rt_gch(&p[j]);
         int cn = (int)(unsigned char)p[j + mw];
         int cn2 = 0;
         if (cn == 45) cn2 = (int)(unsigned char)p[j + mw + 1];
         if (cn == 45 && cn2 != 0 && cn2 != 93) {
             int hw = rt_cpw(&p[j + mw + 1]);
-            int hc = rt_cpat(&p[j + mw + 1]);
+            int hc = rt_gch(&p[j + mw + 1]);
             if (ch >= mc && ch <= hc) m = 1;
             j = j + mw + 1 + hw;
         } else {
@@ -1489,7 +1501,7 @@ int rt_glob(char *p, char *s)
         /* "?" matches one CHARACTER and a bracket expression holds characters,
          * so the subject is decoded once here and every arm below steps by scw. */
         scw = rt_cpw(scur2);
-        sc = rt_cpat(scur2);
+        sc = rt_gch(scur2);
 
         if (pc == 63) {
             pp = pcur + 1;
@@ -1513,7 +1525,7 @@ int rt_glob(char *p, char *s)
             isEsc = (pc == 92) && (nc != 0);
             if (isEsc) {
                 pcw = rt_cpw(pcur + 1);
-                if (rt_cpat(pcur + 1) != sc) return 0;
+                if (rt_gch(pcur + 1) != sc) return 0;
                 pp = pcur + 1 + pcw;
                 sp = scur2 + scw;
                 continue;
@@ -1521,7 +1533,7 @@ int rt_glob(char *p, char *s)
         }
         /* literal */
         pcw = rt_cpw(pcur);
-        if (rt_cpat(pcur) != sc) return 0;
+        if (rt_gch(pcur) != sc) return 0;
         pp = pcur + pcw;
         sp = scur2 + scw;
     }
@@ -1852,14 +1864,21 @@ void rp_add(char *b, int n) {
 }
 
 /* rt_replace: ${v/p/r} and friends; mode 0 = first, 1 = all, 2 = anchored at the
- * start (#), 3 = anchored at the end (%). An UNSET value is left alone, while an
- * empty one is a subject like any other, which a lone star pattern matches. */
+ * start (#), 3 = anchored at the end (%). An UNSET value is left alone. A null
+ * pattern replaces nothing unless anchored: ${v/#/x} prefixes x. Otherwise this
+ * is bash's pat_subst: the first start with a match wins, with its longest match,
+ * an EMPTY one included, and after an empty match the character there is copied
+ * and the search goes on behind it (v=abac; ${v//*(a)/Z} is ZZbZZc). bash tries
+ * a pattern at the END of the subject only when it starts with "*", which for
+ * modes 0, 1 and 2 decides an empty subject: e=""; ${e//?(a)/Z} is "" while a
+ * lone star pattern matches it. Twin of replacePat in bash-interpreter.abnf. */
 char *rt_replace(char *s, char *p, char *r, int mode) {
     int len = rt_strlen(s);
     int pl = rt_patlen(p);
     int from = 0;
-    int i = 0;
     if (s == &unset_marker[0]) return s;
+    if (p[0] == 0 && mode < 2) return s;
+    if (len == 0 && p[0] != 0 && p[0] != 42 && mode < 3) return s;
     if (mode >= 2) {
         if (mode == 2) {
             int jj = rt_matchlen(p, s, len, 0, pl);
@@ -1877,19 +1896,25 @@ char *rt_replace(char *s, char *p, char *r, int mode) {
     rp_buf = empty;
     rp_len = 0;
     rp_cap = 0;
-    while (i <= len) {
-        int j = rt_matchlen(p, s, len, i, pl);
-        if (j > i) {
-            /* a real (non empty) match: the text before it, then the replacement */
-            char *rep = rt_repsub(r, rt_slice(s, i, j - i));
-            rp_add(&s[from], i - from);
-            rp_add(rep, rt_strlen(rep));
-            i = j;
-            from = j;
-            if (mode == 0) break;
-        } else {
-            /* no match here: step one CHARACTER */
-            i = i + ((i < len) ? rt_cpw(&s[i]) : 1);
+    while (from < len) {
+        int i = from;
+        int j = -1;
+        char *rep;
+        while (j < 0 && i < len) {
+            j = rt_matchlen(p, s, len, i, pl);
+            if (j < 0) i = i + rt_cpw(&s[i]);
+        }
+        if (j < 0) break;
+        rep = rt_repsub(r, rt_slice(s, i, j - i));
+        rp_add(&s[from], i - from);
+        rp_add(rep, rt_strlen(rep));
+        from = j;
+        if (mode == 0) break;
+        if (i == j) {
+            /* an empty match: copy the character it sits on, then search behind it */
+            int w = rt_cpw(&s[i]);
+            rp_add(&s[i], w);
+            from = i + w;
         }
     }
     rp_add(&s[from], len - from);
@@ -1973,61 +1998,169 @@ char *rt_case(char *s, int mode, char *pat) {
     return dst;
 }
 
-/* iswprint for a character from U+0080 up, in the macOS en_US.UTF-8 locale:
- * bash switches ${v@Q}, printf %q and `declare -p` to the $'...' form for a
- * character it rejects (U+0085, U+200B, an unassigned one) and writes that
- * character's bytes in octal. wprint_runs holds the lengths of the alternating
- * runs from U+0080 up - non-printable, printable, ... - each in base 26, leading
- * digits a-z and the last digit A-Z; past the final run nothing is printable.
- * Twin of wprint in languages/bash-interpreter.abnf, which holds the same string
- * and says where it came from. */
-char *wprint_runs =
-    "bGNBbbMCGEHBBBUBpHBbMCbYCDBcDIbBEGRWBhKBbWCcHCdXOcHCbXCPBbCCBBLFbFJcWBgFBICCCWBH"
-    "BBDECJCCCEIBECBFCZCDBGECCWBHBCBCBCCBBFECCDDBHEBBHRKDBJBDBWBHBCBFCKBDBDCBPECMHHBD"
-    "BICCCWBHBCBFCJCCCDHDECBFCSKCBGDDBEDCBBBCDCDDDMEFDDBECBGBOVFNBDBXBQCJBDBEHCBDCBCE"
-    "CKHWBDBXBKBFCJBDBEHCGCBECKBDMNBDBbZBDBGEQCbABDBSDYBJBBCHDBEGBBBIGKCDMcGEbDbLCBBB"
-    "FBYBBBXCFBBBHBKCEbGcUBbKEbNBbKBPBNbLhQBBFBCoNBECHBBBECbPBECbHBECHBBBECPBcFBECcPC"
-    "bGDbAGdICGCzTDdLHWJYJUMNBDBCMdQCKGKGOBLGdLHbRFcSKbFBMEMEBDbQCFLbSEbAGLDcKCcNBbDC"
-    "LGKGOCbFbXcZDbVBeMIcIDPDcIHbRCLIbRFuOCGCbMCGCIBBBBBBBbFCcBBPBOCGBTCDBJBLFbAFbXQC"
-    "CbBBNDbHPbHPfKEzNZLVcrSCbGBnLFbTBBFBCcEHCOYJHBHBHBHBHBHBHBHBeWbIbABdLMiGbAMEcMBd"
-    "ICdZFbRBdQBdGMbVBbriRDcDJnKUhCIhVFCBBBFYcHDKGcEIcSIMGeMLbEDdABLEbHBcDJOCKCdZYbCK"
-    "GCGCGJHBHBcIEeWCKGqnSMXEbXdaYkaGCeCbMHMFFbABFBBBCBCBeVQrDCcCHBbGbQGbZBTBEEFBfFEh"
-    "IDGCGCGCDDHBHNCCMBbABTBCBPCObIeTFDEbTDdKBNDBbVbUfAbDDbXPbCEbKJbEFbRFbEBbLEObQgCC"
-    "KGbKEbKEbOIcALMBPBHBCBLBPBHBCcPlZJWKIYGBbQBJcRGCBBbSBCDBCXBcUIJbWTBCFbHDbBFBcMcE"
-    "EUCbYBCFIBDBbDCDEKHJHcMbGbNEMJcCDbDCbBFbAHEMHdCcVcDbZNbZHbUIKlIbFBbQBDCCcXbRIbQW"
-    "bAbMbCUXJdAEbKJcKBFNZHKGcBBSIbNJdSBULSBbVcKHBBBEBPBLGcHFKGEBICCCWBHBCBFBKCCCDCBG"
-    "BFHCHDFfJdOBFbEcUIKgKcCCbMbIcRLKGNTcGGKcCbBCPEXhDcIdWdFMICBCIBCBbEBCCMJKcSICbUCL"
-    "bBcUIdFNcVHKjMJBbTBOKbDDbGCWBOcVHBCBbSDBBCBJIKGGBCBbLBCBGHKlYZHRBbPDbCdIBPbYNbjN"
-    "dYeHBFLhOdxKdVNbpGQWfyGwLmuBvXHbFBKEdDBKGbECGKcSKKBHBVFTbaMdNdXcXEcFHRcMFLCOjcAI"
-    "bvQbQJnfREBHBCBlFPBbDDCBOEIpGdkUeDFNDJHKCEgyYbUCXJeMcIjMKbNCcWIeIVcSeSUMUMdJJZfF"
-    "dHBcTBCCBCCCEBMBBBHBcNBECIBHBbCBEBFBBDHBnCClGCbbAPFBPbqMbFGGiFHBRCHBCBFFcKbHBeIb"
-    "TDOCKECmIbFRcGFBrWbQbcOHBEBCBPBhPCQbPcYEKECbeFcQcYcJhMEBbBBCBBCBBKBEBBBBGBEBBBBB"
-    "BDBCBBCBBBBBBBBBBCBBCEBHBEBEBBBKBRFDBFBRcACkKbSEdWMPCPBPBbLKgScEbDNbSEJHCOGfYblW"
-    "ERDNDePEdRGMEBPMEcEIKGbOIbECCdAnCMOCNDJHbUBHIOEJHJHfRBcDbLKbnQclfCbGgdUGiOCinQOl"
-    "bLepJuWcfYhhZFgfGbonhGjGdsfOdsyOCdsyO";
-int wprint_cuts[1424];  /* one boundary per run in wprint_runs */
-int wprint_n = 0;
-int rt_wprint(int cp) {
+/* The class of a character from U+0080 up in the macOS en_US.UTF-8 locale, which
+ * is what bash 5.3 asks iswctype for a POSIX bracket class in a glob and
+ * iswprint for the $'...' quoting below:
+ *     0 unassigned or a surrogate  1 upper  2 lower  3 other alpha
+ *     4 digit (and xdigit)  5 punct  6 space  7 cntrl  8 other printable
+ * where 1-6 and 8 are print, 1-5 and 8 graph, and nothing is blank. A raw byte
+ * is U+DC80..U+DCFF (rt_gch), so it is in no class. uclass_runs0/1 hold the runs
+ * from U+0080 up, each a class digit and then its length in base 26 (leading
+ * digits a-z, the last A-Z), split in two because the C compiler cannot index
+ * one string literal past byte 4095. Twin of uclass in
+ * languages/bash-interpreter.abnf, which holds the same string and says where
+ * it came from. */
+char *uclass_runs0 =
+    "7bG6B5B8F5B8C3B5B8B7B8H2B5C8C3B5B8D5B1X8B1H2Y8B2I1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2"
+    "B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2"
+    "C1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2C1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2"
+    "B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1C2B1B2B1B2D1C2B1B2B1C2B1D2C1E2B1C2"
+    "B1D2D1C2B1C2B1B2B1B2B1C2B1B2C1B2B1C2B1D2B1B2B1C2C3B1B2D3E1B3B2B1B3B2B1B3B2B1B2B1"
+    "B2B1B2B1B2B1B2B1B2B1B2B1B2C1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2C1B3B2B1B2B1D2B1B2"
+    "B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2"
+    "B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2H1C2B1C2C1B2B1E2B1B2B1B2B1B2B1B2cR3B2bB3S8E3M8O3"
+    "F8H3B8B3B8eZ1B2B1B2B3B8B1B2B0C3B2D5B1B0E8C1B5B1D0B1B0B1C2B1R0B1J2bJ1B2C1D2D1B2B1"
+    "B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2F1B2B8B1B2B1C2C1bZ2bW1B2B1B2B1B2B1B2B1"
+    "B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B8I1B2B1B2B1B2B1B2B1B2B1B2B1B2"
+    "B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2"
+    "B1C2B1B2B1B2B1B2B1B2B1B2B1B2C1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2"
+    "B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2"
+    "B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B0B1bM0C3B5G2bP5C0C8"
+    "D0B8bT5B8B5B8C5B8C5B8B0I3bB0E3E5C0L7G8D5C8B5C8N5B7B5D3bR8V4K5E3C8B3dV5B3B8H7B8H3"
+    "C8H3C4K3D8C3B5O0B7B3B8B3bE8bB0C3dL8L3B0O4K3bH8J3C8B5D3B0C8D3W8E3B8J3B8D3B8F0C5P0"
+    "B3Z8D0C5B0B3L0F3Y8B3G0B7C0G8I3bQ8Y7B8bH3cC8D3B8S3B8H3K8C5C4K5B3Q8D0B3I0C3C0C3W0B"
+    "3H0B3B0D3E0C8B3B8H0C8C0C8D3B0I8B0E3C0B3D8C0C4K3C8K3B5B8B0C8D0B3G0E3C0C3W0B3H0B3C"
+    "0B3C0B3C0C8B0B8F0E8C0C8D0D8B0H3E0B3B0H4K8C3D8B5B0K8D0B3J0B3D0B3W0B3H0B3C0B3F0C8B"
+    "3B8I0B8D0B8D0C3B0P3C8C0C4K5B8B0H3B8G0B8D0B3I0C3C0C3W0B3H0B3C0B3F0C8B3B8H0C8C0C8D"
+    "0H8D0E3C0B3D8C0C4K8B3B8G0K8B3B0B3G0D3D0B3E0D3C0B3B0B3C0D3C0D3D0D3M0E8F0D8D0B8E0C"
+    "3B0G8B0O4K8L0F8F3I0B3D0B3X0B3Q0C8B3B8H0B8D0B8E0H8C0B3D0C3B0C3C8C0C4K0H5B8I3B8D5B"
+    "3I0B3D0B3X0B3K0B3F0C8B3B8H0B8D0B8E0H8C0G3C0B3C8C0C4K0B3C8B0M8E3J0B3D0B3bP8C3B8H0"
+    "B8D0B8E3B8B0E3D8I3D8C0C4K8K3G0B8D0B3S0D3Y0B3J0B3B0C3H0D8B0E8G0B8B0B8I0G4K0C8C5B0"
+    "M3bW8B3C8H0E8B3H8I5B4K5C0bL3C0B3B0B3F0B3Y0B3B0B3K8B3C8J3B0C3F0B3B0B8H0B4K0C3E0bG"
+    "3B8D5P8B5B8L4K8Q5E8C3I0B3bK0E8U5B8C3F8L0B8bK0B8P0B8C5F8E5C0bL3bR8U3B4K5G3G8E3E8D"
+    "3B8D3C8H3D8E3N8M3B8B4K8G1bM0B1B0F1B0C2bR5B3B2D3mR0B3E0C3H0B3B0B3E0C3bP0B3E0C3bH0"
+    "B3E0C3H0B3B0B3E0C3P0B3cF0B3E0C3cP0C8D5J8U0D3Q8K0G1dI0C2G0C5B3xW8B5B3R6B3bA5C0D3c"
+    "X5D8D3I0H3S8E0J3T8D5C0J3S8C0M3N0B3D0B8C0M3cA8bG5D3B5D8B3B8B0C4K0G8K0G5L8D7B8B4K0"
+    "G3dL0H3F8C3bI8B3B0F3cS0K3bF0B8M0E8M0E8B0D5C4K3bE0C3F0L3bS0E3bA0G4K8B0D8bI3X8F0C5"
+    "C3cB8K0B8bD0C8B4K0G4K0G5H3B5G0C8bF0bX8F3bV8R3I0D4K5H8bC5C0B8D3bE8N3C4K3bS8O0I5E3"
+    "bK8U0D5F4K0D3D4K3bK5C2J0H1bR0C1D5I0I8D5B8V3E8B3G8B3C8D3B0F2bS3cL2N3B2bI3bL8cM1B2"
+    "B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2"
+    "B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2"
+    "B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2"
+    "B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2J1B2B1B2B1B2B1B2B1B2B1B2"
+    "B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2"
+    "B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2"
+    "B1B2B1B2B1B2J1I2G0C1G0C2I1I2I1I2G0C1G0C2I0B1B0B1B0B1B0B1B2I1I2O0C2I3I2I3I2I3I2F0"
+    "B2C1E3B8B2B8D2D0B2C1E3B8D2E0C2C1E0B8D2I1F8D0C2D0B2C1E3B8C0B6L7F5Y6C7F6B5U8B5N8B5"
+    "M6B7F0B7K8B3B0C8J5C3B8N5C0B3N0D8bH0P8bH0P8C1B8E1B8C2B1D2C1D2B8B1B8D1F8G1B8B1B8B1"
+    "B8B1E8B2B1E2B3E2B8C2C1C8F1B2E8E2B8cA1B2B8H0E8oM5E8bD5C8jS0Z8L0V8bdW5O8dB5C8bF5K8"
+    "pN5W8cL5E8bG5C8oK0C8bG0B8eB1bW2bW1B2B1D2C1B2B1B2B1B2B1E2B1B2C1B2G3C1D2B1B2B1B2B1"
+    "B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1";
+char *uclass_runs1 =
+    "B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1"
+    "B2B1B2B1B2B1B2B1B2B1B2B1B2C8G1B2B1B2B8D1B2B0F5E8B5C2bM0B2B0F2B0C3cE0H3B5B0O8B3X0"
+    "J3H0B3H0B3H0B3H0B3H0B3H0B3H0B3H0B8bG5bV3B5bG8C5M0bI8bA0B8dL0M8iG0bA8M0E6B5D8B3C8"
+    "B5K8C5M8Q5B3F8F3C5B8C0B3dI0C8E3D5B3dM5B3E0F3bR0B3dQ0B8Q3bG8bK0M3Q8bF0B8sM3jtO8cM"
+    "3bguF0D8cD0J3bU5C3kJ5D3Q4K3C0U1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B"
+    "2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B3B8E5B8K5B3B1B2B1B2B1B2B1B2B1B2B1B2B1B"
+    "2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B3C8C3cS8M5G0I8X3J8C1B2B1B2B1B2B1B2B1B2B1B2B1B2D1B2"
+    "B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2"
+    "B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B3B2I1B2B1B2B1C2B1B2B1B2B1B2B1B2B3B8C1B2"
+    "B1B2B3B1B2B1B2D1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1B2B1F2B1F2B1B2B1B2B1B2B1B2B1"
+    "B2B1B2B1B2B1E2B1B2B0F1B2B0B2B0B2B1B2B1B2B0Y3D1B2B3D2B3H8B3D8B3E8B3X8K0D8K0G3cA5E"
+    "0I8C3bY8S0I5C4K0G8S3G5D3B5B3C8B4K3bC8I5C3X8N0L5B3bD0D8E3bV8O5N0B3B4K0E5C3F8B3K4K"
+    "3F0B3bP8O0J3D8B3I8C0C4K0C5E3X8D3B8D3bY8B3B8D3C8C3F8C3B8B3B0Y3D5C3L8F5C3D8C0K3G0C"
+    "3G0C3G0J3H0B3H0B2bR8B3E2J3B8C0E2dC3bJ8I5B8C0C4K0G3qnS0M3X0E3bX0daY8jmE3oC0C3eC0b"
+    "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"
+    "fO8dsyO0C8dsyO0C";
+int uclass_cuts[3370];   /* the first code point past each run */
+int uclass_cls[3370];
+int uclass_n = 0;
+int rt_uclass(int cp) {
     int lo = 0;
     int hi;
-    if (wprint_n == 0) {
+    if (uclass_n == 0) {
         int p = 128;
         int n = 0;
-        int i = 0;
-        while (wprint_runs[i] != 0) {
-            int d = (int)(unsigned char)wprint_runs[i];
-            if (d >= 97) n = n * 26 + d - 97;
-            else { p = p + n * 26 + d - 65; wprint_cuts[wprint_n] = p; wprint_n = wprint_n + 1; n = 0; }
-            i = i + 1;
+        int k = 0;
+        int r = 0;
+        while (r < 2) {
+            char *row = r == 0 ? uclass_runs0 : uclass_runs1;
+            int i = 0;
+            while (row[i] != 0) {
+                int d = (int)(unsigned char)row[i];
+                if (d < 65) k = d - 48;
+                else if (d >= 97) n = n * 26 + d - 97;
+                else {
+                    p = p + n * 26 + d - 65;
+                    uclass_cuts[uclass_n] = p;
+                    uclass_cls[uclass_n] = k;
+                    uclass_n = uclass_n + 1;
+                    n = 0;
+                }
+                i = i + 1;
+            }
+            r = r + 1;
         }
     }
-    /* the number of run boundaries at or below cp: odd means printable */
-    hi = wprint_n;
+    /* the first run that ends past cp */
+    hi = uclass_n;
     while (lo < hi) {
         int mid = (lo + hi) / 2;
-        if (wprint_cuts[mid] <= cp) lo = mid + 1; else hi = mid;
+        if (uclass_cuts[mid] <= cp) lo = mid + 1; else hi = mid;
     }
-    return lo % 2;
+    return lo < uclass_n ? uclass_cls[lo] : 0;
+}
+int rt_wprint(int cp) {
+    int k = rt_uclass(cp);
+    return (k != 0 && k != 7) ? 1 : 0;
+}
+
+/* re_ctype's answer for a character from U+0080 up: an alphabetic character is
+ * alnum and word, a digit of any script is also xdigit, and none is blank or
+ * ascii. Twin of uCtype in languages/bash-interpreter.abnf. */
+int rt_uctype(int ctid, int ctch) {
+    int k = rt_uclass(ctch);
+    if (ctid == 1) return k >= 1 && k <= 3;
+    if (ctid == 2 || ctid == 12) return k == 4;
+    if (ctid == 3 || ctid == 13) return k >= 1 && k <= 4;
+    if (ctid == 4) return k == 1;
+    if (ctid == 5) return k == 2;
+    if (ctid == 6) return k == 6;
+    if (ctid == 8) return k == 5;
+    if (ctid == 9) return k != 0 && k != 7;
+    if (ctid == 10) return k != 0 && k != 7 && k != 6;
+    if (ctid == 11) return k == 7;
+    return 0;
 }
 
 /* Does quoting v need the $'...' form: a control character, a byte >= 0x80
