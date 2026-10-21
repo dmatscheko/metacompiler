@@ -327,7 +327,7 @@ CommandStmt = CommandForm ;
 CommandForm <~~ push(makeCall(takeAll())) ~~>
             = BareName <~~ push(up.in) ~~> NotLocalCmd SameLine CmdArgAhead ( CommandForm | Arg { "," Arg } ) [ Block ] ;
 // NotLocalCmd fails the command form when its name is a LOCAL VARIABLE. MRI reads
-// `x -1`, `x *2`, `x &m` and `x [1]` with its local-variable table: for a local they
+// `x -1`, `x *2`, `x &m`, `x ?c` and `x [1]` with its local-variable table: for a local they
 // are the binary operator or the index, for a method the argument. A PEG has no such
 // table, so this re-derives it from the source: an assignment, block parameter, `for`
 // variable or method parameter naming it earlier in the same scope. Scopes are read
@@ -350,7 +350,7 @@ NotLocalCmd = :script(~~
         var i = 0
         var cc = c.peek(0)
         while (cc === 32 || cc === 9) { i = i + 1; cc = c.peek(i) }
-        if (!(cc === 45 || cc === 42 || cc === 38 || cc === 91 || cc === 47 || cc === 37)) { return undefined }
+        if (!(cc === 45 || cc === 42 || cc === 38 || cc === 91 || cc === 47 || cc === 37 || cc === 63)) { return undefined }
         if (cc === 45 && c.peek(i + 1) === 62) { return undefined }
         function isId(ch) { return (ch >= 48 && ch <= 57) || (ch >= 65 && ch <= 90) || (ch >= 97 && ch <= 122) || ch === 95 }
         function isSp(ch) { return ch === 32 || ch === 9 || ch === 13 }
@@ -2279,9 +2279,19 @@ CmdArgAhead = :script(~~
         // 123 here, `x = proc { }` would read as `x = proc({})`. A SPACED `(` is not
         // one: `p (x).m` is p((x).m) in MRI, the parenthesis opening the argument.
         if (cc === 41 || cc === 93 || cc === 123 || cc === 125 || cc === 44 || cc === 59
-            || cc === 46 || cc === 61 || cc === 60 || cc === 62 || cc === 63 || cc === 124
+            || cc === 46 || cc === 61 || cc === 60 || cc === 62 || cc === 124
             || cc === 94 || cc === 43 || cc === 92) { return no }
         var nx = c.peek(i + 1)
+        // `p ?c`: a spaced `?` glued to one character opens a character literal, as
+        // in MRI; a blank after it, or an identifier character following a glued one
+        // (`f ?ab : c`), makes it the ternary's `?`.
+        if (cc === 63) {
+            if (nx === 32 || nx === 9 || nx === 10 || nx === 13 || nx < 0) { return no }
+            var n2 = c.peek(i + 2)
+            function cmdIdCh(ch) { return (ch >= 48 && ch <= 57) || (ch >= 65 && ch <= 90) || (ch >= 97 && ch <= 122) || ch === 95 }
+            if (cmdIdCh(nx) && cmdIdCh(n2)) { return no }
+            return undefined
+        }
         // `p /x/` and `p %w[a b]`: a spaced `/` or `%` GLUED to what follows opens a
         // regexp or a percent literal, as in MRI (which warns that the first argument
         // is ambiguous); spaced on both sides it is the operator. A `%` opens a

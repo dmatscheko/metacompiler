@@ -4109,6 +4109,18 @@ p :hidden
 =end	trailing words
   check("bc92a", n == [1, 3] && v == 5)
 end
+# ===== SECTION 93: a character literal as a command argument =====
+# `f ?c` passes the literal "c"; after a LOCAL, or with a blank after the `?`, or a
+# second identifier character glued on, the `?` is the ternary's. /usr/bin/ruby 2.6.
+def s93f(x) x end
+def s93
+  a = [true, 1]
+  t = a[0]
+  b = a[1]
+  r = t ?b : 2
+  check("cl93a", (s93f ?c.frozen?) == false && (s93f ?x) == "x" && r == 1)
+  check("cl93b", (s93f ?\n) == "\n" && (t ? ?y:?z) == "y")
+end
 
 s39() # SECTION-CALL 39
 s40() # SECTION-CALL 40
@@ -4164,6 +4176,7 @@ s89() # SECTION-CALL 89
 s90() # SECTION-CALL 90
 s91() # SECTION-CALL 91
 s92() # SECTION-CALL 92
+s93() # SECTION-CALL 93
 s95() # SECTION-CALL 95
 s96() # SECTION-CALL 96
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
