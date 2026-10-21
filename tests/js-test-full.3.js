@@ -2884,6 +2884,9 @@ class H110 extends F110 {}
 class M110 { m() { return typeof new.target } static s() { return typeof new.target } }
 function* g110() { yield typeof new.target }
 class E110 extends Error { constructor(m) { super(m); this.nt = new.target === E110 } }
+// A field initializer is evaluated as a method is: new.target is undefined there.
+class I110 { x = typeof new.target; y = (() => typeof new.target)(); static s = typeof new.target }
+class J110 extends I110 { z = typeof new.target; constructor() { super(); this.w = typeof new.target } }
 // A class extending Array makes real arrays: its own and inherited methods win over
 // the builtins, super.m() reaches Array.prototype, the builtins that create an array
 // answer one of the class, and from / of are its inherited statics.
@@ -2920,6 +2923,8 @@ function s110() {
     check("nt110e", got.join() === "true,false,false,true")
     const e = new E110("m" + v110[0])
     check("nt110f", e.nt && e.message === "m1" && e instanceof E110 && e instanceof Error && String(e) === "Error: m1")
+    const fi = new J110()
+    check("nt110g", fi.x === "undefined" && fi.y === "undefined" && fi.z === "undefined" && fi.w === "function" && I110.s === "undefined")
     const l = new L110()
     check("xa110a", l.push(v110[0], v110[1], v110[2]) === 103 && l.length === 3 && l[1] === 2 && l.sum() === 6 && l.last === 3)
     check("xa110b", Array.isArray(l) && l instanceof L110 && l instanceof Array && !(l instanceof K110) && !([1] instanceof L110))

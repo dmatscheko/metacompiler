@@ -5040,6 +5040,7 @@ NotFuncHead = :script(~~
     // Twin of ctorFields in typescript-interpreter.abnf.
     function emitFieldInits(b, inits) {
         var thisV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "this")])
+        var savedScope = fieldScopeOpen(b)
         if (inits.props != undefined && inits.props != null) {
             for (var pd = 0; pd < inits.props.length; pd++) {
                 callExt(b, memSetExt(), [thisV, emitStr(b, jsKeyEsc(inits.props[pd])), hUndef])
@@ -5062,7 +5063,17 @@ NotFuncHead = :script(~~
                                       callExt(b, "js_scope_get", [curScopeV, emitStr(b, inits.props[pi])])])
             }
         }
+        curScopeV = savedScope
         return b
+    }
+    // Twin of fieldScopeOpen in js-to-llvm-ir.abnf.
+    function fieldScopeOpen(b) {
+        var saved = curScopeV
+        if (ntWant) {
+            curScopeV = callExt(b, "js_scope_new", [saved])
+            bindNewTarget(b, false)
+        }
+        return saved
     }
     // See the twin of this comment in js-to-llvm-ir.abnf.
     function emitSuperDone(b, retV, inits) {

@@ -10026,7 +10026,10 @@ NotFuncHead = :script(~~
     }
     function ctorFields(fields, fscopes) {
         var saved = scopes
-        scopes = fscopes
+        // A field initializer is evaluated as a method is: new.target is undefined in it.
+        var fsc = {}
+        fsc["new.target"] = undefined
+        scopes = concat2impl(fscopes, [fsc])
         var self = getVar("this")
         for (var k = 0; k < fields.length; k++) {
             var fk = memberKey(fields[k])

@@ -6908,6 +6908,7 @@ NotFuncHead = :script(~~
     }
     function emitFieldInits(b, initFields) {
         var thisV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "this")])
+        var savedScope = fieldScopeOpen(b)
         for (var k = 0; k < initFields.length; k++) {
             var fv = hUndef
             if (initFields[k].init != null && initFields[k].init != undefined) {
@@ -6917,7 +6918,19 @@ NotFuncHead = :script(~~
             }
             callExt(b, memSetExt(), [thisV, emitStr(b, memberNameEsc(initFields[k])), fv])
         }
+        curScopeV = savedScope
         return b
+    }
+    // A field initializer is evaluated as a method is: new.target is undefined in it, so
+    // a program that names new.target runs the initializers in a scope binding that.
+    // Answers the scope to restore.
+    function fieldScopeOpen(b) {
+        var saved = curScopeV
+        if (ntWant) {
+            curScopeV = callExt(b, "js_scope_new", [saved])
+            bindNewTarget(b, false)
+        }
+        return saved
     }
     // super() answered retV: rebind `this` to it when it is an object (js_jsnewres),
     // then initialize the derived class's fields on it.

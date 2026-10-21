@@ -8123,7 +8123,10 @@ NotFuncHead = :script(~~
     // Twin of emitFieldInits in typescript-to-llvm-ir.abnf.
     function ctorFields(params, fields, fscopes) {
         var saved = scopes
-        scopes = fscopes
+        // See the twin of this comment in js-interpreter.abnf.
+        var fsc = {}
+        fsc["new.target"] = undefined
+        scopes = concat2impl(fscopes, [fsc])
         var self = getVar("this")
         for (var pi = 0; pi < params.length; pi++) {
             var pp = params[pi]
