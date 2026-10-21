@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-748** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-749** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -131,6 +131,12 @@ parameter), which no engine prints either.
 ---
 
 # CORE — MetaJS, the engines, shared runtime, tooling
+
+### T-748 tooling: ruby -callgraph names regressed to `$d$f` after top-level defs stopped binding the plain name · P1 · CORE · IN PROGRESS (CORE worker, round 6) [V]
+tests/srcpos-probe.sh (a gate) on main: `FAIL ruby: definitions are on [f@1], -callgraph says [<module>@1 $d$f@1]` and edges
+`$d$g->$d$h`, `m->$d$g` instead of `g->h`, `m->g`. Cause: 910997a4 made a top-level ruby def bind only `$d$name` (so `k2 = k2` reads
+nil); abnf/callgraph.go named the definition from the plain-name store. Map ruby's `$d$NAME` slot to the source name `NAME` in the name
+pass (the def's own name, not a strip of every `$`), keep 910997a4's semantics, srcpos back to 39/39.
 
 ### T-184 dart: `IndexError` vs `RangeError` text for `[1,2,3][7]` · P3 · DA · BLOCKED - needs a Dart VM to settle [U spec-only]
 A reviewer argued the VM prints `RangeError (index): Invalid value: Not in inclusive
