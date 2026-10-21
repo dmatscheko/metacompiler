@@ -76,7 +76,7 @@ non-ASCII class range spanning 256 or more characters only gets the text-side up
 
 # JS — JavaScript and TypeScript
 
-### T-701 js: `delete` of a class static field or method does nothing · P3 · JS · OPEN [V]
+### T-701 js: `delete` of a class static field or method does nothing · P3 · JS · IN PROGRESS (JS worker, round 20) [V]
 `class T { static z = 1; static m(){} }; delete T.z; delete T.m; T.z, T.m, Object.keys(T).length, T.hasOwnProperty("z")` → node
 `undefined undefined 0 false`, all our legs `1 m() {} 1 true`. Same cause: `class S { static name = "custom" }; delete S.name` leaves
 "custom" (node "").
