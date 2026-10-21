@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-729** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-730** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -147,14 +147,11 @@ parameter), which no engine prints either.
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-727 bash: assigning an element to a scalar drops the scalar · P2 · SH · IN PROGRESS (SH worker, round 17) [V]
-`t=abcd; t[1]=x; echo "${t[*]}"` → bash `abcd x` (the scalar becomes element 0); all our engines `x`. Same for `u=ab; u[1]=x`.
-
-### T-728 bash native: arrays scan a flat table on every scalar access, cap at 4096 rows; stored values never freed · P2 · SH · IN PROGRESS (SH worker, round 17) [V]
-Compiled bash calls rt_arr_any / rt_arr_find on every scalar read/write, scanning the whole flat array table: with a 600-element array
-a loop doing `a+=(x)` costs ~280K steps per pass; the array store caps at 4096 rows. The heap floor keeps every stored value: `t="${a[*]}"`
-3000 times over a 1 MB array reaches 2.8 GB RSS natively. Index arrays by variable (hash or per-variable vector) and reclaim
-overwritten stored values; bench bash.
+### T-729 bash: mapfile/readarray; attributes on array elements; unset of a scalar's element; `${!a[@]:0:3}` accepted · P2 · SH · OPEN [V]
+`mapfile` / `readarray` → "command not found" exit 127 in all engines (bash 5.3 builtin). `declare -i n=5; n[1]=3+4; echo "${n[*]}"`
+→ bash `5 7`, ours `5 3+4`; `declare -l lo=ABC; lo[1]=XY` → bash `abc xy`, ours `abc XY`. `p2=ab; unset 'p2[1]'` → bash "not an array
+variable" status 1, ours silent 0. `"${!a[@]:0:3}"` → bash "bad substitution", ours expands. Long overwritten array element values
+are still never reclaimed (needs an element ownership table; `x="${a[0]}$((a[0]=1))"` must stay safe).
 
 ---
 
@@ -817,6 +814,8 @@ T-722 ruby: an uncaught internal error lacks MRI's `file:line:in 'meth': ` prefi
 T-718 js: a strict-mode write to a getter-only property is silently dropped — DONE efccf010 (getter-only writes raise node's TypeError naming the holder in strict code and drop without an own property in sloppy, incl. statics, destructuring, Object.assign; stale accessors after delete/redefine — 4 legs = node, TS via tsc 6; follow-ups T-725/T-726)
 T-720 tooling: tests/bash-test-full.sh is at ~97M of llvm.Run's 100M step brake — DONE a1656068 (bash ratchet split into full/.2/.3/.4 parts at ~30/39/14/65M steps, wired into test.sh, clang-check, native-full, gates)
 T-719 bash native: quadratic list/word building; O(n²) `for w in $list`; positional stack capped at 4096 — DONE 9936078f (in-place list growth, field cursors, one-pass word and printf building, guarded in-place s+=, doubling positionals — native probes 334 MB → 2 MB, minutes → 0.4 s, = bash 5.3; bash bench +0.56%; follow-ups T-727/T-728)
+T-727 bash: assigning an element to a scalar drops the scalar — DONE 6e13d2ea (a scalar becomes element 0 on element assignment, plus local -a, unset element, index order — 4 legs = bash 5.3)
+T-728 bash native: arrays scan a flat table on every scalar access, cap at 4096 rows; stored values never freed — DONE 6e13d2ea 679f55e2 (per-name array records with bisect/hash, no row cap, long stored values in reusable per-slot buffers guarded by holders — 2.54G → 28M instructions, 2.8 GB → 3.8 MB; bash bench −12.5%; follow-up T-729)
 
 # Settled — do not re-open
 
