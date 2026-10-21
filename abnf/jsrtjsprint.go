@@ -679,7 +679,7 @@ func (rt *jsrt) jsvDefineProp(v interface{}, key string, desc interface{}) {
 	g, s := rt.jsvGetKey(desc, "get"), rt.jsvGetKey(desc, "set")
 	// An array's named data property keeps its attributes on the object that holds it
 	// (jsvArrNamed), so the rules below apply there unchanged.
-	if a, isArr := v.(*jsArray); isArr && isUndefOrNull(g) && isUndefOrNull(s) && key != "length" && rt.arrIndexOf(key) < 0 {
+	if a, isArr := v.(*jsArray); isArr && key != "length" && rt.arrIndexOf(key) < 0 {
 		p := jsvArrNamed(a)
 		if p == nil {
 			p = newJSObject()
@@ -1012,6 +1012,31 @@ func jsvStaticDel(cls *jsObject, name string) {
 func jsvArrNamed(a *jsArray) *jsObject {
 	p, _ := a.props.(*jsObject)
 	return p
+}
+
+// jsvArrAccRead answers (value, true) when v is an array whose named property k is an
+// accessor: its getter's answer with the array as `this`, or undefined when it has
+// none. The shared getMember hands the accessor box back as it is.
+func (rt *jsrt) jsvArrAccRead(v interface{}, k string) (interface{}, bool) {
+	acc := jsvArrAccessor(v, k)
+	if acc == nil {
+		return nil, false
+	}
+	if acc.get == nil {
+		return jsUndef, true
+	}
+	return rt.call(acc.get, v, nil), true
+}
+
+// jsvArrAccessor is the accessor v's named property k holds when v is an array, or nil.
+func jsvArrAccessor(v interface{}, k string) *jsAccessor {
+	if a, isArr := v.(*jsArray); isArr {
+		if p := jsvArrNamed(a); p != nil {
+			acc, _ := p.props[k].(*jsAccessor)
+			return acc
+		}
+	}
+	return nil
 }
 
 // jsvArrNamedHas: does array a hold the named property k?
@@ -2628,6 +2653,7 @@ func (rt *jsrt) jsvOwnDesc(v interface{}, k string, get func(interface{}, string
 			if _, named := p.props[k]; named {
 				wr = wr && !jsvAttrHas(p, "__ro", k)
 				cf = cf && !jsvAttrHas(p, "__nc", k)
+				slots = p
 			}
 		}
 	case *jsObject:
@@ -3000,6 +3026,9 @@ func (rt *jsrt) jsvGetKey(v interface{}, k string) interface{} {
 	// js_jsmget.)
 	if cls, isStatic := jsvIsStaticSide(v, k); isStatic {
 		return rt.unwrap(rt.jsvStaticSideRead(cls, k))
+	}
+	if val, isAcc := rt.jsvArrAccRead(v, k); isAcc {
+		return val
 	}
 	// A FUNCTION's own properties live in the side table, and rt.getMember knows
 	// nothing about it - the SAME shape as the class-descriptor arm above, one layer
@@ -5684,6 +5713,9 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 	// languages/lib/js-rt.metajs and the interpreters' is getMember's class-method arm.
 	var vget func(a []uint64) uint64
 	vget = func(a []uint64) uint64 {
+		if v, isAcc := rt.jsvArrAccRead(u(a[0]), rt.toString(u(a[1]))); isAcc {
+			return w(v)
+		}
 		if cls := jsvArrClass(u(a[0])); cls != nil {
 			if v, found := rt.jsvArrSubRead(u(a[0]).(*jsArray), cls, rt.toString(u(a[1]))); found {
 				return w(v)
@@ -5955,6 +5987,9 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 	m["js_jsmget"] = func(a []uint64) uint64 {
 		if jsvHidesMember(u(a[0]), rt.toString(u(a[1]))) {
 			return jsHUndefined
+		}
+		if v, isAcc := rt.jsvArrAccRead(u(a[0]), rt.toString(u(a[1]))); isAcc {
+			return w(v)
 		}
 		if f := jsvArgsIterFn(u(a[0]), rt.toString(u(a[1]))); f != nil {
 			return w(f)
@@ -6333,6 +6368,13 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 				arr.kind = jsvArgsKind(int(n))
 				return 0
 			}
+		}
+		// A named accessor of an array runs its setter, with the array as `this`.
+		if acc := jsvArrAccessor(u(a[0]), rt.toString(u(a[1]))); acc != nil {
+			if acc.set != nil {
+				rt.call(acc.set, u(a[0]), []interface{}{u(a[2])})
+			}
+			return 0
 		}
 		r := baseSet(a)
 		if argsLen {

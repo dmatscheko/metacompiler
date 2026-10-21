@@ -4901,6 +4901,15 @@ function s105(): void {
     const fd = Object.getOwnPropertyDescriptor(Object.freeze(sl), "foo")!;
     check("ap105e", !fd.writable && !fd.configurable && (sl as any).foo === 3 &&
         rm === "Cannot redefine property: foo" && Object.keys(sl).join() === "0,foo");
+    const ac: number[] = [1, 2];
+    let st = 0;
+    Object.defineProperty(ac, "acc", { get() { return 42; }, enumerable: true });
+    Object.defineProperty(ac, "st", { get() { return st * 2; }, set(this: number[], v: number) { st = v + this.length; } });
+    (ac as any).st = 5;
+    const ad = Object.getOwnPropertyDescriptor(ac, "st")!;
+    check("ac105f", Object.keys(ac).join() === "0,1,acc" && (ac as any).acc === 42 &&
+        Object.getOwnPropertyNames(ac).join() === "0,1,length,acc,st" && st === 7 && (ac as any).st === 14 &&
+        typeof ad.get === "function" && typeof ad.set === "function" && !ad.enumerable && !ac.propertyIsEnumerable("st"));
     const r: TemplateStringsArray[] = [];
     for (let i = 0; i < 2; i++) r.push(tag105`y${i}`);
     check("tp105d", t105(1) === t105(2) && r[0] === r[1] && r[0].raw === r[1].raw && Object.isFrozen(r[0]) &&

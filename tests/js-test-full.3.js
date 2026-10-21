@@ -3041,6 +3041,15 @@ function s112() {
     try { Object.defineProperty(sl, "foo", { enumerable: false }) } catch (e) { rm = e.message }
     check("ap112f", !fd.writable && !fd.configurable && fd.enumerable && sl.foo === 3 &&
         rm === "Cannot redefine property: foo" && Object.keys(sl).join() === "0,foo")
+    const ac = [1, 2]
+    let st = 0
+    Object.defineProperty(ac, "acc", { get() { return 42 }, enumerable: true })
+    Object.defineProperty(ac, "st", { get() { return st * 2 }, set(v) { st = v + this.length } })
+    ac.st = 5
+    const ad = Object.getOwnPropertyDescriptor(ac, "st")
+    check("ac112g", Object.keys(ac).join() === "0,1,acc" && ac.acc === 42 && Object.getOwnPropertyNames(ac).join() === "0,1,length,acc,st" &&
+        st === 7 && ac.st === 14 && typeof ad.get === "function" && typeof ad.set === "function" && !ad.enumerable &&
+        !ac.propertyIsEnumerable("st") && JSON.stringify(Object.entries(ac)) === '[["0",1],["1",2],["acc",42]]')
     const r = []
     for (let i = 0; i < 2; i++) r.push(tag112`y${i}`)
     check("tp112e", t112(1) === t112(2) && r[0] === r[1] && r[0].raw === r[1].raw && Object.isFrozen(r[0]) &&

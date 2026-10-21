@@ -3655,6 +3655,9 @@ NotFuncHead = :script(~~
             if (jsArrNamedHas(o, kk)) {
                 w = w && !jsArrNamedAttr(o, "__ro", kk)
                 cf = cf && !jsArrNamedAttr(o, "__nc", kk)
+                var np = anytype // The named properties, whose accessor table may hold kk.
+                np = jsArrNamed(o, false)
+                if (hasOwn(np, "__acc")) { acc = np.__acc }
             }
         } else if (typeof o == "function") {
             if (kk == "name" || kk == "length") {
@@ -3804,7 +3807,7 @@ NotFuncHead = :script(~~
         var s = anytype
         s = getMember(desc, "set")
         // See the twin of this comment in js-interpreter.abnf.
-        if (Array.isArray(o) && g === undefined && s === undefined && key !== "length" && jsArrIndexKey(key) < 0) {
+        if (Array.isArray(o) && key !== "length" && jsArrIndexKey(key) < 0) {
             if (jsArrLevel(o) > 0 && !jsArrNamedHas(o, key)) { biRaise("TypeError: Cannot define property " + jsStr(jsKeyUnesc(key)) + ", object is not extensible") }
             jsDefineKey(jsArrNamed(o, true), key, desc)
             return
@@ -5021,7 +5024,14 @@ NotFuncHead = :script(~~
         if (Array.isArray(o) && (typeof k == "string" ? k !== "length" : !(k >= 0 && Math.floor(k) === k))) {
             var np = anytype // The array's named properties, or undefined (jsArrNamed).
             np = jsArrNamed(o, false)
-            if (np !== undefined && np.__keys.indexOf("" + k) >= 0) { return np["" + k] }
+            if (np !== undefined && np.__keys.indexOf("" + k) >= 0) {
+                if (jsIsAccKey(np, "" + k)) {
+                    var ag = anytype // The named accessor's getter, or undefined.
+                    ag = findAccessor(np, "get", "" + k)
+                    return ag === undefined ? undefined : callWithThis(ag, o, [])
+                }
+                return np["" + k]
+            }
             // Under goja the host array would answer its own Object.prototype method,
             // where -frozen's has none and jsProtoCall answers.
             if (jsIsProtoName(k)) { return undefined }
@@ -5684,6 +5694,12 @@ NotFuncHead = :script(~~
         }
         if (k !== "length" && Array.isArray(o) && jsArrIndexKey(k) < 0) {
             var np = jsArrNamed(o, true)
+            if (jsIsAccKey(np, "" + k)) {
+                var as = anytype // The named accessor's setter, or undefined.
+                as = findAccessor(np, "set", "" + k)
+                if (as !== undefined) { callWithThis(as, o, [v]) }
+                return
+            }
             scopePut(np, k, v)
             trackKey(np, k)
             return
