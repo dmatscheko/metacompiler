@@ -896,6 +896,55 @@ l=q"
   o=$( { local s71v=$(echo E5 >&2) 2>/dev/null; } 2>&1 )
   check fd4 "$o" "E5"
 }
+# ===== SECTION 72: a command that is not found; `exec` with only redirections =====
+# A command that is not found writes its diagnostic on standard error and answers 127: a $( )
+# captures none of it, and the shell around it goes on. `exec` with no command applies its
+# redirections to the shell itself - after a function returns, after a { } group - until the
+# ( ) or $( ) around it ends; a subshell's own standard input does not replace its parent's,
+# while what it reads of an inherited one is gone for the parent too. Every expected value is
+# bash 5.3's.
+s72f() { echo "e:$1" >&2; echo "o:$1"; }
+s72g() { exec 2>&1; }
+s72() {
+  local o e r c=s72nosuch
+  { o=$(s72nosuch); r=$?; } 2>/dev/null
+  check cnf1 "$r[$o]" "127[]"
+  e=$( { o=$(s72nosuch arg); } 2>&1 ); r=$?
+  check cnf2 "$r[$o]" "127[]"
+  [[ $e == *"command not found"* && $e == *s72nosuch* ]]; check cnf3 "$?" 0
+  o=$($c 2>/dev/null); r=$?
+  check cnf4 "$r[$o]" "127[]"
+  o=$( exec 2>&1; s72nosuch ); r=$?
+  [[ $o == *"command not found"* ]]; check cnf5 "$?$r" 0127
+  o=$( exec 2>&1; s72f a ); r=$?
+  check xr1 "$r[$o]" "0[e:a
+o:a]"
+  o=$( { exec 2>&1; }; s72f b )
+  check xr2 "$o" "e:b
+o:b"
+  o=$( s72g; s72f c )
+  check xr3 "$o" "e:c
+o:c"
+  o=$( ( exec 2>&1 ); s72f d 2>/dev/null )
+  check xr4 "$o" "o:d"
+  o=$( exec >/dev/null; s72f e 2>&1 )
+  check xr5 "$o" ""
+  o=$( exec 2>/dev/null; s72f g; exec 2>&1; s72f h )
+  check xr6 "$o" "o:g
+e:h
+o:h"
+  o=$( exec; echo k ); r=$?
+  check xr7 "$r[$o]" "0[k]"
+  o=$( exec 2>&1 >/dev/null; s72f i )
+  check xr8 "$o" "e:i"
+  o=$( { { exec 2>&1; } 2>/dev/null; s72f j; } 2>/dev/null )
+  check xr9 "$o" "o:j"
+  o=$( exec <<< "p
+q"; ( exec <<< "z"; read w; echo "$w" ); read w; echo "$w"; ( read w ); read w; echo "[$w]" )
+  check xr10 "$o" "z
+p
+[]"
+}
 # ===== END SECTIONS =====
 
 s47   # SECTION-CALL 47
@@ -922,5 +971,6 @@ s68   # SECTION-CALL 68
 s69   # SECTION-CALL 69
 s70   # SECTION-CALL 70
 s71   # SECTION-CALL 71
+s72   # SECTION-CALL 72
 echo "full: $checks checks, $fails failures"
 exit $fails

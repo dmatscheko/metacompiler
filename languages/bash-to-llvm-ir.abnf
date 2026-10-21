@@ -4574,13 +4574,27 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         b.NewStore(b.NewLoad(i32, gOptU), su)
         b.NewStore(b.NewLoad(i32, gOptPf), sp)
         b.NewStore(b.NewLoad(i32, gOptExtglob), sx)
-        return {e: se, u: su, pf: sp, x: sx}
+        var so = slotOf(i32), sr = slotOf(i32), sb = slotOf(i8ptr), si = slotOf(i32)
+        b.NewStore(b.NewLoad(i32, gSinkOut), so)
+        b.NewStore(b.NewLoad(i32, gSinkErr), sr)
+        b.NewStore(b.NewLoad(i8ptr, gStdin), sb)
+        b.NewStore(b.NewLoad(i32, gStdinPos), si)
+        return {e: se, u: su, pf: sp, x: sx, so: so, sr: sr, sb: sb, si: si}
     }
+    // The streams an `exec` may have redirected come back too; the standard input only when
+    // the subshell REPLACED it, since what it read of an inherited input is consumed for the
+    // parent as well. Twin of restoreShellState in bash-interpreter.abnf.
     function restoreOpts(b, sv) {
         b.NewStore(b.NewLoad(i32, sv.e), gOptE)
         b.NewStore(b.NewLoad(i32, sv.u), gOptU)
         b.NewStore(b.NewLoad(i32, sv.pf), gOptPf)
         b.NewStore(b.NewLoad(i32, sv.x), gOptExtglob)
+        b.NewStore(b.NewLoad(i32, sv.so), gSinkOut)
+        b.NewStore(b.NewLoad(i32, sv.sr), gSinkErr)
+        var ib = b.NewLoad(i8ptr, sv.sb)
+        var moved = b.NewICmp(llvm.enum.IPredNE, b.NewLoad(i8ptr, gStdin), ib)
+        b.NewStore(b.NewSelect(moved, b.NewLoad(i32, sv.si), b.NewLoad(i32, gStdinPos)), gStdinPos)
+        b.NewStore(ib, gStdin)
     }
     // `shopt` knows extglob (-s / -u / -q); every other option is accepted and reported as
     // success, and a -q query of one answers "on". Only LITERAL words are read. Twin of the
@@ -4691,10 +4705,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             b = miss
         }
         // The same diagnostic and the same 127 the literal path writes, with the name from
-        // the expansion. bash carries on after it; this language stops, in both halves.
-        b.NewCall(rtPrints, gepStr(b, c.file + ": command not found: "))
-        b.NewCall(rtPrints, nameV)
-        b.NewCall(rtPrints, gepStr(b, "\n"))
+        // the expansion.
+        emitOnStderr(b, b.NewCall(rtStrcat, [b.NewCall(rtStrcat, [gepStr(b, c.file + ": command not found: "), nameV]),
+                                             gepStr(b, "\n")]))
         b.NewStore(llvm.constant.NewInt(i32, 127), gExitCode)
         b.NewStore(one, gExited)
         b.NewBr(viaUnwind(curExit, curExitRd))
@@ -4729,6 +4742,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 storeStatusI(b, (cmd == "false") ? 1 : 0)
                 return b
             }
+            // `exec` without a command: its redirections, if any, are left open by the caller.
+            if (cmd == "exec" && argTs.length == 0) { storeStatusI(b, 0); return b }
             if (cmd == "exit") {
                 var code = zero
                 // An exit status is N modulo 256: `exit 300` is 44, `exit -2` is 254.
@@ -4926,9 +4941,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var bbox2 = {b: b}
             evalArgs(bbox2, argTs)
             b = bbox2.b
-            // Prefixed with $0, like every shell diagnostic; bash-interpreter.abnf prints the same
-            // line and exits 127 too.
-            b.NewCall(rtPrints, gepStr(b, c.file + ": command not found: " + cmd + "\n"))
+            // Prefixed with $0, like every shell diagnostic, on the standard error channel; it
+            // exits the current shell (a ( ) or $( ) ends, its parent carries on) with 127.
+            // Twin of the end of runCommand in bash-interpreter.abnf.
+            emitOnStderr(b, gepStr(b, c.file + ": command not found: " + cmd + "\n"))
             b.NewStore(llvm.constant.NewInt(i32, 127), gExitCode)
             b.NewStore(one, gExited)
             b.NewBr(viaUnwind(curExit, curExitRd))
@@ -4948,7 +4964,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             redirStack.pop()
             cmdT = cmd0
             argTs = args0
-            emitCloseRedirs(b, sv)
+            // `exec` with no command makes its redirections the shell's own: they stay in
+            // effect until the ( ) or $( ) around it ends (saveOpts). Twin of the exec arm of
+            // makeSimpleCommand in bash-interpreter.abnf.
+            if (cmd0.c != "exec" || args0.length > 0) { emitCloseRedirs(b, sv) }
             return b
         }
     }

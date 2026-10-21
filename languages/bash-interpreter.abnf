@@ -4918,6 +4918,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // command too. Twin of the emitAbortCheck that starts the compiler's inner.
             var ab2 = takeAbort()
             if (ab2 != null) { closeRedirs(rs); return ab2 }
+            // `exec` with no command makes its redirections the shell's own: they stay in
+            // effect until the ( ) or $( ) around it ends. Twin of the exec arm of
+            // makeSimpleCommand in bash-to-llvm-ir.abnf.
+            if (cmd == "exec" && args.length == 0) { setStatus(0); return 0 }
             var st = anytype
             st = runCommand(cmd, args)
             closeRedirs(rs)
@@ -5861,6 +5865,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             setStatus(rst)
             return rst
         }
+        // `exec` with neither a command nor a redirection does nothing.
+        if (cmd == "exec" && args.length == 0) { setStatus(0); return 0 }
         if (cmd == "shift") {
             var n = (args.length > 0) ? strToInt(args[0]) : 1
             posParams = (n <= posParams.length) ? posParams.slice(n) : []
@@ -5884,13 +5890,14 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             setStatus(st2)
             return st2
         }
-        // A SHELL DIAGNOSTIC, NOT AN ENGINE DIAGNOSTIC: all three engines print
-        // `<script>: command not found: NAME` and exit 127, as bash exits 127. The word order
-        // differs from bash's `<script>: line N: NAME: command not found`, which needs a line
-        // number no engine here carries to run time; and this STOPS, where bash would carry on.
-        println(scriptName + ": command not found: " + cmd)
-        exit(127)
-        return 127
+        // A SHELL DIAGNOSTIC, NOT AN ENGINE DIAGNOSTIC: all three engines write
+        // `<script>: command not found: NAME` on the standard error channel and exit the
+        // current shell with 127 - a ( ) or $( ) ends there, the parent carries on. The word
+        // order differs from bash's `<script>: line N: NAME: command not found`, which needs a
+        // line number no engine here carries to run time; and this STOPS the shell it runs in,
+        // where bash would carry on with the next command.
+        emitErr(scriptName + ": command not found: " + cmd + "\n")
+        return {ret: 127, isExit: 1}
     }
 
     // Call a user function: bind $1.. to args, run the body, restore, return its status.
@@ -6114,12 +6121,18 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
 
     // Everything a subshell must restore: variables, positional parameters, call frames,
-    // the shell options and the EXIT trap.
+    // the shell options, the EXIT trap and the streams an `exec` may have redirected. The
+    // standard input comes back only when the subshell REPLACED it: what a subshell reads of
+    // an inherited input is consumed for its parent too, as from a shared file offset.
     function saveShellState() {
         return {vars: snapshotVars(), pos: posParams, frames: localFrames, st: snapshotState(),
-                e: optErrExit, u: optNounset, pf: optPipefail, eg: optExtglob, tr: exitTrap}
+                e: optErrExit, u: optNounset, pf: optPipefail, eg: optExtglob, tr: exitTrap,
+                so: sinkOut, se: sinkErr, inb: stdinBuf, inp: stdinPos}
     }
     function restoreShellState(st) {
+        sinkOut = st.so
+        sinkErr = st.se
+        if (stdinBuf != st.inb) { stdinBuf = st.inb; stdinPos = st.inp }
         restoreVars(st.vars)
         restoreState(st.st)
         posParams = st.pos
