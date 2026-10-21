@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-742** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-743** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -68,14 +68,13 @@ its report; anything structural there is a CORE ticket.
 
 # RB — Ruby
 
-### T-740 ruby: `<<` through a method call reads a raw property; `=begin`/`=end`; dynamic define_method compiled; `p ?c` · P1 · RB · IN PROGRESS (RB worker, round 14) [V]
-`a = [[1,2]]; a.first << 3; p a` → ruby `[[1, 2, 3]]`, ours "not a number in '<<'"; `h = {"abc"=>1}; h.keys[0] << "x"` mutates the
-hash's internal key (ruby FrozenError): an append statement's target path does `o[s.key]` for a `.name` step instead of calling the
-method (interpreter resolveRefRuby and the compiler) — P1. `=begin` / `=end` block comments fail to parse in both grammars — P2.
-`[:a,:b].each { |n| define_method(n) { } }` / `define_method(var)` → NoMethodError in the compiler legs (needs runtime method
-installation). `p ?c.frozen?` → interpreter prints nothing, compiler NameError for `p` (ruby false; `?c` read as a ternary).
-Residue: `[]` on a String, format/sprintf/gets results and builtin-yielded block args (each_char) are unboxed until read through a
-place; read-out key boxes are distinct (`h.keys[0].equal?(h.keys[0])` false, ruby true).
+### T-742 ruby: Struct; `self` in a define_method block; class-body locals in constants (compiler); instance_methods(false) · P2 · RB · OPEN [V]
+`Struct.new(:a, :b)` → NameError in the interpreter (unsupported in all engines; ruby builds a class with accessors, ==, to_a,
+members, keyword_init). `define_method(:me) { self.class }` → `Class` in all engines (ruby `K`: the block runs instance_exec-style).
+`class K; r = 5; QQ = r; end` → compiler NameError for `r` (the constant is hoisted to the enclosing scope). `A.instance_methods(false)`
+→ interpreter `[]`, compiler NoMethodError (ruby the names). Compiler only: a run-time `define_method` inside a module is not seen by a
+class that includes it (`include` copies at build time). `a&.first << x` reads a raw property; `a[0, 2] << x` ignores the second
+subscript (both halves).
 
 ---
 
@@ -796,6 +795,7 @@ T-736 ruby: bang methods on strings do not mutate; `puts` inside an expression; 
 T-737 tooling + js: swift overloads and module bodies in -callgraph; `Object.assign(5, {...})` compiled — DONE ca9a0474 6763ce45 (swift overloads by source name, module bodies as <module>, unescaped jsonl; Object.assign ToObject's a primitive target incl. host objects — srcpos 26/26, = node; follow-up T-739)
 T-738 ruby: strings produced by methods are not boxes; Array#to_h; define_method compiled; frozen hash keys; frozen_string_literal — DONE bfe97792 4235b67f (method/operator results are fresh string boxes incl. arrays of them, Array#to_h, define_method by String/Symbol in the compiler, frozen hash keys and immediates, frozen_string_literal per file — = ruby 2.6; follow-up T-740)
 T-739 tooling: -callgraph loses swift and python call edges — DONE 3b5a140e (name-read/call helpers of python, swift, dart, kotlin, lua, ruby recognised; overload/method second names resolve to the source name; helpers dropped from the graph — EDGE_CASES for 12 languages, srcpos 38/38; follow-up T-741)
+T-740 ruby: `<<` through a method call reads a raw property; `=begin`/`=end`; dynamic define_method compiled; `p ?c` — DONE c73ddb45..968722e3 (append/assign path .name steps call the method, =begin/=end, `f ?c`, run-time define_method on class objects in all engines, builtin-built strings are boxes, one key object per text — = ruby 2.6; follow-up T-742)
 
 # Settled — do not re-open
 
