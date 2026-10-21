@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-727** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-729** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -147,12 +147,14 @@ parameter), which no engine prints either.
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-719 bash native: quadratic list/word building; O(n²) `for w in $list`; positional stack capped at 4096 · P2 · SH · IN PROGRESS (SH worker, round 16) [V]
-bash-rt.c: `rt_arr_list` builds `"${a[@]}"` / `${#a[@]}` element by element with rt_fput/rt_strcat (one `echo "${#keep[@]}"` over
-3,000 elements allocates ~255 MB); `mkWord` joins an N-part quoted word with N−1 rt_strcat (104 × 11 KB parts → ~60 MB); `for w in
-$list` re-walks from the list start each pass (rt_nfields/rt_getfield; 208,000 fields ran for minutes); `s+=x` pins every intermediate
-value (2,000 passes pin 11 MB); `set -- $s2` with 208,000 words exits 70 (fixed 4096 positional stack; bash unlimited). Make each
-linear; bench bash.
+### T-727 bash: assigning an element to a scalar drops the scalar · P2 · SH · OPEN [V]
+`t=abcd; t[1]=x; echo "${t[*]}"` → bash `abcd x` (the scalar becomes element 0); all our engines `x`. Same for `u=ab; u[1]=x`.
+
+### T-728 bash native: arrays scan a flat table on every scalar access, cap at 4096 rows; stored values never freed · P2 · SH · OPEN [V]
+Compiled bash calls rt_arr_any / rt_arr_find on every scalar read/write, scanning the whole flat array table: with a 600-element array
+a loop doing `a+=(x)` costs ~280K steps per pass; the array store caps at 4096 rows. The heap floor keeps every stored value: `t="${a[*]}"`
+3000 times over a 1 MB array reaches 2.8 GB RSS natively. Index arrays by variable (hash or per-variable vector) and reclaim
+overwritten stored values; bench bash.
 
 ---
 
@@ -166,11 +168,6 @@ linear; bench bash.
 php and metajs have no deep-recursion hook (T-505's js_rt_deep / coreDeepHook): interp and llvm.Run die with Go's fatal stack
 overflow, native SIGSEGV. php 8.3+ throws an Error whose message embeds a platform-dependent size (zend.max_allowed_stack_size /
 "Maximum call stack size of N bytes reached"); settle the text from php-src. metajs needs the hook in metajs-to-llvm-ir plus a re-freeze.
-
-### T-720 tooling: tests/bash-test-full.sh is at ~97M of llvm.Run's 100M step brake · P3 · CORE · IN PROGRESS (SH worker, round 16) [V]
-`--full` runs bash-test-full.sh under llvm.Run at ~96.9M steps; the next sections will trip the brake and read as RUN-FAILED.
-Split the file (as go/js did with .2/.3/.4 parts, wired into test.sh / native-full.sh / gates) or raise -max-steps for --full with
-a documented reason.
 
 ### T-716 core: a non-canonical numeric string key (`"01"`, `"1.0"`, `"+1"`, `" 1"`, `"-0"`) is an array index · P2 · CORE · IN PROGRESS (CORE worker, round 2) [V]
 js `k=[]; k["01"]=7` → node: named property (length 0, `k[1]` undefined, keys `01`); llvm.Run/native: index 1 (length 2); interpreter
@@ -818,6 +815,8 @@ T-674 go (CORE): native recursion capped at ~500 Go frames by the js_gotry jump-
 T-505 java (and probably every language): unbounded recursion kills the process instead of raising — DONE 4b8bcb99 (one call counter in all four engines raising each language's own error — python RecursionError at CPython's 1000, js RangeError, java/kotlin StackOverflowError, ruby SystemStackError, lua catchable stack overflow, dart StackOverflowError, go fatal exit 2, swift SIGSEGV, csharp per .NET docs; non-python limit 10,000 frames, below the reference for java/lua/go but within what the native 8 MB C stack allows; php/metajs → T-721)
 T-722 ruby: an uncaught internal error lacks MRI's `file:line:in 'meth': ` prefix — DONE 3430e76e for SystemStackError (statement site register in both engines, = ruby 2.6 first line and backtrace[0]); builtin-raised errors need frame names at jsrt.go raise sites → T-724
 T-718 js: a strict-mode write to a getter-only property is silently dropped — DONE efccf010 (getter-only writes raise node's TypeError naming the holder in strict code and drop without an own property in sloppy, incl. statics, destructuring, Object.assign; stale accessors after delete/redefine — 4 legs = node, TS via tsc 6; follow-ups T-725/T-726)
+T-720 tooling: tests/bash-test-full.sh is at ~97M of llvm.Run's 100M step brake — DONE a1656068 (bash ratchet split into full/.2/.3/.4 parts at ~30/39/14/65M steps, wired into test.sh, clang-check, native-full, gates)
+T-719 bash native: quadratic list/word building; O(n²) `for w in $list`; positional stack capped at 4096 — DONE 9936078f (in-place list growth, field cursors, one-pass word and printf building, guarded in-place s+=, doubling positionals — native probes 334 MB → 2 MB, minutes → 0.4 s, = bash 5.3; bash bench +0.56%; follow-ups T-727/T-728)
 
 # Settled — do not re-open
 
