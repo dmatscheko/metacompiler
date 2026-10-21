@@ -33,7 +33,8 @@
 #
 # 4. -callgraph recovers the static call edges top -> m -> g -> h (EDGE_CASES),
 #    m a method called through the language's own method-call extern, whichever
-#    helper a compiler reads a name through. Runtime fabric - a compiler's helper
+#    helper a compiler reads a name through. The ruby program reads an arity, so
+#    its defs are stored wrapped in js_rarity. Runtime fabric - a compiler's helper
 #    functions, the jsnum.N constant builders, the entry function - is neither a
 #    definition nor an edge end; the entry's edges come from (top) or <module>.
 #
@@ -229,7 +230,7 @@ EDGE_CASES=(
 edge_src_for() {
     case "$1" in
     python) printf 'def h(a):\n    return a\ndef g(a):\n    return h(a)\nclass C:\n    def m(self):\n        return g(1)\nprint(C().m())\n' ;;
-    ruby)   printf 'def h(a)\n  a\nend\ndef g(a)\n  h(a)\nend\nclass C\n  def m\n    g(1)\n  end\nend\nputs C.new.m\n' ;;
+    ruby)   printf 'def h(a)\n  a\nend\ndef g(a)\n  h(a)\nend\nclass C\n  def m\n    g(1)\n  end\nend\nputs C.new.m\nputs method(:g).arity\n' ;;
     php)    printf '<?php\nfunction h($a) { return $a; }\nfunction g($a) { return h($a); }\nclass C { function m() { return g(1); } }\necho (new C())->m();\n' ;;
     js|typescript) printf 'function h(a) { return a }\nfunction g(a) { return h(a) }\nclass C { m() { return g(1) } }\nfunction main() { new C().m() }\n' ;;
     metajs) printf 'function h(a) { return a }\nfunction g(a) { return h(a) }\nfunction main() { print(g(1)) }\n' ;;

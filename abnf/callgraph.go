@@ -357,10 +357,10 @@ func extractCallGraph(m *ir.Module) ([]cgDef, []cgCall) {
 					lastPos = -1
 				}
 			}
-		case "js_jsfnmeta", "js_pysig", "js_pyfnname":
+		case "js_jsfnmeta", "js_pysig", "js_pyfnname", "js_rarity":
 			// js/ts/php wrap a closure to give it `name`/`length`, python its
-			// signature and `__name__`, and store the wrapper's result, which is
-			// the same function.
+			// signature and `__name__`, ruby its arity shape, and store the
+			// wrapper's result, which is the same function.
 			if len(call.Args) > 0 {
 				if fn, ok := closureFn[call.Args[0]]; ok {
 					closureFn[call] = fn
