@@ -196,6 +196,9 @@ func (rt *jsrt) jsvStaticSideRead(o *jsObject, name string) uint64 {
 		}
 		return rt.wrap(v)
 	}
+	if name == "__#@species" && jsvSpeciesRoot(o) {
+		return rt.wrap(o)
+	}
 	if (name == "name" || name == "length") && o.props["__del"+name] == true {
 		if sup, isObj := o.props["__super"].(*jsObject); isObj && isClassDesc(sup) {
 			return rt.jsvStaticSideRead(sup, name)
@@ -217,6 +220,29 @@ func (rt *jsrt) jsvStaticSideRead(o *jsObject, name string) uint64 {
 		return rt.wrap(jsvProtoShim(name))
 	}
 	return jsHUndefined
+}
+
+// jsvHasSpecies: is g a builtin whose constructor has a [Symbol.species] getter
+// answering `this` (ECMA-262 23.1.2.5, 27.2.4.8, 22.2.5.2)? Map's and Set's are
+// lib/js-builtins.js's. jsvSpeciesRoot: does class cls's chain end at one, so that
+// it inherits the getter and answers itself? Twins: jsHasSpecies / jsSpeciesRoot in
+// both *-interpreter.abnf, jvHasSpecies / jvSpeciesRoot in languages/lib/js-rt.metajs.
+func jsvHasSpecies(g interface{}) bool {
+	if hf, ok := g.(*hostFunc); ok && (hf.name == "Promise" || hf.name == "RegExp") {
+		return true
+	}
+	return jsvIsArrayGlobal(g)
+}
+
+func jsvSpeciesRoot(cls *jsObject) bool {
+	for guard := 0; guard < 64; guard++ {
+		sup, ok := cls.props["__super"].(*jsObject)
+		if !ok || !isClassDesc(sup) {
+			break
+		}
+		cls = sup
+	}
+	return jsvHasSpecies(cls.props["__ctorfn"])
 }
 
 // jsvProtoTag is Object.prototype.toString's answer for a value.
@@ -1874,6 +1900,10 @@ func jsvGopnKeys(v interface{}) []string {
 			if jsvIsArgs(t) {
 				out = append(out, "callee")
 			}
+			// The named properties, the non-enumerable ones too.
+			if p := jsvArrNamed(t); p != nil {
+				return append(out, jsvGopnKeys(p)...)
+			}
 			return append(out, ks[n:]...)
 		}
 		return jsvOwnKeys(v)
@@ -2987,7 +3017,7 @@ var jsvNumberMethods = map[string]bool{"toFixed": true, "toExponential": true, "
 
 // jsvBuiltinFam is 's' / 'a' / 'n' / 'b' when name is a builtin method of a String,
 // an Array, a Number or a Boolean receiver READ AS A VALUE (js_jsvget), else 0: the
-// names js_jsmcall answers, plus an Array's valueOf. Twins: builtinFam in both
+// names js_jsmcall answers, plus an Array's valueOf and toLocaleString. Twins: builtinFam in both
 // *-interpreter.abnf, jvBuiltinFam in languages/lib/js-rt.metajs.
 func jsvBuiltinFam(target interface{}, name string) byte {
 	switch target.(type) {
@@ -3004,7 +3034,7 @@ func jsvBuiltinFam(target interface{}, name string) byte {
 			return 'b'
 		}
 	case *jsArray:
-		if (jsvArrayMethods[name] || name == "valueOf") && !jsvIsArgs(target) {
+		if (jsvArrayMethods[name] || name == "valueOf" || name == "toLocaleString") && !jsvIsArgs(target) {
 			return 'a'
 		}
 	}
@@ -4859,6 +4889,9 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 	// jvStaticValue in languages/lib/js-rt.metajs.
 	staticVals := map[string]*hostFunc{}
 	staticValue := func(g interface{}, name string) interface{} {
+		if name == "__#@species" && jsvHasSpecies(g) {
+			return g
+		}
 		gname := ""
 		if jsvIsObjectGlobal(g) {
 			gname = "Object"
@@ -5751,11 +5784,19 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 		if f := jsvArgsIterFn(u(a[0]), rt.toString(u(a[1]))); f != nil {
 			return w(f)
 		}
-		// Object.prototype's methods, off a plain object or an instance.
-		if recv, isObj := u(a[0]).(*jsObject); isObj && !isClassDesc(recv) && !rxIsRegexObj(recv) && !jsvNoObjProto(recv) {
-			if name := rt.toString(u(a[1])); jsvIsProtoName(name) {
-				return w(jsvProtoShim(name))
+		// Object.prototype's methods, off a plain object, an instance, an array, or a
+		// string, number or boolean primitive (through its wrapper's prototype).
+		switch recv := u(a[0]).(type) {
+		case *jsObject:
+			if isClassDesc(recv) || rxIsRegexObj(recv) || jsvNoObjProto(recv) {
+				return r
 			}
+		case *jsArray, string, float64, bool:
+		default:
+			return r
+		}
+		if name := rt.toString(u(a[1])); jsvIsProtoName(name) {
+			return w(jsvProtoShim(name))
 		}
 		return r
 	}
@@ -6150,6 +6191,21 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 	// therefore invisible to Object.keys, which is what node says. The emitter calls
 	// this instead of js_set in emitClass's static-field loop; the layer-2 twin is
 	// js_jssfield in languages/lib/js-rt.metajs.
+	// js_jstagstrs(cooked, raw) makes a tagged template's strings array out of its
+	// cooked and raw texts: cooked, frozen, with raw, frozen too, as its own
+	// NON-ENUMERABLE `raw` property (ECMA-262 13.2.8.4 GetTemplateObject). Twins:
+	// js_jstagstrs in languages/lib/js-rt.metajs, tagArgs in both *-interpreter.abnf.
+	m["js_jstagstrs"] = func(a []uint64) uint64 {
+		cooked, ok := u(a[0]).(*jsArray)
+		if !ok {
+			rt.fail("js_jstagstrs needs an array")
+		}
+		rt.setMember(cooked, "raw", u(a[1]))
+		jsvAttrSet(jsvArrNamed(cooked), "__hidden", "raw", true)
+		rt.jsvSetIntegrity(u(a[1]), 3)
+		rt.jsvSetIntegrity(cooked, 3)
+		return a[0]
+	}
 	m["js_jssfield"] = func(a []uint64) uint64 {
 		t, ok := u(a[0]).(*jsObject)
 		if !ok {

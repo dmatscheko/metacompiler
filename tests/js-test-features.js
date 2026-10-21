@@ -916,6 +916,58 @@ check("promise-subclass-species", (function () {
         && spLog.join() === "p,p,p,p,p,p,p,p,p,p,p,p";
 })());
 
+// ----- [Symbol.species] read off a builtin or a subclass; Object.prototype's methods as values -----
+// Array.from / Array.of on an Array subclass make an instance of it. The species
+// getter of Array, Promise, RegExp, Map and Set answers the class it is read on, so
+// a subclass that does not override it answers itself; a class extending nothing has
+// none. An array and a primitive inherit Object.prototype's methods, and an array has
+// its own toLocaleString. Values are node 24's.
+class SpOf extends Array {}
+class SpMap extends Map {}
+check("species-getter-read", (function () {
+    var sp = Symbol.species;
+    var gs = [Array, SpArr, Promise, SpProm, RegExp, Map, SpMap, Set];
+    var r = true;
+    for (var i = 0; i < gs.length; i++) { r = r && gs[i][sp] === gs[i]; }
+    return r && SpPlain[sp] === Array && SpPlainProm[sp] === Promise && (class {})[sp] === undefined
+        && Object[sp] === undefined && Number[sp] === undefined
+        && SpOf.of(4, 5) instanceof SpOf && SpOf.of(4, 5).join() === "4,5" && SpOf.from("ab") instanceof SpOf
+        && SpOf.from("ab").join() === "a,b";
+})());
+check("proto-methods-as-values", (function () {
+    var vals = [[], "s", 5, true];
+    var names = ["hasOwnProperty", "isPrototypeOf", "propertyIsEnumerable", "toLocaleString"];
+    var r = true;
+    for (var i = 0; i < vals.length; i++) {
+        for (var j = 0; j < names.length; j++) { r = r && typeof vals[i][names[j]] === "function"; }
+    }
+    var h = [].hasOwnProperty;
+    var loc = [].toLocaleString;
+    return r && h === ({}).hasOwnProperty && h.call([7], 0) && !h.call([7], 1) && h.call("ab", 1)
+        && [].propertyIsEnumerable.call([7], 0) && !"s".propertyIsEnumerable.call([7], "length")
+        && loc.call([1234.5, "x"]) === "1,234.5,x";
+})());
+
+// ----- a tagged template's strings array -----
+// A frozen array whose own `raw`, the frozen array of the raw texts, is not
+// enumerable (ECMA-262 13.2.8.4). Values are node 24's.
+check("tagged-template-strings-array", (function () {
+    function tag(s) { return s; }
+    var s = tag`a${1}b\n${2}`;
+    var d = Object.getOwnPropertyDescriptor(s, "raw");
+    var ks = [];
+    for (var k in s) { ks.push(k); }
+    var bad = "none";
+    try { s.push("z"); } catch (e) { bad = e.message; }
+    return Array.isArray(s) && s.length === 3 && s[1] === "b\n" && s[2] === "" && Object.isFrozen(s)
+        && Array.isArray(s.raw) && Object.isFrozen(s.raw) && s.raw[1] === "b\\n"
+        && Object.keys(s).join(",") === "0,1,2" && ks.join(",") === "0,1,2" && JSON.stringify(s) === '["a","b\\n",""]'
+        && Object.getOwnPropertyNames(s).join(",") === "0,1,2,length,raw" && !s.propertyIsEnumerable("raw")
+        && s.hasOwnProperty("raw") && !d.enumerable && !d.writable && !d.configurable && d.value === s.raw
+        && s.map(function (x) { return x.length; }).join(",") === "1,2,0"
+        && bad === "Cannot add property 3, object is not extensible" && s.length === 3;
+})());
+
 // ----- a match record is an array carrying index, input and groups -----
 check("regex-match-record-array", (function () {
     var rs = [/(\d+)-(?<w>[a-z]+)/, /\d+/g];

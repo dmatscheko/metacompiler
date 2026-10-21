@@ -5866,11 +5866,9 @@ NotFuncHead = :script(~~
 
     // A tagged template call: tag(strings, ...values). The string parts are the text
     // BETWEEN the interpolations, so there is always one more of them than there are
-    // values ('x${1}y${2}' has the parts "x", "y" and the trailing ""). The parts object
-    // carries them under the index keys plus 'length' and the raw (unescaped) texts under
-    // 'raw' - a plain object rather than a js_arr_new array, because the runtime's arrays
-    // are pure element sequences and cannot carry the 'raw' property the tag protocol
-    // needs. Index reads (strings[0]) work either way: a member read stringifies its key.
+    // values ('x${1}y${2}' has the parts "x", "y" and the trailing ""). js_jstagstrs
+    // makes the array of them the strings array, with the raw (unescaped) texts as its
+    // 'raw' property.
     function emitTagCall(b, fnV, thisV, parts, site) {
         var cooked = []
         var raws = []
@@ -5891,15 +5889,13 @@ NotFuncHead = :script(~~
         }
         cooked.push(curStr)
         raws.push(curRaw)
-        var stringsV = callExt(b, "js_obj_new", [])
-        // strings.raw carries no property of its own, so it is a real array.
+        var cookedV = callExt(b, "js_arr_new", [])
         var rawV = callExt(b, "js_arr_new", [])
         for (var j = 0; j < cooked.length; j++) {
-            callExt(b, memSetExt(), [stringsV, emitStr(b, "" + j), emitStr(b, cooked[j])])
+            callExt(b, "js_arr_push", [cookedV, emitStr(b, cooked[j])])
             callExt(b, "js_arr_push", [rawV, emitStr(b, raws[j])])
         }
-        callExt(b, memSetExt(), [stringsV, emitStr(b, "length"), callExt(b, "js_num_i", [handle(cooked.length)])])
-        callExt(b, memSetExt(), [stringsV, emitStr(b, "raw"), rawV])
+        var stringsV = callExt(b, "js_jstagstrs", [cookedV, rawV])
         var argsV = callExt(b, "js_arr_new", [])
         callExt(b, "js_arr_push", [argsV, stringsV])
         for (var k = 0; k < exprs.length; k++) {

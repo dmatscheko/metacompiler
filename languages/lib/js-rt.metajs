@@ -1706,17 +1706,17 @@ function jvIndexKeys(n) {
     return out
 }
 
-// An array's own keys: its indices, then its NAMED properties in insertion order
-// (node's OrdinaryOwnPropertyKeys). The floor's set_member keeps a key that is no
-// index in an object in the array cell's field e, which arrProps (host id 106)
-// answers, undefined while there is none. Twin: jsvArrNamed in
+// An array's own enumerable keys: its indices, then its enumerable NAMED properties
+// in insertion order (node's OrdinaryOwnPropertyKeys). The floor's set_member keeps
+// a key that is no index in an object in the array cell's field e, which arrProps
+// (host id 106) answers, undefined while there is none. Twin: jsvArrNamed in
 // abnf/jsrtjsprint.go.
 function jvArrKeys(a) {
     var out = jvIndexKeys(a.length)
     var p = anytype
     p = arrProps(a)
     if (p !== undefined) {
-        var ks = keysOf(p)
+        var ks = jvEnumKeys(p, keysOf(p))
         var i = 0
         while (i < ks.length) {
             out.push(ks[i])
@@ -1731,6 +1731,16 @@ function jvArrNamedHas(a, k) {
     p = arrProps(a)
     if (p === undefined) { return false }
     return jvSlotHas(p, k)
+}
+
+// A tagged template's strings array. Twin of js_jstagstrs in abnf/jsrtjsprint.go,
+// which states the rule.
+function js_jstagstrs(cooked, raw) {
+    cooked["raw"] = raw
+    jvAttrSet(arrProps(cooked), "__nonenum", "raw", true)
+    jvSetIntegrity(raw, 3)
+    jvSetIntegrity(cooked, 3)
+    return cooked
 }
 
 function js_jssfield(statics, key, v) {
@@ -1863,6 +1873,9 @@ function jvStaticSideRead(o, k) {
     v = jvStaticFind(o, k)
     if (jvIsAcc(v)) { return jvAccGet(v, o) }
     if (v !== undefined) { return v }
+    if (k == "__#@species") {
+        if (jvSpeciesRoot(o)) { return o }
+    }
     if (k == "name" || k == "length") {
         if (o["__del" + k] === true) {
             var sup = anytype
@@ -2252,7 +2265,7 @@ function jvMethodValueFn(fn) {
 // function, one per kind and name whatever the receiver, taking `this` from its
 // call site (jvThis, read at entry) - `f.call([9], 3)` pushes onto [9]. Interned;
 // a call re-enters js_jsmcall on the call-site receiver. The names are the ones
-// js_jsmcall answers, plus an Array's valueOf. Twins: jsvBuiltinValue in
+// js_jsmcall answers, plus an Array's valueOf and toLocaleString. Twins: jsvBuiltinValue in
 // abnf/jsrtjsprint.go, builtinValue in both *-interpreter.abnf.
 var jvBuiltinVals = {}
 function jvBuiltinFam(o, key) {
@@ -2265,7 +2278,7 @@ function jvBuiltinFam(o, key) {
         return ""
     }
     if (Array.isArray(o)) {
-        if ((jvArrM[key] === 1 || key == "valueOf") && !jvIsArgs(o)) { return "a" }
+        if ((jvArrM[key] === 1 || key == "valueOf" || key == "toLocaleString") && !jvIsArgs(o)) { return "a" }
     }
     return ""
 }
@@ -2567,6 +2580,11 @@ function jvValueMiss(o, key) {
     if (key == "isPrototypeOf" || key == "toLocaleString") {
         if (jvIsCallable(o)) { return jvProtoShim(key) }
     }
+    // An array's and a string, number or boolean primitive's Object.prototype methods
+    // (through Array.prototype or the wrapper's prototype).
+    if (jvIsProtoName(key)) {
+        if (typeof o == "string" || typeof o == "number" || typeof o == "boolean" || Array.isArray(o)) { return jvProtoShim(key) }
+    }
     return jvStaticValue(o, key)
 }
 
@@ -2598,6 +2616,9 @@ function jvStaticHas(g, key) {
     return false
 }
 function jvStaticValue(g, key) {
+    if (key == "__#@species") {
+        if (jvHasSpecies(g)) { return g }
+    }
     var gn = ""
     if (jvIsObjectGlobal(g)) { gn = "Object" }
     if (jvStringFn !== undefined && g === jvStringFn) { gn = "String" }
@@ -4258,6 +4279,16 @@ function jvBuiltinBase(cls) {
     }
     return undefined
 }
+
+// A builtin whose constructor has a [Symbol.species] getter answering `this`, and a
+// class whose chain ends at one, which inherits it. Twin of jsvHasSpecies /
+// jsvSpeciesRoot in abnf/jsrtjsprint.go, which state the rule.
+function jvHasSpecies(g) {
+    if (g === jxRegExpFn) { return true }
+    if (jpFn !== undefined && g === jpFn) { return true }
+    return jvIsArrayGlobal(g)
+}
+function jvSpeciesRoot(cls) { return jvHasSpecies(jvBuiltinBase(cls)) }
 
 function js_jsheritage(v) {
     if (!jvIsObjectGlobal(v)) {
@@ -6090,6 +6121,20 @@ function jvObjectGlobalMethod(name, args) {
         // A non-enumerable property is in the key order too, where it was defined.
         if (name == "getOwnPropertyNames" && jvNeN > 0 && jvIsObj(src)) {
             if (src["__nonenum"] !== undefined) { ks = jvErrHide(src, jvIndexOrder(keysOf(src))) }
+        }
+        // ...and an array's named properties, the non-enumerable ones too.
+        if (name == "getOwnPropertyNames" && jvNeN > 0 && Array.isArray(src)) {
+            var gp = anytype
+            gp = arrProps(src)
+            if (gp !== undefined) {
+                ks = jvIndexKeys(src.length)
+                var gpk = keysOf(gp)
+                var gpi = 0
+                while (gpi < gpk.length) {
+                    ks.push(gpk[gpi])
+                    gpi = gpi + 1
+                }
+            }
         }
         // ...and an array's or a string's `length` after its indices, before an
         // array's named properties, an arguments object's `callee` after that.

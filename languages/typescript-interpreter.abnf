@@ -2955,6 +2955,10 @@ NotFuncHead = :script(~~
             var gk = ak.slice(0, lenAt)
             gk.push("length")
             if (jsIsArgs(v)) { gk.push("callee") }
+            // The named properties, the non-enumerable ones too.
+            var gp = anytype // The array's named properties, or undefined (jsArrNamed).
+            gp = Array.isArray(v) ? jsArrNamed(v, false) : undefined
+            if (gp !== undefined) { return gk.concat(jsGopnKeys(gp)) }
             return gk.concat(ak.slice(lenAt))
         }
         if (typeof v == "object" && v !== null && hasOwn(v, "__protoof")) { return jsProtoGopn(v) }
@@ -4989,8 +4993,7 @@ NotFuncHead = :script(~~
                     if (cf != undefined) { return cf }
                 }
                 // A numeric index on a plain object addresses the string key "0", "1",
-                // ... - which is what an array-LIKE object (a tagged template's chunk
-                // list) is built out of.
+                // ... - which is what an array-LIKE object is built out of.
                 if (typeof k == "number" && hasOwn(o, "" + k)) { return o["" + k] }
                 // A String wrapper's length and indices are its string's.
                 if (typeof o.__bvof == "string" && (k === "length" || jsArrayIndex("" + k) >= 0)) { return getMemberRaw(o.__bvof, k) }
@@ -5086,6 +5089,7 @@ NotFuncHead = :script(~~
             }
             return hit.v
         }
+        if (k === "__#@species" && jsSpeciesRoot(o)) { return o }
         if ((k == "name" || k == "length") && hasOwn(o, "__del" + k)) {
             var sup = anytype // The parent class, whose own name / length a deleted one reads.
             sup = o.__super
@@ -5173,6 +5177,9 @@ NotFuncHead = :script(~~
             var bf = builtinFam(o, k)
             if (bf != "") { return builtinValue(bf, k) }
             if (hasOwn(bvArr, k) && jsIsArgs(o)) { return jsIsProtoName(k) ? jsProtoShim(k) : undefined }
+            // A primitive's Object.prototype methods, through its wrapper's prototype -
+            // answered here, before the read reaches the host's own prototype under goja.
+            if (typeof o != "object" && jsIsProtoName(k)) { return jsProtoShim(k) }
         }
         // An arguments object's `length` is its own slot (jsIsArgs).
         if (argsWant && k === "length" && jsIsArgs(o)) { return jsArgsLen(o) }
@@ -5210,6 +5217,8 @@ NotFuncHead = :script(~~
             if (cm !== undefined) { return cm }
             if (jsIsProtoName(k) && !isClassDesc(o) && !isBigInt(o) && !rxIsRegexObj(o) && !jsNoObjProto(o)) { return jsProtoShim(k) }
         }
+        // An array inherits Object.prototype's methods through Array.prototype.
+        if (Array.isArray(o) && jsIsProtoName(k)) { return jsProtoShim(k) }
         return v
     }
     // The __class/__super walk for a callable member. The `guard` cap is the same 64
@@ -5226,6 +5235,7 @@ NotFuncHead = :script(~~
     var stLen2 = ["assign", "create", "is", "hasOwn", "groupBy", "parseInt", "defineProperties", "setPrototypeOf",
                   "getOwnPropertyDescriptor"]
     function staticValue(g, k) {
+        if (k === "__#@species" && jsHasSpecies(g)) { return g }
         var gn = ""
         if (g === jsObjectGlobal) { gn = "Object" }
         if (g === jsStringFn) { gn = "String" }
@@ -5286,7 +5296,8 @@ NotFuncHead = :script(~~
                    "includes", "join", "concat", "reverse", "sort", "map", "filter", "forEach",
                    "reduce", "reduceRight", "some", "every", "find", "findIndex", "findLast",
                    "findLastIndex", "flat", "flatMap", "fill", "at", "toString", "valueOf",
-                   "keys", "values", "entries", "toReversed", "toSorted", "toSpliced", "with", "copyWithin"])
+                   "keys", "values", "entries", "toReversed", "toSorted", "toSpliced", "with", "copyWithin",
+                   "toLocaleString"])
     bvSeed(bvNum, ["toFixed", "toExponential", "toPrecision", "toString", "valueOf", "toLocaleString"])
     bvSeed(bvBool, ["toString", "valueOf"])
     // "s" / "a" / "n" / "b" when `k` is a builtin method of the receiver's kind, else "".
@@ -7617,16 +7628,11 @@ NotFuncHead = :script(~~
         cooked.push(cur)
         raws.push(raw)
         // See the twin of this comment in js-interpreter.abnf.
-        var strs = {}
-        var ks = []
-        for (var j = 0; j < cooked.length; j++) {
-            scopePut(strs, "" + j, cooked[j])
-            ks.push("" + j)
-        }
-        scopePut(strs, "length", cooked.length)
-        scopePut(strs, "raw", raws)
-        scopePut(strs, "__keys", ks)
-        return concat2impl([strs], subs)
+        setMember(cooked, "raw", raws)
+        jsAttrSet(jsArrNamed(cooked, false), "__hidden", "raw", true)
+        jsSetIntegrity(raws, 3)
+        jsSetIntegrity(cooked, 3)
+        return concat2impl([cooked], subs)
     }
 
     // ----- Generators -----
@@ -8511,6 +8517,18 @@ NotFuncHead = :script(~~
         var none = anytype
         none = undefined
         return none
+    }
+    // See the twin of this comment in js-interpreter.abnf.
+    function jsHasSpecies(f) { return f === jsArrayFn || f === jsPromiseFn || f === hostGlobals["RegExp"] }
+    function jsSpeciesRoot(cls) {
+        var cl = anytype // The descriptor at the end of the chain.
+        cl = cls
+        var guard = 0
+        while (isClassDesc(cl.__super) && guard < 64) {
+            cl = cl.__super
+            guard = guard + 1
+        }
+        return hasOwn(cl, "__ctorfn") && jsHasSpecies(cl.__ctorfn)
     }
     function jsArrSubRead(a, k) {
         var none = anytype

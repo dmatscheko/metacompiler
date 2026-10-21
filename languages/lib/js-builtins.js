@@ -169,6 +169,8 @@ class Set extends __Coll {
     entries() { return new __CollIter(this, 2) }
     ["__#@iterator"]() { return new __CollIter(this, 1) }
     toString() { return "[object Set]" }
+    // [Symbol.species] (ECMA-262 24.2.3.2): the class it is read on, a subclass too.
+    static get ["__#@species"]() { return this }
 }
 
 class Map extends __Coll {
@@ -201,6 +203,7 @@ class Map extends __Coll {
     entries() { return new __CollIter(this, 2) }
     ["__#@iterator"]() { return new __CollIter(this, 2) }
     toString() { return "[object Map]" }
+    static get ["__#@species"]() { return this }
     // Map.groupBy(items, f): the items in a Map from f(item, index) to the items it
     // gave that key, the keys in first-seen order and compared as Map keys.
     static groupBy(items, f) {

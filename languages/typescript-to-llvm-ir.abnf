@@ -4146,15 +4146,13 @@ NotFuncHead = :script(~~
         }
         cooked.push(curStr)
         raws.push(curRaw)
-        var stringsV = callExt(b, "js_obj_new", [])
-        // strings.raw carries no property of its own, so it is a real array.
+        var cookedV = callExt(b, "js_arr_new", [])
         var rawV = callExt(b, "js_arr_new", [])
         for (var j = 0; j < cooked.length; j++) {
-            callExt(b, memSetExt(), [stringsV, emitStr(b, "" + j), emitStr(b, cooked[j])])
+            callExt(b, "js_arr_push", [cookedV, emitStr(b, cooked[j])])
             callExt(b, "js_arr_push", [rawV, emitStr(b, raws[j])])
         }
-        callExt(b, memSetExt(), [stringsV, emitStr(b, "length"), callExt(b, "js_num_i", [handle(cooked.length)])])
-        callExt(b, memSetExt(), [stringsV, emitStr(b, "raw"), rawV])
+        var stringsV = callExt(b, "js_jstagstrs", [cookedV, rawV])
         var argsV = callExt(b, "js_arr_new", [])
         callExt(b, "js_arr_push", [argsV, stringsV])
         for (var k = 0; k < exprs.length; k++) {
