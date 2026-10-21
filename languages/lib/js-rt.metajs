@@ -2837,6 +2837,11 @@ function jvHas(o, key) {
         }
         if (Array.isArray(o)) {
             if (key == "length" || jvArrM[key] === 1) { return true }
+            if (jvArrClsN > 0) {
+                var hac = anytype
+                hac = jvArrClass(o)
+                if (hac !== undefined) { if (jvProtoChainHas(hac, key)) { return true } }
+            }
         }
         if (jvIsCallable(o) || jvIsClassDesc(o)) {
             if (key == "call" || key == "apply" || key == "bind" || key == "name" || key == "length") { return true }
@@ -3552,6 +3557,14 @@ function js_jsinstanceof(v, c) {
         if (jvIsObjLike(v)) { return true }
         return jvIsCallable(v)
     }
+    // The prototype of a class extending a builtin is an instance of the builtin.
+    if (jvIsObj(v) && (jvArrayRoot !== undefined || jvHostRoots.length > 0)) {
+        var pvd = anytype
+        pvd = v["__protoof"]
+        if (pvd !== undefined) {
+            if (jvBuiltinBase(pvd) === c) { return true }
+        }
+    }
     if (jvIsArrayGlobal(c)) { return Array.isArray(v) && !jvIsArgs(v) }
     if (jvFunctionFn !== undefined && c === jvFunctionFn) { return jvIsCallable(v) || jvIsClassDesc(v) }
     if (jpFn !== undefined && c === jpFn) { return jpIs(v) }
@@ -4138,6 +4151,26 @@ function jvHostRoot(b) {
     }
     jvHostRoots.push(d)
     return d
+}
+
+// The builtin a class's chain ends at (jvArrayRootOf / jvHostRoot), whose statics
+// the class inherits; undefined for any other class. Twin of the class-descriptor arm
+// of js_jsmcall in abnf/jsrtjsprint.go.
+function jvBuiltinBase(cls) {
+    var c = anytype
+    c = cls
+    var guard = 0
+    while (jvIsObj(c) && guard < 64) {
+        if (c === jvArrayRoot) { return c["__ctorfn"] }
+        var i = 0
+        while (i < jvHostRoots.length) {
+            if (jvHostRoots[i] === c) { return c["__ctorfn"] }
+            i = i + 1
+        }
+        c = c["__super"]
+        guard = guard + 1
+    }
+    return undefined
 }
 
 function js_jsheritage(v) {
@@ -5426,6 +5459,11 @@ function jvGetProto(v) {
     if (typeof v == "boolean") { return jvBuiltinProtoAt(6) }
     if (jbIsBig(v)) { return jvBuiltinProtoAt(5) }
     if (Array.isArray(v)) {
+        if (jvArrClsN > 0) {
+            var gac = anytype
+            gac = jvArrClass(v)
+            if (gac !== undefined) { return jvProtoView(gac) }
+        }
         if (jvIsArgs(v) || v === jvBuiltinProtoAt(0)) { return jvObjProto }
         return jvBuiltinProtoAt(0)
     }
@@ -5449,6 +5487,7 @@ function jvGetProto(v) {
     var wp = anytype
     wp = v["__bvof"]
     if (wp !== undefined) {
+        if (jvIsObj(v["__class"])) { return jvProtoView(v["__class"]) }
         var wpr = jvBuiltinProtoAt(jvWrapProtoAt(wp))
         if (v === wpr) { return jvObjProto }
         return wpr
@@ -5458,6 +5497,13 @@ function jvGetProto(v) {
     if (pd !== undefined) {
         sup = pd["__super"]
         if (!jvIsObj(sup) || sup === jvObjectRoot) { return jvObjProto }
+        // A class extending a builtin: the builtin's prototype is the next one up.
+        var sbf = anytype
+        sbf = sup["__ctorfn"]
+        if (sbf !== undefined) {
+            var sba = jvBuiltinAt(sbf)
+            if (sba >= 0) { return jvBuiltinProtoAt(sba) }
+        }
         return jvProtoView(sup)
     }
     var cls = anytype
@@ -6437,6 +6483,9 @@ function js_jsmcall(recv, key, args) {
         if (jvIsStaticSide(recv, name)) {
             if (jvStaticFind(recv, name) === undefined) {
                 if (jvIsProtoName(name)) { return jvProtoApply(recv, name, args) }
+                var hb = anytype
+                hb = jvBuiltinBase(recv)
+                if (hb !== undefined) { return js_jsmcall(hb, name, args) }
                 if (jvMissCallSet) { return jvMissCall }
             }
         }

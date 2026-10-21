@@ -4821,6 +4821,10 @@ function s103(): void {
     check("xb103c", u.shout() === "HEY!" && u.length === 3 && u + "?" === "hey?" && u instanceof String && u.constructor === U103 &&
         typeof u === "object");
     check("xb103d", n.half() === 15 && (n as any) + 0 === 30 && n instanceof Number && n.toFixed(1) === "30.0" && new B103b(false).neg());
+    // The builtin's statics are the subclass's too.
+    check("xb103e", L103.isArray(l) && !K103.isArray({}) && Q103.resolve(v103[0]) instanceof Promise && N103.isInteger(v103[2]));
+    check("xb103f", Object.getPrototypeOf(l) === L103.prototype && "sum" in l && "last" in l && !("zz" in l) &&
+        L103.prototype instanceof Array && Object.getPrototypeOf(L103.prototype) === Array.prototype && Object.getPrototypeOf(u) === U103.prototype);
 }
 
 // ===== SECTION 104: a class declared inside a try, catch or finally block =====

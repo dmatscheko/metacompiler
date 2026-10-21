@@ -2957,6 +2957,10 @@ function s110() {
     check("xb110c", u.shout() === "HEY!" && u.length === 3 && u + "?" === "hey?" && u instanceof String && u.constructor === U110 &&
         typeof u === "object")
     check("xb110d", n.half() === 15 && n + 0 === 30 && n instanceof Number && n.toFixed(1) === "30.0" && new B110b(false).neg())
+    // The builtin's statics are the subclass's too.
+    check("xb110e", L110.isArray(l) && !K110.isArray({}) && Q110.resolve(v110[0]) instanceof Promise && N110.isInteger(v110[2]))
+    check("xb110f", Object.getPrototypeOf(l) === L110.prototype && "sum" in l && "last" in l && !("zz" in l) &&
+        L110.prototype instanceof Array && Object.getPrototypeOf(L110.prototype) === Array.prototype && Object.getPrototypeOf(u) === U110.prototype)
 }
 
 // ===== SECTION 111: a class declared inside a try, catch or finally block =====

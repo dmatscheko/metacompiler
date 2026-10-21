@@ -5022,6 +5022,16 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 		if jsvIsObjectGlobal(target) {
 			return boolH(jsvIsObjLike(v) || isCallable(v))
 		}
+		// The prototype of a class extending a builtin is an instance of the builtin.
+		if o, isObj := v.(*jsObject); isObj {
+			c, _ := o.props["__protoof"].(*jsObject)
+			for guard := 0; c != nil && guard < 64; guard++ {
+				if b, isHost := c.props["__ctorfn"].(*hostFunc); isHost && interface{}(b) == target {
+					return boolH(true)
+				}
+				c, _ = c.props["__super"].(*jsObject)
+			}
+		}
 		if hf, isHost := target.(*hostFunc); isHost {
 			switch hf.name {
 			case "Function":
@@ -5724,6 +5734,9 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 		if _, isArr := u(a[0]).(*jsArray); isArr && (name == "length" || jsvArrayMethods[name] || jsvObjProtoName(jsvKeyUnesc(name))) {
 			return w(true)
 		}
+		if cls := jsvArrClass(u(a[0])); cls != nil && jsvProtoChainHas(cls, name) {
+			return w(true)
+		}
 		if p, isWrap := jsvWrapped(u(a[0])); isWrap {
 			if ps, isStr := p.(string); isStr && rt.jsvHasOwn(ps, name) {
 				return w(true)
@@ -6227,6 +6240,9 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 		case *jsBigInt:
 			return builtinProtoNamed("BigInt")
 		case *jsArray:
+			if cls := jsvArrClass(x); cls != nil {
+				return protoView(cls)
+			}
 			if jsvIsArgs(x) || interface{}(x) == builtinProtoNamed("Array") {
 				return objProto
 			}
@@ -6249,6 +6265,9 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 				return jsNull
 			}
 			if p, isWrap := x.props["__bvof"]; isWrap {
+				if d, isInst := x.props["__class"].(*jsObject); isInst {
+					return protoView(d)
+				}
 				if wp := builtinProtoNamed(jsvWrapCtor(p)); wp != interface{}(x) {
 					return wp
 				}
@@ -6258,6 +6277,12 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 				sd, ok := d.props["__super"].(*jsObject)
 				if !ok || sd == objectRoot {
 					return objProto
+				}
+				// A class extending a builtin: the builtin's prototype is the next one up.
+				if b, isHost := sd.props["__ctorfn"].(*hostFunc); isHost {
+					if bp := builtinProto(b); bp != nil {
+						return bp
+					}
 				}
 				return protoView(sd)
 			}
@@ -6337,6 +6362,17 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 		if _, isStatic := jsvIsStaticSide(u(a[0]), rt.toString(u(a[1]))); isStatic {
 			if name := rt.toString(u(a[1])); jsvIsProtoName(name) {
 				return w(rt.jsvProtoApply(u(a[0]), name, arr.elems))
+			}
+			// A class extending a builtin inherits the builtin's statics (`V.isArray(x)`):
+			// the root descriptor arrayRoot / hostRoot files the builtin as __ctorfn.
+			// Twins: jsBuiltinBase in both *-interpreter.abnf, jvBuiltinBase in
+			// languages/lib/js-rt.metajs.
+			c, _ := u(a[0]).(*jsObject)
+			for guard := 0; c != nil && guard < 64; guard++ {
+				if b, isHost := c.props["__ctorfn"].(*hostFunc); isHost {
+					return m["js_jsmcall"]([]uint64{w(b), a[1], a[2]})
+				}
+				c, _ = c.props["__super"].(*jsObject)
 			}
 			if v, ok := rt.mcallMiss(); ok {
 				return w(v)

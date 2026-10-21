@@ -3688,6 +3688,7 @@ NotFuncHead = :script(~~
         if (typeof v == "boolean") { return builtinProto(jsBooleanFn) }
         if (isBigInt(v)) { return builtinProto(jsBigIntFn) }
         if (Array.isArray(v)) {
+            if (jsArrClasses.length > 0 && jsArrClassOf(v) !== undefined) { return protoView(jsArrClassOf(v)) }
             if (jsIsArr(v) && v !== builtinProto(jsArrayFn)) { return builtinProto(jsArrayFn) }
             return jsObjectProto
         }
@@ -3698,6 +3699,7 @@ NotFuncHead = :script(~~
         }
         if (typeof v == "function") { return v === builtinProto(jsFunctionFn) ? jsObjectProto : builtinProto(jsFunctionFn) }
         if (v === jsObjectProto || v.__nullproto === true) { return null }
+        if (jsIsWrap(v) && v.__class != undefined) { return protoView(v.__class) }
         if (jsIsWrap(v)) {
             var wp = anytype // The wrapper's builtin prototype.
             wp = builtinProto(jsWrapCtor(v.__bvof))
@@ -3707,6 +3709,8 @@ NotFuncHead = :script(~~
             var sd = anytype // The parent class, if any.
             sd = v.__protoof.__super
             if (sd == undefined || sd == null || sd === jsObjectRootClass) { return jsObjectProto }
+            // A class extending a builtin: the builtin's prototype is the next one up.
+            if (hasOwn(sd, "__ctorfn") && builtinProto(sd.__ctorfn) !== undefined) { return builtinProto(sd.__ctorfn) }
             return protoView(sd)
         }
         if (v.__class != undefined) { return protoView(v.__class) }
@@ -6932,6 +6936,7 @@ NotFuncHead = :script(~~
         // A FUNCTION's own properties (fnOwn), and nothing else.
         if (typeof o == "function") { return fnOwn(o, "" + k) }
         if (argsWant && jsIsArgs(o)) { return jsArgsHas(o, k) }
+        if (jsArrClasses.length > 0 && Array.isArray(o) && jsArrClassOf(o) !== undefined && jsProtoChainHas(jsArrClassOf(o), "" + k)) { return true }
         if (Array.isArray(o)) { var n = k - 0; return n >= 0 && n < o.length }
         if (jsIsWrap(o) && typeof o.__bvof == "string" && jsHasOwn(o.__bvof, k)) { return true }
         // `"m" in C` asks the STATIC namespace and nothing else: the descriptor's own
@@ -6980,6 +6985,8 @@ NotFuncHead = :script(~~
             biRaise("TypeError: Right-hand side of 'instanceof' is not callable")
         }
         if (v == undefined || v == null) { return false }
+        // The prototype of a class extending a builtin is an instance of the builtin.
+        if (typeof v == "object" && !Array.isArray(v) && hasOwn(v, "__protoof") && jsBuiltinBase(v.__protoof) === cls) { return true }
         // The two host constructors a program may legitimately test against. There is no
         // prototype chain here, so they are answered from the value's own shape.
         if (cls === hostGlobals["Object"]) { return typeof v == "object" || typeof v == "function" }
@@ -8213,7 +8220,24 @@ NotFuncHead = :script(~~
         var pc2 = anytype // {v} or null.
         pc2 = jsProtoCall(target, name, args)
         if (pc2 != null) { return pc2.v }
+        // See the twin of this comment in js-interpreter.abnf.
+        if (isClassDesc(target)) {
+            var bb = anytype // The builtin the class's chain ends at, or undefined.
+            bb = jsBuiltinBase(target)
+            if (bb !== undefined) {
+                var bs = anytype // {v} or null.
+                bs = jsBuiltin(bb, name, args)
+                if (bs != null) { return bs.v }
+            }
+        }
         biRaise("TypeError: " + site + " is not a function")
+    }
+    function jsBuiltinBase(cls) {
+        for (var cl = cls; cl != undefined && cl != null; cl = cl.__super) {
+            if (cl === jsArrayRootClass) { return jsArrayFn }
+            for (var i = 0; i < jsHostRoots.length; i++) { if (jsHostRoots[i] === cl) { return cl.__ctorfn } }
+        }
+        return undefined
     }
 
     // ----- Class members -----
