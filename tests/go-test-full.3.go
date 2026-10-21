@@ -1075,6 +1075,25 @@ func s124() {
 		"int64 uint64 int main.c124")
 }
 
+// ===== SECTION 125: the bytes of a surrogate's UTF-8 =====
+// ED A0 80 spells a surrogate, which UTF-8 forbids: to Go it is three bytes, each
+// a rune of its own (U+FFFD, width 1), and two such triples concatenate to six
+// bytes rather than to one astral character. The expected values are go run's.
+func s125() {
+	hs := []string{"\xed\xa0\x80", "\xed\xb0\x80"}
+	s := hs[0] + hs[1]
+	var b strings.Builder
+	b.WriteString(hs[0])
+	b.WriteString(hs[1])
+	check("surcat125", len(s) == 6 && s[3] == 0xed && fmt.Sprint([]byte(s)) == "[237 160 128 237 176 128]")
+	check("surjoin125", fmt.Sprintf("%s%s", hs[0], hs[1]) == s && strings.Join(hs, "") == s && b.String() == s)
+	check("surwid125", fmt.Sprintf("%-4s|%.1s|%3.2s|", hs[0], hs[0], hs[0]) == hs[0]+" |\xed| \xed\xa0|")
+	sp := strings.Split(hs[0], "")
+	check("sursplit125", len(sp) == 3 && sp[0] == "\xed" && sp[2] == "\x80" && fmt.Sprint(strings.SplitN("a😀c", "", 2)) == "[a 😀c]")
+	r := []rune{0x1F600, 'x'}
+	check("surrune125", string(r[0]) == "\xf0\x9f\x98\x80" && string(r) == "😀x" && fmt.Sprintf("😀%c|%3s|", r[0], "😀") == "😀😀|  😀|")
+}
+
 func main() {
 	s94()   // SECTION-CALL 94
 	s95()   // SECTION-CALL 95
@@ -1105,6 +1124,7 @@ func main() {
 	s122()  // SECTION-CALL 122
 	s123()  // SECTION-CALL 123
 	s124()  // SECTION-CALL 124
+	s125()  // SECTION-CALL 125
 	fmt.Println("full:", checks, "checks,", fails, "failures")
 	os.Exit(fails)
 }

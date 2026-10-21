@@ -6910,6 +6910,10 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         // closure and the js_gotry body inside it, hence twice the frames. Twin of
         // coreDeepHook in go-interpreter.abnf.
         callExt(b, "js_rt_deep", [emitNum(b, 20000), emitStr(b, "runtime: goroutine stack exceeds 1000000000-byte limit\nfatal error: stack overflow\n"), emitNum(b, 2)])
+        // A Go string is its bytes, so the floor neither rejoins nor cleans three
+        // that spell a surrogate (RT_RAW_STR in languages/lib/runtime.c). The Go
+        // twin's go externs never do (js_giadd, js_goprint in abnf/jsrtgolang.go).
+        if (c.exePath != undefined && c.exePath != "") { callExt(b, "js_rt_rawstr", []) }
         var fmtV = callExt(b, "js_obj_new", [])
         b = declPrint(b, fmtV, "Println", "js_goprint", 0)
         b = declPrint(b, fmtV, "Print", "js_gowrite", 1)

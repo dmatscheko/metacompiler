@@ -69,12 +69,14 @@ func init() {
 	rxExtraExterns = append(rxExtraExterns, func(rt *jsrt, m map[string]func(args []uint64) uint64) {
 		u := rt.unwrap
 
+		// A Go string is its bytes, written as they are: three that spell a
+		// surrogate are not a character to clean (the floor's RT_RAW_STR).
 		m["js_goprint"] = func(a []uint64) uint64 {
 			out, nl := rt.gopCompose(u(a[0]), int(rt.toNumber(u(a[1]))))
 			if nl {
 				out += "\n"
 			}
-			fmt.Fprint(outWriter, wtf8Clean(out))
+			fmt.Fprint(outWriter, out)
 			return 0
 		}
 		m["js_gowrite"] = func(a []uint64) uint64 {
@@ -82,7 +84,7 @@ func init() {
 			if nl {
 				out += "\n"
 			}
-			fmt.Fprint(outWriter, wtf8Clean(out))
+			fmt.Fprint(outWriter, out)
 			return 0
 		}
 		m["js_goerrors"] = func(a []uint64) uint64 {
@@ -2289,7 +2291,7 @@ func init() {
 		// so a write's own trailing newline is dropped first. Twin of js_gofdwrite in
 		// lib/go-rt.metajs, goFdWrite in go-interpreter.abnf.
 		m["js_gofdwrite"] = func(a []uint64) uint64 {
-			s := wtf8Clean(rt.toString(u(a[1])))
+			s := rt.toString(u(a[1]))
 			if rt.toNumber(u(a[0])) == 1 {
 				fmt.Fprint(outWriter, s)
 			} else {

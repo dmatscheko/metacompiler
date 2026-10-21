@@ -2211,6 +2211,9 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     function gfHBytesStr(bs) { return utf8Decode(bs) }
     function gfHQuote(s, delim) { return gQuoteBody(s, delim.charCodeAt(0)) }
     function gfHRune(cp) { return fromCodePoint(cp) }
+    // A held byte is a unit of its own here, so units are runes.
+    function gfHRuneCount(s) { return gfRuneCount(s) }
+    function gfHRuneCut(s, n) { return gfRuneCut(s, n) }
     // The body of strconv.Quote / QuoteRune: the letter escapes, the backslash and
     // whichever delimiter is in force (`delim` is that character's code), \xHH for
     // the other ASCII controls and gfUEsc for any other character that is not

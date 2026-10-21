@@ -47,8 +47,8 @@
 #             the right answer is 0 and any wrong one is not.
 #
 # Real-language rows join them: lua/bytes, because what lua's print writes for a
-# string that is not valid UTF-8 is visible only in the output bytes (php/bytes and
-# bash/bytes - the NUL bytes printf writes - likewise), bash/stack, whose
+# string that is not valid UTF-8 is visible only in the output bytes (php/bytes,
+# go/bytes and bash/bytes - the NUL bytes printf writes - likewise), bash/stack, whose
 # failure is a native stack overflow, and bash/heap, a run far past the IR
 # interpreter's step brake whose failure is running out of string heap. Their
 # fixtures are the real toolchain's output, not blessed ones of ours - except
@@ -134,6 +134,7 @@ EXPECT_ROWS="brainfuck:features:tests/brainfuck-test-features.txt:tests/brainfuc
              bash:stderr:tests/bash-native-stderr.sh:tests/bash-stderr.expected
              batch:nest:tests/batch-native-nest.cmd:tests/batch-nest.expected
              lua:bytes:tests/lua-test-bytes.lua:tests/lua-bytes.expected
+             go:bytes:tests/go-test-bytes.go:tests/go-bytes.expected
              php:bytes:tests/php-test-bytes.php:tests/php-bytes.expected"
 
 JOBS="${MEC_JOBS:-$( (sysctl -n hw.ncpu || nproc || echo 4) 2>/dev/null )}"

@@ -960,13 +960,15 @@ func init() {
 		rel("js_gigt", func(c int) bool { return c == 1 })
 		rel("js_gige", func(c int) bool { return c == 1 || c == 0 })
 		// '+' is the one arithmetic operator that is not only arithmetic: in Go
-		// it also concatenates strings, and a float operand keeps its box. Two
-		// integers add at 64 bits and wrap to the result type's width.
+		// it also concatenates strings - their bytes, so two halves of a
+		// surrogate's UTF-8 stay six bytes (no strConcat) - and a float operand
+		// keeps its box. Two integers add at 64 bits and wrap to the result
+		// type's width.
 		m["js_giadd"] = func(a []uint64) uint64 {
 			l, r := u(a[0]), u(a[1])
 			if ls, ok := l.(string); ok {
 				if rs, ok2 := r.(string); ok2 {
-					return rt.wrapStr(strConcat(ls, rs))
+					return rt.wrapStr(ls + rs)
 				}
 			}
 			if jvmIsFlo(l) || jvmIsFlo(r) {

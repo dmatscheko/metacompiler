@@ -1334,8 +1334,15 @@ long u_slice(long h, long b, long e) {
 	return str_from_units(u + b, e - b);
 }
 
+/* RT_RAW_STR is set (js_rt_rawstr) by a language whose strings are BYTES, go:
+ * three bytes that spell a surrogate in UTF-8 are bytes like any others there,
+ * so str_cat does not rejoin two of them and print writes them as they are. */
+long RT_RAW_STR;
+long js_rt_rawstr(void) { RT_RAW_STR = 1; return 0; }
+
 /* str_cat is `a + b`: plain concatenation, except that a surrogate pair split
- * across the seam is rejoined into its astral character (Go's strConcat). */
+ * across the seam is rejoined into its astral character (Go's strConcat), unless
+ * the strings are bytes (RT_RAW_STR). */
 long str_cat(long x, long y) {
 	long nx = str_len(x);
 	long ny = str_len(y);
@@ -1347,7 +1354,7 @@ long str_cat(long x, long y) {
 	long o = 0;
 	long hi = 0;
 	long lo = 0;
-	if (nx >= 3 && ny >= 3 && ((long)px[nx - 3] & 255) == 237 && ((long)py[0] & 255) == 237) {
+	if (nx >= 3 && ny >= 3 && ((long)px[nx - 3] & 255) == 237 && ((long)py[0] & 255) == 237 && RT_RAW_STR == 0) {
 		u_decode(px, nx, nx - 3); hi = G_CP;
 		u_decode(py, ny, 0);      lo = G_CP;
 		if (is_high_surr(hi) && is_low_surr(lo)) {
@@ -1375,7 +1382,7 @@ long str_cat(long x, long y) {
 }
 
 /* wtf8_clean replaces every lone surrogate with U+FFFD, which is what println
- * shows (Go's wtf8Clean). */
+ * shows (Go's wtf8Clean); a byte string (RT_RAW_STR) is printed as it is. */
 long wtf8_clean(long h) {
 	const char *p = str_ptr(h);
 	long n = str_len(h);
@@ -4093,7 +4100,10 @@ long fmt_val(long h) {
 
 /* fmt_top is fmt_val at the TOP level of a print: Go's printArgs runs every
  * string operand through wtf8Clean, so a lone surrogate shows as U+FFFD. */
-long fmt_top(long h) { if (tag_of(h) == 4) { return wtf8_clean(h); } return fmt_val(h); }
+long fmt_top(long h) {
+	if (tag_of(h) == 4) { return RT_RAW_STR != 0 ? h : wtf8_clean(h); }
+	return fmt_val(h);
+}
 
 void print_val(long h) { o_str(fmt_top(h)); }
 

@@ -176,15 +176,23 @@ func CutSuffix(s, suffix string) (before string, found bool) {
 // ----- splitting and joining -----
 
 // explode splits s into its runes: at most n parts (all of them when n < 0), the
-// last holding the rest.
+// last holding the rest. A part is the rune's own bytes, so a byte that is no
+// character stays that byte rather than becoming U+FFFD.
 func explode(s string, n int) []string {
 	var a []string
-	for i, c := range s {
-		if n > 0 && len(a) == n-1 {
-			a = append(a, s[i:])
-			return a
+	start := 0
+	for i := range s {
+		if i == 0 {
+			continue
 		}
-		a = append(a, string(c))
+		if n > 0 && len(a) == n-1 {
+			break
+		}
+		a = append(a, s[start:i])
+		start = i
+	}
+	if len(s) > 0 {
+		a = append(a, s[start:])
 	}
 	return a
 }

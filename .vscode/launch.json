@@ -1787,6 +1787,18 @@
             "program": "${workspaceFolder}","args": ["languages/php-to-llvm-ir.abnf", "tests/php-test-nolib.php", "-q"]
         },
         {
+            "name": "Go fmt writes raw bytes (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/go-interpreter.abnf", "tests/go-test-bytes.go", "-q"]
+        },
+        {
+            "name": "Go fmt writes raw bytes (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/go-to-llvm-ir.abnf", "tests/go-test-bytes.go", "-q"]
+        },
+        {
             "name": "PHP echo writes raw bytes (interpreter)",
             "type": "go",
             "request": "launch",

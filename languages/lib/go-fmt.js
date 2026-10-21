@@ -103,7 +103,15 @@ function gfFormat(format, args, wrap) {
     var i = 0
     while (i < n) {
         var c = format.charAt(i)
-        if (c != "%") { out = out + c; i = i + 1; continue }
+        if (c != "%") {
+            // The run up to the next verb, whole: a unit at a time would cut an
+            // astral character in two, which a byte string does not rejoin.
+            var j = i + 1
+            while (j < n && format.charCodeAt(j) != 37) { j = j + 1 }
+            out = out + format.substring(i, j)
+            i = j
+            continue
+        }
         i = i + 1
         var f = gfState()
         while (i < n) {
@@ -257,7 +265,8 @@ function gfRepeat(c, n) {
     return out
 }
 
-// Width counts RUNES: a surrogate pair is one.
+// Width counts RUNES (gfHRuneCount). Over UTF-16 text a surrogate pair is one;
+// the interpreter's hook is this.
 function gfRuneCount(s) {
     var n = 0
     var i = 0
@@ -273,7 +282,7 @@ function gfRuneCount(s) {
 // f.pad: to the left with zeros or spaces, to the right (f.minus) with spaces.
 function gfPad(f, s) {
     if (!f.widPresent || f.wid == 0) { return s }
-    var w = f.wid - gfRuneCount(s)
+    var w = f.wid - gfHRuneCount(s)
     if (w <= 0) { return s }
     if (f.minus) { return s + gfRepeat(" ", w) }
     return gfRepeat(f.zero ? "0" : " ", w) + s
@@ -283,7 +292,7 @@ function gfPad(f, s) {
 // they have placed their own zeros.
 function gfPadSp(f, s) {
     if (!f.widPresent || f.wid == 0) { return s }
-    var w = f.wid - gfRuneCount(s)
+    var w = f.wid - gfHRuneCount(s)
     if (w <= 0) { return s }
     if (f.minus) { return s + gfRepeat(" ", w) }
     return gfRepeat(" ", w) + s
@@ -739,13 +748,17 @@ function gfPrintRuns() {
     }
 }
 
-// f.truncateString: at most f.prec runes.
+// f.truncateString: at most f.prec runes (gfHRuneCut).
 function gfTrunc(f, s) {
     if (!f.precPresent) { return s }
+    return gfHRuneCut(s, f.prec)
+}
+// The first n runes of UTF-16 text; the interpreter's gfHRuneCut.
+function gfRuneCut(s, prec) {
     var n = 0
     var i = 0
     while (i < s.length) {
-        if (n == f.prec) { return s.substring(0, i) }
+        if (n == prec) { return s.substring(0, i) }
         var c = s.charCodeAt(i)
         if (c >= 55296 && c <= 56319 && i + 1 < s.length) { i = i + 1 }
         n = n + 1

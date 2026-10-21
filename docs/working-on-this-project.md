@@ -805,10 +805,12 @@ string is its BYTES under llvm.Run and natively (the floor's cell holds UTF-8, a
 layer 2 reads it through `byteAt`/`byteSub`/`bytesStr`, host ids 101..103), and the
 interpreter holds a byte that is not part of a character as U+DC00 + byte, so a
 slice that cuts a rune, `string([]byte)` and `\x` escapes agree with go in all
-three. What is left is the bytes of a UTF-8-encoded SURROGATE (`"\xed\xa0\x80"`):
-llvm.Run and the native leg print them as U+FFFD and join two such triples into
-one astral character, because the shared `str_cat` and print path read them as
-WTF-8; the interpreter writes them raw, as go does. An
+three. The bytes of a UTF-8-encoded SURROGATE (`"\xed\xa0\x80"`) are bytes too:
+go's native boot sets the floor's `RT_RAW_STR`, so `str_cat` does not join two
+such triples into an astral character and print does not clean one to U+FFFD, and
+layer 2 must therefore never build a character of go's output out of two
+`fromCharCode` halves (`goRuneStr` passes both units to one call; regex.js's `rxCpStr`
+builds only the UTF-16 view the regex engine searches). An
 ~~astral character prints as two U+FFFD in swift~~ - **NO LONGER TRUE for string
 literals, 2026-08-10**: `swUnescape` was copying a literal one code unit at a time
 and handing the host a LONE SURROGATE, which UTF-8 cannot encode. All four legs

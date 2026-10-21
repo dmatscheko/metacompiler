@@ -1194,6 +1194,14 @@ function gfHBytes(s) { return goBytes(s) }
 function gfHBytesStr(bs) { return bytesStr(bs) }
 function gfHQuote(s, delim) { return gopQuoteBody(s, delim) }
 function gfHRune(cp) { return goRuneStr(cp) }
+// A Go string's runes are decoded from its bytes (goRunes): three that spell a
+// surrogate are three runes, where its UTF-16 view has one unit.
+function gfHRuneCount(s) { return goRunes(s).cps.length }
+function gfHRuneCut(s, n) {
+    var offs = goRunes(s).offs
+    if (n >= offs.length) { return s }
+    return byteSub(s, 0, offs[n])
+}
 
 // gopQuoteBody is the body of strconv.Quote / QuoteRune: the letter escapes, the
 // backslash and whichever delimiter is in force, \xHH for the other ASCII controls
@@ -1239,7 +1247,7 @@ function goRuneStr(cp) {
     if (c >= 55296 && c <= 57343) { c = 65533 }
     if (c < 65536) { return String.fromCharCode(c) }
     var v = c - 65536
-    return String.fromCharCode(55296 + Math.floor(v / 1024)) + String.fromCharCode(56320 + (v % 1024))
+    return String.fromCharCode(55296 + Math.floor(v / 1024), 56320 + (v % 1024))
 }
 
 // ===================================================== print composition ====
