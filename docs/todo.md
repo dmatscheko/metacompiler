@@ -136,7 +136,7 @@ parameter), which no engine prints either.
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-733 bash: `o=$(nosuchcmd)` halves diverge; `exec` unsupported · P3 · SH · OPEN [V]
+### T-733 bash: `o=$(nosuchcmd)` halves diverge; `exec` unsupported · P3 · SH · IN PROGRESS (SH worker, round 20) [V]
 `o=$(nosuchcmd)` → bash prints "nosuchcmd: command not found" on stderr, o empty, script continues; interpreter aborts the whole
 program with 127; compiler ends only the substitution and writes the message into o. `exec 2>&1` (and `exec` redirection-only forms)
 → "command not found: exec" in both halves (bash applies the redirections to the shell).
