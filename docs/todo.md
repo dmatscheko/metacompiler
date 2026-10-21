@@ -139,11 +139,6 @@ ours `xyZ`). `**(a)` never matches in our engines (interp globAt's star-run coll
 
 # C — C subset
 
-### T-714 c: string literals over 4096 bytes break llvm.Run; global `char *a[N] = {...}` crashes the compiler · P2 · C · IN PROGRESS (C worker, round 5) [V]
-A string literal longer than 4096 bytes is emitted with array indices like `u0x1000`, which llvm.Run rejects ("unable to parse
-integer u0x1000"); native builds are fine. A global `char *a[N] = {"..", ...}` initializer crashes c-to-llvm-ir (TypeError in
-emitInit). Oracle: cc/clang.
-
 ---
 
 # CORE — MetaJS, the engines, shared runtime, tooling
@@ -802,6 +797,7 @@ T-709 bash: the interpreter is very slow building a long string (`printf -v s '%
 T-711 bash: glob `?` and pattern elements match one UTF-16 unit in the interpreter — DONE 3e4a5ea7 (glob elements step whole characters in the interpreter — 4 legs = bash 5.3; follow-up T-712)
 T-712 bash: non-ASCII POSIX classes in globs; empty extglob matches in `${v//pat/rep}` — DONE 61c107ce (Unicode class table read off macOS iswctype replaces the print table in both engines, undecodable bytes in no class, pat_subst's empty-match rule — 4 legs = bash 5.3; follow-ups T-713/T-714)
 T-710 js: `Sub.from` / `Sub.of` on an Array subclass; `Symbol.species` reads; `typeof [].hasOwnProperty`; tagged-template strings array; `"01"` array key — DONE 19d778a0 (Symbol.species getters, Object.prototype methods as values on primitives/arrays, tagged-template strings as frozen arrays with hidden raw; Sub.from/of already worked — 4 legs = node; the "01" key moves to T-716 CORE; follow-up T-715)
+T-714 c: string literals over 4096 bytes break llvm.Run; global `char *a[N] = {...}` crashes the compiler — DONE 7c1446cd 24ac13e0 (llvm.Run's IR reader accepts llir's u0x GEP indices on all three parse paths; string-literal brace items and literal-operand initializers in the C grammars — = cc)
 
 # Settled — do not re-open
 
