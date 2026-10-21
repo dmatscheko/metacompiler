@@ -1628,16 +1628,42 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         return -1
     }
+    // bash's match_pattern (subst.c) first rules out a subject that pat cannot match anywhere,
+    // with one match of pat widened by stars: a "*" in front unless pat starts with a plain
+    // "*", and one behind unless it ends with an unescaped "*". When subject and pattern are
+    // both ASCII (match_upattern) the anchored side of "#" / "%" gets no star. A star never
+    // tries the empty tail, so v=xy; ${v/%@(|a)/Z} is xy. The subject is v from index from;
+    // wide says it or pat holds a non-ASCII character. Twin of rt_patany in
+    // languages/lib/bash-rt.c.
+    function patAnywhere(pat, v, from, mode, wide) {
+        var n = pat.length
+        var lead = pat.charCodeAt(0) == 42 && !(optExtglob && n > 1 && pat.charCodeAt(1) == 40)
+        if (lead && pat.charCodeAt(n - 1) == 42) { return globAt(pat, 0, v, from) }
+        var np = (lead || (!wide && mode == "#")) ? pat : "*" + pat
+        if (wide || mode != "%") {
+            var bs = 0
+            while (bs < n - 1 && pat.charCodeAt(n - 2 - bs) == 92) { bs = bs + 1 }
+            if (pat.charCodeAt(n - 1) != 42 || bs % 2 == 1) { np = np + "*" }
+        }
+        return globAt(np, 0, v, from)
+    }
     // bash's pat_subst. The first start with a match wins, with its longest match, an EMPTY
     // one included; after an empty match the character there is copied and the search goes
     // on behind it, so v=abac; ${v//*(a)/Z} is ZZbZZc. bash tries a pattern at the END of
     // the subject only when it starts with "*" (match_pattern_char), which for "/", "//" and
     // "/#" decides an empty subject: e=""; ${e//?(a)/Z} is "" while ${e//*/Z} is Z. The
     // result is collected in parts and joined once: appending to one growing string would
-    // copy it on every step, quadratic over a long subject. Twin of rt_replace in
+    // copy it on every step, quadratic over a long subject. Every search, the ones behind a
+    // replacement too, first passes patAnywhere. Twin of rt_replace in
     // languages/lib/bash-rt.c.
     function replacePat(v, pat, rep, mode) {
         var fl = patFixedLen(pat)
+        var pw = -1
+        var vw = -1
+        var wi
+        for (wi = 0; wi < pat.length; wi++) { if (pat.charCodeAt(wi) >= 128) { pw = wi } }
+        for (wi = 0; wi < v.length; wi++) { if (v.charCodeAt(wi) >= 128) { vw = wi } }
+        if (pat != "" && !patAnywhere(pat, v, 0, mode, pw >= 0 || vw >= 0)) { return v }
         if (mode == "#") {
             if (v == "" && pat != "" && pat.charCodeAt(0) != 42) { return v }
             var j = matchLenAt(pat, v, 0, fl)
@@ -1653,6 +1679,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var parts = []
         var from = 0
         while (from < v.length) {
+            if (from > 0 && !patAnywhere(pat, v, from, mode, pw >= 0 || vw >= from)) { break }
             var s = from
             var e = -1
             while (e < 0 && s < v.length) {
@@ -2683,9 +2710,19 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         out.push(cur)
         return out
     }
+    // One alternative against the whole of seg. egInAlt counts the alternatives being
+    // matched, because a star behaves differently at the end of the subject inside one
+    // (see globAt).
+    var egInAlt = 0
+    function egAlt(a, seg) {
+        egInAlt = egInAlt + 1
+        var r = globAt(a, 0, seg, 0)
+        egInAlt = egInAlt - 1
+        return r
+    }
     function egAnyFull(alts, seg) {
         var i
-        for (i = 0; i < alts.length; i++) { if (globAt(alts[i], 0, seg, 0)) { return true } }
+        for (i = 0; i < alts.length; i++) { if (egAlt(alts[i], seg)) { return true } }
         return false
     }
     // op is the prefix character; rest is the pattern that follows the group.
@@ -2706,22 +2743,23 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             for (i = 0; i < alts.length; i++) {
                 var k2 = si
                 while (k2 <= s.length) {
-                    if (globAt(alts[i], 0, s.slice(si, k2), 0) && globAt(rest, 0, s, k2)) { return true }
+                    if (egAlt(alts[i], s.slice(si, k2)) && globAt(rest, 0, s, k2)) { return true }
                     k2 = k2 + ((k2 < s.length) ? chW(s, k2) : 1)
                 }
             }
             return false
         }
-        // *(pat) zero or more, +(pat) one or more. Each round consumes at least one
-        // character (k3 starts past si), so the recursion cannot spin on an empty match.
+        // *(pat) zero or more, +(pat) one or more. An occurrence may be empty, so
+        // [[ "" == +(|a) ]] is true, but only a non-empty one repeats, so the recursion
+        // cannot spin.
         if (op == 42 && globAt(rest, 0, s, si)) { return true }
         var j
         for (j = 0; j < alts.length; j++) {
-            var k3 = si + chW(s, si)
+            var k3 = si
             while (k3 <= s.length) {
-                if (globAt(alts[j], 0, s.slice(si, k3), 0)) {
+                if (egAlt(alts[j], s.slice(si, k3))) {
                     if (globAt(rest, 0, s, k3)) { return true }
-                    if (egMatch(42, alts, rest, s, k3)) { return true }
+                    if (k3 > si && egMatch(42, alts, rest, s, k3)) { return true }
                 }
                 k3 = k3 + ((k3 < s.length) ? chW(s, k3) : 1)
             }
@@ -2740,13 +2778,48 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 var ee = egEnd(p, pi + 1)
                 if (ee > 0) { return egMatch(pc, egAlts(p.slice(pi + 2, ee - 1)), p.slice(ee), s, si) }
             }
-            if (pc == 42) { // "*"
-                while (pi < p.length && p.charCodeAt(pi) == 42) { pi = pi + 1 }
+            // "*", as bash's GMATCH does it (lib/glob/sm_loop.c). The run of "*" and "?" after it
+            // goes first: a "?" takes one character, and a ?(..) or *(..) group is tried right
+            // there and then dropped, so *?(a) and **(a) both act as "*". What follows is tried
+            // at every start BEFORE the end of the subject, never at the end itself, so
+            // [[ xy == *@(|a) ]] is false - except that at the end a !(..) in the top-level
+            // pattern matches, and in an alternative nothing does. Twin of rt_glob in
+            // languages/lib/bash-rt.c.
+            if (pc == 42) {
+                var eg = optExtglob || egForce
+                pi = pi + 1
+                while (pi < p.length) {
+                    var wc = p.charCodeAt(pi)
+                    var we = (eg && (wc == 63 || wc == 42) && pi + 1 < p.length && p.charCodeAt(pi + 1) == 40) ? egEnd(p, pi + 1) : -1
+                    if (we > 0) {
+                        var wa = egAlts(p.slice(pi + 2, we - 1))
+                        var wr = p.slice(we)
+                        if (wc == 63) { if (egMatch(63, wa, wr, s, si)) { return true } }
+                        else {
+                            var wk = si
+                            while (wk < s.length) {
+                                if (egMatch(42, wa, wr, s, wk)) { return true }
+                                wk = wk + chW(s, wk)
+                            }
+                        }
+                        pi = we
+                    }
+                    else if (wc == 63) {
+                        if (si >= s.length) { return false }
+                        si = si + chW(s, si)
+                        pi = pi + 1
+                    }
+                    else if (wc == 42) { pi = pi + 1 }
+                    else { break }
+                }
                 if (pi >= p.length) { return true }
+                if (si >= s.length) {
+                    return egInAlt == 0 && eg && p.charCodeAt(pi) == 33 && pi + 1 < p.length && p.charCodeAt(pi + 1) == 40
+                }
                 var k = si
-                while (k <= s.length) {
+                while (k < s.length) {
                     if (globAt(p, pi, s, k)) { return true }
-                    k = k + ((k < s.length) ? chW(s, k) : 1)
+                    k = k + chW(s, k)
                 }
                 return false
             }

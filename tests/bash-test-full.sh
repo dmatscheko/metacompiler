@@ -2757,6 +2757,38 @@ s58() {
   check uesc12 "$(echo -e '\U04000000')" $'\xfc\x84\x80\x80\x80\x80'
 }
 
+# ===== SECTION 59: extended globs behind a star =====
+# bash's star (GMATCH in lib/glob/sm_loop.c) tries what follows it only at starts BEFORE
+# the end of the subject, so an @( ) behind it never matches an empty tail - while a
+# top-level !( ) there always does. A ?( ) or *( ) right behind the star is tried in place
+# and dropped (**(a) acts as *). One occurrence of +( ) may be empty, and an empty last
+# alternative counts. ${v/%p/r} first matches *p against an ASCII subject (match_upattern),
+# so the same star decides it; a non-ASCII one gets *p* (match_wpattern). Every expected
+# value is bash 5.3's under LC_ALL=en_US.UTF-8.
+s59() {
+  local r="" s p v=xy w=xyé e="" c=""
+  for s in "" a b xy ab; do
+    for p in '*@(|a)' '*@(a|)' '*!(a)' '**(a)' '*?(b)' '*?@(|a)' 'x*@(|a)' '+(|a)b' '@(*!(a))' '@()' '*!(a)b'; do
+      if [[ $s == $p ]]; then r="${r}1"; else r="${r}0"; fi
+    done
+    r="$r "
+  done
+  check egs1 "$r" "00111000011 11011000000 00111001101 00111000100 00111001101 "
+  shopt -s extglob
+  check egs2 "[${v/%@(|a)/Z}] [${w/%@(|a)/Z}] [${v/#@(|a)/Z}] [${v//@(|a)/Z}] [${v/%*(a)/Z}] [${v/%\*/Z}] [${e/%@(|a)/Z}] [${v%@(|a)}]" "[xy] [xyéZ] [Zxy] [ZxZy] [xyZ] [xy] [] [xy]"
+  p='*@(|a)'; case xy in $p) c=1 ;; *) c=2 ;; esac
+  p='*!(a)'; case "" in $p) c="${c}3" ;; *) c="${c}4" ;; esac
+  p='+(|a)b'; case b in $p) c="${c}5" ;; *) c="${c}6" ;; esac
+  shopt -u extglob
+  check egs3 "$c" 235
+  # A group's prefix is a whole number of characters: é is never split into two bytes.
+  r=""
+  [[ é == !(|é)? ]] && r="${r}1" || r="${r}0"
+  [[ é == @(?)? ]] && r="${r}1" || r="${r}0"
+  [[ éa == @(?)?a ]] && r="${r}1" || r="${r}0"
+  check egs4 "$r" 000
+}
+
 s01   # SECTION-CALL 01
 s02   # SECTION-CALL 02
 s03   # SECTION-CALL 03
@@ -2815,5 +2847,6 @@ s55   # SECTION-CALL 55
 s56   # SECTION-CALL 56
 s57   # SECTION-CALL 57
 s58   # SECTION-CALL 58
+s59   # SECTION-CALL 59
 echo "full: $checks checks, $fails failures"
 exit $fails

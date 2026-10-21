@@ -1425,6 +1425,10 @@ int rt_egalt(char *eaq, int eaa)
  */
 int opt_extglob;
 int eg_force;
+/* eg_inalt counts the alternatives being matched: at the end of the subject
+ * a star behaves differently inside one (rt_glob). Twin of egInAlt in
+ * bash-interpreter.abnf. */
+int eg_inalt;
 
 /* rt_glob and rt_eg are mutually recursive; this prototype is the forward
  * declaration, with the POINTER parameters the definition has
@@ -1440,17 +1444,15 @@ int rt_glob(char *p, char *s)
     char *pp;
     char *sp;
     char *pcur;
-    char *sk;
-    char *pafter;
     char *scur;
     char *scur2;
     int pc;
     int isPfx;
     int nextc;
     int sat;
-    int pac;
-    int rec;
-    int kc;
+    int eg;
+    int wc;
+    int we;
     int sc;
     int cr;
     int matched;
@@ -1476,24 +1478,50 @@ int rt_glob(char *p, char *s)
         nextc = (int)(unsigned char)pcur[1];
         if (isPfx && nextc == 40 && (opt_extglob != 0 || eg_force != 0)) return rt_eg(pcur, sp, 0);
 
+        /* "*", as bash's GMATCH does it (lib/glob/sm_loop.c). The run of "*"
+         * and "?" after it goes first: a "?" takes one character, and a ?(..)
+         * or *(..) group is tried right there and then dropped, so *?(a) and
+         * **(a) both act as "*". What follows is tried at every start BEFORE
+         * the end of the subject, never at the end itself - except that at the
+         * end a !(..) in the top-level pattern matches. Twin of globAt in
+         * bash-interpreter.abnf. */
         if (pc == 42) {
-            /* skip a run of "*" */
+            eg = opt_extglob != 0 || eg_force != 0;
+            pp = pcur + 1;
             while (1) {
-                sk = pp;
-                if ((int)(unsigned char)sk[0] != 42) break;
-                pp = sk + 1;
+                wc = (int)(unsigned char)pp[0];
+                if (wc == 0) return 1;
+                we = -1;
+                if (eg && (wc == 63 || wc == 42) && (int)(unsigned char)pp[1] == 40) we = rt_egclose(pp + 1);
+                if (we >= 0) {
+                    if (wc == 63) {
+                        if (rt_eg(pp, sp, 0) != 0) return 1;
+                    } else {
+                        scur = sp;
+                        while ((int)(unsigned char)scur[0] != 0) {
+                            if (rt_eg(pp, scur, 0) != 0) return 1;
+                            scur = scur + rt_cpw(scur);
+                        }
+                    }
+                    pp = pp + we + 2;
+                } else if (wc == 63) {
+                    if ((int)(unsigned char)sp[0] == 0) return 0;
+                    sp = sp + rt_cpw(sp);
+                    pp = pp + 1;
+                } else if (wc == 42) {
+                    pp = pp + 1;
+                } else {
+                    break;
+                }
             }
-            pafter = pp;
-            pac = (int)(unsigned char)pafter[0];
-            if (pac == 0) return 1;
-            while (1) {
-                scur = sp;
-                rec = rt_glob(pafter, scur);
-                if (rec != 0) return 1;
-                kc = (int)(unsigned char)scur[0];
-                if (kc == 0) return 0;
-                sp = scur + rt_cpw(scur);
+            if ((int)(unsigned char)sp[0] == 0) {
+                return eg_inalt == 0 && eg && wc == 33 && (int)(unsigned char)pp[1] == 40;
             }
+            while ((int)(unsigned char)sp[0] != 0) {
+                if (rt_glob(pp, sp) != 0) return 1;
+                sp = sp + rt_cpw(sp);
+            }
+            return 0;
         }
 
         scur2 = sp;
@@ -1539,19 +1567,31 @@ int rt_glob(char *p, char *s)
     }
 }
 
+/* int rt_egone(char *alt, char *s): 1 when the alternative alt matches all of s. */
+int rt_egone(char *alt, char *s)
+{
+    int r;
+    eg_inalt = eg_inalt + 1;
+    r = rt_glob(alt, s);
+    eg_inalt = eg_inalt - 1;
+    return r;
+}
+
 /* int rt_eg(char *egp, char *egs, int egstar): egp points at the prefix
  * character of an extglob and egs at the subject; 1 when egp (group AND
  * everything after it) matches all of egs.
  *
- * Each alternative is tried against every PREFIX of the subject and the rest of
- * the pattern against what is left - the same "split and recurse" shape rt_glob
- * uses for "*", with the call stack as the backtracking stack. `egstar` is the
- * +(...) continuation: after one mandatory occurrence the group carries on with
- * *(...) semantics, and because a repeat must consume at least one byte the
- * recursion is finite.
+ * Each alternative is tried against every PREFIX of the subject, a whole
+ * number of characters long, and the rest of the pattern against what is left
+ * - the same "split and recurse" shape rt_glob uses for "*", with the call
+ * stack as the backtracking stack. `egstar` is the *(...) continuation of a
+ * repeat. An occurrence may be empty ([[ "" == +(|a) ]] is true), but only a
+ * non-empty one repeats, so the recursion is finite.
  *   @(A|B)  exactly one alternative        !(A|B)  a prefix NO alternative matches
  *   ?(A|B)  zero or one                    *(A|B)  zero or more
  *   +(A|B)  one or more
+ * Nothing it allocates outlives it, so every return gives the arena back.
+ * Twin of egMatch in bash-interpreter.abnf.
  */
 int rt_eg(char *egp, char *egs, int egstar)
 {
@@ -1560,27 +1600,13 @@ int rt_eg(char *egp, char *egs, int egstar)
     int clo;
     char *rest;
     int slen;
-    int isBang;
-    int isAt;
-    int isQ;
-    int zeroOk;
-    int one1;
-    int minK;
     int a;
     int aend;
-    char *alt;
     int k;
-    char *pre;
-    char *tail;
-    char *t3;
-    int rr;
-    int ba;
-    int be;
-    char *balt;
-    char *bpre;
     int any;
-    char *btail;
-    int g;
+    char *pre;
+    char *alt;
+    int mark = arena_pos;
 
     kind = egstar != 0 ? 42 : (int)(unsigned char)egp[0];
     open = egp + 1;
@@ -1588,66 +1614,43 @@ int rt_eg(char *egp, char *egs, int egstar)
     if (clo < 0) return 0;
     rest = egp + (clo + 2);
     slen = rt_strlen(egs);
-    isBang = kind == 33;
-    isAt = kind == 64;
-    isQ = kind == 63;
-    zeroOk = isQ || (kind == 42);
-    one1 = isAt || isQ;              /* exactly one occurrence, so k may be 0 */
 
-    if (isBang) {
-        /* ! : a prefix that NO alternative matches, with the rest matching
-         * what is left. */
+    if (kind == 33) {
         k = 0;
-        while (k < slen + 1) {
+        while (k <= slen) {
+            pre = rt_substr(egs, 0, k);
             any = 0;
-            ba = 1;
-            while (ba < clo) {
-                be = rt_egalt(open, ba);
-                balt = rt_substr(open + ba, 0, be - ba);
-                bpre = rt_substr(egs, 0, k);
-                any = rt_glob(balt, bpre) != 0 ? 1 : any;
-                if ((int)(unsigned char)open[be] == 41) break;
-                ba = be + 1;
+            a = 1;
+            while (any == 0 && a <= clo) {
+                aend = rt_egalt(open, a);
+                any = rt_egone(rt_substr(open + a, 0, aend - a), pre);
+                if ((int)(unsigned char)open[aend] == 41) break;
+                a = aend + 1;
             }
-            btail = egs + k;
-            /* rt_glob runs even when `any` is already set. */
-            g = rt_glob(rest, btail);
-            if (any == 0 && g != 0) return 1;
-            k = k + 1;
+            if (any == 0 && rt_glob(rest, egs + k) != 0) { arena_pos = mark; return 1; }
+            k = k + (k < slen ? rt_cpw(egs + k) : 1);
         }
+        arena_pos = mark;
         return 0;
     }
 
-    /* @ ? * + : zero occurrences first (? and *), then one alternative at a
-     * time. */
-    if (zeroOk) {
-        if (rt_glob(rest, egs) != 0) return 1;
-    }
-    minK = one1 ? 0 : 1;
+    if ((kind == 63 || kind == 42) && rt_glob(rest, egs) != 0) { arena_pos = mark; return 1; }
     a = 1;
-    while (a < clo) {
+    while (a <= clo) {
         aend = rt_egalt(open, a);
         alt = rt_substr(open + a, 0, aend - a);
-        k = minK;
-        while (k < slen + 1) {
-            pre = rt_substr(egs, 0, k);
-            if (rt_glob(alt, pre) != 0) {
-                if (one1) {
-                    tail = egs + k;
-                    if (rt_glob(rest, tail) != 0) return 1;
-                } else {
-                    /* a * / + repeat must consume something, or the recursion
-                     * would not terminate. */
-                    t3 = egs + k;
-                    rr = rt_eg(egp, t3, 1);
-                    if (k > 0 && rr != 0) return 1;
-                }
+        k = 0;
+        while (k <= slen) {
+            if (rt_egone(alt, rt_substr(egs, 0, k)) != 0) {
+                if (rt_glob(rest, egs + k) != 0) { arena_pos = mark; return 1; }
+                if ((kind == 42 || kind == 43) && k > 0 && rt_eg(egp, egs + k, 1) != 0) { arena_pos = mark; return 1; }
             }
-            k = k + 1;
+            k = k + (k < slen ? rt_cpw(egs + k) : 1);
         }
         if ((int)(unsigned char)open[aend] == 41) break;
         a = aend + 1;
     }
+    arena_pos = mark;
     return 0;
 }
 
@@ -1863,6 +1866,47 @@ void rp_add(char *b, int n) {
     rp_buf[rp_len] = 0;
 }
 
+/* int rt_patany(char *p, char *s, int mode, int wide): bash's match_pattern
+ * (subst.c) first rules out a subject that p cannot match anywhere, with one
+ * match of p widened by stars: a "*" in front unless p starts with a plain "*",
+ * and one behind unless it ends with an unescaped "*". When subject and pattern
+ * are both ASCII (match_upattern, wide == 0) the anchored side of mode 2 (#) and
+ * 3 (%) gets no star. A star never tries the empty tail, so v=xy;
+ * ${v/%@(|a)/Z} is xy. Every search of rt_replace, the ones behind a
+ * replacement too, passes this first. Twin of patAnywhere in
+ * bash-interpreter.abnf. */
+int rt_patany(char *p, char *s, int mode, int wide)
+{
+    int n = rt_strlen(p);
+    int mark = arena_pos;
+    int lead = (int)(unsigned char)p[0] == 42 && !(opt_extglob != 0 && (int)(unsigned char)p[1] == 40);
+    int bs = 0;
+    int r;
+    char *np = p;
+    if (lead && (int)(unsigned char)p[n - 1] == 42) return rt_glob(p, s);
+    if (!lead && (wide != 0 || mode != 2)) np = rt_strcat("*", p);
+    if (wide != 0 || mode != 3) {
+        while (bs < n - 1 && (int)(unsigned char)p[n - 2 - bs] == 92) bs = bs + 1;
+        if ((int)(unsigned char)p[n - 1] != 42 || bs % 2 == 1) np = rt_strcat(np, "*");
+    }
+    r = rt_glob(np, s);
+    arena_pos = mark;
+    return r;
+}
+
+/* The index of the last byte of s from 0x80 up, or -1: rt_patany's `wide`
+ * for the subject from offset i is rt_lasthigh(s) >= i. */
+int rt_lasthigh(char *s)
+{
+    int i = 0;
+    int h = -1;
+    while (s[i] != 0) {
+        if ((int)(unsigned char)s[i] >= 128) h = i;
+        i = i + 1;
+    }
+    return h;
+}
+
 /* rt_replace: ${v/p/r} and friends; mode 0 = first, 1 = all, 2 = anchored at the
  * start (#), 3 = anchored at the end (%). An UNSET value is left alone. A null
  * pattern replaces nothing unless anchored: ${v/#/x} prefixes x. Otherwise this
@@ -1876,8 +1920,13 @@ char *rt_replace(char *s, char *p, char *r, int mode) {
     int len = rt_strlen(s);
     int pl = rt_patlen(p);
     int from = 0;
+    int pw;
+    int sw;
     if (s == &unset_marker[0]) return s;
     if (p[0] == 0 && mode < 2) return s;
+    pw = rt_lasthigh(p) >= 0;
+    sw = rt_lasthigh(s);
+    if (p[0] != 0 && rt_patany(p, s, mode, pw || sw >= 0) == 0) return s;
     if (len == 0 && p[0] != 0 && p[0] != 42 && mode < 3) return s;
     if (mode >= 2) {
         if (mode == 2) {
@@ -1900,6 +1949,7 @@ char *rt_replace(char *s, char *p, char *r, int mode) {
         int i = from;
         int j = -1;
         char *rep;
+        if (from > 0 && rt_patany(p, &s[from], mode, pw || sw >= from) == 0) break;
         while (j < 0 && i < len) {
             j = rt_matchlen(p, s, len, i, pl);
             if (j < 0) i = i + rt_cpw(&s[i]);
