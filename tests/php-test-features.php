@@ -98,6 +98,12 @@ check("coalesce-keeps-zero", $zeroV ?? 99, 0);
 $emptyV = "";
 check("coalesce-keeps-empty", $emptyV ?? "x", "");
 check("coalesce-then-elvis", null ?? 0 ?: "z", "z");
+// A property the object does not have is null to '??', named or computed.
+$cmo = new stdClass();
+$cmo->a = 1;
+$cmn = "zz";
+check("coalesce-missing-prop", [$cmo->zz ?? "d", $cmo->$cmn ?? "e", $cmo->zz ?? $cmo->ww ?? "f", $cmo->a ?? "g"],
+      ["d", "e", "f", 1]);
 
 // ----- strings -----
 check("str-concat", "foo" . "bar", "foobar");
