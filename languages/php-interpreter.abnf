@@ -8590,15 +8590,14 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     }
     // '@e': ZEND_BEGIN_SILENCE before e and ZEND_END_SILENCE after it, also when an
     // exception leaves e. Its value is an ordinary read even as the left operand of
-    // '??'.
+    // '??'. Twin of makeSilence in php-to-llvm-ir.abnf.
     function makeSilence(e, pos) {
         if (diagSite("__mec_silence", pos) == null) { return e }
         phpLibRef("__mec_unsilence", true)
         return function() {
-            var old = anytype
-            old = callNamed("__mec_silence", argsOf([]))
+            callNamed("__mec_silence", argsOf([]))
             var v = anytype
-            try { v = e() } finally { callNamed("__mec_unsilence", argsOf([old])) }
+            try { v = e() } finally { callNamed("__mec_unsilence", argsOf([])) }
             return v
         }
     }

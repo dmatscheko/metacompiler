@@ -2853,17 +2853,30 @@ function __mec_erreport($error_level = null) {
 }
 function error_get_last() { return __mec_erlast(); }
 function error_clear_last() { __mec_erlast(null); }
-// ZEND_BEGIN_SILENCE: '@' leaves only the fatal errors (E_FATAL_ERRORS, 4437) on,
-// and answers the level to restore.
+// The levels the '@' operands being evaluated restore, innermost last: $op 0
+// pushes $level, 1 pops one, 2 answers how many there are.
+function __mec_silenced($op, $level = null) {
+    static $saved = [];
+    if ($op === 0) { $saved[] = $level; return null; }
+    if ($op === 1) { return array_pop($saved); }
+    return count($saved);
+}
+// ZEND_BEGIN_SILENCE: '@' leaves only the fatal errors (E_FATAL_ERRORS, 4437) on.
 function __mec_silence() {
     $old = __mec_erlevel();
+    __mec_silenced(0, $old);
     if (($old & ~4437) != 0) { __mec_erlevel($old & 4437); }
-    return $old;
 }
-// ZEND_END_SILENCE, also run when an exception leaves the operand: the level is
-// restored unless the operand itself turned a non-fatal error back on.
-function __mec_unsilence($old) {
+// ZEND_END_SILENCE: the level is restored unless the operand itself turned a
+// non-fatal error back on.
+function __mec_unsilence() {
+    $old = __mec_silenced(1);
     if ((__mec_erlevel() & ~4437) == 0 && ($old & ~4437) != 0) { __mec_erlevel($old); }
+}
+// An exception caught, or a finally entered, ends the '@' operands it left
+// (ZEND_LIVE_SILENCE in cleanup_live_vars) down to the $depth its try began at.
+function __mec_unsilenceto($depth) {
+    while (__mec_silenced(2) > $depth) { __mec_unsilence(); }
 }
 // The Deprecated of a float that is not an integer used as one
 // (zend_incompatible_double_to_long_error); answers the int.

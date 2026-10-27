@@ -58,6 +58,13 @@ check("silence-keeps-raised", error_reporting(), E_ALL);
 function thrower() { throw new Exception("out"); }
 try { @thrower(); } catch (Exception $ex) { check("silence-catch-level", error_reporting(), E_ALL); }
 check("silence-exception-restored", error_reporting(), E_ALL);
+function silentFinally() { try { @thrower(); } finally { return error_reporting(); } }
+check("silence-finally-level", silentFinally(), E_ALL);
+// An '@' around a yield stays in force while the generator is suspended in it.
+function silentGen() { $sent = @yield 1; yield error_reporting(); }
+$sgLevels = [];
+foreach (silentGen() as $k => $lv) { $sgLevels[] = $k == 0 ? error_reporting() : $lv; }
+check("silence-yield", $sgLevels, [4437, E_ALL]);
 error_reporting(0);
 $v = $quiet; check("level-zero-recorded", lastErr(), want(E_WARNING, 'Undefined variable $quiet', __LINE__));
 error_reporting(E_ALL);

@@ -2946,15 +2946,21 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             else if (items[i].finbody != undefined) { finallyT = items[i].finbody }
         }
         return function(b) {
+            var depthName = ""
+            if (diagOn && silenceUsed) {
+                hidCount++
+                depthName = "0sild" + hidCount
+                callExt(b, "js_pyset_var", [curScopeV, emitStr(b, depthName), emitLibCall(b, "__mec_silenced", [emitNum(b, 2)])])
+            }
             var tryClo = callExt(b, "js_closure", [handle(emitFunc([], tryT, false, true)), curScopeV])
             var catchClo = hUndef
             if (catches.length > 0) {
                 catchClo = callExt(b, "js_closure",
-                                   [handle(emitFunc(["0caught"], makeCatchDispatch(catches), false, true)), curScopeV])
+                                   [handle(emitFunc(["0caught"], silenceUnwind(makeCatchDispatch(catches), depthName), false, true)), curScopeV])
             }
             var finClo = hUndef
             if (finallyT != undefined) {
-                finClo = callExt(b, "js_closure", [handle(emitFunc([], finallyT, false, true)), curScopeV])
+                finClo = callExt(b, "js_closure", [handle(emitFunc([], silenceUnwind(finallyT, depthName), false, true)), curScopeV])
             }
             var ctl = callExt(b, "js_try", [tryClo, catchClo, finClo])
             return excDispatch(b, ctl)
@@ -7449,28 +7455,33 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         if (p.kind == "index") { return site(b, [p.obj, p.key]) }
         return site(b, [p.obj, p.keyName != null ? emitStr(b, p.keyName) : callExt(b, "js_phpname", [p.key])])
     }
-    // '@e': ZEND_BEGIN_SILENCE before e and ZEND_END_SILENCE after it, also when an
-    // exception leaves e (a finally body). Its value is an ordinary read even as the
-    // left operand of '??'.
+    // '@e': ZEND_BEGIN_SILENCE before e and ZEND_END_SILENCE after it. An exception
+    // leaving e is ended by the catch or finally that takes it (silenceUnwind), so e
+    // stays inline: it may yield. Its value is an ordinary read even as the left
+    // operand of '??'. Twin of makeSilence in php-interpreter.abnf.
+    var silenceUsed = false
     function makeSilence(e, pos) {
         if (diagSite("__mec_silence", pos) == null) { return e }
         phpLibRef("__mec_unsilence", true)
-        hidCount++
-        var oldName = "0silo" + hidCount
-        var valName = "0silv" + hidCount
-        var tryS = makeTry([{trybody: function(b) {
-                                var r = e(b)
-                                callExt(r.b, "js_pyset_var", [curScopeV, emitStr(r.b, valName), r.v])
-                                return r.b
-                            }},
-                            {finbody: function(b) {
-                                emitLibCall(b, "__mec_unsilence", [callExt(b, "js_scope_get", [curScopeV, emitStr(b, oldName)])])
-                                return b
-                            }}])
+        phpLibRef("__mec_silenced", true)
+        phpLibRef("__mec_unsilenceto", true)
+        silenceUsed = true
         return function(b) {
-            callExt(b, "js_pyset_var", [curScopeV, emitStr(b, oldName), emitLibCall(b, "__mec_silence", [])])
-            b = tryS(b)
-            return {b: b, v: callExt(b, "js_scope_get", [curScopeV, emitStr(b, valName)])}
+            emitLibCall(b, "__mec_silence", [])
+            var r = e(b)
+            emitLibCall(r.b, "__mec_unsilence", [])
+            return r
+        }
+    }
+    // A try in a program with an '@' records how many '@' operands are under way
+    // where it starts (hidden variable depthName), and its catch and finally bodies
+    // end the ones an exception left first (__mec_unsilenceto). Answers the body
+    // emitter t with that in front, or t itself.
+    function silenceUnwind(t, depthName) {
+        if (!diagOn || !silenceUsed) { return t }
+        return function(b) {
+            emitLibCall(b, "__mec_unsilenceto", [callExt(b, "js_scope_get", [curScopeV, emitStr(b, depthName)])])
+            return t(b)
         }
     }
     // The check a function's record asks for (argCheckOf), or null: req, the count
