@@ -31,6 +31,9 @@
 #   --legs L      comma-separated subset of interp,run,native,oracle
 #   --timeout N   seconds per leg (default 300). A leg that overruns is KILLED
 #                 and reported as broken - never diffed.
+#   --cf K=V[,K=V...]  compiler flags for our three legs, passed on as `-cf K=V`
+#                 (repeatable). Both grammars must declare each flag, which is
+#                 what lets a non-default value be checked against the oracle.
 #
 # WHEN YOU WRITE THE PROGRAM: read every operand out of an ARRAY. A probe over
 # literals tests the grammar's constant folder, not the runtime, and this project
@@ -78,13 +81,14 @@ cd "$(dirname "$0")/.." || exit 2
 
 [ $# -ge 2 ] || { sed -n '2,50p' "$0"; exit 2; }
 LANG_NAME="$1"; PROG="$2"; shift 2
-ORACLE=""; KEEP=""; LEGS="interp,run,native,oracle"; TIMEOUT=300
+ORACLE=""; KEEP=""; LEGS="interp,run,native,oracle"; TIMEOUT=300; CF=()
 while [ $# -gt 0 ]; do
     case "$1" in
         --oracle)  ORACLE="$2"; shift ;;
         --keep)    KEEP="$2"; shift ;;
         --legs)    LEGS="$2"; shift ;;
         --timeout) TIMEOUT="$2"; shift ;;
+        --cf)      CF+=(-cf "$2"); shift ;;
         *) echo "probe.sh: unknown flag $1" >&2; exit 2 ;;
     esac
     shift
@@ -307,7 +311,7 @@ if want interp; then
     if [ ! -f "$INTERP" ]; then
         reject interp "no $INTERP (name the real grammar, or --legs without interp)"
     else
-        run_leg interp ./mec "$INTERP" "$PROG" -q
+        run_leg interp ./mec "$INTERP" "$PROG" -q ${CF[@]+"${CF[@]}"}
         accept_leg interp
     fi
 fi
@@ -317,12 +321,12 @@ if want run; then
     if [ ! -f "$COMPILE" ]; then
         reject run "no $COMPILE"
     elif handle_ir; then
-        run_leg run ./mec "$COMPILE" "$PROG" -qq
+        run_leg run ./mec "$COMPILE" "$PROG" -qq ${CF[@]+"${CF[@]}"}
         accept_leg run
     else
         # Self-contained IR: -qq would erase the module AND the program. Take
         # -q and cut the module off the front instead.
-        run_leg run ./mec "$COMPILE" "$PROG" -q
+        run_leg run ./mec "$COMPILE" "$PROG" -q ${CF[@]+"${CF[@]}"}
         accept_leg run module
     fi
 fi
@@ -336,7 +340,7 @@ if want native; then
         # this is the grammar saying it has no native path - say so, do not
         # quietly drop to three legs.
         reject native "$COMPILE declares no c.exePath - no native leg exists"
-    elif ! ./mec "$COMPILE" "$PROG" -q -exe "$work/a.out" >/dev/null 2>"$work/build.err"; then
+    elif ! ./mec "$COMPILE" "$PROG" -q ${CF[@]+"${CF[@]}"} -exe "$work/a.out" >/dev/null 2>"$work/build.err"; then
         reject native "the -exe BUILD FAILED"
         sed -n '1,3p' "$work/build.err" | sed 's/^/           /'
     else

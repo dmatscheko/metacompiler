@@ -2363,6 +2363,72 @@
             "program": "${workspaceFolder}","args": ["tests/parser-script-test.abnf", "tests/tlv-test.txt", "-v"]
         },
         {
+            "name": "Compiler flags: defaults",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["tests/compiler-flags-test.abnf", "-code", "mode=plain count=1", "-q"]
+        },
+        {
+            "name": "Compiler flags: -cf2 and -cf",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["tests/compiler-flags-test.abnf", "-code", "mode=loud count=3", "-cf2", "mode=loud", "-cf", "count=3", "-q"]
+        },
+        {
+            "name": "Compiler flags: comma list, repeats, -cfN wins over -cf",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["tests/compiler-flags-test.abnf", "-code", "mode=quiet count=2", "-cf2", "mode=quiet", "-cf", "mode=loud,count=3", "-cf", "count=2", "-q"]
+        },
+        {
+            "name": "Compiler flags: -cf help",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["tests/compiler-flags-test.abnf", "-cf", "help", "-q"]
+        },
+        {
+            "name": "Compiler flags: -cf2 help",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["tests/compiler-flags-test.abnf", "-cf2", "help", "-q"]
+        },
+        {
+            "name": "Compiler flags FAIL: undeclared flag",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["tests/compiler-flags-test.abnf", "-code", "mode=plain", "-cf2", "shout=1", "-q"]
+        },
+        {
+            "name": "Compiler flags FAIL: value outside the declared set",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["tests/compiler-flags-test.abnf", "-code", "mode=plain", "-cf2", "mode=shout", "-q"]
+        },
+        {
+            "name": "Compiler flags FAIL: no stage declares the flag",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["tests/compiler-flags-test.abnf", "-code", "mode=plain", "-cf", "shout=1", "-q"]
+        },
+        {
+            "name": "Compiler flags FAIL: stage 1 runs no grammar file",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["tests/compiler-flags-test.abnf", "-code", "mode=plain", "-cf1", "mode=loud", "-q"]
+        },
+        {
+            "name": "Compiler flags FAIL: script reads an undeclared flag",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["tests/compiler-flags-test.abnf", "-code", "bogus=1", "-q"]
+        },
+        {
+            "name": "Compiler flags FAIL: an unset flag reads as its default",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["tests/compiler-flags-test.abnf", "-code", "mode=loud", "-q"]
+        },
+        {
             "name": "Include Test",
             "type": "go",
             "request": "launch",

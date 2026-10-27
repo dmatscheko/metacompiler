@@ -84,6 +84,32 @@ Flags you will actually use (full list in `main.go`'s header):
 | `-warn-imports` / `-warn-unsupported` | warn instead of aborting — how you get a call graph out of a partially-understood language. |
 | `-max-steps N` | the IR interpreter's endless-loop brake (default 1e8). A big benchmark hits it. |
 | `-freeze F` | regenerate the frozen bootstrap snapshot. Needed after **any** change to `metajs-to-llvm-ir.abnf` or `lib/compile-core.js`. |
+| `-cfN K=V[,K=V]` | set a **compiler flag** the stage-N grammar declares; plain `-cf` = every stage declaring `K`. `-cf help` lists them. See below. |
+
+**Compiler flags: a language option is declared by its grammar, not added to
+`main.go`.** A grammar lists its flags in its LEADING comment block, one line each
+- `// @flag NAME VALUE|VALUE|... default=VALUE One-line description.` - and that
+line is the documentation (`mec <grammar> -cf help` prints it). A tag script or a
+parser `:script` reads one as `c.flag("NAME")`, a string, the declared default when
+the command line did not set it; that works in goja and `-frozen` alike, with no
+snapshot change, because `c` is a host map (`abnf/flags.go`). Rules worth knowing:
+
+- **N is the stage, as in `-vN`/`-slotN`**: in `mec lang.abnf prog.x` the language
+  grammar runs stage 2, so `-cf2`; after a `-pipe` the next grammar's stage is
+  further on, and `-cf help` names every stage's number. Only a segment's FIRST
+  file - a grammar compiled by the built-in ABNF a-grammar - has a flag block.
+- **An undeclared name or a value outside the set is an error** listing that
+  stage's flags; so is a script reading an undeclared name. Settings are
+  comma-separated and repeatable, the last wins, and a `-cfN` setting wins over a
+  plain `-cf` one.
+- **Both halves of a language must declare a flag identically**, because the
+  interpreter and the compiler are compared and a probe passes the flag to both:
+  `tests/probe.sh L f --cf K=V --oracle ...` checks a non-default value against the
+  real toolchain, and a matrix row is just its args (`"-cf2", "K=V"`).
+- **A flag fixes what is emitted**, so a native `-exe` bakes it in; the frozen
+  script cache keys on script source only and stays correct, since the value is
+  read at run time.
+- `tests/compiler-flags-test.abnf` is the self-test (rows `Compiler flags*`).
 
 **`-q` versus `-qq`, and why the two halves want different ones.** The module a
 compiler grammar prints is not noise that `-q` failed to strip — **emitting IR is

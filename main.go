@@ -33,6 +33,11 @@ import (
 //  -v, -vN       verbose for all stages / stage N (ASG + compiled result)
 //  -vv, -vvN     parser+compiler trace for all stages / stage N
 //  -slotN V      compile stage N with tag slot V (default 0)
+//  -cfN K=V[,K=V...]  set compiler flag K of stage N to V (repeatable; plain -cf = every
+//                stage whose grammar declares K, a numbered setting wins over it). A
+//                grammar declares its flags in its leading comment block (abnf/flags.go);
+//                an undeclared K or a V outside the declared set is an error. -cf help /
+//                -cfN help prints the declared flags and exits
 //  -q, -qq       quiet (program output + errors / errors only)
 //  -error MODE   parse-failure dump detail: short (default; structure + tokens), code (also
 //                each tag's code), short-all / code-all (the whole tree, no [...] abridging)
@@ -92,6 +97,12 @@ type options struct {
 	traceStage   map[int]bool
 	slotStage    map[int]int // Tag slot to compile a stage with (default 0).
 
+	cfAll      []abnf.FlagSetting         // -cf K=V: every stage that declares K.
+	cfStage    map[int][]abnf.FlagSetting // -cfN K=V: stage N only.
+	cfHelp     bool                       // -cf help / -cfN help: list the declared flags and exit.
+	cfHelpOnly int                        // The N of -cfN help (0 = every stage).
+	stageFlags map[int]*abnf.StageFlags   // By stage: the flags its grammar declares and the values set.
+
 	quietMost, quietFull                  bool
 	frozen, verify, pretty                bool
 	errorMode                             string   // -error short|code|short-all|code-all: parse-failure dump detail (default short).
@@ -124,7 +135,7 @@ type options struct {
 // (anything starting with '-'), so the two may be freely interspersed - unlike
 // the standard flag package, which stops at the first positional argument.
 func parseArgs(args []string) (*options, error) {
-	o := &options{verboseStage: map[int]bool{}, traceStage: map[int]bool{}, slotStage: map[int]int{}}
+	o := &options{verboseStage: map[int]bool{}, traceStage: map[int]bool{}, slotStage: map[int]int{}, cfStage: map[int][]abnf.FlagSetting{}}
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		if len(a) == 0 || a[0] != '-' || a == "-" {
@@ -238,6 +249,8 @@ func parseArgs(args []string) (*options, error) {
 			}
 		case "-vv":
 			o.traceAll = true
+		case "-cf":
+			err = o.takeFlagSettings(name, 0, takeVal)
 		case "-freeze":
 			o.freezePath, err = takeVal()
 		case "-cfgraph":
@@ -261,7 +274,9 @@ func parseArgs(args []string) (*options, error) {
 		case "-render":
 			o.renderKind, err = takeVal()
 		default:
-			if n, ok := stageFlag(name, "-slot"); ok {
+			if n, ok := stageFlag(name, "-cf"); ok {
+				err = o.takeFlagSettings(name, n, takeVal)
+			} else if n, ok := stageFlag(name, "-slot"); ok {
 				v, verr := takeVal()
 				if verr != nil {
 					return nil, verr
@@ -286,7 +301,30 @@ func parseArgs(args []string) (*options, error) {
 	return o, nil
 }
 
-// stageFlag parses a stage-numbered verbose/trace flag like -v3 or -vv12.
+// takeFlagSettings records the value of a -cf (stage 0) or -cfN argument:
+// "help", or comma-separated name=value settings.
+func (o *options) takeFlagSettings(name string, stage int, takeVal func() (string, error)) error {
+	v, err := takeVal()
+	if err != nil {
+		return err
+	}
+	if v == "help" {
+		o.cfHelp, o.cfHelpOnly = true, stage
+		return nil
+	}
+	kvs, err := abnf.ParseFlagSettings(name, v)
+	if err != nil {
+		return err
+	}
+	if stage == 0 {
+		o.cfAll = append(o.cfAll, kvs...)
+	} else {
+		o.cfStage[stage] = append(o.cfStage[stage], kvs...)
+	}
+	return nil
+}
+
+// stageFlag parses a stage-numbered flag like -v3, -vv12 or -cf2.
 func stageFlag(name, prefix string) (int, bool) {
 	if !strings.HasPrefix(name, prefix) {
 		return 0, false
@@ -437,6 +475,12 @@ func main() {
 			os.Exit(2)
 		}
 	}
+	for stage := range o.cfStage {
+		if stage > maxStage {
+			fmt.Fprintf(os.Stderr, "Error: -cf%d, but there are at most %d stage(s)\n", stage, maxStage)
+			os.Exit(2)
+		}
+	}
 
 	srcs := make([]string, len(o.files))
 	for i, f := range o.files {
@@ -450,6 +494,23 @@ func main() {
 			os.Exit(1)
 		}
 		srcs[i] = abnf.StripBOM(string(dat))
+	}
+
+	stageFlags, err := flagStages(o, srcs)
+	if err == nil && !o.cfHelp {
+		err = abnf.ApplyFlagSettings(stageFlags, o.cfAll, o.cfStage)
+	}
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "Error:", err)
+		os.Exit(2)
+	}
+	if o.cfHelp {
+		fmt.Println(abnf.FlagHelp(stageFlags, o.cfHelpOnly))
+		return
+	}
+	o.stageFlags = map[int]*abnf.StageFlags{}
+	for _, s := range stageFlags {
+		o.stageFlags[s.Stage] = s
 	}
 
 	parseropts := &abnf.Parseropts{
@@ -538,6 +599,7 @@ func runPipeline(o *options, srcs []string, parseropts *abnf.Parseropts) {
 			globalStage++
 			verbose := o.verboseAll || o.verboseStage[globalStage]
 			trace := o.traceAll || o.traceStage[globalStage]
+			abnf.SetStageFlags(o.stageFlags[globalStage])
 			if isLast && j == len(files)-1 {
 				// Positions in traces/diagrams refer to the final program.
 				abnf.SetTraceSource(files[j], segSrcs[j])
@@ -550,6 +612,7 @@ func runPipeline(o *options, srcs []string, parseropts *abnf.Parseropts) {
 			globalStage++
 			verbose := o.verboseAll || o.verboseStage[globalStage]
 			trace := o.traceAll || o.traceStage[globalStage]
+			abnf.SetStageFlags(o.stageFlags[globalStage])
 			runStage(grammar, "", "", globalStage, o.slotStage[globalStage], verbose, trace, o.quietMost, quietFull, parseropts)
 		}
 
@@ -559,6 +622,33 @@ func runPipeline(o *options, srcs []string, parseropts *abnf.Parseropts) {
 			piped = &t
 		}
 	}
+}
+
+// flagStages lists the stages whose grammar comes from a grammar FILE - the
+// first file of a pipeline segment, compiled by the built-in ABNF a-grammar -
+// with the flags that file declares. That grammar runs the segment's next stage
+// (the program, the piped input, or the startScript-only run of a one-file last
+// segment); the numbering is runPipeline's.
+func flagStages(o *options, srcs []string) ([]*abnf.StageFlags, error) {
+	bounds := append(append([]int{0}, o.pipeBounds...), len(o.files))
+	var out []*abnf.StageFlags
+	stage := 0
+	for s := 0; s+1 < len(bounds); s++ {
+		start, end := bounds[s], bounds[s+1]
+		n := end - start
+		if s > 0 {
+			n++ // The "(piped)" input stage.
+		}
+		if n > 1 || s+2 == len(bounds) {
+			decls, err := abnf.ParseFlagDecls(o.files[start], srcs[start])
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, &abnf.StageFlags{Stage: stage + 2, File: o.files[start], Decls: decls})
+		}
+		stage += n
+	}
+	return out, nil
 }
 
 // runStage parses a file with the given a-grammar and compiles the resulting
@@ -685,6 +775,13 @@ anywhere among the files.
   -v, -vN       verbose for all stages / stage N (ASG + compiled result)
   -vv, -vvN     parser+compiler trace for all stages / stage N
   -slotN V      compile stage N with tag slot V (default 0)
+  -cfN K=V[,K=V...]
+                set compiler flag K of stage N to V (repeatable; plain -cf = every stage
+                whose grammar declares K, a numbered setting wins over it). A grammar
+                declares its flags in its leading comment block, one line per flag:
+                  // @flag NAME VALUE|VALUE|... default=VALUE One-line description.
+                and its scripts read them as c.flag("NAME"). An undeclared K or a V outside
+                the declared set is an error. -cf help / -cfN help lists them and exits
   -q, -qq       quiet (program output + errors / errors only)
   -error MODE   parse-failure dump detail: short (default; structure + tokens), code (also
                 each tag's code), short-all / code-all (the whole tree, no [...] abridging)

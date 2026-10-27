@@ -504,6 +504,8 @@ func newFrozenEngine(co *compiler, asg *r.Rules, aGrammar *r.Rules, traceEnabled
 		"exePath": ExePath,
 		// Extra link inputs for the native build (-rt flag); see commonscript.go.
 		"runtime": RuntimeInputs,
+		// The grammar's compiler flags; see commonscript.go.
+		"flag": func(name string) string { return flagValue(name) },
 		// Project-file imports (the -i include roots); see commonscript.go.
 		"curFile":        func() string { return traceSrcName },
 		"curFileAbs":     func() string { return curSrcAbs() },
@@ -789,6 +791,7 @@ func (ps *frozenParserScript) init() {
 		"mainName":        EntryPoint,
 		"exePath":         ExePath,
 		"runtime":         RuntimeInputs,
+		"flag":            func(name string) string { return flagValue(name) },
 		// Project-file imports (the -i include roots); mirrors the goja c map in
 		// commonscript.go and the frozen compiler engine, so a parser :script that
 		// resolves an import does not become a latent abort only under -frozen.

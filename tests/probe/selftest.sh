@@ -78,6 +78,11 @@ check "grammar does not exist" 2 "no languages/calculator-interpreter.abnf" -- \
     "$PROBE" calculator tests/calculator-test-1.txt
 check "misspelled --legs drops a leg" 2 "unknown leg" -- \
     "$PROBE" bash tests/probe/good.sh --legs interp,run,nativ
+# --cf must reach all three of our legs: an undeclared flag breaks every one.
+check "--cf reaches the native build" 2 "native   BROKEN: the -exe BUILD FAILED" -- \
+    "$PROBE" bash tests/probe/good.sh --cf nope=1 --legs interp,run,native
+check "--cf reaches the interpreter leg" 2 "interp   BROKEN: produced NO OUTPUT (exit 2)" -- \
+    "$PROBE" bash tests/probe/good.sh --cf nope=1 --legs interp,run,native
 
 # A leg that prints some of its rows and is then killed: "a truncated leg is not
 # a measurement".

@@ -423,6 +423,9 @@ func NewCommonScript(vm *goja.Runtime, compilerFuncMap *map[string]r.Object, pre
 		// grammar hands it to llvm.BuildExecutable; supplying anything here also
 		// turns an unresolved symbol from a zero stub into a hard error.
 		"runtime": RuntimeInputs,
+		// c.flag(name): the grammar's compiler flag, as -cfN set it or else its
+		// declared default (abnf/flags.go).
+		"flag": func(name string) string { return flagValue(name) },
 		// Project-file imports (the -i include roots): findImport locates a
 		// grammar-mapped relative path ("a/b/C.kt"), readFile loads it, and
 		// pushSource/popSource swap the file/line attribution around the

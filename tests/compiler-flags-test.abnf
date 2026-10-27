@@ -1,0 +1,66 @@
+// @flag mode plain|loud|quiet default=plain How the self-test greets: as written, upper-cased or not at all.
+// @flag count 1|2|3 default=1 How many times the self-test greets.
+
+:title("Compiler flags self-test") ;
+:description("Exercises the -cfN compiler flags end to end. The leading @flag lines declare
+two flags; the input is a list of name=value expectations, and every one is checked
+against c.flag(name) twice - from a parser :script() and from a compile tag - so both
+script contexts of both engines are covered. The start script then greets as the flags
+say. The run exits 0 exactly when every expectation holds; an expectation naming an
+undeclared flag makes c.flag raise, which is the error case.") ;
+
+:startRule(S) ;
+:whitespace(Ws) ;
+
+Ws      = @+" \t\r\n" ;
+
+S       = { Expect } ;
+
+Expect  = ParserCheck Name "=" Value ;
+
+// The parser-side check: reads the coming "name=value" off the raw input and fails
+// the parse unless c.flag(name) is value.
+ParserCheck = :script(~~
+    (function() {
+        var i = 0
+        while (c.peek(i) >= 0 && c.peek(i) <= 32) { i++ }
+        var name = ""
+        while (c.peek(i) > 32 && c.peek(i) != 61) { name = name + String.fromCharCode(c.peek(i)); i++ }
+        if (name == "") { return abnf.newToken("\x01no expectation here", 0) }
+        i++
+        var value = ""
+        while (c.peek(i) > 32) { value = value + String.fromCharCode(c.peek(i)); i++ }
+        if (c.flag(name) != value) {
+            println("FAIL parser: c.flag says " + c.flag(name) + " for " + name + ", expected " + value)
+            return abnf.newToken("\x01flag mismatch", 0)
+        }
+    })()
+~~) ;
+
+Name    = @+"abcdefghijklmnopqrstuvwxyz_" <~~ push(up.in) ~~> ;
+Value   = @+"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.+-" <~~ push(up.in) ~~> ;
+
+:startScript(~~
+    var res = c.compile(c.asg)
+    var got = res.stack
+    var fails = 0
+    for (var i = 0; i + 1 < got.length; i += 2) {
+        var name = got[i]
+        var want = got[i + 1]
+        var have = c.flag(name)
+        if (have != want) {
+            println("FAIL " + name + ": c.flag says " + have + ", expected " + want)
+            fails++
+        }
+    }
+    var greet = "hello"
+    if (c.flag("mode") == "loud") { greet = "HELLO" }
+    var n = 0
+    if (c.flag("mode") != "quiet") {
+        var times = c.flag("count")
+        if (times == "2") { n = 2 } else if (times == "3") { n = 3 } else { n = 1 }
+    }
+    for (var k = 0; k < n; k++) { println(greet) }
+    if (fails == 0) { println("compiler flags test passed: " + (got.length / 2) + " expectation(s)") }
+    exit(fails)
+~~) ;
