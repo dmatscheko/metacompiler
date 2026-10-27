@@ -108,7 +108,7 @@ not change the renderer.
 
 # PHP — PHP  (no php here: spec-only, php.net / php-src behaviour)
 
-### T-751 php: reading a property of null aborts by default; diagnostics gaps · P2 · PHP · OPEN [V]
+### T-751 php: reading a property of null aborts by default; diagnostics gaps · P2 · PHP · IN PROGRESS (PHP worker, round 18) [V]
 With display_errors=0 (default), `$null->p` (read) aborts in both halves ("property ->p of null" / "member 'p' of null"); PHP answers
 null (with flag 1 it now warns and answers null). __FILE__ (and the warning location) resolves symlinks (abnf/trace.go curSrcAbs
 EvalSymlinks; php-cli's expand_filepath does not). Not emitted / not diagnosed: the compile-time "Using ${var} in strings is
