@@ -171,7 +171,7 @@ HtmlScan = :script(~~
     })()
 ~~) ;
 // '<?= e, e ?>' is shorthand for 'echo e, e;'.
-ShortEcho   <~~ push(makeEcho(takeAll())) ~~>
+ShortEcho   <~~ push(makeEcho(takeAll(), up.start)) ~~>
             = ShortOpen <~~ push({cmd: "echo"}) ~~> [ Expression { "," Expression } ] [ ";" ] ;
 ShortOpen   = "<?=" :whitespace(Whitespace) ;
 // A statement terminator. PHP lets a close tag stand in for the ';' ("echo 1 ?>"),
@@ -440,7 +440,7 @@ CatchType   = CatchName { "|" CatchName } ;
 CatchName   <~~ push({ctype: lastSeg(stripWs(up.in))}) ~~> = ExtName ;
 
 // echo e, e, e;  /  print e;
-EchoStmt    <~~ push(makeEcho(takeAll())) ~~>
+EchoStmt    <~~ push(makeEcho(takeAll(), up.start)) ~~>
             = KwEcho <~~ push({cmd: up.in}) ~~> [ Expression { "," Expression } ] Semi ;
 
 // global $a, $b; -- binds each local name to the GLOBAL variable's storage cell.
@@ -949,7 +949,7 @@ ThrowExpr   <~~ push(excThrow(pop())) ~~>
             = KwThrow ExprCore ;
 // print is an EXPRESSION whose value is always 1 ('$ok ?: print "x"', a match arm,
 // an argument). As a statement it is EchoStmt's, which is tried first.
-PrintExpr   <~~ push(makePrintExpr(pop())) ~~>
+PrintExpr   <~~ push(makePrintExpr(pop(), up.start)) ~~>
             = "print" KwEnd ExprCore ;
 // $x instanceof Foo : the runtime type test, matching the class itself, every base
 // class and every implemented interface. Tried before the plain unary path; if no
@@ -1259,11 +1259,11 @@ BinAhead    = :script(~~
         return abnf.newToken("\x01nobin", 0)
     })()
 ~~) ;
-DqStr       <~~ push(makeTemplate(takeAll())) ~~>
+DqStr       <~~ push(makeTemplate(takeAll(), up.start)) ~~>
             = '"' :whitespace() { TplBraceExpr | TplDollarCurly | TplVar | TplChunk | TplSpecial } '"' :whitespace(Whitespace) ;
 // The deprecated "${...}" form. Expression only finds where it ends; its value is
 // dropped and the text is compiled again through dollarCurlySrc.
-TplDollarCurly <~~ pop(); push({e: compileSnippet(dollarCurlySrc(up.in.substring(2, up.in.length - 1)))}) ~~>
+TplDollarCurly <~~ pop(); push({e: compileSnippet(dollarCurlySrc(up.in.substring(2, up.in.length - 1)), snippetLine(up.start))}) ~~>
             = "$" "{" :whitespace(Whitespace) Expression "}" ;
 TplBraceExpr <~~ push({e: pop()}) ~~>
             = CurlyOpen "{" :whitespace(Whitespace) Expression "}" ;
@@ -1274,7 +1274,7 @@ CurlyOpen   = :script(~~ c.peek(1) === 36 ? undefined : abnf.newToken("\x01nocur
 // '->prop' step (PHP's "simple" syntax - anything richer needs the '{$...}' form).
 // The index key is an integer, a BARE word (taken as a string: "$map[key]") or
 // another variable; it is captured as text and classified by makeTplVar.
-TplVar      <~~ push({e: makeTplVar(takeAll())}) ~~>
+TplVar      <~~ push({e: makeTplVar(takeAll(), up.start)}) ~~>
             = TplName [ TplIdx | TplProp ] ;
 TplName     <~~ push({tvar: up.in}) ~~>
             = "$" TplId ;
@@ -1342,7 +1342,7 @@ PhpInt      <~~ push(makeConst(phpIntLit(up.in))) ~~>
 // line, the body and the terminator line as ONE token, and makeHeredoc splits that
 // text apart again (terminator-indent strip, escapes and interpolation unless the
 // marker was single-quoted). Modelled on the Ruby grammar's heredoc lexer.
-HeredocLit  <~~ push(makeHeredoc(up.in)) ~~>
+HeredocLit  <~~ push(makeHeredoc(up.in, up.start)) ~~>
             = HdScan :whitespace(Whitespace) ;
 HdScan = :script(~~
     (function() {
@@ -3595,16 +3595,25 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         return phsJoin(a, b)
     }
 
-    function makeTemplate(items) {
+    // An interpolated value is checked as a string (__mec_strchk) with
+    // display_errors=1. Twin of makeTemplate in php-to-llvm-ir.abnf.
+    function makeTemplate(items, pos) {
         if (items.length == 1 && items[0].s != undefined) { phpLibRef(items[0].s, false) }
         for (var k = 0; k < items.length; k++) {
             if (items[k].sb != undefined) { items[k] = {s: phsFromBytes(items[k].sb)} }
         }
+        var site = null
+        for (var q = 0; q < items.length; q++) { if (items[q].e != undefined && site == null) { site = diagSite("__mec_strchk", pos) } }
         return function() {
             var out = ""
             for (var i = 0; i < items.length; i++) {
                 if (items[i].s != undefined) { out = phsJoin(out, items[i].s) }
-                else { out = phsJoin(out, phpStr(items[i].e())) }
+                else {
+                    var v = anytype
+                    v = items[i].e()
+                    if (site != null) { site([v]) }
+                    out = phsJoin(out, phpStr(v))
+                }
             }
             return out
         }
@@ -3725,7 +3734,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // ----- '$name', '$name[key]' and '$name->prop' inside a double-quoted string ---
     // The bracket key of the SIMPLE form is a bare word taken as a string
     // ("$map[key]" reads the "key" entry), an integer, or another variable.
-    function makeTplVar(items) {
+    function makeTplVar(items, pos) {
         var name = ""
         var idx = null
         var prop = null
@@ -3734,28 +3743,43 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             else if (items[i].tidx != undefined) { idx = items[i].tidx }
             else if (items[i].tprop != undefined) { prop = items[i].tprop }
         }
+        // With display_errors=1 the reads are diagnosed as the same expression's
+        // are (makeVarRead, foldCallMember). Twin of makeTplVar in
+        // php-to-llvm-ir.abnf.
+        var rd = makeVarRead(name, pos)
         if (idx != null) {
             var key = anytype
             if (idx.charAt(0) == "$") { key = null } else { key = phpKey(idx) }
-            var vn = idx
+            var rk = idx.charAt(0) == "$" ? makeVarRead(idx, pos) : null
+            var dimSite = diagSite("__mec_dimchk", pos)
             return function() {
+                var o = anytype
+                o = rd()
                 var k = anytype
-                k = (idx.charAt(0) == "$") ? getVar(vn) : key
-                return phpIndex(getVar(name), k)
+                k = rk != null ? rk() : key
+                if (dimSite != null) { dimSite([o, k]) }
+                return phpIndex(o, k)
             }
         }
         if (prop != null) {
             var pn = prop.substring(2)
-            return function() { return phpGetProp(getVar(name), pn) }
+            var propSite = diagSite("__mec_propchk", pos)
+            return function() {
+                var po = anytype
+                po = rd()
+                if (propSite == null) { return phpGetProp(po, pn) }
+                propSite([po, pn])
+                return po === null || po === undefined ? null : phpGetProp(po, pn)
+            }
         }
-        return function() { return getVar(name) }
+        return rd
     }
 
     // ----- heredoc / nowdoc -----
     // HdScan handed over the WHOLE literal as one token: the '<<<MARK' line, the body
     // lines and the terminator. The terminator's own indentation is removed from every
     // body line (PHP 7.3+) and the newline in front of the terminator is dropped.
-    function makeHeredoc(text) {
+    function makeHeredoc(text, pos) {
         var i = 3
         while (i < text.length && (text.charAt(i) == " " || text.charAt(i) == "\t")) { i++ }
         var quote = ""
@@ -3773,7 +3797,9 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         var body = lastNl < 0 ? "" : rest.substring(0, lastNl)
         if (indent > 0) { body = stripHdIndent(body, indent) }
         if (quote == "'") { return makeConst(body) }
-        return makeTemplate(hdParts(body))
+        // The body starts on the line after the opening '<<<'.
+        var line0 = snippetLine(pos)
+        return makeTemplate(hdParts(body, line0 > 0 ? line0 + 1 : 0), pos)
     }
     function nlAt(s, from) {
         for (var i = from; i < s.length; i++) { if (s.charAt(i) == "\n") { return i } }
@@ -3795,8 +3821,10 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     }
     // Split an interpolating heredoc body into the {s}/{e} pieces makeTemplate wants.
     // '{$expr}' is parsed with the grammar itself, from the Expression production -
-    // the same door include/require uses to pull in another file.
-    function hdParts(body) {
+    // the same door include/require uses to pull in another file. line0 is the
+    // body's first line for the diagnostics of its expressions (diagLine), 0 for
+    // none.
+    function hdParts(body, line0) {
         var parts = []
         var lit = ""
         var i = 0
@@ -3815,7 +3843,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                 if (j < body.length) {
                     if (lit != "") { parts.push(dqPiece(lit)); lit = "" }
                     var src = dc ? dollarCurlySrc(body.substring(i + 2, j)) : body.substring(i + 1, j)
-                    parts.push({e: compileSnippet(src)})
+                    parts.push({e: compileSnippet(src, hdLine(body, i, line0))})
                     i = j + 1
                     continue
                 }
@@ -3841,7 +3869,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                     k = p2
                 }
                 if (lit != "") { parts.push(dqPiece(lit)); lit = "" }
-                parts.push({e: compileSnippet(expr)})
+                parts.push({e: compileSnippet(expr, hdLine(body, i, line0))})
                 i = k
                 continue
             }
@@ -3864,9 +3892,14 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         if (k > 0 && (k == inner.length || inner.charAt(k) == "[")) { return "$" + inner }
         return "${" + inner + "}"
     }
-    function compileSnippet(src) {
+    // line is the line its diagnostics name (diagLine), 0 for none.
+    function compileSnippet(src, line) {
         var frag = c.parseFrom(c.agrammar, src, "Expression")
-        return c.compile(frag).stack[0]
+        var outer = diagLine
+        diagLine = line
+        var t = c.compile(frag).stack[0]
+        diagLine = outer
+        return t
     }
 
     // ----- length / indexing -----
@@ -5612,18 +5645,31 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             return v
         }
     }
-    function makePrintExpr(e) {
-        var st = makeEcho([null, e])
+    function makePrintExpr(e, pos) {
+        var st = makeEcho([null, e], pos)
         var one = makeConst(phpIntLit("1"))
         return function() { st(); return one() }
     }
     // 'echo a, b' is one ZEND_ECHO per operand: each is evaluated, converted and
-    // written before the next is evaluated, so their side effects interleave.
+    // written before the next is evaluated, so their side effects interleave. With
+    // display_errors=1 each is checked as a string (__mec_strchk) first.
     // Twin of makeEcho in php-to-llvm-ir.abnf.
-    function makeEcho(items) {
+    function makeEcho(items, pos) {
         var args = items.slice(1)
+        var site = args.length > 0 ? diagSite("__mec_strchk", pos) : null
+        if (site == null) {
+            return function() {
+                for (var i = 0; i < args.length; i++) { phsEcho(phpStr(args[i]())) }
+                return null
+            }
+        }
         return function() {
-            for (var i = 0; i < args.length; i++) { phsEcho(phpStr(args[i]())) }
+            for (var i = 0; i < args.length; i++) {
+                var v = anytype
+                v = args[i]()
+                site([v])
+                phsEcho(phpStr(v))
+            }
             return null
         }
     }
@@ -8512,6 +8558,19 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // php-to-llvm-ir.abnf.
     var diagOn = c.flag("display_errors") == "1"
     var diagLines = c.flag("lines") == "1"
+    // An interpolated expression is compiled from its own text (compileSnippet),
+    // whose positions are not the file's: its sites take the line of the string it
+    // stands in, diagLine, instead. 0 outside one. Twins of snippetLine and hdLine in
+    // php-to-llvm-ir.abnf.
+    var diagLine = 0
+    function snippetLine(pos) { return diagOn ? c.lineOf(pos) : 0 }
+    // The line of offset i of a heredoc body whose first line is line0 (0: none).
+    function hdLine(body, i, line0) {
+        if (line0 == 0) { return 0 }
+        var n = line0
+        for (var k = 0; k < i; k++) { if (body.charCodeAt(k) == 10) { n++ } }
+        return n
+    }
     // The site at pos calling check fname, compiled in here: a function of the
     // check's leading arguments, or null where nothing is diagnosed.
     function diagSite(fname, pos) {
@@ -8520,7 +8579,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         var at = []
         if (diagLines) {
             at.push(c.curFileAbs())
-            at.push(c.lineOf(pos))
+            at.push(diagLine > 0 ? diagLine : c.lineOf(pos))
         }
         return function(vals) {
             var all = []

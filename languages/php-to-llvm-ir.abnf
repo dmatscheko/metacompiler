@@ -162,7 +162,7 @@ HtmlScan = :script(~~
     })()
 ~~) ;
 // '<?= e, e ?>' is shorthand for 'echo e, e;'.
-ShortEcho   <~~ push(makeEcho(takeAll())) ~~>
+ShortEcho   <~~ push(makeEcho(takeAll(), up.start)) ~~>
             = ShortOpen <~~ push({cmd: "echo"}) ~~> [ Expression { "," Expression } ] [ ";" ] ;
 ShortOpen   = "<?=" :whitespace(Whitespace) ;
 // A statement terminator. PHP lets a close tag stand in for the ';' ("echo 1 ?>"),
@@ -471,7 +471,7 @@ CatchType   = CatchName { "|" CatchName } ;
 CatchName   <~~ push({ctype: lastSeg(stripWs(up.in))}) ~~> = ExtName ;
 
 // echo e, e, e;  /  print e;
-EchoStmt    <~~ push(makeEcho(takeAll())) ~~>
+EchoStmt    <~~ push(makeEcho(takeAll(), up.start)) ~~>
             = KwEcho <~~ push({cmd: up.in}) ~~> [ Expression { "," Expression } ] Semi ;
 
 // global $a, $b; -- binds each local name to the GLOBAL variable's storage cell.
@@ -956,7 +956,7 @@ PowExpr     <~~ push(foldPow(takeAll())) ~~>
 ThrowExpr   <~~ push(makeThrowExpr(pop())) ~~>
             = KwThrow ExprCore ;
 // print as an EXPRESSION. Twin of PrintExpr in php-interpreter.abnf; see there.
-PrintExpr   <~~ push(makePrintExpr(pop())) ~~>
+PrintExpr   <~~ push(makePrintExpr(pop(), up.start)) ~~>
             = "print" KwEnd ExprCore ;
 // (int)$x / (string)$y / (array)$z ...: a type cast, lowered to js_phcast - the same
 // conversion table php-interpreter.abnf's phpCast has, so (int)3.9 is 3, (float)5 is
@@ -1348,10 +1348,10 @@ BinAhead    = :script(~~
         return abnf.newToken("\x01nobin", 0)
     })()
 ~~) ;
-DqStr       <~~ push(makeTemplate(takeAll())) ~~>
+DqStr       <~~ push(makeTemplate(takeAll(), up.start)) ~~>
             = '"' :whitespace() { TplBraceExpr | TplDollarCurly | TplVar | TplChunk | TplSpecial } '"' :whitespace(Whitespace) ;
 // Twin of TplDollarCurly in php-interpreter.abnf; see there.
-TplDollarCurly <~~ pop(); push({e: compileSnippet(dollarCurlySrc(up.in.substring(2, up.in.length - 1)))}) ~~>
+TplDollarCurly <~~ pop(); push({e: compileSnippet(dollarCurlySrc(up.in.substring(2, up.in.length - 1)), snippetLine(up.start))}) ~~>
             = "$" "{" :whitespace(Whitespace) Expression "}" ;
 TplBraceExpr <~~ push({e: pop()}) ~~>
             = CurlyOpen "{" :whitespace(Whitespace) Expression "}" ;
@@ -1361,7 +1361,7 @@ CurlyOpen   = :script(~~ c.peek(1) === 36 ? undefined : abnf.newToken("\x01nocur
 // '->prop' step (PHP's "simple" syntax - anything richer needs the '{$...}' form).
 // The index key is an integer, a BARE word (taken as a string: "$map[key]") or
 // another variable; it is captured as text and classified by makeTplVar.
-TplVar      <~~ push({e: makeTplVar(takeAll())}) ~~>
+TplVar      <~~ push({e: makeTplVar(takeAll(), up.start)}) ~~>
             = TplName [ TplIdx | TplProp ] ;
 TplName     <~~ push({tvar: up.in}) ~~>
             = "$" TplId ;
@@ -1402,7 +1402,7 @@ SqPlain     = "\x20"..."\x26" | "\x28"..."\x5b" | "\x5d"..."\U0010ffff" | @"\t" 
 
 // A heredoc / nowdoc, lexed whole by HdScan. Twin of HeredocLit in
 // php-interpreter.abnf; see there.
-HeredocLit  <~~ push(makeHeredoc(up.in)) ~~>
+HeredocLit  <~~ push(makeHeredoc(up.in, up.start)) ~~>
             = HdScan :whitespace(Whitespace) ;
 HdScan = :script(~~
     (function() {
@@ -2352,7 +2352,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     // HdScan handed over the WHOLE literal as one token: the '<<<MARK' line, the body
     // lines and the terminator. The terminator's own indentation is removed from every
     // body line (PHP 7.3+) and the newline in front of the terminator is dropped.
-    function makeHeredoc(text) {
+    function makeHeredoc(text, pos) {
         var i = 3
         while (i < text.length && (text.charAt(i) == " " || text.charAt(i) == "\t")) { i++ }
         var quote = ""
@@ -2370,7 +2370,9 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         var body = lastNl < 0 ? "" : rest.substring(0, lastNl)
         if (indent > 0) { body = stripHdIndent(body, indent) }
         if (quote == "'") { return makeConst(body) }
-        return makeTemplate(hdParts(body))
+        // The body starts on the line after the opening '<<<'.
+        var line0 = snippetLine(pos)
+        return makeTemplate(hdParts(body, line0 > 0 ? line0 + 1 : 0), pos)
     }
     function nlAt(s, from) {
         for (var i = from; i < s.length; i++) { if (s.charAt(i) == "\n") { return i } }
@@ -2393,7 +2395,9 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     // Split an interpolating heredoc body into the {s}/{e} pieces makeTemplate wants.
     // '{$expr}' is parsed with the grammar itself, from the Expression production -
     // the same door include/require uses to pull in another file.
-    function hdParts(body) {
+    // line0 is the body's first line for the diagnostics of its expressions
+    // (diagLine), 0 for none.
+    function hdParts(body, line0) {
         var parts = []
         var lit = ""
         var i = 0
@@ -2412,7 +2416,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                 if (j < body.length) {
                     if (lit != "") { parts.push(dqPiece(lit)); lit = "" }
                     var src = dc ? dollarCurlySrc(body.substring(i + 2, j)) : body.substring(i + 1, j)
-                    parts.push({e: compileSnippet(src)})
+                    parts.push({e: compileSnippet(src, hdLine(body, i, line0))})
                     i = j + 1
                     continue
                 }
@@ -2438,7 +2442,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                     k = p2
                 }
                 if (lit != "") { parts.push(dqPiece(lit)); lit = "" }
-                parts.push({e: compileSnippet(expr)})
+                parts.push({e: compileSnippet(expr, hdLine(body, i, line0))})
                 i = k
                 continue
             }
@@ -2459,9 +2463,14 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         if (k > 0 && (k == inner.length || inner.charAt(k) == "[")) { return "$" + inner }
         return "${" + inner + "}"
     }
-    function compileSnippet(src) {
+    // line is the line its diagnostics name (diagLine), 0 for none.
+    function compileSnippet(src, line) {
         var frag = c.parseFrom(c.agrammar, src, "Expression")
-        return c.compile(frag).stack[0]
+        var outer = diagLine
+        diagLine = line
+        var t = c.compile(frag).stack[0]
+        diagLine = outer
+        return t
     }
 
     // ----- string helpers -----
@@ -3723,15 +3732,24 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         }
     }
 
-    function makeTemplate(items) {
+    // An interpolated value is checked as a string (__mec_strchk) with
+    // display_errors=1. Twin of makeTemplate in php-interpreter.abnf.
+    function makeTemplate(items, pos) {
         if (items.length == 1 && items[0].s != undefined) { phpLibRef(items[0].s, false) }
+        var site = null
+        for (var q = 0; q < items.length; q++) { if (items[q].e != undefined && site == null) { site = diagSite("__mec_strchk", pos) } }
         return function(b) {
             var v = emitStr(b, "")
             for (var i = 0; i < items.length; i++) {
                 var pv
                 if (items[i].s != undefined) { pv = emitStr(b, items[i].s) }
                 else if (items[i].sb != undefined) { pv = callExt(b, "js_phfrombytes", [emitStr(b, items[i].sb)]) }
-                else { var r = items[i].e(b); b = r.b; pv = r.v }
+                else {
+                    var r = items[i].e(b)
+                    b = r.b
+                    pv = r.v
+                    if (site != null) { site(b, [pv]) }
+                }
                 v = callExt(b, "js_phcat", [v, pv])
             }
             return {b: b, v: v}
@@ -3742,7 +3760,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     // index text is classified here, exactly as php-interpreter.abnf's makeTplVar does:
     // a leading '$' is another variable, a canonical integer is an int key, anything
     // else is a BARE word taken as a string key (that is what "$map[key]" means).
-    function makeTplVar(items) {
+    function makeTplVar(items, pos) {
         var name = ""
         var idx = null
         var prop = null
@@ -3751,30 +3769,40 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             else if (items[i].tidx != undefined) { idx = items[i].tidx }
             else if (items[i].tprop != undefined) { prop = items[i].tprop }
         }
+        // With display_errors=1 the reads are diagnosed as the same expression's
+        // are (makeVarRead, foldCallMember). Twin of makeTplVar in
+        // php-interpreter.abnf.
+        var rd = makeVarRead(name, pos)
         if (idx != null) {
             var itxt = idx
+            var rdk = itxt.charAt(0) == "$" ? makeVarRead(itxt, pos) : null
+            var dimSite = diagSite("__mec_dimchk", pos)
             return function(b) {
-                var ro = makeVarRef(name)(b)
+                var ro = rd(b)
                 b = ro.b
                 var ov = ro.v
                 var kv = anytype
-                if (itxt.charAt(0) == "$") {
-                    var rk = makeVarRef(itxt)(b)
+                if (rdk != null) {
+                    var rk = rdk(b)
                     b = rk.b
                     kv = rk.v
                 } else if (isCanonInt(itxt) && itxt.length <= 15) { kv = emitNum(b, parseInt(itxt, 10)) }
                 else { kv = emitStr(b, itxt) } // js_phget folds a canonical decimal that fits 64 bits
+                if (dimSite != null) { b = dimSite(b, [ov, kv]) }
                 return {b: b, v: callExt(b, "js_phget", [ov, kv])}
             }
         }
         if (prop != null) {
             var pn = prop.substring(2)
+            var propSite = diagSite("__mec_propchk", pos)
             return function(b) {
-                var rov = makeVarRef(name)(b)
-                return emitPropGet(rov.b, rov.v, propKey(rov.b, pn), pn, name == "$this", false)
+                var rov = rd(b)
+                if (propSite == null) { return emitPropGet(rov.b, rov.v, propKey(rov.b, pn), pn, name == "$this", false) }
+                propSite(rov.b, [rov.v, emitStr(rov.b, pn)])
+                return emitPropGetSafe(rov.b, rov.v, propKey(rov.b, pn), pn, name == "$this", false)
             }
         }
-        return makeVarRef(name)
+        return rd
     }
     // A canonical decimal integer: no leading zero, an optional '-'. PHP's array keys
     // only fold a string to an int in that exact form ("01" stays a string key, and
@@ -5261,17 +5289,21 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             return r
         }
     }
-    function makePrintExpr(e) {
-        var st = makeEcho([null, e])
+    function makePrintExpr(e, pos) {
+        var st = makeEcho([null, e], pos)
         var one = phpIntLit("1")
         return function(b) { return one(st(b)) }
     }
-    function makeEcho(items) {
+    // With display_errors=1 each operand is checked as a string (__mec_strchk)
+    // before it is written. Twin of makeEcho in php-interpreter.abnf.
+    function makeEcho(items, pos) {
         var args = items.slice(1)
+        var site = args.length > 0 ? diagSite("__mec_strchk", pos) : null
         return function(b) {
             for (var i = 0; i < args.length; i++) {
                 var r = args[i](b)
                 b = r.b
+                if (site != null) { b = site(b, [r.v]) }
                 callExt(b, "js_phecho", [r.v])
             }
             return b
@@ -7301,6 +7333,19 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     // the same section in php-interpreter.abnf.
     var diagOn = c.flag("display_errors") == "1"
     var diagLines = c.flag("lines") == "1"
+    // An interpolated expression is compiled from its own text (compileSnippet),
+    // whose positions are not the file's: its sites take the line of the string it
+    // stands in, diagLine, instead. 0 outside one. Twins of snippetLine and hdLine in
+    // php-interpreter.abnf.
+    var diagLine = 0
+    function snippetLine(pos) { return diagOn ? c.lineOf(pos) : 0 }
+    // The line of offset i of a heredoc body whose first line is line0 (0: none).
+    function hdLine(body, i, line0) {
+        if (line0 == 0) { return 0 }
+        var n = line0
+        for (var k = 0; k < i; k++) { if (body.charCodeAt(k) == 10) { n++ } }
+        return n
+    }
     // The site at pos calling check fname, compiled in here: an emitter of the call
     // with the check's leading arguments (handles), answering the block after it,
     // or null where nothing is diagnosed.
@@ -7308,7 +7353,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         if (!diagOn || phpLibDepth > 0 || pos == undefined) { return null }
         phpLibRef(fname, true)
         var file = c.curFileAbs()
-        var line = c.lineOf(pos)
+        var line = diagLine > 0 ? diagLine : c.lineOf(pos)
         return function(b, vals) {
             // An absent value (a missing property's undefined) reaches the check as
             // the null PHP reads it as, not as a missing argument.

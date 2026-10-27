@@ -135,6 +135,21 @@ $v = "x" . $ops[4]; check("concat-array", [$v, lastErr()], ["xArray", want(E_WAR
 $cv = 7.5; $cv %= 2; check("mod-assign-float", [$cv, lastErr()], [1, want(E_DEPRECATED, 'Implicit conversion from float 7.5 to int loses precision', __LINE__)]);
 $v = "ab" | "  "; check("bitor-strings-clean", lastErr(), null);
 
+// ----- strings: interpolation and echo -----
+$v = "a $tplA b"; check("interp-undef-var", lastErr(), want(E_WARNING, 'Undefined variable $tplA', __LINE__));
+$v = "a {$tplB} b"; check("interp-braced-undef-var", lastErr(), want(E_WARNING, 'Undefined variable $tplB', __LINE__));
+$v = "a $a[zz] b"; check("interp-undef-key", lastErr(), want(E_WARNING, 'Undefined array key "zz"', __LINE__));
+$v = "a $o->zz b"; check("interp-undef-prop", lastErr(), want(E_WARNING, 'Undefined property: WarnP::$zz', __LINE__));
+$v = "a {$ops[4]} b"; check("interp-array", [$v, lastErr()], ["a Array b", want(E_WARNING, 'Array to string conversion', __LINE__)]);
+$hdLine = __LINE__ + 3;
+$v = <<<EOT
+first
+x {$tplC} y
+EOT;
+check("heredoc-line", lastErr(), want(E_WARNING, 'Undefined variable $tplC', $hdLine));
+echo $ops[4], "\n"; check("echo-array", lastErr(), want(E_WARNING, 'Array to string conversion', __LINE__));
+print $ops[4] . "\n"; check("print-concat-array", lastErr(), want(E_WARNING, 'Array to string conversion', __LINE__));
+
 // ----- call arguments: read by value, not by reference -----
 function byVal($x) { return $x; }
 function byRef(&$x) { return 0; }

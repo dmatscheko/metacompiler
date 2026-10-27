@@ -2914,14 +2914,18 @@ function __mec_numchk($v, $file = null, $line = 0) {
         __mec_diag(2, "A non-numeric value encountered", $file, $line);
     }
 }
+// A value echo, print, an interpolation or '.' converts to a string: an array
+// (zval_get_string).
+function __mec_strchk($v, $file = null, $line = 0) {
+    if (is_array($v)) { __mec_diag(2, "Array to string conversion", $file, $line); }
+}
 // The operands of binary operator $op, or of ~ ($b null), left first: as ints for
 // %, the shifts and a bitwise operator not given two strings, as numbers for the
-// arithmetic ones, and an array as a string for the concatenation
-// (zval_get_string's "Array to string conversion").
+// arithmetic ones, and as strings for the concatenation (__mec_strchk).
 function __mec_opchk($op, $a, $b, $file = null, $line = 0) {
     if ($op === ".") {
-        if (is_array($a)) { __mec_diag(2, "Array to string conversion", $file, $line); }
-        if (is_array($b)) { __mec_diag(2, "Array to string conversion", $file, $line); }
+        __mec_strchk($a, $file, $line);
+        __mec_strchk($b, $file, $line);
     } elseif ($op === "+" || $op === "-" || $op === "*" || $op === "/" || $op === "**") {
         __mec_numchk($a, $file, $line);
         __mec_numchk($b, $file, $line);
