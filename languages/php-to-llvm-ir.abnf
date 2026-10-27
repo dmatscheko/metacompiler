@@ -2035,7 +2035,13 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             return {b: b, v: elemCell(b, p.obj, lastK)}
         }
         if (p.kind == "index") { return {b: b, v: elemCell(b, p.obj, p.key)} }
-        if (p.kind == "field") { return propCell(b, p.obj, p.key) }
+        // A property fetched for writing on a non-object is PHP's "Attempt to
+        // modify property" Error (zend_fetch_property_address). Twin of targetCell
+        // in php-interpreter.abnf.
+        if (p.kind == "field") {
+            if (p.thisObj !== true) { b = emitObjChk(b, p.obj, p.key, "js_phmodchk") }
+            return propCell(b, p.obj, p.key)
+        }
         return {b: b, v: hNull}
     }
     // $b = &$a : bind the left name (or element) to the right side's cell.
@@ -4254,17 +4260,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     // object ($this, a fresh clone): no check at all. Twin of phpSetProp in
     // php-interpreter.abnf.
     function emitPropSet(b, objV, keyV, valV, name, isObj) {
-        if (isObj !== true) {
-            var chkB = curF.NewBlock("")
-            var slowB = curF.NewBlock("")
-            var liveB = curF.NewBlock("")
-            b.NewCondBr(isNullishHandle(b, objV), slowB, chkB)
-            var clsV = callExt(chkB, "js_get", [objV, emitStr(chkB, "__class")])
-            chkB.NewCondBr(chkB.NewICmp(llvm.enum.IPredEQ, clsV, hUndef), slowB, liveB)
-            callExt(slowB, "js_phsetchk", [objV, keyV])
-            slowB.NewBr(liveB)
-            b = liveB
-        }
+        if (isObj !== true) { b = emitObjChk(b, objV, keyV, "js_phsetchk") }
         if (isHooked(name)) {
             var hn = emitStr(b, "__hset_" + name)
             var hm = emitHasMethod(b, objV, hn)
@@ -4279,6 +4275,19 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             return joinB
         }
         return emitPropSetPlain(b, objV, keyV, valV, name, isObj)
+    }
+    // The receiver check of a property write: chk (js_phsetchk, js_phmodchk) raises
+    // unless objV is an object.
+    function emitObjChk(b, objV, keyV, chk) {
+        var chkB = curF.NewBlock("")
+        var slowB = curF.NewBlock("")
+        var liveB = curF.NewBlock("")
+        b.NewCondBr(isNullishHandle(b, objV), slowB, chkB)
+        var clsV = callExt(chkB, "js_get", [objV, emitStr(chkB, "__class")])
+        chkB.NewCondBr(chkB.NewICmp(llvm.enum.IPredEQ, clsV, hUndef), slowB, liveB)
+        callExt(slowB, chk, [objV, keyV])
+        slowB.NewBr(liveB)
+        return liveB
     }
     // Writing a property whose slot holds a reference CELL has to write through it.
     // Emitted only for a program that writes a '&' somewhere; otherwise this is a
@@ -5424,7 +5433,8 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     // for isset (emitIsFetch, zend_fetch_dimension_address_read with BP_VAR_IS).
     function emitRefPath(b, ref) { return emitRefPathV(b, ref, false, false) }
     function emitRefPathIs(b, ref) { return emitRefPathV(b, ref, false, true) }
-    function emitRefPathV(b, ref, viv, isf) {
+    // ik, when given, checks each array level's key on the way (rwSite's k).
+    function emitRefPathV(b, ref, viv, isf, ik) {
         if (viv) { noteWrite(ref) }
         var rr = refRootV(b, ref, viv)
         b = rr.b
@@ -5495,7 +5505,10 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                     var rif = emitIsFetch(b, o, ri.v)
                     b = rif.b
                     o = rif.v
-                } else { o = callExt(b, viv ? "js_phviv" : "js_phget", [o, ri.v]) }
+                } else {
+                    if (ik != undefined && ik != null) { b = ik(b, [o, ri.v]) }
+                    o = callExt(b, viv ? "js_phviv" : "js_phget", [o, ri.v])
+                }
             }
         }
         var last = ref.path[ref.path.length - 1]
@@ -5590,7 +5603,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                 b = endB6
             } else {
                 if (op != "=") { b = rwVarChk(b, rw, ref) }
-                var p = emitRefPathV(b, ref, true)
+                var p = emitRefPathV(b, ref, true, false, op == "=" || rw == null ? null : rw.k)
                 b = p.b
                 if (op != "=") {
                     b = rwSlotChk(b, rw, p)
@@ -5750,7 +5763,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             return {b: b, v: isPre ? newV : oldV}
         }
         b = rwVarChk(b, ds == null ? null : ds.rw, ref)
-        var p = emitRefPathV(b, ref, true)
+        var p = emitRefPathV(b, ref, true, false, ds == null || ds.rw == null ? null : ds.rw.k)
         b = rwSlotChk(p.b, ds == null ? null : ds.rw, p)
         var rslot = readRefSlot(b, p)
         var oldM = rslot.v
@@ -7492,18 +7505,26 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         return readRawV(okB, raw)
     }
     // The sites checking the read half of a compound assignment or ++/-- of target
-    // ref at pos, null for none: h for an undefined variable, s for the slot. Twin
-    // of rwSite in php-interpreter.abnf, which cites the engine.
+    // ref at pos, null for none: h for an undefined variable, s for the slot, k for
+    // each array level's key on the way. Twin of rwSite in php-interpreter.abnf,
+    // which cites the engine.
     function rwSite(ref, pos) {
         if (ref.sbase != undefined || ref.headT != undefined || ref.gkey != undefined) { return null }
         var named = ref.nameT == null && ref.name != null && ref.name != "$this"
-        if (ref.path.length == 0) { return named ? rwSites(diagSite("__mec_diag", pos), null) : null }
+        if (ref.path.length == 0) { return named ? rwSites(diagSite("__mec_diag", pos), null, null) : null }
         var last = ref.path[ref.path.length - 1]
         var s = last.append === true ? null : diagSite(last.idx != undefined ? "__mec_keychk" : "__mec_ownpropchk", pos)
         var dim = ref.path[0].key == undefined && ref.path[0].keyT == undefined
-        return rwSites(named && dim ? diagSite("__mec_diag", pos) : null, s)
+        return rwSites(named && dim ? diagSite("__mec_diag", pos) : null, s, rwMidSite(ref, pos))
     }
-    function rwSites(h, s) { return h == null && s == null ? null : {h: h, s: s} }
+    // The k site of rwSite: null when no step before the last is an index.
+    function rwMidSite(ref, pos) {
+        for (var i = 0; i < ref.path.length - 1; i++) {
+            if (ref.path[i].idx != undefined) { return diagSite("__mec_keychk", pos) }
+        }
+        return null
+    }
+    function rwSites(h, s, k) { return h == null && s == null && k == null ? null : {h: h, s: s, k: k} }
     // Those checks, of the variable holding path target ref's elements or of its
     // slot p (emitRefPathV).
     function rwVarChk(b, rw, ref) {

@@ -4703,13 +4703,19 @@ func init() {
 		m["js_phtype"] = func(a []uint64) uint64 { return rt.wrapStr(rt.phpTypeName(u(a[0]))) }
 		m["js_phdtype"] = func(a []uint64) uint64 { return rt.wrapStr(rt.phpDebugType(u(a[0]))) }
 		// (o, key): writing a property of anything but an object raises PHP 8's
-		// catchable Error. Twin of js_phsetchk in languages/lib/php-rt.metajs.
-		m["js_phsetchk"] = func(a []uint64) uint64 {
-			if o := u(a[0]); !phpIsObj(o) {
-				rt.phpRaise("Error", "Attempt to assign property \""+phpPropName(rt.phpStr(u(a[1])))+"\" on "+rt.phpDebugType(o))
+		// catchable Error; "modify" when the property is fetched for writing, as a
+		// reference to it is (zend_throw_non_object_error). Twins of js_phsetchk and
+		// js_phmodchk in languages/lib/php-rt.metajs.
+		propChk := func(verb string) func(a []uint64) uint64 {
+			return func(a []uint64) uint64 {
+				if o := u(a[0]); !phpIsObj(o) {
+					rt.phpRaise("Error", "Attempt to "+verb+" property \""+phpPropName(rt.phpStr(u(a[1])))+"\" on "+rt.phpValueName(o))
+				}
+				return 0
 			}
-			return 0
 		}
+		m["js_phsetchk"] = propChk("assign")
+		m["js_phmodchk"] = propChk("modify")
 		m["js_phdump"] = func(a []uint64) uint64 { return rt.wrapStr(rt.phpDump(u(a[0]), 0)) }
 		// The slow halves of a property access, for a name some class restricts or
 		// types and for a miss with a magic method about: (o, key, scope[, ...]),

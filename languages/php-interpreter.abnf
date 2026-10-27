@@ -3252,7 +3252,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                     if (nm == "$this") { phpNoThis() }
                     continue
                 }
-                var p = resolveRefPhpV(ref, false)
+                var p = resolveRefPhpV(ref, false, null)
                 if (p.last.key != undefined) { if (isObj(p.obj)) { phpUnsetProp(p.obj, p.last.key) } }
                 else if (p.last.append !== true && isArr(p.obj)) { arrDel(p.obj, p.last.idx()) }
                 else if (p.last.append !== true && phpIsAA(p.obj)) { mcall(p.obj, "offsetUnset", argsOf([p.last.idx()])) }
@@ -4107,13 +4107,16 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         return r
     }
     function phpInUn(o, name) { return typeof o.un == "string" && o.un.indexOf("," + name + ",") >= 0 }
+    // PHP 8 no longer makes a stdClass here: writing a property of a non-object
+    // is a catchable Error (Zend/tests/bug52614), "modify" when the property is
+    // fetched for writing (a reference to it; zend_throw_non_object_error).
+    // Twin of js_phsetchk / js_phmodchk in abnf/jsrtphp.go.
+    function phpPropOnNonObj(verb, o, name) {
+        var q = String.fromCharCode(34)
+        phpRaise("Error", "Attempt to " + verb + " property " + q + name + q + " on " + phpValueName(o))
+    }
     function phpSetProp(o, name, v) {
-        // PHP 8 no longer makes a stdClass here: writing a property of a non-object
-        // is a catchable Error (Zend/tests/bug52614).
-        if (!isObj(o)) {
-            var q = String.fromCharCode(34)
-            phpRaise("Error", "Attempt to assign property " + q + name + q + " on " + phpDebugType(o))
-        }
+        if (!isObj(o)) { phpPropOnNonObj("assign", o, name) }
         if (name != hookBacking) {
             var hs = classFind(o.__class, "__hset_" + name)
             if (hs != null) { callHook(o, hs, name, [v]); return }
@@ -5780,11 +5783,12 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     }
     // Walk the path to the container that the last step writes into, creating the
     // arrays along the way (PHP auto-vivifies: $a["x"]["y"] = 1 makes both levels).
-    function resolveRefPhp(ref) { return resolveRefPhpV(ref, true) }
+    function resolveRefPhp(ref) { return resolveRefPhpV(ref, true, null) }
     // ... except under unset(), which walks the same path and creates NOTHING:
     // `unset($j["z"]["w"])` on an empty $j leaves it empty, it does not give it a
-    // "z" holding an empty array.
-    function resolveRefPhpV(ref, viv) {
+    // "z" holding an empty array. ik, when not null, checks each array level's key
+    // on the way (rwSite's k).
+    function resolveRefPhpV(ref, viv, ik) {
         var o = anytype
         if (ref.headT != null && ref.headT != undefined) {
             o = phpCopy(ref.headT())   // a by-value array result is a temporary
@@ -5819,7 +5823,11 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             // read for isset, as emitPropGetSafe does in php-to-llvm-ir.abnf.
             if (s.key != undefined) { nxt = viv ? phpGetProp(o, s.key) : (isObj(o) ? phpGetProp(o, s.key, true) : null) }
             else if (s.append === true) { nxt = null }
-            else { key = s.idx(); nxt = phpIndex(o, key) }
+            else {
+                key = s.idx()
+                if (ik != null && isArr(o)) { ik([o, key]) }
+                nxt = phpIndex(o, key)
+            }
             if (viv && (nxt === null || nxt === undefined) && isArr(o)) {
                 nxt = newArr()
                 if (s.append === true) { arrPush(o, nxt) } else { arrSet(o, key, nxt) }
@@ -5993,7 +6001,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                 phpSet(nm, v)
             } else {
                 rwVarChk(rw, ref)
-                var p = resolveRefPhp(op == "=" ? ref : memoRef(ref))
+                var p = op == "=" ? resolveRefPhp(ref) : resolveRefPhpV(memoRef(ref), true, rw == null ? null : rw.k)
                 if (op != "=") {
                     rwSlotChk(rw, p)
                     v = compoundOp(oc, op, readAt(p), v)
@@ -6129,7 +6137,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         // An object PROPERTY is a storage location too: the property map is the same
         // ordered map an array is, so its element cell is the same mechanism.
         if (p.last.key != undefined) {
-            if (!isObj(p.obj)) { return null }
+            if (!isObj(p.obj)) { phpPropOnNonObj("modify", p.obj, p.last.key) }
             return arrCell(p.obj.p, p.last.key)
         }
         if (isArr(p.obj)) { return arrCell(p.obj, p.last.idx()) }
@@ -6210,7 +6218,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         if (rw == null) { return readTargetVal(ref) }
         rwVarChk(rw, ref)
         if (ref.path.length == 0) { return readTargetVal(ref) }
-        var p = resolveRefPhp(ref)
+        var p = resolveRefPhpV(ref, true, rw.k)
         rwSlotChk(rw, p)
         return readAt(p)
     }
@@ -6219,17 +6227,26 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // variable, the target itself or the one holding its elements (ZEND_ASSIGN_DIM_OP
     // and zend_fetch_dimension_address raise it before the key's warning); s checks
     // the slot read, an array element's key (__mec_keychk) or an object's property
-    // (__mec_ownpropchk). Twin of rwSite in php-to-llvm-ir.abnf.
+    // (__mec_ownpropchk); k checks the key of each array level on the way, which
+    // ZEND_FETCH_DIM_RW fetches as a read-write too (zend_undefined_index_write).
+    // Twin of rwSite in php-to-llvm-ir.abnf.
     function rwSite(ref, pos) {
         if (ref.sref != null || (ref.headT != null && ref.headT != undefined) || ref.gkey != undefined) { return null }
         var named = ref.nameT == null && ref.name != null && ref.name != "$this"
-        if (ref.path.length == 0) { return named ? rwSites(diagSite("__mec_diag", pos), null) : null }
+        if (ref.path.length == 0) { return named ? rwSites(diagSite("__mec_diag", pos), null, null) : null }
         var last = ref.path[ref.path.length - 1]
         var s = last.append === true ? null : diagSite(last.idx != undefined ? "__mec_keychk" : "__mec_ownpropchk", pos)
         var dim = ref.path[0].key == undefined && ref.path[0].keyT == undefined
-        return rwSites(named && dim ? diagSite("__mec_diag", pos) : null, s)
+        return rwSites(named && dim ? diagSite("__mec_diag", pos) : null, s, rwMidSite(ref, pos))
     }
-    function rwSites(h, s) { return h == null && s == null ? null : {h: h, s: s} }
+    // The k site of rwSite: null when no step before the last is an index.
+    function rwMidSite(ref, pos) {
+        for (var i = 0; i < ref.path.length - 1; i++) {
+            if (ref.path[i].idx != undefined) { return diagSite("__mec_keychk", pos) }
+        }
+        return null
+    }
+    function rwSites(h, s, k) { return h == null && s == null && k == null ? null : {h: h, s: s, k: k} }
     // Those checks, of the variable of target ref or of slot p of a path target.
     function rwVarChk(rw, ref) {
         if (rw != null && rw.h != null && !varIsSet(ref.name)) { rw.h([2, "Undefined variable " + ref.name]) }

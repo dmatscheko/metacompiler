@@ -102,6 +102,12 @@ $rwA[] .= "x"; check("rw-undef-container", [$rwA, lastErr()], [["x"], want(E_WAR
 $rwB["k"] .= "x"; check("rw-undef-container-key", [$rwB, lastErr()], [["k" => "x"], want(E_WARNING, 'Undefined array key "k"', __LINE__)]);
 $rwC[0]++; check("rw-undef-container-inc", [$rwC, lastErr()], [[1], want(E_WARNING, 'Undefined array key 0', __LINE__)]);
 $rwD[]++; check("rw-undef-container-inc-append", lastErr(), want(E_WARNING, 'Undefined variable $rwD', __LINE__));
+// Each level on the way is fetched read-write too (ZEND_FETCH_DIM_RW), and a key
+// it does not have warns before the next level's.
+$rwE = []; $rwE["a"][] .= "x"; check("rw-mid-key", [$rwE, lastErr()], [["a" => ["x"]], want(E_WARNING, 'Undefined array key "a"', __LINE__)]);
+$rwF = [3 => []]; $rwF[3][4][]++; check("rw-mid-key-inc", [$rwF, lastErr()], [[3 => [4 => [1]]], want(E_WARNING, 'Undefined array key 4', __LINE__)]);
+$rwG = ["a" => null]; $rwG["a"][] .= "x"; check("rw-mid-key-present", [$rwG, lastErr()], [["a" => ["x"]], null]);
+$rwH["a"]["b"] .= "y"; check("rw-mid-key-last", [$rwH, lastErr()], [["a" => ["b" => "y"]], want(E_WARNING, 'Undefined array key "b"', __LINE__)]);
 $s = "abc";
 $v = $s[5]; check("string-offset", [$v, lastErr()], ["", want(E_WARNING, 'Uninitialized string offset 5', __LINE__)]);
 $v = $s[-4]; check("string-offset-negative", lastErr(), want(E_WARNING, 'Uninitialized string offset -4', __LINE__));

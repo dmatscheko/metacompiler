@@ -3550,14 +3550,18 @@ function js_phis(kind, v) {
 
 function js_phtype(v) { return phTypeName(v) }
 function js_phdtype(v) { return phDebugType(v) }
-// Writing a property of anything but an object raises PHP 8's catchable Error.
-// Twin of js_phsetchk in abnf/jsrtphp.go.
-function js_phsetchk(o, k) {
+// Writing a property of anything but an object raises PHP 8's catchable Error;
+// "modify" when the property is fetched for writing, as a reference to it is
+// (zend_throw_non_object_error). Twins of js_phsetchk and js_phmodchk in
+// abnf/jsrtphp.go.
+function phPropChk(verb, o, k) {
     if (!phIsObj(o)) {
-        phRaise("Error", "Attempt to assign property \"" + phPropName(phStr(k)) + "\" on " + phDebugType(o))
+        phRaise("Error", "Attempt to " + verb + " property \"" + phPropName(phStr(k)) + "\" on " + phValueName(o))
     }
     return undefined
 }
+function js_phsetchk(o, k) { return phPropChk("assign", o, k) }
+function js_phmodchk(o, k) { return phPropChk("modify", o, k) }
 function js_phdump(v) { return phDump(v, 0) }
 
 // method_exists over the __mlc lists of the class chain; v is an object, a class

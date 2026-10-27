@@ -2086,10 +2086,13 @@ function s50() {
 // (Zend/tests/named_params). A callable naming a missing class raises
 // 'Class "X" not found' (dynamic_call/bug68475), and 'parent::m' / 'self::m' resolve
 // in the class scope of the caller, through call_user_func too. Writing a property
-// of an int, string, float, bool or array is a catchable Error, and a write through
-// a variable bound by reference reaches the object it holds.
+// of an int, string, float, bool or array is a catchable Error (a bool named by its
+// value), fetching one for a reference "Attempt to modify property" before the
+// call (Zend/tests/bug44660), and a write through a variable bound by reference
+// reaches the object it holds.
 function s51f($a, $b = 2) { return $a + $b; }
 function s51v($a, ...$rest) { return count($rest); }
+function s51rf(&$x) { $x = 7; }
 class S51T {}
 class S51I { function __invoke($a = "a", $b = "b") { return $a . $b; } }
 class S51A { static function hi() { return "A"; } }
@@ -2125,13 +2128,22 @@ function s51() {
     $msgs = [];
     foreach ($vals as $v) { $msgs[] = s51err(function() use ($v) { $v->p = 1; }); }
     check("prp1", $msgs === ["Attempt to assign property \"p\" on int", "Attempt to assign property \"p\" on string",
-                             "Attempt to assign property \"p\" on float", "Attempt to assign property \"p\" on bool",
+                             "Attempt to assign property \"p\" on float", "Attempt to assign property \"p\" on true",
                              "Attempt to assign property \"p\" on array"]);
     $o = new S51T();
     $r = &$o;
     $r->x = 1;
     $o->y = 2;
     check("prp2", $o->x === 1 && $r->y === 2);
+    $n = null;
+    $log = "";
+    $m = s51err(function() use ($n, &$log) { s51rf($n->p); $log .= "ran"; });
+    check("prp3", $m === "Attempt to modify property \"p\" on null" && $log === "" && $n === null);
+    $b = true;
+    check("prp4", s51err(function() use ($b) { $s = &$b->q; }) === "Attempt to modify property \"q\" on true");
+    $k = new S51T();
+    s51rf($k->p);
+    check("prp5", $k->p === 7);
 }
 
 // ===== SECTION 52: goto out of try, catch and nested try bodies =====
@@ -2620,11 +2632,11 @@ class S59It extends ArrayIterator {
 }
 function s59() {
     $f = s59f();
-    check("mag1", $f[0] === "s59f" && $f[1] === "{closure:s59f():2582}|{closure:s59f():2582}"
-        && $f[2] === "{closure:s59f():2583}" && $f[3] === "{closure:{closure:s59f():2584}:2584}"
+    check("mag1", $f[0] === "s59f" && $f[1] === "{closure:s59f():2594}|{closure:s59f():2594}"
+        && $f[2] === "{closure:s59f():2595}" && $f[3] === "{closure:{closure:s59f():2596}:2596}"
         && $f[4] === "s59f");
     $m = (new S59C)->m();
-    check("mag2", $m[0] === "{closure:S59C::m():2589}|{closure:S59C::m():2589}|S59C"
+    check("mag2", $m[0] === "{closure:S59C::m():2601}|{closure:S59C::m():2601}|S59C"
         && $m[1] === "m" && $m[2] === "S59C::m" && (new S59H)->p === "\$p::get|S59H::\$p::get");
     check("spl1", class_exists('ArrayIterator') && class_exists('arrayobject') && class_exists("SplStack")
         && class_exists('SplObjectStorage') && interface_exists('SeekableIterator')
