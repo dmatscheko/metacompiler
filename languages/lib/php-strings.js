@@ -660,6 +660,14 @@ function phsCloDesc(name, file, line, statics, pnames, pref, popt) {
     return name + "\n" + file + "\n" + line + "\n" + ss + "\n" + ps + "\n" + nreq
 }
 
+// zend_valid_closure_binding's warning for binding a closure made from a method,
+// whose debug record is d (its name "<class>::<method>"), to an instance of class
+// cn.
+function phsBindMethodMsg(d, cn) {
+    var nl = d.indexOf("\n")
+    return "Cannot bind method " + (nl < 0 ? d : d.substring(0, nl)) + "() to object of class " + cn
+}
+
 // s cut at every unit sep; "" is no fields at all.
 function phsCloSplit(s, sep) {
     var out = []

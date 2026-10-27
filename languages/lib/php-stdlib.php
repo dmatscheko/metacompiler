@@ -2792,6 +2792,208 @@ function spl_object_hash($object) {
     return sprintf("%016x0000000000000000", __mec_oid($object));
 }
 
+// ----- diagnostics -----------------------------------------------------------
+// A grammar compiled with display_errors=1 raises the program's warnings,
+// notices and deprecations through __mec_diag, and checks the operations that
+// raise them with the __mec_*chk functions before it performs them; $file and
+// $line are the site's, or null and 0 with lines=0. With display_errors=0 none of
+// this is compiled in, and error_get_last() never has an error to answer.
+//
+// EG(error_reporting), E_ALL at startup: answers it, and sets it first unless
+// $level is null.
+function __mec_erlevel($level = null) {
+    static $cur = 32767;
+    $old = $cur;
+    if ($level !== null) { $cur = $level; }
+    return $old;
+}
+// PG(last_error_*): answers the record, and sets it first unless $error is false.
+function __mec_erlast($error = false) {
+    static $last = null;
+    if ($error !== false) { $last = $error; }
+    return $last;
+}
+// php_error_cb (main/main.c) at the CLI's defaults: the error is recorded, then,
+// if error_reporting has its bit, displayed on stdout as
+// "%s\n%s: %s in %s on line %d\n%s" with an empty prepend and append string. A
+// site without a location shows none.
+function __mec_diag($type, $message, $file = null, $line = 0) {
+    if (__mec_diagbuf(2, [$type, $message, $file, $line])) { return; }
+    __mec_erlast(["type" => $type, "message" => $message, "file" => $file ?? "Unknown", "line" => $line]);
+    if ((__mec_erlevel() & $type) == 0) { return; }
+    $label = $type == 8 ? "Notice" : ($type == 8192 ? "Deprecated" : "Warning");
+    echo "\n", $label, ": ", $message, $file === null ? "" : " in " . $file . " on line " . $line, "\n";
+}
+// The diagnostics of an argument the interpreter reads before it knows whether
+// the parameter takes it by reference: $op 0 starts keeping them, 1 stops and
+// answers the kept ones (each __mec_diag's arguments), and 2 keeps $entry if
+// keeping, answering whether it did. Starts nest.
+function __mec_diagbuf($op, $entry = null) {
+    static $kept = [];
+    if ($op === 0) { $kept[] = []; return null; }
+    if ($op === 1) { return array_pop($kept); }
+    $n = count($kept);
+    if ($n === 0) { return false; }
+    $kept[$n - 1][] = $entry;
+    return true;
+}
+// Raises the kept diagnostics of an argument passed by value after all.
+function __mec_diagreplay($kept) {
+    foreach ($kept as $e) { __mec_diag($e[0], $e[1], $e[2], $e[3]); }
+}
+// After ->bindTo(), ->call() or Closure::bind(): the warning of a binding
+// zend_valid_closure_binding refused, which the engine keeps (__mec_bindwhy).
+function __mec_bindchk($file = null, $line = 0) {
+    $why = __mec_bindwhy();
+    if ($why !== "") { __mec_diag(2, $why, $file, $line); }
+}
+// error_reporting() under display_errors=1: the previous level.
+function __mec_erreport($error_level = null) {
+    return __mec_erlevel($error_level === null ? null : (int) $error_level);
+}
+function error_get_last() { return __mec_erlast(); }
+function error_clear_last() { __mec_erlast(null); }
+// ZEND_BEGIN_SILENCE: '@' leaves only the fatal errors (E_FATAL_ERRORS, 4437) on,
+// and answers the level to restore.
+function __mec_silence() {
+    $old = __mec_erlevel();
+    if (($old & ~4437) != 0) { __mec_erlevel($old & 4437); }
+    return $old;
+}
+// ZEND_END_SILENCE, also run when an exception leaves the operand: the level is
+// restored unless the operand itself turned a non-fatal error back on.
+function __mec_unsilence($old) {
+    if ((__mec_erlevel() & ~4437) == 0 && ($old & ~4437) != 0) { __mec_erlevel($old); }
+}
+// The Deprecated of a float that is not an integer used as one
+// (zend_incompatible_double_to_long_error); answers the int.
+function __mec_f2ichk($v, $file = null, $line = 0) {
+    $i = (int) $v;
+    if ((float) $i !== $v) {
+        __mec_diag(8192, "Implicit conversion from float " . __mec_serfloat($v, "E") . " to int loses precision", $file, $line);
+    }
+    return $i;
+}
+// The operand of ++ ($inc) or -- (increment_function, decrement_function): a bool,
+// a null decremented, and a string that is not numeric.
+function __mec_incdecchk($v, $inc, $file = null, $line = 0) {
+    $what = $inc ? "Increment" : "Decrement";
+    if (is_bool($v) || ($v === null && !$inc)) {
+        __mec_diag(2, $what . " on type " . ($v === null ? "null" : "bool") . " has no effect, this will change in the next major version of PHP", $file, $line);
+    } elseif (!is_string($v) || is_numeric($v)) {
+        return;
+    } elseif ($inc && ($v === "" || preg_match('/^[A-Za-z0-9]*$/', $v) !== 1)) {
+        __mec_diag(8192, "Increment on non-alphanumeric string is deprecated", $file, $line);
+    } elseif (!$inc) {
+        __mec_diag(8192, $v === "" ? "Decrement on empty string is deprecated as non-numeric" : "Decrement on non-numeric string has no effect and is deprecated", $file, $line);
+    }
+}
+// An operand of %, the bitwise operators and the shifts, as zendi_try_get_long
+// takes it: a float that is not an integer, and a numeric string with trailing
+// data or with a float value that is not one. A string that is not numeric at all
+// is the operator's own TypeError.
+function __mec_intchk($v, $file = null, $line = 0) {
+    if (is_float($v)) { __mec_f2ichk($v, $file, $line); return; }
+    if (!is_string($v) || is_numeric($v)) {
+        if (is_string($v) && (float) $v != (int) $v) {
+            __mec_diag(8192, "Implicit conversion from float-string \"" . $v . "\" to int loses precision", $file, $line);
+        }
+        return;
+    }
+    if (preg_match('/^[ \t\n\r\v\f]*[+-]?([0-9]+(\.[0-9]*)?|\.[0-9]+)([eE][+-]?[0-9]+)?/', $v, $m) !== 1) { return; }
+    __mec_diag(2, "A non-numeric value encountered", $file, $line);
+    if ((float) $m[0] != (int) $m[0]) {
+        __mec_diag(8192, "Implicit conversion from float-string \"" . $v . "\" to int loses precision", $file, $line);
+    }
+}
+// An operand of +, -, *, / and **: a numeric string with trailing data
+// (_zendi_try_convert_scalar_to_number).
+function __mec_numchk($v, $file = null, $line = 0) {
+    if (is_string($v) && !is_numeric($v)
+        && preg_match('/^[ \t\n\r\v\f]*[+-]?([0-9]+(\.[0-9]*)?|\.[0-9]+)/', $v) === 1) {
+        __mec_diag(2, "A non-numeric value encountered", $file, $line);
+    }
+}
+// The operands of binary operator $op, or of ~ ($b null), left first: as ints for
+// %, the shifts and a bitwise operator not given two strings, as numbers for the
+// arithmetic ones, and an array as a string for the concatenation
+// (zval_get_string's "Array to string conversion").
+function __mec_opchk($op, $a, $b, $file = null, $line = 0) {
+    if ($op === ".") {
+        if (is_array($a)) { __mec_diag(2, "Array to string conversion", $file, $line); }
+        if (is_array($b)) { __mec_diag(2, "Array to string conversion", $file, $line); }
+    } elseif ($op === "+" || $op === "-" || $op === "*" || $op === "/" || $op === "**") {
+        __mec_numchk($a, $file, $line);
+        __mec_numchk($b, $file, $line);
+    } elseif ($op === "~") {
+        if (is_float($a)) { __mec_f2ichk($a, $file, $line); }
+    } elseif ($op === "%" || $op === "<<" || $op === ">>" || !is_string($a) || !is_string($b)) {
+        __mec_intchk($a, $file, $line);
+        __mec_intchk($b, $file, $line);
+    }
+}
+// Reading $container[$offset] (zend_fetch_dimension_address_read_R): a missing
+// key of an array, a cast or out-of-range offset of a string, and a scalar
+// container. An offset the read itself refuses is left to it.
+function __mec_dimchk($container, $offset, $file = null, $line = 0) {
+    if (is_array($container)) {
+        __mec_keychk($container, $offset, $file, $line);
+        return;
+    }
+    if (is_string($container)) {
+        if (is_float($offset) || is_bool($offset) || $offset === null) {
+            __mec_diag(2, "String offset cast occurred", $file, $line);
+            $offset = (int) $offset;
+        } elseif (is_string($offset)) {
+            // An integer string is the offset, and so is one's integer prefix,
+            // with a warning; anything else is the read's own Error.
+            if (is_numeric($offset)) {
+                if (!is_int($offset + 0)) { return; }
+            } elseif (preg_match('/^[ \t\n\r\v\f]*[+-]?[0-9]+(\.[0-9]*)?([eE][+-]?[0-9]+)?/', $offset, $m) === 1 && is_int($m[0] + 0)) {
+                __mec_diag(2, "Illegal string offset \"" . $offset . "\"", $file, $line);
+            } else { return; }
+            $offset = (int) $offset;
+        } elseif (!is_int($offset)) { return; }
+        $n = strlen($container);
+        if ($offset >= $n || $offset < -$n) { __mec_diag(2, "Uninitialized string offset " . $offset, $file, $line); }
+        return;
+    }
+    if (!is_object($container)) {
+        __mec_diag(2, "Trying to access array offset on " . __mec_vname($container), $file, $line);
+    }
+}
+// The key of an array element that is read, also by a compound assignment or
+// ++/-- (zend_undefined_offset, zend_undefined_index): a float that is not an
+// integer, and a key the array does not have.
+function __mec_keychk($container, $offset, $file = null, $line = 0) {
+    if (!is_array($container)) { return; }
+    if (is_float($offset)) { $offset = __mec_f2ichk($offset, $file, $line); }
+    elseif (is_bool($offset)) { $offset = (int) $offset; }
+    elseif ($offset === null) { $offset = ""; }
+    elseif (!is_int($offset) && !is_string($offset)) { return; }
+    if (array_key_exists($offset, $container)) { return; }
+    if (is_string($offset) && (string) (int) $offset !== $offset) {
+        __mec_diag(2, "Undefined array key \"" . $offset . "\"", $file, $line);
+    } else {
+        __mec_diag(2, "Undefined array key " . $offset, $file, $line);
+    }
+}
+// Reading $object->$name: a container that is no object
+// (zend_wrong_property_read), then __mec_ownpropchk.
+function __mec_propchk($object, $name, $file = null, $line = 0) {
+    if (!is_object($object)) {
+        __mec_diag(2, "Attempt to read property \"" . $name . "\" on " . __mec_vname($object), $file, $line);
+    }
+    __mec_ownpropchk($object, $name, $file, $line);
+}
+// A property an object does not have and no __get supplies, read, also by a
+// compound assignment or ++/-- (zend_std_read_property).
+function __mec_ownpropchk($object, $name, $file = null, $line = 0) {
+    if (is_object($object) && !property_exists($object, $name) && !method_exists($object, "__get")) {
+        __mec_diag(2, "Undefined property: " . get_class($object) . "::\$" . $name, $file, $line);
+    }
+}
+
 // ----- SPL: the iterator functions, class_implements ------------------------
 function iterator_to_array($iterator, $preserve_keys = true) {
     if (is_array($iterator)) { return $preserve_keys ? $iterator : array_values($iterator); }

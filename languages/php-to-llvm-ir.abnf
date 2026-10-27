@@ -1,3 +1,6 @@
+// @flag display_errors 0|1 default=0 1 prints warnings, notices and deprecations on stdout as php-cli does, honouring @ and error_reporting(); 0 detects none and costs nothing.
+// @flag lines 1|0 default=1 With display_errors=1, 0 drops each diagnostic's " in <file> on line <n>" for smaller and faster code.
+
 :title("PHP (subset) to LLVM IR compiler") ;
 :description("Compiles a PHP subset to an LLVM IR module and runs it with the built-in
 IR interpreter and the MetaJS handle runtime (llvm.RunJS).
@@ -47,7 +50,9 @@ PHP's catchable Error and the shared js_mcall may not be overridden - manual ch.
 foreach via js_range_len / js_range_key / js_range_val over that same ordered map.
 '.' concatenation coerces via js_phcat; && || coerce to booleans with js_phbool. The whole program becomes phpmain(env,
 args); a self checking program ends with exit(failures). The same subset is interpreted
-directly by php-interpreter.abnf, and the two must agree.") ;
+directly by php-interpreter.abnf, and the two must agree. Warnings, notices and
+deprecations are emitted only with the compiler flag display_errors=1 (the flags are in
+the leading comment block); without it no code checks for them.") ;
 
 
 // --- main rules
@@ -577,7 +582,8 @@ Expression  <~~ push(makeOrAnd(takeAll(), true)) ~~>
 WordAnd     <~~ push(makeOrAnd(takeAll(), false)) ~~>
             = ExprCore { "and" KwEnd ExprCore } ;
 ExprCore    = SuppressExpr | RefAssign | RefAssignVal | DestructAssign | Assignment | Ternary ;
-SuppressExpr = "@" ExprCore ;
+SuppressExpr <~~ push(makeSilence(pop(), up.start)) ~~>
+            = "@" ExprCore ;
 
 // yield / yield $v / yield $k => $v / yield from $it. A function whose body contains
 // one is a GENERATOR function: calling it does not run the body, it makes a generator
@@ -644,7 +650,7 @@ Elvis       <~~ push({elvis: pop()}) ~~>
 Coalesce    <~~ push(makeCoalesce(takeAll())) ~~>
             = OrExpr { "??" OrExpr } ;
 
-Assignment  <~~ push(makeAssign(takeAll())) ~~>
+Assignment  <~~ push(makeAssign(takeAll(), up.start)) ~~>
             = Target AssignOp <~~ push(up.in) ~~> ExprCore ;
 // Longest first (ordered choice): '**=' before '*=', '<<=' before '<='. The plain
 // '=' declines '==' (a comparison) and '=>' (an array key), neither of which is an
@@ -909,12 +915,12 @@ PipeExpr    <~~ push(makePipe(takeAll())) ~~>
 
 // The binary operator ladder. Twin of the ladder in php-interpreter.abnf (above
 // OrExpr there), which documents PHP's precedence order.
-BitOrExpr   <~~ push(foldBinary(takeAll())) ~~>
+BitOrExpr   <~~ push(foldOps(takeAll(), up.start)) ~~>
             = BitXorExpr { SingleBar <~~ push(up.in) ~~> BitXorExpr } ;
 SingleBar   = "|" !"|" !">" ;
-BitXorExpr  <~~ push(foldBinary(takeAll())) ~~>
+BitXorExpr  <~~ push(foldOps(takeAll(), up.start)) ~~>
             = BitAndExpr { "^" <~~ push(up.in) ~~> BitAndExpr } ;
-BitAndExpr  <~~ push(foldBinary(takeAll())) ~~>
+BitAndExpr  <~~ push(foldOps(takeAll(), up.start)) ~~>
             = EqExpr { SingleAmp <~~ push(up.in) ~~> EqExpr } ;
 SingleAmp   = "&" !"&" ;
 EqExpr      <~~ push(foldBinary(takeAll())) ~~>
@@ -925,21 +931,21 @@ RelOp       = LeNotSpaceship | ">=" | SingleLt | SingleGt ;
 LeNotSpaceship = "<=" !">" ;
 SingleLt    = "<" !"<" ;
 SingleGt    = ">" !">" ;
-ConcatExpr  <~~ push(foldBinary(takeAll())) ~~>
+ConcatExpr  <~~ push(foldOps(takeAll(), up.start)) ~~>
             = ShiftExpr { DotOp <~~ push(up.in) ~~> ShiftExpr } ;
 DotOp       = "." !"=" ;
-ShiftExpr   <~~ push(foldBinary(takeAll())) ~~>
+ShiftExpr   <~~ push(foldOps(takeAll(), up.start)) ~~>
             = AddExpr { ( "<<" | ">>" ) <~~ push(up.in) ~~> AddExpr } ;
-AddExpr     <~~ push(foldBinary(takeAll())) ~~>
+AddExpr     <~~ push(foldOps(takeAll(), up.start)) ~~>
             = MulExpr { ( "+" | "-" ) <~~ push(up.in) ~~> MulExpr } ;
-MulExpr     <~~ push(foldBinary(takeAll())) ~~>
+MulExpr     <~~ push(foldOps(takeAll(), up.start)) ~~>
             = UnaryExpr { ( "*" | "/" | "%" ) <~~ push(up.in) ~~> UnaryExpr } ;
 
 UnaryExpr   = Cast | Clone | InstanceofExpr | PreIncDec | Neg | Pos | BitNot | NotOp
             | Suppress | ThrowExpr | PrintExpr | YieldExpr | PowExpr ;
 NotOp       <~~ push(makeNot(pop())) ~~>
             = "!" UnaryExpr ;
-BitNot      <~~ push(makeBitNot(pop())) ~~>
+BitNot      <~~ push(makeBitNot(pop(), up.start)) ~~>
             = "~" UnaryExpr ;
 // '**' is RIGHT associative (2 ** 3 ** 2 is 512, not 64) and binds tighter than
 // every prefix operator on its left but looser than the one on its right, so its
@@ -980,20 +986,21 @@ InstRef     = InstDyn | InstParen | InstName ;
 InstDyn     <~~ push({idyn: makeVarRef(pop())}) ~~> = DollarName ;
 InstParen   <~~ push({idyn: pop()}) ~~> = "(" Expression ")" ;
 InstName    <~~ push({iname: lastSeg(stripWs(up.in))}) ~~> = ExtName ;
-PreIncDec   <~~ push(makePreIncDec(pop(), pop())) ~~>
+PreIncDec   <~~ push(makePreIncDec(pop(), pop(), up.start)) ~~>
             = ( "++" | "--" ) <~~ push(up.in) ~~> Target ;
 Neg         <~~ push(makeNeg(pop())) ~~>
             = "-" UnaryExpr ;
 Pos         <~~ push(makePos(pop())) ~~>
             = "+" UnaryExpr ;
 // See SuppressExpr: '@' as a prefix INSIDE an expression ('$x = @foo() + 1').
-Suppress    = "@" UnaryExpr ;
+Suppress    <~~ push(makeSilence(pop(), up.start)) ~~>
+            = "@" UnaryExpr ;
 
 // '$x++' / '$x--' and an assignment as an OPERAND over one shared Target. Twin of
 // TgtOperand in php-interpreter.abnf; see there.
 PostfixExpr = TgtOperand | CallMember ;
 
-TgtOperand  <~~ var it = takeAll(); push(it.length == 2 ? makeIncDec(it) : makeAssign(it)) ~~>
+TgtOperand  <~~ var it = takeAll(); push(it.length == 2 ? makeIncDec(it, up.start) : makeAssign(it, up.start)) ~~>
             = Target ( IncDecOp | OpAssign ) ;
 IncDecOp    <~~ push(up.in) ~~> = "++" | "--" ;
 OpAssign    = AssignOp <~~ push(up.in) ~~> ExprCore ;
@@ -1314,11 +1321,11 @@ PhpLegOct   <~~ push(phpLegOctLit(up.in)) ~~>
 PhpInt      <~~ push(phpIntLit(up.in)) ~~>
             = "0"..."9" :whitespace() { "0"..."9" | "_" } :whitespace(Whitespace) ;
 
-VarRef      <~~ push(makeVarRef(pop())) ~~>
+VarRef      <~~ push(makeVarRead(pop(), up.start)) ~~>
             = DollarName ;
 // '$$$$d' / '${$$$a}': the indirection RECURSES, each level a name thunk over the
 // next one down, so any depth reads the same way the head form writes it.
-VarVarRef   <~~ push(makeVarVarRef(pop())) ~~>
+VarVarRef   <~~ push(makeVarVarRef(pop(), up.start)) ~~>
             = "$" ( VarRef | VarVarRef | "{" Expression "}" ) ;
 Null        <~~ push(makeConst(null)) ~~> = "null" KwEnd ;
 
@@ -2258,12 +2265,13 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         return b
     }
     // $$name as a VALUE. The name is "$" . the string the inner expression yields.
-    function makeVarVarRef(t) {
-        return function(b) {
+    function makeVarVarRef(t, pos) {
+        var site = diagSite("__mec_diag", pos)
+        return function(b, mode) {
             var r = t(b)
             b = r.b
             var nameV = callExt(b, "js_phcat", [emitStr(b, "$"), callExt(b, "js_phstr", [r.v])])
-            return readVarV(b, nameV)
+            return readVarDiag(b, nameV, null, mode === coalIs ? null : site)
         }
     }
 
@@ -3660,9 +3668,12 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         }
     }
     // ~x: a string's bytes or an int's bits (phpBitNot in the interpreter).
-    function makeBitNot(t) {
+    // ~e, its operand checked (__mec_opchk) with display_errors=1.
+    function makeBitNot(t, pos) {
+        var site = diagSite("__mec_opchk", pos)
         return function(b) {
             var r = t(b)
+            if (site != null) { site(r.b, [emitStr(r.b, "~"), r.v, hNull]) }
             return {b: r.b, v: callExt(r.b, "js_phbnot", [r.v])}
         }
     }
@@ -3848,11 +3859,25 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         var suffixes = items.slice(1)
         var site = callSite(start)
         var hasNs = false
+        // A read of an element or a property is checked first (__mec_dimchk,
+        // __mec_propchk) with display_errors=1; the chain's line is the site's.
+        // Twin of foldCallMember in php-interpreter.abnf.
+        // A ->bindTo() or ->call() raises the warning of a refused binding after it
+        // (__mec_bindchk); js_phbindwhy before it drops one a binding no site
+        // checks left behind.
+        var dimSite = null
+        var propSite = null
+        var bindSite = null
         for (var q = 0; q < suffixes.length; q++) {
             if (suffixes[q].nullsafe === true) { hasNs = true }
+            if (suffixes[q].kind == "index" && dimSite == null) { dimSite = diagSite("__mec_dimchk", start) }
+            if ((suffixes[q].kind == "field" || suffixes[q].kind == "dynfield") && propSite == null) { propSite = diagSite("__mec_propchk", start) }
+            if (suffixes[q].kind == "mcall" && isBindName(suffixes[q].name) && bindSite == null) { bindSite = diagSite("__mec_bindchk", start) }
         }
         return function(b, mode) {
-            var r = primary(b)
+            // The head of a chain under '??' is fetched for isset too, which only a
+            // diagnosed variable read tells apart.
+            var r = diagOn ? primary(b, mode) : primary(b)
             b = r.b
             var cur = r.v
             // A '?->' anywhere in the chain gives it an end block that every null
@@ -3885,7 +3910,9 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                 } else if (s.kind == "dynfield") {
                     var rf = s.nameT(b)
                     b = rf.b
-                    var rdf = emitPropGet(b, cur, callExt(b, "js_phpkey", [rf.v]), null, false, mode === coalIs)
+                    if (propSite != null && mode !== coalIs) { b = propSite(b, [cur, callExt(b, "js_phstr", [rf.v])]) }
+                    var rdf = propSite != null ? emitPropGetSafe(b, cur, callExt(b, "js_phpkey", [rf.v]), null, false, mode === coalIs)
+                                               : emitPropGet(b, cur, callExt(b, "js_phpkey", [rf.v]), null, false, mode === coalIs)
                     b = rdf.b
                     cur = rdf.v
                 } else if (s.kind == "mcall") {
@@ -3898,13 +3925,17 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                         continue
                     }
                     var rm = anytype
+                    var binds = bindSite != null && isBindName(s.name)
+                    if (binds) { callExt(b, "js_phbindwhy", []) }
                     if (phsCase(s.name, false) == "fromcallable" && argsArePlain(s.args) && s.args.length > 0) {
                         rm = emitFromCallableOn(b, cur, s, site)
                     } else { rm = emitMcallSfx(b, cur, s, site) }
-                    b = rm.b
+                    b = binds ? bindSite(rm.b, []) : rm.b
                     cur = rm.v
                 } else if (s.kind == "field") {
-                    var rg = emitPropGet(b, cur, propKey(b, s.name), s.name, i == 0 && thisHead, mode === coalIs)
+                    if (propSite != null && mode !== coalIs) { b = propSite(b, [cur, emitStr(b, s.name)]) }
+                    var rg = propSite != null ? emitPropGetSafe(b, cur, propKey(b, s.name), s.name, i == 0 && thisHead, mode === coalIs)
+                                              : emitPropGet(b, cur, propKey(b, s.name), s.name, i == 0 && thisHead, mode === coalIs)
                     b = rg.b
                     cur = rg.v
                 } else if (s.kind == "call") {
@@ -3973,6 +4004,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                 } else {
                     var ir = s.idx(b)
                     b = ir.b
+                    if (dimSite != null) { b = dimSite(b, [cur, ir.v]) }
                     cur = callExt(b, "js_phget", [cur, ir.v])
                 }
             }
@@ -4112,16 +4144,16 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     // declares __get anywhere - emitHasMethod's js_get(objV, "__class"). It is the
     // intermediate step of `isset($undef->a->b)` / `isset($o->missing->p)`.
     //
-    // ONLY the non-creating walk gets it. An ordinary `$null->p` READ aborts, because
-    // php-interpreter.abnf aborts there too ("property ->p of null"); answering PHP 8's
-    // warn-and-null in this half alone would make the two halves diverge.
-    function emitPropGetSafe(b, objV, keyV, name, thisLex) {
+    // Besides that walk only a diagnosed read gets it (display_errors=1), whose
+    // warning precedes it: without one an ordinary `$null->p` READ aborts, as
+    // php-interpreter.abnf's does ("property ->p of null").
+    function emitPropGetSafe(b, objV, keyV, name, thisLex, isMode) {
         var nullB = curF.NewBlock("")
         var liveB = curF.NewBlock("")
         var joinB = curF.NewBlock("")
         b.NewCondBr(isNullishHandle(b, objV), nullB, liveB)
         nullB.NewBr(joinB)
-        var r = emitPropGet(liveB, objV, keyV, name, thisLex, true)
+        var r = emitPropGet(liveB, objV, keyV, name, thisLex, isMode)
         r.b.NewBr(joinB)
         return {b: joinB, v: joinB.NewPhi([llvm.ir.NewIncoming(hNull, nullB),
                                            llvm.ir.NewIncoming(r.v, r.b)])}
@@ -4723,7 +4755,17 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     function makeStaticExpr(items, start) {
         var p = staticParts(items)
         if (p.args != null) { nsUsed = true }
-        return emitStaticAccessV(p.base, p.mem, p.args, p.memT, p.memprop, p.baseText, callSite(start))
+        var acc = emitStaticAccessV(p.base, p.mem, p.args, p.memT, p.memprop, p.baseText, callSite(start))
+        // Closure::bind() raises the warning of a refused binding after it, as
+        // ->bindTo() does (foldCallMember).
+        var bindSite = p.memT == null && p.args != null && p.baseText != null && phsCase(p.baseText, false) == "closure"
+            && phsCase(p.mem, false) == "bind" ? diagSite("__mec_bindchk", start) : null
+        if (bindSite == null) { return acc }
+        return function(b, mode) {
+            callExt(b, "js_phbindwhy", [])
+            var r = acc(b, mode)
+            return {b: bindSite(r.b, []), v: r.v}
+        }
     }
     // A call through a VALUE ($f(...), $o->p(...)(...)) - or of a method whose
     // parameter list depends on the receiver - cannot place named arguments or a
@@ -5378,7 +5420,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             if (s.append === true) { o = viv ? callExt(b, "js_phvivpush", [o]) : hNull }
             else if (s.key != undefined) {
                 var rs = viv ? emitPropGet(b, o, propKey(b, s.key), s.key, i == 0 && refIsThis, false)
-                             : emitPropGetSafe(b, o, propKey(b, s.key), s.key, i == 0 && refIsThis)
+                             : emitPropGetSafe(b, o, propKey(b, s.key), s.key, i == 0 && refIsThis, true)
                 b = rs.b
                 o = rs.v
             }
@@ -5390,7 +5432,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                 var rt = s.keyT(b)
                 b = rt.b
                 var rs2 = viv ? emitPropGet(b, o, callExt(b, "js_phpkey", [rt.v]), null, false, false)
-                              : emitPropGetSafe(b, o, callExt(b, "js_phpkey", [rt.v]), null, false)
+                              : emitPropGetSafe(b, o, callExt(b, "js_phpkey", [rt.v]), null, false, true)
                 b = rs2.b
                 o = rs2.v
             }
@@ -5440,11 +5482,13 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     function isStrTarget(ref) {
         return ref.sbase == undefined && ref.headT == undefined && ref.path.length == 1 && ref.path[0].idx != undefined
     }
-    function makeAssign(items) {
+    function makeAssign(items, pos) {
         var ref = items[0]
         var op = items[1]
         var valT = items[2]
         if (op == "??=") { return function(b) { return emitCoalesceAssign(b, ref, valT) } }
+        var rw = op == "=" ? null : rwSite(ref, pos)
+        var oc = op == "=" ? null : diagSite("__mec_opchk", pos)
         return function(b) {
             var r = valT(b)
             b = r.b
@@ -5455,16 +5499,16 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                 var rs5 = sNameV(b, ref)
                 b = rs5.b
                 var snV = rs5.v
-                if (op != "=") { v = emitBin(b, op, sGetV(b, rb.v, snV, sRefName(ref), false), v) }
+                if (op != "=") { v = compoundOp(b, oc, op, sGetV(b, rb.v, snV, sRefName(ref), false), v) }
                 sSetV(b, rb.v, snV, sRefName(ref), v)
             } else if (ref.path.length == 0) {
                 var rn4 = refNameV(b, ref)
                 b = rn4.b
                 var nameV = rn4.v
                 if (op != "=") {
-                    var rold = readVarV(b, nameV)
+                    var rold = readVarDiag(b, nameV, ref.name, rw)
                     b = rold.b
-                    v = emitBin(b, op, rold.v, v)
+                    v = compoundOp(b, oc, op, rold.v, v)
                 } else {
                     v = callExt(b, "js_phcopy", [v])
                 }
@@ -5496,9 +5540,10 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                 var p = emitRefPathV(b, ref, true)
                 b = p.b
                 if (op != "=") {
+                    b = rwSlotChk(b, rw, p)
                     var rold2 = readRefSlot(b, p)
                     b = rold2.b
-                    v = emitBin(b, op, rold2.v, v)
+                    v = compoundOp(b, oc, op, rold2.v, v)
                 } else {
                     v = callExt(b, "js_phcopy", [v])
                 }
@@ -5628,7 +5673,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
 
     // ++ / -- (postfix yields the old value, prefix the new one). js_phinc /
     // js_phdec are PHP's increment_function and decrement_function.
-    function incDec(b, ref, isPre, isInc) {
+    function incDec(b, ref, isPre, isInc, ds) {
         var ext = isInc ? "js_phinc" : "js_phdec"
         if (ref.sbase != undefined && ref.path.length == 0) {
             var rb = ref.sbase(b)
@@ -5637,36 +5682,49 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             b = rs6.b
             var snV = rs6.v
             var oldS = sGetV(b, rb.v, snV, sRefName(ref), false)
+            b = incDecChk(b, ds, oldS, isInc)
             var newS = callExt(b, ext, [oldS])
             sSetV(b, rb.v, snV, sRefName(ref), newS)
             return {b: b, v: isPre ? newS : oldS}
         }
         if (ref.path.length == 0) {
             var rn5 = refNameV(b, ref)
-            var rcur = readVarV(rn5.b, rn5.v)
-            b = rcur.b
+            var rcur = readVarDiag(rn5.b, rn5.v, ref.name, ds == null ? null : ds.rw)
             var oldV = rcur.v
+            b = incDecChk(rcur.b, ds, oldV, isInc)
             var newV = callExt(b, ext, [oldV])
             b = setVarV(b, rn5.v, newV)
             return {b: b, v: isPre ? newV : oldV}
         }
         var p = emitRefPathV(b, ref, true)
-        b = p.b
+        b = rwSlotChk(p.b, ds == null ? null : ds.rw, p)
         var rslot = readRefSlot(b, p)
-        b = rslot.b
         var oldM = rslot.v
+        b = incDecChk(rslot.b, ds, oldM, isInc)
         var newM = callExt(b, ext, [oldM])
         b = writeRefSlot(b, p, newM)
         return {b: b, v: isPre ? newM : oldM}
     }
-    function makeIncDec(items) {
+    function makeIncDec(items, pos) {
         var ref = items[0]
         var isInc = (items[1] == "++")
-        return function(b) { return incDec(b, ref, false, isInc) }
+        var ds = incDecSites(ref, pos)
+        return function(b) { return incDec(b, ref, false, isInc, ds) }
     }
-    function makePreIncDec(ref, op) {
+    function makePreIncDec(ref, op, pos) {
         var isInc = (op == "++")
-        return function(b) { return incDec(b, ref, true, isInc) }
+        var ds = incDecSites(ref, pos)
+        return function(b) { return incDec(b, ref, true, isInc, ds) }
+    }
+    // The checks of ++/-- on target ref at pos: its read (rwSite) and its operand
+    // (__mec_incdecchk); null without diagnostics.
+    function incDecSites(ref, pos) {
+        var idc = diagSite("__mec_incdecchk", pos)
+        return idc == null ? null : {rw: rwSite(ref, pos), idc: idc}
+    }
+    function incDecChk(b, ds, oldV, isInc) {
+        if (ds == null) { return b }
+        return ds.idc(b, [oldV, isInc ? hTrue : hFalse])
     }
 
     // ----- argument lists -------------------------------------------------------
@@ -6629,6 +6687,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         if (name == "__mec_aptr") { return "js_phaptr" }
         if (name == "__mec_precision") { return "js_phprecision" }
         if (name == "__mec_oid") { return "js_phoidof" }
+        if (name == "__mec_bindwhy") { return "js_phbindwhy" }
         if (name == "__mec_pregc") { return "js_phpregc" }
         if (name == "__mec_pregx") { return "js_phpregx" }
         if (name == "array_key_exists") { return "js_phkeyexists" }
@@ -6640,6 +6699,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         if (ext == "js_phsubstr" || ext == "js_phstrpos" || ext == "js_phstrrpos" || ext == "js_phfmtfloat" ||
             ext == "js_phmath" || ext == "js_phpregx") { return 3 }
         if (ext == "js_phkeyexists" || ext == "js_phstrcmp" || ext == "js_phaptr") { return 2 }
+        if (ext == "js_phbindwhy") { return 0 }
         return 1
     }
     // The is_* family, mapped onto the ONE js_phis extern.
@@ -6790,8 +6850,9 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         if (name == "constant") {
             return {b: b, v: phClsLookup(b, callExt(b, "js_phstr", [vs[0]]))}
         }
-        // The diagnostics level is not modelled (every engine error here is fatal
-        // or a thrown Error), so error_reporting() reports a level without acting.
+        // Without display_errors=1 nothing is diagnosed, so error_reporting()
+        // reports a level without acting (makeCall routes it to __mec_erreport
+        // with the flag).
         if (name == "error_reporting") { return {b: b, v: emitNum(b, 32767)} }
         var kind = phpIsKind(name)
         if (kind != "") { return {b: b, v: callExt(b, "js_phis", [emitStr(b, kind), vs[0]])} }
@@ -7089,6 +7150,9 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                 name = bare
             }
         }
+        // With display_errors=1 error_reporting() sets and answers the level the
+        // diagnostics read. Twin of makeCall in php-interpreter.abnf.
+        if (diagOn && phpLibDepth == 0 && name == "error_reporting") { name = phpLibRef("__mec_erreport", true) }
         var cbAt = libCbArg["$" + phsCase(bare, false)]
         if (phpLibDynCall(phsCase(bare, false), cbAt == undefined ? 1000 : cbAt.at, args, "aname", "aspread")) { phpLibAll() }
         // call_user_func of a library function that takes a callback: that callback
@@ -7227,6 +7291,141 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             b = nextB
         }
         b.NewRet(emitStr(b, ""))
+    }
+    // ----- diagnostics: the display_errors and lines compiler flags -----
+    // With display_errors=1 every site PHP diagnoses calls a check of
+    // lib/php-stdlib.php ("diagnostics") with its location - the file and line, or
+    // nothing with lines=0 - before it does what it does; the library's own code is
+    // no site. With display_errors=0 no site is built and nothing is emitted. Twin of
+    // the same section in php-interpreter.abnf.
+    var diagOn = c.flag("display_errors") == "1"
+    var diagLines = c.flag("lines") == "1"
+    // The site at pos calling check fname, compiled in here: an emitter of the call
+    // with the check's leading arguments (handles), answering the block after it,
+    // or null where nothing is diagnosed.
+    function diagSite(fname, pos) {
+        if (!diagOn || phpLibDepth > 0 || pos == undefined) { return null }
+        phpLibRef(fname, true)
+        var file = c.curFileAbs()
+        var line = c.lineOf(pos)
+        return function(b, vals) {
+            // An absent value (a missing property's undefined) reaches the check as
+            // the null PHP reads it as, not as a missing argument.
+            var all = []
+            for (var i = 0; i < vals.length; i++) {
+                all.push(b.NewSelect(b.NewICmp(llvm.enum.IPredEQ, vals[i], hUndef), hNull, vals[i]))
+            }
+            if (diagLines) {
+                all.push(emitStr(b, file))
+                all.push(emitNum(b, line))
+            }
+            emitLibCall(b, fname, all)
+            return b
+        }
+    }
+    // A call of library function fname with the handles vals: its value.
+    function emitLibCall(b, fname, vals) {
+        var argsV = callExt(b, "js_arr_new", [])
+        for (var i = 0; i < vals.length; i++) { callExt(b, "js_arr_push", [argsV, vals[i]]) }
+        return callExt(b, "js_call", [callExt(b, "js_scope_get", [curScopeV, emitStr(b, fname)]), hUndef, argsV])
+    }
+    // A variable read warns "Undefined variable $x" where the frame holds none, but
+    // not as the left operand of '??' (coalIs), which fetches for isset.
+    function makeVarRead(name, pos) {
+        var rd = makeVarRef(name)
+        var site = name == "$this" ? null : diagSite("__mec_diag", pos)
+        if (site == null) { return rd }
+        return function(b, mode) {
+            if (mode === coalIs) { return rd(b) }
+            return readVarDiag(b, emitStr(b, name), name, site)
+        }
+    }
+    // Is method name one that rebinds a closure (->bindTo, ->call)?
+    function isBindName(name) {
+        var lc = phsCase(name, false)
+        return lc == "bindto" || lc == "call"
+    }
+    // A run of binary operators of one level, whose operands are checked
+    // (__mec_opchk) before each operation with display_errors=1; foldBinary without.
+    // Twin of foldOps in php-interpreter.abnf.
+    function foldOps(items, pos) {
+        var site = items.length > 1 ? diagSite("__mec_opchk", pos) : null
+        if (site == null) { return foldBinary(items) }
+        return function(b) {
+            var r = items[0](b)
+            b = r.b
+            var v = r.v
+            for (var i = 1; i < items.length; i += 2) {
+                var rr = items[i + 1](b)
+                b = site(rr.b, [emitStr(rr.b, items[i]), v, rr.v])
+                v = emitBin(b, items[i], v, rr.v)
+            }
+            return {b: b, v: v}
+        }
+    }
+    // Compound assignment op ('.=') of oldV and v, its operands checked through site
+    // oc (foldOps) when there is one. The check does not branch.
+    function compoundOp(b, oc, op, oldV, v) {
+        if (oc != null) { oc(b, [emitStr(b, op.substring(0, op.length - 1)), oldV, v]) }
+        return emitBin(b, op, oldV, v)
+    }
+    // The read of variable nameV (spelled name, null for one named at run time),
+    // which warns through site where the frame holds none; a plain read without a
+    // site.
+    function readVarDiag(b, nameV, name, site) {
+        if (site == null) { return readVarV(b, nameV) }
+        var raw = rawVarV(b, nameV)
+        var undB = curF.NewBlock("")
+        var okB = curF.NewBlock("")
+        b.NewCondBr(b.NewICmp(llvm.enum.IPredEQ, raw, hUndef), undB, okB)
+        var msgV = name == null ? callExt(undB, "js_phcat", [emitStr(undB, "Undefined variable "), nameV])
+                                : emitStr(undB, "Undefined variable " + name)
+        site(undB, [emitNum(undB, 2), msgV]).NewBr(okB)
+        return readRawV(okB, raw)
+    }
+    // The site checking the read half of a compound assignment or ++/-- of target
+    // ref at pos (a read-write fetch): a plain variable, an array element's key
+    // (__mec_keychk) or an object's property (__mec_ownpropchk); null for any other
+    // target. Twin of rwSite in php-interpreter.abnf.
+    function rwSite(ref, pos) {
+        if (ref.sbase != undefined || ref.headT != undefined || ref.gkey != undefined) { return null }
+        if (ref.path.length == 0) {
+            if (ref.nameT != null || ref.name == null || ref.name == "$this") { return null }
+            return diagSite("__mec_diag", pos)
+        }
+        var last = ref.path[ref.path.length - 1]
+        if (last.append === true) { return null }
+        return diagSite(last.idx != undefined ? "__mec_keychk" : "__mec_ownpropchk", pos)
+    }
+    // That check on slot p of a path target (emitRefPathV).
+    function rwSlotChk(b, site, p) {
+        if (site == null || p.kind == "append") { return b }
+        if (p.kind == "index") { return site(b, [p.obj, p.key]) }
+        return site(b, [p.obj, p.keyName != null ? emitStr(b, p.keyName) : callExt(b, "js_phpname", [p.key])])
+    }
+    // '@e': ZEND_BEGIN_SILENCE before e and ZEND_END_SILENCE after it, also when an
+    // exception leaves e (a finally body). Its value is an ordinary read even as the
+    // left operand of '??'.
+    function makeSilence(e, pos) {
+        if (diagSite("__mec_silence", pos) == null) { return e }
+        phpLibRef("__mec_unsilence", true)
+        hidCount++
+        var oldName = "0silo" + hidCount
+        var valName = "0silv" + hidCount
+        var tryS = makeTry([{trybody: function(b) {
+                                var r = e(b)
+                                callExt(r.b, "js_pyset_var", [curScopeV, emitStr(r.b, valName), r.v])
+                                return r.b
+                            }},
+                            {finbody: function(b) {
+                                emitLibCall(b, "__mec_unsilence", [callExt(b, "js_scope_get", [curScopeV, emitStr(b, oldName)])])
+                                return b
+                            }}])
+        return function(b) {
+            callExt(b, "js_pyset_var", [curScopeV, emitStr(b, oldName), emitLibCall(b, "__mec_silence", [])])
+            b = tryS(b)
+            return {b: b, v: callExt(b, "js_scope_get", [curScopeV, emitStr(b, valName)])}
+        }
     }
     // The check a function's record asks for (argCheckOf), or null: req, the count
     // of required parameters (a default before a required one is none,

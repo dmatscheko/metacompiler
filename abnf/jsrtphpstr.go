@@ -633,6 +633,13 @@ func init() {
 			}
 			return rt.wrapNum(float64(old))
 		}
+		// The warning of the last binding phpCloBind refused, "" for none; taking
+		// it clears it. Twin of __mec_bindwhy in php-interpreter.abnf.
+		m["js_phbindwhy"] = func(a []uint64) uint64 {
+			why := phpBindWhy
+			phpBindWhy = ""
+			return rt.wrapStr(why)
+		}
 		m["js_phmath"] = func(a []uint64) uint64 {
 			x := phpNumOf(rt.phpToNum(u(a[1])))
 			y := phpNumOf(rt.phpToNum(u(a[2])))

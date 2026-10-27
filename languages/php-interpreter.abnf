@@ -1,3 +1,6 @@
+// @flag display_errors 0|1 default=0 1 prints warnings, notices and deprecations on stdout as php-cli does, honouring @ and error_reporting(); 0 detects none and costs nothing.
+// @flag lines 1|0 default=1 With display_errors=1, 0 drops each diagnostic's " in <file> on line <n>" for smaller and faster code.
+
 :title("PHP (subset) interpreter") ;
 :description("Parses PHP and executes it directly, without generating code.
 
@@ -54,6 +57,10 @@ Generator methods, iterator_to_array - COLLECTS, running the body to completion;
 one still cannot terminate on an unbounded generator, and neither can PHP. Creation
 stays lazy either way and every side effect happens exactly once, in order. Only
 send(), which has to resume a suspended body with a value, is out of reach.
+
+Warnings, notices and deprecations are raised only with the compiler flag
+display_errors=1, and displayed on stdout as php-cli does; error_reporting(), '@' and
+error_get_last() see them (the flags are in the leading comment block).
 
 The program runs top to bottom; a self checking program ends with exit(failures).") ;
 
@@ -546,7 +553,8 @@ Expression  <~~ push(makeOrAnd(takeAll(), true)) ~~>
 WordAnd     <~~ push(makeOrAnd(takeAll(), false)) ~~>
             = ExprCore { "and" KwEnd ExprCore } ;
 ExprCore    = SuppressExpr | RefAssign | RefAssignVal | DestructAssign | Assignment | Ternary ;
-SuppressExpr = "@" ExprCore ;
+SuppressExpr <~~ push(makeSilence(pop(), up.start)) ~~>
+            = "@" ExprCore ;
 
 // yield / yield $v / yield $k => $v / yield from $iterable. It is an EXPRESSION in
 // PHP, and the presence of one anywhere in a body is what turns that function into a
@@ -610,7 +618,7 @@ Elvis       <~~ push({elvis: pop()}) ~~>
 Coalesce    <~~ push(makeCoalesce(takeAll())) ~~>
             = OrExpr { "??" OrExpr } ;
 
-Assignment  <~~ push(makeAssign(takeAll())) ~~>
+Assignment  <~~ push(makeAssign(takeAll(), up.start)) ~~>
             = Target AssignOp <~~ push(up.in) ~~> ExprCore ;
 // Longest first (ordered choice): '**=' before '*=', '<<=' before '<='. The plain
 // '=' declines '==' (a comparison) and '=>' (an array key), neither of which is an
@@ -884,12 +892,12 @@ AndOp       = "&&" ;
 // too), which is what asCallable already normalizes for call_user_func.
 PipeExpr    <~~ push(makePipe(takeAll())) ~~>
             = BitOrExpr { "|>" BitOrExpr } ;
-BitOrExpr   <~~ push(foldBinary(takeAll())) ~~>
+BitOrExpr   <~~ push(foldOps(takeAll(), up.start)) ~~>
             = BitXorExpr { SingleBar <~~ push(up.in) ~~> BitXorExpr } ;
 SingleBar   = "|" !"|" !">" ;
-BitXorExpr  <~~ push(foldBinary(takeAll())) ~~>
+BitXorExpr  <~~ push(foldOps(takeAll(), up.start)) ~~>
             = BitAndExpr { "^" <~~ push(up.in) ~~> BitAndExpr } ;
-BitAndExpr  <~~ push(foldBinary(takeAll())) ~~>
+BitAndExpr  <~~ push(foldOps(takeAll(), up.start)) ~~>
             = EqExpr { SingleAmp <~~ push(up.in) ~~> EqExpr } ;
 SingleAmp   = "&" !"&" ;
 EqExpr      <~~ push(foldBinary(takeAll())) ~~>
@@ -900,21 +908,21 @@ RelOp       = LeNotSpaceship | ">=" | SingleLt | SingleGt ;
 LeNotSpaceship = "<=" !">" ;
 SingleLt    = "<" !"<" ;
 SingleGt    = ">" !">" ;
-ConcatExpr  <~~ push(foldBinary(takeAll())) ~~>
+ConcatExpr  <~~ push(foldOps(takeAll(), up.start)) ~~>
             = ShiftExpr { DotOp <~~ push(up.in) ~~> ShiftExpr } ;
 DotOp       = "." !"=" ;
-ShiftExpr   <~~ push(foldBinary(takeAll())) ~~>
+ShiftExpr   <~~ push(foldOps(takeAll(), up.start)) ~~>
             = AddExpr { ( "<<" | ">>" ) <~~ push(up.in) ~~> AddExpr } ;
-AddExpr     <~~ push(foldBinary(takeAll())) ~~>
+AddExpr     <~~ push(foldOps(takeAll(), up.start)) ~~>
             = MulExpr { ( "+" | "-" ) <~~ push(up.in) ~~> MulExpr } ;
-MulExpr     <~~ push(foldBinary(takeAll())) ~~>
+MulExpr     <~~ push(foldOps(takeAll(), up.start)) ~~>
             = UnaryExpr { ( "*" | "/" | "%" ) <~~ push(up.in) ~~> UnaryExpr } ;
 
 UnaryExpr   = Cast | Clone | InstanceofExpr | PreIncDec | Neg | Pos | BitNot | NotOp
             | Suppress | ThrowExpr | PrintExpr | YieldExpr | PowExpr ;
 NotOp       <~~ push(makeNot(pop())) ~~>
             = "!" UnaryExpr ;
-BitNot      <~~ push(makeBitNot(pop())) ~~>
+BitNot      <~~ push(makeBitNot(pop(), up.start)) ~~>
             = "~" UnaryExpr ;
 // '**' is RIGHT associative (2 ** 3 ** 2 is 512, not 64) and binds tighter than
 // every prefix operator on its left but looser than the one on its right, so its
@@ -953,17 +961,17 @@ InstanceofExpr <~~ push(makeInstanceof(takeAll())) ~~>
 InstRef     = InstDyn | InstName ;
 InstDyn     <~~ push({idyn: pop()}) ~~> = VarRef | "(" Expression ")" ;
 InstName    <~~ push({iname: up.in}) ~~> = ExtName ;
-PreIncDec   <~~ push(makePreIncDec(pop(), pop())) ~~>
+PreIncDec   <~~ push(makePreIncDec(pop(), pop(), up.start)) ~~>
             = ( "++" | "--" ) <~~ push(up.in) ~~> Target ;
 Neg         <~~ push(makeNeg(pop())) ~~>
             = "-" UnaryExpr ;
 Pos         <~~ push(makePos(pop())) ~~>
             = "+" UnaryExpr ;
-// '@expr' is PHP's error-suppression operator: it evaluates its operand and throws
-// away any DIAGNOSTIC the evaluation would have produced. This subset does not model
-// the diagnostic channel at all, so the operator is a pass-through and the rule is
-// deliberately item-NEUTRAL (no tag).
-Suppress    = "@" UnaryExpr ;
+// '@expr' is PHP's error-suppression operator: its operand's diagnostics are not
+// displayed (makeSilence). Without display_errors=1 there are none, and the
+// operand is the expression itself.
+Suppress    <~~ push(makeSilence(pop(), up.start)) ~~>
+            = "@" UnaryExpr ;
 
 // An assignment is also an OPERAND: '1 + $a = 1', 'null !== $k = key($a)',
 // 'false && $y = clone $x' - PHP's grammar takes 'variable = expr' wherever an
@@ -972,7 +980,7 @@ Suppress    = "@" UnaryExpr ;
 // operand costs no more than the increment form alone did.
 PostfixExpr = TgtOperand | CallMember ;
 
-TgtOperand  <~~ var it = takeAll(); push(it.length == 2 ? makeIncDec(it) : makeAssign(it)) ~~>
+TgtOperand  <~~ var it = takeAll(); push(it.length == 2 ? makeIncDec(it, up.start) : makeAssign(it, up.start)) ~~>
             = Target ( IncDecOp | OpAssign ) ;
 IncDecOp    <~~ push(up.in) ~~> = "++" | "--" ;
 OpAssign    = AssignOp <~~ push(up.in) ~~> ExprCore ;
@@ -1022,7 +1030,7 @@ NamedPlaceArg <~~ push({argname: popLabel(), place: true}) ~~>
 // an l-value, so a by-reference parameter (function f(&$n)) can bind the caller's
 // storage cell. ArgEnd is the guard that keeps '$a + 1' out of this alternative:
 // only a ',' or ')' may follow, otherwise the argument is an ordinary expression.
-LvalArg     <~~ push(makeLvalArg(pop())) ~~>
+LvalArg     <~~ push(makeLvalArg(pop(), up.start)) ~~>
             = Target ArgEnd ;
 // A bare $GLOBALS argument is a read-only copy, never a variable: a by-reference
 // parameter cannot take it (Zend/tests/restrict_globals/invalid_pass_by_ref), which
@@ -1045,7 +1053,7 @@ ArgEnd      = :script(~~
 ~~) ;
 // A named argument that is a storage location binds a by-reference parameter of
 // that name to it, as LvalArg does a positional one.
-NamedLvalArg <~~ var lab = popLabel(); var lv = makeLvalArg(pop()); lv.argname = lab; push(lv) ~~>
+NamedLvalArg <~~ var lab = popLabel(); var lv = makeLvalArg(pop(), up.start); lv.argname = lab; push(lv) ~~>
             = ArgLabel Target ArgEnd ;
 NamedArg    <~~ push({argname: popLabel(), argval: pop(), dyn: phpLibDynArg(up.in.substring(up.in.indexOf(":") + 1))}) ~~>
             = ArgLabel Expression ;
@@ -1092,7 +1100,7 @@ EmptyTgt    <~~ push(makeEmptyTgt(pop())) ~~>
 EmptyExpr   <~~ push(makeEmpty(pop())) ~~>
             = KwEmpty "(" Expression ")" ;
 // $$name / ${expr}: a variable variable - the NAME is computed at run time.
-VarVar      <~~ push(makeVarVar(pop())) ~~>
+VarVar      <~~ push(makeVarVar(pop(), up.start)) ~~>
             = "$" ( VarRef | VarVar | "{" Expression "}" ) ;
 
 NewExpr     <~~ push(makeNew(takeAll(), up.start)) ~~>
@@ -1226,7 +1234,7 @@ PlainItem   <~~ push({elem: pop()}) ~~>
 Call        <~~ push(makeCall(takeAll(), up.start)) ~~>
             = QName <~~ push(lastSeg(up.in)) ~~> "(" [ ArgList ] ")" ;
 
-VarRef      <~~ push(makeVarRef(pop())) ~~>
+VarRef      <~~ push(makeVarRead(pop(), up.start)) ~~>
             = DollarName ;
 Null        <~~ push(makeConst(null)) ~~> = "null" KwEnd ;
 
@@ -1661,10 +1669,12 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // taken (bindParams) since the parameter decides which way it goes.
     var APPEND_READ = {__appendread: true}
     var NOREF = {__noref: true}
-    function makeLvalArg(ref) {
+    function makeLvalArg(ref, pos) {
         for (var i = 0; i < ref.path.length; i++) {
             if (ref.path[i].append === true) { return {argval: function() { return APPEND_READ }, argtgt: ref} }
         }
+        var ds = lvalSites(ref, pos)
+        if (ds != null) { return {argval: function() { return readTargetVal(ref) }, argtgt: ref, argds: ds} }
         return {argval: function() { return readTargetVal(ref) }, argtgt: ref}
     }
     function argValue(v) {
@@ -1683,6 +1693,9 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     }
     // site is where the call stands (callSite), for the callee's count check.
     function evalArgs(args, site) {
+        // The kept diagnostics of the arguments read by lvalRead, or null.
+        var pend = anytype
+        pend = null
         var pos = []
         var named = {}
         var nkeys = []
@@ -1737,7 +1750,11 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             }
             if (a.argname != undefined) {
                 var nv = anytype
-                nv = a.argval()
+                if (a.argds != undefined) {
+                    var nr = lvalRead(a.argtgt, a.argds)
+                    nv = nr.v
+                    if (nr.kept != null) { pend = pendAdd(pend, {i: -1, nm: "$" + a.argname, kept: nr.kept}) }
+                } else { nv = a.argval() }
                 if (hasOwn(named, "$" + a.argname)) { namedTwice("$" + a.argname) }
                 nkeys.push("$" + a.argname)
                 scopePut(named, "$" + a.argname, nv)
@@ -1746,11 +1763,16 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                 continue
             }
             var av = anytype
-            av = a.argval()
+            if (a.argds != undefined) {
+                var pr = lvalRead(a.argtgt, a.argds)
+                av = pr.v
+                if (pr.kept != null) { pend = pendAdd(pend, {i: pos.length, nm: "", kept: pr.kept}) }
+            } else { av = a.argval() }
             pos.push(av)
             tgts.push(a.argtgt == undefined ? (a.noref === true ? NOREF : null) : mkCellMaker(a.argtgt, here, {v: av}))
         }
-        return {pos: pos, named: hasNamed ? named : null, nkeys: nkeys, tgts: tgts, ntgts: ntgts, fcc: fcc, holes: holes, site: site}
+        return {pos: pos, named: hasNamed ? named : null, nkeys: nkeys, tgts: tgts, ntgts: ntgts, fcc: fcc, holes: holes, site: site,
+                pend: pend}
     }
     // A named argument that no parameter declares and no variadic collects raises,
     // and so does one naming a parameter a positional argument already filled; both
@@ -1947,6 +1969,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // Binds one call's arguments into the CURRENT (already pushed) frame; who and
     // cls name the function for phpMissArg.
     function bindParams(params, argset, who, cls) {
+        if (argset.pend != null) { argDiag(params, argset) }
         var pos = argset.pos
         var named = argset.named
         if (named != null) { checkNamedArgs(params, argset) }
@@ -3230,7 +3253,17 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             return null
         }
     }
-    function makeVarVar(t) { return function() { return getVar("$" + phpStr(t())) } }
+    // $$name as a value; with display_errors=1 a name the frame does not hold warns,
+    // as makeVarRead does. Twin of makeVarVarRef in php-to-llvm-ir.abnf.
+    function makeVarVar(t, pos) {
+        var site = diagSite("__mec_diag", pos)
+        if (site == null) { return function() { return getVar("$" + phpStr(t())) } }
+        return function(mode) {
+            var name = "$" + phpStr(t())
+            if (mode !== coalIs && !varIsSet(name)) { site([2, "Undefined variable " + name]) }
+            return getVar(name)
+        }
+    }
 
     // ----- match: === comparison, first arm wins, default may sit anywhere -----
     function makeArm(items) {
@@ -4132,22 +4165,53 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         var primary = items[0]
         var suffixes = items.slice(1)
         var site = callSite(start)
+        // A read of an element or a property is checked first (__mec_dimchk,
+        // __mec_propchk) with display_errors=1; the chain's line is the site's.
+        // A ->bindTo() or ->call() raises the warning of a refused binding after it
+        // (__mec_bindchk).
+        var dimSite = null
+        var propSite = null
+        var bindSite = null
+        for (var k = 0; k < suffixes.length; k++) {
+            if (suffixes[k].kind == "index" && dimSite == null) { dimSite = diagSite("__mec_dimchk", start) }
+            if ((suffixes[k].kind == "field" || suffixes[k].kind == "dfield") && propSite == null) { propSite = diagSite("__mec_propchk", start) }
+            if (suffixes[k].kind == "mcall" && isBindName(suffixes[k].name) && bindSite == null) { bindSite = diagSite("__mec_bindchk", start) }
+        }
         return function(mode) {
             var cur = anytype
-            cur = primary()
+            // The head of a chain under '??' is fetched for isset too, which only a
+            // diagnosed variable read tells apart.
+            cur = diagOn ? primary(mode) : primary()
             for (var i = 0; i < suffixes.length; i++) {
                 var s = suffixes[i]
                 // '?->' on a null receiver short circuits the WHOLE remaining chain,
                 // arguments included - which is why this test sits before evalArgs.
                 if (s.ns === true && (cur === null || cur === undefined)) { return null }
-                if (s.kind == "mcall") { cur = mcall(cur, s.name, evalArgs(s.args, site)) }
+                if (s.kind == "mcall") {
+                    var binds = bindSite != null && isBindName(s.name)
+                    if (binds) { bindWhy = "" }
+                    cur = mcall(cur, s.name, evalArgs(s.args, site))
+                    if (binds) { bindSite([]) }
+                }
                 else if (s.kind == "dmcall") { cur = mcall(cur, phpStr(s.name()), evalArgs(s.args, site)) }
-                else if (s.kind == "field") { cur = phpGetProp(cur, s.name, mode === coalIs) }
-                else if (s.kind == "dfield") { cur = phpGetProp(cur, phpStr(s.name()), mode === coalIs) }
+                else if (s.kind == "field" || s.kind == "dfield") {
+                    var pn = s.kind == "field" ? s.name : phpStr(s.name())
+                    if (propSite != null && mode !== coalIs) { propSite([cur, pn]) }
+                    // A diagnosed read of null answers null after its warning; without
+                    // one phpGetProp aborts. Twin of emitPropGetSafe in
+                    // php-to-llvm-ir.abnf.
+                    if (propSite != null && (cur === null || cur === undefined)) { cur = null }
+                    else { cur = phpGetProp(cur, pn, mode === coalIs) }
+                }
                 else if (s.kind == "call") { cur = phpInvoke(cur, evalArgs(s.args, site)) }
                 else if (s.kind == "static") { cur = s.run(cur, site) }
                 else if (mode === coalIs) { cur = phpIndexIs(cur, s.idx()) }
-                else { cur = phpIndex(cur, s.idx()) }
+                else {
+                    var ix = anytype
+                    ix = s.idx()
+                    if (dimSite != null) { dimSite([cur, ix]) }
+                    cur = phpIndex(cur, ix)
+                }
             }
             return cur
         }
@@ -4241,7 +4305,10 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     }
     function callNamed(cname, argset) {
         var name = fnName(cname)
-        if (hasOwn(phpBuiltins, name) && !nativeRefuses(name, argset)) { return phpBuiltins[name].apply(undefined, argset.pos) }
+        if (hasOwn(phpBuiltins, name) && !nativeRefuses(name, argset)) {
+            if (argset.pend != null) { argDiag(null, argset) }
+            return phpBuiltins[name].apply(undefined, argset.pos)
+        }
         var f = getVar(name)
         if (typeof f != "function") { fail("call of an undefined function: " + name) }
         return f(argset)
@@ -4298,7 +4365,10 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     }
     function callDyn(n, argset) {
         var lc = phsCase(fnName(n), false)
-        if (hasOwn(phpBuiltins, lc) && !nativeRefuses(lc, argset)) { return phpBuiltins[lc].apply(undefined, argset.pos) }
+        if (hasOwn(phpBuiltins, lc) && !nativeRefuses(lc, argset)) {
+            if (argset.pend != null) { argDiag(null, argset) }
+            return phpBuiltins[lc].apply(undefined, argset.pos)
+        }
         return fnGet(n)(argset)
     }
     // Does native lc refuse this call? Its library declaration is then called
@@ -4974,11 +5044,17 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         // Closure::bind($c, $newThis, $newScope) is $c->bindTo($newThis, $newScope).
         if (p.name != null && p.args != null && phsCase(p.raw, false) == "closure" && phsCase(p.name, false) == "bind") {
             var ba = p.args
+            var bindSite = diagSite("__mec_bindchk", start)
             return function() {
                 var bp = evalArgs(ba, "").pos
                 var bt = anytype
                 bt = bp.length > 1 ? bp[1] : null
-                return cloRebind(bp[0], bt, bp.length > 2, bp.length > 2 ? bp[2] : null)
+                if (bindSite == null) { return cloRebind(bp[0], bt, bp.length > 2, bp.length > 2 ? bp[2] : null) }
+                bindWhy = ""
+                var bound = anytype
+                bound = cloRebind(bp[0], bt, bp.length > 2, bp.length > 2 ? bp[2] : null)
+                bindSite([])
+                return bound
             }
         }
         // As the left operand of '??' (coalIs) a static property the scope may not
@@ -5205,11 +5281,16 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // Closure::bind / bindTo / call: the same closure with its $this and class
     // scope replaced, both read through one overlay scope over what it captured
     // (zend_create_closure_ex); keep leaves the class scope as it is. A binding
-    // zend_valid_closure_binding refuses answers null (PHP also warns, which is not
-    // modelled): an instance for a static closure, none for a closure using $this
-    // that has one, and for a closure made from a callable (fakeBind) or a
-    // function, which has no class scope, any other scope. Twin of phCloBind in
-    // lib/php-rt.metajs and phpCloBind in abnf/jsrtphp.go.
+    // zend_valid_closure_binding refuses answers null, its warning kept in bindWhy:
+    // an instance for a static closure, none for a closure using $this that has
+    // one, and for a closure made from a callable (fakeBind) or a function, which
+    // has no class scope, any other scope. Twin of phCloBind in lib/php-rt.metajs
+    // and phpCloBind in abnf/jsrtphp.go.
+    var bindWhy = ""
+    function bindRefused(why) {
+        bindWhy = why
+        return null
+    }
     function cloBind(f, nthis, scope, keep) {
         var r = cloRecOf(f)
         if (r == null) {
@@ -5217,10 +5298,10 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             if (fr != null) { return fakeBind(fr, nthis, scope, keep) }
             // A new Closure object, as zend_create_closure_ex always makes one.
             if (keep || scope == null) { return function(argset) { return f(argset) } }
-            return null
+            return bindRefused("Cannot rebind scope of closure created from function")
         }
-        if (r.st === true && isObj(nthis)) { return null }
-        if (!isObj(nthis) && isObj(r.t) && r.ut === true) { return null }
+        if (r.st === true && isObj(nthis)) { return bindRefused("Cannot bind an instance to a static closure") }
+        if (!isObj(nthis) && isObj(r.t) && r.ut === true) { return bindRefused("Cannot unbind $this of closure using $this") }
         var sc = anytype
         sc = scope
         if (keep) {
@@ -5290,10 +5371,10 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         var ce = anytype
         ce = keep ? fr.sc : scope
         if (isObj(nthis)) {
-            if (fr.st === true) { return null }
-            if (!classIs(nthis.__class, fr.sc.__name)) { return null }
-        } else if (fr.st !== true) { return null }
-        if (ce !== fr.sc) { return null }
+            if (fr.st === true) { return bindRefused("Cannot bind an instance to a static closure") }
+            if (!classIs(nthis.__class, fr.sc.__name)) { return bindRefused(phsBindMethodMsg(fr.d, nthis.__class.__name)) }
+        } else if (fr.st !== true) { return bindRefused("Cannot unbind $this of method") }
+        if (ce !== fr.sc) { return bindRefused("Cannot rebind scope of closure created from method") }
         var nt = anytype
         nt = isObj(nthis) ? nthis : null
         return fakeClosure(fr.call, fr.sc, fr.st, nt, nt != null ? nt.__class : ce, fr.d)
@@ -5810,17 +5891,19 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         }
         return {name: nm, init: init}
     }
-    function makeAssign(items) {
+    function makeAssign(items, pos) {
         var ref = items[0]
         var op = items[1]
         var valT = items[2]
         if (op == "??=") { return function() { return coalesceAssign(ref, valT) } }
+        var rw = op == "=" ? null : rwSite(ref, pos)
+        var oc = op == "=" ? null : diagSite("__mec_opchk", pos)
         return function() {
             var v = anytype
             v = phpCopy(valT())          // arrays assign BY VALUE
             if (ref.path.length == 0 && ref.sref != null) {
                 var cell = ref.sref()
-                if (op != "=") { v = applyPhp(op, deref(cell.v), v) }
+                if (op != "=") { v = compoundOp(oc, op, deref(cell.v), v) }
                 if (cell.st != undefined) { v = phpStaticFit(cell, v) }
                 cell.v = v
                 return v
@@ -5828,11 +5911,17 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             if (op == "=" && strOffsetSet(ref, v)) { return v }
             if (ref.path.length == 0) {
                 var nm = refName(ref)
-                if (op != "=") { v = applyPhp(op, getVar(nm), v) }
+                if (op != "=") {
+                    rwVarChk(rw, ref)
+                    v = compoundOp(oc, op, getVar(nm), v)
+                }
                 phpSet(nm, v)
             } else {
                 var p = resolveRefPhp(op == "=" ? ref : memoRef(ref))
-                if (op != "=") { v = applyPhp(op, readAt(p), v) }
+                if (op != "=") {
+                    rwSlotChk(rw, p)
+                    v = compoundOp(oc, op, readAt(p), v)
+                }
                 storeAt(p, v)
             }
             return v
@@ -6004,24 +6093,75 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             return cell.v
         }
     }
-    function makeIncDec(items) {
+    function makeIncDec(items, pos) {
         var ref = items[0]
         var inc = items[1] == "++"
+        var ds = incDecSites(ref, pos)
         return function() {
+            var t = ds == null ? ref : memoRef(ref)
             var old = anytype
-            old = readTargetVal(ref)
-            writeTargetVal(ref, phpIncDec(old, inc))
+            old = readTargetRw(t, ds == null ? null : ds.rw)
+            if (ds != null) { ds.idc([old, inc]) }
+            writeTargetVal(t, phpIncDec(old, inc))
             return old
         }
     }
-    function makePreIncDec(ref, op) {
+    function makePreIncDec(ref, op, pos) {
         var inc = op == "++"
+        var ds = incDecSites(ref, pos)
         return function() {
+            var t = ds == null ? ref : memoRef(ref)
+            var old = anytype
+            old = readTargetRw(t, ds == null ? null : ds.rw)
+            if (ds != null) { ds.idc([old, inc]) }
             var n = anytype
-            n = phpIncDec(readTargetVal(ref), inc)
-            writeTargetVal(ref, n)
+            n = phpIncDec(old, inc)
+            writeTargetVal(t, n)
             return n
         }
+    }
+    // The checks of ++/-- on target ref at pos: its read (rwSite) and its operand
+    // (__mec_incdecchk); null without diagnostics. Twin of incDecSites in
+    // php-to-llvm-ir.abnf.
+    function incDecSites(ref, pos) {
+        var idc = diagSite("__mec_incdecchk", pos)
+        return idc == null ? null : {rw: rwSite(ref, pos), idc: idc}
+    }
+    // The read half of a compound assignment or ++/-- of target ref, checked
+    // through site rw (rwSite) when there is one. A checked target is walked once
+    // (memoRef), as the compiler's is.
+    function readTargetRw(ref, rw) {
+        if (rw == null) { return readTargetVal(ref) }
+        if (ref.path.length == 0) {
+            rwVarChk(rw, ref)
+            return readTargetVal(ref)
+        }
+        var p = resolveRefPhp(ref)
+        rwSlotChk(rw, p)
+        return readAt(p)
+    }
+    // The site checking the read half of a compound assignment or ++/-- of target
+    // ref at pos (a read-write fetch): a plain variable, an array element's key
+    // (__mec_keychk) or an object's property (__mec_ownpropchk); null for any other
+    // target. Twin of rwSite in php-to-llvm-ir.abnf.
+    function rwSite(ref, pos) {
+        if (ref.sref != null || (ref.headT != null && ref.headT != undefined) || ref.gkey != undefined) { return null }
+        if (ref.path.length == 0) {
+            if (ref.nameT != null || ref.name == null || ref.name == "$this") { return null }
+            return diagSite("__mec_diag", pos)
+        }
+        var last = ref.path[ref.path.length - 1]
+        if (last.append === true) { return null }
+        return diagSite(last.idx != undefined ? "__mec_keychk" : "__mec_ownpropchk", pos)
+    }
+    // That check, of a plain variable's target ref or of slot p of a path target.
+    function rwVarChk(site, ref) {
+        if (site != null && !varIsSet(ref.name)) { site([2, "Undefined variable " + ref.name]) }
+    }
+    function rwSlotChk(site, p) {
+        if (site == null || p.last.append === true) { return }
+        if (p.last.key != undefined) { site([p.obj, p.last.key]) }
+        else { site([p.obj, p.last.idx()]) }
     }
     // PHP 8.3's increment_function / decrement_function: a number steps by one;
     // null++ is 1 and null-- stays null; a bool does not change; "" becomes "1"
@@ -6217,6 +6357,9 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                 name = bare
             }
         }
+        // With display_errors=1 error_reporting() sets and answers the level the
+        // diagnostics read. Twin of makeCall in php-to-llvm-ir.abnf.
+        if (diagOn && phpLibDepth == 0 && name == "error_reporting") { name = phpLibRef("__mec_erreport", true) }
         var args = items.slice(1)
         var cbAt = libCbArg["$" + phsCase(bare, false)]
         if (phpLibDynCall(phsCase(bare, false), cbAt == undefined ? 1000 : cbAt.at, args, "argname", "argspread")) { phpLibAll() }
@@ -7180,6 +7323,13 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             if (p !== null && p !== undefined) { phpPrecision = phpInt(p) }
             return old
         },
+        // The warning of the last binding refused (cloBind), "" for none; taking it
+        // clears it. Twin of js_phbindwhy in lib/php-rt.metajs and abnf/jsrtphp.go.
+        "__mec_bindwhy": function() {
+            var why = bindWhy
+            bindWhy = ""
+            return why
+        },
         "__mec_callable": function(cb, where) { return phpCheckCallback(cb, phpStr(where), true, false) },
         "is_callable": function(v) { return phpIsCallable(v) },
         "__mec_ifaces": function(v) { return phpIfaceNames(v) },
@@ -7265,8 +7415,9 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         "define": function(n, v) { rawSet(phpConsts, phpStr(n), v); return true },
         "defined": function(n) { return hasOwn(phpConsts, phpStr(n)) },
         "constant": function(n) { return hasOwn(phpConsts, phpStr(n)) ? phpConsts[phpStr(n)] : null },
-        // The diagnostics level is not modelled (every engine error here is fatal),
-        // so error_reporting() accepts and reports a level without acting on it.
+        // Without display_errors=1 nothing is diagnosed, so error_reporting()
+        // accepts and reports a level without acting on it (makeCall routes it to
+        // __mec_erreport with the flag).
         "error_reporting": function(v) { return 32767 },
         "get_class": function(v) { return arguments.length == 0 ? phpSelfClass() : phpGetClass(v) },
         "method_exists": function(v, m) { return phpMethodExists(v, m) },
@@ -8193,7 +8344,18 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // PHP compiles +$x as $x * 1: "5" becomes int(5) and "abc" is a TypeError.
     function makePos(t) { return function() { return phpArith("*", t(), 1) } }
     makeNot = function(t) { return function() { return !phptest(t()) } }
-    function makeBitNot(t) { return function() { return phpBitNot(t()) } }
+    // ~e, its operand checked (__mec_opchk) with display_errors=1. Twin of
+    // makeBitNot in php-to-llvm-ir.abnf.
+    function makeBitNot(t, pos) {
+        var site = diagSite("__mec_opchk", pos)
+        if (site == null) { return function() { return phpBitNot(t()) } }
+        return function() {
+            var v = anytype
+            v = t()
+            site(["~", v, null])
+            return phpBitNot(v)
+        }
+    }
     // ~ inverts a string's bytes and an int's bits (a float's int reading); any
     // other operand, null and a bool included, is a TypeError naming it as
     // zend_zval_value_name does (bitwise_not_function). Twin of js_phbnot in
@@ -8340,6 +8502,164 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         dictSet(o.p, "message", msg)
         dictSet(o.p, "code", 0)
         throw {__exc: true, v: o}
+    }
+
+    // ----- diagnostics: the display_errors and lines compiler flags -----
+    // With display_errors=1 every site PHP diagnoses calls a check of
+    // lib/php-stdlib.php ("diagnostics") with its location - the file and line, or
+    // nothing with lines=0 - before it does what it does; the library's own code is
+    // no site. With display_errors=0 no site is built. Twin of the same section in
+    // php-to-llvm-ir.abnf.
+    var diagOn = c.flag("display_errors") == "1"
+    var diagLines = c.flag("lines") == "1"
+    // The site at pos calling check fname, compiled in here: a function of the
+    // check's leading arguments, or null where nothing is diagnosed.
+    function diagSite(fname, pos) {
+        if (!diagOn || phpLibDepth > 0 || pos == undefined) { return null }
+        phpLibRef(fname, true)
+        var at = []
+        if (diagLines) {
+            at.push(c.curFileAbs())
+            at.push(c.lineOf(pos))
+        }
+        return function(vals) {
+            var all = []
+            for (var i = 0; i < vals.length; i++) { all.push(vals[i]) }
+            for (var j = 0; j < at.length; j++) { all.push(at[j]) }
+            callNamed(fname, argsOf(all))
+        }
+    }
+    // '@e': ZEND_BEGIN_SILENCE before e and ZEND_END_SILENCE after it, also when an
+    // exception leaves e. Its value is an ordinary read even as the left operand of
+    // '??'.
+    function makeSilence(e, pos) {
+        if (diagSite("__mec_silence", pos) == null) { return e }
+        phpLibRef("__mec_unsilence", true)
+        return function() {
+            var old = anytype
+            old = callNamed("__mec_silence", argsOf([]))
+            var v = anytype
+            try { v = e() } finally { callNamed("__mec_unsilence", argsOf([old])) }
+            return v
+        }
+    }
+    // A run of binary operators of one level, whose operands are checked
+    // (__mec_opchk) before each operation with display_errors=1; foldBinary without.
+    // Twin of foldOps in php-to-llvm-ir.abnf.
+    function foldOps(items, pos) {
+        var site = items.length > 1 ? diagSite("__mec_opchk", pos) : null
+        if (site == null) { return foldBinary(items) }
+        return function() {
+            var v = anytype
+            v = items[0]()
+            for (var i = 1; i < items.length; i += 2) {
+                var r = anytype
+                r = items[i + 1]()
+                site([items[i], v, r])
+                v = binOp(items[i], v, r)
+            }
+            return v
+        }
+    }
+    // Compound assignment op ('.=') of old and v, its operands checked through site
+    // oc (foldOps) when there is one. Twin of compoundOp in php-to-llvm-ir.abnf.
+    function compoundOp(oc, op, old, v) {
+        if (oc != null) { oc([op.substring(0, op.length - 1), old, v]) }
+        return applyPhp(op, old, v)
+    }
+    // An argument that is a storage location ($v, $a[k], $o->p) is read before
+    // the callee is known, but only a by-value parameter reads it as PHP does: its
+    // diagnostics are kept as it is read (lvalRead) and raised when bindParams
+    // binds it by value or a native takes it (argDiag). The compiler knows the
+    // parameter at the read. lvalSites are the checks of such a read at pos, null
+    // without diagnostics.
+    function lvalSites(ref, pos) {
+        if (ref.sref != null || (ref.headT != null && ref.headT != undefined) || ref.nameT != null || ref.name == null) { return null }
+        var v = diagSite("__mec_diag", pos)
+        if (v == null) { return null }
+        phpLibRef("__mec_diagbuf", true)
+        phpLibRef("__mec_diagreplay", true)
+        return {v: v, d: diagSite("__mec_dimchk", pos), p: diagSite("__mec_propchk", pos)}
+    }
+    // The value of such an argument, read as the same expression is
+    // (makeVarRead, foldCallMember), and its kept diagnostics, null for none.
+    function lvalRead(ref, ds) {
+        callNamed("__mec_diagbuf", argsOf([0]))
+        var v = anytype
+        var kept = anytype
+        try { v = readTargetDiag(ref, ds) } finally { kept = callNamed("__mec_diagbuf", argsOf([1])) }
+        return {v: v, kept: isArr(kept) && kept.keys.length > 0 ? kept : null}
+    }
+    function readTargetDiag(ref, ds) {
+        var cur = anytype
+        if (ref.name == "$this") { cur = getVar("$this") }
+        else if (varIsSet(ref.name)) { cur = getVar(ref.name) }
+        else {
+            ds.v([2, "Undefined variable " + ref.name])
+            cur = null
+        }
+        for (var i = 0; i < ref.path.length; i++) {
+            var s = stepOf(ref.path[i])
+            if (s.key != undefined) {
+                ds.p([cur, s.key])
+                if (cur === null || cur === undefined) { cur = null } else { cur = phpGetProp(cur, s.key, false) }
+            } else {
+                var ix = anytype
+                ix = s.idx()
+                ds.d([cur, ix])
+                cur = phpIndex(cur, ix)
+            }
+        }
+        return cur
+    }
+    function pendAdd(pend, e) {
+        var out = anytype
+        out = pend == null ? [] : pend
+        out.push(e)
+        return out
+    }
+    // Raises the kept diagnostics of argset's arguments that params (null: a
+    // native's) take by value.
+    function argDiag(params, argset) {
+        var pend = anytype
+        pend = argset.pend
+        if (pend == null || pend == undefined) { return }
+        for (var k = 0; k < pend.length; k++) {
+            var e = pend[k]
+            var p = anytype
+            p = null
+            if (params != null) {
+                for (var j = 0; j < params.length; j++) {
+                    if (e.i >= 0 ? (j == e.i || (params[j].variadic === true && j < e.i)) : params[j].name == e.nm || params[j].variadic === true) { p = params[j] }
+                    if (p != null) { break }
+                }
+            }
+            if (p == null || p.byref !== true) { callNamed("__mec_diagreplay", argsOf([e.kept])) }
+        }
+    }
+    // Is method name one that rebinds a closure (->bindTo, ->call)?
+    function isBindName(name) {
+        var lc = phsCase(name, false)
+        return lc == "bindto" || lc == "call"
+    }
+    // Does the current frame hold variable name (zval_undefined_cv's test)?
+    function varIsSet(name) {
+        var top = scopes[scopes.length - 1]
+        if (!objHasOwn.call(top, name)) { return false }
+        var v = anytype
+        v = top[name]
+        return v !== UNSET
+    }
+    // A variable read warns "Undefined variable $x" where the frame holds none, but
+    // not as the left operand of '??' (coalIs), which fetches for isset.
+    function makeVarRead(name, pos) {
+        var rd = makeVarRef(name)
+        var site = name == "$this" ? null : diagSite("__mec_diag", pos)
+        if (site == null) { return rd }
+        return function(mode) {
+            if (mode !== coalIs && !varIsSet(name)) { site([2, "Undefined variable " + name]) }
+            return rd()
+        }
     }
 
 

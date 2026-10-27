@@ -771,6 +771,12 @@ $afG = $afRet();
 foreach ($afG as $v) { $afLog .= $v . ";"; }
 check("arrow-fn-generator", [$afLog, $afG->getReturn(), $afGen(1) instanceof Generator], ["0=3;1;", 10, true]);
 
+// ----- diagnostics stay off without -cf2 display_errors=1 -----
+// (tests/php-test-warnings.php runs with them on.) Nothing is displayed and
+// nothing is recorded.
+$dgv = $dgUndefined;
+check("diagnostics-off", [error_get_last(), error_reporting(), $dgv], [null, E_ALL, null]);
+
 // ----- done -----
 echo "features: " . $checks . " checks, " . $fails . " failures\n";
 exit($fails);

@@ -1763,6 +1763,30 @@
             "program": "${workspaceFolder}","args": ["languages/php-to-llvm-ir.abnf", "tests/php-test-features.php", "-q"]
         },
         {
+            "name": "PHP diagnostics, display_errors=1 (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/php-interpreter.abnf", "tests/php-test-warnings.php", "-q", "-cf2", "display_errors=1"]
+        },
+        {
+            "name": "PHP diagnostics, display_errors=1 (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/php-to-llvm-ir.abnf", "tests/php-test-warnings.php", "-q", "-cf2", "display_errors=1"]
+        },
+        {
+            "name": "PHP diagnostics, display_errors=1 lines=0 (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/php-interpreter.abnf", "tests/php-test-warnings.php", "-q", "-cf2", "display_errors=1,lines=0"]
+        },
+        {
+            "name": "PHP diagnostics, display_errors=1 lines=0 (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/php-to-llvm-ir.abnf", "tests/php-test-warnings.php", "-q", "-cf2", "display_errors=1,lines=0"]
+        },
+        {
             "name": "PHP strict_types typed properties (interpreter)",
             "type": "go",
             "request": "launch",
@@ -2600,6 +2624,12 @@
             "type": "go",
             "request": "launch",
             "program": "${workspaceFolder}","args": ["languages/php-to-llvm-ir.abnf", "tests/php-test-features.php", "-q", "-exe", "tests/php-native.out"]
+        },
+        {
+            "name": "PHP native binary, diagnostics display_errors=1 (compiler, -exe + the C floor and the MetaJS layer 2)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/php-to-llvm-ir.abnf", "tests/php-test-warnings.php", "-q", "-cf2", "display_errors=1", "-exe", "tests/php-native-warn.out"]
         },
         {
             "name": "PHP native binary, multifile (compiler, -exe + the C floor and the MetaJS layer 2)",

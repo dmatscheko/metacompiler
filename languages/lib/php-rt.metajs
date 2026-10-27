@@ -1840,11 +1840,23 @@ function phCloCall(f, name, args) {
 // f with its $this and class scope replaced (zend_create_closure_ex), made by the
 // factory a closure literal's record keeps (cloFactory in php-to-llvm-ir.abnf),
 // which also resolves a class NAME. keep leaves the class scope the record holds.
-// A binding zend_valid_closure_binding refuses answers null (PHP also warns,
-// which is not modelled): an instance for a static closure, none for a closure
-// using $this that has one, and for a closure made from a callable (phFakeBind)
-// or a function any other scope. Twin of phpCloBind in abnf/jsrtphp.go and
-// cloBind in php-interpreter.abnf.
+// A binding zend_valid_closure_binding refuses answers null, its warning kept in
+// phBindWhy: an instance for a static closure, none for a closure using $this
+// that has one, and for a closure made from a callable (phFakeBind) or a
+// function any other scope. Twin of phpCloBind in abnf/jsrtphp.go and cloBind
+// in php-interpreter.abnf.
+var phBindWhy = ""
+function phBindRefused(why) {
+    phBindWhy = why
+    return null
+}
+// The warning of the last binding refused, "" for none; taking it clears it.
+// Twin of __mec_bindwhy in php-interpreter.abnf.
+function js_phbindwhy() {
+    var why = phBindWhy
+    phBindWhy = ""
+    return why
+}
 function phCloBind(f, nthis, scope, keep) {
     var r = phCloRec(f)
     if (r === undefined) {
@@ -1857,16 +1869,16 @@ function phCloBind(f, nthis, scope, keep) {
             fnMetaSet(g, fnMeta(f, "name"), fnMeta(f, "length"))
             return g
         }
-        return null
+        return phBindRefused("Cannot rebind scope of closure created from function")
     }
     if (r["f"] === undefined) { fail("binding a Closure that is not a closure literal is not modelled") }
     var t = anytype
     t = nthis
     if (!phIsObj(t)) {
         t = null
-        if (r["ut"] === true && phIsObj(r["t"])) { return null }
+        if (r["ut"] === true && phIsObj(r["t"])) { return phBindRefused("Cannot unbind $this of closure using $this") }
     }
-    else if (r["st"] === true) { return null }
+    else if (r["st"] === true) { return phBindRefused("Cannot bind an instance to a static closure") }
     var sc = anytype
     sc = keep ? r["sc"] : scope
     return r["f"].apply(undefined, [t, sc])
@@ -1881,10 +1893,10 @@ function phCloBind(f, nthis, scope, keep) {
 function phFakeBind(f, fr, nthis, scope, keep) {
     var sc = fr["sc"]
     if (phIsObj(nthis)) {
-        if (fr["st"] === true) { return null }
-        if (!phIsA(nthis, phStr(sc["__name"]))) { return null }
-    } else if (fr["st"] !== true) { return null }
-    if (!keep && !phSameClass(scope, sc)) { return null }
+        if (fr["st"] === true) { return phBindRefused("Cannot bind an instance to a static closure") }
+        if (!phIsA(nthis, phStr(sc["__name"]))) { return phBindRefused(phsBindMethodMsg(phStr(fr["d"]), phStr(nthis["__class"]["__name"]))) }
+    } else if (fr["st"] !== true) { return phBindRefused("Cannot unbind $this of method") }
+    if (!keep && !phSameClass(scope, sc)) { return phBindRefused("Cannot rebind scope of closure created from method") }
     var nt = anytype
     nt = phIsObj(nthis) ? nthis : undefined
     var lsb = anytype

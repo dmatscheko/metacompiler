@@ -1378,12 +1378,22 @@ func (rt *jsrt) phpCloCall(f interface{}, name string, args []interface{}) inter
 	return jsUndef
 }
 
+// phpBindWhy is the warning of the last binding phpCloBind refused
+// (js_phbindwhy). One process runs one PHP program, so it is process state.
+var phpBindWhy string
+
+// phpBindRefused keeps why and answers the refused binding's null.
+func phpBindRefused(why string) interface{} {
+	phpBindWhy = why
+	return jsNull
+}
+
 // phpCloBind is f with its $this and class scope replaced (zend_create_closure_ex),
 // made by the factory a closure literal's record keeps (cloFactory in
 // php-to-llvm-ir.abnf), which also resolves a class NAME. keep leaves the class
 // scope the record holds. A binding zend_valid_closure_binding refuses answers
-// null (PHP also warns, which is not modelled): an instance for a static closure,
-// none for a closure using $this that has one, and for a closure made from a
+// null, its warning kept in phpBindWhy: an instance for a static closure, none
+// for a closure using $this that has one, and for a closure made from a
 // callable (phpFakeBind) or a function any other scope. Twin of phCloBind in
 // languages/lib/php-rt.metajs and cloBind in php-interpreter.abnf.
 func (rt *jsrt) phpCloBind(f, nthis, scope interface{}, keep bool) interface{} {
@@ -1400,7 +1410,7 @@ func (rt *jsrt) phpCloBind(f, nthis, scope interface{}, keep bool) interface{} {
 				return rt.call(f, jsUndef, args)
 			}}
 		}
-		return jsNull
+		return phpBindRefused("Cannot rebind scope of closure created from function")
 	}
 	if rec.props["f"] == nil {
 		rt.fail("binding a Closure that is not a closure literal is not modelled")
@@ -1408,10 +1418,10 @@ func (rt *jsrt) phpCloBind(f, nthis, scope interface{}, keep bool) interface{} {
 	if !phpIsObj(nthis) {
 		nthis = jsNull
 		if rec.props["ut"] == true && phpIsObj(rec.props["t"]) {
-			return jsNull
+			return phpBindRefused("Cannot unbind $this of closure using $this")
 		}
 	} else if rec.props["st"] == true {
-		return jsNull
+		return phpBindRefused("Cannot bind an instance to a static closure")
 	}
 	if keep {
 		scope = rec.props["sc"]
@@ -1479,14 +1489,20 @@ func (rt *jsrt) phpFakeBind(f interface{}, fr *jsObject, nthis, scope interface{
 	sc, _ := fr.props["sc"].(*jsObject)
 	st := fr.props["st"] == true
 	if phpIsObj(nthis) {
-		if st || !rt.phpIsA(nthis, rt.phpStr(sc.props["__name"])) {
-			return jsNull
+		if st {
+			return phpBindRefused("Cannot bind an instance to a static closure")
+		}
+		if !rt.phpIsA(nthis, rt.phpStr(sc.props["__name"])) {
+			// Twin of phsBindMethodMsg in languages/lib/php-strings.js.
+			d, _, _ := strings.Cut(rt.phpStr(fr.props["d"]), "\n")
+			cls, _ := nthis.(*jsObject).props["__class"].(*jsObject)
+			return phpBindRefused("Cannot bind method " + d + "() to object of class " + rt.phpStr(cls.props["__name"]))
 		}
 	} else if !st {
-		return jsNull
+		return phpBindRefused("Cannot unbind $this of method")
 	}
 	if !keep && !rt.phpSameClass(scope, sc) {
-		return jsNull
+		return phpBindRefused("Cannot rebind scope of closure created from method")
 	}
 	var nt interface{} = jsUndef
 	var lsb interface{} = sc
