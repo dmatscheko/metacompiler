@@ -776,6 +776,12 @@ $afRet = fn() => (yield 1) + 10;
 $afG = $afRet();
 foreach ($afG as $v) { $afLog .= $v . ";"; }
 check("arrow-fn-generator", [$afLog, $afG->getReturn(), $afGen(1) instanceof Generator], ["0=3;1;", 10, true]);
+// A yield foreach resumes is null as an argument and as a stored value too.
+function ysArg($v) { return $v; }
+function ysGen(&$seen) { $seen[] = ysArg(yield 1); $y = yield 2; $seen[] = isset($y) || $y === null; }
+$ysSeen = [];
+foreach (ysGen($ysSeen) as $v) { }
+check("yield-sent-null", $ysSeen, [null, true]);
 
 // ----- diagnostics stay off without -cf2 display_errors=1 -----
 // (tests/php-test-warnings.php runs with them on.) Nothing is displayed and

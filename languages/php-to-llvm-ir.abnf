@@ -3193,7 +3193,10 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                 callExt(b, "js_set", [pair, emitStr(b, "v"), v])
                 v = pair
             }
-            return {b: b, v: callExt(b, "js_yield", [v])}
+            // The value sent in, null when the generator was resumed without one
+            // (next(), foreach) - which js_yield answers as undefined.
+            var sent = callExt(b, "js_yield", [v])
+            return {b: b, v: b.NewSelect(b.NewICmp(llvm.enum.IPredEQ, sent, hUndef), hNull, sent)}
         }
     }
 
