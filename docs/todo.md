@@ -132,12 +132,6 @@ plus a second flag `lines` = 1 | 0 (default 1) whose 0 drops the location for sm
 
 # CORE — MetaJS, the engines, shared runtime, tooling
 
-### T-750 tooling: tests/probe/selftest.sh "sabotaged flavour test, 3 legs agree" no longer fails · P3 · CORE · IN PROGRESS (CORE worker, round 8) [V]
-tests/probe/selftest.sh reports 10 ok, 1 failed: the sabotage case (forcing bash to be treated as a handle-IR language) relied on
-`./mec languages/bash-to-llvm-ir.abnf tests/probe/good.sh -qq` printing nothing, which recent bash commits changed (the program's
-output now prints under -qq, correctly). Give the case a sabotage that still empties or corrupts the run leg so the self-test proves
-probe.sh catches a broken leg again; consider adding selftest.sh to tests/gates.sh.
-
 ### T-184 dart: `IndexError` vs `RangeError` text for `[1,2,3][7]` · P3 · DA · BLOCKED - needs a Dart VM to settle [U spec-only]
 A reviewer argued the VM prints `RangeError (index): Invalid value: Not in inclusive
 range 0..2: 7` (a plain RangeError); the current engines print the IndexError form
@@ -795,6 +789,7 @@ T-747 ruby: halves divergences — Method#arity in the Go twin, inherited privat
 T-748 tooling: ruby -callgraph names regressed to `$d$f` after top-level defs stopped binding the plain name — DONE 022d8358 bdc1920e (ruby $d$NAME definitions named by their source name; js_rarity seen through as a passthrough — srcpos 39/39, other languages' graphs byte-identical)
 
 T-749 core: per-language compiler flags `-cfN key=value[,key=value]`, declared and documented in each grammar — DONE f94fc97c (-cfN name=value[,...] per stage like -vN/-slotN, plain -cf = every declaring stage, // @flag declarations at the top of the grammar, errors listing valid flags, -cf help, c.flag() in goja and both frozen engines, probe.sh --cf, self-test grammar + 11 matrix rows; defaults change nothing)
+T-750 tooling: tests/probe/selftest.sh "sabotaged flavour test, 3 legs agree" no longer fails — DONE b279a3e0 (two sabotages that genuinely empty or corrupt the run leg, checked to apply; step-brake case deterministic under load; self-test gated in tests/gates.sh with PROBE_CASES=12)
 # Settled — do not re-open
 
 **~196 items, one section, grouped by VERDICT and by nothing else** — no dates, no
