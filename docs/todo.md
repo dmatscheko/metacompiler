@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-752** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-753** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -108,14 +108,11 @@ not change the renderer.
 
 # PHP — PHP  (no php here: spec-only, php.net / php-src behaviour)
 
-### T-751 php: reading a property of null aborts by default; diagnostics gaps · P2 · PHP · IN PROGRESS (PHP worker, round 18) [V]
-With display_errors=0 (default), `$null->p` (read) aborts in both halves ("property ->p of null" / "member 'p' of null"); PHP answers
-null (with flag 1 it now warns and answers null). __FILE__ (and the warning location) resolves symlinks (abnf/trace.go curSrcAbs
-EvalSymlinks; php-cli's expand_filepath does not). Not emitted / not diagnosed: the compile-time "Using ${var} in strings is
-deprecated" Deprecated; an undefined container in a read-write fetch (`$u['k'] .= 'x'`); 'Class "X" not found' from bindTo with an
-unknown class; "Cannot bind closure to scope of internal class". Interpreter: several warning arguments of one call can warn in a
-different order than PHP. Compiler: a bare variable passed by name/spread to a run-time callee in a program with by-reference
-parameters gets no undefined-variable warning. E_ALL is 32767 (PHP 8.4: 30719, E_STRICT dropped).
+### T-752 php: `rf($null->p)` by reference diverges; intermediate key warning in nested read-write fetch · P2 · PHP · IN PROGRESS (PHP worker, round 19) [V]
+`function rf(&$x){}; $n = null; rf($n->p);` → php throws Error 'Attempt to modify property "p" on null'; the interpreter now binds no
+cell and returns normally, the compiler aborts (halves diverge; settle from zend_fetch_property_address / ZEND_FETCH_OBJ_W).
+`$w['a']['b'] .= 'y'` with `$w` undefined, display_errors=1: php warns 'Undefined variable $w', 'Undefined array key "a"'
+(FETCH_DIM_RW, zend_undefined_index_write) and 'Undefined array key "b"'; both halves miss "a".
 
 ---
 
@@ -792,6 +789,7 @@ T-748 tooling: ruby -callgraph names regressed to `$d$f` after top-level defs st
 T-749 core: per-language compiler flags `-cfN key=value[,key=value]`, declared and documented in each grammar — DONE f94fc97c (-cfN name=value[,...] per stage like -vN/-slotN, plain -cf = every declaring stage, // @flag declarations at the top of the grammar, errors listing valid flags, -cf help, c.flag() in goja and both frozen engines, probe.sh --cf, self-test grammar + 11 matrix rows; defaults change nothing)
 T-750 tooling: tests/probe/selftest.sh "sabotaged flavour test, 3 legs agree" no longer fails — DONE b279a3e0 (two sabotages that genuinely empty or corrupt the run leg, checked to apply; step-brake case deterministic under load; self-test gated in tests/gates.sh with PROBE_CASES=12)
 T-596 php: warnings/notices/deprecations are never printed — behind `-cfN display_errors=1` — DONE 943147f2..01ac3e37 (-cf2 display_errors=1 prints php-cli's exact Warning/Notice/Deprecated display for undefined variables/keys/properties, offsets, conversions, ++/--, array-to-string and the six closure-binding refusals, honouring @ and error_reporting(), error_get_last(); -cf2 lines=0 drops the location; default output byte-identical; texts settled from php-src 8.4; follow-up T-751)
+T-751 php: reading a property of null aborts by default; diagnostics gaps — DONE e32f6b9c ($null->p reads null by default in both halves, compile-time ${var} deprecations, read-write fetch undefined container, bindTo unknown/internal classes, named-callee argument warning order, run-time named by-value arguments, E_ALL 30719 per 8.4; __FILE__ symlink resolution confirmed correct from php-src tsrm_realpath_r; follow-up T-752)
 # Settled — do not re-open
 
 **~196 items, one section, grouped by VERDICT and by nothing else** — no dates, no
