@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-750** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-751** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -108,7 +108,7 @@ not change the renderer.
 
 # PHP — PHP  (no php here: spec-only, php.net / php-src behaviour)
 
-### T-596 php: warnings/notices/deprecations are never printed — behind `-cfN display_errors=1` · P3 · PHP · OPEN [V user decision 2026-10-27]
+### T-596 php: warnings/notices/deprecations are never printed — behind `-cfN display_errors=1` · P3 · PHP · IN PROGRESS (PHP worker, round 17) [V user decision 2026-10-27]
 User decision: implement as PHP's first compiler flag (needs T-749). `display_errors` = 0 | 1, default 0 (today's behaviour,
 nothing printed). At 1, print exactly php-cli's display format on stdout (`PHP_EOL . "Warning: <msg> in <file> on line <n>" .
 PHP_EOL`, likewise Notice / Deprecated), honouring `@` and `error_reporting()`, for: undefined variable / array key / property
@@ -132,21 +132,11 @@ plus a second flag `lines` = 1 | 0 (default 1) whose 0 drops the location for sm
 
 # CORE — MetaJS, the engines, shared runtime, tooling
 
-### T-749 core: per-language compiler flags `-cfN key=value[,key=value]`, declared and documented in each grammar · P1 · CORE · IN PROGRESS (CORE worker, round 7) [V user decision 2026-10-27]
-User decision: add language-configurable flags. Syntax: `-cfN key=value[,key=value...]`, repeatable (`-cf2 a=1,b=2` == `-cf2 a=1 -cf2
-b=2`), N = the 1-indexed stage exactly like `-vN` / `-vvN` / `-slotN` (numbered so a positional association is never needed and file
-names may start with `-`; works across `-pipe` chains). Plain `-cf` (no N) = every stage that declares the key, as plain `-v` does.
-Each grammar declares its flags in a documented, machine-read block at the very beginning of the file (name, allowed values,
-default, one-line description); this block IS the documentation. An undeclared key or a value outside the declared set is an ERROR
-naming the stage and listing that stage's valid flags (unnumbered `-cf`: error if no stage declares the key). `-cf help` (or
-`-cfN help`) prints every (that) stage's declared flags and exits. Grammar scripts read a flag through the context (e.g.
-`c.flag("name")`, returning the declared default when not given) in BOTH the interpreter and the compiler grammars and in every
-engine that runs tag scripts (goja and -frozen). Defaults must reproduce today's behaviour exactly (no output change anywhere
-without a flag). Flags fix what is emitted, so a native `-exe` bakes them in. Plumbing: tests/probe.sh and the matrix rows
-(.vscode/launch.json) / test.sh must be able to pass flags so non-default values get oracle-checked rows; any cache (frozen script
-cache, MEC_SCRIPT_CACHE) must key on the flags; document `-cfN` in main.go's usage and docs/working-on-this-project.md. Deliver the
-mechanism with a self-test (a tiny declared flag exercised end to end, including the error cases and `help`); T-596 is its first
-real user.
+### T-750 tooling: tests/probe/selftest.sh "sabotaged flavour test, 3 legs agree" no longer fails · P3 · CORE · IN PROGRESS (CORE worker, round 8) [V]
+tests/probe/selftest.sh reports 10 ok, 1 failed: the sabotage case (forcing bash to be treated as a handle-IR language) relied on
+`./mec languages/bash-to-llvm-ir.abnf tests/probe/good.sh -qq` printing nothing, which recent bash commits changed (the program's
+output now prints under -qq, correctly). Give the case a sabotage that still empties or corrupts the run leg so the self-test proves
+probe.sh catches a broken leg again; consider adding selftest.sh to tests/gates.sh.
 
 ### T-184 dart: `IndexError` vs `RangeError` text for `[1,2,3][7]` · P3 · DA · BLOCKED - needs a Dart VM to settle [U spec-only]
 A reviewer argued the VM prints `RangeError (index): Invalid value: Not in inclusive
@@ -804,6 +794,7 @@ T-746 ruby: private setters; `5.x = 1` crashes the interpreter; attr_writer in a
 T-747 ruby: halves divergences — Method#arity in the Go twin, inherited private setter from a subclass, compiler local hiding a method; `nil.x =`; missing keyword — DONE 910997a4 (Method#arity via explicit receivers in the Go twin, inherited private setter visibility, .new in call-chain setter targets, known locals over methods in the compiler, nil.x =, missing keyword errors incl. interpreter block keywords — = ruby 2.6)
 T-748 tooling: ruby -callgraph names regressed to `$d$f` after top-level defs stopped binding the plain name — DONE 022d8358 bdc1920e (ruby $d$NAME definitions named by their source name; js_rarity seen through as a passthrough — srcpos 39/39, other languages' graphs byte-identical)
 
+T-749 core: per-language compiler flags `-cfN key=value[,key=value]`, declared and documented in each grammar — DONE f94fc97c (-cfN name=value[,...] per stage like -vN/-slotN, plain -cf = every declaring stage, // @flag declarations at the top of the grammar, errors listing valid flags, -cf help, c.flag() in goja and both frozen engines, probe.sh --cf, self-test grammar + 11 matrix rows; defaults change nothing)
 # Settled — do not re-open
 
 **~196 items, one section, grouped by VERDICT and by nothing else** — no dates, no
