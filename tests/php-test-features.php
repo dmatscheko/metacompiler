@@ -788,6 +788,17 @@ check("yield-sent-null", $ysSeen, [null, true]);
 // nothing is recorded.
 $dgv = $dgUndefined;
 check("diagnostics-off", [error_get_last(), error_reporting(), $dgv], [null, E_ALL, null]);
+// E_ALL has no E_STRICT bit since PHP 8.4 (Zend/zend_errors.h).
+check("e-all", [E_ALL, error_reporting()], [30719, 30719]);
+// Reading a property of null answers null (only writing one raises).
+class NullPropHolder { public $o = null; function inner() { return $this->o->z; } }
+function nullPropArg($x) { return $x; }
+$npn = null;
+$npk = "q";
+$nph = new NullPropHolder();
+check("null-prop-read", [$npn->p, $npn->$npk, $npn->a->b, "<{$npn->p}>", "<$npn->p>", $nph->inner(), $nph->o->z,
+                         nullPropArg($npn->p), nullPropArg($npn->a->b), $npn->p ?? "d", $npn],
+      [null, null, null, "<>", "<>", null, null, null, null, "d", null]);
 
 // ----- done -----
 echo "features: " . $checks . " checks, " . $fails . " failures\n";

@@ -2802,7 +2802,7 @@ function spl_object_hash($object) {
 // EG(error_reporting), E_ALL at startup: answers it, and sets it first unless
 // $level is null.
 function __mec_erlevel($level = null) {
-    static $cur = 32767;
+    static $cur = 30719;
     $old = $cur;
     if ($level !== null) { $cur = $level; }
     return $old;

@@ -1390,13 +1390,25 @@ func phpBindRefused(why string) interface{} {
 
 // phpCloBind is f with its $this and class scope replaced (zend_create_closure_ex),
 // made by the factory a closure literal's record keeps (cloFactory in
-// php-to-llvm-ir.abnf), which also resolves a class NAME. keep leaves the class
-// scope the record holds. A binding zend_valid_closure_binding refuses answers
-// null, its warning kept in phpBindWhy: an instance for a static closure, none
-// for a closure using $this that has one, and for a closure made from a
-// callable (phpFakeBind) or a function any other scope. Twin of phCloBind in
-// languages/lib/php-rt.metajs and cloBind in php-interpreter.abnf.
+// php-to-llvm-ir.abnf). keep leaves the class scope the record holds; a scope
+// given as a class NAME is resolved first, and one no class has is refused
+// (do_closure_bind). A binding zend_valid_closure_binding refuses answers null,
+// its warning kept in phpBindWhy: an instance for a static closure, none for a
+// closure using $this that has one, an internal class for a scope other than its
+// own, and for a closure made from a callable (phpFakeBind) or a function any
+// other scope. Twin of phCloBind in languages/lib/php-rt.metajs and cloBind in
+// php-interpreter.abnf.
 func (rt *jsrt) phpCloBind(f, nthis, scope interface{}, keep bool) interface{} {
+	if !keep && !isNullish(scope) && !phpIsClass(scope) {
+		name := rt.phpStr(scope)
+		scope = jsNull
+		if find := rt.phpRtClass("\x00clsfind"); find != nil {
+			scope = rt.call(find, jsUndef, []interface{}{name})
+		}
+		if isNullish(scope) {
+			return phpBindRefused("Class \"" + name + "\" not found")
+		}
+	}
 	rec := phpLitRec(f)
 	if rec == nil {
 		if fr := phpFakeRec(f); fr != nil {
@@ -1409,6 +1421,9 @@ func (rt *jsrt) phpCloBind(f, nthis, scope interface{}, keep bool) interface{} {
 			return &hostFunc{name: "closure", meta: &mi, fn: func(rt *jsrt, this uint64, args []interface{}) interface{} {
 				return rt.call(f, jsUndef, args)
 			}}
+		}
+		if rt.phpBindInternal(scope, nil) {
+			return jsNull
 		}
 		return phpBindRefused("Cannot rebind scope of closure created from function")
 	}
@@ -1425,6 +1440,8 @@ func (rt *jsrt) phpCloBind(f, nthis, scope interface{}, keep bool) interface{} {
 	}
 	if keep {
 		scope = rec.props["sc"]
+	} else if rt.phpBindInternal(scope, rec.props["sc"]) {
+		return jsNull
 	}
 	return rt.call(rec.props["f"], jsUndef, []interface{}{nthis, scope})
 }
@@ -1501,7 +1518,10 @@ func (rt *jsrt) phpFakeBind(f interface{}, fr *jsObject, nthis, scope interface{
 	} else if !st {
 		return phpBindRefused("Cannot unbind $this of method")
 	}
-	if !keep && !rt.phpSameClass(scope, sc) {
+	if !keep && rt.phpBindInternal(scope, sc) {
+		return jsNull
+	}
+	if !keep && scope != interface{}(sc) {
 		return phpBindRefused("Cannot rebind scope of closure created from method")
 	}
 	var nt interface{} = jsUndef
@@ -1513,13 +1533,21 @@ func (rt *jsrt) phpFakeBind(f interface{}, fr *jsObject, nthis, scope interface{
 	return rt.call(fr.props["f"], jsUndef, []interface{}{sc, fr.props["n"], nt, lsb, f})
 }
 
-// phpSameClass: whether a bind scope - a class, a class name, or null - is sc.
-func (rt *jsrt) phpSameClass(scope interface{}, sc *jsObject) bool {
-	if s, ok := scope.(string); ok {
-		return phpCase(strings.TrimPrefix(s, "\\"), false) == phpCase(rt.phpStr(sc.props["__name"]), false)
-	}
+// phpIsClass reports whether v is a class descriptor.
+func phpIsClass(v interface{}) bool {
+	o, ok := v.(*jsObject)
+	return ok && o.props["__isclass"] == true
+}
+
+// phpBindInternal refuses the new scope, a class descriptor or null, when it is
+// an internal class (one the engine or the library declares) other than own.
+func (rt *jsrt) phpBindInternal(scope, own interface{}) bool {
 	o, ok := scope.(*jsObject)
-	return ok && o == sc
+	if !ok || scope == own || o.props["__isinternal"] != true {
+		return false
+	}
+	phpBindRefused("Cannot bind closure to scope of internal class " + rt.phpStr(o.props["__name"]))
+	return true
 }
 
 // ----- comparison ------------------------------------------------------------
@@ -4118,6 +4146,31 @@ func init() {
 				return jsHFalse
 			}
 			return boolH((jsvFnMeta(meth).length>>uint(int(rt.toNumber(u(a[2])))))&1 == 1)
+		}
+		// (target, method, name) -> is the parameter named name, else the variadic
+		// one that collects it, of target's method (method undefined: of target
+		// itself, or its __invoke) by reference. Twin of js_phrefnamed in
+		// languages/lib/php-rt.metajs.
+		m["js_phrefnamed"] = func(a []uint64) uint64 {
+			f := u(a[0])
+			if mn := u(a[1]); mn != jsUndef {
+				f = rt.phpMethodOf(f, mn)
+			} else if _, isObj := f.(*jsObject); isObj {
+				f = rt.phpMethodOf(f, "__invoke")
+			}
+			if f == nil {
+				return jsHFalse
+			}
+			name := rt.phpStr(u(a[2]))
+			at := -1
+			if sig := rt.phpSigOf(f); sig != "" && sig != ")" {
+				for pi, p := range strings.Split(sig, ",") {
+					if p == name || (at < 0 && strings.HasPrefix(p, "...")) {
+						at = pi
+					}
+				}
+			}
+			return boolH(at >= 0 && at < 53 && (jsvFnMeta(f).length>>uint(at))&1 == 1)
 		}
 		// An object called as a function places its arguments for its __invoke.
 		m["js_phplace"] = func(a []uint64) uint64 {

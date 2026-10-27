@@ -8,6 +8,8 @@
 // The messages are php-src's (Zend/zend_execute.c, zend_operators.c,
 // zend_closures.c, zend_object_handlers.c, zend_API.c).
 
+// The diagnostic compiling this file raised last (checked at the end).
+$compileErr = error_get_last();
 $fails = 0;
 $checks = 0;
 
@@ -41,7 +43,7 @@ function want($type, $message, $line) {
 }
 
 // ----- the level: error_reporting() and @ -----
-check("level-default", error_reporting(), E_ALL);
+check("level-default", [error_reporting(), E_ALL], [30719, 30719]);
 check("no-error-yet", error_get_last(), null);
 function level() { return error_reporting(); }
 check("silence-level", @level(), 4437);
@@ -95,6 +97,11 @@ $v = isset($a["q"]); check("undef-key-isset", lastErr(), null);
 $a["k"]++; check("undef-key-inc", [$a["k"], lastErr()], [1, want(E_WARNING, 'Undefined array key "k"', __LINE__)]);
 $a["j"] .= "z"; check("undef-key-concat-assign", lastErr(), want(E_WARNING, 'Undefined array key "j"', __LINE__));
 $a["n"][] = 1; check("append-no-diagnostic", lastErr(), null);
+// An undefined variable fetched to read-write an element is warned of first.
+$rwA[] .= "x"; check("rw-undef-container", [$rwA, lastErr()], [["x"], want(E_WARNING, 'Undefined variable $rwA', __LINE__)]);
+$rwB["k"] .= "x"; check("rw-undef-container-key", [$rwB, lastErr()], [["k" => "x"], want(E_WARNING, 'Undefined array key "k"', __LINE__)]);
+$rwC[0]++; check("rw-undef-container-inc", [$rwC, lastErr()], [[1], want(E_WARNING, 'Undefined array key 0', __LINE__)]);
+$rwD[]++; check("rw-undef-container-inc-append", lastErr(), want(E_WARNING, 'Undefined variable $rwD', __LINE__));
 $s = "abc";
 $v = $s[5]; check("string-offset", [$v, lastErr()], ["", want(E_WARNING, 'Uninitialized string offset 5', __LINE__)]);
 $v = $s[-4]; check("string-offset-negative", lastErr(), want(E_WARNING, 'Uninitialized string offset -4', __LINE__));
@@ -170,6 +177,13 @@ $wa = new WarnArgs();
 $v = $wa->val($argE); check("arg-method-by-value", lastErr(), want(E_WARNING, 'Undefined variable $argE', __LINE__));
 $v = $wa->ref($argF); check("arg-method-by-ref", lastErr(), null);
 $v = byVal(x: $argG); check("arg-named-by-value", lastErr(), want(E_WARNING, 'Undefined variable $argG', __LINE__));
+$fnv = "byVal";
+$v = $fnv(x: $argL); check("arg-dynamic-named-by-value", lastErr(), want(E_WARNING, 'Undefined variable $argL', __LINE__));
+$fnr = "byRef";
+$v = $fnr(x: $argM); check("arg-dynamic-named-by-ref", [$argM, lastErr()], [null, null]);
+// The callee is resolved before its arguments (ZEND_INIT_FCALL), so each warns as it is sent.
+$v = byVal($argH, $argI . ""); check("arg-order", lastErr(), want(E_WARNING, 'Undefined variable $argI', __LINE__));
+$v = $wa->val($argJ, $argK . ""); check("arg-order-method", lastErr(), want(E_WARNING, 'Undefined variable $argK', __LINE__));
 
 // ----- closure bindings refused (zend_valid_closure_binding) -----
 class WarnBind {
@@ -189,6 +203,24 @@ $v = $mc->bindTo(null); check("unbind-method", lastErr(), want(E_WARNING, 'Canno
 $v = $mc->bindTo($wb, WarnOther::class); check("rebind-method-scope", lastErr(), want(E_WARNING, 'Cannot rebind scope of closure created from method', __LINE__));
 $v = Closure::fromCallable('strlen')->bindTo(null, WarnBind::class); check("rebind-function-scope", lastErr(), want(E_WARNING, 'Cannot rebind scope of closure created from function', __LINE__));
 $v = $wb->get()->bindTo(new WarnBind()); check("bind-ok", [$v(), lastErr()], [1, null]);
+// do_closure_bind looks the scope's class up first.
+$v = $sf->bindTo($wb, 'WarnNoSuch'); check("bind-unknown-class", [$v, lastErr()], [null, want(E_WARNING, 'Class "WarnNoSuch" not found', __LINE__)]);
+$v = Closure::fromCallable('strlen')->bindTo(null, 'WarnNoSuch'); check("bind-unknown-class-function", lastErr(), want(E_WARNING, 'Class "WarnNoSuch" not found', __LINE__));
+$v = $mc->bindTo($wb, 'WarnNoSuch'); check("bind-unknown-class-method", lastErr(), want(E_WARNING, 'Class "WarnNoSuch" not found', __LINE__));
+$v = $sf->bindTo(null, 'stdClass'); check("bind-internal-scope", [$v, lastErr()], [null, want(E_WARNING, 'Cannot bind closure to scope of internal class stdClass', __LINE__)]);
+$v = Closure::bind($sf, null, new ArrayObject([])); check("bind-internal-scope-library", lastErr(), want(E_WARNING, 'Cannot bind closure to scope of internal class ArrayObject', __LINE__));
+$v = $mc->bindTo($wb, Exception::class); check("bind-internal-scope-method", lastErr(), want(E_WARNING, 'Cannot bind closure to scope of internal class Exception', __LINE__));
+$v = Closure::fromCallable('strlen')->bindTo(null, 'stdClass'); check("bind-internal-scope-function", lastErr(), want(E_WARNING, 'Cannot bind closure to scope of internal class stdClass', __LINE__));
+$v = (function () { return 3; })->call(new ArrayObject([])); check("call-internal-scope", [$v, lastErr()], [null, want(E_WARNING, 'Cannot bind closure to scope of internal class ArrayObject', __LINE__)]);
+
+// ----- compile time: the deprecated "${...}" interpolation -----
+// zend_compile_encaps_list raises it while the file compiles, before any of it
+// runs, so the last one in the file is what error_get_last() answered first.
+function dollarCurlyVarVar($n) { $x = 1; return "${$n}"; }
+$dcLine = __LINE__ + 1;
+function dollarCurly($v) { return "${v}"; }
+check("dollar-curly", [dollarCurly("v"), dollarCurlyVarVar("x"), array_values($compileErr ?? [])],
+      ["v", "1", want(E_DEPRECATED, 'Using ${var} in strings is deprecated, use {$var} instead', $dcLine)]);
 
 // ----- done -----
 echo "warnings: " . $checks . " checks, " . $fails . " failures\n";

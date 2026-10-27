@@ -1263,7 +1263,7 @@ DqStr       <~~ push(makeTemplate(takeAll(), up.start)) ~~>
             = '"' :whitespace() { TplBraceExpr | TplDollarCurly | TplVar | TplChunk | TplSpecial } '"' :whitespace(Whitespace) ;
 // The deprecated "${...}" form. Expression only finds where it ends; its value is
 // dropped and the text is compiled again through dollarCurlySrc.
-TplDollarCurly <~~ pop(); push({e: compileSnippet(dollarCurlySrc(up.in.substring(2, up.in.length - 1)), snippetLine(up.start))}) ~~>
+TplDollarCurly <~~ pop(); push(dollarCurlyPiece(dollarCurlySrc(up.in.substring(2, up.in.length - 1)), snippetLine(up.start))) ~~>
             = "$" "{" :whitespace(Whitespace) Expression "}" ;
 TplBraceExpr <~~ push({e: pop()}) ~~>
             = CurlyOpen "{" :whitespace(Whitespace) Expression "}" ;
@@ -1675,6 +1675,9 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         }
         var ds = lvalSites(ref, pos)
         if (ds != null) { return {argval: function() { return readTargetVal(ref) }, argtgt: ref, argds: ds} }
+        // A variable's element or property is read as the same expression is,
+        // creating nothing ($null->p is null), as the diagnosed read does.
+        if (lvalPlain(ref) && ref.path.length > 0) { return {argval: function() { return readTargetDiag(ref, null) }, argtgt: ref} }
         return {argval: function() { return readTargetVal(ref) }, argtgt: ref}
     }
     function argValue(v) {
@@ -1692,7 +1695,11 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         return phsCallSite(c.curFileAbs(), c.lineOf(pos))
     }
     // site is where the call stands (callSite), for the callee's count check.
-    function evalArgs(args, site) {
+    // pre is the callee's parameters when known before its arguments are read (a
+    // user function or method a call names, which PHP resolves first): an
+    // argument's diagnostics are then raised as it is read if it is by value.
+    // Twin of the by-value argument reads in php-to-llvm-ir.abnf.
+    function evalArgs(args, site, pre) {
         // The kept diagnostics of the arguments read by lvalRead, or null.
         var pend = anytype
         pend = null
@@ -1753,7 +1760,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                 if (a.argds != undefined) {
                     var nr = lvalRead(a.argtgt, a.argds)
                     nv = nr.v
-                    if (nr.kept != null) { pend = pendAdd(pend, {i: -1, nm: "$" + a.argname, kept: nr.kept}) }
+                    if (nr.kept != null) { pend = argKept(pend, pre, -1, "$" + a.argname, nr.kept) }
                 } else { nv = a.argval() }
                 if (hasOwn(named, "$" + a.argname)) { namedTwice("$" + a.argname) }
                 nkeys.push("$" + a.argname)
@@ -1766,7 +1773,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             if (a.argds != undefined) {
                 var pr = lvalRead(a.argtgt, a.argds)
                 av = pr.v
-                if (pr.kept != null) { pend = pendAdd(pend, {i: pos.length, nm: "", kept: pr.kept}) }
+                if (pr.kept != null) { pend = argKept(pend, pre, pos.length, "", pr.kept) }
             } else { av = a.argval() }
             pos.push(av)
             tgts.push(a.argtgt == undefined ? (a.noref === true ? NOREF : null) : mkCellMaker(a.argtgt, here, {v: av}))
@@ -3597,8 +3604,13 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
 
     // An interpolated value is checked as a string (__mec_strchk) with
     // display_errors=1. Twin of makeTemplate in php-to-llvm-ir.abnf.
-    function makeTemplate(items, pos) {
+    // line is the string's line (a heredoc's body starts below pos), which its
+    // compile-time deprecations name.
+    function makeTemplate(items, pos, line) {
         if (items.length == 1 && items[0].s != undefined) { phpLibRef(items[0].s, false) }
+        for (var d = 0; d < items.length; d++) {
+            if (items[d].dc != undefined) { compileDiag(8192, items[d].dc, line == undefined ? c.lineOf(pos) : line) }
+        }
         for (var k = 0; k < items.length; k++) {
             if (items[k].sb != undefined) { items[k] = {s: phsFromBytes(items[k].sb)} }
         }
@@ -3767,8 +3779,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             return function() {
                 var po = anytype
                 po = rd()
-                if (propSite == null) { return phpGetProp(po, pn) }
-                propSite([po, pn])
+                if (propSite != null) { propSite([po, pn]) }
                 return po === null || po === undefined ? null : phpGetProp(po, pn)
             }
         }
@@ -3799,7 +3810,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         if (quote == "'") { return makeConst(body) }
         // The body starts on the line after the opening '<<<'.
         var line0 = snippetLine(pos)
-        return makeTemplate(hdParts(body, line0 > 0 ? line0 + 1 : 0), pos)
+        return makeTemplate(hdParts(body, line0 > 0 ? line0 + 1 : 0), pos, line0 + 1)
     }
     function nlAt(s, from) {
         for (var i = from; i < s.length; i++) { if (s.charAt(i) == "\n") { return i } }
@@ -3842,8 +3853,8 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                 }
                 if (j < body.length) {
                     if (lit != "") { parts.push(dqPiece(lit)); lit = "" }
-                    var src = dc ? dollarCurlySrc(body.substring(i + 2, j)) : body.substring(i + 1, j)
-                    parts.push({e: compileSnippet(src, hdLine(body, i, line0))})
+                    if (dc) { parts.push(dollarCurlyPiece(dollarCurlySrc(body.substring(i + 2, j)), hdLine(body, i, line0))) }
+                    else { parts.push({e: compileSnippet(body.substring(i + 1, j), hdLine(body, i, line0))}) }
                     i = j + 1
                     continue
                 }
@@ -3891,6 +3902,15 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         }
         if (k > 0 && (k == inner.length || inner.charAt(k) == "[")) { return "$" + inner }
         return "${" + inner + "}"
+    }
+    // The piece of an interpolated "${...}" whose code is src, and the deprecation
+    // zend_compile_encaps_list raises for it: src is "${expr}" for the variable
+    // variable form.
+    function dollarCurlyPiece(src, line) {
+        var vv = src.charAt(1) == "{"
+        return {e: compileSnippet(src, line),
+                dc: vv ? "Using ${expr} (variable variables) in strings is deprecated, use {${expr}} instead"
+                       : "Using ${var} in strings is deprecated, use {$var} instead"}
     }
     // line is the line its diagnostics name (diagLine), 0 for none.
     function compileSnippet(src, line) {
@@ -4209,6 +4229,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             if (suffixes[k].kind == "index" && dimSite == null) { dimSite = diagSite("__mec_dimchk", start) }
             if ((suffixes[k].kind == "field" || suffixes[k].kind == "dfield") && propSite == null) { propSite = diagSite("__mec_propchk", start) }
             if (suffixes[k].kind == "mcall" && isBindName(suffixes[k].name) && bindSite == null) { bindSite = diagSite("__mec_bindchk", start) }
+            if (suffixes[k].kind == "mcall") { suffixes[k].kd = argsKept(suffixes[k].args) }
         }
         return function(mode) {
             var cur = anytype
@@ -4223,20 +4244,19 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                 if (s.kind == "mcall") {
                     var binds = bindSite != null && isBindName(s.name)
                     if (binds) { bindWhy = "" }
-                    cur = mcall(cur, s.name, evalArgs(s.args, site))
+                    cur = mcall(cur, s.name, evalArgs(s.args, site, s.kd === true && isObj(cur) ? methodParams(cur.__class, s.name) : null))
                     if (binds) { bindSite([]) }
                 }
-                else if (s.kind == "dmcall") { cur = mcall(cur, phpStr(s.name()), evalArgs(s.args, site)) }
+                else if (s.kind == "dmcall") { cur = mcall(cur, phpStr(s.name()), evalArgs(s.args, site, null)) }
                 else if (s.kind == "field" || s.kind == "dfield") {
                     var pn = s.kind == "field" ? s.name : phpStr(s.name())
                     if (propSite != null && mode !== coalIs) { propSite([cur, pn]) }
-                    // A diagnosed read of null answers null after its warning; without
-                    // one phpGetProp aborts. Twin of emitPropGetSafe in
-                    // php-to-llvm-ir.abnf.
-                    if (propSite != null && (cur === null || cur === undefined)) { cur = null }
+                    // A read of null answers null, after its warning when diagnosed.
+                    // Twin of emitPropRead in php-to-llvm-ir.abnf.
+                    if (cur === null || cur === undefined) { cur = null }
                     else { cur = phpGetProp(cur, pn, mode === coalIs) }
                 }
-                else if (s.kind == "call") { cur = phpInvoke(cur, evalArgs(s.args, site)) }
+                else if (s.kind == "call") { cur = phpInvoke(cur, evalArgs(s.args, site, null)) }
                 else if (s.kind == "static") { cur = s.run(cur, site) }
                 else if (mode === coalIs) { cur = phpIndexIs(cur, s.idx()) }
                 else {
@@ -4826,7 +4846,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                 return deref(sc.v)
             }
             var dn = phpStr(getVar("$" + prop))
-            return staticCall(cls, dn, evalArgs(args, site), baseText, phpNsThis(cls, dn))
+            return staticCall(cls, dn, evalArgs(args, site, null), baseText, phpNsThis(cls, dn))
         }
         if (name == "class" && args == null) { return fullName(cls) }
         if (args == null) {
@@ -4835,7 +4855,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             fail("unknown class constant " + cls.__name + "::" + name)
         }
         var nt = phpNsThis(cls, name)
-        return staticCall(cls, name, evalArgs(args, site), baseText, nt)
+        return staticCall(cls, name, evalArgs(args, site, diagOn && argsKept(args) ? methodParams(cls, name) : null), baseText, nt)
     }
     // A '::' call of a non-static method runs on $this, which must be an instance
     // of the class (zend_non_static_method_call): answers the {self, bind} that
@@ -5002,7 +5022,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             if (name == "INF") { return mkFlo(PHP_INF) }
             if (name == "NAN") { return mkFlo(0 / 0) }
             if (hasOwn(phpMathConsts, name)) { return mkFlo(phpMathConsts[name]) }
-            if (name == "E_ALL") { return 32767 }
+            if (name == "E_ALL") { return 30719 }
             if (name == "E_ERROR") { return 1 }
             if (name == "E_WARNING") { return 2 }
             if (name == "E_NOTICE") { return 8 }
@@ -5072,14 +5092,14 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         if (p.name != null && p.args != null && phsCase(p.raw, false) == "closure" && phsCase(p.name, false) == "fromcallable") {
             var fa = p.args
             if (phpLibDynCall("closure::fromcallable", 1000, fa, "argname", "argspread")) { phpLibAll() }
-            return function() { return cloFromCallable(evalArgs(fa, "").pos[0]) }
+            return function() { return cloFromCallable(evalArgs(fa, "", null).pos[0]) }
         }
         // Closure::bind($c, $newThis, $newScope) is $c->bindTo($newThis, $newScope).
         if (p.name != null && p.args != null && phsCase(p.raw, false) == "closure" && phsCase(p.name, false) == "bind") {
             var ba = p.args
             var bindSite = diagSite("__mec_bindchk", start)
             return function() {
-                var bp = evalArgs(ba, "").pos
+                var bp = evalArgs(ba, "", null).pos
                 var bt = anytype
                 bt = bp.length > 1 ? bp[1] : null
                 if (bindSite == null) { return cloRebind(bp[0], bt, bp.length > 2, bp.length > 2 ? bp[2] : null) }
@@ -5316,13 +5336,20 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // (zend_create_closure_ex); keep leaves the class scope as it is. A binding
     // zend_valid_closure_binding refuses answers null, its warning kept in bindWhy:
     // an instance for a static closure, none for a closure using $this that has
-    // one, and for a closure made from a callable (fakeBind) or a function, which
-    // has no class scope, any other scope. Twin of phCloBind in lib/php-rt.metajs
-    // and phpCloBind in abnf/jsrtphp.go.
+    // one, an internal class (one the engine or the library declares) for a scope
+    // other than its own, and for a closure made from a callable (fakeBind) or a
+    // function, which has no class scope, any other scope. Twin of phCloBind in
+    // lib/php-rt.metajs and phpCloBind in abnf/jsrtphp.go.
     var bindWhy = ""
     function bindRefused(why) {
         bindWhy = why
         return null
+    }
+    // Whether the new scope ce is refused as an internal class other than own.
+    function bindInternal(ce, own) {
+        if (ce == null || ce === own || ce.__isinternal !== true) { return false }
+        bindRefused("Cannot bind closure to scope of internal class " + ce.__name)
+        return true
     }
     function cloBind(f, nthis, scope, keep) {
         var r = cloRecOf(f)
@@ -5331,18 +5358,19 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             if (fr != null) { return fakeBind(fr, nthis, scope, keep) }
             // A new Closure object, as zend_create_closure_ex always makes one.
             if (keep || scope == null) { return function(argset) { return f(argset) } }
+            if (bindInternal(scope, null)) { return null }
             return bindRefused("Cannot rebind scope of closure created from function")
         }
         if (r.st === true && isObj(nthis)) { return bindRefused("Cannot bind an instance to a static closure") }
         if (!isObj(nthis) && isObj(r.t) && r.ut === true) { return bindRefused("Cannot unbind $this of closure using $this") }
+        var own = anytype
+        var saved = scopes
+        scopes = r.c
+        own = ctxSelf()
+        scopes = saved
         var sc = anytype
-        sc = scope
-        if (keep) {
-            var saved = scopes
-            scopes = r.c
-            sc = ctxSelf()
-            scopes = saved
-        }
+        sc = keep ? own : scope
+        if (bindInternal(sc, own)) { return null }
         var ov = {}
         scopePut(ov, "$this", isObj(nthis) ? nthis : UNSET)
         scopePut(ov, SELF_KEY, sc == null ? UNSET : sc)
@@ -5407,6 +5435,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             if (fr.st === true) { return bindRefused("Cannot bind an instance to a static closure") }
             if (!classIs(nthis.__class, fr.sc.__name)) { return bindRefused(phsBindMethodMsg(fr.d, nthis.__class.__name)) }
         } else if (fr.st !== true) { return bindRefused("Cannot unbind $this of method") }
+        if (bindInternal(ce, fr.sc)) { return null }
         if (ce !== fr.sc) { return bindRefused("Cannot rebind scope of closure created from method") }
         var nt = anytype
         nt = isObj(nthis) ? nthis : null
@@ -5414,13 +5443,13 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     }
     // bindTo's $newScope: an object's class, a class name, null for none, and
     // "static" (the default) for the closure's own. A name no class has binds
-    // nothing: PHP warns and answers null.
+    // nothing, refused before anything else (do_closure_bind).
     function cloRebind(f, nthis, hasScope, sv) {
         if (!hasScope || (typeof sv == "string" && phsCase(sv, false) == "static")) { return cloBind(f, nthis, null, true) }
         if (isObj(sv)) { return cloBind(f, nthis, sv.__class, false) }
         if (sv === null || sv === undefined) { return cloBind(f, nthis, null, false) }
         var cls = findClass(phpStr(sv))
-        if (cls == null) { return null }
+        if (cls == null) { return bindRefused("Class " + String.fromCharCode(34) + phpStr(sv) + String.fromCharCode(34) + " not found") }
         return cloBind(f, nthis, cls, false)
     }
     // A Closure is an object whose class declares bind, bindTo, call and
@@ -5610,7 +5639,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         var args = items.slice(1)
         var site = callSite(start)
         return function() {
-            var argset = evalArgs(args, site)
+            var argset = evalArgs(args, site, null)
             var cls = anytype
             cls = clsT == null ? resolveClassName(stripWs(name)) : resolveClass(clsT())
             if (cls == undefined || cls == null || cls.__isclass !== true) { fail("new on a non-class") }
@@ -5963,6 +5992,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                 }
                 phpSet(nm, v)
             } else {
+                rwVarChk(rw, ref)
                 var p = resolveRefPhp(op == "=" ? ref : memoRef(ref))
                 if (op != "=") {
                     rwSlotChk(rw, p)
@@ -6178,36 +6208,36 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // (memoRef), as the compiler's is.
     function readTargetRw(ref, rw) {
         if (rw == null) { return readTargetVal(ref) }
-        if (ref.path.length == 0) {
-            rwVarChk(rw, ref)
-            return readTargetVal(ref)
-        }
+        rwVarChk(rw, ref)
+        if (ref.path.length == 0) { return readTargetVal(ref) }
         var p = resolveRefPhp(ref)
         rwSlotChk(rw, p)
         return readAt(p)
     }
-    // The site checking the read half of a compound assignment or ++/-- of target
-    // ref at pos (a read-write fetch): a plain variable, an array element's key
-    // (__mec_keychk) or an object's property (__mec_ownpropchk); null for any other
-    // target. Twin of rwSite in php-to-llvm-ir.abnf.
+    // The sites checking the read half of a compound assignment or ++/-- of target
+    // ref at pos (a read-write fetch), null for none: h warns of an undefined
+    // variable, the target itself or the one holding its elements (ZEND_ASSIGN_DIM_OP
+    // and zend_fetch_dimension_address raise it before the key's warning); s checks
+    // the slot read, an array element's key (__mec_keychk) or an object's property
+    // (__mec_ownpropchk). Twin of rwSite in php-to-llvm-ir.abnf.
     function rwSite(ref, pos) {
         if (ref.sref != null || (ref.headT != null && ref.headT != undefined) || ref.gkey != undefined) { return null }
-        if (ref.path.length == 0) {
-            if (ref.nameT != null || ref.name == null || ref.name == "$this") { return null }
-            return diagSite("__mec_diag", pos)
-        }
+        var named = ref.nameT == null && ref.name != null && ref.name != "$this"
+        if (ref.path.length == 0) { return named ? rwSites(diagSite("__mec_diag", pos), null) : null }
         var last = ref.path[ref.path.length - 1]
-        if (last.append === true) { return null }
-        return diagSite(last.idx != undefined ? "__mec_keychk" : "__mec_ownpropchk", pos)
+        var s = last.append === true ? null : diagSite(last.idx != undefined ? "__mec_keychk" : "__mec_ownpropchk", pos)
+        var dim = ref.path[0].key == undefined && ref.path[0].keyT == undefined
+        return rwSites(named && dim ? diagSite("__mec_diag", pos) : null, s)
     }
-    // That check, of a plain variable's target ref or of slot p of a path target.
-    function rwVarChk(site, ref) {
-        if (site != null && !varIsSet(ref.name)) { site([2, "Undefined variable " + ref.name]) }
+    function rwSites(h, s) { return h == null && s == null ? null : {h: h, s: s} }
+    // Those checks, of the variable of target ref or of slot p of a path target.
+    function rwVarChk(rw, ref) {
+        if (rw != null && rw.h != null && !varIsSet(ref.name)) { rw.h([2, "Undefined variable " + ref.name]) }
     }
-    function rwSlotChk(site, p) {
-        if (site == null || p.last.append === true) { return }
-        if (p.last.key != undefined) { site([p.obj, p.last.key]) }
-        else { site([p.obj, p.last.idx()]) }
+    function rwSlotChk(rw, p) {
+        if (rw == null || rw.s == null) { return }
+        if (p.last.key != undefined) { rw.s([p.obj, p.last.key]) }
+        else { rw.s([p.obj, p.last.idx()]) }
     }
     // PHP 8.3's increment_function / decrement_function: a number steps by one;
     // null++ is 1 and null-- stays null; a bool does not change; "" becomes "1"
@@ -6434,8 +6464,10 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         var resolveCb = name == "call_user_func" || name == "call_user_func_array"
         var libCb = hasOwn(libCbArg, "$" + phsCase(name, false))
         var site = callSite(start)
+        var kept = !hasOwn(phpBuiltins, name) && argsKept(args)
+        var fk = fnKey(phsCase(fnName(name), false))
         return function() {
-            var argset = evalArgs(args, site)
+            var argset = evalArgs(args, site, kept && varExists(fk) ? calleeParams(getVar(fk)) : null)
             if (resolveCb && argset.pos.length > 0) {
                 argset.pos[0] = callerCallable(argset.pos[0], name)
                 // call_user_func of a library function that takes a callback: that
@@ -6640,6 +6672,11 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     function runProgram(items) {
         jumpResolve(jw.frames[0])
         var main = makeBody(items)
+        var diags = []
+        if (phpLibDepth == 0) {
+            diags = compileDiags
+            compileDiags = []
+        }
         var defs = topDefs
         topDefs = []
         var early = topClasses
@@ -6653,6 +6690,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         // whose main() is called explicitly), so this is where the throw actually
         // propagates. excIsUser lives in lib/interp-core.js.
         try {
+            for (var cd = 0; cd < diags.length; cd++) { callNamed("__mec_diag", argsOf(diags[cd])) }
             main()
         } catch (e) {
             if (excIsUser(e)) { fail("uncaught exception: " + phpExcText(e.v)) }
@@ -7095,7 +7133,13 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         var name = items[0]
         var p = classParts(items, 1, name)
         lastClassDecl = {name: name, ext: p.ext, plain: p.ifaces.length == 0 && p.uses.length == 0}
-        return function() { declClass(name, buildClass(name, p)); return null }
+        var internal = phpLibDepth > 0
+        return function() {
+            var cls = buildClass(name, p)
+            if (internal) { cls.__isinternal = true }
+            declClass(name, cls)
+            return null
+        }
     }
     // An enum: the class is built exactly like any other, then one instance per case
     // is created and stored as a class constant of that name. The instances ARE the
@@ -7189,7 +7233,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                 site.cls = buildClass(shown, p)
                 site.cls.__anon = sfx
             }
-            return instantiate(site.cls, evalArgs(args, callAt))
+            return instantiate(site.cls, evalArgs(args, callAt, null))
         }
     }
     // The name an anonymous class shows: its parent's, else its first interface's,
@@ -7224,8 +7268,9 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             else if (items[i].cconsts != undefined) { collectConsts(items[i].cconsts, consts) }
         }
         lastClassDecl = {name: name, ext: null, plain: parents.length == 0}
+        var internal = phpLibDepth > 0
         return function() {
-            declClass(name, {__isclass: true, __isiface: true, __name: name, __super: null,
+            declClass(name, {__isclass: true, __isiface: true, __isinternal: internal, __name: name, __super: null,
                            __props: [], __ifaces: parents,
                            __constT: consts, __constV: newArr(), __statics: newArr()})
             return null
@@ -7464,7 +7509,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         // Without display_errors=1 nothing is diagnosed, so error_reporting()
         // accepts and reports a level without acting on it (makeCall routes it to
         // __mec_erreport with the flag).
-        "error_reporting": function(v) { return 32767 },
+        "error_reporting": function(v) { return 30719 },
         "get_class": function(v) { return arguments.length == 0 ? phpSelfClass() : phpGetClass(v) },
         "method_exists": function(v, m) { return phpMethodExists(v, m) },
         "property_exists": function(v, m) { return phpPropExists(v, phpStr(m)) },
@@ -8504,7 +8549,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // (zend_do_inheritance_ex). Twin of emitExcClass in php-to-llvm-ir.abnf.
     function declBuiltinClass(name, superName) {
         var sup = superName == null ? null : getVar(superName)
-        var cls = {__isclass: true, __name: name, __super: sup, __props: [], __ifaces: sup == null ? ["Throwable"] : []}
+        var cls = {__isclass: true, __isinternal: true, __name: name, __super: sup, __props: [], __ifaces: sup == null ? ["Throwable"] : []}
         cls["__construct"] = function(self, argset) {
             dictSet(self.p, "message", argset.pos.length > 0 ? argset.pos[0] : "")
             dictSet(self.p, "code", argset.pos.length > 1 ? argset.pos[1] : 0)
@@ -8528,7 +8573,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     declBuiltinClass("DivisionByZeroError", "ArithmeticError")
     // stdClass: the empty class of `new stdClass`, an (object) cast and
     // json_decode's objects. Twin of emitStdClass in php-to-llvm-ir.abnf.
-    scopePut(globalScope, "stdClass", {__isclass: true, __name: "stdClass", __super: null, __props: [], __ifaces: [],
+    scopePut(globalScope, "stdClass", {__isclass: true, __isinternal: true, __name: "stdClass", __super: null, __props: [], __ifaces: [],
                                        __constT: [], __constV: newArr(), __statics: newArr()})
     scopePut(globalScope, classKey("stdClass"), getVar("stdClass"))
     engineClasses[classKey("stdClass")] = true
@@ -8564,6 +8609,14 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // php-to-llvm-ir.abnf.
     var diagLine = 0
     function snippetLine(pos) { return diagOn ? c.lineOf(pos) : 0 }
+    // The diagnostics zend_compile raises (__mec_diag's arguments), which display
+    // before the file's code runs, in source order.
+    var compileDiags = []
+    function compileDiag(type, msg, line) {
+        if (!diagOn || phpLibDepth > 0) { return }
+        phpLibRef("__mec_diag", true)
+        compileDiags.push(diagLines ? [type, msg, c.curFileAbs(), line] : [type, msg])
+    }
     // The line of offset i of a heredoc body whose first line is line0 (0: none).
     function hdLine(body, i, line0) {
         if (line0 == 0) { return 0 }
@@ -8632,12 +8685,16 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // parameter at the read. lvalSites are the checks of such a read at pos, null
     // without diagnostics.
     function lvalSites(ref, pos) {
-        if (ref.sref != null || (ref.headT != null && ref.headT != undefined) || ref.nameT != null || ref.name == null) { return null }
+        if (!lvalPlain(ref)) { return null }
         var v = diagSite("__mec_diag", pos)
         if (v == null) { return null }
         phpLibRef("__mec_diagbuf", true)
         phpLibRef("__mec_diagreplay", true)
         return {v: v, d: diagSite("__mec_dimchk", pos), p: diagSite("__mec_propchk", pos)}
+    }
+    // A target headed by a plain variable name.
+    function lvalPlain(ref) {
+        return ref.sref == null && (ref.headT == null || ref.headT == undefined) && ref.nameT == null && ref.name != null
     }
     // The value of such an argument, read as the same expression is
     // (makeVarRead, foldCallMember), and its kept diagnostics, null for none.
@@ -8648,32 +8705,40 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         try { v = readTargetDiag(ref, ds) } finally { kept = callNamed("__mec_diagbuf", argsOf([1])) }
         return {v: v, kept: isArr(kept) && kept.keys.length > 0 ? kept : null}
     }
+    // ds null reads without diagnosing.
     function readTargetDiag(ref, ds) {
         var cur = anytype
         if (ref.name == "$this") { cur = getVar("$this") }
         else if (varIsSet(ref.name)) { cur = getVar(ref.name) }
         else {
-            ds.v([2, "Undefined variable " + ref.name])
+            if (ds != null) { ds.v([2, "Undefined variable " + ref.name]) }
             cur = null
         }
         for (var i = 0; i < ref.path.length; i++) {
             var s = stepOf(ref.path[i])
             if (s.key != undefined) {
-                ds.p([cur, s.key])
+                if (ds != null) { ds.p([cur, s.key]) }
                 if (cur === null || cur === undefined) { cur = null } else { cur = phpGetProp(cur, s.key, false) }
             } else {
                 var ix = anytype
                 ix = s.idx()
-                ds.d([cur, ix])
+                if (ds != null) { ds.d([cur, ix]) }
                 cur = phpIndex(cur, ix)
             }
         }
         return cur
     }
-    function pendAdd(pend, e) {
+    // The kept diagnostics of argument i (i < 0: the one named nm): raised now if
+    // params pre take it by value, dropped if by reference, queued on pend when
+    // the callee is not known yet.
+    function argKept(pend, pre, i, nm, kept) {
+        if (pre != null) {
+            if (!argByRef(pre, i, nm)) { callNamed("__mec_diagreplay", argsOf([kept])) }
+            return pend
+        }
         var out = anytype
         out = pend == null ? [] : pend
-        out.push(e)
+        out.push({i: i, nm: nm, kept: kept})
         return out
     }
     // Raises the kept diagnostics of argset's arguments that params (null: a
@@ -8684,16 +8749,40 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         if (pend == null || pend == undefined) { return }
         for (var k = 0; k < pend.length; k++) {
             var e = pend[k]
-            var p = anytype
-            p = null
-            if (params != null) {
-                for (var j = 0; j < params.length; j++) {
-                    if (e.i >= 0 ? (j == e.i || (params[j].variadic === true && j < e.i)) : params[j].name == e.nm || params[j].variadic === true) { p = params[j] }
-                    if (p != null) { break }
-                }
-            }
-            if (p == null || p.byref !== true) { callNamed("__mec_diagreplay", argsOf([e.kept])) }
+            if (params == null || !argByRef(params, e.i, e.nm)) { callNamed("__mec_diagreplay", argsOf([e.kept])) }
         }
+    }
+    // Whether params take argument i (i < 0: the one named nm) by reference.
+    function argByRef(params, i, nm) {
+        for (var j = 0; j < params.length; j++) {
+            if (i >= 0 ? (j == i || (params[j].variadic === true && j < i)) : params[j].name == nm || params[j].variadic === true) {
+                return params[j].byref === true
+            }
+        }
+        return false
+    }
+    // Whether an argument list has an argument whose diagnostics are kept.
+    function argsKept(args) {
+        for (var i = 0; i < args.length; i++) { if (args[i] != null && args[i] != undefined && args[i].argds != undefined) { return true } }
+        return false
+    }
+    // The parameters of f, a user function or method, else null.
+    function calleeParams(f) {
+        if (typeof f != "function") { return null }
+        var nm = anytype
+        nm = fnMeta(f, "name")
+        if (typeof nm != "string") { return null }
+        if (nm.substring(0, 3) == "fn:") { return fnRecs[phpInt(nm.substring(3))].params }
+        if (nm.substring(0, 2) == "m:") { return mRecs[phpInt(nm.substring(2))].params }
+        return null
+    }
+    // The parameters of method name of class cls, null when unknown or when its
+    // visibility may send the call to __call.
+    function methodParams(cls, name) {
+        if (mVisNames["$" + phsCase(name, false)] === true) { return null }
+        var m = classFind(cls, name)
+        if (m == null) { m = classFind(cls, phsCase(name, false)) }
+        return calleeParams(m)
     }
     // Is method name one that rebinds a closure (->bindTo, ->call)?
     function isBindName(name) {

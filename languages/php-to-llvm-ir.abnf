@@ -1351,7 +1351,7 @@ BinAhead    = :script(~~
 DqStr       <~~ push(makeTemplate(takeAll(), up.start)) ~~>
             = '"' :whitespace() { TplBraceExpr | TplDollarCurly | TplVar | TplChunk | TplSpecial } '"' :whitespace(Whitespace) ;
 // Twin of TplDollarCurly in php-interpreter.abnf; see there.
-TplDollarCurly <~~ pop(); push({e: compileSnippet(dollarCurlySrc(up.in.substring(2, up.in.length - 1)), snippetLine(up.start))}) ~~>
+TplDollarCurly <~~ pop(); push(dollarCurlyPiece(dollarCurlySrc(up.in.substring(2, up.in.length - 1)), snippetLine(up.start))) ~~>
             = "$" "{" :whitespace(Whitespace) Expression "}" ;
 TplBraceExpr <~~ push({e: pop()}) ~~>
             = CurlyOpen "{" :whitespace(Whitespace) Expression "}" ;
@@ -2372,7 +2372,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         if (quote == "'") { return makeConst(body) }
         // The body starts on the line after the opening '<<<'.
         var line0 = snippetLine(pos)
-        return makeTemplate(hdParts(body, line0 > 0 ? line0 + 1 : 0), pos)
+        return makeTemplate(hdParts(body, line0 > 0 ? line0 + 1 : 0), pos, line0 + 1)
     }
     function nlAt(s, from) {
         for (var i = from; i < s.length; i++) { if (s.charAt(i) == "\n") { return i } }
@@ -2415,8 +2415,8 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                 }
                 if (j < body.length) {
                     if (lit != "") { parts.push(dqPiece(lit)); lit = "" }
-                    var src = dc ? dollarCurlySrc(body.substring(i + 2, j)) : body.substring(i + 1, j)
-                    parts.push({e: compileSnippet(src, hdLine(body, i, line0))})
+                    if (dc) { parts.push(dollarCurlyPiece(dollarCurlySrc(body.substring(i + 2, j)), hdLine(body, i, line0))) }
+                    else { parts.push({e: compileSnippet(body.substring(i + 1, j), hdLine(body, i, line0))}) }
                     i = j + 1
                     continue
                 }
@@ -2462,6 +2462,13 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         }
         if (k > 0 && (k == inner.length || inner.charAt(k) == "[")) { return "$" + inner }
         return "${" + inner + "}"
+    }
+    // Twin of dollarCurlyPiece in php-interpreter.abnf.
+    function dollarCurlyPiece(src, line) {
+        var vv = src.charAt(1) == "{"
+        return {e: compileSnippet(src, line),
+                dc: vv ? "Using ${expr} (variable variables) in strings is deprecated, use {${expr}} instead"
+                       : "Using ${var} in strings is deprecated, use {$var} instead"}
     }
     // line is the line its diagnostics name (diagLine), 0 for none.
     function compileSnippet(src, line) {
@@ -3743,8 +3750,11 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
 
     // An interpolated value is checked as a string (__mec_strchk) with
     // display_errors=1. Twin of makeTemplate in php-interpreter.abnf.
-    function makeTemplate(items, pos) {
+    function makeTemplate(items, pos, line) {
         if (items.length == 1 && items[0].s != undefined) { phpLibRef(items[0].s, false) }
+        for (var d = 0; d < items.length; d++) {
+            if (items[d].dc != undefined) { compileDiag(8192, items[d].dc, line == undefined ? c.lineOf(pos) : line) }
+        }
         var site = null
         for (var q = 0; q < items.length; q++) { if (items[q].e != undefined && site == null) { site = diagSite("__mec_strchk", pos) } }
         return function(b) {
@@ -3806,9 +3816,8 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             var propSite = diagSite("__mec_propchk", pos)
             return function(b) {
                 var rov = rd(b)
-                if (propSite == null) { return emitPropGet(rov.b, rov.v, propKey(rov.b, pn), pn, name == "$this", false) }
-                propSite(rov.b, [rov.v, emitStr(rov.b, pn)])
-                return emitPropGetSafe(rov.b, rov.v, propKey(rov.b, pn), pn, name == "$this", false)
+                var bp = propSite == null ? rov.b : propSite(rov.b, [rov.v, emitStr(rov.b, pn)])
+                return emitPropRead(bp, rov.v, propKey(bp, pn), pn, name == "$this", false)
             }
         }
         return rd
@@ -3949,8 +3958,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                     var rf = s.nameT(b)
                     b = rf.b
                     if (propSite != null && mode !== coalIs) { b = propSite(b, [cur, callExt(b, "js_phstr", [rf.v])]) }
-                    var rdf = propSite != null ? emitPropGetSafe(b, cur, callExt(b, "js_phpkey", [rf.v]), null, false, mode === coalIs)
-                                               : emitPropGet(b, cur, callExt(b, "js_phpkey", [rf.v]), null, false, mode === coalIs)
+                    var rdf = emitPropRead(b, cur, callExt(b, "js_phpkey", [rf.v]), null, false, mode === coalIs)
                     b = rdf.b
                     cur = rdf.v
                 } else if (s.kind == "mcall") {
@@ -3972,8 +3980,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                     cur = rm.v
                 } else if (s.kind == "field") {
                     if (propSite != null && mode !== coalIs) { b = propSite(b, [cur, emitStr(b, s.name)]) }
-                    var rg = propSite != null ? emitPropGetSafe(b, cur, propKey(b, s.name), s.name, i == 0 && thisHead, mode === coalIs)
-                                              : emitPropGet(b, cur, propKey(b, s.name), s.name, i == 0 && thisHead, mode === coalIs)
+                    var rg = emitPropRead(b, cur, propKey(b, s.name), s.name, i == 0 && thisHead, mode === coalIs)
                     b = rg.b
                     cur = rg.v
                 } else if (s.kind == "call") {
@@ -4181,10 +4188,6 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     // js_get (`member 'a' of null`, an uncatchable abort) or - in a program that
     // declares __get anywhere - emitHasMethod's js_get(objV, "__class"). It is the
     // intermediate step of `isset($undef->a->b)` / `isset($o->missing->p)`.
-    //
-    // Besides that walk only a diagnosed read gets it (display_errors=1), whose
-    // warning precedes it: without one an ordinary `$null->p` READ aborts, as
-    // php-interpreter.abnf's does ("property ->p of null").
     function emitPropGetSafe(b, objV, keyV, name, thisLex, isMode) {
         var nullB = curF.NewBlock("")
         var liveB = curF.NewBlock("")
@@ -4195,6 +4198,14 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         r.b.NewBr(joinB)
         return {b: joinB, v: joinB.NewPhi([llvm.ir.NewIncoming(hNull, nullB),
                                            llvm.ir.NewIncoming(r.v, r.b)])}
+    }
+    // A property READ: PHP answers null for a property of null (after the "Attempt
+    // to read property" warning when diagnosed), so the receiver is tested unless it
+    // is the lexical $this, which is never null. Twin of foldCallMember's field step
+    // in php-interpreter.abnf.
+    function emitPropRead(b, objV, keyV, name, thisLex, isMode) {
+        if (thisLex) { return emitPropGet(b, objV, keyV, name, thisLex, isMode) }
+        return emitPropGetSafe(b, objV, keyV, name, thisLex, isMode)
     }
     // A property's KEY on an object: a name starting "__" is stored behind a \x01,
     // because the runtime keeps its own slots (__class, __dict, __refcell ...)
@@ -4908,10 +4919,12 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             }
         }
         lastClassDecl = {name: name, ext: "", plain: parents.length == 0}
+        var internal = phpLibDepth > 0
         return function(b) {
             var clsV = callExt(b, "js_obj_new", [])
             callExt(b, "js_set", [clsV, emitStr(b, "__isclass"), hTrue])
             callExt(b, "js_set", [clsV, emitStr(b, "__isiface"), hTrue])
+            if (internal) { markInternal(b, clsV) }
             callExt(b, "js_set", [clsV, emitStr(b, "__name"), emitStr(b, name)])
             b = emitIfaceList(b, clsV, parents)
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), clsV])
@@ -5016,6 +5029,11 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     // cloRebind: the program can rebind a closure (->bindTo, ->call, Closure::bind),
     // so every closure literal's record carries what that needs (cloRebindRec).
     var cloRebind = false
+    // A class the engine or the library declares is internal, which a rebinding
+    // refuses as a closure's new scope (phpBindInternal in abnf/jsrtphp.go).
+    function markInternal(b, clsV) {
+        if (cloRebind) { callExt(b, "js_set", [clsV, emitStr(b, "__isinternal"), hTrue]) }
+    }
     // The record fields a rebind reads: the literal's FACTORY (cloFactory), its class
     // scope, and st for a static one.
     function cloRebindRec(b, rec, facIdx, envV, sc, scopeV) {
@@ -5028,9 +5046,8 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     // Closure arm (phCloBind), it makes the same closure over a scope that copies
     // the captured names and declares $this, self and static anew, so the body,
     // which reads them up its scope chain, sees the new ones
-    // (zend_create_closure_ex). A scope given as a class NAME is looked up here,
-    // and one no class has answers null, as PHP does. Twin of cloBind in
-    // php-interpreter.abnf.
+    // (zend_create_closure_ex). The scope is a class descriptor or null: the
+    // runtime resolves a class name first. Twin of cloBind in php-interpreter.abnf.
     function cloFactory(idx, names, pl, desc, sc) {
         funcCount++
         var facIdx = funcCount
@@ -5042,15 +5059,8 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         var env = f.Params[0]
         var b = f.NewBlock("entry")
         var thisV = callExt(b, "js_arg", [f.Params[1], handle(0)])
-        var sArg = callExt(b, "js_arg", [f.Params[1], handle(1)])
-        var strB = f.NewBlock("")
-        var missB = f.NewBlock("")
-        var joinB = f.NewBlock("")
-        b.NewCondBr(truthy(b, callExt(b, "js_phis", [emitStr(b, "string"), sArg])), strB, joinB)
-        var looked = phClsFind(strB, sArg)
-        strB.NewCondBr(strB.NewICmp(llvm.enum.IPredEQ, looked, hNull), missB, joinB)
-        missB.NewRet(hNull)
-        var scopeV = joinB.NewPhi([llvm.ir.NewIncoming(sArg, b), llvm.ir.NewIncoming(looked, strB)])
+        var scopeV = callExt(b, "js_arg", [f.Params[1], handle(1)])
+        var joinB = b
         var L = callExt(joinB, "js_scope_new", [env])
         for (var i = 0; i < names.length; i++) {
             var nV = emitStr(joinB, names[i])
@@ -5548,7 +5558,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                 b = rn4.b
                 var nameV = rn4.v
                 if (op != "=") {
-                    var rold = readVarDiag(b, nameV, ref.name, rw)
+                    var rold = readVarDiag(b, nameV, ref.name, rw == null ? null : rw.h)
                     b = rold.b
                     v = compoundOp(b, oc, op, rold.v, v)
                 } else {
@@ -5579,6 +5589,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                 arrB.NewBr(endB6)
                 b = endB6
             } else {
+                if (op != "=") { b = rwVarChk(b, rw, ref) }
                 var p = emitRefPathV(b, ref, true)
                 b = p.b
                 if (op != "=") {
@@ -5731,13 +5742,14 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         }
         if (ref.path.length == 0) {
             var rn5 = refNameV(b, ref)
-            var rcur = readVarDiag(rn5.b, rn5.v, ref.name, ds == null ? null : ds.rw)
+            var rcur = readVarDiag(rn5.b, rn5.v, ref.name, ds == null || ds.rw == null ? null : ds.rw.h)
             var oldV = rcur.v
             b = incDecChk(rcur.b, ds, oldV, isInc)
             var newV = callExt(b, ext, [oldV])
             b = setVarV(b, rn5.v, newV)
             return {b: b, v: isPre ? newV : oldV}
         }
+        b = rwVarChk(b, ds == null ? null : ds.rw, ref)
         var p = emitRefPathV(b, ref, true)
         b = rwSlotChk(p.b, ds == null ? null : ds.rw, p)
         var rslot = readRefSlot(b, p)
@@ -6134,7 +6146,10 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         var t = argTarget(a.vtext)
         if (t == null) { return a.pos(b) }
         var want = false
-        if (refs.dyn === true) { want = t.path.length == 0 && t.gkey == undefined && t.name != "$this" }
+        if (refs.dyn === true) {
+            want = t.path.length == 0 && t.gkey == undefined && t.name != "$this"
+            if (want && diagOn && (a.aname != undefined || at >= 0)) { return dynArgOrCell(b, a, t, refs, at) }
+        }
         else if (a.aname != undefined) {
             // A name no parameter declares is the variadic's.
             var pi = refs.sig.rest
@@ -6145,6 +6160,25 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         } else { want = at >= 0 && byrefAt(refs.sig, at) }
         if (!want) { return a.pos(b) }
         return targetCell(b, t)
+    }
+    // A plain variable argument of a callee known only at run time, with
+    // display_errors=1: its cell where the parameter the callee places it in is by
+    // reference (js_phrefnamed for a named one, else as emitDynRefArgs asks), else
+    // its value, read as a by-value argument is, which warns of an undefined one.
+    function dynArgOrCell(b, a, t, refs, at) {
+        var mV = refs.nameV == undefined ? hUndef : refs.nameV
+        var isRef = a.aname != undefined ? callExt(b, "js_phrefnamed", [refs.fV, mV, emitStr(b, a.aname)])
+                  : refs.nameV == undefined ? callExt(b, "js_phrefat", [refs.fV, emitNum(b, at)])
+                  : callExt(b, "js_phmrefat", [refs.fV, refs.nameV, emitNum(b, at)])
+        var refB = curF.NewBlock("")
+        var valB = curF.NewBlock("")
+        var joinB = curF.NewBlock("")
+        b.NewCondBr(truthy(b, isRef), refB, valB)
+        var rc = targetCell(refB, t)
+        rc.b.NewBr(joinB)
+        var rv = a.pos(valB)
+        rv.b.NewBr(joinB)
+        return {b: joinB, v: joinB.NewPhi([llvm.ir.NewIncoming(rc.v, rc.b), llvm.ir.NewIncoming(rv.v, rv.b)])}
     }
     // Read a collected PHP array back into the positional list the callee declared:
     // by position, else by parameter name, with the variadic tail gathered into one
@@ -6895,7 +6929,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         // Without display_errors=1 nothing is diagnosed, so error_reporting()
         // reports a level without acting (makeCall routes it to __mec_erreport
         // with the flag).
-        if (name == "error_reporting") { return {b: b, v: emitNum(b, 32767)} }
+        if (name == "error_reporting") { return {b: b, v: emitNum(b, 30719)} }
         var kind = phpIsKind(name)
         if (kind != "") { return {b: b, v: callExt(b, "js_phis", [emitStr(b, kind), vs[0]])} }
         return {b: b, v: callExt(b, "js_phintdiv", [vs[0], vs[1]])}
@@ -7348,6 +7382,25 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     // php-interpreter.abnf.
     var diagLine = 0
     function snippetLine(pos) { return diagOn ? c.lineOf(pos) : 0 }
+    // Twin of compileDiag in php-interpreter.abnf.
+    var compileDiags = []
+    function compileDiag(type, msg, line) {
+        if (!diagOn || phpLibDepth > 0) { return }
+        phpLibRef("__mec_diag", true)
+        compileDiags.push(diagLines ? [type, msg, c.curFileAbs(), line] : [type, msg])
+    }
+    // The statement raising the diagnostics ds, after the file's declarations.
+    function compileDiagsAt(ds) {
+        return function(b) {
+            for (var i = 0; i < ds.length; i++) {
+                var d = ds[i]
+                var vals = [emitNum(b, d[0]), emitStr(b, d[1])]
+                if (d.length > 2) { vals.push(emitStr(b, d[2])); vals.push(emitNum(b, d[3])) }
+                emitLibCall(b, "__mec_diag", vals)
+            }
+            return b
+        }
+    }
     // The line of offset i of a heredoc body whose first line is line0 (0: none).
     function hdLine(body, i, line0) {
         if (line0 == 0) { return 0 }
@@ -7438,25 +7491,29 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         site(undB, [emitNum(undB, 2), msgV]).NewBr(okB)
         return readRawV(okB, raw)
     }
-    // The site checking the read half of a compound assignment or ++/-- of target
-    // ref at pos (a read-write fetch): a plain variable, an array element's key
-    // (__mec_keychk) or an object's property (__mec_ownpropchk); null for any other
-    // target. Twin of rwSite in php-interpreter.abnf.
+    // The sites checking the read half of a compound assignment or ++/-- of target
+    // ref at pos, null for none: h for an undefined variable, s for the slot. Twin
+    // of rwSite in php-interpreter.abnf, which cites the engine.
     function rwSite(ref, pos) {
         if (ref.sbase != undefined || ref.headT != undefined || ref.gkey != undefined) { return null }
-        if (ref.path.length == 0) {
-            if (ref.nameT != null || ref.name == null || ref.name == "$this") { return null }
-            return diagSite("__mec_diag", pos)
-        }
+        var named = ref.nameT == null && ref.name != null && ref.name != "$this"
+        if (ref.path.length == 0) { return named ? rwSites(diagSite("__mec_diag", pos), null) : null }
         var last = ref.path[ref.path.length - 1]
-        if (last.append === true) { return null }
-        return diagSite(last.idx != undefined ? "__mec_keychk" : "__mec_ownpropchk", pos)
+        var s = last.append === true ? null : diagSite(last.idx != undefined ? "__mec_keychk" : "__mec_ownpropchk", pos)
+        var dim = ref.path[0].key == undefined && ref.path[0].keyT == undefined
+        return rwSites(named && dim ? diagSite("__mec_diag", pos) : null, s)
     }
-    // That check on slot p of a path target (emitRefPathV).
-    function rwSlotChk(b, site, p) {
-        if (site == null || p.kind == "append") { return b }
-        if (p.kind == "index") { return site(b, [p.obj, p.key]) }
-        return site(b, [p.obj, p.keyName != null ? emitStr(b, p.keyName) : callExt(b, "js_phpname", [p.key])])
+    function rwSites(h, s) { return h == null && s == null ? null : {h: h, s: s} }
+    // Those checks, of the variable holding path target ref's elements or of its
+    // slot p (emitRefPathV).
+    function rwVarChk(b, rw, ref) {
+        if (rw == null || rw.h == null) { return b }
+        return readVarDiag(b, emitStr(b, ref.name), ref.name, rw.h).b
+    }
+    function rwSlotChk(b, rw, p) {
+        if (rw == null || rw.s == null || p.kind == "append") { return b }
+        if (p.kind == "index") { return rw.s(b, [p.obj, p.key]) }
+        return rw.s(b, [p.obj, p.keyName != null ? emitStr(b, p.keyName) : callExt(b, "js_phpname", [p.key])])
     }
     // '@e': ZEND_BEGIN_SILENCE before e and ZEND_END_SILENCE after it. An exception
     // leaving e is ended by the catch or finally that takes it (silenceUnwind), so e
@@ -8654,9 +8711,11 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         var shown = anon ? anonClassName(extRaw, ifacesRaw) : name
         noteClassProps(name, ext, props)
         lastClassDecl = {name: name, ext: ext, plain: ifaces.length == 0 && uses.length == 0}
+        var internal = phpLibDepth > 0
         return function(b) {
             var clsV = callExt(b, "js_obj_new", [])
             callExt(b, "js_set", [clsV, emitStr(b, "__isclass"), hTrue])
+            if (internal) { markInternal(b, clsV) }
             callExt(b, "js_set", [clsV, emitStr(b, "__name"), emitStr(b, shown)])
             if (anon) { callExt(b, "js_set", [clsV, emitStr(b, "__anon"), emitStr(b, anonSfx)]) }
             // Single inheritance: the __super chain is what the runtime's method
@@ -8946,6 +9005,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     function emitExcClass(b, name, superName) {
         var clsV = callExt(b, "js_obj_new", [])
         callExt(b, "js_set", [clsV, emitStr(b, "__isclass"), hTrue])
+        markInternal(b, clsV)
         callExt(b, "js_set", [clsV, emitStr(b, "__name"), emitStr(b, name)])
         if (superName != "") {
             callExt(b, "js_set", [clsV, emitStr(b, "__super"),
@@ -8994,6 +9054,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     function emitStdClass(b) {
         var clsV = callExt(b, "js_obj_new", [])
         callExt(b, "js_set", [clsV, emitStr(b, "__isclass"), hTrue])
+        markInternal(b, clsV)
         callExt(b, "js_set", [clsV, emitStr(b, "__name"), emitStr(b, "stdClass")])
         b = emitInitProps(b, clsV, "stdClass", "", [])
         var ctor = emitFunc([], function(bb) { return bb }, true, false, "stdClass")
@@ -9022,7 +9083,12 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         1.7320508075688772]
     function buildMain(items) {
         jumpResolve(jw.frames[0])
-        var all = topDefs.concat(topClasses).concat(items)
+        var all = topDefs.concat(topClasses)
+        if (phpLibDepth == 0 && compileDiags.length > 0) {
+            all.push(compileDiagsAt(compileDiags))
+            compileDiags = []
+        }
+        all = all.concat(items)
         topDefs = []
         topClasses = []
         hoisted = {}
@@ -9064,7 +9130,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, mathConstNames[mci]),
                                          callExt(b, "js_phflo", [emitNum(b, mathConstVals[mci])])])
         }
-        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "E_ALL"), emitNum(b, 32767)])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "E_ALL"), emitNum(b, 30719)])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "E_ERROR"), emitNum(b, 1)])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "E_WARNING"), emitNum(b, 2)])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "E_NOTICE"), emitNum(b, 8)])
@@ -9087,6 +9153,16 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         for (var rc = 0; rc < rtCls.length; rc++) {
             callExt(b, "js_phset", [regV, emitStr(b, rtCls[rc]),
                                     callExt(b, "js_scope_get", [curScopeV, emitStr(b, rtCls[rc])])])
+        }
+        // The runtime resolves a class NAME (a closure's new scope) through
+        // php_class_find, handed over as a closure under "\x00clsfind".
+        if (cloRebind) {
+            funcCount++
+            var cfIdx = funcCount
+            var cff = m.NewFunc("jsf_" + cfIdx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
+            var cfb = cff.NewBlock("entry")
+            cfb.NewRet(cfb.NewCall(classFindFn(), [cff.Params[0], callExt(cfb, "js_arg", [cff.Params[1], handle(0)])]))
+            callExt(b, "js_phset", [regV, emitStr(b, "\x00clsfind"), callExt(b, "js_closure", [handle(cfIdx), curScopeV])])
         }
         callExt(b, "js_phrtinit", [regV])
         if (strictTypes) { callExt(b, "js_phstrict", []) }
