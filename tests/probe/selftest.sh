@@ -54,20 +54,35 @@ check "all legs silent (js-test-1)" 2 "produced NO OUTPUT" -- \
 check "calculator (no stdout at all)" 2 "THERE WAS NO COMPARISON" -- \
     "$PROBE" calculator tests/calculator-test-1.txt
 
-# The sharpest one: sabotage the IR-flavour classifier so bash is treated as a
-# handle-IR language (its run leg then comes out empty), and check that the
-# three surviving legs agreeing PERFECTLY is still not a pass.
-#
-# The copy has to live in tests/ rather than in $WORK, because probe.sh finds
-# the repo root as `dirname $0`/..  - a copy anywhere else would cd somewhere
-# else and fail for the wrong reason.
+# The sharpest ones sabotage a copy of probe.sh itself. The copy has to live in
+# tests/ rather than in $WORK, because probe.sh finds the repo root as
+# `dirname $0`/.. - a copy anywhere else would cd somewhere else and fail for
+# the wrong reason.
 SAB=tests/.probe-selftest-sabotage.sh
 trap 'rm -rf "$WORK" "$SAB"' EXIT
-sed 's/^handle_ir() {.*$/handle_ir() { return 0; }/' "$PROBE" >"$SAB"
-chmod +x "$SAB"
-grep -q '^handle_ir() { return 0; }$' "$SAB" || {
-    echo "FAIL sabotage did not apply - handle_ir() was renamed?"; fail=$((fail + 1)); }
-check "sabotaged flavour test, 3 legs agree" 1 "NOT a four-way comparison" -- \
+
+# sabotage NAME SED_EXPR WANT - write $SAB with the edit applied and check that
+# it changed exactly WANT lines: an edit that no longer matches (probe.sh was
+# reworded) would leave an intact copy that goes green for the wrong reason.
+sabotage() {
+    sed "$2" "$PROBE" >"$SAB"; chmod +x "$SAB"
+    local n; n=$(diff "$PROBE" "$SAB" | grep -c '^>')
+    [ "$n" = "$3" ] && return 0
+    printf 'FAIL %-38s changed %s lines of %s, wanted %s - reworded?\n' "$1" "$n" "$PROBE" "$3"
+    fail=$((fail + 1)); return 1
+}
+
+# An EMPTY run leg: both run_leg run commands become `true`. The three surviving
+# legs agree PERFECTLY, and that is still not a pass.
+sabotage "sabotage: empty run leg" 's/run_leg run \.\/mec /run_leg run true /' 2 &&
+check "run leg emptied, 3 legs agree" 1 "run: produced NO OUTPUT" -- \
+    "$SAB" bash tests/probe/good.sh --oracle 'bash %s'
+
+# A CORRUPTED run leg: module_lines() cuts nothing, so bash's run leg keeps the
+# emitted module in front of the program's output - what a wrong IR-flavour
+# classification produces. It must read as a disagreement, not as a pass.
+sabotage "sabotage: module left uncut" 's/print n + 0 }/print 0 }/' 1 &&
+check "run leg keeps the module" 1 "interp   != run" -- \
     "$SAB" bash tests/probe/good.sh --oracle 'bash %s'
 
 echo
@@ -94,9 +109,11 @@ EOF
 check "prints, then hangs (timeout 5s)" 2 "a truncated leg is not a measurement" -- \
     "$PROBE" bash "$WORK/hang.sh" --timeout 5
 # The same input also trips the IR interpreter's step brake, which truncates the
-# run leg without any timeout being involved.
+# run leg without any timeout being involved. The run leg alone, under a timeout
+# it never reaches (the brake trips in about a second), so a loaded machine
+# cannot turn the brake into a kill.
 check "step brake truncates the run leg" 2 "hit the IR step brake" -- \
-    "$PROBE" bash "$WORK/hang.sh" --timeout 5
+    "$PROBE" bash "$WORK/hang.sh" --legs run --timeout 120
 
 echo
 printf -- '----------------------------------------------------------\n'

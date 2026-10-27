@@ -4,8 +4,9 @@
 # verdict.
 #
 # Green means every gate, including the output greps and the RECORDED NUMBERS
-# below (FULL_ASSERTIONS, FULL_GAPS, SHAPE_GROUPS, MATRIX_ENTRIES, LINT_FINDINGS):
-# a gate that prints a smaller number without complaining is worse than no gate.
+# below (FULL_ASSERTIONS, FULL_GAPS, SHAPE_GROUPS, MATRIX_ENTRIES, LINT_FINDINGS,
+# PROBE_CASES): a gate that prints a smaller number without complaining is worse
+# than no gate.
 # ./test.sh, --full and --cross run llvm.Run, which resolves js_* to the Go twin,
 # so they cannot see layer 2 (languages/lib/*-rt.metajs); only clang-check,
 # native-full and a native -exe probe can.
@@ -30,8 +31,9 @@
 # The gates run concurrently. That is safe because no two write the same path:
 # test.sh and clang-check build their own binaries and work in mktemp dirs (the
 # matrix's only in-repo writes are the -exe targets in .vscode/launch.json);
-# native-full only reads ./mec, which is built once before the fan-out; gen-all
-# --check, go test, shape-scan and metajs-lint write nothing.
+# native-full only reads ./mec, which is built once before the fan-out; the probe
+# self-test writes only tests/.probe-selftest-sabotage.sh, which nothing else
+# reads; gen-all --check, go test, shape-scan and metajs-lint write nothing.
 #
 # Exit 0 iff every gate that ran passed.
 
@@ -93,6 +95,10 @@ ABORT_ROWS=29             # rows whose name says SHOULD ABORT
 ABORT_ALL_ROWS=28         # of those, the ones that also compare the interpreter
                           # half (ALL HALVES)
 
+# A FLOOR on tests/probe/selftest.sh's cases: a deleted sabotage case leaves the
+# self-test green while it proves less.
+PROBE_CASES=12
+
 FAILED=()
 pass() { printf '  %-24s %s\n' "$1" "$2"; }
 fail() { printf '  %-24s %s\n' "$1" "$2"; FAILED+=("$1"); }
@@ -132,6 +138,8 @@ start shape  go run ./tools/shape-scan -max "$SHAPE_GROUPS" -max-lines "$SHAPE_L
 start lint   go run ./tools/metajs-lint -grammars -q
 start lintst go run ./tools/metajs-lint -selftest
 start srcpos tests/srcpos-probe.sh
+# tests/probe.sh shown to go red on a broken leg, not just green on a good one.
+start probe  tests/probe/selftest.sh
 if [ "$QUICK" = 0 ]; then
     start clang  tests/clang-check.sh
     start native tests/native-full.sh
@@ -216,6 +224,17 @@ else fail "go test" "$(tail -3 "$log/gotest" | tr '\n' ' ')"; fi
 sp=$(grep -E '^srcpos: ' "$log/srcpos" | tail -1)
 if [ "$(rc_of srcpos)" = 0 ]; then pass srcpos "${sp:-ok}"
 else fail srcpos "${sp:-no summary}: $(grep '^FAIL' "$log/srcpos" | head -3 | tr '\n' ' ')"; fi
+
+# 4c. The differential probe's own gate: every sabotaged or degraded leg must
+#     be reported, never diffed as agreement.
+ps=$(grep -E '^[0-9]+ ok, [0-9]+ failed$' "$log/probe" | tail -1)
+pn=$(printf '%s\n' "$ps" | sed -n 's/^\([0-9][0-9]*\) ok.*/\1/p')
+if [ "$(rc_of probe)" = 0 ] && [ "${pn:-0}" -lt "$PROBE_CASES" ]; then
+    fail probe-selftest "${ps:-no summary} - SHORT: fewer than the recorded $PROBE_CASES cases"
+elif [ "$(rc_of probe)" = 0 ] && [ "$pn" -gt "$PROBE_CASES" ]; then
+    pass probe-selftest "$ps (over the recorded $PROBE_CASES - RAISE PROBE_CASES in tests/gates.sh)"
+elif [ "$(rc_of probe)" = 0 ]; then pass probe-selftest "$ps"
+else fail probe-selftest "${ps:-no summary}: $(grep '^FAIL' "$log/probe" | head -3 | tr '\n' ' ')"; fi
 
 # 5. The layer-2 shape ratchet: the only gate that can see a body copy-pasted
 #    into a second language.
