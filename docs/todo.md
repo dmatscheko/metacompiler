@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-751** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-752** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -108,13 +108,14 @@ not change the renderer.
 
 # PHP — PHP  (no php here: spec-only, php.net / php-src behaviour)
 
-### T-596 php: warnings/notices/deprecations are never printed — behind `-cfN display_errors=1` · P3 · PHP · IN PROGRESS (PHP worker, round 17) [V user decision 2026-10-27]
-User decision: implement as PHP's first compiler flag (needs T-749). `display_errors` = 0 | 1, default 0 (today's behaviour,
-nothing printed). At 1, print exactly php-cli's display format on stdout (`PHP_EOL . "Warning: <msg> in <file> on line <n>" .
-PHP_EOL`, likewise Notice / Deprecated), honouring `@` and `error_reporting()`, for: undefined variable / array key / property
-reads, "Cannot unbind $this of closure using $this", "Implicit conversion from float 1.5 to int loses precision" and the other
-warnings the engines already detect silently (settle each text from php-src; no php binary here). Line tracking per warning site,
-plus a second flag `lines` = 1 | 0 (default 1) whose 0 drops the location for smaller/faster code. All four legs with the same flags.
+### T-751 php: reading a property of null aborts by default; diagnostics gaps · P2 · PHP · OPEN [V]
+With display_errors=0 (default), `$null->p` (read) aborts in both halves ("property ->p of null" / "member 'p' of null"); PHP answers
+null (with flag 1 it now warns and answers null). __FILE__ (and the warning location) resolves symlinks (abnf/trace.go curSrcAbs
+EvalSymlinks; php-cli's expand_filepath does not). Not emitted / not diagnosed: the compile-time "Using ${var} in strings is
+deprecated" Deprecated; an undefined container in a read-write fetch (`$u['k'] .= 'x'`); 'Class "X" not found' from bindTo with an
+unknown class; "Cannot bind closure to scope of internal class". Interpreter: several warning arguments of one call can warn in a
+different order than PHP. Compiler: a bare variable passed by name/spread to a run-time callee in a program with by-reference
+parameters gets no undefined-variable warning. E_ALL is 32767 (PHP 8.4: 30719, E_STRICT dropped).
 
 ---
 
@@ -790,6 +791,7 @@ T-748 tooling: ruby -callgraph names regressed to `$d$f` after top-level defs st
 
 T-749 core: per-language compiler flags `-cfN key=value[,key=value]`, declared and documented in each grammar — DONE f94fc97c (-cfN name=value[,...] per stage like -vN/-slotN, plain -cf = every declaring stage, // @flag declarations at the top of the grammar, errors listing valid flags, -cf help, c.flag() in goja and both frozen engines, probe.sh --cf, self-test grammar + 11 matrix rows; defaults change nothing)
 T-750 tooling: tests/probe/selftest.sh "sabotaged flavour test, 3 legs agree" no longer fails — DONE b279a3e0 (two sabotages that genuinely empty or corrupt the run leg, checked to apply; step-brake case deterministic under load; self-test gated in tests/gates.sh with PROBE_CASES=12)
+T-596 php: warnings/notices/deprecations are never printed — behind `-cfN display_errors=1` — DONE 943147f2..01ac3e37 (-cf2 display_errors=1 prints php-cli's exact Warning/Notice/Deprecated display for undefined variables/keys/properties, offsets, conversions, ++/--, array-to-string and the six closure-binding refusals, honouring @ and error_reporting(), error_get_last(); -cf2 lines=0 drops the location; default output byte-identical; texts settled from php-src 8.4; follow-up T-751)
 # Settled — do not re-open
 
 **~196 items, one section, grouped by VERDICT and by nothing else** — no dates, no
