@@ -303,6 +303,12 @@ and a real toolchain, and reports **which pair** disagrees - which names the lay
 native binary's instruction count moves by up to 4.8% with nothing but the length of
 its output filename; see the header of `tests/bench/baseline.txt`.
 
+Every script that runs a program under test sources `tests/lib/guard.sh`: when the
+script ends or is interrupted, everything it started is killed, and no file anything
+under it writes can grow past `MEC_MAX_OUTPUT_MB` (default 2048), which still holds for
+a process orphaned by a `kill -9`. `native-full.sh` and `clang-check.sh` give each
+native binary `MEC_RUN_TIMEOUT` seconds (default 300).
+
 #### The second test group: full-syntax ratchets (`--full`)
 
 The goal is to support the **full** languages, and `tests/<lang>-test-full.<ext>` is the

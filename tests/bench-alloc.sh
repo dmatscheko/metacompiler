@@ -20,11 +20,12 @@ set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT" || exit 2
+. tests/lib/guard.sh
 
 ITERS="${1:-200000}"
 TMP="$(mktemp -d -t mec-bench.XXXXXX)"
 BIN="$TMP/mec"
-trap 'rm -rf "$TMP"' EXIT
+trap 'guard_reap; rm -rf "$TMP"' EXIT
 
 go build -o "$BIN" . || { echo "bench-alloc.sh: build failed" >&2; exit 2; }
 

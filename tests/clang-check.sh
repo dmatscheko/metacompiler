@@ -35,12 +35,14 @@ set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT" || exit 2
+. tests/lib/guard.sh
+RUN_TIMEOUT="${MEC_RUN_TIMEOUT:-300}"
 
 command -v clang >/dev/null 2>&1 || { echo "clang-check.sh: no clang on PATH" >&2; exit 2; }
 
 BIN="$(mktemp -t mec-clang.XXXXXX)"
 WORK="$(mktemp -d -t mec-clangwork.XXXXXX)"
-trap 'rm -rf "$BIN" "$WORK"' EXIT
+trap 'guard_reap; rm -rf "$BIN" "$WORK"' EXIT
 
 echo "building compiler..."
 go build -o "$BIN" . || { echo "clang-check.sh: build failed" >&2; exit 2; }
@@ -133,7 +135,7 @@ for f in tests/*-test-full.*; do
                 sed -n '1,4p' "$ll.exe.err" | sed 's/^/                       /'
                 bad=$((bad + 1)); rc=1; continue
             fi
-            out="$("$exe" 2>&1)"; erc=$?
+            out="$(guard_timeout "$RUN_TIMEOUT" "$exe" 2>&1)"; erc=$?
             if [ "$erc" -eq 0 ]; then
                 printf '%-12s %8s  ok, and the clang executable agrees\n' "$label" "$lines"
             else

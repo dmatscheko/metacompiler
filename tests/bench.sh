@@ -48,6 +48,7 @@
 
 set -uo pipefail
 cd "$(dirname "$0")/.." || exit 2
+. tests/lib/guard.sh
 
 BASE=tests/bench/baseline.txt
 RECORD=0; RUNS=3; DRAWS=5; TOL=2.5; PAIRED=""; WANT=()
@@ -69,7 +70,7 @@ done
 
 
 work=$(mktemp -d)
-trap 'rm -rf "$work"' EXIT
+trap 'guard_reap; rm -rf "$work"' EXIT
 
 # Draws build to output paths of different lengths (a semantics-free handle on
 # layout). The directory is FIXED so two checkouts draw from the same paths and
@@ -92,7 +93,7 @@ until mkdir "$LOCK" 2>/dev/null; do
         exit 2
     fi
 done
-trap 'rm -rf "$work" "$LOCK"' EXIT
+trap 'guard_reap; rm -rf "$work" "$LOCK"' EXIT
 
 # ext -> language, i.e. which grammar compiles it.
 #

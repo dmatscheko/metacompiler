@@ -57,6 +57,7 @@ set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$ROOT/../.." && pwd)"
+. "$REPO/tests/lib/guard.sh"
 
 # ---------------------------------------------------------------------------
 # The corpus table: one line per language.
@@ -288,7 +289,7 @@ BIN="$(mktemp -t mec-sweep.XXXXXX)"
 TASKS="$(mktemp -t mec-tasks.XXXXXX)"
 RESDIR="$(mktemp -d -t mec-sweepres.XXXXXX)"
 TMP="$(mktemp -d -t mec-sweeptmp.XXXXXX)"
-trap 'rm -rf "$BIN" "$TASKS" "$RESDIR" "$TMP"' EXIT
+trap 'guard_reap; rm -rf "$BIN" "$TASKS" "$RESDIR" "$TMP"' EXIT
 
 echo "building compiler..."
 (cd "$REPO" && go build -o "$BIN" .) || { echo "sweep.sh: build failed" >&2; exit 2; }

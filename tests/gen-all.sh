@@ -37,6 +37,7 @@ export MEC_GEN_ALL=1
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SELF="$(basename "${BASH_SOURCE[0]}")"
 cd "$ROOT" || exit 2
+. tests/lib/guard.sh
 
 CHECK=0
 LANGS=()
@@ -70,7 +71,7 @@ if [ "${#GENS[@]}" -eq 0 ]; then echo "gen-all.sh: nothing to run" >&2; exit 2; 
 
 # One build for all of them.
 TMP="$(mktemp -d -t mec-genall.XXXXXX)"
-trap 'rm -rf "$TMP"' EXIT
+trap 'guard_reap; rm -rf "$TMP"' EXIT
 if ! go build -o "$TMP/mec" . 2>"$TMP/build.log"; then
     cat "$TMP/build.log" >&2
     echo "gen-all.sh: BUILD FAILED" >&2

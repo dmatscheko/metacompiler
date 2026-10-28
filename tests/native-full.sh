@@ -88,14 +88,17 @@
 #
 # Usage: tests/native-full.sh [lang ...]        (default: every language)
 #        MEC_JOBS=4 tests/native-full.sh        cap the fan-out
+#        MEC_RUN_TIMEOUT=600 tests/native-full.sh  seconds per binary (default 300)
 #        tests/native-full.sh --bless [lang ...]  rewrite the EXPECT_ROWS fixtures
 set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT" || exit 2
+. tests/lib/guard.sh
+RUN_TIMEOUT="${MEC_RUN_TIMEOUT:-300}"
 
 OUT="$(mktemp -d)"
-trap 'rm -rf "$OUT"' EXIT
+trap 'guard_reap; rm -rf "$OUT"' EXIT
 
 # <lang>:<extension of tests/<lang>-test-{full,features}.*>[:<kinds this language has>]
 #
@@ -171,10 +174,11 @@ one_program() {
         printf "%-20s %-6s %s\n" "$tag" "-" "no binary written" > "$OUT/$L.$kind.row"
         echo 1 > "$OUT/$L.$kind.rc"; return
     fi
-    "$bin" > "$OUT/$L.$kind.txt" 2>&1
+    guard_timeout "$RUN_TIMEOUT" "$bin" > "$OUT/$L.$kind.txt" 2>&1
     x=$?
     line="$(grep -E 'checks, [0-9]+ failure' "$OUT/$L.$kind.txt" | tail -1)"
     [ -n "$line" ] || line="NO SELF-CHECK LINE - the binary printed nothing usable"
+    [ "$x" = 124 ] && line="KILLED after ${RUN_TIMEOUT}s (MEC_RUN_TIMEOUT) - $line"
     { printf "%-20s %-6s %s\n" "$tag" "$x" "$line"
       grep -E '^FAIL' "$OUT/$L.$kind.txt" | sed 's/^/    /'; } > "$OUT/$L.$kind.row"
     case "$x:$line" in
@@ -198,7 +202,7 @@ one_expect() {
           tail -3 "$OUT/$L.$kind.err" | sed 's/^/    /'; } > "$OUT/$L.$kind.row"
         echo 1 > "$OUT/$L.$kind.rc"; return
     fi
-    "$bin" > "$OUT/$L.$kind.txt" 2>&1
+    guard_timeout "$RUN_TIMEOUT" "$bin" > "$OUT/$L.$kind.txt" 2>&1
     x=$?
     if [ "$want" = exit-only ]; then
         sz=$(wc -c < "$OUT/$L.$kind.txt" | tr -d ' ')

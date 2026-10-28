@@ -24,10 +24,11 @@ set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT" || exit 2
+. tests/lib/guard.sh
 HERE="tests/coro-poc"
 
 WORK="$(mktemp -d -t mec-coro.XXXXXX)"
-trap 'rm -rf "$WORK"' EXIT
+trap 'guard_reap; rm -rf "$WORK"' EXIT
 
 MODE="${1:-run}"
 

@@ -39,6 +39,7 @@
 
 set -uo pipefail
 cd "$(dirname "$0")/.." || exit 2
+. tests/lib/guard.sh
 
 QUICK=0; GEN=0; FREEZE=0; SERIAL=0; BENCH=0
 for a in "$@"; do
@@ -97,14 +98,14 @@ ABORT_ALL_ROWS=28         # of those, the ones that also compare the interpreter
 
 # A FLOOR on tests/probe/selftest.sh's cases: a deleted sabotage case leaves the
 # self-test green while it proves less.
-PROBE_CASES=12
+PROBE_CASES=14
 
 FAILED=()
 pass() { printf '  %-24s %s\n' "$1" "$2"; }
 fail() { printf '  %-24s %s\n' "$1" "$2"; FAILED+=("$1"); }
 
 log=$(mktemp -d)
-trap 'rm -rf "$log"' EXIT
+trap 'guard_reap; rm -rf "$log"' EXIT
 
 echo "== building"
 if ! go build -o mec . 2>"$log/build"; then
@@ -140,6 +141,8 @@ start lintst go run ./tools/metajs-lint -selftest
 start srcpos tests/srcpos-probe.sh
 # tests/probe.sh shown to go red on a broken leg, not just green on a good one.
 start probe  tests/probe/selftest.sh
+# tests/lib/guard.sh shown to stop a runaway writer when its script dies.
+start guard  tests/lib/guard-selftest.sh
 if [ "$QUICK" = 0 ]; then
     start clang  tests/clang-check.sh
     start native tests/native-full.sh
@@ -235,6 +238,12 @@ elif [ "$(rc_of probe)" = 0 ] && [ "$pn" -gt "$PROBE_CASES" ]; then
     pass probe-selftest "$ps (over the recorded $PROBE_CASES - RAISE PROBE_CASES in tests/gates.sh)"
 elif [ "$(rc_of probe)" = 0 ]; then pass probe-selftest "$ps"
 else fail probe-selftest "${ps:-no summary}: $(grep '^FAIL' "$log/probe" | head -3 | tr '\n' ' ')"; fi
+
+# 4d. The guard every test script sources: a runaway writer must not survive
+#     its script, and an orphan must stop at the output cap.
+gs=$(grep -E '^[0-9]+ ok, [0-9]+ failed$' "$log/guard" | tail -1)
+if [ "$(rc_of guard)" = 0 ]; then pass guard-selftest "${gs:-ok}"
+else fail guard-selftest "${gs:-no summary}: $(grep '^FAIL' "$log/guard" | head -3 | tr '\n' ' ')"; fi
 
 # 5. The layer-2 shape ratchet: the only gate that can see a body copy-pasted
 #    into a second language.

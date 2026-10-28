@@ -46,6 +46,7 @@
 
 set -uo pipefail
 cd "$(dirname "$0")/.." || exit 2
+. tests/lib/guard.sh
 
 VERBOSE=0
 WANT=()
@@ -62,7 +63,7 @@ if [ ! -x ./mec ]; then
 fi
 
 WORK=$(mktemp -d) || exit 2
-trap 'rm -rf "$WORK"' EXIT
+trap 'guard_reap; rm -rf "$WORK"' EXIT
 
 # LANG:EXT:the lines the three statements are on. The source is in src_for().
 CASES=(

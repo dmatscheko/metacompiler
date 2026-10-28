@@ -65,6 +65,7 @@ set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT" || exit 2
+. tests/lib/guard.sh
 
 FILTER=""; VERBOSE=0; LIST=0; TIMEOUT=""; TIMEOUT_EXPLICIT=0; FULL=0; CROSS=0
 NCPU="$(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 4)"
@@ -125,7 +126,7 @@ fi
 BIN="$(mktemp -t mec-test.XXXXXX)"
 ENTRIES="$(mktemp -t mec-entries.XXXXXX)"
 RESDIR="$(mktemp -d -t mec-results.XXXXXX)"
-trap 'rm -rf "$BIN" "$ENTRIES" "$RESDIR"' EXIT
+trap 'guard_reap; rm -rf "$BIN" "$ENTRIES" "$RESDIR"' EXIT
 
 if [ "$LIST" -eq 0 ]; then
     echo "building compiler..."

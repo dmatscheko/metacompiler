@@ -80,6 +80,7 @@
 
 set -uo pipefail
 cd "$(dirname "$0")/.." || exit 2
+. tests/lib/guard.sh
 
 [ $# -ge 2 ] || { sed -n '2,50p' "$0"; exit 2; }
 LANG_NAME="$1"; PROG="$2"; shift 2
@@ -113,19 +114,14 @@ case "$MAX_OUT" in ''|*[!0-9]*|0) echo "probe.sh: --max-output wants megabytes" 
 
 [ -x ./mec ] || go build -o mec . || exit 2
 
-# A LEG MUST NOT OUTLIVE THE PROBE. A leg writes into $work, and the temp $work
-# is removed on exit; a leg left running after that keeps writing into a file
-# that no longer has a name, so the space it fills is invisible to du and is only
-# given back when the process dies. So the leg running at exit is killed first,
-# and INT/TERM/HUP are turned into an exit so that this always happens.
-LEG_PID=""; LEG_WD=""; work=""
+# A LEG MUST NOT OUTLIVE THE PROBE (tests/lib/guard.sh says why): every leg and
+# anything it started is killed before $work goes.
+work=""
 cleanup() {
-    [ -n "$LEG_PID" ] && kill -9 "$LEG_PID" 2>/dev/null
-    [ -n "$LEG_WD" ] && kill "$LEG_WD" 2>/dev/null
+    guard_reap
     [ -z "$KEEP" ] && [ -n "$work" ] && rm -rf "$work"
 }
 trap cleanup EXIT
-trap 'exit 129' HUP; trap 'exit 130' INT; trap 'exit 143' TERM
 
 if [ -n "$KEEP" ]; then mkdir -p "$KEEP"; work="$KEEP"
 else work=$(mktemp -d); fi
@@ -275,13 +271,12 @@ reject() {   # reject NAME REASON
 run_leg() {
     local name="$1"; shift
     rm -f "$work/$name.timeout"
-    ( ulimit -f $((MAX_OUT * 1024)) -t $((TIMEOUT * 4)); exec "$@" ) >"$work/$name.raw" 2>"$work/$name.err" &
-    LEG_PID=$!
-    { sleep "$TIMEOUT"; if kill -0 "$LEG_PID" 2>/dev/null; then : >"$work/$name.timeout"; kill -9 "$LEG_PID" 2>/dev/null; fi; } >/dev/null 2>&1 &
-    LEG_WD=$!
-    wait "$LEG_PID" 2>/dev/null; local rc=$?
-    kill "$LEG_WD" 2>/dev/null; wait "$LEG_WD" 2>/dev/null
-    LEG_PID=""; LEG_WD=""
+    ( ulimit -S -f $((MAX_OUT * 1024)) -t $((TIMEOUT * 4)); exec "$@" ) >"$work/$name.raw" 2>"$work/$name.err" &
+    local pid=$!
+    { sleep "$TIMEOUT"; if kill -0 "$pid" 2>/dev/null; then : >"$work/$name.timeout"; kill -9 "$pid" 2>/dev/null; fi; } >/dev/null 2>&1 &
+    local wd=$!
+    wait "$pid" 2>/dev/null; local rc=$?
+    kill "$wd" 2>/dev/null; wait "$wd" 2>/dev/null
     printf '%s\n' "$rc" >"$work/$name.rc"
 }
 
