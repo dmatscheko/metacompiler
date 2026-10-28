@@ -31,6 +31,8 @@
 #   --legs L      comma-separated subset of interp,run,native,oracle
 #   --timeout N   seconds per leg (default 300). A leg that overruns is KILLED
 #                 and reported as broken - never diffed.
+#   --max-output N  MB a leg may write to stdout or stderr (default 1024). A leg
+#                 over it is killed by SIGXFSZ and reported as broken.
 #   --cf K=V[,K=V...]  compiler flags for our three legs, passed on as `-cf K=V`
 #                 (repeatable). Both grammars must declare each flag, which is
 #                 what lets a non-default value be checked against the oracle.
@@ -81,13 +83,14 @@ cd "$(dirname "$0")/.." || exit 2
 
 [ $# -ge 2 ] || { sed -n '2,50p' "$0"; exit 2; }
 LANG_NAME="$1"; PROG="$2"; shift 2
-ORACLE=""; KEEP=""; LEGS="interp,run,native,oracle"; TIMEOUT=300; CF=()
+ORACLE=""; KEEP=""; LEGS="interp,run,native,oracle"; TIMEOUT=300; MAX_OUT=1024; CF=()
 while [ $# -gt 0 ]; do
     case "$1" in
         --oracle)  ORACLE="$2"; shift ;;
         --keep)    KEEP="$2"; shift ;;
         --legs)    LEGS="$2"; shift ;;
         --timeout) TIMEOUT="$2"; shift ;;
+        --max-output) MAX_OUT="$2"; shift ;;
         --cf)      CF+=(-cf "$2"); shift ;;
         *) echo "probe.sh: unknown flag $1" >&2; exit 2 ;;
     esac
@@ -106,11 +109,26 @@ done
 want() { case ",$LEGS," in *",$1,"*) return 0 ;; *) return 1 ;; esac; }
 
 case "$TIMEOUT" in ''|*[!0-9]*) echo "probe.sh: --timeout wants seconds" >&2; exit 2 ;; esac
+case "$MAX_OUT" in ''|*[!0-9]*|0) echo "probe.sh: --max-output wants megabytes" >&2; exit 2 ;; esac
 
 [ -x ./mec ] || go build -o mec . || exit 2
 
+# A LEG MUST NOT OUTLIVE THE PROBE. A leg writes into $work, and the temp $work
+# is removed on exit; a leg left running after that keeps writing into a file
+# that no longer has a name, so the space it fills is invisible to du and is only
+# given back when the process dies. So the leg running at exit is killed first,
+# and INT/TERM/HUP are turned into an exit so that this always happens.
+LEG_PID=""; LEG_WD=""; work=""
+cleanup() {
+    [ -n "$LEG_PID" ] && kill -9 "$LEG_PID" 2>/dev/null
+    [ -n "$LEG_WD" ] && kill "$LEG_WD" 2>/dev/null
+    [ -z "$KEEP" ] && [ -n "$work" ] && rm -rf "$work"
+}
+trap cleanup EXIT
+trap 'exit 129' HUP; trap 'exit 130' INT; trap 'exit 143' TERM
+
 if [ -n "$KEEP" ]; then mkdir -p "$KEEP"; work="$KEEP"
-else work=$(mktemp -d); trap 'rm -rf "$work"' EXIT; fi
+else work=$(mktemp -d); fi
 
 INTERP="languages/$LANG_NAME-interpreter.abnf"
 COMPILE="languages/$LANG_NAME-to-llvm-ir.abnf"
@@ -248,15 +266,22 @@ reject() {   # reject NAME REASON
 # exit status -> NAME.rc. A leg that overruns is killed and flagged, because a
 # killed leg that leaves a short file behind is exactly how a truncation gets
 # diffed as if it were an answer.
+#
+# The cleanup trap cannot run when the probe itself is SIGKILLed, so the leg
+# also carries its own limits: an output cap (SIGXFSZ) and a CPU-time cap
+# (SIGXCPU). The CPU cap is four times the wall-clock timeout, because the Go
+# engine legs legitimately use more than one core; it only has to stop an
+# orphan, not race the watchdog.
 run_leg() {
     local name="$1"; shift
     rm -f "$work/$name.timeout"
-    "$@" >"$work/$name.raw" 2>"$work/$name.err" &
-    local pid=$!
-    { sleep "$TIMEOUT"; if kill -0 "$pid" 2>/dev/null; then : >"$work/$name.timeout"; kill -9 "$pid" 2>/dev/null; fi; } >/dev/null 2>&1 &
-    local wd=$!
-    wait "$pid" 2>/dev/null; local rc=$?
-    kill "$wd" 2>/dev/null; wait "$wd" 2>/dev/null
+    ( ulimit -f $((MAX_OUT * 1024)) -t $((TIMEOUT * 4)); exec "$@" ) >"$work/$name.raw" 2>"$work/$name.err" &
+    LEG_PID=$!
+    { sleep "$TIMEOUT"; if kill -0 "$LEG_PID" 2>/dev/null; then : >"$work/$name.timeout"; kill -9 "$LEG_PID" 2>/dev/null; fi; } >/dev/null 2>&1 &
+    LEG_WD=$!
+    wait "$LEG_PID" 2>/dev/null; local rc=$?
+    kill "$LEG_WD" 2>/dev/null; wait "$LEG_WD" 2>/dev/null
+    LEG_PID=""; LEG_WD=""
     printf '%s\n' "$rc" >"$work/$name.rc"
 }
 
@@ -272,6 +297,10 @@ accept_leg() {   # accept_leg NAME [module]
     fi
     # A Swift trap is SIGTRAP by definition (swiftc's binary dies with 133), so
     # all four legs exit 133 on purpose and the status is compared like any other.
+    if [ "$rc" = $((128 + $(kill -l XFSZ))) ]; then
+        reject "$name" "wrote more than ${MAX_OUT} MB and was killed - raise --max-output"
+        return 1
+    fi
     if [ "$rc" -ge 128 ] 2>/dev/null && ! { [ "$LANG_NAME" = swift ] && [ "$rc" = 133 ]; }; then
         reject "$name" "died on signal $((rc - 128)) (exit $rc) - a crashing leg is not a measurement"
         return 1

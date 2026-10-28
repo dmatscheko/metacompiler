@@ -115,6 +115,36 @@ check "prints, then hangs (timeout 5s)" 2 "a truncated leg is not a measurement"
 check "step brake truncates the run leg" 2 "hit the IR step brake" -- \
     "$PROBE" bash "$WORK/hang.sh" --legs run --timeout 120
 
+# A native leg that prints forever must be stopped by the output cap, not by
+# the disk filling up.
+cat >"$WORK/flood.sh" <<'EOF'
+V=(x)
+while true; do echo "row ${V[0]}"; done
+EOF
+check "prints forever (cap 1 MB)" 2 "was killed - raise --max-output" -- \
+    "$PROBE" bash "$WORK/flood.sh" --legs native --max-output 1 --timeout 120
+
+# A probe that is terminated mid-leg must take the leg with it. --keep gives the
+# binary a known path to look for afterwards. The match is exact (-x) because
+# the clang command that builds it names the same path.
+"$PROBE" bash "$WORK/hang.sh" --legs native --timeout 120 --keep "$WORK/orphan" >/dev/null 2>&1 &
+probe_pid=$!
+started=""
+for _ in $(seq 1 300); do pgrep -fx "$WORK/orphan/a.out" >/dev/null && { started=1; break; }; sleep 0.2; done
+kill -TERM "$probe_pid"; wait "$probe_pid" 2>/dev/null
+sleep 0.5
+if [ -z "$started" ]; then
+    printf 'FAIL %-38s the native leg never started\n' "terminated probe kills its leg"
+    fail=$((fail + 1))
+elif pgrep -fx "$WORK/orphan/a.out" >/dev/null; then
+    printf 'FAIL %-38s leg still running after the probe died\n' "terminated probe kills its leg"
+    pkill -9 -fx "$WORK/orphan/a.out"
+    fail=$((fail + 1))
+else
+    printf 'ok   %-38s\n' "terminated probe kills its leg"
+    pass=$((pass + 1))
+fi
+
 echo
 printf -- '----------------------------------------------------------\n'
 printf '%d ok, %d failed\n' "$pass" "$fail"
