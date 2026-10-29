@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-765** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-795** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -64,17 +64,175 @@ its report; anything structural there is a CORE ticket.
 
 # PY — Python
 
+### T-765 python compiler: `| ^ & << >>` share one precedence level · P1 · PY · OPEN [V]
+`vs=[6,3,1]; a,b,c=vs[0],vs[1],vs[2]; print(a ^ b >> c, a | b << c, a & b >> c, a ^ b & c, a | b & c)` → interp and python3
+`7 6 0 7 7`, run and native `2 14 1 1 1`; `n ^ n >> 1` with n=5 is 0 (python 7) — found by Rosetta Gray_code. The compiler's
+BitExpr is `Arith { ("|"|"^"|"&"|"<<"|">>") Arith }` through makeBit (python-to-llvm-ir.abnf ~831-832); the interpreter's
+BitExpr / BitXor / BitAnd / ShiftExpr ladder (python-interpreter.abnf ~678-689) is right — copy it.
+
+### T-768 python: `map()` with several iterables pulls its arguments eagerly · P1 · PY · OPEN [V]
+`print(list(map(mul, cycle([1,2]), [5,6,7])))` → interp "generator did not terminate", run step brake, native killed;
+python `[5, 12, 7]` (Rosetta Luhn). `zip(cycle(ws), xs)` and `map(f, xs, [10,20])` are right — make multi-iterable map lazy
+like zip. Files: the map builtin in both grammars / lib/python-rt.metajs.
+
+### T-769 python: the implicit `main()` entry runs again after an `if __name__ == "__main__": main()` guard · P2 · PY · OPEN [V]
+`def main(n): print("main", n)` + `if __name__ == "__main__": main(3)` → python `main 3`; interp `main 3` then uncaught
+`TypeError: main() missing 1 required positional argument: 'n'`, exit 1; run/native `main 3`, `main None`. Every BG -8 Python
+program and several Rosetta ones print their output twice. The implicit entry (c.mainName; python-interpreter.abnf ~15082,
+python-to-llvm-ir.abnf ~5265) should be skipped when the top level calls main itself or has a `__name__` guard. Ruby shares the
+convention (check it); for js main() is the dialect.
+
+### T-770 python: CRLF line endings are rejected by both halves · P2 · PY · OPEN [V]
+`printf 'xs = [1, 2]\r\n\r\nprint(xs[0] + xs[1])\r\n'` → both halves "Not everything could be parsed ... :1:12", python `3`
+(BG mandelbrot.python3-8 ships CRLF). Java, js, lua, ruby, swift and go accept CRLF. File: the NEWLINE / indentation tokenizer
+in both python grammars.
+
+### T-773 python native: list `+` costs ~100 ns per copied element; collection pacing looks too eager · P3 · PY · OPEN [V finder only]
+6000 iterations of `acc = acc + [[i, i+1]]`: native 2.42 s (MEC_GC=off 1.95 s), python3 0.06 s; MEC_GC_STATS 1439 collections at
+~2.1 MB live, which is more than the documented pacing (collect when bytes since the last collection exceed the live set,
+floor 4 MB) predicts. Rosetta N-queens (block 7) takes 24 s natively for sizes 1..7 vs python3 0.43 s for 1..10. Files: the
+list-add path in lib/python-rt.metajs / runtime.c, gc pacing in runtime.c. Measure with tests/bench.sh before changing.
+
 ---
 
 # RB — Ruby
+
+### T-772 ruby: `def` with a parenthesis-free parameter list · P2 · RB · OPEN [V]
+`def twice n\n  n * 2\nend; puts twice(xs[0])` → interp "wrong number of arguments (given 1, expected 0)", run/native
+"undefined local variable or method `n'"; ruby `42` (BG nbody.ruby-8 `def nbody n`). `def add a, b` does not parse at all.
+`n` is taken as the first body statement. Files: the def rule in both ruby grammars.
 
 ---
 
 # JS — JavaScript and TypeScript
 
+### T-777 js: assigning an invalid array `length` throws an uncatchable RangeError · P1 · JS · OPEN [V]
+Neighbour of T-488. `try { var a = [1]; a.length = v[0]; } catch (e) { println(..., e instanceof RangeError, e.message) }` with
+v[0] = 1.5 (also -1, 4294967296) → every leg exits 1 (interp a goja host error, compiled `js runtime error: invalid array
+length 1.5`); node `caught true Invalid array length`, then `after`. `new Array(1.5)` is already catchable (biRaise ~5907) —
+copy it to abnf/jsrt.go ~3312 (`rt.fail`), runtime.c ~3955 (`die2`), the interpreter's length setter, and typescript.
+
+### T-779 js/ts native: a program that contains `normalize` cannot run under MEC_GC=stress · P3 · JS · OPEN [V]
+`function main() { println("hi", "é".normalize("NFC").length); }` native: plain run immediate, `MEC_GC=stress` still running
+after 30 s (finders: >280 s, `sample` 100% in gc_try/gc_mark/gc_scan_range; also when the function containing normalize is
+never called). The normalization tables are built with a growing live set while stress collects on every allocation.
+Effect: no GC-stress coverage for any js/ts program referencing normalize. Build the tables in the permanent region
+(`js_gc_perm`) or outside stress accounting. Files: the normalize table builder in lib/js-rt.metajs or runtime.c. Same in
+typescript (one `normalize("NFC")` call: killed after 280 s under stress, 0.06 s normally).
+
+### T-780 ts/js interp: `o.m?.()` on a class (prototype) method returns undefined without calling it · P1 · JS · OPEN [V]
+`class K { v = 1; m(): string { return "m" + this.v; } }`, `const k: any = new K(); String(k.m?.())`, `String(k?.m?.())` →
+interp `undefined` twice; run, native, tsc+node `m1`. Object-literal, arrow, string and array methods are right. The chain
+evaluator (typescript-interpreter.abnf ~10255-10270, the `suffixes` loop) reads member+call with getMemberRaw, which is
+undefined for a prototype method; the opt-call check `s.opt == true && cur == undefined` fires before the lastKey/curThis
+recovery the plain call uses. Twin in js-interpreter.abnf.
+
+### T-781 ts: declaration merging replaces the binding (namespace into function or class; enum with enum) · P1 · JS · OPEN [V]
+`function Fn(): string { return "fn"; } namespace Fn { export const extra: number = 3; }` → all legs `typeof Fn` `object`,
+`Fn()` TypeError "Fn is not a function"; tsc+node `function`, `3`, `fn`. `class Cl { static s = 1; } namespace Cl { export const
+added = "added"; }` → interp `Cl.added` undefined, compiled `TypeError: Cl is not a constructor`; `enum Mg { M1 = 1 } enum Mg { M2
+= 2 }` → interp `Mg.M1` undefined, keys `2,M2` (node `1 2 1,2,M1,M2`). Enum+namespace and namespace+namespace already merge.
+tsc's `X || (X = {})` reuse is missing in makeNamespace / the enum builder of both TS grammars.
+
+### T-782 ts/js: class fields use [[Set]] instead of [[Define]]; `declare` fields are materialised · P1 · JS · OPEN [V]
+`class Base { get acc() {...} get rw() {...} set rw(v) { setterCalls++ } }`, `class WithInit extends Base { acc = "own"; rw =
+"own-rw"; }`, `class NoInit extends Base { rw: string; }`, `class DeclOnly { declare q: number; r?: number; }`: node `own own-rw
+[acc,rw] setter=0` / `undefined [rw] setter=0` / `[r] false true`; compiled `base-acc base-rw [] setter=1` / `base-rw [] setter=2`
+(inherited setter called, write to a getter-only accessor dropped); interp `base-acc base-rw [acc,rw] setter=0` (own keys made
+but reads hit the getter, T-783) / `base-rw [rw]`; both `[q,r] true true` for DeclOnly. Finder: `declare z: number` resets z to
+undefined after the base constructor set it. Same in js (.js twin). Files: field-initialiser emission in
+typescript-to-llvm-ir.abnf / js-to-llvm-ir.abnf (define an own data property), the interpreter field install, the `declare`
+modifier.
+
+### T-783 ts/js interp: an own data property or a nearer half-accessor does not shadow an inherited accessor · P1 · JS · OPEN [V]
+`class Base { get acc() { return "base-acc"; } }`; `Object.defineProperty(o, "acc", { value: "own", ... }); o.acc` → interp
+`base-acc`, others `own` (also the Object.create and object-literal-prototype variants). `class B0 { get v(){return 1} set v(x){} }
+class S0 extends B0 { set v(x) {} }; new S0().v` → interp 1, others undefined. getMember (typescript-interpreter.abnf ~5136)
+calls findAccessor before hasOwn, and findAccessor (~5957) walks the chain per kind ("get:"+k) without stopping at a level
+holding a data property or only the other half. Twin in js-interpreter.abnf.
+
+### T-784 ts/js: `#private` brand checks are missing · P1 · JS · OPEN [V]
+Static helpers in `class P` with `#x`, `#m()`, `get #acc`, `static #s`, applied to `{}`: read → all legs `undefined` (node
+`TypeError: Cannot read private member #x from an object whose class did not declare it`); write → `wrote`, the slot is
+created (node `Cannot write private member #x to an object ...`); call → `TypeError: o.#m is not a function` (node `Receiver
+must be an instance of class P`); accessor → undefined (Receiver TypeError); a static private read through a subclass → 5
+(TypeError). `#x in o` is already right. Files: private member read/write/call in both TS and both js grammars and the
+floor/twin private-key access.
+
+### T-785 ts/js: the regex `u` flag is not implemented, and non-u astral handling differs by leg · P1 · JS · OPEN [V]
+s = "\u{1F600}" from an array: `/^.$/u.test(s), /^.$/.test(s), /^..$/.test(s)` → interp/native `false false true`, llvm.Run
+`true true false`, node `true false true`; `/\u{1F600}/u` → all legs throw "invalid unicode escape" (node accepts).
+t = "a\u{1F600}b": `t.split(/(?:)/).length, t.split(/(?:)/u).length` → interp/native `4 4`, run `3 3`, node `4 3`;
+`matchAll(/(?:)/gu)` indices → interp/native `0,1,2,3,4`, run `0,1,2,3`, node `0,1,3,4`. interp/native are right without
+`u`; the Go twin steps by code points always, so it is wrong without `u`. lib/regex.js rxCompile has no JS unicode-mode
+flag (its `u` is unicode CASE). Files: lib/regex.js, abnf/jsrtregex.go, the js/ts regex flag plumbing.
+
+### T-786 ts/js: `s.replaceAll("", x)` replaces only once · P1 · JS · OPEN [V]
+Empty search read from an array: `"abc".replaceAll("", "_")` → all legs `_abc` (node `_a_b_c_`); function form `<0>abc` (node
+`<0>a<1>b<2>c<3>`); same for "a" and an astral string; `"".replaceAll("","_")` is right. Files: replaceAll in abnf/jsrt.go,
+lib/js-rt.metajs, the interpreters.
+
+### T-787 ts/js: `Promise.any` rejects with a string; `AggregateError` is undefined · P1 · JS · OPEN [V]
+`try { await Promise.any([Promise.reject(1)]) } catch (e) { typeof e, String(e), e instanceof Error, e.name, JSON.stringify(e.errors) }`
+→ all legs `string AggregateError: All promises were rejected | false undefined undefined`; node `object ... | true
+AggregateError [1]`; `typeof AggregateError` undefined (node function). Files: every site containing "All promises were
+rejected" (both interpreters, abnf/jsrt.go, lib/js-rt.metajs).
+
+### T-788 ts/js Go twin: ToPrimitive runs twice for relational and loose-equality comparisons · P1 · JS · OPEN [V]
+An object whose `valueOf` logs: `a < b` → llvm.Run logs `valueOf 1,valueOf 2,valueOf 1,valueOf 2`, interp/native/node
+`valueOf 1,valueOf 2`; `a == 1` → run `valueOf 1,valueOf 1` (others once); `a >= b` like `<`. `+`, `*`, `a - 0 > 0` are right.
+File: abnf/jsrt.go relational / loose_eq on objects.
+
+### T-789 ts/js: computed class-member keys — evaluated per construction (interp), compiler crashes · P2 · JS · OPEN [V]
+`let n = 0; function key() { n++; return "f" + n; } class C { [key()] = "v"; }`, two instances → interp `f1 f2 calls=2`, node
+`f1 f1 calls=1`; the compilers fail to build: `TypeError: Cannot read property 'length' of undefined at jsKeyEsc
+(typescript-to-llvm-ir.abnf:startScript:3452)`, js-to-llvm-ir.abnf ~721 likewise. Finder: the interpreter evaluates a static
+computed key after earlier static initialisers and the static block (the spec evaluates all keys first).
+
+### T-790 ts compiler: `declare const enum` leaves the enum body as statements · P2 · JS · OPEN [V]
+`declare const enum DCE { Z = 9 }` + a main that prints `ok` → interp and node `ok`; run/native `ReferenceError: DCE is not
+defined`. Likely AmbientDecl (typescript-to-llvm-ir.abnf ~226) tries AmbVar before AmbEnum (PEG ordering, manual ch. 4).
+
+### T-791 ts: decorators — the compiler passes no context; field decorators are ignored · P2 · JS · OPEN [V finder only]
+Method decorator printing `typeof ctx, ctx.name, ctx.kind`; a field decorator returning `init => init + 1`: interp
+`decorating object m method`, `f=5 m=4`; run/native `decorating undefined `, `f=5 m=4`; node `decorating object m method`,
+`field f`, `f=6 m=4`; the interpreter lacks `ctx.addInitializer`. The compiler header (typescript-to-llvm-ir.abnf ~62-73)
+documents the limits but Settled does not; field decorators silently give wrong values in both halves.
+
+### T-792 ts/js: `new Error(msg, { cause })` drops the cause · P2 · JS · OPEN [V finder only]
+`const e = new Error("m", { cause: "c" }); [e.cause, Object.keys(e).length, "cause" in e]` → all legs `[null,0,false]`, node
+`["c",0,true]`.
+
+### T-793 ts/js: an unhandled promise rejection is silent with exit 0 · P2 · JS · OPEN [V]
+`async function g() { await null; throw new Error("lost"); }`, `main` calls `g()` and prints `main end` → all legs `main end`,
+exit 0, nothing on stderr; node prints `Error: lost` and exits 1. Every exception inside an async function that nobody awaits
+vanishes. Files: the job loop in abnf/jsrt.go, lib/js-rt.metajs, the interpreters.
+
+### T-794 ts/js: derived-constructor and constructability errors; parse/lowering gaps; missing host APIs · P3 · JS · OPEN [V finder only]
+Errors silently missing (all legs): `this` before super, super twice, a derived constructor returning 5, no super call, `new
+(()=>1)()`, `new o.m()`; `A()` without new says "A is not a function" (node "Class constructor A cannot be invoked without
+'new'"). Gaps differing by half: non-null `!` in assignment targets (`o!.n = 5`, `o.inner!.k += 3`, `o.inner!.k++`, `maybe! =
+10`, `maybe! += 2`); a literal U+2028/U+2029 in a string is an interp parse error; tagged templates with invalid escapes
+rejected; `export import X = NS.Y` in a namespace crashes both (interp in stripWs, lib/interp-core.js ~100); `super` in an
+object-literal method after setPrototypeOf leaks `__class__` (interp) / an empty name (compiled); `__proto__: base` in a
+literal does not set the prototype. Missing: setTimeout, queueMicrotask, Date, WeakMap, encodeURIComponent,
+isWellFormed/toWellFormed, Set#union etc., `accessor` auto-accessors (treated as an own field).
+
 ---
 
 # JV — Java
+
+### T-767 java: a C-style array declarator on a method parameter (`double u[]`) breaks both halves · P1 · JV · OPEN [V]
+`static void add(double u[], double au[]) { au[0] = 0; au[0] += u[0]; au[1] = 7; }` with x={2.5,0.0}, y={0,0}: interp
+`2.5 0.0 2 7` (element type lost: 0 stored as int, `+=` narrows), run/native `js runtime error: member assignment '0' on NaN`;
+java `2.5 0.0 2.5 7.0` (BG spectralnorm.java-8). `double[] u` is right; local and field `T x[]` are right. Files: Param
+`[ CDims ]` in java-interpreter.abnf ~444 and java-to-llvm-ir.abnf ~437.
+
+### T-776 java: a null Integer as array index, array dimension or charAt argument raises no NPE · P1 · JV · OPEN [V]
+Neighbour of T-494. `static Integer nn() { return (Integer) nulls[0]; }`: `new int[nn()]` → all legs `len 0`; `base[nn()]` →
+interp `null`, run/native `10`; `base[nn()] = 5` → `set`; `new int[2][nn()]` → `0`; `"abc".charAt(nn())` → `a`; java NPE for each.
+The 12 other unboxing contexts are right. Files: index, array-creation and charAt operand paths in both java grammars and
+lib/java-rt.metajs.
 
 ---
 
@@ -100,6 +258,12 @@ not change the renderer.
 
 # SW — Swift  (oracle: swiftc 6.1.2)
 
+### T-766 swift: `String(format:, args...)` returns the format unchanged · P1 · SW · OPEN [V]
+`import Foundation; print(String(format: "%.3f", xs[0])); print(String(format: "%d items", ns[1]))` → all legs `%.3f`,
+`%d items`; swiftc `1.500`, `42 items` (BG spectralnorm.swift-8 printed `%.9f`). The labelled `format:` initializer is
+ignored in both swift grammars and lib/swift-rt.metajs. Oracle note: swiftc needs `-sdk
+/Library/Developer/CommandLineTools/SDKs/MacOSX14.4.sdk` to import Foundation on this machine.
+
 ---
 
 # DA — Dart  (no dart here: spec-only)
@@ -115,6 +279,12 @@ not change the renderer.
 ---
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
+
+### T-778 bash: printf `%f %e %g %a` print the operand as text · P2 · SH · OPEN [V]
+`printf '[%f] [%.2f] [%5.2f] [%e] [%g] [%.0f]\n' 3.14159` → all legs `[3.14159] [3.] [   3.] [3.14159] [3.14159] []` (precision
+applied as string truncation), bash `[3.141590] [3.14] [ 3.14] [3.141590e+00] [3.14159] [3]`; `%.3f` of 7 → `7` (`7.000`); `abc` →
+rc 0 (bash 1). The source admits it (bash-interpreter.abnf ~4997 "NOT IMPLEMENTED") but manual 7.9 does not list it. Decimal
+formatting of the parsed literal needs no double: implement it, or fail loudly and record it in 7.9.
 
 ---
 
@@ -195,6 +365,16 @@ The interpreter's one-cell-per-scalar memory model; either model bytes or record
 interpreter limit. Missing features seen (loud): `2[arr]`, `enum { X = 'x' }`, nested designator `.b[1] = 5`,
 `#include <limits.h>` (and with `-pipe … -qq` the compile error is swallowed, only rc=1 shows), `__LINE__`.
 
+### T-771 c: a storage class or qualifier before a typedef name is rejected · P2 · C · OPEN [V]
+`typedef int Num; int main(void){ const Num a = 40; static Num b = 2; return a + b - 42; }` → both halves "Not everything could
+be parsed", cc exit 0 (BG fasta.gcc-8 `static uint32_t seed`). `static unsigned int` and a plain `uint32_t` work. File:
+DeclSpec / typedef-name handling in both C grammars; tests/c-test-full.c has no such declaration.
+
+### T-774 c native: printf binds to a silent zero-returning stub · P2 · C · OPEN [V finder only]
+`printf("P4\n"); puts("done")` → the native binary prints only `done`, exit 0; interp and llvm.Run fail loudly. Varargs
+printf is deliberately absent (manual 7.9), but the native leg must refuse it too, not drop output: an unresolved symbol in
+a build that links a runtime is supposed to be a hard error (manual ch. 2). Find why printf escapes that rule.
+
 ---
 
 # CORE — MetaJS, the engines, shared runtime, tooling
@@ -204,6 +384,13 @@ A reviewer argued the VM prints `RangeError (index): Invalid value: Not in inclu
 range 0..2: 7` (a plain RangeError); the current engines print the IndexError form
 `RangeError (index): Index out of range: index should be less than 3: 7`, which is
 believed to be the modern VM's. Leave as is unless a real dart run settles it.
+
+### T-775 missing features met in real programs (Benchmarks Game, Rosetta Code) · P3 · CORE · OPEN [V finder only]
+python: module-level `__doc__` (NameError). go: `make(NamedType, n)` for `type Vec []float64` / `type M map[string]int`
+(go-interpreter.abnf MakeType ~981); `math/cmplx` / complex128. js: Uint8Array. java: `System.out.flush()`; without a class Main
+the compiled legs say only "variable not defined: Main". swift: free function `sqrt`; bitwise compound assignment (`&=` parse
+error; `|=`, `<<=`, `>>=` "unknown operator" / "call of a non function value"). c: a `#define` inside a function body is not
+applied. Programs and adaptations: tests/programs/fetch.sh --list.
 
 ---
 
