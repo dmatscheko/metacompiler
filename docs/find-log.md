@@ -30,5 +30,5 @@ sweep · **D** guard review · **E** small open-source programs · **F** perform
 | B shared runtime | never | | | |
 | C all corpora | about 2026-07 | | per-language corpus sweep | date approximate (from commit history); only PHP was re-measured since, in October |
 | D launch.json guards | 2026-10-29 | 9bd2229e | every SHOULD FAIL / SHOULD ABORT row (both halves, goja and -frozen), the test.sh matrix summary, gates.sh floors, --cross, native-full, probe.sh; sabotage-proved vacuities | 7: T-795..T-801; gates all green, every floor equals its measured count |
-| E all languages | 2026-10-29 | 9bd2229e | first run: tests/programs/fetch.sh pins 40 Benchmarks Game + 36 Rosetta Code programs (python, go, java, js, lua, c, swift, ruby); ~70 four-way probes, ~45 fully agreed | 11: T-765..T-775 |
+| E all languages | 2026-10-29 | 9bd2229e | first run: tests/programs/fetch.sh pins 40 Benchmarks Game + 36 Rosetta Code programs (python, go, java, js, lua, c, swift, ruby); ~70 four-way probes, ~45 fully agreed; tests/gates.sh on a clean checkout of d12bd958+: ALL GATES GREEN (matrix 496/496, --full 14659) | 11: T-765..T-775 |
 | F all bench rows | 2026-10-12 | 8bbba503 | final bench of the work run | all rows within +-0.11% of the baseline |
