@@ -15,11 +15,11 @@ sweep · **D** guard review · **E** small open-source programs · **F** perform
 | A typescript | 2026-10-29 | 9bd2229e | classes (fields, accessors, #private, statics, super), enums, namespaces and merging, parameters/destructuring, ?. and ??, decorators, regex flags, promises/async, ToPrimitive, computed keys, ambient declarations; re-check of the js fixes T-478..T-493 on TS (all green) | 15: T-780..T-794 (+TS evidence on T-779) |
 | A go | 2026-10-13 | fda7a2b6 | sized ints, fmt verbs, strings pkg, panics/recover, slices/append/copy, maps, closures, channels, conversions, min/max/clear | 13: T-465..T-477 |
 | A swift | 2026-10-13 | fda7a2b6 | integers/shifts/conversions, Double rounding and text, graphemes, value semantics, for-in, switch patterns, Character properties, literal type adoption | 10: T-507..T-516 |
-| A ruby | never | | | |
+| A ruby | 2026-10-29 | 9bd2229e | Float/Integer arithmetic and text, String#% (36 flag x 17 values), String methods (split, [], index, succ, sub/gsub, tr, center), Array/Hash/Range methods, Comparable, blocks/procs/lambdas, exceptions, eval order (oracle ruby 2.6) | 17: T-816..T-832 |
 | A lua | 2026-10-13 | fda7a2b6 | int/float arithmetic and printing, string.format, patterns, string/table library, pcall/error, goto, numeric/generic for, closures, multiple assignment, int-float comparison, recursion | 9: T-532..T-540 (+lua evidence on T-505) |
 | A bash | 2026-10-13 | fda7a2b6 | arithmetic, parameter expansion, word splitting/IFS, indexed and sparse arrays, [[ ]] tests and =~, case, return codes, printf, command-substitution depth | 15: T-517..T-529, T-531 (+T-530 CORE, probe.sh) |
 | A c | 2026-10-29 | 9bd2229e | integer promotions and conversions, 64-bit unsigned, / % shifts, floats and -0.0, string.h/stdlib, structs/unions/bit-fields, function pointers, control flow, sizeof/_Generic, ?: typing, string and char literals, preprocessor | 12: T-753..T-764 |
-| A kotlin | never | | | |
+| A kotlin | 2026-10-29 | ae9a4e63 | Double/Float text and comparison, Int/Long arithmetic and shifts, Char, String and collection stdlib (vs the kotlin-stdlib jar), ranges, operator conventions, null-safety, casts, exceptions and messages, eval order (oracle: java + stdlib jar, no kotlinc) | 14: T-802..T-815 |
 | A php | never | | | |
 | A csharp | never | | | |
 | A dart | never | | | |

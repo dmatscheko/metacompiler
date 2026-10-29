@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-802** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-833** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -101,6 +101,104 @@ list-add path in lib/python-rt.metajs / runtime.c, gc pacing in runtime.c. Measu
 `def twice n\n  n * 2\nend; puts twice(xs[0])` → interp "wrong number of arguments (given 1, expected 0)", run/native
 "undefined local variable or method `n'"; ruby `42` (BG nbody.ruby-8 `def nbody n`). `def add a, b` does not parse at all.
 `n` is taken as the first body statement. Files: the def rule in both ruby grammars.
+
+### T-816 ruby: String#split is a naive literal split · P1 · RB · OPEN [V]
+`s="a,b,,c,,"`: `s.split(",")` → all legs `["a","b","","c","",""]` (ruby `["a","b","","c"]`: trailing empties removed);
+`s.split(",", 2)` → same (ruby `["a", "b,,c,,"]`: limit ignored); `" a  b ".split(" ")` → `["","a","","b",""]` (ruby `["a","b"]`:
+awk mode); `"a1b2".split(/(\d)/)` → interp/native `["a","b",""]`, llvm.Run `["a1b2"]` (ruby `["a","1","b","2"]`: captures kept,
+and run does not split on a Regexp at all). Finder: `"".split(",")` → `[""]` (ruby `[]`); `"abc".split(//)` differs by half.
+Files: lib/ruby-rt.metajs rbStrSplit (~5659) and the dispatch (~7524), rxSplit (~4963), ruby-interpreter.abnf ~8747/8766.
+
+### T-817 ruby: String#[] / slice / []= with a Regexp or String argument return garbage · P1 · RB · OPEN [V]
+`h="hello"`: `h[/l+/]` → all legs `"h"` (ruby `"ll"`); `h["ell"]` → `"h"` (`"ell"`); `h["z"]` → `"h"` (nil); finder: `h[/(h)(e)/,2]`
+→ `"he"` (`"e"`), `h.slice(/l+/)` → `"h"`; `t["world"]="ruby"; t[/l+/]="L"` on "hello world" → `"Lubyello world"` (ruby
+`"heLo ruby"`).
+
+### T-818 ruby: String#index / rindex ignore the offset; rindex(Regexp) is nil; run's index(Regexp) is nil · P1 · RB · OPEN [V]
+`"hello world".index("o", 5)` → 4 (ruby 7); `rindex("o", 5)` → 7 (4); finder: `index("o", 20)` → 4 (nil), `index("", 11)` → 0 (11);
+`"hello"`: `index(/l/), rindex(/l/), index(/l/,3), index("l",3), rindex("l",2)` → interp/native `2 nil 2 2 3`, run `nil nil nil
+2 3`, ruby `2 3 3 3 2`. lib/ruby-rt.metajs ~7525 calls `indexOf` without a from-index; the Regexp path ~4964.
+
+### T-819 ruby: adjacent string-literal concatenation crosses a newline · P1 · RB · OPEN [V]
+`puts "first"` then a statement starting with a string literal, `"second".upcase` → all legs `FIRSTSECOND` (ruby `first`): the
+next line's literal is glued onto the previous argument (finder: `"x".each_char { … }` after `puts "third"` iterates "thirdx").
+`DqStr` ends with `:whitespace(Whitespace)` and `StrLit = StrPiece { StrPiece }` (ruby-interpreter.abnf ~2088-2095; the
+compiler ~2127): juxtaposition must not cross a newline.
+
+### T-820 ruby: index assignment evaluates the RHS before the receiver and index · P1 · RB · OPEN [V]
+`arr=[0,0]; i=0; arr[i += 1] = (i += 10)` → all legs `[0, 0, nil × 9, 10]`, ruby `[0, 11]`; finder: `hh[t(:k)] = t(:v)` logs `vk`
+(ruby `kv`). Same class as T-479 (js, java) and T-806 (kotlin).
+
+### T-821 ruby compiler: `return` from a block through ensure, Proc `return`, and `while` break value · P1 · RB · OPEN [V]
+`def m4; [1,2].each { |x| begin; return x; ensure; puts "  ensure #{x}"; end }; :fell_through; end` → interp and ruby
+`ensure 1`, `1`; run/native `ensure 1`, `ensure 2`, `:fell_through`. `def m5; pr = Proc.new { return 7 }; pr.call; :unreached;
+end` → interp 7, compiled `:unreached`. Finder: `r = while …; break w*2 if w==lim; end` → compiled nil (interp/ruby the value).
+
+### T-822 ruby: Array#insert with negative or past-the-end index; mutating a Hash during each · P1 · RB · OPEN [V]
+`[1,2].insert(-1, :b)` → all legs `[1, :b, 2]` (ruby `[1, 2, :b]`); finder: `insert(-2, :z)` → `[:z,1,2]` (`[1,:z,2]`),
+`insert(3, 9)` → interp/native `[1,2,9]` (`[1,2,nil,9]`) and llvm.Run a Go panic "slice bounds out of range [:3] with capacity
+2", `insert(-4, :w)` → padded (IndexError "index -4 too small for array; minimum: -3"). Deleting inside `Hash#each` → run Go
+panic "index out of range [2] with length 2", interp/native skip the next entry; adding inside `each` raises nothing (ruby
+RuntimeError "can't add a new key into hash during iteration"). Files: lib/ruby-rt.metajs ~6983 (insert / rbArrSub), the
+twin's hash iteration.
+
+### T-823 ruby native: `!~` does not link · P1 · RB · OPEN [V]
+`puts s[0] !~ /z/` → interp, run and ruby `true`; native BUILD FAILED "unresolved symbol js_rxnmatch". ruby-to-llvm-ir.abnf
+~3281 maps `!~` to js_rxnmatch, which exists only in abnf/jsrtregex.go (~8106); add it to the floor / layer 2.
+
+### T-824 ruby: Float#round(half:) is ignored · P1 · RB · OPEN [V]
+`2.5.round(half: :even)` → 3 (ruby 2); finder: `half: :down` 3 (2), `-2.5` even -3 (-2), `3.5` down 4 (3), `25.round(-1, half:
+:even)` 30 (20). All legs.
+
+### T-825 ruby: Array#sum on Floats lacks Kahan-Babuska; Integer#fdiv on bignums is inexact · P1 · RB · OPEN [V]
+`[0.1, 0.2, 0.3].sum` → `0.6000000000000001` (ruby 0.6); `[1e100, 1.0, -1e100].sum` → 0.0 (1.0); finder: `[3, 0.1, 0.2].sum` →
+3.3000000000000003 (3.3); `(10**30).fdiv(10**29)` → 10.000000000000002 (10.0). All legs. MRI's ary_add_one /
+Kahan-Babuska and big_fdiv are the models.
+
+### T-826 ruby: Array method arguments — slice, fill, uniq block, max_by · P1 · RB · OPEN [V]
+`[1,2,3,4].fill(9, 0, 2)` → `[9,9,9,9]` (ruby `[9,9,3,4]`); `uniq { |x| x % 3 }` on 1..6 ignores the block (ruby `[1,2,3]`).
+Finder: `a.slice(6,0)`, `slice(-6,1)`, `slice(2,-1)` → `[]`, `[1]`, `[]` (ruby nil each; `a[...]` is right); `fill(9,3,5)`,
+`fill(9,-2,1)`; `max_by` returns the last of ties ("cc", ruby "bb"); `max_by(2)` ignores n; `[1].flatten!` returns self (nil).
+
+### T-827 ruby: Comparable, `<=>`, `===` and Range semantics · P1 · RB · OPEN [V finder only]
+`include Comparable` + `<=>`: `V.new(1)==V.new(1)` → false (ruby true); `V.new(1) < 5` with `<=>` nil → compiled false (ruby
+ArgumentError); `clamp` → interp V5, compiled NoMethodError (ruby V3). `nil <=> nil`, `true <=> true` → nil (0). A lambda in `when`
+never matches (`->(x){…} === 2.5` false). `(0..9) === Float::NAN` / `include?(NaN)` → true (false). `(1.0..2.0).min/max` → 1/2
+Integers (1.0/2.0); `(1..1.5).max` → 1 (1.5); `(1.0..2.0).step(0.5)` raises "step can't be 0 or negative". A user `hash`/`eql?`
+is ignored for Hash keys (`{K.new(1)=>"one"}[K.new(1)]` nil) while `uniq` honours it.
+
+### T-828 ruby: sub/gsub replacement forms — Hash, `\&`, `` \` ``, `\'`; numbered groups next to named ones · P1 · RB · OPEN [V]
+`"abc".sub(/b/, "[\\&]")` → `"a[&]c"` (ruby `"a[b]c"`); `"cat hat".gsub(/[ch]/, "c" => "C", "h" => "H")` → the Hash's inspect
+spliced in (ruby `"Cat Hat"`); finder: `` "abc".sub(/b/, "\\`|\\'") `` → `` "a`|'c" `` (`"aa|cc"`); `.match(/(?<first>a)(b)/)[2]` →
+"b" (ruby nil: with named groups the unnamed ones are not captured). All legs.
+
+### T-829 ruby: String#succ — non-alphanumerics incremented, carries wrong, halves disagree · P1 · RB · OPEN [V]
+`"1.9".succ` → `"1/0"` (ruby `"2.0"`); `"a-9".succ` → `"a.0"` (`"a-10"`); finder: `"a z"` → `"a!a"` (`"b a"`), `"<<koala>>"` →
+`"<<koala>?"` (`"<<koalb>>"`); interp only: `"Zz"` → `"aAa"` (`"AAa"`), `""` → `"a"` (`""`), `"9"` → interp `"a0"`, compiled `"00"`
+(`"10"`); `"ÿ".succ` → invalid bytes in run. File: lib/ruby-rt.metajs rbStrSucc (~4239) and the interpreter's copy — port
+MRI's str_succ (rightmost alnum run, skip non-alnums).
+
+### T-830 ruby: astral characters handled as UTF-16 code units · P2 · RB · OPEN [V finder only]
+`s="a😀b"`: `s[1]` → a lone surrogate (ruby "😀"), `s[1,2]` → "😀" ("😀b"), `center(6,"*")` → `"*a😀b*"` (`"*a😀b**"`),
+`index("b")` → 3 (2); `length` is right. `reverse` splits the pair in run/native; `"😀".ord` → interp/native 55357, run 128512
+(ruby 128512); `128512.chr("UTF-8")` raises RangeError; `255.chr.bytes` → [195,191] (ruby [255]; binary strings not modelled).
+
+### T-831 ruby: uncatchable internal errors; interp hangs on an infinite range · P2 · RB · OPEN [V finder only]
+`b[-10]=1` on a 6-element array → "ruby interpreter error / js runtime error: index -4 too small for array", not catchable by
+`rescue IndexError` (ruby IndexError "index -10 too small for array; minimum: -6"); `each_slice(0)` → uncatchable "invalid
+size" (ArgumentError "invalid slice size"); `[1,2].cycle` without a block → uncatchable. `(1..Float::INFINITY).first(3)` →
+interp loops until killed (run/native/ruby `[1, 2, 3]`).
+
+### T-832 ruby: error paths and assorted gaps · P3 · RB · OPEN [V finder only]
+`throw` without `catch` → NoMethodError (UncaughtThrowError; `catch` undefined); `loop { raise StopIteration }` propagates (ruby
+ends the loop, nil); `"x"*-1` / `[0]*-1` → "" / [] (ArgumentError "negative argument"); `5.upto` without args → an Enumerator
+(ArgumentError); interp: a `def` inside a lambda skips the arity check, `"\t\n hi \r\n\0".strip` keeps the tail, `[1,2].inject(&:+)`
+NoMethodError, bare `p` gives #<Proc> (compiled NameError, ruby nil); `each_line("--")` ignores the separator, `chomp("")` not
+handled, `String#dump` equals inspect, `$stdout`/`STDOUT` read nil, `("y".."ab").to_a` iterates (ruby []); the compiler rejects
+`super` in method_missing of a class without an explicit superclass; a bare `new` in `def self.make` NameError. Missing:
+`||=`/`&&=` (message names `||=` for both), method_missing, Exception#cause, Integer#step, Integer.sqrt, Array#at / transpose /
+slice! / bsearch, chunk_while, Proc#>> / curry, Hash#compact, endless `(1..)`, Range#lazy, Regexp.last_match, pp; `**` of a
+negative float to a fractional power → NaN (ruby Complex).
 
 ---
 
@@ -249,6 +347,89 @@ not change the renderer.
 
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
+
+### T-802 kotlin compiler: `a[i] = x` never calls a user `operator fun set` · P1 · KT · OPEN [V]
+`class S1(var v: Int) { operator fun set(i: Int, x: Int) { v = x + i } }`, `class S2` with get and set: `a[n[0]] = n[1]` →
+interp `s1 8` (right by the operator convention), run/native `s1 0`; `b[n[0]] = n[1]; b[n[0]]` → interp `71 72`, compiled
+`0 1`; `b[n[0]] += n[1]` → interp 791, compiled 0 — the write is dropped silently. The emitter dispatches "get"
+(emitOpDispatch, kotlin-to-llvm-ir.abnf ~4423) and invoke, but "$set" (listed in opConventions ~3118) has no dispatch site.
+Oracle: the Kotlin operator-convention spec (no kotlinc here).
+
+### T-803 kotlin compiler: an indexed write to an implicit-this property named `data` is lost · P1 · KT · OPEN [V]
+`class A1 { var data = mutableListOf(0, 0); fun w(i: Int, x: Int) { data[i] = x }; fun r() = data[0] + data.size }`, `a.w(0, 5)`
+→ interp `[5, 0] 7`, run/native `[0, 0] 2`. A field named `items`, `this.data[i] = x`, `data[i] += x` and a local `data` work.
+`data` is a soft keyword (`data class`): the statement is probably read as a modifier, or the NotColon guard eats it.
+File: statement / modifier rules in kotlin-to-llvm-ir.abnf.
+
+### T-804 kotlin compiler: ordered comparisons with NaN, each compiled leg wrong differently · P1 · KT · OPEN [V]
+v = doubleArrayOf(NaN, 0.0, 1.0), every pair: interp (JLS/IEEE) all NaN rows `lt=false le=false gt=false ge=false`; llvm.Run
+`gt=true ge=true`; native `le=true ge=true`. It changes control flow (`while (nan > w.toDouble() && w < 3) w++` runs 3 times on
+run). js_ktcmp (abnf/jsrtkotlin.go ~982 via rt.jsCompare; lib/kotlin-rt.metajs ~2014 ktCmpVals) maps the relational operators
+onto a three-way compare, which cannot say "unordered"; Doubles need direct relational ops. Oracle: java.
+
+### T-805 kotlin: Double total order and boxed equality (NaN largest, -0.0 < 0.0, NaN equals NaN) are not applied · P1 · KT · OPEN [V]
+nz=-0.0, z=0.0, nan from an array: `listOf(nz)==listOf(z), listOf(nan)==listOf(nan), setOf(nz,z).size, setOf(nan,nan).size,
+(nz as Any).equals(z), listOf(z,nz,nan,nan).distinct(), listOf(1.0,nan).indexOf(nan), listOf(nz).contains(z)` → all legs
+`true false 1 2 true [0.0, NaN, NaN] -1 true`, oracle `false true 2 1 false [0.0, -0.0, NaN] 1 false`. `nz.compareTo(z),
+nan.compareTo(z), z.compareTo(nan), …, nan.equals(nan), nz.equals(z)` → ours `0 0 0 … false … true` (run also `nan>z` true),
+oracle `-1 1 -1 … true … false`. `listOf(3.0,-0.0,0.0,NaN,-1.0,-Inf).sorted()` → `[-0.0, 0.0, 3.0, NaN, -Infinity, -1.0]` (oracle
+`[-Infinity, -1.0, -0.0, 0.0, 3.0, NaN]`), max/min wrong too. `data class D(val d: Double)`: `D(nz)==D(z)` true, `D(nan)==D(nan)`
+false (spec: false, true). minOf/maxOf/Math.min/max on (-0.0,0.0) and NaN: interp returns the first argument, compiled the
+second (oracle -0.0 / 0.0 / NaN). Oracle: java Double.compare / Math.min/max / collections, and kotlin-stdlib
+CollectionsKt.sorted etc. Files: lib/kotlin-rt.metajs ktCmpKeys/ktCmpVals (~1327), jsrtkotlin.go comparators and equality,
+the interpreter's min/max builtins, data-class equals emission. May need a value-model decision for Double through Any.
+
+### T-806 kotlin: indexed and compound assignment evaluate the RHS first · P1 · KT · OPEN [V]
+Same class as T-479 (js, java), fixed there, not here. `arr=[1,2,3]; i=0; arr[i++] = arr[i] + 10` → all legs `[11, 2, 3] 1`,
+java `[12, 2, 3] 1`; `i=0; arr[i] = i++ + i++` → `[11, 2, 1]` (java `[1, 2, 3]` from `[12,2,3]`); `var x=5; x += x++ * 2` → 16 (java
+15); user get/set logging `b[t("i",2)] += t("v",5)` → interp `vig2s2=11` (expected `ig2vs2=11`). Kotlin's order is receiver,
+index, value, with the LHS value saved first (same as java). Files: assignment emitters in both kotlin grammars.
+
+### T-807 kotlin: `x!!` on null does not throw NullPointerException · P1 · KT · OPEN [V]
+`fun pick(i: Int): String? = if (i > 9) "x" else null`; `try { val t = pick(0)!!; println("nn2 $t") } catch (e: Exception) {…}`
+→ all legs `nn2 0 null`; Kotlin `caught NullPointerException null` (Intrinsics.checkNotNull). `pick(0)!!.length` inside
+`catch (e: NullPointerException)` aborts the process (exit 1). The grammars drop `!!` as identity (kotlin-interpreter.abnf
+~1125/1133/1435, and the compiler's equivalents).
+
+### T-808 kotlin: LongRange iteration near or above 2^53 runs in doubles and never ends · P1 · KT · OPEN [V]
+`val ls = longArrayOf(9007199254740993L); for (i in ls[0]..ls[0] + 1) println("it $i ${i % 10}")` → run/native print
+`it 9007199254740992 0` forever, interp hangs (all killed by the timeout); expected `…993 3`, `…994 4`. `for (i in
+Long.MAX_VALUE-1..Long.MAX_VALUE)` prints `9223372036854776000` forever; `.toList()`/`.count()` hang too. A 3e9 range is
+right. Remainder of T-347 (PARTIAL), which claimed LongRange. Files: range iteration in both kotlin grammars,
+jsrtkotlin.go, lib/kotlin-rt.metajs.
+
+### T-809 kotlin compiler: `for (i in a..Int.MAX_VALUE)` and `step MAX` overflow and loop forever · P1 · KT · OPEN [V finder only]
+ii = intArrayOf(Int.MAX_VALUE, Int.MIN_VALUE): `for (i in ii[0]-2..ii[0])` (capped by `if (sum > 10) break`) → interp 3,
+run/native 11 (infinite); `for (i in 0..ii[0] step ii[0])` → 2 vs 11. downTo Int.MIN_VALUE and `toList()` are right. The
+lowering is `i <= last; i += step` with no last-element exit. File: for-over-IntRange in kotlin-to-llvm-ir.abnf.
+
+### T-810 kotlin: `as` casts never throw ClassCastException · P1 · KT · OPEN [V]
+`fun anyOf(i: Int): Any = if (i == 0) "str" else if (i == 1) 42 else 2.5`; `anyOf(1) as String` → all legs succeed (`.length`
+on an Int gives `kotlin.Unit`); `"str" as Int` → `ok str`; Kotlin/JVM ClassCastException. java's T-495 is DONE; kotlin never got
+the fix. `as?` is right.
+
+### T-811 kotlin native: `abs(Int.MIN_VALUE)` returns 2147483648 · P1 · KT · OPEN [V]
+`abs(i)` and `Math.abs(i)` for Int.MIN_VALUE → interp/run `-2147483648`, native `2147483648` (an out-of-range Int); java
+`-2147483648`. Long abs is right. File: the abs builtin in lib/kotlin-rt.metajs (no 32-bit wrap) or the floor.
+
+### T-812 kotlin: `Double.mod(Double)` — native silently wrong, interp/run abort · P1 · KT · OPEN [V finder only]
+`2.5.mod(2.0), (-2.5).mod(2.0), (-2.5).mod(-2.0), (-7.0).mod(3.0)` → native `0 0 0 2`, interp "unknown Double method: mod", run
+"method call 'mod' on a number"; stdlib (floored) `0.5 1.5 -0.5 2.0`. Int/Long `.mod` are right.
+
+### T-813 kotlin: missing JVM exceptions — getValue, negative array size, subList bounds · P2 · KT · OPEN [V finder only]
+`mapOf("a" to 1).getValue("b")` in `catch (e: NoSuchElementException)` → uncatchable host error "key b is missing in the map",
+exit 1 (stdlib NoSuchElementException "Key b is missing in the map."). `IntArray(-1)` / `Array(-1){0}` → size 0
+(NegativeArraySizeException: -1). `xs.subList(2, 1)` → interp/native `[]`, llvm.Run Go panic "slice bounds out of range [2:1]"
+(IllegalArgumentException "fromIndex(2) > toIndex(1)"). Files: jsrtkotlin.go (subList), lib/kotlin-rt.metajs, interp builtins.
+
+### T-814 kotlin: removing from a MutableList inside its for-each does not throw ConcurrentModificationException · P2 · KT · OPEN [V finder only]
+`for (e in ml) if (e == 2) ml.remove(e)` on [1,2,3,4] → all legs `cme none [1, 3, 4]`; java ArrayList `cme caught [1, 3, 4]`.
+Needs a modCount on lists.
+
+### T-815 kotlin: `when (x) { in someList -> … }` does not parse; missing stdlib members · P3 · KT · OPEN [V finder only]
+An `in` condition whose operand is not a range (`in someList`, `in listOf("a","b")`) fails to parse in every leg. Missing:
+trimMargin, replaceIndent, Double.withSign/ulp/nextUp, Int.takeHighestOneBit/rotateLeft/inc(), MutableList.iterator(),
+addAll(index, list), StringBuilder(String).insert/setLength/deleteCharAt.
 
 ---
 
