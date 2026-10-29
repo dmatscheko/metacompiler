@@ -18,7 +18,7 @@ sweep · **D** guard review · **E** small open-source programs · **F** perform
 | A ruby | never | | | |
 | A lua | 2026-10-13 | fda7a2b6 | int/float arithmetic and printing, string.format, patterns, string/table library, pcall/error, goto, numeric/generic for, closures, multiple assignment, int-float comparison, recursion | 9: T-532..T-540 (+lua evidence on T-505) |
 | A bash | 2026-10-13 | fda7a2b6 | arithmetic, parameter expansion, word splitting/IFS, indexed and sparse arrays, [[ ]] tests and =~, case, return codes, printf, command-substitution depth | 15: T-517..T-529, T-531 (+T-530 CORE, probe.sh) |
-| A c | never | | | |
+| A c | 2026-10-29 | 9bd2229e | integer promotions and conversions, 64-bit unsigned, / % shifts, floats and -0.0, string.h/stdlib, structs/unions/bit-fields, function pointers, control flow, sizeof/_Generic, ?: typing, string and char literals, preprocessor | 12: T-753..T-764 |
 | A kotlin | never | | | |
 | A php | never | | | |
 | A csharp | never | | | |

@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-753** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-765** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -119,6 +119,81 @@ not change the renderer.
 ---
 
 # C — C subset
+
+### T-753 c: `sizeof` and `_Generic` evaluate their operand · P1 · C · OPEN [V]
+C11 6.5.3.4p2 / 6.5.1.1p3: the operand is not evaluated. `int k=0; n = sizeof(k++); pl(n); pl(k);` → all legs `4 1`, cc `4 0`;
+`sizeof(f())` calls f (prints "called"); `sizeof(arr[k++])`, `sizeof(k = 5)`, `sizeof(++k + 1LL)`, `_Generic(k++, int: 1,
+default: 2)` all run their side effects. Files: makeSizeofExpr / makeSizeofPlace / makeGeneric in c-interpreter.abnf (~1867;
+they call t()/placeT() at run time) and c-to-llvm-ir.abnf (~1871, ~1952; they emit the operand). Related, loud: `sizeof k++`
+without parentheses does not parse (SizeofPlace = Lvalue takes `k`, `++` is left over).
+
+### T-754 c compiler: a cast of an unsigned 64-bit constant ≥ 2^63 to a signed type is computed in a double · P1 · C · OPEN [V]
+`pl((long long)18446744073709551615ULL); pl((long long)0x8000000000000001ULL); pl((int)0xFFFFFFFFFFFFFFF1UL);` and a global
+`long long gc = (long long)0x8000000000000001ULL;` → interp and cc `-1`, `-9223372036854775807`, `-15`,
+`-9223372036854775807`; run and native `0`, `-9223372036854775808`, `0`, `-9223372036854775808`. Through a variable it is
+right. makeCast's constant path (c-to-llvm-ir.abnf ~1886) converts `r.cv`, a JS double (`u64FromNum(trunc0(r.cv))`,
+`convertNum`): keep 64-bit constants exact.
+
+### T-755 c compiler: a function named only in a global initializer is not in the indirect-call dispatcher · P1 · C · OPEN [V]
+`int (*ops[3])(int,int) = {add, sub, mul};` at file scope, then `pl(ops[i](7,3))` with i=1 → interp and cc `4`, run and native
+`0` (silently). The module has `define i32* @__mec_icall2(...) { ret i32* null }` while `@__mec_ginit` stores ids 1, 2, 3;
+naming `sub` in any function body makes it work. The address-taken set is collected from function bodies only. File:
+c-to-llvm-ir.abnf, the `__mec_icallN` emission and its funcId collection.
+
+### T-756 c preprocessor: `#define`/`#undef` in a dead conditional group still take effect · P1 · C · OPEN [V]
+`#if 1 / #define PICK 10 / #elif 1 / #define PICK 20 / #else / #define PICK 30 / #endif`, `pl(PICK)` → through `-pipe` to
+either half `30`, cc `10`; `#if 1 #define B 1 #else #define B 3` gives 3. The pass leaves conditionals to the downstream
+grammar, but by then the macro table already holds the last definition, so the common `#ifdef X / #define A … / #else /
+#define A …` idiom always takes the else branch. File: c-preprocessor.abnf (preprocess) — it must evaluate #if/#ifdef far
+enough to know which directives are live.
+
+### T-757 c preprocessor: a self-referential macro is re-expanded after argument pre-expansion · P1 · C · OPEN [V]
+`int S = 5; #define S (S + 1)`, `#define F(e) e`, `#define G(e) F(e)`: `pl(S); pl(F(S)); pl(G(S)); pl(F(F(S)));` → ours
+`6 7 8 8`, cc `6 6 6 6` (cc -E gives `(S + 1)` each time). C11 6.10.3.4p2: a name painted during expansion stays unexpanded
+on the rescan; the painted state is not carried into substituted argument tokens. File: c-preprocessor.abnf.
+
+### T-758 c: non-ASCII string literals are UTF-16 code units, `\u`/`\U` escapes are missing; interp putchar writes a code point · P1 · C · OPEN [V]
+`{"é","€","😀","aéb","\U0001F600x"}` printing strlen and bytes: cc (UTF-8) `2: 195 169`, `3: 226 130 172`, `4: 240 159 152 128`,
+`4: 97 195 169 98`, `5`; all legs `1: 233`, `1: 172`, `1: 61` (low byte of the high surrogate D83D, then NUL), `3: 97 233 98`,
+`10` spelling `U0001F600x` (backslash dropped); `sizeof("😀")` 3 (cc 5). cStrBytes / cCharCode (c-to-llvm-ir.abnf ~1481) push
+`charCodeAt` and have no `\u`/`\U` case; the interpreter has the equivalent. Interp only: `putchar(0xC3); putchar(0xA9)` writes
+`c3 83 c2 a9` (run, native, cc `c3 a9`) — callFunction "putchar" does `printf("%c", v & 255)`, which encodes a code point
+(c-interpreter.abnf ~2570).
+
+### T-759 c: character constants above 0x7f are unsigned (clang arm64 `char` is signed) · P1 · C · OPEN [V]
+`pl('\377'); pl('\xc8'); pl('\200' < 0);` → all legs `255 200 0`, cc `-1 -56 1`; so `char c = (char)200; c == '\xc8'` is 0
+(cc 1). cCharCode returns `hv & 255` / `ov & 255` in both halves; an integer character constant is an int with the value of a
+(signed) char.
+
+### T-760 c: unsigned bit-fields narrower than int do not promote to int; 64-bit-base bit-fields · P1 · C · OPEN [V]
+`struct BF { unsigned a:3; unsigned long long e:40; unsigned long long g:33; }; f.a=1; f.e=(unsigned long long)-1; f.g=5;`
+`pl(f.a - 4); pl(-f.a); pl(f.a - 4 < 0); pu(f.e); pu(f.g);` → cc `-3 -1 1 1099511627775 5`; run/native `4294967293 4294967295 0
+18446744073709551615 5` (no promotion; the 40-bit field is not masked); interp `4294967293 4294967295 0 0 0` (wide bit-fields
+read as 0). C11 6.3.1.1p2: a bit-field whose values fit in int promotes to int. Files: bit-field read/store in both grammars.
+
+### T-761 c interp: `?:` does not apply the usual arithmetic conversions · P1 · C · OPEN [V]
+`int c = 1; unsigned u = 1u;` `long long z = c ? -1 : u;` → interp -1 (run, native, cc 4294967295); `(c ? 7 : 2.5) / 2 * 10`
+→ 30 (35); `sizeof(c ? 1 : 2LL)` → 4 (8); `(c ? -1 : u) > 0` → 0 (1). Finder: `sizeof(a<0 ? (char)1 : (short)2)` depends on a
+(cc always 4); `_Generic(a<0 ? 1 : 1u, …)` picks int. makeCond (c-interpreter.abnf ~2989) returns the chosen arm although its
+comment claims the conversions are applied.
+
+### T-762 c: `-0.0` loses its sign · P1 · C · OPEN [V]
+`sg(x)` prints neg/pos by `1/x < 0`: `double ga[2] = {0.0, -0.0}`, `double gs = -0.0`, `float gf = -0.0f`, a local `-0.0`,
+`double arr[1] = {-0.0}` → all legs `pos`, cc `neg`; interp also gets `-z` (z = 0.0 from an array) and `(double)(float)-z`
+wrong. Compiler makeNeg constant path `convertNum(ct, 0 - r.cv)` (c-to-llvm-ir.abnf ~3376); interp makeNeg `0 - r.v`
+(c-interpreter.abnf ~2910) — manual ch. 4: unary minus must be `-x`, never `0 - x`.
+
+### T-763 c compiler: `*pp = ptr` through a pointer-to-pointer fails to build · P2 · C · OPEN [V]
+`int a=5,b=6; int *p=&a; int **pp=&p; *pp = &b; pl(*p);` → interp and cc `6`; llvm.Run and -exe abort "store operands are not
+compatible: src=i32*; dst=i32*" (also inside a callee `void setpp(int **pp, int *t){ *pp = t; }`). `pp[0] = &a` works. File:
+c-to-llvm-ir.abnf, assignment through a `*` lvalue whose element is a pointer.
+
+### T-764 c interp: union type punning and byte-level pointer differences are not modelled · P2 · C · OPEN [V finder only]
+`union U { int i; unsigned char b[4]; short s[2]; }; u.i = 0x01020304*5;` → interp `b[0..3] = 84545300 0 0 0`, `s = 84545300 0`
+(an unsigned char above 255); run, native, cc `20 15 10 5` / `3860 1290`. `(char*)&lm[1][0] - (char*)&lm[0][0]` → 3 (cc 24).
+The interpreter's one-cell-per-scalar memory model; either model bytes or record it in manual 7.9 as a permanent
+interpreter limit. Missing features seen (loud): `2[arr]`, `enum { X = 'x' }`, nested designator `.b[1] = 5`,
+`#include <limits.h>` (and with `-pipe … -qq` the compile error is swallowed, only rc=1 shows), `__LINE__`.
 
 ---
 
