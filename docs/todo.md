@@ -100,7 +100,7 @@ not change the renderer.
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-868 kotlin: nested names leak globally; builtin qualifiedName; type-blind receiver rule · P2 · KT · OPEN [V KT worker]
+### T-868 kotlin: nested names leak globally; builtin qualifiedName; type-blind receiver rule · P2 · KT · IN PROGRESS (KT worker, round 7) [V KT worker]
 (1) WRONG ANSWER, every leg: `class In { override fun toString() = "top" }` + `class O1 { class In … }` → `println(In(1))`
 prints "O1"'s, Kotlin "top" (interp: `globalScope[name] = cls` for nested classes); a nested class `N` anywhere also
 breaks an enum's bare `N` entry. (2) every leg: `IllegalStateException("x")::class.qualifiedName` → "IllegalStateException"
