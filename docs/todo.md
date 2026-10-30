@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-843** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-844** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -106,19 +106,12 @@ parse in the js compiler.
 
 # JV — Java
 
-### T-767 java: a C-style array declarator on a method parameter (`double u[]`) breaks both halves · P1 · JV · IN PROGRESS (JV worker, round 13) [V]
-`static void add(double u[], double au[]) { au[0] = 0; au[0] += u[0]; au[1] = 7; }` with x={2.5,0.0}, y={0,0}: interp
-`2.5 0.0 2 7` (element type lost: 0 stored as int, `+=` narrows), run/native `js runtime error: member assignment '0' on NaN`;
-java `2.5 0.0 2.5 7.0` (BG spectralnorm.java-8). `double[] u` is right; local and field `T x[]` are right. Files: Param
-`[ CDims ]` in java-interpreter.abnf ~444 and java-to-llvm-ir.abnf ~437.
-
-### T-776 java: a null Integer as array index, array dimension or charAt argument raises no NPE · P1 · JV · IN PROGRESS (JV worker, round 13) [V]
-Neighbour of T-494. `static Integer nn() { return (Integer) nulls[0]; }`: `new int[nn()]` → all legs `len 0`; `base[nn()]` →
-interp `null`, run/native `10`; `base[nn()] = 5` → `set`; `new int[2][nn()]` → `0`; `"abc".charAt(nn())` → `a`; java NPE for each.
-The 12 other unboxing contexts are right. Files: index, array-creation and charAt operand paths in both java grammars and
-lib/java-rt.metajs.
-
----
+### T-843 java: field types collide by name across classes · P2 · JV · OPEN [V JV worker]
+One class declares `double d = 2.5;`, another `double[] d;` — `d[1] = 4` inside the second class prints `4`
+in all engines; java prints `4.0`. jPlaceTy / jFieldTyOf look a bare field name up in the program-wide
+table, which turns `?` (no conversion) when two declarations disagree; use the per-class table
+(jOwnFieldTy, walking superclasses). Also: `String.codePointBefore` is unsupported (all engines:
+"unknown String method").
 
 # CS — C#  (no dotnet here: spec-only, ECMA-334 and the .NET reference source)
 
@@ -947,6 +940,8 @@ T-830 ruby: astral characters handled as UTF-16 code units — PARTIAL c832167f 
 T-831 ruby: uncatchable internal errors; interp hangs on an infinite range — PARTIAL 4c87d12e — rescuable IndexError/ArgumentError, first(n) on endless ranges; lazy enumerators (cycle without block, Range#lazy) filed as T-839
 T-832 ruby: error paths and assorted gaps — PARTIAL b73c1ae9 — ||=/&&=, negative-argument errors, strip, inject(&:+), chomp(""), upto, each_line sep, step, at/transpose/slice!/bsearch/chunk_while/slice_when, Hash#compact; the rest filed as T-839
 T-766 swift: `String(format:, args...)` returns the format unchanged — DONE 3009949d (String(format:) via shared c-printf.js + swift-format.js in all engines incl. %n$, *, length modifiers, %@; also native String(Int.min, radix:) fixed)
+T-767 java: a C-style array declarator on a method parameter (`double u[]`) breaks both halves — DONE 3245f0be (a parameter's [ CDims ] go through DeclDims and join its type in both grammars)
+T-776 java: a null Integer as array index, array dimension or charAt argument raises no NPE — DONE 4892fb93 (null-check on possibly-boxed indexes/dimensions at javac's evaluation point; null String positions NPE in all engines; int-array store converts before the bounds check)
 
 # Settled — do not re-open
 
