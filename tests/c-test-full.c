@@ -102,6 +102,11 @@ int s02(void) {
     check(206, '\x41' == 65 && '\101' == 65);
     check(207, '\'' == 39 && '\"' == 34 && '\\' == 92);
     check(208, 'A' + 1 == 'B' && '0' + 5 == '5' && '9' - '0' == 9);
+    /* A character constant is an int holding a char's value, and char is signed on
+       this target (arm64 clang): '\377' is -1, as cc answers. */
+    check(209, '\377' == -1 && '\xc8' == -56 && '\200' < 0 && '\x7f' == 127);
+    char c200 = (char)200;
+    check(210, c200 == '\xc8' && L'\xff' == 255);
     return 0;
 }
 
@@ -132,6 +137,13 @@ int s04(void) {
     check(405, sizeof(L"ab") == 3 * sizeof(L'a'));   /* wide: syntax and sizes only */
     char c8[4] = "hi";          /* array longer than the literal: zero padded */
     check(406, c8[2] == 0 && c8[3] == 0);
+    /* The execution character set is UTF-8: a character outside ASCII, and a \u / \U
+       universal character name, is stored as its UTF-8 bytes (cc's answers). */
+    const char *e1 = "\xc3\xa9";
+    check(407, sizeof("é") == 3 && "é"[0] == e1[0] && "é"[1] == e1[1]);
+    check(408, sizeof("\U0001F600x") == 6 && (unsigned char)"\U0001F600x"[0] == 240
+               && (unsigned char)"\U0001F600x"[3] == 128 && "\U0001F600x"[4] == 'x');
+    check(409, sizeof("😀") == 5 && (unsigned char)"€"[2] == 172 && "\u00e9"[1] == e1[1]);
     return 0;
 }
 

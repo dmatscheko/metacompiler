@@ -406,6 +406,10 @@ int main() {
     /* ----- combined pipeline ----- */
     check(pipeline() == 529);
 
+    /* putchar writes ONE BYTE: these two are the UTF-8 encoding of U+00E9, which cc
+       prints as the bytes c3 a9. test.sh --cross compares the halves byte for byte. */
+    putchar(0xC3); putchar(0xA9); putchar('\n');
+
     /* summary: "features: <checks> checks, <fails> failures" */
     putchar('f'); putchar('e'); putchar('a'); putchar('t'); putchar('u');
     putchar('r'); putchar('e'); putchar('s'); putchar(':'); putchar(' ');
