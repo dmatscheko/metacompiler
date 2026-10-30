@@ -6078,6 +6078,72 @@ fun sec134() {
     check("nest134g", Outer134.Item(5).twin() + Outer134b.Item(6).twin() == "P5Q6")
 }
 
+// ===== SECTION 135: an implicit receiver's member beats a top-level declaration =====
+// Kotlin's scope tower: locals, then the implicit receivers (innermost first, an
+// inner class's outer instance included), then the top level - so inside a member
+// an unqualified call, read or write of a name the receiver's class declares is the
+// member, a top-level `fun` / `val` / `var` of the same name notwithstanding - unless
+// no member of that name takes the call's argument count, when resolution moves on
+// to the top level. Spec only (the Kotlin specification, "Linked scopes" and "Call
+// without an explicit receiver"); no kotlinc on this machine.
+fun pick135() = 9
+fun span135(vararg xs: Int) = xs.size
+val tag135 = "top"
+var cnt135 = 1000
+interface M135 { fun pick135(): Int; fun g() = pick135() + 10 }
+class A135 : M135 { override fun pick135() = 1 }
+class B135 {
+    var cnt135 = 0
+    val tag135 get() = "getter"
+    fun pick135() = 2
+    fun all() = "" + pick135() + tag135
+    fun bump(): Int { cnt135++; cnt135 += 10; cnt135 = cnt135 * 2; return cnt135 }
+    fun local(): Int { fun pick135() = 50; return pick135() }
+    fun span135(a: Int) = a * 100
+    fun spans() = "" + span135(1, 2) + span135(3)
+    inner class I { fun t() = "" + pick135() + cnt135 }
+}
+class C135 { fun t() = "" + pick135() + tag135 + cnt135 }
+fun sec135() {
+    check("recv135a", A135().g() == 11)
+    val b = B135()
+    check("recv135b", b.all() == "2getter")
+    check("recv135c", b.bump() == 22 && cnt135 == 1000)
+    check("recv135d", b.local() == 50 && b.I().t() == "222")
+    check("recv135e", C135().t() == "9top1000")
+    check("recv135f", with(b) { "" + pick135() + tag135 } == "2getter")
+    check("recv135g", b.spans() == "2300")
+}
+
+// ===== SECTION 136: nested classes - KClass names, named constructor arguments =====
+// A nested class's KClass is its java class: simpleName Inner, qualifiedName
+// O136.Inner, java.name O136$Inner, and equal whichever way it was reached
+// (java 24 + kotlin-stdlib 2.2.21's Reflection.getOrCreateKotlinClass over the same
+// classes). A qualified or bare constructor call of a nested class orders its named
+// arguments by THAT class's parameters, even when another nested class shares its
+// simple name (the Kotlin specification, "Named arguments").
+object O136 { class Inner }
+class C136 { class Nd { class D }; inner class I }
+class N136a {
+    class In(val a: Int, val b: Int = 10) { fun s() = "a$a b$b" }
+    inner class R136(val x: Int, val y: Int) { fun s() = "x$x y$y" }
+    fun mk() = In(b = 3, a = 4).s()
+}
+class N136b {
+    class In(val c: Int, val d: Int) { fun s() = "c$c d$d" }
+    fun mk() = In(d = 5, c = 6).s()
+}
+fun sec136() {
+    check("kcls136a", "${O136.Inner::class.simpleName} ${O136.Inner::class.qualifiedName}" == "Inner O136.Inner")
+    val x = C136.Nd.D()
+    check("kcls136b", "${x::class.simpleName} ${x::class.qualifiedName} ${x::class.java.name}" == "D C136.Nd.D C136\$Nd\$D")
+    check("kcls136c", C136.I::class.qualifiedName == "C136.I" && C136.Nd::class == C136.Nd()::class)
+    check("kcls136d", C136.Nd::class.java.name == "C136\$Nd" && C136.Nd.D::class.simpleName == "D")
+    check("nest136a", N136a.In(b = 1, a = 2).s() == "a2 b1" && N136a().mk() == "a4 b3")
+    check("nest136b", N136b.In(d = 7, c = 8).s() == "c8 d7" && N136b().mk() == "c6 d5")
+    check("nest136c", N136a().R136(y = 1, x = 2).s() == "x2 y1")
+}
+
 fun main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -6209,6 +6275,8 @@ fun main() {
     sec132() // SECTION-CALL 132
     sec133() // SECTION-CALL 133
     sec134() // SECTION-CALL 134
+    sec135() // SECTION-CALL 135
+    sec136() // SECTION-CALL 136
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }

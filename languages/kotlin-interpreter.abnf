@@ -3924,13 +3924,22 @@ NotMemberKw = :script(~~
         var segs = t.split(".")
         for (var j = 0; j < segs.length - 1; j++) {
             var d = anytype
-            d = hasOwn(globalScope, segs[j]) ? globalScope[segs[j]] : undefined
-            if (d === null || d === undefined || typeof d != "object" || d.__isclass !== true) { continue }
+            d = kTypeDesc(hasOwn(globalScope, segs[j]) ? globalScope[segs[j]] : undefined, segs[j])
+            if (d === undefined) { continue }
             for (var k = j + 1; k < segs.length && d !== undefined; k++) {
-                d = (d.__statics != undefined && hasOwn(d.__statics, segs[k])) ? d.__statics[segs[k]] : undefined
+                d = (d.__statics != undefined && hasOwn(d.__statics, segs[k])) ? kTypeDesc(d.__statics[segs[k]], segs[k]) : undefined
             }
             return d
         }
+        return undefined
+    }
+    // The descriptor the binding of type name n holds: the binding itself, or the
+    // class of the singleton an `object n` declaration binds; undefined for anything
+    // else.
+    function kTypeDesc(v, n) {
+        if (v === null || v === undefined || typeof v != "object") { return undefined }
+        if (v.__isclass === true) { return v }
+        if (v.__class != undefined && v.__class != null && v.__class.__isclass === true && v.__class.__name == n) { return v.__class }
         return undefined
     }
     // A type name as written inside the types lex (curClasses where it was walked),
@@ -10043,6 +10052,42 @@ NotMemberKw = :script(~~
     }
 
     // ----- Member partitioning -----
+    // The member names some class declares, for core.globalHit below: every method
+    // and property name, the property names alone, and the argument counts each
+    // method name accepts as [min, max] (max -1: a vararg). Twin of classMethodNames /
+    // classPropNames / memberArity in kotlin-to-llvm-ir.abnf.
+    var kMemberNames = {}
+    var kMemberProps = {}
+    var kMemberArity = {}
+    function kNoteProp(n) { kMemberNames["$" + n] = true; kMemberProps["$" + n] = true }
+    function kNoteMethod(m) {
+        kMemberNames["$" + m.name] = true
+        var lo = 0
+        var va = false
+        for (var i = 0; i < m.params.length; i++) {
+            var pr = m.params[i]
+            if (typeof pr == "string") { lo++ }
+            else if (pr.vararg) { va = true }
+            else if (pr.def === null || pr.def === undefined) { lo++ }
+        }
+        var l = kMemberArity["$" + m.name]
+        if (l == undefined) { l = []; kMemberArity["$" + m.name] = l }
+        l.push([lo, va ? 0 - 1 : m.params.length])
+    }
+    function kNoteCtorMembers(cparams) {
+        for (var i = 0; i < cparams.length; i++) { if (cparams[i].prop) { kNoteProp(cparams[i].pname) } }
+    }
+    // Whether a call of argc arguments (-1: unknown, a spread) can be a member call:
+    // a property of the name may hold a function, or some method of it takes argc.
+    function kMemberAccepts(name, argc) {
+        if (kMemberProps["$" + name] === true || argc < 0) { return true }
+        var l = kMemberArity["$" + name]
+        if (l == undefined) { return false }
+        for (var j = 0; j < l.length; j++) {
+            if (argc >= l[j][0] && (l[j][1] < 0 || argc <= l[j][1])) { return true }
+        }
+        return false
+    }
     // The walked members of a class body, split into what each builder needs. The
     // initializers (property initializers AND init blocks) keep their DECLARATION
     // ORDER, because Kotlin runs them in that order.
@@ -10061,9 +10106,10 @@ NotMemberKw = :script(~~
             else if (it.secondary != undefined) { r.secondary.push(it.secondary) }
             else if (it.nested != undefined) { r.nested.push(it.nested) }
             else if (it.initblock != undefined) { r.inits.push({block: it.initblock}) }
-            else if (it.method != undefined) { r.methods.push(it.method) }
+            else if (it.method != undefined) { r.methods.push(it.method); kNoteMethod(it.method) }
             else if (it.isDeleg != undefined) { r.delegs.push(it); r.inits.push({deleg: it}) }
             else if (it.prop != undefined) {
+                kNoteProp(it.prop)
                 if (it.getter != undefined || it.setter != undefined) {
                     r.accessors.push(it)
                 }
@@ -10406,6 +10452,7 @@ NotMemberKw = :script(~~
             cls.__dataProps = dp
         }
         cls.__cparams = cparams
+        kNoteCtorMembers(cparams)
         cls.__ctor = makeCtor(cls, cparams, parentSpecs, parts.inits)
         cls.__secondary = parts.secondary
         // An `inner` class remembers WHICH class encloses it, so a BARE `Inner()`
@@ -10715,6 +10762,7 @@ NotMemberKw = :script(~~
         installMembers(cls, parts)
         attachNested(cls, parts.nested)
         cls.__cparams = cparams
+        kNoteCtorMembers(cparams)
         cls.__isenum = true
         cls.__ctor = makeCtor(cls, cparams, supersOf(items), parts.inits)
         globalScope[name] = cls
@@ -11057,6 +11105,9 @@ NotMemberKw = :script(~~
         var ho = objHasOwn
         for (var i = sc.length - 1; i >= 0; i--) {
             if (ho.call(sc[i], name)) {
+                // A receiver member shadowing a global: getVar / setVar below route
+                // both halves of the write to it (core.globalHit / globalSet).
+                if (i == 0 && kMemberNames["$" + name] === true && kRecvOf(name, false) != null) { break }
                 var cur = anytype
                 cur = sc[i][name]
                 if (cur !== null && typeof cur == "object" && cur.__pdeleg === true) {
@@ -11339,7 +11390,7 @@ NotMemberKw = :script(~~
             var isCls = kIsTypeName(baseName) || (hv && base !== null && base !== undefined && typeof base == "object" && base.__isclass === true)
             if (name == "class") {
                 if (!hv || kIsTypeName(baseName)) { return kClassLitNamed(baseName) }
-                return isCls ? kClassLitNamed(base.__name) : kClassOf(base)
+                return isCls ? kClassOfDesc(base) : kClassOf(base)
             }
             // String::length - the base names a builtin type this value model has no
             // descriptor for. It is still a perfectly good unbound reference: the
@@ -11440,14 +11491,34 @@ NotMemberKw = :script(~~
     }
     // `expr::class` / `Type::class`. KClass renders as "class Box" (java.lang.Class does
     // too, which is why .java answers the same value here), and for a top-level class in
-    // the default package qualifiedName IS the simple name.
-    function kClassLitNamed(n) { return {__kclass: true, kname: n} }
+    // the default package qualifiedName IS the simple name. A qualified `Outer.Inner`
+    // is the class of that nested descriptor.
+    function kClassLitNamed(n) {
+        if (n.indexOf(".") >= 0) {
+            var d = anytype
+            d = kQualDesc(n)
+            if (d !== undefined && d !== null && typeof d == "object" && d.__isclass === true) { return kClassOfDesc(d) }
+        }
+        return {__kclass: true, kname: n}
+    }
+    // The KClass of a declared type. A NESTED one is a java class named by its binary
+    // name (kJavaClass): simpleName `Inner`, qualifiedName `Outer.Inner`, rendered
+    // "class Outer$Inner" - kotlin-stdlib's ClassReference reads all three off the
+    // java class. A builtin throwable's package-qualified __bname is not used. Twin of
+    // ktClassOfDesc in abnf/jsrtkotlin.go and languages/lib/kotlin-rt.metajs.
+    function kClassOfDesc(d) {
+        var bn = anytype
+        bn = d.__bname
+        if (typeof bn == "string" && bn != "" && bn.indexOf(".") < 0) { return kJavaClass(bn) }
+        return {__kclass: true, kname: d.__name}
+    }
     // A collection's KClass is its JVM class (kJavaClass): kotlin-stdlib's
     // ClassReference names a java class by the class itself. Twin of ktClassOf in
     // abnf/jsrtkotlin.go and js_ktclasslit in languages/lib/kotlin-rt.metajs.
     function kClassOf(v) {
         var jc = kCollJvmClass(v)
         if (jc != "") { return kJavaClass(jc) }
+        if (v !== null && typeof v == "object" && v.__class != undefined && v.__class != null) { return kClassOfDesc(v.__class) }
         return {__kclass: true, kname: kSimpleName(v)}
     }
     // `javaClass`, and a collection's KClass: a class literal that also carries the
@@ -12374,6 +12445,8 @@ NotMemberKw = :script(~~
     // before both of its readers: the frozen host resolves a var by position where goja
     // hoists (docs/working-on-this-project.md 7.12).
     var kCallPos = false
+    // The call's argument count beside kCallPos (-1 with a spread), for globalHit.
+    var kCallArgc = 0
 
     // f(args): a global function, a builtin, a class constructor, or an object with an
     // `operator fun invoke`.
@@ -12413,6 +12486,10 @@ NotMemberKw = :script(~~
         for (var i = 0; i < tys.length; i++) { args[i] = kAdoptThunk(args[i], tys[i]) }
     }
     function makeCallBody(name, targs, args, lex) {
+        var argc = args.length
+        for (var ai = 0; ai < args.length; ai++) {
+            if (typeof args[ai] != "function" && args[ai].spread != undefined) { argc = 0 - 1 }
+        }
         return function() {
             var spec = kevalArgs(args)
             // THE SYNTACTIC POSITION. `first` is a PROPERTY of IntProgression and a
@@ -12424,6 +12501,7 @@ NotMemberKw = :script(~~
             // is cleared here too, because a name the SCOPE walk answers never reaches
             // varMiss at all and the flag would otherwise survive into the next miss.
             kCallPos = true
+            kCallArgc = argc
             var f = getVar(name)
             kCallPos = false
             if (f != undefined && f !== null && f.__isclass) { return kNew(lex === null ? f : kLexClass(f, name, lex), spec) }
@@ -12825,6 +12903,56 @@ NotMemberKw = :script(~~
             for (var i = 0; i < arguments.length; i++) { args.push(arguments[i]) }
             return m.apply(undefined, concat2impl([self], args))
         }
+    }
+    // KOTLIN'S SCOPE TOWER PUTS THE IMPLICIT RECEIVERS BETWEEN THE LOCALS AND THE
+    // TOP LEVEL: inside a member, an unqualified `f()` or `p` that a receiver's class
+    // declares is that member even when a top-level `fun f` / `val p` exists (the
+    // Kotlin specification, "Linked scopes" and "Call without an explicit receiver").
+    // getVar and setVar consult these two hooks when the name resolved in the global
+    // scope; a local binding never reaches them. kMemberNames - every name some class
+    // declares as a method or property - keeps a top-level name no class shadows at
+    // one lookup. Only a receiver that is a class instance is asked, and only for an
+    // own field, an accessor or (in call position) a method; a companion member is
+    // not. Twin of js_ktrecvof in abnf/jsrtkotlin.go and languages/lib/kotlin-rt.metajs.
+    function kRecvOf(name, iscall) {
+        var chain = findThisChain()
+        for (var ci = 0; ci < chain.length; ci++) {
+            var r = kRecvDeclaring(chain[ci], name, iscall)
+            if (r != null) { return r }
+        }
+        return kRecvDeclaring(findDispatch(), name, iscall)
+    }
+    function kRecvDeclaring(start, name, iscall) {
+        var cur = anytype
+        cur = start
+        while (cur != undefined && cur != null && typeof cur == "object") {
+            var cls = cur.__class
+            if (cls != undefined && cls != null && cls.__isclass === true) {
+                if (hasOwn(cur, name) || typeof clsFind(cls, "get$" + name) == "function") { return cur }
+                if (iscall && typeof clsFind(cls, name) == "function") { return cur }
+            }
+            cur = hasOwn(cur, "__outer") ? cur.__outer : null
+        }
+        return null
+    }
+    core.globalHit = function(name) {
+        if (kMemberNames["$" + name] !== true) { return null }
+        var iscall = kCallPos
+        kCallPos = false
+        // A member method that cannot take the call's arguments does not hide the
+        // top-level function: resolution moves on to the next level.
+        if (iscall && !kMemberAccepts(name, kCallArgc)) { return null }
+        var r = kRecvOf(name, iscall)
+        if (r == null) { return null }
+        if (hasOwn(r, name)) { return {v: kLateinitCheck(r, name, r[name])} }
+        var g = clsFind(r.__class, "get$" + name)
+        if (typeof g == "function") { return {v: g(r)} }
+        return {v: boundMethod(r, clsFind(r.__class, name))}
+    }
+    core.globalSet = function(name, value) {
+        if (kMemberNames["$" + name] !== true) { return false }
+        var r = kRecvOf(name, false)
+        return r != null && recvStore(r, name, value)
     }
     core.setMiss = function(name, value) {
         if (recvStore(findThis(), name, value)) { return true }

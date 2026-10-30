@@ -235,7 +235,12 @@ Program     <~~ buildMain(takeAll()) ~~>
 // slots they occupy. noteTopItem and ClassMark are item-neutral - each pops the thunk
 // the alternative pushed and pushes it straight back.
 TopItem     <~~ push(noteTopItem(pop())) ~~>
-            = [ Modifiers ] ( TypeMark | FunDecl <~~ push(makeFunStmt(pop(), true)) ~~> | ExtFun | UnsupFun | ClassMark | ExtProp | ExtDelegProp | TopAccProp | UnsupAccessor | TopProp ) ;
+            = [ Modifiers ] ( TypeMark | FunDecl <~~ push(makeFunStmt(pop(), true)) ~~> | ExtFun | UnsupFun | ClassMark | ExtProp | ExtDelegProp | TopAccMark | UnsupAccessor | TopPropMark ) ;
+// The name a top-level property declares, for ktGlobShadow; the thunk passes through.
+TopAccMark  <~~ push(ktNoteTopVal(pop(), c.srcSlice(up.start, up.pos))) ~~>
+            = TopAccProp ;
+TopPropMark <~~ push(ktNoteTopVal(pop(), c.srcSlice(up.start, up.pos))) ~~>
+            = TopProp ;
 TypeMark    <~~ push(markTopType(pop())) ~~>
             = UnsupType ;
 ClassMark   <~~ push(markTopType(pop())) ~~>
@@ -2937,6 +2942,98 @@ KwContract  = "contract" KwEnd ;
     // name, which only the run time knows (see makeCall).
     var funNames = {}
     var topFunNames = {}
+    // The names top-level properties declare (`val p = 1`; an extension property
+    // declares none).
+    var topValNames = {}
+    function ktNoteTopVal(t, src) {
+        var i = ktSkipWs(src, src.indexOf("va") + 3)
+        var j = i
+        while (j < src.length && ktIdChar(src.charAt(j))) { j++ }
+        var k = ktSkipWs(src, j)
+        if (j > i && src.charAt(k) != "." && src.charAt(k) != "<") {
+            topValNames["$" + src.substring(i, j)] = true
+            topDeclList.push(src.substring(i, j))
+        }
+        return t
+    }
+    var topDeclList = []
+    // The scope the top-level declarations are bound in carries __kttop when any of
+    // them is shadowed (ktGlobShadow): js_ktrecvof stops its search for a local there.
+    function emitTopMark(b) {
+        for (var i = 0; i < topDeclList.length; i++) {
+            if (ktGlobShadow(topDeclList[i])) {
+                callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "__kttop"), hTrue])
+                return
+            }
+        }
+    }
+    // The argument counts the member methods of each name accept, [min, max] (max -1:
+    // a vararg). A member that cannot take the call's arguments does not hide a
+    // top-level function: resolution moves on to the next level of the tower. Twin of
+    // kMemberArity in kotlin-interpreter.abnf.
+    var memberArity = {}
+    function ktNoteMethod(m) {
+        classMethodNames["$" + m.name] = true
+        var sig = m.sig
+        if (sig == undefined) { return }
+        var lo = 0
+        for (var i = 0; i < sig.params.length; i++) {
+            if (i != sig.varargAt && (sig.defs[i] === undefined || sig.defs[i] === null)) { lo++ }
+        }
+        var l = memberArity["$" + m.name]
+        if (l == undefined) { l = []; memberArity["$" + m.name] = l }
+        l.push([lo, sig.varargAt >= 0 ? 0 - 1 : sig.params.length])
+    }
+    // Whether a call with these arguments can be a member call: some member method of
+    // the name accepts their count (a spread makes the count unknown, so yes), or a
+    // property of the name may hold a function.
+    function ktMemberAccepts(name, args) {
+        if (classPropNames["$" + name] == true) { return true }
+        var n = args.length
+        for (var i = 0; i < args.length; i++) { if (args[i].spread == true) { return true } }
+        var l = memberArity["$" + name]
+        if (l == undefined) { return false }
+        for (var j = 0; j < l.length; j++) {
+            if (n >= l[j][0] && (l[j][1] < 0 || n <= l[j][1])) { return true }
+        }
+        return false
+    }
+    // KOTLIN'S SCOPE TOWER PUTS THE IMPLICIT RECEIVERS BETWEEN THE LOCALS AND THE
+    // TOP LEVEL: an unqualified `f()` or `p` that a receiver's class declares is that
+    // member even when a top-level `fun f` / `val p` exists. Only a name that is both
+    // declared at top level and declared as a member somewhere pays for the run-time
+    // test (js_ktrecvof, which names the receiver or answers undefined); every other
+    // site is emitted as before. Twin of core.globalHit in kotlin-interpreter.abnf.
+    function ktGlobShadow(name) {
+        return (topFunNames["$" + name] == true || topValNames["$" + name] == true)
+            && (classMethodNames["$" + name] == true || classPropNames["$" + name] == true)
+    }
+    // A bare read / write / call of such a name: the receiver arm (rv is the receiver
+    // js_ktrecvof found) or the ordinary one, merged.
+    function emitRecvOr(b, name, iscall, recvArm, plainArm) {
+        var rv = callExt(b, "js_ktrecvof", [curScopeV, emitStr(b, name), iscall ? hTrue : hFalse])
+        var recvB = curF.NewBlock("")
+        var plainB = curF.NewBlock("")
+        var mrg = curF.NewBlock("")
+        b.NewCondBr(truthy(b, callExt(b, "js_sne", [rv, hUndef])), recvB, plainB)
+        var r1 = recvArm(recvB, rv)
+        r1.b.NewBr(mrg)
+        var r2 = plainArm(plainB)
+        r2.b.NewBr(mrg)
+        return {b: mrg, v: mrg.NewPhi([llvm.ir.NewIncoming(r1.v, r1.b), llvm.ir.NewIncoming(r2.v, r2.b)])}
+    }
+    function emitBareGet(b, name) {
+        if (!ktGlobShadow(name)) { return {b: b, v: b.NewCall(rtKtGet(), [curScopeV, emitStr(b, name)])} }
+        return emitRecvOr(b, name, false,
+            function(rb, rv) { return {b: rb, v: callExt(rb, "js_ktfget", [rv, emitStr(rb, name)])} },
+            function(pb) { return {b: pb, v: pb.NewCall(rtKtGet(), [curScopeV, emitStr(pb, name)])} })
+    }
+    function emitBareSet(b, name, v, setter) {
+        if (!ktGlobShadow(name)) { b.NewCall(setter, [curScopeV, emitStr(b, name), v]); return b }
+        return emitRecvOr(b, name, false,
+            function(rb, rv) { callExt(rb, "js_ktset", [rv, emitStr(rb, name), v]); return {b: rb, v: hUndef} },
+            function(pb) { pb.NewCall(setter, [curScopeV, emitStr(pb, name), v]); return {b: pb, v: hUndef} }).b
+    }
     // Parameter NAME lists by callee name, so a call site can place its named
     // arguments: functions (and lambdas' owners) in funParams, member methods in
     // methodParams. A method name declared by two classes keeps the LAST list here;
@@ -4158,7 +4255,7 @@ KwContract  = "contract" KwEnd ;
                 // qualified by ktLexType: its binary name is the path from the first
                 // declared type on.
                 var simple = baseTypeName(base)
-                dest = (classNames[simple] == 1 || interfaceNames["$" + simple] == true) ? ktBinOf(simple) : ""
+                dest = (classNames[simple] == 1 || interfaceNames["$" + simple] == true) ? ktBinKey(simple) : ""
                 var segs = qb.split(".")
                 for (var sg = 0; sg < segs.length - 1 && dest != ""; sg++) {
                     if (classNames[segs[sg]] == 1 || interfaceNames["$" + segs[sg]] == true) {
@@ -4337,6 +4434,18 @@ KwContract  = "contract" KwEnd ;
         var lazyAt = ktChainSites(suffixes)
         var lead = ktLeadName(txt)
         var leadAt = ktAt
+        // `Outer.In(b = 1, a = 2)`: a call whose receiver is a run of plain member
+        // reads off a name may be a nested class's constructor, and its named
+        // arguments then take that class's parameter list (ktQualCtorBin decides at
+        // emit time, when every declaration is known).
+        if (lead != "") {
+            var tpath = [lead]
+            for (var si = 0; si < suffixes.length && suffixes[si].safe != true; si++) {
+                if (suffixes[si].kind == "mcall") { suffixes[si].tpath = tpath.slice(0) }
+                if (suffixes[si].kind != "field") { break }
+                tpath.push(suffixes[si].name)
+            }
+        }
         function emitSuffixT(b, cur, s) {
             var sr = emitSuffix(b, cur, s)
             if (s.ktRes == undefined) { return sr }
@@ -4411,7 +4520,15 @@ KwContract  = "contract" KwEnd ;
                     lamB.NewBr(mrg)
                     return {b: mrg, v: mrg.NewPhi([llvm.ir.NewIncoming(mv, objB2), llvm.ir.NewIncoming(lv2, lamB)])}
                 }
-                var ea = emitArgs(b, orderArgs(s.args, paramsFor(s.name, s.args)))
+                var cbin = s.tpath != undefined ? ktQualCtorBin(s.tpath, s.name) : null
+                // `outer.Inner(y = 5, x = 6)` on an instance: no method has the name and
+                // one class does.
+                if (cbin == null && classNames[s.name] == 1 && methodParams["$" + s.name] == undefined) {
+                    ktDeclIndex()
+                    var sbs = simpleBins["$" + s.name]
+                    if (sbs != undefined && sbs.length == 1 && ctorParamNames["$" + sbs[0]] != undefined) { cbin = sbs[0] }
+                }
+                var ea = emitArgs(b, orderArgs(s.args, cbin != null ? ctorParamNames["$" + cbin] : paramsFor(s.name, s.args)))
                 // An explicit type argument the method actually uses -
                 // xs.filterIsInstance<String>() - rides along as a trailing string.
                 var tnV = mcallTArg(s)
@@ -5040,7 +5157,7 @@ KwContract  = "contract" KwEnd ;
         var parts = splitMembers(items, hdr.i)
         var props = parts.props
         var methods = parts.methods
-        for (var om = 0; om < methods.length; om++) { classMethodNames["$" + methods[om].name] = true }
+        for (var om = 0; om < methods.length; om++) { ktNoteMethod(methods[om]) }
         return function(b) {
             return emitObjectInstance(b, "<object>", methods, props, hdr.supers, parts.accprops, parts.memberExts, parts.memberExtProps, parts.memberExtDelegs)
         }
@@ -5096,7 +5213,7 @@ KwContract  = "contract" KwEnd ;
     var ktCallSeen = {}
     function makeCallBody(name, args) {
         ktCallSeen["$" + name] = true
-        return function(b) {
+        var plain = function(b) {
             // Regex(pattern) / Regex(pattern, options). Kotlin has no regexp literal,
             // so this constructor call IS the literal syntax; the pattern is compiled
             // (and reported on) by js_rxktnew - see abnf/jsrtregexkt.go. A program
@@ -5195,12 +5312,13 @@ KwContract  = "contract" KwEnd ;
                 // instance, exactly as `outer.Inner()` does. js_ktouter picks the
                 // receiver whose class is NAMED by the owner, so a construction inside
                 // a `with` still finds the right one.
-                var ownerN = innerOwner["$" + name]
+                var ckey = ktBinKey(name)
+                var ownerN = innerOwner["$" + ckey]
                 if (ownerN != undefined) {
                     callExt(b, "js_set", [objV, emitStr(b, "__outer"),
                                           b.NewCall(rtOuter(), [curScopeV, emitStr(b, ownerN)])])
                 }
-                var cargs = orderArgs(args, ctorParamNames["$" + name])
+                var cargs = orderArgs(args, ctorParamNames["$" + ckey])
                 var argsV = callExt(b, "js_arr_new", [])
                 callExt(b, "js_arr_push", [argsV, objV])
                 for (var i = 0; i < cargs.length; i++) {
@@ -5236,6 +5354,15 @@ KwContract  = "contract" KwEnd ;
                 })
             }
             return {b: b, v: callExt(b, "js_call", [fV, hUndef, ea.v])}
+        }
+        // A member of an implicit receiver beats a top-level function of the same
+        // name (ktGlobShadow).
+        return function(b) {
+            if (!ktGlobShadow(name) || !ktMemberAccepts(name, args)) { return plain(b) }
+            return emitRecvOr(b, name, true, function(rb, rv) {
+                var ma = emitArgs(rb, orderArgs(args, paramsFor(name, args)))
+                return {b: ma.b, v: callExt(ma.b, "js_ktsmcall", [rv, emitStr(ma.b, name), ma.v])}
+            }, plain)
         }
     }
 
@@ -5412,14 +5539,19 @@ KwContract  = "contract" KwEnd ;
                 v = nr.v
                 callExt(b, "js_set", [fThisV, fNameV, v])
             } else if (ref.path.length == 0) {
-                var nameV = emitStr(b, ref.name)
-                nr = emitNewVal(b, (op != "=") ? b.NewCall(rtKtGet(), [curScopeV, nameV]) : hUndef, isVal)
+                var oldB = hUndef
+                if (op != "=") {
+                    var og = emitBareGet(b, ref.name)
+                    b = og.b
+                    oldB = og.v
+                }
+                nr = emitNewVal(b, oldB, isVal)
                 b = nr.b
                 v = nr.v
                 // js_ktvarset, not js_kset: a binding holding a delegate box is written
                 // through the delegate's setValue (see RealDelegateDecl). `this += x`
                 // mutated `this` in place and has no binding to write.
-                if (ref.name != "this") { b.NewCall(rtVarSet(), [curScopeV, nameV, v]) }
+                if (ref.name != "this") { b = emitBareSet(b, ref.name, v, rtVarSet()) }
             } else {
                 var p = emitRefPath(b, ref)
                 b = p.b
@@ -5563,10 +5695,9 @@ KwContract  = "contract" KwEnd ;
         return function(b) {
             var oneV = emitNum(b, step)
             if (ref.path.length == 0) {
-                var nameV = emitStr(b, ref.name)
-                var newV = callExt(b, "js_ktstep", [b.NewCall(rtKtGet(), [curScopeV, nameV]), oneV])
-                b.NewCall(rtKSet(), [curScopeV, nameV, newV])
-                return {b: b, v: newV}
+                var og = emitBareGet(b, ref.name)
+                var newV = callExt(og.b, "js_ktstep", [og.v, oneV])
+                return {b: emitBareSet(og.b, ref.name, newV, rtKSet()), v: newV}
             }
             var p = emitRefPath(b, ref)
             var rm = emitSlotRead(p.b, p)
@@ -5580,10 +5711,8 @@ KwContract  = "contract" KwEnd ;
         return function(b) {
             var oneV = emitNum(b, step)
             if (ref.path.length == 0) {
-                var nameV = emitStr(b, ref.name)
-                var oldV = b.NewCall(rtKtGet(), [curScopeV, nameV])
-                b.NewCall(rtKSet(), [curScopeV, nameV, callExt(b, "js_ktstep", [oldV, oneV])])
-                return {b: b, v: oldV}
+                var og = emitBareGet(b, ref.name)
+                return {b: emitBareSet(og.b, ref.name, callExt(og.b, "js_ktstep", [og.v, oneV]), rtKSet()), v: og.v}
             }
             var p = emitRefPath(b, ref)
             var rm = emitSlotRead(p.b, p)
@@ -6272,7 +6401,7 @@ KwContract  = "contract" KwEnd ;
     }
     function makeFunStmt(f, top) {
         funNames["$" + f.name] = true
-        if (top) { topFunNames["$" + f.name] = true }
+        if (top) { topFunNames["$" + f.name] = true; topDeclList.push(f.name) }
         return function(b) {
             var idx = emitFunc(f.params, f.body, false, false, f.sig)
             defPos(b, f.pos)
@@ -6851,8 +6980,8 @@ KwContract  = "contract" KwEnd ;
             // rule, and what recvLookup does in the other half (`inner class In(val tag:
             // String)` inside `class Outer(val tag: String)` reads the inner `tag`).
             if (emitOuterProps != null && emitOuterProps["$" + name] == true
-                && !(emitClassTop() != null && classOwnProps["$" + emitClassTop()] != undefined
-                     && classOwnProps["$" + emitClassTop()]["$" + name] == true)) {
+                && !(ktEmitBin() != null && classOwnProps["$" + ktEmitBin()] != undefined
+                     && classOwnProps["$" + ktEmitBin()]["$" + name] == true)) {
                 var itV = b.NewCall(rtKtGet(), [curScopeV, emitStr(b, "this")])
                 return {b: b, v: callExt(b, "js_get", [callExt(b, "js_get", [itV, emitStr(b, "__outer")]),
                                                        emitStr(b, name)])}
@@ -6861,7 +6990,7 @@ KwContract  = "contract" KwEnd ;
                 var thisV = b.NewCall(rtKtGet(), [curScopeV, emitStr(b, "this")])
                 return {b: b, v: callExt(b, "js_get", [thisV, emitStr(b, emitBackingField)])}
             }
-            return {b: b, v: b.NewCall(rtKtGet(), [curScopeV, emitStr(b, name)])}
+            return emitBareGet(b, name)
         }
     }
     // Variables holding a lambda WITH RECEIVER (declared type Recv.(A) -> R). Their
@@ -7246,14 +7375,66 @@ KwContract  = "contract" KwEnd ;
         for (var i = 0; i < supers.length; i++) { ns.push(supers[i].name) }
         declTick++
         declMark = {name: name, supers: ns}
-        var own = {}
+        var rec = declRecs.length
+        declRecs.push({name: name, owner: 0 - 1, nested: nested, ctor: undefined, props: undefined})
         for (var j = 0; j < nested.length; j++) {
-            if (nested[j].name != null) { nestOwner["$" + nested[j].name] = name; own["$" + nested[j].name] = true }
+            if (nested[j].name != null && nested[j].rec != undefined) { declRecs[nested[j].rec].owner = rec }
         }
-        nestedOf["$" + name] = own
+        lastDeclRec = rec
+        return declRecs[rec]
     }
-    // The nested type names each type declares, by the owner's simple name.
+    // One record per TYPE declaration, in walk order: its simple name, the record of
+    // the type it is nested in (-1 at top level, and for a local type), its nested
+    // declarations, its primary-constructor parameter names and its own property
+    // names. A nested declaration is walked before its owner, so its BINARY name
+    // (Outer$Inner) is only known once the whole file has been walked; ktDeclIndex
+    // then keys the emit-time tables below by it, so `class A { class In }` and
+    // `class B { class In }` keep separate entries. makeNested / makeNestedValue
+    // carry the index up to the owner (an index, not the record: a tag-stack value
+    // is copied).
+    var declRecs = []
+    var lastDeclRec = -1
+    var declIndexed = 0 - 1
+    function ktRecBin(r) {
+        var out = declRecs[r].name
+        var cur = declRecs[r].owner
+        for (var g = 0; g < 64 && cur >= 0; g++) {
+            out = declRecs[cur].name + "$" + out
+            cur = declRecs[cur].owner
+        }
+        return out
+    }
+    // Rebuilt whenever a declaration was recorded since the last build, so a read
+    // made before the walk ends never leaves a table short.
+    function ktDeclIndex() {
+        if (declIndexed == declRecs.length) { return }
+        declIndexed = declRecs.length
+        ctorParamNames = {}
+        classOwnProps = {}
+        innerOwner = {}
+        nestedOf = {}
+        simpleBins = {}
+        for (var r = 0; r < declRecs.length; r++) {
+            var d = declRecs[r]
+            var bin = ktRecBin(r)
+            if (d.ctor != undefined) { ctorParamNames["$" + bin] = d.ctor }
+            if (d.props != undefined) { classOwnProps["$" + bin] = d.props }
+            var own = {}
+            for (var j = 0; j < d.nested.length; j++) {
+                var nn = d.nested[j].name
+                if (nn == null) { continue }
+                own["$" + nn] = true
+                if (d.nested[j].inner == true) { innerOwner["$" + bin + "$" + nn] = d.name }
+            }
+            nestedOf["$" + bin] = own
+            var sb = simpleBins["$" + d.name]
+            if (sb == undefined) { simpleBins["$" + d.name] = [bin] } else { sb.push(bin) }
+        }
+    }
+    // The nested type names each type declares, by the owner's binary name.
     var nestedOf = {}
+    // Every binary name declared under a simple name.
+    var simpleBins = {}
     // A type name as written at the current emission point, qualified when it is
     // simple and names a nested type of an enclosing type: `Inner` inside class
     // Outer (or inside a sibling nested in it) is Outer.Inner, whatever other
@@ -7268,28 +7449,45 @@ KwContract  = "contract" KwEnd ;
         var chain = curBinPrefix == "" ? [] : curBinPrefix.split("$")
         var top = emitClassTop()
         if (top != null) { chain.push(top) }
+        ktDeclIndex()
         for (var i = chain.length - 1; i >= 0; i--) {
-            var ns = nestedOf["$" + chain[i]]
+            var ns = nestedOf["$" + chain.slice(0, i + 1).join("$")]
             if (ns != undefined && ns["$" + base] == true) {
                 return chain.slice(0, i + 1).join(".") + "." + tname
             }
         }
         return tname
     }
-    // The enclosing type of each nested declaration, by simple name, so an emit-time
-    // cast can spell a nested class's JVM binary name (Outer$Inner) - emitBinName's
-    // prefix only exists while the class itself is being emitted.
-    var nestOwner = {}
-    function ktBinOf(name) {
-        var out = name
-        var cur = name
-        for (var g = 0; g < 32; g++) {
-            var o = nestOwner["$" + cur]
-            if (o == undefined) { return out }
-            out = o + "$" + out
-            cur = o
+    // The binary name a simple type name written at the current emission point
+    // denotes: the lexically enclosing nested type of that name (ktLexType), else
+    // the one type the file declares under it, else the name itself. emitBinName's
+    // prefix only exists while the class itself is being emitted, so an emit-time
+    // cast or call resolves it here.
+    function ktBinKey(name) {
+        ktDeclIndex()
+        var q = ktLexType(name)
+        if (q.indexOf(".") >= 0) { return q.split(".").join("$") }
+        var sb = simpleBins["$" + name]
+        return (sb != undefined && sb.length == 1) ? sb[0] : name
+    }
+    // The binary name of the class a qualified constructor call `Outer.Mid.In(...)`
+    // names - path is [Outer, Mid], name In - or null when the path is not a chain
+    // of declared nested types.
+    function ktQualCtorBin(path, name) {
+        var bin = ktBinKey(path[0])
+        for (var k = 1; k <= path.length; k++) {
+            var ns = nestedOf["$" + bin]
+            var seg = k < path.length ? path[k] : name
+            if (ns == undefined || ns["$" + seg] != true) { return null }
+            bin = bin + "$" + seg
         }
-        return out
+        return ctorParamNames["$" + bin] != undefined ? bin : null
+    }
+    // The binary name of the class whose members are being emitted, null outside one.
+    function ktEmitBin() {
+        var top = emitClassTop()
+        if (top == null) { return null }
+        return curBinPrefix == "" ? top : curBinPrefix + "$" + top
     }
     function markTopType(t) {
         if (declTick > prevTick) { topClassPending = declMark }
@@ -7353,7 +7551,7 @@ KwContract  = "contract" KwEnd ;
         var inner = false
         var at = 0
         if (items[at] != undefined && items[at].isinner != undefined) { inner = true; at++ }
-        return {name: lastDeclaredClass, inner: inner, asvalue: false, stmt: items[at]}
+        return {name: lastDeclaredClass, inner: inner, asvalue: false, stmt: items[at], rec: lastDeclRec}
     }
     // The same, for a nested type that is NOT a class: an enum, an interface or an
     // object declaration. makeEnumStmt / makeInterfaceStmt / makeObjectStmt record the
@@ -7363,7 +7561,7 @@ KwContract  = "contract" KwEnd ;
     // construction factory - an enum, an interface and an object are never `new`ed.
     var lastDeclaredType = null
     function makeNestedValue(stmt) {
-        return {name: lastDeclaredType, inner: false, asvalue: true, stmt: stmt}
+        return {name: lastDeclaredType, inner: false, asvalue: true, stmt: stmt, rec: lastDeclRec}
     }
     // The factory the enclosing descriptor exposes under the nested class's name. It is
     // an ordinary callable property, so `Outer.Nested(a)` (memberCall on a descriptor
@@ -7390,15 +7588,17 @@ KwContract  = "contract" KwEnd ;
     // inside the owner's body resolves through the ordinary scope chain.
     function emitNestedList(b, holderV, alsoV, nested, ownerName) {
         for (var nc = 0; nc < nested.length; nc++) {
-            var savedOuter = emitOuterProps
-            if (nested[nc].inner) { emitOuterProps = classOwnProps["$" + ownerName] }
-            var savedScopeV = curScopeV
-            curScopeV = callExt(b, "js_scope_new", [savedScopeV])
-            var ownScopeV = curScopeV
             // The enclosing type's binary name, for the __bname of everything the
             // nested declaration itself declares. See emitBinName.
             var savedBin = curBinPrefix
-            curBinPrefix = (savedBin == "") ? ownerName : savedBin + "$" + ownerName
+            var ownerBin = (savedBin == "") ? ownerName : savedBin + "$" + ownerName
+            var savedOuter = emitOuterProps
+            ktDeclIndex()
+            if (nested[nc].inner) { emitOuterProps = classOwnProps["$" + ownerBin] }
+            var savedScopeV = curScopeV
+            curScopeV = callExt(b, "js_scope_new", [savedScopeV])
+            var ownScopeV = curScopeV
+            curBinPrefix = ownerBin
             b = nested[nc].stmt(b)
             curBinPrefix = savedBin
             emitOuterProps = savedOuter
@@ -7662,7 +7862,10 @@ KwContract  = "contract" KwEnd ;
     // this@Label and this::prop.isInitialized.
     var emitClassNames = []
     function emitClassTop() { return emitClassNames.length > 0 ? emitClassNames[emitClassNames.length - 1] : null }
-    // "$Inner" -> "Outer" for every `inner` class, filled by makeClassStmt of the owner.
+    // "$Outer$Inner" -> "Outer" for every `inner` class (ktDeclIndex), so the bare
+    // `Inner()` call site can capture the enclosing instance as __outer, as the
+    // qualified `outer.Inner()` does (emitNestedFactory). The twin is cls.__isinner /
+    // __outerName in kotlin-interpreter.abnf.
     var innerOwner = {}
     function makeThisAt(lbl) {
         return function(b) {
@@ -7725,7 +7928,19 @@ KwContract  = "contract" KwEnd ;
             var baseV = ktTypeNameSet["$" + baseName] == true
                 ? callExt(b, "js_ktrefbase", [curScopeV, emitStr(b, baseName), hTrue])
                 : b.NewCall(rtRefBase(), [curScopeV, emitStr(b, baseName)])
-            if (name == "class") { return {b: b, v: callExt(b, "js_ktclasslit", [baseV])} }
+            if (name == "class") {
+                // `Outer.Inner::class` is the class of the nested descriptor: read
+                // from the first segment that is a declared type on, as kQualDesc
+                // does in kotlin-interpreter.abnf.
+                var segs = baseName.split(".")
+                for (var j = 0; j < segs.length - 1; j++) {
+                    if (classNames[segs[j]] == undefined && interfaceNames["$" + segs[j]] != true) { continue }
+                    baseV = b.NewCall(rtRefBase(), [curScopeV, emitStr(b, segs[j])])
+                    for (var k = j + 1; k < segs.length; k++) { baseV = callExt(b, "js_ktfget", [baseV, emitStr(b, segs[k])]) }
+                    break
+                }
+                return {b: b, v: callExt(b, "js_ktclasslit", [baseV])}
+            }
             return {b: b, v: emitRefValue(b, baseV, name)}
         }
     }
@@ -7773,8 +7988,8 @@ KwContract  = "contract" KwEnd ;
         var comp = parts.companion
         classNames[name] = 1
         lastDeclaredClass = name
-        noteDecl(name, hdr.supers, parts.nested)
-        ctorParamNames["$" + name] = ctorSig(hdr.cparams).params
+        var drec = noteDecl(name, hdr.supers, parts.nested)
+        drec.ctor = ctorSig(hdr.cparams).params
         var own = {}
         var ownProps = {}
         for (var cp = 0; cp < hdr.cparams.length; cp++) {
@@ -7785,18 +8000,9 @@ KwContract  = "contract" KwEnd ;
             notePropName(parts.accprops[ac].name)
             ownProps["$" + parts.accprops[ac].name] = true
         }
-        classOwnProps["$" + name] = ownProps
-        // Which class encloses each `inner` class, recorded at WALK time so the bare
-    // `Inner()` call site below can capture the enclosing instance as __outer, as the
-    // qualified `outer.Inner()` does (emitNestedFactory). The twin is cls.__isinner /
-    // __outerName in kotlin-interpreter.abnf.
-        for (var nn = 0; nn < parts.nested.length; nn++) {
-            if (parts.nested[nn].inner == true && parts.nested[nn].name != null) {
-                innerOwner["$" + parts.nested[nn].name] = name
-            }
-        }
+        drec.props = ownProps
         for (var cm = 0; cm < methods.length; cm++) {
-            classMethodNames["$" + methods[cm].name] = true
+            ktNoteMethod(methods[cm])
             noteParams(methods[cm].name, methods[cm].params)
             own["$" + methods[cm].name] = true
             noteMethodClass(methods[cm].name, name)
@@ -7819,7 +8025,7 @@ KwContract  = "contract" KwEnd ;
         }
         if (comp != null) {
             for (var cc = 0; cc < comp.length; cc++) {
-                if (comp[cc].method != undefined) { classMethodNames["$" + comp[cc].method.name] = true }
+                if (comp[cc].method != undefined) { ktNoteMethod(comp[cc].method) }
             }
         }
         return function(b) {
@@ -7897,7 +8103,7 @@ KwContract  = "contract" KwEnd ;
             if (items[i] != undefined && items[i] != null && items[i].emembers != undefined) {
                 body = splitMembers(items[i].emembers, 0)
                 for (var m = 0; m < body.methods.length; m++) {
-                    classMethodNames["$" + body.methods[m].name] = true
+                    ktNoteMethod(body.methods[m])
                     noteParams(body.methods[m].name, body.methods[m].params)
                 }
             } else { args.push(items[i]) }
@@ -7915,11 +8121,11 @@ KwContract  = "contract" KwEnd ;
         var methods = parts.methods
         classNames[name] = 1
         lastDeclaredType = name
-        noteDecl(name, hdr.supers, parts.nested)
-        ctorParamNames["$" + name] = ctorSig(hdr.cparams).params
+        var drec = noteDecl(name, hdr.supers, parts.nested)
+        drec.ctor = ctorSig(hdr.cparams).params
         var own = {}
         for (var cm = 0; cm < methods.length; cm++) {
-            classMethodNames["$" + methods[cm].name] = true
+            ktNoteMethod(methods[cm])
             noteParams(methods[cm].name, methods[cm].params)
             own["$" + methods[cm].name] = true
             declOpIfConvention(methods[cm].name, name)
@@ -8015,7 +8221,7 @@ KwContract  = "contract" KwEnd ;
                     emitClassNames.pop()
                 }
                 callExt(b, "js_set", [objV, emitStr(b, "__class"), entClsV])
-                var eargs = orderArgs(entries[e].args, ctorParamNames["$" + name])
+                var eargs = orderArgs(entries[e].args, drec.ctor)
                 var argsV = callExt(b, "js_arr_new", [])
                 callExt(b, "js_arr_push", [argsV, objV])
                 for (var a = 0; a < eargs.length; a++) {
@@ -8114,7 +8320,7 @@ KwContract  = "contract" KwEnd ;
             // declOpIfConvention call is the class emitter's, for the same reason: an
             // operator convention declared on an object counts.
         for (var om = 0; om < methods.length; om++) {
-            classMethodNames["$" + methods[om].name] = true
+            ktNoteMethod(methods[om])
             noteParams(methods[om].name, methods[om].params)
             declOpIfConvention(methods[om].name, name)
         }
@@ -8149,7 +8355,7 @@ KwContract  = "contract" KwEnd ;
         // emitSuperLinks has to read the method off the declaring descriptor.
         for (var i = 0; i < methods.length; i++) {
             sig.push({name: methods[i].name, params: methods[i].params, from: name})
-            classMethodNames["$" + methods[i].name] = true
+            ktNoteMethod(methods[i])
         }
         for (var a = 0; a < parts.abstracts.length; a++) {
             sig.push({name: parts.abstracts[a].name, params: parts.abstracts[a].params, from: name})
@@ -8341,6 +8547,7 @@ KwContract  = "contract" KwEnd ;
         curF = f
         var b = f.NewBlock("entry")
         curScopeV = callExt(b, "js_scope_new", [f.Params[0]])
+        emitTopMark(b)
         // mutableListOf: an IR function that simply returns its argument array.
         funcCount++
         var loIdx = funcCount

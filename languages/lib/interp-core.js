@@ -32,6 +32,11 @@ var core = {
     framePop: null,     // Called after the body, before locals are dropped (Go: run defers).
     varMiss: null,      // Name not in any scope: return {v: value} or null (Kotlin: this properties).
     setMiss: null,      // Assignment target not in any scope: handle it and return true (Kotlin).
+    // A name found in the GLOBAL scope, before that binding answers: return {v: value}
+    // (globalHit) or handle the write and return true (globalSet) to shadow it, else
+    // null / false (Kotlin: a receiver member beats a top-level declaration).
+    globalHit: null,
+    globalSet: null,
     catchScope: true,   // A catch clause binds in a scope of its own (PHP: false, no block scope).
     // Map-key identity, for a language whose numbers are BOXED. dictKeyId below can
     // only index a value whose === is string equality, and dictFind confirms a hit
@@ -250,7 +255,11 @@ function setVar(name, value) {
     var sc = scopes
     var ho = objHasOwn
     for (var i = sc.length - 1; i >= 0; i--) {
-        if (ho.call(sc[i], name)) { scopePut(sc[i], name, value); return }
+        if (ho.call(sc[i], name)) {
+            if (i == 0 && core.globalSet != null && core.globalSet(name, value)) { return }
+            scopePut(sc[i], name, value)
+            return
+        }
     }
     if (core.setMiss != null && core.setMiss(name, value)) { return }
     fail("assignment to unknown variable: " + name)
@@ -361,7 +370,10 @@ function getVar(name) {
     var sc = scopes
     var ho = objHasOwn
     for (var i = sc.length - 1; i >= 0; i--) {
-        if (ho.call(sc[i], name)) return sc[i][name]
+        if (ho.call(sc[i], name)) {
+            if (i == 0 && core.globalHit != null) { var gh = core.globalHit(name); if (gh != null) return gh.v }
+            return sc[i][name]
+        }
     }
     if (core.varMiss != null) { var h = core.varMiss(name); if (h != null) return h.v }
     if (hasOwn(hostGlobals, name)) return hostGlobals[name]

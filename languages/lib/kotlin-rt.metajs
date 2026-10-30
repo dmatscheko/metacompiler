@@ -7115,13 +7115,25 @@ function js_ktctorref(v) {
 function js_ktclasslit(base) {
     if (ktIsObj(base)) {
         if (typeof base["__kttype"] == "string") { return ktClassLit(base["__kttype"]) }
-        if (base["__isclass"] === true) { return ktClassLit(base["__name"]) }
+        if (base["__isclass"] === true) { return ktClassOfDesc(base) }
     }
     // A collection's KClass is its JVM class. Twin of ktClassOf in
     // abnf/jsrtkotlin.go.
     var jc = ktCollJvmClass(base)
     if (jc != "") { return ktJavaClass(jc) }
+    var c = ktClassOf(base)
+    if (c !== undefined) { return ktClassOfDesc(c) }
     return ktClassLit(k4bSimpleName(base))
+}
+
+// The KClass of a declared type, a NESTED one named by its binary name. Twin of
+// ktClassOfDesc in abnf/jsrtkotlin.go, which has the rules.
+function ktClassOfDesc(d) {
+    var bn = d["__bname"]
+    if (typeof bn == "string") {
+        if (bn.length > 0 && bn.indexOf(".") < 0) { return ktJavaClass(bn) }
+    }
+    return ktClassLit(d["__name"])
 }
 
 // js_ktnameval(v, "topFun") remembers the name a `::` spelled against the
@@ -11402,6 +11414,74 @@ function js_ktget(env, name, iscall) {
     // `Unit` as a VALUE is the Unit object, which is undefined here.
     if (name == "Unit") { return undefined }
     fail("unknown name: " + name)
+    return undefined
+}
+
+// js_ktrecvof (jsrtkotlin.go's js_ktrecvof, which has the rules): the implicit
+// receiver whose class declares `name`, or undefined when a local binds it or no
+// receiver declares it.
+function js_ktrecvof(env, name, iscall) {
+    var s = anytype
+    var r = anytype
+    s = env
+    while (s !== undefined && s !== null) {
+        if (scopeHas(s, "__kttop")) {
+            s = undefined
+        } else {
+            if (scopeHas(s, name)) { return undefined }
+            s = scopeParent(s)
+        }
+    }
+    s = env
+    while (s !== undefined && s !== null) {
+        if (scopeHas(s, "this")) {
+            r = k6RecvDeclaring(scopeGet(s, "this"), name, iscall)
+            if (r !== undefined) { return r }
+        }
+        s = scopeParent(s)
+    }
+    s = env
+    while (s !== undefined && s !== null) {
+        if (scopeHas(s, "__dispatch")) {
+            return k6RecvStack(k6RecvDeclaring(scopeGet(s, "__dispatch"), name, iscall), name, iscall)
+        }
+        s = scopeParent(s)
+    }
+    return k6RecvStack(undefined, name, iscall)
+}
+// The dispatch receiver's answer r, else the receiver stack's, innermost first.
+function k6RecvStack(r, name, iscall) {
+    if (r !== undefined) { return r }
+    var i = ktRecvStack.length - 1
+    while (i >= 0) {
+        var q = anytype
+        q = k6RecvDeclaring(ktRecvStack[i], name, iscall)
+        if (q !== undefined) { return q }
+        i = i - 1
+    }
+    return undefined
+}
+// jsrtkotlin.go's ktRecvDeclaring: the instance on v's __outer chain whose class
+// declares `name`, or undefined.
+function k6RecvDeclaring(v, name, iscall) {
+    var o = anytype
+    o = v
+    var guard = 0
+    while (guard < 64) {
+        guard = guard + 1
+        if (!ktIsObj(o)) { return undefined }
+        var cls = o["__class"]
+        if (ktIsObj(cls)) {
+            if (cls["__isclass"] === true) {
+                if (k4Own(o, name)) { return o }
+                if (k4bFindAcc(o, name) !== undefined) { return o }
+                if (iscall) {
+                    if (ktClsFind(cls, name) !== undefined) { return o }
+                }
+            }
+        }
+        o = o["__outer"]
+    }
     return undefined
 }
 

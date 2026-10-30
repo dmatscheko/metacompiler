@@ -2228,7 +2228,7 @@ func init() {
 			}
 			if o, isObj := base.(*jsObject); isObj {
 				if b, isCls := o.props["__isclass"].(bool); isCls && b {
-					return w(ktClassLit(o.props["__name"]))
+					return w(ktClassOfDesc(o))
 				}
 			}
 			return w(ktClassOf(base))
@@ -2840,6 +2840,47 @@ func init() {
 			}
 			rt.fail("unknown name: %s", name)
 			return 0
+		}
+
+		// js_ktrecvof(env, name, iscall) is the implicit receiver whose class
+		// declares `name` - an own field, an accessor, or in call position a method -
+		// innermost first, for a name a top-level declaration also binds; undefined
+		// when a LOCAL binds it (any scope below the one marked __kttop) or no receiver
+		// declares it. Kotlin's scope tower puts the receivers between the two. The
+		// twin is core.globalHit / kRecvOf in kotlin-interpreter.abnf.
+		m["js_ktrecvof"] = func(a []uint64) uint64 {
+			sc := rt.scopeOf(a[0])
+			name := rt.toString(u(a[1]))
+			iscall := rt.truthy(u(a[2]))
+			for s := sc; s != nil; s = s.parent {
+				if _, top := s.get("__kttop"); top {
+					break
+				}
+				if _, ok := s.get(name); ok {
+					return w(jsUndef)
+				}
+			}
+			for s := sc; s != nil; s = s.parent {
+				if t, ok := s.get("this"); ok {
+					if r := rt.ktRecvDeclaring(t, name, iscall); r != nil {
+						return w(r)
+					}
+				}
+			}
+			for s := sc; s != nil; s = s.parent {
+				if d, ok := s.get("__dispatch"); ok {
+					if r := rt.ktRecvDeclaring(d, name, iscall); r != nil {
+						return w(r)
+					}
+					break
+				}
+			}
+			for i := len(ktRecvStack) - 1; i >= 0; i-- {
+				if r := rt.ktRecvDeclaring(ktRecvStack[i], name, iscall); r != nil {
+					return w(r)
+				}
+			}
+			return w(jsUndef)
 		}
 
 		// js_ktfget is the field-read extern: the StringBuilder box's properties, a
@@ -4261,6 +4302,32 @@ func ktHasMethod(v interface{}, name string) bool {
 		cls = co.props["__super"]
 	}
 	return false
+}
+
+// ktRecvDeclaring is the instance on v's __outer chain whose class declares `name`
+// (see js_ktrecvof), or nil. Twin of kRecvDeclaring in kotlin-interpreter.abnf.
+func (rt *jsrt) ktRecvDeclaring(v interface{}, name string, iscall bool) *jsObject {
+	for g := 0; g < 64; g++ {
+		o, isObj := v.(*jsObject)
+		if !isObj {
+			return nil
+		}
+		if cls, has := o.props["__class"].(*jsObject); has {
+			if isc, _ := cls.props["__isclass"].(bool); isc {
+				if _, own := o.props[name]; own {
+					return o
+				}
+				if rt.findClassAccessor(o, name) != nil {
+					return o
+				}
+				if iscall && ktClsFind(cls, name) != nil {
+					return o
+				}
+			}
+		}
+		v = o.props["__outer"]
+	}
+	return nil
 }
 
 // ktClsFind walks a descriptor's __super chain for a callable member.
@@ -10060,7 +10127,22 @@ func ktClassOf(v interface{}) *jsObject {
 	if jc := ktCollJvmClass(v); jc != "" {
 		return ktJavaClass(jc)
 	}
+	if o, isObj := v.(*jsObject); isObj {
+		if cls, has := o.props["__class"].(*jsObject); has {
+			return ktClassOfDesc(cls)
+		}
+	}
 	return ktClassLit(ktSimpleName(v))
+}
+
+// ktClassOfDesc is the KClass of a declared type: a NESTED one is the java class
+// its binary name names (simpleName Inner, qualifiedName Outer.Inner, "class
+// Outer$Inner"). Twin of kClassOfDesc in kotlin-interpreter.abnf.
+func ktClassOfDesc(d *jsObject) *jsObject {
+	if bn, ok := d.props["__bname"].(string); ok && bn != "" && !strings.Contains(bn, ".") {
+		return ktJavaClass(bn)
+	}
+	return ktClassLit(d.props["__name"])
 }
 
 // ktJavaClass is `javaClass`, and a collection's KClass: a class literal that also
