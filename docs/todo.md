@@ -126,7 +126,7 @@ nestOwner / nestedOf are keyed by simple class name (last wins); key them by bin
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-863 bash: newlines in [[ ]], fd 3+, ${!u} error under 2>/dev/null, $( ) LINENO, quote corner · P3 · SH · OPEN [V SH worker]
+### T-863 bash: newlines in [[ ]], fd 3+, ${!u} error under 2>/dev/null, $( ) LINENO, quote corner · P3 · SH · IN PROGRESS (SH worker, round 13) [V SH worker]
 bash 5.3. (1) `[[ a == a &&⏎ b == b ]]` and `[[⏎ a == a⏎]]` do not parse in either half (CondCmd skips blanks, not
 newlines). (2) fds 3+ are not modelled: `f 3>&1 1>&2 2>&3` (f prints f1 to stdout, f2 to stderr) → bash f1 on stderr,
 f2 on stdout; ours both on stderr, every leg. (3) `echo "${!u:-q}" 2>/dev/null` with u empty → bash and our interp
