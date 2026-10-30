@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-847** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-848** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -88,21 +88,19 @@ the path then `nil`, `nil`. So the common `main(3) if __FILE__ == $0` guard runs
 
 # JS — JavaScript and TypeScript
 
-### T-838 ts/js: decorator and constructor semantics left over · P3 · JS · IN PROGRESS (JS worker, round 32) [V JS worker]
-node / tsc 6.0.3 answers were measured by the JS worker. Decorators: `ctx.addInitializer`, field
-decorators, and tsc's evaluation order (static methods → instance methods → fields → class) — needs
-per-class initializer lists threaded into the constructor in both halves. Constructors: `this` before
-super(), super() twice, a derived constructor returning 5, a missing super(), `new (()=>1)()`, `new o.m()`
-(constructability), `super` after setPrototypeOf. Parse/lowering: `!` definite-assignment targets,
-U+2028 in strings, tagged-template invalid escapes, `export import`, `__proto__:` in object literals;
-plus the missing host APIs listed in the closed T-794.
-
-### T-842 ts/js: RegExp to string, method shadowing an inherited getter, `o?.#f` · P2 · JS · IN PROGRESS (JS worker, round 32) [V JS worker]
-(1) `String(/y/g)`, `"" + /y/g`, `` `${/y/g}` `` → interp and llvm.Run `[object Object]`, native and node
-`/y/g`. (2) `class Base { get acc(){return "s"} } class Mid extends Base { acc(){} } class Leaf extends
-Mid {}; typeof new Leaf().acc` → llvm.Run "string", node and other legs "function" (a class method
-definition goes through js_set, which runs the inherited accessor — must define). (3) `o?.#f` does not
-parse in the js compiler.
+### T-847 ts/js: decorators, constructability, Date/setTimeout; a `__proto__` binding crashes · P3 · JS · OPEN [V JS worker]
+(1) Decorators (TS, both halves): addInitializer, field decorators, and tsc 6.0.3's order — evaluate all
+decorator expressions class-first in source order; apply static methods → instance methods → static fields
+→ instance fields → class; then static-method initializers, static field init + per-field extra
+initializers, class initializers; per instance, method initializers first, then each field + its extra
+initializers. Needs makeClassValue/applyDecorators (interp) and emitClass/applyDeco (compiler) restructured
+into those phases. Probe: the JS worker's deco.ts. (2) Constructability: `new (()=>1)()`, `new o.m()`,
+class/static methods, generators, async functions and `new Math.max()` construct (node: TypeError "... is
+not a constructor"); natively `new Math.max()` aborts "js_keys: not an object". Route: a per-function-index
+non-constructor table registered at boot (like js_jssrc), read at `new` in Go and layer 2, plus a flag in the
+interpreters' fn meta. (3) Date and setTimeout are missing. (4) `const __proto__ = 7` crashes the js/ts
+interpreters at tag time under goja ("Object prototype may only be an Object or null ... at declIsConst":
+jsConstNames[name] = true on a host object); node is fine.
 
 # JV — Java
 
@@ -932,6 +930,8 @@ T-835 c: a duplicate definition in one block scope is accepted — DONE c2152f2f
 T-837 kotlin: a lambda whose body is a `try` expression returns Unit — DONE 66e8c889 (a try at the start of a lambda statement is a TryExpr in both grammars; plus cc28d0c0: typed catch clauses in a try expression, a non-local return passes catch(Exception))
 T-836 kotlin: edges left by the operator/cast/range fixes — PARTIAL 84a044bd — trimIndent = replaceIndent(""), is/as Comparable, !! in assignment targets, JVM binary names in CCE and javaClass.name, exact LongRange first/last/contains, null as checked T → NPE; the modCount-based CME filed as T-846
 T-843 java: field types collide by name across classes — DONE 4eccaba8 (field type resolved where Java resolves the name: own class + superclasses + enclosing classes, this.f, C.f, static type before .f incl. after a call; String.codePointBefore in all engines)
+T-842 ts/js: RegExp to string, method shadowing an inherited getter, `o?.#f` — DONE e227c713 (RegExp ToString /src/flags in all engines with V8 source escaping, [object RegExp]; class members defined via js_jsdefm so a method shadows an inherited getter; o?.#f / o?.#m() parse; raw U+2028 in TS strings)
+T-838 ts/js: decorator and constructor semantics left over — PARTIAL 171fb506 — derived-constructor this/super/return errors, __proto__: in literals, home-object super, tagged-template invalid escapes, TS x! targets, import/export import aliases, accessor auto-accessors, Set methods, WeakMap/WeakSet, queueMicrotask, URI functions, isWellFormed/toWellFormed; decorators, constructability and Date/setTimeout filed as T-847
 
 # Settled — do not re-open
 
