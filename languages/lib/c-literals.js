@@ -162,6 +162,8 @@ function cStdConst(name) {
 // a constant of an included standard header. Anything else - a variable, which
 // would make a variable-length array - is refused.
 function cConstOf(name) {
+    var be = cBlockEnum(name)
+    if (be != undefined) return be
     if (hasOwn(enumConsts, name)) return enumConsts[name] | 0
     for (var i = 0; i < cStdIncluded.length; i++) {
         if (!hasOwn(cStdIncluded[i], name)) continue
@@ -258,9 +260,19 @@ function initCount(init, dims, base) {
     return cInitWalk(ctArr(-1, arrCt(dims.slice(1), base, 0)), init.list,
                      function(v, ct) { init.elides = true; return false }, function(steps, v) {})
 }
+// An automatic array sized by that guess, once its declaration runs and whole -
+// the engine's test for an expression that is a whole aggregate element - can
+// look at the expressions: its real type, and the list to initialize it with.
+// Answers {ct, init}.
+function cInitResize(ct, init, whole) {
+    if (init == undefined || typeof init == "function" || init.elides != true) return {ct: ct, init: init}
+    var n = cInitWalk(ctArr(-1, ct.e), init.list, whole, function(steps, v) {})
+    return {ct: ctArr(n, ct.e), init: {list: init.list}}
+}
 // The whole-value test for placing a brace list: the engine's own, unless the
-// list sized its array assuming an expression elides, where a struct value that
-// would take a whole element instead is refused.
+// list sized its array assuming an expression elides and was not resized
+// (a static object), where a struct value that would take a whole element
+// instead is refused.
 function cInitWholeOf(init, whole) {
     if (init.elides != true) return whole
     return function(v, ct) {
@@ -381,6 +393,36 @@ function noteBlockName(name, ext) {
     if (hasOwn(top, name) && !(ext && top[name] == "ext")) fail("redefinition of '" + name + "'")
     top[name] = ext ? "ext" : "obj"
 }
+// An enumeration constant is an ordinary identifier scoped like any declaration
+// (C11 6.2.1p4, 6.7.2.2p3): a file-scope one lives in enumConsts, a block-scope one
+// in its block's name table, as its value. The values run from 0, or on from an
+// explicit '= n'; the counter is updated as each enumerator reduces so that the
+// next initializer can name it ('A = 4, B = A + 1').
+var enumConsts = {}
+var enumNext = 0
+function enumStart() { enumNext = 0 }
+// items = [name, {val}?]
+function makeEnumerator(items) {
+    var v = enumNext
+    if (items.length > 1) { v = items[1].val | 0 }
+    enumNext = v + 1
+    if (blockNames.length == 0) { enumConsts[items[0]] = v; return }
+    noteBlockName(items[0], false)
+    blockNames[blockNames.length - 1][items[0]] = v
+}
+// The value of the block-scope enumeration constant a name denotes here, or
+// undefined: the innermost block declaring the name decides, and an object
+// declared there hides any enumerator further out.
+function cBlockEnum(name) {
+    for (var i = blockNames.length - 1; i >= 0; i--) {
+        if (hasOwn(blockNames[i], name)) {
+            var e = blockNames[i][name]
+            return typeof e == "number" ? e : undefined
+        }
+    }
+    return undefined
+}
+
 // Whether a declaration's keyword run ('extern int', 'const extern long') holds
 // the extern storage class. up.in arrives with the separators removed, so the
 // run is read keyword by keyword and the scan stops at anything else.

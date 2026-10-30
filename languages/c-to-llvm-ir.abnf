@@ -71,12 +71,12 @@ PPCont      = "\\" [ "\r" ] "\n" ;
 PPChar      = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
 
 // enum: named int constants in one global table (the tag is ignored).
-EnumDef     <~~ defineEnum(takeAll()) ~~>
+EnumDef     <~~ takeAll() ~~>
             = KwEnum [ Id <~~ push({tag: up.in}) ~~> ]
               EnumOpen [ Enumerator { "," Enumerator } [ "," ] ] "}" ";" ;
 // The running enumerator counter is per enum BODY, so it restarts at the brace.
 EnumOpen    <~~ enumStart() ~~> = "{" ;
-Enumerator  <~~ push(makeEnumerator(takeAll())) ~~>
+Enumerator  <~~ makeEnumerator(takeAll()) ~~>
             = Id <~~ push(up.in) ~~> [ "=" EnumInit ] ;
 // A constant expression folded as the tags walk; it may name an earlier enum constant
 // or a standard header's (cConstOf).
@@ -119,7 +119,7 @@ TdStructDef <~~ push({tb: tdTagDef(takeAll(), false)}) ~~>
             = KwStruct { Attr } [ Id <~~ push({tag: up.in}) ~~> ] "{" { FieldLine } "}" { Attr } ;
 TdUnionDef  <~~ push({tb: tdTagDef(takeAll(), true)}) ~~>
             = KwUnion { Attr } [ Id <~~ push({tag: up.in}) ~~> ] "{" { FieldLine } "}" { Attr } ;
-TdEnumDef   <~~ defineEnum(takeAll()); push({tb: ctInt}) ~~>
+TdEnumDef   <~~ takeAll(); push({tb: ctInt}) ~~>
             = KwEnum [ Id <~~ push({tag: up.in}) ~~> ]
               EnumOpen [ Enumerator { "," Enumerator } [ "," ] ] "}" ;
 TdDeclr     = TdFnPtr | TdPlain ;
@@ -581,13 +581,14 @@ AnonKind    = KwUnion <~~ push({anon: true, u: true}) ~~>
             | KwStruct <~~ push({anon: true, u: false}) ~~> ;
 // The raw text is kept so an UNSIGNED bit field can wrap where a signed one sign-extends.
 FieldType   = TypeInt <~~ push({bty: baseCtOf(up.in), raw: up.in}) ~~>
-            | FieldEnumDef
+            | EnumSpecDef
             | EnumRef <~~ push({bty: ctInt}) ~~>
             | KwStruct Id <~~ push({bty: ctStruct(up.in)}) ~~>
             | KwUnion Id <~~ push({bty: ctStruct(uKey(up.in))}) ~~>
             | TdFieldTy ;
-// 'enum { X } x;' as a member: the constants are registered, the member is an int.
-FieldEnumDef <~~ defineEnum(takeAll()); push({bty: ctInt}) ~~>
+// 'enum { X } x;' as a member, a local or a global: the constants are registered
+// in the current scope, and the declared type is int.
+EnumSpecDef <~~ takeAll(); push({bty: ctInt}) ~~>
             = KwEnum [ Id <~~ push({tag: up.in}) ~~> ]
               EnumOpen [ Enumerator { "," Enumerator } [ "," ] ] "}" ;
 TdFieldTy   <~~ push({bty: typedefOf(up.in)}) ~~> = NotCKw Id ;
@@ -667,7 +668,7 @@ ParamType   = BaseTy | KwStruct Id <~~ push({sname: up.in}) ~~>
 
 // Globals are registered at build time.
 GlobalDecl  <~~ defineGlobals(takeAll()) ~~>
-            = BaseTy GDeclItem { "," GDeclItem } ";" ;
+            = ( EnumSpecDef | BaseTy ) GDeclItem { "," GDeclItem } ";" ;
 // 'int f(int a), g(int a), a;': prototypes and objects may share one base type;
 // only the objects reach defineGlobals.
 GDeclItem   = ProtoItem | DeclItem ;
@@ -696,7 +697,7 @@ PtrQual     = "const" KwEnd | "volatile" KwEnd | "restrict" KwEnd | "_Atomic" Kw
 // StructDecl / UnionDecl come BEFORE Decl: they own the 'struct'/'union' base type,
 // which BaseTy does not read.
 Statement   = Block | If | While | Do | For | Switch | SwitchCase | Return | Break | Continue
-            | AssertStmt | BoolDecl | LProto | LTagFwd | LStructDef | LUnionDef | StructDefDecl | UnionDefDecl
+            | AssertStmt | BoolDecl | LProto | LTagFwd | LEnumDef | LStructDef | LUnionDef | StructDefDecl | UnionDefDecl
             | LTypedef | SStructDecl | SUnionDecl | StaticDecl | StructDecl | UnionDecl | Decl
             | Goto | PPCondStmt | PPStmt | Label | TdStatic | TdDecl | Empty | ExprStmt ;
 
@@ -783,6 +784,9 @@ LProto      <~~ takeAll(); push(function(b) { return b }) ~~>
 
 // A forward tag declaration inside a function body.
 LTagFwd     <~~ push(function(b) { return b }) ~~> = TagFwd ;
+// An enum definition inside a function body: its constants belong to the block
+// (makeEnumerator). Twin of LEnumDef in c-interpreter.abnf.
+LEnumDef    <~~ push(function(b) { return b }) ~~> = EnumDef ;
 
 // A preprocessor line inside a function body is skipped (no-op statement).
 PPStmt      <~~ push(function(b) { return b }) ~~>
@@ -844,7 +848,7 @@ Default     <~~ push(makeDefault(pop())) ~~>
 
 Decl        = DeclCore ";" ;
 DeclCore    <~~ push(makeDeclSeq(takeAll(), false)) ~~>
-            = BaseTy DeclItem { "," DeclItem } ;
+            = ( EnumSpecDef | BaseTy ) DeclItem { "," DeclItem } ;
 // FnPtrRetDecl, FnPtrDecl and PtrArrDecl ('int (*pa)[3]', a pointer TO an array) all
 // start '( *' and come before InitDecl; only what follows tells them apart.
 DeclItem    = FnPtrRetDecl | FnPtrDecl | PtrArrDecl | InitDecl ;
@@ -1689,8 +1693,6 @@ KwDefault   = "default" KwEnd ;
         return v
     }
 
-    // enum constants: name -> integer value, filled by defineEnum, read in makeVarRef.
-    var enumConsts = {}
     // A '*' run in a declarator: {ptr: levels}. Every level is one i32* cell, so int**
     // is an ordinary pointer slot whose value is the address of an int* slot.
     function makeStars(s, pos) {
@@ -1701,26 +1703,6 @@ KwDefault   = "default" KwEnd ;
     // The declarator's leading '*' run, if any: 0 when the item is already the name.
     function starsOf(item) {
         return (item != undefined && item.ptr != undefined) ? item.ptr : 0
-    }
-    // enum: sequential from 0 or after an explicit '= n'. The counter lives here so a
-    // constant is readable by the next enumerator's initializer ('A = 4, B = A + 1').
-    var enumNext = 0
-    function enumStart() { enumNext = 0 }
-    function makeEnumerator(items) {
-        var v = enumNext
-        if (items.length > 1) { v = items[1].val | 0 }
-        enumConsts[items[0]] = v
-        enumNext = v + 1
-        return items.length > 1 ? {name: items[0], explicit: v} : {name: items[0]}
-    }
-    function defineEnum(items) {
-        var next = 0
-        for (var i = 0; i < items.length; i++) {
-            if (items[i].tag != undefined) continue // The enum tag is not tracked.
-            if (items[i].explicit != undefined) next = items[i].explicit | 0
-            enumConsts[items[i].name] = next
-            next = next + 1
-        }
     }
     // The comma operator: emit each side in order, the result is the last value.
     function makeComma(items) {
@@ -1843,6 +1825,7 @@ KwDefault   = "default" KwEnd ;
     // not decayed), any other name as the value it denotes. Twin of makeSizeofName
     // in c-interpreter.abnf.
     function makeSizeofName(name) {
+        if (cBlockEnum(name) != undefined) return makeSizeofExpr(makeVarRef(name))
         var placeT = makeSizeofPlace(makeVarPlace([name]))
         var valT = makeSizeofExpr(makeVarRef(name))
         return function(b) { return lookupVar(name) != undefined ? placeT(b) : valT(b) }
@@ -3210,6 +3193,8 @@ KwDefault   = "default" KwEnd ;
     }
     // Bare name: int variable loads, array decays to the address of its first element.
     makeVarRef = function(name) {
+        var be = cBlockEnum(name)
+        if (be != undefined) return makeNum(be, ctInt)
         return function(b) {
             var e = lookupVar(name)
             if (e == undefined) {
@@ -3952,10 +3937,13 @@ KwDefault   = "default" KwEnd ;
             return b
         }
     }
-    function makeDeclOf(name, ct, opt) {
-        var lty = ctLTy(ct)
-        var isPtr = ct.k == "ptr"
+    function makeDeclOf(name, gct, gopt) {
         return function(b) {
+            var r = cInitResize(gct, gopt, function(v, mct) { return wholeInit(b, v, mct) })
+            var ct = r.ct
+            var opt = r.init
+            var lty = ctLTy(ct)
+            var isPtr = ct.k == "ptr"
             var a = b.NewAlloca(lty)
             // An alloca is not zeroed, and C requires every element a brace
             // initializer does not mention to be zero.

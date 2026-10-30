@@ -79,12 +79,12 @@ PPChar      = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
 // enum Color { RED, GREEN = 5, BLUE }; -- genuinely lowered to named int constants
 // (sequential from 0, or from an explicit value). The optional tag is ignored; the
 // constants live in a global table and resolve wherever a bare name is read.
-EnumDef     <~~ defineEnum(takeAll()) ~~>
+EnumDef     <~~ takeAll() ~~>
             = KwEnum [ Id <~~ push({tag: up.in}) ~~> ]
               EnumOpen [ Enumerator { "," Enumerator } [ "," ] ] "}" ";" ;
 // The running enumerator counter is per enum BODY, so it restarts at the brace.
 EnumOpen    <~~ enumStart() ~~> = "{" ;
-Enumerator  <~~ push(makeEnumerator(takeAll())) ~~>
+Enumerator  <~~ makeEnumerator(takeAll()) ~~>
             = Id <~~ push(up.in) ~~> [ "=" EnumInit ] ;
 // An enum initializer is a constant EXPRESSION, and it may NAME another enum constant:
 // 'enum c_tree_code { C_DUMMY = LAST_AND_UNUSED_TREE_CODE, ... }' continues a previous
@@ -145,7 +145,7 @@ TdStructDef <~~ push({tb: tdTagDef(takeAll(), false)}) ~~>
             = KwStruct { Attr } [ Id <~~ push({tag: up.in}) ~~> ] "{" { FieldLine } "}" { Attr } ;
 TdUnionDef  <~~ push({tb: tdTagDef(takeAll(), true)}) ~~>
             = KwUnion { Attr } [ Id <~~ push({tag: up.in}) ~~> ] "{" { FieldLine } "}" { Attr } ;
-TdEnumDef   <~~ defineEnum(takeAll()); push({tb: ctInt}) ~~>
+TdEnumDef   <~~ takeAll(); push({tb: ctInt}) ~~>
             = KwEnum [ Id <~~ push({tag: up.in}) ~~> ]
               EnumOpen [ Enumerator { "," Enumerator } [ "," ] ] "}" ;
 TdDeclr     = TdFnPtr | TdPlain ;
@@ -631,13 +631,14 @@ AnonKind    = KwUnion <~~ push({anon: true, u: true}) ~~>
 // The base type text is kept so that an UNSIGNED bit field can wrap where a signed
 // one sign-extends; everything else about the width still collapses to the int model.
 FieldType   = TypeInt <~~ push({bty: baseCtOf(up.in), raw: up.in}) ~~>
-            | FieldEnumDef
+            | EnumSpecDef
             | EnumRef <~~ push({bty: ctInt}) ~~>
             | KwStruct Id <~~ push({bty: ctStruct(up.in)}) ~~>
             | KwUnion Id <~~ push({bty: ctStruct(uKey(up.in))}) ~~>
             | TdFieldTy ;
-// 'enum { X } x;' as a member: the constants are registered, the member is an int.
-FieldEnumDef <~~ defineEnum(takeAll()); push({bty: ctInt}) ~~>
+// 'enum { X } x;' as a member, a local or a global: the constants are registered
+// in the current scope, and the declared type is int.
+EnumSpecDef <~~ takeAll(); push({bty: ctInt}) ~~>
             = KwEnum [ Id <~~ push({tag: up.in}) ~~> ]
               EnumOpen [ Enumerator { "," Enumerator } [ "," ] ] "}" ;
 TdFieldTy   <~~ push({bty: typedefOf(up.in)}) ~~> = NotCKw Id ;
@@ -734,7 +735,7 @@ ParamType   = BaseTy | KwStruct Id <~~ push({sname: up.in}) ~~>
 
 // Globals are declared like locals but registered at build time.
 GlobalDecl  <~~ defineGlobals(takeAll()) ~~>
-            = BaseTy GDeclItem { "," GDeclItem } ";" ;
+            = ( EnumSpecDef | BaseTy ) GDeclItem { "," GDeclItem } ";" ;
 // One declaration may mix prototypes and objects over a shared base type:
 // 'int f(int a), g(int a), a;' declares two functions and one int. A prototype needs no
 // lowering, so ProtoItem parses and drops it and only the objects reach defineGlobals.
@@ -768,7 +769,7 @@ PtrQual     = "const" KwEnd | "volatile" KwEnd | "restrict" KwEnd | "_Atomic" Kw
 // StructDecl / UnionDecl come BEFORE Decl: they own the 'struct'/'union' base type,
 // which BaseTy does not read.
 Statement   = Block | If | While | Do | For | Switch | SwitchCase | Return | Break | Continue
-            | AssertStmt | BoolDecl | LProto | LTagFwd | LStructDef | LUnionDef | StructDefDecl | UnionDefDecl
+            | AssertStmt | BoolDecl | LProto | LTagFwd | LEnumDef | LStructDef | LUnionDef | StructDefDecl | UnionDefDecl
             | LTypedef | SStructDecl | SUnionDecl | StaticDecl | StructDecl | UnionDecl | Decl
             | Goto | PPCondStmt | PPStmt | Label | TdStatic | TdDecl | Empty | ExprStmt ;
 
@@ -865,6 +866,9 @@ LProto      <~~ takeAll(); push(function() {}) ~~>
 
 // A forward tag declaration inside a function body.
 LTagFwd     <~~ push(function() {}) ~~> = TagFwd ;
+// An enum definition inside a function body: its constants belong to the block
+// (makeEnumerator), and the statement does nothing.
+LEnumDef    <~~ push(function() {}) ~~> = EnumDef ;
 
 // A preprocessor line inside a function body is skipped (no-op statement).
 PPStmt      <~~ push(function() {}) ~~>
@@ -932,7 +936,7 @@ Default     <~~ push(makeDefault(pop())) ~~>
 
 Decl        = DeclCore ";" ;
 DeclCore    <~~ push(makeDeclSeq(takeAll(), false)) ~~>
-            = BaseTy DeclItem { "," DeclItem } ;
+            = ( EnumSpecDef | BaseTy ) DeclItem { "," DeclItem } ;
 // A parenthesized declarator: 'int (*pa)[3]' is a POINTER TO an array of 3 ints,
 // which is a different type from the 'int *pa[3]' array of pointers that InitDecl
 // reads. It has to be tried first - InitDecl cannot start with a '('.
@@ -1703,8 +1707,6 @@ KwDefault   = "default" KwEnd ;
         return v
     }
 
-    // enum constants: name -> integer value, filled by defineEnum, read in makeVarRef.
-    var enumConsts = {}
     // A '*' run in a declarator: {ptr: levels}. Every level is one word holding an
     // address, so int** is an ordinary cell whose value is the address of an int cell.
     function makeStars(s, pos) {
@@ -1715,28 +1717,6 @@ KwDefault   = "default" KwEnd ;
     // The declarator's leading '*' run, if any: 0 when the item is already the name.
     function starsOf(item) {
         return (item != undefined && item.ptr != undefined) ? item.ptr : 0
-    }
-    // enum: sequential values from 0, or continuing after an explicit '= n'.
-    // The counter lives here rather than in defineEnum because a constant has to be
-    // READABLE by the enumerators after it ('A = 4, B = A + 1'), which means it must be
-    // in the table when the NEXT enumerator's initializer folds, not one rule later.
-    var enumNext = 0
-    function enumStart() { enumNext = 0 }
-    function makeEnumerator(items) {
-        var v = enumNext
-        if (items.length > 1) { v = items[1].val | 0 }
-        enumConsts[items[0]] = v
-        enumNext = v + 1
-        return items.length > 1 ? {name: items[0], explicit: v} : {name: items[0]}
-    }
-    function defineEnum(items) {
-        var next = 0
-        for (var i = 0; i < items.length; i++) {
-            if (items[i].tag != undefined) continue // The enum tag is not tracked.
-            if (items[i].explicit != undefined) next = items[i].explicit | 0
-            enumConsts[items[i].name] = next
-            next = next + 1
-        }
     }
     // The comma operator: evaluate each side left to right, yield the last value.
     function makeComma(items) {
@@ -1845,6 +1825,7 @@ KwDefault   = "default" KwEnd ;
     }
     // 'sizeof x' of a bare name. Twin of makeSizeofName in c-to-llvm-ir.abnf.
     function makeSizeofName(name) {
+        if (cBlockEnum(name) != undefined) return makeSizeofExpr(makeVarRef(name))
         var placeT = makeSizeofPlace(makeVarPlace([name]))
         var valT = makeSizeofExpr(makeVarRef(name))
         return function() { return lookupVar(name) != undefined ? placeT() : valT() }
@@ -2686,6 +2667,8 @@ KwDefault   = "default" KwEnd ;
         return makeNum(parseCFloat(t), ct)
     }
     makeVarRef = function(name) {
+        var be = cBlockEnum(name)
+        if (be != undefined) return makeNum(be, ctInt)
         noteFileScopeUse(name)
         return function() {
             // An array name decays to the address of its first element, and a struct
@@ -3158,13 +3141,15 @@ KwDefault   = "default" KwEnd ;
     }
     // One declared object: fresh (zeroed) storage plus, if there is one, its
     // initializer written into it.
-    function makeDeclOf(name, ct, opt) {
+    function makeDeclOf(name, gct, gopt) {
         return function() {
+            var r = cInitResize(gct, gopt, wholeInit)
+            var ct = r.ct
             var a = alloc(ctSize(ct))
             // A switch may jump PAST a declaration (C11 6.2.4: the object still exists,
             // it just was never initialized), so while seeking the storage is still
             // made - only the initializer is skipped.
-            if (opt != undefined && !swSkip()) initInto(ct, opt, a)
+            if (r.init != undefined && !swSkip()) initInto(ct, r.init, a)
             declVar(name, a, ct.k == "arr", ct)
         }
     }
@@ -3418,10 +3403,10 @@ KwDefault   = "default" KwEnd ;
         var d = makeDeclr(items.slice(i), "plain")
         return paramOf(d.name, declCt(base, d))
     }
-    // items = [{bty}, {dcl}...]. A global is registered - and its initializer run -
-    // at build time, which is exactly what C asks for: the initializer of an object
-    // with static storage duration must be a constant expression (C11 6.7.9p4), so
-    // there is nothing in it that could need a running program.
+    // items = [{bty}, {dcl}...]. A global is registered at build time, and its
+    // initializer runs before main (runGlobalInits) - a constant expression (C11
+    // 6.7.9p4), but one that may take the address of an array a later declaration
+    // still has to size, which moves the array's storage (sizeGlobal).
     // Every file-scope declaration of one name denotes one object (C11 6.2.2p2), so
     // a later one reuses the first one's memory. Twin of defineGlobals in
     // c-to-llvm-ir.abnf.
@@ -3441,8 +3426,15 @@ KwDefault   = "default" KwEnd ;
             var entry = globalScope[d.name]
             if (entry.inited == true) fail("redefinition of '" + d.name + "'")
             entry.inited = true
-            initInto(ct, d.init, entry.addr)
+            globalInits.push(makeGlobalInit(ct, d.init, entry))
         }
+    }
+    var globalInits = []
+    var globalInitsRan = false
+    function makeGlobalInit(ct, init, entry) { return function() { initInto(ct, init, entry.addr) } }
+    function runGlobalInits() {
+        for (var i = 0; i < globalInits.length; i++) globalInits[i]()
+        globalInitsRan = true
     }
     // A name read outside every block belongs to a file-scope initializer; see
     // sizeGlobal for why that matters to a global without a size yet.
@@ -3451,11 +3443,12 @@ KwDefault   = "default" KwEnd ;
     }
     // A global array declared without a size gets its storage when a later
     // declaration sizes it. The storage moves unless nothing was allocated since,
-    // which is sound only while no file-scope initializer has named the array
-    // (noteFileScopeUse): those run before main and may keep its address. Twin of
-    // sizeGlobal in c-to-llvm-ir.abnf.
+    // which a file-scope declaration may always do, since no initializer has run yet;
+    // a block-scope 'extern' runs later, and is sound only while no file-scope
+    // initializer has named the array (noteFileScopeUse) and kept its address. Twin
+    // of sizeGlobal in c-to-llvm-ir.abnf.
     function sizeGlobal(name, e, ct) {
-        if (e.addr != mem.length && e.early == true) {
+        if (globalInitsRan && e.addr != mem.length && e.early == true) {
             fail("a file-scope initializer used '" + name + "' before a declaration gave it a size")
         }
         e.addr = alloc(ctSize(ct))
@@ -3591,6 +3584,7 @@ KwDefault   = "default" KwEnd ;
     }
 
     c.compile(c.asg)
+    runGlobalInits()
 
     // The entry point defaults to main(), but the -main flag (c.mainName) can override it:
     // a bare identifier names a defined function to call, anything with a '(' is a C

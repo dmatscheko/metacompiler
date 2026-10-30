@@ -2124,6 +2124,9 @@ int s53_iasum(void) { return s53_ia[0] + s53_ia[2]; }
 int s53_ia[3] = { 1, 2, 30 };
 long s53_ib[2][2];
 extern long s53_ib[][2];
+extern int s53_xa[];
+int *s53_xp = s53_xa;
+int s53_xa[3] = { 4, 5, 6 };
 int s53(void) {
     check(5301, s53_ge == 5 && s53_gf == 7 && s53_gh == 0 && s53_gi == 3);
     check(5302, s53_readj() == 9);
@@ -2139,6 +2142,7 @@ int s53(void) {
     s53_ib[1][1] = 6;
     check(5307, s53_iasum() == 31 && sizeof s53_ia / sizeof s53_ia[0] == 3
                 && sizeof s53_ib / sizeof s53_ib[0] == 2 && s53_ib[1][1] == 6);
+    check(5308, s53_xp == s53_xa && s53_xp[1] == 5 && sizeof s53_xa == 12);
     return 0;
 }
 
@@ -2151,6 +2155,17 @@ int s53(void) {
    (tests/c-fail-test-redef-param.c), but a nested block may shadow a parameter. */
 int s54_g = 1;
 int s54_pa(int a) { { int a = 2; return a + 1; } }
+/* An enumerator is scoped like any other identifier (6.2.1p4): one declared in a
+   block is visible there only, hides an outer object, and is hidden in turn. */
+enum { S54_K = 100 };
+int s54_e(int n) {
+    enum { A = 1, B = A + 1 };
+    switch (n) { case A: return 10; case B: return 20; }
+    { enum { A = 5 }; if (n == A) return 50; }
+    { int A = 9; if (n == A) return 90; }
+    return A;
+}
+int s54_k(void) { enum { S54_K = 3 }; int a[S54_K]; return S54_K * 10 + (int)(sizeof a / sizeof a[0]); }
 int s54(void) {
     int x = 1, sum = 0;
     { int x = 2; sum = sum + x; { int x = 3; sum = sum + x; } }
@@ -2169,6 +2184,13 @@ again:;
     { _Bool b = 0; check(5405, b == 0); }
     check(5406, b == 1 && x == 1);
     check(5407, s54_pa(9) == 3);
+    check(5408, s54_e(1) == 10 && s54_e(2) == 20 && s54_e(5) == 50 && s54_e(9) == 90 && s54_e(3) == 1);
+    check(5409, s54_k() == 33 && S54_K == 100);
+    enum E54 { X54 = 6, Y54 } e = Y54;
+    typedef enum { Q54 = 11 } T54;
+    T54 t = Q54;
+    int s54_e2 = 1;
+    { enum { s54_e2 = 2 }; check(5410, e + t == 18 && s54_e2 == 2 && sizeof s54_e2 == 4); }
     return 0;
 }
 
@@ -2225,6 +2247,11 @@ int s55(void) {
     struct S55E ed = { .p = 1, 2, .a = 3 };
     check(5514, sizeof ns / sizeof ns[0] == 2 && ns[1].n[1] == 'd' && ns[1].v == 2
                 && ed.p.x == 1 && ed.p.y == 2 && ed.a[0] == 3 && ed.b == 0);
+    /* A struct value takes a whole element of an array sized by its list too. */
+    struct S55P pa[] = { pv, 5, 6 };
+    struct S55P pb[] = { 1, 2, pv, pv };
+    check(5515, sizeof pa / sizeof pa[0] == 2 && pa[0].y == 8 && pa[1].x == 5 && pa[1].y == 6
+                && sizeof pb / sizeof pb[0] == 3 && pb[0].y == 2 && pb[2].x == 7);
     return 0;
 }
 
