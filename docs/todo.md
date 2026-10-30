@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-849** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-850** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -151,11 +151,11 @@ is named ClosedDoubleRange (no Float mark on the range value). (7) `null as T` f
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-848 bash: backslash-newline inside an array literal does not parse · P2 · SH · IN PROGRESS (SH worker, round 10) [V SH worker]
-`v=(a \⏎'b')` → real bash 2 elements; both halves "Not everything could be parsed". `v=(a b \⏎ c)`
-parses by accident, but the backslash-newline is not whitespace. Cause: `WsNL` in both bash grammars
-(interpreter ~306, compiler ~295) lacks the `"\\\n"` alternative that `Whitespace` has; CfSt
-(`(( ;; ))`) uses WsNL too.
+### T-849 bash: a backslash-newline that splits a name is not spliced · P3 · SH · OPEN [V SH worker]
+bash removes `\⏎` before tokenizing; ours does not inside names. bash 5.3 vs ours (interp): `x\⏎y=3; echo $xy`
+→ `3` vs "command not found: xy=3"; `echo ${#arr\⏎[@]}`, `echo ${#\⏎arr[@]}` → `3` vs parse failure;
+`echo ${\⏎x:-dflt}` → `dflt` vs parse failure; `echo $x\⏎y` not isolated. Compiler not checked. Needs a
+splice in VarName / AsgIdent / PeName, or a pre-parse splice that keeps source positions.
 
 # C — C subset
 
@@ -931,6 +931,7 @@ T-843 java: field types collide by name across classes — DONE 4eccaba8 (field 
 T-842 ts/js: RegExp to string, method shadowing an inherited getter, `o?.#f` — DONE e227c713 (RegExp ToString /src/flags in all engines with V8 source escaping, [object RegExp]; class members defined via js_jsdefm so a method shadows an inherited getter; o?.#f / o?.#m() parse; raw U+2028 in TS strings)
 T-838 ts/js: decorator and constructor semantics left over — PARTIAL 171fb506 — derived-constructor this/super/return errors, __proto__: in literals, home-object super, tagged-template invalid escapes, TS x! targets, import/export import aliases, accessor auto-accessors, Set methods, WeakMap/WeakSet, queueMicrotask, URI functions, isWellFormed/toWellFormed; decorators, constructability and Date/setTimeout filed as T-847
 T-778 bash: printf `%f %e %g %a` print the operand as text — DONE 01c030c6 (%f %e %g %a/F E G A print the exact digits of the double strtold reads — interp via c-printf.js, compiler via an exact big-integer reader + C port in bash-rt.c with no double; invalid/too-large diagnostics per bash 5.3; integer error wording, \\v\\f\\r whitespace and message precedence fixed alongside; 9695-row probe matches real bash)
+T-848 bash: backslash-newline inside an array literal does not parse — DONE 57147b97 (WsNL takes a backslash-newline in both grammars — array literals, (( ;; )); also LineCont in the compiler's ${...} words and in subscripts of both; name-splitting continuations filed as T-849)
 
 # Settled — do not re-open
 
