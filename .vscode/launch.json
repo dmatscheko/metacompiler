@@ -158,24 +158,28 @@
             "name": "MetaJS type violation (SHOULD FAIL)",
             "type": "go",
             "request": "launch",
+            "expectError": "variable 'x' has type number and cannot hold a string",
             "program": "${workspaceFolder}","args": ["languages/metajs-interpreter.abnf", "tests/metajs-fail-test.js", "-q"]
         },
         {
             "name": "MetaJS type violation, compiled (SHOULD FAIL)",
             "type": "go",
             "request": "launch",
+            "expectError": "variable 'x' has type number and cannot hold a string",
             "program": "${workspaceFolder}","args": ["languages/metajs-to-llvm-ir.abnf", "tests/metajs-fail-test.js", "-q"]
         },
         {
             "name": "MetaJS undeclared assignment (SHOULD FAIL)",
             "type": "go",
             "request": "launch",
+            "expectError": "assignment to undeclared variable: zzz",
             "program": "${workspaceFolder}","args": ["languages/metajs-interpreter.abnf", "tests/metajs-fail-test-undeclared.js", "-q"]
         },
         {
             "name": "MetaJS anytype assignment (SHOULD FAIL)",
             "type": "go",
             "request": "launch",
+            "expectError": "anytype can only initialize a declaration",
             "program": "${workspaceFolder}","args": ["languages/metajs-interpreter.abnf", "tests/metajs-fail-test-anytype.js", "-q"]
         },
         {
@@ -200,6 +204,7 @@
             "name": "MetaJS abort probe, unbounded recursion (interpreter, SHOULD FAIL)",
             "type": "go",
             "request": "launch",
+            "expectError": "Maximum call stack size exceeded",
             "program": "${workspaceFolder}","args": ["languages/metajs-interpreter.abnf", "tests/metajs-abort-test-deep.js", "-q"]
         },
         {
@@ -224,12 +229,14 @@
             "name": "C unresolved include SHOULD FAIL",
             "type": "go",
             "request": "launch",
+            "expectError": "unresolved import 'mylib.h'",
             "program": "${workspaceFolder}","args": ["languages/c-to-llvm-ir.abnf", "tests/c-fail-test-import.c", "-q"]
         },
         {
             "name": "C native printf (undefined function) SHOULD FAIL",
             "type": "go",
             "request": "launch",
+            "expectError": "function not defined: printf",
             "program": "${workspaceFolder}","args": ["languages/c-to-llvm-ir.abnf", "tests/c-fail-test-printf.c", "-q", "-exe", "tests/c-native-fail-printf.out"]
         },
         {
@@ -278,6 +285,7 @@
             "name": "Java unresolved import SHOULD FAIL",
             "type": "go",
             "request": "launch",
+            "expectError": "unresolved import 'com.acme.external.Widget'",
             "program": "${workspaceFolder}","args": ["languages/java-to-llvm-ir.abnf", "tests/java-fail-test-import.java", "-q"]
         },
         {
@@ -518,24 +526,28 @@
             "name": "Kotlin isInitialized out of scope SHOULD FAIL (interpreter)",
             "type": "go",
             "request": "launch",
+            "expectError": "isInitialized on a property that is not lexically accessible here not implemented",
             "program": "${workspaceFolder}","args": ["languages/kotlin-interpreter.abnf", "tests/kotlin-fail-test-isinit.kt", "-q"]
         },
         {
             "name": "Kotlin isInitialized out of scope SHOULD FAIL (compiler)",
             "type": "go",
             "request": "launch",
+            "expectError": "isInitialized on a property that is not lexically accessible here not implemented",
             "program": "${workspaceFolder}","args": ["languages/kotlin-to-llvm-ir.abnf", "tests/kotlin-fail-test-isinit.kt", "-q"]
         },
         {
             "name": "Kotlin unresolved import SHOULD FAIL",
             "type": "go",
             "request": "launch",
+            "expectError": "unresolved import 'com.example.widget.Widget'",
             "program": "${workspaceFolder}","args": ["languages/kotlin-to-llvm-ir.abnf", "tests/kotlin-fail-test-import.kt", "-q"]
         },
         {
             "name": "Kotlin unresolved import SHOULD FAIL (interpreter)",
             "type": "go",
             "request": "launch",
+            "expectError": "unresolved import 'com.example.widget.Widget'",
             "program": "${workspaceFolder}","args": ["languages/kotlin-interpreter.abnf", "tests/kotlin-fail-test-import.kt", "-q"]
         },
         {
@@ -602,6 +614,7 @@
             "name": "Kotlin widen2 declarations SHOULD FAIL",
             "type": "go",
             "request": "launch",
+            "expectError": "index with more than one argument not implemented",
             "program": "${workspaceFolder}","args": ["languages/kotlin-to-llvm-ir.abnf", "tests/kotlin-test-widen2.kt", "-q"]
         },
         {
@@ -620,6 +633,7 @@
             "name": "Go unresolved import SHOULD FAIL",
             "type": "go",
             "request": "launch",
+            "expectError": "unresolved import 'github.com/example/widget'",
             "program": "${workspaceFolder}","args": ["languages/go-to-llvm-ir.abnf", "tests/go-fail-test-import.go", "-q"]
         },
         {
@@ -632,240 +646,280 @@
             "name": "Go interpreter constant overflow SHOULD FAIL",
             "type": "go",
             "request": "launch",
+            "expectError": "as int value in argument to fmt.Println (overflows)",
             "program": "${workspaceFolder}","args": ["languages/go-interpreter.abnf", "tests/go-fail-test-overflow.go", "-q"]
         },
         {
             "name": "Go compiler constant overflow SHOULD FAIL",
             "type": "go",
             "request": "launch",
+            "expectError": "as int value in argument to fmt.Println (overflows)",
             "program": "${workspaceFolder}","args": ["languages/go-to-llvm-ir.abnf", "tests/go-fail-test-overflow.go", "-q"]
         },
         {
             "name": "Go interpreter constant overflow (compound) SHOULD FAIL",
             "type": "go",
             "request": "launch",
+            "expectError": "256 (untyped int constant) overflows uint8",
             "program": "${workspaceFolder}","args": ["languages/go-interpreter.abnf", "tests/go-fail-test-overflow-compound.go", "-q"]
         },
         {
             "name": "Go compiler constant overflow (compound) SHOULD FAIL",
             "type": "go",
             "request": "launch",
+            "expectError": "256 (untyped int constant) overflows uint8",
             "program": "${workspaceFolder}","args": ["languages/go-to-llvm-ir.abnf", "tests/go-fail-test-overflow-compound.go", "-q"]
         },
         {
             "name": "Go interpreter constant overflow (operand) SHOULD FAIL",
             "type": "go",
             "request": "launch",
+            "expectError": "300 (untyped int constant) overflows uint8",
             "program": "${workspaceFolder}","args": ["languages/go-interpreter.abnf", "tests/go-fail-test-overflow-operand.go", "-q"]
         },
         {
             "name": "Go compiler constant overflow (operand) SHOULD FAIL",
             "type": "go",
             "request": "launch",
+            "expectError": "300 (untyped int constant) overflows uint8",
             "program": "${workspaceFolder}","args": ["languages/go-to-llvm-ir.abnf", "tests/go-fail-test-overflow-operand.go", "-q"]
         },
         {
             "name": "Go interpreter constant overflow (const) SHOULD FAIL",
             "type": "go",
             "request": "launch",
+            "expectError": "as uint8 value in constant declaration (overflows)",
             "program": "${workspaceFolder}","args": ["languages/go-interpreter.abnf", "tests/go-fail-test-overflow-const.go", "-q"]
         },
         {
             "name": "Go compiler constant overflow (const) SHOULD FAIL",
             "type": "go",
             "request": "launch",
+            "expectError": "as uint8 value in constant declaration (overflows)",
             "program": "${workspaceFolder}","args": ["languages/go-to-llvm-ir.abnf", "tests/go-fail-test-overflow-const.go", "-q"]
         },
         {
             "name": "Go interpreter constant overflow (return) SHOULD FAIL",
             "type": "go",
             "request": "launch",
+            "expectError": "as uint8 value in return statement (overflows)",
             "program": "${workspaceFolder}","args": ["languages/go-interpreter.abnf", "tests/go-fail-test-overflow-return.go", "-q"]
         },
         {
             "name": "Go compiler constant overflow (return) SHOULD FAIL",
             "type": "go",
             "request": "launch",
+            "expectError": "as uint8 value in return statement (overflows)",
             "program": "${workspaceFolder}","args": ["languages/go-to-llvm-ir.abnf", "tests/go-fail-test-overflow-return.go", "-q"]
         },
         {
             "name": "Go interpreter constant overflow (literal) SHOULD FAIL",
             "type": "go",
             "request": "launch",
+            "expectError": "as uint8 value in struct literal (overflows)",
             "program": "${workspaceFolder}","args": ["languages/go-interpreter.abnf", "tests/go-fail-test-overflow-literal.go", "-q"]
         },
         {
             "name": "Go compiler constant overflow (literal) SHOULD FAIL",
             "type": "go",
             "request": "launch",
+            "expectError": "as uint8 value in struct literal (overflows)",
             "program": "${workspaceFolder}","args": ["languages/go-to-llvm-ir.abnf", "tests/go-fail-test-overflow-literal.go", "-q"]
         },
         {
             "name": "Go interpreter constant overflow (send) SHOULD FAIL",
             "type": "go",
             "request": "launch",
+            "expectError": "as uint8 value in send (overflows)",
             "program": "${workspaceFolder}","args": ["languages/go-interpreter.abnf", "tests/go-fail-test-overflow-send.go", "-q"]
         },
         {
             "name": "Go compiler constant overflow (send) SHOULD FAIL",
             "type": "go",
             "request": "launch",
+            "expectError": "as uint8 value in send (overflows)",
             "program": "${workspaceFolder}","args": ["languages/go-to-llvm-ir.abnf", "tests/go-fail-test-overflow-send.go", "-q"]
         },
         {
             "name": "Go interpreter constant overflow (blank) SHOULD FAIL",
             "type": "go",
             "request": "launch",
+            "expectError": "as int value in assignment to _ identifier (overflows)",
             "program": "${workspaceFolder}","args": ["languages/go-interpreter.abnf", "tests/go-fail-test-overflow-blank.go", "-q"]
         },
         {
             "name": "Go compiler constant overflow (blank) SHOULD FAIL",
             "type": "go",
             "request": "launch",
+            "expectError": "as int value in assignment to _ identifier (overflows)",
             "program": "${workspaceFolder}","args": ["languages/go-to-llvm-ir.abnf", "tests/go-fail-test-overflow-blank.go", "-q"]
         },
         {
             "name": "Go interpreter division by constant zero SHOULD FAIL",
             "type": "go",
             "request": "launch",
+            "expectError": "invalid operation: division by zero",
             "program": "${workspaceFolder}","args": ["languages/go-interpreter.abnf", "tests/go-fail-test-divzero.go", "-q"]
         },
         {
             "name": "Go compiler division by constant zero SHOULD FAIL",
             "type": "go",
             "request": "launch",
+            "expectError": "invalid operation: division by zero",
             "program": "${workspaceFolder}","args": ["languages/go-to-llvm-ir.abnf", "tests/go-fail-test-divzero.go", "-q"]
         },
         {
             "name": "Go interpreter negative shift count SHOULD FAIL",
             "type": "go",
             "request": "launch",
+            "expectError": "invalid operation: negative shift count -1",
             "program": "${workspaceFolder}","args": ["languages/go-interpreter.abnf", "tests/go-fail-test-shift.go", "-q"]
         },
         {
             "name": "Go compiler negative shift count SHOULD FAIL",
             "type": "go",
             "request": "launch",
+            "expectError": "invalid operation: negative shift count -1",
             "program": "${workspaceFolder}","args": ["languages/go-to-llvm-ir.abnf", "tests/go-fail-test-shift.go", "-q"]
         },
         {
             "name": "Go interpreter float constant truncated SHOULD FAIL",
             "type": "go",
             "request": "launch",
+            "expectError": "as int value in argument to f (truncated)",
             "program": "${workspaceFolder}","args": ["languages/go-interpreter.abnf", "tests/go-fail-test-truncate.go", "-q"]
         },
         {
             "name": "Go compiler float constant truncated SHOULD FAIL",
             "type": "go",
             "request": "launch",
+            "expectError": "as int value in argument to f (truncated)",
             "program": "${workspaceFolder}","args": ["languages/go-to-llvm-ir.abnf", "tests/go-fail-test-truncate.go", "-q"]
         },
         {
             "name": "Go interpreter constant slice bounds out of order SHOULD FAIL",
             "type": "go",
             "request": "launch",
+            "expectError": "invalid slice indices: 1 < 2",
             "program": "${workspaceFolder}","args": ["languages/go-interpreter.abnf", "tests/go-fail-test-slice.go", "-q"]
         },
         {
             "name": "Go compiler constant slice bounds out of order SHOULD FAIL",
             "type": "go",
             "request": "launch",
+            "expectError": "invalid slice indices: 1 < 2",
             "program": "${workspaceFolder}","args": ["languages/go-to-llvm-ir.abnf", "tests/go-fail-test-slice.go", "-q"]
         },
         {
             "name": "Go interpreter typed constant overflow SHOULD FAIL",
             "type": "go",
             "request": "launch",
+            "expectError": "(constant 400 of type uint8) overflows uint8",
             "program": "${workspaceFolder}","args": ["languages/go-interpreter.abnf", "tests/go-fail-test-typed-const.go", "-q"]
         },
         {
             "name": "Go compiler typed constant overflow SHOULD FAIL",
             "type": "go",
             "request": "launch",
+            "expectError": "(constant 400 of type uint8) overflows uint8",
             "program": "${workspaceFolder}","args": ["languages/go-to-llvm-ir.abnf", "tests/go-fail-test-typed-const.go", "-q"]
         },
         {
             "name": "Go interpreter constant len shift overflow SHOULD FAIL",
             "type": "go",
             "request": "launch",
+            "expectError": "(constant 2361183241434822606848 of type int) overflows int",
             "program": "${workspaceFolder}","args": ["languages/go-interpreter.abnf", "tests/go-fail-test-len-shift.go", "-q"]
         },
         {
             "name": "Go compiler constant len shift overflow SHOULD FAIL",
             "type": "go",
             "request": "launch",
+            "expectError": "(constant 2361183241434822606848 of type int) overflows int",
             "program": "${workspaceFolder}","args": ["languages/go-to-llvm-ir.abnf", "tests/go-fail-test-len-shift.go", "-q"]
         },
         {
             "name": "Go interpreter typed constant division by zero SHOULD FAIL",
             "type": "go",
             "request": "launch",
+            "expectError": "invalid operation: division by zero",
             "program": "${workspaceFolder}","args": ["languages/go-interpreter.abnf", "tests/go-fail-test-typed-divzero.go", "-q"]
         },
         {
             "name": "Go compiler typed constant division by zero SHOULD FAIL",
             "type": "go",
             "request": "launch",
+            "expectError": "invalid operation: division by zero",
             "program": "${workspaceFolder}","args": ["languages/go-to-llvm-ir.abnf", "tests/go-fail-test-typed-divzero.go", "-q"]
         },
         {
             "name": "Go interpreter named constant string index SHOULD FAIL",
             "type": "go",
             "request": "launch",
+            "expectError": "invalid argument: index 3 out of bounds [0:3]",
             "program": "${workspaceFolder}","args": ["languages/go-interpreter.abnf", "tests/go-fail-test-const-str-index.go", "-q"]
         },
         {
             "name": "Go compiler named constant string index SHOULD FAIL",
             "type": "go",
             "request": "launch",
+            "expectError": "invalid argument: index 3 out of bounds [0:3]",
             "program": "${workspaceFolder}","args": ["languages/go-to-llvm-ir.abnf", "tests/go-fail-test-const-str-index.go", "-q"]
         },
         {
             "name": "Go interpreter constant string slice bound SHOULD FAIL",
             "type": "go",
             "request": "launch",
+            "expectError": "invalid argument: index 6 out of bounds [0:5]",
             "program": "${workspaceFolder}","args": ["languages/go-interpreter.abnf", "tests/go-fail-test-const-str-slice.go", "-q"]
         },
         {
             "name": "Go compiler constant string slice bound SHOULD FAIL",
             "type": "go",
             "request": "launch",
+            "expectError": "invalid argument: index 6 out of bounds [0:5]",
             "program": "${workspaceFolder}","args": ["languages/go-to-llvm-ir.abnf", "tests/go-fail-test-const-str-slice.go", "-q"]
         },
         {
             "name": "Go interpreter float32 constant overflow SHOULD FAIL",
             "type": "go",
             "request": "launch",
+            "expectError": "as float32 value in variable declaration (overflows)",
             "program": "${workspaceFolder}","args": ["languages/go-interpreter.abnf", "tests/go-fail-test-float32.go", "-q"]
         },
         {
             "name": "Go compiler float32 constant overflow SHOULD FAIL",
             "type": "go",
             "request": "launch",
+            "expectError": "as float32 value in variable declaration (overflows)",
             "program": "${workspaceFolder}","args": ["languages/go-to-llvm-ir.abnf", "tests/go-fail-test-float32.go", "-q"]
         },
         {
             "name": "Go interpreter constant index out of range SHOULD FAIL",
             "type": "go",
             "request": "launch",
+            "expectError": "invalid argument: index 3 out of bounds [0:3]",
             "program": "${workspaceFolder}","args": ["languages/go-interpreter.abnf", "tests/go-fail-test-index.go", "-q"]
         },
         {
             "name": "Go compiler constant index out of range SHOULD FAIL",
             "type": "go",
             "request": "launch",
+            "expectError": "invalid argument: index 3 out of bounds [0:3]",
             "program": "${workspaceFolder}","args": ["languages/go-to-llvm-ir.abnf", "tests/go-fail-test-index.go", "-q"]
         },
         {
             "name": "Go interpreter constant conversion overflow SHOULD FAIL",
             "type": "go",
             "request": "launch",
+            "expectError": "constant 256 overflows uint8",
             "program": "${workspaceFolder}","args": ["languages/go-interpreter.abnf", "tests/go-fail-test-convert.go", "-q"]
         },
         {
             "name": "Go compiler constant conversion overflow SHOULD FAIL",
             "type": "go",
             "request": "launch",
+            "expectError": "constant 256 overflows uint8",
             "program": "${workspaceFolder}","args": ["languages/go-to-llvm-ir.abnf", "tests/go-fail-test-convert.go", "-q"]
         },
         {
@@ -884,18 +938,21 @@
             "name": "Python unresolved import SHOULD FAIL",
             "type": "go",
             "request": "launch",
+            "expectError": "unresolved import 'notarealmodule'",
             "program": "${workspaceFolder}","args": ["languages/python-to-llvm-ir.abnf", "tests/python-fail-test-import.py", "-q"]
         },
         {
             "name": "Python unknown \\N{} name (interpreter) SHOULD FAIL",
             "type": "go",
             "request": "launch",
+            "expectError": "codec can't decode bytes in position 2-12: unknown Unicode character name",
             "program": "${workspaceFolder}","args": ["languages/python-interpreter.abnf", "tests/python-fail-test-uniname.py", "-q"]
         },
         {
             "name": "Python unknown \\N{} name (compiler) SHOULD FAIL",
             "type": "go",
             "request": "launch",
+            "expectError": "codec can't decode bytes in position 2-12: unknown Unicode character name",
             "program": "${workspaceFolder}","args": ["languages/python-to-llvm-ir.abnf", "tests/python-fail-test-uniname.py", "-q"]
         },
         {
@@ -1682,6 +1739,7 @@
             "name": "MetaJS native link, unresolved runtime symbol SHOULD FAIL (compiler, -exe)",
             "type": "go",
             "request": "launch",
+            "expectError": "clang could not link the executable: 1 unresolved symbol(s)",
             "program": "${workspaceFolder}","args": ["languages/metajs-to-llvm-ir.abnf", "tests/metajs-link-missing.js", "-q", "-exe", "tests/metajs-link-missing.out", "-rt", "tests/metajs-link-stubrt.c"]
         },
         {
@@ -1754,6 +1812,7 @@
             "name": "Lisp native link, missing -l library SHOULD FAIL (compiler, -exe)",
             "type": "go",
             "request": "launch",
+            "expectError": "library 'mec_no_such_lib' not found",
             "program": "${workspaceFolder}","args": ["languages/lisp-to-llvm-ir.abnf", "tests/lisp-test-features.txt", "-q", "-exe", "tests/lisp-link-nolib.out", "-l", "mec_no_such_lib"]
         },
         {
@@ -1916,6 +1975,7 @@
             "name": "Java recognition SHOULD FAIL",
             "type": "go",
             "request": "launch",
+            "expectError": "assert not implemented (tests/java-test-recognize.java:74)",
             "program": "${workspaceFolder}","args": ["languages/java-to-llvm-ir.abnf", "tests/java-test-recognize.java", "-q"]
         },
         {
@@ -1928,6 +1988,7 @@
             "name": "Kotlin recognition SHOULD FAIL",
             "type": "go",
             "request": "launch",
+            "expectError": "assignment to a computed target not implemented (tests/kotlin-test-recognize.kt:111)",
             "program": "${workspaceFolder}","args": ["languages/kotlin-to-llvm-ir.abnf", "tests/kotlin-test-recognize.kt", "-q"]
         },
         {
@@ -1940,6 +2001,7 @@
             "name": "Kotlin recognition, interpreted SHOULD FAIL",
             "type": "go",
             "request": "launch",
+            "expectError": "assignment to a computed target not implemented (tests/kotlin-test-recognize.kt:111)",
             "program": "${workspaceFolder}","args": ["languages/kotlin-interpreter.abnf", "tests/kotlin-test-recognize.kt", "-q"]
         },
         {
@@ -2012,12 +2074,14 @@
             "name": "Kotlin delegation SHOULD FAIL (interpreter)",
             "type": "go",
             "request": "launch",
+            "expectError": "delegated property not implemented (tests/kotlin-test-delegation.kt:27)",
             "program": "${workspaceFolder}","args": ["languages/kotlin-interpreter.abnf", "tests/kotlin-test-delegation.kt", "-q"]
         },
         {
             "name": "Kotlin delegation SHOULD FAIL (compiler)",
             "type": "go",
             "request": "launch",
+            "expectError": "delegated property not implemented (tests/kotlin-test-delegation.kt:27)",
             "program": "${workspaceFolder}","args": ["languages/kotlin-to-llvm-ir.abnf", "tests/kotlin-test-delegation.kt", "-q"]
         },
         {
@@ -2060,6 +2124,7 @@
             "name": "Go recognition SHOULD FAIL",
             "type": "go",
             "request": "launch",
+            "expectError": "grouped type declaration not implemented (tests/go-test-recognize.go:50)",
             "program": "${workspaceFolder}","args": ["languages/go-to-llvm-ir.abnf", "tests/go-test-recognize.go", "-q"]
         },
         {
@@ -2096,6 +2161,7 @@
             "name": "TypeScript recognition SHOULD FAIL",
             "type": "go",
             "request": "launch",
+            "expectError": "import statement not implemented (tests/typescript-test-recognize.ts:13)",
             "program": "${workspaceFolder}","args": ["languages/typescript-to-llvm-ir.abnf", "tests/typescript-test-recognize.ts", "-q"]
         },
         {
@@ -2120,66 +2186,77 @@
             "name": "PHP undefined constant SHOULD FAIL (interpreted)",
             "type": "go",
             "request": "launch",
+            "expectError": "uncaught exception: Undefined constant",
             "program": "${workspaceFolder}","args": ["languages/php-interpreter.abnf", "tests/php-test-undefconst.php", "-q"]
         },
         {
             "name": "PHP undefined constant SHOULD FAIL (compiled)",
             "type": "go",
             "request": "launch",
+            "expectError": "uncaught exception: Undefined constant",
             "program": "${workspaceFolder}","args": ["languages/php-to-llvm-ir.abnf", "tests/php-test-undefconst.php", "-q"]
         },
         {
             "name": "PHP goto out of finally SHOULD FAIL (interpreted)",
             "type": "go",
             "request": "launch",
+            "expectError": "jump out of a finally block is disallowed",
             "program": "${workspaceFolder}","args": ["languages/php-interpreter.abnf", "tests/php-test-finallygoto.php", "-q"]
         },
         {
             "name": "PHP goto out of finally SHOULD FAIL (compiled)",
             "type": "go",
             "request": "launch",
+            "expectError": "jump out of a finally block is disallowed",
             "program": "${workspaceFolder}","args": ["languages/php-to-llvm-ir.abnf", "tests/php-test-finallygoto.php", "-q"]
         },
         {
             "name": "PHP promoted parameter null default SHOULD FAIL (interpreted)",
             "type": "go",
             "request": "launch",
+            "expectError": "Cannot use null as default value for parameter $x of type int",
             "program": "${workspaceFolder}","args": ["languages/php-interpreter.abnf", "tests/php-test-promotenull.php", "-q"]
         },
         {
             "name": "PHP promoted parameter null default SHOULD FAIL (compiled)",
             "type": "go",
             "request": "launch",
+            "expectError": "Cannot use null as default value for parameter $x of type int",
             "program": "${workspaceFolder}","args": ["languages/php-to-llvm-ir.abnf", "tests/php-test-promotenull.php", "-q"]
         },
         {
             "name": "PHP break out of finally SHOULD FAIL (interpreted)",
             "type": "go",
             "request": "launch",
+            "expectError": "jump out of a finally block is disallowed",
             "program": "${workspaceFolder}","args": ["languages/php-interpreter.abnf", "tests/php-test-finallybreak.php", "-q"]
         },
         {
             "name": "PHP break out of finally SHOULD FAIL (compiled)",
             "type": "go",
             "request": "launch",
+            "expectError": "jump out of a finally block is disallowed",
             "program": "${workspaceFolder}","args": ["languages/php-to-llvm-ir.abnf", "tests/php-test-finallybreak.php", "-q"]
         },
         {
             "name": "PHP goto into finally SHOULD FAIL (interpreted)",
             "type": "go",
             "request": "launch",
+            "expectError": "jump into a finally block is disallowed",
             "program": "${workspaceFolder}","args": ["languages/php-interpreter.abnf", "tests/php-test-finallyinto.php", "-q"]
         },
         {
             "name": "PHP goto into finally SHOULD FAIL (compiled)",
             "type": "go",
             "request": "launch",
+            "expectError": "jump into a finally block is disallowed",
             "program": "${workspaceFolder}","args": ["languages/php-to-llvm-ir.abnf", "tests/php-test-finallyinto.php", "-q"]
         },
         {
             "name": "PHP recognition SHOULD FAIL",
             "type": "go",
             "request": "launch",
+            "expectError": "include/require not implemented (tests/php-test-recognize.php:14)",
             "program": "${workspaceFolder}","args": ["languages/php-to-llvm-ir.abnf", "tests/php-test-recognize.php", "-q"]
         },
         {
@@ -2192,6 +2269,7 @@
             "name": "Dart recognition SHOULD FAIL",
             "type": "go",
             "request": "launch",
+            "expectError": "library directive not implemented (tests/dart-test-recognize.dart:14)",
             "program": "${workspaceFolder}","args": ["languages/dart-to-llvm-ir.abnf", "tests/dart-test-recognize.dart", "-q"]
         },
         {
@@ -2204,6 +2282,7 @@
             "name": "Swift recognition SHOULD FAIL",
             "type": "go",
             "request": "launch",
+            "expectError": "await expression not implemented (tests/swift-test-recognize.swift:62)",
             "program": "${workspaceFolder}","args": ["languages/swift-to-llvm-ir.abnf", "tests/swift-test-recognize.swift", "-q"]
         },
         {
@@ -2216,6 +2295,7 @@
             "name": "Ruby recognition SHOULD FAIL",
             "type": "go",
             "request": "launch",
+            "expectError": "conditional assignment (||=) not implemented (tests/ruby-test-recognize.rb:63)",
             "program": "${workspaceFolder}","args": ["languages/ruby-to-llvm-ir.abnf", "tests/ruby-test-recognize.rb", "-q"]
         },
         {
@@ -2360,7 +2440,8 @@
             "name": "Smaller match first Test",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["tests/smaller-match-first-test.abnf", "tests/smaller-match-first-test.txt"]
+            "expectError": "Last good parse position: tests/smaller-match-first-test.txt:1:2",
+            "program": "${workspaceFolder}","args": ["tests/smaller-match-first-test.abnf", "tests/smaller-match-first-test.txt", "-q"]
         },
         {
             "name": "LLVM IR Test",
@@ -2426,36 +2507,42 @@
             "name": "Compiler flags FAIL: undeclared flag",
             "type": "go",
             "request": "launch",
+            "expectError": "declares no flag",
             "program": "${workspaceFolder}","args": ["tests/compiler-flags-test.abnf", "-code", "mode=plain", "-cf2", "shout=1", "-q"]
         },
         {
             "name": "Compiler flags FAIL: value outside the declared set",
             "type": "go",
             "request": "launch",
+            "expectError": "takes plain|loud|quiet, got",
             "program": "${workspaceFolder}","args": ["tests/compiler-flags-test.abnf", "-code", "mode=plain", "-cf2", "mode=shout", "-q"]
         },
         {
             "name": "Compiler flags FAIL: no stage declares the flag",
             "type": "go",
             "request": "launch",
+            "expectError": "no stage declares a flag",
             "program": "${workspaceFolder}","args": ["tests/compiler-flags-test.abnf", "-code", "mode=plain", "-cf", "shout=1", "-q"]
         },
         {
             "name": "Compiler flags FAIL: stage 1 runs no grammar file",
             "type": "go",
             "request": "launch",
+            "expectError": "stage 1 runs no grammar file, so it has no flags",
             "program": "${workspaceFolder}","args": ["tests/compiler-flags-test.abnf", "-code", "mode=plain", "-cf1", "mode=loud", "-q"]
         },
         {
             "name": "Compiler flags FAIL: script reads an undeclared flag",
             "type": "go",
             "request": "launch",
+            "expectError": "the grammar does not declare that flag",
             "program": "${workspaceFolder}","args": ["tests/compiler-flags-test.abnf", "-code", "bogus=1", "-q"]
         },
         {
             "name": "Compiler flags FAIL: an unset flag reads as its default",
             "type": "go",
             "request": "launch",
+            "expectError": "c.flag says plain for mode, expected loud",
             "program": "${workspaceFolder}","args": ["tests/compiler-flags-test.abnf", "-code", "mode=loud", "-q"]
         },
         {
@@ -2504,7 +2591,8 @@
             "name": "Infinite Loop",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["tests/infinite-loop.abnf", "tests/infinite-loop-test-1.txt", "-lb", "-vv2"]
+            "expectError": "Not everything could be parsed. Last good parse position: tests/infinite-loop-test-1.txt:1:1",
+            "program": "${workspaceFolder}","args": ["tests/infinite-loop.abnf", "tests/infinite-loop-test-1.txt", "-lb", "-q"]
         },
         // ---- NATIVE (-exe) ROWS FOR THE HANDLE-IR LANGUAGES ----
         //
@@ -2701,6 +2789,7 @@
             "name": "Python abort probe, list index out of range (interpreter, SHOULD FAIL)",
             "type": "go",
             "request": "launch",
+            "expectError": "uncaught exception: IndexError: list index out of range",
             "program": "${workspaceFolder}","args": ["languages/python-interpreter.abnf", "tests/python-abort-test.py", "-q"]
         },
         {
@@ -2713,6 +2802,7 @@
             "name": "Python abort probe, uncaught KeyError (interpreter, SHOULD FAIL)",
             "type": "go",
             "request": "launch",
+            "expectError": "uncaught exception: KeyError: ('k', 2)",
             "program": "${workspaceFolder}","args": ["languages/python-interpreter.abnf", "tests/python-abort-test-uncaught.py", "-q"]
         },
         {
@@ -2725,6 +2815,7 @@
             "name": "JavaScript abort probe, uncaught Error (interpreter, SHOULD FAIL)",
             "type": "go",
             "request": "launch",
+            "expectError": "uncaught exception: Error: abort probe",
             "program": "${workspaceFolder}","args": ["languages/js-interpreter.abnf", "tests/js-abort-test.js", "-q"]
         },
         {
@@ -2737,6 +2828,7 @@
             "name": "TypeScript abort probe, uncaught Error (interpreter, SHOULD FAIL)",
             "type": "go",
             "request": "launch",
+            "expectError": "uncaught exception: Error: abort probe",
             "program": "${workspaceFolder}","args": ["languages/typescript-interpreter.abnf", "tests/typescript-abort-test.ts", "-q"]
         },
         {
@@ -2773,66 +2865,77 @@
             "name": "TypeScript interpreter legacy octal literal SHOULD FAIL",
             "type": "go",
             "request": "launch",
+            "expectError": "Last good parse position: tests/typescript-fail-test-legacy-octal.ts:8:14",
             "program": "${workspaceFolder}","args": ["languages/typescript-interpreter.abnf", "tests/typescript-fail-test-legacy-octal.ts", "-q"]
         },
         {
             "name": "TypeScript compiler legacy octal literal SHOULD FAIL",
             "type": "go",
             "request": "launch",
+            "expectError": "Last good parse position: tests/typescript-fail-test-legacy-octal.ts:8:14",
             "program": "${workspaceFolder}","args": ["languages/typescript-to-llvm-ir.abnf", "tests/typescript-fail-test-legacy-octal.ts", "-q"]
         },
         {
             "name": "JavaScript interpreter separator after a leading 0 SHOULD FAIL",
             "type": "go",
             "request": "launch",
+            "expectError": "Last good parse position: tests/js-fail-test-leading-zero-sep.js:7:14",
             "program": "${workspaceFolder}","args": ["languages/js-interpreter.abnf", "tests/js-fail-test-leading-zero-sep.js", "-q"]
         },
         {
             "name": "JavaScript compiler separator after a leading 0 SHOULD FAIL",
             "type": "go",
             "request": "launch",
+            "expectError": "Last good parse position: tests/js-fail-test-leading-zero-sep.js:7:14",
             "program": "${workspaceFolder}","args": ["languages/js-to-llvm-ir.abnf", "tests/js-fail-test-leading-zero-sep.js", "-q"]
         },
         {
             "name": "JavaScript interpreter BigInt with a leading 0 SHOULD FAIL",
             "type": "go",
             "request": "launch",
+            "expectError": "Last good parse position: tests/js-fail-test-leading-zero-bigint.js:7:15",
             "program": "${workspaceFolder}","args": ["languages/js-interpreter.abnf", "tests/js-fail-test-leading-zero-bigint.js", "-q"]
         },
         {
             "name": "JavaScript compiler BigInt with a leading 0 SHOULD FAIL",
             "type": "go",
             "request": "launch",
+            "expectError": "Last good parse position: tests/js-fail-test-leading-zero-bigint.js:7:15",
             "program": "${workspaceFolder}","args": ["languages/js-to-llvm-ir.abnf", "tests/js-fail-test-leading-zero-bigint.js", "-q"]
         },
         {
             "name": "JavaScript interpreter doubled or trailing numeric separator SHOULD FAIL",
             "type": "go",
             "request": "launch",
+            "expectError": "Last good parse position: tests/js-fail-test-numeric-separator.js:7:15",
             "program": "${workspaceFolder}","args": ["languages/js-interpreter.abnf", "tests/js-fail-test-numeric-separator.js", "-q"]
         },
         {
             "name": "JavaScript compiler doubled or trailing numeric separator SHOULD FAIL",
             "type": "go",
             "request": "launch",
+            "expectError": "Last good parse position: tests/js-fail-test-numeric-separator.js:7:15",
             "program": "${workspaceFolder}","args": ["languages/js-to-llvm-ir.abnf", "tests/js-fail-test-numeric-separator.js", "-q"]
         },
         {
             "name": "TypeScript interpreter doubled or trailing numeric separator SHOULD FAIL",
             "type": "go",
             "request": "launch",
+            "expectError": "Last good parse position: tests/typescript-fail-test-numeric-separator.ts:8:15",
             "program": "${workspaceFolder}","args": ["languages/typescript-interpreter.abnf", "tests/typescript-fail-test-numeric-separator.ts", "-q"]
         },
         {
             "name": "TypeScript compiler doubled or trailing numeric separator SHOULD FAIL",
             "type": "go",
             "request": "launch",
+            "expectError": "Last good parse position: tests/typescript-fail-test-numeric-separator.ts:8:15",
             "program": "${workspaceFolder}","args": ["languages/typescript-to-llvm-ir.abnf", "tests/typescript-fail-test-numeric-separator.ts", "-q"]
         },
         {
             "name": "Ruby abort probe, raise (interpreter, SHOULD FAIL)",
             "type": "go",
             "request": "launch",
+            "expectError": "tests/ruby-abort-test.rb:6:in `<main>': abort probe (RuntimeError)",
             "program": "${workspaceFolder}","args": ["languages/ruby-interpreter.abnf", "tests/ruby-abort-test.rb", "-q"]
         },
         {
@@ -2845,6 +2948,7 @@
             "name": "Go abort probe, panic (interpreter, SHOULD FAIL)",
             "type": "go",
             "request": "launch",
+            "expectError": "panic: abort probe [recovered]",
             "program": "${workspaceFolder}","args": ["languages/go-interpreter.abnf", "tests/go-abort-test.go", "-q"]
         },
         {
@@ -2863,6 +2967,7 @@
             "name": "Go abort probe, unbounded recursion (interpreter, SHOULD FAIL)",
             "type": "go",
             "request": "launch",
+            "expectError": "fatal error: stack overflow",
             "program": "${workspaceFolder}","args": ["languages/go-interpreter.abnf", "tests/go-abort-deep-test.go", "-q"]
         },
         {
@@ -2875,6 +2980,7 @@
             "name": "Java abort probe, uncaught RuntimeException (interpreter, SHOULD FAIL)",
             "type": "go",
             "request": "launch",
+            "expectError": "java.lang.RuntimeException: abort probe",
             "program": "${workspaceFolder}","args": ["languages/java-interpreter.abnf", "tests/java-abort-test.java", "-q"]
         },
         {
@@ -2887,6 +2993,7 @@
             "name": "C# abort probe, uncaught Exception (interpreter, SHOULD FAIL)",
             "type": "go",
             "request": "launch",
+            "expectError": "Unhandled exception. System.Exception: abort probe",
             "program": "${workspaceFolder}","args": ["languages/csharp-interpreter.abnf", "tests/csharp-abort-test.cs", "-q"]
         },
         {
@@ -2899,6 +3006,7 @@
             "name": "C# abort probe, unbounded recursion (interpreter, SHOULD FAIL)",
             "type": "go",
             "request": "launch",
+            "expectError": "Stack overflow.",
             "program": "${workspaceFolder}","args": ["languages/csharp-interpreter.abnf", "tests/csharp-abort-test-deep.cs", "-q"]
         },
         {
@@ -2911,6 +3019,7 @@
             "name": "PHP abort probe, uncaught Exception (interpreter, SHOULD FAIL)",
             "type": "go",
             "request": "launch",
+            "expectError": "uncaught exception: abort probe",
             "program": "${workspaceFolder}","args": ["languages/php-interpreter.abnf", "tests/php-abort-test.php", "-q"]
         },
         {
@@ -2923,6 +3032,7 @@
             "name": "PHP abort probe, unbounded recursion (interpreter, SHOULD FAIL)",
             "type": "go",
             "request": "launch",
+            "expectError": "PHP Fatal error:  Allowed memory size of 134217728 bytes exhausted",
             "program": "${workspaceFolder}","args": ["languages/php-interpreter.abnf", "tests/php-abort-test-deep.php", "-q"]
         },
         {
@@ -2935,6 +3045,7 @@
             "name": "Kotlin abort probe, uncaught RuntimeException (interpreter, SHOULD FAIL)",
             "type": "go",
             "request": "launch",
+            "expectError": "java.lang.RuntimeException: abort probe",
             "program": "${workspaceFolder}","args": ["languages/kotlin-interpreter.abnf", "tests/kotlin-abort-test.kt", "-q"]
         },
         {
@@ -2947,6 +3058,7 @@
             "name": "Dart abort probe, uncaught Exception (interpreter, SHOULD FAIL)",
             "type": "go",
             "request": "launch",
+            "expectError": "uncaught exception: Exception: abort probe",
             "program": "${workspaceFolder}","args": ["languages/dart-interpreter.abnf", "tests/dart-abort-test.dart", "-q"]
         },
         {
@@ -2959,6 +3071,7 @@
             "name": "Lua abort probe, index a nil value (interpreter, SHOULD FAIL)",
             "type": "go",
             "request": "launch",
+            "expectError": "tests/lua-abort-test.lua:6: attempt to index a nil value (local 't')",
             "program": "${workspaceFolder}","args": ["languages/lua-interpreter.abnf", "tests/lua-abort-test.lua", "-q"]
         },
         {
@@ -2971,6 +3084,7 @@
             "name": "Swift abort probe, array index out of range (interpreter, SHOULD FAIL)",
             "type": "go",
             "request": "launch",
+            "expectError": "Fatal error: Index out of range",
             "program": "${workspaceFolder}","args": ["languages/swift-interpreter.abnf", "tests/swift-abort-test.swift", "-q"]
         },
         {
@@ -2983,6 +3097,7 @@
             "name": "Swift abort probe, array element write out of range (interpreter, SHOULD FAIL)",
             "type": "go",
             "request": "launch",
+            "expectError": "Fatal error: Index out of range",
             "program": "${workspaceFolder}","args": ["languages/swift-interpreter.abnf", "tests/swift-abort-test-write.swift", "-q"]
         },
         {
@@ -2995,6 +3110,7 @@
             "name": "Swift abort probe, uncaught throw (interpreter, SHOULD FAIL)",
             "type": "go",
             "request": "launch",
+            "expectError": "Fatal error: Error raised at top level: boom",
             "program": "${workspaceFolder}","args": ["languages/swift-interpreter.abnf", "tests/swift-abort-test-throw.swift", "-q"]
         },
         {
@@ -3007,6 +3123,8 @@
             "name": "Swift abort probe, unbounded recursion (interpreter, SHOULD FAIL)",
             "type": "go",
             "request": "launch",
+            "expectError": "before the abort",
+            "expectExit": 139,
             "program": "${workspaceFolder}","args": ["languages/swift-interpreter.abnf", "tests/swift-abort-test-deep.swift", "-q"]
         },
         {
@@ -3019,6 +3137,7 @@
             "name": "Swift abort probe, Int of an out-of-range Double (interpreter, SHOULD FAIL)",
             "type": "go",
             "request": "launch",
+            "expectError": "Double value cannot be converted to Int because the result would be greater than Int.max",
             "program": "${workspaceFolder}","args": ["languages/swift-interpreter.abnf", "tests/swift-abort-test-intconv.swift", "-q"]
         },
         {
@@ -3031,6 +3150,7 @@
             "name": "Swift abort probe, inverted range (interpreter, SHOULD FAIL)",
             "type": "go",
             "request": "launch",
+            "expectError": "Fatal error: Range requires lowerBound <= upperBound",
             "program": "${workspaceFolder}","args": ["languages/swift-interpreter.abnf", "tests/swift-abort-test-range.swift", "-q"]
         },
         {
@@ -3043,6 +3163,7 @@
             "name": "Swift abort probe, removeLast on an empty array (interpreter, SHOULD FAIL)",
             "type": "go",
             "request": "launch",
+            "expectError": "Fatal error: Can't remove last element from an empty collection",
             "program": "${workspaceFolder}","args": ["languages/swift-interpreter.abnf", "tests/swift-abort-test-removelast.swift", "-q"]
         },
         {
@@ -3055,6 +3176,7 @@
             "name": "Bash abort probe, command not found (interpreter, SHOULD FAIL)",
             "type": "go",
             "request": "launch",
+            "expectError": "command not found: nosuchcommand_abort_probe",
             "program": "${workspaceFolder}","args": ["languages/bash-interpreter.abnf", "tests/bash-abort-test.sh", "-q"]
         },
         {
@@ -3067,6 +3189,8 @@
             "name": "Bash abort probe, set -e at the top level (interpreter, SHOULD FAIL)",
             "type": "go",
             "request": "launch",
+            "expectError": "the exempt failures went on",
+            "expectExit": 1,
             "program": "${workspaceFolder}","args": ["languages/bash-interpreter.abnf", "tests/bash-abort-test-errexit.sh", "-q"]
         },
         {

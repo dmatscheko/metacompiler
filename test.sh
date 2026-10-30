@@ -13,7 +13,10 @@
 #   2. correct exit status: the language tests are self-checking (exit 0 == the
 #      program's own checks passed). Ordinary entries must exit 0 on both engines;
 #      the by-design failures (names containing "FAIL", plus the smaller-match-first
-#      and infinite-loop grammar guards) must exit non-zero on both engines.
+#      and infinite-loop grammar guards) must exit non-zero on both engines, FOR
+#      THEIR STATED REASON: each such row carries an "expectError" substring that
+#      both engines' output must contain (and optionally an "expectExit" status),
+#      because a missing input file or a parse stop at 1:1 also exits non-zero.
 #   3. expect-nonzero NATIVE rows: `-exe PATH` only builds, so an entry that names
 #      SHOULD ABORT is built (which must succeed), then the built BINARY is run and
 #      must exit non-zero with the same OUTPUT AND ABORT TEXT as the same program
@@ -55,7 +58,8 @@
 #                             engine against ITSELF and is blind to the
 #                             interpreter and the compiler of one language giving
 #                             different answers. This group is the check for
-#                             that. Informational: always exits 0.
+#                             that. A divergence is informational; a pair that
+#                             was KILLED or left no verdict exits non-zero.
 #                             Combine with --filter to probe one language.
 #   ./test.sh -h, --help      show this header
 #
@@ -82,7 +86,7 @@ while [ $# -gt 0 ]; do
         --timeout=*)  TIMEOUT="${1#*=}"; TIMEOUT_EXPLICIT=1 ;;
         --full)       FULL=1 ;;
         --cross)      CROSS=1 ;;
-        -h|--help)    sed -n '2,60p' "$0"; exit 0 ;;
+        -h|--help)    sed -n '2,67p' "$0"; exit 0 ;;
         *) echo "test.sh: unknown option '$1' (try --help)" >&2; exit 2 ;;
     esac
     shift
@@ -863,8 +867,11 @@ if [ "$CROSS" -eq 1 ]; then
         L="${pair%%|*}"; P="${pair#*|}"
         n=$((n + 1)); r="$RESDIR/x.$(printf '%04d' "$n")"
         XREPORTS="$XREPORTS $r"
+        printf '%s  %s' "$L" "$P" > "$r.pair"
         IFS= read -r -n 1 -u 5 _t
-        { cross_one "$L" "$P" "$r"; printf '.' >&5; printf '.' >&2; } &
+        # The token goes back from an EXIT trap, so a worker that dies still
+        # returns it; its missing report is counted below.
+        { trap "printf '.' >&5" EXIT; cross_one "$L" "$P" "$r"; printf '.' >&2; } &
     done
     wait
     echo
@@ -872,9 +879,9 @@ if [ "$CROSS" -eq 1 ]; then
     echo "run on the same program and diffed. The matrix cannot see this class:"
     echo "it compares each engine against ITSELF, never the two halves."
     echo
-    nd=0; nw=0; nk=0
+    nd=0; nw=0; nk=0; nv=0
     for r in $XREPORTS; do
-        [ -f "$r" ] || continue
+        if [ ! -f "$r" ]; then nv=$((nv + 1)); printf 'NO VERDICT  %s\n          the worker for this pair died before writing a report\n' "$(cat "$r.pair")"; continue; fi
         if [ "$(head -1 "$r")" = "agree" ]; then continue; fi
         case "$(head -1 "$r")" in
             "DIFFER "*) nd=$((nd + 1)) ;;
@@ -884,12 +891,12 @@ if [ "$CROSS" -eq 1 ]; then
         cat "$r"
     done
     echo
-    printf '%d programs compared, %d divergent, %d differing only in warnings\n' "$((n - nk))" "$nd" "$nw"
+    printf '%d programs compared, %d divergent, %d differing only in warnings\n' "$((n - nk - nv))" "$nd" "$nw"
     # A killed pair is subtracted from the compared count above rather than
     # folded into it, and it is reported on its own line, because "compared" has
-    # to mean compared. tests/gates.sh keys off ", 0 divergent" in the line
-    # above; the non-zero exit below is what makes a kill reach a caller that
-    # only looks at status.
+    # to mean compared. tests/gates.sh reads ", 0 divergent" and the count in
+    # the line above AND the exit status below, which is what makes a kill
+    # reach it.
     if [ "$nk" -gt 0 ]; then
         echo
         printf '%d PAIR(S) WERE KILLED BY THE %ss --timeout and were NOT COMPARED. The counts\n' "$nk" "$TIMEOUT"
@@ -900,29 +907,44 @@ if [ "$CROSS" -eq 1 ]; then
     echo "  A divergence is not automatically a bug - the real language decides which"
     echo "  half is right. Settle each against the real toolchain, then fix the wrong"
     echo "  half and pin it with a ratchet assertion."
-    [ "$nk" -gt 0 ] && exit 1
+    if [ "$nv" -gt 0 ]; then
+        echo
+        printf '%d PAIR(S) LEFT NO VERDICT: their worker died (a harness defect, see stderr).\n' "$nv"
+    fi
+    [ "$nk" -gt 0 ] || [ "$nv" -gt 0 ] && exit 1
     exit 0
 fi
 
-# Extract the matrix from the JSONC launch.json. Every entry is a "name": line
-# followed by a single "program": ... "args": [ ... ] line; emit one tab-separated
-# record per entry: name <TAB> arg1 <TAB> arg2 ... The "-----" separators, the
-# -freeze entry (mutates the snapshot) and entries without args are dropped.
+# Extract the matrix from the JSONC launch.json. Every entry is a "name": line,
+# optionally an "expectError": "<substring>" and an "expectExit": <status> line
+# (see run_entry), then a single "program": ... "args": [ ... ] line; emit one
+# tab-separated record per entry: name <TAB> expectError <TAB> expectExit <TAB>
+# arg1 <TAB> arg2 ..., with "-" for an absent expectation (an empty field would
+# vanish when the record is split on tabs). An expectError value holds no '"'
+# or backslash: it is taken verbatim. The "-----" separators, the -freeze entry
+# (mutates the snapshot) and entries without args are dropped.
 awk '
     /"name":/ {
         n = $0; sub(/.*"name":[[:space:]]*"/, "", n); sub(/".*/, "", n); name = n
+        experr = "-"; expexit = "-"
+    }
+    /"expectError":/ {
+        experr = $0; sub(/.*"expectError":[[:space:]]*"/, "", experr); sub(/"[^"]*$/, "", experr)
+    }
+    /"expectExit":/ {
+        expexit = $0; sub(/.*"expectExit":[[:space:]]*/, "", expexit); sub(/[^0-9].*/, "", expexit)
     }
     /"args":/ {
         a = $0; sub(/.*"args":[[:space:]]*\[/, "", a); sub(/\].*/, "", a)
         gsub(/"[[:space:]]*,[[:space:]]*"/, "\t", a)   # arg boundaries -> tab
         sub(/^[[:space:]]*"/, "", a); sub(/"[[:space:]]*$/, "", a)
         if (a ~ /-----/ || a ~ /-freeze/) next
-        print name "\t" a
+        print name "\t" experr "\t" expexit "\t" a
     }
 ' .vscode/launch.json > "$ENTRIES"
 
 if [ "$LIST" -eq 1 ]; then
-    nl -ba "$ENTRIES" | sed 's/\t/  |  /g'
+    cut -f1,4- "$ENTRIES" | nl -ba | sed 's/\t/  |  /g'
     exit 0
 fi
 
@@ -933,7 +955,7 @@ n_entries=$(wc -l < "$ENTRIES" | tr -d ' ')
 # block). Entries are independent, so any number of them may run in parallel;
 # each uses its own output files under $RESDIR.
 run_entry() {
-    local idx="$1" name="$2"; shift 2
+    local idx="$1" name="$2" experr="$3" expexit="$4"; shift 4
     local args=("$@")
     local og="$RESDIR/$idx.og" of="$RESDIR/$idx.of" eg="$RESDIR/$idx.eg" ef="$RESDIR/$idx.ef"
 
@@ -1011,6 +1033,33 @@ run_entry() {
     if [ "$should_fail" -eq 1 ]; then
         [ "$rc_g" -eq 0 ] && problems+=("goja exited 0 but should fail")
         [ "$rc_f" -eq 0 ] && problems+=("frozen exited 0 but should fail")
+        # A non-zero exit alone does not say WHY: a missing input file and a
+        # parse stop at 1:1 exit non-zero too. So the row states the reason, and
+        # both engines must give it. The two generic checks catch the commonest
+        # wrong reasons even under a loose expectation; a row whose expectation
+        # IS one of them is exempt from that one.
+        if [ "$experr" = - ]; then
+            problems+=("by-design failing row with no \"expectError\" in .vscode/launch.json: an exit status cannot say why it failed")
+        else
+            local leg lo le lrc
+            for leg in goja frozen; do
+                if [ "$leg" = goja ]; then lo="$og"; le="$eg"; lrc="$rc_g"; else lo="$of"; le="$ef"; lrc="$rc_f"; fi
+                cat "$lo" "$le" | LC_ALL=C tr -d '\000' > "$RESDIR/$idx.all"
+                grep -qF -- "$experr" "$RESDIR/$idx.all" \
+                    || problems+=("$leg failed, but not for the stated reason: its output has no \"$experr\"")
+                case "$experr" in *"no such file or directory"*) ;; *)
+                    grep -qi 'no such file or directory' "$RESDIR/$idx.all" \
+                        && problems+=("$leg failed on a MISSING FILE: $(grep -i -m1 'no such file or directory' "$RESDIR/$idx.all" | cut -c1-120)") ;;
+                esac
+                case "$experr" in *":1:1"*) ;; *)
+                    grep -Eq 'Last good parse position: [^(][^ ]*:1:1$' "$RESDIR/$idx.all" \
+                        && problems+=("$leg failed on a parse stop at 1:1 - the input never parsed at all") ;;
+                esac
+                [ "$expexit" != - ] && [ "$lrc" != "$expexit" ] \
+                    && problems+=("$leg exited $lrc, the row expects exit $expexit")
+            done
+            rm -f "$RESDIR/$idx.all"
+        fi
     else
         { [ "$rc_g" -ne 0 ] && ! killed_rc "$rc_g"; } && problems+=("goja exit $rc_g")
         { [ "$rc_f" -ne 0 ] && ! killed_rc "$rc_f"; } && problems+=("frozen exit $rc_f")
@@ -1095,6 +1144,20 @@ run_entry() {
 # A FIFO token semaphore caps the pool at $JOBS parallel entries (works on the
 # stock macOS bash 3.2: no wait -n). Each worker takes a token before it starts
 # and puts one back when done.
+#
+# A WORKER THAT DIES (an unset variable under set -u, say) must still do both
+# of its jobs, so they run from its EXIT trap: write a verdict - a .fail naming
+# the death when run_entry wrote none - and return the token. Otherwise the row
+# vanishes from the tally and, after $JOBS deaths, the loop blocks on fd 3.
+matrix_worker_exit() {
+    local idx="$1" name="$2" block
+    if [ ! -f "$RESDIR/$idx.ok" ] && [ ! -f "$RESDIR/$idx.fail" ]; then
+        block="$(printf 'FAIL   %s\n         - the test.sh worker DIED before writing a verdict (a harness defect; its error is on stderr above)' "$name")"
+        printf '%s\n' "$block" > "$RESDIR/$idx.fail"
+        printf '%s\n' "$block"
+    fi
+    printf '.' >&3
+}
 SEM="$RESDIR/sem"
 mkfifo "$SEM"
 exec 3<>"$SEM"
@@ -1102,7 +1165,7 @@ rm -f "$SEM"
 i=0; while [ "$i" -lt "$JOBS" ]; do printf '.' >&3; i=$((i + 1)); done
 
 total=0; idx=0
-while IFS=$'\t' read -r name rest; do
+while IFS=$'\t' read -r name experr expexit rest; do
     [ -z "${name:-}" ] && continue
     IFS=$'\t' read -r -a args <<< "$rest"
     idx=$((idx + 1))
@@ -1114,7 +1177,8 @@ while IFS=$'\t' read -r name rest; do
     total=$((total + 1))
 
     IFS= read -r -n 1 -u 3 _token
-    { run_entry "$idx" "$name" "${args[@]}"; printf '.' >&3; } &
+    { trap "matrix_worker_exit $idx $(printf '%q' "$name")" EXIT
+      run_entry "$idx" "$name" "$experr" "$expexit" "${args[@]}"; } &
 done < "$ENTRIES"
 wait
 
@@ -1125,6 +1189,14 @@ echo
 echo "----------------------------------------------------------------"
 printf 'matrix: %d entries run - %d passed, %d failed\n' "$total" "$pass" "$fail"
 
+# Every row run must have left exactly one verdict. The worker's EXIT trap makes
+# a shortfall unreachable short of the trap itself failing, so this is the
+# backstop for that: green means pass == total, never just fail == 0.
+if [ "$((pass + fail))" -ne "$total" ]; then
+    printf 'NO VERDICT for %d of the %d entries run - the harness lost them; NOT green\n' \
+        "$((total - pass - fail))" "$total"
+    exit 1
+fi
 if [ "$fail" -ne 0 ]; then
     echo "FAILURES:"
     for f in $(ls "$RESDIR" | grep '\.fail$' | sort -n); do
