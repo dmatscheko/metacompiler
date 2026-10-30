@@ -996,7 +996,7 @@ LambdaLit   <~~ push(makeLambda(takeAll())) ~~>
 LambdaBody  = KwDo Body End | "{" [ BlockParams ] Body "}" ;
 
 // A block passed to a method call: a real closure over the current scope.
-Block       <~~ push(makeBlock(takeAll())) ~~>
+Block       <~~ push(makeBlock(takeAll(), up.start, up.pos)) ~~>
             = NoLoopDo KwDo [ BlockParams ] GuardedBlockBody End
             | NoLambdaParam "{" [ BlockParams ] BlockBody "}" ;
 // A `{` may not open a BLOCK inside a parenthesis-less lambda parameter list: in
@@ -3713,7 +3713,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (req == 0 && opt == 0 && !star) { return fv }
         return callExt(b, "js_rarity", [fv, emitNum(b, req), emitNum(b, opt), star ? hTrue : hFalse])
     }
-    function makeBlock(items) {
+    function makeBlock(items, from, to) {
         var params = blockParams(items)
         if (params.length == 0) {
             var np = numberedParamCount(blockText(items))
@@ -3727,7 +3727,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // the one place it is free.
         // blkMethT emits the same block in the METHOD convention (the receiver is
         // argument 0 and binds self), for a define_method body (dmArgs).
-        return {blkKinds: paramKinds(params), blkT: function(b) {
+        return {blkKinds: paramKinds(params), blkFrom: from, blkTo: to, blkT: function(b) {
             curBlkDepth++
             var idx = emitFunc(params, bodyStmt, false, false, true)
             curBlkDepth--
@@ -3764,7 +3764,51 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // because a symbol thunk does not keep its identity through the tag stack.
     // Twin of blockMethodDef in ruby-interpreter.abnf.
     function isDmName(nm) { return nm == "define_method" || nm == "define_singleton_method" }
+    function isEvalName(nm) { return nm == "class_eval" || nm == "module_eval" || nm == "class_exec" || nm == "module_exec" }
+    // The literal block of class_eval and its kin runs in the method convention
+    // too, self being the module, and a def emitted inside it (curEvalDef) is an
+    // instance method of the module, defined at run time through define_method.
+    // Twin of classEval in ruby-interpreter.abnf.
+    var curEvalDef = false
+    // The defs makeDefStmt has seen, by position: one inside a class_eval block
+    // is no top-level function after all (evalDefsOut), unless another def of the
+    // name is.
+    var topDefs = []
+    function evalDefsOut(from, to) {
+        var kept = []
+        var out = []
+        for (var i = 0; i < topDefs.length; i++) {
+            if (topDefs[i].pos >= from && topDefs[i].pos < to) { out.push(topDefs[i].name) } else { kept.push(topDefs[i]) }
+        }
+        topDefs = kept
+        for (var j = 0; j < out.length; j++) {
+            var still = false
+            for (var k = 0; k < kept.length; k++) { if (kept[k].name == out[j]) { still = true } }
+            if (!still) { rubyMethods["$" + out[j]] = false }
+        }
+        return null
+    }
+    function evalBlockT(blkMethT) {
+        return function(b) {
+            var saved = curEvalDef
+            curEvalDef = true
+            var r = blkMethT(b)
+            curEvalDef = saved
+            return r
+        }
+    }
     function dmArgs(name, args, txt) {
+        if (isEvalName(name)) {
+            var eo = []
+            for (var ei = 0; ei < args.length; ei++) {
+                var ea = args[ei]
+                if (ea != null && ea != undefined && typeof ea != "function" && ea.blkMethT != undefined) {
+                    evalDefsOut(ea.blkFrom, ea.blkTo)
+                    eo.push({blkKinds: ea.blkKinds, blkT: evalBlockT(ea.blkMethT), blkSelf: true})
+                } else { eo.push(ea) }
+            }
+            return eo
+        }
         var dm = isDmName(name)
         if (!dm && (name == "send" || name == "__send__" || name == "public_send")) {
             var at = txt.indexOf(name) + name.length
@@ -7436,7 +7480,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
         rubyMethods["$" + fn.name] = true
         rubyAllMethods["$" + fn.name] = true
+        topDefs.push({name: fn.name, pos: fn.pos})
         return function(b) {
+            if (curEvalDef) { return {b: emitEvalDef(b, fn), v: hNull} }
             var savedMN = curMethName
             var savedMP = curMethParams
             curMethName = fn.name
@@ -7853,6 +7899,32 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (!skip) { out.push(superForwarder(owner, n, "$q$" + n)) }
         }
         return out
+    }
+    // A def in a class_eval block: `self.define_method(:name, <the method>)', the
+    // method in the method convention and marked __rself as a literal
+    // define_method block is.
+    function emitEvalDef(b, fn) {
+        var savedMN = curMethName
+        var savedMP = curMethParams
+        var savedPs = curMethPs
+        var savedEval = curEvalDef
+        curMethName = fn.name
+        curMethParams = paramNames(fn.params)
+        curMethPs = fn.params
+        curEvalDef = false
+        var idx = emitFunc(fn.params, fn.body, true, false, false, true, fn.pos)
+        curMethName = savedMN
+        curMethParams = savedMP
+        curMethPs = savedPs
+        curEvalDef = savedEval
+        var cloV = emitArity(b, callExt(b, "js_closure", [handle(idx), curScopeV]), fn.params)
+        var argsV = callExt(b, "js_arr_new", [])
+        callExt(b, "js_arr_push", [argsV, callExt(b, "js_sym", [emitStr(b, fn.name)])])
+        var wrapV = callExt(b, "js_rblkwrap", [cloV])
+        callExt(b, "js_set", [wrapV, emitStr(b, "__rself"), hTrue])
+        callExt(b, "js_arr_push", [argsV, wrapV])
+        callExt(b, "js_rxmcall", [callExt(b, "js_scope_get", [curScopeV, emitStr(b, "self")]), emitStr(b, "define_method"), argsV])
+        return b
     }
     function superForwarder(owner, n, key) {
         return {name: n, params: [paramDesc({param: "$fwd", splat: true})], body: function(b) {

@@ -9676,6 +9676,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             }
             if (name == "define_singleton_method") { return blockMethodDef(target, true, args, blk) }
             if (name == "define_method") { return blockMethodDef(target, false, args, blk) }
+            if ((name == "class_eval" || name == "module_eval" || name == "class_exec" || name == "module_exec") && blk != null) {
+                return classEval(target, name == "class_exec" || name == "module_exec" ? args : [], blk)
+            }
             if (name == "singleton_methods") { return singNames(target) }
             if (name == "respond_to?") { return respondTo(target, args) }
             // A class method is stored under a "$s$" prefix so it cannot collide with
@@ -12522,6 +12525,28 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // the method, and the answer is the name as a Symbol, as in MRI. The dispatch
     // prepends the receiver; the block does not take it. Twin of rubyBlockMethod in
     // abnf/jsrt.go and rbBlockMethod in lib/ruby-rt.metajs.
+    // Module#class_eval / #module_eval / #class_exec / #module_exec with a block:
+    // the block runs with self the module, and a def in it is an instance method
+    // of the module (evalClass, read by makeDefStmt). The String form needs a
+    // parser at run time, which the compiled half cannot have. Twins: the
+    // class_eval arm of rubyMethod in abnf/jsrt.go and rbMethod in
+    // lib/ruby-rt.metajs, evalBlockArgs in ruby-to-llvm-ir.abnf.
+    var evalClass = anytype
+    evalClass = null
+    function classEval(cls, args, blk) {
+        var savedEval = evalClass
+        var savedVis = curVis
+        evalClass = cls
+        curVis = "public"
+        blkSelfFor = wrapCore(blk)
+        blkSelf = cls
+        var r = anytype
+        try { r = blockCall(blk, args) } finally {
+            evalClass = savedEval
+            curVis = savedVis
+        }
+        return r
+    }
     function blockMethodDef(o, sing, args, blk) {
         var nm = rstr(args[0])
         var body = anytype
@@ -12938,7 +12963,18 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             return function() { return singPut(recvT(), fn.name, makeMethodClosure(fn)) }
         }
         rubyMethods["$" + fn.name] = true
-        return function() { defDecl(fn.name, makeFunClosure(fn)); return null }
+        return function() {
+            if (evalClass !== null) {
+                fn.owner = evalClass
+                scopePut(evalClass, fn.name, makeMethodClosure(fn))
+                if (curVis == "private" || curVis == "protected") { scopePut(evalClass, "$v$" + fn.name, curVis) }
+                imnNote(evalClass, fn.name)
+                setterNote(fn.name)
+                return null
+            }
+            defDecl(fn.name, makeFunClosure(fn))
+            return null
+        }
     }
     // A local and a def of one name are two things in MRI: the def also lives under
     // "$d$" + name, which is what a call reads, because a local assignment overwrites

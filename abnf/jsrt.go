@@ -11472,6 +11472,17 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 				nm, fn := rt.rubyBlockMethod(args)
 				rubySingPut(o, nm, fn)
 				return jsSym{s: nm}
+			case "class_eval", "module_eval", "class_exec", "module_exec":
+				// The literal block (marked __rself) takes the module as self.
+				// Twin of classEval in ruby-interpreter.abnf.
+				if pos, blk := rubyBlockArgs(args); objIsCls && blk != nil {
+					if _, own := args[len(args)-1].(*jsObject).props["__rself"]; own {
+						if name == "class_eval" || name == "module_eval" {
+							pos = nil
+						}
+						return rt.call(blk, jsUndef, append([]interface{}{o}, pos...))
+					}
+				}
 			case "define_method":
 				// Module#define_method run at run time (a literal one in a class
 				// body is compiled as a def): an instance method of the class.

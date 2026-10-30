@@ -8594,6 +8594,18 @@ function rbMethod(target, name, args) {
                 }
                 return target
             }
+            // The literal block of class_eval and its kin (marked __rself) takes the
+            // module as self. Twin of classEval in ruby-interpreter.abnf.
+            if ((name == "class_eval" || name == "module_eval" || name == "class_exec" || name == "module_exec")
+                && target["__isclass"] === true && rbBlockOf(args) !== null && args[args.length - 1]["__rself"] === true) {
+                var eargs = [target]
+                if (name == "class_exec" || name == "module_exec") {
+                    var en = rbNPos(args)
+                    var ei = 0
+                    while (ei < en) { eargs.push(args[ei]); ei = ei + 1 }
+                }
+                return rbBlockOf(args).apply(undefined, eargs)
+            }
             // Module#define_method run at run time (a literal one in a class body is
             // compiled as a def) adds an instance method to the class.
             if (name == "define_singleton_method" || (name == "define_method" && target["__isclass"] === true)) {

@@ -343,6 +343,27 @@ def s131
   check("rb131b", s131rb == [ArgumentError, "q"])
 end
 
+# ===== SECTION 132: Module#class_eval / #module_eval with a block =====
+# The block runs with self the class and answers its last value; a def in it
+# is an instance method of the class, which the class's other methods call on
+# the implicit self; define_method in it adds one too, and class_exec hands
+# the block its arguments. /usr/bin/ruby 2.6 settles each.
+class S132A; def base; 1; end; end
+def s132
+  r = S132A.module_eval { def q; 7; end; self }
+  S132A.class_eval do
+    def name2; "e"; end
+    define_method(:dm) { base + 10 }
+    def uses; q + base; end
+  end
+  k = 3
+  S132A.class_exec(5) { |n| define_method(:kn) { k + n } }
+  v = S132A.class_eval { 40 + 2 }
+  a = S132A.new
+  check("ce132a", r == S132A && a.q == 7 && a.name2 == "e" && a.dm == 11 && a.uses == 8 && a.kn == 8 && v == 42 &&
+        S132A.instance_methods(false).sort == [:base, :dm, :kn, :name2, :q, :uses] && a.respond_to?(:uses))
+end
+
 s122() # SECTION-CALL 122
 s123() # SECTION-CALL 123
 s124() # SECTION-CALL 124
@@ -353,5 +374,6 @@ s128() # SECTION-CALL 128
 s129() # SECTION-CALL 129
 s130() # SECTION-CALL 130
 s131() # SECTION-CALL 131
+s132() # SECTION-CALL 132
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])
