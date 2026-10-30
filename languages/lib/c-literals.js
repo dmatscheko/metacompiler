@@ -213,11 +213,11 @@ function cInitWalk(ct, list, whole, put) {
         var v = it.v
         if (it.at != undefined || it.fld != undefined) {
             while (stack.length > 1) stack.pop()
-            stack[0].i = cInitIndex(ct, it)
+            cInitSeek(stack, it)
             var sub = it.sub != undefined ? it.sub : []
             for (var d = 0; d < sub.length; d++) {
-                var dct = cInitChild(stack[stack.length - 1])
-                stack.push({ct: dct, i: cInitIndex(dct, sub[d])})
+                stack.push({ct: cInitChild(stack[stack.length - 1]), i: 0})
+                cInitSeek(stack, sub[d])
             }
         } else {
             while (stack[stack.length - 1].i >= cInitSize(stack[stack.length - 1].ct)) {
@@ -297,6 +297,26 @@ function cInitAdvance(f) {
     f.i = f.i + 1
 }
 // The member index one designator ('[i]' or '.name') picks in an object of type ct.
+// Point the top frame at what one designator names. A member of an ANONYMOUS
+// struct or union is reached through it (C11 6.7.2.1p13): the frame is pointed at
+// the anonymous member and a frame for that member is pushed, so the items after
+// '.u' carry on inside it.
+function cInitSeek(stack, d) {
+    var f = stack[stack.length - 1]
+    if (d.fld != undefined && f.ct.k == "struct") {
+        var st = structOf(f.ct.s)
+        for (var k = 0; k < st.order.length; k++) {
+            var m = st.fields[st.order[k]]
+            if (m.anon == true && hasOwn(structOf(m.ct.s).fields, d.fld)) {
+                f.i = k
+                stack.push({ct: m.ct, i: 0})
+                cInitSeek(stack, d)
+                return
+            }
+        }
+    }
+    f.i = cInitIndex(f.ct, d)
+}
 function cInitIndex(ct, d) {
     if (d.fld != undefined) {
         if (ct.k != "struct") fail("a '." + d.fld + "' designator needs a struct or union")

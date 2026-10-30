@@ -1056,7 +1056,48 @@ Lvalue      = StrPlaceP | CompLitP | DerefP | Deref | ParenSfx | ParenPlace | Va
 // '2[arr]' as a place: a subscript is '*(E1 + E2)', so the pointer may be either
 // operand (C11 6.5.2.1p2). A name seed ('i[p]') is VarPlace's.
 ConstSubP   <~~ push(makeSubscript(takeAll())) ~~>
-            = ( NumberLit | CharLit ) Index { PlaceSfx } ;
+            = ( ParenStepAhead "(" Expression ")" | NumberLit | CharLit ) ( Index | Arrow ) { PlaceSfx } ;
+// '(' Expression ')' then '->' or '[' is a place: '(p + 2)->a = 1', '(i + 1)[p] = 2'.
+// A scan of the source for that suffix after the matching ')' guards it, so any other
+// '(' is not parsed as an expression once more on every attempt at an lvalue. A
+// :script sees the raw input, so the scan steps over blanks, comments and literals.
+ParenStepAhead = :script(~~
+    (function() {
+        var s = 0
+        var depth = 0
+        var seen = false
+        while (true) {
+            var ch = c.peek(s)
+            if (ch < 0) return abnf.newToken("\x01no-paren-step", 0)
+            if (ch === 32 || ch === 9 || ch === 10 || ch === 13 || ch === 12) { s++; continue }
+            if (ch === 47 && c.peek(s + 1) === 47) {
+                s += 2
+                while (c.peek(s) >= 0 && c.peek(s) !== 10) { s++ }
+                continue
+            }
+            if (ch === 47 && c.peek(s + 1) === 42) {
+                s += 2
+                while (c.peek(s) >= 0 && !(c.peek(s) === 42 && c.peek(s + 1) === 47)) { s++ }
+                s += 2
+                continue
+            }
+            if (seen && depth === 0) {
+                return ((ch === 45 && c.peek(s + 1) === 62) || ch === 91) ? undefined : abnf.newToken("\x01no-paren-step", 0)
+            }
+            if (!seen && ch !== 40) return abnf.newToken("\x01no-paren-step", 0)
+            if (ch === 34 || ch === 39) {
+                s++
+                while (c.peek(s) >= 0 && c.peek(s) !== ch && c.peek(s) !== 10) { s += c.peek(s) === 92 ? 2 : 1 }
+            } else if (ch === 40) {
+                depth++
+                seen = true
+            } else if (ch === 41) {
+                depth--
+            }
+            s++
+        }
+    })()
+~~) ;
 // A STRING LITERAL is an array object of static storage duration, so it is a place:
 // "abc"[1] indexes it, sizeof "abc" is its byte size, and reading it decays to a
 // pointer to its first character. Adjacent literals concatenate (C11 6.4.5p5); an
@@ -1419,10 +1460,10 @@ ArgList     <~~ push({args: takeAll()}) ~~>
 // general form would consume the '(' and then choke on the '{'.
 Primary     = StmtExpr | CompLitRef | ParenSfxRef | SubSeedRef | StrRef | PlaceRef | VarRef ;
 // A parenthesized expression or a constant, optionally subscripted ('2[arr]',
-// '(i + 1)[p]'; see ConstSubP). The subscript is an optional TAIL so the seed is
-// parsed once.
+// '(i + 1)[p]') or stepped through ('(p + 2)->a'); see ConstSubP. The step is an
+// optional TAIL so the seed is parsed once.
 SubSeedRef  <~~ push(makeSubSeedRef(takeAll())) ~~>
-            = ( "(" Expression ")" | FloatLit | NumberLit | CharLit ) [ Index { PlaceSfx } ] ;
+            = ( "(" Expression ")" | FloatLit | NumberLit | CharLit ) [ ( Index | Arrow ) { PlaceSfx } ] ;
 // A GCC STATEMENT EXPRESSION '({ stmt; stmt; expr; })': an ordinary block, in its own
 // scope, whose value is the value of its LAST expression statement (and 0 when it has
 // none). Rather than single that statement out in the syntax - which needs a lookahead
@@ -2146,7 +2187,11 @@ KwDefault   = "default" KwEnd ;
             var off = isUnion ? base : base + size
             var w = 0
             if (g.anonFields != undefined) {
+                var outer = st.order
+                st.order = []
                 var r = layoutGroups(st, g.anonFields, off, g.isUnion, name)
+                st.order = outer
+                st.order.push(anonMemberTag(st.fields, g, off))
                 w = r.size
                 ms.push(cAbiSub(r.cc))
             } else {
@@ -2178,6 +2223,20 @@ KwDefault   = "default" KwEnd ;
             }
         }
         return {size: size, cc: cAbiLayout(ms, isUnion)}
+    }
+    // An anonymous member is also ONE member of the enclosing tag, of a synthetic
+    // tag of its own: a positional initializer steps over it as a unit, so
+    // '{ 5, { 9 }, 100 }' and '{ 5, 9, 100 }' both give its first member 9 (C11
+    // 6.7.2.1p13, 6.7.9p17). Its own members stay in the enclosing tag's namespace
+    // (layoutGroups), so only the initializer walk ever names it.
+    // Twin of anonMemberTag in c-to-llvm-ir.abnf.
+    function anonMemberTag(fields, g, off) {
+        var key = g.isUnion ? uKey(anonTagName()) : anonTagName()
+        var items = [key]
+        for (var i = 0; i < g.anonFields.length; i++) items.push(g.anonFields[i])
+        defineTag(items, g.isUnion)
+        fields[key] = {off: off, ct: ctStruct(key), bf: undefined, anon: true}
+        return key
     }
     // A bit-field: its width, its signedness, and vct, the type its value has in an
     // expression. A field whose every value fits an int promotes to int, one of 32
@@ -2747,14 +2806,15 @@ KwDefault   = "default" KwEnd ;
         if (x.t == undefined || x.t.k != "ptr") fail("indexing needs an array or a pointer")
         return {a: x.v + szNum(y.v) * ctSize(x.t.p), ct: x.t.p, bf: undefined}
     }
-    // items = [seedThunk, {idx}, step...]: a subscripted value, as a place.
+    // items = [seedThunk, {idx} or {arw}, step...]: a subscripted value, or a pointer
+    // value stepped through with '->', as a place.
     function makeSubscript(items) {
         var seedT = items[0]
-        var idxT = items[1].idx
+        var first = items[1]
         var path = items.slice(2)
         return function() {
             var x = seedT()
-            var p = subscriptPlace(x, idxT())
+            var p = first.idx != undefined ? subscriptPlace(x, first.idx()) : makeValStep(x, first)
             return path.length == 0 ? p : walkPath(p, path, "subscript")
         }
     }

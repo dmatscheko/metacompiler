@@ -185,6 +185,11 @@ int s05(void) {
     int t;
     int cm = (t = 1, t + 2);    /* comma evaluates left to right */
     check(514, cm == 3 && t == 1);
+    /* The result has the type of the right operand (6.5.17p2). */
+    double cd = (t++, 2.5);
+    long cl = (t++, 5000000000L);
+    check(520, cd * 2 == 5 && cl / 1000 == 5000000 && sizeof (t, 1L) == 8 && (t, 7) / 2 == 3
+               && (t, 2.5) > 2 && t == 3);
     check(515, (0 ? 1 : 0 ? 2 : 3) == 3 && (87 >= 90 ? 1 : 87 >= 80 ? 2 : 3) == 2);
     check(516, sizeof(int) == 4 && sizeof(int *) == 8);   /* the pinned data model */
     /* 6.5.15p5: the two arms of ?: meet in the usual arithmetic conversions, and the
@@ -339,6 +344,12 @@ int s11(void) {
 struct S12F { unsigned a : 3; unsigned b : 5; int c : 4; };
 struct S12A { int tag; union { int i; unsigned u; }; };   /* C11 anonymous union */
 struct S12W { unsigned long long e : 40; unsigned long long g : 33; long long h : 40; unsigned long long x : 20; };
+/* An anonymous member is ONE member to an initializer (6.7.2.1p13, 6.7.9p17): its
+   own braces, or brace elision into its first member; a designator may name a
+   member inside it and the items after go on from there (cc for every value). */
+struct S12D { int k; union { int u; char ch; }; int t; };
+struct S12E { char a; struct { char x; long y; }; char z; };
+struct S12D s12_gd = { 1, { 2 }, 3 };
 int s12(void) {
     struct S12F f;
     int nine = 9;
@@ -365,6 +376,19 @@ int s12(void) {
     unsigned long long big = 5;
     big++;
     check(1209, big == 6);
+    struct S12D d1 = { 5, { 9 }, 100 };
+    struct S12D d2 = { 6, 7, 8 };
+    check(1210, d1.k == 5 && d1.u == 9 && d1.t == 100 && d2.k == 6 && d2.u == 7 && d2.t == 8
+                && s12_gd.u == 2 && s12_gd.t == 3);
+    struct S12D d3 = { .u = 11, 12 };
+    struct S12D da[2] = { 1, 2, 3, { 4, { 5 }, 6 } };
+    check(1211, d3.k == 0 && d3.u == 11 && d3.t == 12 && da[0].t == 3 && da[1].u == 5 && da[1].t == 6);
+    struct S12E e1 = { 'a', { 'b', 40 }, 'c' };
+    struct S12E e2 = { 1, 2, 3, 4 };
+    struct S12E e3 = { .y = 20, 21 };
+    struct S12E e4 = e1;
+    check(1212, e1.x == 'b' && e1.y == 40 && e1.z == 'c' && e2.y == 3 && e2.z == 4
+                && e3.x == 0 && e3.y == 20 && e3.z == 21 && e4.y == 40 && e4.z == 'c');
     return 0;
 }
 
@@ -2197,6 +2221,7 @@ again:;
 // ===== SECTION 55: subscript operand order; nested designators =====
 /* 'E1[E2]' is '*((E1) + (E2))' (C11 6.5.2.1p2), so the integer may come first, as a
    constant, a parenthesized expression or a variable, and the result is an lvalue.
+   '->' applies to any pointer expression, parenthesized ones included (6.5.2.3p4).
    A designator list ('.b[1] =', '[1][2] =', '.p[1].y =') names a subobject, and
    only that subobject is initialized (6.7.9p17-19). Braces around a member may be
    left out: an item that lands on an aggregate fills its first scalar and the
@@ -2252,6 +2277,15 @@ int s55(void) {
     struct S55P pb[] = { 1, 2, pv, pv };
     check(5515, sizeof pa / sizeof pa[0] == 2 && pa[0].y == 8 && pa[1].x == 5 && pa[1].y == 6
                 && sizeof pb / sizeof pb[0] == 3 && pb[0].y == 2 && pb[2].x == 7);
+    struct S55P *pp = pb;
+    check(5516, (pp + 2)->x == 7 && (pp /* c */ + 1) -> y == 8 && ((pp))->y == 2
+                && (i = 1, pp + i)->x == 7 && sizeof (pp + 1)->x == 4);
+    (pp + 1)->y = 30;
+    (pp + 2)->x += 3;
+    int *py = &(pp + 1)->y;
+    i = 1;
+    (i - 1)[pp].x = 40;
+    check(5517, pb[1].y == 30 && pb[2].x == 10 && *py == 30 && pb[0].x == 40 && (1 + 1)[pp].x == 10);
     return 0;
 }
 
