@@ -986,6 +986,62 @@ s73() {
   e=$(printf '%#x' "${v[33]}" 2>&1)
   check pff16 "$(s73m "$e")|${e##*$'\n'}" "printf: 123456789012345678901234567890.5: invalid number|0xffffffffffffffff"
 }
+
+# ===== SECTION 74: a backslash-newline is removed before the line is read =====
+# Outside '...', $'...', a comment and a quoted here-document, bash joins the two lines before
+# it reads a token, so a continuation may split a name, a keyword, an operator or a ${...},
+# and an eval string is joined the same way. In an unquoted here-document the joined line is
+# what ends the body. An arithmetic error after a joined line names its own text. Every
+# expected value is bash 5.3's.
+s74m() { local m=${1#bash: }; printf '%s' "${m#*line [0-9]*: }"; }
+s74() {
+  local xy x=X arr=(1 2 3) r o l
+  x\
+y=3; check bsn1 "$xy" 3
+  check bsn2 "$x\
+y|$x\
+y|${x\
+y}|$\
+xy" "3|3|3|3"
+  check bsn3 "${#arr\
+[@]}|${#\
+arr[@]}|${\
+u:-dflt}|${xy\
+:-z}|${xy/\
+3/q}" "3|3|dflt|3|q"
+  xy=AB
+  x\
+y+=C; check bsn4 "$xy|$(( ${#x\
+y} + 1\
+0 ))" "ABC|13"
+  r=""; wh\
+ile [ -z "$r" ]; do r=w; done; t\
+rue &\
+& r="$r&"; check bsn5 "$r" "w&"
+  check bsn6 "'a\
+b'|"'c\
+d' "'ab'|c\\
+d"
+  r=no # a comment ends at its newline \
+r=yes
+  check bsn7 "$r" yes
+  r=""
+  while IFS= read -r l; do r="$r[$l]"; done <<S74
+1$x\
+y
+S7\
+4
+  while IFS= read -r l; do r="$r[$l]"; done <<'S74'
+2$x\
+y
+S74
+  check bsn8 "$r" '[1ABC][2$x\][y]'
+  eval 'x\
+y=9; r=$x\
+y'
+  check bsn9 "$r" 9
+  o=$( { echo $(( 1/0 )); } 2>&1 ); check bsn10 "$(s74m "$o")" '1/0 : division by 0 (error token is "0 ")'
+}
 # ===== END SECTIONS =====
 
 s47   # SECTION-CALL 47
@@ -1014,5 +1070,6 @@ s70   # SECTION-CALL 70
 s71   # SECTION-CALL 71
 s72   # SECTION-CALL 72
 s73   # SECTION-CALL 73
+s74   # SECTION-CALL 74
 echo "full: $checks checks, $fails failures"
 exit $fails

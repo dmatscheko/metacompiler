@@ -53,13 +53,14 @@ a command name computed at run time can only reach echo, the trivial builtins an
 
 :startRule(Program) ;
 :whitespace(Whitespace) ;
+:include("lib/bash-splice.abnf") ;
 
 // A whole script: statements separated by ; or newlines (blank / comment lines collapse).
 // The production tag runs all top level statement thunks and exits with the final status.
 // A top-level separator run that holds a newline also ENDS A LINE ({nl}): an expansion
 // error abandons the rest of its line, as bash abandons the command line it read.
 Program     <~~ runProgram(takeAll()) ~~>
-            = OptSep [ Statement { TopSep Statement } TopOptSep ] ;
+            = BsSplice OptSep [ Statement { TopSep Statement } TopOptSep ] ;
 TopSep      = TopAmpSep | TopSepRun ;
 TopOptSep   = [ TopSep ] ;
 TopAmpSep   <~~ push({amp: 1}); pushLineEnd(up.in) ~~> = AmpTok { NotCaseTerm SepTok } ;
@@ -88,6 +89,8 @@ Statement   = AndOrList ;
 // command position (guarded in SimpleCommand) stops the list so that keyword can match.
 CompoundList <~~ push(makeSeq(linkAsync(takeAll()))) ~~>
             = OptSep Statement { ListSep Statement } ListOptSep ;
+// An eval or trap string, its continuations joined (see compileSnippet).
+Spliced     <~~ push(up.in) ~~> = BsSplice :whitespace() { AnyCh | "\n" } ;
 
 
 // --- compound statements
@@ -115,7 +118,7 @@ CasePats    <~~ push({pats: takeAll()}) ~~> = CasePat { "|" CasePat } ;
 // CasePat in bash-interpreter.abnf.
 CasePat     <~~ push(mkNsWord(takeAll())) ~~> = CaseFirst :whitespace() { CaseSeg } ;
 CaseFirst   = Tilde | CaseSeg ;
-CaseSeg     = PatSq | PatDq | PatAnsi | UqExp | LineCont | PatEsc | BraceLit | ExtGlob | EgPfxLit | BareSeg ;
+CaseSeg     = PatSq | PatDq | PatAnsi | UqExp | PatEsc | BraceLit | ExtGlob | EgPfxLit | BareSeg ;
 CaseBody    <~~ push(makeSeq(linkAsync(takeAll()))) ~~>
             = CaseSepOpt [ Statement { ListSep Statement } ListOptSep ] ;
 CaseSep     = NotCaseTerm SepTok { NotCaseTerm SepTok } ;
@@ -292,7 +295,7 @@ ArrayItem   = ArrayKV | CWord ;
 // `[k]=v` inside an array literal is an assignment too: bash 5.3 keeps `A=([0]=$x)`
 // unsplit exactly as it keeps `A=$x`.
 ArrayKV     <~~ push(mkArrayKV(takeAll())) ~~> = "[" IdxWord "]" :whitespace() "=" :whitespace() NsWord ;
-WsNL        = { @+" \t\r\n" | "\\\n" | Comment } ;
+WsNL        = { @+" \t\r\n" | Comment } ;
 AsgIdent    = ( "a"..."z" | "A"..."Z" | "_" ) :whitespace() { "a"..."z" | "A"..."Z" | "0"..."9" | "_" } ;
 
 // A command word followed by argument words. NotReserved blocks a bare reserved keyword in
@@ -332,7 +335,7 @@ LtOne       = "<" NotLt ;
 Word        <~~ push(mkWord(takeAll())) ~~>
             = WordFirst :whitespace() { WordSeg } ;
 WordFirst   = Tilde | WordSeg ;
-WordSeg     = SqSeg | DqSeg | AnsiSeg | UqExp | LineCont | EscSeg | BraceLit | EgPfxLit | BareSeg ;
+WordSeg     = SqSeg | DqSeg | AnsiSeg | UqExp | EscSeg | BraceLit | EgPfxLit | BareSeg ;
 
 // An expansion OUTSIDE quotes is subject to word splitting on IFS; the same production
 // inside a double-quoted string (or a ${...} word) is not, which is the only difference
@@ -345,7 +348,7 @@ UqExp       <~~ push(mkSplittable(pop())) ~~> = ExpSeg ;
 CWord       <~~ pushWords(mkWords(takeAll())) ~~>
             = CWordFirst :whitespace() { CWordSeg } ;
 CWordFirst  = Tilde | CWordSeg ;
-CWordSeg    = SqSeg | DqSeg | AnsiSeg | UqExp | LineCont | EscSeg | BraceRange | BraceAlts | BraceLit | EgPfxLit | BareSeg ;
+CWordSeg    = SqSeg | DqSeg | AnsiSeg | UqExp | EscSeg | BraceRange | BraceAlts | BraceLit | EgPfxLit | BareSeg ;
 
 // {a,b,c} needs at least one comma; {x} is literal. {1..5} {5..1} {a..e} {1..9..3} are ranges.
 BraceAlts   <~~ push(mkBraceAlts(takeAll())) ~~>
@@ -365,9 +368,6 @@ BraceLit    <~~ push(makeConst(up.in)) ~~> = "{" | "}" ;
 // ~ or ~/... at the START of a word expands to $HOME.
 Tilde       <~~ push(mkTilde()) ~~> = "~" TildeEnd ;
 
-// A backslash immediately followed by a newline is a line continuation: both vanish.
-LineCont    <~~ push(makeConst("")) ~~> = "\\" "\n" ;
-
 // $'...' : ANSI-C quoting. The body is taken raw and decoded by ansiC (\n \t \xHH \0NNN \uHHHH ...).
 AnsiSeg     = "$'" :whitespace() AnsiBody "'" ;
 AnsiBody    <~~ push(ansiWord(ansiC(up.in))) ~~> = { AnsiEsc | AnsiLit } ;
@@ -379,12 +379,11 @@ SqSeg       = "'" :whitespace() { !@+"'" } <~~ push(makeConst(up.in)) ~~> "'" ;
 
 // "double quoted" : literal runs, escapes and $ expansions concatenated.
 DqSeg       <~~ push(mkDqWord(takeAll())) ~~>
-            = '"' :whitespace() { ExpSeg | DqCont | DqEsc | DqLit } '"' ;
+            = '"' :whitespace() { ExpSeg | DqEsc | DqLit } '"' ;
 DqLit       <~~ push(makeConst(up.in)) ~~>
             = !@+"\"$\\`" ;
 DqEsc       <~~ push(makeConst(dqEsc(up.in))) ~~>
             = "\\" AnyCh ;
-DqCont      <~~ push(makeConst("")) ~~> = "\\" "\n" ;
 
 // An unquoted \x escape: the backslash is dropped, the next char is literal (\  -> space).
 EscSeg      <~~ push(makeConst(escChar(up.in))) ~~>
@@ -491,7 +490,7 @@ PeXfOp      <~~ push({xf: up.in}) ~~> = "Q" | "E" | "P" | "A" | "K" | "a" | "k" 
 PeTarget    <~~ peTgt = arSrc(up.start, up.pos) ~~> = PeIdxRef | PeName ;
 PeIdxRef    <~~ push({hasIdx: 1}) ~~> = PeName "[" IdxWord "]" ;
 IdxWord     <~~ push(mkWord(takeAll())) ~~> = { IdxSeg } ;
-IdxSeg      = SqSeg | DqSeg | ExpSeg | LineCont | EscSeg | IdxBare ;
+IdxSeg      = SqSeg | DqSeg | ExpSeg | EscSeg | IdxBare ;
 IdxBare     <~~ push(makeConst(up.in)) ~~> = !@+"]}\"'\\$`" ;
 PeName      <~~ push({pname: up.in}) ~~> = PeNameTok ;
 PeNameTok   = PeIdent | PeDigits | "@" | "*" | "#" | "?" | "!" | "$" | "-" ;
@@ -506,7 +505,7 @@ PePatOp     <~~ push({pe: up.in}) ~~> = "##" | "#" | "%%" | "%" ;
 // The PATTERN operand of ${v#p} ${v%p} ${v^p} and ${v/p/r}: a quoted part is literal, as in
 // [[ == ]] (`${s%"$p"}` with p='?' strips nothing).
 PeGlobArg   <~~ push(mkWord(takeAll())) ~~> = { PeGlobSeg } ;
-PeGlobSeg   = PatSq | PatDq | PatAnsi | ExpSeg | LineCont | PatEsc | BraceBare ;
+PeGlobSeg   = PatSq | PatDq | PatAnsi | ExpSeg | PatEsc | BraceBare ;
 
 // ${v^} ${v^^} ${v,} ${v,,} : case conversion of the first / of every character.
 PeCaseForm  = PeTarget PeCaseOp [ PeGlobArg ] ;
@@ -528,10 +527,10 @@ ReplBare    <~~ push(makeConst(up.in)) ~~> = !@+"}/\"'\\$`" ;
 // rt_repsub undoes. Twin of ReplTail in bash-interpreter.abnf.
 ReplTail    = "/" ReplArg ;
 ReplArg     <~~ push(mkWord(takeAll())) ~~> = { ReplArgSeg } ;
-ReplArgSeg  = RepSq | RepDq | RepAnsi | ExpSeg | LineCont | RepEsc | BraceBare ;
+ReplArgSeg  = RepSq | RepDq | RepAnsi | ExpSeg | RepEsc | BraceBare ;
 RepSq       = "'" :whitespace() { !@+"'" } <~~ push(makeConst(repEscape(up.in))) ~~> "'" ;
 RepDq       <~~ push(mkQuotedRep(mkDqWord(takeAll()))) ~~>
-            = '"' :whitespace() { ExpSeg | DqCont | DqEsc | DqLit } '"' ;
+            = '"' :whitespace() { ExpSeg | DqEsc | DqLit } '"' ;
 RepEsc      <~~ push(makeConst(repEscape(escChar(up.in)))) ~~> = "\\" AnyCh ;
 RepAnsi     = "$'" :whitespace() RepAnsiBody "'" ;
 RepAnsiBody <~~ push(ansiWord(repEscape(ansiC(up.in)))) ~~> = { AnsiEsc | AnsiLit } ;
@@ -548,11 +547,11 @@ PeBlank     = @+" \t" ;
 
 // A word inside ${...}: anything up to the closing brace, expansions included.
 BraceWord   <~~ push(mkBraceWord(takeAll())) ~~> = BraceWSeg { BraceWSeg } ;
-BraceWSeg   = SqSeg | DqSeg | AnsiSeg | BraceUq | LineCont | EscSeg ;
+BraceWSeg   = SqSeg | DqSeg | AnsiSeg | BraceUq | EscSeg ;
 // The UNQUOTED parts of a ${v-w} word: split when the ${...} itself stands unquoted
 // (see mkBraceWord).
 BraceUq     <~~ push({uq: pop()}) ~~> = ExpSeg | BraceBare ;
-BraceSeg    = SqSeg | DqSeg | AnsiSeg | ExpSeg | LineCont | EscSeg | BraceBare ;
+BraceSeg    = SqSeg | DqSeg | AnsiSeg | ExpSeg | EscSeg | BraceBare ;
 BraceBare   <~~ push(makeConst(up.in)) ~~> = !@+"}\"'\\$`" ;
 DollarName  = "$" VarName <~~ push(mkVarRef(up.in)) ~~> ;
 DollarDigit = "$" ArgDigit <~~ push(mkVarRef(up.in)) ~~> ;
@@ -676,7 +675,7 @@ RegexWord   <~~ push(mkNsWord(takeAll())) ~~> = RegexSeg :whitespace() { RegexSe
 RegexSeg    = RxSq | RxDq | ExpSeg | RxEsc | RegexBare ;
 RxSq        = "'" :whitespace() { !@+"'" } <~~ push(makeConst(regexEscape(up.in))) ~~> "'" ;
 RxDq        <~~ push(mkQuotedRx(mkDqWord(takeAll()))) ~~>
-            = '"' :whitespace() { ExpSeg | DqCont | DqEsc | DqLit } '"' ;
+            = '"' :whitespace() { ExpSeg | DqEsc | DqLit } '"' ;
 RxEsc       <~~ push(makeConst(regexEscape(escChar(up.in)))) ~~> = "\\" AnyCh ;
 RegexBare   <~~ push(makeConst(up.in)) ~~> = !@+" \t\n\r;&<>$'\"\\`" ;
 CondParen   = "(" CondOr ")" ;
@@ -690,7 +689,7 @@ PatWord     <~~ push(mkNsWord(takeAll())) ~~> = PatSeg :whitespace() { PatSeg } 
 PatSeg      = PatSq | PatDq | PatAnsi | ExpSeg | PatEsc | ExtGlob | EgPfxLit | BareSeg ;
 PatSq       = "'" :whitespace() { !@+"'" } <~~ push(makeConst(globEscape(up.in))) ~~> "'" ;
 PatDq       <~~ push(mkQuotedPat(mkDqWord(takeAll()))) ~~>
-            = '"' :whitespace() { ExpSeg | DqCont | DqEsc | DqLit } '"' ;
+            = '"' :whitespace() { ExpSeg | DqEsc | DqLit } '"' ;
 PatAnsi     = "$'" :whitespace() PatAnsiBody "'" ;
 PatAnsiBody <~~ push(ansiWord(globEscape(ansiC(up.in)))) ~~> = { AnsiEsc | AnsiLit } ;
 PatEsc      <~~ push(makeConst(globEscape(escChar(up.in)))) ~~> = "\\" AnyCh ;
@@ -1032,10 +1031,10 @@ NotReserved = :script(~~
 ~~) ;
 
 
-// --- whitespace: spaces, tabs, CR, # line comments and a backslash-newline (a line
-// continuation between two words is no word at all); NEVER a bare newline (that is structure).
+// --- whitespace: spaces, tabs, CR and # line comments; NEVER a bare newline (that is
+// structure). A backslash-newline never reaches the grammar (BsSplice).
 
-Whitespace  = { @+" \t\r" | "\\\n" | Comment } ;
+Whitespace  = { @+" \t\r" | Comment } ;
 Comment     = "#" :whitespace() { NotNL } :whitespace(Whitespace) ;
 NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
 
@@ -4292,7 +4291,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     // eval / trap re-parse a string with THIS grammar, starting at CompoundList (which pushes
     // one statement-sequence thunk); the thunk that comes back is emitted inline.
+    // Its continuations are joined first, as in a script (Spliced), so the offsets arSrc reads
+    // are those of the joined text.
     function compileSnippet(src) {
+        if (src.indexOf("\\\n") >= 0) { src = c.compile(c.parseFrom(c.agrammar, src, "Spliced")).stack[0] }
         return arCompile(src, "CompoundList", false)
     }
 

@@ -70,6 +70,11 @@ type wsMemo struct {
 // setSrc replaces the target text. Only a :script() rule can do that (c.setSrc()), and
 // every cache that is keyed by a position in the old text has to go with it.
 func (pa *parser) setSrc(src string) {
+	// A rewritten PROGRAM becomes the registered source too: its positions are offsets
+	// into the new text, so c.srcSlice and the line table must answer from that text.
+	if traceSrcName != "" && sourceTexts[traceSrcName] == pa.Src {
+		SetTraceSource(traceSrcName, src)
+	}
 	pa.Src = src
 	pa.wsCache = map[*r.Rule]*wsMemo{}
 	// The found and block lists are keyed by a position in the old text, so they

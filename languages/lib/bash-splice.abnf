@@ -1,0 +1,214 @@
+// bash line continuation as a source PRE-PASS. bash removes an unquoted backslash-newline
+// while it READS its input, before any token exists, so it may split a name (`x\<nl>y=3`
+// assigns xy), a keyword, an operator or a ${...} anywhere. BsSplice rewrites the source
+// with c.setSrc() and restarts the parse, so the grammar never sees a continuation that is
+// spliced. Kept as written: inside '...' and $'...', in a comment, and in the body of a
+// here-document whose delimiter is quoted. In an unquoted body the joined line is what is
+// compared with the delimiter (`E\<nl>OF` ends it). Inside "${...}" a single quote is an
+// ordinary character. The removed newlines are put back as blank lines at the next line
+// break in command text, so every line after a joined one keeps its number in a parse
+// error. A file without a backslash-newline leaves after one indexOf.
+// Include with :include("lib/bash-splice.abnf") and reference BsSplice first in the start
+// production.
+BsSplice    = :script(~~
+    (function() {
+        var src = c.getSrc()
+        if (src.indexOf("\\\n") < 0) { return undefined }
+        var n = src.length
+        var out = ""
+        var last = 0        // start of the not-yet-copied run
+        // The quoting context, one frame per level: kind 0 command text, 1 "...", 2 '...',
+        // 3 $'...', 4 ${...}, 5 `...`. dep counts the frame's open ( or {, cl is 1 for a
+        // command frame that a ")" closes, ar 1 for arithmetic (no comment, no here-doc),
+        // dq 1 for a ${...} inside "...", cs the open `case` commands whose ")" ends a pattern.
+        var kind = [0]
+        var dep = [0]
+        var cl = [0]
+        var ar = [0]
+        var dq = [0]
+        var cs = [0]
+        var hdWord = []     // here-documents opened on the current line
+        var hdQuoted = []
+        var hdDash = []
+        var prev = "\n"     // the last character kept, for the start of a comment
+        var i = 0
+        // Past every continuation from k on: what the next character really is.
+        var nx = function(k) {
+            while (src.charAt(k) === "\\" && src.charAt(k + 1) === "\n") { k = k + 2 }
+            return k
+        }
+        var held = 0        // newlines spliced out and not yet given back
+        var cut = function(k) { out = out + src.substring(last, k); last = k + 2; held = held + 1 }
+        // Give the held newlines back at k, the start of a line in command text, where a run
+        // of newlines means what one does: every later line keeps its line number.
+        var giveBack = function(k) {
+            out = out + src.substring(last, k)
+            last = k
+            while (held > 0) { out = out + "\n"; held = held - 1 }
+        }
+        var open = function(k, d, closes, isAr, inDq) {
+            kind.push(k); dep.push(d); cl.push(closes); ar.push(isAr); dq.push(inDq); cs.push(0)
+        }
+        var close = function() { kind.pop(); dep.pop(); cl.pop(); ar.pop(); dq.pop(); cs.pop() }
+        // The delimiter of a here-document whose << is at k: quote characters removed.
+        var hdOpen = function(k) {
+            var dash = false
+            k = nx(k)
+            if (src.charAt(k) === "-") { dash = true; k = nx(k + 1) }
+            while (src.charAt(k) === " " || src.charAt(k) === "\t") { k = nx(k + 1) }
+            var w = ""
+            var quoted = false
+            var guard = 0
+            while (k < n && guard < n) {
+                guard = guard + 1
+                var h = src.charAt(k)
+                if (" \t\n;&|<>()".indexOf(h) >= 0) { guard = n; continue }
+                if (h === "'" || h === "\"") { quoted = true; k = nx(k + 1); continue }
+                if (h === "\\") { quoted = true; k = k + 1; h = src.charAt(k) }
+                w = w + h
+                k = nx(k + 1)
+            }
+            if (w !== "") { hdWord.push(w); hdQuoted.push(quoted); hdDash.push(dash) }
+        }
+        // Every pending here-document body, from the line start at i on.
+        var hdBodies = function() {
+            var b = 0
+            while (b < hdWord.length) {
+                var done = false
+                while (!done && i < n) {
+                    var line = ""
+                    var s = i
+                    var eol = false
+                    while (!eol && i < n) {
+                        var h = src.charAt(i)
+                        if (h === "\n") { eol = true; i = i + 1; continue }
+                        if (h === "\\" && !hdQuoted[b] && i + 1 < n) {
+                            if (src.charAt(i + 1) === "\n") { cut(i); i = i + 2; continue }
+                            line = line + h + src.charAt(i + 1)
+                            i = i + 2
+                            continue
+                        }
+                        line = line + h
+                        i = i + 1
+                    }
+                    if (hdDash[b]) { while (line.charAt(0) === "\t") { line = line.substring(1) } }
+                    if (line === hdWord[b]) { done = true }
+                    if (s === i) { done = true }
+                }
+                b = b + 1
+            }
+            hdWord = []
+            hdQuoted = []
+            hdDash = []
+            prev = "\n"
+        }
+        while (i < n) {
+            var ch = src.charAt(i)
+            var t = kind.length - 1
+            var k = kind[t]
+            if (k === 2) {
+                if (ch === "'") { close() }
+                prev = ch
+                i = i + 1
+                continue
+            }
+            if (k === 3) {
+                if (ch === "\\") { prev = src.charAt(i + 1); i = i + 2; continue }
+                if (ch === "'") { close() }
+                prev = ch
+                i = i + 1
+                continue
+            }
+            if (ch === "\\") {
+                if (src.charAt(i + 1) === "\n") { cut(i); i = i + 2; continue }
+                prev = src.charAt(i + 1)
+                i = i + 2
+                continue
+            }
+            if (ch === "$") {
+                var j = nx(i + 1)
+                var d = src.charAt(j)
+                if (d === "(") {
+                    var j2 = nx(j + 1)
+                    if (src.charAt(j2) === "(") { open(0, 1, 1, 1, 0); i = j2 + 1 } else { open(0, 0, 1, 0, 0); i = j + 1 }
+                    prev = "("
+                    continue
+                }
+                if (d === "{") { open(4, 0, 0, 0, k === 1 || (k === 4 && dq[t] === 1) ? 1 : 0); prev = "{"; i = j + 1; continue }
+                if (k !== 1 && d === "'") { open(3, 0, 0, 0, 0); prev = "'"; i = j + 1; continue }
+                if (k !== 1 && d === "\"") { open(1, 0, 0, 0, 0); prev = "\""; i = j + 1; continue }
+                prev = ch
+                i = i + 1
+                continue
+            }
+            if (ch === "`") {
+                if (k === 5) { close() } else { open(5, 0, 0, 0, 0) }
+                prev = ch
+                i = i + 1
+                continue
+            }
+            if (k === 1) {
+                if (ch === "\"") { close() }
+                prev = ch
+                i = i + 1
+                continue
+            }
+            if (ch === "\"") { open(1, 0, 0, 0, 0); prev = ch; i = i + 1; continue }
+            if (ch === "'") {
+                if (!(k === 4 && dq[t] === 1)) { open(2, 0, 0, 0, 0) }
+                prev = ch
+                i = i + 1
+                continue
+            }
+            if (k === 4) {
+                if (ch === "{") { dep[t] = dep[t] + 1 }
+                if (ch === "}") { if (dep[t] === 0) { close() } else { dep[t] = dep[t] - 1 } }
+                prev = ch
+                i = i + 1
+                continue
+            }
+            // Command text: a frame of kind 0 or 5.
+            if (ch === "(") {
+                var p2 = nx(i + 1)
+                if (k === 0 && src.charAt(p2) === "(" && ar[t] === 0) { open(0, 1, 1, 1, 0); prev = "("; i = p2 + 1; continue }
+                dep[t] = dep[t] + 1
+            }
+            if (ch === ")" && k === 0) {
+                if (dep[t] > 0) { dep[t] = dep[t] - 1 } else { if (cl[t] === 1 && cs[t] === 0) { close() } }
+            }
+            if ((ch === "c" || ch === "e") && ar[t] === 0 && " \t\n;&|()".indexOf(prev) >= 0) {
+                var wd = src.substring(i, i + 4)
+                var af = src.charAt(i + 4)
+                var ends = af === "" || " \t\n;&|()<>".indexOf(af) >= 0
+                if (wd === "case" && ends) { cs[t] = cs[t] + 1 }
+                if (wd === "esac" && ends && cs[t] > 0) { cs[t] = cs[t] - 1 }
+            }
+            if (ch === "#" && ar[t] === 0 && " \t\n;&|()<>".indexOf(prev) >= 0) {
+                var e = src.indexOf("\n", i)
+                i = e < 0 ? n : e
+                prev = "#"
+                continue
+            }
+            if (ch === "<" && ar[t] === 0) {
+                var l2 = nx(i + 1)
+                if (src.charAt(l2) === "<") {
+                    // <<< is a here-string, not a here-document.
+                    var l3 = nx(l2 + 1)
+                    if (src.charAt(l3) === "<") { i = l3 + 1 } else { hdOpen(l2 + 1); i = l2 + 1 }
+                    prev = "<"
+                    continue
+                }
+            }
+            prev = ch
+            i = i + 1
+            if (ch === "\n") {
+                if (hdWord.length > 0) { hdBodies() }
+                if (held > 0) { giveBack(i) }
+            }
+        }
+        giveBack(n)
+        c.setSrc(out)
+        c.setSdx(0)
+        return undefined
+    })()
+~~) ;
