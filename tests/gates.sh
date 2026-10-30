@@ -69,7 +69,7 @@ done
 FULL_TIMEOUT=900
 
 # A FLOOR on the total ratchet assertion count (the files legitimately grow).
-FULL_ASSERTIONS=14659
+FULL_ASSERTIONS=14842
 
 # A CEILING on section gaps, summed per half over all languages. A gapped half
 # still reports the assertions it ran, so the total barely moves when a section
@@ -92,9 +92,9 @@ LINT_FINDINGS=0
 # A FLOOR on the matrix entry count (.vscode/launch.json), and on the abort rows
 # specifically: they are the only rows that compare abort messages, and a row
 # losing its "SHOULD ABORT" or "ALL HALVES" token silently downgrades it.
-MATRIX_ENTRIES=497
-ABORT_ROWS=29             # rows whose name says SHOULD ABORT
-ABORT_ALL_ROWS=28         # of those, the ones that also compare the interpreter
+MATRIX_ENTRIES=500
+ABORT_ROWS=31             # rows whose name says SHOULD ABORT
+ABORT_ALL_ROWS=30         # of those, the ones that also compare the interpreter
                           # half (ALL HALVES)
 
 # A FLOOR on the program pairs ./test.sh --cross compares. A pair that is killed
@@ -105,7 +105,7 @@ CROSS_PROGRAMS=132
 # A FLOOR on the programs tests/native-full.sh builds and runs natively. Its
 # table of ratchet parts is hand-written, so a new part it does not list, or a
 # row it skips, would otherwise leave this number smaller and the gate green.
-NATIVE_PROGRAMS=59
+NATIVE_PROGRAMS=60
 
 # A FLOOR on tests/probe/selftest.sh's cases: a deleted sabotage case leaves the
 # self-test green while it proves less.
@@ -307,7 +307,7 @@ fi
 if [ "$QUICK" = 0 ]; then
     # 6 and 7 are THE ONLY GATES THAT SEE LAYER 2.
     # CLANG_MODULES is a FLOOR, like FULL_ASSERTIONS: it may grow, never shrink.
-    CLANG_MODULES=30
+    CLANG_MODULES=31
     crc=$(rc_of clang)
     held=$(grep -c 'row HELD' "$log/clang")
     ok=$(grep -c 'the clang executable agrees' "$log/clang")
