@@ -8616,7 +8616,7 @@ func (rt *jsrt) rubySmSqueeze(o string, specs []string) string {
 // String#center / #ljust / #rjust: mode 0 centres, 1 pads right, 2 pads left.
 // MRI counts CHARACTERS here, unlike printf's %10s, which counts bytes.
 func (rt *jsrt) rubySmPad(o string, width int, pad string, mode int) string {
-	n := rt.strLen(o)
+	n := rt.rubyCpLen(o)
 	if rt.strLen(pad) == 0 || width <= n {
 		return o
 	}
@@ -8631,12 +8631,12 @@ func (rt *jsrt) rubySmPad(o string, width int, pad string, mode int) string {
 }
 
 func (rt *jsrt) rubySmRepeatTo(pad string, n int) string {
-	units := rt.rubySmChars(pad)
-	out := ""
-	for i := 0; i < n; i++ {
-		out += units[i%len(units)]
+	cs := []rune(pad)
+	out := make([]rune, n)
+	for i := range out {
+		out[i] = cs[i%len(cs)]
 	}
-	return out
+	return string(out)
 }
 
 func (rt *jsrt) rubySmSwapcase(o string) string {
@@ -9023,7 +9023,7 @@ func (rt *jsrt) rubySubrange(o, lo, hi interface{}, excl bool) (interface{}, boo
 	case *jsArray:
 		n = len(t.elems)
 	case string:
-		n = rt.strLen(t)
+		n = rt.rubyCpLen(t)
 	}
 	if n < 0 {
 		return nil, false
@@ -9111,14 +9111,14 @@ func (rt *jsrt) rubyIndexGet(o, k interface{}) interface{} {
 		}
 		return o.elems[idx]
 	case string:
-		n := rt.strLen(o)
+		n := rt.rubyCpLen(o)
 		if idx < 0 {
 			idx += n
 		}
 		if idx < 0 || idx >= n {
 			return jsNull
 		}
-		return rt.strAt(o, idx)
+		return rt.rubyCpRange(o, idx, idx+1)
 	}
 	if isUndefOrNull(o) {
 		rt.fail("indexing nil")
@@ -10739,6 +10739,16 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 				return jsNull
 			}
 		}
+	// Exception#cause: what js_rraiseat recorded, nil for an exception never raised.
+	case "cause":
+		if o, isObj := target.(*jsObject); isObj && rubyExcInst(o) {
+			if _, hasOwn := rubyFindMethod(target, name); !hasOwn {
+				if c, had := o.props["__rcause"]; had {
+					return c
+				}
+				return jsNull
+			}
+		}
 	// NameError#receiver (and #name, in the Method#name arm below): the hidden
 	// slots rubyNameErr fills, nil for a NameError the program raised itself.
 	case "receiver":
@@ -10989,15 +10999,7 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 				v, _ := rt.rubySubrange(o, r.props["begin"], r.props["end"], rt.truthy(r.props["excl"]))
 				return v
 			}
-			n := rt.strLen(o)
-			ix := int(rt.toNumber(argAt(spos, 0)))
-			if ix < 0 {
-				ix += n
-			}
-			if ix < 0 || ix >= n {
-				return jsNull
-			}
-			return rt.strAt(o, ix)
+			return rt.rubyIndexGet(o, argAt(spos, 0))
 		// String#start_with? / #end_with? take ANY NUMBER of prefixes/suffixes and
 		// answer true when one of them matches.
 		case "start_with?":
@@ -11023,12 +11025,11 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 			}
 			return caseMapMode(rt.strAt(o, 0), caseTitle|caseFull) + caseMapMode(rt.strRange(o, 1, rt.strLen(o)), caseFull)
 		case "reverse":
-			n := rt.strLen(o)
-			out := ""
-			for i := n - 1; i >= 0; i-- {
-				out += rt.strAt(o, i)
+			cs := []rune(o)
+			for i, j := 0, len(cs)-1; i < j; i, j = i+1, j-1 {
+				cs[i], cs[j] = cs[j], cs[i]
 			}
-			return out
+			return string(cs)
 		case "strip":
 			return strings.Trim(o, " \t\n\r\f\v\x00")
 		case "chars":
@@ -11316,6 +11317,21 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 			switch name {
 			case "name", "to_s", "inspect":
 				return rt.rubyClassText(o, name)
+			}
+			bn, _ := o.props["__rbuiltin"].(string)
+			if bn == "Integer" && name == "sqrt" {
+				return rt.rubyIntSqrt(argAt(args, 0))
+			}
+			// Regexp.last_match / last_match(n): $~, or its group n.
+			if bn == "Regexp" && name == "last_match" {
+				md, had := rt.rubyGlobals["~"]
+				if !had || md == jsNull {
+					return jsNull
+				}
+				if pos, _ := rubyBlockArgs(args); len(pos) > 0 {
+					return rt.rxMdIndex(md, pos[0])
+				}
+				return md
 			}
 			// The reflection surface. A user `def self.ancestors' still wins - the
 			// $s$ walk above runs first.
@@ -11796,7 +11812,7 @@ func rubyArrSubseq(t *jsArray, start, length interface{}) interface{} {
 }
 
 func (rt *jsrt) rubyStrSubseq(t string, start, length interface{}) interface{} {
-	n := rt.strLen(t)
+	n := rt.rubyCpLen(t)
 	s := int(math.Trunc(rubyToF(start)))
 	k := int(math.Trunc(rubyToF(length)))
 	if k < 0 {
@@ -11811,7 +11827,7 @@ func (rt *jsrt) rubyStrSubseq(t string, start, length interface{}) interface{} {
 	if s+k > n {
 		k = n - s
 	}
-	return rt.strRange(t, s, s+k)
+	return rt.rubyCpRange(t, s, s+k)
 }
 
 // rubyArrHas / rubyArrAnd / rubyArrOr back Array#& and Array#|. Both keep the
@@ -14816,6 +14832,16 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 					if where, isStr := u(a[2]).(string); isStr {
 						rt.setMember(o, "__rwhere", where)
 					}
+				}
+				// Exception#cause: the exception being handled ($!) when this
+				// one is raised, unless it already has one. Twins: excAt in
+				// ruby-interpreter.abnf, js_rraiseat in lib/ruby-rt.metajs.
+				if _, had := o.props["__rcause"]; !had {
+					cur, ok := rt.rubyGlobals["!"]
+					if !ok || cur == e {
+						cur = jsNull
+					}
+					rt.setMember(o, "__rcause", cur)
 				}
 			}
 			panic(&jsThrown{value: e})

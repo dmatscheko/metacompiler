@@ -4139,25 +4139,6 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // String#center / #ljust / #rjust. mode 0 centres, 1 pads on the right, 2 on the
     // left. MRI counts CHARACTERS here (unlike printf's %10s, which counts bytes),
     // and a width at or below the receiver's length answers the receiver.
-    function smPad(s, width, pad, mode) {
-        if (pad.length == 0 || width <= s.length) { return s }
-        var total = width - s.length
-        var left = 0
-        if (mode == 0) { left = Math.floor(total / 2) } else if (mode == 2) { left = total }
-        var right = total - left
-        return smRepeatTo(pad, left) + s + smRepeatTo(pad, right)
-    }
-
-    function smRepeatTo(pad, n) {
-        var out = ""
-        var i = 0
-        while (out.length < n) {
-            out = out + pad.charAt(i % pad.length)
-            i = i + 1
-        }
-        return out
-    }
-
     function smSwapcase(s) {
         var out = ""
         var i = 0
@@ -4256,9 +4237,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (name == "squeeze" || name == "squeeze!") { return {ok: true, v: smSqueeze(s, sargs)} }
         if (name == "count") { return {ok: true, v: smCount(s, sargs)} }
         if (name == "delete" || name == "delete!") { return {ok: true, v: smDelete(s, sargs)} }
-        if (name == "center") { return {ok: true, v: smPad(s, Math.trunc(nargs[0]), sargs.length > 1 ? sargs[1] : " ", 0)} }
-        if (name == "ljust") { return {ok: true, v: smPad(s, Math.trunc(nargs[0]), sargs.length > 1 ? sargs[1] : " ", 1)} }
-        if (name == "rjust") { return {ok: true, v: smPad(s, Math.trunc(nargs[0]), sargs.length > 1 ? sargs[1] : " ", 2)} }
+        if (name == "center") { return {ok: true, v: rbsPad(s, Math.trunc(nargs[0]), sargs.length > 1 ? sargs[1] : " ", 0)} }
+        if (name == "ljust") { return {ok: true, v: rbsPad(s, Math.trunc(nargs[0]), sargs.length > 1 ? sargs[1] : " ", 1)} }
+        if (name == "rjust") { return {ok: true, v: rbsPad(s, Math.trunc(nargs[0]), sargs.length > 1 ? sargs[1] : " ", 2)} }
         if (name == "chop" || name == "chop!") { return {ok: true, v: smChop(s)} }
         if (name == "chomp" || name == "chomp!") {
             // "" removes every trailing newline (\n or \r\n), "\n" is the default.
@@ -5445,6 +5426,29 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         var s = spaceship(l, r)
         if (s === null || s === undefined) { cmpFail(l, r) }
         return s
+    }
+    // Integer.sqrt: the floor of the square root, exact past 2**53 by Newton's
+    // iteration, which only decreases from n. Twins: rbIntSqrt in
+    // lib/ruby-rt.metajs, rubyIntSqrt in abnf/jsrtruby.go.
+    function intSqrt(v) {
+        var n = anytype
+        n = isFlo(v) ? Math.trunc(toF(v)) : v
+        if (rcmp(n, 0) < 0) { raiseErr("", "Math::DomainError", "Numerical argument is out of domain - \"isqrt\"") }
+        if (typeof n == "number") {
+            var r = Math.floor(Math.sqrt(n))
+            while (r * r > n) { r = r - 1 }
+            while ((r + 1) * (r + 1) <= n) { r = r + 1 }
+            return r
+        }
+        var x = anytype
+        var y = anytype
+        x = n
+        y = rbin("/", rbin("+", x, 1), 2)
+        while (rcmp(y, x) < 0) {
+            x = y
+            y = rbin("/", rbin("+", x, rbin("/", n, x)), 2)
+        }
+        return x
     }
 
     // ----- Ranges: lazy objects (Ruby's Range), not eager arrays. lo/hi may be
@@ -7574,11 +7578,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // s[a..b] / a[a..b]: a Range subscript is a SUBSEQUENCE, not an index.
         if (isRange(i) && (typeof o == "string" || Array.isArray(o))) { return rsubrange(o, i) }
         if (typeof o == "string" && (typeof i == "string" || isRStr(i) || isRegex(i))) { return strPatAt(o, i, undefined) }
-        if (typeof o == "string") {
-            if (i < 0) { i += o.length }
-            if (i < 0 || i >= o.length) { return null }
-            return o.charAt(i)
-        }
+        if (typeof o == "string") { return rbsCharAt(o, Math.trunc(toF(i))) }
         if (o === null || o === undefined) { fail("index of nil") }
         if (i < 0) { i += o.length }
         if (i < 0 || i >= o.length) { return null }
@@ -8030,6 +8030,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // rubyStrSubseq / rubyArrSubseq of abnf/jsrt.go.
     function rsubseq(o, start, len) {
         if (typeof o == "string" && isRegex(start)) { return strPatAt(o, start, len) }
+        if (typeof o == "string") { return rbsSubseq(o, Math.trunc(toF(start)), Math.trunc(toF(len))) }
         var n = o.length
         var s = Math.trunc(toF(start))
         var k = Math.trunc(toF(len))
@@ -8073,7 +8074,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         return {a: caps[2 * g], b: caps[2 * g + 1]}
     }
     function rsubrange(o, r) {
-        var n = o.length
+        var n = typeof o == "string" ? rbsLen(o) : o.length
         var lo = (r.lo === null || r.lo === undefined) ? 0 : Math.trunc(toF(r.lo))
         if (lo < 0) { lo = lo + n }
         if (lo < 0 || lo > n) { return null }
@@ -8877,7 +8878,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             // MRI maps case fully but has no Final_Sigma: unicodeCase mode 2 (abnf/casemap.go).
             if (name == "downcase") { return unicodeCase(target, 2) }
             if (name == "capitalize") { return target.length == 0 ? target : unicodeCase(target.charAt(0), 10) + unicodeCase(target.slice(1), 2) }
-            if (name == "reverse") { return target.split("").reverse().join("") }
+            if (name == "reverse") { return rbsReverse(target) }
             if (name == "strip") { return strStrip(target) }
             if (name == "chars") { return target.split("") }
             // String#[] / #slice: one index, a Range, or start+len.
@@ -9188,6 +9189,14 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (name == "new" && target === hostGlobals["Array"]) { return arrNew(args, blk) }
             if (name == "new" && target === hostGlobals["Regexp"]) { return regexNew(args) }
             if (name == "new" && target === hostGlobals["Struct"]) { return structNew(args) }
+            if (name == "sqrt" && target === hostGlobals["Integer"]) { return intSqrt(args[0]) }
+            // Regexp.last_match / last_match(n): $~, or its group n.
+            if (name == "last_match" && target === hostGlobals["Regexp"]) {
+                var lm = anytype
+                lm = hasOwn(rubyGlobals, "~") ? rubyGlobals["~"] : null
+                if (args.length == 0 || lm === null) { return lm }
+                return mdGet(lm, args[0])
+            }
             // Hash.new / Hash.new(v) / Hash.new { |h, k| }. The default is kept in
             // the hidden __hdef / __hdefp slots and honoured by hashDefault at every
             // read.
@@ -11309,6 +11318,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if ((f == undefined || typeof f != "function") && rubyMethods["$" + name] === true && hasVar("$d$" + name)) {
                 f = getVar("$d$" + name)
             }
+            // Where self is a class, a bare `new' is Class#new on it.
+            if (f == undefined && name == "new" && isClassObj(ivarSelf())) {
+                if (bf == null) { return mcall(ivarSelf(), "new", argv, null) }
+                return catchBlkBreak(function() { return mcall(ivarSelf(), "new", argv, bf) })
+            }
             // A call of a name nothing defines: NoMethodError on the implicit self.
             // Twin of js_rfn in languages/lib/ruby-rt.metajs and abnf/jsrtruby.go.
             if (f == undefined && !hasVar(name)) { noMethod(ivarSelf(), name) }
@@ -12295,6 +12309,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             // Float), not a reference to the host function. A program that defines a rand
             // of its own still wins: the scope walk and selfMethod above run first.
             if (name == "rand" && rubyMethods["$rand"] !== true) { return hostGlobals["rand"](null) }
+            // A bare `p' / `pp' prints nothing and answers nil.
+            if ((name == "p" || name == "pp") && rubyMethods["$" + name] !== true && !hasOwn(globalScope, name) && lex.k == 2) { return null }
+            // Where self is a class, a bare `new' is Class#new on it.
+            if (name == "new" && isClassObj(ivarSelf())) { return mcall(ivarSelf(), "new", [], null) }
             var sm2 = anytype
             sm2 = selfMethod(name)
             if (typeof sm2 == "function") { return boxOut(findSelf(), mcall(findSelf(), name, [], null)) }
@@ -13400,6 +13418,13 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (v !== null && v !== undefined && typeof v == "object" && !hasOwn(v, "__rwhere")) {
             rawSet(v, "__rwhere", raiseSite(pos))
         }
+        // Exception#cause: the exception being handled ($!) when this one is
+        // raised, unless it already has one. Twin of js_rraiseat in abnf/jsrt.go.
+        if (v !== null && v !== undefined && typeof v == "object" && !hasOwn(v, "__rcause")) {
+            var cur = anytype
+            cur = hasOwn(rubyGlobals, "!") ? rubyGlobals["!"] : null
+            rawSet(v, "__rcause", cur === v ? null : cur)
+        }
         return v
     }
     // An exception the RUNTIME raised gets its first backtrace frame where it is
@@ -13831,6 +13856,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (typeof self.__rwhere == "string") { return [self.__rwhere] }
         return null
     }
+    excBase["cause"] = function() {
+        var self = arguments[0]
+        return hasOwn(self, "__rcause") ? self.__rcause : null
+    }
 
     // ----- Class-body directives (ordinary method calls in Ruby) -----
     // They all act on the class whose body is running, which findSelf() supplies.
@@ -14031,6 +14060,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (ia.length == 1) { return ia[0] }
         return ia
     }
+    hostGlobals["pp"] = hostGlobals["p"]
     hostGlobals["raise"] = function() { throw {__exc: true, v: mkExc(hostGlobals["RuntimeError"], rstr(arguments[0])) } }
     // Kernel#loop: an endless loop whose only exit is a break out of the block (which
     // arrives here as the non-local break makeCall catches, so `loop { break 42 }` is 42).

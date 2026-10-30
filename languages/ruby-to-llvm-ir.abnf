@@ -5455,13 +5455,13 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 return convT(b)
             }
         }
-        if ((name == "printf" || name == "p") && args.length > 0 && !hasBlockArg(args)) {
+        if ((name == "printf" || name == "p" || name == "pp") && args.length > 0 && !hasBlockArg(args)) {
             var kargs = args
             var kname = name
             var kernelT = function(b) {
                 var eka = emitArgs(b, kargs)
                 b = eka.b
-                if (kname == "p") { return {b: b, v: callExt(b, "js_rp", [eka.v])} }
+                if (kname == "p" || kname == "pp") { return {b: b, v: callExt(b, "js_rp", [eka.v])} }
                 callExt(b, "js_rprint", [callExt(b, "js_rformat", [eka.v, emitStr(b, "printf")])])
                 return {b: b, v: hNull}
             }
@@ -5552,6 +5552,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     function selfCallOf(name) {
         if (selfMethod(curClsName, name) || isSelfCall(name)) { return true }
         if (!curSelfIsCls) { return false }
+        // Where self is the class, a bare `new' is Class#new on it.
+        if (name == "new") { return true }
         var c = curClsName
         var hops = 0
         while (c != undefined && c != "" && hops < 64) {
@@ -5567,6 +5569,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if ((name == "send" || name == "__send__") && isSelfCall(name)) {
             return callExt(b, "js_rselfsend", [curScopeV, selfV, argsV])
         }
+        if (name == "new" && curSelfIsCls && !classHasSMethod(curClsName, "new")) { return callExt(b, "js_rnew", [selfV, argsV]) }
         return callExt(b, "js_rxmcall", [selfV, emitStr(b, methodKey(name)), argsV])
     }
     function makePlainCall(name, args) {
@@ -7177,6 +7180,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (!local && name == "rand" && rubyAllMethods["$rand"] !== true && !selfMethod(curClsName, "rand")) {
                 return {b: b, v: callExt(b, "js_rrand", [callExt(b, "js_arr_new", [])])}
             }
+            // A bare `p' / `pp' prints nothing and answers nil.
+            if (!local && (name == "p" || name == "pp") && rubyAllMethods["$" + name] !== true && !selfMethod(curClsName, name)) {
+                return {b: b, v: hNull}
+            }
             // Inside a method body a bare name that is a method of the SAME class (or
             // of one above it) is a call on the implicit self - `def intro; speak; end'.
             if (!local && (selfMethod(curClsName, name) || classHasSMethod(curClsName, name) || builtinSelfMethod(curClsName, name) ||
@@ -7185,6 +7192,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 return {b: b, v: callExt(b, "js_rxmcall", [selfV, emitStr(b, methodKey(name)), callExt(b, "js_arr_new", [])])}
             }
             if (!local && bareSelfCallNames.indexOf(name) >= 0 && isSelfCall(name)) { return makePlainCall(name, [])(b) }
+            if (!local && name == "new" && curSelfIsCls) { return makePlainCall(name, [])(b) }
             if (rubyMethods["$" + name] !== true && inDefFrame(name)) {
                 return {b: b, v: callExt(b, "js_rlvar", [curScopeV, emitStr(b, name)])}
             }

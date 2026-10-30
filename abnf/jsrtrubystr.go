@@ -2,12 +2,48 @@ package abnf
 
 import (
 	"math"
+	"math/big"
 	"strings"
+	"unicode/utf8"
 )
 
 // Ruby String algorithms of MRI's string.c. Twins of languages/lib/ruby-str.js,
 // which the interpreter includes and layer 2 imports; positions here are code
 // points.
+
+// rubyCpLen is the character count of s; an ASCII string answers its length
+// without a scan. Twin of rbsLen in ruby-str.js.
+func (rt *jsrt) rubyCpLen(s string) int {
+	if rt.strMeta(s).shape == 1 {
+		return len(s)
+	}
+	return utf8.RuneCountInString(s)
+}
+
+// rubyCpRange is characters [b, e) of s (0 <= b <= e <= rubyCpLen(s)). Twin of
+// rbsSub in ruby-str.js.
+func (rt *jsrt) rubyCpRange(s string, b, e int) string {
+	if rt.strMeta(s).shape == 1 {
+		return s[b:e]
+	}
+	return string([]rune(s)[b:e])
+}
+
+// rubyIntSqrt is Integer.sqrt: the floor of the square root, exact past 2**53.
+// Twins: intSqrt in ruby-interpreter.abnf, rbIntSqrt in lib/ruby-rt.metajs.
+func (rt *jsrt) rubyIntSqrt(v interface{}) interface{} {
+	if f, isFlo := v.(jsFlo); isFlo {
+		v = math.Trunc(f.f)
+	}
+	n, ok := rubyBigOf(v)
+	if !ok {
+		rt.rubyRaiseErr("sqrt", "TypeError", "can't convert "+rt.rubyClassNameRT(v)+" into Integer")
+	}
+	if n.Sign() < 0 {
+		rt.rubyRaiseErr("", "Math::DomainError", "Numerical argument is out of domain - \"isqrt\"")
+	}
+	return rt.rubyBigNarrow(new(big.Int).Sqrt(n))
+}
 
 // rubyFindRunes is the first index >= from where t occurs in s, or -1.
 func rubyFindRunes(s, t []rune, from int) int {

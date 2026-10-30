@@ -4758,6 +4758,48 @@ def s110
   check("pn110c", __FILE__ == $0 && $PROGRAM_NAME == $0)
 end
 
+# ===== SECTION 111: String#[], center and reverse count characters =====
+# An astral character is one character to s[i], s[i, n], s[range], slice,
+# center / ljust / rjust and reverse. /usr/bin/ruby 2.6 settles each.
+def s111
+  s = ["a\u{1F600}bc", "\u{1F600}", "日本\u{1F600}x"]
+  t = s[0]
+  check("ix111a", t[1] == s[1] && t[1, 2] == s[1] + "b" && t[2..3] == "bc" && t[-3] == s[1] && t[1..] == s[1] + "bc" &&
+        t.slice(1) == s[1] && t[4].nil? && t[4, 1] == "" && t[5, 1].nil?)
+  u = s[2]
+  check("ix111b", u[0] == "日" && u[-1] == "x" && u[1, 10] == "本" + s[1] + "x" && u[1...-1] == "本" + s[1] && u[-5].nil?)
+  check("pd111c", t.center(9, "*") == "**" + t + "***" && t.ljust(6, ".") == t + ".." && t.rjust(6) == "  " + t &&
+        u.ljust(7, s[1]) == u + s[1] * 3 && "ab".center(7, "xy") == "xyabxyx")
+  check("rv111d", t.reverse == "cb" + s[1] + "a" && u.reverse == "x" + s[1] + "本日")
+end
+
+# ===== SECTION 112: Integer.sqrt, Regexp.last_match, Exception#cause, pp, bare p and new =====
+# Integer.sqrt is exact past 2**53; Regexp.last_match is $~; a raise inside a
+# rescue records the handled exception as the new one's cause; pp answers its
+# argument; a bare `p' is nil; a bare `new' in a class method builds an instance.
+# /usr/bin/ruby 2.6 settles each.
+class S112
+  attr_reader :a
+  def initialize(a = 0); @a = a; end
+  def self.make; new; end
+  def self.make2(a); new(a); end
+end
+def s112
+  e1 = begin; Integer.sqrt(-1); rescue Math::DomainError => e; e.message; end
+  check("is112a", Integer.sqrt(24) == 4 && Integer.sqrt(25) == 5 && Integer.sqrt(10**41) == 316227766016837933199 &&
+        e1 == "Numerical argument is out of domain - \"isqrt\"")
+  "abc" =~ /b(c)/
+  m = [Regexp.last_match[0], Regexp.last_match(1)]
+  "x" =~ /y/
+  check("lm112b", m == ["bc", "c"] && Regexp.last_match.nil?)
+  c1 = begin; begin; raise ArgumentError, "a"; rescue => e; raise TypeError, "b"; end; rescue => e2; e2.cause; end
+  c2 = begin; raise "x"; rescue => e; e.cause; end
+  c3 = begin; begin; raise "a"; rescue => e; raise e; end; rescue => e2; e2.cause; end
+  check("ca112c", c1.class == ArgumentError && c1.message == "a" && c2.nil? && c3.nil?)
+  x = p
+  check("pp112d", x.nil? && S112.make.class == S112 && S112.make2(4).a == 4)
+end
+
 s39() # SECTION-CALL 39
 s40() # SECTION-CALL 40
 s41() # SECTION-CALL 41
@@ -4830,5 +4872,7 @@ s107() # SECTION-CALL 107
 s108() # SECTION-CALL 108
 s109() # SECTION-CALL 109
 s110() # SECTION-CALL 110
+s111() # SECTION-CALL 111
+s112() # SECTION-CALL 112
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

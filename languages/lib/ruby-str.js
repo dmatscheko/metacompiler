@@ -165,6 +165,87 @@ function rbsUnitIdx(s, c) {
     return n < c ? -1 : i
 }
 
+// The character count of s. byteLen equal to the unit count means ASCII, where
+// a unit is a character, so the common case does not scan.
+function rbsLen(s) {
+    if (byteLen(s) == s.length) { return s.length }
+    return rbsCharIdx(s, s.length)
+}
+
+// Characters [c, c + k) of s, cut at the end (0 <= c <= rbsLen(s), k >= 0).
+function rbsSub(s, c, k) {
+    var a = c
+    var b = c + k
+    if (byteLen(s) != s.length) {
+        a = rbsUnitIdx(s, c)
+        b = a
+        var n = 0
+        while (n < k && b < s.length) {
+            b = b + rbsCharLen(s, b)
+            n = n + 1
+        }
+    }
+    if (b > s.length) { b = s.length }
+    return s.substring(a, b)
+}
+
+// String#[start, len] (start and len integers): nil for a negative len or a start
+// outside the string, a negative start counting from the end.
+function rbsSubseq(s, start, len) {
+    var n = rbsLen(s)
+    if (len < 0) { return null }
+    if (start < 0) { start = start + n }
+    if (start < 0 || start > n) { return null }
+    return rbsSub(s, start, len)
+}
+
+// String#[i] (an integer): one character, or nil outside the string.
+function rbsCharAt(s, i) {
+    var n = rbsLen(s)
+    if (i < 0) { i = i + n }
+    if (i < 0 || i >= n) { return null }
+    return rbsSub(s, i, 1)
+}
+
+// String#reverse, a surrogate pair kept whole.
+function rbsReverse(s) {
+    var out = ""
+    var i = 0
+    while (i < s.length) {
+        var k = rbsCharLen(s, i)
+        out = s.substring(i, i + k) + out
+        i = i + k
+    }
+    return out
+}
+
+// String#center / #ljust / #rjust. mode 0 centres, 1 pads on the right, 2 on the
+// left. MRI counts CHARACTERS, and a width at or below the receiver's length
+// answers the receiver.
+function rbsPad(s, width, pad, mode) {
+    var n = rbsLen(s)
+    if (pad.length == 0 || width <= n) { return s }
+    var total = width - n
+    var left = 0
+    if (mode == 0) { left = Math.floor(total / 2) } else if (mode == 2) { left = total }
+    return rbsRepeatTo(pad, left) + s + rbsRepeatTo(pad, total - left)
+}
+
+// The first n characters of pad repeated.
+function rbsRepeatTo(pad, n) {
+    var out = ""
+    var i = 0
+    var c = 0
+    while (c < n) {
+        if (i >= pad.length) { i = 0 }
+        var k = rbsCharLen(pad, i)
+        out = out + pad.substring(i, i + k)
+        i = i + k
+        c = c + 1
+    }
+    return out
+}
+
 // Where String#index starts searching for character position pos (negative
 // counts from the end): a unit index, or -1 when pos is outside the string.
 function rbsIndexStart(s, pos) {

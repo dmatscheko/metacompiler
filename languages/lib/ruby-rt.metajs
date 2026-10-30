@@ -5902,16 +5902,8 @@ function rbArrSubseq(t, start, len) {
     if (s < 0 || s > t.length) { return null }
     return rbArrSub(t, s, k)
 }
-// The same rule for String#[start, len].
-function rbStrSubseq(t, start, len) {
-    var s = Math.trunc(rbToF(start))
-    var k = Math.trunc(rbToF(len))
-    if (k < 0) { return null }
-    if (s < 0) { s = s + t.length }
-    if (s < 0 || s > t.length) { return null }
-    if (s + k > t.length) { k = t.length - s }
-    return t.slice(s, s + k)
-}
+// The same rule for String#[start, len], by character.
+function rbStrSubseq(t, start, len) { return rbsSubseq(t, Math.trunc(rbToF(start)), Math.trunc(rbToF(len))) }
 // A Range subsequence goes through js_rsubrange, which reads the range's own
 // endpoints.
 function rbArrSub(t, from, len) {
@@ -7553,6 +7545,13 @@ function rbMethod(target, name, args) {
             return null
         }
     }
+    // Exception#cause: what js_rraiseat recorded, nil for an exception never raised.
+    if (name == "cause") {
+        if (rbExcInst(target) && rbFindMethod(target, name) === undefined) {
+            if (target["__rcause"] === undefined) { return null }
+            return target["__rcause"]
+        }
+    }
     // Object#dup / #clone on a user INSTANCE, only when the class defines neither -
     // so a user #dup still wins, exactly as the to_s / inspect arm above works. A
     // String / Array / Hash keeps its own arm further down.
@@ -7718,12 +7717,7 @@ function rbMethod(target, name, args) {
             if (target.length == 0) { return target }
             return unicodeCase(target.charAt(0), 10) + rbLower(target.slice(1))
         }
-        if (name == "reverse") {
-            var rv = ""
-            var rq = target.length - 1
-            while (rq >= 0) { rv = rv + target.charAt(rq); rq = rq - 1 }
-            return rv
-        }
+        if (name == "reverse") { return rbsReverse(target) }
         if (name == "strip") { return rbStrStrip(target) }
         if (name == "chars") { return rbStrChars(target) }
         if (name == "split") {
@@ -7924,6 +7918,14 @@ function rbMethod(target, name, args) {
             }
             // Class#name, #to_s and #inspect are the class NAME.
             if (name == "name" || name == "to_s" || name == "inspect") { return rbClassText(target, name) }
+            if (name == "sqrt" && target["__rbuiltin"] === "Integer") { return rbIntSqrt(rbArgAt(args, 0)) }
+            // Regexp.last_match / last_match(n): $~, or its group n.
+            if (name == "last_match" && target["__rbuiltin"] === "Regexp") {
+                var lmd = rbGlobals["$~"]
+                if (lmd === undefined || lmd === null) { return null }
+                if (rbNPos(args) > 0) { return rbRxMdIndex(lmd, rbArgAt(args, 0)) }
+                return lmd
+            }
             // The reflection surface. A user `def self.ancestors' still wins - the
             // $s$ walk above runs first.
             if (name == "ancestors") { return rbAncestors(target) }
@@ -8437,9 +8439,8 @@ function js_rget(o, k) {
         return o[idx]
     }
     if (typeof o == "string") {
-        if (idx < 0) { idx = idx + o.length }
-        if (idx < 0 || idx >= o.length) { return null }
-        return rbMkRStr(o.charAt(idx), false)
+        var ch = rbsCharAt(o, idx)
+        return ch === null ? null : rbMkRStr(ch, false)
     }
     if (rtTag(o, "__rstr")) { return js_rget(o["__s"], k) }
     if (rtIsNil(o)) { fail("indexing nil") }
@@ -8517,7 +8518,7 @@ function rbStrPatSpan(s, k1, k2) {
 function js_rsubrange(o, lo, hi, excl) {
     if (typeof o == "object" && rtTag(o, "__rstr")) { return js_rsubrange(o["__s"], lo, hi, excl) }
     if (rbIsArr(o) || typeof o == "string") {
-        var n = o.length
+        var n = typeof o == "string" ? rbsLen(o) : o.length
         var b0 = rtIsNil(lo) ? 0 : Math.trunc(rbToF(lo))
         if (b0 < 0) { b0 = b0 + n }
         if (b0 < 0 || b0 > n) { return null }
@@ -9521,27 +9522,6 @@ function smDelete(s, specs) {
     return out
 }
 
-// String#center / #ljust / #rjust. mode 0 centres, 1 pads on the right, 2 on the
-// left. MRI counts CHARACTERS here, and a width at or below the receiver's length
-// answers the receiver.
-function smPad(s, width, pad, mode) {
-    if (pad.length == 0 || width <= s.length) { return s }
-    var total = width - s.length
-    var left = 0
-    if (mode == 0) { left = Math.floor(total / 2) } else if (mode == 2) { left = total }
-    var right = total - left
-    return smRepeatTo(pad, left) + s + smRepeatTo(pad, right)
-}
-
-function smRepeatTo(pad, n) {
-    var out = ""
-    var i = 0
-    while (out.length < n) {
-        out = out + pad.charAt(i % pad.length)
-        i = i + 1
-    }
-    return out
-}
 
 function smSwapcase(s) {
     var out = ""
@@ -9639,9 +9619,9 @@ function smMethod(s, name, sargs, nargs) {
     if (name == "squeeze" || name == "squeeze!") { return {ok: true, v: smSqueeze(s, sargs)} }
     if (name == "count") { return {ok: true, v: smCount(s, sargs)} }
     if (name == "delete" || name == "delete!") { return {ok: true, v: smDelete(s, sargs)} }
-    if (name == "center") { return {ok: true, v: smPad(s, Math.trunc(nargs[0]), sargs.length > 1 ? sargs[1] : " ", 0)} }
-    if (name == "ljust") { return {ok: true, v: smPad(s, Math.trunc(nargs[0]), sargs.length > 1 ? sargs[1] : " ", 1)} }
-    if (name == "rjust") { return {ok: true, v: smPad(s, Math.trunc(nargs[0]), sargs.length > 1 ? sargs[1] : " ", 2)} }
+    if (name == "center") { return {ok: true, v: rbsPad(s, Math.trunc(nargs[0]), sargs.length > 1 ? sargs[1] : " ", 0)} }
+    if (name == "ljust") { return {ok: true, v: rbsPad(s, Math.trunc(nargs[0]), sargs.length > 1 ? sargs[1] : " ", 1)} }
+    if (name == "rjust") { return {ok: true, v: rbsPad(s, Math.trunc(nargs[0]), sargs.length > 1 ? sargs[1] : " ", 2)} }
     if (name == "chop" || name == "chop!") { return {ok: true, v: smChop(s)} }
     if (name == "chomp" || name == "chomp!") {
         // "" removes every trailing newline (\n or \r\n), "\n" is the default.
@@ -9919,7 +9899,36 @@ function js_rraiseat(v, msg, where) {
     if (rbIsObj(e) && e["__rwhere"] === undefined && typeof where == "string") {
         e["__rwhere"] = where
     }
+    // Exception#cause: $! when this one is raised, unless it already has one.
+    if (rbIsObj(e) && e["__rcause"] === undefined) {
+        var cur = rbGlobals["$!"]
+        e["__rcause"] = (cur === undefined || cur === e) ? null : cur
+    }
     throw e
+}
+
+// Integer.sqrt: the floor of the square root, exact past 2**53 by Newton's
+// iteration, which only decreases from n. Twin of rubyIntSqrt in
+// abnf/jsrtrubystr.go.
+function rbIntSqrt(v) {
+    var n = anytype
+    n = rbIsFlo(v) ? Math.trunc(rbToF(v)) : v
+    if (rbCmp(n, 0) < 0) { rbRaiseErr("", "Math::DomainError", "Numerical argument is out of domain - \"isqrt\"") }
+    if (typeof n == "number") {
+        var r = Math.floor(Math.sqrt(n))
+        while (r * r > n) { r = r - 1 }
+        while ((r + 1) * (r + 1) <= n) { r = r + 1 }
+        return r
+    }
+    var x = anytype
+    var y = anytype
+    x = n
+    y = rbBin("/", rbBin("+", x, 1), 2)
+    while (rbCmp(y, x) < 0) {
+        x = y
+        y = rbBin("/", rbBin("+", x, rbBin("/", n, x)), 2)
+    }
+    return x
 }
 
 // THE TOP OF THE PROGRAM: an exception nobody rescued. Without this the floor's
