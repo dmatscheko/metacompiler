@@ -3629,6 +3629,8 @@ KwDefault   = "default" KwEnd ;
                        : (ct.u == true ? b.NewZExt(v, lt) : b.NewSExt(v, lt))
             }
             addr = cellAddr(b, lt, addr)
+        } else if (llvm.types.IsPointer(cell.Type())) {
+            addr = cellAddr(b, i32p, addr)   // a pointer cell reached through '*pp'
         }
         b.NewStore(cell, addr)
         return v

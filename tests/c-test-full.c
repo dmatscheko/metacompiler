@@ -254,6 +254,8 @@ int s08(void) {
 }
 
 // ===== SECTION 09: pointers =====
+int s09_seen = 0;
+void s09_set(int **pp, int *t) { *pp = t; s09_seen = **pp; }
 int s09(void) {
     int x = 1;
     int *p = &x, **pp = &p, ***ppp = &pp;   /* pointer levels */
@@ -271,6 +273,12 @@ int s09(void) {
     void *vp = &v;
     int *ip = vp;                            /* void* converts back without a cast */
     check(906, *ip == 7 && vp != 0);
+    int y = 2;
+    *pp = &y;                                /* a store THROUGH a pointer to a pointer */
+    check(907, *p == 2 && **pp == 2);
+    s09_set(pp, &v);
+    **ppp = &x;
+    check(908, s09_seen == 7 && *p == 1);
     return 0;
 }
 
