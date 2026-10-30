@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-876** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-877** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -66,7 +66,7 @@ its report; anything structural there is a CORE ticket.
 
 # RB — Ruby
 
-### T-875 ruby: frozen binary strings, super with no superclass method, class_eval block gaps (compiler) · P3 · RB · OPEN [V RB worker]
+### T-875 ruby: frozen binary strings, super with no superclass method, class_eval block gaps (compiler) · P3 · RB · IN PROGRESS (RB worker, round 28) [V RB worker]
 Oracle LC_ALL=en_US.UTF-8 /usr/bin/ruby 2.6. (1) WRONG: `"\xC3\xA9".b.freeze` returns an unfrozen copy in every engine
 (`frozen?` false, `force_encoding` raises no FrozenError). (2) `super` in a top-level def with no superclass method, inside
 `rescue NoMethodError` → oracle `[6, NoMethodError]`; interp aborts "super called outside of a method", compiler exits 1
@@ -102,10 +102,9 @@ not change the renderer.
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-873 kotlin: unqualified `is` matches nested classes; interface companion calls (compiled) · P2 · KT · IN PROGRESS (KT worker, round 8) [V KT worker]
-(1) WRONG, every leg: `class In; class O1 { class In }`; `val a: Any = O1.In(1); a is In` → true; Kotlin false (an unqualified
-`is` must resolve the name lexically to one class, not match any class of that simple name — clsNamed / js_ktis). (2)
-compiled legs: `interface Ic { companion object { fun g() = "ifc" } }; Ic.g()` → "unknown method 'g'"; interp `ifc`.
+### T-876 kotlin: an enum value is not an `Enum<*>` · P3 · KT · OPEN [V KT worker]
+WRONG, every leg: `enum class Color { RED }; val c: Any = Color.RED; c is Enum<*>` → false; Kotlin true (every enum class
+extends kotlin.Enum; also `c is Comparable<*>` true). Check `as Enum<*>` and `c::class.supertypes`-free forms only.
 
 # GO — Go  (oracle: `go run`)
 
@@ -927,6 +926,7 @@ T-864 ruby: encoding and module leftovers — DONE 9e2eeb10 (hash keys equal acr
 T-868 kotlin: nested names leak globally; builtin qualifiedName; type-blind receiver rule — DONE de73477b (receiver rule checks applicability by named args and builtin argument types — the regression fixed, arguments evaluated once; nested names bound globally only when no top-level declaration claims them; builtin KClass names per stdlib; class and superclass companions are implicit receivers. DECLINED: the " (Kotlin reflection is not available)" suffix when printing a KClass — it depends on whether kotlin-reflect is on the JVM classpath, not on the language)
 T-871 bash: prefix assignments with declaration builtins, local, unset, arrays, readonly; native arena growth — PARTIAL 6fc7fc4b — prefix + declaration builtins (PrefixDecl), += prefixes, function prefix bindings as the function's frame (local inherits, unset reveals the caller's, hides arrays), readonly refused on assignment/prefix/local/declare/unset/for; per-statement arena release: 300k-pass loops 52–199 MB → 3.7–3.8 MB; bash bench +0.77%. Compiler lexical attributes under a prefix (n=4 f keeps -i/-u) recorded as a compile-time-attribute divergence in manual 7.9. Rest filed as T-874
 T-872 ruby: binary case mapping, re-encode back to UTF-8 in place, public over inherited private, module_eval — DONE fb23db4d (binary strings case-map ASCII only and their bang methods mutate in place; force_encoding back to UTF-8 in place through aliases; compiler public :m over an inherited or mixed-in private method; module_eval/class_eval/class_exec with a block; the real trigger of the rescue case was 'rescue X => e' followed by a line starting with '[' parsed as e[...] — fixed with SameLine TIndex. DECLINED: [-Float::NAN].pack("E") sign bit — no engine can read a NaN's sign (MetaJS has no bit access, manual 7.7; go-math.go documents the same), and a new sign-bit primitive in all three host engines for negative-NaN packing alone is not worth the shared-engine change; the string form of module_eval needs a run-time parser in the compiled half)
+T-873 kotlin: unqualified `is` matches nested classes; interface companion calls (compiled) — DONE 50489dc1 (a type test's name is resolved lexically to one declared type and matched by its full binary name in is/as/as?/when-is/filterIsInstance/reified is — interp, Go twin, layer 2; interface companion objects emitted like a class's, incl. named companions and const vals)
 
 # Settled — do not re-open
 
