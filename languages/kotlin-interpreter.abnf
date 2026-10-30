@@ -1124,13 +1124,13 @@ CallAssign  <~~ push(makeCallAssign(takeAll(), up.pos)) ~~>
 CallChain   <~~ push({chain: takeAll()}) ~~>
             = Primary { MethodSfx | SafeMethodSfx | FieldSfx | SafeFieldSfx | IndexSfx | NnSfx } ;
 
-// The chain may carry a `!!` (the non-null assertion, which is the identity for an
-// untyped value and is simply dropped) and a `?.` step - `t!!.i++` and `t?.i++` are both
-// ordinary Kotlin, and psiUtil/isSelectorInExpression.kt spells them out. The `?.` step
-// is read like a plain `.`: on a NON-null receiver, which is the only case a ++ can
-// mean anything on, the two are the same access.
-Target      <~~ push(makeTargetRef(takeAll())) ~~>
-            = KId <~~ push(up.in) ~~> { "." KId <~~ push({key: up.in}) ~~> | "?." KId <~~ push({key: up.in}) ~~> | "!!" | TIndex } ;
+// The chain may carry a `!!` (the non-null assertion: kTargetRef marks the step after
+// it, and a null there is the message-less NullPointerException) and a `?.` step -
+// `t!!.i++` and `t?.i++` are both ordinary Kotlin, and psiUtil/isSelectorInExpression.kt
+// spells them out. The `?.` step is read like a plain `.`: on a NON-null receiver,
+// which is the only case a ++ can mean anything on, the two are the same access.
+Target      <~~ push(kTargetRef(takeAll())) ~~>
+            = KId <~~ push(up.in) ~~> { "." KId <~~ push({key: up.in}) ~~> | "?." KId <~~ push({key: up.in}) ~~> | "!!" <~~ push({nn: true}) ~~> | TIndex } ;
 TIndex      <~~ push({idx: kIndexArg(takeAll(), up.pos)}) ~~>
             = "[" Expression { "," Expression } [ "," ] "]" ;
 
@@ -3576,6 +3576,7 @@ NotMemberKw = :script(~~
             return kNum(x) >= rg.from && kNum(x) <= rg.to
         }
         if (rg.ch !== kIsChar(x)) { return false }
+        if (rg.lg === true) { return rangeHasL(rg, x) }
         var n = kNum(x)
         if (rg.down) {
             if (n > rg.from || n < rg.to) { return false }
@@ -3583,6 +3584,22 @@ NotMemberKw = :script(~~
         }
         if (n < rg.from || n > rg.to) { return false }
         return (n - rg.from) % rg.st == 0
+    }
+    // rangeHas over a Long range's exact bounds: x lies between first and the bound,
+    // a whole number of steps from first. Twin of ktRangeHasL in abnf/jsrtkotlin.go
+    // and languages/lib/kotlin-rt.metajs.
+    function rangeHasL(rg, x) {
+        if (!szIs(x) && typeof x != "number") { return false }
+        var n = anytype
+        n = kAdoptLong(x)
+        var lo = anytype
+        var hi = anytype
+        lo = rg.down ? rg.lt : rg.lf
+        hi = rg.down ? rg.lf : rg.lt
+        if (kCmpI("<", n, lo) || kCmpI(">", n, hi)) { return false }
+        var off = anytype
+        off = rg.down ? kArith("-", rg.lf, n) : kArith("-", n, rg.lf)
+        return kCmpI("==", kArith("%", off, rg.ls), 0)
     }
     // An element of a progression, boxed back into whatever the bounds were.
     function rangeEl(rg, n) {
@@ -3814,24 +3831,40 @@ NotMemberKw = :script(~~
     }
     // x as T: a ClassCastException when x is not a T, judged for the builtin value
     // types and for a class or interface the program declares; any other T (a type
-    // parameter, a library type) is unchecked, as an erased cast is. null passes.
-    // Twin of js_ktcast in abnf/jsrtkotlin.go and languages/lib/kotlin-rt.metajs.
+    // parameter, a library type) is unchecked, as an erased cast is. null passes a
+    // nullable T and is a NullPointerException for a judged non-null one, which is the
+    // check kotlinc emits. Twin of js_ktcast in abnf/jsrtkotlin.go and
+    // languages/lib/kotlin-rt.metajs.
     function makeCast(operand, tname) {
         var base = kCastBase(tname)
+        var opt = tname.charAt(tname.length - 1) == "?"
         var dest = anytype // T's JVM class once the classes exist, "" when T is not judged
         return function() {
             var v = anytype
             v = operand()
             if (dest === undefined) { dest = kCastDest(base) }
-            if (dest == "" || v === null || v === undefined || typeof v == "function" || kIsType(v, base)) { return v }
+            if (dest == "" || typeof v == "function") { return v }
+            if (v === null || v === undefined) {
+                if (!opt) { kThrowExc("NullPointerException", "null cannot be cast to non-null type " + kNullCastName(base, dest)) }
+                return v
+            }
+            if (kIsType(v, base)) { return v }
             kThrowExc("ClassCastException", kCceMsg(jxkClass(v), dest))
             return v
         }
     }
+    // The Kotlin name kotlinc's null-cast message spells: kotlin.String for a builtin,
+    // the dotted path for a program type. Twin of ktNullCastName in abnf/jsrtkotlin.go
+    // and languages/lib/kotlin-rt.metajs.
+    function kNullCastName(base, dest) {
+        if (dest.indexOf("java.lang.") == 0) { return "kotlin." + base }
+        return dest.split("$").join(".")
+    }
     var kCastLang = {"$String": "java.lang.String", "$Int": "java.lang.Integer", "$Long": "java.lang.Long",
                      "$Short": "java.lang.Short", "$Byte": "java.lang.Byte", "$Double": "java.lang.Double",
                      "$Float": "java.lang.Float", "$Char": "java.lang.Character",
-                     "$Boolean": "java.lang.Boolean", "$Number": "java.lang.Number"}
+                     "$Boolean": "java.lang.Boolean", "$Number": "java.lang.Number",
+                     "$Comparable": "java.lang.Comparable"}
     // T without its nullability mark and its type arguments.
     function kCastBase(t) {
         var b = t
@@ -3843,27 +3876,41 @@ NotMemberKw = :script(~~
     function kCastDest(b) {
         var l = kCastLang["$" + b]
         if (l != undefined) { return l }
+        // A nested type may be written qualified (`as Outer.Inner`); its descriptor is
+        // bound under the simple name.
+        var sn = resolvedTypeName(b)
         var d = anytype
-        d = globalScope[b]
-        // A builtin throwable's binary name is package-qualified; the program's own
-        // types live in the default package. A nested type is named by its simple
-        // name, as the compiler half names it.
-        if (d === null || typeof d != "object" || d.__isclass !== true) { return "" }
+        d = hasOwn(globalScope, sn) ? globalScope[sn] : undefined
+        if (d === null || d === undefined || typeof d != "object" || d.__isclass !== true) { return "" }
+        // A builtin throwable's binary name is package-qualified and is not judged; the
+        // program's own types live in the default package, a nested one as Outer$Inner.
         var bn = anytype
         bn = d.__bname
-        return (typeof bn != "string" || bn.indexOf(".") < 0) ? b : ""
+        if (typeof bn != "string" || bn == "") { return sn }
+        return bn.indexOf(".") < 0 ? bn : ""
     }
     // java's ClassCastException message. Twin of ktCceMsg in
     // languages/lib/kotlin-rt.metajs and jvCceMsg in abnf/jsrtjavastr.go.
     function kCceMsg(src, dst) {
         var head = "class " + src + " cannot be cast to class " + dst + " ("
-        var bs = src.substring(0, 5) == "java."
-        var bd = dst.substring(0, 5) == "java."
+        var bs = kCceBase(src)
+        var bd = kCceBase(dst)
         if (bs && bd) { return head + src + " and " + dst + " are in module java.base of loader 'bootstrap')" }
         if (!bs && !bd) { return head + src + " and " + dst + " are in unnamed module of loader 'app')" }
         var ws = bs ? " is in module java.base of loader 'bootstrap'" : " is in unnamed module of loader 'app'"
         var wd = bd ? " is in module java.base of loader 'bootstrap'" : " is in unnamed module of loader 'app'"
         return head + src + ws + "; " + dst + wd + ")"
+    }
+    // Whether a binary class name is in java.base: a java.* class, an array of one,
+    // or an array of a primitive ([I, [[D).
+    function kCceBase(n) {
+        var k = 0
+        while (k < n.length && n.charAt(k) == "[") { k++ }
+        if (k > 0) {
+            if (n.charAt(k) != "L") { return true }
+            k++
+        }
+        return n.substring(k, k + 5) == "java."
     }
     // The suffixes CHAIN - `x as T is U` is a cast whose result is then type-tested -
     // so they are folded left to right rather than read as a single optional suffix.
@@ -5955,7 +6002,7 @@ NotMemberKw = :script(~~
             return {v: head + sv.substring(1, sv.length)}
         }
         if (name == "subSequence") { return {v: sv.substring(kNum(args[0]), kNum(args[1]))} }
-        if (name == "trimIndent") { return {v: kTrimIndent(sv)} }
+        if (name == "trimIndent") { return {v: kReindent(sv, "", null)} }
         if (name == "replaceIndent") { return {v: kReindent(sv, args.length > 0 ? kstr2(args[0]) : "", null)} }
         if (name == "trimMargin") {
             var mp = args.length > 0 ? kstr2(args[0]) : "|"
@@ -6016,7 +6063,8 @@ NotMemberKw = :script(~~
     // blank last line dropped and every other line cut - after its margin prefix
     // (trimMargin, mp a string) or by the common indent of the non-blank lines
     // (replaceIndent, mp null) - and given newIndent; a line the margin cut does
-    // not apply to stays as it is. Twin of ktReindent in abnf/jsrtkotlin.go.
+    // not apply to stays as it is. trimIndent is replaceIndent(""). Twin of ktReindent
+    // in abnf/jsrtkotlin.go.
     function kReindent(sv, newIndent, mp) {
         var lines = kSplitStr(sv, ["\n"], false, 0)
         var minInd = 0 - 1
@@ -6046,37 +6094,6 @@ NotMemberKw = :script(~~
         var k = 0
         while (k < l.length && kIsSpaceCh(l.charCodeAt(k))) { k++ }
         return k
-    }
-    // kotlin.text.trimIndent: drop a leading and a trailing BLANK line, then remove the
-    // common indent of every non-blank line. The twin is ktTrimIndent in
-    // abnf/jsrtkotlin.go. Written with an explicit scan because the frozen engine has
-    // no string.split and no array.join.
-    function kTrimIndent(sv) {
-        var lines = []
-        var cur = ""
-        for (var i = 0; i < sv.length; i++) {
-            if (sv.charAt(i) == "\n") { lines.push(cur); cur = "" } else { cur += sv.charAt(i) }
-        }
-        lines.push(cur)
-        var lo = 0
-        var hi = lines.length
-        while (lo < hi && kTrimSide(lines[lo], true, true).length == 0) { lo++ }
-        while (hi > lo && kTrimSide(lines[hi - 1], true, true).length == 0) { hi-- }
-        var ind = 0 - 1
-        for (var j = lo; j < hi; j++) {
-            if (kTrimSide(lines[j], true, true).length == 0) { continue }
-            var k = 0
-            while (k < lines[j].length && (lines[j].charAt(k) == " " || lines[j].charAt(k) == "\t")) { k++ }
-            if (ind < 0 || k < ind) { ind = k }
-        }
-        if (ind < 0) { ind = 0 }
-        var out = ""
-        for (var p = lo; p < hi; p++) {
-            if (p > lo) { out += "\n" }
-            out += (lines[p].length >= ind) ? lines[p].substring(ind, lines[p].length)
-                                            : kTrimSide(lines[p], true, false)
-        }
-        return out
     }
     // toInt() / toLong() / toDouble() / toFloat() on a String and their OrNull forms.
     // Kotlin THROWS NumberFormatException for text that is not a number, with
@@ -6459,13 +6476,29 @@ NotMemberKw = :script(~~
         if ((kIsSet(v) || kIsMap(v)) && v.__jc !== undefined) { return v.__jc }
         if (kIsSet(v)) { return "java.util.LinkedHashSet" }
         if (kIsMap(v)) { return "java.util.LinkedHashMap" }
+        if (isRange(v)) { return kRangeJvmClass(v.fl === true, v.ch === true, v.lg === true, v.st == 1 && !v.down && v.pg !== true) }
+        if (kIsPair(v)) { return v.third !== undefined ? "kotlin.Triple" : "kotlin.Pair" }
         var n = kSimpleName(v)
         if (szIs(v) && v.u) { return "kotlin." + n }
         if (n == "Int") { return "java.lang.Integer" }
         if (n == "Char") { return "java.lang.Character" }
         if (n == "Long" || n == "Short" || n == "Byte" || n == "Double" || n == "Float" ||
             n == "String" || n == "Boolean") { return "java.lang." + n }
+        // A nested class is Outer$Inner and a builtin throwable package-qualified.
+        if (typeof v == "object" && v.__class != undefined && v.__class != null) {
+            var bn = anytype
+            bn = v.__class.__bname
+            if (typeof bn == "string" && bn != "") { return bn }
+        }
         return n
+    }
+    // The kotlin.ranges class of a range value: plain means an IntRange-style `..`
+    // (step 1, ascending, not built by step / reversed). A floating range is taken
+    // as Double's - the value keeps no Float mark. Twin of ktRangeJvmClass in
+    // abnf/jsrtkotlin.go and languages/lib/kotlin-rt.metajs.
+    function kRangeJvmClass(fl, ch, lg, plain) {
+        if (fl) { return "kotlin.ranges.ClosedDoubleRange" }
+        return "kotlin.ranges." + (ch ? "Char" : lg ? "Long" : "Int") + (plain ? "Range" : "Progression")
     }
     function jxkHash(v) { return kHash(v) }
     function jxkThrow(cls, msg) { kThrowExc(cls, msg) }
@@ -11589,17 +11622,18 @@ NotMemberKw = :script(~~
             var rx = anytype
             rx = kIdxExt(o, name)
             if (rx !== undefined) { return rx }
-            if (name == "first") { return rangeEl(o, o.from) }
+            // A Long range answers from its exact bounds (lf / lt), which the doubles
+            // cannot hold past 2^53.
+            if (name == "first" || name == "start") { return o.lg === true ? o.lf : rangeEl(o, o.from) }
             // IntProgression.last is "the last element in the progression", NOT the
             // bound it was built from: (1..10 step 4).last is 9. IntProgression.step
             // carries the DIRECTION - kotlin.ranges.downTo is documented as "a
             // progression ... with the step -1".
-            if (name == "last") { return rangeEl(o, rangeLastEl(o)) }
+            if (name == "last") { return o.lg === true ? kRangeLastL(o) : rangeEl(o, rangeLastEl(o)) }
             // ClosedRange.start / ClosedRange.endInclusive are the BOUNDS the range was
             // built from, not the last ELEMENT - the two coincide for every plain
             // `a..b`, and a stepped progression declares neither in Kotlin.
-            if (name == "start") { return rangeEl(o, o.from) }
-            if (name == "endInclusive") { return rangeEl(o, o.to) }
+            if (name == "endInclusive") { return o.lg === true ? o.lt : rangeEl(o, o.to) }
             if (name == "step") { return o.down ? -o.st : o.st }
             // `.size` on a progression is not Kotlin (IntRange is an Iterable, not a
             // Collection), but both halves answer the element count rather than
@@ -11965,7 +11999,8 @@ NotMemberKw = :script(~~
         if (t.length > 0 && t.charAt(t.length - 1) == "?") { t = t.substring(0, t.length - 1); opt = true }
         if (v === null || v === undefined) { return opt }
         if (t == "Any" || t == "Object") { return true }
-        if (kIsChar(v)) { return t == "Char" || t == "Comparable" }
+        if (t == "Comparable") { return kIsComparable(v) }
+        if (kIsChar(v)) { return t == "Char" }
         // A sized integer carries its real type, so `5L is Long` holds and
         // `5L is Int` does not - where the shared rtIsType answers "integral
         // number" for Int, Long, Short and Byte alike. The four unsigned types are
@@ -12025,6 +12060,28 @@ NotMemberKw = :script(~~
             return false
         }
         return rtIsType(v, t)
+    }
+
+    // `is Comparable`: java.lang.Comparable is implemented by the boxed numbers,
+    // Character, String, Boolean, every enum, and a class naming Comparable among its
+    // supertypes, directly or through a parent. Twin of ktIsCmp in abnf/jsrtkotlin.go
+    // and languages/lib/kotlin-rt.metajs.
+    function kIsComparable(v) {
+        if (typeof v == "string" || typeof v == "boolean" || typeof v == "number") { return true }
+        if (kIsChar(v) || szIs(v) || kIsFlo(v)) { return true }
+        if (typeof v == "object" && v.__class != undefined && v.__class != null) { return kClsCmp(v.__class, 0) }
+        return false
+    }
+    function kClsCmp(cls, depth) {
+        if (cls.__isenum === true) { return true }
+        var specs = cls.__parentSpecs
+        if (specs == undefined || depth > 32) { return false }
+        for (var i = 0; i < specs.length; i++) {
+            if (resolvedTypeName(specs[i].name) == "Comparable") { return true }
+        }
+        var ps = resolveParents(cls)
+        for (var j = 0; j < ps.length; j++) { if (kClsCmp(ps[j], depth + 1)) { return true } }
+        return false
     }
 
     // ----- Exceptions declared in the program -----
@@ -12256,7 +12313,7 @@ NotMemberKw = :script(~~
             var ael = ktLitElems(aty)
             if (ref.path.length == 1 && ref.path[0].idx != undefined && ael != null) {
                 valT = kAdoptThunk(valT, ael.v)
-                ref = {name: ref.name, path: [{idx: kAdoptThunk(ref.path[0].idx, ael.k)}]}
+                ref = {name: ref.name, path: [{idx: kAdoptThunk(ref.path[0].idx, ael.k), nn: ref.path[0].nn}]}
             }
         }
         // A write through a member - `b.xs = listOf(1)`, `b.m[1] = v` - takes the
@@ -12332,18 +12389,37 @@ NotMemberKw = :script(~~
         }
         scopePut(o, i, v)
     }
+    // An assignment target: the shared {name, path}, with each `!!` folded into the
+    // step after it as `nn` (a `!!` with no step after it asserts nothing written).
+    // Twin of kTargetRef in kotlin-to-llvm-ir.abnf.
+    function kTargetRef(items) {
+        var path = []
+        var nn = false
+        for (var i = 1; i < items.length; i++) {
+            if (items[i].nn === true) { nn = true; continue }
+            if (nn) { items[i].nn = true; nn = false }
+            path.push(items[i])
+        }
+        return {name: items[0], path: path}
+    }
     // resolveRef walks the path; the last step needs to say whether it is a `.name` or
     // an `[index]`, so the write can route through a setter or an `operator fun set`.
+    // A step after a `!!` raises the message-less NullPointerException on a null.
     resolveRef = function(ref) {
         var o = anytype
         o = getVar(ref.name)
-        for (var i = 0; i < ref.path.length - 1; i++) {
+        var n = ref.path.length
+        for (var i = 0; i < n; i++) {
             var s = ref.path[i]
+            if (o === undefined || o === null) {
+                if (s.nn === true) { kRaise("NullPointerException", null) }
+                if (i > 0) fail("null in assignment path of " + ref.name)
+            }
+            if (i == n - 1) { break }
             if (s.key != undefined) { o = kGetField(o, s.key) }
             else { o = kIndex(o, s.idx()) }
-            if (o === undefined || o === null) fail("null in assignment path of " + ref.name)
         }
-        var last = ref.path[ref.path.length - 1]
+        var last = ref.path[n - 1]
         if (last.key != undefined) { return {obj: o, key: last.key, isIndex: false} }
         return {obj: o, key: last.idx(), isIndex: true}
     }

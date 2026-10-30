@@ -1081,11 +1081,12 @@ CallAssign  <~~ push(makeCallAssign(takeAll(), up.pos)) ~~>
 CallChain   <~~ push({chain: takeAll()}) ~~>
             = Primary { MethodSfx | SafeMethodSfx | FieldSfx | SafeFieldSfx | IndexSfx | NnSfx } ;
 
-Target      <~~ push(makeTargetRef(takeAll())) ~~>
+Target      <~~ push(kTargetRef(takeAll())) ~~>
 // `?.` and `!!` are accepted in a TARGET as well - `t?.i++` and `t!!.i++` are ordinary
-// postfix targets in Kotlin's own tree (psiUtil/isSelectorInExpression.txt). Both are the
-// identity in the untyped handle world, so the key is recorded exactly as for `.`.
-            = KId <~~ push(up.in) ~~> { "." KId <~~ push({key: up.in}) ~~> | "?." KId <~~ push({key: up.in}) ~~> | "!!" | TIndex } ;
+// postfix targets in Kotlin's own tree (psiUtil/isSelectorInExpression.txt). A `?.` key
+// is recorded exactly as for `.`; a `!!` marks the step after it (kTargetRef), which
+// emitRefPath guards with the NullPointerException check.
+            = KId <~~ push(up.in) ~~> { "." KId <~~ push({key: up.in}) ~~> | "?." KId <~~ push({key: up.in}) ~~> | "!!" <~~ push({nn: true}) ~~> | TIndex } ;
 TIndex      <~~ push({idx: kIndexArg(takeAll(), up.pos)}) ~~>
             = "[" Expression { "," Expression } [ "," ] "]" ;
 
@@ -4134,20 +4135,25 @@ KwContract  = "contract" KwEnd ;
     var ktCastLang = {"$String": "java.lang.String", "$Int": "java.lang.Integer", "$Long": "java.lang.Long",
                       "$Short": "java.lang.Short", "$Byte": "java.lang.Byte", "$Double": "java.lang.Double",
                       "$Float": "java.lang.Float", "$Char": "java.lang.Character",
-                      "$Boolean": "java.lang.Boolean", "$Number": "java.lang.Number"}
+                      "$Boolean": "java.lang.Boolean", "$Number": "java.lang.Number",
+                      "$Comparable": "java.lang.Comparable"}
     function makeCast(operand, tname) {
         var base = tname
         var lt = base.indexOf("<")
         if (lt >= 0) { base = base.substring(0, lt) }
+        // js_ktcast lets null through a nullable T only, so T keeps its `?`.
+        var opt = tname.charAt(tname.length - 1) == "?"
         if (base.length > 0 && base.charAt(base.length - 1) == "?") { base = base.substring(0, base.length - 1) }
         return function(b) {
             var r = operand(b)
             var dest = ktCastLang["$" + base]
             if (dest == undefined) {
-                if (classNames[base] != 1 && interfaceNames["$" + base] != true) { return r }
-                dest = base
+                // A nested type may be written qualified (`as Outer.Inner`).
+                var simple = baseTypeName(base)
+                if (classNames[simple] != 1 && interfaceNames["$" + simple] != true) { return r }
+                dest = ktBinOf(simple)
             }
-            return {b: r.b, v: callExt(r.b, "js_ktcast", [r.v, emitStr(r.b, base), emitStr(r.b, dest)])}
+            return {b: r.b, v: callExt(r.b, "js_ktcast", [r.v, emitStr(r.b, opt ? base + "?" : base), emitStr(r.b, dest)])}
         }
     }
 
@@ -4403,16 +4409,8 @@ KwContract  = "contract" KwEnd ;
                 return {b: ea.b, v: callExt(ea.b, "js_ktsmcall", [cur, emitStr(ea.b, s.name), ea.v])}
             }
             if (s.kind == "dotanon") { return s.t(b) }
-            // x!! (Intrinsics.checkNotNull): a null receiver throws a message-less
-            // NullPointerException. Twin of the "nn" arm in kotlin-interpreter.abnf.
-            if (s.kind == "nn") {
-                var npeB = curF.NewBlock("")
-                var nnB = curF.NewBlock("")
-                b.NewCondBr(truthy(b, callExt(b, "js_eq", [cur, hNull])), npeB, nnB)
-                callExt(npeB, "js_throw", [callExt(npeB, "js_ktnewexc", [emitStr(npeB, "NullPointerException"), hNull])])
-                npeB.NewRet(hUndef)
-                return {b: nnB, v: cur}
-            }
+            // x!!: twin of the "nn" arm in kotlin-interpreter.abnf.
+            if (s.kind == "nn") { return {b: emitNnCheck(b, cur), v: cur} }
             // `X()::class`, `foo()::bar` - a reference whose RECEIVER is an arbitrary
             // expression, so it is always a BOUND one.
             if (s.kind == "refsfx") {
@@ -4873,10 +4871,15 @@ KwContract  = "contract" KwEnd ;
         }
         var ifacesV = null
         for (var k = 0; k < supers.length; k++) {
-            if (k == pk) { continue }
             // The alias-and-path-reduced name: an interface reached through a typealias
             // or written as a dotted path is still bound under its simple name.
             var kn = resolvedTypeName(supers[k].name)
+            // kotlin.Comparable has no descriptor here; __cmp is what js_ktis reads for
+            // `is Comparable` (ktIsCmp, abnf/jsrtkotlin.go).
+            if (kn == null && baseTypeName(stripWs(supers[k].name)) == "Comparable") {
+                callExt(b, "js_set", [clsV, emitStr(b, "__cmp"), hTrue])
+            }
+            if (k == pk) { continue }
             if (kn == null) { kn = supers[k].name }
             // Off the __super chain, so listed in __ifaces for js_ktis.
             if (interfaceNames["$" + kn] == true) {
@@ -5209,10 +5212,34 @@ KwContract  = "contract" KwEnd ;
         }
     }
 
+    // An assignment target: {name, path}, with each `!!` folded into the step after it
+    // as `nn` (a `!!` with no step after it asserts nothing written). Twin of
+    // kTargetRef in kotlin-interpreter.abnf.
+    function kTargetRef(items) {
+        var path = []
+        var nn = false
+        for (var i = 1; i < items.length; i++) {
+            if (items[i].nn === true) { nn = true; continue }
+            if (nn) { items[i].nn = true; nn = false }
+            path.push(items[i])
+        }
+        return {name: items[0], path: path}
+    }
+    // x!! (Intrinsics.checkNotNull): a null throws a message-less NullPointerException.
+    // Returns the block that continues with v non-null.
+    function emitNnCheck(b, v) {
+        var npeB = curF.NewBlock("")
+        var nnB = curF.NewBlock("")
+        b.NewCondBr(truthy(b, callExt(b, "js_eq", [v, hNull])), npeB, nnB)
+        callExt(npeB, "js_throw", [callExt(npeB, "js_ktnewexc", [emitStr(npeB, "NullPointerException"), hNull])])
+        npeB.NewRet(hUndef)
+        return nnB
+    }
     function emitRefPath(b, ref) {
         var o = b.NewCall(rtKtGet(), [curScopeV, emitStr(b, ref.name)])
         for (var i = 0; i < ref.path.length - 1; i++) {
             var s = ref.path[i]
+            if (s.nn === true) { b = emitNnCheck(b, o) }
             if (s.key != undefined) {
                 o = callExt(b, "js_get", [o, emitStr(b, s.key)])
             } else {
@@ -5223,6 +5250,7 @@ KwContract  = "contract" KwEnd ;
             }
         }
         var last = ref.path[ref.path.length - 1]
+        if (last.nn === true) { b = emitNnCheck(b, o) }
         if (last.key != undefined) return {b: b, obj: o, key: emitStr(b, last.key), isIndex: false}
         var kr = last.idx(b)
         return {b: kr.b, obj: o, key: kr.v, isIndex: true}
@@ -5278,7 +5306,7 @@ KwContract  = "contract" KwEnd ;
             var ael = ktLitElems(aty)
             if (ref.path.length == 1 && ref.path[0].idx != undefined && ael != null) {
                 valT = ktAdoptThunk(valT, ael.v)
-                ref = {name: ref.name, path: [{idx: ktAdoptThunk(ref.path[0].idx, ael.k)}]}
+                ref = {name: ref.name, path: [{idx: ktAdoptThunk(ref.path[0].idx, ael.k), nn: ref.path[0].nn}]}
             }
         }
         // A write to a MEMBER extension property - `n.slot = 5` - is routed through the
@@ -7146,11 +7174,29 @@ KwContract  = "contract" KwEnd ;
     var declTick = 0
     var declMark = null
     var prevTick = 0
-    function noteDecl(name, supers) {
+    function noteDecl(name, supers, nested) {
         var ns = []
         for (var i = 0; i < supers.length; i++) { ns.push(supers[i].name) }
         declTick++
         declMark = {name: name, supers: ns}
+        for (var j = 0; j < nested.length; j++) {
+            if (nested[j].name != null) { nestOwner["$" + nested[j].name] = name }
+        }
+    }
+    // The enclosing type of each nested declaration, by simple name, so an emit-time
+    // cast can spell a nested class's JVM binary name (Outer$Inner) - emitBinName's
+    // prefix only exists while the class itself is being emitted.
+    var nestOwner = {}
+    function ktBinOf(name) {
+        var out = name
+        var cur = name
+        for (var g = 0; g < 32; g++) {
+            var o = nestOwner["$" + cur]
+            if (o == undefined) { return out }
+            out = o + "$" + out
+            cur = o
+        }
+        return out
     }
     function markTopType(t) {
         if (declTick > prevTick) { topClassPending = declMark }
@@ -7634,7 +7680,7 @@ KwContract  = "contract" KwEnd ;
         var comp = parts.companion
         classNames[name] = 1
         lastDeclaredClass = name
-        noteDecl(name, hdr.supers)
+        noteDecl(name, hdr.supers, parts.nested)
         ctorParamNames["$" + name] = ctorSig(hdr.cparams).params
         var own = {}
         var ownProps = {}
@@ -7761,7 +7807,7 @@ KwContract  = "contract" KwEnd ;
         var methods = parts.methods
         classNames[name] = 1
         lastDeclaredType = name
-        noteDecl(name, hdr.supers)
+        noteDecl(name, hdr.supers, parts.nested)
         ctorParamNames["$" + name] = ctorSig(hdr.cparams).params
         var own = {}
         for (var cm = 0; cm < methods.length; cm++) {
@@ -7954,7 +8000,7 @@ KwContract  = "contract" KwEnd ;
         var methods = parts.methods
         classNames[name] = 2   // A singleton: named like a class, but never constructed.
         lastDeclaredType = name
-        noteDecl(name, hdr.supers)
+        noteDecl(name, hdr.supers, parts.nested)
             // noteParams as well as the name, so orderArgs has the parameter list for
             // a NAMED argument to an object's method (`R.f(c = 9)`). The
             // declOpIfConvention call is the class emitter's, for the same reason: an
@@ -7988,7 +8034,7 @@ KwContract  = "contract" KwEnd ;
         var methods = parts.methods
         interfaceNames["$" + name] = true
         lastDeclaredType = name
-        noteDecl(name, hdr.supers)
+        noteDecl(name, hdr.supers, parts.nested)
         var sig = []
         // `from` is the interface that DECLARES the member, which is not always the one
         // a class names as its supertype (see the inheritance loop below): the copy in

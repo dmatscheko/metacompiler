@@ -5741,6 +5741,84 @@ fun sec127() {
     check("lam127b", listOf(1, 2).map { try { if (it == 1) return@map 9; it } finally { } }.toString() == "[9, 2]")
 }
 
+// ===== SECTION 128: casts, `!!` targets, trimIndent and LongRange bounds =====
+// trimIndent / replaceIndent, javaClass and LongRange / LongProgression are
+// kotlin-stdlib 2.2.21's, called from java 24; `is` / `as Comparable` and every
+// ClassCastException text are java 24's for the same objects (a nested class is
+// Outer$Inner). `x!!` on null in an assignment target is Intrinsics.checkNotNull's
+// NullPointerException, as in an expression. `null as T` for a non-null T is the
+// NullPointerException kotlinc emits - spec only (no kotlinc here), so only the type
+// is asserted.
+class Ver128(val n: Int) : Comparable<Ver128> { override fun compareTo(other: Ver128): Int = n - other.n }
+enum class Col128 { RED }
+class Dog128
+class Outer128 {
+    class Inner
+}
+class T128(var i: Int) { val xs = intArrayOf(1, 2) }
+fun pick128(k: Int): T128? = if (k > 0) T128(k) else null
+fun any128(i: Int): Any? = when (i) {
+    0 -> null
+    1 -> Dog128()
+    2 -> Outer128.Inner()
+    3 -> 1 to 2
+    else -> arrayOf(1)
+}
+fun sec128() {
+    val ti = listOf("\n\n  a\n\n", "\n \n  a\n    b\n \n", "\n\n")
+    check("ti128", ti[0].trimIndent() == "\na\n" && ti[1].trimIndent() == "\na\n  b\n" && ti[2].trimIndent() == "" && ti[0].replaceIndent(">") == ">\n>a\n>")
+    val vs: List<Any> = listOf("s", 'c', true, Col128.RED, Ver128(1), 2L, 1.5f, Dog128(), listOf(1), 1 to 2)
+    var cs = ""
+    for (v in vs) {
+        cs += if (v is Comparable<*>) "+" else "-"
+        try { v as Comparable<*>; cs += "+" } catch (e: ClassCastException) { cs += "-" }
+    }
+    check("cmp128a", cs == "++++++++++++++------")
+    val msgs = mutableListOf<String>()
+    for (i in 1..4) {
+        try { any128(i) as Comparable<*> } catch (e: ClassCastException) { msgs.add(e.message ?: "") }
+    }
+    try { any128(2) as String } catch (e: ClassCastException) { msgs.add(e.message ?: "") }
+    try { any128(1) as Outer128.Inner } catch (e: ClassCastException) { msgs.add(e.message ?: "") }
+    check("cce128a", msgs[0] == "class Dog128 cannot be cast to class java.lang.Comparable (Dog128 is in unnamed module of loader 'app'; java.lang.Comparable is in module java.base of loader 'bootstrap')")
+    check("cce128b", msgs[1] == "class Outer128\$Inner cannot be cast to class java.lang.Comparable (Outer128\$Inner is in unnamed module of loader 'app'; java.lang.Comparable is in module java.base of loader 'bootstrap')")
+    check("cce128c", msgs[2] == "class kotlin.Pair cannot be cast to class java.lang.Comparable (kotlin.Pair is in unnamed module of loader 'app'; java.lang.Comparable is in module java.base of loader 'bootstrap')")
+    check("cce128d", msgs[3] == "class [Ljava.lang.Integer; cannot be cast to class java.lang.Comparable ([Ljava.lang.Integer; and java.lang.Comparable are in module java.base of loader 'bootstrap')")
+    check("cce128e", msgs[4] == "class Outer128\$Inner cannot be cast to class java.lang.String (Outer128\$Inner is in unnamed module of loader 'app'; java.lang.String is in module java.base of loader 'bootstrap')" &&
+                     msgs[5] == "class Dog128 cannot be cast to class Outer128\$Inner (Dog128 and Outer128\$Inner are in unnamed module of loader 'app')")
+    val jc = listOf<Any>(1 to 2, Triple(1, 2, 3), 1..2, 1L..2L, 'a'..'b', (1..5) step 2, 5L downTo 1L, Outer128.Inner())
+    var jn = ""
+    for (v in jc) jn += v.javaClass.name + " "
+    check("jcls128", jn == "kotlin.Pair kotlin.Triple kotlin.ranges.IntRange kotlin.ranges.LongRange kotlin.ranges.CharRange kotlin.ranges.IntProgression kotlin.ranges.LongProgression Outer128\$Inner ")
+    var nc = ""
+    try { any128(0) as String; nc += "a" } catch (e: NullPointerException) { nc += "A" }
+    try { any128(0) as String?; nc += "b" } catch (e: NullPointerException) { nc += "B" }
+    try { any128(0) as Dog128; nc += "c" } catch (e: NullPointerException) { nc += "C" }
+    check("nc128", nc == "AbC")
+    val ok = pick128(5)
+    ok!!.i++
+    ok!!.xs[1] += 3
+    val t = pick128(0)
+    var got = ""
+    try { t!!.i++; got += "a" } catch (e: NullPointerException) { got += "A" + e.message }
+    try { t!!.i = 3; got += "b" } catch (e: NullPointerException) { got += "B" }
+    try { t!!.i += 3; got += "c" } catch (e: NullPointerException) { got += "C" }
+    try { t!!.xs[0] = 1; got += "d" } catch (e: NullPointerException) { got += "D" }
+    try { t!!.xs[0]++; got += "e" } catch (e: NullPointerException) { got += "E" }
+    check("nn128", got == "AnullBCDE" && ok.i == 6 && ok.xs[1] == 5)
+    val ls = longArrayOf(9007199254740993L, Long.MAX_VALUE)
+    val b = ls[0]
+    val r = b..b + 2
+    check("lr128a", "" + r.first + " " + r.last + " " + r.start + " " + r.endInclusive == "9007199254740993 9007199254740995 9007199254740993 9007199254740995")
+    check("lr128b", r.contains(b + 1) && !r.contains(b - 1) && !(b + 3 in r) && b in r)
+    val p = (b..b + 4) step 3
+    check("lr128c", "" + p.first + " " + p.last == "9007199254740993 9007199254740996" && (b + 3 in p) && !(b + 4 in p))
+    val d = (b + 4) downTo b
+    check("lr128d", "" + d.first + " " + d.last == "9007199254740997 9007199254740993" && !(b + 5 in d) && b in d)
+    val mx = ls[1] - 2..ls[1]
+    check("lr128e", "" + mx.first + " " + mx.last == "9223372036854775805 9223372036854775807" && ls[1] in mx && !(ls[1] - 3 in mx))
+}
+
 fun main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -5865,6 +5943,7 @@ fun main() {
     sec125() // SECTION-CALL 125
     sec126() // SECTION-CALL 126
     sec127() // SECTION-CALL 127
+    sec128() // SECTION-CALL 128
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }

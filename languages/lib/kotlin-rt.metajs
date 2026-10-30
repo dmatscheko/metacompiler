@@ -2587,10 +2587,9 @@ function k2Obj(o, depth) {
 }
 
 // ktClassBin (jsrtkotlin.go's ktClassBin) is a descriptor's binary name: the
-// __bname the builtin hierarchy writes, falling back to the simple __name a class
-// the PROGRAM declares carries. A top-level Kotlin class in the default package
-// has the simple name as its binary name; a NESTED one is spelled Outer$Inner by
-// the JVM and this subset keeps no nesting path on the descriptor.
+// __bname the builtin hierarchy and the emitter write (a nested class's
+// Outer$Inner), falling back to the simple __name a top-level class the PROGRAM
+// declares carries, which is its binary name in the default package.
 function ktClassBin(cls) {
     var b = cls["__bname"]
     if (typeof b == "string") { if (b.length > 0) { return b } }
@@ -3133,21 +3132,6 @@ function k2TrimHit(args, c) {
     return false
 }
 
-// strings.TrimLeft over the cutset " \t\r\n\f": trimIndent's fallback for a line
-// shorter than the common indent.
-function k2IsCut(c) {
-    return c == 32 || c == 9 || c == 13 || c == 10 || c == 12
-}
-
-function k2TrimLeftCut(s) {
-    var i = 0
-    while (i < s.length) {
-        if (!k2IsCut(s.charCodeAt(i))) { return s.substring(i, s.length) }
-        i = i + 1
-    }
-    return ""
-}
-
 // ------------------------------------------------------ the String surface
 
 // ktStrMethod is jsrtkotlin.go:2162 - the Go twin of the String branch of
@@ -3391,7 +3375,7 @@ function k2StrMethod2(s, name, args) {
     if (name == "subSequence") {
         return s.substring(k2Int(ktArg(args, 0)), k2Int(ktArg(args, 1)))
     }
-    if (name == "trimIndent") { return k2TrimIndent(s) }
+    if (name == "trimIndent") { return k2Reindent(s, "", null) }
     if (name == "replaceIndent") {
         if (args.length > 0) { return k2Reindent(s, k2Str2(args[0]), null) }
         return k2Reindent(s, "", null)
@@ -3533,51 +3517,6 @@ function k2IndentW(l) {
     var k = 0
     while (k < l.length && k2IsSpace(l.charCodeAt(k))) { k = k + 1 }
     return k
-}
-
-// k2TrimIndent is ktTrimIndent (jsrtkotlin.go:2423) - kotlin.text.trimIndent:
-// drop a leading and a trailing BLANK line, then remove the common indent of
-// every non-blank line. The twin is kTrimIndent in kotlin-interpreter.abnf.
-// The Go twin measures the indent and the slice in BYTES; this measures UTF-16
-// code units. The prefix scanned is only spaces and tabs, so the two agree
-// wherever the indent itself is what is being cut, which is every call.
-function k2TrimIndent(s) {
-    var lines = k2Split(s, "\n")
-    var lo = 0
-    var hi = lines.length
-    var go = true
-    while (go && lo < hi) {
-        if (k2TrimSpace(lines[lo]).length == 0) { lo = lo + 1 } else { go = false }
-    }
-    go = true
-    while (go && hi > lo) {
-        if (k2TrimSpace(lines[hi - 1]).length == 0) { hi = hi - 1 } else { go = false }
-    }
-    var ind = -1
-    var i = lo
-    while (i < hi) {
-        var l = lines[i]
-        if (k2TrimSpace(l).length != 0) {
-            var k = 0
-            var scan = true
-            while (scan && k < l.length) {
-                var c = l.charCodeAt(k)
-                if (c == 32 || c == 9) { k = k + 1 } else { scan = false }
-            }
-            if (ind < 0 || k < ind) { ind = k }
-        }
-        i = i + 1
-    }
-    if (ind < 0) { ind = 0 }
-    var out = ""
-    var j = lo
-    while (j < hi) {
-        if (j > lo) { out = out + "\n" }
-        var t = lines[j]
-        if (t.length >= ind) { out = out + t.substring(ind, t.length) } else { out = out + k2TrimLeftCut(t) }
-        j = j + 1
-    }
-    return out
 }
 
 // ------------------------------------------------------ String -> number, %s
@@ -4068,13 +4007,40 @@ function jxkClass(v) {
     }
     if (ktIsSet(v)) { return "java.util.LinkedHashSet" }
     if (rtIsDictObj(v)) { return "java.util.LinkedHashMap" }
+    if (ktIsRange(v)) {
+        var plain = v["st"] == 1
+        if (v["down"] === true) { plain = false }
+        if (v["pg"] === true) { plain = false }
+        return ktRangeJvmClass(v["fl"] === true, v["ch"] === true, v["lg"] === true, plain)
+    }
+    if (ktIsPair(v)) {
+        if (v["third"] !== undefined) { return "kotlin.Triple" }
+        return "kotlin.Pair"
+    }
     var n = k4bSimpleName(v)
     if (sintIs(v) && sintUns(v)) { return "kotlin." + n }
     if (n == "Int") { return "java.lang.Integer" }
     if (n == "Char") { return "java.lang.Character" }
     if (n == "Long" || n == "Short" || n == "Byte" || n == "Double" || n == "Float" ||
         n == "String" || n == "Boolean") { return "java.lang." + n }
+    // A nested class is Outer$Inner and a builtin throwable package-qualified.
+    if (ktIsObj(v)) {
+        var cls = v["__class"]
+        if (ktIsObj(cls)) {
+            var bn = cls["__bname"]
+            if (typeof bn == "string") { if (bn.length > 0) { return bn } }
+        }
+    }
     return n
+}
+// ktRangeJvmClass is ktRangeJvmClass (jsrtkotlin.go): the kotlin.ranges class of a
+// range value.
+function ktRangeJvmClass(fl, ch, lg, plain) {
+    if (fl) { return "kotlin.ranges.ClosedDoubleRange" }
+    var k = "Int"
+    if (ch) { k = "Char" } else if (lg) { k = "Long" }
+    if (plain) { return "kotlin.ranges." + k + "Range" }
+    return "kotlin.ranges." + k + "Progression"
 }
 function jxkHash(v) { return ktElemHash(v) }
 function jxkThrow(cls, msg) { ktRaise(cls, msg) }
@@ -6564,10 +6530,12 @@ function k4bSetMember(o, key, val) {
 // answered here and everything else falls through unchanged.
 function ktIsType(v, tname) {
     if (typeof v != "number") {
+        var bt = k4bStripQ(k4bStripAngle(tname))
+        if (bt == "Comparable") { return ktIsCmp(v) }
         // A PROGRESSION is an IntRange / CharRange / IntProgression and NOT a
         // List - the shared js_is_type has no arm for it.
         if (ktIsRange(v)) { return k4RangeIsType(v, tname) }
-        var ci = ktCollIsType(v, k4bStripQ(k4bStripAngle(tname)))
+        var ci = ktCollIsType(v, bt)
         if (ci !== undefined) { return ci }
         if (js_is_type(v, tname) === true) { return true }
         // A QUALIFIED type name - `is Shape.Circle`, which is how a NESTED class
@@ -6610,6 +6578,32 @@ function ktIsType(v, tname) {
     return t == "Number" || t == "Int"
 }
 
+// ktIsCmp is ktIsCmp (jsrtkotlin.go): `is Comparable` for a value that is not a
+// number - Char, String, Boolean, an enum entry, or an instance of a class whose
+// descriptor chain carries the emitter's __cmp mark.
+function ktIsCmp(v) {
+    if (typeof v == "string" || typeof v == "boolean" || ktIsChar(v)) { return true }
+    if (ktIsObj(v)) { return ktDescCmp(v["__class"], 0) }
+    return false
+}
+function ktDescCmp(c, depth) {
+    var guard = 0
+    while (c !== null && c !== undefined && typeof c == "object" && guard < 64) {
+        if (c["__isenum"] === true || c["__cmp"] === true) { return true }
+        var ifs = c["__ifaces"]
+        if (Array.isArray(ifs) && depth < 64) {
+            var i = 0
+            while (i < ifs.length) {
+                if (ktDescCmp(ifs[i], depth + 1)) { return true }
+                i = i + 1
+            }
+        }
+        c = c["__super"]
+        guard = guard + 1
+    }
+    return false
+}
+
 // Whether the class descriptor c, its __super chain, or an interface listed in
 // __ifaces along them is named t. Twin of ktDescIs in abnf/jsrtkotlin.go.
 function ktDescIs(c, t, depth) {
@@ -6640,22 +6634,50 @@ function js_ktequals(l, r) {
 // `x is T`, as the extern.
 function js_ktis(v, tname) { return ktIsType(v, tname) }
 // js_ktcast (jsrtkotlin.go): `v as T` for a judged T, a ClassCastException when v
-// is not a T.
+// is not a T; null passes a nullable T only.
 function js_ktcast(v, tname, dst) {
-    if (rtIsNil(v) || typeof v == "function" || ktIsType(v, tname)) { return v }
+    if (rtIsNil(v)) {
+        if (!k4bEndsQ(tname)) { ktRaise("NullPointerException", "null cannot be cast to non-null type " + ktNullCastName(tname, dst)) }
+        return v
+    }
+    if (typeof v == "function" || ktIsType(v, tname)) { return v }
     ktRaise("ClassCastException", ktCceMsg(jxkClass(v), dst))
     return v
+}
+// ktNullCastName is ktNullCastName (jsrtkotlin.go): kotlin.String for a builtin,
+// the dotted path for a program type.
+function ktNullCastName(base, dest) {
+    if (dest.substring(0, 10) == "java.lang.") { return "kotlin." + base }
+    var out = ""
+    var i = 0
+    while (i < dest.length) {
+        var c = dest.charAt(i)
+        if (c == "$") { out = out + "." } else { out = out + c }
+        i = i + 1
+    }
+    return out
 }
 // java's ClassCastException message: java.* classes are in java.base, everything
 // else (kotlin-stdlib's and the program's) in the app loader's unnamed module. Twin
 // of jvCceMsg in abnf/jsrtjavastr.go and kCceMsg in kotlin-interpreter.abnf.
 function ktCceMsg(src, dst) {
     var head = "class " + src + " cannot be cast to class " + dst + " ("
-    var bs = src.substring(0, 5) == "java."
-    var bd = dst.substring(0, 5) == "java."
+    var bs = ktCceBase(src)
+    var bd = ktCceBase(dst)
     if (bs && bd) { return head + src + " and " + dst + " are in module java.base of loader 'bootstrap')" }
     if (!bs && !bd) { return head + src + " and " + dst + " are in unnamed module of loader 'app')" }
     return head + src + ktCceWhere(bs) + "; " + dst + ktCceWhere(bd) + ")"
+}
+// Whether a binary class name is in java.base: a java.* class, an array of one,
+// or an array of a primitive ([I, [[D).
+function ktCceBase(n) {
+    var k = 0
+    while (k < n.length && n.charCodeAt(k) == 91) { k = k + 1 }
+    if (k > 0) {
+        if (n.charCodeAt(k) != 76) { return true }
+        k = k + 1
+    }
+    return n.substring(k, k + 5) == "java."
 }
 function ktCceWhere(base) {
     if (base) { return " is in module java.base of loader 'bootstrap'" }
@@ -9932,6 +9954,7 @@ function ktRangeHas(rg, x) {
         if (ktIsChar(x)) { return false }
         if (typeof x != "number") { return false }
     }
+    if (rg["lg"] === true) { return ktRangeHasL(rg, x) }
     var n = k4RangeNum(x)
     if (rg["down"] === true) {
         if (n > rg["from"] || n < rg["to"]) { return false }
@@ -9939,6 +9962,24 @@ function ktRangeHas(rg, x) {
     }
     if (n < rg["from"] || n > rg["to"]) { return false }
     return (n - rg["from"]) % rg["st"] == 0
+}
+
+// ktRangeHasL is ktRangeHasL (jsrtkotlin.go): ktRangeHas over a Long range's exact
+// bounds.
+function ktRangeHasL(rg, x) {
+    var n = ktAdoptLong(x)
+    var lo = rg["lf"]
+    var hi = rg["lt"]
+    var down = rg["down"] === true
+    if (down) {
+        lo = rg["lt"]
+        hi = rg["lf"]
+    }
+    if (k1Cmp("<", n, lo)) { return false }
+    if (k1Cmp(">", n, hi)) { return false }
+    var off = k1Arith("-", n, rg["lf"])
+    if (down) { off = k1Arith("-", rg["lf"], n) }
+    return k1Cmp("==", k1Arith("%", off, rg["ls"]), 0)
 }
 
 // IntRange.toString is "$first..$last"; IntProgression.toString is
@@ -10266,15 +10307,26 @@ function js_ktfget(o, name) {
     // is not Kotlin (IntRange is an Iterable, not a Collection) but the
     // interpreter half answers the element count, so this one does too.
     if (ktIsRange(o) && rtIsNil(r)) {
-        if (name == "first") { return k4RangeEl(o, o["from"]) }
+        // A Long range answers from its exact bounds (lf / lt), which the doubles
+        // cannot hold past 2^53.
+        var lg = o["lg"] === true
+        if (name == "first" || name == "start") {
+            if (lg) { return o["lf"] }
+            return k4RangeEl(o, o["from"])
+        }
         // IntProgression.last is the last ELEMENT, not the bound it was built
         // from: (1..10 step 4).last is 9.
-        if (name == "last") { return k4RangeEl(o, ktRangeLastEl(o)) }
+        if (name == "last") {
+            if (lg) { return k4RangeLastL(o) }
+            return k4RangeEl(o, ktRangeLastEl(o))
+        }
         // ClosedRange.start / ClosedRange.endInclusive are the BOUNDS - the two
         // coincide with first/last for every plain a..b, and a stepped
         // progression declares neither in Kotlin.
-        if (name == "start") { return k4RangeEl(o, o["from"]) }
-        if (name == "endInclusive") { return k4RangeEl(o, o["to"]) }
+        if (name == "endInclusive") {
+            if (lg) { return o["lt"] }
+            return k4RangeEl(o, o["to"])
+        }
         if (name == "step") {
             if (o["down"] === true) { return -o["st"] }
             return o["st"]

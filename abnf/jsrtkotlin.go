@@ -316,11 +316,9 @@ func ktExcFqcn(name string) string {
 }
 
 // ktClassBin is a descriptor's binary name: the __bname the hierarchy above and the
-// emitter write, falling back to the simple __name a class the PROGRAM declares
-// carries. A top-level Kotlin class in the default package has the simple name as
-// its binary name, which is the common case and exact; a NESTED one is spelled
-// Outer$Inner by the JVM and this subset has no nesting path on the descriptor, so
-// it answers "Inner".
+// emitter write (a nested class's Outer$Inner), falling back to the simple __name a
+// top-level class the PROGRAM declares carries, which is its binary name in the
+// default package.
 func ktClassBin(cls *jsObject) string {
 	if b, ok := cls.props["__bname"].(string); ok && b != "" {
 		return b
@@ -1480,11 +1478,20 @@ func init() {
 		}
 		// js_ktcast(v, T, dst) is `v as T` for a judged T (dst is its JVM class,
 		// chosen by the emitter): a ClassCastException with java's message when v is
-		// not a T. null and function values pass. Twin of kCast in
-		// kotlin-interpreter.abnf and js_ktcast in languages/lib/kotlin-rt.metajs.
+		// not a T. A function value passes, and null passes a nullable T (written
+		// with its `?`) and is kotlinc's NullPointerException for a non-null one.
+		// Twin of makeCast in kotlin-interpreter.abnf and js_ktcast in
+		// languages/lib/kotlin-rt.metajs.
 		m["js_ktcast"] = func(a []uint64) uint64 {
 			v := u(a[0])
-			if isUndefOrNull(v) || isCallable(v) || ktIsType(v, rt.toString(u(a[1]))) {
+			t := rt.toString(u(a[1]))
+			if isUndefOrNull(v) {
+				if !strings.HasSuffix(t, "?") {
+					rt.ktRaise("NullPointerException", "null cannot be cast to non-null type "+ktNullCastName(t, rt.toString(u(a[2]))))
+				}
+				return a[0]
+			}
+			if isCallable(v) || ktIsType(v, t) {
 				return a[0]
 			}
 			src, _ := ktJvmClass(v).(string)
@@ -1511,6 +1518,9 @@ func init() {
 			switch v.(type) {
 			case jsGInt, jsJFlo, float64:
 			default:
+				if ktTypeBase(rt.toString(u(a[1]))) == "Comparable" {
+					return boolH(ktIsCmp(v))
+				}
 				// A PROGRESSION is an IntRange / CharRange / IntProgression and
 				// NOT a List - the shared probe has no arm for it.
 				if rg, isRg := ktRangeOf(v); isRg {
@@ -2986,18 +2996,27 @@ func init() {
 			// nothing else.
 			if rg, isRg := ktRangeOf(o); isRg && isUndefOrNull(u(r)) {
 				switch name {
-				case "first":
+				// A Long range answers from its exact bounds (lf / lt), which the
+				// doubles cannot hold past 2^53.
+				case "first", "start":
+					if rg.lg {
+						return w(jsGInt{v: rg.lf, w: 64})
+					}
 					return w(ktRangeEl(rg, rg.from))
 				// IntProgression.last is the last ELEMENT, not the bound it was
 				// built from: (1..10 step 4).last is 9.
 				case "last":
+					if rg.lg {
+						return w(jsGInt{v: ktRangeLastL(rg), w: 64})
+					}
 					return w(ktRangeEl(rg, ktRangeLastEl(rg)))
 				// ClosedRange.start / ClosedRange.endInclusive are the BOUNDS -
 				// they coincide with first/last for every plain a..b, and a
 				// stepped progression declares neither in Kotlin.
-				case "start":
-					return w(ktRangeEl(rg, rg.from))
 				case "endInclusive":
+					if rg.lg {
+						return w(jsGInt{v: rg.lt, w: 64})
+					}
 					return w(ktRangeEl(rg, rg.to))
 				case "step":
 					return w(ktRangeSigned(rg))
@@ -3407,7 +3426,7 @@ func (rt *jsrt) ktStrMethod2(s, name string, args []interface{}) (interface{}, b
 	case "subSequence":
 		return rt.strRange(s, jsToInt(rt.toNumber(argAt(args, 0))), jsToInt(rt.toNumber(argAt(args, 1)))), true
 	case "trimIndent":
-		return ktTrimIndent(s), true
+		return rt.ktReindent(s, "", nil), true
 	case "trimMargin", "replaceIndent":
 		if name == "replaceIndent" {
 			ind := ""
@@ -3539,8 +3558,8 @@ func ktCharsStr(v interface{}) string {
 // first and a blank last line dropped and every other line cut - after its margin
 // prefix (trimMargin, margin non-nil) or by the common indent of the non-blank
 // lines (replaceIndent, margin nil) - and given newIndent; a line the margin cut
-// does not apply to stays as it is. Twin of kReindent in kotlin-interpreter.abnf
-// and k2Reindent in languages/lib/kotlin-rt.metajs.
+// does not apply to stays as it is. trimIndent is replaceIndent(""). Twin of
+// kReindent in kotlin-interpreter.abnf and k2Reindent in languages/lib/kotlin-rt.metajs.
 func (rt *jsrt) ktReindent(s, newIndent string, margin *string) string {
 	lines := strings.Split(s, "\n")
 	indentW := func(l string) int {
@@ -3576,44 +3595,6 @@ func (rt *jsrt) ktReindent(s, newIndent string, margin *string) string {
 			out = append(out, newIndent+l[f+len(*margin):])
 		} else {
 			out = append(out, l)
-		}
-	}
-	return strings.Join(out, "\n")
-}
-
-// ktTrimIndent is kotlin.text.trimIndent: drop a leading and a trailing BLANK
-// line, then remove the common indent of every non-blank line. The twin is
-// kTrimIndent in kotlin-interpreter.abnf.
-func ktTrimIndent(s string) string {
-	lines := strings.Split(s, "\n")
-	for len(lines) > 0 && strings.TrimSpace(lines[0]) == "" {
-		lines = lines[1:]
-	}
-	for len(lines) > 0 && strings.TrimSpace(lines[len(lines)-1]) == "" {
-		lines = lines[:len(lines)-1]
-	}
-	ind := -1
-	for _, l := range lines {
-		if strings.TrimSpace(l) == "" {
-			continue
-		}
-		k := 0
-		for k < len(l) && (l[k] == ' ' || l[k] == '\t') {
-			k++
-		}
-		if ind < 0 || k < ind {
-			ind = k
-		}
-	}
-	if ind < 0 {
-		ind = 0
-	}
-	out := make([]string, len(lines))
-	for i, l := range lines {
-		if len(l) >= ind {
-			out[i] = l[ind:]
-		} else {
-			out[i] = strings.TrimLeft(l, " \t")
 		}
 	}
 	return strings.Join(out, "\n")
@@ -3903,6 +3884,12 @@ func ktJvmClass(v interface{}) interface{} {
 		if jc, ok := t.props["__jc"].(string); ok {
 			return jc
 		}
+		// A nested class is Outer$Inner and a builtin throwable package-qualified.
+		if cls, ok := t.props["__class"].(*jsObject); ok {
+			if bn, ok := cls.props["__bname"].(string); ok && bn != "" {
+				return bn
+			}
+		}
 	}
 	if ktIsSet(v) {
 		return "java.util.LinkedHashSet"
@@ -3910,10 +3897,50 @@ func ktJvmClass(v interface{}) interface{} {
 	if _, _, isDict := dictParts(v); isDict {
 		return "java.util.LinkedHashMap"
 	}
+	if rg, ok := ktRangeOf(v); ok {
+		return ktRangeJvmClass(rg.fl, rg.ch, rg.lg, rg.st == 1 && !rg.down && !rg.pg)
+	}
+	if p, ok := ktIsPair(v); ok {
+		if _, has := p.props["third"]; has {
+			return "kotlin.Triple"
+		}
+		return "kotlin.Pair"
+	}
 	if bn := jvBoxName(v); bn != "" {
 		return "java.lang." + bn
 	}
 	return ktSimpleName(v)
+}
+
+// ktNullCastName is the Kotlin name kotlinc's null-cast message spells: kotlin.String
+// for a builtin, the dotted path for a program type. Twin of kNullCastName in
+// kotlin-interpreter.abnf and ktNullCastName in languages/lib/kotlin-rt.metajs.
+func ktNullCastName(base, dest string) string {
+	if strings.HasPrefix(dest, "java.lang.") {
+		return "kotlin." + base
+	}
+	return strings.ReplaceAll(dest, "$", ".")
+}
+
+// ktRangeJvmClass is the kotlin.ranges class of a range value: plain means an
+// IntRange-style `..` (step 1, ascending, not built by step / reversed). A floating
+// range is taken as Double's - the value keeps no Float mark. Twin of
+// kRangeJvmClass in kotlin-interpreter.abnf and ktRangeJvmClass in
+// languages/lib/kotlin-rt.metajs.
+func ktRangeJvmClass(fl, ch, lg, plain bool) string {
+	if fl {
+		return "kotlin.ranges.ClosedDoubleRange"
+	}
+	k := "Int"
+	if ch {
+		k = "Char"
+	} else if lg {
+		k = "Long"
+	}
+	if plain {
+		return "kotlin.ranges." + k + "Range"
+	}
+	return "kotlin.ranges." + k + "Progression"
 }
 
 // ktStr2 is kstr2: a string is itself, everything else renders through ktpRender.
@@ -7751,6 +7778,9 @@ func ktRangeHas(rg ktRange, x interface{}) bool {
 	if !ok {
 		return false
 	}
+	if rg.lg {
+		return ktRangeHasL(rg, x)
+	}
 	if rg.down {
 		if n > rg.from || n < rg.to {
 			return false
@@ -7761,6 +7791,33 @@ func ktRangeHas(rg ktRange, x interface{}) bool {
 		return false
 	}
 	return math.Mod(n-rg.from, rg.st) == 0
+}
+
+// ktRangeHasL is ktRangeHas over a Long range's exact bounds: x lies between first
+// and the bound, a whole number of steps from first. Twin of rangeHasL in
+// kotlin-interpreter.abnf and ktRangeHasL in languages/lib/kotlin-rt.metajs.
+func ktRangeHasL(rg ktRange, x interface{}) bool {
+	g, isG := x.(jsGInt)
+	f, isF := x.(float64)
+	if !isG && !isF {
+		return false
+	}
+	n := g.v
+	if !isG {
+		n = int64(f)
+	}
+	lo, hi := rg.lf, rg.lt
+	if rg.down {
+		lo, hi = rg.lt, rg.lf
+	}
+	if n < lo || n > hi {
+		return false
+	}
+	off := n - rg.lf
+	if rg.down {
+		off = rg.lf - n
+	}
+	return off%rg.ls == 0
 }
 
 func ktRangeSigned(rg ktRange) float64 {
@@ -9179,6 +9236,47 @@ func ktCmpKeys(rt *jsrt, a, b interface{}, desc bool) int {
 // listed in __ifaces anywhere along them (a supertype after the first, see
 // emitSuperLinks in kotlin-to-llvm-ir.abnf) is named t. Twin of ktDescIs in
 // languages/lib/kotlin-rt.metajs.
+// ktTypeBase is a type name without its type arguments and nullability mark.
+func ktTypeBase(t string) string {
+	if i := strings.IndexByte(t, '<'); i >= 0 {
+		t = t[:i]
+	}
+	return strings.TrimSuffix(t, "?")
+}
+
+// ktIsCmp is `is Comparable` for a value that is not a number (every number is
+// one): java.lang.Comparable is implemented by Character, String, Boolean, every
+// enum, and a class naming Comparable among its supertypes (the emitter's __cmp
+// mark), directly or through a parent. Twin of kIsComparable in
+// kotlin-interpreter.abnf and ktIsCmp in languages/lib/kotlin-rt.metajs.
+func ktIsCmp(v interface{}) bool {
+	switch o := v.(type) {
+	case string, bool, jsChar:
+		return true
+	case *jsObject:
+		cls, _ := o.props["__class"].(*jsObject)
+		return ktDescCmp(cls, 0)
+	}
+	return false
+}
+
+func ktDescCmp(c *jsObject, depth int) bool {
+	for guard := 0; c != nil && guard < 64; guard++ {
+		if c.props["__isenum"] == true || c.props["__cmp"] == true {
+			return true
+		}
+		if ifs, ok := c.props["__ifaces"].(*jsArray); ok && depth < 64 {
+			for _, e := range ifs.elems {
+				if ic, isObj := e.(*jsObject); isObj && ktDescCmp(ic, depth+1) {
+					return true
+				}
+			}
+		}
+		c, _ = c.props["__super"].(*jsObject)
+	}
+	return false
+}
+
 func ktDescIs(c *jsObject, t string, depth int) bool {
 	for guard := 0; c != nil && guard < 64; guard++ {
 		if c.props["__name"] == t {
