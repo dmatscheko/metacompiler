@@ -246,6 +246,69 @@
             "program": "${workspaceFolder}","args": ["languages/c-to-llvm-ir.abnf", "tests/c-fail-test-import.c", "-q", "-warn-imports"]
         },
         {
+            "name": "C interpreter, a duplicate block-scope declaration SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "expectError": "redefinition of 'zero'",
+            "program": "${workspaceFolder}","args": ["languages/c-interpreter.abnf", "tests/c-fail-test-redef-block.c", "-q"]
+        },
+        {
+            "name": "C to LLVM IR, a duplicate block-scope declaration SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "expectError": "redefinition of 'zero'",
+            "program": "${workspaceFolder}","args": ["languages/c-to-llvm-ir.abnf", "tests/c-fail-test-redef-block.c", "-q"]
+        },
+        {
+            "name": "C interpreter, two file-scope definitions SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "expectError": "redefinition of 'x'",
+            "program": "${workspaceFolder}","args": ["languages/c-interpreter.abnf", "tests/c-fail-test-redef-global.c", "-q"]
+        },
+        {
+            "name": "C to LLVM IR, two file-scope definitions SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "expectError": "redefinition of 'x'",
+            "program": "${workspaceFolder}","args": ["languages/c-to-llvm-ir.abnf", "tests/c-fail-test-redef-global.c", "-q"]
+        },
+        {
+            "name": "C interpreter, conflicting file-scope types SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "expectError": "conflicting types for 'y'",
+            "program": "${workspaceFolder}","args": ["languages/c-interpreter.abnf", "tests/c-fail-test-conflict.c", "-q"]
+        },
+        {
+            "name": "C to LLVM IR, conflicting file-scope types SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "expectError": "conflicting types for 'y'",
+            "program": "${workspaceFolder}","args": ["languages/c-to-llvm-ir.abnf", "tests/c-fail-test-conflict.c", "-q"]
+        },
+        {
+            "name": "C interpreter, brace elision after a nested designator SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "expectError": "an initializer after a nested designator (brace elision) is not supported",
+            "program": "${workspaceFolder}","args": ["languages/c-interpreter.abnf", "tests/c-fail-test-elision.c", "-q"]
+        },
+        {
+            "name": "C to LLVM IR, brace elision after a nested designator SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "expectError": "an initializer after a nested designator (brace elision) is not supported",
+            "program": "${workspaceFolder}","args": ["languages/c-to-llvm-ir.abnf", "tests/c-fail-test-elision.c", "-q"]
+        },
+        {
+            "name": "C preprocessor piped into C to LLVM IR -qq, a compile error still shows SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "expectError": "c compiler error: redefinition of 'zero'",
+            "program": "${workspaceFolder}","args": ["languages/c-preprocessor.abnf", "tests/c-fail-test-redef-block.c", "-pipe", "languages/c-to-llvm-ir.abnf", "-qq"]
+        },
+        {
             "name": "MetaJS interpreter (pinning self test)",
             "type": "go",
             "request": "launch",

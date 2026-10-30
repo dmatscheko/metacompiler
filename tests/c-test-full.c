@@ -2089,6 +2089,134 @@ int s52(void) {
     return 0;
 }
 
+// ===== SECTION 53: one file-scope object, several declarations =====
+/* Every file-scope declaration of one name denotes the same object (C11 6.2.2p2,
+   6.9.2): an extern declaration before the definition, one after it, one spelled
+   through a typedef, and a repeated tentative definition. A function that reads the
+   name before its definition sees the defined value, and so does an extern
+   declaration in a block, even past a local that shadows the name (6.2.2p4). Every
+   expected value was printed by cc. */
+typedef int s53_myint;
+extern int s53_ge;
+int s53_ge = 5;
+extern s53_myint s53_gf;
+s53_myint s53_gf = 7;
+int s53_gh;
+extern int s53_gh;
+int s53_gh;
+int s53_gi = 3;
+extern int s53_gi;
+extern int s53_gj;
+int s53_readj(void) { return s53_gj; }
+int s53_gj = 9;
+int s53_arr[3];
+extern int s53_arr[3];
+int s53_gk = 4;
+int s53_bump(void) { extern int s53_gl; s53_gl = s53_gl + 1; return s53_gl; }
+int s53_gl = 10;
+int s53(void) {
+    check(5301, s53_ge == 5 && s53_gf == 7 && s53_gh == 0 && s53_gi == 3);
+    check(5302, s53_readj() == 9);
+    s53_ge++; s53_gi += s53_gh + 1; s53_arr[2] = 4;
+    check(5303, s53_ge == 6 && s53_gi == 4 && s53_arr[2] == 4);
+    { extern int s53_gk; s53_gk = 5; }
+    int s53_gk = 100;
+    { extern int s53_gk; extern int s53_gk; check(5304, s53_gk == 5); }
+    check(5305, s53_gk == 100 && s53_bump() == 11 && s53_gl == 11);
+    return 0;
+}
+
+// ===== SECTION 54: block scopes =====
+/* A nested block, a for statement and a statement expression each open a scope of
+   their own, so redeclaring an outer name in them is legal shadowing (C11 6.2.1p4,
+   6.8.5p5); a backward goto over a declaration re-runs it in the same scope. A
+   second declaration in ONE block is rejected (tests/c-fail-test-redef-block.c). */
+int s54_g = 1;
+int s54(void) {
+    int x = 1, sum = 0;
+    { int x = 2; sum = sum + x; { int x = 3; sum = sum + x; } }
+    check(5401, x == 1 && sum == 5);
+    for (int x = 4; x < 5; x++) { int x = 9; sum = sum + x; }
+    check(5402, sum == 14);
+    int k = 0;
+again:;
+    int z = k;
+    k++;
+    if (k < 3) goto again;
+    check(5403, z == 2);
+    int s54_g = 7;
+    check(5404, s54_g == 7 && ({ int x = 11; x; }) == 11);
+    _Bool b = 1;
+    { _Bool b = 0; check(5405, b == 0); }
+    check(5406, b == 1 && x == 1);
+    return 0;
+}
+
+// ===== SECTION 55: subscript operand order; nested designators =====
+/* 'E1[E2]' is '*((E1) + (E2))' (C11 6.5.2.1p2), so the integer may come first, as a
+   constant, a parenthesized expression or a variable, and the result is an lvalue.
+   A designator list ('.b[1] =', '[1][2] =', '.p[1].y =') names a subobject, and
+   only that subobject is initialized (6.7.9p17-19). Every expected value was
+   printed by cc. */
+struct S55P { int x; int y; };
+union S55U { int i; char c; };
+struct S55Q { struct S55P p[2]; union S55U u; int z; };
+struct S55T { int a; int b[3]; };
+struct S55Q s55_gq = { .p[1].y = 4, .u.i = 300, .p[0] = { 1, 2 } };
+int s55_gm[2][3] = { [1][2] = 7, [0][0] = 1, [1][0] = 5 };
+int s55(void) {
+    int arr[5] = { 1, 2, 3, 4, 5 };
+    int *p = arr + 1;
+    int i = 3;
+    check(5501, 2[arr] == 3 && 2[p] == 4 && (1 + 1)[arr] == 3 && '\1'[arr] == 2);
+    check(5502, i[arr] == 4 && 1["abc"] == 'b' && -1[p] == -3 && *&1[arr] == 2);
+    3[arr] = 40; i[p] = 50;
+    check(5503, arr[3] == 40 && arr[4] == 50 && ++0[arr] == 2);
+    struct S55T t = { .b[1] = 5 };
+    check(5504, t.a == 0 && t.b[0] == 0 && t.b[1] == 5 && t.b[2] == 0);
+    struct S55T u = { 1, .b[2] = 9, .b[0] = 8 };
+    check(5505, u.a == 1 && u.b[0] == 8 && u.b[1] == 0 && u.b[2] == 9);
+    check(5506, s55_gq.p[0].x == 1 && s55_gq.p[0].y == 2 && s55_gq.p[1].x == 0
+                && s55_gq.p[1].y == 4 && s55_gq.u.i == 300 && s55_gq.z == 0);
+    check(5507, s55_gm[0][0] == 1 && s55_gm[0][1] == 0 && s55_gm[1][0] == 5 && s55_gm[1][2] == 7);
+    struct S55P ps[] = { [2].y = 6, [0].x = 1 };
+    check(5508, sizeof ps / sizeof ps[0] == 3 && ps[2].y == 6 && ps[0].x == 1 && ps[1].x == 0);
+    return 0;
+}
+
+// ===== SECTION 56: the constants of <limits.h>, <stdint.h> and <stdbool.h> =====
+/* The headers are built in: each constant has this target's value (LP64, signed
+   char) and the type the reference toolchain's header spelling gives it, and
+   <stdbool.h> defines bool as _Bool. sizeof of a bare constant name measures the
+   constant, as it does for an enumerator. Every expected value was printed by cc. */
+#include <limits.h>
+#include <stdint.h>
+#include <stdbool.h>
+enum { S56_E = 3 };
+int s56_g = INT_MAX;
+long s56_gl = LONG_MIN;
+int s56(void) {
+    check(5601, CHAR_BIT == 8 && SCHAR_MIN == -128 && SCHAR_MAX == 127 && UCHAR_MAX == 255
+                && CHAR_MIN == -128 && CHAR_MAX == 127);
+    check(5602, SHRT_MIN == -32768 && SHRT_MAX == 32767 && USHRT_MAX == 65535);
+    check(5603, INT_MAX == 2147483647 && INT_MIN < 0 && INT_MIN + INT_MAX == -1
+                && sizeof INT_MIN == 4 && UINT_MAX + 1 == 0 && UINT_MAX > 0);
+    check(5604, LONG_MAX == 9223372036854775807L && LONG_MIN + LONG_MAX == -1L
+                && sizeof(LONG_MIN) == 8 && ULONG_MAX + 1 == 0 && ULONG_MAX > 0
+                && LLONG_MAX == LONG_MAX && ULLONG_MAX == ULONG_MAX);
+    check(5605, INT8_MIN == -128 && INT8_MAX == 127 && UINT8_MAX == 255 && INT16_MIN == -32768
+                && UINT16_MAX == 65535 && INT32_MIN == INT_MIN && UINT32_MAX == UINT_MAX);
+    check(5606, INT64_MAX == LONG_MAX && INT64_MIN == LONG_MIN && UINT64_MAX == ULONG_MAX
+                && SIZE_MAX == ULONG_MAX && INTPTR_MIN == LONG_MIN && UINTMAX_MAX + 1 == 0
+                && PTRDIFF_MAX == LONG_MAX && sizeof SIZE_MAX == 8);
+    check(5607, s56_g == 2147483647 && s56_gl < 0 && -(s56_gl + 1) == LONG_MAX);
+    bool b = 5;
+    check(5608, true == 1 && false == 0 && __bool_true_false_are_defined == 1 && b == 1
+                && sizeof(bool) == 1 && sizeof(S56_E) == 4 && sizeof S56_E == 4);
+    switch (8) { case CHAR_BIT: check(5609, 1); break; default: check(5609, 0); }
+    return 0;
+}
+
 // ===== END SECTIONS =====
 
 int main() {
@@ -2144,6 +2272,10 @@ int main() {
     s50(); // SECTION-CALL 50
     s51(); // SECTION-CALL 51
     s52(); // SECTION-CALL 52
+    s53(); // SECTION-CALL 53
+    s54(); // SECTION-CALL 54
+    s55(); // SECTION-CALL 55
+    s56(); // SECTION-CALL 56
     /* summary: "full: <checks> checks, <failures> failures" */
     putchar('f'); putchar('u'); putchar('l'); putchar('l'); putchar(':'); putchar(' ');
     print_num(nchecks);

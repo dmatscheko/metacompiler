@@ -597,7 +597,7 @@ Attr        = ( "__attribute__" | "__attribute" ) SkipParen ;
 // <...>/"..." token including its delimiters, so slice them off to get the bare
 // header name. Nothing is pushed, so an include yields no top-level statement.
 Include     = "#" "include" ( SysHeader | LocHeader ) ;
-SysHeader   <~~ resolveImport(up.in.slice(1, up.in.length - 1), up.pos) ~~>
+SysHeader   <~~ cNoteSysHeader(up.in.slice(1, up.in.length - 1)); resolveImport(up.in.slice(1, up.in.length - 1), up.pos) ~~>
             = "<" :whitespace() { HdrChar } ">" :whitespace(Whitespace) ;
 LocHeader   <~~ resolveImport(up.in.slice(1, up.in.length - 1), up.pos) ~~>
             = '"' :whitespace() { HdrChar } '"' :whitespace(Whitespace) ;
@@ -741,7 +741,7 @@ ProtoItem   <~~ takeAll() /* A prototype needs no lowering. */ ~~>
             = [ PStars ] Id ParamList { Attr } ;
 // The declaration BASE type, kept as a real C type so that a char is one byte wide
 // and an unsigned int divides and compares unsigned. Pushes {bty: ct}.
-BaseTy      <~~ push({bty: baseCtOf(up.in)}) ~~> = [ TypeInt ] EnumRef [ TypeInt ] | TypeInt ;
+BaseTy      <~~ push({bty: baseCtOf(up.in), ext: isExternTy(up.in)}) ~~> = [ TypeInt ] EnumRef [ TypeInt ] | TypeInt ;
 // 'struct T;' / 'union U;' / 'enum E;' - a declaration of the TAG alone. It makes
 // the type name available; the layout comes from the definition, wherever that is.
 // GCC accepts the enum form too, which the corpus relies on.
@@ -875,8 +875,11 @@ StructDecl  <~~ push(makeDeclSeq(takeAll(), false)) ~~>
 UnionDecl   <~~ push(makeDeclSeq(takeAll(), false)) ~~>
             = [ TypeInt ] KwUnion Id <~~ push({bty: ctStruct(uKey(up.in))}) ~~> [ TypeInt ] DeclItem { "," DeclItem } ";" ;
 
-Block       <~~ push(makeBlockStmt(takeAll())) ~~>
-            = "{" { Statement } "}" ;
+// A block is a scope of its own (C11 6.2.1p4): ScopeOpen starts the build-time
+// name table that rejects a second declaration of one name in it.
+Block       <~~ closeBlockScope(); push(makeBlockStmt(takeAll())) ~~>
+            = ScopeOpen { Statement } "}" ;
+ScopeOpen   <~~ openBlockScope() ~~> = "{" ;
 
 If          <~~ push(makeIf(takeAll())) ~~>
             = KwIf "(" Expression ")" Statement [ KwElse Statement ] ;
@@ -887,8 +890,10 @@ While       <~~ push(makeWhile(pop(), pop())) ~~>
 Do          <~~ push(makeDo(pop(), pop())) ~~>
             = KwDo Statement KwWhile "(" Expression ")" ";" ;
 
-For         <~~ push(makeFor(takeAll())) ~~>
-            = KwFor "(" [ ForInit ] ";" [ ForCond ] ";" [ ForPost ] ")" Statement ;
+For         <~~ closeBlockScope(); push(makeFor(takeAll())) ~~>
+            = KwFor ForOpen [ ForInit ] ";" [ ForCond ] ";" [ ForPost ] ")" Statement ;
+// The for statement is a block around its declaration and its body (C11 6.8.5p5).
+ForOpen     <~~ openBlockScope() ~~> = "(" ;
 ForInit     <~~ push({k:"init", t:pop()}) ~~> = ForVar | ForExpr ;
 ForVar      = DeclCore ;
 ForExpr     <~~ push(exprToStmt(pop())) ~~> = Expression ;
@@ -1039,10 +1044,11 @@ StrInitEnd = :script(~~
 // A brace initializer collects its items; a trailing comma is allowed.
 BraceInit   <~~ push({list: takeAll()}) ~~>
             = "{" [ DItem { "," DItem } [ "," ] ] "}" ;
-DItem       <~~ push(makeDItem(takeAll())) ~~> = [ ArrDesig | FldDesig ] DInit ;
+DItem       <~~ push(makeDItem(takeAll())) ~~> = [ Desig { Desig } "=" ] DInit ;
 // The array designator '[2] = value' and the struct/union form '.field = value'.
-ArrDesig    <~~ push({at: pop()}) ~~> = "[" Number "]" "=" ;
-FldDesig    = "." Id <~~ push({fld: up.in}) ~~> "=" ;
+Desig       = ArrDesig | FldDesig ;
+ArrDesig    <~~ push({at: pop()}) ~~> = "[" Number "]" ;
+FldDesig    = "." Id <~~ push({fld: up.in}) ~~> ;
 
 Empty       <~~ push(function() {}) ~~>
             = ";" ;
@@ -1067,7 +1073,11 @@ Assignment  <~~ push(makeAssign(takeAll())) ~~>
 // DerefP ('*' of a PLACE) comes before the general Deref ('*' of any expression):
 // only the place form knows the C type of what it dereferences, which is what makes
 // '(*pa)[1]' step by whole rows of 'int (*pa)[3]'.
-Lvalue      = StrPlaceP | CompLitP | DerefP | Deref | ParenSfx | ParenPlace | VarPlace ;
+Lvalue      = StrPlaceP | CompLitP | DerefP | Deref | ParenSfx | ParenPlace | VarPlace | ConstSubP ;
+// '2[arr]' as a place: a subscript is '*(E1 + E2)', so the pointer may be either
+// operand (C11 6.5.2.1p2). A name seed ('i[p]') is VarPlace's.
+ConstSubP   <~~ push(makeSubscript(takeAll())) ~~>
+            = ( NumberLit | CharLit ) Index { PlaceSfx } ;
 // A STRING LITERAL is an array object of static storage duration, so it is a place:
 // "abc"[1] indexes it, sizeof "abc" is its byte size, and reading it decays to a
 // pointer to its first character. Adjacent literals concatenate (C11 6.4.5p5); an
@@ -1194,7 +1204,11 @@ Cast        <~~ push(makeCast(takeAll())) ~~>
 // answer is the size of that expression's type, which is what makes 'sizeof a' on a
 // char array answer its length. SizeofPlace comes before SizeofExpr so that the
 // common 'sizeof name' shape needs no evaluation of anything but an address.
-Sizeof      = KwSizeof ( SizeofType | SizeofPlace | SizeofExpr ) ;
+Sizeof      = KwSizeof ( SizeofType | SizeofName | SizeofPlace | SizeofExpr ) ;
+// A bare name, which may be a variable or a constant (an enumerator, a header
+// constant) - only the emitted code can tell, see makeSizeofName.
+SizeofName  <~~ push(makeSizeofName(pop())) ~~>
+            = ( "(" Id <~~ push(up.in) ~~> ")" | Id <~~ push(up.in) ~~> ) !"[" !"." !"->" !"(" !"++" !"--" ;
 SizeofType  <~~ push(makeSizeof(pop())) ~~>
             = "(" TypeName ")" ;
 SizeofPlace <~~ push(makeSizeofPlace(pop())) ~~>
@@ -1254,7 +1268,8 @@ IsTypedef = :script(~~
             nc = c.peek(s)
         }
         if (name === "") { return abnf.newToken("\x01no-name", 0) }
-        var std = "|size_t|ssize_t|ptrdiff_t|intptr_t|uintptr_t|intmax_t|uintmax_t|wchar_t|wint_t|char16_t|char32_t|int8_t|uint8_t|int16_t|uint16_t|int32_t|uint32_t|int64_t|uint64_t|int_fast8_t|int_least8_t|"
+        // bool is <stdbool.h>'s: without that header typedefOf refuses it.
+        var std = "|size_t|ssize_t|ptrdiff_t|intptr_t|uintptr_t|intmax_t|uintmax_t|wchar_t|wint_t|char16_t|char32_t|int8_t|uint8_t|int16_t|uint16_t|int32_t|uint32_t|int64_t|uint64_t|int_fast8_t|int_least8_t|bool|"
         if (std.indexOf("|" + name + "|") >= 0) { return undefined }
         var back = c.getSdx()
         var i = 0 - back
@@ -1421,7 +1436,12 @@ ArgList     <~~ push({args: takeAll()}) ~~>
 // PEG never goes back for the longer read.
 // StmtExpr comes first: '({ ... })' starts like a parenthesized expression, and the
 // general form would consume the '(' and then choke on the '{'.
-Primary     = StmtExpr | CompLitRef | ParenSfxRef | "(" Expression ")" | StrRef | FloatLit | NumberLit | CharLit | PlaceRef | VarRef ;
+Primary     = StmtExpr | CompLitRef | ParenSfxRef | SubSeedRef | StrRef | PlaceRef | VarRef ;
+// A parenthesized expression or a constant, optionally subscripted ('2[arr]',
+// '(i + 1)[p]'; see ConstSubP). The subscript is an optional TAIL so the seed is
+// parsed once.
+SubSeedRef  <~~ push(makeSubSeedRef(takeAll())) ~~>
+            = ( "(" Expression ")" | FloatLit | NumberLit | CharLit ) [ Index { PlaceSfx } ] ;
 // A GCC STATEMENT EXPRESSION '({ stmt; stmt; expr; })': an ordinary block, in its own
 // scope, whose value is the value of its LAST expression statement (and 0 when it has
 // none). Rather than single that statement out in the syntax - which needs a lookahead
@@ -1429,8 +1449,8 @@ Primary     = StmtExpr | CompLitRef | ParenSfxRef | "(" Expression ")" | StrRef 
 // records its value, so the last one to record simply wins. That is the same order in
 // both halves: the interpreter records while it RUNS the block, the compiler while it
 // EMITS it, and in either case the block's own statements are the last to act.
-StmtExpr    <~~ push(makeStmtExpr(takeAll())) ~~>
-            = "(" "{" { Statement } "}" ")" ;
+StmtExpr    <~~ closeBlockScope(); push(makeStmtExpr(takeAll())) ~~>
+            = "(" ScopeOpen { Statement } "}" ")" ;
 ParenSfxRef <~~ push(makeLoad(pop())) ~~> = ParenSfx ;
 CompLitRef  <~~ push(makeLoad(pop())) ~~> = CompLitP ;
 StrRef      <~~ push(makeLoad(pop())) ~~> = StrPlaceP ;
@@ -1824,6 +1844,7 @@ KwDefault   = "default" KwEnd ;
     // A _Bool declarator: the initializer is normalized to 0 or 1.
     function makeBoolDecl(items) {
         var name = items[0]
+        noteBlockName(name, false)
         var opt = items[1]
         return function() {
             var a = alloc(1)
@@ -1847,6 +1868,12 @@ KwDefault   = "default" KwEnd ;
     // sizeof over any other expression: the size of the type that expression has.
     function makeSizeofExpr(t) {
         return function() { return val(ctBytes(typeOnly(t).t), ctSizeT) }
+    }
+    // 'sizeof x' of a bare name. Twin of makeSizeofName in c-to-llvm-ir.abnf.
+    function makeSizeofName(name) {
+        var placeT = makeSizeofPlace(makeVarPlace([name]))
+        var valT = makeSizeofExpr(makeVarRef(name))
+        return function() { return lookupVar(name) != undefined ? placeT() : valT() }
     }
     // A cast converts the value to the named type (C11 6.5.4): an integer wraps to
     // that type's width and signedness, a float truncates towards zero on the way to
@@ -2303,9 +2330,10 @@ KwDefault   = "default" KwEnd ;
             var at = 0
             for (var i = 0; i < list.length; i++) {
                 var it = list[i]
+                noElisionAfter(list, i)
                 if (it.at != undefined) { at = it.at | 0 }
                 if (at >= ct.n) fail("too many initializers for an array")
-                runInit(ct.e, it.v, base + at * ctSize(ct.e))
+                runDesigInit(ct.e, it, base + at * ctSize(ct.e))
                 at = at + 1
             }
             return
@@ -2320,6 +2348,7 @@ KwDefault   = "default" KwEnd ;
         var idx = 0
         for (var j = 0; j < list.length; j++) {
             var iu = list[j]
+            noElisionAfter(list, j)
             if (iu.fld != undefined) {
                 var found = -1
                 for (var k = 0; k < st.order.length; k++) { if (st.order[k] == iu.fld) found = k }
@@ -2328,9 +2357,30 @@ KwDefault   = "default" KwEnd ;
             }
             if (idx >= st.order.length) fail("too many initializers for " + tagName(ct.s))
             var f = fieldOf(ct.s, st.order[idx])
-            runInit(f.ct, iu.v, base + f.off)
+            runDesigInit(f.ct, iu, base + f.off)
             idx = idx + 1
         }
+    }
+    // One list item into the member its first designator picked; the rest of a
+    // chain walks on to the subobject it names. Twin of emitDesigInit in
+    // c-to-llvm-ir.abnf.
+    function runDesigInit(ct, it, base) {
+        var sub = it.sub != undefined ? it.sub : []
+        for (var i = 0; i < sub.length; i++) {
+            var d = sub[i]
+            if (d.fld != undefined) {
+                if (ct.k != "struct") fail("a '." + d.fld + "' designator needs a struct or union")
+                var f = fieldOf(ct.s, d.fld)
+                base = base + f.off
+                ct = f.ct
+            } else {
+                if (ct.k != "arr") fail("a '[" + d.at + "]' designator needs an array")
+                if ((d.at | 0) >= ct.n) fail("too many initializers for an array")
+                base = base + (d.at | 0) * ctSize(ct.e)
+                ct = ct.e
+            }
+        }
+        runInit(ct, it.v, base)
     }
 
     // All user defined functions by name: {params: [{name, ptr, ct}...], body: thunk}.
@@ -2725,6 +2775,8 @@ KwDefault   = "default" KwEnd ;
             if (hasOwn(enumConsts, name)) return val(enumConsts[name] | 0, ctInt)
             // A bare function name is its address: the function pointer value.
             if (hasOwn(funcs, name)) return val(funcId(name), ctFn)
+            var sc = cStdConst(name)
+            if (sc != undefined) return sc()
             fail("variable not defined: " + name)
         }
     }
@@ -2754,10 +2806,15 @@ KwDefault   = "default" KwEnd ;
             var s = path[i]
             bf = undefined
             if (s.idx != undefined) {
-                var idx = szNum(s.idx().v)
+                var iv = s.idx()
+                var idx = szNum(iv.v)
                 if (ct.k == "arr") { ct = ct.e; addr = addr + idx * ctSize(ct) }
                 else if (ct.k == "ptr") { ct = ct.p; addr = load(addr) + idx * ctSize(ct) }
-                else fail("indexing needs an array or a pointer: " + name)
+                else if (ct.k == "int") {
+                    var sp = subscriptPlace({v: load(addr), t: ct}, iv)
+                    addr = sp.a
+                    ct = sp.ct
+                } else fail("indexing needs an array or a pointer: " + name)
             } else if (s.fld != undefined) {
                 if (ct.k != "struct") fail("'.' needs a struct value: ." + s.fld)
                 var f = fieldOf(ct.s, s.fld)
@@ -2773,6 +2830,28 @@ KwDefault   = "default" KwEnd ;
             }
         }
         return {a: addr, ct: ct, bf: bf}
+    }
+    // 'x[y]' of two VALUES is '*(x + y)' (C11 6.5.2.1p2), so either operand may be
+    // the pointer: the place of the selected element. Twin of emitSubscript in
+    // c-to-llvm-ir.abnf.
+    function subscriptPlace(x, y) {
+        if (y.t != undefined && y.t.k == "ptr") { var t = x; x = y; y = t }
+        if (x.t == undefined || x.t.k != "ptr") fail("indexing needs an array or a pointer")
+        return {a: x.v + szNum(y.v) * ctSize(x.t.p), ct: x.t.p, bf: undefined}
+    }
+    // items = [seedThunk, {idx}, step...]: a subscripted value, as a place.
+    function makeSubscript(items) {
+        var seedT = items[0]
+        var idxT = items[1].idx
+        var path = items.slice(2)
+        return function() {
+            var x = seedT()
+            var p = subscriptPlace(x, idxT())
+            return path.length == 0 ? p : walkPath(p, path, "subscript")
+        }
+    }
+    function makeSubSeedRef(items) {
+        return items.length == 1 ? items[0] : makeLoad(makeSubscript(items))
     }
     function makeVarPlace(items) {
         var name = items[0]
@@ -3091,15 +3170,6 @@ KwDefault   = "default" KwEnd ;
 
     // ----- Statement thunks -----
 
-    // One brace-initializer item: an optional '[i] =' / '.field =' designator plus
-    // its value.
-    function makeDItem(items) {
-        if (items.length > 1) {
-            if (items[0].fld != undefined) return {fld: items[0].fld, v: items[1]}
-            return {at: items[0].at, v: items[1]}
-        }
-        return {v: items[0]}
-    }
     // ----- Declarators -----
     // One declarator, whatever its shape, collapses into a DESCRIPTOR; the enclosing
     // declaration owns the base type and combines the two. That is what lets 'char',
@@ -3144,10 +3214,24 @@ KwDefault   = "default" KwEnd ;
         var thunks = []
         for (var i = 1; i < items.length; i++) {
             var d = items[i].dcl
+            noteBlockName(d.name, items[0].ext == true)
+            if (items[0].ext == true) { thunks.push(makeExternOf(d.name, declCt(base, d), d.init)); continue }
             var t = makeDeclOf(d.name, declCt(base, d), d.init)
             thunks.push(isStatic ? makeStaticOf(d.name, t) : t)
         }
         return makeSeq(thunks)
+    }
+    // 'extern int g;' in a block names the file-scope object g. Twin of
+    // makeExternOf in c-to-llvm-ir.abnf.
+    function makeExternOf(name, ct, opt) {
+        if (opt != undefined) fail("an extern declaration in a block cannot have an initializer: " + name)
+        return function() {
+            var prev = hasOwn(globalScope, name) ? globalScope[name] : undefined
+            if (prev != undefined && !ctEq(prev.ct, ct)) fail("conflicting types for '" + name + "'")
+            if (prev == undefined) globalScope[name] = {addr: alloc(ctSize(ct)), arr: ct.k == "arr", ct: ct}
+            var e = globalScope[name]
+            declVar(name, e.addr, e.arr, e.ct)
+        }
     }
     // One declared object: fresh (zeroed) storage plus, if there is one, its
     // initializer written into it.
@@ -3415,14 +3499,22 @@ KwDefault   = "default" KwEnd ;
     // at build time, which is exactly what C asks for: the initializer of an object
     // with static storage duration must be a constant expression (C11 6.7.9p4), so
     // there is nothing in it that could need a running program.
+    // Every file-scope declaration of one name denotes one object (C11 6.2.2p2), so
+    // a later one reuses the first one's memory. Twin of defineGlobals in
+    // c-to-llvm-ir.abnf.
     function defineGlobals(items) {
         var base = items[0].bty
         for (var i = 1; i < items.length; i++) {
             var d = items[i].dcl
             var ct = declCt(base, d)
-            var a = alloc(ctSize(ct))     // Fresh memory is zeroed, like a global is.
-            declVar(d.name, a, ct.k == "arr", ct)
-            if (d.init != undefined) initInto(ct, d.init, a)
+            var prev = hasOwn(globalScope, d.name) ? globalScope[d.name] : undefined
+            if (prev != undefined && !ctEq(prev.ct, ct)) fail("conflicting types for '" + d.name + "'")
+            if (prev == undefined) declVar(d.name, alloc(ctSize(ct)), ct.k == "arr", ct) // Fresh memory is zeroed, like a global is.
+            if (d.init == undefined) continue
+            var entry = globalScope[d.name]
+            if (entry.inited == true) fail("redefinition of '" + d.name + "'")
+            entry.inited = true
+            initInto(ct, d.init, entry.addr)
         }
     }
 
