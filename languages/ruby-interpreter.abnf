@@ -3725,9 +3725,113 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
 
     function mkRStr(s) { return {__rs: s, __fz: false} }
     function rsText(v) { return isRStr(v) ? v.__rs : v }
+    // The text of a String box or a binary String.
+    function binText(v) { return isBin(v) ? v.__rbin : rsText(v) }
+    // A binary (ASCII-8BIT) String: {__rbin: text} with one char per byte,
+    // U+0000..U+00FF, which leaves the String box on its fast path. Integer#chr
+    // past 127, String#b, force_encoding("BINARY") and Array#pack make one. Twins:
+    // jsRBin in abnf/jsrtrubystr.go, the {__rbin} box of lib/ruby-rt.metajs.
+    function mkBin(s) { return {__rbin: s} }
+    function isBin(v) { return v !== null && v !== undefined && typeof v == "object" && typeof v.__rbin == "string" }
+    // The methods a binary String answers on its bytes; every other String method
+    // runs on the text, and a String it answers is binary too. Twins: rubyBinMethod
+    // in abnf/jsrtrubystr.go, rbBinMethod in lib/ruby-rt.metajs.
+    function binMethod(t, name, args, blk) {
+        var b = t.__rbin
+        if (name == "bytes") { return binBytes(b) }
+        if (name == "bytesize") { return b.length }
+        if (name == "getbyte") {
+            var gi = Math.trunc(toF(args[0]))
+            if (gi < 0) { gi = gi + b.length }
+            return gi < 0 || gi >= b.length ? null : b.charCodeAt(gi)
+        }
+        if (name == "each_byte") {
+            if (blk == null) { return enumAt(mkEnum(binBytes(b)), t, name, args) }
+            for (var i = 0; i < b.length; i++) { blockCall(blk, [b.charCodeAt(i)]) }
+            return t
+        }
+        if (name == "inspect" || name == "dump") { return rbsBinInspect(b) }
+        if (name == "encoding") { return hostGlobals["Encoding"]["$c$BINARY"] }
+        if (name == "force_encoding") {
+            if (encArgName(args[0]) == "BINARY") { return t }
+            var u = rbsBinDecode(b)
+            return u === null ? t : mkRStr(u)
+        }
+        if (name == "b" || name == "dup" || name == "clone" || name == "+@") { return mkBin(b) }
+        if (name == "valid_encoding?") { return true }
+        if (name == "ascii_only?") { return rbsAsciiOnly(b) }
+        if (name == "to_s" || name == "to_str" || name == "-@") { return t }
+        if (name == "<<" || name == "concat") {
+            for (var k = 0; k < args.length; k++) {
+                var a = anytype
+                a = typeof args[k] == "number" ? mkBin(String.fromCharCode(imod(args[k], 256))) : args[k]
+                t.__rbin = binText(binCat(t, a))
+            }
+            return t
+        }
+        if (name == "+") { return binCat(t, args[0]) }
+        if (name == "==" || name == "===" || name == "eql?") { return binEq(t, args[0]) }
+        if (name == "*") { return mkBin(strRepeat(b, Math.trunc(toF(args[0])))) }
+        if (name == "unpack" || name == "unpack1") { return strUnpack(b, name, args) }
+        var r = anytype
+        r = isBinOpName(name) ? rbin(name, b, binText(args[0])) : mcall(b, name, args, blk)
+        if (typeof r == "string" || isRStr(r)) { return mkBin(binText(r)) }
+        if (Array.isArray(r) && name != "bytes" && name != "unpack") {
+            for (var j = 0; j < r.length; j++) { if (typeof r[j] == "string" || isRStr(r[j])) { r[j] = mkBin(binText(r[j])) } }
+        }
+        return r
+    }
+    function binBytes(b) {
+        var out = []
+        for (var i = 0; i < b.length; i++) { out.push(b.charCodeAt(i)) }
+        return out
+    }
+    // String#+ / #<< with a binary side: two binary Strings join, an ASCII-only
+    // side takes the other side's encoding, and two non-ASCII sides are MRI's
+    // Encoding::CompatibilityError. Twins: rubyBinCat in abnf/jsrtrubystr.go,
+    // rbBinCat in lib/ruby-rt.metajs.
+    function binCat(l, r) {
+        var lt = binText(l)
+        var rt = strOperand(r)
+        if (isBin(l) && isBin(r)) { return mkBin(lt + rt) }
+        if (rbsAsciiOnly(isBin(l) ? rt : lt)) { return mkBin(lt + rt) }
+        if (rbsAsciiOnly(isBin(l) ? lt : rt)) { return mkRStr(lt + rt) }
+        raiseErr("+", "Encoding::CompatibilityError", "incompatible character encodings: " + (isBin(l) ? "ASCII-8BIT and UTF-8" : "UTF-8 and ASCII-8BIT"))
+        return null
+    }
+    // == with a binary side: the same bytes, and an ASCII-only text where the
+    // other side is UTF-8 (MRI compares across encodings only then).
+    function binEq(l, r) {
+        if (isBin(l) && isBin(r)) { return l.__rbin === r.__rbin }
+        var o = anytype
+        o = isBin(l) ? r : l
+        if (typeof o != "string" && !isRStr(o)) { return false }
+        return binText(l) === binText(r) && rbsAsciiOnly(binText(o))
+    }
+    // The encoding an argument of force_encoding (a name or an Encoding) selects:
+    // BINARY or UTF-8, US-ASCII counting as UTF-8. Twins: rubyEncArg in
+    // abnf/jsrtrubystr.go, rbEncArg in lib/ruby-rt.metajs.
+    function encArgName(e) {
+        if (isUserObj(e) && e.__renc !== undefined) { return e.__renc == "ASCII-8BIT" ? "BINARY" : "UTF-8" }
+        var n = rstr(e).toUpperCase()
+        if (n == "BINARY" || n == "ASCII-8BIT") { return "BINARY" }
+        if (n == "UTF-8" || n == "US-ASCII" || n == "ASCII") { return "UTF-8" }
+        raiseErr("force_encoding", "ArgumentError", "unknown encoding name - " + rstr(e))
+        return ""
+    }
+    // String#unpack / #unpack1 of the bytes b.
+    function strUnpack(b, name, args) {
+        var err = []
+        var dirs = rbsPackDirs(rstr(args[0]), err)
+        if (err.length > 0) { raiseErr(name, "NotImplementedError", "unpack directive '" + err[0] + "' is not supported") }
+        var out = rbsUnpack(b, dirs, err)
+        if (err.length > 0) { raiseErr(name, "ArgumentError", err[0]) }
+        if (name == "unpack1") { return out.length > 0 ? out[0] : null }
+        return out
+    }
     function rsTextList(a) {
         var out = []
-        for (var i = 0; i < a.length; i++) { out.push(rsText(a[i])) }
+        for (var i = 0; i < a.length; i++) { out.push(binText(a[i])) }
         return out
     }
     // A string literal: a fresh box at every evaluation, as MRI allocates one. Under
@@ -4330,8 +4434,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (name == "hex") { return {ok: true, v: strToInum(s, 16, false).v} }
         if (name == "oct") { return {ok: true, v: strToInum(s, 0 - 8, false).v} }
         if (name == "clear") { return {ok: true, v: ""} }
-        if (name == "b" || name == "scrub" || name == "unicode_normalize" || name == "force_encoding"
-        || name == "encode") {
+        if (name == "scrub" || name == "unicode_normalize" || name == "encode") {
             return {ok: true, v: s}
         }
         if (name == "unicode_normalized?" || name == "valid_encoding?") { return {ok: true, v: true} }
@@ -5361,7 +5464,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     function rbin(op, l, r) {
         if (isUserObj(l)) { return mcall(l, op, [r], null) }
         if (typeof l == "function" && (op == ">>" || op == "<<")) { return procCompose(l, r, op == ">>") }
-        if (isRStr(l) || isRStr(r)) { return rbin(op, rsText(l), rsText(r)) }
+        if (isBin(l)) { return binMethod(l, op, [r], null) }
+        if (isRStr(l) || isRStr(r) || isBin(r)) { return rbin(op, rsText(l), binText(r)) }
         if (Array.isArray(l)) {
             if (op == "-" && Array.isArray(r)) { return arrDiff(l, r) }
             // Array#* is repetition with an Integer and JOIN with a String.
@@ -5846,6 +5950,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (v === false) { return "false" }
         if (typeof v == "string") { return v }
         if (isRStr(v)) { return v.__rs }
+        if (isBin(v)) { return v.__rbin }
         if (isSym(v)) { return v.s }
         if (isBig(v)) { return bigStr(v) }
         if (typeof v == "number") { return intStr(v) }
@@ -5865,7 +5970,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // `#<A:0x00007f... @x=1>'; the address is its own and cannot be matched, so
         // the address and the instance variables are left off rather than invented -
         // the same rule the Proc renderer below follows.
-        if (isUserObj(v)) { return "#<" + v.__class.__name + ">" }
+        if (isUserObj(v)) { return v.__renc !== undefined ? v.__renc : "#<" + v.__class.__name + ">" }
         // Enumerator#to_s is Object#to_s, the address left off the same way.
         if (isEnum(v)) { return "#<Enumerator>" }
         // A CLASS object stringifies as its name, not as "[object Object]", unless a
@@ -5960,6 +6065,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (isMatchD(v)) { return "#<MatchData " + rinspect(rxGroup(v.rev.prog, v.text, v.m, 0)) + ">" }
         if (typeof v == "string") { return strInspect(v) }
         if (isRStr(v)) { return strInspect(v.__rs) }
+        if (isBin(v)) { return rbsBinInspect(v.__rbin) }
         if (isSym(v)) { return symInspect(v.s) }
         if (isEnum(v)) { return enumInspect(v) }
         // Rational#inspect and Complex#inspect are PARENTHESIZED where #to_s is
@@ -5998,6 +6104,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             // IO#inspect names the stream: `#<IO:<STDOUT>>`. Twins in rubyInspect of
             // abnf/jsrt.go and rbInspect of lib/ruby-rt.metajs.
             if (v.__rio !== undefined) { return "#<IO:<" + (v.__rio == 2 ? "STDERR" : "STDOUT") + ">>" }
+            if (v.__renc !== undefined) { return "#<Encoding:" + v.__renc + ">" }
             // Object#inspect never calls a user #to_s: MRI's default form, with the
             // address and instance variables left off as in rstr.
             return "#<" + v.__class.__name + ">"
@@ -6032,6 +6139,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     function radd(l, r) {
         if (isExcObj(l) && typeof lookupMethod(l.__class, "+") != "function") { return rstr(l) + rstr(r) }
         if (isUserObj(l)) { return mcall(l, "+", [r], null) }
+        if (isBin(l) || (isBin(r) && (typeof l == "string" || isRStr(l)))) { return binCat(l, r) }
         if (typeof l == "string") { return mkRStr(l + strOperand(r)) }
         if (isRStr(l)) { return mkRStr(l.__rs + strOperand(r)) }
         if (Array.isArray(l) && Array.isArray(r)) { return l.concat(r) }
@@ -6044,6 +6152,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     function strOperand(r) {
         if (typeof r == "string") { return r }
         if (isRStr(r)) { return r.__rs }
+        if (isBin(r)) { return r.__rbin }
         var cv = anytype
         cv = fmtUserConv(r, "to_str", "")
         if (typeof cv == "string") { return cv }
@@ -7602,6 +7711,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     }
     function rindex(o, i) {
         if (isRStr(o)) { return rindex(o.__rs, i) }
+        if (isBin(o)) { return binMethod(o, "[]", [i], null) }
         // p[x] calls a Proc, obj[i] a user-defined def [].
         if (typeof o == "function") { return blockCall(o, [i]) }
         // m[1] / m[:name] on a MatchData reads a capture group.
@@ -7923,7 +8033,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (isFlo(v)) { return hostGlobals["Float"] }
         if (isRat(v)) { return hostGlobals["Rational"] }
         if (isCpx(v)) { return hostGlobals["Complex"] }
-        if (typeof v == "string" || isRStr(v)) { return hostGlobals["String"] }
+        if (typeof v == "string" || isRStr(v) || isBin(v)) { return hostGlobals["String"] }
         if (isSym(v)) { return hostGlobals["Symbol"] }
         if (isRange(v)) { return hostGlobals["Range"] }
         if (isRegex(v)) { return hostGlobals["Regexp"] }
@@ -8042,6 +8152,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (typeof v == "number" || isBig(v)) { return strHash("i" + intText(v)) }
         if (typeof v == "string") { return strHash("s" + v) }
         if (isRStr(v)) { return strHash("s" + v.__rs) }
+        if (isBin(v)) { return strHash("s" + v.__rbin) }
         if (isSym(v)) { return strHash("y" + v.s) }
         if (isFlo(v)) { return strHash("f" + rinspect(v)) }
         if (isRat(v)) { return strHash("r" + rinspect(v)) }
@@ -8073,6 +8184,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // back from the end. Mirrors rbStrSubseq / rbArrSubseq of lib/ruby-rt.metajs and
     // rubyStrSubseq / rubyArrSubseq of abnf/jsrt.go.
     function rsubseq(o, start, len) {
+        if (isBin(o)) { return binMethod(o, "[]", [start, len], null) }
         if (typeof o == "string" && isRegex(start)) { return strPatAt(o, start, len) }
         if (typeof o == "string") { return rbsSubseq(o, Math.trunc(toF(start)), Math.trunc(toF(len))) }
         var n = o.length
@@ -8760,6 +8872,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (rcmp(target, args[1]) > 0) { return args[1] }
             return target
         }
+        if (isBin(target)) { return binMethod(target, name, args, blk) }
         // A box answers the identity-bearing methods itself and every other one on
         // its text.
         if (isRStr(target)) {
@@ -8860,7 +8973,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                     return cs
                 }
                 if (target < 0 || target > 255) { raiseErr(name, "RangeError", intStr(target) + " out of char range") }
-                return String.fromCharCode(target)
+                return target > 127 ? mkBin(String.fromCharCode(target)) : String.fromCharCode(target)
             }
             // Integer is a real number with denominator 1, always finite.
             if (name == "numerator" || name == "real") { return target }
@@ -8898,7 +9011,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
         if (typeof target == "string") {
             // No String method keeps an argument, so a box argument is read as its text.
-            for (var ai = 0; ai < args.length; ai++) { if (isRStr(args[ai])) { args = rsTextList(args); break } }
+            for (var ai = 0; ai < args.length; ai++) { if (isRStr(args[ai]) || isBin(args[ai])) { args = rsTextList(args); break } }
+            if (name == "b") { return mkBin(rbsBinOf(target)) }
+            if (name == "encoding") { return hostGlobals["Encoding"]["$c$UTF_8"] }
+            if (name == "force_encoding") { return encArgName(args[0]) == "BINARY" ? mkBin(rbsBinOf(target)) : target }
+            if (name == "unpack" || name == "unpack1") { return strUnpack(rbsBinOf(target), name, args) }
             // index and rindex take a String or a Regexp, and a character offset.
             // Twins: rbStrSearch in lib/ruby-rt.metajs, rubyStrIndex in abnf/jsrtrubystr.go.
             if (name == "index" || name == "rindex") {
@@ -9223,6 +9340,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 }
                 if (name == "instance_variables") { return ivarNames(target) }
                 if (target.__rio !== undefined) { return ioMethod(target, name, args) }
+                if (target.__renc !== undefined) {
+                    if (name == "name" || name == "to_s") { return target.__renc }
+                    if (name == "ascii_compatible?") { return true }
+                }
                 // A call nothing answers goes to the class's method_missing, with
                 // the name as a Symbol in front of the arguments. Twins:
                 // rubyMemberCall in abnf/jsrt.go, rbMemberCall in lib/ruby-rt.metajs.
@@ -10190,6 +10311,18 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             var dn = Math.trunc(toF(args[0]))
             return arrSub(t, dn, t.length - dn)
         }
+        // Array#pack over C, c and U (rbsPack in lib/ruby-str.js); C or c first
+        // makes a binary String, U first a UTF-8 one.
+        if (name == "pack") {
+            var perr = []
+            var pdirs = rbsPackDirs(rstr(args[0]), perr)
+            if (perr.length > 0) { raiseErr(name, "NotImplementedError", "pack directive '" + perr[0] + "' is not supported") }
+            var pv = []
+            for (i = 0; i < t.length; i++) { pv.push(Math.trunc(toF(t[i]))) }
+            var ps = rbsPack(pv, pdirs, perr)
+            if (perr.length > 0) { raiseErr(name, "ArgumentError", perr[0]) }
+            return pdirs.length > 0 && pdirs[0][0] == "U" ? ps : mkBin(ps)
+        }
         if (name == "take_while" || name == "drop_while") {
             var cut = t.length
             for (i = 0; i < t.length; i++) {
@@ -10598,12 +10731,12 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                     visCheck(cur, s.name)
                     if (isUserObj(cur)) { cur = boxOut(cur, mcall(cur, s.name, [], null)) }
                     else if (s.name == "length" || s.name == "size") { cur = rlen(cur, s.name) }
-                    else if (s.name == "to_s") { cur = isRStr(cur) ? cur : mkRStr(rstr(cur)) }
+                    else if (s.name == "to_s") { cur = isRStr(cur) || isBin(cur) ? cur : mkRStr(rstr(cur)) }
                     else { cur = boxOut(cur, mcall(cur, s.name, [], null)) }
                 } else if (s.kind == "sfield") {
                     if (cur === null || cur === undefined) { cur = null }
                     else if (s.name == "length" || s.name == "size") { cur = rlen(cur, s.name) }
-                    else if (s.name == "to_s") { cur = isRStr(cur) ? cur : mkRStr(rstr(cur)) }
+                    else if (s.name == "to_s") { cur = isRStr(cur) || isBin(cur) ? cur : mkRStr(rstr(cur)) }
                     else { cur = boxOut(cur, mcall(cur, s.name, [])) }
                 } else if (s.idx2 != undefined && s.idx2 != null) {
                     // `x[start, len]': the two-argument subscript is the `[]' METHOD,
@@ -11161,7 +11294,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             var vals = []
             for (var i = 0; i < args.length; i++) { vals.push(args[i]()) }
             if (isPrint) {
-                for (var k = 0; k < vals.length; k++) { print(rstr(vals[k])) }
+                for (var k = 0; k < vals.length; k++) {
+                    if (isBin(vals[k])) { writeBytes(vals[k].__rbin) } else { print(rstr(vals[k])) }
+                }
                 return null
             }
             if (vals.length == 0) { println("") ; return null }
@@ -11176,6 +11311,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             for (var i = 0; i < v.length; i++) { putsVal(v[i]) }
             return
         }
+        // A binary String's bytes are written as they are, not UTF-8 encoded.
+        if (isBin(v)) { writeBytes(putsLine(v.__rbin)); return }
         print(putsLine(rstr(v)))
     }
     // A line puts writes: the text, and a newline unless it already ends in one.
@@ -11186,8 +11323,12 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // text after its last newline waits for the next write. Twins: rubyIOMethod
     // in abnf/jsrtruby.go, rbIOMethod in lib/ruby-rt.metajs.
     var ioErrPend = ""
-    function ioWrite(io, s) {
-        if (io.__rio != 2) { print(s); return }
+    // raw: s is a binary String's bytes, written as they are.
+    function ioWrite(io, s, raw) {
+        if (io.__rio != 2) {
+            if (raw) { writeBytes(s) } else { print(s) }
+            return
+        }
         var t = ioErrPend + s
         var k = t.indexOf("\n")
         while (k >= 0) {
@@ -11202,11 +11343,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             for (var i = 0; i < v.length; i++) { ioPuts(io, v[i]) }
             return
         }
-        ioWrite(io, putsLine(rstr(v)))
+        ioWrite(io, putsLine(rstr(v)), isBin(v))
     }
     function ioMethod(io, name, args) {
         if (name == "puts") {
-            if (args.length == 0) { ioWrite(io, "\n") }
+            if (args.length == 0) { ioWrite(io, "\n", false) }
             for (var i = 0; i < args.length; i++) { ioPuts(io, args[i]) }
             return null
         }
@@ -11214,14 +11355,14 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             var n = 0
             for (var j = 0; j < args.length; j++) {
                 var s = rstr(args[j])
-                ioWrite(io, s)
-                n = n + byteLen(s)
+                ioWrite(io, s, isBin(args[j]))
+                n = n + (isBin(args[j]) ? s.length : byteLen(s))
             }
             if (name == "write") { return n }
             return name == "<<" ? io : null
         }
         if (name == "printf") {
-            if (args.length > 0) { ioWrite(io, rformat(rstr(args[0]), args.slice(1), "printf")) }
+            if (args.length > 0) { ioWrite(io, rformat(rstr(args[0]), args.slice(1), "printf"), false) }
             return null
         }
         if (name == "flush") { return io }
@@ -13246,6 +13387,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     function appendOp(l, r) {
         if (Array.isArray(l)) { l.push(r); return l }
         if (isRStr(l)) { return strMutate(l, "<<", [r], null) }
+        if (isBin(l)) { return binMethod(l, "<<", [r], null) }
         if (typeof l == "string") { return l + strAppendText(r) }
         if (isUserObj(l)) { return mcall(l, "<<", [r], null) }
         return rbin("<<", l, r)
@@ -13774,7 +13916,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (n == "Rational") { return isRat(v) }
             if (n == "Complex") { return isCpx(v) }
             if (n == "Numeric") { return isNumV(v) }
-            if (n == "String") { return typeof v == "string" || isRStr(v) }
+            if (n == "String") { return typeof v == "string" || isRStr(v) || isBin(v) }
             if (n == "Symbol") { return isSym(v) }
             if (n == "Array") { return Array.isArray(v) }
             if (n == "Hash") { return isDict(v) }
@@ -13962,7 +14104,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                              "Comparable", "Enumerable", "Enumerator", "Math", "Struct",
                              // Class and Module are what a class object and a module
                              // object answer to #class.
-                             "Class", "Module", "IO"]
+                             "Class", "Module", "IO", "Encoding"]
     // The builtin names that are modules, not classes: their #class is Module. Twins:
     // rubyBuiltinClass in abnf/jsrt.go, rbBuiltinClass in languages/lib/ruby-rt.metajs.
     function isBuiltinModule(n) { return n == "Kernel" || n == "Comparable" || n == "Enumerable" || n == "Math" }
@@ -13970,6 +14112,13 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         hostGlobals[builtinClassNames[bci]] = mkBuiltinClass(builtinClassNames[bci], null)
         if (isBuiltinModule(builtinClassNames[bci])) { hostGlobals[builtinClassNames[bci]].__ismodule = true }
     }
+    // An Encoding is one object per encoding, its name in __renc. Twins:
+    // rubyBuiltinClass in abnf/jsrt.go, rbBuiltinClass in lib/ruby-rt.metajs.
+    function mkEnc(n) { return {__class: hostGlobals["Encoding"], __renc: n} }
+    hostGlobals["Encoding"]["$c$UTF_8"] = mkEnc("UTF-8")
+    hostGlobals["Encoding"]["$c$BINARY"] = mkEnc("ASCII-8BIT")
+    hostGlobals["Encoding"]["$c$ASCII_8BIT"] = hostGlobals["Encoding"]["$c$BINARY"]
+    hostGlobals["Encoding"]["$c$US_ASCII"] = mkEnc("US-ASCII")
     hostGlobals["STDOUT"] = {__class: hostGlobals["IO"], __rio: 1}
     hostGlobals["STDERR"] = {__class: hostGlobals["IO"], __rio: 2}
     scopePut(rubyGlobals, "stdout", hostGlobals["STDOUT"])
@@ -14103,6 +14252,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // Integer#digits raises on a negative receiver.
     hostGlobals["Math::DomainError"] = mkBuiltinClass("Math::DomainError", stdErr)
     hostGlobals["Math"]["$c$DomainError"] = hostGlobals["Math::DomainError"]
+    // What joining a binary and a UTF-8 String, both non-ASCII, raises.
+    hostGlobals["EncodingError"] = mkBuiltinClass("EncodingError", stdErr)
+    hostGlobals["Encoding::CompatibilityError"] = mkBuiltinClass("Encoding::CompatibilityError", hostGlobals["EncodingError"])
+    hostGlobals["Encoding"]["$c$CompatibilityError"] = hostGlobals["Encoding::CompatibilityError"]
     // Regexp's option bits, the second argument of Regexp.new.
     hostGlobals["Regexp"]["$c$IGNORECASE"] = 1
     hostGlobals["Regexp"]["$c$EXTENDED"] = 2
@@ -14428,6 +14581,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // element / key by key), while every other value compares by identity. -----
     function rubyEq(l, r) {
         if (l === r) { return true }
+        if (isBin(l) || isBin(r)) { return binEq(l, r) }
         if (isRStr(l) || isRStr(r)) { return rubyEq(rsText(l), rsText(r)) }
         if (isNumV(l) && isNumV(r)) { return numEq(l, r) }
         if (isRange(l) && isRange(r)) { return rubyEq(l.lo, r.lo) && rubyEq(l.hi, r.hi) && l.excl === r.excl }
@@ -14514,6 +14668,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     core.keyId = function(k) {
         if (isBig(k)) { return "b" + bigStr(k) }
         if (isRStr(k)) { return "s" + k.__rs }
+        if (isBin(k)) { return "x" + k.__rbin }
         return null
     }
     // An ARRAY is a VALUE key in Ruby (Array#hash and Array#eql? are structural),
@@ -14528,6 +14683,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // Hash#rehash. This compares at lookup time and therefore still finds it -
     // the same shape the compiled halves' fallback scans have.
     core.keyEq = function(a, b) {
+        if (isBin(a) || isBin(b)) { return isBin(a) && isBin(b) && a.__rbin === b.__rbin }
         if (isRStr(a) || isRStr(b)) { return rsText(a) === rsText(b) }
         // An object whose class defines eql? is keyed by it.
         if (isUserObj(b) && typeof lookupMethod(b.__class, "eql?") == "function") { return rtest(mcall(b, "eql?", [a], null)) }

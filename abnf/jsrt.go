@@ -1686,6 +1686,8 @@ func (rt *jsrt) wrap(v interface{}) uint64 {
 		return rt.wrapID(&t.id, v)
 	case *jsRStr:
 		return rt.wrapID(&t.id, v)
+	case *jsRBin:
+		return rt.wrapID(&t.id, v)
 	case *boundMethod:
 		// Every member read builds a fresh one, so interning it by identity
 		// would only grow the intern map.
@@ -1953,6 +1955,8 @@ func (rt *jsrt) toString(v interface{}) string {
 		return t.s
 	case *jsRStr: // Ruby's mutable String renders as its text.
 		return t.s
+	case *jsRBin: // A binary String renders as one char per byte.
+		return rubyBinText(t.b)
 	case jsFlo: // Ruby's Float keeps its decimal point (1000.0), unlike an Integer.
 		return rubyFloStr(t.f)
 	case jsPhpFlo: // PHP prints a float without a fraction as an integer ((string)3.0 == "3").
@@ -6525,6 +6529,9 @@ func (rt *jsrt) rubyStrOperand(r interface{}) string {
 	if b, ok := r.(*jsRStr); ok {
 		return b.s
 	}
+	if b, ok := r.(*jsRBin); ok {
+		return b.b
+	}
 	if v, conv := rt.rubyFmtUserConv(r, "to_str", ""); conv {
 		if s, ok := rubySV(v).(string); ok {
 			return s
@@ -6584,6 +6591,14 @@ func (rt *jsrt) rubyBin(op string, l, r interface{}) interface{} {
 			}
 		}
 		return rt.rubyMethod(l, op, []interface{}{r})
+	}
+	if b, ok := l.(*jsRBin); ok {
+		return rt.rubyBinMethod(b, op, []interface{}{r})
+	}
+	if _, ok := r.(*jsRBin); ok && op == "+" {
+		if _, isText := rubySV(l).(string); isText {
+			return rt.rubyBinCat(rubySV(l), r)
+		}
 	}
 	// A String box is its text to every operator but <<, which appends in place;
 	// an Array keeps a box it is handed by <<.
@@ -6789,6 +6804,9 @@ func (rt *jsrt) rubyNumMethod(t interface{}, name string, args []interface{}) (i
 		if x < 0 || x > 255 {
 			rt.rubyRaiseErr(name, "RangeError", rubyIntStr(x)+" out of char range")
 		}
+		if x > 127 {
+			return &jsRBin{b: string([]byte{byte(x)})}, true
+		}
 		return string(rune(int32(x))), true
 	case "integer?":
 		return isInt, true
@@ -6986,7 +7004,7 @@ func rubyClassName(v interface{}) string {
 		return "Rational"
 	case jsCpx:
 		return "Complex"
-	case string, *jsRStr:
+	case string, *jsRStr, *jsRBin:
 		return "String"
 	case jsSym:
 		return "Symbol"
@@ -7074,6 +7092,22 @@ func (rt *jsrt) rubyBuiltinClass(name string) *jsObject {
 		c.set("$c$IGNORECASE", 1.0)
 		c.set("$c$EXTENDED", 2.0)
 		c.set("$c$MULTILINE", 4.0)
+	}
+	// One Encoding object per encoding, its name in __renc. Twins: the Encoding
+	// constants of ruby-interpreter.abnf, rbBuiltinClass in lib/ruby-rt.metajs.
+	if name == "Encoding" {
+		enc := func(n string) *jsObject {
+			o := newJSObject()
+			o.set("__class", c)
+			o.set("__renc", n)
+			return o
+		}
+		bin := enc("ASCII-8BIT")
+		c.set("$c$UTF_8", enc("UTF-8"))
+		c.set("$c$BINARY", bin)
+		c.set("$c$ASCII_8BIT", bin)
+		c.set("$c$US_ASCII", enc("US-ASCII"))
+		c.set("$c$CompatibilityError", rt.rubyBuiltinClass("Encoding::CompatibilityError"))
 	}
 	rt.rubyClasses[name] = c
 	return c
@@ -7912,6 +7946,14 @@ func (rt *jsrt) rubyMemberCall(target interface{}, name string, args []interface
 		if o, isObj := target.(*jsObject); isObj {
 			if fd, isIO := o.props["__rio"].(float64); isIO {
 				return rt.rubyIOMethod(o, int(fd), name, args)
+			}
+			if n, isEnc := o.props["__renc"].(string); isEnc {
+				switch name {
+				case "name", "to_s":
+					return n
+				case "ascii_compatible?":
+					return true
+				}
 			}
 		}
 		// A call nothing answers goes to the class's method_missing, with the name
@@ -8986,7 +9028,7 @@ func (rt *jsrt) rubySmMethod(o, name string, sargs []string, nargs []float64) (i
 		return rt.rubyBigNarrow(n), true
 	case "clear":
 		return "", true
-	case "b", "scrub", "unicode_normalize", "force_encoding", "encode":
+	case "scrub", "unicode_normalize", "encode":
 		return o, true
 	case "unicode_normalized?", "valid_encoding?":
 		return true, true
@@ -9119,6 +9161,9 @@ func (rt *jsrt) rubySubrange(o, lo, hi interface{}, excl bool) (interface{}, boo
 // - which is Ruby's Hash#[] / Array#[] / String#[], and what ruby-interpreter.abnf
 // does. js_rget and js_rsubrange's non-sequence fallback share it.
 func (rt *jsrt) rubyIndexGet(o, k interface{}) interface{} {
+	if bn, isBin := o.(*jsRBin); isBin {
+		return rt.rubyBinMethod(bn, "[]", []interface{}{k})
+	}
 	o = rubySV(o)
 	// A Proc answers p[x] by calling itself.
 	if isCallable(o) {
@@ -9276,6 +9321,11 @@ func (rt *jsrt) rubyPuts(v interface{}) {
 		}
 		return
 	}
+	// A binary String's bytes are written as they are, not UTF-8 encoded.
+	if b, ok := v.(*jsRBin); ok {
+		outWriter.Write([]byte(rubyPutsLine(b.b)))
+		return
+	}
 	fmt.Fprint(outWriter, wtf8Clean(rubyPutsLine(rt.rubyStr(v))))
 }
 
@@ -9285,6 +9335,8 @@ func (rt *jsrt) rubyStr(v interface{}) string {
 		return ""
 	case *jsRStr:
 		return t.s
+	case *jsRBin:
+		return rubyBinText(t.b)
 	case float64:
 		return rubyIntStr(t)
 	case *jsBigInt:
@@ -9321,6 +9373,9 @@ func (rt *jsrt) rubyStr(v interface{}) string {
 		}
 		if _, isRng := t.props["__rrange"]; isRng {
 			return rt.rubyRangeText(t, false)
+		}
+		if n, isEnc := t.props["__renc"].(string); isEnc {
+			return n
 		}
 		// A plain instance with no #to_s of its own. MRI writes
 		// `#<A:0x00007f... @x=1>'; the address is its own and cannot be matched,
@@ -9560,6 +9615,8 @@ func (rt *jsrt) rubyInspect(v interface{}) string {
 		return rubyStrInspect(t)
 	case *jsRStr:
 		return rubyStrInspect(t.s)
+	case *jsRBin:
+		return rubyBinInspect(t.b)
 	case jsSym:
 		return rubySymInspect(t.s)
 	// Rational#inspect and Complex#inspect are PARENTHESIZED where #to_s is not -
@@ -9616,6 +9673,9 @@ func (rt *jsrt) rubyInspect(v interface{}) string {
 				return "#<IO:<STDERR>>"
 			}
 			return "#<IO:<STDOUT>>"
+		}
+		if n, isEnc := t.props["__renc"].(string); isEnc {
+			return "#<Encoding:" + n + ">"
 		}
 		// A Regexp / MatchData answers from the regexp half's own table.
 		if rxIsRegexObj(t) || rxIsMatchObj(t) {
@@ -9685,6 +9745,12 @@ func rubyExcInspect(name, msg string) string {
 // user class's own == when it defines one, and the structural comparison of
 // Array/Hash (pyEqual) otherwise. A Symbol only equals another Symbol.
 func (rt *jsrt) rubyEq(l, r interface{}) bool {
+	if b, ok := l.(*jsRBin); ok {
+		return rubyBinEq(b, r)
+	}
+	if b, ok := r.(*jsRBin); ok {
+		return rubyBinEq(b, l)
+	}
 	if _, ok := l.(*jsRStr); ok {
 		return l == r || rt.rubyEq(rubySV(l), rubySV(r))
 	}
@@ -9862,7 +9928,8 @@ func rubyIdxOrNil(i int) interface{} {
 // rubyValueKey answers whether a key is one of the two STRUCTURALLY compared
 // shapes: an Array, or a Hash (a dict object).
 func rubyValueKey(v interface{}) bool {
-	if _, isArr := v.(*jsArray); isArr {
+	switch v.(type) {
+	case *jsArray, *jsRBin:
 		return true
 	}
 	if o, isObj := v.(*jsObject); isObj {
@@ -10701,6 +10768,9 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 			return rt.call(bm, jsUndef, append([]interface{}{target}, args...))
 		}
 	}
+	if bn, isBin := target.(*jsRBin); isBin {
+		return rt.rubyBinMethod(bn, name, args)
+	}
 	// A String box answers the identity-bearing methods itself and every other one
 	// on its text; no String method keeps an argument, so a box argument is read as
 	// its text too.
@@ -10715,8 +10785,21 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 		}
 		target = bx.s
 	}
-	if _, isStr := target.(string); isStr {
+	if s, isStr := target.(string); isStr {
 		args = rubySVArgs(args)
+		switch name {
+		case "b":
+			return &jsRBin{b: s}
+		case "encoding":
+			return rt.rubyEncoding("UTF-8")
+		case "force_encoding":
+			if rt.rubyEncArg(argAt(args, 0)) == "BINARY" {
+				return &jsRBin{b: s}
+			}
+			return s
+		case "unpack", "unpack1":
+			return rt.rubyUnpack(s, name, args)
+		}
 	}
 	// Ruby's universal reflective methods, answered for every kind of value.
 	switch name {
@@ -13146,6 +13229,9 @@ func (rt *jsrt) rubyArrayMethod(t *jsArray, name string, args []interface{}) int
 	case "drop":
 		n := int(math.Trunc(rubyToF(argAt(pos, 0))))
 		return rubyArrSub(t, n, len(t.elems)-n)
+	// Array#pack over C, c and U (rubyPack in jsrtrubystr.go).
+	case "pack":
+		return rt.rubyPack(t.elems, rt.rubyStr(argAt(pos, 0)))
 	case "take_while", "drop_while":
 		cut := len(t.elems)
 		for i, e := range t.elems {
@@ -15942,6 +16028,10 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		// is MRI.
 		"js_rputs": func(a []uint64) uint64 { rt.rubyPuts(u(a[0])); return 0 },
 		"js_rprint": func(a []uint64) uint64 {
+			if b, isBin := u(a[0]).(*jsRBin); isBin {
+				outWriter.Write([]byte(b.b))
+				return 0
+			}
 			fmt.Fprint(outWriter, wtf8Clean(rt.rubyStr(u(a[0]))))
 			return 0
 		},

@@ -410,3 +410,200 @@ function rbsExpand(re, s, m, repl) {
     }
     return out
 }
+
+// ----- Binary (ASCII-8BIT) Strings -----
+// A binary String's text holds one char per byte, U+0000..U+00FF. Go twins in
+// abnf/jsrtrubystr.go.
+
+// The UTF-8 bytes of s, one char each: String#b.
+function rbsBinOf(s) {
+    var out = ""
+    var i = 0
+    while (i < s.length) {
+        var c = s.charCodeAt(i)
+        if (rbsCharLen(s, i) == 2) {
+            c = (c - 55296) * 1024 + (s.charCodeAt(i + 1) - 56320) + 65536
+            i = i + 1
+        }
+        i = i + 1
+        if (c < 128) { out = out + String.fromCharCode(c) }
+        else if (c < 2048) { out = out + String.fromCharCode(192 + Math.floor(c / 64), 128 + (c % 64)) }
+        else if (c < 65536) {
+            out = out + String.fromCharCode(224 + Math.floor(c / 4096), 128 + (Math.floor(c / 64) % 64), 128 + (c % 64))
+        } else {
+            out = out + String.fromCharCode(240 + Math.floor(c / 262144), 128 + (Math.floor(c / 4096) % 64),
+                                            128 + (Math.floor(c / 64) % 64), 128 + (c % 64))
+        }
+    }
+    return out
+}
+
+// The text a binary String's bytes spell as UTF-8, or null when they are not
+// valid UTF-8 (a stray continuation byte, an overlong form, a surrogate, past
+// U+10FFFF, or a sequence cut short).
+function rbsBinDecode(b) {
+    var out = ""
+    var i = 0
+    var err = []
+    while (i < b.length) {
+        var c = b.charCodeAt(i)
+        var n = 0
+        var cp = c
+        if (c >= 194 && c <= 223) { n = 1; cp = c - 192 }
+        else if (c >= 224 && c <= 239) { n = 2; cp = c - 224 }
+        else if (c >= 240 && c <= 244) { n = 3; cp = c - 240 }
+        else if (c >= 128) { return null }
+        if (i + n >= b.length && n > 0) { return null }
+        var k = 1
+        while (k <= n) {
+            var d = b.charCodeAt(i + k)
+            if (d < 128 || d > 191) { return null }
+            cp = cp * 64 + (d - 128)
+            k = k + 1
+        }
+        if ((n == 2 && cp < 2048) || (n == 3 && cp < 65536)) { return null }
+        var ch = rbsChrUtf8(cp, err)
+        if (err.length > 0) { return null }
+        out = out + ch
+        i = i + n + 1
+    }
+    return out
+}
+
+// Whether every char of s is ASCII.
+function rbsAsciiOnly(s) {
+    var i = 0
+    while (i < s.length) {
+        if (s.charCodeAt(i) > 127) { return false }
+        i = i + 1
+    }
+    return true
+}
+
+// A binary String's #inspect: printable ASCII as itself, the named escapes, and
+// every other byte as \xHH.
+function rbsBinInspect(b) {
+    var hx = "0123456789ABCDEF"
+    var out = "\""
+    var i = 0
+    while (i < b.length) {
+        var c = b.charCodeAt(i)
+        var nx = i + 1 < b.length ? b.charCodeAt(i + 1) : 0
+        if (c == 34) { out = out + "\\\"" }
+        else if (c == 92) { out = out + "\\\\" }
+        else if (c == 10) { out = out + "\\n" }
+        else if (c == 9) { out = out + "\\t" }
+        else if (c == 13) { out = out + "\\r" }
+        else if (c == 12) { out = out + "\\f" }
+        else if (c == 11) { out = out + "\\v" }
+        else if (c == 8) { out = out + "\\b" }
+        else if (c == 7) { out = out + "\\a" }
+        else if (c == 27) { out = out + "\\e" }
+        else if (c == 35 && (nx == 123 || nx == 36 || nx == 64)) { out = out + "\\#" }
+        else if (c < 32 || c >= 127) { out = out + "\\x" + hx.charAt(Math.floor(c / 16)) + hx.charAt(c % 16) }
+        else { out = out + b.charAt(i) }
+        i = i + 1
+    }
+    return out + "\""
+}
+
+// Array#pack and String#unpack over the directives C (unsigned byte), c (signed
+// byte) and U (UTF-8 character), each with an optional count or `*'. The
+// directives as [letter, count] pairs, count -1 for `*'; err[0] names the first
+// directive outside that set.
+function rbsPackDirs(fmt, err) {
+    var out = []
+    var i = 0
+    while (i < fmt.length) {
+        var d = fmt.charAt(i)
+        i = i + 1
+        if (d == " ") { continue }
+        if (d != "C" && d != "c" && d != "U") {
+            err.push(d)
+            return out
+        }
+        var n = 1
+        if (i < fmt.length && fmt.charAt(i) == "*") {
+            n = 0 - 1
+            i = i + 1
+        } else if (i < fmt.length && fmt.charCodeAt(i) >= 48 && fmt.charCodeAt(i) <= 57) {
+            n = 0
+            while (i < fmt.length && fmt.charCodeAt(i) >= 48 && fmt.charCodeAt(i) <= 57) {
+                n = n * 10 + (fmt.charCodeAt(i) - 48)
+                i = i + 1
+            }
+        }
+        out.push([d, n])
+    }
+    return out
+}
+
+// Array#pack of the Integers in vals: the text, which is a binary String's
+// unless the first directive is U. err[0] is the ArgumentError's message.
+function rbsPack(vals, dirs, err) {
+    var out = ""
+    var k = 0
+    var i = 0
+    while (i < dirs.length) {
+        var d = dirs[i][0]
+        var n = dirs[i][1]
+        if (n < 0) { n = vals.length - k }
+        var j = 0
+        while (j < n) {
+            if (k >= vals.length) {
+                err.push("too few arguments")
+                return out
+            }
+            var v = vals[k]
+            k = k + 1
+            if (d == "U") {
+                var ch = rbsChrUtf8(v, err)
+                if (err.length > 0) {
+                    err[0] = "pack(U): value out of range"
+                    return out
+                }
+                out = out + (dirs[0][0] == "U" ? ch : rbsBinOf(ch))
+            } else {
+                out = out + String.fromCharCode(((v % 256) + 256) % 256)
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    return out
+}
+
+// String#unpack of the bytes b (one char per byte): an Array of Integers, nil
+// for a counted C / c past the end. err[0] is the ArgumentError's message.
+function rbsUnpack(b, dirs, err) {
+    var out = []
+    var p = 0
+    var i = 0
+    while (i < dirs.length) {
+        var d = dirs[i][0]
+        var n = dirs[i][1]
+        var j = 0
+        while (n < 0 ? p < b.length : j < n) {
+            if (p >= b.length) {
+                if (d != "U") { out.push(null) }
+            } else if (d == "U") {
+                var c = b.charCodeAt(p)
+                var len = c < 128 ? 1 : (c >= 240 ? 4 : (c >= 224 ? 3 : 2))
+                var t = rbsBinDecode(b.substring(p, p + len))
+                if (t === null) {
+                    err.push("malformed UTF-8 character")
+                    return out
+                }
+                out.push(rbsOrd(t))
+                p = p + len
+            } else {
+                var v = b.charCodeAt(p)
+                out.push(d == "c" && v > 127 ? v - 256 : v)
+                p = p + 1
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    return out
+}

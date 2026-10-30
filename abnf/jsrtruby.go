@@ -38,6 +38,8 @@ func init() {
 	// this is the whole registration.
 	rubyExcParent["FloatDomainError"] = "RangeError"
 	rubyExcParent["Math::DomainError"] = "StandardError"
+	rubyExcParent["EncodingError"] = "StandardError"
+	rubyExcParent["Encoding::CompatibilityError"] = "EncodingError"
 	rxExtraExterns = append(rxExtraExterns, func(rt *jsrt, m map[string]func(args []uint64) uint64) {
 		rt.addRubyFmtExterns(m)
 	})
@@ -1698,9 +1700,14 @@ func rubyPutsLine(s string) string {
 // rules; standard error is written a line at a time there, and here too.
 func (rt *jsrt) rubyIOMethod(o *jsObject, fd int, name string, args []interface{}) interface{} {
 	pos, _ := rubyBlockArgs(args)
-	write := func(s string) {
+	// raw: s is a binary String's bytes, written to standard output as they are.
+	write := func(s string, raw bool) {
 		if fd != 2 {
-			fmt.Fprint(outWriter, wtf8Clean(s))
+			if raw {
+				outWriter.Write([]byte(s))
+			} else {
+				fmt.Fprint(outWriter, wtf8Clean(s))
+			}
 			return
 		}
 		t := rt.rubyIOErrPend + s
@@ -1718,12 +1725,16 @@ func (rt *jsrt) rubyIOMethod(o *jsObject, fd int, name string, args []interface{
 			}
 			return
 		}
-		write(rubyPutsLine(rt.rubyStr(v)))
+		if b, isBin := v.(*jsRBin); isBin {
+			write(rubyPutsLine(b.b), true)
+			return
+		}
+		write(rubyPutsLine(rt.rubyStr(v)), false)
 	}
 	switch name {
 	case "puts":
 		if len(pos) == 0 {
-			write("\n")
+			write("\n", false)
 		}
 		for _, v := range pos {
 			puts(v)
@@ -1732,8 +1743,13 @@ func (rt *jsrt) rubyIOMethod(o *jsObject, fd int, name string, args []interface{
 	case "print", "write", "<<":
 		n := 0
 		for _, v := range pos {
+			if b, isBin := v.(*jsRBin); isBin {
+				write(b.b, true)
+				n += len(b.b)
+				continue
+			}
 			s := rt.rubyStr(v)
-			write(s)
+			write(s, false)
 			n += len(s)
 		}
 		if name == "write" {
@@ -1745,7 +1761,7 @@ func (rt *jsrt) rubyIOMethod(o *jsObject, fd int, name string, args []interface{
 		return jsNull
 	case "printf":
 		if len(pos) > 0 {
-			write(rt.rubyFormatArgs(pos, "printf"))
+			write(rt.rubyFormatArgs(pos, "printf"), false)
 		}
 		return jsNull
 	case "flush":
@@ -2650,6 +2666,8 @@ func (rt *jsrt) rubyHashOf(v interface{}) float64 {
 		return rubyStrHash("s" + t)
 	case *jsRStr:
 		return rubyStrHash("s" + t.s)
+	case *jsRBin:
+		return rubyStrHash("s" + rubyBinText(t.b))
 	case jsSym:
 		return rubyStrHash("y" + t.s)
 	case jsFlo:
@@ -2898,9 +2916,14 @@ func (rt *jsrt) rubyKeyOut(k interface{}) interface{} {
 // rubySVArgs is rubySV over an argument list, copying only when a box is in it.
 func rubySVArgs(args []interface{}) []interface{} {
 	for i, a := range args {
-		if _, ok := a.(*jsRStr); ok {
+		switch a.(type) {
+		case *jsRStr, *jsRBin:
 			out := append([]interface{}{}, args[:i]...)
 			for _, b := range args[i:] {
+				if bn, isBin := b.(*jsRBin); isBin {
+					out = append(out, rubyBinText(bn.b))
+					continue
+				}
 				out = append(out, rubySV(b))
 			}
 			return out
@@ -3154,7 +3177,8 @@ func init() {
 		// A bare `.to_s': a new String of js_rstr's text, except that a String box
 		// answers itself.
 		m["js_rtos"] = func(a []uint64) uint64 {
-			if _, isBox := u(a[0]).(*jsRStr); isBox {
+			switch u(a[0]).(type) {
+			case *jsRStr, *jsRBin:
 				return a[0]
 			}
 			return w(&jsRStr{s: rt.rubyStr(u(a[0]))})

@@ -5043,6 +5043,44 @@ def s120
 end
 
 
+# ===== SECTION 121: binary (ASCII-8BIT) Strings; Encoding =====
+# Integer#chr past 127, String#b, force_encoding("BINARY") and Array#pack("C*")
+# make a binary String: one byte per character, #inspect escapes a byte past
+# ASCII as \xHH, #encoding is ASCII-8BIT; == across encodings holds only for
+# ASCII-only text; + / << with a UTF-8 side keep an ASCII-only side's bytes and
+# raise Encoding::CompatibilityError for two non-ASCII sides; unpack reads the
+# bytes. /usr/bin/ruby 2.6 settles each.
+def s121
+  cs = [255, 200, 65]
+  b = cs[0].chr
+  check("bn121a", b.bytes == [255] && b.encoding.inspect == "#<Encoding:ASCII-8BIT>" && b.inspect == "\"\\xFF\"" &&
+        b.size == 1 && b.bytesize == 1 && b.valid_encoding? && b.is_a?(String) && b.class == String &&
+        cs[2].chr.encoding != Encoding::BINARY && (b * 2).inspect == "\"\\xFF\\xFF\"" && b.to_s.encoding == Encoding::BINARY)
+  e = "é".b
+  check("bn121b", e.bytes == [195, 169] && e.size == 2 && e[0].inspect == "\"\\xC3\"" && e[0, 2].size == 2 &&
+        "é".b.force_encoding("UTF-8") == "é" && "é".b.force_encoding(Encoding::UTF_8).encoding.to_s == "UTF-8" &&
+        "é".force_encoding("BINARY").size == 2 && e.reverse.bytes == [169, 195] && e.ascii_only? == false &&
+        "\x7F".b.ascii_only? && e.getbyte(1) == 169)
+  check("bn121c", "ab".b == "ab" && e != "é" && e == "é".b && {cs[0].chr => 1}[cs[0].chr] == 1 && e.hash == "é".b.hash &&
+        e.eql?("é".b))
+  x = "".b
+  x << cs[0].chr
+  x << 65
+  r = []
+  e.each_byte { |c| r << c }
+  ce = begin; "é" + b; rescue EncodingError => err; [err.class, err.message]; end
+  check("bn121d", x.inspect == "\"\\xFFA\"" && x.encoding == Encoding::BINARY && r == [195, 169] &&
+        ("a" + b).inspect == "\"a\\xFF\"" && (b + "a").encoding == Encoding::BINARY && (e + "x".b).inspect == "\"\\xC3\\xA9x\"" &&
+        ce == [Encoding::CompatibilityError, "incompatible character encodings: UTF-8 and ASCII-8BIT"])
+  pk = cs.pack("C*")
+  check("bn121e", pk.inspect == "\"\\xFF\\xC8A\"" && pk.encoding == Encoding::BINARY && [233].pack("U*") == "é" &&
+        [233].pack("U*").encoding == Encoding::UTF_8 && pk.unpack("C*") == cs && "é".unpack("C*") == [195, 169] &&
+        "é".unpack("U*") == [233] && e.unpack1("C") == 195 && [-1].pack("c").unpack("c") == [-1] && "A".unpack("C3") == [65, nil, nil])
+  check("bn121f", "abc".encoding.inspect == "#<Encoding:UTF-8>" && "abc".encoding.to_s == "UTF-8" &&
+        Encoding::BINARY.equal?(Encoding::ASCII_8BIT) && Encoding::BINARY.name == "ASCII-8BIT" &&
+        Encoding::UTF_8.inspect == "#<Encoding:UTF-8>" && "abc".b.encoding.to_s == "ASCII-8BIT")
+end
+
 s39() # SECTION-CALL 39
 s40() # SECTION-CALL 40
 s41() # SECTION-CALL 41
@@ -5125,5 +5163,6 @@ s117() # SECTION-CALL 117
 s118() # SECTION-CALL 118
 s119() # SECTION-CALL 119
 s120() # SECTION-CALL 120
+s121() # SECTION-CALL 121
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])
