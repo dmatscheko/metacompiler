@@ -152,7 +152,7 @@ range 0..2: 7` (a plain RangeError); the current engines print the IndexError fo
 `RangeError (index): Index out of range: index should be less than 3: 7`, which is
 believed to be the modern VM's. Leave as is unless a real dart run settles it.
 
-### T-775 missing features met in real programs (Benchmarks Game, Rosetta Code) · P3 · CORE · OPEN [V finder only]
+### T-775 missing features met in real programs (Benchmarks Game, Rosetta Code) · P3 · CORE · IN PROGRESS (CORE worker, round 10) [V finder only]
 python: module-level `__doc__` (NameError). go: `make(NamedType, n)` for `type Vec []float64` / `type M map[string]int`
 (go-interpreter.abnf MakeType ~981); `math/cmplx` / complex128. js: Uint8Array. java: `System.out.flush()`; without a class Main
 the compiled legs say only "variable not defined: Main". swift: free function `sqrt`; bitwise compound assignment (`&=` parse
