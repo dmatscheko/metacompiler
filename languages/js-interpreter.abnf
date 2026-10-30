@@ -3849,16 +3849,15 @@ NotFuncHead = :script(~~
         if (typeof v == "number") { return "[object Number]" }
         if (typeof v == "string") { return "[object String]" }
         if (typeof v == "boolean") { return "[object Boolean]" }
-        if (typeof v == "function") { return "[object Function]" }
+        if (typeof v == "function" || isClassDesc(v)) { return "[object Function]" }
         // The objects node gives a @@toStringTag: an Error instance (its __errh mark),
         // a promise, a RegExp, and Math / JSON, which carry their tag in a hidden __strtag slot.
         if (typeof v == "object") {
-            // A string [Symbol.toStringTag], own or inherited, names the object.
-            if (hasOwn(jsSymWK, "toStringTag")) {
-                var tg = anytype // The tag, if there is one.
-                tg = getMember(v, "__#@toStringTag")
-                if (typeof tg == "string") { return "[object " + tg + "]" }
-            }
+            // A string [Symbol.toStringTag], own or inherited, names the object: a
+            // program's, or lib/js-builtins.js's on Map, Set and Uint8Array.
+            var tg = anytype // The tag, if there is one.
+            tg = getMember(v, "__#@toStringTag")
+            if (typeof tg == "string") { return "[object " + tg + "]" }
             if (hasOwn(v, "__errh")) { return "[object Error]" }
             if (hasOwn(v, "__strtag")) { return "[object " + v.__strtag + "]" }
             if (jsIsWrap(v)) { return jsProtoTag(v.__bvof) }
@@ -5321,6 +5320,14 @@ NotFuncHead = :script(~~
     function jsFnRoText(f, key) { return "Cannot assign to read only property '" + jsKeyText(key) + "' of function '" + fsElide(jsStr(f)) + "'" }
     function jsAddText(key) { return "Cannot add property " + jsKeyText(key) + ", object is not extensible" }
     function jsDelText(o, key) { return "Cannot delete property '" + jsKeyText(key) + "' of " + jsObjText(o) }
+    // A write of a numeric key a typed array has no element for (lib/js-builtins.js's
+    // Uint8Array, marked __tarr) is dropped, in strict code too: IntegerIndexedElementSet
+    // (ECMA-262 10.4.5.16). Twins: jsvTypedDrop in abnf/jsrtjsprint.go, jvTypedDrop in
+    // languages/lib/js-rt.metajs.
+    function jsTypedDrop(o, key) {
+        if (!hasOwn(o, "__tarr") || jsIsAccKey(o, key)) { return false }
+        return jsStr(jsToNum(key)) === key || key === "-0"
+    }
     // The TypeError text a write of v to o[k] meets under o's marks, or "".
     function jsWriteRefusal(o, k, v) {
         var key = "" + k
@@ -6686,6 +6693,11 @@ NotFuncHead = :script(~~
         }
         if (k == "name") { return o.__name }
         if (k == "length") { return fnLenOf(o.__ctor) }
+        // A class is a function, so Function.prototype's call and apply - node's
+        // TypeError, a class being callable only through `new` - and bind, whose
+        // bound function `new` constructs the class through (jsUnbind).
+        if (k == "call" || k == "apply") { return jsNativeFn(function() { jsClassCallErr(o) }, k, "") }
+        if (k == "bind") { return jsNativeFn(fnBindShim(o), k, "") }
         // A class is a function, so its inherited `constructor` is Function.
         if (k == "constructor") { return jsFunctionFn }
         // A class object inherits Object.prototype's methods too.
@@ -7456,6 +7468,7 @@ NotFuncHead = :script(~~
         // A write the property attributes or the integrity level refuse (jsDefineKey,
         // jsSetIntegrity).
         if (jsAttrN > 0 && typeof o == "object" && o !== null) {
+            if (jsTypedDrop(o, "" + k)) { return }
             var wr = jsWriteRefusal(o, k, v)
             if (wr != "") { jsRefuse(wr); return }
         }
@@ -7537,6 +7550,11 @@ NotFuncHead = :script(~~
             return callWithThis(fn, self, a)
         }
     }
+    // node's TypeError for a class called without `new`. Twin of js_jscallerr in
+    // abnf/jsrtjsprint.go and languages/lib/js-rt.metajs.
+    function jsClassCallErr(cls) {
+        biRaise("TypeError: Class constructor " + cls.__name + " cannot be invoked without 'new'")
+    }
     // bind() differs from call() in one way that matters here: the bound arguments are
     // PREPENDED to whatever the eventual call passes, and the receiver is remembered
     // rather than taken at the call site.
@@ -7546,17 +7564,19 @@ NotFuncHead = :script(~~
             self = (arguments.length > 0) ? arguments[0] : undefined
             var pre = []
             for (var i = 1; i < arguments.length; i++) { pre.push(arguments[i]) }
-            var bl = fnLenOf(fn) - pre.length
+            var cd = isClassDesc(fn) // A bound class constructs only through `new`.
+            var bl = (cd ? staticSideRead(fn, "length") : fnLenOf(fn)) - pre.length
             if (bl < 0) { bl = 0 }
             // A bound function's own name is "bound " + the target's, and its length is
             // the target's less the arguments already supplied, floored at 0 (node says
             // "bound f"/1 for `f.bind(null)` of `function f(a){}`).
             var bf = fnMetaPut(function() {
+                if (cd) { jsClassCallErr(fn) }
                 var a = []
                 for (var j = 0; j < pre.length; j++) { a.push(pre[j]) }
                 for (var k2 = 0; k2 < arguments.length; k2++) { a.push(arguments[k2]) }
                 return callWithThis(fn, self, a)
-            }, "bound " + fnNameOf(fn), bl)
+            }, "bound " + (cd ? staticSideRead(fn, "name") : fnNameOf(fn)), bl)
             jsBoundK.push(bf)
             jsBoundT.push(fn)
             jsBoundP.push(pre)
@@ -11443,7 +11463,12 @@ NotFuncHead = :script(~~
     // `new F(...)` for a FUNCTION F. A wrapper of the primitive the call answers, and
     // ToObject for Object.
     function jsConstructFn(cls, argv, clsName) {
-        if (jsBoundK.length > 0) { cls = jsUnbind(cls, argv) }
+        if (jsBoundK.length > 0) {
+            var ub = anytype // The bound target: a function, or a class.
+            ub = jsUnbind(cls, argv)
+            if (isClassDesc(ub)) { return jsConstructClass(ub, argv) }
+            cls = ub
+        }
         if (jsNotCtor(cls)) { biRaise("TypeError: " + clsName + " is not a constructor") }
         if (cls === jsNumberFn || cls === jsStringFn || cls === jsBooleanFn) { return jsWrap(cls.apply(undefined, argv)) }
         if (cls === jsObjectGlobal) { return jsToObject(argv.length > 0 ? argv[0] : undefined) }
@@ -12288,9 +12313,7 @@ NotFuncHead = :script(~~
                     } else {
                         // A class called without `new` is node's own TypeError. Twin of
                         // js_jscallerr in abnf/jsrtjsprint.go and languages/lib/js-rt.metajs.
-                        if (cur != undefined && cur != null && isClassDesc(cur)) {
-                            biRaise("TypeError: Class constructor " + cur.__name + " cannot be invoked without 'new'")
-                        }
+                        if (cur != undefined && cur != null && isClassDesc(cur)) { jsClassCallErr(cur) }
                         cur = mcall(curThis, lastKey, argv, sTexts[i])
                     }
                     curThis = undefined
@@ -12994,7 +13017,7 @@ NotFuncHead = :script(~~
         return true
     }
 
-    // lib/js-builtins.js (Set, Map, Array.from, Array.of, Boolean, isNaN, isFinite, structuredClone, Reflect, Uint8Array) is JavaScript,
+    // lib/js-builtins.js (Set, Map, Array.from, Array.of, Boolean, isNaN, isFinite, structuredClone, Reflect, ArrayBuffer, Uint8Array) is JavaScript,
     // compiled into a program that names one of them (jsbRef, at the
     // VarRef, typeof-name and new-name tags) and run before anything that could use it:
     // before an imported file's top level and before the program's. Twin of jsbLoad in
@@ -13007,7 +13030,7 @@ NotFuncHead = :script(~~
         if (name == "Set" || name == "Map" || name == "Array" || name == "isNaN" || name == "isFinite" ||
             name == "structuredClone" || name == "Reflect" || name == "WeakMap" || name == "WeakSet" ||
             name == "queueMicrotask" || name == "URIError" || name == "encodeURIComponent" || name == "encodeURI" ||
-            name == "decodeURIComponent" || name == "decodeURI" || name == "Uint8Array") { jsbWant = true }
+            name == "decodeURIComponent" || name == "decodeURI" || name == "Uint8Array" || name == "ArrayBuffer") { jsbWant = true }
         if (name == "setTimeout" || name == "setInterval" || name == "clearTimeout" || name == "clearInterval") { jsTimerWant = true }
         if (name == "Date" || jsTimerWant) {
             jsbWant = true

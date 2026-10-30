@@ -1,6 +1,6 @@
 // js-builtins.js -- JAVASCRIPT, not MetaJS: the Set and Map classes, Array.from /
 // Array.of, isNaN, isFinite, structuredClone, Reflect, WeakMap / WeakSet,
-// queueMicrotask, the URI functions, Uint8Array, Date and the timers, written in the language itself and compiled
+// queueMicrotask, the URI functions, ArrayBuffer, Uint8Array, Date and the timers, written in the language itself and compiled
 // INTO a program by the js grammars, both halves (jsbLoad in js-interpreter.abnf and js-to-llvm-ir.abnf).
 // A program that names Set, Map, Array, isNaN, isFinite, structuredClone or Reflect gets this file in
 // front of it; one that does not pays nothing. Being one JavaScript source compiled by the same grammars is what
@@ -169,7 +169,7 @@ class Set extends __Coll {
     keys() { return new __CollIter(this, 1) }
     entries() { return new __CollIter(this, 2) }
     ["__#@iterator"]() { return new __CollIter(this, 1) }
-    toString() { return "[object Set]" }
+    get ["__#@toStringTag"]() { return "Set" }
     // The set methods (ECMA-262 24.2.4.*): the argument is SET-LIKE, a size, a has and
     // a keys method (__setRec), and the answer is a new Set. Which side is iterated
     // depends on the two sizes, which decides the order of an intersection.
@@ -271,7 +271,7 @@ class Map extends __Coll {
     values() { return new __CollIter(this, 1) }
     entries() { return new __CollIter(this, 2) }
     ["__#@iterator"]() { return new __CollIter(this, 2) }
-    toString() { return "[object Map]" }
+    get ["__#@toStringTag"]() { return "Map" }
     static get ["__#@species"]() { return this }
     // Map.groupBy(items, f): the items in a Map from f(item, index) to the items it
     // gave that key, the keys in first-seen order and compared as Map keys.
@@ -536,7 +536,7 @@ class WeakMap extends __Weak {
         }
         return this
     }
-    toString() { return "[object WeakMap]" }
+    get ["__#@toStringTag"]() { return "WeakMap" }
 }
 class WeakSet extends __Weak {
     constructor(items = undefined) {
@@ -553,7 +553,7 @@ class WeakSet extends __Weak {
         }
         return this
     }
-    toString() { return "[object WeakSet]" }
+    get ["__#@toStringTag"]() { return "WeakSet" }
 }
 
 // node's TypeError for a callback argument that is not a function.
@@ -664,12 +664,29 @@ function encodeURI(v) { return __uriEncode(v, __uriReserved) }
 function decodeURIComponent(v) { return __uriDecode(v, "") }
 function decodeURI(v) { return __uriDecode(v, __uriReserved) }
 
-// ===== Uint8Array =====
-// A view of __n bytes at offset __o of the plain array __b, which subarray shares.
+// ===== ArrayBuffer and Uint8Array =====
+// An ArrayBuffer holds its bytes in the plain array __b. A Uint8Array is a view of
+// __n bytes at offset __o of such an array, which subarray and a view made over an
+// ArrayBuffer share; its `buffer` is made on first use when the view owns its bytes.
 // Each index is an enumerable accessor of the view's own; its write stores
 // ToUint8 of the value, which `& 255` is (ToInt32's modulus is a multiple of 256).
-// No ArrayBuffer: a view is made from a length, an iterable, an array-like or
-// another view. A write past the end makes an ordinary property, where node drops it.
+class ArrayBuffer {
+    constructor(n) {
+        this.__b = []
+        var len = __u8Len(n, "Invalid array buffer length", false)
+        for (var i = 0; i < len; i++) { this.__b.push(0) }
+    }
+    get byteLength() { return this.__b.length }
+    slice(s, e) {
+        var n = this.__b.length
+        var lo = __u8Rel(s, n, 0)
+        var r = new ArrayBuffer(0)
+        r.__b = this.__b.slice(lo, Math.max(__u8Rel(e, n, n), lo))
+        return r
+    }
+    static isView(v) { return v instanceof Uint8Array }
+    get ["__#@toStringTag"]() { return "ArrayBuffer" }
+}
 var __u8Share = null
 function __u8Def(t, i) {
     Object.defineProperty(t, i, {
@@ -678,11 +695,12 @@ function __u8Def(t, i) {
         enumerable: true
     })
 }
-// ToIndex (ECMA-262 7.1.22), with V8's message.
-function __u8Len(v) {
+// ToIndex (ECMA-262 7.1.22), with V8's message: `what`, and the value when shown.
+function __u8Len(v, what, shown) {
+    if (v === undefined) { return 0 }
     var n = Math.trunc(+v)
     if (n !== n) { return 0 }
-    if (n < 0 || n > 9007199254740991) { throw new RangeError("Invalid typed array length: " + v) }
+    if (n < 0 || n > 9007199254740991) { throw new RangeError(shown ? what + ": " + v : what) }
     return n
 }
 // A relative index of a slice-like method (ECMA-262 23.2.3): negative counts from
@@ -703,24 +721,39 @@ function __u8Vals(a) {
         for (var v of a) { out.push(v) }
         return out
     }
-    var n = __u8Len(a.length === undefined ? 0 : a.length)
+    var n = __u8Len(a.length, "Invalid typed array length", true)
     for (var i = 0; i < n; i++) { out.push(a[i]) }
     return out
 }
 function __u8Check(f) { if (typeof f !== "function") { throw __notFn(f) } }
 class Uint8Array {
     constructor(a, b, c) {
+        this.__ab = undefined
+        this.__tarr = true // The engines drop a write past the end (jsTypedDrop).
         if (__u8Share !== null) {
             var sh = __u8Share
             __u8Share = null
-            this.__b = sh.b
+            this.__ab = sh.ab
+            this.__b = sh.ab.__b
             this.__o = sh.o
             this.__n = sh.n
+        } else if (a instanceof ArrayBuffer) {
+            // new Uint8Array(buffer, byteOffset, length): a view of the buffer's bytes.
+            var bl = a.__b.length
+            var off = b === undefined ? 0 : Math.trunc(+b)
+            if (off !== off) { off = 0 }
+            if (off < 0 || off > bl) { throw new RangeError("Start offset " + off + " is outside the bounds of the buffer") }
+            var len = c === undefined ? bl - off : __u8Len(c, "Invalid typed array length", true)
+            if (off + len > bl) { throw new RangeError("Invalid typed array length: " + len) }
+            this.__ab = a
+            this.__b = a.__b
+            this.__o = off
+            this.__n = len
         } else {
             var src = (typeof a === "object" && a !== null) ? __u8Vals(a) : null
             this.__b = []
             this.__o = 0
-            this.__n = src === null ? (a === undefined ? 0 : __u8Len(a)) : src.length
+            this.__n = src === null ? __u8Len(a, "Invalid typed array length", true) : src.length
             for (var i = 0; i < this.__n; i++) { this.__b.push(src === null ? 0 : src[i] & 255) }
         }
         for (var j = 0; j < this.__n; j++) { __u8Def(this, j) }
@@ -731,6 +764,14 @@ class Uint8Array {
     get byteOffset() { return this.__o }
     get BYTES_PER_ELEMENT() { return 1 }
     static get BYTES_PER_ELEMENT() { return 1 }
+    get buffer() {
+        if (this.__ab === undefined) {
+            this.__ab = new ArrayBuffer(0)
+            this.__ab.__b = this.__b
+        }
+        return this.__ab
+    }
+    get ["__#@toStringTag"]() { return "Uint8Array" }
     static from(items, f, self) {
         if (f !== undefined) { __u8Check(f) }
         var vs = __u8Vals(items)
@@ -761,7 +802,7 @@ class Uint8Array {
     subarray(s, e) {
         var lo = __u8Rel(s, this.__n, 0)
         var hi = __u8Rel(e, this.__n, this.__n)
-        __u8Share = {b: this.__b, o: this.__o + lo, n: Math.max(hi - lo, 0)}
+        __u8Share = {ab: this.buffer, o: this.__o + lo, n: Math.max(hi - lo, 0)}
         return new Uint8Array()
     }
     slice(s, e) {
@@ -1364,6 +1405,7 @@ class Date {
             t = __dClip(__dUTC(__dMake(y, f[1], f[2], f[3], f[4], f[5], f[6])))
         }
         this.__t = t
+        this.__strtag = "Date" // Object.prototype.toString's tag, for the [[DateValue]] slot.
     }
     static now() { return Math.floor(__jsClockMs() + __clockSkew) }
     static parse(s) { return __dParse(s) }

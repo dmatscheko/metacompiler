@@ -233,6 +233,20 @@ func (rt *jsrt) jsvStaticSideRead(o *jsObject, name string) uint64 {
 	if name == "length" {
 		return rt.wrap(float64(jsvFnMeta(o.props["__ctor"]).length))
 	}
+	// A class is a function, so Function.prototype's call and apply - node's TypeError,
+	// a class being callable only through `new` - and bind, whose bound function `new`
+	// constructs the class through (js_jsunbind).
+	switch name {
+	case "call", "apply":
+		return rt.wrap(jsvNativeFn(jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			rt.jsvClassCallErr(o)
+			return nil
+		}), name, 0))
+	case "bind":
+		return rt.wrap(jsvNativeFn(jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			return rt.jsvBind(o, args)
+		}), name, 0))
+	}
 	// A class is a function, so its inherited `constructor` is Function.
 	if name == "constructor" {
 		return rt.wrap(rt.jsGlobals["Function"])
@@ -285,7 +299,7 @@ func (rt *jsrt) jsvProtoTag(v interface{}) string {
 	case bool:
 		return "[object Boolean]"
 	}
-	if isCallable(v) {
+	if isCallable(v) || isClassDesc(v) {
 		return "[object Function]"
 	}
 	// The objects node gives a @@toStringTag: an Error instance (its __errh mark), a
@@ -1594,6 +1608,21 @@ func (rt *jsrt) jsvWriteRefusal(o interface{}, key string, v interface{}) string
 		}
 	}
 	return ""
+}
+
+// jsvTypedDrop: is a write of key to o one a typed array drops - a numeric key it has
+// no element for (lib/js-builtins.js's Uint8Array, marked __tarr)? Dropped in strict
+// code too: IntegerIndexedElementSet (ECMA-262 10.4.5.16). Twins: jsTypedDrop in both
+// *-interpreter.abnf, jvTypedDrop in languages/lib/js-rt.metajs.
+func (rt *jsrt) jsvTypedDrop(o interface{}, key string) bool {
+	t, isObj := o.(*jsObject)
+	if !isObj || t.props["__tarr"] != true {
+		return false
+	}
+	if _, own := t.props[key]; own {
+		return false
+	}
+	return rt.toString(rt.toNumber(key)) == key || key == "-0"
 }
 
 // jsvDeleteRefusal is the TypeError text a delete of o[key] meets, or "".
@@ -4241,6 +4270,46 @@ func (rt *jsrt) jsvFlatten(out *[]interface{}, elems []interface{}, depth int) {
 	}
 }
 
+// jsvBind is fn.bind(args...): a function or a class descriptor, which constructs
+// only through `new`.
+func (rt *jsrt) jsvBind(fn interface{}, args []interface{}) *hostFunc {
+	self := argAt(args, 0)
+	var pre []interface{}
+	if len(args) > 1 {
+		pre = append([]interface{}{}, args[1:]...)
+	}
+	cls, isCls := fn.(*jsObject)
+	isCls = isCls && isClassDesc(cls)
+	bound := jsHostFunc("bound", func(rt *jsrt, this uint64, later []interface{}) interface{} {
+		if isCls {
+			rt.jsvClassCallErr(cls)
+		}
+		return rt.call(fn, self, append(append([]interface{}{}, pre...), later...))
+	})
+	// A bound function's own name is "bound " + the target's, and its length is the
+	// target's less the arguments already supplied, floored at 0 - node says
+	// "bound f"/1 for `f.bind(null)` of `function f(a){}`.
+	name, length := jsvFnMeta(fn).name, jsvFnMeta(fn).length
+	if isCls {
+		name = rt.toString(rt.unwrap(rt.jsvStaticSideRead(cls, "name")))
+		length = int(rt.toNumber(rt.unwrap(rt.jsvStaticSideRead(cls, "length"))))
+	}
+	bl := length - len(pre)
+	if bl < 0 {
+		bl = 0
+	}
+	jsvFnMetaSet(bound, "bound "+name, bl)
+	bound.meta.bound = &jsvBoundRec{target: fn, pre: pre}
+	return bound
+}
+
+// jsvClassCallErr raises node's TypeError for a class called without `new`. Twins:
+// jsClassCallErr in both *-interpreter.abnf, js_jscallerr in languages/lib/js-rt.metajs.
+func (rt *jsrt) jsvClassCallErr(cls *jsObject) {
+	name, _ := cls.props["__name"].(string)
+	rt.bigRaise("TypeError: Class constructor %s cannot be invoked without 'new'", name)
+}
+
 // jsvMethod is the Go twin of `jsBuiltin` in languages/js-interpreter.abnf.
 func (rt *jsrt) jsvMethod(target interface{}, name string, args []interface{}) (interface{}, bool) {
 	// Function.prototype.bind. jsrt.go's getMember/builtinMethod already answer
@@ -4252,25 +4321,7 @@ func (rt *jsrt) jsvMethod(target interface{}, name string, args []interface{}) (
 	// are fnBindShim in both *-interpreter.abnf start scripts and jvBindShim in
 	// lib/js-rt.metajs.
 	if name == "bind" && isCallable(target) {
-		self := argAt(args, 0)
-		var pre []interface{}
-		if len(args) > 1 {
-			pre = append([]interface{}{}, args[1:]...)
-		}
-		fn := target
-		bound := jsHostFunc("bound", func(rt *jsrt, this uint64, later []interface{}) interface{} {
-			return rt.call(fn, self, append(append([]interface{}{}, pre...), later...))
-		})
-		// A bound function's own name is "bound " + the target's, and its length is the
-		// target's less the arguments already supplied, floored at 0 - node says
-		// "bound f"/1 for `f.bind(null)` of `function f(a){}`.
-		bl := jsvFnMeta(fn).length - len(pre)
-		if bl < 0 {
-			bl = 0
-		}
-		jsvFnMetaSet(bound, "bound "+jsvFnMeta(fn).name, bl)
-		bound.meta.bound = &jsvBoundRec{target: fn, pre: pre}
-		return bound, true
+		return rt.jsvBind(target, args), true
 	}
 	// BigInt.prototype (abnf/jsrtjsbig.go): (255n).toString(16), (1n).valueOf().
 	if bi, ok := target.(*jsBigInt); ok {
@@ -7142,6 +7193,9 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 			t := u(a[0])
 			if p := jsvFnPropsOf(t); p != nil {
 				t = p
+			}
+			if rt.jsvTypedDrop(t, rt.toString(u(a[1]))) {
+				return 0
 			}
 			if msg := rt.jsvWriteRefusal(t, rt.toString(u(a[1])), u(a[2])); msg != "" {
 				jsvRefused = msg

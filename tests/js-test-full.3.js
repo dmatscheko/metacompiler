@@ -3231,6 +3231,29 @@ function s116() {
     const r = new Uint8Array([5, 1, 200, 3, 1])
     check("u8d116", String(r.sort()) === "1,1,3,5,200" && [...r].join("+") === "1+1+3+5+200" && String(Uint8Array.of(255, 256, 257)) === "255,0,1" &&
         String(Uint8Array.from({ length: 2, 0: 4, 1: 5 })) === "4,5" && new Uint8Array(2.9).length === 2)
+    // A view over an ArrayBuffer shares its bytes from an offset; a write of a numeric
+    // key with no element is dropped, a named one kept.
+    const ab = new ArrayBuffer(5)
+    const whole = new Uint8Array(ab)
+    const mid = new Uint8Array(ab, 1, 3)
+    mid[0] = 260
+    const keys = ["3", "-1", "1.5", "nm"]
+    for (let i = 0; i < keys.length; i++) { mid[keys[i]] = 7 }
+    let err2 = ""
+    try { new Uint8Array(ab, 3, 4) } catch (e) { err2 = String(e) }
+    check("u8e116", String(whole) === "0,4,0,0,0" && whole.buffer === ab && mid.buffer === ab && mid.byteOffset === 1 &&
+        mid[3] === undefined && mid["-1"] === undefined && mid.nm === 7 && Object.keys(mid).join() === "0,1,2,nm" &&
+        ab.slice(1, 3).byteLength === 2 && ArrayBuffer.isView(mid) && !ArrayBuffer.isView(ab) &&
+        err2 === "RangeError: Invalid typed array length: 4")
+    // Object.prototype.toString names Map, Set, WeakMap, WeakSet, ArrayBuffer and
+    // Uint8Array by their [Symbol.toStringTag], a Date by its date value, a class as
+    // the function it is.
+    const tagOf = [new Map(), new Set(), new WeakMap(), new WeakSet(), ab, whole, new Date(0), Map, w.subarray(0)]
+    const tags = []
+    for (let i = 0; i < tagOf.length; i++) { tags.push(Object.prototype.toString.call(tagOf[i])) }
+    check("u8f116", tags.join() === "[object Map],[object Set],[object WeakMap],[object WeakSet],[object ArrayBuffer]," +
+        "[object Uint8Array],[object Date],[object Function],[object Uint8Array]" && String(tagOf[0]) === "[object Map]" &&
+        tagOf[1].toString === Object.prototype.toString)
 }
 
 function main() {

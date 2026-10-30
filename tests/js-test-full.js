@@ -1793,6 +1793,7 @@ function s144() {
 // constructors (IsConstructor); `new` on an arrow, a method, a generator, an async
 // function or a builtin such as Math.max is node's TypeError, after the arguments.
 class K145 { m() { return 1 } static s() { return 2 } }
+class C145 { constructor(a, b) { this.s = a + b } }
 function* g145() {}
 async function a145() {}
 function P145(x) { this.x = x }
@@ -1832,6 +1833,14 @@ function s145() {
     // A parenthesized callee with members behind it is printed without the parentheses.
     check("newctor4", e145(function () { return new (o).ar() }) == "TypeError:o.ar is not a constructor" &&
         e145(function () { return new (o)["ar"]() }) == "TypeError:o.ar is not a constructor")
+    // A class is a function: bind makes a bound function that `new` constructs the
+    // class through, and a call through call, apply or that bound function is node's
+    // TypeError.
+    var bc = C145.bind(null, 7)
+    var nc = "TypeError:Class constructor C145 cannot be invoked without 'new'"
+    check("newctor6", new bc(8).s === 15 && new bc(8) instanceof C145 && bc.name === "bound C145" && bc.length === 1 &&
+        e145(function () { return C145.call(null, 1, 2) }) == nc && e145(function () { return C145.apply(null, [1, 2]) }) == nc &&
+        e145(function () { return bc(1) }) == nc)
 }
 
 // ===== END SECTIONS =====

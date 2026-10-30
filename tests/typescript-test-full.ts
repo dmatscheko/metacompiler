@@ -5897,6 +5897,7 @@ function s147(): void {
 // constructors (IsConstructor); `new` on an arrow, a method, a generator, an async
 // function or a builtin such as Math.max is node's TypeError, after the arguments.
 class K148 { m() { return 1 } static s() { return 2 } }
+class C148 { s = 0; constructor(a: number, b: number) { this.s = a + b } }
 function* g148() {}
 async function a148() {}
 function P148(this: any, x: number) { this.x = x }
@@ -5936,6 +5937,14 @@ function s148(): void {
     // A parenthesized callee with members behind it is printed without the parentheses.
     check("newctor4", e148(function () { return new (o).ar() }) == "TypeError:o.ar is not a constructor" &&
         e148(function () { return new (o)["ar"]() }) == "TypeError:o.ar is not a constructor")
+    // A class is a function: bind makes a bound function that `new` constructs the
+    // class through, and a call through call, apply or that bound function is node's
+    // TypeError.
+    var bc: any = C148.bind(null, 7)
+    var nc = "TypeError:Class constructor C148 cannot be invoked without 'new'"
+    check("newctor6", new bc(8).s === 15 && new bc(8) instanceof C148 && bc.name === "bound C148" && bc.length === 1 &&
+        e148(function () { return C148.call(null, 1, 2) }) == nc && e148(function () { return C148.apply(null, [1, 2]) }) == nc &&
+        e148(function () { return bc(1) }) == nc)
     // node strips the types before V8 prints the callee: a type assertion or a non-null
     // '!' prints nothing.
     check("newctor5", e148(function () { return new (arrow as any)() }) == "TypeError:arrow is not a constructor" &&
@@ -5944,6 +5953,27 @@ function s148(): void {
         e148(function () { return new (arrow!)() }) == "TypeError:arrow is not a constructor" &&
         e148(function () { return new (o.ar satisfies () => number)() }) == "TypeError:o.ar is not a constructor" &&
         e148(function () { return (o.ar() + 1 as any)() }) == "TypeError:(o.ar(...) + 1) is not a function")
+}
+
+// ===== SECTION 149: Object.prototype.toString's tags, ArrayBuffer and Uint8Array =====
+// Map, Set, WeakMap, WeakSet, ArrayBuffer and Uint8Array are named by their
+// [Symbol.toStringTag], a Date by its date value, a class as the function it is. A
+// view over an ArrayBuffer shares its bytes from an offset, and a write of a numeric
+// key with no element is dropped. Values read off node 24.
+function s149(): void {
+    const ab = new ArrayBuffer(5)
+    const whole = new Uint8Array(ab)
+    const mid: any = new Uint8Array(ab, 1, 3)
+    mid[0] = 260
+    const keys = ["3", "-1", "1.5", "nm"]
+    for (let i = 0; i < keys.length; i++) { mid[keys[i]] = 7 }
+    check("tag149a", String(whole) === "0,4,0,0,0" && whole.buffer === ab && mid.buffer === ab && mid.byteOffset === 1 &&
+        mid[3] === undefined && mid.nm === 7 && Object.keys(mid).join() === "0,1,2,nm" && ab.slice(1, 3).byteLength === 2)
+    const tagOf: any[] = [new Map(), new Set(), new WeakMap(), new WeakSet(), ab, whole, new Date(0), Map]
+    const tags: string[] = []
+    for (let i = 0; i < tagOf.length; i++) { tags.push(Object.prototype.toString.call(tagOf[i])) }
+    check("tag149b", tags.join() === "[object Map],[object Set],[object WeakMap],[object WeakSet],[object ArrayBuffer]," +
+        "[object Uint8Array],[object Date],[object Function]" && String(tagOf[0]) === "[object Map]")
 }
 
 // ===== END SECTIONS =====
@@ -6085,6 +6115,7 @@ function main(): number {
     s146(); // SECTION-CALL 146
     s147(); // SECTION-CALL 147
     s148(); // SECTION-CALL 148
+    s149(); // SECTION-CALL 149
     println("full: " + checks + " checks, " + failures + " failures");
     return failures;
 }

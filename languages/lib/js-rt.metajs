@@ -2319,6 +2319,11 @@ function jvStaticSideRead(o, k) {
         if (typeof c == "function") { return jvFnLenOf(c) }
         return 0
     }
+    // A class is a function, so Function.prototype's call and apply - node's
+    // TypeError, a class being callable only through `new` - and bind, whose bound
+    // function `new` constructs the class through (js_jsunbind).
+    if (k == "call" || k == "apply") { return jvNativeFn(function () { jbRaise(jvClassCallMsg(o)) }, k, "") }
+    if (k == "bind") { return jvNativeFn(jvBindShim(o), k, "") }
     // A class is a function, so its inherited `constructor` is Function.
     if (k == "constructor") { return js_jsfunctionfn() }
     // A class object inherits Object.prototype's methods too.
@@ -2490,7 +2495,9 @@ function jvApplyShim(f) {
 // beyond remembering the receiver. Twins: jsvMethod's arm in abnf/jsrtjsprint.go and
 // fnBindShim in both *-interpreter.abnf start scripts.
 function jvBoundFn(f, self, pre) {
+    var cd = jvIsClassDesc(f) // A bound class constructs only through `new`.
     var bf = function () {
+        if (cd) { jbRaise(jvClassCallMsg(f)) }
         var a = []
         var j = 0
         while (j < pre.length) {
@@ -2564,12 +2571,16 @@ function jvBindShim(f) {
             pre.push(arguments[i])
             i = i + 1
         }
-        var bl = jvFnLenOf(f) - pre.length
+        var cd = jvIsClassDesc(f)
+        var bl = anytype
+        bl = (cd ? jvStaticSideRead(f, "length") : jvFnLenOf(f)) - pre.length
         if (bl < 0) { bl = 0 }
         // A bound function's own name is "bound " + the target's, and its length is
         // the target's less the arguments already supplied, floored at 0 - node says
         // "bound f"/1 for `f.bind(null)` of `function f(a){}`.
-        return fnMetaSet(jvBoundFn(f, self, pre), "bound " + jvFnNameOf(f), bl)
+        var nm = anytype
+        nm = cd ? jvStaticSideRead(f, "name") : jvFnNameOf(f)
+        return fnMetaSet(jvBoundFn(f, self, pre), "bound " + nm, bl)
     }
 }
 
@@ -3662,6 +3673,7 @@ function js_jsmset(o, key, v) {
                 }
             }
         }
+        if (jvTypedDrop(wt, key)) { return true }
         var wr = jvWriteRefusal(wt, key, v)
         if (wr != "") {
             jvRefused = wr
@@ -4680,9 +4692,10 @@ function js_jsfielddef(o, key, v) {
 // called without `new` has node's own words. Twin of js_jscallerr in
 // abnf/jsrtjsprint.go.
 function js_jscallerr(f, site) {
-    if (jvIsClassDesc(f)) { return jvErrFromText("TypeError: Class constructor " + jvStr(f["__name"]) + " cannot be invoked without 'new'") }
+    if (jvIsClassDesc(f)) { return jvErrFromText(jvClassCallMsg(f)) }
     return jvErrFromText("TypeError: " + site + " is not a function")
 }
+function jvClassCallMsg(cls) { return "TypeError: Class constructor " + jvStr(cls["__name"]) + " cannot be invoked without 'new'" }
 // The AggregateError constructor body: (this, errors, message).
 function js_jsaggerrinit(self, errors, msg) {
     js_jserrinit(self, msg)
@@ -4841,16 +4854,15 @@ function jvProtoTag(v) {
     if (typeof v == "number") { return "[object Number]" }
     if (typeof v == "string") { return "[object String]" }
     if (typeof v == "boolean") { return "[object Boolean]" }
-    if (jvIsCallable(v)) { return "[object Function]" }
+    if (jvIsCallable(v) || jvIsClassDesc(v)) { return "[object Function]" }
     // The objects node gives a @@toStringTag: an Error instance (its __errh mark), a
     // promise, a RegExp, and Math / JSON, which carry their tag in a hidden __strtag slot.
     if (jvIsObj(v)) {
-        // A string [Symbol.toStringTag], own or inherited, names the object.
-        if (jvSymOn) {
-            var st = anytype
-            st = js_jsvget(v, "__#@toStringTag")
-            if (typeof st == "string") { return "[object " + st + "]" }
-        }
+        // A string [Symbol.toStringTag], own or inherited, names the object: a
+        // program's, or lib/js-builtins.js's on Map, Set and Uint8Array.
+        var st = anytype
+        st = js_jsvget(v, "__#@toStringTag")
+        if (typeof st == "string") { return "[object " + st + "]" }
         if (v["__errh"] === true) { return "[object Error]" }
         var tag = anytype
         tag = v["__strtag"]
@@ -6581,6 +6593,15 @@ function jvWriteRefusal(o, key, v) {
         }
     }
     return ""
+}
+// A write of a numeric key a typed array has no element for is dropped. Twin of
+// jsvTypedDrop in abnf/jsrtjsprint.go.
+function jvTypedDrop(o, key) {
+    if (!jvIsObj(o)) { return false }
+    if (o["__tarr"] !== true) { return false }
+    var k = jvStr(key)
+    if (jvSlotHas(o, k)) { return false }
+    return jvStr(jvToNumber(k)) == k || k == "-0"
 }
 // The TypeError text a delete of o[key] meets, or "".
 function jvDeleteRefusal(o, key) {

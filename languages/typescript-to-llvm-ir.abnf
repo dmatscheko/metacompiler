@@ -2595,7 +2595,7 @@ NotFuncHead = :script(~~
         if (name == "Set" || name == "Map" || name == "Array" || name == "isNaN" || name == "isFinite" ||
             name == "structuredClone" || name == "Reflect" || name == "WeakMap" || name == "WeakSet" ||
             name == "queueMicrotask" || name == "URIError" || name == "encodeURIComponent" || name == "encodeURI" ||
-            name == "decodeURIComponent" || name == "decodeURI") { jsbWant = true }
+            name == "decodeURIComponent" || name == "decodeURI" || name == "Uint8Array" || name == "ArrayBuffer") { jsbWant = true }
         if (name == "setTimeout" || name == "setInterval" || name == "clearTimeout" || name == "clearInterval") { jsTimerWant = true }
         if (name == "Date" || jsTimerWant) {
             jsbWant = true
@@ -5606,6 +5606,12 @@ NotFuncHead = :script(~~
             // the fresh receiver.
             // See the twin of this comment in js-to-llvm-ir.abnf.
             var fnV = callExt(fnB, "js_jsunbind", [clsV, argsV])
+            // See the twin of this comment in js-to-llvm-ir.abnf.
+            var unbB = curF.NewBlock("")
+            var fnOkB = curF.NewBlock("")
+            fnB.NewCondBr(fnB.NewICmp(llvm.enum.IPredNE, fnV, clsV), unbB, fnOkB)
+            unbB.NewCondBr(truthy(unbB, callExt(unbB, "js_seq", [callExt(unbB, "js_typeof", [fnV]), emitStr(unbB, "function")])), fnOkB, clsB)
+            fnB = fnOkB
             var ctorOkF = curF.NewBlock("")
             var ctorBadF = curF.NewBlock("")
             fnB.NewCondBr(fnB.NewICmp(llvm.enum.IPredNE, callExt(fnB, "js_jsnotctor", [fnV]), handle(0)), ctorBadF, ctorOkF)
@@ -5619,6 +5625,7 @@ NotFuncHead = :script(~~
             // The class form: the constructor convention prepends the instance. A
             // callee that is neither a function nor a class descriptor is node's
             // `X is not a constructor` TypeError, and CATCHABLE.
+            clsV = clsB.NewPhi([llvm.ir.NewIncoming(clsV, b), llvm.ir.NewIncoming(fnV, unbB)])
             var ctorOkB = curF.NewBlock("")
             var ctorBadB = curF.NewBlock("")
             clsB.NewCondBr(clsB.NewICmp(llvm.enum.IPredNE, callExt(clsB, "js_jsctorp", [clsV]), handle(0)),
