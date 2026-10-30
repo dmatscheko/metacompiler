@@ -128,7 +128,7 @@ nestOwner / nestedOf are keyed by simple class name (last wins); key them by bin
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-865 bash: `$NAME"` glued inside a nested "…"; a redirection alone on a line · P3 · SH · OPEN [V SH worker]
+### T-865 bash: `$NAME"` glued inside a nested "…"; a redirection alone on a line · P3 · SH · IN PROGRESS (SH worker, round 14) [V SH worker]
 (1) with `x=abc xb=ZZ`, `echo "${u:-a"$x"b}"` → bash 5.3 (and /bin/bash 3.2) `aZZ` (the inner `"` closes, so `$x"b` reads
 the name `xb`), ours expands `$x` — both engines. (2) a command that is only a redirection (`>&6` on its own line) does
 not parse in either half; bash runs it and answers 1 (bad fd) — also `>file` alone must create/truncate the file.
