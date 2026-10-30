@@ -1902,12 +1902,14 @@ KwDefault   = "default" KwEnd ;
             // A constant folds; that is also the only way a float reaches an integer.
             if (r.cv != undefined) {
                 // A 64-bit destination folds in the EXACT two-half domain: convertNum
-                // works on a double, which cannot spell (unsigned long)-1 at all.
+                // works on a double, which cannot spell (unsigned long)-1 at all. A
+                // 64-bit operand hands over its exact halves (p64), since its cv is
+                // only the nearest double.
                 if (ct.k == "int" && ct.w >= 8) {
-                    var p64 = u64FromNum(trunc0(r.cv))
-                    return {b: r.b, v: k64exact(p64), ct: ct, cv: u64Num(p64, ct.u == true)}
+                    var p64 = r.p64 != undefined ? r.p64 : u64FromNum(trunc0(r.cv))
+                    return {b: r.b, v: k64exact(p64), ct: ct, cv: u64Num(p64, ct.u == true), p64: p64}
                 }
-                var cv = convertNum(ct, r.cv)
+                var cv = convertNum(ct, (r.p64 != undefined && ct.k == "int" && ct.bool != true) ? r.p64.lo : r.cv)
                 return {b: r.b, v: (ct.k == "flt") ? zero : kint(cv | 0), ct: ct, cv: cv}
             }
             // Pointer <-> integer is ptrtoint / inttoptr (LLVM has no sext from a pointer).
@@ -3136,7 +3138,7 @@ KwDefault   = "default" KwEnd ;
         if (ct.w < 8) return makeNum(n, ct)
         var k = k64exact(p)
         var cv = u64Num(p, ct.u == true)
-        return function(b) { return {b: b, v: k, ct: ct, cv: cv, big: true} }
+        return function(b) { return {b: b, v: k, ct: ct, cv: cv, p64: p} }
     }
     // The suffix names the smallest rank and the signedness; the type is then the
     // first one of that rank's list that holds the value. A decimal constant only ever

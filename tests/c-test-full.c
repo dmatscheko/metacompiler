@@ -728,6 +728,7 @@ int s26(void) {
 
 long s27_gl = 5000000000L;              /* a global wider than 32 bits */
 unsigned long s27_gu = 18446744073709551615UL;
+long long s27_gc = (long long)0x8000000000000001ULL;
 
 int s27(void) {
     long l = 5000000000L;
@@ -766,6 +767,12 @@ int s27(void) {
     check(2731, (short)70000 == 4464);
     check(2732, (unsigned short)70000 == 4464);
     check(2733, (signed char)-200 == 56);
+    /* A cast of an unsigned 64-bit CONSTANT keeps all 64 bits: no double in between. */
+    long long c1 = (long long)18446744073709551615ULL;
+    long long c2 = (long long)0x8000000000000001ULL;
+    int c3 = (int)0xFFFFFFFFFFFFFFF1UL;
+    check(2734, c1 == -1 && c2 == -9223372036854775807LL && c3 == -15);
+    check(2735, s27_gc == -9223372036854775807LL && (short)0xFFFFFFFFFFFF8001ULL == -32767);
     return 0;
 }
 
