@@ -1512,8 +1512,11 @@ function rbRatIntOp(n, d, mode) {
     if (mode == "f") { return Math.floor(n / d) }
     if (mode == "c") { return Math.ceil(n / d) }
     if (mode == "t") { return Math.trunc(n / d) }
-    if (n >= 0) { return Math.floor((2 * n + d) / (2 * d)) }
-    return Math.ceil((2 * n - d) / (2 * d))
+    var k = n >= 0 ? Math.floor((2 * n + d) / (2 * d)) : Math.ceil((2 * n - d) / (2 * d))
+    // half: :even / :down move an exact tie (2n/d odd) back toward zero.
+    if (mode == "r" || (2 * n) % d != 0 || ((2 * n) / d) % 2 == 0) { return k }
+    if (mode == "rd" || k % 2 != 0) { return n > 0 ? k - 1 : k + 1 }
+    return k
 }
 // The same on Integer parts of any size. Twin of ratIntOpBig.
 function rbRatIntOpBig(n, d, mode) {
@@ -1527,8 +1530,11 @@ function rbRatIntOpBig(n, d, mode) {
     n2 = rbNumBin("*", 2, n)
     var d2 = anytype
     d2 = rbNumBin("*", 2, d)
-    if (rbNumCmp(n, 0) >= 0) { return rbNumBin("/", rbNumBin("+", n2, d), d2) }
-    return rbNeg(rbNumBin("/", rbNumBin("-", d, n2), d2))
+    var k = anytype
+    if (rbNumCmp(n, 0) >= 0) { k = rbNumBin("/", rbNumBin("+", n2, d), d2) } else { k = rbNeg(rbNumBin("/", rbNumBin("-", d, n2), d2)) }
+    if (mode == "r" || !rbEq(rbNumBin("%", n2, d), 0) || rbEq(rbNumBin("%", rbNumBin("/", n2, d), 2), 0)) { return k }
+    if (mode == "rd" || !rbEq(rbNumBin("%", k, 2), 0)) { return rbNumBin(rbNumCmp(n, 0) > 0 ? "-" : "+", k, 1) }
+    return k
 }
 // A Rational to an Integer power, exactly. Twin of ratPow in ruby-interpreter.abnf.
 function rbRatPow(p, k) {
@@ -4026,6 +4032,7 @@ var rbExcParent = {
     // Float::INFINITY raise.
     $FloatDomainError: "RangeError",
     $StopIteration: "IndexError",
+    $UncaughtThrowError: "ArgumentError",
     $FrozenError: "RuntimeError",
     $IOError: "StandardError",
     $EOFError: "IOError",
@@ -4567,6 +4574,7 @@ function rbOpenRangeCover(o, v) {
 // operator method, strings and arrays get their Ruby operators, everything else
 // is the numeric tower.
 function rbBin(op, l, r) {
+    if (rbIsFn(l) && (op == ">>" || op == "<<")) { return rbProcCompose(l, r, op == ">>") }
     if (rbUserObj(l)) {
         // An exception instance that defines no + of its own concatenates as its
         // message, so `raise e + "er"` inside a rescue keeps working.
@@ -6098,6 +6106,70 @@ function rbEnumFinish(t, items, results) {
     }
     return t
 }
+// Enumerator#next past the end: StopIteration, whose #result is what the
+// iteration answered - the receiver of an each. Twin of the next arm in
+// ruby-interpreter.abnf and rubyStopIter in abnf/jsrtruby.go.
+function rbStopIter(name, t) {
+    var e = rbExc(rbBuiltinClass("StopIteration"), ["iteration reached an end"])
+    e["__rframe"] = name
+    e["__rresult"] = (t["op"] == "each" && t["src"] !== undefined) ? t["src"] : null
+    js_rraise(e, undefined)
+}
+
+// Kernel#loop: the block again and again, until a break (the caller's marker
+// catch) or a StopIteration, whose #result is the answer. Twin of loop in
+// ruby-interpreter.abnf and js_rloop in abnf/jsrtruby.go.
+// Kernel#catch / #throw. Twins: the catch / throw host globals of
+// ruby-interpreter.abnf, which state the rule, and rubyCatch / rubyThrow in
+// abnf/jsrtruby.go. A throw to a running catch is a js_pyexc "__rthrow" marker
+// carrying [tag, value]; no rescue clause takes one.
+var rbCatchTags = []
+function js_rcatch(tag, blk) {
+    var t = anytype
+    t = tag
+    if (t === undefined) { t = {__class: rbBuiltinClass("Object")} }
+    rbCatchTags.push(t)
+    try {
+        var r = blk.apply(undefined, [t])
+        rbCatchTags.pop()
+        return r
+    } catch (e) {
+        rbCatchTags.pop()
+        if (js_is_type(e, "__rthrow") && rbIdenticalP(e["args"][0], t)) { return e["args"][1] }
+        throw e
+    }
+    return null
+}
+function js_rthrow(args) {
+    var tag = rbArgAt(args, 0)
+    var v = anytype
+    v = rbNPos(args) > 1 ? rbArgAt(args, 1) : null
+    var i = rbCatchTags.length - 1
+    while (i >= 0) {
+        if (rbIdenticalP(rbCatchTags[i], tag)) { throw js_pyexc("__rthrow", [tag, v]) }
+        i = i - 1
+    }
+    var e = rbExc(rbBuiltinClass("UncaughtThrowError"), ["uncaught throw " + rbInspect(tag)])
+    e["__rtag"] = tag
+    e["__rval"] = v
+    e["__rframe"] = "throw"
+    js_rraise(e, undefined)
+    return null
+}
+
+function js_rloop(f) {
+    try {
+        while (true) { f.apply(undefined, []) }
+    } catch (e) {
+        if (rbIsA(e, rbBuiltinClass("StopIteration"))) {
+            if (e["__rresult"] === undefined) { return null }
+            return e["__rresult"]
+        }
+        throw e
+    }
+    return null
+}
+
 function rbIsEnum(v) {
     if (!rbIsObj(v)) { return false }
     return v["__renum"] === true
@@ -6112,7 +6184,7 @@ function rbEnumMethod(t, name, args) {
     }
     if (name == "next" || name == "peek") {
         var pos = Math.trunc(rbToF(t["pos"]))
-        if (pos >= items.length) { fail("iteration reached an end") }
+        if (pos >= items.length) { rbStopIter(name, t) }
         if (name == "next") { t["pos"] = pos + 1 }
         return items[pos]
     }
@@ -7545,6 +7617,13 @@ function rbMethod(target, name, args) {
             return null
         }
     }
+    if ((name == "tag" || name == "value") && rbExcInst(target) && target["__rtag"] !== undefined && rbFindMethod(target, name) === undefined) {
+        return name == "tag" ? target["__rtag"] : target["__rval"]
+    }
+    if (name == "result" && rbExcInst(target) && rbFindMethod(target, name) === undefined) {
+        if (target["__rresult"] === undefined) { return null }
+        return target["__rresult"]
+    }
     // Exception#cause: what js_rraiseat recorded, nil for an exception never raised.
     if (name == "cause") {
         if (rbExcInst(target) && rbFindMethod(target, name) === undefined) {
@@ -7601,6 +7680,15 @@ function rbMethod(target, name, args) {
     }
     if (name == "arity") {
         if (rbIsFn(target)) { return rbProcArity(target) }
+    }
+    if (name == ">>" || name == "<<") {
+        if (rbIsFn(target)) { return rbProcCompose(target, rbArgAt(args, 0), name == ">>") }
+    }
+    if (name == "curry") {
+        if (rbIsFn(target)) {
+            var cn = rbNPos(args) > 0 ? Math.trunc(rbToF(rbArgAt(args, 0))) : rbProcArity(target)
+            return rbProcCurry(target, cn < 0 ? 0 - cn - 1 : cn, [])
+        }
     }
     // Method#to_proc answers a PROC, and a LAMBDA one: MRI's `method(:foo).to_proc'
     // is `#<Proc (lambda)>' with the Method's own arity. A fresh wrapper rather
@@ -10370,6 +10458,38 @@ function js_rblockarg(args, i_raw, n_raw) {
 
 // A lambda literal (->) / Kernel#lambda: an ordinary closure, remembered here so
 // `lambda?` can tell it from a proc.
+// Proc#>> (g after f) and Proc#<< (f after g). Twin of procCompose in
+// ruby-interpreter.abnf.
+function rbProcCompose(f, g, fFirst) {
+    var comp = function() {
+        var ca = []
+        var i = 0
+        while (i < arguments.length) { ca.push(arguments[i]); i = i + 1 }
+        if (fFirst) { return rbCallOf(g, [f.apply(undefined, ca)]) }
+        return f.apply(undefined, [rbCallOf(g, ca)])
+    }
+    if (rtHas(rbLambdas, f)) { return js_rlambda(comp) }
+    return comp
+}
+function rbCallOf(g, a) {
+    if (rbIsFn(g)) { return g.apply(undefined, a) }
+    return rbMethod(g, "call", a)
+}
+// Proc#curry. Twin of procCurry in ruby-interpreter.abnf.
+function rbProcCurry(f, n, got) {
+    var cf = function() {
+        var all = []
+        var i = 0
+        while (i < got.length) { all.push(got[i]); i = i + 1 }
+        i = 0
+        while (i < arguments.length) { all.push(arguments[i]); i = i + 1 }
+        if (all.length >= n) { return f.apply(undefined, all) }
+        return rbProcCurry(f, n, all)
+    }
+    if (rtHas(rbLambdas, f)) { return js_rlambda(cf) }
+    return cf
+}
+
 function js_rlambda(f) {
     rbLambdas.push(f)
     return f

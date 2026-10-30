@@ -468,6 +468,8 @@ type jsrt struct {
 	// inside a method is visible everywhere, and a read of a never-assigned one
 	// answers nil. Only js_rgset / js_rgget (ruby-to-llvm-ir.abnf) touch it.
 	rubyGlobals map[string]interface{}
+	// rubyCatchTags: the tags of the Kernel#catch calls running, innermost last.
+	rubyCatchTags []interface{}
 
 	// ktRndDef is kotlin.random.Random.Default - the one generator every unseeded
 	// `random()` draws from. Built lazily by ktRndDefault (abnf/jsrtkotlin.go);
@@ -5341,10 +5343,21 @@ func rubyRatIntOp(n, d float64, mode byte) float64 {
 	case 't':
 		return math.Trunc(n / d)
 	}
+	k := math.Ceil((2*n - d) / (2 * d))
 	if n >= 0 {
-		return math.Floor((2*n + d) / (2 * d))
+		k = math.Floor((2*n + d) / (2 * d))
 	}
-	return math.Ceil((2*n - d) / (2 * d))
+	// half: :even / :down move an exact tie (2n/d odd) back toward zero.
+	if mode == 'r' || math.Mod(2*n, d) != 0 || math.Mod(2*n/d, 2) == 0 {
+		return k
+	}
+	if mode == 'd' || math.Mod(k, 2) != 0 {
+		if n > 0 {
+			return k - 1
+		}
+		return k + 1
+	}
+	return k
 }
 
 func (rt *jsrt) rubyRatDigitOp(v jsRat, mode byte, nd int) interface{} {
@@ -6541,6 +6554,9 @@ func (rt *jsrt) rubyNumOperandErr(op string, l, r interface{}) {
 // dispatches to its own operator method, strings and arrays get their Ruby
 // operators, everything else is the numeric tower above.
 func (rt *jsrt) rubyBin(op string, l, r interface{}) interface{} {
+	if isCallable(l) && (op == ">>" || op == "<<") {
+		return rt.rubyProcCompose(l, r, op == ">>")
+	}
 	if rubyUserObj(l) {
 		// An exception instance that defines no + of its own concatenates as its
 		// message, the same rule radd of ruby-interpreter.abnf applies - so
@@ -7483,6 +7499,8 @@ var rubyExcParent = map[string]string{
 	"IOError":           "StandardError",
 	"EOFError":          "IOError",
 	"LocalJumpError":    "StandardError",
+	// What a throw no catch is waiting for raises.
+	"UncaughtThrowError": "ArgumentError",
 	// ScriptError sits beside StandardError, so a bare `rescue' does not catch
 	// NotImplementedError.
 	"ScriptError":         "Exception",
@@ -10739,6 +10757,26 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 				return jsNull
 			}
 		}
+	case "tag", "value":
+		if o, isObj := target.(*jsObject); isObj && rubyExcInst(o) {
+			if tag, had := o.props["__rtag"]; had {
+				if _, hasOwn := rubyFindMethod(target, name); !hasOwn {
+					if name == "tag" {
+						return tag
+					}
+					return o.props["__rval"]
+				}
+			}
+		}
+	case "result":
+		if o, isObj := target.(*jsObject); isObj && rubyExcInst(o) {
+			if _, hasOwn := rubyFindMethod(target, name); !hasOwn {
+				if r, had := o.props["__rresult"]; had {
+					return r
+				}
+				return jsNull
+			}
+		}
 	// Exception#cause: what js_rraiseat recorded, nil for an exception never raised.
 	case "cause":
 		if o, isObj := target.(*jsObject); isObj && rubyExcInst(o) {
@@ -10839,6 +10877,21 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 	case "lambda?":
 		if isCallable(target) {
 			return rt.rubyLambdas[target]
+		}
+	case ">>", "<<":
+		if isCallable(target) {
+			return rt.rubyProcCompose(target, argAt(args, 0), name == ">>")
+		}
+	case "curry":
+		if isCallable(target) {
+			n := int(rt.rubyArityOf(target))
+			if pos, _ := rubyBlockArgs(args); len(pos) > 0 {
+				n = int(math.Trunc(rubyToF(pos[0])))
+			}
+			if n < 0 {
+				n = -n - 1
+			}
+			return rt.rubyProcCurry(target, n, nil)
 		}
 	case "arity":
 		if isCallable(target) {
@@ -12394,7 +12447,7 @@ func (rt *jsrt) rubyEnumMethod(t *jsObject, name string, args []interface{}) int
 	case "next", "peek":
 		cur := int(rubyToF(t.props["pos"]))
 		if cur >= len(items.elems) {
-			rt.fail("iteration reached an end")
+			rt.rubyStopIter(name, t)
 		}
 		if name == "next" {
 			t.set("pos", float64(cur+1))

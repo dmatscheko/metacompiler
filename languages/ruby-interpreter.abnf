@@ -4983,8 +4983,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (mode == "f") { return Math.floor(n / d) }
         if (mode == "c") { return Math.ceil(n / d) }
         if (mode == "t") { return Math.trunc(n / d) }
-        if (n >= 0) { return Math.floor((2 * n + d) / (2 * d)) }
-        return Math.ceil((2 * n - d) / (2 * d))
+        var k = n >= 0 ? Math.floor((2 * n + d) / (2 * d)) : Math.ceil((2 * n - d) / (2 * d))
+        // half: :even / :down move an exact tie (2n/d odd) back toward zero.
+        if (mode == "r" || (2 * n) % d != 0 || ((2 * n) / d) % 2 == 0) { return k }
+        if (mode == "rd" || k % 2 != 0) { return n > 0 ? k - 1 : k + 1 }
+        return k
     }
     // The same on Integer parts of any size: floor is Integer#/, the rest follow.
     function ratIntOpBig(n, d, mode) {
@@ -4995,8 +4998,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         n2 = numBin("*", 2, n)
         var d2 = anytype
         d2 = numBin("*", 2, d)
-        if (numCmp(n, 0) >= 0) { return numBin("/", numBin("+", n2, d), d2) }
-        return rneg(numBin("/", numBin("-", d, n2), d2))
+        var k = anytype
+        k = numCmp(n, 0) >= 0 ? numBin("/", numBin("+", n2, d), d2) : rneg(numBin("/", numBin("-", d, n2), d2))
+        if (mode == "r" || !numEq(numBin("%", n2, d), 0) || numEq(numBin("%", numBin("/", n2, d), 2), 0)) { return k }
+        if (mode == "rd" || !numEq(numBin("%", k, 2), 0)) { return numBin(numCmp(n, 0) > 0 ? "-" : "+", k, 1) }
+        return k
     }
     // A Rational to an Integer power, exactly; 0 to a negative one is
     // ZeroDivisionError. Twins: rubyRatPow in abnf/jsrtruby.go, rbRatPow in
@@ -5326,6 +5332,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     }
     function rbin(op, l, r) {
         if (isUserObj(l)) { return mcall(l, op, [r], null) }
+        if (typeof l == "function" && (op == ">>" || op == "<<")) { return procCompose(l, r, op == ">>") }
         if (isRStr(l) || isRStr(r)) { return rbin(op, rsText(l), rsText(r)) }
         if (Array.isArray(l)) {
             if (op == "-" && Array.isArray(r)) { return arrDiff(l, r) }
@@ -7387,7 +7394,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // builds blocks. A program that reaches the method some other way (send(:arity))
     // answers 0, which is what an unrecorded closure answers anyway.
     var usesArity = false
-    function noteMName(n) { if (n == "arity") { usesArity = true } return n }
+    function noteMName(n) { if (n == "arity" || n == "curry") { usesArity = true } return n }
     // `x.+(y)' calls an operator METHOD by name, which is exactly `x.send(:+, y)'.
     // Twin of methodSfx in ruby-to-llvm-ir.abnf.
     function methodSfx(name, args) {
@@ -8623,6 +8630,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (name == "to_s" || name == "inspect") { return rstr(target) }
             if (name == "lambda?") { return isLambda(target) }
             if (name == "arity") { return procArity(target) }
+            if (name == ">>" || name == "<<") { return procCompose(target, args[0], name == ">>") }
+            if (name == "curry") {
+                var cn = args.length > 0 ? Math.trunc(toF(args[0])) : procArity(target)
+                return procCurry(target, cn < 0 ? 0 - cn - 1 : cn, [])
+            }
             // `def m(&blk); blk.nil?; end' - the ordinary way to ask whether a method
             // was given a block.
             if (name == "nil?") { return false }
@@ -9622,7 +9634,15 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (args.length == 0 && blk == null) { return items.length }
         }
         if (name == "next" || name == "peek") {
-            if (t.pos >= items.length) { fail("iteration reached an end") }
+            if (t.pos >= items.length) {
+                // StopIteration#result is what the iteration answered: the
+                // receiver of an each.
+                var si = anytype
+                si = mkExc(hostGlobals["StopIteration"], "iteration reached an end")
+                rawSet(si, "__rresult", t.op == "each" && t.src !== undefined ? t.src : null)
+                si.__rframe = name
+                throw {__exc: true, v: si}
+            }
             var nv = items[t.pos]
             if (name == "next") { t.pos = t.pos + 1 }
             return nv
@@ -10922,6 +10942,29 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     var blkSelf = anytype
     blkSelf = null
     // blockCall runs one block invocation and turns a `redo` into a re-run.
+    // Proc#>> (g after f) and Proc#<< (f after g); g is anything with #call. The
+    // composition is a lambda when f is. Twins: rubyProcCompose in
+    // abnf/jsrtruby.go, rbProcCompose in lib/ruby-rt.metajs.
+    function procCompose(f, g, fFirst) {
+        var comp = function() {
+            var ca = argsArray(arguments)
+            if (fFirst) { return callOf(g, [blockCall(f, ca)]) }
+            return blockCall(f, [callOf(g, ca)])
+        }
+        return isLambda(f) ? markLambda(comp) : comp
+    }
+    function callOf(g, a) { return typeof g == "function" ? blockCall(g, a) : mcall(g, "call", a, null) }
+    // Proc#curry: collect arguments until there are n, then call f with them all.
+    // A curried lambda is a lambda. Twins: rubyProcCurry in abnf/jsrtruby.go,
+    // rbProcCurry in lib/ruby-rt.metajs.
+    function procCurry(f, n, got) {
+        var cf = function() {
+            var all = concat2impl(got, argsArray(arguments))
+            if (all.length >= n) { return blockCall(f, all) }
+            return procCurry(f, n, all)
+        }
+        return isLambda(f) ? markLambda(cf) : cf
+    }
     function blockCall(f, args) {
         while (true) {
             try {
@@ -13798,6 +13841,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     }
     hostGlobals["NoMethodError"] = mkBuiltinClass("NoMethodError", hostGlobals["NameError"])
     hostGlobals["KeyError"] = mkBuiltinClass("KeyError", hostGlobals["IndexError"])
+    hostGlobals["UncaughtThrowError"] = mkBuiltinClass("UncaughtThrowError", hostGlobals["ArgumentError"])
     hostGlobals["StopIteration"] = mkBuiltinClass("StopIteration", hostGlobals["IndexError"])
     hostGlobals["FrozenError"] = mkBuiltinClass("FrozenError", hostGlobals["RuntimeError"])
     // FloatDomainError < RangeError is what an infinity or a NaN raises when it is
@@ -13855,6 +13899,12 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         var self = arguments[0]
         if (typeof self.__rwhere == "string") { return [self.__rwhere] }
         return null
+    }
+    hostGlobals["UncaughtThrowError"]["tag"] = function() { return arguments[0].__rtag }
+    hostGlobals["UncaughtThrowError"]["value"] = function() { return arguments[0].__rval }
+    hostGlobals["StopIteration"]["result"] = function() {
+        var self = arguments[0]
+        return hasOwn(self, "__rresult") ? self.__rresult : null
     }
     excBase["cause"] = function() {
         var self = arguments[0]
@@ -14064,8 +14114,56 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     hostGlobals["raise"] = function() { throw {__exc: true, v: mkExc(hostGlobals["RuntimeError"], rstr(arguments[0])) } }
     // Kernel#loop: an endless loop whose only exit is a break out of the block (which
     // arrives here as the non-local break makeCall catches, so `loop { break 42 }` is 42).
+    // Kernel#catch / #throw. catch runs its block with the tag (a fresh Object when
+    // none is given); throw to a tag some catch is running unwinds to it as
+    // control flow no rescue sees, running the ensure clauses on the way, and
+    // that catch answers the value. A throw no catch waits for is an
+    // UncaughtThrowError. Twins: rubyCatch / rubyThrow in abnf/jsrtruby.go,
+    // js_rcatch / js_rthrow in lib/ruby-rt.metajs.
+    var catchTags = []
+    hostGlobals["catch"] = function(tag, blk) {
+        var t = anytype
+        var b = anytype
+        t = tag
+        b = blk
+        if (blk === undefined && typeof tag == "function") {
+            b = tag
+            t = {__class: hostGlobals["Object"]}
+        }
+        catchTags.push(t)
+        try {
+            var r = anytype
+            r = blockCall(b, [t])
+            catchTags.pop()
+            return r
+        } catch (e) {
+            catchTags.pop()
+            if (e !== null && e !== undefined && typeof e == "object" && e.__rthrow === true && e.tag === t) { return e.v }
+            throw e
+        }
+    }
+    hostGlobals["throw"] = function(tag, v) {
+        var tv = anytype
+        tv = v === undefined ? null : v
+        for (var i = catchTags.length - 1; i >= 0; i--) {
+            if (catchTags[i] === tag) { throw {__rthrow: true, tag: tag, v: tv} }
+        }
+        var e = anytype
+        e = mkExc(hostGlobals["UncaughtThrowError"], "uncaught throw " + rinspect(tag))
+        rawSet(e, "__rtag", tag)
+        rawSet(e, "__rval", tv)
+        e.__rframe = "throw"
+        throw {__exc: true, v: e}
+    }
+    // A StopIteration out of the block ends it too, and loop answers its #result.
+    // Twins: js_rloop in abnf/jsrtruby.go and lib/ruby-rt.metajs.
     hostGlobals["loop"] = function(blk) {
-        while (true) { blockCall(blk, []) }
+        try {
+            while (true) { blockCall(blk, []) }
+        } catch (e) {
+            if (excIsUser(e) && valueIsA(e.v, hostGlobals["StopIteration"])) { return hasOwn(e.v, "__rresult") ? e.v.__rresult : null }
+            throw e
+        }
     }
 
     // ----- Equality: Ruby's Array#== / Hash#== compare structurally (element by

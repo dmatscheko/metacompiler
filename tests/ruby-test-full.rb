@@ -4800,6 +4800,50 @@ def s112
   check("pp112d", x.nil? && S112.make.class == S112 && S112.make2(4).a == 4)
 end
 
+# ===== SECTION 113: Proc#>> / #<< / #curry; Rational#round(half:) =====
+# >> runs the receiver first, << last, and the composition is a lambda when the
+# receiver is; curry collects arguments up to the arity. Rational#round honours
+# half: :even and :down on an exact tie. /usr/bin/ruby 2.6 settles each.
+def s113
+  inc = proc { |x| x + 1 }
+  dbl = proc { |x| x * 2 }
+  check("pc113a", (inc >> dbl).call(3) == 8 && (inc << dbl).call(3) == 7 && !(inc >> dbl).lambda? &&
+        (lambda { |x| x } >> dbl).lambda?)
+  add3 = proc { |a, b, c| a + b + c }
+  add2 = lambda { |a, b| a + b }
+  check("cu113b", add3.curry[1][2][3] == 6 && add3.curry[1, 2][3] == 6 && add2.curry[1][2] == 3 &&
+        add2.curry.lambda? && !add3.curry.lambda? && proc { |a, b| [a, b] }.curry(3)[1][2][3] == [1, 2])
+  r = [Rational(5, 2), Rational(-5, 2), Rational(7, 2), Rational(-7, 2)]
+  check("rr113c", r.map { |x| x.round(half: :even) } == [2, -2, 4, -4] && r.map { |x| x.round(half: :down) } == [2, -2, 3, -3] &&
+        r.map { |x| x.round(half: :up) } == [3, -3, 4, -4] && Rational(2**70 + 1, 2).round(half: :even) == 2**69 &&
+        Rational(5, 4).round(1, half: :even) == Rational(6, 5))
+end
+
+# ===== SECTION 114: loop and StopIteration; catch / throw =====
+# loop ends at a StopIteration and answers its #result; Enumerator#next past the
+# end raises one. throw unwinds to its catch past rescue clauses, running ensure;
+# a throw no catch waits for is an UncaughtThrowError. /usr/bin/ruby 2.6 settles each.
+def s114_thrower
+  throw :t114, 3
+end
+def s114
+  x = 0
+  r1 = loop { x += 1; raise StopIteration if x == 3 }
+  en = [1, 2].each
+  got = []
+  r2 = loop { got << en.next }
+  m = begin; en.next; rescue StopIteration => e; [e.message, e.result]; end
+  check("lp114a", x == 3 && r1.nil? && got == [1, 2] && r2 == [1, 2] && m == ["iteration reached an end", [1, 2]])
+  r3 = catch(:done) { 10.times { |i| throw :done, i if i == 3 }; :never }
+  log = []
+  r4 = catch(:x) { begin; throw :x, 1; rescue Exception; log << :rescued; ensure; log << :ensure; end }
+  r5 = catch(:o) { catch(:i) { throw :o, 9 }; 0 }
+  check("ct114b", r3 == 3 && r4 == 1 && log == [:ensure] && r5 == 9 && catch { |t| throw t, 5 } == 5 &&
+        catch(:a) { throw :a }.nil? && catch(:t114) { s114_thrower; 1 } == 3)
+  u = begin; throw :nope, 4; rescue ArgumentError => e; [e.class, e.message, e.tag, e.value]; end
+  check("ut114c", u == [UncaughtThrowError, "uncaught throw :nope", :nope, 4])
+end
+
 s39() # SECTION-CALL 39
 s40() # SECTION-CALL 40
 s41() # SECTION-CALL 41
@@ -4874,5 +4918,7 @@ s109() # SECTION-CALL 109
 s110() # SECTION-CALL 110
 s111() # SECTION-CALL 111
 s112() # SECTION-CALL 112
+s113() # SECTION-CALL 113
+s114() # SECTION-CALL 114
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

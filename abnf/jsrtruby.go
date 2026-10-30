@@ -194,6 +194,23 @@ func (rt *jsrt) addRubyFmtExterns(m map[string]func(args []uint64) uint64) {
 		rt.rubyNameErr("NameError", "undefined local variable or method `"+name+"' for "+rt.rubyNoMethodDesc(self), name, self)
 		return 0
 	}
+	m["js_rloop"] = func(a []uint64) uint64 { return w(rt.rubyLoop(u(a[0]))) }
+	m["js_rcatch"] = func(a []uint64) uint64 { return w(rt.rubyCatch(u(a[0]), u(a[1]))) }
+	m["js_rthrow"] = func(a []uint64) uint64 {
+		args, _ := u(a[0]).(*jsArray)
+		var tag, v interface{} = jsNull, jsNull
+		if args != nil {
+			pos, _ := rubyBlockArgs(args.elems)
+			if len(pos) > 0 {
+				tag = pos[0]
+			}
+			if len(pos) > 1 {
+				v = pos[1]
+			}
+		}
+		rt.rubyThrow(tag, v)
+		return 0
+	}
 	// send(:name, ...), with or without a receiver: a top-level def and a Kernel
 	// function are MRI's private Object methods, so they answer when the receiver
 	// has no method of the name. Twin of
@@ -1517,10 +1534,149 @@ func rubyRatIntOpB(n, d *big.Int, mode byte) *big.Int {
 	}
 	n2 := new(big.Int).Lsh(n, 1)
 	d2 := new(big.Int).Lsh(d, 1)
+	var k *big.Int
 	if n.Sign() >= 0 {
-		return new(big.Int).Div(new(big.Int).Add(n2, d), d2)
+		k = new(big.Int).Div(new(big.Int).Add(n2, d), d2)
+	} else {
+		k = new(big.Int).Neg(new(big.Int).Div(new(big.Int).Sub(d, n2), d2))
 	}
-	return new(big.Int).Neg(new(big.Int).Div(new(big.Int).Sub(d, n2), d2))
+	// half: :even / :down move an exact tie (2n/d odd) back toward zero.
+	q, r := new(big.Int).QuoRem(n2, d, new(big.Int))
+	if mode == 'r' || r.Sign() != 0 || q.Bit(0) == 0 {
+		return k
+	}
+	if mode == 'd' || k.Bit(0) != 0 {
+		return k.Sub(k, big.NewInt(int64(n.Sign())))
+	}
+	return k
+}
+
+// rubyProcCompose is Proc#>> (g after f) and Proc#<< (f after g); g is anything
+// with #call, and the composition is a lambda when f is. Twins: procCompose in
+// ruby-interpreter.abnf, rbProcCompose in lib/ruby-rt.metajs.
+func (rt *jsrt) rubyProcCompose(f, g interface{}, fFirst bool) interface{} {
+	callG := func(a []interface{}) interface{} {
+		if isCallable(g) {
+			return rt.call(g, jsUndef, a)
+		}
+		return rt.rubyMethod(g, "call", a)
+	}
+	var comp interface{} = &hostFunc{name: "compose", fn: func(rt *jsrt, this uint64, a []interface{}) interface{} {
+		if fFirst {
+			return callG([]interface{}{rt.call(f, jsUndef, a)})
+		}
+		return rt.call(f, jsUndef, []interface{}{callG(a)})
+	}}
+	rt.rubyMarkLambdaLike(comp, f)
+	return comp
+}
+
+// rubyProcCurry is Proc#curry: collect arguments until there are n, then call f
+// with them all. Twins: procCurry in ruby-interpreter.abnf, rbProcCurry in
+// lib/ruby-rt.metajs.
+func (rt *jsrt) rubyProcCurry(f interface{}, n int, got []interface{}) interface{} {
+	var cf interface{} = &hostFunc{name: "curry", fn: func(rt *jsrt, this uint64, a []interface{}) interface{} {
+		all := append(append([]interface{}{}, got...), a...)
+		if len(all) >= n {
+			return rt.call(f, jsUndef, all)
+		}
+		return rt.rubyProcCurry(f, n, all)
+	}}
+	rt.rubyMarkLambdaLike(cf, f)
+	return cf
+}
+
+// rubyMarkLambdaLike makes g a lambda when f is one.
+func (rt *jsrt) rubyMarkLambdaLike(g, f interface{}) {
+	if rt.rubyLambdas[f] {
+		if rt.rubyLambdas == nil {
+			rt.rubyLambdas = map[interface{}]bool{}
+		}
+		rt.rubyLambdas[g] = true
+	}
+}
+
+// rubyStopIter is Enumerator#next past the end: StopIteration, whose #result is
+// what the iteration answered - the receiver of an each. Twin of rbStopIter in
+// lib/ruby-rt.metajs.
+func (rt *jsrt) rubyStopIter(name string, t *jsObject) {
+	e := rt.rubyExc(rt.rubyBuiltinClass("StopIteration"), []interface{}{"iteration reached an end"})
+	var res interface{} = jsNull
+	if src, has := t.props["src"]; has && t.props["op"] == "each" {
+		res = src
+	}
+	e.set("__rframe", name)
+	e.set("__rresult", res)
+	panic(&jsThrown{value: e})
+}
+
+// rubyCatch / rubyThrow are Kernel#catch / #throw. Twins: the catch / throw host
+// globals of ruby-interpreter.abnf, which state the rule, and js_rcatch /
+// js_rthrow in lib/ruby-rt.metajs. A throw to a running catch is a js_pyexc
+// "__rthrow" marker carrying [tag, value]; no rescue clause takes one.
+func (rt *jsrt) rubyCatch(tag, blk interface{}) (res interface{}) {
+	if tag == jsUndef {
+		o := newJSObject()
+		o.set("__class", rt.rubyBuiltinClass("Object"))
+		tag = o
+	}
+	rt.rubyCatchTags = append(rt.rubyCatchTags, tag)
+	depth := len(rt.rubyCatchTags)
+	defer func() {
+		rt.rubyCatchTags = rt.rubyCatchTags[:depth-1]
+		if p := recover(); p != nil {
+			if th, isThrown := p.(*jsThrown); isThrown && rt.isTypeName(th.value, "__rthrow") {
+				if args, ok := th.value.(*jsObject).props["args"].(*jsArray); ok && len(args.elems) == 2 && rubyIdenticalP(args.elems[0], tag) {
+					res = args.elems[1]
+					return
+				}
+			}
+			panic(p)
+		}
+	}()
+	return rt.call(blk, jsUndef, []interface{}{tag})
+}
+
+func (rt *jsrt) rubyThrow(tag, v interface{}) {
+	for i := len(rt.rubyCatchTags) - 1; i >= 0; i-- {
+		if rubyIdenticalP(rt.rubyCatchTags[i], tag) {
+			cls := newJSObject()
+			cls.set("__name", "__rthrow")
+			mark := newJSObject()
+			mark.set("__class", cls)
+			mark.set("args", &jsArray{elems: []interface{}{tag, v}})
+			panic(&jsThrown{value: mark})
+		}
+	}
+	e := rt.rubyExc(rt.rubyBuiltinClass("UncaughtThrowError"), []interface{}{"uncaught throw " + rt.rubyInspect(tag)})
+	e.set("__rtag", tag)
+	e.set("__rval", v)
+	e.set("__rframe", "throw")
+	panic(&jsThrown{value: e})
+}
+
+// rubyLoop is Kernel#loop: the block again and again, until a break (the
+// caller's marker catch) or a StopIteration, whose #result is the answer. Twin
+// of js_rloop in lib/ruby-rt.metajs and loop in ruby-interpreter.abnf.
+func (rt *jsrt) rubyLoop(f interface{}) (res interface{}) {
+	stop := rt.rubyBuiltinClass("StopIteration")
+	defer func() {
+		if p := recover(); p != nil {
+			if th, isThrown := p.(*jsThrown); isThrown && rt.rubyIsA(th.value, stop) {
+				res = jsNull
+				if o, isObj := th.value.(*jsObject); isObj {
+					if r, had := o.props["__rresult"]; had {
+						res = r
+					}
+				}
+				return
+			}
+			panic(p)
+		}
+	}()
+	for {
+		rt.call(f, jsUndef, nil)
+	}
 }
 
 // rubyMainObj is MRI's top-level `self`: an Object whose singleton #to_s and
@@ -1635,10 +1791,10 @@ var rubyRespondNames = map[string][]string{
 		"is_a?", "kind_of?", "nil?", "public_send", "send", "|"},
 	"FalseClass": {"&", "<=>", "^", "equal?", "frozen?", "instance_of?", "instance_variables",
 		"is_a?", "kind_of?", "nil?", "public_send", "send", "|"},
-	"Proc": {"<=>", "[]", "arity", "call", "equal?", "frozen?", "instance_of?",
+	"Proc": {"<<", "<=>", ">>", "[]", "arity", "call", "curry", "equal?", "frozen?", "instance_of?",
 		"instance_variables", "is_a?", "kind_of?", "lambda?", "nil?", "public_send", "send",
 		"to_proc", "yield"},
-	"Method": {"<=>", "[]", "arity", "call", "equal?", "frozen?", "instance_of?",
+	"Method": {"<<", "<=>", ">>", "[]", "arity", "call", "curry", "equal?", "frozen?", "instance_of?",
 		"instance_variables", "is_a?", "kind_of?", "name", "nil?", "public_send", "send",
 		"to_proc"},
 	"Regexp": {"<=>", "=~", "equal?", "frozen?", "instance_of?", "instance_variables", "is_a?",
