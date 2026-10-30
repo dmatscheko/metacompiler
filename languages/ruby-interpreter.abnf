@@ -2468,6 +2468,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     include("lib/hex-float.js")
     include("lib/ruby-num.js")
     include("lib/ruby-str.js")
+    include("lib/ruby-arr.js")
 
     // ----- Control signals: everything is an expression, so a body threads the
     // value of its last statement (Ruby's implicit return). break / next / return
@@ -4815,11 +4816,15 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     }
     // The three ndigits > 0 bodies. A zero result carries the receiver's sign
     // (-0.05.ceil(1) is -0.0 in MRI), which zeroSigned is here for.
-    function floDigitRound(x, nd) {
+    function floDigitRound(x, nd, mode) {
         var be = floBinExp(x)
         if (floRoundOver(nd, be)) { return x }
         if (floRoundUnder(nd, be)) { return 0 }
         var s = pow10(nd)
+        if (mode != "r") {
+            var h = rbnRoundHalf(x, s, mode) / s
+            return h == 0 ? zeroSigned(x) : h
+        }
         var f = cRound(x * s)
         if (x > 0) {
             if ((f + 0.5) / s <= x) { f = f + 1 }
@@ -4911,7 +4916,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // Mode "t" is TRUNCATION and never carries: 1234.truncate(-2) is 1200 and
         // -1234.truncate(-2) is -1200.
         if (!zeroTail && mode != "t") {
-            if (mode == "r") { away = tail.charCodeAt(0) - 48 >= 5 }
+            if (mode.charAt(0) == "r") { away = rbnHalfAway(mode, head, tail) }
             else if (mode == "f") { away = neg }
             else { away = !neg }
         }
@@ -4940,7 +4945,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (nd > 0) {
             if (t !== t || t - t !== 0) { return mkFlo(t) }
             if (t == 0) { return mkFlo(t) }
-            if (mode == "r") { return mkFlo(floDigitRound(t, nd)) }
+            if (mode.charAt(0) == "r") { return mkFlo(floDigitRound(t, nd, mode)) }
             if (mode == "f") { return mkFlo(floDigitFloor(t, nd)) }
             if (mode == "t") { return mkFlo(floDigitTrunc(t, nd)) }
             return mkFlo(floDigitCeil(t, nd))
@@ -4952,13 +4957,32 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // would give.
         if (nd == 0) {
             if (mode == "r") { return intFromF(cRound(t)) }
+            if (mode.charAt(0) == "r") { return intFromF(rbnRoundHalf(t, 1, mode)) }
             if (mode == "f") { return intFromF(Math.floor(t)) }
             if (mode == "t") { return intFromF(Math.trunc(t)) }
             return intFromF(Math.ceil(t))
         }
         var w = 0
-        if (mode == "r" || mode == "t") { w = Math.trunc(t) } else if (mode == "f") { w = Math.floor(t) } else { w = Math.ceil(t) }
+        if (mode.charAt(0) == "r" || mode == "t") { w = Math.trunc(t) } else if (mode == "f") { w = Math.floor(t) } else { w = Math.ceil(t) }
         return intDigitOp(intFromF(w), 0 - nd, mode)
+    }
+    // #round's arguments: [ndigits] [half: :up / :even / :down], as {nd, mode}.
+    // Twins: rbRoundArgs in lib/ruby-rt.metajs, rubyRoundArgs in abnf/jsrtruby.go.
+    function roundArgs(args) {
+        var n = args.length
+        var mode = "r"
+        if (n > 0 && isDict(args[n - 1])) {
+            var hi = dictFind(args[n - 1], mkSym("half"))
+            if (hi >= 0) {
+                var hv = anytype
+                hv = args[n - 1].vals[hi]
+                var hn = hv === null || hv === undefined ? "" : (isSym(hv) ? hv.s : rstr(hv))
+                mode = rbnHalfMode(hn)
+                if (mode == "") { raiseErr("round", "ArgumentError", "invalid rounding mode: " + hn) }
+            }
+            n = n - 1
+        }
+        return {nd: n > 0 ? Math.trunc(toF(args[0])) : 0, mode: mode}
     }
     // ----- Rational#floor / #ceil / #round / #truncate, EXACTLY ------------------
     //
@@ -5147,15 +5171,16 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
         fail("Integer does not support '" + op + "'")
     }
-    // Integer#fdiv. When an Integer operand does not fit a double,
-    // (10**400).fdiv(10**399) would be Infinity / Infinity; MRI answers 10.0. The
+    // Integer#fdiv. When the divisor is a Bignum, or an Integer operand does not
+    // fit a double, the double quotient would be inexact ((10**30).fdiv(10**29)
+    // 10.000000000000002) or Infinity / Infinity; MRI's big_fdiv answers 10.0. The
     // quotient is then formed EXACTLY, as an integer of about 70 bits, and only that
     // is rounded once and scaled by a power of two (exact). Twins: rubyIntFdiv in
     // abnf/jsrtruby.go and rbIntFdiv in lib/ruby-rt.metajs.
     function intFdiv(a, b) {
         var x = toF(a)
         var y = toF(b)
-        if ((x - x == 0 && y - y == 0) || !(typeof b == "number" || isBig(b)) || y == 0) { return fdivSign(x / y, x, y) }
+        if ((x - x == 0 && y - y == 0 && !isBig(b)) || !(typeof b == "number" || isBig(b)) || y == 0) { return fdivSign(x / y, x, y) }
         var na = numCmp(a, 0) < 0
         var nb = numCmp(b, 0) < 0
         var pa = anytype
@@ -8030,7 +8055,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // 2**53 has to be exact.
         if (name == "floor") { return numDigitOp(0, t, true, "f", args.length > 0 ? Math.trunc(toF(args[0])) : 0) }
         if (name == "ceil") { return numDigitOp(0, t, true, "c", args.length > 0 ? Math.trunc(toF(args[0])) : 0) }
-        if (name == "round") { return numDigitOp(0, t, true, "r", args.length > 0 ? Math.trunc(toF(args[0])) : 0) }
+        if (name == "round") { var bra = roundArgs(args); return numDigitOp(0, t, true, bra.mode, bra.nd) }
         if (name == "to_f") { return mkFlo(bigToNum(t)) }
         if (name == "abs" || name == "magnitude") { return bigOut(bigAbs(t)) }
         if (name == "zero?") { return bigIsZero(t) }
@@ -8270,8 +8295,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // one answers a Float (and does not raise on an infinity); 0 and negatives
         // answer an Integer. numDigitOp is the whole rule.
         if (name == "floor" || name == "ceil" || name == "round" || name == "truncate") {
-            var dmode = name == "floor" ? "f" : (name == "ceil" ? "c" : (name == "round" ? "r" : "t"))
-            var dnd = args.length > 0 ? Math.trunc(toF(args[0])) : 0
+            var dra = roundArgs(args)
+            var dmode = name == "floor" ? "f" : (name == "ceil" ? "c" : (name == "round" ? dra.mode : "t"))
+            var dnd = dra.nd
             // A Rational stays EXACT at every ndigits - see ratDigitOp.
             if (isRat(t)) { return ratDigitOp(t, dmode, dnd) }
             return numDigitOp(toF(t), null, false, dmode, dnd)
@@ -8706,7 +8732,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             // ndigits >= 0 and round to a multiple of 10**-ndigits below that.
             if (name == "floor") { return numDigitOp(target, null, true, "f", args.length > 0 ? Math.trunc(toF(args[0])) : 0) }
             if (name == "ceil") { return numDigitOp(target, null, true, "c", args.length > 0 ? Math.trunc(toF(args[0])) : 0) }
-            if (name == "round") { return numDigitOp(target, null, true, "r", args.length > 0 ? Math.trunc(toF(args[0])) : 0) }
+            if (name == "round") { var ira = roundArgs(args); return numDigitOp(target, null, true, ira.mode, ira.nd) }
             if (name == "to_f") { return mkFlo(target) }
             if (name == "to_r") { return mkRat(target, 1) }
             if (name == "to_c") { return mkCpx(target, 0) }
@@ -8856,9 +8882,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             // rindex. String and Array answer it too.
             if (name == "[]") { return rindex(target, args[0]) }
             if (name == "include?" || name == "has_key?" || name == "key?") { return dictFind(target, args[0]) >= 0 }
-            if (name == "each") {
+            if (name == "each" || name == "each_pair") {
                 if (blk == null) { return enumAt(mkEnum(hashPairs(target)), target, name, args) }
-                for (var di = 0; di < target.keys.length; di++) { blockCall(blk, [keyOut(target.keys[di]), target.vals[di]]) }
+                hashEach(target, blk)
                 return target
             }
             // Hash#default is the value Hash.new(v) recorded; a hash built with a
@@ -8912,11 +8938,6 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 return xv
             }
             if (name == "clear") { arrReplace(target.keys, []); arrReplace(target.vals, []); return target }
-            if (name == "each_pair") {
-                if (blk == null) { return enumAt(mkEnum(hashPairs(target)), target, name, args) }
-                for (var ep = 0; ep < target.keys.length; ep++) { blockCall(blk, [keyOut(target.keys[ep]), target.vals[ep]]) }
-                return target
-            }
             if (name == "each_key") {
                 for (var ek = 0; ek < target.keys.length; ek++) { blockCall(blk, [keyOut(target.keys[ek])]) }
                 return target
@@ -9235,6 +9256,31 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     }
     // sort_by / min_by / max_by: decorate, sort on the key, undecorate. The sort is
     // the stable one above, which is what MRI's sort_by promises.
+    // Hash#each / #each_pair. An entry deleted before it is reached is not
+    // yielded; a key ADDED by the block is MRI's RuntimeError, and is taken out
+    // again (one that replaced a deleted key shows as more yields than entries).
+    // Twins: rbHashEach in lib/ruby-rt.metajs, rubyHashEach in abnf/jsrt.go.
+    function hashEach(d, blk) {
+        var i = 0
+        var left = d.keys.length
+        while (i < d.keys.length) {
+            var k = anytype
+            k = d.keys[i]
+            var n0 = d.keys.length
+            if (left == 0) { raiseErr("each", "RuntimeError", "can't add a new key into hash during iteration") }
+            left = left - 1
+            blockCall(blk, [keyOut(k), d.vals[i]])
+            if (d.keys.length > n0) {
+                while (d.keys.length > n0) {
+                    d.keys.pop()
+                    d.vals.pop()
+                }
+                d.__idx = null
+                raiseErr("each", "RuntimeError", "can't add a new key into hash during iteration")
+            }
+            if (i < d.keys.length && d.keys[i] === k) { i = i + 1 }
+        }
+    }
     function arrKeyed(t, blk) {
         var pairs = []
         for (var i = 0; i < t.length; i++) { pairs.push([blockCall(blk, [t[i]]), t[i]]) }
@@ -9613,14 +9659,22 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // uniq is eql?/hash, NOT ==: `[1, 1.0].uniq` keeps BOTH in MRI, because
         // 1.eql?(1.0) is false across classes. index and include? are ==, which is
         // why they do not share this test.
+        // With a block, two elements are duplicates when the block answers equal
+        // values for them.
         if (name == "uniq") {
             var uq = []
+            var uk = []
             for (i = 0; i < t.length; i++) {
+                var ukey = anytype
+                ukey = blk == null ? t[i] : blockCall(blk, [t[i]])
                 var seen = false
-                for (var uj = 0; uj < uq.length; uj++) {
-                    if (classOf(uq[uj]) === classOf(t[i]) && rubyEq(uq[uj], t[i])) { seen = true; break }
+                for (var uj = 0; uj < uk.length; uj++) {
+                    if (classOf(uk[uj]) === classOf(ukey) && rubyEq(uk[uj], ukey)) { seen = true; break }
                 }
-                if (!seen) { uq.push(t[i]) }
+                if (!seen) {
+                    uq.push(t[i])
+                    uk.push(ukey)
+                }
             }
             return uq
         }
@@ -9661,19 +9715,28 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // MRI's sum REFUSES a non-numeric element against a NUMERIC accumulator:
         // `["b","a"].sum` is a TypeError, not "0ba", while `["a","b"].sum("")` is
         // "ab" and `[[1],[2]].sum([])` is [1,2], because those start from a String
-        // and an Array. The TypeError is catchable, as MRI's is.
+        // and an Array. The TypeError is catchable, as MRI's is. Once a Float meets
+        // a real sum the rest of the real elements are added with Kahan-Babuska
+        // compensation (rbnKahan), so [0.1, 0.2, 0.3].sum is 0.6.
         if (name == "sum") {
             var s = anytype
             s = args.length > 0 ? args[0] : 0
+            var ks = anytype
+            ks = null
             for (i = 0; i < t.length; i++) {
                 var sv = anytype
                 sv = blk == null ? t[i] : blockCall(blk, [t[i]])
+                var real = typeof sv == "number" || isFlo(sv) || isBig(sv) || isRat(sv)
+                if (ks === null && isFlo(sv) && (typeof s == "number" || isFlo(s) || isBig(s) || isRat(s))) { ks = {f: toF(s), c: 0} }
+                if (ks !== null && real) { rbnKahan(ks, toF(sv)); continue }
+                if (ks !== null) { s = mkFlo(ks.f); ks = null }
                 if (isNumV(s) && !isNumV(sv)) {
                     throw {__exc: true, v: mkExc(hostGlobals["TypeError"],
                                                  cmpName(sv) + " can't be coerced into " + classOf(s).__name)}
                 }
                 s = radd(s, sv)
             }
+            if (ks !== null) { return mkFlo(ks.f + ks.c) }
             return s
         }
         // ----- the rest of the Array / Enumerable surface -----
@@ -9721,10 +9784,23 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             }
             return best
         }
+        // min_by / max_by answer the FIRST of equal keys; with n, the n smallest /
+        // largest, ties in their original order.
         if (name == "min_by" || name == "max_by") {
-            if (t.length == 0) { return null }
             var kpairs = arrKeyed(t, blk)
-            return name == "min_by" ? kpairs[0][1] : kpairs[kpairs.length - 1][1]
+            if (name == "max_by") {
+                var kdesc = []
+                var kj = kpairs.length - 1
+                while (kj >= 0) {
+                    var kg = kj
+                    while (kg > 0 && rcmp(kpairs[kg - 1][0], kpairs[kj][0]) == 0) { kg = kg - 1 }
+                    for (var kq = kg; kq <= kj; kq++) { kdesc.push(kpairs[kq]) }
+                    kj = kg - 1
+                }
+                kpairs = kdesc
+            }
+            if (args.length > 0) { return arrUndecorate(kpairs.slice(0, Math.trunc(toF(args[0])))) }
+            return kpairs.length == 0 ? null : kpairs[0][1]
         }
         if (name == "minmax") {
             if (t.length == 0) { return [null, null] }
@@ -9772,7 +9848,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (name == "flatten" || name == "flatten!") {
             var fdepth = args.length == 0 ? -1 : Math.trunc(toF(args[0]))
             var flat = arrFlatInto(t, fdepth, [])
-            return name == "flatten" ? flat : arrReplace(t, flat)
+            if (name == "flatten") { return flat }
+            // flatten! answers nil when there was nothing to flatten.
+            var fnest = false
+            for (i = 0; i < t.length; i++) { if (Array.isArray(t[i])) { fnest = true } }
+            return fnest ? arrReplace(t, flat) : null
         }
         if (name == "compact" || name == "compact!") {
             var cmp2 = []
@@ -9784,7 +9864,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             return arrReplace(t, cmp2)
         }
         if (name == "uniq!") {
-            var uq2 = arrayMethod(t, "uniq", [], null)
+            var uq2 = arrayMethod(t, "uniq", [], blk)
             if (uq2.length == t.length) { return null }
             return arrReplace(t, uq2)
         }
@@ -10007,15 +10087,17 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 return arrSub(t, rlo, rhi - rlo + 1)
             }
             var si = arrNorm(t, args[0])
-            if (args.length > 1) { return arrSub(t, si, Math.trunc(toF(args[1]))) }
+            if (args.length > 1) { return rsubseq(t, args[0], args[1]) }
             return si >= 0 && si < t.length ? t[si] : null
         }
+        // insert pads past the end with nil and counts a negative position from
+        // after the last element. Twins: rbArrayMethod's insert, rubyArrayMethod's.
         if (name == "insert") {
-            var ii = arrNorm(t, args[0])
-            var ins = arrSub(t, 0, ii)
-            for (i = 1; i < args.length; i++) { ins.push(args[i]) }
-            for (i = ii; i < t.length; i++) { ins.push(t[i]) }
-            return arrReplace(t, ins)
+            if (args.length < 2) { return t }
+            var ip0 = Math.trunc(toF(args[0]))
+            var ii = rbaInsertPos(t.length, ip0)
+            if (ii < 0) { raiseErr("insert", "IndexError", "index " + ip0 + " too small for array; minimum: " + (0 - t.length - 1)) }
+            return arrReplace(t, rbaSpliced(t, ii, args.slice(1)))
         }
         // delete answers the LAST element it removed (nil when none) - not always
         // the argument, since `[1, 1.0].delete(1)` removes both and MRI answers 1.0.
@@ -10067,9 +10149,27 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             }
             return t
         }
+        // fill(v [, start [, length]]), fill(v, range), and the block forms, which
+        // pass the index instead of v (rbaFillSpan).
         if (name == "fill") {
-            var fl = []
-            for (i = 0; i < t.length; i++) { fl.push(blk == null ? args[0] : blockCall(blk, [i])) }
+            var fa = blk == null ? args.slice(1) : args
+            var fsp = anytype
+            if (fa.length > 0 && isRange(fa[0])) {
+                var fb = fa[0].lo === null || fa[0].lo === undefined ? 0 : Math.trunc(toF(fa[0].lo))
+                if (fb < 0) { fb = fb + t.length }
+                var fe = fa[0].hi === null || fa[0].hi === undefined ? t.length : Math.trunc(toF(fa[0].hi))
+                if (fe < 0) { fe = fe + t.length }
+                if (!fa[0].excl && fa[0].hi !== null && fa[0].hi !== undefined) { fe = fe + 1 }
+                fsp = rbaFillSpan(t.length, fb, true, fe - fb < 0 ? 0 : fe - fb, true)
+            } else {
+                var hb = fa.length > 0 && fa[0] !== null && fa[0] !== undefined
+                var hl = fa.length > 1 && fa[1] !== null && fa[1] !== undefined
+                fsp = rbaFillSpan(t.length, hb ? Math.trunc(toF(fa[0])) : 0, hb, hl ? Math.trunc(toF(fa[1])) : 0, hl)
+            }
+            if (fsp === null) { return t }
+            var fl = t.slice(0)
+            while (fl.length < fsp.e) { fl.push(null) }
+            for (i = fsp.b; i < fsp.e; i++) { fl[i] = blk == null ? args[0] : blockCall(blk, [i]) }
             return arrReplace(t, fl)
         }
         if (name == "assoc") {

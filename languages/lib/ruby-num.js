@@ -166,3 +166,79 @@ function rbnStrToDbl(s, badcheck) {
     }
     return r2["v"]
 }
+
+// ----- the half: keyword of #round (numeric.c, rb_num_get_rounding_option) -----
+// The mode letters the digit rounders share: "r" rounds a tie away from zero (the
+// default, half: :up), "re" to the even neighbour, "rd" towards zero. "" for a
+// name that is no mode, which the caller raises as ArgumentError.
+function rbnHalfMode(name) {
+    if (name == "" || name == "up") { return "r" }
+    if (name == "even") { return "re" }
+    if (name == "down") { return "rd" }
+    return ""
+}
+
+// round_half_even / round_half_down of numeric.c: x * s rounded to an integral
+// double under mode "re" / "rd". The tests of (f + 0.5) / s and (f - 0.5) / s are
+// MRI's correction for a product that rounded to a midpoint x does not reach.
+function rbnRoundHalf(x, s, mode) {
+    var xs = x * s
+    var f = 0
+    var d = 0
+    if (mode == "rd") {
+        f = Math.trunc(xs)
+        d = xs - f
+        if (d >= 0.5) { f = f + 1 } else if (d <= 0 - 0.5) { f = f - 1 }
+        if (x > 0 && (f - 0.5) / s >= x) { f = f - 1 }
+        if (x < 0 && (f + 0.5) / s <= x) { f = f + 1 }
+        return f
+    }
+    if (x > 0) {
+        f = Math.floor(xs)
+        d = xs - f
+        if (d > 0.5) { d = 1 } else if (d == 0.5 || (f + 0.5) / s <= x) { d = f % 2 } else { d = 0 }
+        return f + d
+    }
+    if (x < 0) {
+        f = Math.ceil(xs)
+        d = f - xs
+        if (d > 0.5) { d = 1 } else if (d == 0.5 || (f - 0.5) / s >= x) { d = (0 - f) % 2 } else { d = 0 }
+        return f - d
+    }
+    return x
+}
+
+// One step of Array#sum's Kahan-Babuska summation (ary_add_one in array.c):
+// st.f is the running sum, st.c the compensation answered as f + c at the end. A
+// NaN sticks, and infinities of opposite signs make one.
+function rbnKahan(st, x) {
+    var f = st.f
+    if (f !== f) { return }
+    if (x !== x || (x - x !== 0 && f - f === 0)) {
+        st.f = x
+        return
+    }
+    if (x - x !== 0) {
+        if ((x > 0) != (f > 0)) { st.f = x - x } else { st.f = x }
+        return
+    }
+    if (f - f !== 0) { return }
+    var t = f + x
+    if (Math.abs(f) >= Math.abs(x)) { st.c = st.c + ((f - t) + x) } else { st.c = st.c + ((x - t) + f) }
+    st.f = t
+}
+
+// Whether an Integer rounded at a negative ndigits moves away from zero, given the
+// kept digits (head) and the dropped ones (tail, not all zero): past the midpoint
+// always, at it by the mode - "r" away, "rd" never, "re" to an even last digit.
+function rbnHalfAway(mode, head, tail) {
+    var c = tail.charCodeAt(0) - 48
+    if (c != 5 || mode == "r") { return c >= 5 }
+    var i = 1
+    while (i < tail.length) {
+        if (tail.charAt(i) != "0") { return true }
+        i = i + 1
+    }
+    if (mode == "rd" || head.length == 0) { return false }
+    return (head.charCodeAt(head.length - 1) - 48) % 2 == 1
+}

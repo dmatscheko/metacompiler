@@ -4611,6 +4611,47 @@ def s104
   check("wb104c", r == 6 && r2.nil? && r3 == :done)
 end
 
+# ===== SECTION 105: Array#insert / fill / slice / uniq / max_by / flatten!, Hash#each mutation, !~, round(half:), sum, fdiv =====
+# insert counts a negative position from after the last element and pads with nil;
+# fill takes a start, a length or a range; slice(start, len) is nil out of range;
+# uniq takes a block; max_by answers the first of ties and takes n; flatten!
+# answers nil when nothing changed. Hash#each skips a deleted entry and refuses a
+# new key. !~ is the negated match; round's half: is up, even or down; Array#sum
+# compensates (Kahan-Babuska) once a Float is in; Integer#fdiv by a Bignum is
+# exact. /usr/bin/ruby 2.6 settles each.
+def s105
+  v = [1, 2, 3, 4]
+  ix = [-1, -2, 3, -4]
+  check("in105a", [1, 2].insert(ix[0], :b) == [1, 2, :b] && [1, 2].insert(ix[1], :z) == [1, :z, 2] &&
+        [1, 2].insert(ix[2], 9) == [1, 2, nil, 9])
+  e1 = begin; [1, 2].insert(ix[3], :w); rescue IndexError => e; e.message; end
+  check("in105b", e1 == "index -4 too small for array; minimum: -3")
+  check("fl105c", v.dup.fill(9, 0, 2) == [9, 9, 3, 4] && v.dup.fill(9, 3, 5) == [1, 2, 3, 9, 9, 9, 9, 9] &&
+        v.dup.fill(9, -2, 1) == [1, 2, 9, 4] && v.dup.fill(9, 1..2) == [1, 9, 9, 4] && v.dup.fill(2) { |i| i * 10 } == [1, 2, 20, 30])
+  b = [1, 2, 3, 4, 5]
+  check("sl105d", b.slice(6, 0).nil? && b.slice(-6, 1).nil? && b.slice(2, -1).nil? && b.slice(5, 1) == [])
+  w = %w[a bb cc d]
+  check("ub105e", (1..6).to_a.uniq { |x| x % 3 } == [1, 2, 3] && w.max_by { |s| s.size } == "bb" &&
+        %w[a bb ccc d].max_by(2) { |s| s.size } == ["ccc", "bb"] && [1].flatten!.nil? && [[1]].flatten! == [1])
+  h = {a: 1, b: 2, c: 3}
+  seen = []
+  h.each { |k, x| seen << k; h.delete(:b) if k == :a }
+  h2 = {a: 1}
+  e2 = begin; h2.each { |k, x| h2[:z] = 2 }; rescue RuntimeError => e; e.message; end
+  check("he105f", seen == [:a, :c] && h == {a: 1, c: 3} && e2 == "can't add a new key into hash during iteration" && h2 == {a: 1})
+  s = ["abc", "xyz"]
+  check("nm105g", (s[0] !~ /z/) == true && (s[1] !~ /z/) == false)
+  f = [2.5, -2.5, 3.5, 2.665, 0.125]
+  check("rh105h", f[0].round(half: :even) == 2 && f[0].round(half: :down) == 2 && f[1].round(half: :even) == -2 &&
+        f[2].round(half: :down) == 3 && f[3].round(2, half: :even) == 2.66 && f[4].round(2, half: :down) == 0.12 &&
+        25.round(-1, half: :even) == 20 && 35.round(-1, half: :down) == 30 && f[0].round == 3)
+  e3 = begin; f[0].round(half: :foo); rescue ArgumentError => e; e.message; end
+  check("rh105i", e3 == "invalid rounding mode: foo")
+  check("su105j", [0.1, 0.2, 0.3].sum == 0.6 && [1e100, 1.0, -1e100].sum == 1.0 && [3, 0.1, 0.2].sum == 3.3)
+  n = [10**30, 10**29]
+  check("fd105k", n[0].fdiv(n[1]) == 10.0)
+end
+
 s39() # SECTION-CALL 39
 s40() # SECTION-CALL 40
 s41() # SECTION-CALL 41
@@ -4677,5 +4718,6 @@ s101() # SECTION-CALL 101
 s102() # SECTION-CALL 102
 s103() # SECTION-CALL 103
 s104() # SECTION-CALL 104
+s105() # SECTION-CALL 105
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

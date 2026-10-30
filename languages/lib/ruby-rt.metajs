@@ -119,6 +119,7 @@ import "./ruby-num.js"
 
 // String#split, #succ and the other string.c algorithms shared with the interpreter.
 import "./ruby-str.js"
+import "./ruby-arr.js"
 
 // The shared layer-2 runtime: the externs every language implements identically,
 // parameterised by the rtk* hooks below.
@@ -796,11 +797,8 @@ function rbABigMethod(t, name, args) {
     // 10**-ndigits, which past 2**53 has to be exact. #truncate is one of the
     // four.
     if (name == "floor" || name == "ceil" || name == "round" || name == "truncate") {
-        var bnd = 0
-        if (args.length > 0) { bnd = Math.trunc(rbToF(args[0])) }
-        var bmd = "r"
-        if (name == "floor") { bmd = "f" } else if (name == "ceil") { bmd = "c" } else if (name == "truncate") { bmd = "t" }
-        return rbNumDigitOp(0, t, true, bmd, bnd)
+        var bra = rbRoundArgs(name, args)
+        return rbNumDigitOp(0, t, true, bra["mode"], bra["nd"])
     }
     if (name == "to_f") { return rbMkFlo(rbABigToF(t)) }
     if (name == "abs" || name == "magnitude") { return rtABigNarrow(rbABigAbs(t)) }
@@ -984,11 +982,16 @@ function rbCRound(v) {
 // is at or past the midpoint whatever the scaled product said. That correction is
 // why rtExactDec is NOT used here - the true decimal expansion would answer 2.67.
 // A zero result carries the receiver's sign (-0.05.ceil(1) is -0.0 in MRI).
-function rbFloDigitRound(x, nd) {
+function rbFloDigitRound(x, nd, mode) {
     var be = rbFloBinExp(x)
     if (rbFloRoundOver(nd, be)) { return x }
     if (rbFloRoundUnder(nd, be)) { return 0 }
     var s = rbPow10(nd)
+    if (mode != "r") {
+        var h = rbnRoundHalf(x, s, mode) / s
+        if (h == 0) { return rbZeroSign(x) }
+        return h
+    }
     var f = rbCRound(x * s)
     if (x > 0) {
         if ((f + 0.5) / s <= x) { f = f + 1 }
@@ -1094,7 +1097,7 @@ function rbIntDigitOp(v, k, mode) {
     var away = false
     // Mode "t" is TRUNCATION and never carries: 1234.truncate(-2) is 1200.
     if (!zeroTail && mode != "t") {
-        if (mode == "r") { away = tail.charCodeAt(0) - 48 >= 5 }
+        if (mode.charAt(0) == "r") { away = rbnHalfAway(mode, head, tail) }
         else if (mode == "f") { away = neg }
         else { away = !neg }
     }
@@ -1128,7 +1131,7 @@ function rbNumDigitOp(t, big, isInt, mode, nd) {
     if (nd > 0) {
         if (t !== t || t - t !== 0) { return rbMkFlo(t) }
         if (t == 0) { return rbMkFlo(t) }
-        if (mode == "r") { return rbMkFlo(rbFloDigitRound(t, nd)) }
+        if (mode.charAt(0) == "r") { return rbMkFlo(rbFloDigitRound(t, nd, mode)) }
         if (mode == "f") { return rbMkFlo(rbFloDigitFloor(t, nd)) }
         // #truncate at a POSITIVE ndigits is toward zero: floor above, ceil below.
         if (mode == "t") {
@@ -1144,13 +1147,36 @@ function rbNumDigitOp(t, big, isInt, mode, nd) {
     // would give.
     if (nd == 0) {
         if (mode == "r") { return rbIntFromF(rbCRound(t)) }
+        if (mode.charAt(0) == "r") { return rbIntFromF(rbnRoundHalf(t, 1, mode)) }
         if (mode == "f") { return rbIntFromF(Math.floor(t)) }
         if (mode == "t") { return rbIntFromF(Math.trunc(t)) }
         return rbIntFromF(Math.ceil(t))
     }
     var w = 0
-    if (mode == "r" || mode == "t") { w = Math.trunc(t) } else if (mode == "f") { w = Math.floor(t) } else { w = Math.ceil(t) }
+    if (mode.charAt(0) == "r" || mode == "t") { w = Math.trunc(t) } else if (mode == "f") { w = Math.floor(t) } else { w = Math.ceil(t) }
     return rbIntDigitOp(rbIntFromF(w), 0 - nd, mode)
+}
+
+// #floor / #ceil / #round / #truncate's arguments: [ndigits] [half: :up / :even /
+// :down], as {nd, mode}. Twin of roundArgs in ruby-interpreter.abnf.
+function rbRoundArgs(name, args) {
+    var n = args.length
+    var mode = "r"
+    if (name == "floor") { mode = "f" } else if (name == "ceil") { mode = "c" } else if (name == "truncate") { mode = "t" }
+    if (n > 0 && rbIsDict(args[n - 1])) {
+        var hi = rbDictFind(args[n - 1]["keys"], rbSym("half"))
+        if (hi >= 0 && name == "round") {
+            var hv = args[n - 1]["vals"][hi]
+            var hn = ""
+            if (rbIsSym(hv)) { hn = hv["s"] } else if (!rtIsNil(hv)) { hn = rbStr(hv) }
+            mode = rbnHalfMode(hn)
+            if (mode == "") { rbRaiseErr("round", "ArgumentError", "invalid rounding mode: " + hn) }
+        }
+        n = n - 1
+    }
+    var nd = 0
+    if (n > 0) { nd = Math.trunc(rbToF(args[0])) }
+    return {nd: nd, mode: mode}
 }
 
 // x - q*y, correctly rounded as if ONE fused multiply-add had computed it.
@@ -1712,7 +1738,7 @@ function rbBits64(op, a, b) {
 function rbIntFdiv(a, b) {
     var x = rbToF(a)
     var y = rbToF(b)
-    if ((x - x == 0 && y - y == 0) || !(typeof b == "number" || rbIsBig(b)) || y == 0) { return rbFdivSign(x / y, x, y) }
+    if ((x - x == 0 && y - y == 0 && !rbIsBig(b)) || !(typeof b == "number" || rbIsBig(b)) || y == 0) { return rbFdivSign(x / y, x, y) }
     var na = rbNumCmp(a, 0) < 0
     var nb = rbNumCmp(b, 0) < 0
     var pa = anytype
@@ -5209,10 +5235,9 @@ function rbNumMethod(t, name, args) {
     // one answers a Float (and does not raise on an infinity); 0 and negatives
     // answer an Integer. rbNumDigitOp is the whole rule.
     if (name == "floor" || name == "ceil" || name == "round" || name == "truncate") {
-        var nd = 0
-        if (args.length > 0) { nd = Math.trunc(rbToF(args[0])) }
-        var md = "r"
-        if (name == "floor") { md = "f" } else if (name == "ceil") { md = "c" } else if (name == "truncate") { md = "t" }
+        var ra = rbRoundArgs(name, args)
+        var nd = ra["nd"]
+        var md = ra["mode"]
         // A Rational stays EXACT at every ndigits - see rbRatDigitOp.
         if (rbIsRat(t)) { return rbRatDigitOp(t, md, nd) }
         return rbNumDigitOp(x, null, isInt, md, nd)
@@ -5678,6 +5703,30 @@ function rbMSort(a, blk, byKey) {
 }
 // The decorate-sort step of sort_by / min_by / max_by: each element paired with
 // its block value, stably sorted on that key.
+// Hash#each / #each_pair. An entry deleted before it is reached is not yielded;
+// a key ADDED by the block is MRI's RuntimeError, and is taken out again. Twin of
+// hashEach in ruby-interpreter.abnf.
+function rbHashEach(keys, vals, blk) {
+    var i = 0
+    var left = keys.length
+    while (i < keys.length) {
+        var k = anytype
+        k = keys[i]
+        var n0 = keys.length
+        if (left == 0) { rbRaiseErr("each", "RuntimeError", "can't add a new key into hash during iteration") }
+        left = left - 1
+        rbCall2(blk, rbKeyOut(k), vals[i])
+        if (keys.length > n0) {
+            while (keys.length > n0) {
+                keys.pop()
+                vals.pop()
+            }
+            rbRaiseErr("each", "RuntimeError", "can't add a new key into hash during iteration")
+        }
+        if (i < keys.length && keys[i] === k) { i = i + 1 }
+    }
+    return undefined
+}
 function rbArrKeyed(t, blk) {
     var pairs = []
     var i = 0
@@ -6149,10 +6198,7 @@ function rbHashMethod(o, keys, vals, name, args) {
     }
     if (name == "each_pair") {
         if (blk === null) { return rbEnumAt(rbMkEnum(rbHashPairs(keys, vals)), o, name, args) }
-        while (i < keys.length) {
-            rbCall2(blk, rbKeyOut(keys[i]), vals[i])
-            i = i + 1
-        }
+        rbHashEach(keys, vals, blk)
         return o
     }
     if (name == "each_key") {
@@ -6360,17 +6406,24 @@ function rbArrayMethod(t, name, args) {
     // uniq is eql?/hash, NOT ==: `[1, 1.0].uniq` keeps BOTH in MRI, because
     // 1.eql?(1.0) is false across classes. index and include? are ==, which is
     // why they do not share this test.
+    // With a block, two elements are duplicates when the block answers eql? values.
     if (name == "uniq") {
         var uq = []
+        var uk = []
         var ui = 0
         while (ui < t.length) {
+            var ukey = anytype
+            ukey = blk === null ? t[ui] : rbCall1(blk, t[ui])
             var dup = false
             var uj = 0
-            while (uj < uq.length) {
-                if (rbEql(uq[uj], t[ui])) { dup = true; break }
+            while (uj < uk.length) {
+                if (rbEql(uk[uj], ukey)) { dup = true; break }
                 uj = uj + 1
             }
-            if (!dup) { uq.push(t[ui]) }
+            if (!dup) {
+                uq.push(t[ui])
+                uk.push(ukey)
+            }
             ui = ui + 1
         }
         return uq
@@ -6442,20 +6495,37 @@ function rbArrayMethod(t, name, args) {
     // `["b","a"].sum` is a TypeError, not "0ba". The refusal is only against a
     // NUMERIC accumulator - `["a","b"].sum("")` is "ab" and `[[1],[2]].sum([])` is
     // [1,2]. A catchable TypeError, since MRI's is rescuable.
+    // A Float meeting a real sum switches to Kahan-Babuska (rbnKahan). Twin of the
+    // sum arm in ruby-interpreter.abnf.
     if (name == "sum") {
         var acc = anytype
         acc = nPos > 0 ? args[0] : 0
+        var ks = anytype
+        ks = null
         var k = 0
         while (k < t.length) {
             var sv = anytype
             sv = blk === null ? t[k] : rbCall1(blk, t[k])
+            k = k + 1
+            var real = typeof sv == "number" || rbIsFlo(sv) || rbIsBig(sv) || rbIsRat(sv)
+            if (ks === null && rbIsFlo(sv) && (typeof acc == "number" || rbIsFlo(acc) || rbIsBig(acc) || rbIsRat(acc))) {
+                ks = {f: rbToF(acc), c: 0}
+            }
+            if (ks !== null && real) {
+                rbnKahan(ks, rbToF(sv))
+                continue
+            }
+            if (ks !== null) {
+                acc = rbMkFlo(ks["f"])
+                ks = null
+            }
             if (rbIsNum(acc) && !rbIsNum(sv)) {
                 js_rraise(rbBuiltinClass("TypeError"),
                           rbCmpName(sv) + " can't be coerced into " + rbClassName(acc))
             }
             acc = rbBin("+", acc, sv)
-            k = k + 1
         }
+        if (ks !== null) { return rbMkFlo(ks["f"] + ks["c"]) }
         return acc
     }
     // ----- the rest of the Array / Enumerable surface -----
@@ -6520,11 +6590,28 @@ function rbArrayMethod(t, name, args) {
         }
         return best
     }
+    // The FIRST of equal keys; with n, the n smallest / largest, ties in their
+    // original order. Twin of the min_by arm in ruby-interpreter.abnf.
     if (name == "min_by" || name == "max_by") {
-        if (t.length == 0) { return null }
         var kp = rbArrKeyed(t, blk)
-        if (name == "min_by") { return kp[0][1] }
-        return kp[kp.length - 1][1]
+        if (name == "max_by") {
+            var kd = []
+            var kj = kp.length - 1
+            while (kj >= 0) {
+                var kg = kj
+                while (kg > 0 && rbCmp(kp[kg - 1][0], kp[kj][0]) == 0) { kg = kg - 1 }
+                var kq = kg
+                while (kq <= kj) {
+                    kd.push(kp[kq])
+                    kq = kq + 1
+                }
+                kj = kg - 1
+            }
+            kp = kd
+        }
+        if (nPos > 0) { return rbUndecorate(rbArrSub(kp, 0, Math.trunc(rbToF(args[0])))) }
+        if (kp.length == 0) { return null }
+        return kp[0][1]
     }
     if (name == "minmax") {
         if (t.length == 0) { return [null, null] }
@@ -6586,6 +6673,10 @@ function rbArrayMethod(t, name, args) {
         var fdepth = nPos == 0 ? 0 - 1 : Math.trunc(rbToF(args[0]))
         var flat = rbArrFlat(t, fdepth, [])
         if (name == "flatten") { return flat }
+        // flatten! answers nil when there was nothing to flatten.
+        var fn = 0
+        while (fn < t.length && !rbIsArr(t[fn])) { fn = fn + 1 }
+        if (fn == t.length) { return null }
         return rbArrReplace(t, flat)
     }
     if (name == "compact" || name == "compact!") {
@@ -6904,24 +6995,18 @@ function rbArrayMethod(t, name, args) {
             return js_rsubrange(t, rr["begin"], rr["end"], rr["excl"])
         }
         var six = rbArrNorm(t, rbPosAt(args, nPos, 0))
-        if (nPos > 1) { return rbArrSub(t, six, Math.trunc(rbToF(args[1]))) }
+        if (nPos > 1) { return rbArrSubseq(t, args[0], args[1]) }
         if (six >= 0 && six < t.length) { return t[six] }
         return null
     }
+    // insert pads past the end with nil and counts a negative position from after
+    // the last element. Twin of the insert arm in ruby-interpreter.abnf.
     if (name == "insert") {
-        var iix = rbArrNorm(t, rbPosAt(args, nPos, 0))
-        var ins = rbArrSub(t, 0, iix)
-        var ik = 1
-        while (ik < nPos) {
-            ins.push(args[ik])
-            ik = ik + 1
-        }
-        var im = iix
-        while (im < t.length) {
-            ins.push(t[im])
-            im = im + 1
-        }
-        return rbArrReplace(t, ins)
+        if (nPos < 2) { return t }
+        var ip0 = Math.trunc(rbToF(args[0]))
+        var iix = rbaInsertPos(t.length, ip0)
+        if (iix < 0) { rbRaiseErr("insert", "IndexError", "index " + ip0 + " too small for array; minimum: " + (0 - t.length - 1)) }
+        return rbArrReplace(t, rbaSpliced(t, iix, rbArrSub(args, 1, nPos - 1)))
     }
     // delete answers the value it removed (nil when it removed nothing), while
     // delete_at answers the element that was at that index.
@@ -7003,11 +7088,33 @@ function rbArrayMethod(t, name, args) {
         }
         return t
     }
+    // fill(v [, start [, length]]), fill(v, range) and the block forms (rbaFillSpan).
+    // Twin of the fill arm in ruby-interpreter.abnf.
     if (name == "fill") {
-        var fl = []
-        var fk = 0
-        while (fk < t.length) {
-            if (blk === null) { fl.push(rbPosAt(args, nPos, 0)) } else { fl.push(rbCall1(blk, fk)) }
+        var f0 = blk === null ? 1 : 0
+        var fsp = anytype
+        var fa0 = anytype
+        fa0 = rbPosAt(args, nPos, f0)
+        if (rbIsRange(fa0)) {
+            var fb = rtIsNil(fa0["begin"]) ? 0 : Math.trunc(rbToF(fa0["begin"]))
+            if (fb < 0) { fb = fb + t.length }
+            var fe = rtIsNil(fa0["end"]) ? t.length : Math.trunc(rbToF(fa0["end"]))
+            if (fe < 0) { fe = fe + t.length }
+            if (fa0["excl"] !== true && !rtIsNil(fa0["end"])) { fe = fe + 1 }
+            fsp = rbaFillSpan(t.length, fb, true, fe - fb < 0 ? 0 : fe - fb, true)
+        } else {
+            var fa1 = anytype
+            fa1 = rbPosAt(args, nPos, f0 + 1)
+            var hb = !rtIsNil(fa0)
+            var hl = !rtIsNil(fa1)
+            fsp = rbaFillSpan(t.length, hb ? Math.trunc(rbToF(fa0)) : 0, hb, hl ? Math.trunc(rbToF(fa1)) : 0, hl)
+        }
+        if (fsp === null) { return t }
+        var fl = rbArrSub(t, 0, t.length)
+        while (fl.length < fsp["e"]) { fl.push(null) }
+        var fk = fsp["b"]
+        while (fk < fsp["e"]) {
+            if (blk === null) { fl[fk] = rbPosAt(args, nPos, 0) } else { fl[fk] = rbCall1(blk, fk) }
             fk = fk + 1
         }
         return rbArrReplace(t, fl)
@@ -7515,11 +7622,7 @@ function rbMethod(target, name, args) {
                 // things.
                 var eblk = rbBlockOf(args)
                 if (eblk === null) { return rbEnumAt(rbMkEnum(rbHashPairs(keys, vals)), target, name, args) }
-                var e = 0
-                while (e < keys.length) {
-                    rbCall2(eblk, rbKeyOut(keys[e]), vals[e])
-                    e = e + 1
-                }
+                rbHashEach(keys, vals, eblk)
                 return target
             }
             // Hash#default is the value Hash.new(v) recorded; a hash built with a
@@ -10381,5 +10484,6 @@ function js_rxget(o, k) {
     return js_rget(o, k)
 }
 
-// The =~ operator.
+// The =~ and !~ operators.
 function js_rxmatch(l, r) { return rbRxMatchOp(l, r) }
+function js_rxnmatch(l, r) { return rbRxMatchOp(l, r) === null }

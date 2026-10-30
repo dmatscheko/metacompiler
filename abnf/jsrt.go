@@ -4877,7 +4877,7 @@ func rubyPow10(nd int) float64 {
 // That correction is why the exact decimal expansion is NOT used here - it would
 // answer 2.67, which is the true value and not MRI's. A zero result carries the
 // receiver's sign (-0.05.ceil(1) is -0.0 in MRI).
-func rubyFloDigitRound(x float64, nd int) float64 {
+func rubyFloDigitRound(x float64, nd int, mode byte) float64 {
 	_, be := math.Frexp(x)
 	if rubyFloRoundOver(nd, be) {
 		return x
@@ -4886,6 +4886,12 @@ func rubyFloDigitRound(x float64, nd int) float64 {
 		return 0
 	}
 	s := rubyPow10(nd)
+	if mode != 'r' {
+		if h := rubyRoundHalf(x, s, mode) / s; h != 0 {
+			return h
+		}
+		return math.Copysign(0, x)
+	}
 	f := math.Round(x * s)
 	if x > 0 {
 		if (f+0.5)/s <= x {
@@ -5021,8 +5027,8 @@ func (rt *jsrt) rubyIntDigitOp(v interface{}, k int, mode byte) interface{} {
 	// Mode 't' is TRUNCATION and never carries: 1234.truncate(-2) is 1200.
 	if !zeroTail && mode != 't' {
 		switch mode {
-		case 'r':
-			away = tail[0] >= '5'
+		case 'r', 'e', 'd':
+			away = rubyHalfAway(mode, head, tail)
 		case 'f':
 			away = neg
 		default:
@@ -5069,8 +5075,8 @@ func (rt *jsrt) rubyNumDigitOp(t float64, big *jsBigInt, isInt bool, mode byte, 
 			return jsFlo{f: t}
 		}
 		switch mode {
-		case 'r':
-			return jsFlo{f: rubyFloDigitRound(t, nd)}
+		case 'r', 'e', 'd':
+			return jsFlo{f: rubyFloDigitRound(t, nd, mode)}
 		case 'f':
 			return jsFlo{f: rubyFloDigitFloor(t, nd)}
 		case 't':
@@ -5092,6 +5098,8 @@ func (rt *jsrt) rubyNumDigitOp(t float64, big *jsBigInt, isInt bool, mode byte, 
 		switch mode {
 		case 'r':
 			return rt.rubyIntFromF(math.Round(t))
+		case 'e', 'd':
+			return rt.rubyIntFromF(rubyRoundHalf(t, 1, mode))
 		case 'f':
 			return rt.rubyIntFromF(math.Floor(t))
 		case 't':
@@ -6720,19 +6728,7 @@ func (rt *jsrt) rubyNumMethod(t interface{}, name string, args []interface{}) (i
 	// one answers a Float (and does not raise on an infinity); 0 and negatives
 	// answer an Integer. rubyNumDigitOp is the whole rule.
 	case "floor", "ceil", "round", "truncate":
-		nd := 0
-		if len(args) > 0 {
-			nd = int(math.Trunc(rubyToF(args[0])))
-		}
-		mode := byte('r')
-		switch name {
-		case "floor":
-			mode = 'f'
-		case "ceil":
-			mode = 'c'
-		case "truncate":
-			mode = 't'
-		}
+		nd, mode := rt.rubyRoundArgs(name, args)
 		// A Rational stays EXACT at every ndigits - see rubyRatDigitOp.
 		if r, ok := t.(jsRat); ok {
 			return rt.rubyRatDigitOp(r, mode, nd), true
@@ -6838,19 +6834,7 @@ func (rt *jsrt) rubyBigMethod(t *jsBigInt, name string, args []interface{}) (int
 	// ...at every ndigits >= 0; a NEGATIVE one rounds to a multiple of
 	// 10**-ndigits, which past 2**53 has to be exact.
 	case "floor", "ceil", "round", "truncate":
-		nd := 0
-		if len(args) > 0 {
-			nd = int(math.Trunc(rubyToF(args[0])))
-		}
-		mode := byte('r')
-		switch name {
-		case "floor":
-			mode = 'f'
-		case "ceil":
-			mode = 'c'
-		case "truncate":
-			mode = 't'
-		}
+		nd, mode := rt.rubyRoundArgs(name, args)
 		return rt.rubyNumDigitOp(0, t, true, mode, nd), true
 	case "abs", "magnitude":
 		return rt.rubyBigNarrow(new(big.Int).Abs(t.v)), true
@@ -11070,9 +11054,7 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 				if eblk == nil {
 					return rubyEnumAt(rubyMkEnum(rt.rubyHashPairs(keys, vals)), o, name, epos)
 				}
-				for i := range keys.elems {
-					rt.call(eblk, jsUndef, []interface{}{rt.rubyKeyOut(keys.elems[i]), vals.elems[i]})
-				}
+				rt.rubyHashEach(keys, vals, eblk)
 				return o
 			case "default":
 				// Hash#default is the value Hash.new(v) recorded; a hash built
@@ -11968,9 +11950,7 @@ func (rt *jsrt) rubyHashMethod(o *jsObject, keys, vals *jsArray, name string, ar
 		if blk == nil {
 			return rubyEnumAt(rubyMkEnum(rt.rubyHashPairs(keys, vals)), o, name, pos), true
 		}
-		for i := range keys.elems {
-			rt.call(blk, jsUndef, []interface{}{rt.rubyKeyOut(keys.elems[i]), vals.elems[i]})
-		}
+		rt.rubyHashEach(keys, vals, blk)
 		return o, true
 	case "each_key":
 		for _, k := range append([]interface{}{}, keys.elems...) {
@@ -12454,17 +12434,24 @@ func (rt *jsrt) rubyArrayMethod(t *jsArray, name string, args []interface{}) int
 		// uniq is eql?/hash, NOT ==: `[1, 1.0].uniq` keeps BOTH in MRI, because
 		// 1.eql?(1.0) is false across classes. index and include? above are ==,
 		// which is why they do not share this test.
-		out := &jsArray{}
+		// With a block, two elements are duplicates when the block answers eql?
+		// values for them.
+		out, seen := &jsArray{}, []interface{}{}
 		for _, e := range t.elems {
+			key := e
+			if blk != nil {
+				key = rt.call(blk, jsUndef, []interface{}{e})
+			}
 			dup := false
-			for _, k := range out.elems {
-				if rt.rubyEql(k, e) {
+			for _, k := range seen {
+				if rt.rubyEql(k, key) {
 					dup = true
 					break
 				}
 			}
 			if !dup {
 				out.elems = append(out.elems, e)
+				seen = append(seen, key)
 			}
 		}
 		return out
@@ -12529,16 +12516,32 @@ func (rt *jsrt) rubyArrayMethod(t *jsArray, name string, args []interface{}) int
 		if len(pos) > 0 {
 			s = pos[0]
 		}
+		// A Float meeting a real sum switches to Kahan-Babuska (rubyKahan).
+		kahan, kf, kc := false, 0.0, 0.0
 		for _, e := range t.elems {
 			v := e
 			if blk != nil {
 				v = rt.call(blk, jsUndef, []interface{}{e})
+			}
+			_, vFlo := v.(jsFlo)
+			if !kahan && vFlo && rubyIsReal(s) {
+				kahan, kf, kc = true, rubyToF(s), 0
+			}
+			if kahan && rubyIsReal(v) {
+				kf, kc = rubyKahan(kf, kc, rubyToF(v))
+				continue
+			}
+			if kahan {
+				s, kahan = jsFlo{f: kf}, false
 			}
 			if rubyIsNum(s) && !rubyIsNum(v) {
 				panic(&jsThrown{value: rt.rubyExc(rt.rubyBuiltinClass("TypeError"),
 					[]interface{}{rt.rubyCmpName(v) + " can't be coerced into " + rubyClassName(s)})})
 			}
 			s = rt.rubyBin("+", s, v)
+		}
+		if kahan {
+			return jsFlo{f: kf + kc}
 		}
 		return s
 	// ----- the rest of the Array / Enumerable surface -----
@@ -12611,15 +12614,34 @@ func (rt *jsrt) rubyArrayMethod(t *jsArray, name string, args []interface{}) int
 			}
 		}
 		return best
+	// The FIRST of equal keys; with n, the n smallest / largest, ties in their
+	// original order. Twin of the min_by arm in ruby-interpreter.abnf.
 	case "min_by", "max_by":
-		if len(t.elems) == 0 {
+		pairs := rt.rubyArrKeyed(t, blk)
+		key := func(i int) interface{} { return pairs[i].(*jsArray).elems[0] }
+		if name == "max_by" {
+			desc := []interface{}{}
+			for j := len(pairs) - 1; j >= 0; {
+				g := j
+				for g > 0 && rt.rubyCmp(key(g-1), key(j)) == 0 {
+					g--
+				}
+				desc = append(desc, pairs[g:j+1]...)
+				j = g - 1
+			}
+			pairs = desc
+		}
+		if len(pos) > 0 {
+			n := int(math.Trunc(rubyToF(pos[0])))
+			if n > len(pairs) {
+				n = len(pairs)
+			}
+			return rubyUndecorate(pairs[:n])
+		}
+		if len(pairs) == 0 {
 			return jsNull
 		}
-		pairs := rt.rubyArrKeyed(t, blk)
-		if name == "min_by" {
-			return pairs[0].(*jsArray).elems[1]
-		}
-		return pairs[len(pairs)-1].(*jsArray).elems[1]
+		return pairs[0].(*jsArray).elems[1]
 	case "minmax":
 		if len(t.elems) == 0 {
 			return &jsArray{elems: []interface{}{jsNull, jsNull}}
@@ -12694,7 +12716,13 @@ func (rt *jsrt) rubyArrayMethod(t *jsArray, name string, args []interface{}) int
 		if name == "flatten" {
 			return flat
 		}
-		return rubyArrReplace(t, flat.elems)
+		// flatten! answers nil when there was nothing to flatten.
+		for _, e := range t.elems {
+			if _, isArr := e.(*jsArray); isArr {
+				return rubyArrReplace(t, flat.elems)
+			}
+		}
+		return jsNull
 	case "compact", "compact!":
 		out := &jsArray{}
 		for _, e := range t.elems {
@@ -13037,17 +13065,36 @@ func (rt *jsrt) rubyArrayMethod(t *jsArray, name string, args []interface{}) int
 		}
 		ix := rubyArrNorm(t, argAt(pos, 0))
 		if len(pos) > 1 {
-			return rubyArrSub(t, ix, int(math.Trunc(rubyToF(pos[1]))))
+			return rubyArrSubseq(t, pos[0], pos[1])
 		}
 		if ix >= 0 && ix < len(t.elems) {
 			return t.elems[ix]
 		}
 		return jsNull
+	// insert pads past the end with nil and counts a negative position from after
+	// the last element. Twin of the insert arm in ruby-interpreter.abnf.
 	case "insert":
-		ix := rubyArrNorm(t, argAt(pos, 0))
-		out := append([]interface{}{}, t.elems[:ix]...)
+		if len(pos) < 2 {
+			return t
+		}
+		n, p0 := len(t.elems), int(math.Trunc(rubyToF(pos[0])))
+		ix := p0
+		if p0 < 0 {
+			if p0 < -n-1 {
+				rt.rubyRaiseErr("insert", "IndexError", "index "+jsNumString(float64(p0))+" too small for array; minimum: "+jsNumString(float64(-n-1)))
+			}
+			ix = p0 + n + 1
+		}
+		cut := ix
+		if cut > n {
+			cut = n
+		}
+		out := append([]interface{}{}, t.elems[:cut]...)
+		for len(out) < ix {
+			out = append(out, jsNull)
+		}
 		out = append(out, pos[1:]...)
-		return rubyArrReplace(t, append(out, t.elems[ix:]...))
+		return rubyArrReplace(t, append(out, t.elems[cut:]...))
 	// delete answers the value it removed (nil when it removed nothing), while
 	// delete_at answers the element that was at that index.
 	// delete answers the LAST element it removed - which is not always the
@@ -13114,13 +13161,62 @@ func (rt *jsrt) rubyArrayMethod(t *jsArray, name string, args []interface{}) int
 			}
 		}
 		return t
+	// fill(v [, start [, length]]), fill(v, range) and the block forms. Twin of
+	// the fill arm in ruby-interpreter.abnf (rbaFillSpan).
 	case "fill":
-		out := []interface{}{}
-		for i := range t.elems {
+		f0, n := 1, len(t.elems)
+		if blk != nil {
+			f0 = 0
+		}
+		b, e := 0, n
+		if r, isRng := rubyIsRange(argAt(pos, f0)); isRng {
+			if isUndefOrNull(r.props["begin"]) != true {
+				b = int(math.Trunc(rubyToF(r.props["begin"])))
+			}
+			if b < 0 {
+				b += n
+			}
+			if isUndefOrNull(r.props["end"]) != true {
+				e = int(math.Trunc(rubyToF(r.props["end"])))
+				if e < 0 {
+					e += n
+				}
+				if !rt.truthy(r.props["excl"]) {
+					e++
+				}
+			}
+			if b < 0 {
+				b = 0
+			}
+			if e < b {
+				e = b
+			}
+		} else {
+			if a := argAt(pos, f0); isUndefOrNull(a) != true {
+				if b = int(math.Trunc(rubyToF(a))); b < 0 {
+					if b += n; b < 0 {
+						b = 0
+					}
+				}
+			}
+			e = n
+			if a := argAt(pos, f0+1); isUndefOrNull(a) != true {
+				l := int(math.Trunc(rubyToF(a)))
+				if l < 0 {
+					return t
+				}
+				e = b + l
+			}
+		}
+		out := append([]interface{}{}, t.elems...)
+		for len(out) < e {
+			out = append(out, jsNull)
+		}
+		for i := b; i < e; i++ {
 			if blk != nil {
-				out = append(out, rt.call(blk, jsUndef, []interface{}{float64(i)}))
+				out[i] = rt.call(blk, jsUndef, []interface{}{float64(i)})
 			} else {
-				out = append(out, argAt(pos, 0))
+				out[i] = argAt(pos, 0)
 			}
 		}
 		return rubyArrReplace(t, out)

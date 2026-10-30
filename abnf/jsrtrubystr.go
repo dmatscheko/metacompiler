@@ -1,6 +1,9 @@
 package abnf
 
-import "strings"
+import (
+	"math"
+	"strings"
+)
 
 // Ruby String algorithms of MRI's string.c. Twins of languages/lib/ruby-str.js,
 // which the interpreter includes and layer 2 imports; positions here are code
@@ -401,4 +404,165 @@ func (rt *jsrt) rubySubWith(repl interface{}) func(*rxRe, []rune, *rxMatch) stri
 	}
 	tmpl := rt.rubyStr(repl)
 	return func(re *rxRe, text []rune, m *rxMatch) string { return rubyExpand(re, text, m, tmpl) }
+}
+
+// rubyRoundArgs reads #floor / #ceil / #round / #truncate's arguments: ndigits,
+// and for #round the half: keyword, as the digit rounders' mode byte ('r' half up,
+// 'e' half even, 'd' half down). Twin of rbRoundArgs in lib/ruby-rt.metajs.
+func (rt *jsrt) rubyRoundArgs(name string, args []interface{}) (int, byte) {
+	mode := map[string]byte{"floor": 'f', "ceil": 'c', "truncate": 't'}[name]
+	if mode == 0 {
+		mode = 'r'
+	}
+	n := len(args)
+	var last interface{}
+	if n > 0 {
+		last = args[n-1]
+	}
+	if keys, vals, isDict := dictParts(last); isDict {
+		if i := rt.rubyDictFind(keys, jsSym{s: "half"}); i >= 0 && name == "round" {
+			hn := ""
+			if sy, isSym := vals.elems[i].(jsSym); isSym {
+				hn = sy.s
+			} else if isUndefOrNull(vals.elems[i]) != true {
+				hn = rt.rubyStr(vals.elems[i])
+			}
+			switch hn {
+			case "", "up":
+			case "even":
+				mode = 'e'
+			case "down":
+				mode = 'd'
+			default:
+				rt.rubyRaiseErr("round", "ArgumentError", "invalid rounding mode: "+hn)
+			}
+		}
+		n--
+	}
+	nd := 0
+	if n > 0 {
+		nd = int(math.Trunc(rubyToF(args[0])))
+	}
+	return nd, mode
+}
+
+// rubyRoundHalf is round_half_even ('e') / round_half_down ('d') of numeric.c.
+// Twin of rbnRoundHalf in lib/ruby-num.js.
+func rubyRoundHalf(x, s float64, mode byte) float64 {
+	// float64() keeps Go from fusing x*s into the subtractions below (FMA).
+	xs := float64(x * s)
+	if mode == 'd' {
+		f := math.Round(xs)
+		if x > 0 && (f-0.5)/s >= x {
+			f--
+		}
+		if x < 0 && (f+0.5)/s <= x {
+			f++
+		}
+		return f
+	}
+	if x > 0 {
+		f := math.Floor(xs)
+		d := xs - f
+		if d > 0.5 {
+			d = 1
+		} else if d == 0.5 || (f+0.5)/s <= x {
+			d = math.Mod(f, 2)
+		} else {
+			d = 0
+		}
+		return f + d
+	}
+	if x < 0 {
+		f := math.Ceil(xs)
+		d := f - xs
+		if d > 0.5 {
+			d = 1
+		} else if d == 0.5 || (f-0.5)/s >= x {
+			d = math.Mod(-f, 2)
+		} else {
+			d = 0
+		}
+		return f - d
+	}
+	return x
+}
+
+// rubyHalfAway: whether an Integer rounded at a negative ndigits moves away from
+// zero, the tail of dropped digits not being all zero. Twin of rbnHalfAway in
+// lib/ruby-num.js.
+func rubyHalfAway(mode byte, head, tail string) bool {
+	if tail[0] != '5' || mode == 'r' {
+		return tail[0] >= '5'
+	}
+	if strings.TrimRight(tail[1:], "0") != "" {
+		return true
+	}
+	if mode == 'd' || head == "" {
+		return false
+	}
+	return (head[len(head)-1]-'0')%2 == 1
+}
+
+// rubyIsReal: an Integer, a Float or a Rational - what Array#sum adds as a double
+// once a Float joined the sum.
+func rubyIsReal(v interface{}) bool {
+	switch v.(type) {
+	case float64, jsFlo, *jsBigInt, jsRat:
+		return true
+	}
+	return false
+}
+
+// rubyKahan is one step of Array#sum's Kahan-Babuska summation (ary_add_one in
+// array.c) on the running sum f and compensation c. Twin of rbnKahan in
+// lib/ruby-num.js.
+func rubyKahan(f, c, x float64) (float64, float64) {
+	switch {
+	case math.IsNaN(f):
+		return f, c
+	case math.IsNaN(x), math.IsInf(x, 0) && !math.IsInf(f, 0):
+		return x, c
+	case math.IsInf(x, 0):
+		if (x > 0) != (f > 0) {
+			return math.NaN(), c
+		}
+		return x, c
+	case math.IsInf(f, 0):
+		return f, c
+	}
+	t := f + x
+	if math.Abs(f) >= math.Abs(x) {
+		c += (f - t) + x
+	} else {
+		c += (x - t) + f
+	}
+	return t, c
+}
+
+// rubyHashEach is Hash#each / #each_pair. An entry deleted before it is reached is
+// not yielded; a key ADDED by the block is MRI's RuntimeError, and is taken out
+// again. Twin of rbHashEach in lib/ruby-rt.metajs.
+func (rt *jsrt) rubyHashEach(keys, vals *jsArray, blk interface{}) {
+	added := func() {
+		rt.rubyRaiseErr("each", "RuntimeError", "can't add a new key into hash during iteration")
+	}
+	left := len(keys.elems)
+	for i := 0; i < len(keys.elems); {
+		k := keys.elems[i]
+		n0 := len(keys.elems)
+		if left == 0 {
+			added()
+		}
+		left--
+		rt.call(blk, jsUndef, []interface{}{rt.rubyKeyOut(k), vals.elems[i]})
+		if len(keys.elems) > n0 {
+			keys.elems, vals.elems = keys.elems[:n0], vals.elems[:n0]
+			keys.dropIdx()
+			added()
+		}
+		if i < len(keys.elems) && keys.elems[i] == k {
+			i++
+		}
+	}
 }

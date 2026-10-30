@@ -580,14 +580,15 @@ func (rt *jsrt) rubyRealCall(name string, args interface{}) (string, interface{}
 // Float#nan? / #infinite? / #finite?. #infinite? answers 1, -1 or NIL and not a
 // boolean. The twins are numberMethod in languages/ruby-interpreter.abnf and
 // rbNumMethod in languages/lib/ruby-rt.metajs.
-// Integer#fdiv, exact past the double range: the quotient is formed as an integer
+// Integer#fdiv, exact for a big divisor and past the double range: the quotient is formed as an integer
 // of about 70 bits, rounded once and scaled by a power of two. Twin of intFdiv in
 // languages/ruby-interpreter.abnf (the reasoning is there) and rbIntFdiv in
 // languages/lib/ruby-rt.metajs; the digit counts choose the same scale in all three.
 func rubyIntFdiv(a, b interface{}) float64 {
 	x, y := rubyToF(a), rubyToF(b)
 	bi, isInt := rubyBigOf(b)
-	if (!math.IsInf(x, 0) && !math.IsInf(y, 0)) || !isInt || y == 0 {
+	_, bigB := b.(*jsBigInt)
+	if (!math.IsInf(x, 0) && !math.IsInf(y, 0) && !bigB) || !isInt || y == 0 {
 		return x / y
 	}
 	ai, _ := rubyBigOf(a)
