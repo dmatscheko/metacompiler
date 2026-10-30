@@ -2271,6 +2271,58 @@ int s56(void) {
     return 0;
 }
 
+// ===== SECTION 57: struct and union layout =====
+/* sizeof and _Alignof answer cc's layout (the arm64 ABI): every member at a multiple
+   of its alignment, a bit-field packed into its type's unit unless it would straddle
+   one, an unnamed bit-field adding no alignment, the size rounded up to the largest
+   member alignment. Every expected value was printed by cc. */
+struct s57_ic { int a; char c; };
+struct s57_ci { char c; int a; };
+struct s57_arr { int m[7]; char n[2]; };
+struct s57_mix { char c; short s; int i; long l; };
+struct s57_bits { unsigned a:3; unsigned b:5; };
+struct s57_str { char c; unsigned x:30; unsigned y:4; };
+struct s57_zero { char c; int :0; char d; };
+struct s57_unnamed { char c; int :4; };
+struct s57_anon { char c; struct { char x; int y; }; char e; };
+union s57_u { char c[5]; int i; };
+struct s57_nest { char c; union s57_u u; char d; };
+struct s57_dbl { char c; double d; };
+struct s57_flt { char c; float f; };
+int s57(void) {
+    check(5701, sizeof(struct s57_ic) == 8 && sizeof(struct s57_ci) == 8
+                && sizeof(struct s57_arr) == 32 && sizeof(struct s57_mix) == 16);
+    check(5702, sizeof(struct s57_bits) == 4 && sizeof(struct s57_str) == 12
+                && sizeof(struct s57_zero) == 5 && sizeof(struct s57_unnamed) == 2);
+    check(5703, sizeof(struct s57_anon) == 16 && sizeof(union s57_u) == 8
+                && sizeof(struct s57_nest) == 16 && sizeof(struct s57_dbl) == 16
+                && sizeof(struct s57_flt) == 8);
+    check(5704, _Alignof(struct s57_mix) == 8 && _Alignof(int[4]) == 4 && _Alignof(union s57_u) == 4
+                && _Alignof(struct s57_zero) == 1 && _Alignof(struct s57_unnamed) == 1);
+    /* An array of structs strides by the padded size, and a pointer difference
+       counts elements of it. */
+    struct s57_ic as[6];
+    struct s57_ic *p = as;
+    struct s57_ic *q = p + 5;
+    for (int i = 0; i < 6; i++) { as[i].a = i * 10; as[i].c = 'a' + i; }
+    check(5705, sizeof as == 48 && q - p == 5 && &as[3] - &as[0] == 3 && q->a == 50 && q->c == 'f');
+    struct s57_nest h[2];
+    h[1].u.i = 77; h[1].c = 9; h[1].d = 8;
+    h[0] = h[1];
+    check(5706, &h[1] - &h[0] == 1 && h[0].u.i == 77 && h[0].c == 9 && h[0].d == 8);
+    struct s57_anon v;
+    v.c = 1; v.x = 2; v.y = 3; v.e = 4;
+    struct s57_anon w = v;
+    check(5707, w.c + w.x + w.y + w.e == 10);
+    /* Members of an anonymous union of different widths share one slot. */
+    struct { char c; union { char x; long y; }; char d; } au = { 1 }, av;
+    au.y = 5000000000L;
+    au.d = 3;
+    av = au;
+    check(5708, sizeof au == 24 && av.c == 1 && av.y == 5000000000L && av.d == 3);
+    return 0;
+}
+
 // ===== END SECTIONS =====
 
 int main() {
@@ -2330,6 +2382,7 @@ int main() {
     s54(); // SECTION-CALL 54
     s55(); // SECTION-CALL 55
     s56(); // SECTION-CALL 56
+    s57(); // SECTION-CALL 57
     /* summary: "full: <checks> checks, <failures> failures" */
     putchar('f'); putchar('u'); putchar('l'); putchar('l'); putchar(':'); putchar(' ');
     print_num(nchecks);

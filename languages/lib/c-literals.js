@@ -297,6 +297,55 @@ function cInitIndex(ct, d) {
     return d.at | 0
 }
 
+// The byte size and alignment cc gives a type on this target (LP64 arm64, where
+// long double is a double): what sizeof and _Alignof answer. Neither engine's
+// storage has to be this shape - see ctSize in c-interpreter.abnf and machBytes in
+// c-to-llvm-ir.abnf.
+function ctBytes(ct) {
+    if (ct.k == "ptr" || ct.k == "fnp") return 8
+    if (ct.k == "struct") return structOf(ct.s).bytes
+    if (ct.k == "arr") return ct.n * ctBytes(ct.e)
+    if (ct.k == "void") return 1    // GCC's sizeof(void), which cc also answers
+    return ct.w
+}
+function ctAlign(ct) {
+    if (ct.k == "struct") return structOf(ct.s).align
+    if (ct.k == "arr") return ctAlign(ct.e)
+    return ctBytes(ct)
+}
+function cRoundUp(n, a) { return n % a == 0 ? n : n + a - n % a }
+// cc's layout of a struct or union (C11 6.7.2.1 as the arm64 ABI fixes it): each
+// member at the next multiple of its alignment; a bit-field packed into the bits
+// that follow unless it would straddle a unit of its declared type, when it starts
+// the next unit; a zero-width one only rounding up to such a unit; every member of
+// a union at 0. The alignment is the largest member's - an UNNAMED bit-field counts
+// for nothing - and the size is rounded up to it. ms: [{size, align, bits?, named}].
+// Answers {bytes, align}.
+function cAbiLayout(ms, isUnion) {
+    var bit = 0
+    var end = 0
+    var align = 1
+    for (var i = 0; i < ms.length; i++) {
+        var m = ms[i]
+        var at = isUnion ? 0 : bit
+        var w = m.size * 8
+        if (m.bits == undefined) { at = cRoundUp(at, m.align * 8) }
+        else {
+            w = m.bits
+            var unit = m.size * 8
+            if (w == 0 || (at - at % unit) != (at + w - 1) - (at + w - 1) % unit) at = cRoundUp(at, m.align * 8)
+        }
+        if (m.named && m.align > align) align = m.align
+        if (at + w > end) end = at + w
+        bit = at + w
+    }
+    return {bytes: cRoundUp(cRoundUp(end, 8) / 8, align), align: align}
+}
+// One member of a cAbiLayout list: a declared field of type ct, or (sub) the
+// {bytes, align} of an anonymous struct/union member.
+function cAbiMember(ct, f) { return {size: ctBytes(ct), align: ctAlign(ct), bits: f.bits, named: f.pad != true} }
+function cAbiSub(sub) { return {size: sub.bytes, align: sub.align, named: true} }
+
 // The names declared so far in each enclosing block, innermost last. The tags
 // fill it while they walk the tree, so a second declaration of one name in one
 // block (C11 6.7p3) is a compile error even in code that never runs; a nested

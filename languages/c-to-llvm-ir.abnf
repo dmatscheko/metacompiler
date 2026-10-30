@@ -20,10 +20,11 @@ helper.
 Pointers compile to real addresses (alloca values), arrays to alloca [N x T] plus
 getelementptr, globals to module globals. Structs become real LLVM struct types:
 member access is a getelementptr with a constant field index, nested structs and
-arrays of structs nest the types, and the built-in IR interpreter lays the fields
-out packed (ints 4 bytes, pointers 8). A union is an LLVM struct holding its widest
-member, which every one of its members selects, so they share one address; bit fields
-mask (or sign-extend) on every store. A struct returned by value uses the sret shape
+arrays of structs nest the types, and explicit padding members put every field at
+its alignment, so the built-in IR interpreter (which lays fields out back to back)
+and clang agree on one layout - cc's, for a struct of integers and pointers. A
+union is an LLVM struct holding its widest member, which every one of its members
+selects, so they share one address; bit fields mask (or sign-extend) on every store. A struct returned by value uses the sret shape
 of a real C ABI: the caller allocates the destination and passes it as a hidden first
 pointer parameter. A function pointer is the callee identifier, an i32; since the
 built-in IR interpreter has no indirect call, an indirect call goes through a
@@ -1066,9 +1067,9 @@ SizeofPlace <~~ push(makeSizeofPlace(pop())) ~~>
             = Lvalue !"++" !"--" !"(" ;
 SizeofExpr  <~~ push(makeSizeofExpr(pop())) ~~>
             = UnaryExpr ;
-// _Alignof(type): for the scalar types this machine models, the alignment equals the
-// size, and a pointer aligns to 8 like it is sized.
-AlignOf     <~~ push(makeSizeof(pop())) ~~>
+// _Alignof(type): cc's alignment (ctAlign) - a scalar's size, an array's element's,
+// a struct's or union's largest member's.
+AlignOf     <~~ push(makeAlignof(pop())) ~~>
             = KwAlignof "(" TypeName ")" ;
 // A type name: base plus '*'s, optionally an abstract function-pointer declarator
 // (every function pointer type is the same ctFn) or an array declarator.
@@ -1816,8 +1817,10 @@ KwDefault   = "default" KwEnd ;
     }
     // sizeof(type): a constant of type size_t (unsigned long). The thunk reads a struct
     // tag's size at emit time, so a sizeof may name a tag defined further down.
-    function makeSizeof(ct) {
-        return function(b) { return {b: b, v: kint(ctBytes(ct)), ct: ctSizeT, cv: ctBytes(ct)} }
+    function makeSizeof(ct) { return makeSizeTConst(ctBytes, ct) }
+    function makeAlignof(ct) { return makeSizeTConst(ctAlign, ct) }
+    function makeSizeTConst(of, ct) {
+        return function(b) { return {b: b, v: kint(of(ct)), ct: ctSizeT, cv: of(ct)} }
     }
     // sizeof over a PLACE needs its address, not its value - an array or a struct
     // answers its whole size, which is what 'sizeof a' on a char array reports. The
@@ -2079,14 +2082,6 @@ KwDefault   = "default" KwEnd ;
         if (f == undefined) fail(tagName(sname) + " has no field " + fname)
         return f
     }
-    // The BYTE size behind sizeof (packed layout, no padding).
-    function ctBytes(ct) {
-        if (ct.k == "ptr" || ct.k == "fnp") return 8
-        if (ct.k == "struct") return structOf(ct.s).bytes
-        if (ct.k == "arr") return ct.n * ctBytes(ct.e)
-        if (ct.k == "void") return 1    // GCC's sizeof(void), which cc also answers
-        return ct.w
-    }
     // The size pointer arithmetic steps by: exactly the byte size of ctLTy(ct). The two
     // MUST agree - a gep strides by the LLVM type while a pointer difference divides
     // by this - or 'p + 1 - p' is not 1. A float (carried in an i64) and a function
@@ -2094,12 +2089,18 @@ KwDefault   = "default" KwEnd ;
     function machBytes(ct) {
         if (ct.k == "ptr") return 8
         if (ct.k == "flt") return 8      // every float is carried in a double's cell
-        if (ct.k == "struct") return structOf(ct.s).bytes
+        if (ct.k == "struct") return structOf(ct.s).mbytes
         if (ct.k == "arr") return ct.n * machBytes(ct.e)
         if (ct.k == "fnp") return 4      // a funcId, not an address
         if (ct.k == "void") return 1     // GCC's sizeof(void), and its pointer step
         if (ct.k == "int") return ct.w >= 8 ? 8 : ct.w
         return 4
+    }
+    // The alignment of a cell of ctLTy(ct) - at least the one LLVM gives that type.
+    function machAlign(ct) {
+        if (ct.k == "struct") return structOf(ct.s).malign
+        if (ct.k == "arr") return machAlign(ct.e)
+        return machBytes(ct)
     }
     function ctStruct(sname) { return {k: "struct", s: sname} }
     // n levels of pointer around a base ct (0 levels yields the base itself).
@@ -2110,8 +2111,8 @@ KwDefault   = "default" KwEnd ;
     }
     // The LLVM type of a CELL of this C type - an alloca, a global, an array element,
     // a struct member. Every integer width is spelled honestly, so the storage layout
-    // the module describes IS the C layout (packed, no alignment padding): char is i8,
-    // short i16, int i32, long i64. A VALUE, by contrast, always lives in an i32 or an
+    // the module describes IS the C layout (with the padding defineTag spells out):
+    // char is i8, short i16, int i32, long i64. A VALUE, by contrast, always lives in an i32 or an
     // i64 register (see ctRTy) - which is C's own integer promotion - so a narrow cell
     // is extended on every load (loadCt) and truncated on every store (storeTo).
     function ctLTy(ct) {
@@ -2255,11 +2256,13 @@ KwDefault   = "default" KwEnd ;
         order.push(f.name)
     }
     // A union-like run of member groups: every member selects the SAME parent slot, so
-    // they all share one address, and the slot is typed as the widest member - which is
-    // what makes the storage as large as the widest member. Returns {bytes, wideCt}.
+    // they all share one address, and the slot is typed as the member whose cell is
+    // largest - which is what makes the storage as large as the widest member.
+    // Returns {wideCt, malign, cc}, cc being cc's layout of the members (cAbiLayout).
     function layoutUnionAt(fields, order, groups, name, slot) {
-        var bytes = 0
-        var wideCt = ctInt
+        var wideCt = undefined
+        var malign = 1
+        var ms = []
         for (var i = 0; i < groups.length; i++) {
             var g = groups[i]
             if (g.anonFields != undefined) {
@@ -2267,7 +2270,9 @@ KwDefault   = "default" KwEnd ;
                 // at one parent index, which this one-slot model cannot express.
                 if (g.isUnion != true) fail("an anonymous struct inside a union is not supported (in " + tagName(name) + ")")
                 var r = layoutUnionAt(fields, order, g.anonFields, name, slot)
-                if (r.bytes > bytes) { bytes = r.bytes; wideCt = r.wideCt }
+                if (r.wideCt != undefined && (wideCt == undefined || machBytes(r.wideCt) > machBytes(wideCt))) wideCt = r.wideCt
+                if (r.malign > malign) malign = r.malign
+                ms.push(cAbiSub(r.cc))
                 continue
             }
             var fl = g.fields
@@ -2275,29 +2280,68 @@ KwDefault   = "default" KwEnd ;
                 var f = fl[j]
                 var ct = fieldCt(f)
                 registerField(fields, order, name, f, ct, slot)
-                var by = ctBytes(ct)
-                if (by > bytes) { bytes = by; wideCt = ct }
+                ms.push(cAbiMember(ct, f))
+                if (wideCt == undefined || machBytes(ct) > machBytes(wideCt)) wideCt = ct
+                if (machAlign(ct) > malign) malign = machAlign(ct)
             }
         }
-        return {bytes: bytes, wideCt: wideCt}
+        return {wideCt: wideCt, malign: malign, cc: cAbiLayout(ms, true)}
     }
-    // A struct-like run of member groups: one LLVM member per field, appended to ltys.
+    // The machine layout of a struct under construction: its slot types, the byte
+    // offset the next one lands at and its alignment so far. An explicit [n x i8] pad
+    // slot puts every slot at a multiple of its machAlign and rounds the size up to
+    // the struct's, so llvm.Run's packed layout and clang's natural one coincide - and
+    // a struct of integers and pointers lays out exactly as cc's (cAbiLayout).
+    function mPadTo(L, a) {
+        if (a > L.align) L.align = a
+        var n = cRoundUp(L.off, a) - L.off
+        if (n > 0) { L.ltys.push(llvm.types.NewArray(n, i8)); L.off = L.off + n }
+    }
+    // The machine alignment of a run of member groups, needed before an anonymous
+    // struct member is flattened into its parent.
+    function groupsMAlign(groups) {
+        var a = 1
+        for (var i = 0; i < groups.length; i++) {
+            var g = groups[i]
+            if (g.anonFields != undefined) {
+                var ga = groupsMAlign(g.anonFields)
+                if (ga > a) a = ga
+                continue
+            }
+            for (var j = 0; j < g.fields.length; j++) {
+                var fa = machAlign(fieldCt(g.fields[j]))
+                if (fa > a) a = fa
+            }
+        }
+        return a
+    }
+    // A union slot in the struct under construction, sized to the union's alignment.
+    function mPushUnion(L, r) {
+        mPadTo(L, r.malign)
+        L.ltys.push(ctLTy(r.wideCt))
+        L.off = L.off + machBytes(r.wideCt)
+        mPadTo(L, r.malign)
+    }
+    // A struct-like run of member groups: one LLVM member per field, appended to L.
     // An anonymous struct member is FLATTENED into the parent (its fields simply keep
-    // taking the next slots); an anonymous union member takes a single shared slot.
-    function layoutStructInto(fields, order, groups, name, ltys) {
-        var bytes = 0
+    // taking the next slots, aligned as the nested struct would be); an anonymous
+    // union member takes a single shared slot. Returns cc's layout of the run.
+    function layoutStructInto(fields, order, groups, name, L) {
+        var ms = []
         for (var i = 0; i < groups.length; i++) {
             var g = groups[i]
             if (g.anonFields != undefined) {
                 if (g.isUnion == true) {
-                    var slot = ltys.length
-                    ltys.push(i32)
-                    var r = layoutUnionAt(fields, order, g.anonFields, name, slot)
-                    if (r.bytes == 0) fail("an empty anonymous union in " + tagName(name) + " has no layout")
-                    ltys[slot] = ctLTy(r.wideCt)
-                    bytes = bytes + r.bytes
+                    mPadTo(L, groupsMAlign(g.anonFields))
+                    var r = layoutUnionAt(fields, order, g.anonFields, name, L.ltys.length)
+                    if (r.wideCt == undefined) fail("an empty anonymous union in " + tagName(name) + " has no layout")
+                    mPushUnion(L, r)
+                    ms.push(cAbiSub(r.cc))
                 } else {
-                    bytes = bytes + layoutStructInto(fields, order, g.anonFields, name, ltys)
+                    var ga = groupsMAlign(g.anonFields)
+                    mPadTo(L, ga)
+                    ms.push(cAbiSub(layoutStructInto(fields, order, g.anonFields, name, L)))
+                    mPadTo(L, ga)
                 }
                 continue
             }
@@ -2305,37 +2349,40 @@ KwDefault   = "default" KwEnd ;
             for (var j = 0; j < fl.length; j++) {
                 var f = fl[j]
                 var ct = fieldCt(f)
-                var fslot = ltys.length
-                ltys.push(ctLTy(ct))
-                registerField(fields, order, name, f, ct, fslot)
-                bytes = bytes + ctBytes(ct)
+                mPadTo(L, machAlign(ct))
+                registerField(fields, order, name, f, ct, L.ltys.length)
+                L.ltys.push(ctLTy(ct))
+                L.off = L.off + machBytes(ct)
+                ms.push(cAbiMember(ct, f))
             }
         }
-        return bytes
+        return cAbiLayout(ms, false)
     }
     // A UNION is an LLVM struct with ONE member typed as the widest; every field selects
     // index 0. `order` keeps declaration order for positional brace initializers.
+    // bytes/align are cc's (sizeof, _Alignof), mbytes/malign the module's own.
     function defineTag(items, isUnion) {
         var name = items[0]
         if (hasOwn(structs, name)) fail(tagName(name) + " defined twice")
         var fields = {}
         var order = []
-        var ltys = []
-        var bytes = 0
+        var L = {ltys: [], off: 0, align: 1}
         var wideCt = ctInt
         var groups = items.slice(1)
+        var cc = undefined
         if (isUnion) {
-            ltys.push(i32)
             var r = layoutUnionAt(fields, order, groups, name, 0)
-            if (r.bytes == 0) fail("an empty " + tagName(name) + " has no layout")
-            ltys[0] = ctLTy(r.wideCt)
-            bytes = r.bytes
+            if (r.wideCt == undefined) fail("an empty " + tagName(name) + " has no layout")
+            mPushUnion(L, r)
             wideCt = r.wideCt
+            cc = r.cc
         } else {
-            bytes = layoutStructInto(fields, order, groups, name, ltys)
+            cc = layoutStructInto(fields, order, groups, name, L)
+            mPadTo(L, L.align)
         }
-        structs[name] = {lty: llvm.types.NewStruct(ltys), fields: fields, order: order,
-                         isUnion: isUnion, bytes: bytes, wideCt: wideCt}
+        structs[name] = {lty: llvm.types.NewStruct(L.ltys), fields: fields, order: order,
+                         isUnion: isUnion, bytes: cc.bytes, align: cc.align,
+                         mbytes: L.off, malign: L.align, wideCt: wideCt}
     }
     // A bit field holds only its declared width: an unsigned one WRAPS, a signed one
     // sign-extends. Normalizing on every STORE keeps reads plain loads.
@@ -2468,11 +2515,14 @@ KwDefault   = "default" KwEnd ;
         for (var i = 0; i < st.order.length; i++) {
             var f = fieldOf(ct.s, st.order[i])
             var slot = b.NewGetElementPtr(st.lty, addr, [zero, llvm.constant.NewInt(i32, f.idx)])
-            b = zeroAggregate(b, f.ct, slot)
+            b = zeroAggregate(b, f.ct, memberCell(b, f, slot))
         }
         return b
     }
 
+    // A member's slot typed as the member's own cell: an anonymous union's members
+    // share one slot typed as the widest of them.
+    function memberCell(b, f, slot) { return cellAddr(b, ctLTy(f.ct), slot) }
     // An aggregate travels as the ADDRESS of its storage: an array decays to it in C,
     // and a struct value uses it because a whole struct never lives in a register here.
     // Whoever RECEIVES such a value copies the members out.
@@ -2498,8 +2548,8 @@ KwDefault   = "default" KwEnd ;
             for (var j = 0; j < st.order.length; j++) {
                 var f = fieldOf(ct.s, st.order[j])
                 var cj = llvm.constant.NewInt(i32, f.idx)
-                b = emitCopy(b, f.ct, b.NewGetElementPtr(st.lty, dst, [zero, cj]),
-                                      b.NewGetElementPtr(st.lty, src, [zero, cj]))
+                b = emitCopy(b, f.ct, memberCell(b, f, b.NewGetElementPtr(st.lty, dst, [zero, cj])),
+                                      memberCell(b, f, b.NewGetElementPtr(st.lty, src, [zero, cj])))
             }
             return b
         }

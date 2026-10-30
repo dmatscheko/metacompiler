@@ -1174,8 +1174,8 @@ Cast        <~~ push(makeCast(takeAll())) ~~>
             = "(" TypeName ")" UnaryExpr ;
 
 // sizeof: the byte size the type model pins - char 1, short 2, int 4, any long and
-// any double 8, any pointer 8, a struct the packed sum, a union the maximum over its
-// members, an array its element count times the element size. Over an EXPRESSION the
+// any double 8, any pointer 8, a struct or union cc's padded layout (cAbiLayout),
+// an array its element count times the element size. Over an EXPRESSION the
 // answer is the size of that expression's type, which is what makes 'sizeof a' on a
 // char array answer its length. SizeofPlace comes before SizeofExpr so that the
 // common 'sizeof name' shape needs no evaluation of anything but an address.
@@ -1190,9 +1190,9 @@ SizeofPlace <~~ push(makeSizeofPlace(pop())) ~~>
             = Lvalue !"++" !"--" !"(" ;
 SizeofExpr  <~~ push(makeSizeofExpr(pop())) ~~>
             = UnaryExpr ;
-// _Alignof(type): for the scalar types this machine models, the alignment equals the
-// size, and a pointer aligns to 8 like it is sized.
-AlignOf     <~~ push(makeSizeof(pop())) ~~>
+// _Alignof(type): cc's alignment (ctAlign) - a scalar's size, an array's element's,
+// a struct's or union's largest member's.
+AlignOf     <~~ push(makeAlignof(pop())) ~~>
             = KwAlignof "(" TypeName ")" ;
 // A TYPE NAME: a scalar/struct/union/enum base plus a run of pointer stars.
 // An ABSTRACT function-pointer declarator may follow, so a cast can name a function
@@ -1830,6 +1830,7 @@ KwDefault   = "default" KwEnd ;
     // lazily, so a sizeof may name a tag defined further down the file.
     var ctSizeT = {k: "int", w: 8, u: true}
     function makeSizeof(ct) { return function() { return val(ctBytes(ct), ctSizeT) } }
+    function makeAlignof(ct) { return function() { return val(ctAlign(ct), ctSizeT) } }
     // sizeof over a PLACE needs its address, not its value - an array or a struct
     // answers its whole size, which is what 'sizeof a' on a char array reports.
     function makeSizeofPlace(placeT) {
@@ -2047,15 +2048,6 @@ KwDefault   = "default" KwEnd ;
         return (key.length > 2 && key.charCodeAt(0) == 117 && key.charCodeAt(1) == 58)
             ? "union " + key.slice(2) : "struct " + key
     }
-    // The BYTE size behind sizeof: an int is 4, any pointer 8, an aggregate its own
-    // packed size (the flat memory itself is word addressed - see ctSize).
-    function ctBytes(ct) {
-        if (ct.k == "ptr" || ct.k == "fnp") return 8
-        if (ct.k == "struct") return structOf(ct.s).bytes
-        if (ct.k == "arr") return ct.n * ctBytes(ct.e)
-        if (ct.k == "void") return 1    // GCC's sizeof(void), which cc also answers
-        return ct.w
-    }
     // n levels of pointer around a base ct (0 levels yields the base itself).
     function ptrTo(n, base) {
         var ct = base
@@ -2142,10 +2134,11 @@ KwDefault   = "default" KwEnd ;
     function defineTag(items, isUnion) {
         var name = items[0]
         if (hasOwn(structs, name)) fail(tagName(name) + " defined twice")
-        var st = {size: 0, bytes: 0, fields: {}, order: [], isUnion: isUnion}
+        var st = {size: 0, bytes: 0, align: 1, fields: {}, order: [], isUnion: isUnion}
         var r = layoutGroups(st, items.slice(1), 0, isUnion, name)
         st.size = r.size
-        st.bytes = r.bytes
+        st.bytes = r.cc.bytes
+        st.align = r.cc.align
         structs[name] = st
     }
     // The C type of one declared member. A POINTER field may point at any (even a
@@ -2158,23 +2151,23 @@ KwDefault   = "default" KwEnd ;
         return base
     }
     // Lay a run of member GROUPS - ordinary declarator lines and anonymous struct/union
-    // members - into st, starting at word offset `base`, and return the words and bytes
-    // they occupy. In a union every group starts at `base` and the size is the MAXIMUM;
-    // in a struct they follow each other and the size is the sum. An anonymous member
-    // recurses with its OWN kind, which is what puts its members into the enclosing
-    // tag's namespace at its own offset.
+    // members - into st, starting at word offset `base`, and return the words they
+    // occupy and cc's layout of them (cAbiLayout, which is what sizeof reports). In a
+    // union every group starts at `base` and the size is the MAXIMUM; in a struct they
+    // follow each other and the size is the sum. An anonymous member recurses with its
+    // OWN kind, which is what puts its members into the enclosing tag's namespace at
+    // its own offset.
     function layoutGroups(st, groups, base, isUnion, name) {
         var size = 0
-        var bytes = 0
+        var ms = []
         for (var i = 0; i < groups.length; i++) {
             var g = groups[i]
             var off = isUnion ? base : base + size
             var w = 0
-            var by = 0
             if (g.anonFields != undefined) {
                 var r = layoutGroups(st, g.anonFields, off, g.isUnion, name)
                 w = r.size
-                by = r.bytes
+                ms.push(cAbiSub(r.cc))
             } else {
                 var fl = g.fields
                 for (var j = 0; j < fl.length; j++) {
@@ -2188,26 +2181,22 @@ KwDefault   = "default" KwEnd ;
                         st.fields[f.name] = {off: fo, ct: ct, bf: bf}
                         st.order.push(f.name)
                     }
+                    ms.push(cAbiMember(ct, f))
                     var fw = ctSize(ct)
-                    var fb = ctBytes(ct)
                     if (isUnion) {
                         if (fw > w) w = fw
-                        if (fb > by) by = fb
                     } else {
                         w = w + fw
-                        by = by + fb
                     }
                 }
             }
             if (isUnion) {
                 if (w > size) size = w
-                if (by > bytes) bytes = by
             } else {
                 size = size + w
-                bytes = bytes + by
             }
         }
-        return {size: size, bytes: bytes}
+        return {size: size, cc: cAbiLayout(ms, isUnion)}
     }
     // A bit-field: its width, its signedness, and vct, the type its value has in an
     // expression. A field whose every value fits an int promotes to int, one of 32
@@ -2343,7 +2332,7 @@ KwDefault   = "default" KwEnd ;
     // the compiler half resolves through clang (and through libcNative under llvm.Run).
     //
     // Why it is sound: the interpreter's memory is one cell per SCALAR rather than the
-    // compiler's packed bytes, but sizeof(char) is 1 in both models, so for CHARACTER
+    // compiler's bytes, but sizeof(char) is 1 in both models, so for CHARACTER
     // data a cell IS a byte and a length in bytes is a length in cells. That does NOT
     // extend to wider elements (memcpy over an int array would be n/4 cells here and n
     // bytes there), so the mem* group is honest only over char storage (SECTION 50).

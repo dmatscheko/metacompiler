@@ -764,8 +764,12 @@ store that outlives the statement raises a floor no release goes below (the
 these as the specification of this project, not as a backlog — each was probed and
 a decision was taken:
 
-- **C**: struct alignment is packed (`{char;short;int;long}` is 15 bytes where
-  `cc` says 16); `_Bool b = 5` holds 5; identical string literals are not merged
+- **C**: `sizeof` and `_Alignof` answer `cc`'s padded layout in both halves, and
+  the compiled half's storage IS that layout except for a float (an 8-byte cell),
+  a function pointer (a 4-byte funcId) and a bit-field (a whole cell of its type)
+  member, so a `char *` difference across such a struct differs from `cc` and
+  `malloc(n * sizeof(T))` of such a `T` (or of `float`) is too small;
+  identical string literals are not merged
   (unspecified in C); `c-interpreter.abnf` deliberately lacks the varargs `printf`
   family, `exit`/`abort`, `qsort`/`bsearch` and `malloc`/`free` (the compiler's
   native build refuses a call to any function nothing defines, `printf` included,
