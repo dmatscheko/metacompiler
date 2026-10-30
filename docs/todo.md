@@ -440,7 +440,7 @@ the compiled legs say only "variable not defined: Main". swift: free function `s
 error; `|=`, `<<=`, `>>=` "unknown operator" / "call of a non function value"). c: a `#define` inside a function body is not
 applied. Programs and adaptations: tests/programs/fetch.sh --list.
 
-### T-795 test.sh: a matrix worker that dies counts as green; enough deaths hang the run · P2 · CORE · OPEN [V]
+### T-795 test.sh: a matrix worker that dies counts as green; enough deaths hang the run · P2 · CORE · IN PROGRESS (CORE worker, round 9) [V]
 `run_entry` runs under `set -u` in a background subshell; one that dies writes neither `.ok` nor `.fail`, and the summary
 (test.sh ~1120-1135) checks only `fail -ne 0`, never `pass + fail == total`. Finder's sabotage: a typo'd variable in the
 `abort_exe` block → `matrix: 496 entries run - 467 passed, 0 failed / all green`, exit 0 — the 29 SHOULD ABORT rows vanish,
@@ -450,36 +450,36 @@ never returns its FIFO token (`printf '.' >&3` follows run_entry), so after JOBS
 the token and write `.fail` from an EXIT trap in the subshell; demand pass + fail == total; gates.sh section 1 must also
 require "N passed" == MATRIX_ENTRIES.
 
-### T-796 gates.sh: `--cross` passes when pairs were killed; no floor on pairs compared · P2 · CORE · OPEN [V]
+### T-796 gates.sh: `--cross` passes when pairs were killed; no floor on pairs compared · P2 · CORE · IN PROGRESS (CORE worker, round 9) [V]
 gates.sh section 3 (~215) passes on the text `, 0 divergent` and never reads `rc_of cross`. `./test.sh --cross --filter kotlin
 --timeout 1` exits 1 with `1 programs compared, 0 divergent ... 16 PAIR(S) WERE KILLED ... and were NOT COMPARED` — which
 gates.sh would classify PASS. Check the exit code and add a CROSS_PROGRAMS floor (132 today).
 
-### T-797 test.sh: SHOULD FAIL rows check only for a non-zero exit, never the reason · P2 · CORE · OPEN [V finder only]
+### T-797 test.sh: SHOULD FAIL rows check only for a non-zero exit, never the reason · P2 · CORE · IN PROGRESS (CORE worker, round 9) [V finder only]
 Finder's sabotage: moving tests/kotlin-fail-test-isinit.kt away → `--filter isInitialized` `2 passed` while the output is
 `open ...: no such file or directory`; prefixing tests/go-fail-test-divzero.go with `@@@` → `2 passed` on a parse stop at 1:1.
 This holds for all ~95 non-abort guard rows (each was checked by hand to fail for its stated reason today; nothing keeps it
 so). Give each row an expected diagnostic substring (a `// EXPECT-ERROR:` line in the file, or in the row), and at minimum
 reject "no such file" and a parse stop at 1:1. Files: run_entry's should_fail branch, .vscode/launch.json.
 
-### T-798 the "Infinite Loop" guard is vacuous · P2 · CORE · OPEN [V]
+### T-798 the "Infinite Loop" guard is vacuous · P2 · CORE · IN PROGRESS (CORE worker, round 9) [V]
 Its premise: with `-lb` the left-recursion block list stops TestA and the parse fails cleanly. Without `-lb`,
 `mec tests/infinite-loop.abnf tests/infinite-loop-test-1.txt` dies with Go `fatal error: stack overflow`, exit 2 — also
 non-zero, so the row passes either way (finder: disabling the block list in abnf/parser.go ~135 keeps it green). Require the
 clean "Not everything could be parsed" diagnostic; the row also lacks `-q`, so goja vs -frozen is never compared on it.
 
-### T-799 native-full.sh: a missing ratchet file or a held row is a skip, not a failure; no program-count floor · P2 · CORE · OPEN [V]
+### T-799 native-full.sh: a missing ratchet file or a held row is a skip, not a failure; no program-count floor · P2 · CORE · IN PROGRESS (CORE worker, round 9) [V]
 Moving tests/lua-test-full.2.lua away → `lua/full.2 - no tests/lua-test-full.2.lua` and the final `every native binary exits 0
 with 0 failures`, which is what gates.sh greps (native-full.sh ~262 and ~294 write `skip`). A `native-full:
 features-row-held` row takes the same path and gates.sh checks held == 0 only for clang-check. ROWS is a hand-written list,
 so a new ratchet part is silently not run natively. Treat "no $f" as rc 1, demand held == 0, add a NATIVE_PROGRAMS floor.
 
-### T-800 tests/probe.sh uses a stale ./mec · P3 · CORE · OPEN [V]
+### T-800 tests/probe.sh uses a stale ./mec · P3 · CORE · IN PROGRESS (CORE worker, round 9) [V]
 probe.sh ~115 `[ -x ./mec ] || go build -o mec .` builds only when there is no binary, so after an abnf/*.go or Go-twin edit a
 standalone probe measures the previous build (finder: a `fmt.Println("SABOTAGE")` in main.go stayed invisible). Rebuild
 always (it is incremental), or when any *.go is newer than ./mec. Same for native-full.sh run on its own.
 
-### T-801 stale guards: C widen-notimpl asserts nothing; stale names and headers · P3 · CORE · OPEN [V finder only]
+### T-801 stale guards: C widen-notimpl asserts nothing; stale names and headers · P3 · CORE · IN PROGRESS (CORE worker, round 9) [V finder only]
 tests/c-test-widen-notimpl.c's own header says a flagless run exits 0 and `-warn-unsupported` reports nothing, yet every line
 still says `-> not implemented`, row "C not-implemented surface warned+ignored" produces 0 warnings, and `main` returns 0
 unconditionally (union, typedef, float globals, goto, `sizeof n` are never checked), so rows 167/168 pass whatever the values;
