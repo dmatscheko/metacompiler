@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-856** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-857** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -153,13 +153,12 @@ splice in VarName / AsgIdent / PeName, or a pre-parse splice that keeps source p
 
 # C — C subset
 
-### T-852 c: anonymous-union positional initializer; `(p + 2)->a`; float storage · P2 · C · IN PROGRESS (C worker, round 10) [V C worker]
-(1) WRONG ANSWER (interp): `struct D { int k; union { int u; char ch; }; int t; }; struct D d = { 5, { 9 }, 100 };`
-→ cc `d.u` 9, `d.t` 100; the interpreter walks the anonymous union's members as separate members (`d.u` 100, `d.t` 0);
-the compiler aborts "store operands are not compatible: src=i8; dst=i32*". (2) `(p + 2)->a` does not parse in either
-half. (3) compiled half: a float is an 8-byte cell (double holding the binary32 value), so `malloc(n * sizeof(float))`
-or of a struct with a float or function-pointer member is too small (manual 7.9); fixing it needs double↔binary32
-conversion on each load/store — measure.
+### T-856 c compiler: anonymous struct inside a union; null-based offsetof natively · P3 · C · OPEN [V C worker]
+(1) `union { struct { short lo, hi; }; int w; }` → compiler refuses "an anonymous struct inside a union is not
+supported" (loud); the interpreter gives cc's `1 2 3 4` for `{1,{{2,3}},4}`. Needs byte-offset registration of the
+flattened members (an `L.at` base in layoutStructInto / registerField / mBitField). (2) `(char *)&((struct S *)0)->g
+- (char *)0` runs under llvm.Run but clang rejects the native module: "invalid cast opcode for cast from 'i32' to
+'ptr'" (`bitcast i32 0 to {...}*`) — a null constant cast to a pointer must be `inttoptr`/`null`.
 
 # CORE — MetaJS, the engines, shared runtime, tooling
 
@@ -930,6 +929,7 @@ T-844 c: declaration gaps left from the scope/designator round — DONE 1e3d17a3
 T-851 c: `sizeof` of a struct ignores alignment padding; block-scope enums — DONE 7fa9bd46..45dd3ec2 (cAbiLayout: cc's padded layout for sizeof/_Alignof in both halves, explicit padding members in the compiled structs; compiled half packs bit-fields into their storage units so malloc(n*sizeof) is exact — new c-native-bytes.c byte-layout row; block-scope enums, struct values in []-sized arrays, file-scope initializers after all declarations)
 T-847 ts/js: decorators, constructability, Date/setTimeout; a `__proto__` binding crashes — DONE 184ac024..f19a083f (decorators in tsc 6.0.3's phases incl. field decorators and addInitializer, 24/24 probe lines; new refuses arrows/methods/generators/async/non-constructor builtins via a boot-time constructor table; Date and timers with a virtual loop clock, 93/95 Date probe rows = node; const __proto__ no longer crashes; bound functions filed as T-853)
 T-850 ruby: binary strings, blockless enumerators, statement-line and zsuper gaps — PARTIAL 504be153 — one-line assignment + while/until, blockless enumerator results, zsuper with keywords and block, uninitialized-constant superclass, private-method wording and IO#inspect, $0/$PROGRAM_NAME alias (+ block-stack/scope-chain leaks after rescue/loop/catch); binary strings filed as T-854 with the worker's design
+T-852 c: anonymous-union positional initializer; `(p + 2)->a`; float storage — DONE df663c0d..20315cdb (anonymous member is one initializer member, cInitSeek for designators into it; (expr)-> as value and place; compiled float cell is binary32 via exact soft pack/unpack, function-pointer cell 8 bytes, so machBytes == sizeof for every scalar — float-only loops +21% instructions, c bench unchanged; also fixed: comma operator type, floating truth incl. -0.0/NaN/(_Bool)0.5)
 
 # Settled — do not re-open
 
