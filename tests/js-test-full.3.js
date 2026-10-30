@@ -1,4 +1,4 @@
-// Full-syntax test: JavaScript - part 3 of 4, sections 44-56, 58-71, 73-100, 109-115.
+// Full-syntax test: JavaScript - part 3 of 4, sections 44-56, 58-71, 73-100, 109-116.
 //
 // THE JS RATCHET IS FOUR FILES: as one file its -frozen interpreter leg ran into
 // ./test.sh --full's time brake (peak memory grew superlinearly with the file), and
@@ -7,7 +7,7 @@
 //   tests/js-test-full.js     sections 01-35, the ECMAScript-2022 syntax walk
 //   tests/js-test-full.2.js   sections 36-43 and 101-108, engine agreement, generators,
 //                             Error, Math, builtin constructors, integrity levels
-//   tests/js-test-full.3.js   sections 44-56, 58-71, 73-100, 109-115, the call/class/private-name
+//   tests/js-test-full.3.js   sections 44-56, 58-71, 73-100, 109-116, the call/class/private-name
 //                             model, the Unicode identifier tables, iterators, derived
 //                             constructors, JSON, guards, Set and Map, iterator closing,
 //                             hasOwnProperty, delete, Object.prototype, extends Object,
@@ -25,7 +25,8 @@
 //                             new.target and a class extending a builtin, a
 //                             class declared inside a try block, accessors of a
 //                             prototype object, Reflect, a function's defined
-//                             properties, symbol keys under integrity levels
+//                             properties, symbol keys under integrity levels,
+//                             Uint8Array
 //   (section 72 is in tests/js-test-full.4.mjs, beside 57: it needs a file that
 //   names no builtin class but in a `new`)
 //   tests/js-test-full.4.mjs  section 57, export in a Module
@@ -3204,6 +3205,34 @@ function s115() {
 
 // ===== END SECTIONS =====
 
+// ===== SECTION 116: Uint8Array =====
+// A Uint8Array element stores ToUint8 of what is written (300 is 44, -1 is 255,
+// 3.7 is 3, NaN is 0); a subarray shares the bytes, a slice copies them; the
+// array methods answer Uint8Arrays where they make arrays. Values read off node 24.
+function s116() {
+    const vals = [300, -1, 3.7, "12", NaN]
+    const u = new Uint8Array(4)
+    for (let i = 0; i < vals.length; i++) { u[i % 4] = vals[i] }
+    u[2] += 250
+    check("u8a116", u.join() === "0,255,253,12" && u.length === 4 && u[4] === undefined && Object.keys(u).join() === "0,1,2,3" && !Array.isArray(u))
+    const w = new Uint8Array([1, 2, 300, -2, 7.9])
+    const sub = w.subarray(1, 4)
+    sub[0] = 99
+    const sl = w.slice(-3)
+    sl[0] = 5
+    check("u8b116", String(w) === "1,99,44,254,7" && String(sub) === "99,44,254" && sub.byteOffset === 1 && String(sl) === "5,254,7")
+    const t = new Uint8Array(6)
+    t.set([1, 2, 3], 2)
+    t.set(new Uint8Array([7, 8]))
+    let err = ""
+    try { t.set([1, 2, 3], 5) } catch (e) { err = String(e) }
+    check("u8c116", String(t) === "7,8,1,2,3,0" && t.indexOf(3) === 4 && t.at(-1) === 0 && err === "RangeError: offset is out of bounds" &&
+        String(t.map(function (x) { return x * 100 })) === "188,32,100,200,44,0" && t.reduce(function (a, b) { return a + b }) === 21)
+    const r = new Uint8Array([5, 1, 200, 3, 1])
+    check("u8d116", String(r.sort()) === "1,1,3,5,200" && [...r].join("+") === "1+1+3+5+200" && String(Uint8Array.of(255, 256, 257)) === "255,0,1" &&
+        String(Uint8Array.from({ length: 2, 0: 4, 1: 5 })) === "4,5" && new Uint8Array(2.9).length === 2)
+}
+
 function main() {
     s44() // SECTION-CALL 44
     s45() // SECTION-CALL 45
@@ -3267,6 +3296,7 @@ function main() {
     s113() // SECTION-CALL 113
     s114() // SECTION-CALL 114
     s115() // SECTION-CALL 115
+    s116() // SECTION-CALL 116
     println("full: " + checks + " checks, " + failures + " failures")
     return failures
 }

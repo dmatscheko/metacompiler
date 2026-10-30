@@ -3694,7 +3694,7 @@ NotFuncHead = :script(~~
         return true
     }
 
-    // lib/js-builtins.js (Set, Map, Array.from, Array.of, Boolean, isNaN, isFinite, structuredClone, Reflect) is JavaScript,
+    // lib/js-builtins.js (Set, Map, Array.from, Array.of, Boolean, isNaN, isFinite, structuredClone, Reflect, Uint8Array) is JavaScript,
     // compiled into a program that names one of them (jsbRef, at the
     // VarRef, typeof-name and new-name tags), like an imported file but emitted FIRST,
     // before every imported file's top level, since any of them may use it. Twin of
@@ -3708,7 +3708,7 @@ NotFuncHead = :script(~~
         if (name == "Set" || name == "Map" || name == "Array" || name == "isNaN" || name == "isFinite" ||
             name == "structuredClone" || name == "Reflect" || name == "WeakMap" || name == "WeakSet" ||
             name == "queueMicrotask" || name == "URIError" || name == "encodeURIComponent" || name == "encodeURI" ||
-            name == "decodeURIComponent" || name == "decodeURI") { jsbWant = true }
+            name == "decodeURIComponent" || name == "decodeURI" || name == "Uint8Array") { jsbWant = true }
         if (name == "setTimeout" || name == "setInterval" || name == "clearTimeout" || name == "clearInterval") { jsTimerWant = true }
         if (name == "Date" || jsTimerWant) {
             jsbWant = true

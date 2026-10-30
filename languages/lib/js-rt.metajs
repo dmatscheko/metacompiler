@@ -2675,6 +2675,11 @@ function js_jsmget(o, key) {
             if (ia !== undefined) { return jvAccGet(ia, o) }
         }
     }
+    // A number key names the property its string does: o[0] runs an accessor
+    // defined on "0".
+    if (jvAccN > 0) {
+        if (jvIsObj(o)) { return js_jsmget(o, jvStr(key)) }
+    }
     if (jvStrWrapN > 0) { return jvWrapRead(o, key) }
     return o[key]
 }
@@ -3003,6 +3008,11 @@ function js_jsvget(o, key) {
             ia = jvIdxAcc(o, jvStr(key))
             if (ia !== undefined) { return jvAccGet(ia, o) }
         }
+    }
+    // A number key names the property its string does: o[0] runs an accessor
+    // defined on "0".
+    if (jvAccN > 0) {
+        if (jvIsObj(o)) { return js_jsvget(o, jvStr(key)) }
     }
     if (jvStrWrapN > 0) { return jvWrapRead(o, key) }
     return o[key]

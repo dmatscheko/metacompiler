@@ -1,6 +1,6 @@
 // js-builtins.js -- JAVASCRIPT, not MetaJS: the Set and Map classes, Array.from /
 // Array.of, isNaN, isFinite, structuredClone, Reflect, WeakMap / WeakSet,
-// queueMicrotask, the URI functions, Date and the timers, written in the language itself and compiled
+// queueMicrotask, the URI functions, Uint8Array, Date and the timers, written in the language itself and compiled
 // INTO a program by the js grammars, both halves (jsbLoad in js-interpreter.abnf and js-to-llvm-ir.abnf).
 // A program that names Set, Map, Array, isNaN, isFinite, structuredClone or Reflect gets this file in
 // front of it; one that does not pays nothing. Being one JavaScript source compiled by the same grammars is what
@@ -663,6 +663,217 @@ function encodeURIComponent(v) { return __uriEncode(v, "") }
 function encodeURI(v) { return __uriEncode(v, __uriReserved) }
 function decodeURIComponent(v) { return __uriDecode(v, "") }
 function decodeURI(v) { return __uriDecode(v, __uriReserved) }
+
+// ===== Uint8Array =====
+// A view of __n bytes at offset __o of the plain array __b, which subarray shares.
+// Each index is an enumerable accessor of the view's own; its write stores
+// ToUint8 of the value, which `& 255` is (ToInt32's modulus is a multiple of 256).
+// No ArrayBuffer: a view is made from a length, an iterable, an array-like or
+// another view. A write past the end makes an ordinary property, where node drops it.
+var __u8Share = null
+function __u8Def(t, i) {
+    Object.defineProperty(t, i, {
+        get: function () { return t.__b[t.__o + i] },
+        set: function (v) { t.__b[t.__o + i] = v & 255 },
+        enumerable: true
+    })
+}
+// ToIndex (ECMA-262 7.1.22), with V8's message.
+function __u8Len(v) {
+    var n = Math.trunc(+v)
+    if (n !== n) { return 0 }
+    if (n < 0 || n > 9007199254740991) { throw new RangeError("Invalid typed array length: " + v) }
+    return n
+}
+// A relative index of a slice-like method (ECMA-262 23.2.3): negative counts from
+// the end, both clamped to [0, n].
+function __u8Rel(v, n, dflt) {
+    if (v === undefined) { return dflt }
+    var k = Math.trunc(+v)
+    if (k !== k) { return 0 }
+    if (k < 0) { return Math.max(n + k, 0) }
+    return Math.min(k, n)
+}
+// The values of a constructor or from() argument: a view's, an iterable's, or an
+// array-like's by its length.
+function __u8Vals(a) {
+    if (a instanceof Uint8Array) { return a.__vals() }
+    var out = []
+    if (Array.isArray(a) || typeof a["__#@iterator"] === "function") {
+        for (var v of a) { out.push(v) }
+        return out
+    }
+    var n = __u8Len(a.length === undefined ? 0 : a.length)
+    for (var i = 0; i < n; i++) { out.push(a[i]) }
+    return out
+}
+function __u8Check(f) { if (typeof f !== "function") { throw __notFn(f) } }
+class Uint8Array {
+    constructor(a, b, c) {
+        if (__u8Share !== null) {
+            var sh = __u8Share
+            __u8Share = null
+            this.__b = sh.b
+            this.__o = sh.o
+            this.__n = sh.n
+        } else {
+            var src = (typeof a === "object" && a !== null) ? __u8Vals(a) : null
+            this.__b = []
+            this.__o = 0
+            this.__n = src === null ? (a === undefined ? 0 : __u8Len(a)) : src.length
+            for (var i = 0; i < this.__n; i++) { this.__b.push(src === null ? 0 : src[i] & 255) }
+        }
+        for (var j = 0; j < this.__n; j++) { __u8Def(this, j) }
+    }
+    __vals() { return this.__b.slice(this.__o, this.__o + this.__n) }
+    get length() { return this.__n }
+    get byteLength() { return this.__n }
+    get byteOffset() { return this.__o }
+    get BYTES_PER_ELEMENT() { return 1 }
+    static get BYTES_PER_ELEMENT() { return 1 }
+    static from(items, f, self) {
+        if (f !== undefined) { __u8Check(f) }
+        var vs = __u8Vals(items)
+        if (f !== undefined) { for (var i = 0; i < vs.length; i++) { vs[i] = f.call(self, vs[i], i) } }
+        return new Uint8Array(vs)
+    }
+    static of(...items) { return new Uint8Array(items) }
+    at(i) {
+        var k = Math.trunc(+i)
+        if (k !== k) { k = 0 }
+        if (k < 0) { k = k + this.__n }
+        return (k < 0 || k >= this.__n) ? undefined : this.__b[this.__o + k]
+    }
+    fill(v, s, e) {
+        var x = v & 255
+        var hi = __u8Rel(e, this.__n, this.__n)
+        for (var i = __u8Rel(s, this.__n, 0); i < hi; i++) { this.__b[this.__o + i] = x }
+        return this
+    }
+    set(src, off) {
+        var vs = __u8Vals(src)
+        var o = off === undefined ? 0 : Math.trunc(+off)
+        if (o !== o) { o = 0 }
+        if (o < 0) { throw new RangeError("offset is out of bounds") }
+        if (o + vs.length > this.__n) { throw new RangeError("offset is out of bounds") }
+        for (var i = 0; i < vs.length; i++) { this.__b[this.__o + o + i] = vs[i] & 255 }
+    }
+    subarray(s, e) {
+        var lo = __u8Rel(s, this.__n, 0)
+        var hi = __u8Rel(e, this.__n, this.__n)
+        __u8Share = {b: this.__b, o: this.__o + lo, n: Math.max(hi - lo, 0)}
+        return new Uint8Array()
+    }
+    slice(s, e) {
+        var lo = __u8Rel(s, this.__n, 0)
+        var hi = __u8Rel(e, this.__n, this.__n)
+        return new Uint8Array(this.__b.slice(this.__o + lo, this.__o + Math.max(hi, lo)))
+    }
+    indexOf(v, from) {
+        for (var i = __u8Rel(from, this.__n, 0); i < this.__n; i++) { if (this.__b[this.__o + i] === v) { return i } }
+        return -1
+    }
+    lastIndexOf(v, from) {
+        var i = this.__n - 1
+        if (from !== undefined) {
+            var k = Math.trunc(+from)
+            if (k !== k) { k = 0 }
+            i = k < 0 ? this.__n + k : Math.min(k, this.__n - 1)
+        }
+        for (; i >= 0; i--) { if (this.__b[this.__o + i] === v) { return i } }
+        return -1
+    }
+    includes(v, from) { return this.indexOf(v, from) >= 0 }
+    join(sep) {
+        var s = sep === undefined ? "," : String(sep)
+        var out = ""
+        for (var i = 0; i < this.__n; i++) { out = out + (i > 0 ? s : "") + this.__b[this.__o + i] }
+        return out
+    }
+    toString() { return this.join(",") }
+    forEach(f, self) {
+        __u8Check(f)
+        for (var i = 0; i < this.__n; i++) { f.call(self, this.__b[this.__o + i], i, this) }
+    }
+    map(f, self) {
+        __u8Check(f)
+        var out = []
+        for (var i = 0; i < this.__n; i++) { out.push(f.call(self, this.__b[this.__o + i], i, this)) }
+        return new Uint8Array(out)
+    }
+    filter(f, self) {
+        __u8Check(f)
+        var out = []
+        for (var i = 0; i < this.__n; i++) {
+            var v = this.__b[this.__o + i]
+            if (f.call(self, v, i, this)) { out.push(v) }
+        }
+        return new Uint8Array(out)
+    }
+    reduce(f, ...init) {
+        __u8Check(f)
+        var i = 0
+        var acc = init[0]
+        if (init.length === 0) {
+            if (this.__n === 0) { throw new TypeError("Reduce of empty array with no initial value") }
+            acc = this.__b[this.__o]
+            i = 1
+        }
+        for (; i < this.__n; i++) { acc = f(acc, this.__b[this.__o + i], i, this) }
+        return acc
+    }
+    reduceRight(f, ...init) {
+        __u8Check(f)
+        var i = this.__n - 1
+        var acc = init[0]
+        if (init.length === 0) {
+            if (this.__n === 0) { throw new TypeError("Reduce of empty array with no initial value") }
+            acc = this.__b[this.__o + i]
+            i = i - 1
+        }
+        for (; i >= 0; i--) { acc = f(acc, this.__b[this.__o + i], i, this) }
+        return acc
+    }
+    every(f, self) {
+        __u8Check(f)
+        for (var i = 0; i < this.__n; i++) { if (!f.call(self, this.__b[this.__o + i], i, this)) { return false } }
+        return true
+    }
+    some(f, self) {
+        __u8Check(f)
+        for (var i = 0; i < this.__n; i++) { if (f.call(self, this.__b[this.__o + i], i, this)) { return true } }
+        return false
+    }
+    find(f, self) {
+        var i = this.findIndex(f, self)
+        return i < 0 ? undefined : this.__b[this.__o + i]
+    }
+    findIndex(f, self) {
+        __u8Check(f)
+        for (var i = 0; i < this.__n; i++) { if (f.call(self, this.__b[this.__o + i], i, this)) { return i } }
+        return -1
+    }
+    reverse() {
+        for (var i = 0, j = this.__n - 1; i < j; i++, j--) {
+            var t = this.__b[this.__o + i]
+            this.__b[this.__o + i] = this.__b[this.__o + j]
+            this.__b[this.__o + j] = t
+        }
+        return this
+    }
+    // Numeric order by default, and a comparator's NaN reads as 0.
+    sort(f) {
+        if (f !== undefined) { __u8Check(f) }
+        var vs = this.__vals()
+        vs.sort(f === undefined ? function (x, y) { return x - y } : function (x, y) { var r = +f(x, y); return r !== r ? 0 : r })
+        for (var i = 0; i < vs.length; i++) { this.__b[this.__o + i] = vs[i] }
+        return this
+    }
+    *values() { for (var i = 0; i < this.__n; i++) { yield this.__b[this.__o + i] } }
+    *keys() { for (var i = 0; i < this.__n; i++) { yield i } }
+    *entries() { for (var i = 0; i < this.__n; i++) { yield [i, this.__b[this.__o + i]] } }
+    ["__#@iterator"]() { return this.values() }
+}
 
 // ===== Date and the timers =====
 // Compiled into a program only when it names Date or a timer function: the loaders
