@@ -1,16 +1,16 @@
-// Swift recognition test: real-world syntax that the widened grammar PARSES but
-// does not compile. Every construct below is accepted and routed to
-// notImplemented, so a normal run aborts at the first one (nonzero exit) while a
-// run with -warn-unsupported warns on each and still succeeds (exit 0). The
+// Swift recognition test: real-world syntax that the widened grammar PARSES.
+// Most of it now compiles; what does not is routed to notImplemented - today only
+// `await` (in fetch below) - so a normal run aborts there (nonzero exit) while a
+// run with -warn-unsupported warns on it and still succeeds (exit 0). The
 // compiler's -q output must be byte-identical between the goja and -frozen
-// engines. This file is a SHOULD-FAIL by default.
+// engines. This file is a SHOULD FAIL row by default.
 
 import Foundation
 import class UIKit.UIView
 
 typealias Meters = Double
 
-// A protocol and an extension are accepted structurally (not implemented).
+// A protocol and an extension.
 protocol Shape {
     var area: Double { get }
     func describe() -> String
@@ -22,7 +22,7 @@ extension Shape {
     }
 }
 
-// An enum with raw / associated values (not implemented).
+// An enum with associated values.
 enum Token {
     case number(Int)
     case word(String)

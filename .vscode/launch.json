@@ -1007,16 +1007,16 @@
             "program": "${workspaceFolder}","args": ["languages/c-to-llvm-ir.abnf", "tests/c-test-widen.c", "-q"]
         },
         {
-            "name": "C widened surface (compiler, no flags)",
+            "name": "C widen2: typedef, float, goto, union, sizeof expr (compiler)",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["languages/c-to-llvm-ir.abnf", "tests/c-test-widen-notimpl.c", "-q"]
+            "program": "${workspaceFolder}","args": ["languages/c-to-llvm-ir.abnf", "tests/c-test-widen2.c", "-q"]
         },
         {
-            "name": "C not-implemented surface warned+ignored",
+            "name": "C widen2: typedef, float, goto, union, sizeof expr (interpreter)",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["languages/c-to-llvm-ir.abnf", "tests/c-test-widen-notimpl.c", "-q", "-warn-unsupported"]
+            "program": "${workspaceFolder}","args": ["languages/c-interpreter.abnf", "tests/c-test-widen2.c", "-q"]
         },
         {
             "name": "C preprocessor (object-like macros) standalone",
@@ -2656,7 +2656,7 @@
             "program": "${workspaceFolder}","args": ["-i", "tests/imports", "languages/swift-to-llvm-ir.abnf", "tests/swift-test-multifile.swift", "-q", "-exe", "tests/swift-native-multi.out"]
         },
         {
-            "name": "--------- ABORT TEXT (docs/todo.md 4.1): every row below is SUPPOSED to die ---------",
+            "name": "--------- ABORT TEXT: every row below is SUPPOSED to die ---------",
             "type": "go",
             "request": "launch",
             "program": "${workspaceFolder}"
@@ -2668,7 +2668,7 @@
             "program": "${workspaceFolder}"
         },
         {
-            "name": "--------- a row named SHOULD-ABORT builds AND RUNS the native binary, comparing its abort ---------",
+            "name": "--------- a row named SHOULD ABORT builds AND RUNS the native binary, comparing its abort ---------",
             "type": "go",
             "request": "launch",
             "program": "${workspaceFolder}"
@@ -2950,7 +2950,7 @@
             "program": "${workspaceFolder}","args": ["languages/dart-interpreter.abnf", "tests/dart-abort-test.dart", "-q"]
         },
         {
-            "name": "Dart abort probe, native binary SHOULD ABORT (native vs llvm.Run only - the interpreter half says 'Exception: boom', the compiler half says 'boom')",
+            "name": "Dart abort probe, native binary SHOULD ABORT (native vs llvm.Run only - the interpreter half says 'Exception: abort probe', the compiler half says 'abort probe')",
             "type": "go",
             "request": "launch",
             "program": "${workspaceFolder}","args": ["languages/dart-to-llvm-ir.abnf", "tests/dart-abort-test.dart", "-q", "-exe", "tests/dart-abort.out"]
