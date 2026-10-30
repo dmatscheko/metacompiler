@@ -188,7 +188,7 @@ Program     <~~ buildMain(takeAll()) ~~>
 // as a 'const' declaration of a variable named 'enum'. A decorated declaration is in
 // front of ClassDecl because the decorators sit before the 'class' keyword.
 Statement   <~~ push(stmtPos(pop())) ~~>
-            = Block | ImportStmt | ExportStmt | AmbientDecl | NamespaceDecl | Interface | TypeAlias | EnumDecl
+            = Block | ImportStmt | ImportAlias | ExportStmt | AmbientDecl | NamespaceDecl | Interface | TypeAlias | EnumDecl
             | DecoratedDecl | ClassDecl | ClassDeclWidened | TryStmt | VarDecl | Destructure | If | While | Do | ForOf | For | Switch | Return | Break | Continue
             | Throw | Debugger | With | AsyncFuncDecl | GenFuncDecl | FuncOverload | FuncDecl | Labeled | Empty | ExprStmt ;
 
@@ -855,12 +855,20 @@ NotArrow    = :script(~~
 ~~) ;
 AsCast      = KwAs ( "const" KwEnd | Type ) ;
 SatisfiesCast = KwSatisfies Type ;
-NonNullSfx  = "!" !"=" ;
+NonNullSfx  = "!" NotTouchingEq ;
+// Twin of NotTouchingEq in typescript-interpreter.abnf. The non-null '!' is followed by anything but an '=' TOUCHING it: 'x! = 1' assigns to
+// x and 'x! == 1' compares it, while 'x != 1' and 'x !== 1' are the inequalities. A
+// plain !"=" would skip the blank and refuse 'x! = 1'.
+NotTouchingEq = :script(~~
+    (function() {
+        return (c.peek(0) === 61) ? abnf.newToken("\x01eq", 0) : undefined
+    })()
+~~) ;
 // A template literal directly behind a callee is a TAGGED template: tag`a${1}b` calls
 // tag(strings, 1) with the string parts in strings (and their unescaped source text in
 // strings.raw). It is a call suffix like '(' so that it chains - String.raw`x`.length.
 TagSuffix   <~~ push({kind: "tag", parts: takeAll()}) ~~>
-            = TplBody ;
+            = "`" :whitespace() { TplExpr | TagChars | TplDollar } "`" :whitespace(Whitespace) ;
 // TypeScript allows EXPLICIT type arguments at a call site ('ident<string>("e")'). The
 // list is optional and must be followed by the '(' of the call, so the whole attempt
 // rolls back for an ordinary 'a < b' and the relational level picks it up - which is the
@@ -1020,7 +1028,7 @@ GetSetProp  <~~ push(makeAccessorProp(takeAll())) ~~>
 GetterParams <~~ takeAll() ~~> = "(" [ ParamSeq ] ")" ;
 SetterParams = "(" [ ParamSeq ] ")" ;
 // A shorthand method: '{ m(x) { ... } }', with the async and generator prefixes.
-MethodProp  <~~ push(makeMethodProp(takeAll())) ~~>
+MethodProp  <~~ push(homeNote(makeMethodProp(takeAll()), up.in)) ~~>
             = [ AsyncMod ] [ GenMod ] MemberKey [ "?" ] [ TypeParams ] ParamList [ TypeAnnot ] [ UseStrictMark ] FuncBody ;
 AsyncMod    <~~ push({amod: true}) ~~> = "async" KwEnd ;
 GenMod      <~~ push({gmod: true}) ~~> = "*" ;
@@ -1059,6 +1067,12 @@ TplExpr     <~~ push({expr: pop()}) ~~>
             = "${" :whitespace(Whitespace) Expression "}" ;
 // Both the cooked text (escapes resolved) and the raw text are kept: a tagged template
 // hands the raw one to the tag function as strings.raw.
+// See the twin of this comment in js-to-llvm-ir.abnf.
+TagChars    <~~ push(tagChunk(up.in)) ~~>
+            = TagChar { TagChar } ;
+TagChar     = TplEsc | TplBadEsc | TplPlain ;
+TplBadEsc   <~~ tplBadSeen = true ~~>
+            = "\\" ( "x" | "u" | "0"..."9" ) ;
 TplChars    <~~ push({str: unescapeJs(up.in), raw: up.in}) ~~>
             = TplChar { TplChar } ;
 TplChar     = TplEsc | TplPlain ;
@@ -1414,13 +1428,20 @@ ImportStmt  <~~ push(jsImport(takeAll(), up.pos)) ~~>
 // and the older 'import X = require("...")' / 'import X = A.B' aliases; all of them are
 // erased the same way - only the module SPECIFIER matters, and only when it names a
 // project file.
-            = KwImport ( ImportEquals | KwType ImportEquals | [ KwDefer ] ImportClause KwFrom ModPath | ModPath ) [ ImportAttrs ] [ ";" ] ;
+            = KwImport ( ImportEquals | KwType ImportTypeEquals | [ KwDefer ] ImportClause KwFrom ModPath | ModPath ) [ ImportAttrs ] [ ";" ] ;
 // 'import defer * as ns from "m"': the deferred-evaluation import. The module is emitted
 // the same way here (this flat model has no lazy namespace object), so the modifier is
 // parsed and dropped, exactly like 'import type'.
 KwDefer     = "defer" KwEnd ;
 ImportAttrs = ( "with" | "assert" ) KwEnd SkipBlock ;
-ImportEquals = NotBindName Id "=" ( Id "(" ModPath ")" | Id { "." Id } ) ;
+ImportEquals = NotBindName Id "=" Id "(" ModPath ")" ;
+ImportTypeEquals = NotBindName Id "=" ( Id "(" ModPath ")" | Id { "." Id } ) ;
+// See the twin of this comment in typescript-interpreter.abnf.
+ImportAlias = ImportAliasCore [ ";" ] ;
+ImportAliasCore <~~ push(makeVarSeq(takeAll())); declKinds.pop() ~~>
+            = AliasKw NameDeclarator ;
+AliasKw     <~~ declKinds.push("var") ~~>
+            = KwImport ;
 ImportClause = [ KwType ] ( ImportBinding [ "," ImportTail ] | ImportTail ) ;
 ImportBinding = NotBindName Id ;
 ImportTail  = ImportNs | ImportNamed ;
@@ -1449,7 +1470,7 @@ ExportNs    <~~ takeAll(); push(function(b) { return b }) ~~>
             = KwAs KwNamespace Id [ ";" ] ;
 ExportBody  = AmbientDecl | NamespaceDecl | Interface | TypeAlias | EnumDecl | DecoratedDecl
             | ClassDecl | ClassDeclWidened | AsyncFuncDecl | GenFuncDecl | FuncOverload | FuncDecl
-            | Destructure | VarDecl
+            | Destructure | VarDecl | ImportAlias
             | ExportAll | ExportNamed | ExportAssign | ExportDefaultExpr ;
 // The specifier forms only name things that are already declared - an import emits the
 // referenced file into the shared global scope - so they emit nothing at all. 'export ='
@@ -2571,7 +2592,9 @@ NotFuncHead = :script(~~
     var jsAggWant = false // Whether the program names Promise or AggregateError.
     function jsbRef(name) {
         if (name == "Set" || name == "Map" || name == "Array" || name == "isNaN" || name == "isFinite" ||
-            name == "structuredClone" || name == "Reflect") { jsbWant = true }
+            name == "structuredClone" || name == "Reflect" || name == "WeakMap" || name == "WeakSet" ||
+            name == "queueMicrotask" || name == "URIError" || name == "encodeURIComponent" || name == "encodeURI" ||
+            name == "decodeURIComponent" || name == "decodeURI") { jsbWant = true }
         if (name == "Promise" || name == "AggregateError") { jsAggWant = true }
         return name
     }
@@ -2850,6 +2873,7 @@ NotFuncHead = :script(~~
             absB.NewBr(endB)
             var gv = callExt(hitB, "js_scope_get", [curScopeV, nmV])
             if (hoistRefAll[ri].chk) { gv = tdzChk(hitB, gv, nmV) }
+            if (name == "this" && derivedThis) { gv = hitB.NewCall(derivedFnsGet()[0], [gv]) }
             var hv = callExt(hitB, "js_jstypeof", [gv])
             hitB.NewBr(endB)
             return {b: endB, v: endB.NewPhi([llvm.ir.NewIncoming(tv, absB),
@@ -2978,8 +3002,35 @@ NotFuncHead = :script(~~
     function makeProp(valT, key, txt) {
         // NamedEvaluation, the property form: `{ o: (a,b)=>a }` names the arrow "o".
         if (typeof key == "string") { fnAnonName(key, ":", txt) }
+        // `__proto__: p`, the name or a plain string literal (js_jsprotolit).
+        if (typeof txt == "string" && (key === "__proto__" || txt.substring(0, 12) == "\"__proto__\":" || txt.substring(0, 12) == "'__proto__':")) {
+            return {proto: true, kt: makeConst(""), t: valT}
+        }
         if (typeof key == "string") { return {kt: makeConst(jsKeyEsc(key)), kesc: true, t: valT} }
         return {kt: key, t: valT}
+    }
+    // See the twin of this comment in js-to-llvm-ir.abnf.
+    var homeSuperWant = false
+    function homeNote(p, txt) {
+        if (txt.indexOf("super") >= 0) {
+            p.home = true
+            homeSuperWant = true
+        }
+        return p
+    }
+    // Splits b on whether "0home" is a home object: {homeB, clsB, hv}.
+    function homeSplit(b) {
+        var hv = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "0home")])
+        var homeB = curF.NewBlock("")
+        var clsB = curF.NewBlock("")
+        b.NewCondBr(b.NewICmp(llvm.enum.IPredNE, callExt(b, "js_jsctorp", [hv]), handle(0)), clsB, homeB)
+        return {homeB: homeB, clsB: clsB, hv: hv}
+    }
+    function homeMerge(hb, hv, cb, cv) {
+        var mB = curF.NewBlock("")
+        hb.NewBr(mB)
+        cb.NewBr(mB)
+        return {b: mB, v: mB.NewPhi([llvm.ir.NewIncoming(hv, hb), llvm.ir.NewIncoming(cv, cb)])}
     }
     function makeObject(props) {
         return function(b) {
@@ -3003,8 +3054,18 @@ NotFuncHead = :script(~~
                     callExt(b, "js_defprop", [obj, callExt(b, "js_jspropkey", [kr.v]), gV, sV])
                     continue
                 }
+                var savedHome = curScopeV
+                if (props[i].home === true) {
+                    curScopeV = callExt(b, "js_scope_new", [savedHome])
+                    callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0home"), obj])
+                }
                 var vr = props[i].t(b)
+                curScopeV = savedHome
                 b = vr.b
+                if (props[i].proto === true) {
+                    callExt(b, "js_jsprotolit", [obj, vr.v])
+                    continue
+                }
                 var kv = (props[i].kesc === true) ? kr.v : callExt(b, "js_jskeyesc", [kr.v])
                 callExt(b, memSetExt(), [obj, kv, vr.v])
             }
@@ -3590,7 +3651,7 @@ NotFuncHead = :script(~~
             b = r.b
             var cur = r.v
             var curThis = hUndef
-            if (supThis) { curThis = callExt(b, core.scopeGetExt, [curScopeV, emitStr(b, "this")]) }
+            if (supThis) { curThis = emitThisGet(b) }
             // A bare name that is an exported namespace variable (nsCallThis).
             if (!supThis && nsIsVar(headTxt)) {
                 var nr = nsCallThis(b)
@@ -3949,6 +4010,8 @@ NotFuncHead = :script(~~
         var savedAsyncGen = inAsyncGen
         var savedPlainGen = inPlainGen
         var savedStrict = emitStrict
+        var savedDThis = derivedThis
+        if (!isCtl && lexThis != true) { derivedThis = false }
         if (ownStrict === true) { emitStrict = true }
         if (!isCtl) { inAsyncFn = pendingAsyncFn; inAsyncGen = pendingAsyncGen; inPlainGen = pendingPlainGen }
         pendingAsyncFn = false
@@ -3998,6 +4061,7 @@ NotFuncHead = :script(~~
         inAsyncGen = savedAsyncGen
         inPlainGen = savedPlainGen
         emitStrict = savedStrict
+        derivedThis = savedDThis
         emitParams = savedParams
         return idx
     }
@@ -4135,6 +4199,14 @@ NotFuncHead = :script(~~
     }
 
     // See the twin of this comment in js-to-llvm-ir.abnf.
+    // The chunk TagChars matched; bad when a TplBadEsc stood in it.
+    var tplBadSeen = false
+    function tagChunk(t) {
+        var bad = tplBadSeen
+        tplBadSeen = false
+        if (bad) { return {str: "", raw: t, bad: true} }
+        return {str: unescapeJs(t), raw: t}
+    }
     var tplCount = 0 // The tagged-template call sites emitted so far (emitTagCall).
     function emitTagCall(b, fnV, thisV, parts, site) {
         var cooked = []
@@ -4142,19 +4214,22 @@ NotFuncHead = :script(~~
         var exprs = []
         var curStr = ""
         var curRaw = ""
+        var curBad = false
         for (var i = 0; i < parts.length; i++) {
             if (parts[i].expr != undefined) {
-                cooked.push(curStr)
+                cooked.push(curBad ? undefined : curStr)
                 raws.push(curRaw)
                 curStr = ""
                 curRaw = ""
+                curBad = false
                 exprs.push(parts[i].expr)
             } else {
                 curStr = curStr + parts[i].str
                 curRaw = curRaw + parts[i].raw
+                if (parts[i].bad === true) { curBad = true }
             }
         }
-        cooked.push(curStr)
+        cooked.push(curBad ? undefined : curStr)
         raws.push(curRaw)
         tplCount++
         var g = m.NewGlobalDef("jstpl." + tplCount, llvm.constant.NewInt(i64, 0))
@@ -4165,7 +4240,7 @@ NotFuncHead = :script(~~
         var cookedV = callExt(mkB, "js_arr_new", [])
         var rawV = callExt(mkB, "js_arr_new", [])
         for (var j = 0; j < cooked.length; j++) {
-            callExt(mkB, "js_arr_push", [cookedV, emitStr(mkB, cooked[j])])
+            callExt(mkB, "js_arr_push", [cookedV, (cooked[j] === undefined) ? hUndef : emitStr(mkB, cooked[j])])
             callExt(mkB, "js_arr_push", [rawV, emitStr(mkB, raws[j])])
         }
         var made = callExt(mkB, "js_gc_pin", [callExt(mkB, "js_jstagstrs", [cookedV, rawV])])
@@ -4945,8 +5020,26 @@ NotFuncHead = :script(~~
     // A `declare` or `abstract` field is type layer only: tsc emits nothing for it.
     function makeField(items) {
         if (fieldIsAmbient(items[0].mods)) { return {skip: true} }
+        var auto = false
+        for (var j = 0; j < items[0].mods.length; j++) { if (items[0].mods[j] == "accessor") { auto = true } }
         return {kind: "field", name: items[1].fname, statik: isStaticMods(items[0].mods),
-                init: items.length > 2 ? items[2] : null}
+                init: items.length > 2 ? items[2] : null, auto: auto}
+    }
+    // An AUTO-ACCESSOR, 'accessor x = 1': the hidden field "__#auto#x" (raw, as a private
+    // name is) holds the value, and a getter and a setter named x read and write it on
+    // their receiver. Twin of autoGetter / autoSetter in typescript-interpreter.abnf.
+    function autoAccFns(b, mm) {
+        var gidx = emitFunction([], makeReturn([function(gb) {
+            var tv = callExt(gb, "js_scope_get", [curScopeV, emitStr(gb, "this")])
+            return {b: gb, v: callExt(gb, "js_jsvget", [tv, emitStr(gb, mm.store)])}
+        }]), false, false)
+        var sidx = emitFunction(["v"], function(sb) {
+            var tv = callExt(sb, "js_scope_get", [curScopeV, emitStr(sb, "this")])
+            callExt(sb, memSetExt(), [tv, emitStr(sb, mm.store), callExt(sb, "js_scope_get", [curScopeV, emitStr(sb, "v")])])
+            return sb
+        }, false, false)
+        return {g: fnMetaAt(b, callExt(b, "js_closure", [handle(gidx), curScopeV]), "get " + mm.name, []),
+                s: fnMetaAt(b, callExt(b, "js_closure", [handle(sidx), curScopeV]), "set " + mm.name, ["v"])}
     }
     function fieldIsAmbient(mods) {
         for (var i = 0; i < mods.length; i++) { if (mods[i] == "declare" || mods[i] == "abstract") { return true } }
@@ -5010,6 +5103,51 @@ NotFuncHead = :script(~~
     // See the twin of this comment in js-to-llvm-ir.abnf.
     var superFields = null
     var derivedCtorF = null
+    // See the twin of this comment in js-to-llvm-ir.abnf.
+    var derivedThis = false
+    var derivedThisWant = false
+    function emitThisGet(b) {
+        var v = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "this")])
+        if (derivedThis) { v = b.NewCall(derivedFnsGet()[0], [v]) }
+        return v
+    }
+    var derivedFns = []
+    function derivedFnsGet() {
+        if (derivedFns.length > 0) { return derivedFns }
+        var sentG = tdzGlob()
+        var cf = m.NewFunc("jsthischk", i64, [llvm.ir.NewParam("v", i64)])
+        var cb = cf.NewBlock("entry")
+        var cbad = cf.NewBlock("")
+        var cok = cf.NewBlock("")
+        cb.NewCondBr(cb.NewICmp(llvm.enum.IPredEQ, cf.Params[0], cb.NewLoad(i64, sentG)), cbad, cok)
+        cok.NewRet(cf.Params[0])
+        derivedThrow(cbad, "ReferenceError: " + derivedNoSuper)
+        var rf = m.NewFunc("jsderivedret", i64, [llvm.ir.NewParam("v", i64), llvm.ir.NewParam("t", i64)])
+        var rb = rf.NewBlock("entry")
+        var objB = rf.NewBlock("")
+        var primB = rf.NewBlock("")
+        var undefB = rf.NewBlock("")
+        var typeB = rf.NewBlock("")
+        var refB = rf.NewBlock("")
+        var thisB = rf.NewBlock("")
+        var sentV = rb.NewLoad(i64, sentG)
+        var resV = callExt(rb, "js_jsnewres", [rf.Params[0], sentV])
+        rb.NewCondBr(rb.NewICmp(llvm.enum.IPredNE, resV, sentV), objB, primB)
+        objB.NewRet(resV)
+        primB.NewCondBr(primB.NewICmp(llvm.enum.IPredEQ, rf.Params[0], hUndef), undefB, typeB)
+        derivedThrow(typeB, "TypeError: Derived constructors may only return object or undefined")
+        undefB.NewCondBr(undefB.NewICmp(llvm.enum.IPredEQ, rf.Params[1], undefB.NewLoad(i64, sentG)), refB, thisB)
+        derivedThrow(refB, "ReferenceError: " + derivedNoSuper)
+        thisB.NewRet(rf.Params[1])
+        derivedFns.push(cf)
+        derivedFns.push(rf)
+        return derivedFns
+    }
+    var derivedNoSuper = "Must call super constructor in derived class before accessing 'this' or returning from derived constructor"
+    function derivedThrow(bb, msg) {
+        callExt(bb, "js_throw", [callExt(bb, "js_jserrmk", [emitStr(bb, msg)])])
+        bb.NewRet(hUndef) // Never reached: js_throw does not return.
+    }
     // A class coroutine method's value: an instance method's receiver is in its
     // arguments, a static one's is taken by a binder (emitThisBinder).
     function clsCoro(b, idx, kind, statik) {
@@ -5071,19 +5209,27 @@ NotFuncHead = :script(~~
             var supCls = callExt(b, "js_scope_get", [curScopeV, emitStr(b, implicitSuper)])
             var supCtor = callExt(b, memGetExt(), [supCls, emitStr(b, "__ctor")])
             // See the twin of this comment in js-to-llvm-ir.abnf.
-            b = emitSuperDone(b, superCall(b, supCtor, f.Params[1]), inits)
+            b = emitSuperDone(b, superCall(b, supCtor, f.Params[1]), inits, null)
         } else if (derived != true) {
             b = emitFieldInits(b, inits)
         }
         var savedSuperFields = superFields
         var savedDerivedF = derivedCtorF
+        var savedDThis = derivedThis
         superFields = (derived == true && implicitSuper == null) ? inits : null
-        derivedCtorF = (derived == true) ? f : null
+        derivedCtorF = (derived == true) ? idx : null
+        derivedThis = (derived == true && implicitSuper == null)
+        if (derivedThis) {
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0self"), callExt(b, "js_scope_get", [curScopeV, emitStr(b, "this")])])
+            callExt(b, "js_scope_set", [curScopeV, emitStr(b, "this"), b.NewLoad(i64, tdzGlob())])
+        }
         var endB = body != null ? body(b) : b
-        if (derived == true) { endB.NewRet(callExt(endB, "js_scope_get", [curScopeV, emitStr(endB, "this")])) }
+        if (derivedThis) { endB.NewRet(endB.NewCall(derivedFnsGet()[1], [hUndef, callExt(endB, "js_scope_get", [curScopeV, emitStr(endB, "this")])])) }
+        else if (derived == true) { endB.NewRet(callExt(endB, "js_scope_get", [curScopeV, emitStr(endB, "this")])) }
         else { endB.NewRet(hUndef) }
         superFields = savedSuperFields
         derivedCtorF = savedDerivedF
+        derivedThis = savedDThis
         curF = savedF
         curFTag = savedTag
         curScopeV = savedScope
@@ -5141,8 +5287,8 @@ NotFuncHead = :script(~~
         return saved
     }
     // See the twin of this comment in js-to-llvm-ir.abnf.
-    function emitSuperDone(b, retV, inits) {
-        var thisV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "this")])
+    function emitSuperDone(b, retV, inits, selfV) {
+        var thisV = (selfV != null) ? selfV : callExt(b, "js_scope_get", [curScopeV, emitStr(b, "this")])
         callExt(b, "js_scope_set", [curScopeV, emitStr(b, "this"), callExt(b, "js_jsnewres", [retV, thisV])])
         if (inits != null) { b = emitFieldInits(b, inits) }
         return b
@@ -5179,6 +5325,11 @@ NotFuncHead = :script(~~
             if (m.kind == "ctor") { info.ctor = m }
             else if (m.kind == "sblock") { info.sinits.push(m) }
             else if (m.kind == "accessor" || m.kind == "method") { info.protos.push(m) }
+            else if (m.auto === true && m.name != undefined) {
+                var store = {kind: "field", name: "__#auto#" + m.name, priv: true, statik: m.statik, init: m.init}
+                if (m.statik) { info.sinits.push(store) } else { info.fields.push(store) }
+                info.protos.push({kind: "autoacc", name: m.name, statik: m.statik, store: store.name})
+            }
             else if (m.statik) { info.sinits.push(m) }
             else { info.fields.push(m) }
             if (m.nameT != undefined && m.kind != "sblock" && m.kind != "ctor") {
@@ -5187,6 +5338,7 @@ NotFuncHead = :script(~~
                 info.computed.push(m)
             }
         }
+        if (info.ctor != null && info.superName != null) { derivedThisWant = true }
         info.shown = [info.name] // The class's `name`; makeClassExpr refines it.
         return info
     }
@@ -5212,6 +5364,11 @@ NotFuncHead = :script(~~
                       callExt(b, "js_scope_get", [curScopeV, emitStr(b, info.superName)]))
         }
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, info.name), clsV])
+        var outerScope = curScopeV
+        if (homeSuperWant) {
+            curScopeV = callExt(b, "js_scope_new", [outerScope])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0home"), clsV])
+        }
         // See the twin of this comment in js-to-llvm-ir.abnf.
         for (var ci = 0; ci < info.computed.length; ci++) {
             var ckr = emitKeyNow(b, info.computed[ci])
@@ -5235,6 +5392,11 @@ NotFuncHead = :script(~~
             b = mk.b
             // The one line that separates the two namespaces.
             var mtgt = mm.statik ? statsV : clsV
+            if (mm.kind == "autoacc") {
+                var af = autoAccFns(b, mm)
+                callExt(b, "js_defprop", [mtgt, mk.v, af.g, af.s])
+                continue
+            }
             if (mm.kind == "accessor") {
                 // See the twin of this comment in js-to-llvm-ir.abnf.
                 var aidx = emitFunction(mm.params, mm.body, false, false)
@@ -5299,6 +5461,7 @@ NotFuncHead = :script(~~
             // See the twin of this comment in js-to-llvm-ir.abnf.
             callExt(b, "js_jssfield", [statsV, kr.v, sv])
         }
+        curScopeV = outerScope
         return {b: b, v: clsV}
     }
     function makeClassStmt(items, pos) {
@@ -5405,20 +5568,63 @@ NotFuncHead = :script(~~
                 var clsV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, defName)])
                 var supV = callExt(b, memGetExt(), [clsV, emitStr(b, "__super")])
                 var supCtor = callExt(b, memGetExt(), [supV, emitStr(b, "__ctor")])
-                var thisV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "this")])
+                var selfV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, derivedThis ? "0self" : "this")])
+                var firstV = null
+                if (derivedThis) {
+                    // `this` already bound makes this a second super(): the parent still
+                    // constructs, on an object of its own, and then the binding is refused
+                    // (ECMA-262 13.3.7.1 steps 6-7).
+                    var curV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "this")])
+                    firstV = b.NewICmp(llvm.enum.IPredEQ, curV, b.NewLoad(i64, tdzGlob()))
+                    var freshB = curF.NewBlock("")
+                    var selfB = curF.NewBlock("")
+                    var fromB = b
+                    b.NewCondBr(firstV, selfB, freshB)
+                    var freshV = callExt(freshB, "js_obj_new", [])
+                    callExt(freshB, memSetExt(), [freshV, emitStr(freshB, "__class"), callExt(freshB, memGetExt(), [selfV, emitStr(freshB, "__class")])])
+                    freshB.NewBr(selfB)
+                    selfV = selfB.NewPhi([llvm.ir.NewIncoming(selfV, fromB), llvm.ir.NewIncoming(freshV, freshB)])
+                    b = selfB
+                }
                 var argsV = callExt(b, "js_arr_new", [])
-                callExt(b, "js_arr_push", [argsV, thisV])
+                callExt(b, "js_arr_push", [argsV, selfV])
                 b = pushArgs(b, argsV, argThunks)
-                b = emitSuperDone(b, superCall(b, supCtor, argsV), superFields)
+                var retV = superCall(b, supCtor, argsV)
+                if (derivedThis) {
+                    var againB = curF.NewBlock("")
+                    var firstB = curF.NewBlock("")
+                    b.NewCondBr(firstV, firstB, againB)
+                    derivedThrow(againB, "ReferenceError: Super constructor may only be called once")
+                    b = firstB
+                }
+                b = emitSuperDone(b, retV, superFields, selfV)
                 return {b: b, v: hUndef}
             }
         }
         return function(b) {
-            var clsV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, defName)])
-            var supV = callExt(b, memGetExt(), [clsV, emitStr(b, "__super")])
-            var thisV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "this")])
+            var thisV = emitThisGet(b)
             var argsV = callExt(b, "js_arr_new", [])
             b = pushArgs(b, argsV, argThunks)
+            var homeEnd = null
+            var homeV = null
+            if (homeSuperWant) {
+                var hs = homeSplit(b)
+                var fnV = callExt(hs.homeB, "js_jshomeget", [hs.hv, emitStr(hs.homeB, jsKeyEsc(name))])
+                var hr = jsCallChecked(hs.homeB, fnV, thisV, argsV, "(intermediate value)." + name)
+                homeEnd = hr.b
+                homeV = hr.v
+                b = hs.clsB
+            }
+            var cr = superMethodCls(b, defName, name, thisV, argsV)
+            if (homeEnd == null) { return cr }
+            return homeMerge(homeEnd, homeV, cr.b, cr.v)
+        }
+    }
+    // super.name(args) inside a class body, the arguments already evaluated.
+    function superMethodCls(b, defName, name, thisV, argsV) {
+        {
+            var clsV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, defName)])
+            var supV = callExt(b, memGetExt(), [clsV, emitStr(b, "__super")])
             var scV = callExt(jsThisSet(b, thisV), "js_supercall", [supV, thisV, emitStr(b, jsKeyEsc(name)), argsV])
             // See the twin of this comment in js-to-llvm-ir.abnf.
             var scOkB = curF.NewBlock("")
@@ -5456,7 +5662,7 @@ NotFuncHead = :script(~~
     function emitSuperBase(b, defName) {
         var clsV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, defName)])
         return {sup: callExt(b, memGetExt(), [clsV, emitStr(b, "__super")]),
-                self: callExt(b, "js_scope_get", [curScopeV, emitStr(b, "this")])}
+                self: emitThisGet(b)}
     }
     function emitSuperStore(b, defName, keyT, valueH) {
         var kr = keyT(b)
@@ -5470,6 +5676,12 @@ NotFuncHead = :script(~~
         var defName = curClassName
         return function(b) {
             var kr = keyT(b)
+            if (homeSuperWant) {
+                var hs = homeSplit(kr.b)
+                var hgV = callExt(hs.homeB, "js_jshomeget", [hs.hv, kr.v])
+                var csb = emitSuperBase(hs.clsB, defName)
+                return homeMerge(hs.homeB, hgV, hs.clsB, callExt(hs.clsB, "js_jssupget", [csb.sup, csb.self, kr.v]))
+            }
             var sb = emitSuperBase(kr.b, defName)
             // See the twin of this comment in js-to-llvm-ir.abnf.
             return {b: kr.b, v: callExt(kr.b, "js_jssupget", [sb.sup, sb.self, kr.v])}
@@ -5791,6 +6003,7 @@ NotFuncHead = :script(~~
             var nmV = emitStr(b, name)
             var v = callExt(b, nsGetExt(name), [curScopeV, nmV])
             if (hoistRefAll[ri].chk) { v = tdzChk(b, v, nmV) }
+            if (name == "this" && derivedThis) { v = b.NewCall(derivedFnsGet()[0], [v]) }
             return {b: b, v: v}
         }
     }
@@ -5803,6 +6016,7 @@ NotFuncHead = :script(~~
     function refRead(b, ref, nmV) {
         var v = callExt(b, nsGetExt(ref.name), [curScopeV, nmV])
         if (ref.tdz != undefined && hoistRefAll[ref.tdz].chk) { v = tdzChk(b, v, nmV) }
+        if (ref.name == "this" && derivedThis) { v = b.NewCall(derivedFnsGet()[0], [v]) }
         return v
     }
     function refWriteChk(b, ref, nmV) {
@@ -6568,8 +6782,9 @@ NotFuncHead = :script(~~
                 v = r.v
             }
             // See the twin of this comment in js-to-llvm-ir.abnf.
-            if (curF === derivedCtorF) {
-                v = callExt(b, "js_jsnewres", [v, callExt(b, "js_scope_get", [curScopeV, emitStr(b, "this")])])
+            if (curFTag === derivedCtorF) {
+                var tV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "this")])
+                v = derivedThis ? b.NewCall(derivedFnsGet()[1], [v, tV]) : callExt(b, "js_jsnewres", [v, tV])
             }
             emitIterUnwind(b, 0) // A return out of a for-of body closes its iterator.
             return retStmt(b, v) // plain ret, or a control signal when leaving a try body
@@ -6863,7 +7078,7 @@ NotFuncHead = :script(~~
             callExt(b, "js_jsnormdata", [emitStr(b, load("lib/unicode-norm.txt"))])
             callExt(b, "js_gc_perm", [handle(0)])
         }
-        if (hoistTdzCount > 0) { b.NewStore(callExt(b, "js_gc_pin", [callExt(b, "js_obj_new", [])]), tdzGlob()) }
+        if (hoistTdzCount > 0 || derivedThisWant) { b.NewStore(callExt(b, "js_gc_pin", [callExt(b, "js_obj_new", [])]), tdzGlob()) }
         b = emitImported(b)
         b = makeSeq(items)(b)
         b.NewRet(callExt(b, "js_getret", []))

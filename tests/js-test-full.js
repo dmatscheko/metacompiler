@@ -1601,6 +1601,118 @@ function s139() {
         Opt139.deep(p) == 3 && Opt139.deep(null) === undefined)
 }
 
+// ===== SECTION 140: derived constructors, `__proto__:` and tagged-template escapes =====
+// A derived constructor's `this` is in its dead zone until super() returns: reading it
+// first, never calling super(), or calling it twice is a ReferenceError (the second
+// call still runs the parent, on an object of its own), and returning anything but an
+// object or undefined is a TypeError. `__proto__: p` in an object literal sets the
+// prototype (an object or null; anything else is ignored), unlike a computed key. A
+// TAGGED template may hold an escape a plain one refuses: that segment's cooked
+// string is undefined and its raw text is kept.
+class B140 { constructor(v) { this.b = v } m() { return "m" } }
+class Early140 extends B140 { constructor() { this.x = 1; super(1) } }
+class Arrow140 extends B140 { constructor() { const g = () => this; g(); super(1) } }
+class SupM140 extends B140 { constructor() { super.m(); super(1) } }
+class Typeof140 extends B140 { constructor() { const t = typeof this; super(1) } }
+class None140 extends B140 { constructor() { } }
+class Twice140 extends B140 { constructor() { super(1); try { super(2) } catch (e) { this.err = e.message } } }
+class Ret5140 extends B140 { constructor() { super(1); return 5 } }
+class RetNull140 extends B140 { constructor() { super(1); return null } }
+class RetObj140 extends B140 { constructor() { return {o: 1} } }
+class Late140 extends B140 { constructor() { const f = () => super(7); const g = () => this.b; f(); this.g = g() } }
+class Cond140 extends B140 { constructor(x) { if (x) { super(5) } } }
+function tag140(s, ...v) { return JSON.stringify([s, s.raw, v]) }
+function s140() {
+    function err(f) { try { return "ok:" + JSON.stringify(f()) } catch (e) { return e.constructor.name + ":" + e.message } }
+    var noSuper = "ReferenceError:Must call super constructor in derived class before accessing 'this' or returning from derived constructor"
+    var cs = [Early140, Arrow140, SupM140, Typeof140, None140]
+    var bad = 0
+    for (var i = 0; i < cs.length; i++) { if (err(() => new cs[i]()) != noSuper) { bad++ } }
+    check("dctor1", bad == 0 && err(() => new Cond140(false)) == noSuper && err(() => new Cond140(true)) == "ok:{\"b\":5}")
+    check("dctor2", err(() => new Twice140()) == "ok:{\"b\":1,\"err\":\"Super constructor may only be called once\"}" &&
+        err(() => new Ret5140()) == "TypeError:Derived constructors may only return object or undefined" &&
+        err(() => new RetNull140()) == "TypeError:Derived constructors may only return object or undefined")
+    check("dctor3", err(() => new RetObj140()) == "ok:{\"o\":1}" && err(() => new Late140()) == "ok:{\"b\":7,\"g\":7}")
+    var base = {hi() { return "base" }, k: 1}
+    var ps = [base, null, 5]
+    var lit = {__proto__: ps[0], x: 1}
+    var lit2 = {"__proto__": ps[0]}
+    var lit3 = {__proto__: ps[1], a: 1}
+    var lit4 = {__proto__: ps[2], b: 2}
+    var key = "__proto__"
+    var lit5 = {[key]: base}
+    check("protolit1", lit.hi() == "base" && Object.getPrototypeOf(lit) === base && Object.keys(lit).join() == "x" &&
+        lit.k == 1 && !lit.hasOwnProperty("k") && lit2.hi() == "base")
+    check("protolit2", Object.getPrototypeOf(lit3) === null && Object.keys(lit3).join() == "a" &&
+        Object.getPrototypeOf(lit4) === Object.prototype && Object.keys(lit4).join() == "b" &&
+        Object.getPrototypeOf(lit5) === Object.prototype && Object.keys(lit5).join() == "__proto__")
+    check("tagesc1", tag140`\unicode` == "[[null],[\"\\\\unicode\"],[]]" &&
+        tag140`a\xZ${1}b\u{110000}c${2}\01` == "[[null,null,null],[\"a\\\\xZ\",\"b\\\\u{110000}c\",\"\\\\01\"],[1,2]]" &&
+        tag140`ok\n${3}\x41` == "[[\"ok\\n\",\"A\"],[\"ok\\\\n\",\"\\\\x41\"],[3]]" && String.raw`\u{zz}${4}\9` == "\\u{zz}4\\9")
+}
+
+// ===== SECTION 141: set methods, WeakMap / WeakSet, URI functions, well-formed strings =====
+// The ES2025 set methods take any set-like argument (a size, has and keys) and answer
+// a new Set; WeakMap and WeakSet hold object keys only and are neither iterable nor
+// sized; the URI functions percent-encode UTF-8 and raise URIError on a lone
+// surrogate or a malformed escape; isWellFormed / toWellFormed find and replace lone
+// surrogates. queueMicrotask refuses a non-function.
+function s141() {
+    function err(f) { try { return "ok:" + String(f()) } catch (e) { return e.constructor.name + ":" + e.name + ":" + e.message } }
+    var sh = s => [...s].join(",")
+    var a = new Set([1, 2, 3, 4]), b = new Set([5, 4, 3])
+    check("setm1", sh(a.union(b)) == "1,2,3,4,5" && sh(a.intersection(b)) == "4,3" && sh(a.difference(b)) == "1,2" &&
+        sh(b.difference(a)) == "5" && sh(a.symmetricDifference(b)) == "1,2,5")
+    check("setm2", !a.isSubsetOf(b) && new Set([3]).isSubsetOf(a) && a.isSupersetOf(new Set([1, 2])) &&
+        a.isDisjointFrom(new Set([9])) && !a.isDisjointFrom(b) && sh(a.union(new Map([[7, "y"]]))) == "1,2,3,4,7" &&
+        err(() => a.union([1])) == "TypeError:TypeError:The .size property is NaN" &&
+        err(() => a.union(5)) == "TypeError:TypeError:Set.prototype.union argument must be an object")
+    var wm = new WeakMap(), k1 = {}, k2 = [1]
+    wm.set(k1, 1).set(k2, 2)
+    check("weak1", wm.get(k1) == 1 && wm.get(k2) == 2 && !wm.has({}) && wm.delete(k1) && !wm.has(k1) &&
+        typeof wm.size == "undefined" && typeof wm.forEach == "undefined" &&
+        err(() => wm.set(1, 2)) == "TypeError:TypeError:Invalid value used as weak map key")
+    var ws = new WeakSet([k1])
+    check("weak2", ws.has(k1) && !ws.has(k2) && ws.add(k2).has(k2) && ws.delete(k2) &&
+        err(() => ws.add("s")) == "TypeError:TypeError:Invalid value used in weak set")
+    check("uri1", encodeURIComponent("a b&c/d?é€\u{1F600}") == "a%20b%26c%2Fd%3F%C3%A9%E2%82%AC%F0%9F%98%80" &&
+        encodeURI("http://x.y/a b?q=1&r=é#f") == "http://x.y/a%20b?q=1&r=%C3%A9#f" &&
+        decodeURIComponent("a%20b%26%C3%A9%F0%9F%98%80") == "a b&é\u{1F600}" && decodeURI("a%20b%26c%2F%23") == "a b%26c%2F%23")
+    check("uri2", err(() => decodeURIComponent("%C3")) == "URIError:URIError:URI malformed" &&
+        err(() => decodeURIComponent("%C0%80")) == "URIError:URIError:URI malformed" &&
+        err(() => encodeURIComponent("\uD800")) == "URIError:URIError:URI malformed" && String(new URIError("m")) == "URIError: m")
+    var ss = ["abc", "a\uD800b", "x\uDE00\uD83D", "ok😀"]
+    var wf = []
+    for (var i = 0; i < ss.length; i++) { wf.push(ss[i].isWellFormed() + "/" + encodeURIComponent(ss[i].toWellFormed())) }
+    check("wellformed1", wf.join(" ") == "true/abc false/a%EF%BF%BDb false/x%EF%BF%BD%EF%BF%BD true/ok%F0%9F%98%80" &&
+        err(() => queueMicrotask(5)) == "TypeError:TypeError:The \"callback\" argument must be of type function. Received type number (5)")
+}
+
+// ===== SECTION 142: `super` in an object literal's method =====
+// A shorthand method's `super` starts at its home object's prototype, whatever
+// setPrototypeOf or `__proto__:` made it, and runs with the method's own `this`; an
+// arrow inside sees the same; a literal inside a class method has its own home, and
+// the class method's `super` is still the class's.
+class K142 { m() { return "k" } }
+class D142 extends K142 {
+    m() {
+        var lit = {m() { return "lit>" + super.m() }}
+        Object.setPrototypeOf(lit, {m() { return "p" }})
+        return lit.m() + "|" + super.m()
+    }
+}
+function s142() {
+    var base = {hi() { return "base:" + this.n }, v: 7}
+    var obj = {n: 1, hi() { return super.hi() + "!" }, rv() { return super.v }}
+    Object.setPrototypeOf(obj, base)
+    var o2 = {__proto__: base, n: 2, hi() { return super.hi() + "?" }}
+    var o3 = {toString() { return "o3:" + super.toString() }}
+    var o4 = {f() { var a = () => super.hi(); return a() }, n: 4}
+    Object.setPrototypeOf(o4, base)
+    check("homesuper1", obj.hi() == "base:1!" && obj.rv() == 7 && o2.hi() == "base:2?" && o4.f() == "base:4")
+    check("homesuper2", new D142().m() == "lit>p|k" && String(o3) == "o3:[object Object]")
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -1657,6 +1769,9 @@ function main() {
     s137() // SECTION-CALL 137
     s138() // SECTION-CALL 138
     s139() // SECTION-CALL 139
+    s140() // SECTION-CALL 140
+    s141() // SECTION-CALL 141
+    s142() // SECTION-CALL 142
     println("full: " + checks + " checks, " + failures + " failures")
     return failures
 }

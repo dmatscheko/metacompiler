@@ -599,7 +599,7 @@ ParenExpr   <~~ push(parenPrimary(pop(), up.in)) ~~>
 // template body productions rather than reusing TemplateLit, because that one pushes a
 // finished string thunk while a tag needs the pieces.
 TaggedTemplate <~~ push({kind: "tagcall", parts: takeAll()}) ~~>
-            = "`" :whitespace() { TplExpr | TplChars | TplDollar } "`" :whitespace(Whitespace) ;
+            = "`" :whitespace() { TplExpr | TagChars | TplDollar } "`" :whitespace(Whitespace) ;
 CallSuffix  <~~ push({kind:"call", args: takeAll()}) ~~>
             = "(" [ Arg { "," Arg } [ "," ] ] ")" ;
 DotSuffix   = PrivateDotSuffix | "." Id <~~ push({kind:"member", name: idName(up.in), key: makeConst(jsKeyEsc(idName(up.in)))}) ~~> ;
@@ -743,7 +743,7 @@ GetterParams <~~ push([]) ~~> = "(" ")" ;
 SetterParams <~~ push(takeAll()) ~~> = "(" Param ")" ;
 // A shorthand method. The async and generator markers are kept, so 'async m() {}' and
 // '*m() {}' build the right kind of function value (see makeMethodProp).
-MethodProp  <~~ fsMark(up.start, up.pos, false); push(makeMethodProp(takeAll())) ~~>
+MethodProp  <~~ fsMark(up.start, up.pos, false); push(homeNote(makeMethodProp(takeAll()), up.in)) ~~>
             = [ AsyncMark ] [ GenMark ] PropKeyAny ParamList [ UseStrictMark ] FuncBody ;
 // The key of a method or accessor may be computed ('{get [a]() {}}', '{*[b]() {}}'), which
 // the plain PropKey has no room for - there the computed form is a member alternative of
@@ -794,6 +794,15 @@ TemplateLit <~~ push(makeTemplate(takeAll())) ~~>
             = "`" :whitespace() { TplExpr | TplChars | TplDollar } "`" :whitespace(Whitespace) ;
 TplExpr     <~~ push({expr: pop()}) ~~>
             = "${" :whitespace(Whitespace) Expression "}" ;
+// A TAGGED template may hold an escape a plain one refuses ('\unicode', '\x4', '\01'):
+// that segment's cooked string is undefined and its raw text is kept (ECMA-262 13.2.8.3,
+// NotEscapeSequence). TplBadEsc marks the chunk it stands in (tplBadSeen); the escape's
+// remaining characters read as plain ones.
+TagChars    <~~ push(tagChunk(up.in)) ~~>
+            = TagChar { TagChar } ;
+TagChar     = TplEsc | TplBadEsc | TplPlain ;
+TplBadEsc   <~~ tplBadSeen = true ~~>
+            = "\\" ( "x" | "u" | "0"..."9" ) ;
 TplChars    <~~ push({str: jsUnescape(up.in), raw: up.in}) ~~>
             = TplChar { TplChar } ;
 TplChar     = TplEsc | TplPlain ;
@@ -5623,6 +5632,8 @@ NotFuncHead = :script(~~
             if (s > oc) { return {v: 1} }
             return {v: 0}
         }
+        if (name == "isWellFormed") { return {v: jsnToWellFormed(s) === s} }
+        if (name == "toWellFormed") { return {v: jsnToWellFormed(s)} }
         return null
     }
     // Array#toLocaleString: each element's own toLocaleString, "" for undefined and
@@ -6245,7 +6256,12 @@ NotFuncHead = :script(~~
     // a read, write or typeof that meets jsTdz ran before the declaration. Twin:
     // tdzChk in js-to-llvm-ir.abnf, which checks only the references that can.
     var jsTdz = {}
-    function jsTdzRaise(name) { biRaise("ReferenceError: Cannot access '" + name + "' before initialization") }
+    // A derived constructor's `this` is in its dead zone until super() returns.
+    function jsTdzRaise(name) {
+        if (name == "this") { biRaise("ReferenceError: " + jsNoSuperText) }
+        biRaise("ReferenceError: Cannot access '" + name + "' before initialization")
+    }
+    var jsNoSuperText = "Must call super constructor in derived class before accessing 'this' or returning from derived constructor"
     function withLexInit(names, items) {
         if (names.length == 0) { return items }
         var out = [function() { jsTdzDecl(names) }]
@@ -6896,7 +6912,7 @@ NotFuncHead = :script(~~
                    "startsWith", "endsWith", "slice", "substring", "substr", "split", "toUpperCase",
                    "toLowerCase", "trim", "trimStart", "trimEnd", "padStart", "padEnd", "repeat",
                    "concat", "replace", "replaceAll", "toString", "valueOf", "localeCompare",
-                   "normalize"])
+                   "normalize", "isWellFormed", "toWellFormed"])
     bvSeed(bvArr, ["push", "pop", "shift", "unshift", "slice", "splice", "indexOf", "lastIndexOf",
                    "includes", "join", "concat", "reverse", "sort", "map", "filter", "forEach",
                    "reduce", "reduceRight", "some", "every", "find", "findIndex", "findLast",
@@ -9531,6 +9547,7 @@ NotFuncHead = :script(~~
         var k = (typeof key == "string") ? key : jsStr(key())
         // NamedEvaluation, the property form: `{ o: (a,b)=>a }` names the arrow "o".
         fnAnonName("" + k, ":", txt)
+        if (k === "__proto__" && txt !== undefined) { return {proto: true, t: valT} }
         return {k: jsKeyEsc(k), t: valT}
     }
     // Objects carry a hidden __keys array recording their own keys in insertion order.
@@ -9553,8 +9570,10 @@ NotFuncHead = :script(~~
             for (var i = 0; i < props.length; i++) {
                 var p = props[i]
                 if (p.spreadObj == true) { spreadInto(o, keys, p.t()); continue }
+                if (p.proto === true) { jsProtoLit(o, p.t()); continue }
                 var key = (p.kt != undefined) ? jsKeyStr(p.kt()) : p.k
                 if (p.acc != undefined) { addAccessor(o, p.acc, key, p.fn()) }
+                else if (p.home === true) { scopePut(o, key, homeMethod(o, p.t)) }
                 else { scopePut(o, key, p.t()) }
                 if (!isInternalKey(key)) { if (keys.indexOf(key) < 0) { keys.push(key) } }
                 else { jsSymTrack(o, key) }
@@ -9566,6 +9585,14 @@ NotFuncHead = :script(~~
     // '{...src}': copies src's own keys, in their own order, into the object being built,
     // then its symbol-keyed properties. A key that is already there is overwritten in
     // place and keeps its position, which is what JavaScript's property order does too.
+    // `__proto__: p` in an object literal (not computed, not shorthand) sets the
+    // object's prototype when p is an object or null, and is otherwise ignored
+    // (ECMA-262 B.3.1). Twins: js_jsprotolit in abnf/jsrtjsprint.go and
+    // languages/lib/js-rt.metajs.
+    function jsProtoLit(o, p) {
+        var pt = jsTypeofVal(p)
+        if (p === null || pt == "object" || pt == "function") { jsSetProto(o, p) }
+    }
     function spreadInto(o, keys, src) {
         if (src == undefined || src == null) { return }
         var ks = ownKeys(src)
@@ -10027,23 +10054,34 @@ NotFuncHead = :script(~~
         }
         return concat2impl([tagSites[site.tix]], subs)
     }
+    // The chunk TagChars matched; bad when a TplBadEsc stood in it.
+    var tplBadSeen = false
+    function tagChunk(t) {
+        var bad = tplBadSeen
+        tplBadSeen = false
+        if (bad) { return {str: "", raw: t, bad: true} }
+        return {str: jsUnescape(t), raw: t}
+    }
     function tagStrings(parts) {
         var cooked = []
         var raws = []
         var cur = ""
         var raw = ""
+        var bad = false
         for (var i = 0; i < parts.length; i++) {
             if (parts[i].expr != undefined) {
-                cooked.push(cur)
+                cooked.push(bad ? undefined : cur)
                 raws.push(raw)
                 cur = ""
                 raw = ""
+                bad = false
             } else {
                 cur = cur + parts[i].str
                 raw = raw + parts[i].raw
+                if (parts[i].bad === true) { bad = true }
             }
         }
-        cooked.push(cur)
+        cooked.push(bad ? undefined : cur)
         raws.push(raw)
         // The chunk list is a frozen array whose own 'raw' property, the frozen array of
         // the raw texts, is not enumerable (ECMA-262 13.2.8.4 GetTemplateObject).
@@ -10671,6 +10709,12 @@ NotFuncHead = :script(~~
             scopes = env.slice()
             var sc = {}
             sc["this"] = self
+            // An explicit derived constructor holds the instance aside and its `this`
+            // in the dead zone until super() binds it (ECMA-262 10.2.1.3).
+            if (hasSuper && !isDefault) {
+                sc["this"] = jsTdz
+                sc["0self"] = self
+            }
             sc["new.target"] = nt
             sc["arguments"] = jsArgsObj(args)
             sc["0strict"] = true // A class body is strict code, always.
@@ -10691,7 +10735,7 @@ NotFuncHead = :script(~~
                 // on to A, which is also how `class E extends Error {}` carries its message.
                 var supArgs = [self]
                 for (var sa = 0; sa < args.length; sa++) supArgs.push(args[sa])
-                ctorSuperDone(self, ctorConstruct(supCls, supArgs, nt))
+                ctorSuperDone(sc, self, ctorConstruct(supCls, supArgs, nt))
             } else if (!hasSuper) {
                 ctorFields(fields, fscopes, ckeys)
             }
@@ -10705,10 +10749,10 @@ NotFuncHead = :script(~~
             scopes = saved
             // An explicit `return v` reaches makeNewFrom, which keeps it if it is an
             // object; a derived constructor otherwise answers its `this`, which super()
-            // may have replaced.
+            // may have replaced (ctorDerivedResult).
             var rv = anytype
             rv = (rb != undefined && rb.isRet) ? rb.v : undefined
-            if (hasSuper && (rv == undefined || rv == null || (typeof rv != "object" && typeof rv != "function"))) { return sc["this"] }
+            if (hasSuper) { return ctorDerivedResult(sc, rv) }
             return rv
         }
     }
@@ -10750,12 +10794,27 @@ NotFuncHead = :script(~~
     // OBJECT the parent constructor returned becomes `this` from here on, as
     // [[Construct]]'s BindThisValue makes it, and then the derived class's fields are
     // initialized on it. Twin of the super() lowering in js-to-llvm-ir.abnf.
-    function ctorSuperDone(self, r) {
-        if (r != undefined && r != null && (typeof r == "object" || typeof r == "function") && r !== self) {
-            setVar("this", r)
-        }
+    // super() binds the derived constructor's `this` (in its scope sc) to the instance,
+    // or to the object the parent constructor returned, then runs the fields.
+    function ctorSuperDone(sc, self, r) {
+        if (r != undefined && r != null && (typeof r == "object" || typeof r == "function")) { self = r }
+        scopePut(sc, "this", self)
         getVar("0fields")()
         return undefined
+    }
+    // What `new` gets from a derived constructor that returned rv (ECMA-262 10.2.2
+    // steps 10-12): an object wins, anything else but undefined is a TypeError, and
+    // `this` must be bound by then.
+    function ctorDerivedResult(sc, rv) {
+        if (rv !== null && (typeof rv == "object" || typeof rv == "function")) { return rv }
+        if (rv !== undefined) { biRaise("TypeError: Derived constructors may only return object or undefined") }
+        if (sc["this"] === jsTdz) { biRaise("ReferenceError: " + jsNoSuperText) }
+        return sc["this"]
+    }
+    // The scope holding the running constructor's `this` (an arrow inside it has none).
+    function ctorThisScope() {
+        for (var i = scopes.length - 1; i >= 0; i--) { if (hasOwn(scopes[i], "this")) { return scopes[i] } }
+        return globalScope
     }
 
     // Method dispatch on an instance: follow the __class / __super chain. Native and
@@ -11434,15 +11493,56 @@ NotFuncHead = :script(~~
     // which the class body binds and which is what makes an anonymous class expression
     // work - and walks __super from there, so a subclass override never shadows what
     // super.x means. A getter/setter found on the way runs with the real receiver.
+    // An object literal's shorthand method that names `super` is its [[HomeObject]]'s:
+    // it is made in a scope binding __home__ to the literal, and its `super` starts at
+    // the home object's prototype (superHomeGet), however setPrototypeOf or `__proto__:`
+    // left it. The nearer of __home__ and a class body's __class__ decides. Twins:
+    // homeNote / homeSplit in js-to-llvm-ir.abnf, js_jshomeget in abnf/jsrtjsprint.go.
+    var homeSuperN = 0
+    function homeNote(p, txt) {
+        if (txt.indexOf("super") >= 0) {
+            p.home = true
+            homeSuperN = homeSuperN + 1
+        }
+        return p
+    }
+    function homeMethod(o, t) {
+        var saved = scopes
+        var hs = {}
+        hs["__home__"] = o
+        scopes = concat2impl(scopes, [hs])
+        var fv = anytype // The method, made in the home scope.
+        fv = t()
+        scopes = saved
+        return fv
+    }
+    // The home object `super` belongs to, or null inside a class body.
+    function superHomeOf() {
+        if (homeSuperN > 0) {
+            for (var i = scopes.length - 1; i >= 0; i--) {
+                if (hasOwn(scopes[i], "__home__")) { return scopes[i]["__home__"] }
+                if (hasOwn(scopes[i], "__class__")) { return null }
+            }
+        }
+        return null
+    }
+    // `super.k` in a home object's method: k read off the home object's prototype.
+    function superHomeGet(ho, k) {
+        var hp = anytype // The home object's prototype.
+        hp = jsGetProto(ho)
+        if (hp === null) { return undefined }
+        return getMember(hp, k)
+    }
     function superClass() {
-        var cls = getVar("__class__")
-        if (cls == undefined || cls == null) fail("super outside a class")
         // A class with no heritage still has one: Object.prototype, whose methods
         // superGet and makeSuperCall answer at the end of the chain.
-        return cls.__super
+        return getVar("__class__").__super
     }
     function superGet(k) {
         var self = getVar("this")
+        var ho = anytype // The home object, or null in a class body.
+        ho = superHomeOf()
+        if (ho !== null) { return superHomeGet(ho, k) }
         // The static side first when the receiver is a class descriptor; see
         // makeSuperCall for why the receiver is what decides.
         if (isClassDesc(self)) {
@@ -11582,16 +11682,36 @@ NotFuncHead = :script(~~
     function makeSuperCall(name, argThunks) {
         if (name == "") {
             return function() {
-                var self = getVar("this")
+                var tsc = ctorThisScope()
+                var self = tsc["0self"]
+                var again = tsc["this"] !== jsTdz
+                // A second super() still constructs, on an object of its own, and then
+                // the binding is refused (ECMA-262 13.3.7.1 steps 6-7).
+                if (again) {
+                    self = {}
+                    self["__class"] = tsc["0self"].__class
+                    self["__keys"] = []
+                }
                 var supCls = getVar("__class__").__super
                 if (supCls == undefined) fail("super() with no superclass")
                 var argv = concat2impl([self], evalArgs(argThunks))
-                ctorSuperDone(self, ctorConstruct(supCls, argv, getVar("new.target")))
+                var sr = anytype // What the parent's constructor returned.
+                sr = ctorConstruct(supCls, argv, getVar("new.target"))
+                if (again) { biRaise("ReferenceError: Super constructor may only be called once") }
+                ctorSuperDone(tsc, self, sr)
                 return undefined
             }
         }
         return function() {
             var self = getVar("this")
+            var ho = anytype // The home object, or null in a class body.
+            ho = superHomeOf()
+            if (ho !== null) {
+                var hf = anytype // The method found on the home object's prototype.
+                hf = superHomeGet(ho, name)
+                if (typeof hf != "function") { biRaise("TypeError: (intermediate value)." + name + " is not a function") }
+                return callWithThis(hf, self, evalArgs(argThunks))
+            }
             var sup = getVar("__class__").__super
             // `super.s(x)` inside a STATIC method resolves on the STATIC SIDE, and a
             // static is a plain closure whose `this` is the receiver rather than an
@@ -12822,7 +12942,9 @@ NotFuncHead = :script(~~
     var jsbDone = false
     function jsbRef(name) {
         if (name == "Set" || name == "Map" || name == "Array" || name == "isNaN" || name == "isFinite" ||
-            name == "structuredClone" || name == "Reflect") { jsbWant = true }
+            name == "structuredClone" || name == "Reflect" || name == "WeakMap" || name == "WeakSet" ||
+            name == "queueMicrotask" || name == "URIError" || name == "encodeURIComponent" || name == "encodeURI" ||
+            name == "decodeURIComponent" || name == "decodeURI") { jsbWant = true }
         if (name == "arguments") { argsWant = true }
         return name
     }

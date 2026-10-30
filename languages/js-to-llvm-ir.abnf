@@ -710,7 +710,7 @@ NotYieldWord = :script(~~
 // tag(strings, 1) with the string parts in strings (and their unescaped source text in
 // strings.raw). It is a call suffix like '(' so that it chains - String.raw`x`.length.
 TagSuffix   <~~ push({kind: "tag", parts: takeAll()}) ~~>
-            = TplBody ;
+            = "`" :whitespace() { TplExpr | TagChars | TplDollar } "`" :whitespace(Whitespace) ;
 CallSuffix  <~~ push({kind:"call", args: takeAll()}) ~~>
             = "(" [ Arg { "," Arg } [ "," ] ] ")" ;
 DotSuffix   = "." ( PrivSuffix | Id <~~ push({kind:"member", name: idName(up.in), key: makeConst(jsKeyEsc(idName(up.in)))}); noteMember(idName(up.in)) ~~> ) ;
@@ -861,7 +861,7 @@ GetSetProp  <~~ fsMark(up.start, up.pos, false); push(makeAccessorProp(takeAll()
 GetterParams = "(" ")" ;
 SetterParams = "(" Param ")" ;
 // A shorthand method: '{ m(x) { ... } }', with the async and generator prefixes.
-MethodProp  <~~ fsMark(up.start, up.pos, false); push(makeMethodProp(takeAll())) ~~>
+MethodProp  <~~ fsMark(up.start, up.pos, false); push(homeNote(makeMethodProp(takeAll()), up.in)) ~~>
             = [ AsyncMod ] [ GenMod ] MemberKey ParamList [ UseStrictMark ] FuncBody ;
 AsyncMod    <~~ push({amod: true}) ~~> = "async" KwEnd ;
 GenMod      <~~ push({gmod: true}) ~~> = "*" ;
@@ -911,6 +911,15 @@ TplExpr     <~~ push({expr: pop()}) ~~>
             = "${" :whitespace(Whitespace) Expression "}" ;
 // Both the cooked text (escapes resolved) and the raw text are kept: a tagged template
 // hands the raw one to the tag function as strings.raw.
+// A TAGGED template may hold an escape a plain one refuses ('\unicode', '\x4', '\01'):
+// that segment's cooked string is undefined and its raw text is kept (ECMA-262 13.2.8.3,
+// NotEscapeSequence). TplBadEsc marks the chunk it stands in (tplBadSeen); the escape's
+// remaining characters read as plain ones.
+TagChars    <~~ push(tagChunk(up.in)) ~~>
+            = TagChar { TagChar } ;
+TagChar     = TplEsc | TplBadEsc | TplPlain ;
+TplBadEsc   <~~ tplBadSeen = true ~~>
+            = "\\" ( "x" | "u" | "0"..."9" ) ;
 TplChars    <~~ push({str: unescapeJs(up.in), raw: up.in}) ~~>
             = TplChar { TplChar } ;
 TplChar     = TplEsc | TplPlain ;
@@ -3695,7 +3704,9 @@ NotFuncHead = :script(~~
     var jsAggWant = false // Whether the program names Promise or AggregateError.
     function jsbRef(name) {
         if (name == "Set" || name == "Map" || name == "Array" || name == "isNaN" || name == "isFinite" ||
-            name == "structuredClone" || name == "Reflect") { jsbWant = true }
+            name == "structuredClone" || name == "Reflect" || name == "WeakMap" || name == "WeakSet" ||
+            name == "queueMicrotask" || name == "URIError" || name == "encodeURIComponent" || name == "encodeURI" ||
+            name == "decodeURIComponent" || name == "decodeURI") { jsbWant = true }
         if (name == "Promise" || name == "AggregateError") { jsAggWant = true }
         return name
     }
@@ -4027,6 +4038,7 @@ NotFuncHead = :script(~~
             var nmV = emitStr(b, name)
             var v = callExt(b, core.scopeGetExt, [curScopeV, nmV])
             if (hoistRefAll[ri].chk) { v = tdzChk(b, v, nmV) }
+            if (name == "this" && derivedThis) { v = b.NewCall(derivedFnsGet()[0], [v]) }
             return {b: b, v: v}
         }
     }
@@ -4041,6 +4053,7 @@ NotFuncHead = :script(~~
         var nmV = emitStr(b, ref.name)
         var v = callExt(b, (ref.w === true) ? "js_jswithget" : "js_scope_get", [curScopeV, nmV])
         if (ref.tdz != undefined && hoistRefAll[ref.tdz].chk) { v = tdzChk(b, v, nmV) }
+        if (ref.name == "this" && derivedThis) { v = b.NewCall(derivedFnsGet()[0], [v]) }
         return v
     }
     // The store of a plain `=` to a bare name: sloppy code's implicit global, which in
@@ -4234,6 +4247,7 @@ NotFuncHead = :script(~~
             absB.NewBr(endB)
             var gv = callExt(hitB, "js_scope_get", [curScopeV, nmV])
             if (hoistRefAll[ri].chk) { gv = tdzChk(hitB, gv, nmV) }
+            if (name == "this" && derivedThis) { gv = hitB.NewCall(derivedFnsGet()[0], [gv]) }
             var hv = callExt(hitB, "js_jstypeof", [gv])
             hitB.NewBr(endB)
             return {b: endB, v: endB.NewPhi([llvm.ir.NewIncoming(tv, absB),
@@ -4371,8 +4385,40 @@ NotFuncHead = :script(~~
     function makeProp(valT, key, txt) {
         // NamedEvaluation, the property form: `{ o: (a,b)=>a }` names the arrow "o".
         if (typeof key == "string") { fnAnonName(key, ":", txt) }
+        // `__proto__: p`, the name or a plain string literal (js_jsprotolit).
+        if (typeof txt == "string" && (key === "__proto__" || txt.substring(0, 12) == "\"__proto__\":" || txt.substring(0, 12) == "'__proto__':")) {
+            return {proto: true, kt: makeConst(""), t: valT}
+        }
         if (typeof key == "string") { return {kt: makeConst(jsKeyEsc(key)), kesc: true, t: valT} }
         return {kt: key, t: valT}
+    }
+    // An object literal's shorthand method that names `super` belongs to its home
+    // object: it is made in a scope binding "0home" to the literal, and while any such
+    // method exists (homeSuperWant, final once parsing ends) every class body binds
+    // "0home" to its descriptor too, so the nearer binding says which `super` is
+    // meant. A home object's `super.k` is k read off its prototype (js_jshomeget).
+    // Twins: homeNote / superHomeOf in js-interpreter.abnf.
+    var homeSuperWant = false
+    function homeNote(p, txt) {
+        if (txt.indexOf("super") >= 0) {
+            p.home = true
+            homeSuperWant = true
+        }
+        return p
+    }
+    // Splits b on whether "0home" is a home object: {homeB, clsB, hv}.
+    function homeSplit(b) {
+        var hv = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "0home")])
+        var homeB = curF.NewBlock("")
+        var clsB = curF.NewBlock("")
+        b.NewCondBr(b.NewICmp(llvm.enum.IPredNE, callExt(b, "js_jsctorp", [hv]), handle(0)), clsB, homeB)
+        return {homeB: homeB, clsB: clsB, hv: hv}
+    }
+    function homeMerge(hb, hv, cb, cv) {
+        var mB = curF.NewBlock("")
+        hb.NewBr(mB)
+        cb.NewBr(mB)
+        return {b: mB, v: mB.NewPhi([llvm.ir.NewIncoming(hv, hb), llvm.ir.NewIncoming(cv, cb)])}
     }
     function makeObject(props) {
         return function(b) {
@@ -4397,8 +4443,18 @@ NotFuncHead = :script(~~
                     callExt(b, "js_defprop", [obj, callExt(b, "js_jspropkey", [kr.v]), gV, sV])
                     continue
                 }
+                var savedHome = curScopeV
+                if (props[i].home === true) {
+                    curScopeV = callExt(b, "js_scope_new", [savedHome])
+                    callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0home"), obj])
+                }
                 var vr = props[i].t(b)
+                curScopeV = savedHome
                 b = vr.b
+                if (props[i].proto === true) {
+                    callExt(b, "js_jsprotolit", [obj, vr.v])
+                    continue
+                }
                 var kv = (props[i].kesc === true) ? kr.v : callExt(b, "js_jskeyesc", [kr.v])
                 callExt(b, memSetExt(), [obj, kv, vr.v])
             }
@@ -5200,7 +5256,7 @@ NotFuncHead = :script(~~
             b = r.b
             var cur = r.v
             var curThis = hUndef
-            if (supThis) { curThis = callExt(b, core.scopeGetExt, [curScopeV, emitStr(b, "this")]) }
+            if (supThis) { curThis = emitThisGet(b) }
             if (withThis) { curThis = callExt(b, "js_jswithrecv", []) }
             var shortIn = []
             var i = 0
@@ -5576,6 +5632,8 @@ NotFuncHead = :script(~~
         var savedAsyncGen = inAsyncGen
         var savedPlainGen = inPlainGen
         var savedStrict = emitStrict
+        var savedDThis = derivedThis
+        if (!isCtl && lexThis != true) { derivedThis = false }
         if (ownStrict === true) { emitStrict = true }
         if (!isCtl) { inAsyncFn = pendingAsyncFn; inAsyncGen = pendingAsyncGen; inPlainGen = pendingPlainGen }
         pendingAsyncFn = false
@@ -5630,6 +5688,7 @@ NotFuncHead = :script(~~
         inAsyncGen = savedAsyncGen
         inPlainGen = savedPlainGen
         emitStrict = savedStrict
+        derivedThis = savedDThis
         emitParams = savedParams
         return idx
     }
@@ -5878,6 +5937,14 @@ NotFuncHead = :script(~~
     // values ('x${1}y${2}' has the parts "x", "y" and the trailing ""). js_jstagstrs
     // makes the array of them the strings array, with the raw (unescaped) texts as its
     // 'raw' property.
+    // The chunk TagChars matched; bad when a TplBadEsc stood in it.
+    var tplBadSeen = false
+    function tagChunk(t) {
+        var bad = tplBadSeen
+        tplBadSeen = false
+        if (bad) { return {str: "", raw: t, bad: true} }
+        return {str: unescapeJs(t), raw: t}
+    }
     var tplCount = 0 // The tagged-template call sites emitted so far (emitTagCall).
     function emitTagCall(b, fnV, thisV, parts, site) {
         var cooked = []
@@ -5885,19 +5952,22 @@ NotFuncHead = :script(~~
         var exprs = []
         var curStr = ""
         var curRaw = ""
+        var curBad = false
         for (var i = 0; i < parts.length; i++) {
             if (parts[i].expr != undefined) {
-                cooked.push(curStr)
+                cooked.push(curBad ? undefined : curStr)
                 raws.push(curRaw)
                 curStr = ""
                 curRaw = ""
+                curBad = false
                 exprs.push(parts[i].expr)
             } else {
                 curStr = curStr + parts[i].str
                 curRaw = curRaw + parts[i].raw
+                if (parts[i].bad === true) { curBad = true }
             }
         }
-        cooked.push(curStr)
+        cooked.push(curBad ? undefined : curStr)
         raws.push(curRaw)
         // The strings array is made once per call site and every evaluation passes
         // that same object (ECMA-262 13.2.8.4 GetTemplateObject), so it is kept in a
@@ -5911,7 +5981,7 @@ NotFuncHead = :script(~~
         var cookedV = callExt(mkB, "js_arr_new", [])
         var rawV = callExt(mkB, "js_arr_new", [])
         for (var j = 0; j < cooked.length; j++) {
-            callExt(mkB, "js_arr_push", [cookedV, emitStr(mkB, cooked[j])])
+            callExt(mkB, "js_arr_push", [cookedV, (cooked[j] === undefined) ? hUndef : emitStr(mkB, cooked[j])])
             callExt(mkB, "js_arr_push", [rawV, emitStr(mkB, raws[j])])
         }
         var made = callExt(mkB, "js_gc_pin", [callExt(mkB, "js_jstagstrs", [cookedV, rawV])])
@@ -6869,10 +6939,63 @@ NotFuncHead = :script(~~
     // constructor returns replaces the instance (BindThisValue), the derived class's
     // fields are initialized on it when super() returns, and the constructor answers it
     // unless it returns an object of its own. While such a body is emitted, superFields
-    // holds the fields makeSuperCall initializes and derivedCtorF is the function whose
-    // `return` answers `this`. Twin of ctorSuperDone in js-interpreter.abnf.
+    // holds the fields makeSuperCall initializes and derivedCtorF is the tag (curFTag)
+    // of the function whose `return` answers `this`. Twin of ctorSuperDone in js-interpreter.abnf.
     var superFields = null
     var derivedCtorF = null
+    // derivedThis is true while the body of an EXPLICIT derived constructor, or an
+    // arrow inside one, is emitted. Its `this` holds the TDZ sentinel until super()
+    // binds it (the instance waits in "0self"), every read of `this` there goes
+    // through jsthischk, and what it answers through jsderivedret (ECMA-262 10.2.2
+    // steps 10-12: an object wins, anything else but undefined is a TypeError, and
+    // `this` must be bound by then). derivedThisWant, set at parse time, makes the
+    // boot create the sentinel. Twins: ctorDerivedResult and ctorThisScope in
+    // js-interpreter.abnf.
+    var derivedThis = false
+    var derivedThisWant = false
+    function emitThisGet(b) {
+        var v = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "this")])
+        if (derivedThis) { v = b.NewCall(derivedFnsGet()[0], [v]) }
+        return v
+    }
+    var derivedFns = [] // [jsthischk, jsderivedret], made on first use
+    function derivedFnsGet() {
+        if (derivedFns.length > 0) { return derivedFns }
+        var sentG = tdzGlob()
+        var cf = m.NewFunc("jsthischk", i64, [llvm.ir.NewParam("v", i64)])
+        var cb = cf.NewBlock("entry")
+        var cbad = cf.NewBlock("")
+        var cok = cf.NewBlock("")
+        cb.NewCondBr(cb.NewICmp(llvm.enum.IPredEQ, cf.Params[0], cb.NewLoad(i64, sentG)), cbad, cok)
+        cok.NewRet(cf.Params[0])
+        derivedThrow(cbad, "ReferenceError: " + derivedNoSuper)
+        var rf = m.NewFunc("jsderivedret", i64, [llvm.ir.NewParam("v", i64), llvm.ir.NewParam("t", i64)])
+        var rb = rf.NewBlock("entry")
+        var objB = rf.NewBlock("")
+        var primB = rf.NewBlock("")
+        var undefB = rf.NewBlock("")
+        var typeB = rf.NewBlock("")
+        var refB = rf.NewBlock("")
+        var thisB = rf.NewBlock("")
+        // js_jsnewres answers its first argument when that is an object.
+        var sentV = rb.NewLoad(i64, sentG)
+        var resV = callExt(rb, "js_jsnewres", [rf.Params[0], sentV])
+        rb.NewCondBr(rb.NewICmp(llvm.enum.IPredNE, resV, sentV), objB, primB)
+        objB.NewRet(resV)
+        primB.NewCondBr(primB.NewICmp(llvm.enum.IPredEQ, rf.Params[0], hUndef), undefB, typeB)
+        derivedThrow(typeB, "TypeError: Derived constructors may only return object or undefined")
+        undefB.NewCondBr(undefB.NewICmp(llvm.enum.IPredEQ, rf.Params[1], undefB.NewLoad(i64, sentG)), refB, thisB)
+        derivedThrow(refB, "ReferenceError: " + derivedNoSuper)
+        thisB.NewRet(rf.Params[1])
+        derivedFns.push(cf)
+        derivedFns.push(rf)
+        return derivedFns
+    }
+    var derivedNoSuper = "Must call super constructor in derived class before accessing 'this' or returning from derived constructor"
+    function derivedThrow(bb, msg) {
+        callExt(bb, "js_throw", [callExt(bb, "js_jserrmk", [emitStr(bb, msg)])])
+        bb.NewRet(hUndef) // Never reached: js_throw does not return.
+    }
     // A class coroutine method's value: an instance method's receiver is in its
     // arguments, a static one's is taken by a binder (emitThisBinder).
     function clsCoro(b, idx, kind, statik) {
@@ -6944,19 +7067,27 @@ NotFuncHead = :script(~~
             // own), which is exactly the shape the parent constructor is called with, so
             // it is handed over unchanged. `class E extends Error {}` relies on it to
             // carry its message through.
-            b = emitSuperDone(b, superCall(b, supCtor, f.Params[1]), initFields)
+            b = emitSuperDone(b, superCall(b, supCtor, f.Params[1]), initFields, null)
         } else if (initFields != null && derived != true) {
             b = emitFieldInits(b, initFields)
         }
         var savedSuperFields = superFields
         var savedDerivedF = derivedCtorF
+        var savedDThis = derivedThis
         superFields = (derived == true && implicitSuper == null) ? initFields : null
-        derivedCtorF = (derived == true) ? f : null
+        derivedCtorF = (derived == true) ? idx : null
+        derivedThis = (derived == true && implicitSuper == null)
+        if (derivedThis) {
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0self"), callExt(b, "js_scope_get", [curScopeV, emitStr(b, "this")])])
+            callExt(b, "js_scope_set", [curScopeV, emitStr(b, "this"), b.NewLoad(i64, tdzGlob())])
+        }
         var endB = body != null ? body(b) : b
-        if (derived == true) { endB.NewRet(callExt(endB, "js_scope_get", [curScopeV, emitStr(endB, "this")])) }
+        if (derivedThis) { endB.NewRet(endB.NewCall(derivedFnsGet()[1], [hUndef, callExt(endB, "js_scope_get", [curScopeV, emitStr(endB, "this")])])) }
+        else if (derived == true) { endB.NewRet(callExt(endB, "js_scope_get", [curScopeV, emitStr(endB, "this")])) }
         else { endB.NewRet(hUndef) }
         superFields = savedSuperFields
         derivedCtorF = savedDerivedF
+        derivedThis = savedDThis
         curF = savedF
         curFTag = savedTag
         curScopeV = savedScope
@@ -6999,8 +7130,9 @@ NotFuncHead = :script(~~
     }
     // super() answered retV: rebind `this` to it when it is an object (js_jsnewres),
     // then initialize the derived class's fields on it.
-    function emitSuperDone(b, retV, initFields) {
-        var thisV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "this")])
+    // selfV is the instance super() was handed, or null to read it from `this`.
+    function emitSuperDone(b, retV, initFields, selfV) {
+        var thisV = (selfV != null) ? selfV : callExt(b, "js_scope_get", [curScopeV, emitStr(b, "this")])
         callExt(b, "js_scope_set", [curScopeV, emitStr(b, "this"), callExt(b, "js_jsnewres", [retV, thisV])])
         if (initFields != null) { b = emitFieldInits(b, initFields) }
         return b
@@ -7066,6 +7198,7 @@ NotFuncHead = :script(~~
                 info.computed.push(m)
             }
         }
+        if (info.ctor != null && info.superName != null) { derivedThisWant = true }
         info.shown = [info.name] // The class's `name`; makeClassExpr refines it.
         info.sp = fsTake()
         return info
@@ -7097,6 +7230,11 @@ NotFuncHead = :script(~~
                       callExt(b, "js_scope_get", [curScopeV, emitStr(b, info.superName)]))
         }
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, info.name), clsV])
+        var outerScope = curScopeV
+        if (homeSuperWant) {
+            curScopeV = callExt(b, "js_scope_new", [outerScope])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0home"), clsV])
+        }
         // Every computed key is evaluated ONCE, in source order, before any member is
         // defined or any static initializer runs; a scope slot keeps it for the member
         // definitions and for every construction's field initializers (emitMemberKey).
@@ -7202,6 +7340,7 @@ NotFuncHead = :script(~~
             // abnf/jsrtjsprint.go.
             callExt(b, "js_jssfield", [statsV, kr.v, sv])
         }
+        curScopeV = outerScope
         return {b: b, v: clsV}
     }
     function makeClassStmt(items, pos) {
@@ -7315,20 +7454,63 @@ NotFuncHead = :script(~~
                 var clsV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, defName)])
                 var supV = callExt(b, memGetExt(), [clsV, emitStr(b, "__super")])
                 var supCtor = callExt(b, memGetExt(), [supV, emitStr(b, "__ctor")])
-                var thisV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "this")])
+                var selfV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, derivedThis ? "0self" : "this")])
+                var firstV = null
+                if (derivedThis) {
+                    // `this` already bound makes this a second super(): the parent still
+                    // constructs, on an object of its own, and then the binding is refused
+                    // (ECMA-262 13.3.7.1 steps 6-7).
+                    var curV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "this")])
+                    firstV = b.NewICmp(llvm.enum.IPredEQ, curV, b.NewLoad(i64, tdzGlob()))
+                    var freshB = curF.NewBlock("")
+                    var selfB = curF.NewBlock("")
+                    var fromB = b
+                    b.NewCondBr(firstV, selfB, freshB)
+                    var freshV = callExt(freshB, "js_obj_new", [])
+                    callExt(freshB, memSetExt(), [freshV, emitStr(freshB, "__class"), callExt(freshB, memGetExt(), [selfV, emitStr(freshB, "__class")])])
+                    freshB.NewBr(selfB)
+                    selfV = selfB.NewPhi([llvm.ir.NewIncoming(selfV, fromB), llvm.ir.NewIncoming(freshV, freshB)])
+                    b = selfB
+                }
                 var argsV = callExt(b, "js_arr_new", [])
-                callExt(b, "js_arr_push", [argsV, thisV])
+                callExt(b, "js_arr_push", [argsV, selfV])
                 b = pushArgs(b, argsV, argThunks)
-                b = emitSuperDone(b, superCall(b, supCtor, argsV), superFields)
+                var retV = superCall(b, supCtor, argsV)
+                if (derivedThis) {
+                    var againB = curF.NewBlock("")
+                    var firstB = curF.NewBlock("")
+                    b.NewCondBr(firstV, firstB, againB)
+                    derivedThrow(againB, "ReferenceError: Super constructor may only be called once")
+                    b = firstB
+                }
+                b = emitSuperDone(b, retV, superFields, selfV)
                 return {b: b, v: hUndef}
             }
         }
         return function(b) {
-            var clsV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, defName)])
-            var supV = callExt(b, memGetExt(), [clsV, emitStr(b, "__super")])
-            var thisV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "this")])
+            var thisV = emitThisGet(b)
             var argsV = callExt(b, "js_arr_new", [])
             b = pushArgs(b, argsV, argThunks)
+            var homeEnd = null
+            var homeV = null
+            if (homeSuperWant) {
+                var hs = homeSplit(b)
+                var fnV = callExt(hs.homeB, "js_jshomeget", [hs.hv, emitStr(hs.homeB, jsKeyEsc(name))])
+                var hr = jsCallChecked(hs.homeB, fnV, thisV, argsV, "(intermediate value)." + name)
+                homeEnd = hr.b
+                homeV = hr.v
+                b = hs.clsB
+            }
+            var cr = superMethodCls(b, defName, name, thisV, argsV)
+            if (homeEnd == null) { return cr }
+            return homeMerge(homeEnd, homeV, cr.b, cr.v)
+        }
+    }
+    // super.name(args) inside a class body, the arguments already evaluated.
+    function superMethodCls(b, defName, name, thisV, argsV) {
+        {
+            var clsV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, defName)])
+            var supV = callExt(b, memGetExt(), [clsV, emitStr(b, "__super")])
             var scV = callExt(jsThisSet(b, thisV), "js_supercall", [supV, thisV, emitStr(b, jsKeyEsc(name)), argsV])
             // The same miss-sentinel check the method-call arm makes: nothing on the
             // __super chain is node's "is not a function", not an abort. It has no
@@ -7374,7 +7556,7 @@ NotFuncHead = :script(~~
     function emitSuperBase(b, defName) {
         var clsV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, defName)])
         return {sup: callExt(b, memGetExt(), [clsV, emitStr(b, "__super")]),
-                self: callExt(b, "js_scope_get", [curScopeV, emitStr(b, "this")])}
+                self: emitThisGet(b)}
     }
     function emitSuperStore(b, defName, keyT, valueH) {
         var kr = keyT(b)
@@ -7388,6 +7570,12 @@ NotFuncHead = :script(~~
         var defName = curClassName
         return function(b) {
             var kr = keyT(b)
+            if (homeSuperWant) {
+                var hs = homeSplit(kr.b)
+                var hgV = callExt(hs.homeB, "js_jshomeget", [hs.hv, kr.v])
+                var csb = emitSuperBase(hs.clsB, defName)
+                return homeMerge(hs.homeB, hgV, hs.clsB, callExt(hs.clsB, "js_jssupget", [csb.sup, csb.self, kr.v]))
+            }
             var sb = emitSuperBase(kr.b, defName)
             // js_jssupget and not the shared js_supget: the js/ts value read has to
             // hand back a method shim whose receiver the eventual `.call(x)` can
@@ -7761,8 +7949,9 @@ NotFuncHead = :script(~~
                 v = r.v
             }
             // A derived constructor answers `this` unless it returns an object.
-            if (curF === derivedCtorF) {
-                v = callExt(b, "js_jsnewres", [v, callExt(b, "js_scope_get", [curScopeV, emitStr(b, "this")])])
+            if (curFTag === derivedCtorF) {
+                var tV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "this")])
+                v = derivedThis ? b.NewCall(derivedFnsGet()[1], [v, tV]) : callExt(b, "js_jsnewres", [v, tV])
             }
             emitIterUnwind(b, 0) // A return out of a for-of body closes its iterator.
             return retStmt(b, v) // plain ret, or a control signal when leaving a try body
@@ -8144,7 +8333,7 @@ NotFuncHead = :script(~~
             callExt(b, "js_jsnormdata", [emitStr(b, load("lib/unicode-norm.txt"))])
             callExt(b, "js_gc_perm", [handle(0)])
         }
-        if (hoistTdzCount > 0) { b.NewStore(callExt(b, "js_gc_pin", [callExt(b, "js_obj_new", [])]), tdzGlob()) }
+        if (hoistTdzCount > 0 || derivedThisWant) { b.NewStore(callExt(b, "js_gc_pin", [callExt(b, "js_obj_new", [])]), tdzGlob()) }
         b = emitImported(b)
         b = makeSeq(items)(b)
         b.NewRet(callExt(b, "js_getret", []))

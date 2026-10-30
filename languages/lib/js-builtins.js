@@ -1,5 +1,6 @@
 // js-builtins.js -- JAVASCRIPT, not MetaJS: the Set and Map classes, Array.from /
-// Array.of, isNaN, isFinite, structuredClone and Reflect, written in the language itself and compiled
+// Array.of, isNaN, isFinite, structuredClone, Reflect, WeakMap / WeakSet,
+// queueMicrotask and the URI functions, written in the language itself and compiled
 // INTO a program by the js grammars, both halves (jsbLoad in js-interpreter.abnf and js-to-llvm-ir.abnf).
 // A program that names Set, Map, Array, isNaN, isFinite, structuredClone or Reflect gets this file in
 // front of it; one that does not pays nothing. Being one JavaScript source compiled by the same grammars is what
@@ -169,8 +170,76 @@ class Set extends __Coll {
     entries() { return new __CollIter(this, 2) }
     ["__#@iterator"]() { return new __CollIter(this, 1) }
     toString() { return "[object Set]" }
+    // The set methods (ECMA-262 24.2.4.*): the argument is SET-LIKE, a size, a has and
+    // a keys method (__setRec), and the answer is a new Set. Which side is iterated
+    // depends on the two sizes, which decides the order of an intersection.
+    union(o) {
+        var r = new Set(this)
+        for (var v of __setRec(o, "union").keys()) { r.add(v) }
+        return r
+    }
+    intersection(o) {
+        var n = __setRec(o, "intersection").size
+        var r = new Set()
+        if (this.size <= n) {
+            for (var v of this) { if (o.has(v)) { r.add(v) } }
+        } else {
+            for (var w of o.keys()) { if (this.has(w)) { r.add(w) } }
+        }
+        return r
+    }
+    difference(o) {
+        var n = __setRec(o, "difference").size
+        var r = new Set(this)
+        if (this.size <= n) {
+            for (var v of this) { if (o.has(v)) { r.delete(v) } }
+        } else {
+            for (var w of o.keys()) { r.delete(w) }
+        }
+        return r
+    }
+    symmetricDifference(o) {
+        var r = new Set(this)
+        for (var v of __setRec(o, "symmetricDifference").keys()) {
+            if (this.has(v)) { r.delete(v) } else { r.add(v) }
+        }
+        return r
+    }
+    isSubsetOf(o) {
+        if (this.size > __setRec(o, "isSubsetOf").size) { return false }
+        for (var v of this) { if (!o.has(v)) { return false } }
+        return true
+    }
+    isSupersetOf(o) {
+        if (this.size < __setRec(o, "isSupersetOf").size) { return false }
+        for (var v of o.keys()) { if (!this.has(v)) { return false } }
+        return true
+    }
+    isDisjointFrom(o) {
+        var n = __setRec(o, "isDisjointFrom").size
+        if (this.size <= n) {
+            for (var v of this) { if (o.has(v)) { return false } }
+        } else {
+            for (var w of o.keys()) { if (this.has(w)) { return false } }
+        }
+        return true
+    }
     // [Symbol.species] (ECMA-262 24.2.3.2): the class it is read on, a subclass too.
     static get ["__#@species"]() { return this }
+}
+
+// GetSetRecord (ECMA-262 24.2.1.2): o, checked to be set-like, in V8's words; fn is
+// the method's name.
+function __setRec(o, fn) {
+    if ((typeof o !== "object" || o === null) && typeof o !== "function") {
+        throw new TypeError("Set.prototype." + fn + " argument must be an object")
+    }
+    var n = +o.size
+    if (n !== n) { throw new TypeError("The .size property is NaN") }
+    if (n < 0) { throw new RangeError("'" + n + "' is an invalid size") }
+    if (typeof o.has !== "function") { throw new TypeError("string \"has\" is not a function") }
+    if (typeof o.keys !== "function") { throw new TypeError("string \"keys\" is not a function") }
+    return o
 }
 
 class Map extends __Coll {
@@ -421,3 +490,171 @@ var Reflect = (function () {
     }
     return r
 })()
+
+// WeakMap and WeakSet: keyed by object identity, and neither iterable nor sized. This
+// engine's collector cannot see a key die, so an entry lives as long as its table.
+function __weakKey(k, what) {
+    if ((typeof k !== "object" || k === null) && typeof k !== "function") {
+        throw new TypeError("Invalid value used " + what)
+    }
+}
+class __Weak {
+    constructor() {
+        this.__k = []
+        this.__v = []
+    }
+    __at(k) {
+        for (var i = 0; i < this.__k.length; i++) { if (this.__k[i] === k) { return i } }
+        return -1
+    }
+    has(k) { return this.__at(k) >= 0 }
+    delete(k) {
+        var i = this.__at(k)
+        if (i < 0) { return false }
+        this.__k.splice(i, 1)
+        this.__v.splice(i, 1)
+        return true
+    }
+}
+class WeakMap extends __Weak {
+    constructor(entries = undefined) {
+        super()
+        if (entries !== undefined && entries !== null) {
+            for (var e of __iterCheck(entries)) { this.set(e[0], e[1]) }
+        }
+    }
+    get(k) {
+        var i = this.__at(k)
+        return i < 0 ? undefined : this.__v[i]
+    }
+    set(k, v) {
+        __weakKey(k, "as weak map key")
+        var i = this.__at(k)
+        if (i >= 0) { this.__v[i] = v } else {
+            this.__k.push(k)
+            this.__v.push(v)
+        }
+        return this
+    }
+    toString() { return "[object WeakMap]" }
+}
+class WeakSet extends __Weak {
+    constructor(items = undefined) {
+        super()
+        if (items !== undefined && items !== null) {
+            for (var v of __iterCheck(items)) { this.add(v) }
+        }
+    }
+    add(k) {
+        __weakKey(k, "in weak set")
+        if (this.__at(k) < 0) {
+            this.__k.push(k)
+            this.__v.push(true)
+        }
+        return this
+    }
+    toString() { return "[object WeakSet]" }
+}
+
+// queueMicrotask(f): f runs as a microtask, after the running code and in order with
+// the promise reactions queued before it.
+function queueMicrotask(f) {
+    if (typeof f !== "function") {
+        var t = typeof f
+        var got = (f === undefined || f === null) ? String(f)
+            : (t === "object" ? "an instance of Object" : "type " + t + " (" + (t === "string" ? "'" + f + "'" : String(f)) + ")")
+        throw new TypeError("The \"callback\" argument must be of type function. Received " + got)
+    }
+    Promise.resolve().then(function () { f() })
+}
+
+// encodeURIComponent / encodeURI / decodeURIComponent / decodeURI (ECMA-262 19.2.6):
+// UTF-8 percent-encoding. A lone surrogate, or an escape that is not well-formed
+// UTF-8, is a URIError. encodeURI keeps, and decodeURI leaves encoded, the reserved
+// characters and '#'.
+class URIError extends Error {
+    constructor(m) {
+        super(m)
+        Object.defineProperty(this, "name", {value: "URIError", writable: true, configurable: true})
+    }
+}
+var __uriKeep = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_.!~*'()"
+var __uriReserved = ";/?:@&=+$,#"
+function __uriEncode(v, keep) {
+    var s = String(v)
+    var out = ""
+    for (var i = 0; i < s.length; i++) {
+        var ch = s.charAt(i)
+        if (__uriKeep.indexOf(ch) >= 0 || keep.indexOf(ch) >= 0) {
+            out = out + ch
+            continue
+        }
+        var cp = s.charCodeAt(i)
+        if (cp >= 0xDC00 && cp <= 0xDFFF) { throw new URIError("URI malformed") }
+        if (cp >= 0xD800 && cp <= 0xDBFF) {
+            var lo = i + 1 < s.length ? s.charCodeAt(i + 1) : 0
+            if (lo < 0xDC00 || lo > 0xDFFF) { throw new URIError("URI malformed") }
+            cp = (cp - 0xD800) * 0x400 + (lo - 0xDC00) + 0x10000
+            i = i + 1
+        }
+        if (cp < 0x80) { out = out + __uriHex(cp) }
+        else if (cp < 0x800) { out = out + __uriHex(0xC0 | (cp >> 6)) + __uriHex(0x80 | (cp & 63)) }
+        else if (cp < 0x10000) { out = out + __uriHex(0xE0 | (cp >> 12)) + __uriHex(0x80 | ((cp >> 6) & 63)) + __uriHex(0x80 | (cp & 63)) }
+        else {
+            out = out + __uriHex(0xF0 | (cp >> 18)) + __uriHex(0x80 | ((cp >> 12) & 63)) +
+                __uriHex(0x80 | ((cp >> 6) & 63)) + __uriHex(0x80 | (cp & 63))
+        }
+    }
+    return out
+}
+function __uriHex(b) { return "%" + "0123456789ABCDEF".charAt(b >> 4) + "0123456789ABCDEF".charAt(b & 15) }
+// The byte the escape at s[i] spells, or -1 when s[i..i+2] is not '%' and two hex digits.
+function __uriByte(s, i) {
+    if (i + 2 >= s.length || s.charAt(i) !== "%") { return -1 }
+    var h = "0123456789abcdef".indexOf(s.charAt(i + 1).toLowerCase())
+    var l = "0123456789abcdef".indexOf(s.charAt(i + 2).toLowerCase())
+    if (h < 0 || l < 0) { return -1 }
+    return h * 16 + l
+}
+function __uriDecode(v, reserved) {
+    var s = String(v)
+    var out = ""
+    var i = 0
+    while (i < s.length) {
+        var ch = s.charAt(i)
+        if (ch !== "%") {
+            out = out + ch
+            i = i + 1
+            continue
+        }
+        var start = i
+        var b = __uriByte(s, i)
+        if (b < 0) { throw new URIError("URI malformed") }
+        i = i + 3
+        if (b < 0x80) {
+            var c0 = String.fromCharCode(b)
+            out = out + (reserved.indexOf(c0) >= 0 ? s.substring(start, i) : c0)
+            continue
+        }
+        var n = 0
+        var cp = 0
+        var min = 0
+        if ((b & 0xE0) === 0xC0) { n = 1; cp = b & 31; min = 0x80 }
+        else if ((b & 0xF0) === 0xE0) { n = 2; cp = b & 15; min = 0x800 }
+        else if ((b & 0xF8) === 0xF0) { n = 3; cp = b & 7; min = 0x10000 }
+        else { throw new URIError("URI malformed") }
+        for (var j = 0; j < n; j++) {
+            var cb = __uriByte(s, i)
+            if (cb < 0 || (cb & 0xC0) !== 0x80) { throw new URIError("URI malformed") }
+            cp = cp * 64 + (cb & 63)
+            i = i + 3
+        }
+        if (cp < min || cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)) { throw new URIError("URI malformed") }
+        out = out + String.fromCodePoint(cp)
+    }
+    return out
+}
+function encodeURIComponent(v) { return __uriEncode(v, "") }
+function encodeURI(v) { return __uriEncode(v, __uriReserved) }
+function decodeURIComponent(v) { return __uriDecode(v, "") }
+function decodeURI(v) { return __uriDecode(v, __uriReserved) }

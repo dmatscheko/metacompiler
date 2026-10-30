@@ -3574,7 +3574,7 @@ var jsvStringMethods = map[string]bool{
 	"trim": true, "trimStart": true, "trimEnd": true, "padStart": true,
 	"padEnd": true, "repeat": true, "concat": true, "replace": true,
 	"replaceAll": true, "toString": true, "valueOf": true, "localeCompare": true,
-	"normalize": true,
+	"normalize": true, "isWellFormed": true, "toWellFormed": true,
 }
 
 var jsvArrayMethods = map[string]bool{
@@ -4740,8 +4740,29 @@ func (rt *jsrt) jsvStringMethod(s string, name string, args []interface{}) (inte
 			return float64(1), true
 		}
 		return float64(0), true
+	case "isWellFormed":
+		return jsvToWellFormed(s) == s, true
+	case "toWellFormed":
+		return jsvToWellFormed(s), true
 	}
 	return nil, false
+}
+
+// jsvToWellFormed is String#toWellFormed: every lone surrogate (a WTF-8 one here)
+// becomes U+FFFD. Twin of jsnToWellFormed in languages/lib/js-num.js.
+func jsvToWellFormed(s string) string {
+	u := strUnits(s)
+	for i := 0; i < len(u); i++ {
+		c := rune(u[i])
+		if isHighSurr(c) && i+1 < len(u) && isLowSurr(rune(u[i+1])) {
+			i++
+			continue
+		}
+		if isSurrogate(c) {
+			u[i] = 0xFFFD
+		}
+	}
+	return strFromUnits(u)
 }
 
 // jsvSpace is the character set String#trim removes (WhiteSpace + LineTerminator).
@@ -6931,6 +6952,19 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 		o.set(rt.toString(u(a[1])), u(a[2]))
 		return 0
 	}
+	// js_jsprotolit is `__proto__: p` in an object literal: o's prototype becomes p
+	// when p is an object or null, and anything else is ignored (ECMA-262 B.3.1).
+	// Twins: jsProtoLit in both *-interpreter.abnf, js_jsprotolit in
+	// languages/lib/js-rt.metajs.
+	m["js_jsprotolit"] = func(a []uint64) uint64 {
+		p := u(a[1])
+		po, isObj := p.(*jsObject)
+		_, isArr := p.(*jsArray)
+		if p == interface{}(jsNull) || isArr || isCallable(p) || (isObj && !jsvIsSym(po)) {
+			rt.jsvSetProto(u(a[0]), p)
+		}
+		return a[0]
+	}
 	m["js_jssfield"] = func(a []uint64) uint64 {
 		t, ok := u(a[0]).(*jsObject)
 		if !ok {
@@ -7241,6 +7275,16 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 			return objProto
 		}
 		return jsUndef
+	}
+	// js_jshomeget is `super.k` in an object literal's method: k read off its home
+	// object's prototype. Twins: superHomeGet in both *-interpreter.abnf, js_jshomeget
+	// in languages/lib/js-rt.metajs.
+	m["js_jshomeget"] = func(a []uint64) uint64 {
+		p := getProto(nil, u(a[0]))
+		if p == interface{}(jsNull) {
+			return 0
+		}
+		return m["js_jsvget"]([]uint64{w(p), a[1]})
 	}
 	m["js_jsmcall"] = func(a []uint64) uint64 {
 		arr, ok := u(a[2]).(*jsArray)

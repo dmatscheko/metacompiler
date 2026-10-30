@@ -92,7 +92,7 @@ HtmlCloseAtStart = "-->" :whitespace() { NotNewline } :whitespace(Whitespace) ;
 // 'namespace'/'declare' are not reserved words, so their productions have to be tried
 // before the expression statement that would otherwise read them as a bare name (each of
 // them fails and backtracks cleanly when the word is genuinely a variable).
-Statement   = Block | ImportStmt | DecoratedExportClass | ExportStmt | AmbientDecl | NamespaceDecl | InterfaceDecl | TypeAliasDecl | EnumDecl
+Statement   = Block | ImportStmt | ImportAlias | DecoratedExportClass | ExportStmt | AmbientDecl | NamespaceDecl | InterfaceDecl | TypeAliasDecl | EnumDecl
             | ClassDecl | ClassDeclWidened | TryStmt | UsingDecl | VarDecl | If | While | Do | ForOf | For | Switch | Return | Break | Continue
             | Throw | Debugger | With | AsyncFuncDecl | GenFuncDecl | FuncDecl | FuncOverload | Empty | LabeledStmt | ExprStmt ;
 
@@ -151,7 +151,7 @@ NsExport    <~~ push(makeNsExport(pop(), claimVars(up.start, up.pos))) ~~>
 // An exported VARIABLE statement, which tsc compiles differently from an exported
 // function or class: every reference to it becomes 'Ns.name'.
 NsExportVar <~~ push({nsvar: pop(), names: nsMarkVars(up.start, up.pos)}) ~~>
-            = VarDecl ;
+            = VarDecl | ImportAlias ;
 
 // An AMBIENT declaration ('declare ...') describes something that exists elsewhere, so it
 // has no run-time effect at all: the whole form is parsed and erased. This is what lets a
@@ -379,7 +379,8 @@ LhsHead     <~~ push({lhsprim: pop(), ptxt: cpTxt(up.in, up.pos)}) ~~>
             = Primary ;
 // Zero or more calls, then a member, then optionally more of the same - so whatever the
 // path does in between, the LAST suffix is always a member and the place exists.
-LhsSuffixes = ( DotSuffix | IndexSuffix ) [ LhsSuffixes ] | CallSuffix LhsSuffixes ;
+// A non-null '!' may stand anywhere in the path ('o!.n = 5', 'o.a!.k += 3'); it erases.
+LhsSuffixes = ( DotSuffix | IndexSuffix ) { NonNullSuffix } [ LhsSuffixes ] | ( CallSuffix | NonNullSuffix ) LhsSuffixes ;
 
 // The arithmetic/bitwise compound assignments, folded through the same applyOp as the
 // short ones. The longer operators must be tried before their prefixes (">>>=" before
@@ -410,7 +411,7 @@ Target      <~~ push(makeTargetRef(takeAll())) ~~>
 // out whole and whatever suffixes follow the ')' are appended to its path. Inside them a
 // type assertion is erased like everywhere else: tsc accepts '(f as any) = g',
 // '(o.p satisfies number) = 1', '(<any>o).q = 1' and '(f!) = 1' as stores to the target.
-TargetHead  = ParenTarget | NotReserved Id <~~ push(idName(up.in)) ~~> ;
+TargetHead  = ParenTarget | NotReserved Id <~~ push(idName(up.in)) ~~> { NonNullSuffix } ;
 ParenTarget <~~ push({parenref: pop()}) ~~>
             = "(" ( "<" Type ">" Target | Target { AsCast | NonNullSuffix } ) ")" ;
 
@@ -587,11 +588,19 @@ CallPrimary = ParenExpr | Primary ;
 ParenExpr   <~~ push(parenPrimary(pop(), up.in)) ~~>
             = "(" Expression ")" NotArrow ;
 TypeArgsSuffix = TypeArgs TypeArgsFollow ;
-NonNullSuffix = "!" !"=" ;
+NonNullSuffix = "!" NotTouchingEq ;
+// The non-null '!' is followed by anything but an '=' TOUCHING it: 'x! = 1' assigns to
+// x and 'x! == 1' compares it, while 'x != 1' and 'x !== 1' are the inequalities. A
+// plain !"=" would skip the blank and refuse 'x! = 1'.
+NotTouchingEq = :script(~~
+    (function() {
+        return (c.peek(0) === 61) ? abnf.newToken("\x01eq", 0) : undefined
+    })()
+~~) ;
 AsCast      = ( KwAs | KwSatisfies ) ( KwConst | Type ) ;
 // See the twin of this comment in js-interpreter.abnf.
 TaggedTemplate <~~ push({kind: "tagcall", parts: takeAll()}) ~~>
-            = "`" :whitespace() { TplExpr | TplChars | TplDollar } "`" :whitespace(Whitespace) ;
+            = "`" :whitespace() { TplExpr | TagChars | TplDollar } "`" :whitespace(Whitespace) ;
 CallSuffix  <~~ push({kind:"call", args: takeAll()}) ~~>
             = "(" [ Arg { "," Arg } [ "," ] ] ")" ;
 DotSuffix   = PrivateDotSuffix | "." Id <~~ push({kind:"member", name: idName(up.in), key: makeConst(jsKeyEsc(idName(up.in)))}) ~~> ;
@@ -737,7 +746,7 @@ GetterParams <~~ takeAll(); push([]) ~~> = "(" [ ParamSeq ] ")" ;
 SetterParams <~~ push(takeAll()) ~~> = "(" [ ParamSeq ] ")" ;
 // A shorthand method. The async and generator markers are kept, so 'async m() {}' and
 // '*m() {}' build the right kind of function value (see makeMethodProp).
-MethodProp  <~~ push(makeMethodProp(takeAll())) ~~>
+MethodProp  <~~ push(homeNote(makeMethodProp(takeAll()), up.in)) ~~>
             = [ AsyncMark ] [ GenMark ] PropKeyAny [ TypeParams ] ParamList [ TypeAnnot ] [ UseStrictMark ] FuncBody ;
 // See the twin of this comment in js-interpreter.abnf.
 PropKeyAny  = PropKey | PropComputedKey ;
@@ -776,6 +785,12 @@ TemplateLit <~~ push(makeTemplate(takeAll())) ~~>
             = "`" :whitespace() { TplExpr | TplChars | TplDollar } "`" :whitespace(Whitespace) ;
 TplExpr     <~~ push({expr: pop()}) ~~>
             = "${" :whitespace(Whitespace) Expression "}" ;
+// See the twin of this comment in js-to-llvm-ir.abnf.
+TagChars    <~~ push(tagChunk(up.in)) ~~>
+            = TagChar { TagChar } ;
+TagChar     = TplEsc | TplBadEsc | TplPlain ;
+TplBadEsc   <~~ tplBadSeen = true ~~>
+            = "\\" ( "x" | "u" | "0"..."9" ) ;
 TplChars    <~~ push({str: jsUnescape(up.in), raw: up.in}) ~~>
             = TplChar { TplChar } ;
 TplChar     = TplEsc | TplPlain ;
@@ -1230,7 +1245,7 @@ MemberDecorators <~~ push({decs: takeAll()}) ~~>
 // and the legacy 'import fs = require("fs")' equals form; all three are recognized, and
 // the type-only ones name nothing at run time anyway.
 ImportStmt  <~~ push(jsImport(takeAll(), up.pos)) ~~>
-            = KwImport ( ImportEquals | KwType ImportEquals | [ KwType | KwDefer ] ImportClause KwFrom ModPath [ ImportAttrs ] | ModPath [ ImportAttrs ] ) [ ";" ] ;
+            = KwImport ( ImportEquals | KwType ImportTypeEquals | [ KwType | KwDefer ] ImportClause KwFrom ModPath [ ImportAttrs ] | ModPath [ ImportAttrs ] ) [ ";" ] ;
 // 'import defer * as ns from "m"': the deferred-evaluation import. The module is loaded
 // the same way here (this flat model has no lazy namespace object), so the modifier is
 // parsed and dropped, exactly like 'import type'.
@@ -1239,7 +1254,16 @@ KwDefer     = "defer" KwEnd ;
 // 'assert { ... }' spelling). They describe how the host should load the module, which
 // this flat import model has no use for, so the clause is parsed and dropped.
 ImportAttrs = ( KwWith | KwAssert ) SkipBlock ;
-ImportEquals = NotBindName Id "=" ( Id "(" ModPath ")" | EntityName ) ;
+ImportEquals = NotBindName Id "=" Id "(" ModPath ")" ;
+ImportTypeEquals = NotBindName Id "=" ( Id "(" ModPath ")" | EntityName ) ;
+// 'import X = A.B.C' (an import ALIAS, not an import) is tsc's 'var X = A.B.C', and
+// 'export import X = A.B' in a namespace exports it like an exported var. Tried after
+// ImportStmt, which keeps the 'X = require("m")' form and the type-only 'import type'.
+ImportAlias = ImportAliasCore [ ";" ] ;
+ImportAliasCore <~~ push(makeSeq(takeAll())); declKinds.pop() ~~>
+            = AliasKw NameDeclarator ;
+AliasKw     <~~ declKinds.push("var") ~~>
+            = KwImport ;
 ImportClause = ImportBinding [ "," ImportTail ] | ImportTail ;
 ImportBinding = NotBindName Id ;
 ImportTail  = ImportNs | ImportNamed ;
@@ -4350,6 +4374,8 @@ NotFuncHead = :script(~~
             if (s > oc) { return {v: 1} }
             return {v: 0}
         }
+        if (name == "isWellFormed") { return {v: jsnToWellFormed(s) === s} }
+        if (name == "toWellFormed") { return {v: jsnToWellFormed(s)} }
         return null
     }
     // See the twin of this comment in js-interpreter.abnf.
@@ -4928,7 +4954,12 @@ NotFuncHead = :script(~~
     }
     // The temporal dead zone: see the twin of this comment in js-interpreter.abnf.
     var jsTdz = {}
-    function jsTdzRaise(name) { biRaise("ReferenceError: Cannot access '" + name + "' before initialization") }
+    // A derived constructor's `this` is in its dead zone until super() returns.
+    function jsTdzRaise(name) {
+        if (name == "this") { biRaise("ReferenceError: " + jsNoSuperText) }
+        biRaise("ReferenceError: Cannot access '" + name + "' before initialization")
+    }
+    var jsNoSuperText = "Must call super constructor in derived class before accessing 'this' or returning from derived constructor"
     function withLexInit(names, items) {
         if (names.length == 0) { return items }
         var out = [function() { jsTdzDecl(names) }]
@@ -5483,7 +5514,7 @@ NotFuncHead = :script(~~
                    "startsWith", "endsWith", "slice", "substring", "substr", "split", "toUpperCase",
                    "toLowerCase", "trim", "trimStart", "trimEnd", "padStart", "padEnd", "repeat",
                    "concat", "replace", "replaceAll", "toString", "valueOf", "localeCompare",
-                   "normalize"])
+                   "normalize", "isWellFormed", "toWellFormed"])
     bvSeed(bvArr, ["push", "pop", "shift", "unshift", "slice", "splice", "indexOf", "lastIndexOf",
                    "includes", "join", "concat", "reverse", "sort", "map", "filter", "forEach",
                    "reduce", "reduceRight", "some", "every", "find", "findIndex", "findLast",
@@ -7727,6 +7758,7 @@ NotFuncHead = :script(~~
         var k = (typeof key == "string") ? key : jsStr(key())
         // NamedEvaluation, the property form: `{ o: (a,b)=>a }` names the arrow "o".
         fnAnonName("" + k, ":", txt)
+        if (k === "__proto__" && txt !== undefined) { return {proto: true, t: valT} }
         return {k: jsKeyEsc(k), t: valT}
     }
     // See the twin of this comment in js-interpreter.abnf.
@@ -7741,8 +7773,10 @@ NotFuncHead = :script(~~
             for (var i = 0; i < props.length; i++) {
                 var p = props[i]
                 if (p.spreadObj == true) { spreadInto(o, keys, p.t()); continue }
+                if (p.proto === true) { jsProtoLit(o, p.t()); continue }
                 var key = (p.kt != undefined) ? jsKeyStr(p.kt()) : p.k
                 if (p.acc != undefined) { addAccessor(o, p.acc, key, p.fn()) }
+                else if (p.home === true) { scopePut(o, key, homeMethod(o, p.t)) }
                 else { scopePut(o, key, p.t()) }
                 if (!isInternalKey(key)) { if (keys.indexOf(key) < 0) { keys.push(key) } }
                 else { jsSymTrack(o, key) }
@@ -7754,6 +7788,11 @@ NotFuncHead = :script(~~
     // '{...src}': copies src's own keys, in their own order, into the object being built,
     // then its symbol-keyed properties. A key that is already there is overwritten in
     // place and keeps its position, which is what JavaScript's property order does too.
+    // See the twin of this comment in js-interpreter.abnf.
+    function jsProtoLit(o, p) {
+        var pt = jsTypeofVal(p)
+        if (p === null || pt == "object" || pt == "function") { jsSetProto(o, p) }
+    }
     function spreadInto(o, keys, src) {
         if (src == undefined || src == null) { return }
         var ks = ownKeys(src)
@@ -8140,23 +8179,34 @@ NotFuncHead = :script(~~
         }
         return concat2impl([tagSites[site.tix]], subs)
     }
+    // The chunk TagChars matched; bad when a TplBadEsc stood in it.
+    var tplBadSeen = false
+    function tagChunk(t) {
+        var bad = tplBadSeen
+        tplBadSeen = false
+        if (bad) { return {str: "", raw: t, bad: true} }
+        return {str: jsUnescape(t), raw: t}
+    }
     function tagStrings(parts) {
         var cooked = []
         var raws = []
         var cur = ""
         var raw = ""
+        var bad = false
         for (var i = 0; i < parts.length; i++) {
             if (parts[i].expr != undefined) {
-                cooked.push(cur)
+                cooked.push(bad ? undefined : cur)
                 raws.push(raw)
                 cur = ""
                 raw = ""
+                bad = false
             } else {
                 cur = cur + parts[i].str
                 raw = raw + parts[i].raw
+                if (parts[i].bad === true) { bad = true }
             }
         }
-        cooked.push(cur)
+        cooked.push(bad ? undefined : cur)
         raws.push(raw)
         // See the twin of this comment in js-interpreter.abnf.
         setMember(cooked, "raw", raws)
@@ -8718,6 +8768,12 @@ NotFuncHead = :script(~~
             scopes = env.slice()
             var sc = {}
             sc["this"] = self
+            // An explicit derived constructor holds the instance aside and its `this`
+            // in the dead zone until super() binds it (ECMA-262 10.2.1.3).
+            if (hasSuper && !isDefault) {
+                sc["this"] = jsTdz
+                sc["0self"] = self
+            }
             sc["new.target"] = nt
             sc["arguments"] = jsArgsObj(args)
             sc["0strict"] = true // A class body is strict code, always.
@@ -8737,7 +8793,7 @@ NotFuncHead = :script(~~
                 // on to A, which is also how `class E extends Error {}` carries its message.
                 var supArgs = [self]
                 for (var sa = 0; sa < args.length; sa++) supArgs.push(args[sa])
-                ctorSuperDone(self, ctorConstruct(supCls, supArgs, nt))
+                ctorSuperDone(sc, self, ctorConstruct(supCls, supArgs, nt))
             } else if (!hasSuper) {
                 ctorFields(params, fields, fscopes, ckeys)
             }
@@ -8752,7 +8808,7 @@ NotFuncHead = :script(~~
             // See the twin of this comment in js-interpreter.abnf.
             var rv = anytype
             rv = (rb != undefined && rb.isRet) ? rb.v : undefined
-            if (hasSuper && (rv == undefined || rv == null || (typeof rv != "object" && typeof rv != "function"))) { return sc["this"] }
+            if (hasSuper) { return ctorDerivedResult(sc, rv) }
             return rv
         }
     }
@@ -8805,12 +8861,23 @@ NotFuncHead = :script(~~
         return r
     }
     // See the twin of this comment in js-interpreter.abnf.
-    function ctorSuperDone(self, r) {
-        if (r != undefined && r != null && (typeof r == "object" || typeof r == "function") && r !== self) {
-            setVar("this", r)
-        }
+    function ctorSuperDone(sc, self, r) {
+        if (r != undefined && r != null && (typeof r == "object" || typeof r == "function")) { self = r }
+        scopePut(sc, "this", self)
         getVar("0fields")()
         return undefined
+    }
+    // See the twin of this comment in js-interpreter.abnf.
+    function ctorDerivedResult(sc, rv) {
+        if (rv !== null && (typeof rv == "object" || typeof rv == "function")) { return rv }
+        if (rv !== undefined) { biRaise("TypeError: Derived constructors may only return object or undefined") }
+        if (sc["this"] === jsTdz) { biRaise("ReferenceError: " + jsNoSuperText) }
+        return sc["this"]
+    }
+    // See the twin of this comment in js-interpreter.abnf.
+    function ctorThisScope() {
+        for (var i = scopes.length - 1; i >= 0; i--) { if (hasOwn(scopes[i], "this")) { return scopes[i] } }
+        return globalScope
     }
 
     // See the twin of this comment in js-interpreter.abnf.
@@ -8932,8 +8999,31 @@ NotFuncHead = :script(~~
         for (var i = 0; i < items[1].mods.length; i++) {
             if (items[1].mods[i] == "declare" || items[1].mods[i] == "abstract") { return {skip: true} }
         }
+        var auto = false
+        for (var j = 0; j < items[1].mods.length; j++) { if (items[1].mods[j] == "accessor") { auto = true } }
         return {kind: "field", name: key.mk, keyT: key.mkT, statik: hasStatic(items[1].mods),
-                decs: items[0].decs, init: (items.length > 3) ? items[3] : null}
+                decs: items[0].decs, init: (items.length > 3) ? items[3] : null,
+                auto: auto && (key.mkT == undefined || key.mkT == null)}
+    }
+    // An AUTO-ACCESSOR, 'accessor x = 1': a hidden field "__#auto#x" holds the value and
+    // a getter and a setter named x on the prototype (or the class) read and write it.
+    // Twin of autoAccFns in typescript-to-llvm-ir.abnf.
+    function autoGetter(store) {
+        return function() {
+            var self = anytype // The receiver, from the one-shot slot.
+            self = pendingThis
+            pendingThis = undefined
+            return getMember(self, store)
+        }
+    }
+    function autoSetter(store) {
+        return function(v) {
+            var self = anytype // The receiver, from the one-shot slot.
+            self = pendingThis
+            pendingThis = undefined
+            setMember(self, store, v)
+            return undefined
+        }
     }
     // items = [{decs}, {mods}, {acc}, keyDesc, params, bodyThunk].
     function makeClassAccessor(items) {
@@ -9163,7 +9253,12 @@ NotFuncHead = :script(~~
             if (typeof mm.name == "string" && isPrivateKey(mm.name)) {
                 privKinds["$" + mm.name] = {field: mm.kind == "field", statik: mm.statik == true, cls: (name == "") ? "anonymous" : name}
             }
-            if (mm.kind == "field") { if (mm.statik) { inits.push(mm) } else { fields.push(mm) } }
+            if (mm.auto === true) {
+                var store = {kind: "field", name: "__#auto#" + mm.name, statik: mm.statik, decs: mm.decs, init: mm.init}
+                if (mm.statik) { inits.push(store) } else { fields.push(store) }
+                protos.push({kind: "autoacc", name: mm.name, statik: mm.statik, store: store.name})
+            }
+            else if (mm.kind == "field") { if (mm.statik) { inits.push(mm) } else { fields.push(mm) } }
             else if (mm.kind == "method" || mm.kind == "accessor") { protos.push(mm) }
             else if (mm.kind == "staticblock") { inits.push(mm) }
             else if (mm.kind == "ctor") { ctorInfo = mm }
@@ -9212,6 +9307,9 @@ NotFuncHead = :script(~~
                 if (pm.kind == "accessor") {
                     addAccessor(ptgt, pm.acc, pk, fnMetaPut(makeClosure(pm.params, pm.body, mscopes, true),
                                                             pm.acc + " " + pk, fnArity(pm.params)))
+                } else if (pm.kind == "autoacc") {
+                    addAccessor(ptgt, "get", pk, fnMetaPut(autoGetter(pm.store), "get " + pk, 0))
+                    addAccessor(ptgt, "set", pk, fnMetaPut(autoSetter(pm.store), "set " + pk, 1))
                 } else {
                     // A method replaces an earlier accessor of the same name.
                     jsAccDrop(ptgt, pk)
@@ -9476,14 +9574,48 @@ NotFuncHead = :script(~~
 
     // ----- super as a PROPERTY -----
     // See the twin of this comment in js-interpreter.abnf.
+    // See the twin of this comment in js-interpreter.abnf.
+    var homeSuperN = 0
+    function homeNote(p, txt) {
+        if (txt.indexOf("super") >= 0) {
+            p.home = true
+            homeSuperN = homeSuperN + 1
+        }
+        return p
+    }
+    function homeMethod(o, t) {
+        var saved = scopes
+        var hs = {}
+        hs["__home__"] = o
+        scopes = concat2impl(scopes, [hs])
+        var fv = anytype // The method, made in the home scope.
+        fv = t()
+        scopes = saved
+        return fv
+    }
+    function superHomeOf() {
+        if (homeSuperN > 0) {
+            for (var i = scopes.length - 1; i >= 0; i--) {
+                if (hasOwn(scopes[i], "__home__")) { return scopes[i]["__home__"] }
+                if (hasOwn(scopes[i], "__class__")) { return null }
+            }
+        }
+        return null
+    }
+    function superHomeGet(ho, k) {
+        var hp = anytype // The home object's prototype.
+        hp = jsGetProto(ho)
+        if (hp === null) { return undefined }
+        return getMember(hp, k)
+    }
     function superClass() {
-        var cls = getVar("__class__")
-        if (cls == undefined || cls == null) fail("super outside a class")
-        // See the twin of this line in js-interpreter.abnf.
-        return cls.__super
+        return getVar("__class__").__super
     }
     function superGet(k) {
         var self = getVar("this")
+        var ho = anytype // The home object, or null in a class body.
+        ho = superHomeOf()
+        if (ho !== null) { return superHomeGet(ho, k) }
         // The static side first when the receiver is a class descriptor; see
         // makeSuperCall for why the receiver is what decides.
         if (isClassDesc(self)) {
@@ -9652,16 +9784,36 @@ NotFuncHead = :script(~~
     function makeSuperCall(name, argThunks) {
         if (name == "") {
             return function() {
-                var self = getVar("this")
+                var tsc = ctorThisScope()
+                var self = tsc["0self"]
+                var again = tsc["this"] !== jsTdz
+                // A second super() still constructs, on an object of its own, and then
+                // the binding is refused (ECMA-262 13.3.7.1 steps 6-7).
+                if (again) {
+                    self = {}
+                    self["__class"] = tsc["0self"].__class
+                    self["__keys"] = []
+                }
                 var supCls = getVar("__class__").__super
                 if (supCls == undefined) fail("super() with no superclass")
                 var argv = concat2impl([self], evalArgs(argThunks))
-                ctorSuperDone(self, ctorConstruct(supCls, argv, getVar("new.target")))
+                var sr = anytype // What the parent's constructor returned.
+                sr = ctorConstruct(supCls, argv, getVar("new.target"))
+                if (again) { biRaise("ReferenceError: Super constructor may only be called once") }
+                ctorSuperDone(tsc, self, sr)
                 return undefined
             }
         }
         return function() {
             var self = getVar("this")
+            var ho = anytype // The home object, or null in a class body.
+            ho = superHomeOf()
+            if (ho !== null) {
+                var hf = anytype // The method found on the home object's prototype.
+                hf = superHomeGet(ho, name)
+                if (typeof hf != "function") { biRaise("TypeError: (intermediate value)." + name + " is not a function") }
+                return callWithThis(hf, self, evalArgs(argThunks))
+            }
             var sup = getVar("__class__").__super
             // See the twin of this comment in js-interpreter.abnf.
             if (isClassDesc(self)) {
@@ -11140,7 +11292,9 @@ NotFuncHead = :script(~~
     var jsbDone = false
     function jsbRef(name) {
         if (name == "Set" || name == "Map" || name == "Array" || name == "isNaN" || name == "isFinite" ||
-            name == "structuredClone" || name == "Reflect") { jsbWant = true }
+            name == "structuredClone" || name == "Reflect" || name == "WeakMap" || name == "WeakSet" ||
+            name == "queueMicrotask" || name == "URIError" || name == "encodeURIComponent" || name == "encodeURI" ||
+            name == "decodeURIComponent" || name == "decodeURI") { jsbWant = true }
         if (name == "arguments") { argsWant = true }
         return name
     }

@@ -2367,6 +2367,8 @@ function jvSeedMethodNames() {
     jvStrM["valueOf"] = 1
     jvStrM["localeCompare"] = 1
     jvStrM["normalize"] = 1
+    jvStrM["isWellFormed"] = 1
+    jvStrM["toWellFormed"] = 1
 
     jvArrM["push"] = 1
     jvArrM["pop"] = 1
@@ -5607,6 +5609,8 @@ function jvStrMethod(s, name, args) {
         if (s > other) { return 1 }
         return 0
     }
+    if (name == "isWellFormed") { return jsnToWellFormed(s) === s }
+    if (name == "toWellFormed") { return jsnToWellFormed(s) }
     return jvMiss
 }
 
@@ -6228,6 +6232,16 @@ function jvNoObjProto(v) {
 // function and a base class Function.prototype, and a derived class the class it
 // extends. Twins: getProto in abnf/jsrtjsprint.go, jsGetProto in both
 // *-interpreter.abnf.
+// `super.k` in an object literal's method: k read off its home object's prototype.
+// Twins: js_jshomeget in abnf/jsrtjsprint.go, superHomeGet in both
+// *-interpreter.abnf.
+function js_jshomeget(home, key) {
+    var p = anytype
+    p = jvGetProto(home)
+    if (p === null) { return undefined }
+    return js_jsvget(p, key)
+}
+
 function jvGetProto(v) {
     if (jvUndefOrNull(v)) { jbRaise("TypeError: Cannot convert undefined or null to object") }
     if (typeof v == "string") { return jvBuiltinProtoAt(1) }
@@ -6293,6 +6307,16 @@ function jvGetProto(v) {
 // mark for null. A primitive comes back unchanged, and so do an array, a function and
 // a prototype view, whose prototypes this value model keeps elsewhere. Twins:
 // jsvSetProto in abnf/jsrtjsprint.go, jsSetProto in both *-interpreter.abnf.
+// `__proto__: p` in an object literal: o's prototype becomes p when p is an object
+// or null, and anything else is ignored (ECMA-262 B.3.1). Twins: js_jsprotolit in
+// abnf/jsrtjsprint.go, jsProtoLit in both *-interpreter.abnf.
+function js_jsprotolit(o, p) {
+    var pobj = jvIsObjLike(p)
+    if (pobj) { pobj = !jbIsBig(p) && !jvIsSym(p) }
+    if (p === null || pobj || jvIsCallable(p)) { jvSetProto(o, p) }
+    return o
+}
+
 function jvSetProto(o, p) {
     if (jvUndefOrNull(o)) { jbRaise("TypeError: Object.setPrototypeOf called on null or undefined") }
     var pobj = jvIsObjLike(p)

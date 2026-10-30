@@ -2,7 +2,7 @@
 // ToNumber of a string, ES2023 7.1.4.1.1) and the globals parseFloat and parseInt
 // (19.2.4, 19.2.5); the writing of one by Number#toFixed, toExponential,
 // toPrecision and toLocaleString; the code-unit order of two strings, which relations and the
-// default sort use; and a RegExp's `source` text.
+// default sort use; a RegExp's `source` text; and String#toWellFormed.
 //
 // Included by both js and typescript interpreters (include("lib/js-num.js")) and
 // imported by languages/lib/js-rt.metajs, so the interpreters and layer 2 run one
@@ -622,4 +622,28 @@ function jsnToLocale(x) {
     while (fp.length > 0 && fp.charAt(fp.length - 1) == "0") { fp = fp.substring(0, fp.length - 1) }
     if (fp.length > 0) { return sign + jsnGroup(rd.substring(0, il)) + "." + fp }
     return sign + jsnGroup(rd.substring(0, il))
+}
+
+// String#toWellFormed (ECMA-262 22.1.3.32): s with every lone surrogate replaced by
+// U+FFFD; isWellFormed is whether that changes nothing. Twin of jsvToWellFormed in
+// abnf/jsrtjsprint.go.
+function jsnToWellFormed(s) {
+    if (byteLen(s) == s.length) { return s }
+    var out = ""
+    var i = 0
+    while (i < s.length) {
+        var c = s.charCodeAt(i)
+        if (c >= 55296 && c <= 56319 && i + 1 < s.length) {
+            var d = s.charCodeAt(i + 1)
+            if (d >= 56320 && d <= 57343) {
+                out = out + s.substring(i, i + 2)
+                i = i + 2
+                continue
+            }
+        }
+        if (c >= 55296 && c <= 57343) { out = out + String.fromCharCode(65533) }
+        else { out = out + s.substring(i, i + 1) }
+        i = i + 1
+    }
+    return out
 }

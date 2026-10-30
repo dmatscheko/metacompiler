@@ -5586,6 +5586,144 @@ function s140(): void {
     check("rawls1", ls.length == 4 && ls.charCodeAt(1) == 8232 && ls.charCodeAt(3) == 8233);
 }
 
+// ===== SECTION 141: derived constructors, `__proto__:`, tagged-template escapes, `x!` targets, import aliases =====
+// A derived constructor's `this` is in its dead zone until super() returns: reading it
+// first, never calling super(), or calling it twice is a ReferenceError (the second
+// call still runs the parent, on an object of its own), and returning anything but an
+// object or undefined is a TypeError. `__proto__: p` in an object literal sets the
+// prototype. A TAGGED template may hold an escape a plain one refuses: that segment's
+// cooked string is undefined. A non-null '!' erases in an assignment target ('x! = 1'
+// assigns, 'x! == 1' compares), and 'import X = A.B' is tsc's 'var X = A.B' -
+// exported from a namespace with 'export import'.
+class B141 { b: any; constructor(v: any) { this.b = v } m(): string { return "m" } }
+class Early141 extends B141 { x: any; constructor() { this.x = 1; super(1) } }
+class SupM141 extends B141 { constructor() { super.m(); super(1) } }
+class None141 extends B141 { constructor() { } }
+class Twice141 extends B141 { err: any; constructor() { super(1); try { super(2) } catch (e: any) { this.err = e.message } } }
+class Ret5141 extends B141 { constructor() { super(1); return 5 as any } }
+class Late141 extends B141 { g: any; constructor() { const f = () => super(7); const g = () => this.b; f(); this.g = g() } }
+function tag141(s: any, ...v: any[]): string { return JSON.stringify([s, s.raw, v]) }
+namespace Shapes141 {
+    export namespace Polygons {
+        export class Square { side = 2 }
+        export const tri = 3
+    }
+}
+namespace App141 {
+    export import Sq = Shapes141.Polygons.Square;
+    import P = Shapes141.Polygons;
+    export const n = P.tri;
+}
+import Q141 = App141.Sq;
+let maybe141: number | undefined = 1;
+function s141(): void {
+    function err(f: any): string { try { return "ok:" + JSON.stringify(f()) } catch (e: any) { return e.constructor.name + ":" + e.message } }
+    const noSuper = "ReferenceError:Must call super constructor in derived class before accessing 'this' or returning from derived constructor";
+    check("dctor1", err(() => new Early141()) == noSuper && err(() => new SupM141()) == noSuper && err(() => new None141()) == noSuper);
+    check("dctor2", err(() => new Twice141()) == "ok:{\"b\":1,\"err\":\"Super constructor may only be called once\"}" &&
+        err(() => new Ret5141()) == "TypeError:Derived constructors may only return object or undefined" &&
+        err(() => new Late141()) == "ok:{\"b\":7,\"g\":7}");
+    const base: any = { hi() { return "base" }, k: 1 };
+    const lit: any = { __proto__: base, x: 1 };
+    check("protolit1", lit.hi() == "base" && Object.getPrototypeOf(lit) === base && Object.keys(lit).join() == "x");
+    check("tagesc1", tag141`\unicode` == "[[null],[\"\\\\unicode\"],[]]" &&
+        tag141`ok\n${3}\x41` == "[[\"ok\\n\",\"A\"],[\"ok\\\\n\",\"\\\\x41\"],[3]]");
+    const o: { n?: number, inner?: { k: number } } = { inner: { k: 1 } };
+    o!.n = 5;
+    o.inner!.k += 3;
+    o.inner!.k++;
+    maybe141! = 10;
+    maybe141! += 2;
+    o!["n"]! -= 1;
+    const x: number | undefined = [1][0];
+    check("nonnull1", o.n == 4 && o.inner!.k == 5 && maybe141 == 12 && (x != 1) === false && (x! == 1) === true && (x!==1) === false);
+    check("impalias1", new App141.Sq().side == 2 && App141.n == 3 && new Q141().side == 2);
+}
+
+// ===== SECTION 142: set methods, WeakMap / WeakSet, URI functions, well-formed strings =====
+// The ES2025 set methods take any set-like argument (a size, has and keys) and answer
+// a new Set; WeakMap and WeakSet hold object keys only and are neither iterable nor
+// sized; the URI functions percent-encode UTF-8 and raise URIError on a lone
+// surrogate or a malformed escape; isWellFormed / toWellFormed find and replace lone
+// surrogates. queueMicrotask refuses a non-function.
+function s142(): void {
+    function err(f: any): string { try { return "ok:" + String(f()) } catch (e: any) { return e.constructor.name + ":" + e.name + ":" + e.message } }
+    var sh = (s: any) => [...s].join(",")
+    var a: any = new Set([1, 2, 3, 4]), b = new Set([5, 4, 3])
+    check("setm1", sh(a.union(b)) == "1,2,3,4,5" && sh(a.intersection(b)) == "4,3" && sh(a.difference(b)) == "1,2" &&
+        sh(b.difference(a)) == "5" && sh(a.symmetricDifference(b)) == "1,2,5")
+    check("setm2", !a.isSubsetOf(b) && (new Set([3]) as any).isSubsetOf(a) && a.isSupersetOf(new Set([1, 2])) &&
+        a.isDisjointFrom(new Set([9])) && !a.isDisjointFrom(b) && sh(a.union(new Map([[7, "y"]]))) == "1,2,3,4,7" &&
+        err(() => a.union([1])) == "TypeError:TypeError:The .size property is NaN" &&
+        err(() => a.union(5)) == "TypeError:TypeError:Set.prototype.union argument must be an object")
+    var wm: any = new WeakMap(), k1 = {}, k2 = [1]
+    wm.set(k1, 1).set(k2, 2)
+    check("weak1", wm.get(k1) == 1 && wm.get(k2) == 2 && !wm.has({}) && wm.delete(k1) && !wm.has(k1) &&
+        typeof wm.size == "undefined" && typeof wm.forEach == "undefined" &&
+        err(() => wm.set(1, 2)) == "TypeError:TypeError:Invalid value used as weak map key")
+    var ws = new WeakSet([k1])
+    check("weak2", ws.has(k1) && !ws.has(k2) && ws.add(k2).has(k2) && ws.delete(k2) &&
+        err(() => ws.add("s" as any)) == "TypeError:TypeError:Invalid value used in weak set")
+    check("uri1", encodeURIComponent("a b&c/d?é€\u{1F600}") == "a%20b%26c%2Fd%3F%C3%A9%E2%82%AC%F0%9F%98%80" &&
+        encodeURI("http://x.y/a b?q=1&r=é#f") == "http://x.y/a%20b?q=1&r=%C3%A9#f" &&
+        decodeURIComponent("a%20b%26%C3%A9%F0%9F%98%80") == "a b&é\u{1F600}" && decodeURI("a%20b%26c%2F%23") == "a b%26c%2F%23")
+    check("uri2", err(() => decodeURIComponent("%C3")) == "URIError:URIError:URI malformed" &&
+        err(() => decodeURIComponent("%C0%80")) == "URIError:URIError:URI malformed" &&
+        err(() => encodeURIComponent("\uD800")) == "URIError:URIError:URI malformed" && String(new URIError("m")) == "URIError: m")
+    var ss: string[] = ["abc", "a\uD800b", "x\uDE00\uD83D", "ok😀"]
+    var wf: string[] = []
+    for (var i = 0; i < ss.length; i++) { wf.push(ss[i].isWellFormed() + "/" + encodeURIComponent(ss[i].toWellFormed())) }
+    check("wellformed1", wf.join(" ") == "true/abc false/a%EF%BF%BDb false/x%EF%BF%BD%EF%BF%BD true/ok%F0%9F%98%80" &&
+        err(() => queueMicrotask(5 as any)) == "TypeError:TypeError:The \"callback\" argument must be of type function. Received type number (5)")
+}
+
+// ===== SECTION 143: `super` in an object literal's method =====
+// A shorthand method's `super` starts at its home object's prototype, whatever
+// setPrototypeOf or `__proto__:` made it, and runs with the method's own `this`; an
+// arrow inside sees the same; a literal inside a class method has its own home, and
+// the class method's `super` is still the class's.
+class K143 { m() { return "k" } }
+class D143 extends K143 {
+    m(): string {
+        var lit: any = {m() { return "lit>" + super.m() }}
+        Object.setPrototypeOf(lit, {m() { return "p" }})
+        return lit.m() + "|" + super.m()
+    }
+}
+function s143(): void {
+    var base: any = {hi() { return "base:" + this.n }, v: 7}
+    var obj: any = {n: 1, hi() { return super.hi() + "!" }, rv() { return super.v }}
+    Object.setPrototypeOf(obj, base)
+    var o2: any = {__proto__: base, n: 2, hi() { return super.hi() + "?" }}
+    var o3 = {toString() { return "o3:" + super.toString() }}
+    var o4: any = {f() { var a = () => super.hi(); return a() }, n: 4}
+    Object.setPrototypeOf(o4, base)
+    check("homesuper1", obj.hi() == "base:1!" && obj.rv() == 7 && o2.hi() == "base:2?" && o4.f() == "base:4")
+    check("homesuper2", new D143().m() == "lit>p|k" && String(o3) == "o3:[object Object]")
+}
+
+// ===== SECTION 144: auto-accessors =====
+// 'accessor x = 1' is a getter and a setter named x on the prototype (static: on the
+// class) over hidden storage, so the instance has no own key x and a subclass getter
+// overrides it.
+class Aa144 {
+    accessor x = 1;
+    static accessor s = "st";
+    accessor y: number = 2;
+}
+class Ab144 extends Aa144 {
+    get x(): any { return 100 }
+}
+function s144(): void {
+    const a: any = new Aa144();
+    const d: any = Object.getOwnPropertyDescriptor(Aa144.prototype, "x");
+    check("autoacc1", a.x == 1 && a.y == 2 && Aa144.s == "st" && Object.keys(a).length == 0 && typeof d.get == "function");
+    a.x = 5;
+    Aa144.s = "t";
+    check("autoacc2", a.x == 5 && new Aa144().x == 1 && Aa144.s == "t" && new Ab144().x == 100 &&
+        Object.getOwnPropertyNames(Aa144.prototype).join() == "constructor,x,y");
+}
+
 // ===== END SECTIONS =====
 
 function main(): number {
@@ -5717,6 +5855,10 @@ function main(): number {
     s138(); // SECTION-CALL 138
     s139(); // SECTION-CALL 139
     s140(); // SECTION-CALL 140
+    s141(); // SECTION-CALL 141
+    s142(); // SECTION-CALL 142
+    s143(); // SECTION-CALL 143
+    s144(); // SECTION-CALL 144
     println("full: " + checks + " checks, " + failures + " failures");
     return failures;
 }
