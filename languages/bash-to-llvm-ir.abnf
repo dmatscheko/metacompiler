@@ -196,7 +196,7 @@ PipeOp      = "|" NotBar ;
 // (`echo x | while read l; do ...; done`) and can carry redirections that apply to the
 // whole thing (`while read l; do ...; done < file`, `for x in ...; done <<EOF`). Its
 // {cpd} marker tells makePipeline that, as a stage, it starts outside every loop.
-Command     = CompoundCmd | LetCmd | DeclCommand | PrefixCommand | Assignment | SimpleCommand ;
+Command     = CompoundCmd | LetCmd | DeclCommand | PrefixCommand | Assignment | RedirCommand | SimpleCommand ;
 CompoundCmd <~~ push({cpd: 1}) ~~> = CompoundRedir | Subshell | BraceGroup ;
 CompoundRedir <~~ push(mkRedirected(takeAll())) ~~> = CompoundCore [ RedirList ] ;
 // "((" must be tried before "(" or an arithmetic command parses as nested subshells, which
@@ -277,7 +277,7 @@ DeclName    <~~ push({dname: up.in}) ~~> = Name ;
 // It may carry redirections (`r=$(cmd) 2>/dev/null`): bash performs them after the
 // assignment, so they do not apply to a command substitution on the right hand side.
 // Several may share one command (`a=1 b=$a`): they run left to right, each seeing the last.
-Assignment  <~~ push(atLine(makeAssign(takeAll()), lnPop())) ~~> = AsgOne1 { AsgOne } [ RedirList ] ;
+Assignment  <~~ push(atLine(makeAssign(takeAll()), lnPop())) ~~> = [ RedirList ] AsgOne1 { AsgOne } [ RedirList ] ;
 AsgOne1     <~~ lnPush(up.pos) ~~> = AsgOne ;
 AsgOne      <~~ push({a: parseAssign(takeAll())}) ~~>
             = AsgIdent <~~ push({aname: up.in}) ~~> AsgTail ;
@@ -309,6 +309,11 @@ SimpleCommand <~~ push(atLine(makeSimpleCommand(takeAll()), lnPop())) ~~>
             = NotReserved FirstWord { CmdSuffix } ;
 FirstWord   <~~ lnPush(up.pos) ~~> = CWord ;
 CmdSuffix   = HereDoc | Redir | CWord ;
+// Redirections before the command word, or with no command at all (then `:`). Twin of
+// RedirCommand in bash-interpreter.abnf; see there.
+RedirCommand <~~ push(atLine(makeSimpleCommand(redirCmdItems(takeAll())), lnPop())) ~~>
+            = RedirFirst { RedirItem } [ NotReserved CWord { CmdSuffix } ] ;
+RedirFirst  <~~ lnPush(up.pos) ~~> = RedirItem ;
 
 // A here-document: marker and body as ONE token (lib/bash-splice.abnf), which mkHereDoc splits
 // apart again. Twin of HereDoc in bash-interpreter.abnf; see there.
@@ -570,10 +575,20 @@ DqPeIndForm <~~ push({indp: 1}) ~~> = "!" ( PePfxNames | DqPeCore ) ;
 DqPeCore    = PePatForm | PeCaseForm | PeReplForm | PeXform | DqPeOpForm | PeSubstrForm | PePlain ;
 DqPeOpForm  = PeTarget PeOp [ DqBraceWord ] ;
 DqBraceWord <~~ push(mkBraceWord(takeAll())) ~~> = DqBrSeg { DqBrSeg } ;
-DqBrSeg     = DqBrSq | DqSeg | AnsiSeg | DqExpSeg | DqBrEsc | BraceBare ;
+DqBrSeg     = DqBrSq | DqBrDq | AnsiSeg | DqBrGlue | DqExpSeg | DqBrEsc | BraceBare ;
 // Between the two 's a " is still a quote character and is removed:
 // "${u:-'a"b'}" -> 'ab'   "${u:-'a"}"b'}" -> 'a}b'
-DqBrSq      = DqBrQuote { DqExpSeg | DqBrEsc | DqBrSqDq | DqBrSqLit } DqBrQuote ;
+DqBrSq      = DqBrQuote { GlueRef | DqExpSeg | DqBrEsc | DqBrSqDq | DqBrSqLit } DqBrQuote ;
+// A $NAME runs on across the word's quotes. Twin of DqBrDq in bash-interpreter.abnf; see there.
+DqBrDq      <~~ push(mkDqWord(takeAll())) ~~> = '"' :whitespace() DqBrDqRest ;
+DqBrDqRest  = '"' | GlueRef GlueFlip | ( GlueRef | DqExpSeg | DqBrEsc | DqLit ) DqBrDqRest ;
+DqBrGlue    = GlueRef [ DqBrGlueDq ] ;
+DqBrGlueDq  <~~ push(mkDqWord(takeAll())) ~~> = GlueFlip DqBrDqRest ;
+GlueRef     = "$" :whitespace() GlueName ;
+GlueName    <~~ push(mkVarRef(up.in.split('"').join(""))) ~~>
+            = ( "a"..."z" | "A"..."Z" | "_" ) { GlueNc | GlueQ } ;
+GlueNc      = "a"..."z" | "A"..."Z" | "0"..."9" | "_" ;
+GlueQ       = '"' { '"' } GlueNc ;
 DqBrSqDq    = '"' ;
 DqBrQuote   <~~ push(makeConst("'")) ~~> = "'" ;
 DqBrSqLit   <~~ push(makeConst(up.in)) ~~> = !@+"'\"$\\`" ;
@@ -768,6 +783,20 @@ NotIoRedir = :script(~~
 NotLt = :script(~~
     (function() {
         if (c.peek(0) === 60) { return abnf.newToken("\x01lt", 0) }
+    })()
+~~) ;
+// Twin of GlueFlip in bash-interpreter.abnf.
+GlueFlip = :script(~~
+    (function() {
+        var i = -1
+        var q = 0
+        var cc = c.peek(i)
+        while (cc !== 36 && cc >= 0) {
+            if (cc === 34) { q = q + 1 }
+            i = i - 1
+            cc = c.peek(i)
+        }
+        if (q % 2 === 0) { return abnf.newToken("\x01even", 0) }
     })()
 ~~) ;
 
@@ -4736,6 +4765,20 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return done
     }
 
+    // A RedirCommand's items in makeSimpleCommand's order: the first word moved to the front,
+    // or `:` when there is none. Twin of redirCmdItems in bash-interpreter.abnf.
+    function redirCmdItems(items) {
+        var w = -1
+        var i
+        for (i = items.length - 1; i >= 0; i--) {
+            if (items[i].rd == undefined) { w = i }
+        }
+        var out = [w < 0 ? makeConst(":") : items[w]]
+        for (i = 0; i < items.length; i++) {
+            if (i != w) { out.push(items[i]) }
+        }
+        return out
+    }
     // words[0] is the command word (a literal, or an expansion - see emitComputedCommand),
     // the rest are arguments.
     function makeSimpleCommand(items0) {

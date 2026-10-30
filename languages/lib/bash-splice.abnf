@@ -24,7 +24,8 @@ BsSplice    = :script(~~
         if (src.indexOf("\\\n") < 0 && src.indexOf("<<") < 0) { return undefined }
         var n = src.length
         // The quoting context, one frame per level: kind 0 command text, 1 "...", 2 '...',
-        // 3 $'...', 4 ${...}, 5 `...`. dep counts the frame's open ( (or { and [), cl is 1 for a
+        // 3 $'...', 4 ${...}, 5 `...`, 6 '...' in a quoted ${v-w} word (the ' is kept, yet it
+        // hides a " or } up to the next one; a backslash-newline there is a continuation). dep counts the frame's open ( (or { and [), cl is 1 for a
         // command frame that a ")" closes, ar 1 for arithmetic (no comment, no here-doc),
         // dq 1 for a ${...} inside "...", cs the open `case` commands whose ")" ends a pattern.
         var kind = [0]
@@ -165,6 +166,12 @@ BsSplice    = :script(~~
                 i = i + 1
                 continue
             }
+            if (k === 6 && ch !== "\\") {
+                if (ch === "'") { close() }
+                prev = ch
+                i = i + 1
+                continue
+            }
             if (ch === "\\") {
                 if (src.charAt(i + 1) === "\n") { cut(i); i = i + 2; continue }
                 prev = src.charAt(i + 1)
@@ -202,6 +209,7 @@ BsSplice    = :script(~~
             if (ch === "\"") { open(1, 0, 0, 0, 0); prev = ch; i = i + 1; continue }
             if (ch === "'") {
                 if (!sqLit) { open(2, 0, 0, 0, 0) }
+                else if (k === 4) { open(6, 0, 0, 0, 0) }
                 prev = ch
                 i = i + 1
                 continue

@@ -1183,6 +1183,27 @@ echo $LINENO'
   o=$( { echo "${!u:-q}" 2>/dev/null; echo never; } 2>&1 ); r=$?
   check ie1 "$r $(s76m "$o")" "1 : invalid variable name"
 }
+# ===== SECTION 77: a $NAME runs on across the quotes of a quoted ${v-w} word; redirections alone =====
+# In "${v-w}" (and the -, =, + and ? forms with or without the colon, and in a here-document
+# body) the double quotes of the word are removed before it is expanded, so `"$x"b` reads the
+# name xb; `${x}` still ends at its brace. A command may be redirections alone, or have them
+# before its word: `>&6` with fd 6 closed fails with status 1, `>/dev/null` alone succeeds.
+s77() {
+  local x=abc xb=ZZ xbc=Y x_c=U u v w r h
+  check gl1 "${u:-a"$x"b}|${u:-"$x"_c}|${u:-a"$x"b"c"}|${u:-a"${x}"b}|${u:-a"$x" b}" "aZZ|U|aY|aabcb|aabc b"
+  check gl2 "${u:-'$x"b'}|${u:-"\}"}|${x:+q"$x"b}|${u-"$x""b"}" "'ZZ'|}|qZZ|ZZ"
+  r="${u:-p"$x"b}"; check gl3 "$r|${u:-"$x"b"$x"b}" "pZZ|ZZZZ"
+  while IFS= read -r h; do check gl4 "$h" "aZZ"; done <<EOF
+${u:-a"$x"b}
+EOF
+  { >&6; } 2>/dev/null; check ro1 "$?" 1
+  false; >/dev/null; check ro2 "$?" 0
+  r=$( 2>/dev/null echo two; 2>&1 >/dev/null echo gone; >/dev/null 2>&1; echo "rc=$?" ); check ro3 "${r//$'\n'/,}" "two,rc=0"
+  { >&6 echo x; } 2>/dev/null; check ro4 "$?" 1
+  { >&6 v=6; } 2>/dev/null; check ro5 "$? $v" "1 6"
+  >/dev/null w=5; check ro6 "$w" 5
+  if >/dev/null; then r=ok; else r=no; fi; check ro7 "$r" ok
+}
 # ===== END SECTIONS =====
 
 s47   # SECTION-CALL 47
@@ -1214,5 +1235,6 @@ s73   # SECTION-CALL 73
 s74   # SECTION-CALL 74
 s75   # SECTION-CALL 75
 s76   # SECTION-CALL 76
+s77   # SECTION-CALL 77
 echo "full: $checks checks, $fails failures"
 exit $fails

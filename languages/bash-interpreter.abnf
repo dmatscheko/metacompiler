@@ -207,7 +207,7 @@ PipeOp      = "|" NotBar ;
 // (`echo x | while read l; do ...; done`) and can carry redirections that apply to the
 // whole thing (`while read l; do ...; done < file`, `for x in ...; done <<EOF`). Its
 // {cpd} marker tells makePipeline that, as a stage, it starts outside every loop.
-Command     = CompoundCmd | LetCmd | DeclCommand | PrefixCommand | Assignment | SimpleCommand ;
+Command     = CompoundCmd | LetCmd | DeclCommand | PrefixCommand | Assignment | RedirCommand | SimpleCommand ;
 CompoundCmd <~~ push({cpd: 1}) ~~> = CompoundRedir | Subshell | BraceGroup ;
 CompoundRedir <~~ push(mkRedirected(takeAll())) ~~> = CompoundCore [ RedirList ] ;
 // "((" must be tried before "(" or an arithmetic command parses as nested subshells, which
@@ -285,10 +285,10 @@ DeclName    <~~ push({dname: up.in}) ~~> = Name ;
 // name=value : the = must stick to the name (no surrounding spaces), so the disable
 // (:whitespace()) sits in THIS sequence, right after the identifier. The value is optional
 // (name= is valid) and starts immediately after = with no space.
-// It may carry redirections (`r=$(cmd) 2>/dev/null`): bash performs them after the
-// assignment, so they do not apply to a command substitution on the right hand side.
+// It may carry redirections, before or after (`r=$(cmd) 2>/dev/null`): bash performs them
+// after the assignment, so they do not apply to a command substitution on the right hand side.
 // Several may share one command (`a=1 b=$a`): they run left to right, each seeing the last.
-Assignment  <~~ push(makeAssign(takeAll(), "" + lnPop())) ~~> = AsgOne1 { AsgOne } [ RedirList ] ;
+Assignment  <~~ push(makeAssign(takeAll(), "" + lnPop())) ~~> = [ RedirList ] AsgOne1 { AsgOne } [ RedirList ] ;
 AsgOne1     <~~ lnPush(up.pos) ~~> = AsgOne ;
 AsgOne      <~~ push({a: parseAssign(takeAll())}) ~~>
             = AsgIdent <~~ push({aname: up.in}) ~~> AsgTail ;
@@ -322,6 +322,12 @@ SimpleCommand <~~ push(makeSimpleCommand(takeAll(), "" + lnPop())) ~~>
             = NotReserved FirstWord { CmdSuffix } ;
 FirstWord   <~~ lnPush(up.pos) ~~> = CWord ;
 CmdSuffix   = HereDoc | Redir | CWord ;
+// Redirections BEFORE the command word (`2>/dev/null cmd`), or with no command at all: bash
+// 5.3 performs `>file` alone (status 0) and `>&6` with fd 6 closed fails with status 1.
+// Without a command word this is `:` with the redirections.
+RedirCommand <~~ push(makeSimpleCommand(redirCmdItems(takeAll()), "" + lnPop())) ~~>
+            = RedirFirst { RedirItem } [ NotReserved CWord { CmdSuffix } ] ;
+RedirFirst  <~~ lnPush(up.pos) ~~> = RedirItem ;
 
 // A here-document. Its body lives on the lines after the command line, so it cannot be
 // described by ordinary productions: BsSplice moves each body next to its marker and HdScan
@@ -620,10 +626,24 @@ DqPeIndForm <~~ push({indp: 1}) ~~> = "!" ( PePfxNames | DqPeCore ) ;
 DqPeCore    = PePatForm | PeCaseForm | PeReplForm | PeXform | DqPeOpForm | PeSubstrForm | PePlain ;
 DqPeOpForm  = PeTarget PeOp [ DqBraceWord ] ;
 DqBraceWord <~~ push(mkBraceWord(takeAll())) ~~> = DqBrSeg { DqBrSeg } ;
-DqBrSeg     = DqBrSq | DqSeg | AnsiSeg | DqExpSeg | DqBrEsc | BraceBare ;
+DqBrSeg     = DqBrSq | DqBrDq | AnsiSeg | DqBrGlue | DqExpSeg | DqBrEsc | BraceBare ;
 // Between the two 's a " is still a quote character and is removed:
 // "${u:-'a"b'}" -> 'ab'   "${u:-'a"}"b'}" -> 'a}b'
-DqBrSq      = DqBrQuote { DqExpSeg | DqBrEsc | DqBrSqDq | DqBrSqLit } DqBrQuote ;
+DqBrSq      = DqBrQuote { GlueRef | DqExpSeg | DqBrEsc | DqBrSqDq | DqBrSqLit } DqBrQuote ;
+// The quotes of this word are removed BEFORE it is expanded, so a $NAME runs on across
+// them. bash 5.3, x=abc xb=ZZ:  "${u:-a"$x"b}" -> aZZ   "${u:-'$x"b'}" -> 'ZZ'
+// "${u:-"\}"}" -> }   while "${u:-a"${x}"b}" -> aabcb. GlueRef reads such a name; when
+// it crossed an odd number of quotes (GlueFlip) the parse continues on the other side of
+// an inner "..." (DqBrDqRest is the inside, up to its closing quote).
+DqBrDq      <~~ push(mkDqWord(takeAll())) ~~> = '"' :whitespace() DqBrDqRest ;
+DqBrDqRest  = '"' | GlueRef GlueFlip | ( GlueRef | DqExpSeg | DqBrEsc | DqLit ) DqBrDqRest ;
+DqBrGlue    = GlueRef [ DqBrGlueDq ] ;
+DqBrGlueDq  <~~ push(mkDqWord(takeAll())) ~~> = GlueFlip DqBrDqRest ;
+GlueRef     = "$" :whitespace() GlueName ;
+GlueName    <~~ push(mkVarRef(up.in.split('"').join(""))) ~~>
+            = ( "a"..."z" | "A"..."Z" | "_" ) { GlueNc | GlueQ } ;
+GlueNc      = "a"..."z" | "A"..."Z" | "0"..."9" | "_" ;
+GlueQ       = '"' { '"' } GlueNc ;
 DqBrSqDq    = '"' ;
 DqBrQuote   <~~ push(makeConst("'")) ~~> = "'" ;
 DqBrSqLit   <~~ push(makeConst(up.in)) ~~> = !@+"'\"$\\`" ;
@@ -831,6 +851,21 @@ NotIoRedir = :script(~~
 NotLt = :script(~~
     (function() {
         if (c.peek(0) === 60) { return abnf.newToken("\x01lt", 0) }
+    })()
+~~) ;
+// Succeeds right after a GlueRef that crossed an odd number of quotes: counts the " back
+// to its $.
+GlueFlip = :script(~~
+    (function() {
+        var i = -1
+        var q = 0
+        var cc = c.peek(i)
+        while (cc !== 36 && cc >= 0) {
+            if (cc === 34) { q = q + 1 }
+            i = i - 1
+            cc = c.peek(i)
+        }
+        if (q % 2 === 0) { return abnf.newToken("\x01even", 0) }
     })()
 ~~) ;
 
@@ -4884,6 +4919,21 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return getVarVal(name)
     }
 
+    // A RedirCommand's items in makeSimpleCommand's order: the first word moved to the front
+    // (the redirections keep their order), or `:` when there is none. Twin of redirCmdItems
+    // in bash-to-llvm-ir.abnf.
+    function redirCmdItems(items) {
+        var w = -1
+        var i
+        for (i = items.length - 1; i >= 0; i--) {
+            if (typeof items[i] == "function") { w = i }
+        }
+        var out = [w < 0 ? makeConst(":") : items[w]]
+        for (i = 0; i < items.length; i++) {
+            if (i != w) { out.push(items[i]) }
+        }
+        return out
+    }
     // items[0] is the command word thunk; the rest are argument word thunks and redirections.
     function makeSimpleCommand(items, ln) {
         var cmdT = items[0]
