@@ -2967,10 +2967,10 @@ KwContract  = "contract" KwEnd ;
             }
         }
     }
-    // The argument counts the member methods of each name accept, [min, max] (max -1:
-    // a vararg). A member that cannot take the call's arguments does not hide a
-    // top-level function: resolution moves on to the next level of the tower. Twin of
-    // kMemberArity in kotlin-interpreter.abnf.
+    // The shape of each member method of a name: [min args, max args (-1: a vararg),
+    // parameter names, parameter types, vararg index]. A member that cannot take the
+    // call's arguments does not hide a top-level function: resolution moves on to the
+    // next level of the tower. Twin of kMemberArity in kotlin-interpreter.abnf.
     var memberArity = {}
     function ktNoteMethod(m) {
         classMethodNames["$" + m.name] = true
@@ -2982,21 +2982,62 @@ KwContract  = "contract" KwEnd ;
         }
         var l = memberArity["$" + m.name]
         if (l == undefined) { l = []; memberArity["$" + m.name] = l }
-        l.push([lo, sig.varargAt >= 0 ? 0 - 1 : sig.params.length])
+        l.push([lo, sig.varargAt >= 0 ? 0 - 1 : sig.params.length, sig.params, sig.tys, sig.varargAt])
     }
-    // Whether a call with these arguments can be a member call: some member method of
-    // the name accepts their count (a spread makes the count unknown, so yes), or a
-    // property of the name may hold a function.
-    function ktMemberAccepts(name, args) {
-        if (classPropNames["$" + name] == true) { return true }
+    // The member methods of the name a call with these arguments can be, each as the
+    // run-time type checks that decide whether it is APPLICABLE: [{a: argument
+    // index, ty}] for every argument passed to a parameter of a builtin scalar type.
+    // Empty: no member can take the call. An empty check list: one can, whatever the
+    // values (so can a property of the name, which may hold a function, and any
+    // member when a spread hides the count). Twin of kMemberAccepts in
+    // kotlin-interpreter.abnf.
+    function ktMemberChecks(name, args) {
+        if (classPropNames["$" + name] == true) { return [[]] }
         var n = args.length
-        for (var i = 0; i < args.length; i++) { if (args[i].spread == true) { return true } }
+        for (var i = 0; i < args.length; i++) { if (args[i].spread == true) { return [[]] } }
+        var out = []
         var l = memberArity["$" + name]
-        if (l == undefined) { return false }
+        if (l == undefined) { return out }
         for (var j = 0; j < l.length; j++) {
-            if (n >= l[j][0] && (l[j][1] < 0 || n <= l[j][1])) { return true }
+            if (n < l[j][0] || (l[j][1] >= 0 && n > l[j][1])) { continue }
+            var checks = []
+            var pos = 0
+            var ok = true
+            for (var k = 0; k < args.length; k++) {
+                var at = pos
+                if (args[k].aname == undefined) { pos++ } else { at = l[j][2].indexOf(args[k].aname) }
+                if (at < 0) { ok = false; break }
+                if (at < l[j][3].length && (l[j][4] < 0 || at < l[j][4] || (args[k].aname != undefined && at != l[j][4]))) {
+                    var ty = l[j][3][at]
+                    var bt = ty.charAt(ty.length - 1) == "?" ? ty.substring(0, ty.length - 1) : ty
+                    if (ktScalarTys["$" + bt] == true) { checks.push({a: k, ty: ty}) }
+                }
+            }
+            if (ok) { out.push(checks) }
         }
-        return false
+        return out
+    }
+    var ktScalarTys = {"$String": true, "$Int": true, "$Long": true, "$Short": true, "$Byte": true,
+                       "$Double": true, "$Float": true, "$Boolean": true, "$Char": true}
+    // Whether the argument values vals pass some member's checks (ktMemberChecks): an
+    // i1. An Int passes for Long, Short and Byte, since an integer literal takes the
+    // parameter's type. Twin of kArgFits in kotlin-interpreter.abnf.
+    function emitMemberFit(b, vals, lists) {
+        var any = null
+        for (var j = 0; j < lists.length; j++) {
+            var all = null
+            for (var k = 0; k < lists[j].length; k++) {
+                var ck = lists[j][k]
+                var one = truthy(b, callExt(b, "js_ktis", [vals[ck.a], emitStr(b, ck.ty)]))
+                var bt = ck.ty.charAt(ck.ty.length - 1) == "?" ? ck.ty.substring(0, ck.ty.length - 1) : ck.ty
+                if (bt == "Long" || bt == "Short" || bt == "Byte") {
+                    one = b.NewOr(one, truthy(b, callExt(b, "js_ktis", [vals[ck.a], emitStr(b, "Int")])))
+                }
+                all = all == null ? one : b.NewAnd(all, one)
+            }
+            any = any == null ? all : b.NewOr(any, all)
+        }
+        return any
     }
     // KOTLIN'S SCOPE TOWER PUTS THE IMPLICIT RECEIVERS BETWEEN THE LOCALS AND THE
     // TOP LEVEL: an unqualified `f()` or `p` that a receiver's class declares is that
@@ -3009,13 +3050,15 @@ KwContract  = "contract" KwEnd ;
             && (classMethodNames["$" + name] == true || classPropNames["$" + name] == true)
     }
     // A bare read / write / call of such a name: the receiver arm (rv is the receiver
-    // js_ktrecvof found) or the ordinary one, merged.
-    function emitRecvOr(b, name, iscall, recvArm, plainArm) {
+    // js_ktrecvof found) or the ordinary one, merged. fitV (an i1, or null) must
+    // also hold for the receiver arm.
+    function emitRecvOr(b, name, iscall, recvArm, plainArm, fitV) {
         var rv = callExt(b, "js_ktrecvof", [curScopeV, emitStr(b, name), iscall ? hTrue : hFalse])
         var recvB = curF.NewBlock("")
         var plainB = curF.NewBlock("")
         var mrg = curF.NewBlock("")
-        b.NewCondBr(truthy(b, callExt(b, "js_sne", [rv, hUndef])), recvB, plainB)
+        var found = truthy(b, callExt(b, "js_sne", [rv, hUndef]))
+        b.NewCondBr(fitV == null ? found : b.NewAnd(found, fitV), recvB, plainB)
         var r1 = recvArm(recvB, rv)
         r1.b.NewBr(mrg)
         var r2 = plainArm(plainB)
@@ -3026,13 +3069,13 @@ KwContract  = "contract" KwEnd ;
         if (!ktGlobShadow(name)) { return {b: b, v: b.NewCall(rtKtGet(), [curScopeV, emitStr(b, name)])} }
         return emitRecvOr(b, name, false,
             function(rb, rv) { return {b: rb, v: callExt(rb, "js_ktfget", [rv, emitStr(rb, name)])} },
-            function(pb) { return {b: pb, v: pb.NewCall(rtKtGet(), [curScopeV, emitStr(pb, name)])} })
+            function(pb) { return {b: pb, v: pb.NewCall(rtKtGet(), [curScopeV, emitStr(pb, name)])} }, null)
     }
     function emitBareSet(b, name, v, setter) {
         if (!ktGlobShadow(name)) { b.NewCall(setter, [curScopeV, emitStr(b, name), v]); return b }
         return emitRecvOr(b, name, false,
             function(rb, rv) { callExt(rb, "js_ktset", [rv, emitStr(rb, name), v]); return {b: rb, v: hUndef} },
-            function(pb) { pb.NewCall(setter, [curScopeV, emitStr(pb, name), v]); return {b: pb, v: hUndef} }).b
+            function(pb) { pb.NewCall(setter, [curScopeV, emitStr(pb, name), v]); return {b: pb, v: hUndef} }, null).b
     }
     // Parameter NAME lists by callee name, so a call site can place its named
     // arguments: functions (and lambdas' owners) in funParams, member methods in
@@ -5213,7 +5256,41 @@ KwContract  = "contract" KwEnd ;
     var ktCallSeen = {}
     function makeCallBody(name, args) {
         ktCallSeen["$" + name] = true
-        var plain = function(b) {
+        var plain = makePlainCall(name, args)
+        // A member of an implicit receiver beats a top-level function of the same
+        // name (ktGlobShadow) when it is applicable. When that depends on the
+        // argument types, the arguments are evaluated once, ahead of the test, and
+        // both arms take the values.
+        return function(b) {
+            if (!ktGlobShadow(name)) { return plain(b) }
+            var lists = ktMemberChecks(name, args)
+            if (lists.length == 0) { return plain(b) }
+            var fitAll = false
+            for (var li = 0; li < lists.length; li++) { if (lists[li].length == 0) { fitAll = true } }
+            var cargs = args
+            var fitV = null
+            if (!fitAll) {
+                var vals = []
+                cargs = []
+                for (var ai = 0; ai < args.length; ai++) {
+                    var ar = args[ai].at(b)
+                    b = ar.b
+                    vals.push(ar.v)
+                    cargs.push({at: ktValThunk(ar.v), aname: args[ai].aname, spread: args[ai].spread})
+                }
+                fitV = emitMemberFit(b, vals, lists)
+            }
+            return emitRecvOr(b, name, true, function(rb, rv) {
+                var ma = emitArgs(rb, orderArgs(cargs, paramsFor(name, cargs)))
+                return {b: ma.b, v: callExt(ma.b, "js_ktsmcall", [rv, emitStr(ma.b, name), ma.v])}
+            }, makePlainCall(name, cargs), fitV)
+        }
+    }
+    // An argument already evaluated.
+    function ktValThunk(v) { return function(b) { return {b: b, v: v} } }
+    // A call of a name that no implicit receiver's member takes.
+    function makePlainCall(name, args) {
+        return function(b) {
             // Regex(pattern) / Regex(pattern, options). Kotlin has no regexp literal,
             // so this constructor call IS the literal syntax; the pattern is compiled
             // (and reported on) by js_rxktnew - see abnf/jsrtregexkt.go. A program
@@ -5304,7 +5381,9 @@ KwContract  = "contract" KwEnd ;
                 var ma = emitArgs(b, orderArgs(args, paramsFor(name, args)))
                 return {b: ma.b, v: ma.b.NewCall(rtBareCall(), [curScopeV, emitStr(ma.b, name), ma.v])}
             }
-            if (classNames[name] == 1) {
+            // A top-level function beats a nested class of its name outside that
+            // class's owner, where Kotlin cannot see the class (ktMirrorNested).
+            if (classNames[name] == 1 && !(topFunNames["$" + name] == true && !ktTopType(name) && ktLexType(name) == name)) {
                 var clsV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, name)])
                 var objV = callExt(b, "js_obj_new", [])
                 callExt(b, "js_set", [objV, emitStr(b, "__class"), clsV])
@@ -5354,15 +5433,6 @@ KwContract  = "contract" KwEnd ;
                 })
             }
             return {b: b, v: callExt(b, "js_call", [fV, hUndef, ea.v])}
-        }
-        // A member of an implicit receiver beats a top-level function of the same
-        // name (ktGlobShadow).
-        return function(b) {
-            if (!ktGlobShadow(name) || !ktMemberAccepts(name, args)) { return plain(b) }
-            return emitRecvOr(b, name, true, function(rb, rv) {
-                var ma = emitArgs(rb, orderArgs(args, paramsFor(name, args)))
-                return {b: ma.b, v: callExt(ma.b, "js_ktsmcall", [rv, emitStr(ma.b, name), ma.v])}
-            }, plain)
         }
     }
 
@@ -7563,6 +7633,25 @@ KwContract  = "contract" KwEnd ;
     function makeNestedValue(stmt) {
         return {name: lastDeclaredType, inner: false, asvalue: true, stmt: stmt, rec: lastDeclRec}
     }
+    // A type's nested declarations, bound in its own scope ownV, are mirrored into
+    // the enclosing scope outV - which stands in for the imports this subset drops -
+    // unless a top-level declaration claims the name: Kotlin never resolves a nested
+    // type's bare name outside its owner. Twin of kBindType in kotlin-interpreter.abnf.
+    function ktMirrorNested(b, ownV, outV, nested) {
+        for (var nn = 0; nn < nested.length; nn++) {
+            var nnm = nested[nn].name
+            if (nnm == null || ktTopName(nnm)) { continue }
+            callExt(b, "js_scope_decl", [outV, emitStr(b, nnm), callExt(b, "js_scope_get", [ownV, emitStr(b, nnm)])])
+        }
+    }
+    // Whether a top-level declaration - a type, a fun or a property - binds n.
+    function ktTopName(n) {
+        return topFunNames["$" + n] == true || topValNames["$" + n] == true || ktTopType(n)
+    }
+    function ktTopType(n) {
+        for (var i = 0; i < topClassItems.length; i++) { if (topClassItems[i].name == n) { return true } }
+        return false
+    }
     // The factory the enclosing descriptor exposes under the nested class's name. It is
     // an ordinary callable property, so `Outer.Nested(a)` (memberCall on a descriptor
     // calls the property directly) and `outer.Inner(a)` (memberCall on an INSTANCE
@@ -8041,7 +8130,8 @@ KwContract  = "contract" KwEnd ;
             // A class that declares nested types gets a scope of its own, which its
             // members close over and its nested declarations are bound in: a bare
             // `Inner` inside it is ITS Inner, whatever other Inner the file declares.
-            // The names are mirrored into the enclosing scope at the end as well.
+            // The names are mirrored into the enclosing scope at the end as well
+            // (ktMirrorNested).
             var outerScopeV = curScopeV
             if (parts.nested.length > 0) { curScopeV = callExt(b, "js_scope_new", [outerScopeV]) }
             var savedSuper = emitSuperName
@@ -8082,12 +8172,7 @@ KwContract  = "contract" KwEnd ;
             }
             if (comp != null) { b = emitCompanion(b, clsV, comp, parts.compName) }
             if (parts.nested.length > 0) {
-                for (var nn = 0; nn < parts.nested.length; nn++) {
-                    var nnm = parts.nested[nn].name
-                    if (nnm == null) { continue }
-                    callExt(b, "js_scope_decl", [outerScopeV, emitStr(b, nnm),
-                                                 callExt(b, "js_scope_get", [curScopeV, emitStr(b, nnm)])])
-                }
+                ktMirrorNested(b, curScopeV, outerScopeV, parts.nested)
                 curScopeV = outerScopeV
             }
             return b
@@ -8242,8 +8327,9 @@ KwContract  = "contract" KwEnd ;
             // name (and the enum's own methods) resolve inside the companion's members,
             // which is what Kotlin's scoping says.
             if (parts.companion != null) { b = emitCompanion(b, clsV, parts.companion, parts.compName) }
-            curScopeV = saved
             b = emitNestedList(b, clsV, null, parts.nested, name)
+            ktMirrorNested(b, curScopeV, saved, parts.nested)
+            curScopeV = saved
             return b
         }
     }
@@ -8325,14 +8411,19 @@ KwContract  = "contract" KwEnd ;
             declOpIfConvention(methods[om].name, name)
         }
         return function(b) {
+            // A scope of its own for the nested types, as a class has (makeClassStmt).
+            var outerV = curScopeV
+            if (parts.nested.length > 0) { curScopeV = callExt(b, "js_scope_new", [outerV]) }
             var r = emitObjectInstance(b, name, methods, props, hdr.supers, parts.accprops, parts.memberExts, parts.memberExtProps, parts.memberExtDelegs)
             b = r.b
-            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), r.v])
+            callExt(b, "js_scope_decl", [outerV, emitStr(b, name), r.v])
             // A nested type of an object hangs on the object's DESCRIPTOR, not on the
             // singleton instance: the runtime's memberCall looks a call up the __class
             // chain (which is how Outer.Nested(1) reaches the factory), and js_get on
             // an instance falls through to the same chain for a plain read.
             b = emitNestedList(b, r.cls, r.v, parts.nested, name)
+            ktMirrorNested(b, curScopeV, outerV, parts.nested)
+            curScopeV = outerV
             return b
         }
     }
@@ -8391,8 +8482,14 @@ KwContract  = "contract" KwEnd ;
             callExt(b, "js_set", [clsV, emitStr(b, "__isclass"), hTrue])
             callExt(b, "js_set", [clsV, emitStr(b, "__name"), emitStr(b, name)])
             emitBinName(b, clsV, name)
+            // The interface marker the interpreter half sets too: ktRecvDeclaring in
+            // abnf/jsrtkotlin.go stops its superclass walk at an interface.
+            callExt(b, "js_set", [clsV, emitStr(b, "__isiface"), hTrue])
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), clsV])
             b = emitSuperLinks(b, clsV, hdr.supers, own)
+            // A scope of its own for the nested types, as a class has (makeClassStmt).
+            var outerV = curScopeV
+            if (parts.nested.length > 0) { curScopeV = callExt(b, "js_scope_new", [outerV]) }
             var savedSuper = emitSuperName
             var savedSuperRaw = emitSuperRaw
             emitClassNames.push(name)
@@ -8410,6 +8507,8 @@ KwContract  = "contract" KwEnd ;
             emitSuperName = savedSuper
             emitSuperRaw = savedSuperRaw
             b = emitNestedList(b, clsV, null, parts.nested, name)
+            ktMirrorNested(b, curScopeV, outerV, parts.nested)
+            curScopeV = outerV
             return b
         }
     }

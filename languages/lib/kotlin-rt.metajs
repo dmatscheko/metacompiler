@@ -7003,7 +7003,33 @@ function ktClassLit(name) {
     var o = {}
     o["__kclass"] = true
     o["kname"] = name
+    if (name === "String") { o["jname"] = "java.lang.String" }
+    if (name === "Any") { o["jname"] = "java.lang.Object" }
     return o
+}
+
+// KClass.qualifiedName. Twin of ktKClassFq in abnf/jsrtkotlin.go, which has the
+// rules.
+function ktKClassFq(o) {
+    var jn = o["jname"]
+    if (jn === undefined) {
+        var kn = o["kname"]
+        if (kn === "Int" || kn === "Long" || kn === "Short" || kn === "Byte" || kn === "Double" ||
+            kn === "Float" || kn === "Boolean" || kn === "Char" || kn === "Unit" || kn === "Nothing" ||
+            kn === "Number" || kn === "CharSequence" || kn === "Comparable") { return "kotlin." + kn }
+        return kn
+    }
+    if (jn == "java.lang.String") { return "kotlin.String" }
+    if (jn == "java.lang.Object") { return "kotlin.Any" }
+    if (jn == "java.lang.Throwable") { return "kotlin.Throwable" }
+    var qn = ""
+    var qi = 0
+    while (qi < jn.length) {
+        var qc = jn.charAt(qi)
+        if (qc == "$") { qn = qn + "." } else { qn = qn + qc }
+        qi = qi + 1
+    }
+    return qn
 }
 
 // `javaClass`, and a collection's KClass: a class literal that also carries the JVM
@@ -7114,7 +7140,11 @@ function js_ktctorref(v) {
 // js_ktclasslit(base) is `base::class`.
 function js_ktclasslit(base) {
     if (ktIsObj(base)) {
-        if (typeof base["__kttype"] == "string") { return ktClassLit(base["__kttype"]) }
+        if (typeof base["__kttype"] == "string") {
+            var tn = base["__kttype"]
+            if (ktIsBuiltinExc(tn)) { return ktClassOfDesc(ktExcHierarchy()[tn]) }
+            return ktClassLit(tn)
+        }
         if (base["__isclass"] === true) { return ktClassOfDesc(base) }
     }
     // A collection's KClass is its JVM class. Twin of ktClassOf in
@@ -7126,12 +7156,12 @@ function js_ktclasslit(base) {
     return ktClassLit(k4bSimpleName(base))
 }
 
-// The KClass of a declared type, a NESTED one named by its binary name. Twin of
+// The KClass of a declared type, the java class its binary name names. Twin of
 // ktClassOfDesc in abnf/jsrtkotlin.go, which has the rules.
 function ktClassOfDesc(d) {
     var bn = d["__bname"]
     if (typeof bn == "string") {
-        if (bn.length > 0 && bn.indexOf(".") < 0) { return ktJavaClass(bn) }
+        if (bn.length > 0) { return ktJavaClass(bn) }
     }
     return ktClassLit(d["__name"])
 }
@@ -10275,24 +10305,10 @@ function js_ktfget(o, name) {
         }
     }
     // A KClass. simpleName and qualifiedName agree for a top-level class in the
-    // default package (a java class's qualifiedName is its binary name with "." for
-    // "$"), and .java is the same handle again.
+    // default package (see ktKClassFq), and .java is the same handle again.
     if (ktIsClassLit(o)) {
         if (name == "simpleName") { return o["kname"] }
-        if (name == "qualifiedName") {
-            if (o["jname"] !== undefined) {
-                var jn = o["jname"]
-                var qn = ""
-                var qi = 0
-                while (qi < jn.length) {
-                    var qc = jn.charAt(qi)
-                    if (qc == "$") { qn = qn + "." } else { qn = qn + qc }
-                    qi = qi + 1
-                }
-                return qn
-            }
-            return o["kname"]
-        }
+        if (name == "qualifiedName") { return ktKClassFq(o) }
         if (name == "name") {
             if (o["jname"] !== undefined) { return o["jname"] }
             return o["kname"]
@@ -11461,8 +11477,9 @@ function k6RecvStack(r, name, iscall) {
     }
     return undefined
 }
-// jsrtkotlin.go's ktRecvDeclaring: the instance on v's __outer chain whose class
-// declares `name`, or undefined.
+// jsrtkotlin.go's ktRecvDeclaring: the receiver on v's __outer chain that declares
+// `name` - an instance, else the companion object of its class or of a superclass -
+// or undefined.
 function k6RecvDeclaring(v, name, iscall) {
     var o = anytype
     o = v
@@ -11478,11 +11495,33 @@ function k6RecvDeclaring(v, name, iscall) {
                 if (iscall) {
                     if (ktClsFind(cls, name) !== undefined) { return o }
                 }
+                var d = anytype
+                d = cls
+                var k = 0
+                while (ktIsObj(d) && k < 64) {
+                    if (d["__isiface"] === true) { k = 64 } else {
+                        if (k6CompDeclares(d, name, iscall)) { return d }
+                        d = d["__super"]
+                        k = k + 1
+                    }
+                }
             }
         }
+        if (k6CompDeclares(o, name, iscall)) { return o }
         o = o["__outer"]
     }
     return undefined
+}
+// jsrtkotlin.go's ktCompDeclares, which has the rules.
+function k6CompDeclares(d, name, iscall) {
+    if (d["__isclass"] !== true) { return false }
+    if (k4Own(d, name)) {
+        if (!k4Fn(d[name])) { return true }
+    }
+    if (!iscall) { return false }
+    var holder = d["__class"]
+    if (!ktIsObj(holder)) { return false }
+    return ktClsFind(holder, name) !== undefined
 }
 
 // ----- the two WRITE externs -----

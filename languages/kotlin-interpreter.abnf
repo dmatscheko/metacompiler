@@ -10053,9 +10053,10 @@ NotMemberKw = :script(~~
 
     // ----- Member partitioning -----
     // The member names some class declares, for core.globalHit below: every method
-    // and property name, the property names alone, and the argument counts each
-    // method name accepts as [min, max] (max -1: a vararg). Twin of classMethodNames /
-    // classPropNames / memberArity in kotlin-to-llvm-ir.abnf.
+    // and property name, the property names alone, and per method name the shape of
+    // each method of it: [min args, max args (-1: a vararg), parameter names,
+    // parameter types, vararg index]. Twin of classMethodNames / classPropNames /
+    // memberArity in kotlin-to-llvm-ir.abnf.
     var kMemberNames = {}
     var kMemberProps = {}
     var kMemberArity = {}
@@ -10063,31 +10064,65 @@ NotMemberKw = :script(~~
     function kNoteMethod(m) {
         kMemberNames["$" + m.name] = true
         var lo = 0
-        var va = false
+        var va = 0 - 1
+        var names = []
+        var tys = []
         for (var i = 0; i < m.params.length; i++) {
             var pr = m.params[i]
-            if (typeof pr == "string") { lo++ }
-            else if (pr.vararg) { va = true }
+            if (typeof pr == "string") { lo++; names.push(pr); tys.push(""); continue }
+            names.push(pr.pname)
+            tys.push(pr.ty == undefined ? "" : pr.ty)
+            if (pr.vararg) { va = i }
             else if (pr.def === null || pr.def === undefined) { lo++ }
         }
         var l = kMemberArity["$" + m.name]
         if (l == undefined) { l = []; kMemberArity["$" + m.name] = l }
-        l.push([lo, va ? 0 - 1 : m.params.length])
+        l.push([lo, va >= 0 ? 0 - 1 : m.params.length, names, tys, va])
     }
     function kNoteCtorMembers(cparams) {
         for (var i = 0; i < cparams.length; i++) { if (cparams[i].prop) { kNoteProp(cparams[i].pname) } }
     }
-    // Whether a call of argc arguments (-1: unknown, a spread) can be a member call:
-    // a property of the name may hold a function, or some method of it takes argc.
-    function kMemberAccepts(name, argc) {
+    // Whether a call can be a member call: a property of the name may hold a
+    // function, or some method of it is APPLICABLE - it takes argc arguments (-1:
+    // unknown, a spread) and every argument passed to a parameter of a builtin
+    // scalar type is of that type (kArgFits). Twin of ktMemberChecks / emitMemberFit
+    // in kotlin-to-llvm-ir.abnf.
+    function kMemberAccepts(name, argc, spec) {
         if (kMemberProps["$" + name] === true || argc < 0) { return true }
         var l = kMemberArity["$" + name]
         if (l == undefined) { return false }
         for (var j = 0; j < l.length; j++) {
-            if (argc >= l[j][0] && (l[j][1] < 0 || argc <= l[j][1])) { return true }
+            if (argc >= l[j][0] && (l[j][1] < 0 || argc <= l[j][1]) && kSigFits(l[j], spec)) { return true }
         }
         return false
     }
+    function kSigFits(sig, spec) {
+        for (var i = 0; i < spec.pos.length; i++) {
+            if ((sig[4] < 0 || i < sig[4]) && i < sig[3].length && !kArgFits(spec.pos[i], sig[3][i])) { return false }
+        }
+        if (spec.named == null) { return true }
+        // Every named argument must name a parameter of this method.
+        var hit = 0
+        for (var k = 0; k < sig[2].length; k++) {
+            if (!hasOwn(spec.named, sig[2][k])) { continue }
+            hit++
+            if (k != sig[4] && !kArgFits(spec.named[sig[2][k]], sig[3][k])) { return false }
+        }
+        return hit == spec.nvals.length
+    }
+    // Whether v can be an argument of declared type ty, decided only for the builtin
+    // scalar types (anything else - a class, a generic, a function type - is assumed
+    // to fit). An Int value passes for Long, Short and Byte: an integer literal
+    // takes the parameter's type. Twin of emitMemberFit in kotlin-to-llvm-ir.abnf.
+    function kArgFits(v, ty) {
+        var t = ty
+        if (t.length > 0 && t.charAt(t.length - 1) == "?") { t = t.substring(0, t.length - 1) }
+        if (kScalarTys["$" + t] !== true) { return true }
+        if ((t == "Long" || t == "Short" || t == "Byte") && kIsType(v, "Int")) { return true }
+        return kIsType(v, ty)
+    }
+    var kScalarTys = {"$String": true, "$Int": true, "$Long": true, "$Short": true, "$Byte": true,
+                      "$Double": true, "$Float": true, "$Boolean": true, "$Char": true}
     // The walked members of a class body, split into what each builder needs. The
     // initializers (property initializers AND init blocks) keep their DECLARATION
     // ORDER, because Kotlin runs them in that order.
@@ -10427,6 +10462,23 @@ NotMemberKw = :script(~~
         cls.__companion = obj
     }
 
+    // A declared type is bound under its simple name in globalScope. A NESTED one
+    // only while no top-level declaration claims the name - a later top-level one
+    // replaces it - because Kotlin never resolves a nested type's bare name outside
+    // its owner: inside it kLexClass and the implicit receivers' statics find it,
+    // and the global binding only stands in for the imports this subset drops.
+    var kTopTypes = {}
+    var kNestedTypes = {}
+    function kBindType(name, v) {
+        if (curClassTop() == "") {
+            kTopTypes["$" + name] = true
+            globalScope[name] = v
+            return
+        }
+        kNestedTypes["$" + name] = true
+        if (kTopTypes["$" + name] !== true) { globalScope[name] = v }
+    }
+
     // ----- The class builder -----
     // items = [{mods}, name, {cparams}?, {supers}?, members...]
     function buildClass(items) {
@@ -10468,7 +10520,7 @@ NotMemberKw = :script(~~
             cls.__isinner = true
             cls.__outerName = curClassTop()
         }
-        globalScope[name] = cls
+        kBindType(name, cls)
         // An `inner` class keeps the enclosing instance; NestedType passes the pair up.
         push({nname: name, nval: cls, inner: hasMod(mods, "inner")})
     }
@@ -10693,7 +10745,7 @@ NotMemberKw = :script(~~
         attachCompanion(cls, parts.companion)
         cls.__ctor = function() {}
         cls.__isiface = true
-        globalScope[name] = cls
+        kBindType(name, cls)
         push({nname: name, nval: cls, inner: false})
     }
 
@@ -10734,7 +10786,7 @@ NotMemberKw = :script(~~
         curClassPop()
         var name = items[1]
         var obj = buildSingleton(name, items.slice(2), supersOf(items))
-        globalScope[name] = obj
+        kBindType(name, obj)
         push({nname: name, nval: obj, inner: false})
     }
 
@@ -10765,7 +10817,7 @@ NotMemberKw = :script(~~
         kNoteCtorMembers(cparams)
         cls.__isenum = true
         cls.__ctor = makeCtor(cls, cparams, supersOf(items), parts.inits)
-        globalScope[name] = cls
+        kBindType(name, cls)
         var all = []
         for (var e = 0; e < entries.length; e++) {
             var ent = enumEntryOf(entries[e])
@@ -11039,13 +11091,11 @@ NotMemberKw = :script(~~
     // The types a reference is walked inside (curClasses), null outside every type.
     function kLexAt() { return curClasses.length == 0 ? null : curClasses.slice(0) }
     // The class `name` resolves to inside the types lex, given the descriptor the scope
-    // chain found for it: every nested type is bound under its simple name in
-    // globalScope too, where the last one declared wins, so a nested one of an
-    // enclosing type is looked up through that type instead (kLexType).
+    // chain found for it: the global binding of a name some nested type declares may
+    // be another type of that name (kBindType), so a nested one of an enclosing type
+    // is looked up through that type instead (kLexType).
     function kLexClass(d, name, lex) {
-        var bn = anytype
-        bn = d.__bname
-        if (typeof bn != "string" || bn.indexOf("$") < 0) { return d }
+        if (kNestedTypes["$" + name] !== true) { return d }
         var q = kLexType(name, lex)
         if (q == name) { return d }
         var ld = anytype
@@ -11499,18 +11549,44 @@ NotMemberKw = :script(~~
             d = kQualDesc(n)
             if (d !== undefined && d !== null && typeof d == "object" && d.__isclass === true) { return kClassOfDesc(d) }
         }
+        return kKClass(n)
+    }
+    // The KClass of a type known by its simple name alone. kotlin.String and
+    // kotlin.Any are java.lang.String and java.lang.Object at run time, the classes
+    // their KClass renders. Twin of ktClassLit in abnf/jsrtkotlin.go and
+    // languages/lib/kotlin-rt.metajs.
+    function kKClass(n) {
+        if (n == "String") { return {__kclass: true, kname: n, jname: "java.lang.String"} }
+        if (n == "Any") { return {__kclass: true, kname: n, jname: "java.lang.Object"} }
         return {__kclass: true, kname: n}
     }
-    // The KClass of a declared type. A NESTED one is a java class named by its binary
-    // name (kJavaClass): simpleName `Inner`, qualifiedName `Outer.Inner`, rendered
-    // "class Outer$Inner" - kotlin-stdlib's ClassReference reads all three off the
-    // java class. A builtin throwable's package-qualified __bname is not used. Twin of
-    // ktClassOfDesc in abnf/jsrtkotlin.go and languages/lib/kotlin-rt.metajs.
+    // KClass.qualifiedName: a builtin type's is its kotlin name (kotlin.String,
+    // kotlin.Int, kotlin.Throwable) - kotlin-stdlib's ClassReference maps the java
+    // class - and a java class's otherwise its binary name with "." for "$". Twin of
+    // ktKClassFq in abnf/jsrtkotlin.go and languages/lib/kotlin-rt.metajs.
+    function kKClassFq(o) {
+        var jn = anytype
+        jn = o.jname
+        if (jn === undefined) { return kBuiltinFq["$" + o.kname] === true ? "kotlin." + o.kname : o.kname }
+        if (jn == "java.lang.String") { return "kotlin.String" }
+        if (jn == "java.lang.Object") { return "kotlin.Any" }
+        if (jn == "java.lang.Throwable") { return "kotlin.Throwable" }
+        return jn.split("$").join(".")
+    }
+    var kBuiltinFq = {"$Int": true, "$Long": true, "$Short": true, "$Byte": true, "$Double": true,
+                      "$Float": true, "$Boolean": true, "$Char": true, "$Unit": true, "$Nothing": true,
+                      "$Number": true, "$CharSequence": true, "$Comparable": true}
+    // The KClass of a declared type: the java class its binary name names
+    // (kJavaClass). A nested one has simpleName `Inner`, qualifiedName `Outer.Inner`
+    // and renders "class Outer$Inner"; a builtin throwable's is package-qualified
+    // (java.lang.IllegalStateException) - kotlin-stdlib's ClassReference reads all
+    // three off the java class. Twin of ktClassOfDesc in abnf/jsrtkotlin.go and
+    // languages/lib/kotlin-rt.metajs.
     function kClassOfDesc(d) {
         var bn = anytype
         bn = d.__bname
-        if (typeof bn == "string" && bn != "" && bn.indexOf(".") < 0) { return kJavaClass(bn) }
-        return {__kclass: true, kname: d.__name}
+        if (typeof bn == "string" && bn != "") { return kJavaClass(bn) }
+        return kKClass(d.__name)
     }
     // A collection's KClass is its JVM class (kJavaClass): kotlin-stdlib's
     // ClassReference names a java class by the class itself. Twin of ktClassOf in
@@ -11519,7 +11595,7 @@ NotMemberKw = :script(~~
         var jc = kCollJvmClass(v)
         if (jc != "") { return kJavaClass(jc) }
         if (v !== null && typeof v == "object" && v.__class != undefined && v.__class != null) { return kClassOfDesc(v.__class) }
-        return {__kclass: true, kname: kSimpleName(v)}
+        return kKClass(kSimpleName(v))
     }
     // `javaClass`, and a collection's KClass: a class literal that also carries the
     // JVM binary name jc (jname), which .name and toString answer. simpleName is the
@@ -11856,12 +11932,12 @@ NotMemberKw = :script(~~
             return kGetField(o.obj, o.pname)
         }
         // KClass: simpleName / qualifiedName (a top-level class in the default package
-        // has no package prefix, so the two agree; a java class's is its binary name
-        // with "." for "$") and .java, which is the same handle again - java.lang.Class
-        // renders "class Box" exactly as KClass does.
+        // has no package prefix, so the two agree; see kKClassFq) and .java, which is
+        // the same handle again - java.lang.Class renders "class Box" exactly as KClass
+        // does.
         if (o.__kclass === true) {
             if (name == "name" && o.jname !== undefined) { return o.jname }
-            if (name == "qualifiedName" && o.jname !== undefined) { return o.jname.split("$").join(".") }
+            if (name == "qualifiedName") { return kKClassFq(o) }
             if (name == "simpleName" || name == "qualifiedName" || name == "name") { return o.kname }
             if (name == "java" || name == "javaClass" || name == "javaObjectType") { return o }
             fail("member ." + name + " of a class literal")
@@ -12447,6 +12523,7 @@ NotMemberKw = :script(~~
     var kCallPos = false
     // The call's argument count beside kCallPos (-1 with a spread), for globalHit.
     var kCallArgc = 0
+    var kCallSpec = anytype
 
     // f(args): a global function, a builtin, a class constructor, or an object with an
     // `operator fun invoke`.
@@ -12486,6 +12563,7 @@ NotMemberKw = :script(~~
         for (var i = 0; i < tys.length; i++) { args[i] = kAdoptThunk(args[i], tys[i]) }
     }
     function makeCallBody(name, targs, args, lex) {
+        var nkey = "$" + name
         var argc = args.length
         for (var ai = 0; ai < args.length; ai++) {
             if (typeof args[ai] != "function" && args[ai].spread != undefined) { argc = 0 - 1 }
@@ -12502,9 +12580,13 @@ NotMemberKw = :script(~~
             // varMiss at all and the flag would otherwise survive into the next miss.
             kCallPos = true
             kCallArgc = argc
-            var f = getVar(name)
+            kCallSpec = spec
+            var f = anytype
+            f = getVar(name)
             kCallPos = false
-            if (f != undefined && f !== null && f.__isclass) { return kNew(lex === null ? f : kLexClass(f, name, lex), spec) }
+            // A nested type of an enclosing type beats a top-level function of its name.
+            if (lex !== null && kNestedTypes[nkey] === true) { f = kLexClass(f, name, lex) }
+            if (f != undefined && f !== null && f.__isclass) { return kNew(f, spec) }
             if (typeof f != "function") {
                 // A local holding a callable reference - `val g = b::twice; g()`.
                 if (kIsRef(f)) { return kRefApply(f, spec.pos) }
@@ -12912,8 +12994,10 @@ NotMemberKw = :script(~~
     // scope; a local binding never reaches them. kMemberNames - every name some class
     // declares as a method or property - keeps a top-level name no class shadows at
     // one lookup. Only a receiver that is a class instance is asked, and only for an
-    // own field, an accessor or (in call position) a method; a companion member is
-    // not. Twin of js_ktrecvof in abnf/jsrtkotlin.go and languages/lib/kotlin-rt.metajs.
+    // own field, an accessor or (in call position) a method - its own, else the
+    // companion object's of its class or of a superclass, the next implicit
+    // receivers (not an interface's). Twin of js_ktrecvof in
+    // abnf/jsrtkotlin.go and languages/lib/kotlin-rt.metajs.
     function kRecvOf(name, iscall) {
         var chain = findThisChain()
         for (var ci = 0; ci < chain.length; ci++) {
@@ -12928,20 +13012,38 @@ NotMemberKw = :script(~~
         while (cur != undefined && cur != null && typeof cur == "object") {
             var cls = cur.__class
             if (cls != undefined && cls != null && cls.__isclass === true) {
-                if (hasOwn(cur, name) || typeof clsFind(cls, "get$" + name) == "function") { return cur }
-                if (iscall && typeof clsFind(cls, name) == "function") { return cur }
+                if (kRecvHas(cur, cls, name, iscall)) { return cur }
+                var sc = cls
+                for (var g = 0; g < 64 && sc != null; g++) {
+                    var comp = sc.__companion
+                    if (comp != undefined && comp != null && kRecvHas(comp, comp.__class, name, iscall)) { return comp }
+                    sc = firstClassParent(sc)
+                }
             }
             cur = hasOwn(cur, "__outer") ? cur.__outer : null
         }
         return null
     }
+    function kRecvHas(o, cls, name, iscall) {
+        if (hasOwn(o, name) || typeof clsFind(cls, "get$" + name) == "function") { return true }
+        return iscall && typeof clsFind(cls, name) == "function"
+    }
     core.globalHit = function(name) {
+        // A nested type's global binding (kBindType) ranks below the implicit
+        // receivers, whose statics - an enum's entries, the owner's own nested types -
+        // answer a bare name first.
+        if (kNestedTypes["$" + name] === true) {
+            var pos = kCallPos
+            var h = core.varMiss(name)
+            if (h != null) { return h }
+            kCallPos = pos
+        }
         if (kMemberNames["$" + name] !== true) { return null }
         var iscall = kCallPos
         kCallPos = false
         // A member method that cannot take the call's arguments does not hide the
         // top-level function: resolution moves on to the next level.
-        if (iscall && !kMemberAccepts(name, kCallArgc)) { return null }
+        if (iscall && !kMemberAccepts(name, kCallArgc, kCallSpec)) { return null }
         var r = kRecvOf(name, iscall)
         if (r == null) { return null }
         if (hasOwn(r, name)) { return {v: kLateinitCheck(r, name, r[name])} }

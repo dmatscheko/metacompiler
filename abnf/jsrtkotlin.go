@@ -2224,6 +2224,10 @@ func init() {
 		m["js_ktclasslit"] = func(a []uint64) uint64 {
 			base := u(a[0])
 			if tn, isType := base.(ktTypeName); isType {
+				// A builtin throwable's is the java class (ktClassOfDesc).
+				if ktIsBuiltinExc(tn.name) {
+					return w(ktClassOfDesc(ktExcHierarchy()[tn.name]))
+				}
 				return w(ktClassLit(tn.name))
 			}
 			if o, isObj := base.(*jsObject); isObj {
@@ -2925,8 +2929,8 @@ func init() {
 				}
 			}
 			// A KClass. simpleName and qualifiedName agree for a top-level class in
-			// the default package (a java class's qualifiedName is its binary name
-			// with "." for "$"), and .java is the same handle again.
+			// the default package (see ktKClassFq), and .java is the same handle
+			// again.
 			if co, isCls := ktIsClassLit(o); isCls {
 				switch name {
 				case "name":
@@ -2935,10 +2939,7 @@ func init() {
 					}
 					return w(co.props["kname"])
 				case "qualifiedName":
-					if jn, has := co.props["jname"].(string); has {
-						return rt.wrapStr(strings.ReplaceAll(jn, "$", "."))
-					}
-					return w(co.props["kname"])
+					return w(ktKClassFq(co))
 				case "simpleName":
 					return w(co.props["kname"])
 				case "java", "javaClass", "javaObjectType":
@@ -4304,8 +4305,10 @@ func ktHasMethod(v interface{}, name string) bool {
 	return false
 }
 
-// ktRecvDeclaring is the instance on v's __outer chain whose class declares `name`
-// (see js_ktrecvof), or nil. Twin of kRecvDeclaring in kotlin-interpreter.abnf.
+// ktRecvDeclaring is the receiver on v's __outer chain that declares `name` (see
+// js_ktrecvof) - an instance, else the companion object of its class or of a
+// superclass - or nil. Twin of
+// kRecvDeclaring in kotlin-interpreter.abnf.
 func (rt *jsrt) ktRecvDeclaring(v interface{}, name string, iscall bool) *jsObject {
 	for g := 0; g < 64; g++ {
 		o, isObj := v.(*jsObject)
@@ -4323,11 +4326,45 @@ func (rt *jsrt) ktRecvDeclaring(v interface{}, name string, iscall bool) *jsObje
 				if iscall && ktClsFind(cls, name) != nil {
 					return o
 				}
+				// The companion of the class, else of a superclass (an interface's
+				// companion is not an implicit receiver of its implementations).
+				for d, k := cls, 0; d != nil && k < 64; k++ {
+					if isf, _ := d.props["__isiface"].(bool); isf {
+						break
+					}
+					if ktCompDeclares(d, name, iscall) {
+						return d
+					}
+					d, _ = d.props["__super"].(*jsObject)
+				}
 			}
+		}
+		// The descriptor itself is `this` inside a companion's own members.
+		if ktCompDeclares(o, name, iscall) {
+			return o
 		}
 		v = o.props["__outer"]
 	}
 	return nil
+}
+
+// ktCompDeclares reports whether the companion object of class descriptor d
+// declares `name`: the emitter puts a companion's properties on the descriptor
+// itself and its methods on the holder the descriptor's __class points at (see
+// emitCompanion in kotlin-to-llvm-ir.abnf); a descriptor's own callable slots are
+// the instance methods and constructor factories, never a companion property.
+func ktCompDeclares(d *jsObject, name string, iscall bool) bool {
+	if isc, _ := d.props["__isclass"].(bool); !isc {
+		return false
+	}
+	if v, own := d.props[name]; own && !isCallable(v) {
+		return true
+	}
+	if !iscall {
+		return false
+	}
+	holder, has := d.props["__class"].(*jsObject)
+	return has && ktClsFind(holder, name) != nil
 }
 
 // ktClsFind walks a descriptor's __super chain for a callable member.
@@ -10112,12 +10149,48 @@ func ktSimpleName(v interface{}) interface{} {
 
 // ktClassLit is `x::class` / `Type::class`. A KClass renders "class Box", and so
 // does java.lang.Class - which is why .java answers the same handle here.
+// kotlin.String and kotlin.Any are java.lang.String and java.lang.Object at run
+// time, the classes their KClass renders. Twin of kKClass in
+// kotlin-interpreter.abnf.
 func ktClassLit(name interface{}) *jsObject {
 	o := newJSObject()
 	o.set("__kclass", true)
 	o.set("kname", name)
+	switch name {
+	case "String":
+		o.set("jname", "java.lang.String")
+	case "Any":
+		o.set("jname", "java.lang.Object")
+	}
 	return o
 }
+
+// ktKClassFq is KClass.qualifiedName: a builtin type's is its kotlin name
+// (kotlin.String, kotlin.Int, kotlin.Throwable) - kotlin-stdlib's ClassReference
+// maps the java class - and a java class's otherwise its binary name with "." for
+// "$". Twin of kKClassFq in kotlin-interpreter.abnf.
+func ktKClassFq(o *jsObject) interface{} {
+	jn, has := o.props["jname"].(string)
+	if !has {
+		if kn, isStr := o.props["kname"].(string); isStr && ktBuiltinFq[kn] {
+			return "kotlin." + kn
+		}
+		return o.props["kname"]
+	}
+	switch jn {
+	case "java.lang.String":
+		return "kotlin.String"
+	case "java.lang.Object":
+		return "kotlin.Any"
+	case "java.lang.Throwable":
+		return "kotlin.Throwable"
+	}
+	return strings.ReplaceAll(jn, "$", ".")
+}
+
+var ktBuiltinFq = map[string]bool{"Int": true, "Long": true, "Short": true, "Byte": true,
+	"Double": true, "Float": true, "Boolean": true, "Char": true, "Unit": true,
+	"Nothing": true, "Number": true, "CharSequence": true, "Comparable": true}
 
 // ktClassOf is `v::class`. A collection's KClass is its JVM class (ktJavaClass):
 // kotlin-stdlib's ClassReference names a java class by the class itself. Twin of
@@ -10135,11 +10208,12 @@ func ktClassOf(v interface{}) *jsObject {
 	return ktClassLit(ktSimpleName(v))
 }
 
-// ktClassOfDesc is the KClass of a declared type: a NESTED one is the java class
-// its binary name names (simpleName Inner, qualifiedName Outer.Inner, "class
-// Outer$Inner"). Twin of kClassOfDesc in kotlin-interpreter.abnf.
+// ktClassOfDesc is the KClass of a declared type: the java class its binary name
+// names (a nested one: simpleName Inner, qualifiedName Outer.Inner, "class
+// Outer$Inner"; a builtin throwable's is package-qualified). Twin of kClassOfDesc
+// in kotlin-interpreter.abnf.
 func ktClassOfDesc(d *jsObject) *jsObject {
-	if bn, ok := d.props["__bname"].(string); ok && bn != "" && !strings.Contains(bn, ".") {
+	if bn, ok := d.props["__bname"].(string); ok && bn != "" {
 		return ktJavaClass(bn)
 	}
 	return ktClassLit(d.props["__name"])

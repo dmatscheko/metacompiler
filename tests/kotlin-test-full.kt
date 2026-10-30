@@ -6083,9 +6083,12 @@ fun sec134() {
 // inner class's outer instance included), then the top level - so inside a member
 // an unqualified call, read or write of a name the receiver's class declares is the
 // member, a top-level `fun` / `val` / `var` of the same name notwithstanding - unless
-// no member of that name takes the call's argument count, when resolution moves on
-// to the top level. Spec only (the Kotlin specification, "Linked scopes" and "Call
-// without an explicit receiver"); no kotlinc on this machine.
+// no member of that name is applicable to the call (its argument count, the names of
+// its named arguments, the types of its arguments), when resolution moves on to the
+// top level. Spec only (the Kotlin specification, "Linked scopes" and "Call without
+// an explicit receiver"); no kotlinc on this machine. The companion objects of a
+// class and of its superclasses (not of an interface) are the implicit receivers
+// after the instance, so their members hide a top-level declaration too.
 fun pick135() = 9
 fun span135(vararg xs: Int) = xs.size
 val tag135 = "top"
@@ -6104,6 +6107,41 @@ class B135 {
     inner class I { fun t() = "" + pick135() + cnt135 }
 }
 class C135 { fun t() = "" + pick135() + tag135 + cnt135 }
+fun log135(s: String) = "top:$s"
+fun wide135(x: String) = "t$x"
+fun opt135(x: Int) = "i$x"
+var ev135 = 0
+fun nx135(): String { ev135++; return "e" }
+class L135 {
+    fun log135(a: Int, b: Int = 1) = "mem:${a + b}"
+    fun wide135(x: Long) = "m$x"
+    fun opt135(x: String?) = "s$x"
+    fun logs(): String {
+        val s = "v"
+        return log135("hi") + " " + log135(5) + " " + log135(s) + " " + log135(b = 2, a = 3) + " " + log135(s = "n")
+    }
+    fun wides() = wide135(7) + wide135("q") + opt135(null) + opt135(3) + opt135("z")
+    fun once() = log135(nx135()) + ev135
+}
+fun make135() = "top"
+val lim135 = 1
+var cnt135b = 100
+class K135 {
+    companion object {
+        fun make135() = "comp"
+        val lim135 = 2
+        var cnt135b = 0
+        fun inner() = make135() + lim135
+    }
+    fun t() = make135() + lim135
+    fun bump(): Int { cnt135b++; cnt135b += 5; return cnt135b }
+    inner class I { fun t() = make135() + lim135 }
+}
+interface Ic135 { companion object { fun make135() = "ifc" } }
+open class B0135 { companion object { fun make135() = "b0" } }
+open class B1135 : B0135()
+class B2135 : B1135(), Ic135 { fun t() = make135() }
+class Ai135 : Ic135 { fun t() = make135() }
 fun sec135() {
     check("recv135a", A135().g() == 11)
     val b = B135()
@@ -6113,6 +6151,12 @@ fun sec135() {
     check("recv135e", C135().t() == "9top1000")
     check("recv135f", with(b) { "" + pick135() + tag135 } == "2getter")
     check("recv135g", b.spans() == "2300")
+    check("recv135h", L135().logs() == "top:hi mem:6 top:v mem:5 top:n")
+    check("recv135i", L135().wides() == "m7tqsnulli3sz")
+    check("recv135j", L135().once() == "top:e1")
+    check("recv135k", K135().t() + K135.inner() + K135().I().t() == "comp2comp2comp2")
+    check("recv135l", K135().bump() == 6 && cnt135b == 100 && K135.cnt135b == 6)
+    check("recv135m", B2135().t() + Ai135().t() == "b0top")
 }
 
 // ===== SECTION 136: nested classes - KClass names, named constructor arguments =====
@@ -6142,6 +6186,59 @@ fun sec136() {
     check("nest136a", N136a.In(b = 1, a = 2).s() == "a2 b1" && N136a().mk() == "a4 b3")
     check("nest136b", N136b.In(d = 7, c = 8).s() == "c8 d7" && N136b().mk() == "c6 d5")
     check("nest136c", N136a().R136(y = 1, x = 2).s() == "x2 y1")
+}
+
+// ===== SECTION 137: a nested type's name is not a top-level name =====
+// Outside its owner a nested type is reached only qualified, so a bare name there is
+// the top-level declaration of it - a class, a fun or a val - wherever either is
+// declared; inside the owner (and inside a type nested in it) the nested type wins,
+// and an enum's entries win inside the enum. Spec only (the Kotlin specification,
+// "Declarations" / "Linked scopes"); no kotlinc on this machine.
+class In137(val x: Int) { override fun toString() = "top$x" }
+class O137 {
+    class In137(val y: Int) { override fun toString() = "O$y" }
+    class Sib { fun mk() = In137(7) }
+    fun mk() = In137(5)
+}
+enum class Col137 { N, S; fun flip() = if (this == N) S else N }
+class H137 { class N { override fun toString() = "HN" }; fun mk() = N() }
+object Ob137 { class S { override fun toString() = "ObS" }; fun mk() = S() }
+interface If137 { class Item137 { override fun toString() = "IfItem" }; fun mk() = Item137() }
+class Impl137 : If137
+enum class E137 { X; class Item137 { override fun toString() = "EItem" }; fun mk() = Item137() }
+val Item137 = "topval"
+class A137 { class Leaf137(val v: Int) { override fun toString() = "L$v" }; class Sib { fun mk() = Leaf137(9) }; fun mk() = Leaf137(1) }
+fun Leaf137(v: Int) = "fun$v"
+fun sec137() {
+    check("nest137a", "${In137(1)} ${O137.In137(2)} ${O137().mk()} ${O137.Sib().mk()}" == "top1 O2 O5 O7")
+    val z: Any = In137(3)
+    check("nest137b", "$z" == "top3" && z is In137 && z::class.simpleName == "In137")
+    check("nest137c", "${Col137.N.flip()}${Col137.S.flip()} ${H137().mk()} ${Ob137.mk()}" == "SN HN ObS")
+    check("nest137d", "${Impl137().mk()} ${E137.X.mk()} $Item137" == "IfItem EItem topval")
+    check("nest137e", "${A137().mk()} ${A137.Sib().mk()} ${Leaf137(2)}" == "L1 L9 fun2")
+}
+
+// ===== SECTION 138: KClass names of builtin types =====
+// Read off kotlin-stdlib 2.2.21 under JDK 24 (Reflection.getOrCreateKotlinClass(c)
+// .getSimpleName() / .getQualifiedName() / toString()): a builtin throwable's KClass
+// is its java class (java.lang.IllegalStateException, java.util.NoSuchElementException,
+// kotlin.NotImplementedError), Throwable's qualifiedName is kotlin.Throwable, and a
+// builtin type's is its kotlin name (kotlin.String, kotlin.Int, kotlin.Any). The
+// real toString adds " (Kotlin reflection is not available)", which this
+// implementation does not print.
+fun sec138() {
+    val e: Any = IllegalStateException("x")
+    check("kcls138a", "${e::class.qualifiedName} ${e::class.simpleName} ${e::class.java.name}" ==
+        "java.lang.IllegalStateException IllegalStateException java.lang.IllegalStateException")
+    check("kcls138b", IllegalStateException::class.qualifiedName == "java.lang.IllegalStateException" &&
+        IllegalStateException::class == e::class && "${e::class}" == "class java.lang.IllegalStateException")
+    check("kcls138c", "${NoSuchElementException()::class.qualifiedName} ${NotImplementedError()::class.qualifiedName} ${Throwable::class.qualifiedName}" ==
+        "java.util.NoSuchElementException kotlin.NotImplementedError kotlin.Throwable")
+    val s: Any = "abc"
+    check("kcls138d", "${String::class.qualifiedName} ${String::class.simpleName} ${String::class} ${s::class.qualifiedName}" ==
+        "kotlin.String String class java.lang.String kotlin.String" && s::class == String::class)
+    check("kcls138e", "${Int::class.qualifiedName} ${5::class.qualifiedName} ${Any::class.qualifiedName} ${Char::class.qualifiedName}" ==
+        "kotlin.Int kotlin.Int kotlin.Any kotlin.Char")
 }
 
 fun main() {
@@ -6277,6 +6374,8 @@ fun main() {
     sec134() // SECTION-CALL 134
     sec135() // SECTION-CALL 135
     sec136() // SECTION-CALL 136
+    sec137() // SECTION-CALL 137
+    sec138() // SECTION-CALL 138
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }
