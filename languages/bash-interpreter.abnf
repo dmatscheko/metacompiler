@@ -207,7 +207,7 @@ PipeOp      = "|" NotBar ;
 // (`echo x | while read l; do ...; done`) and can carry redirections that apply to the
 // whole thing (`while read l; do ...; done < file`, `for x in ...; done <<EOF`). Its
 // {cpd} marker tells makePipeline that, as a stage, it starts outside every loop.
-Command     = CompoundCmd | LetCmd | DeclCommand | PrefixCommand | Assignment | RedirCommand | SimpleCommand ;
+Command     = CompoundCmd | LetCmd | DeclCommand | PrefixDecl | PrefixCommand | Assignment | RedirCommand | SimpleCommand ;
 CompoundCmd <~~ push({cpd: 1}) ~~> = CompoundRedir | Subshell | BraceGroup ;
 CompoundRedir <~~ push(mkRedirected(takeAll())) ~~> = CompoundCore [ RedirList ] ;
 // "((" must be tried before "(" or an arithmetic command parses as nested subshells, which
@@ -224,8 +224,12 @@ PrefixCommand <~~ push(makePrefixCmd(takeAll(), "" + lnPop())) ~~>
             = { RedirItem } AsgPrefix1 { AsgPrefix | RedirItem } NotIoRedir NotReserved CWord { CmdSuffix } ;
 AsgPrefix1  <~~ lnPush(up.pos) ~~> = AsgPrefix ;
 AsgPrefix   <~~ push(mkPrefixAsg(takeAll())) ~~>
-            = AsgIdent <~~ push({aname: up.in}) ~~> :whitespace() AsgEq :whitespace() [ NsWord ] ;
+            = AsgIdent <~~ push({aname: up.in}) ~~> :whitespace() AsgPOp :whitespace() [ NsWord ] ;
+AsgPOp      <~~ push({pop: up.in}) ~~> = "+=" | AsgEq ;
 AsgEq       = "=" ;
+// NAME=VALUE... before a declaration builtin (makePrefixDecl has the rules).
+PrefixDecl  <~~ push(makePrefixDecl(takeAll(), "" + lnPop())) ~~>
+            = AsgPrefix1 { AsgPrefix } DeclKw { DeclFlag } { DeclItem } [ RedirList ] ;
 
 // ( LIST ) runs in a copy of the shell: variable changes and `exit` stay inside.
 Subshell    <~~ push(makeSubshellR(takeAll())) ~~> = "(" CompoundList ")" [ RedirList ] ;
@@ -1496,6 +1500,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         upVars["$" + e.name] = e.au
         loVars["$" + e.name] = e.al
         dclVars["$" + e.name] = e.ad
+        roVars["$" + e.name] = e.ar
         if (e.hasArr) { arrs[arrKey(e.name)] = e.arr } else { arrs[arrKey(e.name)] = null }
     }
     // `unset NAME` where NAME is a local of a CALLER: bash removes that caller's local
@@ -1503,20 +1508,37 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // h(){ local g=5; f; echo $g; }` prints 1). The innermost frame holding NAME loses it as
     // a whole - a name declared local twice there restores its FIRST saved value - and its
     // entries are dropped so that frame's return does not restore over later writes.
-    // Answers false when no caller frame holds NAME. Twin of rt_unset_up in bash-rt.c.
+    // Answers false when no caller frame holds NAME. The running call's own prefix binding
+    // of NAME (`x=5 f`), unless f made it local, goes the same way (tmpHere). Twin of
+    // rt_unset_up in bash-rt.c.
     function unsetCallerLocal(name) {
         var j
+        if (tmpHere(name)) { return dropFrameName(localFrames.length - 1, name) }
         for (j = localFrames.length - 2; j >= 0; j--) {
-            var fr = localFrames[j]
-            var keep = []
-            var first = null
-            var i
-            for (i = 0; i < fr.length; i++) {
-                if (fr[i].name != name) { keep.push(fr[i]) }
-                else if (first == null) { first = fr[i] }
-            }
-            if (first != null) { restoreLocal(first); localFrames[j] = keep; return true }
+            if (dropFrameName(j, name)) { return true }
         }
+        return false
+    }
+    function dropFrameName(j, name) {
+        var fr = localFrames[j]
+        var keep = []
+        var first = null
+        var i
+        for (i = 0; i < fr.length; i++) {
+            if (fr[i].name != name) { keep.push(fr[i]) }
+            else if (first == null) { first = fr[i] }
+        }
+        if (first == null) { return false }
+        restoreLocal(first)
+        localFrames[j] = keep
+        return true
+    }
+    // Is NAME a prefix binding of the running call that no `local` has claimed?
+    function tmpHere(name) {
+        if (localFrames.length == 0) { return false }
+        var fr = localFrames[localFrames.length - 1]
+        var i
+        for (i = 0; i < fr.length; i++) { if (fr[i].name == name) { return fr[i].tmp == true && fr[i].loc != true } }
         return false
     }
     // Record NAME's current binding in the innermost call frame, so it is restored on return.
@@ -1533,9 +1555,26 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var hadA = hasOwn(arrs, ak) && arrs[ak] != null
         fr.push({name: name, had: isSetVar(name), val: getVarVal(name),
                  ai: attrOn(intVars, name), au: attrOn(upVars, name), al: attrOn(loVars, name),
-                 ad: attrOn(dclVars, name), hasArr: hadA, arr: hadA ? arrCopy(arrs[ak]) : {assoc: false, keys: [], vals: {}, gone: {}, lit: false, decl: false}})
+                 ad: attrOn(dclVars, name), ar: attrOn(roVars, name), hasArr: hadA, arr: hadA ? arrCopy(arrs[ak]) : {assoc: false, keys: [], vals: {}, gone: {}, lit: false, decl: false}})
     }
 
+    // Is NAME's visible binding a prefix binding of a function call (applyPrefix)? The
+    // innermost frame holding NAME holds the binding in effect. Twin of rt_tmp_vis in bash-rt.c.
+    function tmpVisible(name) {
+        var j
+        for (j = localFrames.length - 1; j >= 0; j--) {
+            var fr = localFrames[j]
+            var i
+            for (i = fr.length - 1; i >= 0; i--) { if (fr[i].name == name) { return fr[i].tmp == true } }
+        }
+        return false
+    }
+    // A `local` of the running call's prefix binding makes it an ordinary local (tmpHere).
+    function claimLocal(name) {
+        var fr = localFrames[localFrames.length - 1]
+        var i
+        for (i = 0; i < fr.length; i++) { if (fr[i].name == name) { fr[i].loc = true } }
+    }
     // Is NAME a local of the INNERMOST call frame?
     function localHere(name) {
         if (localFrames.length == 0) { return false }
@@ -2119,6 +2158,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         upVars["$" + name] = false
         loVars["$" + name] = false
         dclVars["$" + name] = false
+        roVars["$" + name] = false
     }
     // ${!prefix*} / ${!prefix@}: the set variable names with that prefix, sorted.
     //     $ Zq=1; Zw=2; echo "${!Z*}"   ->  Zq Zw
@@ -2761,6 +2801,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // the name a fresh unset local.
         var query = (flags.indexOf("p") >= 0) || (flags.indexOf("f") >= 0) || (flags.indexOf("F") >= 0)
         var isPrint = (flags.indexOf("p") >= 0) && (flags.indexOf("f") < 0) && (flags.indexOf("F") < 0)
+        var setRo = kw == "readonly" || flags.indexOf("r") >= 0
+        // A readonly name the declaration would assign or make local is refused (status 1).
+        var roFail = false
         // One name: its attributes, then its value (v, or the assignment's own literal).
         var declOne = function(k, v) {
             // WHICH KEYWORDS ARE LOCAL. bash 5.3: `local`, `declare` and `typeset` inside a
@@ -2770,6 +2813,12 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // A second `local` of a name in the same call keeps its value, array and
             // attributes (bash 5.3: f() { local a=5; local a; echo $a; } prints 5).
             var fresh = localize && !localHere(names[k])
+            if ((asgs[k] != null || fresh) && roRefused(names[k], (kw == "readonly" || kw == "export") ? "" : kw + ": ")) { roFail = true; return }
+            if (localize && !fresh) { claimLocal(names[k]) }
+            // A bare `local x` whose visible x is a caller's prefix binding (`x=5 f`)
+            // starts from that value, bash 5.3; any other starts unset.
+            var inherit = fresh && asgs[k] == null && tmpVisible(names[k])
+            var inhV = inherit ? getVarVal(names[k]) : ""
             touchState(names[k])
             if (fresh) {
                 declareLocal(names[k])
@@ -2795,7 +2844,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 if (isArray) { arrNew(names[k], assoc) }
                 if (asgs[k].lit != null) { runAssign(asgs[k], assoc) } else { runAssignV(asgs[k], assoc, v) }
             }
+            else if (inherit) { setVarVal(names[k], inhV) }
             else if (fresh) { unsetVar(names[k]) }
+            if (setRo) { roVars["$" + names[k]] = true }
             if (asgs[k] == null && !isArray && kw != "export" && kw != "readonly") { dclVars["$" + names[k]] = true }
         }
         // The expanded values, one array per running declaration: the expansion of a value can
@@ -2824,8 +2875,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             }
             var ab = takeAbort()
             if (ab != null) { return ab }
-            setStatus(0)
-            return 0
+            var st = roFail ? 1 : 0
+            roFail = false
+            setStatus(st)
+            return st
         }
         var run = body
         if (redirs.length > 0) {
@@ -3288,6 +3341,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // `declare -- x`. So does a local unset in the frame that declared it - bash keeps the
     // local binding, unset, until the function returns.
     var dclVars = {}
+    // `readonly` / -r: an assignment, a `local` or an `unset` of the name fails (roRefused).
+    var roVars = {}
     // An attribute map holds FALSE for a name whose attribute was dropped - by `unset`, or by
     // a call frame unwinding a `local` - so membership alone is not the answer.
     function attrOn(m, name) {
@@ -3317,7 +3372,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var ak = arrKey(nm)
             var hadA = hasOwn(arrs, ak) && arrs[ak] != null
             out.push({hasArr: hadA, arr: hadA ? arrCopy(arrs[ak]) : {assoc: false, keys: [], vals: {}, gone: {}, lit: false, decl: false},
-                      ai: attrOn(intVars, nm), au: attrOn(upVars, nm), al: attrOn(loVars, nm), ad: attrOn(dclVars, nm)})
+                      ai: attrOn(intVars, nm), au: attrOn(upVars, nm), al: attrOn(loVars, nm), ad: attrOn(dclVars, nm),
+                      ar: attrOn(roVars, nm)})
         }
         return out
     }
@@ -3330,6 +3386,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             upVars["$" + nm] = snap[i].au
             loVars["$" + nm] = snap[i].al
             dclVars["$" + nm] = snap[i].ad
+            roVars["$" + nm] = snap[i].ar
         }
         // A name FIRST SEEN inside the subshell has no saved entry, and leaving it is
         // the same leak the other way round: `( declare -A m=([z]=1) )` must not leave m
@@ -4845,7 +4902,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             cmdSubRan = false
             var k
             for (k = 0; k < as.length; k++) {
-                runAssign(as[k], false)
+                // A readonly name abandons the command line, as an arithmetic error does.
+                if (roRefused(as[k].name, "")) { abortSignal = {ret: 1, isExit: 1, soft: 1} }
+                else { runAssign(as[k], false) }
                 var ab = takeAbort()
                 if (ab != null) { return ab }
             }
@@ -4857,6 +4916,13 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             }
             return lastStatus
         }
+    }
+    // Is NAME readonly? Then says so (`bash: [who]NAME: readonly variable`). Twin of roRefused
+    // in bash-to-llvm-ir.abnf.
+    function roRefused(name, who) {
+        if (!attrOn(roVars, name)) { return false }
+        emitErr("bash: " + who + name + ": readonly variable\n")
+        return true
     }
     // An error an expansion raised, taken before the command runs. set -u and ${v:?} end the
     // (sub)shell; an arithmetic or substring error ({soft}) abandons the command line - a
@@ -4965,7 +5031,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // (`x=1; x=2 echo $x` prints 1), and before the redirections.
             var saved = noPrefix
             if (asgs != null) {
-                saved = applyPrefix(asgs, all.length > 0)
+                saved = applyPrefix(asgs, all.length > 0, all.length > 0 && hasOwn(funcs, "$" + all[0]))
                 var ab3 = takeAbort()
                 if (ab3 != null) { restorePrefix(saved); return ab3 }
             }
@@ -4978,7 +5044,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             for (k = 1; k < all.length; k++) { args.push(all[k]) }
             var st = anytype
             if (redirs.length == 0) {
-                st = runCommand(cmd, args)
+                st = runPrefixed(cmd, args, saved)
                 if (asgs != null) { restorePrefix(saved) }
                 return st
             }
@@ -4992,28 +5058,55 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // effect until the ( ) or $( ) around it ends. Twin of the exec arm of
             // makeSimpleCommand in bash-to-llvm-ir.abnf.
             if (cmd == "exec" && args.length == 0) { restorePrefix(saved); setStatus(0); return 0 }
-            st = runCommand(cmd, args)
+            st = runPrefixed(cmd, args, saved)
             closeRedirs(rs)
             if (asgs != null) { restorePrefix(saved) }
             return st
         }
     }
     var noPrefix = []
+    // A function run under prefix bindings takes their frame (applyPrefix) as its own: bash
+    // merges the temporary environment into the function's local scope, so a `local` of such
+    // a name there is the same binding (keeps its value, and a callee's `local` inherits it).
+    var adoptFrame = false
+    function runPrefixed(cmd, args, saved) {
+        adoptFrame = saved.length > 0 && saved[0].tmp == true
+        var st = anytype
+        st = runCommand(cmd, args)
+        adoptFrame = false
+        return st
+    }
     // Performs the prefix assignments left to right, each seeing the ones before it. With
     // undo, answers what restorePrefix needs to put the names back after the command - which
     // is all a function or builtin that assigns the same name changes (`x=5 read x` leaves x
     // as it was). Twin of the asgs arm of makeSimpleCommand in bash-to-llvm-ir.abnf.
-    function applyPrefix(asgs, undo) {
+    function applyPrefix(asgs, undo, frame) {
         var saved = []
         var k
         for (k = 0; k < asgs.length; k++) {
             var nm = asgs[k].aname
             var v = (asgs[k].val != null) ? wordJoin(asgs[k].val()) : ""
+            if (asgs[k].op == "+=") { v = getVarVal(nm) + v }
+            // A readonly name keeps its value; the command still runs.
+            if (roRefused(nm, "")) { continue }
             if (!undo) { storeAttr(nm, v); continue }
-            saved.push({name: nm, had: isSetVar(nm), val: getVarVal(nm)})
-            // A binding for the command takes no attributes: with `declare -u U`, `U=b f`
-            // hands f "b".
+            if (frame) {
+                // For a FUNCTION the bindings are the call's frame (runPrefixed): what the
+                // function assigns to such a name changes the binding (gone after the call),
+                // `unset` removes it (unsetCallerLocal), and a callee's `local` inherits its
+                // value (tmpVisible). The binding is a plain scalar: it hides an array of that
+                // name, and takes no attributes (`U=b f` hands f "b" whatever `declare -u U`
+                // said).
+                if (saved.length == 0) { pushLocalFrame() }
+                declareLocal(nm)
+                var fr = localFrames[localFrames.length - 1]
+                fr[fr.length - 1].tmp = true
+                saved.push(fr[fr.length - 1])
+                dropAttrs(nm)
+                arrs[arrKey(nm)] = null
+            } else { saved.push({name: nm, had: isSetVar(nm), val: getVarVal(nm)}) }
             if (rawSeen) { v = normBytes(v) }
+            saved[saved.length - 1].nv = v
             touchVar(nm); vars["$" + nm] = v; varsHas["$" + nm] = true
         }
         return saved
@@ -5025,12 +5118,16 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var cur = []
         var k
         for (k = 0; k < saved.length; k++) { var key = "$" + saved[k].name; cur.push({v: vars[key], h: varsHas[key]}) }
-        restorePrefix(saved)
+        restoreVals(saved)
         var rs = openRedirs(redirs)
         for (k = 0; k < saved.length; k++) { vars["$" + saved[k].name] = cur[k].v; varsHas["$" + saved[k].name] = cur[k].h }
         return rs
     }
     function restorePrefix(saved) {
+        if (saved.length > 0 && saved[0].tmp == true) { popLocalFrame(); return }
+        restoreVals(saved)
+    }
+    function restoreVals(saved) {
         var k
         for (k = saved.length - 1; k >= 0; k--) {
             vars["$" + saved[k].name] = saved[k].val
@@ -6076,8 +6173,12 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var ust = 0
             for (ui = 0; ui < args.length; ui++) {
                 var sp = splitSubscript(args[ui])
-                if (sp.key == null) {
-                    if (localHere(sp.name) || !unsetCallerLocal(sp.name)) {
+                if (sp.key == null && attrOn(roVars, sp.name)) {
+                    emitErr("bash: unset: " + sp.name + ": cannot unset: readonly variable\n")
+                    ust = 1
+                }
+                else if (sp.key == null) {
+                    if ((localHere(sp.name) && !tmpHere(sp.name)) || !unsetCallerLocal(sp.name)) {
                         unsetVar(sp.name); arrs[arrKey(sp.name)] = null; dropAttrs(sp.name)
                         if (localHere(sp.name)) { dclVars["$" + sp.name] = true }
                     }
@@ -6195,13 +6296,15 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var savedLoops = loopDepth
         posParams = args
         loopDepth = 0
-        pushLocalFrame()
+        var own = !adoptFrame
+        adoptFrame = false
+        if (own) { pushLocalFrame() }
         declareLocal("FUNCNAME")
         setVarVal("FUNCNAME", name)
         var r = anytype
         r = body()
         lnCtx = svLn
-        popLocalFrame()
+        if (own) { popLocalFrame() }
         posParams = saved
         loopDepth = savedLoops
         if (typeof r == "object") {
@@ -6772,8 +6875,67 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
 
     function mkPrefixAsg(items) {
-        return {aname: items[0].aname, val: (items.length > 1) ? items[1] : null}
+        return {aname: items[0].aname, op: items[1].pop, val: (items.length > 2) ? items[2] : null}
     }
+    // NAME=VALUE... before a declaration builtin, bash 5.3. A builtin that gives a name it
+    // lists an attribute outliving the command (export, readonly, -x, -r) or a local binding
+    // (local, and declare/typeset in a function without -g) takes the prefix value for that
+    // name as if assigned there: `x=5 export x` keeps x=5, `x=6 local x` is a local holding 6.
+    // Every other prefix binding lasts for the builtin only (`x=8 declare x` leaves x alone).
+    // Twin of makePrefixDecl in bash-to-llvm-ir.abnf.
+    function makePrefixDecl(items, ln) {
+        var asgs = []
+        var decl = []
+        var reds = []
+        var i
+        for (i = 0; i < items.length; i++) {
+            var it = items[i]
+            if (typeof it != "function" && it.aname != undefined) { asgs.push(it) }
+            else if (it.dkw != undefined || it.dflag != undefined || it.dname != undefined || it.a != undefined) { decl.push(it) }
+            else { reds.push(it) }
+        }
+        var flags = ""
+        for (i = 1; i < decl.length; i++) { if (decl[i].dflag != undefined) { flags = flags + decl[i].dflag } }
+        var kw = decl[0].dkw
+        var query = flags.indexOf("p") >= 0 || flags.indexOf("f") >= 0 || flags.indexOf("F") >= 0
+        var keeps = !query && (kw == "export" || kw == "readonly" || kw == "local" || flags.indexOf("x") >= 0 || flags.indexOf("r") >= 0)
+        var inFn = !query && !keeps && flags.indexOf("g") < 0
+        // The prefix values, computed in order (each sees the ones before it) and read back
+        // by the listed names' assignments.
+        var cell = {}
+        var taken = [decl[0]]
+        for (i = 1; i < decl.length; i++) {
+            var nm = decl[i].dname
+            if (nm != undefined && prefixHas(asgs, nm)) {
+                taken.push({a: {name: nm, idxT: null, op: "=", valT: prefixCell(cell, nm), lit: null}})
+            } else { taken.push(decl[i]) }
+        }
+        var plain = makeDecl(decl, reds, ln)
+        var bound = makeDecl(taken, reds, ln)
+        return function() {
+            var saved = applyPrefix(asgs, true, false)
+            var ab = takeAbort()
+            if (ab != null) { restorePrefix(saved); return ab }
+            if (!keeps && !(inFn && localFrames.length > 0)) {
+                var r = anytype
+                r = plain()
+                restorePrefix(saved)
+                return r
+            }
+            var k
+            for (k = 0; k < saved.length; k++) { cell["$" + saved[k].name] = saved[k].nv }
+            restorePrefix(saved)
+            // A refused (readonly) prefix name leaves the declaration as written.
+            if (saved.length < asgs.length) { return plain() }
+            return bound()
+        }
+    }
+    function prefixHas(asgs, nm) {
+        var k
+        for (k = 0; k < asgs.length; k++) { if (asgs[k].aname == nm) { return true } }
+        return false
+    }
+    function prefixCell(cell, nm) { return function() { return cell["$" + nm] } }
     // items = {aname,val} and redirection records in source order, then cmdWordThunk and
     // argThunk/redir...
     function makePrefixCmd(items, ln) {
@@ -6940,6 +7102,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var r = anytype
             var k
             for (k = 0; k < vals.length; k++) {
+                // A readonly name ends the loop at its first pass, status 1.
+                if (roRefused(fname, "")) { setStatus(1); return 1 }
                 storeAttr(fname, vals[k])
                 r = bodyT()
                 if (typeof r == "object") {

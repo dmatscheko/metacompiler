@@ -48,3 +48,21 @@ for ((i = 0; i < 3000; i++)); do
   em[k]="${big[*]:0:900}:$i"
 done
 echo "elements ${#el[0]} ${el[0]: -6} ${#em[k]} ${em[k]: -6}"
+# Simple commands that expand long words and store something on every pass: each gives
+# back what it expanded before the next one's store, and a call's arguments, a prefix
+# binding, a here-string, and what printf -v and a one-name read built besides their value
+# go back with the command.
+w=${big[*]:0:40}
+hf() { n=$((n + ${#1})); }
+n=0
+c=0
+for ((i = 0; i < 20000; i++)); do
+  echo "$w$i" >/dev/null
+  [[ "$w$i" == *9 ]] && c=$((c + 1))
+  case "$w$i" in *7) c=$((c + 2)) ;; esac
+  hf "$w$i"
+  z="$w$i" hf "$z"
+  printf -v p '%s-%s' "${w:0:20}" "$i"
+  read -r q <<< "$w:$i"
+done
+echo "commands $n $c $p ${#q} ${q: -6}"

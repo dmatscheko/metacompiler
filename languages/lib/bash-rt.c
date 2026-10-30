@@ -64,6 +64,8 @@ char *ls_val[512];
 int ls_acnt[512];
 int ls_amark[512];   /* the record's marks (1 2 4, see rt_arr_mark), and 8 when it was not sorted */
 int ls_top;
+int ls_tmp[512];     /* a function's prefix binding (rt_push_tmp): 1, and 2 once a `local` claimed it */
+int ls_tb;           /* 1 + where the next call's frame starts when prefix bindings open it, else 0 */
 
 /* The array save stack the entries above index into, grown by doubling. */
 char **las_k;
@@ -248,6 +250,7 @@ char *rt_globescape(char *s);
 char *rt_catfields(char *a, char *b);
 char *rt_mapf(char *v, int op, char *p, char *r, int mode, char *sep, int star);
 int rt_argpush(char *v);
+int rt_argcall(char *v);
 int rt_echo(char *fields, int newline, int escapes);
 char *rt_param(int n);
 char *rt_params(char *sep, int star);
@@ -263,6 +266,7 @@ int rt_ss_restore(int u);
 int rt_push_local(int id);
 int rt_pop_locals(int d);
 int rt_unset_up(int id, int d, int fn);
+int rt_ls_drop(int id, int low, int from, int to);
 int rt_fskind(char *p);
 char *rt_getvar_byname(char *n);
 char *rt_getvar_ind(char *n);
@@ -6391,9 +6395,11 @@ int rt_echo(char *fields, int newline, int escapes) {
     return 0;
 }
 
-/* i32 rt_argpush(i8* v): append every FIELD of v to the argv stack, doubling
- * the stack when it is full. */
-int rt_argpush(char *v) {
+/* i32 rt_argcall(i8* v): append every FIELD of v to the argv stack, doubling
+ * the stack when it is full. For a function call's frame, which is gone when
+ * the call returns: every release during the call goes to a mark taken after
+ * its fields, so nothing has to pin them. */
+int rt_argcall(char *v) {
     int p = rt_fpos(v);
     char **na;
     while (p >= 0) {
@@ -6409,9 +6415,15 @@ int rt_argpush(char *v) {
         argv[t] = rt_fat(v, p);
         rt_abheld(argv[t]);
         argv_top = t + 1;
-        rt_pin();
         p = rt_fnext(v, p);
     }
+    return 0;
+}
+
+/* rt_argcall for `set --`, whose parameters outlive the statement. */
+int rt_argpush(char *v) {
+    rt_argcall(v);
+    rt_pin();
     return 0;
 }
 
@@ -6745,6 +6757,7 @@ int rt_push_local(int id)
     }
     ls_id[t] = id;
     ls_val[t] = gvars[id];
+    ls_tmp[t] = 0;
     /* Copy this name's array rows aside: none when the name has no record,
      * which is why `local` in a hot recursive function does not pay for this. */
     ls_amark[t] = 0;
@@ -6798,16 +6811,78 @@ int rt_ls_restore(int t, int rows)
     return 0;
 }
 
+/* A function's prefix binding (`x=5 f`): saved like a local, and marked. The
+ * bindings begin the call's own frame (ls_tb, rt_fn_enter): bash merges the
+ * temporary environment into the function's local scope. */
+int rt_push_tmp(int id)
+{
+    rt_push_local(id);
+    ls_tmp[ls_top - 1] = 1;
+    return 0;
+}
+
+/* A function's entry: its frame's depth, which is where its prefix bindings
+ * start if it has any, and $FUNCNAME saved as its first local. */
+int rt_fn_enter(int fn)
+{
+    int d = ls_tb > 0 ? ls_tb - 1 : ls_top;
+    ls_tb = 0;
+    rt_push_local(fn);
+    return d;
+}
+
+/* Is gvars[id]'s binding in effect a function's prefix binding? The innermost
+ * entry of `id` saved the binding before the one in effect, so its mark says
+ * what that one is. Twin of tmpVisible in bash-interpreter.abnf. */
+int rt_tmp_vis(int id)
+{
+    int t = ls_top - 1;
+    while (t >= 0) {
+        if (ls_id[t] == id) return ls_tmp[t] != 0;
+        t = t - 1;
+    }
+    return 0;
+}
+
+/* `local NAME`, its first in a call whose frame starts at depth d: a fresh
+ * binding saved for the return, without an array, and when bare, unset - or
+ * holding the value of a caller's prefix binding it hides (bash 5.3). The
+ * call's own prefix binding of NAME is already its local: it is claimed
+ * (unset then leaves it in place), value kept. Twin of the fresh arm of
+ * makeDecl in bash-interpreter.abnf. */
+int rt_local_new(int id, int d, int bare)
+{
+    int t = d;
+    char *old = gvars[id];
+    int inh;
+    while (t < ls_top) {
+        if (ls_id[t] == id && ls_tmp[t] != 0) {
+            ls_tmp[t] = 2;
+            return 0;
+        }
+        t = t + 1;
+    }
+    inh = rt_tmp_vis(id);
+    rt_push_local(id);
+    rt_arr_clear(varnames[id]);
+    if (bare != 0) gvars[id] = inh != 0 ? old : unset_marker;
+    return 0;
+}
+
 /* Restore every entry above `d` (innermost first). An id of -1 is an entry
  * rt_unset_up already retired: it only releases its array rows. */
 /* Is gvars[id] on the local save stack above depth d already - a second
  * `local` of the name in the same call, which keeps its value and attributes
- * (bash 5.3: f() { local a=5; local a; echo $a; } prints 5)? */
+ * (bash 5.3: f() { local a=5; local a; echo $a; } prints 5)? A prefix binding
+ * of the call is claimed as its local (rt_local_new). */
 int rt_local_here(int id, int d)
 {
     int t = d;
     while (t < ls_top) {
-        if (ls_id[t] == id) return 1;
+        if (ls_id[t] == id) {
+            if (ls_tmp[t] != 0) ls_tmp[t] = 2;
+            return 1;
+        }
         t = t + 1;
     }
     return 0;
@@ -6840,30 +6915,49 @@ int rt_unset_up(int id, int d, int fn)
 {
     int top = d;
     int low = -1;
-    int t = d - 1;
+    int t = d;
+    /* The call's own prefix binding no `local` claimed goes first. */
+    while (t < ls_top) {
+        if (ls_id[t] == id) {
+            if (ls_tmp[t] == 1) return rt_ls_drop(id, t, d, ls_top);
+            break;
+        }
+        t = t + 1;
+    }
+    t = d - 1;
     while (t >= 0) {
         if (ls_id[t] == id) low = t;
         if (ls_id[t] == fn) {
-            if (low >= 0) {
-                int rows = las_top;
-                int i = ls_top - 1;
-                while (i >= low) {
-                    rows = rows - ls_acnt[i];
-                    i = i - 1;
-                }
-                rt_ls_restore(low, rows);
-                i = t;
-                while (i < top) {
-                    if (ls_id[i] == id) ls_id[i] = -1;
-                    i = i + 1;
-                }
-                return 1;
+            /* A call's prefix bindings, just below its $FUNCNAME, open its frame. */
+            while (t > 0 && ls_tmp[t - 1] != 0) {
+                t = t - 1;
+                if (ls_id[t] == id) low = t;
             }
+            if (low >= 0) return rt_ls_drop(id, low, t, top);
             top = t;
         }
         t = t - 1;
     }
     return 0;
+}
+
+/* Restore entry `low`, the first of `id` in the frame [from, to), and retire
+ * every entry of `id` there. */
+int rt_ls_drop(int id, int low, int from, int to)
+{
+    int rows = las_top;
+    int i = ls_top - 1;
+    while (i >= low) {
+        rows = rows - ls_acnt[i];
+        i = i - 1;
+    }
+    rt_ls_restore(low, rows);
+    i = from;
+    while (i < to) {
+        if (ls_id[i] == id) ls_id[i] = -1;
+        i = i + 1;
+    }
+    return 1;
 }
 
 /* ---- name -> slot ---------------------------------------------------------- */

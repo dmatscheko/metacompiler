@@ -1238,6 +1238,62 @@ s78() {
   ar=5 true; check tw16 "${ar[*]}" "1 2"
   up=c $e; ar=7 $e; check tw17 "$up|${ar[*]}" "C|7 2"
 }
+# ===== SECTION 79: prefix assignments before a declaration builtin or a function; readonly =====
+# Before export, readonly, -x or -r, a prefix assignment to a name the builtin lists outlives
+# it (`e=5 export e` keeps 5), and so does one before `local` (a local holding the value);
+# any other ends with the builtin. A function takes its prefix bindings as its own locals: a
+# `local` of one keeps it, a callee's `local` inherits its value, `unset` removes it (the
+# caller's binding shows), and it hides an array of its name. A readonly name refuses an
+# assignment (abandoning the command line), a prefix binding (the command still runs), a
+# `local`, a `declare`, an `unset` and a `for` (which fails). `+=` appends in a prefix too.
+s79() {
+  local x=1 y r a ro e
+  s79k() { echo "$x"; }
+  s79l() { local x; echo "[$x]"; }
+  s79n() { s79l; }
+  s79o() { local x=3; s79l; }
+  s79u() { unset x; echo "${x-unset}"; }
+  s79w() { x=9; unset x; unset x; echo "${x-unset}"; }
+  s79a() { echo "$a ${a[1]-u} ${#a[@]}"; }
+  s79m() { x=6 local x; echo "$x"; x=7; }
+  s79d() { x=8 declare x; echo "$x"; }
+  e=5 export e; check pd1 "$e" 5
+  e=1; e=5 export y; check pd2 "$e" 1
+  e=5 export e y=$e; check pd3 "$e $y" "5 1"
+  e=1; e+=2 export e; check pd4 "$e" 12
+  e=1; e=7 declare -x e; check pd5 "$e" 7
+  ro=6 readonly ro; check pd6 "$ro" 6
+  x=1; r=$(s79m); check pd7 "$r|$x" "6|1"
+  r=$(s79d); check pd8 "$r|$x" "8|1"
+  x=1 y=2; x=3 y=$x s79k >/dev/null; check pd9 "$x $y" "1 2"
+  r=$(x=5 s79l); check tf1 "$r" "[5]"
+  r=$(x=5 s79n); check tf2 "$r" "[5]"
+  r=$(x=5 s79o); check tf3 "$r" "[3]"
+  r=$(x=5 s79u); check tf4 "$r|$x" "1|1"
+  r=$(x=5 s79w); check tf5 "$r" "unset"
+  a=(1 2); r=$(a=5 s79a); check tf6 "$r|${a[*]}" "5 u 1|1 2"
+  r=$(x+=2 s79k); check tf7 "$r" 12
+  r=$(x+=2 y+=$x s79k; echo "$y"); check tf8 "${r//$'\n'/,}" "12,2"
+  s79v() { s79u; echo "${x-unset}"; }
+  r=$(x=5 s79v); check tf9 "${r//$'\n'/,}" "1,1"
+  s79h() { local y=2; y=7 s79i; echo "$y"; }
+  s79i() { s79j; }
+  s79j() { unset y; echo "${y-unset}"; }
+  r=$(s79h); check tf10 "${r//$'\n'/,}" "2,2"
+  local -r s79c=1
+  s79p() { echo "$s79c"; }
+  r=$( { s79c=2; echo no; } 2>/dev/null ); check ro1 "$r|$?" "|1"
+  r=$( { s79c=2 s79p; echo "$?"; } 2>/dev/null ); check ro2 "${r//$'\n'/,}" "1,0"
+  r=$( { local s79c=3; echo "$? $s79c"; } 2>/dev/null ); check ro3 "$r" "1 1"
+  r=$( { declare s79c=4; echo "$? $s79c"; } 2>/dev/null ); check ro4 "$r" "1 1"
+  r=$( { unset s79c; echo "$? $s79c"; } 2>/dev/null ); check ro5 "$r" "1 1"
+  r=$( x=5 readonly x; echo "$x"; { x=6; } 2>/dev/null; echo no ); check ro6 "$r" 5
+  r=$( { for s79c in 1 2; do echo no; done; echo "$?"; } 2>/dev/null ); check ro7 "$r" 1
+  # A loop's reads and printf -v keep their values whatever the pass allocated.
+  r=
+  for y in 1 2 3; do IFS=, read -r x <<< "a$y,b"; printf -v x '%s-%s' "$x" "$y"; r+="$x "; done
+  check pk1 "$r" "a1,b-1 a2,b-2 a3,b-3 "
+}
 # ===== END SECTIONS =====
 
 s47   # SECTION-CALL 47
@@ -1271,5 +1327,6 @@ s75   # SECTION-CALL 75
 s76   # SECTION-CALL 76
 s77   # SECTION-CALL 77
 s78   # SECTION-CALL 78
+s79   # SECTION-CALL 79
 echo "full: $checks checks, $fails failures"
 exit $fails
