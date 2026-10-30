@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-864** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-865** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -66,14 +66,16 @@ its report; anything structural there is a CORE ticket.
 
 # RB — Ruby
 
-### T-859 ruby: class-body scope gate, nested reopen, visibility queries, encoding remainders · P3 · RB · IN PROGRESS (RB worker, round 25) [V RB worker]
-Oracle LC_ALL=en_US.UTF-8 /usr/bin/ruby 2.6. (1) WRONG ACCEPT (interp): a class body nested in another body can read
-the enclosing body's local variables (`x = 1; class A; p x; end` → MRI NameError); nested bodies now share the scope
-chain for constants, but locals must stop at the class/module gate. (2) interp: `class X; end; module M; class X; end;
-end` reopens the top-level X (checks globalScope) instead of creating M::X. (3) `private_method_defined?` /
-`protected_method_defined?` undefined in both halves. (4) binary-string remainders: US-ASCII (`65.chr.encoding` →
-US-ASCII), an invalid-UTF-8 `"\xFF"` literal, in-place `force_encoding` / `"" << 255.chr`, an interpolated binary
-String stays binary, pack/unpack directives beyond C c U (NotImplementedError today).
+### T-864 ruby: encoding and module leftovers · P3 · RB · OPEN [V RB worker]
+Oracle LC_ALL=en_US.UTF-8 /usr/bin/ruby 2.6. (1) a Hash key in one encoding is not found by an equal String in another:
+`{65.chr=>1}["A"]` → 1, ours nil in every engine (Go's dict keys a box by pointer). (2) `Module#private_instance_methods`
+missing (oracle `[]`). (3) a class/module nested in a module is also bound globally when no top-level name exists:
+`module M; class X; end; end; p X` → MRI NameError, ours M::X (both halves). (4) interp: `module M; K=1; def self.f; K;
+end; p f; end` cannot see K; compiler: f undefined at that point. (5) float pack directives e/E/d/D/f/F/g/G raise
+NotImplementedError; `String#encode` missing. (6) in-place re-encoding of a plain UTF-8 String (`z=""; z << 255.chr`;
+`x.force_encoding("BINARY")` seen through an alias `y = x`) — needs one String type with an encoding field in the Go
+twin (jsRStr vs jsRBin) or a forwarding check at ~35 *jsRStr sites; measure, DECLINE with the numbers if it costs the
+string fast path.
 
 # JS — JavaScript and TypeScript
 
@@ -915,6 +917,7 @@ T-858 c: `<stddef.h>` gives no `offsetof` / `NULL` / `size_t` — DONE ef5212f7 
 T-853 ts/js: bound functions and `new`; TS error site text; accessor decorators — DONE c12762b2 (bound target + args recorded in every engine, js_jsunbind before the constructor check, instanceof via the target; TS callee text skips as/satisfies/!; new (o).f() site text; getter/setter/accessor decorators in tsc's order — parameter decorators stay dropped as tsc's emit drops them; V8 DateParser port for Date.parse and V8's equivalent-year zone names, 155-row probe = node)
 T-857 kotlin: local fun vs interface default, lambda-param `+=`, nested-class name clash, set CME — DONE 80637192 (only top-level funs block the implicit-receiver reading; lambda params, it and this are vals so += calls plusAssign; nested classes of one simple name are distinct types by binary name in all engines; set mutators bump modCount with the set iterator's end rule; list += always counts)
 T-860 bash: $LINENO, quotes in quoted ${v-w}, case in "$( )", fd dup order, here-doc forms — DONE 12813383 ($LINENO per bash's measured line rules incl. eval and functions — bash bench +0.92%; double-quoted ${v-w} expansion rules; NotEsac in case patterns; fd number must touch its operator; here-doc bodies moved next to their markers by the splice pass — <<\\EOF, several per line; llvm.Run models write(2) and fflush(NULL); c.setSrcMap maps rewritten-source positions back for parse errors and c.lineOf)
+T-859 ruby: class-body scope gate, nested reopen, visibility queries, encoding remainders — PARTIAL 46515fe9 — class/module bodies are a local scope gate in both halves (regression fixed; compiler too), class X in a module is M::X with lexical constant lookup, module reopen in the compiler, public/private/protected_method_defined? and method_defined? per MRI, module private sections, US-ASCII and invalid-UTF-8 strings, byte escapes, interpolated binary, pack/unpack integer/string/base64 directives; in-place re-encoding of a plain String, float pack and String#encode filed as T-864
 
 # Settled — do not re-open
 
