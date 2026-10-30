@@ -2225,6 +2225,9 @@ func (ma *machine) constValue(c constant.Constant) uint64 {
 	case *constant.Index:
 		// The asm parser wraps getelementptr indices into constant.Index.
 		return ma.constValue(c.Constant)
+	case *constant.ExprBitCast:
+		// A pointer cast changes the type, not the address.
+		return ma.constValue(c.From)
 	case *constant.ExprGetElementPtr:
 		// The same address computation as the getelementptr instruction:
 		// the first index scales by the whole element type, the following

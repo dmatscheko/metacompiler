@@ -2062,9 +2062,11 @@ int s51(void) {
 /* A typedef name stands wherever a type name does (C11 6.7.8): in a cast, in
    sizeof, after unary +, and for a function-pointer typedef declared in a list. A
    GCC attribute may stand between a function's return type and its name; a
-   qualifier may lead a typedef parameter and a cast's type name. Every
-   expected value was printed by cc. */
+   qualifier may lead a typedef parameter and a cast's type name. Before
+   <stdbool.h> (SECTION 56), bool is an ordinary identifier, so '(bool)' is a
+   parenthesized expression. Every expected value was printed by cc. */
 typedef unsigned char s52_u8;
+int s52_bool(int bool) { return (bool) + 1 + (bool) * 2; }
 typedef long s52_I;
 typedef int s52_int;
 typedef int (*s52_Fn)(int), s52_Other;
@@ -2086,6 +2088,7 @@ int s52(void) {
     check(5207, (s52_Other)3.7 == 3);
     s52_b[0] = 7; s52_l = 5;
     check(5208, s52_first(s52_b, 2) == 9 && *(const long *)&s52_l == 5);
+    check(5209, s52_bool(3) == 10);
     return 0;
 }
 
@@ -2094,7 +2097,9 @@ int s52(void) {
    6.9.2): an extern declaration before the definition, one after it, one spelled
    through a typedef, and a repeated tentative definition. A function that reads the
    name before its definition sees the defined value, and so does an extern
-   declaration in a block, even past a local that shadows the name (6.2.2p4). Every
+   declaration in a block, even past a local that shadows the name (6.2.2p4), also
+   when spelled through a typedef. An array declared without a size takes the size
+   a later declaration gives it (6.2.7p3), also for code that used it before. Every
    expected value was printed by cc. */
 typedef int s53_myint;
 extern int s53_ge;
@@ -2114,6 +2119,11 @@ extern int s53_arr[3];
 int s53_gk = 4;
 int s53_bump(void) { extern int s53_gl; s53_gl = s53_gl + 1; return s53_gl; }
 int s53_gl = 10;
+extern int s53_ia[];
+int s53_iasum(void) { return s53_ia[0] + s53_ia[2]; }
+int s53_ia[3] = { 1, 2, 30 };
+long s53_ib[2][2];
+extern long s53_ib[][2];
 int s53(void) {
     check(5301, s53_ge == 5 && s53_gf == 7 && s53_gh == 0 && s53_gi == 3);
     check(5302, s53_readj() == 9);
@@ -2123,6 +2133,12 @@ int s53(void) {
     int s53_gk = 100;
     { extern int s53_gk; extern int s53_gk; check(5304, s53_gk == 5); }
     check(5305, s53_gk == 100 && s53_bump() == 11 && s53_gl == 11);
+    { extern s53_myint s53_gf; s53_gf = 8; }
+    { s53_myint extern s53_gf; s53_gf = s53_gf + 1; }
+    check(5306, s53_gf == 9);
+    s53_ib[1][1] = 6;
+    check(5307, s53_iasum() == 31 && sizeof s53_ia / sizeof s53_ia[0] == 3
+                && sizeof s53_ib / sizeof s53_ib[0] == 2 && s53_ib[1][1] == 6);
     return 0;
 }
 
@@ -2130,8 +2146,11 @@ int s53(void) {
 /* A nested block, a for statement and a statement expression each open a scope of
    their own, so redeclaring an outer name in them is legal shadowing (C11 6.2.1p4,
    6.8.5p5); a backward goto over a declaration re-runs it in the same scope. A
-   second declaration in ONE block is rejected (tests/c-fail-test-redef-block.c). */
+   second declaration in ONE block is rejected (tests/c-fail-test-redef-block.c),
+   and so is one reusing a parameter in a function body's outermost block
+   (tests/c-fail-test-redef-param.c), but a nested block may shadow a parameter. */
 int s54_g = 1;
+int s54_pa(int a) { { int a = 2; return a + 1; } }
 int s54(void) {
     int x = 1, sum = 0;
     { int x = 2; sum = sum + x; { int x = 3; sum = sum + x; } }
@@ -2149,6 +2168,7 @@ again:;
     _Bool b = 1;
     { _Bool b = 0; check(5405, b == 0); }
     check(5406, b == 1 && x == 1);
+    check(5407, s54_pa(9) == 3);
     return 0;
 }
 
@@ -2156,12 +2176,19 @@ again:;
 /* 'E1[E2]' is '*((E1) + (E2))' (C11 6.5.2.1p2), so the integer may come first, as a
    constant, a parenthesized expression or a variable, and the result is an lvalue.
    A designator list ('.b[1] =', '[1][2] =', '.p[1].y =') names a subobject, and
-   only that subobject is initialized (6.7.9p17-19). Every expected value was
-   printed by cc. */
+   only that subobject is initialized (6.7.9p17-19). Braces around a member may be
+   left out: an item that lands on an aggregate fills its first scalar and the
+   following items go on inside it, also after a designator, while a struct
+   value or a brace list initializes the whole member (6.7.9p20-21). Every
+   expected value was printed by cc. */
 struct S55P { int x; int y; };
 union S55U { int i; char c; };
 struct S55Q { struct S55P p[2]; union S55U u; int z; };
 struct S55T { int a; int b[3]; };
+struct S55E { int a[3]; int b; struct S55P p; };
+struct S55N { char n[4]; int v; };
+struct S55E s55_ge = { 1, 2, 3, 4, 5, 6 };
+int s55_gi[][2] = { 1, 2, 3, 4, 5 };
 struct S55Q s55_gq = { .p[1].y = 4, .u.i = 300, .p[0] = { 1, 2 } };
 int s55_gm[2][3] = { [1][2] = 7, [0][0] = 1, [1][0] = 5 };
 int s55(void) {
@@ -2181,6 +2208,23 @@ int s55(void) {
     check(5507, s55_gm[0][0] == 1 && s55_gm[0][1] == 0 && s55_gm[1][0] == 5 && s55_gm[1][2] == 7);
     struct S55P ps[] = { [2].y = 6, [0].x = 1 };
     check(5508, sizeof ps / sizeof ps[0] == 3 && ps[2].y == 6 && ps[0].x == 1 && ps[1].x == 0);
+    struct S55E e = { 1, 2, 3, 4, 5, 6 };
+    check(5509, e.a[2] == 3 && e.b == 4 && e.p.x == 5 && e.p.y == 6 && s55_ge.p.y == 6);
+    struct S55T v = { .b[1] = 5, 6 };
+    check(5510, v.a == 0 && v.b[0] == 0 && v.b[1] == 5 && v.b[2] == 6);
+    int m[2][3] = { 1, 2, 3, 4 };
+    check(5511, m[0][2] == 3 && m[1][0] == 4 && m[1][1] == 0
+                && sizeof s55_gi / sizeof s55_gi[0] == 3 && s55_gi[2][0] == 5 && s55_gi[2][1] == 0);
+    struct S55P pv = { 7, 8 };
+    struct S55E es[2] = { 1, 2, 3, 4, pv, 9, 10 };
+    check(5512, es[0].b == 4 && es[0].p.y == 8 && es[1].a[0] == 9 && es[1].a[1] == 10 && es[1].p.x == 0);
+    struct S55Q q = { 1, 2, { 3, 4 }, 5, 6 };
+    union S55U us[2] = { 1, 2 };
+    check(5513, q.p[0].y == 2 && q.p[1].x == 3 && q.u.i == 5 && q.z == 6 && us[1].i == 2);
+    struct S55N ns[] = { "ab", 1, "cd", 2 };
+    struct S55E ed = { .p = 1, 2, .a = 3 };
+    check(5514, sizeof ns / sizeof ns[0] == 2 && ns[1].n[1] == 'd' && ns[1].v == 2
+                && ed.p.x == 1 && ed.p.y == 2 && ed.a[0] == 3 && ed.b == 0);
     return 0;
 }
 
@@ -2193,6 +2237,11 @@ int s55(void) {
 #include <stdint.h>
 #include <stdbool.h>
 enum { S56_E = 3 };
+/* A constant names a constant expression's value anywhere one is folded: in an
+   enumerator, an array dimension and an array designator. */
+enum { S56_W = CHAR_BIT * 2, S56_K = S56_W / 4, S56_Z = INT_MIN + INT_MAX };
+int s56_a[CHAR_BIT];
+char s56_big[UCHAR_MAX + 1];
 int s56_g = INT_MAX;
 long s56_gl = LONG_MIN;
 int s56(void) {
@@ -2214,6 +2263,11 @@ int s56(void) {
     check(5608, true == 1 && false == 0 && __bool_true_false_are_defined == 1 && b == 1
                 && sizeof(bool) == 1 && sizeof(S56_E) == 4 && sizeof S56_E == 4);
     switch (8) { case CHAR_BIT: check(5609, 1); break; default: check(5609, 0); }
+    int d[S56_K][S56_W - INT8_MAX + 114];
+    int s[] = { [S56_K] = 1, [S56_E] = 2 };
+    check(5610, S56_W == 16 && S56_Z == -1 && sizeof s56_a / sizeof s56_a[0] == 8
+                && sizeof s56_big == 256 && sizeof d / sizeof d[0] == 4
+                && sizeof d[0] / sizeof d[0][0] == 3 && sizeof s / sizeof s[0] == 5 && s[3] == 2);
     return 0;
 }
 

@@ -157,6 +157,31 @@ function cStdConst(name) {
     return undefined
 }
 
+// The value of a name in an integer constant expression folded while the tags walk
+// (an array dimension, an enumerator): an enumeration constant declared earlier, or
+// a constant of an included standard header. Anything else - a variable, which
+// would make a variable-length array - is refused.
+function cConstOf(name) {
+    if (hasOwn(enumConsts, name)) return enumConsts[name] | 0
+    for (var i = 0; i < cStdIncluded.length; i++) {
+        if (!hasOwn(cStdIncluded[i], name)) continue
+        var s = cStdIncluded[i][name]
+        var neg = s.charCodeAt(0) == 45
+        var parts = (neg ? s.slice(1) : s).split("-")
+        var v = cConstPart(name, parts[0])
+        if (neg) v = 0 - v
+        if (parts.length > 1) v = v - cConstPart(name, parts[1])
+        return v
+    }
+    fail("not an integer constant: " + name)
+    return 0
+}
+function cConstPart(name, digits) {
+    var v = parseCInt(digits)
+    if (typeof v != "number" || v > 9007199254740991) fail("constant too large to fold here: " + name)
+    return v
+}
+
 // One brace-initializer item: an optional designator chain ('[i]', '.field',
 // '.b[1]') plus its value. The first designator picks the member of the list's
 // own object (at / fld); the rest (sub) walk into that member.
@@ -168,13 +193,108 @@ function makeDItem(items) {
     }
     return it
 }
-// An undesignated item after a chained designator continues INSIDE the member the
-// chain walked into (C11 6.7.9p17-20), which is brace elision - not supported, so
-// refuse it instead of filling the next member.
-function noElisionAfter(list, i) {
-    if (i > 0 && list[i].at == undefined && list[i].fld == undefined && list[i - 1].sub != undefined) {
-        fail("an initializer after a nested designator (brace elision) is not supported")
+// Lay the items of one brace list over an array or struct/union of type ct (C11
+// 6.7.9p17-21) and call put(steps, v) for each item in order, where steps is the
+// designator chain ([{at} | {fld}]) from the object to the subobject the item
+// initializes. The current object is a stack of frames {ct, i}, i being the next
+// member: a designation rebuilds the stack from the outermost object, and an item
+// that lands on an aggregate without being a brace list or a whole value of it
+// (whole(v, ct) for an expression, a string literal on a character array) descends
+// into its first member - brace elision. A filled frame pops back to its parent.
+// Returns how many elements of the outermost object were reached, which sizes an
+// array declared with '[]' (ct.n < 0 is unbounded).
+function cInitWalk(ct, list, whole, put) {
+    var stack = [{ct: ct, i: 0}]
+    var reach = 0
+    for (var k = 0; k < list.length; k++) {
+        var it = list[k]
+        var v = it.v
+        if (it.at != undefined || it.fld != undefined) {
+            while (stack.length > 1) stack.pop()
+            stack[0].i = cInitIndex(ct, it)
+            var sub = it.sub != undefined ? it.sub : []
+            for (var d = 0; d < sub.length; d++) {
+                var dct = cInitChild(stack[stack.length - 1])
+                stack.push({ct: dct, i: cInitIndex(dct, sub[d])})
+            }
+        } else {
+            while (stack[stack.length - 1].i >= cInitSize(stack[stack.length - 1].ct)) {
+                if (stack.length == 1) {
+                    fail(ct.k == "arr" ? "too many initializers for an array" : "too many initializers for " + tagName(ct.s))
+                }
+                stack.pop()
+                cInitAdvance(stack[stack.length - 1])
+            }
+        }
+        while (true) {
+            var cct = cInitChild(stack[stack.length - 1])
+            if (!isAggCt(cct)) break
+            if (typeof v == "function") {
+                if (whole(v, cct)) break
+            } else if (v.list != undefined || (cct.k == "arr" && cct.e.k != "ptr" && !isAggCt(cct.e))) {
+                break
+            }
+            if (cInitSize(cct) == 0) fail("an initializer for an empty aggregate")
+            stack.push({ct: cct, i: 0})
+        }
+        if (stack[0].i + 1 > reach) reach = stack[0].i + 1
+        var steps = []
+        for (var s = 0; s < stack.length; s++) {
+            var f = stack[s]
+            steps.push(f.ct.k == "arr" ? {at: f.i} : {fld: structOf(f.ct.s).order[f.i]})
+        }
+        put(steps, v)
+        cInitAdvance(stack[stack.length - 1])
     }
+    return reach
+}
+// How many elements an initializer gives an array declared with '[]' first: a
+// string literal's characters, or the outermost elements a brace list reaches.
+// No code runs this early, so an expression on an aggregate element is counted as
+// eliding into it, and the list is marked for cInitWholeOf to hold that guess to.
+function initCount(init, dims, base) {
+    if ((dims[0] | 0) >= 0 || init == undefined || typeof init == "function") return 0
+    if (init.str != undefined) return init.str.length
+    return cInitWalk(ctArr(-1, arrCt(dims.slice(1), base, 0)), init.list,
+                     function(v, ct) { init.elides = true; return false }, function(steps, v) {})
+}
+// The whole-value test for placing a brace list: the engine's own, unless the
+// list sized its array assuming an expression elides, where a struct value that
+// would take a whole element instead is refused.
+function cInitWholeOf(init, whole) {
+    if (init.elides != true) return whole
+    return function(v, ct) {
+        if (whole(v, ct)) fail("a struct value in an array sized by its initializer is not supported")
+        return false
+    }
+}
+// How many members a frame walks: an array's elements (unbounded while its size is
+// still being inferred), a struct's members in declaration order.
+function cInitSize(ct) {
+    if (ct.k == "arr") return ct.n < 0 ? 4294967296 : ct.n
+    return structOf(ct.s).order.length
+}
+// The type of the member a frame is at.
+function cInitChild(f) {
+    if (f.ct.k == "arr") return f.ct.e
+    return fieldOf(f.ct.s, structOf(f.ct.s).order[f.i]).ct
+}
+// Past the member just initialized; a union holds only one, so it is then full.
+function cInitAdvance(f) {
+    if (f.ct.k != "arr" && structOf(f.ct.s).isUnion) { f.i = cInitSize(f.ct); return }
+    f.i = f.i + 1
+}
+// The member index one designator ('[i]' or '.name') picks in an object of type ct.
+function cInitIndex(ct, d) {
+    if (d.fld != undefined) {
+        if (ct.k != "struct") fail("a '." + d.fld + "' designator needs a struct or union")
+        var order = structOf(ct.s).order
+        for (var k = 0; k < order.length; k++) { if (order[k] == d.fld) return k }
+        fail(tagName(ct.s) + " has no field " + d.fld)
+    }
+    if (ct.k != "arr") fail("a '[" + d.at + "]' designator needs an array")
+    if ((d.at | 0) >= cInitSize(ct)) fail("too many initializers for an array")
+    return d.at | 0
 }
 
 // The names declared so far in each enclosing block, innermost last. The tags
@@ -186,6 +306,26 @@ function noElisionAfter(list, i) {
 var blockNames = []
 function openBlockScope() { blockNames.push({}) }
 function closeBlockScope() { blockNames.pop() }
+// Two declarations of one object with linkage must have compatible types (C11
+// 6.7p4): the same type, or arrays of one element type where one has no size
+// ('extern int a[];' then 'int a[3];'), which together give the sized type
+// (6.2.7p3). Answers the type the object has from now on; fails on a conflict.
+function cRedeclCt(name, prev, ct) {
+    if (ctEq(prev, ct)) return prev
+    if (prev.k == "arr" && ct.k == "arr" && (prev.n == 0 || ct.n == 0) && ctEq(prev.e, ct.e)) {
+        return prev.n == 0 ? ct : prev
+    }
+    fail("conflicting types for '" + name + "'")
+    return prev
+}
+// The parameters of the parameter list walked last, which a function body that
+// follows it declares in its own outermost block.
+var fnParams = []
+function cParamList(items) { fnParams = items; return items }
+function openFnScope() {
+    openBlockScope()
+    for (var i = 0; i < fnParams.length; i++) noteBlockName(fnParams[i].name, false)
+}
 function noteBlockName(name, ext) {
     if (blockNames.length == 0) { return }
     var top = blockNames[blockNames.length - 1]

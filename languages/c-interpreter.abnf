@@ -88,10 +88,11 @@ Enumerator  <~~ push(makeEnumerator(takeAll())) ~~>
             = Id <~~ push(up.in) ~~> [ "=" EnumInit ] ;
 // An enum initializer is a constant EXPRESSION, and it may NAME another enum constant:
 // 'enum c_tree_code { C_DUMMY = LAST_AND_UNUSED_TREE_CODE, ... }' continues a previous
-// enum's numbering, which is how the GCC tree-code enums are chained. The value is
-// folded here, at parse time, exactly like an array dimension - by the time an
-// enumerator reduces, every constant before it (this enum's included, see
-// makeEnumerator) is already in the table, so the fold never needs a frame.
+// enum's numbering, which is how the GCC tree-code enums are chained, or a standard
+// header's constant ('E = CHAR_BIT * 2'). The value is folded here, exactly like an
+// array dimension - by the time an enumerator reduces, every constant before it (this
+// enum's included, see makeEnumerator) is already in the table, so the fold never
+// needs a frame.
 EnumInit    <~~ push({val: pop()}) ~~> = ECShift ;
 ECShift     <~~ push(foldDimBin(takeAll())) ~~> = ECAdd { DimShOp ECAdd } ;
 ECAdd       <~~ push(foldDimBin(takeAll())) ~~> = ECMul { DimAddOp ECMul } ;
@@ -101,7 +102,7 @@ ECParen     = "(" ECShift ")" ;
 ECNeg       <~~ push(0 - pop()) ~~> = "-" ECUn ;
 ECPos       = "+" ECUn ;
 ECNot       <~~ push(0 - pop() - 1) ~~> = "~" ECUn ;
-ECName      <~~ push(enumConstOf(up.in)) ~~> = Id ;
+ECName      <~~ push(cConstOf(up.in)) ~~> = Id ;
 // A character constant ('enum { X = 'x' }').
 ECChar      = "'" :whitespace() CChar <~~ push(cCharConst(up.in)) ~~> "'" :whitespace(Whitespace) ;
 
@@ -158,11 +159,14 @@ TdPlain     <~~ push({dcl: makeDeclr(takeAll(), "plain")}) ~~>
 // 'Num const a', 'static inline Num f(...)'); like TypeInt's, they are read and
 // ignored, except that a LOCAL 'static' makes a static local (TdStatic).
 TdDecl      <~~ push(makeDeclSeq(tdBase(takeAll()), false)) ~~>
-            = { TdQual } TdName { TdQual } DeclItem { "," DeclItem } ";" ;
+            = { TdDQual } TdName { TdDQual } DeclItem { "," DeclItem } ";" ;
+// In a block, 'extern' makes the declaration name the file-scope object.
+TdDQual     = TdExtern | TdQual ;
+TdExtern    <~~ push({ext: true}) ~~> = "extern" KwEnd ;
 TdStatic    <~~ push(makeDeclSeq(tdBase(takeAll()), true)) ~~>
             = { TdQual } KwStatic { TdQual } TdName { TdQual } SInitDecl { "," SInitDecl } ";" ;
 TdFuncDef   <~~ defineTdFunc(takeAll()) ~~>
-            = { TdSpec } TdName { TdQual } [ PStars ] Id <~~ push(up.in) ~~> ParamList { Attr } Block ;
+            = { TdSpec } TdName { TdQual } [ PStars ] Id <~~ push(up.in) ~~> ParamList { Attr } FnBody ;
 TdProto     <~~ takeAll() /* A prototype needs no lowering. */ ~~>
             = { TdSpec } TdName { TdQual } [ Stars ] Id ParamList { Attr } ";" ;
 TdQual      = "const" KwEnd | "volatile" KwEnd | "extern" KwEnd | "register" KwEnd | "auto" KwEnd
@@ -655,14 +659,14 @@ Proto       <~~ pop(); pop(); pop() /* Drop the return type, name and parameters
 
 // The merged pushes: [name, [params...], bodyThunk]. A parameter is {name, ptr, sname?}.
 FuncDef     <~~ defineFunction() ~~>
-            = TypeInt <~~ push({ret: baseCtOf(up.in)}) ~~> { Attr } [ PStars <~~ push(up.in) ~~> ] Id <~~ push(up.in) ~~> ParamList { Attr } Block ;
+            = TypeInt <~~ push({ret: baseCtOf(up.in)}) ~~> { Attr } [ PStars <~~ push(up.in) ~~> ] Id <~~ push(up.in) ~~> ParamList { Attr } FnBody ;
 
 // A function whose RETURN type is a struct or union (by value, or a pointer to one).
 // A struct value is an address into the flat memory, and the memory of a call frame
 // is never reused, so returning one is returning that address; whoever receives it
 // (a declaration, an assignment) copies the words out.
 SFuncDef    <~~ defineSFunction(takeAll()) ~~>
-            = SRetType Id <~~ push(up.in) ~~> ParamList { Attr } Block ;
+            = SRetType Id <~~ push(up.in) ~~> ParamList { Attr } FnBody ;
 SProto      <~~ takeAll() /* A prototype needs no lowering. */ ~~>
             = SRetType Id ParamList { Attr } ";" ;
 
@@ -670,7 +674,7 @@ SProto      <~~ takeAll() /* A prototype needs no lowering. */ ~~>
 // enum is an int here, so the only new thing is the declarator's base-type spelling.
 ERetType    <~~ push({ret: ctInt}) ~~> = [ TypeInt ] EnumRef [ TypeInt ] ;
 EFuncDef    <~~ defineFunction() ~~>
-            = ERetType [ PStars <~~ push(up.in) ~~> ] Id <~~ push(up.in) ~~> ParamList { Attr } Block ;
+            = ERetType [ PStars <~~ push(up.in) ~~> ] Id <~~ push(up.in) ~~> ParamList { Attr } FnBody ;
 EProto      <~~ takeAll() /* A prototype needs no lowering. */ ~~>
             = ERetType [ PStars ] Id ParamList { Attr } ";" ;
 SRetType    <~~ push({ret: makeRetCt(takeAll())}) ~~>
@@ -680,7 +684,7 @@ SRetType    <~~ push({ret: makeRetCt(takeAll())}) ~~>
 // returned value is the callee's identifier, so the return type is an ordinary int
 // cell; only the declarator syntax is unusual.
 FnPtrFuncDef <~~ defineFnPtrFunc(takeAll()) ~~>
-            = TypeInt "(" Stars Id <~~ push(up.in) ~~> ParamList ")" FnParams { Attr } Block ;
+            = TypeInt "(" Stars Id <~~ push(up.in) ~~> ParamList ")" FnParams { Attr } FnBody ;
 // The parameter list of a function TYPE ('(int)', '(void)', '(int, char *)'): only
 // the arity of the call matters here, so the balanced run is parsed and ignored.
 FnParams    = SkipParen ;
@@ -694,7 +698,7 @@ FnParams    = SkipParen ;
 // retries a committed alternative, so the two forms cannot be told apart by order
 // alone - the negative lookahead is what decides.) A parameter may be UNNAMED, which
 // is the normal shape of a prototype: int printf(const char *, ...);
-ParamList   <~~ push(takeAll()) ~~>
+ParamList   <~~ push(cParamList(takeAll())) ~~>
             = "(" [ ( VoidOnly | ParamItem { "," ParamItem } [ "," "..." ] | "..." ) ] ")" ;
 VoidOnly    = "void" KwEnd !"*" ;
 ParamItem   = FnPtrParam | TdParam | ParenParam | Param | ParamAbs | TdParamAbs ;
@@ -880,6 +884,11 @@ UnionDecl   <~~ push(makeDeclSeq(takeAll(), false)) ~~>
 Block       <~~ closeBlockScope(); push(makeBlockStmt(takeAll())) ~~>
             = ScopeOpen { Statement } "}" ;
 ScopeOpen   <~~ openBlockScope() ~~> = "{" ;
+// A function body's outermost block also holds the parameters (6.2.1p4), so a
+// declaration there may not reuse a parameter's name.
+FnBody      <~~ closeBlockScope(); push(makeBlockStmt(takeAll())) ~~>
+            = FnScopeOpen { Statement } "}" ;
+FnScopeOpen <~~ openFnScope() ~~> = "{" ;
 
 If          <~~ push(makeIf(takeAll())) ~~>
             = KwIf "(" Expression ")" Statement [ KwElse Statement ] ;
@@ -956,60 +965,25 @@ ArrDims     <~~ push({dims: takeAll()}) ~~> = ( ArrDim | StarDim | InferDim ) { 
 // 'int x[const *]' - a VLA of UNSPECIFIED size, which C11 6.7.6.2 allows only in a
 // prototype, where nothing may read the bound anyway. Treated exactly like '[]'.
 StarDim     <~~ push(-1) ~~> = "[" { ArrQual } "*" "]" ;
-ArrDim      = "[" { ArrQual } ConstDim "]" ;
+ArrDim      = "[" { ArrQual } DimShift "]" ;
 // An array dimension is a constant EXPRESSION, not just a literal: 'char buf[5*32]' is
-// ordinary C, and so is 'int a[N]' once the preprocessor has turned N into '0x1E+1'. The
-// arithmetic is folded here, at parse time, because a dimension must already be a number
-// when the declarator is built - the interpreter has no frame yet and the compiler emits
-// no code for it.
-//
-// NoDimId is what keeps this honest: it refuses any identifier inside the brackets, so a
-// real variable-length array ('char test[argc]') is still REJECTED outright rather than
-// accepted and then failing at walk time.
-ConstDim    = NoDimId DimShift ;
+// ordinary C, and so are 'int a[N]' once the preprocessor has turned N into '0x1E+1',
+// 'int a[CHAR_BIT]' and an enumerator. The arithmetic is folded as the tags walk,
+// because a dimension must already be a number when the declarator is built - the
+// interpreter has no frame yet and the compiler emits no code for it. A name that is
+// no constant (a variable-length array, 'char test[argc]') is refused by cConstOf.
 DimShift    <~~ push(foldDimBin(takeAll())) ~~> = DimAdd { DimShOp DimAdd } ;
 DimShOp     <~~ push({op: up.in}) ~~> = "<<" | ">>" ;
 DimAdd      <~~ push(foldDimBin(takeAll())) ~~> = DimMul { DimAddOp DimMul } ;
 DimAddOp    <~~ push({op: up.in}) ~~> = "+" | "-" ;
 DimMul      <~~ push(foldDimBin(takeAll())) ~~> = DimUn { DimMulOp DimUn } ;
 DimMulOp    <~~ push({op: up.in}) ~~> = "*" | "/" | "%" ;
-DimUn       = Number | DimParen | DimNeg | DimPos | DimNot ;
+DimUn       = Number | DimParen | DimNeg | DimPos | DimNot | DimName ;
+DimName     <~~ push(cConstOf(up.in)) ~~> = Id ;
 DimParen    = "(" DimShift ")" ;
 DimNeg      <~~ push(0 - pop()) ~~> = "-" DimUn ;
 DimPos      = "+" DimUn ;
 DimNot      <~~ push(0 - pop() - 1) ~~> = "~" DimUn ;
-// Refuse a dimension that names anything. Scans the raw input to the closing ']':
-// a numeric literal swallows its own letters (0x1E, 5L, 1e3), so any letter or '_' left
-// over starts an identifier - a VLA, or a constant this pass cannot know.
-NoDimId = :script(~~
-    (function() {
-        var s = 0 // Neither whitespace NOR COMMENTS are skipped before a :script.
-        while (true) {
-            var ch = c.peek(s)
-            if (ch === 32 || ch === 9 || ch === 10 || ch === 13 || ch === 12) { s++; continue }
-            break
-        }
-        while (true) {
-            var b = c.peek(s)
-            if (b < 0)   { return abnf.newToken("\x01dim-unterminated", 0) }
-            if (b === 93) { return undefined }                              // ']'
-            if (b === 91) { return abnf.newToken("\x01dim-bracket", 0) }    // '['
-            if (b >= 48 && b <= 57) {                                       // a number
-                s++
-                while (true) {
-                    var d = c.peek(s)
-                    if ((d >= 48 && d <= 57) || (d >= 65 && d <= 90) ||
-                        (d >= 97 && d <= 122) || d === 46) { s++ } else { break }
-                }
-                continue
-            }
-            if ((b >= 65 && b <= 90) || (b >= 97 && b <= 122) || b === 95) {
-                return abnf.newToken("\x01dim-not-constant", 0)
-            }
-            s++
-        }
-    })()
-~~) ;
 InferDim    <~~ push(-1) ~~> = "[" "]" ;
 ArrQual     = PtrQual | "static" KwEnd ;
 // A declaration initializer: a brace list, a string literal (which initializes a
@@ -1045,9 +1019,10 @@ StrInitEnd = :script(~~
 BraceInit   <~~ push({list: takeAll()}) ~~>
             = "{" [ DItem { "," DItem } [ "," ] ] "}" ;
 DItem       <~~ push(makeDItem(takeAll())) ~~> = [ Desig { Desig } "=" ] DInit ;
-// The array designator '[2] = value' and the struct/union form '.field = value'.
+// The array designator '[2] = value' (a constant expression, like a dimension) and
+// the struct/union form '.field = value'.
 Desig       = ArrDesig | FldDesig ;
-ArrDesig    <~~ push({at: pop()}) ~~> = "[" Number "]" ;
+ArrDesig    <~~ push({at: pop()}) ~~> = "[" DimShift "]" ;
 FldDesig    = "." Id <~~ push({fld: up.in}) ~~> ;
 
 Empty       <~~ push(function() {}) ~~>
@@ -1268,8 +1243,7 @@ IsTypedef = :script(~~
             nc = c.peek(s)
         }
         if (name === "") { return abnf.newToken("\x01no-name", 0) }
-        // bool is <stdbool.h>'s: without that header typedefOf refuses it.
-        var std = "|size_t|ssize_t|ptrdiff_t|intptr_t|uintptr_t|intmax_t|uintmax_t|wchar_t|wint_t|char16_t|char32_t|int8_t|uint8_t|int16_t|uint16_t|int32_t|uint32_t|int64_t|uint64_t|int_fast8_t|int_least8_t|bool|"
+        var std = "|size_t|ssize_t|ptrdiff_t|intptr_t|uintptr_t|intmax_t|uintmax_t|wchar_t|wint_t|char16_t|char32_t|int8_t|uint8_t|int16_t|uint16_t|int32_t|uint32_t|int64_t|uint64_t|int_fast8_t|int_least8_t|"
         if (std.indexOf("|" + name + "|") >= 0) { return undefined }
         var back = c.getSdx()
         var i = 0 - back
@@ -1302,6 +1276,9 @@ IsTypedef = :script(~~
                 j++
             }
             var glued = (p >= 97 && p <= 122) || (p >= 65 && p <= 90) || p === 95 || (p >= 48 && p <= 57)
+            // bool is a type name only after <stdbool.h> (C11 7.18); before it, it is
+            // an ordinary identifier.
+            if (word === "stdbool" && !glued) { names = names + "bool|" }
             if (word !== "typedef" || glued) { i = j; continue }
             // A typedef statement: collect its declarator names up to the ; at depth 0.
             var t = j
@@ -1584,7 +1561,7 @@ KwDefault   = "default" KwEnd ;
     // rounding to the nearest double. The result is a plain number while it fits a
     // signed 64-bit double and the sized-integer box beyond that.
     // items = [v0, {op}, v1, {op}, v2, ...] - ONE precedence level of a constant array
-    // dimension, folded left to right at parse time. See the ArrDim rule for why a
+    // dimension, folded left to right as the tags walk. See the ArrDim rule for why a
     // dimension is a number here rather than an expression tree.
     function foldDimBin(items) {
         var v = anytype
@@ -1745,10 +1722,6 @@ KwDefault   = "default" KwEnd ;
     // in the table when the NEXT enumerator's initializer folds, not one rule later.
     var enumNext = 0
     function enumStart() { enumNext = 0 }
-    function enumConstOf(name) {
-        if (!hasOwn(enumConsts, name)) fail("enum initializer names an unknown constant: " + name)
-        return enumConsts[name] | 0
-    }
     function makeEnumerator(items) {
         var v = enumNext
         if (items.length > 1) { v = items[1].val | 0 }
@@ -2066,17 +2039,6 @@ KwDefault   = "default" KwEnd ;
         }
         return ct
     }
-    // How many elements a brace list covers, honouring '[i] =' designators.
-    function initLen(list) {
-        var n = 0
-        var at = 0
-        for (var i = 0; i < list.length; i++) {
-            if (list[i].at != undefined) { at = list[i].at | 0 }
-            at = at + 1
-            if (at > n) { n = at }
-        }
-        return n
-    }
     // A union tag lives in the same table as the struct tags, under a 'u:' prefixed
     // key - C keeps 'struct X' and 'union X' in one tag namespace but as distinct types,
     // and no C identifier can contain a ':', so the two can never collide.
@@ -2311,76 +2273,49 @@ KwDefault   = "default" KwEnd ;
     }
     function defineStruct(items) { defineTag(items, false) }
     function defineUnion(items) { defineTag(items, true) }
-    // Write one brace initializer (or one scalar expression) into memory at `base`,
-    // driven by the C type it initializes. Arrays walk their elements, honouring
-    // '[i] =' designators; structs and unions walk their members in declaration
-    // order, honouring '.field =' designators (C11 6.7.9), and every position the
-    // list does not reach keeps the zero the fresh memory already holds. Nesting is
-    // simply recursion, which is what makes 'int m[2][3] = { { 1, 2, 3 }, ... }' and
-    // a struct holding an array work.
+    // Write one brace initializer (or one expression) into memory at `base`, driven
+    // by the C type it initializes: cInitWalk (lib/c-literals.js) places each item,
+    // and a nested brace list recurses. Every position the list does not reach keeps
+    // the zero the fresh memory already holds.
     function runInit(ct, init, base) {
         if (typeof init == "function") {
-            if (ct.k == "arr" || ct.k == "struct") fail("an aggregate needs a brace initializer")
-            mem[base] = convert(ct, init().v)
+            var r = init()
+            if (isAggCt(ct)) { copyCt(ct, base, r.v); return }
+            mem[base] = convert(ct, r.v)
             return
         }
         if (init.str != undefined) { strInitInto(ct, init, base); return }
         var list = init.list
-        if (ct.k == "arr") {
-            var at = 0
-            for (var i = 0; i < list.length; i++) {
-                var it = list[i]
-                noElisionAfter(list, i)
-                if (it.at != undefined) { at = it.at | 0 }
-                if (at >= ct.n) fail("too many initializers for an array")
-                runDesigInit(ct.e, it, base + at * ctSize(ct.e))
-                at = at + 1
-            }
-            return
-        }
         // 'int x = { 1 };': a scalar may be brace-initialized by one item (C11 6.7.9p11).
-        if (ct.k != "struct") {
+        if (!isAggCt(ct)) {
             if (list.length > 1) fail("too many initializers for a scalar")
             if (list.length == 1) { runInit(ct, list[0].v, base) }
             return
         }
-        var st = structOf(ct.s)
-        var idx = 0
-        for (var j = 0; j < list.length; j++) {
-            var iu = list[j]
-            noElisionAfter(list, j)
-            if (iu.fld != undefined) {
-                var found = -1
-                for (var k = 0; k < st.order.length; k++) { if (st.order[k] == iu.fld) found = k }
-                if (found < 0) fail(tagName(ct.s) + " has no field " + iu.fld)
-                idx = found
-            }
-            if (idx >= st.order.length) fail("too many initializers for " + tagName(ct.s))
-            var f = fieldOf(ct.s, st.order[idx])
-            runDesigInit(f.ct, iu, base + f.off)
-            idx = idx + 1
-        }
+        cInitWalk(ct, list, cInitWholeOf(init, wholeInit), function(steps, v) { runDesigInit(ct, steps, v, base) })
     }
-    // One list item into the member its first designator picked; the rest of a
-    // chain walks on to the subobject it names. Twin of emitDesigInit in
-    // c-to-llvm-ir.abnf.
-    function runDesigInit(ct, it, base) {
-        var sub = it.sub != undefined ? it.sub : []
-        for (var i = 0; i < sub.length; i++) {
-            var d = sub[i]
+    // Whether an expression initializes an aggregate member whole rather than its
+    // first scalar: a struct value of that very type (C11 6.7.9p13). Only its type
+    // is wanted, so it is run with every side effect off.
+    function wholeInit(v, ct) {
+        var t = typeOnly(v).t
+        return ct.k == "struct" && t != undefined && t.k == "struct" && t.s == ct.s
+    }
+    // One list item into the subobject its designator chain names (C11 6.7.9p19).
+    // Twin of emitDesigInit in c-to-llvm-ir.abnf.
+    function runDesigInit(ct, steps, v, base) {
+        for (var i = 0; i < steps.length; i++) {
+            var d = steps[i]
             if (d.fld != undefined) {
-                if (ct.k != "struct") fail("a '." + d.fld + "' designator needs a struct or union")
                 var f = fieldOf(ct.s, d.fld)
                 base = base + f.off
                 ct = f.ct
             } else {
-                if (ct.k != "arr") fail("a '[" + d.at + "]' designator needs an array")
-                if ((d.at | 0) >= ct.n) fail("too many initializers for an array")
                 base = base + (d.at | 0) * ctSize(ct.e)
                 ct = ct.e
             }
         }
-        runInit(ct, it.v, base)
+        runInit(ct, v, base)
     }
 
     // All user defined functions by name: {params: [{name, ptr, ct}...], body: thunk}.
@@ -2762,6 +2697,7 @@ KwDefault   = "default" KwEnd ;
         return makeNum(parseCFloat(t), ct)
     }
     makeVarRef = function(name) {
+        noteFileScopeUse(name)
         return function() {
             // An array name decays to the address of its first element, and a struct
             // (or union) VALUE is likewise handed on as the address of its storage.
@@ -2856,6 +2792,7 @@ KwDefault   = "default" KwEnd ;
     function makeVarPlace(items) {
         var name = items[0]
         var path = items.slice(1)
+        noteFileScopeUse(name)
         return function() {
             var v = findVar(name)
             var ct = v.ct != undefined ? v.ct : ctInt
@@ -2890,7 +2827,7 @@ KwDefault   = "default" KwEnd ;
     function compLitCt(d, init) {
         var base = d.bs
         if (d.ptr > 0) { base = ptrTo(d.ptr, base) }
-        if (d.dims != undefined) return arrCt(d.dims, base, initCount(init))
+        if (d.dims != undefined) return arrCt(d.dims, base, initCount(init, d.dims, base))
         return base
     }
     function makeCompLit(items) {
@@ -3189,23 +3126,16 @@ KwDefault   = "default" KwEnd ;
         }
         return d
     }
-    // How many elements an initializer covers, for an inferred array size.
-    function initCount(init) {
-        if (init == undefined || typeof init == "function") return 0
-        if (init.list != undefined) return initLen(init.list)
-        if (init.str != undefined) return init.str.length
-        return 0
-    }
     // The C type that a base type plus one declarator name.
     function declCt(base, d) {
         if (d.kind == "fnptr") {
-            if (d.dims != undefined) return arrCt(d.dims, ctFn, initCount(d.init))
+            if (d.dims != undefined) return arrCt(d.dims, ctFn, initCount(d.init, d.dims, ctFn))
             return ctFn
         }
         // 'int (*pa)[3]' is a POINTER TO an array, so the dimensions sit INSIDE.
         if (d.kind == "ptrarr") return ptrTo(d.ptr, arrCt(d.dims, base, 0))
         var b = (d.ptr > 0) ? ptrTo(d.ptr, base) : base
-        if (d.dims != undefined) return arrCt(d.dims, b, initCount(d.init))
+        if (d.dims != undefined) return arrCt(d.dims, b, initCount(d.init, d.dims, b))
         return b
     }
     // items = [{bty}, {dcl}...] -> one declaration statement.
@@ -3227,8 +3157,12 @@ KwDefault   = "default" KwEnd ;
         if (opt != undefined) fail("an extern declaration in a block cannot have an initializer: " + name)
         return function() {
             var prev = hasOwn(globalScope, name) ? globalScope[name] : undefined
-            if (prev != undefined && !ctEq(prev.ct, ct)) fail("conflicting types for '" + name + "'")
-            if (prev == undefined) globalScope[name] = {addr: alloc(ctSize(ct)), arr: ct.k == "arr", ct: ct}
+            if (prev == undefined) {
+                globalScope[name] = {addr: alloc(ctSize(ct)), arr: ct.k == "arr", ct: ct}
+            } else {
+                var nct = cRedeclCt(name, prev.ct, ct)
+                if (nct != prev.ct) sizeGlobal(name, prev, nct)
+            }
             var e = globalScope[name]
             declVar(name, e.addr, e.arr, e.ct)
         }
@@ -3508,14 +3442,35 @@ KwDefault   = "default" KwEnd ;
             var d = items[i].dcl
             var ct = declCt(base, d)
             var prev = hasOwn(globalScope, d.name) ? globalScope[d.name] : undefined
-            if (prev != undefined && !ctEq(prev.ct, ct)) fail("conflicting types for '" + d.name + "'")
-            if (prev == undefined) declVar(d.name, alloc(ctSize(ct)), ct.k == "arr", ct) // Fresh memory is zeroed, like a global is.
+            if (prev == undefined) {
+                declVar(d.name, alloc(ctSize(ct)), ct.k == "arr", ct) // Fresh memory is zeroed, like a global is.
+            } else {
+                var nct = cRedeclCt(d.name, prev.ct, ct)
+                if (nct != prev.ct) sizeGlobal(d.name, prev, nct)
+            }
             if (d.init == undefined) continue
             var entry = globalScope[d.name]
             if (entry.inited == true) fail("redefinition of '" + d.name + "'")
             entry.inited = true
             initInto(ct, d.init, entry.addr)
         }
+    }
+    // A name read outside every block belongs to a file-scope initializer; see
+    // sizeGlobal for why that matters to a global without a size yet.
+    function noteFileScopeUse(name) {
+        if (blockNames.length == 0 && hasOwn(globalScope, name)) globalScope[name].early = true
+    }
+    // A global array declared without a size gets its storage when a later
+    // declaration sizes it. The storage moves unless nothing was allocated since,
+    // which is sound only while no file-scope initializer has named the array
+    // (noteFileScopeUse): those run before main and may keep its address. Twin of
+    // sizeGlobal in c-to-llvm-ir.abnf.
+    function sizeGlobal(name, e, ct) {
+        if (e.addr != mem.length && e.early == true) {
+            fail("a file-scope initializer used '" + name + "' before a declaration gave it a size")
+        }
+        e.addr = alloc(ctSize(ct))
+        e.ct = ct
     }
 
     function defineFunction() {
@@ -3598,11 +3553,15 @@ KwDefault   = "default" KwEnd ;
             typedefs[d.name] = declCt(base, d)
         }
     }
-    // items = [{tname}, {dcl}...] -> the [{bty}, {dcl}...] shape every declaration
-    // maker reads, with the typedef name resolved to the type it abbreviates.
+    // items = [{ext}?, {tname}, {ext}?, {dcl}...] -> the [{bty, ext}, {dcl}...] shape every
+    // declaration maker reads, with the typedef name resolved to the type it abbreviates.
     function tdBase(items) {
-        var all = [{bty: typedefOf(items[0].tname)}]
-        for (var i = 1; i < items.length; i++) all.push(items[i])
+        var all = [{bty: ctInt, ext: false}]
+        for (var i = 0; i < items.length; i++) {
+            if (items[i].tname != undefined) { all[0].bty = typedefOf(items[i].tname) }
+            else if (items[i].ext == true) { all[0].ext = true }
+            else { all.push(items[i]) }
+        }
         return all
     }
     // A parameter of typedef type: [{tname}, {ptr}?, name, {dims}?].

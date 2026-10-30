@@ -288,18 +288,18 @@
             "program": "${workspaceFolder}","args": ["languages/c-to-llvm-ir.abnf", "tests/c-fail-test-conflict.c", "-q"]
         },
         {
-            "name": "C interpreter, brace elision after a nested designator SHOULD FAIL",
+            "name": "C interpreter, a declaration reusing a parameter name SHOULD FAIL",
             "type": "go",
             "request": "launch",
-            "expectError": "an initializer after a nested designator (brace elision) is not supported",
-            "program": "${workspaceFolder}","args": ["languages/c-interpreter.abnf", "tests/c-fail-test-elision.c", "-q"]
+            "expectError": "redefinition of 'a'",
+            "program": "${workspaceFolder}","args": ["languages/c-interpreter.abnf", "tests/c-fail-test-redef-param.c", "-q"]
         },
         {
-            "name": "C to LLVM IR, brace elision after a nested designator SHOULD FAIL",
+            "name": "C to LLVM IR, a declaration reusing a parameter name SHOULD FAIL",
             "type": "go",
             "request": "launch",
-            "expectError": "an initializer after a nested designator (brace elision) is not supported",
-            "program": "${workspaceFolder}","args": ["languages/c-to-llvm-ir.abnf", "tests/c-fail-test-elision.c", "-q"]
+            "expectError": "redefinition of 'a'",
+            "program": "${workspaceFolder}","args": ["languages/c-to-llvm-ir.abnf", "tests/c-fail-test-redef-param.c", "-q"]
         },
         {
             "name": "C preprocessor piped into C to LLVM IR -qq, a compile error still shows SHOULD FAIL",
