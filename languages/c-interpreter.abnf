@@ -615,7 +615,8 @@ StructDef   <~~ defineStruct(takeAll()) ~~>
 // A member line is either an ANONYMOUS struct/union member (C11 6.7.2.1p13: its
 // members are addressed as members of the enclosing tag) or an ordinary declarator
 // list, whose declarators may carry a ':width' bit-field size.
-FieldLine   = AnonMember | TagFieldDef | PlainField ;
+// A directive line may stand among the members, as among statements.
+FieldLine   = PPLine | AnonMember | TagFieldDef | PlainField ;
 PlainField  <~~ push(makeFieldLine(takeAll())) ~~>
             = FieldType ( AnonBits | FieldDecl { "," FieldDecl } ) ";" ;
 // 'struct { int y; int z; } nest;' / 'struct S1 { ... } a, *b;' as a MEMBER: the tag
@@ -1019,9 +1020,10 @@ StrInitEnd = :script(~~
         return (cc === 44 || cc === 59 || cc === 125) ? undefined : abnf.newToken("\x01str-init-continues", 0)
     })()
 ~~) ;
-// A brace initializer collects its items; a trailing comma is allowed.
+// A brace initializer collects its items; a trailing comma is allowed, and so is
+// a directive line between them.
 BraceInit   <~~ push({list: takeAll()}) ~~>
-            = "{" [ DItem { "," DItem } [ "," ] ] "}" ;
+            = "{" { PPLine } [ DItem { "," { PPLine } DItem } [ "," ] ] { PPLine } "}" ;
 DItem       <~~ push(makeDItem(takeAll())) ~~> = [ Desig { Desig } "=" ] DInit ;
 // The array designator '[2] = value' (a constant expression, like a dimension) and
 // the struct/union form '.field = value'.

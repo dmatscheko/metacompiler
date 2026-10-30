@@ -2462,6 +2462,33 @@ int s58(void) {
     return 0;
 }
 
+// ===== SECTION 59: a directive line among members and initializers =====
+/* A preprocessor line may stand on its own line anywhere: among the members of a
+   struct, among the items of a brace initializer, among statements. Only
+   c-preprocessor.abnf expands a macro, so these define names nothing uses. Every
+   expected value was printed by cc. */
+struct s59_p {
+#define S59_UNUSED_A 1
+    int w;
+#pragma pack()
+    int h;
+};
+int s59_tab[] = {
+#define S59_UNUSED_B 2
+    4, 5,
+#undef S59_UNUSED_B
+    6
+#define S59_UNUSED_C 3
+};
+int s59(void) {
+    struct s59_p p = {
+#define S59_UNUSED_D 4
+        7, 8 };
+    check(5901, p.w + p.h == 15 && s59_tab[0] + s59_tab[2] == 10 && sizeof s59_tab == 12
+                && sizeof(struct s59_p) == 8);
+    return 0;
+}
+
 // ===== END SECTIONS =====
 
 int main() {
@@ -2523,6 +2550,7 @@ int main() {
     s56(); // SECTION-CALL 56
     s57(); // SECTION-CALL 57
     s58(); // SECTION-CALL 58
+    s59(); // SECTION-CALL 59
     /* summary: "full: <checks> checks, <failures> failures" */
     putchar('f'); putchar('u'); putchar('l'); putchar('l'); putchar(':'); putchar(' ');
     print_num(nchecks);

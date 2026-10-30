@@ -82,6 +82,8 @@ int fill(int *arr, int n) {
 
 int dbl(int v) { return v + v; }
 
+int placed(void);             /* defined after main, see there */
+
 int PFXSFX = 9;                 /* the name CAT(PFX, SFX) pastes to, unexpanded */
 int catvar = 3;                 /* the name XCAT(PFX, SFX) pastes to, expanded */
 int FN = 6;                     /* FN without '(' is not a macro call */
@@ -158,12 +160,31 @@ int main() {
     check(ID(SELF), 6);
     check(ID2(SELF), 6);
     check(ID(ID(SELF)), 6);
-    check(__LINE__, 161);               /* the line this check stands on */
-    check(ID(__LINE__), 162);
+    check(__LINE__, 163);               /* the line this check stands on */
+    check(ID(__LINE__), 164);
+
+    check(placed(), 12);
 
 #undef ADD
     e = 1;
     check(e, 1);                        /* #undef of a function-like macro */
 
     return nfail;
+}
+
+/* A definition may stand anywhere a line may: inside a struct body and inside an
+ * initializer list (cc reads w as 3 and tab as {4, 5}). */
+struct Pt {
+#define PT_W 3
+    int w;
+};
+int tab[] = {
+#define TAB0 4
+    TAB0, 5
+};
+
+int placed(void) {
+    struct Pt pt;
+    pt.w = PT_W;
+    return pt.w + tab[0] + tab[1];
 }

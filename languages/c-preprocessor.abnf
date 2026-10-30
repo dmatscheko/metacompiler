@@ -25,9 +25,11 @@ definition; backslash-newline continuations are joined. A body may be empty (a b
 '#define' in a skipped group must not reach the macro table: '#if'/'#elif' evaluate an
 integer constant expression after 'defined' and macro expansion (an identifier left
 over is 0), '#ifdef'/'#ifndef' test the table. A skipped group and every conditional
-directive line are replaced by their newlines. Every other directive line of a live
-group is passed through unchanged, '#define'/'#undef' included ('#include' resolves
-downstream; '#pragma', '#error' and '#line' are skipped there). Macro uses inside other
+directive line are replaced by their newlines, and so is a '#define' / '#undef' line
+once it has updated the table, as cc -E does - so a definition may stand anywhere,
+inside a struct body or an initializer list too. Every other directive line of a live
+group is passed through unchanged ('#include' resolves downstream; '#pragma', '#error'
+and '#line' are skipped there). Macro uses inside other
 directives are not expanded. The tokenizer reproduces
 every byte, so non-macro source is emitted verbatim and line numbers hold. A space is inserted at the seam between an
 expansion and its neighbours only when the two would otherwise lex as one token.") ;
@@ -611,10 +613,10 @@ Other    <~~ push({kind: "other", text: up.in}) ~~>
         return {word: "", at: p}
     }
 
-    // Handle a directive at index i (the '#' token). Returns {text, next}: `text` is the
-    // directive line VERBATIM - a '#define'/'#undef' updates the table here AND is still
-    // emitted, because the downstream '#if'/'#ifdef' evaluator has no other way to learn
-    // the same table - and `next` is the index to resume at, just past the newline.
+    // Handle a directive at index i (the '#' token). Returns {text, next}: `text` is what
+    // the line becomes - a '#define' / '#undef' updates the table and leaves only its
+    // newlines, any other directive (or a definition not understood) stays verbatim -
+    // and `next` is the index to resume at, just past the newline.
     function handleDirective(tokens, i, macros) {
         var end = lineEndOf(tokens, i)
         var afterLine = end < tokens.length ? end + 1 : end
@@ -637,15 +639,15 @@ Other    <~~ push({kind: "other", text: up.in}) ~~>
                 }
                 putOwn(macros, name,
                        newMacro(true, pp.params, pp.variadic, collectBody(tokens, pp.next, end)))
-                return {text: rawText(tokens, i, afterLine), next: afterLine}
+                return {text: newlinesText(tokens, i, end), next: afterLine}
             }
             putOwn(macros, name, newMacro(false, noParams(), false, collectBody(tokens, q, end)))
-            return {text: rawText(tokens, i, afterLine), next: afterLine}
+            return {text: newlinesText(tokens, i, end), next: afterLine}
         }
         if (word == "undef") {
             var p2 = skipHws(tokens, kw.at + 1)
             if (p2 < end && tokens[p2].kind == "ident") { putOwn(macros, tokens[p2].text, undefined) }
-            return {text: rawText(tokens, i, afterLine), next: afterLine}
+            return {text: newlinesText(tokens, i, end), next: afterLine}
         }
         // Every other directive passes through for the downstream language to handle.
         return {text: rawText(tokens, i, afterLine), next: afterLine}
