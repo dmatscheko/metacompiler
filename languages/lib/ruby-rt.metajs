@@ -4581,7 +4581,6 @@ function rbOpenRangeCover(o, v) {
 // operator method, strings and arrays get their Ruby operators, everything else
 // is the numeric tower.
 function rbBin(op, l, r) {
-    if (rbIsFn(l) && (op == ">>" || op == "<<")) { return rbProcCompose(l, r, op == ">>") }
     if (rbUserObj(l)) {
         // An exception instance that defines no + of its own concatenates as its
         // message, so `raise e + "er"` inside a rescue keeps working.
@@ -9299,6 +9298,7 @@ function rbNonNumBin(op, l, r) {
         return rbBin(op, l["__s"], rbSV(r))
     }
     if (typeof r == "object" && rtTag(r, "__rstr")) { return rbBin(op, l, r["__s"]) }
+    if ((op == ">>" || op == "<<") && rbIsFn(l)) { return rbProcCompose(l, r, op == ">>") }
     rbNumOperandErr(op, l, r)
     return null
 }
