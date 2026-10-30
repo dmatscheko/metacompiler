@@ -612,12 +612,16 @@ IndexSuffix <~~ push({kind:"member", txt: cpTxt(up.in, up.pos), key: jsIdxKeyT(p
             = "[" Expression "]" ;
 // The three optional forms get their own suffix productions rather than reusing
 // CallSuffix/IndexSuffix, because the marker they push differs by the 'opt' flag.
-OptChainSuffix = "?." ( OptCallSuffix | OptIndexSuffix | OptDotSuffix ) ;
+OptChainSuffix = "?." ( OptCallSuffix | OptIndexSuffix | OptPrivateSuffix | OptDotSuffix ) ;
 OptCallSuffix <~~ push({kind:"call", opt: true, args: takeAll()}) ~~>
             = "(" [ Arg { "," Arg } [ "," ] ] ")" ;
 OptIndexSuffix <~~ push({kind:"member", opt: true, txt: cpTxt(up.in, up.pos), key: jsPropKeyT(pop())}) ~~>
             = "[" Expression "]" ;
 OptDotSuffix = Id <~~ push({kind:"member", opt: true, name: idName(up.in), key: makeConst(jsKeyEsc(idName(up.in)))}) ~~> ;
+// 'o?.#x': the optional form of PrivateDotSuffix, tried before the plain form, whose Id
+// cannot start at a '#'.
+OptPrivateSuffix <~~ push(privDotSuffixOpt(pop())) ~~>
+            = "#" Id <~~ push(idName(up.in)) ~~> ;
 
 // A call/array/new argument. A plain argument pushes its value thunk directly (the
 // common case, and what makes the fast path a plain function call); a SPREAD pushes a
@@ -3546,6 +3550,9 @@ NotFuncHead = :script(~~
             if (ex != null) { return jsStr(ex.v) }
             var r = jsCallMethod(v, "toString")
             if (r != null) { return "" + r.v }
+            // RegExp.prototype.toString. Twins: jsvString in abnf/jsrtjsprint.go, jvStr
+            // in languages/lib/js-rt.metajs.
+            if (isRegex(v)) { return "/" + v.source + "/" + v.flags }
             if (jsIsWrap(v)) { return jsStr(v.__bvof) }
             // OrdinaryToPrimitive finds no toString and no valueOf to call.
             if (jsNoObjProto(v)) { biRaise("TypeError: Cannot convert object to primitive value") }
@@ -3835,7 +3842,7 @@ NotFuncHead = :script(~~
         if (typeof v == "boolean") { return "[object Boolean]" }
         if (typeof v == "function") { return "[object Function]" }
         // The objects node gives a @@toStringTag: an Error instance (its __errh mark),
-        // a promise, and Math / JSON, which carry their tag in a hidden __strtag slot.
+        // a promise, a RegExp, and Math / JSON, which carry their tag in a hidden __strtag slot.
         if (typeof v == "object") {
             // A string [Symbol.toStringTag], own or inherited, names the object.
             if (hasOwn(jsSymWK, "toStringTag")) {
@@ -3847,6 +3854,7 @@ NotFuncHead = :script(~~
             if (hasOwn(v, "__strtag")) { return "[object " + v.__strtag + "]" }
             if (jsIsWrap(v)) { return jsProtoTag(v.__bvof) }
             if (jpIs(v)) { return "[object Promise]" }
+            if (isRegex(v)) { return "[object RegExp]" }
         }
         return "[object Object]"
     }
@@ -8703,7 +8711,7 @@ NotFuncHead = :script(~~
     function mkRegex(src, flags) {
         var v = {}
         scopePut(v, "__regex", true)
-        scopePut(v, "source", src)
+        scopePut(v, "source", jsnReSource(src))
         scopePut(v, "flags", flags)
         scopePut(v, "prog", jsReProg(src, flags))
         scopePut(v, "global", jsReHas(flags, "g"))
@@ -11173,6 +11181,8 @@ NotFuncHead = :script(~~
                     addAccessor(ptgt, pm.acc, pk, fnMetaSrc(makeClosure(pm.params, pm.body, mscopes, true),
                                                             pm.acc + " " + pk, fnArity(pm.params), pm.sp))
                 } else {
+                    // A method replaces an earlier accessor of the same name.
+                    jsAccDrop(ptgt, pk)
                     scopePut(ptgt, pk, classMemberFn(pm, mscopes, pk))
                 }
                 if (pm.statik) { jsStaticName(statics, pk) }
@@ -11937,6 +11947,7 @@ NotFuncHead = :script(~~
         return k.charAt(0) == "_" && k.charAt(1) == "_" && k.charAt(2) == "#"
     }
     function privDotSuffix(n) { return {kind: "member", name: "#" + n, key: privRefThunk(n), priv: true} }
+    function privDotSuffixOpt(n) { return {kind: "member", opt: true, name: "#" + n, key: privRefThunk(n), priv: true} }
     // What each private key names, filed by the class builder: {field, statik, cls}.
     var privKinds = {}
     // The brand check in front of a private member access: node's TypeError when the

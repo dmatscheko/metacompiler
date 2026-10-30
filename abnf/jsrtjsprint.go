@@ -288,7 +288,7 @@ func (rt *jsrt) jsvProtoTag(v interface{}) string {
 		return "[object Function]"
 	}
 	// The objects node gives a @@toStringTag: an Error instance (its __errh mark), a
-	// promise, and Math / JSON, which carry their tag in a hidden __strtag slot.
+	// promise, a RegExp, and Math / JSON, which carry their tag in a hidden __strtag slot.
 	if o, ok := v.(*jsObject); ok {
 		// A string [Symbol.toStringTag], own or inherited, names the object.
 		if t, isStr := rt.jsvSymMember(o, "__#@toStringTag").(string); isStr {
@@ -305,6 +305,9 @@ func (rt *jsrt) jsvProtoTag(v interface{}) string {
 		}
 		if promIs(o) {
 			return "[object Promise]"
+		}
+		if rxIsRegexObj(o) {
+			return "[object RegExp]"
 		}
 	}
 	return "[object Object]"
@@ -1939,6 +1942,12 @@ func (rt *jsrt) jsvString(v interface{}) string {
 		}
 		if r, ok := rt.jsvCallMethod(t, "toString"); ok {
 			return rt.toString(r)
+		}
+		// RegExp.prototype.toString. Twins: jsStr in both *-interpreter.abnf, jvStr in
+		// languages/lib/js-rt.metajs.
+		if rxIsRegexObj(t) {
+			r, _ := rt.jsxMethod(t, "toString", nil)
+			return r.(string)
 		}
 		if p, isWrap := jsvWrapped(t); isWrap {
 			return rt.jsvString(p)
@@ -6909,6 +6918,18 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 		rt.jsvSetIntegrity(u(a[1]), 3)
 		rt.jsvSetIntegrity(cooked, 3)
 		return a[0]
+	}
+	// js_jsdefm DEFINES a class member on its descriptor or static table: a method
+	// replaces an accessor of the same name, own or inherited, where js_set would run
+	// it (ClassDefinitionEvaluation uses DefineProperty). Emitted under llvm.Run only;
+	// natively js_set is already the floor's plain set_member.
+	m["js_jsdefm"] = func(a []uint64) uint64 {
+		o, ok := u(a[0]).(*jsObject)
+		if !ok {
+			rt.fail("js_jsdefm needs an object")
+		}
+		o.set(rt.toString(u(a[1])), u(a[2]))
+		return 0
 	}
 	m["js_jssfield"] = func(a []uint64) uint64 {
 		t, ok := u(a[0]).(*jsObject)

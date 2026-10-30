@@ -722,12 +722,16 @@ IndexSuffix <~~ push({kind:"member", txt: cpTxt(up.in, up.pos), key: idxKeyT(pop
             = "[" Expression "]" ;
 // The three optional forms carry the same payload as their plain counterparts plus the
 // 'opt' kind, which is what makes foldCallMember emit the nullish guard in front of them.
-OptChainSuffix = OptCallSuffix | OptIndexSuffix | OptDotSuffix ;
+OptChainSuffix = OptCallSuffix | OptIndexSuffix | OptPrivateSuffix | OptDotSuffix ;
 OptCallSuffix <~~ push({kind:"optcall", args: takeAll()}) ~~>
             = "?." "(" [ Arg { "," Arg } [ "," ] ] ")" ;
 OptIndexSuffix <~~ push({kind:"optmember", txt: cpTxt(up.in, up.pos), key: keyEscT(pop())}) ~~>
             = "?." "[" Expression "]" ;
 OptDotSuffix = "?." Id <~~ push({kind:"optmember", name: idName(up.in), key: makeConst(jsKeyEsc(idName(up.in)))}) ~~> ;
+// 'o?.#x': the optional form of PrivSuffix, under the same mangled key and brand check.
+// Tried before the plain form, whose Id cannot start at a '#'.
+OptPrivateSuffix <~~ push(privSuffixOpt(pop())) ~~>
+            = "?." "#" Id <~~ push(idName(up.in)) ~~> ;
 
 // A call/array/new argument. The spread form (...expr) pushes a marker instead of a
 // value thunk; pushArgs recognizes it and appends the ELEMENTS of the spread value.
@@ -6717,6 +6721,8 @@ NotFuncHead = :script(~~
         var st = privStack.slice()
         return function(b) { return {b: b, v: emitStr(b, privRefKey(st, n))} }
     }
+    // The OptPrivateSuffix record: PrivSuffix's, with the nullish guard.
+    function privSuffixOpt(n) { return {kind: "optmember", name: "#" + n, key: privRefConst(n), privChk: privRefChk(n)} }
     // The member builders record what each private name is, for its brand check.
     function privNote(key, field, statik) {
         if (typeof key == "string" && key.substring(0, 3) == "__#") { privKinds["$" + key] = {field: field, statik: statik} }
@@ -7008,12 +7014,15 @@ NotFuncHead = :script(~~
     // js_jsmcall) plus js_supget / js_supset / js_supercall read it. Instance members
     // stay in the descriptor, so the shared js_get / js_set / js_mcall are untouched.
     //
-    // Every write here is a RAW js_set rather than memSetExt(): memSetExt is
+    // Every write here is a RAW definition rather than memSetExt(): memSetExt is
     // js_jsmset, whose whole job is to send a non-internal write on a descriptor to
     // the static table, which is exactly wrong for the instance half of this loop.
+    // It is js_jsdefm under llvm.Run, because the Go twin's js_set runs an accessor
+    // of the same name found up the __super chain, and a method must replace it;
+    // the floor's js_set already stores plainly.
     // The table itself is created unconditionally, so a RUNTIME `C.zz = 1` has
     // somewhere to land whether or not the class declared a static.
-    function clsRawSet(b, obj, key, val) { callExt(b, "js_set", [obj, key, val]) }
+    function clsRawSet(b, obj, key, val) { callExt(b, nativeBuild ? "js_set" : "js_jsdefm", [obj, key, val]) }
     // ----- The class descriptor -----
     // Sort the parsed members and remember the name and the parent. Shared by the
     // declaration and the expression form.

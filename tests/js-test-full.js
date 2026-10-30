@@ -1565,6 +1565,42 @@ function s138() {
     check("classcall1", m.join("|") == "true:Class constructor Nn138 cannot be invoked without 'new'|true:f is not a function")
 }
 
+// ===== SECTION 139: a RegExp as a string, a method over an accessor, o?.#x =====
+// ToString of a RegExp is RegExp.prototype.toString, "/" + source + "/" + flags, and
+// `source` escapes what would end the literal: a '/' outside a class, a line
+// terminator, and the empty pattern as "(?:)". A RegExp subclass's own toString wins.
+// A class method DEFINES its name, replacing an accessor of the same name in the same
+// class or up the chain - it never runs a setter. `o?.#x` is the optional form of a
+// private member access.
+class Re139 extends RegExp { toString() { return "R" } }
+class Acc139 { get a() { return "s" } set b(v) { Acc139.ran = true } }
+class Mid139 extends Acc139 { a() { return 1 } b() { return 2 } }
+class Leaf139 extends Mid139 {}
+class Own139 { get x() { return 1 } x() { return 2 } }
+class Opt139 {
+    #f = 3
+    #m() { return "m" }
+    static f(o) { return o?.#f }
+    static m(o) { return o?.#m() }
+    static deep(o) { return o?.inner.#f }
+}
+function s139() {
+    var rs = [/y/g, new RegExp("a/b", "i"), new RegExp(""), new RegExp("[/]/\n")]
+    var out = []
+    for (var i = 0; i < rs.length; i++) { out.push(String(rs[i]) + "|" + ("" + rs[i]) + "|" + `${rs[i]}`) }
+    check("restr1", out.join(" ") == "/y/g|/y/g|/y/g /a\\/b/i|/a\\/b/i|/a\\/b/i /(?:)/|/(?:)/|/(?:)/ /[/]\\/\\n/|/[/]\\/\\n/|/[/]\\/\\n/")
+    check("restr2", rs[1].source == "a\\/b" && rs[2].source == "(?:)" && new RegExp(rs[1]).source == "a\\/b" &&
+        new RegExp("a/b").test("a/b") && [rs[0]].join() == "/y/g")
+    check("restr3", String(new Re139("q", "g")) == "R" && Object.prototype.toString.call(rs[0]) == "[object RegExp]")
+    var lf = new Leaf139()
+    check("mshadow1", typeof lf.a == "function" && lf.a() == 1 && typeof new Mid139().a == "function" &&
+        lf.b() == 2 && Acc139.ran === undefined && typeof new Own139().x == "function")
+    var p = new Opt139()
+    p.inner = new Opt139()
+    check("optpriv1", Opt139.f(p) == 3 && Opt139.f(null) === undefined && Opt139.m(p) == "m" && Opt139.m(undefined) === undefined &&
+        Opt139.deep(p) == 3 && Opt139.deep(null) === undefined)
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -1620,6 +1656,7 @@ function main() {
     s135() // SECTION-CALL 135
     s137() // SECTION-CALL 137
     s138() // SECTION-CALL 138
+    s139() // SECTION-CALL 139
     println("full: " + checks + " checks, " + failures + " failures")
     return failures
 }

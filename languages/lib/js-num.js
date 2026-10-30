@@ -1,8 +1,8 @@
 // js-num.js -- JavaScript's reading of a STRING as a number: StringToNumber (the
 // ToNumber of a string, ES2023 7.1.4.1.1) and the globals parseFloat and parseInt
 // (19.2.4, 19.2.5); the writing of one by Number#toFixed, toExponential,
-// toPrecision and toLocaleString; and the code-unit order of two strings, which relations and the
-// default sort use.
+// toPrecision and toLocaleString; the code-unit order of two strings, which relations and the
+// default sort use; and a RegExp's `source` text.
 //
 // Included by both js and typescript interpreters (include("lib/js-num.js")) and
 // imported by languages/lib/js-rt.metajs, so the interpreters and layer 2 run one
@@ -334,6 +334,43 @@ function jsnStrCmp(a, b) {
     }
     if (a.length < b.length) { return -1 }
     return 1
+}
+
+// A RegExp's `source` (EscapeRegExpPattern, ECMA-262 22.2.6.13, as V8 spells it): a
+// '/' outside a character class gains a backslash, a line terminator becomes its
+// escape (a backslash before one is dropped), and the empty pattern reads "(?:)", so
+// "/" + source + "/" is again a literal. Escaping an escaped source changes nothing.
+// Twin of jsxSource in abnf/jsrtregexjs.go.
+function jsnReSource(src) {
+    if (src == "") { return "(?:)" }
+    var out = ""
+    var inCls = false
+    var i = 0
+    while (i < src.length) {
+        var c = src.charCodeAt(i)
+        if (c == 92 && i + 1 < src.length) {
+            var d = src.charCodeAt(i + 1)
+            if (d != 10 && d != 13 && d != 8232 && d != 8233) {
+                out = out + src.substring(i, i + 2)
+                i = i + 2
+                continue
+            }
+            i = i + 1
+            c = d
+        }
+        if (c == 10) { out = out + "\\n" }
+        else if (c == 13) { out = out + "\\r" }
+        else if (c == 8232) { out = out + "\\u2028" }
+        else if (c == 8233) { out = out + "\\u2029" }
+        else if (c == 47 && !inCls) { out = out + "\\/" }
+        else {
+            if (c == 91) { inCls = true }
+            if (c == 93) { inCls = false }
+            out = out + src.substring(i, i + 1)
+        }
+        i = i + 1
+    }
+    return out
 }
 
 // ----- Number#toFixed / toExponential / toPrecision (ES2023 21.1.3) -----

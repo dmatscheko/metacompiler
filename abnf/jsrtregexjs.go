@@ -18,7 +18,10 @@ package abnf
 // Positions are RUNE indices on this side and UTF-16 units on the interpreter side. They
 // agree over the whole Basic Multilingual Plane, which is every test in this tree.
 
-import "strings"
+import (
+	"strings"
+	"unicode/utf8"
+)
 
 // ----- Flags -----
 //
@@ -88,7 +91,7 @@ func jsxAdv(o *jsObject, text []rune, i int) int {
 func jsxNewRegex(src, jsFlags string) *jsObject {
 	fl := jsxCanonFlags(jsFlags)
 	o := rxNewRegexObj(src, jsxNeutral(fl))
-	o.set("source", src)
+	o.set("source", jsxSource(src))
 	o.set("flags", fl)
 	o.set("global", jsxHasFlag(fl, 'g'))
 	o.set("sticky", jsxHasFlag(fl, 'y'))
@@ -100,6 +103,52 @@ func jsxNewRegex(src, jsFlags string) *jsObject {
 	o.set("hasIndices", jsxHasFlag(fl, 'd'))
 	o.set("lastIndex", float64(0))
 	return o
+}
+
+// jsxSource is a RegExp's `source` (EscapeRegExpPattern, as V8 spells it). Twin of
+// jsnReSource in languages/lib/js-num.js.
+func jsxSource(src string) string {
+	if src == "" {
+		return "(?:)"
+	}
+	// Byte-wise, so a WTF-8 lone surrogate is copied through untouched; every
+	// character this rewrites is ASCII or U+2028 / U+2029.
+	var out strings.Builder
+	inCls := false
+	for i := 0; i < len(src); {
+		c, n := utf8.DecodeRuneInString(src[i:])
+		if c == '\\' && i+1 < len(src) {
+			d, m := utf8.DecodeRuneInString(src[i+1:])
+			if d != '\n' && d != '\r' && d != 0x2028 && d != 0x2029 {
+				out.WriteString(src[i : i+1+m])
+				i += 1 + m
+				continue
+			}
+			i++
+			c, n = d, m
+		}
+		switch {
+		case c == '\n':
+			out.WriteString(`\n`)
+		case c == '\r':
+			out.WriteString(`\r`)
+		case c == 0x2028:
+			out.WriteString("\\u2028")
+		case c == 0x2029:
+			out.WriteString("\\u2029")
+		case c == '/' && !inCls:
+			out.WriteString(`\/`)
+		default:
+			if c == '[' {
+				inCls = true
+			} else if c == ']' {
+				inCls = false
+			}
+			out.WriteString(src[i : i+n])
+		}
+		i += n
+	}
+	return out.String()
 }
 
 func jsxBool(o *jsObject, key string) bool {

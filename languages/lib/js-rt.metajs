@@ -1014,7 +1014,6 @@ function jvClassText(c) {
 function jvStr(v) {
     if (typeof v == "string") { return v }
     if (jbIsBig(v)) { return jbStr(v) }
-    if (jxIsRe(v)) { return jxStr(v) }
     if (jvIsObj(v)) {
         if (v["__symkey"] !== undefined) { return jvSymStr(v) }
         if (v["__isclass"] === true) {
@@ -1032,6 +1031,9 @@ function jvStr(v) {
             if (typeof r == "string") { return r }
             return jvStr(r)
         }
+        // RegExp.prototype.toString, after a subclass's own. Twins: jsvString in
+        // abnf/jsrtjsprint.go, jsStr in both *-interpreter.abnf.
+        if (jxIsRe(v)) { return jxStr(v) }
         var wp = anytype
         wp = v["__bvof"]
         if (wp !== undefined) { return jvStr(wp) }
@@ -4745,7 +4747,7 @@ function jvProtoTag(v) {
     if (typeof v == "boolean") { return "[object Boolean]" }
     if (jvIsCallable(v)) { return "[object Function]" }
     // The objects node gives a @@toStringTag: an Error instance (its __errh mark), a
-    // promise, and Math / JSON, which carry their tag in a hidden __strtag slot.
+    // promise, a RegExp, and Math / JSON, which carry their tag in a hidden __strtag slot.
     if (jvIsObj(v)) {
         // A string [Symbol.toStringTag], own or inherited, names the object.
         if (jvSymOn) {
@@ -4761,6 +4763,7 @@ function jvProtoTag(v) {
         wp = v["__bvof"]
         if (wp !== undefined) { return jvProtoTag(wp) }
         if (jpIs(v)) { return "[object Promise]" }
+        if (jxIsRe(v)) { return "[object RegExp]" }
     }
     return "[object Object]"
 }
@@ -8772,7 +8775,7 @@ function jxNewRegex(src, jsFlags) {
     var o = {}
     o["__jxsrc"] = src
     o["__jxneutral"] = jxNeutral(fl)
-    o["source"] = src
+    o["source"] = jsnReSource(src)
     o["flags"] = fl
     o["global"] = jxHasFlag(fl, "g")
     o["sticky"] = jxHasFlag(fl, "y")

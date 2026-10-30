@@ -5559,6 +5559,33 @@ function s139(): void {
         new Dk139().m() == 4 && Ds139.sm() == 6);
 }
 
+// ===== SECTION 140: a RegExp as a string, a method over an accessor =====
+// ToString of a RegExp is RegExp.prototype.toString, "/" + source + "/" + flags, and
+// `source` escapes what would end the literal: a '/' outside a class, a line
+// terminator, and the empty pattern as "(?:)". A RegExp subclass's own toString wins.
+// A class method DEFINES its name, replacing an accessor of the same name in the same
+// class or up the chain - it never runs a setter. U+2028 and U+2029 may stand raw in
+// a string literal.
+class Re140 extends RegExp { toString(): string { return "R" } }
+class Acc140 { static ran: any; get a(): any { return "s" } set b(v: any) { Acc140.ran = true } }
+class Mid140 extends Acc140 { a(): any { return 1 } b(): any { return 2 } }
+class Leaf140 extends Mid140 {}
+class Own140 { get x(): any { return 1 } x(): any { return 2 } }
+function s140(): void {
+    const rs: RegExp[] = [/y/g, new RegExp("a/b", "i"), new RegExp(""), new RegExp("[/]/\n")];
+    const out: string[] = [];
+    for (let i = 0; i < rs.length; i++) { out.push(String(rs[i]) + "|" + ("" + rs[i]) + "|" + `${rs[i]}`) }
+    check("restr1", out.join(" ") == "/y/g|/y/g|/y/g /a\\/b/i|/a\\/b/i|/a\\/b/i /(?:)/|/(?:)/|/(?:)/ /[/]\\/\\n/|/[/]\\/\\n/|/[/]\\/\\n/");
+    check("restr2", rs[1].source == "a\\/b" && rs[2].source == "(?:)" && new RegExp(rs[1]).source == "a\\/b" &&
+        new RegExp("a/b").test("a/b") && [rs[0]].join() == "/y/g");
+    check("restr3", String(new Re140("q", "g")) == "R" && Object.prototype.toString.call(rs[0]) == "[object RegExp]");
+    const lf: any = new Leaf140();
+    check("mshadow1", typeof lf.a == "function" && lf.a() == 1 && typeof new Mid140().a == "function" &&
+        lf.b() == 2 && Acc140.ran === undefined && typeof new Own140().x == "function");
+    const ls: string = "a b ";
+    check("rawls1", ls.length == 4 && ls.charCodeAt(1) == 8232 && ls.charCodeAt(3) == 8233);
+}
+
 // ===== END SECTIONS =====
 
 function main(): number {
@@ -5689,6 +5716,7 @@ function main(): number {
     s137(); // SECTION-CALL 137
     s138(); // SECTION-CALL 138
     s139(); // SECTION-CALL 139
+    s140(); // SECTION-CALL 140
     println("full: " + checks + " checks, " + failures + " failures");
     return failures;
 }

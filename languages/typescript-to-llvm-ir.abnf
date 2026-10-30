@@ -5150,7 +5150,7 @@ NotFuncHead = :script(~~
 
     // ----- The static namespace -----
     // See the twin of this comment in js-to-llvm-ir.abnf.
-    function clsRawSet(b, obj, key, val) { callExt(b, "js_set", [obj, key, val]) }
+    function clsRawSet(b, obj, key, val) { callExt(b, nativeBuild ? "js_set" : "js_jsdefm", [obj, key, val]) }
     // ----- The class descriptor -----
     // Sort the parsed members and remember the name and the parent. Shared by the
     // declaration and the expression form.

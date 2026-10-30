@@ -1425,12 +1425,10 @@ VarRef      <~~ push(makeVarRef(jsbRef(idName(up.in)))) ~~>
 StringLit   = JsDqString | JsSqString ;
 JsDqString  = '"' :whitespace() { JsStrEsc | JsDqPlain } <~~ push(makeConst(jsUnescape(up.in))) ~~> '"' :whitespace(Whitespace) ;
 JsSqString  = "'" :whitespace() { JsStrEsc | JsSqPlain } <~~ push(makeConst(jsUnescape(up.in))) ~~> "'" :whitespace(Whitespace) ;
-// The plain characters of a string are everything EXCEPT the closing quote, the backslash
-// and a line terminator. The shared DqPlain/SqPlain start at \x20, which would reject the
-// raw control characters JavaScript allows (a literal NUL in a string is legal), so the
-// JS strings bring their own body characters the same way they bring their own escapes.
-JsDqPlain   = "\x00"..."\x09" | "\x0b"..."\x0c" | "\x0e"..."\x21" | "\x23"..."\x5b" | "\x5d"..."\u2027" | "\u202a"..."\U0010ffff" ;
-JsSqPlain   = "\x00"..."\x09" | "\x0b"..."\x0c" | "\x0e"..."\x26" | "\x28"..."\x5b" | "\x5d"..."\u2027" | "\u202a"..."\U0010ffff" ;
+// See the twin of this comment in js-interpreter.abnf: U+2028 and U+2029 stand raw in a
+// string, as tsc agrees.
+JsDqPlain   = "\x00"..."\x09" | "\x0b"..."\x0c" | "\x0e"..."\x21" | "\x23"..."\x5b" | "\x5d"..."\U0010ffff" ;
+JsSqPlain   = "\x00"..."\x09" | "\x0b"..."\x0c" | "\x0e"..."\x26" | "\x28"..."\x5b" | "\x5d"..."\U0010ffff" ;
 
 // See the twin of this comment in js-interpreter.abnf.
 JsStrEsc    = "\\" ( JsHexEsc | JsUniEsc | JsLineCont | JsEscChar ) ;
@@ -2491,6 +2489,9 @@ NotFuncHead = :script(~~
             if (ex != null) { return jsStr(ex.v) }
             var r = jsCallMethod(v, "toString")
             if (r != null) { return "" + r.v }
+            // RegExp.prototype.toString. Twins: jsvString in abnf/jsrtjsprint.go, jvStr
+            // in languages/lib/js-rt.metajs.
+            if (isRegex(v)) { return "/" + v.source + "/" + v.flags }
             if (jsIsWrap(v)) { return jsStr(v.__bvof) }
             // OrdinaryToPrimitive finds no toString and no valueOf to call.
             if (jsNoObjProto(v)) { biRaise("TypeError: Cannot convert object to primitive value") }
@@ -2772,6 +2773,7 @@ NotFuncHead = :script(~~
             if (hasOwn(v, "__strtag")) { return "[object " + v.__strtag + "]" }
             if (jsIsWrap(v)) { return jsProtoTag(v.__bvof) }
             if (jpIs(v)) { return "[object Promise]" }
+            if (isRegex(v)) { return "[object RegExp]" }
         }
         return "[object Object]"
     }
@@ -6976,7 +6978,7 @@ NotFuncHead = :script(~~
     function mkRegex(src, flags) {
         var v = {}
         scopePut(v, "__regex", true)
-        scopePut(v, "source", src)
+        scopePut(v, "source", jsnReSource(src))
         scopePut(v, "flags", flags)
         scopePut(v, "prog", jsReProg(src, flags))
         scopePut(v, "global", jsReHas(flags, "g"))
@@ -9211,6 +9213,8 @@ NotFuncHead = :script(~~
                     addAccessor(ptgt, pm.acc, pk, fnMetaPut(makeClosure(pm.params, pm.body, mscopes, true),
                                                             pm.acc + " " + pk, fnArity(pm.params)))
                 } else {
+                    // A method replaces an earlier accessor of the same name.
+                    jsAccDrop(ptgt, pk)
                     scopePut(ptgt, pk, classMemberFn(pm, mscopes, pk))
                 }
                 if (pm.statik) { jsStaticName(statics, pk) }

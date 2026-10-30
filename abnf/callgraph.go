@@ -437,10 +437,10 @@ func extractCallGraph(m *ir.Module) ([]cgDef, []cgCall) {
 				}
 			}
 		case "js_tdecl", "js_scope_decl", "js_pyset_var", "py_setvar", "sw_kset", "dt_kset", "kt_kset",
-			"js_tset", "js_scope_set", "js_kset", "js_set", "js_phmset":
+			"js_tset", "js_scope_set", "js_kset", "js_set", "js_phmset", "js_jsdefm":
 			if len(call.Args) >= 3 {
 				if fn, ok := closureFn[call.Args[2]]; ok {
-					member := callee == "js_set" || callee == "js_phmset"
+					member := callee == "js_set" || callee == "js_phmset" || callee == "js_jsdefm"
 					if member && !closureSite[fn].adj {
 						delete(closureSite, fn)
 					}
