@@ -112,7 +112,9 @@ want() { case ",$LEGS," in *",$1,"*) return 0 ;; *) return 1 ;; esac; }
 case "$TIMEOUT" in ''|*[!0-9]*) echo "probe.sh: --timeout wants seconds" >&2; exit 2 ;; esac
 case "$MAX_OUT" in ''|*[!0-9]*|0) echo "probe.sh: --max-output wants megabytes" >&2; exit 2 ;; esac
 
-[ -x ./mec ] || go build -o mec . || exit 2
+# Always rebuild: an abnf/*.go or Go-twin edit is otherwise measured with the
+# previous binary. Incremental, and an up-to-date ./mec is left untouched.
+go build -o mec . || exit 2
 
 # A LEG MUST NOT OUTLIVE THE PROBE (tests/lib/guard.sh says why): every leg and
 # anything it started is killed before $work goes.

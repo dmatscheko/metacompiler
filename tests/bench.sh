@@ -66,7 +66,9 @@ while [ $# -gt 0 ]; do
     shift
 done
 
-[ -x ./mec ] || go build -o mec . || exit 2
+# Always rebuild: an abnf/*.go or Go-twin edit is otherwise measured with the
+# previous binary. Incremental, and an up-to-date ./mec is left untouched.
+go build -o mec . || exit 2
 
 
 work=$(mktemp -d)
