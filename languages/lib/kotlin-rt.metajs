@@ -6742,6 +6742,11 @@ function k4bIsThrowable(v) {
 // ordinary type test and `catch (e: RuntimeException)` declines a `: Exception`
 // class.
 function js_ktexcmatch(thrown, tname) {
+    // A return leaving a lambda travels as a thrown marker; no catch clause takes it.
+    if (ktIsObj(thrown)) {
+        if (thrown["__nlret"] !== undefined) { return false }
+        if (thrown["__lamret"] !== undefined) { return false }
+    }
     var t = k4bStripQ(k4bStripAngle(tname))
     if (t == "Throwable" || t == "Any") { return true }
     if (t == "Exception" || t == "RuntimeException" || t == "Error") {

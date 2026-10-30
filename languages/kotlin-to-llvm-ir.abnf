@@ -1678,7 +1678,7 @@ TryExpr     <~~ push(makeTryValue(takeAll())) ~~>
 TryVBody    <~~ push({trybody: valueBody(pop())}) ~~>
             = ValueBlock ;
 CatchVClause <~~ push(makeCatch(takeAll())) ~~>
-            = KwCatch "(" KId <~~ push(up.in) ~~> [ ":" Type ] [ "," ] ")" CatchVBody ;
+            = KwCatch "(" KId <~~ push(up.in) ~~> [ ":" CatchTy ] [ "," ] ")" CatchVBody ;
 CatchVBody  <~~ push(valueBody(pop())) ~~>
             = ValueBlock ;
 

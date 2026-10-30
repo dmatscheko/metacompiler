@@ -5733,12 +5733,57 @@ fun sec126() {
 // ===== SECTION 127: a lambda whose body ends in a try =====
 // A lambda's value is its last expression, and a try is an expression (the Kotlin
 // specification, "Lambda literals" and "Try-expressions"); getValue's message is
-// kotlin-stdlib 2.2.21's MapsKt.getValue, called from java 24.
+// kotlin-stdlib 2.2.21's MapsKt.getValue, called from java 24. A try-expression's
+// catch clauses are chosen by type like a statement's, and a `return` out of a
+// lambda passes every catch clause on its way (it is not an exception) while a
+// finally still runs.
+fun tc127(i: Int): String {
+    val r = try {
+        if (i == 0) throw IllegalStateException("s") else throw IllegalArgumentException("a")
+    } catch (e: IllegalArgumentException) { "iae" } catch (e: RuntimeException) { "rte" }
+    return r
+}
+fun nl127a(xs: List<Int>): Int {
+    xs.forEach {
+        try { if (it == 2) return it * 10 } catch (e: Exception) { }
+    }
+    return -1
+}
+fun nl127b(xs: List<Int>): String {
+    var log = ""
+    xs.forEach {
+        try {
+            if (it == 2) return log + "r"
+            log += it
+        } catch (e: Throwable) { log += "c" } finally { log += "f" }
+    }
+    return log
+}
+fun nl127c(xs: List<List<Int>>): String {
+    var log = ""
+    xs.forEach outer@{ row ->
+        row.forEach {
+            try {
+                if (it == 0) return@outer
+                log += it
+            } catch (e: Exception) { log += "c" }
+        }
+        log += "|"
+    }
+    return log
+}
 fun sec127() {
     val m = mapOf("a" to 1)
     check("lam127a", m.let { try { it.getValue("b") } catch (e: NoSuchElementException) { e.message } } == "Key b is missing in the map." &&
                      m.let { try { 7 } catch (e: Exception) { 8 } } == 7)
     check("lam127b", listOf(1, 2).map { try { if (it == 1) return@map 9; it } finally { } }.toString() == "[9, 2]")
+    var out = ""
+    try {
+        out = run { try { throw IllegalStateException("x") } catch (e: IllegalArgumentException) { "wrong" } }
+    } catch (e: IllegalStateException) { out = "outer " + e.message }
+    check("lam127c", tc127(0) + " " + tc127(1) == "rte iae" && out == "outer x" &&
+                     listOf(1, 2).map { try { if (it == 2) throw IllegalArgumentException("b"); it } catch (e: IllegalArgumentException) { -1 } }.toString() == "[1, -1]")
+    check("lam127d", nl127a(listOf(1, 2, 3)) == 20 && nl127b(listOf(1, 2, 3)) == "1fr" && nl127c(listOf(listOf(1, 0, 2), listOf(3))) == "13|")
 }
 
 // ===== SECTION 128: casts, `!!` targets, trimIndent and LongRange bounds =====

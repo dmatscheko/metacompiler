@@ -1641,6 +1641,16 @@ func init() {
 		// the ordinary type test and `catch (e: RuntimeException)` declines a
 		// `: Exception` class (tests/kotlin-test-full.kt asserts it).
 		m["js_ktexcmatch"] = func(a []uint64) uint64 {
+			// A return leaving a lambda travels as a thrown marker (retNonLocal /
+			// retLamLabel in kotlin-to-llvm-ir.abnf); no catch clause takes it.
+			if o, ok := u(a[0]).(*jsObject); ok {
+				if _, nl := o.props["__nlret"]; nl {
+					return boolH(false)
+				}
+				if _, lr := o.props["__lamret"]; lr {
+					return boolH(false)
+				}
+			}
 			t := rt.toString(u(a[1]))
 			if i := strings.IndexByte(t, '<'); i >= 0 {
 				t = t[:i]
