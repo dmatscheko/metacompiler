@@ -4451,9 +4451,6 @@ KwDefault   = "default" KwEnd ;
     }
 
     c.compile(c.asg)
-    // Every address-taken function is known now, so the indirect-call trampolines
-    // can be given their dispatch bodies.
-    finishTrampolines()
     var ginitF = buildGlobalInit()
 
     // The entry point defaults to main() but the -main flag (c.mainName) can name any
@@ -4473,6 +4470,7 @@ KwDefault   = "default" KwEnd ;
         sb = thunk(sb)
         sb.NewRet(zero)
         scopes.pop()
+        finishTrampolines()
         println(m)
         var sres = llvm.Run(m, "__mecmain__")
         print(sres.Out)
@@ -4484,6 +4482,10 @@ KwDefault   = "default" KwEnd ;
         exit(1)
     }
     if (ginitF != undefined) { wrapEntry(entry, ginitF) }
+    // Every address-taken function is known only now - a global initializer and a
+    // -main snippet name functions too - so the indirect-call trampolines get their
+    // dispatch bodies last.
+    finishTrampolines()
 
     // With -exe PATH, link the module into a native executable (clang) instead of running
     // it. main() returns int and output goes through putchar, so the binary prints and

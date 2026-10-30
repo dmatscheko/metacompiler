@@ -636,6 +636,10 @@ char s25_rows[2][3] = { "ab", "c" };     /* string literals as char-array rows *
 struct S25K { const char *k; char t[3]; } s25_kv[2] = { { "one", "t" }, { .t = "u", .k = "two" } };
 const char *s25_tail = "hello" + 3;      /* a literal OPERAND, not the whole initializer */
 int s25_id(int v) { return v; }
+/* Functions named ONLY in a file-scope initializer are still callable through it. */
+int s25_sub(int a, int b) { return a - b; }
+int s25_mul(int a, int b) { return a * b; }
+int (*s25_ops[2])(int, int) = { s25_sub, s25_mul };
 int s25(void) {
     check(2501, s25_arr[0] == 1 && s25_arr[2] == 3 && s25_arr[3] == 0);
     check(2502, s25_inf[1] == 8 && sizeof s25_inf == 8);
@@ -656,6 +660,7 @@ int s25(void) {
     check(2515, loc[0][1] == 'q' && loc[1][0] == 'r' && sizeof loc == 2 * sizeof(char *));
     const char *mid = "abc" + 1, *arr2[] = { "xyz" + 2 };
     check(2516, s25_tail[0] == 'l' && s25_tail[1] == 'o' && mid[0] == 'b' && arr2[0][0] == 'z');
+    check(2517, s25_ops[0](7, 3) == 4 && s25_ops[1](7, 3) == 21);
     return 0;
 }
 
