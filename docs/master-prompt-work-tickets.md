@@ -108,6 +108,10 @@ Rules:
   tests/<lang>-test-full.* or tests/<lang>-test-features.* (follow the file's
   SECTION / SECTION-CALL / check conventions), and check that the new assertion FAILS
   on the code before your fix.
+- A new by-design failing row in .vscode/launch.json (SHOULD FAIL, SHOULD ABORT
+  interpreter rows) needs an `"expectError": "<substring>"` line after its
+  `"request"` line, taken from the output after checking it fails for its stated
+  reason (no `"` or backslash in the value); test.sh turns a row without one red.
 - Code comments explain the code: what, why it is non-obvious, the spec rule. NO
   history (no "used to", no commit hashes, dates, rounds, ticket IDs, todo.md
   references, measurement war stories). Keep comments short; one explanation per
