@@ -151,7 +151,7 @@ is named ClosedDoubleRange (no Float mark on the range value). (7) `null as T` f
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-848 bash: backslash-newline inside an array literal does not parse · P2 · SH · OPEN [V SH worker]
+### T-848 bash: backslash-newline inside an array literal does not parse · P2 · SH · IN PROGRESS (SH worker, round 10) [V SH worker]
 `v=(a \⏎'b')` → real bash 2 elements; both halves "Not everything could be parsed". `v=(a b \⏎ c)`
 parses by accident, but the backslash-newline is not whitespace. Cause: `WsNL` in both bash grammars
 (interpreter ~306, compiler ~295) lacks the `"\\\n"` alternative that `Whitespace` has; CfSt
