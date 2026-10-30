@@ -2835,6 +2835,7 @@
             "name": "JavaScript abort probe, unhandled rejection (interpreter, SHOULD FAIL)",
             "type": "go",
             "request": "launch",
+            "expectError": "uncaught exception: Error: unhandled rejection probe",
             "program": "${workspaceFolder}","args": ["languages/js-interpreter.abnf", "tests/js-abort-test-unhandled.js", "-q"]
         },
         {
@@ -2847,6 +2848,7 @@
             "name": "TypeScript abort probe, unhandled rejection (interpreter, SHOULD FAIL)",
             "type": "go",
             "request": "launch",
+            "expectError": "uncaught exception: Error: unhandled rejection probe",
             "program": "${workspaceFolder}","args": ["languages/typescript-interpreter.abnf", "tests/typescript-abort-test-unhandled.ts", "-q"]
         },
         {
