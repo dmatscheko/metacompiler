@@ -1648,13 +1648,18 @@ KwDefault   = "default" KwEnd ;
         return base
     }
     function load(addr) {
-        if (addr <= 0 || addr >= mem.length) fail("invalid load at address " + addr)
+        if (addr <= 0 || addr >= mem.length) {
+            if (noEval > 0) return 0
+            fail("invalid load at address " + addr)
+        }
         return mem[addr]
     }
     // The operand of sizeof and _Generic is not evaluated (C11 6.5.3.4p2, 6.5.1.1p3),
-    // but this interpreter learns a type only by running the thunk. While typeOnly
-    // runs one, noEval > 0 turns every side effect off: stores, copies and library
-    // writes are dropped and a call answers a zero of its return type unrun.
+    // and neither is the arm of ?: not taken, whose type still decides the result's
+    // (6.5.15p5), but this interpreter learns a type only by running the thunk. While
+    // typeOnly runs one, noEval > 0 turns every side effect off: stores, copies and
+    // library writes are dropped, a call answers a zero of its return type unrun, and
+    // a wild load or a division by zero answers 0 instead of failing.
     var noEval = 0
     function typeOnly(t) {
         noEval = noEval + 1
@@ -1665,8 +1670,8 @@ KwDefault   = "default" KwEnd ;
     // Storing converts to the destination's C type first, so a cell only ever holds
     // a value its own type can represent.
     function store(ct, addr, v) {
-        if (addr <= 0 || addr >= mem.length) fail("invalid store at address " + addr)
         if (noEval > 0) return convert(ct, v)
+        if (addr <= 0 || addr >= mem.length) fail("invalid store at address " + addr)
         mem[addr] = convert(ct, v)
         return mem[addr]
     }
@@ -2569,7 +2574,10 @@ KwDefault   = "default" KwEnd ;
             // Not a function name: a VARIABLE holding a function pointer, called
             // through its own name ('fp(4)').
             var lv = lookupVar(name)
-            if (lv != undefined) return callFunction(funcNameOf(load(lv.addr)), argValues)
+            if (lv != undefined) {
+                if (noEval > 0) return val(0, ctInt)
+                return callFunction(funcNameOf(load(lv.addr)), argValues)
+            }
             // The standard library comes LAST, so a program that defines its own strlen
             // (or holds one in a function pointer) still gets its own.
             if (hasOwn(libcNames, name)) return libcCall(name, argValues)
@@ -2940,6 +2948,7 @@ KwDefault   = "default" KwEnd ;
         // which is exact at 64 bits and wraps at the result type's width; convert
         // then re-applies the width for the narrow types (szArith works at 64).
         var isI = ct.k == "int"
+        if (noEval > 0 && isI && (op == "/" || op == "%") && szEq(b, 0)) return val(0, ct)
         if (op == "==") return val((isI ? szEq(a, b) : (a == b)) ? 1 : 0, ctInt)
         if (op == "!=") return val((isI ? !szEq(a, b) : (a != b)) ? 1 : 0, ctInt)
         if (op == "<")  return val((isI ? (szCmp(a, b) < 0)  : (a < b))  ? 1 : 0, ctInt)
@@ -2979,13 +2988,24 @@ KwDefault   = "default" KwEnd ;
     }
     // The conditional operator's two arms are balanced by the usual arithmetic
     // conversions, so '1 ? 2 : 2.5' has type double and yields 2.0 (C11 6.5.15p5).
+    // The arm not taken is never evaluated: its type is learned once, by typeOnly,
+    // and kept, as is the type of each arm that does run.
     function makeCond(items) {
         if (items.length == 1) return items[0]
+        var arms = [items[1], items[2]]
+        var armCt = [ctUnknown, ctUnknown]
         return function() {
-            var r = nzv(items[0]().v) ? items[1]() : items[2]()
-            return r
+            var k = nzv(items[0]().v) ? 0 : 1
+            var r = arms[k]()
+            armCt[k] = r.t
+            if (armCt[1 - k] == ctUnknown) { armCt[1 - k] = typeOnly(arms[1 - k]).t }
+            var o = armCt[1 - k]
+            if (!isNum(r.t) || !isNum(o)) return r
+            var ct = arithCt(r.t, o)
+            return val(convert(ct, r.v), ct)
         }
     }
+    var ctUnknown = {k: "unknown"}
     // A compound assignment is the plain operator on the current value, converted
     // back to the target's type (C11 6.5.16.2p3).
     applyOp = function(op, a, b) { return binOp(op.slice(0, op.length - 1), a, b) }

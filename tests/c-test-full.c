@@ -178,6 +178,15 @@ int s05(void) {
     check(514, cm == 3 && t == 1);
     check(515, (0 ? 1 : 0 ? 2 : 3) == 3 && (87 >= 90 ? 1 : 87 >= 80 ? 2 : 3) == 2);
     check(516, sizeof(int) == 4 && sizeof(int *) == 8);   /* the pinned data model */
+    /* 6.5.15p5: the two arms of ?: meet in the usual arithmetic conversions, and the
+       arm not taken is not evaluated (cc for every line). */
+    int one = 1, mone = -1, nil = 0, hits = s05_hits;
+    unsigned uone = 1u;
+    long long ce = one ? -1 : uone;
+    check(517, ce == 4294967295LL && (one ? -1 : uone) > 0 && (one ? 7 : 2.5) / 2 * 10 == 35);
+    check(518, sizeof(one ? 1 : 2LL) == 8 && sizeof(mone < 0 ? (char)1 : (short)2) == 4
+               && _Generic(mone < 0 ? 1 : 1u, int: 1, unsigned: 2, default: 3) == 2);
+    check(519, (nil != 0 ? 7 / nil : 9) == 9 && (one ? 3 : s05_bump()) == 3 && s05_hits == hits);
     return 0;
 }
 
