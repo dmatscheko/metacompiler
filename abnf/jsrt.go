@@ -658,6 +658,9 @@ type jsrt struct {
 	// onto; js_jsdrain runs it to exhaustion once the script has finished, which
 	// is the only point at which this runtime has an event loop turn.
 	microQ []func()
+	// promRejected are the promises rejected while no reaction was registered on
+	// them; js_jsdrain raises the first that still has none (jsvUnhandled).
+	promRejected []*jsObject
 	// promFn is the one `Promise` global value, interned so that `Promise ===
 	// Promise` holds and the statics can be recognized by identity.
 	promFn *hostFunc
@@ -1023,6 +1026,9 @@ func (rt *jsrt) promSettle(p *jsObject, state int, v interface{}) {
 	}
 	p.set("__ps", float64(state))
 	p.set("__pv", v)
+	if state == 2 && p.props["__ph"] == nil {
+		rt.promRejected = append(rt.promRejected, p)
+	}
 	cbs, _ := p.props["__pcb"].(*jsArray)
 	p.set("__pcb", &jsArray{})
 	if cbs != nil {
@@ -1138,6 +1144,7 @@ func (rt *jsrt) promEnqueueReaction(p *jsObject, reaction *jsObject) {
 // promThen registers one reaction. derived is the promise then() answers, or nil
 // for an await, which consumes the result itself.
 func (rt *jsrt) promThen(p *jsObject, onF, onR interface{}, derived *jsObject) {
+	p.props["__ph"] = true
 	reaction := newJSObject()
 	reaction.set("f", onF)
 	reaction.set("r", onR)
@@ -1384,7 +1391,7 @@ func (rt *jsrt) promStatic(c *jsObject, name string, args []interface{}) (interf
 			case "all", "allSettled":
 				rt.promResolve(out, results)
 			case "any":
-				rt.promSettle(out, 2, "AggregateError: All promises were rejected")
+				rt.promSettle(out, 2, rt.jsAggErr(nil))
 			}
 			return out, true
 		}
@@ -1440,7 +1447,7 @@ func (rt *jsrt) promStatic(c *jsObject, name string, args []interface{}) (interf
 					left--
 					if left == 0 {
 						if name == "any" {
-							rt.promSettle(out, 2, "AggregateError: All promises were rejected")
+							rt.promSettle(out, 2, rt.jsAggErr(results.elems))
 						} else {
 							rt.promResolve(out, results)
 						}
@@ -1457,14 +1464,8 @@ func (rt *jsrt) promStatic(c *jsObject, name string, args []interface{}) (interf
 // loop: there are no timers or I/O here, so one drain after the script has run
 // is every turn the program will ever get.
 //
-// An UNHANDLED REJECTION is deliberately not reported, in any of the three
-// engines. node terminates the process on one; here the interpreter half drives
-// an async body by REPLAY (see the generator section of js-interpreter.abnf's
-// start script), so a rejected promise the body created is created again on
-// every resume and the copies nothing awaited would be reported as unhandled -
-// spurious aborts on correct programs. Reporting it in the compiler halves only
-// would make the halves disagree on an error path, so no engine reports it and
-// the divergence from node is documented instead.
+// A rejection nothing handled by the end of the drain is js_jsdrain's to raise
+// (jsvUnhandled).
 func (rt *jsrt) drainMicrotasks() {
 	for len(rt.microQ) > 0 {
 		job := rt.microQ[0]

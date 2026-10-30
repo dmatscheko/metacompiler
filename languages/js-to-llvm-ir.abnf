@@ -717,7 +717,7 @@ DotSuffix   = "." ( PrivSuffix | Id <~~ push({kind:"member", name: idName(up.in)
 // 'this.#x': a private name. It is stored under the mangled key '__#<body>#x' (see
 // ClassPrivate),
 // which is what keeps it out of js_keys, so out of for-in and object spread.
-PrivSuffix  = "#" Id <~~ push({kind:"member", name: "#" + idName(up.in), key: privRefConst(idName(up.in))}) ~~> ;
+PrivSuffix  = "#" Id <~~ push({kind:"member", name: "#" + idName(up.in), key: privRefConst(idName(up.in)), privChk: privRefChk(idName(up.in))}) ~~> ;
 IndexSuffix <~~ push({kind:"member", txt: cpTxt(up.in, up.pos), key: idxKeyT(pop(), up.in)}) ~~>
             = "[" Expression "]" ;
 // The three optional forms carry the same payload as their plain counterparts plus the
@@ -3391,7 +3391,9 @@ NotFuncHead = :script(~~
         var okB = curF.NewBlock("")
         var badB = curF.NewBlock("")
         b.NewCondBr(b.NewICmp(llvm.enum.IPredNE, callExt(b, "js_jsfnp", [fnV]), handle(0)), okB, badB)
-        emitSiteThrow(badB, site + " is not a function")
+        // js_jscallerr: node's TypeError, which names a class called without `new`.
+        callExt(badB, "js_throw", [callExt(badB, "js_jscallerr", [fnV, emitStr(badB, site)])])
+        badB.NewRet(hUndef) // Never reached: js_throw does not return.
         return {b: okB, v: jsCall(okB, fnV, thisV, argsV)}
     }
     // The MISS SENTINEL js_jsmcall answers when no arm claimed a method call. It is
@@ -3686,9 +3688,11 @@ NotFuncHead = :script(~~
     // jsbLoad in js-interpreter.abnf.
     var jsbWant = false
     var jsbDone = false
+    var jsAggWant = false // Whether the program names Promise or AggregateError.
     function jsbRef(name) {
         if (name == "Set" || name == "Map" || name == "Array" || name == "isNaN" || name == "isFinite" ||
             name == "structuredClone" || name == "Reflect") { jsbWant = true }
+        if (name == "Promise" || name == "AggregateError") { jsAggWant = true }
         return name
     }
     function jsbLoad() {
@@ -5208,6 +5212,7 @@ NotFuncHead = :script(~~
                 if (s.kind == "member" || s.kind == "optmember") {
                     var kr = s.key(b)
                     b = kr.b
+                    if (s.privChk != undefined) { b = s.privChk(b, cur, false) }
                     if (i + 1 < suffixes.length && suffixes[i + 1].kind == "call") {
                         var mc = emitMethodCall(b, cur, kr.v, s.name, suffixes[i + 1].args, sTexts[i + 1])
                         b = mc.b
@@ -5275,7 +5280,9 @@ NotFuncHead = :script(~~
         if (ref.name != undefined) { return ref.name }
         return "(intermediate value)"
     }
-    function emitRefPath(b, ref) {
+    // write: the target is only stored to (a plain `=`), which a private field's brand
+    // check names.
+    function emitRefPath(b, ref, write) {
         var cur = anytype
         if (ref.base != undefined) {
             var br = ref.base(b)
@@ -5293,6 +5300,7 @@ NotFuncHead = :script(~~
             if (s.kind == "member") {
                 var kr = s.key(b)
                 b = kr.b
+                if (s.privChk != undefined) { b = s.privChk(b, cur, false) }
                 if (i + 1 < n && ref.path[i + 1].kind == "call") {
                     // 'o.get(1).a = 2' is the ordinary method call, receiver and all.
                     var mc = emitMethodCall(b, cur, kr.v, s.name, ref.path[i + 1].args, sTexts[i + 1])
@@ -5325,7 +5333,9 @@ NotFuncHead = :script(~~
                 i = i + 1
             }
         }
-        var last = ref.path[ref.path.length - 1].key(b)
+        var lastS = ref.path[ref.path.length - 1]
+        var last = lastS.key(b)
+        if (lastS.privChk != undefined) { lastS.privChk(last.b, cur, write === true) }
         return {b: last.b, obj: cur, key: last.v}
     }
     // items = [ref, opString, valueThunk]. The logical operators short circuit and so need
@@ -5361,7 +5371,7 @@ NotFuncHead = :script(~~
                     setExt = "js_scope_set"
                 }
             } else {
-                p = emitRefPath(b, ref)
+                p = emitRefPath(b, ref, op == "=")
                 b = p.b
                 if (op != "=") {
                     var og = emitOldGet(b, p.obj, p.key)
@@ -6183,7 +6193,7 @@ NotFuncHead = :script(~~
             refNameSet(b, ref, "js_scope_set_or_create", valueH)
             return b
         }
-        var p = emitRefPath(b, ref)
+        var p = emitRefPath(b, ref, true)
         return emitRefused(p.b, callExt(p.b, memSetExt(), [p.obj, p.key, valueH]))
     }
     // The store of an ASSIGNMENT pattern's name leaf: the implicit-global write, or the
@@ -6648,6 +6658,7 @@ NotFuncHead = :script(~~
     var curClassName = ""
     var classSeq = 0
     var heritageSeq = 0
+    var ckeySeq = 0 // Names the scope slot of each computed member key (makeClassInfo).
 
     // A private name '#x' is stored under the mangled key '__#<body>#x'. The '__' prefix
     // is the runtime's marker for an internal slot, which js_keys skips - so a private
@@ -6662,9 +6673,12 @@ NotFuncHead = :script(~~
     // it); privDecls[id] is the set of private names body id DECLARES.
     var privStack = []
     var privDecls = []
+    var privClassNames = [] // privClassNames[id]: the class body id's class name.
+    var privKinds = {}      // "$" + key: {field, statik} for each declared private name.
     function privEnter() {
         privStack.push(privDecls.length)
         privDecls.push({})
+        privClassNames.push(curClassName)
     }
     function privExit() { privStack.pop() }
     function privKey(id, n) { return "__#" + id + "#" + n }
@@ -6703,6 +6717,35 @@ NotFuncHead = :script(~~
         var st = privStack.slice()
         return function(b) { return {b: b, v: emitStr(b, privRefKey(st, n))} }
     }
+    // The member builders record what each private name is, for its brand check.
+    function privNote(key, field, statik) {
+        if (typeof key == "string" && key.substring(0, 3) == "__#") { privKinds["$" + key] = {field: field, statik: statik} }
+    }
+    // The brand check in front of a private member access on objV: node's TypeError
+    // when the object does not hold the name - a field's names the access (write is
+    // true for a store), a method's or an accessor's the class. js_jsprivchk tests the
+    // static ones against the class itself. Twin of privCheck in js-interpreter.abnf.
+    function privRefChk(n) {
+        var st = privStack.slice()
+        return function(b, objV, write) {
+            var key = privRefKey(st, n)
+            var info = privKinds["$" + key]
+            if (info == undefined) { return b }
+            var i = st.length - 1
+            while (i >= 0 && privDecls[st[i]]["$" + n] == undefined) { i = i - 1 }
+            var cn = (i >= 0) ? privClassNames[st[i]] : ""
+            if (cn == "" || cn.substring(0, 6) == "0class") { cn = "anonymous" }
+            var msg = ""
+            if (info.field) {
+                msg = write ? "TypeError: Cannot write private member #" + n + " to an object whose class did not declare it"
+                            : "TypeError: Cannot read private member #" + n + " from an object whose class did not declare it"
+            } else {
+                msg = info.statik ? "TypeError: Receiver must be class " + cn : "TypeError: Receiver must be an instance of class " + cn
+            }
+            callExt(b, "js_jsprivchk", [objV, emitStr(b, key), info.statik ? hTrue : hFalse, emitStr(b, msg)])
+            return b
+        }
+    }
 
     // ----- Class members -----
     // Every member production pushes ONE descriptor:
@@ -6720,14 +6763,16 @@ NotFuncHead = :script(~~
     }
     // A key descriptor as a {b, v} pair in the class-definition block.
     function emitMemberKey(b, m) {
-        if (m.nameT != undefined) {
-            // A computed key may be a symbol, which js_jspropkey turns into its key;
-            // lib/js-builtins.js's are the engine's own keys, raw.
-            var kr = m.nameT(b)
-            if (c.curFile() == "js-builtins.js") { return kr }
-            return {b: kr.b, v: callExt(kr.b, "js_jspropkey", [kr.v])}
-        }
+        if (m.ckey != undefined) { return {b: b, v: callExt(b, "js_scope_get", [curScopeV, emitStr(b, m.ckey)])} }
+        if (m.nameT != undefined) { return emitKeyNow(b, m) }
         return {b: b, v: emitStr(b, memberNameEsc(m))}
+    }
+    // A computed key, evaluated. It may be a symbol, which js_jspropkey turns into its
+    // key; lib/js-builtins.js's are the engine's own keys, raw.
+    function emitKeyNow(b, m) {
+        var kr = m.nameT(b)
+        if (c.curFile() == "js-builtins.js") { return kr }
+        return {b: kr.b, v: callExt(kr.b, "js_jspropkey", [kr.v])}
     }
     // The member's own name for `f.name` / `f.length` - "" when the key is COMPUTED and
     // so is only known at run time.
@@ -6758,6 +6803,7 @@ NotFuncHead = :script(~~
     // exactly one for a setter). A private key arrives mangled (privDeclare) and is
     // filed raw, as makeClassPrivate's is.
     function makeClassAccessor(items) {
+        privNote(items[2], false, isStaticMods(items[0].mods))
         return {kind: "accessor", acc: items[1], statik: isStaticMods(items[0].mods),
                 priv: typeof items[2] == "string" && items[2].substring(0, 3) == "__#",
                 name: (typeof items[2] == "string") ? items[2] : undefined,
@@ -6776,6 +6822,7 @@ NotFuncHead = :script(~~
             else if (items[i] != undefined && items[i].amod == true) { isAsync = true }
             else { rest.push(items[i]) }
         }
+        privNote(rest[0], false, isStaticMods(mods))
         return {kind: "method", statik: isStaticMods(mods), gen: isGen, async: isAsync,
                 name: (typeof rest[0] == "string") ? rest[0] : undefined,
                 nameT: (typeof rest[0] == "string") ? undefined : rest[0],
@@ -6787,6 +6834,7 @@ NotFuncHead = :script(~~
     function makeClassPrivate(items) {
         var statik = isStaticMods(items[0].mods)
         var sp = fsTake()
+        privNote(items[1], items.length <= 3, statik)
         if (items.length > 3) {
             return {kind: "method", name: items[1], priv: true, statik: statik, params: items[2], body: items[3], sp: sp}
         }
@@ -6925,7 +6973,9 @@ NotFuncHead = :script(~~
                 b = r.b
                 fv = r.v
             }
-            callExt(b, memSetExt(), [thisV, emitStr(b, memberNameEsc(initFields[k])), fv])
+            // A field DEFINES the property (js_jsfielddef): an inherited setter does not run.
+            var fkr = emitMemberKey(b, initFields[k])
+            callExt(b, "js_jsfielddef", [thisV, fkr.v, fv])
         }
         curScopeV = savedScope
         return b
@@ -6969,7 +7019,7 @@ NotFuncHead = :script(~~
     // declaration and the expression form.
     function makeClassInfo(items) {
         var info = {name: "", superName: null, extT: null, fields: [], statics: [], protos: [],
-                    sinits: [], ctor: null}
+                    sinits: [], ctor: null, computed: []}
         for (var i = 0; i < items.length; i++) {
             var m = items[i]
             if (m == undefined || m.skip != undefined) { continue }
@@ -7001,6 +7051,11 @@ NotFuncHead = :script(~~
             else if (m.kind == "accessor" || m.kind == "method") { info.protos.push(m) }
             else if (m.statik) { info.sinits.push(m) }
             else { info.fields.push(m) }
+            if (m.nameT != undefined && m.kind != "sblock" && m.kind != "ctor") {
+                ckeySeq = ckeySeq + 1
+                m.ckey = "0ck" + ckeySeq
+                info.computed.push(m)
+            }
         }
         info.shown = [info.name] // The class's `name`; makeClassExpr refines it.
         info.sp = fsTake()
@@ -7033,6 +7088,15 @@ NotFuncHead = :script(~~
                       callExt(b, "js_scope_get", [curScopeV, emitStr(b, info.superName)]))
         }
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, info.name), clsV])
+        // Every computed key is evaluated ONCE, in source order, before any member is
+        // defined or any static initializer runs; a scope slot keeps it for the member
+        // definitions and for every construction's field initializers (emitMemberKey).
+        // Twin of the computed-key pass in js-interpreter.abnf's makeClassValue.
+        for (var ci = 0; ci < info.computed.length; ci++) {
+            var ckr = emitKeyNow(b, info.computed[ci])
+            b = ckr.b
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, info.computed[ci].ckey), ckr.v])
+        }
         var ctorIdx = anytype
         if (info.ctor != null) {
             ctorIdx = emitClassFunc(info.ctor.params, info.ctor.body, true, info.fields, null, info.superName != null)
@@ -7798,6 +7862,9 @@ NotFuncHead = :script(~~
     // marks at each collection and seven classes measurably slowed a GC-heavy bench.
     var jsErrClassNames = ["Error", "TypeError", "RangeError", "ReferenceError",
                            "SyntaxError"]
+    // AggregateError is a sixth class, built only for a program that names Promise or
+    // AggregateError (jsbRef): Promise.any rejects with one, and every boot class costs
+    // each collection. Its constructor takes (errors, message): js_jsaggerrinit.
     function emitErrorClasses(b) {
         // The shared constructor: js_jserrinit(this, args[1]).
         funcCount++
@@ -7807,6 +7874,9 @@ NotFuncHead = :script(~~
         cb.NewCall(getExtern("js_jserrinit", 2),
                    [cb.NewCall(getExtern("js_arg", 2), [cf.Params[1], handle(0)]),
                     cb.NewCall(getExtern("js_arg", 2), [cf.Params[1], handle(1)])])
+        cb.NewCall(getExtern("js_jserrcause", 2),
+                   [cb.NewCall(getExtern("js_arg", 2), [cf.Params[1], handle(0)]),
+                    cb.NewCall(getExtern("js_arg", 2), [cf.Params[1], handle(2)])])
         cb.NewRet(hUndef)
         // Error.prototype.toString. A class method is dispatched with the
         // receiver PREPENDED, so args[0] is the error.
@@ -7829,6 +7899,23 @@ NotFuncHead = :script(~~
             callExt(b, "js_scope_decl",
                     [curScopeV, emitStr(b, jsErrClassNames[ei]),
                      callExt(b, "js_jserrcls", [emitStr(b, jsErrClassNames[ei]), ctorV, tsV])])
+        }
+        if (jsAggWant) {
+            funcCount++
+            var agIdx = funcCount
+            var af = m.NewFunc("jsf_" + agIdx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
+            var ab = af.NewBlock("entry")
+            ab.NewCall(getExtern("js_jsaggerrinit", 3),
+                       [ab.NewCall(getExtern("js_arg", 2), [af.Params[1], handle(0)]),
+                        ab.NewCall(getExtern("js_arg", 2), [af.Params[1], handle(1)]),
+                        ab.NewCall(getExtern("js_arg", 2), [af.Params[1], handle(2)])])
+            ab.NewCall(getExtern("js_jserrcause", 2),
+                       [ab.NewCall(getExtern("js_arg", 2), [af.Params[1], handle(0)]),
+                        ab.NewCall(getExtern("js_arg", 2), [af.Params[1], handle(3)])])
+            ab.NewRet(hUndef)
+            var agV = callExt(b, "js_jsfnmeta", [callExt(b, "js_closure", [handle(agIdx), curScopeV]), emitStr(b, ""), emitNum(b, 2)])
+            callExt(b, "js_scope_decl",
+                    [curScopeV, emitStr(b, "AggregateError"), callExt(b, "js_jserrcls", [emitStr(b, "AggregateError"), agV, tsV])])
         }
         return b
     }
@@ -8041,7 +8128,13 @@ NotFuncHead = :script(~~
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "Symbol"), callExt(b, "js_jssymbolfn", [])])
         b = emitErrorClasses(b)
         b = emitMissHooks(b)   // after the classes: the hooks raise instances of them.
-        if (normWant) { callExt(b, "js_jsnormdata", [emitStr(b, load("lib/unicode-norm.txt"))]) }
+        // The normalization tables live for the whole run: they are built in the
+        // permanent region (js_gc_perm), so no collection traces them.
+        if (normWant) {
+            callExt(b, "js_gc_perm", [handle(1)])
+            callExt(b, "js_jsnormdata", [emitStr(b, load("lib/unicode-norm.txt"))])
+            callExt(b, "js_gc_perm", [handle(0)])
+        }
         if (hoistTdzCount > 0) { b.NewStore(callExt(b, "js_gc_pin", [callExt(b, "js_obj_new", [])]), tdzGlob()) }
         b = emitImported(b)
         b = makeSeq(items)(b)

@@ -714,8 +714,11 @@ char *ar_alloc_k(long n, long kind) {
 		b = perm_block(need, kind);
 		if (b != 0) { return (char *)b; }
 	}
+	/* Inside a js_gc_perm bracket stress mode collects on the threshold only: a
+	 * bracket builds whole-run tables, and an overflow past the region with a
+	 * collection per allocation is quadratic in the table. */
 	if (GC_ON != 0) {
-		if (GC_MODE == 2) { gc_collect(); }
+		if (GC_MODE == 2 && PERM_ON == 0) { gc_collect(); }
 		else if (GC_MODE != 1 && GC_ALLOCED > GC_THRESH) { gc_collect(); }
 	}
 	b = ar_block(need, kind);

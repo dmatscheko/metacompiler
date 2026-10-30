@@ -59,8 +59,9 @@ WHAT IS GENUINELY LOWERED beyond JavaScript:
                 same thing.
   parameter properties - 'constructor(public x: number, private readonly y: T)' binds the
                 parameter AND assigns it to 'this' at the top of the constructor.
-  decorators  - TC39 standard decorators on a CLASS (called with the descriptor; a
-                returned value replaces the binding) and on a METHOD (called with the
+  decorators  - TC39 standard decorators, each called with the value and a context
+                object {kind, name, static, private}, on a CLASS (called with the
+                descriptor; a returned value replaces the binding) and on a METHOD (called with the
                 undecorated method, which is emitted as a plain dynamic-`this` function so
                 that 'original.call(this, x)' works, and whose result is installed behind
                 a trampoline that turns js_mcall's receiver-prepending convention back
@@ -70,7 +71,8 @@ WHAT IS GENUINELY LOWERED beyond JavaScript:
                 value that is not callable, is skipped rather than raising - which is what
                 keeps the declarative, framework-resolved decorators ('@sealed',
                 '@Component') harmless. Decorators on a FIELD, an ACCESSOR or a PARAMETER
-                are parsed and then IGNORED (the member is installed undecorated).
+                are parsed and then IGNORED (the member is installed undecorated), and the
+                context has no addInitializer.
   import      - 'import ... from \"./lib\"' loads the referenced project file (a leading
                 './' is dropped and a missing extension completed to '.ts'), parses it
                 with this grammar and prepends its top-level declarations to jsrun. The
@@ -221,10 +223,11 @@ FuncOverload <~~ takeAll(); push(tsNoop()) ~~>
 
 // 'declare ...' is an AMBIENT declaration: it describes something that exists elsewhere
 // and must emit no code at all, not even for the shapes (a class, an enum) that would
-// otherwise lower. Everything it declares is consumed and dropped.
+// otherwise lower. Everything it declares is consumed and dropped. AmbEnum is tried
+// before AmbVar, whose `const` would otherwise take `const enum E` as a declarator.
 AmbientDecl <~~ takeAll(); push(tsNoop()) ~~>
-            = KwDeclare ( AmbGlobal | AmbNamespace | AmbClass | AmbFunc | AmbVar
-                        | Interface | TypeAlias | AmbEnum ) ;
+            = KwDeclare ( AmbGlobal | AmbNamespace | AmbClass | AmbFunc | AmbEnum | AmbVar
+                        | Interface | TypeAlias ) ;
 AmbGlobal   = KwGlobal SkipBlock ;
 AmbNamespace = ( KwNamespace | KwModule ) NsPath SkipBlock
              | KwModule ModPath [ ";" ] ;
@@ -868,7 +871,7 @@ DotSuffix   = "." ( PrivSuffix | Id <~~ push({kind:"member", name: idName(up.in)
 // 'this.#x': a private name. It is stored under the mangled key '__#<body>#x' (see
 // ClassPrivate),
 // which is what keeps it out of js_keys, so out of for-in and object spread.
-PrivSuffix  = "#" Id <~~ push({kind:"member", name: "#" + idName(up.in), key: privRefConst(idName(up.in))}) ~~> ;
+PrivSuffix  = "#" Id <~~ push({kind:"member", name: "#" + idName(up.in), key: privRefConst(idName(up.in)), privChk: privRefChk(idName(up.in))}) ~~> ;
 IndexSuffix <~~ push({kind:"member", txt: cpTxt(up.in, up.pos), key: idxKeyT(pop(), up.in)}) ~~>
             = "[" Expression "]" ;
 // The three optional forms carry the same payload as their plain counterparts plus the
@@ -2309,7 +2312,9 @@ NotFuncHead = :script(~~
         var okB = curF.NewBlock("")
         var badB = curF.NewBlock("")
         b.NewCondBr(b.NewICmp(llvm.enum.IPredNE, callExt(b, "js_jsfnp", [fnV]), handle(0)), okB, badB)
-        emitSiteThrow(badB, site + " is not a function")
+        // js_jscallerr: node's TypeError, which names a class called without `new`.
+        callExt(badB, "js_throw", [callExt(badB, "js_jscallerr", [fnV, emitStr(badB, site)])])
+        badB.NewRet(hUndef) // Never reached: js_throw does not return.
         return {b: okB, v: jsCall(okB, fnV, thisV, argsV)}
     }
     // See the twin of this comment in js-to-llvm-ir.abnf.
@@ -2563,9 +2568,11 @@ NotFuncHead = :script(~~
     // See the twin of this comment in js-to-llvm-ir.abnf.
     var jsbWant = false
     var jsbDone = false
+    var jsAggWant = false // Whether the program names Promise or AggregateError.
     function jsbRef(name) {
         if (name == "Set" || name == "Map" || name == "Array" || name == "isNaN" || name == "isFinite" ||
             name == "structuredClone" || name == "Reflect") { jsbWant = true }
+        if (name == "Promise" || name == "AggregateError") { jsAggWant = true }
         return name
     }
     function jsbLoad() {
@@ -3507,7 +3514,7 @@ NotFuncHead = :script(~~
         }
         return out
     }
-    function privSuffixOpt(n) { return {kind: "optmember", name: "#" + n, key: privRefConst(n)} }
+    function privSuffixOpt(n) { return {kind: "optmember", name: "#" + n, key: privRefConst(n), privChk: privRefChk(n)} }
     // ----- the call side of the parenref rule (see ParenExpr in the grammar) ----------
     // See the twin of this comment in js-to-llvm-ir.abnf.
     var chainItems = []
@@ -3604,6 +3611,7 @@ NotFuncHead = :script(~~
                 if (s.kind == "member" || s.kind == "optmember") {
                     var kr = s.key(b)
                     b = kr.b
+                    if (s.privChk != undefined) { b = s.privChk(b, cur, false) }
                     if (i + 1 < suffixes.length && suffixes[i + 1].kind == "call") {
                         var mc = emitMethodCall(b, cur, kr.v, s.name, suffixes[i + 1].args, sTexts[i + 1])
                         b = mc.b
@@ -3656,7 +3664,8 @@ NotFuncHead = :script(~~
         if (ref.name != undefined) { return ref.name }
         return "(intermediate value)"
     }
-    function emitRefPath(b, ref) {
+    // See the twin of this comment in js-to-llvm-ir.abnf.
+    function emitRefPath(b, ref, write) {
         var cur = anytype
         if (ref.base != undefined) {
             var br = ref.base(b)
@@ -3674,6 +3683,7 @@ NotFuncHead = :script(~~
             if (s.kind == "member") {
                 var kr = s.key(b)
                 b = kr.b
+                if (s.privChk != undefined) { b = s.privChk(b, cur, false) }
                 if (i + 1 < n && ref.path[i + 1].kind == "call") {
                     // 'o.get(1).a = 2' is the ordinary method call, receiver and all.
                     var mc = emitMethodCall(b, cur, kr.v, s.name, ref.path[i + 1].args, sTexts[i + 1])
@@ -3706,7 +3716,9 @@ NotFuncHead = :script(~~
                 i = i + 1
             }
         }
-        var last = ref.path[ref.path.length - 1].key(b)
+        var lastS = ref.path[ref.path.length - 1]
+        var last = lastS.key(b)
+        if (lastS.privChk != undefined) { lastS.privChk(last.b, cur, write === true) }
         return {b: last.b, obj: cur, key: last.v}
     }
     // items = [ref, opString, valueThunk]. The logical operators short circuit and so need
@@ -3740,7 +3752,7 @@ NotFuncHead = :script(~~
                     setExt = "js_scope_set"
                 }
             } else {
-                p = emitRefPath(b, ref)
+                p = emitRefPath(b, ref, op == "=")
                 b = p.b
                 if (op != "=") {
                     var og = emitOldGet(b, p.obj, p.key)
@@ -4391,7 +4403,7 @@ NotFuncHead = :script(~~
             emitArgSync(b, ref.name, valueH)
             return b
         }
-        var p = emitRefPath(b, ref)
+        var p = emitRefPath(b, ref, true)
         return emitRefused(p.b, callExt(p.b, memSetExt(), [p.obj, p.key, valueH]))
     }
     function bindPattern(b, pat, valueH, declExt) {
@@ -4804,13 +4816,17 @@ NotFuncHead = :script(~~
     var curClassName = ""
     var classSeq = 0
     var heritageSeq = 0
+    var ckeySeq = 0 // Names the scope slot of each computed member key (makeClassInfo).
 
     // See the twin of this comment in js-to-llvm-ir.abnf.
     var privStack = []
     var privDecls = []
+    var privClassNames = []
+    var privKinds = {}
     function privEnter() {
         privStack.push(privDecls.length)
         privDecls.push({})
+        privClassNames.push(curClassName)
     }
     function privExit() { privStack.pop() }
     function privKey(id, n) { return "__#" + id + "#" + n }
@@ -4845,6 +4861,31 @@ NotFuncHead = :script(~~
         var st = privStack.slice()
         return function(b) { return {b: b, v: emitStr(b, privRefKey(st, n))} }
     }
+    // See the twin of this comment in js-to-llvm-ir.abnf.
+    function privNote(key, field, statik) {
+        if (typeof key == "string" && key.substring(0, 3) == "__#") { privKinds["$" + key] = {field: field, statik: statik} }
+    }
+    function privRefChk(n) {
+        var st = privStack.slice()
+        return function(b, objV, write) {
+            var key = privRefKey(st, n)
+            var info = privKinds["$" + key]
+            if (info == undefined) { return b }
+            var i = st.length - 1
+            while (i >= 0 && privDecls[st[i]]["$" + n] == undefined) { i = i - 1 }
+            var cn = (i >= 0) ? privClassNames[st[i]] : ""
+            if (cn == "" || cn.substring(0, 6) == "0class") { cn = "anonymous" }
+            var msg = ""
+            if (info.field) {
+                msg = write ? "TypeError: Cannot write private member #" + n + " to an object whose class did not declare it"
+                            : "TypeError: Cannot read private member #" + n + " from an object whose class did not declare it"
+            } else {
+                msg = info.statik ? "TypeError: Receiver must be class " + cn : "TypeError: Receiver must be an instance of class " + cn
+            }
+            callExt(b, "js_jsprivchk", [objV, emitStr(b, key), info.statik ? hTrue : hFalse, emitStr(b, msg)])
+            return b
+        }
+    }
 
     // ----- Class members -----
     // See the twin of this comment in js-to-llvm-ir.abnf.
@@ -4854,14 +4895,16 @@ NotFuncHead = :script(~~
     }
     // A key descriptor as a {b, v} pair in the class-definition block.
     function emitMemberKey(b, m) {
-        if (m.nameT != undefined) {
-            // A computed key may be a symbol, which js_jspropkey turns into its key;
-            // lib/js-builtins.js's are the engine's own keys, raw.
-            var kr = m.nameT(b)
-            if (c.curFile() == "js-builtins.js") { return kr }
-            return {b: kr.b, v: callExt(kr.b, "js_jspropkey", [kr.v])}
-        }
+        if (m.ckey != undefined) { return {b: b, v: callExt(b, "js_scope_get", [curScopeV, emitStr(b, m.ckey)])} }
+        if (m.nameT != undefined) { return emitKeyNow(b, m) }
         return {b: b, v: emitStr(b, memberNameEsc(m))}
+    }
+    // A computed key, evaluated. It may be a symbol, which js_jspropkey turns into its
+    // key; lib/js-builtins.js's are the engine's own keys, raw.
+    function emitKeyNow(b, m) {
+        var kr = m.nameT(b)
+        if (c.curFile() == "js-builtins.js") { return kr }
+        return {b: kr.b, v: callExt(kr.b, "js_jspropkey", [kr.v])}
     }
     // The member's own name for `f.name` / `f.length` - "" when the key is COMPUTED and
     // so is only known at run time.
@@ -4899,14 +4942,21 @@ NotFuncHead = :script(~~
         if (items.length > 1) { return {pname: items[0], def: items[1], prop: true} }
         return {pname: items[0], prop: true}
     }
+    // A `declare` or `abstract` field is type layer only: tsc emits nothing for it.
     function makeField(items) {
+        if (fieldIsAmbient(items[0].mods)) { return {skip: true} }
         return {kind: "field", name: items[1].fname, statik: isStaticMods(items[0].mods),
                 init: items.length > 2 ? items[2] : null}
+    }
+    function fieldIsAmbient(mods) {
+        for (var i = 0; i < mods.length; i++) { if (mods[i] == "declare" || mods[i] == "abstract") { return true } }
+        return false
     }
     // items = [mods, "get"|"set", key, param..., bodyThunk]: the kind is always second and
     // the body always last, so the parameters are whatever lies between (none for a getter,
     // exactly one for a setter). See the twin of this comment in js-to-llvm-ir.abnf.
     function makeClassAccessor(items) {
+        privNote(items[2], false, isStaticMods(items[0].mods))
         return {kind: "accessor", acc: items[1], statik: isStaticMods(items[0].mods),
                 priv: typeof items[2] == "string" && items[2].substring(0, 3) == "__#",
                 name: (typeof items[2] == "string") ? items[2] : undefined,
@@ -4925,6 +4975,7 @@ NotFuncHead = :script(~~
             else if (items[i] != undefined && items[i].amod == true) { isAsync = true }
             else { rest.push(items[i]) }
         }
+        privNote(rest[0], false, isStaticMods(mods))
         return {kind: "method", statik: isStaticMods(mods), gen: isGen, async: isAsync,
                 name: (typeof rest[0] == "string") ? rest[0] : undefined,
                 nameT: (typeof rest[0] == "string") ? undefined : rest[0],
@@ -4935,6 +4986,7 @@ NotFuncHead = :script(~~
     // is the only form that carries both a parameter list and a body, hence the length.
     function makeClassPrivate(items) {
         var statik = isStaticMods(items[0].mods)
+        privNote(items[1], items.length <= 3, statik)
         if (items.length > 3) {
             return {kind: "method", name: items[1], priv: true, statik: statik, params: items[2], body: items[3]}
         }
@@ -5051,9 +5103,11 @@ NotFuncHead = :script(~~
     function emitFieldInits(b, inits) {
         var thisV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "this")])
         var savedScope = fieldScopeOpen(b)
+        // A field and a parameter property's declaration DEFINE the property
+        // (js_jsfielddef); the parameter's value is then assigned.
         if (inits.props != undefined && inits.props != null) {
             for (var pd = 0; pd < inits.props.length; pd++) {
-                callExt(b, memSetExt(), [thisV, emitStr(b, jsKeyEsc(inits.props[pd])), hUndef])
+                callExt(b, "js_jsfielddef", [thisV, emitStr(b, jsKeyEsc(inits.props[pd])), hUndef])
             }
         }
         if (inits.fields != undefined && inits.fields != null) {
@@ -5064,7 +5118,8 @@ NotFuncHead = :script(~~
                     b = r.b
                     fv = r.v
                 }
-                callExt(b, memSetExt(), [thisV, emitStr(b, memberNameEsc(inits.fields[k])), fv])
+                var fkr = emitMemberKey(b, inits.fields[k])
+                callExt(b, "js_jsfielddef", [thisV, fkr.v, fv])
             }
         }
         if (inits.props != undefined && inits.props != null) {
@@ -5101,7 +5156,7 @@ NotFuncHead = :script(~~
     // declaration and the expression form.
     function makeClassInfo(items) {
         var info = {name: "", superName: null, extT: null, fields: [], statics: [], protos: [],
-                    sinits: [], ctor: null}
+                    sinits: [], ctor: null, computed: []}
         for (var i = 0; i < items.length; i++) {
             var m = items[i]
             if (m == undefined || m.skip != undefined) { continue }
@@ -5126,6 +5181,11 @@ NotFuncHead = :script(~~
             else if (m.kind == "accessor" || m.kind == "method") { info.protos.push(m) }
             else if (m.statik) { info.sinits.push(m) }
             else { info.fields.push(m) }
+            if (m.nameT != undefined && m.kind != "sblock" && m.kind != "ctor") {
+                ckeySeq = ckeySeq + 1
+                m.ckey = "0ck" + ckeySeq
+                info.computed.push(m)
+            }
         }
         info.shown = [info.name] // The class's `name`; makeClassExpr refines it.
         return info
@@ -5152,6 +5212,12 @@ NotFuncHead = :script(~~
                       callExt(b, "js_scope_get", [curScopeV, emitStr(b, info.superName)]))
         }
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, info.name), clsV])
+        // See the twin of this comment in js-to-llvm-ir.abnf.
+        for (var ci = 0; ci < info.computed.length; ci++) {
+            var ckr = emitKeyNow(b, info.computed[ci])
+            b = ckr.b
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, info.computed[ci].ckey), ckr.v])
+        }
         var ctorIdx = anytype
         if (info.ctor != null) {
             ctorIdx = emitClassFunc(info.ctor.params, info.ctor.body, true, info.fields, null, info.ctor.props, info.superName != null)
@@ -5532,15 +5598,29 @@ NotFuncHead = :script(~~
     // items = [{ename}, member...]. The object is bound under the enum name in the
     // enclosing scope; the member initializers run in a scope of their own in which the
     // PRECEDING members are bound under their bare names ('Both = Two | 1').
+    // The member names of the enums declared so far, by enum name: an initializer of a
+    // later enum of the same name may name them, as a merged enum's body sees them.
+    var enumMembersSeen = {}
     function makeEnum(items) {
         var name = items[0].ename
         var members = items.slice(1)
         exportNames = [name]
+        var seenKey = "$" + name
+        var earlier = (enumMembersSeen[seenKey] != undefined) ? enumMembersSeen[seenKey] : []
+        var all = earlier.slice(0)
+        for (var mi = 0; mi < members.length; mi++) {
+            if (members[mi].name != undefined) { all.push(members[mi].name) }
+        }
+        enumMembersSeen[seenKey] = all
         return function(b) {
-            var obj = callExt(b, "js_obj_new", [])
-            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), obj])
+            var er = emitMergeTarget(b, name)
+            b = er.b
+            var obj = er.v
             var saved = curScopeV
             curScopeV = callExt(b, "js_scope_new", [saved])
+            for (var ei = 0; ei < earlier.length; ei++) {
+                callExt(b, "js_scope_decl", [curScopeV, emitStr(b, earlier[ei]), callExt(b, "js_jsvget", [obj, emitStr(b, earlier[ei])])])
+            }
             var nextV = callExt(b, "js_num_i", [handle(0)])
             for (var i = 0; i < members.length; i++) {
                 var mm = members[i]
@@ -5846,7 +5926,8 @@ NotFuncHead = :script(~~
         if (nsAccIdx.length == 0) {
             nsAccIdx.push(emitFunction([], function(fb) {
                 var o = callExt(fb, "js_scope_get", [curScopeV, emitStr(fb, "0nso")])
-                return retStmt(fb, callExt(fb, memGetExt(), [o, callExt(fb, "js_scope_get", [curScopeV, emitStr(fb, "0nsn")])]))
+                // The full member read: the namespace may be merged into a function.
+                return retStmt(fb, callExt(fb, "js_jsvget", [o, callExt(fb, "js_scope_get", [curScopeV, emitStr(fb, "0nsn")])]))
             }, false, true))
             nsAccIdx.push(emitFunction(["0nsv"], function(fb) {
                 callExt(fb, memSetExt(), [callExt(fb, "js_scope_get", [curScopeV, emitStr(fb, "0nso")]),
@@ -5883,6 +5964,20 @@ NotFuncHead = :script(~~
         objB.NewBr(mergeB)
         noB.NewBr(mergeB)
         return {b: mergeB, v: mergeB.NewPhi([llvm.ir.NewIncoming(o, objB), llvm.ir.NewIncoming(hUndef, noB)])}
+    }
+    // tsc's `X || (X = {})`: the value this scope binds to name when it is truthy - a
+    // function, class or enum a namespace or a second enum merges into - else a new
+    // object bound to it. Twin of nsResolve and makeEnum in typescript-interpreter.abnf.
+    function emitMergeTarget(b, name) {
+        var cur = callExt(b, "js_scope_own", [curScopeV, emitStr(b, name)])
+        var newB = curF.NewBlock("")
+        var mergeB = curF.NewBlock("")
+        var fromB = b
+        b.NewCondBr(truthy(b, cur), mergeB, newB)
+        var fresh = callExt(newB, "js_obj_new", [])
+        callExt(newB, "js_scope_decl", [curScopeV, emitStr(newB, name), fresh])
+        newB.NewBr(mergeB)
+        return {b: mergeB, v: mergeB.NewPhi([llvm.ir.NewIncoming(cur, fromB), llvm.ir.NewIncoming(fresh, newB)])}
     }
     // items = [{nspath}, (statement thunk | {nsexport, t})...].
     // The body's vars are hoisted into the namespace's own scope.
@@ -5932,8 +6027,9 @@ NotFuncHead = :script(~~
             for (var p = 0; p < path.length; p++) {
                 if (p == 0) {
                     if (fresh[0]) {
-                        obj = callExt(b, "js_obj_new", [])
-                        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, path[0]), obj])
+                        var mr = emitMergeTarget(b, path[0])
+                        b = mr.b
+                        obj = mr.v
                     } else {
                         obj = callExt(b, "js_scope_get", [curScopeV, emitStr(b, path[0])])
                     }
@@ -5992,7 +6088,25 @@ NotFuncHead = :script(~~
     // when the decorator answered undefined (the TC39 rule for a decorator that only
     // observes). Both outcomes are possible at run time, so both are emitted and a phi
     // picks.
-    function applyDeco(b, decoT, valueV) {
+    // The context object a decorator is handed: kind, name, static and private (the
+    // TC39 fields this engine models; a private name reads "#x"). Twin of the ctx in
+    // applyDecorators in typescript-interpreter.abnf.
+    function emitDecoCtx(b, kind, name, statik) {
+        var o = callExt(b, "js_obj_new", [])
+        var priv = typeof name == "string" && name.substring(0, 3) == "__#"
+        var shown = name
+        if (priv) {
+            var hi = name.length - 1
+            while (hi > 0 && name.charAt(hi) != "#") { hi = hi - 1 }
+            shown = name.substring(hi, name.length)
+        }
+        callExt(b, memSetExt(), [o, emitStr(b, "kind"), emitStr(b, kind)])
+        callExt(b, memSetExt(), [o, emitStr(b, "name"), (typeof shown == "string") ? emitStr(b, shown) : hUndef])
+        callExt(b, memSetExt(), [o, emitStr(b, "static"), statik ? hTrue : hFalse])
+        callExt(b, memSetExt(), [o, emitStr(b, "private"), priv ? hTrue : hFalse])
+        return o
+    }
+    function applyDeco(b, decoT, valueV, ctxV) {
         var dr = decoT(b)
         b = dr.b
         // A decorator that is not callable at run time (an unresolved '@sealed') is
@@ -6006,7 +6120,7 @@ NotFuncHead = :script(~~
         b.NewCondBr(isFn, runB, skipB)
         var argsV = callExt(runB, "js_arr_new", [])
         callExt(runB, "js_arr_push", [argsV, valueV])
-        callExt(runB, "js_arr_push", [argsV, hUndef])
+        callExt(runB, "js_arr_push", [argsV, ctxV])
         var res = jsCall(runB, dr.v, hUndef, argsV)
         var keepB = curF.NewBlock("")
         var repB = curF.NewBlock("")
@@ -6053,7 +6167,7 @@ NotFuncHead = :script(~~
             b = r.b
             var clsV = r.v
             for (var i = decos.length - 1; i >= 0; i--) {
-                var dr = applyDeco(b, decos[i], clsV)
+                var dr = applyDeco(b, decos[i], clsV, emitDecoCtx(b, "class", info.name, false))
                 b = dr.b
                 clsV = dr.v
             }
@@ -6080,7 +6194,7 @@ NotFuncHead = :script(~~
             b = r.b
             var v = r.v
             for (var i = decos.length - 1; i >= 0; i--) {
-                var dr = applyDeco(b, decos[i], v)
+                var dr = applyDeco(b, decos[i], v, emitDecoCtx(b, "class", undefined, false))
                 b = dr.b
                 v = dr.v
             }
@@ -6112,7 +6226,7 @@ NotFuncHead = :script(~~
         // replaces is the body.
         var cur = fnMetaAt(b, callExt(b, "js_closure", [handle(idx), curScopeV]), memberFnName(mm), mm.params)
         for (var i = mm.decos.length - 1; i >= 0; i--) {
-            var dr = applyDeco(b, mm.decos[i], cur)
+            var dr = applyDeco(b, mm.decos[i], cur, emitDecoCtx(b, "method", mm.name, mm.statik === true))
             b = dr.b
             cur = dr.v
         }
@@ -6532,6 +6646,7 @@ NotFuncHead = :script(~~
     // See the twin of this comment in js-to-llvm-ir.abnf.
     var jsErrClassNames = ["Error", "TypeError", "RangeError", "ReferenceError",
                            "SyntaxError"]
+    // See the twin of this comment in js-to-llvm-ir.abnf.
     function emitErrorClasses(b) {
         // The shared constructor: js_jserrinit(this, args[1]).
         funcCount++
@@ -6541,6 +6656,9 @@ NotFuncHead = :script(~~
         cb.NewCall(getExtern("js_jserrinit", 2),
                    [cb.NewCall(getExtern("js_arg", 2), [cf.Params[1], handle(0)]),
                     cb.NewCall(getExtern("js_arg", 2), [cf.Params[1], handle(1)])])
+        cb.NewCall(getExtern("js_jserrcause", 2),
+                   [cb.NewCall(getExtern("js_arg", 2), [cf.Params[1], handle(0)]),
+                    cb.NewCall(getExtern("js_arg", 2), [cf.Params[1], handle(2)])])
         cb.NewRet(hUndef)
         // Error.prototype.toString. A class method is dispatched with the
         // receiver PREPENDED, so args[0] is the error.
@@ -6558,6 +6676,23 @@ NotFuncHead = :script(~~
             callExt(b, "js_scope_decl",
                     [curScopeV, emitStr(b, jsErrClassNames[ei]),
                      callExt(b, "js_jserrcls", [emitStr(b, jsErrClassNames[ei]), ctorV, tsV])])
+        }
+        if (jsAggWant) {
+            funcCount++
+            var agIdx = funcCount
+            var af = m.NewFunc("jsf_" + agIdx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
+            var ab = af.NewBlock("entry")
+            ab.NewCall(getExtern("js_jsaggerrinit", 3),
+                       [ab.NewCall(getExtern("js_arg", 2), [af.Params[1], handle(0)]),
+                        ab.NewCall(getExtern("js_arg", 2), [af.Params[1], handle(1)]),
+                        ab.NewCall(getExtern("js_arg", 2), [af.Params[1], handle(2)])])
+            ab.NewCall(getExtern("js_jserrcause", 2),
+                       [ab.NewCall(getExtern("js_arg", 2), [af.Params[1], handle(0)]),
+                        ab.NewCall(getExtern("js_arg", 2), [af.Params[1], handle(3)])])
+            ab.NewRet(hUndef)
+            var agV = callExt(b, "js_jsfnmeta", [callExt(b, "js_closure", [handle(agIdx), curScopeV]), emitStr(b, ""), emitNum(b, 2)])
+            callExt(b, "js_scope_decl",
+                    [curScopeV, emitStr(b, "AggregateError"), callExt(b, "js_jserrcls", [emitStr(b, "AggregateError"), agV, tsV])])
         }
         return b
     }
@@ -6721,7 +6856,13 @@ NotFuncHead = :script(~~
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "Symbol"), callExt(b, "js_jssymbolfn", [])])
         b = emitErrorClasses(b)
         b = emitMissHooks(b)   // after the classes: the hooks raise instances of them.
-        if (normWant) { callExt(b, "js_jsnormdata", [emitStr(b, load("lib/unicode-norm.txt"))]) }
+        // The normalization tables live for the whole run: they are built in the
+        // permanent region (js_gc_perm), so no collection traces them.
+        if (normWant) {
+            callExt(b, "js_gc_perm", [handle(1)])
+            callExt(b, "js_jsnormdata", [emitStr(b, load("lib/unicode-norm.txt"))])
+            callExt(b, "js_gc_perm", [handle(0)])
+        }
         if (hoistTdzCount > 0) { b.NewStore(callExt(b, "js_gc_pin", [callExt(b, "js_obj_new", [])]), tdzGlob()) }
         b = emitImported(b)
         b = makeSeq(items)(b)

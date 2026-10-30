@@ -93,6 +93,12 @@
 //                                            rxPyDigitHit / rxPySpaceHit)
 //                                            a (P only: re.ASCII, as the inline a:
 //                                            those are ASCII's)
+//                                            U (JavaScript's u flag: pattern and
+//                                            text are code points, a surrogate
+//                                            pair one character, and \u{h..} and
+//                                            a \uHHHH\uHHHH pair are escapes of
+//                                            one; without U the text is UTF-16
+//                                            units)
 //                                            R (Go's regexp: RE2 syntax with Go's
 //                                            error texts, rewritten into J by
 //                                            rxRe2, and Go's matching rules - see
@@ -1108,6 +1114,12 @@ function rxEsc(st, inClass) {
         res.ch = v
         return res
     }
+    if (c == 117 && st.uni) { // JavaScript's \u under U (rxEscU)
+        var ju = rxEscU(st)
+        if (ju < 0) { rxErr(st, "invalid unicode escape") }
+        res.ch = ju
+        return res
+    }
     if (c == 117) { // \uHHHH
         var uv = 0
         var ugot = 0
@@ -1159,12 +1171,55 @@ function rxEsc(st, inClass) {
         res.ch = oval
         return res
     }
-    if ((st.java || st.py) && c >= 55296 && c <= 56319) {
+    if ((st.java || st.py || st.uni) && c >= 55296 && c <= 56319) {
         c = rxCpAt(p, st.i - 1)
         if (c > 65535) { st.i = st.i + 1 }
     }
     res.ch = c
     return res
+}
+
+// rxEscU is JavaScript's \u escape under U, after the u: \u{h..} is the code point,
+// \uHHHH four hex digits, and a \uHHHH\uHHHH surrogate pair one character. -1
+// when the escape is none of these.
+function rxEscU(st) {
+    var p = st.p
+    if (st.i < st.n && p.charCodeAt(st.i) == 123) {
+        var j = st.i + 1
+        var cv = 0
+        while (j < st.n && rxHexVal(p.charCodeAt(j)) >= 0 && cv <= 1114111) {
+            cv = cv * 16 + rxHexVal(p.charCodeAt(j))
+            j = j + 1
+        }
+        if (j == st.i + 1 || j >= st.n || p.charCodeAt(j) != 125 || cv > 1114111) { return 0 - 1 }
+        st.i = j + 1
+        return cv
+    }
+    var v = rxHex4(p, st.i, st.n)
+    if (v < 0) { return 0 - 1 }
+    st.i = st.i + 4
+    if (v >= 55296 && v <= 56319 && st.i + 1 < st.n && p.charCodeAt(st.i) == 92 && p.charCodeAt(st.i + 1) == 117) {
+        var lo = rxHex4(p, st.i + 2, st.n)
+        if (lo >= 56320 && lo <= 57343) {
+            st.i = st.i + 6
+            return (v - 55296) * 1024 + (lo - 56320) + 65536
+        }
+    }
+    return v
+}
+
+// rxHex4 is the value of the four hex digits at p[i..i+4), or -1.
+function rxHex4(p, i, n) {
+    if (i + 4 > n) { return 0 - 1 }
+    var v = 0
+    var k = 0
+    while (k < 4) {
+        var h = rxHexVal(p.charCodeAt(i + k))
+        if (h < 0) { return 0 - 1 }
+        v = v * 16 + h
+        k = k + 1
+    }
+    return v
 }
 
 // rxBadEscP: is \c an escape Python's re refuses ("bad escape")? An ASCII
@@ -1240,7 +1295,7 @@ function rxParseClass(st) {
             }
             loCode = e.ch
         } else {
-            if (st.py) { c = rxCpAt(p, st.i) }
+            if (st.py || st.uni) { c = rxCpAt(p, st.i) }
             st.i = st.i + (c > 65535 ? 2 : 1)
             loCode = c
         }
@@ -1266,7 +1321,7 @@ function rxParseClass(st) {
                 }
                 hiCode = e2.ch
             } else {
-                if (st.py) { c2 = rxCpAt(p, st.i) }
+                if (st.py || st.uni) { c2 = rxCpAt(p, st.i) }
                 st.i = st.i + (c2 > 65535 ? 2 : 1)
                 hiCode = c2
             }
@@ -2212,7 +2267,7 @@ function rxParseAtom(st) {
         st.i = st.i + 1
         return rxNode("empty")
     }
-    if (st.java || st.py) { c = rxCpAt(p, st.i) }
+    if (st.java || st.py || st.uni) { c = rxCpAt(p, st.i) }
     st.i = st.i + (c > 65535 ? 2 : 1)
     var lit = rxNode("cls")
     rxClsAdd(lit.cls, c, c)
@@ -5715,6 +5770,7 @@ function rxCompile(pattern, flags) {
     var unix = false
     var pyascii = false
     var re2 = false
+    var uni = false
     // C is followed by PHP's modifiers rather than these letters (rxPcre).
     var pcre = flags.length > 0 && flags.charAt(0) == "C"
     var fi = pcre ? flags.length : 0
@@ -5736,6 +5792,7 @@ function rxCompile(pattern, flags) {
         else if (f == "d") { unix = true }
         else if (f == "a") { pyascii = true }
         else if (f == "R") { re2 = true }
+        else if (f == "U") { uni = true }
         fi = fi + 1
     }
     // R reads the pattern as Go does and compiles its J spelling (rxRe2).
@@ -5779,7 +5836,7 @@ function rxCompile(pattern, flags) {
         py: py, icase: icase, multi: multi, gend: 0, gflags: "",
         ucase: ucase && java, uclass: false, unix: unix && java, inl: false, supp: false,
         canon: false, pyuni: py && !pyascii, re2: re2, pcre: pcre, open: [], tctx: [], brbase: 0 - 1,
-        inlook: 0, startopt: false
+        inlook: 0, startopt: false, uni: uni
     }
     // Under P and J case folding and line anchoring are decided per atom while
     // parsing.
@@ -5791,7 +5848,7 @@ function rxCompile(pattern, flags) {
     // A search steps over a surrogate pair whole: under J when the pattern has
     // a supplementary character (java.util.regex's hasSupplementary), and always
     // under P, where the text is code points.
-    var supp = py || java && (re2 || st.supp || rxSuppJ(ast) || rxHasSurr(pat)) || pcre && ucase
+    var supp = py || uni || java && (re2 || st.supp || rxSuppJ(ast) || rxHasSurr(pat)) || pcre && ucase
     // Resolve every \k<name> now that the whole name table is known.
     var pend = st.pending
     var pi = 0
@@ -5818,7 +5875,7 @@ function rxCompile(pattern, flags) {
         return {ok: false, err: st.err, errAt: st.errAt, ops: [], as: [], bs: [], clss: [],
                 ngroups: 0, nmarks: 0, names: [], nameGroups: [],
                 icase: icase, dotall: dotall, multi: multi, jsrep: jsrep, java: java,
-                py: false, supp: false, bfail: bfail, gflags: "",
+                py: false, uni: false, supp: false, bfail: bfail, gflags: "",
                 cmin: [], cmax: [], cgreedy: [], cemp: [], lbmin: [], lbmax: [], vmarks: [],
                 src: pattern, flags: flags, hitEnd: false, reqEnd: false, jbegin: false, jmin: 0, jcut: 0, steps: 0}
     }
@@ -5863,7 +5920,7 @@ function rxCompile(pattern, flags) {
         ngroups: st.ngroups, nmarks: pg.nmarks, vmarks: tp.marks, names: re2 ? tr.names : pcre ? tp.names : st.names,
         nameGroups: re2 ? tr.nameGroups : pcre ? tp.nameGroups : st.nameGroups,
         icase: icase, dotall: dotall, multi: multi, jsrep: jsrep, java: java,
-        py: py, supp: supp, bfail: bfail, gflags: java ? rxFlagsGet(st) : st.gflags, pcre: pcre,
+        py: py, uni: uni, supp: supp, bfail: bfail, gflags: java ? rxFlagsGet(st) : st.gflags, pcre: pcre,
         acc: pg.acc, cmin: pg.cmin, cmax: pg.cmax, cgreedy: pg.cgreedy, cemp: pg.cemp, lbmin: pg.lbmin, lbmax: pg.lbmax,
         src: pattern, flags: flags, hitEnd: false, reqEnd: false, jbegin: jbegin, jmin: jmin, steps: 0,
         jcut: 0
@@ -6096,8 +6153,8 @@ function rxRun(re, text, pcIn, spIn, caps, marks, st, base, keep) {
                     break
                 }
                 var cc = text.charCodeAt(sp)
-                // J and P read a surrogate pair as one character.
-                if (cc >= 55296 && cc <= 56319 && (re.java || re.py)) {
+                // J, P and U read a surrogate pair as one character.
+                if (cc >= 55296 && cc <= 56319 && (re.java || re.py || re.uni)) {
                     // Pattern.CharProperty reads a pair a region end splits
                     // (re.jcut) and fails past the end; CharPropertyGreedy
                     // (cls.cpg) reads its high half, as a BmpCharProperty

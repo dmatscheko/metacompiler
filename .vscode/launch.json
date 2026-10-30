@@ -2746,6 +2746,30 @@
             "program": "${workspaceFolder}","args": ["languages/typescript-to-llvm-ir.abnf", "tests/typescript-abort-test.ts", "-q", "-exe", "tests/typescript-abort.out"]
         },
         {
+            "name": "JavaScript abort probe, unhandled rejection (interpreter, SHOULD FAIL)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/js-interpreter.abnf", "tests/js-abort-test-unhandled.js", "-q"]
+        },
+        {
+            "name": "JavaScript abort probe, unhandled rejection, native binary SHOULD ABORT, ALL HALVES (interpreter vs llvm.Run vs native)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/js-to-llvm-ir.abnf", "tests/js-abort-test-unhandled.js", "-q", "-exe", "tests/js-abort-unhandled.out"]
+        },
+        {
+            "name": "TypeScript abort probe, unhandled rejection (interpreter, SHOULD FAIL)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/typescript-interpreter.abnf", "tests/typescript-abort-test-unhandled.ts", "-q"]
+        },
+        {
+            "name": "TypeScript abort probe, unhandled rejection, native binary SHOULD ABORT, ALL HALVES (interpreter vs llvm.Run vs native)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/typescript-to-llvm-ir.abnf", "tests/typescript-abort-test-unhandled.ts", "-q", "-exe", "tests/typescript-abort-unhandled.out"]
+        },
+        {
             "name": "TypeScript interpreter legacy octal literal SHOULD FAIL",
             "type": "go",
             "request": "launch",

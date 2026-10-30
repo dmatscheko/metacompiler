@@ -492,30 +492,56 @@ func (rt *jsrt) addJSBigIntExterns(m map[string]func(args []uint64) uint64) {
 	// everything else delegates to the js_js* extern of abnf/jsrtjsprint.go.
 	// ToPrimitive runs FIRST, so an OBJECT on the other side reaches its primitive
 	// form before the BigInt rules see it: `1n == [1n]` is true in node, because the
-	// array stringifies to "1" and StringToBigInt reads it back.
+	// array stringifies to "1" and StringToBigInt reads it back. It runs ONCE per
+	// operand - a valueOf is observable - so the delegate gets the primitives; and
+	// == converts nothing when two objects meet (identity) or beside null or
+	// undefined.
 	eqBase, neBase := m["js_jseq"], m["js_jsne"]
+	// ToPrimitive, which answers a symbol as it is.
+	prim := func(v interface{}, hint string) interface{} {
+		if jsvIsSym(v) {
+			return v
+		}
+		return rt.jsvToPrimitive(v, hint)
+	}
+	isObj := func(v interface{}) bool { return (jsvIsObjLike(v) || jsvIsFnLike(v)) && !jsvIsSym(v) }
+	// The two primitives an == compares; ok is false when it converts nothing.
+	bigEqPrims := func(a []uint64) (x, y interface{}, ok bool) {
+		x, y = u(a[0]), u(a[1])
+		if isUndefOrNull(x) || isUndefOrNull(y) || (isObj(x) && isObj(y)) {
+			return nil, nil, false
+		}
+		return prim(x, "default"), prim(y, "default"), true
+	}
 	m["js_jseq"] = func(a []uint64) uint64 {
-		if r, ok := bigLooseEq(rt.jsvToPrimitive(u(a[0]), "default"), rt.jsvToPrimitive(u(a[1]), "default")); ok {
-			return boolH(r)
+		if x, y, ok := bigEqPrims(a); ok {
+			if r, ok := bigLooseEq(x, y); ok {
+				return boolH(r)
+			}
+			return eqBase([]uint64{w(x), w(y)})
 		}
 		return eqBase(a)
 	}
 	m["js_jsne"] = func(a []uint64) uint64 {
-		if r, ok := bigLooseEq(rt.jsvToPrimitive(u(a[0]), "default"), rt.jsvToPrimitive(u(a[1]), "default")); ok {
-			return boolH(!r)
+		if x, y, ok := bigEqPrims(a); ok {
+			if r, ok := bigLooseEq(x, y); ok {
+				return boolH(!r)
+			}
+			return neBase([]uint64{w(x), w(y)})
 		}
 		return neBase(a)
 	}
 	rel := func(name string, want func(int) bool) {
 		base := m[name]
 		m[name] = func(a []uint64) uint64 {
-			if c, ok := bigCompare(rt.jsvToPrimitive(u(a[0]), "number"), rt.jsvToPrimitive(u(a[1]), "number")); ok {
+			x, y := prim(u(a[0]), "number"), prim(u(a[1]), "number")
+			if c, ok := bigCompare(x, y); ok {
 				if c == 2 {
 					return jsHFalse
 				}
 				return boolH(want(c))
 			}
-			return base(a)
+			return base([]uint64{w(x), w(y)})
 		}
 	}
 	rel("js_jslt", func(c int) bool { return c < 0 })

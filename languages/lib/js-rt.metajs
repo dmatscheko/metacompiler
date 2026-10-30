@@ -1098,7 +1098,7 @@ function jvToPrimitive(v, hint) {
         }
         var r = jvCallMethod(v, "valueOf")
         if (r !== jvMiss) {
-            if (!jvIsObjLike(r)) { return r }
+            if (!jvIsObjLike(r) || jbIsBig(r)) { return r }
         }
         var wp = anytype
         wp = v["__bvof"]
@@ -1121,7 +1121,7 @@ function jvExoticPrim(v, hint) {
     jvNeedFn(f)
     var r = anytype
     r = jvCallT(f, v, [hint])
-    if (jvIsObjLike(r)) { throw jvErrFromText("TypeError: Cannot convert object to primitive value") }
+    if (jvIsObjLike(r) && !jbIsBig(r)) { throw jvErrFromText("TypeError: Cannot convert object to primitive value") }
     return r
 }
 
@@ -1376,6 +1376,20 @@ function jvFindClassAcc(o, name) {
         cls = cls["__super"]
     }
     return undefined
+}
+// The class accessor a read of name on o meets: none when o has an own slot of that
+// name, even one holding undefined (a field declared without an initializer).
+function jvReadAcc(o, name) {
+    var acc = anytype
+    acc = jvFindClassAcc(o, name)
+    if (acc === undefined) { return undefined }
+    var ks = keysOf(o)
+    var i = 0
+    while (i < ks.length) {
+        if (ks[i] === name) { return undefined }
+        i = i + 1
+    }
+    return acc
 }
 // The class descriptor or prototype object holding the accessor jvFindClassAcc finds, for a write that
 // must name it. Twins: accHolder in both *-interpreter.abnf, jsvAccHolder in
@@ -2510,7 +2524,7 @@ function js_jsmget(o, key) {
                 var cur = o[key]
                 if (jvIsAcc(cur)) { return jvAccGet(cur, o) }
                 if (cur === undefined) {
-                    var acc = jvFindClassAcc(o, key)
+                    var acc = jvReadAcc(o, key)
                     if (acc !== undefined) { return jvAccGet(acc, o) }
                     if (jvStrWrapN > 0) { return jvWrapRead(o, key) }
                     return undefined
@@ -2819,7 +2833,7 @@ function js_jsvget(o, key) {
                 var cur = o[key]
                 if (jvIsAcc(cur)) { return jvAccGet(cur, o) }
                 if (cur === undefined) {
-                    var acc = jvFindClassAcc(o, key)
+                    var acc = jvReadAcc(o, key)
                     if (acc !== undefined) { return jvAccGet(acc, o) }
                     return jvValueMiss(o, key)
                 }
@@ -3288,6 +3302,20 @@ function js_jsprivin(o, key) {
     }
     return jvHas(o, key)
 }
+// The brand check in front of a private member access: (obj, raw key, static,
+// message). Twin of js_jsprivchk in abnf/jsrtjsprint.go.
+function js_jsprivchk(o, key, statik, msg) {
+    var ok = false
+    if (statik === true) {
+        if (jvIsClassDesc(o)) { ok = jvClassOwnsStatic(o, key) }
+    } else if (jvIsCallable(o)) {
+        ok = jvHas(o, key)
+    } else if (jvIsObjLike(o)) {
+        if (!jbIsBig(o)) { ok = jvHas(o, key) }
+    }
+    if (!ok) { jbRaise(msg) }
+    return undefined
+}
 function js_jsin(o, key) {
     if (!jvIsObjLike(o) || jbIsBig(o)) {
         if (!jvIsCallable(o)) { jbRaise("TypeError: Cannot use 'in' operator to search for '" + jvStr(key) + "' in " + jvStr(o)) }
@@ -3605,6 +3633,13 @@ function js_jsmset(o, key, v) {
                 arrKindSet(o, 19 + 32 * o.length)
                 return undefined
             }
+        }
+    }
+    // An array length must be a uint32: anything else is a catchable RangeError.
+    if (key === "length") {
+        if (Array.isArray(o)) {
+            var ln = jvToNumber(v)
+            if (!(ln >= 0 && ln <= 4294967295 && Math.floor(ln) === ln)) { jbRaise("RangeError: Invalid array length") }
         }
     }
     o[key] = v
@@ -4436,7 +4471,11 @@ function jvErrHide(o, ks) {
     while (i < ks.length) {
         var k = ks[i]
         if (k != "message" && k != "stack") {
-            if (k != "name" || h !== true) { out.push(k) }
+            if (k != "name" || h !== true) {
+                if (k != "errors" || o["__erragg"] !== true) {
+                    if (k != "cause" || o["__errcause"] !== true) { out.push(k) }
+                }
+            }
         }
         i = i + 1
     }
@@ -4487,6 +4526,71 @@ function jvErrFromText(t) {
 }
 
 function js_jserrmk(t) { return jvErrFromText(t) }
+
+// The AggregateError Promise.any rejects with, its errors the rejection reasons in
+// input order; the plain text when the program registered no AggregateError class.
+// Twin of jsAggErr in abnf/jsrtjsprint.go.
+function jvAggErr(reasons) {
+    var e = anytype
+    e = jvErrFromText("AggregateError: All promises were rejected")
+    if (jvIsObj(e)) { jvAggInit(e, reasons) }
+    return e
+}
+// An AggregateError's own non-enumerable errors array (jvErrHide).
+function jvAggInit(o, reasons) {
+    var cp = []
+    var i = 0
+    while (i < reasons.length) {
+        cp.push(reasons[i])
+        i = i + 1
+    }
+    o["errors"] = cp
+    o["__erragg"] = true
+}
+// InstallErrorCause: an options object holding a cause gives the error its own
+// non-enumerable cause (jvErrHide). Twin of js_jserrcause in abnf/jsrtjsprint.go.
+function js_jserrcause(self, opts) {
+    if (!jvIsObj(self)) { return undefined }
+    if (!jvIsCallable(opts)) {
+        if (!jvIsObjLike(opts) || jbIsBig(opts)) { return undefined }
+    }
+    if (!js_jshas(opts, "cause")) { return undefined }
+    self["cause"] = js_jsvget(opts, "cause")
+    self["__errcause"] = true
+    return undefined
+}
+// A class field is DEFINED on the instance, not assigned: an accessor of that name,
+// own or inherited, is replaced by an own data property and its setter does not run.
+// Every other write is js_jsmset's. Twin of js_jsfielddef in abnf/jsrtjsprint.go.
+function js_jsfielddef(o, key, v) {
+    if (jvAccN > 0) {
+        if (jvIsObj(o)) {
+            if (typeof key == "string") {
+                var ah = anytype
+                ah = undefined
+                if (jvIsAcc(o[key])) { ah = o } else { ah = jvClassAccHolder(o, key) }
+                if (ah !== undefined) {
+                    o[key] = v
+                    return undefined
+                }
+            }
+        }
+    }
+    return js_jsmset(o, key, v)
+}
+// The TypeError of a call of a value that is no function: (callee, site text). A class
+// called without `new` has node's own words. Twin of js_jscallerr in
+// abnf/jsrtjsprint.go.
+function js_jscallerr(f, site) {
+    if (jvIsClassDesc(f)) { return jvErrFromText("TypeError: Class constructor " + jvStr(f["__name"]) + " cannot be invoked without 'new'") }
+    return jvErrFromText("TypeError: " + site + " is not a function")
+}
+// The AggregateError constructor body: (this, errors, message).
+function js_jsaggerrinit(self, errors, msg) {
+    js_jserrinit(self, msg)
+    if (jvIsObj(self)) { jvAggInit(self, jvIterList(errors)) }
+    return undefined
+}
 
 // ===================================================== the globals ========
 
@@ -5241,8 +5345,25 @@ function jvExpandDollar(repl, match, before, after) {
 }
 
 // The replacer-FUNCTION form: the callback gets (match, offset, whole).
+// An empty pattern matches before every UTF-16 unit and at the end; replace (limit
+// 1) takes the first of those matches. fn is the replacer, or undefined for the
+// template repl. Twin of jsvReplaceEmpty in abnf/jsrtjsprint.go.
+function jvReplaceEmpty(s, fn, repl, limit) {
+    var n = 0
+    if (limit < 0) { n = s.length }
+    var out = ""
+    var i = 0
+    while (i <= n) {
+        if (jvIsCallable(fn)) { out = out + jvStr(jvCallT(fn, undefined, ["", i, s])) }
+        else { out = out + jvExpandDollar(repl, "", s.substring(0, i), s.substring(i, s.length)) }
+        if (i < n) { out = out + s.substring(i, i + 1) }
+        i = i + 1
+    }
+    return out + s.substring(n, s.length)
+}
+
 function jvReplaceFn(s, pat, fn, limit) {
-    if (pat == "") { return jvStr(jvCallT(fn, undefined, ["", 0, s])) + s }
+    if (pat == "") { return jvReplaceEmpty(s, fn, "", limit) }
     var out = ""
     var at = 0
     var done = 0
@@ -5261,7 +5382,7 @@ function jvReplaceFn(s, pat, fn, limit) {
 }
 
 function jvReplaceTemplate(s, pat, repl, limit) {
-    if (pat == "") { return jvExpandDollar(repl, "", "", s) + s }
+    if (pat == "") { return jvReplaceEmpty(s, undefined, repl, limit) }
     var out = ""
     var at = 0
     var done = 0
@@ -8091,8 +8212,10 @@ function jbEq(a, b) {
     var bbig = jbIsBig(bp)
     if (!abig && !bbig) { return jbMiss }
     if (abig && bbig) { return jbCmpB(ap, bp) === 0 }
-    var n = ap
-    var other = bp
+    var n = anytype // The BigInt side, and the other side, may be any type.
+    var other = anytype
+    n = ap
+    other = bp
     if (!abig) { n = bp; other = ap }
     if (typeof other == "string") {
         var p = jbFromStrStrict(other)
@@ -8618,7 +8741,19 @@ function jxNeutral(flags) {
     if (jxHasFlag(flags, "i")) { out = out + "i" }
     if (jxHasFlag(flags, "s")) { out = out + "s" }
     if (jxHasFlag(flags, "m")) { out = out + "m" }
+    if (jxHasFlag(flags, "u") || jxHasFlag(flags, "v")) { out = out + "U" }
     return out
+}
+
+// AdvanceStringIndex: past the empty match at i, a whole surrogate pair under u.
+// Twin of jsxAdv in abnf/jsrtregexjs.go.
+function jxAdv(o, s, i) {
+    if (jxBool(o, "unicode")) {
+        if (i + 1 < s.length) {
+            if (rxCpAt(s, i) > 65535) { return i + 2 }
+        }
+    }
+    return i + 1
 }
 
 // ----- the RegExp value --------------------------------------------------------
@@ -8769,7 +8904,15 @@ function jxExec(o, s) {
     var re = jxProg(o)
     var useLast = jxBool(o, "global") || jxBool(o, "sticky")
     var at = 0
-    if (useLast) { at = jxLastIndex(o) }
+    if (useLast) {
+        at = jxLastIndex(o)
+        // Under u a lastIndex inside a surrogate pair reads the pair.
+        if (jxBool(o, "unicode")) {
+            if (at > 0 && at < s.length) {
+                if (rxCpAt(s, at - 1) > 65535) { at = at - 1 }
+            }
+        }
+    }
     if (at < 0 || at > s.length) {
         if (useLast) { o["lastIndex"] = 0 }
         return null
@@ -8807,7 +8950,7 @@ function jxMatchAll(o, s, whole) {
         } else {
             out.push(jxResult(re, s, m, s))
         }
-        if (m["end"] == m["begin"]) { at = m["end"] + 1 } else { at = m["end"] }
+        if (m["end"] == m["begin"]) { at = jxAdv(o, s, m["end"]) } else { at = m["end"] }
     }
     o["lastIndex"] = 0
     return out
@@ -8829,7 +8972,7 @@ function jxSplit(o, s, limit) {
     while (q < s.length) {
         var m = rxSearch(re, s, q)
         if (m === null || m["begin"] != q || m["end"] == p) {
-            q = q + 1
+            q = jxAdv(o, s, q)
             continue
         }
         out.push(s.substring(p, q))
@@ -8922,9 +9065,9 @@ function jxReplace(o, s, repl, forceAll) {
         last = m["end"]
         at = m["end"]
         if (m["end"] == m["begin"]) {
-            if (m["end"] < s.length) { out = out + s.charAt(m["end"]) }
-            last = m["end"] + 1
-            at = m["end"] + 1
+            at = jxAdv(o, s, m["end"])
+            if (m["end"] < s.length) { out = out + s.substring(m["end"], at) }
+            last = at
         }
         if (!all) { break }
     }
@@ -9087,6 +9230,7 @@ function js_jsxcall(fn, self, args) {
 // await site, which is what puts it inside an enclosing try/catch.
 var jpQ = []          // The microtask queue: thunks, drained by js_jsdrain.
 var jpQi = 0          // Read cursor, so draining does not re-slice the queue.
+var jpRej = []        // Promises rejected while they had no reaction (js_jsdrain).
 var jpFn = anytype    // The one `Promise` global value, interned for identity.
 
 function jpNew() {
@@ -9111,6 +9255,9 @@ function jpSettle(p, state, v) {
     if (p["__ps"] !== 0) { return }
     p["__ps"] = state
     p["__pv"] = v
+    if (state === 2) {
+        if (p["__ph"] !== true) { jpRej.push(p) }
+    }
     var cbs = p["__pcb"]
     p["__pcb"] = []
     var i = 0
@@ -9181,6 +9328,7 @@ function jpReactJob(state, arg, reaction) {
 // Register one reaction. derived is the promise then() answered, or undefined for
 // an await, which consumes the result itself.
 function jpThen(p, onF, onR, derived) {
+    p["__ph"] = true
     var reaction = {}
     reaction["f"] = onF
     reaction["r"] = onR
@@ -9314,7 +9462,7 @@ function jpCombine(kind, src, c) {
     if (src.length === 0) {
         if (kind == "all") { jpResolve(st["out"], st["results"]) }
         if (kind == "allSettled") { jpResolve(st["out"], st["results"]) }
-        if (kind == "any") { jpSettle(st["out"], 2, "AggregateError: All promises were rejected") }
+        if (kind == "any") { jpSettle(st["out"], 2, jvAggErr([])) }
         return st["out"]
     }
     var j = 0
@@ -9354,7 +9502,7 @@ function jpCombineFn(st, idx, ok) {
         }
         st["left"] = st["left"] - 1
         if (st["left"] !== 0) { return }
-        if (st["kind"] == "any") { jpSettle(st["out"], 2, "AggregateError: All promises were rejected") }
+        if (st["kind"] == "any") { jpSettle(st["out"], 2, jvAggErr(st["results"])) }
         else { jpResolve(st["out"], st["results"]) }
     }
 }
@@ -9617,8 +9765,9 @@ function js_jspromfn() {
 
 // Run the microtask queue to exhaustion. There are no timers and no I/O here, so
 // the one drain the emitter puts after the whole script is every event-loop turn
-// a program gets. An UNHANDLED REJECTION is deliberately not reported in any of
-// the three engines - see the note in abnf/jsrt.go's drainMicrotasks.
+// a program gets. A promise rejected with no reaction that has none once the queue
+// is drained is node's unhandled rejection, raised here as an uncaught exception.
+// Twin of jsvUnhandled in abnf/jsrtjsprint.go.
 function js_jsdrain() {
     while (jpQi < jpQ.length) {
         var job = jpQ[jpQi]
@@ -9627,6 +9776,13 @@ function js_jsdrain() {
     }
     jpQ = []
     jpQi = 0
+    var rej = jpRej
+    jpRej = []
+    var i = 0
+    while (i < rej.length) {
+        if (rej[i]["__ph"] !== true) { throw rej[i]["__pv"] }
+        i = i + 1
+    }
     return undefined
 }
 

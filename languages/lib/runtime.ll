@@ -4625,7 +4625,7 @@ entry:
 	%36 = icmp ne i64 %34, %35
 	%37 = zext i1 %36 to i32
 	%38 = icmp ne i32 %37, 0
-	br i1 %38, label %44, label %50
+	br i1 %38, label %44, label %52
 
 39:
 	%40 = load i64, i64* %10
@@ -4645,59 +4645,75 @@ dead73:
 	%47 = icmp eq i64 %45, %46
 	%48 = zext i1 %47 to i32
 	%49 = icmp ne i32 %48, 0
-	br i1 %49, label %60, label %63
+	%50 = zext i1 %49 to i32
+	%51 = icmp ne i32 %50, 0
+	br i1 %51, label %62, label %69
 
-50:
-	%51 = load i64, i64* %4
-	%52 = load i64, i64* %3
-	%53 = call i64 @ar_block(i64 %51, i64 %52)
-	store i64 %53, i64* %10
-	%54 = load i64, i64* @GC_ALLOCED
-	%55 = load i64, i64* %4
-	%56 = add i64 %54, %55
-	store i64 %56, i64* @GC_ALLOCED
-	%57 = load i64, i64* %10
-	%58 = inttoptr i64 %57 to i32*
-	%59 = bitcast i32* %58 to i32*
-	ret i32* %59
-
-60:
-	%61 = call i32 @gc_collect()
-	br label %62
+52:
+	%53 = load i64, i64* %4
+	%54 = load i64, i64* %3
+	%55 = call i64 @ar_block(i64 %53, i64 %54)
+	store i64 %55, i64* %10
+	%56 = load i64, i64* @GC_ALLOCED
+	%57 = load i64, i64* %4
+	%58 = add i64 %56, %57
+	store i64 %58, i64* @GC_ALLOCED
+	%59 = load i64, i64* %10
+	%60 = inttoptr i64 %59 to i32*
+	%61 = bitcast i32* %60 to i32*
+	ret i32* %61
 
 62:
-	br label %50
+	%63 = load i64, i64* @PERM_ON
+	%64 = sext i32 0 to i64
+	%65 = icmp eq i64 %63, %64
+	%66 = zext i1 %65 to i32
+	%67 = icmp ne i32 %66, 0
+	%68 = zext i1 %67 to i32
+	br label %69
 
-63:
-	%64 = load i64, i64* @GC_MODE
-	%65 = sext i32 1 to i64
-	%66 = icmp ne i64 %64, %65
-	%67 = zext i1 %66 to i32
-	%68 = icmp ne i32 %67, 0
-	%69 = zext i1 %68 to i32
-	%70 = icmp ne i32 %69, 0
-	br i1 %70, label %71, label %78
+69:
+	%70 = phi i32 [ %50, %44 ], [ %68, %62 ]
+	%71 = icmp ne i32 %70, 0
+	br i1 %71, label %72, label %75
 
-71:
-	%72 = load i64, i64* @GC_ALLOCED
-	%73 = load i64, i64* @GC_THRESH
-	%74 = icmp sgt i64 %72, %73
-	%75 = zext i1 %74 to i32
-	%76 = icmp ne i32 %75, 0
-	%77 = zext i1 %76 to i32
-	br label %78
+72:
+	%73 = call i32 @gc_collect()
+	br label %74
 
-78:
-	%79 = phi i32 [ %69, %63 ], [ %77, %71 ]
+74:
+	br label %52
+
+75:
+	%76 = load i64, i64* @GC_MODE
+	%77 = sext i32 1 to i64
+	%78 = icmp ne i64 %76, %77
+	%79 = zext i1 %78 to i32
 	%80 = icmp ne i32 %79, 0
-	br i1 %80, label %81, label %83
-
-81:
-	%82 = call i32 @gc_collect()
-	br label %83
+	%81 = zext i1 %80 to i32
+	%82 = icmp ne i32 %81, 0
+	br i1 %82, label %83, label %90
 
 83:
-	br label %62
+	%84 = load i64, i64* @GC_ALLOCED
+	%85 = load i64, i64* @GC_THRESH
+	%86 = icmp sgt i64 %84, %85
+	%87 = zext i1 %86 to i32
+	%88 = icmp ne i32 %87, 0
+	%89 = zext i1 %88 to i32
+	br label %90
+
+90:
+	%91 = phi i32 [ %81, %75 ], [ %89, %83 ]
+	%92 = icmp ne i32 %91, 0
+	br i1 %92, label %93, label %95
+
+93:
+	%94 = call i32 @gc_collect()
+	br label %95
+
+95:
+	br label %74
 
 dead74:
 	ret i32* null

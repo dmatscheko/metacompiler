@@ -582,6 +582,54 @@ type rxSt struct {
 	brbase   int
 	inlook   int
 	startopt bool
+	// uni is the U flag: JavaScript's u, where the pattern is code points.
+	uni bool
+}
+
+// escU is JavaScript's \u escape under U, after the u: \u{h..} is the code point,
+// \uHHHH four hex digits, and a \uHHHH\uHHHH surrogate pair one character. -1
+// when the escape is none of these. Twin of rxEscU in lib/regex.js.
+func (st *rxSt) escU() int {
+	if st.i < st.n && st.p[st.i] == '{' {
+		j, cv := st.i+1, 0
+		for j < st.n && rxHexVal(st.p[j]) >= 0 && cv <= 0x10FFFF {
+			cv = cv*16 + rxHexVal(st.p[j])
+			j++
+		}
+		if j == st.i+1 || j >= st.n || st.p[j] != '}' || cv > 0x10FFFF {
+			return -1
+		}
+		st.i = j + 1
+		return cv
+	}
+	v := rxHex4(st.p, st.i)
+	if v < 0 {
+		return -1
+	}
+	st.i += 4
+	if v >= 0xD800 && v <= 0xDBFF && st.i+1 < st.n && st.p[st.i] == '\\' && st.p[st.i+1] == 'u' {
+		if lo := rxHex4(st.p, st.i+2); lo >= 0xDC00 && lo <= 0xDFFF {
+			st.i += 6
+			return (v-0xD800)*1024 + (lo - 0xDC00) + 0x10000
+		}
+	}
+	return v
+}
+
+// rxHex4 is the value of the four hex digits at p[i:i+4], or -1.
+func rxHex4(p []rune, i int) int {
+	if i+4 > len(p) {
+		return -1
+	}
+	v := 0
+	for k := 0; k < 4; k++ {
+		h := rxHexVal(p[i+k])
+		if h < 0 {
+			return -1
+		}
+		v = v*16 + h
+	}
+	return v
 }
 
 // rxIsMetaCh answers whether a character has to be backslashed to stay a literal.
@@ -1105,6 +1153,13 @@ func (st *rxSt) esc(inClass bool) rxEscRes {
 		}
 		return rxEscRes{ch: rune(v)}
 	case 'u':
+		if st.uni {
+			v := st.escU()
+			if v < 0 {
+				st.fail("invalid unicode escape")
+			}
+			return rxEscRes{ch: rune(v)}
+		}
 		v, got := 0, 0
 		for got < 4 && st.i < st.n {
 			h := rxHexVal(st.p[st.i])
@@ -4268,6 +4323,8 @@ type rxRe struct {
 	// the counted-loop and lookbehind tables (rxProg).
 	java  bool
 	errAt int
+	// uni is the U flag: the text's surrogate pairs are one character each.
+	uni bool
 	// supp is java.util.regex's hasSupplementary (see rxSuppJ).
 	supp bool
 	// bfail is the n flag (implied by J and P): a backreference to a group that
@@ -6192,6 +6249,12 @@ func rxCompile(pattern, flags string) *rxRe {
 	posix := strings.ContainsRune(letters, 'p')
 	java := strings.ContainsRune(letters, 'J')
 	py := strings.ContainsRune(letters, 'P')
+	// U is JavaScript's u: the pattern is code points and the text's surrogate pairs
+	// are one character. W (no letter in lib/regex.js, whose strings are UTF-16
+	// already) is JavaScript's text without u: the pattern is UTF-16 units, as the
+	// text is.
+	uni := strings.ContainsRune(letters, 'U')
+	wide := strings.ContainsRune(letters, 'W')
 	bfail := java || py || strings.ContainsRune(letters, 'n')
 	// R reads the pattern as Go does and compiles its J spelling (rxRe2).
 	re2 := strings.ContainsRune(letters, 'R')
@@ -6229,8 +6292,10 @@ func rxCompile(pattern, flags string) *rxRe {
 	// counter nor the parser needs a quoting mode. re.src keeps the ORIGINAL pattern,
 	// which is what a language's .source / inspect reports.
 	pat := []rune(pattern)
-	if java {
+	if java || uni {
 		pat = wtf8Runes(pattern)
+	} else if wide {
+		pat = rxUnits(pattern)
 	}
 	if re2 {
 		pat = wtf8Runes(tr.out)
@@ -6243,7 +6308,7 @@ func rxCompile(pattern, flags string) *rxRe {
 	}
 	st := &rxSt{p: pat, ext: ext, dotall: dotall, octal: octal, ere: ere, posix: posix, java: java, errAt: -1,
 		py: py, icase: icase, multi: multi, ucase: ucase, unix: unix, gnodes: []*rxNode{nil},
-		pyuni: py && !strings.ContainsRune(letters, 'a'), re2: re2, pcre: pcre, brbase: -1}
+		pyuni: py && !strings.ContainsRune(letters, 'a'), re2: re2, pcre: pcre, brbase: -1, uni: uni}
 	// Under P and J case folding and line anchoring are decided per atom while
 	// parsing.
 	if py || java {
@@ -6347,8 +6412,8 @@ func rxCompile(pattern, flags string) *rxRe {
 	return &rxRe{
 		ok: true, ops: pg.ops, as: pg.as, bs: pg.bs, clss: pg.clss,
 		ngroups: st.ngroups, nmarks: pg.nmarks, names: names, nameGroups: nameGroups,
-		icase: icase, dotall: dotall, multi: multi, jsrep: jsrep, java: java, errAt: -1,
-		supp: java && (re2 || st.supp || rxSuppJ(ast) || rxHasSurr(pat)) || pcre && ucase, bfail: bfail, gflags: gflags,
+		icase: icase, dotall: dotall, multi: multi, jsrep: jsrep, java: java, errAt: -1, uni: uni,
+		supp: uni || java && (re2 || st.supp || rxSuppJ(ast) || rxHasSurr(pat)) || pcre && ucase, bfail: bfail, gflags: gflags,
 		pcre: pcre, acc: pg.acc, vmarks: tp.marks,
 		cmin: pg.cmin, cmax: pg.cmax, cgreedy: pg.cgreedy, cemp: pg.cemp, lbmin: pg.lbmin, lbmax: pg.lbmax,
 		src: pattern, flags: flags, jbegin: jbegin, jmin: jmin,
@@ -6709,7 +6774,7 @@ func (re *rxRe) run(text []rune, pcIn, spIn int, caps, marks []int, st *rxRunSt,
 					break fwd
 				}
 				c, w := text[sp], 1
-				if re.java && isHighSurr(c) {
+				if (re.java || re.uni) && isHighSurr(c) {
 					// A pair a region end splits (see RX_CLASS in lib/regex.js).
 					if sp+1 == n && re.jcut != 0 && !rxClsBmpJ(re.clss[pc]) {
 						re.hitEnd = true

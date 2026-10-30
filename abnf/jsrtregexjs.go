@@ -54,7 +54,9 @@ func jsxNeutral(flags string) string {
 	// kept, so /^(a*)*$/.exec("aaa") reports "aaa" for group 1 (node), not "" (Perl,
 	// Python, Ruby, Java). It also clears the captures inside a repeated atom at the
 	// start of every iteration: /(?:(a)|b)+/.exec("ab") leaves group 1 undefined.
-	out := "oj"
+	// "W" is unconditional as well: the text is UTF-16 units (rxUnits), and so is the
+	// pattern, except under u ("U"), where both are code points.
+	out := "ojW"
 	if jsxHasFlag(flags, 'i') {
 		out += "i"
 	}
@@ -64,7 +66,20 @@ func jsxNeutral(flags string) string {
 	if jsxHasFlag(flags, 'm') {
 		out += "m"
 	}
+	if jsxHasFlag(flags, 'u') || jsxHasFlag(flags, 'v') {
+		out += "U"
+	}
 	return out
+}
+
+// jsxAdv is AdvanceStringIndex: past the empty match at i, a whole surrogate pair
+// under u. Twins: jsReAdv in both *-interpreter.abnf, jxAdv in
+// languages/lib/js-rt.metajs.
+func jsxAdv(o *jsObject, text []rune, i int) int {
+	if jsxBool(o, "unicode") && i+1 < len(text) && isHighSurr(text[i]) && isLowSurr(text[i+1]) {
+		return i + 2
+	}
+	return i + 1
 }
 
 // jsxNewRegex builds the RegExp value: the __rx slots the shared engine reads plus the
@@ -182,11 +197,15 @@ func (rt *jsrt) jsxResult(re *rxRe, text []rune, m *rxMatch, input string) *jsAr
 // to 0 on failure, and y additionally refuses a match that does not BEGIN there.
 func (rt *jsrt) jsxExec(o *jsObject, s string) interface{} {
 	re := rt.jsxProg(o)
-	text := []rune(s)
+	text := rxUnits(s)
 	useLast := jsxBool(o, "global") || jsxBool(o, "sticky")
 	at := 0
 	if useLast {
 		at = jsxLastIndex(o)
+		// Under u a lastIndex inside a surrogate pair reads the pair.
+		if jsxBool(o, "unicode") && at > 0 && at < len(text) && isLowSurr(text[at]) && isHighSurr(text[at-1]) {
+			at--
+		}
 	}
 	if at < 0 || at > len(text) {
 		if useLast {
@@ -218,7 +237,7 @@ func (rt *jsrt) jsxTest(o *jsObject, s string) bool {
 	if jsxBool(o, "global") || jsxBool(o, "sticky") {
 		return rt.jsxExec(o, s) != jsNull
 	}
-	return rt.jsxSearch(rt.jsxProg(o), []rune(s), 0) != nil
+	return rt.jsxSearch(rt.jsxProg(o), rxUnits(s), 0) != nil
 }
 
 // jsxMatchAll walks every match. whole=true collects just the matched text (String#match
@@ -227,7 +246,7 @@ func (rt *jsrt) jsxTest(o *jsObject, s string) bool {
 // for-of over it needs anyway - the interpreter does the same.
 func (rt *jsrt) jsxMatchAll(o *jsObject, s string, whole bool) *jsArray {
 	re := rt.jsxProg(o)
-	text := []rune(s)
+	text := rxUnits(s)
 	out := &jsArray{}
 	for at := 0; at <= len(text); {
 		m := rt.jsxSearch(re, text, at)
@@ -241,7 +260,7 @@ func (rt *jsrt) jsxMatchAll(o *jsObject, s string, whole bool) *jsArray {
 			out.elems = append(out.elems, rt.jsxResult(re, text, m, s))
 		}
 		if m.end == m.begin {
-			at = m.end + 1
+			at = jsxAdv(o, text, m.end)
 		} else {
 			at = m.end
 		}
@@ -255,7 +274,7 @@ func (rt *jsrt) jsxMatchAll(o *jsObject, s string, whole bool) *jsArray {
 // are part of the output. Ruby's rxSplit answers a different shape, so this is its own.
 func (rt *jsrt) jsxSplit(o *jsObject, s string, limit int) *jsArray {
 	re := rt.jsxProg(o)
-	text := []rune(s)
+	text := rxUnits(s)
 	out := &jsArray{}
 	if len(text) == 0 {
 		if rt.jsxSearch(re, text, 0) == nil {
@@ -270,10 +289,10 @@ func (rt *jsrt) jsxSplit(o *jsObject, s string, limit int) *jsArray {
 	for q < len(text) {
 		m := rt.jsxSearch(re, text, q)
 		if m == nil || m.begin != q || m.end == p {
-			q++
+			q = jsxAdv(o, text, q)
 			continue
 		}
-		out.elems = append(out.elems, string(text[p:q]))
+		out.elems = append(out.elems, rxUnitsStr(text[p:q]))
 		if limit >= 0 && len(out.elems) >= limit {
 			return out
 		}
@@ -290,7 +309,7 @@ func (rt *jsrt) jsxSplit(o *jsObject, s string, limit int) *jsArray {
 		p = m.end
 		q = p
 	}
-	out.elems = append(out.elems, string(text[p:]))
+	out.elems = append(out.elems, rxUnitsStr(text[p:]))
 	return out
 }
 
@@ -316,9 +335,9 @@ func (re *rxRe) substJS(t string, text []rune, m *rxMatch) string {
 		case d == '&':
 			group(0)
 		case d == '`':
-			out.WriteString(string(text[:m.begin]))
+			out.WriteString(rxUnitsStr(text[:m.begin]))
 		case d == '\'':
-			out.WriteString(string(text[m.end:]))
+			out.WriteString(rxUnitsStr(text[m.end:]))
 		case d >= '0' && d <= '9':
 			idx, w := int(d-'0'), 1
 			if i+2 < len(r) && r[i+2] >= '0' && r[i+2] <= '9' && idx*10+int(r[i+2]-'0') <= re.ngroups {
@@ -365,7 +384,7 @@ func (rt *jsrt) jsxReplace(o *jsObject, s string, repl interface{}, forceAll boo
 	if !isFn {
 		tpl = rt.toString(repl)
 	}
-	text := []rune(s)
+	text := rxUnits(s)
 	var out strings.Builder
 	at, last := 0, 0
 	for at <= len(text) {
@@ -373,7 +392,7 @@ func (rt *jsrt) jsxReplace(o *jsObject, s string, repl interface{}, forceAll boo
 		if m == nil {
 			break
 		}
-		out.WriteString(string(text[last:m.begin]))
+		out.WriteString(rxUnitsStr(text[last:m.begin]))
 		if !isFn {
 			out.WriteString(re.substJS(tpl, text, m))
 		} else {
@@ -390,17 +409,18 @@ func (rt *jsrt) jsxReplace(o *jsObject, s string, repl interface{}, forceAll boo
 		}
 		last, at = m.end, m.end
 		if m.end == m.begin {
+			at = jsxAdv(o, text, m.end)
 			if m.end < len(text) {
-				out.WriteRune(text[m.end])
+				out.WriteString(rxUnitsStr(text[m.end:at]))
 			}
-			last, at = m.end+1, m.end+1
+			last = at
 		}
 		if !all {
 			break
 		}
 	}
 	if last <= len(text) {
-		out.WriteString(string(text[last:]))
+		out.WriteString(rxUnitsStr(text[last:]))
 	}
 	if jsxBool(o, "global") {
 		o.set("lastIndex", float64(0))
@@ -450,7 +470,7 @@ func (rt *jsrt) jsxMethod(target interface{}, name string, args []interface{}) (
 	case "match", "matchAll", "search":
 		re := rt.jsxRegexArg(argAt(args, 0))
 		if name == "search" {
-			m := rt.jsxSearch(rt.jsxProg(re), []rune(s), 0)
+			m := rt.jsxSearch(rt.jsxProg(re), rxUnits(s), 0)
 			if m == nil {
 				return float64(-1), true
 			}

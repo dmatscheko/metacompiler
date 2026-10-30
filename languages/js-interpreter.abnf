@@ -3736,9 +3736,16 @@ NotFuncHead = :script(~~
     // replaceAll. repl is a replacement string or a function (match, offset, whole).
     function jsReplace(s, pat, repl, limit) {
         var isFn = typeof repl == "function"
+        // An empty pattern matches before every UTF-16 unit and at the end; replace
+        // takes the first of those matches.
         if (pat == "") {
-            var head = isFn ? ("" + callWithThis(repl, undefined, ["", 0, s])) : jsExpandDollar(repl, "", "", s)
-            return head + s
+            var en = (limit < 0) ? s.length : 0
+            var eo = ""
+            for (var ei = 0; ei <= en; ei++) {
+                eo = eo + (isFn ? ("" + callWithThis(repl, undefined, ["", ei, s])) : jsExpandDollar(repl, "", s.substring(0, ei), s.substring(ei, s.length)))
+                if (ei < en) { eo = eo + s.substring(ei, ei + 1) }
+            }
+            return eo + s.substring(en, s.length)
         }
         var out = ""
         var at = 0
@@ -4166,6 +4173,7 @@ NotFuncHead = :script(~~
     // promise then() answered (undefined for an await, which consumes the result).
     var jpQ = []          // The microtask queue: thunks, drained by jsDrain.
     var jpQi = 0          // Read cursor, so draining does not re-slice the queue.
+    var jpRej = []        // Promises rejected while they had no reaction (jsDrain).
     var jpMiss = {}       // "this table does not answer that name".
 
     function jpIsObjV(v) {
@@ -4195,6 +4203,7 @@ NotFuncHead = :script(~~
         if (p["__ps"] !== 0) { return }
         p["__ps"] = state
         p["__pv"] = v
+        if (state === 2 && p["__ph"] !== true) { jpRej.push(p) }
         var cbs = p["__pcb"]
         p["__pcb"] = []
         for (var i = 0; i < cbs.length; i++) { jpEnqReact(p, cbs[i]) }
@@ -4264,6 +4273,7 @@ NotFuncHead = :script(~~
     // Register one reaction. derived is the promise then() answered, or undefined for
     // an await, which consumes the result itself.
     function jpThen(p, onF, onR, derived) {
+        p["__ph"] = true
         var reaction = {}
         reaction["f"] = onF
         reaction["r"] = onR
@@ -4381,7 +4391,7 @@ NotFuncHead = :script(~~
         if (src.length === 0) {
             if (kind == "all") { jpResolve(st["out"], st["results"]) }
             if (kind == "allSettled") { jpResolve(st["out"], st["results"]) }
-            if (kind == "any") { jpSettle(st["out"], 2, "AggregateError: All promises were rejected") }
+            if (kind == "any") { jpSettle(st["out"], 2, jsAggErr([])) }
             return st["out"]
         }
         for (var j = 0; j < src.length; j++) {
@@ -4418,7 +4428,7 @@ NotFuncHead = :script(~~
             }
             st["left"] = st["left"] - 1
             if (st["left"] !== 0) { return }
-            if (st["kind"] == "any") { jpSettle(st["out"], 2, "AggregateError: All promises were rejected") }
+            if (st["kind"] == "any") { jpSettle(st["out"], 2, jsAggErr(st["results"])) }
             else { jpResolve(st["out"], st["results"]) }
         }
     }
@@ -4650,9 +4660,10 @@ NotFuncHead = :script(~~
         return p
     }
     // Run the microtask queue to exhaustion. There are no timers and no I/O here, so
-    // the one drain after the whole program is every event-loop turn it gets. An
-    // UNHANDLED REJECTION is deliberately not reported in any of the three engines -
-    // see the note in abnf/jsrt.go's drainMicrotasks.
+    // the one drain after the whole program is every event-loop turn it gets. A
+    // promise rejected with no reaction that has none once the queue is drained is
+    // node's unhandled rejection, raised as an uncaught exception. Twins: js_jsdrain in
+    // abnf/jsrtjsprint.go and languages/lib/js-rt.metajs.
     function jsDrain() {
         while (jpQi < jpQ.length) {
             var job = jpQ[jpQi]
@@ -4661,6 +4672,11 @@ NotFuncHead = :script(~~
         }
         jpQ = []
         jpQi = 0
+        var rej = jpRej
+        jpRej = []
+        for (var i = 0; i < rej.length; i++) {
+            if (rej[i]["__ph"] !== true) { throw {__exc: true, v: rej[i]["__pv"]} }
+        }
     }
     // The value an `await` answers, given what the driver sent back in: a rejection
     // arrives as a marker record and is re-raised HERE, at the await site, which is
@@ -5900,6 +5916,13 @@ NotFuncHead = :script(~~
     // lib/js-builtins.js's. It replaces the host's own Array, whose statics would
     // otherwise answer for the program under goja and not under -frozen. Twins:
     // js_jsarrayfn in abnf/jsrtjsprint.go and languages/lib/js-rt.metajs.
+    // An array length must be a uint32: anything else is a catchable RangeError. Twins:
+    // js_jsmset in abnf/jsrtjsprint.go and languages/lib/js-rt.metajs.
+    function jsArrLenOf(v) {
+        var n = jsToNum(v)
+        if (!(n >= 0 && n <= 4294967295 && Math.floor(n) === n)) { biRaise("RangeError: Invalid array length") }
+        return n
+    }
     function jsArrayFn() {
         var out = []
         if (arguments.length == 1 && typeof arguments[0] == "number") {
@@ -6486,8 +6509,12 @@ NotFuncHead = :script(~~
         // would resolve inherited Object.prototype members (toString, valueOf, ...)
         // under goja, while the frozen engine's objects have no prototype chain.
         if (typeof o == "object" && !Array.isArray(o)) {
-            var g = findAccessor(o, "get", k)
-            if (g != undefined) { return callWithThis(g, o, []) }
+            var gh = anytype // The holder of the accessor the read meets, or undefined.
+            gh = accHolder(o, k)
+            if (gh !== undefined) {
+                var g = accSlot(gh.__acc, "get:" + k)
+                return (g === undefined) ? undefined : callWithThis(g, o, [])
+            }
             if (!hasOwn(o, k)) {
                 // `e.constructor` is the CLASS an instance was built from - node reads
                 // it off the prototype, and this engine's equivalent is the instance's
@@ -7399,6 +7426,7 @@ NotFuncHead = :script(~~
             trackKey(np, k)
             return
         }
+        if (k === "length" && Array.isArray(o) && !(argsWant && jsIsArgs(o))) { scopePut(o, k, jsArrLenOf(v)); return }
         scopePut(o, k, v)
         trackKey(o, k) // Keep the object's for-in key list up to date.
         // ...and a value that is no array length resizes it as an array write does.
@@ -7509,21 +7537,29 @@ NotFuncHead = :script(~~
         }
         return undefined
     }
-    // The object holding k's accessor pair for a write: o itself, else the nearest
-    // class descriptor or prototype object on its __class chain (findAccessor's
-    // walk), or undefined. The
-    // pair decides alone - a getter-only accessor refuses the write even where a
-    // class further up declares a setter (OrdinarySet, ECMA-262 10.1.9.2). Twins:
-    // jsvAccHolder in abnf/jsrtjsprint.go, jvClassAccHolder in languages/lib/js-rt.metajs.
+    // The object holding the accessor pair a read or a write of k meets: o itself, else
+    // the nearest class descriptor or prototype object on its __class chain, or
+    // undefined. The nearest level that has k decides: an own data property or a
+    // method in between shadows an accessor further up, and the pair decides alone -
+    // a getter-only accessor refuses the write, and a setter-only one reads undefined,
+    // even where a class further up declares the other half (OrdinaryGet / OrdinarySet,
+    // ECMA-262 10.1.8.1 / 10.1.9.2). Twins: jsvAccHolder in abnf/jsrtjsprint.go,
+    // jvClassAccHolder in languages/lib/js-rt.metajs.
     function accHolder(o, k) {
         var r = anytype
         r = undefined
         if (hasOwn(o, "__acc") && jsIsAccKey(o, "" + k)) { return o }
+        if (hasOwn(o, k)) { return r }
         var start = anytype // A prototype view starts at its own descriptor, anything else at its class.
         start = hasOwn(o, "__protoof") ? o.__protoof : o.__class
+        var ik = isInternalKey("" + k)
         for (var cl = start; cl != undefined && cl != null; cl = cl.__super) {
             if (hasOwn(cl, "__acc") && jsIsAccKey(cl, "" + k)) { return cl }
-            if (hasOwn(cl, "__pview") && jsIsAccKey(cl.__pview, "" + k)) { return cl.__pview }
+            if (!ik && hasOwn(cl, k)) { return r }
+            if (hasOwn(cl, "__pview")) {
+                if (jsIsAccKey(cl.__pview, "" + k)) { return cl.__pview }
+                if (!ik && hasOwn(cl.__pview, k)) { return r }
+            }
         }
         return r
     }
@@ -8650,6 +8686,7 @@ NotFuncHead = :script(~~
         if (jsReHas(flags, "i")) { out = out + "i" }
         if (jsReHas(flags, "s")) { out = out + "s" }
         if (jsReHas(flags, "m")) { out = out + "m" }
+        if (jsReHas(flags, "u") || jsReHas(flags, "v")) { out = out + "U" }
         return out
     }
     // One compiled program per (neutral flags, source): a literal inside a loop builds a
@@ -8747,6 +8784,8 @@ NotFuncHead = :script(~~
         if (useLast) {
             at = rv.lastIndex
             if (typeof at != "number") { at = 0 }
+            // Under u a lastIndex inside a surrogate pair reads the pair.
+            if (rv.unicode && at > 0 && at < s.length && rxCpAt(s, at - 1) > 65535) { at = at - 1 }
         }
         if (at < 0 || at > s.length) { if (useLast) { rv.lastIndex = 0 } return null }
         // Sticky is the engine's own anchored entry point: rxMatchAt tries ONE
@@ -8755,6 +8794,12 @@ NotFuncHead = :script(~~
         if (m == null) { if (useLast) { rv.lastIndex = 0 } return null }
         if (useLast) { rv.lastIndex = m.end }
         return reResult(rv, s, m)
+    }
+    // AdvanceStringIndex: past the empty match at i, a whole surrogate pair under u.
+    // Twins: jsxAdv in abnf/jsrtregexjs.go, jxAdv in languages/lib/js-rt.metajs.
+    function jsReAdv(rv, s, i) {
+        if (rv.unicode && i + 1 < s.length && rxCpAt(s, i) > 65535) { return i + 2 }
+        return i + 1
     }
     function reTest(rv, s) {
         if (rv.global || rv.sticky) { return reExec(rv, s) != null }
@@ -8772,7 +8817,7 @@ NotFuncHead = :script(~~
             var m = rxSearch(prog, s, at)
             if (m == null) { break }
             if (whole) { out.push(rxGroup(prog, s, m, 0)) } else { out.push(reResult(rv, s, m)) }
-            at = (m.end == m.begin) ? m.end + 1 : m.end
+            at = (m.end == m.begin) ? jsReAdv(rv, s, m.end) : m.end
         }
         rv.lastIndex = 0
         return out
@@ -8795,8 +8840,8 @@ NotFuncHead = :script(~~
         var q = 0
         while (q < s.length) {
             var m = rxSearch(prog, s, q)
-            if (m == null || m.begin != q) { q = q + 1; continue }
-            if (m.end == p) { q = q + 1; continue }
+            if (m == null || m.begin != q) { q = jsReAdv(rv, s, q); continue }
+            if (m.end == p) { q = jsReAdv(rv, s, q); continue }
             out.push(s.substring(p, q))
             if (limit >= 0 && out.length >= limit) { return out }
             for (var i = 1; i <= n; i++) {
@@ -8888,9 +8933,9 @@ NotFuncHead = :script(~~
             last = m.end
             at = m.end
             if (m.end == m.begin) {
-                if (m.end < s.length) { out = out + s.charAt(m.end) }
-                last = m.end + 1
-                at = m.end + 1
+                at = jsReAdv(rv, s, m.end)
+                if (m.end < s.length) { out = out + s.substring(m.end, at) }
+                last = at
             }
             if (!all) { break }
         }
@@ -8983,7 +9028,7 @@ NotFuncHead = :script(~~
     // out on purpose, because every boot class adds to the live set the collector
     // marks at each collection and seven classes measurably slowed a GC-heavy bench.
     var jsErrClassNames = ["Error", "TypeError", "RangeError", "ReferenceError",
-                           "SyntaxError"]
+                           "SyntaxError", "AggregateError"]
     // The nearest BUILTIN error name up the instance's class chain. The `guard`
     // cap is the same 64 the rest of this project puts on a descriptor walk.
     function jsErrNameOf(self) {
@@ -9055,7 +9100,10 @@ NotFuncHead = :script(~~
         root["__isclass"] = true
         root["__name"] = "Error"
         root["__errname"] = "Error"
-        root["__ctor"] = fnMetaPut(function() { return jsErrInit(arguments[0], (arguments.length > 1) ? arguments[1] : undefined) }, "", 1)
+        root["__ctor"] = fnMetaPut(function() {
+            jsErrInit(arguments[0], (arguments.length > 1) ? arguments[1] : undefined)
+            return jsErrCause(arguments[0], (arguments.length > 2) ? arguments[2] : undefined)
+        }, "", 1)
         root["toString"] = jsErrToString
         scopePut(hostGlobals, "Error", root)
         for (var i = 1; i < jsErrClassNames.length; i++) {
@@ -9065,9 +9113,31 @@ NotFuncHead = :script(~~
             c["__name"] = n
             c["__errname"] = n
             c["__super"] = root
-            c["__ctor"] = root["__ctor"]
+            c["__ctor"] = (n == "AggregateError") ? fnMetaPut(jsAggCtor, "", 2) : root["__ctor"]
             scopePut(hostGlobals, n, c)
         }
+    }
+    // AggregateError's constructor, (this, errors, message), and the instance
+    // Promise.any rejects with. errors is an own property kept off the key list, so it
+    // is not enumerable. Twins: js_jsaggerrinit and jsAggErr in abnf/jsrtjsprint.go,
+    // and in languages/lib/js-rt.metajs.
+    // InstallErrorCause: an options object holding a cause gives the error its own
+    // cause, kept off the key list so it is not enumerable. Twins: js_jserrcause in
+    // abnf/jsrtjsprint.go and languages/lib/js-rt.metajs.
+    function jsErrCause(self, opts) {
+        if (opts === null || (typeof opts != "object" && typeof opts != "function") || !propIn("cause", opts)) { return undefined }
+        scopePut(self, "cause", getMember(opts, "cause"))
+        return undefined
+    }
+    function jsAggCtor() {
+        jsErrInit(arguments[0], (arguments.length > 2) ? arguments[2] : undefined)
+        scopePut(arguments[0], "errors", jsIterList((arguments.length > 1) ? arguments[1] : undefined).slice(0))
+        return jsErrCause(arguments[0], (arguments.length > 3) ? arguments[3] : undefined)
+    }
+    function jsAggErr(reasons) {
+        var e = jsMakeErr("AggregateError", "All promises were rejected")
+        scopePut(e, "errors", reasons.slice(0))
+        return e
     }
     jsInstallErrors()
     // An instance of one of the classes above, built without going through
@@ -10579,7 +10649,7 @@ NotFuncHead = :script(~~
 
     // A constructor closure: binds this = arguments[0], runs the field initializers (a
     // derived class: when super() returns - see ctorSuperDone), then the body.
-    function makeCtorClosure(params, bodyT, fields, defScopes, hasSuper, isDefault) {
+    function makeCtorClosure(params, bodyT, fields, defScopes, hasSuper, isDefault, ckeys) {
         var env = defScopes.slice()
         return function() {
             // new.target arrives through the one-shot slot like a function's does:
@@ -10602,7 +10672,7 @@ NotFuncHead = :script(~~
             // whatever `this` super() produced (ctorSuperDone); the scope chain they
             // are evaluated in is this one, not the body's.
             var fscopes = scopes.slice()
-            sc["0fields"] = function() { ctorFields(fields, fscopes) }
+            sc["0fields"] = function() { ctorFields(fields, fscopes, ckeys) }
             // The implicit 'super()' of a default constructor. The parent is read off the
             // DEFINING class rather than resolved by name, which is what lets a heritage
             // EXPRESSION ('class extends mixin(B) {}') have a default constructor too.
@@ -10615,7 +10685,7 @@ NotFuncHead = :script(~~
                 for (var sa = 0; sa < args.length; sa++) supArgs.push(args[sa])
                 ctorSuperDone(self, ctorConstruct(supCls, supArgs, nt))
             } else if (!hasSuper) {
-                ctorFields(fields, fscopes)
+                ctorFields(fields, fscopes, ckeys)
             }
             var rb = anytype // The body's return record, or absent.
             rb = undefined
@@ -10653,7 +10723,7 @@ NotFuncHead = :script(~~
         scopePut(self, k, v)
         trackKey(self, k)
     }
-    function ctorFields(fields, fscopes) {
+    function ctorFields(fields, fscopes, ckeys) {
         var saved = scopes
         // A field initializer is evaluated as a method is: new.target is undefined in it.
         var fsc = {}
@@ -10661,7 +10731,7 @@ NotFuncHead = :script(~~
         scopes = concat2impl(fscopes, [fsc])
         var self = getVar("this")
         for (var k = 0; k < fields.length; k++) {
-            var fk = memberKey(fields[k])
+            var fk = memberKey(fields[k], ckeys)
             var fv = (fields[k].init != null) ? fields[k].init() : undefined
             jsFieldPut(self, fk, fv)
         }
@@ -10773,7 +10843,8 @@ NotFuncHead = :script(~~
     }
     // The name a member is filed under. A computed key is only known at run time, so it
     // is a thunk and this is called from inside the class-building thunk.
-    function memberKey(m) {
+    function memberKey(m, ckeys) {
+        if (m.ci != undefined) { return ckeys[m.ci] }
         if (m.keyT != undefined && m.keyT != null) { return m.keyT() }
         return m.name
     }
@@ -11021,8 +11092,16 @@ NotFuncHead = :script(~~
         var protos = []      // Methods and accessors, static or not, in source order.
         var inits = []       // Static fields AND static blocks, kept in source order.
         var ctorInfo = null
+        var ckMembers = []   // The members with a computed key, in source order.
         for (var j = 0; j < members.length; j++) {
             var mm = members[j]
+            if (mm.keyT != undefined && mm.keyT != null && (mm.kind == "field" || mm.kind == "method" || mm.kind == "accessor")) {
+                mm.ci = ckMembers.length
+                ckMembers.push(mm)
+            }
+            if (typeof mm.name == "string" && isPrivateKey(mm.name)) {
+                privKinds["$" + mm.name] = {field: mm.kind == "field", statik: mm.statik == true, cls: (name == "") ? "anonymous" : name}
+            }
             if (mm.kind == "field") { if (mm.statik) { inits.push(mm) } else { fields.push(mm) } }
             else if (mm.kind == "method" || mm.kind == "accessor") { protos.push(mm) }
             else if (mm.kind == "staticblock") { inits.push(mm) }
@@ -11044,6 +11123,12 @@ NotFuncHead = :script(~~
                 if (sup == undefined || !sup.__isclass) fail("unknown superclass: " + superName)
                 cls["__super"] = sup
             }
+            // Every computed key is evaluated ONCE, in source order, before any member is
+            // defined or any static initializer runs; memberKey answers it from ckeys,
+            // also for every construction's field initializers. Twin of the computed-key
+            // pass in js-to-llvm-ir.abnf's emitClass.
+            var ckeys = []
+            for (var cki = 0; cki < ckMembers.length; cki++) { ckeys.push(ckMembers[cki].keyT()) }
             // Every member closes over one extra scope that names the class itself. That
             // is what super() and super.m() resolve through - not the class's NAME, which
             // an anonymous class expression does not have.
@@ -11079,7 +11164,7 @@ NotFuncHead = :script(~~
             var pnames = []
             for (var mi = 0; mi < protos.length; mi++) {
                 var pm = protos[mi]
-                var pk = memberKey(pm)
+                var pk = memberKey(pm, ckeys)
                 var ptgt = pm.statik ? statics : cls
                 if (pm.kind == "accessor") {
                     // An accessor is called with the receiver in the one-shot slot, never
@@ -11095,10 +11180,10 @@ NotFuncHead = :script(~~
             }
             cls["__pnames"] = pnames
             if (ctorInfo != null) {
-                cls["__ctor"] = fnMetaSrc(makeCtorClosure(ctorInfo.params, ctorInfo.body, fields, mscopes, hasOwn(cls, "__super"), false),
+                cls["__ctor"] = fnMetaSrc(makeCtorClosure(ctorInfo.params, ctorInfo.body, fields, mscopes, hasOwn(cls, "__super"), false, ckeys),
                                           "", fnArity(ctorInfo.params), csp)
             } else {
-                cls["__ctor"] = fnMetaSrc(makeCtorClosure([], null, fields, mscopes, hasOwn(cls, "__super"), true), "", 0, csp)
+                cls["__ctor"] = fnMetaSrc(makeCtorClosure([], null, fields, mscopes, hasOwn(cls, "__super"), true, ckeys), "", 0, csp)
             }
             // The static initializers run now, with the methods already in place (a static
             // block may call them) and 'this' bound to the class.
@@ -11107,7 +11192,7 @@ NotFuncHead = :script(~~
                 if (it.kind == "staticblock") {
                     callWithThis(makeClosure([], it.body, mscopes, true), cls, [])
                 } else {
-                    var itk = memberKey(it)
+                    var itk = memberKey(it, ckeys)
                     scopePut(statics, itk, (it.init != null) ? callWithThis(makeClosure([], makeReturn([it.init]), mscopes, true), cls, []) : undefined)
                     // A static FIELD is enumerable; see __keys above. A PRIVATE one is
                     // not: it is filed under the mangled key '__#x' here exactly as in
@@ -11851,7 +11936,35 @@ NotFuncHead = :script(~~
         if (k.length < 3) { return false }
         return k.charAt(0) == "_" && k.charAt(1) == "_" && k.charAt(2) == "#"
     }
-    function privDotSuffix(n) { return {kind: "member", name: "#" + n, key: privRefThunk(n)} }
+    function privDotSuffix(n) { return {kind: "member", name: "#" + n, key: privRefThunk(n), priv: true} }
+    // What each private key names, filed by the class builder: {field, statik, cls}.
+    var privKinds = {}
+    // The brand check in front of a private member access: node's TypeError when the
+    // object does not hold the name - an instance name as `#x in o` says, a static one
+    // only on the declaring class itself. A field's message names the access (write is
+    // true for a store), a method's or an accessor's the class. Twins: privRefChk in
+    // js-to-llvm-ir.abnf, js_jsprivchk in abnf/jsrtjsprint.go and
+    // languages/lib/js-rt.metajs.
+    // A mangled private key's source spelling, '#x'.
+    function privShown(key) {
+        var i = key.length - 1
+        while (i > 0 && key.charAt(i) != "#") { i = i - 1 }
+        return key.substring(i, key.length)
+    }
+    function privCheck(o, key, write) {
+        if (!hasOwn(privKinds, "$" + key)) { return }
+        var info = privKinds["$" + key]
+        var ok = false
+        if (info.statik) { ok = isClassDesc(o) && classOwnsStatic(o, key) }
+        else { ok = (jsIsObjLike(o) || typeof o == "function") && (propIn(key, o) || (typeof o == "object" && accHolder(o, key) !== undefined)) }
+        if (ok) { return }
+        var n = privShown(key)
+        if (info.field) {
+            if (write) { biRaise("TypeError: Cannot write private member " + n + " to an object whose class did not declare it") }
+            biRaise("TypeError: Cannot read private member " + n + " from an object whose class did not declare it")
+        }
+        biRaise(info.statik ? "TypeError: Receiver must be class " + info.cls : "TypeError: Receiver must be an instance of class " + info.cls)
+    }
 
     // ----- the call side of the parenref rule (see ParenExpr in the grammar) ----------
     //
@@ -11930,14 +12043,16 @@ NotFuncHead = :script(~~
                 if (s.kind == "member") {
                     curThis = cur
                     lastKey = s.key()
+                    if (s.priv === true) { privCheck(cur, lastKey, false) }
                     // A member IMMEDIATELY followed by a call is a method call, and the
                     // arms below already route a __class method through mcall - so the
                     // read stays RAW there and no bound shim is built for a value that
                     // would be discarded on the next line. Everywhere else the read is
-                    // the value read, which does answer a method (see getMember).
+                    // the value read, which does answer a method (see getMember) - also
+                    // before an optional call, whose nullish test needs the method itself.
                     var nxt = anytype
                     nxt = (i + 1 < suffixes.length) ? suffixes[i + 1] : undefined
-                    if (nxt != undefined && nxt.kind == "call") { cur = getMemberRaw(cur, lastKey) }
+                    if (nxt != undefined && nxt.kind == "call" && nxt.opt != true) { cur = getMemberRaw(cur, lastKey) }
                     else { cur = getMember(cur, lastKey) }
                 } else if (s.kind == "tagcall") {
                     // A tagged template: the tag gets the literal chunks first, then one
@@ -11979,6 +12094,11 @@ NotFuncHead = :script(~~
                     } else if (typeof cur == "function") {
                         cur = callWithThis(cur, curThis, argv)
                     } else {
+                        // A class called without `new` is node's own TypeError. Twin of
+                        // js_jscallerr in abnf/jsrtjsprint.go and languages/lib/js-rt.metajs.
+                        if (cur != undefined && cur != null && isClassDesc(cur)) {
+                            biRaise("TypeError: Class constructor " + cur.__name + " cannot be invoked without 'new'")
+                        }
                         cur = mcall(curThis, lastKey, argv, sTexts[i])
                     }
                     curThis = undefined
@@ -12003,7 +12123,9 @@ NotFuncHead = :script(~~
     // Target items = [nameString, suffix marker...] -> reference descriptor.
     // Walks a target path (members and calls) up to the last element and returns
     // the assignable place {obj, key}. The last element must be a member.
-    resolveRef = function(ref) {
+    // write: the target is only stored to (a plain `=`), which a private field's brand
+    // check names.
+    resolveRef = function(ref, write) {
         var cur = anytype     // The walked values and receivers
         var curThis = anytype // may be of mixed types.
         // A reference starts at a NAME ('a.b = 1') or, for the LhsAssign form, at an
@@ -12013,7 +12135,10 @@ NotFuncHead = :script(~~
             var s = ref.path[i]
             if (s.kind == "member") {
                 curThis = cur
-                cur = getMember(cur, s.key())
+                var mk = anytype // The member's key, checked first when it is private.
+                mk = s.key()
+                if (s.priv === true) { privCheck(cur, mk, false) }
+                cur = getMember(cur, mk)
             } else {
                 var argv = evalArgs(s.args)
                 // A call in the MIDDLE of an assignment target ('f().x = 1'). The
@@ -12032,6 +12157,7 @@ NotFuncHead = :script(~~
         // reaches it through js_rt_missset.
         var lk = anytype
         lk = last.key()   // Once: the key expression must not be evaluated twice.
+        if (last.priv === true) { privCheck(cur, lk, write === true) }
         if (cur == undefined) { biRaise("TypeError: Cannot set properties of " + jsStr(cur) + " (setting '" + jsStr(lk) + "')") }
         return {obj: cur, key: lk}
     }
@@ -12076,7 +12202,7 @@ NotFuncHead = :script(~~
             if (ref.w === true) { withSet(ref.name, v) } else { jsConstChk(ref.name); setVar(ref.name, v); jsArgSync(ref.name, v) }
             return
         }
-        var p = resolveRef(ref)
+        var p = resolveRef(ref, true)
         setMember(p.obj, p.key, v)
         jsArgPut(p.obj, p.key, v, false)
     }
@@ -12114,7 +12240,7 @@ NotFuncHead = :script(~~
         var op = items[items.length - 2]
         var valT = items[items.length - 1]
         return function() {
-            var p = resolveRef(ref)
+            var p = resolveRef(ref, op == "=")
             var v = anytype // A compound assignment may change the value's type.
             if (op != "=") { v = getMember(p.obj, p.key); v = applyOp(op, v, valT()) } else { v = valT() }
             setMember(p.obj, p.key, v)
@@ -12139,7 +12265,7 @@ NotFuncHead = :script(~~
                 if (op != "=") { v = refGet(ref); v = applyOp(op, v, valT()) } else { v = valT() }
                 refSet(ref, v)
             } else {
-                var p = resolveRef(ref)
+                var p = resolveRef(ref, op == "=")
                 if (op != "=") { v = getMember(p.obj, p.key); v = applyOp(op, v, valT()) } else { v = valT() }
                 setMember(p.obj, p.key, v)
                 jsArgPut(p.obj, p.key, v, false)

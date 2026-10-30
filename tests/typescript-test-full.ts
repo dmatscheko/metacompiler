@@ -5310,6 +5310,255 @@ function s125(): void {
         e8 == "Cannot convert undefined or null to object")
 }
 
+// ===== SECTION 126: an invalid array length is a catchable RangeError =====
+// A length that is not a uint32 - a fraction, a negative, 2^32, NaN - raises a
+// RangeError the program can catch; a numeric string converts.
+function s126(): void {
+    const vals: any[] = [1.5, -1, 4294967296, "x", "2"];
+    const out: string[] = [];
+    for (let i = 0; i < vals.length; i++) {
+        try {
+            const a: any[] = [1, 2, 3, 4];
+            a.length = vals[i];
+            out.push("ok" + a.length);
+        } catch (e: any) {
+            out.push((e instanceof RangeError) + ":" + e.message);
+        }
+    }
+    check("arrlen1", out.join("|") == "true:Invalid array length|true:Invalid array length|true:Invalid array length|true:Invalid array length|ok2");
+}
+
+// ===== SECTION 127: an optional call of a class method =====
+// `o.m?.()` calls a method found on the prototype chain; a missing one answers
+// undefined without a call.
+class OptK127 { v = 1; m(): string { return "m" + this.v; } }
+class OptK127b extends OptK127 { n(): string { return "n" + this.v; } }
+function s127(): void {
+    const k: any = new OptK127();
+    const k2: any = new OptK127b();
+    check("optcall1", String(k.m?.()) == "m1" && String(k?.m?.()) == "m1" && String(k.zz?.()) == "undefined");
+    check("optcall2", String(k2.m?.()) == "m1" && String(k2.n?.()) == "n1" && String(k["m"]?.()) == "m1");
+}
+
+// ===== SECTION 128: replaceAll with an empty pattern =====
+// An empty search string matches before every UTF-16 unit and at the end.
+function s128(): void {
+    const e: string = [""][0];
+    check("repempty1", "abc".replaceAll(e, "_") == "_a_b_c_" && "abc".replace(e, "_") == "_abc" && "".replaceAll(e, "_") == "_");
+    check("repempty2", "abc".replaceAll(e, (m: string, o: number) => "<" + o + ">") == "<0>a<1>b<2>c<3>" && "ab".replaceAll(e, "[$`|$']") == "[|ab]a[a|b]b[ab|]");
+    check("repempty3", "x\u{1F600}".replaceAll(e, "_").length == 7);
+}
+
+// ===== SECTION 129: AggregateError, and Promise.any's rejection =====
+// new AggregateError(errors, message) is an Error whose own errors property, an
+// array of the iterable's values, is not enumerable. Promise.any rejects with one
+// when every input rejects, its errors the reasons in input order. The rejection
+// is checked in a job, after main() has returned, so a failure there exits 1.
+function s129(): void {
+    const a: any = new AggregateError([1, 2], "m");
+    check("aggerr1", typeof AggregateError == "function" && String(a) == "AggregateError: m" && a instanceof Error &&
+        a.errors.length == 2 && a.name == "AggregateError" && Object.keys(a).length == 0 && AggregateError.length == 2);
+    Promise.any([Promise.reject(1), Promise.reject("two")]).catch((e: any) => {
+        const ok = e instanceof AggregateError && String(e) == "AggregateError: All promises were rejected" &&
+            JSON.stringify(e.errors) == "[1,\"two\"]" && JSON.stringify(e) == "{}";
+        check("aggerr2", ok);
+        if (!ok) { exit(1); }
+    });
+}
+
+// ===== SECTION 130: ToPrimitive runs once per operand of a comparison =====
+// A relational operator converts each object operand once, left first; == converts
+// an object beside a primitive once, and two objects compare by identity. A
+// valueOf answering a BigInt gives a BigInt primitive, and an array beside a
+// BigInt compares through its string.
+function s130(): void {
+    const log: number[] = [];
+    function mk(n: number): any { return { valueOf() { log.push(n); return n; } }; }
+    const a: any = mk(1), b: any = mk(2);
+    const r = [a < b, a >= b, a == b, a == 1, 1 != a];
+    check("toprim1", r.join() == "true,false,false,true,false" && log.join() == "1,2,1,2,1,1");
+    const big: any = { valueOf() { return 2n; } };
+    const bs: any[] = [1n, [1n], 2];
+    check("toprim2", bs[0] < big && bs[1] == bs[0] && bs[2] == big && !(big < bs[2]));
+}
+
+// ===== SECTION 131: an Error's cause =====
+// new Error(message, options) gives the error an own, non-enumerable cause when
+// options has one, inherited or holding undefined; a subclass's super call and
+// AggregateError's third argument do the same.
+class CauseErr131 extends Error { constructor(m: string, c: any) { super(m, { cause: c }); } }
+function s131(): void {
+    const opts: any[] = [{ cause: "c" }, {}, Object.create({ cause: "inh" }), { cause: undefined }];
+    const e0: any = new Error("m", opts[0]), e1: any = new Error("m", opts[1]), e2: any = new TypeError("m", opts[2]), e3: any = new Error("m", opts[3]);
+    check("cause1", e0.cause == "c" && Object.keys(e0).length == 0 && "cause" in e0 && JSON.stringify(e0) == "{}");
+    check("cause2", !("cause" in e1) && e2.cause == "inh" && e3.hasOwnProperty("cause") && e3.cause === undefined);
+    check("cause3", (new CauseErr131("x", "why") as any).cause == "why" && (new AggregateError([], "a", { cause: 7 }) as any).cause == 7);
+}
+
+// ===== SECTION 132: declaration merging into a function, a class and an enum =====
+// A namespace of the name of a function or a class adds its exports to that value,
+// which stays callable or constructible; a second enum adds its members to the
+// first one's object, and its initializers see the earlier members. tsc emits
+// `X || (X = {})` for each.
+function MgFn132(): string { return "fn" + MgFn132.extra; }
+namespace MgFn132 { export const extra: number = 3; export function twice(): number { return extra * 2; } }
+class MgCl132 { static s = 1; }
+namespace MgCl132 { export const added = "added"; }
+enum MgEn132 { M1 = 1 }
+enum MgEn132 { M2 = M1 + 1 }
+function s132(): void {
+    check("merge1", typeof MgFn132 == "function" && MgFn132() == "fn3" && MgFn132.twice() == 6 && Object.keys(MgFn132).join() == "extra,twice");
+    check("merge2", typeof MgCl132 == "function" && MgCl132.added == "added" && MgCl132.s == 1 && new MgCl132() instanceof MgCl132);
+    check("merge3", MgEn132.M1 == 1 && MgEn132.M2 == 2 && Object.keys(MgEn132).join() == "1,2,M1,M2");
+}
+
+// ===== SECTION 133: a class field is defined, and the nearest property decides =====
+// A field DEFINES an own data property: an inherited setter does not run, and an
+// inherited getter-only accessor does not refuse it. The own property, also one
+// holding undefined or made by Object.defineProperty, shadows the accessor; and a
+// subclass's lone setter shadows the getter above it, so the read is undefined. A
+// `declare` field is type layer only and defines nothing.
+let setCalls133 = 0;
+class Base133 {
+    get acc(): any { return "base-acc"; }
+    get rw(): any { return "base-rw"; }
+    set rw(v: any) { setCalls133++; }
+}
+class Init133 extends Base133 { acc: any = "own"; rw: any = "own-rw"; }
+class Bare133 extends Base133 { rw: any; }
+class Get133 { get v(): number { return 1; } set v(x: number) {} }
+class Set133 extends Get133 { set v(x: number) {} }
+class Decl133 { declare q: number; r?: number; }
+class SetsZ133 { z: number; constructor() { this.z = 7; } }
+class KeepZ133 extends SetsZ133 { declare z: number; }
+function s133(): void {
+    const w: any = new Init133();
+    const n: any = new Bare133();
+    check("fielddef1", w.acc == "own" && w.rw == "own-rw" && Object.keys(w).join() == "acc,rw" && setCalls133 == 0);
+    check("fielddef2", n.rw === undefined && Object.keys(n).join() == "rw" && setCalls133 == 0);
+    const o: any = new Base133();
+    Object.defineProperty(o, "acc", { value: "def", writable: true, enumerable: true, configurable: true });
+    const oc: any = Object.create(new Base133());
+    Object.defineProperty(oc, "acc", { value: "def2" });
+    check("fielddef3", o.acc == "def" && oc.acc == "def2" && (new Set133() as any).v === undefined);
+    const d: any = new Decl133();
+    check("fielddef4", Object.keys(d).join() == "r" && !("q" in d) && new KeepZ133().z == 7);
+}
+
+// ===== SECTION 134: the brand check of a private member =====
+// Reading, writing or calling a private name on an object that does not hold it is a
+// TypeError: a field's message names the read or the write, a method's or an
+// accessor's the class, and a static name is held by the declaring class alone - a
+// subclass does not have it. A refused write creates nothing.
+class Br134 {
+    #x = 1
+    #m() { return "m" }
+    get #acc() { return "acc" }
+    static #s = 5
+    static read(o: any) { return o.#x }
+    static write(o: any) { o.#x = 9 }
+    static bump(o: any) { o.#x += 1 }
+    static call(o: any) { return o.#m() }
+    static acc(o: any) { return o.#acc }
+    static sread(c: any) { return c.#s }
+}
+class Sub134 extends Br134 {}
+function s134(): void {
+    function err(f: () => any): string { try { return String(f()) } catch (e: any) { return (e instanceof TypeError) + ":" + e.message } }
+    const o: any = {};
+    check("brand1", err(() => Br134.read(o)) == "true:Cannot read private member #x from an object whose class did not declare it" &&
+        err(() => Br134.write(o)) == "true:Cannot write private member #x to an object whose class did not declare it" &&
+        err(() => Br134.bump(o)) == "true:Cannot read private member #x from an object whose class did not declare it" &&
+        Object.keys(o).length == 0)
+    check("brand2", err(() => Br134.call(o)) == "true:Receiver must be an instance of class Br134" &&
+        err(() => Br134.acc(o)) == "true:Receiver must be an instance of class Br134" &&
+        err(() => Br134.sread(Sub134)) == "true:Cannot read private member #s from an object whose class did not declare it")
+    check("brand3", Br134.read(new Sub134()) + Br134.call(new Sub134()) + Br134.acc(new Br134()) + Br134.sread(Br134) == "1macc5")
+}
+
+// ===== SECTION 135: the u flag, and astral characters without it =====
+// Under u the pattern and the text are code points: `.` and a class take a whole
+// surrogate pair, \u{...} and a \uHHHH\uHHHH pair name one, and an empty match
+// advances past a pair. Without u both are UTF-16 units, so a pair is two
+// characters and an index counts units.
+function s135(): void {
+    const s: string = ["\u{1F600}"][0];
+    const t: string = ["a\u{1F600}b"][0];
+    check("uflag1", /^.$/u.test(s) && !/^.$/.test(s) && /^..$/.test(s) && !/^..$/u.test(s) && /^[^x]$/u.test(s));
+    check("uflag2", /\u{1F600}/u.test(s) && /^😀$/u.test(s) && !/\uD83D/u.test(s) && /\uD83D/.test(s) &&
+        /[\u{1F600}-\u{1F602}]/u.test("\u{1F601}"));
+    check("uflag3", t.split(/(?:)/).length == 4 && t.split(/(?:)/u).length == 3 &&
+        [...t.matchAll(/(?:)/gu)].map((m: any) => m.index).join() == "0,1,3,4" && t.replace(/(?:)/gu, "-") == "-a-\u{1F600}-b-");
+    check("uflag4", t.replace(/./gu, "[$&]") == "[a][\u{1F600}][b]" && ("x\u{1F600}y".match(/y/) as any).index == 3 &&
+        "x\u{1F600}y".search(/y/u) == 3 && /./gu.unicode && /./gu.flags == "gu");
+}
+
+// ===== SECTION 136: an ambient const enum emits nothing =====
+// `declare const enum` and `declare enum` describe an enum that exists elsewhere:
+// tsc emits no code for either, so nothing is bound and nothing runs.
+declare const enum Amb136 { Z = 9 }
+declare enum AmbE136 { A, B }
+function s136(): void {
+    check("ambenum1", typeof Amb136 == "undefined" && typeof AmbE136 == "undefined");
+}
+
+// ===== SECTION 137: computed member keys are evaluated once, in source order =====
+// Every computed key - field, static field, method - is evaluated when the class is
+// defined, in source order and before any static initializer or static block runs;
+// each construction reuses the field keys.
+let n137: number = 0;
+const log137: string[] = [];
+function key137(tag: string): string { n137++; log137.push(tag + n137); return "f" + n137 }
+class Ck137 {
+    [key137("a")] = "v";
+    static [key137("s")] = (log137.push("sinit"), "sv");
+    [key137("m")]() { return "m" }
+    static { log137.push("block") }
+    [key137("b")] = "w";
+}
+function s137(): void {
+    const c1: any = new Ck137(), c2: any = new Ck137();
+    check("ckey1", Object.keys(c1).join() == "f1,f4" && Object.keys(c2).join() == "f1,f4" && n137 == 4)
+    check("ckey2", log137.join() == "a1,s2,m3,b4,sinit,block" && (Ck137 as any).f2 == "sv" && c1.f3() == "m" && c2.f4 == "w")
+}
+
+// ===== SECTION 138: a class called without new =====
+// Calling a class as a function is node's own TypeError, not "is not a function".
+class Nn138 { a: number; constructor() { this.a = 1; } }
+function s138(): void {
+    const cs: any[] = [Nn138, 5];
+    const m: string[] = [];
+    for (let i = 0; i < cs.length; i++) {
+        const f = cs[i];
+        try { f(); } catch (e: any) { m.push((e instanceof TypeError) + ":" + e.message); }
+    }
+    check("classcall1", m.join("|") == "true:Class constructor Nn138 cannot be invoked without 'new'|true:f is not a function");
+}
+
+// ===== SECTION 139: a decorator's context object =====
+// A class or method decorator is called with the value and a context object naming
+// the kind, the name and whether the member is static or private.
+const log139: string[] = [];
+function mdec139(target: any, ctx: any): any {
+    log139.push(typeof ctx + ":" + String(ctx.name) + ":" + ctx.kind + ":" + String(ctx.static) + ":" + String(ctx.private));
+    return function (this: any, ...args: any[]) { return target.apply(this, args) * 2; };
+}
+function cdec139(target: any, ctx: any): any {
+    log139.push(ctx.kind + ":" + String(ctx.name));
+    return target;
+}
+@cdec139
+class Dk139 {
+    @mdec139 m(): number { return 2; }
+}
+class Ds139 {
+    @mdec139 static sm(): number { return 3; }
+}
+function s139(): void {
+    check("decoctx1", log139.join("|") == "object:m:method:false:false|class:Dk139|object:sm:method:true:false" &&
+        new Dk139().m() == 4 && Ds139.sm() == 6);
+}
+
 // ===== END SECTIONS =====
 
 function main(): number {
@@ -5426,6 +5675,20 @@ function main(): number {
     s122(); // SECTION-CALL 122
     s124(); // SECTION-CALL 124
     s125(); // SECTION-CALL 125
+    s126(); // SECTION-CALL 126
+    s127(); // SECTION-CALL 127
+    s128(); // SECTION-CALL 128
+    s129(); // SECTION-CALL 129
+    s130(); // SECTION-CALL 130
+    s131(); // SECTION-CALL 131
+    s132(); // SECTION-CALL 132
+    s133(); // SECTION-CALL 133
+    s134(); // SECTION-CALL 134
+    s135(); // SECTION-CALL 135
+    s136(); // SECTION-CALL 136
+    s137(); // SECTION-CALL 137
+    s138(); // SECTION-CALL 138
+    s139(); // SECTION-CALL 139
     println("full: " + checks + " checks, " + failures + " failures");
     return failures;
 }

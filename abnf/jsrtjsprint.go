@@ -4742,7 +4742,9 @@ const jsvSpace = "\t\n\v\f\r \u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005" +
 // jsvReplaceFn is the replacer-function form: the callback gets (match, offset, whole).
 func (rt *jsrt) jsvReplaceFn(s, pat string, fn interface{}, limit int) string {
 	if pat == "" {
-		return rt.toString(rt.call(fn, jsUndef, []interface{}{"", float64(0), s})) + s
+		return rt.jsvReplaceEmpty(s, limit, func(i int) string {
+			return rt.toString(rt.call(fn, jsUndef, []interface{}{"", float64(i), s}))
+		})
 	}
 	out, at, done := "", 0, 0
 	for {
@@ -4763,7 +4765,12 @@ func (rt *jsrt) jsvReplaceFn(s, pat string, fn interface{}, limit int) string {
 // $` the prefix, $' the suffix, $$ a literal dollar).
 func jsvReplaceTemplate(rt *jsrt, s, pat, repl string, limit int) string {
 	if pat == "" {
-		return jsvExpandDollar(repl, "", "", s) + s
+		return rt.jsvReplaceEmpty(s, limit, func(i int) string {
+			if !strings.ContainsRune(repl, '$') {
+				return repl
+			}
+			return jsvExpandDollar(repl, "", rt.strRange(s, 0, i), rt.strRange(s, i, rt.strLen(s)))
+		})
 	}
 	out, at, done := "", 0, 0
 	for {
@@ -4778,6 +4785,25 @@ func jsvReplaceTemplate(rt *jsrt, s, pat, repl string, limit int) string {
 		done++
 	}
 	return out + s[at:]
+}
+
+// jsvReplaceEmpty replaces an empty pattern, which matches before every UTF-16 unit
+// and at the end; replace (limit 1) takes the first of those matches. rep answers the
+// replacement at unit offset i. Twin of jsReplace in both *-interpreter.abnf and
+// jvReplaceEmpty in languages/lib/js-rt.metajs.
+func (rt *jsrt) jsvReplaceEmpty(s string, limit int, rep func(i int) string) string {
+	n := 0
+	if limit < 0 {
+		n = rt.strLen(s)
+	}
+	var b strings.Builder
+	for i := 0; i <= n; i++ {
+		b.WriteString(rep(i))
+		if i < n {
+			b.WriteString(rt.strRange(s, i, i+1))
+		}
+	}
+	return b.String() + rt.strRange(s, n, rt.strLen(s))
 }
 
 func jsvExpandDollar(repl, match, before, after string) string {
@@ -6378,6 +6404,10 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 		if jsvInternalKey(name) && !jsvPrivateKey(name) {
 			return r
 		}
+		// An own property holding undefined shadows the chain.
+		if _, own := recv.props[name]; own {
+			return r
+		}
 		if d, isSym := recv.props["__symdesc"]; isSym && name == "description" {
 			return w(d)
 		}
@@ -6477,6 +6507,26 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 		return hasRaw(a)
 	}
 	m["js_jshas"] = func(a []uint64) uint64 { return hasRaw(rt.jsvEscArg(a, 1)) }
+	// The brand check in front of a private member access: (obj, raw key, static,
+	// message). An instance name is held when `#x in obj` would say so; a static one
+	// only by the declaring class itself, not a subclass. Otherwise the emitter's
+	// TypeError is raised. Twins: js_jsprivchk in languages/lib/js-rt.metajs, privCheck
+	// in both *-interpreter.abnf.
+	m["js_jsprivchk"] = func(a []uint64) uint64 {
+		o := u(a[0])
+		ok := false
+		if u(a[2]) == true {
+			if cls, isObj := o.(*jsObject); isObj && isClassDesc(cls) {
+				ok = jsvOwnsStatic(cls, rt.toString(u(a[1])))
+			}
+		} else if jsvIsObjLike(o) || isCallable(o) {
+			ok = u(hasRaw(a[:2])) == true
+		}
+		if !ok {
+			rt.bigRaise("%s", rt.toString(u(a[3])))
+		}
+		return 0
+	}
 	hasRaw = func(a []uint64) uint64 {
 		recv, isObj := u(a[0]).(*jsObject)
 		name := rt.toString(u(a[1]))
@@ -6997,6 +7047,13 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 				}
 			}
 		}
+		// An array length must be a uint32: anything else is a catchable RangeError.
+		// Twin of jsArrLenOf in both *-interpreter.abnf and js_jsmset's in js-rt.metajs.
+		if isArr && !argsLen && rt.toString(u(a[1])) == "length" {
+			if n := rt.jsvToNum(u(a[2])); !(n >= 0 && n <= 4294967295 && n == math.Floor(n)) {
+				rt.bigRaise("RangeError: Invalid array length")
+			}
+		}
 		r := baseSet(a)
 		if argsLen {
 			arr.kind = jsvArgsKind(len(arr.elems))
@@ -7073,6 +7130,7 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 	// whole script has run, which is this runtime's single event-loop turn.
 	m["js_jsdrain"] = func(a []uint64) uint64 {
 		rt.drainMicrotasks()
+		rt.jsvUnhandled()
 		return w(jsUndef)
 	}
 
@@ -7343,6 +7401,51 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 		}
 		return jsHUndefined
 	}
+	// InstallErrorCause: an options object holding a cause gives the error its own
+	// non-enumerable cause (jsvErrHide). Twins: js_jserrcause in
+	// languages/lib/js-rt.metajs, jsErrCause in both *-interpreter.abnf.
+	m["js_jserrcause"] = func(a []uint64) uint64 {
+		self, ok := u(a[0]).(*jsObject)
+		opts := u(a[1])
+		if !ok || !(jsvIsObjLike(opts) || isCallable(opts)) || m["js_jshas"]([]uint64{a[1], w("cause")}) != jsHTrue {
+			return jsHUndefined
+		}
+		self.set("cause", u(m["js_jsvget"]([]uint64{a[1], w("cause")})))
+		self.props["__errcause"] = true
+		return jsHUndefined
+	}
+	// A class field is DEFINED on the instance, not assigned: an accessor of that name,
+	// own or inherited, is replaced by an own data property and its setter does not run.
+	// Every other write is js_jsmset's. Twin of js_jsfielddef in
+	// languages/lib/js-rt.metajs; the interpreters' field install defines already.
+	m["js_jsfielddef"] = func(a []uint64) uint64 {
+		if o, ok := u(a[0]).(*jsObject); ok && rt.accessorCount > 0 && !jsvIsSym(u(a[1])) {
+			name := rt.toString(u(a[1]))
+			if _, acc := jsvAccHolder(o, name); acc != nil {
+				o.set(name, u(a[2]))
+				return 0
+			}
+		}
+		return m["js_jsmset"](a)
+	}
+	// The TypeError of a call of a value that is no function: (callee, site text).
+	// A class called without `new` has node's own words. Twins: js_jscallerr in
+	// languages/lib/js-rt.metajs, the call arm of both *-interpreter.abnf.
+	m["js_jscallerr"] = func(a []uint64) uint64 {
+		if cls, ok := u(a[0]).(*jsObject); ok && isClassDesc(cls) {
+			name, _ := cls.props["__name"].(string)
+			return w(rt.jsErrFromText("TypeError: Class constructor " + name + " cannot be invoked without 'new'"))
+		}
+		return w(rt.jsErrFromText("TypeError: " + rt.toString(u(a[1])) + " is not a function"))
+	}
+	// The AggregateError constructor body: (this, errors, message).
+	m["js_jsaggerrinit"] = func(a []uint64) uint64 {
+		m["js_jserrinit"]([]uint64{a[0], a[2]})
+		if self, ok := u(a[0]).(*jsObject); ok {
+			jsAggInit(self, rt.jsvIterList(u(a[1])))
+		}
+		return jsHUndefined
+	}
 	m["js_jserrstr"] = func(a []uint64) uint64 {
 		return w(rt.jsErrToString(u(a[0])))
 	}
@@ -7546,7 +7649,7 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 // order, and "Error: " cannot shadow "TypeError: " either way round because a
 // prefix test is anchored at the start.
 var jsErrNames = []string{"Error", "TypeError", "RangeError", "ReferenceError",
-	"SyntaxError"}
+	"SyntaxError", "AggregateError"}
 
 // jsErrNameOf is the nearest BUILTIN error name up the instance's class chain,
 // which is what makes `class E extends TypeError {}` answer "TypeError" and
@@ -7610,7 +7713,8 @@ func jsvErrHide(o *jsObject, ks []string) []string {
 	}
 	out := make([]string, 0, len(ks))
 	for _, k := range ks {
-		if k == "message" || k == "stack" || (k == "name" && h == true) {
+		if k == "message" || k == "stack" || (k == "name" && h == true) || (k == "errors" && o.props["__erragg"] == true) ||
+			(k == "cause" && o.props["__errcause"] == true) {
 			continue
 		}
 		out = append(out, k)
@@ -7697,6 +7801,39 @@ func (rt *jsrt) jsMakeErr(name, msg string) *jsObject {
 	o.set("__class", cls)
 	rt.jsErrInit(o, msg)
 	return o
+}
+
+// jsvUnhandled raises, as an uncaught exception, the reason of the first promise
+// that was rejected with no reaction registered and has none once the queue is
+// drained: node reports such an unhandled rejection after the microtasks and exits
+// 1. A reaction registered later in the same drain handles it (__ph). Twins:
+// js_jsdrain in languages/lib/js-rt.metajs and jsDrain in both *-interpreter.abnf.
+func (rt *jsrt) jsvUnhandled() {
+	rej := rt.promRejected
+	rt.promRejected = nil
+	for _, p := range rej {
+		if p.props["__ph"] == nil {
+			panic(&jsThrown{value: p.props["__pv"]})
+		}
+	}
+}
+
+// jsAggErr is the AggregateError Promise.any rejects with, its errors the
+// rejection reasons in input order; the plain text when the program registered no
+// AggregateError class. Twins: jvAggErr in languages/lib/js-rt.metajs and jsAggErr in
+// both *-interpreter.abnf.
+func (rt *jsrt) jsAggErr(reasons []interface{}) interface{} {
+	e := rt.jsErrFromText("AggregateError: All promises were rejected")
+	if o, ok := e.(*jsObject); ok {
+		jsAggInit(o, reasons)
+	}
+	return e
+}
+
+// jsAggInit gives an AggregateError its own non-enumerable errors array (jsvErrHide).
+func jsAggInit(o *jsObject, reasons []interface{}) {
+	o.set("errors", &jsArray{elems: append([]interface{}{}, reasons...)})
+	o.props["__erragg"] = true
 }
 
 // jsErrFromText turns "TypeError: ..." into a real TypeError carrying just the
