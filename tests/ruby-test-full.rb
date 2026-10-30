@@ -5081,6 +5081,52 @@ def s121
         Encoding::UTF_8.inspect == "#<Encoding:UTF-8>" && "abc".b.encoding.to_s == "ASCII-8BIT")
 end
 
+# ===== SECTION 122: class-body local scope; a class statement in a module =====
+# A class or module body is a new local scope: it cannot read the locals around
+# it (the top level's or an enclosing body's), and a local it binds stays its
+# own. `class X' in a module body makes M::X even beside a top-level X, a later
+# `module M' body reopens M::X rather than X, and a method of M names M::X by a
+# bare X. /usr/bin/ruby 2.6 settles each.
+s122v = 1
+class S122A
+  S122R1 = begin; s122v; rescue NameError => e; e.message; end
+  y = 2
+  class B
+    R2 = begin; y; rescue NameError => e; e.message; end
+  end
+  module M
+    R3 = defined?(y).inspect
+  end
+  R4 = y
+end
+module S122N
+  z = 3
+  class C
+    z = 4
+    R5 = z
+  end
+  R6 = z
+end
+class S122X; def a; 1; end; end
+module S122M
+  class S122X; def b; 2; end; end
+  class S122Y; def d; 4; end; end
+  K = 7
+  def self.mk; S122X.new.b + K; end
+end
+module S122M
+  class S122X; def c; 3; end; end
+end
+class S122Y; def e; 5; end; end
+def s122
+  check("cg122a", S122A::S122R1 == "undefined local variable or method `s122v' for S122A:Class" &&
+        S122A::B::R2 == "undefined local variable or method `y' for S122A::B:Class" && S122A::M::R3 == "nil" &&
+        S122A::R4 == 2 && S122N::C::R5 == 4 && S122N::R6 == 3)
+  check("nr122b", S122M::S122X != S122X && S122M::S122X.name == "S122M::S122X" && S122X.instance_methods(false) == [:a] &&
+        S122M::S122X.instance_methods(false).sort == [:b, :c] && S122M.mk == 9 && S122X.new.a == 1 &&
+        S122Y != S122M::S122Y && S122Y.instance_methods(false) == [:e] && S122M::S122Y.new.d == 4)
+end
+
 s39() # SECTION-CALL 39
 s40() # SECTION-CALL 40
 s41() # SECTION-CALL 41
@@ -5164,5 +5210,6 @@ s118() # SECTION-CALL 118
 s119() # SECTION-CALL 119
 s120() # SECTION-CALL 120
 s121() # SECTION-CALL 121
+s122() # SECTION-CALL 122
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

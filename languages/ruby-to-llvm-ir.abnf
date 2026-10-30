@@ -5888,7 +5888,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (declBlk === true) { curDefLocals = {m: {}, l: []} }
         else if (isCtl !== true && curDefLocals != null) {
             var outer = curDefLocals
-            curDefLocals = {m: {}, l: []}
+            curDefLocals = {m: {}, l: [], cls: outer.cls}
             for (var dk = 0; dk < outer.l.length; dk++) { defLocalAdd(outer.l[dk]) }
         }
         if (curDefLocals != null) {
@@ -7316,7 +7316,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             // js_rlvar raises MRI's NameError for that.
             var walk = inDefFrame(name) || (curDefLocals == null && isLocalName(name) && !knownLocal(name))
             if (walk) { return {b: b, v: callExt(b, "js_rlvar", [curScopeV, emitStr(b, name)])} }
-            if (!knownConst(name) && name.charCodeAt(0) >= 65 && name.charCodeAt(0) <= 90) { return rbConstPath(b, [name], false) }
+            if ((!knownConst(name) || lexConstPath(name) != null) && name.charCodeAt(0) >= 65 && name.charCodeAt(0) <= 90) { return rbConstPath(b, [name], false) }
             return {b: b, v: frameLocalRead(b, name, callExt(b, "js_scope_get", [curScopeV, emitStr(b, name)]))}
         }
     }
@@ -7584,6 +7584,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // head of a knownConst path is read unchecked. Twin of uninitConst in
     // ruby-interpreter.abnf.
     function rbConstPath(b, parts, top) {
+        var lp = top === true ? null : lexConstPath(parts[0])
+        if (lp != null) { parts = lp.concat(parts.slice(1)) }
         var pre = parts[0]
         var lexPre = curClsPath == "" || top === true ? parts[0] : curClsPath + "::" + parts[0]
         var v = hUndef
@@ -8003,6 +8005,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             var imn = ownIMNames([], r)
             var qn = qualName(name)
             emittedClasses[ekey] = {anc: incAnc, snames: snames, core: front.length > 0, imn: imn, mayFail: mayFail, qn: qn}
+            lexNote(qn, r)
             var clsV = callExt(b, "js_obj_new", [])
             callExt(b, "js_set", [clsV, emitStr(b, "__isclass"), hTrue])
             callExt(b, "js_set", [clsV, emitStr(b, "__name"), emitStr(b, qn)])
@@ -8023,7 +8026,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 baseV = rsx.v
                 baseSet = true
             }
-            if (curClsBodyFn) { b = emitConstUp(b, name, clsV) }
+            if (curClsBodyFn) { b = emitNestedBind(b, name, clsV) }
             else { callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), clsV]) }
             // The mixin record. A prepended module is an ancestor IN FRONT of the
             // class and an extended one belongs to the class OBJECT (`D.is_a?(M)'
@@ -8130,6 +8133,41 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // and singleton names a REOPENING body adds to, and whether the class's own
     // methods live one level down (a prepend).
     var emittedClasses = {}
+    // The names each class or module body binds, by the class's path. A constant
+    // read in a method resolves lexically first: in the class the def is written
+    // in, then in the ones around it (M::X from a method of M, even beside a
+    // top-level X), which the emitted code reads as the full path. Twin of
+    // lexConst in ruby-interpreter.abnf.
+    var lexNames = {}
+    function lexNote(qn, r) {
+        var add = []
+        for (var i = 0; i < r.cstmts.length; i++) {
+            var n = r.cstmts[i].name
+            if (n != undefined && n != "") { add.push(n) }
+        }
+        lexNames["$" + qn] = unionNames(lexNames["$" + qn], add)
+    }
+    function lexConstPath(name) {
+        if (curDefLocals == null || curDefLocals.cls === true) { return null }
+        if (curClsPath == "") { return null }
+        var paths = constPrefixes(curClsPath)
+        for (var i = paths.length - 1; i >= 0; i--) {
+            var ln = anytype
+            ln = lexNames["$" + paths[i]]
+            if (ln != undefined && nameIn(ln, name)) { return paths[i].split("::").concat([name]) }
+        }
+        return null
+    }
+    // A::B::C -> [A, A::B, A::B::C]. Twin of the same in ruby-interpreter.abnf.
+    function constPrefixes(path) {
+        var parts = path.split("::")
+        var out = [parts[0]]
+        for (var i = 1; i < parts.length; i++) { out.push(out[i - 1] + "::" + parts[i]) }
+        return out
+    }
+    // The module statements emitted so far, by enclosing class and name: the
+    // instance-method names (__imn) their bodies have defined.
+    var emittedModules = {}
     function unionNames(prev, add) {
         if (prev == undefined) { return add }
         var out = prev.slice(0)
@@ -8146,7 +8184,37 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     var curClsBodyFn = false
     function emitConstUp(b, name, v) {
         callExt(b, "js_rlset", [curScopeV, emitStr(b, name), v, emitNum(b, curCtlDepth + 1)])
+        callExt(b, "js_set", [callExt(b, "js_scope_get", [curScopeV, emitStr(b, "self")]), emitStr(b, "$c$" + name), v])
         return b
+    }
+    // A class or module statement in a body binds its name there and on the
+    // enclosing class or module (self) under $c$ at once, which is where a
+    // reopening statement finds it (emitOwnConst); the enclosing scope, where the
+    // enclosing class's methods read constants, gets it only while no other
+    // binding of the name is visible (M::X beside a top-level X). Twin of
+    // constBind / ownConst in ruby-interpreter.abnf.
+    function emitNestedBind(b, name, v) {
+        var selfV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "self")])
+        callExt(b, "js_set", [selfV, emitStr(b, "$c$" + name), v])
+        if (!nameIn(rubyBuiltinClasses, name)) {
+            var upB = curF.NewBlock("")
+            var joinB = curF.NewBlock("")
+            var tv = callExt(b, "js_scope_typeof", [curScopeV, emitStr(b, name)])
+            b.NewCondBr(truthy(b, callExt(b, "js_seq", [tv, emitStr(b, "undefined")])), upB, joinB)
+            upB = emitConstUp(upB, name, v)
+            upB.NewBr(joinB)
+            b = joinB
+        }
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), v])
+        return b
+    }
+    // In a body the reopened object is bound in the body scope as well, which is
+    // where the body's names are published from.
+    function emitOwnConst(b, name) {
+        if (!curClsBodyFn) { return callExt(b, "js_scope_get", [curScopeV, emitStr(b, name)]) }
+        var v = callExt(b, "js_get", [callExt(b, "js_scope_get", [curScopeV, emitStr(b, "self")]), emitStr(b, "$c$" + name)])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), v])
+        return v
     }
     function emitClassBody(b, clsV, r) {
         if (r.cstmts.length == 0) { return {b: b, v: hNull} }
@@ -8156,18 +8224,29 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         nextSelfIsCls = true
         var cbIdx = emitFunc([], function(bb) {
             curClsBodyFn = true
-            return body(bb)
+            // The body is a new local scope, as a def is: its local set starts empty
+            // (cls marks it a body, not a method) and the $blk slot is the frame
+            // js_rlvar / js_rlset stop at, so the enclosing locals are out of reach.
+            curDefLocals = {m: {}, l: [], cls: true}
+            curDefFn = true
+            callExt(bb, "js_scope_decl", [curScopeV, emitStr(bb, blkSlot), hNull])
+            var res = body(bb)
+            // Each name the body binds is read where the body sees it: a nested
+            // class in the body scope itself, a constant one scope up.
+            var selfV = hNull
+            for (var ni = 0; ni < r.cstmts.length; ni++) {
+                var nn = r.cstmts[ni].name
+                if (nn != undefined && nn != "") {
+                    if (selfV === hNull) { selfV = callExt(res.b, "js_scope_get", [curScopeV, emitStr(res.b, "self")]) }
+                    callExt(res.b, "js_set", [selfV, emitStr(res.b, "$c$" + nn),
+                                              callExt(res.b, "js_scope_get", [curScopeV, emitStr(res.b, nn)])])
+                }
+            }
+            return res
         }, true)
         var cbArgs = callExt(b, "js_arr_new", [])
         callExt(b, "js_arr_push", [cbArgs, clsV])
         var v = callExt(b, "js_call", [callExt(b, "js_closure", [handle(cbIdx), curScopeV]), hUndef, cbArgs])
-        for (var ni = 0; ni < r.cstmts.length; ni++) {
-            var nn = r.cstmts[ni].name
-            if (nn != undefined && nn != "") {
-                callExt(b, "js_set", [clsV, emitStr(b, "$c$" + nn),
-                                      callExt(b, "js_scope_get", [curScopeV, emitStr(b, nn)])])
-            }
-        }
         b = emitConstNames(b, clsV, r)
         return {b: b, v: v}
     }
@@ -8219,7 +8298,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // spliced again, so a method the class overrode it with stays.
     function emitReopen(b, prev, name, r, incAnc, pos) {
         if (r.prepends.length > 0 || r.extends.length > 0) { notImpl("prepend / extend in a reopened class body", pos) }
-        var clsV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, name)])
+        var clsV = emitOwnConst(b, name)
         var newAnc = []
         for (var i = 0; i < incAnc.length; i++) { if (!nameIn(prev.anc, incAnc[i])) { newAnc.push(incAnc[i]) } }
         prev.anc = newAnc.concat(prev.anc)
@@ -8239,7 +8318,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         var savedCls = curClsName
         var savedPath = curClsPath
         curClsName = name
-        if (prev.qn != undefined) { curClsPath = prev.qn }
+        if (prev.qn != undefined) { curClsPath = prev.qn; lexNote(prev.qn, r) }
         var own = mixinDefsAll(newAnc)
         if (nameIn(newAnc, "Comparable")) { pushAll(own, comparableMethods()) }
         for (var m = 0; m < r.methods.length; m++) { own.push(r.methods[m]) }
@@ -8312,27 +8391,30 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
         lastDeclName = name
         var r = clsItems(items, 1)
-        moduleDefs["$" + name] = r.methods
-        moduleSDefs["$" + name] = r.sdefs
-        moduleConsts["$" + name] = r.consts
+        // A module opened twice is one module: the tables hold both bodies.
+        moduleDefs["$" + name] = moduleDefs["$" + name] == undefined ? r.methods : moduleDefs["$" + name].concat(r.methods)
+        moduleSDefs["$" + name] = moduleSDefs["$" + name] == undefined ? r.sdefs : moduleSDefs["$" + name].concat(r.sdefs)
+        moduleConsts["$" + name] = moduleConsts["$" + name] == undefined ? r.consts : moduleConsts["$" + name].concat(r.consts)
         // A module may include another module, and a class including THIS one has to
         // pick up both. The names are recorded here and closed over by mixAncestry
         // at every including class - the module's own defs stay its own.
         var minc = []
         for (var q1 = 0; q1 < r.includes.length; q1++) { minc.push(r.includes[q1]) }
         for (var q2 = 0; q2 < r.prepends.length; q2++) { minc.push(r.prepends[q2]) }
-        moduleIncludes["$" + name] = minc
+        moduleIncludes["$" + name] = unionNames(moduleIncludes["$" + name], minc)
         var modAnc = mixAncestry(minc, 0)
         var mixDefs = mixinDefsAll(modAnc)
         var mnames = []
         for (var q3 = 0; q3 < mixDefs.length; q3++) { mnames.push(mixDefs[q3].name) }
         for (var m1 = 0; m1 < r.methods.length; m1++) { mnames.push(r.methods[m1].name) }
+        mnames = unionNames(classMethods["$" + name], mnames)
         classMethods["$" + name] = mnames
         noteMethodNames(mnames)
         var snames = []
         for (var m3 = 0; m3 < r.sdefs.length; m3++) { snames.push(r.sdefs[m3].name) }
+        snames = unionNames(classSMethods["$" + name], snames)
         classSMethods["$" + name] = snames
-        restrictedMethods["$" + name] = []
+        if (restrictedMethods["$" + name] == undefined) { restrictedMethods["$" + name] = [] }
         // A module's instance methods are emitted onto the module object too (Ruby
         // keeps them there), and one of them may call `super` - which only means
         // anything once the module is mixed into a class. Allowing the emission here
@@ -8340,46 +8422,40 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // one anybody calls.
         classHasSuper["$" + name] = true
         return function(b) {
-            var modV = callExt(b, "js_obj_new", [])
-            callExt(b, "js_set", [modV, emitStr(b, "__isclass"), hTrue])
-            callExt(b, "js_set", [modV, emitStr(b, "__ismodule"), hTrue])
+            // A module statement for a name the same enclosing class or module has
+            // already emitted reopens that module object.
+            // The build-time module tables know a module by its own name, so a
+            // nested one cannot share it with a builtin module.
+            if (curClsName != "" && nameIn(rubyBuiltinClasses, name)) { notImpl("a nested module named like a builtin module", pos) }
+            var mkey = "$" + curClsName + "::" + name
             var qn = qualName(name)
-            callExt(b, "js_set", [modV, emitStr(b, "__name"), emitStr(b, qn)])
-            b = emitNameList(b, modV, ownIMNames([], r), "__imn")
-            b = emitNameList(b, modV, [], "__incl")
-            if (curClsBodyFn) { b = emitConstUp(b, name, modV) }
-            else { callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), modV]) }
+            lexNote(qn, r)
+            var modV = hNull
+            if (emittedModules[mkey] != undefined) {
+                modV = emitOwnConst(b, name)
+                var imn = ownIMNames(emittedModules[mkey], r)
+                emittedModules[mkey] = imn
+                b = emitNameList(b, modV, imn, "__imn")
+            } else {
+                emittedModules[mkey] = ownIMNames([], r)
+                modV = callExt(b, "js_obj_new", [])
+                callExt(b, "js_set", [modV, emitStr(b, "__isclass"), hTrue])
+                callExt(b, "js_set", [modV, emitStr(b, "__ismodule"), hTrue])
+                callExt(b, "js_set", [modV, emitStr(b, "__name"), emitStr(b, qn)])
+                b = emitNameList(b, modV, emittedModules[mkey], "__imn")
+                b = emitNameList(b, modV, [], "__incl")
+                if (curClsBodyFn) { b = emitNestedBind(b, name, modV) }
+                else { callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), modV]) }
+            }
             b = emitMixRecord(b, modV, modAnc, "$mix$", "__mixorder")
             var savedCls = curClsName
             var savedPath = curClsPath
             curClsName = name
             curClsPath = qn
-            // A module body's statements (constants, nested classes and modules) run
-            // in the CURRENT scope, so a name it introduces stays visible where the
-            // module was written - which is what lets a mixed-in method read a
-            // constant of its module. Each one is then published on the module under
-            // $c$ as well, for the M::NAME form. `self` is the module object meanwhile,
-            // bound in the current scope and put back afterwards, so a body @ivar is
-            // the module's own.
-            var savedHasSelf = curHasSelf
-            var savedSelfIsCls = curSelfIsCls
-            var outerSelfV = curHasSelf ? callExt(b, "js_scope_get", [curScopeV, emitStr(b, "self")]) : hNull
-            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "self"), modV])
-            curHasSelf = true
-            curSelfIsCls = true
-            for (var ci = 0; ci < r.cstmts.length; ci++) {
-                var res = r.cstmts[ci].t(b)
-                b = res.b
-                var cn = r.cstmts[ci].name
-                if (cn != undefined && cn != "") {
-                    callExt(b, "js_set", [modV, emitStr(b, "$c$" + cn),
-                                          callExt(b, "js_scope_get", [curScopeV, emitStr(b, cn)])])
-                }
-            }
-            b = emitConstNames(b, modV, r)
-            curHasSelf = savedHasSelf
-            curSelfIsCls = savedSelfIsCls
-            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "self"), outerSelfV])
+            // A module body runs as a class body does (emitClassBody): its own local
+            // scope with `self` the module, its constants bound where the module was
+            // written and published on it under $c$.
+            b = emitClassBody(b, modV, r).b
             var savedModObj = curModObjBody
             curModObjBody = name
             b = emitMethods(b, modV, mixDefs, "", name, [])
@@ -8544,7 +8620,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // name that is not a local may be one of its methods (`upcase + "!"` in
     // String#shout). Twin of builtinSelfMethod in ruby-interpreter.abnf.
     function builtinSelfMethod(cls, name) {
-        if (reopenedBuiltins["$" + cls] == undefined || curDefLocals == null || knownLocal(name)) { return false }
+        if (reopenedBuiltins["$" + cls] == undefined || curDefLocals == null || curDefLocals.cls === true || knownLocal(name)) { return false }
         return rbResponds(cls, name) || nameIn(reopenedBuiltins["$" + cls], name)
     }
     // Exception's own methods by a bare name inside a method of a user exception
@@ -8552,7 +8628,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // whose methods no class registry here records. Twin of excBase in
     // ruby-interpreter.abnf, where they are ordinary inherited methods.
     function excSelfMethod(cls, name) {
-        if (curDefLocals == null || knownLocal(name)) { return false }
+        if (curDefLocals == null || curDefLocals.cls === true || knownLocal(name)) { return false }
         if (name != "message" && name != "full_message" && name != "backtrace") { return false }
         var c = cls
         var hops = 0

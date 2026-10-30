@@ -3035,11 +3035,14 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 for (var i2 = scopes.length - 1; i2 >= 0; i2--) { if (hasOwn(scopes[i2], t)) { return "constant" } }
                 return hasOwn(hostGlobals, t) ? "constant" : null
             }
-            for (var j = scopes.length - 1; j >= 1; j--) { if (hasOwn(scopes[j], t)) { return "local-variable" } }
+            for (var j = scopes.length - 1; j >= 1; j--) {
+                if (hasOwn(scopes[j], t)) { return "local-variable" }
+                if (hasOwn(scopes[j], "$cgate")) { break }
+            }
             // globalScope holds the top-level locals AND the top-level defs; a local
-            // there is only visible outside every method.
+            // there is only visible outside every method and class body.
             if (rubyMethods["$" + t] === true) { return "method" }
-            if (hasOwn(globalScope, t) && frameScopeOf(scopes) == null) { return "local-variable" }
+            if (hasOwn(globalScope, t) && !topHidden()) { return "local-variable" }
             if (definedKernelNames.indexOf(t) >= 0 || hasOwn(hostGlobals, t)) { return "method" }
             if (typeof selfMethod(t) == "function") { return "method" }
             return null
@@ -11453,19 +11456,29 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // the top level's locals (globalScope) are out of reach, so a local name found
     // only there is a NEW local of the method.
     function rubySet(name, value) {
+        var loc = isLocalName(name)
         for (var i = scopes.length - 1; i >= 0; i--) {
             if (hasOwn(scopes[i], name)) {
-                if (i == 0 && isLocalName(name) && frameScopeOf(scopes) != null) { break }
+                if (i == 0 && loc && topHidden()) { break }
                 scopePut(scopes[i], name, value)
                 return
             }
+            if (loc && hasOwn(scopes[i], "$cgate")) { break }
         }
+        scopeBind(name, value)
+    }
+    function scopeBind(name, value) {
         var sc = scopes[scopes.length - 1]
         // The name trail a module body needs (see publishModuleScope) - the frozen
         // engine cannot enumerate an object's keys.
         if (!hasOwn(sc, "__names")) { sc["__names"] = [] }
         sc["__names"].push(name)
         scopePut(sc, name, value)
+    }
+    // A class or module statement binds its name in the body it is written in, never
+    // in an outer scope that holds the name.
+    function constBind(name, value) {
+        if (curClass === null || name.indexOf("::") >= 0) { rubySet(name, value) } else { scopeBind(name, value) }
     }
     // A `.name' step before the last is a zero-argument method call, read as a
     // member chain reads it (foldCallMember); the last step is the place written.
@@ -11530,8 +11543,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // Whether a local of this name is in scope, by makeVarRef's walk; a method of
     // the name does not count.
     function localBound(name) {
-        for (var i = scopes.length - 1; i >= 1; i--) { if (hasOwn(scopes[i], name)) { return true } }
-        return frameScopeOf(scopes) == null && hasOwn(globalScope, name)
+        for (var i = scopes.length - 1; i >= 1; i--) {
+            if (hasOwn(scopes[i], name)) { return true }
+            if (hasOwn(scopes[i], "$cgate")) { return false }
+        }
+        return !topHidden() && hasOwn(globalScope, name)
             && !(hasOwn(globalScope, "$d$" + name) && globalScope[name] === globalScope["$d$" + name])
     }
     function makeAssign(items, pos) {
@@ -11824,19 +11840,20 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
         return function() {
             var existing = anytype
-            existing = hasOwn(globalScope, name) ? globalScope[name] : undefined
+            existing = ownConst(name)
             var mod = anytype
             if (existing != undefined && existing != null && existing.__ismodule === true) { mod = existing }
             else { mod = {__isclass: true, __ismodule: true, __name: qualName(name), __super: null,
                           __mixins: [], __prepends: [], __methodNames: []} }
-            rubySet(name, mod)
+            constBind(name, mod)
             var saved = scopes
             var savedClass = curClass
             var savedVis = curVis
             var modScope = {}
             // A body nested in another class or module body also sees that body's
-            // constants (Ruby's lexical scope).
+            // constants (Ruby's lexical scope), but not its locals ($cgate).
             scopes = curClass === null ? [globalScope, modScope] : saved.concat([modScope])
+            declVar("$cgate", true)
             declVar("self", mod)
             curClass = mod
             curVis = "public"
@@ -11900,7 +11917,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 if (mod.__cnames == undefined) { mod.__cnames = [] }
                 if (mod.__cnames.indexOf(n) < 0) { mod.__cnames.push(n) }
             }
-            if (!hasOwn(globalScope, n)) { scopePut(globalScope, n, sc[n]) }
+            if (!hasOwn(globalScope, n) && !hasOwn(hostGlobals, n)) { scopePut(globalScope, n, sc[n]) }
         }
     }
 
@@ -12093,6 +12110,16 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (hasOwn(chain[i], "$mname")) { return chain[i] }
         }
         return null
+    }
+    // Whether the running code is in a def or a class / module body: each starts a
+    // new local scope, so the top level's locals (globalScope) are out of reach. A
+    // body's scope carries $cgate; a local read stops there, below it the chain is
+    // only searched for constants.
+    function topHidden() {
+        for (var i = scopes.length - 1; i >= 1; i--) {
+            if (hasOwn(scopes[i], "$mname") || hasOwn(scopes[i], "$cgate")) { return true }
+        }
+        return false
     }
     // A non-local `return' out of a block, or an exception out of a call given one,
     // throws straight past the blockStack.pop() of the call that pushed the block, so
@@ -12690,16 +12717,24 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // local here, 2 it does not. Decided on first run, once the parse has noted
         // every assignment and range.
         var lex = {k: 0}
+        var loc = isLocalName(name)
+        var cap = name.charCodeAt(0) >= 65 && name.charCodeAt(0) <= 90
         return function() {
             for (var i = scopes.length - 1; i >= 1; i--) {
                 if (hasOwn(scopes[i], name)) { return scopes[i][name] }
+                if (loc && hasOwn(scopes[i], "$cgate")) { break }
+            }
+            if (cap) {
+                var lc = anytype
+                lc = lexConst(name)
+                if (lc !== undefined) { return lc }
             }
             // A local not bound yet is nil, and it hides a method of its name
             // (`k2 = k2' reads nil). Inside a def the loop above searched the whole
             // frame; at the top level the global slot is a local unless it holds
             // the def itself.
             if (lex.k == 0) { lex.k = lexLocalAt(name, at) ? 1 : 2 }
-            if (lex.k == 1 && (frameScopeOf(scopes) != null || !hasOwn(globalScope, name)
+            if (lex.k == 1 && (topHidden() || !hasOwn(globalScope, name)
                                || (hasOwn(globalScope, "$d$" + name) && globalScope[name] === globalScope["$d$" + name]))) { return null }
             if (name == "__method__") { return mkSym(rstr(getVar("$mname"))) }
             // `private` / `module_function` on a line of their own are ZERO-argument
@@ -12723,23 +12758,23 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (rubyMethods["$" + name] === true && hasVar("$d$" + name)) {
                 var f = anytype
                 f = getVar("$d$" + name)
-                if (frameScopeOf(scopes) != null || !hasOwn(globalScope, name) || globalScope[name] === f) { return f() }
+                if (topHidden() || !hasOwn(globalScope, name) || globalScope[name] === f) { return f() }
             }
             if (bareSelfCallNames.indexOf(name) >= 0 && rubyMethods["$" + name] !== true && !hasVar(name)) {
                 return boxOut(ivarSelf(), mcall(ivarSelf(), name, [], null))
             }
 
-            // A def does not see the locals around it: inside a method the loop above
-            // searched its whole own frame, and what globalScope holds under a local
+            // A def or class body does not see the locals around it: the loop above
+            // searched its whole own scope, and what globalScope holds under a local
             // name is a top-level LOCAL unless it is a method. Twin of js_rlvar in
             // languages/lib/ruby-rt.metajs and abnf/jsrtruby.go.
-            if (isLocalName(name) && frameScopeOf(scopes) != null) {
+            if (loc && topHidden()) {
                 var gv = anytype
                 gv = hasOwn(globalScope, name) ? globalScope[name] : undefined
-                if (hasOwn(globalScope, name) ? typeof gv != "function" : !hasVar(name)) {
-                    if (lexLocalAt(name, at)) { return null }
-                    undefinedName(name)
-                }
+                if (typeof gv == "function") { return gv }
+                if (hasOwn(hostGlobals, name)) { return hostGlobals[name] }
+                if (lexLocalAt(name, at)) { return null }
+                undefinedName(name)
             }
             if (!hasVar(name)) {
                 if (lexLocalAt(name, at)) { return null }
@@ -12761,6 +12796,25 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // A class or module written in another one's body is named by the path
     // (M::N::C), which is what Module#name answers. Twin of qualName in
     // ruby-to-llvm-ir.abnf.
+    // The class or module a `class' / `module' statement reopens: at the top level
+    // a global one, in a body only the enclosing class or module's own (M::X is a
+    // new class beside a top-level X, as M::String is beside String). Twin of
+    // the curClsPath key in ruby-to-llvm-ir.abnf.
+    function ownConst(name) {
+        if (curClass === null || name.indexOf("::") >= 0) {
+            // A nested class is also bound globally (publishModuleScope), but it is
+            // not the top-level constant of its name.
+            var g = anytype
+            g = hasOwn(globalScope, name) ? globalScope[name] : undefined
+            if (g != undefined && g != null && g.__isclass === true && typeof g.__name == "string" && g.__name.substring(g.__name.length - name.length - 2) == "::" + name) { return undefined }
+            return g
+        }
+        for (var i = scopes.length - 1; i >= 1; i--) {
+            if (hasOwn(scopes[i], name)) { return scopes[i][name] }
+            if (hasOwn(scopes[i], "$cgate")) { break }
+        }
+        return hasOwn(curClass, "$c$" + name) ? curClass["$c$" + name] : undefined
+    }
     function qualName(name) {
         return curClass === null || name.indexOf("::") >= 0 ? name : curClass.__name + "::" + name
     }
@@ -12780,11 +12834,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             // Reopening a class keeps the object it already has (Ruby), so `class C`
             // twice adds to one class rather than replacing it.
             var existing = anytype
-            existing = hasOwn(globalScope, name) ? globalScope[name] : undefined
+            existing = ownConst(name)
             var cls = anytype
             if (existing != undefined && existing != null && existing.__isclass === true && existing.__builtin !== true) {
                 cls = existing
-            } else if (existing == undefined && supName == null && reopenableBuiltin(name)) {
+            } else if (existing == undefined && supName == null && curClass === null && reopenableBuiltin(name)) {
                 // Reopening a BUILTIN class (`class String; def shout ...`) adds to the
                 // builtin's own object, which mcall asks for a builtin value.
                 cls = hostGlobals[name]
@@ -12799,7 +12853,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 if (sv != null && sv.__isclass === true) { cls.__super = sv }
             }
             if (supExpr != null) { cls.__super = supExpr() }
-            rubySet(name, cls)
+            constBind(name, cls)
             // Run the body items in SOURCE order with self bound to the class object:
             // a `private` only affects the defs that come after it, and a class-body
             // statement may reference a method defined above it.
@@ -12812,6 +12866,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             // visible where the class was written (so a method of Outer can name Inner).
             var clsScope = {}
             scopes = curClass === null ? [globalScope, clsScope] : saved.concat([clsScope])
+            declVar("$cgate", true)
             declVar("self", cls)
             curClass = cls
             curVis = "public"
@@ -13662,7 +13717,41 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
         nameErr("NameError", "uninitialized constant " + pre, parts[i - 1], findSelf())
     }
+    // A constant read in a method resolves lexically first: in the class or module
+    // the def is written in, then in the ones around it by its path (M::X from a
+    // method of M, even beside a top-level X). Twin of lexConstPath in
+    // ruby-to-llvm-ir.abnf.
+    // The classes are found by $defclass's path, as the owner a def records need
+    // not be the live class object.
+    function lexConst(name) {
+        if (!hasVar("$defclass")) { return undefined }
+        var dc = anytype
+        dc = getVar("$defclass")
+        if (dc === undefined || dc === null || dc.__isclass !== true) { return undefined }
+        var paths = constPrefixes(dc.__name)
+        for (var i = paths.length - 1; i >= 0; i--) {
+            var c = anytype
+            c = scopeConst(paths[i])
+            if (c !== undefined && c !== null && hasOwn(c, "$c$" + name)) { return c["$c$" + name] }
+        }
+        return undefined
+    }
+    // A::B::C -> [A, A::B, A::B::C]. Twin of the same in ruby-to-llvm-ir.abnf.
+    function constPrefixes(path) {
+        var parts = path.split("::")
+        var out = [parts[0]]
+        for (var i = 1; i < parts.length; i++) { out.push(out[i - 1] + "::" + parts[i]) }
+        return out
+    }
     function lookupConst(name) {
+        var lc = anytype
+        var k = name.indexOf("::")
+        lc = lexConst(k < 0 ? name : name.substring(0, k))
+        if (lc === undefined) { return scopeConst(name) }
+        if (k < 0) { return lc }
+        return constMembers(lc, name.split("::"))
+    }
+    function scopeConst(name) {
         var parts = name.split("::")
         var cur = anytype
         cur = undefined
@@ -13670,8 +13759,13 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (hasOwn(scopes[i], parts[0])) { cur = scopes[i][parts[0]] }
         }
         if (cur == undefined && hasOwn(hostGlobals, parts[0])) { cur = hostGlobals[parts[0]] }
-        // Only the LAST segment may be nil (`R::RV` after `RV = nil`); a nil
-        // scope before it leaves the name unresolved.
+        return constMembers(cur, parts)
+    }
+    // Only the LAST segment may be nil (`R::RV` after `RV = nil`); a nil scope
+    // before it leaves the name unresolved.
+    function constMembers(head, parts) {
+        var cur = anytype
+        cur = head
         for (var j = 1; j < parts.length; j++) {
             if (cur === undefined || cur === null) { return undefined }
             cur = hasOwn(cur, "$c$" + parts[j]) ? cur["$c$" + parts[j]]
