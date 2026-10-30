@@ -88,7 +88,7 @@ or method", compiler aborts; MRI "uninitialized constant Nope".
 
 # JS — JavaScript and TypeScript
 
-### T-853 ts/js: bound functions and `new`; TS error site text; accessor decorators · P3 · JS · OPEN [V JS worker]
+### T-853 ts/js: bound functions and `new`; TS error site text; accessor decorators · P3 · JS · IN PROGRESS (JS worker, round 34) [V JS worker]
 (1) `function plain(this:any){this.p=1}; new (plain.bind(null))()` → node `ok 1`; all TS legs "Cannot set properties
 of null (setting 'p')" (a bound function's `new` must ignore the bound this). (2) `new (arrow.bind(null))()` constructs;
 node TypeError — record the bound target in the Go twin and layer 2. (3) TS error site text keeps the type assertion:
