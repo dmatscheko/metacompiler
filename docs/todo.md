@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-861** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-862** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -77,13 +77,10 @@ String stays binary, pack/unpack directives beyond C c U (NotImplementedError to
 
 # JS — JavaScript and TypeScript
 
-### T-853 ts/js: bound functions and `new`; TS error site text; accessor decorators · P3 · JS · IN PROGRESS (JS worker, round 34) [V JS worker]
-(1) `function plain(this:any){this.p=1}; new (plain.bind(null))()` → node `ok 1`; all TS legs "Cannot set properties
-of null (setting 'p')" (a bound function's `new` must ignore the bound this). (2) `new (arrow.bind(null))()` constructs;
-node TypeError — record the bound target in the Go twin and layer 2. (3) TS error site text keeps the type assertion:
-`new (arrow as any)()` → "arrowasany is not a constructor", node "arrow is not a constructor". (4) decorators on
-getters, setters, `accessor` fields and parameters are parsed and ignored. (5) Date: V8's legacy parse of `"5"` and the
-zone name at year −271821 differ from node.
+### T-861 ts/js: `bind` on a class · P3 · JS · OPEN [V JS worker]
+`class K { constructor(a, b) { this.s = a + b; } }; new (K.bind(null, 7))(8).s` → node 15; all three of our engines
+"TypeError: K.bind is not a function" (a class descriptor is not callable, so it has no bind, although `"bind" in K`
+is true). Also `K.call`/`K.apply` must throw node's "Class constructor K cannot be invoked without 'new'".
 
 # JV — Java
 
@@ -917,6 +914,7 @@ T-855 ruby: private/constant/enumerator gaps — DONE e1ab0f6f (private/protecte
 T-854 ruby: binary (ASCII-8BIT) strings — DONE 074917f6 (binary String box {__rbin} / jsRBin with raw bytes; producers chr>127, b, force_encoding BINARY, pack C*; bytes/bytesize/getbyte/each_byte/[]/inspect \\xHH/encoding/==/hash/+/<< with CompatibilityError/*/unpack C c U; puts writes raw bytes via the existing writeBytes host — od-checked = ruby; Encoding objects)
 T-849 bash: a backslash-newline that splits a name is not spliced — DONE 4c9f2756 (pre-parse splice BsSplice in shared bash-splice.abnf: joins \\⏎ everywhere bash does — not in '...', $'...', comments, quoted here-doc bodies — and restores the removed newlines at the next line break so line numbers hold; eval/trap strings too; parser.go setSrc re-registers the rewritten program source; plus $'...' keeps a backslash-newline)
 T-858 c: `<stddef.h>` gives no `offsetof` / `NULL` / `size_t` — DONE ef5212f7 (offsetof after <stddef.h> folded from cc's layout offsets in both halves — expressions, enumerators, dimensions, nested and indexed designators, cc's bit-field error; NULL from stddef/stdio/stdlib/string; size_t/ptrdiff_t already predefined)
+T-853 ts/js: bound functions and `new`; TS error site text; accessor decorators — DONE c12762b2 (bound target + args recorded in every engine, js_jsunbind before the constructor check, instanceof via the target; TS callee text skips as/satisfies/!; new (o).f() site text; getter/setter/accessor decorators in tsc's order — parameter decorators stay dropped as tsc's emit drops them; V8 DateParser port for Date.parse and V8's equivalent-year zone names, 155-row probe = node)
 
 # Settled — do not re-open
 
