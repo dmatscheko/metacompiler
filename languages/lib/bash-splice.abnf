@@ -4,8 +4,8 @@
 // with c.setSrc() and restarts the parse, so the grammar never sees a continuation that is
 // spliced. Kept as written: inside '...' and $'...', in a comment, and in the body of a
 // here-document whose delimiter is quoted. In an unquoted body the joined line is what is
-// compared with the delimiter (`E\<nl>OF` ends it). Inside "${...}" a single quote is an
-// ordinary character. The removed newlines are put back as blank lines at the next line
+// compared with the delimiter (`E\<nl>OF` ends it). Inside "${...}" a single quote, $'
+// included, is an ordinary character. The removed newlines are put back as blank lines at the next line
 // break in command text, so every line after a joined one keeps its number in a parse
 // error. A file without a backslash-newline leaves after one indexOf.
 // Include with :include("lib/bash-splice.abnf") and reference BsSplice first in the start
@@ -18,7 +18,7 @@ BsSplice    = :script(~~
         var out = ""
         var last = 0        // start of the not-yet-copied run
         // The quoting context, one frame per level: kind 0 command text, 1 "...", 2 '...',
-        // 3 $'...', 4 ${...}, 5 `...`. dep counts the frame's open ( or {, cl is 1 for a
+        // 3 $'...', 4 ${...}, 5 `...`. dep counts the frame's open ( (or { and [), cl is 1 for a
         // command frame that a ")" closes, ar 1 for arithmetic (no comment, no here-doc),
         // dq 1 for a ${...} inside "...", cs the open `case` commands whose ")" ends a pattern.
         var kind = [0]
@@ -27,6 +27,9 @@ BsSplice    = :script(~~
         var ar = [0]
         var dq = [0]
         var cs = [0]
+        // For a ${...}: 0 before the name, 3 in the name, 1 in the word of - = + ? (where a
+        // quoted ${...} treats ' as an ordinary character), 2 after any other operator.
+        var pe = [0]
         var hdWord = []     // here-documents opened on the current line
         var hdQuoted = []
         var hdDash = []
@@ -47,9 +50,9 @@ BsSplice    = :script(~~
             while (held > 0) { out = out + "\n"; held = held - 1 }
         }
         var open = function(k, d, closes, isAr, inDq) {
-            kind.push(k); dep.push(d); cl.push(closes); ar.push(isAr); dq.push(inDq); cs.push(0)
+            kind.push(k); dep.push(d); cl.push(closes); ar.push(isAr); dq.push(inDq); cs.push(0); pe.push(0)
         }
-        var close = function() { kind.pop(); dep.pop(); cl.pop(); ar.pop(); dq.pop(); cs.pop() }
+        var close = function() { kind.pop(); dep.pop(); cl.pop(); ar.pop(); dq.pop(); cs.pop(); pe.pop() }
         // The delimiter of a here-document whose << is at k: quote characters removed.
         var hdOpen = function(k) {
             var dash = false
@@ -106,6 +109,7 @@ BsSplice    = :script(~~
             var ch = src.charAt(i)
             var t = kind.length - 1
             var k = kind[t]
+            var sqLit = k === 1 || (k === 4 && dq[t] === 1 && pe[t] === 1)   // a ' is no quote here
             if (k === 2) {
                 if (ch === "'") { close() }
                 prev = ch
@@ -134,8 +138,8 @@ BsSplice    = :script(~~
                     prev = "("
                     continue
                 }
-                if (d === "{") { open(4, 0, 0, 0, k === 1 || (k === 4 && dq[t] === 1) ? 1 : 0); prev = "{"; i = j + 1; continue }
-                if (k !== 1 && d === "'") { open(3, 0, 0, 0, 0); prev = "'"; i = j + 1; continue }
+                if (d === "{") { open(4, 0, 0, 0, sqLit ? 1 : 0); prev = "{"; i = j + 1; continue }
+                if (!sqLit && d === "'") { open(3, 0, 0, 0, 0); prev = "'"; i = j + 1; continue }
                 if (k !== 1 && d === "\"") { open(1, 0, 0, 0, 0); prev = "\""; i = j + 1; continue }
                 prev = ch
                 i = i + 1
@@ -155,14 +159,21 @@ BsSplice    = :script(~~
             }
             if (ch === "\"") { open(1, 0, 0, 0, 0); prev = ch; i = i + 1; continue }
             if (ch === "'") {
-                if (!(k === 4 && dq[t] === 1)) { open(2, 0, 0, 0, 0) }
+                if (!sqLit) { open(2, 0, 0, 0, 0) }
                 prev = ch
                 i = i + 1
                 continue
             }
             if (k === 4) {
-                if (ch === "{") { dep[t] = dep[t] + 1 }
-                if (ch === "}") { if (dep[t] === 0) { close() } else { dep[t] = dep[t] - 1 } }
+                if (ch === "}" && dep[t] === 0) { close(); prev = ch; i = i + 1; continue }
+                if (dep[t] === 0 && pe[t] === 0) { if (ch !== "#" && ch !== "!") { pe[t] = 3 } }
+                else if (dep[t] === 0 && pe[t] === 3) {
+                    if (ch === ":") { pe[t] = "-=+?".indexOf(src.charAt(nx(i + 1))) >= 0 ? 1 : 2 }
+                    else if (ch === "-" || ch === "=" || ch === "+" || ch === "?") { pe[t] = 1 }
+                    else if (!((ch >= "a" && ch <= "z") || (ch >= "A" && ch <= "Z") || (ch >= "0" && ch <= "9") || ch === "_" || ch === "[")) { pe[t] = 2 }
+                }
+                if (ch === "{" || ch === "[") { dep[t] = dep[t] + 1 }
+                if (ch === "}" || ch === "]") { dep[t] = dep[t] - 1 }
                 prev = ch
                 i = i + 1
                 continue

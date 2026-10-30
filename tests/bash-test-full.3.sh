@@ -991,8 +991,9 @@ s73() {
 # Outside '...', $'...', a comment and a quoted here-document, bash joins the two lines before
 # it reads a token, so a continuation may split a name, a keyword, an operator or a ${...},
 # and an eval string is joined the same way. In an unquoted here-document the joined line is
-# what ends the body. An arithmetic error after a joined line names its own text. Every
-# expected value is bash 5.3's.
+# what ends the body. An arithmetic error after a joined line names its own text. In $'...'
+# a backslash-newline is an unknown escape and stays; inside "${v-w}" a $' is no quote, but
+# in the operand of a quoted ${v/p/r} it is. Every expected value is bash 5.3's.
 s74m() { local m=${1#bash: }; printf '%s' "${m#*line [0-9]*: }"; }
 s74() {
   local xy x=X arr=(1 2 3) r o l
@@ -1041,6 +1042,14 @@ y=9; r=$x\
 y'
   check bsn9 "$r" 9
   o=$( { echo $(( 1/0 )); } 2>&1 ); check bsn10 "$(s74m "$o")" '1/0 : division by 0 (error token is "0 ")'
+  check bsn11 $'a\
+b' 'a\
+b'
+  r=abc
+  check bsn12 "${u:-$'c\
+d'}|${r/b/$'e\
+f'}" 'cd|ae\
+fc'
 }
 # ===== END SECTIONS =====
 

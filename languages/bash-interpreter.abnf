@@ -392,7 +392,7 @@ Tilde       <~~ push(mkTilde()) ~~> = "~" TildeEnd ;
 // $'...' : ANSI-C quoting. The body is taken raw and decoded by ansiC (\n \t \xHH \0NNN \uHHHH ...).
 AnsiSeg     = "$'" :whitespace() AnsiBody "'" ;
 AnsiBody    <~~ push(makeConst(ansiC(up.in, true))) ~~> = { AnsiEsc | AnsiLit } ;
-AnsiEsc     = "\\" AnyCh ;
+AnsiEsc     = "\\" ( AnyCh | "\n" ) ;
 AnsiLit     = !@+"'\\" ;
 
 // 'single quoted' : everything up to the next ' is literal (no escapes, may span lines).
