@@ -813,13 +813,16 @@ FnBody      <~~ closeBlockScope(); push(makeBlockStmt(takeAll())) ~~>
 FnScopeOpen <~~ openFnScope() ~~> = "{" ;
 
 If          <~~ push(makeIf(takeAll())) ~~>
-            = KwIf "(" Expression ")" Statement [ KwElse Statement ] ;
+            = KwIf "(" Cond ")" Statement [ KwElse Statement ] ;
 
 While       <~~ push(makeWhile(pop(), pop())) ~~>
-            = KwWhile "(" Expression ")" Statement ;
+            = KwWhile "(" Cond ")" Statement ;
 
 Do          <~~ push(makeDo(pop(), pop())) ~~>
-            = KwDo Statement KwWhile "(" Expression ")" ";" ;
+            = KwDo Statement KwWhile "(" Cond ")" ";" ;
+// A controlling expression, tested by the shared statement emitters on its value
+// alone; makeTruth gives a floating one an int truth value first.
+Cond        <~~ push(makeTruth(pop())) ~~> = Expression ;
 
 For         <~~ closeBlockScope(); push(makeFor(takeAll())) ~~>
             = KwFor ForOpen [ ForInit ] ";" [ ForCond ] ";" [ ForPost ] ")" Statement ;
@@ -828,7 +831,7 @@ ForOpen     <~~ openBlockScope() ~~> = "(" ;
 ForInit     <~~ push({k:"init", t:pop()}) ~~> = ForVar | ForExpr ;
 ForVar      = DeclCore ;
 ForExpr     <~~ push(exprToStmt(pop())) ~~> = Expression ;
-ForCond     <~~ push({k:"cond", t:pop()}) ~~> = Expression ;
+ForCond     <~~ push({k:"cond", t:pop()}) ~~> = Cond ;
 ForPost     <~~ push({k:"post", t:exprToStmt(pop())}) ~~> = Expression ;
 
 Return      <~~ push(makeReturn(takeAll())) ~~>
@@ -1833,7 +1836,7 @@ KwDefault   = "default" KwEnd ;
             if (opt != undefined) {
                 var r = opt(b)
                 b = r.b
-                storeTo(b, bct, ptr, toInt(b, truthy(b, r.v)))
+                storeTo(b, bct, ptr, toInt(b, truthOf(b, r)))
             }
             declVar(name, {val: ptr, arr: false, load: ctLTy(bct), ct: bct})
             return b
@@ -1916,7 +1919,7 @@ KwDefault   = "default" KwEnd ;
                 if (fct.k == "int") return {b: r.b, v: ptrOperand(r.b, emitWiden(r.b, r.v, fct.u == true, true)), ct: ct}
             }
             if (isFlt(ct)) return {b: r.b, v: fltOperand(r.b, r, ct), ct: ct}
-            if (isFlt(fct)) return {b: r.b, v: emitConv(r.b, ct, emitD2I(r.b, dblOf(r.b, r)), ctI(8, false)), ct: ct}
+            if (isFlt(fct)) return {b: r.b, v: coerce(r.b, ct, r), ct: ct}
             return {b: r.b, v: emitConv(r.b, ct, r.v, fct), ct: ct}
         }
     }
@@ -1940,7 +1943,7 @@ KwDefault   = "default" KwEnd ;
         if (ct.k != "int") return v
         // _Bool converts by a TEST against zero (C11 6.3.1.2). Assignment, cast and
         // store all pass through here, so this one arm suffices.
-        if (ct.bool == true) { return toInt(b, truthy(b, v)) }
+        if (ct.bool == true) { return toInt(b, (fct != undefined && isFlt(fct)) ? fltTruth(b, v) : truthy(b, v)) }
         var fromU = (fct != undefined && fct.k == "int") ? (fct.u == true) : false
         var v2 = emitWiden(b, v, fromU, ct.w >= 8)
         if (ct.w == 1) return ct.u ? b.NewAnd(v2, kint(255)) : b.NewAShr(b.NewShl(v2, kint(24)), kint(24))
@@ -3250,6 +3253,22 @@ KwDefault   = "default" KwEnd ;
         return b.NewICmp(llvm.enum.IPredNE, v, llIs64(v) ? zero64 : zero)
     }
     function toInt(b, v) { return b.NewZExt(v, i32) }
+    // Whether a value compares unequal to 0 (C11 6.5.13p3, 6.8.4.1p2), as an i1. A
+    // floating value is tested on its bits without the sign, so -0.0 is false and a
+    // NaN true; a floating constant is carried only as cv.
+    function truthOf(b, r) {
+        if (r.cv != undefined) return b.NewICmp(llvm.enum.IPredNE, kint(r.cv != 0 ? 1 : 0), zero)
+        if (r.ct != undefined && isFlt(r.ct)) return fltTruth(b, r.v)
+        return truthy(b, r.v)
+    }
+    function fltTruth(b, v) { return b.NewICmp(llvm.enum.IPredNE, b.NewShl(v, one64), zero64) }
+    function makeTruth(t) {
+        return function(b) {
+            var r = t(b)
+            if (r.ct == undefined || !isFlt(r.ct)) return r
+            return {b: r.b, v: toInt(r.b, truthOf(r.b, r)), ct: ctInt}
+        }
+    }
 
     // ----- goto and labels -----
     // A labelled statement is pushed as {lbl, t} instead of a bare thunk, so the
@@ -3624,6 +3643,7 @@ KwDefault   = "default" KwEnd ;
                 var cv = (r.cv == 0) ? 1 : 0
                 return {b: r.b, v: kint(cv), ct: ctInt, cv: cv}
             }
+            if (r.ct != undefined && isFlt(r.ct)) return {b: r.b, v: toInt(r.b, r.b.NewXor(fltTruth(r.b, r.v), trueBit(r.b))), ct: ctInt}
             return {b: r.b, v: toInt(r.b, r.b.NewICmp(llvm.enum.IPredEQ, r.v,
                         llvm.types.IsPointer(r.v.Type()) ? llvm.constant.NewNull(i32p) : (llIs64(r.v) ? zero64 : zero))), ct: ctInt}
         }
@@ -3675,10 +3695,11 @@ KwDefault   = "default" KwEnd ;
     }
     // One value as the representation the destination type needs: an integer becomes
     // a double when the destination is floating point, and a double truncates to an
-    // integer when it is not.
+    // integer when it is not - except to _Bool, which tests it (C11 6.3.1.2).
     function coerce(b, ct, r) {
         var rct = r.ct != undefined ? r.ct : ctInt
         if (ct != undefined && isFlt(ct)) return fltOperand(b, r, ct)
+        if (isFlt(rct) && ct != undefined && ct.bool == true) return toInt(b, truthOf(b, r))
         if (isFlt(rct)) return emitConv(b, ct != undefined ? ct : ctInt, emitD2I(b, dblOf(b, r)), ctI(8, false))
         // An integer destination also fixes the REGISTER WIDTH: a long assigned into
         // an int truncates, an int assigned into a long sign- or zero-extends.
@@ -3796,7 +3817,7 @@ KwDefault   = "default" KwEnd ;
         return function(b) {
             var r = items[0](b)
             b = r.b
-            var v = toInt(b, truthy(b, r.v))
+            var v = toInt(b, truthOf(b, r))
             for (var i = 1; i < items.length; i++) {
                 var rightB = curF.NewBlock("")
                 var mergeB = curF.NewBlock("")
@@ -3804,7 +3825,7 @@ KwDefault   = "default" KwEnd ;
                 if (isOr) { b.NewCondBr(c, mergeB, rightB) }
                 else      { b.NewCondBr(c, rightB, mergeB) }
                 var r2 = items[i](rightB)
-                var v2 = toInt(r2.b, truthy(r2.b, r2.v))
+                var v2 = toInt(r2.b, truthOf(r2.b, r2))
                 r2.b.NewBr(mergeB)
                 var phi = mergeB.NewPhi([llvm.ir.NewIncoming(v, b), llvm.ir.NewIncoming(v2, r2.b)])
                 b = mergeB
@@ -3824,7 +3845,7 @@ KwDefault   = "default" KwEnd ;
             var thenB = curF.NewBlock("")
             var elseB = curF.NewBlock("")
             var mergeB = curF.NewBlock("")
-            r.b.NewCondBr(truthy(r.b, r.v), thenB, elseB)
+            r.b.NewCondBr(truthOf(r.b, r), thenB, elseB)
             var rt = items[1](thenB)
             var re = items[2](elseB)
             // Both arms feed one phi, so both are brought to the balanced type first.

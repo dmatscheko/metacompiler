@@ -638,6 +638,22 @@ int s20(void) {
     unsigned long sz = sizeof(se++) + sizeof se++ + sizeof(sa[se++]) + sizeof(se = 5) + sizeof(++se + 1LL);
     check(2021, sz == 24 && se == 0);
     check(2022, sizeof(s20_bump()) == sizeof(int) && sizeof s20_bump() == 4 && s20_calls == 0);
+    /* A floating value is true when it compares unequal to 0, in a condition and in a
+       conversion to _Bool alike: 0.5 is true, -0.0 false, a NaN true (cc). */
+    double fv[4] = { 0.5, -0.0, 0.0, 0.0 };
+    fv[3] = fv[2] / fv[2];
+    int ft = 0, fk;
+    for (fk = 0; fk < 4; fk++) {
+        double d = fv[fk];
+        float ff = d;
+        _Bool bd = d, bf = ff;
+        if (d) ft += 1;
+        ft = ft * 2 + (ff ? 1 : 0);
+        ft = ft * 2 + (d && 1) + (0 || ff) + !d + bd + bf + (_Bool)d;
+        while (ff) { ft += 100; break; }
+    }
+    _Bool b05 = 0.5, bmz = -0.0;
+    check(2023, ft == 7235 && (0.5 && 1) && (fk || 0.5) && !0.5 == 0 && b05 && !bmz);
     return 0;
 }
 
