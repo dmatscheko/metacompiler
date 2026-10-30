@@ -1105,9 +1105,9 @@ class Date {
 }
 
 // setTimeout / setInterval / clearTimeout / clearInterval. A timer is due `delay`
-// milliseconds (at least 1) after the LOOP TIME, which, as libuv's, is read when the
-// first timer is set and again as each timer runs - so the timers one turn sets are
-// ordered by their delays alone. The engine calls __timerTick once the microtask
+// milliseconds (at least 1) after the LOOP TIME: the clock when the first timer is set,
+// then the due time of the timer running - so timers are ordered by their delays
+// alone, however long the code between them takes. The engine calls __timerTick once the microtask
 // queue is empty: it runs the earliest due timer (the earlier set first among
 // equals) and answers whether one ran. Nothing waits: the clock is moved on to the
 // timer's due time instead (__clockSkew), so the program sees the time pass.
@@ -1167,15 +1167,12 @@ function __timerTick() {
     }
     var tm = __timers[at]
     var now = Date.now()
-    if (tm.__due > now) {
-        __clockSkew = __clockSkew + (tm.__due - now)
-        now = tm.__due
-    }
-    __loopNow = now
+    if (tm.__due > now) { __clockSkew = __clockSkew + (tm.__due - now) }
+    __loopNow = tm.__due
     if (tm.__repeat) {
         __timerSeq = __timerSeq + 1
         tm.__seq = __timerSeq
-        tm.__due = now + tm.__ms
+        tm.__due = tm.__due + tm.__ms
     } else {
         __timers.splice(at, 1)
     }
