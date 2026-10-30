@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-858** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-859** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -112,7 +112,7 @@ not change the renderer.
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-857 kotlin: local fun vs interface default, lambda-param `+=`, nested-class name clash, set CME · P2 · KT · OPEN [V KT worker]
+### T-857 kotlin: local fun vs interface default, lambda-param `+=`, nested-class name clash, set CME · P2 · KT · IN PROGRESS (KT worker, round 5) [V KT worker]
 (1) compiled legs: `class A : M { override fun f() = 1 }; interface M { fun f(): Int; fun g() = f() + 10 }; fun other()
 { fun f() = 9 }; println(A().g())` → interp 11 (right), compiled abort "unknown name: f" (a local fun elsewhere shadows the
 default method's call). (2) all engines: `{ l: MutableList<Int> -> l += 7 }` and `d.let { it += 8 }` do not mutate —
@@ -148,6 +148,12 @@ bash removes `\⏎` before tokenizing; ours does not inside names. bash 5.3 vs o
 splice in VarName / AsgIdent / PeName, or a pre-parse splice that keeps source positions.
 
 # C — C subset
+
+### T-858 c: `<stddef.h>` gives no `offsetof` / `NULL` / `size_t` · P3 · C · OPEN [V C worker]
+`#include <stddef.h>` is accepted and ignored, so `offsetof(struct S, g)` is "function not defined" and a program
+must spell the null-pointer idiom. cc: offsetof is a constant expression (4 for `struct S { char c; int g; }`). Add
+offsetof (constant-folded from the layout, both halves — the interpreter must answer cc's byte offsets, not cell
+counts), NULL, size_t, ptrdiff_t through the built-in header table in c-literals.js.
 
 # CORE — MetaJS, the engines, shared runtime, tooling
 
