@@ -766,11 +766,9 @@ a decision was taken:
 
 - **C**: `sizeof` and `_Alignof` answer `cc`'s padded layout in both halves, and
   the compiled half's storage IS that layout, bit-fields packed into their units,
-  except for a float (an 8-byte cell: a float is carried as a double holding its
-  binary32 value) and a function pointer (a 4-byte funcId) member. So
-  a `char *` difference across a struct holding one differs from `cc`, and
-  `malloc(n * sizeof(T))` of `float` or of such a `T` is too small;
-  identical string literals are not merged
+  a float's four bytes holding its binary32 pattern (its value is carried as a
+  double, converted on each load and store) and a function pointer's eight bytes
+  holding a funcId; identical string literals are not merged
   (unspecified in C); `c-interpreter.abnf` deliberately lacks the varargs `printf`
   family, `exit`/`abort`, `qsort`/`bsearch` and `malloc`/`free` (the compiler's
   native build refuses a call to any function nothing defines, `printf` included,

@@ -15,20 +15,21 @@ is gradual, a NaN operand comes through with its payload and is unordered agains
 everything. cc and this agree BIT FOR BIT over a 90,000-case differential probe
 covering all five of those. A float is carried as a double holding a binary32 value:
 every conversion to float and every float operation rounds through __mec_d2f, like in
-the interpreter. A constant expression still folds at compile time and never reaches a
+the interpreter; its four-byte cell holds the binary32 bit pattern (__mec_f32pack and
+__mec_f32unpack on each store and load). A constant expression still folds at compile time and never reaches a
 helper.
 Pointers compile to real addresses (alloca values), arrays to alloca [N x T] plus
 getelementptr, globals to module globals. Structs become real LLVM struct types:
 member access is a getelementptr with a constant field index, nested structs and
 arrays of structs nest the types, and explicit padding members put every field at
 its alignment, so the built-in IR interpreter (which lays fields out back to back)
-and clang agree on one layout - cc's, unless a member is a float or a function
-pointer. A bit-field shares its storage unit with its neighbours as in cc and is
+and clang agree on one layout - cc's. A bit-field shares its storage unit with its neighbours as in cc and is
 shifted and masked in and out of it. A union is an LLVM struct holding its widest
 member, which every one of its members selects, so they share one address. A
 struct returned by value uses the sret shape
 of a real C ABI: the caller allocates the destination and passes it as a hidden first
-pointer parameter. A function pointer is the callee identifier, an i32; since the
+pointer parameter. A function pointer is the callee identifier, an i32 in an 8-byte
+cell; since the
 built-in IR interpreter has no indirect call, an indirect call goes through a
 generated per-arity trampoline that compares the identifier against every
 address-taken function and calls it directly. || and && short circuit through basic blocks,
@@ -2108,14 +2109,14 @@ KwDefault   = "default" KwEnd ;
     }
     // The size pointer arithmetic steps by: exactly the byte size of ctLTy(ct). The two
     // MUST agree - a gep strides by the LLVM type while a pointer difference divides
-    // by this - or 'p + 1 - p' is not 1. A float (carried in an i64) and a function
-    // pointer (a funcId in an i32) are the cells whose size differs from sizeof.
+    // by this - or 'p + 1 - p' is not 1. It is also sizeof (ctBytes) for every
+    // scalar, so a byte view of an object and a malloc of n * sizeof agree with cc.
     function machBytes(ct) {
         if (ct.k == "ptr") return 8
-        if (ct.k == "flt") return 8      // every float is carried in a double's cell
+        if (ct.k == "flt") return ct.w
         if (ct.k == "struct") return structOf(ct.s).mbytes
         if (ct.k == "arr") return ct.n * machBytes(ct.e)
-        if (ct.k == "fnp") return 4      // a funcId, not an address
+        if (ct.k == "fnp") return 8
         if (ct.k == "void") return 1     // GCC's sizeof(void), and its pointer step
         if (ct.k == "int") return ct.w >= 8 ? 8 : ct.w
         return 4
@@ -2140,8 +2141,9 @@ KwDefault   = "default" KwEnd ;
     // i64 register (see ctRTy) - which is C's own integer promotion - so a narrow cell
     // is extended on every load (loadCt) and truncated on every store (storeTo).
     function ctLTy(ct) {
-        // A floating-point value is its IEEE-754 bit pattern in an i64.
-        if (ct.k == "flt") return llvm.types.I64
+        // A floating-point cell is its IEEE-754 bit pattern: binary64 in an i64,
+        // binary32 in an i32 (loadCt and storeTo convert a float's).
+        if (ct.k == "flt") return ct.w == 4 ? i32 : llvm.types.I64
         // long / long long are real i64 cells (and registers).
         if (ct.k == "int") {
             if (ct.w >= 8) return llvm.types.I64
@@ -2149,10 +2151,11 @@ KwDefault   = "default" KwEnd ;
             if (ct.w == 2) return i16
             return i32
         }
-        // A function-pointer cell holds a funcId, an ordinary i32. `void` is only ever
+        // A function pointer's VALUE is a funcId, an ordinary i32, kept in an
+        // address-sized cell (loadCt truncates, storeTo widens). `void` is only ever
         // reached through a pointer, and its cell is a byte so that GCC's sizeof(void)
         // == 1 and the one-byte step of 'void *p; p + 1' agree with each other.
-        if (ct.k == "fnp") return i32
+        if (ct.k == "fnp") return llvm.types.I64
         if (ct.k == "void") return i8
         if (ct.k == "ptr") return i32p
         if (ct.k == "arr") return llvm.types.NewArray(ct.n, ctLTy(ct.e))
@@ -2185,6 +2188,10 @@ KwDefault   = "default" KwEnd ;
         var t = (lty != undefined) ? lty : ctLTy(ct != undefined ? ct : ctInt)
         var v = b.NewLoad(t, cellAddr(b, t, addr))
         if (llvm.types.Equal(t, i8) || llvm.types.Equal(t, i16)) return promoteCell(b, ct, v)
+        if (ct != undefined && ct.k == "flt" && llvm.types.Equal(t, i32)) {
+            return b.NewCall(softFn("__mec_f32unpack", 1, buildF32Unpack), [b.NewZExt(v, i64)])
+        }
+        if (ct != undefined && ct.k == "fnp" && llvm.types.Equal(t, i64)) return b.NewTrunc(v, i32)
         return v
     }
     // An address typed to hold a cell of type t: a pointer VALUE is the uniform i32*,
@@ -2316,9 +2323,8 @@ KwDefault   = "default" KwEnd ;
     // The machine layout of a struct under construction: its slot types, the byte
     // offset the next one lands at and its alignment so far. An explicit [n x i8] pad
     // slot puts every slot at a multiple of its machAlign and rounds the size up to
-    // the struct's, so llvm.Run's packed layout and clang's natural one coincide - and
-    // a struct without float or function-pointer members lays out exactly as cc's
-    // (cAbiLayout).
+    // the struct's, so llvm.Run's packed layout and clang's natural one coincide, and
+    // both are cc's (cAbiLayout).
     function mPadTo(L, a) {
         L.bits = -1
         if (a > L.align) L.align = a
@@ -2615,7 +2621,7 @@ KwDefault   = "default" KwEnd ;
         if (ct.k != "struct") {
             // kcell, not kct: the zero has to be the width of the CELL, so a char
             // slot is zeroed with an i8 and not with an i32 that would overrun it.
-            b.NewStore(ct.k == "ptr" ? llvm.constant.NewNull(i32p) : (isFlt(ct) ? zero64 : kcell(ct, 0)), addr)
+            b.NewStore(ct.k == "ptr" ? llvm.constant.NewNull(i32p) : kcell(ct, 0), addr)
             return b
         }
         var st = structOf(ct.s)
@@ -3155,6 +3161,54 @@ KwDefault   = "default" KwEnd ;
         return b.NewSelect(isInfOf(b, x), x, res)
     }
     function emitD2F(b, v) { return b.NewCall(softFn("__mec_d2f", 1, buildD2F), [v]) }
+    // A float's binary32 CELL from the double carrying its value, which is already
+    // rounded to binary32 (buildD2F), so this is exact: a normal is rebiased and keeps
+    // its top 23 mantissa bits, a value below 2^-126 (field 897) becomes a binary32
+    // subnormal, shifting one more place per binade, and an infinity or NaN keeps the
+    // top of its payload, a NaN staying quiet. The result is in the low 32 bits.
+    function buildF32Pack(b, f) {
+        var x = f.Params[0]
+        var sg = b.NewShl(b.NewLShr(x, k64(63)), k64(31))
+        var ex = b.NewAnd(b.NewLShr(x, k64(52)), kExpMask)
+        var mn = b.NewAnd(x, kM52)
+        var top = b.NewLShr(mn, k64(29))
+        var normal = b.NewOr(b.NewShl(b.NewSub(ex, k64(896)), k64(23)), top)
+        var sh0 = b.NewSub(k64(926), ex)
+        var sh = b.NewSelect(b.NewICmp(llvm.enum.IPredUGT, sh0, k64(63)), k64(63), sh0)
+        var sub = b.NewLShr(b.NewOr(mn, kB52), sh)
+        var special = b.NewOr(b.NewOr(k64(2139095040), top),
+                              b.NewSelect(b.NewICmp(llvm.enum.IPredNE, mn, zero64), k64(4194304), zero64))
+        var mag = b.NewSelect(b.NewICmp(llvm.enum.IPredUGE, ex, k64(897)), normal, sub)
+        mag = b.NewSelect(b.NewICmp(llvm.enum.IPredEQ, ex, kExpMask), special, mag)
+        return b.NewOr(sg, mag)
+    }
+    function emitF32Pack(b, v) { return b.NewTrunc(b.NewCall(softFn("__mec_f32pack", 1, buildF32Pack), [v]), i32) }
+    // The double a binary32 cell (in the low 32 bits) holds. A binary32 subnormal is a
+    // normal double: its mantissa is shifted until the leading bit reaches bit 23, in
+    // steps of 16, 8, 4, 2 and 1 places, and each place lowers the exponent by one.
+    function buildF32Unpack(b, f) {
+        var y = f.Params[0]
+        var sg = b.NewShl(b.NewAnd(b.NewLShr(y, k64(31)), one64), k64(63))
+        var e8 = b.NewAnd(b.NewLShr(y, k64(23)), k64(255))
+        var m = b.NewAnd(y, k64(8388607))
+        var m29 = b.NewShl(m, k64(29))
+        var normal = b.NewOr(b.NewShl(b.NewAdd(e8, k64(896)), k64(52)), m29)
+        var special = b.NewOr(kInfBits, m29)
+        var t = m
+        var n = zero64
+        var steps = [16, 8, 4, 2, 1]
+        var below = [256, 65536, 1048576, 4194304, 8388608]
+        for (var i = 0; i < steps.length; i++) {
+            var lt = b.NewICmp(llvm.enum.IPredULT, t, k64(below[i]))
+            t = b.NewSelect(lt, b.NewShl(t, k64(steps[i])), t)
+            n = b.NewSelect(lt, b.NewAdd(n, k64(steps[i])), n)
+        }
+        var sub = b.NewOr(b.NewShl(b.NewSub(k64(897), n), k64(52)), b.NewShl(b.NewAnd(t, k64(8388607)), k64(29)))
+        sub = b.NewSelect(b.NewICmp(llvm.enum.IPredEQ, m, zero64), zero64, sub)
+        var mag = b.NewSelect(b.NewICmp(llvm.enum.IPredEQ, e8, zero64), sub, normal)
+        mag = b.NewSelect(b.NewICmp(llvm.enum.IPredEQ, e8, k64(255)), special, mag)
+        return b.NewOr(sg, mag)
+    }
     // int -> double and double -> int through the soft-float helpers.
     function emitI2D(b, ct, v) {
         var uns = ct.k == "int" && ct.u == true
@@ -3812,7 +3866,11 @@ KwDefault   = "default" KwEnd ;
     function storeTo(b, ct, addr, v) {
         // The ADDRESS is typed to the cell too: a place reached through '*p' is the
         // uniform i32*, and llir refuses an i64 store into it.
-        if (ct != undefined && isFlt(ct)) { b.NewStore(v, cellAddr(b, llvm.types.I64, addr)); return v }
+        if (ct != undefined && isFlt(ct)) {
+            if (ct.w == 4) { b.NewStore(emitF32Pack(b, v), cellAddr(b, i32, addr)); return v }
+            b.NewStore(v, cellAddr(b, llvm.types.I64, addr))
+            return v
+        }
         if (llvm.types.IsPointer(v.Type())) {
             v = b.NewBitCast(v, i32p)
         } else if (ct != undefined && ct.k == "ptr") {
@@ -3829,6 +3887,9 @@ KwDefault   = "default" KwEnd ;
                        : (ct.u == true ? b.NewZExt(v, lt) : b.NewSExt(v, lt))
             }
             addr = cellAddr(b, lt, addr)
+        } else if (ct != undefined && ct.k == "fnp" && !llvm.types.IsPointer(v.Type())) {
+            if (!llIs64(v)) { cell = b.NewZExt(v, i64) }
+            addr = cellAddr(b, i64, addr)
         } else if (llvm.types.IsPointer(cell.Type())) {
             addr = cellAddr(b, i32p, addr)   // a pointer cell reached through '*pp'
         }
@@ -4526,13 +4587,13 @@ KwDefault   = "default" KwEnd ;
                 declVar(params[i].name, {val: a, arr: false, ct: pct})
                 continue
             }
-            // The signature passes a narrow integer promoted (i32), but the SLOT is a cell
-            // of the declared width (an i8 for a char), like every other store/load of it.
-            // A double parameter is an i64 bit pattern, as in getFunc's signature.
+            // The signature passes a narrow integer promoted (i32) and a float as a
+            // double's i64, but the SLOT is a cell of the declared type (an i8 for a
+            // char, a binary32 for a float), like every other store/load of it.
             var pty = params[i].ptr ? i32p
                       : ((pct != undefined && (pct.k == "flt" || (pct.k == "int" && pct.w >= 8)))
                          ? llvm.types.I64 : i32)
-            var cty = (!params[i].ptr && pct != undefined && pct.k == "int" && pct.w < 4)
+            var cty = (!params[i].ptr && pct != undefined && ((pct.k == "int" && pct.w < 4) || pct.k == "flt" || pct.k == "fnp"))
                       ? ctLTy(pct) : pty
             var ptr = b.NewAlloca(cty)
             // Narrowing here is also the conversion C11 6.5.2.2p7 requires of an
@@ -4541,7 +4602,9 @@ KwDefault   = "default" KwEnd ;
             // f(3) with '_Bool b' sees 1 (C11 6.3.1.2, applied by 6.5.2.2p7).
             var pv = f.Params[i + off]
             if (pct != undefined && pct.bool == true) { pv = emitConv(b, pct, pv, pct) }
-            b.NewStore(llvm.types.Equal(cty, pty) ? pv : b.NewTrunc(pv, cty), ptr)
+            if (!params[i].ptr && pct != undefined && pct.k == "flt" && pct.w == 4) { pv = emitF32Pack(b, pv) }
+            if (!params[i].ptr && pct != undefined && pct.k == "fnp") { pv = b.NewZExt(pv, i64) }
+            b.NewStore(llvm.types.Equal(cty, pv.Type()) ? pv : b.NewTrunc(pv, cty), ptr)
             declVar(params[i].name, {val: ptr, arr: false, ty: cty, load: cty, ct: pct})
         }
         b = bodyT(b)

@@ -28,6 +28,21 @@ struct Mixed { char c; int x : 4; char d; int y : 12; short s : 3; };
 struct Wide { signed a : 3; unsigned b : 5; _Bool f : 1; _Bool g : 1; long l : 40; long m : 30; };
 struct Zero { char a; char b : 4; char d : 6; unsigned : 0; char e; };
 union UB { unsigned a : 3; signed b : 5; int i; };
+/* A float is four bytes holding its binary32 pattern, a function pointer eight. */
+struct FS { char c; float f; short s; float g; };
+struct FN { char c; int (*fn)(int); float f; };
+int twice(int x) { return 2 * x; }
+unsigned fbits(float f) {
+    unsigned char *b = (unsigned char *)&f;
+    return b[0] | b[1] << 8 | b[2] << 16 | (unsigned)b[3] << 24;
+}
+float frombits(unsigned u) {
+    float f;
+    unsigned char *b = (unsigned char *)&f;
+    b[0] = u; b[1] = u >> 8; b[2] = u >> 16; b[3] = u >> 24;
+    return f;
+}
+double fvals[] = { -1.5, 3.4028234663852886e38, 1.1754942106924411e-38, 1.401298464324817e-45, 1e39, 0.1 };
 
 int main(void) {
     struct Pad p;
@@ -69,6 +84,24 @@ int main(void) {
     int i1 = u.i;
     u.b = -1;
     check(i1 == 7 && u.i == 31 && u.a == 7 && sizeof u == 4);
+
+    float *fa = malloc(6 * sizeof(float));
+    for (int i = 0; i < 6; i++) fa[i] = (float)fvals[i];
+    check(sizeof(float) == 4 && (char *)&fa[5] - (char *)fa == 20 && fbits(fa[0]) == 0xbfc00000u
+          && fbits(fa[1]) == 0x7f7fffffu && fbits(fa[2]) == 0x007fffffu && fbits(fa[3]) == 1u
+          && fbits(fa[4]) == 0x7f800000u && fbits(fa[5]) == 0x3dcccccdu && fa[5] * 2 == 0.2f);
+    float sub = frombits(0x00012345u), nan = frombits(0x7fc12345u), mz = frombits(0x80000000u);
+    check(sub > 0 && sub * 0x1p149 == 0x12345 && fbits(-sub) == 0x80012345u && nan != nan
+          && fbits(nan) == 0x7fc12345u && 1 / mz < 0 && fbits(mz) == 0x80000000u);
+    struct FS *fs = malloc(3 * sizeof(struct FS));
+    for (int i = 0; i < 3; i++) { fs[i].c = i; fs[i].f = i + 0.5f; fs[i].s = 10 * i; fs[i].g = -i * 0.25f; }
+    check(sizeof(struct FS) == 16 && (char *)&fs[0].g - (char *)&fs[0] == 12 && fs[2].f == 2.5f
+          && fs[2].s == 20 && fs[2].g == -0.5f && fs[1].c == 1 && fbits(fs[1].f) == 0x3fc00000u);
+    struct FN *fn = malloc(2 * sizeof(struct FN));
+    fn[1].c = 7; fn[1].fn = twice; fn[1].f = 1.25f;
+    struct FN fc = fn[1];
+    check(sizeof(struct FN) == 24 && (char *)&fn[1].f - (char *)&fn[0] == 40 && fn[1].fn(21) == 42
+          && fc.fn(4) == 8 && fc.f == 1.25f && fc.c == 7);
 
     putchar('0' + nchecks / 10); putchar('0' + nchecks % 10);
     putchar(' '); putchar('c'); putchar('h'); putchar('e'); putchar('c'); putchar('k');
