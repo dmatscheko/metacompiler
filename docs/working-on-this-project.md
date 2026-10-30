@@ -835,9 +835,8 @@ shape; an uncaught `__dexc` in the compiler half prints `bad` rather than
 `FormatException: bad` (the handler is `runJSModule` in the shared `abnf/jsrt.go`).
 **Bash** the compiler's attribute scope is LEXICAL where bash's is dynamic (so a
 function's prefix binding `n=4 f` still takes `n`'s `-i`/`-u`/`-l` inside `f`
-there); `readonly` is enforced on assignments, prefix bindings, declarations,
-`unset` and `for`, not on `read`, `printf -v`, `mapfile`, `let`/`(( ))` or
-`${v:=w}`.
+there); so is `readonly`, which the compiler therefore cannot enforce on an
+arithmetic expression it only meets at run time (`e=ro=5; let "$e"`, `$(( $e ))`).
 
 Per-language divergences from real toolchains, recorded and permanent: a Go
 string is its BYTES under llvm.Run and natively (the floor's cell holds UTF-8, and

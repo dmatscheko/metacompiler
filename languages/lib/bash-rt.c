@@ -5285,6 +5285,10 @@ int rt_mf_begin(char *who, char *nm, char *dlm, char *cnt, char *org, char *skp,
         rt_berr(who, rt_strcat(rt_strcat("`", nm), "'"), "not a valid identifier");
         return 1;
     }
+    if ((at & 8) != 0) {
+        rt_berr("", nm, "readonly variable");
+        return 1;
+    }
     if (rt_isassoc(nm) != 0) {
         rt_berr(who, nm, "not an indexed array");
         return 1;
@@ -5300,7 +5304,7 @@ int rt_mf_begin(char *who, char *nm, char *dlm, char *cnt, char *org, char *skp,
     mf_nm = nm;
     mf_dlm = dlm != 0 ? (int)(unsigned char)dlm[0] : 10;
     mf_trim = trim;
-    mf_at = at;
+    mf_at = at & 7;
     mf_q = q;
     mf_pfx = rt_streq(who, "readarray") != 0 ? "readarray: " : "mapfile: ";
     mf_left = -1;

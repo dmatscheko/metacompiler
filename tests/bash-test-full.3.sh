@@ -1318,6 +1318,27 @@ s80() {
   r=$( { s80r; echo "$m"; m=3; echo "$m"; } 2>/dev/null ); check gd8 "${r//$'\n'/,}" "2,9"
   r=$(d=0; s80o; echo "$d"); check gd9 "${r//$'\n'/,}" "2,1,7"
 }
+# ===== SECTION 81: readonly names under read, printf -v, mapfile, let, (( )), ${v:=w} =====
+# A readonly name refuses every store a builtin or an expansion makes: read fails with 1
+# at the array or the last name and 2 at REPLY or an earlier one (stopping there), its line
+# still consumed; printf -v and mapfile fail with 1; let and (( )) fail as an arithmetic
+# error does (the stores before it stay), $(( )) and ${v:=w} abandon the line.
+s81() {
+  local -r ro=1
+  local -r u
+  local a=0 q=0 w=0 x
+  r=$( { read -r a ro <<< "p q"; echo "$? $a $ro"; } 2>/dev/null ); check rr1 "$r" "1 p 1"
+  r=$( { read -r ro a <<< "p q"; echo "$? $a $ro"; } 2>/dev/null ); check rr2 "$r" "2 0 1"
+  r=$( { read -r ro a < /dev/null; echo "$? $a $ro"; } 2>/dev/null ); check rr3 "$r" "2 0 1"
+  r=$( { { read -a ro; read -r x; } <<< $'a\nb'; echo "$? $x $ro"; } 2>/dev/null ); check rr4 "$r" "0 b 1"
+  r=$( { printf -v ro '%s' y; echo "$? $ro"; } 2>/dev/null ); check rr5 "$r" "1 1"
+  r=$( { mapfile -t ro <<< z; echo "$? $ro"; } 2>/dev/null ); check rr6 "$r" "1 1"
+  r=$( { let "q=2" ro=5 "w=3"; echo "$? $q $w $ro"; } 2>/dev/null ); check rr7 "$r" "1 2 0 1"
+  r=$( { (( q=4, ro++, w=6 )); echo "$? $q $w $ro"; } 2>/dev/null ); check rr8 "$r" "1 4 0 1"
+  r=$( { echo "$(( ro = 7 ))"; echo no; } 2>/dev/null ); check rr9 "$r|$?" "|1"
+  r=$( { : "${u:=9}"; echo no; } 2>/dev/null ); check rr10 "$r|$?|${u-unset}" "|1|unset"
+  r=$( { : "${ro:=9}"; echo "$? $ro"; } 2>/dev/null ); check rr11 "$r" "0 1"
+}
 # ===== END SECTIONS =====
 
 s47   # SECTION-CALL 47
@@ -1353,5 +1374,6 @@ s77   # SECTION-CALL 77
 s78   # SECTION-CALL 78
 s79   # SECTION-CALL 79
 s80   # SECTION-CALL 80
+s81   # SECTION-CALL 81
 echo "full: $checks checks, $fails failures"
 exit $fails

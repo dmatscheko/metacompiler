@@ -2739,7 +2739,13 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (o == "-") { return blank ? dfltWord(wordT) : v }
             if (o == "+") { return blank ? "" : dfltWord(wordT) }
             if (o == "=") {
-                if (blank) { var d = (wordT != null) ? wordJoin(wordT()) : ""; if (tn != null) { d = storeAttr(tn, d) }; return d }
+                if (blank) {
+                    var d = (wordT != null) ? wordJoin(wordT()) : ""
+                    // A readonly NAME abandons the line, as an expansion error does.
+                    if (tn != null && roRefused(tn, "")) { arithErr = true; return "" }
+                    if (tn != null) { d = storeAttr(tn, d) }
+                    return d
+                }
                 return v
             }
             if (o == "?") {
@@ -4278,6 +4284,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function arLhsGet(name, key) { return arEval((key != null) ? scGet(name, key) : getVarVal(name)) }
     function arLhsSet(name, key, v) {
         if (arithErr) { return }
+        // A readonly name is an arithmetic error: (( )) and let fail, $(( )) abandons the line.
+        if (roRefused(name, "")) { arithErr = true; return }
         if (key != null) { arrSet(name, key, numToStr(v)) } else { setVarVal(name, numToStr(v)) }
     }
     // An arithmetic error: bash reports it on standard error and abandons the command, so
@@ -4557,6 +4565,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     function arStore(nm, key, v) {
         if (arNoeval > 0 || arithErr) { return v }
+        if (roRefused(nm, "")) { arBad = true; arithErr = true; return v }
         if (key != null) { arrSet(nm, key, numToStr(v)) } else { setVarVal(nm, numToStr(v)) }
         return v
     }
@@ -5678,6 +5687,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         var res = normBytes(pf.e)
         if (dest != null) {
+            if (roRefused(dest, "")) { return 1 }
             var svp = arPfx
             arPfx = "printf: "
             storeAttr(dest, cutNul(res))
@@ -5785,6 +5795,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (o.s != null && (skp == null || skp < 0)) { emitErr("bash: " + who + ": " + o.s + ": invalid line count\n"); return 1 }
         if (o.c != null && (qn == null || qn <= 0)) { emitErr("bash: " + who + ": " + o.c + ": invalid callback quantum\n"); return 1 }
         if (!isIdentText(nm)) { emitErr("bash: " + who + ": `" + nm + "': not a valid identifier\n"); return 1 }
+        if (roRefused(nm, "")) { return 1 }
         if (assocFact(nm, false)) { emitErr("bash: " + who + ": " + nm + ": not an indexed array\n"); return 1 }
         if (o.O == null) { unsetVar(nm); arrNew(nm, false) } else { arrAdopt(nm); arrEnsure(nm, false) }
         arrs[arrKey(nm)].lit = true
@@ -5903,9 +5914,16 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             else { names.push(a) }
             i = i + 1
         }
+        // A readonly target, once the line is read: the array or the last name fails the
+        // read (status 1), REPLY or an earlier name stops it there (2), bash 5.3.
         if (stdinPos >= stdinBuf.length) {
+            if (arrName != null && roRefused(arrName, "")) { return 1 }
+            if (arrName == null && names.length == 0 && roRefused("REPLY", "")) { return 2 }
             var z
-            for (z = 0; z < names.length; z++) { storeAttr(names[z], "") }
+            for (z = 0; z < names.length; z++) {
+                if (roRefused(names[z], "")) { return (z < names.length - 1) ? 2 : 1 }
+                storeAttr(names[z], "")
+            }
             // At end of file bash CLEARS what it would have set, REPLY included:
             // `REPLY=keep; read -r </dev/null; echo "[$REPLY]"` prints [].
             if (arrName == null && names.length == 0) { setVarVal("REPLY", "") }
@@ -5916,6 +5934,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         while (e < stdinBuf.length && stdinBuf.charAt(e) != "\n") { e = e + 1 }
         var line = stdinBuf.slice(stdinPos, e)
         stdinPos = (e < stdinBuf.length) ? (e + 1) : e
+        if (arrName != null && roRefused(arrName, "")) { return 1 }
+        if (arrName == null && names.length == 0 && roRefused("REPLY", "")) { return 2 }
         var rec = splitIFSRec(line)
         var fields = rec.f
         if (arrName != null) {
@@ -5930,11 +5950,13 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var svp2 = arPfx
         arPfx = "read: "
         var k
+        var rst = 0
         for (k = 0; k < names.length && !arithErr; k++) {
+            if (roRefused(names[k], "")) { rst = (k < names.length - 1) ? 2 : 1; break }
             storeAttr(names[k], (k == names.length - 1) ? readRest(line, rec, k) : ((k < fields.length) ? fields[k] : ""))
         }
         arPfx = svp2
-        return 0
+        return rst
     }
     // WHAT THE LAST NAME OF A `read` GETS, which is not "the remaining fields joined":
     // `IFS=: read -r a b <<< "p::q:r:"` gives b=":q:r:" and `read -r a b <<< "  x   y   z  "`

@@ -2446,8 +2446,14 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 // the default is stored under the name's attributes, and expands as stored
                 var setB = curF.NewBlock(""), joinB = curF.NewBlock("")
                 b.NewCondBr(blank, setB, joinB)
-                var sb = emitStoreAttr(setB, name, d)
-                var stored = sb.NewCall(rtGetByName, gepStr(sb, name))
+                var sb = setB
+                var stored = d
+                // A readonly name abandons the line, as an expansion error does.
+                if (roRefused(sb, name, "")) { sb.NewStore(one, gArithErr) }
+                else {
+                    sb = emitStoreAttr(setB, name, d)
+                    stored = sb.NewCall(rtGetByName, gepStr(sb, name))
+                }
                 sb.NewBr(joinB)
                 picked = joinB.NewPhi([llvm.ir.NewIncoming(stored, sb), llvm.ir.NewIncoming(v, b)])
                 b = joinB
@@ -2932,7 +2938,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function arLhsSet(b, name, k, v) {
         var st = curF.NewBlock(""), jb = curF.NewBlock("")
         b.NewCondBr(b.NewICmp(llvm.enum.IPredEQ, b.NewLoad(i32, gArithErr), zero), st, jb)
-        if (k == null) { storeVar(st, name, st.NewCall(rtInt2str, v)) }
+        // A readonly name is an arithmetic error: (( )) and let fail, $(( )) abandons the line.
+        if (roRefused(st, name, "")) { st.NewStore(one, gArithErr) }
+        else if (k == null) { storeVar(st, name, st.NewCall(rtInt2str, v)) }
         else {
             var setF = hasOwn(assocArrays, "$" + name) ? rtArrSet : rtArrIset
             st.NewCall(setF, [gepStr(st, name), k, st.NewCall(rtInt2str, v)])
@@ -4449,6 +4457,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         b = emitAbortCheck(b)
         var out = b.NewCall(rtPrintf, [rf.v, listV])
+        if (dest != null && roRefused(b, dest, "")) { storeStatusI(b, 1); return b }
         if (dest != null) {
             b.NewStore(gepStr(b, "printf: "), gArPfx)
             b = emitAssign(b, {name: dest, op: "=", idxT: null, lit: null, valT: doneWord(b.NewCall(rtPfValue, out))}, false, mk)
@@ -4479,14 +4488,24 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // One name is the read's only store: what the read allocated besides goes back.
         var mk = (arrName == null && names.length == 1) ? ((cmk != null) ? cmk : heapMark(b)) : null
         var line = b.NewCall(rtReadLine, zero)
+        // A readonly target, once the line is read: the array or the last name fails the
+        // read (status 1), REPLY or an earlier name stops it there (2), bash 5.3. Twin of
+        // readBuiltin in bash-interpreter.abnf.
+        if ((arrName != null && roRefused(b, arrName, "")) || (rawReply && roRefused(b, "REPLY", ""))) {
+            storeStatusI(b, rawReply ? 2 : 1)
+            return b
+        }
+        var roK = names.length
+        var k
+        for (k = 0; k < names.length && roK == names.length; k++) { if (attrOn(roVars, names[k])) { roK = k } }
         var eof = b.NewICmp(llvm.enum.IPredNE, b.NewLoad(i32, gReadEof), zero)
         var eofB = curF.NewBlock(""), okB = curF.NewBlock(""), merge = curF.NewBlock("")
         b.NewCondBr(eof, eofB, okB)
-        var k
-        for (k = 0; k < names.length; k++) { eofB = emitStoreAttr(eofB, names[k], emptyPtr(eofB)) }
+        for (k = 0; k < roK; k++) { eofB = emitStoreAttr(eofB, names[k], emptyPtr(eofB)) }
+        if (roK < names.length) { roRefused(eofB, names[roK], "") }
         if (rawReply) { storeVar(eofB, "REPLY", emptyPtr(eofB)) }
         if (arrName != null) { eofB.NewCall(rtArrClear, gepStr(eofB, arrName)) }
-        eofB.NewStore(one, gStatus)
+        storeStatusI(eofB, (roK < names.length - 1) ? 2 : 1)
         eofB.NewBr(merge)
         var ifsRaw = loadVar(okB, "IFS")
         var ifs = okB.NewSelect(okB.NewICmp(llvm.enum.IPredEQ, ifsRaw, unsetPtr(okB)), gepStr(okB, " \t\n"), ifsRaw)
@@ -4505,13 +4524,14 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (rawReply) { storeVar(okB, "REPLY", line) }
         // An -i name's arithmetic error abandons the line: the names after it keep their values.
         okB.NewStore(gepStr(okB, "read: "), gArPfx)
-        for (k = 0; k < names.length; k++) {
+        for (k = 0; k < roK; k++) {
             var isLast = (k == names.length - 1) ? 1 : 0
             var fv = okB.NewCall(rtField, [line, ifs, llvm.constant.NewInt(i32, k), llvm.constant.NewInt(i32, isLast)])
             okB = emitAssign(okB, {name: names[k], op: "=", idxT: null, lit: null, valT: doneWord(fv)}, false, mk)
         }
+        if (roK < names.length) { roRefused(okB, names[roK], "") }
         okB.NewStore(emptyPtr(okB), gArPfx)
-        okB.NewStore(zero, gStatus)
+        storeStatusI(okB, (roK == names.length) ? 0 : ((roK < names.length - 1) ? 2 : 1))
         okB.NewBr(merge)
         return merge
     }
@@ -4570,7 +4590,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             ops.push(rw.v)
         }
         b = emitAbortCheck(b)
-        var at = isIdentText(name) ? elemAttrs(name) : 0
+        // 8: the name is readonly, which rt_mf_begin reports once the options pass.
+        var at = isIdentText(name) ? elemAttrs(name) + (attrOn(roVars, name) ? 8 : 0) : 0
         ops.push(llvm.constant.NewInt(i32, trim))
         ops.push(llvm.constant.NewInt(i32, at))
         var st = b.NewCall(rtMfBegin, ops)
