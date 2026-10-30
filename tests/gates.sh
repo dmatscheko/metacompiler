@@ -5,8 +5,8 @@
 #
 # Green means every gate, including the output greps and the RECORDED NUMBERS
 # below (FULL_ASSERTIONS, FULL_GAPS, SHAPE_GROUPS, MATRIX_ENTRIES, LINT_FINDINGS,
-# PROBE_CASES): a gate that prints a smaller number without complaining is worse
-# than no gate.
+# CROSS_PROGRAMS, NATIVE_PROGRAMS, PROBE_CASES): a gate that prints a smaller
+# number without complaining is worse than no gate.
 # ./test.sh, --full and --cross run llvm.Run, which resolves js_* to the Go twin,
 # so they cannot see layer 2 (languages/lib/*-rt.metajs); only clang-check,
 # native-full and a native -exe probe can.
@@ -31,8 +31,9 @@
 # The gates run concurrently. That is safe because no two write the same path:
 # test.sh and clang-check build their own binaries and work in mktemp dirs (the
 # matrix's only in-repo writes are the -exe targets in .vscode/launch.json);
-# native-full only reads ./mec, which is built once before the fan-out; the probe
-# self-test writes only tests/.probe-selftest-sabotage.sh, which nothing else
+# native-full and the probe self-test only read ./mec: it is built before the
+# fan-out, so their own `go build` finds it up to date and writes nothing; the
+# probe self-test writes only tests/.probe-selftest-sabotage.sh, which nothing else
 # reads; gen-all --check, go test, shape-scan and metajs-lint write nothing.
 #
 # Exit 0 iff every gate that ran passed.
@@ -96,6 +97,16 @@ ABORT_ROWS=29             # rows whose name says SHOULD ABORT
 ABORT_ALL_ROWS=28         # of those, the ones that also compare the interpreter
                           # half (ALL HALVES)
 
+# A FLOOR on the program pairs ./test.sh --cross compares. A pair that is killed
+# or leaves no verdict is subtracted from that count, and a deleted test program
+# shrinks it, so "0 divergent" alone can be over a smaller set.
+CROSS_PROGRAMS=132
+
+# A FLOOR on the programs tests/native-full.sh builds and runs natively. Its
+# table of ratchet parts is hand-written, so a new part it does not list, or a
+# row it skips, would otherwise leave this number smaller and the gate green.
+NATIVE_PROGRAMS=59
+
 # A FLOOR on tests/probe/selftest.sh's cases: a deleted sabotage case leaves the
 # self-test green while it proves less.
 PROBE_CASES=14
@@ -158,12 +169,16 @@ wait
 #    about SIZE, so the recorded counts above are checked here too.
 m=$(grep -E '^matrix: ' "$log/matrix" | tail -1)
 me=$(printf '%s\n' "$m" | sed -n 's/^matrix: \([0-9][0-9]*\) entries run.*/\1/p')
-ar=$(grep -c '"name": ".*SHOULD ABORT' .vscode/launch.json)
-aa=$(grep -c '"name": ".*SHOULD ABORT.*ALL HALVES' .vscode/launch.json)
-if ! grep -q '^all green' "$log/matrix"; then
-    fail matrix "${m:-NO SUMMARY} - see $log/matrix"; cp "$log/matrix" /tmp/gates-matrix.log
+mp=$(printf '%s\n' "$m" | sed -n 's/.* - \([0-9][0-9]*\) passed.*/\1/p')
+# Rows, not the "-----" separators, whose prose may quote the tokens.
+ar=$(grep -c '"name": "[^-].*SHOULD ABORT' .vscode/launch.json)
+aa=$(grep -c '"name": "[^-].*SHOULD ABORT.*ALL HALVES' .vscode/launch.json)
+if [ "$(rc_of matrix)" != 0 ] || ! grep -q '^all green' "$log/matrix"; then
+    fail matrix "${m:-NO SUMMARY} (exit $(rc_of matrix)) - see $log/matrix"; cp "$log/matrix" /tmp/gates-matrix.log
 elif [ -z "$me" ]; then
     fail matrix "all green, but NO ENTRY COUNT in the summary - the run did not finish"
+elif [ "${mp:-0}" -ne "$me" ]; then
+    fail matrix "$m - only ${mp:-no} of the $me entries run PASSED: a row that leaves no verdict is not a pass"
 elif [ "$me" -lt "$MATRIX_ENTRIES" ]; then
     fail matrix "$m - SHORT: $((MATRIX_ENTRIES - me)) rows FEWER than the recorded $MATRIX_ENTRIES. A smaller suite is not a green one."
 elif [ "$ar" -lt "$ABORT_ROWS" ] || [ "$aa" -lt "$ABORT_ALL_ROWS" ]; then
@@ -212,11 +227,21 @@ else
 fi
 
 # 3. The two halves of each language, diffed against each other.
+#    The exit status as well as the text: a killed pair is not compared, and the
+#    run then still says ", 0 divergent" over the pairs that were.
 c=$(grep -E 'programs compared' "$log/cross" | tail -1)
-case "$c" in
-    *", 0 divergent"*) pass --cross "$c" ;;
-    *) fail --cross "${c:-no summary}" ;;
-esac
+cn=$(printf '%s\n' "$c" | sed -n 's/^\([0-9][0-9]*\) programs compared.*/\1/p')
+if [ "$(rc_of cross)" != 0 ]; then
+    fail --cross "${c:-no summary} (exit $(rc_of cross)): $(grep -E 'WERE KILLED|NO VERDICT' "$log/cross" | head -2 | tr '\n' ' ')"
+elif case "$c" in *", 0 divergent"*) false ;; *) true ;; esac; then
+    fail --cross "${c:-no summary}"
+elif [ -z "$cn" ] || [ "$cn" -lt "$CROSS_PROGRAMS" ]; then
+    fail --cross "$c - SHORT: fewer than the recorded $CROSS_PROGRAMS programs compared"
+elif [ "$cn" -gt "$CROSS_PROGRAMS" ]; then
+    pass --cross "$c (over the recorded $CROSS_PROGRAMS - RAISE CROSS_PROGRAMS in tests/gates.sh)"
+else
+    pass --cross "$c"
+fi
 
 # 4. Go-side unit tests.
 if [ "$(rc_of gotest)" = 0 ]; then pass "go test" "$(tail -1 "$log/gotest")"
@@ -294,8 +319,19 @@ if [ "$QUICK" = 0 ]; then
     else fail clang-check "$ok agreeing of $CLANG_MODULES expected, $held held, rc=$crc - copied to /tmp/gates-clang.log"; cp "$log/clang" /tmp/gates-clang.log; fi
 
     nf=$(grep -E 'languages, every native binary|native binaries' "$log/native" | tail -1)
-    if grep -q 'every native binary exits 0 with 0 failures' "$log/native"; then pass native-full "$nf"
-    else fail native-full "${nf:-see $log/native}"; cp "$log/native" /tmp/gates-native.log; fi
+    np=$(sed -n 's/^\([0-9][0-9]*\) native programs run.*/\1/p' "$log/native" | tail -1)
+    nh=$(sed -n 's/^[0-9][0-9]* native programs run.*, \([0-9][0-9]*\) rows held.*/\1/p' "$log/native" | tail -1)
+    if [ "$(rc_of native)" != 0 ] || ! grep -q 'every native binary exits 0 with 0 failures' "$log/native"; then
+        fail native-full "${nf:-see $log/native}"; cp "$log/native" /tmp/gates-native.log
+    elif [ "${nh:-1}" != 0 ]; then
+        fail native-full "${nh:-?} row(s) HELD - a held row runs nothing natively; copied to /tmp/gates-native.log"; cp "$log/native" /tmp/gates-native.log
+    elif [ -z "$np" ] || [ "$np" -lt "$NATIVE_PROGRAMS" ]; then
+        fail native-full "${np:-no} native programs run, fewer than the recorded $NATIVE_PROGRAMS"; cp "$log/native" /tmp/gates-native.log
+    elif [ "$np" -gt "$NATIVE_PROGRAMS" ]; then
+        pass native-full "$nf ($np programs, over the recorded $NATIVE_PROGRAMS - RAISE NATIVE_PROGRAMS in tests/gates.sh)"
+    else
+        pass native-full "$nf ($np programs)"
+    fi
 else
     printf '  %-24s %s\n' "clang-check" "SKIPPED (--quick)"
     printf '  %-24s %s\n' "native-full" "SKIPPED (--quick)"

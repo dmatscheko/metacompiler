@@ -84,7 +84,9 @@
 # regression hides behind it. Same mechanism and same reasoning as
 # `clang-check: native-row-held` in tests/clang-check.sh. Put it in a COMMENT and
 # nowhere else - a stray `; native-full: ...` at grammar top level is not a
-# comment, it is a rule, and the grammar then fails to parse at all.
+# comment, it is a rule, and the grammar then fails to parse at all. A held row
+# runs nothing natively, so tests/gates.sh demands 0 held rows: a hold keeps
+# this script's exit 0 while the work is in progress, never the gate green.
 #
 # Usage: tests/native-full.sh [lang ...]        (default: every language)
 #        MEC_JOBS=4 tests/native-full.sh        cap the fan-out
@@ -96,6 +98,11 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT" || exit 2
 . tests/lib/guard.sh
 RUN_TIMEOUT="${MEC_RUN_TIMEOUT:-300}"
+
+# Always rebuild: an edit to abnf/*.go or a Go twin is otherwise measured with
+# the previous binary. go build is incremental and leaves an up-to-date ./mec
+# untouched.
+go build -o mec . || { echo "native-full.sh: build failed" >&2; exit 2; }
 
 OUT="$(mktemp -d)"
 trap 'guard_reap; rm -rf "$OUT"' EXIT
@@ -259,8 +266,8 @@ for row in $ROWS; do
         # A kind that names its own extension is the file name as it stands.
         [ -f "$f" ] || [ ! -f "tests/$L-test-$kind" ] || f="tests/$L-test-$kind"
         if [ ! -f "$f" ]; then
-            printf "%-20s %-6s %s\n" "$L/$kind" "-" "no $f" > "$OUT/$L.$kind.row"
-            echo skip > "$OUT/$L.$kind.rc"
+            printf "%-20s %-6s %s\n" "$L/$kind" "-" "FAIL: no $f - the table names it, so it must exist" > "$OUT/$L.$kind.row"
+            echo 1 > "$OUT/$L.$kind.rc"
             continue
         fi
         if [ "$kind" = features ] &&
@@ -291,8 +298,8 @@ for row in $EXPECT_ROWS; do
     fi
     expects="$expects $L:$kind"
     if [ ! -f "$f" ]; then
-        printf "%-20s %-6s %s\n" "$L/$kind" "-" "no $f" > "$OUT/$L.$kind.row"
-        echo skip > "$OUT/$L.$kind.rc"
+        printf "%-20s %-6s %s\n" "$L/$kind" "-" "FAIL: no $f - the table names it, so it must exist" > "$OUT/$L.$kind.row"
+        echo 1 > "$OUT/$L.$kind.rc"
         continue
     fi
     if [ "$running" -ge "$JOBS" ]; then wait -n 2>/dev/null || wait; running=$((running - 1)); fi
@@ -300,6 +307,32 @@ for row in $EXPECT_ROWS; do
     running=$((running + 1))
 done
 wait
+
+# The two tables are hand-written, so a ratchet part or feature file neither
+# names would never be run natively and nothing would say so. Each one is a
+# failing row until the table lists it.
+unlisted=""
+for f in tests/*-test-full.* tests/*-test-features.*; do
+    [ -f "$f" ] || continue
+    L="${f#tests/}"; L="${L%%-test-*}"
+    if [ -n "$WANT" ]; then
+        case " $WANT " in *" $L "*) ;; *) continue;; esac
+    fi
+    case " $(echo $EXPECT_ROWS) " in *":$f:"*) continue ;; esac
+    k="${f#tests/$L-test-}"
+    listed=0; e=""
+    for row in $ROWS; do
+        [ "${row%%:*}" = "$L" ] || continue
+        rest="${row#*:}"; e="${rest%%:*}"
+        case "$rest" in *:*) kinds="${rest#*:}" ;; *) kinds="full,features" ;; esac
+        case ",$kinds," in *",${k%.$e},"*|*",$k,"*) listed=1 ;; esac
+    done
+    [ "$listed" = 1 ] && continue
+    printf "%-20s %-6s %s\n" "$L/${k%.$e}" "-" "FAIL: $f is in neither ROWS nor EXPECT_ROWS, so it never runs natively" \
+           > "$OUT/$L.unlisted-$k.row"
+    echo 1 > "$OUT/$L.unlisted-$k.rc"
+    unlisted="$unlisted $L:unlisted-$k"
+done
 
 # --- report, in a fixed order regardless of completion order ------------------
 rc=0
@@ -330,6 +363,7 @@ for pair in $expects; do
     case " $seen " in *" $L "*) ;; *) seen="$seen $L"; langs_run=$((langs_run + 1)) ;; esac
     tally "$L" "${pair##*:}"
 done
+for pair in $unlisted; do tally "${pair%%:*}" "${pair#*:}"; done
 printf -- "------------------------------------------------------------------\n"
 printf "%d native programs run (ratchet + feature matrix + fixtures), %d rows held, %d jobs\n" \
        "$progs" "$held" "$JOBS"
