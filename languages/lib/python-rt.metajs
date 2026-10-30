@@ -4952,21 +4952,11 @@ function js_pybin(opv, l, r) {
     }
     if (op == "+") {
         // Two sequences CONCATENATE in Python ([1] + [2] is [1, 2]), which is not
-        // what jsAdd does.
+        // what jsAdd does. The floor's concat copies both in one call; a push per
+        // element would be a method call, and an argument array, per element.
         if (pyIsArr(l) && pyIsArr(r)) {
             if (pySeqCls(l) != pySeqCls(r)) { pyAAddCheck(l, r) }
-            var out = []
-            var i = 0
-            while (i < l.length) {
-                out.push(l[i])
-                i = i + 1
-            }
-            var j = 0
-            while (j < r.length) {
-                out.push(r[j])
-                j = j + 1
-            }
-            return pySeqLike(l, out)
+            return pySeqLike(l, l.concat(r))
         }
         if (typeof l == "number" && typeof r == "number") {
             var nadd = l + r

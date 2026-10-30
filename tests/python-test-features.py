@@ -291,6 +291,14 @@ lcopy.append(99)
 check_true("list-copy-independent", len(lcopy) == 4 and len(lst) == 3)
 check("list-nested", [[1, 2], [3]][0][1], 2)
 check("list-render", f"{lst}", "[3, 10, 4]")
+# + copies both operands into a new sequence of the left one's kind; a nested
+# list is copied as a reference, never spread.
+acc = []
+for i in range(300):
+    acc = acc + [[i, i + 1]]
+cat = lst + [[5]] + []
+check("list-concat", (len(acc), acc[299], acc[0] is not acc[1], cat, lst, (1,) + (2, 3), type(() + ()).__name__),
+      (300, [299, 300], True, [3, 10, 4, [5]], [3, 10, 4], (1, 2, 3), "tuple"))
 
 sl = [0, 1, 2, 3, 4]
 check("list-slice", f"{sl[1:4]}", "[1, 2, 3]")
