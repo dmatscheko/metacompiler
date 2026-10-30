@@ -4975,6 +4975,74 @@ def s119
   check("pn119f", a == "s119" && $0 == old)
 end
 
+# ===== SECTION 120: private def; reopen after a failed class; blockless enumerators; qualified names; constants =====
+# `private def m' / `protected def m' make m private / protected, and calling it with
+# a receiver says "private method `m' called for #<C...>"; a class statement whose
+# superclass raised binds nothing, so the next statement of that name makes a new
+# class; a blockless each_with_object / each_entry / find_index is an Enumerator; a
+# class or module written in another one's body is named by the path (M::X), and a
+# nested body sees the enclosing body's constants; an unbound constant is NameError
+# "uninitialized constant", named under the lexically enclosing class unless
+# written `::X'. /usr/bin/ruby 2.6 settles each.
+class S120A
+  private def q; 1; end
+  protected def s; 3; end
+  public def r; q + s; end
+  def t(o) o.s; end
+end
+S120RE = [begin; class S120E < Qzxwvq1; end; rescue NameError => e; e.message; end,
+          begin; class S120E < Qzxwvq2; end; rescue NameError => e; e.message; end]
+class S120E; def v; 5; end; end
+module S120M
+  class X; end
+  class Y < X; end
+  module N
+    class Z < X; end
+  end
+end
+class S120C
+  def f; Qzxwvq; end
+  def g; ::Qzxwvq; end
+  def h; S120M::Qzxwvq; end
+  def self.k; Qzxwvq::X; end
+  S120CB = begin; Qzxwvq; rescue NameError => e; e.message; end
+end
+class S120D < S120C; end
+def s120
+  m1 = begin; S120A.new.q; rescue NoMethodError => e; e.message; end
+  m2 = begin; S120A.new.s; rescue NoMethodError => e; e.message; end
+  check("pv120a", S120A.new.r == 4 && S120A.new.t(S120A.new) == 3 &&
+        m1.start_with?("private method `q' called for #<S120A") && m2.start_with?("protected method `s' called for #<S120A") &&
+        !S120A.new.respond_to?(:q) && S120A.new.respond_to?(:q, true))
+  check("rc120b", S120RE == ["uninitialized constant Qzxwvq1", "uninitialized constant Qzxwvq2"] && S120E.new.v == 5 &&
+        S120E.superclass == Object)
+  e = [1, 2, 3].each_with_object([])
+  n = [1, 2].each_with_object([])
+  n.next; n.next
+  nr = begin; n.next; rescue StopIteration => x; x.result; end
+  check("ew120c", e.class == Enumerator && e.inspect == "#<Enumerator: [1, 2, 3]:each_with_object([])>" &&
+        e.to_a == [[1, []], [2, []], [3, []]] && e.each { |v, acc| acc << v * 2 } == [2, 4, 6] && nr == [] &&
+        {a: 1}.each_with_object([]).to_a == [[[:a, 1], []]] && (1..2).each_with_object({}).each { |v, h| h[v] = 1 } == {1 => 1, 2 => 1})
+  seen = []
+  fi = [4, 5, 6].find_index
+  check("ee120d", [1, 2].each_entry.class == Enumerator && [1, 2].each_entry.to_a == [1, 2] &&
+        [1, 2].each_entry { |v| v } == [1, 2] && {a: 1}.each_entry { |v| v } == {a: 1} &&
+        fi.inspect == "#<Enumerator: [4, 5, 6]:find_index>" && fi.next == 4 &&
+        [4, 5, 6].find_index.each { |v| seen << v; v == 5 } == 1 && seen == [4, 5] &&
+        [4, 5].find_index.each { |v| v == 9 }.nil? && (1..4).find_index.each { |v| v > 2 } == 2)
+  check("qn120e", S120M::Y.superclass.inspect == "S120M::X" && S120M::X.name == "S120M::X" &&
+        S120M::N::Z.superclass == S120M::X && S120M::N::Z.to_s == "S120M::N::Z" && S120M::N.name == "S120M::N" &&
+        S120M::Y.ancestors.take(2).inspect == "[S120M::Y, S120M::X]" && S120M::Y.new.class.inspect == "S120M::Y")
+  u = [-> { S120C.new.f }, -> { S120C.new.g }, -> { S120C.new.h }, -> { S120C.k }, -> { S120D.new.f }, -> { Qzxwvq }].map do |l|
+    begin; l.call; rescue NameError => x; [x.message, x.name]; end
+  end
+  check("uc120f", u == [["uninitialized constant S120C::Qzxwvq", :Qzxwvq], ["uninitialized constant Qzxwvq", :Qzxwvq],
+                        ["uninitialized constant S120M::Qzxwvq", :Qzxwvq], ["uninitialized constant S120C::Qzxwvq", :Qzxwvq],
+                        ["uninitialized constant S120C::Qzxwvq", :Qzxwvq], ["uninitialized constant Qzxwvq", :Qzxwvq]] &&
+        S120C::S120CB == "uninitialized constant S120C::Qzxwvq")
+end
+
+
 s39() # SECTION-CALL 39
 s40() # SECTION-CALL 40
 s41() # SECTION-CALL 41
@@ -5056,5 +5124,6 @@ s116() # SECTION-CALL 116
 s117() # SECTION-CALL 117
 s118() # SECTION-CALL 118
 s119() # SECTION-CALL 119
+s120() # SECTION-CALL 120
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

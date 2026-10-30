@@ -12115,7 +12115,7 @@ func rubyHashEnumName(n string) bool {
 		"each_with_index", "each_with_object", "inject", "reduce", "all?",
 		"any?", "none?", "one?", "first", "take", "drop", "take_while",
 		"drop_while", "each_slice", "each_cons", "empty?", "tally", "zip",
-		"assoc", "uniq", "reverse", "freeze", "itself":
+		"each_entry", "assoc", "uniq", "reverse", "freeze", "itself":
 		return true
 	}
 	return false
@@ -12453,6 +12453,9 @@ func rubyEnumFinish(t *jsObject, items *jsArray, results []interface{}) interfac
 			out.elems = append(out.elems, r)
 		}
 		return out
+	// each_with_object's items are [element, memo] pairs, and it answers the memo.
+	case "each_with_object":
+		return t.props["margs"].(*jsArray).elems[0]
 	case "select", "filter", "reject":
 		out := &jsArray{}
 		for i := range items.elems {
@@ -12520,6 +12523,10 @@ func (rt *jsrt) rubyEnumMethod(t *jsObject, name string, args []interface{}) int
 	case "each":
 		if blk == nil {
 			return t
+		}
+		// find_index stops at the first element the block accepts.
+		if op, _ := t.props["op"].(string); op == "find_index" || op == "index" {
+			return rt.rubyArrayMethod(items, "find_index", args)
 		}
 		res := []interface{}{}
 		for _, e := range items.elems {
@@ -12670,6 +12677,9 @@ func (rt *jsrt) rubyArrayMethod(t *jsArray, name string, args []interface{}) int
 	case "inspect":
 		return rt.rubyInspect(t)
 	case "index", "find_index":
+		if blk == nil && len(pos) == 0 {
+			return rubyEnumAt(rubyMkEnumOp(&jsArray{elems: append([]interface{}{}, t.elems...)}, name), rt.rubyEnumSrc(t), name, pos)
+		}
 		// == as well, and the same scan: `[[1]].index([1])` is 0 in MRI.
 		if blk != nil && len(pos) == 0 {
 			for i, e := range t.elems {
@@ -12714,13 +12724,17 @@ func (rt *jsrt) rubyArrayMethod(t *jsArray, name string, args []interface{}) int
 		return out
 	case "to_a":
 		return &jsArray{elems: append([]interface{}{}, t.elems...)}
-	case "each":
-		// A blockless each is an Enumerator in MRI, not the array.
+	case "each", "each_entry":
+		// A blockless each is an Enumerator in MRI, not the array. each_entry is
+		// each answering the receiver, a Hash or Range included.
 		if blk == nil {
 			return rubyEnumAt(rubyMkEnum(&jsArray{elems: append([]interface{}{}, t.elems...)}), rt.rubyEnumSrc(t), name, pos)
 		}
 		for _, e := range t.elems {
 			rt.call(blk, jsUndef, []interface{}{e})
+		}
+		if name == "each_entry" {
+			return rt.rubyEnumSrc(t)
 		}
 		return t
 	case "each_with_index":
@@ -13183,6 +13197,13 @@ func (rt *jsrt) rubyArrayMethod(t *jsArray, name string, args []interface{}) int
 		return acc
 	case "each_with_object":
 		memo := argAt(pos, 0)
+		if blk == nil {
+			pairs := &jsArray{}
+			for _, e := range t.elems {
+				pairs.elems = append(pairs.elems, &jsArray{elems: []interface{}{e, memo}})
+			}
+			return rubyEnumAt(rubyMkEnumOp(pairs, name), rt.rubyEnumSrc(t), name, pos)
+		}
 		for _, e := range t.elems {
 			rt.call(blk, jsUndef, []interface{}{e, memo})
 		}
@@ -15906,6 +15927,13 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		// per name, so `1.class == Integer` and `when Integer` compare identities.
 		"js_rclass": func(a []uint64) uint64 { return w(rt.rubyBuiltinClass(rt.toString(u(a[0])))) },
 		"js_rmain":  func(a []uint64) uint64 { return w(rt.rubyMainObj()) },
+		// A private / protected method called from outside: (receiver, "private", name).
+		// Twins: visCheck in ruby-interpreter.abnf, js_rvisfail in lib/ruby-rt.metajs.
+		"js_rvisfail": func(a []uint64) uint64 {
+			name := rt.toString(u(a[2]))
+			rt.rubyNameErr("NoMethodError", rt.toString(u(a[1]))+" method `"+name+"' called for "+rt.rubyNoMethodDesc(u(a[0])), name, u(a[0]))
+			return 0
+		},
 		// Ruby's to_s, used for string interpolation and puts.
 		"js_rstr": func(a []uint64) uint64 { return rt.wrapStr(rt.rubyStr(u(a[0]))) },
 		// Kernel#puts and Kernel#print with RUBY rendering (not Go's %v: `puts nil`

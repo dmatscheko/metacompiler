@@ -187,7 +187,7 @@ OpMethodName = "[]=" | "[]" | "<=>" | "===" | "==" | "!=" | "<<" | ">>" | "<=" |
 ClassDecl   <~~ push(makeClassStmt(takeAll(), up.pos)) ~~>
             = KwClass ClassPath <~~ push(up.in) ~~> [ Superclass ] ClassItems [ ClassGuard ] End ;
 ClassItems  = { Semi | SingletonBlock | Def <~~ push({method: pop()}) ~~> | AttrDecl
-              | AliasStmt | AliasMethodStmt | DefineMethodStmt | MixinStmt | VisStmt | VisNamesStmt
+              | AliasStmt | AliasMethodStmt | DefineMethodStmt | MixinStmt | VisStmt | VisNamesStmt | VisDefStmt
               | ClassDecl <~~ push({nested: pop(), nestedName: lastDeclName}) ~~>
               | ModuleDecl <~~ push({nested: pop(), nestedName: lastDeclName}) ~~>
               | ClassBodyStmt } ;
@@ -277,6 +277,10 @@ VisNamesStmt <~~ var n = takeAll(); push({visnames: n.slice(1), vis: n[0]}) ~~>
             = VisNameWord VisName { "," VisName } LineEnd ;
 VisNameWord <~~ push(up.in) ~~> = ( "private" | "protected" | "public" ) KwEnd ;
 VisName     = ":" :whitespace() SymNameSfx <~~ push(up.in) ~~> :whitespace(Whitespace) ;
+// `private def m ... end': `def' answers the Symbol :m, so this is `private :m' for
+// the method the def just defined.
+VisDefStmt  <~~ var n = takeAll(); push({method: n[1], defvis: n[0]}) ~~>
+            = VisNameWord Def ;
 // class D < Base: real inheritance (method lookup walks __super, and `super` calls
 // the overridden method).
 Superclass  = "<" !"<" KwSelf <~~ push({supername: "self"}) ~~>
@@ -1236,7 +1240,7 @@ ScopedConst <~~ push(makeScopedConst(up.in)) ~~>
 // ::CONST - a constant looked up in Object, the top-level namespace. It is the same
 // value as the bare CONST here (there is one constant table), but the spelling is
 // common enough in a spec suite that refusing it costs whole files.
-TopConst    <~~ push(makeScopedConst(up.in.substring(2))) ~~>
+TopConst    <~~ push(makeScopedConst(up.in.substring(2), true)) ~~>
             = "::" Name { "::" Name } ;
 
 // The percent literals. The lower-case tags (%q %w %i) are RAW - no escapes beyond
@@ -4275,6 +4279,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     }
     function makeAssign(items, pos) {
         var ref = items[0]
+        if (ref.path.length == 0 && ref.name != undefined) { assignedConsts["$" + ref.name] = true }
         var op = items[1]
         var valT = items[2]
         // ||= / &&= evaluate the right-hand side, and write, only when the old
@@ -7110,6 +7115,12 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // and the method's parameter names while it emits each method. A BARE super passes
     // the parameters the method received; super(...) passes exactly its own list.
     var curClsName = ""
+    // The qualified name (M::N::C) of the class or module being emitted, which is
+    // what Module#name answers for a class nested in it.
+    var curClsPath = ""
+    function qualName(name) {
+        return curClsPath == "" || name.indexOf("::") >= 0 ? name : curClsPath + "::" + name
+    }
     var curMethName = ""
     var curMethParams = []
     // The parameter descriptors of the method being emitted, which a zsuper reads.
@@ -7305,8 +7316,16 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             // js_rlvar raises MRI's NameError for that.
             var walk = inDefFrame(name) || (curDefLocals == null && isLocalName(name) && !knownLocal(name))
             if (walk) { return {b: b, v: callExt(b, "js_rlvar", [curScopeV, emitStr(b, name)])} }
+            if (!knownConst(name) && name.charCodeAt(0) >= 65 && name.charCodeAt(0) <= 90) { return rbConstPath(b, [name], false) }
             return {b: b, v: frameLocalRead(b, name, callExt(b, "js_scope_get", [curScopeV, emitStr(b, name)]))}
         }
+    }
+    // A constant the file binds by an assignment, a class or a module statement, or a
+    // builtin class: its read skips rbConstPath's check, which only names a constant
+    // nothing binds.
+    var assignedConsts = {}
+    function knownConst(name) {
+        return assignedConsts["$" + name] === true || classMethods["$" + name] != undefined || nameIn(rubyBuiltinClasses, name)
     }
     // The class registry: filled by makeClassStmt while the tags run, consulted while
     // the thunks EMIT, so every class of the file is known by then.
@@ -7554,17 +7573,26 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     }
     function restrictedStub(kind, name) {
         return function(b) {
-            emitNameErr(b, "NoMethodError", kind + " method '" + name + "' called", name)
+            callExt(b, "js_rvisfail", [emitIvarSelf(b), emitStr(b, kind), emitStr(b, name)])
+            b.NewRet(hUndef)
             return {b: deadBlock(), v: hNull}
         }
     }
     // A constant path's value, raising NameError at its first missing prefix as MRI
-    // does (`Nope::X` reports Nope, `M::Nope` reports M::Nope). Twin of uninitConst
-    // in ruby-interpreter.abnf.
-    function rbConstPath(b, parts) {
+    // does (`Nope::X` reports Nope, `M::Nope` reports M::Nope), a missing first
+    // segment under the lexically enclosing class unless the path is `::X'. The
+    // head of a knownConst path is read unchecked. Twin of uninitConst in
+    // ruby-interpreter.abnf.
+    function rbConstPath(b, parts, top) {
         var pre = parts[0]
+        var lexPre = curClsPath == "" || top === true ? parts[0] : curClsPath + "::" + parts[0]
         var v = hUndef
-        for (var k = 0; k < parts.length; k++) {
+        var k = 0
+        if (knownConst(pre)) {
+            v = callExt(b, "js_scope_get", [curScopeV, emitStr(b, pre)])
+            k = 1
+        }
+        while (k < parts.length) {
             var missB = curF.NewBlock("")
             var okB = curF.NewBlock("")
             if (k == 0) {
@@ -7575,9 +7603,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 v = callExt(b, "js_get", [v, emitStr(b, "$c$" + parts[k])])
                 b.NewCondBr(b.NewICmp(llvm.enum.IPredEQ, v, hUndef), missB, okB)
             }
-            emitNameErr(missB, "NameError", "uninitialized constant " + pre, parts[k])
+            emitNameErr(missB, "NameError", "uninitialized constant " + (k == 0 ? lexPre : pre), parts[k])
             b = okB
             if (k == 0) { v = callExt(b, "js_scope_get", [curScopeV, emitStr(b, pre)]) }
+            k = k + 1
         }
         return {b: b, v: v}
     }
@@ -7682,7 +7711,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 if (fn.singleton === true) { r.sdefs.push({name: fn.name, params: fn.params, body: fn.body, pos: fn.pos}) }
                 else {
                     r.methods.push({name: fn.name, params: fn.params, body: fn.body, pos: fn.pos})
-                    if (vis == "private" || vis == "protected") { r.restricted.push({name: fn.name, kind: vis}) }
+                    if (it.defvis != undefined) { named.push({visnames: [fn.name], vis: it.defvis}) }
+                    else if (vis == "private" || vis == "protected") { r.restricted.push({name: fn.name, kind: vis}) }
                     if (vis == "module_function") { r.sdefs.push({name: fn.name, params: fn.params, body: fn.body, pos: fn.pos}) }
                 }
                 continue
@@ -7964,17 +7994,18 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // so `super` inside the prepended method is a legal thing to emit.
         if ((front.length > 0 && superName == "") || r.superexpr != undefined) { classHasSuper["$" + name] = true }
         var coreName = name + "$core"
-        return function(b) {
-            // A class statement for a name the same enclosing class or module has
-            // already emitted REOPENS that class object (MRI): its methods and @ivars
-            // stay, and this body adds to them.
+        // A superclass that is neither builtin nor compiled may be missing at run
+        // time, and then the statement raises before it binds the name.
+        var mayFail = superName != "" && superName != "self" && classMethods["$" + superName] == undefined
+                      && !nameIn(rubyBuiltinClasses, superName)
+        var fresh = function(b) {
             var ekey = "$" + curClsName + "::" + name
-            if (emittedClasses[ekey] != undefined) { return emitReopen(b, emittedClasses[ekey], name, r, incAnc, pos) }
             var imn = ownIMNames([], r)
-            emittedClasses[ekey] = {anc: incAnc, snames: snames, core: front.length > 0, imn: imn}
+            var qn = qualName(name)
+            emittedClasses[ekey] = {anc: incAnc, snames: snames, core: front.length > 0, imn: imn, mayFail: mayFail, qn: qn}
             var clsV = callExt(b, "js_obj_new", [])
             callExt(b, "js_set", [clsV, emitStr(b, "__isclass"), hTrue])
-            callExt(b, "js_set", [clsV, emitStr(b, "__name"), emitStr(b, name)])
+            callExt(b, "js_set", [clsV, emitStr(b, "__name"), emitStr(b, qn)])
             b = emitNameList(b, clsV, imn, "__imn")
             var baseSet = false
             var baseV = hNull
@@ -8002,7 +8033,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             b = emitMixRecord(b, clsV, extAnc, "$xmix$", "__extorder")
             b = emitNameList(b, clsV, snames, "__snames")
             var savedCls = curClsName
+            var savedPath = curClsPath
             curClsName = name
+            curClsPath = qn
             // `class MyErr < StandardError; def initialize(m); super(m); end; end'.
             // The superclass is a BUILTIN, which carries no compiled `initialize'
             // for js_supercall to find.
@@ -8069,7 +8102,27 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             // body is an EXPRESSION: its value is its last statement's.
             var cb = emitClassBody(b, clsV, r)
             curClsName = savedCls
+            curClsPath = savedPath
             return cb
+        }
+        return function(b) {
+            // A class statement for a name the same enclosing class or module has
+            // already emitted REOPENS that class object (MRI): its methods and @ivars
+            // stay, and this body adds to them. When that earlier statement may have
+            // raised before binding the name, which one runs is decided at run time.
+            var prev = emittedClasses["$" + curClsName + "::" + name]
+            if (prev == undefined) { return fresh(b) }
+            if (prev.mayFail !== true) { return emitReopen(b, prev, name, r, incAnc, pos) }
+            var newB = curF.NewBlock("")
+            var reB = curF.NewBlock("")
+            var joinB = curF.NewBlock("")
+            var tv = callExt(b, "js_scope_typeof", [curScopeV, emitStr(b, name)])
+            b.NewCondBr(truthy(b, callExt(b, "js_seq", [tv, emitStr(b, "undefined")])), newB, reB)
+            var rr = emitReopen(reB, prev, name, r, incAnc, pos)
+            var rf = fresh(newB)
+            rr.b.NewBr(joinB)
+            rf.b.NewBr(joinB)
+            return {b: joinB, v: joinB.NewPhi([llvm.ir.NewIncoming(rr.v, rr.b), llvm.ir.NewIncoming(rf.v, rf.b)])}
         }
     }
 
@@ -8184,7 +8237,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             prev.imn = imn
         }
         var savedCls = curClsName
+        var savedPath = curClsPath
         curClsName = name
+        if (prev.qn != undefined) { curClsPath = prev.qn }
         var own = mixinDefsAll(newAnc)
         if (nameIn(newAnc, "Comparable")) { pushAll(own, comparableMethods()) }
         for (var m = 0; m < r.methods.length; m++) { own.push(r.methods[m]) }
@@ -8195,6 +8250,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // As in makeClassStmt, the body runs with the reopening's methods in place.
         var cb = emitClassBody(b, clsV, r)
         curClsName = savedCls
+        curClsPath = savedPath
         return cb
     }
 
@@ -8287,14 +8343,17 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             var modV = callExt(b, "js_obj_new", [])
             callExt(b, "js_set", [modV, emitStr(b, "__isclass"), hTrue])
             callExt(b, "js_set", [modV, emitStr(b, "__ismodule"), hTrue])
-            callExt(b, "js_set", [modV, emitStr(b, "__name"), emitStr(b, name)])
+            var qn = qualName(name)
+            callExt(b, "js_set", [modV, emitStr(b, "__name"), emitStr(b, qn)])
             b = emitNameList(b, modV, ownIMNames([], r), "__imn")
             b = emitNameList(b, modV, [], "__incl")
             if (curClsBodyFn) { b = emitConstUp(b, name, modV) }
             else { callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), modV]) }
             b = emitMixRecord(b, modV, modAnc, "$mix$", "__mixorder")
             var savedCls = curClsName
+            var savedPath = curClsPath
             curClsName = name
+            curClsPath = qn
             // A module body's statements (constants, nested classes and modules) run
             // in the CURRENT scope, so a name it introduces stays visible where the
             // module was written - which is what lets a mixed-in method read a
@@ -8339,12 +8398,13 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                                       callExt(b, "js_get", [modV, emitStr(b, r.aliases[ai].from)])])
             }
             curClsName = savedCls
+            curClsPath = savedPath
             return {b: b, v: hNull}
         }
     }
     // A::B::C - the head is a scope name, every further step a $c$ member of the
     // module or class object before it.
-    function makeScopedConst(text) {
+    function makeScopedConst(text, top) {
         var parts = []
         var cur = ""
         for (var i = 0; i < text.length; i++) {
@@ -8379,13 +8439,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 return {b: b, v: callExt(b, "js_rflo", [emitNum(b, rbFloatConstNum(fname))])}
             }
         }
-        return function(b) {
-            var v = callExt(b, "js_scope_get", [curScopeV, emitStr(b, parts[0])])
-            for (var k = 1; k < parts.length; k++) {
-                v = callExt(b, "js_get", [v, emitStr(b, "$c$" + parts[k])])
-            }
-            return {b: b, v: v}
-        }
+        return function(b) { return rbConstPath(b, parts, top === true) }
     }
     // The thirteen Float:: constants MRI carries, and how each is built: "int" is a
     // plain Integer, "flo" a Float box around a literal double, "inf" a Float box

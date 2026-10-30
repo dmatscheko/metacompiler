@@ -6108,6 +6108,8 @@ function rbEnumFinish(t, items, results) {
         }
         return fl
     }
+    // each_with_object's items are [element, memo] pairs, and it answers the memo.
+    if (op == "each_with_object") { return t["margs"][0] }
     if (op == "select" || op == "filter" || op == "reject") {
         var keep = []
         var k = 0
@@ -6301,6 +6303,8 @@ function rbEnumMethod(t, name, args) {
     if (name == "inspect" || name == "to_s") { return rbEnumInspect(t) }
     if (name == "each") {
         if (blk === null) { return t }
+        // find_index stops at the first element the block accepts.
+        if (t["op"] == "find_index" || t["op"] == "index") { return rbArrayMethod(items, "find_index", args) }
         var eres = []
         var e = 0
         while (e < items.length) { eres.push(rbCall1(blk, items[e])); e = e + 1 }
@@ -6415,7 +6419,7 @@ function rbHashEnumName(n) {
         || n == "inject" || n == "reduce" || n == "all?" || n == "any?" || n == "none?"
         || n == "one?" || n == "first" || n == "take" || n == "drop"
         || n == "take_while" || n == "drop_while" || n == "each_slice"
-        || n == "each_cons" || n == "empty?" || n == "tally" || n == "zip"
+        || n == "each_cons" || n == "empty?" || n == "tally" || n == "zip" || n == "each_entry"
         || n == "assoc" || n == "uniq" || n == "reverse" || n == "freeze" || n == "itself"
 }
 
@@ -6668,6 +6672,7 @@ function rbArrayMethod(t, name, args) {
     // VALUE - `[[1]].index([1])` is 0 in MRI - which is what rbDictFind says.
     if (name == "inspect") { return rbInspect(t) }
     if (name == "index" || name == "find_index") {
+        if (blk === null && nPos == 0) { return rbEnumAt(rbMkEnumOp(rtCopyArr(t), name), rbEnumSrc(t), name, args) }
         if (blk !== null && nPos == 0) {
             var bi = 0
             while (bi < t.length) {
@@ -6715,13 +6720,15 @@ function rbArrayMethod(t, name, args) {
     }
     if (name == "to_a") { return rtCopyArr(t) }
     // A blockless each / each_with_index is an Enumerator in MRI, not the array.
-    if (name == "each") {
+    // each_entry is each answering the receiver, a Hash or Range included.
+    if (name == "each" || name == "each_entry") {
         if (blk === null) { return rbEnumAt(rbMkEnum(rtCopyArr(t)), rbEnumSrc(t), name, args) }
         var e = 0
         while (e < t.length) {
             rbCall1(blk, t[e])
             e = e + 1
         }
+        if (name == "each_entry") { return rbEnumSrc(t) }
         return t
     }
     if (name == "each_with_index") {
@@ -7157,6 +7164,11 @@ function rbArrayMethod(t, name, args) {
         var memo = anytype
         memo = rbPosAt(args, nPos, 0)
         var oi = 0
+        if (blk === null) {
+            var opairs = []
+            while (oi < t.length) { opairs.push([t[oi], memo]); oi = oi + 1 }
+            return rbEnumAt(rbMkEnumOp(opairs, name), rbEnumSrc(t), name, args)
+        }
         while (oi < t.length) {
             rbCall2(blk, t[oi], memo)
             oi = oi + 1
@@ -8469,6 +8481,12 @@ function rbWhen(l, r) {
 // The builtin class objects: one object per name, so `1.class == Integer` and
 // `when Integer` compare identities.
 function js_rclass(name) { return rbBuiltinClass(rbStr(name)) }
+
+// A private / protected method called from outside. Twin of js_rvisfail in
+// abnf/jsrt.go.
+function js_rvisfail(recv, kind, name) {
+    rbNameErr("NoMethodError", rbStr(kind) + " method `" + rbStr(name) + "' called for " + rbNoMethodDesc(recv), rbStr(name), recv)
+}
 
 // `class String ... end` reopening a builtin class: its methods go onto the
 // builtin's own class object, and from here on rbMethod asks it.

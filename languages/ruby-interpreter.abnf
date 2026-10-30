@@ -184,7 +184,7 @@ OpMethodName = "[]=" | "[]" | "<=>" | "===" | "==" | "!=" | "<<" | ">>" | "<=" |
 // attr_writer / attr_accessor declare @ivar getters/setters on the class.
 ClassDecl   <~~ clsRanges.push({s: up.start, e: up.pos}); push(makeClassStmt(takeAll(), up.pos)) ~~>
             = KwClass ClassPath <~~ push(up.in) ~~> [ Superclass ] ClassItems [ ClassGuard ] End ;
-ClassItems  = { Semi | SingletonBlock | Def <~~ push({method: pop()}) ~~> | AttrDecl
+ClassItems  = { Semi | SingletonBlock | Def <~~ push({method: pop()}) ~~> | AttrDecl | VisDef
               | AliasStmt | ClassDecl <~~ push({cstmt: pop()}) ~~>
               | ModuleDecl <~~ push({cstmt: pop()}) ~~> | ClassBodyStmt } ;
 // A class body may carry its own rescue / else / ensure clauses, with no `begin` of
@@ -280,6 +280,13 @@ AttrDecl    <~~ push(makeAttr(takeAll())) ~~>
             = AttrKind <~~ push({akind: up.in}) ~~> AttrSym { "," AttrSym } ;
 AttrKind    = ( "attr_accessor" | "attr_reader" | "attr_writer" ) KwEnd ;
 AttrSym     = ":" SymName <~~ push({aname: up.in}) ~~> :whitespace(Whitespace) ;
+
+// `private def m ... end': `def' answers the Symbol :m, so this is `private :m' for
+// the method the def just defined.
+VisDef      <~~ var n = takeAll(); push({method: n[1], mvis: n[0]}) ~~>
+            = VisDefWord Def ;
+VisDefWord  = "private" KwEnd <~~ push("private") ~~> | "protected" KwEnd <~~ push("protected") ~~>
+            | "public" KwEnd <~~ push("public") ~~> ;
 
 End         = "end" KwEnd ;
 
@@ -1100,7 +1107,7 @@ DefExpr     <~~ push(makeDefExpr(pop())) ~~>
 // ::CONST - a constant looked up in Object, the top-level namespace. It is the same
 // value as the bare CONST here (there is one constant table), but the spelling is
 // common enough in a spec suite that refusing it costs whole files.
-TopConst    <~~ push(makeScopedConst(up.in.substring(2))) ~~>
+TopConst    <~~ push(makeScopedConst(up.in.substring(2), true)) ~~>
             = "::" Name { "::" Name } ;
 
 // ( STMT; STMT ) is a value: parentheses in Ruby hold a whole statement SEQUENCE and
@@ -2723,12 +2730,12 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         return null
     }
     function makeSelf() { return function() { return ivarSelf() } }
-    function makeScopedConst(text) {
+    function makeScopedConst(text, top) {
         var name = stripWs(text)
         return function() {
             var v = anytype
             v = lookupConst(name)
-            if (v === undefined) { fail("uninitialized constant " + name) }
+            if (v === undefined) { uninitConst(name, top === true) }
             return v
         }
     }
@@ -7985,6 +7992,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // A bare name that is neither a local nor a method: NameError, worded as MRI 2.6
     // does. Twins: js_rlvar in languages/lib/ruby-rt.metajs and abnf/jsrtruby.go.
     function undefinedName(name) {
+        var c0 = name.charCodeAt(0)
+        if (c0 >= 65 && c0 <= 90) { uninitConst(name) }
         nameErr("NameError", "undefined local variable or method `" + name + "' for " + noMethodDesc(ivarSelf()), name, ivarSelf())
     }
     // Object#object_id. nil, true, false and an Integer have MRI's fixed ids (8, 20,
@@ -9591,7 +9600,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             || n == "inject" || n == "reduce" || n == "all?" || n == "any?" || n == "none?"
             || n == "one?" || n == "first" || n == "take" || n == "drop"
             || n == "take_while" || n == "drop_while" || n == "each_slice"
-            || n == "each_cons" || n == "empty?" || n == "tally" || n == "zip"
+            || n == "each_cons" || n == "empty?" || n == "tally" || n == "zip" || n == "each_entry"
             || n == "assoc" || n == "uniq" || n == "reverse" || n == "freeze" || n == "itself"
     }
     // The Array/Enumerable names that REQUIRE a block; called without one MRI hands
@@ -9655,6 +9664,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             }
             return fl
         }
+        // each_with_object's items are [element, memo] pairs, and it answers the memo.
+        if (op == "each_with_object") { return t.margs[0] }
         if (op == "select" || op == "filter" || op == "reject") {
             var keep = []
             for (var k = 0; k < items.length; k++) {
@@ -9764,6 +9775,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (name == "inspect" || name == "to_s") { return enumInspect(t) }
         if (name == "each") {
             if (blk == null) { return t }
+            // find_index stops at the first element the block accepts.
+            if (t.op == "find_index" || t.op == "index") { return arrayMethod(items, "find_index", [], blk) }
             var eres = []
             for (var i = 0; i < items.length; i++) { eres.push(blockCall(blk, [items[i]])) }
             return enumFinish(t, items, eres)
@@ -9859,6 +9872,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // in MRI - as dictScan/rbDictFind/core.keyEq do.
         if (name == "inspect") { return rinspect(t) }
         if (name == "index" || name == "find_index") {
+            if (blk == null && args.length == 0) { return enumAt(mkEnumOp(t.slice(0), name), enumSrc(t), name, args) }
             // The block form answers the first index the block accepts.
             if (blk != null && args.length == 0) {
                 for (i = 0; i < t.length; i++) { if (rtest(blockCall(blk, [t[i]]))) { return i } }
@@ -9899,6 +9913,13 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (blk == null) { return enumAt(mkEnum(t.slice(0)), enumSrc(t), name, args) }
             for (i = 0; i < t.length; i++) { blockCall(blk, [t[i]]) }
             return t
+        }
+        // Enumerable#each_entry is each that answers the receiver, a Hash or Range
+        // included.
+        if (name == "each_entry") {
+            if (blk == null) { return enumAt(mkEnum(t.slice(0)), enumSrc(t), name, args) }
+            for (i = 0; i < t.length; i++) { blockCall(blk, [t[i]]) }
+            return enumSrc(t)
         }
         if (name == "each_with_index") {
             if (blk == null) {
@@ -10207,6 +10228,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (name == "each_with_object") {
             var memo = anytype
             memo = args[0]
+            if (blk == null) {
+                var opairs = []
+                for (i = 0; i < t.length; i++) { opairs.push([t[i], memo]) }
+                return enumAt(mkEnumOp(opairs, name), enumSrc(t), name, args)
+            }
             for (i = 0; i < t.length; i++) { blockCall(blk, [t[i], memo]) }
             return memo
         }
@@ -11660,14 +11686,16 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             existing = hasOwn(globalScope, name) ? globalScope[name] : undefined
             var mod = anytype
             if (existing != undefined && existing != null && existing.__ismodule === true) { mod = existing }
-            else { mod = {__isclass: true, __ismodule: true, __name: name, __super: null,
+            else { mod = {__isclass: true, __ismodule: true, __name: qualName(name), __super: null,
                           __mixins: [], __prepends: [], __methodNames: []} }
             rubySet(name, mod)
             var saved = scopes
             var savedClass = curClass
             var savedVis = curVis
             var modScope = {}
-            scopes = [globalScope, modScope]
+            // A body nested in another class or module body also sees that body's
+            // constants (Ruby's lexical scope).
+            scopes = curClass === null ? [globalScope, modScope] : saved.concat([modScope])
             declVar("self", mod)
             curClass = mod
             curVis = "public"
@@ -12589,6 +12617,12 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // body items have to be executed in source order.
     var curClass = null
     var curVis = "public"
+    // A class or module written in another one's body is named by the path
+    // (M::N::C), which is what Module#name answers. Twin of qualName in
+    // ruby-to-llvm-ir.abnf.
+    function qualName(name) {
+        return curClass === null || name.indexOf("::") >= 0 ? name : curClass.__name + "::" + name
+    }
     function makeClassStmt(items, pos) {
         var name = items[0]
         var supName = null
@@ -12615,7 +12649,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 cls = hostGlobals[name]
                 builtinReopened = true
             } else {
-                cls = {__isclass: true, __name: name, __super: null, __mixins: [], __prepends: []}
+                cls = {__isclass: true, __name: qualName(name), __super: null, __mixins: [], __prepends: []}
             }
             if (supName != null) {
                 var sv = anytype
@@ -12636,7 +12670,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             // $c$ member of the class (so Outer::Inner and C::CONST resolve) and stays
             // visible where the class was written (so a method of Outer can name Inner).
             var clsScope = {}
-            scopes = [globalScope, clsScope]
+            scopes = curClass === null ? [globalScope, clsScope] : saved.concat([clsScope])
             declVar("self", cls)
             curClass = cls
             curVis = "public"
@@ -12647,7 +12681,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             var runItems = function() {
               for (var st = 0; st < ordered.length; st++) {
                 var it = ordered[st]
-                if (it.method != undefined) { declareMethods(cls, [it.method]) }
+                if (it.method != undefined) {
+                    declareMethods(cls, [it.method])
+                    if (it.mvis != undefined) { visDirective(it.mvis, [it.method.name]) }
+                }
                 else if (it.sblock != undefined) {
                     for (var sb = 0; sb < it.sblock.length; sb++) {
                         // attr_* in `class << self' defines the accessors on the class object.
@@ -12852,7 +12889,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         return "public"
     }
     // A call with an EXPLICIT receiver may not reach a private method, and may reach a
-    // protected one only from inside the same class.
+    // protected one only from inside the same class. Twin of js_rvisfail in abnf/jsrt.go.
     function visCheck(recv, name) {
         if (!isUserObj(recv)) { return }
         var v = visOf(recv.__class, name)
@@ -12860,10 +12897,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         var self = findSelf()
         if (v == "private") {
             if (self === recv) { return }
-            nameErr("NoMethodError", "private method '" + name + "' called", name, recv)
+            nameErr("NoMethodError", "private method `" + name + "' called for " + noMethodDesc(recv), name, recv)
         }
         if (self !== null && self !== undefined && isUserObj(self) && valueIsA(self, recv.__class)) { return }
-        nameErr("NoMethodError", "protected method '" + name + "' called", name, recv)
+        nameErr("NoMethodError", "protected method `" + name + "' called for " + noMethodDesc(recv), name, recv)
     }
     // attr_reader / attr_writer / attr_accessor become @ivar getter/setter methods
     // synthesized as ordinary function descriptors on the class descriptor.
@@ -13468,13 +13505,19 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     }
     // Resolve a (possibly scoped) constant name: Foo, or Foo::Bar::Baz.
     // NameError for a constant path that does not resolve, naming its first missing
-    // prefix as MRI does (`Nope::X` reports Nope, `M::Nope` reports M::Nope). Twin
-    // of rbUninitConst in ruby-to-llvm-ir.abnf.
-    function uninitConst(path) {
+    // prefix as MRI does (`Nope::X` reports Nope, `M::Nope` reports M::Nope). A
+    // missing FIRST segment is named under the lexically enclosing class (A::Nope
+    // in a method or the body of A). Twin of rbConstPath in ruby-to-llvm-ir.abnf.
+    function uninitConst(path, top) {
         var parts = path.split("::")
         var pre = parts[0]
         var i = 1
         while (i < parts.length && lookupConst(pre) !== undefined) { pre = pre + "::" + parts[i]; i = i + 1 }
+        if (i == 1 && top !== true) {
+            var lc = anytype
+            lc = hasVar("$defclass") ? getVar("$defclass") : curClass
+            if (lc !== null && lc !== undefined && lc.__isclass === true && lc.__name != "Object") { pre = lc.__name + "::" + pre }
+        }
         nameErr("NameError", "uninitialized constant " + pre, parts[i - 1], findSelf())
     }
     function lookupConst(name) {
