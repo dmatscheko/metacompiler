@@ -4566,6 +4566,51 @@ def s103
   check("or103d", a == 5 && b == 7 && h == {x: [1]} && log == [:k, :v, :k, 2, 5, 7] && s103_memo == 5)
 end
 
+# ===== SECTION 104: return through ensure in a block, a proc's return, a loop's break value =====
+# `return' in a begin body inside a block leaves the method after the ensure ran;
+# `return' in a proc (proc { } / Proc.new) leaves the method the proc was written
+# in, while a lambda's only leaves the lambda; `break v' makes a while / until loop
+# answer v, which is nil when the loop ends by its condition. /usr/bin/ruby 2.6
+# settles each.
+def s104_m4(log)
+  [1, 2].each { |x| begin; return x; ensure; log << x; end }
+  :fell_through
+end
+def s104_m5
+  pr = Proc.new { return 7 }
+  pr.call
+  :unreached
+end
+def s104_m6(v)
+  pr = proc { |q| return q * 2 }
+  [v].each { |q| pr.call(q) }
+  :unreached
+end
+def s104_m7
+  la = lambda { return 3 }
+  la.call + 1
+end
+def s104
+  log = []
+  check("rt104a", s104_m4(log) == 1 && log == [1])
+  check("pr104b", s104_m5 == 7 && s104_m6(3) == 6 && s104_m7 == 4)
+  lim = [3, 5]
+  w = 0
+  r = while w < 10
+    w += 1
+    break w * 2 if w == lim[0]
+  end
+  r2 = while w < lim[1]
+    w += 1
+  end
+  u = 0
+  r3 = until u > 4
+    u += 1
+    break :done if u == 2
+  end
+  check("wb104c", r == 6 && r2.nil? && r3 == :done)
+end
+
 s39() # SECTION-CALL 39
 s40() # SECTION-CALL 40
 s41() # SECTION-CALL 41
@@ -4631,5 +4676,6 @@ s100() # SECTION-CALL 100
 s101() # SECTION-CALL 101
 s102() # SECTION-CALL 102
 s103() # SECTION-CALL 103
+s104() # SECTION-CALL 104
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

@@ -94,7 +94,7 @@ KwNilPath   = "nil" KwEnd "::" Name ;
 // A def: implicit return of the last expression, or an explicit return. A singleton
 // receiver (def self.m / def obj.m) defines a singleton method. The parameter list
 // accepts default / splat / double-splat / block / keyword parameters.
-Def         <~~ push(makeFun(takeAll())) ~~>
+Def         <~~ push(makeFun(takeAll(), up.in)) ~~>
             = "" <~~ push(up.pos) ~~> KwDef [ SelfRecv ] DefName <~~ push(up.in) ~~> [ ParamList ] DefTail ;
 // The name a def may carry. SetterName comes FIRST (PEG): `def name=(v)` declares the
 // assignment method `name=`, and it is told apart from the endless `def name = EXPR`
@@ -2566,6 +2566,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     var curMethodFrame = false
     var curBlkNonlocal = false
     var emitBlkArg = false
+    //   curProcRet     - the method being emitted catches the `return' of every
+    //                    block in it (procRetBody), so a stored proc's `return'
+    //                    may throw the marker as well.
+    var curProcRet = false
     // The same marker trick carries `retry' out of a rescue clause closure: the clause
     // returns it, and the loop makeTry wraps around the js_try re-runs the begin body.
     var retryName = "__blkretry"
@@ -2702,6 +2706,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     }
     var coreRetStmt = retStmt
     retStmt = function(b, v) {
+        // A `return' signalled out of a begin body inside a block leaves the method.
+        if (!inCtlBody() && curIsBlockFn && curBlkNonlocal && curMethodTag != 0) { return emitBlkRet(b, v) }
         if (curSiteSave !== null && !inCtlBody()) { rbSiteStore(b, curSiteSave) }
         return coreRetStmt(b, v)
     }
@@ -2732,16 +2738,45 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // leaves the enclosing METHOD: the [value, tag] marker emitBlkBreakCall unwraps.
     // A plain ret there would only end this one block run - which is `next'.
     function emitRubyRet(b, v) {
-        if (curIsBlockFn && curBlkNonlocal && curMethodTag != 0) {
-            var margs = callExt(b, "js_arr_new", [])
-            callExt(b, "js_arr_push", [margs, v])
-            callExt(b, "js_arr_push", [margs, emitNum(b, curMethodTag)])
-            callExt(b, "js_throw", [callExt(b, "js_pyexc", [emitStr(b, blkRetName), margs])])
-            b.NewRet(hUndef) // never reached: js_throw unwinds on the host side
-            return deadBlock()
-        }
+        if (curIsBlockFn && curBlkNonlocal && curMethodTag != 0) { return emitBlkRet(b, v) }
         // A plain ret, or a control signal when the return leaves a begin body.
         return retStmt(b, v)
+    }
+    function emitBlkRet(b, v) {
+        var margs = callExt(b, "js_arr_new", [])
+        callExt(b, "js_arr_push", [margs, v])
+        callExt(b, "js_arr_push", [margs, emitNum(b, curMethodTag)])
+        callExt(b, "js_throw", [callExt(b, "js_pyexc", [emitStr(b, blkRetName), margs])])
+        b.NewRet(hUndef) // never reached: js_throw unwinds on the host side
+        return deadBlock()
+    }
+    // A def body that catches the `return' marker of its own blocks: the body runs
+    // as a try closure, and the catch hands a marker of this method back as a
+    // return signal, re-raising anything else.
+    function procRetBody(bodyT) {
+        return function(b) {
+            var saved = curProcRet
+            curProcRet = true
+            var myTag = curMethodTag
+            var tryClo = callExt(b, "js_closure", [handle(emitFunc([], bodyT, false, true)), curScopeV])
+            var catchIdx = emitFunc(["$exc"], function(cb) {
+                var ev = callExt(cb, "js_scope_get", [curScopeV, emitStr(cb, "$exc")])
+                var tagB = curF.NewBlock("")
+                var mineB = curF.NewBlock("")
+                var otherB = curF.NewBlock("")
+                cb.NewCondBr(truthy(cb, callExt(cb, "js_is_type", [ev, emitStr(cb, blkRetName)])), tagB, otherB)
+                var rArgs = callExt(tagB, "js_get", [ev, emitStr(tagB, "args")])
+                var tagV = callExt(tagB, "js_rget", [rArgs, emitNum(tagB, 1)])
+                tagB.NewCondBr(truthy(tagB, callExt(tagB, "js_seq", [tagV, emitNum(tagB, myTag)])), mineB, otherB)
+                callExt(otherB, "js_throw", [ev])
+                otherB.NewRet(hUndef) // never reached: js_throw unwinds on the host side
+                return {b: retStmt(mineB, callExt(mineB, "js_rget", [rArgs, emitNum(mineB, 0)])), v: hUndef}
+            }, false, true)
+            var catchClo = callExt(b, "js_closure", [handle(catchIdx), curScopeV])
+            var ctl = callExt(b, "js_try", [tryClo, catchClo, hUndef])
+            curProcRet = saved
+            return {b: excDispatch(b, ctl), v: ctl}
+        }
     }
     // return with several values yields an array (Ruby: `return 3, 4` -> [3, 4]).
     function makeReturn(items) {
@@ -2764,9 +2799,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
     }
     makeBreak = function(items) {
-        // In a loop the break value is discarded (loops yield nil); still evaluate it
-        // for effects. Directly in a block body it is the value of the whole call, and
-        // travels there as the js_pyexc marker that emitBlkBreakCall unwraps.
+        // In a while / until loop the break value is the loop's (loopValue). Directly
+        // in a block body it is the value of the whole call, and travels there as the
+        // js_pyexc marker that emitBlkBreakCall unwraps.
         var t = items.length > 0 ? items[0] : null
         return function(b) {
             var v = hNull
@@ -2779,6 +2814,14 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 return {b: deadBlock(), v: hNull}
             }
             // A branch to the enclosing loop, or a control signal out of a begin body.
+            var lp = loopStack.length > 0 ? loopStack[loopStack.length - 1] : null
+            if (t != null && lp !== null && lp.bv !== undefined) {
+                if (lp.bv == "") {
+                    hidCount++
+                    lp.bv = "$wbrk" + hidCount
+                }
+                callExt(b, "js_scope_set", [curScopeV, emitStr(b, lp.bv), v])
+            }
             emitBreak(b)
             return {b: deadBlock(), v: hNull}
         }
@@ -2883,14 +2926,14 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             var headB = curF.NewBlock("")
             var bodyB = curF.NewBlock("")
             var exitB = curF.NewBlock("")
-            b.NewBr(headB)
             var r = condT(headB)
             r.b.NewCondBr(truthy(r.b, r.v), bodyB, exitB)
-            loopStack.push({cont: headB, brk: exitB})
+            var lp = {cont: headB, brk: exitB, bv: ""}
+            loopStack.push(lp)
             var rb = bodyT(bodyB)
             rb.b.NewBr(headB)
             loopStack.pop()
-            return {b: exitB, v: hNull}
+            return loopValue(b, lp, headB, exitB)
         }
     }
     function makeUntil(bodyT, condT) {
@@ -2898,15 +2941,28 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             var headB = curF.NewBlock("")
             var bodyB = curF.NewBlock("")
             var exitB = curF.NewBlock("")
-            b.NewBr(headB)
             var r = condT(headB)
             r.b.NewCondBr(truthy(r.b, r.v), exitB, bodyB)
-            loopStack.push({cont: headB, brk: exitB})
+            var lp = {cont: headB, brk: exitB, bv: ""}
+            loopStack.push(lp)
             var rb = bodyT(bodyB)
             rb.b.NewBr(headB)
             loopStack.pop()
+            return loopValue(b, lp, headB, exitB)
+        }
+    }
+    // The value of a while / until loop: nil, or the value of the `break' that
+    // ended it. A loop with a valued break keeps it in a hidden local (lp.bv,
+    // named by makeBreak), reset to nil on entry; the entry branch from b is
+    // emitted last, once the body has said whether it needs one.
+    function loopValue(b, lp, headB, exitB) {
+        if (lp.bv == "") {
+            b.NewBr(headB)
             return {b: exitB, v: hNull}
         }
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, lp.bv), hNull])
+        b.NewBr(headB)
+        return {b: exitB, v: callExt(exitB, "js_scope_get", [curScopeV, emitStr(exitB, lp.bv)])}
     }
 
     // ----- Boolean operators yielding an operand (short circuit, Ruby truthiness) -----
@@ -4771,15 +4827,15 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             var headB = curF.NewBlock("")
             var bodyB = curF.NewBlock("")
             var exitB = curF.NewBlock("")
-            b.NewBr(headB)
             var r = cond(headB)
             if (mod == "while") { r.b.NewCondBr(truthy(r.b, r.v), bodyB, exitB) }
             else { r.b.NewCondBr(truthy(r.b, r.v), exitB, bodyB) }
-            loopStack.push({cont: headB, brk: exitB})
+            var lp = {cont: headB, brk: exitB, bv: ""}
+            loopStack.push(lp)
             var rb = stmt(bodyB)
             rb.b.NewBr(headB)
             loopStack.pop()
-            return {b: exitB, v: hNull}
+            return loopValue(b, lp, headB, exitB)
         }
     }
 
@@ -4794,15 +4850,15 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             var bodyB = curF.NewBlock("")
             var condB = curF.NewBlock("")
             var exitB = curF.NewBlock("")
-            b.NewBr(bodyB)
-            loopStack.push({cont: condB, brk: exitB})
+            var lp = {cont: condB, brk: exitB, bv: ""}
+            loopStack.push(lp)
             var rb = body(bodyB)
             rb.b.NewBr(condB)
             loopStack.pop()
             var rc = cond(condB)
             if (op == "while") { rc.b.NewCondBr(truthy(rc.b, rc.v), bodyB, exitB) }
             else { rc.b.NewCondBr(truthy(rc.b, rc.v), exitB, bodyB) }
-            return {b: exitB, v: hNull}
+            return loopValue(b, lp, bodyB, exitB)
         }
     }
 
@@ -5251,14 +5307,17 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (blkT != null) {
                 var isLam = name == "lambda"
                 return function(b) {
-                    // `return' inside either is LOCAL here: a lambda's return is local
-                    // in Ruby too, and a proc body stored and called later has no
-                    // catch on the stack for a non-local marker. emitBlkArg is cleared
-                    // so neither inherits it from a call being wrapped around us.
+                    // A lambda's `return' is local. A proc's leaves the method, but
+                    // only one that catches it (procRetBody): a proc body is stored and
+                    // called later, outside the call being wrapped around us, so
+                    // emitBlkArg is cleared and neither inherits it.
                     var savedBA = emitBlkArg
+                    var savedPR = curProcRet
                     emitBlkArg = false
+                    if (isLam) { curProcRet = false }
                     var r = blkT(b)
                     emitBlkArg = savedBA
+                    curProcRet = savedPR
                     var twin = blkMethT != null && needsMethTwin(name)
                     if (!isLam) {
                         if (twin) { return {b: emitMethTwin(r.b, r.v, blkMethT), v: r.v} }
@@ -5734,6 +5793,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         var savedMTag = curMethodTag
         var savedMFrame = curMethodFrame
         var savedBlkNL = curBlkNonlocal
+        var savedProcRet = curProcRet
         var savedBlkArg = emitBlkArg
         var savedHasSelf = curHasSelf
         if (isMethod) { curHasSelf = true }
@@ -5777,7 +5837,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // the non-local `return' of the block that encloses it.
         if (declBlk === true) { curMethodTag = idx; curMethodFrame = true }
         else if (isCtl !== true) { curMethodFrame = false }
-        curBlkNonlocal = isBlock === true && savedBlkArg === true
+        if (declBlk === true || (isBlock !== true && isCtl !== true)) { curProcRet = false }
+        curBlkNonlocal = isBlock === true && (savedBlkArg === true || curProcRet)
         emitBlkArg = false
         curInRescue = false
         curF = f
@@ -5847,6 +5908,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         curMethodTag = savedMTag
         curMethodFrame = savedMFrame
         curBlkNonlocal = savedBlkNL
+        curProcRet = savedProcRet
         emitBlkArg = savedBlkArg
         curHasSelf = savedHasSelf
         curSelfIsCls = savedSelfIsCls
@@ -5860,7 +5922,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         curFrame = savedFrame
         return idx
     }
-    function makeFun(items) {
+    function makeFun(items, text) {
         var name = ""
         var params = []
         var body = null
@@ -5881,8 +5943,13 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         for (var bp = 0; bp < params.length; bp++) {
             if (params[bp].blockp === true) { rubyAmpDefs["$" + (name == "initialize" ? "new" : name)] = true }
         }
-        return {name: name, params: params, singleton: singleton, srecv: srecv, pos: pos,
-                body: body != null ? body : makeBody([])}
+        var fbody = body != null ? body : makeBody([])
+        // A `return' in a proc leaves the method the proc was written in, so a def
+        // whose text has a proc and a return catches that return (procRetBody).
+        if ((text.indexOf("proc") >= 0 || text.indexOf("Proc.new") >= 0) && text.indexOf("return") >= 0) {
+            fbody = procRetBody(fbody)
+        }
+        return {name: name, params: params, singleton: singleton, srecv: srecv, pos: pos, body: fbody}
     }
     // The receiver of a `def X.m', with the whitespace the token match may have
     // carried stripped. "self" keeps the class-method path; anything else names an
