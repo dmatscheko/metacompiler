@@ -1117,6 +1117,11 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     include("lib/regex.js")
     // Exact 64-bit integers on a pair of 32-bit halves: bash's arithmetic is intmax_t.
     include("lib/int64.js")
+    // printf's float conversions: one C printf conversion, over the exact decimal of a double.
+    include("lib/exact-dec.js")
+    include("lib/c-printf.js")
+    function cpfExactDec(a) { return coreExactDec(a) }
+    function cpfRoundHalfEven(ds, k) { return coreRoundHalfEven(ds, k) }
 
     // ---- tiny stack / string helpers (self contained, no shared core) ----
 
@@ -4990,14 +4995,13 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // a conversion past the last operand reads "" or 0. Measured against bash 5.3: the flags
     // - + space # 0, width and precision (a literal or *; a negative * width left-justifies, a
     // negative * precision is none), the length modifiers h l L j z t (ignored), and
-    // d i o u x X c s b q. Width and precision count UTF-8 BYTES, and %c is the first byte.
-    // A numeric operand is read like strtoimax with base 0 (0x1f is 31, 010 is 8) -
-    // strtoumax for o u x X - or 'C / "C for a character's code; one
-    // that is not entirely a number is reported and its leading number used, with status 1.
-    // An invalid conversion character ends the output there, status 1. NOT IMPLEMENTED:
-    // %e %f %g %a print the operand as it is, since the compiled half's runtime has no
-    // double. Escapes are pfEscape's. Twin of rt_printf in languages/lib/bash-rt.c.
-    var pf = {e: "", stop: false, ai: 0, have: false, rc: 0}
+    // d i o u x X c s b q e E f F g G a A. Width and precision count UTF-8 BYTES, and %c is
+    // the first byte. A numeric operand is read like strtoimax with base 0 (0x1f is 31, 010
+    // is 8) - strtoumax for o u x X, strtold for the float conversions (pfFloat) - or 'C /
+    // "C for a character's code; one that is not entirely a number is reported and its
+    // leading number used, with status 1. An invalid conversion character ends the output
+    // there, status 1. Escapes are pfEscape's. Twin of rt_printf in languages/lib/bash-rt.c.
+    var pf = {e: "", stop: false, ai: 0, have: false, rc: 0, ei: 0}
     var pfSimple = {a: 7, b: 8, e: 27, E: 27, f: 12, n: 10, r: 13, t: 9, v: 11}
     function pfHex(cc) {
         if (cc >= 48 && cc <= 57) { return cc - 48 }
@@ -5075,6 +5079,20 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return r
     }
     function pfBad(a, msg) { emitErr("bash: printf: " + a + ": " + msg + "\n"); pf.rc = 1 }
+    // An operand that is not entirely a number. bash names the kind by the word's first two
+    // bytes alone (sh_invalidnum): 0 and a digit is octal, "0x" is hex. Twin of pf_invalid.
+    function pfInvalid(a) {
+        var c1 = a.charCodeAt(1)
+        if (a.charAt(0) == "0" && c1 >= 48 && c1 <= 57) { pfBad(a, "invalid octal number") }
+        else if (a.charAt(0) == "0" && a.charAt(1) == "x") { pfBad(a, "invalid hex number") }
+        else { pfBad(a, "invalid number") }
+    }
+    // Where the operand starts after the white space strtoimax and strtold skip.
+    function pfSpace(a) {
+        var i = 0
+        while (i < a.length && (a.charCodeAt(i) == 32 || (a.charCodeAt(i) >= 9 && a.charCodeAt(i) <= 13))) { i = i + 1 }
+        return i
+    }
     // Would the digits a[ds..de) in `base` exceed the largest magnitude the conversion holds -
     // 2^63 - 1, 2^63 for a negative signed operand, 2^64 - 1 for an unsigned one (o u x X read
     // like strtoumax)? Compared as text against that limit. Twin of pf_over.
@@ -5092,8 +5110,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // A numeric operand, as an arithmetic value (see arNorm); uns for o u x X.
     function pfNum(a, uns) {
         if (a.length > 0 && (a.charAt(0) == "'" || a.charAt(0) == "\"")) { return (a.length > 1) ? a.charCodeAt(1) : 0 }
-        var i = 0
-        while (i < a.length && (a.charAt(i) == " " || a.charAt(i) == "\t" || a.charAt(i) == "\n")) { i = i + 1 }
+        var i = pfSpace(a)
         var neg = false
         if (i < a.length && (a.charAt(i) == "-" || a.charAt(i) == "+")) { neg = a.charAt(i) == "-"; i = i + 1 }
         var base = 10
@@ -5110,18 +5127,144 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             v = i64Add(i64Mul(v, bp), i64Make(0, d))
             i = i + 1
         }
+        // An operand that is not entirely a number is reported as only that.
+        var bad = i == ds || i < a.length
+        if (bad) { pfInvalid(a) }
         if (pfOver(a, ds, i, base, neg, uns)) {
-            pfBad(a, "Result too large")
+            if (!bad) { pfBad(a, "Result too large") }
             if (uns) { return -1 }
             return arNorm(neg ? i64Make(0x80000000, 0) : i64Make(0x7fffffff, 0xffffffff))
         }
-        if (i == ds || i < a.length) {
-            var tc = a.charAt(i)
-            if (tc == "x" || tc == "X") { pfBad(a, "invalid hexadecimal number") }
-            else if (base == 8 && tc >= "0" && tc <= "9") { pfBad(a, "invalid octal number") }
-            else { pfBad(a, "invalid number") }
-        }
         return arNorm(neg ? i64Neg(v) : v)
+    }
+    // A float operand as strtold reads it - a double here: white space, a sign, then inf,
+    // infinity or nan (any case; nan( ... ) through the first ")"), a hex float 0xH.HpE or a
+    // decimal D.DeE. Reports an operand that is not entirely a number, or strtold's ERANGE:
+    // an overflow, or an inexact result below the smallest normal double. Twin of pf_flt in
+    // lib/bash-rt.c, which reads it exactly into a big integer; here a decimal goes through
+    // parseFloat (exact in both hosts) and a hex one is rounded by hand.
+    function pfFloat(a) {
+        if (a.length > 0 && (a.charAt(0) == "'" || a.charAt(0) == "\"")) { return arNum(pfNum(a, false)) }
+        var low = a.toLowerCase()
+        var i = pfSpace(a)
+        var neg = false
+        if (a.charAt(i) == "-" || a.charAt(i) == "+") { neg = a.charAt(i) == "-"; i = i + 1 }
+        var s = i
+        var v = 0
+        var range = false
+        if (low.slice(i, i + 3) == "inf") {
+            v = 1 / 0
+            i = i + ((low.slice(i, i + 8) == "infinity") ? 8 : 3)
+        } else if (low.slice(i, i + 3) == "nan") {
+            v = 0 / 0
+            i = i + 3
+            if (a.charAt(i) == "(" && a.indexOf(")", i) > 0) { i = a.indexOf(")", i) + 1 }
+        } else {
+            var hex = a.charAt(i) == "0" && low.charAt(i + 1) == "x" &&
+                (pfHex(a.charCodeAt(i + 2)) >= 0 || (a.charAt(i + 2) == "." && pfHex(a.charCodeAt(i + 3)) >= 0))
+            if (hex) { i = i + 2 }
+            // The significant digits ds, the value being ds * base^x; a hex float keeps 16,
+            // which decides its rounding, and st says a nonzero one was dropped.
+            var ds = ""
+            var x = 0
+            var dot = false
+            var any = false
+            var st = false
+            var d = 0
+            var going = true
+            while (going) {
+                if (a.charAt(i) == "." && !dot) { dot = true; i = i + 1 }
+                d = (i < a.length) ? pfHex(a.charCodeAt(i)) : -1
+                if (d < 0 || (!hex && d > 9)) { going = false } else {
+                    any = true
+                    if (hex && ds.length >= 16) {
+                        if (d != 0) { st = true }
+                        if (!dot) { x = x + 1 }
+                    } else {
+                        if (ds != "" || d != 0) { ds = ds + a.charAt(i) }
+                        if (dot) { x = x - 1 }
+                    }
+                    i = i + 1
+                }
+            }
+            if (!any) { i = s; neg = false } else {
+                var ex = pfExpSuffix(a, i, hex ? "p" : "e")
+                i = pf.ei
+                if (hex) { x = x * 4 + ex } else { x = x + ex }
+                if (ds != "" && hex) {
+                    var hr = pfHexFloat(ds.toLowerCase(), x, st)
+                    v = hr.v
+                    range = hr.range
+                } else if (ds != "") {
+                    while (ds.charAt(ds.length - 1) == "0") { ds = ds.slice(0, ds.length - 1); x = x + 1 }
+                    if (x + ds.length > 330) { v = 1 / 0 }
+                    else if (x + ds.length >= -330) { v = parseFloat("0." + ds + "e" + (x + ds.length)) }
+                    range = v == 1 / 0 || (v < Math.pow(2, -1022) && !pfDecExact(v, ds, x))
+                }
+            }
+        }
+        if (i == s || i < a.length) { pfInvalid(a) } else if (range) { pfBad(a, "Result too large") }
+        return neg ? -v : v
+    }
+    // A decimal exponent suffix at a[i] ("e", or "p" for hex): its value, saturated far past
+    // any double's, with pf.ei past it - or 0 with pf.ei at i when no digit follows the sign.
+    function pfExpSuffix(a, i, letter) {
+        pf.ei = i
+        var j = i + 1
+        if (a.charAt(i).toLowerCase() != letter) { return 0 }
+        if (a.charAt(j) == "+" || a.charAt(j) == "-") { j = j + 1 }
+        if (!(a.charCodeAt(j) >= 48 && a.charCodeAt(j) <= 57)) { return 0 }
+        var v = 0
+        while (j < a.length && a.charCodeAt(j) >= 48 && a.charCodeAt(j) <= 57) {
+            if (v < 100000000) { v = v * 10 + (a.charCodeAt(j) - 48) }
+            j = j + 1
+        }
+        pf.ei = j
+        return (a.charAt(i + 1) == "-") ? -v : v
+    }
+    // Is the double v exactly the decimal ds * 10^x (ds without leading or trailing zeros)?
+    function pfDecExact(v, ds, x) {
+        if (v == 0) { return false }
+        var dec = coreExactDec(v)
+        var all = dec.i + dec.f
+        var ax = 0 - dec.f.length
+        while (all.charAt(0) == "0") { all = all.slice(1) }
+        while (all.charAt(all.length - 1) == "0") { all = all.slice(0, all.length - 1); ax = ax + 1 }
+        return all == ds && ax == x
+    }
+    // The double nearest the hex digits hd (no leading zero) times 2^x, st set when a nonzero
+    // digit was dropped below them, rounded half to even to 53 bits - fewer below 2^-1022 -
+    // as {v, range}. Twin of pfb_round in lib/bash-rt.c.
+    function pfHexFloat(hd, x, st) {
+        var bits = ""
+        var k = 0
+        for (k = 0; k < hd.length; k++) {
+            var nib = pfHex(hd.charCodeAt(k))
+            var b4 = ""
+            var t = 0
+            for (t = 0; t < 4; t++) { b4 = ((nib % 2 == 1) ? "1" : "0") + b4; nib = (nib - nib % 2) / 2 }
+            bits = bits + b4
+        }
+        while (bits.charAt(0) == "0") { bits = bits.slice(1) }
+        var lead = bits.length - 1 + x
+        if (lead > 1100) { return {v: 1 / 0, range: true} }
+        var prec = (lead < -1022) ? lead + 1075 : 53
+        var m = 0
+        var rb = false
+        var e2 = -1074
+        if (prec < 0) { st = true } else {
+            e2 = lead + 1 - prec
+            for (k = 0; k < prec; k++) { m = m * 2 + ((k < bits.length && bits.charAt(k) == "1") ? 1 : 0) }
+            rb = prec < bits.length && bits.charAt(prec) == "1"
+            if (bits.indexOf("1", prec + 1) > 0) { st = true }
+            if (rb && (st || m % 2 == 1)) { m = m + 1 }
+            if (m >= Math.pow(2, prec)) { lead = lead + 1 }
+        }
+        if (lead > 1023) { return {v: 1 / 0, range: true} }
+        var v = m
+        while (e2 > 0) { v = v * 2; e2 = e2 - 1 }
+        while (e2 < 0) { v = v / 2; e2 = e2 + 1 }
+        return {v: v, range: (rb || st) && (m == 0 || lead < -1022)}
     }
     function pfArg(args) {
         var k = pf.ai
@@ -5215,6 +5358,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             nv = 0
             if (pf.have) { nv = pfNum(a, cv != "d" && cv != "i") }
             piece = pfInt(nv, cv, f)
+        } else if ("eEfFgGaA".indexOf(cv) >= 0) {
+            var fv = 0
+            if (pf.have) { fv = pfFloat(a) }
+            piece = cpfFloat({left: f.left, plus: f.plus, space: f.space, alt: f.alt, zero: f.zero, width: f.w, prec: f.prec}, cv.charCodeAt(0), fv)
         } else {
             if (cv == "c") { piece = (a.length > 0) ? pfCut(a, 1) : pfChr(0) }
             else if (cv == "b") { piece = pfBstr(a, 1) }
@@ -5233,7 +5380,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (a.length == 0) { return 0 }
         var fmt = a[0]
         var rest = a.slice(1)
-        pf = {e: "", stop: false, ai: 0, have: false, rc: 0}
+        pf = {e: "", stop: false, ai: 0, have: false, rc: 0, ei: 0}
         var pass = 0
         var used = false
         var bad = false

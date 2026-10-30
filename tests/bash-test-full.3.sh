@@ -945,6 +945,47 @@ q"; ( exec <<< "z"; read w; echo "$w" ); read w; echo "$w"; ( read w ); read w; 
 p
 []"
 }
+# ===== SECTION 73: printf's float conversions; what a numeric operand reports =====
+# %f %e %g %a (and F E G A) read the operand as strtold does - the double nearest it,
+# from a decimal or a hex float, inf or nan - and print that double's EXACT decimal,
+# rounded half to even, as the C library does. One that is not entirely a number is
+# reported, its leading number used and the status 1; strtold's ERANGE (an overflow, or
+# an inexact result below the smallest normal double) is "Result too large". The kind
+# of a bad number is named by the word's first two bytes. Every expected value is
+# bash 5.3's, in the C locale.
+s73m() { local m=${1#bash: }; m=${m#*line [0-9]*: }; printf '%s' "${m%%$'\n'*}"; }
+s73() {
+  local o e r v=(3.14159 7 2.675 0.25 0.1 2.5 abc 1e-5 123456789 0.0001 1e-10 1 -0 0x10 0x1.8p1)
+  v+=(inf -INF nan -nan 1e309 1e-400 2.2250738585072011e-308 2.2250738585072012e-308 2.5x "")
+  v+=(' 1.5' "'A" - 1e308 012x 0xg ' 012x' $'\v1' 123456789012345678901234567890.5 0x1p-1074)
+  check pff1 "$(printf '[%f] [%.2f] [%5.2f] [%e] [%g] [%.0f]' "${v[0]}" "${v[0]}" "${v[0]}" "${v[0]}" "${v[0]}" "${v[0]}")" "[3.141590] [3.14] [ 3.14] [3.141590e+00] [3.14159] [3]"
+  check pff2 "$(printf '%.3f|%.2f|%.1f|%.20f|%.0f' "${v[1]}" "${v[2]}" "${v[3]}" "${v[4]}" "${v[5]}")" "7.000|2.67|0.2|0.10000000000000000555|2"
+  o=$(printf '%f' "${v[6]}" 2>/dev/null); r=$?
+  e=$(printf '%f' "${v[6]}" 2>&1 >/dev/null)
+  check pff3 "$o $r $(s73m "$e")" "0.000000 1 printf: abc: invalid number"
+  check pff4 "$(printf '%g|%g|%g|%G|%#g|%g|%E' "${v[@]:7:6}" "${v[8]}")" "1e-05|1.23457e+08|0.0001|1E-10|1.00000|-0|1.234568E+08"
+  check pff5 "$(printf '%a|%A|%.2a|%.0a|%a' "${v[11]}" "${v[4]}" "${v[0]}" 1.5 "${v[34]}")" "0x1p+0|0X1.999999999999AP-4|0x1.92p+1|0x1p+0|0x1p-1074"
+  check pff6 "$(printf '%010.3f|%-10.2e|%+f|% f|%#.0f|% 010a' "${v[0]}" "${v[5]}" 1 1 3 1)" "000003.142|2.50e+00  |+1.000000| 1.000000|3.| 0x0001p+0"
+  check pff7 "$(printf '%f|%f|%f|%f|%f|%f|%010f' "${v[@]:13:6}" "${v[16]}")" "16.000000|3.000000|inf|-inf|nan|nan|      -inf"
+  o=$(printf '%f|' "${v[@]:19:4}" 2>/dev/null); r=$?
+  e=$(printf '%f' "${v[19]}" 2>&1 >/dev/null)
+  check pff8 "$o $r $(s73m "$e")" "inf|0.000000|0.000000|0.000000| 1 printf: 1e309: Result too large"
+  o=$(printf '%a|%f|' "${v[22]}" "${v[21]}" 2>/dev/null)
+  e=$(printf '%a|%f|' "${v[22]}" "${v[21]}" 2>&1 >/dev/null)
+  check pff9 "$(s73m "$e")" "printf: 2.2250738585072011e-308: Result too large"
+  check pff10 "$o" "0x1p-1022|0.000000|"
+  o=$(printf '%f|%f|%f|%f|%f' "${v[@]:23:5}" 2>/dev/null); r=$?
+  check pff11 "$o $r" "2.500000|0.000000|1.500000|65.000000|0.000000 1"
+  o=$(printf '%f' "${v[28]}")
+  check pff12 "${#o} ${o:0:20} ${o: -10}" "316 10000000000000000109 336.000000"
+  o=$(printf '%.1000f' "${v[11]}")
+  check pff13 "${#o}" 1002
+  e=$(printf '%d|' "${v[@]:29:4}" 2>&1 >/dev/null); o=$(printf '%d|' "${v[@]:29:4}" 2>/dev/null)
+  check pff14 "$o" "10|0|10|1|"
+  check pff15 "$(s73m "$e")|$(s73m "${e#*$'\n'}")|$(s73m "${e##*$'\n'}")" "printf: 012x: invalid octal number|printf: 0xg: invalid hex number|printf:  012x: invalid number"
+  e=$(printf '%#x' "${v[33]}" 2>&1)
+  check pff16 "$(s73m "$e")|${e##*$'\n'}" "printf: 123456789012345678901234567890.5: invalid number|0xffffffffffffffff"
+}
 # ===== END SECTIONS =====
 
 s47   # SECTION-CALL 47
@@ -972,5 +1013,6 @@ s69   # SECTION-CALL 69
 s70   # SECTION-CALL 70
 s71   # SECTION-CALL 71
 s72   # SECTION-CALL 72
+s73   # SECTION-CALL 73
 echo "full: $checks checks, $fails failures"
 exit $fails

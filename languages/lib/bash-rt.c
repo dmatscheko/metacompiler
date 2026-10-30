@@ -2992,14 +2992,13 @@ char *rt_pfq(char *s) {
  *
  * Measured against bash 5.3: the flags - + space # 0, width and precision (a
  * literal or *; a negative * width left-justifies, a negative * precision is
- * none), the length modifiers h l L j z t (ignored), and d i o u x X c s b q.
- * Width and precision count BYTES. A numeric operand is read like strtoimax with
- * base 0 (0x1f is 31, 010 is 8) - strtoumax for o u x X - or 'C / "C for a
- * character's code; an operand that is not entirely a number is reported and
- * its leading number used, with status 1. An invalid conversion character ends
- * the output there, status 1.
- * %e %f %g %a are not implemented: the operand is printed as it is (bash-rt.c
- * has no double).
+ * none), the length modifiers h l L j z t (ignored), and d i o u x X c s b q
+ * e E f F g G a A. Width and precision count BYTES. A numeric operand is read
+ * like strtoimax with base 0 (0x1f is 31, 010 is 8) - strtoumax for o u x X,
+ * strtold for the float conversions - or 'C / "C for a character's code; an
+ * operand that is not entirely a number is reported and its leading number
+ * used, with status 1. An invalid conversion character ends the output there,
+ * status 1.
  *
  * Escapes: the FORMAT knows \a \b \e \E \f \n \r \t \v \\ \" \' \?, \NNN octal
  * (one to three digits, \0 included), \xHH, \uHHHH and \UHHHHHHHH, and keeps
@@ -3237,6 +3236,23 @@ int pf_over(char *s, int ds, int de, long base, int neg, int uns)
     return 0;
 }
 
+/* Where the operand starts after the white space strtoimax and strtold skip. */
+int pf_space(char *a)
+{
+    int i = 0;
+    while (a[i] == 32 || (a[i] >= 9 && a[i] <= 13)) i = i + 1;
+    return i;
+}
+
+/* An operand that is not entirely a number. bash names the kind by the word's
+ * first two bytes alone (sh_invalidnum): 0 and a digit is octal, "0x" is hex. */
+int pf_invalid(char *a)
+{
+    if (a[0] == 48 && a[1] >= 48 && a[1] <= 57) return pf_bad(a, "invalid octal number");
+    if (a[0] == 48 && a[1] == 120) return pf_bad(a, "invalid hex number");
+    return pf_bad(a, "invalid number");
+}
+
 /* A numeric operand (see the head comment); uns for o u x X. */
 long pf_num(char *a, int uns)
 {
@@ -3245,12 +3261,13 @@ long pf_num(char *a, int uns)
     long base = 10;
     long v = 0;
     int ds;
+    int bad;
     long d;
     if (a[0] == 39 || a[0] == 34) {
         if (a[1] == 0) return 0;
         return (long)rt_cpat(&a[1]);
     }
-    while (a[i] == 32 || a[i] == 9 || a[i] == 10) i = i + 1;
+    i = pf_space(a);
     if (a[i] == 45 || a[i] == 43) {
         neg = a[i] == 45;
         i = i + 1;
@@ -3268,18 +3285,16 @@ long pf_num(char *a, int uns)
         v = v * base + d;
         i = i + 1;
     }
+    /* An operand that is not entirely a number is reported as only that. */
+    bad = i == ds || a[i] != 0;
+    if (bad != 0) pf_invalid(a);
     if (pf_over(a, ds, i, base, neg, uns) != 0) {
-        pf_bad(a, "Result too large");
+        if (bad == 0) pf_bad(a, "Result too large");
         if (uns != 0) return -1;
         if (neg != 0) return 0 - 9223372036854775807L - 1;
         return 9223372036854775807L;
     }
     if (neg != 0) v = 0 - v;
-    if (i == ds || a[i] != 0) {
-        if (a[i] == 120 || a[i] == 88) pf_bad(a, "invalid hexadecimal number");
-        else if (base == 8 && a[i] >= 48 && a[i] <= 57) pf_bad(a, "invalid octal number");
-        else pf_bad(a, "invalid number");
-    }
     return v;
 }
 
@@ -3396,6 +3411,568 @@ char *pf_int(long v, int conv, int left, int plus, int space, int alt, int zero,
     return pf_pad(rt_strcat(pre, dg), w, left, (zero != 0 && prec < 0 && left == 0) ? 1 : 0, rt_strlen(pre));
 }
 
+/* ---- printf's float conversions: a A e E f F g G --------------------------
+ * bash reads the operand with strtold (on this platform a double) and prints it
+ * with the C library's printf. Neither step needs a double here: the operand is
+ * read EXACTLY into a big integer and rounded once, half to even, to the double
+ * nearest it, kept as pf_fm * 2^pf_fx; the digits printed are that value's exact
+ * decimal expansion, rounded half to even. strtold reports ERANGE when the result
+ * overflows, or is below the smallest normal double and inexact. Twin of pfFloat
+ * in bash-interpreter.abnf, which formats with lib/c-printf.js. */
+
+/* The big integer: little-endian limbs of 32 bits, pfb_n of them in use. */
+long pfb[200];
+int pfb_n;
+
+/* pfb = pfb * mul + add, both below 2^30. */
+int pfb_muladd(long mul, long add)
+{
+    int i = 0;
+    long c = add;
+    while (i < pfb_n) {
+        long t = pfb[i] * mul + c;
+        pfb[i] = t & 4294967295L;
+        c = t >> 32;
+        i = i + 1;
+    }
+    if (c != 0) {
+        pfb[pfb_n] = c;
+        pfb_n = pfb_n + 1;
+    }
+    return 0;
+}
+
+/* pfb = floor(pfb / d), d below 2^30; answers the remainder. */
+long pfb_div(long d)
+{
+    long r = 0;
+    int i = pfb_n - 1;
+    while (i >= 0) {
+        long t = (r << 32) | pfb[i];
+        pfb[i] = t / d;
+        r = t % d;
+        i = i - 1;
+    }
+    while (pfb_n > 0 && pfb[pfb_n - 1] == 0) pfb_n = pfb_n - 1;
+    return r;
+}
+
+/* pfb = pfb * 2^s. */
+int pfb_shl(long s)
+{
+    int w = (int)(s / 32);
+    int b = (int)(s % 32);
+    int n = pfb_n + w + 1;
+    int i = n - 1;
+    if (pfb_n == 0) return 0;
+    while (i >= 0) {
+        long hi = (i - w >= 0 && i - w < pfb_n) ? pfb[i - w] : 0;
+        long lo = (i - w - 1 >= 0 && i - w - 1 < pfb_n) ? pfb[i - w - 1] : 0;
+        if (b == 0) pfb[i] = hi;
+        else pfb[i] = ((hi << b) | (lo >> (32 - b))) & 4294967295L;
+        i = i - 1;
+    }
+    pfb_n = n;
+    while (pfb_n > 0 && pfb[pfb_n - 1] == 0) pfb_n = pfb_n - 1;
+    return 0;
+}
+
+/* pfb's bit length, and its bit k (0 below bit 0). */
+long pfb_bits(void)
+{
+    long n;
+    long top;
+    if (pfb_n == 0) return 0;
+    n = (long)(pfb_n - 1) * 32;
+    top = pfb[pfb_n - 1];
+    while (top != 0) {
+        n = n + 1;
+        top = top >> 1;
+    }
+    return n;
+}
+
+int pfb_bit(long k)
+{
+    if (k < 0) return 0;
+    return (int)((pfb[k / 32] >> (k % 32)) & 1);
+}
+
+/* The operand as strtold read it: pf_fk 0 a finite pf_fm * 2^pf_fx, 1 an
+ * infinity, 2 a NaN; pf_fneg its sign, pf_frange set for ERANGE. */
+long pf_fm;
+long pf_fx;
+int pf_fk;
+int pf_fneg;
+int pf_frange;
+
+/* The double nearest pfb * 2^x, pfb nonzero; st says a nonzero tail was
+ * dropped below it. A double has 53 bits, fewer below 2^-1022 (subnormal). */
+int pfb_round(long x, int st)
+{
+    long bl = pfb_bits();
+    long lead = bl - 1 + x;
+    long prec = 53;
+    long m = 0;
+    long e2 = -1074;
+    long k = 0;
+    int rb = 0;
+    if (lead > 1100) {
+        pf_fk = 1;
+        pf_frange = 1;
+        return 0;
+    }
+    if (lead < -1022) prec = lead + 1075;
+    if (prec < 0) {
+        st = 1;
+    } else {
+        e2 = lead + 1 - prec;
+        while (k < prec) {
+            m = m * 2 + (long)pfb_bit(bl - 1 - k);
+            k = k + 1;
+        }
+        rb = pfb_bit(bl - 1 - prec);
+        k = bl - 2 - prec;
+        while (k >= 0 && st == 0) {
+            if (pfb_bit(k) != 0) st = 1;
+            k = k - 1;
+        }
+        if (rb != 0 && (st != 0 || (m & 1) != 0)) m = m + 1;
+        /* The carry out of the top bit makes the value the next power of two. */
+        if (m >> prec != 0) lead = lead + 1;
+    }
+    pf_fm = m;
+    pf_fx = e2;
+    if (lead > 1023) {
+        pf_fk = 1;
+        pf_frange = 1;
+    } else if ((rb != 0 || st != 0) && (m == 0 || lead < -1022)) {
+        pf_frange = 1;
+    }
+    return 0;
+}
+
+/* Lower-case c equals the letter l. */
+int pf_lc(int c, int l)
+{
+    return (c == l || c + 32 == l) ? 1 : 0;
+}
+
+/* A decimal exponent's digits from a[i], saturated far beyond any double's;
+ * pf_ei is where they end. */
+int pf_ei;
+long pf_exp(char *a, int i)
+{
+    long v = 0;
+    while (a[i] >= 48 && a[i] <= 57) {
+        if (v < 100000000) v = v * 10 + (long)(a[i] - 48);
+        i = i + 1;
+    }
+    pf_ei = i;
+    return v;
+}
+
+/* An exponent suffix at a[i] (p for hex, e for decimal): its value, with
+ * pf_ei past it, or 0 with pf_ei at i when no digit follows the sign. */
+long pf_sfx(char *a, int i, int letter)
+{
+    int j = i + 1;
+    long v;
+    pf_ei = i;
+    if (pf_lc((int)a[i], letter) == 0) return 0;
+    if (a[j] == 43 || a[j] == 45) j = j + 1;
+    if (a[j] < 48 || a[j] > 57) return 0;
+    v = pf_exp(a, j);
+    return a[i + 1] == 45 ? 0 - v : v;
+}
+
+/* Reads a float operand into pf_f* and reports one that is not entirely a
+ * number, or out of range. */
+int pf_flt(char *a)
+{
+    int i;
+    int s;
+    int nd = 0;
+    int dot = 0;
+    int st = 0;
+    int any = 0;
+    int hex = 0;
+    long x = 0;
+    long d;
+    pf_fk = 0;
+    pf_fneg = 0;
+    pf_frange = 0;
+    pf_fm = 0;
+    pf_fx = 0;
+    pfb_n = 0;
+    if (a[0] == 39 || a[0] == 34) {
+        pf_fm = pf_num(a, 0);
+        return 0;
+    }
+    i = pf_space(a);
+    if (a[i] == 45 || a[i] == 43) {
+        pf_fneg = a[i] == 45;
+        i = i + 1;
+    }
+    s = i;
+    if (pf_lc((int)a[i], 105) != 0 && pf_lc((int)a[i + 1], 110) != 0 && pf_lc((int)a[i + 2], 102) != 0) {
+        pf_fk = 1;
+        i = i + 3;
+        if (pf_lc((int)a[i], 105) != 0 && pf_lc((int)a[i + 1], 110) != 0 && pf_lc((int)a[i + 2], 105) != 0
+            && pf_lc((int)a[i + 3], 116) != 0 && pf_lc((int)a[i + 4], 121) != 0) i = i + 5;
+    } else if (pf_lc((int)a[i], 110) != 0 && pf_lc((int)a[i + 1], 97) != 0 && pf_lc((int)a[i + 2], 110) != 0) {
+        /* nan, or nan( ... ) through the first ")". */
+        pf_fk = 2;
+        i = i + 3;
+        if (a[i] == 40) {
+            int j = i + 1;
+            while (a[j] != 0 && a[j] != 41) j = j + 1;
+            if (a[j] == 41) i = j + 1;
+        }
+    } else {
+        if (a[i] == 48 && pf_lc((int)a[i + 1], 120) != 0
+            && (pf_hexval((int)(unsigned char)a[i + 2]) >= 0 || (a[i + 2] == 46 && pf_hexval((int)(unsigned char)a[i + 3]) >= 0))) {
+            hex = 1;
+            i = i + 2;
+        }
+        /* The digits: at most 800 significant decimal ones (16 hex ones) are
+         * kept, which decides the rounding; a nonzero digit past them is st. */
+        while (1) {
+            if (a[i] == 46 && dot == 0) {
+                dot = 1;
+                i = i + 1;
+            }
+            d = hex != 0 ? (long)pf_hexval((int)(unsigned char)a[i]) : (a[i] >= 48 && a[i] <= 57 ? (long)(a[i] - 48) : -1);
+            if (d < 0) break;
+            any = 1;
+            if (nd < (hex != 0 ? 16 : 800)) {
+                pfb_muladd(hex != 0 ? 16 : 10, d);
+                if (pfb_n > 0) nd = nd + 1;
+                if (dot != 0) x = x - 1;
+            } else {
+                if (d != 0) st = 1;
+                if (dot == 0) x = x + 1;
+            }
+            i = i + 1;
+        }
+        if (any == 0) {
+            /* No number at all: strtold answers +0 and reads nothing. */
+            i = s;
+            pf_fneg = 0;
+        } else if (hex != 0) {
+            x = x * 4 + pf_sfx(a, i, 112);
+            i = pf_ei;
+            if (pfb_n > 0) pfb_round(x, st);
+        } else {
+            x = x + pf_sfx(a, i, 101);
+            i = pf_ei;
+            if (pfb_n == 0) {
+                pf_fm = 0;
+            } else if (x + nd > 330) {
+                pf_fk = 1;
+                pf_frange = 1;
+            } else if (x + nd < -330) {
+                pf_frange = 1;
+            } else if (x >= 0) {
+                while (x > 0) {
+                    pfb_muladd(x >= 9 ? 1000000000 : 10, 0);
+                    x = x - (x >= 9 ? 9 : 1);
+                }
+                pfb_round(0, st);
+            } else {
+                /* pfb * 2^sh / 10^-x, with enough quotient bits to round. */
+                long m10 = 0 - x;
+                long sh = 58 + (m10 * 3322 + 999) / 1000 - pfb_bits();
+                if (sh < 0) sh = 0;
+                pfb_shl(sh);
+                while (m10 > 0) {
+                    if (pfb_div(m10 >= 9 ? 1000000000 : 10) != 0) st = 1;
+                    m10 = m10 - (m10 >= 9 ? 9 : 1);
+                }
+                pfb_round(0 - sh, st);
+            }
+        }
+    }
+    if (i == s || a[i] != 0) pf_invalid(a);
+    else if (pf_frange != 0) pf_bad(a, "Result too large");
+    return 0;
+}
+
+/* n zeros. */
+char *pf_zeros(int n)
+{
+    char *z;
+    int i = 0;
+    if (n <= 0) return empty;
+    z = rt_bump(n + 1);
+    while (i < n) {
+        z[i] = 48;
+        i = i + 1;
+    }
+    z[n] = 0;
+    return z;
+}
+
+/* The exact decimal of the finite pf_fm * 2^pf_fx: m * 2^x, or m * 5^-x with
+ * the point -x digits from the right. Answers its digits; the first pf_dil of
+ * them (at least one) are the integer part. Twin of coreExactDec. */
+int pf_dil;
+char *pf_dec(void)
+{
+    long x = pf_fx;
+    int frac = 0;
+    int cap;
+    int pos;
+    int k;
+    long r;
+    char *b;
+    pfb[0] = pf_fm & 4294967295L;
+    pfb[1] = pf_fm >> 32;
+    pfb_n = pfb[1] != 0 ? 2 : (pfb[0] != 0 ? 1 : 0);
+    if (pfb_n == 0) x = 0;
+    if (x >= 0) {
+        pfb_shl(x);
+    } else {
+        frac = (int)(0 - x);
+        while (x < 0) {
+            pfb_muladd(x <= -12 ? 244140625 : 5, 0);
+            x = x + (x <= -12 ? 12 : 1);
+        }
+    }
+    /* A 32-bit limb is at most ten decimal digits, and each pass writes nine. */
+    cap = 10 * pfb_n + 9 + frac + 2;
+    b = rt_bump(cap);
+    pos = cap - 1;
+    b[pos] = 0;
+    while (pfb_n > 0) {
+        r = pfb_div(1000000000);
+        k = 0;
+        while (k < 9) {
+            pos = pos - 1;
+            b[pos] = (char)(48 + r % 10);
+            r = r / 10;
+            k = k + 1;
+        }
+    }
+    while (b[pos] == 48 && cap - 1 - pos > frac + 1) pos = pos + 1;
+    while (cap - 1 - pos < frac + 1) {
+        pos = pos - 1;
+        b[pos] = 48;
+    }
+    pf_dil = cap - 1 - pos - frac;
+    return &b[pos];
+}
+
+/* The first keep digits of ds rounded half to even: keep + 1 of them when the
+ * carry runs out (999 -> 1000), "0" for none. Twin of coreRoundHalfEven. */
+char *pf_rhe(char *ds, int keep)
+{
+    int n = rt_strlen(ds);
+    char *r = rt_bump(keep + 2);
+    int up = 0;
+    int i = 0;
+    while (i < keep) {
+        r[i + 1] = i < n ? ds[i] : 48;
+        i = i + 1;
+    }
+    r[keep + 1] = 0;
+    if (keep < n) {
+        up = ds[keep] > 53 ? 1 : 0;
+        if (ds[keep] == 53) {
+            i = keep + 1;
+            while (i < n && ds[i] == 48) i = i + 1;
+            if (i < n) up = 1;
+            else if (keep > 0) up = (ds[keep - 1] - 48) % 2;
+        }
+    }
+    if (up == 0) return keep == 0 ? "0" : &r[1];
+    i = keep;
+    while (i >= 1 && r[i] == 57) {
+        r[i] = 48;
+        i = i - 1;
+    }
+    if (i == 0) {
+        r[0] = 49;
+        return r;
+    }
+    r[i] = (char)(r[i] + 1);
+    return &r[1];
+}
+
+/* The nonzero value's digits rounded to n significant ones; pf_se is the
+ * exponent of the first. */
+long pf_se;
+char *pf_sig(int n)
+{
+    char *all = pf_dec();
+    int lead = 0;
+    char *ds;
+    while (all[lead] == 48) lead = lead + 1;
+    pf_se = (long)(pf_dil - 1 - lead);
+    ds = pf_rhe(&all[lead], n);
+    if (rt_strlen(ds) > n) {
+        ds = rt_substr(ds, 0, n);
+        pf_se = pf_se + 1;
+    }
+    return ds;
+}
+
+/* %e with prec digits after the point. */
+char *pf_fe(int prec, int alt)
+{
+    char *ds;
+    char *body;
+    long e = 0;
+    long ae;
+    if (pf_fm == 0) {
+        ds = pf_zeros(prec + 1);
+    } else {
+        ds = pf_sig(prec + 1);
+        e = pf_se;
+    }
+    body = rt_substr(ds, 0, 1);
+    if (prec > 0 || alt != 0) body = rt_strcat(rt_strcat(body, "."), rt_substr(ds, 1, -1));
+    ae = e < 0 ? 0 - e : e;
+    body = rt_strcat(body, e < 0 ? "e-" : "e+");
+    if (ae < 10) body = rt_strcat(body, "0");
+    return rt_strcat(body, rt_int2str(ae));
+}
+
+/* %f with prec digits after the point. */
+char *pf_ff(int prec, int alt)
+{
+    char *all = pf_dec();
+    int il = pf_dil;
+    char *kept = pf_rhe(all, il + prec);
+    char *ints;
+    if (rt_strlen(kept) > il + prec) il = il + 1;
+    ints = rt_substr(kept, 0, il);
+    if (prec > 0) return rt_strcat(rt_strcat(ints, "."), rt_substr(kept, il, -1));
+    return alt != 0 ? rt_strcat(ints, ".") : ints;
+}
+
+/* %g: %e or %f by the exponent the value has at P significant digits, its
+ * trailing zeros (and a bare point) dropped unless '#'. */
+char *pf_fg(int prec, int alt)
+{
+    int p = prec < 0 ? 6 : (prec == 0 ? 1 : prec);
+    long x = 0;
+    char *s;
+    int ei = 0;
+    int k;
+    if (pf_fm != 0) {
+        pf_sig(p);
+        x = pf_se;
+    }
+    if (x < -4 || x >= p) s = pf_fe(p - 1, alt);
+    else s = pf_ff(p - 1 - (int)x, alt);
+    if (alt != 0 || rt_haschar(s, 46) == 0) return s;
+    while (s[ei] != 0 && s[ei] != 101) ei = ei + 1;
+    k = ei;
+    while (s[k - 1] == 48) k = k - 1;
+    if (s[k - 1] == 46) k = k - 1;
+    return rt_strcat(rt_substr(s, 0, k), rt_substr(s, ei, -1));
+}
+
+/* %a: 0x1.<hex>p<exp>, normalized (a subnormal too). A precision cuts the hex
+ * digits and rounds them as this platform's libc does, reading only the next
+ * two: up from 0x90, down below 0x80, and in between up when the second is
+ * odd; a carry makes the lead digit 2. */
+char *pf_fa(int prec, int alt)
+{
+    char *hx = "0123456789abcdef";
+    char *ds = rt_bump(14);
+    char *body;
+    long m = pf_fm;
+    long e = 0;
+    long f;
+    int lead = 48;
+    int nd = 0;
+    int k;
+    int nx;
+    if (m != 0) {
+        lead = 49;
+        e = pf_fx + 52;
+        while (m < 4503599627370496L) {
+            m = m * 2;
+            e = e - 1;
+        }
+        while (m >= 9007199254740992L) {
+            m = m / 2;
+            e = e + 1;
+        }
+        f = m - 4503599627370496L;
+        while (f != 0) {
+            ds[nd] = hx[(f >> 48) & 15];
+            f = (f << 4) & 4503599627370495L;
+            nd = nd + 1;
+        }
+    }
+    ds[nd] = 0;
+    if (prec >= 0 && nd > prec) {
+        nx = pf_hexval((int)ds[prec]) * 16 + (prec + 1 < nd ? pf_hexval((int)ds[prec + 1]) : 0);
+        nd = prec;
+        ds[nd] = 0;
+        if (nx >= 144 || (nx >= 128 && nx % 2 == 1)) {
+            k = nd - 1;
+            while (k >= 0 && ds[k] == 102) {
+                ds[k] = 48;
+                k = k - 1;
+            }
+            if (k >= 0) ds[k] = hx[pf_hexval((int)ds[k]) + 1];
+            else lead = 50;
+        }
+    }
+    body = rt_strcat("0x", pf_chr(lead));
+    if (nd > 0 || alt != 0 || prec > 0) body = rt_strcat(rt_strcat(body, "."), ds);
+    if (prec > nd) body = rt_strcat(body, pf_zeros(prec - nd));
+    body = rt_strcat(body, e < 0 ? "p-" : "p+");
+    return rt_strcat(body, rt_int2str(e < 0 ? 0 - e : e));
+}
+
+/* One float conversion of operand a: the sign, inf / nan (no zero padding, and
+ * nan no sign), the digits, the case, the padding. Twin of cpfFloat. */
+char *pf_float(char *a, int conv, int left, int plus, int space, int alt, int zero, int w, int prec)
+{
+    int lc = conv >= 97 ? conv : conv + 32;
+    int pad0 = 0;
+    char *sign = empty;
+    char *body;
+    char *fill;
+    int n;
+    int i = 0;
+    pf_fk = 0;
+    pf_fneg = 0;
+    pf_fm = 0;
+    pf_fx = 0;
+    if (pf_have != 0) pf_flt(a);
+    if (pf_fk == 2) sign = empty;
+    else if (pf_fneg != 0) sign = "-";
+    else if (plus != 0) sign = "+";
+    else if (space != 0) sign = " ";
+    if (pf_fk != 0) body = pf_fk == 2 ? "nan" : "inf";
+    else if (lc == 101) body = pf_fe(prec < 0 ? 6 : prec, alt);
+    else if (lc == 102) body = pf_ff(prec < 0 ? 6 : prec, alt);
+    else if (lc == 103) body = pf_fg(prec, alt);
+    else body = pf_fa(prec, alt);
+    if (conv < 97) body = rt_case(body, 1, empty);
+    n = rt_strlen(sign) + rt_strlen(body);
+    pad0 = zero != 0 && left == 0 && pf_fk == 0;
+    /* The zero padding of %a goes behind the "0x". */
+    if (pad0 != 0 && lc == 97)
+        return rt_strcat(rt_strcat(rt_strcat(sign, rt_substr(body, 0, 2)), pf_zeros(w - n)), rt_substr(body, 2, -1));
+    if (n >= w) return rt_strcat(sign, body);
+    fill = rt_bump(w - n + 1);
+    while (i < w - n) {
+        fill[i] = pad0 != 0 ? 48 : 32;
+        i = i + 1;
+    }
+    fill[w - n] = 0;
+    if (left != 0) return rt_strcat(rt_strcat(sign, body), fill);
+    if (pad0 != 0) return rt_strcat(rt_strcat(sign, fill), body);
+    return rt_strcat(rt_strcat(fill, sign), body);
+}
+
 /* The next operand of the field list args (nargs of them), "" past the end. */
 char *pf_arg(char *args, int nargs)
 {
@@ -3474,6 +4051,8 @@ int pf_conv(char *fmt, int i, char *args, int nargs)
         nv = 0;
         if (pf_have != 0) nv = pf_num(a, (cv == 100 || cv == 105) ? 0 : 1);
         piece = pf_int(nv, cv, left, plus, space, alt, zero, w, prec);
+    } else if (rt_haschar("eEfFgGaA", cv) != 0) {
+        piece = pf_float(a, cv, left, plus, space, alt, zero, w, prec);
     } else {
         piece = pf_enc(a);
         if (cv == 99) piece = a[0] != 0 ? pf_chr((int)(unsigned char)a[0]) : pf_chr(0);
