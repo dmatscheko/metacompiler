@@ -66,7 +66,7 @@ its report; anything structural there is a CORE ticket.
 
 # RB — Ruby
 
-### T-854 ruby: binary (ASCII-8BIT) strings · P3 · RB · OPEN [V RB worker]
+### T-854 ruby: binary (ASCII-8BIT) strings · P3 · RB · IN PROGRESS (RB worker, round 24) [V RB worker]
 `p 255.chr.bytes, 255.chr.encoding, 255.chr` → ruby `[255]`, `#<Encoding:ASCII-8BIT>`, `"\xFF"`; ours `[195, 191]`,
 String#encoding undefined. Strings are untagged UTF-16 primitives. Design (RB worker): a box `{__rbin: s}`, one char
 per byte (U+0000..U+00FF), modelled on the `{__flo}` float box — Go twin type + layer-2 object, typed strings keep
@@ -75,7 +75,7 @@ size/length, [], each_byte, inspect ("\xFF"), encoding, ==, +/<< (MRI's compatib
 unpack, valid_encoding?. Floor part FIRST: `puts 255.chr` must write the raw byte 0xFF, but output UTF-8-encodes
 text — needs a raw-byte write in runtime.c, the Go twin and the interpreter hosts. ~400-600 lines, 4-5 files.
 
-### T-855 ruby: private/constant/enumerator gaps · P3 · RB · OPEN [V RB worker]
+### T-855 ruby: private/constant/enumerator gaps · P3 · RB · IN PROGRESS (RB worker, round 24) [V RB worker]
 Oracle LC_ALL=en_US.UTF-8 /usr/bin/ruby 2.6. (1) compiler: `class A; private def q; end; end` → "undefined method
 `private' for A:Class". (2) both: a user private/protected method's error says "private method 'q' called"; MRI
 "private method `q' called for #<A:0x...>". (3) compiler: after `begin; class E < Nope; end; rescue NameError; end`,
@@ -145,7 +145,7 @@ is named ClosedDoubleRange (no Float mark on the range value). (7) `null as T` f
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-849 bash: a backslash-newline that splits a name is not spliced · P3 · SH · OPEN [V SH worker]
+### T-849 bash: a backslash-newline that splits a name is not spliced · P3 · SH · IN PROGRESS (SH worker, round 11) [V SH worker]
 bash removes `\⏎` before tokenizing; ours does not inside names. bash 5.3 vs ours (interp): `x\⏎y=3; echo $xy`
 → `3` vs "command not found: xy=3"; `echo ${#arr\⏎[@]}`, `echo ${#\⏎arr[@]}` → `3` vs parse failure;
 `echo ${\⏎x:-dflt}` → `dflt` vs parse failure; `echo $x\⏎y` not isolated. Compiler not checked. Needs a
