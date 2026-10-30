@@ -96,7 +96,9 @@ Rules:
 - Settle every answer with the REAL toolchain, and paste the oracle output in your
   report: node 24, python3, go, swiftc 6.1.2, java/javac 24, /opt/homebrew/bin/bash
   5.3, /usr/bin/ruby 2.6 (old: Ruby-3 syntax rejected, but most semantics match), lua
-  5.5, cc/clang. Kotlin: the real stdlib jar
+  5.5, cc/clang. Java 24 is NOT the `java` on PATH (that is 21, whose older Unicode
+  tables fail real assertions): use $(/usr/libexec/java_home -v 24)/bin/java and
+  javac. Kotlin: the real stdlib jar
   (~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/
   kotlin-stdlib-2.2.21.jar) can be called from a java program. TypeScript: a real tsc
   ships with VS Code (manual ch. 5). No dotnet, dart, kotlinc or php: for those, fix
