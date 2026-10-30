@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-874** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-875** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -137,15 +137,12 @@ for a dereference.
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-871 bash: prefix assignments with declaration builtins, local, unset, arrays, readonly; native arena growth · P2 · SH · IN PROGRESS (SH worker, round 17) [V SH worker]
-bash 5.3, every leg. REJECTED: `x=5 export x` → "command not found: export", exit 127 (bash keeps x=5 afterwards; same
-for `readonly x`, `declare -x x`; `declare x`/`typeset x` leave the old value). REJECTED: `x+=2 k` (a `+=` prefix) does
-not parse (bash runs k with x=12). WRONG: `f(){ local x; echo "[$x]"; }; x=5 f` → bash `[5]`, ours `[]`. WRONG:
-`f(){ unset x; echo ${x-unset}; }; x=1; x=5 f` → bash `1` (unset removes only the temporary binding), ours `unset`. WRONG:
-`a=(1 2); f(){ echo "$a ${a[1]-u} ${#a[@]}"; }; a=5 f` → bash `5 u 1`, ours `1 2 2`. WRONG: `readonly r=1; pr(){ echo $r;
-}; r=2 pr` → bash `1` + "r: readonly variable" on stderr, ours `2`. MEMORY: a native loop of 300k simple commands each
-expanding ~160 bytes reaches 200–295 MB resident (same on the base): every store raises the bash runtime's arena floor
-above the words just expanded — find a reset point per command.
+### T-874 bash: declare -g, top-level local, readonly on read/printf -v/let, remaining arena growth · P2 · SH · OPEN [V SH worker]
+bash 5.3, both halves. WRONG: `x=1; f(){ local x=2; declare -g x=3; echo $x; }; f; echo $x` → bash `2`/`3`, ours `3`/`1`
+(also under a prefix binding). WRONG: `local y=5` at top level → bash "local: can only be used in a function", status 1,
+y unset; ours sets y, status 0. readonly is not enforced by `read`, `printf -v`, `mapfile`, `let`/`(( ))`, `${v:=w}`.
+MEMORY (native, 300k passes, 166-byte words): `IFS=, read -r a b` 200 MB, `echo | read x` 151 MB (pipeline/PIPESTATUS
+pin), `y=…; x=$y` 99 MB (x shares y's buffer), `set --` 59 MB — the rest of the loop bodies now stay at ~3.8 MB.
 
 # C — C subset
 
@@ -930,6 +927,7 @@ T-775 missing features met in real programs (Benchmarks Game, Rosetta Code) — 
 T-867 bash: a prefix assignment is visible while the command's own words expand — DONE 18bf1dde (words expand first, then prefix assignments left to right, redirection words see the old values, names restored after — interp applyPrefix/openRedirsOuter/restorePrefix, compiler expandedWord/prefixOuter; no-command-word assignments persist with the last substitution's status; temporary bindings take no attributes and leave arrays alone; bash bench unchanged)
 T-864 ruby: encoding and module leftovers — DONE 9e2eeb10 (hash keys equal across encodings in all engines; private/protected_instance_methods and private in module bodies; nested names no longer leak globally, body constants resolve lexically, module bodies run after their methods install; float pack directives; String#encode with MRI's error classes and replace options; in-place re-encoding seen through aliases — Go twin forwards jsRStr→jsRBin, append loop −0.5%)
 T-868 kotlin: nested names leak globally; builtin qualifiedName; type-blind receiver rule — DONE de73477b (receiver rule checks applicability by named args and builtin argument types — the regression fixed, arguments evaluated once; nested names bound globally only when no top-level declaration claims them; builtin KClass names per stdlib; class and superclass companions are implicit receivers. DECLINED: the " (Kotlin reflection is not available)" suffix when printing a KClass — it depends on whether kotlin-reflect is on the JVM classpath, not on the language)
+T-871 bash: prefix assignments with declaration builtins, local, unset, arrays, readonly; native arena growth — PARTIAL 6fc7fc4b — prefix + declaration builtins (PrefixDecl), += prefixes, function prefix bindings as the function's frame (local inherits, unset reveals the caller's, hides arrays), readonly refused on assignment/prefix/local/declare/unset/for; per-statement arena release: 300k-pass loops 52–199 MB → 3.7–3.8 MB; bash bench +0.77%. Compiler lexical attributes under a prefix (n=4 f keeps -i/-u) recorded as a compile-time-attribute divergence in manual 7.9. Rest filed as T-874
 
 # Settled — do not re-open
 
