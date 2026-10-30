@@ -4299,6 +4299,8 @@ function rbRangeArr(lo, hi, excl) {
     var out = []
     if (typeof lo == "string") {
         var hs = rbStr(hi)
+        // A begin past the end is empty (rb_str_upto_each): ("y".."ab") is [].
+        if (lo > hs) { return out }
         var s = lo
         var n = 0
         while (n < 1000000) {
@@ -4421,6 +4423,19 @@ function rbRangeMethod(t, name, args) {
     if (name == "end") { return t["end"] }
     if (name == "first" && npos == 0) { return t["begin"] }
     if (name == "last" && npos == 0) { return t["end"] }
+    // first(n) from an Integer takes one element at a time, so an endless or
+    // infinite range answers too. Twin of the arm in rangeMethod.
+    if (name == "first" && (typeof t["begin"] == "number" || rbIsBig(t["begin"]))) {
+        var fn = Math.trunc(rbToF(rbArgAt(args, 0)))
+        var fo = []
+        var fc = anytype
+        fc = t["begin"]
+        while (fo.length < fn && rbOpenRangeCover(t, fc)) {
+            fo.push(fc)
+            fc = rbBin("+", fc, 1)
+        }
+        return fo
+    }
     if (name == "to_s") { return rbRangeText(t, false) }
     if (name == "inspect") { return rbRangeText(t, true) }
     if (name == "class") { return rbBuiltinClass("Range") }
@@ -4569,7 +4584,7 @@ function rbBin(op, l, r) {
     if (op == "*") {
         if (typeof l == "string") {
             var n = Math.trunc(rbToF(r))
-            if (n < 0) { n = 0 }
+            if (n < 0) { rbRaiseErr("*", "ArgumentError", "negative argument") }
             return rbMkRStr(rtRepeat(l, n), false)
         }
         // Array#* is repetition with an Integer and JOIN with a String.
@@ -4579,6 +4594,7 @@ function rbBin(op, l, r) {
             var rep = []
             var t = 0
             var times = Math.trunc(rbToF(r))
+            if (times < 0) { rbRaiseErr("*", "ArgumentError", "negative argument") }
             while (t < times) {
                 var j = 0
                 while (j < l.length) {
@@ -6774,7 +6790,7 @@ function rbArrayMethod(t, name, args) {
     // the array of groups - what .to_a on that Enumerator would give.
     if (name == "each_slice" || name == "each_cons") {
         var gn = Math.trunc(rbToF(rbPosAt(args, nPos, 0)))
-        if (gn < 1) { fail("invalid size") }
+        if (gn < 1) { rbRaiseErr(name, "ArgumentError", name == "each_slice" ? "invalid slice size" : "invalid size") }
         var groups = []
         var gi = 0
         if (name == "each_slice") {
@@ -8490,7 +8506,7 @@ function js_rsetsl(o, k1, k2, v) {
     // A RANGE key is a slice write, not an element write.
     if (rtIsNil(k2) && !rbIsArr(k1) && !rbIsRange(k1)) { js_rset(o, k1, v); return o }
     var ab = rbSliceBounds(o.length, k1, k2)
-    if (ab["s"] < 0) { fail("index " + ab["s"] + " too small for array") }
+    if (ab["s"] < 0) { rbRaiseErr("[]=", "IndexError", "index " + (ab["s"] - o.length) + " too small for array; minimum: -" + o.length) }
     while (o.length < ab["s"]) { o.push(null) }
     var al = ab["l"]
     if (ab["s"] + al > o.length) { al = o.length - ab["s"] }
@@ -8520,7 +8536,7 @@ function js_rset(o, k, v) {
     if (!rbIsArr(o)) { fail("item assignment on a " + typeof o) }
     var idx = Math.trunc(rbToF(k))
     if (idx < 0) { idx = idx + o.length }
-    if (idx < 0) { fail("index " + idx + " too small for array") }
+    if (idx < 0) { rbRaiseErr("[]=", "IndexError", "index " + (idx - o.length) + " too small for array; minimum: -" + o.length) }
     while (o.length <= idx) { o.push(null) }
     o[idx] = v
     return undefined
@@ -9542,7 +9558,16 @@ function smMethod(s, name, sargs, nargs) {
     if (name == "rjust") { return {ok: true, v: smPad(s, Math.trunc(nargs[0]), sargs.length > 1 ? sargs[1] : " ", 2)} }
     if (name == "chop" || name == "chop!") { return {ok: true, v: smChop(s)} }
     if (name == "chomp" || name == "chomp!") {
-        if (sargs.length > 0) {
+        // "" removes every trailing newline (\n or \r\n), "\n" is the default.
+        if (sargs.length > 0 && sargs[0] == "") {
+            var ps = s
+            while (ps.length > 0 && ps.charAt(ps.length - 1) == "\n") {
+                ps = ps.substring(0, ps.length - 1)
+                if (ps.length > 0 && ps.charAt(ps.length - 1) == "\r") { ps = ps.substring(0, ps.length - 1) }
+            }
+            return {ok: true, v: ps}
+        }
+        if (sargs.length > 0 && sargs[0] != "\n") {
             var suf = sargs[0]
             if (suf.length > 0 && s.length >= suf.length
                 && s.substring(s.length - suf.length, s.length) == suf) {

@@ -6584,7 +6584,7 @@ func (rt *jsrt) rubyBin(op string, l, r interface{}) interface{} {
 		if ls, ok := l.(string); ok {
 			n := int(rubyToF(r))
 			if n < 0 {
-				n = 0
+				rt.rubyRaiseErr("*", "ArgumentError", "negative argument")
 			}
 			return &jsRStr{s: strings.Repeat(ls, n)}
 		}
@@ -6592,6 +6592,9 @@ func (rt *jsrt) rubyBin(op string, l, r interface{}) interface{} {
 			// Array#* is repetition with an Integer and JOIN with a String.
 			if sep, isStr := r.(string); isStr {
 				return rt.rubyArrJoin(la, sep)
+			}
+			if rubyToF(r) < 0 {
+				rt.rubyRaiseErr("*", "ArgumentError", "negative argument")
 			}
 			out := &jsArray{}
 			for i := 0; i < int(rubyToF(r)); i++ {
@@ -7089,6 +7092,10 @@ func (rt *jsrt) rubyRangeArr(lo, hi interface{}, excl bool) *jsArray {
 	out := &jsArray{}
 	if ls, isStr := lo.(string); isStr {
 		hs := rt.toString(hi)
+		// A begin past the end is empty (rb_str_upto_each): ("y".."ab") is [].
+		if ls > hs {
+			return out
+		}
 		for s, n := ls, 0; n < 1000000; n++ {
 			if excl && s == hs {
 				break
@@ -7289,6 +7296,15 @@ func (rt *jsrt) rubyRangeMethod(t *jsObject, name string, args []interface{}) in
 	case "first":
 		if len(pos) == 0 {
 			return t.props["begin"]
+		}
+		// first(n) from an Integer takes one element at a time, so an endless or
+		// infinite range answers too. Twin of the arm in rangeMethod.
+		if lo := t.props["begin"]; rubyIsIntV(lo) {
+			n, out := int(math.Trunc(rubyToF(pos[0]))), &jsArray{}
+			for c := lo; len(out.elems) < n && rt.rubyOpenRangeCover(t, c); c = rt.rubyBin("+", c, float64(1)) {
+				out.elems = append(out.elems, c)
+			}
+			return out
 		}
 	case "last":
 		if len(pos) == 0 {
@@ -8306,7 +8322,7 @@ func (rt *jsrt) rubyIndexSet(t, k, v interface{}) {
 		idx += len(arr.elems)
 	}
 	if idx < 0 {
-		rt.fail("index %d too small for array", idx)
+		rt.rubyRaiseErr("[]=", "IndexError", "index "+jsNumString(float64(idx-len(arr.elems)))+" too small for array; minimum: -"+jsNumString(float64(len(arr.elems))))
 	}
 	arr.dropIdx()
 	for len(arr.elems) <= idx {
@@ -8428,7 +8444,7 @@ func (rt *jsrt) rubySetSlice(o, k1, k2, v interface{}) interface{} {
 	}
 	s, l := rubySliceBounds(len(arr.elems), k1, k2)
 	if s < 0 {
-		rt.fail("index %d too small for array", s)
+		rt.rubyRaiseErr("[]=", "IndexError", "index "+jsNumString(float64(s-len(arr.elems)))+" too small for array; minimum: -"+jsNumString(float64(len(arr.elems))))
 	}
 	arr.dropIdx()
 	for len(arr.elems) < s {
@@ -8791,7 +8807,14 @@ func (rt *jsrt) rubySmMethod(o, name string, sargs []string, nargs []float64) (i
 		}
 		return o, true
 	case "chomp", "chomp!":
-		if len(sargs) > 0 {
+		// "" removes every trailing newline (\n or \r\n), "\n" is the default.
+		if len(sargs) > 0 && sargs[0] == "" {
+			for strings.HasSuffix(o, "\n") {
+				o = strings.TrimSuffix(strings.TrimSuffix(o, "\n"), "\r")
+			}
+			return o, true
+		}
+		if len(sargs) > 0 && sargs[0] != "\n" {
 			if sargs[0] != "" && strings.HasSuffix(o, sargs[0]) {
 				return o[:len(o)-len(sargs[0])], true
 			}
@@ -12833,7 +12856,11 @@ func (rt *jsrt) rubyArrayMethod(t *jsArray, name string, args []interface{}) int
 	case "each_slice", "each_cons":
 		n := int(math.Trunc(rubyToF(argAt(pos, 0))))
 		if n < 1 {
-			rt.fail("invalid size")
+			msg := "invalid size"
+			if name == "each_slice" {
+				msg = "invalid slice size"
+			}
+			rt.rubyRaiseErr(name, "ArgumentError", msg)
 		}
 		groups := &jsArray{}
 		if name == "each_slice" {

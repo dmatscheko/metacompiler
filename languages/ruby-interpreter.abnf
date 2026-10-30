@@ -4275,7 +4275,16 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (name == "rjust") { return {ok: true, v: smPad(s, Math.trunc(nargs[0]), sargs.length > 1 ? sargs[1] : " ", 2)} }
         if (name == "chop" || name == "chop!") { return {ok: true, v: smChop(s)} }
         if (name == "chomp" || name == "chomp!") {
-            if (sargs.length > 0) {
+            // "" removes every trailing newline (\n or \r\n), "\n" is the default.
+            if (sargs.length > 0 && sargs[0] == "") {
+                var ps = s
+                while (ps.length > 0 && ps.charAt(ps.length - 1) == "\n") {
+                    ps = ps.substring(0, ps.length - 1)
+                    if (ps.length > 0 && ps.charAt(ps.length - 1) == "\r") { ps = ps.substring(0, ps.length - 1) }
+                }
+                return {ok: true, v: ps}
+            }
+            if (sargs.length > 0 && sargs[0] != "\n") {
                 var suf = sargs[0]
                 if (suf.length > 0 && s.length >= suf.length
                     && s.substring(s.length - suf.length, s.length) == suf) {
@@ -5355,6 +5364,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (op == "-" && Array.isArray(r)) { return arrDiff(l, r) }
             // Array#* is repetition with an Integer and JOIN with a String.
             if (op == "*" && typeof r == "string") { return arrJoin(l, r) }
+            if (op == "*" && toF(r) < 0) { raiseErr("*", "ArgumentError", "negative argument") }
             if (op == "*") { return arrRepeat(l, r) }
             // Array#& (intersection) and Array#| (union). Both keep the LEFT-hand
             // order, both dedupe, and both compare with eql? like Array#- above.
@@ -5462,6 +5472,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
         var out = []
         if (typeof r.lo == "string") {
+            // A begin past the end is empty (rb_str_upto_each): ("y".."ab") is [].
+            if (r.lo > r.hi) { return out }
             var cur = r.lo
             var guard = 0
             while (guard < 100000) {
@@ -5554,6 +5566,19 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // ARGUMENT they are the Array's - `(1..3).first(2)' is [1, 2].
         if (name == "end") { return t.hi }
         if (name == "first" && args.length == 0) { return t.lo }
+        // first(n) from an Integer takes one element at a time, so an endless or
+        // infinite range answers too. Twins: rbRangeMethod, rubyRangeMethod.
+        if (name == "first" && (typeof t.lo == "number" || isBig(t.lo))) {
+            var fn = Math.trunc(toF(args[0]))
+            var fo = []
+            var fc = anytype
+            fc = t.lo
+            while (fo.length < fn && rangeCover(t, fc)) {
+                fo.push(fc)
+                fc = numBin("+", fc, 1)
+            }
+            return fo
+        }
         if (name == "last" && args.length == 0) { return t.hi }
         if (name == "exclude_end?") { return t.excl }
         if (name == "to_s") { return rangeText(t, false) }
@@ -5981,6 +6006,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     }
     // "ab" * 3, and the format operator "%d-%d" % [3, 4] (Kernel#format).
     function strRepeat(s, n) {
+        if (n < 0) { raiseErr("*", "ArgumentError", "negative argument") }
         var out = ""
         for (var i = 0; i < n; i++) { out += s }
         return out
@@ -8061,8 +8087,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     function strStrip(s) {
         var a = 0
         var b = s.length
-        while (a < b && (s.charCodeAt(a) == 32 || s.charCodeAt(a) == 9 || s.charCodeAt(a) == 10 || s.charCodeAt(a) == 13)) { a = a + 1 }
-        while (b > a && (s.charCodeAt(b - 1) == 32 || s.charCodeAt(b - 1) == 9 || s.charCodeAt(b - 1) == 10 || s.charCodeAt(b - 1) == 13)) { b = b - 1 }
+        while (a < b && (rbsIsSpace(s.charCodeAt(a)) || s.charCodeAt(a) == 0)) { a = a + 1 }
+        while (b > a && (rbsIsSpace(s.charCodeAt(b - 1)) || s.charCodeAt(b - 1) == 0)) { b = b - 1 }
         return s.slice(a, b)
     }
     // The Integer method set for a value past 2^53. It is the same list the plain
@@ -8707,7 +8733,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (name == "upcase" || name == "downcase" || name == "swapcase" || name == "capitalize"
                 || name == "succ" || name == "next") { return mkSym(rstr(mcall(target.s, name, args, null))) }
             if (name == "empty?") { return target.s == "" }
-            if (name == "to_proc") { return function(x) { return boxOut(x, mcall(x, target.s, [], null)) } }
+            if (name == "to_proc") { return symProc(target) }
             noMethod(target, name)
         }
         if (isRange(target)) { return rangeMethod(target, name, args, blk) }
@@ -9920,7 +9946,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // answer the array of groups - what .to_a on that Enumerator would give.
         if (name == "each_slice" || name == "each_cons") {
             var gn = Math.trunc(toF(args[0]))
-            if (gn < 1) { fail("invalid size") }
+            if (gn < 1) { raiseErr(name, "ArgumentError", name == "each_slice" ? "invalid slice size" : "invalid size") }
             var groups = []
             if (name == "each_slice") {
                 for (i = 0; i < t.length; i = i + gn) { groups.push(arrSub(t, i, gn)) }
@@ -10841,14 +10867,22 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     function makeRedo(pos) { return function() { return {redo: true} } }
     // &expr as an argument: a Proc passes straight through, a symbol becomes the
     // "send this message to each element" proc that Symbol#to_proc builds in Ruby.
+    // Symbol#to_proc: the first argument receives the message with the rest as its
+    // arguments, through send so an operator works too ([1, 2].inject(&:+)).
+    function symProc(sym) {
+        return function() {
+            var a = argsArray(arguments)
+            var sa = [sym]
+            for (var i = 1; i < a.length; i++) { sa.push(a[i]) }
+            return boxOut(a[0], mcall(a[0], "send", sa, null))
+        }
+    }
     function makeBlockArg(t) {
         return function() {
             var v = anytype
             v = t()
             if (typeof v == "function") { return v }
-            if (isSym(v)) {
-                return function(x) { return boxOut(x, mcall(x, v.s, [], null)) }
-            }
+            if (isSym(v)) { return symProc(v) }
             // `&nil' is Ruby for "no block", and it is how a method FORWARDS the
             // block it may not have been given: `def a(*r, &b); c(*r, &b); end'
             // called without one passes &nil.
@@ -12923,7 +12957,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (Array.isArray(o)) {
             var i0 = Math.trunc(toF(k))
             if (i0 < 0) { i0 = i0 + o.length }
-            if (i0 < 0) { fail("index " + i0 + " too small for array") }
+            if (i0 < 0) { raiseErr("[]=", "IndexError", "index " + (i0 - o.length) + " too small for array; minimum: -" + o.length) }
             while (o.length <= i0) { o.push(null) }
             o[i0] = v
             return
@@ -12989,7 +13023,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         var plain = (k2 === undefined || k2 === null) && !isRange(k1)
         if (plain) { rsetIndex(o, k1, v); return o }
         var ab = sliceBounds(o.length, k1, k2)
-        if (ab.s < 0) { fail("index " + ab.s + " too small for array") }
+        if (ab.s < 0) { raiseErr("[]=", "IndexError", "index " + (ab.s - o.length) + " too small for array; minimum: -" + o.length) }
         while (o.length < ab.s) { o.push(null) }
         var al = ab.l
         if (ab.s + al > o.length) { al = o.length - ab.s }

@@ -4691,6 +4691,27 @@ def s106
   check("ek106e", hh[S106K.new(v[0])] == "one" && [S106K.new(v[0]), S106K.new(v[0])].uniq.size == 1)
 end
 
+# ===== SECTION 107: rescuable index and size errors, first(n) of an endless range, assorted String / Array corners =====
+# A write before the start of an Array, each_slice(0) and a negative repetition are
+# rescuable errors with MRI's wording; first(n) of an infinite or endless range
+# takes n elements; strip removes NULs and all ASCII whitespace; a Symbol proc
+# sends operators too; chomp("") removes every trailing newline; a String range
+# whose begin is past its end is empty. /usr/bin/ruby 2.6 settles each.
+def s107
+  b = [1, 2, 3, 4, 5, 6]
+  i = [-10, 0, -1, 3]
+  e1 = begin; b[i[0]] = 1; rescue IndexError => e; e.message; end
+  e2 = begin; b.each_slice(i[1]) { |x| x }; rescue ArgumentError => e; e.message; end
+  e3 = begin; b.each_cons(i[1]) { |x| x }; rescue ArgumentError => e; e.message; end
+  check("ie107a", e1 == "index -10 too small for array; minimum: -6" && e2 == "invalid slice size" && e3 == "invalid size")
+  check("fr107b", (1..Float::INFINITY).first(i[3]) == [1, 2, 3] && (1..).first(2) == [1, 2])
+  e4 = begin; "x" * i[2]; rescue ArgumentError => e; e.message; end
+  e5 = begin; [0] * i[2]; rescue ArgumentError => e; e.message; end
+  check("ng107c", e4 == "negative argument" && e5 == "negative argument")
+  s = ["\t\n hi \r\n\0", "abc\n\r\n\n", "y", "ab"]
+  check("st107d", s[0].strip == "hi" && [1, 2].inject(&:+) == 3 && s[1].chomp("") == "abc" && (s[2]..s[3]).to_a == [])
+end
+
 s39() # SECTION-CALL 39
 s40() # SECTION-CALL 40
 s41() # SECTION-CALL 41
@@ -4759,5 +4780,6 @@ s103() # SECTION-CALL 103
 s104() # SECTION-CALL 104
 s105() # SECTION-CALL 105
 s106() # SECTION-CALL 106
+s107() # SECTION-CALL 107
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])
