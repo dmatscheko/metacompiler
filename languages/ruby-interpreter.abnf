@@ -308,7 +308,7 @@ DoWhileStmt <~~ push(makeDoWhile(takeAll())) ~~>
             = KwBegin Body End SameLine DoWhileKw Expression ;
 DoWhileKw   = KwWhile <~~ push({dw: "while"}) ~~> | KwUntil <~~ push({dw: "until"}) ~~> ;
 ModStmt     <~~ push(applyMod(takeAll())) ~~>
-            = StmtRescue [ SameLine ModKw ModCond ] ;
+            = StmtRescue [ SameLine NotAfterSemi ModKw ModCond ] ;
 // STMT rescue STMT: the STATEMENT modifier form of rescue. MRI allows the modifier at
 // exactly three places - a statement, an assignment's right-hand side (AssignRhs) and a
 // parenthesised body (reached through ParenBody) - and REJECTS `f(a rescue b)', so it is
@@ -666,7 +666,8 @@ NotColonGlued = :script(~~
 // NotAfterSemi succeeds (matching empty) only when the token just before the
 // current position is NOT a ';'. StmtRescue needs it because ExprStmt swallows the
 // separator: without it `def f; raise "x"; rescue; 1; end' read the def's rescue
-// CLAUSE as a statement modifier on the raise.
+// CLAUSE as a statement modifier on the raise, and ModStmt read the loop of
+// `i = 0; while i < 3; i += 1; end` as a `while` modifier on the assignment.
 NotAfterSemi = :script(~~
     (function() {
         var i = -1
@@ -694,7 +695,7 @@ TargetHead  = "$" :whitespace() GvarDashCh <~~ push({gvar: up.in}) ~~> :whitespa
             | ParenTarget
             | "::" Name <~~ push({var: up.in}) ~~>
             | "$" :whitespace() GvarNumCh <~~ push({gvar: up.in}) ~~> :whitespace(Whitespace)
-            | "$" Id <~~ push({gvar: up.in}) ~~>
+            | "$" Id <~~ push({gvar: gvName(up.in)}) ~~>
             | "@@" Id <~~ push({cvar: up.in}) ~~>
             | "@" Id <~~ push({ivar: up.in}) ~~>
             | KwSelf <~~ push({var: "self"}) ~~>
@@ -1963,7 +1964,7 @@ IvarRef     <~~ notePlace(up.pos, {ivar: pop().ivar}) ~~>
             = "@" Id <~~ push(makeIvarRef(up.in)); push({ivar: up.in}) ~~> ;
 // $global and @@classvar reads (their writes go through TargetHead above).
 GvarRef     <~~ notePlace(up.pos, {gvar: pop().gvar}) ~~>
-            = "$" Id <~~ push(makeGvarRef(up.in)); push({gvar: up.in}) ~~> ;
+            = "$" Id <~~ push(makeGvarRef(gvName(up.in))); push({gvar: gvName(up.in)}) ~~> ;
 // The regexp match globals: $1..$9 are the capture groups of the last match and
 // $~ the MatchData itself. They are ordinary entries in the global table, so they
 // only need their own spelling here (Id does not start with a digit).
@@ -2200,14 +2201,25 @@ PredOk      = :script(~~
             // A '?' followed by a SPACE may still be a ternary (`a? b : c`), so it is
             // declined; one followed by a LINE BREAK cannot be - `if block_given?` on
             // its own line is a bare predicate call, and refusing it cost whole files.
-            // The exception is a SECOND '?' after the space: `block_given? ? a : b` is
-            // the predicate followed by the ternary, and nothing else it could be.
+            // The exceptions are what no ternary branch can start with: a SECOND '?'
+            // (`block_given? ? a : b`), a closing bracket, `;`, `,`, the line's end,
+            // and the keywords `end` / `then` / `do` (`def f; block_given? end`).
             if (nx === 32 || nx === 9) {
                 var k2 = i + 1
                 var e2 = c.peek(k2)
                 var st4 = 0
                 while (st4 < 1000 && (e2 === 32 || e2 === 9)) { k2 = k2 + 1; e2 = c.peek(k2); st4 = st4 + 1 }
-                if (e2 === 63) { return undefined }
+                if (e2 === 63 || e2 === 59 || e2 === 41 || e2 === 125 || e2 === 93 || e2 === 44
+                    || e2 === 10 || e2 === 13 || e2 === 35 || e2 === -1) { return undefined }
+                var kws = ["end", "then", "do"]
+                for (var q = 0; q < kws.length; q++) {
+                    var w = kws[q]
+                    var m = 0
+                    while (m < w.length && c.peek(k2 + m) === w.charCodeAt(m)) { m = m + 1 }
+                    var af = c.peek(k2 + m)
+                    if (m == w.length && !((af >= 48 && af <= 57) || (af >= 65 && af <= 90) || (af >= 97 && af <= 122)
+                                           || af === 95 || af === 63 || af === 33)) { return undefined }
+                }
                 return abnf.newToken("\x01no", 0)
             }
             if (nx === 61) { return abnf.newToken("\x01no", 0) }
@@ -2722,6 +2734,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     }
     // $globals live in one program-wide table (they are not scoped).
     var rubyGlobals = {}
+    // $PROGRAM_NAME is MRI's built-in alias of $0: one variable under two names, so
+    // the parser reads both as "0". Twin of gvName in ruby-to-llvm-ir.abnf.
+    function gvName(n) { return n == "PROGRAM_NAME" ? "0" : n }
     function makeGvarRef(name) {
         return function() { return hasOwn(rubyGlobals, name) ? rubyGlobals[name] : null }
     }
@@ -2994,7 +3009,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         return function() {
             if (t.length == 0) { return null }
             var c0 = t.charAt(0)
-            if (c0 == "$") { return hasOwn(rubyGlobals, t.slice(1)) ? "global-variable" : null }
+            if (c0 == "$") { return hasOwn(rubyGlobals, gvName(t.slice(1))) ? "global-variable" : null }
             // An @ivar or @@cvar is defined once ASSIGNED (even to nil), not merely named.
             if (c0 == "@") {
                 if (t.charAt(1) == "@") { return cvarHolder(t.slice(2)) != null ? "class variable" : null }
@@ -5973,6 +5988,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 return rstr(mcall(v, "inspect", [], null))
             }
             if (isExcObj(v)) { return excInspect(v.__class.__name, rstr(v)) }
+            // IO#inspect names the stream: `#<IO:<STDOUT>>`. Twins in rubyInspect of
+            // abnf/jsrt.go and rbInspect of lib/ruby-rt.metajs.
+            if (v.__rio !== undefined) { return "#<IO:<" + (v.__rio == 2 ? "STDERR" : "STDOUT") + ">>" }
             // Object#inspect never calls a user #to_s: MRI's default form, with the
             // address and instance variables left off as in rstr.
             return "#<" + v.__class.__name + ">"
@@ -7916,13 +7934,16 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     }
     // NoMethodError for a name no method table answers, worded as MRI 2.6 does: the
     // receiver's #inspect (its "#<Class>" form past 65 characters), then ":" and its
-    // class name unless that text already starts with "#". Twins: rubyNoMethod in
+    // class name unless that text already starts with "#". A private method every
+    // object has (puts, p, a top-level def) exists but refuses an explicit receiver,
+    // which MRI words "private method `p' called for". Twins: rubyNoMethod in
     // abnf/jsrt.go, rbNoMethod in languages/lib/ruby-rt.metajs.
     function noMethod(t, name) {
         var r = anytype
         r = t
         if (nmDeleg.arr !== null && t === nmDeleg.arr) { r = nmDeleg.recv }
-        nameErr("NoMethodError", "undefined method `" + name + "' for " + noMethodDesc(r), name, r)
+        var what = respondsPrivate(name) ? "private method `" + name + "' called for " : "undefined method `" + name + "' for "
+        nameErr("NoMethodError", what + noMethodDesc(r), name, r)
     }
     // A NameError / NoMethodError carrying MRI's #name and #receiver, in the hidden
     // __nmname / __nmrecv slots. MRI reports both at the calling statement, in the
@@ -9645,6 +9666,15 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
         return t
     }
+    // StopIteration#result is what the iteration answered, every yield having given
+    // nil: the receiver of an each, and otherwise the method run again with a block
+    // answering nil (`[1, 2].map` gives [nil, nil], `select` gives []). Twins:
+    // rubyStopIter in abnf/jsrtruby.go, rbStopIter in lib/ruby-rt.metajs.
+    function enumResult(t) {
+        if (t.src === undefined) { return null }
+        if (t.op == "each") { return t.src }
+        return mcall(t.src, t.meth, t.margs, function() { return null })
+    }
     function isEnum(v) {
         return v !== null && v !== undefined && typeof v == "object" && v.__renum === true
     }
@@ -9719,11 +9749,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
         if (name == "next" || name == "peek") {
             if (t.pos >= items.length) {
-                // StopIteration#result is what the iteration answered: the
-                // receiver of an each.
                 var si = anytype
                 si = mkExc(hostGlobals["StopIteration"], "iteration reached an end")
-                rawSet(si, "__rresult", t.op == "each" && t.src !== undefined ? t.src : null)
+                rawSet(si, "__rresult", enumResult(t))
                 si.__rframe = name
                 throw {__exc: true, v: si}
             }
@@ -11597,10 +11625,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // top-level break/next, which MRI turns into a LocalJumpError - ending
         // quietly is closer than ignoring it.
         var body = makeBody(items)
-        // $0 and $PROGRAM_NAME name the script being run. Twin of buildMain's in
+        // $0 (and so $PROGRAM_NAME) names the script being run. Twin of buildMain's in
         // ruby-to-llvm-ir.abnf.
         scopePut(rubyGlobals, "0", c.file)
-        scopePut(rubyGlobals, "PROGRAM_NAME", c.file)
         try {
             body()
         } catch (e) {
@@ -11861,17 +11888,32 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     }
     function currentParamValues(params) {
         var out = []
+        var kw = anytype
+        kw = null
         for (var i = 0; i < params.length; i++) {
-            if (params[i].kw === true || params[i].kwrest === true || params[i].blockp === true) { continue }
+            if (params[i].blockp === true) { continue }
             if (params[i].param == null || params[i].param == undefined) { continue }
             var v = anytype
             v = getVar(params[i].param)
+            if (params[i].kwrest === true) {
+                if (kw === null) { kw = {__dict: true, keys: [], vals: []} }
+                for (var k = 0; k < v.keys.length; k++) { dictSet(kw, v.keys[k], v.vals[k]) }
+                continue
+            }
             if (params[i].splat === true && Array.isArray(v)) {
                 for (var j = 0; j < v.length; j++) { out.push(v[j]) }
                 continue
             }
-            out.push(v)
+            if (params[i].kw !== true) { out.push(v) }
         }
+        // The keyword parameters travel as the trailing keyword Hash, **rest's pairs
+        // first and then the named ones (MRI's order).
+        for (var n = 0; n < params.length; n++) {
+            if (params[n].kw !== true) { continue }
+            if (kw === null) { kw = {__dict: true, keys: [], vals: []} }
+            dictSet(kw, mkSym(params[n].param), getVar(params[n].param))
+        }
+        if (kw !== null) { out.push(kw) }
         return out
     }
     // The innermost METHOD scope of a captured chain: the frame a `return' written
@@ -11883,8 +11925,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
         return null
     }
-    // A non-local `return' out of a block throws straight past the blockStack.pop()
-    // of the call that pushed the block, so without the trim the block would STAY on
+    // A non-local `return' out of a block, or an exception out of a call given one,
+    // throws straight past the blockStack.pop() of the call that pushed the block, so
+    // without the trim (here, and at a rescue) the block would STAY on
     // the stack and the next method invoked with no block of its own would see it.
     // This half only - the compiler half publishes $blk out of the method's own
     // argument list, so it cannot leak. invokeRuby restores the depth exactly the
@@ -11906,10 +11949,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (fn.pos !== undefined) { rbSitePos = fn.pos }
         bindParams(fn.params, args)
         rbSitePos = site
-        // A bare `super` forwards the current VALUES of the parameters (Ruby), not
-        // the raw argument list - which is what makes `def initialize(msg = "d");
+        // A bare `super` forwards the VALUES the parameters hold when it runs (Ruby),
+        // not the raw argument list - which is what makes `def initialize(msg = "d");
         // super; end` pass the default on.
-        declVar("$sargs", currentParamValues(fn.params))
+        declVar("$sparams", fn.params)
         var r = anytype
         var depth = coreDepth + 1
         coreDepth = depth
@@ -12398,7 +12441,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 for (var j = 0; j < sp.args.length; j++) { av.push(sp.args[j]()) }
                 args = av
             } else {
-                args = getVar("$sargs")
+                args = currentParamValues(getVar("$sparams"))
             }
             if (dc == null || dc == undefined) { fail("super called outside of a method") }
             // A method defined in a prepended module supers into the class itself.
@@ -12576,8 +12619,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             }
             if (supName != null) {
                 var sv = anytype
-                sv = getVar(supName)
-                if (sv != undefined && sv != null && sv.__isclass === true) { cls.__super = sv }
+                sv = supName == "self" ? findSelf() : lookupConst(supName)
+                if (sv === undefined) { uninitConst(supName) }
+                if (sv != null && sv.__isclass === true) { cls.__super = sv }
             }
             if (supExpr != null) { cls.__super = supExpr() }
             rubySet(name, cls)
@@ -13423,6 +13467,16 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         return false
     }
     // Resolve a (possibly scoped) constant name: Foo, or Foo::Bar::Baz.
+    // NameError for a constant path that does not resolve, naming its first missing
+    // prefix as MRI does (`Nope::X` reports Nope, `M::Nope` reports M::Nope). Twin
+    // of rbUninitConst in ruby-to-llvm-ir.abnf.
+    function uninitConst(path) {
+        var parts = path.split("::")
+        var pre = parts[0]
+        var i = 1
+        while (i < parts.length && lookupConst(pre) !== undefined) { pre = pre + "::" + parts[i]; i = i + 1 }
+        nameErr("NameError", "uninitialized constant " + pre, parts[i - 1], findSelf())
+    }
     function lookupConst(name) {
         var parts = name.split("::")
         var cur = anytype
@@ -13467,12 +13521,14 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 var bang0 = anytype
                 bang0 = hasOwn(rubyGlobals, "!") ? rubyGlobals["!"] : null
                 var savedDepth = coreDepth
+                var savedBlk = blockStack.length
                 var site0 = rbSitePos
                 try {
                     box.v = tryT()
                 } catch (e) {
                     scopes = savedChain.slice()
                     coreDepth = savedDepth
+                    blkTrim(savedBlk)
                     if (!excIsUser(e)) { throw e }
                     excSite(e.v)
                     var hit = null
@@ -13542,6 +13598,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         return function() {
             var savedChain = scopes.slice()
             var savedDepth = coreDepth
+            var savedBlk = blockStack.length
             var site0 = rbSitePos
             try {
                 var r0 = anytype
@@ -13553,6 +13610,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             } catch (e) {
                 scopes = savedChain.slice()
                 coreDepth = savedDepth
+                blkTrim(savedBlk)
                 if (!excIsUser(e)) { throw e }
                 excSite(e.v)
                 var bang0 = anytype
@@ -14282,6 +14340,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             t = {__class: hostGlobals["Object"]}
         }
         catchTags.push(t)
+        var saved = scopes
         try {
             var r = anytype
             r = blockCall(b, [t])
@@ -14289,6 +14348,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             return r
         } catch (e) {
             catchTags.pop()
+            scopes = saved
             if (e !== null && e !== undefined && typeof e == "object" && e.__rthrow === true && e.tag === t) { return e.v }
             throw e
         }
@@ -14308,10 +14368,14 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     }
     // A StopIteration out of the block ends it too, and loop answers its #result.
     // Twins: js_rloop in abnf/jsrtruby.go and lib/ruby-rt.metajs.
+    // The raise left the block's scope chain in place, so it is put back as a rescue
+    // does (makeTry).
     hostGlobals["loop"] = function(blk) {
+        var saved = scopes
         try {
             while (true) { blockCall(blk, []) }
         } catch (e) {
+            scopes = saved
             if (excIsUser(e) && valueIsA(e.v, hostGlobals["StopIteration"])) { return hasOwn(e.v, "__rresult") ? e.v.__rresult : null }
             throw e
         }

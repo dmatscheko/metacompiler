@@ -7810,13 +7810,18 @@ func (rt *jsrt) rubyRaiseErr(frame, cls, msg string) {
 
 // rubyNoMethod raises NoMethodError for a name no method table answers, worded as
 // MRI 2.6 does: the receiver's #inspect (its "#<Class>" form past 65 characters),
-// then ":" and its class name unless that text already starts with "#". Twins:
-// noMethod in ruby-interpreter.abnf, rbNoMethod in languages/lib/ruby-rt.metajs.
+// then ":" and its class name unless that text already starts with "#"; a private
+// method every object has is "private method `p' called for". Twins: noMethod in
+// ruby-interpreter.abnf, rbNoMethod in languages/lib/ruby-rt.metajs.
 func (rt *jsrt) rubyNoMethod(t interface{}, name string) {
 	if a, isArr := t.(*jsArray); isArr && rt.rubyNmArr != nil && a == rt.rubyNmArr {
 		t = rt.rubyNmRecv
 	}
-	rt.rubyNameErr("NoMethodError", "undefined method `"+name+"' for "+rt.rubyNoMethodDesc(t), name, t)
+	what := "undefined method `" + name + "' for "
+	if rt.rubyRespondsPrivate(name) {
+		what = "private method `" + name + "' called for "
+	}
+	rt.rubyNameErr("NoMethodError", what+rt.rubyNoMethodDesc(t), name, t)
 }
 
 // rubyNameErr raises a NameError / NoMethodError carrying MRI's #name and
@@ -9598,6 +9603,12 @@ func (rt *jsrt) rubyInspect(v interface{}) string {
 		}
 		if rubyExcInst(t) {
 			return rubyExcInspect(rubyInstClassName(t), rt.rubyStr(t))
+		}
+		if fd, isIO := t.props["__rio"].(float64); isIO {
+			if fd == 2 {
+				return "#<IO:<STDERR>>"
+			}
+			return "#<IO:<STDOUT>>"
 		}
 		// A Regexp / MatchData answers from the regexp half's own table.
 		if rxIsRegexObj(t) || rxIsMatchObj(t) {

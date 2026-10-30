@@ -1616,13 +1616,23 @@ func (rt *jsrt) rubyMarkLambdaLike(g, f interface{}) {
 }
 
 // rubyStopIter is Enumerator#next past the end: StopIteration, whose #result is
-// what the iteration answered - the receiver of an each. Twin of rbStopIter in
-// lib/ruby-rt.metajs.
+// what the iteration answered, every yield having given nil - the receiver of an
+// each, and otherwise the method run again with a block answering nil. Twin of
+// enumResult in ruby-interpreter.abnf, rbStopIter in lib/ruby-rt.metajs.
 func (rt *jsrt) rubyStopIter(name string, t *jsObject) {
 	e := rt.rubyExc(rt.rubyBuiltinClass("StopIteration"), []interface{}{"iteration reached an end"})
 	var res interface{} = jsNull
-	if src, has := t.props["src"]; has && t.props["op"] == "each" {
+	if src, has := t.props["src"]; has {
 		res = src
+		if t.props["op"] != "each" {
+			meth, _ := t.props["meth"].(string)
+			var args []interface{}
+			if ma, isArr := t.props["margs"].(*jsArray); isArr {
+				args = append(args, ma.elems...)
+			}
+			nilBlk := &hostFunc{name: "", fn: func(*jsrt, uint64, []interface{}) interface{} { return jsNull }}
+			res = rt.rubyMethod(src, meth, append(args, rubyBlkWrap(nilBlk)))
+		}
 	}
 	e.set("__rframe", name)
 	e.set("__rresult", res)

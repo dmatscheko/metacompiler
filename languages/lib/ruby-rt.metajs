@@ -2044,6 +2044,7 @@ function rbInspect(v) {
             var im = rbFindMethod(v, "inspect")
             if (im !== undefined) { return rbStr(im.apply(undefined, [v])) }
             if (rbExcInst(v)) { return rbExcInspect(rbInstClassName(v), rbStr(v)) }
+            if (v["__rio"] !== undefined) { return "#<IO:<" + (v["__rio"] == 2 ? "STDERR" : "STDOUT") + ">>" }
         }
         // A Regexp / MatchData answers from the regexp half's own table.
         if (rbRxIsRegex(v) || rbRxIsMatch(v)) { return rbStr(rbRxMethod(v, "inspect", [])) }
@@ -6121,12 +6122,23 @@ function rbEnumFinish(t, items, results) {
     return t
 }
 // Enumerator#next past the end: StopIteration, whose #result is what the
-// iteration answered - the receiver of an each. Twin of the next arm in
-// ruby-interpreter.abnf and rubyStopIter in abnf/jsrtruby.go.
+// iteration answered, every yield having given nil - the receiver of an each, and
+// otherwise the method run again with a block answering nil. Twin of enumResult
+// in ruby-interpreter.abnf and rubyStopIter in abnf/jsrtruby.go.
 function rbStopIter(name, t) {
     var e = rbExc(rbBuiltinClass("StopIteration"), ["iteration reached an end"])
     e["__rframe"] = name
-    e["__rresult"] = (t["op"] == "each" && t["src"] !== undefined) ? t["src"] : null
+    var res = anytype
+    res = null
+    if (t["src"] !== undefined) {
+        res = t["src"]
+        if (t["op"] != "each") {
+            var args = rtCopyArr(t["margs"])
+            args.push(js_rblkwrap(function() { return null }))
+            res = rbMethod(t["src"], t["meth"], args)
+        }
+    }
+    e["__rresult"] = res
     js_rraise(e, undefined)
 }
 
@@ -9388,7 +9400,8 @@ function rbNoMethod(t, name) {
     var r = anytype
     r = t
     if (rbNmDeleg[0] !== null && t === rbNmDeleg[0]) { r = rbNmDeleg[1] }
-    rbNameErr("NoMethodError", "undefined method `" + name + "' for " + rbNoMethodDesc(r), name, r)
+    var what = rbRespondsPriv(name) ? "private method `" + name + "' called for " : "undefined method `" + name + "' for "
+    rbNameErr("NoMethodError", what + rbNoMethodDesc(r), name, r)
 }
 
 // A NameError / NoMethodError carrying MRI's #name and #receiver in the hidden

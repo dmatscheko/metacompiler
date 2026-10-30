@@ -349,7 +349,7 @@ DoWhileStmt <~~ push(makeDoWhile(takeAll())) ~~>
             = KwBegin Body End SameLine DoWhileKw Expression ;
 DoWhileKw   = KwWhile <~~ push({dw: "while"}) ~~> | KwUntil <~~ push({dw: "until"}) ~~> ;
 ModStmt     <~~ push(applyMod(takeAll())) ~~>
-            = StmtRescue [ SameLine ModKw ModCond ] ;
+            = StmtRescue [ SameLine NotAfterSemi ModKw ModCond ] ;
 // STMT rescue STMT: the STATEMENT modifier form of rescue. MRI allows the modifier at
 // exactly three places - a statement, an assignment's right-hand side (AssignRhs) and a
 // parenthesised body (reached through ParenBody) - and REJECTS `f(a rescue b)', so it is
@@ -708,7 +708,8 @@ NotColonGlued = :script(~~
 // NotAfterSemi succeeds (matching empty) only when the token just before the
 // current position is NOT a ';'. StmtRescue needs it because ExprStmt swallows the
 // separator: without it `def f; raise "x"; rescue; 1; end' read the def's rescue
-// CLAUSE as a statement modifier on the raise.
+// CLAUSE as a statement modifier on the raise, and ModStmt read the loop of
+// `i = 0; while i < 3; i += 1; end` as a `while` modifier on the assignment.
 NotAfterSemi = :script(~~
     (function() {
         var i = -1
@@ -736,7 +737,7 @@ TargetHead  = "$" :whitespace() GvarDashCh <~~ push({gvar: up.in}) ~~> :whitespa
             | ParenTarget
             | "::" Name <~~ push({var: up.in}) ~~>
             | "$" :whitespace() GvarNumCh <~~ push({gvar: up.in}) ~~> :whitespace(Whitespace)
-            | "$" Id <~~ push({gvar: up.in}) ~~>
+            | "$" Id <~~ push({gvar: gvName(up.in)}) ~~>
             | "@@" Id <~~ push({cvar: up.in}) ~~>
             | "@" Id <~~ push({ivar: up.in}) ~~>
             | KwSelf <~~ push({var: "self"}) ~~>
@@ -2002,7 +2003,7 @@ IvarRef     <~~ notePlace(up.pos, {ivar: pop().ivar}) ~~>
             = "@" Id <~~ push(makeIvarRef(up.in)); push({ivar: up.in}) ~~> ;
 // $global and @@classvar reads (their writes go through TargetHead above).
 GvarRef     <~~ notePlace(up.pos, {gvar: pop().gvar}) ~~>
-            = "$" Id <~~ push(makeGvarRef(up.in)); push({gvar: up.in}) ~~> ;
+            = "$" Id <~~ push(makeGvarRef(gvName(up.in))); push({gvar: gvName(up.in)}) ~~> ;
 // The regexp match globals: $1..$9 are the capture groups of the last match, $~ the
 // MatchData and $& the whole match. They are ordinary entries in the global table,
 // so they only need their own spelling here (Id does not start with a digit).
@@ -2239,14 +2240,25 @@ PredOk      = :script(~~
             // A '?' followed by a SPACE may still be a ternary (`a? b : c`), so it is
             // declined; one followed by a LINE BREAK cannot be - `if block_given?` on
             // its own line is a bare predicate call, and refusing it cost whole files.
-            // The exception is a SECOND '?' after the space: `block_given? ? a : b` is
-            // the predicate followed by the ternary, and nothing else it could be.
+            // The exceptions are what no ternary branch can start with: a SECOND '?'
+            // (`block_given? ? a : b`), a closing bracket, `;`, `,`, the line's end,
+            // and the keywords `end` / `then` / `do` (`def f; block_given? end`).
             if (nx === 32 || nx === 9) {
                 var k2 = i + 1
                 var e2 = c.peek(k2)
                 var st4 = 0
                 while (st4 < 1000 && (e2 === 32 || e2 === 9)) { k2 = k2 + 1; e2 = c.peek(k2); st4 = st4 + 1 }
-                if (e2 === 63) { return undefined }
+                if (e2 === 63 || e2 === 59 || e2 === 41 || e2 === 125 || e2 === 93 || e2 === 44
+                    || e2 === 10 || e2 === 13 || e2 === 35 || e2 === -1) { return undefined }
+                var kws = ["end", "then", "do"]
+                for (var q = 0; q < kws.length; q++) {
+                    var w = kws[q]
+                    var m = 0
+                    while (m < w.length && c.peek(k2 + m) === w.charCodeAt(m)) { m = m + 1 }
+                    var af = c.peek(k2 + m)
+                    if (m == w.length && !((af >= 48 && af <= 57) || (af >= 65 && af <= 90) || (af >= 97 && af <= 122)
+                                           || af === 95 || af === 63 || af === 33)) { return undefined }
+                }
                 return abnf.newToken("\x01no", 0)
             }
             if (nx === 61) { return abnf.newToken("\x01no", 0) }
@@ -6039,12 +6051,12 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         var savedParams = curMethParams
         curMethName = m.name
         curMethParams = paramNames(m.params)
-        var savedSplat = curMethSplat
-        curMethSplat = splatParamName(m.params)
+        var savedPs = curMethPs
+        curMethPs = m.params
         var idx = emitFunc(m.params, m.body, true, false, false, true, m.pos)
         curMethName = savedMeth
         curMethParams = savedParams
-        curMethSplat = savedSplat
+        curMethPs = savedPs
         var fnV = emitArity(b, callExt(b, "js_closure", [handle(idx), curScopeV]), m.params)
         callExt(b, "js_rsingdef", [targetV, emitStr(b, m.name), fnV])
         return b
@@ -6645,6 +6657,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             return {b: b, v: callExt(b, "js_rpow", [rl.v, rr.v])}
         }
     }
+    // $PROGRAM_NAME is MRI's built-in alias of $0: one variable under two names, so
+    // the parser reads both as "0". Twin of gvName in ruby-interpreter.abnf.
+    function gvName(n) { return n == "PROGRAM_NAME" ? "0" : n }
     function makeGvarRef(name) {
         return function(b) { return {b: b, v: callExt(b, "js_rgget", [emitStr(b, name)])} }
     }
@@ -6982,7 +6997,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             }
         }
         if (txt.length > 1 && txt.charAt(0) == "$") {
-            var gname = txt.slice(1)
+            var gname = gvName(txt.slice(1))
             return function(b) {
                 return {b: b, v: callExt(b, "js_rgdefined", [emitStr(b, gname), emitStr(b, "global-variable")])}
             }
@@ -7097,15 +7112,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     var curClsName = ""
     var curMethName = ""
     var curMethParams = []
-    // The *rest parameter of the method being emitted ("" when none): a zsuper
-    // passes its elements, not the Array.
-    var curMethSplat = ""
-    function splatParamName(ps) {
-        for (var i = 0; i < ps.length; i++) {
-            if (typeof ps[i] != "string" && ps[i].splat === true) { return ps[i].name }
-        }
-        return ""
-    }
+    // The parameter descriptors of the method being emitted, which a zsuper reads.
+    var curMethPs = []
     function makeSuper(items) {
         var explicit = false
         var argTs = []
@@ -7134,8 +7142,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             }
             var clsName = curClsName
             var methName = curMethName
-            var ownParams = curMethParams
-            var ownSplat = curMethSplat
+            var ownPs = curMethPs
             var clsV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, clsName)])
             var supV = callExt(b, "js_get", [clsV, emitStr(b, "__super")])
             var selfV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "self")])
@@ -7145,11 +7152,36 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 b = ea.b
                 argsV = ea.v
             } else {
-                for (var k = 0; k < ownParams.length; k++) {
-                    var pv = callExt(b, "js_scope_get", [curScopeV, emitStr(b, ownParams[k])])
-                    if (ownParams[k] == ownSplat) { b = emitSpliceInto(b, argsV, pv) }
+                // The values the parameters hold now: the positional ones (a *rest
+                // spliced), then the keyword ones as the trailing keyword Hash, **rest's
+                // pairs first (MRI's order), then the method's own block. Twin of
+                // currentParamValues in ruby-interpreter.abnf.
+                var kwD = null
+                var kwNs = []
+                for (var k = 0; k < ownPs.length; k++) {
+                    var p = typeof ownPs[k] == "string" ? {name: ownPs[k]} : ownPs[k]
+                    if (p.blockp === true) { continue }
+                    if (p.kw === true) { kwNs.push(p.name); continue }
+                    var pv = callExt(b, "js_scope_get", [curScopeV, emitStr(b, p.name)])
+                    if (p.kwrest === true) {
+                        if (kwD == null) { kwD = callExt(b, "js_dict_new", []) }
+                        b = emitMergeDict(b, kwD, pv)
+                    } else if (p.splat === true) { b = emitSpliceInto(b, argsV, pv) }
                     else { callExt(b, "js_arr_push", [argsV, pv]) }
                 }
+                for (var kn = 0; kn < kwNs.length; kn++) {
+                    if (kwD == null) { kwD = callExt(b, "js_dict_new", []) }
+                    callExt(b, "js_rset", [kwD, callExt(b, "js_sym", [emitStr(b, kwNs[kn])]),
+                                           callExt(b, "js_scope_get", [curScopeV, emitStr(b, kwNs[kn])])])
+                }
+                if (kwD != null) { callExt(b, "js_arr_push", [argsV, kwD]) }
+                var blkV = curBlockV(b)
+                var wrapB = curF.NewBlock("")
+                var goB = curF.NewBlock("")
+                b.NewCondBr(truthy(b, blkV), wrapB, goB)
+                callExt(wrapB, "js_arr_push", [argsV, callExt(wrapB, "js_rblkwrap", [blkV])])
+                wrapB.NewBr(goB)
+                b = goB
             }
             return {b: b, v: callExt(b, "js_supercall", [supV, selfV, emitStr(b, methName), argsV])}
         }
@@ -7368,12 +7400,12 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             var savedMP = curMethParams
             curMethName = fn.name
             curMethParams = paramNames(fn.params)
-            var savedSplat = curMethSplat
-            curMethSplat = splatParamName(fn.params)
+            var savedPs = curMethPs
+            curMethPs = fn.params
             var idx = emitFunc(fn.params, fn.body, false, false, false, true, fn.pos)
             curMethName = savedMN
             curMethParams = savedMP
-            curMethSplat = savedSplat
+            curMethPs = savedPs
             // Recorded for Proc#arity exactly as a class method is - see emitMethods.
             // Only "$d$" + name is bound: the plain name is a LOCAL's slot (see
             // curTopLocals), and `k = k` must read it unassigned.
@@ -7508,20 +7540,46 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (curClsName != "" && isRestricted(curClsName, name)) { return "$q$" + name }
         return name
     }
-    // The stub's NoMethodError carries #name and #receiver as nameErr's does
-    // (ruby-interpreter.abnf), raised at the calling statement.
+    // Raise a NameError / NoMethodError carrying #name and #receiver as nameErr's
+    // does (ruby-interpreter.abnf), at the calling statement; b ends there.
+    function emitNameErr(b, cls, msg, name) {
+        var msgA = callExt(b, "js_arr_new", [])
+        callExt(b, "js_arr_push", [msgA, emitStr(b, msg)])
+        var e = callExt(b, "js_rnew", [callExt(b, "js_rclass", [emitStr(b, cls)]), msgA])
+        callExt(b, "js_set", [e, emitStr(b, "__nmname"), callExt(b, "js_sym", [emitStr(b, name)])])
+        callExt(b, "js_set", [e, emitStr(b, "__nmrecv"), emitIvarSelf(b)])
+        callExt(b, "js_set", [e, emitStr(b, "__rframe"), emitStr(b, "")])
+        callExt(b, "js_rraise", [e, hUndef])
+        b.NewRet(hUndef)
+    }
     function restrictedStub(kind, name) {
         return function(b) {
-            var msgA = callExt(b, "js_arr_new", [])
-            callExt(b, "js_arr_push", [msgA, emitStr(b, kind + " method '" + name + "' called")])
-            var e = callExt(b, "js_rnew", [callExt(b, "js_rclass", [emitStr(b, "NoMethodError")]), msgA])
-            callExt(b, "js_set", [e, emitStr(b, "__nmname"), callExt(b, "js_sym", [emitStr(b, name)])])
-            callExt(b, "js_set", [e, emitStr(b, "__nmrecv"), callExt(b, "js_scope_get", [curScopeV, emitStr(b, "self")])])
-            callExt(b, "js_set", [e, emitStr(b, "__rframe"), emitStr(b, "")])
-            callExt(b, "js_rraise", [e, hUndef])
-            b.NewRet(hUndef)
+            emitNameErr(b, "NoMethodError", kind + " method '" + name + "' called", name)
             return {b: deadBlock(), v: hNull}
         }
+    }
+    // A constant path's value, raising NameError at its first missing prefix as MRI
+    // does (`Nope::X` reports Nope, `M::Nope` reports M::Nope). Twin of uninitConst
+    // in ruby-interpreter.abnf.
+    function rbConstPath(b, parts) {
+        var pre = parts[0]
+        var v = hUndef
+        for (var k = 0; k < parts.length; k++) {
+            var missB = curF.NewBlock("")
+            var okB = curF.NewBlock("")
+            if (k == 0) {
+                var tv = callExt(b, "js_scope_typeof", [curScopeV, emitStr(b, pre)])
+                b.NewCondBr(truthy(b, callExt(b, "js_seq", [tv, emitStr(b, "undefined")])), missB, okB)
+            } else {
+                pre = pre + "::" + parts[k]
+                v = callExt(b, "js_get", [v, emitStr(b, "$c$" + parts[k])])
+                b.NewCondBr(b.NewICmp(llvm.enum.IPredEQ, v, hUndef), missB, okB)
+            }
+            emitNameErr(missB, "NameError", "uninitialized constant " + pre, parts[k])
+            b = okB
+            if (k == 0) { v = callExt(b, "js_scope_get", [curScopeV, emitStr(b, pre)]) }
+        }
+        return {b: b, v: v}
     }
     // include Comparable on a class that defines <=>: the runtime already compares
     // two such objects through their <=> (rubySpaceship in abnf/jsrt.go), so all the
@@ -7665,7 +7723,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     function emitMethods(b, dstV, list, prefix, owner, restrictedList) {
         var savedMeth = curMethName
         var savedParams = curMethParams
-        var savedSplatM = curMethSplat
+        var savedPsM = curMethPs
         if (prefix == "") { list = list.concat(inheritedRestricted(list, owner, restrictedList)) }
         for (var k = 0; k < list.length; k++) {
             var m = list[k]
@@ -7675,7 +7733,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (rk != "" && prefix == "") { key = "$q$" + m.name }
             curMethName = m.name
             curMethParams = paramNames(m.params)
-            curMethSplat = splatParamName(m.params)
+            curMethPs = m.params
             nextSelfIsCls = prefix == "$s$"
             var idx = emitFunc(m.params, m.body, true, false, false, true, m.pos)
             // A method closure enters the arity registry the way a block and a lambda
@@ -7695,7 +7753,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
         curMethName = savedMeth
         curMethParams = savedParams
-        curMethSplat = savedSplatM
+        curMethPs = savedPsM
         return b
     }
 
@@ -7838,7 +7896,12 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (items[gi].cguard != undefined) { notImpl("rescue/ensure on a class body", pos) }
         }
         var r = clsItems(items, 1)
-        var superName = r.supername
+        // `class E < M::X`: the build-time tables know a class by its own name, the
+        // emitted code reads the whole path.
+        var superParts = []
+        var sps = r.supername.split("::")
+        for (var spi = 0; spi < sps.length; spi++) { if (sps[spi] != "") { superParts.push(sps[spi]) } }
+        var superName = superParts.length > 0 ? superParts[superParts.length - 1] : ""
         // Reopening a BUILTIN class (`class String; def shout ...`) adds to the
         // builtin's own class object - the one js_rclass hands out - which the
         // runtime asks for a builtin value once js_rbreopen has said so. It is not a
@@ -7915,8 +7978,13 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             b = emitNameList(b, clsV, imn, "__imn")
             var baseSet = false
             var baseV = hNull
-            if (superName != "") {
+            if (superName == "self") {
                 baseV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, superName)])
+                baseSet = true
+            } else if (superName != "") {
+                var rcp = rbConstPath(b, superParts)
+                b = rcp.b
+                baseV = rcp.v
                 baseSet = true
             } else if (r.superexpr != undefined) {
                 var rsx = r.superexpr(b)
@@ -8462,9 +8530,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // level resolves to false instead of failing the scope lookup (see curBlockV).
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, blkSlot), hNull])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "$main"), callExt(b, "js_rmain", [])])
-        // $0 and $PROGRAM_NAME name the script being run (the interpreter's runProgram).
+        // $0 (and so $PROGRAM_NAME) names the script being run (the interpreter's runProgram).
         callExt(b, "js_rgset", [emitStr(b, "0"), emitStr(b, c.file)])
-        callExt(b, "js_rgset", [emitStr(b, "PROGRAM_NAME"), emitStr(b, c.file)])
         // $stdout / $stderr, and the STDOUT / STDERR constants naming the same IO.
         var outV = callExt(b, "js_rio", [emitNum(b, 1)])
         var errV = callExt(b, "js_rio", [emitNum(b, 2)])

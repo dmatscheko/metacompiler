@@ -4914,6 +4914,67 @@ def s118
         [1, 2].cycle.inspect == "#<Enumerator: [1, 2]:cycle>")
 end
 
+# ===== SECTION 119: one-line loops; Enumerator#next results; zsuper; superclass; private Kernel =====
+# A `while` after `x = 1;` on one line is a loop, not a modifier, and `foo? end` a
+# predicate call, not a ternary; StopIteration#result of an external map / select
+# is the method's answer with nil blocks; a bare super passes keyword parameters as
+# keywords (**rest first) and the current values; an unknown superclass is
+# NameError; a private Kernel method with a receiver is "private method ...
+# called"; a block left by a raise or a throw is not the next method's block;
+# $PROGRAM_NAME is $0. /usr/bin/ruby 2.6 settles each.
+class S119X
+  def f(*a, k: 1) [a, k] end
+  def g(a, **o) [a, o] end
+  def h(a) a end
+end
+class S119Y < S119X
+  def f(*r, k: 2) super end
+  def g(a, k: 1, **r) super end
+  def h(a) a = 9; super end
+end
+module S119M
+  class C
+    def v; 7; end
+  end
+end
+class S119D < S119M::C; end
+S119NE = [begin; class S119E < Qzxwvq; end; rescue NameError => e; [e.message, e.name]; end,
+          begin; class S119F < Qzxwvq::X; end; rescue NameError => e; e.message; end,
+          begin; class S119G < S119M::Qzxwvq; end; rescue NameError => e; e.message; end]
+def s119_bg; block_given? end
+def s119_m; yield; end
+def s119_rs; begin; s119_m { raise "x" }; rescue; end; s119_bg; end
+S119EN = [1].each
+loop { S119EN.next }
+catch(:s119) { throw :s119 }
+def s119_after; block_given?; end
+S119LK = s119_after
+def s119
+  i = 0; j = 1; while i < 3; i += 1; end
+  k = 0; until k >= 2; k += 1; end
+  check("ln119a", i == 3 && j == 1 && k == 2 && s119_bg == false && s119_bg { } == true)
+  e1 = [1, 2, 3].map
+  e2 = [1, 2, 3].select
+  e3 = [1, 2].partition
+  e4 = [1, 2].each
+  check("en119b", loop { e1.next } == [nil, nil, nil] && loop { e2.next } == [] &&
+        loop { e3.next } == [[], [1, 2]] && loop { e4.next } == [1, 2])
+  check("zs119c", S119Y.new.f(1, 2) == [[1, 2], 2] && S119Y.new.f(1, k: 5) == [[1], 5] &&
+        S119Y.new.g(1, z: 3) == [1, {z: 3, k: 1}] && S119Y.new.g(1, z: 3)[1].keys == [:z, :k] && S119Y.new.h(1) == 9)
+  check("sc119d", S119NE == [["uninitialized constant Qzxwvq", :Qzxwvq], "uninitialized constant Qzxwvq",
+                             "uninitialized constant S119M::Qzxwvq"] && S119D.new.v == 7)
+  m1 = begin; $stdout.p 1; rescue NoMethodError => e; e.message; end
+  m2 = begin; 5.puts; rescue NoMethodError => e; e.message; end
+  check("pv119e", m1 == "private method `p' called for #<IO:<STDOUT>>" && m2 == "private method `puts' called for 5:Integer" &&
+        $stderr.inspect == "#<IO:<STDERR>>")
+  check("bk119g", S119LK == false && s119_rs == false)
+  old = $0
+  $0 = "s119"
+  a = $PROGRAM_NAME
+  $PROGRAM_NAME = old
+  check("pn119f", a == "s119" && $0 == old)
+end
+
 s39() # SECTION-CALL 39
 s40() # SECTION-CALL 40
 s41() # SECTION-CALL 41
@@ -4994,5 +5055,6 @@ s115() # SECTION-CALL 115
 s116() # SECTION-CALL 116
 s117() # SECTION-CALL 117
 s118() # SECTION-CALL 118
+s119() # SECTION-CALL 119
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])
