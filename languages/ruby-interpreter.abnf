@@ -1747,7 +1747,7 @@ RePipPlain  = "\x00"..."\x22" | "\x24"..."\x5b" | "\x5d"..."\x7b" | "\x7d"..."\U
 
 // ?a / ?\n: the one-character string literal. The body may not start with a space,
 // which is exactly what keeps the ternary `c ? a : b` out of it.
-CharLit     <~~ push(makeStrLit(makeConst(charLitVal(up.in)), false)) ~~>
+CharLit     <~~ var iv = []; var cv = charLitVal(up.in, iv); push(makeStrLit(iv.length > 0 ? makeU8Lit(iv[0]) : makeConst(cv), false)) ~~>
             = "?" :whitespace() CharBody :whitespace(Whitespace) ;
 // ?\C-z / ?\M-\C-z: the control and meta forms of a character literal. Longest first
 // (PEG), or the plain escape below would take the backslash and leave the rest.
@@ -2108,7 +2108,8 @@ TplExpr     <~~ push({e: pop()}) ~~>
 // An EMPTY interpolation is legal and contributes nothing: `"#{}" == ""`.
 TplEmpty    <~~ push({s: ""}) ~~>
             = "#{" :whitespace(Whitespace) "}" :whitespace() ;
-TplChunk    <~~ push({s: unescapeRb(up.in)}) ~~>
+// A chunk whose escapes spell invalid UTF-8 also carries its bytes (rbsEscBytes).
+TplChunk    <~~ var iv = []; var us = unescapeRb(up.in, iv); push(iv.length > 0 ? {s: us, u8: iv[0]} : {s: us}) ~~>
             = TplChar { TplChar } ;
 TplChar     = TplEsc | HashChar | TplPlain ;
 TplEsc      = "\\" "\x20"..b"\x7e" ;
@@ -3730,17 +3731,54 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     function rsText(v) { return isRStr(v) ? v.__rs : v }
     // The text of a String box or a binary String.
     function binText(v) { return isBin(v) ? v.__rbin : rsText(v) }
-    // A binary (ASCII-8BIT) String: {__rbin: text} with one char per byte,
-    // U+0000..U+00FF, which leaves the String box on its fast path. Integer#chr
-    // past 127, String#b, force_encoding("BINARY") and Array#pack make one. Twins:
-    // jsRBin in abnf/jsrtrubystr.go, the {__rbin} box of lib/ruby-rt.metajs.
+    // A String whose encoding is not UTF-8, or whose UTF-8 bytes are invalid:
+    // {__rbin: bytes, __benc: encoding} with one char per byte, U+0000..U+00FF,
+    // which leaves the String box on its fast path. __benc is absent for
+    // ASCII-8BIT (binary: Integer#chr past 127, String#b, Array#pack), else
+    // "US-ASCII" (Integer#chr below 128, unpack("B") / ("H")) or "UTF-8" (a "\xFF"
+    // literal). Twins: jsRBin in abnf/jsrtrubystr.go, the {__rbin} box of
+    // lib/ruby-rt.metajs.
     function mkBin(s) { return {__rbin: s} }
     function isBin(v) { return v !== null && v !== undefined && typeof v == "object" && typeof v.__rbin == "string" }
-    // The methods a binary String answers on its bytes; every other String method
-    // runs on the text, and a String it answers is binary too. Twins: rubyBinMethod
-    // in abnf/jsrtrubystr.go, rbBinMethod in lib/ruby-rt.metajs.
+    function binEnc(v) { return typeof v.__benc == "string" ? v.__benc : "ASCII-8BIT" }
+    // The String of the bytes s in encoding enc: UTF-8 bytes that decode are an
+    // ordinary String.
+    function encStr(s, enc) {
+        if (enc == "ASCII-8BIT") { return mkBin(s) }
+        if (enc == "UTF-8") {
+            var u = rbsBinDecode(s)
+            if (u !== null) { return mkRStr(u) }
+        }
+        return {__rbin: s, __benc: enc}
+    }
+    // A String value's bytes and encoding, for the rules that mix encodings.
+    function strBytes(v) { return isBin(v) ? v.__rbin : rbsBinOf(rsText(v)) }
+    function strEnc(v) { return isBin(v) ? binEnc(v) : "UTF-8" }
+    function encObj(n) {
+        return hostGlobals["Encoding"][n == "ASCII-8BIT" ? "$c$BINARY" : (n == "US-ASCII" ? "$c$US_ASCII" : "$c$UTF_8")]
+    }
+    // #inspect of the box: an invalid UTF-8 String shows its valid characters as
+    // text and every other byte as \xHH.
+    function binInspect(v) {
+        var b = v.__rbin
+        if (binEnc(v) != "UTF-8") { return rbsBinInspect(b) }
+        var out = "\""
+        var i = 0
+        while (i < b.length) {
+            var j = i
+            while (j < b.length && rbsU8At(b, j) > 0) { j = j + rbsU8At(b, j) }
+            var q = j > i ? rinspect(rbsBinDecode(b.substring(i, j))) : rbsBinInspect(b.charAt(i))
+            out = out + q.substring(1, q.length - 1)
+            i = j > i ? j : i + 1
+        }
+        return out + "\""
+    }
+    // The methods a box answers on its bytes; every other String method runs on
+    // the text, and a String it answers has the box's encoding. Twins:
+    // rubyBinMethod in abnf/jsrtrubystr.go, rbBinMethod in lib/ruby-rt.metajs.
     function binMethod(t, name, args, blk) {
         var b = t.__rbin
+        var enc = binEnc(t)
         if (name == "bytes") { return binBytes(b) }
         if (name == "bytesize") { return b.length }
         if (name == "getbyte") {
@@ -3753,34 +3791,44 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             for (var i = 0; i < b.length; i++) { blockCall(blk, [b.charCodeAt(i)]) }
             return t
         }
-        if (name == "inspect" || name == "dump") { return rbsBinInspect(b) }
-        if (name == "encoding") { return hostGlobals["Encoding"]["$c$BINARY"] }
+        if (name == "inspect" || name == "dump") { return binInspect(t) }
+        if (name == "encoding") { return encObj(enc) }
+        // force_encoding changes the box in place; bytes that become valid UTF-8
+        // are an ordinary String, a new one.
         if (name == "force_encoding") {
-            if (encArgName(args[0]) == "BINARY") { return t }
-            var u = rbsBinDecode(b)
-            return u === null ? t : mkRStr(u)
+            var fe = encArgName(args[0])
+            var fv = anytype
+            fv = encStr(b, fe)
+            if (!isBin(fv)) { return fv }
+            t.__benc = fv.__benc
+            return t
         }
-        if (name == "b" || name == "dup" || name == "clone" || name == "+@") { return mkBin(b) }
-        if (name == "valid_encoding?") { return true }
+        if (name == "b") { return mkBin(b) }
+        if (name == "dup" || name == "clone" || name == "+@") { return encStr(b, enc) }
+        if (name == "valid_encoding?") { return enc == "ASCII-8BIT" || (enc == "US-ASCII" && rbsAsciiOnly(b)) }
         if (name == "ascii_only?") { return rbsAsciiOnly(b) }
+        if (name == "size" || name == "length") { return enc == "UTF-8" ? rbsU8Len(b) : b.length }
         if (name == "to_s" || name == "to_str" || name == "-@") { return t }
         if (name == "<<" || name == "concat") {
             for (var k = 0; k < args.length; k++) {
                 var a = anytype
                 a = typeof args[k] == "number" ? mkBin(String.fromCharCode(imod(args[k], 256))) : args[k]
-                t.__rbin = binText(binCat(t, a))
+                var cv = anytype
+                cv = binCat(t, a)
+                t.__rbin = strBytes(cv)
+                t.__benc = strEnc(cv)
             }
             return t
         }
         if (name == "+") { return binCat(t, args[0]) }
         if (name == "==" || name == "===" || name == "eql?") { return binEq(t, args[0]) }
-        if (name == "*") { return mkBin(strRepeat(b, Math.trunc(toF(args[0])))) }
+        if (name == "*") { return encStr(strRepeat(b, Math.trunc(toF(args[0]))), enc) }
         if (name == "unpack" || name == "unpack1") { return strUnpack(b, name, args) }
         var r = anytype
         r = isBinOpName(name) ? rbin(name, b, binText(args[0])) : mcall(b, name, args, blk)
-        if (typeof r == "string" || isRStr(r)) { return mkBin(binText(r)) }
+        if (typeof r == "string" || isRStr(r)) { return encStr(binText(r), enc) }
         if (Array.isArray(r) && name != "bytes" && name != "unpack") {
-            for (var j = 0; j < r.length; j++) { if (typeof r[j] == "string" || isRStr(r[j])) { r[j] = mkBin(binText(r[j])) } }
+            for (var j = 0; j < r.length; j++) { if (typeof r[j] == "string" || isRStr(r[j])) { r[j] = encStr(binText(r[j]), enc) } }
         }
         return r
     }
@@ -3789,36 +3837,42 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         for (var i = 0; i < b.length; i++) { out.push(b.charCodeAt(i)) }
         return out
     }
-    // String#+ / #<< with a binary side: two binary Strings join, an ASCII-only
-    // side takes the other side's encoding, and two non-ASCII sides are MRI's
-    // Encoding::CompatibilityError. Twins: rubyBinCat in abnf/jsrtrubystr.go,
-    // rbBinCat in lib/ruby-rt.metajs.
+    // String#+ / #<< / interpolation where a side is a box: the bytes join in the
+    // left side's encoding when the right is ASCII-only, in the right side's when
+    // the left is, in their common one otherwise; two non-ASCII sides of two
+    // encodings are MRI's Encoding::CompatibilityError. Twins: rubyBinCat in
+    // abnf/jsrtrubystr.go, rbBinCat in lib/ruby-rt.metajs.
     function binCat(l, r) {
-        var lt = binText(l)
-        var rt = strOperand(r)
-        if (isBin(l) && isBin(r)) { return mkBin(lt + rt) }
-        if (rbsAsciiOnly(isBin(l) ? rt : lt)) { return mkBin(lt + rt) }
-        if (rbsAsciiOnly(isBin(l) ? lt : rt)) { return mkRStr(lt + rt) }
-        raiseErr("+", "Encoding::CompatibilityError", "incompatible character encodings: " + (isBin(l) ? "ASCII-8BIT and UTF-8" : "UTF-8 and ASCII-8BIT"))
-        return null
+        // An ASCII-only box on the right leaves a UTF-8 left side as it is.
+        if (isBin(r) && !isBin(l) && rbsAsciiOnly(r.__rbin)) { return mkRStr(rsText(l) + r.__rbin) }
+        var lb = strBytes(l)
+        var rb = isBin(r) ? r.__rbin : rbsBinOf(strOperand(r))
+        var le = strEnc(l)
+        var re = isBin(r) ? binEnc(r) : "UTF-8"
+        var enc = le
+        if (!rbsAsciiOnly(rb)) {
+            if (rbsAsciiOnly(lb)) { enc = re }
+            else if (le != re) { raiseErr("+", "Encoding::CompatibilityError", "incompatible character encodings: " + le + " and " + re) }
+        }
+        return encStr(lb + rb, enc)
     }
-    // == with a binary side: the same bytes, and an ASCII-only text where the
-    // other side is UTF-8 (MRI compares across encodings only then).
+    // == / eql? where a side is a box: the same bytes, in the same encoding unless
+    // they are ASCII-only (MRI compares across encodings only then).
     function binEq(l, r) {
-        if (isBin(l) && isBin(r)) { return l.__rbin === r.__rbin }
-        var o = anytype
-        o = isBin(l) ? r : l
-        if (typeof o != "string" && !isRStr(o)) { return false }
-        return binText(l) === binText(r) && rbsAsciiOnly(binText(o))
+        if (!isBin(l) && typeof l != "string" && !isRStr(l)) { return false }
+        if (!isBin(r) && typeof r != "string" && !isRStr(r)) { return false }
+        var lb = strBytes(l)
+        return lb === strBytes(r) && (strEnc(l) == strEnc(r) || rbsAsciiOnly(lb))
     }
     // The encoding an argument of force_encoding (a name or an Encoding) selects:
-    // BINARY or UTF-8, US-ASCII counting as UTF-8. Twins: rubyEncArg in
-    // abnf/jsrtrubystr.go, rbEncArg in lib/ruby-rt.metajs.
+    // ASCII-8BIT, US-ASCII or UTF-8. Twins: rubyEncArg in abnf/jsrtrubystr.go,
+    // rbEncArg in lib/ruby-rt.metajs.
     function encArgName(e) {
-        if (isUserObj(e) && e.__renc !== undefined) { return e.__renc == "ASCII-8BIT" ? "BINARY" : "UTF-8" }
+        if (isUserObj(e) && e.__renc !== undefined) { return e.__renc }
         var n = rstr(e).toUpperCase()
-        if (n == "BINARY" || n == "ASCII-8BIT") { return "BINARY" }
-        if (n == "UTF-8" || n == "US-ASCII" || n == "ASCII") { return "UTF-8" }
+        if (n == "BINARY" || n == "ASCII-8BIT") { return "ASCII-8BIT" }
+        if (n == "US-ASCII" || n == "ASCII") { return "US-ASCII" }
+        if (n == "UTF-8") { return "UTF-8" }
         raiseErr("force_encoding", "ArgumentError", "unknown encoding name - " + rstr(e))
         return ""
     }
@@ -3829,7 +3883,27 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (err.length > 0) { raiseErr(name, "NotImplementedError", "unpack directive '" + err[0] + "' is not supported") }
         var out = rbsUnpack(b, dirs, err)
         if (err.length > 0) { raiseErr(name, "ArgumentError", err[0]) }
+        for (var i = 0; i < out.length; i++) {
+            var o = anytype
+            o = out[i]
+            if (o !== null && typeof o == "object") { out[i] = typeof o.big == "string" ? bigOut(bigFromDec(o.big)) : encStr(o.str, o.enc) }
+        }
         if (name == "unpack1") { return out.length > 0 ? out[0] : null }
+        return out
+    }
+    // Array#pack: its values as rbsPack takes them (lib/ruby-str.js).
+    function packArgs(t) {
+        var out = []
+        for (var i = 0; i < t.length; i++) {
+            var v = anytype
+            v = t[i]
+            if (typeof v == "number") { out.push(v) }
+            else if (isBig(v)) { out.push({big: bigStr(v)}) }
+            else if (isFlo(v)) { out.push(Math.trunc(toF(v))) }
+            else if (typeof v == "string" || isRStr(v) || isBin(v)) { out.push({str: strBytes(v)}) }
+            else if (v === null || v === undefined) { out.push(null) }
+            else { out.push({cls: fmtConvName(v)}) }
+        }
         return out
     }
     function rsTextList(a) {
@@ -3841,9 +3915,21 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
 
     // `# frozen_string_literal: true' (lib/ruby-magic.js) it is frozen instead, and
     // one shared object per text unless it interpolates (dyn).
+    // A literal of invalid UTF-8 (rbsEscBytes): a fresh box of its bytes each time.
+    function makeU8Lit(b) { return function() { return encStr(b, "UTF-8") } }
     function makeStrLit(t, dyn) {
-        if (rbFrozenLits()) { return function() { return fzLit(rstr(t()), !dyn) } }
-        return function() { return mkRStr(rstr(t())) }
+        if (rbFrozenLits()) {
+            return function() {
+                var fv = anytype
+                fv = t()
+                return isBin(fv) ? fv : fzLit(rstr(fv), !dyn)
+            }
+        }
+        return function() {
+            var v = anytype
+            v = t()
+            return isBin(v) ? v : mkRStr(rstr(v))
+        }
     }
     // The frozen literal. Twins: rubyFzLit in abnf/jsrtruby.go, js_rsfz in
     // lib/ruby-rt.metajs.
@@ -6068,7 +6154,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (isMatchD(v)) { return "#<MatchData " + rinspect(rxGroup(v.rev.prog, v.text, v.m, 0)) + ">" }
         if (typeof v == "string") { return strInspect(v) }
         if (isRStr(v)) { return strInspect(v.__rs) }
-        if (isBin(v)) { return rbsBinInspect(v.__rbin) }
+        if (isBin(v)) { return binInspect(v) }
         if (isSym(v)) { return symInspect(v.s) }
         if (isEnum(v)) { return enumInspect(v) }
         // Rational#inspect and Complex#inspect are PARENTHESIZED where #to_s is
@@ -7245,14 +7331,26 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         fmtFrame = outerFrame
         return out
     }
+    // The pieces join as text until one is a box - a chunk of invalid UTF-8 or an
+    // interpolated binary String - and by binCat's encoding rule from there on.
+    // Twin of js_rtpl in abnf/jsrtruby.go and lib/ruby-rt.metajs.
     function makeTemplate(items) {
         return function() {
             var out = ""
+            var box = anytype
+            box = null
             for (var i = 0; i < items.length; i++) {
-                if (items[i].s != undefined) { out += items[i].s }
-                else { out += rstr(items[i].e()) }
+                var part = anytype
+                if (items[i].u8 != undefined) { part = encStr(items[i].u8, "UTF-8") }
+                else if (items[i].s != undefined) { part = items[i].s }
+                else {
+                    part = items[i].e()
+                    if (!isBin(part)) { part = rstr(part) }
+                }
+                if (box === null && !isBin(part)) { out += part; continue }
+                box = binCat(box === null ? out : box, part)
             }
-            return out
+            return box === null ? out : box
         }
     }
     // ----- Heredocs -----
@@ -7394,8 +7492,13 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     function makeAdjacent(items) {
         if (items.length == 1) { return items[0] }
         return function() {
-            var out = ""
-            for (var i = 0; i < items.length; i++) { out += rstr(items[i]()) }
+            var out = anytype
+            out = ""
+            for (var i = 0; i < items.length; i++) {
+                var part = anytype
+                part = items[i]()
+                out = isBin(out) || isBin(part) ? binCat(out, part) : rstr(out) + rstr(part)
+            }
             return out
         }
     }
@@ -7403,7 +7506,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // ?a / ?\n: the body of a one-character literal, with the escapes of "..".
     // ?\C-z is the control character (the letter modulo 32) and ?\M-x sets the high bit,
     // so ?\M-\C-z is 0x1a + 0x80 = 0x9a. Both prefixes may be spelled in either order.
-    function ctlCharVal(b) {
+    function ctlCharVal(b, inv) {
         var meta = false
         var ctrl = false
         var i = 0
@@ -7417,15 +7520,20 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         var code = 0
         if (rest.charAt(0) == "\\") { code = unescapeRb(rest).charCodeAt(0) } else { code = rest.charCodeAt(0) }
         if (ctrl) { code = code % 32 }
-        if (meta) { code = code + 128 }
+        // A meta character is a byte, which on its own is invalid UTF-8.
+        if (meta) {
+            code = code + 128
+            inv.push(String.fromCharCode(code))
+        }
         return String.fromCharCode(code)
     }
-    function charLitVal(s) {
+    // inv receives the bytes of a literal that is invalid UTF-8 (rbsEscBytes).
+    function charLitVal(s, inv) {
         var body = s.slice(1)
         if (body.charAt(0) == "\\" && (body.charAt(1) == "M" || body.charAt(1) == "C" || body.charAt(1) == "c")) {
-            if (body.charAt(1) == "c" || body.charAt(2) == "-") { return ctlCharVal(body) }
+            if (body.charAt(1) == "c" || body.charAt(2) == "-") { return ctlCharVal(body, inv) }
         }
-        if (body.charCodeAt(0) == 92) { return unescapeRb(body) }
+        if (body.charCodeAt(0) == 92) { return unescapeRb(body, inv) }
         return body
     }
     // pctRawOf digs the {raw: text} the delimiter production pushed out of the items.
@@ -7556,8 +7664,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // Everything else keeps the shared helper's rule: the character itself, so \" \\
     // \# and \/ stay right. \C-x / \M-x are NOT decoded here - ctlCharVal handles them
     // for ?x character literals only.
-    function unescapeRb(s) {
+    function unescapeRb(s, inv) {
         var out = ""
+        var raw = []
         var i = 0
         while (i < s.length) {
             var c = s.charCodeAt(i)
@@ -7581,6 +7690,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                     ov = ov * 8 + (od - 48)
                     on = on + 1
                 }
+                if (ov % 256 >= 128) { raw.push(out.length) }
                 out += String.fromCharCode(ov % 256)
                 i = i + 1 + on
                 continue
@@ -7593,6 +7703,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                     xn = xn + 1
                 }
                 if (xn == 0) { out += "x"; i = i + 2; continue }
+                if (xv >= 128) { raw.push(out.length) }
                 out += String.fromCharCode(xv)
                 i = i + 2 + xn
                 continue
@@ -7640,7 +7751,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             out += String.fromCharCode(e)
             i = i + 2
         }
-        return out
+        return raw.length == 0 ? out : rbsEscBytes(out, raw, inv)
     }
     // One hex digit's value, or -1 - including past the end of the string, which is
     // checked explicitly rather than left to charCodeAt's NaN: the two script hosts
@@ -8976,7 +9087,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                     return cs
                 }
                 if (target < 0 || target > 255) { raiseErr(name, "RangeError", intStr(target) + " out of char range") }
-                return target > 127 ? mkBin(String.fromCharCode(target)) : String.fromCharCode(target)
+                return encStr(String.fromCharCode(target), target > 127 ? "ASCII-8BIT" : "US-ASCII")
             }
             // Integer is a real number with denominator 1, always finite.
             if (name == "numerator" || name == "real") { return target }
@@ -9017,7 +9128,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             for (var ai = 0; ai < args.length; ai++) { if (isRStr(args[ai]) || isBin(args[ai])) { args = rsTextList(args); break } }
             if (name == "b") { return mkBin(rbsBinOf(target)) }
             if (name == "encoding") { return hostGlobals["Encoding"]["$c$UTF_8"] }
-            if (name == "force_encoding") { return encArgName(args[0]) == "BINARY" ? mkBin(rbsBinOf(target)) : target }
+            if (name == "force_encoding") { return encStr(rbsBinOf(target), encArgName(args[0])) }
             if (name == "unpack" || name == "unpack1") { return strUnpack(rbsBinOf(target), name, args) }
             // index and rindex take a String or a Regexp, and a character offset.
             // Twins: rbStrSearch in lib/ruby-rt.metajs, rubyStrIndex in abnf/jsrtrubystr.go.
@@ -9566,7 +9677,17 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     }
     // Array#join RECURSES into a nested array with the same separator, and every
     // other element goes through to_s (so nil contributes "").
+    // With a box among the elements, the parts join by binCat's encoding rule
+    // from the first one's encoding (MRI). Twins: rubyArrJoin in abnf/jsrt.go,
+    // rbArrJoin in lib/ruby-rt.metajs.
     function arrJoin(t, sep) {
+        if (arrHasBox(t)) {
+            var flat = arrFlatInto(t, 0 - 1, [])
+            var acc = anytype
+            acc = isBin(flat[0]) ? flat[0] : rstr(flat[0])
+            for (var bj = 1; bj < flat.length; bj++) { acc = binCat(binCat(acc, sep), isBin(flat[bj]) ? flat[bj] : rstr(flat[bj])) }
+            return acc
+        }
         var out = ""
         for (var i = 0; i < t.length; i++) {
             if (i > 0) { out = out + sep }
@@ -9574,6 +9695,12 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             else { out = out + rstr(t[i]) }
         }
         return out
+    }
+    function arrHasBox(t) {
+        for (var i = 0; i < t.length; i++) {
+            if (isBin(t[i]) || (Array.isArray(t[i]) && arrHasBox(t[i]))) { return true }
+        }
+        return false
     }
     // Array#flatten takes a DEPTH: flatten(1) splices one level only. -1 is "all the
     // way down", which is what a missing argument means.
@@ -10324,11 +10451,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             var perr = []
             var pdirs = rbsPackDirs(rstr(args[0]), perr)
             if (perr.length > 0) { raiseErr(name, "NotImplementedError", "pack directive '" + perr[0] + "' is not supported") }
-            var pv = []
-            for (i = 0; i < t.length; i++) { pv.push(Math.trunc(toF(t[i]))) }
-            var ps = rbsPack(pv, pdirs, perr)
-            if (perr.length > 0) { raiseErr(name, "ArgumentError", perr[0]) }
-            return pdirs.length > 0 && pdirs[0][0] == "U" ? ps : mkBin(ps)
+            var ps = rbsPack(packArgs(t), pdirs, perr)
+            if (perr.length > 0) { raiseErr(name, perr.length > 1 ? perr[1] : "ArgumentError", perr[0]) }
+            return encStr(ps, rbsPackEnc(pdirs))
         }
         if (name == "take_while" || name == "drop_while") {
             var cut = t.length
@@ -14799,7 +14924,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     core.keyId = function(k) {
         if (isBig(k)) { return "b" + bigStr(k) }
         if (isRStr(k)) { return "s" + k.__rs }
-        if (isBin(k)) { return "x" + k.__rbin }
+        if (isBin(k)) { return "x" + (rbsAsciiOnly(k.__rbin) ? "" : binEnc(k) + ":") + k.__rbin }
         return null
     }
     // An ARRAY is a VALUE key in Ruby (Array#hash and Array#eql? are structural),
@@ -14814,7 +14939,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // Hash#rehash. This compares at lookup time and therefore still finds it -
     // the same shape the compiled halves' fallback scans have.
     core.keyEq = function(a, b) {
-        if (isBin(a) || isBin(b)) { return isBin(a) && isBin(b) && a.__rbin === b.__rbin }
+        if (isBin(a) || isBin(b)) { return binEq(a, b) }
         if (isRStr(a) || isRStr(b)) { return rsText(a) === rsText(b) }
         // An object whose class defines eql? is keyed by it.
         if (isUserObj(b) && typeof lookupMethod(b.__class, "eql?") == "function") { return rtest(mcall(b, "eql?", [a], null)) }

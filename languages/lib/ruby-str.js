@@ -446,28 +446,84 @@ function rbsBinDecode(b) {
     var i = 0
     var err = []
     while (i < b.length) {
-        var c = b.charCodeAt(i)
-        var n = 0
-        var cp = c
-        if (c >= 194 && c <= 223) { n = 1; cp = c - 192 }
-        else if (c >= 224 && c <= 239) { n = 2; cp = c - 224 }
-        else if (c >= 240 && c <= 244) { n = 3; cp = c - 240 }
-        else if (c >= 128) { return null }
-        if (i + n >= b.length && n > 0) { return null }
-        var k = 1
-        while (k <= n) {
-            var d = b.charCodeAt(i + k)
-            if (d < 128 || d > 191) { return null }
-            cp = cp * 64 + (d - 128)
-            k = k + 1
-        }
-        if ((n == 2 && cp < 2048) || (n == 3 && cp < 65536)) { return null }
-        var ch = rbsChrUtf8(cp, err)
-        if (err.length > 0) { return null }
-        out = out + ch
-        i = i + n + 1
+        var n = rbsU8At(b, i)
+        if (n == 0) { return null }
+        out = out + (n == 1 ? b.charAt(i) : rbsChrUtf8(rbsU8Cp(b, i, n), err))
+        i = i + n
     }
     return out
+}
+
+// A string literal whose \xHH or \nnn escapes past 127 are BYTES (raw lists
+// where each landed in out, one char each): the literal is read as UTF-8 bytes,
+// which spell its text when they are valid ("\xC3\xA9" is "é"). Invalid ones
+// leave out as it is, and inv, when given, receives the bytes for a String
+// literal to box.
+function rbsEscBytes(out, raw, inv) {
+    var b = ""
+    var r = 0
+    var i = 0
+    while (i < out.length) {
+        if (r < raw.length && raw[r] == i) {
+            b = b + out.charAt(i)
+            r = r + 1
+            i = i + 1
+        } else {
+            var k = rbsCharLen(out, i)
+            b = b + rbsBinOf(out.substring(i, i + k))
+            i = i + k
+        }
+    }
+    var t = rbsBinDecode(b)
+    if (t !== null) { return t }
+    if (inv !== undefined && inv !== null) { inv.push(b) }
+    return out
+}
+
+// The byte length of the UTF-8 character at byte i of b, 0 when no valid one
+// starts there.
+function rbsU8At(b, i) {
+    var c = b.charCodeAt(i)
+    if (c < 128) { return 1 }
+    var n = 0
+    if (c >= 194 && c <= 223) { n = 2 }
+    else if (c >= 224 && c <= 239) { n = 3 }
+    else if (c >= 240 && c <= 244) { n = 4 }
+    else { return 0 }
+    if (i + n > b.length) { return 0 }
+    var k = 1
+    while (k < n) {
+        var d = b.charCodeAt(i + k)
+        if (d < 128 || d > 191) { return 0 }
+        k = k + 1
+    }
+    var cp = rbsU8Cp(b, i, n)
+    if ((n == 3 && (cp < 2048 || (cp >= 55296 && cp <= 57343))) || (n == 4 && (cp < 65536 || cp > 1114111))) { return 0 }
+    return n
+}
+
+// The code point of the n-byte UTF-8 character at byte i of b.
+function rbsU8Cp(b, i, n) {
+    var cp = b.charCodeAt(i) % (n == 2 ? 32 : (n == 3 ? 16 : 8))
+    var k = 1
+    while (k < n) {
+        cp = cp * 64 + (b.charCodeAt(i + k) - 128)
+        k = k + 1
+    }
+    return cp
+}
+
+// The characters of UTF-8 bytes b where a byte that starts no valid character
+// counts as one: String#size of a String with an invalid byte.
+function rbsU8Len(b) {
+    var n = 0
+    var i = 0
+    while (i < b.length) {
+        var k = rbsU8At(b, i)
+        i = i + (k == 0 ? 1 : k)
+        n = n + 1
+    }
+    return n
 }
 
 // Whether every char of s is ASCII.
@@ -507,22 +563,59 @@ function rbsBinInspect(b) {
     return out + "\""
 }
 
-// Array#pack and String#unpack over the directives C (unsigned byte), c (signed
-// byte) and U (UTF-8 character), each with an optional count or `*'. The
-// directives as [letter, count] pairs, count -1 for `*'; err[0] names the first
-// directive outside that set.
+// ----- Array#pack / String#unpack -----
+// Integers (C c S s L l Q q J j I i n N v V U, with the _ ! < > modifiers),
+// Strings (a A Z B b H h m) and positions (x X @), each with a count or `*'.
+// The float directives are not modelled. Go twins: rubyPack / rubyUnpack in
+// abnf/jsrtrubystr.go.
+//
+// The engine hands rbsPack its values as a number (an Integer, or a Float
+// truncated), {big: decimal text} (an Integer past 2^53), {str: bytes} (a
+// String, one char per byte), null (nil) or {cls: class name}; rbsUnpack answers
+// numbers, {big: decimal text}, {str: bytes, enc: encoding name} and null. An
+// error is err[0] (the message) and err[1] (the class, ArgumentError when
+// absent).
+
+// The byte width of an integer directive, 0 for any other one, -1 for one that
+// is not modelled.
+function rbsPackSize(d) {
+    if (d == "C" || d == "c") { return 1 }
+    if (d == "S" || d == "s" || d == "n" || d == "v") { return 2 }
+    if (d == "L" || d == "l" || d == "N" || d == "V" || d == "I" || d == "i") { return 4 }
+    if (d == "Q" || d == "q" || d == "J" || d == "j") { return 8 }
+    if (d == "U" || d == "a" || d == "A" || d == "Z" || d == "B" || d == "b" || d == "H" || d == "h"
+        || d == "m" || d == "x" || d == "X" || d == "@") { return 0 }
+    return 0 - 1
+}
+
+// The directives as [letter, count, byte width, big-endian, signed] records;
+// count -1 for `*'. err[0] names the first directive that is not modelled.
 function rbsPackDirs(fmt, err) {
     var out = []
     var i = 0
     while (i < fmt.length) {
         var d = fmt.charAt(i)
         i = i + 1
-        if (d == " ") { continue }
-        if (d != "C" && d != "c" && d != "U") {
+        if (d == " " || d == "\t" || d == "\n") { continue }
+        var size = rbsPackSize(d)
+        if (size < 0) {
             err.push(d)
             return out
         }
-        var n = 1
+        var be = d == "n" || d == "N"
+        var signed = d == "c" || d == "s" || d == "l" || d == "q" || d == "j" || d == "i"
+        var native = "sSiIlLqQjJ"
+        while (i < fmt.length && (fmt.charAt(i) == "_" || fmt.charAt(i) == "!" || fmt.charAt(i) == "<" || fmt.charAt(i) == ">")) {
+            var mo = fmt.charAt(i)
+            if (native.indexOf(d) < 0) {
+                err.push(d + mo)
+                return out
+            }
+            if (mo == "<" || mo == ">") { be = mo == ">" }
+            else if (d == "l" || d == "L") { size = 8 }
+            i = i + 1
+        }
+        var n = d == "m" ? 45 : 1
         if (i < fmt.length && fmt.charAt(i) == "*") {
             n = 0 - 1
             i = i + 1
@@ -533,13 +626,182 @@ function rbsPackDirs(fmt, err) {
                 i = i + 1
             }
         }
-        out.push([d, n])
+        out.push([d, n, size, be, signed])
     }
     return out
 }
 
-// Array#pack of the Integers in vals: the text, which is a binary String's
-// unless the first directive is U. err[0] is the ArgumentError's message.
+// The value's class for a TypeError message.
+function rbsPackCls(v) {
+    if (v === null) { return "nil" }
+    if (typeof v == "number") { return "Integer" }
+    if (typeof v.big == "string") { return "Integer" }
+    if (typeof v.str == "string") { return "String" }
+    return v.cls
+}
+
+// The k little-endian bytes of the decimal integer text dec modulo 2^(8k), two's
+// complement for a negative one.
+function rbsDecBytes(dec, k) {
+    var neg = dec.charAt(0) == "-"
+    var digits = []
+    var i = neg ? 1 : 0
+    while (i < dec.length) {
+        digits.push(dec.charCodeAt(i) - 48)
+        i = i + 1
+    }
+    var out = []
+    while (out.length < k) {
+        var rem = 0
+        var j = 0
+        while (j < digits.length) {
+            var cur = rem * 10 + digits[j]
+            digits[j] = Math.floor(cur / 256)
+            rem = cur % 256
+            j = j + 1
+        }
+        out.push(rem)
+    }
+    if (neg) {
+        var carry = 1
+        var q = 0
+        while (q < k) {
+            var b = 255 - out[q] + carry
+            out[q] = b % 256
+            carry = b >= 256 ? 1 : 0
+            q = q + 1
+        }
+    }
+    return out
+}
+
+// The decimal text of the little-endian bytes b (two's complement when neg).
+function rbsBytesDec(b, neg) {
+    var bytes = []
+    var i = 0
+    while (i < b.length) {
+        bytes.push(neg ? 255 - b[i] : b[i])
+        i = i + 1
+    }
+    if (neg) {
+        var carry = 1
+        var q = 0
+        while (q < bytes.length && carry > 0) {
+            var s = bytes[q] + carry
+            bytes[q] = s % 256
+            carry = s >= 256 ? 1 : 0
+            q = q + 1
+        }
+    }
+    var out = ""
+    var nonzero = true
+    while (nonzero) {
+        var rem = 0
+        nonzero = false
+        var j = bytes.length - 1
+        while (j >= 0) {
+            var cur = rem * 256 + bytes[j]
+            bytes[j] = Math.floor(cur / 10)
+            rem = cur % 10
+            if (bytes[j] > 0) { nonzero = true }
+            j = j - 1
+        }
+        out = String.fromCharCode(48 + rem) + out
+    }
+    return (neg ? "-" : "") + out
+}
+
+// The k bytes of an Integer, little-endian.
+function rbsIntBytes(v, k) {
+    if (typeof v != "number") { return rbsDecBytes(v.big, k) }
+    var out = []
+    var x = v
+    if (k == 8) {
+        var hi = Math.floor(x / 4294967296)
+        var lo = x - hi * 4294967296
+        out = rbsIntBytes(lo, 4)
+        var hb = rbsIntBytes(hi, 4)
+        var t = 0
+        while (t < 4) {
+            out.push(hb[t])
+            t = t + 1
+        }
+        return out
+    }
+    var m = Math.pow(2, 8 * k)
+    x = ((x % m) + m) % m
+    var i = 0
+    while (i < k) {
+        out.push(x % 256)
+        x = Math.floor(x / 256)
+        i = i + 1
+    }
+    return out
+}
+
+function rbsB64Char(n) {
+    return "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/".charAt(n)
+}
+
+// The base64 text of the bytes s: `m' wraps a line every `per' input bytes, and
+// per 0 (`m0') writes no newline.
+function rbsB64(s, per) {
+    var out = ""
+    var i = 0
+    var line = 0
+    while (i < s.length) {
+        var b0 = s.charCodeAt(i)
+        var b1 = i + 1 < s.length ? s.charCodeAt(i + 1) : 0
+        var b2 = i + 2 < s.length ? s.charCodeAt(i + 2) : 0
+        out = out + rbsB64Char(Math.floor(b0 / 4)) + rbsB64Char((b0 % 4) * 16 + Math.floor(b1 / 16))
+        out = out + (i + 1 < s.length ? rbsB64Char((b1 % 16) * 4 + Math.floor(b2 / 64)) : "=")
+        out = out + (i + 2 < s.length ? rbsB64Char(b2 % 64) : "=")
+        i = i + 3
+        line = line + 3
+        if (per > 0 && (line >= per || i >= s.length)) {
+            out = out + "\n"
+            line = 0
+        }
+    }
+    return out
+}
+
+// The bytes base64 text s spells; anything not in the alphabet is skipped.
+function rbsUnB64(s) {
+    var out = ""
+    var acc = 0
+    var bits = 0
+    var i = 0
+    while (i < s.length) {
+        var c = s.charCodeAt(i)
+        i = i + 1
+        var v = 0 - 1
+        if (c >= 65 && c <= 90) { v = c - 65 }
+        else if (c >= 97 && c <= 122) { v = c - 71 }
+        else if (c >= 48 && c <= 57) { v = c + 4 }
+        else if (c == 43) { v = 62 }
+        else if (c == 47) { v = 63 }
+        else if (c == 61) { break }
+        if (v < 0) { continue }
+        acc = acc * 64 + v
+        bits = bits + 6
+        if (bits >= 8) {
+            bits = bits - 8
+            var p = Math.pow(2, bits)
+            out = out + String.fromCharCode(Math.floor(acc / p))
+            acc = acc % p
+        }
+    }
+    return out
+}
+
+// The nibble value of a hex digit as MRI reads it for H / h.
+function rbsNibble(c) {
+    if ((c >= 65 && c <= 90) || (c >= 97 && c <= 122)) { return ((c % 8) + 9) % 16 }
+    return c % 16
+}
+
+// Array#pack: the bytes, one char per byte.
 function rbsPack(vals, dirs, err) {
     var out = ""
     var k = 0
@@ -547,6 +809,44 @@ function rbsPack(vals, dirs, err) {
     while (i < dirs.length) {
         var d = dirs[i][0]
         var n = dirs[i][1]
+        var size = dirs[i][2]
+        if (d == "x") {
+            out = out + rbsRepeatTo(String.fromCharCode(0), n < 0 ? 0 : n)
+            i = i + 1
+            continue
+        }
+        if (d == "X") {
+            var back = n < 0 ? 0 : n
+            if (back > out.length) {
+                err.push("X outside of string")
+                return out
+            }
+            out = out.substring(0, out.length - back)
+            i = i + 1
+            continue
+        }
+        if (d == "@") {
+            var at = n < 0 ? 0 : n
+            out = at <= out.length ? out.substring(0, at) : out + rbsRepeatTo(String.fromCharCode(0), at - out.length)
+            i = i + 1
+            continue
+        }
+        if (size == 0 && d != "U") {
+            if (k >= vals.length) {
+                err.push("too few arguments")
+                return out
+            }
+            var sv = vals[k]
+            k = k + 1
+            if (sv === null || typeof sv != "object" || typeof sv.str != "string") {
+                err.push("no implicit conversion of " + rbsPackCls(sv) + " into String")
+                err.push("TypeError")
+                return out
+            }
+            out = out + rbsPackStr(d, n, sv.str)
+            i = i + 1
+            continue
+        }
         if (n < 0) { n = vals.length - k }
         var j = 0
         while (j < n) {
@@ -556,15 +856,25 @@ function rbsPack(vals, dirs, err) {
             }
             var v = vals[k]
             k = k + 1
+            if (v === null || (typeof v != "number" && typeof v.big != "string")) {
+                err.push("no implicit conversion of " + rbsPackCls(v) + " into Integer")
+                err.push("TypeError")
+                return out
+            }
             if (d == "U") {
-                var ch = rbsChrUtf8(v, err)
-                if (err.length > 0) {
-                    err[0] = "pack(U): value out of range"
+                if (typeof v != "number" || v < 0 || v > 2147483647) {
+                    err.push("pack(U): value out of range")
+                    err.push("RangeError")
                     return out
                 }
-                out = out + (dirs[0][0] == "U" ? ch : rbsBinOf(ch))
+                out = out + rbsU8Enc(v)
             } else {
-                out = out + String.fromCharCode(((v % 256) + 256) % 256)
+                var bs = rbsIntBytes(v, size)
+                var q = 0
+                while (q < size) {
+                    out = out + String.fromCharCode(bs[dirs[i][3] ? size - 1 - q : q])
+                    q = q + 1
+                }
             }
             j = j + 1
         }
@@ -573,8 +883,88 @@ function rbsPack(vals, dirs, err) {
     return out
 }
 
-// String#unpack of the bytes b (one char per byte): an Array of Integers, nil
-// for a counted C / c past the end. err[0] is the ArgumentError's message.
+// The encoding of pack's String: UTF-8 when U comes first, US-ASCII when only
+// m does, else ASCII-8BIT (MRI's pack.c).
+function rbsPackEnc(dirs) {
+    var e = "US-ASCII"
+    var i = 0
+    while (i < dirs.length) {
+        var d = dirs[i][0]
+        if (d == "U") {
+            if (e == "US-ASCII") { e = "UTF-8" }
+        } else if (d != "m") { e = "ASCII-8BIT" }
+        i = i + 1
+    }
+    return e
+}
+
+// The bytes pack(U) writes for cp: UTF-8's scheme, extended to six bytes up to
+// 2^31 - 1 as MRI does, so a surrogate or a value past U+10FFFF is written too.
+function rbsU8Enc(cp) {
+    if (cp < 128) { return String.fromCharCode(cp) }
+    var n = 6
+    var lead = 252
+    if (cp < 2048) { n = 2; lead = 192 }
+    else if (cp < 65536) { n = 3; lead = 224 }
+    else if (cp < 2097152) { n = 4; lead = 240 }
+    else if (cp < 67108864) { n = 5; lead = 248 }
+    var tail = ""
+    var v = cp
+    var k = 1
+    while (k < n) {
+        tail = String.fromCharCode(128 + v % 64) + tail
+        v = Math.floor(v / 64)
+        k = k + 1
+    }
+    return String.fromCharCode(lead + v) + tail
+}
+
+// One String directive of pack over the bytes s.
+function rbsPackStr(d, n, s) {
+    if (d == "a" || d == "A" || d == "Z") {
+        if (n < 0) { return d == "Z" ? s + String.fromCharCode(0) : s }
+        if (s.length >= n) { return s.substring(0, n) }
+        return s + rbsRepeatTo(d == "A" ? " " : String.fromCharCode(0), n - s.length)
+    }
+    if (d == "m") { return rbsB64(s, n == 0 ? 0 : (n < 3 ? 45 : n - n % 3)) }
+    var out = ""
+    var cnt = n < 0 ? s.length : n
+    if (d == "B" || d == "b") {
+        var acc = 0
+        var bits = 0
+        var i = 0
+        while (i < cnt) {
+            var bit = i < s.length ? s.charCodeAt(i) % 2 : 0
+            acc = d == "B" ? acc * 2 + bit : acc + bit * Math.pow(2, bits)
+            bits = bits + 1
+            if (bits == 8) {
+                out = out + String.fromCharCode(acc)
+                acc = 0
+                bits = 0
+            }
+            i = i + 1
+        }
+        if (bits > 0) { out = out + String.fromCharCode(d == "B" ? acc * Math.pow(2, 8 - bits) : acc) }
+        return out
+    }
+    var hacc = 0
+    var half = false
+    var h = 0
+    while (h < cnt) {
+        var nib = h < s.length ? rbsNibble(s.charCodeAt(h)) : 0
+        if (!half) { hacc = d == "H" ? nib * 16 : nib }
+        else {
+            hacc = d == "H" ? hacc + nib : hacc + nib * 16
+            out = out + String.fromCharCode(hacc)
+        }
+        half = !half
+        h = h + 1
+    }
+    if (half) { out = out + String.fromCharCode(hacc) }
+    return out
+}
+
+// String#unpack of the bytes b (one char per byte).
 function rbsUnpack(b, dirs, err) {
     var out = []
     var p = 0
@@ -582,28 +972,114 @@ function rbsUnpack(b, dirs, err) {
     while (i < dirs.length) {
         var d = dirs[i][0]
         var n = dirs[i][1]
-        var j = 0
-        while (n < 0 ? p < b.length : j < n) {
-            if (p >= b.length) {
-                if (d != "U") { out.push(null) }
-            } else if (d == "U") {
-                var c = b.charCodeAt(p)
-                var len = c < 128 ? 1 : (c >= 240 ? 4 : (c >= 224 ? 3 : 2))
-                var t = rbsBinDecode(b.substring(p, p + len))
-                if (t === null) {
-                    err.push("malformed UTF-8 character")
-                    return out
-                }
-                out.push(rbsOrd(t))
-                p = p + len
-            } else {
-                var v = b.charCodeAt(p)
-                out.push(d == "c" && v > 127 ? v - 256 : v)
-                p = p + 1
+        var size = dirs[i][2]
+        if (d == "x" || d == "X" || d == "@") {
+            var to = d == "@" ? (n < 0 ? 0 : n) : (d == "x" ? p + (n < 0 ? b.length - p : n) : p - (n < 0 ? 0 : n))
+            if (to < 0 || to > b.length) {
+                err.push(d + " outside of string")
+                return out
             }
-            j = j + 1
+            p = to
+        } else if (size == 0 && d != "U") {
+            var r = rbsUnpackStr(d, n, b, p)
+            out.push(r[0])
+            p = r[1]
+        } else {
+            var j = 0
+            while (n < 0 ? p + (d == "U" ? 1 : size) <= b.length : j < n) {
+                if (d == "U") {
+                    if (p >= b.length) { break }
+                    var c = b.charCodeAt(p)
+                    var len = c < 128 ? 1 : (c >= 240 ? 4 : (c >= 224 ? 3 : 2))
+                    var t = rbsBinDecode(b.substring(p, p + len))
+                    if (t === null) {
+                        err.push("malformed UTF-8 character")
+                        return out
+                    }
+                    out.push(rbsOrd(t))
+                    p = p + len
+                } else if (p + size > b.length) {
+                    out.push(null)
+                    p = b.length
+                } else {
+                    out.push(rbsIntOf(b, p, size, dirs[i][3], dirs[i][4]))
+                    p = p + size
+                }
+                j = j + 1
+            }
         }
         i = i + 1
     }
     return out
+}
+
+// The integer of the size bytes of b at p.
+function rbsIntOf(b, p, size, be, signed) {
+    var le = []
+    var q = 0
+    while (q < size) {
+        le.push(b.charCodeAt(be ? p + size - 1 - q : p + q))
+        q = q + 1
+    }
+    var neg = signed && le[size - 1] >= 128
+    if (size == 8) {
+        var lo = le[0] + le[1] * 256 + le[2] * 65536 + le[3] * 16777216
+        var hi = le[4] + le[5] * 256 + le[6] * 65536 + le[7] * 16777216
+        if (neg) { hi = hi - 4294967296 }
+        if (hi < 2097152 && hi >= 0 - 2097152) { return hi * 4294967296 + lo }
+        return {big: rbsBytesDec(le, neg)}
+    }
+    var v = 0
+    var k = size - 1
+    while (k >= 0) {
+        v = v * 256 + le[k]
+        k = k - 1
+    }
+    return neg ? v - Math.pow(2, 8 * size) : v
+}
+
+// One String directive of unpack at byte p: [the String, the next position].
+function rbsUnpackStr(d, n, b, p) {
+    var rest = b.length - p
+    if (d == "a" || d == "A" || d == "Z") {
+        var cnt = n < 0 || n > rest ? rest : n
+        var s = b.substring(p, p + cnt)
+        var next = p + cnt
+        if (d == "Z") {
+            var z = s.indexOf(String.fromCharCode(0))
+            if (z >= 0) {
+                s = s.substring(0, z)
+                if (n < 0) { next = p + z + 1 }
+            }
+        } else if (d == "A") {
+            var e = s.length
+            while (e > 0 && (s.charCodeAt(e - 1) == 32 || s.charCodeAt(e - 1) == 0)) { e = e - 1 }
+            s = s.substring(0, e)
+        }
+        return [{str: s, enc: "ASCII-8BIT"}, next]
+    }
+    if (d == "m") { return [{str: rbsUnB64(b.substring(p, b.length)), enc: "ASCII-8BIT"}, b.length] }
+    var out = ""
+    if (d == "B" || d == "b") {
+        var bits = n < 0 || n > rest * 8 ? rest * 8 : n
+        var i = 0
+        while (i < bits) {
+            var by = b.charCodeAt(p + Math.floor(i / 8))
+            var sh = d == "B" ? 7 - i % 8 : i % 8
+            out = out + (Math.floor(by / Math.pow(2, sh)) % 2 == 1 ? "1" : "0")
+            i = i + 1
+        }
+        return [{str: out, enc: "US-ASCII"}, p + Math.floor((bits + 7) / 8)]
+    }
+    var hx = "0123456789abcdef"
+    var nibs = n < 0 || n > rest * 2 ? rest * 2 : n
+    var h = 0
+    while (h < nibs) {
+        var hb = b.charCodeAt(p + Math.floor(h / 2))
+        var hi = Math.floor(hb / 16)
+        var lo = hb % 16
+        out = out + hx.charAt((h % 2 == 0) == (d == "H") ? hi : lo)
+        h = h + 1
+    }
+    return [{str: out, enc: "US-ASCII"}, p + Math.floor((nibs + 1) / 2)]
 }

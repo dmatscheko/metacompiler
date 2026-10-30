@@ -3213,7 +3213,29 @@ func init() {
 	rxExtraExterns = append(rxExtraExterns, func(rt *jsrt, m map[string]func(args []uint64) uint64) {
 		u := rt.unwrap
 		w := rt.wrap
-		m["js_rsnew"] = func(a []uint64) uint64 { return w(&jsRStr{s: rt.rubyStr(u(a[0]))}) }
+		m["js_rsnew"] = func(a []uint64) uint64 {
+			if _, isBox := u(a[0]).(*jsRBin); isBox {
+				return a[0]
+			}
+			return w(&jsRStr{s: rt.rubyStr(u(a[0]))})
+		}
+		// One piece of an interpolated String joining the text so far: plain text
+		// while neither side is a box, else rubyBinCat's encoding rule. Twins:
+		// makeTemplate in ruby-interpreter.abnf, js_rtpl in lib/ruby-rt.metajs.
+		m["js_rtpl"] = func(a []uint64) uint64 {
+			acc, x := u(a[0]), u(a[1])
+			_, accBox := acc.(*jsRBin)
+			_, xBox := x.(*jsRBin)
+			if !accBox && !xBox {
+				return w(rt.toString(acc) + rt.rubyStr(x))
+			}
+			return w(rt.rubyBinCat(acc, x))
+		}
+		// A String literal of invalid UTF-8: its bytes, one char each, in
+		// encoding a[1]. Twin of js_renc in lib/ruby-rt.metajs.
+		m["js_renc"] = func(a []uint64) uint64 {
+			return w(rubyEncStr(rubyBinOfText(rt.toString(u(a[0]))), rt.toString(u(a[1]))))
+		}
 		m["js_rsfz"] = func(a []uint64) uint64 { return w(rt.rubyFzLit(u(a[0]), u(a[1]) == true)) }
 
 		m["js_rspct"] = func(a []uint64) uint64 { return w(rubyPctLit(u(a[0]))) }

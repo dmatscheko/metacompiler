@@ -129,10 +129,10 @@ trap 'guard_reap; rm -rf "$OUT"' EXIT
 #            tests/<lang>-test-full.2.<ext> and tests/<lang>-test-full.3.<ext>, the
 #            kinds `full`, `full.2` and `full.3`; go, bash and python also have
 #            full.4, python full.5 and full.6 (CRLF line endings).
-#   lua      has tests/lua-test-full.2.lua beside its ratchet, for the same reason.
+#   lua, ruby  have tests/<lang>-test-full.2.<ext> beside the ratchet, for the same reason.
 ROWS="bash:sh:full,features,full.2,full.3,full.4 batch:cmd c:c csharp:cs dart:dart go:go:full,features,full.2,full.3,full.4 java:java kotlin:kt
       js:js:full,features,full.2,full.3,full.4.mjs
-      lua:lua:full,features,full.2 metajs:js php:php python:py:full,features,full.2,full.3,full.4,full.5,full.6 ruby:rb swift:swift typescript:ts
+      lua:lua:full,features,full.2 metajs:js php:php python:py:full,features,full.2,full.3,full.4,full.5,full.6 ruby:rb:full,features,full.2 swift:swift typescript:ts
       lisp:txt:features tinyc:txt:features"
 
 # <lang>:<label>:<source file>:<fixture path | exit-only>   - see the comment above

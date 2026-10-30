@@ -1,6 +1,8 @@
 package abnf
 
 import (
+	"bytes"
+	"encoding/base64"
 	"math"
 	"math/big"
 	"strconv"
@@ -872,19 +874,57 @@ func rubyFloatStep(beg, end, unit float64, excl bool) []float64 {
 	return out
 }
 
-// ----- Binary (ASCII-8BIT) Strings -----
+// ----- Strings in another encoding -----
 
-// jsRBin is a binary Ruby String, holding its bytes as they are. Integer#chr past
-// 127, String#b, force_encoding("BINARY") and Array#pack make one; a pointer, so
-// << changes it in place. Twin of the {__rbin} box of ruby-interpreter.abnf and
-// lib/ruby-rt.metajs, which hold one char per byte.
+// jsRBin is a Ruby String whose encoding is not UTF-8, or whose UTF-8 bytes are
+// invalid, holding its bytes as they are: enc is "" for ASCII-8BIT (binary:
+// Integer#chr past 127, String#b, Array#pack), else "US-ASCII" (Integer#chr
+// below 128, unpack("B") / ("H")) or "UTF-8" (a "\xFF" literal). A pointer, so
+// << and force_encoding change it in place. Twin of the {__rbin} box of
+// ruby-interpreter.abnf and lib/ruby-rt.metajs, which hold one char per byte.
 type jsRBin struct {
-	b  string
-	id jsHandleID
+	b   string
+	enc string
+	id  jsHandleID
+}
+
+func (t *jsRBin) encName() string {
+	if t.enc == "" {
+		return "ASCII-8BIT"
+	}
+	return t.enc
+}
+
+// rubyEncStr is the String of the bytes b in encoding enc: UTF-8 bytes that
+// are valid are an ordinary String. Twin of encStr in ruby-interpreter.abnf.
+func rubyEncStr(b, enc string) interface{} {
+	switch enc {
+	case "ASCII-8BIT":
+		return &jsRBin{b: b}
+	case "UTF-8":
+		if utf8.ValidString(b) {
+			return &jsRStr{s: b}
+		}
+	}
+	return &jsRBin{b: b, enc: enc}
+}
+
+// rubyStrBE is a String value's bytes and encoding, for the rules that mix
+// encodings; anything else converts through to_str (or raises TypeError).
+func (rt *jsrt) rubyStrBE(v interface{}) (string, string) {
+	switch t := v.(type) {
+	case *jsRBin:
+		return t.b, t.encName()
+	case *jsRStr:
+		return t.s, "UTF-8"
+	case string:
+		return t, "UTF-8"
+	}
+	return rt.rubyStrOperand(v), "UTF-8"
 }
 
 // rubyBinText is the text the other engines hold for the bytes b: one char per
-// byte, which is what the String methods a binary String delegates run on.
+// byte, which is what the String methods a box delegates run on.
 func rubyBinText(b string) string {
 	rs := make([]rune, len(b))
 	for i := 0; i < len(b); i++ {
@@ -954,71 +994,365 @@ func rubyBinInspect(b string) string {
 	return sb.String()
 }
 
-// rubyPackDir is one Array#pack / String#unpack directive: C, c or U, and its
-// count (-1 for `*'). Twin of rbsPackDirs in ruby-str.js.
-type rubyPackDir struct {
-	d byte
-	n int
+// rubyBoxInspect is a box's #inspect: an invalid UTF-8 String shows its valid
+// characters as text and every other byte as \xHH. Twin of binInspect in
+// ruby-interpreter.abnf.
+func rubyBoxInspect(t *jsRBin) string {
+	if t.enc != "UTF-8" {
+		return rubyBinInspect(t.b)
+	}
+	var sb strings.Builder
+	sb.WriteByte('"')
+	for i := 0; i < len(t.b); {
+		j := i
+		for j < len(t.b) {
+			r, n := utf8.DecodeRuneInString(t.b[j:])
+			if r == utf8.RuneError && n <= 1 {
+				break
+			}
+			j += n
+		}
+		var q string
+		if j > i {
+			q = rubyStrInspect(t.b[i:j])
+			i = j
+		} else {
+			q = rubyBinInspect(t.b[i : i+1])
+			i++
+		}
+		sb.WriteString(q[1 : len(q)-1])
+	}
+	sb.WriteByte('"')
+	return sb.String()
 }
 
-func (rt *jsrt) rubyPackDirs(name, fmtS string) []rubyPackDir {
+// rubyU8Len counts the characters of UTF-8 bytes b, a byte that starts no valid
+// character as one. Twin of rbsU8Len in ruby-str.js.
+func rubyU8Len(b string) int {
+	n := 0
+	for i := 0; i < len(b); n++ {
+		r, k := utf8.DecodeRuneInString(b[i:])
+		if r == utf8.RuneError && k <= 1 {
+			k = 1
+		}
+		i += k
+	}
+	return n
+}
+
+// rubyPackDir is one Array#pack / String#unpack directive: its letter, count
+// (-1 for `*'), byte width (0 for a String or position directive), byte order
+// and sign. Twin of rbsPackDirs in ruby-str.js, which states the set.
+type rubyPackDir struct {
+	d      byte
+	n      int
+	size   int
+	be     bool
+	signed bool
+}
+
+func rubyPackSize(d byte) int {
+	switch d {
+	case 'C', 'c':
+		return 1
+	case 'S', 's', 'n', 'v':
+		return 2
+	case 'L', 'l', 'N', 'V', 'I', 'i':
+		return 4
+	case 'Q', 'q', 'J', 'j':
+		return 8
+	case 'U', 'a', 'A', 'Z', 'B', 'b', 'H', 'h', 'm', 'x', 'X', '@':
+		return 0
+	}
+	return -1
+}
+
+func (rt *jsrt) rubyPackDirs(name, f string) []rubyPackDir {
 	var out []rubyPackDir
-	for i := 0; i < len(fmtS); {
-		d := fmtS[i]
+	for i := 0; i < len(f); {
+		d := f[i]
 		i++
-		if d == ' ' {
+		if d == ' ' || d == '\t' || d == '\n' {
 			continue
 		}
-		if d != 'C' && d != 'c' && d != 'U' {
+		size := rubyPackSize(d)
+		if size < 0 {
 			rt.rubyRaiseErr(name, "NotImplementedError", name+" directive '"+string(rune(d))+"' is not supported")
 		}
+		be := d == 'n' || d == 'N'
+		signed := strings.IndexByte("cslqji", d) >= 0
+		for i < len(f) && strings.IndexByte("_!<>", f[i]) >= 0 {
+			if strings.IndexByte("sSiIlLqQjJ", d) < 0 {
+				rt.rubyRaiseErr(name, "NotImplementedError", name+" directive '"+string(rune(d))+string(rune(f[i]))+"' is not supported")
+			}
+			switch f[i] {
+			case '<':
+				be = false
+			case '>':
+				be = true
+			default:
+				if d == 'l' || d == 'L' {
+					size = 8
+				}
+			}
+			i++
+		}
 		n := 1
-		if i < len(fmtS) && fmtS[i] == '*' {
+		if d == 'm' {
+			n = 45
+		}
+		if i < len(f) && f[i] == '*' {
 			n = -1
 			i++
-		} else if i < len(fmtS) && fmtS[i] >= '0' && fmtS[i] <= '9' {
+		} else if i < len(f) && f[i] >= '0' && f[i] <= '9' {
 			n = 0
-			for i < len(fmtS) && fmtS[i] >= '0' && fmtS[i] <= '9' {
-				n = n*10 + int(fmtS[i]-'0')
+			for i < len(f) && f[i] >= '0' && f[i] <= '9' {
+				n = n*10 + int(f[i]-'0')
 				i++
 			}
 		}
-		out = append(out, rubyPackDir{d, n})
+		out = append(out, rubyPackDir{d, n, size, be, signed})
 	}
 	return out
 }
 
-// rubyPack is Array#pack over C, c and U: a binary String unless the first
+// rubyPackInt is a pack value as an Integer: an Integer, or a Float truncated.
+func rubyPackInt(v interface{}) (*big.Int, bool) {
+	switch t := v.(type) {
+	case float64:
+		return big.NewInt(int64(t)), true
+	case *jsBigInt:
+		return t.v, true
+	case jsFlo:
+		i, _ := big.NewFloat(math.Trunc(rubyToF(t))).Int(nil)
+		return i, true
+	}
+	return nil, false
+}
+
+// rubyIntBytes is the k little-endian bytes of x modulo 2^(8k), two's
+// complement for a negative one. Twin of rbsIntBytes in ruby-str.js.
+func rubyIntBytes(x *big.Int, k int) []byte {
+	m := new(big.Int).Lsh(big.NewInt(1), uint(8*k))
+	be := new(big.Int).Mod(x, m).Bytes()
+	out := make([]byte, k)
+	for i := 0; i < len(be); i++ {
+		out[i] = be[len(be)-1-i]
+	}
+	return out
+}
+
+// rubyPack is Array#pack: a binary String, or a UTF-8 one when the first
 // directive is U. Twin of rbsPack in ruby-str.js.
-func (rt *jsrt) rubyPack(vals []interface{}, fmtS string) interface{} {
-	dirs := rt.rubyPackDirs("pack", fmtS)
-	var sb strings.Builder
+func (rt *jsrt) rubyPack(vals []interface{}, f string) interface{} {
+	dirs := rt.rubyPackDirs("pack", f)
+	var out []byte
 	k := 0
+	next := func() interface{} {
+		if k >= len(vals) {
+			rt.rubyRaiseErr("pack", "ArgumentError", "too few arguments")
+		}
+		k++
+		return vals[k-1]
+	}
 	for _, d := range dirs {
 		n := d.n
+		if n < 0 && (d.d == 'x' || d.d == 'X' || d.d == '@') {
+			n = 0
+		}
+		switch {
+		case d.d == 'x':
+			out = append(out, make([]byte, n)...)
+		case d.d == 'X':
+			if n > len(out) {
+				rt.rubyRaiseErr("pack", "ArgumentError", "X outside of string")
+			}
+			out = out[:len(out)-n]
+		case d.d == '@':
+			if n <= len(out) {
+				out = out[:n]
+			} else {
+				out = append(out, make([]byte, n-len(out))...)
+			}
+		case d.size == 0 && d.d != 'U':
+			v := next()
+			var s string
+			switch t := v.(type) {
+			case string, *jsRStr, *jsRBin:
+				s, _ = rt.rubyStrBE(t)
+			default:
+				rt.rubyRaiseErr("pack", "TypeError", "no implicit conversion of "+rubyFmtConvName(v)+" into String")
+			}
+			out = append(out, rubyPackStr(d.d, d.n, s)...)
+		default:
+			if n < 0 {
+				n = len(vals) - k
+			}
+			for j := 0; j < n; j++ {
+				v := next()
+				x, ok := rubyPackInt(v)
+				if !ok {
+					rt.rubyRaiseErr("pack", "TypeError", "no implicit conversion of "+rubyFmtConvName(v)+" into Integer")
+				}
+				if d.d == 'U' {
+					c := x.Int64()
+					if !x.IsInt64() || c < 0 || c > 0x7FFFFFFF {
+						rt.rubyRaiseErr("pack", "RangeError", "pack(U): value out of range")
+					}
+					out = append(out, rubyU8Enc(c)...)
+					continue
+				}
+				bs := rubyIntBytes(x, d.size)
+				for q := 0; q < d.size; q++ {
+					if d.be {
+						out = append(out, bs[d.size-1-q])
+					} else {
+						out = append(out, bs[q])
+					}
+				}
+			}
+		}
+	}
+	enc := "US-ASCII"
+	for _, d := range dirs {
+		if d.d == 'U' {
+			if enc == "US-ASCII" {
+				enc = "UTF-8"
+			}
+		} else if d.d != 'm' {
+			enc = "ASCII-8BIT"
+		}
+	}
+	return rubyEncStr(string(out), enc)
+}
+
+// rubyU8Enc is the bytes pack(U) writes for cp: UTF-8's scheme extended to six
+// bytes. Twin of rbsU8Enc in ruby-str.js.
+func rubyU8Enc(cp int64) []byte {
+	if cp < 128 {
+		return []byte{byte(cp)}
+	}
+	n, lead := 6, int64(252)
+	switch {
+	case cp < 2048:
+		n, lead = 2, 192
+	case cp < 65536:
+		n, lead = 3, 224
+	case cp < 2097152:
+		n, lead = 4, 240
+	case cp < 67108864:
+		n, lead = 5, 248
+	}
+	out := make([]byte, n)
+	for k := n - 1; k > 0; k-- {
+		out[k] = byte(128 + cp%64)
+		cp /= 64
+	}
+	out[0] = byte(lead + cp)
+	return out
+}
+
+// rubyPackStr is one String directive of pack over the bytes s. Twin of
+// rbsPackStr in ruby-str.js.
+func rubyPackStr(d byte, n int, s string) []byte {
+	switch d {
+	case 'a', 'A', 'Z':
 		if n < 0 {
-			n = len(vals) - k
+			if d == 'Z' {
+				return append([]byte(s), 0)
+			}
+			return []byte(s)
 		}
-		for j := 0; j < n; j++ {
-			if k >= len(vals) {
-				rt.rubyRaiseErr("pack", "ArgumentError", "too few arguments")
-			}
-			v := int64(rubyToF(vals[k]))
-			k++
-			if d.d != 'U' {
-				sb.WriteByte(byte(((v % 256) + 256) % 256))
-				continue
-			}
-			if v < 0 || v > 0x10FFFF || (v >= 0xD800 && v <= 0xDFFF) {
-				rt.rubyRaiseErr("pack", "ArgumentError", "pack(U): value out of range")
-			}
-			sb.WriteString(string(rune(v)))
+		if len(s) >= n {
+			return []byte(s[:n])
 		}
+		pad := byte(0)
+		if d == 'A' {
+			pad = ' '
+		}
+		return append([]byte(s), bytes.Repeat([]byte{pad}, n-len(s))...)
+	case 'm':
+		per := 45
+		if n == 0 {
+			per = 0
+		} else if n >= 3 {
+			per = n - n%3
+		}
+		enc := base64.StdEncoding
+		var sb strings.Builder
+		for i := 0; i < len(s); {
+			end := len(s)
+			if per > 0 && i+per < end {
+				end = i + per
+			}
+			sb.WriteString(enc.EncodeToString([]byte(s[i:end])))
+			if per > 0 {
+				sb.WriteByte('\n')
+			}
+			i = end
+		}
+		return []byte(sb.String())
 	}
-	if len(dirs) > 0 && dirs[0].d == 'U' {
-		return &jsRStr{s: sb.String()}
+	cnt := n
+	if n < 0 {
+		cnt = len(s)
 	}
-	return &jsRBin{b: sb.String()}
+	var out []byte
+	if d == 'B' || d == 'b' {
+		acc, bits := 0, 0
+		for i := 0; i < cnt; i++ {
+			bit := 0
+			if i < len(s) {
+				bit = int(s[i]) % 2
+			}
+			if d == 'B' {
+				acc = acc*2 + bit
+			} else {
+				acc += bit << bits
+			}
+			bits++
+			if bits == 8 {
+				out = append(out, byte(acc))
+				acc, bits = 0, 0
+			}
+		}
+		if bits > 0 {
+			if d == 'B' {
+				acc <<= 8 - bits
+			}
+			out = append(out, byte(acc))
+		}
+		return out
+	}
+	acc, half := 0, false
+	for h := 0; h < cnt; h++ {
+		nib := 0
+		if h < len(s) {
+			c := int(s[h])
+			if (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') {
+				nib = (c%8 + 9) % 16
+			} else {
+				nib = c % 16
+			}
+		}
+		switch {
+		case !half && d == 'H':
+			acc = nib * 16
+		case !half:
+			acc = nib
+		case d == 'H':
+			acc += nib
+			out = append(out, byte(acc))
+		default:
+			acc += nib * 16
+			out = append(out, byte(acc))
+		}
+		half = !half
+	}
+	if half {
+		out = append(out, byte(acc))
+	}
+	return out
 }
 
 // rubyUnpack is String#unpack / #unpack1 of the bytes b. Twin of rbsUnpack in
@@ -1028,26 +1362,55 @@ func (rt *jsrt) rubyUnpack(b, name string, args []interface{}) interface{} {
 	out := &jsArray{}
 	p := 0
 	for _, d := range dirs {
-		for j := 0; (d.n < 0 && p < len(b)) || (d.n >= 0 && j < d.n); j++ {
-			switch {
-			case p >= len(b):
-				if d.d != 'U' {
+		n := d.n
+		switch {
+		case d.d == 'x' || d.d == 'X' || d.d == '@':
+			c := n
+			if c < 0 {
+				c = 0
+				if d.d == 'x' {
+					c = len(b) - p
+				}
+			}
+			to := c
+			if d.d == 'x' {
+				to = p + c
+			} else if d.d == 'X' {
+				to = p - c
+			}
+			if to < 0 || to > len(b) {
+				rt.rubyRaiseErr(name, "ArgumentError", string(rune(d.d))+" outside of string")
+			}
+			p = to
+		case d.size == 0 && d.d != 'U':
+			var v interface{}
+			v, p = rubyUnpackStr(d.d, n, b, p)
+			out.elems = append(out.elems, v)
+		default:
+			w := d.size
+			if d.d == 'U' {
+				w = 1
+			}
+			for j := 0; (n < 0 && p+w <= len(b)) || (n >= 0 && j < n); j++ {
+				switch {
+				case d.d == 'U':
+					if p >= len(b) {
+						j = n
+						continue
+					}
+					r, size := utf8.DecodeRuneInString(b[p:])
+					if r == utf8.RuneError && size <= 1 {
+						rt.rubyRaiseErr(name, "ArgumentError", "malformed UTF-8 character")
+					}
+					out.elems = append(out.elems, float64(r))
+					p += size
+				case p+d.size > len(b):
 					out.elems = append(out.elems, jsNull)
+					p = len(b)
+				default:
+					out.elems = append(out.elems, rt.rubyIntOf(b[p:p+d.size], d.be, d.signed))
+					p += d.size
 				}
-			case d.d == 'U':
-				r, size := utf8.DecodeRuneInString(b[p:])
-				if r == utf8.RuneError && size <= 1 {
-					rt.rubyRaiseErr(name, "ArgumentError", "malformed UTF-8 character")
-				}
-				out.elems = append(out.elems, float64(r))
-				p += size
-			default:
-				v := float64(b[p])
-				if d.d == 'c' && v > 127 {
-					v -= 256
-				}
-				out.elems = append(out.elems, v)
-				p++
 			}
 		}
 	}
@@ -1060,22 +1423,116 @@ func (rt *jsrt) rubyUnpack(b, name string, args []interface{}) interface{} {
 	return out
 }
 
+// rubyIntOf is the Integer the bytes b spell. Twin of rbsIntOf in ruby-str.js.
+func (rt *jsrt) rubyIntOf(b string, be, signed bool) interface{} {
+	x := new(big.Int)
+	for q := 0; q < len(b); q++ {
+		c := b[len(b)-1-q]
+		if be {
+			c = b[q]
+		}
+		x.Lsh(x, 8)
+		x.Or(x, big.NewInt(int64(c)))
+	}
+	if signed && x.Bit(8*len(b)-1) == 1 {
+		x.Sub(x, new(big.Int).Lsh(big.NewInt(1), uint(8*len(b))))
+	}
+	return rt.rubyBigNarrow(x)
+}
+
+// rubyUnpackStr is one String directive of unpack at byte p: the String and the
+// next position. Twin of rbsUnpackStr in ruby-str.js.
+func rubyUnpackStr(d byte, n int, b string, p int) (interface{}, int) {
+	rest := len(b) - p
+	switch d {
+	case 'a', 'A', 'Z':
+		cnt := n
+		if n < 0 || n > rest {
+			cnt = rest
+		}
+		s := b[p : p+cnt]
+		next := p + cnt
+		if d == 'Z' {
+			if z := strings.IndexByte(s, 0); z >= 0 {
+				s = s[:z]
+				if n < 0 {
+					next = p + z + 1
+				}
+			}
+		} else if d == 'A' {
+			s = strings.TrimRight(s, " \x00")
+		}
+		return &jsRBin{b: s}, next
+	case 'm':
+		var clean []byte
+		for i := p; i < len(b); i++ {
+			c := b[i]
+			if c == '=' {
+				break
+			}
+			if (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '+' || c == '/' {
+				clean = append(clean, c)
+			}
+		}
+		dec, _ := base64.RawStdEncoding.DecodeString(string(clean[:len(clean)-len(clean)%4+rubyB64Tail(len(clean)%4)]))
+		return &jsRBin{b: string(dec)}, len(b)
+	}
+	var sb strings.Builder
+	if d == 'B' || d == 'b' {
+		bits := n
+		if n < 0 || n > rest*8 {
+			bits = rest * 8
+		}
+		for i := 0; i < bits; i++ {
+			by := b[p+i/8]
+			sh := uint(i % 8)
+			if d == 'B' {
+				sh = 7 - sh
+			}
+			sb.WriteByte('0' + (by>>sh)&1)
+		}
+		return &jsRBin{b: sb.String(), enc: "US-ASCII"}, p + (bits+7)/8
+	}
+	const hx = "0123456789abcdef"
+	nibs := n
+	if n < 0 || n > rest*2 {
+		nibs = rest * 2
+	}
+	for h := 0; h < nibs; h++ {
+		hb := b[p+h/2]
+		if (h%2 == 0) == (d == 'H') {
+			sb.WriteByte(hx[hb>>4])
+		} else {
+			sb.WriteByte(hx[hb&15])
+		}
+	}
+	return &jsRBin{b: sb.String(), enc: "US-ASCII"}, p + (nibs+1)/2
+}
+
+// rubyB64Tail keeps the sextets of a final partial base64 group that still make
+// a whole byte: one leftover sextet makes none.
+func rubyB64Tail(r int) int {
+	if r == 1 {
+		return 0
+	}
+	return r
+}
+
 // rubyEncArg is the encoding a force_encoding argument (a name or an Encoding)
-// selects: "BINARY" or "UTF-8", US-ASCII counting as UTF-8. Twin of encArgName in
+// selects: ASCII-8BIT, US-ASCII or UTF-8. Twin of encArgName in
 // ruby-interpreter.abnf.
 func (rt *jsrt) rubyEncArg(e interface{}) string {
 	if o, isObj := e.(*jsObject); isObj {
 		if n, isEnc := o.props["__renc"].(string); isEnc {
-			if n == "ASCII-8BIT" {
-				return "BINARY"
-			}
-			return "UTF-8"
+			return n
 		}
 	}
 	switch strings.ToUpper(rt.rubyStr(e)) {
 	case "BINARY", "ASCII-8BIT":
-		return "BINARY"
-	case "UTF-8", "US-ASCII", "ASCII":
+		return "ASCII-8BIT"
+	case "US-ASCII", "ASCII":
+		return "US-ASCII"
+	case "UTF-8":
 		return "UTF-8"
 	}
 	rt.rubyRaiseErr("force_encoding", "ArgumentError", "unknown encoding name - "+rt.rubyStr(e))
@@ -1094,56 +1551,54 @@ func (rt *jsrt) rubyEncoding(n string) interface{} {
 	return c.props["$c$UTF_8"]
 }
 
-// rubyBinCat is String#+ / #<< with a binary side: two binary Strings join, an
-// ASCII-only side takes the other side's encoding, and two non-ASCII sides are
-// MRI's Encoding::CompatibilityError. Twin of binCat in ruby-interpreter.abnf.
+// rubyBinCat is String#+ / #<< / interpolation where a side is a box: the bytes
+// join in the left side's encoding when the right is ASCII-only, in the right
+// side's when the left is, in their common one otherwise; two non-ASCII sides
+// of two encodings are MRI's Encoding::CompatibilityError. Twin of binCat in
+// ruby-interpreter.abnf.
 func (rt *jsrt) rubyBinCat(l, r interface{}) interface{} {
-	lb, lBin := l.(*jsRBin)
-	rb, rBin := r.(*jsRBin)
-	if lBin && rBin {
-		return &jsRBin{b: lb.b + rb.b}
-	}
-	if lBin {
-		o := rt.rubyStrOperand(r)
-		if rubyAsciiOnly(o) {
-			return &jsRBin{b: lb.b + o}
+	// An ASCII-only box on the right leaves a UTF-8 left side as it is.
+	if b, isBox := r.(*jsRBin); isBox && rubyAsciiOnly(b.b) {
+		if _, lBox := l.(*jsRBin); !lBox {
+			return &jsRStr{s: rt.rubyStr(l) + b.b}
 		}
-		if rubyAsciiOnly(lb.b) {
-			return &jsRStr{s: lb.b + o}
+	}
+	lb, le := rt.rubyStrBE(l)
+	rb, re := rt.rubyStrBE(r)
+	enc := le
+	if !rubyAsciiOnly(rb) {
+		if rubyAsciiOnly(lb) {
+			enc = re
+		} else if le != re {
+			rt.rubyRaiseErr("+", "Encoding::CompatibilityError", "incompatible character encodings: "+le+" and "+re)
 		}
-		rt.rubyRaiseErr("+", "Encoding::CompatibilityError", "incompatible character encodings: ASCII-8BIT and UTF-8")
 	}
-	o := rt.rubyStr(l)
-	if rubyAsciiOnly(o) {
-		return &jsRBin{b: o + rb.b}
-	}
-	if rubyAsciiOnly(rb.b) {
-		return &jsRStr{s: o + rb.b}
-	}
-	rt.rubyRaiseErr("+", "Encoding::CompatibilityError", "incompatible character encodings: UTF-8 and ASCII-8BIT")
-	return nil
+	return rubyEncStr(lb+rb, enc)
 }
 
-// rubyBinEq is == with the binary String b on one side: the same bytes, and an
-// ASCII-only text where the other side is UTF-8. Twin of binEq in
-// ruby-interpreter.abnf.
+// rubyBinEq is == / eql? with the box b on one side: the same bytes, in the same
+// encoding unless they are ASCII-only. Twin of binEq in ruby-interpreter.abnf.
 func rubyBinEq(b *jsRBin, o interface{}) bool {
+	var ob, oe string
 	switch t := o.(type) {
 	case *jsRBin:
-		return t.b == b.b
+		ob, oe = t.b, t.encName()
 	case *jsRStr:
-		return t.s == b.b && rubyAsciiOnly(t.s)
+		ob, oe = t.s, "UTF-8"
 	case string:
-		return t == b.b && rubyAsciiOnly(t)
+		ob, oe = t, "UTF-8"
+	default:
+		return false
 	}
-	return false
+	return ob == b.b && (oe == b.encName() || rubyAsciiOnly(ob))
 }
 
-// rubyBinMethod is a method of a binary String: the ones that read its bytes
-// here, every other String method on its text, a String it answers binary too.
-// Twin of binMethod in ruby-interpreter.abnf.
+// rubyBinMethod is a method of a box: the ones that read its bytes here, every
+// other String method on its text, a String it answers in its encoding. Twin
+// of binMethod in ruby-interpreter.abnf.
 func (rt *jsrt) rubyBinMethod(t *jsRBin, name string, args []interface{}) interface{} {
 	pos, blk := rubyBlockArgs(args)
+	enc := t.encName()
 	bytesArr := func() *jsArray {
 		a := &jsArray{elems: make([]interface{}, len(t.b))}
 		for i := 0; i < len(t.b); i++ {
@@ -1174,20 +1629,31 @@ func (rt *jsrt) rubyBinMethod(t *jsRBin, name string, args []interface{}) interf
 		}
 		return t
 	case "inspect", "dump":
-		return rubyBinInspect(t.b)
+		return rubyBoxInspect(t)
 	case "encoding":
-		return rt.rubyEncoding("ASCII-8BIT")
+		return rt.rubyEncoding(enc)
 	case "force_encoding":
-		if rt.rubyEncArg(argAt(pos, 0)) == "BINARY" || !utf8.ValidString(t.b) {
-			return t
+		// In place; bytes that become valid UTF-8 are an ordinary String, a new one.
+		v := rubyEncStr(t.b, rt.rubyEncArg(argAt(pos, 0)))
+		nb, isBox := v.(*jsRBin)
+		if !isBox {
+			return v
 		}
-		return &jsRStr{s: t.b}
-	case "b", "dup", "clone", "+@":
+		t.enc = nb.enc
+		return t
+	case "b":
 		return &jsRBin{b: t.b}
+	case "dup", "clone", "+@":
+		return rubyEncStr(t.b, enc)
 	case "valid_encoding?":
-		return true
+		return enc == "ASCII-8BIT" || (enc == "US-ASCII" && rubyAsciiOnly(t.b))
 	case "ascii_only?":
 		return rubyAsciiOnly(t.b)
+	case "size", "length":
+		if enc == "UTF-8" {
+			return float64(rubyU8Len(t.b))
+		}
+		return float64(len(t.b))
 	case "to_s", "to_str", "-@":
 		return t
 	case "<<", "concat":
@@ -1195,7 +1661,10 @@ func (rt *jsrt) rubyBinMethod(t *jsRBin, name string, args []interface{}) interf
 			if f, isNum := a.(float64); isNum {
 				a = &jsRBin{b: string([]byte{byte(int64(f) & 255)})}
 			}
-			t.b = rt.rubyBinCat(t, a).(*jsRBin).b
+			t.b, t.enc = rt.rubyStrBE(rt.rubyBinCat(t, a))
+			if t.enc == "ASCII-8BIT" {
+				t.enc = ""
+			}
 		}
 		return t
 	case "+":
@@ -1207,7 +1676,7 @@ func (rt *jsrt) rubyBinMethod(t *jsRBin, name string, args []interface{}) interf
 		if n < 0 {
 			rt.rubyRaiseErr("*", "ArgumentError", "negative argument")
 		}
-		return &jsRBin{b: strings.Repeat(t.b, n)}
+		return rubyEncStr(strings.Repeat(t.b, n), enc)
 	case "unpack", "unpack1":
 		return rt.rubyUnpack(t.b, name, pos)
 	}
@@ -1219,16 +1688,16 @@ func (rt *jsrt) rubyBinMethod(t *jsRBin, name string, args []interface{}) interf
 	}
 	switch v := r.(type) {
 	case string:
-		return &jsRBin{b: rubyBinOfText(v)}
+		return rubyEncStr(rubyBinOfText(v), enc)
 	case *jsRStr:
-		return &jsRBin{b: rubyBinOfText(v.s)}
+		return rubyEncStr(rubyBinOfText(v.s), enc)
 	case *jsArray:
 		for i, e := range v.elems {
 			switch s := e.(type) {
 			case string:
-				v.elems[i] = &jsRBin{b: rubyBinOfText(s)}
+				v.elems[i] = rubyEncStr(rubyBinOfText(s), enc)
 			case *jsRStr:
-				v.elems[i] = &jsRBin{b: rubyBinOfText(s.s)}
+				v.elems[i] = rubyEncStr(rubyBinOfText(s.s), enc)
 			}
 		}
 	}

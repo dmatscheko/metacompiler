@@ -1784,7 +1784,7 @@ RePipPlain  = "\x00"..."\x22" | "\x24"..."\x5b" | "\x5d"..."\x7b" | "\x7d"..."\U
 
 // ?a / ?\n: the one-character string literal. The body may not start with a space,
 // which is exactly what keeps the ternary `c ? a : b` out of it.
-CharLit     <~~ push(makeStrLit(makeConst(charLitVal(up.in)), false)) ~~>
+CharLit     <~~ var iv = []; var cv = charLitVal(up.in, iv); push(makeStrLit(iv.length > 0 ? makeU8Lit(iv[0]) : makeConst(cv), false)) ~~>
             = "?" :whitespace() CharBody :whitespace(Whitespace) ;
 // ?\C-z / ?\M-\C-z: the control and meta forms of a character literal. Longest first
 // (PEG), or the plain escape below would take the backslash and leave the rest.
@@ -2144,7 +2144,8 @@ TplExpr     <~~ push({e: pop()}) ~~>
 // An EMPTY interpolation is legal and contributes nothing: `"#{}" == ""`.
 TplEmpty    <~~ push({s: ""}) ~~>
             = "#{" :whitespace(Whitespace) "}" :whitespace() ;
-TplChunk    <~~ push({s: unescapeRb(up.in)}) ~~>
+// A chunk whose escapes spell invalid UTF-8 also carries its bytes (rbsEscBytes).
+TplChunk    <~~ var iv = []; var us = unescapeRb(up.in, iv); push(iv.length > 0 ? {s: us, u8: iv[0]} : {s: us}) ~~>
             = TplChar { TplChar } ;
 TplChar     = TplEsc | HashChar | TplPlain ;
 TplEsc      = "\\" "\x20"..b"\x7e" ;
@@ -2527,6 +2528,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     include("lib/ruby-respond.js")
     // The `# frozen_string_literal: true' magic comment (makeStrLit).
     include("lib/ruby-magic.js")
+    // The UTF-8 byte helpers a "\xC3\xA9" literal is read with (rbsEscBytes).
+    include("lib/ruby-str.js")
 
     var hidCount = 0
     // The argument array of the function being emitted (js_rblock reads the block out
@@ -3165,22 +3168,26 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         bodyB.NewBr(headB)
         return exitB
     }
+    // The pieces join as plain text (js_add) until one may be a box - a chunk of
+    // invalid UTF-8 (js_renc) or an interpolated value - and through js_rtpl, which
+    // is Ruby's to_s plus the encoding rule of String#+, from there on. Twin of
+    // makeTemplate in ruby-interpreter.abnf.
     function makeTemplate(items) {
         return function(b) {
             var v = emitStr(b, "")
+            var mayBox = false
             for (var i = 0; i < items.length; i++) {
-                var pv
-                if (items[i].s != undefined) { pv = emitStr(b, items[i].s) }
-                else {
+                if (items[i].u8 != undefined) {
+                    v = callExt(b, "js_rtpl", [v, callExt(b, "js_renc", [emitStr(b, items[i].u8), emitStr(b, "UTF-8")])])
+                    mayBox = true
+                } else if (items[i].s != undefined) {
+                    v = callExt(b, mayBox ? "js_rtpl" : "js_add", [v, emitStr(b, items[i].s)])
+                } else {
                     var r = items[i].e(b)
                     b = r.b
-                    // '#{v}' is Ruby's to_s: a Float keeps its point, an Array renders
-                    // like #inspect, a Symbol is its bare name.
-                    pv = callExt(b, "js_rstr", [r.v])
+                    v = callExt(b, "js_rtpl", [v, r.v])
+                    mayBox = true
                 }
-                // Both sides are plain text, so the plain concatenation: String#+
-                // (js_radd) would box every intermediate piece.
-                v = callExt(b, "js_add", [v, pv])
             }
             return {b: b, v: v}
         }
@@ -3216,8 +3223,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // Everything else keeps the shared helper's rule: the character itself, so \" \\
     // \# and \/ stay right. \C-x / \M-x are NOT decoded here - ctlCharVal handles them
     // for ?x character literals only.
-    function unescapeRb(s) {
+    function unescapeRb(s, inv) {
         var out = ""
+        var raw = []
         var i = 0
         while (i < s.length) {
             var c = s.charCodeAt(i)
@@ -3241,6 +3249,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                     ov = ov * 8 + (od - 48)
                     on = on + 1
                 }
+                if (ov % 256 >= 128) { raw.push(out.length) }
                 out += String.fromCharCode(ov % 256)
                 i = i + 1 + on
                 continue
@@ -3253,6 +3262,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                     xn = xn + 1
                 }
                 if (xn == 0) { out += "x"; i = i + 2; continue }
+                if (xv >= 128) { raw.push(out.length) }
                 out += String.fromCharCode(xv)
                 i = i + 2 + xn
                 continue
@@ -3302,7 +3312,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             out += String.fromCharCode(e)
             i = i + 2
         }
-        return out
+        return raw.length == 0 ? out : rbsEscBytes(out, raw, inv)
     }
     // One hex digit's value, or -1 - including past the end of the string, which is
     // checked explicitly rather than left to charCodeAt's NaN: the two script hosts
@@ -6356,6 +6366,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // %-literal is one too, and a %w array holds fresh ones. Twin of makeStrLit /
     // makePctLit in ruby-interpreter.abnf, which says why a String is a box. Under
     // `# frozen_string_literal: true' both are js_rsfz's frozen literal instead.
+    // A literal of invalid UTF-8 (rbsEscBytes): a box of its bytes (js_renc).
+    function makeU8Lit(bs) {
+        return function(b) { return {b: b, v: callExt(b, "js_renc", [emitStr(b, bs), emitStr(b, "UTF-8")])} }
+    }
     function makeStrLit(t, dyn) { return makeLitVia(t, dyn, "js_rsnew") }
     function makePctLit(t, dyn) { return makeLitVia(t, dyn, "js_rspct") }
     function makeLitVia(t, dyn, ext) {
@@ -6514,7 +6528,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
 
     // ?\C-z is the control character (the letter modulo 32) and ?\M-x sets the high bit,
     // so ?\M-\C-z is 0x1a + 0x80 = 0x9a. Both prefixes may be spelled in either order.
-    function ctlCharVal(b) {
+    function ctlCharVal(b, inv) {
         var meta = false
         var ctrl = false
         var i = 0
@@ -6528,15 +6542,20 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         var code = 0
         if (rest.charAt(0) == "\\") { code = unescapeRb(rest).charCodeAt(0) } else { code = rest.charCodeAt(0) }
         if (ctrl) { code = code % 32 }
-        if (meta) { code = code + 128 }
+        // A meta character is a byte, which on its own is invalid UTF-8.
+        if (meta) {
+            code = code + 128
+            inv.push(String.fromCharCode(code))
+        }
         return String.fromCharCode(code)
     }
-    function charLitVal(s) {
+    // inv receives the bytes of a literal that is invalid UTF-8 (rbsEscBytes).
+    function charLitVal(s, inv) {
         var body = s.slice(1)
         if (body.charAt(0) == "\\" && (body.charAt(1) == "M" || body.charAt(1) == "C" || body.charAt(1) == "c")) {
-            if (body.charAt(1) == "c" || body.charAt(2) == "-") { return ctlCharVal(body) }
+            if (body.charAt(1) == "c" || body.charAt(2) == "-") { return ctlCharVal(body, inv) }
         }
-        if (body.charCodeAt(0) == 92) { return unescapeRb(body) }
+        if (body.charCodeAt(0) == 92) { return unescapeRb(body, inv) }
         return body
     }
     function pctRawOf(items) {

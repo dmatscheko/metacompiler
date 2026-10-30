@@ -6807,7 +6807,7 @@ func (rt *jsrt) rubyNumMethod(t interface{}, name string, args []interface{}) (i
 		if x > 127 {
 			return &jsRBin{b: string([]byte{byte(x)})}, true
 		}
-		return string(rune(int32(x))), true
+		return &jsRBin{b: string([]byte{byte(x)}), enc: "US-ASCII"}, true
 	case "integer?":
 		return isInt, true
 	case "numerator":
@@ -9616,7 +9616,7 @@ func (rt *jsrt) rubyInspect(v interface{}) string {
 	case *jsRStr:
 		return rubyStrInspect(t.s)
 	case *jsRBin:
-		return rubyBinInspect(t.b)
+		return rubyBoxInspect(t)
 	case jsSym:
 		return rubySymInspect(t.s)
 	// Rational#inspect and Complex#inspect are PARENTHESIZED where #to_s is not -
@@ -10793,10 +10793,7 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 		case "encoding":
 			return rt.rubyEncoding("UTF-8")
 		case "force_encoding":
-			if rt.rubyEncArg(argAt(args, 0)) == "BINARY" {
-				return &jsRBin{b: s}
-			}
-			return s
+			return rubyEncStr(s, rt.rubyEncArg(argAt(args, 0)))
 		case "unpack", "unpack1":
 			return rt.rubyUnpack(s, name, args)
 		}
@@ -11898,6 +11895,41 @@ func rubyUndecorate(pairs []interface{}) *jsArray {
 	return out
 }
 
+// rubyArrJoinBox is Array#join with a box among the elements: the parts join by
+// rubyBinCat's encoding rule from the first one's encoding (MRI). Twins:
+// arrJoin in ruby-interpreter.abnf, rbArrJoin in lib/ruby-rt.metajs.
+func (rt *jsrt) rubyArrJoinBox(t *jsArray, sep string) (interface{}, bool) {
+	if !rubyArrHasBox(t) {
+		return nil, false
+	}
+	flat := rubyArrFlat(t, -1, &jsArray{}).elems
+	part := func(v interface{}) interface{} {
+		if b, ok := v.(*jsRBin); ok {
+			return b
+		}
+		return rt.rubyStr(v)
+	}
+	acc := part(flat[0])
+	for _, f := range flat[1:] {
+		acc = rt.rubyBinCat(rt.rubyBinCat(acc, sep), part(f))
+	}
+	return acc, true
+}
+
+func rubyArrHasBox(t *jsArray) bool {
+	for _, e := range t.elems {
+		switch v := e.(type) {
+		case *jsRBin:
+			return true
+		case *jsArray:
+			if rubyArrHasBox(v) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // rubyArrJoin RECURSES into a nested array with the same separator, and sends
 // every other element through to_s (so nil contributes "").
 func (rt *jsrt) rubyArrJoin(t *jsArray, sep string) string {
@@ -12937,6 +12969,9 @@ func (rt *jsrt) rubyArrayMethod(t *jsArray, name string, args []interface{}) int
 		sep := ""
 		if len(pos) > 0 {
 			sep = rt.rubyStr(pos[0])
+		}
+		if v, isBox := rt.rubyArrJoinBox(t, sep); isBox {
+			return v
 		}
 		return rt.rubyArrJoin(t, sep)
 	// min / max take an optional COUNT and an optional block, and with the count
