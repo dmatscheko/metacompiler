@@ -106,7 +106,7 @@ parse in the js compiler.
 
 # JV — Java
 
-### T-843 java: field types collide by name across classes · P2 · JV · OPEN [V JV worker]
+### T-843 java: field types collide by name across classes · P2 · JV · IN PROGRESS (JV worker, round 14) [V JV worker]
 One class declares `double d = 2.5;`, another `double[] d;` — `d[1] = 4` inside the second class prints `4`
 in all engines; java prints `4.0`. jPlaceTy / jFieldTyOf look a bare field name up in the program-wide
 table, which turns `?` (no conversion) when two declarations disagree; use the per-class table
