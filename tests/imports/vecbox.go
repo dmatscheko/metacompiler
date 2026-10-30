@@ -57,6 +57,11 @@ type Tag string
 
 func TagText(t Tag) string { return string(t) + "!" }
 
+// make of a package type the main file also declares, over another underlying type.
+type Bag []string
+
+func NewBag(n int) Bag { return make(Bag, n, n+2) }
+
 // The package's OWN defined type in its own code is vecbox.Kind, not the main
 // file's Kind: fmt reaches its String() for a value, a slice element and an array
 // element, %T names it, and a type switch and an assertion compare against it.

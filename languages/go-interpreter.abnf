@@ -979,7 +979,11 @@ CompNested  <~~ push({cnested: pop()}); goLitGrp(up.start, up.pos) ~~>
 // make(T) / make(T, n) / make(T, n, cap): a map, a slice or a channel.
 MakeCall    <~~ push(makeMakeCall(takeAll())); regSt(up.pos, goMakeTy(up.in)) ~~>
             = "make" KwEnd "(" MakeType [ "," Expression ] [ "," Expression ] ")" ;
-MakeType    = MakeMapT | MakeSliceT | MakeChanT ;
+MakeType    = MakeMapT | MakeSliceT | MakeChanT | MakeNamedT ;
+// A defined type over a slice, map or channel type (type Vec []float64); its
+// underlying type is looked up when the call first runs, since the declaration
+// may come later in the file.
+MakeNamedT  <~~ push({mkind: "named", mname: up.in, mpkg: goWalkPkg}) ~~> = Id ;
 MakeMapT    <~~ push({mkind: "map", czero: pop().mzero, mkey: pop().mkey}) ~~> = MapTypeZ ;
 MakeSliceT  <~~ push({mkind: "slice", cet: pop().cet}) ~~> = "[" "]" CompElemT ;
 // The ELEMENT type comes along: a receive from a closed, drained channel yields it
@@ -4635,6 +4639,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // items = [{mkind,...}, lenThunk?, capThunk?]
     function makeMakeCall(items) {
         var d = items[0]
+        if (d.mkind == "named") { return makeMakeNamed(items) }
         var lenT = items.length > 1 ? items[1] : null
         var capT = items.length > 2 ? items[2] : null
         if (d.mkind == "map") {
@@ -4671,6 +4676,25 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             var a = []
             for (var i = 0; i < cp; i++) { a.push(zeroOfType2(ez)) }
             return slT(newSl(a, 0, n, cp), ez)
+        }
+    }
+    // make(T, ...) of a defined type T: the make of its underlying type, built at
+    // its first run. Twin of makeMakeNamed in go-to-llvm-ir.abnf.
+    function makeMakeNamed(items) {
+        var d = items[0]
+        var made = null
+        return function() {
+            if (made == null) {
+                // Inside a package's code its own T wins over a main-file T.
+                var key = (d.mpkg != "" && hasOwn(definedUnder, sKeyI(d.mpkg, d.mname))) ? sKeyI(d.mpkg, d.mname) : d.mname
+                var u = goMakeUnder(resolveDefined(key), d.mpkg)
+                if (u == null) { fail("make of a type that is not a slice, map or channel: " + d.mname) }
+                var nd = {mkind: u.kind, cet: u.elem, czero: u.elem, mkey: u.key}
+                var ni = [nd]
+                for (var i = 1; i < items.length; i++) { ni.push(items[i]) }
+                made = makeMakeCall(ni)
+            }
+            return made()
         }
     }
     function makeNew(ty) {

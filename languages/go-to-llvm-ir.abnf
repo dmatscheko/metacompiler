@@ -930,7 +930,7 @@ BoolLitT    <~~ regSt(up.pos, "bool") ~~> = True | False ;
 Primary     = ParenConv | ParenGroup | ImagLit | DotFloatLit | HexFloatLit | FloatLit | HexLit | OctLit
             | BinLit | LegOctLit | DecULit | StrLitT | RuneLit
             | GoDecLit | BoolLitT | Nil | FuncLit | SliceLit
-            | MapLit | MakeMap | MakeSlice | MakeChan | NewCall | AnonStructLit
+            | MapLit | MakeMap | MakeSlice | MakeChan | MakeNamed | NewCall | AnonStructLit
             | QualStructLit | StructLit
             | ArrayLit | ConvExpr | CompLitNI | PanicCall | Call | VarRef ;
 
@@ -1193,6 +1193,12 @@ MakeChan    <~~ push(makeMakeChan(takeAll())); regSt(up.pos, goMakeTy(up.in)) ~~
             = "make" KwEnd "(" ( "chan" KwEnd [ "<-" ] | "<-" "chan" KwEnd ) ChanElemT
               [ "," Expression ] ")" ;
 ChanElemT   <~~ push({cet: firstType(up.in)}) ~~> = Type ;
+// make(T, ...) of a defined type over a slice, map or channel type (type Vec
+// []float64); its underlying type is looked up at emit time, once every
+// declaration of the file has been walked.
+MakeNamed   <~~ push(makeMakeNamed(takeAll())); regSt(up.pos, goMakeTy(up.in)) ~~>
+            = "make" KwEnd "(" MakeNamedT [ "," Expression ] [ "," Expression ] ")" ;
+MakeNamedT  <~~ push({mname: up.in, mpkg: goWalkPkg}) ~~> = Id ;
 MapTypeZ    = "map" KwEnd "[" KType "]" ZType ;
 // The KEY type text, which an elided struct key is built against (see MapKey).
 KType       <~~ push({mkey: goWalkQual(firstType(up.in))}) ~~>
@@ -2771,6 +2777,27 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                 nV = rs.v
             }
             return {b: b, v: callExt(b, "js_gochan_new", [emitStr(b, ty), nV])}
+        }
+    }
+    // items = [{mname, mpkg}, sizeThunk?, capThunk?]: the make of T's underlying
+    // type. Twin of makeMakeNamed in go-interpreter.abnf.
+    function makeMakeNamed(items) {
+        var d = items[0]
+        var args = items.slice(1)
+        return function(b) {
+            // resolveDefined reads the package the make was written in.
+            var emitPkg = goWalkPkg
+            goWalkPkg = d.mpkg
+            var under = resolveDefined(d.mname)
+            goWalkPkg = emitPkg
+            var u = goMakeUnder(under, d.mpkg)
+            if (u == null) { fail("make of a type that is not a slice, map or channel: " + d.mname) }
+            if (u.kind == "slice") {
+                if (args.length == 0) { fail("make of a slice type needs a length: " + d.mname) }
+                return makeMakeSlice([{cet: u.elem}].concat(args))(b)
+            }
+            if (u.kind == "map") { return makeMakeMap([{mkey: u.key}, {mzero: u.elem}].concat(args))(b) }
+            return makeMakeChan([{cet: u.elem}].concat(args))(b)
         }
     }
     // items = [{mkey}, {mzero}, hintThunk?]: the size hint is evaluated and

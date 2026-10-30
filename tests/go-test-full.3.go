@@ -1094,6 +1094,39 @@ func s125() {
 	check("surrune125", string(r[0]) == "\xf0\x9f\x98\x80" && string(r) == "😀x" && fmt.Sprintf("😀%c|%3s|", r[0], "😀") == "😀😀|  😀|")
 }
 
+// ===== SECTION 126: make of a defined type =====
+// make takes any type whose underlying type is a slice, map or channel, and the
+// value keeps the defined type (%T, its methods). The expected values are go run's.
+type vec126 []float64
+type cnt126 map[string]int
+type ch126 chan int
+type grid126 [][]int
+
+func (v vec126) sum() float64 {
+	s := 0.0
+	for _, x := range v {
+		s += x
+	}
+	return s
+}
+
+func s126() {
+	v := make(vec126, 3)
+	v[1] = 2.5
+	v = append(v, 4)
+	w := make(vec126, 2, 10)
+	check("mkslice126", fmt.Sprintf("%v %d %v %T", v, len(v), v.sum(), v) == "[0 2.5 0 4] 4 6.5 main.vec126" && len(w) == 2 && cap(w) == 10)
+	m := make(cnt126)
+	m["a"]++
+	m2 := make(cnt126, 8)
+	check("mkmap126", fmt.Sprintf("%v %d %d %T", m, m["zz"], len(m2), m) == "map[a:1] 0 0 main.cnt126")
+	c := make(ch126, 2)
+	c <- 5
+	g := make(grid126, 2)
+	g[0] = make([]int, 3)
+	check("mkchan126", <-c == 5 && cap(c) == 2 && fmt.Sprint(g) == "[[0 0 0] []]")
+}
+
 func main() {
 	s94()   // SECTION-CALL 94
 	s95()   // SECTION-CALL 95
@@ -1125,6 +1158,7 @@ func main() {
 	s123()  // SECTION-CALL 123
 	s124()  // SECTION-CALL 124
 	s125()  // SECTION-CALL 125
+	s126()  // SECTION-CALL 126
 	fmt.Println("full:", checks, "checks,", fails, "failures")
 	os.Exit(fails)
 }

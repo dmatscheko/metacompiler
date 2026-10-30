@@ -2505,6 +2505,22 @@ function goRefTy(ref) {
     }
     return stChainFrom(ref.name, ht, cIsLocal(ref.name), t)
 }
+// make(T, ...) of a defined type T: the kind its underlying type text u spells
+// (whitespace out: "[]float64", "map[string]int", "chanint") and that type's
+// element and key texts, qualified for package pkg ("" for main). null when u is
+// not a slice, map or channel type.
+function goMakeUnder(u, pkg) {
+    if (u.substring(0, 2) == "[]") { return {kind: "slice", key: "", elem: goMakeQual(u.substring(2), pkg)} }
+    if (u.substring(0, 4) == "map[") {
+        var e = stClose(u, 3)
+        if (e < 0) { return null }
+        return {kind: "map", key: goMakeQual(u.substring(4, e), pkg), elem: goMakeQual(u.substring(e + 1), pkg)}
+    }
+    if (u.substring(0, 6) == "chan<-" || u.substring(0, 6) == "<-chan") { return {kind: "chan", key: "", elem: goMakeQual(u.substring(6), pkg)} }
+    if (u.substring(0, 4) == "chan") { return {kind: "chan", key: "", elem: goMakeQual(u.substring(4), pkg)} }
+    return null
+}
+function goMakeQual(t, pkg) { return pkg == "" ? t : goPkgQual(pkg, t, true) }
 // The type a make call (text, whitespace out) makes: its first argument.
 function goMakeTy(text) {
     var s = text.indexOf("(")
