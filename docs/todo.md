@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-857** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-858** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -112,18 +112,14 @@ not change the renderer.
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-846 kotlin: modCount CME and smaller gaps · P3 · KT · IN PROGRESS (KT worker, round 4) [V KT worker]
-(1) ConcurrentModificationException is size-based: an add+remove in one iteration, or `sort()` during
-iteration, does not throw (JVM ArrayList modCount does). Needs a per-list modification counter on the
-shared array value in all three engines (Go array struct in abnf/jsrt.go, the array cell in runtime.c,
-the interpreter's arrays), bumped by every structural mutator and read per loop step — a shared-file
-change: agree where the counter lives (e.g. the array's named-property slot) and bench it. (2) `Unit` as
-a value (`listOf(1, Unit)`) → interp "unknown name: Unit". (3) `class Outer { class Inner; inner class
-Inn2 }` — `;` between members on one line does not parse (interp, 2:26). (4) `t?.i = 3` with t null: the
-`?.` in an assignment target is read as `.` (interp hard error; Kotlin skips the assignment); probe the
-compiled legs. (5) LongRange hashing (rangeHashK / ktRangeHash) uses the double fields. (6) a Float range
-is named ClosedDoubleRange (no Float mark on the range value). (7) `null as T` for unchecked targets
-(type parameters, `List<Int>`, `Any`) still passes.
+### T-857 kotlin: local fun vs interface default, lambda-param `+=`, nested-class name clash, set CME · P2 · KT · OPEN [V KT worker]
+(1) compiled legs: `class A : M { override fun f() = 1 }; interface M { fun f(): Int; fun g() = f() + 10 }; fun other()
+{ fun f() = 9 }; println(A().g())` → interp 11 (right), compiled abort "unknown name: f" (a local fun elsewhere shadows the
+default method's call). (2) all engines: `{ l: MutableList<Int> -> l += 7 }` and `d.let { it += 8 }` do not mutate —
+Kotlin calls plusAssign; ktAssignIsVal (kotlin-decltypes.js) does not know lambda parameters are vals. (3) all engines:
+`Outer128.Inner` and `Outer129.Inner` in one file collide in casts and class lookups (last registered wins). (4) compiled
+legs: `s.add(9); s.remove(9)` inside `for (x in s)` over a MutableSet does not throw CME (interp and Java do) — set
+mutators must bump the new modCount. (5) `xs += emptyList()` in a loop over xs does not throw; Java's addAll always counts.
 
 # GO — Go  (oracle: `go run`)
 
@@ -930,6 +926,7 @@ T-851 c: `sizeof` of a struct ignores alignment padding; block-scope enums — D
 T-847 ts/js: decorators, constructability, Date/setTimeout; a `__proto__` binding crashes — DONE 184ac024..f19a083f (decorators in tsc 6.0.3's phases incl. field decorators and addInitializer, 24/24 probe lines; new refuses arrows/methods/generators/async/non-constructor builtins via a boot-time constructor table; Date and timers with a virtual loop clock, 93/95 Date probe rows = node; const __proto__ no longer crashes; bound functions filed as T-853)
 T-850 ruby: binary strings, blockless enumerators, statement-line and zsuper gaps — PARTIAL 504be153 — one-line assignment + while/until, blockless enumerator results, zsuper with keywords and block, uninitialized-constant superclass, private-method wording and IO#inspect, $0/$PROGRAM_NAME alias (+ block-stack/scope-chain leaks after rescue/loop/catch); binary strings filed as T-854 with the worker's design
 T-852 c: anonymous-union positional initializer; `(p + 2)->a`; float storage — DONE df663c0d..20315cdb (anonymous member is one initializer member, cInitSeek for designators into it; (expr)-> as value and place; compiled float cell is binary32 via exact soft pack/unpack, function-pointer cell 8 bytes, so machBytes == sizeof for every scalar — float-only loops +21% instructions, c bench unchanged; also fixed: comma operator type, floating truth incl. -0.0/NaN/(_Bool)0.5)
+T-846 kotlin: modCount CME and smaller gaps — DONE dffa62ee..ad6f21a6 (modCount on the shared array value — Go jsArray.mod, C cell field f, goja private symbol; host arrMod/arrModBump/arrModIs; only Kotlin's list mutators bump; 30 java+stdlib scenarios byte-identical, java/js/kotlin/python bench within spread; Unit value, ; members, ?. assignment targets skip, stdlib range hashes (rng17b corrected), ClosedFloatRange mark, null as checked/generic T → NPE)
 
 # Settled — do not re-open
 
