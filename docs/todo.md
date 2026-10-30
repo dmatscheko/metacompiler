@@ -149,7 +149,7 @@ splice in VarName / AsgIdent / PeName, or a pre-parse splice that keeps source p
 
 # C — C subset
 
-### T-856 c compiler: anonymous struct inside a union; null-based offsetof natively · P3 · C · OPEN [V C worker]
+### T-856 c compiler: anonymous struct inside a union; null-based offsetof natively · P3 · C · IN PROGRESS (C worker, round 11) [V C worker]
 (1) `union { struct { short lo, hi; }; int w; }` → compiler refuses "an anonymous struct inside a union is not
 supported" (loud); the interpreter gives cc's `1 2 3 4` for `{1,{{2,3}},4}`. Needs byte-offset registration of the
 flattened members (an `L.at` base in layoutStructInto / registerField / mBitField). (2) `(char *)&((struct S *)0)->g
