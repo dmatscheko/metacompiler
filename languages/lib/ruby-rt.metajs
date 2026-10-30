@@ -3473,7 +3473,7 @@ function rbArrIndex(t, v) {
 // Ruby's eql?: == that does NOT convert across classes, so `1.eql?(1.0)` is
 // false where `1 == 1.0` is true. Array#uniq and Array#- compare with this.
 function rbEql(a, b) {
-    if (rbUserObj(a)) {
+    if (typeof a == "object" && rbUserObj(a)) {
         var em = rbFindMethod(a, "eql?")
         if (em !== undefined) { return rbTruthy(em.apply(undefined, [a, b])) }
     }
@@ -3483,6 +3483,12 @@ function rbEql(a, b) {
 
 // rubySpaceship: null when the two cannot be compared, which is Ruby's answer.
 function rbSpaceship(l, r) {
+    // Two Integers (plain numbers, never NaN): the common case, answered first.
+    if (typeof l == "number" && typeof r == "number") {
+        if (l < r) { return 0 - 1 }
+        if (r < l) { return 1 }
+        return 0
+    }
     if (rbUserObj(l)) {
         var m = rbFindMethod(l, "<=>")
         if (m === undefined) { return null }
@@ -3491,10 +3497,11 @@ function rbSpaceship(l, r) {
         if (rtIsNil(uc)) { return null }
         return Math.trunc(rbToF(uc))
     }
-    // A NaN compares with nothing.
+    // A NaN compares with nothing; it reads as equal, so only 0 is checked.
     if (rbIsNum(l) && rbIsNum(r)) {
-        if ((rbIsFlo(l) && l["f"] !== l["f"]) || (rbIsFlo(r) && r["f"] !== r["f"])) { return null }
-        return rbNumCmp(l, r)
+        var nc = rbNumCmp(l, r)
+        if (nc == 0 && ((rbIsFlo(l) && l["f"] !== l["f"]) || (rbIsFlo(r) && r["f"] !== r["f"]))) { return null }
+        return nc
     }
     if ((typeof l == "object" && rtTag(l, "__rstr")) || (typeof r == "object" && rtTag(r, "__rstr"))) { return rbSpaceship(rbSV(l), rbSV(r)) }
     if (typeof l == "string" && typeof r == "string") {
@@ -8227,7 +8234,7 @@ function js_rcase(l, r) {
 function rbWhen(l, r) {
     if (rbIsObj(l) && l["__isclass"] === true) { return rbIsA(r, l) }
     // Proc#=== / Method#=== call it: `when ->(x) { x > 2 }'.
-    if (rbIsFn(l)) { return rbTruthy(rbCall1(l, r)) }
+    if (typeof l == "function") { return rbTruthy(rbCall1(l, r)) }
     // `when' is Ruby's ===, and a Range's === is MEMBERSHIP. The emitter routes a
     // range LITERAL to js_rcase by syntax, so this only bites when the when value
     // is a variable (`when r').
