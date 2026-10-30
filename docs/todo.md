@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-838** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-843** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -64,259 +64,45 @@ its report; anything structural there is a CORE ticket.
 
 # PY — Python
 
-### T-765 python compiler: `| ^ & << >>` share one precedence level · P1 · PY · IN PROGRESS (PY worker, round 16) [V]
-`vs=[6,3,1]; a,b,c=vs[0],vs[1],vs[2]; print(a ^ b >> c, a | b << c, a & b >> c, a ^ b & c, a | b & c)` → interp and python3
-`7 6 0 7 7`, run and native `2 14 1 1 1`; `n ^ n >> 1` with n=5 is 0 (python 7) — found by Rosetta Gray_code. The compiler's
-BitExpr is `Arith { ("|"|"^"|"&"|"<<"|">>") Arith }` through makeBit (python-to-llvm-ir.abnf ~831-832); the interpreter's
-BitExpr / BitXor / BitAnd / ShiftExpr ladder (python-interpreter.abnf ~678-689) is right — copy it.
-
-### T-768 python: `map()` with several iterables pulls its arguments eagerly · P1 · PY · IN PROGRESS (PY worker, round 16) [V]
-`print(list(map(mul, cycle([1,2]), [5,6,7])))` → interp "generator did not terminate", run step brake, native killed;
-python `[5, 12, 7]` (Rosetta Luhn). `zip(cycle(ws), xs)` and `map(f, xs, [10,20])` are right — make multi-iterable map lazy
-like zip. Files: the map builtin in both grammars / lib/python-rt.metajs.
-
-### T-769 python: the implicit `main()` entry runs again after an `if __name__ == "__main__": main()` guard · P2 · PY · IN PROGRESS (PY worker, round 16) [V]
-`def main(n): print("main", n)` + `if __name__ == "__main__": main(3)` → python `main 3`; interp `main 3` then uncaught
-`TypeError: main() missing 1 required positional argument: 'n'`, exit 1; run/native `main 3`, `main None`. Every BG -8 Python
-program and several Rosetta ones print their output twice. The implicit entry (c.mainName; python-interpreter.abnf ~15082,
-python-to-llvm-ir.abnf ~5265) should be skipped when the top level calls main itself or has a `__name__` guard. Ruby shares the
-convention (check it); for js main() is the dialect.
-
-### T-770 python: CRLF line endings are rejected by both halves · P2 · PY · IN PROGRESS (PY worker, round 16) [V]
-`printf 'xs = [1, 2]\r\n\r\nprint(xs[0] + xs[1])\r\n'` → both halves "Not everything could be parsed ... :1:12", python `3`
-(BG mandelbrot.python3-8 ships CRLF). Java, js, lua, ruby, swift and go accept CRLF. File: the NEWLINE / indentation tokenizer
-in both python grammars.
-
-### T-773 python native: list `+` costs ~100 ns per copied element; collection pacing looks too eager · P3 · PY · IN PROGRESS (PY worker, round 16) [V finder only]
-6000 iterations of `acc = acc + [[i, i+1]]`: native 2.42 s (MEC_GC=off 1.95 s), python3 0.06 s; MEC_GC_STATS 1439 collections at
-~2.1 MB live, which is more than the documented pacing (collect when bytes since the last collection exceed the live set,
-floor 4 MB) predicts. Rosetta N-queens (block 7) takes 24 s natively for sizes 1..7 vs python3 0.43 s for 1..10. Files: the
-list-add path in lib/python-rt.metajs / runtime.c, gc pacing in runtime.c. Measure with tests/bench.sh before changing.
-
----
-
 # RB — Ruby
 
-### T-772 ruby: `def` with a parenthesis-free parameter list · P2 · RB · IN PROGRESS (RB worker, round 21) [V]
-`def twice n\n  n * 2\nend; puts twice(xs[0])` → interp "wrong number of arguments (given 1, expected 0)", run/native
-"undefined local variable or method `n'"; ruby `42` (BG nbody.ruby-8 `def nbody n`). `def add a, b` does not parse at all.
-`n` is taken as the first body statement. Files: the def rule in both ruby grammars.
+### T-839 ruby: features left from the string/array/error rounds · P3 · RB · OPEN [V RB worker]
+Each fails vs /usr/bin/ruby 2.6 today. Strings: code-point `s[1]`, `s[1,2]`, center, reverse of astral
+text (run/native) — needs code-point String#[] with an O(1) ASCII fast path in all three engines;
+`128512.chr("UTF-8")`, `255.chr.bytes` (binary strings not modelled). Enumerators: `[1,2].cycle` without
+a block, `Range#lazy` (enumerators are materialised arrays; needs a lazy kind). Control: catch/throw +
+UncaughtThrowError, `loop` ended by StopIteration, method_missing (+ `super` inside it, compiler),
+Exception#cause. Methods: Integer.sqrt, Proc#>> / #curry, Regexp.last_match, pp. Globals: $stdout /
+STDOUT, bare `p` (compiled NameError), bare `new` in `def self.make`. Numeric: `(-8.0)**(1.0/3)` is a
+Complex; Rational#round(half:) rounds half up. Cleanup: regex.js rxSplit is no longer used by ruby —
+remove it if no language calls it (comments in kotlin-rt.metajs, python, jsrtregexjs.go name it).
 
-### T-816 ruby: String#split is a naive literal split · P1 · RB · IN PROGRESS (RB worker, round 21) [V]
-`s="a,b,,c,,"`: `s.split(",")` → all legs `["a","b","","c","",""]` (ruby `["a","b","","c"]`: trailing empties removed);
-`s.split(",", 2)` → same (ruby `["a", "b,,c,,"]`: limit ignored); `" a  b ".split(" ")` → `["","a","","b",""]` (ruby `["a","b"]`:
-awk mode); `"a1b2".split(/(\d)/)` → interp/native `["a","b",""]`, llvm.Run `["a1b2"]` (ruby `["a","1","b","2"]`: captures kept,
-and run does not split on a Regexp at all). Finder: `"".split(",")` → `[""]` (ruby `[]`); `"abc".split(//)` differs by half.
-Files: lib/ruby-rt.metajs rbStrSplit (~5659) and the dispatch (~7524), rxSplit (~4963), ruby-interpreter.abnf ~8747/8766.
+### T-840 ruby compiler: `next v` inside begin/ensure inside a block returns the control signal · P2 · RB · OPEN [V RB worker]
+`p [1,2,3].map { |x| begin; next x*10 if x==2; x; ensure; nil; end }` → ruby and interp `[1, 20, 3]`,
+run `[1, &{3 <nil>}, 3]`. excDispatch in a block function has no loop to continue, so the signal escapes
+as a value; a block-level `next` across a try must become the block's return value. Check native too.
 
-### T-817 ruby: String#[] / slice / []= with a Regexp or String argument return garbage · P1 · RB · IN PROGRESS (RB worker, round 21) [V]
-`h="hello"`: `h[/l+/]` → all legs `"h"` (ruby `"ll"`); `h["ell"]` → `"h"` (`"ell"`); `h["z"]` → `"h"` (nil); finder: `h[/(h)(e)/,2]`
-→ `"he"` (`"e"`), `h.slice(/l+/)` → `"h"`; `t["world"]="ruby"; t[/l+/]="L"` on "hello world" → `"Lubyello world"` (ruby
-`"heLo ruby"`).
-
-### T-818 ruby: String#index / rindex ignore the offset; rindex(Regexp) is nil; run's index(Regexp) is nil · P1 · RB · IN PROGRESS (RB worker, round 21) [V]
-`"hello world".index("o", 5)` → 4 (ruby 7); `rindex("o", 5)` → 7 (4); finder: `index("o", 20)` → 4 (nil), `index("", 11)` → 0 (11);
-`"hello"`: `index(/l/), rindex(/l/), index(/l/,3), index("l",3), rindex("l",2)` → interp/native `2 nil 2 2 3`, run `nil nil nil
-2 3`, ruby `2 3 3 3 2`. lib/ruby-rt.metajs ~7525 calls `indexOf` without a from-index; the Regexp path ~4964.
-
-### T-819 ruby: adjacent string-literal concatenation crosses a newline · P1 · RB · IN PROGRESS (RB worker, round 21) [V]
-`puts "first"` then a statement starting with a string literal, `"second".upcase` → all legs `FIRSTSECOND` (ruby `first`): the
-next line's literal is glued onto the previous argument (finder: `"x".each_char { … }` after `puts "third"` iterates "thirdx").
-`DqStr` ends with `:whitespace(Whitespace)` and `StrLit = StrPiece { StrPiece }` (ruby-interpreter.abnf ~2088-2095; the
-compiler ~2127): juxtaposition must not cross a newline.
-
-### T-820 ruby: index assignment evaluates the RHS before the receiver and index · P1 · RB · IN PROGRESS (RB worker, round 21) [V]
-`arr=[0,0]; i=0; arr[i += 1] = (i += 10)` → all legs `[0, 0, nil × 9, 10]`, ruby `[0, 11]`; finder: `hh[t(:k)] = t(:v)` logs `vk`
-(ruby `kv`). Same class as T-479 (js, java) and T-806 (kotlin).
-
-### T-821 ruby compiler: `return` from a block through ensure, Proc `return`, and `while` break value · P1 · RB · IN PROGRESS (RB worker, round 21) [V]
-`def m4; [1,2].each { |x| begin; return x; ensure; puts "  ensure #{x}"; end }; :fell_through; end` → interp and ruby
-`ensure 1`, `1`; run/native `ensure 1`, `ensure 2`, `:fell_through`. `def m5; pr = Proc.new { return 7 }; pr.call; :unreached;
-end` → interp 7, compiled `:unreached`. Finder: `r = while …; break w*2 if w==lim; end` → compiled nil (interp/ruby the value).
-
-### T-822 ruby: Array#insert with negative or past-the-end index; mutating a Hash during each · P1 · RB · IN PROGRESS (RB worker, round 21) [V]
-`[1,2].insert(-1, :b)` → all legs `[1, :b, 2]` (ruby `[1, 2, :b]`); finder: `insert(-2, :z)` → `[:z,1,2]` (`[1,:z,2]`),
-`insert(3, 9)` → interp/native `[1,2,9]` (`[1,2,nil,9]`) and llvm.Run a Go panic "slice bounds out of range [:3] with capacity
-2", `insert(-4, :w)` → padded (IndexError "index -4 too small for array; minimum: -3"). Deleting inside `Hash#each` → run Go
-panic "index out of range [2] with length 2", interp/native skip the next entry; adding inside `each` raises nothing (ruby
-RuntimeError "can't add a new key into hash during iteration"). Files: lib/ruby-rt.metajs ~6983 (insert / rbArrSub), the
-twin's hash iteration.
-
-### T-823 ruby native: `!~` does not link · P1 · RB · IN PROGRESS (RB worker, round 21) [V]
-`puts s[0] !~ /z/` → interp, run and ruby `true`; native BUILD FAILED "unresolved symbol js_rxnmatch". ruby-to-llvm-ir.abnf
-~3281 maps `!~` to js_rxnmatch, which exists only in abnf/jsrtregex.go (~8106); add it to the floor / layer 2.
-
-### T-824 ruby: Float#round(half:) is ignored · P1 · RB · IN PROGRESS (RB worker, round 21) [V]
-`2.5.round(half: :even)` → 3 (ruby 2); finder: `half: :down` 3 (2), `-2.5` even -3 (-2), `3.5` down 4 (3), `25.round(-1, half:
-:even)` 30 (20). All legs.
-
-### T-825 ruby: Array#sum on Floats lacks Kahan-Babuska; Integer#fdiv on bignums is inexact · P1 · RB · IN PROGRESS (RB worker, round 21) [V]
-`[0.1, 0.2, 0.3].sum` → `0.6000000000000001` (ruby 0.6); `[1e100, 1.0, -1e100].sum` → 0.0 (1.0); finder: `[3, 0.1, 0.2].sum` →
-3.3000000000000003 (3.3); `(10**30).fdiv(10**29)` → 10.000000000000002 (10.0). All legs. MRI's ary_add_one /
-Kahan-Babuska and big_fdiv are the models.
-
-### T-826 ruby: Array method arguments — slice, fill, uniq block, max_by · P1 · RB · IN PROGRESS (RB worker, round 21) [V]
-`[1,2,3,4].fill(9, 0, 2)` → `[9,9,9,9]` (ruby `[9,9,3,4]`); `uniq { |x| x % 3 }` on 1..6 ignores the block (ruby `[1,2,3]`).
-Finder: `a.slice(6,0)`, `slice(-6,1)`, `slice(2,-1)` → `[]`, `[1]`, `[]` (ruby nil each; `a[...]` is right); `fill(9,3,5)`,
-`fill(9,-2,1)`; `max_by` returns the last of ties ("cc", ruby "bb"); `max_by(2)` ignores n; `[1].flatten!` returns self (nil).
-
-### T-827 ruby: Comparable, `<=>`, `===` and Range semantics · P1 · RB · IN PROGRESS (RB worker, round 21) [V finder only]
-`include Comparable` + `<=>`: `V.new(1)==V.new(1)` → false (ruby true); `V.new(1) < 5` with `<=>` nil → compiled false (ruby
-ArgumentError); `clamp` → interp V5, compiled NoMethodError (ruby V3). `nil <=> nil`, `true <=> true` → nil (0). A lambda in `when`
-never matches (`->(x){…} === 2.5` false). `(0..9) === Float::NAN` / `include?(NaN)` → true (false). `(1.0..2.0).min/max` → 1/2
-Integers (1.0/2.0); `(1..1.5).max` → 1 (1.5); `(1.0..2.0).step(0.5)` raises "step can't be 0 or negative". A user `hash`/`eql?`
-is ignored for Hash keys (`{K.new(1)=>"one"}[K.new(1)]` nil) while `uniq` honours it.
-
-### T-828 ruby: sub/gsub replacement forms — Hash, `\&`, `` \` ``, `\'`; numbered groups next to named ones · P1 · RB · IN PROGRESS (RB worker, round 21) [V]
-`"abc".sub(/b/, "[\\&]")` → `"a[&]c"` (ruby `"a[b]c"`); `"cat hat".gsub(/[ch]/, "c" => "C", "h" => "H")` → the Hash's inspect
-spliced in (ruby `"Cat Hat"`); finder: `` "abc".sub(/b/, "\\`|\\'") `` → `` "a`|'c" `` (`"aa|cc"`); `.match(/(?<first>a)(b)/)[2]` →
-"b" (ruby nil: with named groups the unnamed ones are not captured). All legs.
-
-### T-829 ruby: String#succ — non-alphanumerics incremented, carries wrong, halves disagree · P1 · RB · IN PROGRESS (RB worker, round 21) [V]
-`"1.9".succ` → `"1/0"` (ruby `"2.0"`); `"a-9".succ` → `"a.0"` (`"a-10"`); finder: `"a z"` → `"a!a"` (`"b a"`), `"<<koala>>"` →
-`"<<koala>?"` (`"<<koalb>>"`); interp only: `"Zz"` → `"aAa"` (`"AAa"`), `""` → `"a"` (`""`), `"9"` → interp `"a0"`, compiled `"00"`
-(`"10"`); `"ÿ".succ` → invalid bytes in run. File: lib/ruby-rt.metajs rbStrSucc (~4239) and the interpreter's copy — port
-MRI's str_succ (rightmost alnum run, skip non-alnums).
-
-### T-830 ruby: astral characters handled as UTF-16 code units · P2 · RB · IN PROGRESS (RB worker, round 21) [V finder only]
-`s="a😀b"`: `s[1]` → a lone surrogate (ruby "😀"), `s[1,2]` → "😀" ("😀b"), `center(6,"*")` → `"*a😀b*"` (`"*a😀b**"`),
-`index("b")` → 3 (2); `length` is right. `reverse` splits the pair in run/native; `"😀".ord` → interp/native 55357, run 128512
-(ruby 128512); `128512.chr("UTF-8")` raises RangeError; `255.chr.bytes` → [195,191] (ruby [255]; binary strings not modelled).
-
-### T-831 ruby: uncatchable internal errors; interp hangs on an infinite range · P2 · RB · IN PROGRESS (RB worker, round 21) [V finder only]
-`b[-10]=1` on a 6-element array → "ruby interpreter error / js runtime error: index -4 too small for array", not catchable by
-`rescue IndexError` (ruby IndexError "index -10 too small for array; minimum: -6"); `each_slice(0)` → uncatchable "invalid
-size" (ArgumentError "invalid slice size"); `[1,2].cycle` without a block → uncatchable. `(1..Float::INFINITY).first(3)` →
-interp loops until killed (run/native/ruby `[1, 2, 3]`).
-
-### T-832 ruby: error paths and assorted gaps · P3 · RB · IN PROGRESS (RB worker, round 21) [V finder only]
-`throw` without `catch` → NoMethodError (UncaughtThrowError; `catch` undefined); `loop { raise StopIteration }` propagates (ruby
-ends the loop, nil); `"x"*-1` / `[0]*-1` → "" / [] (ArgumentError "negative argument"); `5.upto` without args → an Enumerator
-(ArgumentError); interp: a `def` inside a lambda skips the arity check, `"\t\n hi \r\n\0".strip` keeps the tail, `[1,2].inject(&:+)`
-NoMethodError, bare `p` gives #<Proc> (compiled NameError, ruby nil); `each_line("--")` ignores the separator, `chomp("")` not
-handled, `String#dump` equals inspect, `$stdout`/`STDOUT` read nil, `("y".."ab").to_a` iterates (ruby []); the compiler rejects
-`super` in method_missing of a class without an explicit superclass; a bare `new` in `def self.make` NameError. Missing:
-`||=`/`&&=` (message names `||=` for both), method_missing, Exception#cause, Integer#step, Integer.sqrt, Array#at / transpose /
-slice! / bsearch, chunk_while, Proc#>> / curry, Hash#compact, endless `(1..)`, Range#lazy, Regexp.last_match, pp; `**` of a
-negative float to a fractional power → NaN (ruby Complex).
-
----
+### T-841 ruby: `$0` / `$PROGRAM_NAME` are nil · P2 · RB · OPEN [V PY worker]
+`p __FILE__; p $0; p $PROGRAM_NAME` → /usr/bin/ruby prints the script path three times; all legs print
+the path then `nil`, `nil`. So the common `main(3) if __FILE__ == $0` guard runs nothing in every leg.
 
 # JS — JavaScript and TypeScript
 
-### T-777 js: assigning an invalid array `length` throws an uncatchable RangeError · P1 · JS · IN PROGRESS (JS worker, round 31) [V]
-Neighbour of T-488. `try { var a = [1]; a.length = v[0]; } catch (e) { println(..., e instanceof RangeError, e.message) }` with
-v[0] = 1.5 (also -1, 4294967296) → every leg exits 1 (interp a goja host error, compiled `js runtime error: invalid array
-length 1.5`); node `caught true Invalid array length`, then `after`. `new Array(1.5)` is already catchable (biRaise ~5907) —
-copy it to abnf/jsrt.go ~3312 (`rt.fail`), runtime.c ~3955 (`die2`), the interpreter's length setter, and typescript.
+### T-838 ts/js: decorator and constructor semantics left over · P3 · JS · OPEN [V JS worker]
+node / tsc 6.0.3 answers were measured by the JS worker. Decorators: `ctx.addInitializer`, field
+decorators, and tsc's evaluation order (static methods → instance methods → fields → class) — needs
+per-class initializer lists threaded into the constructor in both halves. Constructors: `this` before
+super(), super() twice, a derived constructor returning 5, a missing super(), `new (()=>1)()`, `new o.m()`
+(constructability), `super` after setPrototypeOf. Parse/lowering: `!` definite-assignment targets,
+U+2028 in strings, tagged-template invalid escapes, `export import`, `__proto__:` in object literals;
+plus the missing host APIs listed in the closed T-794.
 
-### T-779 js/ts native: a program that contains `normalize` cannot run under MEC_GC=stress · P3 · JS · IN PROGRESS (JS worker, round 31) [V]
-`function main() { println("hi", "é".normalize("NFC").length); }` native: plain run immediate, `MEC_GC=stress` still running
-after 30 s (finders: >280 s, `sample` 100% in gc_try/gc_mark/gc_scan_range; also when the function containing normalize is
-never called). The normalization tables are built with a growing live set while stress collects on every allocation.
-Effect: no GC-stress coverage for any js/ts program referencing normalize. Build the tables in the permanent region
-(`js_gc_perm`) or outside stress accounting. Files: the normalize table builder in lib/js-rt.metajs or runtime.c. Same in
-typescript (one `normalize("NFC")` call: killed after 280 s under stress, 0.06 s normally).
-
-### T-780 ts/js interp: `o.m?.()` on a class (prototype) method returns undefined without calling it · P1 · JS · IN PROGRESS (JS worker, round 31) [V]
-`class K { v = 1; m(): string { return "m" + this.v; } }`, `const k: any = new K(); String(k.m?.())`, `String(k?.m?.())` →
-interp `undefined` twice; run, native, tsc+node `m1`. Object-literal, arrow, string and array methods are right. The chain
-evaluator (typescript-interpreter.abnf ~10255-10270, the `suffixes` loop) reads member+call with getMemberRaw, which is
-undefined for a prototype method; the opt-call check `s.opt == true && cur == undefined` fires before the lastKey/curThis
-recovery the plain call uses. Twin in js-interpreter.abnf.
-
-### T-781 ts: declaration merging replaces the binding (namespace into function or class; enum with enum) · P1 · JS · IN PROGRESS (JS worker, round 31) [V]
-`function Fn(): string { return "fn"; } namespace Fn { export const extra: number = 3; }` → all legs `typeof Fn` `object`,
-`Fn()` TypeError "Fn is not a function"; tsc+node `function`, `3`, `fn`. `class Cl { static s = 1; } namespace Cl { export const
-added = "added"; }` → interp `Cl.added` undefined, compiled `TypeError: Cl is not a constructor`; `enum Mg { M1 = 1 } enum Mg { M2
-= 2 }` → interp `Mg.M1` undefined, keys `2,M2` (node `1 2 1,2,M1,M2`). Enum+namespace and namespace+namespace already merge.
-tsc's `X || (X = {})` reuse is missing in makeNamespace / the enum builder of both TS grammars.
-
-### T-782 ts/js: class fields use [[Set]] instead of [[Define]]; `declare` fields are materialised · P1 · JS · IN PROGRESS (JS worker, round 31) [V]
-`class Base { get acc() {...} get rw() {...} set rw(v) { setterCalls++ } }`, `class WithInit extends Base { acc = "own"; rw =
-"own-rw"; }`, `class NoInit extends Base { rw: string; }`, `class DeclOnly { declare q: number; r?: number; }`: node `own own-rw
-[acc,rw] setter=0` / `undefined [rw] setter=0` / `[r] false true`; compiled `base-acc base-rw [] setter=1` / `base-rw [] setter=2`
-(inherited setter called, write to a getter-only accessor dropped); interp `base-acc base-rw [acc,rw] setter=0` (own keys made
-but reads hit the getter, T-783) / `base-rw [rw]`; both `[q,r] true true` for DeclOnly. Finder: `declare z: number` resets z to
-undefined after the base constructor set it. Same in js (.js twin). Files: field-initialiser emission in
-typescript-to-llvm-ir.abnf / js-to-llvm-ir.abnf (define an own data property), the interpreter field install, the `declare`
-modifier.
-
-### T-783 ts/js interp: an own data property or a nearer half-accessor does not shadow an inherited accessor · P1 · JS · IN PROGRESS (JS worker, round 31) [V]
-`class Base { get acc() { return "base-acc"; } }`; `Object.defineProperty(o, "acc", { value: "own", ... }); o.acc` → interp
-`base-acc`, others `own` (also the Object.create and object-literal-prototype variants). `class B0 { get v(){return 1} set v(x){} }
-class S0 extends B0 { set v(x) {} }; new S0().v` → interp 1, others undefined. getMember (typescript-interpreter.abnf ~5136)
-calls findAccessor before hasOwn, and findAccessor (~5957) walks the chain per kind ("get:"+k) without stopping at a level
-holding a data property or only the other half. Twin in js-interpreter.abnf.
-
-### T-784 ts/js: `#private` brand checks are missing · P1 · JS · IN PROGRESS (JS worker, round 31) [V]
-Static helpers in `class P` with `#x`, `#m()`, `get #acc`, `static #s`, applied to `{}`: read → all legs `undefined` (node
-`TypeError: Cannot read private member #x from an object whose class did not declare it`); write → `wrote`, the slot is
-created (node `Cannot write private member #x to an object ...`); call → `TypeError: o.#m is not a function` (node `Receiver
-must be an instance of class P`); accessor → undefined (Receiver TypeError); a static private read through a subclass → 5
-(TypeError). `#x in o` is already right. Files: private member read/write/call in both TS and both js grammars and the
-floor/twin private-key access.
-
-### T-785 ts/js: the regex `u` flag is not implemented, and non-u astral handling differs by leg · P1 · JS · IN PROGRESS (JS worker, round 31) [V]
-s = "\u{1F600}" from an array: `/^.$/u.test(s), /^.$/.test(s), /^..$/.test(s)` → interp/native `false false true`, llvm.Run
-`true true false`, node `true false true`; `/\u{1F600}/u` → all legs throw "invalid unicode escape" (node accepts).
-t = "a\u{1F600}b": `t.split(/(?:)/).length, t.split(/(?:)/u).length` → interp/native `4 4`, run `3 3`, node `4 3`;
-`matchAll(/(?:)/gu)` indices → interp/native `0,1,2,3,4`, run `0,1,2,3`, node `0,1,3,4`. interp/native are right without
-`u`; the Go twin steps by code points always, so it is wrong without `u`. lib/regex.js rxCompile has no JS unicode-mode
-flag (its `u` is unicode CASE). Files: lib/regex.js, abnf/jsrtregex.go, the js/ts regex flag plumbing.
-
-### T-786 ts/js: `s.replaceAll("", x)` replaces only once · P1 · JS · IN PROGRESS (JS worker, round 31) [V]
-Empty search read from an array: `"abc".replaceAll("", "_")` → all legs `_abc` (node `_a_b_c_`); function form `<0>abc` (node
-`<0>a<1>b<2>c<3>`); same for "a" and an astral string; `"".replaceAll("","_")` is right. Files: replaceAll in abnf/jsrt.go,
-lib/js-rt.metajs, the interpreters.
-
-### T-787 ts/js: `Promise.any` rejects with a string; `AggregateError` is undefined · P1 · JS · IN PROGRESS (JS worker, round 31) [V]
-`try { await Promise.any([Promise.reject(1)]) } catch (e) { typeof e, String(e), e instanceof Error, e.name, JSON.stringify(e.errors) }`
-→ all legs `string AggregateError: All promises were rejected | false undefined undefined`; node `object ... | true
-AggregateError [1]`; `typeof AggregateError` undefined (node function). Files: every site containing "All promises were
-rejected" (both interpreters, abnf/jsrt.go, lib/js-rt.metajs).
-
-### T-788 ts/js Go twin: ToPrimitive runs twice for relational and loose-equality comparisons · P1 · JS · IN PROGRESS (JS worker, round 31) [V]
-An object whose `valueOf` logs: `a < b` → llvm.Run logs `valueOf 1,valueOf 2,valueOf 1,valueOf 2`, interp/native/node
-`valueOf 1,valueOf 2`; `a == 1` → run `valueOf 1,valueOf 1` (others once); `a >= b` like `<`. `+`, `*`, `a - 0 > 0` are right.
-File: abnf/jsrt.go relational / loose_eq on objects.
-
-### T-789 ts/js: computed class-member keys — evaluated per construction (interp), compiler crashes · P2 · JS · IN PROGRESS (JS worker, round 31) [V]
-`let n = 0; function key() { n++; return "f" + n; } class C { [key()] = "v"; }`, two instances → interp `f1 f2 calls=2`, node
-`f1 f1 calls=1`; the compilers fail to build: `TypeError: Cannot read property 'length' of undefined at jsKeyEsc
-(typescript-to-llvm-ir.abnf:startScript:3452)`, js-to-llvm-ir.abnf ~721 likewise. Finder: the interpreter evaluates a static
-computed key after earlier static initialisers and the static block (the spec evaluates all keys first).
-
-### T-790 ts compiler: `declare const enum` leaves the enum body as statements · P2 · JS · IN PROGRESS (JS worker, round 31) [V]
-`declare const enum DCE { Z = 9 }` + a main that prints `ok` → interp and node `ok`; run/native `ReferenceError: DCE is not
-defined`. Likely AmbientDecl (typescript-to-llvm-ir.abnf ~226) tries AmbVar before AmbEnum (PEG ordering, manual ch. 4).
-
-### T-791 ts: decorators — the compiler passes no context; field decorators are ignored · P2 · JS · IN PROGRESS (JS worker, round 31) [V]
-Method decorator printing `typeof ctx, ctx.name, ctx.kind`; a field decorator returning `init => init + 1`: interp
-`decorating object m method`, `f=5 m=4`; run/native `decorating undefined `, `f=5 m=4`; node `decorating object m method`,
-`field f`, `f=6 m=4`; the interpreter lacks `ctx.addInitializer`. The compiler header (typescript-to-llvm-ir.abnf ~62-73)
-documents the limits but Settled does not; field decorators silently give wrong values in both halves.
-
-### T-792 ts/js: `new Error(msg, { cause })` drops the cause · P2 · JS · IN PROGRESS (JS worker, round 31) [V finder only]
-`const e = new Error("m", { cause: "c" }); [e.cause, Object.keys(e).length, "cause" in e]` → all legs `[null,0,false]`, node
-`["c",0,true]`.
-
-### T-793 ts/js: an unhandled promise rejection is silent with exit 0 · P2 · JS · IN PROGRESS (JS worker, round 31) [V]
-`async function g() { await null; throw new Error("lost"); }`, `main` calls `g()` and prints `main end` → all legs `main end`,
-exit 0, nothing on stderr; node prints `Error: lost` and exits 1. Every exception inside an async function that nobody awaits
-vanishes. Files: the job loop in abnf/jsrt.go, lib/js-rt.metajs, the interpreters.
-
-### T-794 ts/js: derived-constructor and constructability errors; parse/lowering gaps; missing host APIs · P3 · JS · IN PROGRESS (JS worker, round 31) [V finder only]
-Errors silently missing (all legs): `this` before super, super twice, a derived constructor returning 5, no super call, `new
-(()=>1)()`, `new o.m()`; `A()` without new says "A is not a function" (node "Class constructor A cannot be invoked without
-'new'"). Gaps differing by half: non-null `!` in assignment targets (`o!.n = 5`, `o.inner!.k += 3`, `o.inner!.k++`, `maybe! =
-10`, `maybe! += 2`); a literal U+2028/U+2029 in a string is an interp parse error; tagged templates with invalid escapes
-rejected; `export import X = NS.Y` in a namespace crashes both (interp in stripWs, lib/interp-core.js ~100); `super` in an
-object-literal method after setPrototypeOf leaks `__class__` (interp) / an empty name (compiled); `__proto__: base` in a
-literal does not set the prototype. Missing: setTimeout, queueMicrotask, Date, WeakMap, encodeURIComponent,
-isWellFormed/toWellFormed, Set#union etc., `accessor` auto-accessors (treated as an own field).
-
----
+### T-842 ts/js: RegExp to string, method shadowing an inherited getter, `o?.#f` · P2 · JS · OPEN [V JS worker]
+(1) `String(/y/g)`, `"" + /y/g`, `` `${/y/g}` `` → interp and llvm.Run `[object Object]`, native and node
+`/y/g`. (2) `class Base { get acc(){return "s"} } class Mid extends Base { acc(){} } class Leaf extends
+Mid {}; typeof new Leaf().acc` → llvm.Run "string", node and other legs "function" (a class method
+definition goes through js_set, which runs the inherited accessor — must define). (3) `o?.#f` does not
+parse in the js compiler.
 
 # JV — Java
 
@@ -371,14 +157,6 @@ map.` and `7`). `val r = try {..} catch {..}` outside a lambda is right. Check a
 ---
 
 # SW — Swift  (oracle: swiftc 6.1.2)
-
-### T-766 swift: `String(format:, args...)` returns the format unchanged · P1 · SW · IN PROGRESS (SW worker, round 10) [V]
-`import Foundation; print(String(format: "%.3f", xs[0])); print(String(format: "%d items", ns[1]))` → all legs `%.3f`,
-`%d items`; swiftc `1.500`, `42 items` (BG spectralnorm.swift-8 printed `%.9f`). The labelled `format:` initializer is
-ignored in both swift grammars and lib/swift-rt.metajs. Oracle note: swiftc needs `-sdk
-/Library/Developer/CommandLineTools/SDKs/MacOSX14.4.sdk` to import Foundation on this machine.
-
----
 
 # DA — Dart  (no dart here: spec-only)
 
@@ -439,56 +217,6 @@ python: module-level `__doc__` (NameError). go: `make(NamedType, n)` for `type V
 the compiled legs say only "variable not defined: Main". swift: free function `sqrt`; bitwise compound assignment (`&=` parse
 error; `|=`, `<<=`, `>>=` "unknown operator" / "call of a non function value"). c: a `#define` inside a function body is not
 applied. Programs and adaptations: tests/programs/fetch.sh --list.
-
-### T-795 test.sh: a matrix worker that dies counts as green; enough deaths hang the run · P2 · CORE · IN PROGRESS (CORE worker, round 9) [V]
-`run_entry` runs under `set -u` in a background subshell; one that dies writes neither `.ok` nor `.fail`, and the summary
-(test.sh ~1120-1135) checks only `fail -ne 0`, never `pass + fail == total`. Finder's sabotage: a typo'd variable in the
-`abort_exe` block → `matrix: 496 entries run - 467 passed, 0 failed / all green`, exit 0 — the 29 SHOULD ABORT rows vanish,
-and gates.sh still passes (it compares the "entries run" total and greps launch.json for the abort counts). With every
-worker dead, a filtered run says `2 entries run - 0 passed, 0 failed / all green`, and the unfiltered run HANGS: a dead worker
-never returns its FIFO token (`printf '.' >&3` follows run_entry), so after JOBS deaths the loop blocks on fd 3. Fix: return
-the token and write `.fail` from an EXIT trap in the subshell; demand pass + fail == total; gates.sh section 1 must also
-require "N passed" == MATRIX_ENTRIES.
-
-### T-796 gates.sh: `--cross` passes when pairs were killed; no floor on pairs compared · P2 · CORE · IN PROGRESS (CORE worker, round 9) [V]
-gates.sh section 3 (~215) passes on the text `, 0 divergent` and never reads `rc_of cross`. `./test.sh --cross --filter kotlin
---timeout 1` exits 1 with `1 programs compared, 0 divergent ... 16 PAIR(S) WERE KILLED ... and were NOT COMPARED` — which
-gates.sh would classify PASS. Check the exit code and add a CROSS_PROGRAMS floor (132 today).
-
-### T-797 test.sh: SHOULD FAIL rows check only for a non-zero exit, never the reason · P2 · CORE · IN PROGRESS (CORE worker, round 9) [V finder only]
-Finder's sabotage: moving tests/kotlin-fail-test-isinit.kt away → `--filter isInitialized` `2 passed` while the output is
-`open ...: no such file or directory`; prefixing tests/go-fail-test-divzero.go with `@@@` → `2 passed` on a parse stop at 1:1.
-This holds for all ~95 non-abort guard rows (each was checked by hand to fail for its stated reason today; nothing keeps it
-so). Give each row an expected diagnostic substring (a `// EXPECT-ERROR:` line in the file, or in the row), and at minimum
-reject "no such file" and a parse stop at 1:1. Files: run_entry's should_fail branch, .vscode/launch.json.
-
-### T-798 the "Infinite Loop" guard is vacuous · P2 · CORE · IN PROGRESS (CORE worker, round 9) [V]
-Its premise: with `-lb` the left-recursion block list stops TestA and the parse fails cleanly. Without `-lb`,
-`mec tests/infinite-loop.abnf tests/infinite-loop-test-1.txt` dies with Go `fatal error: stack overflow`, exit 2 — also
-non-zero, so the row passes either way (finder: disabling the block list in abnf/parser.go ~135 keeps it green). Require the
-clean "Not everything could be parsed" diagnostic; the row also lacks `-q`, so goja vs -frozen is never compared on it.
-
-### T-799 native-full.sh: a missing ratchet file or a held row is a skip, not a failure; no program-count floor · P2 · CORE · IN PROGRESS (CORE worker, round 9) [V]
-Moving tests/lua-test-full.2.lua away → `lua/full.2 - no tests/lua-test-full.2.lua` and the final `every native binary exits 0
-with 0 failures`, which is what gates.sh greps (native-full.sh ~262 and ~294 write `skip`). A `native-full:
-features-row-held` row takes the same path and gates.sh checks held == 0 only for clang-check. ROWS is a hand-written list,
-so a new ratchet part is silently not run natively. Treat "no $f" as rc 1, demand held == 0, add a NATIVE_PROGRAMS floor.
-
-### T-800 tests/probe.sh uses a stale ./mec · P3 · CORE · IN PROGRESS (CORE worker, round 9) [V]
-probe.sh ~115 `[ -x ./mec ] || go build -o mec .` builds only when there is no binary, so after an abnf/*.go or Go-twin edit a
-standalone probe measures the previous build (finder: a `fmt.Println("SABOTAGE")` in main.go stayed invisible). Rebuild
-always (it is incremental), or when any *.go is newer than ./mec. Same for native-full.sh run on its own.
-
-### T-801 stale guards: C widen-notimpl asserts nothing; stale names and headers · P3 · CORE · IN PROGRESS (CORE worker, round 9) [V finder only]
-tests/c-test-widen-notimpl.c's own header says a flagless run exits 0 and `-warn-unsupported` reports nothing, yet every line
-still says `-> not implemented`, row "C not-implemented surface warned+ignored" produces 0 warnings, and `main` returns 0
-unconditionally (union, typedef, float globals, goto, `sizeof n` are never checked), so rows 167/168 pass whatever the values;
-the interpreter half has no row. Rename it, drop the stale comments, make main return a failure count over real assertions,
-add the c-interpreter row. Cosmetic: row 475's name quotes "boom" but the program throws "abort probe";
-tests/swift-test-recognize.swift's header says every construct is notImplemented but typealias and protocol now pass (it stops
-at `await`, line 62); the launch.json separator says "SHOULD-ABORT", test.sh matches "SHOULD ABORT".
-
----
 
 # Closed
 
@@ -1171,6 +899,54 @@ T-812 kotlin: `Double.mod(Double)` — native silently wrong, interp/run abort �
 T-813 kotlin: missing JVM exceptions — getValue, negative array size, subList bounds — DONE d4e00ae1 (getValue, negative array sizes, List(-1), subList messages = java+stdlib)
 T-814 kotlin: removing from a MutableList inside its for-each does not throw ConcurrentModificationException — DONE d4e00ae1 (for over a mutable list throws CME on a size change; modCount precision filed as T-836)
 T-815 kotlin: `when (x) { in someList -> … }` does not parse; missing stdlib members — DONE 0312d4e0 (when-in/!in, trimMargin, replaceIndent, withSign, ulp, nextUp/Down, take*OneBit, rotate*, inc/dec, MutableList.iterator, addAll(index), StringBuilder insert/deleteCharAt/setLength)
+T-777 js: assigning an invalid array `length` throws an uncatchable RangeError — DONE d01e1157 (Invalid array length RangeError in both interpreters, Go js_jsmset and layer 2)
+T-779 js/ts native: a program that contains `normalize` cannot run under MEC_GC=stress — DONE d01e1157 (normalize table load bracketed with js_gc_perm; stress mode collects only on the threshold inside a perm bracket — 120 s kill → 1 s; verified by hand, no gate runs MEC_GC=stress)
+T-780 ts/js interp: `o.m?.()` on a class (prototype) method returns undefined without calling it — DONE d01e1157 (optional call reads the member as a value first)
+T-781 ts: declaration merging replaces the binding (namespace into function or class; enum with enum) — DONE d01e1157 (namespace/enum declaration merging: nsResolve, makeEnum, emitMergeTarget)
+T-782 ts/js: class fields use [[Set]] instead of [[Define]]; `declare` fields are materialised — DONE d01e1157 (class fields use define semantics via js_jsfielddef; declare/abstract fields skipped; an own undefined slot shadows the chain)
+T-783 ts/js interp: an own data property or a nearer half-accessor does not shadow an inherited accessor — DONE d01e1157 (accHolder stops at the nearest level holding the key)
+T-784 ts/js: `#private` brand checks are missing — DONE d01e1157 (#private brand checks with node's messages: js_jsprivchk / privCheck)
+T-785 ts/js: the regex `u` flag is not implemented, and non-u astral handling differs by leg — DONE d01e1157 (regex u flag: letter U — code points, \\u{h}, surrogate pairs; Go glue W = UTF-16 text so non-u indices match node)
+T-786 ts/js: `s.replaceAll("", x)` replaces only once — DONE d01e1157 (empty-match replace advances by code unit/point like node)
+T-787 ts/js: `Promise.any` rejects with a string; `AggregateError` is undefined — DONE d01e1157 (Promise.any + AggregateError)
+T-788 ts/js Go twin: ToPrimitive runs twice for relational and loose-equality comparisons — DONE d01e1157 (ToPrimitive once per operand; == object/null rules; two native BigInt == defects)
+T-789 ts/js: computed class-member keys — evaluated per construction (interp), compiler crashes — DONE d01e1157 (computed keys evaluated once in source order; compiler crash gone)
+T-790 ts compiler: `declare const enum` leaves the enum body as statements — DONE d01e1157 (PEG order AmbEnum before AmbVar)
+T-792 ts/js: `new Error(msg, { cause })` drops the cause — DONE d01e1157 (Error cause option and inherited cause via js_jserrcause)
+T-793 ts/js: an unhandled promise rejection is silent with exit 0 — DONE d01e1157 (unhandled rejections raised after the drain, exit 1; 4 SHOULD ABORT rows)
+T-791 ts: decorators — the compiler passes no context; field decorators are ignored — PARTIAL d01e1157 — decorator context {kind,name,static,private} in both halves; addInitializer, field decorators and tsc evaluation order filed as T-838
+T-794 ts/js: derived-constructor and constructability errors; parse/lowering gaps; missing host APIs — PARTIAL d01e1157 — calling a class without new throws node's TypeError; the rest filed as T-838
+T-765 python compiler: `| ^ & << >>` share one precedence level — DONE 35511a17 (compiler BitExpr is the interpreter's |/^/&/shift ladder)
+T-768 python: `map()` with several iterables pulls its arguments eagerly — DONE e5b2c6f0 (multi-iterable map steps its sources like zip in all three engines)
+T-769 python: the implicit `main()` entry runs again after an `if __name__ == "__main__": main()` guard — DONE 46fde01d (implicit main() entry skipped when the top level calls it or tests __name__; pyTopRunsEntry shared)
+T-770 python: CRLF line endings are rejected by both halves — DONE f70e1d87 (\\r is whitespace; CRLF inside literals becomes \\n; CRLF ratchet python-test-full.6.py)
+T-773 python native: list `+` costs ~100 ns per copied element; collection pacing looks too eager — DONE 19535c48 (list/tuple + is one floor concat: 6000-iteration probe 3.17 s → 0.14 s, collections 1439 → 107; pacing was already per spec)
+T-795 test.sh: a matrix worker that dies counts as green; enough deaths hang the run — DONE 17ffbfbd (EXIT-trap verdict and FIFO token; passed+failed must equal entries run; gates checks N passed == entries run)
+T-796 gates.sh: `--cross` passes when pairs were killed; no floor on pairs compared — DONE 41e64aea (gates --cross checks the exit code and a CROSS_PROGRAMS=132 floor; dead --cross workers are NO VERDICT)
+T-797 test.sh: SHOULD FAIL rows check only for a non-zero exit, never the reason — DONE 17ffbfbd (all 122 by-design failing rows carry expectError (+ expectExit for two); missing file / parse stop at 1:1 rejected)
+T-798 the "Infinite Loop" guard is vacuous — DONE 17ffbfbd (Infinite Loop row expects the clean diagnostic and runs with -q)
+T-799 native-full.sh: a missing ratchet file or a held row is a skip, not a failure; no program-count floor — DONE 41e64aea (missing ratchet file is a failure; unlisted ratchet files fail; gates demand 0 held rows and NATIVE_PROGRAMS=59)
+T-800 tests/probe.sh uses a stale ./mec — DONE bdc2549a (probe.sh, selftest, bench.sh and native-full.sh always go build)
+T-801 stale guards: C widen-notimpl asserts nothing; stale names and headers — DONE 54d6264b (c-test-widen2.c with 12 real checks, interpreter row added; stale names/headers fixed)
+T-816 ruby: String#split is a naive literal split — DONE 36d3c82c (split per MRI incl. limit, awk-mode, captures, empty)
+T-817 ruby: String#[] / slice / []= with a Regexp or String argument return garbage — DONE 36d3c82c (String#[] / slice / []= with a pattern or string)
+T-818 ruby: String#index / rindex ignore the offset; rindex(Regexp) is nil; run's index(Regexp) is nil — DONE 36d3c82c (index/rindex with start positions and regexes)
+T-828 ruby: sub/gsub replacement forms — Hash, `\&`, `` \` ``, `\'`; numbered groups next to named ones — DONE 36d3c82c (sub templates \\& \\` \\', hash replacement; Onigmo capture rule flag O)
+T-829 ruby: String#succ — non-alphanumerics incremented, carries wrong, halves disagree — DONE 36d3c82c (succ per MRI incl. carry and non-alnum)
+T-819 ruby: adjacent string-literal concatenation crosses a newline — DONE c151b3bf (adjacent string literals glue across a backslash-newline: SameLine between pieces)
+T-820 ruby: index assignment evaluates the RHS before the receiver and index — DONE c151b3bf (assignment evaluates target index before the value)
+T-772 ruby: `def` with a parenthesis-free parameter list — DONE c151b3bf (paren-free def parameters)
+T-821 ruby compiler: `return` from a block through ensure, Proc `return`, and `while` break value — DONE 1203aee9 (compiled return out of ensure-in-block and procs; while/until break value)
+T-822 ruby: Array#insert with negative or past-the-end index; mutating a Hash during each — DONE d3bf1a4c (insert negative/out-of-range indices with MRI's IndexError; Hash#each delete skips, add raises)
+T-823 ruby native: `!~` does not link — DONE d3bf1a4c (!~ compiles natively)
+T-824 ruby: Float#round(half:) is ignored — DONE d3bf1a4c (round(half:) even/down/up incl. digits; Go twin avoids FMA fusion)
+T-825 ruby: Array#sum on Floats lacks Kahan-Babuska; Integer#fdiv on bignums is inexact — DONE d3bf1a4c (Kahan-Babuska sum like MRI; Integer#fdiv of bignums)
+T-826 ruby: Array method arguments — slice, fill, uniq block, max_by — DONE d3bf1a4c (fill/slice/uniq-block/max_by(n)/flatten! arguments)
+T-827 ruby: Comparable, `<=>`, `===` and Range semantics — DONE 2a8c7615 (Comparable ==/clamp and failure message, <=> nil/NaN, Proc in when, float Range max/step, eql?/hash keys; Rational round(half:) filed as T-839)
+T-830 ruby: astral characters handled as UTF-16 code units — PARTIAL c832167f — ord and index/rindex count an astral character once; code-point String#[]/center/reverse and chr/bytes of binary strings filed as T-839
+T-831 ruby: uncatchable internal errors; interp hangs on an infinite range — PARTIAL 4c87d12e — rescuable IndexError/ArgumentError, first(n) on endless ranges; lazy enumerators (cycle without block, Range#lazy) filed as T-839
+T-832 ruby: error paths and assorted gaps — PARTIAL b73c1ae9 — ||=/&&=, negative-argument errors, strip, inject(&:+), chomp(""), upto, each_line sep, step, at/transpose/slice!/bsearch/chunk_while/slice_when, Hash#compact; the rest filed as T-839
+T-766 swift: `String(format:, args...)` returns the format unchanged — DONE 3009949d (String(format:) via shared c-printf.js + swift-format.js in all engines incl. %n$, *, length modifiers, %@; also native String(Int.min, radix:) fixed)
 
 # Settled — do not re-open
 
