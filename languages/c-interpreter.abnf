@@ -2908,7 +2908,7 @@ KwDefault   = "default" KwEnd ;
             var r = t()
             var ct = promote(r.t)
             if (ct.k == "int") return val(convert(ct, szArith("-", 0, r.v)), ct)
-            return val(convert(ct, 0 - r.v), ct)
+            return val(convert(ct, -r.v), ct)   // -x, not 0 - x, which loses -0.0's sign
         }
     }
     function makeBitNot(t) {

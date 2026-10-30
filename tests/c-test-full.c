@@ -112,6 +112,9 @@ int s02(void) {
 
 // ===== SECTION 03: floating constants =====
 // Every comparison uses exactly representable values only.
+double s03_za[2] = { 0.0, -0.0 };
+double s03_gs = -0.0;
+float s03_gf = -0.0f;
 int s03(void) {
     double a = 1.5;
     float b = 0.25f;
@@ -123,6 +126,12 @@ int s03(void) {
     check(305, ld / 4.0L == 0.25L);
     double c = 3.0;
     check(306, c / 2.0 == 1.5 && (c - 1.0) * 0.5 == 1.0);
+    /* -0.0 keeps its sign (1 / x is then -infinity), in a constant, an initializer
+       and an operation alike; cc for every line. */
+    check(307, 1 / s03_za[1] < 0 && 1 / s03_gs < 0 && 1 / s03_gf < 0 && 1 / s03_za[0] > 0);
+    double lz = -0.0, z = s03_za[0];
+    float fz = -0.0f;
+    check(308, 1 / lz < 0 && 1 / fz < 0 && 1 / -z < 0 && 1 / (double)(float)-z < 0 && 1 / -(-z) > 0);
     return 0;
 }
 

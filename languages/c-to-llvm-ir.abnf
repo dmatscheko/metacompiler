@@ -2578,7 +2578,8 @@ KwDefault   = "default" KwEnd ;
     function dblBits(x) {
         var s = 0
         var v = x
-        if (v < 0) { s = 1; v = 0 - v }
+        // -0.0 compares equal to 0, so its sign is read through 1 / x.
+        if (v < 0 || (v == 0 && 1 / v < 0)) { s = 1; v = -v }
         // Infinity and NaN have no exponent for the loops below to search (1.0 / 0.0 is
         // an ordinary constant expression). v * 0.5 == v tests for an infinity once
         // zero is excluded.
@@ -3351,7 +3352,7 @@ KwDefault   = "default" KwEnd ;
             var ct = promote(r.ct != undefined ? r.ct : ctInt)
             // A 64-bit constant would fold through a double, so it is emitted.
             if (r.cv != undefined && !(ct.k == "int" && ct.w >= 8)) {
-                var cv = convertNum(ct, 0 - r.cv)
+                var cv = convertNum(ct, -r.cv)   // -x, not 0 - x, which loses -0.0's sign
                 return {b: r.b, v: kint(isFlt(ct) ? 0 : cv), ct: ct, cv: cv}
             }
             // Negating a floating-point value only flips its sign bit.
