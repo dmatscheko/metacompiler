@@ -4735,6 +4735,14 @@ def s108
         1.0.step(2.0, 0.5).to_a == [1.0, 1.5, 2.0] && e2 == "wrong number of arguments (given 0, expected 1)")
 end
 
+# ===== SECTION 109: an astral character in ord, index and rindex =====
+# A character outside the BMP is ONE character: its ord is its code point, and
+# index / rindex count it once. /usr/bin/ruby 2.6 settles each.
+def s109
+  s = ["a\u{1F600}b", "\u{1F600}", "b"]
+  check("as109a", s[1].ord == 128512 && s[0].index(s[2]) == 2 && s[0].rindex(s[1]) == 1 && s[0].length == 3)
+end
+
 s39() # SECTION-CALL 39
 s40() # SECTION-CALL 40
 s41() # SECTION-CALL 41
@@ -4805,5 +4813,6 @@ s105() # SECTION-CALL 105
 s106() # SECTION-CALL 106
 s107() # SECTION-CALL 107
 s108() # SECTION-CALL 108
+s109() # SECTION-CALL 109
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

@@ -8893,7 +8893,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (name == "inspect") { return strInspect(target) }
             // 0 for an empty string where MRI raises ArgumentError; the two compiled
             // halves answer 0 as well.
-            if (name == "ord") { return target.length == 0 ? 0 : target.charCodeAt(0) }
+            if (name == "ord") { return rbsOrd(target) }
             if (name == "succ" || name == "next") { return rbsSucc(target) }
             if (name == "replace") { return rstr(args[0]) }
             // One CHARACTER at a time, a surrogate pair whole, as chars splits.

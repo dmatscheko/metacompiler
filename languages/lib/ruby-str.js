@@ -136,6 +136,14 @@ function rbsLines(s, sep) {
     return out
 }
 
+// String#ord: the code point of the first character, a surrogate pair whole.
+function rbsOrd(s) {
+    if (s.length == 0) { return 0 }
+    var c = s.charCodeAt(0)
+    if (rbsCharLen(s, 0) == 2) { return (c - 55296) * 1024 + (s.charCodeAt(1) - 56320) + 65536 }
+    return c
+}
+
 // The character index of code unit u, and the unit index of character c (-1 when
 // the string is shorter).
 function rbsCharIdx(s, u) {

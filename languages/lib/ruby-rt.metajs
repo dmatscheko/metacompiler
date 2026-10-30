@@ -7681,10 +7681,7 @@ function rbMethod(target, name, args) {
         if (name == "inspect") { return rbInspect(target) }
         if (name == "to_sym" || name == "intern") { return rbSym(target) }
         // String#ord: the code point of the FIRST character.
-        if (name == "ord") {
-            if (target.length == 0) { return 0 }
-            return target.charCodeAt(0)
-        }
+        if (name == "ord") { return rbsOrd(target) }
         // String#to_i / #to_f parse a LEADING number and answer 0 when there is
         // none.
         if (name == "to_i") {
