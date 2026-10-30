@@ -185,8 +185,8 @@ KwEnd = :script(~~
 :whitespace(Whitespace) ;
 
 // The leading NL swallows any comment/blank lines at the top of the file.
-Program     <~~ buildMain(takeAll()) ~~>
-            = [ NL ] { TopStmt } ;
+Program     <~~ buildMain(pyModuleDoc(takeAll())) ~~>
+            = [ NL ] "" <~~ push(up.pos) ~~> { TopStmt } ;
 // Imports are module level (column 0), so they are tried at the TopStmt level
 // (before Statement, outside the stmtPos wrapper); an import that binds a name
 // pushes that binding's statement for buildMain(takeAll()).
@@ -4450,6 +4450,15 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         walkSuiteDoc = (d === undefined) ? null : d
         return makeSeq(items.slice(1))
     }
+    // A module's __doc__ is its first statement when that is a string literal,
+    // else None; Program hands over the start of its first statement. Twin of
+    // pyModuleDoc in python-interpreter.abnf.
+    var pyModDocs = {}
+    function pyModuleDoc(items) {
+        var d = walkDocs["$" + items[0]]
+        pyModDocs["$" + pyCurMod] = (d === undefined) ? null : d
+        return items.slice(1)
+    }
     // The scope a def, a lambda or a class body closes over. CPython never makes a
     // class namespace an enclosing scope of anything nested in it (a method's `max`
     // is the builtin, not the method beside it), so right inside a class body that
@@ -5135,6 +5144,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "EnvironmentError"), osErr])
         // The main program's global __name__.
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "__name__"), emitStr(b, "__main__")])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "__doc__"), pyModDocs["$__main__"] == null ? hUndef : emitStr(b, pyModDocs["$__main__"])])
         // ----- the `builtins` module ------------------------------------------
         //
         // CPython's len.__self__ IS the builtins module, and `builtins.len is
@@ -5363,6 +5373,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var modName = pyCurMod
             return function(b) { return {b: b, v: emitStr(b, modName)} }
         }
+        // Likewise its own __doc__ (pyModuleDoc); the main program's is a global.
+        if (name == "__doc__" && pyCurMod != "__main__") {
+            var docMod = "$" + pyCurMod
+            return function(b) { return {b: b, v: pyModDocs[docMod] == null ? hUndef : emitStr(b, pyModDocs[docMod])} }
+        }
         return function(b) {
             return {b: b, v: pyGetVar(b, curScopeV, emitStr(b, name))}
         }
@@ -5394,7 +5409,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // the module's globals, not the def's locals.
         var outerFrames = sbFrames
         sbFrames = []
+        // Docstrings are keyed by source position, which is per file.
+        var outerDocs = walkDocs
+        walkDocs = {}
         c.compile(asg)
+        walkDocs = outerDocs
         sbFrames = outerFrames
         pyCurMod = outerMod
         importDepth = importDepth - 1

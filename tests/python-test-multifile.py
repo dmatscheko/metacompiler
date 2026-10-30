@@ -6,7 +6,7 @@
 import math
 from mypkg.helper import triple, label
 from mypkg.helper import triple as thrice
-from mypkg.helper import helper_name, own_name
+from mypkg.helper import helper_name, own_name, own_doc
 
 fails = 0
 
@@ -23,6 +23,8 @@ check("module top level ran", module_marker, "helper loaded")
 check("imported module's __name__", helper_name, "mypkg.helper")
 check("__name__ in an imported def", own_name(), "mypkg.helper")
 check("main program's __name__", __name__, "__main__")
+check("imported module's __doc__", own_doc(), "The helper module.")
+check("main program without a docstring", __doc__, None)
 
 if fails == 0:
     print("python multifile test passed")

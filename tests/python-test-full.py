@@ -47,6 +47,9 @@
 # code), organized after the Python 3.12 language reference with the ANTLR
 # grammars-v4 Python grammar as a coverage checklist.
 
+"""Python full-syntax ratchet.
+    Section 184 reads this docstring back."""
+
 fails = [0]
 checks = [0]
 
@@ -7984,6 +7987,16 @@ def s181():
         res = type(e).__name__
     check("reclam", res == "RecursionError")
 
+# ===== SECTION 184: the module docstring =====
+# A module whose first statement is a string literal has it, cleaned like any
+# docstring, as the global __doc__; a function reads that global too, and it
+# can be rebound. Rows from CPython 3.14.
+def s184():
+    check("moddoc1", __doc__ == "Python full-syntax ratchet.\nSection 184 reads this docstring back.")
+    def f():
+        return __doc__
+    check("moddoc2", f() is __doc__ and __doc__.split("\n")[0] == "Python full-syntax ratchet.")
+
 def main():
     s01() # SECTION-CALL 01
     s02() # SECTION-CALL 02
@@ -8132,5 +8145,6 @@ def main():
     s160() # SECTION-CALL 160
     s161() # SECTION-CALL 161
     s181() # SECTION-CALL 181
+    s184() # SECTION-CALL 184
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]

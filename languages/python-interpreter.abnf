@@ -103,8 +103,8 @@ KwEnd = :script(~~
 :whitespace(Whitespace) ;
 
 // The leading NL swallows any comment/blank lines at the top of the file.
-Program     <~~ runProgram(takeAll()) ~~>
-            = [ NL ] { TopStmt } ;
+Program     <~~ runProgram(pyModuleDoc(takeAll())) ~~>
+            = [ NL ] "" <~~ push(up.pos) ~~> { TopStmt } ;
 // Imports are module level (column 0), so they are tried at the TopStmt level
 // (before Statement); an import that binds a name pushes that binding's statement.
 TopStmt     <~~ if (pyCurMod == "__main__" && pyTopRunsEntry(c.srcSlice(up.start, up.pos), pyEntryName())) { pyTopEntry = true } ~~>
@@ -8036,6 +8036,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var modName = pyCurMod
             return function() { return modName }
         }
+        // Likewise its own __doc__ (pyModuleDoc); the main program's is a global.
+        if (name == "__doc__" && pyCurMod != "__main__") {
+            var docMod = "$" + pyCurMod
+            return function() { return pyModDocs[docMod] == null ? undefined : pyModDocs[docMod] }
+        }
         return function() {
             var v = anytype
             v = getVar(name)
@@ -14149,6 +14154,15 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         walkSuiteDoc = (d === undefined) ? null : d
         return makeSeq(items.slice(1))
     }
+    // A module's __doc__ is its first statement when that is a string literal,
+    // else None; Program hands over the start of its first statement. Twin of
+    // pyModuleDoc in python-to-llvm-ir.abnf.
+    var pyModDocs = {}
+    function pyModuleDoc(items) {
+        var d = walkDocs["$" + items[0]]
+        pyModDocs["$" + pyCurMod] = (d === undefined) ? null : d
+        return items.slice(1)
+    }
     function fnName(f) {
         for (var i = fnNames.fns.length - 1; i >= 0; i--) { if (fnNames.fns[i] === f) { return fnNames.names[i] } }
         return "<lambda>"
@@ -14782,6 +14796,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // The whole file runs top to bottom.
     function runProgram(items) {
         var progT = makeSeq(items)
+        if (pyCurMod == "__main__") { scopePut(globalScope, "__doc__", pyModDocs["$__main__"] == null ? undefined : pyModDocs["$__main__"]) }
         // A raise that escapes the top level is reported like any runtime error.
         try {
             progT()
@@ -14970,7 +14985,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // the module's globals, not the def's locals.
         var outerFrames = sbFrames
         sbFrames = []
+        // Docstrings are keyed by source position, which is per file.
+        var outerDocs = walkDocs
+        walkDocs = {}
         c.compile(asg)
+        walkDocs = outerDocs
         sbFrames = outerFrames
         pyCurMod = outerMod
         c.popSource()

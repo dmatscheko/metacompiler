@@ -1,5 +1,6 @@
 # A project module imported by tests/python-test-multifile.py (via -i tests/imports).
 # Its top level executes at import time, like real Python.
+"""The helper module."""
 
 module_marker = "helper loaded"
 
@@ -19,6 +20,11 @@ helper_name = __name__
 
 def own_name():
     return __name__
+
+
+# Its __doc__ is its own docstring, not the importer's.
+def own_doc():
+    return __doc__
 
 
 if __name__ == "__main__":
