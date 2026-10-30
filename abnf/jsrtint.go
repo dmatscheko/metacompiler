@@ -624,7 +624,8 @@ func fnMetaBindings(b map[string]interface{}) {
 // a non-array and answers its first argument. arrProps(a) and arrPropsSet(a, o),
 // host ids 106/107, are the same pair for the object holding an array's named
 // properties (jsArray.props), undefined until set; arrHole and arrUnset, 108/109,
-// ask and make an absent element (jsHole). The frozen grammar host binds
+// ask and make an absent element (jsHole); arrMod, arrModBump and arrModIs,
+// 110..112, the structural-change count (jsArray.mod). The frozen grammar host binds
 // them too (frozenBaseBindings), and commonscript.go binds the goja twin, because
 // an interpreter half keeps the same kinds as its compiler half.
 func arrKindBindings(b map[string]interface{}) {
@@ -668,6 +669,30 @@ func arrKindBindings(b map[string]interface{}) {
 			a.elems[i] = jsHole
 		}
 		return v
+	})
+	// arrMod(a) / arrModBump(a) / arrModIs(a, n), host ids 110..112: the
+	// structural-change count kept on an array (jsArray.mod), 0 for a non-array.
+	// arrModIs compares without making a number, so a per-step check allocates
+	// nothing in the floor.
+	b["arrMod"] = jsHostFunc("arrMod", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		if a, ok := argAt(args, 0).(*jsArray); ok {
+			return float64(a.mod)
+		}
+		return float64(0)
+	})
+	b["arrModBump"] = jsHostFunc("arrModBump", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		v := argAt(args, 0)
+		if a, ok := v.(*jsArray); ok {
+			a.mod++
+		}
+		return v
+	})
+	b["arrModIs"] = jsHostFunc("arrModIs", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		n := 0
+		if a, ok := argAt(args, 0).(*jsArray); ok {
+			n = a.mod
+		}
+		return float64(n) == rt.toNumber(argAt(args, 1))
 	})
 }
 

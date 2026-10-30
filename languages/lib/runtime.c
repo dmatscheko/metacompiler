@@ -6716,6 +6716,26 @@ long host_call(long id, long self, long args) {
 		if (tag_of(a) == 5 && i >= 0 && i < arr_len(a)) { arr_set(a, i, H_HOLE); }
 		return a;
 	}
+	/* arrMod(a) / arrModBump(a) / arrModIs(a, n): the structural-change count a
+	 * language keeps on an array cell, in field f (mk_arr zeroes it, so a copy
+	 * starts at 0; the collector never reads it). arrModIs compares without
+	 * making a number. Twin of jsArray.mod in abnf/jsrt.go. */
+	case 110: {
+		long a = arg_at(args, 0);
+		if (tag_of(a) != 5) { return mk_num(d_from_long(0)); }
+		return mk_num(d_from_long(ff(a)));
+	}
+	case 111: {
+		long a = arg_at(args, 0);
+		if (tag_of(a) == 5) { sf(a, ff(a) + 1); }
+		return a;
+	}
+	case 112: {
+		long a = arg_at(args, 0);
+		long n = 0;
+		if (tag_of(a) == 5) { n = ff(a); }
+		return mk_bool(n == d_to_long(arg_num(args, 1)));
+	}
 	/* byteAt(s, i) / byteSub(s, lo, hi) / bytesStr(a): a string as the BYTES a
 	 * cell holds (UTF-8, WTF-8 for a lone surrogate), for a language whose
 	 * strings are byte strings (go). byteAt is the i-th byte, -1 outside s;
@@ -7795,6 +7815,9 @@ void boot(void) {
 	seed_root("arrPropsSet", mk_host(107));
 	seed_root("arrHole", mk_host(108));
 	seed_root("arrUnset", mk_host(109));
+	seed_root("arrMod", mk_host(110));
+	seed_root("arrModBump", mk_host(111));
+	seed_root("arrModIs", mk_host(112));
 	seed_root("byteAt", mk_host(101));
 	seed_root("byteSub", mk_host(102));
 	seed_root("bytesStr", mk_host(103));

@@ -5928,6 +5928,51 @@ fun sec129() {
     check("nc129", nc == "ABCDef")
 }
 
+// ===== SECTION 130: a for over a MutableList fails fast on modCount, not on size =====
+// java's enhanced for over an ArrayList (what `for (x in xs)` on a mutableListOf is)
+// throws ConcurrentModificationException from next() once modCount moved, and
+// hasNext() is `cursor != size`. Every row is java 24's for the same ArrayList, the
+// kotlin.collections members called from java through kotlin-stdlib 2.2.21: an add
+// and a remove in one step, or a sort, throw though the size is unchanged; reverse,
+// fill and set only set elements; a removeAll / retainAll / remove that removes
+// nothing changes nothing; addAll and clear count even when they change nothing.
+fun cme130(op: (MutableList<Int>, Int) -> Unit): String {
+    val xs = mutableListOf(3, 1, 2)
+    var seen = ""
+    try {
+        for (x in xs) { seen += x; op(xs, x) }
+        return "ok$seen"
+    } catch (e: ConcurrentModificationException) {
+        return "cme$seen"
+    }
+}
+fun sec130() {
+    val r = listOf(
+        cme130 { l, x -> if (x == 3) { l.add(9); l.removeAt(3) } },
+        cme130 { l, x -> if (x == 3) l.sort() },
+        cme130 { l, x -> if (x == 3) l.sortBy { -it } },
+        cme130 { l, x -> if (x == 3) l.sortWith(compareBy { it }) },
+        cme130 { l, x -> if (x == 3) l.reverse() },
+        cme130 { l, x -> if (x == 3) l[2] = 7 },
+        cme130 { l, x -> if (x == 3) l.fill(0) },
+        cme130 { l, x -> if (x == 1) l.removeAt(0) },
+        cme130 { l, x -> if (x == 3) l.addAll(emptyList()) },
+        cme130 { l, x -> if (x == 3) l.removeAll { it > 100 } },
+        cme130 { l, x -> if (x == 3) l.retainAll(listOf(1, 2, 3)) },
+        cme130 { l, x -> if (x == 3) l.remove(42) },
+        cme130 { l, x -> if (x == 3) { l.removeLast(); l.add(6) } },
+        cme130 { l, x -> if (x == 1) { l.removeAt(0); l.add(5) } })
+    check("cme130a", r.joinToString(" ") == "cme3 cme3 cme3 cme3 ok313 ok317 ok300 ok31 cme3 ok312 ok312 ok312 cme3 cme31")
+    val big = mutableListOf<Int>()
+    for (i in 0 until 3000) big.add(i)
+    var hit = ""
+    for (x in big) { if (x == 2999) hit += "last" }
+    try { for (x in big) { if (x == 2000) { big.add(1); big.removeAt(big.size - 1) } } } catch (e: ConcurrentModificationException) { hit += " cme" }
+    val one = mutableListOf(5)
+    for (x in one) { one.sort(); hit += x }
+    check("cme130b", hit == "last cme5")
+}
+
 fun main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -6054,6 +6099,7 @@ fun main() {
     sec127() // SECTION-CALL 127
     sec128() // SECTION-CALL 128
     sec129() // SECTION-CALL 129
+    sec130() // SECTION-CALL 130
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }

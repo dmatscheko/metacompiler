@@ -181,6 +181,13 @@ type jsArray struct {
 	// a copy. Read and written by arrProps / arrPropsSet (arrKindBindings in
 	// jsrtint.go); the floor's twin is field e of the array cell.
 	props interface{}
+
+	// mod counts the structural changes a language records on the array (kotlin:
+	// java.util.ArrayList's modCount, which a `for` compares to fail fast). Read
+	// and bumped by arrMod / arrModBump / arrModIs (arrKindBindings in
+	// jsrtint.go); a copy starts at 0. The floor's twin is field f of the array
+	// cell.
+	mod int
 }
 
 // jsClosure is a compiled MetaJS function: an IR function plus the captured

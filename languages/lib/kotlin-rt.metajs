@@ -2323,6 +2323,7 @@ function js_ktinv(v) {
 // answers src.
 function js_ktfill(dst, src) {
     if (ktIsArr(dst) && ktIsArr(src)) {
+        if (dst.length != src.length) { arrModBump(dst) }
         k3Replace(dst, src)
         return dst
     }
@@ -5388,11 +5389,13 @@ function ktSeqMethodK(arr, name, args, kind) {
         if (k >= arr.length) { ktIndexOob("IndexOutOfBoundsException", k, arr.length) }
         v = arr[k]
         k3RemoveAt(arr, k)
+        arrModBump(arr)
         return v
     }
     // The rest of the MutableList surface, all of it IN PLACE.
     if (name == "add") {
         // add(element) -> Boolean; add(index, element) -> Unit, INSERTING.
+        arrModBump(arr)
         if (args.length < 2) {
             arr.push(f)
             return true
@@ -5436,10 +5439,14 @@ function ktSeqMethodK(arr, name, args, kind) {
         for (i = 0; i < arr.length; i = i + 1) {
             if (i < out.length) { arr[i] = out[i] }
         }
+        // The sorts are ArrayList.sort, a structural change once there are two
+        // elements; reverse() only sets.
+        if (name != "reverse" && arr.length > 1) { arrModBump(arr) }
         return undefined
     }
     if (name == "clear") {
         k3Clear(arr)
+        arrModBump(arr)
         return undefined
     }
     if (k3IsRemoveAll(name)) {
@@ -5461,6 +5468,7 @@ function ktSeqMethodK(arr, name, args, kind) {
         }
         n = es.length
         k3Replace(arr, out)
+        if (out.length != n) { arrModBump(arr) }
         return out.length != n
     }
     if (name == "removeFirst") {
@@ -5483,6 +5491,7 @@ function ktSeqMethodK(arr, name, args, kind) {
     if (name == "addFirst" || name == "push") { return ktSeqMethod(arr, "add", [0, f]) }
     if (name == "addLast") {
         arr.push(f)
+        arrModBump(arr)
         return undefined
     }
     // java.util.Deque's members (jsrtkotlin.go): offer* add and answer true, peek* /
@@ -5490,6 +5499,7 @@ function ktSeqMethodK(arr, name, args, kind) {
     // raise a NoSuchElementException whose message is null.
     if (name == "offer" || name == "offerLast") {
         arr.push(f)
+        arrModBump(arr)
         return true
     }
     if (name == "offerFirst") {
@@ -5514,6 +5524,7 @@ function ktSeqMethodK(arr, name, args, kind) {
         for (i = 0; i < arr.length; i = i + 1) {
             if (ktEqVals(arr[i], f)) {
                 k3RemoveAt(arr, i)
+                arrModBump(arr)
                 return true
             }
         }
@@ -5530,11 +5541,13 @@ function ktSeqMethodK(arr, name, args, kind) {
             while (arr.length > at) { tail.push(arr.pop()) }
             for (i = 0; i < oth.length; i = i + 1) { arr.push(oth[i]) }
             for (i = tail.length - 1; i >= 0; i = i - 1) { arr.push(tail[i]) }
+            arrModBump(arr)
             return oth.length > 0
         }
         oth = ktElems(f)
         n = oth.length
         for (i = 0; i < n; i = i + 1) { arr.push(oth[i]) }
+        arrModBump(arr)
         return n > 0
     }
     return KT_MISS
@@ -6183,6 +6196,14 @@ function k4CursorMethod(c, name) {
 function js_ktmore(a, i) {
     if (k4IsCursor(a)) { return k4CursorPull(a) }
     return false
+}
+// js_ktmod / js_ktforok (jsrtkotlin.go): a `for` loop's modification count at its
+// start, and whether it may take its next element - size and count unchanged.
+function js_ktmod(a) { return arrMod(a) }
+function js_ktforok(a, n0, m0) {
+    if (!ktIsArr(a)) { return true }
+    if (a.length != n0) { return false }
+    return arrModIs(a, m0)
 }
 function js_ktitem(a, i) {
     if (typeof a == "string") { return js_kindex(a, i) }

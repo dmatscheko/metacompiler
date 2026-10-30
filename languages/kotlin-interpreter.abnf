@@ -4432,16 +4432,18 @@ NotMemberKw = :script(~~
         }
         return kNorm(r, w, u)
     }
-    // Whether a `for` over src runs its body for index i. n0 is src's length when
-    // the loop started: java.util.ArrayList's iterator, which the for statement
-    // uses, throws ConcurrentModificationException from next() once the list was
-    // modified, and its hasNext() is `cursor != size`. A change of SIZE stands in
-    // for the modCount. A sequence's cursor (n0 null) counts its pulls in `length`
-    // and is not checked. Twin of emitForMore in kotlin-to-llvm-ir.abnf.
-    function kForN0(src) { return kIsCursor(src) ? null : src.length }
+    // Whether a `for` over src runs its body for index i. n0 is src's length and
+    // modification count (arrMod) when the loop started: java.util.ArrayList's
+    // iterator, which the for statement uses, has hasNext() `cursor != size` and
+    // throws ConcurrentModificationException from next() once modCount moved.
+    // Every structural mutator of a list bumps the count (arrModBump); a set's
+    // keys, which the loop also walks live, are checked by their size. A
+    // sequence's cursor (n0 null) counts its pulls in `length` and is not
+    // checked. Twin of emitForMore in kotlin-to-llvm-ir.abnf.
+    function kForN0(src) { return kIsCursor(src) ? null : {n: src.length, m: arrMod(src)} }
     function kForNext(src, i, n0) {
         var more = i < src.length || kForMore(src)
-        if (n0 !== null && src.length !== n0 && (more || i !== src.length)) {
+        if (n0 !== null && i !== src.length && (src.length !== n0.n || arrMod(src) !== n0.m)) {
             kThrowExc("ConcurrentModificationException", null)
         }
         return more
@@ -7421,6 +7423,7 @@ NotMemberKw = :script(~~
             // No array.splice under the frozen engine: shift down and pop.
             for (i = ra; i + 1 < es.length; i++) { es[i] = es[i + 1] }
             es.pop()
+            arrModBump(es)
             return {v: gone2}
         }
         if (name == "removeFirst" || name == "removeLast") {
@@ -7433,13 +7436,13 @@ NotMemberKw = :script(~~
         }
         // java.util.List's SequencedCollection members (JDK 21), answering Unit.
         if (name == "addFirst" || name == "push") { return kSeqMethod(es, "add", [0, f]) }
-        if (name == "addLast") { es.push(f); return {v: undefined} }
+        if (name == "addLast") { es.push(f); arrModBump(es); return {v: undefined} }
         // java.util.Deque's members, which a LinkedList / ArrayDeque (a list here)
         // answers: offer* add and answer true, peek* / poll* answer null when empty,
         // and pop / element / getFirst / getLast / remove() raise java's
         // NoSuchElementException, whose message is null. Twin of the same branch of
         // ktSeqMethod in abnf/jsrtkotlin.go and languages/lib/kotlin-rt.metajs.
-        if (name == "offer" || name == "offerLast") { es.push(f); return {v: true} }
+        if (name == "offer" || name == "offerLast") { es.push(f); arrModBump(es); return {v: true} }
         if (name == "offerFirst") { kSeqMethod(es, "add", [0, f]); return {v: true} }
         if (name == "peek" || name == "peekFirst") { return {v: es.length == 0 ? null : es[0]} }
         if (name == "peekLast") { return {v: es.length == 0 ? null : es[es.length - 1]} }
@@ -7469,10 +7472,12 @@ NotMemberKw = :script(~~
                 while (es.length > at) { tail.push(es.pop()) }
                 for (i = 0; i < ins.length; i++) { es.push(ins[i]) }
                 for (i = tail.length - 1; i >= 0; i--) { es.push(tail[i]) }
+                arrModBump(es)
                 return {v: ins.length > 0}
             }
             var more = kElems(f)
             for (i = 0; i < more.length; i++) { es.push(more[i]) }
+            arrModBump(es)
             return {v: more.length > 0}
         }
         // The rest of the MutableList surface, all of it IN PLACE.
@@ -7485,13 +7490,14 @@ NotMemberKw = :script(~~
             return {v: old2}
         }
         if (name == "add") {
-            if (args.length < 2) { es.push(f); return {v: true} }
+            if (args.length < 2) { es.push(f); arrModBump(es); return {v: true} }
             // add(index, element): shift up and insert; it answers Unit, not Boolean.
             var ai = kNum(f)
             if (ai < 0 || ai > es.length) { kIndexSizeOob(ai, es.length) }
             es.push(args[1])
             for (i = es.length - 1; i > ai; i--) { es[i] = es[i - 1] }
             es[ai] = args[1]
+            arrModBump(es)
             return {v: undefined}
         }
         if (name == "sort" || name == "sortDescending" || name == "sortBy" ||
@@ -7503,10 +7509,14 @@ NotMemberKw = :script(~~
             else if (name == "sortByDescending") { ord = kSortBy(es, f, true) }
             else { ord = kSortBy(es, null, name == "sortDescending") }
             for (i = 0; i < es.length; i++) { es[i] = ord[i] }
+            // The sorts are ArrayList.sort, a structural change once there are two
+            // elements (`if (size > 1)` in kotlin.collections); reverse() only sets.
+            if (name != "reverse" && es.length > 1) { arrModBump(es) }
             return {v: undefined}
         }
         if (name == "clear") {
             while (es.length > 0) { es.pop() }
+            arrModBump(es)
             return {v: undefined}
         }
         if (name == "removeAll" || name == "retainAll") {
@@ -7525,6 +7535,7 @@ NotMemberKw = :script(~~
             var changed2 = keep.length != es.length
             while (es.length > keep.length) { es.pop() }
             for (i = 0; i < keep.length; i++) { es[i] = keep[i] }
+            if (changed2) { arrModBump(es) }
             return {v: changed2}
         }
         return null
@@ -8238,7 +8249,7 @@ NotMemberKw = :script(~~
         if (Array.isArray(tgt)) {
             // add(element); add(index, element) is the INSERTING overload and belongs
             // to kSeqMethod below, so the fast path takes the one-argument form only.
-            if (name == "add" && args.length == 1) { tgt.push(args[0]); return true }
+            if (name == "add" && args.length == 1) { tgt.push(args[0]); arrModBump(tgt); return true }
             if (name == "size") return tgt.length
             // Bounds-checked, like the indexed read a[i] it is the method spelling of.
             if (name == "get") {
@@ -10931,6 +10942,7 @@ NotMemberKw = :script(~~
     function kFill(dst, src) {
         if (Array.isArray(dst) && Array.isArray(src)) {
             var es = src.slice(0)
+            if (es.length != dst.length) { arrModBump(dst) }
             while (dst.length > 0) { dst.pop() }
             for (var i = 0; i < es.length; i++) { dst.push(es[i]) }
             return dst

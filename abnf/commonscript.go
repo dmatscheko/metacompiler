@@ -682,8 +682,9 @@ func installGojaFnMeta(vm *goja.Runtime) {
 	})
 }
 
-// installGojaArrKind binds arrKind(a) and arrKindSet(a, k), and arrProps(a) and
-// arrPropsSet(a, o), the goja twin of arrKindBindings (jsrtint.go). Each value is
+// installGojaArrKind binds arrKind(a) and arrKindSet(a, k), arrProps(a) and
+// arrPropsSet(a, o), and the arrMod trio, the goja twin of arrKindBindings
+// (jsrtint.go). Each value is
 // kept ON the array under a private symbol, so a copy (slice, concat, a literal)
 // starts without it, as jsArray's does.
 func installGojaArrKind(vm *goja.Runtime) {
@@ -750,6 +751,30 @@ func installGojaArrKind(vm *goja.Runtime) {
 			}
 		}
 		return a
+	})
+	// arrMod / arrModBump / arrModIs: the structural-change count, kept on the
+	// array under a private symbol like the kind.
+	msym := goja.NewSymbol("arrMod")
+	modOf := func(v goja.Value) int64 {
+		if o := arrObj(v); o != nil {
+			if m := o.GetSymbol(msym); m != nil {
+				return m.ToInteger()
+			}
+		}
+		return 0
+	}
+	vm.Set("arrMod", func(call goja.FunctionCall) goja.Value { return vm.ToValue(modOf(call.Argument(0))) })
+	vm.Set("arrModBump", func(call goja.FunctionCall) goja.Value {
+		a := call.Argument(0)
+		if o := arrObj(a); o != nil {
+			if err := o.DefineDataPropertySymbol(msym, vm.ToValue(modOf(a)+1), goja.FLAG_TRUE, goja.FLAG_FALSE, goja.FLAG_TRUE); err != nil {
+				panic(err)
+			}
+		}
+		return a
+	})
+	vm.Set("arrModIs", func(call goja.FunctionCall) goja.Value {
+		return vm.ToValue(float64(modOf(call.Argument(0))) == call.Argument(1).ToFloat())
 	})
 }
 

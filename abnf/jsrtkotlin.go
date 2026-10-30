@@ -1274,10 +1274,31 @@ func init() {
 		// dst takes src's contents IN PLACE, so every alias sees them (a TreeSet /
 		// TreeMap re-sorts as it fills), and answers dst; any other dst answers src.
 		// Twin of kFill in kotlin-interpreter.abnf and languages/lib/kotlin-rt.metajs.
+		// js_ktmod(a) is a's modification count when a `for` over it starts, and
+		// js_ktforok(a, n0, m0) whether the loop may take its next element: the
+		// size and the count are both what they were (kForNext in
+		// kotlin-interpreter.abnf). Anything but an array never changes under a
+		// loop. Twins in languages/lib/kotlin-rt.metajs.
+		m["js_ktmod"] = func(a []uint64) uint64 {
+			if o, ok := u(a[0]).(*jsArray); ok {
+				return w(float64(o.mod))
+			}
+			return w(float64(0))
+		}
+		m["js_ktforok"] = func(a []uint64) uint64 {
+			o, ok := u(a[0]).(*jsArray)
+			if !ok {
+				return boolH(true)
+			}
+			return boolH(float64(len(o.elems)) == rt.toNumber(u(a[1])) && float64(o.mod) == rt.toNumber(u(a[2])))
+		}
 		m["js_ktfill"] = func(a []uint64) uint64 {
 			dst, src := u(a[0]), u(a[1])
 			if da, ok := dst.(*jsArray); ok {
 				if sa, ok := src.(*jsArray); ok {
+					if len(da.elems) != len(sa.elems) {
+						da.mod++
+					}
 					da.elems = append([]interface{}{}, sa.elems...)
 					da.dropIdx()
 					return a[0]
@@ -6469,12 +6490,14 @@ func (rt *jsrt) ktSeqMethodK(o *jsArray, name string, args []interface{}, kind s
 		gone := o.elems[ix]
 		o.dropIdx()
 		o.elems = append(o.elems[:ix], o.elems[ix+1:]...)
+		o.mod++
 		return gone, true
 	// The rest of the MutableList surface, all of it IN PLACE.
 	case "add":
 		// add(element) -> Boolean; add(index, element) -> Unit, INSERTING. The shared
 		// js_mcall knows only the appending one-argument form; answering both arities
 		// here keeps abnf/jsrt.go, which backs every language, untouched.
+		o.mod++
 		if len(args) < 2 {
 			o.dropIdx()
 			o.elems = append(o.elems, f)
@@ -6517,10 +6540,16 @@ func (rt *jsrt) ktSeqMethodK(o *jsArray, name string, args []interface{}, kind s
 		}
 		copy(o.elems, ord)
 		o.dropIdx()
+		// The sorts are ArrayList.sort, a structural change once there are two
+		// elements (`if (size > 1)` in kotlin.collections); reverse() only sets.
+		if name != "reverse" && len(o.elems) > 1 {
+			o.mod++
+		}
 		return jsUndef, true
 	case "clear":
 		o.dropIdx()
 		o.elems = nil
+		o.mod++
 		return jsUndef, true
 	case "removeAll", "retainAll":
 		// Kotlin has TWO overloads of each: one takes a collection of elements, the
@@ -6551,6 +6580,9 @@ func (rt *jsrt) ktSeqMethodK(o *jsArray, name string, args []interface{}, kind s
 		changed := len(keep) != len(es)
 		o.dropIdx()
 		o.elems = keep
+		if changed {
+			o.mod++
+		}
 		return changed, true
 	case "removeFirst", "removeLast":
 		if len(o.elems) == 0 {
@@ -6576,6 +6608,7 @@ func (rt *jsrt) ktSeqMethodK(o *jsArray, name string, args []interface{}, kind s
 	case "addLast":
 		o.dropIdx()
 		o.elems = append(o.elems, f)
+		o.mod++
 		return jsUndef, true
 	// java.util.Deque's members, which a LinkedList / ArrayDeque (a list here)
 	// answers: offer* add and answer true, peek* / poll* answer null when empty, and
@@ -6586,6 +6619,7 @@ func (rt *jsrt) ktSeqMethodK(o *jsArray, name string, args []interface{}, kind s
 	case "offer", "offerLast":
 		o.dropIdx()
 		o.elems = append(o.elems, f)
+		o.mod++
 		return true, true
 	case "offerFirst":
 		rt.ktSeqMethod(o, "add", []interface{}{float64(0), f})
@@ -6608,6 +6642,7 @@ func (rt *jsrt) ktSeqMethodK(o *jsArray, name string, args []interface{}, kind s
 				if rt.ktEqVals(e, f) {
 					o.dropIdx()
 					o.elems = append(o.elems[:i], o.elems[i+1:]...)
+					o.mod++
 					return true, true
 				}
 			}
@@ -6635,11 +6670,13 @@ func (rt *jsrt) ktSeqMethodK(o *jsArray, name string, args []interface{}, kind s
 			more := ktElems(rt, args[1])
 			o.dropIdx()
 			o.elems = append(append(append([]interface{}{}, o.elems[:at]...), more...), o.elems[at:]...)
+			o.mod++
 			return len(more) > 0, true
 		}
 		more := ktElems(rt, f)
 		o.dropIdx()
 		o.elems = append(o.elems, more...)
+		o.mod++
 		return len(more) > 0, true
 	}
 	return nil, false

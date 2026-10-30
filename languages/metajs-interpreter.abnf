@@ -1091,6 +1091,11 @@ KwDefault   = "default" KwEnd ;
         // arrHole(a, i) / arrUnset(a, i): host ids 108/109, an absent element.
         "arrHole": arrHole,
         "arrUnset": arrUnset,
+        // arrMod(a) / arrModBump(a) / arrModIs(a, n): host ids 110..112, the
+        // structural-change count kept on an array.
+        "arrMod": arrMod,
+        "arrModBump": arrModBump,
+        "arrModIs": arrModIs,
         // byteAt(s, i) / byteSub(s, lo, hi) / bytesStr(a): host ids 101..103, a
         // string as its bytes; bound by both grammar hosts like the arrKind pair.
         "byteAt": byteAt,
