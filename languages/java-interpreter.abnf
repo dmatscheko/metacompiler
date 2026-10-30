@@ -441,7 +441,7 @@ ParamList   <~~ push(makeParams(takeAll())) ~~>
 // `Inner(Outer Outer.this)`) - a declaration of the type of `this`, not a real
 // parameter, so it pushes nothing and makeParams never sees it. It has to come
 // FIRST: the ordinary form would match `Foo Foo` and then die on `.this`.
-Param       = RecvParam | { Annotation | "final" KwEnd } PType { Annotation } [ VarArgs ] Id <~~ push(up.in) ~~> [ CDims ] ;
+Param       = RecvParam | { Annotation | "final" KwEnd } PType { Annotation } [ VarArgs ] Id <~~ push(up.in) ~~> [ DeclDims ] ;
 PType       <~~ push({pty: stripWs(up.in)}) ~~>
             = Type ;
 RecvParam   = { Annotation } Type { Id "." } "this" KwEnd ;
@@ -5831,6 +5831,7 @@ HasStatic   = :script(~~
         for (var i = 0; i < items.length; i++) {
             if (items[i] != null && items[i] != undefined && items[i].vararg != undefined) { isVar = true; continue }
             if (items[i] != null && items[i] != undefined && items[i].pty != undefined) { ty = items[i].pty; continue }
+            if (items[i] != null && items[i] != undefined && items[i].cdims != undefined) { tys[tys.length - 1] = ty + items[i].cdims; continue }
             names.push(items[i])
             tys.push(ty)
         }

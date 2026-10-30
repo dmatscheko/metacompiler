@@ -436,7 +436,7 @@ ParamList   <~~ push(makeParams(takeAll())) ~~>
 // It has to come FIRST: the ordinary form matches `Foo Foo` and dies on `.this`.
 Param       = RecvParam
             | { Annotation | "final" KwEnd } PType { Annotation } [ "..." <~~ push({vararg: true}) ~~> ]
-              Id <~~ push(up.in) ~~> { { Annotation } "[" "]" } ;
+              Id <~~ push(up.in) ~~> [ DeclDims ] ;
 RecvParam   = { Annotation } Type { Id "." } "this" KwEnd ;
 PType       <~~ push({pty: stripWs(up.in)}) ~~>
             = Type ;
@@ -4727,9 +4727,12 @@ HasStatic   = :script(~~
         for (var i = 0; i < items.length; i++) {
             if (items[i] != undefined && items[i].vararg != undefined) { rest = true; continue }
             if (items[i] != undefined && items[i].pty != undefined) { ty = items[i].pty; continue }
-            jTyDecl(items[i], rest ? ty + "[]" : ty)
+            if (items[i] != undefined && items[i].cdims != undefined) { tys[tys.length - 1] = ty + items[i].cdims; continue }
             if (rest) { out.push({rest: items[i]}); rest = false } else { out.push(items[i]) }
             tys.push(ty)
+        }
+        for (var k = 0; k < out.length; k++) {
+            if (out[k].rest != undefined) { jTyDecl(out[k].rest, tys[k] + "[]") } else { jTyDecl(out[k], tys[k]) }
         }
         return {params: out, ptys: tys}
     }

@@ -190,6 +190,7 @@ class Main {
         S92.run(); // SECTION-CALL 92
         S93.run(); // SECTION-CALL 93
         S94.run(); // SECTION-CALL 94
+        S95.run(); // SECTION-CALL 95
         S100.run(); // SECTION-CALL 100
         System.out.println("full: " + Main.checks + " checks, " + Main.failures + " failures");
         System.exit(Main.failures);
@@ -5255,5 +5256,28 @@ class S94 {
         try { new NotC().c(); st = st + " cloned"; }
         catch (CloneNotSupportedException e) { st = st + " " + e; }
         Main.check("cl94", st.equals("52 false S94$Lamb 93 62.5z7 true java.lang.CloneNotSupportedException: S94$NotC"));
+    }
+}
+
+// ===== SECTION 95: brackets after a parameter's name =====
+//
+// `double u[]` declares a parameter of type double[], as `double[] u` does, and
+// `double[] g[]` one of type double[][] (JLS 8.4.1, 10.2); stores into it convert
+// to the element type. Every expected value is java 24.0.2's.
+class S95 {
+    double dv95[];
+    S95(double v[]) { dv95 = v; dv95[1] = 4; }
+    static void add(double u[], double au[]) { au[0] = 0; au[0] += u[0]; au[1] = 7; }
+    static int sum(int a[][], int n) { int s = 0; for (int i = 0; i < n; i++) s += a[i][0]; return s; }
+    static String mix(int[] a, final double b[], int c) { b[0] = a[0] + c; return b[0] + " " + c; }
+    static String two(double[] g[]) { g[0][0] = 1; return "" + g[0][0]; }
+    static void run() {
+        double[] x = {2.5, 0.0};
+        double[] y = {0, 0};
+        add(x, y);
+        int[][] m = {{1}, {2}};
+        String st = x[0] + " " + y[0] + " " + y[1] + " " + sum(m, 2) + " " + mix(new int[]{3}, new double[1], 4)
+            + " " + two(new double[1][1]) + " " + new S95(new double[2]).dv95[1];
+        Main.check("pd95", st.equals("2.5 2.5 7.0 3 7.0 4 1.0 4.0"));
     }
 }
