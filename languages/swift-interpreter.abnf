@@ -1178,7 +1178,8 @@ Expression  = PackRepeat | Assignment | Ternary ;
 // matched before ExprStmt, so no guard is needed to tell the two apart.
 PackRepeat  <~~ push(makePackRepeat(pop())) ~~> = KwRepeat Expression ;
 Assignment  <~~ push(makeAssign(takeAll(), up.start)) ~~>
-            = Target ( "+=" | "-=" | "*=" | "/=" | "%=" | "=" ) <~~ push(up.in) ~~>
+            = Target ( "+=" | "-=" | "*=" | "/=" | "%=" | "&+=" | "&-=" | "&*=" | "&=" | "|=" | "^="
+                     | "<<=" | ">>=" | "=" ) <~~ push(up.in) ~~>
               Expression <~~ push({itext: up.in, iat: up.start + ":" + up.pos}) ~~> ;
 
 // An assignment TARGET is a name followed by field reads, tuple-element reads,
@@ -4454,6 +4455,9 @@ KwContinue  = "continue" KwEnd ;
         if (isFlo(p)) { return p }
         return swAdoptTy(p, isF32(a) || isF32(b) ? "Float" : "Double")
     }
+    // Foundation's free sqrt(x) is x.squareRoot(): a Float stays a Float, and an
+    // integer literal is a Double. Twin of the sqrt binding in swift-to-llvm-ir.abnf.
+    hostGlobals["sqrt"] = function(v) { return mcall(v, "squareRoot", []) }
     hostGlobals["max"] = function() {
         var r = anytype
         r = arguments[0]
@@ -11262,6 +11266,14 @@ KwContinue  = "continue" KwEnd ;
     applyOps["*="] = function(a, b) { return binOp("*", a, b) }
     applyOps["/="] = function(a, b) { return binOp("/", a, b) }
     applyOps["%="] = function(a, b) { return binOp("%", a, b) }
+    applyOps["&+="] = function(a, b) { return binOp("&+", a, b) }
+    applyOps["&-="] = function(a, b) { return binOp("&-", a, b) }
+    applyOps["&*="] = function(a, b) { return binOp("&*", a, b) }
+    applyOps["&="] = function(a, b) { return binOp("&", a, b) }
+    applyOps["|="] = function(a, b) { return binOp("|", a, b) }
+    applyOps["^="] = function(a, b) { return binOp("^", a, b) }
+    applyOps["<<="] = function(a, b) { return binOp("<<", a, b) }
+    applyOps[">>="] = function(a, b) { return binOp(">>", a, b) }
     // -x: a `static prefix func -` on the operand's type wins over the negation.
     makeNeg = function(t) {
         return function() {

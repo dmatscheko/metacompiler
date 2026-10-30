@@ -1160,7 +1160,8 @@ Expression  = PackRepeat | Assignment | Ternary ;
 // matched before ExprStmt, so no guard is needed to tell the two apart.
 PackRepeat  <~~ push(makePackRepeat(pop())) ~~> = KwRepeat Expression ;
 Assignment  <~~ push(makeAssign(takeAll(), up.start)) ~~>
-            = Target ( "+=" | "-=" | "*=" | "/=" | "%=" | "=" ) <~~ push(up.in) ~~>
+            = Target ( "+=" | "-=" | "*=" | "/=" | "%=" | "&+=" | "&-=" | "&*=" | "&=" | "|=" | "^="
+                     | "<<=" | ">>=" | "=" ) <~~ push(up.in) ~~>
               Expression <~~ push({itext: up.in, iat: up.start + ":" + up.pos}) ~~> ;
 
 // An assignment TARGET is a name followed by field reads, tuple-element reads,
@@ -12115,6 +12116,11 @@ KwContinue  = "continue" KwEnd ;
         callExt(b, "js_set", [unicodeV, emitStr(b, "Scalar"), scalarV])
         callExt(b, "js_set", [unicodeV, emitStr(b, "__tname"), emitStr(b, "Unicode")])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "Unicode"), unicodeV])
+        // Foundation's free sqrt(x) is x.squareRoot(). Twin: hostGlobals in
+        // swift-interpreter.abnf.
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "sqrt"), emitExtFn(b, "", 1, function(fb, v) {
+            return callExt(fb, "js_swmcall", [v, emitStr(fb, "squareRoot"), callExt(fb, "js_arr_new", [])])
+        })])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "max"), emitExtFn(b, "js_swmax", 2)])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "min"), emitExtFn(b, "js_swmin", 2)])
         // Imported declarations first (so the main file's code can use them), then the
@@ -12182,7 +12188,7 @@ KwContinue  = "continue" KwEnd ;
     var swBase = {"+": "+", "-": "-", "*": "*", "/": "/", "%": "%",
                   "&": "&", "|": "|", "^": "^", "&+": "+", "&-": "-", "&*": "*",
                   "+=": "+", "-=": "-", "*=": "*", "/=": "/", "%=": "%",
-                  "&=": "&", "|=": "|", "^=": "^"}
+                  "&=": "&", "|=": "|", "^=": "^", "&+=": "+", "&-=": "-", "&*=": "*"}
     var swShiftOp = {"<<": "<<", ">>": ">>", "<<=": "<<", ">>=": ">>"}
     var swRel = {"<": "js_swlt", "<=": "js_swle", ">": "js_swgt", ">=": "js_swge"}
     function emitSwBin(b, op, l, r) {

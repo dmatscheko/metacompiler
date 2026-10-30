@@ -28,8 +28,9 @@
 // Deliberately out of scope (not syntax, or unrunnable in this harness):
 // imports and Foundation - stdlib usage strictly mirrors the features file
 // (Int/String/Bool/Array/Dictionary basics, print/exit/abs/min/max and
-// map/filter/forEach) plus SECTION 81's free functions and SECTION 155's
-// String(format:) - so no CaseIterable/Comparable/Codable conformances, and
+// map/filter/forEach) plus SECTION 81's free functions, SECTION 155's
+// String(format:) and SECTION 156's sqrt, imported alone by the
+// `import func Darwin.sqrt` below - so no CaseIterable/Comparable/Codable conformances, and
 // Equatable only where a section tests the synthesized == (own protocols carry
 // the generic constraints), and no key paths
 // (\.p is the stdlib KeyPath type). Concurrency at RUNTIME:
@@ -41,6 +42,8 @@
 // Hand-written for the metacompiler project (Apache-2.0, no copied test-suite
 // code), organized after The Swift Programming Language (5.10) grammar
 // summary with the ANTLR grammars-v4 Swift grammar as a coverage checklist.
+
+import func Darwin.sqrt
 
 var fails = 0
 var checks = 0
@@ -5837,6 +5840,53 @@ func s155() {
         && String(format: "%*d|%.*f", 4, ns[0], 1, xs[0]) == "  42|1.5")
 }
 
+// ===== SECTION 156: bitwise compound assignment; the free sqrt =====
+// &= |= ^= <<= >>= and the overflow forms &+= &-= &*= assign `a = a op b` at the
+// target's own width, through a name, a property, a subscript and a force-unwrap.
+// sqrt(x) is x.squareRoot(): a Float stays a Float, an integer literal is a
+// Double. Every value read off swiftc 6.1.2.
+struct Bits156 {
+    var v: UInt8 = 1
+    mutating func step(_ k: Int) {
+        v <<= UInt8(k)
+        v |= 1
+        v ^= 0x80
+    }
+}
+func s156() {
+    let ms = [0b1010, 3, 1]
+    var a = 0b1100
+    a &= ms[0]
+    a |= ms[1]
+    a ^= 0b0110
+    a <<= ms[2] + 1
+    a >>= 1
+    var b = Bits156()
+    var trail: [UInt8] = []
+    for k in [1, 2, 3] { b.step(k); trail.append(b.v) }
+    var xs = [1, 2, 3]
+    xs[1] |= 8
+    xs[2] <<= 3
+    var d = ["a": 5]
+    d["a"]! |= 2
+    check("156a", a == 26 && trail == [131, 141, 233] && xs == [1, 10, 24] && d["a"]! == 7)
+    var w: UInt8 = 250
+    w &+= 10
+    var i8: Int8 = 100
+    i8 &*= 3
+    var neg = -16
+    neg >>= 2
+    var h: UInt32 = 2166136261
+    for c in [104, 105] {
+        h ^= UInt32(c)
+        h &*= 16777619
+    }
+    check("156b", w == 4 && i8 == 44 && neg == -4 && h == 1748694682)
+    let ds = [2.0, 0.5]
+    let f: Float = 2
+    check("156c", sqrt(ds[0]) == 1.4142135623730951 && sqrt(ds[1]) == ds[1].squareRoot() && "\(sqrt(f))" == "1.4142135" && "\(sqrt(16))" == "4.0")
+}
+
 func main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -5993,6 +6043,7 @@ func main() {
     s153() // SECTION-CALL 153
     s154() // SECTION-CALL 154
     s155() // SECTION-CALL 155
+    s156() // SECTION-CALL 156
     print("full: \(checks) checks, \(fails) failures")
 }
 
