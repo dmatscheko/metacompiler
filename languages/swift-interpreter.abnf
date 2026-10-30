@@ -2086,6 +2086,22 @@ KwContinue  = "continue" KwEnd ;
     include("lib/java-chars.js")
     include("lib/swift-chars.js")
 
+    // String(format:) (swfFormat) and its hooks. Twins in lib/swift-rt.metajs.
+    include("lib/c-printf.js")
+    include("lib/swift-format.js")
+    function cpfExactDec(a) { return coreExactDec(a) }
+    function cpfRoundHalfEven(ds, k) { return coreRoundHalfEven(ds, k) }
+    function swfArgNum(v) { return swD(v) }
+    function swfArgText(v) { return swstr(v) }
+    function swfArgDigits(v, bits) {
+        var x = szIs(v) || typeof v == "number" ? v : swIntConv(v, 64, false)
+        var us = szConv(x, bits, true)
+        var d = swRadixStr(szConv(x, bits, false), 10, false)
+        var neg = d.charAt(0) == "-"
+        return {neg: neg, d: neg ? d.substring(1) : d, u: swRadixStr(us, 10, false),
+            x: swRadixStr(us, 16, false), o: swRadixStr(us, 8, false)}
+    }
+
     // ----- Operators -----
     // precedencegroup / operator declarations. Only the RELATIVE order of the custom
     // operators matters: they all sit at one level of the expression grammar (tighter
@@ -11421,6 +11437,7 @@ KwContinue  = "continue" KwEnd ;
         var lb = labels.length > 0 ? labels[0] : null
         // String(reflecting:) is the debug form: "s" quoted, as inside a collection.
         if (lb == "reflecting") { return swRender(x, true, 0) }
+        if (lb == "format") { return swfFormat(swstr(x), argv.slice(1)) }
         if (lb == null && argv.length == 1 && Array.isArray(x)) { return swStrJoin(x) }
         if (lb == "repeating" && argv.length == 2) {
             var rep = ""

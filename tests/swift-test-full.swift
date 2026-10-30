@@ -15,15 +15,21 @@
 //   - main() calls each section via a line tagged 'SECTION-CALL <nn>' and
 //     prints the summary line 'full: <checks> checks, <failures> failures';
 //     the file ends features-style with main() and exit(fails)
-//   - swiftc 6.1.2 here cannot import Foundation, so on the oracle compile this
-//     file as main.swift beside a shim.swift declaring the exit it calls:
+//   - on the oracle compile this file as main.swift beside a shim.swift that
+//     imports Foundation and declares the exit it calls, with swiftc 6.1.2's
+//     `-sdk /Library/Developer/CommandLineTools/SDKs/MacOSX14.4.sdk`:
+//       import Foundation
 //       @_silgen_name("exit") func cExit(_ code: Int32) -> Never
 //       func exit(_ code: Int) -> Never { cExit(Int32(code)) }
+//     An extension member Foundation adds (SECTION 155's String(format:)) is
+//     visible in every file of the module, its operators only where imported -
+//     importing Foundation in this file would make several `==` ambiguous.
 //
 // Deliberately out of scope (not syntax, or unrunnable in this harness):
 // imports and Foundation - stdlib usage strictly mirrors the features file
 // (Int/String/Bool/Array/Dictionary basics, print/exit/abs/min/max and
-// map/filter/forEach) plus SECTION 81's free functions - so no CaseIterable/Comparable/Codable conformances, and
+// map/filter/forEach) plus SECTION 81's free functions and SECTION 155's
+// String(format:) - so no CaseIterable/Comparable/Codable conformances, and
 // Equatable only where a section tests the synthesized == (own protocols carry
 // the generic constraints), and no key paths
 // (\.p is the stdlib KeyPath type). Concurrency at RUNTIME:
@@ -4073,6 +4079,10 @@ func s86() {
     check("86f", String(v[0], radix: 16) == "2a" && String(v[1], radix: 2) == "-11111111"
         && String(v[0], radix: 16, uppercase: true) == "2A" && String(v[2], radix: 36) == "-1y2p0ij32e8e8"
         && String(big[0], radix: 16) == "ffffffffffffffff")
+    // The minimum of a narrower width keeps its magnitude.
+    let m8: [Int8] = [Int8.min]
+    let m32: [Int32] = [Int32.min]
+    check("86g", String(m8[0], radix: 10) == "-128" && String(m32[0], radix: 16) == "-80000000")
 }
 
 // ===== SECTION 87: for-in walks a copy of its sequence =====
@@ -5809,6 +5819,24 @@ func s154() {
     check("154f", "\(mk154().sorted())" == "[1.0, 2.0]" && "\(sc)" == "[3.0]" && sc.count == 1)
 }
 
+// ===== SECTION 155: String(format:) =====
+// Foundation's String(format:, args...) is C's printf over CFString: flags,
+// width, precision and `*`, positional `%n$`, and a conversion without a length
+// modifier reads a C int, so `%d` of 1 << 40 is 0 where `%ld` is not. `%@` is
+// the description and ignores the width. Every value read off swiftc 6.1.2.
+func s155() {
+    let xs: [Double] = [1.5, -3.75, 1234567.891, 0.125, 0.000012345]
+    let ns: [Int] = [42, -42, 255, 1 << 40, -1, 65]
+    let ss: [String] = ["hi", "h\u{e9}llo"]
+    check("155a", String(format: "%.3f", xs[0]) == "1.500" && String(format: "%d items", ns[0]) == "42 items"
+        && String(format: "%10.2f|%-8.1f|%+08.2f|%.2f", xs[1], xs[1], xs[0], xs[3]) == "     -3.75|-3.8    |+0001.50|0.12")
+    check("155b", String(format: "%e %g %G %.0e", xs[2], xs[2], xs[4], xs[0]) == "1.234568e+06 1.23457e+06 1.2345E-05 2e+00")
+    check("155c", String(format: "%5d|%-5d|%05d|%x %X %#o", ns[0], ns[0], ns[1], ns[2], ns[2], ns[2]) == "   42|42   |-0042|ff FF 0377"
+        && String(format: "%d %ld %u %lx", ns[3], ns[3], ns[4], ns[4]) == "0 1099511627776 4294967295 ffffffffffffffff")
+    check("155d", String(format: "%2$@ %1$@", ss[0], ss[1]) == "h\u{e9}llo hi" && String(format: "%5@|100%%|%c", ss[0], ns[5]) == "hi|100%|A"
+        && String(format: "%*d|%.*f", 4, ns[0], 1, xs[0]) == "  42|1.5")
+}
+
 func main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -5964,6 +5992,7 @@ func main() {
     s152() // SECTION-CALL 152
     s153() // SECTION-CALL 153
     s154() // SECTION-CALL 154
+    s155() // SECTION-CALL 155
     print("full: \(checks) checks, \(fails) failures")
 }
 

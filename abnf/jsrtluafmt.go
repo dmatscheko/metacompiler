@@ -2,9 +2,11 @@ package abnf
 
 // jsrtluafmt.go -- string.format for the compiler grammar
 // (languages/lua-to-llvm-ir.abnf): a line-by-line port of lsFormat in
-// languages/lib/lua-strlib.js, which the interpreter half includes and layer 2
-// imports. It formats as lua 5.5 on this platform does - lstrlib.c over macOS
-// libc's printf - so every rule here is the shared file's; keep the two in step.
+// languages/lib/lua-strlib.js and of the one-conversion core it calls in
+// languages/lib/c-printf.js (lsPad, lsFmtIntConv and lsFmtFloat here are cpfPad,
+// cpfIntConv and cpfFloat there; Swift's String(format:) uses them too). It
+// formats as lua 5.5 on this platform does - lstrlib.c over macOS libc's printf -
+// so every rule here is the shared files'; keep them in step.
 
 import (
 	"math"

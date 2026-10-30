@@ -1087,6 +1087,11 @@ func init() {
 			}
 			return m["js_swmcall"]([]uint64{a[0], a[1], a[2]})
 		}
+		// String(format: f, args...): the argument array, format first.
+		m["js_swformat"] = func(a []uint64) uint64 {
+			args := u(a[0]).(*jsArray).elems
+			return rt.wrapStr(rt.swFormat(rt.swDesc(args[0]), args[1:]))
+		}
 		// String(x) / String(describing: x): the text print would have written.
 		m["js_swstr"] = func(a []uint64) uint64 { return rt.wrapStr(rt.swDesc(u(a[0]))) }
 		// String(reflecting:): the debug form, as inside a collection. Twins:
@@ -2694,6 +2699,186 @@ func swIntMag(v interface{}) (bool, uint64) {
 		return true, uint64(-x)
 	}
 	return false, uint64(x)
+}
+
+// swfArgDigits is the integer v read at `bits` as a printf conversion reads it:
+// its sign and magnitude, and its bit pattern unsigned. Twin of swfArgDigits in
+// languages/swift-interpreter.abnf and lib/swift-rt.metajs.
+func (rt *jsrt) swfArgDigits(v interface{}, bits uint8) lsIntDigitsT {
+	x := giVal(rt, v)
+	s := x
+	switch bits {
+	case 8:
+		s = int64(int8(x))
+	case 16:
+		s = int64(int16(x))
+	case 32:
+		s = int64(int32(x))
+	}
+	us := giU(x, bits)
+	mag := uint64(s)
+	if s < 0 {
+		mag = -mag
+	}
+	return lsIntDigitsT{neg: s < 0, d: strconv.FormatUint(mag, 10), u: strconv.FormatUint(us, 10),
+		x: strconv.FormatUint(us, 16), o: strconv.FormatUint(us, 8)}
+}
+
+// swfArgInt is a `*` width or precision argument.
+func (rt *jsrt) swfArgInt(v interface{}) int {
+	iv := rt.swfArgDigits(v, 32)
+	n, _ := strconv.Atoi(iv.d)
+	if iv.neg {
+		return -n
+	}
+	return n
+}
+
+// swFormat is Foundation's String(format:, args...), over the one-conversion
+// core of abnf/jsrtluafmt.go. Twin of swfFormat in languages/lib/swift-format.js,
+// whose header states the rules.
+func (rt *jsrt) swFormat(format string, args []interface{}) string {
+	fs := strUnits(format)
+	var out []uint16
+	next, i := 0, 0
+	argAt := func(k int) interface{} {
+		if k < len(args) {
+			return args[k]
+		}
+		return 0.0
+	}
+	isDigit := func(i int) bool { return i < len(fs) && fs[i] >= '0' && fs[i] <= '9' }
+	for i < len(fs) {
+		if fs[i] != '%' {
+			out = append(out, fs[i])
+			i++
+			continue
+		}
+		i++
+		if i < len(fs) && fs[i] == '%' {
+			out = append(out, '%')
+			i++
+			continue
+		}
+		pos, j, n := -1, i, 0
+		for isDigit(j) {
+			n = n*10 + int(fs[j]-'0')
+			j++
+		}
+		if j > i && j < len(fs) && fs[j] == '$' {
+			pos, i = n-1, j+1
+		}
+		sp := lsSpecT{prec: -1}
+	flags:
+		for ; i < len(fs); i++ {
+			switch fs[i] {
+			case '-':
+				sp.left = true
+			case '+':
+				sp.plus = true
+			case ' ':
+				sp.space = true
+			case '#':
+				sp.alt = true
+			case '0':
+				sp.zero = true
+			default:
+				break flags
+			}
+		}
+		if i < len(fs) && fs[i] == '*' {
+			wv := rt.swfArgInt(argAt(next))
+			next++
+			if wv < 0 {
+				sp.left, wv = true, -wv
+			}
+			sp.width = wv
+			i++
+		} else {
+			for isDigit(i) {
+				sp.width = sp.width*10 + int(fs[i]-'0')
+				i++
+			}
+		}
+		if i < len(fs) && fs[i] == '.' {
+			i++
+			sp.prec = 0
+			if i < len(fs) && fs[i] == '*' {
+				pv := rt.swfArgInt(argAt(next))
+				next++
+				if pv < 0 {
+					pv = -1
+				}
+				sp.prec = pv
+				i++
+			} else {
+				for isDigit(i) {
+					sp.prec = sp.prec*10 + int(fs[i]-'0')
+					i++
+				}
+			}
+		}
+		bits := uint8(32)
+	length:
+		for ; i < len(fs); i++ {
+			switch fs[i] {
+			case 'h':
+				if bits == 16 {
+					bits = 8
+				} else {
+					bits = 16
+				}
+			case 'l', 'q', 'j', 'z', 't', 'L':
+				bits = 64
+			default:
+				break length
+			}
+		}
+		if i >= len(fs) {
+			break
+		}
+		conv := fs[i]
+		i++
+		k := next
+		if pos >= 0 {
+			k = pos
+		} else {
+			next++
+		}
+		arg := argAt(k)
+		var piece string
+		switch conv {
+		case 'd', 'i':
+			piece = lsFmtIntConv(sp, 'd', rt.swfArgDigits(arg, bits))
+		case 'u', 'o', 'x', 'X':
+			piece = lsFmtIntConv(sp, byte(conv), rt.swfArgDigits(arg, bits))
+		case 'f', 'F', 'e', 'E', 'g', 'G', 'a', 'A':
+			f := 0.0
+			if jf, ok := arg.(jsJFlo); ok {
+				f = jf.f
+			} else {
+				f = swIntToD(rt, arg)
+			}
+			piece = lsFmtFloat(sp, byte(conv), f)
+		case 'c', 'C':
+			w := uint8(8)
+			if conv == 'C' {
+				w = 16
+			}
+			code, _ := strconv.ParseUint(rt.swfArgDigits(arg, w).u, 10, 16)
+			piece = lsPad(sp, "", strFromUnits([]uint16{uint16(code)}), false)
+		case '@', 's':
+			piece = rt.swDesc(arg)
+		default:
+			out = append(out, conv)
+			if pos < 0 {
+				next--
+			}
+			continue
+		}
+		out = append(out, strUnits(piece)...)
+	}
+	return strFromUnits(out)
 }
 
 // swRadixStr is String(v, radix:, uppercase:). Twin of swRadixStr in

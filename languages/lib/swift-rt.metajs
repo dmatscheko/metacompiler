@@ -99,6 +99,10 @@ import "./hex-float.js"
 import "./java-chars.js"
 import "./swift-chars.js"
 
+// String(format:) (swfFormat); its hooks follow js_swradixstr.
+import "./c-printf.js"
+import "./swift-format.js"
+
 // ----- the rtk* hooks the shared runtime calls -------------------------------
 function rtkStr(v) { return rtJavaStr(v) }
 function rtkNum(v) { return swNum(v) }
@@ -538,12 +542,13 @@ function swDigitVal(c) {
 }
 
 // String(v, radix:, uppercase:): a negative value is "-" and its magnitude, which
-// is divided UNSIGNED so Int.min's magnitude 2^63 survives. Twin of swRadixStr in
-// languages/swift-interpreter.abnf and abnf/jsrtswift.go.
+// is divided UNSIGNED so Int.min's magnitude 2^63 survives. The negation is taken
+// at 64 bits: at the value's own width Int8.min would wrap back to itself. Twin of
+// swRadixStr in languages/swift-interpreter.abnf and abnf/jsrtswift.go.
 function swRadixStr(v, radix, upper) {
     var neg = sintCmp(v, 0) < 0
     var mag = sintConv(v, 64, true)
-    if (neg) { mag = sintConv(sintOp(1, 0, v), 64, true) }
+    if (neg) { mag = sintConv(sintOp(1, 0, sintConv(v, 64, false)), 64, true) }
     var b = sintRaw(0, radix, 64, true)
     var zero = sintRaw(0, 0, 64, true)
     var digits = RT_DIGITS
@@ -612,6 +617,35 @@ function js_swnoprop(v, k) {
 
 // String(v, radix: r, uppercase: up).
 function js_swradixstr(v, radix, upper) { return swRadixStr(v, swNum(radix), upper === true) }
+
+// String(format: f, args...): the argument array, format first. Twins: the
+// format arm of swStrInit in languages/swift-interpreter.abnf, js_swformat in
+// abnf/jsrtswift.go.
+function js_swformat(argv) {
+    var rest = []
+    var i = 1
+    while (i < argv.length) { rest.push(argv[i]); i = i + 1 }
+    return swfFormat(swDesc(argv[0]), rest)
+}
+function cpfExactDec(a) { return rtExactDec(a) }
+function cpfRoundHalfEven(ds, k) { return rtRoundHalfEven(ds, k) }
+function swfArgNum(v) {
+    if (floIs(v)) { return floNum(v) }
+    return swIntToD(v)
+}
+function swfArgText(v) { return swDesc(v) }
+// The integer v read at `bits` as a printf conversion reads it. Twins:
+// swfArgDigits in languages/swift-interpreter.abnf and abnf/jsrtswift.go.
+function swfArgDigits(v, bits) {
+    var x = v
+    if (!sintIs(v)) { if (typeof v != "number") { x = js_swintconv(v, 64, false) } }
+    var us = sintConv(x, bits, true)
+    var d = swRadixStr(sintConv(x, bits, false), 10, false)
+    var neg = d.charCodeAt(0) === 45
+    var mag = d
+    if (neg) { mag = d.substring(1) }
+    return {neg: neg, d: mag, u: swRadixStr(us, 10, false), x: swRadixStr(us, 16, false), o: swRadixStr(us, 8, false)}
+}
 
 // ===================================================== object shapes ========
 

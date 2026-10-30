@@ -3534,6 +3534,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
 
     // ----- patterns: lib/lua-strlib.js, shared with layer 2 -----
     include("lib/lua-strlib.js")
+    include("lib/c-printf.js")
     lsFail = function(msg) { fail(msg) }
     // string.pack / unpack / packsize's hooks (lib/lua-strlib.js). Twins in
     // languages/lib/lua-rt.metajs.
@@ -3630,8 +3631,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (v === undefined || v === null || v === true || v === false) { return "t" }
         return "x"
     }
-    function lsExactDec(a) { return coreExactDec(a) }
-    function lsRoundHalfEven(ds, k) { return coreRoundHalfEven(ds, k) }
+    function cpfExactDec(a) { return coreExactDec(a) }
+    function cpfRoundHalfEven(ds, k) { return coreRoundHalfEven(ds, k) }
     // string.find / string.match: the result list, or nil.
     function luaFind(args, find) {
         var fn = find ? "string.find" : "string.match"

@@ -1493,6 +1493,7 @@ function js_pystr(v) {
 // for function. Each takes the call's ARGUMENT ARRAY, which is what tells an
 // absent argument ("got no value") from a nil one.
 import "./lua-strlib.js"
+import "./c-printf.js"
 
 // ----- the lauxlib argument checks -----
 // luArgErr raises lua's "bad argument #n to 'fn' (msg)", fn the function's global
@@ -1934,8 +1935,8 @@ function lsFmtLitKind(args, n) {
     if (v === undefined || v === null || v === true || v === false) { return "t" }
     return "x"
 }
-function lsExactDec(a) { return rtExactDec(a) }
-function lsRoundHalfEven(ds, k) { return rtRoundHalfEven(ds, k) }
+function cpfExactDec(a) { return rtExactDec(a) }
+function cpfRoundHalfEven(ds, k) { return rtRoundHalfEven(ds, k) }
 // select(n, ...): the arguments from the n-th on, a negative n counting from the
 // end, or their count for select('#', ...).
 function js_luselect(args) {

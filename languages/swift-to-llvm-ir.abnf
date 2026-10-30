@@ -7545,6 +7545,15 @@ KwContinue  = "continue" KwEnd ;
                 return {b: b, v: callExt(b, "js_swstrinit", [reps])}
             }
         }
+        // String(format: f, args...): Foundation's printf over the whole argument
+        // array. Twin of the format arm of swStrInit in swift-interpreter.abnf.
+        if (name == "String" && args.length > 0 && args[0].lbl == "format"
+            && lookupSig(name) == null && classNames[name] != 1 && enumNames[name] != 1) {
+            return function(b) {
+                var ef = emitArgRecs(b, args)
+                return {b: ef.b, v: callExt(ef.b, "js_swformat", [ef.v])}
+            }
+        }
         // Character(c) is its one-cluster String, so it renders its argument:
         // a String is itself and a Unicode.Scalar its glyph.
         // String(v, radix: r, uppercase: up).
