@@ -1766,6 +1766,7 @@ func init() {
 								rt.ktStepBad(arr.elems[0])
 							}
 							rg.st = sn
+							rg.ls = ktLongOf(arr.elems[0])
 							rg.pg = true
 							return w(ktMakeRange(rg))
 						}
@@ -2528,8 +2529,9 @@ func init() {
 		// else are used as they are; a MAP iterates its entries (Kotlin's rule, and
 		// what kIterable does in the other half) and a SET its elements, neither of
 		// which has a `length` for the index loop the grammar emits.
-		// js_ktrange builds a progression: `down` is 1 for downTo and 0 otherwise,
-		// and the `..<` / until subtraction on the bound is the emitter's.
+		// js_ktrange builds a progression: the last argument is 1 for downTo, 2 for
+		// the half-open `..<` / until (the inclusive bound is one less) and 0 for
+		// `..`. Twin of js_ktrange in languages/lib/kotlin-rt.metajs.
 		m["js_ktrange"] = func(a []uint64) uint64 {
 			from, to, st := u(a[0]), u(a[1]), u(a[2])
 			fn, fok := ktRangeNum(from)
@@ -2543,9 +2545,15 @@ func init() {
 			}
 			_, isCh := from.(jsChar)
 			_, isFl := from.(jsJFlo)
-			return w(ktMakeRange(ktRange{from: fn, to: tn, st: sn,
-				down: rt.toNumber(u(a[3])) != 0, ch: isCh, fl: isFl,
-				lg: ktIsLongBox(from) || ktIsLongBox(to)}))
+			mode := rt.toNumber(u(a[3]))
+			rg := ktRangeLong(ktRange{from: fn, to: tn, st: sn,
+				down: mode == 1, ch: isCh, fl: isFl,
+				lg: ktIsLongBox(from) || ktIsLongBox(to)}, from, to, st)
+			if mode == 2 {
+				rg.to--
+				rg.lt--
+			}
+			return w(ktMakeRange(rg))
 		}
 		// `r step k` re-steps an existing progression, keeping bounds and direction.
 		m["js_ktrestep"] = func(a []uint64) uint64 {
@@ -2561,6 +2569,7 @@ func init() {
 				rt.ktStepBad(u(a[1]))
 			}
 			rg.st = sn
+			rg.ls = ktLongOf(u(a[1]))
 			// `step` answers an IntProgression, never an IntRange, whatever the
 			// step is: `(1..5) step 1` prints "1..5 step 1" and `is IntRange` is
 			// false for it.
@@ -7209,8 +7218,48 @@ type ktRange struct {
 	// `x is IntRange` has to answer false to.
 	pg bool
 	// lg marks a LongRange / LongProgression: a bound was a Long, so every element,
-	// first, last, start and endInclusive is a Long again.
-	lg bool
+	// first, last, start and endInclusive is a Long again. lf, lt and ls are its
+	// first, bound and step EXACTLY - from/to/st are doubles, which cannot step
+	// past 2^53 - and the iteration, the count and toString use them.
+	lg         bool
+	lf, lt, ls int64
+}
+
+// ktRangeLong fills the exact bounds of a Long range from its bound values.
+func ktRangeLong(rg ktRange, from, to, st interface{}) ktRange {
+	if rg.lg {
+		rg.lf, rg.lt, rg.ls = ktLongOf(from), ktLongOf(to), ktLongOf(st)
+	}
+	return rg
+}
+
+func ktLongOf(v interface{}) int64 {
+	if g, ok := v.(jsGInt); ok {
+		return g.v
+	}
+	f, _ := v.(float64)
+	return int64(f)
+}
+
+// ktRangeLastL is ktRangeLastEl over the exact bounds of a Long range.
+func ktRangeLastL(rg ktRange) int64 {
+	mod := func(x int64) int64 {
+		r := x % rg.ls
+		if r < 0 {
+			r += rg.ls
+		}
+		return r
+	}
+	if rg.down {
+		if rg.lf <= rg.lt {
+			return rg.lt
+		}
+		return rg.lt + mod(mod(rg.lf)-mod(rg.lt))
+	}
+	if rg.lf >= rg.lt {
+		return rg.lt
+	}
+	return rg.lt - mod(mod(rg.lt)-mod(rg.lf))
 }
 
 // ktAdoptLong is js_ktadopt at Long: an element of a LongArray is a Long, so an
@@ -7238,11 +7287,13 @@ func ktRangeMake(from, to interface{}, name string) *jsObject {
 	tn, _ := ktRangeNum(to)
 	_, isCh := from.(jsChar)
 	_, isFl := from.(jsJFlo)
+	rg := ktRangeLong(ktRange{from: fn, to: tn, st: 1, down: name == "downTo",
+		ch: isCh, fl: isFl, lg: ktIsLongBox(from) || ktIsLongBox(to)}, from, to, float64(1))
 	if name == "until" {
-		tn = tn - 1
+		rg.to--
+		rg.lt--
 	}
-	return ktMakeRange(ktRange{from: fn, to: tn, st: 1, down: name == "downTo",
-		ch: isCh, fl: isFl, lg: ktIsLongBox(from) || ktIsLongBox(to)})
+	return ktMakeRange(rg)
 }
 
 // IntProgression.reversed(): "a progression that goes over the same range in the
@@ -7250,8 +7301,12 @@ func ktRangeMake(from, to interface{}, name string) *jsObject {
 // first, -step), so the new FIRST is the old LAST ELEMENT (1..10 step 4 reverses
 // to 9 downTo 1 step 4, not 10 downTo 1). kotlin.ranges.reversed.
 func ktRangeRev(rg ktRange) ktRange {
-	return ktRange{from: ktRangeLastEl(rg), to: rg.from, st: rg.st,
+	rv := ktRange{from: ktRangeLastEl(rg), to: rg.from, st: rg.st,
 		down: !rg.down, ch: rg.ch, pg: true, lg: rg.lg}
+	if rg.lg {
+		rv.lf, rv.lt, rv.ls = ktRangeLastL(rg), rg.lf, rg.ls
+	}
+	return rv
 }
 
 // The number of elements in a progression, arithmetically: `(1..1000000).random()`
@@ -7259,6 +7314,13 @@ func ktRangeRev(rg ktRange) ktRange {
 func ktRangeCount(rg ktRange) int {
 	if ktRangeEmpty(rg) {
 		return 0
+	}
+	if rg.lg {
+		span := ktRangeLastL(rg) - rg.lf
+		if rg.down {
+			span = -span
+		}
+		return int(span/rg.ls) + 1
 	}
 	span := ktRangeLastEl(rg) - rg.from
 	if rg.down {
@@ -7407,6 +7469,9 @@ func ktRangeOf(v interface{}) (ktRange, bool) {
 	rg.fl, _ = o.props["fl"].(bool)
 	rg.pg, _ = o.props["pg"].(bool)
 	rg.lg, _ = o.props["lg"].(bool)
+	if rg.lg {
+		rg.lf, rg.lt, rg.ls = ktLongOf(o.props["lf"]), ktLongOf(o.props["lt"]), ktLongOf(o.props["ls"])
+	}
 	return rg, true
 }
 
@@ -7426,6 +7491,11 @@ func ktMakeRange(rg ktRange) *jsObject {
 	o.set("fl", rg.fl)
 	o.set("pg", rg.pg)
 	o.set("lg", rg.lg)
+	if rg.lg {
+		o.set("lf", jsGInt{v: rg.lf, w: 64})
+		o.set("lt", jsGInt{v: rg.lt, w: 64})
+		o.set("ls", jsGInt{v: rg.ls, w: 64})
+	}
 	return o
 }
 
@@ -7484,6 +7554,12 @@ func ktRangeLastEl(rg ktRange) float64 {
 }
 
 func ktRangeEmpty(rg ktRange) bool {
+	if rg.lg {
+		if rg.down {
+			return rg.lf < rg.lt
+		}
+		return rg.lf > rg.lt
+	}
 	if rg.down {
 		return rg.from < rg.to
 	}
@@ -7492,6 +7568,21 @@ func ktRangeEmpty(rg ktRange) bool {
 
 func ktRangeList(rg ktRange) []interface{} {
 	out := []interface{}{}
+	if rg.lg {
+		if ktRangeEmpty(rg) {
+			return out
+		}
+		last, step := ktRangeLastL(rg), rg.ls
+		if rg.down {
+			step = -step
+		}
+		for i := rg.lf; ; i += step {
+			out = append(out, jsGInt{v: i, w: 64})
+			if i == last {
+				return out
+			}
+		}
+	}
 	step := rg.st
 	if rg.down {
 		step = -step
@@ -7560,6 +7651,9 @@ func (rt *jsrt) ktRangeStr(rg ktRange) string {
 	}
 	a := rt.ktpRender(ktRangeEl(rg, rg.from), 1)
 	b := rt.ktpRender(ktRangeEl(rg, ktRangeLastEl(rg)), 1)
+	if rg.lg {
+		a, b = strconv.FormatInt(rg.lf, 10), strconv.FormatInt(ktRangeLastL(rg), 10)
+	}
 	if rg.down {
 		return a + " downTo " + b + " step " + rt.ktpRender(rg.st, 1)
 	}

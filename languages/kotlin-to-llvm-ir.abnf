@@ -4070,15 +4070,11 @@ KwContract  = "contract" KwEnd ;
                 if (rop == "step") {
                     v = callExt(b, "js_ktrestep", [v, rr.v])
                 } else {
-                    var boundV = rr.v
-                    // `..<` and until are the half-open forms: the INCLUSIVE bound
-                    // the range value carries is one less, computed here.
-                    if (rop == "until" || rop == "..<") {
-                        boundV = callExt(b, "js_sub",
-                            [callExt(b, "js_char_code", [boundV]), emitNum(b, 1)])
-                    }
-                    var downV = emitNum(b, (rop == "downTo") ? 1 : 0)
-                    v = callExt(b, "js_ktrange", [v, boundV, emitNum(b, 1), downV])
+                    // The direction argument: 1 downTo, 2 the half-open `..<` / until,
+                    // whose INCLUSIVE bound - one less - js_ktrange computes in the
+                    // bound's own type (exact for a Long), 0 `..`.
+                    var mode = (rop == "downTo") ? 1 : ((rop == "until" || rop == "..<") ? 2 : 0)
+                    v = callExt(b, "js_ktrange", [v, rr.v, emitNum(b, 1), emitNum(b, mode)])
                 }
             }
             return {b: b, v: v}

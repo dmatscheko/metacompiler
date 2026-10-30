@@ -3373,9 +3373,50 @@ NotMemberKw = :script(~~
     // `x is IntRange` must answer false to.
     // `lg` marks a LongRange / LongProgression: a bound was a Long, so every element,
     // first, last, start and endInclusive is a Long again.
+    // A Long range also keeps its first, bound and step EXACTLY (lf / lt / ls, Long
+    // boxes): from / to / st are doubles, which cannot step past 2^53, so the
+    // iteration, the count and toString use these. Twin of ktRangeLong in
+    // abnf/jsrtkotlin.go and k4RangeLong in languages/lib/kotlin-rt.metajs.
     function kRange(from, to, down) {
-        return {__range: true, from: kNum(from), to: kNum(to), st: 1, down: down,
-                ch: kIsChar(from), fl: kIsFlo(from), pg: false, lg: kIsLongBox(from) || kIsLongBox(to)}
+        var rg = {__range: true, from: kNum(from), to: kNum(to), st: 1, down: down,
+                  ch: kIsChar(from), fl: kIsFlo(from), pg: false, lg: kIsLongBox(from) || kIsLongBox(to)}
+        if (rg.lg) {
+            rg.lf = kAdoptLong(from)
+            rg.lt = kAdoptLong(to)
+            rg.ls = kAdoptLong(1)
+        }
+        return rg
+    }
+    // The half-open `..<` / until: the inclusive bound is one less, unwrapped, so
+    // `x until Int.MIN_VALUE` is empty.
+    function kRangeDec(rg) {
+        rg.to = rg.to - 1
+        if (rg.lg) { rg.lt = kArith("-", rg.lt, 1) }
+        return rg
+    }
+    // `r step k` (and IntProgression.step(k)): the same bounds and direction.
+    function kRangeStep(rg, st) {
+        var stn = kNum(st)
+        if (stn <= 0) { kStepBad(st) }
+        var out = {__range: true, from: rg.from, to: rg.to, st: stn, down: rg.down,
+                   ch: rg.ch, fl: rg.fl, pg: true, lg: rg.lg}
+        if (rg.lg) {
+            out.lf = rg.lf
+            out.lt = rg.lt
+            out.ls = kAdoptLong(st)
+        }
+        return out
+    }
+    // rangeLastEl over a Long range's exact bounds - getProgressionLastElement.
+    function kRangeLastL(rg) {
+        if (rg.down ? !kCmpI(">", rg.lf, rg.lt) : !kCmpI("<", rg.lf, rg.lt)) { return rg.lt }
+        if (rg.down) { return kArith("+", rg.lt, kModL(kArith("-", kModL(rg.lf, rg.ls), kModL(rg.lt, rg.ls)), rg.ls)) }
+        return kArith("-", rg.lt, kModL(kArith("-", kModL(rg.lt, rg.ls), kModL(rg.lf, rg.ls)), rg.ls))
+    }
+    function kModL(a, st) {
+        var r = anytype
+        r = kArith("%", a, st)
+        return kCmpI("<", r, 0) ? kArith("+", r, st) : r
     }
     // A signed 64-bit sized integer, the value model's Long. Twin of ktIsLongBox in
     // abnf/jsrtkotlin.go.
@@ -3389,8 +3430,14 @@ NotMemberKw = :script(~~
     // first, -step), so the new FIRST is the old LAST ELEMENT (1..10 step 4 reverses
     // to 9 downTo 1 step 4, not 10 downTo 1). kotlin.ranges.reversed.
     function rangeRev(rg) {
-        return {__range: true, from: rangeLastEl(rg), to: rg.from, st: rg.st,
-                down: !rg.down, ch: rg.ch, fl: false, pg: true, lg: rg.lg}
+        var rv = {__range: true, from: rangeLastEl(rg), to: rg.from, st: rg.st,
+                  down: !rg.down, ch: rg.ch, fl: false, pg: true, lg: rg.lg}
+        if (rg.lg) {
+            rv.lf = kRangeLastL(rg)
+            rv.lt = rg.lf
+            rv.ls = rg.ls
+        }
+        return rv
     }
     function isRange(v) { return v !== null && v !== undefined && typeof v == "object" && v.__range === true }
     // ----- kotlin.random -----
@@ -3507,14 +3554,11 @@ NotMemberKw = :script(~~
                     // kNum, not the raw operand: `1L..5L step 2L` must not hand a
                     // {__sz} box straight into `st` (k4RangeNum does the same in the
                     // compiled halves).
-                    var stn = kNum(r)
-                    if (stn <= 0) { kStepBad(r) }
-                    v = {__range: true, from: v.from, to: v.to, st: stn, down: v.down,
-                         ch: v.ch, fl: v.fl, pg: true, lg: v.lg}
+                    v = kRangeStep(v, r)
                 } else if (isRange(v)) { fail("chained range expression") }
                 else if (rop == "downTo") { v = kRange(v, r, true) }
                 else if (rop == "..") { v = kRange(v, r, false) }
-                else { var e = kRange(v, r, false); e.to = e.to - 1; v = e }   // ..< / until (no wrap: `x until Int.MIN_VALUE` is empty)
+                else { v = kRangeDec(kRange(v, r, false)) }   // ..< / until
             }
             return v
         }
@@ -3545,7 +3589,10 @@ NotMemberKw = :script(~~
         if (rg.lg === true) { return kAdoptLong(n) }
         return n
     }
-    function rangeEmpty(rg) { return rg.down ? (rg.from < rg.to) : (rg.from > rg.to) }
+    function rangeEmpty(rg) {
+        if (rg.lg === true && rg.lf !== undefined) { return rg.down ? kCmpI("<", rg.lf, rg.lt) : kCmpI(">", rg.lf, rg.lt) }
+        return rg.down ? (rg.from < rg.to) : (rg.from > rg.to)
+    }
     function rangeSigned(rg) { return rg.down ? -rg.st : rg.st }
     // IntRange.toString is "$first..$last"; IntProgression.toString is
     // "$first..$last step $step" for a positive step and
@@ -3556,6 +3603,10 @@ NotMemberKw = :script(~~
         if (rg.fl === true) { return kstr(kFlo(rg.from)) + ".." + kstr(kFlo(rg.to)) }
         var a = kstr(rg.ch ? kChar(rg.from) : rg.from)
         var b = kstr(rg.ch ? kChar(rangeLastEl(rg)) : rangeLastEl(rg))
+        if (rg.lg === true && rg.lf !== undefined) {
+            a = kstr(rg.lf)
+            b = kstr(kRangeLastL(rg))
+        }
         if (rg.down) { return a + " downTo " + b + " step " + rg.st }
         if (rg.st != 1 || rg.pg === true) { return a + ".." + b + " step " + rg.st }
         return a + ".." + b
@@ -3612,6 +3663,18 @@ NotMemberKw = :script(~~
     // The elements of a range, boxed back into Chars when the bounds were Chars.
     function rangeList(rg) {
         var out = []
+        if (rg.lg === true && rg.lf !== undefined) {
+            if (rangeEmpty(rg)) { return out }
+            var last = anytype
+            var li = anytype
+            last = kRangeLastL(rg)
+            li = rg.lf
+            while (true) {
+                out.push(li)
+                if (!kCmpI("<", li, last) && !kCmpI(">", li, last)) { return out }
+                li = kArith(rg.down ? "-" : "+", li, rg.ls)
+            }
+        }
         var step = rg.down ? -rg.st : rg.st
         for (var i = rg.from; rg.down ? i >= rg.to : i <= rg.to; i += step) {
             out.push(rangeEl(rg, i))
@@ -7676,8 +7739,7 @@ NotMemberKw = :script(~~
             (kIsFlo(target) || szIs(target) || typeof target == "number" || kIsChar(target))) {
             if (name == "downTo") { return kRange(target, args[0], true) }
             var rtr = kRange(target, args[0], false)
-            if (name == "until") { rtr.to = rtr.to - 1 }
-            return rtr
+            return (name == "until") ? kRangeDec(rtr) : rtr
         }
         if (kIsFlo(target) || szIs(target) || typeof target == "number") {
             var cn = kConvName(name)
@@ -7981,10 +8043,7 @@ NotMemberKw = :script(~~
             // IntProgression.step(k) in its function spelling; the infix `step` is
             // folded by makeRange and never reaches a method call.
             if (name == "step" && args.length == 1 && tgt.fl !== true) {
-                var sn2 = kNum(args[0])
-                if (sn2 <= 0) { kStepBad(args[0]) }
-                return {__range: true, from: tgt.from, to: tgt.to, st: sn2,
-                        down: tgt.down, ch: tgt.ch, fl: tgt.fl, pg: true, lg: tgt.lg}
+                return kRangeStep(tgt, args[0])
             }
             // kotlin.random: `(1..5).random()` throws NoSuchElementException on an
             // empty progression and randomOrNull() answers null.

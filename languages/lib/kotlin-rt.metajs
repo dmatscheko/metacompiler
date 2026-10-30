@@ -9454,15 +9454,44 @@ function k4ModL(a, s) {
     return r
 }
 
+// The last argument (jsrtkotlin.go js_ktrange): 1 downTo, 2 the half-open `..<`
+// / until, whose inclusive bound is one less, 0 `..`.
 function js_ktrange(from, to, st, down) {
     var stn = k4RangeNum(st)
     if (stn <= 0) { k4StepBad(st) }
     // `fl` marks a ClosedFloatingPointRange - `1.0..2.0`. Kotlin declares no step
     // and no iteration for one, and its contains is the BOUNDS test alone
     // (`1.5 in 1.0..2.0` is true).
-    return {__range: true, from: k4RangeNum(from), to: k4RangeNum(to),
-            st: stn, down: down !== 0, ch: ktIsChar(from), fl: floIs(from), pg: false,
-            lg: k4IsLongBox(from) || k4IsLongBox(to)}
+    var rg = {__range: true, from: k4RangeNum(from), to: k4RangeNum(to),
+              st: stn, down: down === 1, ch: ktIsChar(from), fl: floIs(from), pg: false,
+              lg: k4IsLongBox(from) || k4IsLongBox(to)}
+    k4RangeLong(rg, from, to, st)
+    if (down === 2) { k4RangeDec(rg) }
+    return rg
+}
+
+// A Long range's first, bound and step EXACTLY (lf / lt / ls, Long boxes): the
+// from / to / st doubles cannot step past 2^53, so the iteration, the count and
+// toString use these. Twin of ktRangeLong in abnf/jsrtkotlin.go.
+function k4RangeLong(rg, from, to, st) {
+    if (rg["lg"] === true) {
+        rg["lf"] = ktNorm(k1Val(from), 64, 0)
+        rg["lt"] = ktNorm(k1Val(to), 64, 0)
+        rg["ls"] = ktNorm(k1Val(st), 64, 0)
+    }
+}
+// The half-open form's inclusive bound: one less.
+function k4RangeDec(rg) {
+    rg["to"] = rg["to"] - 1
+    if (rg["lg"] === true) { rg["lt"] = k1Arith("-", rg["lt"], 1) }
+}
+// ktRangeLastEl over a Long range's exact bounds (jsrtkotlin.go ktRangeLastL).
+function k4RangeLastL(rg) {
+    var mode = 0
+    if (rg["down"] === true) { mode = 2 }
+    var l = k4ForLastL(rg["lf"], rg["lt"], rg["ls"], mode)
+    if (l === null) { return rg["lt"] }
+    return l
 }
 
 // `r step k` re-steps an existing progression, keeping its bounds and direction.
@@ -9473,7 +9502,8 @@ function js_ktrestep(r, st) {
     // `step` answers an IntProgression, never an IntRange, whatever the step is:
     // `(1..5) step 1` prints "1..5 step 1" and `is IntRange` is false for it.
     return {__range: true, from: r["from"], to: r["to"], st: stn,
-            down: r["down"], ch: r["ch"], fl: r["fl"], pg: true, lg: r["lg"] === true}
+            down: r["down"], ch: r["ch"], fl: r["fl"], pg: true, lg: r["lg"] === true,
+            lf: r["lf"], lt: r["lt"], ls: ktNorm(k1Val(st), 64, 0)}
 }
 
 function k4RangeEl(rg, n) {
@@ -9514,6 +9544,16 @@ function ktRangeLastEl(rg) {
 
 function ktRangeList(rg) {
     var out = []
+    if (rg["lg"] === true) {
+        if (ktRangeEmpty(rg)) { return out }
+        var last = k4RangeLastL(rg)
+        var li = rg["lf"]
+        while (true) {
+            out.push(li)
+            if (k1Cmp("==", li, last)) { return out }
+            if (rg["down"] === true) { li = k1Arith("-", li, rg["ls"]) } else { li = k1Arith("+", li, rg["ls"]) }
+        }
+    }
     var step = rg["st"]
     if (rg["down"] === true) { step = -step }
     var i = rg["from"]
@@ -9525,6 +9565,10 @@ function ktRangeList(rg) {
 }
 
 function ktRangeEmpty(rg) {
+    if (rg["lg"] === true) {
+        if (rg["down"] === true) { return k1Cmp("<", rg["lf"], rg["lt"]) }
+        return k1Cmp(">", rg["lf"], rg["lt"])
+    }
     if (rg["down"] === true) { return rg["from"] < rg["to"] }
     return rg["from"] > rg["to"]
 }
@@ -9534,14 +9578,25 @@ function ktRangeEmpty(rg) {
 // first, -step), so the new FIRST is the old LAST ELEMENT (1..10 step 4 reverses
 // to 9 downTo 1 step 4, not 10 downTo 1). kotlin.ranges.reversed.
 function ktRangeRev(rg) {
-    return {__range: true, from: ktRangeLastEl(rg), to: rg["from"], st: rg["st"],
-            down: rg["down"] !== true, ch: rg["ch"], fl: false, pg: true, lg: rg["lg"] === true}
+    var rv = {__range: true, from: ktRangeLastEl(rg), to: rg["from"], st: rg["st"],
+              down: rg["down"] !== true, ch: rg["ch"], fl: false, pg: true, lg: rg["lg"] === true}
+    if (rg["lg"] === true) {
+        rv["lf"] = k4RangeLastL(rg)
+        rv["lt"] = rg["lf"]
+        rv["ls"] = rg["ls"]
+    }
+    return rv
 }
 
 // The number of elements in a progression, arithmetically: `(1..1000000).random()`
 // must not materialize a million cells to pick one.
 function ktRangeCount(rg) {
     if (ktRangeEmpty(rg)) { return 0 }
+    if (rg["lg"] === true) {
+        var lspan = k1Arith("-", k4RangeLastL(rg), rg["lf"])
+        if (rg["down"] === true) { lspan = k1Arith("-", rg["lf"], k4RangeLastL(rg)) }
+        return sintNum(k1Arith("/", lspan, rg["ls"])) + 1
+    }
     var span = ktRangeLastEl(rg) - rg["from"]
     if (rg["down"] === true) { span = rg["from"] - ktRangeLastEl(rg) }
     return Math.floor(span / rg["st"]) + 1
@@ -9558,11 +9613,12 @@ function ktRangeAt(rg, i) {
 // lowers to js_ktrange, but kotlin.ranges declares each as an ordinary
 // member/extension too (`1.rangeTo(5)`).
 function k4RangeMake(from, to, name) {
-    var tn = k4RangeNum(to)
-    if (name == "until") { tn = tn - 1 }
-    return {__range: true, from: k4RangeNum(from), to: tn, st: 1,
-            down: name == "downTo", ch: ktIsChar(from), fl: floIs(from), pg: false,
-            lg: k4IsLongBox(from) || k4IsLongBox(to)}
+    var rg = {__range: true, from: k4RangeNum(from), to: k4RangeNum(to), st: 1,
+              down: name == "downTo", ch: ktIsChar(from), fl: floIs(from), pg: false,
+              lg: k4IsLongBox(from) || k4IsLongBox(to)}
+    k4RangeLong(rg, from, to, 1)
+    if (name == "until") { k4RangeDec(rg) }
+    return rg
 }
 
 // ----------------------------------------------------------------------------
@@ -9751,6 +9807,10 @@ function ktRangeStr(rg) {
     }
     var a = k2Render(k4RangeEl(rg, rg["from"]), 1)
     var b = k2Render(k4RangeEl(rg, ktRangeLastEl(rg)), 1)
+    if (rg["lg"] === true) {
+        a = k2Render(rg["lf"], 1)
+        b = k2Render(k4RangeLastL(rg), 1)
+    }
     if (rg["down"] === true) { return a + " downTo " + b + " step " + rg["st"] }
     if (rg["st"] != 1 || rg["pg"] === true) { return a + ".." + b + " step " + rg["st"] }
     return a + ".." + b

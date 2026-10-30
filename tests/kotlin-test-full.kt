@@ -5662,6 +5662,28 @@ fun sec124() {
     check("when124", w == "lrusof")
 }
 
+// ===== SECTION 125: a LongRange above 2^53 =====
+// A LongRange / LongProgression keeps its bounds and step as Longs, so iterating,
+// counting and printing one past 2^53 is exact and the loop ends. kotlin-stdlib
+// 2.2.21's LongRange, RangesKt.step / reversed / until / downTo and
+// CollectionsKt.toList / count, called from java, give every value. Each loop is
+// capped, so a regression cannot hang.
+fun sec125() {
+    val ls = longArrayOf(9007199254740993L, Long.MAX_VALUE)
+    var got = ""
+    for (i in ls[0]..ls[0] + 1) { got += " " + i % 10; if (got.length > 20) break }
+    for (i in ls[1] - 1..ls[1]) { got += " " + i % 10; if (got.length > 40) break }
+    check("lr125a", got == " 3 4 6 7")
+    val r = ls[0]..ls[0] + 4
+    check("lr125b", r.toString() == "9007199254740993..9007199254740997" && (r step 2).toString() == "9007199254740993..9007199254740997 step 2")
+    check("lr125c", (r step 2).toList().toString() == "[9007199254740993, 9007199254740995, 9007199254740997]" &&
+                    r.reversed().toList().last() == ls[0])
+    check("lr125d", (ls[0] until ls[0] + 3).toList().toString() == "[9007199254740993, 9007199254740994, 9007199254740995]" &&
+                    (ls[0] + 3 downTo ls[0]).count() == 4)
+    check("lr125e", (ls[1] - 4..ls[1] step 3).toList().toString() == "[9223372036854775803, 9223372036854775806]" &&
+                    (ls[1] - 4..ls[1]).count() == 5)
+}
+
 
 fun main() {
     s01() // SECTION-CALL 01
@@ -5784,6 +5806,7 @@ fun main() {
     sec122() // SECTION-CALL 122
     sec123() // SECTION-CALL 123
     sec124() // SECTION-CALL 124
+    sec125() // SECTION-CALL 125
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }
