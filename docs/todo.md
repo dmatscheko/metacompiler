@@ -66,7 +66,7 @@ its report; anything structural there is a CORE ticket.
 
 # RB — Ruby
 
-### T-864 ruby: encoding and module leftovers · P3 · RB · OPEN [V RB worker]
+### T-864 ruby: encoding and module leftovers · P3 · RB · IN PROGRESS (RB worker, round 26) [V RB worker]
 Oracle LC_ALL=en_US.UTF-8 /usr/bin/ruby 2.6. (1) a Hash key in one encoding is not found by an equal String in another:
 `{65.chr=>1}["A"]` → 1, ours nil in every engine (Go's dict keys a box by pointer). (2) `Module#private_instance_methods`
 missing (oracle `[]`). (3) a class/module nested in a module is also bound globally when no top-level name exists:
