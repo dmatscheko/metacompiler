@@ -86,6 +86,13 @@ int PFXSFX = 9;                 /* the name CAT(PFX, SFX) pastes to, unexpanded 
 int catvar = 3;                 /* the name XCAT(PFX, SFX) pastes to, expanded */
 int FN = 6;                     /* FN without '(' is not a macro call */
 
+/* A self-referential macro stays painted after its expansion is handed on as an
+ * ARGUMENT and rescanned again (C11 6.10.3.4p2): cc reads every use below as 6. */
+int SELF = 5;
+#define SELF (SELF + 1)
+#define ID(e) e
+#define ID2(e) ID(e)
+
 int main() {
     int squares[SIZE];          /* a macro as an array size */
     int i;
@@ -147,6 +154,10 @@ int main() {
 
     /* ---- the recursion rule ---- */
     check(dbl(21), 42);
+    check(SELF, 6);
+    check(ID(SELF), 6);
+    check(ID2(SELF), 6);
+    check(ID(ID(SELF)), 6);
 
 #undef ADD
     e = 1;

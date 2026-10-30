@@ -180,9 +180,10 @@ Other    <~~ push({kind: "other", text: up.in}) ~~>
 
     // ---- small token helpers -------------------------------------------------
     // Kinds seen here are the tokenizer's (ident, num, other, hws, nl, comment, hash) plus
-    // two that only exist inside an expansion: "paste" (a folded '##' operator) and "pm"
-    // (the standard's placemarker - what an empty argument leaves behind so that a '##'
-    // next to it pastes with nothing rather than with its neighbour's neighbour).
+    // three that only exist inside an expansion: "paste" (a folded '##' operator), "pident"
+    // (a painted name, see expandList) and "pm" (the standard's placemarker - what an
+    // empty argument leaves behind so that a '##' next to it pastes with nothing rather
+    // than with its neighbour's neighbour).
     //
     // `idx` is the token's position in the ORIGINAL token stream, or -1 for a token this
     // script synthesised. Two tokens with consecutive idx were written next to each other
@@ -548,14 +549,22 @@ Other    <~~ push({kind: "other", text: up.in}) ~~>
         return {ok: true, out: res, next: ca.next}
     }
 
-    // Rescan a token list, expanding every macro in it.
+    // Rescan a token list, expanding every macro in it. A name left alone because its
+    // own macro is being expanded is PAINTED (kind "pident"): it stays unexpanded for
+    // good, also after it is substituted as part of an argument and rescanned in an
+    // outer expansion where its macro is no longer active (C11 6.10.3.4p2).
     function expandList(list, macros, active) {
         var out = []
         var i = 0
         while (i < list.length) {
             var r = tryExpandAt(list, i, macros, active)
-            if (r.ok) { pushAll(out, r.out); i = r.next }
-            else { out.push(list[i]); i = i + 1 }
+            if (r.ok) { pushAll(out, r.out); i = r.next; continue }
+            var t = list[i]
+            if (t.kind == "ident" && hasOwn(active, t.text) && active[t.text] == true) {
+                t = mkTokAt("pident", t.text, t.idx)
+            }
+            out.push(t)
+            i = i + 1
         }
         return out
     }
@@ -729,7 +738,7 @@ Other    <~~ push({kind: "other", text: up.in}) ~~>
             k = k + 1
             if (isWsTok(t) || t.kind == "pm") { continue }
             if (t.kind == "num") { out.push({op: "", v: ppNum(t.text)}); continue }
-            if (t.kind == "ident") { out.push({op: "", v: 0}); continue }
+            if (t.kind == "ident" || t.kind == "pident") { out.push({op: "", v: 0}); continue }
             if (t.text.length > 2 && t.text.charAt(0) == "'") { out.push({op: "", v: ppChar(t.text)}); continue }
             var op = t.text
             if (k < list.length && list[k].kind == "other" && ppIn(ppPairs, op + list[k].text)) {
