@@ -96,12 +96,14 @@ EnumInit    <~~ push({val: pop()}) ~~> = ECShift ;
 ECShift     <~~ push(foldDimBin(takeAll())) ~~> = ECAdd { DimShOp ECAdd } ;
 ECAdd       <~~ push(foldDimBin(takeAll())) ~~> = ECMul { DimAddOp ECMul } ;
 ECMul       <~~ push(foldDimBin(takeAll())) ~~> = ECUn { DimMulOp ECUn } ;
-ECUn        = Number | ECParen | ECNeg | ECPos | ECNot | ECName ;
+ECUn        = Number | ECParen | ECNeg | ECPos | ECNot | ECChar | ECName ;
 ECParen     = "(" ECShift ")" ;
 ECNeg       <~~ push(0 - pop()) ~~> = "-" ECUn ;
 ECPos       = "+" ECUn ;
 ECNot       <~~ push(0 - pop() - 1) ~~> = "~" ECUn ;
 ECName      <~~ push(enumConstOf(up.in)) ~~> = Id ;
+// A character constant ('enum { X = 'x' }').
+ECChar      = "'" :whitespace() CChar <~~ push(cCharConst(up.in)) ~~> "'" :whitespace(Whitespace) ;
 
 // union U { int i; unsigned u; }; -- a union is laid out exactly like a struct whose
 // fields ALL sit at offset 0, with the size (and the byte size behind sizeof) the

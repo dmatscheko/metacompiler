@@ -506,6 +506,11 @@ Other    <~~ push({kind: "other", text: up.in}) ~~>
         var t = list[i]
         if (t.kind != "ident") { return {ok: false, out: [], next: i} }
         var name = t.text
+        // __LINE__ is the line of the source token that started the expansion (C11
+        // 6.10.8.1), unless the program defines a macro of that name.
+        if (name == "__LINE__" && !isDefined(macros, name)) {
+            return {ok: true, out: [mkTok("num", "" + lineNow)], next: i + 1}
+        }
         if (!hasOwn(macros, name) || macros[name] == undefined) { return {ok: false, out: [], next: i} }
         if (hasOwn(active, name) && active[name] == true) { return {ok: false, out: [], next: i} }
         var m = macros[name]
@@ -849,6 +854,14 @@ Other    <~~ push({kind: "other", text: up.in}) ~~>
         }
         return {text: newlinesText(tokens, i, end), next: end < tokens.length ? end + 1 : end}
     }
+    // The line the top-level walk has reached, for __LINE__.
+    var lineNow = 1
+    function nlCount(text) {
+        var n = 0
+        var i = 0
+        while (i < text.length) { if (text.charAt(i) == "\n") { n = n + 1 } i = i + 1 }
+        return n
+    }
     // The newlines inside one token of a skipped group.
     function nlOnly(text) {
         var s = ""
@@ -869,11 +882,15 @@ Other    <~~ push({kind: "other", text: up.in}) ~~>
         var macros = {}
         var conds = []
         var out = ""
+        var line = 1             // the line of tokens[i]
+        var lineAt = 0           // tokens[0 .. lineAt) are counted into line
         var col0 = true          // only whitespace seen since the last newline
         var afterExp = false     // the previous emission came out of a macro expansion
         var i = 0
         while (i < tokens.length) {
             var t = tokens[i]
+            while (lineAt < i) { line = line + nlCount(tokens[lineAt].text); lineAt = lineAt + 1 }
+            lineNow = line
             var live = conds.length == 0 || conds[conds.length - 1].live
             if (t.kind == "hash" && col0) {
                 var kw = directiveKeyword(tokens, i)

@@ -390,6 +390,7 @@ int s13(void) {
 enum S14Color { S14_RED, S14_GREEN, S14_BLUE };
 enum S14Status { S14_OK = 0, S14_WARN = 5, S14_ERR };     /* ERR continues at 6 */
 enum S14Level { S14_LOW = -1, S14_MID, S14_TOP = 7 };
+enum S14Char { S14_X = 'x', S14_Y, S14_NL = '\n' };      /* character constants */
 int s14(void) {
     check(1401, S14_RED == 0 && S14_GREEN == 1 && S14_BLUE == 2);
     check(1402, S14_OK == 0 && S14_WARN == 5 && S14_ERR == 6);
@@ -404,6 +405,7 @@ int s14(void) {
     }
     check(1404, hit == 3);
     check(1405, S14_RED + 2 == S14_BLUE && S14_WARN * 2 == 10);
+    check(1406, S14_X == 120 && S14_Y == 121 && S14_NL == 10);
     return 0;
 }
 

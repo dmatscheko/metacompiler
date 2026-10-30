@@ -158,6 +158,8 @@ int main() {
     check(ID(SELF), 6);
     check(ID2(SELF), 6);
     check(ID(ID(SELF)), 6);
+    check(__LINE__, 161);               /* the line this check stands on */
+    check(ID(__LINE__), 162);
 
 #undef ADD
     e = 1;

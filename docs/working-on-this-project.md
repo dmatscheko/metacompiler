@@ -767,7 +767,15 @@ a decision was taken:
 - **C**: struct alignment is packed (`{char;short;int;long}` is 15 bytes where
   `cc` says 16); `_Bool b = 5` holds 5; identical string literals are not merged
   (unspecified in C); `c-interpreter.abnf` deliberately lacks the varargs `printf`
-  family, `exit`/`abort`, `qsort`/`bsearch` and `malloc`/`free`.
+  family, `exit`/`abort`, `qsort`/`bsearch` and `malloc`/`free` (the compiler's
+  native build refuses a call to any function nothing defines, `printf` included,
+  rather than link a zero stub). `c-interpreter.abnf`'s memory is one cell per
+  SCALAR, not bytes, so it has no type punning - after `u.i = 0x01020304` in a
+  `union { int i; unsigned char b[4]; }`, `u.b[0]` reads the whole int and
+  `u.b[1..3]` read 0, where `cc` and the compiled half read the little-endian
+  bytes - and a `char *` difference across wider objects counts cells
+  (`(char*)&m[1][0] - (char*)&m[0][0]` on `long m[2][3]` is 3, `cc` 24). Bytes
+  would mean rewriting its memory, every load and store, and its libc.
 - **Bash**: both our engines accept
   `[[:word:]]` and `[[:ascii:]]` which bash rejects, and converging means changing
   `regex.js`, shared by ten languages; bash *errors* on
