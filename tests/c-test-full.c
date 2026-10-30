@@ -298,6 +298,7 @@ int s11(void) {
 // ===== SECTION 12: bitfields and anonymous members =====
 struct S12F { unsigned a : 3; unsigned b : 5; int c : 4; };
 struct S12A { int tag; union { int i; unsigned u; }; };   /* C11 anonymous union */
+struct S12W { unsigned long long e : 40; unsigned long long g : 33; long long h : 40; unsigned long long x : 20; };
 int s12(void) {
     struct S12F f;
     int nine = 9;
@@ -312,6 +313,18 @@ int s12(void) {
     check(1204, x.tag == 3 && x.i == 42);
     x.u = 5u;
     check(1205, x.u == 5u);
+    /* A bit-field whose values all fit an int PROMOTES to int (6.3.1.1p2): f.a - 4 is
+       -3, not 4294967293. A wider field on a 64-bit base keeps its width (cc). */
+    f.a = 1;
+    check(1206, f.a - 4 == -3 && -f.a == -1 && f.a - 4 < 0 && sizeof(f.a + 0) == 4);
+    struct S12W w;
+    w.e = (unsigned long long)-1; w.g = 5; w.h = -5;
+    check(1207, w.e == 1099511627775ULL && w.g == 5 && w.h == -5 && sizeof(w.e + 0) == 8);
+    w.e++; w.x = 1;
+    check(1208, w.e == 0 && w.x - 2 < 0 && _Generic(w.x, unsigned long long: 1, default: 2) == 1);
+    unsigned long long big = 5;
+    big++;
+    check(1209, big == 6);
     return 0;
 }
 

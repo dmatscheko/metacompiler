@@ -1978,7 +1978,10 @@ KwDefault   = "default" KwEnd ;
     // zero IS a box, so a bare '!= 0' would call it true).
     function nzv(v) { return szIs(v) ? !szEq(v, 0) : (v != 0) }
     // The integer promotions: anything narrower than int is evaluated as an int.
-    function promote(ct) { return (ct.k == "int" && ct.w < 4) ? ctInt : ct }
+    function promote(ct) {
+        if (ct.prom != undefined) return ct.prom
+        return (ct.k == "int" && ct.w < 4) ? ctInt : ct
+    }
     // The usual arithmetic conversions (C11 6.3.1.8): the common type of a binary
     // operator's two operands.
     function arithCt(a, b) {
@@ -2176,7 +2179,7 @@ KwDefault   = "default" KwEnd ;
                     if (f.pad != true) {
                         if (hasOwn(st.fields, f.name)) fail("duplicate field " + f.name + " in " + tagName(name))
                         var bf = undefined
-                        if (f.bits != undefined) { bf = {w: f.bits | 0, sign: f.uns != true} }
+                        if (f.bits != undefined) { bf = bitField(f, ct) }
                         st.fields[f.name] = {off: fo, ct: ct, bf: bf}
                         st.order.push(f.name)
                     }
@@ -2201,14 +2204,43 @@ KwDefault   = "default" KwEnd ;
         }
         return {size: size, bytes: bytes}
     }
+    // A bit-field: its width, its signedness, and vct, the type its value has in an
+    // expression. A field whose every value fits an int promotes to int, one of 32
+    // unsigned bits to unsigned int (C11 6.3.1.1p2), and a wider one keeps its 64-bit
+    // type, as clang does; prom carries that to promote(), so _Generic still sees the
+    // declared type.
+    // Twin of bitField in c-to-llvm-ir.abnf.
+    function bitField(f, ct) {
+        var bf = {w: f.bits | 0, sign: f.uns != true, wide: ct.k == "int" && ct.w >= 8, vct: ct}
+        if (ct.k == "int" && ct.bool != true && bf.w <= 32) {
+            var to = (bf.w < 32 || bf.sign) ? ctInt : ctUInt
+            if (!ctEq(to, promote(ct))) { bf.vct = {k: "int", w: ct.w, u: ct.u, prom: to} }
+        }
+        return bf
+    }
     // A bit field holds only its declared width: an unsigned one WRAPS, a signed one
     // sign-extends. Normalizing on every STORE keeps reads plain loads.
     function bfNorm(bf, v) {
         if (bf == undefined) return v
         var w = bf.w
+        if (bf.wide) return bfNorm64(w, bf.sign, szPair(v))
         if (w <= 0 || w >= 32) return v | 0
         if (bf.sign) return (v << (32 - w)) >> (32 - w)
         return v & ((1 << w) - 1)
+    }
+    // The same on the two 32-bit halves of a field with a 64-bit base.
+    function bfNorm64(w, sign, p) {
+        var h = p.h
+        var l = p.l
+        if (w <= 32) {
+            var ls = 32 - w
+            l = sign ? ((l << ls) >> ls) : ((l << ls) >>> ls)
+            h = (sign && l < 0) ? 4294967295 : 0
+        } else if (w < 64) {
+            var hs = 64 - w
+            h = sign ? ((h << hs) >> hs) : ((h << hs) >>> hs)
+        }
+        return szNorm(i64Make(h, l), 64, !sign)
     }
     // An omitted tag ('struct { int x; } s;') still needs a layout, so it gets a
     // synthetic name; the '$' keeps it unspellable from C source.
@@ -2809,6 +2841,7 @@ KwDefault   = "default" KwEnd ;
     // Reading a place loads its cell - except an ARRAY place, which decays to the
     // address of its first element ('m[0]' used as an int*).
     function placeVal(p) {
+        if (p.bf != undefined) return val(load(p.a), p.bf.vct)
         var ct = p.ct != undefined ? p.ct : ctInt
         if (ct.k == "arr") return val(p.a, {k: "ptr", p: ct.e})
         if (ct.k == "struct") return val(p.a, ct)
@@ -2969,16 +3002,21 @@ KwDefault   = "default" KwEnd ;
             if (op == "=" && isAggCt(p.ct)) { copyCt(p.ct, p.a, r.v); return val(p.a, p.ct) }
             var nv = r
             if (op != "=") nv = applyOp(op, val(load(p.a), p.ct), r)
-            return val(store(p.ct, p.a, bfNorm(p.bf, convert(p.ct, nv.v))), p.ct)
+            return val(store(p.ct, p.a, bfNorm(p.bf, convert(p.ct, nv.v))), p.bf != undefined ? p.bf.vct : p.ct)
         }
     }
-    // ++ and -- step a POINTER by a whole element and anything else by one.
-    function incStep(ct) { return ct.k == "ptr" ? ctSize(ct.p) : 1 }
+    // ++ and -- step a POINTER by a whole element and anything else by one. A 64-bit
+    // integer steps in the sized-integer layer: it may be a box, or a number at 2^53.
+    function incNext(ct, cur, d) {
+        if (ct.k == "int" && (ct.w >= 8 || szIs(cur))) return szArith("+", cur, d)
+        return cur + d * (ct.k == "ptr" ? ctSize(ct.p) : 1)
+    }
     function makePreIncDec(placeT, op) {
         var d = (op == "++") ? 1 : -1
         return function() {
             var p = placeT()
-            return val(store(p.ct, p.a, bfNorm(p.bf, convert(p.ct, load(p.a) + d * incStep(p.ct)))), p.ct)
+            return val(store(p.ct, p.a, bfNorm(p.bf, convert(p.ct, incNext(p.ct, load(p.a), d)))),
+                       p.bf != undefined ? p.bf.vct : p.ct)
         }
     }
     function makePostIncDec(op, placeT) {
@@ -2986,8 +3024,8 @@ KwDefault   = "default" KwEnd ;
         return function() {
             var p = placeT()
             var old = load(p.a)
-            store(p.ct, p.a, bfNorm(p.bf, convert(p.ct, old + d * incStep(p.ct))))
-            return val(old, p.ct)
+            store(p.ct, p.a, bfNorm(p.bf, convert(p.ct, incNext(p.ct, old, d))))
+            return val(old, p.bf != undefined ? p.bf.vct : p.ct)
         }
     }
     function evalArgs(args) {

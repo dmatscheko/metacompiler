@@ -1997,7 +1997,10 @@ KwDefault   = "default" KwEnd ;
         return trunc0(x)
     }
     // The integer promotions: anything narrower than int is evaluated as an int.
-    function promote(ct) { return (ct.k == "int" && ct.w < 4) ? ctInt : ct }
+    function promote(ct) {
+        if (ct.prom != undefined) return ct.prom
+        return (ct.k == "int" && ct.w < 4) ? ctInt : ct
+    }
     // The usual arithmetic conversions (C11 6.3.1.8).
     function arithCt(a, b) {
         if (isFlt(a) || isFlt(b)) return ctF((isFlt(a) ? a.w : 0) > (isFlt(b) ? b.w : 0)
@@ -2239,7 +2242,7 @@ KwDefault   = "default" KwEnd ;
         if (f.pad == true) { return }
         if (hasOwn(fields, f.name)) fail("duplicate field " + f.name + " in " + tagName(name))
         var bf = undefined
-        if (f.bits != undefined) { bf = {w: f.bits | 0, sign: f.uns != true} }
+        if (f.bits != undefined) { bf = bitField(f, ct) }
         fields[f.name] = {idx: slot, ct: ct, bf: bf}
         order.push(f.name)
     }
@@ -2328,11 +2331,31 @@ KwDefault   = "default" KwEnd ;
     }
     // A bit field holds only its declared width: an unsigned one WRAPS, a signed one
     // sign-extends. Normalizing on every STORE keeps reads plain loads.
+    // A bit-field: its width, its signedness, and vct, the type its value has in an
+    // expression. A field whose every value fits an int promotes to int, one of 32
+    // unsigned bits to unsigned int (C11 6.3.1.1p2), and a wider one keeps its 64-bit
+    // type, as clang does; prom carries that to promote(), so _Generic still sees the
+    // declared type.
+    // Twin of bitField in c-interpreter.abnf.
+    function bitField(f, ct) {
+        var bf = {w: f.bits | 0, sign: f.uns != true, vct: ct}
+        if (ct.k == "int" && ct.bool != true && bf.w <= 32) {
+            var to = (bf.w < 32 || bf.sign) ? ctInt : ctUInt
+            if (!ctEq(to, promote(ct))) { bf.vct = {k: "int", w: ct.w, u: ct.u, prom: to} }
+        }
+        return bf
+    }
+    // Keep only a bit-field's width of a value about to be stored, in whichever
+    // register (i32 or i64) the value occupies: shifted up and back down, arithmetic
+    // for a signed field and logical for an unsigned one.
     function bfNormV(b, bf, v) {
-        if (bf == undefined || bf.w <= 0 || bf.w >= 32) return v
-        var sh = llvm.constant.NewInt(i32, 32 - bf.w)
+        if (bf == undefined || bf.w <= 0) return v
+        var is64 = llIs64(v)
+        var bits = is64 ? 64 : 32
+        if (bf.w >= bits) return v
+        var sh = llvm.constant.NewInt(is64 ? i64 : i32, bits - bf.w)
         if (bf.sign) return b.NewAShr(b.NewShl(v, sh), sh)
-        return b.NewAnd(v, llvm.constant.NewInt(i32, (1 << bf.w) - 1))
+        return b.NewLShr(b.NewShl(v, sh), sh)
     }
     // An omitted tag ('struct { int x; } s;') still needs a layout, so it gets a
     // synthetic name; the '$' keeps it unspellable from C source.
@@ -3289,7 +3312,7 @@ KwDefault   = "default" KwEnd ;
         var ct = r.ct != undefined ? r.ct : ctInt
         if (ct.k == "arr") return {b: r.b, v: r.b.NewGetElementPtr(ctLTy(ct), r.v, [zero, zero]), ct: {k: "ptr", p: ct.e}}
         if (ct.k == "struct") return {b: r.b, v: r.v, ct: ct}
-        return {b: r.b, v: loadCt(r.b, ct, r.v), ct: ct}
+        return {b: r.b, v: loadCt(r.b, ct, r.v), ct: r.bf != undefined ? r.bf.vct : ct}
     }
     function makeLoadOf(placeT) {
         return function(b) { return placeValOf(placeT(b)) }
@@ -3636,7 +3659,7 @@ KwDefault   = "default" KwEnd ;
             }
             v = bfNormV(b, p.bf, v)
             v = storeTo(b, p.ct, p.v, v)
-            return {b: b, v: v, ct: p.ct}
+            return {b: b, v: v, ct: p.bf != undefined ? p.bf.vct : p.ct}
         }
     }
     // ++ and -- step a POINTER by a whole element and anything else by one.
@@ -3660,7 +3683,7 @@ KwDefault   = "default" KwEnd ;
             var old = loadCt(b, p.ct, p.v)
             var nv = bfNormV(b, p.bf, emitStep(b, p.ct, old, op))
             nv = storeTo(b, p.ct, p.v, nv)
-            return {b: b, v: nv, ct: p.ct}
+            return {b: b, v: nv, ct: p.bf != undefined ? p.bf.vct : p.ct}
         }
     }
     function makePostIncDec(op, placeT) {
@@ -3669,7 +3692,7 @@ KwDefault   = "default" KwEnd ;
             b = p.b
             var old = loadCt(b, p.ct, p.v)
             storeTo(b, p.ct, p.v, bfNormV(b, p.bf, emitStep(b, p.ct, old, op)))
-            return {b: b, v: old, ct: p.ct}
+            return {b: b, v: old, ct: p.bf != undefined ? p.bf.vct : p.ct}
         }
     }
     // items = [seed, {args}...]. The seed is either {fname} (a bare name, resolved as
