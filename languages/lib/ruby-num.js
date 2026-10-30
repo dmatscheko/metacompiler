@@ -237,6 +237,17 @@ function rbnFloatStep(beg, end, unit, excl) {
     return out
 }
 
+// Integer#step(limit, by) over Integers: from, from + by, ... while not past limit.
+function rbnIntStep(from, limit, by) {
+    var out = []
+    var v = from
+    while (by > 0 ? v <= limit : v >= limit) {
+        out.push(v)
+        v = v + by
+    }
+    return out
+}
+
 // One step of Array#sum's Kahan-Babuska summation (ary_add_one in array.c):
 // st.f is the running sum, st.c the compensation answered as f + c at the end. A
 // NaN sticks, and infinities of opposite signs make one.

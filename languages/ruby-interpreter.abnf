@@ -4170,20 +4170,6 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         return out
     }
 
-    // String#lines: split after each newline, keeping it.
-    function smLines(s) {
-        var out = []
-        var cur = ""
-        var i = 0
-        while (i < s.length) {
-            cur = cur + s.charAt(i)
-            if (s.charAt(i) == "\n") { out.push(cur); cur = "" }
-            i = i + 1
-        }
-        if (cur.length > 0) { out.push(cur) }
-        return out
-    }
-
     // String#chomp: the trailing record separator, "\r\n" counting as one.
     function smChomp(s) {
         if (s.length >= 2 && s.substring(s.length - 2, s.length) == "\r\n") { return s.substring(0, s.length - 2) }
@@ -4299,7 +4285,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (name == "rstrip" || name == "rstrip!") { return {ok: true, v: smRstrip(s)} }
         if (name == "strip!") { return {ok: true, v: smLstrip(smRstrip(s))} }
         if (name == "swapcase" || name == "swapcase!") { return {ok: true, v: smSwapcase(s)} }
-        if (name == "lines") { return {ok: true, v: smLines(s)} }
+        if (name == "lines") { return {ok: true, v: rbsLines(s, sargs.length > 0 ? sargs[0] : "\n")} }
         if (name == "partition" || name == "rpartition") {
             var sep = sargs[0]
             var at = name == "partition" ? s.indexOf(sep) : rbsRfind(s, sep, s.length)
@@ -4373,7 +4359,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             var list = []
             if (name == "each_byte") { list = smUtf8Bytes(target) }
             if (name == "each_codepoint") { list = smCodePoints(target) }
-            if (name == "each_line") { list = smLines(target) }
+            if (name == "each_line") { list = rbsLines(target, sargs.length > 0 ? sargs[0] : "\n") }
             if (name == "upto") { list = smUptoList(target, sargs.length > 0 ? sargs[0] : target, args.length > 1 && rtest(args[1])) }
             if (blk == null) { return {ok: true, v: enumAt(mkEnum(list), target, name, args)} }
             for (var k = 0; k < list.length; k++) { blockCall(blk, [boxOut(target, list[k])]) }
@@ -5650,6 +5636,23 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // #each answers the RECEIVER in MRI, and the receiver is the range.
         if (name == "each" && blk != null) { return t }
         return av
+    }
+    // Numeric#step(limit, by = 1): Integers, or doubles when any of the three is a
+    // Float (rbnFloatStep). Twins: the step arms of rbNumMethod and rubyNumMore.
+    function numStep(t, args, blk) {
+        var sby = anytype
+        sby = args.length > 1 ? args[1] : 1
+        if (toF(sby) == 0) { raiseErr("step", "ArgumentError", "step can't be 0") }
+        var sl = []
+        if (isFlo(sby) || isFlo(args[0]) || isFlo(t)) {
+            var sf = rbnFloatStep(toF(t), toF(args[0]), toF(sby), false)
+            for (var sfi = 0; sfi < sf.length; sfi++) { sl.push(mkFlo(sf[sfi])) }
+        } else {
+            sl = rbnIntStep(t, toF(args[0]), toF(sby))
+        }
+        if (blk == null) { return enumAt(mkEnum(sl), t, "step", args) }
+        for (var ski = 0; ski < sl.length; ski++) { blockCall(blk, [sl[ski]]) }
+        return t
     }
     // [a, *b, c]: a splat element splices an array in (a non-array splats as itself).
     function makeArray(items) {
@@ -8353,6 +8356,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (isRat(t)) { return ratDigitOp(t, dmode, dnd) }
             return numDigitOp(toF(t), null, false, dmode, dnd)
         }
+        if (name == "step" && args.length > 0 && isFlo(t)) { return numStep(t, args, blk) }
         if (name == "zero?") { return toF(t) == 0 }
         if (name == "positive?") { return toF(t) > 0 }
         if (name == "negative?") { return toF(t) < 0 }
@@ -8813,6 +8817,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (name == "pow" && args.length < 2) { return binAs(name, "**", target, args[0]) }
             // Without a block, times / upto / downto answer an Enumerator over the
             // numbers they would yield.
+            if (name == "step" && args.length > 0) { return numStep(target, args, blk) }
+            if ((name == "upto" || name == "downto") && args.length == 0) {
+                raiseErr(name, "ArgumentError", "wrong number of arguments (given 0, expected 1)")
+            }
             if (name == "times" || name == "upto" || name == "downto") {
                 var nl = []
                 if (name == "times") { for (var ni = 0; ni < target; ni++) { nl.push(ni) } }
@@ -8989,6 +8997,14 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 return xv
             }
             if (name == "clear") { arrReplace(target.keys, []); arrReplace(target.vals, []); return target }
+            // Hash#compact: a new Hash without the nil values.
+            if (name == "compact") {
+                var hc = {__dict: true, keys: [], vals: []}
+                for (var hci = 0; hci < target.keys.length; hci++) {
+                    if (target.vals[hci] !== null && target.vals[hci] !== undefined) { dictSet(hc, target.keys[hci], target.vals[hci]) }
+                }
+                return hc
+            }
             if (name == "each_key") {
                 for (var ek = 0; ek < target.keys.length; ek++) { blockCall(blk, [keyOut(target.keys[ek])]) }
                 return target
@@ -10229,6 +10245,59 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             while (fl.length < fsp.e) { fl.push(null) }
             for (i = fsp.b; i < fsp.e; i++) { fl[i] = blk == null ? args[0] : blockCall(blk, [i]) }
             return arrReplace(t, fl)
+        }
+        if (name == "at") {
+            var ati = arrNorm(t, args[0])
+            return ati >= 0 && ati < t.length ? t[ati] : null
+        }
+        if (name == "transpose") {
+            var trm = rbaRowMismatch(t)
+            if (trm >= 0) { raiseErr(name, "IndexError", "element size differs (" + trm + " should be " + t[0].length + ")") }
+            return rbaTranspose(t)
+        }
+        // slice!(start, len) / slice!(i): removes and answers what slice would.
+        // Twins: rbArrayMethod's and rubyArrayMethod's slice! arms.
+        if (name == "slice!") {
+            var sk = anytype
+            sk = args.length > 1 ? rsubseq(t, args[0], args[1]) : arrayMethod(t, "at", args, null)
+            if (sk === null || sk === undefined) { return null }
+            var ss = arrNorm(t, args[0])
+            var sn = args.length > 1 ? sk.length : 1
+            var kept = []
+            for (i = 0; i < t.length; i++) { if (i < ss || i >= ss + sn) { kept.push(t[i]) } }
+            arrReplace(t, kept)
+            return sk
+        }
+        // bsearch: find-minimum mode (the block answers true / false / nil) and
+        // find-any mode (it answers a number, 0 meaning found).
+        if (name == "bsearch") {
+            var blo = 0
+            var bhi = t.length
+            var bfound = anytype
+            bfound = null
+            while (blo < bhi) {
+                var bmid = Math.floor((blo + bhi) / 2)
+                var bv = anytype
+                bv = blockCall(blk, [t[bmid]])
+                if (typeof bv == "number" || isFlo(bv)) {
+                    if (toF(bv) == 0) { return t[bmid] }
+                    if (toF(bv) < 0) { bhi = bmid } else { blo = bmid + 1 }
+                } else if (rtest(bv)) {
+                    bfound = t[bmid]
+                    bhi = bmid
+                } else {
+                    blo = bmid + 1
+                }
+            }
+            return bfound
+        }
+        if (name == "chunk_while" || name == "slice_when") {
+            var ckeep = []
+            for (i = 0; i + 1 < t.length; i++) {
+                var cb = rtest(blockCall(blk, [t[i], t[i + 1]]))
+                ckeep.push(name == "chunk_while" ? cb : !cb)
+            }
+            return rbaChunks(t, ckeep)
         }
         if (name == "assoc") {
             for (i = 0; i < t.length; i++) {

@@ -32,6 +32,54 @@ function rbaSpliced(t, pos, items) {
     return out
 }
 
+// The length of the first of rows t that is not as long as the first row, or
+// -1: Array#transpose's IndexError "element size differs (N should be W)".
+function rbaRowMismatch(t) {
+    var i = 1
+    while (i < t.length) {
+        if (t[i].length != t[0].length) { return t[i].length }
+        i = i + 1
+    }
+    return -1
+}
+// Array#transpose of rows that all have one length.
+function rbaTranspose(t) {
+    var out = []
+    if (t.length == 0) { return out }
+    var w = t[0].length
+    var c = 0
+    while (c < w) {
+        var col = []
+        var r = 0
+        while (r < t.length) {
+            col.push(t[r][c])
+            r = r + 1
+        }
+        out.push(col)
+        c = c + 1
+    }
+    return out
+}
+
+// Array#chunk_while / #slice_when, given whether each adjacent pair stays
+// together (keep[i] for t[i], t[i + 1]).
+function rbaChunks(t, keep) {
+    var out = []
+    if (t.length == 0) { return out }
+    var cur = [t[0]]
+    var i = 1
+    while (i < t.length) {
+        if (!keep[i - 1]) {
+            out.push(cur)
+            cur = []
+        }
+        cur.push(t[i])
+        i = i + 1
+    }
+    out.push(cur)
+    return out
+}
+
 // The [begin, end) Array#fill writes on an array of n (rb_ary_fill): a negative
 // start counts from the end (clamped to 0), an absent one is 0, an absent length
 // runs to the end; null when the length is negative. end may lie past n, which

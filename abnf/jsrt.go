@@ -6763,11 +6763,35 @@ func (rt *jsrt) rubyNumMethod(t interface{}, name string, args []interface{}) (i
 		return rt.rubyRatPart(rt.rubyAsRat(t), true), true
 	case "denominator":
 		return rt.rubyRatPart(rt.rubyAsRat(t), false), true
-	case "times", "upto", "downto": // n.times { |i| ... }
+	case "times", "upto", "downto", "step": // n.times { |i| ... }
 		// Without a block they answer an Enumerator over the numbers they would yield.
 		npos, nblk := rubyBlockArgs(args)
 		nl := &jsArray{}
+		if name != "times" && len(npos) == 0 {
+			rt.rubyRaiseErr(name, "ArgumentError", "wrong number of arguments (given 0, expected 1)")
+		}
 		switch name {
+		// Numeric#step(limit, by = 1): Integers, or doubles when the limit or the
+		// step is a Float. Twin of the arm in ruby-interpreter.abnf.
+		case "step":
+			var by interface{} = float64(1)
+			if len(npos) > 1 {
+				by = npos[1]
+			}
+			if rubyToF(by) == 0 {
+				rt.rubyRaiseErr(name, "ArgumentError", "step can't be 0")
+			}
+			_, fb := by.(jsFlo)
+			_, ft := t.(jsFlo)
+			if _, fl := npos[0].(jsFlo); fb || fl || ft {
+				for _, d := range rubyFloatStep(x, rubyToF(npos[0]), rubyToF(by), false) {
+					nl.elems = append(nl.elems, jsFlo{f: d})
+				}
+			} else {
+				for v, lim, b := x, rubyToF(npos[0]), rubyToF(by); (b > 0 && v <= lim) || (b < 0 && v >= lim); v += b {
+					nl.elems = append(nl.elems, v)
+				}
+			}
 		case "times":
 			for i := 0.0; i < x; i++ {
 				nl.elems = append(nl.elems, i)
@@ -8628,19 +8652,20 @@ func (rt *jsrt) rubySmSwapcase(o string) string {
 	return out
 }
 
-// String#lines: split after each newline, keeping it.
-func (rt *jsrt) rubySmLines(o string) []string {
+// String#lines / #each_line: the pieces of o, each ending after an occurrence
+// of sep (kept), the rest last. Twin of rbsLines in lib/ruby-str.js.
+func rubySmLines(o, sep string) []string {
 	out := []string{}
-	cur := ""
-	for _, ch := range rt.rubySmChars(o) {
-		cur += ch
-		if ch == "\n" {
-			out = append(out, cur)
-			cur = ""
+	for sep != "" {
+		at := strings.Index(o, sep)
+		if at < 0 {
+			break
 		}
+		out = append(out, o[:at+len(sep)])
+		o = o[at+len(sep):]
 	}
-	if cur != "" {
-		out = append(out, cur)
+	if o != "" {
+		out = append(out, o)
 	}
 	return out
 }
@@ -8841,7 +8866,11 @@ func (rt *jsrt) rubySmMethod(o, name string, sargs []string, nargs []float64) (i
 	case "swapcase", "swapcase!":
 		return rt.rubySmSwapcase(o), true
 	case "lines":
-		return rubySmStrArr(rt.rubySmLines(o)), true
+		sep := "\n"
+		if len(sargs) > 0 {
+			sep = sargs[0]
+		}
+		return rubySmStrArr(rubySmLines(o, sep)), true
 	case "partition", "rpartition":
 		sep := sarg(0)
 		at := -1
@@ -11075,7 +11104,11 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 					list = append(list, float64(r))
 				}
 			} else {
-				list = rubySmStrArr(rt.rubySmLines(o)).elems
+				sep := "\n"
+				if len(spos) > 0 {
+					sep = rt.rubyStr(spos[0])
+				}
+				list = rubySmStrArr(rubySmLines(o, sep)).elems
 			}
 			if sblk == nil {
 				return rubyEnumAt(rubyMkEnum(&jsArray{elems: list}), o, name, spos)
@@ -12040,6 +12073,16 @@ func (rt *jsrt) rubyHashMethod(o *jsObject, keys, vals *jsArray, name string, ar
 		}
 		rt.rubyHashEach(keys, vals, blk)
 		return o, true
+	// Hash#compact: a new Hash without the nil values.
+	case "compact":
+		hk, hv := &jsArray{}, &jsArray{}
+		for i, k := range keys.elems {
+			if isUndefOrNull(vals.elems[i]) != true {
+				hk.elems = append(hk.elems, k)
+				hv.elems = append(hv.elems, vals.elems[i])
+			}
+		}
+		return &jsObject{props: map[string]interface{}{"__dict": true, "keys": hk, "vals": hv}}, true
 	case "each_key":
 		for _, k := range append([]interface{}{}, keys.elems...) {
 			rt.call(blk, jsUndef, []interface{}{rt.rubyKeyOut(k)})
@@ -13312,6 +13355,89 @@ func (rt *jsrt) rubyArrayMethod(t *jsArray, name string, args []interface{}) int
 			}
 		}
 		return rubyArrReplace(t, out)
+	case "at":
+		if ix := rubyArrNorm(t, argAt(pos, 0)); ix >= 0 && ix < len(t.elems) {
+			return t.elems[ix]
+		}
+		return jsNull
+	case "transpose":
+		out := &jsArray{}
+		for i, row := range t.elems {
+			r, _ := row.(*jsArray)
+			w := len(t.elems[0].(*jsArray).elems)
+			if len(r.elems) != w {
+				rt.rubyRaiseErr(name, "IndexError", "element size differs ("+jsNumString(float64(len(r.elems)))+" should be "+jsNumString(float64(w))+")")
+			}
+			for c, v := range r.elems {
+				if i == 0 {
+					out.elems = append(out.elems, &jsArray{})
+				}
+				col := out.elems[c].(*jsArray)
+				col.elems = append(col.elems, v)
+			}
+		}
+		return out
+	// slice!(start, len) / slice!(i). Twin of the arm in ruby-interpreter.abnf.
+	case "slice!":
+		var cut interface{}
+		n := 1
+		if len(pos) > 1 {
+			cut = rubyArrSubseq(t, pos[0], pos[1])
+			if a, ok := cut.(*jsArray); ok {
+				n = len(a.elems)
+			}
+		} else {
+			cut = rt.rubyArrayMethod(t, "at", pos)
+		}
+		if isUndefOrNull(cut) == true {
+			return jsNull
+		}
+		s := rubyArrNorm(t, pos[0])
+		kept := []interface{}{}
+		for i, e := range t.elems {
+			if i < s || i >= s+n {
+				kept = append(kept, e)
+			}
+		}
+		rubyArrReplace(t, kept)
+		return cut
+	// bsearch: find-minimum (true / false / nil) and find-any (a number) modes.
+	case "bsearch":
+		lo, hi := 0, len(t.elems)
+		var found interface{} = jsNull
+		for lo < hi {
+			mid := (lo + hi) / 2
+			v := rt.call(blk, jsUndef, []interface{}{t.elems[mid]})
+			switch v.(type) {
+			case float64, jsFlo:
+				f := rubyToF(v)
+				if f == 0 {
+					return t.elems[mid]
+				}
+				if f < 0 {
+					hi = mid
+				} else {
+					lo = mid + 1
+				}
+				continue
+			}
+			if rubyTruthy(v) {
+				found, hi = t.elems[mid], mid
+			} else {
+				lo = mid + 1
+			}
+		}
+		return found
+	case "chunk_while", "slice_when":
+		out := &jsArray{}
+		for i, e := range t.elems {
+			if i == 0 || rubyTruthy(rt.call(blk, jsUndef, []interface{}{t.elems[i-1], e})) != (name == "chunk_while") {
+				out.elems = append(out.elems, &jsArray{})
+			}
+			last := out.elems[len(out.elems)-1].(*jsArray)
+			last.elems = append(last.elems, e)
+		}
+		return out
 	case "assoc":
 		for _, e := range t.elems {
 			if row, isArr := e.(*jsArray); isArr && len(row.elems) > 0 && rt.rubyEq(row.elems[0], argAt(pos, 0)) {

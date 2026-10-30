@@ -121,6 +121,21 @@ function rbsSplit(s, sep, re, lim) {
     return out
 }
 
+// String#lines / #each_line: the pieces of s, each ending after an occurrence
+// of sep (kept), the rest last.
+function rbsLines(s, sep) {
+    var out = []
+    var p = 0
+    while (p < s.length && sep.length > 0) {
+        var at = rbsFind(s, sep, p)
+        if (at < 0) { break }
+        out.push(s.substring(p, at + sep.length))
+        p = at + sep.length
+    }
+    if (p < s.length) { out.push(s.substring(p, s.length)) }
+    return out
+}
+
 // The character index of code unit u, and the unit index of character c (-1 when
 // the string is shorter).
 function rbsCharIdx(s, u) {

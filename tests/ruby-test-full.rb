@@ -4712,6 +4712,29 @@ def s107
   check("st107d", s[0].strip == "hi" && [1, 2].inject(&:+) == 3 && s[1].chomp("") == "abc" && (s[2]..s[3]).to_a == [])
 end
 
+# ===== SECTION 108: Array#at / transpose / slice! / bsearch / chunk_while, Hash#compact, each_line(sep), Numeric#step =====
+# The Array and Hash methods MRI 2.6 has and the engines lacked; each_line and
+# lines take a separator; Numeric#step walks Integers, or doubles when one of the
+# three is a Float; upto without a limit is an ArgumentError. /usr/bin/ruby 2.6
+# settles each.
+def s108
+  v = [1, 2, 3, 4]
+  e1 = begin; [[1, 2], [3]].transpose; rescue IndexError => e; e.message; end
+  check("ar108a", v.at(-1) == 4 && v.at(9).nil? && [[1, 2], [3, 4]].transpose == [[1, 3], [2, 4]] &&
+        e1 == "element size differs (1 should be 2)")
+  x = v.dup
+  y = v.dup
+  check("ar108b", x.slice!(1, 2) == [2, 3] && x == [1, 4] && y.slice!(-1) == 4 && y == [1, 2, 3] && y.slice!(9).nil?)
+  check("ar108c", [1, 3, 5, 7].bsearch { |n| n >= 4 } == 5 && [1, 3, 5, 7].bsearch { |n| 5 <=> n } == 5 &&
+        [1, 2, 4, 9, 10, 11].chunk_while { |a, b| b == a + 1 }.to_a == [[1, 2], [4], [9, 10, 11]] &&
+        [1, 2, 4].slice_when { |a, b| b != a + 1 }.to_a == [[1, 2], [4]])
+  check("hc108d", {a: nil, b: 1, c: false}.compact == {b: 1, c: false})
+  check("el108e", "a--b--c".each_line("--").to_a == ["a--", "b--", "c"] && "x|y|".lines("|") == ["x|", "y|"])
+  e2 = begin; 5.upto; rescue ArgumentError => e; e.message; end
+  check("st108f", 3.step(10, 3).to_a == [3, 6, 9] && 10.step(1, -4).to_a == [10, 6, 2] && 1.step(2, 0.5).to_a == [1.0, 1.5, 2.0] &&
+        1.0.step(2.0, 0.5).to_a == [1.0, 1.5, 2.0] && e2 == "wrong number of arguments (given 0, expected 1)")
+end
+
 s39() # SECTION-CALL 39
 s40() # SECTION-CALL 40
 s41() # SECTION-CALL 41
@@ -4781,5 +4804,6 @@ s104() # SECTION-CALL 104
 s105() # SECTION-CALL 105
 s106() # SECTION-CALL 106
 s107() # SECTION-CALL 107
+s108() # SECTION-CALL 108
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

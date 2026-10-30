@@ -5360,6 +5360,34 @@ function rbNumMethod(t, name, args) {
         }
         return t
     }
+    // Numeric#step(limit, by = 1). Twin of the arm in ruby-interpreter.abnf.
+    if (name == "step" && rbNPos(args) > 0) {
+        var sblk = rbBlockOf(args)
+        var sby = anytype
+        sby = rbNPos(args) > 1 ? args[1] : 1
+        if (rbToF(sby) == 0) { rbRaiseErr(name, "ArgumentError", "step can't be 0") }
+        var sl = []
+        if (rbIsFlo(sby) || rbIsFlo(args[0]) || rbIsFlo(t)) {
+            var sf = rbnFloatStep(x, rbToF(args[0]), rbToF(sby), false)
+            var sfi = 0
+            while (sfi < sf.length) {
+                sl.push(rbMkFlo(sf[sfi]))
+                sfi = sfi + 1
+            }
+        } else {
+            sl = rbnIntStep(x, rbToF(args[0]), rbToF(sby))
+        }
+        if (sblk === null) { return rbEnumAt(rbMkEnum(sl), t, name, args) }
+        var ski = 0
+        while (ski < sl.length) {
+            rbCall1(sblk, sl[ski])
+            ski = ski + 1
+        }
+        return t
+    }
+    if ((name == "upto" || name == "downto") && rbNPos(args) == 0) {
+        rbRaiseErr(name, "ArgumentError", "wrong number of arguments (given 0, expected 1)")
+    }
     if (name == "upto") {
         var ublk = rbBlockOf(args)
         var u = x
@@ -6269,6 +6297,15 @@ function rbHashMethod(o, keys, vals, name, args) {
         if (blk === null) { return rbEnumAt(rbMkEnum(rbHashPairs(keys, vals)), o, name, args) }
         rbHashEach(keys, vals, blk)
         return o
+    }
+    // Hash#compact: a new Hash without the nil values.
+    if (name == "compact") {
+        var hc = js_dict_new()
+        while (i < keys.length) {
+            if (!rtIsNil(vals[i])) { rbDictSet(hc, keys[i], vals[i]) }
+            i = i + 1
+        }
+        return hc
     }
     if (name == "each_key") {
         while (i < keys.length) {
@@ -7187,6 +7224,65 @@ function rbArrayMethod(t, name, args) {
             fk = fk + 1
         }
         return rbArrReplace(t, fl)
+    }
+    if (name == "at") {
+        var ati = rbArrNorm(t, rbPosAt(args, nPos, 0))
+        if (ati >= 0 && ati < t.length) { return t[ati] }
+        return null
+    }
+    if (name == "transpose") {
+        var trm = rbaRowMismatch(t)
+        if (trm >= 0) { rbRaiseErr(name, "IndexError", "element size differs (" + trm + " should be " + t[0].length + ")") }
+        return rbaTranspose(t)
+    }
+    // slice!(start, len) / slice!(i). Twin of the arm in ruby-interpreter.abnf.
+    if (name == "slice!") {
+        var sk = anytype
+        if (nPos > 1) { sk = rbArrSubseq(t, args[0], args[1]) } else { sk = rbArrayMethod(t, "at", args) }
+        if (rtIsNil(sk)) { return null }
+        var ss = rbArrNorm(t, args[0])
+        var sn = 1
+        if (nPos > 1) { sn = sk.length }
+        var kept = []
+        var ki = 0
+        while (ki < t.length) {
+            if (ki < ss || ki >= ss + sn) { kept.push(t[ki]) }
+            ki = ki + 1
+        }
+        rbArrReplace(t, kept)
+        return sk
+    }
+    // bsearch: find-minimum (true / false / nil) and find-any (a number) modes.
+    if (name == "bsearch") {
+        var blo = 0
+        var bhi = t.length
+        var bfound = anytype
+        bfound = null
+        while (blo < bhi) {
+            var bmid = Math.floor((blo + bhi) / 2)
+            var bv = anytype
+            bv = rbCall1(blk, t[bmid])
+            if (typeof bv == "number" || rbIsFlo(bv)) {
+                if (rbToF(bv) == 0) { return t[bmid] }
+                if (rbToF(bv) < 0) { bhi = bmid } else { blo = bmid + 1 }
+            } else if (rbTruthy(bv)) {
+                bfound = t[bmid]
+                bhi = bmid
+            } else {
+                blo = bmid + 1
+            }
+        }
+        return bfound
+    }
+    if (name == "chunk_while" || name == "slice_when") {
+        var ckeep = []
+        var ci = 0
+        while (ci + 1 < t.length) {
+            var cb = rbTruthy(rbCall2(blk, t[ci], t[ci + 1]))
+            if (name == "chunk_while") { ckeep.push(cb) } else { ckeep.push(!cb) }
+            ci = ci + 1
+        }
+        return rbaChunks(t, ckeep)
     }
     if (name == "assoc") {
         var si2 = 0
@@ -9455,20 +9551,6 @@ function smSwapcase(s) {
     return out
 }
 
-// String#lines: split after each newline, keeping it.
-function smLines(s) {
-    var out = []
-    var cur = ""
-    var i = 0
-    while (i < s.length) {
-        cur = cur + s.charAt(i)
-        if (s.charAt(i) == "\n") { out.push(cur); cur = "" }
-        i = i + 1
-    }
-    if (cur.length > 0) { out.push(cur) }
-    return out
-}
-
 // String#chomp: the trailing record separator, "\r\n" counting as one.
 function smChomp(s) {
     if (s.length >= 2 && s.substring(s.length - 2, s.length) == "\r\n") { return s.substring(0, s.length - 2) }
@@ -9582,7 +9664,7 @@ function smMethod(s, name, sargs, nargs) {
     if (name == "rstrip" || name == "rstrip!") { return {ok: true, v: smRstrip(s)} }
     if (name == "strip!") { return {ok: true, v: smLstrip(smRstrip(s))} }
     if (name == "swapcase" || name == "swapcase!") { return {ok: true, v: smSwapcase(s)} }
-    if (name == "lines") { return {ok: true, v: smLines(s)} }
+    if (name == "lines") { return {ok: true, v: rbsLines(s, sargs.length > 0 ? sargs[0] : "\n")} }
     if (name == "partition" || name == "rpartition") {
         var sep = sargs[0]
         var at = name == "partition" ? s.indexOf(sep) : rbsRfind(s, sep, s.length)
@@ -9660,7 +9742,7 @@ function rbStrExtra(target, name, args) {
         var list = []
         if (name == "each_byte") { list = smUtf8Bytes(target) }
         if (name == "each_codepoint") { list = smCodePoints(target) }
-        if (name == "each_line") { list = smLines(target) }
+        if (name == "each_line") { list = rbsLines(target, sargs.length > 0 ? sargs[0] : "\n") }
         if (name == "upto") { list = smUptoList(target, sargs.length > 0 ? sargs[0] : target, pos.length > 1 && rbTruthy(pos[1])) }
         if (blk === null) { return {ok: true, v: rbEnumAt(rbMkEnum(list), target, name, args)} }
         var k = 0
