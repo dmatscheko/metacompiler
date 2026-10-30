@@ -66,7 +66,7 @@ its report; anything structural there is a CORE ticket.
 
 # RB — Ruby
 
-### T-839 ruby: features left from the string/array/error rounds · P3 · RB · OPEN [V RB worker]
+### T-839 ruby: features left from the string/array/error rounds · P3 · RB · IN PROGRESS (RB worker, round 22) [V RB worker]
 Each fails vs /usr/bin/ruby 2.6 today. Strings: code-point `s[1]`, `s[1,2]`, center, reverse of astral
 text (run/native) — needs code-point String#[] with an O(1) ASCII fast path in all three engines;
 `128512.chr("UTF-8")`, `255.chr.bytes` (binary strings not modelled). Enumerators: `[1,2].cycle` without
@@ -77,18 +77,18 @@ STDOUT, bare `p` (compiled NameError), bare `new` in `def self.make`. Numeric: `
 Complex; Rational#round(half:) rounds half up. Cleanup: regex.js rxSplit is no longer used by ruby —
 remove it if no language calls it (comments in kotlin-rt.metajs, python, jsrtregexjs.go name it).
 
-### T-840 ruby compiler: `next v` inside begin/ensure inside a block returns the control signal · P2 · RB · OPEN [V RB worker]
+### T-840 ruby compiler: `next v` inside begin/ensure inside a block returns the control signal · P2 · RB · IN PROGRESS (RB worker, round 22) [V RB worker]
 `p [1,2,3].map { |x| begin; next x*10 if x==2; x; ensure; nil; end }` → ruby and interp `[1, 20, 3]`,
 run `[1, &{3 <nil>}, 3]`. excDispatch in a block function has no loop to continue, so the signal escapes
 as a value; a block-level `next` across a try must become the block's return value. Check native too.
 
-### T-841 ruby: `$0` / `$PROGRAM_NAME` are nil · P2 · RB · OPEN [V PY worker]
+### T-841 ruby: `$0` / `$PROGRAM_NAME` are nil · P2 · RB · IN PROGRESS (RB worker, round 22) [V PY worker]
 `p __FILE__; p $0; p $PROGRAM_NAME` → /usr/bin/ruby prints the script path three times; all legs print
 the path then `nil`, `nil`. So the common `main(3) if __FILE__ == $0` guard runs nothing in every leg.
 
 # JS — JavaScript and TypeScript
 
-### T-838 ts/js: decorator and constructor semantics left over · P3 · JS · OPEN [V JS worker]
+### T-838 ts/js: decorator and constructor semantics left over · P3 · JS · IN PROGRESS (JS worker, round 32) [V JS worker]
 node / tsc 6.0.3 answers were measured by the JS worker. Decorators: `ctx.addInitializer`, field
 decorators, and tsc's evaluation order (static methods → instance methods → fields → class) — needs
 per-class initializer lists threaded into the constructor in both halves. Constructors: `this` before
@@ -97,7 +97,7 @@ super(), super() twice, a derived constructor returning 5, a missing super(), `n
 U+2028 in strings, tagged-template invalid escapes, `export import`, `__proto__:` in object literals;
 plus the missing host APIs listed in the closed T-794.
 
-### T-842 ts/js: RegExp to string, method shadowing an inherited getter, `o?.#f` · P2 · JS · OPEN [V JS worker]
+### T-842 ts/js: RegExp to string, method shadowing an inherited getter, `o?.#f` · P2 · JS · IN PROGRESS (JS worker, round 32) [V JS worker]
 (1) `String(/y/g)`, `"" + /y/g`, `` `${/y/g}` `` → interp and llvm.Run `[object Object]`, native and node
 `/y/g`. (2) `class Base { get acc(){return "s"} } class Mid extends Base { acc(){} } class Leaf extends
 Mid {}; typeof new Leaf().acc` → llvm.Run "string", node and other legs "function" (a class method
@@ -127,7 +127,7 @@ not change the renderer.
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-836 kotlin: edges left by the operator/cast/range fixes · P3 · KT · OPEN [V KT worker]
+### T-836 kotlin: edges left by the operator/cast/range fixes · P3 · KT · IN PROGRESS (KT worker, round 3) [V KT worker]
 Each checked against java 24 + kotlin-stdlib 2.2.21 unless noted. (1) `"\n\n  a\n\n".trimIndent()` →
 stdlib `"\na\n"` (drops only a blank FIRST and a blank LAST line), ours `"a"` in all engines.
 (2) compiled `is Comparable<*>` is true for any value, so `Dog() as Comparable<*>` does not throw
@@ -139,7 +139,7 @@ says `Outer$Inner`. (6) LongRange `first`/`last`/`contains` near 2^53 still read
 (iteration, count, toString are exact). (7) `null as String` passes in every leg; Kotlin/JVM throws
 NullPointerException (message from kotlinc codegen — spec-only, no kotlinc here).
 
-### T-837 kotlin: a lambda whose body is a `try` expression returns Unit · P2 · KT · OPEN [V master]
+### T-837 kotlin: a lambda whose body is a `try` expression returns Unit · P2 · KT · IN PROGRESS (KT worker, round 3) [V master]
 `println(m.let { try { it.getValue("b") } catch (e: NoSuchElementException) { e.message } })` and
 `println(m.let { try { 7 } catch (e: Exception) { 8 } })` print `kotlin.Unit` (interpreter; Kotlin
 spec: the lambda's value is its last expression, a try is an expression → `Key b is missing in the
@@ -175,7 +175,7 @@ formatting of the parsed literal needs no double: implement it, or fail loudly a
 
 # C — C subset
 
-### T-833 c: loud gaps left from the cell-memory ticket · P3 · C · OPEN [V C worker]
+### T-833 c: loud gaps left from the cell-memory ticket · P3 · C · IN PROGRESS (C worker, round 7) [V C worker]
 All refuse loudly, none print a wrong answer. (1) `2[arr]` — needs a Primary production for
 an integer subscripted by a pointer (cc: same as `arr[2]`). (2) a nested designator
 `struct T t = { .b[1] = 5 };` — designator merging in both engines' initializers.
@@ -184,14 +184,14 @@ and ignored; a small built-in table for limits.h/stdint.h/stdbool.h constants wo
 (4) with `languages/c-preprocessor.abnf f.c -pipe languages/c-to-llvm-ir.abnf -qq` a compile
 error of the second stage is swallowed and only rc=1 shows — find out where -qq drops it.
 
-### T-834 c native: `extern int ge; int ge = 5;` fails to link · P2 · C · OPEN [V C worker]
+### T-834 c native: `extern int ge; int ge = 5;` fails to link · P2 · C · IN PROGRESS (C worker, round 7) [V C worker]
 c-to-llvm-ir defineGlobals/newGlobal makes one LLVM global per declaration, so an `extern`
 declaration followed by the definition gives clang "redefinition of global '@ge'" on -exe.
 llvm.Run and cc accept it (cc prints 5). The same happens when the second declaration
 spells the type through a typedef. An extern declaration must reuse (or be replaced by)
 the defining global.
 
-### T-835 c: a duplicate definition in one block scope is accepted · P3 · C · OPEN [V C worker]
+### T-835 c: a duplicate definition in one block scope is accepted · P3 · C · IN PROGRESS (C worker, round 7) [V C worker]
 `{ int zero = 0; int zero = 0; }` runs in both halves; cc rejects it ("redefinition of
 'zero'", 6.7p3). Both engines should report a compile error naming the variable; shadowing
 in a NESTED block must stay legal.
