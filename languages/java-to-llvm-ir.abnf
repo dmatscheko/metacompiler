@@ -4889,7 +4889,16 @@ HasStatic   = :script(~~
         if (jTypeWantsUtil(t)) { jUtilWant = true }
         return t
     }
+    // The first top-level type of the program's own file: the class java's
+    // source launcher runs when the file declares no class Main. Twin of
+    // jFirstTop in java-interpreter.abnf.
+    var jFirstTop = ""
+    var jHasMain = false
     function jEnterClass(n) {
+        if (jCurBin == "" && jPkgPrefix == "" && importDepth == 0) {
+            if (jFirstTop == "") { jFirstTop = n }
+            if (n == "Main") { jHasMain = true }
+        }
         jClassStack.push(curClassName)
         jBinStack.push(jCurBin)
         jCurBin = (jCurBin == "") ? jPkgPrefix + n : jCurBin + "$" + jNrSimple(n)
@@ -6361,6 +6370,13 @@ HasStatic   = :script(~~
         }, false, null)
         callExt(b, "js_set", [outV, emitStr(b, "printf"), callExt(b, "js_closure", [handle(jvPrintfF), curScopeV])])
         callExt(b, "js_set", [outV, emitStr(b, "format"), callExt(b, "js_closure", [handle(jvPrintfF), curScopeV])])
+        // flush(): every write above reaches the output at once. Twin of the
+        // flush member in java-interpreter.abnf.
+        var jvFlushF = emitFunc([], function(bb) {
+            bb.NewRet(hUndef)
+            return deadBlock()
+        }, false, null)
+        callExt(b, "js_set", [outV, emitStr(b, "flush"), callExt(b, "js_closure", [handle(jvFlushF), curScopeV])])
         callExt(b, "js_set", [sysV, emitStr(b, "out"), outV])
         callExt(b, "js_set", [sysV, emitStr(b, "exit"), callExt(b, "js_scope_get", [curScopeV, emitStr(b, "exit")])])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "System"), sysV])
@@ -6427,13 +6443,21 @@ HasStatic   = :script(~~
         // the class nor the message. This is the shape ruby-to-llvm-ir.abnf
         // (js_try + js_rtop) and go-to-llvm-ir.abnf (js_gotry + js_gotop) use;
         // js_jvtop prints the java LAUNCHER's own line and exits 1, as real java does.
+        // Class Main, else - as java's source launcher picks it - the first
+        // top-level type of the file.
+        var mainName = (jHasMain || jFirstTop == "") ? "Main" : jFirstTop
+        // The interpreter's words, at compile time. Twin of the entry checks in
+        // java-interpreter.abnf.
+        if (!mainIsSnippet(entry) && lookupMethodKind(mainName, entry) == null) {
+            fail("Java programs need a class Main with a static " + entry + " method.")
+        }
         var entryT = function(bb) {
             if (mainIsSnippet(entry)) {
                 bb = emitMainSnippet(bb, entry, "Statement")
                 bb.NewRet(emitNum(bb, 0))
                 return deadBlock()
             }
-            var mainCls = callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, "Main")])
+            var mainCls = callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, mainName)])
             var mainV = callExt(bb, "js_get", [mainCls, emitStr(bb, entry)])
             var argsV = callExt(bb, "js_arr_new", [])
             // JEP 512: the entry may be an INSTANCE method (`void main()` in an
@@ -6442,7 +6466,7 @@ HasStatic   = :script(~~
             // methodKind, never from the property; the receiver is a fresh
             // instance built with the no-argument constructor, exactly as
             // java's own launcher does it.
-            if (lookupMethodKind("Main", entry) == "instance") {
+            if (lookupMethodKind(mainName, entry) == "instance") {
                 var selfV = callExt(bb, "js_obj_new", [])
                 callExt(bb, "js_set", [selfV, emitStr(bb, "__class"), mainCls])
                 var ctorArgs = callExt(bb, "js_arr_new", [])

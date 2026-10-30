@@ -2269,7 +2269,9 @@ HasStatic   = :script(~~
             println: function(x) { println(arguments.length == 0 ? "" : jOutText(jstr(x))) },
             print: function(x) { print(jOutText(jstr(x))) },
             printf: function() { print(jOutText(jStrStatic("format", jArgList(arguments)))) },
-            format: function() { print(jOutText(jStrStatic("format", jArgList(arguments)))) }
+            format: function() { print(jOutText(jStrStatic("format", jArgList(arguments)))) },
+            // Every write above reaches the output at once, so there is nothing to flush.
+            flush: function() {}
         },
         exit: function(code) { exit(code | 0) },
         // Twin of js_jvarraycopy in lib/java-rt.metajs, which documents the checks.
@@ -6994,7 +6996,17 @@ HasStatic   = :script(~~
         if (jTypeWantsUtil(t)) { jUtilWant = true }
         return t
     }
+    // The first top-level type of the program's own file: the class java's
+    // source launcher runs when the file declares no class Main. Twin of
+    // jFirstTop in java-to-llvm-ir.abnf.
+    var jFirstTop = ""
+    var jHasMain = false
+    var jImportDepth = 0
     function jEnterClass(n) {
+        if (jCurBin == "" && jPkgPrefix == "" && jImportDepth == 0) {
+            if (jFirstTop == "") { jFirstTop = n }
+            if (n == "Main") { jHasMain = true }
+        }
         jClassStack.push(curClassName)
         jBinStack.push(jCurBin)
         jCurBin = (jCurBin == "") ? jPkgPrefix + n : jCurBin + "$" + jNrSimple(n)
@@ -7604,7 +7616,9 @@ HasStatic   = :script(~~
             var text = c.readFile(file)
             var asg = c.parse(c.agrammar, text, null, file)
             c.pushSource(file, text)
+            jImportDepth = jImportDepth + 1
             c.compile(asg)
+            jImportDepth = jImportDepth - 1
             c.popSource()
             return true
         }
@@ -7639,7 +7653,10 @@ HasStatic   = :script(~~
         }
         println("java interpreter: -main snippet returned " + (ret === undefined ? 0 : ret))
     } else {
-        var mainCls = globalScope["Main"]
+        // Class Main, else - as java's source launcher picks it - the first
+        // top-level type of the file.
+        var mainName = (jHasMain || jFirstTop == "") ? "Main" : jFirstTop
+        var mainCls = globalScope[mainName]
         if (mainCls == undefined) {
             fail("Java programs need a class Main with a static " + entry + " method.")
         }
@@ -7649,7 +7666,7 @@ HasStatic   = :script(~~
         // constructor and call the method on that instance. An instance method
         // lives on the class descriptor like a static one, so the STATIC-ness is
         // read from jMethodKind (jLookupKind), never from the property.
-        var mainStatic = jLookupKind("Main", entry) == "static"
+        var mainStatic = jLookupKind(mainName, entry) == "static"
         var mainInst = null
         if (!mainStatic) {
             mainInst = {__class: mainCls}

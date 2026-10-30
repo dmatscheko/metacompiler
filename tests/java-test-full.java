@@ -193,6 +193,7 @@ class Main {
         S95.run(); // SECTION-CALL 95
         S96.run(); // SECTION-CALL 96
         S100.run(); // SECTION-CALL 100
+        S101.run(); // SECTION-CALL 101
         System.out.println("full: " + Main.checks + " checks, " + Main.failures + " failures");
         System.exit(Main.failures);
     }
@@ -1623,6 +1624,18 @@ class S100 {
         String how = "";
         try { new S100().m(0); } catch (VirtualMachineError e) { how = e.getClass().getName(); }
         Main.check("soe2", how.equals("java.lang.StackOverflowError") && deep(100) == 100);
+    }
+}
+
+// ===== SECTION 101: System.out.flush =====
+//
+// flush() writes out what print() buffered; output written before and after it
+// keeps its order.
+class S101 {
+    static void run() {
+        System.out.print("");
+        System.out.flush();
+        Main.check("flush101", true);
     }
 }
 
