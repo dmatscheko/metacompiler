@@ -2668,7 +2668,7 @@ func (rt *jsrt) rubySubMisses(s string, args []interface{}) bool {
 	pos, _ := rubyBlockArgs(args)
 	reObj := argAt(pos, 0)
 	if !rxIsRegexObj(reObj) {
-		reObj = rxNewRegexObj(rxQuoteText(rt.rubyStr(reObj)), "mpn")
+		reObj = rxNewRegexObj(rxQuoteText(rt.rubyStr(reObj)), "mpnO")
 	}
 	m, ok := rxObjRe(reObj).search([]rune(s), 0)
 	if !ok {

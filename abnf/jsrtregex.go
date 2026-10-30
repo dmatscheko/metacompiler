@@ -519,6 +519,7 @@ func rxNewNode(t string) *rxNode {
 }
 
 type rxSt struct {
+	noauto     bool
 	p          []rune
 	i          int
 	n          int
@@ -696,7 +697,7 @@ func rxExpandQuotes(p []rune) []rune {
 // pattern with none it is either a legacy octal escape (JavaScript, flag o) or an
 // error (everywhere else) - and the octal reading has to CONSUME the following digits,
 // which the parser cannot undo after the fact.
-func rxCountGroups(p []rune) int {
+func rxCountGroups(p []rune, plain bool) int {
 	n := 0
 	inCls := false
 	for i := 0; i < len(p); {
@@ -722,7 +723,9 @@ func rxCountGroups(p []rune) int {
 			continue
 		}
 		if i+1 >= len(p) || p[i+1] != '?' {
-			n++
+			if plain {
+				n++
+			}
 			i++
 			continue
 		}
@@ -1703,6 +1706,13 @@ func (st *rxSt) parseGroup() *rxNode {
 		}
 		st.fail("unsupported group form (?" + string(st.p[st.i]) + ")")
 		return rxNewNode("empty")
+	}
+	// Onigmo: once a pattern names a group, a plain one does not capture.
+	if st.noauto {
+		g := rxNewNode("group")
+		g.items = append(g.items, st.parseAlt())
+		st.expect(')', "unterminated group")
+		return g
 	}
 	cg := rxNewNode("group")
 	st.ngroups++
@@ -6315,8 +6325,11 @@ func rxCompile(pattern, flags string) *rxRe {
 		icase, multi = false, false
 	}
 	st.n = len(st.p)
+	// O is Onigmo's capture rule: a pattern with a named group captures only the
+	// named ones.
+	st.noauto = strings.ContainsRune(letters, 'O') && rxCountGroups(st.p, false) > 0
 	if !ere {
-		st.ntotal = rxCountGroups(st.p)
+		st.ntotal = rxCountGroups(st.p, !st.noauto)
 	}
 	ast := st.parseAlt()
 	// Resolve every \k<name> now that the whole name table is known.
@@ -7808,16 +7821,9 @@ func (rt *jsrt) rxScan(reObj interface{}, s string) *jsArray {
 	return out
 }
 
-// rxReplace is String#sub / #gsub with a STRING replacement.
-func (rt *jsrt) rxReplace(reObj interface{}, s, repl string, all bool) string {
-	return rt.rxReplaceWith(reObj, s, all, func(re *rxRe, text []rune, m *rxMatch) string {
-		return re.expand(text, m, repl)
-	})
-}
-
 // rxReplaceBlock is Ruby's String#sub / #gsub with a BLOCK: the block is handed
 // each match's text, with $~ set to that match, and answers its replacement.
-// Twins: reSub in ruby-interpreter.abnf, rbRxReplaceBlock in lib/ruby-rt.metajs.
+// Twins: reSub in ruby-interpreter.abnf, rbRxReplace in lib/ruby-rt.metajs.
 func (rt *jsrt) rxReplaceBlock(reObj interface{}, s string, blk interface{}, all bool) string {
 	return rt.rxReplaceWith(reObj, s, all, func(re *rxRe, text []rune, m *rxMatch) string {
 		rt.rxSetGlobals(rxNewMatchObj(re.src, re.flags, s, m))
@@ -7862,34 +7868,6 @@ func (rt *jsrt) rxReplaceWith(reObj interface{}, s string, all bool, with func(*
 		out.WriteString(string(text[last:]))
 	}
 	return out.String()
-}
-
-func (rt *jsrt) rxSplit(reObj interface{}, s string) *jsArray {
-	re := rxObjRe(reObj)
-	text := []rune(s)
-	parts := &jsArray{}
-	at, last := 0, 0
-	for at <= len(text) {
-		m, ok := re.search(text, at)
-		if !ok {
-			rt.fail("regexp: step limit exceeded")
-		}
-		if m == nil {
-			break
-		}
-		if m.end == m.begin {
-			if m.begin >= len(text) {
-				break
-			}
-			parts.elems = append(parts.elems, string(text[last:m.begin+1]))
-			last, at = m.begin+1, m.begin+1
-		} else {
-			parts.elems = append(parts.elems, string(text[last:m.begin]))
-			last, at = m.end, m.end
-		}
-	}
-	parts.elems = append(parts.elems, string(text[last:]))
-	return parts
 }
 
 // rxWantsPattern names the String methods whose argument is a PATTERN, which Ruby
@@ -8010,11 +7988,11 @@ func (rt *jsrt) rxRegexMethod(target interface{}, name string, args []interface{
 	// Ruby's String methods, which the base js_rmcall knows nothing about.
 	if s, isStr := target.(string); isStr && len(args) > 0 {
 		switch name {
-		case "match", "match?", "=~", "scan", "sub", "gsub", "sub!", "gsub!", "split", "index":
+		case "match", "match?", "=~", "scan", "sub", "gsub", "sub!", "gsub!", "split":
 			pos, blk := rubyBlockArgs(args)
 			reObj := argAt(pos, 0)
 			if !rxIsRegexObj(reObj) {
-				if name == "split" || name == "index" {
+				if name == "split" {
 					return nil, false // a plain-string argument stays the base behaviour
 				}
 				// #match / #match? compile a String pattern; #sub / #gsub / #scan
@@ -8023,7 +8001,7 @@ func (rt *jsrt) rxRegexMethod(target interface{}, name string, args []interface{
 				if name != "match" && name != "match?" && name != "=~" {
 					src = rxQuoteText(src)
 				}
-				reObj = rxNewRegexObj(src, "mpn")
+				reObj = rxNewRegexObj(src, "mpnO")
 			}
 			switch name {
 			case "match":
@@ -8047,11 +8025,9 @@ func (rt *jsrt) rxRegexMethod(target interface{}, name string, args []interface{
 				if blk != nil {
 					return rt.rxReplaceBlock(reObj, s, blk, all), true
 				}
-				return rt.rxReplace(reObj, s, rt.rubyStr(argAt(pos, 1)), all), true
+				return rt.rxReplaceWith(reObj, s, all, rt.rubySubWith(argAt(pos, 1))), true
 			case "split":
-				return rt.rxSplit(reObj, s), true
-			case "index":
-				return rt.rxMatchOp(reObj, s), true
+				return rt.rubySplitCall(s, args), true
 			}
 		}
 	}
@@ -8205,7 +8181,7 @@ func rubyReDescSrc(src string) string {
 // rubyReOptBits is Regexp#options from the engine flags: IGNORECASE 1, EXTENDED
 // 2, MULTILINE 4. Twin of reOptBits in ruby-interpreter.abnf.
 func rubyReOptBits(flags string) int {
-	flags = strings.TrimPrefix(flags, "mpn")
+	flags = strings.TrimPrefix(flags, "mpnO")
 	n := 0
 	if strings.Contains(flags, "i") {
 		n += 1
@@ -8232,7 +8208,7 @@ func (rt *jsrt) rubyRegexNew(args []interface{}) interface{} {
 	} else if rubyTruthy(argAt(args, 1)) {
 		bits = 1
 	}
-	flags := "mpn"
+	flags := "mpnO"
 	if bits&1 != 0 {
 		flags += "i"
 	}
@@ -8250,10 +8226,10 @@ func (rt *jsrt) rubyRegexNew(args []interface{}) interface{} {
 }
 
 // rubyReOpts is a Ruby Regexp's options as MRI writes them, from the engine flags
-// the ruby grammars compile with ("mpn" then i, s for Ruby's m, x). Twin of reOpts
+// the ruby grammars compile with ("mpnO" then i, s for Ruby's m, x). Twin of reOpts
 // in languages/ruby-interpreter.abnf, which states the rule.
 func rubyReOpts(flags string, embed bool) string {
-	flags = strings.TrimPrefix(flags, "mpn")
+	flags = strings.TrimPrefix(flags, "mpnO")
 	m, i, x := strings.Contains(flags, "s"), strings.Contains(flags, "i"), strings.Contains(flags, "x")
 	on, off := "", ""
 	for _, o := range []struct {

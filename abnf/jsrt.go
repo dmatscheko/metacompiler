@@ -7099,32 +7099,6 @@ func (rt *jsrt) rubyMathArg(name string, x float64) float64 {
 // rbRangeToArr / rbRangeMethod in languages/lib/ruby-rt.metajs, rangeToA /
 // rangeMethod in languages/ruby-interpreter.abnf.
 
-// rubyStrSucc is String#succ for the simple alphanumeric case: the last character
-// is incremented, carrying into the one before it when it wraps ("az" -> "ba").
-func rubyStrSucc(s string) string {
-	if s == "" {
-		return ""
-	}
-	b := []byte(s)
-	for i := len(b) - 1; i >= 0; i-- {
-		switch {
-		case b[i] >= 'a' && b[i] < 'z', b[i] >= 'A' && b[i] < 'Z', b[i] >= '0' && b[i] < '9':
-			b[i]++
-			return string(b)
-		case b[i] == 'z':
-			b[i] = 'a'
-		case b[i] == 'Z':
-			b[i] = 'A'
-		case b[i] == '9':
-			b[i] = '0'
-		default:
-			b[i]++
-			return string(b)
-		}
-	}
-	return string(b[0]) + string(b)
-}
-
 // rubyRangeArr materializes lo..hi (excl: the three-dot form) as an array. The
 // step cap keeps a nonsensical range from hanging the program.
 func (rt *jsrt) rubyRangeArr(lo, hi interface{}, excl bool) *jsArray {
@@ -8399,6 +8373,13 @@ func (rt *jsrt) rubySetSlice(o, k1, k2, v interface{}) interface{} {
 		return b
 	}
 	if str, isStr := o.(string); isStr {
+		_, kStr := k1.(string)
+		_, kBox := k1.(*jsRStr)
+		if kStr || kBox || rxIsRegexObj(k1) {
+			a, b := rt.rubyStrPatSpan(str, k1, k2)
+			rs := []rune(str)
+			return &jsRStr{s: string(rs[:a]) + rt.rubyStr(v) + string(rs[b:])}
+		}
 		n := rt.strLen(str)
 		s, l := rubySliceBounds(n, k1, k2)
 		if s < 0 || s > n {
@@ -8847,11 +8828,6 @@ func (rt *jsrt) rubySmMethod(o, name string, sargs []string, nargs []float64) (i
 		return float64(rubyCasecmp(o, sarg(0))), true
 	case "casecmp?":
 		return caseMapMode(o, caseFold|caseFull) == caseMapMode(sarg(0), caseFold|caseFull), true
-	case "rindex":
-		if i := rubySmRindexUnits(rt, o, sarg(0)); i >= 0 {
-			return float64(i), true
-		}
-		return jsNull, true
 	case "insert":
 		n := rt.strLen(o)
 		at := num(0)
@@ -9039,6 +9015,15 @@ func (rt *jsrt) rubyIndexGet(o, k interface{}) interface{} {
 	if ko, isRng := rubyIsRange(k); isRng {
 		if v, ok := rt.rubySubrange(o, ko.props["begin"], ko.props["end"], rt.truthy(ko.props["excl"])); ok {
 			return v
+		}
+	}
+	if str, isStr := o.(string); isStr {
+		switch k.(type) {
+		case string, *jsRStr:
+			return rt.rubyStrPatAt(str, k, nil)
+		}
+		if rxIsRegexObj(k) {
+			return rt.rubyStrPatAt(str, k, nil)
 		}
 	}
 	idx := int(rt.toNumber(k))
@@ -10888,6 +10873,14 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 		// start+len.
 		case "[]", "slice":
 			spos, _ := rubyBlockArgs(args)
+			_, kStr := argAt(spos, 0).(string)
+			if kStr || rxIsRegexObj(argAt(spos, 0)) {
+				var g interface{}
+				if len(spos) > 1 {
+					g = spos[1]
+				}
+				return rt.rubyStrPatAt(o, spos[0], g)
+			}
 			if len(spos) > 1 {
 				return rt.rubyStrSubseq(o, spos[0], spos[1])
 			}
@@ -10922,9 +10915,7 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 				}
 			}
 			return false
-		// Plain String methods, with ruby-interpreter.abnf's bodies. `split` keeps
-		// that half's LITERAL separator (MRI's single space is the awk separator - a
-		// run of whitespace with the leading run dropped); the two halves must agree.
+		// Plain String methods, with ruby-interpreter.abnf's bodies.
 		case "capitalize":
 			if o == "" {
 				return o
@@ -10947,26 +10938,9 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 			}
 			return out
 		case "split":
-			sep := " "
-			if pos, _ := rubyBlockArgs(args); len(pos) > 0 {
-				sep = rt.toString(pos[0])
-			}
-			out := &jsArray{}
-			if sep == "" {
-				for i := 0; i < rt.strLen(o); i++ {
-					out.elems = append(out.elems, rt.strAt(o, i))
-				}
-				return out
-			}
-			for _, part := range strings.Split(o, sep) {
-				out.elems = append(out.elems, part)
-			}
-			return out
-		case "index":
-			if i := rt.strIndexOf(o, rt.toString(argAt(args, 0))); i >= 0 {
-				return float64(i)
-			}
-			return jsNull
+			return rt.rubySplitCall(o, args)
+		case "index", "rindex":
+			return rt.rubyStrIndex(o, name == "index", args)
 		case "empty?":
 			return o == ""
 		case "succ", "next":

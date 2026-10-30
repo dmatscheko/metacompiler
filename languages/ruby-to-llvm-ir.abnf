@@ -6023,10 +6023,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // has [[:alpha:]] but is NOT a POSIX ERE - it keeps \d, \w, \s, lazy quantifiers,
     // (?...) groups and an escaping backslash inside a bracket, all of which the
     // engine's whole-dialect "e" letter would remove. The engine's "n" makes a
-    // backreference to a group that did not take part fail. o/u/n/e/s are encoding and
+    // backreference to a group that did not take part fail, and "O" captures only the
+    // named groups of a pattern that has any. o/u/n/e/s are encoding and
     // once-only hints that do not change the match; they are accepted and ignored.
     function rubyReFlags(rflags) {
-        var out = "mpn"
+        var out = "mpnO"
         for (var i = 0; i < rflags.length; i++) {
             var f = rflags.charAt(i)
             if (f == "i") { out += "i" }

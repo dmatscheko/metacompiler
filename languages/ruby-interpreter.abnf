@@ -2465,6 +2465,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // String#to_f and Float(String), MRI's rb_cstr_to_dbl (rbnStrToDbl).
     include("lib/hex-float.js")
     include("lib/ruby-num.js")
+    include("lib/ruby-str.js")
 
     // ----- Control signals: everything is an expression, so a body threads the
     // value of its last statement (Ruby's implicit return). break / next / return
@@ -4215,16 +4216,6 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
 
     // String#rindex: the LAST index of sub, or -1. indexOf ignores its second
     // argument in this dialect, so the scan is written out.
-    function smRindex(s, sub) {
-        if (sub.length == 0) { return s.length }
-        var i = s.length - sub.length
-        while (i >= 0) {
-            if (s.substring(i, i + sub.length) == sub) { return i }
-            i = i - 1
-        }
-        return 0 - 1
-    }
-
     // casecmp folds ASCII only - to UPPER case, so "[".casecmp("a") is 1 - and then
     // compares like MRI's bytes, i.e. by code point: a surrogate unit (an astral
     // character) sorts above every BMP unit from U+E000. Twins: rubyCasecmp in
@@ -4299,7 +4290,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (name == "lines") { return {ok: true, v: smLines(s)} }
         if (name == "partition" || name == "rpartition") {
             var sep = sargs[0]
-            var at = name == "partition" ? s.indexOf(sep) : smRindex(s, sep)
+            var at = name == "partition" ? s.indexOf(sep) : rbsRfind(s, sep, s.length)
             if (at < 0) {
                 if (name == "partition") { return {ok: true, v: [s, "", ""]} }
                 return {ok: true, v: ["", "", s]}
@@ -4320,11 +4311,6 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
         if (name == "casecmp") { return {ok: true, v: rbCasecmp(s, sargs[0])} }
         if (name == "casecmp?") { return {ok: true, v: unicodeCase(s, 18) == unicodeCase(sargs[0], 18)} }
-        if (name == "rindex") {
-            var ri = smRindex(s, sargs[0])
-            if (ri < 0) { return {ok: true, v: null} }
-            return {ok: true, v: ri}
-        }
         if (name == "insert") {
             var at2 = Math.trunc(nargs[0])
             if (at2 < 0) { at2 = at2 + s.length + 1 }
@@ -4420,7 +4406,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (excl && cur == limit) { return out }
             out.push(cur)
             if (cur == limit) { return out }
-            cur = strSucc(cur)
+            cur = rbsSucc(cur)
             guard = guard + 1
         }
         return out
@@ -5440,18 +5426,6 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     function mkRange(lo, hi, excl) { return {__rng: true, lo: rsText(lo), hi: rsText(hi), excl: excl} }
     function isRange(v) { return v !== null && v !== undefined && typeof v == "object" && v.__rng === true }
     // "a".succ: increment the last character, carrying into the ones before it.
-    function strSucc(s) {
-        var i = s.length - 1
-        var out = s
-        while (i >= 0) {
-            var cc = out.charCodeAt(i)
-            if (cc == 122) { out = out.slice(0, i) + "a" + out.slice(i + 1); i = i - 1; continue }
-            if (cc == 90) { out = out.slice(0, i) + "A" + out.slice(i + 1); i = i - 1; continue }
-            if (cc == 57) { out = out.slice(0, i) + "0" + out.slice(i + 1); i = i - 1; continue }
-            return out.slice(0, i) + String.fromCharCode(cc + 1) + out.slice(i + 1)
-        }
-        return "a" + out
-    }
     function rangeToA(r) {
         if (r.hi === null || r.hi === undefined || r.lo === null || r.lo === undefined) {
             fail("cannot convert an endless range to an array")
@@ -5465,7 +5439,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 if (r.excl && cur == r.hi) { break }
                 out.push(cur)
                 if (cur == r.hi) { break }
-                cur = strSucc(cur)
+                cur = rbsSucc(cur)
                 guard = guard + 1
             }
             return out
@@ -7518,6 +7492,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
         // s[a..b] / a[a..b]: a Range subscript is a SUBSEQUENCE, not an index.
         if (isRange(i) && (typeof o == "string" || Array.isArray(o))) { return rsubrange(o, i) }
+        if (typeof o == "string" && (typeof i == "string" || isRStr(i) || isRegex(i))) { return strPatAt(o, i, undefined) }
         if (typeof o == "string") {
             if (i < 0) { i += o.length }
             if (i < 0 || i >= o.length) { return null }
@@ -7590,8 +7565,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // (/"x" =~ /[[:alpha:]]/ matches) but is NOT a POSIX ERE - it keeps \d, \w,
         // \s, lazy quantifiers, (?...) groups and an escaping backslash inside a
         // bracket, all of which the engine's whole-dialect "e" letter would remove.
-        // "n": a backreference to a group that did not take part fails.
-        var neutral = "mpn"
+        // "n": a backreference to a group that did not take part fails. "O": a
+        // pattern that names a group captures only the named ones (Onigmo).
+        var neutral = "mpnO"
         for (var i = 0; i < rflags.length; i++) {
             var f = rflags.charAt(i)
             if (f == "i") { neutral += "i" }
@@ -7748,25 +7724,35 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
         return out
     }
+    // sub / gsub: each match is replaced by the block's answer (with $~ set to
+    // it), by the Hash's value for the matched text, or by the expanded template.
+    // Twins: rbRxReplace in lib/ruby-rt.metajs, rxReplaceBlock / rubySubWith in abnf.
     function reSub(rv, s, args, blk, all) {
-        if (blk !== null && blk !== undefined) {
-            var out = ""
-            var at = 0
-            var last = 0
-            while (at <= s.length) {
-                var m = rxSearch(rv.prog, s, at)
-                if (m === null) { break }
-                var md = {__md: true, rev: rv, text: s, m: m}
-                setLastMatch(md)
-                out += s.slice(last, m.begin) + rstr(blockCall(blk, [rxGroup(rv.prog, s, m, 0)]))
-                last = m.end
-                at = m.end == m.begin ? m.end + 1 : m.end
-                if (m.end == m.begin && m.begin < s.length) { out += s.charAt(m.begin); last = m.begin + 1 }
-                if (!all) { break }
+        var hasBlk = blk !== null && blk !== undefined
+        var out = ""
+        var at = 0
+        var last = 0
+        while (at <= s.length) {
+            var m = rxSearch(rv.prog, s, at)
+            if (m === null) { break }
+            var rep = ""
+            if (hasBlk) {
+                setLastMatch({__md: true, rev: rv, text: s, m: m})
+                rep = rstr(blockCall(blk, [rxGroup(rv.prog, s, m, 0)]))
+            } else if (isDict(args[1])) {
+                var hv = anytype
+                hv = rindex(args[1], rxGroup(rv.prog, s, m, 0))
+                rep = hv === null || hv === undefined ? "" : rstr(hv)
+            } else {
+                rep = rbsExpand(rv.prog, s, m, rstr(args[1]))
             }
-            return out + s.slice(last)
+            out += s.slice(last, m.begin) + rep
+            last = m.end
+            at = m.end == m.begin ? m.end + 1 : m.end
+            if (m.end == m.begin && m.begin < s.length) { out += s.charAt(m.begin); last = m.begin + 1 }
+            if (!all) { break }
         }
-        return rxReplace(rv.prog, s, rstr(args[1]), all)
+        return out + s.slice(last)
     }
 
     // ----- Method dispatch (js_mcall equivalent) -----
@@ -7962,6 +7948,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // back from the end. Mirrors rbStrSubseq / rbArrSubseq of lib/ruby-rt.metajs and
     // rubyStrSubseq / rubyArrSubseq of abnf/jsrt.go.
     function rsubseq(o, start, len) {
+        if (typeof o == "string" && isRegex(start)) { return strPatAt(o, start, len) }
         var n = o.length
         var s = Math.trunc(toF(start))
         var k = Math.trunc(toF(len))
@@ -7977,6 +7964,33 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // range they most recently materialized, a materialized range having no endpoints
     // of its own (js_rrangearr's slot). A Range is a real object here, so this half
     // is exact for every shape.
+    // s[str] is str when s contains it; s[re] and s[re, group] the matched text;
+    // nil otherwise. Twins: rbStrPatAt in lib/ruby-rt.metajs, rubyStrPatAt in
+    // abnf/jsrtrubystr.go.
+    function strPatAt(s, k, g) {
+        if (!isRegex(k)) { return s.indexOf(rstr(k)) >= 0 ? rstr(k) : null }
+        var md = reMatch(k, s, 0)
+        if (md === null) { return null }
+        return mdGet(md, g === undefined ? 0 : g)
+    }
+    // The units s[k1] = v / s[k1, k2] = v replaces when k1 is a String or a Regexp
+    // (k2 its group), as {a, b}; IndexError when there is nothing to replace.
+    function strPatSpan(s, k1, k2) {
+        if (!isRegex(k1)) {
+            var t = rstr(k1)
+            var a = s.indexOf(t)
+            if (a < 0) { raiseErr("[]=", "IndexError", "string not matched") }
+            return {a: a, b: a + t.length}
+        }
+        var md = reMatch(k1, s, 0)
+        if (md === null) { raiseErr("[]=", "IndexError", "regexp not matched") }
+        var g = 0
+        if (typeof k2 == "number") { g = Math.trunc(k2) } else if (k2 !== undefined && k2 !== null) { g = rxIndexOfName(k1.prog, isSym(k2) ? k2.s : rstr(k2)) }
+        if (g < 0 || g > k1.prog.ngroups) { raiseErr("[]=", "IndexError", "index " + g + " out of regexp") }
+        var caps = md.m.caps
+        if (caps[2 * g] < 0) { raiseErr("[]=", "IndexError", "regexp group " + g + " not matched") }
+        return {a: caps[2 * g], b: caps[2 * g + 1]}
+    }
     function rsubrange(o, r) {
         var n = o.length
         var lo = (r.lo === null || r.lo === undefined) ? 0 : Math.trunc(toF(r.lo))
@@ -8741,11 +8755,27 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (typeof target == "string") {
             // No String method keeps an argument, so a box argument is read as its text.
             for (var ai = 0; ai < args.length; ai++) { if (isRStr(args[ai])) { args = rsTextList(args); break } }
-            // split and index take a plain string too, so they only route to the
-            // regexp engine when the argument really IS a pattern.
-            if (args.length > 0 && isRegex(args[0])) {
-                if (name == "split") { return rxSplit(args[0].prog, target) }
-                if (name == "index") { return reMatchOp(args[0], target) }
+            // index and rindex take a String or a Regexp, and a character offset.
+            // Twins: rbStrSearch in lib/ruby-rt.metajs, rubyStrIndex in abnf/jsrtrubystr.go.
+            if (name == "index" || name == "rindex") {
+                var ipos = args.length > 1 ? Math.trunc(toF(args[1])) : 0
+                var ist = name == "index" ? rbsIndexStart(target, ipos) : rbsRindexStart(target, ipos, args.length > 1)
+                if (ist >= 0 && isRegex(args[0])) {
+                    if (name == "rindex") { ist = rbsRfindRx(args[0].prog, target, ist) }
+                    if (ist >= 0) {
+                        var imd = reMatch(args[0], target, ist)
+                        return imd === null ? null : rbsCharIdx(target, imd.m.begin)
+                    }
+                }
+                if (isRegex(args[0])) { setLastMatch(null) }
+                if (ist < 0 || isRegex(args[0])) { return null }
+                var iu = name == "index" ? rbsFind(target, rstr(args[0]), ist) : rbsRfind(target, rstr(args[0]), ist)
+                return iu < 0 ? null : rbsCharIdx(target, iu)
+            }
+            if (name == "split") {
+                var sre = args.length > 0 && isRegex(args[0]) ? args[0].prog : null
+                var ssep = args.length == 0 || args[0] === null || args[0] === undefined || sre !== null ? null : rstr(args[0])
+                return rbsSplit(target, ssep == " " ? null : ssep, sre, args.length > 1 ? toF(args[1]) : 0)
             }
             if (name == "length" || name == "size") { return charCount(target) }
             if (name == "to_s" || name == "to_str") { return target }
@@ -8763,7 +8793,6 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (name == "reverse") { return target.split("").reverse().join("") }
             if (name == "strip") { return strStrip(target) }
             if (name == "chars") { return target.split("") }
-            if (name == "split") { return args.length > 0 ? target.split(rstr(args[0])) : target.split(" ") }
             // String#[] / #slice: one index, a Range, or start+len.
             if (name == "[]" || name == "slice") {
                 if (args.length > 1) { return rsubseq(target, args[0], args[1]) }
@@ -8773,13 +8802,12 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             // matches; reading only args[0] silently ignored the rest.
             if (name == "start_with?") { return strAnyPrefix(target, args) }
             if (name == "end_with?") { return strAnySuffix(target, args) }
-            if (name == "index") { var ix = target.indexOf(rstr(args[0])); return ix < 0 ? null : ix }
             if (name == "empty?") { return target.length == 0 }
             if (name == "inspect") { return strInspect(target) }
             // 0 for an empty string where MRI raises ArgumentError; the two compiled
             // halves answer 0 as well.
             if (name == "ord") { return target.length == 0 ? 0 : target.charCodeAt(0) }
-            if (name == "succ" || name == "next") { return strSucc(target) }
+            if (name == "succ" || name == "next") { return rbsSucc(target) }
             if (name == "replace") { return rstr(args[0]) }
             // One CHARACTER at a time, a surrogate pair whole, as chars splits.
             if (name == "each_char") {
@@ -12796,6 +12824,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (o.__fz) { raiseErr("[]=", "FrozenError", "can't modify frozen String") }
             o.__rs = rsetSlice(o.__rs, k1, k2, v).__rs
             return o
+        }
+        if (typeof o == "string" && (typeof k1 == "string" || isRStr(k1) || isRegex(k1))) {
+            var ps = strPatSpan(o, k1, k2)
+            return mkRStr(o.substring(0, ps.a) + rstr(v) + o.substring(ps.b, o.length))
         }
         if (typeof o == "string") {
             var sb = sliceBounds(o.length, k1, k2)

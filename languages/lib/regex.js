@@ -725,7 +725,7 @@ function rxExpandQuotes(p) {
 // pattern with none it is either a legacy octal escape (JavaScript, flag o) or an
 // error (everywhere else) - and the octal reading has to CONSUME the following digits,
 // which the parser cannot undo after the fact.
-function rxCountGroups(p) {
+function rxCountGroups(p, plain) {
     var n = 0
     var i = 0
     var incls = false
@@ -739,7 +739,11 @@ function rxCountGroups(p) {
         }
         if (c == 91) { incls = true; i = i + 1; continue }
         if (c != 40) { i = i + 1; continue }
-        if (i + 1 >= p.length || p.charCodeAt(i + 1) != 63) { n = n + 1; i = i + 1; continue }
+        if (i + 1 >= p.length || p.charCodeAt(i + 1) != 63) {
+            if (plain) { n = n + 1 }
+            i = i + 1
+            continue
+        }
         // (?<name> and (?'name' capture; (?<= and (?<! are lookbehind, and every other
         // (? form is non-capturing.
         var c2 = i + 2 < p.length ? p.charCodeAt(i + 2) : 0
@@ -1753,6 +1757,13 @@ function rxParseGroup(st) {
         }
         rxErr(st, "unsupported group form (?" + p.charAt(st.i) + ")")
         return rxNode("empty")
+    }
+    // Onigmo: once a pattern names a group, a plain one does not capture.
+    if (st.noauto) {
+        var ncg = rxNode("group")
+        ncg.items.push(rxParseAlt(st))
+        rxExpect(st, 41, "unterminated group")
+        return ncg
     }
     var cg = rxNode("group")
     st.ngroups = st.ngroups + 1
@@ -5771,6 +5782,7 @@ function rxCompile(pattern, flags) {
     var pyascii = false
     var re2 = false
     var uni = false
+    var onig = false
     // C is followed by PHP's modifiers rather than these letters (rxPcre).
     var pcre = flags.length > 0 && flags.charAt(0) == "C"
     var fi = pcre ? flags.length : 0
@@ -5793,6 +5805,7 @@ function rxCompile(pattern, flags) {
         else if (f == "a") { pyascii = true }
         else if (f == "R") { re2 = true }
         else if (f == "U") { uni = true }
+        else if (f == "O") { onig = true }
         fi = fi + 1
     }
     // R reads the pattern as Go does and compiles its J spelling (rxRe2).
@@ -5828,15 +5841,18 @@ function rxCompile(pattern, flags) {
     // group counter nor the parser needs a quoting mode. re.src keeps the ORIGINAL
     // pattern, which is what a language's .source / inspect reports.
     var pat = re2 ? tr.out : pcre ? tp.out : quoting ? rxExpandQuotes(pattern) : pattern
+    // O is Onigmo's capture rule: a pattern with a named group captures only the
+    // named ones.
+    var noauto = onig && rxCountGroups(pat, false) > 0
     var st = {
         p: pat, i: 0, n: pat.length, err: "",
         ngroups: 0, names: [], nameGroups: [], pending: [], ext: ext, dotall: dotall,
-        octal: octal, ntotal: ere ? 0 : rxCountGroups(pat), ere: ere, posix: posix,
+        octal: octal, ntotal: ere ? 0 : rxCountGroups(pat, !noauto), ere: ere, posix: posix,
         depth: 0, java: java, errAt: -1, pcls: rxNewCls(), gnodes: [rxNode("empty")],
         py: py, icase: icase, multi: multi, gend: 0, gflags: "",
         ucase: ucase && java, uclass: false, unix: unix && java, inl: false, supp: false,
         canon: false, pyuni: py && !pyascii, re2: re2, pcre: pcre, open: [], tctx: [], brbase: 0 - 1,
-        inlook: 0, startopt: false, uni: uni
+        inlook: 0, startopt: false, uni: uni, noauto: noauto
     }
     // Under P and J case folding and line anchoring are decided per atom while
     // parsing.

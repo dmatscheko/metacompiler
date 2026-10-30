@@ -4481,6 +4481,40 @@ def s101
   check("kw101g", d.k(a: v[0]) == 4 && d.j(a: v[1]) == [1, 2] && pr.call(a: v[2]) == 2 && s101_g(a: v[1], b: v[2]) == [1, 2, 3])
 end
 
+# ===== SECTION 102: String#split, #index / #rindex, #[] with a pattern, sub templates, #succ =====
+# split is MRI's: no argument or " " is awk mode, a limit caps the fields, trailing
+# empty fields go unless the limit is negative, and a Regexp's groups are kept.
+# index / rindex take an offset and a Regexp; s[str] / s[re, n] read and write a
+# match; a sub template knows \& \` \' \k<n>, a Hash maps each match; a pattern with
+# a named group captures only the named ones; succ skips non-alphanumerics.
+# /usr/bin/ruby 2.6 settles each.
+def s102
+  w = ["a,b,,c,,", " a  b ", "a1b2", "", "abc", ",", " "]
+  check("sp102a", w[0].split(w[5]) == ["a", "b", "", "c"] && w[0].split(w[5], 2) == ["a", "b,,c,,"] &&
+        w[0].split(w[5], -1) == ["a", "b", "", "c", "", ""])
+  check("sp102b", w[1].split(w[6]) == ["a", "b"] && w[1].split == ["a", "b"] && w[1].split(w[6], 2) == ["a", "b "])
+  check("sp102c", w[2].split(/(\d)/) == ["a", "1", "b", "2"] && w[3].split(w[5]) == [] && w[4].split(//) == ["a", "b", "c"] &&
+        w[4].split("", 2) == ["a", "bc"])
+  h = ["hello", "hello world", "ell", "z", "o", "l"]
+  check("ix102d", h[1].index(h[4], 5) == 7 && h[1].rindex(h[4], 5) == 4 && h[1].index(h[4], 20).nil? &&
+        h[1].index("", 11) == 11 && h[1].index(h[4], -4) == 7)
+  check("ix102e", h[0].index(/l/) == 2 && h[0].rindex(/l/) == 3 && h[0].index(/l/, 3) == 3 &&
+        h[0].index(h[5], 3) == 3 && h[0].rindex(h[5], 2) == 2 && h[0].rindex(/l/, 2) == 2)
+  check("sb102f", h[0][/l+/] == "ll" && h[0][h[2]] == "ell" && h[0][h[3]].nil? && h[0][/(h)(e)/, 2] == "e" &&
+        h[0].slice(/l+/) == "ll" && h[0].slice(h[2]) == "ell")
+  t = h[1].dup
+  t["world"] = "ruby"
+  t[/l+/] = "L"
+  e1 = begin; t["zz"] = "q"; rescue IndexError => e; e.message; end
+  check("sb102g", t == "heLo ruby" && e1 == "string not matched")
+  check("su102h", "abc".sub(/b/, "[\\&]") == "a[b]c" && "abc".sub(/b/, "\\`|\\'") == "aa|cc" &&
+        "cat hat".gsub(/[ch]/, "c" => "C", "h" => "H") == "Cat Hat" && "abc".sub(/(?<x>b)/, "{\\k<x>}") == "a{b}c")
+  md = "ab".match(/(?<first>a)(b)/)
+  check("nm102i", md[2].nil? && md.size == 2 && md.captures == ["a"])
+  u = ["1.9", "a-9", "a z", "<<koala>>", "Zz", "", "9", "***", "zz"]
+  check("sc102j", u.map { |s| s.succ } == ["2.0", "a-10", "b a", "<<koalb>>", "AAa", "", "10", "**+", "aaa"])
+end
+
 s39() # SECTION-CALL 39
 s40() # SECTION-CALL 40
 s41() # SECTION-CALL 41
@@ -4544,5 +4578,6 @@ s98() # SECTION-CALL 98
 s99() # SECTION-CALL 99
 s100() # SECTION-CALL 100
 s101() # SECTION-CALL 101
+s102() # SECTION-CALL 102
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

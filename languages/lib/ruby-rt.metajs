@@ -117,6 +117,9 @@ import "./ruby-respond.js"
 import "./hex-float.js"
 import "./ruby-num.js"
 
+// String#split, #succ and the other string.c algorithms shared with the interpreter.
+import "./ruby-str.js"
+
 // The shared layer-2 runtime: the externs every language implements identically,
 // parameterised by the rtk* hooks below.
 import "./runtime.metajs"
@@ -4234,57 +4237,6 @@ function rbClassOfSelf(self) {
 
 // ===================================================== ranges ===============
 
-// String#succ for the alphanumeric case: the last character is incremented,
-// carrying into the one before it when it wraps ("az" -> "ba").
-function rbStrSucc(s) {
-    if (s == "") { return "" }
-    var codes = []
-    var i = 0
-    while (i < s.length) {
-        codes.push(s.charCodeAt(i))
-        i = i + 1
-    }
-    var j = codes.length - 1
-    while (j >= 0) {
-        var c = codes[j]
-        var done = false
-        if (c >= 97 && c < 122) {
-            codes[j] = c + 1
-            done = true
-        } else if (c >= 65 && c < 90) {
-            codes[j] = c + 1
-            done = true
-        } else if (c >= 48 && c < 57) {
-            codes[j] = c + 1
-            done = true
-        } else if (c == 122) {
-            codes[j] = 97
-        } else if (c == 90) {
-            codes[j] = 65
-        } else if (c == 57) {
-            codes[j] = 48
-        } else {
-            codes[j] = c + 1
-            done = true
-        }
-        if (done) { return rbFromCodes(codes) }
-        j = j - 1
-    }
-    // Every position wrapped: Go prepends the FIRST byte of the wrapped string.
-    var out = rbFromCodes(codes)
-    return out.charAt(0) + out
-}
-
-function rbFromCodes(codes) {
-    var out = ""
-    var i = 0
-    while (i < codes.length) {
-        out = out + String.fromCharCode(codes[i])
-        i = i + 1
-    }
-    return out
-}
-
 // TWO DELIBERATE DIVERGENCES FROM MRI LIVE HERE (ruby 2.6.10); they are what
 // materializing means:
 //   * a FLOAT range iterates: `(1.5..3.5).to_a' is [1.5, 2.5, 3.5] where MRI raises
@@ -4305,7 +4257,7 @@ function rbRangeArr(lo, hi, excl) {
             if (s.length > hs.length) { break }
             out.push(s)
             if (s == hs) { break }
-            s = rbStrSucc(s)
+            s = rbsSucc(s)
             n = n + 1
         }
         return out
@@ -4745,7 +4697,7 @@ function rbRxQuoteLit(s) {
 // String#sub / #gsub with a BLOCK: the block is handed each match's text, with $~
 // set to that match, and answers its replacement. Twins: reSub in
 // ruby-interpreter.abnf, rxReplaceBlock in abnf/jsrtregex.go.
-function rbRxReplaceBlock(reObj, s, blk, all) {
+function rbRxReplace(reObj, s, blk, repl, all) {
     var re = rbRxObjRe(reObj)
     var out = ""
     var at = 0
@@ -4753,9 +4705,18 @@ function rbRxReplaceBlock(reObj, s, blk, all) {
     while (at <= s.length) {
         var m = rxSearch(re, s, at)
         if (m === null) { break }
-        rbRxSetGlobals(rbRxNewMatch(re["src"], re["flags"], s, m))
         var g = rxGroup(re, s, m, 0)
-        out = out + s.substring(last, m["begin"]) + rbStr(rbCall1(blk, g === null ? "" : g))
+        var rep = ""
+        if (blk !== null) {
+            rbRxSetGlobals(rbRxNewMatch(re["src"], re["flags"], s, m))
+            rep = rbStr(rbCall1(blk, g === null ? "" : g))
+        } else if (rbIsDict(repl)) {
+            var hv = js_rget(repl, g)
+            rep = rtIsNil(hv) ? "" : rbStr(hv)
+        } else {
+            rep = rbsExpand(re, s, m, rbStr(repl))
+        }
+        out = out + s.substring(last, m["begin"]) + rep
         if (m["end"] == m["begin"]) {
             if (m["end"] < s.length) { out = out + s.charAt(m["end"]) }
             last = m["end"] + 1
@@ -4803,7 +4764,7 @@ function rbRxMatchOp(l, r) {
 // abnf/jsrtregex.go, which states the rule.
 function rbReOpts(flags, embed) {
     var f = flags
-    if (f.substring(0, 3) == "mpn") { f = f.substring(3, f.length) }
+    if (f.substring(0, 4) == "mpnO") { f = f.substring(4, f.length) }
     var m = f.indexOf("s") >= 0
     var i = f.indexOf("i") >= 0
     var x = f.indexOf("x") >= 0
@@ -4835,7 +4796,7 @@ function rbReDescSrc(src) {
 // abnf/jsrtregex.go.
 function rbReOptBits(flags) {
     var f = flags
-    if (f.substring(0, 3) == "mpn") { f = f.substring(3, f.length) }
+    if (f.substring(0, 4) == "mpnO") { f = f.substring(4, f.length) }
     var n = 0
     if (f.indexOf("i") >= 0) { n = n + 1 }
     if (f.indexOf("x") >= 0) { n = n + 2 }
@@ -4851,7 +4812,7 @@ function rbRegexNew(argv) {
     var bits = 0
     if (typeof o == "number") { bits = Math.floor(o) }
     else if (!rtIsNil(o) && o !== false) { bits = 1 }
-    var f = "mpn"
+    var f = "mpnO"
     if (bits % 2 == 1) { f = f + "i" }
     if (Math.floor(bits / 4) % 2 == 1) { f = f + "s" }
     if (Math.floor(bits / 2) % 2 == 1) { f = f + "x" }
@@ -4927,7 +4888,6 @@ function rbRxMethod(target, name, args) {
         var wants = false
         if (name == "match" || name == "match?" || name == "=~" || name == "scan") { wants = true }
         if (name == "sub" || name == "gsub" || name == "sub!" || name == "gsub!") { wants = true }
-        if (name == "split" || name == "index") { wants = true }
         if (!wants) { return undefined }
         // `var pat = anytype`, not `var pat = args[0]`: MetaJS is typed and a local
         // keeps the type of its first assignment, so with a STRING pattern the
@@ -4937,16 +4897,16 @@ function rbRxMethod(target, name, args) {
         var pat = anytype
         pat = args[0]
         if (!rbRxIsRegex(pat)) {
-            if (name == "split" || name == "index") { return undefined }
             // #match / #match? compile a String pattern; #sub / #gsub / #scan match
             // it LITERALLY ("a.c".gsub(".", "-") is "a-c").
             var psrc = rbStr(args[0])
             if (name != "match" && name != "match?" && name != "=~") { psrc = rbRxQuoteLit(psrc) }
-            pat = rbRxNewRegex(psrc, "mpn")
+            pat = rbRxNewRegex(psrc, "mpnO")
         }
-        var sblk = rbBlockOf(args)
-        if (sblk !== null && (name == "sub" || name == "sub!" || name == "gsub" || name == "gsub!")) {
-            return rbRxReplaceBlock(pat, target, sblk, name == "gsub" || name == "gsub!")
+        if (name == "sub" || name == "sub!" || name == "gsub" || name == "gsub!") {
+            // sub! / gsub! answer nil when the pattern does not match at all.
+            if ((name == "sub!" || name == "gsub!") && rxSearch(rbRxObjRe(pat), target, 0) === null) { return null }
+            return rbRxReplace(pat, target, rbBlockOf(args), rbArgAt(args, 1), name == "gsub" || name == "gsub!")
         }
         if (name == "match") {
             var smd = rbRxRunMatch(pat, target, 0)
@@ -4956,12 +4916,6 @@ function rbRxMethod(target, name, args) {
         if (name == "match?") { return rxSearch(rbRxObjRe(pat), target, 0) !== null }
         if (name == "=~") { return rbRxMatchOp(pat, target) }
         if (name == "scan") { return rbRxScan(pat, target) }
-        // sub! / gsub! answer nil when the pattern does not match at all.
-        if ((name == "sub!" || name == "gsub!") && rxSearch(rbRxObjRe(pat), target, 0) === null) { return null }
-        if (name == "sub" || name == "sub!") { return rxReplace(rbRxObjRe(pat), target, rbStr(rbArgAt(args, 1)), false) }
-        if (name == "gsub" || name == "gsub!") { return rxReplace(rbRxObjRe(pat), target, rbStr(rbArgAt(args, 1)), true) }
-        if (name == "split") { return rxSplit(rbRxObjRe(pat), target) }
-        if (name == "index") { return rbRxMatchOp(pat, target) }
     }
     return undefined
 }
@@ -5617,14 +5571,7 @@ function rbEndsWith(target, args) {
     }
     return false
 }
-// String#strip / #chars / #split with a plain separator - the interpreter half's
-// bodies. split has no `split` in the frozen engine to lean on, so it walks.
-//
-// DELIBERATE DIVERGENCE FROM MRI, kept because the two halves must agree and this
-// is what ruby-interpreter.abnf does: MRI treats a SINGLE SPACE (and no
-// argument at all) as the "awk" separator - any run of whitespace, with leading
-// whitespace dropped - while this splits on the literal separator, so
-// `"a  b".split(" ")` is ["a", "", "b"] here and ["a", "b"] in MRI.
+// String#strip / #chars - the interpreter half's bodies.
 function rbStrStrip(s) {
     var a = 0
     var b = s.length
@@ -5656,25 +5603,6 @@ function rbPairAt(s, i) {
     var d = s.charCodeAt(i + 1)
     return d >= 56320 && d <= 57343
 }
-function rbStrSplit(s, sep) {
-    var out = []
-    if (sep == "") { return rbStrChars(s) }
-    var cur = ""
-    var i = 0
-    while (i < s.length) {
-        if (s.slice(i, i + sep.length) == sep) {
-            out.push(cur)
-            cur = ""
-            i = i + sep.length
-            continue
-        }
-        cur = cur + s.charAt(i)
-        i = i + 1
-    }
-    out.push(cur)
-    return out
-}
-
 function rbBlockOf(args) {
     if (args.length > 0 && rbIsBlk(args[args.length - 1])) { return rbBlkVal(args[args.length - 1]) }
     return null
@@ -7500,6 +7428,7 @@ function rbMethod(target, name, args) {
         // start+len.
         if (name == "[]" || name == "slice") {
             var sPos = rbNPos(args)
+            if (sPos > 1 && rbRxIsRegex(args[0])) { return rbStrPatAt(target, args[0], args[1]) }
             if (sPos > 1) { return rbStrSubseq(target, args[0], args[1]) }
             return js_rget(target, rbPosAt(args, sPos, 0))
         }
@@ -7521,13 +7450,22 @@ function rbMethod(target, name, args) {
         }
         if (name == "strip") { return rbStrStrip(target) }
         if (name == "chars") { return rbStrChars(target) }
-        if (name == "split") { return rbStrSplit(target, rbNPos(args) > 0 ? rbStr(args[0]) : " ") }
-        if (name == "index") {
-            var ix = target.indexOf(rbStr(rbArgAt(args, 0)))
-            return ix < 0 ? null : ix
+        if (name == "split") {
+            var spn = rbNPos(args)
+            var spre = anytype
+            spre = null
+            var spsep = anytype
+            spsep = null
+            if (spn > 0 && rbRxIsRegex(args[0])) {
+                spre = rbRxObjRe(args[0])
+            } else if (spn > 0 && args[0] !== null && args[0] !== undefined && rbStr(args[0]) != " ") {
+                spsep = rbStr(args[0])
+            }
+            return rbsSplit(target, spsep, spre, spn > 1 ? rbToF(args[1]) : 0)
         }
+        if (name == "index" || name == "rindex") { return rbStrSearch(target, name == "index", args) }
         if (name == "empty?") { return target.length == 0 }
-        if (name == "succ" || name == "next") { return rbStrSucc(target) }
+        if (name == "succ" || name == "next") { return rbsSucc(target) }
         if (name == "replace") { return rbStr(rbArgAt(args, 0)) }
         if (name == "each_char") {
             var ecb = rbBlockOf(args)
@@ -8217,6 +8155,7 @@ function js_rget(o, k) {
     // A String's s[i] / s[a..b] is a new String, so it answers a box. Twin of the
     // js_rget extern in abnf/jsrt.go.
     if (rbIsRange(k) && typeof o == "string") { return rbBoxOut(o, js_rsubrange(o, k["begin"], k["end"], k["excl"])) }
+    if (typeof o == "string" && (typeof k == "string" || rtTag(k, "__rstr") || rbRxIsRegex(k))) { return rbStrPatAt(o, k, undefined) }
     var idx = Math.trunc(rbToF(k))
     if (rbIsArr(o)) {
         if (idx < 0) { idx = idx + o.length }
@@ -8231,6 +8170,67 @@ function js_rget(o, k) {
     if (rtTag(o, "__rstr")) { return js_rget(o["__s"], k) }
     if (rtIsNil(o)) { fail("indexing nil") }
     return o[k]
+}
+
+// String#index / #rindex with a String or a Regexp and a character offset. Twin
+// of the index arm in ruby-interpreter.abnf and rubyStrIndex in abnf/jsrtrubystr.go.
+function rbStrSearch(s, fwd, args) {
+    var n = rbNPos(args)
+    var pat = anytype
+    pat = rbArgAt(args, 0)
+    var pos = n > 1 ? Math.trunc(rbToF(args[1])) : 0
+    var st = fwd ? rbsIndexStart(s, pos) : rbsRindexStart(s, pos, n > 1)
+    if (rbRxIsRegex(pat)) {
+        if (st >= 0 && !fwd) { st = rbsRfindRx(rbRxObjRe(pat), s, st) }
+        if (st < 0) {
+            rbRxSetGlobals(null)
+            return null
+        }
+        var md = rbRxRunMatch(pat, s, st)
+        if (md === null) { return null }
+        return rbsCharIdx(s, md["__rxcaps"][0])
+    }
+    if (st < 0) { return null }
+    var t = rbStr(pat)
+    var u = fwd ? rbsFind(s, t, st) : rbsRfind(s, t, st)
+    return u < 0 ? null : rbsCharIdx(s, u)
+}
+
+// s[str] is str when s contains it; s[re] and s[re, group] the matched text;
+// nil otherwise. Twin of strPatAt in ruby-interpreter.abnf.
+function rbStrPatAt(s, k, g) {
+    if (!rbRxIsRegex(k)) {
+        var t = rbStr(k)
+        return s.indexOf(t) >= 0 ? t : null
+    }
+    var md = rbRxRunMatch(k, s, 0)
+    if (md === null) { return null }
+    return rbRxMdIndex(md, g === undefined ? 0 : g)
+}
+
+// The units s[k1] = v / s[k1, k2] = v replaces when k1 is a String or a Regexp
+// (k2 its group), as {a, b}; IndexError when there is nothing to replace. Twin
+// of strPatSpan in ruby-interpreter.abnf.
+function rbStrPatSpan(s, k1, k2) {
+    if (!rbRxIsRegex(k1)) {
+        var t = rbStr(k1)
+        var a = s.indexOf(t)
+        if (a < 0) { rbRaiseErr("[]=", "IndexError", "string not matched") }
+        return {a: a, b: a + t.length}
+    }
+    var re = rbRxObjRe(k1)
+    var md = rbRxRunMatch(k1, s, 0)
+    if (md === null) { rbRaiseErr("[]=", "IndexError", "regexp not matched") }
+    var g = 0
+    if (typeof k2 == "number") {
+        g = Math.trunc(k2)
+    } else if (!rtIsNil(k2)) {
+        g = rxIndexOfName(re, rbIsSym(k2) ? k2["s"] : rbStr(k2))
+    }
+    if (g < 0 || g > re["ngroups"]) { rbRaiseErr("[]=", "IndexError", "index " + g + " out of regexp") }
+    var caps = md["__rxcaps"]
+    if (caps[2 * g] < 0) { rbRaiseErr("[]=", "IndexError", "regexp group " + g + " not matched") }
+    return {a: caps[2 * g], b: caps[2 * g + 1]}
 }
 
 // s[lo..hi] / a[lo...hi] written as a RANGE LITERAL at the subscript: the endpoints
@@ -8314,6 +8314,10 @@ function js_rsetsl(o, k1, k2, v) {
         if (o["__fz"]) { rbRaiseErr("[]=", "FrozenError", "can't modify frozen String") }
         o["__s"] = js_rsetsl(o["__s"], k1, k2, v)["__s"]
         return o
+    }
+    if (typeof o == "string" && (typeof k1 == "string" || rtTag(k1, "__rstr") || rbRxIsRegex(k1))) {
+        var ps = rbStrPatSpan(o, k1, k2)
+        return rbMkRStr(o.substring(0, ps["a"]) + rbStr(v) + o.substring(ps["b"], o.length), false)
     }
     if (typeof o == "string") {
         var sb = rbSliceBounds(o.length, k1, k2)
@@ -9324,18 +9328,6 @@ function smRstrip(s) {
     return s.substring(0, j)
 }
 
-// String#rindex: the LAST index of sub, or -1. indexOf ignores its second
-// argument in this dialect, so the scan is written out.
-function smRindex(s, sub) {
-    if (sub.length == 0) { return s.length }
-    var i = s.length - sub.length
-    while (i >= 0) {
-        if (s.substring(i, i + sub.length) == sub) { return i }
-        i = i - 1
-    }
-    return 0 - 1
-}
-
 // casecmp folds ASCII only - to UPPER case, so "[".casecmp("a") is 1 - and then
 // compares like MRI's bytes, i.e. by code point: a surrogate unit (an astral
 // character) sorts above every BMP unit from U+E000. Twins: rubyCasecmp in
@@ -9410,7 +9402,7 @@ function smMethod(s, name, sargs, nargs) {
     if (name == "lines") { return {ok: true, v: smLines(s)} }
     if (name == "partition" || name == "rpartition") {
         var sep = sargs[0]
-        var at = name == "partition" ? s.indexOf(sep) : smRindex(s, sep)
+        var at = name == "partition" ? s.indexOf(sep) : rbsRfind(s, sep, s.length)
         if (at < 0) {
             if (name == "partition") { return {ok: true, v: [s, "", ""]} }
             return {ok: true, v: ["", "", s]}
@@ -9431,11 +9423,6 @@ function smMethod(s, name, sargs, nargs) {
     }
     if (name == "casecmp") { return {ok: true, v: rbCasecmp(s, sargs[0])} }
     if (name == "casecmp?") { return {ok: true, v: unicodeCase(s, 18) == unicodeCase(sargs[0], 18)} }
-    if (name == "rindex") {
-        var ri = smRindex(s, sargs[0])
-        if (ri < 0) { return {ok: true, v: null} }
-        return {ok: true, v: ri}
-    }
     if (name == "insert") {
         var at2 = Math.trunc(nargs[0])
         if (at2 < 0) { at2 = at2 + s.length + 1 }
@@ -9535,7 +9522,7 @@ function smUptoList(s, limit, excl) {
         if (excl && cur == limit) { return out }
         out.push(cur)
         if (cur == limit) { return out }
-        cur = rbStrSucc(cur)
+        cur = rbsSucc(cur)
         guard = guard + 1
     }
     return out
