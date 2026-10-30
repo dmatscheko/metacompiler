@@ -38,8 +38,8 @@ members), string valued, and with the reverse mapping of the numeric members
 MERGED ones - the namespace object is the body's own scope, so its members see each other
 by bare name and the outside sees them as 'Ns.member'; constructor PARAMETER PROPERTIES
 ('constructor(public x: number)' declares and assigns this.x); TC39 standard DECORATORS
-on classes and class members, including decorator factories - the decorator receives the
-value and a context object and its result, when it returns one, replaces the value;
+on classes, methods and fields, including decorator factories and addInitializer, applied
+in tsc's phases (decoPhases);
 'export' in front of a declaration (a transparent prefix, the declaration is genuine);
 and 'import' of a project .ts file, whose top-level declarations register flatly in the
 global scope.
@@ -698,7 +698,7 @@ FnExprName  <~~ push({fname: idName(up.in)}) ~~>
 GenFuncExpr <~~ push(makeGenOrFuncExpr(takeAll(), up.in)) ~~>
             = KwFunction GenMark [ FnExprName ] [ TypeParams ] ParamList [ TypeAnnot ] [ UseStrictMark ] FuncBody ;
 // See the twin of this comment in js-interpreter.abnf.
-ClassExpr   <~~ push(makeClassExprValue(takeAll(), up.in)) ~~>
+ClassExpr   <~~ push(makeClassValue(takeAll(), up.in)) ~~>
             = ClassDecorators [ KwAbstract ] KwClass [ ClassExprName ] [ TypeParams ]
               [ KwExtends NotReserved Id <~~ push({ext: idName(up.in)}) ~~> [ TypeArgs ] ]
               [ KwImplements TypeList ]
@@ -8754,7 +8754,7 @@ NotFuncHead = :script(~~
 
     // A constructor closure: binds this = arguments[0], runs the field initializers (a
     // derived class: when super() returns - see ctorSuperDone), then the body.
-    function makeCtorClosure(params, bodyT, fields, defScopes, hasSuper, isDefault, ckeys) {
+    function makeCtorClosure(params, bodyT, fields, defScopes, hasSuper, isDefault, ckeys, deco) {
         var env = defScopes.slice()
         return function() {
             // new.target arrives through the one-shot slot like a function's does:
@@ -8782,7 +8782,7 @@ NotFuncHead = :script(~~
             // See the twin of this comment in js-interpreter.abnf. TypeScript PARAMETER
             // PROPERTIES are written in the same step, ahead of the field initializers.
             var fscopes = scopes.slice()
-            sc["0fields"] = function() { ctorFields(params, fields, fscopes, ckeys) }
+            sc["0fields"] = function() { ctorFields(params, fields, fscopes, ckeys, deco) }
             // The implicit 'super()' of a default constructor. The parent is read off the
             // DEFINING class rather than resolved by name, which is what lets a heritage
             // EXPRESSION ('class extends mixin(B) {}') have a default constructor too.
@@ -8795,7 +8795,7 @@ NotFuncHead = :script(~~
                 for (var sa = 0; sa < args.length; sa++) supArgs.push(args[sa])
                 ctorSuperDone(sc, self, ctorConstruct(supCls, supArgs, nt))
             } else if (!hasSuper) {
-                ctorFields(params, fields, fscopes, ckeys)
+                ctorFields(params, fields, fscopes, ckeys, deco)
             }
             var rb = anytype // The body's return record, or absent.
             rb = undefined
@@ -8827,7 +8827,10 @@ NotFuncHead = :script(~~
         scopePut(self, k, v)
         trackKey(self, k)
     }
-    function ctorFields(params, fields, fscopes, ckeys) {
+    // deco is what the class's decorators registered (decoPhases), or null: the
+    // instance-method extra initializers run first, and a decorated field's value goes
+    // through its decorators' initializers, its own extra initializers following it.
+    function ctorFields(params, fields, fscopes, ckeys, deco) {
         var saved = scopes
         // See the twin of this comment in js-interpreter.abnf.
         var fsc = {}
@@ -8839,10 +8842,15 @@ NotFuncHead = :script(~~
             if (typeof pp == "string" || pp.prop != true) { continue }
             jsFieldPut(self, pp.pname, undefined)
         }
+        if (deco != null) { decoRun(deco.ix, self, undefined, false) }
         for (var k = 0; k < fields.length; k++) {
             var fk = memberKey(fields[k], ckeys)
-            var fv = (fields[k].init != null) ? fields[k].init() : undefined
+            var fv = anytype // The field's initial value.
+            fv = (fields[k].init != null) ? fields[k].init() : undefined
+            var di = fields[k].di
+            if (di != undefined) { fv = decoRun(deco.m[di].inits, self, fv, true) }
             jsFieldPut(self, fk, fv)
+            if (di != undefined) { decoRun(deco.m[di].extras, self, undefined, false) }
         }
         for (var pj = 0; pj < params.length; pj++) {
             var pq = params[pj]
@@ -9039,30 +9047,64 @@ NotFuncHead = :script(~~
     }
 
     // ----- TC39 standard decorators -----
-    // A decorator is called with the value being decorated and a context object, and when
-    // it RETURNS a value that value replaces the original. Several decorators on one
-    // declaration apply bottom-up (the one closest to the declaration runs first), which
-    // is what the backwards loop does. The context object is the practical subset of the
-    // TC39 one: kind, name and static - enough for a decorator to tell what it got.
-    function applyDecorators(decs, value, kind, name, statik) {
+    // A class's decorators run in tsc's phases (makeClassValue): every decorator
+    // EXPRESSION is evaluated first, class then members in source order (decoEval); they
+    // are then applied - static methods, instance methods, static fields, instance
+    // fields, the class (decoApply); the initializers they registered run last, at
+    // class definition (static and class ones) or per instance (ctorFields).
+    function decoEval(decs) {
+        var out = []
+        if (decs == undefined || decs == null) { return out }
+        for (var i = 0; i < decs.length; i++) {
+            var d = anytype // A decorator expression's value.
+            d = decs[i]()
+            out.push(d)
+        }
+        return out
+    }
+    // Applies evaluated decorators bottom-up (the one closest to the declaration first).
+    // A decorator is called with the value and a context object, and a value it returns
+    // replaces the original - except on a FIELD, whose value is undefined and whose
+    // decorators return INITIALIZERS: the answer is then the list of those, outermost
+    // first. ctx.addInitializer appends to extras. The context carries kind, name,
+    // static, private (a private name reads "#x") and addInitializer.
+    // Twin of decoApplyAll in typescript-to-llvm-ir.abnf.
+    function decoApply(vals, value, kind, name, statik, extras) {
         var v = anytype // The decorated value: a class descriptor or a function.
         v = value
-        if (decs == undefined || decs == null) { return v }
-        for (var i = decs.length - 1; i >= 0; i--) {
-            // kind, name, static and private: the TC39 context fields this engine models;
-            // a private name reads "#x". Twin of emitDecoCtx in typescript-to-llvm-ir.abnf.
+        var finits = []
+        var adder = fnMetaPut(function(f) { extras.push(f); return undefined }, "addInitializer", 1)
+        for (var i = vals.length - 1; i >= 0; i--) {
             var priv = typeof name == "string" && isPrivateKey(name)
-            var ctx = {kind: kind, name: priv ? privShown(name) : name,
-                       __keys: ["kind", "name", "static", "private"]}
+            var ctx = {kind: kind, name: priv ? privShown(name) : name, addInitializer: adder,
+                       __keys: ["kind", "name", "static", "private", "addInitializer"]}
             ctx["static"] = statik == true
             ctx["private"] = priv
-            var d = decs[i]()
+            var d = anytype // The decorator.
+            d = vals[i]
             if (typeof d != "function") fail("decorator is not a function")
             var r = anytype // Whatever the decorator handed back.
             r = callWithThis(d, undefined, [v, ctx])
-            if (r != undefined && r != null) { v = r }
+            if (r != undefined && r != null) {
+                if (kind == "field") { finits.push(r) } else { v = r }
+            }
         }
-        return v
+        if (kind != "field") { return v }
+        var outer = []
+        for (var j = finits.length - 1; j >= 0; j--) { outer.push(finits[j]) }
+        return outer
+    }
+    // Runs registered initializers with `this` bound; with a value, each one maps it.
+    function decoRun(list, self, v, useValue) {
+        var cur = anytype // The value being initialized.
+        cur = v
+        if (list == undefined) { return cur }
+        for (var i = 0; i < list.length; i++) {
+            var r = anytype // An initializer's answer.
+            r = callWithThis(list[i], self, useValue ? [cur] : [])
+            if (useValue) { cur = r }
+        }
+        return cur
     }
     function makeStaticBlock(body) { return {kind: "staticblock", body: body} }
 
@@ -9228,12 +9270,14 @@ NotFuncHead = :script(~~
         var superName = null
         var superT = null // A heritage EXPRESSION, evaluated once per class build.
         var members = []
+        // The decorators may stand in front of the class OR of an 'export' before it.
+        var cdecs = []
         for (var i = 0; i < items.length; i++) {
             if (items[i] == undefined) { continue }
             if (items[i].cname != undefined) { name = items[i].cname }
             else if (items[i].ext != undefined) { superName = items[i].ext }
             else if (items[i].extT != undefined) { superT = items[i].extT }
-            else if (items[i].cdecs != undefined) { continue } // The class decorators: makeClassStmt's business.
+            else if (items[i].cdecs != undefined) { cdecs = concat2impl(cdecs, items[i].cdecs) }
             else if (items[i].skip != undefined) { continue }
             else { members.push(items[i]) }
         }
@@ -9244,8 +9288,16 @@ NotFuncHead = :script(~~
         var inits = []       // Static fields AND static blocks, kept in source order.
         var ctorInfo = null
         var ckMembers = []   // The members with a computed key, in source order.
+        var dMembers = []    // The decorated methods and fields, in source order.
+        var decorated = cdecs.length > 0
         for (var j = 0; j < members.length; j++) {
             var mm = members[j]
+            if (mm.decs != undefined && mm.decs != null && mm.decs.length > 0 && mm.auto !== true &&
+                (mm.kind == "field" || mm.kind == "method")) {
+                mm.di = dMembers.length
+                dMembers.push(mm)
+                decorated = true
+            }
             if (mm.keyT != undefined && mm.keyT != null && (mm.kind == "field" || mm.kind == "method" || mm.kind == "accessor")) {
                 mm.ci = ckMembers.length
                 ckMembers.push(mm)
@@ -9254,7 +9306,7 @@ NotFuncHead = :script(~~
                 privKinds["$" + mm.name] = {field: mm.kind == "field", statik: mm.statik == true, cls: (name == "") ? "anonymous" : name}
             }
             if (mm.auto === true) {
-                var store = {kind: "field", name: "__#auto#" + mm.name, statik: mm.statik, decs: mm.decs, init: mm.init}
+                var store = {kind: "field", name: "__#auto#" + mm.name, statik: mm.statik, init: mm.init}
                 if (mm.statik) { inits.push(store) } else { fields.push(store) }
                 protos.push({kind: "autoacc", name: mm.name, statik: mm.statik, store: store.name})
             }
@@ -9265,6 +9317,7 @@ NotFuncHead = :script(~~
         }
         return function() {
             var defScopes = scopes.slice()
+            var cdv = decoEval(cdecs)
             var cls = {}
             cls["__isclass"] = true
             cls["__name"] = shown[0]
@@ -9282,6 +9335,13 @@ NotFuncHead = :script(~~
             // See the twin of this comment in js-interpreter.abnf.
             var ckeys = []
             for (var cki = 0; cki < ckMembers.length; cki++) { ckeys.push(ckMembers[cki].keyT()) }
+            var dv = []
+            for (var dvi = 0; dvi < dMembers.length; dvi++) { dv.push(decoEval(dMembers[dvi].decs)) }
+            // What the decorators register: per decorated field {inits, extras} (by its
+            // di), and the static-method, instance-method and class extra initializers.
+            var deco = anytype
+            deco = decorated ? {m: [], sx: [], ix: [], cx: []} : null
+            var dcells = [] // A decorated method's current function, by its di.
             // Every member closes over one extra scope that names the class itself. That
             // is what super() and super.m() resolve through - not the class's NAME, which
             // an anonymous class expression does not have.
@@ -9313,17 +9373,24 @@ NotFuncHead = :script(~~
                 } else {
                     // A method replaces an earlier accessor of the same name.
                     jsAccDrop(ptgt, pk)
-                    scopePut(ptgt, pk, classMemberFn(pm, mscopes, pk))
+                    scopePut(ptgt, pk, (pm.di != undefined) ? decoMethodFn(pm, mscopes, pk, dcells) : classMemberFn(pm, mscopes, pk))
                 }
                 if (pm.statik) { jsStaticName(statics, pk) }
                 else if (!isInternalKey(pk) && pnames.indexOf(pk) < 0) { pnames.push(pk) }
             }
             cls["__pnames"] = pnames
             if (ctorInfo != null) {
-                cls["__ctor"] = fnMetaPut(makeCtorClosure(ctorInfo.params, ctorInfo.body, fields, mscopes, hasOwn(cls, "__super"), false, ckeys),
+                cls["__ctor"] = fnMetaPut(makeCtorClosure(ctorInfo.params, ctorInfo.body, fields, mscopes, hasOwn(cls, "__super"), false, ckeys, deco),
                                           "", fnArity(ctorInfo.params))
             } else {
-                cls["__ctor"] = makeCtorClosure([], null, fields, mscopes, hasOwn(cls, "__super"), true, ckeys)
+                cls["__ctor"] = makeCtorClosure([], null, fields, mscopes, hasOwn(cls, "__super"), true, ckeys, deco)
+            }
+            var dcls = anytype // The class as its decorators leave it.
+            dcls = cls
+            if (decorated) {
+                dcls = decoPhases(cls, statics, dMembers, dv, dcells, deco, cdv, ckeys)
+                if (name != "") { clsScope[name] = dcls }
+                decoRun(deco.sx, cls, undefined, false)
             }
             // The static initializers run now, with the methods already in place (a static
             // block may call them) and 'this' bound to the class.
@@ -9333,16 +9400,43 @@ NotFuncHead = :script(~~
                     callWithThis(makeClosure([], it.body, mscopes, true), cls, [])
                 } else {
                     var itk = memberKey(it, ckeys)
-                    scopePut(statics, itk, (it.init != null) ? callWithThis(makeClosure([], makeReturn([it.init]), mscopes, true), cls, []) : undefined)
+                    var itv = anytype // The static field's initial value.
+                    itv = (it.init != null) ? callWithThis(makeClosure([], makeReturn([it.init]), mscopes, true), cls, []) : undefined
+                    if (it.di != undefined) { itv = decoRun(deco.m[it.di].inits, cls, itv, true) }
+                    scopePut(statics, itk, itv)
                     // A static FIELD is enumerable; see __keys above. A PRIVATE one is
                     // not: it is filed under the mangled key '__#x' here exactly as in
                     // both compiled halves, and trackKey skips every '__' name.
                     jsStaticName(statics, itk)
                     trackKey(statics, itk)
+                    if (it.di != undefined) { decoRun(deco.m[it.di].extras, cls, undefined, false) }
                 }
             }
-            return cls
+            if (decorated) { decoRun(deco.cx, dcls, undefined, false) }
+            return dcls
         }
+    }
+    // The decoration phases in tsc's order - static methods, instance methods, static
+    // fields, instance fields, then the class - answering the decorated class.
+    // Twin of decoPhases in typescript-to-llvm-ir.abnf.
+    function decoPhases(cls, statics, dMembers, dv, dcells, deco, cdv, ckeys) {
+        for (var ph = 0; ph < 4; ph++) {
+            for (var i = 0; i < dMembers.length; i++) {
+                var m = dMembers[i]
+                if ((m.kind == "field") != (ph >= 2) || (m.statik == true) != (ph % 2 == 0)) { continue }
+                var k = memberKey(m, ckeys)
+                if (m.kind == "field") {
+                    var rec = {inits: [], extras: []}
+                    rec.inits = decoApply(dv[i], undefined, "field", k, m.statik, rec.extras)
+                    deco.m[i] = rec
+                } else {
+                    var cell = dcells[i]
+                    cell.f = decoApply(dv[i], cell.f, "method", k, m.statik, m.statik ? deco.sx : deco.ix)
+                    if (m.statik) { scopePut(statics, k, fnMetaPut(cell.f, k, fnArity(m.params))) }
+                }
+            }
+        }
+        return decoApply(cdv, cls, "class", cls.__name, false, deco.cx)
     }
     // The function value of one method: an instance method takes the receiver as
     // arguments[0] (that is mcall's contract), a static one is an ordinary closure, and a
@@ -9360,26 +9454,34 @@ NotFuncHead = :script(~~
     function classMemberFn(m, mscopes, mnm) {
         return fnMetaPut(classMemberFnRaw(m, mscopes, mnm), mnm, fnArity(m.params))
     }
+    // A DECORATED method is built as a plain function - `this` from the one-shot slot,
+    // the shape a decorator is handed and hands back ('original.call(this, n)') - and
+    // filed in dcells[m.di] for decoPhases to replace. A static one is installed as it
+    // stands (decoPhases re-installs the result); an instance one as a trampoline that
+    // turns mcall's arguments[0] receiver back into a plain call of the current value.
+    function decoMethodFn(m, mscopes, mnm, dcells) {
+        var cell = {f: undefined}
+        dcells[m.di] = cell
+        cell.f = fnMetaPut(plainMemberFn(m, mscopes, mnm), mnm, fnArity(m.params))
+        if (m.statik) { return cell.f }
+        return function() {
+            var self = arguments[0]
+            var args = []
+            for (var i = 1; i < arguments.length; i++) { args.push(arguments[i]) }
+            return callWithThis(cell.f, self, args)
+        }
+    }
+    // A method as a plain function reading its receiver from the one-shot slot.
+    function plainMemberFn(m, mscopes, mnm) {
+        var sfn = anytype // The method's function value.
+        sfn = makeClosure(m.params, m.body, mscopes, true)
+        if (m.isGen) { sfn = makeGenerator(m.params, m.body, true, mnm)() }
+        if (m.isAsync) { sfn = makeAsyncFn(m.params, m.body, true, mnm)() }
+        if (m.isGen && m.isAsync) { sfn = makeAsyncGen(m.params, m.body, true, mnm)() }
+        return sfn
+    }
     function classMemberFnRaw(m, mscopes, mnm) {
-        var decs = m.decs
-        if (decs != undefined && decs != null && decs.length > 0 && !m.statik && !m.isGen) {
-            var user = makeClosure(m.params, m.body, mscopes, true)
-            var wrapped = applyDecorators(decs, user, "method", m.name, false)
-            return function() {
-                var self = arguments[0]
-                var args = []
-                for (var i = 1; i < arguments.length; i++) { args.push(arguments[i]) }
-                return callWithThis(wrapped, self, args)
-            }
-        }
-        if (m.statik) {
-            var sfn = anytype // The static method's function value.
-            sfn = makeClosure(m.params, m.body, mscopes, true)
-            if (m.isGen) { sfn = makeGenerator(m.params, m.body, true, mnm)() }
-            if (m.isAsync) { sfn = makeAsyncFn(m.params, m.body, true, mnm)() }
-            if (m.isGen && m.isAsync) { sfn = makeAsyncGen(m.params, m.body, true, mnm)() }
-            return applyDecorators(decs, sfn, "method", m.name, true)
-        }
+        if (m.statik) { return plainMemberFn(m, mscopes, mnm) }
         if (m.isGen && m.isAsync) { return makeInstanceAsyncGen(m.params, m.body, mscopes) }
         if (m.isGen) { return makeInstanceGenerator(m.params, m.body, mscopes) }
         if (m.isAsync) { return makeInstanceAsync(m.params, m.body, mscopes) }
@@ -9423,35 +9525,15 @@ NotFuncHead = :script(~~
         }
     }
 
-    // A class declaration: build the descriptor, run the class decorators over it (a
-    // decorator that returns a value replaces the class, which is how '@addTag class W {}'
-    // can hand back a subclass), and bind the result under the class's name.
+    // A class declaration: build the (decorated) class and bind it under its name.
     function makeClassStmt(items, pos) {
         var name = ""
-        var decs = []
-        // The decorators may come from in front of the class OR from in front of an
-        // 'export' that precedes it, so every {cdecs} on the stack is collected.
         for (var i = 0; i < items.length; i++) {
-            if (items[i] == undefined) { continue }
-            if (items[i].cname != undefined) { name = items[i].cname }
-            if (items[i].cdecs != undefined) { decs = concat2impl(decs, items[i].cdecs) }
+            if (items[i] != undefined && items[i].cname != undefined) { name = items[i].cname }
         }
         if (name != "") { hoistNoteLex(name, pos) }
         var build = makeClassValue(items)
-        return function() { declVar(name, applyDecorators(decs, build(), "class", name, false)) }
-    }
-    // The class EXPRESSION form: the same build, the same decorators, but the value is
-    // returned instead of bound.
-    function makeClassExprValue(items, txt) {
-        var name = ""
-        var decs = []
-        for (var i = 0; i < items.length; i++) {
-            if (items[i] == undefined) { continue }
-            if (items[i].cname != undefined) { name = items[i].cname }
-            if (items[i].cdecs != undefined) { decs = concat2impl(decs, items[i].cdecs) }
-        }
-        var build = makeClassValue(items, txt)
-        return function() { return applyDecorators(decs, build(), "class", name, false) }
+        return function() { declVar(name, build()) }
     }
 
     // new C(args): build the instance, attach __class, run the constructor as

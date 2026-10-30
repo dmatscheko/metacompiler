@@ -60,19 +60,19 @@ WHAT IS GENUINELY LOWERED beyond JavaScript:
   parameter properties - 'constructor(public x: number, private readonly y: T)' binds the
                 parameter AND assigns it to 'this' at the top of the constructor.
   decorators  - TC39 standard decorators, each called with the value and a context
-                object {kind, name, static, private}, on a CLASS (called with the
-                descriptor; a returned value replaces the binding) and on a METHOD (called with the
-                undecorated method, which is emitted as a plain dynamic-`this` function so
-                that 'original.call(this, x)' works, and whose result is installed behind
-                a trampoline that turns js_mcall's receiver-prepending convention back
-                into a normal call). A decorator FACTORY ('@addN(5)') works, because the
-                decorator expression is evaluated where the declaration stands. A
-                decorator spelled as a BARE NAME resolves softly: an unbound name, or a
-                value that is not callable, is skipped rather than raising - which is what
-                keeps the declarative, framework-resolved decorators ('@sealed',
-                '@Component') harmless. Decorators on a FIELD, an ACCESSOR or a PARAMETER
-                are parsed and then IGNORED (the member is installed undecorated), and the
-                context has no addInitializer.
+                object {kind, name, static, private, addInitializer}, on a CLASS (called
+                with the descriptor; a returned value replaces the binding), on a METHOD
+                (called with the undecorated method, which is emitted as a plain
+                dynamic-`this` function so that 'original.call(this, x)' works, and whose
+                result is installed behind a trampoline that turns js_mcall's
+                receiver-prepending convention back into a normal call) and on a FIELD
+                (called with undefined; a returned function maps the initial value), in
+                tsc's phases (decoPhases). A decorator spelled as a BARE NAME resolves
+                softly: an unbound name, or a value that is not callable, is skipped
+                rather than raising - which is what keeps the declarative,
+                framework-resolved decorators ('@sealed', '@Component') harmless.
+                Decorators on an ACCESSOR or a PARAMETER are parsed and then IGNORED (the
+                member is installed undecorated).
   import      - 'import ... from \"./lib\"' loads the referenced project file (a leading
                 './' is dropped and a missing extension completed to '.ts'), parses it
                 with this grammar and prepends its top-level declarations to jsrun. The
@@ -289,12 +289,8 @@ NsExport    <~~ push(makeNsExport(pop())); claimVars(up.start, up.pos) ~~>
             = KwExport <~~ exportNames = [] ~~> [ KwDefault ] ExportBody ;
 
 // ----- decorators -----
-// TC39 standard decorators. A CLASS decorator is called with the class descriptor and,
-// when it answers a value, that value replaces the binding; a METHOD decorator is called
-// with the undecorated method and its result becomes the method. The decorator expression
-// itself is evaluated where the declaration stands, so a decorator FACTORY ('@addN(5)')
-// works out of the box. Decorators on a FIELD, an accessor or a parameter are parsed and
-// then ignored (the member is installed undecorated).
+// TC39 standard decorators on a class, a method and a field (decoPhases). Decorators on
+// an accessor or a parameter are parsed and then ignored.
 DecoratedDecl <~~ push(makeDecoratedClass(takeAll())) ~~>
             = Decorator { Decorator } [ KwExport [ KwDefault ] ] ClassCore ;
 // A decorator that is spelled as a BARE NAME resolves SOFTLY: an unbound name yields
@@ -977,7 +973,7 @@ ClassExpr   = DecoratedClassExpr | ClassExprLowered | ClassExprWidened ;
 // A decorated class EXPRESSION. The decorators run on the descriptor the expression
 // evaluates to, exactly as on a declaration - but there is no binding to rewrite, so the
 // decorated value simply IS the value of the expression.
-DecoratedClassExpr <~~ push(makeDecoratedClassExpr(takeAll())) ~~>
+DecoratedClassExpr <~~ push(makeDecoratedClassExpr(takeAll(), up.in)) ~~>
             = Decorator { Decorator } ClassExprLowered ;
 ClassExprLowered <~~ push(makeClassExpr(takeAll(), up.in)) ~~>
             = [ "abstract" KwEnd ] KwClass ClassAnonName [ ClassExprName ] [ TypeParams ]
@@ -5154,7 +5150,7 @@ NotFuncHead = :script(~~
         if (statik) { return emitThisBinder(b, true, idx, kind).v }
         return coroOf(b, idx, kind, curScopeV)
     }
-    function emitClassFunc(params, body, isInstance, initFields, implicitSuper, propNames, derived) {
+    function emitClassFunc(params, body, isInstance, initFields, implicitSuper, propNames, derived, ixSlot) {
         funcCount++
         var idx = funcCount
         var f = m.NewFunc("jsf_" + idx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
@@ -5204,7 +5200,7 @@ NotFuncHead = :script(~~
         if (argsWant) {
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "arguments"), callExt(b, "js_jsargs", [f.Params[1], callExt(b, "js_num_i", [handle(off)])])])
         }
-        var inits = {fields: initFields, props: propNames}
+        var inits = {fields: initFields, props: propNames, ix: ixSlot}
         if (implicitSuper != undefined && implicitSuper != null) {
             var supCls = callExt(b, "js_scope_get", [curScopeV, emitStr(b, implicitSuper)])
             var supCtor = callExt(b, memGetExt(), [supCls, emitStr(b, "__ctor")])
@@ -5244,7 +5240,9 @@ NotFuncHead = :script(~~
     }
     // The TypeScript parameter properties declared as undefined, the field initializers,
     // then the parameter properties assigned ('this.x = x' for every modifier-carrying
-    // constructor parameter), all on the current `this`: tsc's order.
+    // constructor parameter), all on the current `this`: tsc's order. What decorators
+    // registered (decoPhases) joins in: the instance-method extra initializers first, and
+    // a decorated field's value through its initializers, its extra ones after it.
     // Twin of ctorFields in typescript-interpreter.abnf.
     function emitFieldInits(b, inits) {
         var thisV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "this")])
@@ -5256,16 +5254,26 @@ NotFuncHead = :script(~~
                 callExt(b, "js_jsfielddef", [thisV, emitStr(b, jsKeyEsc(inits.props[pd])), hUndef])
             }
         }
+        if (inits.ix != undefined && inits.ix != null) {
+            emitDecoRun(b, callExt(b, "js_scope_get", [curScopeV, emitStr(b, inits.ix)]), thisV, hUndef, false)
+        }
         if (inits.fields != undefined && inits.fields != null) {
             for (var k = 0; k < inits.fields.length; k++) {
+                var fd = inits.fields[k]
                 var fv = hUndef
-                if (inits.fields[k].init != null && inits.fields[k].init != undefined) {
-                    var r = inits.fields[k].init(b)
+                if (fd.init != null && fd.init != undefined) {
+                    var r = fd.init(b)
                     b = r.b
                     fv = r.v
                 }
-                var fkr = emitMemberKey(b, inits.fields[k])
+                if (fd.dslot != undefined) {
+                    fv = emitDecoRun(b, callExt(b, "js_scope_get", [curScopeV, emitStr(b, fd.dslot + "i")]), thisV, fv, true)
+                }
+                var fkr = emitMemberKey(b, fd)
                 callExt(b, "js_jsfielddef", [thisV, fkr.v, fv])
+                if (fd.dslot != undefined) {
+                    emitDecoRun(b, callExt(b, "js_scope_get", [curScopeV, emitStr(b, fd.dslot + "x")]), thisV, hUndef, false)
+                }
             }
         }
         if (inits.props != undefined && inits.props != null) {
@@ -5302,10 +5310,17 @@ NotFuncHead = :script(~~
     // declaration and the expression form.
     function makeClassInfo(items) {
         var info = {name: "", superName: null, extT: null, fields: [], statics: [], protos: [],
-                    sinits: [], ctor: null, computed: []}
+                    sinits: [], ctor: null, computed: [], cdecos: [], dmembers: [], ixSlot: null}
         for (var i = 0; i < items.length; i++) {
             var m = items[i]
             if (m == undefined || m.skip != undefined) { continue }
+            if (m.decos != undefined) {
+                m.di = info.dmembers.length
+                info.dmembers.push(m)
+                decoSeq = decoSeq + 1
+                if (m.kind == "field" && !m.statik) { m.dslot = "0df" + decoSeq }
+                if (m.kind == "method" && !m.statik && info.ixSlot == null) { info.ixSlot = "0dix" + decoSeq }
+            }
             if (m.cname != undefined) { info.name = m.cname; continue }
             // See the twin of this comment in js-to-llvm-ir.abnf.
             if (m.ext === "Array" || m.ext === "Promise" || m.ext === "RegExp" || m.ext === "Number" || m.ext === "String" ||
@@ -5346,6 +5361,14 @@ NotFuncHead = :script(~~
     // constructor, the methods and the accessors, and finally run the static fields and
     // static blocks.
     function emitClass(b, info) {
+        var decorated = info.cdecos.length > 0 || info.dmembers.length > 0
+        // The class decorators' expressions are evaluated first of all (decoPhases).
+        var cdv = []
+        for (var cdi = 0; cdi < info.cdecos.length; cdi++) {
+            var cdr = info.cdecos[cdi](b)
+            b = cdr.b
+            cdv.push(cdr.v)
+        }
         // A heritage expression is evaluated FIRST, before anything of the class exists,
         // and bound to the synthetic name makeClassInfo reserved for it.
         if (info.extT != null) {
@@ -5365,21 +5388,33 @@ NotFuncHead = :script(~~
         }
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, info.name), clsV])
         var outerScope = curScopeV
-        if (homeSuperWant) {
-            curScopeV = callExt(b, "js_scope_new", [outerScope])
-            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0home"), clsV])
-        }
+        // A decorated class keeps its decorator slots in a scope of its own, so that
+        // each evaluation of the class has its own.
+        if (homeSuperWant || decorated) { curScopeV = callExt(b, "js_scope_new", [outerScope]) }
+        if (homeSuperWant) { callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0home"), clsV]) }
         // See the twin of this comment in js-to-llvm-ir.abnf.
         for (var ci = 0; ci < info.computed.length; ci++) {
             var ckr = emitKeyNow(b, info.computed[ci])
             b = ckr.b
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, info.computed[ci].ckey), ckr.v])
         }
+        // The members' decorator expressions, in source order.
+        var dv = []
+        for (var dmi = 0; dmi < info.dmembers.length; dmi++) {
+            var dl = []
+            for (var dei = 0; dei < info.dmembers[dmi].decos.length; dei++) {
+                var der = info.dmembers[dmi].decos[dei](b)
+                b = der.b
+                dl.push(der.v)
+            }
+            dv.push(dl)
+        }
+        var dcur = [] // A decorated method's undecorated value, by its di.
         var ctorIdx = anytype
         if (info.ctor != null) {
-            ctorIdx = emitClassFunc(info.ctor.params, info.ctor.body, true, info.fields, null, info.ctor.props, info.superName != null)
+            ctorIdx = emitClassFunc(info.ctor.params, info.ctor.body, true, info.fields, null, info.ctor.props, info.superName != null, info.ixSlot)
         } else {
-            ctorIdx = emitClassFunc([], null, true, info.fields, info.superName, null, info.superName != null)
+            ctorIdx = emitClassFunc([], null, true, info.fields, info.superName, null, info.superName != null, info.ixSlot)
         }
         // The constructor's arity is the class's `length`.
         var ctorClo = callExt(b, "js_closure", [handle(ctorIdx), curScopeV])
@@ -5409,7 +5444,7 @@ NotFuncHead = :script(~~
             }
             var idx = anytype
             if (mm.decos != undefined) {
-                b = emitDecoratedMethod(b, mtgt, mk.v, mm)
+                dcur[mm.di] = emitDecoratedMethod(b, mtgt, mk.v, mm)
                 continue
             }
             if (mm.gen == true && mm.async == true) {
@@ -5439,6 +5474,15 @@ NotFuncHead = :script(~~
             idx = emitClassFunc(mm.params, mm.body, !mm.statik, null, null)
             clsRawSet(b, mtgt, mk.v, fnMetaAt(b, callExt(b, "js_closure", [handle(idx), curScopeV]), memberFnName(mm), mm.params))
         }
+        var dclsV = clsV
+        var ds = null
+        if (decorated) {
+            ds = decoPhases(b, info, clsV, dv, dcur, cdv)
+            b = ds.b
+            dclsV = ds.v
+            callExt(b, "js_scope_set", [curScopeV, emitStr(b, info.name), dclsV])
+            emitDecoRun(b, ds.sx, clsV, hUndef, false)
+        }
         // Static fields and static blocks run in SOURCE ORDER, after the methods and
         // accessors exist, each as a function with 'this' bound to the class
         // (ClassDefinitionEvaluation, ES2023 15.7.14 steps 31-32).
@@ -5458,11 +5502,14 @@ NotFuncHead = :script(~~
                 sv = jsCall(b, callExt(b, "js_closure", [handle(iidx), curScopeV]), clsV,
                             callExt(b, "js_arr_new", []))
             }
+            if (it.di != undefined) { sv = emitDecoRun(b, ds.fi[it.di], clsV, sv, true) }
             // See the twin of this comment in js-to-llvm-ir.abnf.
             callExt(b, "js_jssfield", [statsV, kr.v, sv])
+            if (it.di != undefined) { emitDecoRun(b, ds.fx[it.di], clsV, hUndef, false) }
         }
+        if (decorated) { emitDecoRun(b, ds.cx, dclsV, hUndef, false) }
         curScopeV = outerScope
-        return {b: b, v: clsV}
+        return {b: b, v: dclsV}
     }
     function makeClassStmt(items, pos) {
         var info = makeClassInfo(items)
@@ -5478,8 +5525,10 @@ NotFuncHead = :script(~~
         var anon = info.name.substring(0, 6) == "0class"
         info.shown = [anon ? "" : info.name]
         fnAnonNote(info.shown, info.shown[0], txt)
+        lastClassExprInfo = info
         return function(b) { return emitClass(b, info) }
     }
+    var lastClassExprInfo = null
     // 'new.target'.
     function makeNewTarget() {
         ntWant = true
@@ -6298,14 +6347,15 @@ NotFuncHead = :script(~~
     }
 
     // ----- decorators -----
-    // Apply one decorator to a value: 'v = deco(v, undefined)', keeping the old value
-    // when the decorator answered undefined (the TC39 rule for a decorator that only
-    // observes). Both outcomes are possible at run time, so both are emitted and a phi
-    // picks.
-    // The context object a decorator is handed: kind, name, static and private (the
-    // TC39 fields this engine models; a private name reads "#x"). Twin of the ctx in
-    // applyDecorators in typescript-interpreter.abnf.
-    function emitDecoCtx(b, kind, name, statik) {
+    // A class's decorators run in tsc's phases: every decorator EXPRESSION is evaluated
+    // first, class then members in source order (emitClass); they are then applied -
+    // static methods, instance methods, static fields, instance fields, the class
+    // (decoPhases); the initializers they registered run last, at class definition
+    // (static and class ones) or per instance (emitFieldInits).
+    // The context object a decorator is handed: kind, name, static, private (a private
+    // name reads "#x") and addInitializer, which appends to listV. nameV, when given, is
+    // a computed key's value. Twin of the ctx in decoApply in typescript-interpreter.abnf.
+    function emitDecoCtx(b, kind, name, statik, listV, nameV) {
         var o = callExt(b, "js_obj_new", [])
         var priv = typeof name == "string" && name.substring(0, 3) == "__#"
         var shown = name
@@ -6314,20 +6364,25 @@ NotFuncHead = :script(~~
             while (hi > 0 && name.charAt(hi) != "#") { hi = hi - 1 }
             shown = name.substring(hi, name.length)
         }
+        var nv = (typeof shown == "string") ? emitStr(b, shown) : hUndef
+        if (nameV != null) { nv = nameV }
         callExt(b, memSetExt(), [o, emitStr(b, "kind"), emitStr(b, kind)])
-        callExt(b, memSetExt(), [o, emitStr(b, "name"), (typeof shown == "string") ? emitStr(b, shown) : hUndef])
+        callExt(b, memSetExt(), [o, emitStr(b, "name"), nv])
         callExt(b, memSetExt(), [o, emitStr(b, "static"), statik ? hTrue : hFalse])
         callExt(b, memSetExt(), [o, emitStr(b, "private"), priv ? hTrue : hFalse])
+        var asc = callExt(b, "js_scope_new", [curScopeV])
+        callExt(b, "js_scope_decl", [asc, emitStr(b, "0dlist"), listV])
+        callExt(b, memSetExt(), [o, emitStr(b, "addInitializer"), callExt(b, "js_closure", [handle(decoFnsGet().adder), asc])])
         return o
     }
-    function applyDeco(b, decoT, valueV, ctxV) {
-        var dr = decoT(b)
-        b = dr.b
-        // A decorator that is not callable at run time (an unresolved '@sealed') is
-        // skipped; so is a decorator that answered undefined (the TC39 rule for one that
-        // only observes). Both are run-time questions, so both branches are emitted and a
-        // phi picks.
-        var isFn = truthy(b, callExt(b, "js_seq", [callExt(b, "js_typeof", [dr.v]), emitStr(b, "function")]))
+    // Apply one evaluated decorator to a value: 'v = deco(v, ctx)'. A decorator that is
+    // not callable at run time (an unresolved '@sealed') is skipped; so is a decorator
+    // that answered undefined (the TC39 rule for one that only observes) - the answer
+    // is then the value unchanged, or undefined for a field (whose decorators answer
+    // initializers). Both are run-time questions, so both branches are emitted and a phi
+    // picks.
+    function applyDecoV(b, decoV, valueV, ctxV, field) {
+        var isFn = truthy(b, callExt(b, "js_seq", [callExt(b, "js_typeof", [decoV]), emitStr(b, "function")]))
         var runB = curF.NewBlock("")
         var skipB = curF.NewBlock("")
         var afterB = curF.NewBlock("")
@@ -6335,16 +6390,124 @@ NotFuncHead = :script(~~
         var argsV = callExt(runB, "js_arr_new", [])
         callExt(runB, "js_arr_push", [argsV, valueV])
         callExt(runB, "js_arr_push", [argsV, ctxV])
-        var res = jsCall(runB, dr.v, hUndef, argsV)
+        var res = jsCall(runB, decoV, hUndef, argsV)
         var keepB = curF.NewBlock("")
         var repB = curF.NewBlock("")
         runB.NewCondBr(truthy(runB, callExt(runB, "js_seq", [res, hUndef])), keepB, repB)
         keepB.NewBr(afterB)
         repB.NewBr(afterB)
         skipB.NewBr(afterB)
-        var phi = afterB.NewPhi([llvm.ir.NewIncoming(valueV, keepB), llvm.ir.NewIncoming(res, repB),
-                                 llvm.ir.NewIncoming(valueV, skipB)])
+        var kept = field ? hUndef : valueV
+        var phi = afterB.NewPhi([llvm.ir.NewIncoming(kept, keepB), llvm.ir.NewIncoming(res, repB),
+                                 llvm.ir.NewIncoming(kept, skipB)])
         return {b: afterB, v: phi}
+    }
+    // Applies a member's or the class's evaluated decorators bottom-up (the one nearest
+    // the declaration first). A field's answers are collected outermost first, skipping
+    // undefined, into a fresh list: its initializers.
+    function decoApplyAll(b, vals, valueV, kind, name, statik, listV, nameV) {
+        var v = valueV
+        var answers = []
+        for (var i = vals.length - 1; i >= 0; i--) {
+            var dr = applyDecoV(b, vals[i], v, emitDecoCtx(b, kind, name, statik, listV, nameV), kind == "field")
+            b = dr.b
+            if (kind == "field") { answers.push(dr.v) } else { v = dr.v }
+        }
+        if (kind != "field") { return {b: b, v: v} }
+        var inits = callExt(b, "js_arr_new", [])
+        for (var j = answers.length - 1; j >= 0; j--) {
+            var pushB = curF.NewBlock("")
+            var nextB = curF.NewBlock("")
+            b.NewCondBr(b.NewICmp(llvm.enum.IPredEQ, answers[j], hUndef), nextB, pushB)
+            callExt(pushB, "js_arr_push", [inits, answers[j]])
+            pushB.NewBr(nextB)
+            b = nextB
+        }
+        return {b: b, v: inits}
+    }
+    // The decoration phases in tsc's order - static methods, instance methods, static
+    // fields, instance fields, then the class. Answers the decorated class and the lists
+    // the initializers run from: sx/cx the static-method and class extra initializers,
+    // fi/fx a static field's initializers and extra ones by its di. An instance member's
+    // lists go into the slots emitFieldInits reads. Twin of decoPhases in
+    // typescript-interpreter.abnf.
+    function decoPhases(b, info, clsV, dv, dcur, cdv) {
+        var out = {b: b, v: clsV, sx: callExt(b, "js_arr_new", []), cx: callExt(b, "js_arr_new", []), fi: [], fx: []}
+        var ixV = callExt(b, "js_arr_new", [])
+        if (info.ixSlot != null) { callExt(b, "js_scope_decl", [curScopeV, emitStr(b, info.ixSlot), ixV]) }
+        for (var ph = 0; ph < 4; ph++) {
+            for (var i = 0; i < info.dmembers.length; i++) {
+                var mm = info.dmembers[i]
+                if ((mm.kind == "field") != (ph >= 2) || (mm.statik == true) != (ph % 2 == 0)) { continue }
+                var nameV = null
+                if (mm.nameT != undefined) {
+                    var kr = emitMemberKey(b, mm)
+                    b = kr.b
+                    nameV = kr.v
+                }
+                if (mm.kind == "field") {
+                    var fxV = callExt(b, "js_arr_new", [])
+                    var fr = decoApplyAll(b, dv[i], hUndef, "field", mm.name, mm.statik === true, fxV, nameV)
+                    b = fr.b
+                    if (mm.statik) {
+                        out.fi[i] = fr.v
+                        out.fx[i] = fxV
+                    } else {
+                        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, mm.dslot + "i"), fr.v])
+                        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, mm.dslot + "x"), fxV])
+                    }
+                    continue
+                }
+                var mr = decoApplyAll(b, dv[i], dcur[i], "method", mm.name, mm.statik === true, mm.statik ? out.sx : ixV, nameV)
+                b = mr.b
+                callExt(b, "js_scope_set", [curScopeV, emitStr(b, mm.dslot), mr.v])
+            }
+        }
+        var cr = decoApplyAll(b, cdv, clsV, "class", info.shown[0], false, out.cx, null)
+        out.b = cr.b
+        out.v = cr.v
+        return out
+    }
+    // Runs the initializers in listV with `this` bound; with useValue each one maps the
+    // value, which is the answer. Twin of decoRun in typescript-interpreter.abnf.
+    function emitDecoRun(b, listV, selfV, valueV, useValue) {
+        return b.NewCall(decoFnsGet().run, [listV, selfV, valueV, handle(useValue ? 1 : 0)])
+    }
+    // The module's two decorator helpers, made on first use: `jsdecorun(list, self, v,
+    // use)` - emitDecoRun's loop - and the closure body behind every
+    // ctx.addInitializer(f), which appends f to the 0dlist of its scope.
+    var decoFns = []
+    function decoFnsGet() {
+        if (decoFns.length > 0) { return decoFns[0] }
+        var rf = m.NewFunc("jsdecorun", i64, [llvm.ir.NewParam("list", i64), llvm.ir.NewParam("self", i64),
+                                               llvm.ir.NewParam("v", i64), llvm.ir.NewParam("use", i64)])
+        var entryB = rf.NewBlock("entry")
+        var headB = rf.NewBlock("")
+        var bodyB = rf.NewBlock("")
+        var exitB = rf.NewBlock("")
+        entryB.NewBr(headB)
+        var iV = headB.NewPhi([llvm.ir.NewIncoming(handle(0), entryB)])
+        var curV = headB.NewPhi([llvm.ir.NewIncoming(rf.Params[2], entryB)])
+        var fnV = callExt(headB, "js_arg", [rf.Params[0], iV])
+        headB.NewCondBr(headB.NewICmp(llvm.enum.IPredEQ, fnV, hUndef), exitB, bodyB)
+        var withV = callExt(bodyB, "js_arr_new", [])
+        callExt(bodyB, "js_arr_push", [withV, curV])
+        var use = bodyB.NewICmp(llvm.enum.IPredNE, rf.Params[3], handle(0))
+        var resV = jsCall(bodyB, fnV, rf.Params[1], bodyB.NewSelect(use, withV, callExt(bodyB, "js_arr_new", [])))
+        var nextV = bodyB.NewSelect(use, resV, curV)
+        bodyB.NewBr(headB)
+        iV.Incs = [llvm.ir.NewIncoming(handle(0), entryB), llvm.ir.NewIncoming(bodyB.NewAdd(iV, handle(1)), bodyB)]
+        curV.Incs = [llvm.ir.NewIncoming(rf.Params[2], entryB), llvm.ir.NewIncoming(nextV, bodyB)]
+        exitB.NewRet(curV)
+        funcCount++
+        var aidx = funcCount
+        var af = m.NewFunc("jsf_" + aidx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
+        var ab = af.NewBlock("entry")
+        callExt(ab, "js_arr_push", [callExt(ab, "js_scope_get", [af.Params[0], emitStr(ab, "0dlist")]),
+                                    callExt(ab, "js_arg", [af.Params[1], handle(0)])])
+        ab.NewRet(hUndef)
+        decoFns.push({run: rf, adder: aidx})
+        return decoFns[0]
     }
     // A variable reference that yields undefined instead of raising when the name is not
     // bound (js_scope_typeof answers "undefined" for an unbound name, where js_scope_get
@@ -6364,9 +6527,8 @@ NotFuncHead = :script(~~
                                                  llvm.ir.NewIncoming(hUndef, undefB)])}
         }
     }
-    // A decorated class declaration: build the class, run the decorators bottom-up (the
-    // one nearest the 'class' keyword first, as the spec prescribes) and rebind the name
-    // to whatever came out.
+    // A decorated class declaration: emitClass applies the decorators and rebinds the
+    // name to whatever came out.
     function makeDecoratedClass(items) {
         var decos = []
         var rest = []
@@ -6375,46 +6537,27 @@ NotFuncHead = :script(~~
             if (it != undefined && it.deco != undefined) { decos.push(it.deco) } else { rest.push(it) }
         }
         var info = makeClassInfo(rest)
+        info.cdecos = decos
         exportNames = [info.name]
-        return function(b) {
-            var r = emitClass(b, info)
-            b = r.b
-            var clsV = r.v
-            for (var i = decos.length - 1; i >= 0; i--) {
-                var dr = applyDeco(b, decos[i], clsV, emitDecoCtx(b, "class", info.name, false))
-                b = dr.b
-                clsV = dr.v
-            }
-            callExt(b, "js_scope_set", [curScopeV, emitStr(b, info.name), clsV])
-            return b
-        }
+        return function(b) { return emitClass(b, info).b }
     }
-    // A decorated class MEMBER: the decorators are attached to the descriptor the inner
-    // member production pushed. Only a method is genuinely decorated (see
-    // emitDecoratedMethod); on a field or an accessor the list is dropped and the member
-    // is installed as it stands.
-    // The expression form: same decorator application, but the result is the VALUE of the
-    // expression rather than a rebound name. ClassExprLowered has already pushed its own
-    // thunk, so the class is built by calling it.
-    function makeDecoratedClassExpr(items) {
+    // The expression form: the decorated value IS the value of the expression.
+    // ClassExprLowered has just made its class (lastClassExprInfo), and the decorators
+    // join it there; an anonymous one is named from the text WITH its decorators.
+    function makeDecoratedClassExpr(items, txt) {
         var decos = []
         var clsT = undefined
         for (var i = 0; i < items.length; i++) {
             var it = items[i]
             if (it != undefined && it.deco != undefined) { decos.push(it.deco) } else { clsT = it }
         }
-        return function(b) {
-            var r = clsT(b)
-            b = r.b
-            var v = r.v
-            for (var i = decos.length - 1; i >= 0; i--) {
-                var dr = applyDeco(b, decos[i], v, emitDecoCtx(b, "class", undefined, false))
-                b = dr.b
-                v = dr.v
-            }
-            return {b: b, v: v}
-        }
+        lastClassExprInfo.cdecos = decos
+        fnAnonNote(lastClassExprInfo.shown, lastClassExprInfo.shown[0], txt)
+        return clsT
     }
+    // A decorated class MEMBER: the decorators are attached to the descriptor the inner
+    // member production pushed. A method or a field is decorated (decoPhases); on an
+    // accessor the list is dropped and the member is installed as it stands.
     function makeDecoratedMember(items) {
         var decos = []
         var member = undefined
@@ -6422,37 +6565,33 @@ NotFuncHead = :script(~~
             var it = items[i]
             if (it != undefined && it.deco != undefined) { decos.push(it.deco) } else { member = it }
         }
-        if (member != undefined && member.kind == "method") { member.decos = decos }
+        if (member != undefined && (member.kind == "method" || (member.kind == "field" && member.auto !== true))) { member.decos = decos }
         return member
     }
-    // The hidden slot that carries a decorated method's current value from the class
-    // definition into its trampoline.
+    // The hidden slots that carry a decorated method's value and a decorated field's
+    // initializer lists from the class definition to their users.
     var decoSeq = 0
     // A decorated method. The UNDECORATED method is emitted as a PLAIN function - `this`
     // from js_this, the declared parameters at args[0..] - because that is the shape a
     // TC39 decorator expects to be handed and to hand back ('original.call(this, n)').
     // js_mcall, however, calls a class member with the receiver PREPENDED, so what lands
     // on the descriptor is a trampoline that turns that convention back into a normal
-    // call on the decorated value.
+    // call on the slot's value, which decoPhases replaces with the decorated one.
+    // Answers the undecorated value.
     function emitDecoratedMethod(b, clsV, keyV, mm) {
         var idx = emitFunction(mm.params, mm.body, false, false)
         // A DECORATED method keeps its declaration's name and arity: what a decorator
         // replaces is the body.
         var cur = fnMetaAt(b, callExt(b, "js_closure", [handle(idx), curScopeV]), memberFnName(mm), mm.params)
-        for (var i = mm.decos.length - 1; i >= 0; i--) {
-            var dr = applyDeco(b, mm.decos[i], cur, emitDecoCtx(b, "method", mm.name, mm.statik === true))
-            b = dr.b
-            cur = dr.v
-        }
         decoSeq = decoSeq + 1
-        var slot = "0deco" + decoSeq
-        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, slot), cur])
-        var widx = emitDecoTrampoline(slot, mm.statik)
+        mm.dslot = "0deco" + decoSeq
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, mm.dslot), cur])
+        var widx = emitDecoTrampoline(mm.dslot, mm.statik)
         // clsV is the STATIC table for a static member and the descriptor for an
         // instance one - emitClass picks which, and the raw set is for the same reason
         // it is raw there.
         clsRawSet(b, clsV, keyV, callExt(b, "js_closure", [handle(widx), curScopeV]))
-        return b
+        return cur
     }
     // jsf_N(env, args): args[0] is the receiver js_mcall prepended (for a static member
     // there is none), the rest are the real arguments; call the decorated value with the

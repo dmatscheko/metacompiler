@@ -5724,6 +5724,59 @@ function s144(): void {
         Object.getOwnPropertyNames(Aa144.prototype).join() == "constructor,x,y");
 }
 
+// ===== SECTION 145: decorator phases, field decorators, addInitializer =====
+// tsc's order: every decorator expression is evaluated first (class, then members in
+// source order); they are applied static methods, instance methods, static fields,
+// instance fields, class; then the static-method initializers, each static field with
+// its decorators' initializers and its extra ones, the class's; per instance, the
+// method initializers, then each field and its extra initializers. A field decorator
+// answers an initializer that maps the field's value, outermost first.
+const log145: string[] = [];
+function nd145(tag: string): any {
+    log145.push("e:" + tag);
+    return function (value: any, ctx: any): any {
+        log145.push("a:" + tag + ":" + ctx.kind + ":" + String(ctx.name));
+        ctx.addInitializer(function (this: any) { log145.push("i:" + tag + ":" + typeof this); });
+        if (ctx.kind == "field") { return function (this: any, v: any) { log145.push("f:" + tag + ":" + v); return v * 10; }; }
+        return undefined;
+    };
+}
+function add145(n: number): any {
+    return function (v: any, ctx: any): any { return function (this: any, x: number) { return x + n; }; };
+}
+function sub145(v: any, ctx: any): any {
+    log145.push("n:" + ctx.name);
+    return class extends v { extra = 7; };
+}
+@nd145("c")
+class K145 {
+    @nd145("f1") a = 1;
+    @nd145("m1") m(): number { return 1; }
+    @nd145("s1") static sm(): number { return 2; }
+    @nd145("f2") b = 2;
+    @nd145("sf") static sf = 5;
+    constructor() { log145.push("ctor"); }
+}
+class F145 {
+    @add145(1) @add145(10) x = 5;
+    @add145(100) static s = 1;
+}
+@sub145
+class R145 { static make(): any { return new R145(); } }
+const E145 = @sub145 class { z = 1; };
+const defs145 = log145.join(",");
+function s145(): void {
+    log145.length = 0;
+    log145.push("new");
+    const k: any = new K145();
+    check("decophase1", defs145 ==
+        "e:c,e:f1,e:m1,e:s1,e:f2,e:sf,a:s1:method:sm,a:m1:method:m,a:sf:field:sf,a:f1:field:a,a:f2:field:b,a:c:class:K145," +
+        "i:s1:function,f:sf:5,i:sf:function,i:c:function,n:R145,n:E145" &&
+        log145.join(",") == "new,i:m1:object,f:f1:1,i:f1:object,f:f2:2,i:f2:object,ctor");
+    check("decophase2", k.a == 10 && k.b == 20 && K145.sf == 50 && new F145().x == 16 && F145.s == 101);
+    check("decophase3", (R145.make() as any).extra == 7 && (new E145() as any).extra == 7);
+}
+
 // ===== END SECTIONS =====
 
 function main(): number {
@@ -5859,6 +5912,7 @@ function main(): number {
     s142(); // SECTION-CALL 142
     s143(); // SECTION-CALL 143
     s144(); // SECTION-CALL 144
+    s145(); // SECTION-CALL 145
     println("full: " + checks + " checks, " + failures + " failures");
     return failures;
 }
