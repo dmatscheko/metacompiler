@@ -1751,6 +1751,23 @@ func (rt *jsrt) rubyIOMethod(o *jsObject, fd int, name string, args []interface{
 	return nil
 }
 
+// rubyPolarPi is MRI's rb_dbl_complex_new_polar_pi: abs * e^(i*pi*ang), which a
+// negative Float to a non-integral power is. Twin of rbnPolarPi in
+// lib/ruby-num.js.
+func rubyPolarPi(abs, ang float64) (float64, float64) {
+	fi := math.Trunc(ang)
+	fr := ang - fi
+	pos := fr == 0.5
+	if pos || fr == -0.5 {
+		h := fi / 2
+		if (h-math.Trunc(h) != fr) != pos {
+			abs = -abs
+		}
+		return 0, abs
+	}
+	return abs * math.Cos(math.Pi*ang), abs * math.Sin(math.Pi*ang)
+}
+
 // rubyLoop is Kernel#loop: the block again and again, until a break (the
 // caller's marker catch) or a StopIteration, whose #result is the answer. Twin
 // of js_rloop in lib/ruby-rt.metajs and loop in ruby-interpreter.abnf.

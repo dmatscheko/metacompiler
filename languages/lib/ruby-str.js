@@ -136,6 +136,28 @@ function rbsLines(s, sep) {
     return out
 }
 
+// Integer#chr("UTF-8"): the character of code point cp, or "" with the
+// RangeError's message in err[0]. Go twin: rubyChrUtf8 in abnf/jsrtrubystr.go.
+function rbsChrUtf8(cp, err) {
+    if (cp < 0 || cp > 1114111) {
+        err.push(cp + " out of char range")
+        return ""
+    }
+    if (cp >= 55296 && cp <= 57343) {
+        var hx = ""
+        var v = cp
+        while (v > 0) {
+            hx = "0123456789ABCDEF".charAt(v % 16) + hx
+            v = Math.floor(v / 16)
+        }
+        err.push("invalid codepoint 0x" + hx + " in UTF-8")
+        return ""
+    }
+    if (cp < 65536) { return String.fromCharCode(cp) }
+    var w = cp - 65536
+    return String.fromCharCode(55296 + Math.floor(w / 1024), 56320 + (w % 1024))
+}
+
 // String#ord: the code point of the first character, a surrogate pair whole.
 function rbsOrd(s) {
     if (s.length == 0) { return 0 }

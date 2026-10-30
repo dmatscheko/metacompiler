@@ -4877,6 +4877,23 @@ def s116
         $stdout.flush.equal?($stdout))
 end
 
+# ===== SECTION 117: a negative Float to a fractional power; chr("UTF-8") =====
+# A negative base to a non-integral Float power is a Complex (MRI's polar form,
+# exactly imaginary at an odd half); Integer#chr("UTF-8") is the character of a
+# code point, a RangeError outside Unicode or on a surrogate. /usr/bin/ruby 2.6
+# settles each.
+def s117
+  b = [-8.0, -4.0, -8]
+  c1 = b[0]**(1.0 / 3)
+  check("cp117a", c1.class == Complex && c1 == Complex(1.0000000000000002, 1.7320508075688772) &&
+        b[1]**0.5 == Complex(0.0, 2.0) && b[1]**1.5 == Complex(0.0, -8.0) && b[2]**(1.0 / 3) == c1 &&
+        b[1]**2.0 == 16.0)
+  e1 = begin; 0x110000.chr("UTF-8"); rescue RangeError => e; e.message; end
+  e2 = begin; 0xD800.chr("UTF-8"); rescue RangeError => e; e.message; end
+  check("ch117b", 128512.chr("UTF-8") == "\u{1F600}" && 233.chr("UTF-8") == "é" && 128512.chr("UTF-8").length == 1 &&
+        e1 == "1114112 out of char range" && e2 == "invalid codepoint 0xD800 in UTF-8")
+end
+
 s39() # SECTION-CALL 39
 s40() # SECTION-CALL 40
 s41() # SECTION-CALL 41
@@ -4955,5 +4972,6 @@ s113() # SECTION-CALL 113
 s114() # SECTION-CALL 114
 s115() # SECTION-CALL 115
 s116() # SECTION-CALL 116
+s117() # SECTION-CALL 117
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

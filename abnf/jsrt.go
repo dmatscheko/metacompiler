@@ -6019,6 +6019,10 @@ func (rt *jsrt) rubyNumBin(op string, l, r interface{}) interface{} {
 			}
 			return jsFlo{f: rubyFloMod(x, y)}
 		case "**":
+			if x < 0 && math.Floor(y) != y {
+				re, im := rubyPolarPi(crPow(-x, y), y)
+				return jsCpx{re: jsFlo{f: re}, im: jsFlo{f: im}}
+			}
 			return jsFlo{f: crPow(x, y)}
 		}
 		// A Float or Rational receiver has no bit operators (<< >> & | ^). Twin of
@@ -6771,6 +6775,10 @@ func (rt *jsrt) rubyNumMethod(t interface{}, name string, args []interface{}) (i
 		return rt.rubyNumBin("-", t, float64(1)), true
 	// Integer#chr: one byte, so 0..255; anything else is a RangeError.
 	case "chr":
+		// chr("UTF-8") is the character of that code point.
+		if pos, _ := rubyBlockArgs(args); len(pos) > 0 && strings.ToUpper(rt.rubyStr(pos[0])) == "UTF-8" {
+			return rt.rubyChrUtf8(x), true
+		}
 		if x < 0 || x > 255 {
 			rt.rubyRaiseErr(name, "RangeError", rubyIntStr(x)+" out of char range")
 		}

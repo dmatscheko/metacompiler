@@ -171,6 +171,23 @@ function rbnStrToDbl(s, badcheck) {
 // The mode letters the digit rounders share: "r" rounds a tie away from zero (the
 // default, half: :up), "re" to the even neighbour, "rd" towards zero. "" for a
 // name that is no mode, which the caller raises as ArgumentError.
+// A negative Float to a non-integral power is a Complex: MRI's
+// rb_dbl_complex_new_polar_pi(abs, ang), abs * e^(i*pi*ang), as [re, im]. An
+// angle of an odd half is exactly imaginary. Go twin: rubyPolarPi in
+// abnf/jsrtruby.go.
+function rbnPolarPi(abs, ang) {
+    var fi = Math.trunc(ang)
+    var fr = ang - fi
+    var pos = fr == 0.5
+    if (pos || fr == 0 - 0.5) {
+        var h = fi / 2
+        var a = abs
+        if (((h - Math.trunc(h)) != fr) != pos) { a = -a }
+        return [0, a]
+    }
+    return [abs * Math.cos(Math.PI * ang), abs * Math.sin(Math.PI * ang)]
+}
+
 function rbnHalfMode(name) {
     if (name == "" || name == "up") { return "r" }
     if (name == "even") { return "re" }

@@ -3,6 +3,7 @@ package abnf
 import (
 	"math"
 	"math/big"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 )
@@ -43,6 +44,18 @@ func (rt *jsrt) rubyIntSqrt(v interface{}) interface{} {
 		rt.rubyRaiseErr("", "Math::DomainError", "Numerical argument is out of domain - \"isqrt\"")
 	}
 	return rt.rubyBigNarrow(new(big.Int).Sqrt(n))
+}
+
+// rubyChrUtf8 is Integer#chr("UTF-8"). Twin of rbsChrUtf8 in ruby-str.js.
+func (rt *jsrt) rubyChrUtf8(x float64) string {
+	cp := int64(x)
+	if cp < 0 || cp > 0x10FFFF {
+		rt.rubyRaiseErr("chr", "RangeError", rubyIntStr(x)+" out of char range")
+	}
+	if cp >= 0xD800 && cp <= 0xDFFF {
+		rt.rubyRaiseErr("chr", "RangeError", "invalid codepoint 0x"+strings.ToUpper(strconv.FormatInt(cp, 16))+" in UTF-8")
+	}
+	return string(rune(cp))
 }
 
 // rubyFindRunes is the first index >= from where t occurs in s, or -1.

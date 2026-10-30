@@ -5093,7 +5093,13 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 if (y * fm < 0) { return mkFlo(fm + y) }
                 return mkFlo(fm)
             }
-            if (op == "**") { return mkFlo(Math.pow(x, y)) }
+            if (op == "**") {
+                if (x < 0 && Math.floor(y) != y) {
+                    var pp = rbnPolarPi(Math.pow(0 - x, y), y)
+                    return mkCpx(mkFlo(pp[0]), mkFlo(pp[1]))
+                }
+                return mkFlo(Math.pow(x, y))
+            }
             // A Float or Rational receiver has no bit operators (<< >> & | ^).
             // Twin of rubyNumBin in abnf/jsrt.go and rbNumBin in lib/ruby-rt.metajs.
             if (numRank(l) >= 1) { noMethod(l, op) }
@@ -8815,6 +8821,13 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (name == "integer?") { return true }
             // Integer#chr: one byte, so 0..255; anything else is a RangeError.
             if (name == "chr") {
+                // chr("UTF-8") is the character of that code point.
+                if (args.length > 0 && rstr(args[0]).toUpperCase() == "UTF-8") {
+                    var cerr = []
+                    var cs = rbsChrUtf8(target, cerr)
+                    if (cerr.length > 0) { raiseErr(name, "RangeError", cerr[0]) }
+                    return cs
+                }
                 if (target < 0 || target > 255) { raiseErr(name, "RangeError", intStr(target) + " out of char range") }
                 return String.fromCharCode(target)
             }
