@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-873** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-874** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -66,7 +66,7 @@ its report; anything structural there is a CORE ticket.
 
 # RB — Ruby
 
-### T-872 ruby: binary case mapping, re-encode back to UTF-8 in place, public over inherited private, module_eval · P3 · RB · OPEN [V RB worker]
+### T-872 ruby: binary case mapping, re-encode back to UTF-8 in place, public over inherited private, module_eval · P3 · RB · IN PROGRESS (RB worker, round 27) [V RB worker]
 Oracle LC_ALL=en_US.UTF-8 /usr/bin/ruby 2.6. (1) WRONG: `"\xFFAb".b.upcase` → `"\xFFAB"`; interp `"\x8AB"`, llvm.Run/native
 `"xAB"` (the byte is case-mapped as U+00FF; binary strings map ASCII only). (2) `force_encoding("UTF-8")` on a binary box
 with valid UTF-8 bytes returns a new String, so an alias keeps ASCII-8BIT (oracle UTF-8). (3) compiler: `public :m` over an
@@ -104,15 +104,10 @@ not change the renderer.
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-868 kotlin: nested names leak globally; builtin qualifiedName; type-blind receiver rule · P2 · KT · IN PROGRESS (KT worker, round 7) [V KT worker]
-(1) WRONG ANSWER, every leg: `class In { override fun toString() = "top" }` + `class O1 { class In … }` → `println(In(1))`
-prints "O1"'s, Kotlin "top" (interp: `globalScope[name] = cls` for nested classes); a nested class `N` anywhere also
-breaks an enum's bare `N` entry. (2) every leg: `IllegalStateException("x")::class.qualifiedName` → "IllegalStateException"
-(stdlib `java.lang.IllegalStateException`), printing the KClass gives "class IllegalStateException"; `String::class.
-qualifiedName` → "String" (`kotlin.String`). (3) REGRESSION from the receiver rule: member `log(a: Int, b: Int = 1)` +
-top-level `log(s: String)`: `log("hi")` inside the class now picks the member (arity only); Kotlin picks the top-level by
-type. The rule must check applicability by argument types where they are known. (4) companion members do not take part
-in the receiver rule (a companion member should hide a top-level declaration of the same name; spec-only).
+### T-873 kotlin: unqualified `is` matches nested classes; interface companion calls (compiled) · P2 · KT · IN PROGRESS (KT worker, round 8) [V KT worker]
+(1) WRONG, every leg: `class In; class O1 { class In }`; `val a: Any = O1.In(1); a is In` → true; Kotlin false (an unqualified
+`is` must resolve the name lexically to one class, not match any class of that simple name — clsNamed / js_ktis). (2)
+compiled legs: `interface Ic { companion object { fun g() = "ifc" } }; Ic.g()` → "unknown method 'g'"; interp `ifc`.
 
 # GO — Go  (oracle: `go run`)
 
@@ -934,6 +929,7 @@ T-862 kotlin: member vs top-level fun, qualifiedName, named args on nested ctors
 T-775 missing features met in real programs (Benchmarks Game, Rosetta Code) — DONE ddd654a4 (python module __doc__ incl. per-module docstring table; go make of named slice/map/chan types, math/cmplx after Go's algorithms + Atan2/Sincos, complex128 typed locations, returned constants convert to the result type; java System.out.flush and the source launcher's entry class; swift &= |= ^= <<= >>= and wrapping forms, free sqrt; js Uint8Array; c #define among struct members and initializer items through the pipeline — the in-function case already worked via -pipe; complex64 and cmplx trig filed as T-869)
 T-867 bash: a prefix assignment is visible while the command's own words expand — DONE 18bf1dde (words expand first, then prefix assignments left to right, redirection words see the old values, names restored after — interp applyPrefix/openRedirsOuter/restorePrefix, compiler expandedWord/prefixOuter; no-command-word assignments persist with the last substitution's status; temporary bindings take no attributes and leave arrays alone; bash bench unchanged)
 T-864 ruby: encoding and module leftovers — DONE 9e2eeb10 (hash keys equal across encodings in all engines; private/protected_instance_methods and private in module bodies; nested names no longer leak globally, body constants resolve lexically, module bodies run after their methods install; float pack directives; String#encode with MRI's error classes and replace options; in-place re-encoding seen through aliases — Go twin forwards jsRStr→jsRBin, append loop −0.5%)
+T-868 kotlin: nested names leak globally; builtin qualifiedName; type-blind receiver rule — DONE de73477b (receiver rule checks applicability by named args and builtin argument types — the regression fixed, arguments evaluated once; nested names bound globally only when no top-level declaration claims them; builtin KClass names per stdlib; class and superclass companions are implicit receivers. DECLINED: the " (Kotlin reflection is not available)" suffix when printing a KClass — it depends on whether kotlin-reflect is on the JVM classpath, not on the language)
 
 # Settled — do not re-open
 
