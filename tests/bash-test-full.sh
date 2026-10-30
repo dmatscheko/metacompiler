@@ -107,6 +107,23 @@ y"
 cd "abcd"
   # inside double quotes a backslash is literal unless it precedes $ ` " \ or newline
   check quo12 "a\qb" 'a\qb'
+  # outside single quotes a backslash-newline vanishes before words are split, so
+  # between words it is blank: in an array literal, a ${...} word, a subscript, (( ))
+  local -a cont=(a \
+'b')
+  check quo13 "${#cont[@]}:${cont[1]}" "2:b"
+  check quo14 "${s02unset:-ab\
+cd}" "abcd"
+  check quo15 "${cont[\
+1]}" "b"
+  local -a nums=(4 6)
+  check quo16 "$(( nums[\
+1] + 1 ))" 7
+  local i acc=""
+  for (( i = 0; \
+i < 2; i++ \
+)); do acc="$acc$i"; done
+  check quo17 "$acc" "01"
 }
 
 # ===== SECTION 03: parameter expansion: defaults and length =====

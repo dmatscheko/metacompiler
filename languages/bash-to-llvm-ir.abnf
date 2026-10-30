@@ -292,7 +292,7 @@ ArrayItem   = ArrayKV | CWord ;
 // `[k]=v` inside an array literal is an assignment too: bash 5.3 keeps `A=([0]=$x)`
 // unsplit exactly as it keeps `A=$x`.
 ArrayKV     <~~ push(mkArrayKV(takeAll())) ~~> = "[" IdxWord "]" :whitespace() "=" :whitespace() NsWord ;
-WsNL        = { @+" \t\r\n" | Comment } ;
+WsNL        = { @+" \t\r\n" | "\\\n" | Comment } ;
 AsgIdent    = ( "a"..."z" | "A"..."Z" | "_" ) :whitespace() { "a"..."z" | "A"..."Z" | "0"..."9" | "_" } ;
 
 // A command word followed by argument words. NotReserved blocks a bare reserved keyword in
@@ -491,7 +491,7 @@ PeXfOp      <~~ push({xf: up.in}) ~~> = "Q" | "E" | "P" | "A" | "K" | "a" | "k" 
 PeTarget    <~~ peTgt = arSrc(up.start, up.pos) ~~> = PeIdxRef | PeName ;
 PeIdxRef    <~~ push({hasIdx: 1}) ~~> = PeName "[" IdxWord "]" ;
 IdxWord     <~~ push(mkWord(takeAll())) ~~> = { IdxSeg } ;
-IdxSeg      = SqSeg | DqSeg | ExpSeg | EscSeg | IdxBare ;
+IdxSeg      = SqSeg | DqSeg | ExpSeg | LineCont | EscSeg | IdxBare ;
 IdxBare     <~~ push(makeConst(up.in)) ~~> = !@+"]}\"'\\$`" ;
 PeName      <~~ push({pname: up.in}) ~~> = PeNameTok ;
 PeNameTok   = PeIdent | PeDigits | "@" | "*" | "#" | "?" | "!" | "$" | "-" ;
@@ -548,11 +548,11 @@ PeBlank     = @+" \t" ;
 
 // A word inside ${...}: anything up to the closing brace, expansions included.
 BraceWord   <~~ push(mkBraceWord(takeAll())) ~~> = BraceWSeg { BraceWSeg } ;
-BraceWSeg   = SqSeg | DqSeg | AnsiSeg | BraceUq | EscSeg ;
+BraceWSeg   = SqSeg | DqSeg | AnsiSeg | BraceUq | LineCont | EscSeg ;
 // The UNQUOTED parts of a ${v-w} word: split when the ${...} itself stands unquoted
 // (see mkBraceWord).
 BraceUq     <~~ push({uq: pop()}) ~~> = ExpSeg | BraceBare ;
-BraceSeg    = SqSeg | DqSeg | AnsiSeg | ExpSeg | EscSeg | BraceBare ;
+BraceSeg    = SqSeg | DqSeg | AnsiSeg | ExpSeg | LineCont | EscSeg | BraceBare ;
 BraceBare   <~~ push(makeConst(up.in)) ~~> = !@+"}\"'\\$`" ;
 DollarName  = "$" VarName <~~ push(mkVarRef(up.in)) ~~> ;
 DollarDigit = "$" ArgDigit <~~ push(mkVarRef(up.in)) ~~> ;
