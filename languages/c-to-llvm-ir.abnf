@@ -1059,7 +1059,7 @@ Sizeof      = KwSizeof ( SizeofType | SizeofPlace | SizeofExpr ) ;
 SizeofType  <~~ push(makeSizeof(pop())) ~~>
             = "(" TypeName ")" ;
 SizeofPlace <~~ push(makeSizeofPlace(pop())) ~~>
-            = Lvalue ;
+            = Lvalue !"++" !"--" !"(" ;
 SizeofExpr  <~~ push(makeSizeofExpr(pop())) ~~>
             = UnaryExpr ;
 // _Alignof(type): for the scalar types this machine models, the alignment equals the
@@ -1870,17 +1870,26 @@ KwDefault   = "default" KwEnd ;
     // place is emitted and its value dropped; only its TYPE is used.
     function makeSizeofPlace(placeT) {
         return function(b) {
-            var p = placeT(b)
+            var p = typeOnly(b, placeT)
             var n = ctBytes(p.ct != undefined ? p.ct : ctInt)
-            return {b: p.b, v: kint(n), ct: ctSizeT, cv: n}
+            return {b: b, v: kint(n), ct: ctSizeT, cv: n}
         }
     }
     function makeSizeofExpr(t) {
         return function(b) {
-            var r = t(b)
+            var r = typeOnly(b, t)
             var n = ctBytes(r.ct != undefined ? r.ct : ctInt)
-            return {b: r.b, v: kint(n), ct: ctSizeT, cv: n}
+            return {b: b, v: kint(n), ct: ctSizeT, cv: n}
         }
+    }
+    // The operand of sizeof and _Generic is not evaluated (C11 6.5.3.4p2, 6.5.1.1p3):
+    // it is emitted into a fresh block nothing branches to, which ends 'unreachable',
+    // so only its type is kept. Twin of typeOnly in c-interpreter.abnf.
+    function typeOnly(b, t) {
+        if (b == undefined || curF == undefined) return t(b)
+        var r = t(curF.NewBlock(""))
+        r.b.NewUnreachable()
+        return r
     }
     // A cast converts the value to the named type (C11 6.5.4).
     function makeCast(items) {
@@ -1953,8 +1962,7 @@ KwDefault   = "default" KwEnd ;
         var ctrl = items[0]
         var assocs = items.slice(1)
         return function(b) {
-            var r = ctrl(b)
-            b = r.b
+            var r = typeOnly(b, ctrl)
             var t = r.ct != undefined ? r.ct : ctInt
             if (t.k == "arr") t = {k: "ptr", p: t.e}
             var dflt = undefined

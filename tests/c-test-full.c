@@ -490,6 +490,8 @@ int s20_takeb(_Bool b) { return b; }
 unsigned char s20_retuc(int n) { return n; }
 signed char s20_retsc(int n) { return n; }
 short s20_retsh(int n) { return n; }
+int s20_calls = 0;
+int s20_bump(void) { s20_calls++; return 1; }
 int s20(void) {
     _Static_assert(1 + 1 == 2, "constant arithmetic");
     _Static_assert(sizeof(char) == 1, "char is exactly one byte");
@@ -539,6 +541,12 @@ int s20(void) {
     /* 6.8.6.4p3: the returned value is converted to the DECLARED return type, the
        same way an assignment converts, also when that type is narrow. */
     check(2020, s20_retuc(300) == 44 && s20_retsc(200) == -56 && s20_retsh(70000) == 4464);
+    /* 6.5.3.4p2: the operand of sizeof is not evaluated - no increment, store or call. */
+    int se = 0;
+    int sa[3] = { 1, 2, 3 };
+    unsigned long sz = sizeof(se++) + sizeof se++ + sizeof(sa[se++]) + sizeof(se = 5) + sizeof(++se + 1LL);
+    check(2021, sz == 24 && se == 0);
+    check(2022, sizeof(s20_bump()) == sizeof(int) && sizeof s20_bump() == 4 && s20_calls == 0);
     return 0;
 }
 
@@ -549,6 +557,8 @@ int s21(void) {
     check(2103, _Generic('a', char: 1, int: 2, default: 3) == 2);   /* 'a' is an int */
     check(2104, _Generic((char)0, char: 1, int: 2, default: 3) == 1);
     check(2105, _Generic(1ul, int: 4, default: 42) == 42);
+    int gk = 0;   /* 6.5.1.1p3: the controlling expression is not evaluated */
+    check(2106, _Generic(gk++, int: 1, default: 2) == 1 && gk == 0);
     return 0;
 }
 

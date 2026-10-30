@@ -644,7 +644,7 @@ Proto       <~~ pop(); pop(); pop() /* Drop the return type, name and parameters
 
 // The merged pushes: [name, [params...], bodyThunk]. A parameter is {name, ptr, sname?}.
 FuncDef     <~~ defineFunction() ~~>
-            = TypeInt <~~ push({ret: baseCtOf(up.in)}) ~~> { Attr } [ PStars <~~ push("*") ~~> ] Id <~~ push(up.in) ~~> ParamList { Attr } Block ;
+            = TypeInt <~~ push({ret: baseCtOf(up.in)}) ~~> { Attr } [ PStars <~~ push(up.in) ~~> ] Id <~~ push(up.in) ~~> ParamList { Attr } Block ;
 
 // A function whose RETURN type is a struct or union (by value, or a pointer to one).
 // A struct value is an address into the flat memory, and the memory of a call frame
@@ -659,7 +659,7 @@ SProto      <~~ takeAll() /* A prototype needs no lowering. */ ~~>
 // enum is an int here, so the only new thing is the declarator's base-type spelling.
 ERetType    <~~ push({ret: ctInt}) ~~> = [ TypeInt ] EnumRef [ TypeInt ] ;
 EFuncDef    <~~ defineFunction() ~~>
-            = ERetType [ PStars <~~ push("*") ~~> ] Id <~~ push(up.in) ~~> ParamList { Attr } Block ;
+            = ERetType [ PStars <~~ push(up.in) ~~> ] Id <~~ push(up.in) ~~> ParamList { Attr } Block ;
 EProto      <~~ takeAll() /* A prototype needs no lowering. */ ~~>
             = ERetType [ PStars ] Id ParamList { Attr } ";" ;
 SRetType    <~~ push({ret: makeRetCt(takeAll())}) ~~>
@@ -1187,7 +1187,7 @@ Sizeof      = KwSizeof ( SizeofType | SizeofPlace | SizeofExpr ) ;
 SizeofType  <~~ push(makeSizeof(pop())) ~~>
             = "(" TypeName ")" ;
 SizeofPlace <~~ push(makeSizeofPlace(pop())) ~~>
-            = Lvalue ;
+            = Lvalue !"++" !"--" !"(" ;
 SizeofExpr  <~~ push(makeSizeofExpr(pop())) ~~>
             = UnaryExpr ;
 // _Alignof(type): for the scalar types this machine models, the alignment equals the
@@ -1705,10 +1705,22 @@ KwDefault   = "default" KwEnd ;
         if (addr <= 0 || addr >= mem.length) fail("invalid load at address " + addr)
         return mem[addr]
     }
+    // The operand of sizeof and _Generic is not evaluated (C11 6.5.3.4p2, 6.5.1.1p3),
+    // but this interpreter learns a type only by running the thunk. While typeOnly
+    // runs one, noEval > 0 turns every side effect off: stores, copies and library
+    // writes are dropped and a call answers a zero of its return type unrun.
+    var noEval = 0
+    function typeOnly(t) {
+        noEval = noEval + 1
+        var r = t()
+        noEval = noEval - 1
+        return r
+    }
     // Storing converts to the destination's C type first, so a cell only ever holds
     // a value its own type can represent.
     function store(ct, addr, v) {
         if (addr <= 0 || addr >= mem.length) fail("invalid store at address " + addr)
+        if (noEval > 0) return convert(ct, v)
         mem[addr] = convert(ct, v)
         return mem[addr]
     }
@@ -1866,13 +1878,13 @@ KwDefault   = "default" KwEnd ;
     // answers its whole size, which is what 'sizeof a' on a char array reports.
     function makeSizeofPlace(placeT) {
         return function() {
-            var p = placeT()
+            var p = typeOnly(placeT)
             return val(ctBytes(p.ct != undefined ? p.ct : ctInt), ctSizeT)
         }
     }
     // sizeof over any other expression: the size of the type that expression has.
     function makeSizeofExpr(t) {
-        return function() { return val(ctBytes(t().t), ctSizeT) }
+        return function() { return val(ctBytes(typeOnly(t).t), ctSizeT) }
     }
     // A cast converts the value to the named type (C11 6.5.4): an integer wraps to
     // that type's width and signedness, a float truncates towards zero on the way to
@@ -1887,15 +1899,14 @@ KwDefault   = "default" KwEnd ;
         }
     }
     // _Generic: the association whose type name IS the controlling expression's type
-    // wins, otherwise the 'default' one. The controlling expression is evaluated to
-    // learn its type - C says it is not evaluated, which only differs for an operand
-    // with side effects.
+    // wins, otherwise the 'default' one. The controlling expression is run only for
+    // its type (typeOnly).
     function makeGenAssoc(items) { return {gt: items[0], t: items[1]} }
     function makeGeneric(items) {
         var ctrl = items[0]
         var assocs = items.slice(1)
         return function() {
-            var t = ctrl().t
+            var t = typeOnly(ctrl).t
             if (t.k == "arr") t = {k: "ptr", p: t.e}
             var dflt = undefined
             for (var i = 0; i < assocs.length; i++) {
@@ -2372,7 +2383,7 @@ KwDefault   = "default" KwEnd ;
     // expression is a goja-vs-frozen trap - JS inserts a semicolon (ASI), the frozen
     // MetaJS parser does not and reads 'return (mem[addr] = ...)'.
     function cPut(addr, b) {
-        if (addr > 0 && addr < mem.length) { mem[addr] = convert(ctChar, b & 255) }
+        if (addr > 0 && addr < mem.length && noEval == 0) { mem[addr] = convert(ctChar, b & 255) }
     }
     // The address of the NUL that terminates the string at addr, clamped to the arena.
     function cStrEnd(addr) {
@@ -2568,6 +2579,7 @@ KwDefault   = "default" KwEnd ;
 
     function callFunction(name, argValues) {
         if (name == "putchar") {
+            if (noEval > 0) return argValues[0]
             printf("%c", argValues[0].v & 255)
             return argValues[0]
         }
@@ -2585,6 +2597,7 @@ KwDefault   = "default" KwEnd ;
             if (hasOwn(libcNames, name)) return libcCall(name, argValues)
             fail("function not defined: " + name)
         }
+        if (noEval > 0) return val(0, f.rct != undefined ? f.rct : ctInt)
         var callerScopes = scopes
         scopes = [globalScope, {}]
         for (var i = 0; i < f.params.length; i++) {
@@ -2724,6 +2737,7 @@ KwDefault   = "default" KwEnd ;
     function isAggCt(ct) { return ct != undefined && (ct.k == "arr" || ct.k == "struct") }
     // Copy a whole aggregate (or one word for a scalar) from src to dst.
     function copyCt(ct, dst, src) {
+        if (noEval > 0) { return }
         var n = ctSize(ct)
         for (var i = 0; i < n; i++) mem[dst + i] = mem[src + i]
     }
@@ -3183,7 +3197,7 @@ KwDefault   = "default" KwEnd ;
         return {name: name, ptr: false, ct: ctFn}
     }
     // items = [{ptr}, name, [params...], bodyThunk].
-    function defineFnPtrFunc(items) { funcs[items[1]] = {params: items[2], body: items[3]} }
+    function defineFnPtrFunc(items) { funcs[items[1]] = {params: items[2], body: items[3], rct: ctFn} }
     // The loop and branch forms all follow the same shape while a switch is seeking:
     // enter the BODY without evaluating anything (a jump into a loop skips the
     // controlling expression, C11 6.8.6.1), and if the label was found in there, carry
@@ -3405,15 +3419,18 @@ KwDefault   = "default" KwEnd ;
         var rt = (typeof star == "string") ? pop() : star
         // The declared RETURN type converts the returned value, exactly as C requires
         // (6.8.6.4p3) - which is what makes a function declared int truncate a long.
-        // A pointer return ('*' present) keeps the address unconverted.
-        funcs[name] = {params: params, body: bodyT,
-                       ret: (typeof star == "string") ? undefined : rt.ret}
+        // A pointer return (the star run present) keeps the address unconverted; its
+        // type is still what an unevaluated call (typeOnly) answers.
+        var isPtr = typeof star == "string"
+        funcs[name] = {params: params, body: bodyT, ret: isPtr ? undefined : rt.ret,
+                       rct: isPtr ? ptrTo(starCount(star), rt.ret) : rt.ret}
     }
+    function starCount(text) { return text.split("*").length - 1 }
     // The C type a 'struct S' / 'union U' / 'struct S *' return type names.
     function makeRetCt(items) { return ptrTo(starsOf(items[1]), ctStruct(items[0])) }
     // items = [{ret}, name, [params...], bodyThunk].
     function defineSFunction(items) {
-        funcs[items[1]] = {params: items[2], body: items[3], ret: items[0].ret}
+        funcs[items[1]] = {params: items[2], body: items[3], ret: items[0].ret, rct: items[0].ret}
     }
 
     // ----- typedef -----
