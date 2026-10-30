@@ -106,13 +106,6 @@ parse in the js compiler.
 
 # JV — Java
 
-### T-843 java: field types collide by name across classes · P2 · JV · IN PROGRESS (JV worker, round 14) [V JV worker]
-One class declares `double d = 2.5;`, another `double[] d;` — `d[1] = 4` inside the second class prints `4`
-in all engines; java prints `4.0`. jPlaceTy / jFieldTyOf look a bare field name up in the program-wide
-table, which turns `?` (no conversion) when two declarations disagree; use the per-class table
-(jOwnFieldTy, walking superclasses). Also: `String.codePointBefore` is unsupported (all engines:
-"unknown String method").
-
 # CS — C#  (no dotnet here: spec-only, ECMA-334 and the .NET reference source)
 
 ### T-112 csharp: `Single` exponent-notation threshold is unverified · P3 · CS · BLOCKED - needs dotnet
@@ -938,6 +931,7 @@ T-834 c native: `extern int ge; int ge = 5;` fails to link — DONE c2152f2f (on
 T-835 c: a duplicate definition in one block scope is accepted — DONE c2152f2f (per-block/for/statement-expression name tables; same-scope redeclaration is a compile error in both halves; parameter-vs-body redeclaration filed as T-844)
 T-837 kotlin: a lambda whose body is a `try` expression returns Unit — DONE 66e8c889 (a try at the start of a lambda statement is a TryExpr in both grammars; plus cc28d0c0: typed catch clauses in a try expression, a non-local return passes catch(Exception))
 T-836 kotlin: edges left by the operator/cast/range fixes — PARTIAL 84a044bd — trimIndent = replaceIndent(""), is/as Comparable, !! in assignment targets, JVM binary names in CCE and javaClass.name, exact LongRange first/last/contains, null as checked T → NPE; the modCount-based CME filed as T-846
+T-843 java: field types collide by name across classes — DONE 4eccaba8 (field type resolved where Java resolves the name: own class + superclasses + enclosing classes, this.f, C.f, static type before .f incl. after a call; String.codePointBefore in all engines)
 
 # Settled — do not re-open
 
