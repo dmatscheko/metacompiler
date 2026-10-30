@@ -917,6 +917,9 @@ func (rt *jsrt) rubyStrBE(v interface{}) (string, string) {
 	case *jsRBin:
 		return t.b, t.encName()
 	case *jsRStr:
+		if t.bin != nil {
+			return t.bin.b, t.bin.encName()
+		}
 		return t.s, "UTF-8"
 	case string:
 		return t, "UTF-8"
@@ -1632,6 +1635,7 @@ func (rt *jsrt) rubyEncoding(n string) interface{} {
 // of two encodings are MRI's Encoding::CompatibilityError. Twin of binCat in
 // ruby-interpreter.abnf.
 func (rt *jsrt) rubyBinCat(l, r interface{}) interface{} {
+	l, r = rubyFwd(l), rubyFwd(r)
 	// An ASCII-only box on the right leaves a UTF-8 left side as it is.
 	if b, isBox := r.(*jsRBin); isBox && rubyAsciiOnly(b.b) {
 		if _, lBox := l.(*jsRBin); !lBox {
@@ -1660,6 +1664,9 @@ func rubyBinEq(b *jsRBin, o interface{}) bool {
 		ob, oe = t.b, t.encName()
 	case *jsRStr:
 		ob, oe = t.s, "UTF-8"
+		if t.bin != nil {
+			ob, oe = t.bin.b, t.bin.encName()
+		}
 	case string:
 		ob, oe = t, "UTF-8"
 	default:
@@ -1919,8 +1926,10 @@ func (rt *jsrt) rubyBinMethod(t *jsRBin, name string, args []interface{}) interf
 			return float64(rubyU8Len(t.b))
 		}
 		return float64(len(t.b))
-	case "to_s", "to_str", "-@":
+	case "to_s", "to_str", "-@", "itself":
 		return t
+	case "equal?":
+		return argAt(pos, 0) == interface{}(t)
 	case "<<", "concat":
 		for _, a := range pos {
 			if f, isNum := a.(float64); isNum {

@@ -4037,9 +4037,22 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     function strMutate(b, name, args, blk) {
         if (b.__fz) { raiseErr(name, "FrozenError", "can't modify frozen String") }
         if (name == "<<" || name == "concat") {
-            var acc = b.__rs
-            for (var i = 0; i < args.length; i++) { acc = acc + strAppendText(args[i]) }
-            b.__rs = acc
+            for (var i = 0; i < args.length; i++) {
+                if (!isBin(args[i])) {
+                    b.__rs = b.__rs + strAppendText(args[i])
+                    continue
+                }
+                var cv = anytype
+                cv = binCat(b, args[i])
+                if (!isBin(cv)) {
+                    b.__rs = rsText(cv)
+                    continue
+                }
+                becomeBin(b, cv)
+                var rest = args.slice(i + 1)
+                if (rest.length > 0) { binMethod(b, name, rest, null) }
+                return b
+            }
             return b
         }
         if (name == "replace") { b.__rs = rstr(args[0]); return b }
@@ -4064,6 +4077,15 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (r === null || r === undefined) { return null }
         b.__rs = rsText(r)
         return b
+    }
+    // A String re-encoded in place (<< of a binary String, force_encoding) turns
+    // into the binary box cv holds, so every alias of it sees the change. Twins:
+    // the bin forward of jsRStr in abnf/jsrtruby.go, rbBecomeBin in
+    // lib/ruby-rt.metajs.
+    function becomeBin(b, cv) {
+        b.__rbin = cv.__rbin
+        b.__benc = cv.__benc
+        b.__rs = undefined
     }
     // THE BLOCK MARKER. A call's block is appended to the argument list (makeCall
     // and mcall below) WRAPPED, so it stays distinguishable from a Proc handed over
@@ -9058,6 +9080,13 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 return fr
             }
             if (name == "to_s" || name == "to_str") { return target }
+            if (name == "force_encoding") {
+                if (target.__fz) { raiseErr(name, "FrozenError", "can't modify frozen String") }
+                var fe = anytype
+                fe = encStr(rbsBinOf(target.__rs), encArgName(args[0]))
+                if (isBin(fe)) { becomeBin(target, fe) }
+                return target
+            }
             return mcall(target.__rs, name, args, blk)
         }
         if (isBig(target)) { return bigMethod(target, name, args, blk) }

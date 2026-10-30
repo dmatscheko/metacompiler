@@ -342,7 +342,8 @@ function rbBinMethod(t, name, args) {
         if (enc == "UTF-8") { return rbsU8Len(b) }
         return b.length
     }
-    if (name == "to_s" || name == "to_str" || name == "-@") { return t }
+    if (name == "to_s" || name == "to_str" || name == "-@" || name == "itself") { return t }
+    if (name == "equal?") { return rbIdenticalP(t, rbArgAt(args, 0)) }
     if (name == "<<" || name == "concat") {
         var n = rbNPos(args)
         var k = 0
@@ -514,13 +515,50 @@ function rbStrAppendText(r) {
     if (typeof r == "number") { return rbCharCode(r) }
     return rbStr(r)
 }
+// A String re-encoded in place turns into the binary box cv holds. Twin of
+// becomeBin in ruby-interpreter.abnf.
+function rbBecomeBin(b, cv) {
+    b["__rstr"] = false
+    b["__rbin"] = true
+    b["__s"] = cv["__s"]
+    b["__benc"] = cv["__benc"]
+}
+// The rest of `b << args[i], ...' from a binary String args[i] on: joined by
+// rbBinCat's rule, b becomes binary in place when the result is.
+function rbStrCatBin(b, name, args, i) {
+    var cv = rbBinCat(b, args[i])
+    if (!rbIsBox(cv)) {
+        b["__s"] = rbSV(cv)
+        if (i + 1 < args.length) { return rbStrMutate(b, name, rbArgsFrom(args, i + 1)) }
+        return b
+    }
+    rbBecomeBin(b, cv)
+    if (i + 1 < args.length) { rbBinMethod(b, name, rbArgsFrom(args, i + 1)) }
+    return b
+}
+// rbStrAppendText for the box's own <<, ahead of the common cases, or null for
+// a binary String (rbStrCatBin's case).
+function rbStrAppendPart(r) {
+    if (typeof r == "string") { return r }
+    if (rtTag(r, "__rstr")) { return r["__s"] }
+    if (rtTag(r, "__rbin")) { return null }
+    return rbStrAppendText(r)
+}
 // A mutator on a box. Twin of strMutate in ruby-interpreter.abnf.
 function rbStrMutate(b, name, args) {
     if (b["__fz"]) { rbRaiseErr(name, "FrozenError", "can't modify frozen String") }
     if (name == "<<" || name == "concat") {
         var acc = b["__s"]
         var i = 0
-        while (i < args.length) { acc = acc + rbStrAppendText(args[i]); i = i + 1 }
+        while (i < args.length) {
+            var part = rbStrAppendPart(args[i])
+            if (part === null) {
+                b["__s"] = acc
+                return rbStrCatBin(b, name, args, i)
+            }
+            acc = acc + part
+            i = i + 1
+        }
         b["__s"] = acc
         return b
     }
@@ -565,6 +603,12 @@ function rbRStrMethod(b, name, args) {
         return rbMkRStr(b["__s"], true)
     }
     if (name == "to_s" || name == "to_str" || name == "itself") { return b }
+    if (name == "force_encoding") {
+        if (b["__fz"]) { rbRaiseErr(name, "FrozenError", "can't modify frozen String") }
+        var fe = rbEncStr(rbsBinOf(b["__s"]), rbEncArg(rbArgAt(args, 0)))
+        if (rbIsBox(fe)) { rbBecomeBin(b, fe) }
+        return b
+    }
     if (name == "tap") { rbCall1(rbBlockOf(args), b); return b }
     if (name == "equal?") { return rbIdenticalP(b, rbArgAt(args, 0)) }
     if (name == "object_id") { return rbObjectId(b) }

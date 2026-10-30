@@ -94,6 +94,9 @@ func (rt *jsrt) addRubyFmtExterns(m map[string]func(args []uint64) uint64) {
 		counted := false
 		switch t := v.(type) {
 		case *jsRStr:
+			if t.bin != nil {
+				return w(rt.rubyBinMethod(t.bin, "size", nil))
+			}
 			return w(float64(rubyCharCount(t.s)))
 		case string, *jsArray:
 			counted = true
@@ -1728,7 +1731,7 @@ func (rt *jsrt) rubyIOMethod(o *jsObject, fd int, name string, args []interface{
 			}
 			return
 		}
-		if b, isBin := v.(*jsRBin); isBin {
+		if b, isBin := rubyFwd(v).(*jsRBin); isBin {
 			write(rubyPutsLine(b.b), true)
 			return
 		}
@@ -1746,7 +1749,7 @@ func (rt *jsrt) rubyIOMethod(o *jsObject, fd int, name string, args []interface{
 	case "print", "write", "<<":
 		n := 0
 		for _, v := range pos {
-			if b, isBin := v.(*jsRBin); isBin {
+			if b, isBin := rubyFwd(v).(*jsRBin); isBin {
 				write(b.b, true)
 				n += len(b.b)
 				continue
@@ -2772,6 +2775,9 @@ func (rt *jsrt) rubyHashOf(v interface{}) float64 {
 	case string:
 		return rubyStrHash("s" + t)
 	case *jsRStr:
+		if t.bin != nil {
+			return rubyStrHash("s" + rubyBinText(t.bin.b))
+		}
 		return rubyStrHash("s" + t.s)
 	case *jsRBin:
 		return rubyStrHash("s" + rubyBinText(t.b))
@@ -2971,10 +2977,34 @@ func (rt *jsrt) rubyBuiltinExtFind(v interface{}, name string) (interface{}, boo
 // reaches through a variable or an element. The rule, and what it leaves out, are
 // at isRStr in languages/ruby-interpreter.abnf. It is a pointer, so every alias
 // shares it; fz is #frozen?. Twin of the {__rs, __fz} box of lib/ruby-rt.metajs.
+//
+// A String re-encoded in place (<< of a binary String, force_encoding) becomes
+// the binary String bin: the other engines change the box's own tags
+// (becomeBin in ruby-interpreter.abnf), and a Go value cannot change its type,
+// so every alias reaches bin through this one (rubyFwd).
 type jsRStr struct {
-	s  string
-	fz bool
-	id jsHandleID
+	s   string
+	fz  bool
+	id  jsHandleID
+	bin *jsRBin
+}
+
+// rubyFwd is what a value stands for: the binary String a re-encoded box
+// became, else the value itself.
+func rubyFwd(v interface{}) interface{} {
+	if b, ok := v.(*jsRStr); ok && b.bin != nil {
+		return b.bin
+	}
+	return v
+}
+
+// rubyFwdSelf is a method answer of the binary String b became, with that
+// String itself answered as b, the object the program holds.
+func rubyFwdSelf(b *jsRStr, r interface{}) interface{} {
+	if bn, ok := r.(*jsRBin); ok && bn == b.bin {
+		return b
+	}
+	return r
 }
 
 // rubyBoxOut is a method call's answer as the program sees it: a String the call
@@ -3002,6 +3032,9 @@ func rubyBoxOut(recv, v interface{}) interface{} {
 // rubySV reads a String box as its text and hands every other value back.
 func rubySV(v interface{}) interface{} {
 	if b, ok := v.(*jsRStr); ok {
+		if b.bin != nil {
+			return b.bin
+		}
 		return b.s
 	}
 	return v
@@ -3027,7 +3060,7 @@ func rubySVArgs(args []interface{}) []interface{} {
 		case *jsRStr, *jsRBin:
 			out := append([]interface{}{}, args[:i]...)
 			for _, b := range args[i:] {
-				if bn, isBin := b.(*jsRBin); isBin {
+				if bn, isBin := rubyFwd(b).(*jsRBin); isBin {
 					out = append(out, rubyBinText(bn.b))
 					continue
 				}
@@ -3115,10 +3148,26 @@ func (rt *jsrt) rubyStrMutate(b *jsRStr, name string, args []interface{}) interf
 	if b.fz {
 		rt.rubyRaiseErr(name, "FrozenError", "can't modify frozen String")
 	}
+	if b.bin != nil {
+		return rubyFwdSelf(b, rt.rubyBinMethod(b.bin, name, args))
+	}
 	switch name {
 	case "<<", "concat":
-		for _, a := range args {
-			b.s += rt.rubyStrAppendText(a)
+		for i, a := range args {
+			a = rubyFwd(a)
+			if _, isBin := a.(*jsRBin); !isBin {
+				b.s += rt.rubyStrAppendText(a)
+				continue
+			}
+			cv := rt.rubyBinCat(b.s, a)
+			if nb, isBin := cv.(*jsRBin); isBin {
+				b.bin = nb
+				if i+1 < len(args) {
+					rt.rubyBinMethod(nb, name, args[i+1:])
+				}
+				return b
+			}
+			b.s = rt.rubyStr(cv)
 		}
 		return b
 	case "replace":
@@ -3165,6 +3214,23 @@ func (rt *jsrt) rubyStrMutate(b *jsRStr, name string, args []interface{}) interf
 func (rt *jsrt) rubyRStrMethod(b *jsRStr, name string, args []interface{}) (interface{}, bool) {
 	if rubyStrMutator(name) {
 		return rt.rubyStrMutate(b, name, args), true
+	}
+	if b.bin != nil {
+		switch name {
+		case "freeze", "frozen?", "equal?", "object_id", "itself", "tap":
+		default:
+			return rubyFwdSelf(b, rt.rubyBinMethod(b.bin, name, args)), true
+		}
+	}
+	if name == "force_encoding" {
+		if b.fz {
+			rt.rubyRaiseErr(name, "FrozenError", "can't modify frozen String")
+		}
+		pos, _ := rubyBlockArgs(args)
+		if nb, isBin := rubyEncStr(b.s, rt.rubyEncArg(argAt(pos, 0))).(*jsRBin); isBin {
+			b.bin = nb
+		}
+		return b, true
 	}
 	switch name {
 	case "freeze":
@@ -3277,8 +3343,8 @@ func init() {
 		u := rt.unwrap
 		w := rt.wrap
 		m["js_rsnew"] = func(a []uint64) uint64 {
-			if _, isBox := u(a[0]).(*jsRBin); isBox {
-				return a[0]
+			if bn, isBox := rubyFwd(u(a[0])).(*jsRBin); isBox {
+				return w(bn)
 			}
 			return w(&jsRStr{s: rt.rubyStr(u(a[0]))})
 		}
@@ -3286,7 +3352,7 @@ func init() {
 		// while neither side is a box, else rubyBinCat's encoding rule. Twins:
 		// makeTemplate in ruby-interpreter.abnf, js_rtpl in lib/ruby-rt.metajs.
 		m["js_rtpl"] = func(a []uint64) uint64 {
-			acc, x := u(a[0]), u(a[1])
+			acc, x := rubyFwd(u(a[0])), rubyFwd(u(a[1]))
 			_, accBox := acc.(*jsRBin)
 			_, xBox := x.(*jsRBin)
 			if !accBox && !xBox {

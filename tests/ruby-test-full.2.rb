@@ -253,6 +253,34 @@ def s128
         "\xE3\x81\xE3\x81\x82".scrub == "\u{FFFD}あ" && "\xFF".scrub("?") == "?" && "é".encode(Encoding::BINARY, undef: :replace) == "?")
 end
 
+# ===== SECTION 129: a String re-encoded in place =====
+# << of a binary String onto an ASCII-only UTF-8 String, and force_encoding,
+# change the String object itself, so an alias sees the new encoding and bytes;
+# << and force_encoding answer the receiver. A frozen String raises FrozenError.
+# Identity methods of a binary String answer on the object. /usr/bin/ruby 2.6
+# settles each.
+def s129
+  cs = [255, 200]
+  z = +""
+  a = z
+  r = (z << cs[0].chr)
+  z << "A"
+  check("ri129a", a.encoding == Encoding::BINARY && r.equal?(z) && a == "\xFFA".b && a.size == 2 && a.bytes == [255, 65] &&
+        a.inspect == "\"\\xFFA\"" && "#{a}".encoding == Encoding::BINARY && {a => 1}["\xFFA".b] == 1 && (a + "b") == "\xFFAb".b &&
+        a.to_s.equal?(a) && a.itself.equal?(a))
+  x = +"é"
+  y = x
+  q = x.force_encoding("BINARY")
+  m = +"x"
+  m2 = m
+  m.concat(cs[0].chr, "y", cs[1].chr)
+  fe = begin; "fz".freeze.force_encoding("BINARY"); rescue FrozenError => e; e.class; end
+  ce = begin; (+"é") << cs[0].chr; rescue EncodingError => e; e.class; end
+  check("ri129b", q.equal?(x) && y.encoding == Encoding::BINARY && y.bytes == [195, 169] && y.size == 2 && !(y == "é") &&
+        m2.bytes == [120, 255, 121, 200] && m2.encoding == Encoding::BINARY && fe == FrozenError &&
+        ce == Encoding::CompatibilityError)
+end
+
 s122() # SECTION-CALL 122
 s123() # SECTION-CALL 123
 s124() # SECTION-CALL 124
@@ -260,5 +288,6 @@ s125() # SECTION-CALL 125
 s126() # SECTION-CALL 126
 s127() # SECTION-CALL 127
 s128() # SECTION-CALL 128
+s129() # SECTION-CALL 129
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

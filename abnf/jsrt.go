@@ -1954,6 +1954,9 @@ func (rt *jsrt) toString(v interface{}) string {
 	case jsSym: // Ruby's Symbol renders as its bare name.
 		return t.s
 	case *jsRStr: // Ruby's mutable String renders as its text.
+		if t.bin != nil {
+			return rubyBinText(t.bin.b)
+		}
 		return t.s
 	case *jsRBin: // A binary String renders as one char per byte.
 		return rubyBinText(t.b)
@@ -3948,7 +3951,7 @@ func dictKeyable(v interface{}) bool {
 func dictAppend(keys, vals *jsArray, k, v interface{}) {
 	// A Ruby String key is stored as its text: MRI keys a Hash by a frozen COPY.
 	if b, ok := k.(*jsRStr); ok {
-		k = b.s
+		k = rubySV(b)
 	}
 	keys.elems = append(keys.elems, k)
 	vals.elems = append(vals.elems, v)
@@ -6527,6 +6530,9 @@ func (rt *jsrt) rubyStrOperand(r interface{}) string {
 		return s
 	}
 	if b, ok := r.(*jsRStr); ok {
+		if b.bin != nil {
+			return rt.rubyStrOperand(b.bin)
+		}
 		return b.s
 	}
 	if b, ok := r.(*jsRBin); ok {
@@ -6592,6 +6598,10 @@ func (rt *jsrt) rubyBin(op string, l, r interface{}) interface{} {
 		}
 		return rt.rubyMethod(l, op, []interface{}{r})
 	}
+	if b, ok := l.(*jsRStr); ok && b.bin != nil {
+		return rubyFwdSelf(b, rt.rubyBinMethod(b.bin, op, []interface{}{r}))
+	}
+	r = rubyFwd(r)
 	if b, ok := l.(*jsRBin); ok {
 		return rt.rubyBinMethod(b, op, []interface{}{r})
 	}
@@ -8528,7 +8538,7 @@ func (rt *jsrt) rubySetSlice(o, k1, k2, v interface{}) interface{} {
 	}
 	// A box changes in place; a plain string answers a NEW box, which the emitter
 	// writes back to the variable or element it was read from.
-	if b, isBox := o.(*jsRStr); isBox {
+	if b, isBox := o.(*jsRStr); isBox && b.bin == nil {
 		if b.fz {
 			rt.rubyRaiseErr("[]=", "FrozenError", "can't modify frozen String")
 		}
@@ -9164,7 +9174,7 @@ func (rt *jsrt) rubySubrange(o, lo, hi interface{}, excl bool) (interface{}, boo
 // - which is Ruby's Hash#[] / Array#[] / String#[], and what ruby-interpreter.abnf
 // does. js_rget and js_rsubrange's non-sequence fallback share it.
 func (rt *jsrt) rubyIndexGet(o, k interface{}) interface{} {
-	if bn, isBin := o.(*jsRBin); isBin {
+	if bn, isBin := rubyFwd(o).(*jsRBin); isBin {
 		return rt.rubyBinMethod(bn, "[]", []interface{}{k})
 	}
 	o = rubySV(o)
@@ -9325,7 +9335,7 @@ func (rt *jsrt) rubyPuts(v interface{}) {
 		return
 	}
 	// A binary String's bytes are written as they are, not UTF-8 encoded.
-	if b, ok := v.(*jsRBin); ok {
+	if b, ok := rubyFwd(v).(*jsRBin); ok {
 		outWriter.Write([]byte(rubyPutsLine(b.b)))
 		return
 	}
@@ -9337,6 +9347,9 @@ func (rt *jsrt) rubyStr(v interface{}) string {
 	case jsNullT, jsUndefT:
 		return ""
 	case *jsRStr:
+		if t.bin != nil {
+			return rt.rubyStr(t.bin)
+		}
 		return t.s
 	case *jsRBin:
 		return rubyBinText(t.b)
@@ -9617,6 +9630,9 @@ func (rt *jsrt) rubyInspect(v interface{}) string {
 	case string:
 		return rubyStrInspect(t)
 	case *jsRStr:
+		if t.bin != nil {
+			return rt.rubyInspect(t.bin)
+		}
 		return rubyStrInspect(t.s)
 	case *jsRBin:
 		return rubyBoxInspect(t)
@@ -9748,6 +9764,7 @@ func rubyExcInspect(name, msg string) string {
 // user class's own == when it defines one, and the structural comparison of
 // Array/Hash (pyEqual) otherwise. A Symbol only equals another Symbol.
 func (rt *jsrt) rubyEq(l, r interface{}) bool {
+	l, r = rubyFwd(l), rubyFwd(r)
 	if b, ok := l.(*jsRBin); ok {
 		return rubyBinEq(b, r)
 	}
@@ -11935,7 +11952,7 @@ func (rt *jsrt) rubyArrJoinBox(t *jsArray, sep string) (interface{}, bool) {
 	}
 	flat := rubyArrFlat(t, -1, &jsArray{}).elems
 	part := func(v interface{}) interface{} {
-		if b, ok := v.(*jsRBin); ok {
+		if b, ok := rubyFwd(v).(*jsRBin); ok {
 			return b
 		}
 		return rt.rubyStr(v)
@@ -11949,7 +11966,7 @@ func (rt *jsrt) rubyArrJoinBox(t *jsArray, sep string) (interface{}, bool) {
 
 func rubyArrHasBox(t *jsArray) bool {
 	for _, e := range t.elems {
-		switch v := e.(type) {
+		switch v := rubyFwd(e).(type) {
 		case *jsRBin:
 			return true
 		case *jsArray:
@@ -16093,7 +16110,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		// is MRI.
 		"js_rputs": func(a []uint64) uint64 { rt.rubyPuts(u(a[0])); return 0 },
 		"js_rprint": func(a []uint64) uint64 {
-			if b, isBin := u(a[0]).(*jsRBin); isBin {
+			if b, isBin := rubyFwd(u(a[0])).(*jsRBin); isBin {
 				outWriter.Write([]byte(b.b))
 				return 0
 			}
