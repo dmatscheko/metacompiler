@@ -390,6 +390,39 @@ function js_jsctorp__raw(v) {
     }
     return 0
 }
+// The module's constructor functions by index (js_jsctortab), and the raw predicate
+// `new` refuses a function on (IsConstructor). A layer-2 function - index 1,000,000
+// on, where -rt-lib numbers them - is a builtin like one with no index. Twins of
+// both in abnf/jsrtjsprint.go.
+var jvCtorTab = {}
+function js_jsctortab(list) {
+    var s = jvStr(list)
+    var cur = ""
+    for (var i = 0; i <= s.length; i++) {
+        if (i == s.length || s.charAt(i) == ",") {
+            if (cur != "") { jvCtorTab["$" + cur] = true }
+            cur = ""
+        } else { cur = cur + s.charAt(i) }
+    }
+}
+function js_jsnotctor__raw(v) {
+    if (!jvIsCallable(v)) { return 0 }
+    var nm = jvFnNameOf(v)
+    if (nm.substring(0, 6) == "bound ") { return 0 }
+    var idx = fnMeta(v, "idx")
+    if (idx >= 0 && idx < 1000000) {
+        if (jvCtorTab["$" + idx] === true) { return 0 }
+        return 1
+    }
+    if (jvHostCtor(nm)) { return 0 }
+    return 1
+}
+function jvHostCtor(nm) {
+    return nm == "Number" || nm == "String" || nm == "Boolean" || nm == "Object" || nm == "Array" ||
+        nm == "Function" || nm == "Promise" || nm == "RegExp" || nm == "Error" || nm == "TypeError" ||
+        nm == "RangeError" || nm == "ReferenceError" || nm == "SyntaxError" || nm == "EvalError" ||
+        nm == "AggregateError"
+}
 
 // The accessor-property count. abnf/jsrt.go's rt.accessorCount: while it is 0 the
 // member paths cannot meet an accessor and skip the whole lookup.

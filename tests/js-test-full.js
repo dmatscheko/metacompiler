@@ -1779,6 +1779,41 @@ function s144() {
     }, 50)
 }
 
+// ===== SECTION 145: what `new` constructs =====
+// Only a `function` declaration or expression, a class and a builtin constructor are
+// constructors (IsConstructor); `new` on an arrow, a method, a generator, an async
+// function or a builtin such as Math.max is node's TypeError, after the arguments.
+class K145 { m() { return 1 } static s() { return 2 } }
+function* g145() {}
+async function a145() {}
+function P145(x) { this.x = x }
+function e145(f) {
+    try { var r = f(); return "ok:" + typeof r } catch (e) { return e.constructor.name + ":" + e.message }
+}
+function s145() {
+    var arrow = () => 1
+    var o = {m() { return 1 }, f: function () { this.q = 2 }, ar: () => 1, *g() {}, async a() {}, get x() { return 1 }}
+    var k = new K145()
+    var argRan = false
+    var refused = [e145(function () { return new arrow() }), e145(function () { return new o.m() }),
+        e145(function () { return new o.ar() }), e145(function () { return new o.g() }), e145(function () { return new o.a() }),
+        e145(function () { return new k.m() }), e145(function () { return new K145.s() }), e145(function () { return new g145() }),
+        e145(function () { return new a145() }), e145(function () { return new Math.max(argRan = true) }),
+        e145(function () { return new JSON.parse("1") }), e145(function () { return new parseInt("1") }),
+        e145(function () { return new Symbol() })]
+    check("newctor1", refused.join("|") == "TypeError:arrow is not a constructor|TypeError:o.m is not a constructor|" +
+        "TypeError:o.ar is not a constructor|TypeError:o.g is not a constructor|TypeError:o.a is not a constructor|" +
+        "TypeError:k.m is not a constructor|TypeError:K145.s is not a constructor|TypeError:g145 is not a constructor|" +
+        "TypeError:a145 is not a constructor|TypeError:Math.max is not a constructor|TypeError:JSON.parse is not a constructor|" +
+        "TypeError:parseInt is not a constructor|TypeError:Symbol is not a constructor" && argRan)
+    var made = [e145(function () { return new P145(1) }), e145(function () { return new o.f() }),
+        e145(function () { return new (function () { this.y = 1 })() }), e145(function () { return new Number(1) }),
+        e145(function () { return new Error("x") }), e145(function () { return new Promise(function (r) { r() }) }),
+        e145(function () { return new Object() }), e145(function () { return new Array(2) })]
+    check("newctor2", made.join("|") == "ok:object|ok:object|ok:object|ok:object|ok:object|ok:object|ok:object|ok:object" &&
+        new P145(4).x == 4)
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -1840,6 +1875,7 @@ function main() {
     s142() // SECTION-CALL 142
     s143() // SECTION-CALL 143
     s144() // SECTION-CALL 144
+    s145() // SECTION-CALL 145
     println("full: " + checks + " checks, " + failures + " failures")
     return failures
 }

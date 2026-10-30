@@ -603,6 +603,8 @@ func fnMetaBindings(b map[string]interface{}) {
 			return float64(jsvFnMeta(v).length)
 		case "src":
 			return float64(jsvFnMeta(v).src)
+		case "idx":
+			return float64(jsvFnSrcIdx(v))
 		}
 		return jsUndef
 	})

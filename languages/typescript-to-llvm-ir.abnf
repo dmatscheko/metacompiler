@@ -3499,7 +3499,7 @@ NotFuncHead = :script(~~
         // A method's own name is its KEY - node says `n` for `{ n(){} }`. A COMPUTED key
         // is only known at run time, so those stay anonymous.
         var mnm = (typeof rest[0] == "string") ? rest[0] : ""
-        var fnT = makeFunctionExpr(rest[2], rest[1], st, mnm)
+        var fnT = makeFunctionExpr(rest[2], rest[1], st, mnm, undefined, true)
         if (isGen) { fnT = makeGenFn(rest[1], rest[2], st, mnm) }
         if (isAsync) { fnT = makeAsyncFn(rest[1], rest[2], false, st, mnm) }
         if (isGen && isAsync) { fnT = makeAsyncGenFn(rest[1], rest[2], st, mnm) }
@@ -3509,7 +3509,7 @@ NotFuncHead = :script(~~
     // the computed shorthand method '{[k](x) {}}'.
     function makeComputedProp(items) {
         if (items.length == 2) { return {kt: items[0], t: items[1]} }
-        return {kt: items[0], t: makeFunctionExpr(items[2], items[1])}
+        return {kt: items[0], t: makeFunctionExpr(items[2], items[1], undefined, undefined, undefined, true)}
     }
 
     // See the twin of this comment in js-to-llvm-ir.abnf.
@@ -4149,9 +4149,21 @@ NotFuncHead = :script(~~
         }
         return ""
     }
-    function makeFunctionExpr(bodyT, paramNames, ownStrict, nm, txt) {
+    // See the twin of this comment in js-to-llvm-ir.abnf.
+    var ctorIdxs = []
+    function ctorMark(idx, isCtor) { if (isCtor) { ctorIdxs.push(idx) } }
+    function emitCtorTab(b) {
+        if (ctorIdxs.length == 0) { return }
+        var s = "" + ctorIdxs[0]
+        for (var i = 1; i < ctorIdxs.length; i++) { s = s + "," + ctorIdxs[i] }
+        callExt(b, "js_jsctortab", [emitStr(b, s)])
+    }
+    // See the twin of this comment in js-to-llvm-ir.abnf.
+    function makeFunctionExpr(bodyT, paramNames, ownStrict, nm, txt, method) {
+        var isCtor = method !== true && c.curFile() != "js-builtins.js"
         return fnDef(function(b) {
             var idx = emitFunction(paramNames, bodyT, false, false, ownStrict)
+            ctorMark(idx, isCtor)
             return {b: b, v: callExt(b, "js_closure", [handle(idx), curScopeV])}
         }, nm, paramNames, txt)
     }
@@ -5582,6 +5594,12 @@ NotFuncHead = :script(~~
             // and js_jsnewres implements
             // [[Construct]]'s last step: an OBJECT the constructor returns wins over
             // the fresh receiver.
+            // See the twin of this comment in js-to-llvm-ir.abnf.
+            var ctorOkF = curF.NewBlock("")
+            var ctorBadF = curF.NewBlock("")
+            fnB.NewCondBr(fnB.NewICmp(llvm.enum.IPredNE, callExt(fnB, "js_jsnotctor", [clsV]), handle(0)), ctorBadF, ctorOkF)
+            emitSiteThrow(ctorBadF, site + " is not a constructor")
+            fnB = ctorOkF
             var oF0 = callExt(fnB, "js_obj_new", [])
             callExt(fnB, "js_jsnewclass", [oF0, clsV])
             var retF = callExt(fnB, "js_call_new", [clsV, oF0, argsV])
@@ -6998,8 +7016,10 @@ NotFuncHead = :script(~~
     // instantiates the closure on entry.
     function makeFuncDecl(bodyT, paramNames, name, ownStrict, pos) {
         exportNames = [name]
+        var isCtor = c.curFile() != "js-builtins.js"
         var fnT = fnDef(function(b) {
             var idx = emitFunction(paramNames, bodyT, false, false, ownStrict)
+            ctorMark(idx, isCtor)
             return {b: b, v: callExt(b, "js_closure", [handle(idx), curScopeV])}
         }, name, paramNames)
         return fnDeclAt(name, fnT, pos, true)
@@ -7171,6 +7191,10 @@ NotFuncHead = :script(~~
         var b = f.NewBlock("entry")
         curScopeV = f.Params[0]
         callExt(b, "js_setret", [hUndef]) // A program without expression statements completes with undefined.
+        // The constructor functions (js_jsctortab), filled in once every function of
+        // the program has been emitted.
+        var ctorInit = m.NewFunc("jsctortab.init", i64, [])
+        b.NewCall(ctorInit, [])
         // See the twin of this comment in js-to-llvm-ir.abnf.
         var globalObjV = callExt(b, "js_obj_new", [])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "this"), globalObjV])
@@ -7253,6 +7277,9 @@ NotFuncHead = :script(~~
             bm = emitEventLoop(bm, sc)
             bm.NewRet(mainR)
         }
+        var cb = ctorInit.NewBlock("entry")
+        emitCtorTab(cb)
+        cb.NewRet(hUndef)
     }
 
     // The two host services Date and the timers in lib/js-builtins.js are built on, as

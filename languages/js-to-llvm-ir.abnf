@@ -5023,7 +5023,7 @@ NotFuncHead = :script(~~
         if (isGen && isAsync) { fnT = makeAsyncGenFn(rest[1], rest[2], st, mnm) }
         else if (isGen) { fnT = makeGenFn(rest[1], rest[2], st, mnm) }
         else if (isAsync) { fnT = makeAsyncFn(rest[1], rest[2], false, st, mnm) }
-        else { fnT = makeFunctionExpr(rest[2], rest[1], st, mnm) }
+        else { fnT = makeFunctionExpr(rest[2], rest[1], st, mnm, undefined, true) }
         return {kt: keyThunk(rest[0]), t: fnT}
     }
     // items = [keyThunk, valueThunk] for '{[k]: v}' or [keyThunk, params, bodyThunk] for
@@ -5033,7 +5033,7 @@ NotFuncHead = :script(~~
             fsTake()
             return {kt: items[0], t: items[1]}
         }
-        return {kt: items[0], t: makeFunctionExpr(items[2], items[1])}
+        return {kt: items[0], t: makeFunctionExpr(items[2], items[1], undefined, undefined, undefined, true)}
     }
 
     // items = [primaryThunk, {kind:"call"|"member", ...}...]. A member access remembers
@@ -5876,11 +5876,27 @@ NotFuncHead = :script(~~
         }
         var b = f.NewBlock("entry")
         callExt(b, "js_jssrc", [emitStr(b, fsBlob()), emitStr(b, tab)])
+        emitCtorTab(b)
         b.NewRet(hUndef)
     }
-    function makeFunctionExpr(bodyT, paramNames, ownStrict, nm, txt) {
+    // The indices of the module's constructor FUNCTIONS - its `function` declarations
+    // and expressions, outside lib/js-builtins.js (whose functions are builtins) -
+    // registered at boot (js_jsctortab) for `new` to tell them from every other
+    // function (js_jsnotctor). Twin of jsCtorMark in the -interpreter.abnf.
+    var ctorIdxs = []
+    function ctorMark(idx, isCtor) { if (isCtor) { ctorIdxs.push(idx) } }
+    function emitCtorTab(b) {
+        if (ctorIdxs.length == 0) { return }
+        var s = "" + ctorIdxs[0]
+        for (var i = 1; i < ctorIdxs.length; i++) { s = s + "," + ctorIdxs[i] }
+        callExt(b, "js_jsctortab", [emitStr(b, s)])
+    }
+    // A shorthand METHOD ('{m() {}}') is built here too, and is no constructor.
+    function makeFunctionExpr(bodyT, paramNames, ownStrict, nm, txt, method) {
+        var isCtor = method !== true && c.curFile() != "js-builtins.js"
         return fnDef(function(b) {
             var idx = emitFunction(paramNames, bodyT, false, false, ownStrict)
+            ctorMark(idx, isCtor)
             return {b: b, v: callExt(b, "js_closure", [handle(idx), curScopeV])}
         }, nm, paramNames, txt)
     }
@@ -7419,6 +7435,14 @@ NotFuncHead = :script(~~
             // 'new F() instanceof F' with, or the one F's own written prototype gives
             // (the interpreter half's newClassOf), and js_jsnewres implements [[Construct]]'s last step:
             // an OBJECT the constructor returns wins over the fresh receiver.
+            // A function that is no constructor - an arrow, a method, a generator, an
+            // async function, a builtin like Math.max - is node's TypeError, after the
+            // arguments (js_jsnotctor, ctorMark).
+            var ctorOkF = curF.NewBlock("")
+            var ctorBadF = curF.NewBlock("")
+            fnB.NewCondBr(fnB.NewICmp(llvm.enum.IPredNE, callExt(fnB, "js_jsnotctor", [clsV]), handle(0)), ctorBadF, ctorOkF)
+            emitSiteThrow(ctorBadF, site + " is not a constructor")
+            fnB = ctorOkF
             var oF0 = callExt(fnB, "js_obj_new", [])
             callExt(fnB, "js_jsnewclass", [oF0, clsV])
             var retF = callExt(fnB, "js_call_new", [clsV, oF0, argsV])
@@ -8028,8 +8052,10 @@ NotFuncHead = :script(~~
     // Local stack = [name, [paramNames...], bodyThunk] -- the enclosing scope
     // instantiates the closure on entry.
     function makeFuncDecl(bodyT, paramNames, name, ownStrict, pos) {
+        var isCtor = c.curFile() != "js-builtins.js"
         var fnT = fnDef(function(b) {
             var idx = emitFunction(paramNames, bodyT, false, false, ownStrict)
+            ctorMark(idx, isCtor)
             return {b: b, v: callExt(b, "js_closure", [handle(idx), curScopeV])}
         }, name, paramNames)
         return fnDeclAt(name, fnT, pos, true)

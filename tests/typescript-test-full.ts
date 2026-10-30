@@ -5843,6 +5843,41 @@ function s147(): void {
     }, 50)
 }
 
+// ===== SECTION 148: what `new` constructs =====
+// Only a `function` declaration or expression, a class and a builtin constructor are
+// constructors (IsConstructor); `new` on an arrow, a method, a generator, an async
+// function or a builtin such as Math.max is node's TypeError, after the arguments.
+class K148 { m() { return 1 } static s() { return 2 } }
+function* g148() {}
+async function a148() {}
+function P148(this: any, x: number) { this.x = x }
+function e148(f: () => any): string {
+    try { var r = f(); return "ok:" + typeof r } catch (e: any) { return e.constructor.name + ":" + e.message }
+}
+function s148(): void {
+    var arrow = () => 1
+    var o: any = {m() { return 1 }, f: function () { this.q = 2 }, ar: () => 1, *g() {}, async a() {}, get x() { return 1 }}
+    var k: any = new K148()
+    var argRan = false
+    var refused = [e148(function () { return new arrow() }), e148(function () { return new o.m() }),
+        e148(function () { return new o.ar() }), e148(function () { return new o.g() }), e148(function () { return new o.a() }),
+        e148(function () { return new k.m() }), e148(function () { return new K148.s() }), e148(function () { return new g148() }),
+        e148(function () { return new a148() }), e148(function () { return new Math.max(argRan = true) }),
+        e148(function () { return new JSON.parse("1") }), e148(function () { return new parseInt("1") }),
+        e148(function () { return new Symbol() })]
+    check("newctor1", refused.join("|") == "TypeError:arrow is not a constructor|TypeError:o.m is not a constructor|" +
+        "TypeError:o.ar is not a constructor|TypeError:o.g is not a constructor|TypeError:o.a is not a constructor|" +
+        "TypeError:k.m is not a constructor|TypeError:K148.s is not a constructor|TypeError:g148 is not a constructor|" +
+        "TypeError:a148 is not a constructor|TypeError:Math.max is not a constructor|TypeError:JSON.parse is not a constructor|" +
+        "TypeError:parseInt is not a constructor|TypeError:Symbol is not a constructor" && argRan)
+    var made = [e148(function () { return new P148(1) }), e148(function () { return new o.f() }),
+        e148(function () { return new (function () { this.y = 1 })() }), e148(function () { return new Number(1) }),
+        e148(function () { return new Error("x") }), e148(function () { return new Promise(function (r) { r() }) }),
+        e148(function () { return new Object() }), e148(function () { return new Array(2) })]
+    check("newctor2", made.join("|") == "ok:object|ok:object|ok:object|ok:object|ok:object|ok:object|ok:object|ok:object" &&
+        new P148(4).x == 4)
+}
+
 // ===== END SECTIONS =====
 
 function main(): number {
@@ -5981,6 +6016,7 @@ function main(): number {
     s145(); // SECTION-CALL 145
     s146(); // SECTION-CALL 146
     s147(); // SECTION-CALL 147
+    s148(); // SECTION-CALL 148
     println("full: " + checks + " checks, " + failures + " failures");
     return failures;
 }

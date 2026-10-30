@@ -4256,6 +4256,7 @@ long builtin_method(long recv, long mid, long args);
 long js_jsfnmeta(long f, long nm, long ln);
 long fn_meta_get(long f, long key);
 long fn_src_idx(long f);
+long fn_idx(long f);
 int fn_kind(long h);
 
 long gen_create(long gf, long args);
@@ -7130,6 +7131,8 @@ long fn_meta_get(long f, long key) {
 	/* One above the function index whose source text f shows, 0 for none; undefined
 	 * while no program registered any (fn_src_idx). */
 	if (str_eq_c(key, "src")) { if (FN_SRC_TAB == 0) { return H_UNDEF; } return mk_num(d_from_long(fn_src_idx(f) + 1)); }
+	/* The same index with no source table consulted, -1 for none (fn_idx). */
+	if (str_eq_c(key, "idx")) { return mk_num(d_from_long(fn_idx(f))); }
 	return H_UNDEF;
 }
 
@@ -7175,14 +7178,18 @@ void fn_src_parse(void) {
 		i = i + 1;
 	}
 }
+/* The function index f is a closure of (a generator function's closure's), or the
+ * one js_jsfnsrc linked it to; -1 for none. */
+long fn_idx(long f) {
+	if (fd(f) != 0) { return fd(f) - 1; }
+	if (tag_of(f) == 7) { return fa(f); }
+	if (tag_of(f) == 16) { return fn_idx(fa(f)); }
+	return -1;
+}
 /* The function index whose source text f shows, or -1. */
 long fn_src_idx(long f) {
-	long t = tag_of(f);
-	long idx = -1;
+	long idx = fn_idx(f);
 	long *se;
-	if (fd(f) != 0) { idx = fd(f) - 1; }
-	else if (t == 7) { idx = fa(f); }
-	else if (t == 16) { return fn_src_idx(fa(f)); }
 	if (FN_SRC_SE == 0) { fn_src_parse(); }
 	se = (long *)FN_SRC_SE;
 	if (idx < 0 || idx >= FN_SRC_N) { return -1; }

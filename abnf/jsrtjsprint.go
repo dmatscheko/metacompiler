@@ -2682,6 +2682,20 @@ func (rt *jsrt) jsvGlobalSet(name string, f interface{}) {
 // *-interpreter.abnf.
 var jsvMethodVals = map[interface{}]*hostFunc{}
 
+// jsvCtorTabs is each runtime's js_jsctortab registration.
+var jsvCtorTabs = map[*jsrt]map[int]bool{}
+
+// jsvHostCtor: whether a builtin of this name is a constructor. Twins: jvHostCtor in
+// languages/lib/js-rt.metajs, jsHostCtor in both *-interpreter.abnf.
+func jsvHostCtor(name string) bool {
+	switch name {
+	case "Number", "String", "Boolean", "Object", "Array", "Function", "Promise", "RegExp", "Error",
+		"TypeError", "RangeError", "ReferenceError", "SyntaxError", "EvalError", "AggregateError":
+		return true
+	}
+	return false
+}
+
 func jsvMethodValue(name string, fn interface{}) *hostFunc {
 	if shim, found := jsvMethodVals[fn]; found {
 		return shim
@@ -6210,6 +6224,46 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 			}
 		}
 		return 0
+	}
+	// js_jsctortab(list) registers the module's constructor functions: the indices,
+	// comma-separated, of its `function` declarations and expressions. js_jsnotctor(f)
+	// is the third raw predicate: 1 when f is a function `new` must refuse (ECMA-262
+	// IsConstructor) - an arrow, a method, a generator, an async function, or a
+	// builtin other than a constructor (jsvHostCtor). A bound function is left to
+	// its call. Twins: js_jsctortab / js_jsnotctor__raw in languages/lib/js-rt.metajs,
+	// jsNotCtor in both *-interpreter.abnf.
+	m["js_jsctortab"] = func(a []uint64) uint64 {
+		tab := map[int]bool{}
+		for _, p := range strings.Split(rt.toString(u(a[0])), ",") {
+			if n, err := strconv.Atoi(p); err == nil {
+				tab[n] = true
+			}
+		}
+		jsvCtorTabs[rt] = tab
+		return 0
+	}
+	m["js_jsnotctor"] = func(a []uint64) uint64 {
+		v := u(a[0])
+		if !jsvIsFnLike(v) {
+			return 0
+		}
+		nm := jsvFnMeta(v).name
+		if strings.HasPrefix(nm, "bound ") {
+			return 0
+		}
+		if idx := jsvFnSrcIdx(v); idx >= 0 {
+			if jsvCtorTabs[rt][idx] {
+				return 0
+			}
+			return 1
+		}
+		if hf, ok := v.(*hostFunc); ok && nm == "" {
+			nm = hf.name
+		}
+		if jsvHostCtor(nm) {
+			return 0
+		}
+		return 1
 	}
 	baseGet := m["js_get"]
 	// ----- g.return(v) -----

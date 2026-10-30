@@ -7178,7 +7178,8 @@ NotFuncHead = :script(~~
     // function it creates carries its name and its arity. The name is held in a
     // one-element array rather than captured directly, because an ANONYMOUS function may
     // still be named after the fact - see fnAnonNote.
-    function fnDef(t, nm, params, txt) {
+    // isCtor marks a `function` declaration or expression (jsCtorSpans).
+    function fnDef(t, nm, params, txt, isCtor) {
         var ln = fnArity(params)
         // A caller that has no name at all passes undefined; the DEFAULT is "", and it
         // has to be normalised here rather than at nine call sites, because an undefined
@@ -7186,8 +7187,30 @@ NotFuncHead = :script(~~
         var slot = [(nm == undefined) ? "" : nm]
         fnAnonNote(slot, nm, txt)
         var sp = fsTake()
+        if (isCtor === true && sp >= 0) { jsCtorSpans["$" + sp] = true }
         return function() { return fnMetaSrc(t(), slot[0], ln, sp) }
     }
+    // IsConstructor for a function value: the spans of the `function` declarations
+    // and expressions, and the builtin constructors (jsHostCtor). An arrow, a method,
+    // a generator or an async function is none; a bound function is left to its call.
+    // Twins: js_jsnotctor in abnf/jsrtjsprint.go and languages/lib/js-rt.metajs.
+    var jsCtorSpans = {}
+    function jsNotCtor(f) {
+        var nm = fnNameOf(f)
+        if (nm.substring(0, 6) == "bound ") { return false }
+        var sp = fnSrcOf(f)
+        if (sp >= 0) { return jsCtorSpans["$" + sp] !== true }
+        return !jsHostCtor(nm)
+    }
+    // Whether a builtin of this name is a constructor. Twins: jsvHostCtor in
+    // abnf/jsrtjsprint.go, jvHostCtor in languages/lib/js-rt.metajs.
+    function jsHostCtor(nm) {
+        return nm == "Number" || nm == "String" || nm == "Boolean" || nm == "Object" || nm == "Array" ||
+            nm == "Function" || nm == "Promise" || nm == "RegExp" || nm == "Error" || nm == "TypeError" ||
+            nm == "RangeError" || nm == "ReferenceError" || nm == "SyntaxError" || nm == "EvalError" ||
+            nm == "AggregateError"
+    }
+
     // ----- A named function EXPRESSION sees its own name (ES2023 15.2.5) -----
     // `const f = function fact(n){ return n < 2 ? 1 : n * fact(n-1) }` recurses through
     // `fact` in node. FnExprName records the name (that is what `f.name` reads), and
@@ -9628,7 +9651,7 @@ NotFuncHead = :script(~~
         var st = itemsStrict(itemsIn)
         var items = itemsNoStrict(itemsIn)
         var key = items[1]
-        var fn = makeFunctionExpr(items[3], items[2], st, (typeof key == "string") ? (items[0].acc + " " + key) : "")
+        var fn = makeFunctionExpr(items[3], items[2], st, (typeof key == "string") ? (items[0].acc + " " + key) : "", undefined, true)
         if (typeof key == "string") { return {acc: items[0].acc, k: jsKeyEsc(key), fn: fn} }
         return {acc: items[0].acc, kt: key, fn: fn}
     }
@@ -9654,7 +9677,7 @@ NotFuncHead = :script(~~
         var mnm = (typeof key == "string") ? key : ""
         var fn = anytype // The function-value thunk of the method's kind.
         if (isAsync) { fn = isGen ? makeAsyncGen(params, body, st, mnm) : makeAsyncFn(params, body, st, mnm) }
-        else { fn = isGen ? makeGenerator(params, body, st, mnm) : makeFunctionExpr(body, params, st, mnm) }
+        else { fn = isGen ? makeGenerator(params, body, st, mnm) : makeFunctionExpr(body, params, st, mnm, undefined, true) }
         if (typeof key == "string") { return {k: jsKeyEsc(key), t: fn} }
         return {kt: key, t: fn}
     }
@@ -9765,8 +9788,9 @@ NotFuncHead = :script(~~
     // nm is the name the function was DEFINED under - "" for an anonymous form, which
     // fnDef then lets a binder name (see fnAnonNote). Every function-value builder in
     // this file ends in fnDef for that reason.
-    function makeFunctionExpr(bodyT, params, ownStrict, nm, txt) {
-        return fnDef(function() { return makeClosure(params, bodyT, scopes, ownStrict) }, nm, params, txt)
+    // A shorthand METHOD or an accessor is built here too, and is no constructor.
+    function makeFunctionExpr(bodyT, params, ownStrict, nm, txt, method) {
+        return fnDef(function() { return makeClosure(params, bodyT, scopes, ownStrict) }, nm, params, txt, method !== true)
     }
     // items = [({fname})?, params, (UseStrictMark)?, bodyThunk]. Indexed from the END,
     // because the optional name FnExprName pushes in front of the parameter list.
@@ -11389,6 +11413,7 @@ NotFuncHead = :script(~~
     // `new F(...)` for a FUNCTION F. A wrapper of the primitive the call answers, and
     // ToObject for Object.
     function jsConstructFn(cls, argv, clsName) {
+        if (jsNotCtor(cls)) { biRaise("TypeError: " + clsName + " is not a constructor") }
         if (cls === jsNumberFn || cls === jsStringFn || cls === jsBooleanFn) { return jsWrap(cls.apply(undefined, argv)) }
         if (cls === jsObjectGlobal) { return jsToObject(argv.length > 0 ? argv[0] : undefined) }
         var self = {}
@@ -12878,7 +12903,7 @@ NotFuncHead = :script(~~
         var name = a[0]
         var paramNames = a[1]
         var bodyT = a[2]
-        var mk = fnDef(function() { return makeClosure(paramNames, bodyT, scopes, st) }, name, paramNames)
+        var mk = fnDef(function() { return makeClosure(paramNames, bodyT, scopes, st) }, name, paramNames, undefined, true)
         return fnDeclAt(name, mk, pos, true)
     }
 
