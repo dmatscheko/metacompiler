@@ -150,7 +150,7 @@ splice in VarName / AsgIdent / PeName, or a pre-parse splice that keeps source p
 
 # C — C subset
 
-### T-851 c: `sizeof` of a struct ignores alignment padding; block-scope enums · P2 · C · OPEN [V C worker]
+### T-851 c: `sizeof` of a struct ignores alignment padding; block-scope enums · P2 · C · IN PROGRESS (C worker, round 9) [V C worker]
 WRONG ANSWER: `sizeof(struct{int a; char c;})` → cc 8, ours 5; `struct{char c; int a;}` 8 vs 5; `struct{int m[7];
 char n[2];}` 32 vs 30 — both engines. Layout must follow the arm64 ABI (each member at its alignment, size rounded
 to the struct's alignment); check offsetof-style pointer arithmetic and arrays of structs too. Also loud:
