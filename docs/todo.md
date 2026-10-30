@@ -149,13 +149,6 @@ splice in VarName / AsgIdent / PeName, or a pre-parse splice that keeps source p
 
 # C — C subset
 
-### T-856 c compiler: anonymous struct inside a union; null-based offsetof natively · P3 · C · IN PROGRESS (C worker, round 11) [V C worker]
-(1) `union { struct { short lo, hi; }; int w; }` → compiler refuses "an anonymous struct inside a union is not
-supported" (loud); the interpreter gives cc's `1 2 3 4` for `{1,{{2,3}},4}`. Needs byte-offset registration of the
-flattened members (an `L.at` base in layoutStructInto / registerField / mBitField). (2) `(char *)&((struct S *)0)->g
-- (char *)0` runs under llvm.Run but clang rejects the native module: "invalid cast opcode for cast from 'i32' to
-'ptr'" (`bitcast i32 0 to {...}*`) — a null constant cast to a pointer must be `inttoptr`/`null`.
-
 # CORE — MetaJS, the engines, shared runtime, tooling
 
 ### T-845 compiler grammars: `fail` prints on stdout, so `-qq` swallows compile errors · P2 · CORE · OPEN [V C worker]
@@ -927,6 +920,7 @@ T-847 ts/js: decorators, constructability, Date/setTimeout; a `__proto__` bindin
 T-850 ruby: binary strings, blockless enumerators, statement-line and zsuper gaps — PARTIAL 504be153 — one-line assignment + while/until, blockless enumerator results, zsuper with keywords and block, uninitialized-constant superclass, private-method wording and IO#inspect, $0/$PROGRAM_NAME alias (+ block-stack/scope-chain leaks after rescue/loop/catch); binary strings filed as T-854 with the worker's design
 T-852 c: anonymous-union positional initializer; `(p + 2)->a`; float storage — DONE df663c0d..20315cdb (anonymous member is one initializer member, cInitSeek for designators into it; (expr)-> as value and place; compiled float cell is binary32 via exact soft pack/unpack, function-pointer cell 8 bytes, so machBytes == sizeof for every scalar — float-only loops +21% instructions, c bench unchanged; also fixed: comma operator type, floating truth incl. -0.0/NaN/(_Bool)0.5)
 T-846 kotlin: modCount CME and smaller gaps — DONE dffa62ee..ad6f21a6 (modCount on the shared array value — Go jsArray.mod, C cell field f, goja private symbol; host arrMod/arrModBump/arrModIs; only Kotlin's list mutators bump; 30 java+stdlib scenarios byte-identical, java/js/kotlin/python bench within spread; Unit value, ; members, ?. assignment targets skip, stdlib range hashes (rng17b corrected), ClosedFloatRange mark, null as checked/generic T → NPE)
+T-856 c compiler: anonymous struct inside a union; null-based offsetof natively — DONE 01655e39 (anonymous struct in a union placed by byte offset from the union's start in the compiler; a folded integer constant cast to a pointer is an inttoptr constant, readable by llvm.Run's constValue; the interpreter's cell-counted offsets stay the documented 7.9 limit)
 
 # Settled — do not re-open
 
