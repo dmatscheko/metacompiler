@@ -21,15 +21,14 @@ arguments and empty parameter lists, variadic '...'/'__VA_ARGS__', and calls tha
 lines (the newlines are re-emitted after the expansion so line numbers hold). A
 function-like macro name NOT followed by '(' is left alone. '#undef' removes a
 definition; backslash-newline continuations are joined. A body may be empty (a bare
-'#define FLAG'). EVERY directive line is passed through UNCHANGED, including the
-'#define'/'#undef' lines this pass consumes: conditionals are NOT evaluated here, they are
-the downstream language's job, and the ONLY thing that decides them is the same
-'#define'/'#undef' history - so erasing those lines would hide from the C grammar's
-'#if'/'#ifdef' evaluator exactly the table it must read ('#define DEF' followed by
-'#ifndef DEF' has to come out dead, and cannot if the '#define' is gone). '#include', the
-'#if/#ifdef/#ifndef/#else/#elif/#endif' family, '#pragma', '#error' and '#line' are
-likewise untouched (for the C grammars #include resolves and the rest are skipped).
-Macro uses inside directives are not expanded. The tokenizer reproduces
+'#define FLAG'). Conditional inclusion is decided here (C11 6.10.1), because a
+'#define' in a skipped group must not reach the macro table: '#if'/'#elif' evaluate an
+integer constant expression after 'defined' and macro expansion (an identifier left
+over is 0), '#ifdef'/'#ifndef' test the table. A skipped group and every conditional
+directive line are replaced by their newlines. Every other directive line of a live
+group is passed through unchanged, '#define'/'#undef' included ('#include' resolves
+downstream; '#pragma', '#error' and '#line' are skipped there). Macro uses inside other
+directives are not expanded. The tokenizer reproduces
 every byte, so non-macro source is emitted verbatim and line numbers hold. A space is inserted at the seam between an
 expansion and its neighbours only when the two would otherwise lex as one token.") ;
 
@@ -638,6 +637,217 @@ Other    <~~ push({kind: "other", text: up.in}) ~~>
         return {text: rawText(tokens, i, afterLine), next: afterLine}
     }
 
+    // ---- conditional inclusion (C11 6.10.1) ----------------------------------
+    // The groups are decided HERE, because a '#define' in a skipped group must not
+    // reach the macro table. A skipped group and every conditional directive line
+    // leave only their newlines behind, so the C grammar downstream sees the live
+    // source alone, with its line numbers intact.
+    function isDefined(macros, name) { return hasOwn(macros, name) && macros[name] != undefined }
+    // 'defined X' and 'defined(X)' become 1 or 0 BEFORE macro expansion, so the name is
+    // never itself expanded.
+    function replaceDefined(list, macros) {
+        var out = []
+        var k = 0
+        while (k < list.length) {
+            var t = list[k]
+            if (t.kind == "ident" && t.text == "defined") {
+                var p = skipHwsL(list, k + 1)
+                var paren = p < list.length && isOther(list[p], "(")
+                if (paren) { p = skipHwsL(list, p + 1) }
+                if (p < list.length && list[p].kind == "ident") {
+                    out.push(mkTok("num", isDefined(macros, list[p].text) ? "1" : "0"))
+                    p = p + 1
+                    if (paren) {
+                        p = skipHwsL(list, p)
+                        if (p < list.length && isOther(list[p], ")")) { p = p + 1 }
+                    }
+                    k = p
+                    continue
+                }
+            }
+            out.push(t)
+            k = k + 1
+        }
+        return out
+    }
+    // The value of an integer constant: decimal, 0x hexadecimal, 0b binary or
+    // 0-led octal; a u/U/l/L suffix ends the digits.
+    function ppNum(text) {
+        var s = text.toLowerCase()
+        var base = 10
+        var i = 0
+        if (s.length > 1 && s.charAt(0) == "0") {
+            if (s.charAt(1) == "x") { base = 16; i = 2 }
+            else if (s.charAt(1) == "b") { base = 2; i = 2 }
+            else { base = 8; i = 1 }
+        }
+        var v = 0
+        while (i < s.length) {
+            var d = ppDigit(s.charAt(i))
+            if (d < 0 || d >= base) { return v }
+            v = v * base + d
+            i = i + 1
+        }
+        return v
+    }
+    function ppDigit(ch) {
+        if (ch >= "0" && ch <= "9") { return ch.charCodeAt(0) - 48 }
+        if (ch >= "a" && ch <= "f") { return ch.charCodeAt(0) - 87 }
+        return 0 - 1
+    }
+    // The value of a character constant ('a', '\n', '\x41', '\101'): an int holding
+    // a (signed) char.
+    function ppChar(text) {
+        var v = 0
+        if (text.length > 3 && text.charAt(1) == "\\") {
+            var e = text.charAt(2)
+            v = e.charCodeAt(0)
+            if (e == "x") { v = ppNum("0x" + text.slice(3, text.length - 1)) }
+            else if (e >= "0" && e <= "7") { v = ppNum("0" + text.slice(2, text.length - 1)) }
+            else if (e == "n") { v = 10 }
+            else if (e == "t") { v = 9 }
+            else if (e == "r") { v = 13 }
+            else if (e == "a") { v = 7 }
+            else if (e == "b") { v = 8 }
+            else if (e == "f") { v = 12 }
+            else if (e == "v") { v = 11 }
+        } else if (text.length > 2) {
+            v = text.charCodeAt(1)
+        }
+        v = v & 255
+        return v > 127 ? v - 256 : v
+    }
+    // The expression's tokens as {op, v}: a number (op "") or an operator, with the
+    // two-character operators re-joined (the tokenizer cuts every operator to bytes).
+    // An identifier still there after expansion is 0.
+    var ppPairs = ["&&", "||", "==", "!=", "<=", ">=", "<<", ">>"]
+    function ppToks(list) {
+        var out = []
+        var k = 0
+        while (k < list.length) {
+            var t = list[k]
+            k = k + 1
+            if (isWsTok(t) || t.kind == "pm") { continue }
+            if (t.kind == "num") { out.push({op: "", v: ppNum(t.text)}); continue }
+            if (t.kind == "ident") { out.push({op: "", v: 0}); continue }
+            if (t.text.length > 2 && t.text.charAt(0) == "'") { out.push({op: "", v: ppChar(t.text)}); continue }
+            var op = t.text
+            if (k < list.length && list[k].kind == "other" && ppIn(ppPairs, op + list[k].text)) {
+                op = op + list[k].text
+                k = k + 1
+            }
+            out.push({op: op, v: 0})
+        }
+        return out
+    }
+    function ppIn(ops, op) {
+        var i = 0
+        while (i < ops.length) { if (ops[i] == op) { return true } i = i + 1 }
+        return false
+    }
+    function ppOpAt(st) { return st.p < st.t.length ? st.t[st.p].op : ";" }
+    // The binary operators by precedence, loosest first.
+    var ppLevels = [["||"], ["&&"], ["|"], ["^"], ["&"], ["==", "!="], ["<", ">", "<=", ">="],
+                    ["<<", ">>"], ["+", "-"], ["*", "/", "%"]]
+    function ppApply(op, a, b) {
+        if (op == "||") { return (a != 0 || b != 0) ? 1 : 0 }
+        if (op == "&&") { return (a != 0 && b != 0) ? 1 : 0 }
+        if (op == "|") { return a | b }
+        if (op == "^") { return a ^ b }
+        if (op == "&") { return a & b }
+        if (op == "==") { return a == b ? 1 : 0 }
+        if (op == "!=") { return a != b ? 1 : 0 }
+        if (op == "<") { return a < b ? 1 : 0 }
+        if (op == ">") { return a > b ? 1 : 0 }
+        if (op == "<=") { return a <= b ? 1 : 0 }
+        if (op == ">=") { return a >= b ? 1 : 0 }
+        if (op == "<<") { return a * Math.pow(2, b) }
+        if (op == ">>") { return Math.floor(a / Math.pow(2, b)) }
+        if (op == "+") { return a + b }
+        if (op == "-") { return a - b }
+        if (op == "*") { return a * b }
+        if (b == 0) { return 0 }
+        if (op == "/") { return Math.trunc(a / b) }
+        return a % b
+    }
+    function ppBin(st, lv) {
+        if (lv == ppLevels.length) { return ppUnary(st) }
+        var v = ppBin(st, lv + 1)
+        while (ppIn(ppLevels[lv], ppOpAt(st))) {
+            var op = ppOpAt(st)
+            st.p = st.p + 1
+            v = ppApply(op, v, ppBin(st, lv + 1))
+        }
+        return v
+    }
+    function ppUnary(st) {
+        var op = ppOpAt(st)
+        if (op == ";") { return 0 }
+        st.p = st.p + 1
+        if (op == "") { return st.t[st.p - 1].v }
+        if (op == "(") {
+            var v = ppCondE(st)
+            if (ppOpAt(st) == ")") { st.p = st.p + 1 }
+            return v
+        }
+        var x = ppUnary(st)
+        if (op == "-") { return 0 - x }
+        if (op == "!") { return x == 0 ? 1 : 0 }
+        if (op == "~") { return 0 - x - 1 }
+        return x
+    }
+    function ppCondE(st) {
+        var v = ppBin(st, 0)
+        if (ppOpAt(st) != "?") { return v }
+        st.p = st.p + 1
+        var a = ppCondE(st)
+        if (ppOpAt(st) == ":") { st.p = st.p + 1 }
+        var b = ppCondE(st)
+        return v != 0 ? a : b
+    }
+    // Is the condition of an #if / #elif / #ifdef / #ifndef line true?
+    function condValue(word, tokens, a, end, macros) {
+        var body = collectBody(tokens, a, end)
+        if (word == "ifdef" || word == "ifndef") {
+            var k = skipHwsL(body, 0)
+            var d = k < body.length && body[k].kind == "ident" && isDefined(macros, body[k].text)
+            return word == "ifdef" ? d : !d
+        }
+        var st = {t: ppToks(expandList(replaceDefined(body, macros), macros, {})), p: 0}
+        return ppCondE(st) != 0
+    }
+    function isCondWord(w) {
+        return w == "if" || w == "ifdef" || w == "ifndef" || w == "elif" || w == "else" || w == "endif"
+    }
+    // One conditional directive. conds holds a record per open #if: whether its
+    // current group is live, whether one of its groups was taken already, and
+    // whether the #if itself sits in live code.
+    function handleCond(tokens, i, word, at, macros, conds) {
+        var end = lineEndOf(tokens, i)
+        var outer = conds.length == 0 || conds[conds.length - 1].live
+        if (word == "if" || word == "ifdef" || word == "ifndef") {
+            var v = outer && condValue(word, tokens, at, end, macros)
+            conds.push({live: v, taken: v, outer: outer})
+        } else if (conds.length > 0) {
+            var top = conds[conds.length - 1]
+            if (word == "endif") { conds.pop() }
+            else if (word == "else") { top.live = top.outer && !top.taken; top.taken = true }
+            else if (top.outer && !top.taken) {
+                var v2 = condValue(word, tokens, at, end, macros)
+                top.live = v2
+                top.taken = v2
+            } else { top.live = false }
+        }
+        return {text: newlinesText(tokens, i, end), next: end < tokens.length ? end + 1 : end}
+    }
+    // The newlines inside one token of a skipped group.
+    function nlOnly(text) {
+        var s = ""
+        var i = 0
+        while (i < text.length) { if (text.charAt(i) == "\n") { s = s + "\n" } i = i + 1 }
+        return s
+    }
+
     // Walk the token stream in order, keeping a live macro table, and emit the result.
     function preprocess(raw) {
         // Copy the parse-stack records into plain script records carrying their stream
@@ -648,18 +858,34 @@ Other    <~~ push({kind: "other", text: up.in}) ~~>
         while (z < raw.length) { tokens.push(mkTokAt(raw[z].kind, raw[z].text, z)); z = z + 1 }
 
         var macros = {}
+        var conds = []
         var out = ""
         var col0 = true          // only whitespace seen since the last newline
         var afterExp = false     // the previous emission came out of a macro expansion
         var i = 0
         while (i < tokens.length) {
             var t = tokens[i]
+            var live = conds.length == 0 || conds[conds.length - 1].live
             if (t.kind == "hash" && col0) {
-                var r = handleDirective(tokens, i, macros)
+                var kw = directiveKeyword(tokens, i)
+                var r = anytype
+                if (isCondWord(kw.word)) { r = handleCond(tokens, i, kw.word, kw.at + 1, macros, conds) }
+                else if (live) { r = handleDirective(tokens, i, macros) }
+                else {
+                    var dend = lineEndOf(tokens, i)
+                    r = {text: newlinesText(tokens, i, dend), next: dend < tokens.length ? dend + 1 : dend}
+                }
                 out = out + r.text
                 i = r.next
                 col0 = true
                 afterExp = false
+                continue
+            }
+            if (!live) {
+                out = out + nlOnly(t.text)
+                if (t.kind == "nl") { col0 = true }
+                else if (t.kind != "hws") { col0 = false }
+                i = i + 1
                 continue
             }
             if (t.kind == "ident") {

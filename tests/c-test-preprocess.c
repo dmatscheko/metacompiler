@@ -34,6 +34,35 @@
  * real function dbl() rather than looping. */
 #define dbl(x) dbl(x)
 
+/* Conditional inclusion is decided HERE: a #define in a skipped group never
+ * reaches the macro table (cc picks 10, 1, 7 and 3). */
+#if 1
+#define PICK 10
+#elif 1
+#define PICK 20
+#else
+#define PICK 30
+#endif
+#ifdef SIZE
+#define LIVE 1
+#else
+#define LIVE 3
+#endif
+#ifndef SIZE
+#define COND 1
+#elif SIZE * 2 == 10 && defined(BASE) && !defined NOPE
+#define COND 7
+#else
+#define COND 8
+#endif
+#if 0
+#if 1
+#define NEST 1
+#endif
+#elif (SIZE ? 'a' : 0) == 97 && 0x10 >> 2 == 4 && (7 % 4 | 8) == 11
+#define NEST 3
+#endif
+
 int nfail = 0;
 
 int check(int got, int want) {
@@ -109,6 +138,12 @@ int main() {
     /* ---- variadic ---- */
     check(PICK1(4, 5, 6), 4);
     check(REST(1, 2), 2);
+
+    /* ---- conditional inclusion ---- */
+    check(PICK, 10);
+    check(LIVE, 1);
+    check(COND, 7);
+    check(NEST, 3);
 
     /* ---- the recursion rule ---- */
     check(dbl(21), 42);
