@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-872** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-873** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -66,16 +66,15 @@ its report; anything structural there is a CORE ticket.
 
 # RB — Ruby
 
-### T-864 ruby: encoding and module leftovers · P3 · RB · IN PROGRESS (RB worker, round 26) [V RB worker]
-Oracle LC_ALL=en_US.UTF-8 /usr/bin/ruby 2.6. (1) a Hash key in one encoding is not found by an equal String in another:
-`{65.chr=>1}["A"]` → 1, ours nil in every engine (Go's dict keys a box by pointer). (2) `Module#private_instance_methods`
-missing (oracle `[]`). (3) a class/module nested in a module is also bound globally when no top-level name exists:
-`module M; class X; end; end; p X` → MRI NameError, ours M::X (both halves). (4) interp: `module M; K=1; def self.f; K;
-end; p f; end` cannot see K; compiler: f undefined at that point. (5) float pack directives e/E/d/D/f/F/g/G raise
-NotImplementedError; `String#encode` missing. (6) in-place re-encoding of a plain UTF-8 String (`z=""; z << 255.chr`;
-`x.force_encoding("BINARY")` seen through an alias `y = x`) — needs one String type with an encoding field in the Go
-twin (jsRStr vs jsRBin) or a forwarding check at ~35 *jsRStr sites; measure, DECLINE with the numbers if it costs the
-string fast path.
+### T-872 ruby: binary case mapping, re-encode back to UTF-8 in place, public over inherited private, module_eval · P3 · RB · OPEN [V RB worker]
+Oracle LC_ALL=en_US.UTF-8 /usr/bin/ruby 2.6. (1) WRONG: `"\xFFAb".b.upcase` → `"\xFFAB"`; interp `"\x8AB"`, llvm.Run/native
+`"xAB"` (the byte is case-mapped as U+00FF; binary strings map ASCII only). (2) `force_encoding("UTF-8")` on a binary box
+with valid UTF-8 bytes returns a new String, so an alias keeps ASCII-8BIT (oracle UTF-8). (3) compiler: `public :m` over an
+inherited private method — `D.new.d` raises a private-method NoMethodError (oracle 4; interp right). (4) `Module#module_eval`
+missing in both halves. (5) the RB worker saw `def er; yield; rescue ArgumentError => e; [e.class]; end; er { raise
+ArgumentError, "q" }` fail ("unknown name: e" interp, NameError "in block" compiler) inside its section files
+(scratchpad only126.rb / only127.rb / only128.rb); the isolated form agrees on all legs — isolate the context first.
+(6) `[-Float::NAN].pack("E")` drops the NaN sign bit (layer 2 cannot read it).
 
 # JS — JavaScript and TypeScript
 
@@ -934,6 +933,7 @@ T-866 bash: a prefix assignment after a leading redirection — DONE 1a1f2704 (r
 T-862 kotlin: member vs top-level fun, qualifiedName, named args on nested ctors — DONE 33383d41 (implicit-receiver members beat top-level declarations — interp-core globalHit/globalSet hooks, compiler js_ktrecvof branch only for names declared both ways; nested KClass simpleName/qualifiedName/java.name per stdlib; emit-time tables keyed by binary name so nested named args order right)
 T-775 missing features met in real programs (Benchmarks Game, Rosetta Code) — DONE ddd654a4 (python module __doc__ incl. per-module docstring table; go make of named slice/map/chan types, math/cmplx after Go's algorithms + Atan2/Sincos, complex128 typed locations, returned constants convert to the result type; java System.out.flush and the source launcher's entry class; swift &= |= ^= <<= >>= and wrapping forms, free sqrt; js Uint8Array; c #define among struct members and initializer items through the pipeline — the in-function case already worked via -pipe; complex64 and cmplx trig filed as T-869)
 T-867 bash: a prefix assignment is visible while the command's own words expand — DONE 18bf1dde (words expand first, then prefix assignments left to right, redirection words see the old values, names restored after — interp applyPrefix/openRedirsOuter/restorePrefix, compiler expandedWord/prefixOuter; no-command-word assignments persist with the last substitution's status; temporary bindings take no attributes and leave arrays alone; bash bench unchanged)
+T-864 ruby: encoding and module leftovers — DONE 9e2eeb10 (hash keys equal across encodings in all engines; private/protected_instance_methods and private in module bodies; nested names no longer leak globally, body constants resolve lexically, module bodies run after their methods install; float pack directives; String#encode with MRI's error classes and replace options; in-place re-encoding seen through aliases — Go twin forwards jsRStr→jsRBin, append loop −0.5%)
 
 # Settled — do not re-open
 
