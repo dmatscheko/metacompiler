@@ -126,7 +126,9 @@ SelfRecv    <~~ push({selfrecv: true, srecv: pop()}) ~~>
 // one OBJECT; ScopedName already accepts a plain local name.
 SelfRecvHead <~~ push(up.in) ~~>
             = KwSelf | "@@" Id | "@" Id | "$" Id | ScopedName ;
-ParamList   = "(" [ Param { "," Param } [ "," ] ] ")" ;
+// The list may also go without parentheses (`def add a, b`), up to the end of the
+// line.
+ParamList   = "(" [ Param { "," Param } [ "," ] ] ")" | SameLine Param { "," Param } ;
 Param       = ParamFwd | ParamDSplat | ParamSplat | ParamBlock | ParamKw | ParamDefault
             | BGroup | ParamSimple ;
 // def m(...) - argument forwarding. It is exactly `*__fwd_a, &__fwd_b` under two
@@ -2084,10 +2086,10 @@ SymName     = ( "a"..."z" | "A"..."Z" | "_" | "\x7f"..."\U0010ffff" ) :whitespac
               { "a"..."z" | "A"..."Z" | "0"..."9" | "_" | "\x7f"..."\U0010ffff" } ;
 
 // Two string literals that are only separated by whitespace are ONE string in Ruby
-// ("a" 'd' is "ad"), so a string primary is a run of pieces.
+// ("a" 'd' is "ad"), so a string primary is a run of pieces on one line.
 StrLit      <~~ push(makeStrLit(makeAdjacent(takeAll()), rbMgInterp(up.in))) ~~>
 
-            = StrPiece { StrPiece } ;
+            = StrPiece { SameLine StrPiece } ;
 StrPiece    = DqStr | SqStr ;
 
 // Double quoted strings interpolate '#{expr}'; single quoted are literal.
@@ -10906,34 +10908,49 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         nv = rsetSlice(p.obj, p.key, p.key2, v)
         if (ref.path.length == 1 && ref.texpr == undefined && nv !== p.obj) { writeTarget(ref, nv) }
     }
+    // Whether a local of this name is in scope, by makeVarRef's walk; a method of
+    // the name does not count.
+    function localBound(name) {
+        for (var i = scopes.length - 1; i >= 1; i--) { if (hasOwn(scopes[i], name)) { return true } }
+        return frameScopeOf(scopes) == null && hasOwn(globalScope, name)
+            && !(hasOwn(globalScope, "$d$" + name) && globalScope[name] === globalScope["$d$" + name])
+    }
     function makeAssign(items, pos) {
         var ref = items[0]
         var op = items[1]
         var valT = items[2]
-        // ||= / &&= are not implemented (no short circuit): warn and fall back to a
-        // plain assignment so the target is still written and the rest runs.
-        if (op == "||=" || op == "&&=") { notImpl("conditional assignment (" + op + ")", pos); op = "=" }
+        // ||= / &&= evaluate the right-hand side, and write, only when the old
+        // value is falsy / truthy; an unassigned local reads as nil.
+        var cond = op == "||=" || op == "&&="
+        var bareName = ref.name != undefined && ref.ivar == undefined && ref.gvar == undefined &&
+                       ref.cvar == undefined && ref.sconst == undefined && ref.texpr == undefined
+        // The receiver and the index are evaluated first, then the old value an
+        // operator assignment reads, then the right-hand side, as MRI does.
         return function() {
             var v = anytype
-            v = valT()
+            var old = anytype
             if (ref.path.length == 0) {
-                if (op != "=") { v = applyRuby(op, readTarget(ref), v) }
+                if (op != "=") { old = bareName && !localBound(ref.name) ? null : readTarget(ref) }
+                if (cond && rtest(old) == (op == "||=")) { return old }
+                v = valT()
+                if (op != "=" && !cond) { v = applyRuby(op, old, v) }
                 writeTarget(ref, v)
-            } else {
-                var p = resolveRefRuby(ref)
-                if (op != "=") {
-                    var old = anytype
-                    // A MISS answers the hash's default, exactly as Hash#[] does -
-                    // `cnt[w] += 1' on a Hash.new(0) is the counter idiom.
-                    // `o.a += v' on an object reads through its getter.
-                    if (isDict(p.obj)) { var di = dictFind(p.obj, p.key); old = di < 0 ? hashDefault(p.obj, p.key) : p.obj.vals[di] }
-                    else if (!p.isIdx && (isUserObj(p.obj) || isClassObj(p.obj))) { old = mcall(p.obj, p.key, [], null) }
-                    else if (isUserObj(p.obj)) { old = rindex(p.obj, p.key) }
-                    else { old = hasOwn(p.obj, p.key) ? p.obj[p.key] : undefined }
-                    v = applyRuby(op, old, v)
-                }
-                writePathRuby(ref, p, v)
+                return v
             }
+            var p = resolveRefRuby(ref)
+            if (op != "=") {
+                // A MISS answers the hash's default, exactly as Hash#[] does -
+                // `cnt[w] += 1' on a Hash.new(0) is the counter idiom.
+                // `o.a += v' on an object reads through its getter.
+                if (isDict(p.obj)) { var di = dictFind(p.obj, p.key); old = di < 0 ? hashDefault(p.obj, p.key) : p.obj.vals[di] }
+                else if (!p.isIdx && (isUserObj(p.obj) || isClassObj(p.obj))) { old = mcall(p.obj, p.key, [], null) }
+                else if (isUserObj(p.obj)) { old = rindex(p.obj, p.key) }
+                else { old = hasOwn(p.obj, p.key) ? p.obj[p.key] : undefined }
+            }
+            if (cond && rtest(old) == (op == "||=")) { return old }
+            v = valT()
+            if (op != "=" && !cond) { v = applyRuby(op, old, v) }
+            writePathRuby(ref, p, v)
             return v
         }
     }

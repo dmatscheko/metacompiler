@@ -2292,17 +2292,11 @@
             "program": "${workspaceFolder}","args": ["languages/swift-to-llvm-ir.abnf", "tests/swift-test-recognize.swift", "-q", "-warn-unsupported"]
         },
         {
-            "name": "Ruby recognition SHOULD FAIL",
+            "name": "Ruby recognition",
             "type": "go",
             "request": "launch",
             "expectError": "conditional assignment (||=) not implemented (tests/ruby-test-recognize.rb:63)",
             "program": "${workspaceFolder}","args": ["languages/ruby-to-llvm-ir.abnf", "tests/ruby-test-recognize.rb", "-q"]
-        },
-        {
-            "name": "Ruby recognition warned+ignored",
-            "type": "go",
-            "request": "launch",
-            "program": "${workspaceFolder}","args": ["languages/ruby-to-llvm-ir.abnf", "tests/ruby-test-recognize.rb", "-q", "-warn-unsupported"]
         },
         {
             "name": "Lua recognition (compiler, no flags)",

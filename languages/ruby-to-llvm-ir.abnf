@@ -128,7 +128,9 @@ SelfRecv    <~~ push({selfrecv: true, srecv: pop()}) ~~>
 // one OBJECT; ScopedName already accepts a plain local name.
 SelfRecvHead <~~ push(up.in) ~~>
             = KwSelf | "@@" Id | "@" Id | "$" Id | ScopedName ;
-ParamList   = "(" [ Param { "," Param } [ "," ] ] ")" ;
+// The list may also go without parentheses (`def add a, b`), up to the end of the
+// line.
+ParamList   = "(" [ Param { "," Param } [ "," ] ] ")" | SameLine Param { "," Param } ;
 Param       = ParamFwd | ParamDSplat | ParamSplat | ParamBlock | ParamKw | ParamDefault
             | BGroup | ParamSimple ;
 // def m(...) - argument forwarding. It is exactly `*__fwd_a, &__fwd_b` under two
@@ -2123,10 +2125,10 @@ SymName     = ( "a"..."z" | "A"..."Z" | "_" | "\x7f"..."\U0010ffff" ) :whitespac
               { "a"..."z" | "A"..."Z" | "0"..."9" | "_" | "\x7f"..."\U0010ffff" } ;
 
 // Two string literals that are only separated by whitespace are ONE string in Ruby
-// ("a" 'd' is "ad"), so a string primary is a run of pieces.
+// ("a" 'd' is "ad"), so a string primary is a run of pieces on one line.
 StrLit      <~~ push(makeStrLit(makeAdjacent(takeAll()), rbMgInterp(up.in))) ~~>
 
-            = StrPiece { StrPiece } ;
+            = StrPiece { SameLine StrPiece } ;
 StrPiece    = DqStr | SqStr ;
 
 // Double quoted strings interpolate '#{expr}'; single quoted are literal.
@@ -4188,12 +4190,15 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         var ref = items[0]
         var op = items[1]
         var valT = items[2]
-        // ||= / &&= are not implemented (no short circuit): warn and fall back to a
-        // plain assignment so the target is still written and the rest compiles.
-        if (op == "||=" || op == "&&=") { notImpl("conditional assignment (" + op + ")", pos); op = "=" }
+        // ||= / &&= evaluate the right-hand side, and write, only when the old
+        // value is falsy / truthy (emitCondSet).
+        var cond = op == "||=" || op == "&&="
         var bare = ref.path.length == 0 && ref.name != undefined && ref.ivar == undefined && ref.gvar == undefined &&
                    ref.cvar == undefined && ref.sconst == undefined && ref.texpr == undefined && isLocalName(ref.name)
-        return function(b) {
+        // The receiver and the index are evaluated first, then the old value an
+        // operator assignment reads, then the right-hand side, as MRI does. Twin of
+        // makeAssign in ruby-interpreter.abnf.
+        function rhs(b) {
             var savedRL = rhsLocal
             var savedRF = rhsFrame
             if (bare && curFrame !== null && !knownLocal(ref.name)) {
@@ -4203,43 +4208,69 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             var r = valT(b)
             rhsLocal = savedRL
             rhsFrame = savedRF
-            b = r.b
-            var v = r.v
+            return r
+        }
+        function setHead(b) {
+            var r = rhs(b)
+            var v = op != "=" && !cond ? emitBin(r.b, op, old, r.v) : r.v
+            return {b: emitHeadSet(r.b, ref, v), v: v}
+        }
+        var old = hUndef
+        var p = {}
+        function setAttr(b) {
+            var r = rhs(b)
+            var v = op != "=" && !cond ? emitBin(r.b, op, old, r.v) : r.v
+            emitAttrSet(r.b, p, v)
+            return {b: r.b, v: v}
+        }
+        function setElem(b) {
+            var r = rhs(b)
+            var v = op != "=" && !cond ? emitBin(r.b, op, old, r.v) : r.v
+            return {b: emitPathSet(r.b, ref, p, v), v: v}
+        }
+        return function(b) {
+            old = hUndef
             if (ref.path.length == 0) {
-                if (op != "=") {
+                // A local an operator assignment introduces reads nil.
+                if (op != "=" && bare && curFrame !== null && !knownLocal(ref.name)) {
+                    old = rhsLocalRead(b, ref.name)
+                } else if (op != "=") {
                     var rold = emitHead(b, ref)
                     b = rold.b
-                    v = emitBin(b, op, rold.v, v)
+                    old = rold.v
                 }
-                b = emitHeadSet(b, ref, v)
-            } else {
-                var p = emitRefPath(b, ref)
-                b = p.b
-                // A .field path targets an object property (js_get/js_set); a
-                // [i] path targets an array/hash element (js_pyget/js_pyset).
-                if (p.dict) {
-                    // `o.a += v' is `o.a = o.a + v': the read is the getter call
-                    // wherever the write is a setter call or a def names the getter.
-                    if (op != "=") {
-                        var oldf = hUndef
-                        if (attrDispatches(p.name) || rubyDefNames["$" + p.name] === true) {
-                            var rg = emitStepCall(b, p.obj, p.name, false)
-                            b = rg.b
-                            oldf = rg.v
-                        } else { oldf = callExt(b, "js_get", [p.obj, p.key]) }
-                        v = emitBin(b, op, oldf, v)
-                    }
-                    emitAttrSet(b, p, v)
-                } else {
-                    if (op != "=") {
-                        var oldm = callExt(b, core.indexExt, [p.obj, p.key])
-                        v = emitBin(b, op, oldm, v)
-                    }
-                    b = emitPathSet(b, ref, p, v)
-                }
+                return cond ? emitCondSet(b, old, op, setHead) : setHead(b)
             }
-            return {b: b, v: v}
+            p = emitRefPath(b, ref)
+            b = p.b
+            // A .field path targets an object property (js_get/js_set); a
+            // [i] path targets an array/hash element (js_pyget/js_pyset).
+            if (p.dict) {
+                // `o.a += v' is `o.a = o.a + v': the read is the getter call
+                // wherever the write is a setter call or a def names the getter.
+                if (op != "=") {
+                    if (attrDispatches(p.name) || rubyDefNames["$" + p.name] === true) {
+                        var rg = emitStepCall(b, p.obj, p.name, false)
+                        b = rg.b
+                        old = rg.v
+                    } else { old = callExt(b, "js_get", [p.obj, p.key]) }
+                }
+                return cond ? emitCondSet(b, old, op, setAttr) : setAttr(b)
+            }
+            if (op != "=") { old = callExt(b, core.indexExt, [p.obj, p.key]) }
+            return cond ? emitCondSet(b, old, op, setElem) : setElem(b)
         }
+    }
+    // `x ||= v' / `x &&= v': set(b) emits the right-hand side and the write into its
+    // own block, taken when the old value is falsy (||=) or truthy (&&=); the value
+    // is the old one otherwise.
+    function emitCondSet(b, old, op, set) {
+        var setB = curF.NewBlock("")
+        var joinB = curF.NewBlock("")
+        if (op == "||=") { b.NewCondBr(truthy(b, old), joinB, setB) } else { b.NewCondBr(truthy(b, old), setB, joinB) }
+        var w = set(setB)
+        w.b.NewBr(joinB)
+        return {b: joinB, v: joinB.NewPhi([llvm.ir.NewIncoming(old, b), llvm.ir.NewIncoming(w.v, w.b)])}
     }
 
     // ----- case / ternary / << / multiple assignment / begin / raise -----

@@ -4515,6 +4515,57 @@ def s102
   check("sc102j", u.map { |s| s.succ } == ["2.0", "a-10", "b a", "<<koalb>>", "AAa", "", "10", "**+", "aaa"])
 end
 
+# ===== SECTION 103: def without parentheses, literals on separate lines, assignment order, ||= / &&= =====
+# `def m a, b' takes a parameter list without parentheses; a string literal at the
+# start of a line is a new statement, not glued onto the previous line's literal;
+# an index assignment evaluates the receiver and the index before the value, and
+# an operator assignment reads the old value before the value; ||= and &&= only
+# evaluate and write when the old value is falsy / truthy, and an unassigned local
+# reads as nil. /usr/bin/ruby 2.6 settles each.
+def s103_twice n
+  n * 2
+end
+def s103_add a, b = 3
+  a + b
+end
+def s103_lit
+  r = "first"
+  "second".upcase
+end
+def s103_t(log, x)
+  log << x
+  x
+end
+def s103_memo
+  z ||= 4
+  z &&= z + 1
+  z
+end
+def s103
+  v = [21, 1, 0]
+  check("df103a", s103_twice(v[0]) == 42 && s103_add(v[1]) == 4 && s103_add(v[1], v[1]) == 2)
+  check("sl103b", s103_lit == "SECOND")
+  arr = [v[2], v[2]]
+  i = v[2]
+  arr[i += 1] = (i += 10)
+  log = []
+  hh = {}
+  hh[s103_t(log, :k)] = s103_t(log, :v)
+  c = {k: v[1]}
+  c[s103_t(log, :k)] += s103_t(log, 2)
+  check("as103c", arr == [0, 11] && log == [:k, :v, :k, 2] && c == {k: 3})
+  a = nil
+  a ||= s103_t(log, 5)
+  a ||= s103_t(log, 6)
+  b = v[1]
+  b &&= s103_t(log, 7)
+  h = {}
+  h[:x] ||= []
+  h[:x] << 1
+  h[:x] ||= s103_t(log, 9)
+  check("or103d", a == 5 && b == 7 && h == {x: [1]} && log == [:k, :v, :k, 2, 5, 7] && s103_memo == 5)
+end
+
 s39() # SECTION-CALL 39
 s40() # SECTION-CALL 40
 s41() # SECTION-CALL 41
@@ -4579,5 +4630,6 @@ s99() # SECTION-CALL 99
 s100() # SECTION-CALL 100
 s101() # SECTION-CALL 101
 s102() # SECTION-CALL 102
+s103() # SECTION-CALL 103
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

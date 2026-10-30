@@ -2,10 +2,8 @@
 # singleton methods (def self.x), default / splat / double-splat / keyword / block
 # parameters, keyword / splat / block call arguments, ||= conditional assignment,
 # float literals, scoped constants (::), %w / %i percent literals, for-in loops,
-# yield and symbol-key hashes { name: v }. ||= is still not implemented: a normal
-# run aborts there, so this file is a SHOULD-FAIL by default and only exits 0
-# under -warn-unsupported. The output is byte-identical under goja and -frozen
-# for both the interpreter and the LLVM-IR compiler.
+# yield and symbol-key hashes { name: v }. The output is byte-identical under goja
+# and -frozen for both the interpreter and the LLVM-IR compiler.
 
 # ----- module with a constant and a singleton method -----
 module Config
@@ -55,7 +53,7 @@ render(name: "widget")
 render(*parts)
 render(&:upcase)
 
-# ----- symbol-key hash and ||= conditional assignment (not implemented) -----
+# ----- symbol-key hash and ||= conditional assignment -----
 options = { color: "red", size: 4, tag: :main }
 puts options[:color]
 
