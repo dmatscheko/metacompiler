@@ -265,6 +265,7 @@ int rt_ss_save(int u);
 int rt_ss_restore(int u);
 int rt_push_local(int id);
 int rt_pop_locals(int d);
+int rt_glob_swap(int id);
 int rt_unset_up(int id, int d, int fn);
 int rt_ls_drop(int id, int low, int from, int to);
 int rt_fskind(char *p);
@@ -6886,6 +6887,75 @@ int rt_local_here(int id, int d)
         t = t + 1;
     }
     return 0;
+}
+
+/* `declare -g NAME` where a local or prefix binding hides the global NAME:
+ * exchange the binding in effect, array rows included, with the global one,
+ * which the OUTERMOST save-stack entry of `id` holds. Called around the
+ * declaration's stores, so they land on the global and the local comes back.
+ * Twin of onGlobal in bash-interpreter.abnf. */
+int rt_glob_swap(int id)
+{
+    int t = 0;
+    int s = 0;
+    int r;
+    int n = 0;
+    int mk = 0;
+    int cnt;
+    int i = 0;
+    int h;
+    char *v;
+    char **tk = 0;
+    char **tv = 0;
+    while (t < ls_top && ls_id[t] != id) {
+        s = s + ls_acnt[t];
+        t = t + 1;
+    }
+    if (t >= ls_top) return 0;
+    v = gvars[id];
+    r = rt_ar_find(varnames[id]);
+    cnt = ls_acnt[t];
+    if (r < 0 && cnt == 0 && ls_amark[t] == 0) {
+        gvars[id] = ls_val[t];
+        ls_val[t] = v;
+        return 1;
+    }
+    if (r >= 0) {
+        n = ar_n[r];
+        mk = ar_mk[r] | (ar_srt[r] != 0 ? 0 : 8);
+        if (n > 0) {
+            tk = (char **)rt_xalloc("local array save stack", (long)n * 8);
+            tv = (char **)rt_xalloc("local array save stack", (long)n * 8);
+            memmove(tk, ar_k[r], (unsigned long)n * 8);
+            memmove(tv, ar_v[r], (unsigned long)n * 8);
+        }
+        /* The rows move to the save stack, so their element buffers become
+         * shared, as rt_push_local marks them, before the restore drops them. */
+        while (eb_n != 0 && i < n) {
+            h = rt_ebfind(ar_v[r][i]);
+            if (h >= 0) eb_sh[h] = 1;
+            i = i + 1;
+        }
+    }
+    rt_ls_restore(t, s);
+    if (las_top + n - cnt > las_cap) {
+        las_cap = 2 * (las_top + n - cnt) + 64;
+        las_k = (char **)rt_xgrow("local array save stack", (char *)las_k, (long)las_cap * 8);
+        las_v = (char **)rt_xgrow("local array save stack", (char *)las_v, (long)las_cap * 8);
+    }
+    memmove(las_k + s + n, las_k + s + cnt, (unsigned long)(las_top - s - cnt) * 8);
+    memmove(las_v + s + n, las_v + s + cnt, (unsigned long)(las_top - s - cnt) * 8);
+    las_top = las_top + n - cnt;
+    if (n > 0) {
+        memmove(las_k + s, tk, (unsigned long)n * 8);
+        memmove(las_v + s, tv, (unsigned long)n * 8);
+        free(tk);
+        free(tv);
+    }
+    ls_acnt[t] = n;
+    ls_amark[t] = mk;
+    ls_val[t] = v;
+    return 1;
 }
 
 int rt_pop_locals(int d)

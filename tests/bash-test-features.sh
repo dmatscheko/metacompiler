@@ -751,6 +751,13 @@ xcs=0
 for (( xci = 0; xci < 600; xci++ )); do xcv=$(echo "$xci"); xcs=$(( xcs + xcv )); done
 check cs600 "$xcs" 179700
 
+# ----- `local` outside every function declares nothing, status 1 -----
+xly=0
+{ local xly=5; xlr=$?; } 2>/dev/null
+check lo1 "$xlr/$xly" "1/0"
+xlr=$( { local; echo "$?"; } 2>/dev/null )
+check lo2 "$xlr" 1
+
 # ----- standard error is fd 2 in every leg -----
 # Not a check: ./test.sh --cross diffs the two halves' merged output, so this line and an
 # arithmetic error's message reach it from llvm.Run as they do from the interpreter.

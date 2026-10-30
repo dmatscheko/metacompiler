@@ -1236,6 +1236,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // `local` is dynamic scoping: each function call pushes a frame, every name declared
     // local inside records its previous value there, and the frame is unwound on return.
     var localFrames = []
+    // Calls running, which a subshell keeps (it starts with no frames of its own): `local`
+    // outside every function is an error.
+    var fnDepth = 0
 
     // Output capture for $( ) / ` ` : while the stack is non-empty every byte a command
     // would print is appended to its top entry instead of reaching stdout.
@@ -1550,12 +1553,40 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // the very object saved here.
     function declareLocal(name) {
         if (localFrames.length == 0) { return }
-        var fr = localFrames[localFrames.length - 1]
+        localFrames[localFrames.length - 1].push(bindingOf(name))
+    }
+    function bindingOf(name) {
         var ak = arrKey(name)
         var hadA = hasOwn(arrs, ak) && arrs[ak] != null
-        fr.push({name: name, had: isSetVar(name), val: getVarVal(name),
-                 ai: attrOn(intVars, name), au: attrOn(upVars, name), al: attrOn(loVars, name),
-                 ad: attrOn(dclVars, name), ar: attrOn(roVars, name), hasArr: hadA, arr: hadA ? arrCopy(arrs[ak]) : {assoc: false, keys: [], vals: {}, gone: {}, lit: false, decl: false}})
+        return {name: name, had: isSetVar(name), val: getVarVal(name),
+                ai: attrOn(intVars, name), au: attrOn(upVars, name), al: attrOn(loVars, name),
+                ad: attrOn(dclVars, name), ar: attrOn(roVars, name), hasArr: hadA, arr: hadA ? arrCopy(arrs[ak]) : {assoc: false, keys: [], vals: {}, gone: {}, lit: false, decl: false}}
+    }
+    // The saved entry holding NAME's GLOBAL binding while a local or a prefix binding hides
+    // it: the first entry of the outermost frame that saved NAME. null when the global is
+    // the binding in effect.
+    function globalEntry(name) {
+        var j
+        for (j = 0; j < localFrames.length; j++) {
+            var fr = localFrames[j]
+            var i
+            for (i = 0; i < fr.length; i++) { if (fr[i].name == name) { return fr[i] } }
+        }
+        return null
+    }
+    // Run act() on NAME's global binding (declare -g): it is put in effect, and afterwards
+    // saved back into its entry with the hiding binding restored. Twin of rt_glob_swap in
+    // languages/lib/bash-rt.c.
+    function onGlobal(name, act) {
+        var ge = globalEntry(name)
+        if (ge == null) { act(); return }
+        var cur = bindingOf(name)
+        restoreLocal(ge)
+        act()
+        var now = bindingOf(name)
+        ge.had = now.had; ge.val = now.val; ge.ai = now.ai; ge.au = now.au; ge.al = now.al
+        ge.ad = now.ad; ge.ar = now.ar; ge.hasArr = now.hasArr; ge.arr = now.arr
+        restoreLocal(cur)
     }
 
     // Is NAME's visible binding a prefix binding of a function call (applyPrefix)? The
@@ -2804,6 +2835,11 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var setRo = kw == "readonly" || flags.indexOf("r") >= 0
         // A readonly name the declaration would assign or make local is refused (status 1).
         var roFail = false
+        // One name, which -g declares on its global binding even where a local hides it.
+        var declAt = function(k, v) {
+            if (!global || localFrames.length == 0) { declOne(k, v); return }
+            onGlobal(names[k], function() { declOne(k, v) })
+        }
         // One name: its attributes, then its value (v, or the assignment's own literal).
         var declOne = function(k, v) {
             // WHICH KEYWORDS ARE LOCAL. bash 5.3: `local`, `declare` and `typeset` inside a
@@ -2855,6 +2891,13 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var body = function() {
             var k
             var vals = valStack[valStack.length - 1]
+            // bash 5.3: `local` outside every function declares nothing (an array literal
+            // was already assigned with the words), status 1.
+            if (kw == "local" && fnDepth == 0) {
+                emitErr("bash: local: can only be used in a function\n")
+                setStatus(1)
+                return 1
+            }
             if (query) {
                 // -p with names PRINTS; -p bare and -f/-F stay silent (declLine's comment
                 // says why), and a name that is not set is a diagnostic and status 1.
@@ -2871,7 +2914,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 setStatus(0); return 0
             }
             for (k = 0; k < names.length; k++) {
-                if (asgs[k] == null || asgs[k].lit == null) { declOne(k, vals[k]) }
+                if (asgs[k] == null || asgs[k].lit == null) { declAt(k, vals[k]) }
             }
             var ab = takeAbort()
             if (ab != null) { return ab }
@@ -2892,7 +2935,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var vals = []
             for (k = 0; k < names.length && !query; k++) {
                 var a = asgs[k]
-                if (a != null && a.lit != null) { declOne(k, "") }
+                if (a != null && a.lit != null) { declAt(k, "") }
                 vals.push((a != null && a.lit == null && a.valT != null) ? wordJoin(a.valT()) : "")
                 var ab = takeAbort()
                 if (ab != null) { return ab }
@@ -6301,8 +6344,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (own) { pushLocalFrame() }
         declareLocal("FUNCNAME")
         setVarVal("FUNCNAME", name)
+        fnDepth = fnDepth + 1
         var r = anytype
         r = body()
+        fnDepth = fnDepth - 1
         lnCtx = svLn
         if (own) { popLocalFrame() }
         posParams = saved

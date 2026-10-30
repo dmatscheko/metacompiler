@@ -1745,6 +1745,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var rtFnEnter = rtDecl("rt_fn_enter", false, [0])
     var rtLocalNew = rtDecl("rt_local_new", false, [0, 0, 0])
     var rtUnsetUp = rtDecl("rt_unset_up", false, [0, 0, 0])
+    var rtGlobSwap = rtDecl("rt_glob_swap", false, [0])
 
     // ===================================================================================
     //  Value helpers used by the thunks.
@@ -3378,6 +3379,35 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         for (k = 0; k < names.length; k++) {
             if (assoc && !query && !hasOwn(assocArrays, "$" + names[k])) { assocArrays["$" + names[k]] = true; assocList.push(names[k]) }
         }
+        // One name, which -g declares on its global binding even where a local hides it
+        // (rt_glob_swap). For a lexical local of this function the global's attributes are
+        // the ones its `local` saved for the return (the name's first undo entry here):
+        // the store runs under them, they take the declaration's own, and the local
+        // keeps its attributes.
+        var declAt = function(b, j, v) {
+            if (!global || curFrame == null) { return declOne(b, j, v) }
+            var nm = names[j]
+            var ge = null
+            var u
+            for (u = curFrame.undo; u < attrUndo.length && ge == null; u++) {
+                if (attrUndo[u].name == nm) { ge = attrUndo[u] }
+            }
+            var sv = {name: nm, i: attrOn(intVars, nm), u: attrOn(upVars, nm), l: attrOn(loVars, nm), r: attrOn(roVars, nm)}
+            if (ge != null && hasOwn(curFrame.locs, "$" + nm)) {
+                attrUndo.push(ge)
+                attrUnwind(attrUndo.length - 1)
+            } else { ge = null }
+            var id = llvm.constant.NewInt(i32, getVarId(nm))
+            b.NewCall(rtGlobSwap, id)
+            b = declOne(b, j, v)
+            b.NewCall(rtGlobSwap, id)
+            if (ge != null) {
+                ge.i = attrOn(intVars, nm); ge.u = attrOn(upVars, nm); ge.l = attrOn(loVars, nm); ge.r = attrOn(roVars, nm)
+                attrUndo.push(sv)
+                attrUnwind(attrUndo.length - 1)
+            }
+            return b
+        }
         // One name: its attributes, then its value (v expanded, or null for the assignment's own).
         var declOne = function(b, j, v) {
             // WHICH KEYWORDS ARE LOCAL. bash 5.3: `local`, `declare` and `typeset` inside a
@@ -3447,6 +3477,13 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var pre = {vals: []}
         var body = function(b) {
             var j
+            // bash 5.3: `local` outside every function declares nothing (an array literal
+            // was already assigned with the words), status 1.
+            if (kw == "local" && curFrame == null) {
+                emitOnStderr(b, gepStr(b, "bash: local: can only be used in a function\n"))
+                storeStatusI(b, 1)
+                return b
+            }
             if (query) {
                 // `declare -p NAME` PRINTS. The attribute letter is decided HERE because -i/-u/-l are
                 // compile-time facts in this grammar; rt_declp asks the runtime for array-ness and the value.
@@ -3465,7 +3502,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 storeStatusI(b, 0); return b
             }
             for (j = 0; j < names.length; j++) {
-                if (asgs[j] == null || asgs[j].lit == null) { b = declOne(b, j, pre.vals[j]) }
+                if (asgs[j] == null || asgs[j].lit == null) { b = declAt(b, j, pre.vals[j]) }
             }
             storeStatusI(b, roFail ? 1 : 0)
             roFail = false
@@ -3483,7 +3520,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             for (j = 0; j < names.length && !query; j++) {
                 var a = asgs[j]
                 vals.push(null)
-                if (a != null && a.lit != null) { b = declOne(b, j, null) }
+                if (a != null && a.lit != null) { b = declAt(b, j, null) }
                 // A literal value has nothing to expand: emitAssign keeps its compile-time forms.
                 else if (a != null && a.valT != null && a.valT.c == undefined) {
                     var r = a.valT.fn(b)
@@ -5910,9 +5947,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // return (rt_fn_enter).
             var dslot = entry.NewAlloca(i32)
             entry.NewStore(entry.NewCall(rtFnEnter, llvm.constant.NewInt(i32, getVarId("FUNCNAME"))), dslot)
-            curFrame = {depth: dslot, locs: {}}
             // Every attribute the body declares is function-local, exactly like the value.
             var undoBase = attrUndo.length
+            curFrame = {depth: dslot, locs: {}, undo: undoBase}
             storeVarRaw(entry, "FUNCNAME", gepStr(entry, fname))
             emitFnRet(curExit, curExit.NewLoad(i32, gStatus))
             var endb = bodyT(entry)

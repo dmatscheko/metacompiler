@@ -1294,6 +1294,30 @@ s79() {
   for y in 1 2 3; do IFS=, read -r x <<< "a$y,b"; printf -v x '%s-%s' "$x" "$y"; r+="$x "; done
   check pk1 "$r" "a1,b-1 a2,b-2 a3,b-3 "
 }
+# ===== SECTION 80: declare -g past a local =====
+# declare -g acts on the global binding even where a local or a prefix binding hides
+# it: the local stays in effect, and the global holds the value, attributes and array.
+s80f() { local x=2; declare -g x=3; echo "$x"; }
+s80h() { declare -g s80n=7; }
+s80k() { local q=1; declare -g q; echo "$q"; }
+s80m() { local i80=1; declare -g -i i80=2+3; echo "$i80"; }
+s80p() { local -a a=(l1 l2); declare -g -a a=(n1 n2 n3); echo "${a[*]}"; s80g; echo "${a[*]}"; }
+s80g() { local b=(x y); declare -g a=(z); }
+s80s() { local s=(p q r); declare -g s=new; echo "${s[*]}"; }
+s80r() { local m=1; declare -g -r m=9; m=2; echo "$m"; }
+s80i() { local d=2; declare -g d=7; echo "$d"; }
+s80o() { local d=1; s80i; echo "$d"; }
+s80() {
+  r=$(x=1; s80f; echo "$x"); check gd1 "${r//$'\n'/,}" "2,3"
+  r=$(x=1; x=9 s80f; echo "$x"); check gd2 "${r//$'\n'/,}" "2,3"
+  r=$(s80h; echo "$s80n"); check gd3 "$r" 7
+  r=$(s80k; echo "${q-unset}"); check gd4 "${r//$'\n'/,}" "1,unset"
+  r=$(i80=0; s80m; echo "$i80"; i80=1+1; echo "$i80"); check gd5 "${r//$'\n'/,}" "1,5,2"
+  r=$(a=(g1 g2); s80p; echo "${a[*]} ${#a[@]}"); check gd6 "${r//$'\n'/,}" "l1 l2,l1 l2,z 1"
+  r=$(s=str; s80s; echo "$s ${#s[@]}"); check gd7 "${r//$'\n'/,}" "p q r,new 1"
+  r=$( { s80r; echo "$m"; m=3; echo "$m"; } 2>/dev/null ); check gd8 "${r//$'\n'/,}" "2,9"
+  r=$(d=0; s80o; echo "$d"); check gd9 "${r//$'\n'/,}" "2,1,7"
+}
 # ===== END SECTIONS =====
 
 s47   # SECTION-CALL 47
@@ -1328,5 +1352,6 @@ s76   # SECTION-CALL 76
 s77   # SECTION-CALL 77
 s78   # SECTION-CALL 78
 s79   # SECTION-CALL 79
+s80   # SECTION-CALL 80
 echo "full: $checks checks, $fails failures"
 exit $fails
