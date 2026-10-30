@@ -150,7 +150,7 @@ splice in VarName / AsgIdent / PeName, or a pre-parse splice that keeps source p
 
 # C — C subset
 
-### T-852 c: anonymous-union positional initializer; `(p + 2)->a`; float storage · P2 · C · OPEN [V C worker]
+### T-852 c: anonymous-union positional initializer; `(p + 2)->a`; float storage · P2 · C · IN PROGRESS (C worker, round 10) [V C worker]
 (1) WRONG ANSWER (interp): `struct D { int k; union { int u; char ch; }; int t; }; struct D d = { 5, { 9 }, 100 };`
 → cc `d.u` 9, `d.t` 100; the interpreter walks the anonymous union's members as separate members (`d.u` 100, `d.t` 0);
 the compiler aborts "store operands are not compatible: src=i8; dst=i32*". (2) `(p + 2)->a` does not parse in either
