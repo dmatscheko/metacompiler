@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-851** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-852** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -150,16 +150,13 @@ splice in VarName / AsgIdent / PeName, or a pre-parse splice that keeps source p
 
 # C — C subset
 
-### T-844 c: declaration gaps left from the scope/designator round · P3 · C · IN PROGRESS (C worker, round 8) [V C worker]
-All loud except (4). (1) brace elision: `struct T u = {1,2,3,4,5}` with an array member — interp
-"an aggregate needs a brace initializer", compiler LLVM "store operands are not compatible"; cc
-1 2 3 4 5 (also an undesignated item after a nested designator). (2) a constant name in an array
-dimension or enumerator: `int a[CHAR_BIT];`, `enum { E = CHAR_BIT * 2 }` (and an enumerator as a
-dimension) — parse error / "unknown constant". (3) `extern int a[]; int a[3];` at file scope is
-refused as conflicting types; cc accepts. (4) WRONG ANSWER: `{ extern myint g; }` through a typedef
-in a block still declares a local. (5) `(bool)` as a parenthesised expression without <stdbool.h>
-is taken for a type name ("type not defined: bool"). (6) `void f(int a){ int a; }` is accepted;
-cc: redefinition of 'a' (parameters share the body's outermost scope, 6.2.1p4).
+### T-851 c: `sizeof` of a struct ignores alignment padding; block-scope enums · P2 · C · OPEN [V C worker]
+WRONG ANSWER: `sizeof(struct{int a; char c;})` → cc 8, ours 5; `struct{char c; int a;}` 8 vs 5; `struct{int m[7];
+char n[2];}` 32 vs 30 — both engines. Layout must follow the arm64 ABI (each member at its alignment, size rounded
+to the struct's alignment); check offsetof-style pointer arithmetic and arrays of structs too. Also loud:
+`int main(void){ enum { K = 3 }; ... }` does not parse (cc accepts); the enumerator table is global, so allowing
+it needs block scoping (two blocks defining one name). And: a struct-valued expression in a `[]`-sized array
+(`struct P ps[] = { p, 5, 6 }`, cc 2) is refused; interp-only `extern int a[]; int *p = a; int a[3];` is refused.
 
 # CORE — MetaJS, the engines, shared runtime, tooling
 
@@ -926,6 +923,7 @@ T-848 bash: backslash-newline inside an array literal does not parse — DONE 57
 T-841 ruby: `$0` / `$PROGRAM_NAME` are nil — DONE 308d58d3 ($0 / $PROGRAM_NAME are the script path in both halves)
 T-840 ruby compiler: `next v` inside begin/ensure inside a block returns the control signal — DONE 308d58d3 (next v in a begin closure of a block becomes the block's value; break throws the block-break marker)
 T-839 ruby: features left from the string/array/error rounds — PARTIAL b25b9b95 — character String#[]/center/reverse with ASCII fast path, Integer.sqrt, last_match, cause, pp/bare p/bare new, Proc >>/<</curry, Rational round(half:), loop/StopIteration, catch/throw/UncaughtThrowError, method_missing/respond_to_missing?, IO objects, Complex power, chr(UTF-8), lazy enumerators, rxSplit removed; binary strings and a blockless map enumerator filed as T-850
+T-844 c: declaration gaps left from the scope/designator round — DONE 1e3d17a3 (shared cInitWalk does brace elision for both engines; cConstOf folds enumerators/header constants in dimensions, enumerators and designators; extern int a[] + int a[3] merge per 6.2.7p3; typedef extern in a block binds the global; bool is a type only after <stdbool.h>; parameters share the body's outermost scope)
 
 # Settled — do not re-open
 
