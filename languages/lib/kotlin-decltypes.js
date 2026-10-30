@@ -177,6 +177,21 @@ function ktIsVarAt(at) {
     }
     return false
 }
+// A lambda's parameter `name` declared at offset `at`, a val; the finished lambda
+// body (ktNoteBody) then scopes it. A lambda with no parameter list (items, its
+// parts, carry no lparams) declares the implicit `it` at its own offset.
+function ktNoteLamParam(name, at) {
+    var saved = ktAt
+    ktAt = at
+    ktNoteDecl(name, "")
+    ktAt = saved
+}
+function ktNoteLamIt(items, at) {
+    for (var i = 0; i < items.length; i++) {
+        if (items[i] != undefined && items[i].lparams != undefined) { return }
+    }
+    ktNoteLamParam("it", at)
+}
 function ktNoteBody(from, to) {
     var still = []
     for (var i = 0; i < ktOpen.length; i++) {
@@ -205,8 +220,9 @@ function ktDeclAt(name) {
     return hit
 }
 // Whether the target of a compound assignment `ref op= v` at offset `at` is a
-// `val`: a local or parameter, a top-level property, or a property of the class the
-// path's owner has (by name alone when that owner is not known here). Kotlin
+// `val`: `this`, a local or parameter (a lambda's too), a top-level property, or a
+// property of the class the path's owner has (by name alone when that owner is not
+// known here). Kotlin
 // resolves `a += b` on a val as a.plusAssign(b), in place on a mutable collection,
 // and on a var whose type has no plusAssign as a = a + b (a var of a MUTABLE
 // collection type is ambiguous and rejected, so only a read-only type reaches the
@@ -215,6 +231,7 @@ function ktDeclAt(name) {
 function ktAssignIsVal(ref, at) {
     var n = ref.path.length
     if (n == 0) {
+        if (ref.name == "this") { return true }
         var saved = ktAt
         ktAt = at
         var d = ktDeclAt(ref.name)

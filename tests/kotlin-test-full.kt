@@ -5973,6 +5973,76 @@ fun sec130() {
     check("cme130b", hit == "last cme5")
 }
 
+// ===== SECTION 131: a for over a MutableSet fails fast too, with a set's own end =====
+// A LinkedHashSet / TreeSet iterator throws ConcurrentModificationException from
+// next() once modCount moved, and fetched its next node with the current one: the
+// loop ends quietly after the element that was LAST when the loop started, whatever
+// was added or removed meanwhile. add / addAll / remove / removeAll / retainAll
+// count only when they change the set, clear always. A val's `xs += emptyList()` is
+// plusAssign, i.e. addAll, which an ArrayList counts even when it adds nothing.
+// Every row is java 24 over the same LinkedHashSet / TreeSet / ArrayList, the `+=`
+// one through kotlin-stdlib 2.2.21's CollectionsKt.addAll.
+fun cme131(s: MutableSet<Int>, op: (MutableSet<Int>, Int) -> Unit): String {
+    var seen = ""
+    try {
+        for (x in s) { seen += x; op(s, x) }
+        return "ok$seen"
+    } catch (e: ConcurrentModificationException) {
+        return "cme$seen"
+    }
+}
+fun sec131() {
+    val r = listOf(
+        cme131(mutableSetOf(1, 2, 3)) { s, x -> if (x == 1) { s.add(9); s.remove(9) } },
+        cme131(mutableSetOf(1, 2, 3)) { s, x -> if (x == 2) s.remove(3) },
+        cme131(mutableSetOf(1, 2, 3)) { s, x -> s.add(1) },
+        cme131(mutableSetOf(1, 2, 3)) { s, x -> if (x == 3) s.add(9) },
+        cme131(mutableSetOf(1, 2, 3)) { s, x -> if (x == 3) s.remove(1) },
+        cme131(mutableSetOf(1, 2, 3)) { s, x -> if (x == 1) s.remove(1) },
+        cme131(mutableSetOf(1, 2, 3)) { s, x -> if (x == 1) s.clear() },
+        cme131(mutableSetOf(1, 2, 3)) { s, x -> s.remove(42); s.addAll(listOf(1, 2)); s.removeAll(listOf(7)) },
+        cme131(mutableSetOf(1, 2, 3)) { s, x -> if (x == 1) s.retainAll(listOf(1, 2)) },
+        cme131(mutableSetOf(1, 2, 3)) { s, x -> if (x == 2) s += 4 },
+        cme131(mutableSetOf(1, 2, 3)) { s, x -> s += 1; s -= 42 },
+        cme131(sortedSetOf(3, 1, 2)) { s, x -> if (x == 1) s.add(0) },
+        cme131(sortedSetOf(3, 1, 2)) { s, x -> if (x == 3) s.add(5) })
+    check("cme131a", r.joinToString(" ") == "cme1 cme12 ok123 ok123 ok123 cme1 cme1 ok123 cme1 cme12 ok123 cme1 ok123")
+    val xs = mutableListOf(1, 2)
+    var h = ""
+    try { for (x in xs) { xs += emptyList() }; h += "no" } catch (e: ConcurrentModificationException) { h += "cme" }
+    try { for (x in xs) { xs -= 42 }; h += " ok" } catch (e: ConcurrentModificationException) { h += " cme" }
+    check("cme131b", h + xs == "cme ok[1, 2]")
+}
+
+// ===== SECTION 132: a lambda's parameters are vals, so `+=` on one is plusAssign =====
+// A lambda parameter cannot be reassigned, so `l += 7` on a MutableList one resolves
+// to l.plusAssign(7) and mutates the caller's list (Kotlin spec, compound assignment:
+// a val target leaves only the assign operator). The same for the implicit `it`.
+fun sec132() {
+    val add7 = { l: MutableList<Int> -> l += 7 }
+    val a = mutableListOf(1)
+    add7(a)
+    val d = mutableListOf(2)
+    d.let { it += 8 }
+    d.also { x -> x += listOf(9, 10) }
+    val s = mutableSetOf(1)
+    s.run { listOf(5).forEach { this += it } }
+    check("lam132", "$a $d $s" == "[1, 7] [2, 8, 9, 10] [1, 5]")
+}
+
+// ===== SECTION 133: a local fun does not shadow a member method elsewhere =====
+// A bare f() inside an interface's default method is this.f(), the implementing
+// class's override; a local `fun f` in an unrelated function is not in scope there
+// (Kotlin resolves a call name against the innermost scope declaring it). Inside a
+// member whose OWN body declares a local `fun h`, the local wins over the member.
+class A133 : M133 { override fun f() = 1 }
+interface M133 { fun f(): Int; fun g() = f() + 10 }
+fun other133(): Int { fun f() = 9; return f() }
+class B133 { fun h() = 5; fun k(): Int { fun h() = 7; return h() + h2() }; fun h2() = h() }
+fun sec133() {
+    check("loc133", "${A133().g()} ${other133()} ${B133().k()}" == "11 9 12")
+}
+
 fun main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -6100,6 +6170,9 @@ fun main() {
     sec128() // SECTION-CALL 128
     sec129() // SECTION-CALL 129
     sec130() // SECTION-CALL 130
+    sec131() // SECTION-CALL 131
+    sec132() // SECTION-CALL 132
+    sec133() // SECTION-CALL 133
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }

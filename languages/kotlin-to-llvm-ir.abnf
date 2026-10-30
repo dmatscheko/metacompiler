@@ -235,7 +235,7 @@ Program     <~~ buildMain(takeAll()) ~~>
 // slots they occupy. noteTopItem and ClassMark are item-neutral - each pops the thunk
 // the alternative pushed and pushes it straight back.
 TopItem     <~~ push(noteTopItem(pop())) ~~>
-            = [ Modifiers ] ( TypeMark | FunDecl <~~ push(makeFunStmt(pop())) ~~> | ExtFun | UnsupFun | ClassMark | ExtProp | ExtDelegProp | TopAccProp | UnsupAccessor | TopProp ) ;
+            = [ Modifiers ] ( TypeMark | FunDecl <~~ push(makeFunStmt(pop(), true)) ~~> | ExtFun | UnsupFun | ClassMark | ExtProp | ExtDelegProp | TopAccProp | UnsupAccessor | TopProp ) ;
 TypeMark    <~~ push(markTopType(pop())) ~~>
             = UnsupType ;
 ClassMark   <~~ push(markTopType(pop())) ~~>
@@ -871,7 +871,7 @@ LocalType   = [ Modifiers ] ( UnsupType | ClassDecl | UnsupFun ) ;
 // one (dispatch is by name). Tried first because a non-dotted fun fails RecvSeg and
 // backtracks into the plain form.
 LocalFun    = ExtFun | LocalPlainFun ;
-LocalPlainFun <~~ push(makeFunStmt(pop())) ~~>
+LocalPlainFun <~~ push(makeFunStmt(pop(), false)) ~~>
             = FunDecl ;
 
 // try/catch/finally and throw are implemented: throw calls js_throw (a Go panic the
@@ -1728,7 +1728,7 @@ ThisExpr    <~~ push(makeThisAt(pop().tlbl)) ~~>
 // A lambda may carry its own LABEL - exec lab@{ ... return@lab } - which becomes the
 // target of a return@lab inside it (instead of the callee's implicit label). LamLabel
 // registers it on the walk-time return-target stack; makeLambda pops it again.
-Lambda      <~~ ktNoteBody(up.start, up.pos); push(makeLambda(takeAll())) ~~>
+Lambda      <~~ var lam = takeAll(); ktNoteLamIt(lam, up.start); ktNoteBody(up.start, up.pos); push(makeLambda(lam)) ~~>
             = [ LamLabel ] "{" [ LambdaParams ] { LamStmt } "}" ;
 LamLabel    = KId <~~ push({lamlbl: up.in}); retLblPush(up.in, "lam") ~~> AtAdjacent "@" ;
 // A { ... } in value position (an if / when arm) is a BLOCK, not a lambda: it runs its
@@ -1766,7 +1766,7 @@ LambdaParams <~~ push({lparams: takeAll()}) ~~>
 // A lambda parameter is a plain name or a destructuring pattern - { (a, b) -> ... }
 // over a Pair/data-class/Triple argument, whose names makeLambda binds through the
 // componentN convention.
-LParam      = DestructLParam | KId <~~ push(up.in) ~~> [ ":" Type ] ;
+LParam      = DestructLParam | KId <~~ ktNoteLamParam(up.in, up.start); push(up.in) ~~> [ ":" Type ] ;
 DestructLParam <~~ push({destruct: takeAll(), pos: up.pos}) ~~>   // Each entry pushes {dn, dprop}.
             = DPat [ ":" Type ] ;
 
@@ -2931,10 +2931,12 @@ KwContract  = "contract" KwEnd ;
     // one forwarder per entry the class does not override, so the arity has to be known.
     var interfaceMethods = {}
     // Names bound to a FUNCTION value (top-level and local fun declarations, extension
-    // functions). A bare call whose name is not one of these but IS a member method name
-    // is an implicit this.m() - Kotlin's ordinary way of calling an own or inherited
-    // method - and is dispatched through js_mcall on `this` (see makeCall).
+    // functions), and the top-level ones alone. A bare call whose name is not a
+    // top-level function but IS a member method name is an implicit this.m() - Kotlin's
+    // ordinary way of calling an own or inherited method - unless a local binds the
+    // name, which only the run time knows (see makeCall).
     var funNames = {}
+    var topFunNames = {}
     // Parameter NAME lists by callee name, so a call site can place its named
     // arguments: functions (and lambdas' owners) in funParams, member methods in
     // methodParams. A method name declared by two classes keeps the LAST list here;
@@ -3222,7 +3224,7 @@ KwContract  = "contract" KwEnd ;
     function emitCompoundOp(b, op, l, r, isVal) {
         var ro = emitOpBin(b, op, l, r)
         if (!isVal) { return ro }
-        return {b: ro.b, v: callExt(ro.b, "js_ktfill", [l, ro.v])}
+        return {b: ro.b, v: callExt(ro.b, "js_ktfill", [l, ro.v, op == "+=" ? hTrue : hFalse])}
     }
     // Every binary operator of the subset goes through the convention check.
     foldBinary = function(items) {
@@ -5153,8 +5155,8 @@ KwContract  = "contract" KwEnd ;
             // `secret()` inside a method is `this.secret()`, and so is `area()` inside
             // `fun Shape.describe()`. Decided at emission time, when the whole file has
             // been walked: we are inside a type body or an extension function (so there
-            // IS a `this`), the name is a known member method, and nothing declares a
-            // function of that name - no other reading is possible. js_mcall then walks
+            // IS a `this`), the name is a known member method, and no top-level function
+            // has that name - no other reading is possible. js_mcall then walks
             // the __super chain like any m() call. The emitClassTop test matters: some
             // OTHER class may declare a method of this name while the call sits at top
             // level, where it is an ordinary call on a value of that name.
@@ -5163,14 +5165,15 @@ KwContract  = "contract" KwEnd ;
             // classMethodNames is a WHOLE-FILE set - every method of every class and
             // interface - so `val f = { x: Int -> x * 2 }; f(3)` inside any member must
             // still call the local when some unrelated `interface Shape { fun f(): Int }`
-            // exists. Kotlin resolves a call against the INNERMOST scope that declares the
+            // exists, and so must a local `fun f` declared in some other function's
+            // body. Kotlin resolves a call against the INNERMOST scope that declares the
             // name, and a local declaration is inside the class body's scope, so the
             // local shadows the member. Locals are not tracked at emission time (see
             // classOwnProps' header), so the choice is deferred to kt_barecall, which is
             // the same two-step scope probe rtKtGetP makes on its miss path and costs
             // nothing at a site with no local.
             if ((emitClassTop() != null || emitExtDepth > 0) && classNames[name] == undefined
-                && funNames["$" + name] != true && classMethodNames["$" + name] == true) {
+                && topFunNames["$" + name] != true && classMethodNames["$" + name] == true) {
                 var ma = emitArgs(b, orderArgs(args, paramsFor(name, args)))
                 return {b: ma.b, v: ma.b.NewCall(rtBareCall(), [curScopeV, emitStr(ma.b, name), ma.v])}
             }
@@ -5404,8 +5407,9 @@ KwContract  = "contract" KwEnd ;
                 b = nr.b
                 v = nr.v
                 // js_ktvarset, not js_kset: a binding holding a delegate box is written
-                // through the delegate's setValue (see RealDelegateDecl).
-                b.NewCall(rtVarSet(), [curScopeV, nameV, v])
+                // through the delegate's setValue (see RealDelegateDecl). `this += x`
+                // mutated `this` in place and has no binding to write.
+                if (ref.name != "this") { b.NewCall(rtVarSet(), [curScopeV, nameV, v]) }
             } else {
                 var p = emitRefPath(b, ref)
                 b = p.b
@@ -5915,28 +5919,39 @@ KwContract  = "contract" KwEnd ;
     // A loop's head: index iV below lenV enters the body; at the end, js_ktmore asks
     // the source for one more element, which only a lazy sequence's cursor has (it
     // pulls it, and js_ktitem reads it) - so a list pays the extern once, at its end.
-    // n0V and m0V, the source's length and modification count (js_ktmod) when the
-    // loop started (n0V null: not checked), are the check of java.util.ArrayList's
-    // iterator, which the for statement uses: hasNext() is `cursor != size`, and
-    // next() throws ConcurrentModificationException once modCount moved - so
-    // removing the second-to-last element ends the loop quietly, while an add and a
-    // remove, or a sort, throw as on the JVM. Twin of kForNext in
-    // kotlin-interpreter.abnf.
-    function emitForMore(headB, iV, aV, lenV, bodyB, exitB, n0V, m0V) {
+    // ck (emitForStart; null: not checked) is the check of the java.util iterator the
+    // for statement uses: next() throws ConcurrentModificationException once the
+    // source's size or modification count (js_ktmod) moved, and hasNext() decides
+    // whether next() is called at all. ArrayList's hasNext() is `cursor != size`, so
+    // removing the second-to-last element ends the loop quietly; a set's iterator
+    // (LinkedHashSet, HashSet, TreeSet) fetched its next node along with the current
+    // one, so its hasNext() is whether the element just taken was not the last of
+    // the n0 the loop started with. Twin of kForNext in kotlin-interpreter.abnf.
+    function emitForMore(headB, iV, aV, lenV, bodyB, exitB, ck) {
         var moreB = curF.NewBlock("")
         var inB = bodyB
         var outB = exitB
-        if (n0V != null) {
+        if (ck != null) {
             inB = curF.NewBlock("")
             outB = curF.NewBlock("")
+            var setB = curF.NewBlock("")
+            var listB = curF.NewBlock("")
             var cmeB = curF.NewBlock("")
-            inB.NewCondBr(truthy(inB, callExt(inB, "js_ktforok", [aV, n0V, m0V])), bodyB, cmeB)
-            outB.NewCondBr(truthy(outB, callExt(outB, "js_seq", [iV, lenV])), exitB, cmeB)
+            inB.NewCondBr(truthy(inB, callExt(inB, "js_ktforok", [aV, ck.n, ck.m])), bodyB, outB)
+            outB.NewCondBr(truthy(outB, ck.s), setB, listB)
+            listB.NewCondBr(truthy(listB, callExt(listB, "js_seq", [iV, lenV])), exitB, cmeB)
+            setB.NewCondBr(truthy(setB, callExt(setB, "js_lt", [iV, ck.n])), cmeB, exitB)
             callExt(cmeB, "js_throw", [callExt(cmeB, "js_ktnewexc", [emitStr(cmeB, "ConcurrentModificationException"), hNull])])
             cmeB.NewRet(hUndef)
         }
         headB.NewCondBr(truthy(headB, callExt(headB, "js_lt", [iV, lenV])), inB, moreB)
         moreB.NewCondBr(truthy(moreB, callExt(moreB, "js_ktmore", [aV, iV])), bodyB, outB)
+    }
+    // The check emitForMore makes, taken as a loop over srcV (iterated as itV)
+    // starts: the length, the modification count, and whether srcV is a set.
+    function emitForStart(b, srcV, itV) {
+        return {n: callExt(b, "js_get", [itV, emitStr(b, "length")]), m: callExt(b, "js_ktmod", [itV]),
+                s: callExt(b, "js_ktforset", [srcV])}
     }
     function makeForList(bodyT, listT, name) {
         return function(b) {
@@ -5951,8 +5966,7 @@ KwContract  = "contract" KwEnd ;
             b = it.b
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, aName), it.v])
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, iName), emitNum(b, 0)])
-            var n0V = callExt(b, "js_get", [it.v, emitStr(b, "length")])
-            var m0V = callExt(b, "js_ktmod", [it.v])
+            var ck = emitForStart(b, r.v, it.v)
             var headB = curF.NewBlock("")
             var bodyB = curF.NewBlock("")
             var postB = curF.NewBlock("")
@@ -5961,7 +5975,7 @@ KwContract  = "contract" KwEnd ;
             var iV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, iName)])
             var aV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, aName)])
             var lenV = callExt(headB, "js_get", [aV, emitStr(headB, "length")])
-            emitForMore(headB, iV, aV, lenV, bodyB, exitB, n0V, m0V)
+            emitForMore(headB, iV, aV, lenV, bodyB, exitB, ck)
             var iV2 = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, iName)])
             var aV2 = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, aName)])
             // A FRESH SCOPE per iteration - see the header above makeForRange.
@@ -6001,8 +6015,7 @@ KwContract  = "contract" KwEnd ;
             b = it.b
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, aName), it.v])
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, iName), emitNum(b, 0)])
-            var n0V = callExt(b, "js_get", [it.v, emitStr(b, "length")])
-            var m0V = callExt(b, "js_ktmod", [it.v])
+            var ck = emitForStart(b, r.v, it.v)
             var headB = curF.NewBlock("")
             var bodyB = curF.NewBlock("")
             var postB = curF.NewBlock("")
@@ -6011,7 +6024,7 @@ KwContract  = "contract" KwEnd ;
             var iV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, iName)])
             var aV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, aName)])
             var lenV = callExt(headB, "js_get", [aV, emitStr(headB, "length")])
-            emitForMore(headB, iV, aV, lenV, bodyB, exitB, n0V, m0V)
+            emitForMore(headB, iV, aV, lenV, bodyB, exitB, ck)
             // The component names are (re)declared per iteration in the loop's own scope
             // from the element's componentN() calls.
             var iVb = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, iName)])
@@ -6247,8 +6260,9 @@ KwContract  = "contract" KwEnd ;
         if (retEntry != null && retEntry.nl == true) { body = wrapNonLocal(body) }
         return {name: items[0], params: params, sig: sig, body: body, pos: up.start}
     }
-    function makeFunStmt(f) {
+    function makeFunStmt(f, top) {
         funNames["$" + f.name] = true
+        if (top) { topFunNames["$" + f.name] = true }
         return function(b) {
             var idx = emitFunc(f.params, f.body, false, false, f.sig)
             defPos(b, f.pos)

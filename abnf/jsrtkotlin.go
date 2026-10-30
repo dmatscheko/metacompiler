@@ -1270,13 +1270,17 @@ func init() {
 			}
 			return rt.wrapNum(float64(^int32(giVal(rt, v))))
 		}
-		// js_ktfill(dst, src): a val's `xs += x` (plusAssign) - the mutable collection
-		// dst takes src's contents IN PLACE, so every alias sees them (a TreeSet /
-		// TreeMap re-sorts as it fills), and answers dst; any other dst answers src.
-		// Twin of kFill in kotlin-interpreter.abnf and languages/lib/kotlin-rt.metajs.
-		// js_ktmod(a) is a's modification count when a `for` over it starts, and
+		// js_ktfill(dst, src, add): a val's `xs += x` (plusAssign) - the mutable
+		// collection dst takes src's contents IN PLACE, so every alias sees them (a
+		// TreeSet / TreeMap re-sorts as it fills), and answers dst; any other dst
+		// answers src. A list's modification count moves when its size does, and on
+		// every `+=` (add true): ArrayList.addAll counts even an empty addition. A
+		// set's moves when its size does. Twin of kFill in kotlin-interpreter.abnf
+		// and languages/lib/kotlin-rt.metajs.
+		// js_ktmod(a) is a's modification count when a `for` over it starts,
 		// js_ktforok(a, n0, m0) whether the loop may take its next element: the
-		// size and the count are both what they were (kForNext in
+		// size and the count are both what they were, and js_ktforset(src) whether
+		// src is a set, whose iterator ends differently (kForNext in
 		// kotlin-interpreter.abnf). Anything but an array never changes under a
 		// loop. Twins in languages/lib/kotlin-rt.metajs.
 		m["js_ktmod"] = func(a []uint64) uint64 {
@@ -1292,11 +1296,15 @@ func init() {
 			}
 			return boolH(float64(len(o.elems)) == rt.toNumber(u(a[1])) && float64(o.mod) == rt.toNumber(u(a[2])))
 		}
+		m["js_ktforset"] = func(a []uint64) uint64 {
+			o, ok := u(a[0]).(*jsObject)
+			return boolH(ok && ktIsSet(o) && o.props["__jc"] != ktPqClass)
+		}
 		m["js_ktfill"] = func(a []uint64) uint64 {
 			dst, src := u(a[0]), u(a[1])
 			if da, ok := dst.(*jsArray); ok {
 				if sa, ok := src.(*jsArray); ok {
-					if len(da.elems) != len(sa.elems) {
+					if len(da.elems) != len(sa.elems) || rt.truthy(u(a[2])) {
 						da.mod++
 					}
 					da.elems = append([]interface{}{}, sa.elems...)
@@ -1307,10 +1315,14 @@ func init() {
 			if dk, ok := ktSetParts(dst); ok {
 				if sk, ok := ktSetParts(src); ok {
 					es := append([]interface{}{}, sk.elems...)
+					n := len(dk.elems)
 					dk.elems = nil
 					dk.dropIdx()
 					for _, e := range es {
 						rt.ktSetAdd(dst.(*jsObject), e)
+					}
+					if len(dk.elems) != n {
+						dk.mod++
 					}
 					return a[0]
 				}
@@ -6807,14 +6819,21 @@ func (rt *jsrt) ktSetMethod(s *jsObject, name string, args []interface{}) (inter
 			}
 		}
 		return true, true
-	case "add":
-		return rt.ktSetAdd(s, f), true
-	case "addAll":
+	// A structural change moves the modification count a `for` over the set
+	// checks (js_ktforok); clear() counts even on an empty set, as HashMap's does.
+	case "add", "addAll":
+		more := []interface{}{f}
+		if name == "addAll" {
+			more = ktElems(rt, f)
+		}
 		grew := false
-		for _, e := range ktElems(rt, f) {
+		for _, e := range more {
 			if rt.ktSetAdd(s, e) {
 				grew = true
 			}
+		}
+		if grew {
+			keys.mod++
 		}
 		return grew, true
 	case "remove", "removeAll", "retainAll":
@@ -6840,10 +6859,14 @@ func (rt *jsrt) ktSetMethod(s *jsObject, name string, args []interface{}) (inter
 		}
 		keys.dropIdx()
 		keys.elems = kept
+		if changed {
+			keys.mod++
+		}
 		return changed, true
 	case "clear":
 		keys.dropIdx()
 		keys.elems = nil
+		keys.mod++
 		return jsUndef, true
 	case "hashCode":
 		return float64(int32(ktElemHash(rt, s))), true

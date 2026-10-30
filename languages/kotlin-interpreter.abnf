@@ -1749,7 +1749,7 @@ ThisExpr    <~~ push(makeThisAt(pop())) ~~>
 // it rather than against the callee name the enclosing Call pushed; makeLambda pops it
 // again. Tags run while the parse tree is walked, so the optional prefix needs no
 // rollback care.
-Lambda      <~~ ktNoteBody(up.start, up.pos); push(makeLambda(takeAll())) ~~>
+Lambda      <~~ var lam = takeAll(); ktNoteLamIt(lam, up.start); ktNoteBody(up.start, up.pos); push(makeLambda(lam)) ~~>
             = [ LamLabel ] "{" [ LambdaParams ] { LamStmt } "}" ;
 LamLabel    = KId <~~ push({lamlbl: up.in}); retLblPush(up.in, "lam") ~~> AtAdjacent "@" ;
 // A { ... } in value position (an if / when arm) is a BLOCK, not a lambda: it runs its
@@ -1785,7 +1785,7 @@ LambdaParams <~~ push({lparams: takeAll()}) ~~>
 // A lambda parameter is a plain name or a destructuring pattern - { (a, b) -> ... }
 // over a Pair/data-class/Triple argument, whose names makeLambda binds through
 // componentN.
-LParam      = { Annotation } ( DestructLParam | KId <~~ push(up.in) ~~> [ ":" Type ] ) ;
+LParam      = { Annotation } ( DestructLParam | KId <~~ ktNoteLamParam(up.in, up.start); push(up.in) ~~> [ ":" Type ] ) ;
 DestructLParam <~~ push({destruct: takeAll(), pos: up.pos}) ~~>
             = ( "(" DNameKwV { "," DNameKwV } [ "," ] ")" | "[" DNameKwVB { "," DNameKwVB } [ "," ] "]"
               | "(" DName { "," DName } [ "," ] ")" | "[" DName { "," DName } [ "," ] "]" ) [ ":" Type ] ;
@@ -4432,19 +4432,26 @@ NotMemberKw = :script(~~
         }
         return kNorm(r, w, u)
     }
-    // Whether a `for` over src runs its body for index i. n0 is src's length and
-    // modification count (arrMod) when the loop started: java.util.ArrayList's
-    // iterator, which the for statement uses, has hasNext() `cursor != size` and
-    // throws ConcurrentModificationException from next() once modCount moved.
-    // Every structural mutator of a list bumps the count (arrModBump); a set's
-    // keys, which the loop also walks live, are checked by their size. A
-    // sequence's cursor (n0 null) counts its pulls in `length` and is not
-    // checked. Twin of emitForMore in kotlin-to-llvm-ir.abnf.
-    function kForN0(src) { return kIsCursor(src) ? null : {n: src.length, m: arrMod(src)} }
+    // Whether a `for` over src (the elements of subj) runs its body for index i. n0
+    // is src's length and modification count (arrMod) when the loop started, which
+    // every structural mutator of a list or a set bumps (arrModBump): the
+    // java.util iterator the for statement uses throws
+    // ConcurrentModificationException from next() once either moved, and its
+    // hasNext() decides whether next() is called at all. ArrayList's hasNext() is
+    // `cursor != size`; a set's iterator (LinkedHashSet, HashSet, TreeSet) fetched
+    // its next node along with the current one, so its hasNext() is whether the
+    // element just taken was not the last of the n0.n the loop started with. A
+    // sequence's cursor (n0 null) counts its pulls in `length` and is not checked.
+    // Twin of emitForMore in kotlin-to-llvm-ir.abnf.
+    function kForN0(src, subj) {
+        if (kIsCursor(src)) { return null }
+        return {n: src.length, m: arrMod(src), set: kIsSet(subj) && subj.__jc !== "java.util.PriorityQueue"}
+    }
     function kForNext(src, i, n0) {
         var more = i < src.length || kForMore(src)
-        if (n0 !== null && i !== src.length && (src.length !== n0.n || arrMod(src) !== n0.m)) {
-            kThrowExc("ConcurrentModificationException", null)
+        if (n0 !== null && (src.length !== n0.n || arrMod(src) !== n0.m)) {
+            if (n0.set ? i < n0.n : i !== src.length) { kThrowExc("ConcurrentModificationException", null) }
+            if (n0.set) { return false }
         }
         return more
     }
@@ -5414,6 +5421,12 @@ NotMemberKw = :script(~~
         s.keys.push(ce)
         if (s.__jc === "java.util.TreeSet") { kSortedSink(s, s.keys, null) }
         return true
+    }
+    // a's elements replaced by es IN PLACE: a `for` walks a list's or a set's own
+    // array, so a mutation it must see cannot swap the array out.
+    function kArrSetTo(a, es) {
+        while (a.length > 0) { a.pop() }
+        for (var i = 0; i < es.length; i++) { a.push(es[i]) }
     }
     // The order of a sorted collection: its Comparator's answer when it was built
     // with one (__cmp), else the natural order. Twin of ktOrd in abnf/jsrtkotlin.go
@@ -7687,11 +7700,14 @@ NotMemberKw = :script(~~
             for (i = 0; i < need.length; i++) { if (kSetFind(s, need[i]) < 0) { return {v: false} } }
             return {v: true}
         }
-        if (name == "add") { return {v: kSetAdd(s, f)} }
-        if (name == "addAll") {
-            var more = kElems(f)
+        // A structural change moves the modification count a `for` over the set
+        // checks (kForNext); clear() counts even on an empty set, as HashMap's does.
+        if (name == "add" || name == "addAll") {
+            var more = anytype
+            more = (name == "add") ? [f] : kElems(f)
             var grew = false
             for (i = 0; i < more.length; i++) { if (kSetAdd(s, more[i])) { grew = true } }
+            if (grew) { arrModBump(s.keys) }
             return {v: grew}
         }
         if (name == "remove" || name == "removeAll" || name == "retainAll") {
@@ -7704,10 +7720,11 @@ NotMemberKw = :script(~~
                 for (var g = 0; g < gone.length; g++) { if (kEqVals(gone[g], s.keys[i])) { hit = true } }
                 if (hit == (name == "retainAll")) { nk.push(s.keys[i]) } else { changed = true }
             }
-            s.keys = nk
+            kArrSetTo(s.keys, nk)
+            if (changed) { arrModBump(s.keys) }
             return {v: changed}
         }
-        if (name == "clear") { s.keys = []; return {v: undefined} }
+        if (name == "clear") { kArrSetTo(s.keys, []); arrModBump(s.keys); return {v: undefined} }
         if (name == "hashCode") { return {v: kHash(s)} }
         if (name == "equals") { return {v: kEq(s, f, false)} }
         // The Set-valued operators. plus/union add, minus/subtract remove and
@@ -9477,9 +9494,11 @@ NotMemberKw = :script(~~
     function makeForIn(bodyT, subjT, name) {
         return function() {
             var lbl = takeLabel()
-            var arr = kForSrc(subjT())
+            var subj = anytype
+            subj = subjT()
+            var arr = kForSrc(subj)
             var n0 = anytype
-            n0 = kForN0(arr)
+            n0 = kForN0(arr, subj)
             var res = undefined
             scopes.push({})
             for (var i = 0; kForNext(arr, i, n0); i++) {
@@ -10934,23 +10953,26 @@ NotMemberKw = :script(~~
         if (m != null) { m.apply(undefined, [cur, v]); return cur }
         var nv = anytype
         nv = applyOp(op, cur, v)
-        return isVal ? kFill(cur, nv) : nv
+        return isVal ? kFill(cur, nv, op == "+=") : nv
     }
     // A mutable collection's contents replaced by another's (a TreeSet / TreeMap
-    // re-sorts as it fills), answering dst; any other dst answers src. Twin of
-    // js_ktfill in abnf/jsrtkotlin.go and languages/lib/kotlin-rt.metajs.
-    function kFill(dst, src) {
+    // re-sorts as it fills), answering dst; any other dst answers src. A list's
+    // modification count moves when its size does, and on every `+=` (add):
+    // ArrayList.addAll counts even an empty addition; a set's moves when its size
+    // does. Twin of js_ktfill in abnf/jsrtkotlin.go and languages/lib/kotlin-rt.metajs.
+    function kFill(dst, src, add) {
         if (Array.isArray(dst) && Array.isArray(src)) {
             var es = src.slice(0)
-            if (es.length != dst.length) { arrModBump(dst) }
-            while (dst.length > 0) { dst.pop() }
-            for (var i = 0; i < es.length; i++) { dst.push(es[i]) }
+            if (es.length != dst.length || add) { arrModBump(dst) }
+            kArrSetTo(dst, es)
             return dst
         }
         if (kIsSet(dst) && kIsSet(src)) {
-            var ks = src.keys
-            dst.keys = []
+            var ks = src.keys.slice(0)
+            var n = dst.keys.length
+            kArrSetTo(dst.keys, [])
             for (var j = 0; j < ks.length; j++) { kSetAdd(dst, ks[j]) }
+            if (dst.keys.length != n) { arrModBump(dst.keys) }
             return dst
         }
         if (kIsMap(dst) && kIsMap(src)) {
@@ -11507,9 +11529,11 @@ NotMemberKw = :script(~~
         var bodyT = items[2]
         return function() {
             var lbl = takeLabel()
-            var arr = kForSrc(collT())
+            var subj = anytype
+            subj = collT()
+            var arr = kForSrc(subj)
             var n0 = anytype
-            n0 = kForN0(arr)
+            n0 = kForN0(arr, subj)
             var res = undefined
             scopes.push({})
             for (var i = 0; kForNext(arr, i, n0); i++) {

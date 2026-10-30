@@ -2320,10 +2320,10 @@ function js_ktinv(v) {
 // jsrtkotlin.go js_ktfill: a val's `xs += x` (plusAssign) - the mutable
 // collection dst takes src's contents IN PLACE, so every alias sees them (a
 // TreeSet / TreeMap re-sorts as it fills), and answers dst; any other dst
-// answers src.
-function js_ktfill(dst, src) {
+// answers src. The modification count moves as jsrtkotlin.go's comment says.
+function js_ktfill(dst, src, add) {
     if (ktIsArr(dst) && ktIsArr(src)) {
-        if (dst.length != src.length) { arrModBump(dst) }
+        if (dst.length != src.length || add === true) { arrModBump(dst) }
         k3Replace(dst, src)
         return dst
     }
@@ -2331,9 +2331,11 @@ function js_ktfill(dst, src) {
     var sk = ktSetElems(src)
     if (dk !== undefined && sk !== undefined) {
         var es = k3Copy(sk)
+        var n = dk.length
         k3Clear(dk)
         var i = 0
         for (i = 0; i < es.length; i = i + 1) { ktSetAdd(dst, es[i]) }
+        if (dk.length != n) { arrModBump(dk) }
         return dst
     }
     var mk = ktMapKeys(dst)
@@ -5754,12 +5756,14 @@ function ktSetMethod(s, name, args) {
         }
         return true
     }
-    if (name == "add") { return ktSetAdd(s, f) }
-    if (name == "addAll") {
-        oth = ktElems(f)
+    // A structural change moves the count a `for` over the set checks.
+    if (name == "add" || name == "addAll") {
+        oth = [f]
+        if (name == "addAll") { oth = ktElems(f) }
         for (i = 0; i < oth.length; i = i + 1) {
             if (ktSetAdd(s, oth[i])) { b = true }
         }
+        if (b) { arrModBump(keys) }
         return b
     }
     if (k3IsSetRemove(name)) {
@@ -5774,10 +5778,12 @@ function ktSetMethod(s, name, args) {
             if (b === d) { kept.push(keys[i]) } else { changed = true }
         }
         k3Replace(keys, kept)
+        if (changed) { arrModBump(keys) }
         return changed
     }
     if (name == "clear") {
         k3Clear(keys)
+        arrModBump(keys)
         return undefined
     }
     if (name == "hashCode") { return k3I32(ktElemHash(s)) }
@@ -6197,14 +6203,16 @@ function js_ktmore(a, i) {
     if (k4IsCursor(a)) { return k4CursorPull(a) }
     return false
 }
-// js_ktmod / js_ktforok (jsrtkotlin.go): a `for` loop's modification count at its
-// start, and whether it may take its next element - size and count unchanged.
+// js_ktmod / js_ktforok / js_ktforset (jsrtkotlin.go): a `for` loop's modification
+// count at its start, whether it may take its next element - size and count
+// unchanged - and whether its source is a set.
 function js_ktmod(a) { return arrMod(a) }
 function js_ktforok(a, n0, m0) {
     if (!ktIsArr(a)) { return true }
     if (a.length != n0) { return false }
     return arrModIs(a, m0)
 }
+function js_ktforset(s) { return ktIsSet(s) && s["__jc"] !== KT_PQ_CLASS }
 function js_ktitem(a, i) {
     if (typeof a == "string") { return js_kindex(a, i) }
     var v = a[i]
