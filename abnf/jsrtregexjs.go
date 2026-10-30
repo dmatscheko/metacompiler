@@ -320,7 +320,7 @@ func (rt *jsrt) jsxMatchAll(o *jsObject, s string, whole bool) *jsArray {
 
 // jsxSplit follows SplitMatcher: the match is ANCHORED at the scan position, an empty
 // match at the current segment start does not split, and the separator's capture groups
-// are part of the output. Ruby's rxSplit answers a different shape, so this is its own.
+// are part of the output.
 func (rt *jsrt) jsxSplit(o *jsObject, s string, limit int) *jsArray {
 	re := rt.jsxProg(o)
 	text := rxUnits(s)

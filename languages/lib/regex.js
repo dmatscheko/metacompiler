@@ -7092,30 +7092,6 @@ function rxExpand(re, text, m, repl) {
     return out
 }
 
-// rxSplit cuts `text` at every match. A zero-width match advances by one character,
-// so /x*/ on "abc" answers the individual letters rather than looping.
-function rxSplit(re, text) {
-    var parts = []
-    var at = 0
-    var last = 0
-    while (at <= text.length) {
-        var m = rxSearch(re, text, at)
-        if (m == null) { break }
-        if (m.end == m.begin) {
-            if (m.begin >= text.length) { break }
-            parts.push(text.substring(last, m.begin + 1))
-            last = m.begin + 1
-            at = m.begin + 1
-        } else {
-            parts.push(text.substring(last, m.begin))
-            last = m.end
-            at = m.end
-        }
-    }
-    parts.push(text.substring(last, text.length))
-    return parts
-}
-
 // ===== The compiled-pattern cache, and the neutral match value ==============
 //
 // Shared by js, kotlin, python and ruby. Twins: rxCache/rxGet, rxIsRegexObj,

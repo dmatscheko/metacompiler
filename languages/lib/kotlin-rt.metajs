@@ -10590,8 +10590,8 @@ function k4NameVal(v, name) {
 //       The import costs nothing measurable at run time, and it keeps kotlin on the
 //       same regex.js text the other languages import (abnf/jsrtregex.go ports it
 //       line by line), so a change to lib/regex.js cannot fail to arrive here.
-//       Kotlin carries six engine bodies its grammar never reaches (rxMatchAt,
-//       rxTest, rxGroupCount, rxNameAt, rxReplace, rxSplit); a separate
+//       Kotlin carries five engine bodies its grammar never reaches (rxMatchAt,
+//       rxTest, rxGroupCount, rxNameAt, rxReplace); a separate
 //       runtime-regex split would drop them at the price of a second regex text
 //       to hand-synchronise, so there is none.
 //

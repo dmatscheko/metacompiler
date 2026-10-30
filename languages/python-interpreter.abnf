@@ -4763,8 +4763,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         out += s.substring(at, s.length)
         return {text: out, n: n}
     }
-    // re.split. Unlike the engine's neutral rxSplit, Python SPLICES the capture
-    // groups of each separator into the result, so this walks the matches itself.
+    // re.split. Python SPLICES the capture groups of each separator into the
+    // result, so this walks the matches itself.
     function pyReSplit(rv, s, maxsplit) {
         var parts = []
         var at = 0

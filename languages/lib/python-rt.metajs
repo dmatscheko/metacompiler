@@ -12306,9 +12306,8 @@ function pyERxSub(rv, repl, s, count) {
     return {text: out, n: n}
 }
 
-// pyERxSplit is Go (*jsrt).rxPySplit - re.split. Unlike the engine's neutral
-// rxSplit, Python SPLICES the capture groups of each separator into the result,
-// so this walks the matches itself.
+// pyERxSplit is Go (*jsrt).rxPySplit - re.split. Python SPLICES the capture
+// groups of each separator into the result, so this walks the matches itself.
 function pyERxSplit(rv, s, maxsplit) {
     var re = pyERxReOf(rv)
     var parts = []

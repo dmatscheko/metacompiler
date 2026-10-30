@@ -711,9 +711,8 @@ func (rt *jsrt) rxPySub(rv *jsObject, repl interface{}, s string, count int) (st
 	return out.String(), n
 }
 
-// rxPySplit is re.split. Unlike the engine's neutral rxSplit, Python SPLICES the
-// capture groups of each separator into the result, so this walks the matches
-// itself.
+// rxPySplit is re.split. Python SPLICES the capture groups of each separator
+// into the result, so this walks the matches itself.
 func (rt *jsrt) rxPySplit(rv *jsObject, s string, maxsplit int) *jsArray {
 	re := rxPyReOf(rv)
 	text := []rune(s)
