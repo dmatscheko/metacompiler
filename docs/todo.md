@@ -64,30 +64,30 @@ its report; anything structural there is a CORE ticket.
 
 # PY — Python
 
-### T-765 python compiler: `| ^ & << >>` share one precedence level · P1 · PY · OPEN [V]
+### T-765 python compiler: `| ^ & << >>` share one precedence level · P1 · PY · IN PROGRESS (PY worker, round 16) [V]
 `vs=[6,3,1]; a,b,c=vs[0],vs[1],vs[2]; print(a ^ b >> c, a | b << c, a & b >> c, a ^ b & c, a | b & c)` → interp and python3
 `7 6 0 7 7`, run and native `2 14 1 1 1`; `n ^ n >> 1` with n=5 is 0 (python 7) — found by Rosetta Gray_code. The compiler's
 BitExpr is `Arith { ("|"|"^"|"&"|"<<"|">>") Arith }` through makeBit (python-to-llvm-ir.abnf ~831-832); the interpreter's
 BitExpr / BitXor / BitAnd / ShiftExpr ladder (python-interpreter.abnf ~678-689) is right — copy it.
 
-### T-768 python: `map()` with several iterables pulls its arguments eagerly · P1 · PY · OPEN [V]
+### T-768 python: `map()` with several iterables pulls its arguments eagerly · P1 · PY · IN PROGRESS (PY worker, round 16) [V]
 `print(list(map(mul, cycle([1,2]), [5,6,7])))` → interp "generator did not terminate", run step brake, native killed;
 python `[5, 12, 7]` (Rosetta Luhn). `zip(cycle(ws), xs)` and `map(f, xs, [10,20])` are right — make multi-iterable map lazy
 like zip. Files: the map builtin in both grammars / lib/python-rt.metajs.
 
-### T-769 python: the implicit `main()` entry runs again after an `if __name__ == "__main__": main()` guard · P2 · PY · OPEN [V]
+### T-769 python: the implicit `main()` entry runs again after an `if __name__ == "__main__": main()` guard · P2 · PY · IN PROGRESS (PY worker, round 16) [V]
 `def main(n): print("main", n)` + `if __name__ == "__main__": main(3)` → python `main 3`; interp `main 3` then uncaught
 `TypeError: main() missing 1 required positional argument: 'n'`, exit 1; run/native `main 3`, `main None`. Every BG -8 Python
 program and several Rosetta ones print their output twice. The implicit entry (c.mainName; python-interpreter.abnf ~15082,
 python-to-llvm-ir.abnf ~5265) should be skipped when the top level calls main itself or has a `__name__` guard. Ruby shares the
 convention (check it); for js main() is the dialect.
 
-### T-770 python: CRLF line endings are rejected by both halves · P2 · PY · OPEN [V]
+### T-770 python: CRLF line endings are rejected by both halves · P2 · PY · IN PROGRESS (PY worker, round 16) [V]
 `printf 'xs = [1, 2]\r\n\r\nprint(xs[0] + xs[1])\r\n'` → both halves "Not everything could be parsed ... :1:12", python `3`
 (BG mandelbrot.python3-8 ships CRLF). Java, js, lua, ruby, swift and go accept CRLF. File: the NEWLINE / indentation tokenizer
 in both python grammars.
 
-### T-773 python native: list `+` costs ~100 ns per copied element; collection pacing looks too eager · P3 · PY · OPEN [V finder only]
+### T-773 python native: list `+` costs ~100 ns per copied element; collection pacing looks too eager · P3 · PY · IN PROGRESS (PY worker, round 16) [V finder only]
 6000 iterations of `acc = acc + [[i, i+1]]`: native 2.42 s (MEC_GC=off 1.95 s), python3 0.06 s; MEC_GC_STATS 1439 collections at
 ~2.1 MB live, which is more than the documented pacing (collect when bytes since the last collection exceed the live set,
 floor 4 MB) predicts. Rosetta N-queens (block 7) takes 24 s natively for sizes 1..7 vs python3 0.43 s for 1..10. Files: the
