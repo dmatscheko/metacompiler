@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-844** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-846** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -175,28 +175,24 @@ formatting of the parsed literal needs no double: implement it, or fail loudly a
 
 # C — C subset
 
-### T-833 c: loud gaps left from the cell-memory ticket · P3 · C · IN PROGRESS (C worker, round 7) [V C worker]
-All refuse loudly, none print a wrong answer. (1) `2[arr]` — needs a Primary production for
-an integer subscripted by a pointer (cc: same as `arr[2]`). (2) a nested designator
-`struct T t = { .b[1] = 5 };` — designator merging in both engines' initializers.
-(3) `#include <limits.h>` gives no INT_MAX/INT_MIN/CHAR_BIT: system headers are accepted
-and ignored; a small built-in table for limits.h/stdint.h/stdbool.h constants would do.
-(4) with `languages/c-preprocessor.abnf f.c -pipe languages/c-to-llvm-ir.abnf -qq` a compile
-error of the second stage is swallowed and only rc=1 shows — find out where -qq drops it.
-
-### T-834 c native: `extern int ge; int ge = 5;` fails to link · P2 · C · IN PROGRESS (C worker, round 7) [V C worker]
-c-to-llvm-ir defineGlobals/newGlobal makes one LLVM global per declaration, so an `extern`
-declaration followed by the definition gives clang "redefinition of global '@ge'" on -exe.
-llvm.Run and cc accept it (cc prints 5). The same happens when the second declaration
-spells the type through a typedef. An extern declaration must reuse (or be replaced by)
-the defining global.
-
-### T-835 c: a duplicate definition in one block scope is accepted · P3 · C · IN PROGRESS (C worker, round 7) [V C worker]
-`{ int zero = 0; int zero = 0; }` runs in both halves; cc rejects it ("redefinition of
-'zero'", 6.7p3). Both engines should report a compile error naming the variable; shadowing
-in a NESTED block must stay legal.
+### T-844 c: declaration gaps left from the scope/designator round · P3 · C · OPEN [V C worker]
+All loud except (4). (1) brace elision: `struct T u = {1,2,3,4,5}` with an array member — interp
+"an aggregate needs a brace initializer", compiler LLVM "store operands are not compatible"; cc
+1 2 3 4 5 (also an undesignated item after a nested designator). (2) a constant name in an array
+dimension or enumerator: `int a[CHAR_BIT];`, `enum { E = CHAR_BIT * 2 }` (and an enumerator as a
+dimension) — parse error / "unknown constant". (3) `extern int a[]; int a[3];` at file scope is
+refused as conflicting types; cc accepts. (4) WRONG ANSWER: `{ extern myint g; }` through a typedef
+in a block still declares a local. (5) `(bool)` as a parenthesised expression without <stdbool.h>
+is taken for a type name ("type not defined: bool"). (6) `void f(int a){ int a; }` is accepted;
+cc: redefinition of 'a' (parameters share the body's outermost scope, 6.2.1p4).
 
 # CORE — MetaJS, the engines, shared runtime, tooling
+
+### T-845 compiler grammars: `fail` prints on stdout, so `-qq` swallows compile errors · P2 · CORE · OPEN [V C worker]
+With `-qq` (and inside `-pipe`) a compile error of most `*-to-llvm-ir.abnf` grammars vanishes and only
+rc=1 is left, because their `fail` uses `println` — the channel -qq silences. C now uses `eprintln`;
+check every other compiler (and interpreter) grammar's error path and add one -qq row that shows the
+message survives.
 
 ### T-184 dart: `IndexError` vs `RangeError` text for `[1,2,3][7]` · P3 · DA · BLOCKED - needs a Dart VM to settle [U spec-only]
 A reviewer argued the VM prints `RangeError (index): Invalid value: Not in inclusive
@@ -942,6 +938,9 @@ T-832 ruby: error paths and assorted gaps — PARTIAL b73c1ae9 — ||=/&&=, nega
 T-766 swift: `String(format:, args...)` returns the format unchanged — DONE 3009949d (String(format:) via shared c-printf.js + swift-format.js in all engines incl. %n$, *, length modifiers, %@; also native String(Int.min, radix:) fixed)
 T-767 java: a C-style array declarator on a method parameter (`double u[]`) breaks both halves — DONE 3245f0be (a parameter's [ CDims ] go through DeclDims and join its type in both grammars)
 T-776 java: a null Integer as array index, array dimension or charAt argument raises no NPE — DONE 4892fb93 (null-check on possibly-boxed indexes/dimensions at javac's evaluation point; null String positions NPE in all engines; int-array store converts before the bounds check)
+T-833 c: loud gaps left from the cell-memory ticket — DONE c2152f2f (E1[E2] as *(E1+E2) for rvalues and lvalues; nested designators write only the named subobject, brace elision after one refused loudly; limits.h/stdint.h/stdbool.h constant table with cc's types; C compiler fail goes to stderr so -qq keeps it)
+T-834 c native: `extern int ge; int ge = 5;` fails to link — DONE c2152f2f (one object per file-scope name in both halves; redefinition / conflicting types errors; block-scope extern binds the file-scope object)
+T-835 c: a duplicate definition in one block scope is accepted — DONE c2152f2f (per-block/for/statement-expression name tables; same-scope redeclaration is a compile error in both halves; parameter-vs-body redeclaration filed as T-844)
 
 # Settled — do not re-open
 
