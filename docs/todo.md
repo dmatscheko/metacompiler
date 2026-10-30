@@ -98,7 +98,7 @@ not change the renderer.
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-862 kotlin: member vs top-level fun, qualifiedName, named args on nested ctors · P2 · KT · OPEN [V KT worker]
+### T-862 kotlin: member vs top-level fun, qualifiedName, named args on nested ctors · P2 · KT · IN PROGRESS (KT worker, round 6) [V KT worker]
 (1) all engines: top-level `fun f() = 9` + `interface M { fun f(): Int; fun g() = f() + 10 }` + `class A : M { override
 fun f() = 1 }` → `A().g()` prints 19; Kotlin's rule (implicit receiver's member beats a top-level function) gives 11
 (spec-only, no kotlinc) — kt_barecall cannot tell the global scope from local ones. (2) all engines: `O.Inner::class.
