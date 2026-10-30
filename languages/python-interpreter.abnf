@@ -1068,15 +1068,16 @@ SameLevel = :script(~~
     })()
 ~~) ;
 
-// Whitespace never includes newlines: they are structure, not noise.
+// Whitespace never includes newlines: they are structure, not noise. A carriage
+// return is noise, so a CRLF line ending reads as its "\n".
 // A backslash before a newline joins the lines - Python allows that anywhere, not
 // only inside brackets, so it belongs in the ordinary whitespace too.
-Whitespace  = { @+" \t" | Comment | LineJoin } ;
+Whitespace  = { @+" \t\r" | Comment | LineJoin } ;
 // Inside (), [] and {} a newline is NOT structure - Python joins those lines
 // implicitly - so the bracketed productions switch to this whitespace and switch back
 // on the closing bracket. A backslash at the end of a line joins the next one too.
 WhitespaceNL = { @+" \t\r\n" | Comment | LineJoin } ;
-LineJoin    = "\\" "\n" ;
+LineJoin    = "\\" [ "\r" ] "\n" ;
 Comment     = "#" :whitespace() { NotNewline } :whitespace(Whitespace) ;
 NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
 
@@ -10117,8 +10118,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return n
     }
     // In a bytes literal (isb) \u, \U and \N{...} are not escapes and stay as
-    // written, and only ASCII may appear.
+    // written, and only ASCII may appear. A CRLF line ending inside a literal is
+    // the "\n" CPython's universal-newline source reading makes of it. Twin of
+    // pyUnescape in languages/python-to-llvm-ir.abnf.
     function pyUnescape(text, raw, isb) {
+        if (text.indexOf("\r\n") >= 0) { text = text.split("\r\n").join("\n") }
         if (isb) {
             for (var ai = 0; ai < text.length; ai++) {
                 if (text.charCodeAt(ai) > 127) { fail("SyntaxError: bytes can only contain ASCII literal characters") }
