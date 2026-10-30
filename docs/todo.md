@@ -118,7 +118,7 @@ not change the renderer.
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-846 kotlin: modCount CME and smaller gaps · P3 · KT · OPEN [V KT worker]
+### T-846 kotlin: modCount CME and smaller gaps · P3 · KT · IN PROGRESS (KT worker, round 4) [V KT worker]
 (1) ConcurrentModificationException is size-based: an add+remove in one iteration, or `sort()` during
 iteration, does not throw (JVM ArrayList modCount does). Needs a per-list modification counter on the
 shared array value in all three engines (Go array struct in abnf/jsrt.go, the array cell in runtime.c,
