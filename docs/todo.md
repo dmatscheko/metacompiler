@@ -165,7 +165,7 @@ map.` and `7`). `val r = try {..} catch {..}` outside a lambda is right. Check a
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-778 bash: printf `%f %e %g %a` print the operand as text · P2 · SH · OPEN [V]
+### T-778 bash: printf `%f %e %g %a` print the operand as text · P2 · SH · IN PROGRESS (SH worker, round 9) [V]
 `printf '[%f] [%.2f] [%5.2f] [%e] [%g] [%.0f]\n' 3.14159` → all legs `[3.14159] [3.] [   3.] [3.14159] [3.14159] []` (precision
 applied as string truncation), bash `[3.141590] [3.14] [ 3.14] [3.141590e+00] [3.14159] [3]`; `%.3f` of 7 → `7` (`7.000`); `abc` →
 rc 0 (bash 1). The source admits it (bash-interpreter.abnf ~4997 "NOT IMPLEMENTED") but manual 7.9 does not list it. Decimal
