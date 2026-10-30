@@ -1478,17 +1478,13 @@ func init() {
 		}
 		// js_ktcast(v, T, dst) is `v as T` for a judged T (dst is its JVM class,
 		// chosen by the emitter): a ClassCastException with java's message when v is
-		// not a T. A function value passes, and null passes a nullable T (written
-		// with its `?`) and is kotlinc's NullPointerException for a non-null one.
-		// Twin of makeCast in kotlin-interpreter.abnf and js_ktcast in
-		// languages/lib/kotlin-rt.metajs.
+		// not a T. A function value passes, and so does null: the emitter has
+		// already raised the NullPointerException for a non-null T. Twin of makeCast
+		// in kotlin-interpreter.abnf and js_ktcast in languages/lib/kotlin-rt.metajs.
 		m["js_ktcast"] = func(a []uint64) uint64 {
 			v := u(a[0])
 			t := rt.toString(u(a[1]))
 			if isUndefOrNull(v) {
-				if !strings.HasSuffix(t, "?") {
-					rt.ktRaise("NullPointerException", "null cannot be cast to non-null type "+ktNullCastName(t, rt.toString(u(a[2]))))
-				}
 				return a[0]
 			}
 			if isCallable(v) || ktIsType(v, t) {
@@ -1810,7 +1806,7 @@ func init() {
 				case "isEmpty":
 					return boolH(ktRangeEmpty(rg))
 				case "hashCode":
-					return rt.wrap(float64(ktRangeHash(rg)))
+					return rt.wrap(float64(ktRangeHash(rt, rg)))
 				case "equals":
 					if org, ok := ktRangeOf(argAt(arr.elems, 0)); ok {
 						return boolH(ktRangeEq(rg, org))
@@ -2612,10 +2608,10 @@ func init() {
 				rt.ktStepBad(st)
 			}
 			_, isCh := from.(jsChar)
-			_, isFl := from.(jsJFlo)
+			ff, isFl := from.(jsJFlo)
 			mode := rt.toNumber(u(a[3]))
 			rg := ktRangeLong(ktRange{from: fn, to: tn, st: sn,
-				down: mode == 1, ch: isCh, fl: isFl,
+				down: mode == 1, ch: isCh, fl: isFl, f32: isFl && jvmIs32(ff.sty),
 				lg: ktIsLongBox(from) || ktIsLongBox(to)}, from, to, st)
 			if mode == 2 {
 				rg.to--
@@ -2796,6 +2792,11 @@ func init() {
 			// the same function the bare `abs(-3)` reaches. See ktPkgMember.
 			if name == "kotlin" || name == "java" {
 				return w(ktPkg(name))
+			}
+			// `Unit` as a VALUE is the Unit object, which is undefined here.
+			// Twin of js_ktget in languages/lib/kotlin-rt.metajs.
+			if name == "Unit" {
+				return w(jsUndef)
 			}
 			rt.fail("unknown name: %s", name)
 			return 0
@@ -3908,7 +3909,7 @@ func ktJvmClass(v interface{}) interface{} {
 		return "java.util.LinkedHashMap"
 	}
 	if rg, ok := ktRangeOf(v); ok {
-		return ktRangeJvmClass(rg.fl, rg.ch, rg.lg, rg.st == 1 && !rg.down && !rg.pg)
+		return ktRangeJvmClass(rg.fl, rg.f32, rg.ch, rg.lg, rg.st == 1 && !rg.down && !rg.pg)
 	}
 	if p, ok := ktIsPair(v); ok {
 		if _, has := p.props["third"]; has {
@@ -3922,23 +3923,15 @@ func ktJvmClass(v interface{}) interface{} {
 	return ktSimpleName(v)
 }
 
-// ktNullCastName is the Kotlin name kotlinc's null-cast message spells: kotlin.String
-// for a builtin, the dotted path for a program type. Twin of kNullCastName in
-// kotlin-interpreter.abnf and ktNullCastName in languages/lib/kotlin-rt.metajs.
-func ktNullCastName(base, dest string) string {
-	if strings.HasPrefix(dest, "java.lang.") {
-		return "kotlin." + base
-	}
-	return strings.ReplaceAll(dest, "$", ".")
-}
-
 // ktRangeJvmClass is the kotlin.ranges class of a range value: plain means an
-// IntRange-style `..` (step 1, ascending, not built by step / reversed). A floating
-// range is taken as Double's - the value keeps no Float mark. Twin of
+// IntRange-style `..` (step 1, ascending, not built by step / reversed). Twin of
 // kRangeJvmClass in kotlin-interpreter.abnf and ktRangeJvmClass in
 // languages/lib/kotlin-rt.metajs.
-func ktRangeJvmClass(fl, ch, lg, plain bool) string {
+func ktRangeJvmClass(fl, f32, ch, lg, plain bool) string {
 	if fl {
+		if f32 {
+			return "kotlin.ranges.ClosedFloatRange"
+		}
 		return "kotlin.ranges.ClosedDoubleRange"
 	}
 	k := "Int"
@@ -6693,7 +6686,7 @@ func ktElemHash(rt *jsrt, v interface{}) int64 {
 	// A PROGRESSION hashes by its bounds, not its elements - and an EMPTY one
 	// hashes to -1, which is what makes (5..1) and (7..3) agree with their equals.
 	if rg, ok := ktRangeOf(v); ok {
-		return int64(ktRangeHash(rg))
+		return int64(ktRangeHash(rt, rg))
 	}
 	switch t := v.(type) {
 	case *jsArray:
@@ -7376,8 +7369,9 @@ type ktRange struct {
 	down, ch     bool
 	// fl marks a ClosedFloatingPointRange - `1.0..2.0`. Kotlin declares no step
 	// and no iteration for one, and its contains is the BOUNDS test alone
-	// (`1.5 in 1.0..2.0` is true).
-	fl bool
+	// (`1.5 in 1.0..2.0` is true). f32 marks one over Floats (ClosedFloatRange),
+	// whose bounds read back as Floats.
+	fl, f32 bool
 	// pg marks a value that is an IntProgression and NOT an IntRange. `..`, `until`
 	// and `..<` build an IntRange; `step` and `reversed()` build an IntProgression,
 	// and kotlin.ranges.IntProgression.toString ALWAYS prints " step N" where
@@ -7455,9 +7449,9 @@ func ktRangeMake(from, to interface{}, name string) *jsObject {
 	fn, _ := ktRangeNum(from)
 	tn, _ := ktRangeNum(to)
 	_, isCh := from.(jsChar)
-	_, isFl := from.(jsJFlo)
+	ff, isFl := from.(jsJFlo)
 	rg := ktRangeLong(ktRange{from: fn, to: tn, st: 1, down: name == "downTo",
-		ch: isCh, fl: isFl, lg: ktIsLongBox(from) || ktIsLongBox(to)}, from, to, float64(1))
+		ch: isCh, fl: isFl, f32: isFl && jvmIs32(ff.sty), lg: ktIsLongBox(from) || ktIsLongBox(to)}, from, to, float64(1))
 	if name == "until" {
 		rg.to--
 		rg.lt--
@@ -7636,6 +7630,7 @@ func ktRangeOf(v interface{}) (ktRange, bool) {
 	rg.down, _ = o.props["down"].(bool)
 	rg.ch, _ = o.props["ch"].(bool)
 	rg.fl, _ = o.props["fl"].(bool)
+	rg.f32, _ = o.props["f32"].(bool)
 	rg.pg, _ = o.props["pg"].(bool)
 	rg.lg, _ = o.props["lg"].(bool)
 	if rg.lg {
@@ -7658,6 +7653,9 @@ func ktMakeRange(rg ktRange) *jsObject {
 	o.set("down", rg.down)
 	o.set("ch", rg.ch)
 	o.set("fl", rg.fl)
+	if rg.f32 {
+		o.set("f32", true)
+	}
 	o.set("pg", rg.pg)
 	o.set("lg", rg.lg)
 	if rg.lg {
@@ -7692,6 +7690,9 @@ func ktRangeEl(rg ktRange, n float64) interface{} {
 		return jsChar{code: int32(n)}
 	}
 	if rg.fl {
+		if rg.f32 {
+			return jsJFlo{f: n, sty: floJavaF}
+		}
 		return jvmMkFlo(n)
 	}
 	if rg.lg {
@@ -7723,6 +7724,11 @@ func ktRangeLastEl(rg ktRange) float64 {
 }
 
 func ktRangeEmpty(rg ktRange) bool {
+	// ClosedFloatingPointRange.isEmpty is !(start <= endInclusive): a NaN bound
+	// empties it.
+	if rg.fl {
+		return !(rg.from <= rg.to)
+	}
 	if rg.lg {
 		if rg.down {
 			return rg.lf < rg.lt
@@ -7846,7 +7852,7 @@ func (rt *jsrt) ktRangeStr(rg ktRange) string {
 	// ClosedFloatingPointRange.toString is "$start..$endInclusive" - the declared
 	// BOUND, not a last element, since it has no step and no elements.
 	if rg.fl {
-		return rt.ktpRender(jvmMkFlo(rg.from), 1) + ".." + rt.ktpRender(jvmMkFlo(rg.to), 1)
+		return rt.ktpRender(ktRangeEl(rg, rg.from), 1) + ".." + rt.ktpRender(ktRangeEl(rg, rg.to), 1)
 	}
 	a := rt.ktpRender(ktRangeEl(rg, rg.from), 1)
 	b := rt.ktpRender(ktRangeEl(rg, ktRangeLastEl(rg)), 1)
@@ -7865,6 +7871,10 @@ func (rt *jsrt) ktRangeStr(rg ktRange) string {
 // IntRange.equals: two EMPTY progressions are equal whatever their bounds, and
 // two non-empty ones agree when first, last and step agree.
 func ktRangeEq(a, b ktRange) bool {
+	// A Float range never equals a Double range (ClosedFloatRange.equals).
+	if a.f32 != b.f32 {
+		return false
+	}
 	if ktRangeEmpty(a) {
 		return ktRangeEmpty(b)
 	}
@@ -7875,14 +7885,32 @@ func ktRangeEq(a, b ktRange) bool {
 		ktRangeSigned(a) == ktRangeSigned(b)
 }
 
-// hashCode is -1 for an empty progression - kotlin.ranges.IntProgression's own
-// contract, and what makes it agree with the equals above.
-func ktRangeHash(rg ktRange) int32 {
+// hashCode is -1 for an empty range - kotlin.ranges' own contract, and what makes
+// it agree with the equals above. IntRange, CharRange, LongRange and the floating
+// ranges hash as 31 * h(first) + h(last); a progression as
+// 31 * (31 * h(first) + h(last)) + h(step), h being the element type's own
+// hashCode (a Long folds its halves, a Double or Float hashes its bits). Twin of
+// rangeHashK in kotlin-interpreter.abnf and ktRangeHash in
+// languages/lib/kotlin-rt.metajs.
+func ktRangeHash(rt *jsrt, rg ktRange) int32 {
 	if ktRangeEmpty(rg) {
 		return -1
 	}
-	h := int32(31)*int32(rg.from) + int32(ktRangeLastEl(rg))
-	return int32(31)*h + int32(ktRangeSigned(rg))
+	var first, last, step interface{}
+	if rg.lg {
+		ls := rg.ls
+		if rg.down {
+			ls = -ls
+		}
+		first, last, step = jsGInt{v: rg.lf, w: 64}, jsGInt{v: ktRangeLastL(rg), w: 64}, jsGInt{v: ls, w: 64}
+	} else {
+		first, last, step = ktRangeEl(rg, rg.from), ktRangeEl(rg, ktRangeLastEl(rg)), ktRangeSigned(rg)
+	}
+	h := int32(31)*int32(ktElemHash(rt, first)) + int32(ktElemHash(rt, last))
+	if rg.fl || (rg.st == 1 && !rg.down && !rg.pg) {
+		return h
+	}
+	return int32(31)*h + int32(ktElemHash(rt, step))
 }
 
 // `r is T`. A plain a..b is an IntRange (a CharRange when the bounds were Chars)

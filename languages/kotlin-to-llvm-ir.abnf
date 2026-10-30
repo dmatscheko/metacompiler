@@ -674,7 +674,8 @@ CtorParam   <~~ ktAt = up.start; push(makeCtorParam(takeAll())) ~~>
             = [ Modifiers ] [ KwVararg <~~ push({isvararg: true}) ~~> ] [ ( "val" | "var" ) <~~ push({vv: up.in}) ~~> KwEnd ] KId <~~ push({pname: up.in}) ~~> ":" PType [ "=" ParamDefault ] ;
 
 // A nested typealias is erased exactly like a top-level one.
-Member      = [ Modifiers ] ( InitBlock | CompanionBlk | CompanionObject | SecondaryCtor | NestedClass | NestedType | TypeAlias | MemberExtProp | MemberExtDelegProp | AccessorProp | UnsupAccessor | PropDelegate | PropDecl | FunDecl <~~ push({method: pop()}) ~~> | MemberExtFun | MemberExtAbs | AbstractFun | UnsupFun ) ;
+// A `;` may separate members written on one line: `class O { class I; inner class J }`.
+Member      = [ Modifiers ] ( InitBlock | CompanionBlk | CompanionObject | SecondaryCtor | NestedClass | NestedType | TypeAlias | MemberExtProp | MemberExtDelegProp | AccessorProp | UnsupAccessor | PropDelegate | PropDecl | FunDecl <~~ push({method: pop()}) ~~> | MemberExtFun | MemberExtAbs | AbstractFun | UnsupFun ) { ";" } ;
 // A MEMBER extension function - fun B.ext() declared INSIDE a class - is the only
 // construct with TWO receivers: the extension receiver, bound to `this` in the body,
 // and the DISPATCH receiver, the enclosing class instance. The lowering keeps both:
@@ -1084,9 +1085,10 @@ CallChain   <~~ push({chain: takeAll()}) ~~>
 Target      <~~ push(kTargetRef(takeAll())) ~~>
 // `?.` and `!!` are accepted in a TARGET as well - `t?.i++` and `t!!.i++` are ordinary
 // postfix targets in Kotlin's own tree (psiUtil/isSelectorInExpression.txt). A `?.` key
-// is recorded exactly as for `.`; a `!!` marks the step after it (kTargetRef), which
-// emitRefPath guards with the NullPointerException check.
-            = KId <~~ push(up.in) ~~> { "." KId <~~ push({key: up.in}) ~~> | "?." KId <~~ push({key: up.in}) ~~> | "!!" <~~ push({nn: true}) ~~> | TIndex } ;
+// is marked `safe`: on a null receiver the whole assignment is skipped, right-hand side
+// included (`a?.b = c` is `if (a != null) a.b = c`). A `!!` marks the step after it
+// (kTargetRef), which emitRefPath guards with the NullPointerException check.
+            = KId <~~ push(up.in) ~~> { "." KId <~~ push({key: up.in}) ~~> | "?." KId <~~ push({key: up.in, safe: true}) ~~> | "!!" <~~ push({nn: true}) ~~> | TIndex } ;
 TIndex      <~~ push({idx: kIndexArg(takeAll(), up.pos)}) ~~>
             = "[" Expression { "," Expression } [ "," ] "]" ;
 
@@ -4131,7 +4133,8 @@ KwContract  = "contract" KwEnd ;
     // x as T: js_ktcast throws ClassCastException when x is not a T, judged for the
     // builtin value types and for a class or interface the program declares (known
     // at emission, after the walk); any other T is unchecked, as an erased cast is.
-    // Twin of makeCast in kotlin-interpreter.abnf.
+    // A null is checked here: the NullPointerException for a non-null T that
+    // ktNullCastType names. Twin of makeCast in kotlin-interpreter.abnf.
     var ktCastLang = {"$String": "java.lang.String", "$Int": "java.lang.Integer", "$Long": "java.lang.Long",
                       "$Short": "java.lang.Short", "$Byte": "java.lang.Byte", "$Double": "java.lang.Double",
                       "$Float": "java.lang.Float", "$Char": "java.lang.Character",
@@ -4150,10 +4153,21 @@ KwContract  = "contract" KwEnd ;
             if (dest == undefined) {
                 // A nested type may be written qualified (`as Outer.Inner`).
                 var simple = baseTypeName(base)
-                if (classNames[simple] != 1 && interfaceNames["$" + simple] != true) { return r }
-                dest = ktBinOf(simple)
+                dest = (classNames[simple] == 1 || interfaceNames["$" + simple] == true) ? ktBinOf(simple) : ""
             }
-            return {b: r.b, v: callExt(r.b, "js_ktcast", [r.v, emitStr(r.b, opt ? base + "?" : base), emitStr(r.b, dest)])}
+            var nullName = opt ? "" : ktNullCastType(tname, dest)
+            var cb = r.b
+            if (nullName != "") {
+                var npeB = curF.NewBlock("")
+                var okB = curF.NewBlock("")
+                cb.NewCondBr(truthy(cb, callExt(cb, "js_eq", [r.v, hNull])), npeB, okB)
+                callExt(npeB, "js_throw", [callExt(npeB, "js_ktnewexc", [emitStr(npeB, "NullPointerException"),
+                    emitStr(npeB, "null cannot be cast to non-null type " + nullName)])])
+                npeB.NewRet(hUndef)
+                cb = okB
+            }
+            if (dest == "") { return {b: cb, v: r.v} }
+            return {b: cb, v: callExt(cb, "js_ktcast", [r.v, emitStr(cb, opt ? base + "?" : base), emitStr(cb, dest)])}
         }
     }
 
@@ -5235,11 +5249,15 @@ KwContract  = "contract" KwEnd ;
         npeB.NewRet(hUndef)
         return nnB
     }
+    // A `?.` step on a null receiver branches to a skip block; the caller joins those
+    // through emitSafeJoin.
     function emitRefPath(b, ref) {
         var o = b.NewCall(rtKtGet(), [curScopeV, emitStr(b, ref.name)])
+        var skips = []
         for (var i = 0; i < ref.path.length - 1; i++) {
             var s = ref.path[i]
             if (s.nn === true) { b = emitNnCheck(b, o) }
+            if (s.safe === true) { b = emitSafeStep(b, o, skips) }
             if (s.key != undefined) {
                 o = callExt(b, "js_get", [o, emitStr(b, s.key)])
             } else {
@@ -5251,9 +5269,29 @@ KwContract  = "contract" KwEnd ;
         }
         var last = ref.path[ref.path.length - 1]
         if (last.nn === true) { b = emitNnCheck(b, o) }
-        if (last.key != undefined) return {b: b, obj: o, key: emitStr(b, last.key), isIndex: false}
+        if (last.safe === true) { b = emitSafeStep(b, o, skips) }
+        if (last.key != undefined) return {b: b, obj: o, key: emitStr(b, last.key), isIndex: false, skips: skips}
         var kr = last.idx(b)
-        return {b: kr.b, obj: o, key: kr.v, isIndex: true}
+        return {b: kr.b, obj: o, key: kr.v, isIndex: true, skips: skips}
+    }
+    function emitSafeStep(b, o, skips) {
+        var skipB = curF.NewBlock("")
+        var goB = curF.NewBlock("")
+        b.NewCondBr(truthy(b, callExt(b, "js_eq", [o, hNull])), skipB, goB)
+        skips.push(skipB)
+        return goB
+    }
+    // The end of a write through a target path: v, or null when a `?.` step skipped it.
+    function emitSafeJoin(b, v, p) {
+        if (p.skips.length == 0) { return {b: b, v: v} }
+        var joinB = curF.NewBlock("")
+        var ins = [llvm.ir.NewIncoming(v, b)]
+        b.NewBr(joinB)
+        for (var i = 0; i < p.skips.length; i++) {
+            p.skips[i].NewBr(joinB)
+            ins.push(llvm.ir.NewIncoming(hNull, p.skips[i]))
+        }
+        return {b: joinB, v: joinB.NewPhi(ins)}
     }
     // An indexed read or write of an assignment target: the receiver's `operator fun
     // get` / `set` when some class declares one, else the builtin access. Twin of
@@ -5405,6 +5443,9 @@ KwContract  = "contract" KwEnd ;
                     v = nr.v
                     b = emitSlotWrite(nr.b, p, v)
                 }
+                var sj = emitSafeJoin(b, v, p)
+                b = sj.b
+                v = sj.v
             }
             return {b: b, v: v}
         }
@@ -5426,7 +5467,9 @@ KwContract  = "contract" KwEnd ;
             return function(b) {
                 var rb = baseT(b)
                 var objV = rb.v
-                var bb = rb.b
+                // `f()?.p = v` on a null receiver skips the write and its right-hand side.
+                var sp = {skips: []}
+                var bb = (last.safe === true) ? emitSafeStep(rb.b, objV, sp.skips) : rb.b
                 var keyV = anytype
                 if (isField) {
                     keyV = emitStr(bb, fname)
@@ -5447,7 +5490,7 @@ KwContract  = "contract" KwEnd ;
                     bb = nr.b
                     v = nr.v
                     bb.NewCall(rtMextSet(), [curScopeV, objV, keyV, v])
-                    return {b: bb, v: v}
+                    return emitSafeJoin(bb, v, sp)
                 }
                 // A top-level extension property's SETTER - a computed `set(v) { ... }`
                 // or a delegated extension property's setValue forwarder. Without this
@@ -5469,7 +5512,7 @@ KwContract  = "contract" KwEnd ;
                     callExt(bb, "js_arr_push", [sargsV, objV])
                     callExt(bb, "js_arr_push", [sargsV, v])
                     callExt(bb, "js_call", [sV, hUndef, sargsV])
-                    return {b: bb, v: v}
+                    return emitSafeJoin(bb, v, sp)
                 }
                 var slot = {obj: objV, key: keyV, isIndex: !isField}
                 var oldM = hUndef
@@ -5480,7 +5523,7 @@ KwContract  = "contract" KwEnd ;
                 }
                 nr = emitNewVal(bb, oldM, isField && ktMemberIsVal("", fname))
                 v = nr.v
-                return {b: emitSlotWrite(nr.b, slot, v), v: v}
+                return emitSafeJoin(emitSlotWrite(nr.b, slot, v), v, sp)
             }
         }
         // The chain ends in a CALL, so it is not a slot: not implemented as a write,
@@ -5514,7 +5557,7 @@ KwContract  = "contract" KwEnd ;
             var p = emitRefPath(b, ref)
             var rm = emitSlotRead(p.b, p)
             var newM = callExt(rm.b, "js_ktstep", [rm.v, oneV])
-            return {b: emitSlotWrite(rm.b, p, newM), v: newM}
+            return emitSafeJoin(emitSlotWrite(rm.b, p, newM), newM, p)
         }
     }
     function makeIncDec(items) {
@@ -5530,7 +5573,7 @@ KwContract  = "contract" KwEnd ;
             }
             var p = emitRefPath(b, ref)
             var rm = emitSlotRead(p.b, p)
-            return {b: emitSlotWrite(rm.b, p, callExt(rm.b, "js_ktstep", [rm.v, oneV])), v: rm.v}
+            return emitSafeJoin(emitSlotWrite(rm.b, p, callExt(rm.b, "js_ktstep", [rm.v, oneV])), rm.v, p)
         }
     }
 

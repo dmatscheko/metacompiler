@@ -153,12 +153,13 @@ fun s04() {
     // and hashCode is -1 for either.
     check("rng17", (5..1) == (7..3) && (1..5) == (1..5) && (1..5) != (1..5 step 2) &&
         (1..5).equals(1..5) && !(1..5).equals(listOf(1, 2, 3, 4, 5)))
-    // IntProgression.hashCode is 31 * (31 * first + last) + step, and -1 when the
-    // progression is empty.
+    // IntProgression.hashCode is 31 * (31 * first + last) + step, IntRange's and
+    // CharRange's 31 * first + last, and -1 when the range is empty (kotlin-stdlib
+    // 2.2.21's, called from java 24).
     val rh = listOf(1..5, 5..1, 1..10 step 4, 'a'..'c')
     var v = ""
     for (p in rh) { v += "" + p.hashCode() + " " }
-    check("rng17b", v == "1117 -1 1244 96287 " && (5..1).hashCode() == (7..3).hashCode())
+    check("rng17b", v == "36 -1 1244 3106 " && (5..1).hashCode() == (7..3).hashCode())
     // A range is an IntRange / IntProgression and NOT a List; a STEPPED or downTo
     // progression is an IntProgression and not an IntRange.
     val ri: Any = 1..5
@@ -5864,6 +5865,69 @@ fun sec128() {
     check("lr128e", "" + mx.first + " " + mx.last == "9223372036854775805 9223372036854775807" && ls[1] in mx && !(ls[1] - 3 in mx))
 }
 
+// ===== SECTION 129: Unit as a value, `;` between members, `?.` targets, range hashes and Float ranges, null casts =====
+// Unit's toString, every range hashCode and the ClosedFloatRange values are
+// kotlin-stdlib 2.2.21's, called from java 24. `a?.b = c` is `if (a != null) a.b = c`:
+// a null receiver skips the write and the right-hand side (Kotlin spec, safe-call
+// assignment - spec only, no kotlinc here). `null as T` is kotlinc's
+// NullPointerException for a non-null library type too; only the type is asserted.
+class Outer129 { class In129; inner class Inn129; val k = 1; val m = 2 }
+class T129(var i: Int) { var nx: T129? = null }
+fun mk129(b: Boolean): T129? = if (b) T129(40) else null
+fun <T> cast129(x: Any?): T = x as T
+fun sec129() {
+    val us = listOf(1, Unit)
+    check("unit129", us.toString() == "[1, kotlin.Unit]" && "${us[1]}" == "kotlin.Unit" && us[1] == Unit && Unit.toString() == "kotlin.Unit")
+    check("semi129", Outer129.In129() is Outer129.In129 && Outer129().k + Outer129().m == 3)
+    var calls = 0
+    fun bump129(): Int { calls++; return 9 }
+    val n = mk129(false)
+    n?.i = bump129()
+    n?.i += bump129()
+    val r = n?.i++
+    mk129(false)?.i = bump129()
+    val y = T129(7)
+    y.nx?.i = bump129()
+    check("safe129a", calls == 0 && r == null)
+    y.nx = T129(8)
+    y.nx?.i = bump129()
+    y.nx?.i += 2
+    val r2 = y.nx?.i++
+    val m = mk129(true)
+    m?.i = 41
+    check("safe129b", calls == 1 && r2 == 11 && y.nx!!.i == 12 && m!!.i == 41)
+    val lb = longArrayOf(1L, 5L, 5000000000L, 5000000005L, -3L, 3L, 9223372036854775800L, Long.MAX_VALUE)
+    var hs = ""
+    for (k in 0 until 4) {
+        val a = lb[2 * k]
+        val b = lb[2 * k + 1]
+        hs += "" + (a..b).hashCode() + " " + (b downTo a step 2).hashCode() + " " + (a..b step 3).hashCode() + " " + (a.toInt()..b.toInt()).hashCode() + ";"
+    }
+    check("rh129a", hs == "36 4837 1088 36;1086210083 -687223035 -687225854 1086210053;65 2946 2018 -90;217 187 6761 -249;")
+    val ib = intArrayOf(5, 1, 10, 4)
+    val cb = "ae"
+    val ih = "" + (ib[0] downTo ib[1] step 2).hashCode() + " " + (ib[1]..ib[2] step ib[3]).hashCode() + " " + (cb[0]..cb[1]).hashCode() + " " +
+        (cb[0]..cb[1] step 2).hashCode() + " " + (ib[0]..ib[1]).hashCode() + " " + (lb[1]..lb[0]).hashCode() + " " + (cb[1]..cb[0]).hashCode()
+    check("rh129b", ih == "4834 1244 3108 96350 -1 -1 -1")
+    val db = doubleArrayOf(1.5, 2.5, Double.NaN, 1.0, -0.0, 0.0)
+    val fb = floatArrayOf(1.5f, 2.5f, 0.1f)
+    val dh = "" + (db[0]..db[1]).hashCode() + " " + (fb[0]..fb[1]).hashCode() + " " + (fb[1]..fb[0]).hashCode() + " " +
+        (db[2]..db[3]).isEmpty() + " " + (db[2]..db[3]).hashCode() + " " + (db[4]..db[5]).hashCode()
+    check("rh129c", dh == "-15990784 -127926272 -1 true -1 -2147483648")
+    val fr = fb[2]..fb[1]
+    check("fr129", "" + fr + " " + fr.javaClass.name + " " + fr.start.javaClass.name + " " + fr.endInclusive + " " + (db[0]..db[1]).javaClass.name ==
+        "0.1..2.5 kotlin.ranges.ClosedFloatRange java.lang.Float 2.5 kotlin.ranges.ClosedDoubleRange" && fr == fb[2]..fb[1] && fb[2] in fr)
+    val nul: Any? = mk129(false)
+    var nc = ""
+    try { nul as Any; nc += "a" } catch (e: NullPointerException) { nc += "A" }
+    try { nul as List<Int>; nc += "b" } catch (e: NullPointerException) { nc += "B" }
+    try { nul as Map<String, Int>; nc += "c" } catch (e: NullPointerException) { nc += "C" }
+    try { nul as IntArray; nc += "d" } catch (e: NullPointerException) { nc += "D" }
+    try { nul as List<Int>?; nc += "e" } catch (e: NullPointerException) { nc += "E" }
+    try { cast129<String>(nul); nc += "f" } catch (e: NullPointerException) { nc += "F" }
+    check("nc129", nc == "ABCDef")
+}
+
 fun main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -5989,6 +6053,7 @@ fun main() {
     sec126() // SECTION-CALL 126
     sec127() // SECTION-CALL 127
     sec128() // SECTION-CALL 128
+    sec129() // SECTION-CALL 129
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }

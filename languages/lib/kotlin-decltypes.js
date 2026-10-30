@@ -819,3 +819,54 @@ function ktJavaClassImport(path) {
     }
     return out
 }
+
+// The type kotlinc's null-cast message names - "null cannot be cast to non-null type
+// kotlin.collections.List<kotlin.Int>" for `null as List<Int>`: the written type with
+// every stdlib name fully qualified, its type arguments included. dest is the JVM
+// class a judged cast checks against ("" when the cast checks no class); a program
+// type keeps its dotted path. "" when the cast cannot check null either: a type
+// parameter, a function type, a library type outside ktFqTypes.
+var ktFqTypes = {}
+function ktFqAdd(pkg, names) {
+    for (var i = 0; i < names.length; i++) { ktFqTypes["$" + names[i]] = pkg + names[i] }
+}
+ktFqAdd("kotlin.", ["Any", "Unit", "String", "CharSequence", "Int", "Long", "Short", "Byte",
+                    "Double", "Float", "Char", "Boolean", "Number", "Comparable", "Array",
+                    "IntArray", "LongArray", "ShortArray", "ByteArray", "DoubleArray", "FloatArray",
+                    "CharArray", "BooleanArray", "Pair", "Triple"])
+ktFqAdd("kotlin.collections.", ["List", "MutableList", "Set", "MutableSet", "Map", "MutableMap",
+                                "Collection", "MutableCollection", "Iterable", "MutableIterable",
+                                "Iterator", "MutableIterator"])
+ktFqAdd("kotlin.sequences.", ["Sequence"])
+function ktNullCastType(t, dest) {
+    if (t.indexOf("->") >= 0) { return "" }
+    var s = (t.length > 0 && t.charAt(t.length - 1) == "?") ? t.substring(0, t.length - 1) : t
+    var lt = s.indexOf("<")
+    var base = lt >= 0 ? s.substring(0, lt) : s
+    var head = ktFqTypes["$" + base]
+    if (dest != "" && dest.indexOf("java.lang.") != 0) { head = dest.split("$").join(".") }
+    if (head == undefined) { return "" }
+    return head + ktFqTArgs(s, lt)
+}
+// `<A, B>` of a type whose `<` is at lt, each argument qualified the same way; a
+// name outside ktFqTypes (a type parameter, a program type) is kept as written.
+// The text arrives without whitespace, so a variance reads `outNumber`.
+function ktFqTArgs(s, lt) {
+    if (lt < 0) { return "" }
+    var args = ktSplitTArgs(s.substring(lt + 1, s.length - 1))
+    var out = []
+    for (var i = 0; i < args.length; i++) {
+        var a = args[i]
+        var pre = ""
+        if (a.length > 3 && a.substring(0, 3) == "out" && ktIsUpper(a.charAt(3))) { pre = "out "; a = a.substring(3) }
+        else if (a.length > 2 && a.substring(0, 2) == "in" && ktIsUpper(a.charAt(2))) { pre = "in "; a = a.substring(2) }
+        var q = (a.length > 0 && a.charAt(a.length - 1) == "?") ? "?" : ""
+        if (q != "") { a = a.substring(0, a.length - 1) }
+        var alt = a.indexOf("<")
+        var ab = alt >= 0 ? a.substring(0, alt) : a
+        var fq = ktFqTypes["$" + ab]
+        out.push(pre + (fq == undefined ? ab : fq) + ktFqTArgs(a, alt) + q)
+    }
+    return "<" + out.join(", ") + ">"
+}
+function ktIsUpper(c) { return c >= "A" && c <= "Z" }

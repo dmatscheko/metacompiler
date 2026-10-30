@@ -713,7 +713,8 @@ CtorParam   <~~ ktAt = up.start; push(makeCtorParam(takeAll())) ~~>
 // which in turn precedes the member extension / genuinely unsupported forms.
 // MemberExtProp precedes PropDecl: `val Int.doubledUp get() = ...` would otherwise be
 // half-consumed as a bodiless property named `Int`.
-Member      = [ Modifiers ] ( InitBlock | CompanionObject | SecondaryCtor | NestedType | MemberTypeAlias | MemberExtProp | MemberExtDelegProp | PropDelegate | PropDecl | FunDecl <~~ push({method: pop()}) ~~> | MemberExtFun | MemberExtAbs | AbstractFun | UnsupFun | MemberSkip ) ;
+// A `;` may separate members written on one line: `class O { class I; inner class J }`.
+Member      = [ Modifiers ] ( InitBlock | CompanionObject | SecondaryCtor | NestedType | MemberTypeAlias | MemberExtProp | MemberExtDelegProp | PropDelegate | PropDecl | FunDecl <~~ push({method: pop()}) ~~> | MemberExtFun | MemberExtAbs | AbstractFun | UnsupFun | MemberSkip ) { ";" } ;
 // A MEMBER extension - fun B.ext() / val B.p get() = ... declared inside a class.
 // GENUINE, and the only construct with TWO receivers: the extension receiver (bound to
 // `this` in the body) and the DISPATCH receiver, the enclosing class instance. The
@@ -1127,10 +1128,10 @@ CallChain   <~~ push({chain: takeAll()}) ~~>
 // The chain may carry a `!!` (the non-null assertion: kTargetRef marks the step after
 // it, and a null there is the message-less NullPointerException) and a `?.` step -
 // `t!!.i++` and `t?.i++` are both ordinary Kotlin, and psiUtil/isSelectorInExpression.kt
-// spells them out. The `?.` step is read like a plain `.`: on a NON-null receiver,
-// which is the only case a ++ can mean anything on, the two are the same access.
+// spells them out. A `?.` step is marked `safe`: on a null receiver the whole write is
+// skipped, right-hand side included (`a?.b = c` is `if (a != null) a.b = c`).
 Target      <~~ push(kTargetRef(takeAll())) ~~>
-            = KId <~~ push(up.in) ~~> { "." KId <~~ push({key: up.in}) ~~> | "?." KId <~~ push({key: up.in}) ~~> | "!!" <~~ push({nn: true}) ~~> | TIndex } ;
+            = KId <~~ push(up.in) ~~> { "." KId <~~ push({key: up.in}) ~~> | "?." KId <~~ push({key: up.in, safe: true}) ~~> | "!!" <~~ push({nn: true}) ~~> | TIndex } ;
 TIndex      <~~ push({idx: kIndexArg(takeAll(), up.pos)}) ~~>
             = "[" Expression { "," Expression } [ "," ] "]" ;
 
@@ -3374,14 +3375,15 @@ NotMemberKw = :script(~~
     // the step alone can tell apart from the plain "1..5". It is also what
     // `x is IntRange` must answer false to.
     // `lg` marks a LongRange / LongProgression: a bound was a Long, so every element,
-    // first, last, start and endInclusive is a Long again.
+    // first, last, start and endInclusive is a Long again. `f32` marks a floating range
+    // over Floats (ClosedFloatRange), whose bounds read back as Floats.
     // A Long range also keeps its first, bound and step EXACTLY (lf / lt / ls, Long
     // boxes): from / to / st are doubles, which cannot step past 2^53, so the
     // iteration, the count and toString use these. Twin of ktRangeLong in
     // abnf/jsrtkotlin.go and k4RangeLong in languages/lib/kotlin-rt.metajs.
     function kRange(from, to, down) {
         var rg = {__range: true, from: kNum(from), to: kNum(to), st: 1, down: down,
-                  ch: kIsChar(from), fl: kIsFlo(from), pg: false, lg: kIsLongBox(from) || kIsLongBox(to)}
+                  ch: kIsChar(from), fl: kIsFlo(from), f32: kIsF32(from), pg: false, lg: kIsLongBox(from) || kIsLongBox(to)}
         if (rg.lg) {
             rg.lf = kAdoptLong(from)
             rg.lt = kAdoptLong(to)
@@ -3604,11 +3606,13 @@ NotMemberKw = :script(~~
     // An element of a progression, boxed back into whatever the bounds were.
     function rangeEl(rg, n) {
         if (rg.ch) { return kChar(n) }
-        if (rg.fl === true) { return kFlo(n) }
+        if (rg.fl === true) { return rg.f32 === true ? kFlo32(n) : kFlo(n) }
         if (rg.lg === true) { return kAdoptLong(n) }
         return n
     }
     function rangeEmpty(rg) {
+        // ClosedFloatingPointRange.isEmpty is !(start <= endInclusive): a NaN bound empties it.
+        if (rg.fl === true) { return !(rg.from <= rg.to) }
         if (rg.lg === true && rg.lf !== undefined) { return rg.down ? kCmpI("<", rg.lf, rg.lt) : kCmpI(">", rg.lf, rg.lt) }
         return rg.down ? (rg.from < rg.to) : (rg.from > rg.to)
     }
@@ -3619,7 +3623,7 @@ NotMemberKw = :script(~~
     // with the IntRange form.
     function rangeStr(rg) {
         // ClosedFloatingPointRange.toString is "$start..$endInclusive".
-        if (rg.fl === true) { return kstr(kFlo(rg.from)) + ".." + kstr(kFlo(rg.to)) }
+        if (rg.fl === true) { return kstr(rangeEl(rg, rg.from)) + ".." + kstr(rangeEl(rg, rg.to)) }
         var a = kstr(rg.ch ? kChar(rg.from) : rg.from)
         var b = kstr(rg.ch ? kChar(rangeLastEl(rg)) : rangeLastEl(rg))
         if (rg.lg === true && rg.lf !== undefined) {
@@ -3633,18 +3637,37 @@ NotMemberKw = :script(~~
     // IntProgression.equals: two EMPTY progressions are equal whatever their bounds,
     // and two non-empty ones agree when first, LAST ELEMENT and step agree.
     function rangeEqK(a, b) {
+        // A Float range never equals a Double range (ClosedFloatRange.equals).
+        if ((a.f32 === true) !== (b.f32 === true)) { return false }
         if (rangeEmpty(a)) { return rangeEmpty(b) }
         if (rangeEmpty(b)) { return false }
         if (a.from !== b.from) { return false }
         if (rangeLastEl(a) !== rangeLastEl(b)) { return false }
         return rangeSigned(a) === rangeSigned(b)
     }
-    // hashCode is -1 for an empty progression, which is what makes it agree with the
-    // equals above; otherwise 31 * (31 * first + last) + step.
+    // hashCode is -1 for an empty range, which is what makes it agree with the equals
+    // above. IntRange, CharRange, LongRange and the floating ranges hash as
+    // 31 * h(first) + h(last); a progression as 31 * (31 * h(first) + h(last)) + h(step),
+    // h being the element type's own hashCode (a Long folds its halves, a Double or
+    // Float hashes its bits). Twin of ktRangeHash in abnf/jsrtkotlin.go and
+    // languages/lib/kotlin-rt.metajs.
     function rangeHashK(rg) {
         if (rangeEmpty(rg)) { return -1 }
-        var h = (Math.imul(31, rg.from | 0) + (rangeLastEl(rg) | 0)) | 0
-        return (Math.imul(31, h) + (rangeSigned(rg) | 0)) | 0
+        var first = anytype
+        var last = anytype
+        var step = anytype
+        if (rg.lg === true && rg.lf !== undefined) {
+            first = rg.lf
+            last = kRangeLastL(rg)
+            step = rg.down ? kArith("-", 0, rg.ls) : rg.ls
+        } else {
+            first = rangeEl(rg, rg.from)
+            last = rangeEl(rg, rangeLastEl(rg))
+            step = rangeSigned(rg)
+        }
+        var h = (Math.imul(31, kHash(first)) + kHash(last)) | 0
+        if (rg.fl === true || (rg.st == 1 && !rg.down && rg.pg !== true)) { return h }
+        return (Math.imul(31, h) + kHash(step)) | 0
     }
     // The LAST ELEMENT of a progression, which is what IntProgression.last answers -
     // getProgressionLastElement in kotlin.internal.ProgressionUtil. For a step of 1 it
@@ -3832,33 +3855,30 @@ NotMemberKw = :script(~~
     // x as T: a ClassCastException when x is not a T, judged for the builtin value
     // types and for a class or interface the program declares; any other T (a type
     // parameter, a library type) is unchecked, as an erased cast is. null passes a
-    // nullable T and is a NullPointerException for a judged non-null one, which is the
-    // check kotlinc emits. Twin of js_ktcast in abnf/jsrtkotlin.go and
-    // languages/lib/kotlin-rt.metajs.
+    // nullable T and is a NullPointerException for a non-null one ktNullCastType
+    // names, which is the check kotlinc emits. Twin of makeCast in
+    // kotlin-to-llvm-ir.abnf.
     function makeCast(operand, tname) {
         var base = kCastBase(tname)
         var opt = tname.charAt(tname.length - 1) == "?"
         var dest = anytype // T's JVM class once the classes exist, "" when T is not judged
+        var nullName = ""
         return function() {
             var v = anytype
             v = operand()
-            if (dest === undefined) { dest = kCastDest(base) }
-            if (dest == "" || typeof v == "function") { return v }
+            if (dest === undefined) {
+                dest = kCastDest(base)
+                if (!opt) { nullName = ktNullCastType(tname, dest) }
+            }
             if (v === null || v === undefined) {
-                if (!opt) { kThrowExc("NullPointerException", "null cannot be cast to non-null type " + kNullCastName(base, dest)) }
+                if (nullName != "") { kThrowExc("NullPointerException", "null cannot be cast to non-null type " + nullName) }
                 return v
             }
+            if (dest == "" || typeof v == "function") { return v }
             if (kIsType(v, base)) { return v }
             kThrowExc("ClassCastException", kCceMsg(jxkClass(v), dest))
             return v
         }
-    }
-    // The Kotlin name kotlinc's null-cast message spells: kotlin.String for a builtin,
-    // the dotted path for a program type. Twin of ktNullCastName in abnf/jsrtkotlin.go
-    // and languages/lib/kotlin-rt.metajs.
-    function kNullCastName(base, dest) {
-        if (dest.indexOf("java.lang.") == 0) { return "kotlin." + base }
-        return dest.split("$").join(".")
     }
     var kCastLang = {"$String": "java.lang.String", "$Int": "java.lang.Integer", "$Long": "java.lang.Long",
                      "$Short": "java.lang.Short", "$Byte": "java.lang.Byte", "$Double": "java.lang.Double",
@@ -4810,6 +4830,8 @@ NotMemberKw = :script(~~
         for (var i = sc.length - 1; i >= 0; i--) { if (hasOwn(sc[i], name)) { return sc[i][name] } }
         fail("unknown name: " + sub)
     }
+    // `Unit` as a VALUE is the Unit object, which is undefined here.
+    hostGlobals["Unit"] = undefined
     hostGlobals["kotlin"] = kPkg("kotlin")
     hostGlobals["java"] = kPkg("java")
     function kLazyValue(box) {
@@ -6476,7 +6498,7 @@ NotMemberKw = :script(~~
         if ((kIsSet(v) || kIsMap(v)) && v.__jc !== undefined) { return v.__jc }
         if (kIsSet(v)) { return "java.util.LinkedHashSet" }
         if (kIsMap(v)) { return "java.util.LinkedHashMap" }
-        if (isRange(v)) { return kRangeJvmClass(v.fl === true, v.ch === true, v.lg === true, v.st == 1 && !v.down && v.pg !== true) }
+        if (isRange(v)) { return kRangeJvmClass(v.fl === true, v.f32 === true, v.ch === true, v.lg === true, v.st == 1 && !v.down && v.pg !== true) }
         if (kIsPair(v)) { return v.third !== undefined ? "kotlin.Triple" : "kotlin.Pair" }
         var n = kSimpleName(v)
         if (szIs(v) && v.u) { return "kotlin." + n }
@@ -6493,11 +6515,10 @@ NotMemberKw = :script(~~
         return n
     }
     // The kotlin.ranges class of a range value: plain means an IntRange-style `..`
-    // (step 1, ascending, not built by step / reversed). A floating range is taken
-    // as Double's - the value keeps no Float mark. Twin of ktRangeJvmClass in
+    // (step 1, ascending, not built by step / reversed). Twin of ktRangeJvmClass in
     // abnf/jsrtkotlin.go and languages/lib/kotlin-rt.metajs.
-    function kRangeJvmClass(fl, ch, lg, plain) {
-        if (fl) { return "kotlin.ranges.ClosedDoubleRange" }
+    function kRangeJvmClass(fl, f32, ch, lg, plain) {
+        if (fl) { return f32 ? "kotlin.ranges.ClosedFloatRange" : "kotlin.ranges.ClosedDoubleRange" }
         return "kotlin.ranges." + (ch ? "Char" : lg ? "Long" : "Int") + (plain ? "Range" : "Progression")
     }
     function jxkHash(v) { return kHash(v) }
@@ -9117,6 +9138,8 @@ NotMemberKw = :script(~~
                 // `op=`, then the right-hand side.
                 var obj = anytype
                 obj = baseT()
+                // `f()?.p = v` on a null receiver skips the write and its right-hand side.
+                if (last.safe === true && (obj === null || obj === undefined)) { return null }
                 var v = anytype
                 var old = anytype
                 if (last.kind == "field") {
@@ -12347,6 +12370,7 @@ NotMemberKw = :script(~~
                 return kSetName(ref.name, "=", kCompoundOp(op, old, v, valSt == 1), false)
             }
             var p = resolveRef(ref)
+            if (p === null) { return null }
             if (op != "=") { old = kReadSlot(p) }
             v = valT()
             if (op != "=") { v = kCompoundOp(op, old, v, valSt == 1) }
@@ -12404,7 +12428,9 @@ NotMemberKw = :script(~~
     }
     // resolveRef walks the path; the last step needs to say whether it is a `.name` or
     // an `[index]`, so the write can route through a setter or an `operator fun set`.
-    // A step after a `!!` raises the message-less NullPointerException on a null.
+    // A step after a `!!` raises the message-less NullPointerException on a null; a
+    // `?.` step on a null answers null, and the caller skips the write.
+    // Twin of emitRefPath in kotlin-to-llvm-ir.abnf.
     resolveRef = function(ref) {
         var o = anytype
         o = getVar(ref.name)
@@ -12413,6 +12439,7 @@ NotMemberKw = :script(~~
             var s = ref.path[i]
             if (o === undefined || o === null) {
                 if (s.nn === true) { kRaise("NullPointerException", null) }
+                if (s.safe === true) { return null }
                 if (i > 0) fail("null in assignment path of " + ref.name)
             }
             if (i == n - 1) { break }
@@ -12449,6 +12476,7 @@ NotMemberKw = :script(~~
                 return nv0
             }
             var p = resolveRef(ref)
+            if (p === null) { return null }
             var mv = anytype // The slot may hold a number, a Char or a Double.
             mv = kReadSlot(p)
             var nv = kStep(mv, d)
@@ -12468,6 +12496,7 @@ NotMemberKw = :script(~~
                 return n
             }
             var p = resolveRef(ref)
+            if (p === null) { return null }
             var mv = anytype // The slot may hold a number, a Char or a Double.
             mv = kReadSlot(p)
             var nv = kStep(mv, d)
