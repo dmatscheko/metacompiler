@@ -1765,12 +1765,14 @@ ValueBlock  <~~ push(makeValueBlock(takeAll())) ~~>
 // any REMAINING if statement - a bare `if (c) s` must be consumed here, BEFORE LamExpr,
 // which would otherwise read the keyword `if` as an identifier (`if (c)` parses as the
 // call if(c)) and only fail at run time; then any expression; then an empty statement.
+// A `try` is deliberately not a LamCtrl statement: it is an expression, so LamExpr reads
+// it and a body ending in one takes the try's value.
 LamStmt     = { Annotation } ( LamCtrl | LamIfValue | LamIf | LamExpr ) | ";" ;
 LamCtrl     <~~ push({stmt: pop()}) ~~>
             = ReturnAt | Return | BreakAt | Break | ContinueAt | Continue
             | Labeled | LocalTypeAlias | LocalClass | LocalTypeDecl | LocalExtFun | LocalFun
             | Destructure | DestructAssign | DelegateDecl | Decl | BareDecl | LocalModDecl
-            | While | Do | For | TryStmt | Throw ;
+            | While | Do | For | Throw ;
 LamIfValue  <~~ push({expr: pop()}) ~~>
             = IfExpr ;
 LamIf       <~~ push({stmt: pop()}) ~~>

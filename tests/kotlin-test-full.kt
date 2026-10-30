@@ -5730,6 +5730,17 @@ fun sec126() {
 }
 
 
+// ===== SECTION 127: a lambda whose body ends in a try =====
+// A lambda's value is its last expression, and a try is an expression (the Kotlin
+// specification, "Lambda literals" and "Try-expressions"); getValue's message is
+// kotlin-stdlib 2.2.21's MapsKt.getValue, called from java 24.
+fun sec127() {
+    val m = mapOf("a" to 1)
+    check("lam127a", m.let { try { it.getValue("b") } catch (e: NoSuchElementException) { e.message } } == "Key b is missing in the map." &&
+                     m.let { try { 7 } catch (e: Exception) { 8 } } == 7)
+    check("lam127b", listOf(1, 2).map { try { if (it == 1) return@map 9; it } finally { } }.toString() == "[9, 2]")
+}
+
 fun main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -5853,6 +5864,7 @@ fun main() {
     sec124() // SECTION-CALL 124
     sec125() // SECTION-CALL 125
     sec126() // SECTION-CALL 126
+    sec127() // SECTION-CALL 127
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }
