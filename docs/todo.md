@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-848** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-849** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -151,13 +151,11 @@ is named ClosedDoubleRange (no Float mark on the range value). (7) `null as T` f
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-778 bash: printf `%f %e %g %a` print the operand as text · P2 · SH · IN PROGRESS (SH worker, round 9) [V]
-`printf '[%f] [%.2f] [%5.2f] [%e] [%g] [%.0f]\n' 3.14159` → all legs `[3.14159] [3.] [   3.] [3.14159] [3.14159] []` (precision
-applied as string truncation), bash `[3.141590] [3.14] [ 3.14] [3.141590e+00] [3.14159] [3]`; `%.3f` of 7 → `7` (`7.000`); `abc` →
-rc 0 (bash 1). The source admits it (bash-interpreter.abnf ~4997 "NOT IMPLEMENTED") but manual 7.9 does not list it. Decimal
-formatting of the parsed literal needs no double: implement it, or fail loudly and record it in 7.9.
-
----
+### T-848 bash: backslash-newline inside an array literal does not parse · P2 · SH · OPEN [V SH worker]
+`v=(a \⏎'b')` → real bash 2 elements; both halves "Not everything could be parsed". `v=(a b \⏎ c)`
+parses by accident, but the backslash-newline is not whitespace. Cause: `WsNL` in both bash grammars
+(interpreter ~306, compiler ~295) lacks the `"\\\n"` alternative that `Whitespace` has; CfSt
+(`(( ;; ))`) uses WsNL too.
 
 # C — C subset
 
@@ -932,6 +930,7 @@ T-836 kotlin: edges left by the operator/cast/range fixes — PARTIAL 84a044bd �
 T-843 java: field types collide by name across classes — DONE 4eccaba8 (field type resolved where Java resolves the name: own class + superclasses + enclosing classes, this.f, C.f, static type before .f incl. after a call; String.codePointBefore in all engines)
 T-842 ts/js: RegExp to string, method shadowing an inherited getter, `o?.#f` — DONE e227c713 (RegExp ToString /src/flags in all engines with V8 source escaping, [object RegExp]; class members defined via js_jsdefm so a method shadows an inherited getter; o?.#f / o?.#m() parse; raw U+2028 in TS strings)
 T-838 ts/js: decorator and constructor semantics left over — PARTIAL 171fb506 — derived-constructor this/super/return errors, __proto__: in literals, home-object super, tagged-template invalid escapes, TS x! targets, import/export import aliases, accessor auto-accessors, Set methods, WeakMap/WeakSet, queueMicrotask, URI functions, isWellFormed/toWellFormed; decorators, constructability and Date/setTimeout filed as T-847
+T-778 bash: printf `%f %e %g %a` print the operand as text — DONE 01c030c6 (%f %e %g %a/F E G A print the exact digits of the double strtold reads — interp via c-printf.js, compiler via an exact big-integer reader + C port in bash-rt.c with no double; invalid/too-large diagnostics per bash 5.3; integer error wording, \\v\\f\\r whitespace and message precedence fixed alongside; 9695-row probe matches real bash)
 
 # Settled — do not re-open
 
