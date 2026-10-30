@@ -1891,6 +1891,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     }
     function noteTy(s) {
         if (typeof s == "string" && s.indexOf("float32") >= 0) { usesF32 = true }
+        if (typeof s == "string" && s.indexOf("complex128") >= 0) { usesComplex = true }
         if (typeof s != "string") { return s }
         return goArrConstLen(s)
     }
@@ -1936,6 +1937,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         if (isFloatTy(ty)) { return callExt(b, "js_gflo", [v]) }
         var it = goIntTy(goTyWord(ty))
         if (it != null) { return emitGiConv(b, v, it) }
+        if (goTyWord(ty) == "complex128") { return emitHelper(b, "$cxadopt", [v]) }
         return v
     }
     // goAssignAdopt's conversion (go-constfold.js). Twin of goAdoptThunk in
@@ -3438,6 +3440,14 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         b = declCxPart(b, "real", "re", 1)
         b = declCxPart(b, "imag", "im", 0)
         b = declCxMake(b)
+        // A real number put in a complex128 location becomes (x+0i); twin of the
+        // complex128 arm of gAdoptTy in go-interpreter.abnf.
+        b = declFn(b, "$cxadopt", 1, function(fb, as, f) {
+            var v = as[0]
+            return emitSelect(fb, callExt(fb, "js_is_type", [v, emitStr(fb, "$cx")]),
+                function(tb) { return {b: tb, v: v} },
+                function(eb) { return {b: eb, v: emitNewCx(eb, v, emitNum(eb, 0))} })
+        })
         return b
     }
     function emitCxCall(b, op, l, r) {
@@ -4377,10 +4387,16 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                 var isArr = callExt(eb, "js_is_type", [cur, emitStr(eb, "Array")])
                 return emitSelect(eb, isArr, mkCell, function(sb) { return emitSelect(sb, emitIsSl(sb, cur), mkCell, function(nb) {
                     // nil (typeof "object" too) gets a cell: `var p *T; pp := &p`.
+                    // So does a complex128, a "$cx" object that is a scalar to Go.
                     var isObj = callExt(nb, "js_seq", [callExt(nb, "js_typeof", [cur]), emitStr(nb, "object")])
-                    return emitSelect(nb, isObj, function(ob) {
+                    var objPtr = function(ob) {
                         return emitSelect(ob, callExt(ob, "js_seq", [cur, hNull]), mkCell, function(tb) { return {b: tb, v: cur} })
-                    }, mkCell)
+                    }
+                    if (usesComplex) {
+                        var plainObj = objPtr
+                        objPtr = function(ob) { return emitSelect(ob, callExt(ob, "js_is_type", [cur, emitStr(ob, "$cx")]), mkCell, plainObj) }
+                    }
+                    return emitSelect(nb, isObj, objPtr, mkCell)
                 }) })
             })
         }
@@ -4915,6 +4931,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         if (it != null) { return emitGiConv(b, emitNum(b, 0), it) }
         if (isF32Ty(wd)) { return callExt(b, "js_gflo32", [emitNum(b, 0)]) }
         if (isFloatTy(wd)) { return callExt(b, "js_gflo", [emitNum(b, 0)]) }
+        if (wd == "complex128") { return emitNewCx(b, emitNum(b, 0), emitNum(b, 0)) }
         if (wd == "string") { return emitStr(b, "") }
         if (wd == "bool") { return hFalse }
         // THE ZERO VALUE OF A MAP TYPE IS A MARKED EMPTY MAP, not nil - the twin of
@@ -5645,6 +5662,8 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                 var r = items[0](b)
                 b = r.b
                 v = curRtys.length == 1 ? emitStoreCopy(b, r.v, curRtys[0]) : r.v
+                // A constant takes the result type: `return 1` from a float64 func is 1.0.
+                if (curRtys.length == 1 && sp.krs[0] != null && typeof curRtys[0] == "string") { v = emitAdoptTy(b, curRtys[0], v) }
                 if (curRtys.length == 1 && goDtBoxTo(atys[0], curRtys[0]) != "") { v = emitDtBox(b, v, goDtBoxTo(atys[0], curRtys[0])) }
                 if (curRtys.length == 1 && sp.rns[0] && goRuneSlotTy(curRtys[0])) { v = emitGiConv(b, v, {w: 32, u: false}) }
             } else if (items.length > 1) {
@@ -5653,6 +5672,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                     var r2 = items[i](b)
                     b = r2.b
                     var rv = i < curRtys.length ? emitStoreCopy(b, r2.v, curRtys[i]) : r2.v
+                    if (i < curRtys.length && sp.krs[i] != null && typeof curRtys[i] == "string") { rv = emitAdoptTy(b, curRtys[i], rv) }
                     if (i < curRtys.length && goDtBoxTo(atys[i], curRtys[i]) != "") { rv = emitDtBox(b, rv, goDtBoxTo(atys[i], curRtys[i])) }
                     if (i < curRtys.length && sp.rns[i] && goRuneSlotTy(curRtys[i])) { rv = emitGiConv(b, rv, {w: 32, u: false}) }
                     callExt(b, "js_arr_push", [arr, rv])

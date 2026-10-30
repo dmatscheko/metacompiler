@@ -1274,6 +1274,8 @@ function goConstTo(t, kr, ty, ctx) {
         if (w == "float32") { return cMaterialize(rf) }
         return (kr.k.f || goIsIfaceTy(bt)) ? t : cMaterialize(cAsF(kr.k))
     }
+    // A complex128 location makes the real constant the complex (k+0i).
+    if (w == "complex128") { return t == null ? t : cMaterialize(cxOf(kr.k)) }
     var it = goIntTy(w)
     if (it == null) { return t }
     var iv = goKInt(kr.k)
@@ -1687,7 +1689,7 @@ function goAssignAdopt(t, sty, ty) {
     var w = goTyWord(bt)
     if (w != bt) { return t }
     if (typeof definedUnder[w] == "string") { w = goTyWord(resolveDefined(w)) }
-    if (!isFloatTy(w) && goIntTy(w) == null) { return t }
+    if (!isFloatTy(w) && goIntTy(w) == null && w != "complex128") { return t }
     return goAdoptThunk(t, bt)
 }
 // A composite literal of type ty: a fresh value.
@@ -1939,7 +1941,9 @@ function goNoteMeth1(rt, name, byPtr, rtys) {
     if (goMethRecv["$" + name] === undefined) { goMethRecv["$" + name] = [] }
     goMethRecv["$" + name].push(rt)
 }
-var goFnRty = {}      // "$f" -> top-level function f's single result type ("" otherwise)
+// "$f" -> top-level function f's single result type ("" otherwise); the builtin
+// complex(re, im) answers a complex128.
+var goFnRty = {"$complex": "complex128"}
 var goFnPTys = {}     // "$f" -> top-level function f's parameter types (goPreParams)
 var goMethPTys = {}   // "$T.M" -> method M of T's parameter types (goPreParams)
 var goMethSig = {}    // "$T.M" -> method M of T's type text as a method value (goSigAt)
@@ -3743,6 +3747,7 @@ function goUsesFmtScan(text) {
 function goLibFile(path) {
     if (path == "strings") { return "lib/go-strings.go" }
     if (path == "math") { return "lib/go-math.go" }
+    if (path == "math/cmplx") { return "lib/go-cmplx.go" }
     if (path == "sort") { return "lib/go-sort.go" }
     if (path == "slices") { return "lib/go-slices.go" }
     if (path == "maps") { return "lib/go-maps.go" }
@@ -4217,13 +4222,15 @@ function goKOperands(items, ts, sty) {
     var w = goTyWord(stBare(sty))
     if (typeof definedUnder[w] == "string") { w = goTyWord(resolveDefined(w)) }
     var fl = isFloatTy(w)
-    if (!fl && goIntTy(w) == null) { return }
+    var cx = w == "complex128"
+    if (!fl && !cx && goIntTy(w) == null) { return }
     var k = 0
     while (k < ts.length) {
         var c = constAt(items[3 * k + 1].at)
         if (c != null && !cIsCx(c)) {
-            if (fl && !c.f && cbCmp(c.n, cbTwo53) >= 0) { ts[k] = cMaterialize(cAsF(c)) }
-            if (!fl && c.f && goKInt(c) != null) { ts[k] = cMaterialize(goKInt(c)) }
+            if (cx) { ts[k] = cMaterialize(cxOf(c)) }
+            else if (fl && !c.f && cbCmp(c.n, cbTwo53) >= 0) { ts[k] = cMaterialize(cAsF(c)) }
+            else if (!fl && c.f && goKInt(c) != null) { ts[k] = cMaterialize(goKInt(c)) }
         }
         k = k + 1
     }

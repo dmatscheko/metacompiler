@@ -52,6 +52,7 @@ import (
 	"io"
 	"log"
 	"math"
+	"math/cmplx"
 	"os"
 	"path"
 	"path/filepath"
@@ -1127,6 +1128,39 @@ func s126() {
 	check("mkchan126", <-c == 5 && cap(c) == 2 && fmt.Sprint(g) == "[[0 0 0] []]")
 }
 
+// ===== SECTION 127: complex128 locations and math/cmplx =====
+// A real constant put in a complex128 location (a declaration, an assignment,
+// an argument, a result, an element, a field, a comparison operand) becomes
+// (x+0i); the zero complex128 is (0+0i); a complex map key compares by value.
+// A constant result takes the result type, so a float64 func's `return 1` is
+// 1.0. The expected values are go run's.
+type cx127 struct{ z complex128 }
+
+func one127() complex128 { return 1 }
+func half127() float64   { return 1 }
+
+func s127() {
+	var z complex128 = 3
+	var zero complex128
+	xs := []complex128{1, 2.5}
+	xs[0] = 7
+	p := cx127{z: 2}
+	check("cxloc127", fmt.Sprint(z, zero, xs, p, one127()) == "(3+0i) (0+0i) [(7+0i) (2.5+0i)] {(2+0i)} (1+0i)" && half127()/2 == 0.5)
+	m := map[complex128]int{1i: 2, 3: 4}
+	m[2i] = 6
+	k := 2.0
+	check("cxkey127", m[1i] == 2 && m[3] == 4 && m[2i] == 6 && len(m) == 3 && complex(k, 0) == 2 && z == 3)
+	w := complex(3, -4)
+	r, th := cmplx.Polar(complex(0, 2))
+	check("cmplx127", cmplx.Abs(w) == 5 && cmplx.Conj(w) == 3+4i && cmplx.Sqrt(-4) == 2i && r == 2 && th == math.Pi/2 &&
+		fmt.Sprint(cmplx.Sqrt(w), cmplx.Phase(w), cmplx.Sqrt(complex(1.5, -2.25))) == "(2-1i) -0.9272952180016122 (1.449855761204885-0.7759392555471052i)")
+	check("cmplx127b", fmt.Sprint(cmplx.Exp(complex(1, 2)), cmplx.Log(complex(-1, 0)), cmplx.Pow(1i, 2), cmplx.Pow(complex(2, 1), complex(0.5, -1))) ==
+		"(-1.1312043837568135+2.4717266720048183i) (0+3.141592653589793i) (-1+1.2246467991473515e-16i) (1.99781201148972-1.288710124239901i)")
+	check("cmplx127c", cmplx.IsInf(cmplx.Inf()) && cmplx.IsNaN(cmplx.NaN()) && !cmplx.IsNaN(complex(math.NaN(), math.Inf(1))) &&
+		fmt.Sprintf("%.4f %.4f", cmplx.Rect(2, math.Pi/2), cmplx.Log10(100)) == "(0.0000+2.0000i) (2.0000+0.0000i)")
+	check("atan2127", math.Atan2(1, -1) == 3*math.Pi/4 && math.Atan2(math.Copysign(0, -1), -2) == -math.Pi && fmt.Sprint(math.Atan2(3, 7), math.Atan2(-5, -0.5)) == "0.40489178628508343 -1.6704649792860586")
+}
+
 func main() {
 	s94()   // SECTION-CALL 94
 	s95()   // SECTION-CALL 95
@@ -1159,6 +1193,7 @@ func main() {
 	s124()  // SECTION-CALL 124
 	s125()  // SECTION-CALL 125
 	s126()  // SECTION-CALL 126
+	s127()  // SECTION-CALL 127
 	fmt.Println("full:", checks, "checks,", fails, "failures")
 	os.Exit(fails)
 }

@@ -1015,6 +1015,46 @@ func Atan(x float64) float64 {
 	return -satan(-x)
 }
 
+// The angle of (x, y): Atan(y/x) moved into the quadrant the signs name, with
+// the zero and infinity cases of IEEE 754's atan2.
+func Atan2(y, x float64) float64 {
+	switch {
+	case y != y || x != x:
+		return NaN()
+	case y == 0:
+		if x >= 0 && !Signbit(x) {
+			return Copysign(0, y)
+		}
+		return Copysign(Pi, y)
+	case x == 0:
+		return Copysign(Pi/2, y)
+	case IsInf(x, 0):
+		if IsInf(x, 1) {
+			if IsInf(y, 0) {
+				return Copysign(Pi/4, y)
+			}
+			return Copysign(0, y)
+		}
+		if IsInf(y, 0) {
+			return Copysign(3*Pi/4, y)
+		}
+		return Copysign(Pi, y)
+	case IsInf(y, 0):
+		return Copysign(Pi/2, y)
+	}
+	q := Atan(y / x)
+	if x < 0 {
+		if q <= 0 {
+			return q + Pi
+		}
+		return q - Pi
+	}
+	return q
+}
+
+// Go's Sincos runs Sin's and Cos's reduction and polynomials once for both.
+func Sincos(x float64) (sin, cos float64) { return Sin(x), Cos(x) }
+
 func Hypot(p, q float64) float64 {
 	p, q = Abs(p), Abs(q)
 	switch {
