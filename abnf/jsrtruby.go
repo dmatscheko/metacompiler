@@ -40,6 +40,9 @@ func init() {
 	rubyExcParent["Math::DomainError"] = "StandardError"
 	rubyExcParent["EncodingError"] = "StandardError"
 	rubyExcParent["Encoding::CompatibilityError"] = "EncodingError"
+	rubyExcParent["Encoding::UndefinedConversionError"] = "EncodingError"
+	rubyExcParent["Encoding::InvalidByteSequenceError"] = "EncodingError"
+	rubyExcParent["Encoding::ConverterNotFoundError"] = "EncodingError"
 	rxExtraExterns = append(rxExtraExterns, func(rt *jsrt, m map[string]func(args []uint64) uint64) {
 		rt.addRubyFmtExterns(m)
 	})
@@ -2018,6 +2021,66 @@ func (rt *jsrt) rubyRespondsPrivate(n string) bool {
 	}
 	_, top := rt.rubyBuiltinClass("Object").props["$p$"+n]
 	return top
+}
+
+// rubyVisIMethods is Module#private_instance_methods (want "private") and
+// #protected_instance_methods: the names each ancestor gives that visibility
+// itself - its private ones are its __ipn list (ownIPNames in
+// ruby-to-llvm-ir.abnf), the rest of __imn is protected under "$q$" - nearest
+// first and once each, a nearer one of another visibility hiding it. With
+// inheritance a class's private ones take in Object's: the top-level defs (its
+// "$p$" slots) and the private Kernel methods. Twins: visInstanceMethods in
+// ruby-interpreter.abnf, rbVisIMethods in lib/ruby-rt.metajs.
+func (rt *jsrt) rubyVisIMethods(o *jsObject, want string, inherit bool) *jsArray {
+	out := &jsArray{}
+	seen := map[string]bool{}
+	note := func(n, vis string) {
+		if !seen[n] {
+			seen[n] = true
+			if vis == want {
+				out.elems = append(out.elems, jsSym{s: n})
+			}
+		}
+	}
+	anc := []interface{}{o}
+	if inherit {
+		anc = rt.rubyAncestors(o).elems
+	}
+	for _, a := range anc {
+		ao, isObj := a.(*jsObject)
+		if !isObj {
+			continue
+		}
+		if bn, isBuiltin := ao.props["__rbuiltin"].(string); isBuiltin {
+			if bn == "Object" {
+				for _, k := range ao.keys {
+					if strings.HasPrefix(k, "$p$") {
+						note(k[3:], "private")
+					}
+				}
+				for _, n := range rubyRespondNames["private"] {
+					note(n, "private")
+				}
+			}
+			continue
+		}
+		if ns, isArr := ao.props["__ipn"].(*jsArray); isArr {
+			for _, e := range ns.elems {
+				note(e.(string), "private")
+			}
+		}
+		if ns, isArr := ao.props["__imn"].(*jsArray); isArr {
+			for _, e := range ns.elems {
+				n := e.(string)
+				if _, q := ao.props["$q$"+n]; q {
+					note(n, "protected")
+				} else {
+					note(n, "public")
+				}
+			}
+		}
+	}
+	return out
 }
 
 // rubyRestricted: is n a private or protected method of a class chain (an

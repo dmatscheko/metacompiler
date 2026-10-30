@@ -563,18 +563,117 @@ function rbsBinInspect(b) {
     return out + "\""
 }
 
+// The invalid UTF-8 sequence at byte i of b (where rbsU8At answers 0) as MRI's
+// transcoder delimits it: a lead byte and the continuation bytes that may
+// follow it. [its length, 0 for a byte that starts no character, 1 for a
+// sequence the bytes end inside, 2 for one the next byte breaks].
+function rbsU8Bad(b, i) {
+    var c = b.charCodeAt(i)
+    var n = 0
+    if (c >= 194 && c <= 223) { n = 2 }
+    else if (c >= 224 && c <= 239) { n = 3 }
+    else if (c >= 240 && c <= 244) { n = 4 }
+    else { return [1, 0] }
+    var k = 1
+    while (k < n) {
+        if (i + k >= b.length) { return [k, 1] }
+        var d = b.charCodeAt(i + k)
+        var lo = 128
+        var hi = 191
+        if (k == 1 && c == 224) { lo = 160 }
+        if (k == 1 && c == 237) { hi = 159 }
+        if (k == 1 && c == 240) { lo = 144 }
+        if (k == 1 && c == 244) { hi = 143 }
+        if (d < lo || d > hi) { return [k, 2] }
+        k = k + 1
+    }
+    return [n, 2]
+}
+
+// String#encode over the modelled encodings UTF-8, US-ASCII and ASCII-8BIT:
+// the bytes b of encoding src written in dst. inv and undef are what replaces an
+// invalid byte sequence and a character dst has no code for, null to raise;
+// err receives MRI's message and class then. Bytes in one encoding are copied
+// as they are unless inv is given (String#scrub's case).
+function rbsEncode(b, src, dst, inv, undef, err) {
+    if (src == dst && inv === null) { return b }
+    var out = ""
+    var i = 0
+    while (i < b.length) {
+        var c = b.charCodeAt(i)
+        if (c < 128) {
+            out = out + b.charAt(i)
+            i = i + 1
+        } else if (src == "ASCII-8BIT") {
+            if (dst == "ASCII-8BIT") { out = out + b.charAt(i) }
+            else if (undef !== null) { out = out + undef }
+            else {
+                err.push(rbsBinInspect(b.charAt(i)) + " from ASCII-8BIT to " + dst)
+                err.push("Encoding::UndefinedConversionError")
+                return out
+            }
+            i = i + 1
+        } else if (src == "US-ASCII") {
+            if (inv === null) {
+                err.push(rbsBinInspect(b.charAt(i)) + " on US-ASCII")
+                err.push("Encoding::InvalidByteSequenceError")
+                return out
+            }
+            out = out + inv
+            i = i + 1
+        } else {
+            var n = rbsU8At(b, i)
+            if (n > 0 && dst == "UTF-8") { out = out + b.substring(i, i + n) }
+            else if (n > 0 && undef !== null) { out = out + undef }
+            else if (n > 0) {
+                var hx = rbsHexUp(rbsU8Cp(b, i, n))
+                while (hx.length < 4) { hx = "0" + hx }
+                err.push("U+" + hx + " from UTF-8 to " + dst)
+                err.push("Encoding::UndefinedConversionError")
+                return out
+            } else {
+                var bad = rbsU8Bad(b, i)
+                n = bad[0]
+                if (inv !== null) { out = out + inv }
+                else {
+                    var q = rbsBinInspect(b.substring(i, i + n))
+                    if (bad[1] == 1) { q = "incomplete " + q }
+                    if (bad[1] == 2) { q = q + " followed by " + rbsBinInspect(b.charAt(i + n)) }
+                    err.push(q + " on UTF-8")
+                    err.push("Encoding::InvalidByteSequenceError")
+                    return out
+                }
+            }
+            i = i + n
+        }
+    }
+    return out
+}
+
+// Upper-case hex digits of a non-negative integer.
+function rbsHexUp(v) {
+    var hx = "0123456789ABCDEF"
+    var out = ""
+    var x = v
+    while (x >= 16) {
+        out = hx.charAt(x % 16) + out
+        x = Math.floor(x / 16)
+    }
+    return hx.charAt(x) + out
+}
+
 // ----- Array#pack / String#unpack -----
 // Integers (C c S s L l Q q J j I i n N v V U, with the _ ! < > modifiers),
-// Strings (a A Z B b H h m) and positions (x X @), each with a count or `*'.
-// The float directives are not modelled. Go twins: rubyPack / rubyUnpack in
+// floats (e E g G d D f F), Strings (a A Z B b H h m) and positions (x X @),
+// each with a count or `*'. Go twins: rubyPack / rubyUnpack in
 // abnf/jsrtrubystr.go.
 //
-// The engine hands rbsPack its values as a number (an Integer, or a Float
-// truncated), {big: decimal text} (an Integer past 2^53), {str: bytes} (a
+// The engine hands rbsPack its values as a number (an Integer), {flo: number}
+// (a Float), {big: decimal text} (an Integer past 2^53), {str: bytes} (a
 // String, one char per byte), null (nil) or {cls: class name}; rbsUnpack answers
-// numbers, {big: decimal text}, {str: bytes, enc: encoding name} and null. An
-// error is err[0] (the message) and err[1] (the class, ArgumentError when
-// absent).
+// numbers, {flo: number}, {big: decimal text}, {str: bytes, enc: encoding name}
+// and null. An error is err[0] (the message) and err[1] (the class,
+// ArgumentError when absent).
 
 // The byte width of an integer directive, 0 for any other one, -1 for one that
 // is not modelled.
@@ -583,13 +682,17 @@ function rbsPackSize(d) {
     if (d == "S" || d == "s" || d == "n" || d == "v") { return 2 }
     if (d == "L" || d == "l" || d == "N" || d == "V" || d == "I" || d == "i") { return 4 }
     if (d == "Q" || d == "q" || d == "J" || d == "j") { return 8 }
+    if (d == "e" || d == "f" || d == "F" || d == "g") { return 4 }
+    if (d == "E" || d == "d" || d == "D" || d == "G") { return 8 }
     if (d == "U" || d == "a" || d == "A" || d == "Z" || d == "B" || d == "b" || d == "H" || d == "h"
         || d == "m" || d == "x" || d == "X" || d == "@") { return 0 }
     return 0 - 1
 }
 
 // The directives as [letter, count, byte width, big-endian, signed] records;
-// count -1 for `*'. err[0] names the first directive that is not modelled.
+// count -1 for `*'. err[0] names the first directive that is not modelled, or
+// is MRI's message with err[1] its class for a modifier after a type that
+// takes none.
 function rbsPackDirs(fmt, err) {
     var out = []
     var i = 0
@@ -602,13 +705,14 @@ function rbsPackDirs(fmt, err) {
             err.push(d)
             return out
         }
-        var be = d == "n" || d == "N"
+        var be = d == "n" || d == "N" || d == "g" || d == "G"
         var signed = d == "c" || d == "s" || d == "l" || d == "q" || d == "j" || d == "i"
         var native = "sSiIlLqQjJ"
         while (i < fmt.length && (fmt.charAt(i) == "_" || fmt.charAt(i) == "!" || fmt.charAt(i) == "<" || fmt.charAt(i) == ">")) {
             var mo = fmt.charAt(i)
             if (native.indexOf(d) < 0) {
-                err.push(d + mo)
+                err.push("'" + mo + "' allowed only after types " + native)
+                err.push("ArgumentError")
                 return out
             }
             if (mo == "<" || mo == ">") { be = mo == ">" }
@@ -636,8 +740,135 @@ function rbsPackCls(v) {
     if (v === null) { return "nil" }
     if (typeof v == "number") { return "Integer" }
     if (typeof v.big == "string") { return "Integer" }
+    if (typeof v.flo == "number") { return "Float" }
     if (typeof v.str == "string") { return "String" }
     return v.cls
+}
+
+// A pack value for an integer directive: a Float truncated.
+function rbsPackIntVal(v) {
+    if (v !== null && typeof v == "object" && typeof v.flo == "number") { return Math.trunc(v.flo) }
+    return v
+}
+
+// A float directive: e E g G d D f F.
+function rbsFloDir(d) {
+    return d == "e" || d == "E" || d == "g" || d == "G" || d == "d" || d == "D" || d == "f" || d == "F"
+}
+
+// x * 2^k, exact while the result is a double.
+function rbsScale2(x, k) {
+    var v = x
+    var n = k
+    while (n > 0) { v = v * 2; n = n - 1 }
+    while (n < 0) { v = v / 2; n = n + 1 }
+    return v
+}
+
+// The size (4 or 8) little-endian bytes of the IEEE 754 binary32 / binary64 of
+// x, half to even. A value past the largest binary32 is an infinity there
+// (MRI's VALUE_to_float), and a NaN is the quiet one with the sign clear.
+function rbsFloBytes(x, size) {
+    var mb = size == 4 ? 23 : 52
+    var bias = size == 4 ? 127 : 1023
+    var emax = size == 4 ? 255 : 2047
+    var top = rbsScale2(1, mb)
+    var zero = 0
+    var sign = x < 0 || (x === 0 && 1 / x < 0) ? 1 : 0
+    var a = sign == 1 ? -x : x
+    var ex = 0
+    var f = 0
+    if (x !== x) {
+        sign = 0
+        ex = emax
+        f = top / 2
+    } else if (a !== 0 && (a / 2 === a || (size == 4 && a > rbsScale2(16777215, 104)))) {
+        ex = emax
+    } else if (a !== 0) {
+        var e = 0
+        var t = a
+        while (t >= 2) { t = t / 2; e = e + 1 }
+        while (t < 1) { t = t * 2; e = e - 1 }
+        var q = e - mb
+        if (q < 1 - bias - mb) { q = 1 - bias - mb }
+        var s = rbsScale2(a, -q)
+        var m = Math.floor(s)
+        var d = s - m
+        if (d > 0.5 || (d === 0.5 && m % 2 == 1)) { m = m + 1 }
+        ex = q + mb + bias
+        if (m >= top * 2) {
+            m = m / 2
+            ex = ex + 1
+        }
+        if (m < top) { ex = 0 }
+        f = m < top ? m : m - top
+        if (ex >= emax) {
+            ex = emax
+            f = 0
+        }
+    }
+    var bits = []
+    var v = f
+    while (bits.length < mb) {
+        bits.push(v % 2)
+        v = Math.floor(v / 2)
+    }
+    v = ex
+    while (bits.length < size * 8 - 1) {
+        bits.push(v % 2)
+        v = Math.floor(v / 2)
+    }
+    bits.push(sign)
+    var out = []
+    var k = 0
+    while (k < size) {
+        var by = 0
+        var j = 7
+        while (j >= 0) {
+            by = by * 2 + bits[k * 8 + j]
+            j = j - 1
+        }
+        out.push(by)
+        k = k + 1
+    }
+    return out
+}
+
+// The Float the size bytes of b at p spell (big-endian when be).
+function rbsFloOf(b, p, size, be) {
+    var mb = size == 4 ? 23 : 52
+    var bias = size == 4 ? 127 : 1023
+    var emax = size == 4 ? 255 : 2047
+    var bits = []
+    var q = 0
+    while (q < size) {
+        var by = b.charCodeAt(be ? p + size - 1 - q : p + q)
+        var j = 0
+        while (j < 8) {
+            bits.push(by % 2)
+            by = Math.floor(by / 2)
+            j = j + 1
+        }
+        q = q + 1
+    }
+    var f = 0
+    var i = mb - 1
+    while (i >= 0) {
+        f = f * 2 + bits[i]
+        i = i - 1
+    }
+    var ex = 0
+    i = size * 8 - 2
+    while (i >= mb) {
+        ex = ex * 2 + bits[i]
+        i = i - 1
+    }
+    var zero = 0
+    var v = 0
+    if (ex == emax) { v = f == 0 ? 1 / zero : zero / zero }
+    else if (ex == 0) { v = rbsScale2(f, 1 - bias - mb) }
+    else { v = rbsScale2(rbsScale2(1, mb) + f, ex - bias - mb) }
+    return bits[size * 8 - 1] == 1 ? -v : v
 }
 
 // The k little-endian bytes of the decimal integer text dec modulo 2^(8k), two's
@@ -854,7 +1085,28 @@ function rbsPack(vals, dirs, err) {
                 err.push("too few arguments")
                 return out
             }
-            var v = vals[k]
+            if (rbsFloDir(d)) {
+                var fv = vals[k]
+                k = k + 1
+                var fx = 0
+                if (typeof fv == "number") { fx = fv }
+                else if (fv !== null && typeof fv.flo == "number") { fx = fv.flo }
+                else if (fv !== null && typeof fv.big == "string") { fx = parseFloat(fv.big) }
+                else {
+                    err.push("can't convert " + rbsPackCls(fv) + " into Float")
+                    err.push("TypeError")
+                    return out
+                }
+                var fb = rbsFloBytes(fx, size)
+                var fq = 0
+                while (fq < size) {
+                    out = out + String.fromCharCode(fb[dirs[i][3] ? size - 1 - fq : fq])
+                    fq = fq + 1
+                }
+                j = j + 1
+                continue
+            }
+            var v = rbsPackIntVal(vals[k])
             k = k + 1
             if (v === null || (typeof v != "number" && typeof v.big != "string")) {
                 err.push("no implicit conversion of " + rbsPackCls(v) + " into Integer")
@@ -1001,6 +1253,9 @@ function rbsUnpack(b, dirs, err) {
                 } else if (p + size > b.length) {
                     out.push(null)
                     p = b.length
+                } else if (rbsFloDir(d)) {
+                    out.push({flo: rbsFloOf(b, p, size, dirs[i][3])})
+                    p = p + size
                 } else {
                     out.push(rbsIntOf(b, p, size, dirs[i][3], dirs[i][4]))
                     p = p + size

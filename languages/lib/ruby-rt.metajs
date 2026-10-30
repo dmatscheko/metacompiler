@@ -365,6 +365,7 @@ function rbBinMethod(t, name, args) {
         return rbEncStr(rtRepeat(b, times), enc)
     }
     if (name == "unpack" || name == "unpack1") { return rbStrUnpack(b, name, args) }
+    if (name == "encode" || (name == "scrub" && blk === null)) { return rbStrEncode(b, enc, name, args) }
     var r = anytype
     if (name == "%" || name == "<" || name == ">" || name == "<=" || name == ">=" || name == "<=>" || name == "=~") {
         r = rbBin(name, b, rbBinText(rbArgAt(args, 0)))
@@ -415,11 +416,72 @@ function rbEncArg(e) {
     rbRaiseErr("force_encoding", "ArgumentError", "unknown encoding name - " + rbStr(e))
     return ""
 }
+// String#encode, and #scrub with no block, of the bytes b in encoding enc. Twin
+// of strEncode in ruby-interpreter.abnf, which states the rule.
+function rbStrEncode(b, enc, name, args) {
+    var pos = rbPosArgs(args)
+    var opts = anytype
+    opts = null
+    if (pos.length > 0 && rbIsDict(pos[pos.length - 1])) {
+        opts = pos[pos.length - 1]
+        pos.pop()
+    }
+    var u8rep = String.fromCharCode(239, 191, 189)
+    var err = []
+    if (name == "scrub") {
+        var srep = enc == "UTF-8" ? u8rep : "?"
+        if (pos.length > 0 && !rtIsNil(pos[0])) { srep = rbStrBytes(pos[0]) }
+        return rbEncStr(rbsEncode(b, enc, enc, srep, null, err), enc)
+    }
+    var dst = enc
+    if (pos.length > 0) { dst = rbEncodeName(pos[0]) }
+    var src = enc
+    if (pos.length > 1) { src = rbEncodeName(pos[1]) }
+    var invR = false
+    var undefR = false
+    var rep = dst == "UTF-8" ? u8rep : "?"
+    var k = 0
+    while (opts !== null && k < opts["keys"].length) {
+        var ok = anytype
+        ok = opts["keys"][k]
+        var on = ""
+        if (rbIsSym(ok)) { on = ok["s"] }
+        var ov = anytype
+        ov = opts["vals"][k]
+        var isRep = rbIsSym(ov) && ov["s"] == "replace"
+        if (on == "invalid") { invR = isRep }
+        else if (on == "undef") { undefR = isRep }
+        else if (on == "replace") { rep = rbStrBytes(ov) }
+        else { rbRaiseErr(name, "NotImplementedError", "String#encode option " + rbInspect(ok) + " is not supported") }
+        k = k + 1
+    }
+    if ((invR || undefR) && dst != "UTF-8" && !rbsAsciiOnly(rep)) {
+        rbRaiseErr(name, "Encoding::ConverterNotFoundError", "code converter not found (UTF-8 to " + dst + ")")
+    }
+    var ir = null
+    if (invR) { ir = rep }
+    var ur = null
+    if (undefR) { ur = rep }
+    var out = rbsEncode(b, src, dst, ir, ur, err)
+    if (err.length > 0) { rbRaiseErr(name, err[1], err[0]) }
+    return rbEncStr(out, dst)
+}
+// An encoding String#encode names. Twin of encodeName in ruby-interpreter.abnf.
+function rbEncodeName(e) {
+    if (rbIsObj(e) && typeof e["__renc"] == "string") { return e["__renc"] }
+    var n = rbStr(e).toUpperCase()
+    if (n == "BINARY" || n == "ASCII-8BIT") { return "ASCII-8BIT" }
+    if (n == "US-ASCII" || n == "ASCII") { return "US-ASCII" }
+    if (n == "UTF-8") { return "UTF-8" }
+    rbRaiseErr("encode", "NotImplementedError", "encoding " + rbStr(e) + " is not supported")
+    return ""
+}
 // String#unpack / #unpack1 of the bytes b. Twin of strUnpack in
 // ruby-interpreter.abnf.
 function rbStrUnpack(b, name, args) {
     var err = []
     var dirs = rbsPackDirs(rbStr(rbArgAt(args, 0)), err)
+    if (err.length > 1) { rbRaiseErr(name, err[1], err[0]) }
     if (err.length > 0) { rbRaiseErr(name, "NotImplementedError", "unpack directive '" + err[0] + "' is not supported") }
     var out = rbsUnpack(b, dirs, err)
     if (err.length > 0) { rbRaiseErr(name, "ArgumentError", err[0]) }
@@ -428,7 +490,8 @@ function rbStrUnpack(b, name, args) {
         var o = anytype
         o = out[i]
         if (o !== null && typeof o == "object") {
-            if (typeof o["big"] == "string") { out[i] = rtABigNarrow(rbABigFromStr(o["big"])) }
+            if (typeof o["flo"] == "number") { out[i] = rbMkFlo(o["flo"]) }
+            else if (typeof o["big"] == "string") { out[i] = rtABigNarrow(rbABigFromStr(o["big"])) }
             else { out[i] = rbEncStr(o["str"], o["enc"]) }
         }
         i = i + 1
@@ -3487,13 +3550,24 @@ function rbDictFind(keys, k) {
     var at = rtDictFind(keys, k)
     if (at >= 0) { return at }
     if (k === null) { return 0 - 1 }
+    // A String in another encoding keys with an equal String: the same bytes, in
+    // the same encoding unless ASCII-only (rbBinEq). Twin of rubyDictFind in
+    // abnf/jsrt.go.
+    if (typeof k == "string") {
+        var sk = 0
+        while (sk < keys.length) {
+            if (rbIsBox(keys[sk]) && rbBinEq(keys[sk], k)) { return sk }
+            sk = sk + 1
+        }
+        return 0 - 1
+    }
     if (typeof k != "object") { return 0 - 1 }
     // A String box is keyed by its text (rbDictSet stores the text).
     if (rtTag(k, "__rstr")) { return rbDictFind(keys, k["__s"]) }
     if (rtTag(k, "__rbin")) {
         var bk = 0
         while (bk < keys.length) {
-            if (rbIsBox(keys[bk]) && rbBinEq(keys[bk], k)) { return bk }
+            if (rbBinEq(keys[bk], k)) { return bk }
             bk = bk + 1
         }
         return 0 - 1
@@ -3941,6 +4015,55 @@ function rbAllIMethods(o) {
     }
     return out
 }
+// Module#private_instance_methods / #protected_instance_methods. Twin of
+// rubyVisIMethods in abnf/jsrtruby.go, which states the rule.
+function rbVisIMethods(o, want, inherit) {
+    var out = []
+    var seen = {}
+    var anc = inherit ? rbAncestors(o) : [o]
+    var i = 0
+    while (i < anc.length) {
+        var a = anc[i]
+        var names = []
+        var vis = []
+        if (typeof a["__rbuiltin"] == "string") {
+            if (a["__rbuiltin"] == "Object") {
+                var ks = keysOf(a)
+                var t = 0
+                while (t < ks.length) {
+                    if (ks[t].length > 3 && ks[t].substring(0, 3) == "$p$") { names.push(ks[t].substring(3)); vis.push("private") }
+                    t = t + 1
+                }
+                var pr = rbRespondRows()[1]
+                var u = 1
+                while (u < pr.length) { names.push(pr[u]); vis.push("private"); u = u + 1 }
+            }
+        } else {
+            var ipn = anytype
+            ipn = a["__ipn"]
+            var j = 0
+            while (ipn !== undefined && ipn !== null && j < ipn.length) { names.push(ipn[j]); vis.push("private"); j = j + 1 }
+            var imn = anytype
+            imn = a["__imn"]
+            var m = 0
+            while (imn !== undefined && imn !== null && m < imn.length) {
+                names.push(imn[m])
+                vis.push(a["$q$" + imn[m]] !== undefined ? "protected" : "public")
+                m = m + 1
+            }
+        }
+        var k = 0
+        while (k < names.length) {
+            if (seen["$" + names[k]] !== true) {
+                seen["$" + names[k]] = true
+                if (vis[k] == want) { out.push(rbSym(names[k])) }
+            }
+            k = k + 1
+        }
+        i = i + 1
+    }
+    return out
+}
 // Module#public_instance_methods: instance_methods less the protected ones. Twin
 // of rubyPublicIMethods in abnf/jsrt.go.
 function rbPublicIMethods(cls, names) {
@@ -4201,6 +4324,9 @@ function rbBuiltinClass(name) {
         c["$c$ASCII_8BIT"] = bin
         c["$c$US_ASCII"] = {__class: c, __renc: "US-ASCII"}
         c["$c$CompatibilityError"] = rbBuiltinClass("Encoding::CompatibilityError")
+        c["$c$UndefinedConversionError"] = rbBuiltinClass("Encoding::UndefinedConversionError")
+        c["$c$InvalidByteSequenceError"] = rbBuiltinClass("Encoding::InvalidByteSequenceError")
+        c["$c$ConverterNotFoundError"] = rbBuiltinClass("Encoding::ConverterNotFoundError")
     }
     rbClassTable[k] = c
     return c
@@ -4289,6 +4415,10 @@ rbExcParent["$Math::DomainError"] = "StandardError"
 // What joining a binary and a UTF-8 String, both non-ASCII, raises.
 rbExcParent["$EncodingError"] = "StandardError"
 rbExcParent["$Encoding::CompatibilityError"] = "EncodingError"
+// What String#encode raises.
+rbExcParent["$Encoding::UndefinedConversionError"] = "EncodingError"
+rbExcParent["$Encoding::InvalidByteSequenceError"] = "EncodingError"
+rbExcParent["$Encoding::ConverterNotFoundError"] = "EncodingError"
 
 function rbExcParentOf(name) {
     var p = rbExcParent["$" + name]
@@ -7376,6 +7506,7 @@ function rbArrayMethod(t, name, args) {
     if (name == "pack") {
         var perr = []
         var pdirs = rbsPackDirs(rbStr(rbArgAt(args, 0)), perr)
+        if (perr.length > 1) { rbRaiseErr(name, perr[1], perr[0]) }
         if (perr.length > 0) { rbRaiseErr(name, "NotImplementedError", "pack directive '" + perr[0] + "' is not supported") }
         var pv = []
         var pi = 0
@@ -7384,7 +7515,7 @@ function rbArrayMethod(t, name, args) {
             pe = t[pi]
             if (typeof pe == "number") { pv.push(pe) }
             else if (rbIsBig(pe)) { pv.push({big: rbStr(pe)}) }
-            else if (rbIsFlo(pe)) { pv.push(Math.trunc(rbToF(pe))) }
+            else if (rbIsFlo(pe)) { pv.push({flo: rbToF(pe)}) }
             else if (typeof pe == "string" || rbIsBox(pe) || (typeof pe == "object" && rtTag(pe, "__rstr"))) { pv.push({str: rbStrBytes(pe)}) }
             else if (rtIsNil(pe)) { pv.push(null) }
             else { pv.push({cls: rbFmtConvName(pe)}) }
@@ -8234,6 +8365,7 @@ function rbMethod(target, name, args) {
         if (name == "encoding") { return rbBuiltinClass("Encoding")["$c$UTF_8"] }
         if (name == "force_encoding") { return rbEncStr(rbsBinOf(target), rbEncArg(rbArgAt(args, 0))) }
         if (name == "unpack" || name == "unpack1") { return rbStrUnpack(rbsBinOf(target), name, args) }
+        if (name == "encode") { return rbStrEncode(rbsBinOf(target), "UTF-8", name, args) }
         if (name == "length" || name == "size") { return rbCharCount(target) }
         if (name == "to_s") { return target }
         // The QUOTED form, for `p` of a string or any .inspect reaching a String.
@@ -8486,6 +8618,9 @@ function rbMethod(target, name, args) {
             if (name == "public_instance_methods") {
                 if (rbNPos(args) > 0 && !rbTruthy(rbArgAt(args, 0))) { return rbPublicIMethods(target, rbOwnIMethods(target)) }
                 return rbPublicIMethods(target, rbAllIMethods(target))
+            }
+            if (name == "private_instance_methods" || name == "protected_instance_methods") {
+                return rbVisIMethods(target, name.substring(0, name.indexOf("_")), !(rbNPos(args) > 0 && !rbTruthy(rbArgAt(args, 0))))
             }
             if (name == "method_defined?" || name == "public_method_defined?" || name == "private_method_defined?" || name == "protected_method_defined?") {
                 var mvk = rbMethodVis(target, rbStr(rbArgAt(args, 0)), rbNPos(args) < 2 || rbTruthy(rbArgAt(args, 1)))

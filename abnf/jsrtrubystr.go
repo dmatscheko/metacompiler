@@ -3,6 +3,7 @@ package abnf
 import (
 	"bytes"
 	"encoding/base64"
+	"fmt"
 	"math"
 	"math/big"
 	"strconv"
@@ -1059,8 +1060,10 @@ func rubyPackSize(d byte) int {
 		return 2
 	case 'L', 'l', 'N', 'V', 'I', 'i':
 		return 4
-	case 'Q', 'q', 'J', 'j':
+	case 'Q', 'q', 'J', 'j', 'E', 'd', 'D', 'G':
 		return 8
+	case 'e', 'f', 'F', 'g':
+		return 4
 	case 'U', 'a', 'A', 'Z', 'B', 'b', 'H', 'h', 'm', 'x', 'X', '@':
 		return 0
 	}
@@ -1079,11 +1082,11 @@ func (rt *jsrt) rubyPackDirs(name, f string) []rubyPackDir {
 		if size < 0 {
 			rt.rubyRaiseErr(name, "NotImplementedError", name+" directive '"+string(rune(d))+"' is not supported")
 		}
-		be := d == 'n' || d == 'N'
+		be := d == 'n' || d == 'N' || d == 'g' || d == 'G'
 		signed := strings.IndexByte("cslqji", d) >= 0
 		for i < len(f) && strings.IndexByte("_!<>", f[i]) >= 0 {
 			if strings.IndexByte("sSiIlLqQjJ", d) < 0 {
-				rt.rubyRaiseErr(name, "NotImplementedError", name+" directive '"+string(rune(d))+string(rune(f[i]))+"' is not supported")
+				rt.rubyRaiseErr(name, "ArgumentError", "'"+string(rune(f[i]))+"' allowed only after types sSiIlLqQjJ")
 			}
 			switch f[i] {
 			case '<':
@@ -1128,6 +1131,71 @@ func rubyPackInt(v interface{}) (*big.Int, bool) {
 		return i, true
 	}
 	return nil, false
+}
+
+func rubyFloDir(d byte) bool { return strings.IndexByte("eEgGdDfF", d) >= 0 }
+
+// rubyFloBytes is a float directive's bytes for the pack value v: IEEE 754
+// binary32 or binary64. A value past the largest binary32 is an infinity there
+// (MRI's VALUE_to_float) and a NaN is the quiet one with the sign clear. Twin
+// of rbsFloBytes in ruby-str.js.
+func (rt *jsrt) rubyFloBytes(v interface{}, d rubyPackDir) []byte {
+	var x float64
+	switch t := v.(type) {
+	case float64:
+		x = t
+	case jsFlo:
+		x = t.f
+	case *jsBigInt:
+		x, _ = new(big.Float).SetInt(t.v).Float64()
+	default:
+		rt.rubyRaiseErr("pack", "TypeError", "can't convert "+rubyFmtConvName(v)+" into Float")
+	}
+	out := make([]byte, d.size)
+	var bits uint64
+	if d.size == 4 {
+		f := float32(x)
+		switch {
+		case math.IsNaN(x):
+			bits = 0x7FC00000
+		case x > math.MaxFloat32:
+			bits = uint64(math.Float32bits(float32(math.Inf(1))))
+		case x < -math.MaxFloat32:
+			bits = uint64(math.Float32bits(float32(math.Inf(-1))))
+		default:
+			bits = uint64(math.Float32bits(f))
+		}
+	} else if math.IsNaN(x) {
+		bits = 0x7FF8000000000000
+	} else {
+		bits = math.Float64bits(x)
+	}
+	for q := 0; q < d.size; q++ {
+		c := byte(bits >> (8 * q))
+		if d.be {
+			out[d.size-1-q] = c
+		} else {
+			out[q] = c
+		}
+	}
+	return out
+}
+
+// rubyFloOf is the Float the bytes b of a float directive spell. Twin of
+// rbsFloOf in ruby-str.js.
+func rubyFloOf(b string, be bool) float64 {
+	var bits uint64
+	for q := 0; q < len(b); q++ {
+		c := b[q]
+		if be {
+			c = b[len(b)-1-q]
+		}
+		bits |= uint64(c) << (8 * q)
+	}
+	if len(b) == 4 {
+		return float64(math.Float32frombits(uint32(bits)))
+	}
+	return math.Float64frombits(bits)
 }
 
 // rubyIntBytes is the k little-endian bytes of x modulo 2^(8k), two's
@@ -1190,6 +1258,10 @@ func (rt *jsrt) rubyPack(vals []interface{}, f string) interface{} {
 			}
 			for j := 0; j < n; j++ {
 				v := next()
+				if rubyFloDir(d.d) {
+					out = append(out, rt.rubyFloBytes(v, d)...)
+					continue
+				}
 				x, ok := rubyPackInt(v)
 				if !ok {
 					rt.rubyRaiseErr("pack", "TypeError", "no implicit conversion of "+rubyFmtConvName(v)+" into Integer")
@@ -1407,6 +1479,9 @@ func (rt *jsrt) rubyUnpack(b, name string, args []interface{}) interface{} {
 				case p+d.size > len(b):
 					out.elems = append(out.elems, jsNull)
 					p = len(b)
+				case rubyFloDir(d.d):
+					out.elems = append(out.elems, jsFlo{f: rubyFloOf(b[p:p+d.size], d.be)})
+					p += d.size
 				default:
 					out.elems = append(out.elems, rt.rubyIntOf(b[p:p+d.size], d.be, d.signed))
 					p += d.size
@@ -1593,6 +1668,196 @@ func rubyBinEq(b *jsRBin, o interface{}) bool {
 	return ob == b.b && (oe == b.encName() || rubyAsciiOnly(ob))
 }
 
+// rubyU8Bad is the invalid UTF-8 sequence at the start of b as MRI's transcoder
+// delimits it: its length, and 0 for a byte that starts no character, 1 for a
+// sequence b ends inside, 2 for one the next byte breaks. Twin of rbsU8Bad in
+// ruby-str.js.
+func rubyU8Bad(b string) (int, int) {
+	c := b[0]
+	n := 0
+	switch {
+	case c >= 0xC2 && c <= 0xDF:
+		n = 2
+	case c >= 0xE0 && c <= 0xEF:
+		n = 3
+	case c >= 0xF0 && c <= 0xF4:
+		n = 4
+	default:
+		return 1, 0
+	}
+	for k := 1; k < n; k++ {
+		if k >= len(b) {
+			return k, 1
+		}
+		lo, hi := byte(0x80), byte(0xBF)
+		if k == 1 {
+			switch c {
+			case 0xE0:
+				lo = 0xA0
+			case 0xED:
+				hi = 0x9F
+			case 0xF0:
+				lo = 0x90
+			case 0xF4:
+				hi = 0x8F
+			}
+		}
+		if b[k] < lo || b[k] > hi {
+			return k, 2
+		}
+	}
+	return n, 2
+}
+
+// rubyEncodeBytes is String#encode of the bytes b of encoding src into dst over
+// UTF-8, US-ASCII and ASCII-8BIT; inv / undef replace an invalid sequence / a
+// character dst has no code for, and nil raises MRI's error. Twin of rbsEncode
+// in ruby-str.js.
+func (rt *jsrt) rubyEncodeBytes(name, b, src, dst string, inv, undef *string) string {
+	if src == dst && inv == nil {
+		return b
+	}
+	var sb strings.Builder
+	for i := 0; i < len(b); {
+		c := b[i]
+		switch {
+		case c < 128:
+			sb.WriteByte(c)
+			i++
+		case src == "ASCII-8BIT":
+			if dst == "ASCII-8BIT" {
+				sb.WriteByte(c)
+			} else if undef != nil {
+				sb.WriteString(*undef)
+			} else {
+				rt.rubyRaiseErr(name, "Encoding::UndefinedConversionError", rubyBinInspect(b[i:i+1])+" from ASCII-8BIT to "+dst)
+			}
+			i++
+		case src == "US-ASCII":
+			if inv == nil {
+				rt.rubyRaiseErr(name, "Encoding::InvalidByteSequenceError", rubyBinInspect(b[i:i+1])+" on US-ASCII")
+			}
+			sb.WriteString(*inv)
+			i++
+		default:
+			r, n := utf8.DecodeRuneInString(b[i:])
+			if r != utf8.RuneError || n > 1 {
+				switch {
+				case dst == "UTF-8":
+					sb.WriteString(b[i : i+n])
+				case undef != nil:
+					sb.WriteString(*undef)
+				default:
+					rt.rubyRaiseErr(name, "Encoding::UndefinedConversionError", fmt.Sprintf("U+%04X from UTF-8 to %s", r, dst))
+				}
+				i += n
+				continue
+			}
+			n, kind := rubyU8Bad(b[i:])
+			if inv == nil {
+				q := rubyBinInspect(b[i : i+n])
+				switch kind {
+				case 1:
+					q = "incomplete " + q
+				case 2:
+					q += " followed by " + rubyBinInspect(b[i+n:i+n+1])
+				}
+				rt.rubyRaiseErr(name, "Encoding::InvalidByteSequenceError", q+" on UTF-8")
+			}
+			sb.WriteString(*inv)
+			i += n
+		}
+	}
+	return sb.String()
+}
+
+// rubyStrEncode is String#encode(dst = enc, src = enc, invalid: :replace,
+// undef: :replace, replace: str), and #scrub(rep) with no block, of the bytes b
+// in encoding enc. Twin of strEncode in ruby-interpreter.abnf.
+func (rt *jsrt) rubyStrEncode(b, enc, name string, pos []interface{}) interface{} {
+	var keys, vals *jsArray
+	if len(pos) > 0 {
+		if k, v, isDict := dictParts(pos[len(pos)-1]); isDict {
+			keys, vals = k, v
+			pos = pos[:len(pos)-1]
+		}
+	}
+	u8rep := "\uFFFD"
+	if name == "scrub" {
+		rep := "?"
+		if enc == "UTF-8" {
+			rep = u8rep
+		}
+		if len(pos) > 0 && pos[0] != jsNull {
+			rep, _ = rt.rubyStrBE(pos[0])
+		}
+		return rubyEncStr(rt.rubyEncodeBytes(name, b, enc, enc, &rep, nil), enc)
+	}
+	dst, src := enc, enc
+	if len(pos) > 0 {
+		dst = rt.rubyEncodeName(pos[0])
+	}
+	if len(pos) > 1 {
+		src = rt.rubyEncodeName(pos[1])
+	}
+	invR, undefR := false, false
+	rep := "?"
+	if dst == "UTF-8" {
+		rep = u8rep
+	}
+	if keys != nil {
+		for k, kv := range keys.elems {
+			on := ""
+			if sym, isSym := kv.(jsSym); isSym {
+				on = sym.s
+			}
+			sv, isSym := vals.elems[k].(jsSym)
+			isRep := isSym && sv.s == "replace"
+			switch on {
+			case "invalid":
+				invR = isRep
+			case "undef":
+				undefR = isRep
+			case "replace":
+				rep, _ = rt.rubyStrBE(vals.elems[k])
+			default:
+				rt.rubyRaiseErr(name, "NotImplementedError", "String#encode option "+rt.rubyInspect(kv)+" is not supported")
+			}
+		}
+	}
+	if (invR || undefR) && dst != "UTF-8" && !rubyAsciiOnly(rep) {
+		rt.rubyRaiseErr(name, "Encoding::ConverterNotFoundError", "code converter not found (UTF-8 to "+dst+")")
+	}
+	var inv, undef *string
+	if invR {
+		inv = &rep
+	}
+	if undefR {
+		undef = &rep
+	}
+	return rubyEncStr(rt.rubyEncodeBytes(name, b, src, dst, inv, undef), dst)
+}
+
+// rubyEncodeName is an encoding String#encode names; the ones no engine models
+// are NotImplementedError. Twin of encodeName in ruby-interpreter.abnf.
+func (rt *jsrt) rubyEncodeName(e interface{}) string {
+	if o, isObj := e.(*jsObject); isObj {
+		if n, has := o.props["__renc"].(string); has {
+			return n
+		}
+	}
+	switch strings.ToUpper(rt.rubyStr(e)) {
+	case "BINARY", "ASCII-8BIT":
+		return "ASCII-8BIT"
+	case "US-ASCII", "ASCII":
+		return "US-ASCII"
+	case "UTF-8":
+		return "UTF-8"
+	}
+	rt.rubyRaiseErr("encode", "NotImplementedError", "encoding "+rt.rubyStr(e)+" is not supported")
+	return ""
+}
+
 // rubyBinMethod is a method of a box: the ones that read its bytes here, every
 // other String method on its text, a String it answers in its encoding. Twin
 // of binMethod in ruby-interpreter.abnf.
@@ -1679,6 +1944,12 @@ func (rt *jsrt) rubyBinMethod(t *jsRBin, name string, args []interface{}) interf
 		return rubyEncStr(strings.Repeat(t.b, n), enc)
 	case "unpack", "unpack1":
 		return rt.rubyUnpack(t.b, name, pos)
+	case "encode":
+		return rt.rubyStrEncode(t.b, enc, name, pos)
+	case "scrub":
+		if blk == nil {
+			return rt.rubyStrEncode(t.b, enc, name, pos)
+		}
 	}
 	var r interface{}
 	if rubyBinOpName(name) {

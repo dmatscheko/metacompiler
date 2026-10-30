@@ -3824,6 +3824,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (name == "==" || name == "===" || name == "eql?") { return binEq(t, args[0]) }
         if (name == "*") { return encStr(strRepeat(b, Math.trunc(toF(args[0]))), enc) }
         if (name == "unpack" || name == "unpack1") { return strUnpack(b, name, args) }
+        if (name == "encode" || (name == "scrub" && blk == null)) { return strEncode(b, enc, name, args) }
         var r = anytype
         r = isBinOpName(name) ? rbin(name, b, binText(args[0])) : mcall(b, name, args, blk)
         if (typeof r == "string" || isRStr(r)) { return encStr(binText(r), enc) }
@@ -3876,17 +3877,73 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         raiseErr("force_encoding", "ArgumentError", "unknown encoding name - " + rstr(e))
         return ""
     }
+    // String#encode, and #scrub with no block, of the bytes b in encoding enc
+    // (rbsEncode in lib/ruby-str.js): encode(dst = enc, src = enc, invalid:
+    // :replace, undef: :replace, replace: str); scrub(rep) replaces the invalid
+    // sequences. Twins: rubyStrEncode in abnf/jsrtrubystr.go, rbStrEncode in
+    // lib/ruby-rt.metajs.
+    function strEncode(b, enc, name, args) {
+        var pos = args
+        var opts = anytype
+        opts = null
+        if (pos.length > 0 && isDict(pos[pos.length - 1])) {
+            opts = pos[pos.length - 1]
+            pos = pos.slice(0, pos.length - 1)
+        }
+        var u8rep = String.fromCharCode(239, 191, 189)
+        var err = []
+        if (name == "scrub") {
+            var srep = pos.length > 0 && pos[0] !== null ? strBytes(pos[0]) : (enc == "UTF-8" ? u8rep : "?")
+            return encStr(rbsEncode(b, enc, enc, srep, null, err), enc)
+        }
+        var dst = pos.length > 0 ? encodeName(pos[0]) : enc
+        var src = pos.length > 1 ? encodeName(pos[1]) : enc
+        var invR = false
+        var undefR = false
+        var rep = dst == "UTF-8" ? u8rep : "?"
+        for (var k = 0; opts !== null && k < opts.keys.length; k++) {
+            var on = isSym(opts.keys[k]) ? opts.keys[k].s : ""
+            var ov = anytype
+            ov = opts.vals[k]
+            var isRep = isSym(ov) && ov.s == "replace"
+            if (on == "invalid") { invR = isRep }
+            else if (on == "undef") { undefR = isRep }
+            else if (on == "replace") { rep = strBytes(ov) }
+            else { raiseErr(name, "NotImplementedError", "String#encode option " + rinspect(opts.keys[k]) + " is not supported") }
+        }
+        if ((invR || undefR) && dst != "UTF-8" && !rbsAsciiOnly(rep)) {
+            raiseErr(name, "Encoding::ConverterNotFoundError", "code converter not found (UTF-8 to " + dst + ")")
+        }
+        var out = rbsEncode(b, src, dst, invR ? rep : null, undefR ? rep : null, err)
+        if (err.length > 0) { raiseErr(name, err[1], err[0]) }
+        return encStr(out, dst)
+    }
+    // An encoding String#encode names; the encodings no engine models are
+    // NotImplementedError.
+    function encodeName(e) {
+        if (isUserObj(e) && e.__renc !== undefined) { return e.__renc }
+        var n = rstr(e).toUpperCase()
+        if (n == "BINARY" || n == "ASCII-8BIT") { return "ASCII-8BIT" }
+        if (n == "US-ASCII" || n == "ASCII") { return "US-ASCII" }
+        if (n == "UTF-8") { return "UTF-8" }
+        raiseErr("encode", "NotImplementedError", "encoding " + rstr(e) + " is not supported")
+        return ""
+    }
     // String#unpack / #unpack1 of the bytes b.
     function strUnpack(b, name, args) {
         var err = []
         var dirs = rbsPackDirs(rstr(args[0]), err)
+        if (err.length > 1) { raiseErr(name, err[1], err[0]) }
         if (err.length > 0) { raiseErr(name, "NotImplementedError", "unpack directive '" + err[0] + "' is not supported") }
         var out = rbsUnpack(b, dirs, err)
         if (err.length > 0) { raiseErr(name, "ArgumentError", err[0]) }
         for (var i = 0; i < out.length; i++) {
             var o = anytype
             o = out[i]
-            if (o !== null && typeof o == "object") { out[i] = typeof o.big == "string" ? bigOut(bigFromDec(o.big)) : encStr(o.str, o.enc) }
+            if (o !== null && typeof o == "object") {
+                if (typeof o.flo == "number") { out[i] = mkFlo(o.flo) }
+                else { out[i] = typeof o.big == "string" ? bigOut(bigFromDec(o.big)) : encStr(o.str, o.enc) }
+            }
         }
         if (name == "unpack1") { return out.length > 0 ? out[0] : null }
         return out
@@ -3899,7 +3956,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             v = t[i]
             if (typeof v == "number") { out.push(v) }
             else if (isBig(v)) { out.push({big: bigStr(v)}) }
-            else if (isFlo(v)) { out.push(Math.trunc(toF(v))) }
+            else if (isFlo(v)) { out.push({flo: toF(v)}) }
             else if (typeof v == "string" || isRStr(v) || isBin(v)) { out.push({str: strBytes(v)}) }
             else if (v === null || v === undefined) { out.push(null) }
             else { out.push({cls: fmtConvName(v)}) }
@@ -9130,6 +9187,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (name == "encoding") { return hostGlobals["Encoding"]["$c$UTF_8"] }
             if (name == "force_encoding") { return encStr(rbsBinOf(target), encArgName(args[0])) }
             if (name == "unpack" || name == "unpack1") { return strUnpack(rbsBinOf(target), name, args) }
+            if (name == "encode") { return strEncode(rbsBinOf(target), "UTF-8", name, args) }
             // index and rindex take a String or a Regexp, and a character offset.
             // Twins: rbStrSearch in lib/ruby-rt.metajs, rubyStrIndex in abnf/jsrtrubystr.go.
             if (name == "index" || name == "rindex") {
@@ -9528,6 +9586,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (name == "instance_methods") { return args.length > 0 && !rtest(args[0]) ? ownInstanceMethods(target) : allInstanceMethods(target) }
             if (name == "public_instance_methods") {
                 return publicOnly(target, args.length > 0 && !rtest(args[0]) ? ownInstanceMethods(target) : allInstanceMethods(target))
+            }
+            if (name == "private_instance_methods" || name == "protected_instance_methods") {
+                return visInstanceMethods(target, name.substring(0, name.indexOf("_")), !(args.length > 0 && !rtest(args[0])))
             }
             if (name == "method_defined?" || name == "public_method_defined?" || name == "private_method_defined?" || name == "protected_method_defined?") {
                 var mvk = methodVisIn(target, rstr(args[0]), !(args.length > 1 && !rtest(args[1])))
@@ -10450,6 +10511,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (name == "pack") {
             var perr = []
             var pdirs = rbsPackDirs(rstr(args[0]), perr)
+            if (perr.length > 1) { raiseErr(name, perr[1], perr[0]) }
             if (perr.length > 0) { raiseErr(name, "NotImplementedError", "pack directive '" + perr[0] + "' is not supported") }
             var ps = rbsPack(packArgs(t), pdirs, perr)
             if (perr.length > 0) { raiseErr(name, perr.length > 1 ? perr[1] : "ArgumentError", perr[0]) }
@@ -11586,6 +11648,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // only there is a NEW local of the method.
     function rubySet(name, value) {
         var loc = isLocalName(name)
+        var c0 = name.charCodeAt(0)
+        if (c0 >= 65 && c0 <= 90 && curClass !== null && hasOwn(scopes[scopes.length - 1], "$cgate")) {
+            bodyConst(name, value)
+            return
+        }
         for (var i = scopes.length - 1; i >= 0; i--) {
             if (hasOwn(scopes[i], name)) {
                 if (i == 0 && loc && topHidden()) { break }
@@ -11607,7 +11674,14 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // A class or module statement binds its name in the body it is written in, never
     // in an outer scope that holds the name.
     function constBind(name, value) {
-        if (curClass === null || name.indexOf("::") >= 0) { rubySet(name, value) } else { scopeBind(name, value) }
+        if (curClass === null || name.indexOf("::") >= 0) { rubySet(name, value) } else { bodyConst(name, value) }
+    }
+    // A constant a class or module body binds is the body's own (M::K beside a
+    // top-level K) and a member of the class at once, so a method the body
+    // calls already finds it (lexConst).
+    function bodyConst(name, value) {
+        scopeBind(name, value)
+        scopePut(curClass, "$c$" + name, value)
     }
     // A `.name' step before the last is a zero-argument method call, read as a
     // member chain reads it (foldCallMember); the last step is the place written.
@@ -12047,7 +12121,6 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 if (mod.__cnames == undefined) { mod.__cnames = [] }
                 if (mod.__cnames.indexOf(n) < 0) { mod.__cnames.push(n) }
             }
-            if (!hasOwn(globalScope, n) && !hasOwn(hostGlobals, n)) { scopePut(globalScope, n, sc[n]) }
         }
     }
 
@@ -12811,8 +12884,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // "$d$" + name, which is what a call reads, because a local assignment overwrites
     // the plain slot - and a def does not overwrite a local bound before it. Twin of
     // curTopLocals in ruby-to-llvm-ir.abnf.
+    var topDefNames = []
     function defDecl(name, clo) {
         var sc = scopes[scopes.length - 1]
+        if (sc === globalScope && !hasOwn(sc, "$d$" + name)) { topDefNames.push(name) }
         if (!hasOwn(sc, name) || (hasOwn(sc, "$d$" + name) && sc[name] === sc["$d$" + name])) { declVar(name, clo) }
         declVar("$d$" + name, clo)
     }
@@ -12932,12 +13007,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // the curClsPath key in ruby-to-llvm-ir.abnf.
     function ownConst(name) {
         if (curClass === null || name.indexOf("::") >= 0) {
-            // A nested class is also bound globally (publishModuleScope), but it is
-            // not the top-level constant of its name.
-            var g = anytype
-            g = hasOwn(globalScope, name) ? globalScope[name] : undefined
-            if (g != undefined && g != null && g.__isclass === true && typeof g.__name == "string" && g.__name.substring(g.__name.length - name.length - 2) == "::" + name) { return undefined }
-            return g
+            return hasOwn(globalScope, name) ? globalScope[name] : undefined
         }
         for (var i = scopes.length - 1; i >= 1; i--) {
             if (hasOwn(scopes[i], name)) { return scopes[i][name] }
@@ -13195,12 +13265,18 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     }
     function ownInstanceMethods(c) {
         var out = []
-        if (c.__imn == undefined) { return out }
-        for (var i = 0; i < c.__imn.length; i++) {
+        for (var i = 0; c.__imn != undefined && i < c.__imn.length; i++) {
             var n = c.__imn[i]
             if (n == "initialize" || n == "initialize_copy" || n == "respond_to_missing?") { continue }
             if (hasOwn(c, "$v$" + n) && c["$v$" + n] == "private") { continue }
             out.push(mkSym(n))
+        }
+        // A name a visibility directive names is the class's own too, an inherited
+        // one included (MRI gives the class an entry of that visibility).
+        for (var j = 0; c.__vdn != undefined && j < c.__vdn.length; j++) {
+            var vn = c.__vdn[j]
+            if (c["$v$" + vn] == "private" || symListHas(out, vn)) { continue }
+            out.push(mkSym(vn))
         }
         return out
     }
@@ -13879,16 +13955,15 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
         nameErr("NameError", "uninitialized constant " + pre, parts[i - 1], findSelf())
     }
-    // A constant read in a method resolves lexically first: in the class or module
-    // the def is written in, then in the ones around it by its path (M::X from a
-    // method of M, even beside a top-level X). Twin of lexConstPath in
-    // ruby-to-llvm-ir.abnf.
+    // A constant read in a method or a class body resolves lexically first: in the
+    // class or module the def or body is written in, then in the ones around it by
+    // its path (M::X from a method or a reopened body of M, even beside a
+    // top-level X). Twin of lexConstPath in ruby-to-llvm-ir.abnf.
     // The classes are found by $defclass's path, as the owner a def records need
     // not be the live class object.
     function lexConst(name) {
-        if (!hasVar("$defclass")) { return undefined }
         var dc = anytype
-        dc = getVar("$defclass")
+        dc = hasVar("$defclass") ? getVar("$defclass") : curClass
         if (dc === undefined || dc === null || dc.__isclass !== true) { return undefined }
         var paths = constPrefixes(dc.__name)
         for (var i = paths.length - 1; i >= 0; i--) {
@@ -14306,6 +14381,38 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
         return out
     }
+    // Module#private_instance_methods / #protected_instance_methods: the names
+    // each ancestor gives that visibility itself (a def under `private', `private
+    // :m' over an inherited method; initialize and its kin are private), nearest
+    // first and once each, a nearer one of another visibility hiding it; with
+    // inheritance a class's private ones also take in Object's, the top-level defs
+    // and the private Kernel methods. Twins: rubyVisIMethods in abnf/jsrt.go,
+    // rbVisIMethods in lib/ruby-rt.metajs.
+    function visInstanceMethods(cls, want, inherit) {
+        var out = []
+        var seen = {}
+        var anc = inherit ? ancestorsOf(cls) : [cls]
+        for (var i = 0; i < anc.length; i++) {
+            var c = anc[i]
+            var names = []
+            if (c.__builtin === true) {
+                if (c.__name == "Object") { names = topDefNames.concat(rbRespondRows()[1].slice(1)) }
+            } else {
+                if (c.__imn != undefined) { names = names.concat(c.__imn) }
+                if (c.__vdn != undefined) { names = names.concat(c.__vdn) }
+            }
+            for (var j = 0; j < names.length; j++) {
+                var n = names[j]
+                if (seen["$" + n] === true) { continue }
+                seen["$" + n] = true
+                var v = "public"
+                if (c.__builtin === true || n == "initialize" || n == "initialize_copy" || n == "respond_to_missing?") { v = "private" }
+                else if (hasOwn(c, "$v$" + n)) { v = c["$v$" + n] }
+                if (v == want) { out.push(mkSym(n)) }
+            }
+        }
+        return out
+    }
     // Module#public_instance_methods: instance_methods less the protected ones.
     // Twins: rubyPublicIMethods in abnf/jsrt.go, rbPublicIMethods in
     // lib/ruby-rt.metajs.
@@ -14512,6 +14619,12 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     hostGlobals["EncodingError"] = mkBuiltinClass("EncodingError", stdErr)
     hostGlobals["Encoding::CompatibilityError"] = mkBuiltinClass("Encoding::CompatibilityError", hostGlobals["EncodingError"])
     hostGlobals["Encoding"]["$c$CompatibilityError"] = hostGlobals["Encoding::CompatibilityError"]
+    // What String#encode raises.
+    var encErrs = ["UndefinedConversionError", "InvalidByteSequenceError", "ConverterNotFoundError"]
+    for (var eei = 0; eei < encErrs.length; eei++) {
+        hostGlobals["Encoding::" + encErrs[eei]] = mkBuiltinClass("Encoding::" + encErrs[eei], hostGlobals["EncodingError"])
+        hostGlobals["Encoding"]["$c$" + encErrs[eei]] = hostGlobals["Encoding::" + encErrs[eei]]
+    }
     // Regexp's option bits, the second argument of Regexp.new.
     hostGlobals["Regexp"]["$c$IGNORECASE"] = 1
     hostGlobals["Regexp"]["$c$EXTENDED"] = 2
@@ -14649,6 +14762,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         for (var i = 0; i < args.length; i++) {
             scopePut(c, "$v$" + rstr(args[i]), mode)
             setterNote(rstr(args[i]))
+            if (c.__vdn == undefined) { c.__vdn = [] }
+            c.__vdn.push(rstr(args[i]))
         }
         return null
     }
@@ -14924,7 +15039,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     core.keyId = function(k) {
         if (isBig(k)) { return "b" + bigStr(k) }
         if (isRStr(k)) { return "s" + k.__rs }
-        if (isBin(k)) { return "x" + (rbsAsciiOnly(k.__rbin) ? "" : binEnc(k) + ":") + k.__rbin }
+        // An ASCII-only box is the same key as the plain String of its text.
+        if (isBin(k)) { return rbsAsciiOnly(k.__rbin) ? "s" + k.__rbin : "x" + binEnc(k) + ":" + k.__rbin }
         return null
     }
     // An ARRAY is a VALUE key in Ruby (Array#hash and Array#eql? are structural),

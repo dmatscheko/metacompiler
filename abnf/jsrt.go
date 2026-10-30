@@ -7108,6 +7108,9 @@ func (rt *jsrt) rubyBuiltinClass(name string) *jsObject {
 		c.set("$c$ASCII_8BIT", bin)
 		c.set("$c$US_ASCII", enc("US-ASCII"))
 		c.set("$c$CompatibilityError", rt.rubyBuiltinClass("Encoding::CompatibilityError"))
+		for _, n := range []string{"UndefinedConversionError", "InvalidByteSequenceError", "ConverterNotFoundError"} {
+			c.set("$c$"+n, rt.rubyBuiltinClass("Encoding::"+n))
+		}
 	}
 	rt.rubyClasses[name] = c
 	return c
@@ -9884,6 +9887,28 @@ func (rt *jsrt) rubyDictFind(keys *jsArray, k interface{}) int {
 		}
 		return -1
 	}
+	// A String in another encoding keys with an equal String: the same bytes, in
+	// the same encoding unless ASCII-only (rubyBinEq). A box is never indexed, so
+	// a dict holding one has dictIdxAll false and a plain String scans only then.
+	if s, isStr := k.(string); isStr {
+		if keys.dictIdxAll {
+			return -1
+		}
+		for i, e := range keys.elems {
+			if b, isBin := e.(*jsRBin); isBin && rubyBinEq(b, s) {
+				return i
+			}
+		}
+		return -1
+	}
+	if b, isBin := k.(*jsRBin); isBin {
+		for i, e := range keys.elems {
+			if rubyBinEq(b, e) {
+				return i
+			}
+		}
+		return -1
+	}
 	if !rubyValueKey(k) {
 		return -1
 	}
@@ -10796,6 +10821,9 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 			return rubyEncStr(s, rt.rubyEncArg(argAt(args, 0)))
 		case "unpack", "unpack1":
 			return rt.rubyUnpack(s, name, args)
+		case "encode":
+			pos, _ := rubyBlockArgs(args)
+			return rt.rubyStrEncode(s, "UTF-8", name, pos)
 		}
 	}
 	// Ruby's universal reflective methods, answered for every kind of value.
@@ -11523,6 +11551,9 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 					return rubyPublicIMethods(o, rubyOwnIMethods(o))
 				}
 				return rubyPublicIMethods(o, rt.rubyAllIMethods(o))
+			case "private_instance_methods", "protected_instance_methods":
+				pos, _ := rubyBlockArgs(args)
+				return rt.rubyVisIMethods(o, name[:strings.IndexByte(name, '_')], len(pos) == 0 || rubyTruthy(pos[0]))
 			case "method_defined?", "public_method_defined?", "private_method_defined?", "protected_method_defined?":
 				pos, _ := rubyBlockArgs(args)
 				k := rt.rubyMethodVis(o, rt.rubyStr(argAt(pos, 0)), len(pos) < 2 || rubyTruthy(pos[1]))

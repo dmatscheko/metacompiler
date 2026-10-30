@@ -152,8 +152,113 @@ def s124
         te == "no implicit conversion of String into Integer" && [1.9, -1.5].pack("c*").bytes == [1, 255])
 end
 
+# ===== SECTION 125: Hash keys across encodings =====
+# A String key is eql? to a String of the same bytes in the same encoding, or
+# in any encoding when the bytes are ASCII-only, so 65.chr (US-ASCII) and "A"
+# are one key while "é" and "é".b are two. /usr/bin/ruby 2.6 settles each.
+def s125
+  cs = [65, 255]
+  h = {cs[0].chr => 1}
+  g = {}
+  g["A"] = 1
+  g[cs[0].chr] = 2
+  check("hk125a", h["A"] == 1 && {"A" => 2}[cs[0].chr] == 2 && h.key?("A") && {"A".b => 5}["A"] == 5 &&
+        {"\xFF".b => 3}["\xFF"].nil? && {"é" => 4}["é".b].nil? && g.size == 1 && g["A"] == 2 &&
+        g.keys[0].encoding == Encoding::UTF_8 && h.keys[0].encoding == Encoding::US_ASCII)
+end
+
+# ===== SECTION 126: private_instance_methods / protected_instance_methods =====
+# Each lists the names its ancestors give that visibility themselves, nearest
+# first; `private :m' or `public :m' over an inherited m gives the class its own
+# entry (also in instance_methods(false)); initialize is private; with
+# inheritance a class also answers the top-level defs and the private Kernel
+# methods. A module body takes `private :m' too. /usr/bin/ruby 2.6 settles each.
+class S126C; def a; end; protected def c; end; private; def b; end; def initialize; end; end
+module S126M
+  def x; end
+  def z; end
+  private :z
+  private
+  def y; end
+end
+class S126D < S126C; private def q; end; private :a; include S126M; end
+class S126E < S126C; protected :a; public :b; end
+def s126top; end
+def s126
+  check("pi126a", S126C.private_instance_methods(false).sort == [:b, :initialize] && S126M.private_instance_methods.sort == [:y, :z] &&
+        S126D.private_instance_methods(false).sort == [:a, :q] && S126D.private_instance_methods.include?(:z) &&
+        !S126D.private_instance_methods.include?(:x) && S126D.private_instance_methods.include?(:b))
+  check("pi126b", S126C.private_instance_methods.include?(:puts) && S126C.private_instance_methods.include?(:s126top) &&
+        !S126C.private_instance_methods.include?(:a) && S126C.protected_instance_methods == [:c] &&
+        S126E.protected_instance_methods(false) == [:a] && S126E.instance_methods(false).sort == [:a, :b] &&
+        !S126E.private_instance_methods.include?(:b) && S126M.private_method_defined?(:z))
+end
+
+# ===== SECTION 127: constants of a class or module body stay its own =====
+# A class, module or constant a body binds is a member of it, not a top-level
+# name (MRI's NameError outside); a method the body calls already sees it, and a
+# reopened body sees its own before a top-level one of the name. A module
+# method copied into a class reads the module's constants. /usr/bin/ruby 2.6
+# settles each.
+module S127M
+  K = 1
+  class S127X; def k; K; end; end
+  module S127Y; def self.x; S127X; end; end
+  def self.f; K; end
+  R = f
+  def kk; K; end
+end
+class S127Z; include S127M; end
+S127X = 5
+module S127M; R2 = S127X; end
+def s127
+  y = begin; S127Y; rescue NameError => e; e.message; end
+  k = begin; K; rescue NameError => e; e.message; end
+  check("nc127a", y.start_with?("uninitialized constant S127Y") && k.start_with?("uninitialized constant K") && S127M::S127X.new.k == 1 &&
+        S127M::S127Y.x == S127M::S127X && S127M::R == 1 && S127X == 5 && S127M::R2 == S127M::S127X && S127Z.new.kk == 1)
+end
+
+# ===== SECTION 128: float pack directives; String#encode =====
+# e E g G d D f F pack and unpack IEEE 754 binary32 (e g f F) and binary64 (E G
+# d D), little-endian (e E), big-endian (g G) or native; a binary32 rounds half
+# to even and a value past its largest is an infinity. String#encode converts
+# between UTF-8, US-ASCII and ASCII-8BIT: a character the target has no code for
+# is Encoding::UndefinedConversionError, an invalid byte sequence
+# Encoding::InvalidByteSequenceError, each replaced by invalid: / undef:
+# :replace; scrub replaces the invalid sequences. /usr/bin/ruby 2.6 settles each.
+def s128
+  v = [1.5, 0.1, -0.0, 1e-310, 1e-40, 3.4028235e38, 2**70]
+  check("pf128a", [v[0]].pack("e").bytes == [0, 0, 192, 63] && [v[0]].pack("G").bytes == [63, 248, 0, 0, 0, 0, 0, 0] &&
+        [v[1]].pack("g").unpack1("g") == 0.10000000149011612 && [v[1]].pack("D").unpack1("D") == 0.1 &&
+        [v[2]].pack("E").bytes == [0, 0, 0, 0, 0, 0, 0, 128] && [v[3]].pack("d").unpack1("d") == 1e-310 &&
+        [v[4]].pack("f").unpack1("F") == 9.99994610111476e-41 && [v[5]].pack("e").bytes == [0, 0, 128, 127] &&
+        [v[6]].pack("E").unpack1("E") == 1.1805916207174113e+21 && [1, 2.5].pack("eg").unpack("eg") == [1.0, 2.5] &&
+        "abc".unpack("e") == [nil] && [v[0]].pack("e").encoding == Encoding::BINARY)
+  te = begin; [nil].pack("e"); rescue TypeError => e; e.message; end
+  ae = begin; [v[0]].pack("e<"); rescue ArgumentError => e; e.message; end
+  check("pf128b", te == "can't convert nil into Float" && ae == "'<' allowed only after types sSiIlLqQjJ")
+  e1 = begin; "é".encode("US-ASCII"); rescue EncodingError => e; [e.class, e.message]; end
+  e2 = begin; "\xFF".b.encode("UTF-8"); rescue EncodingError => e; [e.class, e.message]; end
+  e3 = begin; "a\xE3\x81x".encode("US-ASCII"); rescue EncodingError => e; [e.class, e.message]; end
+  e4 = begin; "a\xE3\x81".encode("BINARY"); rescue EncodingError => e; [e.class, e.message]; end
+  check("en128c", e1 == [Encoding::UndefinedConversionError, "U+00E9 from UTF-8 to US-ASCII"] &&
+        e2 == [Encoding::UndefinedConversionError, "\"\\xFF\" from ASCII-8BIT to UTF-8"] &&
+        e3 == [Encoding::InvalidByteSequenceError, "\"\\xE3\\x81\" followed by \"x\" on UTF-8"] &&
+        e4 == [Encoding::InvalidByteSequenceError, "incomplete \"\\xE3\\x81\" on UTF-8"] &&
+        "abc".b.encode("UTF-8").encoding == Encoding::UTF_8 && "abc".encode("ascii").encoding == Encoding::US_ASCII &&
+        "\xFF".encode("UTF-8").valid_encoding? == false)
+  check("en128d", "aé\xFFb".encode("US-ASCII", invalid: :replace, undef: :replace) == "a??b" &&
+        "aé\xFFb".encode("US-ASCII", invalid: :replace, undef: :replace, replace: "*") == "a**b" &&
+        "a\xFFb".encode("UTF-8", invalid: :replace) == "a\u{FFFD}b" && "\xC0\xAF".encode("US-ASCII", invalid: :replace) == "??" &&
+        "\xE3\x81\xE3\x81\x82".scrub == "\u{FFFD}あ" && "\xFF".scrub("?") == "?" && "é".encode(Encoding::BINARY, undef: :replace) == "?")
+end
+
 s122() # SECTION-CALL 122
 s123() # SECTION-CALL 123
 s124() # SECTION-CALL 124
+s125() # SECTION-CALL 125
+s126() # SECTION-CALL 126
+s127() # SECTION-CALL 127
+s128() # SECTION-CALL 128
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

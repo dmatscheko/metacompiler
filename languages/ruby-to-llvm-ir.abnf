@@ -82,7 +82,7 @@ ModuleDecl  <~~ push(makeModuleStmt(takeAll(), up.pos)) ~~>
             = KwModule ScopedName <~~ push(up.in) ~~>
               { Semi | Def <~~ push({method: pop()}) ~~> | ClassDecl <~~ push({nested: pop(), nestedName: lastDeclName}) ~~>
               | ModuleDecl <~~ push({nested: pop(), nestedName: lastDeclName}) ~~> | AliasStmt | AliasMethodStmt
-              | DefineMethodStmt | MixinStmt | VisStmt | AttrDecl | ClassBodyStmt } [ ClassGuard ] End ;
+              | DefineMethodStmt | MixinStmt | VisStmt | VisNamesStmt | VisDefStmt | AttrDecl | ClassBodyStmt } [ ClassGuard ] End ;
 // A constant path Foo::Bar::Baz (module / class name or a scoped reference).
 ScopedName  = [ "::" ] Name { "::" Name } ;
 // The name in a class/module header is normally a constant path, but Ruby also parses
@@ -4174,7 +4174,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         } else if (local && (inDefFrame(name) || (curDefLocals == null && curCtlDepth > 0))) {
             callExt(b, "js_rlset", [curScopeV, emitStr(b, name), v, emitNum(b, curCtlDepth)])
         } else if (!local && curClsBodyFn) {
-            b = emitConstUp(b, name, v)
+            b = emitBodyConst(b, name, v)
         } else {
             callExt(b, "js_pyset_var", [curScopeV, emitStr(b, name), v])
         }
@@ -4186,7 +4186,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // A parenthesised head is only ever a target THROUGH a path ((...).a = 1).
         if (ref.texpr != undefined) { fail("cannot assign to a parenthesized expression") }
         if (ref.sconst != undefined) {
-            if (curClsBodyFn) { return emitConstUp(b, ref.sconst, v) }
+            if (curClsBodyFn) { return emitBodyConst(b, ref.sconst, v) }
             callExt(b, "js_pyset_var", [curScopeV, emitStr(b, ref.sconst), v])
             return b
         }
@@ -7335,14 +7335,16 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             // js_rlvar raises MRI's NameError for that.
             var walk = inDefFrame(name) || (curDefLocals == null && isLocalName(name) && !knownLocal(name))
             if (walk) { return {b: b, v: callExt(b, "js_rlvar", [curScopeV, emitStr(b, name)])} }
-            if ((!knownConst(name) || lexConstPath(name) != null) && name.charCodeAt(0) >= 65 && name.charCodeAt(0) <= 90) { return rbConstPath(b, [name], false) }
+            if ((!knownConst(name) || bodyConsts["$" + name] === true || lexConstPath(name) != null) && name.charCodeAt(0) >= 65 && name.charCodeAt(0) <= 90) { return rbConstPath(b, [name], false) }
             return {b: b, v: frameLocalRead(b, name, callExt(b, "js_scope_get", [curScopeV, emitStr(b, name)]))}
         }
     }
     // A constant the file binds by an assignment, a class or a module statement, or a
     // builtin class: its read skips rbConstPath's check, which only names a constant
-    // nothing binds.
+    // nothing binds - unless a class or module body binds the name (bodyConsts),
+    // which is no binding where the body is not.
     var assignedConsts = {}
+    var bodyConsts = {}
     function knownConst(name) {
         return assignedConsts["$" + name] === true || classMethods["$" + name] != undefined || nameIn(rubyBuiltinClasses, name)
     }
@@ -7609,7 +7611,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         var lexPre = curClsPath == "" || top === true ? parts[0] : curClsPath + "::" + parts[0]
         var v = hUndef
         var k = 0
-        if (knownConst(pre)) {
+        if (knownConst(pre) && bodyConsts["$" + pre] !== true) {
             v = callExt(b, "js_scope_get", [curScopeV, emitStr(b, pre)])
             k = 1
         }
@@ -7686,7 +7688,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // nowhere else.
     function clsItems(items, from) {
         var r = {supername: "", methods: [], sdefs: [], cstmts: [], consts: [],
-                 aliases: [], includes: [], prepends: [], extends: [], restricted: []}
+                 aliases: [], includes: [], prepends: [], extends: [], restricted: [], visnamed: []}
         var vis = "public"
         var named = []
         for (var i = from; i < items.length; i++) {
@@ -7746,10 +7748,14 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 }
                 continue
             }
-            if (it.nested != undefined) { r.cstmts.push({t: it.nested, name: it.nestedName}); continue }
+            if (it.nested != undefined) {
+                r.cstmts.push({t: it.nested, name: it.nestedName})
+                bodyConsts["$" + it.nestedName] = true
+                continue
+            }
             if (it.cstmt != undefined) {
                 var cn = constAssignName(it.ctext)
-                if (cn != "") { r.consts.push(cn) }
+                if (cn != "") { r.consts.push(cn); bodyConsts["$" + cn] = true }
                 r.cstmts.push({t: it.cstmt, name: cn})
                 continue
             }
@@ -7760,12 +7766,15 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             var nk = visWordOf(named[ni].vis)
             for (var nj = 0; nj < named[ni].visnames.length; nj++) {
                 var nn = named[ni].visnames[nj]
+                if (!nameIn(r.visnamed, nn)) { r.visnamed.push(nn) }
                 var kept = []
                 for (var nr = 0; nr < r.restricted.length; nr++) { if (r.restricted[nr].name != nn) { kept.push(r.restricted[nr]) } }
                 if (nk != "public") { kept.push({name: nn, kind: nk}) }
                 r.restricted = kept
             }
         }
+        // The body's own, before a class adds its mixins' (mixinRestricted).
+        r.ownrestricted = r.restricted
         return r
     }
 
@@ -7789,7 +7798,12 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             curMethParams = paramNames(m.params)
             curMethPs = m.params
             nextSelfIsCls = prefix == "$s$"
+            // A module's method copied into an including class reads constants
+            // where it is written (lexPath, stamped by makeModuleStmt).
+            var pathAround = curClsPath
+            if (m.lexPath != undefined) { curClsPath = m.lexPath }
             var idx = emitFunc(m.params, m.body, true, false, false, true, m.pos)
+            curClsPath = pathAround
             // A method closure enters the arity registry the way a block and a lambda
             // already did, so `method(:inst).arity` answers the parameter count rather
             // than the 0 an UNRECORDED closure answers. emitArity is the gate as well
@@ -8050,13 +8064,15 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         var fresh = function(b) {
             var ekey = "$" + curClsName + "::" + name
             var imn = ownIMNames([], r)
+            var ipn = ownIPNames([], r)
             var qn = qualName(name)
-            emittedClasses[ekey] = {anc: incAnc, snames: snames, core: front.length > 0, imn: imn, mayFail: mayFail, qn: qn}
+            emittedClasses[ekey] = {anc: incAnc, snames: snames, core: front.length > 0, imn: imn, ipn: ipn, mayFail: mayFail, qn: qn}
             lexNote(qn, r)
             var clsV = callExt(b, "js_obj_new", [])
             callExt(b, "js_set", [clsV, emitStr(b, "__isclass"), hTrue])
             callExt(b, "js_set", [clsV, emitStr(b, "__name"), emitStr(b, qn)])
             b = emitNameList(b, clsV, imn, "__imn")
+            if (ipn.length > 0) { b = emitNameList(b, clsV, ipn, "__ipn") }
             var baseSet = false
             var baseV = hNull
             if (superName == "self") {
@@ -8181,10 +8197,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // methods live one level down (a prepend).
     var emittedClasses = {}
     // The names each class or module body binds, by the class's path. A constant
-    // read in a method resolves lexically first: in the class the def is written
-    // in, then in the ones around it (M::X from a method of M, even beside a
-    // top-level X), which the emitted code reads as the full path. Twin of
-    // lexConst in ruby-interpreter.abnf.
+    // read in a method or a class body resolves lexically first: in the class the
+    // def or body is written in, then in the ones around it (M::X from a method or
+    // a reopened body of M, even beside a top-level X), which the emitted code
+    // reads as the full path. Twin of lexConst in ruby-interpreter.abnf.
     var lexNames = {}
     function lexNote(qn, r) {
         var add = []
@@ -8195,7 +8211,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         lexNames["$" + qn] = unionNames(lexNames["$" + qn], add)
     }
     function lexConstPath(name) {
-        if (curDefLocals == null || curDefLocals.cls === true) { return null }
+        if (curDefLocals == null) { return null }
         if (curClsPath == "") { return null }
         var paths = constPrefixes(curClsPath)
         for (var i = paths.length - 1; i >= 0; i--) {
@@ -8215,6 +8231,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // The module statements emitted so far, by enclosing class and name: the
     // instance-method names (__imn) their bodies have defined.
     var emittedModules = {}
+    var emittedModuleIPN = {}
     function unionNames(prev, add) {
         if (prev == undefined) { return add }
         var out = prev.slice(0)
@@ -8224,34 +8241,24 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // A class body runs in order, in a function of its own with `self` bound to the
     // class object, so its locals stay its own while a constant may read them
     // (`r = 5; QQ = r`). The constants and the nested classes and modules it
-    // introduces are bound in the ENCLOSING scope instead (curClsBodyFn,
-    // emitConstUp), so a method of the class can name them, and are published on
-    // the class under $c$ afterwards, which is what makes Outer::Inner and C::CONST
-    // resolve (the interpreter's publishModuleScope does the same).
+    // introduces are the body's own (M::K beside a top-level K, and no top-level
+    // K at all): bound in the body scope, where the body and its blocks read
+    // them, and on the class under $c$ at once, which is what makes Outer::Inner
+    // and C::CONST resolve and what a method reads (lexConstPath). Twin of
+    // bodyConst in ruby-interpreter.abnf.
     var curClsBodyFn = false
-    function emitConstUp(b, name, v) {
-        callExt(b, "js_rlset", [curScopeV, emitStr(b, name), v, emitNum(b, curCtlDepth + 1)])
+    function emitBodyConst(b, name, v) {
+        callExt(b, "js_rlset", [curScopeV, emitStr(b, name), v, emitNum(b, curCtlDepth)])
         callExt(b, "js_set", [callExt(b, "js_scope_get", [curScopeV, emitStr(b, "self")]), emitStr(b, "$c$" + name), v])
         return b
     }
     // A class or module statement in a body binds its name there and on the
     // enclosing class or module (self) under $c$ at once, which is where a
-    // reopening statement finds it (emitOwnConst); the enclosing scope, where the
-    // enclosing class's methods read constants, gets it only while no other
-    // binding of the name is visible (M::X beside a top-level X). Twin of
-    // constBind / ownConst in ruby-interpreter.abnf.
+    // reopening statement finds it (emitOwnConst). Twin of constBind / ownConst
+    // in ruby-interpreter.abnf.
     function emitNestedBind(b, name, v) {
         var selfV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "self")])
         callExt(b, "js_set", [selfV, emitStr(b, "$c$" + name), v])
-        if (!nameIn(rubyBuiltinClasses, name)) {
-            var upB = curF.NewBlock("")
-            var joinB = curF.NewBlock("")
-            var tv = callExt(b, "js_scope_typeof", [curScopeV, emitStr(b, name)])
-            b.NewCondBr(truthy(b, callExt(b, "js_seq", [tv, emitStr(b, "undefined")])), upB, joinB)
-            upB = emitConstUp(upB, name, v)
-            upB.NewBr(joinB)
-            b = joinB
-        }
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), v])
         return b
     }
@@ -8315,8 +8322,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     }
     // The instance-method names a class or module body defines ITSELF and does not
     // make private, appended to `prev': the __imn list Module#instance_methods(false)
-    // answers from (rubyOwnIMethods in abnf/jsrt.go). initialize and its kin are
-    // private in MRI whatever the body says.
+    // answers from (rubyOwnIMethods in abnf/jsrt.go). A name a visibility directive
+    // names is the body's own too, an inherited one included (MRI gives the class
+    // an entry of that visibility). initialize and its kin are private in MRI
+    // whatever the body says.
     function ownIMNames(prev, r) {
         var out = prev.slice(0)
         var add = function(n) {
@@ -8328,6 +8337,23 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
         for (var i = 0; i < r.methods.length; i++) { add(r.methods[i].name) }
         for (var j = 0; j < r.aliases.length; j++) { add(r.aliases[j].to) }
+        for (var k = 0; k < r.visnamed.length; k++) { add(r.visnamed[k]) }
+        return out
+    }
+    // The private instance-method names a class or module body gives a method
+    // itself, appended to `prev': a def under `private', `private :m' (over an
+    // inherited m too) and initialize and its kin - the __ipn list of
+    // Module#private_instance_methods (rubyVisIMethods in abnf/jsrtruby.go).
+    function ownIPNames(prev, r) {
+        var out = prev.slice(0)
+        for (var i = 0; i < r.methods.length; i++) {
+            var n = r.methods[i].name
+            if ((n == "initialize" || n == "initialize_copy" || n == "respond_to_missing?") && !nameIn(out, n)) { out.push(n) }
+        }
+        for (var q = 0; q < r.ownrestricted.length; q++) {
+            var rq = r.ownrestricted[q]
+            if (rq.kind == "private" && !nameIn(out, rq.name)) { out.push(rq.name) }
+        }
         return out
     }
     // alias / alias_method: the new name is bound to the SAME closure, after every
@@ -8361,6 +8387,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             var imnV = callExt(b, "js_get", [clsV, emitStr(b, "__imn")])
             for (var ii = prev.imn.length; ii < imn.length; ii++) { callExt(b, "js_arr_push", [imnV, emitStr(b, imn[ii])]) }
             prev.imn = imn
+        }
+        if (prev.ipn != null) {
+            var ipn = ownIPNames(prev.ipn, r)
+            if (ipn.length > prev.ipn.length) { b = emitNameList(b, clsV, ipn, "__ipn") }
+            prev.ipn = ipn
         }
         var savedCls = curClsName
         var savedPath = curClsPath
@@ -8480,7 +8511,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             var mkey = "$" + curClsName + "::" + name
             var qn = qualName(name)
             lexNote(qn, r)
+            for (var lp = 0; lp < r.methods.length; lp++) { r.methods[lp].lexPath = qn }
             var modV = hNull
+            var ipn0 = emittedModuleIPN[mkey] == undefined ? [] : emittedModuleIPN[mkey]
+            var ipn = ownIPNames(ipn0, r)
+            emittedModuleIPN[mkey] = ipn
             if (emittedModules[mkey] != undefined) {
                 modV = emitOwnConst(b, name)
                 var imn = ownIMNames(emittedModules[mkey], r)
@@ -8497,15 +8532,12 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 if (curClsBodyFn) { b = emitNestedBind(b, name, modV) }
                 else { callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), modV]) }
             }
+            if (ipn.length > ipn0.length) { b = emitNameList(b, modV, ipn, "__ipn") }
             b = emitMixRecord(b, modV, modAnc, "$mix$", "__mixorder")
             var savedCls = curClsName
             var savedPath = curClsPath
             curClsName = name
             curClsPath = qn
-            // A module body runs as a class body does (emitClassBody): its own local
-            // scope with `self` the module, its constants bound where the module was
-            // written and published on it under $c$.
-            b = emitClassBody(b, modV, r).b
             var savedModObj = curModObjBody
             curModObjBody = name
             b = emitMethods(b, modV, mixDefs, "", name, [])
@@ -8523,6 +8555,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 callExt(b, "js_set", [modV, emitStr(b, r.aliases[ai].to),
                                       callExt(b, "js_get", [modV, emitStr(b, r.aliases[ai].from)])])
             }
+            // A module body runs as a class body does (emitClassBody), with the
+            // module's methods in place: its own local scope with `self` the module,
+            // its constants bound where the module was written and published on it
+            // under $c$.
+            b = emitClassBody(b, modV, r).b
             curClsName = savedCls
             curClsPath = savedPath
             return {b: b, v: hNull}
