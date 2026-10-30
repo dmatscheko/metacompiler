@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-862** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-863** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -98,14 +98,13 @@ not change the renderer.
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-857 kotlin: local fun vs interface default, lambda-param `+=`, nested-class name clash, set CME · P2 · KT · IN PROGRESS (KT worker, round 5) [V KT worker]
-(1) compiled legs: `class A : M { override fun f() = 1 }; interface M { fun f(): Int; fun g() = f() + 10 }; fun other()
-{ fun f() = 9 }; println(A().g())` → interp 11 (right), compiled abort "unknown name: f" (a local fun elsewhere shadows the
-default method's call). (2) all engines: `{ l: MutableList<Int> -> l += 7 }` and `d.let { it += 8 }` do not mutate —
-Kotlin calls plusAssign; ktAssignIsVal (kotlin-decltypes.js) does not know lambda parameters are vals. (3) all engines:
-`Outer128.Inner` and `Outer129.Inner` in one file collide in casts and class lookups (last registered wins). (4) compiled
-legs: `s.add(9); s.remove(9)` inside `for (x in s)` over a MutableSet does not throw CME (interp and Java do) — set
-mutators must bump the new modCount. (5) `xs += emptyList()` in a loop over xs does not throw; Java's addAll always counts.
+### T-862 kotlin: member vs top-level fun, qualifiedName, named args on nested ctors · P2 · KT · OPEN [V KT worker]
+(1) all engines: top-level `fun f() = 9` + `interface M { fun f(): Int; fun g() = f() + 10 }` + `class A : M { override
+fun f() = 1 }` → `A().g()` prints 19; Kotlin's rule (implicit receiver's member beats a top-level function) gives 11
+(spec-only, no kotlinc) — kt_barecall cannot tell the global scope from local ones. (2) all engines: `O.Inner::class.
+qualifiedName` → `Inner`; Kotlin `O.Inner`. (3) compiled legs: `class O1 { class In(val a: Int, val b: Int = 10) }`;
+`O1.In(b = 1, a = 2)` → `a1 b2` (interp right: `a2 b1`) — emit-time tables ctorParamNames / classOwnProps / innerOwner /
+nestOwner / nestedOf are keyed by simple class name (last wins); key them by binary name.
 
 # GO — Go  (oracle: `go run`)
 
@@ -915,6 +914,7 @@ T-854 ruby: binary (ASCII-8BIT) strings — DONE 074917f6 (binary String box {__
 T-849 bash: a backslash-newline that splits a name is not spliced — DONE 4c9f2756 (pre-parse splice BsSplice in shared bash-splice.abnf: joins \\⏎ everywhere bash does — not in '...', $'...', comments, quoted here-doc bodies — and restores the removed newlines at the next line break so line numbers hold; eval/trap strings too; parser.go setSrc re-registers the rewritten program source; plus $'...' keeps a backslash-newline)
 T-858 c: `<stddef.h>` gives no `offsetof` / `NULL` / `size_t` — DONE ef5212f7 (offsetof after <stddef.h> folded from cc's layout offsets in both halves — expressions, enumerators, dimensions, nested and indexed designators, cc's bit-field error; NULL from stddef/stdio/stdlib/string; size_t/ptrdiff_t already predefined)
 T-853 ts/js: bound functions and `new`; TS error site text; accessor decorators — DONE c12762b2 (bound target + args recorded in every engine, js_jsunbind before the constructor check, instanceof via the target; TS callee text skips as/satisfies/!; new (o).f() site text; getter/setter/accessor decorators in tsc's order — parameter decorators stay dropped as tsc's emit drops them; V8 DateParser port for Date.parse and V8's equivalent-year zone names, 155-row probe = node)
+T-857 kotlin: local fun vs interface default, lambda-param `+=`, nested-class name clash, set CME — DONE 80637192 (only top-level funs block the implicit-receiver reading; lambda params, it and this are vals so += calls plusAssign; nested classes of one simple name are distinct types by binary name in all engines; set mutators bump modCount with the set iterator's end rule; list += always counts)
 
 # Settled — do not re-open
 
