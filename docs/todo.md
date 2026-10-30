@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-863** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-864** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -126,14 +126,13 @@ nestOwner / nestedOf are keyed by simple class name (last wins); key them by bin
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-860 bash: $LINENO, quotes in quoted ${v-w}, case in "$( )", fd dup order, here-doc forms · P2 · SH · IN PROGRESS (SH worker, round 12) [V SH worker + master]
-bash 5.3 vs ours (interp = compiler unless noted). (1) `$LINENO` is unset (empty) at top level and in functions; bash gives
-the line number (13 for `f() { echo $LINENO; }` defined on line 13). (2) `echo "${u:-'ab'}"` → bash `'ab'` (a `'` is
-ordinary inside a quoted ${v-w}), ours `ab`. (3) `r="$(case $x in a) echo q;; esac)"` → bash `q`, ours the literal
-text (case inside a double-quoted $( ) not parsed). (4) `echo 1 >&2 2>&1` → bash prints 1 on stderr, ours nothing.
-(5) `cmd <<\EOF` (backslash-quoted delimiter) and two here-documents on one line do not parse (HdScan limits).
-(6) llvm.Run drops the arithmetic-error stderr text that the native binary prints (seen with -qq). (7) a parse error
-inside a spliced logical line reports the line's start with shifted columns.
+### T-863 bash: newlines in [[ ]], fd 3+, ${!u} error under 2>/dev/null, $( ) LINENO, quote corner · P3 · SH · OPEN [V SH worker]
+bash 5.3. (1) `[[ a == a &&⏎ b == b ]]` and `[[⏎ a == a⏎]]` do not parse in either half (CondCmd skips blanks, not
+newlines). (2) fds 3+ are not modelled: `f 3>&1 1>&2 2>&3` (f prints f1 to stdout, f2 to stderr) → bash f1 on stderr,
+f2 on stdout; ours both on stderr, every leg. (3) `echo "${!u:-q}" 2>/dev/null` with u empty → bash and our interp
+print the "invalid variable name" error anyway; llvm.Run and native print nothing. (4) inside a multi-line `$( )`
+at top level bash numbers $LINENO from the enclosing command's end line (`z=$(⏎echo $LINENO⏎)` → 15 vs ours 14).
+(5) `"${u:-'a"b'}"` → bash `'ab'`, ours `'a"b'`.
 
 # C — C subset
 
@@ -915,6 +914,7 @@ T-849 bash: a backslash-newline that splits a name is not spliced — DONE 4c9f2
 T-858 c: `<stddef.h>` gives no `offsetof` / `NULL` / `size_t` — DONE ef5212f7 (offsetof after <stddef.h> folded from cc's layout offsets in both halves — expressions, enumerators, dimensions, nested and indexed designators, cc's bit-field error; NULL from stddef/stdio/stdlib/string; size_t/ptrdiff_t already predefined)
 T-853 ts/js: bound functions and `new`; TS error site text; accessor decorators — DONE c12762b2 (bound target + args recorded in every engine, js_jsunbind before the constructor check, instanceof via the target; TS callee text skips as/satisfies/!; new (o).f() site text; getter/setter/accessor decorators in tsc's order — parameter decorators stay dropped as tsc's emit drops them; V8 DateParser port for Date.parse and V8's equivalent-year zone names, 155-row probe = node)
 T-857 kotlin: local fun vs interface default, lambda-param `+=`, nested-class name clash, set CME — DONE 80637192 (only top-level funs block the implicit-receiver reading; lambda params, it and this are vals so += calls plusAssign; nested classes of one simple name are distinct types by binary name in all engines; set mutators bump modCount with the set iterator's end rule; list += always counts)
+T-860 bash: $LINENO, quotes in quoted ${v-w}, case in "$( )", fd dup order, here-doc forms — DONE 12813383 ($LINENO per bash's measured line rules incl. eval and functions — bash bench +0.92%; double-quoted ${v-w} expansion rules; NotEsac in case patterns; fd number must touch its operator; here-doc bodies moved next to their markers by the splice pass — <<\\EOF, several per line; llvm.Run models write(2) and fflush(NULL); c.setSrcMap maps rewritten-source positions back for parse errors and c.lineOf)
 
 # Settled — do not re-open
 
