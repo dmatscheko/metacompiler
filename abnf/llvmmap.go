@@ -1012,6 +1012,11 @@ var llvmFuncMap = map[string]r.Object{ // The LLVM functions.
 	// -L/-l reach clang too. Supplying any of them switches OFF the zero-stubbing of
 	// undefined symbols - see buildExecutable.
 	"BuildExecutable": buildExecutable,
+	// UndefinedSymbols lists, sorted, the functions the module declares but neither
+	// defines nor expects from libc: what BuildExecutable would stub when nothing
+	// else is linked. A grammar whose language makes such a name a link error (C)
+	// refuses the build with it instead.
+	"UndefinedSymbols": undefinedSymbols,
 }
 
 // libcExterns are the external functions clang resolves from the real C runtime, so

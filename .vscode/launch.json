@@ -227,6 +227,12 @@
             "program": "${workspaceFolder}","args": ["languages/c-to-llvm-ir.abnf", "tests/c-fail-test-import.c", "-q"]
         },
         {
+            "name": "C native printf (undefined function) SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/c-to-llvm-ir.abnf", "tests/c-fail-test-printf.c", "-q", "-exe", "tests/c-native-fail-printf.out"]
+        },
+        {
             "name": "C unresolved include warned+ignored",
             "type": "go",
             "request": "launch",
