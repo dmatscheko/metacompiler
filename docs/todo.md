@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-852** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-853** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -150,13 +150,13 @@ splice in VarName / AsgIdent / PeName, or a pre-parse splice that keeps source p
 
 # C — C subset
 
-### T-851 c: `sizeof` of a struct ignores alignment padding; block-scope enums · P2 · C · IN PROGRESS (C worker, round 9) [V C worker]
-WRONG ANSWER: `sizeof(struct{int a; char c;})` → cc 8, ours 5; `struct{char c; int a;}` 8 vs 5; `struct{int m[7];
-char n[2];}` 32 vs 30 — both engines. Layout must follow the arm64 ABI (each member at its alignment, size rounded
-to the struct's alignment); check offsetof-style pointer arithmetic and arrays of structs too. Also loud:
-`int main(void){ enum { K = 3 }; ... }` does not parse (cc accepts); the enumerator table is global, so allowing
-it needs block scoping (two blocks defining one name). And: a struct-valued expression in a `[]`-sized array
-(`struct P ps[] = { p, 5, 6 }`, cc 2) is refused; interp-only `extern int a[]; int *p = a; int a[3];` is refused.
+### T-852 c: anonymous-union positional initializer; `(p + 2)->a`; float storage · P2 · C · OPEN [V C worker]
+(1) WRONG ANSWER (interp): `struct D { int k; union { int u; char ch; }; int t; }; struct D d = { 5, { 9 }, 100 };`
+→ cc `d.u` 9, `d.t` 100; the interpreter walks the anonymous union's members as separate members (`d.u` 100, `d.t` 0);
+the compiler aborts "store operands are not compatible: src=i8; dst=i32*". (2) `(p + 2)->a` does not parse in either
+half. (3) compiled half: a float is an 8-byte cell (double holding the binary32 value), so `malloc(n * sizeof(float))`
+or of a struct with a float or function-pointer member is too small (manual 7.9); fixing it needs double↔binary32
+conversion on each load/store — measure.
 
 # CORE — MetaJS, the engines, shared runtime, tooling
 
@@ -924,6 +924,7 @@ T-841 ruby: `$0` / `$PROGRAM_NAME` are nil — DONE 308d58d3 ($0 / $PROGRAM_NAME
 T-840 ruby compiler: `next v` inside begin/ensure inside a block returns the control signal — DONE 308d58d3 (next v in a begin closure of a block becomes the block's value; break throws the block-break marker)
 T-839 ruby: features left from the string/array/error rounds — PARTIAL b25b9b95 — character String#[]/center/reverse with ASCII fast path, Integer.sqrt, last_match, cause, pp/bare p/bare new, Proc >>/<</curry, Rational round(half:), loop/StopIteration, catch/throw/UncaughtThrowError, method_missing/respond_to_missing?, IO objects, Complex power, chr(UTF-8), lazy enumerators, rxSplit removed; binary strings and a blockless map enumerator filed as T-850
 T-844 c: declaration gaps left from the scope/designator round — DONE 1e3d17a3 (shared cInitWalk does brace elision for both engines; cConstOf folds enumerators/header constants in dimensions, enumerators and designators; extern int a[] + int a[3] merge per 6.2.7p3; typedef extern in a block binds the global; bool is a type only after <stdbool.h>; parameters share the body's outermost scope)
+T-851 c: `sizeof` of a struct ignores alignment padding; block-scope enums — DONE 7fa9bd46..45dd3ec2 (cAbiLayout: cc's padded layout for sizeof/_Alignof in both halves, explicit padding members in the compiled structs; compiled half packs bit-fields into their storage units so malloc(n*sizeof) is exact — new c-native-bytes.c byte-layout row; block-scope enums, struct values in []-sized arrays, file-scope initializers after all declarations)
 
 # Settled — do not re-open
 
