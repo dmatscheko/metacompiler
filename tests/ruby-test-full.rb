@@ -4844,6 +4844,39 @@ def s114
   check("ut114c", u == [UncaughtThrowError, "uncaught throw :nope", :nope, 4])
 end
 
+# ===== SECTION 115: method_missing and respond_to_missing? =====
+# A call no method answers goes to method_missing with the name as a Symbol;
+# its `super' reaches Object's, which raises NoMethodError for that name;
+# respond_to? asks respond_to_missing?. /usr/bin/ruby 2.6 settles each.
+class S115A
+  def method_missing(n, *a)
+    n == :total ? a.sum : super
+  end
+  def respond_to_missing?(n, priv = false)
+    n == :total
+  end
+end
+class S115B < S115A
+  def method_missing(n, *a)
+    n == :one ? 1 : super
+  end
+end
+def s115
+  e = begin; S115A.new.nope(1); rescue NoMethodError => x; [x.name, x.message[0, 23]]; end
+  check("mm115a", S115A.new.total(1, 2, 3) == 6 && e == [:nope, "undefined method `nope'"])
+  check("mm115b", S115B.new.one == 1 && S115B.new.total(4) == 4 && S115A.new.respond_to?(:total) &&
+        !S115A.new.respond_to?(:nope))
+end
+
+# ===== SECTION 116: $stdout / STDOUT, $stderr / STDERR =====
+# The standard streams are IO objects: $stdout is STDOUT, write answers the
+# bytes written, << answers the stream. /usr/bin/ruby 2.6 settles each.
+def s116
+  check("io116a", $stdout.equal?(STDOUT) && $stderr.equal?(STDERR) && $stdout.class == IO && STDOUT.fileno == 1 &&
+        $stderr.fileno == 2 && $stdout.write("") == 0 && ($stdout << "").equal?($stdout) && $stdout.print.nil? &&
+        $stdout.flush.equal?($stdout))
+end
+
 s39() # SECTION-CALL 39
 s40() # SECTION-CALL 40
 s41() # SECTION-CALL 41
@@ -4920,5 +4953,7 @@ s111() # SECTION-CALL 111
 s112() # SECTION-CALL 112
 s113() # SECTION-CALL 113
 s114() # SECTION-CALL 114
+s115() # SECTION-CALL 115
+s116() # SECTION-CALL 116
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

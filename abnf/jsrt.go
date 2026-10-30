@@ -470,6 +470,8 @@ type jsrt struct {
 	rubyGlobals map[string]interface{}
 	// rubyCatchTags: the tags of the Kernel#catch calls running, innermost last.
 	rubyCatchTags []interface{}
+	// rubyIOErrPend: what $stderr was given after its last newline.
+	rubyIOErrPend string
 
 	// ktRndDef is kotlin.random.Random.Default - the one generator every unseeded
 	// `random()` draws from. Built lazily by ktRndDefault (abnf/jsrtkotlin.go);
@@ -7884,6 +7886,19 @@ func (rt *jsrt) rubyMemberCall(target interface{}, name string, args []interface
 	v := rt.memberCall(target, name, args)
 	rt.missCall = saved
 	if v == interface{}(rubyMissMark) {
+		if o, isObj := target.(*jsObject); isObj {
+			if fd, isIO := o.props["__rio"].(float64); isIO {
+				return rt.rubyIOMethod(o, int(fd), name, args)
+			}
+		}
+		// A call nothing answers goes to the class's method_missing, with the name
+		// as a Symbol in front of the arguments. Twin of the method_missing arm of
+		// mcall in ruby-interpreter.abnf.
+		if rubyUserObj(target) {
+			if _, has := rubyFindMethod(target, "method_missing"); has {
+				return rt.rubyMethod(target, "method_missing", append([]interface{}{jsSym{s: name}}, args...))
+			}
+		}
 		rt.rubyNoMethod(target, name)
 	}
 	return v
@@ -9238,7 +9253,7 @@ func (rt *jsrt) rubyPuts(v interface{}) {
 		}
 		return
 	}
-	fmt.Fprintln(outWriter, wtf8Clean(rt.rubyStr(v)))
+	fmt.Fprint(outWriter, wtf8Clean(rubyPutsLine(rt.rubyStr(v))))
 }
 
 func (rt *jsrt) rubyStr(v interface{}) string {

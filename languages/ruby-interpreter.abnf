@@ -9178,7 +9178,13 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                     return ivarAccess(target, name == "instance_variable_set", args)
                 }
                 if (name == "instance_variables") { return ivarNames(target) }
-                noMethod(target, name)
+                if (target.__rio !== undefined) { return ioMethod(target, name, args) }
+                // A call nothing answers goes to the class's method_missing, with
+                // the name as a Symbol in front of the arguments. Twins:
+                // rubyMemberCall in abnf/jsrt.go, rbMemberCall in lib/ruby-rt.metajs.
+                m = lookupMethod(target.__class, "method_missing")
+                if (typeof m != "function") { noMethod(target, name) }
+                args = concat2impl([mkSym(name)], args)
             }
             // The block is BOTH put on blockStack (so `yield` in the body finds it) and
             // appended as the last positional argument, WRAPPED in the block marker so
@@ -11037,7 +11043,59 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             for (var i = 0; i < v.length; i++) { putsVal(v[i]) }
             return
         }
-        println(rstr(v))
+        print(putsLine(rstr(v)))
+    }
+    // A line puts writes: the text, and a newline unless it already ends in one.
+    // Twins: rubyPutsLine in abnf/jsrtruby.go, rbPutsLine in lib/ruby-rt.metajs.
+    function putsLine(s) { return s.length > 0 && s.charCodeAt(s.length - 1) == 10 ? s : s + "\n" }
+    // ----- $stdout / STDOUT and $stderr / STDERR: IO objects over fd 1 and 2 -----
+    // Standard error is written a line at a time (the hosts have eprintln only), so
+    // text after its last newline waits for the next write. Twins: rubyIOMethod
+    // in abnf/jsrtruby.go, rbIOMethod in lib/ruby-rt.metajs.
+    var ioErrPend = ""
+    function ioWrite(io, s) {
+        if (io.__rio != 2) { print(s); return }
+        var t = ioErrPend + s
+        var k = t.indexOf("\n")
+        while (k >= 0) {
+            eprintln(t.substring(0, k))
+            t = t.substring(k + 1, t.length)
+            k = t.indexOf("\n")
+        }
+        ioErrPend = t
+    }
+    function ioPuts(io, v) {
+        if (Array.isArray(v)) {
+            for (var i = 0; i < v.length; i++) { ioPuts(io, v[i]) }
+            return
+        }
+        ioWrite(io, putsLine(rstr(v)))
+    }
+    function ioMethod(io, name, args) {
+        if (name == "puts") {
+            if (args.length == 0) { ioWrite(io, "\n") }
+            for (var i = 0; i < args.length; i++) { ioPuts(io, args[i]) }
+            return null
+        }
+        if (name == "print" || name == "write" || name == "<<") {
+            var n = 0
+            for (var j = 0; j < args.length; j++) {
+                var s = rstr(args[j])
+                ioWrite(io, s)
+                n = n + byteLen(s)
+            }
+            if (name == "write") { return n }
+            return name == "<<" ? io : null
+        }
+        if (name == "printf") {
+            if (args.length > 0) { ioWrite(io, rformat(rstr(args[0]), args.slice(1), "printf")) }
+            return null
+        }
+        if (name == "flush") { return io }
+        if (name == "sync" || name == "sync=") { return true }
+        if (name == "fileno") { return io.__rio }
+        if (name == "tty?" || name == "isatty") { return false }
+        noMethod(io, name)
     }
 
     // ----- Assignment (locals, @ivars, index / field targets) -----
@@ -12195,7 +12253,14 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (typeof singFind(target, n) == "function") { return true }
         if (target.__isclass !== true && typeof lookupMethod(target.__class, n) == "function"
             && visOf(target.__class, n) != "public") { return all }
-        return singRespond(target, n) || (all && respondsPrivate(n))
+        if (singRespond(target, n) || (all && respondsPrivate(n))) { return true }
+        // A class that answers calls through method_missing says which in
+        // respond_to_missing?. Twins: rubyRespond in abnf/jsrtruby.go, js_rrespond
+        // in lib/ruby-rt.metajs.
+        if (target.__isclass !== true && typeof lookupMethod(target.__class, "respond_to_missing?") == "function") {
+            return rtest(mcall(target, "respond_to_missing?", [mkSym(n), all], null))
+        }
+        return false
     }
     // The private Kernel methods (the "private" row of ruby-respond.js) and the
     // top-level defs, which are private methods of Object.
@@ -12261,6 +12326,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             var m = anytype
             m = hasOwn(prependOwners, "$" + dc.__name) ? lookupOwn(prependOwners["$" + dc.__name], mn) : undefined
             if (typeof m != "function") { m = lookupMethod(dc.__super, mn) }
+            // Object#method_missing, which a `super' in a method_missing reaches:
+            // NoMethodError for the missing name.
+            if (typeof m != "function" && mn == "method_missing" && args.length > 0) { noMethod(self, rstr(args[0])) }
             if (typeof m != "function") { fail("super: no superclass method '" + mn + "'") }
             return m.apply(undefined, concat2impl([self], args))
         }
@@ -13714,7 +13782,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                              "Comparable", "Enumerable", "Enumerator", "Math", "Struct",
                              // Class and Module are what a class object and a module
                              // object answer to #class.
-                             "Class", "Module"]
+                             "Class", "Module", "IO"]
     // The builtin names that are modules, not classes: their #class is Module. Twins:
     // rubyBuiltinClass in abnf/jsrt.go, rbBuiltinClass in languages/lib/ruby-rt.metajs.
     function isBuiltinModule(n) { return n == "Kernel" || n == "Comparable" || n == "Enumerable" || n == "Math" }
@@ -13722,6 +13790,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         hostGlobals[builtinClassNames[bci]] = mkBuiltinClass(builtinClassNames[bci], null)
         if (isBuiltinModule(builtinClassNames[bci])) { hostGlobals[builtinClassNames[bci]].__ismodule = true }
     }
+    hostGlobals["STDOUT"] = {__class: hostGlobals["IO"], __rio: 1}
+    hostGlobals["STDERR"] = {__class: hostGlobals["IO"], __rio: 2}
+    scopePut(rubyGlobals, "stdout", hostGlobals["STDOUT"])
+    scopePut(rubyGlobals, "stderr", hostGlobals["STDERR"])
     // MRI's `main` is an Object whose singleton #to_s and #inspect answer "main".
     function mainName(self) { return "main" }
     mainObj.__class = hostGlobals["Object"]

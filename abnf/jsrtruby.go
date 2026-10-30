@@ -24,6 +24,7 @@ package abnf
 // languages/lib/ruby-rt.metajs.
 
 import (
+	"fmt"
 	"math"
 	"math/big"
 	"strings"
@@ -195,6 +196,24 @@ func (rt *jsrt) addRubyFmtExterns(m map[string]func(args []uint64) uint64) {
 		return 0
 	}
 	m["js_rloop"] = func(a []uint64) uint64 { return w(rt.rubyLoop(u(a[0]))) }
+	m["js_rio"] = func(a []uint64) uint64 {
+		o := newJSObject()
+		o.set("__class", rt.rubyBuiltinClass("IO"))
+		o.set("__rio", rt.toNumber(u(a[0])))
+		return w(o)
+	}
+	// Object#method_missing, which a `super' in a method_missing reaches:
+	// NoMethodError for the missing name. Twin of js_rnomethod in
+	// lib/ruby-rt.metajs.
+	m["js_rnomethod"] = func(a []uint64) uint64 {
+		args, _ := u(a[1]).(*jsArray)
+		name := ""
+		if args != nil && len(args.elems) > 0 {
+			name = rt.rubyStr(args.elems[0])
+		}
+		rt.rubyNoMethod(u(a[0]), name)
+		return 0
+	}
 	m["js_rcatch"] = func(a []uint64) uint64 { return w(rt.rubyCatch(u(a[0]), u(a[1]))) }
 	m["js_rthrow"] = func(a []uint64) uint64 {
 		args, _ := u(a[0]).(*jsArray)
@@ -1655,6 +1674,83 @@ func (rt *jsrt) rubyThrow(tag, v interface{}) {
 	panic(&jsThrown{value: e})
 }
 
+// rubyPutsLine is a line puts writes: the text, and a newline unless it already
+// ends in one. Twin of putsLine in ruby-interpreter.abnf.
+func rubyPutsLine(s string) string {
+	if strings.HasSuffix(s, "\n") {
+		return s
+	}
+	return s + "\n"
+}
+
+// rubyIOMethod answers the methods of $stdout / STDOUT (fd 1) and $stderr /
+// STDERR (fd 2). Twin of ioMethod in ruby-interpreter.abnf, which states the
+// rules; standard error is written a line at a time there, and here too.
+func (rt *jsrt) rubyIOMethod(o *jsObject, fd int, name string, args []interface{}) interface{} {
+	pos, _ := rubyBlockArgs(args)
+	write := func(s string) {
+		if fd != 2 {
+			fmt.Fprint(outWriter, wtf8Clean(s))
+			return
+		}
+		t := rt.rubyIOErrPend + s
+		for k := strings.IndexByte(t, '\n'); k >= 0; k = strings.IndexByte(t, '\n') {
+			fmt.Fprintln(warnWriter, wtf8Clean(t[:k]))
+			t = t[k+1:]
+		}
+		rt.rubyIOErrPend = t
+	}
+	var puts func(v interface{})
+	puts = func(v interface{}) {
+		if arr, isArr := v.(*jsArray); isArr {
+			for _, e := range arr.elems {
+				puts(e)
+			}
+			return
+		}
+		write(rubyPutsLine(rt.rubyStr(v)))
+	}
+	switch name {
+	case "puts":
+		if len(pos) == 0 {
+			write("\n")
+		}
+		for _, v := range pos {
+			puts(v)
+		}
+		return jsNull
+	case "print", "write", "<<":
+		n := 0
+		for _, v := range pos {
+			s := rt.rubyStr(v)
+			write(s)
+			n += len(s)
+		}
+		if name == "write" {
+			return float64(n)
+		}
+		if name == "<<" {
+			return o
+		}
+		return jsNull
+	case "printf":
+		if len(pos) > 0 {
+			write(rt.rubyFormatArgs(pos, "printf"))
+		}
+		return jsNull
+	case "flush":
+		return o
+	case "sync", "sync=":
+		return true
+	case "fileno":
+		return float64(fd)
+	case "tty?", "isatty":
+		return false
+	}
+	rt.rubyNoMethod(o, name)
+	return nil
+}
+
 // rubyLoop is Kernel#loop: the block again and again, until a break (the
 // caller's marker catch) or a StopIteration, whose #result is the answer. Twin
 // of js_rloop in lib/ruby-rt.metajs and loop in ruby-interpreter.abnf.
@@ -1860,7 +1956,16 @@ func (rt *jsrt) rubyRespond(target interface{}, args []interface{}) interface{} 
 	if rubyRestricted(o.props["__class"], n) {
 		return all
 	}
-	return rubySingRespond(o, n) || (all && rt.rubyRespondsPrivate(n))
+	if rubySingRespond(o, n) || (all && rt.rubyRespondsPrivate(n)) {
+		return true
+	}
+	// respond_to_missing? - see respondTo in ruby-interpreter.abnf.
+	if rubyUserObj(o) {
+		if _, has := rubyFindMethod(o, "respond_to_missing?"); has {
+			return rubyTruthy(rt.rubyMethod(o, "respond_to_missing?", []interface{}{jsSym{s: n}, all}))
+		}
+	}
+	return false
 }
 
 // rubyRespondsPrivate: is n a private method every object has?

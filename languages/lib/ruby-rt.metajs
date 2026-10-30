@@ -7433,6 +7433,19 @@ function rbMemberCall(target, name, args) {
                 }
                 cls = cls["__super"]
             }
+            if (target["__rio"] !== undefined) { return rbIOMethod(target, name, args) }
+            // A call nothing answers goes to the class's method_missing, with the
+            // name as a Symbol in front of the arguments. Twin of the method_missing
+            // arm of mcall in ruby-interpreter.abnf.
+            if (rbUserObj(target) && rbFindMethod(target, "method_missing") !== undefined) {
+                var mmArgs = [rbSym(name)]
+                var mi = 0
+                while (mi < args.length) {
+                    mmArgs.push(args[mi])
+                    mi = mi + 1
+                }
+                return rbMethod(target, "method_missing", mmArgs)
+            }
             rbNoMethod(target, name)
         }
         var own = target[name]
@@ -7473,7 +7486,19 @@ function js_rrespond(target, args) {
     if (rbResponds("", n)) { return true }
     if (rbSingFind(target, n) !== undefined) { return true }
     if (rbRestricted(target["__class"], n)) { return all }
-    return rbSingRespond(target, n) || (all && rbRespondsPriv(n))
+    if (rbSingRespond(target, n) || (all && rbRespondsPriv(n))) { return true }
+    // respond_to_missing? - see respondTo in ruby-interpreter.abnf.
+    if (rbUserObj(target) && rbFindMethod(target, "respond_to_missing?") !== undefined) {
+        return rbTruthy(rbMethod(target, "respond_to_missing?", [rbSym(n), all]))
+    }
+    return false
+}
+
+// Object#method_missing, which a `super' in a method_missing reaches:
+// NoMethodError for the missing name. Twin of js_rnomethod in abnf/jsrtruby.go.
+function js_rnomethod(self, args) {
+    rbNoMethod(self, rbStr(rbArgAt(args, 0)))
+    return null
 }
 
 // The private methods every object has: the "private" row of ruby-respond.js and
@@ -8373,8 +8398,80 @@ function js_rputs(v) {
         }
         return undefined
     }
-    println(rbStr(v))
+    print(rbPutsLine(rbStr(v)))
     return undefined
+}
+// A line puts writes: the text, and a newline unless it already ends in one.
+// Twin of putsLine in ruby-interpreter.abnf.
+function rbPutsLine(s) {
+    if (s.length > 0 && s.charCodeAt(s.length - 1) == 10) { return s }
+    return s + "\n"
+}
+
+// $stdout / STDOUT and $stderr / STDERR: IO objects over fd 1 and 2. Twin of
+// ioMethod in ruby-interpreter.abnf, which states the rules.
+function js_rio(fd) { return {__class: rbBuiltinClass("IO"), __rio: rbToF(fd)} }
+var rbIOErrPend = ""
+function rbIOWrite(io, s) {
+    if (io["__rio"] != 2) {
+        print(s)
+        return undefined
+    }
+    var t = rbIOErrPend + s
+    var k = t.indexOf("\n")
+    while (k >= 0) {
+        eprintln(t.substring(0, k))
+        t = t.substring(k + 1, t.length)
+        k = t.indexOf("\n")
+    }
+    rbIOErrPend = t
+    return undefined
+}
+function rbIOPuts(io, v) {
+    if (rbIsArr(v)) {
+        var i = 0
+        while (i < v.length) {
+            rbIOPuts(io, v[i])
+            i = i + 1
+        }
+        return undefined
+    }
+    rbIOWrite(io, rbPutsLine(rbStr(v)))
+    return undefined
+}
+function rbIOMethod(io, name, args) {
+    var n = rbNPos(args)
+    var i = 0
+    if (name == "puts") {
+        if (n == 0) { rbIOWrite(io, "\n") }
+        while (i < n) {
+            rbIOPuts(io, args[i])
+            i = i + 1
+        }
+        return null
+    }
+    if (name == "print" || name == "write" || name == "<<") {
+        var w = 0
+        while (i < n) {
+            var s = rbStr(args[i])
+            rbIOWrite(io, s)
+            w = w + byteLen(s)
+            i = i + 1
+        }
+        if (name == "write") { return w }
+        if (name == "<<") { return io }
+        return null
+    }
+    if (name == "printf") {
+        if (n > 0) { rbIOWrite(io, rbStr(js_rformat(args, "printf"))) }
+        return null
+    }
+    if (name == "flush") { return io }
+    if (name == "sync" || name == "sync=") { return true }
+    if (name == "fileno") { return io["__rio"] }
+    if (name == "tty?" || name == "isatty") { return false }
+    rbNoMethod(io, name)
+    return null
 }
 
 function js_rprint(v) {

@@ -6039,9 +6039,12 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         var savedParams = curMethParams
         curMethName = m.name
         curMethParams = paramNames(m.params)
+        var savedSplat = curMethSplat
+        curMethSplat = splatParamName(m.params)
         var idx = emitFunc(m.params, m.body, true, false, false, true, m.pos)
         curMethName = savedMeth
         curMethParams = savedParams
+        curMethSplat = savedSplat
         var fnV = emitArity(b, callExt(b, "js_closure", [handle(idx), curScopeV]), m.params)
         callExt(b, "js_rsingdef", [targetV, emitStr(b, m.name), fnV])
         return b
@@ -7094,6 +7097,15 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     var curClsName = ""
     var curMethName = ""
     var curMethParams = []
+    // The *rest parameter of the method being emitted ("" when none): a zsuper
+    // passes its elements, not the Array.
+    var curMethSplat = ""
+    function splatParamName(ps) {
+        for (var i = 0; i < ps.length; i++) {
+            if (typeof ps[i] != "string" && ps[i].splat === true) { return ps[i].name }
+        }
+        return ""
+    }
     function makeSuper(items) {
         var explicit = false
         var argTs = []
@@ -7102,6 +7114,20 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             else { argTs.push(items[i]) }
         }
         return function(b) {
+            // A `super' in a method_missing that no superclass defines reaches
+            // Object#method_missing: NoMethodError for the missing name.
+            if (curMethName == "method_missing" && curClsName != "" && !superHasMethod(curClsName, "method_missing")) {
+                var mmArgs = callExt(b, "js_arr_new", [])
+                if (explicit) {
+                    var mea = emitArgs(b, unwrapArgs(argTs))
+                    b = mea.b
+                    mmArgs = mea.v
+                } else if (curMethParams.length > 0) {
+                    callExt(b, "js_arr_push", [mmArgs, callExt(b, "js_scope_get", [curScopeV, emitStr(b, curMethParams[0])])])
+                }
+                var mmSelf = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "self")])
+                return {b: b, v: callExt(b, "js_rnomethod", [mmSelf, mmArgs])}
+            }
             if (curClsName == "" || (classSupers["$" + curClsName] == undefined
                                      && classHasSuper["$" + curClsName] !== true)) {
                 return notImplExpr("super outside of a subclass", 0)(b)
@@ -7109,6 +7135,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             var clsName = curClsName
             var methName = curMethName
             var ownParams = curMethParams
+            var ownSplat = curMethSplat
             var clsV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, clsName)])
             var supV = callExt(b, "js_get", [clsV, emitStr(b, "__super")])
             var selfV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "self")])
@@ -7119,12 +7146,24 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 argsV = ea.v
             } else {
                 for (var k = 0; k < ownParams.length; k++) {
-                    callExt(b, "js_arr_push", [argsV,
-                        callExt(b, "js_scope_get", [curScopeV, emitStr(b, ownParams[k])])])
+                    var pv = callExt(b, "js_scope_get", [curScopeV, emitStr(b, ownParams[k])])
+                    if (ownParams[k] == ownSplat) { b = emitSpliceInto(b, argsV, pv) }
+                    else { callExt(b, "js_arr_push", [argsV, pv]) }
                 }
             }
             return {b: b, v: callExt(b, "js_supercall", [supV, selfV, emitStr(b, methName), argsV])}
         }
+    }
+    // Whether a class above clsName (declared in this file) defines name.
+    function superHasMethod(clsName, name) {
+        var c = classSupers["$" + clsName]
+        var hops = 0
+        while (c != undefined && c != "" && hops < 64) {
+            if (classHasMethod(c, name)) { return true }
+            c = classSupers["$" + c]
+            hops = hops + 1
+        }
+        return false
     }
     // retry: leave the rescue clause with the marker makeTry's loop tests for.
     function makeRetry() {
@@ -7329,9 +7368,12 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             var savedMP = curMethParams
             curMethName = fn.name
             curMethParams = paramNames(fn.params)
+            var savedSplat = curMethSplat
+            curMethSplat = splatParamName(fn.params)
             var idx = emitFunc(fn.params, fn.body, false, false, false, true, fn.pos)
             curMethName = savedMN
             curMethParams = savedMP
+            curMethSplat = savedSplat
             // Recorded for Proc#arity exactly as a class method is - see emitMethods.
             // Only "$d$" + name is bound: the plain name is a LOCAL's slot (see
             // curTopLocals), and `k = k` must read it unassigned.
@@ -7623,6 +7665,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     function emitMethods(b, dstV, list, prefix, owner, restrictedList) {
         var savedMeth = curMethName
         var savedParams = curMethParams
+        var savedSplatM = curMethSplat
         if (prefix == "") { list = list.concat(inheritedRestricted(list, owner, restrictedList)) }
         for (var k = 0; k < list.length; k++) {
             var m = list[k]
@@ -7632,6 +7675,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (rk != "" && prefix == "") { key = "$q$" + m.name }
             curMethName = m.name
             curMethParams = paramNames(m.params)
+            curMethSplat = splatParamName(m.params)
             nextSelfIsCls = prefix == "$s$"
             var idx = emitFunc(m.params, m.body, true, false, false, true, m.pos)
             // A method closure enters the arity registry the way a block and a lambda
@@ -7651,6 +7695,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
         curMethName = savedMeth
         curMethParams = savedParams
+        curMethSplat = savedSplatM
         return b
     }
 
@@ -8360,7 +8405,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // Math is a MODULE, and it belongs here for the same reason the classes do:
         // without it the name falls through to the ROOT scope's JavaScript Math, and
         // Math.sqrt(4) has to answer 2.0, not 2.
-        "Math", "Struct",
+        "Math", "Struct", "IO",
         "Exception", "StandardError", "RuntimeError", "ArgumentError", "TypeError",
         "NameError", "NoMethodError", "IndexError", "KeyError", "RangeError",
         "ZeroDivisionError", "StopIteration", "FrozenError", "NotImplementedError", "UncaughtThrowError",
@@ -8420,6 +8465,13 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // $0 and $PROGRAM_NAME name the script being run (the interpreter's runProgram).
         callExt(b, "js_rgset", [emitStr(b, "0"), emitStr(b, c.file)])
         callExt(b, "js_rgset", [emitStr(b, "PROGRAM_NAME"), emitStr(b, c.file)])
+        // $stdout / $stderr, and the STDOUT / STDERR constants naming the same IO.
+        var outV = callExt(b, "js_rio", [emitNum(b, 1)])
+        var errV = callExt(b, "js_rio", [emitNum(b, 2)])
+        callExt(b, "js_rgset", [emitStr(b, "stdout"), outV])
+        callExt(b, "js_rgset", [emitStr(b, "stderr"), errV])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "STDOUT"), outV])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "STDERR"), errV])
         // The builtin class constants, so `case v when Integer`, `v.is_a?(String)`
         // and `rescue ArgumentError` name a real class object (js_rclass hands out
         // one object per name, so the identity comparisons hold).
