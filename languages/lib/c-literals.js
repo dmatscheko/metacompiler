@@ -114,7 +114,8 @@ function cCharConst(s) {
 // (core.stdlibImports), spelled as the reference toolchain's headers spell them on
 // this target (LP64, signed char) so each one gets the C type that spelling gives
 // it: INT_MIN is an int, UINT_MAX an unsigned int, ULONG_MAX an unsigned long. A
-// leading '-' negates and a trailing '-1' subtracts one, the only two shapes used.
+// leading '-' negates and a trailing '-1' subtracts one; a leading '(' is NULL's
+// ((void*)0), the one pointer constant.
 var cStdConsts = {
     "limits.h": {CHAR_BIT: "8", SCHAR_MIN: "-128", SCHAR_MAX: "127", UCHAR_MAX: "255",
         CHAR_MIN: "-128", CHAR_MAX: "127", SHRT_MIN: "-32768", SHRT_MAX: "32767",
@@ -132,22 +133,31 @@ var cStdConsts = {
         UINTPTR_MAX: "18446744073709551615UL", INTMAX_MIN: "-9223372036854775807L-1",
         INTMAX_MAX: "9223372036854775807L", UINTMAX_MAX: "18446744073709551615UL",
         PTRDIFF_MIN: "-9223372036854775807L-1", PTRDIFF_MAX: "9223372036854775807L"},
-    "stdbool.h": {"true": "1", "false": "0", __bool_true_false_are_defined: "1"}
+    "stdbool.h": {"true": "1", "false": "0", __bool_true_false_are_defined: "1"},
+    "stddef.h": {NULL: "((void*)0)"},
+    "stdio.h": {NULL: "((void*)0)"},
+    "stdlib.h": {NULL: "((void*)0)"},
+    "string.h": {NULL: "((void*)0)"}
 }
 // The constant tables of the headers included so far.
 var cStdIncluded = []
+// Whether <stddef.h>, the one header defining offsetof (C11 7.19p3), was included.
+var cHasOffsetof = false
 // '#include <h>': its constants become visible, and <stdbool.h> defines bool as
 // _Bool (C11 7.18), from here on like any typedef.
 function cNoteSysHeader(h) {
     if (hasOwn(cStdConsts, h)) cStdIncluded.push(cStdConsts[h])
     if (h == "stdbool.h") typedefs["bool"] = ctBool
+    if (h == "stddef.h") cHasOffsetof = true
 }
 // The constant thunk for a name an included standard header defines, or undefined.
-// makeNumLit, makeNeg and foldBinary come from the including grammar.
+// NULL is the null pointer constant cc's headers spell, ((void*)0) (C11 6.3.2.3p3).
+// makeNumLit, makeNeg, foldBinary, makeCast and ctVoid come from the including grammar.
 function cStdConst(name) {
     for (var i = 0; i < cStdIncluded.length; i++) {
         if (!hasOwn(cStdIncluded[i], name)) continue
         var s = cStdIncluded[i][name]
+        if (s.charCodeAt(0) == 40) return makeCast([{k: "ptr", p: ctVoid}, makeNumLit(0, "0")])
         if (s.charCodeAt(0) != 45) return makeNumLit(parseCInt(s), s)
         var parts = s.slice(1).split("-")
         var t = makeNeg(makeNumLit(parseCInt(parts[0]), parts[0]))
@@ -168,6 +178,7 @@ function cConstOf(name) {
     for (var i = 0; i < cStdIncluded.length; i++) {
         if (!hasOwn(cStdIncluded[i], name)) continue
         var s = cStdIncluded[i][name]
+        if (s.charCodeAt(0) == 40) fail("not an integer constant: " + name)
         var neg = s.charCodeAt(0) == 45
         var parts = (neg ? s.slice(1) : s).split("-")
         var v = cConstPart(name, parts[0])
@@ -351,12 +362,15 @@ function cRoundUp(n, a) { return n % a == 0 ? n : n + a - n % a }
 // that follow unless it would straddle a unit of its declared type, when it starts
 // the next unit; a zero-width one only rounding up to such a unit; every member of
 // a union at 0. The alignment is the largest member's - an UNNAMED bit-field counts
-// for nothing - and the size is rounded up to it. ms: [{size, align, bits?, named}].
-// Answers {bytes, align}.
+// for nothing - and the size is rounded up to it. ms: [{size, align, bits?, named,
+// name?, offs?}]. Answers {bytes, align, offs}: offs lists each named member's byte
+// offset as {n, o} (o is -1 for a bit-field), the members of an anonymous struct or
+// union member (its own offs) shifted to the enclosing tag's start.
 function cAbiLayout(ms, isUnion) {
     var bit = 0
     var end = 0
     var align = 1
+    var offs = []
     for (var i = 0; i < ms.length; i++) {
         var m = ms[i]
         var at = isUnion ? 0 : bit
@@ -370,13 +384,48 @@ function cAbiLayout(ms, isUnion) {
         if (m.named && m.align > align) align = m.align
         if (at + w > end) end = at + w
         bit = at + w
+        if (m.offs != undefined) {
+            for (var k = 0; k < m.offs.length; k++) {
+                var so = m.offs[k].o
+                offs.push({n: m.offs[k].n, o: so < 0 ? so : at / 8 + so})
+            }
+        } else if (m.named) {
+            offs.push({n: m.name, o: m.bits == undefined ? at / 8 : -1})
+        }
     }
-    return {bytes: cRoundUp(cRoundUp(end, 8) / 8, align), align: align}
+    return {bytes: cRoundUp(cRoundUp(end, 8) / 8, align), align: align, offs: offs}
 }
 // One member of a cAbiLayout list: a declared field of type ct, or (sub) the
-// {bytes, align} of an anonymous struct/union member.
-function cAbiMember(ct, f) { return {size: ctBytes(ct), align: ctAlign(ct), bits: f.bits, named: f.pad != true} }
-function cAbiSub(sub) { return {size: sub.bytes, align: sub.align, named: true} }
+// {bytes, align, offs} of an anonymous struct/union member.
+function cAbiMember(ct, f) { return {size: ctBytes(ct), align: ctAlign(ct), bits: f.bits, named: f.pad != true, name: f.name} }
+function cAbiSub(sub) { return {size: sub.bytes, align: sub.align, named: true, offs: sub.offs} }
+
+// offsetof(type, member-designator): the byte offset cc gives the designated member
+// (C11 7.19p3), read from the tag's cAbiLayout offsets, so it answers cc's bytes
+// whatever either engine's own storage looks like. steps: [{fld} | {at}], a member
+// followed by '.member' and '[index]' steps.
+function cOffsetOf(ct, steps) {
+    if (!cHasOffsetof) fail("offsetof needs #include <stddef.h>")
+    var off = 0
+    for (var i = 0; i < steps.length; i++) {
+        var d = steps[i]
+        if (d.fld == undefined) {
+            if (ct.k != "arr") fail("offsetof: subscript of a non-array")
+            ct = ct.e
+            off = off + d.at * ctBytes(ct)
+            continue
+        }
+        if (ct.k != "struct") fail("offsetof: '" + d.fld + "' needs a struct or union")
+        var st = structOf(ct.s)
+        var o = -2
+        for (var k = 0; k < st.offs.length; k++) { if (st.offs[k].n == d.fld) o = st.offs[k].o }
+        if (o == -2) fail(tagName(ct.s) + " has no field " + d.fld)
+        if (o == -1) fail("cannot compute offset of bit-field '" + d.fld + "'")
+        off = off + o
+        ct = st.fields[d.fld].ct
+    }
+    return off
+}
 
 // The names declared so far in each enclosing block, innermost last. The tags
 // fill it while they walk the tree, so a second declaration of one name in one

@@ -2423,6 +2423,45 @@ int s57(void) {
     return 0;
 }
 
+// ===== SECTION 58: <stddef.h>: offsetof, NULL, size_t, ptrdiff_t =====
+/* offsetof is an integer constant expression of type size_t holding cc's byte
+   offset of the member (the arm64 layout of SECTION 57), so it also folds into an
+   enumerator and an array dimension; its designator may step into a nested member,
+   an anonymous member's member and an array element. NULL is ((void *)0). Every
+   expected value was printed by cc. */
+#include <stddef.h>
+struct s58_s { char c; int g; };
+struct s58_t { char a; double d; short s; char b[3]; long l; };
+union s58_u { char c; int i; };
+struct s58_n { int x; struct s58_s in; int arr[4]; struct s58_s m[3]; };
+struct s58_a { char c; struct { char x; int y; }; union { short p; long q; }; char e; };
+struct s58_b { char c; unsigned bf : 3; int after; };
+typedef struct { short p; long q; } s58_td;
+enum { S58_G = offsetof(struct s58_s, g), S58_L = offsetof(struct s58_t, l) / 8 };
+int s58_dim[offsetof(struct s58_t, l)];
+int s58(void) {
+    check(5801, offsetof(struct s58_s, c) == 0 && offsetof(struct s58_s, g) == 4
+                && S58_G == 4 && S58_L == 3 && sizeof s58_dim == 96);
+    check(5802, offsetof(struct s58_t, d) == 8 && offsetof(struct s58_t, s) == 16
+                && offsetof(struct s58_t, b) == 18 && offsetof(struct s58_t, l) == 24
+                && offsetof(union s58_u, i) == 0 && offsetof(s58_td, q) == 8);
+    check(5803, offsetof(struct s58_n, in) == 4 && offsetof(struct s58_n, in.g) == 8
+                && offsetof(struct s58_n, arr) == 12 && offsetof(struct s58_n, arr[2]) == 20
+                && offsetof(struct s58_n, m[2].g) == 48);
+    check(5804, offsetof(struct s58_a, x) == 4 && offsetof(struct s58_a, y) == 8
+                && offsetof(struct s58_a, p) == 16 && offsetof(struct s58_a, q) == 16
+                && offsetof(struct s58_a, e) == 24 && offsetof(struct s58_b, after) == 4);
+    /* size_t is unsigned long, so offsetof minus a larger value wraps. */
+    check(5805, sizeof(offsetof(struct s58_s, g)) == 8 && offsetof(struct s58_s, g) - 5 > 0);
+    int *p = NULL;
+    char *q = NULL;
+    size_t z = sizeof(int);
+    ptrdiff_t d = -3;
+    check(5806, p == NULL && !q && sizeof(NULL) == 8 && z == 4 && d < 0
+                && sizeof(size_t) == 8 && sizeof(ptrdiff_t) == 8 && (size_t)-1 > 0);
+    return 0;
+}
+
 // ===== END SECTIONS =====
 
 int main() {
@@ -2483,6 +2522,7 @@ int main() {
     s55(); // SECTION-CALL 55
     s56(); // SECTION-CALL 56
     s57(); // SECTION-CALL 57
+    s58(); // SECTION-CALL 58
     /* summary: "full: <checks> checks, <failures> failures" */
     putchar('f'); putchar('u'); putchar('l'); putchar('l'); putchar(':'); putchar(' ');
     print_num(nchecks);

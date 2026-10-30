@@ -87,7 +87,7 @@ EnumInit    <~~ push({val: pop()}) ~~> = ECShift ;
 ECShift     <~~ push(foldDimBin(takeAll())) ~~> = ECAdd { DimShOp ECAdd } ;
 ECAdd       <~~ push(foldDimBin(takeAll())) ~~> = ECMul { DimAddOp ECMul } ;
 ECMul       <~~ push(foldDimBin(takeAll())) ~~> = ECUn { DimMulOp ECUn } ;
-ECUn        = Number | ECParen | ECNeg | ECPos | ECNot | ECChar | ECName ;
+ECUn        = Number | ECParen | ECNeg | ECPos | ECNot | ECChar | OffsetVal | ECName ;
 ECParen     = "(" ECShift ")" ;
 ECNeg       <~~ push(0 - pop()) ~~> = "-" ECUn ;
 ECPos       = "+" ECUn ;
@@ -887,7 +887,7 @@ DimAdd      <~~ push(foldDimBin(takeAll())) ~~> = DimMul { DimAddOp DimMul } ;
 DimAddOp    <~~ push({op: up.in}) ~~> = "+" | "-" ;
 DimMul      <~~ push(foldDimBin(takeAll())) ~~> = DimUn { DimMulOp DimUn } ;
 DimMulOp    <~~ push({op: up.in}) ~~> = "*" | "/" | "%" ;
-DimUn       = Number | DimParen | DimNeg | DimPos | DimNot | DimName ;
+DimUn       = Number | DimParen | DimNeg | DimPos | DimNot | OffsetVal | DimName ;
 DimName     <~~ push(cConstOf(up.in)) ~~> = Id ;
 DimParen    = "(" DimShift ")" ;
 DimNeg      <~~ push(0 - pop()) ~~> = "-" DimUn ;
@@ -1100,7 +1100,7 @@ MulExpr     <~~ push(foldBinary(takeAll())) ~~>
 
 // AlignOf comes before PostfixExpr: '_Alignof(int)' looks exactly like a call of a
 // function named _Alignof, and the general call seed would claim it first.
-UnaryExpr   = PreIncDec | AddrOf | DerefLoad | Neg | Pos | Not | BitNot | Sizeof | AlignOf | GenericCall | Generic | Cast | PostfixExpr ;
+UnaryExpr   = PreIncDec | AddrOf | DerefLoad | Neg | Pos | Not | BitNot | Sizeof | AlignOf | OffsetOf | GenericCall | Generic | Cast | PostfixExpr ;
 
 // A cast '(Type)expr'. TypeName needs a type keyword, so '(expr)' stays a parenthesis.
 Cast        <~~ push(makeCast(takeAll())) ~~>
@@ -1122,6 +1122,13 @@ SizeofExpr  <~~ push(makeSizeofExpr(pop())) ~~>
 // a struct's or union's largest member's.
 AlignOf     <~~ push(makeAlignof(pop())) ~~>
             = KwAlignof "(" TypeName ")" ;
+// offsetof(type, member-designator): a size_t constant folded from cc's layout
+// (cOffsetOf). Twin of OffsetOf in c-interpreter.abnf.
+OffsetOf    <~~ push(makeNum(pop(), ctSizeT)) ~~> = OffsetVal ;
+OffsetVal   <~~ var s = takeAll(); push(cOffsetOf(s[0], s.slice(1))) ~~>
+            = KwOffsetof "(" TypeName "," OffMember { "." OffMember | "[" OffIndex "]" } ")" ;
+OffMember   <~~ push({fld: up.in}) ~~> = Id ;
+OffIndex    <~~ push({at: pop()}) ~~> = DimShift ;
 // A type name: base plus '*'s, optionally an abstract function-pointer declarator
 // (every function pointer type is the same ctFn) or an array declarator.
 TypeName    <~~ push(makeTypeName(takeAll())) ~~>
@@ -1400,6 +1407,7 @@ BInitDecl   <~~ push(makeBoolDecl(takeAll())) ~~>
 
 KwSizeof    = "sizeof" KwEnd ;
 KwAlignof   = "_Alignof" KwEnd ;
+KwOffsetof  = "offsetof" KwEnd ;
 KwStaticAs  = "_Static_assert" KwEnd ;
 KwBool      = "_Bool" KwEnd ;
 KwIf        = "if" KwEnd ;
@@ -2471,7 +2479,7 @@ KwDefault   = "default" KwEnd ;
             mPadTo(L, L.align)
         }
         structs[name] = {lty: llvm.types.NewStruct(L.ltys), fields: fields, order: order,
-                         isUnion: isUnion, bytes: cc.bytes, align: cc.align,
+                         isUnion: isUnion, bytes: cc.bytes, align: cc.align, offs: cc.offs,
                          mbytes: L.off, malign: L.align, wideCt: wideCt}
     }
     // A bit field holds only its declared width: an unsigned one WRAPS, a signed one

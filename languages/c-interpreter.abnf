@@ -97,7 +97,7 @@ EnumInit    <~~ push({val: pop()}) ~~> = ECShift ;
 ECShift     <~~ push(foldDimBin(takeAll())) ~~> = ECAdd { DimShOp ECAdd } ;
 ECAdd       <~~ push(foldDimBin(takeAll())) ~~> = ECMul { DimAddOp ECMul } ;
 ECMul       <~~ push(foldDimBin(takeAll())) ~~> = ECUn { DimMulOp ECUn } ;
-ECUn        = Number | ECParen | ECNeg | ECPos | ECNot | ECChar | ECName ;
+ECUn        = Number | ECParen | ECNeg | ECPos | ECNot | ECChar | OffsetVal | ECName ;
 ECParen     = "(" ECShift ")" ;
 ECNeg       <~~ push(0 - pop()) ~~> = "-" ECUn ;
 ECPos       = "+" ECUn ;
@@ -982,7 +982,7 @@ DimAdd      <~~ push(foldDimBin(takeAll())) ~~> = DimMul { DimAddOp DimMul } ;
 DimAddOp    <~~ push({op: up.in}) ~~> = "+" | "-" ;
 DimMul      <~~ push(foldDimBin(takeAll())) ~~> = DimUn { DimMulOp DimUn } ;
 DimMulOp    <~~ push({op: up.in}) ~~> = "*" | "/" | "%" ;
-DimUn       = Number | DimParen | DimNeg | DimPos | DimNot | DimName ;
+DimUn       = Number | DimParen | DimNeg | DimPos | DimNot | OffsetVal | DimName ;
 DimName     <~~ push(cConstOf(up.in)) ~~> = Id ;
 DimParen    = "(" DimShift ")" ;
 DimNeg      <~~ push(0 - pop()) ~~> = "-" DimUn ;
@@ -1208,7 +1208,7 @@ MulExpr     <~~ push(foldBinary(takeAll())) ~~>
 // * dereferences (as an expression it loads the pointed to value).
 // AlignOf comes before PostfixExpr: '_Alignof(int)' looks exactly like a call of a
 // function named _Alignof, and the general call seed would claim it first.
-UnaryExpr   = PreIncDec | AddrOf | DerefLoad | Neg | Pos | Not | BitNot | Sizeof | AlignOf | GenericCall | Generic | Cast | PostfixExpr ;
+UnaryExpr   = PreIncDec | AddrOf | DerefLoad | Neg | Pos | Not | BitNot | Sizeof | AlignOf | OffsetOf | GenericCall | Generic | Cast | PostfixExpr ;
 
 // A cast '(Type)expr' converts the value to the named type: an integer wraps to that
 // type's width and signedness, a float truncates towards zero on the way to an
@@ -1239,6 +1239,15 @@ SizeofExpr  <~~ push(makeSizeofExpr(pop())) ~~>
 // a struct's or union's largest member's.
 AlignOf     <~~ push(makeAlignof(pop())) ~~>
             = KwAlignof "(" TypeName ")" ;
+// offsetof(type, member-designator), the <stddef.h> macro: an integer constant
+// expression of type size_t (C11 7.19p3) folded from cc's layout (cOffsetOf), so it
+// also stands in an array dimension or an enumerator. An index in the designator
+// must be constant too, or the member would have no constant address.
+OffsetOf    <~~ push(makeNum(pop(), ctSizeT)) ~~> = OffsetVal ;
+OffsetVal   <~~ var s = takeAll(); push(cOffsetOf(s[0], s.slice(1))) ~~>
+            = KwOffsetof "(" TypeName "," OffMember { "." OffMember | "[" OffIndex "]" } ")" ;
+OffMember   <~~ push({fld: up.in}) ~~> = Id ;
+OffIndex    <~~ push({at: pop()}) ~~> = DimShift ;
 // A TYPE NAME: a scalar/struct/union/enum base plus a run of pointer stars.
 // An ABSTRACT function-pointer declarator may follow, so a cast can name a function
 // pointer type: '(void (*)(void))0' and '(int (*)(int, int))f'. All this model needs
@@ -1569,6 +1578,7 @@ BInitDecl   <~~ push(makeBoolDecl(takeAll())) ~~>
 
 KwSizeof    = "sizeof" KwEnd ;
 KwAlignof   = "_Alignof" KwEnd ;
+KwOffsetof  = "offsetof" KwEnd ;
 KwStaticAs  = "_Static_assert" KwEnd ;
 KwBool      = "_Bool" KwEnd ;
 KwIf        = "if" KwEnd ;
@@ -2156,11 +2166,12 @@ KwDefault   = "default" KwEnd ;
     function defineTag(items, isUnion) {
         var name = items[0]
         if (hasOwn(structs, name)) fail(tagName(name) + " defined twice")
-        var st = {size: 0, bytes: 0, align: 1, fields: {}, order: [], isUnion: isUnion}
+        var st = {size: 0, bytes: 0, align: 1, offs: [], fields: {}, order: [], isUnion: isUnion}
         var r = layoutGroups(st, items.slice(1), 0, isUnion, name)
         st.size = r.size
         st.bytes = r.cc.bytes
         st.align = r.cc.align
+        st.offs = r.cc.offs
         structs[name] = st
     }
     // The C type of one declared member. A POINTER field may point at any (even a
