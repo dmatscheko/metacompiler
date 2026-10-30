@@ -3213,15 +3213,16 @@ KwContract  = "contract" KwEnd ;
         if (reified == undefined) { return [] }
         var targs = (targText == undefined || targText == null || targText == "") ? [] : typeArgNames(targText)
         var out = []
-        for (var ri = 0; ri < reified.length; ri++) { out.push(targs.length > ri ? targs[ri] : "Any") }
+        for (var ri = 0; ri < reified.length; ri++) { out.push(targs.length > ri ? ktIsName(targs[ri]) : "Any") }
         return out
     }
-    // The trailing string argument a method call's type arguments contribute, or null.
+    // The trailing string argument a method call's type arguments contribute, or null:
+    // the type name as an `is` test judges it (ktIsName).
     function mcallTArg(s) {
         if (s.targ == undefined || s.targ == null || s.targ == "") { return null }
         if (mcallTArgMethods["$" + s.name] != true) { return null }
         var n = tArgName(s.targ)
-        return n == "" ? null : n
+        return n == "" ? null : ktIsName(n)
     }
     // ----- Imports & errors -----
     function fail(msg) { println("kotlin compiler error: " + msg); exit(1) }
@@ -4102,7 +4103,7 @@ KwContract  = "contract" KwEnd ;
             var r = operand(b)
             var tV = (reifiedName != null)
                 ? callExt(r.b, "js_scope_get", [curScopeV, emitStr(r.b, reifiedName)])
-                : emitStr(r.b, ktLexType(m.tname))
+                : emitStr(r.b, ktIsName(m.tname))
             var v = callExt(r.b, "js_ktis", [r.v, tV])
             if (m.neg) { v = callExt(r.b, "js_not", [v]) }
             return {b: r.b, v: v}
@@ -4266,7 +4267,7 @@ KwContract  = "contract" KwEnd ;
             if (!m.safe) { return makeCast(operand, m.tname) }
             return function(b) { // x as? T: the value when it matches, else null
                 var r = operand(b)
-                var isV = callExt(r.b, "js_ktis", [r.v, emitStr(r.b, ktLexType(m.tname))])
+                var isV = callExt(r.b, "js_ktis", [r.v, emitStr(r.b, ktIsName(m.tname))])
                 return {b: r.b, v: r.b.NewSelect(truthy(r.b, isV), r.v, hNull)}
             }
         }
@@ -4319,7 +4320,7 @@ KwContract  = "contract" KwEnd ;
                 cb = okB
             }
             if (dest == "") { return {b: cb, v: r.v} }
-            return {b: cb, v: callExt(cb, "js_ktcast", [r.v, emitStr(cb, opt ? qb + "?" : qb), emitStr(cb, dest)])}
+            return {b: cb, v: callExt(cb, "js_ktcast", [r.v, emitStr(cb, ktIsName(opt ? qb + "?" : qb)), emitStr(cb, dest)])}
         }
     }
 
@@ -4409,7 +4410,7 @@ KwContract  = "contract" KwEnd ;
                     var nextB = curF.NewBlock("")
                     if (cond.isType) {
                         var subjV0 = callExt(b, "js_scope_get", [curScopeV, emitStr(b, wName)])
-                        var isV = callExt(b, "js_ktis", [subjV0, emitStr(b, ktLexType(cond.tname))])
+                        var isV = callExt(b, "js_ktis", [subjV0, emitStr(b, ktIsName(cond.tname))])
                         if (cond.neg) { isV = callExt(b, "js_not", [isV]) }
                         b.NewCondBr(truthy(b, isV), matchB, nextB)
                     } else if (cond.v != undefined) {
@@ -5220,11 +5221,11 @@ KwContract  = "contract" KwEnd ;
         if (items[at] != undefined && items[at].targs != undefined) { targs = typeArgNames(items[at].targs); at++ }
         var args = items.slice(at)
         // A callee with reified type parameters gets the type-argument names appended as
-        // plain string arguments, in declaration order.
+        // plain string arguments, in declaration order, as an `is` test judges them.
         var reified = reifiedFuns["$" + name]
         if (reified != undefined) {
             for (var ri = 0; ri < reified.length; ri++) {
-                args = args.concat([{at: makeConst(targs.length > ri ? targs[ri] : "Any")}])
+                args = args.concat([{at: makeIsNameConst(targs.length > ri ? targs[ri] : "Any")}])
             }
         }
         // A builder call's static type, and its elements retyped by the explicit type
@@ -7528,6 +7529,31 @@ KwContract  = "contract" KwEnd ;
         }
         return tname
     }
+    // The name an `is` / `as` test judges. When the name written at the site denotes
+    // one type this file declares (ktLexType, then a nested type's binary name or the
+    // one unnested type of that simple name), it is ROOTED - a leading "." - so
+    // ktDescQual matches only the class of exactly that binary name: `is In` at top
+    // level is not true of an `O1.In`, nor `is O1.In` of a top-level In. Twin of
+    // kIsName in kotlin-interpreter.abnf.
+    function ktIsName(tname) {
+        var q = ktLexType(tname)
+        var lt = q.indexOf("<")
+        var base = lt < 0 ? q : q.substring(0, lt)
+        if (base.length > 0 && base.charAt(base.length - 1) == "?") { base = base.substring(0, base.length - 1) }
+        ktDeclIndex()
+        if (base.indexOf(".") >= 0) {
+            return nestedOf["$" + base.split(".").join("$")] != undefined ? "." + q : q
+        }
+        var sb = simpleBins["$" + base]
+        if (sb == undefined || !ktTopType(base)) { return q }
+        var tops = 0
+        for (var i = 0; i < sb.length; i++) { if (sb[i].indexOf("$") < 0) { tops++ } }
+        return tops == 1 ? "." + q : q
+    }
+    // The string ktIsName makes of t, resolved where the thunk is emitted.
+    function makeIsNameConst(t) {
+        return function(b) { return {b: b, v: emitStr(b, ktIsName(t))} }
+    }
     // The binary name a simple type name written at the current emission point
     // denotes: the lexically enclosing nested type of that name (ktLexType), else
     // the one type the file declares under it, else the name itself. emitBinName's
@@ -8507,6 +8533,7 @@ KwContract  = "contract" KwEnd ;
             emitSuperName = savedSuper
             emitSuperRaw = savedSuperRaw
             b = emitNestedList(b, clsV, null, parts.nested, name)
+            if (parts.companion != null) { b = emitCompanion(b, clsV, parts.companion, parts.compName) }
             ktMirrorNested(b, curScopeV, outerV, parts.nested)
             curScopeV = outerV
             return b

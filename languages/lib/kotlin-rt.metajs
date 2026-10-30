@@ -6662,15 +6662,19 @@ function ktDescIs(c, t, depth) {
 }
 // ktDescQual / ktBinTail (jsrtkotlin.go): a qualified type name, split at its
 // dots, against c's hierarchy - 0 none of its simple name, 1 one whose binary
-// name agrees, 2 only others.
+// name agrees, 2 only others; a ROOTED name (leading empty segment) agrees only
+// in full.
 function ktDescQual(c, segs, depth) {
     var out = 0
     var guard = 0
+    var rooted = segs[0] == ""
     while (c !== null && c !== undefined && typeof c == "object" && guard < 64) {
         if (c["__name"] === segs[segs.length - 1]) {
             var bn = c["__bname"]
-            if (typeof bn != "string" || bn.indexOf("$") < 0) { return 1 }
-            if (ktBinTail(bn.split("$"), segs)) { return 1 }
+            var bs = [segs[segs.length - 1]]
+            if (typeof bn == "string" && bn.indexOf("$") >= 0) { bs = bn.split("$") }
+            else if (!rooted) { return 1 }
+            if (ktBinTail(bs, segs) && (!rooted || bs.length == segs.length - 1)) { return 1 }
             out = 2
         }
         var ifs = c["__ifaces"]

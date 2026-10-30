@@ -6241,6 +6241,44 @@ fun sec138() {
         "kotlin.Int kotlin.Int kotlin.Any kotlin.Char")
 }
 
+// ===== SECTION 139: a type test names one class; an interface's companion =====
+// `is` / `as` / `as?` / `when` / filterIsInstance and a reified `is T` resolve the
+// written name lexically to ONE class, so a top-level In139 and O139.In139 are
+// unrelated types whichever spelling is tested. An interface may declare a
+// companion object, reached through the interface's name. Spec only (the Kotlin
+// specification, "Type checking" / "Linked scopes"); the same tests through java's
+// instanceof on a static nested class answer the same under JDK 24.
+class In139(val x: Int)
+class O139 {
+    class In139(val y: Int)
+    fun own(a: Any) = a is In139
+}
+inline fun <reified T> isA139(x: Any) = x is T
+interface Ic139 {
+    fun name(): String
+    companion object {
+        const val K = 7
+        val base = "B"
+        fun g() = "ifc"
+        fun mk(): Ic139 = Im139("made")
+    }
+}
+class Im139(val n: String) : Ic139 { override fun name() = n }
+interface Nm139 { companion object Factory { fun of() = "named" } }
+fun sec139() {
+    val a: Any = O139.In139(1)
+    val b: Any = In139(2)
+    check("istop139a", "${a is In139} ${a is O139.In139} ${b is In139} ${b is O139.In139}" == "false true true false")
+    check("istop139b", O139().own(a) && !O139().own(b) && (a as? In139) == null && (b as? O139.In139) == null)
+    check("istop139c", when (b) { is O139.In139 -> "nested"; is In139 -> "top"; else -> "none" } == "top")
+    var cce = false
+    try { println((a as In139).x) } catch (e: ClassCastException) { cce = true }
+    check("istop139d", cce && listOf(a, b, In139(3)).filterIsInstance<In139>().size == 2)
+    check("istop139e", !isA139<In139>(a) && isA139<In139>(b) && isA139<O139.In139>(a) && !isA139<O139.In139>(b))
+    check("ifcomp139a", "${Ic139.g()} ${Ic139.K + 1} ${Ic139.base} ${Ic139.mk().name()}" == "ifc 8 B made")
+    check("ifcomp139b", Nm139.of() == "named" && Nm139.Factory.of() == "named")
+}
+
 fun main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -6376,6 +6414,7 @@ fun main() {
     sec136() // SECTION-CALL 136
     sec137() // SECTION-CALL 137
     sec138() // SECTION-CALL 138
+    sec139() // SECTION-CALL 139
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }

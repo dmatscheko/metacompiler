@@ -9508,14 +9508,22 @@ func ktDescIs(c *jsObject, t string, depth int) bool {
 // when one does whose binary name agrees with it, 2 when only others do. A
 // binary name agrees when its `$`-separated segments end the written ones, or
 // match their tail (`Mid.Deep` for Outer$Mid$Deep); a top-level type's has no
-// `$`, and any qualifier of it is a package. Twin of kDescQual in
-// kotlin-interpreter.abnf and languages/lib/kotlin-rt.metajs.
+// `$`, and any qualifier of it is a package. A ROOTED name (ktIsName: a
+// leading empty segment) is a binary name and agrees only in full. Twin of
+// kDescQual in kotlin-interpreter.abnf and languages/lib/kotlin-rt.metajs.
 func ktDescQual(c *jsObject, segs []string, depth int) int {
 	out := 0
+	rooted := segs[0] == ""
 	for guard := 0; c != nil && guard < 64; guard++ {
 		if c.props["__name"] == segs[len(segs)-1] {
 			bn, _ := c.props["__bname"].(string)
-			if !strings.Contains(bn, "$") || ktBinTail(strings.Split(bn, "$"), segs) {
+			bs := []string{segs[len(segs)-1]}
+			if strings.Contains(bn, "$") {
+				bs = strings.Split(bn, "$")
+			} else if !rooted {
+				return 1
+			}
+			if ktBinTail(bs, segs) && (!rooted || len(bs) == len(segs)-1) {
 				return 1
 			}
 			out = 2

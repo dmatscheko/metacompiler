@@ -1457,9 +1457,9 @@ RefSfx      <~~ push({kind: "refsfx", name: pop()}) ~~>
 // `emptyMap<K, V>()` and every other type-argument-carrying call are unaffected.
 MTypeArgs   <~~ push({mtargs: up.in}) ~~>
             = SkipAngle ;
-MethodSfx   <~~ var mc = popMCall(); push({kind:"mcall", name: mc.name, targ: mc.targ, args: takeAll()}); retLblPop() ~~>
+MethodSfx   <~~ var mc = popMCall(); push({kind:"mcall", name: mc.name, targ: mc.targ, lex: mc.lex, args: takeAll()}); retLblPop() ~~>
             = "." KId <~~ push({mname: up.in}); retLblPush(up.in, "lam") ~~> [ MTypeArgs ] MArgs ;
-SafeMethodSfx <~~ var mcs = popMCall(); push({kind:"mcall", name: mcs.name, targ: mcs.targ, args: takeAll(), safe: true}); retLblPop() ~~>
+SafeMethodSfx <~~ var mcs = popMCall(); push({kind:"mcall", name: mcs.name, targ: mcs.targ, lex: mcs.lex, args: takeAll(), safe: true}); retLblPop() ~~>
             = "?." KId <~~ push({mname: up.in}); retLblPush(up.in, "lam") ~~> [ MTypeArgs ] MArgs ;
 FieldSfx    = "." KId <~~ push({kind:"field", name: up.in}) ~~> ;
 // `receiver.{ ... }` and `receiver.(expr)` - the anonymous-method syntax of very early
@@ -3315,9 +3315,9 @@ NotMemberKw = :script(~~
         var tps = curTParams()
         var idx = -1
         for (var i = 0; i < tps.length; i++) { if (tps[i] == m.tname) { idx = i } }
-        var lexT = anytype // m.tname qualified by kLexType once the classes exist
+        var lexT = anytype // m.tname resolved by kIsName once the classes exist
         return function() {
-            if (lexT === undefined) { lexT = kLexType(m.tname, m.lex) }
+            if (lexT === undefined) { lexT = kIsName(m.tname, m.lex) }
             var tn = lexT
             if (idx >= 0) {
                 var ta = kTypeArgsTop()
@@ -3853,7 +3853,7 @@ NotMemberKw = :script(~~
             var lexT = anytype
             return function() {
                 var v = operand()
-                if (lexT === undefined) { lexT = kLexType(m.tname, m.lex) }
+                if (lexT === undefined) { lexT = kIsName(m.tname, m.lex) }
                 return kIsType(v, lexT) ? v : null
             }
         }
@@ -3870,11 +3870,13 @@ NotMemberKw = :script(~~
         var opt = tname.charAt(tname.length - 1) == "?"
         var dest = anytype // T's JVM class once the classes exist, "" when T is not judged
         var nullName = ""
+        var judged = ""
         return function() {
             var v = anytype
             v = operand()
             if (dest === undefined) {
                 base = kCastBase(kLexType(tname, lex))
+                judged = kIsName(base, lex)
                 dest = kCastDest(base)
                 if (!opt) { nullName = ktNullCastType(tname, dest) }
             }
@@ -3883,7 +3885,7 @@ NotMemberKw = :script(~~
                 return v
             }
             if (dest == "" || typeof v == "function") { return v }
-            if (kIsType(v, base)) { return v }
+            if (kIsType(v, judged)) { return v }
             kThrowExc("ClassCastException", kCceMsg(jxkClass(v), dest))
             return v
         }
@@ -3957,6 +3959,40 @@ NotMemberKw = :script(~~
             if (d !== undefined && d !== null && typeof d == "object" && d.__isclass === true) { return path + "." + tname }
         }
         return tname
+    }
+    // The name an `is` / `as` test judges. When the name written at the site denotes
+    // one type this program declares (kLexType, then the innermost binding of it),
+    // it is ROOTED - a leading "." - so kDescQual matches only the class of exactly
+    // that binary name: `is In` at top level is not true of an `O1.In`, nor
+    // `is O1.In` of a top-level In. Twin of ktIsName in kotlin-to-llvm-ir.abnf.
+    function kIsName(tname, lex) {
+        var q = kLexType(tname, lex)
+        var base = kCastBase(q)
+        var d = anytype
+        d = base.indexOf(".") >= 0 ? kQualDesc(base) : kScopeType(base)
+        if (d === null || d === undefined || typeof d != "object" || d.__isclass !== true) { return q }
+        var bn = anytype
+        bn = d.__bname
+        if (typeof bn != "string") { return q }
+        var path = bn == "" ? d.__name : bn.split("$").join(".")
+        return path == base ? "." + q : q
+    }
+    // A call site's type arguments as a reified `is T` in the callee judges them.
+    function kIsNames(targs, lex) {
+        var out = []
+        for (var i = 0; i < targs.length; i++) { out.push(kIsName(targs[i], lex)) }
+        return out
+    }
+    // The type descriptor the innermost binding of simple name n holds, or undefined.
+    function kScopeType(n) {
+        for (var i = scopes.length - 1; i >= 0; i--) {
+            if (hasOwn(scopes[i], n)) {
+                var d = anytype
+                d = kTypeDesc(scopes[i][n], n)
+                if (d !== undefined) { return d }
+            }
+        }
+        return hasOwn(globalScope, n) ? kTypeDesc(globalScope[n], n) : undefined
     }
     // java's ClassCastException message. Twin of ktCceMsg in
     // languages/lib/kotlin-rt.metajs and jvCceMsg in abnf/jsrtjavastr.go.
@@ -6606,7 +6642,7 @@ NotMemberKw = :script(~~
             else if (items[i] != undefined && items[i] != null && items[i].mtargs != undefined) { targ = items[i].mtargs }
             else { push(items[i]) }
         }
-        return {name: name, targ: targ}
+        return {name: name, targ: targ, lex: targ == "" ? null : kLexAt()}
     }
     // "<String>" / "< String , Int >" -> "String": the FIRST type argument, whitespace
     // stripped. Only the first is used; no builtin here takes two.
@@ -6618,12 +6654,15 @@ NotMemberKw = :script(~~
         if (cut >= 0) { s = s.substring(0, cut) }
         return s
     }
-    // The trailing string argument a method call's type arguments contribute, or null.
+    // The trailing string argument a method call's type arguments contribute, or null:
+    // the type name as an `is` test judges it (kIsName), resolved on the first call.
     function mcallTArg(s) {
         if (s.targ == undefined || s.targ == null || s.targ == "") { return null }
         if (mcallTArgMethods["$" + s.name] != true) { return null }
         var n = tArgName(s.targ)
-        return n == "" ? null : n
+        if (n == "") { return null }
+        if (s.tjudged === undefined) { s.tjudged = kIsName(n, s.lex) }
+        return s.tjudged
     }
     // ----- Collections -----
     function kElems(v) {
@@ -8903,7 +8942,7 @@ NotMemberKw = :script(~~
                     var cond = arms[a].conds[ci]
                     var hit
                     if (cond.isType) {
-                        if (cond.lexT === undefined) { cond.lexT = kLexType(cond.tname, cond.lex) }
+                        if (cond.lexT === undefined) { cond.lexT = kIsName(cond.tname, cond.lex) }
                         hit = kIsType(s, cond.lexT)
                         if (cond.neg) hit = !hit
                     } else if (cond.v != undefined) {
@@ -8968,7 +9007,8 @@ NotMemberKw = :script(~~
                     // the call site's type arguments; the method-suffix form does the
                     // same here. Same stack, same rule.
                     if (s.targ != undefined && s.targ != null && s.targ != "") {
-                        kTypeArgsPush(parseTypeArgs(s.targ))
+                        if (s.tjudgedArgs === undefined) { s.tjudgedArgs = kIsNames(parseTypeArgs(s.targ), s.lex) }
+                        kTypeArgsPush(s.tjudgedArgs)
                         try { cur = mcall(cur, s.name, spec.pos, spec) } finally { kTypeArgsPop() }
                     } else {
                         cur = mcall(cur, s.name, spec.pos, spec)
@@ -12332,7 +12372,8 @@ NotMemberKw = :script(~~
     // agrees, 2 when only others do. A binary name agrees when its `$`-separated
     // segments and the written ones match as far as the shorter goes (`Mid.Deep`
     // for Outer$Mid$Deep); a top-level type's has no `$`, and any qualifier of it
-    // is a package. Twin of ktDescQual in abnf/jsrtkotlin.go and
+    // is a package. A ROOTED name (kIsName: a leading empty segment) is a binary
+    // name and agrees only in full. Twin of ktDescQual in abnf/jsrtkotlin.go and
     // languages/lib/kotlin-rt.metajs.
     function kDescQual(cls, segs, depth) {
         if (cls == undefined || cls == null || depth > 64) { return 0 }
@@ -12340,9 +12381,11 @@ NotMemberKw = :script(~~
         if (cls.__name == segs[segs.length - 1]) {
             var bn = anytype
             bn = cls.__bname
-            if (typeof bn != "string" || bn.indexOf("$") < 0) { return 1 }
-            var bs = bn.split("$")
-            var agree = true
+            var rooted = segs[0] == ""
+            var nested = typeof bn == "string" && bn.indexOf("$") >= 0
+            if (!nested && !rooted) { return 1 }
+            var bs = nested ? bn.split("$") : [cls.__name]
+            var agree = !rooted || bs.length == segs.length - 1
             for (var k = 1; k <= bs.length && k <= segs.length; k++) {
                 if (bs[bs.length - k] != segs[segs.length - k]) { agree = false }
             }
@@ -12568,6 +12611,7 @@ NotMemberKw = :script(~~
         for (var ai = 0; ai < args.length; ai++) {
             if (typeof args[ai] != "function" && args[ai].spread != undefined) { argc = 0 - 1 }
         }
+        var judgedT = anytype // targs resolved by kIsNames on the first call
         return function() {
             var spec = kevalArgs(args)
             // THE SYNTACTIC POSITION. `first` is a PROPERTY of IntProgression and a
@@ -12601,7 +12645,8 @@ NotMemberKw = :script(~~
             kSetNamed(spec.named)
             kNamedVals = spec.nvals
             if (targs == null) { return f.apply(undefined, spec.pos) }
-            kTypeArgsPush(targs)
+            if (judgedT === undefined) { judgedT = kIsNames(targs, lex) }
+            kTypeArgsPush(judgedT)
             try { return f.apply(undefined, spec.pos) } finally { kTypeArgsPop() }
         }
     }
