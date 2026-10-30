@@ -138,7 +138,7 @@ splice in VarName / AsgIdent / PeName, or a pre-parse splice that keeps source p
 
 # C — C subset
 
-### T-858 c: `<stddef.h>` gives no `offsetof` / `NULL` / `size_t` · P3 · C · OPEN [V C worker]
+### T-858 c: `<stddef.h>` gives no `offsetof` / `NULL` / `size_t` · P3 · C · IN PROGRESS (C worker, round 12) [V C worker]
 `#include <stddef.h>` is accepted and ignored, so `offsetof(struct S, g)` is "function not defined" and a program
 must spell the null-pointer idiom. cc: offsetof is a constant expression (4 for `struct S { char c; int g; }`). Add
 offsetof (constant-folded from the layout, both halves — the interpreter must answer cc's byte offsets, not cell
