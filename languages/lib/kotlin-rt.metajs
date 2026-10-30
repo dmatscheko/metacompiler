@@ -1893,6 +1893,17 @@ function ktNumMethod(recv, name, args) {
         if (args.length == 1) { return k4RangeMake(recv, args[0], name) }
     }
     if (name == "floorDiv" || name == "mod") {
+        // Double.mod / Float.mod: the remainder takes the divisor's sign
+        // (jsrtkotlin.go ktNumMethod). Ahead of the integer arm, whose test a
+        // float box also passes.
+        if (name == "mod" && args.length == 1) {
+            if (floIs(recv) || floIs(args[0])) {
+                var fr = k1JvmArith("%", recv, args[0])
+                var frn = floNum(fr)
+                if (frn != 0 && (frn < 0) != (ktNum(args[0]) < 0)) { return k1JvmArith("+", fr, args[0]) }
+                return fr
+            }
+        }
         if (k4IsIntKind(recv) && k4IsIntKind(ktArg(args, 0))) { return k4FloorDivMod(recv, args[0], name == "mod") }
     }
     if (name == "toByte") { return k1Conv(recv, 8, 0) }
@@ -5257,7 +5268,15 @@ function ktSeqMethodK(arr, name, args, kind) {
         for (i = 0; i < oth.length; i = i + 1) { out.push(es[k3Int(oth[i])]) }
         return out
     }
-    if (name == "subList") { return k3Sub(es, k3Int(f), k3Int(ktArg(args, 1))) }
+    if (name == "subList") {
+        // java.util.AbstractList.subListRangeCheck (jsrtkotlin.go).
+        var slo = k3Int(f)
+        var shi = k3Int(ktArg(args, 1))
+        if (slo < 0) { ktRaise("IndexOutOfBoundsException", "fromIndex = " + slo) }
+        if (shi > es.length) { ktRaise("IndexOutOfBoundsException", "toIndex = " + shi) }
+        if (slo > shi) { ktRaise("IllegalArgumentException", "fromIndex(" + slo + ") > toIndex(" + shi + ")") }
+        return k3Sub(es, slo, shi)
+    }
     if (name == "zipWithNext") {
         b = ktIsFn(f)
         for (i = 0; i + 1 < es.length; i = i + 1) {
@@ -5752,7 +5771,7 @@ function ktMapMethod(m, name, args) {
     }
     if (name == "getValue") {
         i = ktMapFind(keys, f)
-        if (i < 0) { fail("key " + ktRender(f) + " is missing in the map") }
+        if (i < 0) { ktRaise("NoSuchElementException", "Key " + ktRender(f) + " is missing in the map.") }
         return vals[i]
     }
     if (name == "getOrDefault") {
@@ -8134,12 +8153,13 @@ function k4SetFrom(es) {
 
 // kotlin.math.abs answers the operand's OWN type, so abs(-1.5) is the Double 1.5
 // and abs(-3L) a Long. The Go twin spells the negation ktArith("-", Int 0, v),
-// which is the same width rule sintOp keeps.
+// which is the same width rule sintOp keeps: an Int wraps, so abs(Int.MIN_VALUE)
+// is Int.MIN_VALUE (java's Math.abs).
 function k4Abs(v) {
     if (floIs(v)) { return floAbs(v) }
     if (!k4KeyLess(v, 0)) { return v }
     if (sintIs(v)) { return k1Arith("-", 0, v) }
-    return -ktNum(v)
+    return k1I32(-ktNum(v))
 }
 
 // The rest of kotlin.math over lib/kotlin-math.js: a Float argument answers a
@@ -8235,6 +8255,12 @@ function k4SeqCap() { return 100000 }
 // ... / arrayOfNulls (jsrtkotlin.go:5275).
 function k4ArrayOfN(name, args) {
     var n = k4Int(k4At(args, 0))
+    // A negative size (jsrtkotlin.go): NegativeArraySizeException for an array,
+    // ArrayList(-1)'s IllegalArgumentException for a List.
+    if (n < 0) {
+        if (name == "List" || name == "MutableList") { ktRaise("IllegalArgumentException", "Illegal Capacity: " + n) }
+        ktRaise("NegativeArraySizeException", "" + n)
+    }
     var init = k4At(args, 1)
     var out = []
     var i = 0
@@ -9371,6 +9397,62 @@ function k4RangeNum(v) {
 // and 0 otherwise; the `..<` / until subtraction is the emitter's.
 // k4StepBad is ktStepBad (jsrtkotlin.go): kotlin.ranges' checkStepIsPositive.
 function k4StepBad(st) { ktRaise("IllegalArgumentException", "Step must be positive, was: " + ktRender(st) + ".") }
+
+// jsrtkotlin.go js_ktrnum: a `for` range bound as its counter - a Char's code,
+// any other value (a Long box included) itself.
+function js_ktrnum(v) {
+    if (ktIsChar(v)) { return ktCharCode(v) }
+    return v
+}
+
+// jsrtkotlin.go js_ktforlast: the LAST element a `for` over first..bound (mode
+// 0), until (1) or downTo (2) reaches - getProgressionLastElement - or null for
+// an empty progression. Ints are exact in doubles; a Long operand takes the 64
+// bit path.
+function js_ktforlast(first, bound, step, mode) {
+    if (sintIs(first) || sintIs(bound) || sintIs(step)) { return k4ForLastL(first, bound, step, mode) }
+    var f = ktNum(first)
+    var b = ktNum(bound)
+    var s = ktNum(step)
+    if (s <= 0) { k4StepBad(step) }
+    if (mode == 1) { b = b - 1 }
+    if (mode == 2) {
+        if (f < b) { return null }
+        if (f == b) { return b }
+        return b + k4ModP(k4ModP(f, s) - k4ModP(b, s), s)
+    }
+    if (f > b) { return null }
+    if (f == b) { return b }
+    return b - k4ModP(k4ModP(b, s) - k4ModP(f, s), s)
+}
+function k4ModP(a, s) {
+    var r = a % s
+    if (r < 0) { return r + s }
+    return r
+}
+function k4ForLastL(first, bound, step, mode) {
+    var s = ktNorm(k1Val(step), 64, 0)
+    if (k1Cmp("<=", s, 0)) { k4StepBad(step) }
+    var f = ktNorm(k1Val(first), 64, 0)
+    var b = ktNorm(k1Val(bound), 64, 0)
+    if (mode == 1) {
+        if (k1Cmp("==", b, k1MinI64())) { return null }
+        b = k1Arith("-", b, 1)
+    }
+    if (mode == 2) {
+        if (k1Cmp("<", f, b)) { return null }
+        if (k1Cmp("==", f, b)) { return b }
+        return k1Arith("+", b, k4ModL(k1Arith("-", k4ModL(f, s), k4ModL(b, s)), s))
+    }
+    if (k1Cmp(">", f, b)) { return null }
+    if (k1Cmp("==", f, b)) { return b }
+    return k1Arith("-", b, k4ModL(k1Arith("-", k4ModL(b, s), k4ModL(f, s)), s))
+}
+function k4ModL(a, s) {
+    var r = k1Arith("%", a, s)
+    if (k1Cmp("<", r, 0)) { return k1Arith("+", r, s) }
+    return r
+}
 
 function js_ktrange(from, to, st, down) {
     var stn = k4RangeNum(st)

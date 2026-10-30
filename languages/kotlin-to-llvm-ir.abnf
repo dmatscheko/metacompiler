@@ -1122,12 +1122,17 @@ WhenArm     <~~ push(makeWhenArm(takeAll())) ~~>
             = WhenCond { "," WhenCond } [ "," ] "->" ( ValueBlock | Expression ) [ ";" ] ;
 // A branch condition: an inclusive range test (in / !in), a type test (is T / !is T,
 // undecidable so it never matches and warns), or a value to compare with.
-WhenCond    = WhenIn | WhenNotIn | WhenIs | WhenVal ;
+WhenCond    = WhenIn | WhenNotIn | WhenInColl | WhenNotInColl | WhenIs | WhenVal ;
 WhenIs      <~~ var t = pop(); push({isType: true, neg: pop(), tname: t, pos: up.pos}) ~~> = IsKw TypeName ;
+// `in lo..hi` is the bounds test; the `!"step"` leaves `in 1..9 step 2` to the
+// general form, whose operand is any expression and which asks its contains
+// (`in someList`, `in a until b`, `in 1..9 step 2`).
 WhenIn      <~~ var h = pop(); push({lo: pop(), hi: h, neg: false}) ~~>
-            = KwIn AddExpr ".." AddExpr ;
+            = KwIn AddExpr ".." AddExpr !"step" ;
 WhenNotIn   <~~ var h = pop(); push({lo: pop(), hi: h, neg: true}) ~~>
-            = "!" KwIn AddExpr ".." AddExpr ;
+            = "!" KwIn AddExpr ".." AddExpr !"step" ;
+WhenInColl  <~~ push({coll: pop(), neg: false}) ~~> = KwIn Expression ;
+WhenNotInColl <~~ push({coll: pop(), neg: true}) ~~> = "!" KwIn Expression ;
 WhenVal     <~~ push({v: pop()}) ~~>
             = Expression ;
 
@@ -4248,6 +4253,15 @@ KwContract  = "contract" KwEnd ;
                             condV = rv.v
                         }
                         b.NewCondBr(truthy(b, condV), matchB, nextB)
+                    } else if (cond.coll != undefined) {
+                        // in coll (or !in): coll.contains(subject), as makeInExpr does.
+                        var rc = cond.coll(b)
+                        b = rc.b
+                        var cargsV = callExt(b, "js_arr_new", [])
+                        callExt(b, "js_arr_push", [cargsV, callExt(b, "js_scope_get", [curScopeV, emitStr(b, wName)])])
+                        var hitV = callExt(b, "js_ktsmcall", [rc.v, emitStr(b, "contains"), cargsV])
+                        if (cond.neg) { b.NewCondBr(truthy(b, hitV), nextB, matchB) }
+                        else          { b.NewCondBr(truthy(b, hitV), matchB, nextB) }
                     } else {
                         // in lo..hi (or !in): both bounds are evaluated, like in Kotlin.
                         var rl = cond.lo(b)
@@ -5737,9 +5751,9 @@ KwContract  = "contract" KwEnd ;
         }
     }
     // items = [name, fromT, {rop}, toT, {step}?, bodyT]. The bounds and the step are
-    // evaluated once (until subtracts one from the bound up front); downTo flips the
-    // condition to >= and steps backwards. A hidden NUMERIC counter drives the loop and
-    // the loop variable is re-boxed from it each iteration with js_char_like, so
+    // evaluated once; downTo steps backwards. A hidden counter (a Char bound's code,
+    // js_ktrnum) drives the loop and the loop variable is re-boxed from it each
+    // iteration with js_char_like, so
     // `for (ch in 'a'..'c')` yields Chars and `for (i in 1..3)` yields Ints out of the
     // same emitted loop (js_char_like is the identity when the bound is not a Char).
     // ----- THE LOOP VARIABLE IS A FRESH BINDING EACH ITERATION -----
@@ -5771,13 +5785,10 @@ KwContract  = "contract" KwEnd ;
             var rf = fromT(b)
             b = rf.b
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, mName), rf.v])          // the element-type model
-            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, cName),
-                                         callExt(b, "js_char_code", [rf.v])])          // the numeric counter
+            var firstV = callExt(b, "js_ktrnum", [rf.v])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, cName), firstV])         // the counter
             var rt = toT(b)
             b = rt.b
-            var boundV = callExt(b, "js_char_code", [rt.v])
-            if (rop == "until") boundV = callExt(b, "js_sub", [boundV, emitNum(b, 1)])
-            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, tName), boundV])
             var stepV = emitNum(b, 1)
             if (stepT != null) {
                 var rs = stepT(b)
@@ -5785,15 +5796,19 @@ KwContract  = "contract" KwEnd ;
                 stepV = rs.v
             }
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, sName), stepV])
-            var headB = curF.NewBlock("")
+            // Kotlin's loop over a progression runs from first to its LAST element
+            // (getProgressionLastElement) and stops ON it, so the counter never steps
+            // past the bound: `for (i in x..Int.MAX_VALUE)` cannot overflow, and a
+            // Long counter stays exact in Kotlin's own arithmetic. js_ktforlast is null
+            // for an empty progression.
+            var mode = (rop == "until") ? 1 : ((rop == "downTo") ? 2 : 0)
+            var lastV = callExt(b, "js_ktforlast", [firstV, callExt(b, "js_ktrnum", [rt.v]), stepV, emitNum(b, mode)])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, tName), lastV])
             var bodyB = curF.NewBlock("")
             var postB = curF.NewBlock("")
+            var stepB = curF.NewBlock("")
             var exitB = curF.NewBlock("")
-            b.NewBr(headB)
-            var iV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, cName)])
-            var tV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, tName)])
-            var condExt = (rop == "downTo") ? "js_ge" : "js_le"
-            headB.NewCondBr(truthy(headB, callExt(headB, condExt, [iV, tV])), bodyB, exitB)
+            b.NewCondBr(truthy(b, callExt(b, "js_eq", [lastV, hNull])), exitB, bodyB)
             var cVb = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, cName)])
             var mVb = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, mName)])
             // A FRESH SCOPE per iteration, holding just the loop variable - see the
@@ -5807,10 +5822,13 @@ KwContract  = "contract" KwEnd ;
             loopStack.pop()
             curScopeV = loopSaved
             var iV2 = callExt(postB, "js_scope_get", [curScopeV, emitStr(postB, cName)])
-            var sV2 = callExt(postB, "js_scope_get", [curScopeV, emitStr(postB, sName)])
-            var stepExt = (rop == "downTo") ? "js_sub" : "js_jadd"
-            callExt(postB, "js_scope_set", [curScopeV, emitStr(postB, cName), callExt(postB, stepExt, [iV2, sV2])])
-            postB.NewBr(headB)
+            var tV2 = callExt(postB, "js_scope_get", [curScopeV, emitStr(postB, tName)])
+            postB.NewCondBr(truthy(postB, callExt(postB, "js_kteq", [iV2, tV2, hFalse])), exitB, stepB)
+            var sV2 = callExt(stepB, "js_scope_get", [curScopeV, emitStr(stepB, sName)])
+            var nextV = (rop == "downTo") ? callExt(stepB, "js_ktarith", [emitStr(stepB, "-"), iV2, sV2])
+                                          : callExt(stepB, "js_ktadd", [iV2, sV2])
+            callExt(stepB, "js_scope_set", [curScopeV, emitStr(stepB, cName), nextV])
+            stepB.NewBr(bodyB)
             curScopeV = saved
             return exitB
         }
@@ -5828,10 +5846,30 @@ KwContract  = "contract" KwEnd ;
     // A loop's head: index iV below lenV enters the body; at the end, js_ktmore asks
     // the source for one more element, which only a lazy sequence's cursor has (it
     // pulls it, and js_ktitem reads it) - so a list pays the extern once, at its end.
-    function emitForMore(headB, iV, aV, lenV, bodyB, exitB) {
+    // n0V, the source's length when the loop started (null: not checked), is the
+    // modification check of java.util.ArrayList's iterator, which the for statement
+    // uses: next() throws ConcurrentModificationException once the list was
+    // modified, and hasNext() is `cursor != size`. A change of SIZE stands in for
+    // the modCount, so removing the second-to-last element ends the loop quietly
+    // while removing any earlier one throws, as on the JVM. Twin of makeForIn in
+    // kotlin-interpreter.abnf.
+    function emitForMore(headB, iV, aV, lenV, bodyB, exitB, n0V) {
         var moreB = curF.NewBlock("")
-        headB.NewCondBr(truthy(headB, callExt(headB, "js_lt", [iV, lenV])), bodyB, moreB)
-        moreB.NewCondBr(truthy(moreB, callExt(moreB, "js_ktmore", [aV, iV])), bodyB, exitB)
+        var inB = bodyB
+        var outB = exitB
+        if (n0V != null) {
+            inB = curF.NewBlock("")
+            outB = curF.NewBlock("")
+            var out2B = curF.NewBlock("")
+            var cmeB = curF.NewBlock("")
+            inB.NewCondBr(truthy(inB, callExt(inB, "js_seq", [lenV, n0V])), bodyB, cmeB)
+            outB.NewCondBr(truthy(outB, callExt(outB, "js_seq", [lenV, n0V])), exitB, out2B)
+            out2B.NewCondBr(truthy(out2B, callExt(out2B, "js_seq", [iV, lenV])), exitB, cmeB)
+            callExt(cmeB, "js_throw", [callExt(cmeB, "js_ktnewexc", [emitStr(cmeB, "ConcurrentModificationException"), hNull])])
+            cmeB.NewRet(hUndef)
+        }
+        headB.NewCondBr(truthy(headB, callExt(headB, "js_lt", [iV, lenV])), inB, moreB)
+        moreB.NewCondBr(truthy(moreB, callExt(moreB, "js_ktmore", [aV, iV])), bodyB, outB)
     }
     function makeForList(bodyT, listT, name) {
         return function(b) {
@@ -5846,6 +5884,7 @@ KwContract  = "contract" KwEnd ;
             b = it.b
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, aName), it.v])
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, iName), emitNum(b, 0)])
+            var n0V = callExt(b, "js_get", [it.v, emitStr(b, "length")])
             var headB = curF.NewBlock("")
             var bodyB = curF.NewBlock("")
             var postB = curF.NewBlock("")
@@ -5854,7 +5893,7 @@ KwContract  = "contract" KwEnd ;
             var iV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, iName)])
             var aV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, aName)])
             var lenV = callExt(headB, "js_get", [aV, emitStr(headB, "length")])
-            emitForMore(headB, iV, aV, lenV, bodyB, exitB)
+            emitForMore(headB, iV, aV, lenV, bodyB, exitB, n0V)
             var iV2 = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, iName)])
             var aV2 = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, aName)])
             // A FRESH SCOPE per iteration - see the header above makeForRange.
@@ -5894,6 +5933,7 @@ KwContract  = "contract" KwEnd ;
             b = it.b
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, aName), it.v])
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, iName), emitNum(b, 0)])
+            var n0V = callExt(b, "js_get", [it.v, emitStr(b, "length")])
             var headB = curF.NewBlock("")
             var bodyB = curF.NewBlock("")
             var postB = curF.NewBlock("")
@@ -5902,7 +5942,7 @@ KwContract  = "contract" KwEnd ;
             var iV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, iName)])
             var aV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, aName)])
             var lenV = callExt(headB, "js_get", [aV, emitStr(headB, "length")])
-            emitForMore(headB, iV, aV, lenV, bodyB, exitB)
+            emitForMore(headB, iV, aV, lenV, bodyB, exitB, n0V)
             // The component names are (re)declared per iteration in the loop's own scope
             // from the element's componentN() calls.
             var iVb = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, iName)])

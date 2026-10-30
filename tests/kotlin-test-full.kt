@@ -5590,6 +5590,78 @@ fun sec122() {
     check("nan122l", "" + maxOf(nz, z) + minOf(z, nz) + maxOf(nan, z) + minOf(z, nan) + Math.max(nz, z) + Math.min(z, nz) == "0.0-0.0NaNNaN0.0-0.0")
 }
 
+// ===== SECTION 123: a `for` over a progression ending at the type's edge =====
+// The loop runs from first to the progression's LAST element (kotlin.internal.
+// getProgressionLastElement) and stops on it, so it never steps past
+// Int.MAX_VALUE or Long.MAX_VALUE, and a Long counter is exact above 2^53.
+// kotlin-stdlib 2.2.21's IntProgression / LongProgression iterators, driven from
+// java, give every value. Each loop is capped, so a regression cannot hang.
+fun sec123() {
+    val ii = intArrayOf(Int.MAX_VALUE, Int.MIN_VALUE)
+    var s = 0
+    for (i in ii[0] - 2..ii[0]) { s++; if (s > 10) break }
+    var t = 0
+    for (i in 0..ii[0] step ii[0]) { t++; if (t > 10) break }
+    var u = 0
+    for (i in ii[1] + 2 downTo ii[1]) { u++; if (u > 10) break }
+    check("for123a", s == 3 && t == 2 && u == 3)
+    var got = ""
+    for (i in ii[0] - 5..ii[0] step 4) { got += " " + i; if (got.length > 80) break }
+    for (i in ii[1]..ii[1] + 3 step 3) { got += " " + i; if (got.length > 160) break }
+    check("for123b", got == " 2147483642 2147483646 -2147483648 -2147483645")
+    var e = 0
+    for (i in ii[0] - 1 until ii[0]) { e++; if (e > 10) break }
+    for (i in 5 until ii[1]) { e += 100; if (e > 1000) break }
+    check("for123c", e == 1)
+}
+
+// ===== SECTION 124: JVM exceptions and edge answers of the stdlib =====
+// abs(Int.MIN_VALUE) is Math.abs's Int.MIN_VALUE; Double.mod / Float.mod take the
+// divisor's sign (the inline body in kotlin-stdlib 2.2.21's util/FloorDivMod.kt, run
+// on java); getValue, a negative array size, List(-1) and subList throw what
+// MapsKt.getValue, new int[-1], ArrayList(-1) and AbstractList.subList throw on java
+// 24; removing from a MutableList inside its for loop is the ArrayList iterator's
+// ConcurrentModificationException (java's enhanced for over mutableListOf); and a
+// when branch `in coll` asks coll.contains (the Kotlin specification).
+fun cme124(k: Int): String {
+    val ml = mutableListOf(1, 2, 3, 4)
+    try { for (e in ml) if (e == k) ml.remove(e) } catch (e: ConcurrentModificationException) { return "cme" + e.message + ml }
+    return "none" + ml
+}
+fun when124(x: Int, xs: List<Int>): String = when (x) {
+    in xs -> "l"
+    in 10..12 -> "r"
+    in 20 until 23 -> "u"
+    in 30..40 step 5 -> "s"
+    !in listOf(50, 51) -> "o"
+    else -> "f"
+}
+fun sec124() {
+    val ii = intArrayOf(Int.MIN_VALUE, -5)
+    check("abs124", kotlin.math.abs(ii[0]) == Int.MIN_VALUE && Math.abs(ii[0]) == Int.MIN_VALUE && ii[0].absoluteValue == Int.MIN_VALUE && kotlin.math.abs(ii[1]) == 5)
+    val d = doubleArrayOf(2.5, -2.5, 2.0, -2.0, -7.0, 3.0)
+    check("mod124a", "" + d[0].mod(d[2]) + " " + d[1].mod(d[2]) + " " + d[1].mod(d[3]) + " " + d[4].mod(d[5]) == "0.5 1.5 -0.5 2.0")
+    val f = floatArrayOf(-2.5f, 2.0f, 0.1f)
+    check("mod124b", "" + f[0].mod(f[1]) + " " + f[2].mod(f[1]) == "1.5 0.1")
+    val n = intArrayOf(-1, 2, 1, 5)
+    var got = ""
+    try { mapOf("a" to 1).getValue("b") } catch (e: NoSuchElementException) { got += e.message }
+    try { IntArray(n[0]) } catch (e: NegativeArraySizeException) { got += "|" + e.message }
+    try { Array(n[0]) { 0 } } catch (e: NegativeArraySizeException) { got += "|" + e.message }
+    try { List(n[0]) { 0 } } catch (e: IllegalArgumentException) { got += "|" + e.message }
+    check("exc124a", got == "Key b is missing in the map.|-1|-1|Illegal Capacity: -1")
+    val xs = listOf(1, 2, 3)
+    got = ""
+    try { xs.subList(n[1], n[2]) } catch (e: IllegalArgumentException) { got += e.message }
+    try { xs.subList(n[2], n[3]) } catch (e: IndexOutOfBoundsException) { got += "|" + e.message }
+    try { mutableListOf(1).subList(n[0], 0) } catch (e: IndexOutOfBoundsException) { got += "|" + e.message }
+    check("exc124b", got == "fromIndex(2) > toIndex(1)|toIndex = 5|fromIndex = -1" && xs.subList(n[2], n[1]) == listOf(2))
+    check("cme124", cme124(1) + cme124(2) + cme124(3) + cme124(4) == "cmenull[2, 3, 4]cmenull[1, 3, 4]none[1, 2, 4]cmenull[1, 2, 3]")
+    var w = ""
+    for (x in intArrayOf(2, 11, 22, 35, 36, 50)) w += when124(x, xs)
+    check("when124", w == "lrusof")
+}
+
 
 fun main() {
     s01() // SECTION-CALL 01
@@ -5710,6 +5782,8 @@ fun main() {
     s120() // SECTION-CALL 120
     sec121() // SECTION-CALL 121
     sec122() // SECTION-CALL 122
+    sec123() // SECTION-CALL 123
+    sec124() // SECTION-CALL 124
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }

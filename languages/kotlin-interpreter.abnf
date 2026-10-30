@@ -1169,12 +1169,17 @@ WhenArm     <~~ push(makeWhenArm(takeAll())) ~~>
             = WhenCond { "," WhenCond } [ "," ] "->" ( ValueBlock | Expression ) [ ";" ] ;
 // A branch condition: an inclusive range test (in / !in), a type test (is T / !is T,
 // undecidable so it never matches and warns), or a value to compare with.
-WhenCond    = WhenIn | WhenNotIn | WhenIs | WhenVal ;
+WhenCond    = WhenIn | WhenNotIn | WhenInColl | WhenNotInColl | WhenIs | WhenVal ;
 WhenIs      <~~ var t = pop(); push({isType: true, neg: pop(), tname: t, pos: up.pos}) ~~> = IsKw TypeName ;
+// `in lo..hi` is the bounds test; the `!"step"` leaves `in 1..9 step 2` to the
+// general form, whose operand is any expression and which asks its contains
+// (`in someList`, `in a until b`, `in 1..9 step 2`).
 WhenIn      <~~ var h = pop(); push({lo: pop(), hi: h, neg: false}) ~~>
-            = KwIn AddExpr ".." AddExpr ;
+            = KwIn AddExpr ".." AddExpr !"step" ;
 WhenNotIn   <~~ var h = pop(); push({lo: pop(), hi: h, neg: true}) ~~>
-            = "!" KwIn AddExpr ".." AddExpr ;
+            = "!" KwIn AddExpr ".." AddExpr !"step" ;
+WhenInColl  <~~ push({coll: pop(), neg: false}) ~~> = KwIn Expression ;
+WhenNotInColl <~~ push({coll: pop(), neg: true}) ~~> = "!" KwIn Expression ;
 WhenVal     <~~ push({v: pop()}) ~~>
             = Expression ;
 
@@ -3509,7 +3514,7 @@ NotMemberKw = :script(~~
                 } else if (isRange(v)) { fail("chained range expression") }
                 else if (rop == "downTo") { v = kRange(v, r, true) }
                 else if (rop == "..") { v = kRange(v, r, false) }
-                else { var e = kRange(v, r, false); e.to = (e.to - 1) | 0; v = e }   // ..< / until
+                else { var e = kRange(v, r, false); e.to = e.to - 1; v = e }   // ..< / until (no wrap: `x until Int.MIN_VALUE` is empty)
             }
             return v
         }
@@ -4270,6 +4275,20 @@ NotMemberKw = :script(~~
     // once, at its end.
     function kForSrc(v) { return kIsLazySeq(v) ? kCursor(v) : kIterable(v) }
     function kForMore(src) { return kIsCursor(src) && kCursorPull(src) }
+    // Whether a `for` over src runs its body for index i. n0 is src's length when
+    // the loop started: java.util.ArrayList's iterator, which the for statement
+    // uses, throws ConcurrentModificationException from next() once the list was
+    // modified, and its hasNext() is `cursor != size`. A change of SIZE stands in
+    // for the modCount. A sequence's cursor (n0 null) counts its pulls in `length`
+    // and is not checked. Twin of emitForMore in kotlin-to-llvm-ir.abnf.
+    function kForN0(src) { return kIsCursor(src) ? null : src.length }
+    function kForNext(src, i, n0) {
+        var more = i < src.length || kForMore(src)
+        if (n0 !== null && src.length !== n0 && (more || i !== src.length)) {
+            kThrowExc("ConcurrentModificationException", null)
+        }
+        return more
+    }
     function kForAt(src, i) { return kIsCursor(src) ? src.cur : src[i] }
     function kSeqMaterialize(seq) {
         var c = kCursor(seq)
@@ -4464,26 +4483,36 @@ NotMemberKw = :script(~~
     }
     // List(n) { i -> ... } / MutableList / arrayOfNulls / Array: the size-and-initializer
     // collection builders.
+    // A negative size is the JVM's: an array throws NegativeArraySizeException with
+    // the size as its message, a List / MutableList the IllegalArgumentException of
+    // ArrayList(-1). Twin of the builders' arm in abnf/jsrtkotlin.go and
+    // languages/lib/kotlin-rt.metajs.
+    function kArrN(n) {
+        var c = kNum(n)
+        if (c < 0) { kThrowExc("NegativeArraySizeException", "" + c) }
+        return c
+    }
     hostGlobals["List"] = function(n, init) {
+        if (kNum(n) < 0) { kThrowExc("IllegalArgumentException", "Illegal Capacity: " + kNum(n)) }
         var out = []
         for (var i = 0; i < kNum(n); i++) { out.push(typeof init == "function" ? init(i) : null) }
         return out
     }
     hostGlobals["MutableList"] = hostGlobals["List"]
-    hostGlobals["Array"] = function(n, init) { return arrKindSet(hostGlobals["List"](n, init), 1) }
+    hostGlobals["Array"] = function(n, init) { kArrN(n); return arrKindSet(hostGlobals["List"](n, init), 1) }
     hostGlobals["arrayOfNulls"] = function(n) {
         var out = []
-        for (var i = 0; i < kNum(n); i++) { out.push(null) }
+        for (var i = 0; i < kArrN(n); i++) { out.push(null) }
         return arrKindSet(out, 1)
     }
     hostGlobals["IntArray"] = function(n, init) {
         var out = []
-        for (var i = 0; i < kNum(n); i++) { out.push(typeof init == "function" ? init(i) : 0) }
+        for (var i = 0; i < kArrN(n); i++) { out.push(typeof init == "function" ? init(i) : 0) }
         return arrKindSet(out, 1)
     }
     hostGlobals["LongArray"] = function(n, init) {
         var out = []
-        for (var i = 0; i < kNum(n); i++) { out.push(kAdoptLong(typeof init == "function" ? init(i) : 0)) }
+        for (var i = 0; i < kArrN(n); i++) { out.push(kAdoptLong(typeof init == "function" ? init(i) : 0)) }
         return arrKindSet(out, 1)
     }
     hostGlobals["ShortArray"] = hostGlobals["IntArray"]
@@ -4491,18 +4520,18 @@ NotMemberKw = :script(~~
     // A DoubleArray / FloatArray fills with 0.0 / 0.0f, a float.
     hostGlobals["DoubleArray"] = function(n, init) {
         var out = []
-        for (var i = 0; i < kNum(n); i++) { out.push(typeof init == "function" ? init(i) : kFlo(0)) }
+        for (var i = 0; i < kArrN(n); i++) { out.push(typeof init == "function" ? init(i) : kFlo(0)) }
         return arrKindSet(out, 1)
     }
     hostGlobals["FloatArray"] = function(n, init) {
         var out = []
-        for (var i = 0; i < kNum(n); i++) { out.push(typeof init == "function" ? init(i) : kFlo32(0)) }
+        for (var i = 0; i < kArrN(n); i++) { out.push(typeof init == "function" ? init(i) : kFlo32(0)) }
         return arrKindSet(out, 1)
     }
     // CharArray(n) fills with Kotlin's NUL char, not 0 - a Char is its glyph here.
     hostGlobals["CharArray"] = function(n, init) {
         var out = []
-        for (var i = 0; i < kNum(n); i++) { out.push(typeof init == "function" ? init(i) : kChar(0)) }
+        for (var i = 0; i < kArrN(n); i++) { out.push(typeof init == "function" ? init(i) : kChar(0)) }
         return arrKindSet(out, 1)
     }
     hostGlobals["UByteArray"] = hostGlobals["IntArray"]
@@ -4511,7 +4540,7 @@ NotMemberKw = :script(~~
     hostGlobals["ULongArray"] = hostGlobals["IntArray"]
     hostGlobals["BooleanArray"] = function(n, init) {
         var out = []
-        for (var i = 0; i < kNum(n); i++) { out.push(typeof init == "function" ? init(i) : false) }
+        for (var i = 0; i < kArrN(n); i++) { out.push(typeof init == "function" ? init(i) : false) }
         return arrKindSet(out, 1)
     }
     // Each primitive array builder - IntArray(n), intArrayOf(...) - tags its answer
@@ -7140,7 +7169,14 @@ NotMemberKw = :script(~~
             idxs = (name == "subList") ? null : (isRange(f) ? rangeList(f) : kElems(f))
             out = []
             if (name == "subList") {
-                for (i = kNum(f); i < kNum(args[1]); i++) { out.push(es[i]) }
+                // java.util.AbstractList.subListRangeCheck. Twin of the subList arms
+                // in abnf/jsrtkotlin.go and languages/lib/kotlin-rt.metajs.
+                var slo = kNum(f)
+                var shi = kNum(args[1])
+                if (slo < 0) { kThrowExc("IndexOutOfBoundsException", "fromIndex = " + slo) }
+                if (shi > es.length) { kThrowExc("IndexOutOfBoundsException", "toIndex = " + shi) }
+                if (slo > shi) { kThrowExc("IllegalArgumentException", "fromIndex(" + slo + ") > toIndex(" + shi + ")") }
+                for (i = slo; i < shi; i++) { out.push(es[i]) }
             } else {
                 for (i = 0; i < idxs.length; i++) { out.push(es[kNum(idxs[i])]) }
             }
@@ -7297,7 +7333,7 @@ NotMemberKw = :script(~~
         if (name == "get" || name == "getValue" || name == "getOrDefault" || name == "getOrElse") {
             i = kMapFind(m, f)
             if (i >= 0) { return {v: m.vals[i]} }
-            if (name == "getValue") { fail("key " + kstr(f) + " is missing in the map") }
+            if (name == "getValue") { kThrowExc("NoSuchElementException", "Key " + kstr(f) + " is missing in the map.") }
             if (name == "getOrDefault") { return {v: args[1]} }
             if (name == "getOrElse") { return {v: args[1]()} }
             return {v: null}
@@ -7685,6 +7721,16 @@ NotMemberKw = :script(~~
             var tf = target.__flo
             if (name == "toString") return kIsF32(target) ? coreJvmF32Str(tf) : kFloStr(tf)
             if (name == "compareTo") return kDblCmp(tf, kNumD(args[0]))
+            // Double.mod / Float.mod (kotlin.util.FloorDivMod): the remainder takes the
+            // divisor's sign. Twin of the mod arm of ktNumMethod in abnf/jsrtkotlin.go.
+            if (name == "mod" && args.length == 1) {
+                var mf32 = kF32Res(target, args[0])
+                var md = kNumD(args[0])
+                var mr = anytype
+                mr = kFloOp2("%", tf, md, mf32)
+                if (mr.__flo != 0 && (mr.__flo < 0) != (md < 0)) { return kFloOp2("+", mr.__flo, md, mf32) }
+                return mr
+            }
             if (name == "equals") return kEq(target, args[0], false)
             if (name == "coerceAtLeast") return tf < kNumD(args[0]) ? args[0] : target
             if (name == "coerceAtMost") return tf > kNumD(args[0]) ? args[0] : target
@@ -8554,6 +8600,10 @@ NotMemberKw = :script(~~
                     } else if (cond.v != undefined) {
                         var val = cond.v()
                         hit = subj != null ? kEqOp(val, s, true) : val
+                    } else if (cond.coll != undefined) {
+                        // in coll (or !in): coll.contains(subject), as makeInExpr does.
+                        hit = mcall(cond.coll(), "contains", [s])
+                        if (cond.neg) hit = !hit
                     } else {
                         // in lo..hi (or !in): both bounds are evaluated, like in Kotlin.
                         var lo = cond.lo()
@@ -9184,9 +9234,11 @@ NotMemberKw = :script(~~
         return function() {
             var lbl = takeLabel()
             var arr = kForSrc(subjT())
+            var n0 = anytype
+            n0 = kForN0(arr)
             var res = undefined
             scopes.push({})
-            for (var i = 0; i < arr.length || kForMore(arr); i++) {
+            for (var i = 0; kForNext(arr, i, n0); i++) {
                 // A FRESH SCOPE OBJECT per iteration, holding just the loop variable.
                 // A lambda captures scopes.slice(0), an array of REFERENCES, so one
                 // shared cell would make every closure read the last value: `for (i in
@@ -11211,9 +11263,11 @@ NotMemberKw = :script(~~
         return function() {
             var lbl = takeLabel()
             var arr = kForSrc(collT())
+            var n0 = anytype
+            n0 = kForN0(arr)
             var res = undefined
             scopes.push({})
-            for (var i = 0; i < arr.length || kForMore(arr); i++) {
+            for (var i = 0; kForNext(arr, i, n0); i++) {
                 // Per-iteration bindings, exactly as in makeForIn above.
                 scopes.push({})
                 var el = kForAt(arr, i)

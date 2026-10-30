@@ -702,6 +702,23 @@ func (rt *jsrt) ktNumMethod(target interface{}, name string, args []interface{})
 		if li && ri {
 			return rt.ktFloorDivMod(target, args[0], name == "mod"), true
 		}
+		// Double.mod / Float.mod (kotlin.util.FloorDivMod): `r = this % other`, plus
+		// other when r is non-zero and its sign differs from other's - the remainder
+		// takes the divisor's sign. A Float pair stays a Float. Twins: the mod arms
+		// of kNumMethod in kotlin-interpreter.abnf and of the number member surface
+		// in languages/lib/kotlin-rt.metajs.
+		if o := argAt(args, 0); name == "mod" && len(args) == 1 && (jvmIsFlo(target) || jvmIsFlo(o)) {
+			sty := jvmArithStyle(target, o)
+			b := rt.toNumber(o)
+			r := math.Mod(rt.toNumber(target), b)
+			if r != 0 && math.Signbit(r) != math.Signbit(b) {
+				r += b
+			}
+			if jvmIs32(sty) {
+				r = jvmFround(r)
+			}
+			return jsJFlo{f: r, sty: sty}, true
+		}
 	case "toByte":
 		return rt.ktConv(target, 8, false), true
 	case "toShort":
@@ -1262,6 +1279,67 @@ func init() {
 				return w(ktNorm(t.v+d, t.w, t.u))
 			}
 			return rt.wrapNum(float64(int32(giVal(rt, v)) + int32(d)))
+		}
+		// js_ktrnum(v) is a `for` range bound as its counter: a Char's code, any
+		// other value (a Long box included, so it stays exact) itself.
+		m["js_ktrnum"] = func(a []uint64) uint64 {
+			if c, ok := u(a[0]).(jsChar); ok {
+				return rt.wrapNum(float64(c.code))
+			}
+			return a[0]
+		}
+		// js_ktforlast(first, bound, step, mode) is the LAST element a `for` over
+		// first..bound (mode 0), first until bound (1) or first downTo bound (2)
+		// reaches - kotlin.internal.getProgressionLastElement - or null when the
+		// progression is empty. A step that is not positive throws, as `step` does.
+		// It answers a Long when an operand is one. Twin of js_ktforlast in
+		// languages/lib/kotlin-rt.metajs; the interpreter half iterates the range
+		// object (rangeList).
+		m["js_ktforlast"] = func(a []uint64) uint64 {
+			first, bound, step := u(a[0]), u(a[1]), u(a[2])
+			mode := int(rt.toNumber(u(a[3])))
+			s := giVal(rt, step)
+			if s <= 0 {
+				rt.ktStepBad(step)
+			}
+			f, b := giVal(rt, first), giVal(rt, bound)
+			_, fl := first.(jsGInt)
+			_, bl := bound.(jsGInt)
+			_, sl := step.(jsGInt)
+			long := fl || bl || sl
+			if mode == 1 {
+				if long && b == math.MinInt64 {
+					return w(jsNull)
+				}
+				b--
+			}
+			mod := func(x int64) int64 {
+				r := x % s
+				if r < 0 {
+					r += s
+				}
+				return r
+			}
+			last := b
+			if mode == 2 {
+				if f < b {
+					return w(jsNull)
+				}
+				if f > b {
+					last = b + mod(mod(f)-mod(b))
+				}
+			} else {
+				if f > b {
+					return w(jsNull)
+				}
+				if f < b {
+					last = b - mod(mod(b)-mod(f))
+				}
+			}
+			if long {
+				return w(jsGInt{v: last, w: 64})
+			}
+			return rt.wrapNum(float64(last))
 		}
 		// The plain-number reading a raw consumer needs (an index, a length, a
 		// range bound): a box is not a float64 and every such consumer wants one.
@@ -6159,7 +6237,17 @@ func (rt *jsrt) ktSeqMethodK(o *jsArray, name string, args []interface{}, kind s
 		}
 		return arr(out), true
 	case "subList":
+		// java.util.AbstractList.subListRangeCheck. Twin of the subList arms in
+		// kotlin-interpreter.abnf and languages/lib/kotlin-rt.metajs.
 		lo, hi := jsToInt(rt.toNumber(f)), jsToInt(rt.toNumber(argAt(args, 1)))
+		switch {
+		case lo < 0:
+			rt.ktRaise("IndexOutOfBoundsException", fmt.Sprintf("fromIndex = %d", lo))
+		case hi > len(es):
+			rt.ktRaise("IndexOutOfBoundsException", fmt.Sprintf("toIndex = %d", hi))
+		case lo > hi:
+			rt.ktRaise("IllegalArgumentException", fmt.Sprintf("fromIndex(%d) > toIndex(%d)", lo, hi))
+		}
 		return arr(append([]interface{}{}, es[lo:hi]...)), true
 	case "zipWithNext":
 		out := []interface{}{}
@@ -6862,7 +6950,7 @@ func (rt *jsrt) ktMapMethod(m *jsObject, name string, args []interface{}) (inter
 	case "getValue":
 		i := rt.ktMapFind(keys, f)
 		if i < 0 {
-			rt.fail("key %s is missing in the map", rt.ktpRender(f, 0))
+			rt.ktRaise("NoSuchElementException", "Key "+rt.ktpRender(f, 0)+" is missing in the map.")
 		}
 		return vals.elems[i], true
 	case "getOrDefault":
@@ -8425,6 +8513,14 @@ func ktGlobalFn(rt *jsrt, name string) interface{} {
 		"UByteArray", "UShortArray", "UIntArray", "ULongArray", "arrayOfNulls":
 		return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
 			n := jsToInt(rt.toNumber(argAt(args, 0)))
+			// A negative size: an array's NegativeArraySizeException, or the
+			// IllegalArgumentException of ArrayList(-1) for a List. Twin of kArrN in
+			// kotlin-interpreter.abnf and k4ArrayOfN in languages/lib/kotlin-rt.metajs.
+			if n < 0 && (name == "List" || name == "MutableList") {
+				rt.ktRaise("IllegalArgumentException", fmt.Sprintf("Illegal Capacity: %d", n))
+			} else if n < 0 {
+				rt.ktRaise("NegativeArraySizeException", fmt.Sprintf("%d", n))
+			}
 			init := argAt(args, 1)
 			out := &jsArray{}
 			for i := 0; i < n; i++ {
