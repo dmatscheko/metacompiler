@@ -310,13 +310,15 @@ ModWordAhead = :script(~~
 // The trailing NotColon lets a soft-keyword modifier double as an identifier when it
 // is actually a name: a real modifier is never immediately followed by `:`, but a
 // parameter or property named `data`/`value`/`inner` is (data: Intent?). Without the
-// guard [Modifiers] would eat the name and strand the `:`.
+// guard [Modifiers] would eat the name and strand the `:`. The `!"["` does the same for
+// an indexed write to a property named `data`/`value` (`data[i] = x`), which would
+// otherwise read as the modifier in front of the declaration `[i] = x` (DPatLead).
 // `lateinit` is the third modifier that CHANGES what is emitted (see DataMod): the
 // property it marks throws on a read before assignment instead of answering null, so
 // PropDecl has to see it. This grammar has no pendingMods list, so it is a single
 // walk-time flag the next property declaration takes.
 Modifier    = ContextClause | CompanionMod
-            | ( DataMod | "inner" ) KwEnd NotColon NotClassW
+            | ( DataMod | "inner" ) KwEnd NotColon !"[" NotClassW
             | "lateinit" KwEnd NotColon <~~ noteLateinit() ~~>
             | ( "public" | "private" | "protected" | "internal" | "open" | "final"
               | "abstract" | "sealed" | "override" | "const"
@@ -633,7 +635,8 @@ CtorModsOnly = ( Modifier | Annotation ) { Modifier | Annotation } ;
 // single inheritance is genuine, and a class extending a class that implements an
 // interface still answers `is Interface`. Any FURTHER supertype is an extra
 // interface: its default methods are copied into the descriptor (so they are
-// callable) but it is NOT on the __super chain, so `is SecondInterface` is false.
+// callable) and it is listed in the descriptor's __ifaces, which js_ktis walks
+// beside the __super chain (emitSuperLinks).
 // `: I by expr` records the delegate; `: C(args)` marks a superCLASS construction.
 Supers      <~~ push({supers: takeAll()}) ~~>
             = SuperItem { "," SuperItem } ;
@@ -1076,7 +1079,7 @@ CallAssign  <~~ push(makeCallAssign(takeAll(), up.pos)) ~~>
 // off the last step: everything before it is the container, and the last `.name` or
 // `[i]` is the slot written. The twin of CallChain in kotlin-interpreter.abnf.
 CallChain   <~~ push({chain: takeAll()}) ~~>
-            = Primary { MethodSfx | SafeMethodSfx | FieldSfx | SafeFieldSfx | IndexSfx | "!!" } ;
+            = Primary { MethodSfx | SafeMethodSfx | FieldSfx | SafeFieldSfx | IndexSfx | NnSfx } ;
 
 Target      <~~ push(makeTargetRef(takeAll())) ~~>
 // `?.` and `!!` are accepted in a TARGET as well - `t?.i++` and `t!!.i++` are ordinary
@@ -1402,10 +1405,10 @@ IncDec      <~~ push(makeIncDec(takeAll())) ~~>
 // p.x is a property read, list[i] an indexed read. The ?. variants yield null
 // (instead of failing) when their receiver is null. A method call may take a
 // trailing lambda - list.map { it * 2 } - which becomes the last argument.
-// A trailing "!!" (non-null assertion) is consumed and dropped: in the untyped handle
-// world it is the identity, so x!! lowers exactly like x (and x!!.m() still chains).
+// A trailing "!!" (non-null assertion) is the identity on a non-null value and throws
+// NullPointerException on null (NnSfx; x!!.m() still chains).
 CallMember  <~~ ktAt = up.start; push(foldCallMember(takeAll(), up.in)) ~~>
-            = Primary { MethodSfx | SafeMethodSfx | FieldSfx | SafeFieldSfx | IndexSfx | GenericSfx | DotAnonSfx | InvokeSfx | RefSfx | "!!" } ;
+            = Primary { MethodSfx | SafeMethodSfx | FieldSfx | SafeFieldSfx | IndexSfx | GenericSfx | DotAnonSfx | InvokeSfx | RefSfx | NnSfx } ;
 // A callable reference or class literal whose RECEIVER is an arbitrary expression:
 // `X()::class`, `object {}::class`, `foo()::bar`. CallableRef in Primary covers only a
 // dotted NAME on the left (`a.b::c`), so these three lines of psi/DoubleColon.kt need
@@ -1414,6 +1417,8 @@ CallMember  <~~ ktAt = up.start; push(foldCallMember(takeAll(), up.in)) ~~>
 // RefName PUSHES its text, so the tag drains it before pushing the suffix record.
 RefSfx      <~~ push({kind: "refsfx", name: pop()}) ~~>
             = "::" RefName ;
+NnSfx       <~~ push({kind: "nn"}) ~~>
+            = "!!" ;
 RefName     = KId <~~ push(up.in) ~~> | "class" KwEnd <~~ push("class") ~~> ;
 // A call's EXPLICIT TYPE ARGUMENTS, captured for `xs.filterIsInstance<String>()`.
 // Twin of MTypeArgs in kotlin-interpreter.abnf; see there.
@@ -4110,7 +4115,7 @@ KwContract  = "contract" KwEnd ;
     }
     function applyTypeOp1(operand, m) {
         if (m.asType) {
-            if (!m.safe) { return operand } // x as T: identity (untyped values)
+            if (!m.safe) { return makeCast(operand, m.tname) }
             return function(b) { // x as? T: the value when it matches, else null
                 var r = operand(b)
                 var isV = callExt(r.b, "js_ktis", [r.v, emitStr(r.b, m.tname)])
@@ -4118,6 +4123,29 @@ KwContract  = "contract" KwEnd ;
             }
         }
         return makeIsCheck(operand, m)
+    }
+    // x as T: js_ktcast throws ClassCastException when x is not a T, judged for the
+    // builtin value types and for a class or interface the program declares (known
+    // at emission, after the walk); any other T is unchecked, as an erased cast is.
+    // Twin of makeCast in kotlin-interpreter.abnf.
+    var ktCastLang = {"$String": "java.lang.String", "$Int": "java.lang.Integer", "$Long": "java.lang.Long",
+                      "$Short": "java.lang.Short", "$Byte": "java.lang.Byte", "$Double": "java.lang.Double",
+                      "$Float": "java.lang.Float", "$Char": "java.lang.Character",
+                      "$Boolean": "java.lang.Boolean", "$Number": "java.lang.Number"}
+    function makeCast(operand, tname) {
+        var base = tname
+        var lt = base.indexOf("<")
+        if (lt >= 0) { base = base.substring(0, lt) }
+        if (base.length > 0 && base.charAt(base.length - 1) == "?") { base = base.substring(0, base.length - 1) }
+        return function(b) {
+            var r = operand(b)
+            var dest = ktCastLang["$" + base]
+            if (dest == undefined) {
+                if (classNames[base] != 1 && interfaceNames["$" + base] != true) { return r }
+                dest = base
+            }
+            return {b: r.b, v: callExt(r.b, "js_ktcast", [r.v, emitStr(r.b, base), emitStr(r.b, dest)])}
+        }
     }
 
     // ----- Expression thunks: function(block) -> {b, v} -----
@@ -4363,6 +4391,16 @@ KwContract  = "contract" KwEnd ;
                 return {b: ea.b, v: callExt(ea.b, "js_ktsmcall", [cur, emitStr(ea.b, s.name), ea.v])}
             }
             if (s.kind == "dotanon") { return s.t(b) }
+            // x!! (Intrinsics.checkNotNull): a null receiver throws a message-less
+            // NullPointerException. Twin of the "nn" arm in kotlin-interpreter.abnf.
+            if (s.kind == "nn") {
+                var npeB = curF.NewBlock("")
+                var nnB = curF.NewBlock("")
+                b.NewCondBr(truthy(b, callExt(b, "js_eq", [cur, hNull])), npeB, nnB)
+                callExt(npeB, "js_throw", [callExt(npeB, "js_ktnewexc", [emitStr(npeB, "NullPointerException"), hNull])])
+                npeB.NewRet(hUndef)
+                return {b: nnB, v: cur}
+            }
             // `X()::class`, `foo()::bar` - a reference whose RECEIVER is an arbitrary
             // expression, so it is always a BOUND one.
             if (s.kind == "refsfx") {
@@ -4821,12 +4859,21 @@ KwContract  = "contract" KwEnd ;
                                   callExt(b, "js_ktexccls",
                                           [emitStr(b, baseTypeName(stripWs(supers[pk].name)))])])
         }
+        var ifacesV = null
         for (var k = 0; k < supers.length; k++) {
             if (k == pk) { continue }
             // The alias-and-path-reduced name: an interface reached through a typealias
             // or written as a dotted path is still bound under its simple name.
             var kn = resolvedTypeName(supers[k].name)
             if (kn == null) { kn = supers[k].name }
+            // Off the __super chain, so listed in __ifaces for js_ktis.
+            if (interfaceNames["$" + kn] == true) {
+                if (ifacesV == null) {
+                    ifacesV = callExt(b, "js_arr_new", [])
+                    callExt(b, "js_set", [clsV, emitStr(b, "__ifaces"), ifacesV])
+                }
+                callExt(b, "js_arr_push", [ifacesV, callExt(b, "js_scope_get", [curScopeV, emitStr(b, kn)])])
+            }
             var sig = interfaceMethods["$" + kn]
             if (sig == undefined) { continue }
             var ifV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, kn)])
@@ -5158,14 +5205,35 @@ KwContract  = "contract" KwEnd ;
                 o = callExt(b, "js_get", [o, emitStr(b, s.key)])
             } else {
                 var r = s.idx(b)
-                b = r.b
-                o = callExt(b, "js_get", [o, r.v])
+                var gr = emitIdxRead(r.b, o, r.v, "js_get")
+                b = gr.b
+                o = gr.v
             }
         }
         var last = ref.path[ref.path.length - 1]
-        if (last.key != undefined) return {b: b, obj: o, key: emitStr(b, last.key)}
+        if (last.key != undefined) return {b: b, obj: o, key: emitStr(b, last.key), isIndex: false}
         var kr = last.idx(b)
-        return {b: kr.b, obj: o, key: kr.v}
+        return {b: kr.b, obj: o, key: kr.v, isIndex: true}
+    }
+    // An indexed read or write of an assignment target: the receiver's `operator fun
+    // get` / `set` when some class declares one, else the builtin access. Twin of
+    // kReadSlot / kSetIndex in kotlin-interpreter.abnf.
+    function emitIdxRead(b, objV, keyV, ext) {
+        return emitOpDispatch(b, objV, "get", [keyV], function(bb) { return callExt(bb, ext, [objV, keyV]) })
+    }
+    function emitIdxWrite(b, objV, keyV, v) {
+        return emitOpDispatch(b, objV, "set", [keyV, v], function(bb) { callExt(bb, "js_ktset", [objV, keyV, v]); return v }).b
+    }
+    // The slot p (an emitRefPath result) read and written: `[i]` through the
+    // conventions, `.name` through js_ktfget / js_ktset.
+    function emitSlotRead(b, p) {
+        if (p.isIndex) { return emitIdxRead(b, p.obj, p.key, "js_ktfget") }
+        return {b: b, v: callExt(b, "js_ktfget", [p.obj, p.key])}
+    }
+    function emitSlotWrite(b, p, v) {
+        if (p.isIndex) { return emitIdxWrite(b, p.obj, p.key, v) }
+        callExt(b, "js_ktset", [p.obj, p.key, v])
+        return b
     }
     // The path step naming the member an assignment writes through: the last step
     // when it is `.name`, the one before a final `[i]` when that is; -1 otherwise.
@@ -5234,28 +5302,29 @@ KwContract  = "contract" KwEnd ;
             if (lastStep != null && lastStep.key != undefined && extPropSetResolves(lastStep.key)) {
                 epWrite = lastStep.key
             }
-            var r = valT(b)
-            b = r.b
-            var v = r.v
+            // Kotlin's order: the target's receiver and index, then (for `op=`) the
+            // target's current value, then the right-hand side, then the write.
+            // emitNewVal is the last two: valT, combined with old for `op=`.
+            var emitNewVal = function(bb, old, isV) {
+                var rv = valT(bb)
+                if (op == "=") { return rv }
+                return emitCompound(rv.b, op, old, rv.v, isV)
+            }
+            var v = hUndef
+            var nr = null
             if (ref.name == "field" && ref.path.length == 0 && emitBackingField != null) {
                 // `field = v` inside an accessor writes the backing field of its property.
                 var fThisV = b.NewCall(rtKtGet(), [curScopeV, emitStr(b, "this")])
                 var fNameV = emitStr(b, emitBackingField)
-                if (op != "=") {
-                    var oldF = callExt(b, "js_get", [fThisV, fNameV])
-                    var rf = emitCompound(b, op, oldF, v, false)
-                    b = rf.b
-                    v = rf.v
-                }
+                nr = emitNewVal(b, (op != "=") ? callExt(b, "js_get", [fThisV, fNameV]) : hUndef, false)
+                b = nr.b
+                v = nr.v
                 callExt(b, "js_set", [fThisV, fNameV, v])
             } else if (ref.path.length == 0) {
                 var nameV = emitStr(b, ref.name)
-                if (op != "=") {
-                    var old = b.NewCall(rtKtGet(), [curScopeV, nameV])
-                    var ro = emitCompound(b, op, old, v, isVal)
-                    b = ro.b
-                    v = ro.v
-                }
+                nr = emitNewVal(b, (op != "=") ? b.NewCall(rtKtGet(), [curScopeV, nameV]) : hUndef, isVal)
+                b = nr.b
+                v = nr.v
                 // js_ktvarset, not js_kset: a binding holding a delegate box is written
                 // through the delegate's setValue (see RealDelegateDecl).
                 b.NewCall(rtVarSet(), [curScopeV, nameV, v])
@@ -5263,37 +5332,38 @@ KwContract  = "contract" KwEnd ;
                 var p = emitRefPath(b, ref)
                 b = p.b
                 if (mxWrite != null) {
-                    if (op != "=") {
-                        var oldX = b.NewCall(rtMextGet(), [curScopeV, p.obj, p.key])
-                        var rx = emitCompound(b, op, oldX, v, false)
-                        b = rx.b
-                        v = rx.v
-                    }
+                    nr = emitNewVal(b, (op != "=") ? b.NewCall(rtMextGet(), [curScopeV, p.obj, p.key]) : hUndef, false)
+                    b = nr.b
+                    v = nr.v
                     b.NewCall(rtMextSet(), [curScopeV, p.obj, p.key, v])
                 } else if (epWrite != null) {
                     // A top-level extension property's setter (computed or delegated):
                     // the twin of the extPropResolves READ arm in the suffix emitter.
+                    var oldE = hUndef
                     if (op != "=") {
                         var gEV = b.NewCall(rtKtGet(), [curScopeV, emitStr(b, "extp$" + epWrite)])
                         var gEA = callExt(b, "js_arr_new", [])
                         callExt(b, "js_arr_push", [gEA, p.obj])
-                        var rE = emitCompound(b, op, callExt(b, "js_call", [gEV, hUndef, gEA]), v, false)
-                        b = rE.b
-                        v = rE.v
+                        oldE = callExt(b, "js_call", [gEV, hUndef, gEA])
                     }
+                    nr = emitNewVal(b, oldE, false)
+                    b = nr.b
+                    v = nr.v
                     var sEV = b.NewCall(rtKtGet(), [curScopeV, emitStr(b, "extps$" + epWrite)])
                     var sEA = callExt(b, "js_arr_new", [])
                     callExt(b, "js_arr_push", [sEA, p.obj])
                     callExt(b, "js_arr_push", [sEA, v])
                     callExt(b, "js_call", [sEV, hUndef, sEA])
                 } else {
+                    var oldM = hUndef
                     if (op != "=") {
-                        var oldM = callExt(b, "js_ktfget", [p.obj, p.key])
-                        var rm = emitCompound(b, op, oldM, v, isVal)
+                        var rm = emitSlotRead(b, p)
                         b = rm.b
-                        v = rm.v
+                        oldM = rm.v
                     }
-                    callExt(b, "js_ktset", [p.obj, p.key, v])
+                    nr = emitNewVal(b, oldM, isVal)
+                    v = nr.v
+                    b = emitSlotWrite(nr.b, p, v)
                 }
             }
             return {b: b, v: v}
@@ -5302,8 +5372,8 @@ KwContract  = "contract" KwEnd ;
     // An assignment whose left side is a postfix chain containing a call.
     // items = [{chain}, op, rhs]. The chain is UNFOLDED, so the last step can be split
     // off as the slot to write. The twin of makeCallAssign in kotlin-interpreter.abnf,
-    // including the evaluation ORDER: receiver, then right-hand side, then (for an
-    // indexed slot) the index.
+    // including the evaluation ORDER of makeAssign: receiver, index, the slot's
+    // current value for `op=`, then the right-hand side.
     function makeCallAssign(items, pos) {
         var chain = items[0].chain
         var op = items[1]
@@ -5316,9 +5386,7 @@ KwContract  = "contract" KwEnd ;
             return function(b) {
                 var rb = baseT(b)
                 var objV = rb.v
-                var rv = rhsT(rb.b)
-                var bb = rv.b
-                var v = rv.v
+                var bb = rb.b
                 var keyV = anytype
                 if (isField) {
                     keyV = emitStr(bb, fname)
@@ -5327,12 +5395,17 @@ KwContract  = "contract" KwEnd ;
                     bb = ir.b
                     keyV = ir.v
                 }
+                var emitNewVal = function(b2, old, isV) {
+                    var rv = rhsT(b2)
+                    if (op == "=") { return rv }
+                    return emitCompound(rv.b, op, old, rv.v, isV)
+                }
+                var v = hUndef
+                var nr = null
                 if (isField && memberExtPropResolves(fname)) {
-                    if (op != "=") {
-                        var rx2 = emitCompound(bb, op, bb.NewCall(rtMextGet(), [curScopeV, objV, keyV]), v, false)
-                        bb = rx2.b
-                        v = rx2.v
-                    }
+                    nr = emitNewVal(bb, (op != "=") ? bb.NewCall(rtMextGet(), [curScopeV, objV, keyV]) : hUndef, false)
+                    bb = nr.b
+                    v = nr.v
                     bb.NewCall(rtMextSet(), [curScopeV, objV, keyV, v])
                     return {b: bb, v: v}
                 }
@@ -5341,14 +5414,16 @@ KwContract  = "contract" KwEnd ;
                 // arm the write would fall to js_ktset and land as an own field on the
                 // receiver (the interpreter half runs it through extPropSetters).
                 if (isField && extPropSetResolves(fname)) {
+                    var oldE = hUndef
                     if (op != "=") {
                         var gV0 = bb.NewCall(rtKtGet(), [curScopeV, emitStr(bb, "extp$" + fname)])
                         var ga0 = callExt(bb, "js_arr_new", [])
                         callExt(bb, "js_arr_push", [ga0, objV])
-                        var rx3 = emitCompound(bb, op, callExt(bb, "js_call", [gV0, hUndef, ga0]), v, false)
-                        bb = rx3.b
-                        v = rx3.v
+                        oldE = callExt(bb, "js_call", [gV0, hUndef, ga0])
                     }
+                    nr = emitNewVal(bb, oldE, false)
+                    bb = nr.b
+                    v = nr.v
                     var sV = bb.NewCall(rtKtGet(), [curScopeV, emitStr(bb, "extps$" + fname)])
                     var sargsV = callExt(bb, "js_arr_new", [])
                     callExt(bb, "js_arr_push", [sargsV, objV])
@@ -5356,13 +5431,16 @@ KwContract  = "contract" KwEnd ;
                     callExt(bb, "js_call", [sV, hUndef, sargsV])
                     return {b: bb, v: v}
                 }
+                var slot = {obj: objV, key: keyV, isIndex: !isField}
+                var oldM = hUndef
                 if (op != "=") {
-                    var ro = emitCompound(bb, op, callExt(bb, "js_ktfget", [objV, keyV]), v, isField && ktMemberIsVal("", fname))
-                    bb = ro.b
-                    v = ro.v
+                    var rm = emitSlotRead(bb, slot)
+                    bb = rm.b
+                    oldM = rm.v
                 }
-                callExt(bb, "js_ktset", [objV, keyV, v])
-                return {b: bb, v: v}
+                nr = emitNewVal(bb, oldM, isField && ktMemberIsVal("", fname))
+                v = nr.v
+                return {b: emitSlotWrite(nr.b, slot, v), v: v}
             }
         }
         // The chain ends in a CALL, so it is not a slot: not implemented as a write,
@@ -5394,10 +5472,9 @@ KwContract  = "contract" KwEnd ;
                 return {b: b, v: newV}
             }
             var p = emitRefPath(b, ref)
-            b = p.b
-            var newM = callExt(b, "js_ktstep", [callExt(b, "js_ktfget", [p.obj, p.key]), oneV])
-            callExt(b, "js_ktset", [p.obj, p.key, newM])
-            return {b: b, v: newM}
+            var rm = emitSlotRead(p.b, p)
+            var newM = callExt(rm.b, "js_ktstep", [rm.v, oneV])
+            return {b: emitSlotWrite(rm.b, p, newM), v: newM}
         }
     }
     function makeIncDec(items) {
@@ -5412,10 +5489,8 @@ KwContract  = "contract" KwEnd ;
                 return {b: b, v: oldV}
             }
             var p = emitRefPath(b, ref)
-            b = p.b
-            var oldM = callExt(b, "js_ktfget", [p.obj, p.key])
-            callExt(b, "js_ktset", [p.obj, p.key, callExt(b, "js_ktstep", [oldM, oneV])])
-            return {b: b, v: oldM}
+            var rm = emitSlotRead(p.b, p)
+            return {b: emitSlotWrite(rm.b, p, callExt(rm.b, "js_ktstep", [rm.v, oneV])), v: rm.v}
         }
     }
 

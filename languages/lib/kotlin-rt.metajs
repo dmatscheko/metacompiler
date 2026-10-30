@@ -6380,9 +6380,11 @@ function ktIsType(v, tname) {
         var d = k4bLastDot(bare)
         if (d >= 0) {
             var short = bare.substring(d + 1, bare.length)
+            bare = short
             if (k4bEndsQ(qt)) { short = short + "?" }
-            return js_is_type(v, short)
+            if (js_is_type(v, short) === true) { return true }
         }
+        if (v !== null && typeof v == "object" && !Array.isArray(v)) { return ktDescIs(v["__class"], bare, 0) }
         return false
     }
     var t = k4bStripQ(k4bStripAngle(tname))
@@ -6410,8 +6412,49 @@ function ktIsType(v, tname) {
     return t == "Number" || t == "Int"
 }
 
+// Whether the class descriptor c, its __super chain, or an interface listed in
+// __ifaces along them is named t. Twin of ktDescIs in abnf/jsrtkotlin.go.
+function ktDescIs(c, t, depth) {
+    var guard = 0
+    while (c !== null && c !== undefined && typeof c == "object" && guard < 64) {
+        if (c["__name"] === t) { return true }
+        var ifs = c["__ifaces"]
+        if (Array.isArray(ifs) && depth < 64) {
+            var i = 0
+            while (i < ifs.length) {
+                if (ktDescIs(ifs[i], t, depth + 1)) { return true }
+                i = i + 1
+            }
+        }
+        c = c["__super"]
+        guard = guard + 1
+    }
+    return false
+}
 // `x is T`, as the extern.
 function js_ktis(v, tname) { return ktIsType(v, tname) }
+// js_ktcast (jsrtkotlin.go): `v as T` for a judged T, a ClassCastException when v
+// is not a T.
+function js_ktcast(v, tname, dst) {
+    if (rtIsNil(v) || typeof v == "function" || ktIsType(v, tname)) { return v }
+    ktRaise("ClassCastException", ktCceMsg(jxkClass(v), dst))
+    return v
+}
+// java's ClassCastException message: java.* classes are in java.base, everything
+// else (kotlin-stdlib's and the program's) in the app loader's unnamed module. Twin
+// of jvCceMsg in abnf/jsrtjavastr.go and kCceMsg in kotlin-interpreter.abnf.
+function ktCceMsg(src, dst) {
+    var head = "class " + src + " cannot be cast to class " + dst + " ("
+    var bs = src.substring(0, 5) == "java."
+    var bd = dst.substring(0, 5) == "java."
+    if (bs && bd) { return head + src + " and " + dst + " are in module java.base of loader 'bootstrap')" }
+    if (!bs && !bd) { return head + src + " and " + dst + " are in unnamed module of loader 'app')" }
+    return head + src + ktCceWhere(bs) + "; " + dst + ktCceWhere(bd) + ")"
+}
+function ktCceWhere(base) {
+    if (base) { return " is in module java.base of loader 'bootstrap'" }
+    return " is in unnamed module of loader 'app'"
+}
 
 // js_ktextok (jsrtkotlin.go): whether the extension chain takes the extension
 // declared for tname - v has that type and no member of the name.

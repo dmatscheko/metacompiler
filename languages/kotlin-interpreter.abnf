@@ -1122,7 +1122,7 @@ CallAssign  <~~ push(makeCallAssign(takeAll(), up.pos)) ~~>
 // off the last step: everything before it is the container, and the last `.name` or
 // `[i]` is the slot written (through a property setter or an `operator fun set`).
 CallChain   <~~ push({chain: takeAll()}) ~~>
-            = Primary { MethodSfx | SafeMethodSfx | FieldSfx | SafeFieldSfx | IndexSfx | "!!" } ;
+            = Primary { MethodSfx | SafeMethodSfx | FieldSfx | SafeFieldSfx | IndexSfx | NnSfx } ;
 
 // The chain may carry a `!!` (the non-null assertion, which is the identity for an
 // untyped value and is simply dropped) and a `?.` step - `t!!.i++` and `t?.i++` are both
@@ -1429,10 +1429,12 @@ IncDec      <~~ push(makeIncDec(takeAll())) ~~>
 // p.x is a property read, list[i] an indexed read. The ?. variants yield null
 // (instead of failing) when their receiver is null. A method call may take a
 // trailing lambda - list.map { it * 2 } - which becomes the last argument.
-// A trailing "!!" (non-null assertion) is consumed and dropped: for untyped values it
-// is the identity, so x!! evaluates exactly like x (and x!!.m() still chains).
+// A trailing "!!" (non-null assertion) is the identity on a non-null value and throws
+// NullPointerException on null (NnSfx; x!!.m() still chains).
 CallMember  <~~ ktAt = up.start; push(foldCallMember(takeAll(), up.in)) ~~>
-            = Primary { MethodSfx | SafeMethodSfx | FieldSfx | SafeFieldSfx | IndexSfx | GenericSfx | DotAnonSfx | InvokeSfx | RefSfx | "!!" } ;
+            = Primary { MethodSfx | SafeMethodSfx | FieldSfx | SafeFieldSfx | IndexSfx | GenericSfx | DotAnonSfx | InvokeSfx | RefSfx | NnSfx } ;
+NnSfx       <~~ push({kind: "nn"}) ~~>
+            = "!!" ;
 // A callable reference or class literal whose RECEIVER is an arbitrary expression:
 // `X()::class`, `object {}::class`, `foo()::bar`. CallableRef in Primary covers only a
 // dotted NAME on the left (`a.b::c`), so these three lines of psi/DoubleColon.kt had no
@@ -3726,10 +3728,63 @@ NotMemberKw = :script(~~
     // applyTypeOp so the fold below never builds a closure over a loop variable.
     function typeOpStep(operand, m) {
         if (m.asType) {
-            if (!m.safe) { return operand } // x as T: identity (untyped values)
+            if (!m.safe) { return makeCast(operand, m.tname) }
             return function() { var v = operand(); return kIsType(v, m.tname) ? v : null }
         }
         return makeIsCheck(operand, m)
+    }
+    // x as T: a ClassCastException when x is not a T, judged for the builtin value
+    // types and for a class or interface the program declares; any other T (a type
+    // parameter, a library type) is unchecked, as an erased cast is. null passes.
+    // Twin of js_ktcast in abnf/jsrtkotlin.go and languages/lib/kotlin-rt.metajs.
+    function makeCast(operand, tname) {
+        var base = kCastBase(tname)
+        var dest = anytype // T's JVM class once the classes exist, "" when T is not judged
+        return function() {
+            var v = anytype
+            v = operand()
+            if (dest === undefined) { dest = kCastDest(base) }
+            if (dest == "" || v === null || v === undefined || typeof v == "function" || kIsType(v, base)) { return v }
+            kThrowExc("ClassCastException", kCceMsg(jxkClass(v), dest))
+            return v
+        }
+    }
+    var kCastLang = {"$String": "java.lang.String", "$Int": "java.lang.Integer", "$Long": "java.lang.Long",
+                     "$Short": "java.lang.Short", "$Byte": "java.lang.Byte", "$Double": "java.lang.Double",
+                     "$Float": "java.lang.Float", "$Char": "java.lang.Character",
+                     "$Boolean": "java.lang.Boolean", "$Number": "java.lang.Number"}
+    // T without its nullability mark and its type arguments.
+    function kCastBase(t) {
+        var b = t
+        var lt = b.indexOf("<")
+        if (lt >= 0) { b = b.substring(0, lt) }
+        if (b.length > 0 && b.charAt(b.length - 1) == "?") { b = b.substring(0, b.length - 1) }
+        return b
+    }
+    function kCastDest(b) {
+        var l = kCastLang["$" + b]
+        if (l != undefined) { return l }
+        var d = anytype
+        d = globalScope[b]
+        // A builtin throwable's binary name is package-qualified; the program's own
+        // types live in the default package. A nested type is named by its simple
+        // name, as the compiler half names it.
+        if (d === null || typeof d != "object" || d.__isclass !== true) { return "" }
+        var bn = anytype
+        bn = d.__bname
+        return (typeof bn != "string" || bn.indexOf(".") < 0) ? b : ""
+    }
+    // java's ClassCastException message. Twin of ktCceMsg in
+    // languages/lib/kotlin-rt.metajs and jvCceMsg in abnf/jsrtjavastr.go.
+    function kCceMsg(src, dst) {
+        var head = "class " + src + " cannot be cast to class " + dst + " ("
+        var bs = src.substring(0, 5) == "java."
+        var bd = dst.substring(0, 5) == "java."
+        if (bs && bd) { return head + src + " and " + dst + " are in module java.base of loader 'bootstrap')" }
+        if (!bs && !bd) { return head + src + " and " + dst + " are in unnamed module of loader 'app')" }
+        var ws = bs ? " is in module java.base of loader 'bootstrap'" : " is in unnamed module of loader 'app'"
+        var wd = bd ? " is in module java.base of loader 'bootstrap'" : " is in unnamed module of loader 'app'"
+        return head + src + ws + "; " + dst + wd + ")"
     }
     // The suffixes CHAIN - `x as T is U` is a cast whose result is then type-tested -
     // so they are folded left to right rather than read as a single optional suffix.
@@ -8516,6 +8571,9 @@ NotMemberKw = :script(~~
                     cur = kGetField(cur, s.name)
                 } else if (s.kind == "dotanon") {
                     cur = s.t()
+                } else if (s.kind == "nn") {
+                    // x!! (Intrinsics.checkNotNull): a message-less NullPointerException.
+                    if (cur === undefined || cur === null) { kRaise("NullPointerException", null) }
                 } else if (s.kind == "refsfx") {
                     // `X()::class`, `foo()::bar` - a reference whose RECEIVER is an
                     // arbitrary expression. The value in hand is that receiver, so the
@@ -8747,18 +8805,23 @@ NotMemberKw = :script(~~
             var valSt = (op == "=" || last.kind != "field") ? 0 : 0 - 1
             return function() {
                 if (valSt < 0) { valSt = ktMemberIsVal("", last.name) ? 1 : 0 }
-                // Kotlin evaluates the receiver before the right-hand side.
+                // makeAssign's order: receiver, index, the slot's current value for
+                // `op=`, then the right-hand side.
                 var obj = anytype
                 obj = baseT()
                 var v = anytype
-                v = rhsT()
+                var old = anytype
                 if (last.kind == "field") {
-                    if (op != "=") { v = kCompoundOp(op, kGetField(obj, last.name), v, valSt == 1) }
+                    if (op != "=") { old = kGetField(obj, last.name) }
+                    v = rhsT()
+                    if (op != "=") { v = kCompoundOp(op, old, v, valSt == 1) }
                     kSetField(obj, last.name, v)
                 } else {
                     var ix = anytype
                     ix = last.idx()
-                    if (op != "=") { v = kCompoundOp(op, kIndex(obj, ix), v, false) }
+                    if (op != "=") { old = kIndex(obj, ix) }
+                    v = rhsT()
+                    if (op != "=") { v = kCompoundOp(op, old, v, false) }
                     kSetIndex(obj, ix, v)
                 }
                 return v
@@ -11934,15 +11997,22 @@ NotMemberKw = :script(~~
                 }
                 memAt = 0 - 1
             }
+            // Kotlin's order: the target's receiver and index, then (for `op=`) the
+            // target's current value, then the right-hand side, then the write.
             var v = anytype // An assignment moves a value of any type.
-            v = valT()
+            var old = anytype
             if (ref.path.length == 0) {
-                return kSetName(ref.name, op, v, valSt == 1)
-            } else {
-                var p = resolveRef(ref)
-                if (op != "=") v = kCompoundOp(op, kReadSlot(p), v, valSt == 1)
-                if (p.isIndex) { kSetIndex(p.obj, p.key, v) } else { kSetField(p.obj, p.key, v) }
+                if (op == "=") { return kSetName(ref.name, op, valT(), false) }
+                old = getVar(ref.name)
+                if (isPDeleg(old)) { old = pdelegGet(old) }
+                v = valT()
+                return kSetName(ref.name, "=", kCompoundOp(op, old, v, valSt == 1), false)
             }
+            var p = resolveRef(ref)
+            if (op != "=") { old = kReadSlot(p) }
+            v = valT()
+            if (op != "=") { v = kCompoundOp(op, old, v, valSt == 1) }
+            if (p.isIndex) { kSetIndex(p.obj, p.key, v) } else { kSetField(p.obj, p.key, v) }
             return v
         }
     }

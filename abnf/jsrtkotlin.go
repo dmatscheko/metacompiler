@@ -1345,6 +1345,19 @@ func init() {
 		ktIsType = func(v interface{}, tname string) bool {
 			return u(m["js_ktis"]([]uint64{w(v), rt.wrapStr(tname)})) == interface{}(true)
 		}
+		// js_ktcast(v, T, dst) is `v as T` for a judged T (dst is its JVM class,
+		// chosen by the emitter): a ClassCastException with java's message when v is
+		// not a T. null and function values pass. Twin of kCast in
+		// kotlin-interpreter.abnf and js_ktcast in languages/lib/kotlin-rt.metajs.
+		m["js_ktcast"] = func(a []uint64) uint64 {
+			v := u(a[0])
+			if isUndefOrNull(v) || isCallable(v) || ktIsType(v, rt.toString(u(a[1]))) {
+				return a[0]
+			}
+			src, _ := ktJvmClass(v).(string)
+			rt.ktRaise("ClassCastException", jvCceMsg(src, rt.toString(u(a[2]))))
+			return a[0]
+		}
 		// js_ktextok(v, type, name, builtin) is whether the extension chain takes the
 		// extension declared for type: v has that type and no member of the name -
 		// a method on a class instance's chain, else (builtin) a name the runtime
@@ -1394,12 +1407,20 @@ func init() {
 				if i := strings.IndexByte(qt, '<'); i >= 0 {
 					qt = qt[:i]
 				}
-				if i := strings.LastIndexByte(strings.TrimSuffix(qt, "?"), '.'); i >= 0 {
-					short := strings.TrimSuffix(qt, "?")[i+1:]
+				bare := strings.TrimSuffix(qt, "?")
+				if i := strings.LastIndexByte(bare, '.'); i >= 0 {
+					short := bare[i+1:]
+					bare = short
 					if strings.HasSuffix(qt, "?") {
 						short += "?"
 					}
-					return baseIs([]uint64{a[0], rt.wrapStr(short)})
+					if r := baseIs([]uint64{a[0], rt.wrapStr(short)}); u(r) == interface{}(true) {
+						return r
+					}
+				}
+				if o, isObj := v.(*jsObject); isObj {
+					cls, _ := o.props["__class"].(*jsObject)
+					return boolH(ktDescIs(cls, bare, 0))
 				}
 				return boolH(false)
 			}
@@ -8726,6 +8747,27 @@ func ktCmpKeys(rt *jsrt, a, b interface{}, desc bool) int {
 		return -c
 	}
 	return c
+}
+
+// ktDescIs is whether the class descriptor c, its __super chain, or an interface
+// listed in __ifaces anywhere along them (a supertype after the first, see
+// emitSuperLinks in kotlin-to-llvm-ir.abnf) is named t. Twin of ktDescIs in
+// languages/lib/kotlin-rt.metajs.
+func ktDescIs(c *jsObject, t string, depth int) bool {
+	for guard := 0; c != nil && guard < 64; guard++ {
+		if c.props["__name"] == t {
+			return true
+		}
+		if ifs, ok := c.props["__ifaces"].(*jsArray); ok && depth < 64 {
+			for _, e := range ifs.elems {
+				if ic, isObj := e.(*jsObject); isObj && ktDescIs(ic, t, depth+1) {
+					return true
+				}
+			}
+		}
+		c, _ = c.props["__super"].(*jsObject)
+	}
+	return false
 }
 
 // ktRaise throws one of the builtin throwables from a host builtin, in the shape

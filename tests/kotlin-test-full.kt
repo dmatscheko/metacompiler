@@ -1100,14 +1100,15 @@ fun sec28() {
     check("cta4", store28[0] == 9)
     boxes28()[2] -= 1
     check("cta5", store28[2] == 2)
-    // Kotlin evaluates the receiver before the right-hand side, and the index of an
-    // indexed slot after both. Pinned so the two halves cannot drift on the order.
+    // Kotlin evaluates the receiver, then the index of an indexed slot (`a[i] = v` is
+    // a.set(i, v), arguments left to right), then the right-hand side - java 24
+    // evaluates `arr()[idx()] = rhs()` in the same order.
     order28 = ""
     lhs28().tag = rhs28()
     check("cta6", order28 == "LR" && shared28.tag == 7)
     order28 = ""
     boxes28()[idx28()] = rhs28()
-    check("cta7", order28 == "RI" && store28[1] == 7)
+    check("cta7", order28 == "IR" && store28[1] == 7)
 }
 
 // ===== SECTION 29: nested types with COLLIDING simple names =====
@@ -5470,6 +5471,93 @@ fun sec115() {
     check("jcls115i", jn115(mutableMapOf(1 to 2).values) == "java.util.LinkedHashMap\$LinkedValues LinkedValues class java.util.LinkedHashMap\$LinkedValues")
 }
 
+// ===== SECTION 121: assignment targets, `!!` and `as` =====
+// `a[i] = v` is a.set(i, v) and `a[i] op= v` is a.set(i, a.get(i) op v) (operator
+// conventions); the target's receiver and index are evaluated first, then the
+// slot's current value for `op=`, then the right-hand side - java 24 settles the
+// same order for the array and field forms. `x!!` on null throws
+// NullPointerException with a null message (kotlin-stdlib's Intrinsics.checkNotNull,
+// called from java). `as` throws ClassCastException with the JVM's message; java 24
+// gives the text for the same casts.
+var log121 = ""
+fun t121(tag: String, v: Int): Int { log121 += tag + v; return v }
+class S121(var v: Int) { operator fun set(i: Int, x: Int) { v = x + i } }
+class G121(var x: Int) {
+    operator fun get(i: Int): Int { log121 += "g" + i; return x }
+    operator fun set(i: Int, v: Int) { log121 += "s" + i; x = v }
+}
+class D121 {
+    var data = mutableListOf(0, 0)
+    var value = mutableListOf(0, 0)
+    fun w(i: Int, x: Int) { data[i] = x; value[i] = x + 1 }
+}
+class H121 { var f = 1; val xs = intArrayOf(1, 2, 3) }
+fun pick121(i: Int): String? = if (i > 9) "x" else null
+fun any121(i: Int): Any = if (i == 0) "str" else if (i == 1) 42 else if (i == 2) Dog121() else Cat121()
+interface Pet121
+open class Animal121
+class Dog121 : Animal121(), Pet121
+class Cat121 : Animal121()
+fun sec121() {
+    val n = intArrayOf(1, 7)
+    val s = S121(0)
+    s[n[0]] = n[1]
+    check("as121a", s.v == 8)
+    val g = G121(6)
+    g[t121("i", 2)] += t121("v", 5)
+    check("as121b", log121 == "i2g2v5s2" && g.x == 11)
+    log121 = ""
+    g[t121("i", 1)] = t121("v", 4)
+    g[0]++
+    check("as121c", log121 == "i1v4s1g0s0" && g.x == 5)
+    val d = D121()
+    d.w(0, 5)
+    check("as121d", d.data.toString() == "[5, 0]" && d.value.toString() == "[6, 0]")
+    val arr = intArrayOf(1, 2, 3)
+    var i = 0
+    arr[i++] = arr[i] + 10
+    check("as121e", arr.toList().toString() == "[12, 2, 3]" && i == 1)
+    i = 0
+    arr[i] = i++ + i++
+    var x = 5
+    x += x++ * 2
+    check("as121f", arr[0] == 1 && x == 15)
+    val h = H121()
+    h.f += h.f++ * 10
+    var k = 0
+    h.xs[k++] += h.xs[k] * 100
+    check("as121g", h.f == 11 && h.xs.toList().toString() == "[201, 2, 3]" && k == 1)
+    val hs = listOf(h)
+    k = 0
+    hs[0].xs[k++] = hs[0].xs[k] + 7
+    check("as121h", h.xs[0] == 9 && k == 1)
+    var got = ""
+    try { val t = pick121(0)!!; got = "nn $t" } catch (e: Exception) { got = "" + e + " " + e.message }
+    try { got += " " + pick121(0)!!.length } catch (e: NullPointerException) { got += " npe" }
+    check("nn121a", got == "java.lang.NullPointerException null npe" && pick121(10)!!.length == 1)
+    var cc = ""
+    for (j in 0..3) {
+        val v = any121(j)
+        cc += j
+        try { v as String; cc += "+" } catch (e: ClassCastException) { cc += "-" }
+        try { v as Int; cc += "+" } catch (e: ClassCastException) { cc += "-" }
+        try { v as Number; cc += "+" } catch (e: ClassCastException) { cc += "-" }
+        try { v as Dog121; cc += "+" } catch (e: ClassCastException) { cc += "-" }
+        try { v as Pet121; cc += "+" } catch (e: ClassCastException) { cc += "-" }
+        try { v as Animal121; cc += "+" } catch (e: ClassCastException) { cc += "-" }
+    }
+    check("cast121a", cc == "0+-----1-++---2---+++3-----+")
+    var m = ""
+    try { m = "" + (any121(1) as String).length } catch (e: ClassCastException) { m = e.message ?: "" }
+    check("cast121b", m == "class java.lang.Integer cannot be cast to class java.lang.String (java.lang.Integer and java.lang.String are in module java.base of loader 'bootstrap')")
+    try { m = "" + (any121(3) as Dog121) } catch (e: ClassCastException) { m = e.message ?: "" }
+    check("cast121c", m == "class Cat121 cannot be cast to class Dog121 (Cat121 and Dog121 are in unnamed module of loader 'app')")
+    try { m = "" + (any121(1) as Dog121) } catch (e: ClassCastException) { m = e.message ?: "" }
+    check("cast121d", m == "class java.lang.Integer cannot be cast to class Dog121 (java.lang.Integer is in module java.base of loader 'bootstrap'; Dog121 is in unnamed module of loader 'app')")
+    val nul: Any? = null
+    check("cast121e", (nul as String?) == null && (any121(1) as Int) + 1 == 43 && any121(2) is Pet121)
+}
+
 
 fun main() {
     s01() // SECTION-CALL 01
@@ -5588,6 +5676,7 @@ fun main() {
     sec114() // SECTION-CALL 114
     sec115() // SECTION-CALL 115
     s120() // SECTION-CALL 120
+    sec121() // SECTION-CALL 121
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }
