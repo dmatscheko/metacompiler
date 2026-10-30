@@ -2536,6 +2536,13 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // def or a lambda written INSIDE a block gets the ordinary treatment again.
     var curIsBlockFn = false
     var curRedoB = null
+    // curBlkCtl: the function is a begin/rescue/ensure closure of a block, with no
+    // loop in between, so a `next' or `break' there ends the block run or the
+    // iterating call. `break' throws its marker as it would in the block itself;
+    // `next v' leaves v in the block's blkNextName slot and signals continue, which
+    // makeTry in the block turns into the block's ret.
+    var curBlkCtl = false
+    var blkNextName = "$blknext"
     var blkBrkName = "__blkbrk"
     // `return' inside a block returns from the ENCLOSING METHOD, not from the block
     // (that is `next'), and it does so through the block, the iterating call and any
@@ -2806,7 +2813,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         return function(b) {
             var v = hNull
             if (t != null) { var r = t(b); b = r.b; v = r.v }
-            if (loopStack.length == 0 && curIsBlockFn) {
+            if (loopStack.length == 0 && (curIsBlockFn || curBlkCtl)) {
                 var margs = callExt(b, "js_arr_new", [])
                 callExt(b, "js_arr_push", [margs, v])
                 callExt(b, "js_throw", [callExt(b, "js_pyexc", [emitStr(b, blkBrkName), margs])])
@@ -2848,6 +2855,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 b.NewRet(v)
                 return {b: deadBlock(), v: hNull}
             }
+            if (loopStack.length == 0 && curBlkCtl) { callExt(b, "js_scope_set", [curScopeV, emitStr(b, blkNextName), v]) }
             emitContinue(b)
             return {b: deadBlock(), v: hNull}
         }
@@ -5227,12 +5235,22 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             // in ruby-interpreter.abnf.
             var bang0 = catchT != null ? callExt(b, "js_rgget", [emitStr(b, "!")]) : hUndef
             var site0 = rbSiteLoad(b)
+            var blkNext = curIsBlockFn && loopStack.length == 0
+            if (blkNext) { callExt(b, "js_scope_decl", [curScopeV, emitStr(b, blkNextName), hNull]) }
             var ctl = callExt(b, "js_try", [tryClo, catchClo, finClo])
             rbSiteStore(b, site0)
             if (catchT != null) { callExt(b, "js_rgset", [emitStr(b, "!"), bang0]) }
             var afterB = curF.NewBlock("")
             b.NewCondBr(truthy(b, callExt(b, "js_is_type", [ctl, emitStr(b, retryName)])), headB, afterB)
             b = afterB
+            if (blkNext) {
+                // A continue signal is a `next' of this block run (see curBlkCtl).
+                var nextB = curF.NewBlock("")
+                var goOnB = curF.NewBlock("")
+                b.NewCondBr(b.NewICmp(llvm.enum.IPredEQ, callExt(b, "js_ctl_kind", [ctl]), handle(3)), nextB, goOnB)
+                nextB.NewRet(callExt(nextB, "js_scope_get", [curScopeV, emitStr(nextB, blkNextName)]))
+                b = goOnB
+            }
             // excDispatch re-issues any return/break/next signal; when none fired, ctl is
             // the begin's ordinary value and normB (its result block) is reached.
             return {b: excDispatch(b, ctl), v: ctl}
@@ -5788,6 +5806,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         var savedLoops = loopStack
         var savedArgs = curArgsV
         var savedInBlk = curIsBlockFn
+        var savedBlkCtl = curBlkCtl
         var savedRedo = curRedoB
         var savedResc = curInRescue
         var savedMTag = curMethodTag
@@ -5846,6 +5865,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         curArgsV = f.Params[1]
         loopStack = []
         curIsBlockFn = isBlock === true
+        curBlkCtl = isCtl === true && savedLoops.length == 0 && (savedInBlk || savedBlkCtl)
         curRedoB = null
         if (isCtl) { ctlEnter(idx) }
         var b = f.NewBlock("entry")
@@ -5903,6 +5923,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         curFTag = savedTag
         curArgsV = savedArgs
         curIsBlockFn = savedInBlk
+        curBlkCtl = savedBlkCtl
         curRedoB = savedRedo
         curInRescue = savedResc
         curMethodTag = savedMTag
@@ -8358,6 +8379,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // level resolves to false instead of failing the scope lookup (see curBlockV).
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, blkSlot), hNull])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "$main"), callExt(b, "js_rmain", [])])
+        // $0 and $PROGRAM_NAME name the script being run (the interpreter's runProgram).
+        callExt(b, "js_rgset", [emitStr(b, "0"), emitStr(b, c.file)])
+        callExt(b, "js_rgset", [emitStr(b, "PROGRAM_NAME"), emitStr(b, c.file)])
         // The builtin class constants, so `case v when Integer`, `v.is_a?(String)`
         // and `rescue ArgumentError` name a real class object (js_rclass hands out
         // one object per name, so the identity comparisons hold).

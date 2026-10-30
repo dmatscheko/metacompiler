@@ -4743,6 +4743,21 @@ def s109
   check("as109a", s[1].ord == 128512 && s[0].index(s[2]) == 2 && s[0].rindex(s[1]) == 1 && s[0].length == 3)
 end
 
+# ===== SECTION 110: next / break out of a begin inside a block; $0 =====
+# `next v' inside a begin/ensure or rescue in a block ends that block run with v,
+# `break v' ends the iterating call; $0 and $PROGRAM_NAME are the script path, so
+# the `if __FILE__ == $0' guard runs. /usr/bin/ruby 2.6 settles each.
+def s110
+  a = [1, 2, 3].map { |x| begin; next x * 10 if x == 2; x; ensure; nil; end }
+  b = [1, 2, 3].map { |x| begin; raise "q" if x == 3; x; rescue; next -1; end }
+  c = [1, 2, 3].map { |x| begin; begin; next x * 10 if x == 2; ensure; nil; end; x; ensure; nil; end }
+  check("bn110a", a == [1, 20, 3] && b == [1, 2, -1] && c == [1, 20, 3])
+  log = []
+  d = [1, 2, 3].each { |x| begin; break x * 7 if x == 2; ensure; log << x; end }
+  check("bb110b", d == 14 && log == [1, 2])
+  check("pn110c", __FILE__ == $0 && $PROGRAM_NAME == $0)
+end
+
 s39() # SECTION-CALL 39
 s40() # SECTION-CALL 40
 s41() # SECTION-CALL 41
@@ -4814,5 +4829,6 @@ s106() # SECTION-CALL 106
 s107() # SECTION-CALL 107
 s108() # SECTION-CALL 108
 s109() # SECTION-CALL 109
+s110() # SECTION-CALL 110
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

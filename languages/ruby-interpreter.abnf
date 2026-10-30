@@ -11403,6 +11403,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // top-level break/next, which MRI turns into a LocalJumpError - ending
         // quietly is closer than ignoring it.
         var body = makeBody(items)
+        // $0 and $PROGRAM_NAME name the script being run. Twin of buildMain's in
+        // ruby-to-llvm-ir.abnf.
+        scopePut(rubyGlobals, "0", c.file)
+        scopePut(rubyGlobals, "PROGRAM_NAME", c.file)
         try {
             body()
         } catch (e) {
