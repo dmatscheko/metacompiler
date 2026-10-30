@@ -9790,9 +9790,12 @@ function js_jspromfn() {
     return jpFn
 }
 
-// Run the microtask queue to exhaustion. There are no timers and no I/O here, so
-// the one drain the emitter puts after the whole script is every event-loop turn
-// a program gets. A promise rejected with no reaction that has none once the queue
+// osQuery's local-zone answer k for a time t in seconds, under lib/js-builtins.js's
+// Date (emitJsbHost). Twin of js_jszone in abnf/jsrtjsprint.go.
+function js_jszone(k, t) { return osQuery(k, t) }
+
+// Run the microtask queue to exhaustion; the timers' later turns are the emitter's
+// (emitEventLoop). A promise rejected with no reaction that has none once the queue
 // is drained is node's unhandled rejection, raised here as an uncaught exception.
 // Twin of jsvUnhandled in abnf/jsrtjsprint.go.
 function js_jsdrain() {

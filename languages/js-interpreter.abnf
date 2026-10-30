@@ -4676,9 +4676,8 @@ NotFuncHead = :script(~~
         }
         return p
     }
-    // Run the microtask queue to exhaustion. There are no timers and no I/O here, so
-    // the one drain after the whole program is every event-loop turn it gets. A
-    // promise rejected with no reaction that has none once the queue is drained is
+    // Run the microtask queue to exhaustion; the timers' later turns are jsTimerLoop's.
+    // A promise rejected with no reaction that has none once the queue is drained is
     // node's unhandled rejection, raised as an uncaught exception. Twins: js_jsdrain in
     // abnf/jsrtjsprint.go and languages/lib/js-rt.metajs.
     function jsDrain() {
@@ -10634,7 +10633,7 @@ NotFuncHead = :script(~~
         for (var li = 0; li < ln.length; li++) { hoistNoteLex(ln[li], pos, cst) }
         if (cst) {
             cn = ln
-            for (var ci = 0; ci < cn.length; ci++) { jsConstNames[cn[ci]] = true }
+            for (var ci = 0; ci < cn.length; ci++) { scopePut(jsConstNames, cn[ci], true) }
         }
         return function() {
             var v = anytype // The initializer may be an array or an object.
@@ -12509,7 +12508,7 @@ NotFuncHead = :script(~~
     // the declaration being walked is one.
     function declIsConst(name) {
         if (declKinds.length == 0 || declKinds[declKinds.length - 1] != "const") { return false }
-        jsConstNames[name] = true
+        scopePut(jsConstNames, name, true)
         return true
     }
     function jsConstMark(names) {
@@ -12695,7 +12694,7 @@ NotFuncHead = :script(~~
             var ns = patNames(pat, [])
             for (var i = 0; i < ns.length; i++) {
                 hoistNoteLex(ns[i], pos, isConst)
-                if (isConst) { jsConstNames[ns[i]] = true }
+                if (isConst) { scopePut(jsConstNames, ns[i], true) }
             }
             if (isConst) { pat.cnames = ns }
             return pat
@@ -12939,12 +12938,19 @@ NotFuncHead = :script(~~
     // before an imported file's top level and before the program's. Twin of jsbLoad in
     // js-to-llvm-ir.abnf.
     var jsbWant = false
+    var jsTimerWant = false // Whether the program names a timer function.
+    var jsDateWant = false  // Whether it names Date or a timer: js-builtins.js's last part.
     var jsbDone = false
     function jsbRef(name) {
         if (name == "Set" || name == "Map" || name == "Array" || name == "isNaN" || name == "isFinite" ||
             name == "structuredClone" || name == "Reflect" || name == "WeakMap" || name == "WeakSet" ||
             name == "queueMicrotask" || name == "URIError" || name == "encodeURIComponent" || name == "encodeURI" ||
             name == "decodeURIComponent" || name == "decodeURI") { jsbWant = true }
+        if (name == "setTimeout" || name == "setInterval" || name == "clearTimeout" || name == "clearInterval") { jsTimerWant = true }
+        if (name == "Date" || jsTimerWant) {
+            jsbWant = true
+            jsDateWant = true
+        }
         if (name == "arguments") { argsWant = true }
         return name
     }
@@ -12952,6 +12958,7 @@ NotFuncHead = :script(~~
         if (!jsbWant || jsbDone) { return }
         jsbDone = true
         var text = load("lib/js-builtins.js")
+        if (!jsDateWant) { text = text.substring(0, text.indexOf("\n// ===== Date and the timers =====")) }
         var asg = c.parse(c.agrammar, text, null, "js-builtins.js")
         c.pushSource("js-builtins.js", text)
         jsKeyRaw = true
@@ -12959,7 +12966,19 @@ NotFuncHead = :script(~~
         jsKeyRaw = false
         c.popSource()
         var mod = popg()
+        // The two host services Date and the timers in js-builtins.js are built on:
+        // the wall clock in milliseconds, and osQuery's local-zone answers (kind 2 the
+        // offset east of UTC in seconds, 3 the abbreviation) for a time in seconds.
+        // Twins: emitJsbHost in the -to-llvm-ir.abnf.
+        scopePut(globalScope, "__jsClockMs", function() { return clockMicros() / 1000 })
+        scopePut(globalScope, "__jsZone", function(k, t) { return osQuery(k, t) })
         mod()
+    }
+    // The event loop's later turns: while a timer is pending, js-builtins.js's
+    // __timerTick runs the next one, and the microtasks it queued are drained.
+    function jsTimerLoop() {
+        if (!jsTimerWant || !hasOwn(globalScope, "__timerTick")) { return }
+        while (callWithThis(globalScope["__timerTick"], undefined, []) === true) { jsDrain() }
     }
 
     c.compile(c.asg)
@@ -12987,6 +13006,7 @@ NotFuncHead = :script(~~
         try {
             ret = runMainSnippet(entry, "Statement")
             jsDrain()
+            jsTimerLoop()
         } catch (e) {
             if (excIsUser(e)) { fail("uncaught exception: " + jsStr(e.v)) }
             throw e
@@ -12998,11 +13018,11 @@ NotFuncHead = :script(~~
         }
         try {
             ret = globalScope[entry]()
-            // The microtask queue is drained ONCE, after the whole program has run: this
-            // runtime has no timers and no I/O, so that is the only event-loop turn a
-            // program gets, and it is where every .then reaction and every resumption of
-            // an async body happens. The compiler half drains at the same point.
+            // The microtask queue is drained after the whole program has run - where
+            // every .then reaction and every resumption of an async body happens - and
+            // again after each timer. The compiler half does the same (emitEventLoop).
             jsDrain()
+            jsTimerLoop()
         } catch (e) {
             if (excIsUser(e)) { fail("uncaught exception: " + jsStr(e.v)) }
             throw e

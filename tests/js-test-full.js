@@ -1713,6 +1713,72 @@ function s142() {
     check("homesuper2", new D142().m() == "lit>p|k" && String(o3) == "o3:[object Object]")
 }
 
+// ===== SECTION 143: bindings named like Object.prototype members =====
+// `__proto__`, `constructor` and `toString` are ordinary identifiers: a const, a
+// parameter or a loop variable of that name binds like any other.
+function p143(__proto__, valueOf) { return __proto__ + valueOf }
+function s143() {
+    const __proto__ = 7
+    let constructor = 3
+    var out = []
+    for (const toString of [8, 9]) { out.push(toString) }
+    var err = ""
+    try { __proto__ = 1 } catch (e) { err = e.constructor.name }
+    check("protoname1", __proto__ + constructor == 10 && p143(1, 2) == 3 && out.join() == "8,9" && err == "TypeError")
+}
+
+// ===== SECTION 144: Date and the timers =====
+// A Date is a time value in UTC milliseconds; the local-time getters and the
+// constructor's component form go through the host's zone rules, so only their
+// round trip is pinned here. Timers run after the microtasks, earliest due first and
+// the earlier set first among equals, with the microtasks each one queues drained
+// before the next; the clock reads as if the time had passed.
+var log144 = []
+function s144() {
+    var d = new Date(Date.UTC(2020, 1, 29, 12, 30, 15, 250))
+    check("date1", d.getTime() == 1582979415250 && d.toISOString() == "2020-02-29T12:30:15.250Z" &&
+        d.toUTCString() == "Sat, 29 Feb 2020 12:30:15 GMT" && JSON.stringify({d: d}) == "{\"d\":\"2020-02-29T12:30:15.250Z\"}" &&
+        d.getUTCDay() == 6 && d.getUTCMonth() == 1 && d.getUTCHours() == 12)
+    check("date2", Date.parse("2020-02-29") == 1582934400000 && Date.parse("2020-02-29T12:30:15+05:30") == 1582959615000 &&
+        Date.parse("Sat, 29 Feb 2020 12:30:15 GMT") == 1582979415000 && isNaN(Date.parse("2020-13-01")) &&
+        new Date(-62198755200000).toISOString() == "-000001-01-01T00:00:00.000Z" &&
+        new Date(253402300800000).toISOString() == "+010000-01-01T00:00:00.000Z" && Date.UTC(99, 0) == 915148800000)
+    var bad = new Date(NaN)
+    var err = ""
+    try { bad.toISOString() } catch (e) { err = e.constructor.name + ":" + e.message }
+    check("date3", String(bad) == "Invalid Date" && err == "RangeError:Invalid time value" && bad.toJSON() === null &&
+        isNaN(new Date(8.64e15 + 1).getTime()) && new Date(1.9).getTime() == 1)
+    var loc = new Date(2020, 1, 29, 12, 30, 15, 250)
+    var off = loc.getTimezoneOffset()
+    check("date4", loc.getFullYear() == 2020 && loc.getMonth() == 1 && loc.getDate() == 29 && loc.getHours() == 12 &&
+        loc.getMinutes() == 30 && loc.getTime() == Date.UTC(2020, 1, 29, 12, 30, 15, 250) + off * 60000 &&
+        /^Sat Feb 29 2020 12:30:15 GMT[+-]\d{4} \(.+\)$/.test(String(loc)) && loc.toLocaleDateString() == "2/29/2020" &&
+        loc.toLocaleTimeString() == "12:30:15 PM")
+    var s = new Date(Date.UTC(2020, 0, 31))
+    s.setUTCMonth(1)
+    var s2 = new Date(Date.UTC(2020, 0, 1))
+    s2.setUTCHours(25, 61)
+    check("date5", s.toISOString() == "2020-03-02T00:00:00.000Z" && s2.toISOString() == "2020-01-02T02:01:00.000Z" &&
+        new Date(5) - new Date(2) == 3 && new Date(1) < new Date(2) && String(new Date(0)) == `${new Date(0)}` &&
+        (new Date(0) + "") == String(new Date(0)) && typeof Date.now() == "number" && new Date() instanceof Date)
+    var t0 = Date.now()
+    setTimeout(function () { log144.push("t20"); Promise.resolve().then(function () { log144.push("t20m") }) }, 20)
+    setTimeout(function () { log144.push("t0") }, 0)
+    var c = setTimeout(function () { log144.push("cleared") }, 5)
+    var n = 0
+    var iv = setInterval(function () { n = n + 1; log144.push("iv" + n); if (n == 2) { clearInterval(iv) } }, 8)
+    setTimeout(function (a, b) { log144.push(a + b) }, 1, "x", "y")
+    clearTimeout(c)
+    Promise.resolve().then(function () { log144.push("micro") })
+    // main() has returned by the time a timer runs: a failure reaches the exit code
+    // through exit(), as in SECTION 16.
+    setTimeout(function () {
+        var ok = log144.join() == "micro,t0,xy,iv1,iv2,t20,t20m" && Date.now() - t0 >= 50
+        check("timer1", ok)
+        if (!ok) { exit(1) }
+    }, 50)
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -1772,6 +1838,8 @@ function main() {
     s140() // SECTION-CALL 140
     s141() // SECTION-CALL 141
     s142() // SECTION-CALL 142
+    s143() // SECTION-CALL 143
+    s144() // SECTION-CALL 144
     println("full: " + checks + " checks, " + failures + " failures")
     return failures
 }

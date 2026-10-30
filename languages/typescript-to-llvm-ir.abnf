@@ -2584,6 +2584,8 @@ NotFuncHead = :script(~~
 
     // See the twin of this comment in js-to-llvm-ir.abnf.
     var jsbWant = false
+    var jsTimerWant = false // Whether the program names a timer function.
+    var jsDateWant = false  // Whether it names Date or a timer: js-builtins.js's last part.
     var jsbDone = false
     var jsAggWant = false // Whether the program names Promise or AggregateError.
     function jsbRef(name) {
@@ -2591,6 +2593,11 @@ NotFuncHead = :script(~~
             name == "structuredClone" || name == "Reflect" || name == "WeakMap" || name == "WeakSet" ||
             name == "queueMicrotask" || name == "URIError" || name == "encodeURIComponent" || name == "encodeURI" ||
             name == "decodeURIComponent" || name == "decodeURI") { jsbWant = true }
+        if (name == "setTimeout" || name == "setInterval" || name == "clearTimeout" || name == "clearInterval") { jsTimerWant = true }
+        if (name == "Date" || jsTimerWant) {
+            jsbWant = true
+            jsDateWant = true
+        }
         if (name == "Promise" || name == "AggregateError") { jsAggWant = true }
         return name
     }
@@ -2598,6 +2605,7 @@ NotFuncHead = :script(~~
         if (!jsbWant || jsbDone) { return }
         jsbDone = true
         var text = load("lib/js-builtins.js")
+        if (!jsDateWant) { text = text.substring(0, text.indexOf("\n// ===== Date and the timers =====")) }
         var asg = c.parse(c.agrammar, text, null, "js-builtins.js")
         c.pushSource("js-builtins.js", text)
         importDepth = importDepth + 1
@@ -7203,6 +7211,7 @@ NotFuncHead = :script(~~
                 callExt(b, "js_jsmath", [callExt(b, "js_scope_get", [curScopeV, emitStr(b, "Math")])])])
         // The JSON global (js_jsjson; lib/json.js in layer 2).
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "JSON"), callExt(b, "js_jsjson", [])])
+        if (jsbWant) { emitJsbHost(b) }
         // The Promise global: a function value, so `new Promise(exec)` constructs one and
         // `typeof Promise` is "function"; the statics resolve through js_jsmcall.
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "Promise"), callExt(b, "js_jspromfn", [])])
@@ -7234,18 +7243,65 @@ NotFuncHead = :script(~~
         if (mainIsSnippet(entry)) {
             curScopeV = sc // The snippet resolves names in the populated program scope.
             bm = emitMainSnippet(bm, entry, "Statement")
-            callExt(bm, "js_jsdrain", [])
+            bm = emitEventLoop(bm, sc)
             bm.NewRet(emitNum(bm, 0))
         } else {
             var mainV = callExt(bm, "js_scope_get", [sc, emitStr(bm, entry)])
             var argsV = callExt(bm, "js_arr_new", [])
             var mainR = jsCall(bm, mainV, hUndef, argsV)
-            // The microtask queue is drained ONCE, after the whole script has run: this
-            // runtime has no timers and no I/O, so that is the only event-loop turn a
-            // program will ever get.
-            callExt(bm, "js_jsdrain", [])
+            // See the twin of this comment in js-to-llvm-ir.abnf.
+            bm = emitEventLoop(bm, sc)
             bm.NewRet(mainR)
         }
+    }
+
+    // The two host services Date and the timers in lib/js-builtins.js are built on, as
+    // globals: __jsClockMs() the wall clock in milliseconds, and __jsZone(k, t)
+    // osQuery's local-zone answer k (2 the offset east of UTC in seconds, 3 the
+    // abbreviation) for a time t in seconds. A native build reads the clock with libc's
+    // gettimeofday (tv_usec is a 32-bit field on Darwin, so only its low half is read);
+    // llvm.Run cannot call libc and asks the Go twin (js_jsclockms). Twins: jsbLoad in
+    // the -interpreter.abnf.
+    var jsGtod = null
+    function emitJsbHost(b) {
+        var cidx = emitFunction([], makeReturn([function(bb) {
+            if (!nativeBuild) { return {b: bb, v: callExt(bb, "js_jsclockms", [])} }
+            var tvTy = llvm.types.NewArray(2, i64)
+            if (jsGtod == null) {
+                jsGtod = m.NewFunc("gettimeofday", llvm.types.I32, [llvm.ir.NewParam("", llvm.types.NewPointer(tvTy)),
+                                                                     llvm.ir.NewParam("", llvm.types.I8Ptr)])
+            }
+            var tv = bb.NewAlloca(tvTy)
+            bb.NewCall(jsGtod, [tv, llvm.constant.NewNull(llvm.types.I8Ptr)])
+            var i32z = llvm.constant.NewInt(llvm.types.I32, 0)
+            var secV = bb.NewLoad(i64, bb.NewGetElementPtr(tvTy, tv, [i32z, i32z]))
+            var usecW = bb.NewLoad(i64, bb.NewGetElementPtr(tvTy, tv, [i32z, llvm.constant.NewInt(llvm.types.I32, 1)]))
+            var usV = bb.NewAdd(bb.NewMul(secV, handle(1000000)), bb.NewSExt(bb.NewTrunc(usecW, llvm.types.I32), i64))
+            return {b: bb, v: callExt(bb, "js_div", [callExt(bb, "js_num_i", [usV]), callExt(bb, "js_num_i", [handle(1000)])])}
+        }]), false, false)
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "__jsClockMs"), callExt(b, "js_closure", [handle(cidx), curScopeV])])
+        var zidx = emitFunction(["k", "t"], makeReturn([function(bb) {
+            return {b: bb, v: callExt(bb, "js_jszone", [callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, "k")]),
+                                                        callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, "t")])])}
+        }]), false, false)
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "__jsZone"), callExt(b, "js_closure", [handle(zidx), curScopeV])])
+    }
+    // The event loop after the entry point: the microtask queue is drained, and while
+    // a timer is pending (a program that names one), lib/js-builtins.js's __timerTick
+    // runs the next one and the queue is drained again.
+    function emitEventLoop(b, sc) {
+        if (!jsTimerWant) {
+            callExt(b, "js_jsdrain", [])
+            return b
+        }
+        var loopB = curF.NewBlock("")
+        var exitB = curF.NewBlock("")
+        b.NewBr(loopB)
+        callExt(loopB, "js_jsdrain", [])
+        var tick = callExt(loopB, "js_scope_get", [sc, emitStr(loopB, "__timerTick")])
+        var ran = jsCall(loopB, tick, hUndef, callExt(loopB, "js_arr_new", []))
+        loopB.NewCondBr(truthy(loopB, ran), loopB, exitB)
+        return exitB
     }
 
     // ===== goja driver =====

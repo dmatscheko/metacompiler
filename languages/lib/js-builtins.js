@@ -1,6 +1,6 @@
 // js-builtins.js -- JAVASCRIPT, not MetaJS: the Set and Map classes, Array.from /
 // Array.of, isNaN, isFinite, structuredClone, Reflect, WeakMap / WeakSet,
-// queueMicrotask and the URI functions, written in the language itself and compiled
+// queueMicrotask, the URI functions, Date and the timers, written in the language itself and compiled
 // INTO a program by the js grammars, both halves (jsbLoad in js-interpreter.abnf and js-to-llvm-ir.abnf).
 // A program that names Set, Map, Array, isNaN, isFinite, structuredClone or Reflect gets this file in
 // front of it; one that does not pays nothing. Being one JavaScript source compiled by the same grammars is what
@@ -556,15 +556,20 @@ class WeakSet extends __Weak {
     toString() { return "[object WeakSet]" }
 }
 
-// queueMicrotask(f): f runs as a microtask, after the running code and in order with
-// the promise reactions queued before it.
-function queueMicrotask(f) {
+// node's TypeError for a callback argument that is not a function.
+function __cbCheck(f) {
     if (typeof f !== "function") {
         var t = typeof f
         var got = (f === undefined || f === null) ? String(f)
             : (t === "object" ? "an instance of Object" : "type " + t + " (" + (t === "string" ? "'" + f + "'" : String(f)) + ")")
         throw new TypeError("The \"callback\" argument must be of type function. Received " + got)
     }
+}
+
+// queueMicrotask(f): f runs as a microtask, after the running code and in order with
+// the promise reactions queued before it.
+function queueMicrotask(f) {
+    __cbCheck(f)
     Promise.resolve().then(function () { f() })
 }
 
@@ -658,3 +663,522 @@ function encodeURIComponent(v) { return __uriEncode(v, "") }
 function encodeURI(v) { return __uriEncode(v, __uriReserved) }
 function decodeURIComponent(v) { return __uriDecode(v, "") }
 function decodeURI(v) { return __uriDecode(v, __uriReserved) }
+
+// ===== Date and the timers =====
+// Compiled into a program only when it names Date or a timer function: the loaders
+// cut the file here otherwise.
+
+// Date (ECMA-262 21.4): a time value, milliseconds since the epoch in UTC, or NaN
+// for an invalid date. Local time comes from the host's zone rules through
+// __jsZone(kind, seconds) - kind 2 the offset east of UTC in seconds, 3 the zone's
+// abbreviation - and the clock from __jsClockMs(); the engine provides both. Strings
+// and toLocale* are node 24's in the en-US locale.
+var __msDay = 86400000
+var __dayNames = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
+var __monNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+var __monLong = ["january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december"]
+// The long name V8 shows for a zone, by the abbreviation the host reports; another
+// zone shows its abbreviation.
+var __zoneNames = {UTC: "Coordinated Universal Time", GMT: "Greenwich Mean Time", BST: "British Summer Time",
+    CET: "Central European Standard Time", CEST: "Central European Summer Time",
+    EET: "Eastern European Standard Time", EEST: "Eastern European Summer Time",
+    WET: "Western European Standard Time", WEST: "Western European Summer Time",
+    EST: "Eastern Standard Time", EDT: "Eastern Daylight Time", CST: "Central Standard Time",
+    CDT: "Central Daylight Time", MST: "Mountain Standard Time", MDT: "Mountain Daylight Time",
+    PST: "Pacific Standard Time", PDT: "Pacific Daylight Time", AKST: "Alaska Standard Time",
+    AKDT: "Alaska Daylight Time", HST: "Hawaii-Aleutian Standard Time", JST: "Japan Standard Time",
+    KST: "Korean Standard Time", IST: "India Standard Time", MSK: "Moscow Standard Time",
+    AEST: "Australian Eastern Standard Time", AEDT: "Australian Eastern Daylight Time",
+    NZST: "New Zealand Standard Time", NZDT: "New Zealand Daylight Time"}
+// Reading Symbol.toPrimitive is what makes the engine consult a Date's
+// [Symbol.toPrimitive] in `+`, `==` and the other ToPrimitive sites.
+var __dateTP = Symbol.toPrimitive
+// Elapsed time the timers skipped instead of waiting (__timerTick).
+var __clockSkew = 0
+
+function __dInt(v) {
+    var n = Number(v)
+    if (n !== n) { return 0 }
+    return Math.trunc(n)
+}
+function __dMod(a, b) {
+    var r = a % b
+    return r < 0 ? r + b : r
+}
+// Days from 1970-01-01 to y-m-d of the proleptic Gregorian calendar, m in 1..12.
+function __daysFromCivil(y, m, d) {
+    if (m <= 2) { y = y - 1 }
+    var era = Math.floor(y / 400)
+    var yoe = y - era * 400
+    var mp = (m + 9) % 12
+    var doy = Math.floor((153 * mp + 2) / 5) + d - 1
+    var doe = yoe * 365 + Math.floor(yoe / 4) - Math.floor(yoe / 100) + doy
+    return era * 146097 + doe - 719468
+}
+// The calendar fields of a time value (UTC or already shifted to local time).
+function __dFields(t) {
+    var days = Math.floor(t / __msDay)
+    var ms = t - days * __msDay
+    var z = days + 719468
+    var era = Math.floor(z / 146097)
+    var doe = z - era * 146097
+    var yoe = Math.floor((doe - Math.floor(doe / 1460) + Math.floor(doe / 36524) - Math.floor(doe / 146096)) / 365)
+    var doy = doe - (365 * yoe + Math.floor(yoe / 4) - Math.floor(yoe / 100))
+    var mp = Math.floor((5 * doy + 2) / 153)
+    var d = doy - Math.floor((153 * mp + 2) / 5) + 1
+    var m = mp < 10 ? mp + 3 : mp - 9
+    var y = yoe + era * 400 + (m <= 2 ? 1 : 0)
+    return {y: y, mo: m - 1, d: d, wd: __dMod(days + 4, 7), h: Math.floor(ms / 3600000),
+        mi: Math.floor(ms / 60000) % 60, s: Math.floor(ms / 1000) % 60, ms: ms % 1000}
+}
+// MakeDay and MakeTime combined (21.4.1.28-29), every argument already a number.
+function __dMake(y, mo, d, h, mi, s, ms) {
+    var a = [y, mo, d, h, mi, s, ms]
+    for (var i = 0; i < 7; i++) { if (a[i] !== a[i] || a[i] === Infinity || a[i] === -Infinity) { return NaN } }
+    y = Math.trunc(y)
+    mo = Math.trunc(mo)
+    var ym = y + Math.floor(mo / 12)
+    var day = __daysFromCivil(ym, __dMod(mo, 12) + 1, 1) + Math.trunc(d) - 1
+    return day * __msDay + Math.trunc(h) * 3600000 + Math.trunc(mi) * 60000 + Math.trunc(s) * 1000 + Math.trunc(ms)
+}
+function __dClip(t) {
+    if (t !== t || Math.abs(t) > 8.64e15) { return NaN }
+    return Math.trunc(t) + 0
+}
+// The local zone's offset in milliseconds at UTC time t.
+function __dOff(t) { return __jsZone(2, Math.floor(t / 1000)) * 1000 }
+function __dLocal(t) { return t + __dOff(t) }
+// UTC(t) for a local time lt. Near a transition the offsets 12 hours either side
+// differ: a local time both of them give (a repeated hour) is the earlier instant,
+// one neither gives (a skipped hour) is read with the offset from before.
+function __dUTC(lt) {
+    if (lt !== lt) { return NaN }
+    var oa = __dOff(lt - 43200000)
+    var ob = __dOff(lt + 43200000)
+    if (oa === ob) { return lt - __dOff(lt - oa) }
+    var va = __dOff(lt - oa) === oa
+    var vb = __dOff(lt - ob) === ob
+    if (va && vb) { return lt - Math.max(oa, ob) }
+    if (vb && !va) { return lt - ob }
+    return lt - oa
+}
+function __pad(n, w) {
+    var s = String(Math.abs(n))
+    while (s.length < w) { s = "0" + s }
+    return n < 0 ? "-" + s : s
+}
+function __dYear(y) { return y < 0 ? "-" + __pad(-y, 4) : __pad(y, 4) }
+// "GMT+0100 (Central European Standard Time)" for UTC time t.
+function __dZone(t) {
+    var off = __jsZone(2, Math.floor(t / 1000))
+    var a = Math.abs(off)
+    var zs = (off < 0 ? "-" : "+") + __pad(Math.floor(a / 3600), 2) + __pad(Math.floor(a / 60) % 60, 2)
+    var ab = __jsZone(3, Math.floor(t / 1000))
+    // Before standard time the host says "LMT"; V8 names the zone's standard time.
+    if (ab === "LMT") { ab = __jsZone(3, __jsZone(2, 946684800) <= __jsZone(2, 962409600) ? 946684800 : 962409600) }
+    var nm = __zoneNames[ab]
+    return "GMT" + zs + " (" + (nm === undefined ? ab : nm) + ")"
+}
+function __dIsDigits(s, from, n) {
+    if (from + n > s.length) { return false }
+    for (var i = from; i < from + n; i++) {
+        var c = s.charCodeAt(i)
+        if (c < 48 || c > 57) { return false }
+    }
+    return true
+}
+// Date.parse: the date-time string format (21.4.1.32) - a date-only form is UTC, a
+// date-time without an offset local time - then the forms toString, toUTCString and
+// the common "Month day, year [time]" spellings make.
+function __dParse(str) {
+    var s = String(str).trim()
+    var t = __dParseIso(s)
+    if (t === t) { return t }
+    return __dParseLoose(s)
+}
+function __dParseIso(s) {
+    var i = 0
+    var y = 0
+    if ((s.charAt(0) === "+" || s.charAt(0) === "-") && __dIsDigits(s, 1, 6)) {
+        y = Number(s.substring(1, 7))
+        if (s.charAt(0) === "-") {
+            if (y === 0) { return NaN }
+            y = -y
+        }
+        i = 7
+    } else if (__dIsDigits(s, 0, 4)) {
+        y = Number(s.substring(0, 4))
+        i = 4
+    } else { return NaN }
+    var mo = 1
+    var d = 1
+    if (s.charAt(i) === "-") {
+        if (!__dIsDigits(s, i + 1, 2)) { return NaN }
+        mo = Number(s.substring(i + 1, i + 3))
+        i = i + 3
+        if (s.charAt(i) === "-") {
+            if (!__dIsDigits(s, i + 1, 2)) { return NaN }
+            d = Number(s.substring(i + 1, i + 3))
+            i = i + 3
+        }
+    }
+    if (mo < 1 || mo > 12 || d < 1 || d > 31) { return NaN }
+    var h = 0
+    var mi = 0
+    var sec = 0
+    var ms = 0
+    var local = false
+    var off = 0
+    if (i < s.length) {
+        if (s.charAt(i) !== "T" && s.charAt(i) !== "t" && s.charAt(i) !== " ") { return NaN }
+        if (!__dIsDigits(s, i + 1, 2) || s.charAt(i + 3) !== ":" || !__dIsDigits(s, i + 4, 2)) { return NaN }
+        h = Number(s.substring(i + 1, i + 3))
+        mi = Number(s.substring(i + 4, i + 6))
+        i = i + 6
+        if (s.charAt(i) === ":") {
+            if (!__dIsDigits(s, i + 1, 2)) { return NaN }
+            sec = Number(s.substring(i + 1, i + 3))
+            i = i + 3
+            if (s.charAt(i) === "." || s.charAt(i) === ",") {
+                var j = i + 1
+                while (__dIsDigits(s, j, 1)) { j = j + 1 }
+                if (j === i + 1) { return NaN }
+                ms = Math.floor(Number("0." + s.substring(i + 1, j)) * 1000)
+                i = j
+            }
+        }
+        if (h > 24 || mi > 59 || sec > 59 || (h === 24 && (mi > 0 || sec > 0 || ms > 0))) { return NaN }
+        local = true
+        if (s.charAt(i) === "Z" || s.charAt(i) === "z") {
+            local = false
+            i = i + 1
+        } else if (s.charAt(i) === "+" || s.charAt(i) === "-") {
+            if (!__dIsDigits(s, i + 1, 2) || s.charAt(i + 3) !== ":" || !__dIsDigits(s, i + 4, 2)) { return NaN }
+            off = (Number(s.substring(i + 1, i + 3)) * 60 + Number(s.substring(i + 4, i + 6))) * 60000
+            if (s.charAt(i) === "-") { off = -off }
+            local = false
+            i = i + 6
+        }
+        if (i !== s.length) { return NaN }
+    }
+    var t = __dMake(y, mo - 1, d, h, mi, sec, ms)
+    if (local) { return __dClip(__dUTC(t)) }
+    return __dClip(t - off)
+}
+function __dParseLoose(s) {
+    var words = []
+    var cur = ""
+    for (var i = 0; i <= s.length; i++) {
+        var ch = i < s.length ? s.charAt(i) : " "
+        if (ch === " " || ch === "," || ch === "\t") {
+            if (cur !== "") { words.push(cur) }
+            cur = ""
+        } else if (ch === "(") {
+            if (cur !== "") { words.push(cur) }
+            cur = ""
+            while (i < s.length && s.charAt(i) !== ")") { i = i + 1 }
+        } else { cur = cur + ch }
+    }
+    var y = NaN
+    var mo = -1
+    var d = NaN
+    var h = 0
+    var mi = 0
+    var sec = 0
+    var off = NaN
+    var pm = -1
+    var nums = []
+    for (var k = 0; k < words.length; k++) {
+        var w = words[k]
+        var lw = w.toLowerCase()
+        if (w.indexOf(":") > 0) {
+            var parts = w.split(":")
+            h = Number(parts[0])
+            mi = Number(parts[1])
+            sec = parts.length > 2 ? Number(parts[2]) : 0
+            if (h !== h || mi !== mi || sec !== sec) { return NaN }
+            continue
+        }
+        if (lw === "am" || lw === "pm") { pm = lw === "pm" ? 1 : 0; continue }
+        if (lw === "gmt" || lw === "utc" || lw === "z") { if (off !== off) { off = 0 } continue }
+        if ((w.charAt(0) === "+" || w.charAt(0) === "-") && w.length > 1) {
+            var z = w.substring(0, 3) === "GMT" ? w.substring(3) : w
+            var zn = Number(z.substring(1).replace(":", ""))
+            if (zn !== zn) { return NaN }
+            off = (Math.floor(zn / 100) * 60 + zn % 100) * 60000
+            if (z.charAt(0) === "-") { off = -off }
+            continue
+        }
+        if (lw.substring(0, 3) === "gmt" && (w.charAt(3) === "+" || w.charAt(3) === "-")) {
+            var zg = Number(w.substring(4).replace(":", ""))
+            off = (Math.floor(zg / 100) * 60 + zg % 100) * 60000
+            if (w.charAt(3) === "-") { off = -off }
+            continue
+        }
+        if (w.indexOf("/") > 0) {
+            var sp = w.split("/")
+            if (sp.length !== 3) { return NaN }
+            mo = Number(sp[0]) - 1
+            d = Number(sp[1])
+            y = Number(sp[2])
+            continue
+        }
+        var mon = -1
+        for (var mm = 0; mm < 12 && lw.length >= 3; mm++) { if (__monLong[mm].substring(0, lw.length) === lw) { mon = mm } }
+        if (mon >= 0) { mo = mon; continue }
+        var isDay = false
+        for (var dd = 0; dd < 7; dd++) { if (lw.substring(0, 3) === __dayNames[dd].toLowerCase()) { isDay = true } }
+        if (isDay) { continue }
+        var n = Number(w)
+        if (n !== n) { return NaN }
+        nums.push(n)
+    }
+    for (var q = 0; q < nums.length; q++) {
+        if (d !== d && nums[q] <= 31 && mo >= 0) { d = nums[q] }
+        else if (y !== y) { y = nums[q] }
+        else { return NaN }
+    }
+    if (mo < 0 || y !== y) { return NaN }
+    if (d !== d) { d = 1 }
+    if (y >= 0 && y <= 49) { y = y + 2000 } else if (y >= 50 && y <= 99) { y = y + 1900 }
+    if (pm === 1 && h < 12) { h = h + 12 }
+    if (pm === 0 && h === 12) { h = 0 }
+    var t = __dMake(y, mo, d, h, mi, sec, 0)
+    if (off === off) { return __dClip(t - off) }
+    return __dClip(__dUTC(t))
+}
+function __dArgs(args, from, n, dflt) {
+    var out = []
+    for (var i = 0; i < n; i++) { out.push(from + i < args.length ? Number(args[from + i]) : dflt[i]) }
+    return out
+}
+
+class Date {
+    constructor(...a) {
+        var t = NaN
+        if (a.length === 0) { t = Date.now() }
+        else if (a.length === 1) {
+            var v = a[0]
+            if (v instanceof Date) { t = v.__t }
+            else {
+                if (typeof v === "object" && v !== null) { v = v.valueOf() }
+                if (typeof v === "object" && v !== null) { v = String(v) }
+                t = typeof v === "string" ? __dParse(v) : __dClip(Number(v))
+            }
+        } else {
+            var f = __dArgs(a, 0, 7, [NaN, 0, 1, 0, 0, 0, 0])
+            var y = f[0]
+            if (y === y) {
+                var yi = Math.trunc(y)
+                if (yi >= 0 && yi <= 99) { y = 1900 + yi }
+            }
+            t = __dClip(__dUTC(__dMake(y, f[1], f[2], f[3], f[4], f[5], f[6])))
+        }
+        this.__t = t
+    }
+    static now() { return Math.floor(__jsClockMs() + __clockSkew) }
+    static parse(s) { return __dParse(s) }
+    static UTC(...a) {
+        var f = __dArgs(a, 0, 7, [NaN, 0, 1, 0, 0, 0, 0])
+        var y = f[0]
+        if (y === y) {
+            var yi = Math.trunc(y)
+            if (yi >= 0 && yi <= 99) { y = 1900 + yi }
+        }
+        return __dClip(__dMake(y, f[1], f[2], f[3], f[4], f[5], f[6]))
+    }
+    getTime() { return this.__t }
+    valueOf() { return this.__t }
+    __f(utc) { return __dFields(utc ? this.__t : __dLocal(this.__t)) }
+    __get(utc, k) {
+        if (this.__t !== this.__t) { return NaN }
+        return this.__f(utc)[k]
+    }
+    getFullYear() { return this.__get(false, "y") }
+    getMonth() { return this.__get(false, "mo") }
+    getDate() { return this.__get(false, "d") }
+    getDay() { return this.__get(false, "wd") }
+    getHours() { return this.__get(false, "h") }
+    getMinutes() { return this.__get(false, "mi") }
+    getSeconds() { return this.__get(false, "s") }
+    getMilliseconds() { return this.__get(false, "ms") }
+    getUTCFullYear() { return this.__get(true, "y") }
+    getUTCMonth() { return this.__get(true, "mo") }
+    getUTCDate() { return this.__get(true, "d") }
+    getUTCDay() { return this.__get(true, "wd") }
+    getUTCHours() { return this.__get(true, "h") }
+    getUTCMinutes() { return this.__get(true, "mi") }
+    getUTCSeconds() { return this.__get(true, "s") }
+    getUTCMilliseconds() { return this.__get(true, "ms") }
+    getTimezoneOffset() {
+        if (this.__t !== this.__t) { return NaN }
+        return -Math.trunc(__dOff(this.__t) / 60000)
+    }
+    setTime(t) {
+        this.__t = __dClip(Number(t))
+        return this.__t
+    }
+    // The setters: fields from `at` on (0 year .. 6 ms) replaced by args, the rest
+    // kept, in local time or UTC. setFullYear starts an invalid date from +0.
+    __set(utc, at, args) {
+        var n = args.length
+        if (n === 0) { n = 1 }
+        var vals = []
+        for (var i = 0; i < n; i++) { vals.push(Number(args[i])) }
+        var t = this.__t
+        var lt = utc ? t : __dLocal(t)
+        if (t !== t) {
+            if (at !== 0) { return NaN }
+            lt = 0
+        }
+        var f = __dFields(lt)
+        var cur = [f.y, f.mo, f.d, f.h, f.mi, f.s, f.ms]
+        for (var j = 0; j < n && at + j < 7; j++) { cur[at + j] = vals[j] }
+        var nt = __dMake(cur[0], cur[1], cur[2], cur[3], cur[4], cur[5], cur[6])
+        this.__t = __dClip(utc ? nt : __dUTC(nt))
+        return this.__t
+    }
+    setFullYear(...a) { return this.__set(false, 0, a.slice(0, 3)) }
+    setMonth(...a) { return this.__set(false, 1, a.slice(0, 2)) }
+    setDate(...a) { return this.__set(false, 2, a.slice(0, 1)) }
+    setHours(...a) { return this.__set(false, 3, a.slice(0, 4)) }
+    setMinutes(...a) { return this.__set(false, 4, a.slice(0, 3)) }
+    setSeconds(...a) { return this.__set(false, 5, a.slice(0, 2)) }
+    setMilliseconds(...a) { return this.__set(false, 6, a.slice(0, 1)) }
+    setUTCFullYear(...a) { return this.__set(true, 0, a.slice(0, 3)) }
+    setUTCMonth(...a) { return this.__set(true, 1, a.slice(0, 2)) }
+    setUTCDate(...a) { return this.__set(true, 2, a.slice(0, 1)) }
+    setUTCHours(...a) { return this.__set(true, 3, a.slice(0, 4)) }
+    setUTCMinutes(...a) { return this.__set(true, 4, a.slice(0, 3)) }
+    setUTCSeconds(...a) { return this.__set(true, 5, a.slice(0, 2)) }
+    setUTCMilliseconds(...a) { return this.__set(true, 6, a.slice(0, 1)) }
+    toISOString() {
+        if (this.__t !== this.__t) { throw new RangeError("Invalid time value") }
+        var f = this.__f(true)
+        var ys = (f.y >= 0 && f.y <= 9999) ? __pad(f.y, 4) : (f.y < 0 ? "-" : "+") + __pad(Math.abs(f.y), 6)
+        return ys + "-" + __pad(f.mo + 1, 2) + "-" + __pad(f.d, 2) + "T" + __pad(f.h, 2) + ":" + __pad(f.mi, 2) + ":" +
+            __pad(f.s, 2) + "." + __pad(f.ms, 3) + "Z"
+    }
+    toJSON(k) { return this.__t !== this.__t ? null : this.toISOString() }
+    toDateString() {
+        if (this.__t !== this.__t) { return "Invalid Date" }
+        var f = this.__f(false)
+        return __dayNames[f.wd] + " " + __monNames[f.mo] + " " + __pad(f.d, 2) + " " + __dYear(f.y)
+    }
+    toTimeString() {
+        if (this.__t !== this.__t) { return "Invalid Date" }
+        var f = this.__f(false)
+        return __pad(f.h, 2) + ":" + __pad(f.mi, 2) + ":" + __pad(f.s, 2) + " " + __dZone(this.__t)
+    }
+    toString() {
+        if (this.__t !== this.__t) { return "Invalid Date" }
+        return this.toDateString() + " " + this.toTimeString()
+    }
+    toUTCString() {
+        if (this.__t !== this.__t) { return "Invalid Date" }
+        var f = this.__f(true)
+        return __dayNames[f.wd] + ", " + __pad(f.d, 2) + " " + __monNames[f.mo] + " " + __dYear(f.y) + " " +
+            __pad(f.h, 2) + ":" + __pad(f.mi, 2) + ":" + __pad(f.s, 2) + " GMT"
+    }
+    toGMTString() { return this.toUTCString() }
+    toLocaleDateString() {
+        if (this.__t !== this.__t) { return "Invalid Date" }
+        var f = this.__f(false)
+        // A year before 1 shows as the era's: 2 BC for year -1.
+        return (f.mo + 1) + "/" + f.d + "/" + (f.y <= 0 ? 1 - f.y : f.y)
+    }
+    toLocaleTimeString() {
+        if (this.__t !== this.__t) { return "Invalid Date" }
+        var f = this.__f(false)
+        var h12 = f.h % 12 === 0 ? 12 : f.h % 12
+        return h12 + ":" + __pad(f.mi, 2) + ":" + __pad(f.s, 2) + (f.h < 12 ? " AM" : " PM")
+    }
+    toLocaleString() {
+        if (this.__t !== this.__t) { return "Invalid Date" }
+        return this.toLocaleDateString() + ", " + this.toLocaleTimeString()
+    }
+    ["__#@toPrimitive"](hint) {
+        if (hint !== "string" && hint !== "number" && hint !== "default") { throw new TypeError("Invalid hint: " + hint) }
+        if (hint === "number") { return this.__t }
+        return this.toString()
+    }
+}
+
+// setTimeout / setInterval / clearTimeout / clearInterval. A timer is due `delay`
+// milliseconds (at least 1) after the LOOP TIME, which, as libuv's, is read when the
+// first timer is set and again as each timer runs - so the timers one turn sets are
+// ordered by their delays alone. The engine calls __timerTick once the microtask
+// queue is empty: it runs the earliest due timer (the earlier set first among
+// equals) and answers whether one ran. Nothing waits: the clock is moved on to the
+// timer's due time instead (__clockSkew), so the program sees the time pass.
+var __timers = []
+var __timerSeq = 0
+var __loopNow = -1
+function __timerAdd(f, delay, args, repeat) {
+    __cbCheck(f)
+    var ms = Number(delay)
+    if (!(ms >= 1 && ms <= 2147483647)) { ms = 1 }
+    ms = Math.trunc(ms)
+    if (__loopNow < 0) { __loopNow = Date.now() }
+    __timerSeq = __timerSeq + 1
+    var tm = new __Timeout(__timerSeq, f, ms, args, repeat)
+    __timers.push(tm)
+    return tm
+}
+class __Timeout {
+    constructor(id, f, ms, args, repeat) {
+        this.__id = id
+        this.__f = f
+        this.__ms = ms
+        this.__args = args
+        this.__repeat = repeat
+        this.__due = __loopNow + ms
+        this.__seq = id
+    }
+    ref() { return this }
+    unref() { return this }
+    hasRef() { return true }
+    refresh() {
+        this.__due = __loopNow + this.__ms
+        return this
+    }
+    ["__#@toPrimitive"](hint) { return this.__id }
+}
+function setTimeout(f, delay, ...args) { return __timerAdd(f, delay, args, false) }
+function setInterval(f, delay, ...args) { return __timerAdd(f, delay, args, true) }
+function __timerClear(h) {
+    for (var i = 0; i < __timers.length; i++) {
+        var tm = __timers[i]
+        if (tm === h || (typeof h === "number" && tm.__id === h) || (typeof h === "string" && String(tm.__id) === h)) {
+            __timers.splice(i, 1)
+            return
+        }
+    }
+}
+function clearTimeout(h) { __timerClear(h) }
+function clearInterval(h) { __timerClear(h) }
+function __timerTick() {
+    if (__timers.length === 0) { return false }
+    var at = 0
+    for (var i = 1; i < __timers.length; i++) {
+        var a = __timers[i]
+        var b = __timers[at]
+        if (a.__due < b.__due || (a.__due === b.__due && a.__seq < b.__seq)) { at = i }
+    }
+    var tm = __timers[at]
+    var now = Date.now()
+    if (tm.__due > now) {
+        __clockSkew = __clockSkew + (tm.__due - now)
+        now = tm.__due
+    }
+    __loopNow = now
+    if (tm.__repeat) {
+        __timerSeq = __timerSeq + 1
+        tm.__seq = __timerSeq
+        tm.__due = now + tm.__ms
+    } else {
+        __timers.splice(at, 1)
+    }
+    tm.__f(...tm.__args)
+    return true
+}

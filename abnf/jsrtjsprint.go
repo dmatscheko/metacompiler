@@ -29,6 +29,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf16"
 	"unicode/utf8"
 )
@@ -5349,6 +5350,17 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 			}
 		}
 		return rt.wrapStr(rt.typeOf(v))
+	}
+
+	// The host services under lib/js-builtins.js's Date and timers (emitJsbHost):
+	// js_jsclockms() the wall clock in milliseconds, js_jszone(k, t) osQuery's
+	// local-zone answer k for a time t in seconds. js_jszone's twin is in
+	// languages/lib/js-rt.metajs; a native build reads the clock itself.
+	m["js_jsclockms"] = func(a []uint64) uint64 {
+		return w(float64(time.Now().UnixMicro()) / 1000)
+	}
+	m["js_jszone"] = func(a []uint64) uint64 {
+		return w(osQuery(int(rt.toNumber(u(a[0]))), rt.toNumber(u(a[1]))))
 	}
 
 	// js_jsprintfn("println"|"print") answers the host FUNCTION VALUE the grammar
