@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-875** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-876** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -66,15 +66,13 @@ its report; anything structural there is a CORE ticket.
 
 # RB — Ruby
 
-### T-872 ruby: binary case mapping, re-encode back to UTF-8 in place, public over inherited private, module_eval · P3 · RB · IN PROGRESS (RB worker, round 27) [V RB worker]
-Oracle LC_ALL=en_US.UTF-8 /usr/bin/ruby 2.6. (1) WRONG: `"\xFFAb".b.upcase` → `"\xFFAB"`; interp `"\x8AB"`, llvm.Run/native
-`"xAB"` (the byte is case-mapped as U+00FF; binary strings map ASCII only). (2) `force_encoding("UTF-8")` on a binary box
-with valid UTF-8 bytes returns a new String, so an alias keeps ASCII-8BIT (oracle UTF-8). (3) compiler: `public :m` over an
-inherited private method — `D.new.d` raises a private-method NoMethodError (oracle 4; interp right). (4) `Module#module_eval`
-missing in both halves. (5) the RB worker saw `def er; yield; rescue ArgumentError => e; [e.class]; end; er { raise
-ArgumentError, "q" }` fail ("unknown name: e" interp, NameError "in block" compiler) inside its section files
-(scratchpad only126.rb / only127.rb / only128.rb); the isolated form agrees on all legs — isolate the context first.
-(6) `[-Float::NAN].pack("E")` drops the NaN sign bit (layer 2 cannot read it).
+### T-875 ruby: frozen binary strings, super with no superclass method, class_eval block gaps (compiler) · P3 · RB · OPEN [V RB worker]
+Oracle LC_ALL=en_US.UTF-8 /usr/bin/ruby 2.6. (1) WRONG: `"\xC3\xA9".b.freeze` returns an unfrozen copy in every engine
+(`frozen?` false, `force_encoding` raises no FrozenError). (2) `super` in a top-level def with no superclass method, inside
+`rescue NoMethodError` → oracle `[6, NoMethodError]`; interp aborts "super called outside of a method", compiler exits 1
+silently. (3) compiler only (interp right): inside a class_eval/module_eval block, `include M` raises "undefined method
+`include'", a bare `private` before a def raises NameError; and `M.module_eval { def m2 }` followed by a later static
+`include M` in a class leaves m2 missing (NoMethodError).
 
 # JS — JavaScript and TypeScript
 
@@ -137,7 +135,7 @@ for a dereference.
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-874 bash: declare -g, top-level local, readonly on read/printf -v/let, remaining arena growth · P2 · SH · OPEN [V SH worker]
+### T-874 bash: declare -g, top-level local, readonly on read/printf -v/let, remaining arena growth · P2 · SH · IN PROGRESS (SH worker, round 18) [V SH worker]
 bash 5.3, both halves. WRONG: `x=1; f(){ local x=2; declare -g x=3; echo $x; }; f; echo $x` → bash `2`/`3`, ours `3`/`1`
 (also under a prefix binding). WRONG: `local y=5` at top level → bash "local: can only be used in a function", status 1,
 y unset; ours sets y, status 0. readonly is not enforced by `read`, `printf -v`, `mapfile`, `let`/`(( ))`, `${v:=w}`.
@@ -928,6 +926,7 @@ T-867 bash: a prefix assignment is visible while the command's own words expand 
 T-864 ruby: encoding and module leftovers — DONE 9e2eeb10 (hash keys equal across encodings in all engines; private/protected_instance_methods and private in module bodies; nested names no longer leak globally, body constants resolve lexically, module bodies run after their methods install; float pack directives; String#encode with MRI's error classes and replace options; in-place re-encoding seen through aliases — Go twin forwards jsRStr→jsRBin, append loop −0.5%)
 T-868 kotlin: nested names leak globally; builtin qualifiedName; type-blind receiver rule — DONE de73477b (receiver rule checks applicability by named args and builtin argument types — the regression fixed, arguments evaluated once; nested names bound globally only when no top-level declaration claims them; builtin KClass names per stdlib; class and superclass companions are implicit receivers. DECLINED: the " (Kotlin reflection is not available)" suffix when printing a KClass — it depends on whether kotlin-reflect is on the JVM classpath, not on the language)
 T-871 bash: prefix assignments with declaration builtins, local, unset, arrays, readonly; native arena growth — PARTIAL 6fc7fc4b — prefix + declaration builtins (PrefixDecl), += prefixes, function prefix bindings as the function's frame (local inherits, unset reveals the caller's, hides arrays), readonly refused on assignment/prefix/local/declare/unset/for; per-statement arena release: 300k-pass loops 52–199 MB → 3.7–3.8 MB; bash bench +0.77%. Compiler lexical attributes under a prefix (n=4 f keeps -i/-u) recorded as a compile-time-attribute divergence in manual 7.9. Rest filed as T-874
+T-872 ruby: binary case mapping, re-encode back to UTF-8 in place, public over inherited private, module_eval — DONE fb23db4d (binary strings case-map ASCII only and their bang methods mutate in place; force_encoding back to UTF-8 in place through aliases; compiler public :m over an inherited or mixed-in private method; module_eval/class_eval/class_exec with a block; the real trigger of the rescue case was 'rescue X => e' followed by a line starting with '[' parsed as e[...] — fixed with SameLine TIndex. DECLINED: [-Float::NAN].pack("E") sign bit — no engine can read a NaN's sign (MetaJS has no bit access, manual 7.7; go-math.go documents the same), and a new sign-bit primitive in all three host engines for negative-NaN packing alone is not worth the shared-engine change; the string form of module_eval needs a run-time parser in the compiled half)
 
 # Settled — do not re-open
 
