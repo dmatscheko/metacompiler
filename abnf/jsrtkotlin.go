@@ -1571,16 +1571,23 @@ func init() {
 				}
 				// A QUALIFIED type name - `is Shape.Circle`, which is how a NESTED
 				// class is spelled from outside its owner, and the shape a sealed
-				// hierarchy is normally written in. A descriptor is registered under
-				// its SIMPLE name, so the qualifier is dropped - the same convention
-				// this subset applies to packages and imports; the twin is kIsType in
-				// kotlin-interpreter.abnf.
+				// hierarchy is normally written in. A class of the simple name in
+				// v's hierarchy decides by its binary name (ktDescQual); otherwise
+				// the qualifier is a package, dropped as this subset drops packages
+				// and imports. The twin is kIsType in kotlin-interpreter.abnf.
 				qt := rt.toString(u(a[1]))
 				if i := strings.IndexByte(qt, '<'); i >= 0 {
 					qt = qt[:i]
 				}
 				bare := strings.TrimSuffix(qt, "?")
 				if i := strings.LastIndexByte(bare, '.'); i >= 0 {
+					if o, isObj := v.(*jsObject); isObj {
+						if cls, ok := o.props["__class"].(*jsObject); ok {
+							if q := ktDescQual(cls, strings.Split(bare, "."), 0); q != 0 {
+								return boolH(q == 1)
+							}
+						}
+					}
 					short := bare[i+1:]
 					bare = short
 					if strings.HasSuffix(qt, "?") {
@@ -9390,6 +9397,51 @@ func ktDescIs(c *jsObject, t string, depth int) bool {
 		c, _ = c.props["__super"].(*jsObject)
 	}
 	return false
+}
+
+// ktDescQual judges a qualified type name, split at its dots, against c's
+// hierarchy: 0 when no class or interface there has its simple (last) name, 1
+// when one does whose binary name agrees with it, 2 when only others do. A
+// binary name agrees when its `$`-separated segments end the written ones, or
+// match their tail (`Mid.Deep` for Outer$Mid$Deep); a top-level type's has no
+// `$`, and any qualifier of it is a package. Twin of kDescQual in
+// kotlin-interpreter.abnf and languages/lib/kotlin-rt.metajs.
+func ktDescQual(c *jsObject, segs []string, depth int) int {
+	out := 0
+	for guard := 0; c != nil && guard < 64; guard++ {
+		if c.props["__name"] == segs[len(segs)-1] {
+			bn, _ := c.props["__bname"].(string)
+			if !strings.Contains(bn, "$") || ktBinTail(strings.Split(bn, "$"), segs) {
+				return 1
+			}
+			out = 2
+		}
+		if ifs, ok := c.props["__ifaces"].(*jsArray); ok && depth < 64 {
+			for _, e := range ifs.elems {
+				if ic, isObj := e.(*jsObject); isObj {
+					switch ktDescQual(ic, segs, depth+1) {
+					case 1:
+						return 1
+					case 2:
+						out = 2
+					}
+				}
+			}
+		}
+		c, _ = c.props["__super"].(*jsObject)
+	}
+	return out
+}
+
+// ktBinTail: whether the trailing segments of a binary name and of a written
+// qualified name agree, as far as the shorter goes.
+func ktBinTail(bn, segs []string) bool {
+	for k := 1; k <= len(bn) && k <= len(segs); k++ {
+		if bn[len(bn)-k] != segs[len(segs)-k] {
+			return false
+		}
+	}
+	return true
 }
 
 // ktRaise throws one of the builtin throwables from a host builtin, in the shape

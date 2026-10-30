@@ -6043,6 +6043,41 @@ fun sec133() {
     check("loc133", "${A133().g()} ${other133()} ${B133().k()}" == "11 9 12")
 }
 
+// ===== SECTION 134: two nested classes of one simple name stay two types =====
+// Outer134.Item and Outer134b.Item are different classes: a qualified `is` / `as` /
+// `as?` / when-is tells them apart, a ClassCastException names both binary names,
+// and a bare `Item` inside an owner (or a sibling nested in it) is that owner's own.
+// Every row is java 24 over the same pair of static nested classes.
+class Outer134 {
+    class Item(val v: Int) { fun show() = "A$v"; fun twin() = Pal(v).show() }
+    class Pal(val v: Int) { fun show() = "P$v" }
+    fun mk() = Item(3)
+    fun isMine(x: Any) = x is Item
+    fun asMine(x: Any) = (x as? Item)?.show()
+}
+class Outer134b {
+    class Item(val v: Int) { fun show() = "B$v"; fun twin() = Pal(v).show() }
+    class Pal(val v: Int) { fun show() = "Q$v" }
+    fun mk() = Item(4)
+    fun isMine(x: Any) = x is Item
+    fun asMine(x: Any) = (x as? Item)?.show()
+}
+fun sec134() {
+    val a: Any = Outer134.Item(1)
+    val b: Any = Outer134b.Item(2)
+    check("nest134a", "${a is Outer134b.Item} ${b is Outer134.Item} ${a is Outer134.Item} ${(b as? Outer134.Item)?.show()}"
+        == "false false true null")
+    check("nest134b", when (a) { is Outer134b.Item -> "b"; is Outer134.Item -> "a"; else -> "?" } == "a")
+    var msg = ""
+    try { (b as Outer134.Item).show() } catch (e: ClassCastException) { msg = e.message ?: "" }
+    check("nest134c", msg.startsWith("class Outer134b\$Item cannot be cast to class Outer134\$Item ("))
+    check("nest134d", Outer134().mk().show() + Outer134b().mk().show() == "A3B4")
+    check("nest134e", "${Outer134().isMine(a)}${Outer134().isMine(b)}${Outer134b().isMine(a)}${Outer134b().isMine(b)}"
+        == "truefalsefalsetrue")
+    check("nest134f", "${Outer134().asMine(b)} ${Outer134b().asMine(b)}" == "null B2")
+    check("nest134g", Outer134.Item(5).twin() + Outer134b.Item(6).twin() == "P5Q6")
+}
+
 fun main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -6173,6 +6208,7 @@ fun main() {
     sec131() // SECTION-CALL 131
     sec132() // SECTION-CALL 132
     sec133() // SECTION-CALL 133
+    sec134() // SECTION-CALL 134
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }

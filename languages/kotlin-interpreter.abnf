@@ -1171,7 +1171,7 @@ WhenArm     <~~ push(makeWhenArm(takeAll())) ~~>
 // A branch condition: an inclusive range test (in / !in), a type test (is T / !is T,
 // undecidable so it never matches and warns), or a value to compare with.
 WhenCond    = WhenIn | WhenNotIn | WhenInColl | WhenNotInColl | WhenIs | WhenVal ;
-WhenIs      <~~ var t = pop(); push({isType: true, neg: pop(), tname: t, pos: up.pos}) ~~> = IsKw TypeName ;
+WhenIs      <~~ var t = pop(); push({isType: true, neg: pop(), tname: t, pos: up.pos, lex: curClasses.slice(0)}) ~~> = IsKw TypeName ;
 // `in lo..hi` is the bounds test; the `!"step"` leaves `in 1..9 step 2` to the
 // general form, whose operand is any expression and which asks its contains
 // (`in someList`, `in a until b`, `in 1..9 step 2`).
@@ -1231,8 +1231,8 @@ TypeOp      <~~ push(applyTypeOp(takeAll())) ~~> = InfixExpr { IsSfx | AsSfx } ;
 // parses as `v is B` and strands the comma. NotArrow: on the SAME line, `is T ->` still
 // leads an arm (is CellInfoGsm -> ...), so the postfix must not fire there either.
 // Together they leave same-line `x is T` (not arrow-led) as the only postfix type test.
-IsSfx       <~~ var t = pop(); push({isType: true, neg: pop(), tname: t, pos: up.pos}) ~~> = SameLine IsKw TypeName NotArrow ;
-AsSfx       <~~ var t = pop(); push({asType: true, safe: pop(), tname: t}) ~~> = AsKw TypeName ;
+IsSfx       <~~ var t = pop(); push({isType: true, neg: pop(), tname: t, pos: up.pos, lex: curClasses.slice(0)}) ~~> = SameLine IsKw TypeName NotArrow ;
+AsSfx       <~~ var t = pop(); push({asType: true, safe: pop(), tname: t, lex: curClasses.slice(0)}) ~~> = AsKw TypeName ;
 IsKw        = KwIs <~~ push(false) ~~> | KwNotIs <~~ push(true) ~~> ;
 AsKw        = KwAsSafe <~~ push(true) ~~> | KwAs <~~ push(false) ~~> ;
 TypeName    <~~ push(stripWs(up.in)) ~~> = Type ;
@@ -3315,8 +3315,10 @@ NotMemberKw = :script(~~
         var tps = curTParams()
         var idx = -1
         for (var i = 0; i < tps.length; i++) { if (tps[i] == m.tname) { idx = i } }
+        var lexT = anytype // m.tname qualified by kLexType once the classes exist
         return function() {
-            var tn = m.tname
+            if (lexT === undefined) { lexT = kLexType(m.tname, m.lex) }
+            var tn = lexT
             if (idx >= 0) {
                 var ta = kTypeArgsTop()
                 if (ta != null && ta.length > idx) { tn = ta[idx] }
@@ -3847,8 +3849,13 @@ NotMemberKw = :script(~~
     // applyTypeOp so the fold below never builds a closure over a loop variable.
     function typeOpStep(operand, m) {
         if (m.asType) {
-            if (!m.safe) { return makeCast(operand, m.tname) }
-            return function() { var v = operand(); return kIsType(v, m.tname) ? v : null }
+            if (!m.safe) { return makeCast(operand, m.tname, m.lex) }
+            var lexT = anytype
+            return function() {
+                var v = operand()
+                if (lexT === undefined) { lexT = kLexType(m.tname, m.lex) }
+                return kIsType(v, lexT) ? v : null
+            }
         }
         return makeIsCheck(operand, m)
     }
@@ -3858,7 +3865,7 @@ NotMemberKw = :script(~~
     // nullable T and is a NullPointerException for a non-null one ktNullCastType
     // names, which is the check kotlinc emits. Twin of makeCast in
     // kotlin-to-llvm-ir.abnf.
-    function makeCast(operand, tname) {
+    function makeCast(operand, tname, lex) {
         var base = kCastBase(tname)
         var opt = tname.charAt(tname.length - 1) == "?"
         var dest = anytype // T's JVM class once the classes exist, "" when T is not judged
@@ -3867,6 +3874,7 @@ NotMemberKw = :script(~~
             var v = anytype
             v = operand()
             if (dest === undefined) {
+                base = kCastBase(kLexType(tname, lex))
                 dest = kCastDest(base)
                 if (!opt) { nullName = ktNullCastType(tname, dest) }
             }
@@ -3896,11 +3904,12 @@ NotMemberKw = :script(~~
     function kCastDest(b) {
         var l = kCastLang["$" + b]
         if (l != undefined) { return l }
-        // A nested type may be written qualified (`as Outer.Inner`); its descriptor is
-        // bound under the simple name.
+        // A nested type written qualified (`as Outer.Inner`) is found through its
+        // owner; any other is bound under its simple name.
         var sn = resolvedTypeName(b)
         var d = anytype
-        d = hasOwn(globalScope, sn) ? globalScope[sn] : undefined
+        d = kQualDesc(b)
+        if (d === undefined) { d = hasOwn(globalScope, sn) ? globalScope[sn] : undefined }
         if (d === null || d === undefined || typeof d != "object" || d.__isclass !== true) { return "" }
         // A builtin throwable's binary name is package-qualified and is not judged; the
         // program's own types live in the default package, a nested one as Outer$Inner.
@@ -3908,6 +3917,37 @@ NotMemberKw = :script(~~
         bn = d.__bname
         if (typeof bn != "string" || bn == "") { return sn }
         return bn.indexOf(".") < 0 ? bn : ""
+    }
+    // The descriptor a qualified type name `Outer.Inner` names - its first segment
+    // that is a declared type, then that type's nested ones - or undefined.
+    function kQualDesc(t) {
+        var segs = t.split(".")
+        for (var j = 0; j < segs.length - 1; j++) {
+            var d = anytype
+            d = hasOwn(globalScope, segs[j]) ? globalScope[segs[j]] : undefined
+            if (d === null || d === undefined || typeof d != "object" || d.__isclass !== true) { continue }
+            for (var k = j + 1; k < segs.length && d !== undefined; k++) {
+                d = (d.__statics != undefined && hasOwn(d.__statics, segs[k])) ? d.__statics[segs[k]] : undefined
+            }
+            return d
+        }
+        return undefined
+    }
+    // A type name as written inside the types lex (curClasses where it was walked),
+    // qualified when it is simple and names a nested type of one of them: `Inner`
+    // inside class Outer (or inside a sibling nested in it) is Outer.Inner, whatever
+    // other Inner the file declares. Twin of ktLexType in kotlin-to-llvm-ir.abnf.
+    function kLexType(tname, lex) {
+        if (lex == undefined || lex.length == 0) { return tname }
+        var base = kCastBase(tname)
+        if (base.indexOf(".") >= 0) { return tname }
+        for (var i = lex.length; i > 0; i--) {
+            var path = lex.slice(0, i).join(".")
+            var d = anytype
+            d = kQualDesc(path + "." + base)
+            if (d !== undefined && d !== null && typeof d == "object" && d.__isclass === true) { return path + "." + tname }
+        }
+        return tname
     }
     // java's ClassCastException message. Twin of ktCceMsg in
     // languages/lib/kotlin-rt.metajs and jvCceMsg in abnf/jsrtjavastr.go.
@@ -8854,7 +8894,8 @@ NotMemberKw = :script(~~
                     var cond = arms[a].conds[ci]
                     var hit
                     if (cond.isType) {
-                        hit = kIsType(s, cond.tname)
+                        if (cond.lexT === undefined) { cond.lexT = kLexType(cond.tname, cond.lex) }
+                        hit = kIsType(s, cond.lexT)
                         if (cond.neg) hit = !hit
                     } else if (cond.v != undefined) {
                         var val = cond.v()
@@ -10936,12 +10977,32 @@ NotMemberKw = :script(~~
     // A variable read unwraps a delegate box. The test is two comparisons for every
     // non-object value, which is small next to the scope-chain walk getVar already does.
     makeVarRef = function(name) {
+        var lex = kLexAt()
         return function() {
             var v = anytype
             v = getVar(name)
-            if (v !== null && typeof v == "object" && v.__pdeleg === true) { return pdelegGet(v) }
+            if (v !== null && typeof v == "object") {
+                if (v.__pdeleg === true) { return pdelegGet(v) }
+                if (lex !== null && v.__isclass === true) { return kLexClass(v, name, lex) }
+            }
             return v
         }
+    }
+    // The types a reference is walked inside (curClasses), null outside every type.
+    function kLexAt() { return curClasses.length == 0 ? null : curClasses.slice(0) }
+    // The class `name` resolves to inside the types lex, given the descriptor the scope
+    // chain found for it: every nested type is bound under its simple name in
+    // globalScope too, where the last one declared wins, so a nested one of an
+    // enclosing type is looked up through that type instead (kLexType).
+    function kLexClass(d, name, lex) {
+        var bn = anytype
+        bn = d.__bname
+        if (typeof bn != "string" || bn.indexOf("$") < 0) { return d }
+        var q = kLexType(name, lex)
+        if (q == name) { return d }
+        var ld = anytype
+        ld = kQualDesc(q)
+        return (ld !== undefined && ld !== null && typeof ld == "object" && ld.__isclass === true) ? ld : d
     }
     // `cur op= v`, op a compound operator: the value's own plusAssign / minusAssign /...
     // when it declares one (Kotlin takes it; declaring plus as well is an ambiguity on
@@ -12110,15 +12171,44 @@ NotMemberKw = :script(~~
             if (clsNamed(v.__class, t)) { return true }
             // A QUALIFIED type name - `is Shape.Circle`, which is how a NESTED class is
             // spelled from outside its owner, and the shape a sealed hierarchy is
-            // normally written in. A descriptor is registered under its SIMPLE name
-            // here, so the qualifier is dropped (the compiled twin is the js_ktis
-            // wrapper in abnf/jsrtkotlin.go) - the same convention the rest of this
-            // subset applies to packages and imports.
+            // normally written in: decided by the binary name of the class of that
+            // simple name (kDescQual); the compiled twin is the js_ktis wrapper in
+            // abnf/jsrtkotlin.go.
             var segs = t.split(".")
-            if (segs.length > 1) { return clsNamed(v.__class, segs[segs.length - 1]) }
+            if (segs.length > 1) { return kDescQual(v.__class, segs, 0) == 1 }
             return false
         }
         return rtIsType(v, t)
+    }
+    // A qualified type name, split at its dots, against cls's hierarchy: 0 when no
+    // type there has its simple (last) name, 1 when one does whose binary name
+    // agrees, 2 when only others do. A binary name agrees when its `$`-separated
+    // segments and the written ones match as far as the shorter goes (`Mid.Deep`
+    // for Outer$Mid$Deep); a top-level type's has no `$`, and any qualifier of it
+    // is a package. Twin of ktDescQual in abnf/jsrtkotlin.go and
+    // languages/lib/kotlin-rt.metajs.
+    function kDescQual(cls, segs, depth) {
+        if (cls == undefined || cls == null || depth > 64) { return 0 }
+        var out = 0
+        if (cls.__name == segs[segs.length - 1]) {
+            var bn = anytype
+            bn = cls.__bname
+            if (typeof bn != "string" || bn.indexOf("$") < 0) { return 1 }
+            var bs = bn.split("$")
+            var agree = true
+            for (var k = 1; k <= bs.length && k <= segs.length; k++) {
+                if (bs[bs.length - k] != segs[segs.length - k]) { agree = false }
+            }
+            if (agree) { return 1 }
+            out = 2
+        }
+        var ps = resolveParents(cls)
+        for (var i = 0; i < ps.length; i++) {
+            var r = kDescQual(ps[i], segs, depth + 1)
+            if (r == 1) { return 1 }
+            if (r == 2) { out = 2 }
+        }
+        return out
     }
 
     // `is Comparable`: java.lang.Comparable is implemented by the boxed numbers,
@@ -12299,7 +12389,7 @@ NotMemberKw = :script(~~
             start = 2
         }
         var args = items.slice(start)
-        var body = makeCallBody(name, targs, args)
+        var body = makeCallBody(name, targs, args, kLexAt())
         // A generic function or class called with explicit type arguments -
         // ident<Long>(5) - retypes the literals its parameter types fix, read when the
         // call first runs (the declaration may come later in the file).
@@ -12322,7 +12412,7 @@ NotMemberKw = :script(~~
         if (tys == null) { return }
         for (var i = 0; i < tys.length; i++) { args[i] = kAdoptThunk(args[i], tys[i]) }
     }
-    function makeCallBody(name, targs, args) {
+    function makeCallBody(name, targs, args, lex) {
         return function() {
             var spec = kevalArgs(args)
             // THE SYNTACTIC POSITION. `first` is a PROPERTY of IntProgression and a
@@ -12336,7 +12426,7 @@ NotMemberKw = :script(~~
             kCallPos = true
             var f = getVar(name)
             kCallPos = false
-            if (f != undefined && f !== null && f.__isclass) { return kNew(f, spec) }
+            if (f != undefined && f !== null && f.__isclass) { return kNew(lex === null ? f : kLexClass(f, name, lex), spec) }
             if (typeof f != "function") {
                 // A local holding a callable reference - `val g = b::twice; g()`.
                 if (kIsRef(f)) { return kRefApply(f, spec.pos) }

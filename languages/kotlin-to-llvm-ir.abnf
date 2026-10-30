@@ -3962,7 +3962,7 @@ KwContract  = "contract" KwEnd ;
             var r = operand(b)
             var tV = (reifiedName != null)
                 ? callExt(r.b, "js_scope_get", [curScopeV, emitStr(r.b, reifiedName)])
-                : emitStr(r.b, m.tname)
+                : emitStr(r.b, ktLexType(m.tname))
             var v = callExt(r.b, "js_ktis", [r.v, tV])
             if (m.neg) { v = callExt(r.b, "js_not", [v]) }
             return {b: r.b, v: v}
@@ -4126,7 +4126,7 @@ KwContract  = "contract" KwEnd ;
             if (!m.safe) { return makeCast(operand, m.tname) }
             return function(b) { // x as? T: the value when it matches, else null
                 var r = operand(b)
-                var isV = callExt(r.b, "js_ktis", [r.v, emitStr(r.b, m.tname)])
+                var isV = callExt(r.b, "js_ktis", [r.v, emitStr(r.b, ktLexType(m.tname))])
                 return {b: r.b, v: r.b.NewSelect(truthy(r.b, isV), r.v, hNull)}
             }
         }
@@ -4151,11 +4151,21 @@ KwContract  = "contract" KwEnd ;
         if (base.length > 0 && base.charAt(base.length - 1) == "?") { base = base.substring(0, base.length - 1) }
         return function(b) {
             var r = operand(b)
+            var qb = ktLexType(base)
             var dest = ktCastLang["$" + base]
             if (dest == undefined) {
-                // A nested type may be written qualified (`as Outer.Inner`).
+                // A nested type may be written qualified (`as Outer.Inner`), or be
+                // qualified by ktLexType: its binary name is the path from the first
+                // declared type on.
                 var simple = baseTypeName(base)
                 dest = (classNames[simple] == 1 || interfaceNames["$" + simple] == true) ? ktBinOf(simple) : ""
+                var segs = qb.split(".")
+                for (var sg = 0; sg < segs.length - 1 && dest != ""; sg++) {
+                    if (classNames[segs[sg]] == 1 || interfaceNames["$" + segs[sg]] == true) {
+                        dest = segs.slice(sg).join("$")
+                        break
+                    }
+                }
             }
             var nullName = opt ? "" : ktNullCastType(tname, dest)
             var cb = r.b
@@ -4169,7 +4179,7 @@ KwContract  = "contract" KwEnd ;
                 cb = okB
             }
             if (dest == "") { return {b: cb, v: r.v} }
-            return {b: cb, v: callExt(cb, "js_ktcast", [r.v, emitStr(cb, opt ? base + "?" : base), emitStr(cb, dest)])}
+            return {b: cb, v: callExt(cb, "js_ktcast", [r.v, emitStr(cb, opt ? qb + "?" : qb), emitStr(cb, dest)])}
         }
     }
 
@@ -4259,7 +4269,7 @@ KwContract  = "contract" KwEnd ;
                     var nextB = curF.NewBlock("")
                     if (cond.isType) {
                         var subjV0 = callExt(b, "js_scope_get", [curScopeV, emitStr(b, wName)])
-                        var isV = callExt(b, "js_ktis", [subjV0, emitStr(b, cond.tname)])
+                        var isV = callExt(b, "js_ktis", [subjV0, emitStr(b, ktLexType(cond.tname))])
                         if (cond.neg) { isV = callExt(b, "js_not", [isV]) }
                         b.NewCondBr(truthy(b, isV), matchB, nextB)
                     } else if (cond.v != undefined) {
@@ -7236,9 +7246,35 @@ KwContract  = "contract" KwEnd ;
         for (var i = 0; i < supers.length; i++) { ns.push(supers[i].name) }
         declTick++
         declMark = {name: name, supers: ns}
+        var own = {}
         for (var j = 0; j < nested.length; j++) {
-            if (nested[j].name != null) { nestOwner["$" + nested[j].name] = name }
+            if (nested[j].name != null) { nestOwner["$" + nested[j].name] = name; own["$" + nested[j].name] = true }
         }
+        nestedOf["$" + name] = own
+    }
+    // The nested type names each type declares, by the owner's simple name.
+    var nestedOf = {}
+    // A type name as written at the current emission point, qualified when it is
+    // simple and names a nested type of an enclosing type: `Inner` inside class
+    // Outer (or inside a sibling nested in it) is Outer.Inner, whatever other
+    // Inner the file declares. The enclosing types are curBinPrefix's path plus
+    // the class whose members are being emitted. Twin of kLexType in
+    // kotlin-interpreter.abnf.
+    function ktLexType(tname) {
+        var lt = tname.indexOf("<")
+        var base = lt < 0 ? tname : tname.substring(0, lt)
+        if (base.length > 0 && base.charAt(base.length - 1) == "?") { base = base.substring(0, base.length - 1) }
+        if (base.indexOf(".") >= 0) { return tname }
+        var chain = curBinPrefix == "" ? [] : curBinPrefix.split("$")
+        var top = emitClassTop()
+        if (top != null) { chain.push(top) }
+        for (var i = chain.length - 1; i >= 0; i--) {
+            var ns = nestedOf["$" + chain[i]]
+            if (ns != undefined && ns["$" + base] == true) {
+                return chain.slice(0, i + 1).join(".") + "." + tname
+            }
+        }
+        return tname
     }
     // The enclosing type of each nested declaration, by simple name, so an emit-time
     // cast can spell a nested class's JVM binary name (Outer$Inner) - emitBinName's
@@ -7349,9 +7385,9 @@ KwContract  = "contract" KwEnd ;
     // PER-OWNER SCOPING. Each nested declaration runs in its OWN child scope, so
     // `class A { class Inner }` and `class B { class Inner }` do not share one slot: the
     // descriptor a factory (and any method of the nested class) resolves is the one
-    // declared right beside it. The simple name is still MIRRORED into the enclosing
-    // scope afterwards, because a bare `Inner(1)` written inside the owner's own body
-    // resolves through the ordinary scope chain.
+    // declared right beside it. The simple name is then bound in the scope the owner
+    // runs in - a class's own scope (makeClassStmt), so a bare `Inner(1)` written
+    // inside the owner's body resolves through the ordinary scope chain.
     function emitNestedList(b, holderV, alsoV, nested, ownerName) {
         for (var nc = 0; nc < nested.length; nc++) {
             var savedOuter = emitOuterProps
@@ -7796,6 +7832,12 @@ KwContract  = "contract" KwEnd ;
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), clsV])
             b = emitSuperLinks(b, clsV, hdr.supers, own)
             b = emitDelegates(b, clsV, hdr.supers, own)
+            // A class that declares nested types gets a scope of its own, which its
+            // members close over and its nested declarations are bound in: a bare
+            // `Inner` inside it is ITS Inner, whatever other Inner the file declares.
+            // The names are mirrored into the enclosing scope at the end as well.
+            var outerScopeV = curScopeV
+            if (parts.nested.length > 0) { curScopeV = callExt(b, "js_scope_new", [outerScopeV]) }
             var savedSuper = emitSuperName
             var savedSuperRaw = emitSuperRaw
             emitSuperName = pickSuperName(hdr.supers)
@@ -7833,6 +7875,15 @@ KwContract  = "contract" KwEnd ;
                                       callExt(b, "js_closure", [handle(emitNameHashFunc(name)), curScopeV])])
             }
             if (comp != null) { b = emitCompanion(b, clsV, comp, parts.compName) }
+            if (parts.nested.length > 0) {
+                for (var nn = 0; nn < parts.nested.length; nn++) {
+                    var nnm = parts.nested[nn].name
+                    if (nnm == null) { continue }
+                    callExt(b, "js_scope_decl", [outerScopeV, emitStr(b, nnm),
+                                                 callExt(b, "js_scope_get", [curScopeV, emitStr(b, nnm)])])
+                }
+                curScopeV = outerScopeV
+            }
             return b
         }
     }

@@ -6571,12 +6571,17 @@ function ktIsType(v, tname) {
         if (ci !== undefined) { return ci }
         if (js_is_type(v, tname) === true) { return true }
         // A QUALIFIED type name - `is Shape.Circle`, which is how a NESTED class
-        // is spelled from outside its owner. A descriptor is registered under
-        // its SIMPLE name, so drop the qualifier.
+        // is spelled from outside its owner: a class of the simple name in v's
+        // hierarchy decides by its binary name (ktDescQual), else the qualifier
+        // is a package and is dropped.
         var qt = k4bStripAngle(tname)
         var bare = k4bStripQ(qt)
         var d = k4bLastDot(bare)
         if (d >= 0) {
+            if (v !== null && typeof v == "object" && !Array.isArray(v)) {
+                var q = ktDescQual(v["__class"], bare.split("."), 0)
+                if (q != 0) { return q == 1 }
+            }
             var short = bare.substring(d + 1, bare.length)
             bare = short
             if (k4bEndsQ(qt)) { short = short + "?" }
@@ -6654,6 +6659,42 @@ function ktDescIs(c, t, depth) {
         guard = guard + 1
     }
     return false
+}
+// ktDescQual / ktBinTail (jsrtkotlin.go): a qualified type name, split at its
+// dots, against c's hierarchy - 0 none of its simple name, 1 one whose binary
+// name agrees, 2 only others.
+function ktDescQual(c, segs, depth) {
+    var out = 0
+    var guard = 0
+    while (c !== null && c !== undefined && typeof c == "object" && guard < 64) {
+        if (c["__name"] === segs[segs.length - 1]) {
+            var bn = c["__bname"]
+            if (typeof bn != "string" || bn.indexOf("$") < 0) { return 1 }
+            if (ktBinTail(bn.split("$"), segs)) { return 1 }
+            out = 2
+        }
+        var ifs = c["__ifaces"]
+        if (Array.isArray(ifs) && depth < 64) {
+            var i = 0
+            while (i < ifs.length) {
+                var r = ktDescQual(ifs[i], segs, depth + 1)
+                if (r == 1) { return 1 }
+                if (r == 2) { out = 2 }
+                i = i + 1
+            }
+        }
+        c = c["__super"]
+        guard = guard + 1
+    }
+    return out
+}
+function ktBinTail(bn, segs) {
+    var k = 1
+    while (k <= bn.length && k <= segs.length) {
+        if (bn[bn.length - k] != segs[segs.length - k]) { return false }
+        k = k + 1
+    }
+    return true
 }
 // jsrtkotlin.go js_ktequals: Any.equals - strict, and Double.equals on two float
 // boxes where the `==` operator is IEEE.
