@@ -1886,8 +1886,19 @@ function ktNumMethod(recv, name, args) {
         name == "countLeadingZeroBits" || name == "countTrailingZeroBits") {
         if (k4IsIntKind(recv)) { return k1IntBits(recv, name, args) }
     }
-    if (name == "pow" || name == "roundToInt" || name == "roundToLong") {
+    if (name == "pow" || name == "roundToInt" || name == "roundToLong" || name == "withSign" ||
+        name == "nextUp" || name == "nextDown") {
         if (floIs(recv)) { return k4MathMethod(recv, name, args) }
+    }
+    // inc() / dec(): ++ / -- as functions, in the receiver's own type.
+    if (name == "inc" || name == "dec") {
+        if (args.length == 0) {
+            if (name == "inc") { return js_ktstep(recv, 1) }
+            return js_ktstep(recv, 0 - 1)
+        }
+    }
+    if (name == "takeHighestOneBit" || name == "takeLowestOneBit" || name == "rotateLeft" || name == "rotateRight") {
+        if (k4IsIntKind(recv) && !floIs(recv)) { return k4IntBitFn(recv, name, args) }
     }
     if (name == "rangeTo" || name == "until" || name == "downTo") {
         if (args.length == 1) { return k4RangeMake(recv, args[0], name) }
@@ -3381,6 +3392,16 @@ function k2StrMethod2(s, name, args) {
         return s.substring(k2Int(ktArg(args, 0)), k2Int(ktArg(args, 1)))
     }
     if (name == "trimIndent") { return k2TrimIndent(s) }
+    if (name == "replaceIndent") {
+        if (args.length > 0) { return k2Reindent(s, k2Str2(args[0]), null) }
+        return k2Reindent(s, "", null)
+    }
+    if (name == "trimMargin") {
+        var mp = "|"
+        if (args.length > 0) { mp = k2Str2(args[0]) }
+        if (k2TrimSpace(mp).length == 0) { ktRaise("IllegalArgumentException", "marginPrefix must be non-blank string.") }
+        return k2Reindent(s, "", mp)
+    }
 
     // ----- the STRING family of _Strings.kt -----
     // kotlin.text generates the collection operators for CharSequence from the
@@ -3464,6 +3485,54 @@ function k4CharsStr(a) {
         i = i + 1
     }
     return out
+}
+
+// k2Reindent is ktReindent (jsrtkotlin.go) - kotlin.text's reindent: a blank
+// first and last line dropped, every other line cut after its margin prefix (mp)
+// or by the common indent (mp null) and given newIndent.
+function k2Reindent(s, newIndent, mp) {
+    var lines = k2Split(s, "\n")
+    var minInd = -1
+    var i = 0
+    while (i < lines.length) {
+        var one = lines[i]
+        if (k2EndsWith(one, "\r")) {
+            one = one.substring(0, one.length - 1)
+            lines[i] = one
+        }
+        var w = k2IndentW(one)
+        if (mp === null && w < one.length && (minInd < 0 || w < minInd)) { minInd = w }
+        i = i + 1
+    }
+    if (minInd < 0) { minInd = 0 }
+    var out = ""
+    var first = true
+    var j = 0
+    while (j < lines.length) {
+        var l = lines[j]
+        var f = k2IndentW(l)
+        if ((j == 0 || j == lines.length - 1) && f == l.length) {
+            j = j + 1
+            continue
+        }
+        var cut = l
+        if (mp === null) {
+            var c0 = minInd
+            if (c0 > l.length) { c0 = l.length }
+            cut = newIndent + l.substring(c0, l.length)
+        } else if (f < l.length && l.substring(f, f + mp.length) == mp) {
+            cut = newIndent + l.substring(f + mp.length, l.length)
+        }
+        if (first) { out = cut } else { out = out + "\n" + cut }
+        first = false
+        j = j + 1
+    }
+    return out
+}
+function k2IndentW(l) {
+    var k = 0
+    while (k < l.length && k2IsSpace(l.charCodeAt(k))) { k = k + 1 }
+    return k
 }
 
 // k2TrimIndent is ktTrimIndent (jsrtkotlin.go:2423) - kotlin.text.trimIndent:
@@ -4118,6 +4187,31 @@ function ktSbMethod(o, name, args) {
         o["s"] = ktRevText(ktSbText(o))
         return o
     }
+    // insert / deleteCharAt / setLength with java.lang.StringBuilder's bounds
+    // checks (jsrtkotlin.go ktSbMethod).
+    if (name == "insert" || name == "deleteCharAt" || name == "setLength") {
+        var t = ktSbText(o)
+        var n = t.length
+        var x = k2Int(ktArg(args, 0))
+        if (name == "insert" && (x < 0 || x > n)) {
+            ktRaise("StringIndexOutOfBoundsException", "Range [" + x + ", " + n + ") out of bounds for length " + n)
+        }
+        if (name == "deleteCharAt" && (x < 0 || x >= n)) {
+            ktRaise("StringIndexOutOfBoundsException", "Index " + x + " out of bounds for length " + n)
+        }
+        if (name == "setLength" && x < 0) { ktRaise("StringIndexOutOfBoundsException", "String index out of range: " + x) }
+        if (name == "insert") {
+            o["s"] = t.substring(0, x) + k2Str2(ktArg(args, 1)) + t.substring(x, n)
+            return o
+        }
+        if (name == "deleteCharAt") {
+            o["s"] = t.substring(0, x) + t.substring(x + 1, n)
+            return o
+        }
+        while (t.length < x) { t = t + String.fromCharCode(0) }
+        o["s"] = t.substring(0, x)
+        return undefined
+    }
     // java.lang.StringBuilder does not override equals: it is identity.
     if (name == "equals") { return ktIdent(o, ktArg(args, 0)) }
     return ktStrMethod(ktSbText(o), name, args)
@@ -4561,6 +4655,13 @@ function ktSeqMethodK(arr, name, args, kind) {
 
     if (name == "isEmpty") { return es.length == 0 }
     if (name == "isNotEmpty") { return es.length > 0 }
+    // iterator(): the cursor a sequence hands out, over the live list (arr) -
+    // jsrtkotlin.go ktSeqMethodK.
+    if (name == "iterator" && args.length == 0) {
+        var lc = k4CursorNew({})
+        lc["arr"] = arr
+        return lc
+    }
     if (name == "map") {
         for (i = 0; i < es.length; i = i + 1) { out.push(ktCall1(f, es[i])) }
         return out
@@ -5450,6 +5551,18 @@ function ktSeqMethodK(arr, name, args, kind) {
         return false
     }
     if (name == "addAll") {
+        // addAll(index, elements) inserts at index (ArrayList.addAll's
+        // rangeCheckForAdd) - jsrtkotlin.go.
+        if (args.length == 2) {
+            var at = k3Int(f)
+            if (at < 0 || at > arr.length) { ktRaise("IndexOutOfBoundsException", "Index: " + at + ", Size: " + arr.length) }
+            oth = ktElems(args[1])
+            var tail = []
+            while (arr.length > at) { tail.push(arr.pop()) }
+            for (i = 0; i < oth.length; i = i + 1) { arr.push(oth[i]) }
+            for (i = tail.length - 1; i >= 0; i = i - 1) { arr.push(tail[i]) }
+            return oth.length > 0
+        }
         oth = ktElems(f)
         n = oth.length
         for (i = 0; i < n; i = i + 1) { arr.push(oth[i]) }
@@ -5988,7 +6101,10 @@ function k4CursorSet(c, v) {
 function k4CursorPull(c) {
     if (c["done"] === true) { return false }
     var ok = false
-    if (c["src"] !== undefined) {
+    var ca = c["arr"]
+    if (ca !== undefined) {
+        if (c["length"] < ca.length) { ok = k4CursorSet(c, ca[c["length"]]) }
+    } else if (c["src"] !== undefined) {
         ok = k4DerivedPull(c, c["src"])
     } else {
         var g = c["g"]
@@ -8224,9 +8340,40 @@ function k4JavaMath() {
 function k4MathMethod(recv, name, args) {
     var f = floNum(recv)
     if (name == "pow") { return k4MathRes(recv, ktmMath2("pow", f, ktNum(ktArg(args, 0)))) }
+    if (name == "withSign") { return k4MathRes(recv, ktmWithSign(f, ktNum(ktArg(args, 0)))) }
+    if (name == "nextUp") { return k4MathRes(recv, ktmNextUp(f, floStyle(recv) == 3)) }
+    if (name == "nextDown") { return k4MathRes(recv, ktmNextDown(f, floStyle(recv) == 3)) }
     if (f !== f) { ktRaise("IllegalArgumentException", "Cannot round NaN value.") }
     if (name == "roundToInt") { return k1Conv(flo(ktmRoundHalfUp(f), 0), 32, 0) }
     return k1Conv(flo(ktmRoundHalfUp(f), 0), 64, 0)
+}
+
+// jsrtkotlin.go ktNumMethod's bit arm: takeHighestOneBit / takeLowestOneBit /
+// rotateLeft / rotateRight at the receiver's width, the count modulo the width.
+function k4IntBitFn(recv, name, args) {
+    var w = 32
+    var u = 0
+    if (sintIs(recv)) {
+        w = sintWidth(recv)
+        if (sintUns(recv)) { u = 1 }
+    }
+    var x = sintConv(k1Val(recv), w, 1)
+    var r = sintConv(0, w, 1)
+    if (name == "takeHighestOneBit") {
+        var k = w - 1
+        while (k >= 0 && sintCmp(r, 0) == 0) {
+            r = sintOp(k1OpCode("&"), x, sintOp(9, sintConv(1, w, 1), k))
+            k = k - 1
+        }
+    } else if (name == "takeLowestOneBit") {
+        r = sintOp(k1OpCode("&"), x, sintOp(k1OpCode("-"), sintConv(0, w, 1), x))
+    } else {
+        var n = k1I32(ktArg(args, 0)) & (w - 1)
+        if (name == "rotateRight") { n = (w - n) & (w - 1) }
+        r = x
+        if (n != 0) { r = sintOp(k1OpCode("|"), sintOp(9, x, n), sintOp(10, x, w - n)) }
+    }
+    return ktNorm(r, w, u)
 }
 
 // The absoluteValue and sign properties: abs and signum in the number's own type,
@@ -10146,6 +10293,10 @@ function js_ktfget(o, name) {
     }
     if (name == "absoluteValue" || name == "sign") {
         if (k1Numeric(o)) { return k4MathProp(o, name) }
+    }
+    // Double.ulp / Float.ulp: Math.ulp (jsrtktmath.go ktMathProp).
+    if (name == "ulp") {
+        if (floIs(o)) { return k4MathRes(o, ktmUlp(floNum(o), floStyle(o) == 3)) }
     }
     // A StringBuilder IS a CharSequence, so the same two properties apply to it.
     if (ktIsSb(o) && rtIsNil(r)) {

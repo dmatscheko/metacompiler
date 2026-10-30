@@ -5684,6 +5684,51 @@ fun sec125() {
                     (ls[1] - 4..ls[1]).count() == 5)
 }
 
+// ===== SECTION 126: stdlib members: margins, float neighbours, bit rotation =====
+// trimMargin / replaceIndent are kotlin-stdlib 2.2.21's StringsKt (called from
+// java); withSign / ulp / nextUp / nextDown are Math.copySign / ulp / nextUp /
+// nextDown and takeHighestOneBit / rotateLeft / ... Integer's and Long's
+// (MathJVM.kt, NumbersJVM.kt); iterator / addAll(index, ...) are ArrayList's and
+// insert / deleteCharAt / setLength java.lang.StringBuilder's - java 24 gives every
+// value, message included.
+fun sec126() {
+    val tm = """
+        |a
+        |  b
+        c""".trimMargin()
+    check("std126a", tm == "a\n  b\n        c" && "  x\n    y".replaceIndent("> ") == "> x\n>   y" && "##a\n##b".trimMargin("##") == "a\nb")
+    val d = doubleArrayOf(3.0, -1.0, 1.0, 0.0, Double.MAX_VALUE, -0.0)
+    check("std126b", "" + d[0].withSign(d[1]) + " " + d[2].ulp + " " + d[2].nextUp() + " " + d[2].nextDown() + " " + d[3].nextUp() ==
+                     "-3.0 2.220446049250313E-16 1.0000000000000002 0.9999999999999999 4.9E-324")
+    val f1 = floatArrayOf(1.0f)
+    check("std126c", "" + d[4].ulp + " " + f1[0].ulp + " " + d[1].nextUp() + " " + f1[0].nextDown() + " " + d[2].withSign(d[5]) ==
+                     "1.99584030953472E292 1.1920929E-7 -0.9999999999999999 0.99999994 -1.0")
+    val ii = intArrayOf(100, -2147483648, 5)
+    val l5 = longArrayOf(-5L, 1L)
+    check("std126d", "" + ii[0].takeHighestOneBit() + " " + ii[0].takeLowestOneBit() + " " + ii[1].rotateLeft(1) + " " + ii[2].rotateRight(1) +
+                     " " + ii[2].inc() + " " + ii[2].dec() + " " + l5[0].takeHighestOneBit() + " " + l5[1].rotateLeft(65) ==
+                     "64 4 1 -2147483646 6 4 -9223372036854775808 2")
+    val ml = mutableListOf(1, 2, 3)
+    val it = ml.iterator()
+    var s = ""
+    while (it.hasNext()) s += it.next()
+    ml.addAll(1, listOf(8, 9))
+    var msg = ""
+    try { ml.addAll(9, listOf(1)) } catch (e: IndexOutOfBoundsException) { msg = e.message ?: "" }
+    check("std126e", s == "123" && ml.toString() == "[1, 8, 9, 2, 3]" && msg == "Index: 9, Size: 5")
+    val sb = StringBuilder("hello")
+    sb.insert(0, "[").insert(sb.length, "]")
+    val s1 = sb.toString()
+    sb.deleteCharAt(1)
+    val s2 = sb.toString()
+    sb.setLength(3)
+    msg = ""
+    try { sb.insert(9, "x") } catch (e: StringIndexOutOfBoundsException) { msg += e.message }
+    try { sb.deleteCharAt(9) } catch (e: StringIndexOutOfBoundsException) { msg += "|" + e.message }
+    check("std126f", s1 == "[hello]" && s2 == "[ello]" && sb.toString() == "[el" &&
+                     msg == "Range [9, 3) out of bounds for length 3|Index 9 out of bounds for length 3")
+}
+
 
 fun main() {
     s01() // SECTION-CALL 01
@@ -5807,6 +5852,7 @@ fun main() {
     sec123() // SECTION-CALL 123
     sec124() // SECTION-CALL 124
     sec125() // SECTION-CALL 125
+    sec126() // SECTION-CALL 126
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }

@@ -265,6 +265,20 @@ func (rt *jsrt) ktMathMethod(target interface{}, name string, args []interface{}
 		return nil, false
 	}
 	switch name {
+	// kotlin.math's withSign (Math.copySign) and nextUp / nextDown (Math.nextUp /
+	// nextDown), at the receiver's width. Twins: ktmWithSign / ktmNext in
+	// languages/lib/kotlin-math.js.
+	case "withSign":
+		return ktMathRes(f, math.Copysign(f.f, giFloat(rt, argAt(args, 0)))), true
+	case "nextUp", "nextDown":
+		to := math.Inf(1)
+		if name == "nextDown" {
+			to = math.Inf(-1)
+		}
+		if f.sty == floJavaF {
+			return jsJFlo{f: float64(math.Nextafter32(float32(f.f), float32(to))), sty: floJavaF}, true
+		}
+		return jsJFlo{f: math.Nextafter(f.f, to)}, true
 	case "pow":
 		return ktMathRes(f, fdPow(f.f, giFloat(rt, argAt(args, 0)))), true
 	case "roundToInt", "roundToLong":
@@ -313,6 +327,22 @@ func (rt *jsrt) ktAbs(v interface{}) interface{} {
 func (rt *jsrt) ktMathProp(o interface{}, name string) interface{} {
 	if name == "absoluteValue" {
 		return rt.ktAbs(o)
+	}
+	// Double.ulp / Float.ulp: Math.ulp, the distance to the next larger magnitude
+	// (Math.ulp(MAX_VALUE) is 2^971, not infinity).
+	if f, isFlo := o.(jsJFlo); isFlo && name == "ulp" {
+		a := math.Abs(f.f)
+		if f.sty == floJavaF {
+			a32 := float32(a)
+			if a32 == math.MaxFloat32 {
+				return jsJFlo{f: math.Ldexp(1, 104), sty: floJavaF}
+			}
+			return jsJFlo{f: float64(math.Nextafter32(a32, float32(math.Inf(1))) - a32), sty: floJavaF}
+		}
+		if a == math.MaxFloat64 {
+			return jsJFlo{f: math.Ldexp(1, 971)}
+		}
+		return jsJFlo{f: math.Nextafter(a, math.Inf(1)) - a}
 	}
 	if f, isFlo := o.(jsJFlo); isFlo {
 		return ktMathRes(f, ktMath1("sign", f.f))

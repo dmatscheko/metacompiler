@@ -139,6 +139,59 @@ function ktmMath2(name, x, y) {
     return fdlibm().log(x) / fdlibm().log(y)
 }
 
+// withSign is Math.copySign: x's magnitude with s's sign, a NaN s counting as
+// positive (java's canonical NaN). ulp / nextUp / nextDown are Math.ulp / nextUp /
+// nextDown, at binary32 when f32. Without access to a double's bits they scale by
+// powers of two, which is exact. Go twin: ktMathMethod / ktMathProp in
+// abnf/jsrtktmath.go.
+function ktmWithSign(x, s) {
+    var neg = s < 0 || (s == 0 && 1 / s < 0)
+    var xneg = x < 0 || (x == 0 && 1 / x < 0)
+    if (neg == xneg) { return x }
+    return -x
+}
+function ktmPow2(k) {
+    var p = 1
+    var i = 0
+    while (i < k) { p = p * 2; i = i + 1 }
+    while (i > k) { p = p / 2; i = i - 1 }
+    return p
+}
+function ktmMant(f32) { if (f32) { return 23 } return 52 }
+function ktmEmin(f32) { if (f32) { return 0 - 126 } return 0 - 1022 }
+function ktmMaxF(f32) { return (2 - ktmPow2(0 - ktmMant(f32))) * ktmPow2(0 - ktmEmin(f32) + 1) }
+function ktmUlp(x, f32) {
+    var a = x
+    if (a < 0) { a = -a }
+    if (a !== a || a - a !== 0) { return a }
+    var p = 1
+    var e = 0
+    if (a >= 1) {
+        while (p * 2 <= a) { p = p * 2; e = e + 1 }
+    } else {
+        while (p > a && e > ktmEmin(f32)) { p = p / 2; e = e - 1 }
+    }
+    return ktmPow2(e - ktmMant(f32))
+}
+// The next value below y > 0: one ulp down, half an ulp from the lowest value of
+// a binade above the subnormals.
+function ktmDownPos(y, f32) {
+    var u = ktmUlp(y, f32)
+    if (u * ktmPow2(ktmMant(f32)) == y && y > ktmPow2(ktmEmin(f32))) { return y - u / 2 }
+    return y - u
+}
+function ktmNextUp(x, f32) {
+    if (x !== x) { return x }
+    if (x - x !== 0) {
+        if (x > 0) { return x }
+        return -ktmMaxF(f32)
+    }
+    if (x == 0) { return ktmPow2(ktmEmin(f32) - ktmMant(f32)) }
+    if (x > 0) { return x + ktmUlp(x, f32) }
+    return -ktmDownPos(-x, f32)
+}
+function ktmNextDown(x, f32) { return -ktmNextUp(-x, f32) }
+
 // The value of a constant, PI or E.
 function ktmConst(name) {
     if (name == "PI") { return 3.141592653589793 }

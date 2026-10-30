@@ -4293,6 +4293,11 @@ NotMemberKw = :script(~~
     var kSeqRunning = []
     function kCursorPull(c) {
         if (c.done) { return false }
+        if (c.arr !== undefined) {
+            if (c.length < c.arr.length) { return kCursorSet(c, c.arr[c.length]) }
+            c.done = true
+            return false
+        }
         if (c.src !== null) {
             if (kDerivedPull(c)) { return true }
             c.done = true
@@ -4338,6 +4343,26 @@ NotMemberKw = :script(~~
     // once, at its end.
     function kForSrc(v) { return kIsLazySeq(v) ? kCursor(v) : kIterable(v) }
     function kForMore(src) { return kIsCursor(src) && kCursorPull(src) }
+    // takeHighestOneBit / takeLowestOneBit / rotateLeft / rotateRight
+    // (Integer.highestOneBit, Integer.rotateLeft, ... at the receiver's width; the
+    // rotation count is taken modulo the width). Twin of the same arm of
+    // ktNumMethod in abnf/jsrtkotlin.go.
+    function kIntBitFn(target, name, args) {
+        var w = szIs(target) ? target.w : 32
+        var u = szIs(target) ? target.u : kNoU
+        var x = i64Trunc(kSz(target, w, u).p, w, true)
+        var r = i64Make(0, 0)
+        if (name == "takeHighestOneBit") {
+            for (var k = w - 1; k >= 0 && i64IsZero(r); k--) { r = i64And(x, i64Shl(i64Make(0, 1), k)) }
+        } else if (name == "takeLowestOneBit") {
+            r = i64And(x, i64Neg(x))
+        } else {
+            var n = kNum(args[0]) & (w - 1)
+            if (name == "rotateRight") { n = (w - n) & (w - 1) }
+            r = (n == 0) ? x : i64Or(i64Shl(x, n), i64ShrU(x, w - n))
+        }
+        return kNorm(r, w, u)
+    }
     // Whether a `for` over src runs its body for index i. n0 is src's length when
     // the loop started: java.util.ArrayList's iterator, which the for statement
     // uses, throws ConcurrentModificationException from next() once the list was
@@ -5929,6 +5954,12 @@ NotMemberKw = :script(~~
         }
         if (name == "subSequence") { return {v: sv.substring(kNum(args[0]), kNum(args[1]))} }
         if (name == "trimIndent") { return {v: kTrimIndent(sv)} }
+        if (name == "replaceIndent") { return {v: kReindent(sv, args.length > 0 ? kstr2(args[0]) : "", null)} }
+        if (name == "trimMargin") {
+            var mp = args.length > 0 ? kstr2(args[0]) : "|"
+            if (kTrimSide(mp, true, true).length == 0) { kThrowExc("IllegalArgumentException", "marginPrefix must be non-blank string.") }
+            return {v: kReindent(sv, "", mp)}
+        }
         // ----- the STRING family of _Strings.kt -----
         // kotlin.text generates the collection operators for CharSequence from the
         // same templates as kotlin.collections, but the ones that SELECT characters
@@ -5978,6 +6009,41 @@ NotMemberKw = :script(~~
         var out = ""
         for (var i = 0; i < a.length; i++) { out += String.fromCharCode(a[i].__char) }
         return out
+    }
+    // kotlin.text's reindent (Indent.kt): the lines of s with a blank first and a
+    // blank last line dropped and every other line cut - after its margin prefix
+    // (trimMargin, mp a string) or by the common indent of the non-blank lines
+    // (replaceIndent, mp null) - and given newIndent; a line the margin cut does
+    // not apply to stays as it is. Twin of ktReindent in abnf/jsrtkotlin.go.
+    function kReindent(sv, newIndent, mp) {
+        var lines = kSplitStr(sv, ["\n"], false, 0)
+        var minInd = 0 - 1
+        for (var i = 0; i < lines.length; i++) {
+            var one = lines[i]
+            if (one.length > 0 && one.charCodeAt(one.length - 1) == 13) { lines[i] = one.substring(0, one.length - 1) }
+            var w = kIndentW(lines[i])
+            if (mp === null && w < lines[i].length && (minInd < 0 || w < minInd)) { minInd = w }
+        }
+        if (minInd < 0) { minInd = 0 }
+        var out = ""
+        var first = true
+        for (var j = 0; j < lines.length; j++) {
+            var l = lines[j]
+            var f = kIndentW(l)
+            if ((j == 0 || j == lines.length - 1) && f == l.length) { continue }
+            var cut = l
+            if (mp === null) { cut = newIndent + l.substring(minInd < l.length ? minInd : l.length, l.length) }
+            else if (f < l.length && l.substring(f, f + mp.length) == mp) { cut = newIndent + l.substring(f + mp.length, l.length) }
+            out = out + (first ? "" : "\n") + cut
+            first = false
+        }
+        return out
+    }
+    // The index of the first non-whitespace character, or the length.
+    function kIndentW(l) {
+        var k = 0
+        while (k < l.length && kIsSpaceCh(l.charCodeAt(k))) { k++ }
+        return k
     }
     // kotlin.text.trimIndent: drop a leading and a trailing BLANK line, then remove the
     // common indent of every non-blank line. The twin is ktTrimIndent in
@@ -6593,6 +6659,13 @@ NotMemberKw = :script(~~
         var out
         if (name == "isEmpty") { return {v: es.length == 0} }
         if (name == "isNotEmpty") { return {v: es.length > 0} }
+        // iterator(): the Iterator a for loop uses - the cursor a sequence hands out,
+        // over the live list (arr). Twin of ktSeqMethodK in abnf/jsrtkotlin.go.
+        if (name == "iterator" && args.length == 0) {
+            var lc = kCursor({f: null})
+            lc.arr = es
+            return {v: lc}
+        }
         // The names the shared list branch already answers for an ARRAY are repeated
         // here because a STRING reaches this function too (a String is a sequence of
         // Char in Kotlin, so "abc".map { it.code } is ordinary). The bodies are the
@@ -7330,6 +7403,18 @@ NotMemberKw = :script(~~
             return {v: false}
         }
         if (name == "addAll") {
+            // addAll(index, elements) inserts at index (ArrayList.addAll's
+            // rangeCheckForAdd). Twin of ktListMutMethod in abnf/jsrtkotlin.go.
+            if (args.length == 2) {
+                var at = kNum(f)
+                if (at < 0 || at > es.length) { kThrowExc("IndexOutOfBoundsException", "Index: " + at + ", Size: " + es.length) }
+                var ins = kElems(args[1])
+                var tail = []
+                while (es.length > at) { tail.push(es.pop()) }
+                for (i = 0; i < ins.length; i++) { es.push(ins[i]) }
+                for (i = tail.length - 1; i >= 0; i--) { es.push(tail[i]) }
+                return {v: ins.length > 0}
+            }
             var more = kElems(f)
             for (i = 0; i < more.length; i++) { es.push(more[i]) }
             return {v: more.length > 0}
@@ -7779,10 +7864,23 @@ NotMemberKw = :script(~~
         if (args.length == 1 && hasOwn(kOpNames, name) && (kIsFlo(target) || szIs(target) || typeof target == "number")) {
             return binOp(kOpNames[name], target, args[0])
         }
+        // inc() / dec(): ++ / -- as functions, in the receiver's own type.
+        if ((name == "inc" || name == "dec") && args.length == 0 && (kIsFlo(target) || szIs(target) || typeof target == "number")) {
+            return kStep(target, name == "inc" ? 1 : 0 - 1)
+        }
+        if ((name == "takeHighestOneBit" || name == "takeLowestOneBit" || name == "rotateLeft" || name == "rotateRight") &&
+            (szIs(target) || typeof target == "number")) {
+            return kIntBitFn(target, name, args)
+        }
         if (kIsFlo(target)) {
             var tf = target.__flo
             if (name == "toString") return kIsF32(target) ? coreJvmF32Str(tf) : kFloStr(tf)
             if (name == "compareTo") return kDblCmp(tf, kNumD(args[0]))
+            // withSign / nextUp / nextDown (Math.copySign / nextUp / nextDown, at the
+            // receiver's width). Twin of ktMathMethod in abnf/jsrtktmath.go.
+            if (name == "withSign") return kMathRes(target, ktmWithSign(tf, kNumD(args[0])))
+            if (name == "nextUp") return kMathRes(target, ktmNextUp(tf, kIsF32(target)))
+            if (name == "nextDown") return kMathRes(target, ktmNextDown(tf, kIsF32(target)))
             // Double.mod / Float.mod (kotlin.util.FloorDivMod): the remainder takes the
             // divisor's sign. Twin of the mod arm of ktNumMethod in abnf/jsrtkotlin.go.
             if (name == "mod" && args.length == 1) {
@@ -7974,6 +8072,24 @@ NotMemberKw = :script(~~
             if (name == "reverse") {
                 target.s = kRevText(target.s)
                 return target
+            }
+            // insert / deleteCharAt / setLength with java.lang.StringBuilder's bounds
+            // checks. Twin of ktSbMethod in abnf/jsrtkotlin.go.
+            if (name == "insert" || name == "deleteCharAt" || name == "setLength") {
+                var sbn = target.s.length
+                var sbx = kNum(args[0])
+                if (name == "insert" && (sbx < 0 || sbx > sbn)) {
+                    kThrowExc("StringIndexOutOfBoundsException", "Range [" + sbx + ", " + sbn + ") out of bounds for length " + sbn)
+                }
+                if (name == "deleteCharAt" && (sbx < 0 || sbx >= sbn)) {
+                    kThrowExc("StringIndexOutOfBoundsException", "Index " + sbx + " out of bounds for length " + sbn)
+                }
+                if (name == "setLength" && sbx < 0) { kThrowExc("StringIndexOutOfBoundsException", "String index out of range: " + sbx) }
+                if (name == "insert") { target.s = target.s.substring(0, sbx) + kstr2(args[1]) + target.s.substring(sbx, sbn); return target }
+                if (name == "deleteCharAt") { target.s = target.s.substring(0, sbx) + target.s.substring(sbx + 1, sbn); return target }
+                while (target.s.length < sbx) { target.s = target.s + String.fromCharCode(0) }
+                target.s = target.s.substring(0, sbx)
+                return undefined
             }
             // java.lang.StringBuilder does not override equals: it is identity.
             if (name == "equals") { return target === args[0] }
@@ -11396,7 +11512,9 @@ NotMemberKw = :script(~~
             return extPropGet(o, name)
         }
         // kotlin.math's absoluteValue and sign properties: abs and signum in the
-        // number's own type, except that an integer's sign is always an Int.
+        // number's own type, except that an integer's sign is always an Int. ulp is
+        // Math.ulp (ktMathProp in abnf/jsrtktmath.go).
+        if (name == "ulp" && kIsFlo(o)) { return kMathRes(o, ktmUlp(o.__flo, kIsF32(o))) }
         if ((name == "absoluteValue" || name == "sign") && (typeof o == "number" || kIsFlo(o) || szIs(o))) {
             if (name == "absoluteValue") { return hostGlobals["abs"](o) }
             if (kIsFlo(o)) { return kMathRes(o, ktmMath1("sign", o.__flo)) }

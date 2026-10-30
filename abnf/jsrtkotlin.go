@@ -686,7 +686,7 @@ func (rt *jsrt) ktNumMethod(target interface{}, name string, args []interface{})
 			}
 			return rt.ktArith(op, target, args[0]), true
 		}
-	case "pow", "roundToInt", "roundToLong":
+	case "pow", "roundToInt", "roundToLong", "withSign", "nextUp", "nextDown":
 		return rt.ktMathMethod(target, name, args)
 	// rangeTo / until / downTo in their FUNCTION spelling. `..`, `until` and
 	// `downTo` are the infix operators the emitter lowers to js_ktrange, but
@@ -696,6 +696,54 @@ func (rt *jsrt) ktNumMethod(target interface{}, name string, args []interface{})
 		if len(args) == 1 {
 			return ktRangeMake(target, args[0], name), true
 		}
+	// inc() / dec(): ++ / -- as functions, in the receiver's own type.
+	case "inc", "dec":
+		if len(args) == 0 {
+			d := int64(1)
+			if name == "dec" {
+				d = -1
+			}
+			switch t := target.(type) {
+			case jsJFlo:
+				if t.sty == floJavaF {
+					return jsJFlo{f: jvmFround(t.f + float64(d)), sty: floJavaF}, true
+				}
+				return jsJFlo{f: t.f + float64(d), sty: t.sty}, true
+			case jsGInt:
+				return ktNorm(t.v+d, t.w, t.u), true
+			}
+			return float64(int32(giVal(rt, target)) + int32(d)), true
+		}
+	// takeHighestOneBit / takeLowestOneBit / rotateLeft / rotateRight
+	// (Integer.highestOneBit, Integer.rotateLeft, ... at the receiver's width; the
+	// rotation count is taken modulo the width). Twin of kIntBitFn in
+	// kotlin-interpreter.abnf and k4IntBitFn in languages/lib/kotlin-rt.metajs.
+	case "takeHighestOneBit", "takeLowestOneBit", "rotateLeft", "rotateRight":
+		w, u, isInt := ktIntKind(target)
+		if !isInt {
+			break
+		}
+		mask := ^uint64(0) >> (64 - uint(w))
+		x := uint64(giVal(rt, target)) & mask
+		var r uint64
+		switch name {
+		case "takeHighestOneBit":
+			for b := uint64(1) << (uint(w) - 1); b > 0 && r == 0; b >>= 1 {
+				r = x & b
+			}
+		case "takeLowestOneBit":
+			r = x & -x
+		default:
+			n := uint(giVal(rt, argAt(args, 0))) & (uint(w) - 1)
+			if name == "rotateRight" {
+				n = (uint(w) - n) & (uint(w) - 1)
+			}
+			r = ((x << n) | (x >> (uint(w) - n))) & mask
+		}
+		if _, boxed := target.(jsGInt); boxed {
+			return ktNorm(int64(r), uint8(w), u), true
+		}
+		return float64(int32(uint32(r))), true
 	case "floorDiv", "mod":
 		_, _, li := ktIntKind(target)
 		_, _, ri := ktIntKind(argAt(args, 0))
@@ -2808,7 +2856,7 @@ func init() {
 					return w(v)
 				}
 			}
-			if (name == "absoluteValue" || name == "sign") && giIsNumeric(o) {
+			if (name == "absoluteValue" || name == "sign" || name == "ulp") && giIsNumeric(o) {
 				return w(rt.ktMathProp(o, name))
 			}
 			if mo, isObj := o.(*jsObject); isObj {
@@ -3360,6 +3408,22 @@ func (rt *jsrt) ktStrMethod2(s, name string, args []interface{}) (interface{}, b
 		return rt.strRange(s, jsToInt(rt.toNumber(argAt(args, 0))), jsToInt(rt.toNumber(argAt(args, 1)))), true
 	case "trimIndent":
 		return ktTrimIndent(s), true
+	case "trimMargin", "replaceIndent":
+		if name == "replaceIndent" {
+			ind := ""
+			if len(args) > 0 {
+				ind = rt.ktStr2(args[0])
+			}
+			return rt.ktReindent(s, ind, nil), true
+		}
+		mp := "|"
+		if len(args) > 0 {
+			mp = rt.ktStr2(args[0])
+		}
+		if strings.TrimFunc(mp, ktIsSpace) == "" {
+			rt.ktRaise("IllegalArgumentException", "marginPrefix must be non-blank string.")
+		}
+		return rt.ktReindent(s, "", &mp), true
 	}
 	// ----- the STRING family of _Strings.kt -----
 	// kotlin.text generates the collection operators for CharSequence from the same
@@ -3469,6 +3533,52 @@ func ktCharsStr(v interface{}) string {
 		}
 	}
 	return out
+}
+
+// ktReindent is kotlin.text's reindent (Indent.kt): the lines of s with a blank
+// first and a blank last line dropped and every other line cut - after its margin
+// prefix (trimMargin, margin non-nil) or by the common indent of the non-blank
+// lines (replaceIndent, margin nil) - and given newIndent; a line the margin cut
+// does not apply to stays as it is. Twin of kReindent in kotlin-interpreter.abnf
+// and k2Reindent in languages/lib/kotlin-rt.metajs.
+func (rt *jsrt) ktReindent(s, newIndent string, margin *string) string {
+	lines := strings.Split(s, "\n")
+	indentW := func(l string) int {
+		for i, r := range l {
+			if !ktIsSpace(r) {
+				return i
+			}
+		}
+		return len(l)
+	}
+	minInd := -1
+	for i, l := range lines {
+		lines[i] = strings.TrimSuffix(l, "\r")
+		if margin == nil && indentW(lines[i]) < len(lines[i]) && (minInd < 0 || indentW(lines[i]) < minInd) {
+			minInd = indentW(lines[i])
+		}
+	}
+	if minInd < 0 {
+		minInd = 0
+	}
+	out := []string{}
+	for i, l := range lines {
+		if (i == 0 || i == len(lines)-1) && indentW(l) == len(l) {
+			continue
+		}
+		if margin == nil {
+			cut := minInd
+			if cut > len(l) {
+				cut = len(l)
+			}
+			out = append(out, newIndent+l[cut:])
+		} else if f := indentW(l); f < len(l) && strings.HasPrefix(l[f:], *margin) {
+			out = append(out, newIndent+l[f+len(*margin):])
+		} else {
+			out = append(out, l)
+		}
+	}
+	return strings.Join(out, "\n")
 }
 
 // ktTrimIndent is kotlin.text.trimIndent: drop a leading and a trailing BLANK
@@ -5287,6 +5397,15 @@ func (rt *jsrt) ktSeqMethodK(o *jsArray, name string, args []interface{}, kind s
 		return len(es) == 0, true
 	case "isNotEmpty":
 		return len(es) > 0, true
+	// iterator(): the Iterator a for loop uses - the cursor a sequence hands out
+	// (ktCursorMethod), over the live list (its arr). Twin of kSeqMethod in
+	// kotlin-interpreter.abnf and ktSeqMethod in languages/lib/kotlin-rt.metajs.
+	case "iterator":
+		if len(args) == 0 {
+			c := ktCursorNew(newJSObject())
+			c.set("arr", o)
+			return c, true
+		}
 	// The names the shared js_mcall already answers for an ARRAY are repeated here
 	// because a STRING reaches this function too (a String is a sequence of Char in
 	// Kotlin, so "abc".map { it.code } is ordinary). The bodies are the same ones, so
@@ -6475,6 +6594,19 @@ func (rt *jsrt) ktSeqMethodK(o *jsArray, name string, args []interface{}, kind s
 		}
 		return rt.ktSeqMethod(o, "removeAt", []interface{}{float64(0)})
 	case "addAll":
+		// addAll(index, elements) inserts at index (ArrayList.addAll's
+		// rangeCheckForAdd message). Twin of kSeqMethod in kotlin-interpreter.abnf
+		// and k3MutList in languages/lib/kotlin-rt.metajs.
+		if len(args) == 2 {
+			at := jsToInt(rt.toNumber(f))
+			if at < 0 || at > len(o.elems) {
+				rt.ktRaise("IndexOutOfBoundsException", fmt.Sprintf("Index: %d, Size: %d", at, len(o.elems)))
+			}
+			more := ktElems(rt, args[1])
+			o.dropIdx()
+			o.elems = append(append(append([]interface{}{}, o.elems[:at]...), more...), o.elems[at:]...)
+			return len(more) > 0, true
+		}
 		more := ktElems(rt, f)
 		o.dropIdx()
 		o.elems = append(o.elems, more...)
@@ -8045,6 +8177,35 @@ func (rt *jsrt) ktSbMethod(o *jsObject, name string, args []interface{}) (interf
 	case "reverse":
 		o.set("s", ktRevText(ktSbText(o)))
 		return o, true
+	// insert / deleteCharAt / setLength, with java.lang.StringBuilder's bounds
+	// checks. Twin of the __sb arms in kotlin-interpreter.abnf and k4SbMethod in
+	// languages/lib/kotlin-rt.metajs.
+	case "insert", "deleteCharAt", "setLength":
+		s := ktSbText(o)
+		n := rt.strLen(s)
+		i := jsToInt(rt.toNumber(argAt(args, 0)))
+		switch {
+		case name == "insert" && (i < 0 || i > n):
+			rt.ktRaise("StringIndexOutOfBoundsException", fmt.Sprintf("Range [%d, %d) out of bounds for length %d", i, n, n))
+		case name == "deleteCharAt" && (i < 0 || i >= n):
+			rt.ktRaise("StringIndexOutOfBoundsException", fmt.Sprintf("Index %d out of bounds for length %d", i, n))
+		case name == "setLength" && i < 0:
+			rt.ktRaise("StringIndexOutOfBoundsException", fmt.Sprintf("String index out of range: %d", i))
+		}
+		switch name {
+		case "insert":
+			o.set("s", strConcat(strConcat(rt.strRange(s, 0, i), rt.ktStr2(argAt(args, 1))), rt.strRange(s, i, n)))
+			return o, true
+		case "deleteCharAt":
+			o.set("s", strConcat(rt.strRange(s, 0, i), rt.strRange(s, i+1, n)))
+			return o, true
+		}
+		if i <= n {
+			o.set("s", rt.strRange(s, 0, i))
+		} else {
+			o.set("s", s+strings.Repeat("\x00", i-n))
+		}
+		return jsUndef, true
 	case "equals":
 		// java.lang.StringBuilder does not override equals: it is identity.
 		return argAt(args, 0) == interface{}(o), true
@@ -9810,7 +9971,10 @@ func (rt *jsrt) ktCursorPull(c *jsObject) bool {
 		return false
 	}
 	var ok bool
-	if src, isCur := ktCursorOf(c.props["src"]); isCur {
+	if a, isArr := c.props["arr"].(*jsArray); isArr {
+		n, _ := c.props["length"].(float64)
+		ok = int(n) < len(a.elems) && ktCursorSet(c, a.elems[int(n)])
+	} else if src, isCur := ktCursorOf(c.props["src"]); isCur {
 		ok = rt.ktDerivedPull(c, src)
 	} else {
 		g, started := c.props["g"].(*jsGenerator)
