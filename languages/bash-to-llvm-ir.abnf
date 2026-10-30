@@ -43,8 +43,7 @@ The generated module is printed (this is the compiler output); it is valid LLVM 
 handed to clang. Passing -exe PATH to mec links it into a native executable with clang directly
 (mec languages/bash-to-llvm-ir.abnf script.sh -exe out && ./out). The supported language, and
 what is modelled rather than real (no filesystem, no environment, no process id), is the one
-documented in bash-interpreter.abnf. Standard error is a real channel and a NATIVE -exe binary
-writes it to fd 2; under llvm.Run, which has no fd 2 at all, its text is dropped. In addition,
+documented in bash-interpreter.abnf. Standard error is a real channel, written to fd 2. In addition,
 a command name computed at run time can only reach echo, the trivial builtins and user functions
 (see emitComputedCommand), and the arrays a subshell ADDS are not rolled back when it ends.") ;
 
@@ -108,10 +107,12 @@ ElseClause  <~~ push(mkElse(pop())) ~~>
 // case WORD in [(] PAT [| PAT]... ) LIST ;; ... esac
 // Subject and patterns are NsWords (not field-split); NotCaseTerm keeps a clause body's
 // separator run off the ";;". Twin of CaseStmt in bash-interpreter.abnf; see there.
-CaseStmt    <~~ push(makeCase(takeAll())) ~~>
+CaseStmt    <~~ push(atLine(makeCase(takeAll()), srcLine(up.start))) ~~>
             = KwCase NsWord KwIn CaseSepOpt { CaseClause } KwEsac ;
 CaseClause  <~~ push(mkCaseClause(takeAll())) ~~>
-            = [ "(" ] CasePats ")" CaseBody [ CaseTerm ] CaseSepOpt ;
+            = CaseOpen CasePats ")" CaseBody [ CaseTerm ] CaseSepOpt ;
+// Twin of CaseOpen in bash-interpreter.abnf; see there.
+CaseOpen    = "(" | NotEsac ;
 CasePats    <~~ push({pats: takeAll()}) ~~> = CasePat { "|" CasePat } ;
 // A case PATTERN is a word whose QUOTED parts are literal (`'*')` matches only "*"): the
 // quoting-aware segments of [[ == ]]'s right hand side (PatSq, PatDq, PatAnsi, PatEsc). Twin of
@@ -136,7 +137,7 @@ UntilStmt   <~~ push(makeUntil(takeAll())) ~~>
 // for (( init; cond; step )); do LIST; done
 // Each part is arithmetic text that, like (( )), is expanded FIRST when it holds an
 // expansion (e='1 + 2'; `i < $e * 2` is i < 5), and may be empty: an empty condition is 1.
-CForStmt    <~~ push(makeCFor(takeAll())) ~~>
+CForStmt    <~~ push(atLine(makeCFor(takeAll()), srcLine(up.start))) ~~>
             = KwFor "((" :whitespace() CfPart ";" CfCond ";" CfPart "))" :whitespace(Whitespace) OptSep KwDo CompoundList KwDone ;
 CfPart      = CfDyn | CfSt | CfZero ;
 CfCond      = CfDyn | CfSt | CfOne ;
@@ -149,7 +150,7 @@ CfZero      <~~ push(mkNum("0")) ~~> = WsNL ;
 CfOne       <~~ push(mkNum("1")) ~~> = WsNL ;
 
 // for NAME in WORD...; do LIST; done   /   for NAME; do LIST; done (the positional parameters)
-ForStmt     <~~ push(makeFor(takeAll())) ~~>
+ForStmt     <~~ push(atLine(makeFor(takeAll()), srcLine(up.start))) ~~>
             = KwFor ForName [ ForIn ] Sep KwDo CompoundList KwDone ;
 ForIn       = KwIn ForWords ;
 ForName     <~~ push({fname: up.in}) ~~>
@@ -205,8 +206,9 @@ FlowCmd     <~~ push(eeExempt(pop())) ~~> = IfStmt | CForStmt | ForStmt | WhileS
 
 // NAME=VALUE... COMMAND ARGS : the assignments apply only for the duration of the command.
 // Tried before a bare Assignment, which is the same shape without a command word after it.
-PrefixCommand <~~ push(makePrefixCmd(takeAll())) ~~>
-            = AsgPrefix { AsgPrefix } NotIoRedir NotReserved CWord { CmdSuffix } ;
+PrefixCommand <~~ push(atLine(makePrefixCmd(takeAll()), lnPop())) ~~>
+            = AsgPrefix1 { AsgPrefix } NotIoRedir NotReserved CWord { CmdSuffix } ;
+AsgPrefix1  <~~ lnPush(up.pos) ~~> = AsgPrefix ;
 AsgPrefix   <~~ push(mkPrefixAsg(takeAll())) ~~>
             = AsgIdent <~~ push({aname: up.in}) ~~> :whitespace() AsgEq :whitespace() [ NsWord ] ;
 AsgEq       = "=" ;
@@ -221,20 +223,20 @@ BraceGroup  <~~ push(eeExempt(makeGroupR(takeAll()))) ~~> = "{" BraceKwEnd Compo
 // (( EXPR )): a text holding an expansion is expanded first and then evaluated, exactly as
 // $(( EXPR )) is. Twin of ArithCmd in bash-interpreter.abnf.
 ArithCmd    = ArithCmdDyn | ArithCmdSt | ArithCmdRaw ;
-ArithCmdSt  <~~ arClaim(up.start + 2, up.pos - 2); push(makeArithCmd(pop())) ~~> = "((" :whitespace(Whitespace) ArList "))" ;
-ArithCmdDyn <~~ push(makeArithCmd(mkArDyn(pop()))) ~~> = "((" :whitespace() ArHasExp ArDynWord "))" ;
+ArithCmdSt  <~~ arClaim(up.start + 2, up.pos - 2); push(atLine(makeArithCmd(pop()), srcLine(up.pos))) ~~> = "((" :whitespace(Whitespace) ArList "))" ;
+ArithCmdDyn <~~ push(atLine(makeArithCmd(mkArDyn(pop())), srcLine(up.pos))) ~~> = "((" :whitespace() ArHasExp ArDynWord "))" ;
 // A text the arithmetic grammar rejects (`(( 1 + ))`) is still an arithmetic command: the
 // run-time evaluator reports bash's syntax error and the command fails with status 1.
-ArithCmdRaw <~~ push(makeArithCmd(mkArDyn(pop()))) ~~> = "((" :whitespace() ArDynWord "))" ;
+ArithCmdRaw <~~ push(atLine(makeArithCmd(mkArDyn(pop())), srcLine(up.pos))) ~~> = "((" :whitespace() ArDynWord "))" ;
 // [[ ... ]] : the conditional command (no word splitting, glob and regex matching).
-CondCmd     <~~ push(makeCondCmd(pop())) ~~> = "[[" :whitespace(Whitespace) CondOr "]]" ;
+CondCmd     <~~ push(atLine(makeCondCmd(pop()), srcLine(up.pos))) ~~> = "[[" :whitespace(Whitespace) CondOr "]]" ;
 
 RedirList   = RedirItem { RedirItem } ;
 RedirItem   = HereDoc | Redir ;
 
 // let EXPR ... : the same evaluator as (( )); a quoted argument is parsed as arithmetic.
 // Redirections may stand among the arguments (`let x=1 2>/dev/null`).
-LetCmd      <~~ push(makeLetCmd(takeAll())) ~~> = KwLet LetItem { LetItem } ;
+LetCmd      <~~ push(atLine(makeLetCmd(takeAll()), srcLine(up.start))) ~~> = KwLet LetItem { LetItem } ;
 KwLet       = "let" KwEnd ;
 LetItem     = RedirItem | NotIoRedir LetArg ;
 // Each argument is a WORD: expanded, field-split where it is unquoted, and every field is
@@ -256,7 +258,7 @@ LetRaw      <~~ push({letws: takeAll()}) ~~> = CWord ;
 // variable slot, and `local` needs it to record the save entry for the current call frame.
 // It carries its own [ RedirList ] because it is not a SimpleCommand
 // (`declare -p missing 2>/dev/null`).
-DeclCommand <~~ push(makeDeclR(takeAll())) ~~>
+DeclCommand <~~ push(atLine(makeDeclR(takeAll()), srcLine(up.start))) ~~>
             = DeclKw { DeclFlag } { DeclItem } [ RedirList ] ;
 DeclKw      <~~ push({dkw: up.in}) ~~> = DeclWord KwEnd ;
 DeclWord    = "local" | "declare" | "typeset" | "export" | "readonly" ;
@@ -273,7 +275,8 @@ DeclName    <~~ push({dname: up.in}) ~~> = Name ;
 // It may carry redirections (`r=$(cmd) 2>/dev/null`): bash performs them after the
 // assignment, so they do not apply to a command substitution on the right hand side.
 // Several may share one command (`a=1 b=$a`): they run left to right, each seeing the last.
-Assignment  <~~ push(makeAssign(takeAll())) ~~> = AsgOne { AsgOne } [ RedirList ] ;
+Assignment  <~~ push(atLine(makeAssign(takeAll()), lnPop())) ~~> = AsgOne1 { AsgOne } [ RedirList ] ;
+AsgOne1     <~~ lnPush(up.pos) ~~> = AsgOne ;
 AsgOne      <~~ push({a: parseAssign(takeAll())}) ~~>
             = AsgIdent <~~ push({aname: up.in}) ~~> AsgTail ;
 
@@ -300,28 +303,29 @@ AsgIdent    = ( "a"..."z" | "A"..."Z" | "_" ) :whitespace() { "a"..."z" | "A"...
 
 // A command word followed by argument words. NotReserved blocks a bare reserved keyword in
 // command position (so 'done' / 'fi' / ... end an enclosing list instead of being commands).
-SimpleCommand <~~ push(makeSimpleCommand(takeAll())) ~~>
-            = NotReserved CWord { CmdSuffix } ;
+SimpleCommand <~~ push(atLine(makeSimpleCommand(takeAll()), lnPop())) ~~>
+            = NotReserved FirstWord { CmdSuffix } ;
+FirstWord   <~~ lnPush(up.pos) ~~> = CWord ;
 CmdSuffix   = HereDoc | Redir | CWord ;
 
-// A here-document: HdScan scans from the marker to the terminator line as ONE token, and
-// mkHereDoc splits it apart again. LIMIT: the marker must be the last thing on its line.
-// Twin of HereDoc in bash-interpreter.abnf; see there.
-HereDoc     <~~ push(mkHereDoc(up.in)) ~~> = HdScan :whitespace(Whitespace) ;
+// A here-document: marker and body as ONE token (lib/bash-splice.abnf), which mkHereDoc splits
+// apart again. Twin of HereDoc in bash-interpreter.abnf; see there.
+HereDoc     <~~ push(mkHereDoc(up.in, up.pos)) ~~> = HdScan :whitespace(Whitespace) ;
 
 // The body of an unquoted here-document, entered through c.parseFrom from mkHereDoc (so
 // -verify reports it unreachable; the "\x01" is prepended there).
 // Twin of HereBodyW in bash-interpreter.abnf; see there.
 HereBodyW   <~~ push(mkWord(takeAll())) ~~> = "\x01" :whitespace() HereSegs ;
 HereSegs    = { HereSeg } ;
-HereSeg     = ExpSeg | DqEsc | HereLit ;
+HereSeg     = DqExpSeg | DqEsc | HereLit ;
 HereLit     <~~ push(makeConst(up.in)) ~~> = !@+"$\\`" ;
 
 // Redirections. `<` declines a second "<" so a here-document HdScan refused cannot fall
 // through and be mis-read as two input redirections.
 Redir       <~~ push(mkRedir(takeAll())) ~~>
             = [ IoNum ] RedirOp [ Word ] ;
-IoNum       <~~ push({iofd: up.in}) ~~> = "0"..."9" :whitespace() { "0"..."9" } ;
+// Twin of IoNum in bash-interpreter.abnf; see there.
+IoNum       <~~ push({iofd: up.in}) ~~> = "0"..."9" :whitespace() { "0"..."9" } RedirNext ;
 RedirOp     <~~ push({redir: up.in}) ~~> = RedirTok ;
 RedirTok    = "<<<" | "&>>" | "&>" | ">>" | ">&" | ">|" | "<&" | ">" | LtOne ;
 LtOne       = "<" NotLt ;
@@ -379,7 +383,7 @@ SqSeg       = "'" :whitespace() { !@+"'" } <~~ push(makeConst(up.in)) ~~> "'" ;
 
 // "double quoted" : literal runs, escapes and $ expansions concatenated.
 DqSeg       <~~ push(mkDqWord(takeAll())) ~~>
-            = '"' :whitespace() { ExpSeg | DqEsc | DqLit } '"' ;
+            = '"' :whitespace() { DqExpSeg | DqEsc | DqLit } '"' ;
 DqLit       <~~ push(makeConst(up.in)) ~~>
             = !@+"\"$\\`" ;
 DqEsc       <~~ push(makeConst(dqEsc(up.in))) ~~>
@@ -530,7 +534,7 @@ ReplArg     <~~ push(mkWord(takeAll())) ~~> = { ReplArgSeg } ;
 ReplArgSeg  = RepSq | RepDq | RepAnsi | ExpSeg | RepEsc | BraceBare ;
 RepSq       = "'" :whitespace() { !@+"'" } <~~ push(makeConst(repEscape(up.in))) ~~> "'" ;
 RepDq       <~~ push(mkQuotedRep(mkDqWord(takeAll()))) ~~>
-            = '"' :whitespace() { ExpSeg | DqEsc | DqLit } '"' ;
+            = '"' :whitespace() { DqExpSeg | DqEsc | DqLit } '"' ;
 RepEsc      <~~ push(makeConst(repEscape(escChar(up.in)))) ~~> = "\\" AnyCh ;
 RepAnsi     = "$'" :whitespace() RepAnsiBody "'" ;
 RepAnsiBody <~~ push(ansiWord(repEscape(ansiC(up.in)))) ~~> = { AnsiEsc | AnsiLit } ;
@@ -553,6 +557,22 @@ BraceWSeg   = SqSeg | DqSeg | AnsiSeg | BraceUq | EscSeg ;
 BraceUq     <~~ push({uq: pop()}) ~~> = ExpSeg | BraceBare ;
 BraceSeg    = SqSeg | DqSeg | AnsiSeg | ExpSeg | EscSeg | BraceBare ;
 BraceBare   <~~ push(makeConst(up.in)) ~~> = !@+"}\"'\\$`" ;
+
+// The expansions of a double-quoted context: a ' in the word of ${v-w} is kept, and the
+// text between two of them expanded. Twin of DqExpSeg in bash-interpreter.abnf; see there.
+DqExpSeg    = ArithExp | CmdSub | BackSub | DqDollarBrace | DollarName | DollarDigit | DollarSpecial | DollarLit ;
+DqDollarBrace <~~ push(mkParamExp(takeAll())) ~~>
+            = "${" :whitespace() DqPeBody "}" ;
+DqPeBody    = PeLen | DqPeIndForm | DqPeCore | PeLenBad ;
+DqPeIndForm <~~ push({indp: 1}) ~~> = "!" ( PePfxNames | DqPeCore ) ;
+DqPeCore    = PePatForm | PeCaseForm | PeReplForm | PeXform | DqPeOpForm | PeSubstrForm | PePlain ;
+DqPeOpForm  = PeTarget PeOp [ DqBraceWord ] ;
+DqBraceWord <~~ push(mkBraceWord(takeAll())) ~~> = DqBrSeg { DqBrSeg } ;
+DqBrSeg     = DqBrSq | DqSeg | AnsiSeg | DqExpSeg | DqBrEsc | BraceBare ;
+DqBrSq      = DqBrQuote { DqExpSeg | DqBrEsc | DqBrSqLit } DqBrQuote ;
+DqBrQuote   <~~ push(makeConst("'")) ~~> = "'" ;
+DqBrSqLit   <~~ push(makeConst(up.in)) ~~> = !@+"'$\\`" ;
+DqBrEsc     <~~ push(makeConst(up.in == "\\}" ? "}" : dqEsc(up.in))) ~~> = "\\" AnyCh ;
 DollarName  = "$" VarName <~~ push(mkVarRef(up.in)) ~~> ;
 DollarDigit = "$" ArgDigit <~~ push(mkVarRef(up.in)) ~~> ;
 DollarSpecial = DollarHash | DollarQ | DollarStar | DollarAt | DollarPid | DollarBang | DollarDash ;
@@ -675,7 +695,7 @@ RegexWord   <~~ push(mkNsWord(takeAll())) ~~> = RegexSeg :whitespace() { RegexSe
 RegexSeg    = RxSq | RxDq | ExpSeg | RxEsc | RegexBare ;
 RxSq        = "'" :whitespace() { !@+"'" } <~~ push(makeConst(regexEscape(up.in))) ~~> "'" ;
 RxDq        <~~ push(mkQuotedRx(mkDqWord(takeAll()))) ~~>
-            = '"' :whitespace() { ExpSeg | DqEsc | DqLit } '"' ;
+            = '"' :whitespace() { DqExpSeg | DqEsc | DqLit } '"' ;
 RxEsc       <~~ push(makeConst(regexEscape(escChar(up.in)))) ~~> = "\\" AnyCh ;
 RegexBare   <~~ push(makeConst(up.in)) ~~> = !@+" \t\n\r;&<>$'\"\\`" ;
 CondParen   = "(" CondOr ")" ;
@@ -689,7 +709,7 @@ PatWord     <~~ push(mkNsWord(takeAll())) ~~> = PatSeg :whitespace() { PatSeg } 
 PatSeg      = PatSq | PatDq | PatAnsi | ExpSeg | PatEsc | ExtGlob | EgPfxLit | BareSeg ;
 PatSq       = "'" :whitespace() { !@+"'" } <~~ push(makeConst(globEscape(up.in))) ~~> "'" ;
 PatDq       <~~ push(mkQuotedPat(mkDqWord(takeAll()))) ~~>
-            = '"' :whitespace() { ExpSeg | DqEsc | DqLit } '"' ;
+            = '"' :whitespace() { DqExpSeg | DqEsc | DqLit } '"' ;
 PatAnsi     = "$'" :whitespace() PatAnsiBody "'" ;
 PatAnsiBody <~~ push(ansiWord(globEscape(ansiC(up.in)))) ~~> = { AnsiEsc | AnsiLit } ;
 PatEsc      <~~ push(makeConst(globEscape(escChar(up.in)))) ~~> = "\\" AnyCh ;
@@ -750,95 +770,6 @@ TildeEnd = :script(~~
         if (cc == 32 || cc == 9 || cc == 10 || cc == 13) { return undefined }
         if (cc == 59 || cc == 38 || cc == 124 || cc == 41 || cc == 62 || cc == 60) { return undefined }
         return abnf.newToken("\x01tilde", 0)
-    })()
-~~) ;
-
-HdScan = :script(~~
-    (function() {
-        var no = abnf.newToken("\x01noheredoc", 0)
-        // Whitespace is not skipped before a script, so step over blanks exactly like the
-        // token match that follows will.
-        var i = 0
-        var cc = c.peek(i)
-        while (cc === 32 || cc === 9) { i = i + 1; cc = c.peek(i) }
-        var start = i
-        if (c.peek(i) !== 60 || c.peek(i + 1) !== 60) { return no }
-        i = i + 2
-        if (c.peek(i) === 60) { return no }           // <<< is a here-STRING
-        var dashed = false
-        if (c.peek(i) === 45) { dashed = true; i = i + 1 }
-        while (c.peek(i) === 32 || c.peek(i) === 9) { i = i + 1 }
-        var quote = 0
-        var q = c.peek(i)
-        if (q === 39 || q === 34) { quote = q; i = i + 1 }
-        var id = ""
-        var ch = c.peek(i)
-        while ((ch >= 48 && ch <= 57) || (ch >= 65 && ch <= 90) || (ch >= 97 && ch <= 122) || ch === 95) {
-            id = id + String.fromCharCode(ch)
-            i = i + 1
-            ch = c.peek(i)
-        }
-        if (id === "") { return no }
-        if (quote !== 0) {
-            if (c.peek(i) !== quote) { return no }
-            i = i + 1
-        }
-        // Nothing but blanks may follow the marker on its own line.
-        var j = i
-        var dd = c.peek(j)
-        while (dd === 32 || dd === 9 || dd === 13) { j = j + 1; dd = c.peek(j) }
-        if (dd !== 10) { return no }
-        j = j + 1
-        // Walk whole lines until one is exactly the marker (leading tabs ignored for <<-),
-        // and stop just BEFORE that line's newline.
-        var end = -1
-        var guard = 0
-        while (guard < 1000000) {
-            guard = guard + 1
-            var k = j
-            var b = c.peek(k)
-            if (b === -1) { end = k; guard = 1000000; continue }
-            if (dashed) { while (b === 9) { k = k + 1; b = c.peek(k) } }
-            var mm = 0
-            while (mm < id.length && c.peek(k + mm) === id.charCodeAt(mm)) { mm = mm + 1 }
-            var after = c.peek(k + mm)
-            if (mm === id.length && (after === 10 || after === 13 || after === -1)) {
-                end = k + mm
-                guard = 1000000
-                continue
-            }
-            while (b !== 10 && b !== -1) { k = k + 1; b = c.peek(k) }
-            if (b === -1) { return no }
-            j = k + 1
-        }
-        if (end < 0) { return no }
-        // Rebuild the exact source slice as a token. c.peek answers BYTES, so the UTF-8 has
-        // to be decoded here or a non-ASCII body would never match.
-        var out = ""
-        var p = start
-        while (p < end) {
-            var b0 = c.peek(p)
-            if (b0 < 128) { out = out + String.fromCharCode(b0); p = p + 1; continue }
-            if (b0 >= 240) {
-                var cp4 = ((b0 - 240) * 262144) + ((c.peek(p + 1) - 128) * 4096) + ((c.peek(p + 2) - 128) * 64) + (c.peek(p + 3) - 128)
-                var off = cp4 - 65536
-                out = out + String.fromCharCode(55296 + ((off - (off % 1024)) / 1024)) + String.fromCharCode(56320 + (off % 1024))
-                p = p + 4
-                continue
-            }
-            if (b0 >= 224) {
-                out = out + String.fromCharCode(((b0 - 224) * 4096) + ((c.peek(p + 1) - 128) * 64) + (c.peek(p + 2) - 128))
-                p = p + 3
-                continue
-            }
-            if (b0 >= 192) {
-                out = out + String.fromCharCode(((b0 - 192) * 64) + (c.peek(p + 1) - 128))
-                p = p + 2
-                continue
-            }
-            return no
-        }
-        return abnf.newToken(out, 0)
     })()
 ~~) ;
 
@@ -955,6 +886,24 @@ NotAmp   = :script(~~ (function() { if (c.peek(0) === 38) { return abnf.newToken
 NotStar  = :script(~~ (function() { if (c.peek(0) === 42) { return abnf.newToken("\x01star", 0) } })() ~~) ;
 NotPlus  = :script(~~ (function() { if (c.peek(0) === 43 || c.peek(0) === 61) { return abnf.newToken("\x01plus", 0) } })() ~~) ;
 NotMinus = :script(~~ (function() { if (c.peek(0) === 45 || c.peek(0) === 61) { return abnf.newToken("\x01minus", 0) } })() ~~) ;
+
+NotEsac = :script(~~
+    (function() {
+        var i = 0
+        while (c.peek(i) === 32 || c.peek(i) === 9) { i = i + 1 }
+        if (c.peek(i) !== 101 || c.peek(i + 1) !== 115 || c.peek(i + 2) !== 97 || c.peek(i + 3) !== 99) { return undefined }
+        var b = c.peek(i + 4)
+        if (b < 0 || b === 32 || b === 9 || b === 10 || b === 13 || b === 59 || b === 38 || b === 124 || b === 40 || b === 41 || b === 60 || b === 62) {
+            return abnf.newToken("\x01esac", 0)
+        }
+        return undefined
+    })()
+~~) ;
+
+// Succeeds (consuming nothing) when a redirection operator follows with no blank between.
+RedirNext = :script(~~
+    (function() { if (c.peek(0) !== 60 && c.peek(0) !== 62) { return abnf.newToken("\x01no-redir", 0) } })()
+~~) ;
 
 NotCaseTerm = :script(~~
     (function() {
@@ -1383,9 +1332,6 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // modelled exactly.
     var gSinkOut = rtGlobal("sink_out", i32)
     var gSinkErr = rtGlobal("sink_err", i32)
-    // 1 only in a native build: lets rt_putc send the standard error channel to fd 2. llvm.Run
-    // has no fd 2 and no `write` extern; see rt_putc in languages/lib/bash-rt.c.
-    var gErrNative = rtGlobal("err_native", i32)
     // Standard input for `read`: the read position (the buffer is gStdin above).
     var gStdinPos = rtGlobal("stdin_pos", i32)
 
@@ -1725,7 +1671,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // unset variable raises the abort flag.
     var rtVar = rtDecl("rt_var", true, [1, 1])
     // rt_putc: one byte to the current sink - the innermost capture buffer if one is open,
-    // stdout if not; channel 1 goes to fd 2 in a native build and nowhere under llvm.Run.
+    // stdout if not; channel 1 goes to fd 2.
     var rtPutc = rtDecl("rt_putc", false, [0])
     var rtCapBegin = rtDecl("rt_cap_begin", false, [0])
     var rtCapEnd = rtDecl("rt_cap_end", true, [0])
@@ -2978,6 +2924,33 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // offsets are its own: arSrc reads them from its text, not the program's.
     var arSnip = ""
     var arInSnip = false
+    // The line of offset pos; in a snippet, of arSnip from its first line snipLine0. Twin of
+    // srcLine in bash-interpreter.abnf.
+    var snipLine0 = 1
+    function srcLine(pos) {
+        if (!arInSnip) { return c.lineOf(pos) }
+        var n = snipLine0
+        var k
+        for (k = 0; k < pos && k < arSnip.length; k++) { if (arSnip.charAt(k) == "\n") { n = n + 1 } }
+        return n
+    }
+    // $LINENO: the code of each command starts by storing its line n, a constant string, into
+    // the ordinary variable (twin of the interpreter's makers, which say which line). emitLine
+    // is that line while the command is being emitted, the line an eval or trap string counts
+    // from.
+    var emitLine = 1
+    function atLine(emit, n) {
+        return function(b) {
+            emitLine = n
+            storeVarRaw(b, "LINENO", gepStr(b, "" + n))
+            return emit(b)
+        }
+    }
+    // A simple command's line is the line its first word ends on. Twin of lnStack in
+    // bash-interpreter.abnf; see there.
+    var lnStack = []
+    function lnPush(pos) { lnStack.push(srcLine(pos)) }
+    function lnPop() { return lnStack.length > 0 ? lnStack.pop() : 0 }
     function arSrc(from, to) { return arInSnip ? arSnip.slice(from, to) : c.srcSlice(from, to) }
     function arCompile(text, rule, claimAll) {
         var svS = arSnip, svIn = arInSnip, svR = arRecs
@@ -4294,8 +4267,12 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // Its continuations are joined first, as in a script (Spliced), so the offsets arSrc reads
     // are those of the joined text.
     function compileSnippet(src) {
-        if (src.indexOf("\\\n") >= 0) { src = c.compile(c.parseFrom(c.agrammar, src, "Spliced")).stack[0] }
-        return arCompile(src, "CompoundList", false)
+        if (src.indexOf("\\\n") >= 0 || src.indexOf("<<") >= 0) { src = c.compile(c.parseFrom(c.agrammar, src, "Spliced")).stack[0] }
+        var sv = snipLine0
+        snipLine0 = emitLine
+        var t = arCompile(src, "CompoundList", false)
+        snipLine0 = sv
+        return t
     }
 
     // printf [-v NAME] [--] FORMAT [ARG...]: the whole command runs in rt_printf
@@ -5146,26 +5123,18 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
     }
 
-    // <<DELIM / <<-DELIM / <<'DELIM' : split the scanned token back into marker and body.
-    function mkHereDoc(text) {
+    // <<DELIM / <<-DELIM: split the token HdScan read back into marker and body. Twin of
+    // mkHereDoc in bash-interpreter.abnf; see there.
+    function mkHereDoc(text, at) {
         var i = 2
         var dashed = false
         if (text.charAt(i) == "-") { dashed = true; i = i + 1 }
-        while (text.charAt(i) == " " || text.charAt(i) == "\t") { i = i + 1 }
-        var quote = ""
-        var q = text.charAt(i)
-        if (q == "'" || q == "\"") { quote = q; i = i + 1 }
-        var firstNL = -1
-        var lastNL = -1
-        var k
-        for (k = 0; k < text.length; k++) {
-            var ch = text.charAt(k)
-            if (ch == "\n") { if (firstNL < 0) { firstNL = k }; lastNL = k }
-        }
-        var body = ""
-        if (firstNL >= 0 && lastNL > firstNL) { body = text.slice(firstNL + 1, lastNL + 1) }
+        var b0 = text.indexOf("\x02")
+        var w = text.slice(i, b0)
+        var quoted = w.indexOf("'") >= 0 || w.indexOf("\"") >= 0 || w.indexOf("\\") >= 0
+        var body = text.slice(b0 + 1, text.length - 1)
         if (dashed) { body = stripLeadingTabs(body) }
-        var t = (quote != "") ? makeConst(body) : compileHereBody(body)
+        var t = quoted ? makeConst(body) : compileHereBody(body, srcLine(at - text.length))
         return {rd: "<<", iofd: "", target: t}
     }
     function stripLeadingTabs(b) {
@@ -5180,8 +5149,12 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         return out
     }
-    function compileHereBody(body) {
-        return arCompile("\x01" + body, "HereBodyW", false)
+    function compileHereBody(body, line) {
+        var sv = snipLine0
+        snipLine0 = line
+        var t = arCompile("\x01" + body, "HereBodyW", false)
+        snipLine0 = sv
+        return t
     }
 
     // A compound statement plus its redirections; items = [bodyThunk, redir...]
@@ -5592,10 +5565,6 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // when its module is generated, so THIS main has to make the call - and it is not
         // optional bookkeeping: every string literal in the runtime is materialized there.
         entry.NewCall(rtGinit, [])
-        // Native build only: turn the fd-2 writer in rt_putc on. c.exePath is "" under
-        // llvm.Run, and rt_putc's comment says why that has to stay silent rather than
-        // abort on the first stderr byte.
-        entry.NewStore(llvm.constant.NewInt(i32, (c.exePath != undefined && c.exePath != "") ? 1 : 0), gErrNative)
         // $0 for the runtime's own ${!r} lookup.
         entry.NewStore(gepStr(entry, c.file), gScriptName)
         // Now that every variable slot is known, mark them all unset in entry (a raw null

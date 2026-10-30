@@ -349,3 +349,43 @@ func TestLibcNative(t *testing.T) {
 		}
 	}
 }
+
+// TestLibcNativeStderr pins the two output names: write reaches warnWriter for fd 2 only,
+// and fflush(NULL) hands the standard output written so far to outWriter first, so a
+// merged stream sees the two in program order.
+func TestLibcNativeStderr(t *testing.T) {
+	var out, errb bytes.Buffer
+	prevOut, prevErr := outWriter, warnWriter
+	outWriter, warnWriter = &out, &errb
+	defer func() { outWriter, warnWriter = prevOut, prevErr }()
+
+	ma := newMachine(ir.NewModule(), "")
+	msg := ma.alloc(4)
+	copy(ma.mem[msg:], "err\n")
+	ma.out.WriteString("out\n")
+	if got := libcNative(ma, "fflush")([]uint64{0}); got != 0 {
+		t.Errorf("fflush(NULL) = %d, want 0", got)
+	}
+	if got := libcNative(ma, "write")([]uint64{2, msg, 4}); got != 4 {
+		t.Errorf("write(2, \"err\\n\", 4) = %d, want 4", got)
+	}
+	if out.String() != "out\n" || ma.out.Len() != 0 {
+		t.Errorf("after fflush(NULL): outWriter %q, still buffered %q; want \"out\\n\", \"\"", out.String(), ma.out.String())
+	}
+	if errb.String() != "err\n" {
+		t.Errorf("write(2): warnWriter got %q, want \"err\\n\"", errb.String())
+	}
+	for _, c := range []struct {
+		name string
+		args []uint64
+	}{{"write", []uint64{1, msg, 4}}, {"fflush", []uint64{msg}}} {
+		func() {
+			defer func() {
+				if recover() == nil {
+					t.Errorf("%s%v did not panic: llvm.Run models only fd 2 and fflush(NULL)", c.name, c.args)
+				}
+			}()
+			libcNative(ma, c.name)(c.args)
+		}()
+	}
+}

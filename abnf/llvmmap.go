@@ -1070,6 +1070,10 @@ var libcExterns = map[string]bool{
 	"strchr": true, "strrchr": true, "strstr": true,
 	"memcpy": true, "memmove": true, "memset": true, "memcmp": true, "memchr": true,
 	"atoi": true, "atol": true, "strdup": true,
+	// Standard error and the flush that orders it after standard output, in the one
+	// shape each is modelled in: write to fd 2 (unbuffered, as the real call is) and
+	// fflush(NULL). Any other fd or stream panics under llvm.Run, naming it.
+	"write": true, "fflush": true,
 	// CAVEAT: for strcmp/strncmp/memcmp the magnitude is unspecified by C and
 	// Apple's libc returns the UNSIGNED byte difference (strcmp("xy","xc") == 22), which
 	// is what byteDiff reproduces. Only the SIGN is portable, so only the sign is
@@ -1397,7 +1401,7 @@ func callgraph(m *ir.Module) string {
 // RunResult is what llvm.Run() returns to JS.
 type RunResult struct {
 	Ret uint32 // The return value of the started function.
-	Out string // Everything the program has written via putchar / puts.
+	Out string // What the program has written via putchar / puts since its last fflush(NULL).
 }
 
 // machineMaxStepsDefault is the emergency brake against endless loops: the number
@@ -2587,7 +2591,8 @@ func (ma *machine) bindExterns() {
 //
 // Names deliberately absent from BOTH, and therefore a loud panic under `llvm.Run`
 // naming the function (externHandler) plus a loud stderr warning under -exe:
-//   - printf / fprintf / sprintf / snprintf / fwrite / fflush / putc / fputc / fputs:
+//   - printf / fprintf / sprintf / snprintf / fwrite / putc / fputc / fputs, and
+//     fflush of one stream:
 //     varargs and FILE* streams. The interpreter has no varargs ABI at all - the
 //     argument list it receives is already flattened to uint64 with no type tags - so a
 //     format string could not be walked correctly, and an approximation that got %ld
@@ -2706,6 +2711,27 @@ func (ma *machine) min(addr uint64) uint64 {
 // name is not one it implements (see the list of exclusions above).
 func libcNative(ma *machine, name string) func(args []uint64) uint64 {
 	switch name {
+	// ----- Standard error -----
+	// fflush(NULL) hands the standard output written so far to outWriter, as the real
+	// call hands it to fd 1, so a later write to fd 2 lands after it in a merged stream.
+	// Standard error is warnWriter, where every other runtime's stderr goes.
+	case "write":
+		return func(args []uint64) uint64 {
+			if fd := signedOf(args[0], 32); fd != 2 {
+				panic(fmt.Sprintf("write to fd %d: llvm.Run models only fd 2 (standard error)", fd))
+			}
+			warnWriter.Write(ma.memAt(args[1], args[2]))
+			return args[2]
+		}
+	case "fflush":
+		return func(args []uint64) uint64 {
+			if args[0] != 0 {
+				panic("fflush of a stream: llvm.Run models only fflush(NULL)")
+			}
+			fmt.Fprint(outWriter, ma.out.String())
+			ma.out.Reset()
+			return 0
+		}
 	// ----- The byte/address family -----
 	// Every one of these is pure work over ma.mem (plus heapAlloc for strdup), which is
 	// laid out exactly as the clang-built binary lays it out (a char is a byte).

@@ -26,6 +26,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -114,7 +115,50 @@ var (
 // against the current source. lineOfPosIn does the same against an explicit
 // line-start table - the call graph passes each function's OWN file's table so
 // functions compiled from imported files get their own line numbers.
-func lineOfPos(pos int) int { return lineOfPosIn(pos, traceLineStarts) }
+func lineOfPos(pos int) int {
+	if m := srcPosMaps[traceSrcName]; m != nil {
+		return lineOfPosIn(m.origPos(pos), m.starts)
+	}
+	return lineOfPosIn(pos, traceLineStarts)
+}
+
+// srcPosMap maps an offset of a rewritten text back to the text as written (see
+// parser.setSrcMap): outAt holds each run's start in the new text, ascending, and
+// origAt the offset that run starts at in orig.
+type srcPosMap struct {
+	orig          string
+	starts        []int // line starts of orig
+	outAt, origAt []int
+}
+
+// srcPosMaps holds the map of each registered source a :script rewrote.
+var srcPosMaps = map[string]*srcPosMap{}
+
+func newSrcPosMap(orig, runs string) *srcPosMap {
+	m := &srcPosMap{orig: orig, starts: []int{0}}
+	for i := 0; i < len(orig); i++ {
+		if orig[i] == '\n' {
+			m.starts = append(m.starts, i+1)
+		}
+	}
+	f := strings.Split(runs, ",")
+	for k := 0; k+1 < len(f); k += 2 {
+		o, _ := strconv.Atoi(f[k])
+		g, _ := strconv.Atoi(f[k+1])
+		m.outAt = append(m.outAt, o)
+		m.origAt = append(m.origAt, g)
+	}
+	return m
+}
+
+// origPos is the offset in orig that offset pos of the new text stands for.
+func (m *srcPosMap) origPos(pos int) int {
+	k := sort.SearchInts(m.outAt, pos+1) - 1
+	if k < 0 {
+		return pos
+	}
+	return m.origAt[k] + pos - m.outAt[k]
+}
 
 func lineOfPosIn(pos int, starts []int) int {
 	if starts == nil || pos < 0 {

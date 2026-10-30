@@ -740,8 +740,9 @@ func (ps *frozenParserScript) init() {
 		ps.fileName = ps.pa.fileName
 	}
 	ps.cMap = map[string]r.Object{
-		"getSrc": func() string { return ps.pa.Src },
-		"setSrc": func(src string) { ps.pa.setSrc(src) },
+		"getSrc":    func() string { return ps.pa.Src },
+		"setSrc":    func(src string) { ps.pa.setSrc(src) },
+		"setSrcMap": func(src, runs string) { ps.pa.setSrcMap(src, runs) },
 		// The name of the file being PARSED - see parserscript.go for what a guard
 		// uses it for (JavaScript's Script-vs-Module goal symbol).
 		"srcName": func() string { return ps.pa.fileName },

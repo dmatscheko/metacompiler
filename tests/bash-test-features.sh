@@ -751,6 +751,12 @@ xcs=0
 for (( xci = 0; xci < 600; xci++ )); do xcv=$(echo "$xci"); xcs=$(( xcs + xcv )); done
 check cs600 "$xcs" 179700
 
+# ----- standard error is fd 2 in every leg -----
+# Not a check: ./test.sh --cross diffs the two halves' merged output, so this line and an
+# arithmetic error's message reach it from llvm.Run as they do from the interpreter.
+echo "features: standard error" >&2
+: $(( 1 / 0 ))
+
 # ----- done -----
 echo "features: $checks checks, $fails failures"
 exit $fails

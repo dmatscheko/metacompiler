@@ -123,12 +123,6 @@ int cond_depth;
 int sink_out;
 int sink_err = 1;
 
-/* 1 exactly when this module was linked into a NATIVE executable, stored by the
- * emitted main's entry block (bash-to-llvm-ir.abnf). It is what lets rt_putc
- * write channel 1 to fd 2 without making llvm.Run - which has no fd 2 and no
- * `write` extern - abort on the first stderr byte. See rt_putc. */
-int err_native;
-
 /* Positional parameters live in ONE global stack rather than in function
  * arguments, so "$@" can expand to any number of words. rt_argpush grows it. */
 char **argv;
@@ -277,14 +271,12 @@ int rt_setvar_byname(char *n, char *v);
 int rt_eval_assign(char *s);
 int putchar(int c);
 
-/* ---- fail-stop -----------------------------------------------------------
- * The two libc names languages/lib/runtime.c already uses for the same job.
- *
- * Neither is available to `llvm.Run` (abnf/llvmmap.go's libcExterns lists only
- * what the IR interpreter implements exactly), so a table overflow under
- * llvm.Run stops with "call to undefined external function @write" - if you
- * see that, you are out of arena; see rt_die. Under a -exe binary it prints the
- * diagnostic on stderr and exits 70. Neither is reached on a successful path. */
+/* ---- standard error and fail-stop ------------------------------------------
+ * write(2, ...) and fflush(NULL) are the shapes of each that `llvm.Run` models
+ * too (abnf/llvmmap.go, libcExterns). exit is not: a table overflow under
+ * llvm.Run prints rt_die's diagnostic and then stops with "call to undefined
+ * external function @exit" - if you see that, you are out of arena. Under a
+ * -exe binary it exits 70. Neither is reached on a successful path. */
 long write(int fd, const char *buf, unsigned long n);
 void exit(int code);
 int fflush(void *f);
@@ -6506,17 +6498,8 @@ char *rt_var(char *nm, char *v)
  *
  * Channel 1 goes to fd 2 one byte at a time through rt_ech, so a redirection
  * that reroutes the channel still decides where the text goes; $( ) capture is
- * channel 0 only, exactly like the shell.
- *
- * WHY IT IS GATED ON err_native. `write` is deliberately absent from
- * abnf/llvmmap.go's libcExterns, and llvm.Run has no standard error at all (its
- * RunResult carries only Out, filled by putchar), so under llvm.Run channel 1
- * is dropped. err_native is 1 ONLY in a native executable (bash-to-llvm-ir.abnf,
- * `c.exePath`), so the write is unreachable in the engine that cannot perform
- * it. This is the same ceiling as manual chapter 7.11.
- *
- * The INTERPRETER half writes channel 1 through the tag host's eprintln, so the
- * two halves a user actually runs agree; see bash-interpreter.abnf writeChan. */
+ * channel 0 only, exactly like the shell. The INTERPRETER half writes channel 1
+ * through the tag host's eprintln; see bash-interpreter.abnf writeChan. */
 int rt_putc(int c)
 {
     int chan;
@@ -6525,9 +6508,7 @@ int rt_putc(int c)
     int l;
     chan = sink_out;
     if (chan == 1) {
-        if (err_native != 0) {
-            rt_ech(c);
-        }
+        rt_ech(c);
         return 0;
     }
     if (chan == 0 || chan >= 3) {

@@ -1051,6 +1051,76 @@ d'}|${r/b/$'e\
 f'}" 'cd|ae\
 fc'
 }
+
+# ===== SECTION 75: $LINENO, a ' in a quoted ${v-w}, case inside $( ), fd numbers, here-documents =====
+# $LINENO is the line the current command starts on, in a function too; a continuation does
+# not move it, an eval string counts from the eval's line, and assigning it lasts until the
+# next command. Inside a DOUBLE-QUOTED ${v-w} (and = + ?, with or without the colon) a ' is an
+# ordinary character that is kept - though it still hides a "}" - while a pattern operator
+# such as ${x#'a'} removes it. `esac` ends a case, so a ")" after it closes an enclosing
+# $( ). An fd number must touch its operator: in `echo 1 >&2` the 1 is an argument. A
+# here-document's body follows the COMMAND line, so code may follow its marker, two may share
+# a line (the last is the input), and any quoting of the delimiter makes the body literal.
+s75lf() { echo $LINENO; }
+s75rd() { local l o=""; while IFS= read -r l; do o="$o[$l]"; done; printf '%s' "$o"; }
+s75() {
+  local l0=$LINENO u= x=abc r r2
+  check ln1 "$(( LINENO - l0 ))" 1
+  check ln2 "$(( $(s75lf) - l0 ))" -3
+  r="$LINENO \
+$LINENO"; check ln3 "$r" "$(( l0 + 4 )) $(( l0 + 4 ))"
+  eval 'r=1
+r=$LINENO'
+  check ln4 "$(( r - l0 ))" 6
+  for r in $LINENO; do :; done; check ln5 "$(( r - l0 ))" 8
+  LINENO=5; r=$LINENO; check ln6 "$(( r - l0 ))" 9
+  check dq1 "${u:-'ab'}|${u-'ab'}|${x:+'a b'}|${x+'q'}" "'ab'||'a b'|'q'"
+  check dq2 "${u:-'a}b'}|${u:-'$x'}|${u:-\'}|${u:-\}}|${u:-a\$b\x}" "'a}b'|'abc'|\\'|}|a\$b\\x"
+  check dq3 "${u:-${u:-'n'}}|${u:-"'q'"}|${x#'a'}|${x/'b'/'X'}" "'n'|'q'|bc|aXc"
+  r=${u:-'ab'}; check dq4 "$r" ab
+  check dq5 "$(s75rd <<EOF
+${u:-'ab'} ${u:-\}}
+EOF
+)" "['ab' }]"
+  r="$(case $x in abc) echo q;; esac)"; check cs1 "$r" q
+  r=$(case $x in (abc) echo q2;; esac); check cs2 "$r" q2
+  case esac in (esac) r=e;; esac; check cs3 "$r" e
+  r=$( { echo 1 >&2 2>&1; } 2>&1 >/dev/null ); check fd1 "$r" 1
+  r=$( { echo 2 >&2; } 2>&1 ); check fd2 "$r" 2
+  r=$(s75rd <<\EOF
+a $x \t
+EOF
+); check hd1 "$r" '[a $x \t]'
+  r=$(s75rd <<E\OF
+b $x
+EOF
+); check hd2 "$r" '[b $x]'
+  r=$(s75rd <<EOF; echo "|t"
+c $x
+EOF
+); check hd3 "$r" "[c abc]|t"
+  r=$(s75rd <<A <<B
+d1 $x
+A
+d2 $x
+B
+); check hd4 "$r" "[d2 abc]"
+  r=$(s75rd <<A && s75rd <<'B'
+e1 $x
+A
+e2 $x
+B
+); check hd5 "$r" '[e1 abc][e2 $x]'
+  r=$( { s75rd <<-EOF; echo; } | s75rd
+	f $x
+	EOF
+); check hd6 "$r" "[[f abc]]"
+  eval 'r=$(s75rd <<E
+g $x
+E
+)'; check hd7 "$r" "[g abc]"
+  check ln7 "$(( LINENO - l0 ))" 55
+}
 # ===== END SECTIONS =====
 
 s47   # SECTION-CALL 47
@@ -1080,5 +1150,6 @@ s71   # SECTION-CALL 71
 s72   # SECTION-CALL 72
 s73   # SECTION-CALL 73
 s74   # SECTION-CALL 74
+s75   # SECTION-CALL 75
 echo "full: $checks checks, $fails failures"
 exit $fails

@@ -3,7 +3,7 @@
 # order: bash writes each command's output as it runs. Checked from outside:
 # tests/native-full.sh runs the native binary with 2>&1 into a file (stdout is then
 # not a terminal) and compares with tests/bash-stderr.expected (real bash 5.3's
-# output). Native only: under llvm.Run standard error is dropped.
+# output). llvm.Run gives the same bytes (-qq, 2>&1).
 echo out1
 echo err1 >&2
 printf 'out2 '

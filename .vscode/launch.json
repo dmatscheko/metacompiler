@@ -3265,6 +3265,20 @@
             "program": "${workspaceFolder}","args": ["languages/bash-to-llvm-ir.abnf", "tests/bash-abort-test-errexit.sh", "-q", "-exe", "tests/bash-abort-errexit.out"]
         },
         {
+            "name": "Bash parse error in a continued line after a moved here-document (interpreter, SHOULD FAIL)",
+            "type": "go",
+            "request": "launch",
+            "expectError": "Last good parse position: tests/bash-abort-test-splice.sh:10:5",
+            "program": "${workspaceFolder}","args": ["languages/bash-interpreter.abnf", "tests/bash-abort-test-splice.sh", "-q"]
+        },
+        {
+            "name": "Bash parse error in a continued line after a moved here-document (compiler, SHOULD FAIL)",
+            "type": "go",
+            "request": "launch",
+            "expectError": "Last good parse position: tests/bash-abort-test-splice.sh:10:5",
+            "program": "${workspaceFolder}","args": ["languages/bash-to-llvm-ir.abnf", "tests/bash-abort-test-splice.sh", "-q"]
+        },
+        {
             "name": "Speed Test",
             "type": "go",
             "request": "launch",

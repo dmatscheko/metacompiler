@@ -1,22 +1,28 @@
-// bash line continuation as a source PRE-PASS. bash removes an unquoted backslash-newline
-// while it READS its input, before any token exists, so it may split a name (`x\<nl>y=3`
-// assigns xy), a keyword, an operator or a ${...} anywhere. BsSplice rewrites the source
-// with c.setSrc() and restarts the parse, so the grammar never sees a continuation that is
-// spliced. Kept as written: inside '...' and $'...', in a comment, and in the body of a
-// here-document whose delimiter is quoted. In an unquoted body the joined line is what is
+// bash line continuation and here-documents as a source PRE-PASS.
+//
+// bash removes an unquoted backslash-newline while it READS its input, before any token
+// exists, so it may split a name (`x\<nl>y=3` assigns xy), a keyword, an operator or a
+// ${...} anywhere. Kept as written: inside '...' and $'...', in a comment, and in the body of
+// a here-document whose delimiter is quoted. In an unquoted body the joined line is what is
 // compared with the delimiter (`E\<nl>OF` ends it). Inside "${...}" a single quote, $'
-// included, is an ordinary character. The removed newlines are put back as blank lines at the next line
-// break in command text, so every line after a joined one keeps its number in a parse
-// error. A file without a backslash-newline leaves after one indexOf.
+// included, is an ordinary character.
+//
+// A here-document's body starts on the line after the COMMAND line, wherever on it the
+// marker stands (`cat <<A; echo x`, `f <<A <<B`). BsSplice moves each body next to its
+// marker, as `<<A\x02body\x03`, so HdScan reads marker and body as one token, and drops it
+// from where it stood.
+//
+// The rewrite goes through c.setSrcMap() and restarts the parse; the map it hands over says
+// where each run of the new text came from, so c.lineOf and a parse error still name the
+// line and column as written. A file with neither a backslash-newline nor a "<<" leaves
+// after two indexOf.
 // Include with :include("lib/bash-splice.abnf") and reference BsSplice first in the start
 // production.
 BsSplice    = :script(~~
     (function() {
         var src = c.getSrc()
-        if (src.indexOf("\\\n") < 0) { return undefined }
+        if (src.indexOf("\\\n") < 0 && src.indexOf("<<") < 0) { return undefined }
         var n = src.length
-        var out = ""
-        var last = 0        // start of the not-yet-copied run
         // The quoting context, one frame per level: kind 0 command text, 1 "...", 2 '...',
         // 3 $'...', 4 ${...}, 5 `...`. dep counts the frame's open ( (or { and [), cl is 1 for a
         // command frame that a ")" closes, ar 1 for arithmetic (no comment, no here-doc),
@@ -33,6 +39,7 @@ BsSplice    = :script(~~
         var hdWord = []     // here-documents opened on the current line
         var hdQuoted = []
         var hdDash = []
+        var hdIdx = []      // ... and their number among all of them
         var prev = "\n"     // the last character kept, for the start of a comment
         var i = 0
         // Past every continuation from k on: what the next character really is.
@@ -40,15 +47,28 @@ BsSplice    = :script(~~
             while (src.charAt(k) === "\\" && src.charAt(k + 1) === "\n") { k = k + 2 }
             return k
         }
-        var held = 0        // newlines spliced out and not yet given back
-        var cut = function(k) { out = out + src.substring(last, k); last = k + 2; held = held + 1 }
-        // Give the held newlines back at k, the start of a line in command text, where a run
-        // of newlines means what one does: every later line keeps its line number.
-        var giveBack = function(k) {
-            out = out + src.substring(last, k)
-            last = k
-            while (held > 0) { out = out + "\n"; held = held - 1 }
+        // The edits, by source offset: drop edDel characters at edAt, or (edHd >= 0) insert
+        // that here-document's body there. A body is the runs rnFrom..rnTo from hdFrom to
+        // hdTo: its text minus the continuations an unquoted one splices.
+        var edAt = []
+        var edDel = []
+        var edHd = []
+        var hdFrom = []
+        var hdTo = []
+        var rnFrom = []
+        var rnTo = []
+        var edit = function(at, del, hd) {
+            edAt.push(at); edDel.push(del); edHd.push(hd)
+            // A continuation inside a delimiter word is found after the word's own insertion.
+            var e = edAt.length - 1
+            while (e > 0 && edAt[e - 1] > edAt[e]) {
+                var ta = edAt[e]; edAt[e] = edAt[e - 1]; edAt[e - 1] = ta
+                var td = edDel[e]; edDel[e] = edDel[e - 1]; edDel[e - 1] = td
+                var th = edHd[e]; edHd[e] = edHd[e - 1]; edHd[e - 1] = th
+                e = e - 1
+            }
         }
+        var cut = function(k) { edit(k, 2, -1) }
         var open = function(k, d, closes, isAr, inDq) {
             kind.push(k); dep.push(d); cl.push(closes); ar.push(isAr); dq.push(inDq); cs.push(0); pe.push(0)
         }
@@ -71,22 +91,34 @@ BsSplice    = :script(~~
                 w = w + h
                 k = nx(k + 1)
             }
-            if (w !== "") { hdWord.push(w); hdQuoted.push(quoted); hdDash.push(dash) }
+            if (w !== "") {
+                hdWord.push(w); hdQuoted.push(quoted); hdDash.push(dash); hdIdx.push(hdFrom.length)
+                edit(k, 0, hdFrom.length)
+                hdFrom.push(0); hdTo.push(0)
+            }
         }
-        // Every pending here-document body, from the line start at i on.
+        // Every pending here-document body, from the line start at i on: recorded as runs
+        // and dropped from here.
         var hdBodies = function() {
+            var region = i
             var b = 0
             while (b < hdWord.length) {
                 var done = false
+                var from = i
+                var end = n
+                hdFrom[hdIdx[b]] = rnFrom.length
                 while (!done && i < n) {
                     var line = ""
                     var s = i
+                    // A terminator line with a continuation in it leaves no run behind.
+                    var lineFrom = from
+                    var lineRuns = rnFrom.length
                     var eol = false
                     while (!eol && i < n) {
                         var h = src.charAt(i)
                         if (h === "\n") { eol = true; i = i + 1; continue }
                         if (h === "\\" && !hdQuoted[b] && i + 1 < n) {
-                            if (src.charAt(i + 1) === "\n") { cut(i); i = i + 2; continue }
+                            if (src.charAt(i + 1) === "\n") { rnFrom.push(from); rnTo.push(i); i = i + 2; from = i; continue }
                             line = line + h + src.charAt(i + 1)
                             i = i + 2
                             continue
@@ -95,14 +127,24 @@ BsSplice    = :script(~~
                         i = i + 1
                     }
                     if (hdDash[b]) { while (line.charAt(0) === "\t") { line = line.substring(1) } }
-                    if (line === hdWord[b]) { done = true }
+                    if (line === hdWord[b]) {
+                        done = true
+                        end = s
+                        from = lineFrom
+                        while (rnFrom.length > lineRuns) { rnFrom.pop(); rnTo.pop() }
+                    }
                     if (s === i) { done = true }
                 }
+                if (end < from) { end = from }
+                rnFrom.push(from); rnTo.push(end)
+                hdTo[hdIdx[b]] = rnFrom.length
                 b = b + 1
             }
+            if (i > region) { edit(region, i - region, -1) }
             hdWord = []
             hdQuoted = []
             hdDash = []
+            hdIdx = []
             prev = "\n"
         }
         while (i < n) {
@@ -212,14 +254,87 @@ BsSplice    = :script(~~
             }
             prev = ch
             i = i + 1
-            if (ch === "\n") {
-                if (hdWord.length > 0) { hdBodies() }
-                if (held > 0) { giveBack(i) }
-            }
+            if (ch === "\n" && hdWord.length > 0) { hdBodies() }
         }
-        giveBack(n)
-        c.setSrc(out)
+        // Apply the edits. runs: per run of out, its start there and the offset it stands for
+        // in src (an inserted \x02 or \x03 stands for its marker's end).
+        var out = ""
+        var runs = ""
+        var pos = 0
+        var run = function(from) { runs = runs + (runs === "" ? "" : ",") + out.length + "," + from }
+        var e = 0
+        while (e < edAt.length) {
+            var at = edAt[e]
+            if (at > pos) { run(pos); out = out + src.substring(pos, at); pos = at }
+            if (edHd[e] < 0) {
+                if (at + edDel[e] > pos) { pos = at + edDel[e] }
+            } else {
+                run(at)
+                out = out + "\x02"
+                var r = hdFrom[edHd[e]]
+                while (r < hdTo[edHd[e]]) {
+                    if (rnTo[r] > rnFrom[r]) { run(rnFrom[r]); out = out + src.substring(rnFrom[r], rnTo[r]) }
+                    r = r + 1
+                }
+                run(at)
+                out = out + "\x03"
+            }
+            e = e + 1
+        }
+        if (pos < n) { run(pos); out = out + src.substring(pos) }
+        c.setSrcMap(out, runs)
         c.setSdx(0)
         return undefined
+    })()
+~~) ;
+
+// A here-document as BsSplice left it: `<<`, an optional `-`, the delimiter word as written,
+// then the body between \x02 and \x03 - ONE token, which mkHereDoc splits apart again.
+HdScan = :script(~~
+    (function() {
+        var no = abnf.newToken("\x01noheredoc", 0)
+        // Whitespace is not skipped before a script, so step over blanks exactly like the
+        // token match that follows will.
+        var i = 0
+        var cc = c.peek(i)
+        while (cc === 32 || cc === 9) { i = i + 1; cc = c.peek(i) }
+        var start = i
+        if (c.peek(i) !== 60 || c.peek(i + 1) !== 60 || c.peek(i + 2) === 60) { return no }
+        i = i + 2
+        // The delimiter word ends at the \x02; a separator or another redirection first
+        // means this is no here-document BsSplice saw.
+        cc = c.peek(i)
+        while (cc >= 0 && cc !== 2 && cc !== 10 && cc !== 59 && cc !== 38 && cc !== 124 && cc !== 60) { i = i + 1; cc = c.peek(i) }
+        if (cc !== 2 || i === start + 2) { return no }
+        while (cc >= 0 && cc !== 3) { i = i + 1; cc = c.peek(i) }
+        if (cc !== 3) { return no }
+        var end = i + 1
+        // Rebuild the exact source slice as a token. c.peek answers BYTES, so the UTF-8 has
+        // to be decoded here or a non-ASCII body would never match.
+        var out = ""
+        var p = start
+        while (p < end) {
+            var b0 = c.peek(p)
+            if (b0 < 128) { out = out + String.fromCharCode(b0); p = p + 1; continue }
+            if (b0 >= 240) {
+                var cp4 = ((b0 - 240) * 262144) + ((c.peek(p + 1) - 128) * 4096) + ((c.peek(p + 2) - 128) * 64) + (c.peek(p + 3) - 128)
+                var off = cp4 - 65536
+                out = out + String.fromCharCode(55296 + ((off - (off % 1024)) / 1024)) + String.fromCharCode(56320 + (off % 1024))
+                p = p + 4
+                continue
+            }
+            if (b0 >= 224) {
+                out = out + String.fromCharCode(((b0 - 224) * 4096) + ((c.peek(p + 1) - 128) * 64) + (c.peek(p + 2) - 128))
+                p = p + 3
+                continue
+            }
+            if (b0 >= 192) {
+                out = out + String.fromCharCode(((b0 - 192) * 64) + (c.peek(p + 1) - 128))
+                p = p + 2
+                continue
+            }
+            return no
+        }
+        return abnf.newToken(out, 0)
     })()
 ~~) ;

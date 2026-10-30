@@ -42,7 +42,8 @@ type parser struct {
 
 	initialSpaces *r.Rule // The rule that describes skippable whitespace (nil skips nothing). Set via :whitespace(), see applyCommand().
 
-	lastParsePosition int // The furthest position that could be parsed. Only used for error messages.
+	lastParsePosition int        // The furthest position that could be parsed. Only used for error messages.
+	posMap            *srcPosMap // Where the text came from, after a c.setSrcMap rewrite; nil = as written.
 
 	ps scriptRuleRunner // The JS subsystem for dynamic :script() rules.
 
@@ -74,8 +75,10 @@ func (pa *parser) setSrc(src string) {
 	// into the new text, so c.srcSlice and the line table must answer from that text.
 	if traceSrcName != "" && sourceTexts[traceSrcName] == pa.Src {
 		SetTraceSource(traceSrcName, src)
+		delete(srcPosMaps, traceSrcName)
 	}
 	pa.Src = src
+	pa.posMap = nil
 	pa.wsCache = map[*r.Rule]*wsMemo{}
 	// The found and block lists are keyed by a position in the old text, so they
 	// have to go as well (-lf / -lb). pureCache survives: it only depends on the
@@ -83,6 +86,34 @@ func (pa *parser) setSrc(src string) {
 	pa.foundList = map[applyKey]*r.Rules{}
 	pa.foundSdxList = map[applyKey]int{}
 	pa.blockList = map[applyKey]bool{}
+}
+
+// setSrcMap is setSrc for a rewrite that knows where its text came from (c.setSrcMap):
+// runs is "out,orig,out,orig,..." - each copied or inserted run of src, by its start in
+// src and the offset in the old text it stands for. Line numbers (c.lineOf) and parse
+// errors then name the text as written; c.srcSlice still reads the new text.
+func (pa *parser) setSrcMap(src, runs string) {
+	m := newSrcPosMap(pa.Src, runs)
+	if prev := pa.posMap; prev != nil {
+		m.orig, m.starts = prev.orig, prev.starts
+		for k := range m.origAt {
+			m.origAt[k] = prev.origPos(m.origAt[k])
+		}
+	}
+	registered := traceSrcName != "" && sourceTexts[traceSrcName] == pa.Src
+	pa.setSrc(src)
+	pa.posMap = m
+	if registered {
+		srcPosMaps[traceSrcName] = m
+	}
+}
+
+// filePos is a position of the parsed text as file:line:column of the file as written.
+func (pa *parser) filePos(pos int) string {
+	if m := pa.posMap; m != nil && pos >= 0 && pos <= len(pa.Src) {
+		return FileLinePos(pa.fileName, m.orig, m.origPos(pos))
+	}
+	return FileLinePos(pa.fileName, string(pa.Src), pos)
 }
 
 // includedByGrammar tracks, per a-grammar, which :include() files were already
@@ -1343,7 +1374,7 @@ func ParseWithAgrammar(agrammar *r.Rules, srcCode, fileName string, options *Par
 	// consume would otherwise fall through both checks and return (nil, nil), a silent
 	// success with no ASG that the :startScript() then trips over.
 	if newProductions == nil {
-		panic(fmt.Sprintf("Not everything could be parsed. Last good parse position: %s\nParsed so far: %s", FileLinePos(pa.fileName, string(pa.Src), pa.lastParsePosition), "<nothing: the start production did not match>"))
+		panic(fmt.Sprintf("Not everything could be parsed. Last good parse position: %s\nParsed so far: %s", pa.filePos(pa.lastParsePosition), "<nothing: the start production did not match>"))
 	}
 	if pa.Sdx < len(pa.Src) {
 		// Default is the structure-only tree (least noise); -error code/code-all also show
@@ -1362,7 +1393,7 @@ func ParseWithAgrammar(agrammar *r.Rules, srcCode, fileName string, options *Par
 				short = ShortenColored(dump)
 			}
 		}
-		panic(fmt.Sprintf("Not everything could be parsed. Last good parse position: %s\nParsed so far: %s", FileLinePos(pa.fileName, string(pa.Src), pa.lastParsePosition), short))
+		panic(fmt.Sprintf("Not everything could be parsed. Last good parse position: %s\nParsed so far: %s", pa.filePos(pa.lastParsePosition), short))
 	}
 
 	mergeTerminals(newProductions)

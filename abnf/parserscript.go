@@ -74,6 +74,7 @@ func (ps *parserscript) initFuncMap() {
 
 	ps.compilerFuncMap["getSrc"] = func() string { return ps.pa.Src }
 	ps.compilerFuncMap["setSrc"] = func(src string) { ps.pa.setSrc(src) }
+	ps.compilerFuncMap["setSrcMap"] = func(src, runs string) { ps.pa.setSrcMap(src, runs) }
 	// srcName is the name of the file currently being PARSED (cleaned, exactly as
 	// it was handed to ParseWithAgrammar). A :script guard otherwise cannot see it,
 	// and some languages make a syntactic decision from the file name alone - in
