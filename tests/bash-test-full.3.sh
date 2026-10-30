@@ -1204,6 +1204,32 @@ EOF
   >/dev/null w=5; check ro6 "$w" 5
   if >/dev/null; then r=ok; else r=no; fi; check ro7 "$r" ok
 }
+# ===== SECTION 78: a prefix assignment is in effect for the command, not for its words =====
+# `x=2 cmd $x` expands the words first, then makes the assignments (left to right, each seeing
+# the one before), then the redirections, whose words do not see them either, and runs the
+# command; afterwards the names are as they were, whatever the command assigned to them. With
+# no command word left (`x=5 $e`) the assignments stay, and the status is that of the last
+# command substitution, else 0.
+s78() {
+  local x=1 y r e= c=0
+  s78p() { printf '%s|' "$@"; echo "x=$x"; }
+  s78s() { x=9; }
+  s78y() { echo "$x$y"; }
+  r=$(x=2 echo "$x"); check tw1 "$r" 1
+  r=$(x=2 s78p "$x" "${x}${x}" $((x + 1))); check tw2 "$r" "1|11|2|x=2"
+  r=$(x=2 y=$x s78p "$y"); check tw3 "$r" "|x=2"
+  r=$(x=2 y=$x$x s78y); check tw4 "$r" 222
+  x=7 s78s; check tw5 "$x" 1
+  x=7 read x <<< "$x"; check tw6 "$x" 1
+  x=7 read y <<< "$x"; check tw7 "$y" 1
+  x=7 : $(( c += 1 )); check tw8 "$c|$x" "1|1"
+  r=$(x=$c s78p $(( c += 1 ))); check tw9 "$r" "2|x=2"
+  for c in 3 4; do r=$r,$(x=$c s78p "$x"); done; check tw10 "$r" "2|x=2,1|x=3,1|x=4"
+  r=$(x=$(exit 3) $e; echo "$? [$x]"); check tw11 "$r" "3 []"
+  r=$(x=$(exit 3) $e $(exit 4); echo "$?"); check tw12 "$r" 3
+  r=$($(exit 4); echo "$?"); check tw13 "$r" 4
+  false; x=5 $e; check tw14 "$?|$x" "0|5"
+}
 # ===== END SECTIONS =====
 
 s47   # SECTION-CALL 47
@@ -1236,5 +1262,6 @@ s74   # SECTION-CALL 74
 s75   # SECTION-CALL 75
 s76   # SECTION-CALL 76
 s77   # SECTION-CALL 77
+s78   # SECTION-CALL 78
 echo "full: $checks checks, $fails failures"
 exit $fails

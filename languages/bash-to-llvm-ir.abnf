@@ -306,13 +306,13 @@ AsgIdent    = ( "a"..."z" | "A"..."Z" | "_" ) :whitespace() { "a"..."z" | "A"...
 
 // A command word followed by argument words. NotReserved blocks a bare reserved keyword in
 // command position (so 'done' / 'fi' / ... end an enclosing list instead of being commands).
-SimpleCommand <~~ push(atLine(makeSimpleCommand(takeAll()), lnPop())) ~~>
+SimpleCommand <~~ push(atLine(makeSimpleCommand(takeAll(), null), lnPop())) ~~>
             = NotReserved FirstWord { CmdSuffix } ;
 FirstWord   <~~ lnPush(up.pos) ~~> = CWord ;
 CmdSuffix   = HereDoc | Redir | CWord ;
 // Redirections before the command word, or with no command at all (then `:`). Twin of
 // RedirCommand in bash-interpreter.abnf; see there.
-RedirCommand <~~ push(atLine(makeSimpleCommand(redirCmdItems(takeAll())), lnPop())) ~~>
+RedirCommand <~~ push(atLine(makeSimpleCommand(redirCmdItems(takeAll()), null), lnPop())) ~~>
             = RedirFirst { RedirItem } [ NotReserved CWord { CmdSuffix } ] ;
 RedirFirst  <~~ lnPush(up.pos) ~~> = RedirItem ;
 
@@ -4694,7 +4694,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // builtins and every user function. LIMIT: builtins compiled from a literal argument list
     // (printf, test/[, read, eval, set, trap, unset, declare, control flow) reach the
     // `command not found` fallback here, where the interpreter runs them.
-    function emitComputedCommand(b, cmdT, argTs) {
+    // subs: a word or prefix assignment holds a command substitution.
+    function emitComputedCommand(b, cmdT, argTs, subs) {
         var listP = slotOf(i8ptr)
         b.NewStore(nilList(b), listP)
         var rw = cmdT.fn(b)
@@ -4712,11 +4713,12 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var nameV = b.NewCall(rtGetField, [all, zero])
         var restV = b.NewCall(rtSliceFields, [all, one, b.NewSub(nf, one), ifsFirstValue(b), zero])
         var done = curF.NewBlock("")
-        // A command word that expands to NO field at all runs nothing and answers 0:
-        // `e=""; $e` is a successful no-op in bash.
+        // A command word that expands to NO field at all runs nothing and answers 0 - or the
+        // status of the last command substitution it made (`$(exit 4)` answers 4), which is
+        // already in $?. Twin of the empty arm of makeSimpleCommand in bash-interpreter.abnf.
         var haveB = curF.NewBlock(""), noneB = curF.NewBlock("")
         b.NewCondBr(b.NewICmp(llvm.enum.IPredSGT, nf, zero), haveB, noneB)
-        storeStatusI(noneB, 0)
+        if (!subs) { storeStatusI(noneB, 0) }
         noneB.NewBr(done)
         b = haveB
         var cands = ["echo", ":", "true", "false", "wait"]
@@ -4781,8 +4783,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return out
     }
     // words[0] is the command word (a literal, or an expansion - see emitComputedCommand),
-    // the rest are arguments.
-    function makeSimpleCommand(items0) {
+    // the rest are arguments. asgs: the {aname,val} prefix assignments (`x=1 cmd`), or null.
+    function makeSimpleCommand(items0, asgs) {
         var cmdT = items0[0]
         var argTs = []
         var redirs = []
@@ -4794,7 +4796,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var inner = function(b) {
             b = emitAbortCheck(b)
             var cmd = cmdT.c
-            if (cmd == undefined) { return emitComputedCommand(b, cmdT, argTs) }
+            if (cmd == undefined) { return emitComputedCommand(b, cmdT, argTs, hasCmdSub(cmdT, argTs, asgs)) }
             if (cmd == "echo") { return emitEcho(b, argTs) }
             if (cmd == "[" || cmd == "test") { return emitTest(b, cmd, argTs) }
             // `cmd &` already ran to completion (see mkAsync), so there is never anything
@@ -5016,8 +5018,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             b.NewBr(viaUnwind(curExit, curExitRd))
             return deadBlock()
         }
-        if (redirs.length == 0) { return inner }
-        return function(b) {
+        var run = inner
+        if (redirs.length > 0) { run = function(b) {
             var sv = emitOpenRedirs(b, redirs)
             var cmd0 = cmdT, args0 = argTs
             cmdT = preRedirWord(cmd0, sv)
@@ -5038,7 +5040,92 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             b = redirJoin(b, gate)
             if (!isExec) { emitCloseRedirs(b, sv) }
             return b
+        } }
+        if (asgs == null) { return run }
+        // The prefix assignments come AFTER the words, so no word sees them (`x=1; x=2 echo
+        // $x` prints 1): every non-literal word is expanded up front and the command reads
+        // the result. Then the assignments, undone after the command by the local save
+        // stack, then the redirections, whose words do not see them either (prefixOuter).
+        // Twin of makeSimpleCommand and applyPrefix in bash-interpreter.abnf.
+        var asgConst = true
+        var ai
+        for (ai = 0; ai < asgs.length; ai++) { if (asgs[ai].val != null && asgs[ai].val.c == undefined) { asgConst = false } }
+        return function(b) {
+            var cmd0 = cmdT, args0 = argTs, redirs0 = redirs
+            var bx = {b: b}
+            cmdT = expandedWord(bx, cmd0)
+            argTs = []
+            var k
+            for (k = 0; k < args0.length; k++) { argTs.push(expandedWord(bx, args0[k])) }
+            b = emitAbortCheck(bx.b)
+            var olds = []
+            if (redirs0.length > 0) { for (k = 0; k < asgs.length; k++) { olds.push(loadVar(b, asgs[k].aname)) } }
+            var depth = slotOf(i32)
+            b.NewStore(b.NewLoad(i32, gLsTop), depth)
+            var vals = []
+            for (k = 0; k < asgs.length; k++) {
+                b.NewCall(rtPushLocal, llvm.constant.NewInt(i32, getVarId(asgs[k].aname)))
+                var v = emptyPtr(b)
+                if (asgs[k].val != null) { var r = evalWord(b, asgs[k].val); b = r.b; v = r.v }
+                storeVar(b, asgs[k].aname, v)
+                vals.push(v)
+            }
+            if (!asgConst) { b = emitAbortCheck(b) }
+            if (redirs0.length > 0) {
+                redirs = []
+                for (k = 0; k < redirs0.length; k++) {
+                    var rd = redirs0[k]
+                    if (rd.target != null && rd.target.c == undefined) { rd = {rd: rd.rd, iofd: rd.iofd, target: prefixOuter(rd.target, asgs, olds)} }
+                    redirs.push(rd)
+                }
+            }
+            // A command word that expands to no field runs nothing, and its assignments stay.
+            var empty = null
+            if (cmdT.pv != undefined && cmd0.f == true) { empty = b.NewICmp(llvm.enum.IPredEQ, b.NewCall(rtNFields, cmdT.pv), zero) }
+            b = run(b)
+            cmdT = cmd0
+            argTs = args0
+            redirs = redirs0
+            b.NewCall(rtPopLocals, b.NewLoad(i32, depth))
+            if (empty == null) { return b }
+            var keepB = curF.NewBlock(""), done = curF.NewBlock("")
+            b.NewCondBr(empty, keepB, done)
+            for (k = 0; k < asgs.length; k++) { storeVar(keepB, asgs[k].aname, vals[k]) }
+            keepB.NewBr(done)
+            return done
         }
+    }
+    // A command's word, expanded now: the word the command reads instead, which hands back
+    // the value (pv) wherever it is read.
+    function expandedWord(bx, w) {
+        if (w.c != undefined) { return w }
+        var r = w.fn(bx.b)
+        bx.b = r.b
+        var v = r.v
+        return {s: w.s, f: w.f, c: undefined, pv: v, fn: function(b) { return {b: b, v: v} }}
+    }
+    // A redirection's word under prefix assignments: expanded with the names holding the values
+    // they had before them (olds, loaded in order, so restoring them backwards leaves each
+    // name's first one).
+    function prefixOuter(w, asgs, olds) {
+        return {s: w.s, f: w.f, c: undefined, fn: function(b) {
+            var cur = []
+            var k
+            for (k = 0; k < asgs.length; k++) { cur.push(loadVar(b, asgs[k].aname)) }
+            for (k = asgs.length - 1; k >= 0; k--) { storeVarRaw(b, asgs[k].aname, olds[k]) }
+            var r = w.fn(b)
+            for (k = 0; k < asgs.length; k++) { storeVarRaw(r.b, asgs[k].aname, cur[k]) }
+            return r
+        }}
+    }
+    // Whether a command substitution stands in the command's words or prefix assignments.
+    function hasCmdSub(cmdT, argTs, asgs) {
+        if (cmdT.s == true) { return true }
+        var k
+        for (k = 0; k < argTs.length; k++) { if (argTs[k].s == true) { return true } }
+        if (asgs == null) { return false }
+        for (k = 0; k < asgs.length; k++) { if (asgs[k].val != null && asgs[k].val.s == true) { return true } }
+        return false
     }
     // bash expands a command's words BEFORE it applies the command's redirections, so what an
     // expansion writes to stderr (a command substitution's own stderr, an arithmetic error) or
@@ -5047,7 +5134,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // non-literal word runs with the saved streams exchanged back in. Twin of makeSimpleCommand
     // in bash-interpreter.abnf, which expands every word before openRedirs.
     function preRedirWord(w, sv) {
-        if (w.c != undefined) { return w }
+        if (w.c != undefined || w.pv != undefined) { return w }
         var o = {s: w.s, f: w.f, c: undefined, fn: preRedirFn(w.fn, sv)}
         if (w.spw != undefined) { o.spw = {s: w.spw.s, f: w.spw.f, c: w.spw.c, fn: preRedirFn(w.spw.fn, sv)} }
         return o
@@ -5432,8 +5519,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function mkPrefixAsg(items) {
         return {aname: items[0].aname, val: (items.length > 1) ? items[1] : null}
     }
-    // NAME=VALUE... COMMAND : the assignments are undone after the command, which the local
-    // save stack already does exactly right.
+    // NAME=VALUE... COMMAND (makeSimpleCommand has the rules).
     function makePrefixCmd(items) {
         var asgs = []
         var rest = []
@@ -5443,21 +5529,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (it.fn == undefined && it.rd == undefined && it.aname != undefined) { asgs.push(it) }
             else { rest.push(it) }
         }
-        var inner = makeSimpleCommand(redirCmdItems(rest))
-        return function(b) {
-            var depth = slotOf(i32)
-            b.NewStore(b.NewLoad(i32, gLsTop), depth)
-            var k
-            for (k = 0; k < asgs.length; k++) {
-                b.NewCall(rtPushLocal, llvm.constant.NewInt(i32, getVarId(asgs[k].aname)))
-                var v = emptyPtr(b)
-                if (asgs[k].val != null) { var r = evalWord(b, asgs[k].val); b = r.b; v = r.v }
-                storeVar(b, asgs[k].aname, v)
-            }
-            b = inner(b)
-            b.NewCall(rtPopLocals, b.NewLoad(i32, depth))
-            return b
-        }
+        return makeSimpleCommand(redirCmdItems(rest), asgs)
     }
 
     function mkCond(items) { return {cond: items[0], body: items[1]} }

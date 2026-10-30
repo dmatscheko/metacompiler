@@ -319,14 +319,14 @@ AsgIdent    = ( "a"..."z" | "A"..."Z" | "_" ) :whitespace() { "a"..."z" | "A"...
 
 // A command word followed by argument words. NotReserved blocks a bare reserved keyword in
 // command position (so 'done' / 'fi' / ... end an enclosing list instead of being commands).
-SimpleCommand <~~ push(makeSimpleCommand(takeAll(), "" + lnPop())) ~~>
+SimpleCommand <~~ push(makeSimpleCommand(takeAll(), "" + lnPop(), null)) ~~>
             = NotReserved FirstWord { CmdSuffix } ;
 FirstWord   <~~ lnPush(up.pos) ~~> = CWord ;
 CmdSuffix   = HereDoc | Redir | CWord ;
 // Redirections BEFORE the command word (`2>/dev/null cmd`), or with no command at all: bash
 // 5.3 performs `>file` alone (status 0) and `>&6` with fd 6 closed fails with status 1.
 // Without a command word this is `:` with the redirections.
-RedirCommand <~~ push(makeSimpleCommand(redirCmdItems(takeAll()), "" + lnPop())) ~~>
+RedirCommand <~~ push(makeSimpleCommand(redirCmdItems(takeAll()), "" + lnPop(), null)) ~~>
             = RedirFirst { RedirItem } [ NotReserved CWord { CmdSuffix } ] ;
 RedirFirst  <~~ lnPush(up.pos) ~~> = RedirItem ;
 
@@ -4936,7 +4936,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return out
     }
     // items[0] is the command word thunk; the rest are argument word thunks and redirections.
-    function makeSimpleCommand(items, ln) {
+    // asgs: the {aname,val} prefix assignments (`x=1 cmd`), or null.
+    function makeSimpleCommand(items, ln, asgs) {
         var cmdT = items[0]
         var argTs = []
         var redirs = []
@@ -4947,6 +4948,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         return function() {
             vars["$LINENO"] = lnCtx == null ? ln : lnIn(ln)
+            cmdSubRan = false
             // THE COMMAND WORD IS FIELD-SPLIT LIKE ANY OTHER: `cmd="echo hi"; $cmd` runs
             // echo with the argument hi. The extra fields become the FIRST arguments, and a
             // word that expands to no field at all (`e=""; $e echo x`) contributes nothing -
@@ -4959,27 +4961,75 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var all = []
             for (k = 0; k < cf.length; k++) { all.push(cf[k]) }
             for (k = 0; k < rest.length; k++) { all.push(rest[k]) }
-            // `$e` with e empty contributes NO field, so `$e echo late` runs echo and a
-            // command word that vanishes entirely runs nothing at all and answers 0.
-            if (all.length == 0) { setStatus(0); return 0 }
+            // The prefix assignments come AFTER the words, so the words never see them
+            // (`x=1; x=2 echo $x` prints 1), and before the redirections.
+            var saved = noPrefix
+            if (asgs != null) {
+                saved = applyPrefix(asgs, all.length > 0)
+                var ab3 = takeAbort()
+                if (ab3 != null) { restorePrefix(saved); return ab3 }
+            }
+            // `$e` with e empty contributes NO field, so `$e echo late` runs echo. A command
+            // word that vanishes entirely runs nothing: its assignments stay (applyPrefix), and
+            // its status is that of the last command substitution, else 0.
+            if (all.length == 0) { if (!cmdSubRan) { setStatus(0) }; return lastStatus }
             var cmd = all[0]
             var args = []
             for (k = 1; k < all.length; k++) { args.push(all[k]) }
-            if (redirs.length == 0) { return runCommand(cmd, args) }
-            var rs = openRedirs(redirs)
+            var st = anytype
+            if (redirs.length == 0) {
+                st = runCommand(cmd, args)
+                if (asgs != null) { restorePrefix(saved) }
+                return st
+            }
+            var rs = (asgs == null) ? openRedirs(redirs) : openRedirsOuter(redirs, saved)
             // An expansion error in a redirection's word (`<<< "$(( 1/0 ))"`) abandons the
             // command too. Twin of the emitAbortCheck that starts the compiler's inner.
             var ab2 = takeAbort()
-            if (ab2 != null) { closeRedirs(rs); return ab2 }
-            if (rs.bad) { closeRedirs(rs); setStatus(1); return 1 }
+            if (ab2 != null) { closeRedirs(rs); restorePrefix(saved); return ab2 }
+            if (rs.bad) { closeRedirs(rs); restorePrefix(saved); setStatus(1); return 1 }
             // `exec` with no command makes its redirections the shell's own: they stay in
             // effect until the ( ) or $( ) around it ends. Twin of the exec arm of
             // makeSimpleCommand in bash-to-llvm-ir.abnf.
-            if (cmd == "exec" && args.length == 0) { setStatus(0); return 0 }
-            var st = anytype
+            if (cmd == "exec" && args.length == 0) { restorePrefix(saved); setStatus(0); return 0 }
             st = runCommand(cmd, args)
             closeRedirs(rs)
+            if (asgs != null) { restorePrefix(saved) }
             return st
+        }
+    }
+    var noPrefix = []
+    // Performs the prefix assignments left to right, each seeing the ones before it. With
+    // undo, answers what restorePrefix needs to put the names back after the command - which
+    // is all a function or builtin that assigns the same name changes (`x=5 read x` leaves x
+    // as it was). Twin of the asgs arm of makeSimpleCommand in bash-to-llvm-ir.abnf.
+    function applyPrefix(asgs, undo) {
+        var saved = []
+        var k
+        for (k = 0; k < asgs.length; k++) {
+            var nm = asgs[k].aname
+            if (undo) { saved.push({name: nm, had: isSetVar(nm), val: getVarVal(nm)}) }
+            setVarVal(nm, (asgs[k].val != null) ? wordJoin(asgs[k].val()) : "")
+        }
+        return saved
+    }
+    // The redirections of a command with prefix assignments: their words see the values the
+    // names had before them (`x=7 read v <<< "$x"` reads the old x). Twin of prefixOuter in
+    // bash-to-llvm-ir.abnf.
+    function openRedirsOuter(redirs, saved) {
+        var cur = []
+        var k
+        for (k = 0; k < saved.length; k++) { var key = "$" + saved[k].name; cur.push({v: vars[key], h: varsHas[key]}) }
+        restorePrefix(saved)
+        var rs = openRedirs(redirs)
+        for (k = 0; k < saved.length; k++) { vars["$" + saved[k].name] = cur[k].v; varsHas["$" + saved[k].name] = cur[k].h }
+        return rs
+    }
+    function restorePrefix(saved) {
+        var k
+        for (k = saved.length - 1; k >= 0; k--) {
+            vars["$" + saved[k].name] = saved[k].val
+            varsHas["$" + saved[k].name] = saved[k].had
         }
     }
 
@@ -6729,24 +6779,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var it = items[i]
             if (typeof it != "function" && it.aname != undefined) { asgs.push(it) } else { rest.push(it) }
         }
-        var inner = makeSimpleCommand(redirCmdItems(rest), ln)
-        return function() {
-            vars["$LINENO"] = lnCtx == null ? ln : lnIn(ln)
-            var saved = []
-            var k
-            for (k = 0; k < asgs.length; k++) {
-                var nm = asgs[k].aname
-                saved.push({name: nm, had: isSetVar(nm), val: getVarVal(nm)})
-                setVarVal(nm, (asgs[k].val != null) ? wordJoin(asgs[k].val()) : "")
-            }
-            var st = anytype
-            st = inner()
-            for (k = saved.length - 1; k >= 0; k--) {
-                vars["$" + saved[k].name] = saved[k].val
-                varsHas["$" + saved[k].name] = saved[k].had
-            }
-            return st
-        }
+        return makeSimpleCommand(redirCmdItems(rest), ln, asgs)
     }
 
     // break / continue travel as {brk: n} / {cont: n}, the same object-signal shape this
