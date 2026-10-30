@@ -184,9 +184,11 @@ AndOrOp     <~~ push({op: up.in}) ~~>
 // A pipeline is what && / || and ! actually operate on. Each stage runs with its stdout
 // captured and handed to the next stage as its standard input, and in a subshell.
 AndOrList   <~~ push(makeAndOr(takeAll())) ~~>
-            = Pipeline { AndOrOp Pipeline } ;
+            = Pipeline { AndOrOp Linebreak Pipeline } ;
 Pipeline    <~~ push(makePipeline(takeAll())) ~~>
-            = [ BangOp ] Command { PipeOp Command } ;
+            = [ BangOp ] Command { PipeOp Linebreak Command } ;
+// Newlines may follow && || and | (and stand around [[ ]] terms, see CondNot).
+Linebreak   = { "\n" } ;
 BangOp      <~~ push({bang: 1}) ~~> = "!" KwEnd ;
 PipeOp      = "|" NotBar ;
 
@@ -229,7 +231,7 @@ ArithCmdDyn <~~ push(atLine(makeArithCmd(mkArDyn(pop())), srcLine(up.pos))) ~~> 
 // run-time evaluator reports bash's syntax error and the command fails with status 1.
 ArithCmdRaw <~~ push(atLine(makeArithCmd(mkArDyn(pop())), srcLine(up.pos))) ~~> = "((" :whitespace() ArDynWord "))" ;
 // [[ ... ]] : the conditional command (no word splitting, glob and regex matching).
-CondCmd     <~~ push(atLine(makeCondCmd(pop()), srcLine(up.pos))) ~~> = "[[" :whitespace(Whitespace) CondOr "]]" ;
+CondCmd     <~~ push(atLine(makeCondCmd(pop()), srcLine(up.pos))) ~~> = "[[" :whitespace(Whitespace) CondOr Linebreak "]]" ;
 
 RedirList   = RedirItem { RedirItem } ;
 RedirItem   = HereDoc | Redir ;
@@ -425,9 +427,9 @@ ExpSeg      = ArithExp | CmdSub | BackSub | DollarBrace | DollarName | DollarDig
 // word segment is that output with its trailing newlines removed (exactly like the shell).
 // The list is parsed with the normal whitespace rule; the enclosing word's "no skipping"
 // state is restored automatically when the production returns.
-CmdSub      <~~ push(mkCmdSub(pop())) ~~>
+CmdSub      <~~ push(mkCmdSub(pop(), bashCsLines(arSrc(up.start + 2, up.pos - 1), srcLine(up.start)))) ~~>
             = "$(" :whitespace(Whitespace) CompoundList ")" ;
-BackSub     <~~ push(mkCmdSub(pop())) ~~>
+BackSub     <~~ push(mkCmdSub(pop(), {first: srcLine(up.start), skips: []})) ~~>
             = "`" :whitespace(Whitespace) CompoundList "`" ;
 
 // $(( expr )) : whitespace IS allowed inside; the value is the decimal string of the result.
@@ -569,9 +571,12 @@ DqPeCore    = PePatForm | PeCaseForm | PeReplForm | PeXform | DqPeOpForm | PeSub
 DqPeOpForm  = PeTarget PeOp [ DqBraceWord ] ;
 DqBraceWord <~~ push(mkBraceWord(takeAll())) ~~> = DqBrSeg { DqBrSeg } ;
 DqBrSeg     = DqBrSq | DqSeg | AnsiSeg | DqExpSeg | DqBrEsc | BraceBare ;
-DqBrSq      = DqBrQuote { DqExpSeg | DqBrEsc | DqBrSqLit } DqBrQuote ;
+// Between the two 's a " is still a quote character and is removed:
+// "${u:-'a"b'}" -> 'ab'   "${u:-'a"}"b'}" -> 'a}b'
+DqBrSq      = DqBrQuote { DqExpSeg | DqBrEsc | DqBrSqDq | DqBrSqLit } DqBrQuote ;
+DqBrSqDq    = '"' ;
 DqBrQuote   <~~ push(makeConst("'")) ~~> = "'" ;
-DqBrSqLit   <~~ push(makeConst(up.in)) ~~> = !@+"'$\\`" ;
+DqBrSqLit   <~~ push(makeConst(up.in)) ~~> = !@+"'\"$\\`" ;
 DqBrEsc     <~~ push(makeConst(up.in == "\\}" ? "}" : dqEsc(up.in))) ~~> = "\\" AnyCh ;
 DollarName  = "$" VarName <~~ push(mkVarRef(up.in)) ~~> ;
 DollarDigit = "$" ArgDigit <~~ push(mkVarRef(up.in)) ~~> ;
@@ -678,9 +683,12 @@ ArCmdSub    <~~ push(mkArCmdSub(pop())) ~~> = CmdSub :whitespace(Whitespace) ;
 
 // --- [[ ... ]] conditional expressions ----------------------------------------------
 
-CondOr      <~~ push(foldCondOr(takeAll())) ~~> = CondAnd { "||" CondAnd } ;
-CondAnd     <~~ push(foldCondAnd(takeAll())) ~~> = CondNot { "&&" CondNot } ;
-CondNot     = CondNeg | CondPrim ;
+CondOr      <~~ push(foldCondOr(takeAll())) ~~> = CondAnd { Linebreak "||" CondAnd } ;
+CondAnd     <~~ push(foldCondAnd(takeAll())) ~~> = CondNot { Linebreak "&&" CondNot } ;
+// A newline may stand before a term, around && and ||, and before ) and ]] (bash's
+// cond_skip_newlines), but never between the words of one term.
+CondNot     = Linebreak CondTerm ;
+CondTerm    = CondNeg | CondPrim ;
 CondNeg     <~~ push(mkCondNot(pop())) ~~> = "!" CondNot ;
 CondPrim    = CondParen | CondUn | CondMatch | CondBin | CondSingle ;
 
@@ -698,7 +706,7 @@ RxDq        <~~ push(mkQuotedRx(mkDqWord(takeAll()))) ~~>
             = '"' :whitespace() { DqExpSeg | DqEsc | DqLit } '"' ;
 RxEsc       <~~ push(makeConst(regexEscape(escChar(up.in)))) ~~> = "\\" AnyCh ;
 RegexBare   <~~ push(makeConst(up.in)) ~~> = !@+" \t\n\r;&<>$'\"\\`" ;
-CondParen   = "(" CondOr ")" ;
+CondParen   = "(" CondOr Linebreak ")" ;
 CondUn      <~~ push(mkCondUn(takeAll())) ~~> = CondUnOp NsWord ;
 CondUnOp    <~~ push({cop: up.in}) ~~> = CondUnTok KwEnd ;
 CondUnTok   = "-z" | "-n" | "-v" | "-e" | "-f" | "-d" | "-s" | "-r" | "-w" | "-x" | "-h" | "-L" | "-b" | "-c" | "-p" | "-S" | "-t" | "-o" ;
@@ -715,7 +723,8 @@ PatAnsiBody <~~ push(ansiWord(globEscape(ansiC(up.in)))) ~~> = { AnsiEsc | AnsiL
 PatEsc      <~~ push(makeConst(globEscape(escChar(up.in)))) ~~> = "\\" AnyCh ;
 CondBinOp   <~~ push({cop: up.in}) ~~> = CondBinTok ;
 CondBinTok  = "==" | "!=" | "-eq" | "-ne" | "-lt" | "-le" | "-gt" | "-ge" | "-nt" | "-ot" | "-ef" | "=" | "<" | ">" ;
-CondSingle  <~~ push(mkCondSingle(pop())) ~~> = NsWord ;
+// A lone word is not followed by a newline: bash reads the next token as a binary operator.
+CondSingle  <~~ push(mkCondSingle(pop())) ~~> = NsWord !"\n" ;
 
 
 // --- keywords, keyword boundary and the reserved-word guard ------------------------
@@ -991,6 +1000,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
 // ---
 
 :startScript(~~
+
+    // $LINENO inside a $( ) (see atLine).
+    include("lib/bash-lines.js")
 
     // ===================================================================================
     //  Stack / string helpers (self contained, no shared core).
@@ -1724,8 +1736,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     // Command substitution: divert output into a capture buffer, run the list, take the buffer.
     // Unlike ( ), it sees the loops around it: `break` there ends the substitution.
-    function mkCmdSub(bodyT) {
+    function mkCmdSub(bodyT, lnTab) {
         return {s: true, c: undefined, fn: function(b) {
+            var svLn = lnCtx, svLine = emitLine
+            lnCtx = {tab: lnTab, base: emitLine}
             b.NewCall(rtCapBegin, zero)
             var savedExit = curExit, savedExitRd = curExitRd
             var savedTraps = trapList
@@ -1746,6 +1760,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             uqStarEmit = false
             var eb = bodyT(b)
             uqStarEmit = svq
+            lnCtx = svLn
+            emitLine = svLine
             subDepth = subDepth - 1
             attrUnwind(undoBase)
             eb.NewBr(subEnd)
@@ -2938,11 +2954,17 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // the ordinary variable (twin of the interpreter's makers, which say which line). emitLine
     // is that line while the command is being emitted, the line an eval or trap string counts
     // from.
+    // Inside a $( ), lnCtx = {tab, base} renumbers the substitution's own commands from the
+    // enclosing command's line (lib/bash-lines.js). It is set while the substitution's body is
+    // EMITTED, so it reaches exactly the commands written inside it, a function defined there
+    // included; an eval or trap string is emitted with none. Twin of lnCtx in
+    // bash-interpreter.abnf.
     var emitLine = 1
+    var lnCtx = null
     function atLine(emit, n) {
         return function(b) {
-            emitLine = n
-            storeVarRaw(b, "LINENO", gepStr(b, "" + n))
+            emitLine = lnCtx == null ? n : bashCsLine(lnCtx.tab, lnCtx.base, n)
+            storeVarRaw(b, "LINENO", gepStr(b, "" + emitLine))
             return emit(b)
         }
     }
@@ -3242,7 +3264,12 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var mk = keep ? heapMark(b) : null
             for (k = 0; k < as.length; k++) { b = emitAssign(b, as[k], false, mk) }
             if (!subs) { storeStatusI(b, 0) }
-            if (redirs.length > 0) { var sv = emitOpenRedirs(b, redirs); b = sv.b; emitCloseRedirs(b, sv) }
+            if (redirs.length > 0) {
+                var sv = emitOpenRedirs(b, redirs)
+                var gate = redirGate(sv.b, sv, [])
+                b = redirJoin(gate.run, gate)
+                emitCloseRedirs(b, sv)
+            }
             return b
         }
     }
@@ -4260,6 +4287,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             else if (it.redir != undefined) { op = it.redir }
             else if (it.iofd != undefined) { fd = it.iofd }
         }
+        var hf = hiFd(fd)
+        if (hf >= 0) { usedFd[hf] = true }
+        if (t != null && t.c != undefined && hiFd(t.c) >= 0) { usedFd[hiFd(t.c)] = true }
         return {rd: op, iofd: fd, target: t}
     }
     // eval / trap re-parse a string with THIS grammar, starting at CompoundList (which pushes
@@ -4272,7 +4302,13 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         snipLine0 = emitLine
         var t = arCompile(src, "CompoundList", false)
         snipLine0 = sv
-        return t
+        return function(b) {
+            var svLn = lnCtx
+            lnCtx = null
+            var r = t(b)
+            lnCtx = svLn
+            return r
+        }
     }
 
     // printf [-v NAME] [--] FORMAT [ARG...]: the whole command runs in rt_printf
@@ -4558,7 +4594,12 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         b.NewStore(b.NewLoad(i32, gSinkErr), sr)
         b.NewStore(b.NewLoad(i8ptr, gStdin), sb)
         b.NewStore(b.NewLoad(i32, gStdinPos), si)
-        return {e: se, u: su, pf: sp, x: sx, so: so, sr: sr, sb: sb, si: si}
+        var fds = []
+        var n
+        for (n = 3; n <= 9; n++) {
+            if (usedFd[n]) { var fs = slotOf(i32); b.NewStore(b.NewLoad(i32, fdGlobal(n)), fs); fds.push({g: fdGlobal(n), s: fs}) }
+        }
+        return {e: se, u: su, pf: sp, x: sx, so: so, sr: sr, sb: sb, si: si, fds: fds}
     }
     // The streams an `exec` may have redirected come back too; the standard input only when
     // the subshell REPLACED it, since what it read of an inherited input is consumed for the
@@ -4570,6 +4611,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         b.NewStore(b.NewLoad(i32, sv.x), gOptExtglob)
         b.NewStore(b.NewLoad(i32, sv.so), gSinkOut)
         b.NewStore(b.NewLoad(i32, sv.sr), gSinkErr)
+        var k
+        for (k = 0; k < sv.fds.length; k++) { b.NewStore(b.NewLoad(i32, sv.fds[k].s), sv.fds[k].g) }
         var ib = b.NewLoad(i8ptr, sv.sb)
         var moved = b.NewICmp(llvm.enum.IPredNE, b.NewLoad(i8ptr, gStdin), ib)
         b.NewStore(b.NewSelect(moved, b.NewLoad(i32, sv.si), b.NewLoad(i32, gStdinPos)), gStdinPos)
@@ -4932,21 +4975,24 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (redirs.length == 0) { return inner }
         return function(b) {
             var sv = emitOpenRedirs(b, redirs)
-            b = sv.b
             var cmd0 = cmdT, args0 = argTs
             cmdT = preRedirWord(cmd0, sv)
             argTs = []
             var k
             for (k = 0; k < args0.length; k++) { argTs.push(preRedirWord(args0[k], sv)) }
             redirStack.push(sv)
-            b = inner(b)
+            var gate = redirGate(sv.b, sv, [cmdT].concat(argTs))
+            b = inner(gate.run)
             redirStack.pop()
             cmdT = cmd0
             argTs = args0
             // `exec` with no command makes its redirections the shell's own: they stay in
             // effect until the ( ) or $( ) around it ends (saveOpts). Twin of the exec arm of
             // makeSimpleCommand in bash-interpreter.abnf.
-            if (cmd0.c != "exec" || args0.length > 0) { emitCloseRedirs(b, sv) }
+            var isExec = cmd0.c == "exec" && args0.length == 0
+            if (isExec && gate.skip != null) { emitCloseRedirs(gate.skip, sv) }
+            b = redirJoin(b, gate)
+            if (!isExec) { emitCloseRedirs(b, sv) }
             return b
         }
     }
@@ -5171,7 +5217,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // An expansion error in a redirection's word abandons the compound command.
             // Twin of mkRedirected in bash-interpreter.abnf.
             b = emitAbortCheck(b)
-            b = bodyT(b)
+            var gate = redirGate(b, sv, [])
+            b = redirJoin(bodyT(gate.run), gate)
             redirStack.pop()
             emitCloseRedirs(b, sv)
             return b
@@ -5182,14 +5229,41 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // Saves the streams the list changes and applies it; emitCloseRedirs puts them back. The
     // stdin buffer and position are saved only under a stdin redirection: without one, what
     // the command reads stays read (`read x 2>/dev/null; read y` reads two lines).
+    // The descriptors 3-9 are module globals fd_chan<n> holding a channel, -1 when closed.
+    // Copying a closed one prints "N: Bad file descriptor" and sets the slot sv.bad: the
+    // caller then skips the command with status 1 (redirGate). usedFd marks the numbers the
+    // program's redirections name, which a subshell saves and restores (saveOpts), as an
+    // `exec 3>&1` inside it lasts only until it ends. Twin of openRedirs in
+    // bash-interpreter.abnf.
+    var usedFd = [false, false, false, false, false, false, false, false, false, false]
+    var fdGlobals = []
+    function hiFd(s) {
+        if (s.length != 1) { return -1 }
+        var cc = s.charCodeAt(0)
+        return (cc >= 51 && cc <= 57) ? cc - 48 : -1
+    }
+    function fdGlobal(n) {
+        while (fdGlobals.length <= n) { fdGlobals.push(null) }
+        if (fdGlobals[n] == null) { fdGlobals[n] = m.NewGlobalDef("fd_chan" + n, llvm.constant.NewInt(i32, -1)) }
+        return fdGlobals[n]
+    }
     function emitOpenRedirs(b, redirs) {
         var so = slotOf(i32), se = slotOf(i32)
         b.NewStore(b.NewLoad(i32, gSinkOut), so)
         b.NewStore(b.NewLoad(i32, gSinkErr), se)
         var sb = null, sp = null
+        var fsv = []
+        var bad = null, badCh = null
+        var badFds = []
         var i
         for (i = 0; i < redirs.length; i++) {
             if (redirs[i].rd == "<<" || redirs[i].rd == "<<<" || redirs[i].rd == "<") { sb = slotOf(i8ptr); sp = slotOf(i32) }
+            var hf0 = hiFd((redirs[i].iofd == "") ? "1" : redirs[i].iofd)
+            if (hf0 >= 0) {
+                var fs = slotOf(i32)
+                b.NewStore(b.NewLoad(i32, fdGlobal(hf0)), fs)
+                fsv.push({g: fdGlobal(hf0), s: fs})
+            }
         }
         if (sb != null) {
             b.NewStore(b.NewLoad(i8ptr, gStdin), sb)
@@ -5200,42 +5274,101 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var tgt = null
             if (r.target != null) { var rr = evalWord(b, r.target); b = rr.b; tgt = rr }
             var fd = (r.iofd == "") ? "1" : r.iofd
-            if (r.rd == "<<") { b.NewStore(tgt.v, gStdin); b.NewStore(zero, gStdinPos); heapPin(b) }
-            else if (r.rd == "<<<") {
-                b.NewStore(b.NewCall(rtStrcat, [tgt.v, gepStr(b, "\n")]), gStdin)
-                b.NewStore(zero, gStdinPos)
-                heapPin(b)
+            var hf = hiFd(fd)
+            var tc = (r.target != null) ? r.target.c : undefined
+            var ch = null
+            if (r.rd == "<<" || r.rd == "<<<" || r.rd == "<") {
+                if (hf >= 0) { continue }
+                if (r.rd == "<<") { b.NewStore(tgt.v, gStdin); b.NewStore(zero, gStdinPos); heapPin(b) }
+                else if (r.rd == "<<<") {
+                    b.NewStore(b.NewCall(rtStrcat, [tgt.v, gepStr(b, "\n")]), gStdin)
+                    b.NewStore(zero, gStdinPos)
+                    heapPin(b)
+                }
+                else { b.NewStore(emptyPtr(b), gStdin); b.NewStore(zero, gStdinPos) }
+                continue
             }
-            else if (r.rd == "<") { b.NewStore(emptyPtr(b), gStdin); b.NewStore(zero, gStdinPos) }
-            else if (r.rd == ">&" || r.rd == "<&") {
-                // a copy of standard output is fixed to the capture it is in now (rt_fix_chan)
-                var src = (r.target != null && r.target.c == "2") ? b.NewLoad(i32, gSinkErr) : b.NewLoad(i32, gSinkOut)
-                src = b.NewCall(rtFixChan, src)
-                if (fd == "2") { b.NewStore(src, gSinkErr) } else { b.NewStore(src, gSinkOut) }
+            if (r.rd == ">&" || r.rd == "<&") {
+                if (hf >= 0 && tc == "-") { b.NewStore(llvm.constant.NewInt(i32, -1), fdGlobal(hf)); continue }
+                var hm = (tc != undefined) ? hiFd(tc) : -1
+                if (hm >= 0) {
+                    ch = b.NewLoad(i32, fdGlobal(hm))
+                    if (bad == null) { bad = slotOf(i32); badCh = slotOf(i32); b.NewStore(zero, bad) }
+                    badFds.push(hm)
+                    var closed = b.NewICmp(llvm.enum.IPredEQ, ch, llvm.constant.NewInt(i32, -1))
+                    var first = b.NewICmp(llvm.enum.IPredEQ, b.NewLoad(i32, bad), zero)
+                    var eb = curF.NewBlock(""), cb = curF.NewBlock("")
+                    b.NewCondBr(b.NewAnd(closed, first), eb, cb)
+                    eb.NewStore(llvm.constant.NewInt(i32, hm), bad)
+                    eb.NewStore(eb.NewLoad(i32, gSinkErr), badCh)
+                    eb.NewBr(cb)
+                    b = cb
+                } else {
+                    // a copy of standard output is fixed to the capture it is in now (rt_fix_chan)
+                    ch = (tc == "2") ? b.NewLoad(i32, gSinkErr) : b.NewLoad(i32, gSinkOut)
+                    ch = b.NewCall(rtFixChan, ch)
+                }
             }
             else if (r.rd == "&>" || r.rd == "&>>") {
-                var ch = llvm.constant.NewInt(i32, 2)
-                if (r.target != null && r.target.c == "/dev/stdout") { ch = b.NewCall(rtFixChan, b.NewLoad(i32, gSinkOut)) }
-                b.NewStore(ch, gSinkOut)
-                b.NewStore(ch, gSinkErr)
+                var cha = llvm.constant.NewInt(i32, 2)
+                if (tc == "/dev/stdout") { cha = b.NewCall(rtFixChan, b.NewLoad(i32, gSinkOut)) }
+                b.NewStore(cha, gSinkOut)
+                b.NewStore(cha, gSinkErr)
+                continue
             }
             else {
-                var tc = (r.target != null) ? r.target.c : undefined
-                var ch2 = llvm.constant.NewInt(i32, 2)
-                if (tc == "/dev/stdout") { ch2 = b.NewCall(rtFixChan, b.NewLoad(i32, gSinkOut)) }
-                if (tc == "/dev/stderr") { ch2 = b.NewLoad(i32, gSinkErr) }
-                if (fd == "2") { b.NewStore(ch2, gSinkErr) } else { b.NewStore(ch2, gSinkOut) }
+                ch = llvm.constant.NewInt(i32, 2)
+                if (tc == "/dev/stdout") { ch = b.NewCall(rtFixChan, b.NewLoad(i32, gSinkOut)) }
+                if (tc == "/dev/stderr") { ch = b.NewLoad(i32, gSinkErr) }
             }
+            if (hf >= 0) { b.NewStore(ch, fdGlobal(hf)) } else if (fd == "2") { b.NewStore(ch, gSinkErr) } else { b.NewStore(ch, gSinkOut) }
         }
-        return {b: b, so: so, se: se, sb: sb, sp: sp}
+        return {b: b, so: so, se: se, sb: sb, sp: sp, fsv: fsv, bad: bad, badCh: badCh, badFds: badFds}
     }
     function emitCloseRedirs(b, sv) {
         b.NewStore(b.NewLoad(i32, sv.so), gSinkOut)
         b.NewStore(b.NewLoad(i32, sv.se), gSinkErr)
+        var k
+        for (k = 0; k < sv.fsv.length; k++) { b.NewStore(b.NewLoad(i32, sv.fsv[k].s), sv.fsv[k].g) }
         if (sv.sb != null) {
             b.NewStore(b.NewLoad(i8ptr, sv.sb), gStdin)
             b.NewStore(b.NewLoad(i32, sv.sp), gStdinPos)
         }
+    }
+    // After emitOpenRedirs: a block that runs the command when no redirection failed, and the
+    // block for the failed case, or null when none of them can fail. That one still expands
+    // the command's words, since bash expands before it redirects (`echo $(echo x >&2) >&5`
+    // prints x first), then reports the descriptor (sv.bad) on the standard error in effect
+    // when it failed (sv.badCh), and answers 1.
+    function redirGate(b, sv, words) {
+        if (sv.bad == null) { return {run: b, skip: null} }
+        var run = curF.NewBlock(""), skip = curF.NewBlock("")
+        b.NewCondBr(b.NewICmp(llvm.enum.IPredNE, b.NewLoad(i32, sv.bad), zero), skip, run)
+        var k
+        for (k = 0; k < words.length; k++) {
+            if (words[k].c == undefined) { skip = evalWord(skip, words[k]).b }
+        }
+        for (k = 0; k < sv.badFds.length; k++) {
+            var n = sv.badFds[k]
+            var pb = curF.NewBlock(""), nb = curF.NewBlock("")
+            skip.NewCondBr(skip.NewICmp(llvm.enum.IPredEQ, skip.NewLoad(i32, sv.bad), llvm.constant.NewInt(i32, n)), pb, nb)
+            var errNow = pb.NewLoad(i32, gSinkErr)
+            pb.NewStore(pb.NewLoad(i32, sv.badCh), gSinkErr)
+            emitOnStderr(pb, gepStr(pb, "bash: " + n + ": Bad file descriptor\n"))
+            pb.NewStore(errNow, gSinkErr)
+            pb.NewBr(nb)
+            skip = nb
+        }
+        storeStatusI(skip, 1)
+        return {run: run, skip: skip}
+    }
+    // Joins the command's end block b with the gate's failed block.
+    function redirJoin(b, g) {
+        if (g.skip == null) { return b }
+        var j = curF.NewBlock("")
+        b.NewBr(j)
+        g.skip.NewBr(j)
+        return j
     }
     // Closes every redirection opened above redirStack[base], innermost first.
     function unwindRedirs(b, base) {

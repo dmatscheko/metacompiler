@@ -1121,6 +1121,68 @@ E
 )'; check hd7 "$r" "[g abc]"
   check ln7 "$(( LINENO - l0 ))" 55
 }
+
+# ===== SECTION 76: line breaks in [[ ]] and after && || |, descriptors 3-9, $LINENO in $( ) =====
+# Inside [[ ]] a newline may stand before a term, around && and ||, and before ) and ]], but
+# not between the words of one term; one may always follow && || and |. The descriptors 3-9
+# keep where they were pointed: `3>&1 1>&2 2>&3` swaps standard output and error, `3>&-`
+# closes one, and copying a closed one fails the command (status 1) without running it. In a
+# $( ) bash numbers lines from the enclosing command's line, the one its first word ends on,
+# dropping leading and blank lines, comments, and line breaks after && || | ( ; a ` ` counts
+# every newline of its text. In a double-quoted ${v-w} a " is still a quote, between two 's
+# too. An expansion error is reported before the command's own 2>/dev/null applies.
+s76f() { echo f1; echo f2 >&2; }
+s76m() { local m=${1#bash: }; m=${m#*line [0-9]*: }; printf '%s' "${m%%$'\n'*}"; }
+s76() {
+  local l0=$LINENO u= r o
+  r=
+  if [[ a == a &&
+     b == b ]]; then r=t1; fi
+  if [[
+     a == b ||
+     ( c == c
+     ) ]]; then r+=t2; fi
+  [[ !
+     a == b ]] && r+=t3
+  check nl1 "$r" t1t2t3
+  r=$(true &&
+    echo a ||
+    echo b; echo c |
+    { read -r o; echo "$o"; })
+  check nl2 "${r//$'\n'/,}" a,c
+  r=$( { s76f 3>&1 1>&2 2>&3; } 2>&1 1>/dev/null ); check fd1 "$r" f1
+  r=$( { s76f 3>&1 1>&2 2>&3; } 2>/dev/null ); check fd2 "$r" f2
+  r=$( { echo hid >&3; } 3>/dev/null ); check fd3 "[$r]" "[]"
+  r=$( { echo x >&4 && echo ran; echo "st=$?"; } 2>&1 ); check fd4 "$(s76m "$r")|${r##*$'\n'}" "4: Bad file descriptor|st=1"
+  r=$( { echo y >&3; } 3>&1 3>&- 2>/dev/null; echo "st=$?" ); check fd5 "$r" st=1
+  r=$( { exec 5>&1; }; echo z >&5 ); check fd6 "$r" z
+  r=$( (exec 6>&1); { echo w >&6; } 2>/dev/null; echo "st=$?" ); check fd7 "$r" st=1
+  r=$( exec 2>/dev/null; o=1 >&5; echo "$? $o"; set -e; echo a; echo b >&8; echo c ); check fd8 "${r//$'\n'/,}" "1 1,a"
+  r=$( { echo $(echo side >&2) >&5; echo q >&6 2>/dev/null; } 2>&1 ); check fd9 "${r%%$'\n'*}|$(s76m "${r#*$'\n'}")|$(s76m "${r##*$'\n'}")" "side|5: Bad file descriptor|6: Bad file descriptor"
+  r=$(
+    echo $LINENO
+  ); check ln1 "$(( r - l0 ))" 27
+  r=$(echo $LINENO
+
+    # a comment
+    echo $LINENO |
+    { read -r o; echo "$o"; }
+    echo $LINENO
+  ); check ln2 "$(( ${r%%$'\n'*} - l0 ))|${r//$'\n'/,}" "34|$(( l0 + 34 )),$(( l0 + 35 )),$(( l0 + 36 ))"
+  r=$(echo $(
+    echo $LINENO
+    ) $LINENO
+    echo $LINENO); check ln3 "$(( ${r%% *} - l0 ))|${r//$'\n'/,}" "38|$(( l0 + 38 )) $(( l0 + 38 )),$(( l0 + 39 ))"
+  r=`
+    echo $LINENO
+  `; check ln4 "$(( r - l0 ))" 42
+  r=$(eval 'echo $LINENO
+echo $LINENO'
+  ); check ln5 "$(( ${r%%$'\n'*} - l0 ))|${r//$'\n'/,}" "44|$(( l0 + 44 )),$(( l0 + 45 ))"
+  check dq1 "${u:-'a"b'}|${u:-'a"}"b'}|${u:-'a\"b'}|${u:-'a""b'}" "'ab'|'a}b'|'a\"b'|'ab'"
+  o=$( { echo "${!u:-q}" 2>/dev/null; echo never; } 2>&1 ); r=$?
+  check ie1 "$r $(s76m "$o")" "1 : invalid variable name"
+}
 # ===== END SECTIONS =====
 
 s47   # SECTION-CALL 47
@@ -1151,5 +1213,6 @@ s72   # SECTION-CALL 72
 s73   # SECTION-CALL 73
 s74   # SECTION-CALL 74
 s75   # SECTION-CALL 75
+s76   # SECTION-CALL 76
 echo "full: $checks checks, $fails failures"
 exit $fails

@@ -195,9 +195,11 @@ AndOrOp     <~~ push({op: up.in}) ~~>
 // A pipeline is what && / || and ! actually operate on. Each stage runs with its stdout
 // captured and handed to the next stage as its standard input, and in a subshell.
 AndOrList   <~~ push(makeAndOr(takeAll())) ~~>
-            = Pipeline { AndOrOp Pipeline } ;
+            = Pipeline { AndOrOp Linebreak Pipeline } ;
 Pipeline    <~~ push(makePipeline(takeAll())) ~~>
-            = [ BangOp ] Command { PipeOp Command } ;
+            = [ BangOp ] Command { PipeOp Linebreak Command } ;
+// Newlines may follow && || and | (and stand around [[ ]] terms, see CondNot).
+Linebreak   = { "\n" } ;
 BangOp      <~~ push({bang: 1}) ~~> = "!" KwEnd ;
 PipeOp      = "|" NotBar ;
 
@@ -240,7 +242,7 @@ ArithCmdDyn <~~ push(makeArithCmd(mkArDyn(pop()), lineStr(up.pos))) ~~> = "((" :
 // run-time evaluator reports bash's syntax error and the command fails with status 1.
 ArithCmdRaw <~~ push(makeArithCmd(mkArDyn(pop()), lineStr(up.pos))) ~~> = "((" :whitespace() ArDynWord "))" ;
 // [[ ... ]] : the conditional command (no word splitting, glob and regex matching).
-CondCmd     <~~ push(makeCondCmd(pop(), lineStr(up.pos))) ~~> = "[[" :whitespace(Whitespace) CondOr "]]" ;
+CondCmd     <~~ push(makeCondCmd(pop(), lineStr(up.pos))) ~~> = "[[" :whitespace(Whitespace) CondOr Linebreak "]]" ;
 
 RedirList   = RedirItem { RedirItem } ;
 RedirItem   = HereDoc | Redir ;
@@ -454,9 +456,9 @@ ExpSeg      = ArithExp | CmdSub | BackSub | DollarBrace | DollarName | DollarDig
 // word segment is that output with its trailing newlines removed (exactly like the shell).
 // The list is parsed with the normal whitespace rule; the enclosing word's "no skipping"
 // state is restored automatically when the production returns.
-CmdSub      <~~ push(mkCmdSub(pop())) ~~>
+CmdSub      <~~ push(mkCmdSub(pop(), bashCsLines(arSrc(up.start + 2, up.pos - 1), srcLine(up.start)))) ~~>
             = "$(" :whitespace(Whitespace) CompoundList ")" ;
-BackSub     <~~ push(mkCmdSub(pop())) ~~>
+BackSub     <~~ push(mkCmdSub(pop(), {first: srcLine(up.start), skips: []})) ~~>
             = "`" :whitespace(Whitespace) CompoundList "`" ;
 
 // $(( expr )) : whitespace IS allowed inside; the value is the decimal string of the result.
@@ -619,9 +621,12 @@ DqPeCore    = PePatForm | PeCaseForm | PeReplForm | PeXform | DqPeOpForm | PeSub
 DqPeOpForm  = PeTarget PeOp [ DqBraceWord ] ;
 DqBraceWord <~~ push(mkBraceWord(takeAll())) ~~> = DqBrSeg { DqBrSeg } ;
 DqBrSeg     = DqBrSq | DqSeg | AnsiSeg | DqExpSeg | DqBrEsc | BraceBare ;
-DqBrSq      = DqBrQuote { DqExpSeg | DqBrEsc | DqBrSqLit } DqBrQuote ;
+// Between the two 's a " is still a quote character and is removed:
+// "${u:-'a"b'}" -> 'ab'   "${u:-'a"}"b'}" -> 'a}b'
+DqBrSq      = DqBrQuote { DqExpSeg | DqBrEsc | DqBrSqDq | DqBrSqLit } DqBrQuote ;
+DqBrSqDq    = '"' ;
 DqBrQuote   <~~ push(makeConst("'")) ~~> = "'" ;
-DqBrSqLit   <~~ push(makeConst(up.in)) ~~> = !@+"'$\\`" ;
+DqBrSqLit   <~~ push(makeConst(up.in)) ~~> = !@+"'\"$\\`" ;
 DqBrEsc     <~~ push(makeConst(up.in == "\\}" ? "}" : dqEsc(up.in))) ~~> = "\\" AnyCh ;
 DollarName  = "$" VarName <~~ push(mkVarRef(up.in)) ~~> ;
 DollarDigit = "$" ArgDigit <~~ push(mkVarRef(up.in)) ~~> ;
@@ -741,9 +746,12 @@ ArCmdSub    <~~ push(mkArCmdSub(pop())) ~~> = CmdSub :whitespace(Whitespace) ;
 
 // --- [[ ... ]] conditional expressions ----------------------------------------------
 
-CondOr      <~~ push(foldCondOr(takeAll())) ~~> = CondAnd { "||" CondAnd } ;
-CondAnd     <~~ push(foldCondAnd(takeAll())) ~~> = CondNot { "&&" CondNot } ;
-CondNot     = CondNeg | CondPrim ;
+CondOr      <~~ push(foldCondOr(takeAll())) ~~> = CondAnd { Linebreak "||" CondAnd } ;
+CondAnd     <~~ push(foldCondAnd(takeAll())) ~~> = CondNot { Linebreak "&&" CondNot } ;
+// A newline may stand before a term, around && and ||, and before ) and ]] (bash's
+// cond_skip_newlines), but never between the words of one term.
+CondNot     = Linebreak CondTerm ;
+CondTerm    = CondNeg | CondPrim ;
 CondNeg     <~~ push(mkCondNot(pop())) ~~> = "!" CondNot ;
 CondPrim    = CondParen | CondUn | CondMatch | CondBin | CondSingle ;
 
@@ -761,7 +769,7 @@ RxDq        <~~ push(mkQuotedRx(mkDqWord(takeAll()))) ~~>
             = '"' :whitespace() { DqExpSeg | DqEsc | DqLit } '"' ;
 RxEsc       <~~ push(makeConst(regexEscape(escChar(up.in)))) ~~> = "\\" AnyCh ;
 RegexBare   <~~ push(makeConst(up.in)) ~~> = !@+" \t\n\r;&<>$'\"\\`" ;
-CondParen   = "(" CondOr ")" ;
+CondParen   = "(" CondOr Linebreak ")" ;
 CondUn      <~~ push(mkCondUn(takeAll())) ~~> = CondUnOp NsWord ;
 CondUnOp    <~~ push({cop: up.in}) ~~> = CondUnTok KwEnd ;
 CondUnTok   = "-z" | "-n" | "-v" | "-e" | "-f" | "-d" | "-s" | "-r" | "-w" | "-x" | "-h" | "-L" | "-b" | "-c" | "-p" | "-S" | "-t" | "-o" ;
@@ -778,7 +786,8 @@ PatAnsiBody <~~ push(makeConst(globEscape(ansiC(up.in, true)))) ~~> = { AnsiEsc 
 PatEsc      <~~ push(makeConst(globEscape(escChar(up.in)))) ~~> = "\\" AnyCh ;
 CondBinOp   <~~ push({cop: up.in}) ~~> = CondBinTok ;
 CondBinTok  = "==" | "!=" | "-eq" | "-ne" | "-lt" | "-le" | "-gt" | "-ge" | "-nt" | "-ot" | "-ef" | "=" | "<" | ">" ;
-CondSingle  <~~ push(mkCondSingle(pop())) ~~> = NsWord ;
+// A lone word is not followed by a newline: bash reads the next token as a binary operator.
+CondSingle  <~~ push(mkCondSingle(pop())) ~~> = NsWord !"\n" ;
 
 
 // --- keywords, keyword boundary and the reserved-word guard ------------------------
@@ -1069,6 +1078,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // printf's float conversions: one C printf conversion, over the exact decimal of a double.
     include("lib/exact-dec.js")
     include("lib/c-printf.js")
+    include("lib/bash-lines.js")
     function cpfExactDec(a) { return coreExactDec(a) }
     function cpfRoundHalfEven(ds, k) { return coreRoundHalfEven(ds, k) }
 
@@ -1179,6 +1189,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var vars = {}        // variables:  vars["$" + name] = string value
     var varsHas = {}     // set-ness:   varsHas["$" + name] = true|false (unset keeps the key)
     var funcs = {}       // functions:  funcs["$" + name] = body thunk
+    var funcLn = {}      // and the lnCtx each was defined under
     var posParams = []   // current positional parameters $1.. (an array of strings)
     var lastStatus = 0   // $? : exit status of the most recent command
 
@@ -2787,7 +2798,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             run = mkRedirected(wrapped)
         }
         return function() {
-            vars["$LINENO"] = ln
+            vars["$LINENO"] = lnCtx == null ? ln : lnIn(ln)
             var k
             var vals = []
             for (k = 0; k < names.length && !query; k++) {
@@ -3602,8 +3613,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     // A dropped NUL byte is warned about, as bash 5.3 does. Twin of rt_cap_end. Unlike ( ),
     // the substitution sees the loops around it: `break` there ends it with the status 0.
-    function mkCmdSub(bodyT) {
+    function mkCmdSub(bodyT, lnTab) {
         return function() {
+            var svLn = lnCtx
+            lnCtx = {tab: lnTab, base: strToInt(vars["$LINENO"])}
             capOpen()
             capNul["$" + capStack.length] = false
             var saved = saveShellState()
@@ -3618,6 +3631,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             r = bodyT()
             uqStar = svq
             var st = runExitTrap(endStatus(r))
+            lnCtx = svLn
             restoreShellState(saved)
             localFrames = savedFrames
             var nulGone = capNul["$" + capStack.length]
@@ -4224,6 +4238,11 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var lnStack = []
     function lnPush(pos) { lnStack.push(srcLine(pos)) }
     function lnPop() { return lnStack.length > 0 ? lnStack.pop() : 0 }
+    // Inside a $( ), the line of a command is renumbered from the enclosing command's (see
+    // lib/bash-lines.js): lnCtx = {tab, base} while the substitution's own commands run. A
+    // function carries the lnCtx it was defined under; an eval or trap string runs with none.
+    var lnCtx = null
+    function lnIn(ln) { return "" + bashCsLine(lnCtx.tab, lnCtx.base, strToInt(ln)) }
     function arSrc(from, to) { return arInSnip ? arSnip.slice(from, to) : c.srcSlice(from, to) }
     function arCompile(text, rule, claimAll) {
         var svS = arSnip, svIn = arInSnip, svR = arRecs
@@ -4786,7 +4805,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (items[i].a != undefined) { as.push(items[i].a) } else { redirs.push(items[i]) }
         }
         return function() {
-            vars["$LINENO"] = ln
+            vars["$LINENO"] = lnCtx == null ? ln : lnIn(ln)
             cmdSubRan = false
             var k
             for (k = 0; k < as.length; k++) {
@@ -4795,7 +4814,11 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 if (ab != null) { return ab }
             }
             if (!cmdSubRan) { setStatus(0) }
-            if (redirs.length > 0) { closeRedirs(openRedirs(redirs)) }
+            if (redirs.length > 0) {
+                var rs = openRedirs(redirs)
+                closeRedirs(rs)
+                if (rs.bad) { setStatus(1) }
+            }
             return lastStatus
         }
     }
@@ -4872,7 +4895,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (typeof it == "function") { argTs.push(it) } else { redirs.push(it) }
         }
         return function() {
-            vars["$LINENO"] = ln
+            vars["$LINENO"] = lnCtx == null ? ln : lnIn(ln)
             // THE COMMAND WORD IS FIELD-SPLIT LIKE ANY OTHER: `cmd="echo hi"; $cmd` runs
             // echo with the argument hi. The extra fields become the FIRST arguments, and a
             // word that expands to no field at all (`e=""; $e echo x`) contributes nothing -
@@ -4897,6 +4920,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // command too. Twin of the emitAbortCheck that starts the compiler's inner.
             var ab2 = takeAbort()
             if (ab2 != null) { closeRedirs(rs); return ab2 }
+            if (rs.bad) { closeRedirs(rs); setStatus(1); return 1 }
             // `exec` with no command makes its redirections the shell's own: they stay in
             // effect until the ( ) or $( ) around it ends. Twin of the exec arm of
             // makeSimpleCommand in bash-to-llvm-ir.abnf.
@@ -4910,29 +4934,49 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
 
     // Apply a redirection list: an output redirection swallows the command's output (there is
     // no filesystem here), an input redirection other than a here-string gives end of file.
+    // The descriptors 3-9 hold channels too (fdTab[n], -1 when closed): `3>&1` copies one there,
+    // `>&3` copies it back, `3>&-` closes it. Copying a closed one prints bash's "N: Bad file
+    // descriptor" and stops there with st.bad set: the command does not run and its status is
+    // 1. Nothing reads an input descriptor, so `3<file` leaves stdin alone. Twin of
+    // emitOpenRedirs in bash-to-llvm-ir.abnf.
+    var fdTab = [-1, -1, -1, -1, -1, -1, -1, -1, -1, -1]
+    function hiFd(s) {
+        if (s.length != 1) { return -1 }
+        var cc = s.charCodeAt(0)
+        return (cc >= 51 && cc <= 57) ? cc - 48 : -1
+    }
     function openRedirs(redirs) {
-        var st = {out: sinkOut, err: sinkErr, inb: stdinBuf, inp: stdinPos, hadIn: false}
+        var st = {out: sinkOut, err: sinkErr, inb: stdinBuf, inp: stdinPos, hadIn: false, fds: fdTab, bad: false}
+        fdTab = fdTab.slice(0)
         var newIn = null
         var i
         for (i = 0; i < redirs.length; i++) {
             var r = redirs[i]
             var tgt = (r.target != null) ? wordJoin(r.target()) : ""
             var fd = (r.iofd == "") ? "1" : r.iofd
-            if (r.rd == "<<") { newIn = tgt }
-            else if (r.rd == "<<<") { newIn = tgt + "\n" }
-            else if (r.rd == "<") { newIn = "" }
-            else if (r.rd == ">&" || r.rd == "<&") {
+            var hf = hiFd(fd)
+            var ch = 0
+            if (r.rd == "<<" || r.rd == "<<<" || r.rd == "<") {
+                if (hf < 0) { newIn = (r.rd == "<<") ? tgt : ((r.rd == "<<<") ? tgt + "\n" : "") }
+                continue
+            }
+            if (r.rd == ">&" || r.rd == "<&") {
+                if (hf >= 0 && tgt == "-") { fdTab[hf] = -1; continue }
                 // N>&M : route channel N wherever channel M currently goes.
-                var src = fixChan((tgt == "2") ? sinkErr : sinkOut)
-                if (fd == "2") { sinkErr = src } else { sinkOut = src }
+                var hm = hiFd(tgt)
+                if (hm >= 0) {
+                    ch = fdTab[hm]
+                    if (ch < 0) { emitErr("bash: " + tgt + ": Bad file descriptor\n"); st.bad = true; break }
+                } else { ch = fixChan((tgt == "2") ? sinkErr : sinkOut) }
             } else if (r.rd == "&>" || r.rd == "&>>") {
-                var ch = (tgt == "/dev/stdout") ? fixChan(sinkOut) : 2
+                ch = (tgt == "/dev/stdout") ? fixChan(sinkOut) : 2
                 sinkOut = ch
                 sinkErr = ch
+                continue
             } else {
-                var ch2 = (tgt == "/dev/stdout") ? fixChan(sinkOut) : ((tgt == "/dev/stderr") ? sinkErr : 2)
-                if (fd == "2") { sinkErr = ch2 } else { sinkOut = ch2 }
+                ch = (tgt == "/dev/stdout") ? fixChan(sinkOut) : ((tgt == "/dev/stderr") ? sinkErr : 2)
             }
+            if (hf >= 0) { fdTab[hf] = ch } else if (fd == "2") { sinkErr = ch } else { sinkOut = ch }
         }
         if (newIn != null) { stdinBuf = newIn; stdinPos = 0; st.hadIn = true }
         return st
@@ -4940,6 +4984,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function closeRedirs(st) {
         sinkOut = st.out
         sinkErr = st.err
+        fdTab = st.fds
         if (st.hadIn) { stdinBuf = st.inb; stdinPos = st.inp }
     }
 
@@ -4954,7 +4999,14 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         snipLine0 = strToInt(vars["$LINENO"])
         var t = arCompile(src, "CompoundList", false)
         snipLine0 = sv
-        return t
+        return function() {
+            var svLn = lnCtx
+            lnCtx = null
+            var r = anytype
+            r = t()
+            lnCtx = svLn
+            return r
+        }
     }
     // The EXIT trap, run once, with $? the status st the shell is leaving with. That status
     // stands - what the trap runs does not change it - unless the trap itself exits. Answers
@@ -6031,6 +6083,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // Call a user function: bind $1.. to args, run the body, restore, return its status.
     function callFunc(name, args) {
         var body = funcs["$" + name]
+        var svLn = lnCtx
+        lnCtx = funcLn["$" + name]
         var saved = posParams
         var savedLoops = loopDepth
         posParams = args
@@ -6040,6 +6094,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         setVarVal("FUNCNAME", name)
         var r = anytype
         r = body()
+        lnCtx = svLn
         popLocalFrame()
         posParams = saved
         loopDepth = savedLoops
@@ -6167,7 +6222,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var subjT = items[0]
         var clauses = items.slice(1)
         return function() {
-            vars["$LINENO"] = ln
+            vars["$LINENO"] = lnCtx == null ? ln : lnIn(ln)
             var s = wordJoin(subjT())
             var i = 0
             var fall = false
@@ -6256,11 +6311,12 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function saveShellState() {
         return {vars: snapshotVars(), pos: posParams, frames: localFrames, st: snapshotState(),
                 e: optErrExit, u: optNounset, pf: optPipefail, eg: optExtglob, tr: exitTrap,
-                so: sinkOut, se: sinkErr, inb: stdinBuf, inp: stdinPos}
+                so: sinkOut, se: sinkErr, fd: fdTab, inb: stdinBuf, inp: stdinPos}
     }
     function restoreShellState(st) {
         sinkOut = st.so
         sinkErr = st.se
+        fdTab = st.fd
         if (stdinBuf != st.inb) { stdinBuf = st.inb; stdinPos = st.inp }
         restoreVars(st.vars)
         restoreState(st.st)
@@ -6320,7 +6376,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function makeArithCmd(exprT0, ln) {
         var exprT = arIn("((: ", exprT0)
         return function() {
-            vars["$LINENO"] = ln
+            vars["$LINENO"] = lnCtx == null ? ln : lnIn(ln)
             var st = !arIsZero(exprT()) ? 0 : 1
             if (takeArithErr()) { st = 1 }
             setStatus(st)
@@ -6343,7 +6399,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             else { redirs.push(items[i]) }
         }
         var core = function() {
-            vars["$LINENO"] = ln
+            vars["$LINENO"] = lnCtx == null ? ln : lnIn(ln)
             var lists = []
             var total = 0
             var k
@@ -6382,7 +6438,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var condErr = 0
     function makeCondCmd(t, ln) {
         return function() {
-            vars["$LINENO"] = ln
+            vars["$LINENO"] = lnCtx == null ? ln : lnIn(ln)
             condErr = 0
             var v = t()
             var st = (condErr != 0) ? condErr : (v ? 0 : 1)
@@ -6601,6 +6657,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var rs = openRedirs(redirs)
             var ab = takeAbort()
             if (ab != null) { closeRedirs(rs); return ab }
+            if (rs.bad) { closeRedirs(rs); setStatus(1); return 1 }
             var st = anytype
             st = bodyT()
             closeRedirs(rs)
@@ -6622,7 +6679,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         var inner = makeSimpleCommand(rest, ln)
         return function() {
-            vars["$LINENO"] = ln
+            vars["$LINENO"] = lnCtx == null ? ln : lnIn(ln)
             var saved = []
             var k
             for (k = 0; k < asgs.length; k++) {
@@ -6700,7 +6757,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function makeCFor(items, ln) {
         var initT = arIn("((: ", items[0]), condT = arIn("((: ", items[1]), stepT = arIn("((: ", items[2]), bodyT = items[3]
         return inLoop(function() {
-            vars["$LINENO"] = ln
+            vars["$LINENO"] = lnCtx == null ? ln : lnIn(ln)
             // An arithmetic error in any of the three parts ends the loop with status 1.
             var last = 0
             var r = anytype
@@ -6782,7 +6839,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             else if (it.fname != undefined) { fname = it.fname }
         }
         return inLoop(function() {
-            vars["$LINENO"] = ln
+            vars["$LINENO"] = lnCtx == null ? ln : lnIn(ln)
             // `for NAME; do` with no `in` list iterates the positional parameters.
             var vals = []
             if (wordThunks == null) {
@@ -6813,6 +6870,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var bodyT = items[1]
         return function() {
             funcs["$" + fname] = bodyT
+            funcLn["$" + fname] = lnCtx
             setStatus(0)
             return 0
         }
