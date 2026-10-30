@@ -5707,6 +5707,12 @@ def s108():
           and list(it.combinations("abcd", 3)) == [("a", "b", "c"), ("a", "b", "d"), ("a", "c", "d"), ("b", "c", "d")]
           and list(it.combinations_with_replacement("ab", 2)) == [("a", "a"), ("a", "b"), ("b", "b")]
           and type(it).__name__ == "module" and it.chain.__name__ == "chain")
+    # map over several sources steps them in turn and stops at the shortest, so an
+    # endless one beside a finite one ends, and map(f, it, it) pairs neighbours.
+    two = iter(xs)
+    check("itt6", list(map(lambda a, b: a * b, it.cycle([1, 2]), [5, 6, 7])) == [5, 12, 7]
+          and list(map(lambda a, b: a + b, xs[:3], it.count(10))) == [13, 12, 16]
+          and list(map(lambda a, b: (a, b), two, two)) == [(3, 1), (4, 1), (5, 9), (2, 6)])
 
 # ===== SECTION 109: the functools module =====
 # reduce, partial, lru_cache / cache with cache_info, wraps / update_wrapper,

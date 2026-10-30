@@ -2456,21 +2456,22 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         pyListErr("ValueError", "zip() argument " + (j + 1) + " is " + what + " than argument" + (j == 1 ? " " : "s 1-") + j)
     }
+    // map(f, *iterables) steps its sources in turn like zip and stops at the
+    // shortest, so an endless source beside a finite one ends. Twin of js_pymapfn
+    // in abnf/jsrt.go and lib/python-rt.metajs.
     hostGlobals["map"] = function() {
         var f = arguments[0]
-        var srcs = []
-        var n = 0 - 1
+        var ds = []
         var i
-        for (i = 1; i < arguments.length; i++) {
-            var es = iterToList(arguments[i])
-            srcs.push(es)
-            if (n < 0 || es.length < n) { n = es.length }
-        }
-        if (n < 0) { n = 0 }
+        for (i = 1; i < arguments.length; i++) { ds.push(pyDelegOf(arguments[i])) }
         var out = []
-        for (i = 0; i < n; i++) {
+        while (ds.length > 0) {
             var row = []
-            for (var k = 0; k < srcs.length; k++) { row.push(srcs[k][i]) }
+            for (var k = 0; k < ds.length; k++) {
+                var st = pyDelegStep(ds[k], undefined)
+                if (st.done) { return pyMkIter("map", out) }
+                row.push(st.value)
+            }
             out.push(pyCall(f, row, null))
         }
         return pyMkIter("map", out)

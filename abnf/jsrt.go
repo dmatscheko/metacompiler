@@ -18723,26 +18723,25 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			}
 			return w(rt.pyMkIter("zip", out))
 		},
+		// map(f, *iterables) steps its sources in turn like zip and stops at the
+		// shortest, so an endless source beside a finite one ends. Twin of
+		// hostGlobals["map"] in languages/python-interpreter.abnf.
 		"js_pymapfn": func(a []uint64) uint64 {
 			args := rt.argArray(u(a[0]))
 			f := argAt(args, 0)
-			var srcs [][]interface{}
-			n := -1
+			var steps []func() (interface{}, bool)
 			for _, s := range pyTailArgs(args) {
-				es := rt.pyElemsOf(s)
-				srcs = append(srcs, es)
-				if n < 0 || len(es) < n {
-					n = len(es)
-				}
-			}
-			if n < 0 {
-				n = 0
+				steps = append(steps, rt.pyStepper(s))
 			}
 			var out []interface{}
-			for i := 0; i < n; i++ {
+			for len(steps) > 0 {
 				var row []interface{}
-				for _, s := range srcs {
-					row = append(row, s[i])
+				for _, step := range steps {
+					v, ok := step()
+					if !ok {
+						return w(rt.pyMkIter("map", out))
+					}
+					row = append(row, v)
 				}
 				out = append(out, rt.callPyValue(f, row, jsUndef))
 			}

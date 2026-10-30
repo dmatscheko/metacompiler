@@ -6549,30 +6549,6 @@ function js_pyenumerate(bound) {
     return pyMkIter("enumerate", out)
 }
 
-// The shortest source wins, and every source is materialized first.
-function pyZipRows(srcs) {
-    var n = 0 - 1
-    var i = 0
-    while (i < srcs.length) {
-        if (n < 0 || srcs[i].length < n) { n = srcs[i].length }
-        i = i + 1
-    }
-    if (n < 0) { n = 0 }
-    var out = []
-    i = 0
-    while (i < n) {
-        var row = []
-        var k = 0
-        while (k < srcs.length) {
-            row.push(srcs[k][i])
-            k = k + 1
-        }
-        out.push(row)
-        i = i + 1
-    }
-    return out
-}
-
 // Go: js_pyzip. zip(*iterables, strict=False), bound as [positionals,
 // keywords]. The sources are stepped in turn, one row at a time, so zip(it, it)
 // pairs consecutive items, and strict= is CPython's ValueError for sources of
@@ -6645,20 +6621,27 @@ function pyAStep(st) {
     return {value: r["value"], done: pyATruthy(r["done"])}
 }
 
+// Go: js_pymapfn. map(f, *iterables) steps its sources in turn like zip and
+// stops at the shortest, so an endless source beside a finite one ends.
 function js_pymapfn(args) {
     var f = pyEArgAt(args, 0)
-    var srcs = []
+    var ss = []
     var i = 1
     while (i < args.length) {
-        srcs.push(pyElemsOf(args[i]))
+        ss.push(pyAStepper(args[i]))
         i = i + 1
     }
-    var rows = pyZipRows(srcs)
     var out = []
-    i = 0
-    while (i < rows.length) {
-        out.push(pyDCallPyValue(f, rows[i], undefined))
-        i = i + 1
+    while (ss.length > 0) {
+        var row = []
+        var k = 0
+        while (k < ss.length) {
+            var st = pyAStep(ss[k])
+            if (st["done"] === true) { return pyMkIter("map", out) }
+            row.push(st["value"])
+            k = k + 1
+        }
+        out.push(pyDCallPyValue(f, row, undefined))
     }
     return pyMkIter("map", out)
 }
