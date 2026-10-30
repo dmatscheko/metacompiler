@@ -676,7 +676,6 @@ function decodeURI(v) { return __uriDecode(v, __uriReserved) }
 var __msDay = 86400000
 var __dayNames = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
 var __monNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
-var __monLong = ["january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december"]
 // The long name V8 shows for a zone, by the abbreviation the host reports; another
 // zone shows its abbreviation.
 var __zoneNames = {UTC: "Coordinated Universal Time", GMT: "Greenwich Mean Time", BST: "British Summer Time",
@@ -762,190 +761,369 @@ function __dUTC(lt) {
     if (vb && !va) { return lt - ob }
     return lt - oa
 }
+// V8 asks whether summer time is in force at an EQUIVALENT time for a t before 1970
+// or past 2^31 - 1 seconds: the same month, day and time of day in the year of
+// 2008..2035 that is a leap year when t's is and starts on the same weekday
+// (DateCache::EquivalentTime).
+function __dNameTime(t) {
+    if (t >= 0 && t <= 2147483647000) { return t }
+    var f = __dFields(t)
+    var leap = f.y % 4 === 0 && (f.y % 100 !== 0 || f.y % 400 === 0)
+    var recent = (leap ? 1956 : 1967) + (__dMod(__daysFromCivil(f.y, 1, 1) + 4, 7) * 12) % 28
+    var ey = 2008 + (recent + 3 * 28 - 2008) % 28
+    var days = Math.floor(t / __msDay)
+    return (__daysFromCivil(ey, f.mo + 1, f.d) - days) * __msDay + t
+}
 function __pad(n, w) {
     var s = String(Math.abs(n))
     while (s.length < w) { s = "0" + s }
     return n < 0 ? "-" + s : s
 }
 function __dYear(y) { return y < 0 ? "-" + __pad(-y, 4) : __pad(y, 4) }
-// "GMT+0100 (Central European Standard Time)" for UTC time t.
+// "GMT+0100 (Central European Standard Time)" for UTC time t. The offset is t's own;
+// the name is the zone's standard or summer time as at __dNameTime(t).
 function __dZone(t) {
     var off = __jsZone(2, Math.floor(t / 1000))
     var a = Math.abs(off)
     var zs = (off < 0 ? "-" : "+") + __pad(Math.floor(a / 3600), 2) + __pad(Math.floor(a / 60) % 60, 2)
-    var ab = __jsZone(3, Math.floor(t / 1000))
+    var ab = __jsZone(3, Math.floor(__dNameTime(t) / 1000))
     // Before standard time the host says "LMT"; V8 names the zone's standard time.
     if (ab === "LMT") { ab = __jsZone(3, __jsZone(2, 946684800) <= __jsZone(2, 962409600) ? 946684800 : 962409600) }
     var nm = __zoneNames[ab]
     return "GMT" + zs + " (" + (nm === undefined ? ab : nm) + ")"
 }
-function __dIsDigits(s, from, n) {
-    if (from + n > s.length) { return false }
-    for (var i = from; i < from + n; i++) {
-        var c = s.charCodeAt(i)
-        if (c < 48 || c > 57) { return false }
-    }
-    return true
+// Date.parse is V8's DateParser: the date-time string format (21.4.1.32) first, and
+// whatever that leaves unread through V8's legacy rules - numbers into a day (up to
+// three, month 1 / day 1 / year 1 filling the missing ones, so "5" is May 1 2001) or
+// a time (after a colon), month and zone words, AM/PM and a UTC offset after a time or
+// "GMT". A date-only string in the format is UTC, anything else without an offset
+// local time.
+//
+// The tokens, as V8's DateStringTokenizer cuts them: k is "num" (v its value from the
+// first nine digits, n its digit count), "sym" (: - + . or ), v the character), "kw" (a
+// word: t its keyword type, v its value, n its length), "ws" (one whitespace
+// character), "unk" (anything else, a parenthesized comment included) and "end".
+var __dKeys = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec",
+    "am", "pm", "ut", "utc", "z", "gmt", "cdt", "cst", "edt", "est", "mdt", "mst", "pdt", "pst", "t"]
+var __dKeyType = ["mon", "mon", "mon", "mon", "mon", "mon", "mon", "mon", "mon", "mon", "mon", "mon",
+    "ampm", "ampm", "tz", "tz", "tz", "tz", "tz", "tz", "tz", "tz", "tz", "tz", "tz", "tz", "tsep"]
+var __dKeyVal = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 0, 12, 0, 0, 0, 0, -5, -6, -4, -5, -6, -7, -7, -8, 0]
+function __dWs(c) {
+    return c === 9 || c === 10 || c === 11 || c === 12 || c === 13 || c === 32 || c === 160 || c === 5760 ||
+        (c >= 8192 && c <= 8202) || c === 8232 || c === 8233 || c === 8239 || c === 8287 || c === 12288 || c === 65279
 }
-// Date.parse: the date-time string format (21.4.1.32) - a date-only form is UTC, a
-// date-time without an offset local time - then the forms toString, toUTCString and
-// the common "Month day, year [time]" spellings make.
-function __dParse(str) {
-    var s = String(str).trim()
-    var t = __dParseIso(s)
-    if (t === t) { return t }
-    return __dParseLoose(s)
-}
-function __dParseIso(s) {
+function __dTokens(s) {
+    var out = []
     var i = 0
-    var y = 0
-    if ((s.charAt(0) === "+" || s.charAt(0) === "-") && __dIsDigits(s, 1, 6)) {
-        y = Number(s.substring(1, 7))
-        if (s.charAt(0) === "-") {
-            if (y === 0) { return NaN }
-            y = -y
-        }
-        i = 7
-    } else if (__dIsDigits(s, 0, 4)) {
-        y = Number(s.substring(0, 4))
-        i = 4
-    } else { return NaN }
-    var mo = 1
-    var d = 1
-    if (s.charAt(i) === "-") {
-        if (!__dIsDigits(s, i + 1, 2)) { return NaN }
-        mo = Number(s.substring(i + 1, i + 3))
-        i = i + 3
-        if (s.charAt(i) === "-") {
-            if (!__dIsDigits(s, i + 1, 2)) { return NaN }
-            d = Number(s.substring(i + 1, i + 3))
-            i = i + 3
+    while (i < s.length) {
+        var c = s.charCodeAt(i)
+        if (c >= 48 && c <= 57) {
+            var v = 0
+            var n = 0
+            while (i < s.length && s.charCodeAt(i) >= 48 && s.charCodeAt(i) <= 57) {
+                if (n < 9) { v = v * 10 + s.charCodeAt(i) - 48 }
+                n = n + 1
+                i = i + 1
+            }
+            out.push({k: "num", v: v, n: n})
+        } else if (c === 58 || c === 45 || c === 43 || c === 46 || c === 41) {
+            out.push({k: "sym", v: s.charAt(i)})
+            i = i + 1
+        } else if (c >= 65 && !__dWs(c)) {
+            // A word is matched on its first three characters, lowercased by setting bit
+            // 0x20 as V8 does; only a month name may be longer than its keyword.
+            var pre = ""
+            var len = 0
+            while (i < s.length && s.charCodeAt(i) >= 65 && !__dWs(s.charCodeAt(i))) {
+                if (len < 3) { pre = pre + String.fromCharCode(s.charCodeAt(i) | 32) }
+                len = len + 1
+                i = i + 1
+            }
+            var kt = "bad"
+            var kv = 0
+            for (var j = 0; j < __dKeys.length; j++) {
+                if (__dKeys[j] === pre && (len <= 3 || __dKeyType[j] === "mon")) {
+                    kt = __dKeyType[j]
+                    kv = __dKeyVal[j]
+                    break
+                }
+            }
+            out.push({k: "kw", t: kt, v: kv, n: len})
+        } else if (__dWs(c)) {
+            out.push({k: "ws"})
+            i = i + 1
+        } else if (c === 40) {
+            var bal = 0
+            do {
+                if (s.charCodeAt(i) === 41) { bal = bal - 1 } else if (s.charCodeAt(i) === 40) { bal = bal + 1 }
+                i = i + 1
+            } while (bal > 0 && i < s.length)
+            out.push({k: "unk"})
+        } else {
+            out.push({k: "unk"})
+            i = i + 1
         }
     }
-    if (mo < 1 || mo > 12 || d < 1 || d > 31) { return NaN }
-    var h = 0
-    var mi = 0
-    var sec = 0
-    var ms = 0
-    var local = false
-    var off = 0
-    if (i < s.length) {
-        if (s.charAt(i) !== "T" && s.charAt(i) !== "t" && s.charAt(i) !== " ") { return NaN }
-        if (!__dIsDigits(s, i + 1, 2) || s.charAt(i + 3) !== ":" || !__dIsDigits(s, i + 4, 2)) { return NaN }
-        h = Number(s.substring(i + 1, i + 3))
-        mi = Number(s.substring(i + 4, i + 6))
-        i = i + 6
-        if (s.charAt(i) === ":") {
-            if (!__dIsDigits(s, i + 1, 2)) { return NaN }
-            sec = Number(s.substring(i + 1, i + 3))
-            i = i + 3
-            if (s.charAt(i) === "." || s.charAt(i) === ",") {
-                var j = i + 1
-                while (__dIsDigits(s, j, 1)) { j = j + 1 }
-                if (j === i + 1) { return NaN }
-                ms = Math.floor(Number("0." + s.substring(i + 1, j)) * 1000)
-                i = j
+    out.push({k: "end"})
+    return out
+}
+// The reading position over the tokens, with V8's scanner operations.
+function __dScan(toks) {
+    var at = 0
+    var sc = {}
+    sc.peek = function () { return toks[at] }
+    sc.next = function () {
+        var t = toks[at]
+        if (at < toks.length - 1) { at = at + 1 }
+        return t
+    }
+    sc.skip = function (ch) {
+        if (toks[at].k === "sym" && toks[at].v === ch) {
+            at = at + 1
+            return true
+        }
+        return false
+    }
+    sc.fixed = function (n) { return toks[at].k === "num" && toks[at].n === n }
+    return sc
+}
+function __dIn(x, lo, hi) { return x >= lo && x <= hi }
+// A fraction's digits as milliseconds: its first three, as written.
+function __dMillis(tok) {
+    var v = tok.v
+    var n = tok.n
+    if (n === 1) { return v * 100 }
+    if (n === 2) { return v * 10 }
+    if (n > 9) { n = 9 }
+    while (n > 3) {
+        v = Math.floor(v / 10)
+        n = n - 1
+    }
+    return v
+}
+// The date-time string format, filling day, time and zone (the composers below):
+// "end" when the whole string was read, "bad" when it cannot be a date at all, and
+// otherwise the first token it did not take, which the legacy rules go on from.
+function __dParseEs5(sc, day, time, tz) {
+    var t = sc.peek()
+    if (t.k === "sym" && (t.v === "+" || t.v === "-")) {
+        var sign = sc.next()
+        if (!sc.fixed(6)) { return sign }
+        var y = sc.next().v
+        if (sign.v === "-" && y === 0) { return sign }
+        day.c.push(sign.v === "-" ? -y : y)
+    } else if (sc.fixed(4)) {
+        day.c.push(sc.next().v)
+    } else {
+        return sc.next()
+    }
+    if (sc.skip("-")) {
+        if (!sc.fixed(2) || !__dIn(sc.peek().v, 1, 12)) { return sc.next() }
+        day.c.push(sc.next().v)
+        if (sc.skip("-")) {
+            if (!sc.fixed(2) || !__dIn(sc.peek().v, 1, 31)) { return sc.next() }
+            day.c.push(sc.next().v)
+        }
+    }
+    var p = sc.peek()
+    if (p.k !== "kw" || p.t !== "tsep") {
+        if (p.k !== "end") { return sc.next() }
+    } else {
+        sc.next()
+        if (!sc.fixed(2) || !__dIn(sc.peek().v, 0, 24)) { return "bad" }
+        var h24 = sc.peek().v === 24
+        time.c.push(sc.next().v)
+        if (!sc.skip(":")) { return "bad" }
+        if (!sc.fixed(2) || !__dIn(sc.peek().v, 0, 59) || (h24 && sc.peek().v > 0)) { return "bad" }
+        time.c.push(sc.next().v)
+        if (sc.skip(":")) {
+            if (!sc.fixed(2) || !__dIn(sc.peek().v, 0, 59) || (h24 && sc.peek().v > 0)) { return "bad" }
+            time.c.push(sc.next().v)
+            if (sc.skip(".")) {
+                if (sc.peek().k !== "num" || (h24 && sc.peek().v > 0)) { return "bad" }
+                time.c.push(__dMillis(sc.next()))
             }
         }
-        if (h > 24 || mi > 59 || sec > 59 || (h === 24 && (mi > 0 || sec > 0 || ms > 0))) { return NaN }
-        local = true
-        if (s.charAt(i) === "Z" || s.charAt(i) === "z") {
-            local = false
-            i = i + 1
-        } else if (s.charAt(i) === "+" || s.charAt(i) === "-") {
-            if (!__dIsDigits(s, i + 1, 2) || s.charAt(i + 3) !== ":" || !__dIsDigits(s, i + 4, 2)) { return NaN }
-            off = (Number(s.substring(i + 1, i + 3)) * 60 + Number(s.substring(i + 4, i + 6))) * 60000
-            if (s.charAt(i) === "-") { off = -off }
-            local = false
-            i = i + 6
+        var z = sc.peek()
+        if (z.k === "kw" && z.t === "tz" && z.n === 1) {
+            sc.next()
+            __dTzSet(tz, 0)
+        } else if (z.k === "sym" && (z.v === "+" || z.v === "-")) {
+            tz.sign = sc.next().v === "+" ? 1 : -1
+            if (sc.fixed(4)) {
+                var hm = sc.next().v
+                if (!__dIn(Math.floor(hm / 100), 0, 23) || !__dIn(hm % 100, 0, 59)) { return "bad" }
+                tz.h = Math.floor(hm / 100)
+                tz.m = hm % 100
+            } else {
+                if (!sc.fixed(2) || !__dIn(sc.peek().v, 0, 23)) { return "bad" }
+                tz.h = sc.next().v
+                if (!sc.skip(":")) { return "bad" }
+                if (!sc.fixed(2) || !__dIn(sc.peek().v, 0, 59)) { return "bad" }
+                tz.m = sc.next().v
+            }
         }
-        if (i !== s.length) { return NaN }
+        if (sc.peek().k !== "end") { return "bad" }
     }
-    var t = __dMake(y, mo - 1, d, h, mi, sec, ms)
-    if (local) { return __dClip(__dUTC(t)) }
-    return __dClip(t - off)
+    if (tz.sign === null && time.c.length === 0) { __dTzSet(tz, 0) }
+    day.iso = true
+    return "end"
 }
-function __dParseLoose(s) {
-    var words = []
-    var cur = ""
-    for (var i = 0; i <= s.length; i++) {
-        var ch = i < s.length ? s.charAt(i) : " "
-        if (ch === " " || ch === "," || ch === "\t") {
-            if (cur !== "") { words.push(cur) }
-            cur = ""
-        } else if (ch === "(") {
-            if (cur !== "") { words.push(cur) }
-            cur = ""
-            while (i < s.length && s.charAt(i) !== ")") { i = i + 1 }
-        } else { cur = cur + ch }
+// A zone of a whole number of hours, the way a zone word or "Z" sets it.
+function __dTzSet(tz, hours) {
+    tz.sign = hours < 0 ? -1 : 1
+    tz.h = Math.abs(hours)
+    tz.m = 0
+}
+// [year, month 0-11, day] from the day composer, or null.
+function __dDayOf(day) {
+    var c = day.c
+    if (c.length < 1) { return null }
+    while (c.length < 3) { c.push(1) }
+    var y = 0
+    var mo = 0
+    var d = 0
+    if (day.mon === 0) {
+        if (day.iso || !__dIn(c[0], 1, 31)) {
+            y = c[0]
+            mo = c[1]
+            d = c[2]
+        } else {
+            mo = c[0]
+            d = c[1]
+            y = c[2]
+        }
+    } else {
+        mo = day.mon
+        if (!__dIn(c[0], 1, 31)) {
+            y = c[0]
+            d = c[1]
+        } else {
+            d = c[0]
+            y = c[1]
+        }
     }
-    var y = NaN
-    var mo = -1
-    var d = NaN
-    var h = 0
-    var mi = 0
-    var sec = 0
-    var off = NaN
-    var pm = -1
-    var nums = []
-    for (var k = 0; k < words.length; k++) {
-        var w = words[k]
-        var lw = w.toLowerCase()
-        if (w.indexOf(":") > 0) {
-            var parts = w.split(":")
-            h = Number(parts[0])
-            mi = Number(parts[1])
-            sec = parts.length > 2 ? Number(parts[2]) : 0
-            if (h !== h || mi !== mi || sec !== sec) { return NaN }
-            continue
-        }
-        if (lw === "am" || lw === "pm") { pm = lw === "pm" ? 1 : 0; continue }
-        if (lw === "gmt" || lw === "utc" || lw === "z") { if (off !== off) { off = 0 } continue }
-        if ((w.charAt(0) === "+" || w.charAt(0) === "-") && w.length > 1) {
-            var z = w.substring(0, 3) === "GMT" ? w.substring(3) : w
-            var zn = Number(z.substring(1).replace(":", ""))
-            if (zn !== zn) { return NaN }
-            off = (Math.floor(zn / 100) * 60 + zn % 100) * 60000
-            if (z.charAt(0) === "-") { off = -off }
-            continue
-        }
-        if (lw.substring(0, 3) === "gmt" && (w.charAt(3) === "+" || w.charAt(3) === "-")) {
-            var zg = Number(w.substring(4).replace(":", ""))
-            off = (Math.floor(zg / 100) * 60 + zg % 100) * 60000
-            if (w.charAt(3) === "-") { off = -off }
-            continue
-        }
-        if (w.indexOf("/") > 0) {
-            var sp = w.split("/")
-            if (sp.length !== 3) { return NaN }
-            mo = Number(sp[0]) - 1
-            d = Number(sp[1])
-            y = Number(sp[2])
-            continue
-        }
-        var mon = -1
-        for (var mm = 0; mm < 12 && lw.length >= 3; mm++) { if (__monLong[mm].substring(0, lw.length) === lw) { mon = mm } }
-        if (mon >= 0) { mo = mon; continue }
-        var isDay = false
-        for (var dd = 0; dd < 7; dd++) { if (lw.substring(0, 3) === __dayNames[dd].toLowerCase()) { isDay = true } }
-        if (isDay) { continue }
-        var n = Number(w)
-        if (n !== n) { return NaN }
-        nums.push(n)
+    if (!day.iso) {
+        if (__dIn(y, 0, 49)) { y = y + 2000 } else if (__dIn(y, 50, 99)) { y = y + 1900 }
     }
-    for (var q = 0; q < nums.length; q++) {
-        if (d !== d && nums[q] <= 31 && mo >= 0) { d = nums[q] }
-        else if (y !== y) { y = nums[q] }
-        else { return NaN }
+    if (!__dIn(mo, 1, 12) || !__dIn(d, 1, 31)) { return null }
+    return [y, mo - 1, d]
+}
+// [hour, minute, second, millisecond] from the time composer, or null.
+function __dTimeOf(time) {
+    var c = time.c
+    while (c.length < 4) { c.push(0) }
+    if (time.ampm !== null) {
+        if (!__dIn(c[0], 0, 12)) { return null }
+        c[0] = c[0] % 12 + time.ampm
     }
-    if (mo < 0 || y !== y) { return NaN }
-    if (d !== d) { d = 1 }
-    if (y >= 0 && y <= 49) { y = y + 2000 } else if (y >= 50 && y <= 99) { y = y + 1900 }
-    if (pm === 1 && h < 12) { h = h + 12 }
-    if (pm === 0 && h === 12) { h = 0 }
-    var t = __dMake(y, mo, d, h, mi, sec, 0)
-    if (off === off) { return __dClip(t - off) }
-    return __dClip(__dUTC(t))
+    if (!__dIn(c[0], 0, 23) || !__dIn(c[1], 0, 59) || !__dIn(c[2], 0, 59) || !__dIn(c[3], 0, 999)) {
+        if (c[0] !== 24 || c[1] !== 0 || c[2] !== 0 || c[3] !== 0) { return null }
+    }
+    return c
+}
+// Whether the time composer takes n as its next field after an hour.
+function __dTimeWants(time, n) {
+    var i = time.c.length
+    return (i === 1 && __dIn(n, 0, 59)) || (i === 2 && __dIn(n, 0, 59)) || (i === 3 && __dIn(n, 0, 999))
+}
+function __dTimeFinal(time, n) {
+    if (time.c.length >= 4) { return false }
+    time.c.push(n)
+    while (time.c.length < 4) { time.c.push(0) }
+    return true
+}
+function __dParse(str) {
+    var sc = __dScan(__dTokens(String(str)))
+    var day = {c: [], mon: 0, iso: false}
+    var time = {c: [], ampm: null}
+    var tz = {sign: null, h: null, m: null}
+    var tok = __dParseEs5(sc, day, time, tz)
+    if (tok === "bad") { return NaN }
+    var hasNum = day.c.length > 0
+    if (tok !== "end") {
+        for (; tok.k !== "end"; tok = sc.next()) {
+            if (tok.k === "num") {
+                hasNum = true
+                var n = tok.v
+                if (sc.skip(":")) {
+                    if (sc.skip(":")) {
+                        if (time.c.length > 0) { return NaN }
+                        time.c.push(n)
+                        time.c.push(0)
+                    } else {
+                        if (time.c.length >= 4) { return NaN }
+                        time.c.push(n)
+                        if (sc.peek().k === "sym" && sc.peek().v === ".") { sc.next() }
+                    }
+                } else if (sc.skip(".") && __dTimeWants(time, n)) {
+                    time.c.push(n)
+                    if (sc.peek().k !== "num") { return NaN }
+                    __dTimeFinal(time, __dMillis(sc.next()))
+                } else if (tz.h !== null && tz.m === null && __dIn(n, 0, 59)) {
+                    tz.m = n
+                } else if (__dTimeWants(time, n)) {
+                    __dTimeFinal(time, n)
+                    var pk = sc.peek()
+                    if (pk.k !== "end" && pk.k !== "ws" && !(pk.k === "kw" && pk.t === "tz" && pk.n === 1) &&
+                        !(pk.k === "sym" && (pk.v === "+" || pk.v === "-"))) { return NaN }
+                } else {
+                    if (day.c.length >= 3) { return NaN }
+                    day.c.push(n)
+                    sc.skip("-")
+                }
+            } else if (tok.k === "kw") {
+                if (tok.t === "ampm" && time.c.length > 0) {
+                    time.ampm = tok.v
+                } else if (tok.t === "mon") {
+                    day.mon = tok.v
+                    sc.skip("-")
+                } else if (tok.t === "tz" && hasNum) {
+                    __dTzSet(tz, tok.v)
+                } else {
+                    // A word that means nothing is allowed only before the first number,
+                    // and not touching it.
+                    if (hasNum || sc.peek().k === "num") { return NaN }
+                }
+            } else if (tok.k === "sym" && (tok.v === "+" || tok.v === "-") && ((tz.h === 0 && tz.m === 0) || time.c.length > 0)) {
+                tz.sign = tok.v === "+" ? 1 : -1
+                var on = 0
+                var ol = 0
+                if (sc.peek().k === "num") {
+                    var nt = sc.next()
+                    ol = nt.n
+                    on = nt.v
+                }
+                hasNum = true
+                if (sc.peek().k === "sym" && sc.peek().v === ":") {
+                    tz.h = on
+                    tz.m = null
+                } else if (ol === 1 || ol === 2) {
+                    tz.h = on
+                    tz.m = 0
+                } else if (ol === 3 || ol === 4) {
+                    tz.h = Math.floor(on / 100)
+                    tz.m = on % 100
+                } else { return NaN }
+            } else if (tok.k === "sym" && (tok.v === "+" || tok.v === "-" || tok.v === ")") && hasNum) {
+                return NaN
+            }
+        }
+    }
+    var dv = __dDayOf(day)
+    var tv = __dTimeOf(time)
+    if (dv === null || tv === null) { return NaN }
+    var t = __dMake(dv[0], dv[1], dv[2], tv[0], tv[1], tv[2], tv[3])
+    if (tz.sign === null) {
+        if (Math.abs(t) > 8.64e15 + 864000000) { return NaN }
+        return __dClip(__dUTC(t))
+    }
+    var secs = (tz.h === null ? 0 : tz.h) * 3600 + (tz.m === null ? 0 : tz.m) * 60
+    // V8 holds the offset in seconds as a 32-bit small integer.
+    if (secs > 2147483647) { return NaN }
+    t = t - secs * tz.sign * 1000
+    if (Math.abs(t) > 8.64e15) { return NaN }
+    return __dClip(t)
 }
 function __dArgs(args, from, n, dflt) {
     var out = []

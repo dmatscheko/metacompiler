@@ -38,8 +38,8 @@ members), string valued, and with the reverse mapping of the numeric members
 MERGED ones - the namespace object is the body's own scope, so its members see each other
 by bare name and the outside sees them as 'Ns.member'; constructor PARAMETER PROPERTIES
 ('constructor(public x: number)' declares and assigns this.x); TC39 standard DECORATORS
-on classes, methods and fields, including decorator factories and addInitializer, applied
-in tsc's phases (decoPhases);
+on classes, methods, getters, setters, fields and auto-accessors, including decorator
+factories and addInitializer, applied in tsc's phases (decoPhases);
 'export' in front of a declaration (a transparent prefix, the declaration is genuine);
 and 'import' of a project .ts file, whose top-level declarations register flatly in the
 global scope.
@@ -309,7 +309,7 @@ ThisParam   = KwThis [ "?" ] [ TypeAnnot ] ;
 // The optional marker '?' and the ': Type' annotation are type-layer only.
 Param       = ParamDecorators ( DefaultParam | PatternParam | PlainParam ) ;
 // A PARAMETER decorator ('@Inject() x: number') is parsed and dropped: there is no
-// TC39 semantics for one, and TypeScript's own is a pure reflection side effect.
+// TC39 semantics for one, and tsc's emit drops it too (TS1206 is a checker error).
 ParamDecorators <~~ takeAll() ~~> = { Decorator } ;
 PlainParam  = NotBindName Id <~~ push(noteParam(idName(up.in))) ~~> [ "?" ] [ TypeAnnot ] ;
 DefaultParam <~~ push(makeDefaultParam(takeAll())) ~~>
@@ -5742,7 +5742,6 @@ NotFuncHead = :script(~~
     // See the twin of this comment in js-interpreter.abnf.
     function jsNotCtor(f) {
         var nm = fnNameOf(f)
-        if (nm.substring(0, 6) == "bound ") { return false }
         if (fnMeta(f, "src") == 1) { return false }
         return !jsHostCtor(nm)
     }
@@ -6021,13 +6020,35 @@ NotFuncHead = :script(~~
             // A bound function's own name is "bound " + the target's, and its length is
             // the target's less the arguments already supplied, floored at 0 (node says
             // "bound f"/1 for `f.bind(null)` of `function f(a){}`).
-            return fnMetaPut(function() {
+            var bf = fnMetaPut(function() {
                 var a = []
                 for (var j = 0; j < pre.length; j++) { a.push(pre[j]) }
                 for (var k2 = 0; k2 < arguments.length; k2++) { a.push(arguments[k2]) }
                 return callWithThis(fn, self, a)
             }, "bound " + fnNameOf(fn), bl)
+            jsBoundK.push(bf)
+            jsBoundT.push(fn)
+            jsBoundP.push(pre)
+            return bf
         }
+    }
+    // See the twin of this comment in js-interpreter.abnf.
+    var jsBoundK = []
+    var jsBoundT = []
+    var jsBoundP = []
+    function jsBoundAt(f) {
+        for (var i = 0; i < jsBoundK.length; i++) { if (jsBoundK[i] === f) { return i } }
+        return 0 - 1
+    }
+    function jsUnbind(f, argv) {
+        var i = jsBoundAt(f)
+        if (i < 0) { return f }
+        var pre = jsBoundP[i]
+        var n = argv.length
+        for (var j = 0; j < pre.length; j++) { argv.push(undefined) }
+        for (var k = n - 1; k >= 0; k--) { argv[k + pre.length] = argv[k] }
+        for (var m = 0; m < pre.length; m++) { argv[m] = pre[m] }
+        return jsUnbind(jsBoundT[i], argv)
     }
 
     // The get/set accessor for a key, or undefined. An object literal keeps its accessors
@@ -7641,6 +7662,10 @@ NotFuncHead = :script(~~
         if (typeof cls != "function" && !isClassDesc(cls) && cls !== hostGlobals["Object"] && cls !== hostGlobals["Array"]) {
             biRaise("TypeError: Right-hand side of 'instanceof' is not callable")
         }
+        if (typeof cls == "function" && jsBoundK.length > 0) {
+            var bi = jsBoundAt(cls)
+            if (bi >= 0) { return instanceOf(v, jsBoundT[bi]) }
+        }
         if (v == undefined || v == null) { return false }
         // The prototype of a class extending a builtin is an instance of the builtin.
         if (typeof v == "object" && !Array.isArray(v) && hasOwn(v, "__protoof") && jsBuiltinBase(v.__protoof) === cls) { return true }
@@ -9057,7 +9082,7 @@ NotFuncHead = :script(~~
     // items = [{decs}, {mods}, {acc}, keyDesc, params, bodyThunk].
     function makeClassAccessor(items) {
         var key = items[3]
-        return {kind: "accessor", acc: items[2].acc, name: key.mk, keyT: key.mkT,
+        return {kind: "accessor", acc: items[2].acc, name: key.mk, keyT: key.mkT, decs: items[0].decs,
                 statik: hasStatic(items[1].mods), params: items[4], body: items[5]}
     }
     // A constructor PARAMETER PROPERTY: items = [name] or [name, defaultThunk]. It binds
@@ -9087,11 +9112,13 @@ NotFuncHead = :script(~~
     // A decorator is called with the value and a context object, and a value it returns
     // replaces the original - except on a FIELD, whose value is undefined and whose
     // decorators return INITIALIZERS: the answer is then the list of those, outermost
-    // first. ctx.addInitializer appends to extras. The context carries kind, name,
-    // static, private (a private name reads "#x") and addInitializer.
-    // Twin of decoApplyAll in typescript-to-llvm-ir.abnf.
+    // first. An AUTO-ACCESSOR's value is {get, set}, the cell {g, s} holds, and its
+    // decorators answer {get, set, init}: a get or a set replaces the cell's, an init
+    // is an initializer of the hidden field. ctx.addInitializer appends to extras. The
+    // context carries kind, name, static, private (a private name reads "#x") and
+    // addInitializer. Twin of decoApplyAll in typescript-to-llvm-ir.abnf.
     function decoApply(vals, value, kind, name, statik, extras) {
-        var v = anytype // The decorated value: a class descriptor or a function.
+        var v = anytype // The decorated value: a class descriptor, a function or an accessor cell.
         v = value
         var finits = []
         var adder = fnMetaPut(function(f) { extras.push(f); return undefined }, "addInitializer", 1)
@@ -9104,16 +9131,32 @@ NotFuncHead = :script(~~
             var d = anytype // The decorator.
             d = vals[i]
             if (typeof d != "function") fail("decorator is not a function")
+            var arg = anytype // What the decorator is handed.
+            arg = v
+            if (kind == "accessor") { arg = {get: v.g, set: v.s, __keys: ["get", "set"]} }
             var r = anytype // Whatever the decorator handed back.
-            r = callWithThis(d, undefined, [v, ctx])
+            r = callWithThis(d, undefined, [arg, ctx])
             if (r != undefined && r != null) {
-                if (kind == "field") { finits.push(r) } else { v = r }
+                if (kind == "field") { finits.push(r) }
+                else if (kind == "accessor") { decoAccTake(v, r, finits) }
+                else { v = r }
             }
         }
-        if (kind != "field") { return v }
+        if (kind != "field" && kind != "accessor") { return v }
         var outer = []
         for (var j = finits.length - 1; j >= 0; j--) { outer.push(finits[j]) }
         return outer
+    }
+    // An auto-accessor decorator's answer r: its get and set replace the cell's, its init
+    // joins the initializers.
+    function decoAccTake(cell, r, finits) {
+        var x = anytype // One of r's three members.
+        x = getMember(r, "get")
+        if (x !== undefined) { cell.g = x }
+        x = getMember(r, "set")
+        if (x !== undefined) { cell.s = x }
+        x = getMember(r, "init")
+        if (x !== undefined) { finits.push(x) }
     }
     // Runs registered initializers with `this` bound; with a value, each one maps it.
     function decoRun(list, self, v, useValue) {
@@ -9313,8 +9356,8 @@ NotFuncHead = :script(~~
         var decorated = cdecs.length > 0
         for (var j = 0; j < members.length; j++) {
             var mm = members[j]
-            if (mm.decs != undefined && mm.decs != null && mm.decs.length > 0 && mm.auto !== true &&
-                (mm.kind == "field" || mm.kind == "method")) {
+            if (mm.decs != undefined && mm.decs != null && mm.decs.length > 0 &&
+                (mm.kind == "field" || mm.kind == "method" || mm.kind == "accessor")) {
                 mm.di = dMembers.length
                 dMembers.push(mm)
                 decorated = true
@@ -9327,9 +9370,9 @@ NotFuncHead = :script(~~
                 privKinds["$" + mm.name] = {field: mm.kind == "field", statik: mm.statik == true, cls: (name == "") ? "anonymous" : name}
             }
             if (mm.auto === true) {
-                var store = {kind: "field", name: "__#auto#" + mm.name, statik: mm.statik, init: mm.init}
+                var store = {kind: "field", name: "__#auto#" + mm.name, statik: mm.statik, init: mm.init, di: mm.di}
                 if (mm.statik) { inits.push(store) } else { fields.push(store) }
-                protos.push({kind: "autoacc", name: mm.name, statik: mm.statik, store: store.name})
+                protos.push({kind: "autoacc", name: mm.name, statik: mm.statik, store: store.name, di: mm.di})
             }
             else if (mm.kind == "field") { if (mm.statik) { inits.push(mm) } else { fields.push(mm) } }
             else if (mm.kind == "method" || mm.kind == "accessor") { protos.push(mm) }
@@ -9386,11 +9429,15 @@ NotFuncHead = :script(~~
                 var pk = memberKey(pm, ckeys)
                 var ptgt = pm.statik ? statics : cls
                 if (pm.kind == "accessor") {
-                    addAccessor(ptgt, pm.acc, pk, fnMetaPut(makeClosure(pm.params, pm.body, mscopes, true),
-                                                            pm.acc + " " + pk, fnArity(pm.params)))
+                    var af = fnMetaPut(makeClosure(pm.params, pm.body, mscopes, true), pm.acc + " " + pk, fnArity(pm.params))
+                    if (pm.di != undefined) { dcells[pm.di] = {f: af} }
+                    addAccessor(ptgt, pm.acc, pk, af)
                 } else if (pm.kind == "autoacc") {
-                    addAccessor(ptgt, "get", pk, fnMetaPut(autoGetter(pm.store), "get " + pk, 0))
-                    addAccessor(ptgt, "set", pk, fnMetaPut(autoSetter(pm.store), "set " + pk, 1))
+                    // A decorated one's pair is filed in dcells for decoPhases to replace.
+                    var acell = {g: fnMetaPut(autoGetter(pm.store), "get " + pk, 0), s: fnMetaPut(autoSetter(pm.store), "set " + pk, 1)}
+                    if (pm.di != undefined) { dcells[pm.di] = acell }
+                    addAccessor(ptgt, "get", pk, acell.g)
+                    addAccessor(ptgt, "set", pk, acell.s)
                 } else {
                     // A method replaces an earlier accessor of the same name.
                     jsAccDrop(ptgt, pk)
@@ -9437,19 +9484,34 @@ NotFuncHead = :script(~~
             return dcls
         }
     }
-    // The decoration phases in tsc's order - static methods, instance methods, static
-    // fields, instance fields, then the class - answering the decorated class.
-    // Twin of decoPhases in typescript-to-llvm-ir.abnf.
+    // The decoration phases in tsc's order - static methods and accessors, instance
+    // ones, static fields, instance fields, then the class - answering the decorated
+    // class. An auto-accessor is decorated with the methods and initialized as a field,
+    // its extra initializers after it. Twin of decoPhases in typescript-to-llvm-ir.abnf.
     function decoPhases(cls, statics, dMembers, dv, dcells, deco, cdv, ckeys) {
         for (var ph = 0; ph < 4; ph++) {
             for (var i = 0; i < dMembers.length; i++) {
                 var m = dMembers[i]
-                if ((m.kind == "field") != (ph >= 2) || (m.statik == true) != (ph % 2 == 0)) { continue }
+                var isField = m.kind == "field" && m.auto !== true
+                if (isField != (ph >= 2) || (m.statik == true) != (ph % 2 == 0)) { continue }
                 var k = memberKey(m, ckeys)
+                var tgt = anytype // Where the member lives: the static namespace or the class.
+                tgt = m.statik ? statics : cls
                 if (m.kind == "field") {
                     var rec = {inits: [], extras: []}
-                    rec.inits = decoApply(dv[i], undefined, "field", k, m.statik, rec.extras)
+                    if (m.auto === true) {
+                        var acell = dcells[i]
+                        rec.inits = decoApply(dv[i], acell, "accessor", k, m.statik, rec.extras)
+                        addAccessor(tgt, "get", k, acell.g)
+                        addAccessor(tgt, "set", k, acell.s)
+                    } else {
+                        rec.inits = decoApply(dv[i], undefined, "field", k, m.statik, rec.extras)
+                    }
                     deco.m[i] = rec
+                } else if (m.kind == "accessor") {
+                    var gcell = dcells[i]
+                    gcell.f = decoApply(dv[i], gcell.f, (m.acc == "get") ? "getter" : "setter", k, m.statik, m.statik ? deco.sx : deco.ix)
+                    addAccessor(tgt, m.acc, k, gcell.f)
                 } else {
                     var cell = dcells[i]
                     cell.f = decoApply(dv[i], cell.f, "method", k, m.statik, m.statik ? deco.sx : deco.ix)
@@ -9595,6 +9657,7 @@ NotFuncHead = :script(~~
     }
     // Twin of jsConstructFn in js-interpreter.abnf.
     function jsConstructFn(cls, argv, clsName) {
+        if (jsBoundK.length > 0) { cls = jsUnbind(cls, argv) }
         if (jsNotCtor(cls)) { biRaise("TypeError: " + clsName + " is not a constructor") }
         if (cls === jsNumberFn || cls === jsStringFn || cls === jsBooleanFn) { return jsWrap(cls.apply(undefined, argv)) }
         if (cls === jsObjectGlobal) { return jsToObject(argv.length > 0 ? argv[0] : undefined) }
@@ -10443,6 +10506,11 @@ NotFuncHead = :script(~~
             var pr = cpPrint(inner)
             if (pr !== null) { return pr }
             if (inner.indexOf("(") < 0) { return inner }
+        }
+        // See the twin of this comment in js-interpreter.abnf.
+        if (t.charCodeAt(0) == 40) {
+            var pw = cpPrint(t)
+            if (pw !== null) { return pw }
         }
         return "(intermediate value)"
     }

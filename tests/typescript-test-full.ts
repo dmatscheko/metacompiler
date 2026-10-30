@@ -5765,6 +5765,35 @@ class F145 {
 class R145 { static make(): any { return new R145(); } }
 const E145 = @sub145 class { z = 1; };
 const defs145 = log145.join(",");
+// A getter or a setter decorator replaces the function; an auto-accessor's is handed
+// {get, set} and answers {get, set, init}: a get or a set replaces that half, an init
+// maps the initial value, outermost first. They are applied with the methods, and an
+// auto-accessor's extra initializers run after its value is set, as a field's do.
+const log145b: string[] = [];
+function acc145(tag: string): any {
+    return function (value: any, ctx: any): any {
+        log145b.push(tag + ":" + ctx.kind + ":" + String(ctx.name) + ":" + ctx.static + ":" + ctx.private + ":" + typeof value);
+        ctx.addInitializer(function (this: any) { log145b.push("x:" + tag); });
+        if (ctx.kind == "getter") { return function (this: any) { return "G" + value.call(this); }; }
+        if (ctx.kind == "setter") { return function (this: any, v: any) { value.call(this, v * 10); }; }
+        if (ctx.kind == "accessor") {
+            return {get(this: any) { return "A" + value.get.call(this); }, set(this: any, v: any) { value.set.call(this, v + 1); },
+                    init(v: any) { log145b.push("init:" + tag + ":" + v); return v + tag; }};
+        }
+        return undefined;
+    };
+}
+class A145 {
+    _x = 1;
+    #p = 3;
+    @acc145("g") get x(): any { return this._x; }
+    @acc145("s") set x(v: any) { this._x = v; }
+    @acc145("a1") @acc145("a2") accessor a: any = "v";
+    @acc145("pg") get #q(): any { return this.#p; }
+    q(): any { return this.#q; }
+    @acc145("sa") static accessor sa: any = 2;
+}
+const defs145b = log145b.join(",");
 function s145(): void {
     log145.length = 0;
     log145.push("new");
@@ -5775,6 +5804,17 @@ function s145(): void {
         log145.join(",") == "new,i:m1:object,f:f1:1,i:f1:object,f:f2:2,i:f2:object,ctor");
     check("decophase2", k.a == 10 && k.b == 20 && K145.sf == 50 && new F145().x == 16 && F145.s == 101);
     check("decophase3", (R145.make() as any).extra == 7 && (new E145() as any).extra == 7);
+    log145b.length = 0;
+    const a: any = new A145();
+    a.x = 4;
+    const v1 = a.x + "," + a._x + "," + a.a + "," + a.q() + "," + A145.sa;
+    a.a = 5;
+    A145.sa = 7;
+    check("decophase4", defs145b == "sa:accessor:sa:true:false:object,g:getter:x:false:false:function," +
+        "s:setter:x:false:false:function,a2:accessor:a:false:false:object,a1:accessor:a:false:false:object," +
+        "pg:getter:#q:false:true:function,init:sa:2,x:sa" &&
+        log145b.join(",") == "x:g,x:s,x:pg,init:a1:v,init:a2:va1,x:a2,x:a1" &&
+        v1 + "|" + a.a + "," + A145.sa == "G40,40,AAva1a2,G3,A2sa|AA7,A8");
 }
 
 // ===== SECTION 146: bindings named like Object.prototype members =====
@@ -5810,6 +5850,15 @@ function s147(): void {
     var bad = new Date(NaN)
     var err = ""
     try { bad.toISOString() } catch (e: any) { err = e.constructor.name + ":" + e.message }
+    // V8's legacy parse: up to three numbers, a lone one a month (or a year when it
+    // cannot be a day), the missing fields month 1, day 1 and year 1 read as 2001.
+    check("date6", Date.parse("5") == new Date(2001, 4, 1).getTime() && Date.parse("32") == new Date(2032, 0, 1).getTime() &&
+        Date.parse("May 5") == new Date(2001, 4, 5).getTime() && Date.parse(" 1/2 ") == new Date(2001, 0, 2).getTime() &&
+        Date.parse("2001-5") == new Date(2001, 4, 1).getTime() && Date.parse("Dec 25 1995 1:30 PM EST") == Date.UTC(1995, 11, 25, 18, 30) &&
+        isNaN(Date.parse("13")) && isNaN(Date.parse("Dec 25 1995 x")) && isNaN(Date.parse("2024-01-01T10:00:00,5")))
+    // A zone's name before 1970 is the one at the equivalent date of 2008..2035.
+    var zn = function (d: any) { var t = String(d); return t.substring(t.indexOf("(")) }
+    check("date7", zn(new Date(-8.64e15)) == zn(new Date(2021, 3, 20, 12)) && zn(new Date(-62198755200000)) == zn(new Date(2021, 0, 1, 12)))
     check("date3", String(bad) == "Invalid Date" && err == "RangeError:Invalid time value" && bad.toJSON() === null &&
         isNaN(new Date(8.64e15 + 1).getTime()) && new Date(1.9).getTime() == 1)
     var loc = new Date(2020, 1, 29, 12, 30, 15, 250)
@@ -5851,6 +5900,7 @@ class K148 { m() { return 1 } static s() { return 2 } }
 function* g148() {}
 async function a148() {}
 function P148(this: any, x: number) { this.x = x }
+function B148(this: any, a: any, b: any, c: any) { this.s = "" + a + b + c }
 function e148(f: () => any): string {
     try { var r = f(); return "ok:" + typeof r } catch (e: any) { return e.constructor.name + ":" + e.message }
 }
@@ -5876,6 +5926,24 @@ function s148(): void {
         e148(function () { return new Object() }), e148(function () { return new Array(2) })]
     check("newctor2", made.join("|") == "ok:object|ok:object|ok:object|ok:object|ok:object|ok:object|ok:object|ok:object" &&
         new P148(4).x == 4)
+    // A bound function constructs its target: the bound this is ignored, the bound
+    // arguments of every level come first, and instanceof asks the target.
+    var bb = B148.bind({z: 1}, 1).bind(null, 2)
+    var ob = new bb(3)
+    check("newctor3", ob.s == "123" && ob.z === undefined && ob instanceof B148 && ob instanceof bb &&
+        e148(function () { return new (arrow.bind(null))() }) == "TypeError:arrow.bind(...) is not a constructor" &&
+        e148(function () { return new (o.ar.bind(o).bind(null))() }) == "TypeError:o.ar.bind(...).bind(...) is not a constructor")
+    // A parenthesized callee with members behind it is printed without the parentheses.
+    check("newctor4", e148(function () { return new (o).ar() }) == "TypeError:o.ar is not a constructor" &&
+        e148(function () { return new (o)["ar"]() }) == "TypeError:o.ar is not a constructor")
+    // node strips the types before V8 prints the callee: a type assertion or a non-null
+    // '!' prints nothing.
+    check("newctor5", e148(function () { return new (arrow as any)() }) == "TypeError:arrow is not a constructor" &&
+        e148(function () { return new (arrow.bind(null) as any)() }) == "TypeError:arrow.bind(...) is not a constructor" &&
+        e148(function () { return new (o as any).ar() }) == "TypeError:o.ar is not a constructor" &&
+        e148(function () { return new (arrow!)() }) == "TypeError:arrow is not a constructor" &&
+        e148(function () { return new (o.ar satisfies () => number)() }) == "TypeError:o.ar is not a constructor" &&
+        e148(function () { return (o.ar() + 1 as any)() }) == "TypeError:(o.ar(...) + 1) is not a function")
 }
 
 // ===== END SECTIONS =====

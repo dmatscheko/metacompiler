@@ -28,6 +28,8 @@
 //   - a function, an arrow or a class prints "(intermediate value)" once per
 //     statement of its body (at least once), plus once more when its parameter list
 //     is not simple (a default, a pattern or a rest), V8's parameter-init block
+//   - a typescript 'as T', 'satisfies T' or non-null '!' prints nothing: node strips
+//     the types before V8 parses, so "(f as any)" reads "f"
 //
 // cpPrint answers null for anything it does not parse - '?.', 'new', a template or
 // string with an escape, a body statement it cannot count (a nested block or a
@@ -115,11 +117,12 @@ function cpTxt(txt, end) {
     return src
 }
 
-// Whether txt may hold a word operator (typeof, void, delete, in, instanceof) or a
-// function, whose words and line breaks the printing reads.
+// Whether txt may hold a word operator (typeof, void, delete, in, instanceof, as,
+// satisfies) or a function, whose words and line breaks the printing reads.
 function cpGlued(t) {
     return t.indexOf("in") >= 0 || t.indexOf("typeof") >= 0 || t.indexOf("void") >= 0 || t.indexOf("delete") >= 0 ||
-        t.indexOf("=>") >= 0 || t.indexOf("function") >= 0 || t.indexOf("class") >= 0 || t.indexOf("async") >= 0
+        t.indexOf("=>") >= 0 || t.indexOf("function") >= 0 || t.indexOf("class") >= 0 || t.indexOf("async") >= 0 ||
+        t.indexOf("as") >= 0 || t.indexOf("satisfies") >= 0
 }
 
 // The JavaScript text of a number, or null when the host printer cannot be trusted
@@ -439,6 +442,12 @@ function cpBin(p, minPrec) {
     var l = cpUnary(p)
     while (!p["bad"]) {
         var tok = cpPeek(p)
+        // 'as' and 'satisfies' bind as the relational operators do.
+        if (tok["k"] == "id" && (tok["v"] == "as" || tok["v"] == "satisfies") && minPrec <= 8) {
+            p["i"] = p["i"] + 1
+            cpSkipType(p)
+            continue
+        }
         var pr = cpPrec(tok)
         if (pr == 0 || pr < minPrec) { return l }
         var op = tok["v"]
@@ -448,6 +457,30 @@ function cpBin(p, minPrec) {
         l = cpCombine(op, l, r)
     }
     return l
+}
+
+// The type after 'as' or 'satisfies': its brackets balanced, and at the outer level
+// names, literals, '.', '|', '&' and '=>'.
+function cpSkipType(p) {
+    var depth = 0
+    while (!p["bad"]) {
+        var tok = cpPeek(p)
+        if (tok["k"] == "end") { return }
+        if (tok["k"] == "p") {
+            var v = tok["v"]
+            if (v == "(" || v == "[" || v == "{" || v == "<") { depth = depth + 1 }
+            else if (v == ")" || v == "]" || v == "}" || v == ">") {
+                if (depth == 0) { return }
+                depth = depth - 1
+            }
+            else if (v == ">>" || v == ">>>") {
+                depth = depth - v.length
+                if (depth < 0) { cpBad(p) }
+            }
+            else if (depth == 0 && v != "." && v != "|" && v != "&" && v != "=>") { return }
+        }
+        p["i"] = p["i"] + 1
+    }
 }
 
 // One binary node, folding two number (or, for '+', two string) literals the way V8's
@@ -551,6 +584,9 @@ function cpPostfix(p) {
             }
             p["i"] = p["i"] + 1
             n = {k: "call", o: n}
+        } else if (cpIsP(tok, "!")) {
+            // A typescript non-null assertion.
+            p["i"] = p["i"] + 1
         } else {
             return n
         }

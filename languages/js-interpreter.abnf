@@ -7192,12 +7192,11 @@ NotFuncHead = :script(~~
     }
     // IsConstructor for a function value: the spans of the `function` declarations
     // and expressions, and the builtin constructors (jsHostCtor). An arrow, a method,
-    // a generator or an async function is none; a bound function is left to its call.
+    // a generator or an async function is none; `new` asks a bound function's target.
     // Twins: js_jsnotctor in abnf/jsrtjsprint.go and languages/lib/js-rt.metajs.
     var jsCtorSpans = {}
     function jsNotCtor(f) {
         var nm = fnNameOf(f)
-        if (nm.substring(0, 6) == "bound ") { return false }
         var sp = fnSrcOf(f)
         if (sp >= 0) { return jsCtorSpans["$" + sp] !== true }
         return !jsHostCtor(nm)
@@ -7552,13 +7551,40 @@ NotFuncHead = :script(~~
             // A bound function's own name is "bound " + the target's, and its length is
             // the target's less the arguments already supplied, floored at 0 (node says
             // "bound f"/1 for `f.bind(null)` of `function f(a){}`).
-            return fnMetaPut(function() {
+            var bf = fnMetaPut(function() {
                 var a = []
                 for (var j = 0; j < pre.length; j++) { a.push(pre[j]) }
                 for (var k2 = 0; k2 < arguments.length; k2++) { a.push(arguments[k2]) }
                 return callWithThis(fn, self, a)
             }, "bound " + fnNameOf(fn), bl)
+            jsBoundK.push(bf)
+            jsBoundT.push(fn)
+            jsBoundP.push(pre)
+            return bf
         }
+    }
+    // A bound function's target and bound arguments, by identity. `new` constructs the
+    // target with the bound arguments first and the bound this ignored, and instanceof
+    // asks the target (ECMA-262 10.4.1.2, 7.3.22 step 2). Twins: jsvFnInfo.bound in
+    // abnf/jsrtjsprint.go, jvBoundK in languages/lib/js-rt.metajs.
+    var jsBoundK = []
+    var jsBoundT = []
+    var jsBoundP = []
+    function jsBoundAt(f) {
+        for (var i = 0; i < jsBoundK.length; i++) { if (jsBoundK[i] === f) { return i } }
+        return 0 - 1
+    }
+    // The function `new f(...argv)` constructs; argv gains every level's bound
+    // arguments in front, the innermost level's first.
+    function jsUnbind(f, argv) {
+        var i = jsBoundAt(f)
+        if (i < 0) { return f }
+        var pre = jsBoundP[i]
+        var n = argv.length
+        for (var j = 0; j < pre.length; j++) { argv.push(undefined) }
+        for (var k = n - 1; k >= 0; k--) { argv[k + pre.length] = argv[k] }
+        for (var m = 0; m < pre.length; m++) { argv[m] = pre[m] }
+        return jsUnbind(jsBoundT[i], argv)
     }
     // The get/set accessor for a key, or undefined. An object literal keeps its accessors
     // in its own hidden table; an INSTANCE has none of its own and inherits them from its
@@ -9428,6 +9454,10 @@ NotFuncHead = :script(~~
         // An object that is no constructor (and has no Symbol.hasInstance, above).
         if (typeof cls != "function" && !isClassDesc(cls) && cls !== hostGlobals["Object"] && cls !== hostGlobals["Array"]) {
             biRaise("TypeError: Right-hand side of 'instanceof' is not callable")
+        }
+        if (typeof cls == "function" && jsBoundK.length > 0) {
+            var bi = jsBoundAt(cls)
+            if (bi >= 0) { return instanceOf(v, jsBoundT[bi]) }
         }
         if (v == undefined || v == null) { return false }
         // The prototype of a class extending a builtin is an instance of the builtin.
@@ -11413,6 +11443,7 @@ NotFuncHead = :script(~~
     // `new F(...)` for a FUNCTION F. A wrapper of the primitive the call answers, and
     // ToObject for Object.
     function jsConstructFn(cls, argv, clsName) {
+        if (jsBoundK.length > 0) { cls = jsUnbind(cls, argv) }
         if (jsNotCtor(cls)) { biRaise("TypeError: " + clsName + " is not a constructor") }
         if (cls === jsNumberFn || cls === jsStringFn || cls === jsBooleanFn) { return jsWrap(cls.apply(undefined, argv)) }
         if (cls === jsObjectGlobal) { return jsToObject(argv.length > 0 ? argv[0] : undefined) }
@@ -11964,6 +11995,12 @@ NotFuncHead = :script(~~
             var pr = cpPrint(inner)
             if (pr !== null) { return pr }
             if (inner.indexOf("(") < 0) { return inner }
+        }
+        // A parenthesized primary with member suffixes behind it: `new (o).f()` reads
+        // `o.f is not a constructor`.
+        if (t.charCodeAt(0) == 40) {
+            var pw = cpPrint(t)
+            if (pw !== null) { return pw }
         }
         return "(intermediate value)"
     }

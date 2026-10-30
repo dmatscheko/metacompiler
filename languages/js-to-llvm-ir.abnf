@@ -5117,6 +5117,11 @@ NotFuncHead = :script(~~
             if (pr !== null) { return pr }
             if (inner.indexOf("(") < 0) { return inner }
         }
+        // See the twin of this comment in js-interpreter.abnf.
+        if (t.charCodeAt(0) == 40) {
+            var pw = cpPrint(t)
+            if (pw !== null) { return pw }
+        }
         return "(intermediate value)"
     }
     function siteIndexText(base, txt) {
@@ -7438,14 +7443,17 @@ NotFuncHead = :script(~~
             // A function that is no constructor - an arrow, a method, a generator, an
             // async function, a builtin like Math.max - is node's TypeError, after the
             // arguments (js_jsnotctor, ctorMark).
+            // A bound function constructs its target, its bound arguments in front of
+            // these (js_jsunbind).
+            var fnV = callExt(fnB, "js_jsunbind", [clsV, argsV])
             var ctorOkF = curF.NewBlock("")
             var ctorBadF = curF.NewBlock("")
-            fnB.NewCondBr(fnB.NewICmp(llvm.enum.IPredNE, callExt(fnB, "js_jsnotctor", [clsV]), handle(0)), ctorBadF, ctorOkF)
+            fnB.NewCondBr(fnB.NewICmp(llvm.enum.IPredNE, callExt(fnB, "js_jsnotctor", [fnV]), handle(0)), ctorBadF, ctorOkF)
             emitSiteThrow(ctorBadF, site + " is not a constructor")
             fnB = ctorOkF
             var oF0 = callExt(fnB, "js_obj_new", [])
-            callExt(fnB, "js_jsnewclass", [oF0, clsV])
-            var retF = callExt(fnB, "js_call_new", [clsV, oF0, argsV])
+            callExt(fnB, "js_jsnewclass", [oF0, fnV])
+            var retF = callExt(fnB, "js_call_new", [fnV, oF0, argsV])
             var oF = callExt(fnB, "js_jsnewres", [retF, oF0])
             fnB.NewBr(mergeB)
             // The class form: the constructor convention prepends the instance. A

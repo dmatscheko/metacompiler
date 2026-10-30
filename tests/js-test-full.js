@@ -1746,6 +1746,15 @@ function s144() {
     var bad = new Date(NaN)
     var err = ""
     try { bad.toISOString() } catch (e) { err = e.constructor.name + ":" + e.message }
+    // V8's legacy parse: up to three numbers, a lone one a month (or a year when it
+    // cannot be a day), the missing fields month 1, day 1 and year 1 read as 2001.
+    check("date6", Date.parse("5") == new Date(2001, 4, 1).getTime() && Date.parse("32") == new Date(2032, 0, 1).getTime() &&
+        Date.parse("May 5") == new Date(2001, 4, 5).getTime() && Date.parse(" 1/2 ") == new Date(2001, 0, 2).getTime() &&
+        Date.parse("2001-5") == new Date(2001, 4, 1).getTime() && Date.parse("Dec 25 1995 1:30 PM EST") == Date.UTC(1995, 11, 25, 18, 30) &&
+        isNaN(Date.parse("13")) && isNaN(Date.parse("Dec 25 1995 x")) && isNaN(Date.parse("2024-01-01T10:00:00,5")))
+    // A zone's name before 1970 is the one at the equivalent date of 2008..2035.
+    var zn = function (d) { var t = String(d); return t.substring(t.indexOf("(")) }
+    check("date7", zn(new Date(-8.64e15)) == zn(new Date(2021, 3, 20, 12)) && zn(new Date(-62198755200000)) == zn(new Date(2021, 0, 1, 12)))
     check("date3", String(bad) == "Invalid Date" && err == "RangeError:Invalid time value" && bad.toJSON() === null &&
         isNaN(new Date(8.64e15 + 1).getTime()) && new Date(1.9).getTime() == 1)
     var loc = new Date(2020, 1, 29, 12, 30, 15, 250)
@@ -1787,6 +1796,7 @@ class K145 { m() { return 1 } static s() { return 2 } }
 function* g145() {}
 async function a145() {}
 function P145(x) { this.x = x }
+function B145(a, b, c) { this.s = "" + a + b + c }
 function e145(f) {
     try { var r = f(); return "ok:" + typeof r } catch (e) { return e.constructor.name + ":" + e.message }
 }
@@ -1812,6 +1822,16 @@ function s145() {
         e145(function () { return new Object() }), e145(function () { return new Array(2) })]
     check("newctor2", made.join("|") == "ok:object|ok:object|ok:object|ok:object|ok:object|ok:object|ok:object|ok:object" &&
         new P145(4).x == 4)
+    // A bound function constructs its target: the bound this is ignored, the bound
+    // arguments of every level come first, and instanceof asks the target.
+    var bb = B145.bind({z: 1}, 1).bind(null, 2)
+    var ob = new bb(3)
+    check("newctor3", ob.s == "123" && ob.z === undefined && ob instanceof B145 && ob instanceof bb &&
+        e145(function () { return new (arrow.bind(null))() }) == "TypeError:arrow.bind(...) is not a constructor" &&
+        e145(function () { return new (o.ar.bind(o).bind(null))() }) == "TypeError:o.ar.bind(...).bind(...) is not a constructor")
+    // A parenthesized callee with members behind it is printed without the parentheses.
+    check("newctor4", e145(function () { return new (o).ar() }) == "TypeError:o.ar is not a constructor" &&
+        e145(function () { return new (o)["ar"]() }) == "TypeError:o.ar is not a constructor")
 }
 
 // ===== END SECTIONS =====

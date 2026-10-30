@@ -2526,6 +2526,25 @@ type jsvFnInfo struct {
 	// "none": a js interpreter's span (lib/js-fnsrc.js), or for a compiled js program
 	// the function index whose text a wrapper value shows (js_jsfnsrc).
 	src int
+	// bound is what Function.prototype.bind made this function from.
+	bound *jsvBoundRec
+}
+
+// jsvBoundRec is a bound function's target and bound arguments. `new` constructs the
+// target with the bound arguments first and the bound this ignored, and instanceof
+// asks the target (ECMA-262 10.4.1.2, 7.3.22 step 2). Twins: jsBoundK in both
+// *-interpreter.abnf, jvBoundK in languages/lib/js-rt.metajs.
+type jsvBoundRec struct {
+	target interface{}
+	pre    []interface{}
+}
+
+// jsvBoundOf is v's bound record, or nil.
+func jsvBoundOf(v interface{}) *jsvBoundRec {
+	if f, ok := v.(*hostFunc); ok && f.meta != nil {
+		return f.meta.bound
+	}
+	return nil
 }
 
 // jsvFnMeta answers ""/0 for a function that was never named and for a non-function.
@@ -2561,7 +2580,7 @@ func jsvFnMetaSet(v interface{}, name string, length int) {
 	case *jsClosure:
 		f.meta = &jsvFnInfo{name: name, length: length, src: src}
 	case *hostFunc:
-		f.meta = &jsvFnInfo{name: name, length: length, src: src}
+		f.meta = &jsvFnInfo{name: name, length: length, src: src, bound: jsvBoundOf(f)}
 	}
 }
 
@@ -4250,6 +4269,7 @@ func (rt *jsrt) jsvMethod(target interface{}, name string, args []interface{}) (
 			bl = 0
 		}
 		jsvFnMetaSet(bound, "bound "+jsvFnMeta(fn).name, bl)
+		bound.meta.bound = &jsvBoundRec{target: fn, pre: pre}
 		return bound, true
 	}
 	// BigInt.prototype (abnf/jsrtjsbig.go): (255n).toString(16), (1n).valueOf().
@@ -5848,6 +5868,9 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 				return boolH(rt.truthy(rt.call(f, target, []interface{}{v})))
 			}
 		}
+		if br := jsvBoundOf(target); br != nil {
+			return m["js_jsinstanceof"]([]uint64{a[0], w(br.target)})
+		}
 		if jsvIsObjectGlobal(target) {
 			return boolH(jsvIsObjLike(v) || isCallable(v))
 		}
@@ -6229,8 +6252,8 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 	// comma-separated, of its `function` declarations and expressions. js_jsnotctor(f)
 	// is the third raw predicate: 1 when f is a function `new` must refuse (ECMA-262
 	// IsConstructor) - an arrow, a method, a generator, an async function, or a
-	// builtin other than a constructor (jsvHostCtor). A bound function is left to
-	// its call. Twins: js_jsctortab / js_jsnotctor__raw in languages/lib/js-rt.metajs,
+	// builtin other than a constructor (jsvHostCtor); `new` asks a bound function's
+	// target (js_jsunbind). Twins: js_jsctortab / js_jsnotctor__raw in languages/lib/js-rt.metajs,
 	// jsNotCtor in both *-interpreter.abnf.
 	m["js_jsctortab"] = func(a []uint64) uint64 {
 		tab := map[int]bool{}
@@ -6242,15 +6265,28 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 		jsvCtorTabs[rt] = tab
 		return 0
 	}
+	// js_jsunbind(f, args) is the function `new f(...args)` constructs: f's bound
+	// target, every level unwrapped, with each level's bound arguments put in front of
+	// args, the innermost level's first. Any other f is answered as it is.
+	m["js_jsunbind"] = func(a []uint64) uint64 {
+		f := u(a[0])
+		br := jsvBoundOf(f)
+		if br == nil {
+			return a[0]
+		}
+		args := u(a[1]).(*jsArray)
+		for ; br != nil; br = jsvBoundOf(f) {
+			args.elems = append(append([]interface{}{}, br.pre...), args.elems...)
+			f = br.target
+		}
+		return w(f)
+	}
 	m["js_jsnotctor"] = func(a []uint64) uint64 {
 		v := u(a[0])
 		if !jsvIsFnLike(v) {
 			return 0
 		}
 		nm := jsvFnMeta(v).name
-		if strings.HasPrefix(nm, "bound ") {
-			return 0
-		}
 		if idx := jsvFnSrcIdx(v); idx >= 0 {
 			if jsvCtorTabs[rt][idx] {
 				return 0
