@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-869** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-871** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -79,7 +79,12 @@ string fast path.
 
 # JS — JavaScript and TypeScript
 
-### T-861 ts/js: `bind` on a class · P3 · JS · OPEN [V JS worker]
+### T-870 ts/js: toStringTag for Map/Set/typed arrays; Uint8Array gaps · P3 · JS · IN PROGRESS (JS worker, round 35) [V CORE worker]
+`Object.prototype.toString.call(new Map())` → node `[object Map]`, ours `[object Object]` (a `__#@toStringTag` getter in
+js-builtins.js is honoured only by llvm.Run, not by the interpreter or native) — same for Set and Uint8Array. Uint8Array:
+no ArrayBuffer; a write past the end makes an ordinary property where node drops it.
+
+### T-861 ts/js: `bind` on a class · P3 · JS · IN PROGRESS (JS worker, round 35) [V JS worker]
 `class K { constructor(a, b) { this.s = a + b; } }; new (K.bind(null, 7))(8).s` → node 15; all three of our engines
 "TypeError: K.bind is not a function" (a class descriptor is not callable, so it has no bind, although `"bind" in K`
 is true). Also `K.call`/`K.apply` must throw node's "Class constructor K cannot be invoked without 'new'".
@@ -111,6 +116,14 @@ type. The rule must check applicability by argument types where they are known. 
 in the receiver rule (a companion member should hide a top-level declaration of the same name; spec-only).
 
 # GO — Go  (oracle: `go run`)
+
+### T-869 go: FMA fusion, complex64, cmplx trig, `*p` through *complex128 · P2 · GO · OPEN [V CORE worker]
+(1) WRONG ANSWER, every leg: Go on arm64 fuses `a*b+c` / `a*b-c` into FMA in user code (the spec permits it, gc does it):
+`float64(i)*0.37 - 30` → go -25.56, ours -25.560000000000002; complex `z*z`, `z/w` differ in the last digit. Model gc's
+fusion rule (an explicit float64() conversion or assignment prevents it) in all three engines — check against `go run`.
+(2) complex64 (float32 rounding of every complex op). (3) cmplx Sin/Cos/Tan/Asin/Acos/Atan/Sinh/Cosh/Tanh (needs math
+Sinh/Cosh/Asin in go-math.go). (4) `*p = 5` with p `*complex128` stores a real number (go `(5+0i)`): goRefTy answers ""
+for a dereference.
 
 ---
 
@@ -151,13 +164,6 @@ A reviewer argued the VM prints `RangeError (index): Invalid value: Not in inclu
 range 0..2: 7` (a plain RangeError); the current engines print the IndexError form
 `RangeError (index): Index out of range: index should be less than 3: 7`, which is
 believed to be the modern VM's. Leave as is unless a real dart run settles it.
-
-### T-775 missing features met in real programs (Benchmarks Game, Rosetta Code) · P3 · CORE · IN PROGRESS (CORE worker, round 10) [V finder only]
-python: module-level `__doc__` (NameError). go: `make(NamedType, n)` for `type Vec []float64` / `type M map[string]int`
-(go-interpreter.abnf MakeType ~981); `math/cmplx` / complex128. js: Uint8Array. java: `System.out.flush()`; without a class Main
-the compiled legs say only "variable not defined: Main". swift: free function `sqrt`; bitwise compound assignment (`&=` parse
-error; `|=`, `<<=`, `>>=` "unknown operator" / "call of a non function value"). c: a `#define` inside a function body is not
-applied. Programs and adaptations: tests/programs/fetch.sh --list.
 
 # Closed
 
@@ -922,6 +928,7 @@ T-863 bash: newlines in [[ ]], fd 3+, ${!u} error under 2>/dev/null, $( ) LINENO
 T-865 bash: `$NAME"` glued inside a nested "…"; a redirection alone on a line — DONE 1f9dce1b (GlueRef reads a $NAME across the quotes of a quoted ${v-w} word as bash does, = bash 5.3 and 3.2 on 9 forms; here-doc pre-pass keeps its place after a ' holding a "; RedirCommand: redirections alone run : with them, redirections before an assignment; no filesystem by design, so >file creates nothing. DECLINED: "${u:-a"$x"$'b'}" — bash turns $'b' into text before reading the glued name, an internal quirk with no further use)
 T-866 bash: a prefix assignment after a leading redirection — DONE 1a1f2704 (redirections interleave with leading assignments in PrefixCommand and Assignment, both grammars — = bash 5.3)
 T-862 kotlin: member vs top-level fun, qualifiedName, named args on nested ctors — DONE 33383d41 (implicit-receiver members beat top-level declarations — interp-core globalHit/globalSet hooks, compiler js_ktrecvof branch only for names declared both ways; nested KClass simpleName/qualifiedName/java.name per stdlib; emit-time tables keyed by binary name so nested named args order right)
+T-775 missing features met in real programs (Benchmarks Game, Rosetta Code) — DONE ddd654a4 (python module __doc__ incl. per-module docstring table; go make of named slice/map/chan types, math/cmplx after Go's algorithms + Atan2/Sincos, complex128 typed locations, returned constants convert to the result type; java System.out.flush and the source launcher's entry class; swift &= |= ^= <<= >>= and wrapping forms, free sqrt; js Uint8Array; c #define among struct members and initializer items through the pipeline — the in-function case already worked via -pipe; complex64 and cmplx trig filed as T-869)
 
 # Settled — do not re-open
 
