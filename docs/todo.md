@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-846** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-847** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -127,23 +127,18 @@ not change the renderer.
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-836 kotlin: edges left by the operator/cast/range fixes · P3 · KT · IN PROGRESS (KT worker, round 3) [V KT worker]
-Each checked against java 24 + kotlin-stdlib 2.2.21 unless noted. (1) `"\n\n  a\n\n".trimIndent()` →
-stdlib `"\na\n"` (drops only a blank FIRST and a blank LAST line), ours `"a"` in all engines.
-(2) compiled `is Comparable<*>` is true for any value, so `Dog() as Comparable<*>` does not throw
-(JVM ClassCastException). (3) `t!!.i++` / `t!!.i = v`: `!!` inside an assignment target is still
-the identity (expressions throw NPE correctly). (4) the ConcurrentModificationException check is
-size-based: an add+remove in one iteration, or `sort()` during iteration, does not throw (ArrayList
-modCount does). (5) the ClassCastException message names a nested class by its simple name; the JVM
-says `Outer$Inner`. (6) LongRange `first`/`last`/`contains` near 2^53 still read the double fields
-(iteration, count, toString are exact). (7) `null as String` passes in every leg; Kotlin/JVM throws
-NullPointerException (message from kotlinc codegen — spec-only, no kotlinc here).
-
-### T-837 kotlin: a lambda whose body is a `try` expression returns Unit · P2 · KT · IN PROGRESS (KT worker, round 3) [V master]
-`println(m.let { try { it.getValue("b") } catch (e: NoSuchElementException) { e.message } })` and
-`println(m.let { try { 7 } catch (e: Exception) { 8 } })` print `kotlin.Unit` (interpreter; Kotlin
-spec: the lambda's value is its last expression, a try is an expression → `Key b is missing in the
-map.` and `7`). `val r = try {..} catch {..}` outside a lambda is right. Check all three engines.
+### T-846 kotlin: modCount CME and smaller gaps · P3 · KT · OPEN [V KT worker]
+(1) ConcurrentModificationException is size-based: an add+remove in one iteration, or `sort()` during
+iteration, does not throw (JVM ArrayList modCount does). Needs a per-list modification counter on the
+shared array value in all three engines (Go array struct in abnf/jsrt.go, the array cell in runtime.c,
+the interpreter's arrays), bumped by every structural mutator and read per loop step — a shared-file
+change: agree where the counter lives (e.g. the array's named-property slot) and bench it. (2) `Unit` as
+a value (`listOf(1, Unit)`) → interp "unknown name: Unit". (3) `class Outer { class Inner; inner class
+Inn2 }` — `;` between members on one line does not parse (interp, 2:26). (4) `t?.i = 3` with t null: the
+`?.` in an assignment target is read as `.` (interp hard error; Kotlin skips the assignment); probe the
+compiled legs. (5) LongRange hashing (rangeHashK / ktRangeHash) uses the double fields. (6) a Float range
+is named ClosedDoubleRange (no Float mark on the range value). (7) `null as T` for unchecked targets
+(type parameters, `List<Int>`, `Any`) still passes.
 
 # GO — Go  (oracle: `go run`)
 
@@ -941,6 +936,8 @@ T-776 java: a null Integer as array index, array dimension or charAt argument ra
 T-833 c: loud gaps left from the cell-memory ticket — DONE c2152f2f (E1[E2] as *(E1+E2) for rvalues and lvalues; nested designators write only the named subobject, brace elision after one refused loudly; limits.h/stdint.h/stdbool.h constant table with cc's types; C compiler fail goes to stderr so -qq keeps it)
 T-834 c native: `extern int ge; int ge = 5;` fails to link — DONE c2152f2f (one object per file-scope name in both halves; redefinition / conflicting types errors; block-scope extern binds the file-scope object)
 T-835 c: a duplicate definition in one block scope is accepted — DONE c2152f2f (per-block/for/statement-expression name tables; same-scope redeclaration is a compile error in both halves; parameter-vs-body redeclaration filed as T-844)
+T-837 kotlin: a lambda whose body is a `try` expression returns Unit — DONE 66e8c889 (a try at the start of a lambda statement is a TryExpr in both grammars; plus cc28d0c0: typed catch clauses in a try expression, a non-local return passes catch(Exception))
+T-836 kotlin: edges left by the operator/cast/range fixes — PARTIAL 84a044bd — trimIndent = replaceIndent(""), is/as Comparable, !! in assignment targets, JVM binary names in CCE and javaClass.name, exact LongRange first/last/contains, null as checked T → NPE; the modCount-based CME filed as T-846
 
 # Settled — do not re-open
 
