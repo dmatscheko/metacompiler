@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-854** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-856** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -66,16 +66,25 @@ its report; anything structural there is a CORE ticket.
 
 # RB — Ruby
 
-### T-850 ruby: binary strings, blockless enumerators, statement-line and zsuper gaps · P3 · RB · IN PROGRESS (RB worker, round 23) [V RB worker]
-Oracle /usr/bin/ruby 2.6 (use LC_ALL=en_US.UTF-8, or `p` escapes non-ASCII). (1) `255.chr.bytes` → `[255]`; ours
-`[195, 191]` — strings are untagged UTF-16 text, a byte >127 cannot be one byte; needs an ASCII-8BIT string kind
-in all three engines and the C floor. (2) `e = [1,2,3].map; loop { e.next }` → `[nil, nil, nil]`; ours nil
-(a materialised enumerator does not know its map result). (3) PARSE: `i = 0; j = 1; while i < 3; i += 1; end;
-p i` fails in all legs (ruby 3) — an assignment, `;`, then `while` on one line. (4) zsuper with keywords:
-`class X; def f(*a, k: 1) [a, k] end end; class Y < X; def f(*r, k: 2) super end end; p Y.new.f(1, 2)` → ruby
-`[[1, 2], 2]`, interp `[[1, 2], 1]`, compiler `[[1, 2, 2], 1]`. (5) `class E < Nope; end` → ruby NameError
-"uninitialized constant Nope"; all legs engine error. (6) `$stdout.p` → MRI "private method `p'", ours
-"undefined method". (7) assigning `$0` does not update `$PROGRAM_NAME` (alias).
+### T-854 ruby: binary (ASCII-8BIT) strings · P3 · RB · OPEN [V RB worker]
+`p 255.chr.bytes, 255.chr.encoding, 255.chr` → ruby `[255]`, `#<Encoding:ASCII-8BIT>`, `"\xFF"`; ours `[195, 191]`,
+String#encoding undefined. Strings are untagged UTF-16 primitives. Design (RB worker): a box `{__rbin: s}`, one char
+per byte (U+0000..U+00FF), modelled on the `{__flo}` float box — Go twin type + layer-2 object, typed strings keep
+their fast path. Producers: Integer#chr 128..255, String#b, force_encoding("BINARY"), pack. Methods: bytes, bytesize,
+size/length, [], each_byte, inspect ("\xFF"), encoding, ==, +/<< (MRI's compatibility error), force_encoding back,
+unpack, valid_encoding?. Floor part FIRST: `puts 255.chr` must write the raw byte 0xFF, but output UTF-8-encodes
+text — needs a raw-byte write in runtime.c, the Go twin and the interpreter hosts. ~400-600 lines, 4-5 files.
+
+### T-855 ruby: private/constant/enumerator gaps · P3 · RB · OPEN [V RB worker]
+Oracle LC_ALL=en_US.UTF-8 /usr/bin/ruby 2.6. (1) compiler: `class A; private def q; end; end` → "undefined method
+`private' for A:Class". (2) both: a user private/protected method's error says "private method 'q' called"; MRI
+"private method `q' called for #<A:0x...>". (3) compiler: after `begin; class E < Nope; end; rescue NameError; end`,
+a second `class E < Nope2` fails "variable not defined: E" (reopen decided at compile time). (4) both:
+`[1,2,3].each_with_object([])` without a block crashes the interpreter ("Cannot read property 'apply'"). (5) both:
+blockless `each_entry` / `find_index` → NoMethodError; MRI an Enumerator. (6) both: `each_slice(2)`/`each_cons(2)`
+driven by `next` — StopIteration#result is the receiver; MRI 2.6 nil. (7) both: `M::X.superclass` from a nested
+`class Y < X` prints `X`, MRI `M::X`. (8) `p Nope` (unknown constant): interp NameError "undefined local variable
+or method", compiler aborts; MRI "uninitialized constant Nope".
 
 # JS — JavaScript and TypeScript
 
@@ -920,6 +929,7 @@ T-839 ruby: features left from the string/array/error rounds — PARTIAL b25b9b9
 T-844 c: declaration gaps left from the scope/designator round — DONE 1e3d17a3 (shared cInitWalk does brace elision for both engines; cConstOf folds enumerators/header constants in dimensions, enumerators and designators; extern int a[] + int a[3] merge per 6.2.7p3; typedef extern in a block binds the global; bool is a type only after <stdbool.h>; parameters share the body's outermost scope)
 T-851 c: `sizeof` of a struct ignores alignment padding; block-scope enums — DONE 7fa9bd46..45dd3ec2 (cAbiLayout: cc's padded layout for sizeof/_Alignof in both halves, explicit padding members in the compiled structs; compiled half packs bit-fields into their storage units so malloc(n*sizeof) is exact — new c-native-bytes.c byte-layout row; block-scope enums, struct values in []-sized arrays, file-scope initializers after all declarations)
 T-847 ts/js: decorators, constructability, Date/setTimeout; a `__proto__` binding crashes — DONE 184ac024..f19a083f (decorators in tsc 6.0.3's phases incl. field decorators and addInitializer, 24/24 probe lines; new refuses arrows/methods/generators/async/non-constructor builtins via a boot-time constructor table; Date and timers with a virtual loop clock, 93/95 Date probe rows = node; const __proto__ no longer crashes; bound functions filed as T-853)
+T-850 ruby: binary strings, blockless enumerators, statement-line and zsuper gaps — PARTIAL 504be153 — one-line assignment + while/until, blockless enumerator results, zsuper with keywords and block, uninitialized-constant superclass, private-method wording and IO#inspect, $0/$PROGRAM_NAME alias (+ block-stack/scope-chain leaks after rescue/loop/catch); binary strings filed as T-854 with the worker's design
 
 # Settled — do not re-open
 
