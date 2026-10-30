@@ -97,44 +97,44 @@ list-add path in lib/python-rt.metajs / runtime.c, gc pacing in runtime.c. Measu
 
 # RB — Ruby
 
-### T-772 ruby: `def` with a parenthesis-free parameter list · P2 · RB · OPEN [V]
+### T-772 ruby: `def` with a parenthesis-free parameter list · P2 · RB · IN PROGRESS (RB worker, round 21) [V]
 `def twice n\n  n * 2\nend; puts twice(xs[0])` → interp "wrong number of arguments (given 1, expected 0)", run/native
 "undefined local variable or method `n'"; ruby `42` (BG nbody.ruby-8 `def nbody n`). `def add a, b` does not parse at all.
 `n` is taken as the first body statement. Files: the def rule in both ruby grammars.
 
-### T-816 ruby: String#split is a naive literal split · P1 · RB · OPEN [V]
+### T-816 ruby: String#split is a naive literal split · P1 · RB · IN PROGRESS (RB worker, round 21) [V]
 `s="a,b,,c,,"`: `s.split(",")` → all legs `["a","b","","c","",""]` (ruby `["a","b","","c"]`: trailing empties removed);
 `s.split(",", 2)` → same (ruby `["a", "b,,c,,"]`: limit ignored); `" a  b ".split(" ")` → `["","a","","b",""]` (ruby `["a","b"]`:
 awk mode); `"a1b2".split(/(\d)/)` → interp/native `["a","b",""]`, llvm.Run `["a1b2"]` (ruby `["a","1","b","2"]`: captures kept,
 and run does not split on a Regexp at all). Finder: `"".split(",")` → `[""]` (ruby `[]`); `"abc".split(//)` differs by half.
 Files: lib/ruby-rt.metajs rbStrSplit (~5659) and the dispatch (~7524), rxSplit (~4963), ruby-interpreter.abnf ~8747/8766.
 
-### T-817 ruby: String#[] / slice / []= with a Regexp or String argument return garbage · P1 · RB · OPEN [V]
+### T-817 ruby: String#[] / slice / []= with a Regexp or String argument return garbage · P1 · RB · IN PROGRESS (RB worker, round 21) [V]
 `h="hello"`: `h[/l+/]` → all legs `"h"` (ruby `"ll"`); `h["ell"]` → `"h"` (`"ell"`); `h["z"]` → `"h"` (nil); finder: `h[/(h)(e)/,2]`
 → `"he"` (`"e"`), `h.slice(/l+/)` → `"h"`; `t["world"]="ruby"; t[/l+/]="L"` on "hello world" → `"Lubyello world"` (ruby
 `"heLo ruby"`).
 
-### T-818 ruby: String#index / rindex ignore the offset; rindex(Regexp) is nil; run's index(Regexp) is nil · P1 · RB · OPEN [V]
+### T-818 ruby: String#index / rindex ignore the offset; rindex(Regexp) is nil; run's index(Regexp) is nil · P1 · RB · IN PROGRESS (RB worker, round 21) [V]
 `"hello world".index("o", 5)` → 4 (ruby 7); `rindex("o", 5)` → 7 (4); finder: `index("o", 20)` → 4 (nil), `index("", 11)` → 0 (11);
 `"hello"`: `index(/l/), rindex(/l/), index(/l/,3), index("l",3), rindex("l",2)` → interp/native `2 nil 2 2 3`, run `nil nil nil
 2 3`, ruby `2 3 3 3 2`. lib/ruby-rt.metajs ~7525 calls `indexOf` without a from-index; the Regexp path ~4964.
 
-### T-819 ruby: adjacent string-literal concatenation crosses a newline · P1 · RB · OPEN [V]
+### T-819 ruby: adjacent string-literal concatenation crosses a newline · P1 · RB · IN PROGRESS (RB worker, round 21) [V]
 `puts "first"` then a statement starting with a string literal, `"second".upcase` → all legs `FIRSTSECOND` (ruby `first`): the
 next line's literal is glued onto the previous argument (finder: `"x".each_char { … }` after `puts "third"` iterates "thirdx").
 `DqStr` ends with `:whitespace(Whitespace)` and `StrLit = StrPiece { StrPiece }` (ruby-interpreter.abnf ~2088-2095; the
 compiler ~2127): juxtaposition must not cross a newline.
 
-### T-820 ruby: index assignment evaluates the RHS before the receiver and index · P1 · RB · OPEN [V]
+### T-820 ruby: index assignment evaluates the RHS before the receiver and index · P1 · RB · IN PROGRESS (RB worker, round 21) [V]
 `arr=[0,0]; i=0; arr[i += 1] = (i += 10)` → all legs `[0, 0, nil × 9, 10]`, ruby `[0, 11]`; finder: `hh[t(:k)] = t(:v)` logs `vk`
 (ruby `kv`). Same class as T-479 (js, java) and T-806 (kotlin).
 
-### T-821 ruby compiler: `return` from a block through ensure, Proc `return`, and `while` break value · P1 · RB · OPEN [V]
+### T-821 ruby compiler: `return` from a block through ensure, Proc `return`, and `while` break value · P1 · RB · IN PROGRESS (RB worker, round 21) [V]
 `def m4; [1,2].each { |x| begin; return x; ensure; puts "  ensure #{x}"; end }; :fell_through; end` → interp and ruby
 `ensure 1`, `1`; run/native `ensure 1`, `ensure 2`, `:fell_through`. `def m5; pr = Proc.new { return 7 }; pr.call; :unreached;
 end` → interp 7, compiled `:unreached`. Finder: `r = while …; break w*2 if w==lim; end` → compiled nil (interp/ruby the value).
 
-### T-822 ruby: Array#insert with negative or past-the-end index; mutating a Hash during each · P1 · RB · OPEN [V]
+### T-822 ruby: Array#insert with negative or past-the-end index; mutating a Hash during each · P1 · RB · IN PROGRESS (RB worker, round 21) [V]
 `[1,2].insert(-1, :b)` → all legs `[1, :b, 2]` (ruby `[1, 2, :b]`); finder: `insert(-2, :z)` → `[:z,1,2]` (`[1,:z,2]`),
 `insert(3, 9)` → interp/native `[1,2,9]` (`[1,2,nil,9]`) and llvm.Run a Go panic "slice bounds out of range [:3] with capacity
 2", `insert(-4, :w)` → padded (IndexError "index -4 too small for array; minimum: -3"). Deleting inside `Hash#each` → run Go
@@ -142,54 +142,54 @@ panic "index out of range [2] with length 2", interp/native skip the next entry;
 RuntimeError "can't add a new key into hash during iteration"). Files: lib/ruby-rt.metajs ~6983 (insert / rbArrSub), the
 twin's hash iteration.
 
-### T-823 ruby native: `!~` does not link · P1 · RB · OPEN [V]
+### T-823 ruby native: `!~` does not link · P1 · RB · IN PROGRESS (RB worker, round 21) [V]
 `puts s[0] !~ /z/` → interp, run and ruby `true`; native BUILD FAILED "unresolved symbol js_rxnmatch". ruby-to-llvm-ir.abnf
 ~3281 maps `!~` to js_rxnmatch, which exists only in abnf/jsrtregex.go (~8106); add it to the floor / layer 2.
 
-### T-824 ruby: Float#round(half:) is ignored · P1 · RB · OPEN [V]
+### T-824 ruby: Float#round(half:) is ignored · P1 · RB · IN PROGRESS (RB worker, round 21) [V]
 `2.5.round(half: :even)` → 3 (ruby 2); finder: `half: :down` 3 (2), `-2.5` even -3 (-2), `3.5` down 4 (3), `25.round(-1, half:
 :even)` 30 (20). All legs.
 
-### T-825 ruby: Array#sum on Floats lacks Kahan-Babuska; Integer#fdiv on bignums is inexact · P1 · RB · OPEN [V]
+### T-825 ruby: Array#sum on Floats lacks Kahan-Babuska; Integer#fdiv on bignums is inexact · P1 · RB · IN PROGRESS (RB worker, round 21) [V]
 `[0.1, 0.2, 0.3].sum` → `0.6000000000000001` (ruby 0.6); `[1e100, 1.0, -1e100].sum` → 0.0 (1.0); finder: `[3, 0.1, 0.2].sum` →
 3.3000000000000003 (3.3); `(10**30).fdiv(10**29)` → 10.000000000000002 (10.0). All legs. MRI's ary_add_one /
 Kahan-Babuska and big_fdiv are the models.
 
-### T-826 ruby: Array method arguments — slice, fill, uniq block, max_by · P1 · RB · OPEN [V]
+### T-826 ruby: Array method arguments — slice, fill, uniq block, max_by · P1 · RB · IN PROGRESS (RB worker, round 21) [V]
 `[1,2,3,4].fill(9, 0, 2)` → `[9,9,9,9]` (ruby `[9,9,3,4]`); `uniq { |x| x % 3 }` on 1..6 ignores the block (ruby `[1,2,3]`).
 Finder: `a.slice(6,0)`, `slice(-6,1)`, `slice(2,-1)` → `[]`, `[1]`, `[]` (ruby nil each; `a[...]` is right); `fill(9,3,5)`,
 `fill(9,-2,1)`; `max_by` returns the last of ties ("cc", ruby "bb"); `max_by(2)` ignores n; `[1].flatten!` returns self (nil).
 
-### T-827 ruby: Comparable, `<=>`, `===` and Range semantics · P1 · RB · OPEN [V finder only]
+### T-827 ruby: Comparable, `<=>`, `===` and Range semantics · P1 · RB · IN PROGRESS (RB worker, round 21) [V finder only]
 `include Comparable` + `<=>`: `V.new(1)==V.new(1)` → false (ruby true); `V.new(1) < 5` with `<=>` nil → compiled false (ruby
 ArgumentError); `clamp` → interp V5, compiled NoMethodError (ruby V3). `nil <=> nil`, `true <=> true` → nil (0). A lambda in `when`
 never matches (`->(x){…} === 2.5` false). `(0..9) === Float::NAN` / `include?(NaN)` → true (false). `(1.0..2.0).min/max` → 1/2
 Integers (1.0/2.0); `(1..1.5).max` → 1 (1.5); `(1.0..2.0).step(0.5)` raises "step can't be 0 or negative". A user `hash`/`eql?`
 is ignored for Hash keys (`{K.new(1)=>"one"}[K.new(1)]` nil) while `uniq` honours it.
 
-### T-828 ruby: sub/gsub replacement forms — Hash, `\&`, `` \` ``, `\'`; numbered groups next to named ones · P1 · RB · OPEN [V]
+### T-828 ruby: sub/gsub replacement forms — Hash, `\&`, `` \` ``, `\'`; numbered groups next to named ones · P1 · RB · IN PROGRESS (RB worker, round 21) [V]
 `"abc".sub(/b/, "[\\&]")` → `"a[&]c"` (ruby `"a[b]c"`); `"cat hat".gsub(/[ch]/, "c" => "C", "h" => "H")` → the Hash's inspect
 spliced in (ruby `"Cat Hat"`); finder: `` "abc".sub(/b/, "\\`|\\'") `` → `` "a`|'c" `` (`"aa|cc"`); `.match(/(?<first>a)(b)/)[2]` →
 "b" (ruby nil: with named groups the unnamed ones are not captured). All legs.
 
-### T-829 ruby: String#succ — non-alphanumerics incremented, carries wrong, halves disagree · P1 · RB · OPEN [V]
+### T-829 ruby: String#succ — non-alphanumerics incremented, carries wrong, halves disagree · P1 · RB · IN PROGRESS (RB worker, round 21) [V]
 `"1.9".succ` → `"1/0"` (ruby `"2.0"`); `"a-9".succ` → `"a.0"` (`"a-10"`); finder: `"a z"` → `"a!a"` (`"b a"`), `"<<koala>>"` →
 `"<<koala>?"` (`"<<koalb>>"`); interp only: `"Zz"` → `"aAa"` (`"AAa"`), `""` → `"a"` (`""`), `"9"` → interp `"a0"`, compiled `"00"`
 (`"10"`); `"ÿ".succ` → invalid bytes in run. File: lib/ruby-rt.metajs rbStrSucc (~4239) and the interpreter's copy — port
 MRI's str_succ (rightmost alnum run, skip non-alnums).
 
-### T-830 ruby: astral characters handled as UTF-16 code units · P2 · RB · OPEN [V finder only]
+### T-830 ruby: astral characters handled as UTF-16 code units · P2 · RB · IN PROGRESS (RB worker, round 21) [V finder only]
 `s="a😀b"`: `s[1]` → a lone surrogate (ruby "😀"), `s[1,2]` → "😀" ("😀b"), `center(6,"*")` → `"*a😀b*"` (`"*a😀b**"`),
 `index("b")` → 3 (2); `length` is right. `reverse` splits the pair in run/native; `"😀".ord` → interp/native 55357, run 128512
 (ruby 128512); `128512.chr("UTF-8")` raises RangeError; `255.chr.bytes` → [195,191] (ruby [255]; binary strings not modelled).
 
-### T-831 ruby: uncatchable internal errors; interp hangs on an infinite range · P2 · RB · OPEN [V finder only]
+### T-831 ruby: uncatchable internal errors; interp hangs on an infinite range · P2 · RB · IN PROGRESS (RB worker, round 21) [V finder only]
 `b[-10]=1` on a 6-element array → "ruby interpreter error / js runtime error: index -4 too small for array", not catchable by
 `rescue IndexError` (ruby IndexError "index -10 too small for array; minimum: -6"); `each_slice(0)` → uncatchable "invalid
 size" (ArgumentError "invalid slice size"); `[1,2].cycle` without a block → uncatchable. `(1..Float::INFINITY).first(3)` →
 interp loops until killed (run/native/ruby `[1, 2, 3]`).
 
-### T-832 ruby: error paths and assorted gaps · P3 · RB · OPEN [V finder only]
+### T-832 ruby: error paths and assorted gaps · P3 · RB · IN PROGRESS (RB worker, round 21) [V finder only]
 `throw` without `catch` → NoMethodError (UncaughtThrowError; `catch` undefined); `loop { raise StopIteration }` propagates (ruby
 ends the loop, nil); `"x"*-1` / `[0]*-1` → "" / [] (ArgumentError "negative argument"); `5.upto` without args → an Enumerator
 (ArgumentError); interp: a `def` inside a lambda skips the arity check, `"\t\n hi \r\n\0".strip` keeps the tail, `[1,2].inject(&:+)`
@@ -204,13 +204,13 @@ negative float to a fractional power → NaN (ruby Complex).
 
 # JS — JavaScript and TypeScript
 
-### T-777 js: assigning an invalid array `length` throws an uncatchable RangeError · P1 · JS · OPEN [V]
+### T-777 js: assigning an invalid array `length` throws an uncatchable RangeError · P1 · JS · IN PROGRESS (JS worker, round 31) [V]
 Neighbour of T-488. `try { var a = [1]; a.length = v[0]; } catch (e) { println(..., e instanceof RangeError, e.message) }` with
 v[0] = 1.5 (also -1, 4294967296) → every leg exits 1 (interp a goja host error, compiled `js runtime error: invalid array
 length 1.5`); node `caught true Invalid array length`, then `after`. `new Array(1.5)` is already catchable (biRaise ~5907) —
 copy it to abnf/jsrt.go ~3312 (`rt.fail`), runtime.c ~3955 (`die2`), the interpreter's length setter, and typescript.
 
-### T-779 js/ts native: a program that contains `normalize` cannot run under MEC_GC=stress · P3 · JS · OPEN [V]
+### T-779 js/ts native: a program that contains `normalize` cannot run under MEC_GC=stress · P3 · JS · IN PROGRESS (JS worker, round 31) [V]
 `function main() { println("hi", "é".normalize("NFC").length); }` native: plain run immediate, `MEC_GC=stress` still running
 after 30 s (finders: >280 s, `sample` 100% in gc_try/gc_mark/gc_scan_range; also when the function containing normalize is
 never called). The normalization tables are built with a growing live set while stress collects on every allocation.
@@ -218,21 +218,21 @@ Effect: no GC-stress coverage for any js/ts program referencing normalize. Build
 (`js_gc_perm`) or outside stress accounting. Files: the normalize table builder in lib/js-rt.metajs or runtime.c. Same in
 typescript (one `normalize("NFC")` call: killed after 280 s under stress, 0.06 s normally).
 
-### T-780 ts/js interp: `o.m?.()` on a class (prototype) method returns undefined without calling it · P1 · JS · OPEN [V]
+### T-780 ts/js interp: `o.m?.()` on a class (prototype) method returns undefined without calling it · P1 · JS · IN PROGRESS (JS worker, round 31) [V]
 `class K { v = 1; m(): string { return "m" + this.v; } }`, `const k: any = new K(); String(k.m?.())`, `String(k?.m?.())` →
 interp `undefined` twice; run, native, tsc+node `m1`. Object-literal, arrow, string and array methods are right. The chain
 evaluator (typescript-interpreter.abnf ~10255-10270, the `suffixes` loop) reads member+call with getMemberRaw, which is
 undefined for a prototype method; the opt-call check `s.opt == true && cur == undefined` fires before the lastKey/curThis
 recovery the plain call uses. Twin in js-interpreter.abnf.
 
-### T-781 ts: declaration merging replaces the binding (namespace into function or class; enum with enum) · P1 · JS · OPEN [V]
+### T-781 ts: declaration merging replaces the binding (namespace into function or class; enum with enum) · P1 · JS · IN PROGRESS (JS worker, round 31) [V]
 `function Fn(): string { return "fn"; } namespace Fn { export const extra: number = 3; }` → all legs `typeof Fn` `object`,
 `Fn()` TypeError "Fn is not a function"; tsc+node `function`, `3`, `fn`. `class Cl { static s = 1; } namespace Cl { export const
 added = "added"; }` → interp `Cl.added` undefined, compiled `TypeError: Cl is not a constructor`; `enum Mg { M1 = 1 } enum Mg { M2
 = 2 }` → interp `Mg.M1` undefined, keys `2,M2` (node `1 2 1,2,M1,M2`). Enum+namespace and namespace+namespace already merge.
 tsc's `X || (X = {})` reuse is missing in makeNamespace / the enum builder of both TS grammars.
 
-### T-782 ts/js: class fields use [[Set]] instead of [[Define]]; `declare` fields are materialised · P1 · JS · OPEN [V]
+### T-782 ts/js: class fields use [[Set]] instead of [[Define]]; `declare` fields are materialised · P1 · JS · IN PROGRESS (JS worker, round 31) [V]
 `class Base { get acc() {...} get rw() {...} set rw(v) { setterCalls++ } }`, `class WithInit extends Base { acc = "own"; rw =
 "own-rw"; }`, `class NoInit extends Base { rw: string; }`, `class DeclOnly { declare q: number; r?: number; }`: node `own own-rw
 [acc,rw] setter=0` / `undefined [rw] setter=0` / `[r] false true`; compiled `base-acc base-rw [] setter=1` / `base-rw [] setter=2`
@@ -242,14 +242,14 @@ undefined after the base constructor set it. Same in js (.js twin). Files: field
 typescript-to-llvm-ir.abnf / js-to-llvm-ir.abnf (define an own data property), the interpreter field install, the `declare`
 modifier.
 
-### T-783 ts/js interp: an own data property or a nearer half-accessor does not shadow an inherited accessor · P1 · JS · OPEN [V]
+### T-783 ts/js interp: an own data property or a nearer half-accessor does not shadow an inherited accessor · P1 · JS · IN PROGRESS (JS worker, round 31) [V]
 `class Base { get acc() { return "base-acc"; } }`; `Object.defineProperty(o, "acc", { value: "own", ... }); o.acc` → interp
 `base-acc`, others `own` (also the Object.create and object-literal-prototype variants). `class B0 { get v(){return 1} set v(x){} }
 class S0 extends B0 { set v(x) {} }; new S0().v` → interp 1, others undefined. getMember (typescript-interpreter.abnf ~5136)
 calls findAccessor before hasOwn, and findAccessor (~5957) walks the chain per kind ("get:"+k) without stopping at a level
 holding a data property or only the other half. Twin in js-interpreter.abnf.
 
-### T-784 ts/js: `#private` brand checks are missing · P1 · JS · OPEN [V]
+### T-784 ts/js: `#private` brand checks are missing · P1 · JS · IN PROGRESS (JS worker, round 31) [V]
 Static helpers in `class P` with `#x`, `#m()`, `get #acc`, `static #s`, applied to `{}`: read → all legs `undefined` (node
 `TypeError: Cannot read private member #x from an object whose class did not declare it`); write → `wrote`, the slot is
 created (node `Cannot write private member #x to an object ...`); call → `TypeError: o.#m is not a function` (node `Receiver
@@ -257,7 +257,7 @@ must be an instance of class P`); accessor → undefined (Receiver TypeError); a
 (TypeError). `#x in o` is already right. Files: private member read/write/call in both TS and both js grammars and the
 floor/twin private-key access.
 
-### T-785 ts/js: the regex `u` flag is not implemented, and non-u astral handling differs by leg · P1 · JS · OPEN [V]
+### T-785 ts/js: the regex `u` flag is not implemented, and non-u astral handling differs by leg · P1 · JS · IN PROGRESS (JS worker, round 31) [V]
 s = "\u{1F600}" from an array: `/^.$/u.test(s), /^.$/.test(s), /^..$/.test(s)` → interp/native `false false true`, llvm.Run
 `true true false`, node `true false true`; `/\u{1F600}/u` → all legs throw "invalid unicode escape" (node accepts).
 t = "a\u{1F600}b": `t.split(/(?:)/).length, t.split(/(?:)/u).length` → interp/native `4 4`, run `3 3`, node `4 3`;
@@ -265,48 +265,48 @@ t = "a\u{1F600}b": `t.split(/(?:)/).length, t.split(/(?:)/u).length` → interp/
 `u`; the Go twin steps by code points always, so it is wrong without `u`. lib/regex.js rxCompile has no JS unicode-mode
 flag (its `u` is unicode CASE). Files: lib/regex.js, abnf/jsrtregex.go, the js/ts regex flag plumbing.
 
-### T-786 ts/js: `s.replaceAll("", x)` replaces only once · P1 · JS · OPEN [V]
+### T-786 ts/js: `s.replaceAll("", x)` replaces only once · P1 · JS · IN PROGRESS (JS worker, round 31) [V]
 Empty search read from an array: `"abc".replaceAll("", "_")` → all legs `_abc` (node `_a_b_c_`); function form `<0>abc` (node
 `<0>a<1>b<2>c<3>`); same for "a" and an astral string; `"".replaceAll("","_")` is right. Files: replaceAll in abnf/jsrt.go,
 lib/js-rt.metajs, the interpreters.
 
-### T-787 ts/js: `Promise.any` rejects with a string; `AggregateError` is undefined · P1 · JS · OPEN [V]
+### T-787 ts/js: `Promise.any` rejects with a string; `AggregateError` is undefined · P1 · JS · IN PROGRESS (JS worker, round 31) [V]
 `try { await Promise.any([Promise.reject(1)]) } catch (e) { typeof e, String(e), e instanceof Error, e.name, JSON.stringify(e.errors) }`
 → all legs `string AggregateError: All promises were rejected | false undefined undefined`; node `object ... | true
 AggregateError [1]`; `typeof AggregateError` undefined (node function). Files: every site containing "All promises were
 rejected" (both interpreters, abnf/jsrt.go, lib/js-rt.metajs).
 
-### T-788 ts/js Go twin: ToPrimitive runs twice for relational and loose-equality comparisons · P1 · JS · OPEN [V]
+### T-788 ts/js Go twin: ToPrimitive runs twice for relational and loose-equality comparisons · P1 · JS · IN PROGRESS (JS worker, round 31) [V]
 An object whose `valueOf` logs: `a < b` → llvm.Run logs `valueOf 1,valueOf 2,valueOf 1,valueOf 2`, interp/native/node
 `valueOf 1,valueOf 2`; `a == 1` → run `valueOf 1,valueOf 1` (others once); `a >= b` like `<`. `+`, `*`, `a - 0 > 0` are right.
 File: abnf/jsrt.go relational / loose_eq on objects.
 
-### T-789 ts/js: computed class-member keys — evaluated per construction (interp), compiler crashes · P2 · JS · OPEN [V]
+### T-789 ts/js: computed class-member keys — evaluated per construction (interp), compiler crashes · P2 · JS · IN PROGRESS (JS worker, round 31) [V]
 `let n = 0; function key() { n++; return "f" + n; } class C { [key()] = "v"; }`, two instances → interp `f1 f2 calls=2`, node
 `f1 f1 calls=1`; the compilers fail to build: `TypeError: Cannot read property 'length' of undefined at jsKeyEsc
 (typescript-to-llvm-ir.abnf:startScript:3452)`, js-to-llvm-ir.abnf ~721 likewise. Finder: the interpreter evaluates a static
 computed key after earlier static initialisers and the static block (the spec evaluates all keys first).
 
-### T-790 ts compiler: `declare const enum` leaves the enum body as statements · P2 · JS · OPEN [V]
+### T-790 ts compiler: `declare const enum` leaves the enum body as statements · P2 · JS · IN PROGRESS (JS worker, round 31) [V]
 `declare const enum DCE { Z = 9 }` + a main that prints `ok` → interp and node `ok`; run/native `ReferenceError: DCE is not
 defined`. Likely AmbientDecl (typescript-to-llvm-ir.abnf ~226) tries AmbVar before AmbEnum (PEG ordering, manual ch. 4).
 
-### T-791 ts: decorators — the compiler passes no context; field decorators are ignored · P2 · JS · OPEN [V]
+### T-791 ts: decorators — the compiler passes no context; field decorators are ignored · P2 · JS · IN PROGRESS (JS worker, round 31) [V]
 Method decorator printing `typeof ctx, ctx.name, ctx.kind`; a field decorator returning `init => init + 1`: interp
 `decorating object m method`, `f=5 m=4`; run/native `decorating undefined `, `f=5 m=4`; node `decorating object m method`,
 `field f`, `f=6 m=4`; the interpreter lacks `ctx.addInitializer`. The compiler header (typescript-to-llvm-ir.abnf ~62-73)
 documents the limits but Settled does not; field decorators silently give wrong values in both halves.
 
-### T-792 ts/js: `new Error(msg, { cause })` drops the cause · P2 · JS · OPEN [V finder only]
+### T-792 ts/js: `new Error(msg, { cause })` drops the cause · P2 · JS · IN PROGRESS (JS worker, round 31) [V finder only]
 `const e = new Error("m", { cause: "c" }); [e.cause, Object.keys(e).length, "cause" in e]` → all legs `[null,0,false]`, node
 `["c",0,true]`.
 
-### T-793 ts/js: an unhandled promise rejection is silent with exit 0 · P2 · JS · OPEN [V]
+### T-793 ts/js: an unhandled promise rejection is silent with exit 0 · P2 · JS · IN PROGRESS (JS worker, round 31) [V]
 `async function g() { await null; throw new Error("lost"); }`, `main` calls `g()` and prints `main end` → all legs `main end`,
 exit 0, nothing on stderr; node prints `Error: lost` and exits 1. Every exception inside an async function that nobody awaits
 vanishes. Files: the job loop in abnf/jsrt.go, lib/js-rt.metajs, the interpreters.
 
-### T-794 ts/js: derived-constructor and constructability errors; parse/lowering gaps; missing host APIs · P3 · JS · OPEN [V finder only]
+### T-794 ts/js: derived-constructor and constructability errors; parse/lowering gaps; missing host APIs · P3 · JS · IN PROGRESS (JS worker, round 31) [V finder only]
 Errors silently missing (all legs): `this` before super, super twice, a derived constructor returning 5, no super call, `new
 (()=>1)()`, `new o.m()`; `A()` without new says "A is not a function" (node "Class constructor A cannot be invoked without
 'new'"). Gaps differing by half: non-null `!` in assignment targets (`o!.n = 5`, `o.inner!.k += 3`, `o.inner!.k++`, `maybe! =
@@ -348,26 +348,26 @@ not change the renderer.
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-802 kotlin compiler: `a[i] = x` never calls a user `operator fun set` · P1 · KT · OPEN [V]
+### T-802 kotlin compiler: `a[i] = x` never calls a user `operator fun set` · P1 · KT · IN PROGRESS (KT worker, round 2) [V]
 `class S1(var v: Int) { operator fun set(i: Int, x: Int) { v = x + i } }`, `class S2` with get and set: `a[n[0]] = n[1]` →
 interp `s1 8` (right by the operator convention), run/native `s1 0`; `b[n[0]] = n[1]; b[n[0]]` → interp `71 72`, compiled
 `0 1`; `b[n[0]] += n[1]` → interp 791, compiled 0 — the write is dropped silently. The emitter dispatches "get"
 (emitOpDispatch, kotlin-to-llvm-ir.abnf ~4423) and invoke, but "$set" (listed in opConventions ~3118) has no dispatch site.
 Oracle: the Kotlin operator-convention spec (no kotlinc here).
 
-### T-803 kotlin compiler: an indexed write to an implicit-this property named `data` is lost · P1 · KT · OPEN [V]
+### T-803 kotlin compiler: an indexed write to an implicit-this property named `data` is lost · P1 · KT · IN PROGRESS (KT worker, round 2) [V]
 `class A1 { var data = mutableListOf(0, 0); fun w(i: Int, x: Int) { data[i] = x }; fun r() = data[0] + data.size }`, `a.w(0, 5)`
 → interp `[5, 0] 7`, run/native `[0, 0] 2`. A field named `items`, `this.data[i] = x`, `data[i] += x` and a local `data` work.
 `data` is a soft keyword (`data class`): the statement is probably read as a modifier, or the NotColon guard eats it.
 File: statement / modifier rules in kotlin-to-llvm-ir.abnf.
 
-### T-804 kotlin compiler: ordered comparisons with NaN, each compiled leg wrong differently · P1 · KT · OPEN [V]
+### T-804 kotlin compiler: ordered comparisons with NaN, each compiled leg wrong differently · P1 · KT · IN PROGRESS (KT worker, round 2) [V]
 v = doubleArrayOf(NaN, 0.0, 1.0), every pair: interp (JLS/IEEE) all NaN rows `lt=false le=false gt=false ge=false`; llvm.Run
 `gt=true ge=true`; native `le=true ge=true`. It changes control flow (`while (nan > w.toDouble() && w < 3) w++` runs 3 times on
 run). js_ktcmp (abnf/jsrtkotlin.go ~982 via rt.jsCompare; lib/kotlin-rt.metajs ~2014 ktCmpVals) maps the relational operators
 onto a three-way compare, which cannot say "unordered"; Doubles need direct relational ops. Oracle: java.
 
-### T-805 kotlin: Double total order and boxed equality (NaN largest, -0.0 < 0.0, NaN equals NaN) are not applied · P1 · KT · OPEN [V]
+### T-805 kotlin: Double total order and boxed equality (NaN largest, -0.0 < 0.0, NaN equals NaN) are not applied · P1 · KT · IN PROGRESS (KT worker, round 2) [V]
 nz=-0.0, z=0.0, nan from an array: `listOf(nz)==listOf(z), listOf(nan)==listOf(nan), setOf(nz,z).size, setOf(nan,nan).size,
 (nz as Any).equals(z), listOf(z,nz,nan,nan).distinct(), listOf(1.0,nan).indexOf(nan), listOf(nz).contains(z)` → all legs
 `true false 1 2 true [0.0, NaN, NaN] -1 true`, oracle `false true 2 1 false [0.0, -0.0, NaN] 1 false`. `nz.compareTo(z),
@@ -379,54 +379,54 @@ second (oracle -0.0 / 0.0 / NaN). Oracle: java Double.compare / Math.min/max / c
 CollectionsKt.sorted etc. Files: lib/kotlin-rt.metajs ktCmpKeys/ktCmpVals (~1327), jsrtkotlin.go comparators and equality,
 the interpreter's min/max builtins, data-class equals emission. May need a value-model decision for Double through Any.
 
-### T-806 kotlin: indexed and compound assignment evaluate the RHS first · P1 · KT · OPEN [V]
+### T-806 kotlin: indexed and compound assignment evaluate the RHS first · P1 · KT · IN PROGRESS (KT worker, round 2) [V]
 Same class as T-479 (js, java), fixed there, not here. `arr=[1,2,3]; i=0; arr[i++] = arr[i] + 10` → all legs `[11, 2, 3] 1`,
 java `[12, 2, 3] 1`; `i=0; arr[i] = i++ + i++` → `[11, 2, 1]` (java `[1, 2, 3]` from `[12,2,3]`); `var x=5; x += x++ * 2` → 16 (java
 15); user get/set logging `b[t("i",2)] += t("v",5)` → interp `vig2s2=11` (expected `ig2vs2=11`). Kotlin's order is receiver,
 index, value, with the LHS value saved first (same as java). Files: assignment emitters in both kotlin grammars.
 
-### T-807 kotlin: `x!!` on null does not throw NullPointerException · P1 · KT · OPEN [V]
+### T-807 kotlin: `x!!` on null does not throw NullPointerException · P1 · KT · IN PROGRESS (KT worker, round 2) [V]
 `fun pick(i: Int): String? = if (i > 9) "x" else null`; `try { val t = pick(0)!!; println("nn2 $t") } catch (e: Exception) {…}`
 → all legs `nn2 0 null`; Kotlin `caught NullPointerException null` (Intrinsics.checkNotNull). `pick(0)!!.length` inside
 `catch (e: NullPointerException)` aborts the process (exit 1). The grammars drop `!!` as identity (kotlin-interpreter.abnf
 ~1125/1133/1435, and the compiler's equivalents).
 
-### T-808 kotlin: LongRange iteration near or above 2^53 runs in doubles and never ends · P1 · KT · OPEN [V]
+### T-808 kotlin: LongRange iteration near or above 2^53 runs in doubles and never ends · P1 · KT · IN PROGRESS (KT worker, round 2) [V]
 `val ls = longArrayOf(9007199254740993L); for (i in ls[0]..ls[0] + 1) println("it $i ${i % 10}")` → run/native print
 `it 9007199254740992 0` forever, interp hangs (all killed by the timeout); expected `…993 3`, `…994 4`. `for (i in
 Long.MAX_VALUE-1..Long.MAX_VALUE)` prints `9223372036854776000` forever; `.toList()`/`.count()` hang too. A 3e9 range is
 right. Remainder of T-347 (PARTIAL), which claimed LongRange. Files: range iteration in both kotlin grammars,
 jsrtkotlin.go, lib/kotlin-rt.metajs.
 
-### T-809 kotlin compiler: `for (i in a..Int.MAX_VALUE)` and `step MAX` overflow and loop forever · P1 · KT · OPEN [V finder only]
+### T-809 kotlin compiler: `for (i in a..Int.MAX_VALUE)` and `step MAX` overflow and loop forever · P1 · KT · IN PROGRESS (KT worker, round 2) [V finder only]
 ii = intArrayOf(Int.MAX_VALUE, Int.MIN_VALUE): `for (i in ii[0]-2..ii[0])` (capped by `if (sum > 10) break`) → interp 3,
 run/native 11 (infinite); `for (i in 0..ii[0] step ii[0])` → 2 vs 11. downTo Int.MIN_VALUE and `toList()` are right. The
 lowering is `i <= last; i += step` with no last-element exit. File: for-over-IntRange in kotlin-to-llvm-ir.abnf.
 
-### T-810 kotlin: `as` casts never throw ClassCastException · P1 · KT · OPEN [V]
+### T-810 kotlin: `as` casts never throw ClassCastException · P1 · KT · IN PROGRESS (KT worker, round 2) [V]
 `fun anyOf(i: Int): Any = if (i == 0) "str" else if (i == 1) 42 else 2.5`; `anyOf(1) as String` → all legs succeed (`.length`
 on an Int gives `kotlin.Unit`); `"str" as Int` → `ok str`; Kotlin/JVM ClassCastException. java's T-495 is DONE; kotlin never got
 the fix. `as?` is right.
 
-### T-811 kotlin native: `abs(Int.MIN_VALUE)` returns 2147483648 · P1 · KT · OPEN [V]
+### T-811 kotlin native: `abs(Int.MIN_VALUE)` returns 2147483648 · P1 · KT · IN PROGRESS (KT worker, round 2) [V]
 `abs(i)` and `Math.abs(i)` for Int.MIN_VALUE → interp/run `-2147483648`, native `2147483648` (an out-of-range Int); java
 `-2147483648`. Long abs is right. File: the abs builtin in lib/kotlin-rt.metajs (no 32-bit wrap) or the floor.
 
-### T-812 kotlin: `Double.mod(Double)` — native silently wrong, interp/run abort · P1 · KT · OPEN [V finder only]
+### T-812 kotlin: `Double.mod(Double)` — native silently wrong, interp/run abort · P1 · KT · IN PROGRESS (KT worker, round 2) [V finder only]
 `2.5.mod(2.0), (-2.5).mod(2.0), (-2.5).mod(-2.0), (-7.0).mod(3.0)` → native `0 0 0 2`, interp "unknown Double method: mod", run
 "method call 'mod' on a number"; stdlib (floored) `0.5 1.5 -0.5 2.0`. Int/Long `.mod` are right.
 
-### T-813 kotlin: missing JVM exceptions — getValue, negative array size, subList bounds · P2 · KT · OPEN [V finder only]
+### T-813 kotlin: missing JVM exceptions — getValue, negative array size, subList bounds · P2 · KT · IN PROGRESS (KT worker, round 2) [V finder only]
 `mapOf("a" to 1).getValue("b")` in `catch (e: NoSuchElementException)` → uncatchable host error "key b is missing in the map",
 exit 1 (stdlib NoSuchElementException "Key b is missing in the map."). `IntArray(-1)` / `Array(-1){0}` → size 0
 (NegativeArraySizeException: -1). `xs.subList(2, 1)` → interp/native `[]`, llvm.Run Go panic "slice bounds out of range [2:1]"
 (IllegalArgumentException "fromIndex(2) > toIndex(1)"). Files: jsrtkotlin.go (subList), lib/kotlin-rt.metajs, interp builtins.
 
-### T-814 kotlin: removing from a MutableList inside its for-each does not throw ConcurrentModificationException · P2 · KT · OPEN [V finder only]
+### T-814 kotlin: removing from a MutableList inside its for-each does not throw ConcurrentModificationException · P2 · KT · IN PROGRESS (KT worker, round 2) [V finder only]
 `for (e in ml) if (e == 2) ml.remove(e)` on [1,2,3,4] → all legs `cme none [1, 3, 4]`; java ArrayList `cme caught [1, 3, 4]`.
 Needs a modCount on lists.
 
-### T-815 kotlin: `when (x) { in someList -> … }` does not parse; missing stdlib members · P3 · KT · OPEN [V finder only]
+### T-815 kotlin: `when (x) { in someList -> … }` does not parse; missing stdlib members · P3 · KT · IN PROGRESS (KT worker, round 2) [V finder only]
 An `in` condition whose operand is not a range (`in someList`, `in listOf("a","b")`) fails to parse in every leg. Missing:
 trimMargin, replaceIndent, Double.withSign/ulp/nextUp, Int.takeHighestOneBit/rotateLeft/inc(), MutableList.iterator(),
 addAll(index, list), StringBuilder(String).insert/setLength/deleteCharAt.
@@ -471,39 +471,39 @@ formatting of the parsed literal needs no double: implement it, or fail loudly a
 
 # C — C subset
 
-### T-753 c: `sizeof` and `_Generic` evaluate their operand · P1 · C · OPEN [V]
+### T-753 c: `sizeof` and `_Generic` evaluate their operand · P1 · C · IN PROGRESS (C worker, round 6) [V]
 C11 6.5.3.4p2 / 6.5.1.1p3: the operand is not evaluated. `int k=0; n = sizeof(k++); pl(n); pl(k);` → all legs `4 1`, cc `4 0`;
 `sizeof(f())` calls f (prints "called"); `sizeof(arr[k++])`, `sizeof(k = 5)`, `sizeof(++k + 1LL)`, `_Generic(k++, int: 1,
 default: 2)` all run their side effects. Files: makeSizeofExpr / makeSizeofPlace / makeGeneric in c-interpreter.abnf (~1867;
 they call t()/placeT() at run time) and c-to-llvm-ir.abnf (~1871, ~1952; they emit the operand). Related, loud: `sizeof k++`
 without parentheses does not parse (SizeofPlace = Lvalue takes `k`, `++` is left over).
 
-### T-754 c compiler: a cast of an unsigned 64-bit constant ≥ 2^63 to a signed type is computed in a double · P1 · C · OPEN [V]
+### T-754 c compiler: a cast of an unsigned 64-bit constant ≥ 2^63 to a signed type is computed in a double · P1 · C · IN PROGRESS (C worker, round 6) [V]
 `pl((long long)18446744073709551615ULL); pl((long long)0x8000000000000001ULL); pl((int)0xFFFFFFFFFFFFFFF1UL);` and a global
 `long long gc = (long long)0x8000000000000001ULL;` → interp and cc `-1`, `-9223372036854775807`, `-15`,
 `-9223372036854775807`; run and native `0`, `-9223372036854775808`, `0`, `-9223372036854775808`. Through a variable it is
 right. makeCast's constant path (c-to-llvm-ir.abnf ~1886) converts `r.cv`, a JS double (`u64FromNum(trunc0(r.cv))`,
 `convertNum`): keep 64-bit constants exact.
 
-### T-755 c compiler: a function named only in a global initializer is not in the indirect-call dispatcher · P1 · C · OPEN [V]
+### T-755 c compiler: a function named only in a global initializer is not in the indirect-call dispatcher · P1 · C · IN PROGRESS (C worker, round 6) [V]
 `int (*ops[3])(int,int) = {add, sub, mul};` at file scope, then `pl(ops[i](7,3))` with i=1 → interp and cc `4`, run and native
 `0` (silently). The module has `define i32* @__mec_icall2(...) { ret i32* null }` while `@__mec_ginit` stores ids 1, 2, 3;
 naming `sub` in any function body makes it work. The address-taken set is collected from function bodies only. File:
 c-to-llvm-ir.abnf, the `__mec_icallN` emission and its funcId collection.
 
-### T-756 c preprocessor: `#define`/`#undef` in a dead conditional group still take effect · P1 · C · OPEN [V]
+### T-756 c preprocessor: `#define`/`#undef` in a dead conditional group still take effect · P1 · C · IN PROGRESS (C worker, round 6) [V]
 `#if 1 / #define PICK 10 / #elif 1 / #define PICK 20 / #else / #define PICK 30 / #endif`, `pl(PICK)` → through `-pipe` to
 either half `30`, cc `10`; `#if 1 #define B 1 #else #define B 3` gives 3. The pass leaves conditionals to the downstream
 grammar, but by then the macro table already holds the last definition, so the common `#ifdef X / #define A … / #else /
 #define A …` idiom always takes the else branch. File: c-preprocessor.abnf (preprocess) — it must evaluate #if/#ifdef far
 enough to know which directives are live.
 
-### T-757 c preprocessor: a self-referential macro is re-expanded after argument pre-expansion · P1 · C · OPEN [V]
+### T-757 c preprocessor: a self-referential macro is re-expanded after argument pre-expansion · P1 · C · IN PROGRESS (C worker, round 6) [V]
 `int S = 5; #define S (S + 1)`, `#define F(e) e`, `#define G(e) F(e)`: `pl(S); pl(F(S)); pl(G(S)); pl(F(F(S)));` → ours
 `6 7 8 8`, cc `6 6 6 6` (cc -E gives `(S + 1)` each time). C11 6.10.3.4p2: a name painted during expansion stays unexpanded
 on the rescan; the painted state is not carried into substituted argument tokens. File: c-preprocessor.abnf.
 
-### T-758 c: non-ASCII string literals are UTF-16 code units, `\u`/`\U` escapes are missing; interp putchar writes a code point · P1 · C · OPEN [V]
+### T-758 c: non-ASCII string literals are UTF-16 code units, `\u`/`\U` escapes are missing; interp putchar writes a code point · P1 · C · IN PROGRESS (C worker, round 6) [V]
 `{"é","€","😀","aéb","\U0001F600x"}` printing strlen and bytes: cc (UTF-8) `2: 195 169`, `3: 226 130 172`, `4: 240 159 152 128`,
 `4: 97 195 169 98`, `5`; all legs `1: 233`, `1: 172`, `1: 61` (low byte of the high surrogate D83D, then NUL), `3: 97 233 98`,
 `10` spelling `U0001F600x` (backslash dropped); `sizeof("😀")` 3 (cc 5). cStrBytes / cCharCode (c-to-llvm-ir.abnf ~1481) push
@@ -511,47 +511,47 @@ on the rescan; the painted state is not carried into substituted argument tokens
 `c3 83 c2 a9` (run, native, cc `c3 a9`) — callFunction "putchar" does `printf("%c", v & 255)`, which encodes a code point
 (c-interpreter.abnf ~2570).
 
-### T-759 c: character constants above 0x7f are unsigned (clang arm64 `char` is signed) · P1 · C · OPEN [V]
+### T-759 c: character constants above 0x7f are unsigned (clang arm64 `char` is signed) · P1 · C · IN PROGRESS (C worker, round 6) [V]
 `pl('\377'); pl('\xc8'); pl('\200' < 0);` → all legs `255 200 0`, cc `-1 -56 1`; so `char c = (char)200; c == '\xc8'` is 0
 (cc 1). cCharCode returns `hv & 255` / `ov & 255` in both halves; an integer character constant is an int with the value of a
 (signed) char.
 
-### T-760 c: unsigned bit-fields narrower than int do not promote to int; 64-bit-base bit-fields · P1 · C · OPEN [V]
+### T-760 c: unsigned bit-fields narrower than int do not promote to int; 64-bit-base bit-fields · P1 · C · IN PROGRESS (C worker, round 6) [V]
 `struct BF { unsigned a:3; unsigned long long e:40; unsigned long long g:33; }; f.a=1; f.e=(unsigned long long)-1; f.g=5;`
 `pl(f.a - 4); pl(-f.a); pl(f.a - 4 < 0); pu(f.e); pu(f.g);` → cc `-3 -1 1 1099511627775 5`; run/native `4294967293 4294967295 0
 18446744073709551615 5` (no promotion; the 40-bit field is not masked); interp `4294967293 4294967295 0 0 0` (wide bit-fields
 read as 0). C11 6.3.1.1p2: a bit-field whose values fit in int promotes to int. Files: bit-field read/store in both grammars.
 
-### T-761 c interp: `?:` does not apply the usual arithmetic conversions · P1 · C · OPEN [V]
+### T-761 c interp: `?:` does not apply the usual arithmetic conversions · P1 · C · IN PROGRESS (C worker, round 6) [V]
 `int c = 1; unsigned u = 1u;` `long long z = c ? -1 : u;` → interp -1 (run, native, cc 4294967295); `(c ? 7 : 2.5) / 2 * 10`
 → 30 (35); `sizeof(c ? 1 : 2LL)` → 4 (8); `(c ? -1 : u) > 0` → 0 (1). Finder: `sizeof(a<0 ? (char)1 : (short)2)` depends on a
 (cc always 4); `_Generic(a<0 ? 1 : 1u, …)` picks int. makeCond (c-interpreter.abnf ~2989) returns the chosen arm although its
 comment claims the conversions are applied.
 
-### T-762 c: `-0.0` loses its sign · P1 · C · OPEN [V]
+### T-762 c: `-0.0` loses its sign · P1 · C · IN PROGRESS (C worker, round 6) [V]
 `sg(x)` prints neg/pos by `1/x < 0`: `double ga[2] = {0.0, -0.0}`, `double gs = -0.0`, `float gf = -0.0f`, a local `-0.0`,
 `double arr[1] = {-0.0}` → all legs `pos`, cc `neg`; interp also gets `-z` (z = 0.0 from an array) and `(double)(float)-z`
 wrong. Compiler makeNeg constant path `convertNum(ct, 0 - r.cv)` (c-to-llvm-ir.abnf ~3376); interp makeNeg `0 - r.v`
 (c-interpreter.abnf ~2910) — manual ch. 4: unary minus must be `-x`, never `0 - x`.
 
-### T-763 c compiler: `*pp = ptr` through a pointer-to-pointer fails to build · P2 · C · OPEN [V]
+### T-763 c compiler: `*pp = ptr` through a pointer-to-pointer fails to build · P2 · C · IN PROGRESS (C worker, round 6) [V]
 `int a=5,b=6; int *p=&a; int **pp=&p; *pp = &b; pl(*p);` → interp and cc `6`; llvm.Run and -exe abort "store operands are not
 compatible: src=i32*; dst=i32*" (also inside a callee `void setpp(int **pp, int *t){ *pp = t; }`). `pp[0] = &a` works. File:
 c-to-llvm-ir.abnf, assignment through a `*` lvalue whose element is a pointer.
 
-### T-764 c interp: union type punning and byte-level pointer differences are not modelled · P2 · C · OPEN [V finder only]
+### T-764 c interp: union type punning and byte-level pointer differences are not modelled · P2 · C · IN PROGRESS (C worker, round 6) [V finder only]
 `union U { int i; unsigned char b[4]; short s[2]; }; u.i = 0x01020304*5;` → interp `b[0..3] = 84545300 0 0 0`, `s = 84545300 0`
 (an unsigned char above 255); run, native, cc `20 15 10 5` / `3860 1290`. `(char*)&lm[1][0] - (char*)&lm[0][0]` → 3 (cc 24).
 The interpreter's one-cell-per-scalar memory model; either model bytes or record it in manual 7.9 as a permanent
 interpreter limit. Missing features seen (loud): `2[arr]`, `enum { X = 'x' }`, nested designator `.b[1] = 5`,
 `#include <limits.h>` (and with `-pipe … -qq` the compile error is swallowed, only rc=1 shows), `__LINE__`.
 
-### T-771 c: a storage class or qualifier before a typedef name is rejected · P2 · C · OPEN [V]
+### T-771 c: a storage class or qualifier before a typedef name is rejected · P2 · C · IN PROGRESS (C worker, round 6) [V]
 `typedef int Num; int main(void){ const Num a = 40; static Num b = 2; return a + b - 42; }` → both halves "Not everything could
 be parsed", cc exit 0 (BG fasta.gcc-8 `static uint32_t seed`). `static unsigned int` and a plain `uint32_t` work. File:
 DeclSpec / typedef-name handling in both C grammars; tests/c-test-full.c has no such declaration.
 
-### T-774 c native: printf binds to a silent zero-returning stub · P2 · C · OPEN [V finder only]
+### T-774 c native: printf binds to a silent zero-returning stub · P2 · C · IN PROGRESS (C worker, round 6) [V finder only]
 `printf("P4\n"); puts("done")` → the native binary prints only `done`, exit 0; interp and llvm.Run fail loudly. Varargs
 printf is deliberately absent (manual 7.9), but the native leg must refuse it too, not drop output: an unresolved symbol in
 a build that links a runtime is supposed to be a hard error (manual ch. 2). Find why printf escapes that rule.
