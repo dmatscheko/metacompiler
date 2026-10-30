@@ -846,6 +846,15 @@ s22() {
   s22show() { echo "$TMPVAR"; }
   check dec11 "$(TMPVAR=once s22show)" once
   check dec12 "${TMPVAR-unset}" unset
+  # redirections may stand before and among the prefix assignments
+  check dec15 "$(2>/dev/null TMPVAR=two s22show)" two
+  check dec16 "$(>/dev/null TMPVAR=gone s22show)" ""
+  s22pair() { echo "$TMPVAR-$TMPV2"; }
+  check dec17 "$(TMPVAR=a 2>/dev/null TMPV2=b s22pair 2>&1)" a-b
+  check dec18 "${TMPVAR-unset}${TMPV2-unset}" unsetunset
+  local s22a s22b
+  >/dev/null s22a=3 2>/dev/null s22b=4
+  check dec19 "$s22a$s22b" 34
   # : is the null command and always succeeds
   :
   check dec13 "$?" 0

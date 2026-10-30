@@ -219,8 +219,9 @@ FlowCmd     <~~ push(eeExempt(pop())) ~~> = IfStmt | CForStmt | ForStmt | WhileS
 
 // NAME=VALUE... COMMAND ARGS : the assignments apply only for the duration of the command.
 // Tried before a bare Assignment, which is the same shape without a command word after it.
+// Redirections may stand before and among the assignments (`>/dev/null x=5 cmd`).
 PrefixCommand <~~ push(makePrefixCmd(takeAll(), "" + lnPop())) ~~>
-            = AsgPrefix1 { AsgPrefix } NotIoRedir NotReserved CWord { CmdSuffix } ;
+            = { RedirItem } AsgPrefix1 { AsgPrefix | RedirItem } NotIoRedir NotReserved CWord { CmdSuffix } ;
 AsgPrefix1  <~~ lnPush(up.pos) ~~> = AsgPrefix ;
 AsgPrefix   <~~ push(mkPrefixAsg(takeAll())) ~~>
             = AsgIdent <~~ push({aname: up.in}) ~~> :whitespace() AsgEq :whitespace() [ NsWord ] ;
@@ -285,10 +286,10 @@ DeclName    <~~ push({dname: up.in}) ~~> = Name ;
 // name=value : the = must stick to the name (no surrounding spaces), so the disable
 // (:whitespace()) sits in THIS sequence, right after the identifier. The value is optional
 // (name= is valid) and starts immediately after = with no space.
-// It may carry redirections, before or after (`r=$(cmd) 2>/dev/null`): bash performs them
-// after the assignment, so they do not apply to a command substitution on the right hand side.
+// It may carry redirections, before, among or after (`r=$(cmd) 2>/dev/null`): bash performs
+// them after the assignment, so they do not apply to a command substitution on the right hand side.
 // Several may share one command (`a=1 b=$a`): they run left to right, each seeing the last.
-Assignment  <~~ push(makeAssign(takeAll(), "" + lnPop())) ~~> = [ RedirList ] AsgOne1 { AsgOne } [ RedirList ] ;
+Assignment  <~~ push(makeAssign(takeAll(), "" + lnPop())) ~~> = [ RedirList ] AsgOne1 { AsgOne | RedirItem } ;
 AsgOne1     <~~ lnPush(up.pos) ~~> = AsgOne ;
 AsgOne      <~~ push({a: parseAssign(takeAll())}) ~~>
             = AsgIdent <~~ push({aname: up.in}) ~~> AsgTail ;
@@ -4829,8 +4830,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (!elemSet(name, plain[i], null, (i + 1 < plain.length) ? plain[i + 1] : "")) { return }
         }
     }
-    // items: one {a} per assignment, then the redirection records. The status is that of
-    // the last command substitution any of them ran, else 0. Twin of makeAssign in
+    // items: one {a} per assignment and the redirection records, interleaved. The status is
+    // that of the last command substitution any of them ran, else 0. Twin of makeAssign in
     // bash-to-llvm-ir.abnf.
     function makeAssign(items, ln) {
         var as = []
@@ -6718,7 +6719,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function mkPrefixAsg(items) {
         return {aname: items[0].aname, val: (items.length > 1) ? items[1] : null}
     }
-    // items = [{aname,val}..., cmdWordThunk, argThunk/redir...]
+    // items = {aname,val} and redirection records in source order, then cmdWordThunk and
+    // argThunk/redir...
     function makePrefixCmd(items, ln) {
         var asgs = []
         var rest = []
@@ -6727,7 +6729,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var it = items[i]
             if (typeof it != "function" && it.aname != undefined) { asgs.push(it) } else { rest.push(it) }
         }
-        var inner = makeSimpleCommand(rest, ln)
+        var inner = makeSimpleCommand(redirCmdItems(rest), ln)
         return function() {
             vars["$LINENO"] = lnCtx == null ? ln : lnIn(ln)
             var saved = []
