@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-859** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-860** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -66,25 +66,14 @@ its report; anything structural there is a CORE ticket.
 
 # RB — Ruby
 
-### T-854 ruby: binary (ASCII-8BIT) strings · P3 · RB · IN PROGRESS (RB worker, round 24) [V RB worker]
-`p 255.chr.bytes, 255.chr.encoding, 255.chr` → ruby `[255]`, `#<Encoding:ASCII-8BIT>`, `"\xFF"`; ours `[195, 191]`,
-String#encoding undefined. Strings are untagged UTF-16 primitives. Design (RB worker): a box `{__rbin: s}`, one char
-per byte (U+0000..U+00FF), modelled on the `{__flo}` float box — Go twin type + layer-2 object, typed strings keep
-their fast path. Producers: Integer#chr 128..255, String#b, force_encoding("BINARY"), pack. Methods: bytes, bytesize,
-size/length, [], each_byte, inspect ("\xFF"), encoding, ==, +/<< (MRI's compatibility error), force_encoding back,
-unpack, valid_encoding?. Floor part FIRST: `puts 255.chr` must write the raw byte 0xFF, but output UTF-8-encodes
-text — needs a raw-byte write in runtime.c, the Go twin and the interpreter hosts. ~400-600 lines, 4-5 files.
-
-### T-855 ruby: private/constant/enumerator gaps · P3 · RB · IN PROGRESS (RB worker, round 24) [V RB worker]
-Oracle LC_ALL=en_US.UTF-8 /usr/bin/ruby 2.6. (1) compiler: `class A; private def q; end; end` → "undefined method
-`private' for A:Class". (2) both: a user private/protected method's error says "private method 'q' called"; MRI
-"private method `q' called for #<A:0x...>". (3) compiler: after `begin; class E < Nope; end; rescue NameError; end`,
-a second `class E < Nope2` fails "variable not defined: E" (reopen decided at compile time). (4) both:
-`[1,2,3].each_with_object([])` without a block crashes the interpreter ("Cannot read property 'apply'"). (5) both:
-blockless `each_entry` / `find_index` → NoMethodError; MRI an Enumerator. (6) both: `each_slice(2)`/`each_cons(2)`
-driven by `next` — StopIteration#result is the receiver; MRI 2.6 nil. (7) both: `M::X.superclass` from a nested
-`class Y < X` prints `X`, MRI `M::X`. (8) `p Nope` (unknown constant): interp NameError "undefined local variable
-or method", compiler aborts; MRI "uninitialized constant Nope".
+### T-859 ruby: class-body scope gate, nested reopen, visibility queries, encoding remainders · P3 · RB · OPEN [V RB worker]
+Oracle LC_ALL=en_US.UTF-8 /usr/bin/ruby 2.6. (1) WRONG ACCEPT (interp): a class body nested in another body can read
+the enclosing body's local variables (`x = 1; class A; p x; end` → MRI NameError); nested bodies now share the scope
+chain for constants, but locals must stop at the class/module gate. (2) interp: `class X; end; module M; class X; end;
+end` reopens the top-level X (checks globalScope) instead of creating M::X. (3) `private_method_defined?` /
+`protected_method_defined?` undefined in both halves. (4) binary-string remainders: US-ASCII (`65.chr.encoding` →
+US-ASCII), an invalid-UTF-8 `"\xFF"` literal, in-place `force_encoding` / `"" << 255.chr`, an interpolated binary
+String stays binary, pack/unpack directives beyond C c U (NotImplementedError today).
 
 # JS — JavaScript and TypeScript
 
@@ -927,6 +916,8 @@ T-850 ruby: binary strings, blockless enumerators, statement-line and zsuper gap
 T-852 c: anonymous-union positional initializer; `(p + 2)->a`; float storage — DONE df663c0d..20315cdb (anonymous member is one initializer member, cInitSeek for designators into it; (expr)-> as value and place; compiled float cell is binary32 via exact soft pack/unpack, function-pointer cell 8 bytes, so machBytes == sizeof for every scalar — float-only loops +21% instructions, c bench unchanged; also fixed: comma operator type, floating truth incl. -0.0/NaN/(_Bool)0.5)
 T-846 kotlin: modCount CME and smaller gaps — DONE dffa62ee..ad6f21a6 (modCount on the shared array value — Go jsArray.mod, C cell field f, goja private symbol; host arrMod/arrModBump/arrModIs; only Kotlin's list mutators bump; 30 java+stdlib scenarios byte-identical, java/js/kotlin/python bench within spread; Unit value, ; members, ?. assignment targets skip, stdlib range hashes (rng17b corrected), ClosedFloatRange mark, null as checked/generic T → NPE)
 T-856 c compiler: anonymous struct inside a union; null-based offsetof natively — DONE 01655e39 (anonymous struct in a union placed by byte offset from the union's start in the compiler; a folded integer constant cast to a pointer is an inttoptr constant, readable by llvm.Run's constValue; the interpreter's cell-counted offsets stay the documented 7.9 limit)
+T-855 ruby: private/constant/enumerator gaps — DONE e1ab0f6f (private/protected/public def; MRI's private-method message; run-time reopen decision after a failed superclass; blockless each_with_object/each_entry/find_index enumerators; nested names M::X in superclass/inspect/ancestors; uninitialized constant naming per MRI. Item 6 DECLINED: each_slice/each_cons StopIteration#result follows Ruby 3.1 (the receiver) consistently in all engines and is pinned by enum-block-still-yields; 2.6's nil is the older behaviour)
+T-854 ruby: binary (ASCII-8BIT) strings — DONE 074917f6 (binary String box {__rbin} / jsRBin with raw bytes; producers chr>127, b, force_encoding BINARY, pack C*; bytes/bytesize/getbyte/each_byte/[]/inspect \\xHH/encoding/==/hash/+/<< with CompatibilityError/*/unpack C c U; puts writes raw bytes via the existing writeBytes host — od-checked = ruby; Encoding objects)
 
 # Settled — do not re-open
 
