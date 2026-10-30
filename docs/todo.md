@@ -128,7 +128,7 @@ nestOwner / nestedOf are keyed by simple class name (last wins); key them by bin
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-866 bash: a prefix assignment after a leading redirection · P3 · SH · OPEN [V SH worker]
+### T-866 bash: a prefix assignment after a leading redirection · P3 · SH · IN PROGRESS (SH worker, round 15) [V SH worker]
 `>/dev/null x=5 echo hi` → bash prints `hi` (x=5 is a prefix assignment for echo); both halves: parse error. A simple
 command is `{ redirection | assignment }* word { word | redirection }*` — redirections and assignments may interleave
 before the command word.
