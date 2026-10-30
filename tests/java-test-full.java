@@ -3647,13 +3647,19 @@ class S61 {
 // arithmetic, a comparison with a primitive, a condition, a switch selector
 // or an assignment to a primitive (JLS 5.1.8, 14.11.3); `throw null` throws
 // one (JLS 14.18). A null compared by reference or concatenated is no
-// unboxing. Every expected value is java 24.0.2's.
+// unboxing. A null Integer as an array index or dimension or a String
+// position unboxes where it is evaluated - before an assignment's right-hand
+// side and the next dimension - and a null stored into an int[] before the
+// bounds check (JLS 15.10.1, 15.13.1, 15.26.1). Every expected value is java
+// 24.0.2's.
 class S62B {
     int v = 1;
     int get() { return v; }
 }
 class S62 {
     static Object[] nulls = {null};
+    static Integer nn() { return (Integer) nulls[0]; }
+    static int side(int v) { log = log + "S"; return v; }
     static String log = "";
     static void k(String id, Runnable r) {
         try { r.run(); log = log + id + ":none "; }
@@ -3692,6 +3698,23 @@ class S62 {
         k("b", () -> { Boolean bb = (Boolean) nulls[0]; log = log + (false || bb); });
         k("c", () -> { Boolean bb = (Boolean) nulls[0]; log = log + (false && bb); });
         Main.check("np62b", log.equals("a:npe b:npe falsec:none "));
+        log = "";
+        int[] base = {10, 20};
+        int[] nul = null;
+        k("a", () -> { int[] z = new int[nn()]; log = log + z.length; });
+        k("b", () -> { log = log + base[nn()]; });
+        k("c", () -> { base[nn()] = side(5); });
+        k("d", () -> { int[][] z = new int[2][nn()]; log = log + z.length; });
+        k("e", () -> { int[][] z = new int[nn()][side(-1)]; });
+        k("f", () -> { log = log + "abc".charAt(nn()); });
+        k("g", () -> { log = log + "abc".substring(0, nn()); });
+        k("h", () -> { log = log + "abc".codePointAt(nn()); });
+        k("i", () -> { log = log + "abc".repeat(nn()); });
+        k("j", () -> { base[5] = nn(); });
+        k("l", () -> { nul[side(0)] = side(1); });
+        k("m", () -> { base[nn()] += 1; });
+        k("n", () -> { S62B b = (S62B) nulls[0]; b.v = side(2); });
+        Main.check("np62c", log.equals("a:npe b:npe c:npe d:npe e:npe f:npe g:npe h:npe i:npe j:npe SSl:npe m:npe Sn:npe "));
         String msg = "";
         try { Object o = nulls[0]; o.toString(); } catch (NullPointerException e) { msg = e.getClass().getName(); }
         Main.check("nm62", msg.equals("java.lang.NullPointerException"));

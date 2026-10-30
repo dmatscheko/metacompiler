@@ -823,7 +823,7 @@ PlaceAhead  = :script(~~
 ~~) ;
 PlainTarget <~~ push(jTargetRef(takeAll())) ~~>
             = Id <~~ push(up.in) ~~> { "." Id <~~ push({key: up.in}) ~~> | TIndex } ;
-TIndex      <~~ push(jNoteIdx({idx: pop()})) ~~>
+TIndex      <~~ push(jNoteIdx({idx: jIdxChk(pop(), stripWs(up.in))})) ~~>
             = "[" Expression "]" ;
 
 CondExpr    <~~ push(makeCond(takeAll(), up.in)) ~~>
@@ -970,7 +970,7 @@ NewArrSize  <~~ push(makeNewArray(takeAll())) ~~>
 NAType      = { Annotation } NATypeName ;
 NATypeName  <~~ push({naty: stripWs(up.in)}) ~~>
             = PrimName KwEnd | "String" KwEnd | Id [ NotDiamond SkipAngle ] { "." Id [ NotDiamond SkipAngle ] } ;
-NADim       <~~ push({dim: pop()}) ~~> = { Annotation } "[" Expression "]" ;
+NADim       <~~ push({dim: jIdxChk(pop(), stripWs(up.in))}) ~~> = { Annotation } "[" Expression "]" ;
 NAEmpty     <~~ push({nadim0: true}) ~~> = { Annotation } "[" "]" ;
 
 // super.m(args): the method search starts at the superclass of the class the call
@@ -1003,7 +1003,7 @@ QNewSfx     <~~ push(makeQNewSfx(takeAll())) ~~>
 MethodSfx   <~~ push(jNoteMSfx(jMcallSfx(popName(), takeAll(), up.in))); jNoteCall(up.in) ~~>
             = "." [ SkipAngle ] Id <~~ push({mname: up.in}) ~~> "(" [ Expression { "," Expression } ] ")" ;
 FieldSfx    = "." Id <~~ push({kind:"field", name: up.in}) ~~> ;
-IndexSfx    <~~ push(jNoteIdx({kind:"index", idx: pop(), stext: up.in})) ~~>
+IndexSfx    <~~ push(jNoteIdx({kind:"index", idx: jIdxChk(pop(), stripWs(up.in)), stext: up.in})) ~~>
             = "[" Expression "]" ;
 
 // A switch EXPRESSION: the same case forms as the statement, but every arm supplies
@@ -2459,9 +2459,10 @@ HasStatic   = :script(~~
                 callExt(b, "js_scope_set", [curScopeV, emitStr(b, ref.name), v])
             } else {
                 if (op == "=") {
-                    if (p.idx === true) { callExt(b, "js_jvidx", [p.obj, p.key]) }
                     var pty = (tyRef == null || tyRef == undefined) ? jFieldTyOfPlace(ref) : jPlaceTy(tyRef, lty)
                     if (pty != vty) { v = declConvert(b, v, pty) }
+                    // After the conversion, as in makeAssign of java-interpreter.abnf.
+                    if (p.idx === true) { callExt(b, "js_jvidx", [p.obj, p.key]) }
                     if (p.clinit != undefined && p.clinit != "") { b = jEmitClinit(b, p.clinit) }
                 }
                 callExt(b, "js_set", [p.obj, p.key, v])
@@ -4064,6 +4065,9 @@ HasStatic   = :script(~~
     // A condition that may be a Boolean box (jCondMayBox) unboxes it. Twin of
     // jCondChk in java-interpreter.abnf.
     function jCondChk(t, text) { return jCondMayBox(text) ? jNonNull(t) : t }
+    // An array index or dimension that may be a box (jIdxMayBox) unboxes as it is
+    // evaluated. Twin of jIdxChk in java-interpreter.abnf.
+    function jIdxChk(t, text) { return jIdxMayBox(text) ? jNonNull(t) : t }
     // Each operand of `a && b` / `a || b` is a condition (jCondChk). Twin of
     // jOrAndChk in java-interpreter.abnf.
     function jOrAndChk(items, text, op) {

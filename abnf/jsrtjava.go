@@ -1807,6 +1807,7 @@ func init() {
 			if str, isStr := u(a[0]).(string); isStr {
 				args, ok := u(a[1]).(*jsArray)
 				if ok {
+					rt.jvNpeIfNull(argAt(args.elems, 0))
 					i := jsToInt(rt.toNumber(argAt(args.elems, 0)))
 					units := strUnits(str)
 					if i < 0 || i >= len(units) {
@@ -1932,10 +1933,12 @@ func init() {
 			if str, isStr := u(a[0]).(string); isStr {
 				if args, ok := u(a[1]).(*jsArray); ok {
 					units := strUnits(str)
+					rt.jvNpeIfNull(argAt(args.elems, 0))
 					bi := jsToInt(rt.toNumber(argAt(args.elems, 0)))
 					ei := len(units)
 					if len(args.elems) > 1 {
-						ei = jsToInt(rt.toNumber(argAt(args.elems, 1)))
+						rt.jvNpeIfNull(args.elems[1])
+						ei = jsToInt(rt.toNumber(args.elems[1]))
 					}
 					if bi < 0 || ei > len(units) || bi > ei {
 						rt.jvThrowRange(bi, ei, len(units))

@@ -1757,6 +1757,16 @@ function jCondMayBox(t) {
     if (ty != "") { return ty == "Boolean" }
     return jTopOp(t, 1) < 0 && t.charAt(0) != "!" && jTopFind(t, "?") < 0
 }
+// May the int operand of the bracket text t (whitespace-free `[e]`, after any
+// type annotations) - an array index or dimension - be a box, whose unboxing
+// makes a null an NPE (JLS 5.1.8, 15.10.1, 15.10.3)? Its static type is not
+// primitive, or it is unknown and e is no operator's result.
+function jIdxMayBox(t) {
+    var e = t.substring(t.indexOf("[") + 1, t.length - 1)
+    var ty = jStaticTy(e)
+    if (ty != "") { return !jIsPrimTy(ty) }
+    return jTopOp(e, 1) < 0
+}
 // The operands of a top-level `op` chain (`a&&b&&c`), split on op outside
 // groups and literals.
 function jSplitTop(t, op) {

@@ -1665,6 +1665,8 @@ function js_jband(l, r) {
 // is 101 and not "e0" (JLS 4.2.1, char is an integral type).
 function js_jcharat(target, args) {
     if (typeof target == "string") {
+        // A null Integer index unboxes to an NPE (JLS 5.1.8).
+        if (args[0] === null) { jvThrowCls(jvNpeCls, null) }
         var i = rtjNum(args[0])
         // THROWS StringIndexOutOfBoundsException, which a program can catch.
         // See jStrIdx in java-interpreter.abnf.
@@ -1711,6 +1713,8 @@ function js_mcall(recv, name, args) {
         }
         if (name == "equals") { return rtjStrictEq(recv, args[0]) }
         if (name == "substring") {
+            jvNpeIfNull(args[0])
+            if (args.length > 1) { jvNpeIfNull(args[1]) }
             var b = args.length > 0 ? rtjNum(args[0]) : 0
             var e = args.length > 1 ? rtjNum(args[1]) : recv.length
             // java.lang.String.substring checks the RANGE, so begin > end is out of

@@ -850,7 +850,7 @@ PlaceAhead  = :script(~~
 ~~) ;
 PlainTarget <~~ push(jTargetRef(takeAll())) ~~>
             = Id <~~ push(up.in) ~~> { "." Id <~~ push({key: up.in}) ~~> | TIndex } ;
-TIndex      <~~ push({idx: pop()}) ~~>
+TIndex      <~~ push({idx: jIdxChk(pop(), stripWs(up.in))}) ~~>
             = "[" Expression "]" ;
 
 CondExpr    <~~ push(makeCond(takeAll(), up.in)) ~~>
@@ -996,7 +996,7 @@ NewArrSize  <~~ push(makeNewArray(takeAll())) ~~>
 ArrBase     = { Annotation } ArrBaseName ;
 ArrBaseName <~~ push({abase: stripWs(up.in)}) ~~>
             = PrimName KwEnd | "String" KwEnd | Id [ NotDiamond SkipAngle ] { "." Id [ NotDiamond SkipAngle ] } ;
-ArrDim      <~~ push({adim: pop()}) ~~>
+ArrDim      <~~ push({adim: jIdxChk(pop(), stripWs(up.in))}) ~~>
             = { Annotation } "[" Expression "]" ;
 ArrEmpty    <~~ push({aempty: true}) ~~>
             = { Annotation } "[" "]" ;
@@ -1034,7 +1034,7 @@ QNewSfx     <~~ push(makeQNewSfx(takeAll())) ~~>
 MethodSfx   <~~ push(jMcallSfx(popName(), takeAll(), up.in)); jNoteCall(up.in) ~~>
             = "." [ SkipAngle ] Id <~~ push({mname: up.in}) ~~> "(" [ Expression { "," Expression } ] ")" ;
 FieldSfx    = "." Id <~~ push({kind:"field", name: up.in}) ~~> ;
-IndexSfx    <~~ push({kind:"index", idx: pop(), stext: up.in}) ~~>
+IndexSfx    <~~ push({kind:"index", idx: jIdxChk(pop(), stripWs(up.in)), stext: up.in}) ~~>
             = "[" Expression "]" ;
 
 // A switch EXPRESSION. It comes first because it is the only Primary that starts
@@ -3148,8 +3148,12 @@ HasStatic   = :script(~~
     }
     // jI is the int reading of any integral operand: a box's value, a char's code,
     // a plain number. Only ever called where the result type is int, so the 32 bit
-    // wrap is the promotion itself.
-    function jI(v) { return szNum(jNumD(v)) | 0 }
+    // wrap is the promotion itself. A null is an Integer unboxed, so an NPE (JLS
+    // 5.1.8); twin of jvLow32 in languages/lib/java-rt.metajs.
+    function jI(v) {
+        if (v === null) { jNpe() }
+        return szNum(jNumD(v)) | 0
+    }
     // ArithmeticException, thrown rather than failed, so a program can catch it.
     // interp-core's exception protocol is {__exc: true, v: <thrown value>}.
     function jThrowExc(clsName, msg) {
@@ -3195,6 +3199,10 @@ HasStatic   = :script(~~
     // (jCondMayBox) unboxes it, and a null there is an NPE. Twin of jCondChk in
     // java-to-llvm-ir.abnf.
     function jCondChk(t, text) { return jCondMayBox(text) ? jNonNull(t) : t }
+    // An array index or dimension that may be a box (jIdxMayBox) unboxes as it is
+    // evaluated - before the right-hand side of an assignment to the element and
+    // before the next dimension. Twin of jIdxChk in java-to-llvm-ir.abnf.
+    function jIdxChk(t, text) { return jIdxMayBox(text) ? jNonNull(t) : t }
     // Each operand of `a && b` / `a || b` is a condition (jCondChk). Twin of
     // jOrAndChk in java-to-llvm-ir.abnf.
     function jOrAndChk(items, text, op) {
@@ -3243,7 +3251,10 @@ HasStatic   = :script(~~
         }
         return i
     }
+    // A String position that is a null Integer is an NPE (JLS 5.1.8); an array
+    // index's is raised where it is evaluated (jIdxChk).
     function jStrIdx(s, iv) {
+        if (iv === null) { jNpe() }
         var i = jNum(iv)
         if (i < 0 || i >= s.length) {
             jThrowExc("StringIndexOutOfBoundsException",
@@ -3255,6 +3266,7 @@ HasStatic   = :script(~~
     // checked as a whole - begin > end is out of bounds too, which is why the
     // message names a range rather than one index.
     function jSubstr(s, args) {
+        if (args[0] === null || args[1] === null) { jNpe() }
         var b = jNum(args[0])
         var e = args.length > 1 ? jNum(args[1]) : s.length
         if (b < 0 || e > s.length || b > e) {
@@ -4293,12 +4305,15 @@ HasStatic   = :script(~~
                     v = applyOp(op, v, valT())
                 } else {
                     v = valT()
-                    if (p.idx === true) { p.key = jArrIdx(p.obj, p.key) }
                     if (pty === null) {
                         pty = (tyRef == null || tyRef == undefined) ? jFieldTyOfPlace(ref) : jPlaceTy(tyRef, lty)
                         if (pty == vty) { pty = "" }
                     }
+                    // The value converts (a null Integer into an int[] is an NPE)
+                    // before the element's bounds are checked.
                     v = jConvTo(v, pty)
+                    if (p.obj === null) { jNpe() }
+                    if (p.idx === true) { p.key = jArrIdx(p.obj, p.key) }
                     jTouch(p.obj, "")
                 }
                 p.obj[p.key] = v
@@ -7249,8 +7264,13 @@ HasStatic   = :script(~~
             if (o === undefined || o === null) { jNpe() }
         }
         var last = ref.path[ref.path.length - 1]
-        if (o === undefined || o === null) { jNpe() }
+        // `o.f = e` and `a[i] = e` evaluate e before a null o or a is an NPE
+        // (JLS 15.26.1); makeAssign raises it.
         if (last.key != undefined) {
+            if (o === undefined || o === null) {
+                if (lateIdx === true) { return {obj: null, key: last.key} }
+                jNpe()
+            }
             // A plain `=` to a static field initializes its class after the
             // right-hand side (makeAssign); a compound one reads it first.
             if (lateIdx !== true) { jTouch(o, last.key) }
@@ -7260,6 +7280,10 @@ HasStatic   = :script(~~
         // rather than growing the array. Every writer - makeAssign, makeIncDec,
         // makePreIncDec - goes through this one place.
         var ki = last.idx()
+        if (o === undefined || o === null) {
+            if (lateIdx === true) { return {obj: null, key: ki, idx: true} }
+            jNpe()
+        }
         if (Array.isArray(o)) {
             if (lateIdx === true) { return {obj: o, key: ki, idx: true} }
             return {obj: o, key: jArrIdx(o, ki)}
