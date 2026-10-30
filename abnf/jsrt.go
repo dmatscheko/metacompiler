@@ -1959,6 +1959,9 @@ func (rt *jsrt) toString(v interface{}) string {
 		}
 		return t.s
 	case *jsRBin: // A binary String renders as one char per byte.
+		if t.str != nil {
+			return rt.toString(t.str)
+		}
 		return rubyBinText(t.b)
 	case jsFlo: // Ruby's Float keeps its decimal point (1000.0), unlike an Integer.
 		return rubyFloStr(t.f)
@@ -6536,6 +6539,9 @@ func (rt *jsrt) rubyStrOperand(r interface{}) string {
 		return b.s
 	}
 	if b, ok := r.(*jsRBin); ok {
+		if b.str != nil {
+			return rt.rubyStrOperand(b.str)
+		}
 		return b.b
 	}
 	if v, conv := rt.rubyFmtUserConv(r, "to_str", ""); conv {
@@ -6600,6 +6606,12 @@ func (rt *jsrt) rubyBin(op string, l, r interface{}) interface{} {
 	}
 	if b, ok := l.(*jsRStr); ok && b.bin != nil {
 		return rubyFwdSelf(b, rt.rubyBinMethod(b.bin, op, []interface{}{r}))
+	}
+	if b, ok := l.(*jsRBin); ok && b.str != nil {
+		if v := rt.rubyBin(op, b.str, r); v != interface{}(b.str) {
+			return v
+		}
+		return b
 	}
 	r = rubyFwd(r)
 	if b, ok := l.(*jsRBin); ok {
@@ -9352,6 +9364,9 @@ func (rt *jsrt) rubyStr(v interface{}) string {
 		}
 		return t.s
 	case *jsRBin:
+		if t.str != nil {
+			return rt.rubyStr(t.str)
+		}
 		return rubyBinText(t.b)
 	case float64:
 		return rubyIntStr(t)
@@ -9635,6 +9650,9 @@ func (rt *jsrt) rubyInspect(v interface{}) string {
 		}
 		return rubyStrInspect(t.s)
 	case *jsRBin:
+		if t.str != nil {
+			return rt.rubyInspect(t.str)
+		}
 		return rubyBoxInspect(t)
 	case jsSym:
 		return rubySymInspect(t.s)

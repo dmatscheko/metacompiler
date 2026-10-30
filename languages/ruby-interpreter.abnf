@@ -80,7 +80,7 @@ BodyItem    = HdBodyItem | AliasTop | Statement ;
 ModuleDecl  <~~ clsRanges.push({s: up.start, e: up.pos}); push(makeModuleStmt(takeAll(), up.pos)) ~~>
             = KwModule ScopedName <~~ push(up.in) ~~>
               { Semi | Def <~~ push({method: pop()}) ~~> | ClassDecl <~~ push({nested: pop()}) ~~>
-              | ModuleDecl <~~ push({nested: pop()}) ~~> | AliasStmt | AttrDecl | ClassBodyStmt } [ ClassGuard ] End ;
+              | ModuleDecl <~~ push({nested: pop()}) ~~> | AliasStmt | AttrDecl | VisDef | ClassBodyStmt } [ ClassGuard ] End ;
 // A constant path Foo::Bar::Baz (module / class name or a scoped reference).
 ScopedName  = [ "::" ] Name { "::" Name } ;
 // The name in a class/module header is normally a constant path, but Ruby also parses
@@ -692,9 +692,10 @@ Target      <~~ push(makeTargetRef(takeAll())) ~~>
             = ( NumLit <~~ push({texpr: pop()}) ~~> TargetStep | Nil <~~ push({texpr: pop()}) ~~> TargetStep
               | TargetHead ) { TargetStep } ;
 // A numeric literal or nil is a head only with a step after it: `5.x = 1' calls
-// Integer#x=, `nil.x = 1' NilClass#x=.
+// Integer#x=, `nil.x = 1' NilClass#x=. An index starts on the target's line, so
+// `rescue => e' before a line opening with `[' binds e.
 TargetStep  = "." Id <~~ push({key: up.in, call: true}) ~~> | "&." Id <~~ push({key: up.in, call: true, safe: true}) ~~>
-            | "::" Id <~~ push({key: up.in}) ~~> | TIndex ;
+            | "::" Id <~~ push({key: up.in}) ~~> | SameLine TIndex ;
 // The '@@' alternative must come BEFORE '@' (PEG: the shorter one would win), and the
 // scoped-constant head before the plain name for the same reason. `self` is a head of
 // its own: `self.attr = v` is how a method writes through its own accessor.
@@ -3794,13 +3795,19 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (name == "inspect" || name == "dump") { return binInspect(t) }
         if (name == "encoding") { return encObj(enc) }
         // force_encoding changes the box in place; bytes that become valid UTF-8
-        // are an ordinary String, a new one.
+        // turn it into an ordinary String box, so every alias sees the change.
         if (name == "force_encoding") {
             var fe = encArgName(args[0])
             var fv = anytype
             fv = encStr(b, fe)
-            if (!isBin(fv)) { return fv }
-            t.__benc = fv.__benc
+            if (isBin(fv)) {
+                t.__benc = fv.__benc
+                return t
+            }
+            t.__rs = fv.__rs
+            t.__fz = false
+            t.__rbin = undefined
+            t.__benc = undefined
             return t
         }
         if (name == "b") { return mkBin(b) }
@@ -3825,6 +3832,27 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (name == "*") { return encStr(strRepeat(b, Math.trunc(toF(args[0]))), enc) }
         if (name == "unpack" || name == "unpack1") { return strUnpack(b, name, args) }
         if (name == "encode" || (name == "scrub" && blk == null)) { return strEncode(b, enc, name, args) }
+        // Case mapping maps the ASCII letters of bytes that are not UTF-8 text;
+        // of invalid UTF-8 it is MRI's ArgumentError. A bang method changes the
+        // box, nil when nothing changed.
+        var cn = name.charAt(name.length - 1) == "!" ? name.substring(0, name.length - 1) : name
+        if (cn == "upcase" || cn == "downcase" || cn == "swapcase" || cn == "capitalize") {
+            if (enc == "UTF-8") { raiseErr(name, "ArgumentError", "input string invalid") }
+            var cb = rbsAsciiCase(b, cn)
+            if (cn == name) { return encStr(cb, enc) }
+            if (cb == b) { return null }
+            t.__rbin = cb
+            return t
+        }
+        // Every other bang method but slice! changes the box to the bytes the
+        // plain-string arm answers, nil when nothing changed (as strMutate).
+        if (cn != name && name != "slice!") {
+            var mr = anytype
+            mr = mcall(b, name, args, blk)
+            if (mr === null || mr === undefined) { return null }
+            t.__rbin = binText(mr)
+            return t
+        }
         var r = anytype
         r = isBinOpName(name) ? rbin(name, b, binText(args[0])) : mcall(b, name, args, blk)
         if (typeof r == "string" || isRStr(r)) { return encStr(binText(r), enc) }
@@ -12108,7 +12136,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
               for (var i = 0; i < ordered.length; i++) {
                 var it = ordered[i]
                 if (it == undefined) { continue }
-                if (it.method != undefined) { install(it.method) }
+                if (it.method != undefined) {
+                    install(it.method)
+                    if (it.mvis != undefined) { visDirective(it.mvis, [it.method.name]) }
+                }
                 else if (it.attr != undefined) {
                     var a = it.attr
                     for (var j = 0; j < a.names.length; j++) {

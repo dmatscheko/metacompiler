@@ -281,6 +281,68 @@ def s129
         ce == Encoding::CompatibilityError)
 end
 
+# ===== SECTION 130: case mapping and bang methods of a binary String =====
+# upcase / downcase / swapcase / capitalize of a String that is not UTF-8 text
+# map its ASCII letters only, of invalid UTF-8 they raise ArgumentError; a bang
+# method of a binary String changes it in place (nil when nothing changed), and
+# force_encoding to bytes that are valid UTF-8 makes the object itself a UTF-8
+# String, so an alias sees it. /usr/bin/ruby 2.6 settles each.
+def s130
+  bs = [255, 195, 169]
+  h = bs[0].chr + "Ab"
+  u = bs[1].chr + bs[2].chr + "ab"
+  check("bc130a", h.upcase == "\xFFAB".b && h.downcase == "\xFFab".b && h.swapcase == "\xFFaB".b && h.capitalize == "\xFFab".b &&
+        u.upcase.bytes == [195, 169, 65, 66] && u.downcase.bytes == [195, 169, 97, 98] && u.swapcase.encoding == Encoding::BINARY &&
+        (bs[2].chr + "a").capitalize.bytes == [169, 97] && u.force_encoding("US-ASCII").upcase.bytes == [195, 169, 65, 66])
+  iv = begin; ("\xFF" + "ab").upcase; rescue ArgumentError => e; e.message; end
+  w = bs[1].chr + "ab" + bs[0].chr
+  w2 = w
+  r1 = w.upcase!
+  r2 = (+"AB").b.upcase!
+  t = (+" ab").b + bs[0].chr + "\n"
+  t2 = t
+  t.chomp!
+  t.strip!
+  check("bc130b", iv == "input string invalid" && r1.equal?(w) && w2.bytes == [195, 65, 66, 255] && r2.nil? &&
+        t2.bytes == [97, 98, 255] && t.sub!("q", "x").nil? && t.sub!("a", "x").equal?(t) && t2.bytes == [120, 98, 255])
+  x = bs[1].chr + bs[2].chr
+  y = x
+  x.force_encoding("UTF-8")
+  z = bs[1].chr + "x" + bs[0].chr
+  z2 = z
+  z.chop!
+  z.chop!
+  z.force_encoding("UTF-8")
+  check("bc130c", y.encoding == Encoding::UTF_8 && y == "\u00e9" && y.length == 1 && y.valid_encoding? && x.equal?(y) &&
+        (y + "!") == "\u00e9!" && y.upcase == "\u00c9" && z2 == "\xC3".b.force_encoding("UTF-8") && z2.encoding == Encoding::UTF_8)
+end
+
+# ===== SECTION 131: visibility re-exposed; a rescue binding before `[' =====
+# `public :m' over an inherited private or protected m, or a mixed-in module's
+# private m, makes m public for the class (the superclass keeps it private);
+# `private def m' in a module body makes m a private method of the module. The
+# `=> e' of a rescue ends at its line, so a handler whose first line opens with
+# `[' is an Array, not e[...]. /usr/bin/ruby 2.6 settles each.
+class S131C; private def d; 4; end; protected def f; 6; end; end
+class S131D < S131C; public :d, :f; end
+class S131E < S131D; end
+module S131M; private def mm; 8; end; def pm; mm + 1; end; end
+class S131F; include S131M; public :mm; end
+class S131G; include S131M; end
+def s131rb
+  raise ArgumentError, "q"
+rescue ArgumentError => e
+  [e.class, e.message]
+end
+def s131
+  pe = begin; S131C.new.d; rescue NoMethodError => e; e.message[0, 18]; end
+  ge = begin; S131G.new.mm; rescue NoMethodError => e; e.message[0, 19]; end
+  check("pv131a", S131D.new.d == 4 && S131D.new.f == 6 && S131E.new.d == 4 && pe == "private method `d'" &&
+        S131D.public_method_defined?(:d) && S131C.private_method_defined?(:d) && S131F.new.mm == 8 &&
+        S131G.new.pm == 9 && ge == "private method `mm'" && S131M.private_method_defined?(:mm))
+  check("rb131b", s131rb == [ArgumentError, "q"])
+end
+
 s122() # SECTION-CALL 122
 s123() # SECTION-CALL 123
 s124() # SECTION-CALL 124
@@ -289,5 +351,7 @@ s126() # SECTION-CALL 126
 s127() # SECTION-CALL 127
 s128() # SECTION-CALL 128
 s129() # SECTION-CALL 129
+s130() # SECTION-CALL 130
+s131() # SECTION-CALL 131
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

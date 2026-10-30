@@ -731,9 +731,10 @@ Target      <~~ push(makeTargetRef(takeAll())) ~~>
             = ( NumLit <~~ push({texpr: pop()}) ~~> TargetStep | Nil <~~ push({texpr: pop()}) ~~> TargetStep
               | TargetHead ) { TargetStep } ;
 // A numeric literal or nil is a head only with a step after it: `5.x = 1' calls
-// Integer#x=, `nil.x = 1' NilClass#x=.
+// Integer#x=, `nil.x = 1' NilClass#x=. An index starts on the target's line, so
+// `rescue => e' before a line opening with `[' binds e.
 TargetStep  = "." Id <~~ push({key: up.in, call: true}) ~~> | "&." Id <~~ push({key: up.in, call: true, safe: true}) ~~>
-            | "::" Id <~~ push({key: up.in}) ~~> | TIndex ;
+            | "::" Id <~~ push({key: up.in}) ~~> | SameLine TIndex ;
 // The '@@' alternative must come BEFORE '@' (PEG: the shorter one would win), and the
 // scoped-constant head before the plain name for the same reason. `self` is a head of
 // its own: `self.attr = v` is how a method writes through its own accessor.
@@ -7835,17 +7836,31 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             var n = restrictedList[q].name
             var own = false
             for (var k = 0; k < list.length; k++) { if (list[k].name == n) { own = true } }
-            if (!own && sup != undefined && classHasMethod(sup, n)) { out.push(superForwarder(owner, n)) }
+            if (!own && sup != undefined && classHasMethod(sup, n)) { out.push(superForwarder(owner, n, n)) }
         }
         return out
     }
-    function superForwarder(owner, n) {
+    // `public :m' over an inherited private or protected m gives the class a public
+    // m that forwards to super's restricted key; the interpreter's visOf finds the
+    // subclass level's visibility first.
+    function inheritedPublic(list, owner, sup, r) {
+        var out = []
+        for (var i = 0; i < r.visnamed.length; i++) {
+            var n = r.visnamed[i]
+            var skip = sup == "" || !isRestricted(sup, n)
+            for (var k = 0; k < list.length; k++) { if (list[k].name == n) { skip = true } }
+            for (var q = 0; q < r.restricted.length; q++) { if (r.restricted[q].name == n) { skip = true } }
+            if (!skip) { out.push(superForwarder(owner, n, "$q$" + n)) }
+        }
+        return out
+    }
+    function superForwarder(owner, n, key) {
         return {name: n, params: [paramDesc({param: "$fwd", splat: true})], body: function(b) {
             var clsV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, owner)])
             var supV = callExt(b, "js_get", [clsV, emitStr(b, "__super")])
             var selfV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "self")])
             var argsV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "$fwd")])
-            return {b: b, v: callExt(b, "js_supercall", [supV, selfV, emitStr(b, n), argsV])}
+            return {b: b, v: callExt(b, "js_supercall", [supV, selfV, emitStr(b, key), argsV])}
         }}
     }
 
@@ -7886,7 +7901,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // wants them: FARTHEST ancestor first, because emitMethods js_sets in order and
     // the last write wins.
     // The private / protected methods a class gets from its included modules: the
-    // module's visibility, unless the class defines or restricts the name itself.
+    // module's visibility, unless the class defines the name or names it in a
+    // visibility directive itself.
     // The nearest module defining a name decides, as its def is the one the class
     // keeps (mixinDefsAll).
     var moduleRestricted = {}
@@ -7895,6 +7911,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         var seen = {}
         for (var i = 0; i < r.methods.length; i++) { seen["$" + r.methods[i].name] = true }
         for (var j = 0; j < r.restricted.length; j++) { seen["$" + r.restricted[j].name] = true }
+        for (var v = 0; v < r.visnamed.length; v++) { seen["$" + r.visnamed[v]] = true }
         for (var a = 0; a < anc.length; a++) {
             var d = mixinDefs(anc[a])
             var mr = anytype
@@ -8026,6 +8043,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         var own = mixinDefsAll(incAnc)
         if (nameIn(incAnc, "Comparable")) { pushAll(own, comparableMethods()) }
         for (var a2 = 0; a2 < r.methods.length; a2++) { own.push(r.methods[a2]) }
+        pushAll(own, inheritedPublic(own, name, superName, r))
         // The prepended methods sit on the CLASS itself while the class's own move
         // into a synthetic ancestor, which is how a `super` inside a prepended method
         // reaches the method it overrode.

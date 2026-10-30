@@ -2780,6 +2780,9 @@ func (rt *jsrt) rubyHashOf(v interface{}) float64 {
 		}
 		return rubyStrHash("s" + t.s)
 	case *jsRBin:
+		if t.str != nil {
+			return rt.rubyHashOf(t.str)
+		}
 		return rubyStrHash("s" + rubyBinText(t.b))
 	case jsSym:
 		return rubyStrHash("y" + t.s)
@@ -2990,10 +2993,18 @@ type jsRStr struct {
 }
 
 // rubyFwd is what a value stands for: the binary String a re-encoded box
-// became, else the value itself.
+// became, or the String a re-encoded binary String became, else the value
+// itself.
 func rubyFwd(v interface{}) interface{} {
-	if b, ok := v.(*jsRStr); ok && b.bin != nil {
-		return b.bin
+	switch t := v.(type) {
+	case *jsRStr:
+		if t.bin != nil {
+			return rubyFwd(t.bin)
+		}
+	case *jsRBin:
+		if t.str != nil {
+			return rubyFwd(t.str)
+		}
 	}
 	return v
 }
@@ -3031,11 +3042,11 @@ func rubyBoxOut(recv, v interface{}) interface{} {
 
 // rubySV reads a String box as its text and hands every other value back.
 func rubySV(v interface{}) interface{} {
-	if b, ok := v.(*jsRStr); ok {
-		if b.bin != nil {
-			return b.bin
-		}
+	switch b := rubyFwd(v).(type) {
+	case *jsRStr:
 		return b.s
+	case *jsRBin:
+		return b
 	}
 	return v
 }
@@ -3215,22 +3226,26 @@ func (rt *jsrt) rubyRStrMethod(b *jsRStr, name string, args []interface{}) (inte
 	if rubyStrMutator(name) {
 		return rt.rubyStrMutate(b, name, args), true
 	}
+	if name == "force_encoding" {
+		if b.fz {
+			rt.rubyRaiseErr(name, "FrozenError", "can't modify frozen String")
+		}
+		pos, _ := rubyBlockArgs(args)
+		bs, _ := rt.rubyStrBE(b)
+		switch nv := rubyEncStr(bs, rt.rubyEncArg(argAt(pos, 0))).(type) {
+		case *jsRBin:
+			b.bin = nv
+		case *jsRStr:
+			b.bin, b.s = nil, nv.s
+		}
+		return b, true
+	}
 	if b.bin != nil {
 		switch name {
 		case "freeze", "frozen?", "equal?", "object_id", "itself", "tap":
 		default:
 			return rubyFwdSelf(b, rt.rubyBinMethod(b.bin, name, args)), true
 		}
-	}
-	if name == "force_encoding" {
-		if b.fz {
-			rt.rubyRaiseErr(name, "FrozenError", "can't modify frozen String")
-		}
-		pos, _ := rubyBlockArgs(args)
-		if nb, isBin := rubyEncStr(b.s, rt.rubyEncArg(argAt(pos, 0))).(*jsRBin); isBin {
-			b.bin = nb
-		}
-		return b, true
 	}
 	switch name {
 	case "freeze":

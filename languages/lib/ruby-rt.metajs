@@ -330,8 +330,14 @@ function rbBinMethod(t, name, args) {
     if (name == "encoding") { return rbEncObj(enc) }
     if (name == "force_encoding") {
         var fv = rbEncStr(b, rbEncArg(rbArgAt(args, 0)))
-        if (!rbIsBox(fv)) { return fv }
-        t["__benc"] = fv["__benc"]
+        if (rbIsBox(fv)) {
+            t["__benc"] = fv["__benc"]
+            return t
+        }
+        t["__rbin"] = false
+        t["__rstr"] = true
+        t["__s"] = fv["__s"]
+        t["__fz"] = false
         return t
     }
     if (name == "b") { return rbMkBin(b) }
@@ -367,6 +373,23 @@ function rbBinMethod(t, name, args) {
     }
     if (name == "unpack" || name == "unpack1") { return rbStrUnpack(b, name, args) }
     if (name == "encode" || (name == "scrub" && blk === null)) { return rbStrEncode(b, enc, name, args) }
+    // Twin of the case-mapping arm of binMethod in ruby-interpreter.abnf.
+    var cn = name
+    if (name.charAt(name.length - 1) == "!") { cn = name.substring(0, name.length - 1) }
+    if (cn == "upcase" || cn == "downcase" || cn == "swapcase" || cn == "capitalize") {
+        if (enc == "UTF-8") { rbRaiseErr(name, "ArgumentError", "input string invalid") }
+        var cb = rbsAsciiCase(b, cn)
+        if (cn == name) { return rbEncStr(cb, enc) }
+        if (cb == b) { return null }
+        t["__s"] = cb
+        return t
+    }
+    if (cn != name && name != "slice!") {
+        var mr = js_rxmcall(b, name, args)
+        if (rtIsNil(mr)) { return null }
+        t["__s"] = rbBinText(mr)
+        return t
+    }
     var r = anytype
     if (name == "%" || name == "<" || name == ">" || name == "<=" || name == ">=" || name == "<=>" || name == "=~") {
         r = rbBin(name, b, rbBinText(rbArgAt(args, 0)))

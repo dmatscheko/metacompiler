@@ -883,10 +883,15 @@ func rubyFloatStep(beg, end, unit float64, excl bool) []float64 {
 // below 128, unpack("B") / ("H")) or "UTF-8" (a "\xFF" literal). A pointer, so
 // << and force_encoding change it in place. Twin of the {__rbin} box of
 // ruby-interpreter.abnf and lib/ruby-rt.metajs, which hold one char per byte.
+//
+// force_encoding to bytes that are valid UTF-8 makes it the ordinary String
+// str: the other engines retag the box, and a Go value cannot change its type,
+// so every alias reaches str through this one (rubyFwd).
 type jsRBin struct {
 	b   string
 	enc string
 	id  jsHandleID
+	str *jsRStr
 }
 
 func (t *jsRBin) encName() string {
@@ -915,6 +920,9 @@ func rubyEncStr(b, enc string) interface{} {
 func (rt *jsrt) rubyStrBE(v interface{}) (string, string) {
 	switch t := v.(type) {
 	case *jsRBin:
+		if t.str != nil {
+			return rt.rubyStrBE(t.str)
+		}
 		return t.b, t.encName()
 	case *jsRStr:
 		if t.bin != nil {
@@ -953,6 +961,22 @@ func rubyAsciiOnly(s string) bool {
 		}
 	}
 	return true
+}
+
+// rubyAsciiCase maps the ASCII letters of the bytes b only. Twin of
+// rbsAsciiCase in ruby-str.js.
+func rubyAsciiCase(b, name string) string {
+	out := []byte(b)
+	for i, c := range out {
+		up := name == "upcase" || (name == "capitalize" && i == 0)
+		down := name == "downcase" || (name == "capitalize" && i > 0)
+		if (up || name == "swapcase") && c >= 'a' && c <= 'z' {
+			out[i] = c - 32
+		} else if (down || name == "swapcase") && c >= 'A' && c <= 'Z' {
+			out[i] = c + 32
+		}
+	}
+	return string(out)
 }
 
 // rubyBinInspect is a binary String's #inspect. Twin of rbsBinInspect in
@@ -1659,7 +1683,7 @@ func (rt *jsrt) rubyBinCat(l, r interface{}) interface{} {
 // encoding unless they are ASCII-only. Twin of binEq in ruby-interpreter.abnf.
 func rubyBinEq(b *jsRBin, o interface{}) bool {
 	var ob, oe string
-	switch t := o.(type) {
+	switch t := rubyFwd(o).(type) {
 	case *jsRBin:
 		ob, oe = t.b, t.encName()
 	case *jsRStr:
@@ -1870,6 +1894,21 @@ func (rt *jsrt) rubyEncodeName(e interface{}) string {
 // of binMethod in ruby-interpreter.abnf.
 func (rt *jsrt) rubyBinMethod(t *jsRBin, name string, args []interface{}) interface{} {
 	pos, blk := rubyBlockArgs(args)
+	if t.str != nil {
+		if name == "equal?" {
+			return argAt(pos, 0) == interface{}(t)
+		}
+		var r interface{}
+		if len(pos) == 1 && (name == "+" || name == "*" || rubyBinOpName(name)) {
+			r = rt.rubyBin(name, t.str, pos[0])
+		} else {
+			r = rt.rubyMethod(t.str, name, args)
+		}
+		if r == interface{}(t.str) {
+			return t
+		}
+		return r
+	}
 	enc := t.encName()
 	bytesArr := func() *jsArray {
 		a := &jsArray{elems: make([]interface{}, len(t.b))}
@@ -1907,11 +1946,11 @@ func (rt *jsrt) rubyBinMethod(t *jsRBin, name string, args []interface{}) interf
 	case "force_encoding":
 		// In place; bytes that become valid UTF-8 are an ordinary String, a new one.
 		v := rubyEncStr(t.b, rt.rubyEncArg(argAt(pos, 0)))
-		nb, isBox := v.(*jsRBin)
-		if !isBox {
-			return v
+		if nb, isBox := v.(*jsRBin); isBox {
+			t.enc = nb.enc
+		} else {
+			t.str = v.(*jsRStr)
 		}
-		t.enc = nb.enc
 		return t
 	case "b":
 		return &jsRBin{b: t.b}
@@ -1958,6 +1997,35 @@ func (rt *jsrt) rubyBinMethod(t *jsRBin, name string, args []interface{}) interf
 	case "scrub":
 		if blk == nil {
 			return rt.rubyStrEncode(t.b, enc, name, pos)
+		}
+	}
+	// Twin of the case-mapping arm of binMethod in ruby-interpreter.abnf.
+	switch cn := strings.TrimSuffix(name, "!"); cn {
+	case "upcase", "downcase", "swapcase", "capitalize":
+		if enc == "UTF-8" {
+			rt.rubyRaiseErr(name, "ArgumentError", "input string invalid")
+		}
+		cb := rubyAsciiCase(t.b, cn)
+		if cn == name {
+			return rubyEncStr(cb, enc)
+		}
+		if cb == t.b {
+			return jsNull
+		}
+		t.b = cb
+		return t
+	default:
+		if cn != name && name != "slice!" {
+			bt := rubyBinText(t.b)
+			if (name == "sub!" || name == "gsub!") && rt.rubySubMisses(bt, args) {
+				return jsNull
+			}
+			r := rt.rubyStrCall(bt, name, args)
+			if isUndefOrNull(r) {
+				return jsNull
+			}
+			t.b = rubyBinOfText(rt.rubyStr(r))
+			return t
 		}
 	}
 	var r interface{}

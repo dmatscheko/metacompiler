@@ -536,6 +536,23 @@ function rbsAsciiOnly(s) {
     return true
 }
 
+// upcase / downcase / swapcase / capitalize (name) of the bytes b of a String
+// that is not UTF-8: MRI maps the ASCII letters only, every other byte stays.
+function rbsAsciiCase(b, name) {
+    var out = ""
+    var i = 0
+    while (i < b.length) {
+        var c = b.charCodeAt(i)
+        var up = name == "upcase" || (name == "capitalize" && i == 0)
+        var down = name == "downcase" || (name == "capitalize" && i > 0)
+        if ((up || name == "swapcase") && c >= 97 && c <= 122) { c = c - 32 }
+        else if ((down || name == "swapcase") && c >= 65 && c <= 90) { c = c + 32 }
+        out = out + String.fromCharCode(c)
+        i = i + 1
+    }
+    return out
+}
+
 // A binary String's #inspect: printable ASCII as itself, the named escapes, and
 // every other byte as \xHH.
 function rbsBinInspect(b) {
