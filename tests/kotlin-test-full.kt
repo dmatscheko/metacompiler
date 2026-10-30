@@ -5558,6 +5558,38 @@ fun sec121() {
     check("cast121e", (nul as String?) == null && (any121(1) as Int) + 1 == 43 && any121(2) is Pet121)
 }
 
+// ===== SECTION 122: NaN and signed zero =====
+// The operators on Doubles are IEEE 754: every ordered relation with a NaN is false,
+// NaN != NaN and -0.0 == 0.0. compareTo, equals(), collections and a data class's
+// equals use java.lang.Double.compare / Double.equals instead: -0.0 < 0.0, NaN above
+// +Infinity and equal to itself. maxOf / minOf / Math.max / Iterable<Double>.max()
+// are Math.max / Math.min (a NaN wins). java 24 with kotlin-stdlib 2.2.21
+// (CollectionsKt.sorted / maxOrThrow / distinct, SetsKt.setOf) gives every value.
+data class D122(val d: Double)
+fun sec122() {
+    val v = doubleArrayOf(Double.NaN, 0.0, -0.0, 1.0)
+    val nan = v[0]
+    val z = v[1]
+    val nz = v[2]
+    val one = v[3]
+    check("nan122a", !(nan < one) && !(nan <= one) && !(nan > one) && !(nan >= one) && !(one < nan) && !(one >= nan))
+    check("nan122b", !(nan == nan) && nan != nan && nz == z && !(nz < z) && nz >= z)
+    var w = 0
+    while (nan > w.toDouble() && w < 3) w++
+    check("nan122c", w == 0)
+    check("nan122d", nz.compareTo(z) == -1 && nan.compareTo(z) == 1 && z.compareTo(nan) == -1 && nan.compareTo(nan) == 0)
+    check("nan122e", nan.equals(nan) && !nz.equals(z) && !(nz as Any).equals(z))
+    check("nan122f", listOf(nz) != listOf(z) && listOf(nan) == listOf(nan) && setOf(nz, z).size == 2 && setOf(nan, nan).size == 1)
+    check("nan122g", listOf(z, nz, nan, nan).distinct().toString() == "[0.0, -0.0, NaN]" && listOf(1.0, nan).indexOf(nan) == 1 && !listOf(nz).contains(z))
+    check("nan122h", D122(nz) != D122(z) && D122(nan) == D122(nan))
+    val xs = listOf(3.0, nz, z, nan, -1.0, Double.NEGATIVE_INFINITY)
+    check("nan122i", xs.sorted().toString() == "[-Infinity, -1.0, -0.0, 0.0, 3.0, NaN]" &&
+                     xs.sortedDescending().toString() == "[NaN, 3.0, 0.0, -0.0, -1.0, -Infinity]")
+    check("nan122j", xs.max().isNaN() && xs.min().isNaN() && xs.maxBy { it }.isNaN() && xs.minBy { it } == Double.NEGATIVE_INFINITY)
+    check("nan122k", "" + listOf(z, nz).max() + listOf(z, nz).min() + listOf(nz, z).max() + listOf(nz, z).min() == "0.0-0.00.0-0.0")
+    check("nan122l", "" + maxOf(nz, z) + minOf(z, nz) + maxOf(nan, z) + minOf(z, nan) + Math.max(nz, z) + Math.min(z, nz) == "0.0-0.0NaNNaN0.0-0.0")
+}
+
 
 fun main() {
     s01() // SECTION-CALL 01
@@ -5677,6 +5709,7 @@ fun main() {
     sec115() // SECTION-CALL 115
     s120() // SECTION-CALL 120
     sec121() // SECTION-CALL 121
+    sec122() // SECTION-CALL 122
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }

@@ -742,17 +742,14 @@ func (rt *jsrt) ktNumMethod(target interface{}, name string, args []interface{})
 			}
 			return float64(0), true
 		}
-		a, b := giFloat(rt, target), giFloat(rt, o)
-		if a < b {
-			return float64(-1), true
-		}
-		if a > b {
-			return float64(1), true
-		}
-		return float64(0), true
+		return float64(ktDblCmp(giFloat(rt, target), giFloat(rt, o))), true
 	case "equals":
-		// equals() of an integer is its type's: 1L.equals(1) is false.
+		// equals() of an integer is its type's: 1L.equals(1) is false; of a
+		// Double, Double.equals (NaN equals NaN, -0.0 is not 0.0).
 		o := argAt(args, 0)
+		if v, decided := ktFloClsEq(target, o, false); decided {
+			return v, true
+		}
 		return !ktKindDiffers(target, o) && rt.giEq(target, o), true
 	case "coerceAtLeast":
 		o := argAt(args, 0)
@@ -1007,6 +1004,9 @@ func init() {
 			// i.e. exactly JLS 5.6.2.)
 			l, r = jvmFloCmpPair(rt, l, r)
 			c := rt.jsCompare(l, r)
+			if c == 2 {
+				return boolH(false) // a NaN operand: every ordered relation is false (IEEE 754)
+			}
 			switch op {
 			case "<":
 				return boolH(c < 0)
@@ -1073,13 +1073,13 @@ func init() {
 		// through its own equals. Twins: kEqAt in kotlin-interpreter.abnf, js_kteq in
 		// languages/lib/kotlin-rt.metajs.
 		baseEq := m["js_seq"]
-		ktEquals := func(a []uint64) bool {
+		ktEquals := func(a []uint64, ieee bool) bool {
 			l, r := u(a[0]), u(a[1])
 			strict := rt.truthy(u(a[2]))
 			// A float box: a Float is not equal to a Double even at the same value
 			// (java.lang.Float#equals demands a Float), nor to an integer. See
 			// ktFloClsEq.
-			if v, decided := ktFloClsEq(l, r); decided {
+			if v, decided := ktFloClsEq(l, r, ieee); decided {
 				return v
 			}
 			if strict && ktKindDiffers(l, r) {
@@ -1111,8 +1111,15 @@ func init() {
 			}
 			return u(baseEq(a[:2])) == true
 		}
-		m["js_kteq"] = func(a []uint64) uint64 { return boolH(ktEquals(a)) }
-		m["js_ktne"] = func(a []uint64) uint64 { return boolH(!ktEquals(a)) }
+		m["js_kteq"] = func(a []uint64) uint64 { return boolH(ktEquals(a, true)) }
+		m["js_ktne"] = func(a []uint64) uint64 { return boolH(!ktEquals(a, true)) }
+		// js_ktequals(l, r) is Any.equals: strict, and Double.equals on two float
+		// boxes where the operator is IEEE (ktFloClsEq). The `equals` member call and
+		// a data class's generated equals use it. Twin of kEq in
+		// kotlin-interpreter.abnf and js_ktequals in languages/lib/kotlin-rt.metajs.
+		m["js_ktequals"] = func(a []uint64) uint64 {
+			return boolH(ktEquals([]uint64{a[0], a[1], boolH(true)}, false))
+		}
 		// js_ktadoptfn(f, ty): a function value whose declared type fixes its
 		// result's width - `val f: () -> Long = { 1 }` - answers through a wrapper
 		// that retypes each result. Twin of kAdoptFn in kotlin-interpreter.abnf.
@@ -1900,7 +1907,7 @@ func init() {
 			// equals(other) is the third Any member, and it is the SAME comparison
 			// `==` makes - js_kteq: `listOf(1, 2).equals(listOf(1, 2))` is true.
 			if len(arr.elems) == 1 && mname == "equals" && !ktChainDeclares(recv, mname) {
-				return m["js_kteq"]([]uint64{w(recv), w(argAt(arr.elems, 0)), w(true)})
+				return m["js_ktequals"]([]uint64{w(recv), w(argAt(arr.elems, 0))})
 			}
 			if next := m["js_rxktmcall"]; next != nil {
 				return next(a)
@@ -4500,7 +4507,11 @@ func (rt *jsrt) ktMapFind(keys *jsArray, k interface{}) int {
 // `1.0 == 1` or `1.0 == 1L` is a compile error, so the pairing only arises through
 // Any, where Double.equals(Integer) is false - `setOf<Any>(1.0, 1)` has two
 // elements. decided=false when neither side is a box.
-func ktFloClsEq(l, r interface{}) (bool, bool) {
+//
+// Two boxes of one width are Double.equals (ktDblCmp: NaN equals NaN, -0.0 is not
+// 0.0), unless ieee: the `==` OPERATOR on operands typed Double / Float is IEEE 754,
+// and the value model takes two boxes for exactly that.
+func ktFloClsEq(l, r interface{}, ieee bool) (bool, bool) {
 	lf, lok := l.(jsJFlo)
 	rf, rok := r.(jsJFlo)
 	if lok != rok {
@@ -4512,7 +4523,10 @@ func ktFloClsEq(l, r interface{}) (bool, bool) {
 	if jvmIs32(lf.sty) != jvmIs32(rf.sty) {
 		return false, true
 	}
-	return lf.f == rf.f, true
+	if ieee {
+		return lf.f == rf.f, true
+	}
+	return ktDblCmp(lf.f, rf.f) == 0, true
 }
 
 // ktEqVals is `==` for the collection operations: two integers are equal when
@@ -4522,7 +4536,7 @@ func ktFloClsEq(l, r interface{}) (bool, bool) {
 func (rt *jsrt) ktEqVals(a, b interface{}) bool {
 	// A float box: width-aware, so a Float is not a Double key, and neither is an
 	// integer one. See ktFloClsEq.
-	if v, decided := ktFloClsEq(a, b); decided {
+	if v, decided := ktFloClsEq(a, b, false); decided {
 		return v
 	}
 	if ktKindDiffers(a, b) {
@@ -5642,8 +5656,7 @@ func (rt *jsrt) ktSeqMethodK(o *jsArray, name string, args []interface{}, kind s
 		if len(es) == 0 {
 			return jsNull, true
 		}
-		s := ktSortBy(rt, es, nil, name == "maxOrNull")
-		return s.elems[0], true
+		return ktPickAll(rt, es, name == "maxOrNull"), true
 	case "maxByOrNull", "minByOrNull":
 		if len(es) == 0 {
 			return jsNull, true
@@ -5994,10 +6007,7 @@ func (rt *jsrt) ktSeqMethodK(o *jsArray, name string, args []interface{}, kind s
 		wantMax := name == "maxOf" || name == "maxOfOrNull"
 		best := rt.ktCall(f, es[0])
 		for _, e := range es[1:] {
-			cand := rt.ktCall(f, e)
-			if ktKeyLess(rt, best, cand) == wantMax {
-				best = cand
-			}
+			best = ktPick(rt, best, rt.ktCall(f, e), wantMax)
 		}
 		return best, true
 	// max()/min() were removed in Kotlin 1.7 and reintroduced as the throwing
@@ -6006,7 +6016,7 @@ func (rt *jsrt) ktSeqMethodK(o *jsArray, name string, args []interface{}, kind s
 		if len(es) == 0 {
 			rt.ktNoElem(nil)
 		}
-		return ktSortBy(rt, es, nil, name == "max").elems[0], true
+		return ktPickAll(rt, es, name == "max"), true
 	case "maxBy", "minBy":
 		if len(es) == 0 {
 			rt.ktNoElem(nil)
@@ -6761,7 +6771,78 @@ func ktKeyLess(rt *jsrt, a, b interface{}) bool {
 	if ao, isObj := a.(*jsObject); isObj && ktMemberCall != nil && ktClassChainHas(ao, "compareTo") {
 		return rt.toNumber(ktMemberCall(a, "compareTo", []interface{}{b})) < 0
 	}
-	return giFloat(rt, a) < giFloat(rt, b)
+	return ktDblCmp(giFloat(rt, a), giFloat(rt, b)) < 0
+}
+
+// ktDblCmp is java.lang.Double.compare, Double.compareTo's total order: -0.0
+// below 0.0, and NaN above every other value and equal to itself. It is also
+// Double.equals (equal exactly when it answers 0). Twins: kDblCmp in
+// kotlin-interpreter.abnf, ktDblCmp in languages/lib/kotlin-rt.metajs.
+func ktDblCmp(a, b float64) int {
+	switch {
+	case a < b:
+		return -1
+	case a > b:
+		return 1
+	case a == b:
+		za, zb := math.Signbit(a), math.Signbit(b)
+		if a != 0 || za == zb {
+			return 0
+		}
+		if za {
+			return -1
+		}
+		return 1
+	case a != a:
+		if b != b {
+			return 0
+		}
+		return 1
+	}
+	return -1
+}
+
+// ktPick is the greater (wantMax) or the lesser of best and cand, best on a tie.
+// Two Doubles (or two Floats) are java's Math.max / Math.min - a NaN wins and
+// -0.0 is below 0.0 - which is kotlin's maxOf(Double, Double) and what
+// Iterable<Double>.max() folds with; anything else compares through compareTo.
+// Twins: kPick in kotlin-interpreter.abnf, ktPick in languages/lib/kotlin-rt.metajs.
+func ktPick(rt *jsrt, best, cand interface{}, wantMax bool) interface{} {
+	bf, bok := best.(jsJFlo)
+	cf, cok := cand.(jsJFlo)
+	if bok && cok {
+		a, b := bf.f, cf.f
+		switch {
+		case a != a:
+			return best
+		case b != b:
+			return cand
+		case a == b:
+			z := a
+			if !wantMax {
+				z = b
+			}
+			if a == 0 && math.Signbit(z) {
+				return cand
+			}
+			return best
+		case (a < b) == wantMax:
+			return cand
+		}
+		return best
+	}
+	if (wantMax && ktKeyLess(rt, best, cand)) || (!wantMax && ktKeyLess(rt, cand, best)) {
+		return cand
+	}
+	return best
+}
+
+func ktPickAll(rt *jsrt, es []interface{}, wantMax bool) interface{} {
+	best := es[0]
+	for _, e := range es[1:] {
+		best = ktPick(rt, best, e, wantMax)
+	}
+	return best
 }
 
 func ktKeyEqual(rt *jsrt, a, b interface{}) bool {
@@ -8292,13 +8373,7 @@ func ktGlobalFn(rt *jsrt, name string) interface{} {
 	case "max", "min", "maxOf", "minOf":
 		wantMax := name == "maxOf" || name == "max"
 		return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
-			best := argAt(args, 0)
-			for _, v := range args[1:] {
-				if ktKeyLess(rt, best, v) == wantMax {
-					best = v
-				}
-			}
-			return best
+			return ktPickAll(rt, args, wantMax)
 		})
 	// The contract functions. Kotlin throws IllegalArgumentException from require and
 	// IllegalStateException from check.

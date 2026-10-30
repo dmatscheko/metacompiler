@@ -1139,14 +1139,75 @@ function ktIsF32(v) { return floStyle(v) === 3 }
 // A box against anything that is not a box is unequal: a typed `1.0 == 1` is a
 // compile error, so the pair only arises through Any, where Double.equals(Integer)
 // is false. KT_MISS when neither side is a box.
-function ktFloEq(a, b) {
+//
+// Two boxes of one width are Double.equals (ktDblCmp: NaN equals NaN, -0.0 is not
+// 0.0), unless ieee: the `==` OPERATOR on operands typed Double / Float is IEEE 754.
+function ktFloEq(a, b, ieee) {
     if (!floIs(a)) {
         if (floIs(b)) { return false }
         return KT_MISS
     }
     if (!floIs(b)) { return false }
     if (ktIsF32(a) !== ktIsF32(b)) { return false }
-    return floNum(a) === floNum(b)
+    if (ieee) { return floNum(a) === floNum(b) }
+    return ktDblCmp(floNum(a), floNum(b)) === 0
+}
+
+// jsrtkotlin.go ktDblCmp: java.lang.Double.compare, Double.compareTo's total
+// order - -0.0 below 0.0, NaN above every other value and equal to itself.
+function ktDblCmp(a, b) {
+    if (a < b) { return 0 - 1 }
+    if (a > b) { return 1 }
+    if (a === b) {
+        if (a !== 0) { return 0 }
+        var za = 1 / a
+        var zb = 1 / b
+        if (za < zb) { return 0 - 1 }
+        if (za > zb) { return 1 }
+        return 0
+    }
+    if (a !== a) {
+        if (b !== b) { return 0 }
+        return 1
+    }
+    return 0 - 1
+}
+
+// jsrtkotlin.go ktPick: the greater (wantMax) or the lesser of best and cand, best
+// on a tie - java's Math.max / Math.min for two float boxes of one width, compareTo
+// for everything else.
+function ktPick(best, cand, wantMax) {
+    if (floIs(best) && floIs(cand)) {
+        var a = floNum(best)
+        var b = floNum(cand)
+        if (a !== a) { return best }
+        if (b !== b) { return cand }
+        if (a === b) {
+            if (a !== 0) { return best }
+            var z = a
+            if (!wantMax) { z = b }
+            if (1 / z < 0) { return cand }
+            return best
+        }
+        if ((a < b) === wantMax) { return cand }
+        return best
+    }
+    if (wantMax) {
+        if (ktKeyLess(best, cand)) { return cand }
+        return best
+    }
+    if (ktKeyLess(cand, best)) { return cand }
+    return best
+}
+function ktPickAll(es, wantMax) {
+    var best = anytype
+    best = es[0]
+    var i = 1
+    while (i < es.length) {
+        best = ktPick(best, es[i], wantMax)
+        i = i + 1
+    }
+    return best
 }
 
 // jsrtkotlin.go ktIntKind: the integer type of v as width and signedness, "" for a
@@ -1192,7 +1253,7 @@ function ktEqVals(a, b) {
     // A tag 14 box: ktFloEq, which is width-aware - a Float is not a Double key, and
     // neither is an integer one. KT_MISS when neither side is a box.
     var fe = anytype
-    fe = ktFloEq(a, b)
+    fe = ktFloEq(a, b, false)
     if (!ktMiss(fe)) { return fe }
     // Two integers of different types are two keys: setOf<Any>(1, 1L) has two.
     if (ktKindDiffers(a, b)) { return false }
@@ -1319,7 +1380,7 @@ function ktKeyLess(a, b) {
             return ktNum(ktCall2(mth, a, b)) < 0
         }
     }
-    return ktNum(a) < ktNum(b)
+    return ktDblCmp(ktNum(a), ktNum(b)) < 0
 }
 
 // ktCmpKeys (jsrtkotlin.go 5557): one comparator step over two selector keys,
@@ -1865,14 +1926,14 @@ function ktNumMethod(recv, name, args) {
             if (k1Cmp(">", recv, o)) { return 1 }
             return 0
         }
-        var af = ktNum(recv)
-        var bf = ktNum(o)
-        if (af < bf) { return 0 - 1 }
-        if (af > bf) { return 1 }
-        return 0
+        return ktDblCmp(ktNum(recv), ktNum(o))
     }
-    // equals() of an integer is its type's: 1L.equals(1) is false.
+    // equals() of an integer is its type's: 1L.equals(1) is false; of a Double,
+    // Double.equals.
     if (name == "equals") {
+        var fq = anytype
+        fq = ktFloEq(recv, ktArg(args, 0), false)
+        if (!ktMiss(fq)) { return fq }
         if (ktKindDiffers(recv, ktArg(args, 0))) { return false }
         return k1GiEq(recv, ktArg(args, 0))
     }
@@ -2017,7 +2078,7 @@ function js_ktcmp(op, l, r) {
     // `16777217 < 16777216f` is false - Int.compareTo(Float) compiles to a JVM
     // float comparison. The integral fast path above stays FIRST on purpose: a
     // float test ahead of it is measurably slower on hot loop conditions.
-    if (k1FloPromotes(l, r)) { return k1F32Rel(op, rtF32Round(ktNum(l)), rtF32Round(ktNum(r))) }
+    if (k1FloPromotes(l, r)) { return k1NumRel(op, rtF32Round(ktNum(l)), rtF32Round(ktNum(r))) }
     if (ktIsObj(l)) {
         if (ktClassChainHas(l, "compareTo")) {
             var m = k1FindMember(l, "compareTo")
@@ -2030,6 +2091,11 @@ function js_ktcmp(op, l, r) {
             }
         }
     }
+    // Two numbers compare as IEEE 754 doubles, so a NaN makes every relation false;
+    // ktCmpVals is compareTo's total order, where NaN is the greatest value.
+    if (typeof l == "number") {
+        if (typeof r == "number") { return k1NumRel(op, ktNum(l), ktNum(r)) }
+    }
     var d = ktCmpVals(l, r)
     if (op == "<") { return d < 0 }
     if (op == ">") { return d > 0 }
@@ -2037,10 +2103,10 @@ function js_ktcmp(op, l, r) {
     return d >= 0
 }
 
-// The four ordered relations on two values already narrowed to binary32. Written
-// out rather than routed back through js_ktcmp, which would re-enter the
-// promotion arm forever.
-function k1F32Rel(op, a, b) {
+// The four ordered relations on two plain doubles (IEEE 754), for both the Float
+// promotion arm and the Double arm of js_ktcmp. Written out rather than routed
+// back through js_ktcmp, which would re-enter the promotion arm forever.
+function k1NumRel(op, a, b) {
     if (op == "<") { return a < b }
     if (op == ">") { return a > b }
     if (op == "<=") { return a <= b }
@@ -2127,7 +2193,7 @@ function js_kteq(l, r, strict) {
     // (java.lang.Float#equals demands a Float), nor to an integer. See ktFloEq in
     // section 0.
     var fe = anytype
-    fe = ktFloEq(l, r)
+    fe = ktFloEq(l, r, true)
     if (!ktMiss(fe)) { return fe }
     if (strict) {
         if (ktKindDiffers(l, r)) { return false }
@@ -2153,7 +2219,7 @@ function js_kteq(l, r, strict) {
 // jsrtkotlin.go js_ktne.
 function js_ktne(l, r, strict) {
     var fe = anytype
-    fe = ktFloEq(l, r)
+    fe = ktFloEq(l, r, true)
     if (!ktMiss(fe)) { return !fe }
     if (strict) {
         if (ktKindDiffers(l, r)) { return true }
@@ -4306,7 +4372,7 @@ function k3KeyLess(a, b) {
             return ktNum(ktSmcall(a, "compareTo", [b])) < 0
         }
     }
-    return ktNum(a) < ktNum(b)
+    return ktDblCmp(ktNum(a), ktNum(b)) < 0
 }
 
 // k3KeyEqual is ktKeyEqual (jsrtkotlin.go:4591).
@@ -4840,11 +4906,11 @@ function ktSeqMethodK(arr, name, args, kind) {
     if (name == "sortedByDescending") { return ktSortBy(es, f, true) }
     if (name == "maxOrNull") {
         if (es.length == 0) { return null }
-        return ktSortBy(es, null, true)[0]
+        return ktPickAll(es, true)
     }
     if (name == "minOrNull") {
         if (es.length == 0) { return null }
-        return ktSortBy(es, null, false)[0]
+        return ktPickAll(es, false)
     }
     if (name == "maxByOrNull") {
         if (es.length == 0) { return null }
@@ -5074,21 +5140,18 @@ function ktSeqMethodK(arr, name, args, kind) {
         if (name == "maxOf") { b = true }
         if (name == "maxOfOrNull") { b = true }
         best = ktCall1(f, es[0])
-        for (i = 1; i < es.length; i = i + 1) {
-            v = ktCall1(f, es[i])
-            if ((k3KeyLess(best, v) === true) === b) { best = v }
-        }
+        for (i = 1; i < es.length; i = i + 1) { best = ktPick(best, ktCall1(f, es[i]), b) }
         return best
     }
     // max()/min() were removed in Kotlin 1.7 and reintroduced as the throwing
     // counterparts of maxOrNull/minOrNull; both spellings answer the same thing.
     if (name == "max") {
         if (es.length == 0) { ktNoElemNull() }
-        return ktSortBy(es, null, true)[0]
+        return ktPickAll(es, true)
     }
     if (name == "min") {
         if (es.length == 0) { ktNoElemNull() }
-        return ktSortBy(es, null, false)[0]
+        return ktPickAll(es, false)
     }
     if (name == "maxBy") {
         if (es.length == 0) { ktNoElemNull() }
@@ -6430,6 +6493,14 @@ function ktDescIs(c, t, depth) {
         guard = guard + 1
     }
     return false
+}
+// jsrtkotlin.go js_ktequals: Any.equals - strict, and Double.equals on two float
+// boxes where the `==` operator is IEEE.
+function js_ktequals(l, r) {
+    var fe = anytype
+    fe = ktFloEq(l, r, false)
+    if (!ktMiss(fe)) { return fe }
+    return js_kteq(l, r, true)
 }
 // `x is T`, as the extern.
 function js_ktis(v, tname) { return ktIsType(v, tname) }
@@ -8782,7 +8853,7 @@ function k4MinMax(wantMax) {
         best = k4At(arguments, 0)
         var i = 1
         while (i < arguments.length) {
-            if (k4KeyLess(best, arguments[i]) === want) { best = arguments[i] }
+            best = ktPick(best, arguments[i], want)
             i = i + 1
         }
         return best
@@ -9186,7 +9257,7 @@ function ktSmcall(recv, name, args) {
     // makes - js_kteq: `listOf(1, 2).equals(listOf(1, 2))` is true.
     if (as.length == 1) {
         if (name == "equals") {
-            if (!k4ChainDeclares(rv, name)) { return js_kteq(rv, as[0], true) }
+            if (!k4ChainDeclares(rv, name)) { return js_ktequals(rv, as[0]) }
         }
     }
 

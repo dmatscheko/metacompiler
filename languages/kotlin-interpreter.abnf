@@ -3258,10 +3258,19 @@ NotMemberKw = :script(~~
     kNumOp2("<=", "compareTo", function(l, r) { return l <= r }, true)
     kNumOp2(">=", "compareTo", function(l, r) { return l >= r }, true)
     // "==." is the equality ktEqOps leaves without an integer literal operand.
-    binOps["=="] = function(l, r) { return kEq(l, r, true) }
-    binOps["!="] = function(l, r) { return !kEq(l, r, true) }
-    binOps["==."] = function(l, r) { return kEq(l, r, false) }
-    binOps["!=."] = function(l, r) { return !kEq(l, r, false) }
+    binOps["=="] = function(l, r) { return kEqOp(l, r, true) }
+    binOps["!="] = function(l, r) { return !kEqOp(l, r, true) }
+    binOps["==."] = function(l, r) { return kEqOp(l, r, false) }
+    binOps["!=."] = function(l, r) { return !kEqOp(l, r, false) }
+    // The `==` operator: on two Doubles (or two Floats) IEEE 754, so NaN == NaN is
+    // false and -0.0 == 0.0 true - Kotlin's rule for operands statically typed as
+    // floating point, which this value model assumes for two float boxes - and
+    // Any.equals (kEq) otherwise. Twin of js_kteq in abnf/jsrtkotlin.go and
+    // languages/lib/kotlin-rt.metajs.
+    function kEqOp(l, r, byValue) {
+        if (kIsFlo(l) && kIsFlo(r) && kIsF32(l) === kIsF32(r)) { return l.__flo === r.__flo }
+        return kEq(l, r, byValue)
+    }
     // The compound assignments are the same operators (a *= b is a = a * b), so they
     // resolve through binOps rather than through the shared applyOps table, whose
     // arithmetic is 32 bit integer only and would truncate `d *= 2` on a Double.
@@ -3839,8 +3848,8 @@ NotMemberKw = :script(~~
         }
         return kNum(v) < 0 ? (0 - kNum(v)) | 0 : kNum(v) | 0
     }
-    hostGlobals["max"] = function(a, b) { return kKeyLess(a, b) ? b : a }
-    hostGlobals["min"] = function(a, b) { return kKeyLess(b, a) ? b : a }
+    hostGlobals["max"] = function(a, b) { return kPick(a, b, true) }
+    hostGlobals["min"] = function(a, b) { return kPick(a, b, false) }
     // The rest of kotlin.math: the functions over lib/kotlin-math.js, a Float argument
     // answering a Float, and the constants PI and E. Twin of ktMathFn in
     // abnf/jsrtktmath.go and k4MathFn in languages/lib/kotlin-rt.metajs.
@@ -4398,13 +4407,13 @@ NotMemberKw = :script(~~
     hostGlobals["maxOf"] = function() {
         var best = anytype
         best = arguments[0]
-        for (var i = 1; i < arguments.length; i++) { if (kKeyLess(best, arguments[i])) { best = arguments[i] } }
+        for (var i = 1; i < arguments.length; i++) { best = kPick(best, arguments[i], true) }
         return best
     }
     hostGlobals["minOf"] = function() {
         var best = anytype
         best = arguments[0]
-        for (var i = 1; i < arguments.length; i++) { if (kKeyLess(arguments[i], best)) { best = arguments[i] } }
+        for (var i = 1; i < arguments.length; i++) { best = kPick(best, arguments[i], false) }
         return best
     }
     // The contract functions. Kotlin throws IllegalArgumentException from require and
@@ -6398,7 +6407,48 @@ NotMemberKw = :script(~~
         // element would compare as NaN < NaN.
         var cf = lookupMethod(a, "compareTo")
         if (cf != null) { return kNum(cf.apply(undefined, [a, b])) < 0 }
-        return kNumD(a) < kNumD(b)
+        return kDblCmp(kNumD(a), kNumD(b)) < 0
+    }
+    // java.lang.Double.compare, Double.compareTo's total order: -0.0 below 0.0, and
+    // NaN above every other value and equal to itself. It is also Double.equals
+    // (equal exactly when it answers 0), which a collection and a data class use.
+    // Twins: ktDblCmp in abnf/jsrtkotlin.go and languages/lib/kotlin-rt.metajs.
+    function kDblCmp(a, b) {
+        if (a < b) { return 0 - 1 }
+        if (a > b) { return 1 }
+        if (a === b) {
+            if (a !== 0) { return 0 }
+            var za = 1 / a
+            var zb = 1 / b
+            return za < zb ? 0 - 1 : (za > zb ? 1 : 0)
+        }
+        if (a !== a) { return (b !== b) ? 0 : 1 }
+        return 0 - 1
+    }
+    // The greater (wantMax) or the lesser of best and cand, best on a tie. Two Doubles
+    // (or two Floats) are java's Math.max / Math.min - a NaN wins and -0.0 is below
+    // 0.0 - which is kotlin's maxOf(Double, Double) and what Iterable<Double>.max()
+    // folds with; anything else compares through compareTo. Twins: ktPick in
+    // abnf/jsrtkotlin.go and languages/lib/kotlin-rt.metajs.
+    function kPick(best, cand, wantMax) {
+        if (kIsFlo(best) && kIsFlo(cand)) {
+            var a = best.__flo
+            var b = cand.__flo
+            if (a !== a) { return best }
+            if (b !== b) { return cand }
+            if (a === b) {
+                if (a !== 0) { return best }
+                return (1 / (wantMax ? a : b) < 0) ? cand : best
+            }
+            return ((a < b) == wantMax) ? cand : best
+        }
+        return (wantMax ? kKeyLess(best, cand) : kKeyLess(cand, best)) ? cand : best
+    }
+    function kPickAll(es, wantMax) {
+        var best = anytype
+        best = es[0]
+        for (var i = 1; i < es.length; i++) { best = kPick(best, es[i], wantMax) }
+        return best
     }
     function kKeyEq(a, b) { return !kKeyLess(a, b) && !kKeyLess(b, a) }
     // A stable insertion sort by an optional selector. Small on purpose: the two
@@ -6749,7 +6799,7 @@ NotMemberKw = :script(~~
         if (name == "sortedByDescending") { return {v: kSortBy(es, f, true)} }
         if (name == "maxOrNull" || name == "minOrNull") {
             if (es.length == 0) { return {v: null} }
-            return {v: kSortBy(es, null, name == "maxOrNull")[0]}
+            return {v: kPickAll(es, name == "maxOrNull")}
         }
         if (name == "maxByOrNull" || name == "minByOrNull") {
             if (es.length == 0) { return {v: null} }
@@ -6977,18 +7027,14 @@ NotMemberKw = :script(~~
             var wantMax = (name == "maxOf" || name == "maxOfOrNull")
             var best = anytype
             best = f(es[0])
-            for (i = 1; i < es.length; i++) {
-                var cand = anytype
-                cand = f(es[i])
-                if (kKeyLess(best, cand) == wantMax) { best = cand }
-            }
+            for (i = 1; i < es.length; i++) { best = kPick(best, f(es[i]), wantMax) }
             return {v: best}
         }
         // max()/min() were REMOVED in Kotlin 1.7 and reintroduced as throwing
         // maxOrNull-style operators; both spellings answer the same thing here.
         if (name == "max" || name == "min") {
             if (es.length == 0) { kNoElem(null) }
-            return {v: kSortBy(es, null, name == "max")[0]}
+            return {v: kPickAll(es, name == "max")}
         }
         if (name == "maxBy" || name == "minBy") {
             if (es.length == 0) { kNoElem(null) }
@@ -7638,8 +7684,8 @@ NotMemberKw = :script(~~
         if (kIsFlo(target)) {
             var tf = target.__flo
             if (name == "toString") return kIsF32(target) ? coreJvmF32Str(tf) : kFloStr(tf)
-            if (name == "compareTo") return tf < kNumD(args[0]) ? -1 : (tf > kNumD(args[0]) ? 1 : 0)
-            if (name == "equals") return tf === kNumD(args[0])
+            if (name == "compareTo") return kDblCmp(tf, kNumD(args[0]))
+            if (name == "equals") return kEq(target, args[0], false)
             if (name == "coerceAtLeast") return tf < kNumD(args[0]) ? args[0] : target
             if (name == "coerceAtMost") return tf > kNumD(args[0]) ? args[0] : target
             if (name == "hashCode") return kHash(target)
@@ -7673,7 +7719,7 @@ NotMemberKw = :script(~~
         if (typeof target == "number") {
             if (name == "inv") return ~target | 0
             if (name == "toString") return kstr(target)
-            if (name == "compareTo") return kIsIntegral(args[0]) ? (kCmpI("<", target, args[0]) ? 0 - 1 : (kCmpI(">", target, args[0]) ? 1 : 0)) : (target < kNumD(args[0]) ? 0 - 1 : (target > kNumD(args[0]) ? 1 : 0))
+            if (name == "compareTo") return kIsIntegral(args[0]) ? (kCmpI("<", target, args[0]) ? 0 - 1 : (kCmpI(">", target, args[0]) ? 1 : 0)) : kDblCmp(target, kNumD(args[0]))
             if (name == "equals") return kEq(target, args[0], false)
             if (name == "coerceAtLeast") return kIsIntegral(args[0]) && kCmpI("<", target, args[0]) ? args[0] : target
             if (name == "coerceAtMost") return kIsIntegral(args[0]) && kCmpI(">", target, args[0]) ? args[0] : target
@@ -8297,10 +8343,12 @@ NotMemberKw = :script(~~
         // compile error, so the pair only arises through Any, where
         // Double.equals(Integer) is false. Twins: ktFloEq in
         // languages/lib/kotlin-rt.metajs, ktFloClsEq in abnf/jsrtkotlin.go.
+        // The value test is Double.equals, so NaN equals NaN and -0.0 is not 0.0; the
+        // `==` OPERATOR on two Doubles is IEEE instead (kEqOp).
         if (kIsFlo(l)) {
             if (kIsFlo(r)) {
                 if (kIsF32(l) !== kIsF32(r)) { return false }
-                return l.__flo === r.__flo
+                return kDblCmp(l.__flo, r.__flo) == 0
             }
             return false
         }
@@ -8505,7 +8553,7 @@ NotMemberKw = :script(~~
                         if (cond.neg) hit = !hit
                     } else if (cond.v != undefined) {
                         var val = cond.v()
-                        hit = subj != null ? kEq(val, s, true) : val
+                        hit = subj != null ? kEqOp(val, s, true) : val
                     } else {
                         // in lo..hi (or !in): both bounds are evaluated, like in Kotlin.
                         var lo = cond.lo()

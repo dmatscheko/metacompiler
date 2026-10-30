@@ -6909,11 +6909,11 @@ KwContract  = "contract" KwEnd ;
         }, true)
     }
     // equals(other): the same class (js_is_type walks the __super chain) and every
-    // property structurally equal (js_kteq, folded with the boolean js_jband).
-    // js_kteq and not js_seq: a property holding a LIST or a MAP compares
-    // element-wise, and a property holding another data instance goes through that
+    // property equal by Any.equals (js_ktequals, folded with the boolean js_jband).
+    // js_ktequals and not js_seq: a property holding a LIST or a MAP compares
+    // element-wise, a property holding another data instance goes through that
     // class's own equals (`data class D(val a: Int, val b: List<Int>)` equals an equal
-    // copy).
+    // copy), and a Double property compares as Double.compare does (D(NaN) == D(NaN)).
     function emitEqualsFunc(name, props) {
         return emitFunc(["other"], function(bb) {
             var thisV = callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, "this")])
@@ -6923,8 +6923,8 @@ KwContract  = "contract" KwEnd ;
             bb.NewCondBr(truthy(bb, callExt(bb, "js_is_type", [otherV, emitStr(bb, name)])), cmpB, noB)
             var acc = anytype
             for (var k = 0; k < props.length; k++) {
-                var eq = callExt(cmpB, "js_kteq", [callExt(cmpB, "js_get", [thisV, emitStr(cmpB, props[k])]),
-                                                  callExt(cmpB, "js_get", [otherV, emitStr(cmpB, props[k])]), hTrue])
+                var eq = callExt(cmpB, "js_ktequals", [callExt(cmpB, "js_get", [thisV, emitStr(cmpB, props[k])]),
+                                                      callExt(cmpB, "js_get", [otherV, emitStr(cmpB, props[k])])])
                 acc = (k == 0) ? eq : callExt(cmpB, "js_jband", [acc, eq])
             }
             cmpB.NewRet(acc)
