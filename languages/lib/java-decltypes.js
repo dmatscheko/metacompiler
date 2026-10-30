@@ -54,9 +54,42 @@ function jNoteFieldTy(name, ty) {
     jFieldTys["$" + name] = (have == undefined || have == ty) ? ty : "?"
     jFieldTysC["$" + curClassName + "." + name] = ty
 }
-function jOwnFieldTy(name) {
-    var t = jFieldTysC["$" + curClassName + "." + name]
-    return t == undefined ? jFieldTyOf(name) : t
+function jOwnFieldTy(name) { return jScopeFieldTy(jFieldScope(), name) }
+// The classes a bare field name written at this point of the walk resolves
+// in, innermost first: the current class, then each lexically enclosing one
+// (JLS 6.5.6.1). Read at walk time; the lookup itself may run later.
+function jFieldScope() {
+    var names = []
+    if (curClassName != "") { names.push(curClassName) }
+    for (var i = jClassStack.length - 1; i >= 0; i--) {
+        if (jClassStack[i] != "" && jClassStack[i] != undefined) { names.push(jClassStack[i]) }
+    }
+    return names
+}
+// A field's declared type as the first class of `scope` - or one of its
+// superclasses - declares it, else by name across the program. Twin of
+// lookupFieldKind's walk in java-to-llvm-ir.abnf.
+function jScopeFieldTy(scope, name) {
+    for (var i = 0; i < scope.length; i++) {
+        var c = scope[i]
+        var guard = 0
+        while (c != "" && guard < 64) {
+            guard++
+            var t = jFieldTysC["$" + c + "." + name]
+            if (t != undefined) { return t }
+            var rec = jOvCls["$" + c]
+            if (rec == undefined) { break }
+            c = rec.sup
+        }
+    }
+    return jFieldTyOf(name)
+}
+// The type of field `name` read off a value of static type ty: the field
+// as ty's class declares it when ty names a class of this program.
+function jMemberFieldTy(ty, name) {
+    var cls = jStripTargs(ty)
+    if (jOvCls["$" + cls] != undefined) { return jScopeFieldTy([cls], name) }
+    return jFieldTyOf(name)
 }
 function jFieldTyOf(name) {
     var t = jFieldTys["$" + name]
@@ -182,7 +215,7 @@ function jExprTy(t) {
                         i = jSkipGroup(t, i)
                     } else {
                         var lt = jTyOf(nm)
-                        ot = (lt != undefined) ? lt : jFieldTyOf(nm)
+                        ot = (lt != undefined) ? lt : jOwnFieldTy(nm)
                     }
                     // `.f`, `.m(...)` and `[i]` suffixes, each typed by name.
                     var sfx = true
@@ -199,7 +232,7 @@ function jExprTy(t) {
                             } else if (nm2 == "length" && jElemTy(ot) != "") {
                                 ot = "int"
                             } else {
-                                ot = jFieldTyOf(nm2)
+                                ot = jMemberFieldTy(ot, nm2)
                             }
                         } else if (c2 == "[") {
                             ot = jElemTy(ot)
@@ -290,24 +323,37 @@ function jNumLit(t, i) {
 function jIterConvTy(fety, text) {
     if (!jIsPrimTy(fety)) { return "" }
     var r = jChainTyRef(text)
-    if (r != null && jElemTy(jPlaceTy(r, jTyOf(r.name))) == fety) { return "" }
+    if (r != null && jElemTy(jPlaceTy(r, jTyOf(r.name), jFieldScope())) == fety) { return "" }
     return fety
 }
 // The declared type of an assignment's place: the base name's local type
-// (lty, from the walk) or field type, then one field type per `.f` and one
-// array level per `[i]`.
-function jPlaceTy(ref, lty) {
-    var ty = (lty != undefined) ? lty : jFieldTyOf(ref.name)
+// (lty, from the walk), `this`'s class, a class name (`C.f` is C's static
+// field) or its field type in `scope` (jFieldScope, taken where the
+// assignment is written), then one field type per `.f` and one array level
+// per `[i]`.
+function jPlaceTy(ref, lty, scope) {
+    var ty = ""
+    if (lty != undefined) { ty = lty }
+    else if (ref.name == "this") { ty = scope.length > 0 ? scope[0] : "" }
+    else if (jFieldTys["$" + ref.name] == undefined && jOvCls["$" + ref.name] != undefined) { ty = ref.name }
+    else { ty = jScopeFieldTy(scope, ref.name) }
     for (var i = 0; i < ref.path.length; i++) {
-        if (ref.path[i].key != undefined) { ty = jFieldTyOf(ref.path[i].key) } else { ty = jElemTy(ty) }
+        if (ref.path[i].key != undefined) { ty = jMemberFieldTy(ty, ref.path[i].key) } else { ty = jElemTy(ty) }
     }
     return ty
 }
-// An arbitrary base with a `.f` place: the field's type by name.
+// An arbitrary base with a `.f` place: the field's type in the base's static
+// type ref.fbty (jChainBaseTy), else by name.
 function jFieldTyOfPlace(ref) {
     var last = ref.path[ref.path.length - 1]
-    if (last.key != undefined) { return jFieldTyOf(last.key) }
+    if (last.key != undefined) { return jMemberFieldTy(ref.fbty == undefined ? "" : ref.fbty, last.key) }
     return ""
+}
+// The static type of the base of a `base.f` target's whitespace-free text.
+function jChainBaseTy(text, f) {
+    var cut = text.length - f.length - 1
+    if (cut <= 0 || text.substring(cut) != "." + f) { return "" }
+    return jStaticTy(text.substring(0, cut))
 }
 // The place `a.b[i][j]` of an assignment whose target the grammar read as
 // a chain, as the name-and-path record jPlaceTy reads - recovered from the
@@ -1546,11 +1592,11 @@ function jChainTy(t) {
                 i = jSkipGroup(t, i)
                 ty = jMemberRetTy(ty, mn)
             } else if (isCls) {
-                ty = jOvCls["$" + ty] != undefined ? jFieldTyOf(mn) : ""
+                ty = jOvCls["$" + ty] != undefined ? jScopeFieldTy([ty], mn) : ""
             } else if (mn == "length" && jElemTy(ty) != "") {
                 ty = "int"
             } else {
-                ty = jFieldTyOf(mn)
+                ty = jMemberFieldTy(ty, mn)
             }
             isCls = false
         } else {

@@ -191,6 +191,7 @@ class Main {
         S93.run(); // SECTION-CALL 93
         S94.run(); // SECTION-CALL 94
         S95.run(); // SECTION-CALL 95
+        S96.run(); // SECTION-CALL 96
         S100.run(); // SECTION-CALL 100
         System.out.println("full: " + Main.checks + " checks, " + Main.failures + " failures");
         System.exit(Main.failures);
@@ -5302,5 +5303,53 @@ class S95 {
         String st = x[0] + " " + y[0] + " " + y[1] + " " + sum(m, 2) + " " + mix(new int[]{3}, new double[1], 4)
             + " " + two(new double[1][1]) + " " + new S95(new double[2]).dv95[1];
         Main.check("pd95", st.equals("2.5 2.5 7.0 3 7.0 4 1.0 4.0"));
+    }
+}
+
+// ===== SECTION 96: fields of one name and different types in different classes =====
+//
+// A store converts to the type its own class (or a superclass, or an enclosing
+// class) declares the field with, not to another class' field of that name
+// (JLS 5.2, 6.5.6.1); String.codePointBefore reads the code point ending
+// before an index. Every expected value is java 24.0.2's.
+class S96 {
+    double sf96;
+    static class A96 { double d96 = 2.5; double x96; long[] arr96 = new long[2]; }
+    static class B96 {
+        double[] d96 = new double[3];
+        int x96;
+        double[] arr96 = new double[2];
+        String set() { d96[1] = 4; this.d96[2] = 5; return d96[1] + " " + d96[2]; }
+    }
+    static class C96 extends B96 { long x96; String set2() { d96[0] = 7; x96 = 5; return d96[0] + " " + x96; } }
+    static class St96 { static int sf96; static double ssf96; }
+    static double ssf96;
+    static class H96 { A96 a = new A96(); B96 b = new B96(); A96 self() { return a; } }
+    class In96 { String s() { sf96 = 9; return "" + sf96; } }
+    static void run() {
+        A96 a = new A96();
+        a.x96 = 1;
+        a.arr96[1] = 2;
+        B96 b = new B96();
+        b.x96 = 3;
+        b.arr96[1] = 4;
+        H96 h = new H96();
+        h.b.arr96[0] = 11;
+        h.a.x96 = 13;
+        h.self().x96 = 14;
+        St96.ssf96 = 6;
+        ssf96 = 8;
+        double t = 0;
+        for (double v : b.arr96) { t += v; }
+        String st = b.set() + " " + new C96().set2() + " " + a.d96 + " " + a.x96 + " " + a.arr96[1] + " " + b.x96
+            + " " + b.arr96[1] + " " + h.b.arr96[0] + " " + h.a.x96 + " " + St96.ssf96 + " " + ssf96 + " " + t
+            + " " + new S96().new In96().s();
+        Main.check("fc96", st.equals("4.0 5.0 7.0 5 2.5 1.0 2 3 4.0 11.0 14.0 6.0 8.0 4.0 9.0"));
+        String s = "a😀b";
+        String r = s.codePointBefore(1) + " " + s.codePointBefore(3) + " " + s.codePointBefore(2) + " " + s.codePointBefore(4)
+            + " " + "\uDE00\uD83D".codePointBefore(2);
+        try { s.codePointBefore(0); } catch (StringIndexOutOfBoundsException e) { r = r + " " + e.getMessage(); }
+        try { s.codePointBefore(5); } catch (StringIndexOutOfBoundsException e) { r = r + " " + e.getMessage(); }
+        Main.check("cpb96", r.equals("97 128512 55357 98 55357 Index -1 out of bounds for length 4 Index 4 out of bounds for length 4"));
     }
 }

@@ -2650,6 +2650,11 @@ function js_jvstrm(s, name, args) {
         }
         return c
     }
+    if (name == "codePointBefore") {
+        var bi = jvI(a0) - 1
+        if (bi < 0 || bi >= s.length) { jvThrowSioobe(bi, s.length) }
+        return jxCodePointBefore(s, bi)
+    }
     if (name == "subSequence") { return js_mcall(s, "substring", args) }
     if (name == "intern") { return s }
     return js_mcall(s, name, args)

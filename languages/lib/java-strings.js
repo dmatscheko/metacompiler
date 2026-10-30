@@ -251,6 +251,16 @@ function jxCodePointCount(s, b, e) {
     }
     return n
 }
+// codePointBefore(i + 1), i already checked against s: the unit at i, or the
+// supplementary code point when it is a low surrogate preceded by a high one.
+function jxCodePointBefore(s, i) {
+    var c = s.charCodeAt(i)
+    if (c >= 56320 && c < 57344 && i > 0) {
+        var hi = s.charCodeAt(i - 1)
+        if (hi >= 55296 && hi < 56320) { return 65536 + (hi - 55296) * 1024 + c - 56320 }
+    }
+    return c
+}
 // ----- Integer's unsigned and bit members, on int values (plain numbers) -----
 //
 // An int's 32 bits read as unsigned, and back; every step is exact in a double.

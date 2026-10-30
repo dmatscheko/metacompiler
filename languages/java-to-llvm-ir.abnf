@@ -2273,7 +2273,10 @@ HasStatic   = :script(~~
         // Three separate returns rather than one reassigned local: under the
         // frozen engine a variable keeps the shape it was first given.
         if (last.kind == "field") {
-            var fr = {name: "", path: [{key: last.name}], frecv: "", finst: false, fctx: curClassName}
+            var ftr = jChainTyRef(text)
+            var fr = {name: "", path: [{key: last.name}], frecv: "", finst: false, fctx: curClassName,
+                      tyref: ftr, tylty: ftr == null ? undefined : jTyOf(ftr.name),
+                      fbty: ftr == null ? jChainBaseTy(text, last.name) : ""}
             jChainTargetRecv(head, last, text, fr)
             fr.base = foldCallMember(head)
             return fr
@@ -2364,8 +2367,8 @@ HasStatic   = :script(~~
     // x++ yields.
     // A plain `=` converts to the slot it lands in: lty is the local's
     // declared type (undefined when the walk saw no declaration), the field's
-    // comes from jFieldTyOf, and a slot of the value's static type vty needs
-    // no conversion.
+    // is as its declaring class fi.cls has it, and a slot of the value's
+    // static type vty needs no conversion.
     function jUnqualWrite(b, name, fi, v, mkNew, retOld, lty, vty) {
         // See makeVarRef: an anonymous class' own field needs no probe.
         if (fi.own == true) {
@@ -2397,7 +2400,7 @@ HasStatic   = :script(~~
         var ownV = jFieldOwner(writeB, fi, name)
         var keyF = emitStr(writeB, jFieldSlot(fi, name))
         var oldF = (mkNew == null) ? v : callExt(writeB, "js_get", [ownV, keyF])
-        var newF = (mkNew == null) ? jConvUnless(writeB, v, jFieldTyOf(name), vty) : mkNew(writeB, oldF)
+        var newF = (mkNew == null) ? jConvUnless(writeB, v, jScopeFieldTy([fi.cls], name), vty) : mkNew(writeB, oldF)
         callExt(writeB, "js_set", [ownV, keyF, newF])
         writeB.NewBr(mergeB)
         var rl = retOld ? oldL : newL
@@ -2459,7 +2462,7 @@ HasStatic   = :script(~~
                 callExt(b, "js_scope_set", [curScopeV, emitStr(b, ref.name), v])
             } else {
                 if (op == "=") {
-                    var pty = (tyRef == null || tyRef == undefined) ? jFieldTyOfPlace(ref) : jPlaceTy(tyRef, lty)
+                    var pty = (tyRef == null || tyRef == undefined) ? jFieldTyOfPlace(ref) : jPlaceTy(tyRef, lty, chain.names)
                     if (pty != vty) { v = declConvert(b, v, pty) }
                     // After the conversion, as in makeAssign of java-interpreter.abnf.
                     if (p.idx === true) { callExt(b, "js_jvidx", [p.obj, p.key]) }
@@ -3784,7 +3787,7 @@ HasStatic   = :script(~~
     var jStrMethodList = ["isEmpty", "isBlank", "indexOf", "lastIndexOf", "contains", "contentEquals", "startsWith", "endsWith",
                           "equalsIgnoreCase", "compareTo", "compareToIgnoreCase", "concat", "replace", "replaceAll",
                           "replaceFirst", "matches", "split", "trim", "strip", "stripLeading", "stripTrailing", "indent", "stripIndent",
-                          "toUpperCase", "toLowerCase", "repeat", "codePointAt", "subSequence", "intern",
+                          "toUpperCase", "toLowerCase", "repeat", "codePointAt", "codePointBefore", "subSequence", "intern",
                           "formatted", "regionMatches", "codePointCount",
                           "__rxfind", "__rxcount", "__rxname", "__rxexpand", "__rxflags"]
     for (var jsm = 0; jsm < jStrMethodList.length; jsm++) { jStrMethods["$" + jStrMethodList[jsm]] = true }
@@ -5698,7 +5701,7 @@ HasStatic   = :script(~~
     function jNoteIdx(sfx) { jUsesIdx = true; return sfx }
     function jNoteMSfx(sfx) {
         if (sfx.name == "charAt" || sfx.name == "substring" || sfx.name == "codePointAt"
-            || sfx.name == "subSequence") { jUsesStrIdx = true }
+            || sfx.name == "codePointBefore" || sfx.name == "subSequence") { jUsesStrIdx = true }
         if (sfx.name == "codePointCount") { jUsesRange = true }
         if (sfx.name == "repeat" || sfx.name == "toChars") { jUsesRepeat = true }
         if (sfx.name == "format" || sfx.name == "formatted" || sfx.name == "printf") { jUsesFormat = true }

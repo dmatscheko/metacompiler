@@ -1965,6 +1965,16 @@ func init() {
 					c = 0x10000 + (c-0xD800)*1024 + int(su[i+1]) - 0xDC00
 				}
 				r = float64(c)
+			case "codePointBefore":
+				i := num(0) - 1
+				if i < 0 || i >= len(su) {
+					rt.jvThrowSioobe(i, len(su))
+				}
+				c := int(su[i])
+				if c >= 0xDC00 && c < 0xE000 && i > 0 && su[i-1] >= 0xD800 && su[i-1] < 0xDC00 {
+					c = 0x10000 + (int(su[i-1])-0xD800)*1024 + c - 0xDC00
+				}
+				r = float64(c)
 			case "subSequence":
 				return m["js_jvsub"]([]uint64{a[0], a[2]})
 			case "intern":

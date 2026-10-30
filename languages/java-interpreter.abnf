@@ -4057,6 +4057,8 @@ HasStatic   = :script(~~
             }
             return c
         }
+        // Index index-1 is the one checked (String.checkIndex).
+        if (name == "codePointBefore") { return jxCodePointBefore(s, jStrIdx(s, a0 === null ? null : jNum(a0) - 1)) }
         if (name == "subSequence") { return jSubstr(s, args) }
         if (name == "intern") { return s }
         fail("unknown String method: " + name)
@@ -4272,6 +4274,7 @@ HasStatic   = :script(~~
         // also needs the field table, which is complete only once the walk is.
         var lty = ref.base == undefined ? jTyOf(ref.name) : ref.tylty
         var tyRef = ref.base == undefined ? ref : ref.tyref
+        var fscope = jFieldScope()
         var pty = anytype
         pty = null
         // The target's array and index (or object) are evaluated BEFORE the right-hand
@@ -4286,7 +4289,7 @@ HasStatic   = :script(~~
                     v = applyOp(op, ho[ref.hk], valT())
                 } else {
                     v = valT()
-                    var hty = jFieldTyOf(ref.name)
+                    var hty = jScopeFieldTy(fscope, ref.name)
                     if (hty != vty) { v = jConvTo(v, hty) }
                 }
                 ho[ref.hk] = v
@@ -4296,7 +4299,7 @@ HasStatic   = :script(~~
                     v = applyOp(op, v, valT())
                     jSetVar(ref.name, v)
                 } else {
-                    v = jSetVarTyped(ref.name, valT(), lty, vty)
+                    v = jSetVarTyped(ref.name, valT(), lty, vty, fscope)
                 }
             } else {
                 var p = resolveRef(ref, op == "=")
@@ -4306,7 +4309,7 @@ HasStatic   = :script(~~
                 } else {
                     v = valT()
                     if (pty === null) {
-                        pty = (tyRef == null || tyRef == undefined) ? jFieldTyOfPlace(ref) : jPlaceTy(tyRef, lty)
+                        pty = (tyRef == null || tyRef == undefined) ? jFieldTyOfPlace(ref) : jPlaceTy(tyRef, lty, fscope)
                         if (pty == vty) { pty = "" }
                     }
                     // The value converts (a null Integer into an int[] is an NPE)
@@ -5518,8 +5521,9 @@ HasStatic   = :script(~~
     }
     // The write of a plain name, deciding local or field the way jSetVar does
     // and converting to that slot's type unless the value's static type vty
-    // already is it. Answers the value stored.
-    function jSetVarTyped(name, value, lty, vty) {
+    // already is it; a field's type is looked up in fscope (jFieldScope).
+    // Answers the value stored.
+    function jSetVarTyped(name, value, lty, vty, fscope) {
         var sc = scopes
         for (var i = sc.length - 1; i >= 0; i--) {
             if (hasOwn(sc[i], name)) {
@@ -5531,7 +5535,7 @@ HasStatic   = :script(~~
                 break
             }
         }
-        var fty = jFieldTyOf(name)
+        var fty = jScopeFieldTy(fscope, name)
         var fv = fty == vty ? value : jConvTo(value, fty)
         var o = jSelfWith(name)
         if (o != null) { o[jSlot(o, name)] = fv } else { setVar(name, fv) }
@@ -7138,7 +7142,10 @@ HasStatic   = :script(~~
         // Three separate returns rather than one reassigned local: under the
         // frozen engine a variable keeps the shape it was first given.
         if (last.kind == "field") {
-            var fr = {name: "", path: [{key: last.name}], frecv: "", finst: false}
+            var ftr = jChainTyRef(text)
+            var fr = {name: "", path: [{key: last.name}], frecv: "", finst: false,
+                      tyref: ftr, tylty: ftr == null ? undefined : jTyOf(ftr.name),
+                      fbty: ftr == null ? jChainBaseTy(text, last.name) : ""}
             jChainTargetRecv(head, last, text, fr)
             fr.base = foldCallMember(head)
             return fr
