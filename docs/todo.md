@@ -88,7 +88,7 @@ the path then `nil`, `nil`. So the common `main(3) if __FILE__ == $0` guard runs
 
 # JS — JavaScript and TypeScript
 
-### T-847 ts/js: decorators, constructability, Date/setTimeout; a `__proto__` binding crashes · P3 · JS · OPEN [V JS worker]
+### T-847 ts/js: decorators, constructability, Date/setTimeout; a `__proto__` binding crashes · P3 · JS · IN PROGRESS (JS worker, round 33) [V JS worker]
 (1) Decorators (TS, both halves): addInitializer, field decorators, and tsc 6.0.3's order — evaluate all
 decorator expressions class-first in source order; apply static methods → instance methods → static fields
 → instance fields → class; then static-method initializers, static field init + per-field extra
@@ -161,7 +161,7 @@ formatting of the parsed literal needs no double: implement it, or fail loudly a
 
 # C — C subset
 
-### T-844 c: declaration gaps left from the scope/designator round · P3 · C · OPEN [V C worker]
+### T-844 c: declaration gaps left from the scope/designator round · P3 · C · IN PROGRESS (C worker, round 8) [V C worker]
 All loud except (4). (1) brace elision: `struct T u = {1,2,3,4,5}` with an array member — interp
 "an aggregate needs a brace initializer", compiler LLVM "store operands are not compatible"; cc
 1 2 3 4 5 (also an undesignated item after a nested designator). (2) a constant name in an array
