@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-871** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-872** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -143,11 +143,15 @@ for a dereference.
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-867 bash: a prefix assignment is visible while the command's own words expand · P1 · SH · IN PROGRESS (SH worker, round 16) [V SH worker + master]
-WRONG ANSWER, every leg: `e=5 echo "e=$e"` → bash `e=`, ours `e=5`; `x=1; x=2 echo "x=$x"` → bash `x=1`, ours `x=2`.
-bash expands the command's words first; prefix assignments only affect the command's environment (a function or
-builtin sees them during its run, and they are restored after — except for special builtins in POSIX mode).
-Restructure makeSimpleCommand in both engines: expand words, then apply the prefix assignments around the call.
+### T-871 bash: prefix assignments with declaration builtins, local, unset, arrays, readonly; native arena growth · P2 · SH · IN PROGRESS (SH worker, round 17) [V SH worker]
+bash 5.3, every leg. REJECTED: `x=5 export x` → "command not found: export", exit 127 (bash keeps x=5 afterwards; same
+for `readonly x`, `declare -x x`; `declare x`/`typeset x` leave the old value). REJECTED: `x+=2 k` (a `+=` prefix) does
+not parse (bash runs k with x=12). WRONG: `f(){ local x; echo "[$x]"; }; x=5 f` → bash `[5]`, ours `[]`. WRONG:
+`f(){ unset x; echo ${x-unset}; }; x=1; x=5 f` → bash `1` (unset removes only the temporary binding), ours `unset`. WRONG:
+`a=(1 2); f(){ echo "$a ${a[1]-u} ${#a[@]}"; }; a=5 f` → bash `5 u 1`, ours `1 2 2`. WRONG: `readonly r=1; pr(){ echo $r;
+}; r=2 pr` → bash `1` + "r: readonly variable" on stderr, ours `2`. MEMORY: a native loop of 300k simple commands each
+expanding ~160 bytes reaches 200–295 MB resident (same on the base): every store raises the bash runtime's arena floor
+above the words just expanded — find a reset point per command.
 
 # C — C subset
 
@@ -929,6 +933,7 @@ T-865 bash: `$NAME"` glued inside a nested "…"; a redirection alone on a line 
 T-866 bash: a prefix assignment after a leading redirection — DONE 1a1f2704 (redirections interleave with leading assignments in PrefixCommand and Assignment, both grammars — = bash 5.3)
 T-862 kotlin: member vs top-level fun, qualifiedName, named args on nested ctors — DONE 33383d41 (implicit-receiver members beat top-level declarations — interp-core globalHit/globalSet hooks, compiler js_ktrecvof branch only for names declared both ways; nested KClass simpleName/qualifiedName/java.name per stdlib; emit-time tables keyed by binary name so nested named args order right)
 T-775 missing features met in real programs (Benchmarks Game, Rosetta Code) — DONE ddd654a4 (python module __doc__ incl. per-module docstring table; go make of named slice/map/chan types, math/cmplx after Go's algorithms + Atan2/Sincos, complex128 typed locations, returned constants convert to the result type; java System.out.flush and the source launcher's entry class; swift &= |= ^= <<= >>= and wrapping forms, free sqrt; js Uint8Array; c #define among struct members and initializer items through the pipeline — the in-function case already worked via -pipe; complex64 and cmplx trig filed as T-869)
+T-867 bash: a prefix assignment is visible while the command's own words expand — DONE 18bf1dde (words expand first, then prefix assignments left to right, redirection words see the old values, names restored after — interp applyPrefix/openRedirsOuter/restorePrefix, compiler expandedWord/prefixOuter; no-command-word assignments persist with the last substitution's status; temporary bindings take no attributes and leave arrays alone; bash bench unchanged)
 
 # Settled — do not re-open
 
