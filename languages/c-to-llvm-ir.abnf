@@ -125,15 +125,24 @@ TdPlain     <~~ push({dcl: makeDeclr(takeAll(), "plain")}) ~~>
             = [ Stars ] Id <~~ push(up.in) ~~> [ ArrDims ] ;
 
 // A declaration (or a function definition) whose base type is a typedef name.
+// Qualifiers and specifiers may stand on either side of the name ('const Num a',
+// 'Num const a', 'static inline Num f(...)'); like TypeInt's, they are read and
+// ignored, except that a LOCAL 'static' makes a static local (TdStatic).
 TdDecl      <~~ push(makeDeclSeq(tdBase(takeAll()), false)) ~~>
-            = TdName DeclItem { "," DeclItem } ";" ;
+            = { TdQual } TdName { TdQual } DeclItem { "," DeclItem } ";" ;
+TdStatic    <~~ push(makeDeclSeq(tdBase(takeAll()), true)) ~~>
+            = { TdQual } KwStatic { TdQual } TdName { TdQual } SInitDecl { "," SInitDecl } ";" ;
 TdFuncDef   <~~ buildTdFunc(takeAll()) ~~>
-            = TdName [ PStars ] Id <~~ push(up.in) ~~> ParamList { Attr } Block ;
+            = { TdSpec } TdName { TdQual } [ PStars ] Id <~~ push(up.in) ~~> ParamList { Attr } Block ;
 TdProto     <~~ takeAll() /* A prototype needs no lowering. */ ~~>
-            = TdName [ Stars ] Id ParamList { Attr } ";" ;
+            = { TdSpec } TdName { TdQual } [ Stars ] Id ParamList { Attr } ";" ;
+TdQual      = "const" KwEnd | "volatile" KwEnd | "extern" KwEnd | "register" KwEnd | "auto" KwEnd
+            | "inline" KwEnd | "_Noreturn" KwEnd | "_Thread_local" KwEnd | "_Atomic" KwEnd | Attr ;
+// At file scope 'static' is only linkage.
+TdSpec      = TdQual | KwStatic ;
 // A file-scope object whose base type is a typedef name.
 TdGlobalDecl <~~ defineGlobals(tdBase(takeAll())) ~~>
-            = TdName DeclItem { "," DeclItem } ";" ;
+            = { TdSpec } TdName { TdQual } DeclItem { "," DeclItem } ";" ;
 TdName      <~~ push({tname: up.in}) ~~> = NotCKw Id ;
 
 // An identifier that is not one of C's own keywords. A typedef USE is recognized
@@ -631,7 +640,7 @@ ParenParam  <~~ push(makeParam(takeAll())) ~~>
 // A parameter whose type is a typedef name. Two identifiers in a row cannot be
 // anything else, which is what keeps this away from a K&R identifier list.
 TdParam     <~~ push(makeTdParam(takeAll())) ~~>
-            = { PtrQual } TdName [ Stars ] Id <~~ push(up.in) ~~> [ ArrDims ] ;
+            = { PtrQual } TdName { PtrQual } [ Stars ] Id <~~ push(up.in) ~~> [ ArrDims ] ;
 // 'int (*f)(int)' as a parameter: one i32 holding a function identifier.
 FnPtrParam  <~~ push(makeFnPtrParam(takeAll())) ~~>
             = ParamType "(" Stars Id <~~ push(up.in) ~~> ")" FnParams ;
@@ -645,7 +654,7 @@ ParamAbs    <~~ push(makeParam(takeAll())) ~~>
 AbsFnTy     <~~ push({fnabs: true}) ~~> = FnParams ;
 // An unnamed parameter of typedef type; tried last.
 TdParamAbs  <~~ push(makeTdParam(takeAll())) ~~>
-            = { PtrQual } TdName [ Stars ] [ ArrDims ] ;
+            = { PtrQual } TdName { PtrQual } [ Stars ] [ ArrDims ] ;
 ParamType   = BaseTy | KwStruct Id <~~ push({sname: up.in}) ~~>
             | KwUnion Id <~~ push({sname: uKey(up.in)}) ~~> ;
 
@@ -682,7 +691,7 @@ PtrQual     = "const" KwEnd | "volatile" KwEnd | "restrict" KwEnd | "_Atomic" Kw
 Statement   = Block | If | While | Do | For | Switch | SwitchCase | Return | Break | Continue
             | AssertStmt | BoolDecl | LProto | LTagFwd | LStructDef | LUnionDef | StructDefDecl | UnionDefDecl
             | LTypedef | SStructDecl | SUnionDecl | StaticDecl | StructDecl | UnionDecl | Decl
-            | Goto | PPCondStmt | PPStmt | Label | TdDecl | Empty | ExprStmt ;
+            | Goto | PPCondStmt | PPStmt | Label | TdStatic | TdDecl | Empty | ExprStmt ;
 
 // A local typedef. One typedef table serves every scope (wider than C, never narrower).
 LTypedef    <~~ defineTypedef(takeAll()); push(function(b) { return b }) ~~>

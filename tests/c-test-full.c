@@ -239,6 +239,12 @@ typedef struct { int v; } S08Box;    /* struct typedef */
 typedef int (*S08Fn)(int);           /* function-pointer typedef */
 int s08_neg(int x) { return -x; }
 S08Fn s08_pick(void) { return s08_neg; }
+/* Storage classes, qualifiers and function specifiers around a typedef name. */
+static S08Num s08_seed = 42;
+static const S08Num s08_k = 3;
+S08Num const s08_k2 = 4;
+static inline S08Num s08_twice(const S08Num x, S08Num const y) { return x * 2 + y; }
+S08Num s08_count(void) { static S08Num c = 0; c++; return c; }
 int s08(void) {
     S08Num n = 41;
     check(801, n + 1 == 42);
@@ -250,6 +256,14 @@ int s08(void) {
     S08Fn f = s08_neg;
     check(804, f(5) == -5);
     check(805, s08_pick()(6) == -6);
+    const S08Num a = 40;
+    static S08Num sb = 2;
+    volatile S08Num v = 1;
+    register S08Num r = 0;
+    S08Num const tail = 1;
+    s08_count();
+    check(806, a + sb == 42 && v + r + tail == 2 && s08_seed == 42 && s08_k + s08_k2 == 7);
+    check(807, s08_twice(1, 1) == 3 && s08_count() == 2);
     return 0;
 }
 
