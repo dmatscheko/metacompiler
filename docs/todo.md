@@ -66,7 +66,7 @@ its report; anything structural there is a CORE ticket.
 
 # RB — Ruby
 
-### T-850 ruby: binary strings, blockless enumerators, statement-line and zsuper gaps · P3 · RB · OPEN [V RB worker]
+### T-850 ruby: binary strings, blockless enumerators, statement-line and zsuper gaps · P3 · RB · IN PROGRESS (RB worker, round 23) [V RB worker]
 Oracle /usr/bin/ruby 2.6 (use LC_ALL=en_US.UTF-8, or `p` escapes non-ASCII). (1) `255.chr.bytes` → `[255]`; ours
 `[195, 191]` — strings are untagged UTF-16 text, a byte >127 cannot be one byte; needs an ASCII-8BIT string kind
 in all three engines and the C floor. (2) `e = [1,2,3].map; loop { e.next }` → `[nil, nil, nil]`; ours nil
