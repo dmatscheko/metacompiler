@@ -5008,8 +5008,13 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var k
         for (k = 0; k < asgs.length; k++) {
             var nm = asgs[k].aname
-            if (undo) { saved.push({name: nm, had: isSetVar(nm), val: getVarVal(nm)}) }
-            setVarVal(nm, (asgs[k].val != null) ? wordJoin(asgs[k].val()) : "")
+            var v = (asgs[k].val != null) ? wordJoin(asgs[k].val()) : ""
+            if (!undo) { storeAttr(nm, v); continue }
+            saved.push({name: nm, had: isSetVar(nm), val: getVarVal(nm)})
+            // A binding for the command takes no attributes: with `declare -u U`, `U=b f`
+            // hands f "b".
+            if (rawSeen) { v = normBytes(v) }
+            touchVar(nm); vars["$" + nm] = v; varsHas["$" + nm] = true
         }
         return saved
     }

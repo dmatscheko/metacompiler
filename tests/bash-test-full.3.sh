@@ -1229,6 +1229,14 @@ s78() {
   r=$(x=$(exit 3) $e $(exit 4); echo "$?"); check tw12 "$r" 3
   r=$($(exit 4); echo "$?"); check tw13 "$r" 4
   false; x=5 $e; check tw14 "$?|$x" "0|5"
+  # The binding takes none of the name's attributes, and leaves an array as it was; with no
+  # command word the assignment is an ordinary one.
+  local -u up=a
+  local -a ar=(1 2)
+  s78u() { echo "$up"; }
+  r=$(up=b s78u); check tw15 "$r|$up" "b|A"
+  ar=5 true; check tw16 "${ar[*]}" "1 2"
+  up=c $e; ar=7 $e; check tw17 "$up|${ar[*]}" "C|7 2"
 }
 # ===== END SECTIONS =====
 

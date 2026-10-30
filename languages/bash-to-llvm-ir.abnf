@@ -5067,7 +5067,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 b.NewCall(rtPushLocal, llvm.constant.NewInt(i32, getVarId(asgs[k].aname)))
                 var v = emptyPtr(b)
                 if (asgs[k].val != null) { var r = evalWord(b, asgs[k].val); b = r.b; v = r.v }
-                storeVar(b, asgs[k].aname, v)
+                // No attrCase: the binding takes no attributes. Twin of applyPrefix.
+                storeVarRaw(b, asgs[k].aname, v)
+                heapPin(b)
                 vals.push(v)
             }
             if (!asgConst) { b = emitAbortCheck(b) }
@@ -5090,7 +5092,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (empty == null) { return b }
             var keepB = curF.NewBlock(""), done = curF.NewBlock("")
             b.NewCondBr(empty, keepB, done)
-            for (k = 0; k < asgs.length; k++) { storeVar(keepB, asgs[k].aname, vals[k]) }
+            for (k = 0; k < asgs.length; k++) { keepB = emitStoreAttr(keepB, asgs[k].aname, vals[k]) }
             keepB.NewBr(done)
             return done
         }
