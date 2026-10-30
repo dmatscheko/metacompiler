@@ -92,7 +92,7 @@ LINT_FINDINGS=0
 # A FLOOR on the matrix entry count (.vscode/launch.json), and on the abort rows
 # specifically: they are the only rows that compare abort messages, and a row
 # losing its "SHOULD ABORT" or "ALL HALVES" token silently downgrades it.
-MATRIX_ENTRIES=496
+MATRIX_ENTRIES=497
 ABORT_ROWS=29             # rows whose name says SHOULD ABORT
 ABORT_ALL_ROWS=28         # of those, the ones that also compare the interpreter
                           # half (ALL HALVES)
