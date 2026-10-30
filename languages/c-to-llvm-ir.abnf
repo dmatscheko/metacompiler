@@ -22,9 +22,11 @@ getelementptr, globals to module globals. Structs become real LLVM struct types:
 member access is a getelementptr with a constant field index, nested structs and
 arrays of structs nest the types, and explicit padding members put every field at
 its alignment, so the built-in IR interpreter (which lays fields out back to back)
-and clang agree on one layout - cc's, for a struct of integers and pointers. A
-union is an LLVM struct holding its widest member, which every one of its members
-selects, so they share one address; bit fields mask (or sign-extend) on every store. A struct returned by value uses the sret shape
+and clang agree on one layout - cc's, unless a member is a float or a function
+pointer. A bit-field shares its storage unit with its neighbours as in cc and is
+shifted and masked in and out of it. A union is an LLVM struct holding its widest
+member, which every one of its members selects, so they share one address. A
+struct returned by value uses the sret shape
 of a real C ABI: the caller allocates the destination and passes it as a hidden first
 pointer parameter. A function pointer is the callee identifier, an i32; since the
 built-in IR interpreter has no indirect call, an indirect call goes through a
@@ -2226,23 +2228,24 @@ KwDefault   = "default" KwEnd ;
         if (f.dims != undefined) return arrCt(f.dims, base, 0)
         return base
     }
-    // Give one named member its parent-level LLVM slot. An unnamed ':n' bit field is
-    // pure padding: its slot is reserved but no name is bound to it.
-    function registerField(fields, order, name, f, ct, slot) {
+    // Give one named member its parent-level LLVM slot, or a bit-field the byte offset
+    // of its storage unit and its bit offset in it (boff, shift). An unnamed ':n' bit
+    // field is pure padding: its bits are laid out but no name is bound to them.
+    function registerField(fields, order, name, f, ct, slot, boff, shift) {
         // The braces are load-bearing: a value-less `return` as the UNBRACED body of an
         // if is mis-executed by the frozen engine (the guard silently does not take).
         if (f.pad == true) { return }
         if (hasOwn(fields, f.name)) fail("duplicate field " + f.name + " in " + tagName(name))
         var bf = undefined
-        if (f.bits != undefined) { bf = bitField(f, ct) }
-        fields[f.name] = {idx: slot, ct: ct, bf: bf}
+        if (f.bits != undefined) { bf = bitField(f, ct, shift) }
+        fields[f.name] = {idx: slot, ct: ct, bf: bf, boff: f.bits != undefined ? boff : undefined}
         order.push(f.name)
     }
     // A union-like run of member groups: every member selects the SAME parent slot, so
     // they all share one address, and the slot is typed as the member whose cell is
     // largest - which is what makes the storage as large as the widest member.
     // Returns {wideCt, malign, cc}, cc being cc's layout of the members (cAbiLayout).
-    function layoutUnionAt(fields, order, groups, name, slot) {
+    function layoutUnionAt(fields, order, groups, name, slot, boff) {
         var wideCt = undefined
         var malign = 1
         var ms = []
@@ -2252,7 +2255,7 @@ KwDefault   = "default" KwEnd ;
                 // An anonymous STRUCT inside a union would need several distinct slots
                 // at one parent index, which this one-slot model cannot express.
                 if (g.isUnion != true) fail("an anonymous struct inside a union is not supported (in " + tagName(name) + ")")
-                var r = layoutUnionAt(fields, order, g.anonFields, name, slot)
+                var r = layoutUnionAt(fields, order, g.anonFields, name, slot, boff)
                 if (r.wideCt != undefined && (wideCt == undefined || machBytes(r.wideCt) > machBytes(wideCt))) wideCt = r.wideCt
                 if (r.malign > malign) malign = r.malign
                 ms.push(cAbiSub(r.cc))
@@ -2262,7 +2265,7 @@ KwDefault   = "default" KwEnd ;
             for (var j = 0; j < fl.length; j++) {
                 var f = fl[j]
                 var ct = fieldCt(f)
-                registerField(fields, order, name, f, ct, slot)
+                registerField(fields, order, name, f, ct, slot, boff, 0)
                 ms.push(cAbiMember(ct, f))
                 if (wideCt == undefined || machBytes(ct) > machBytes(wideCt)) wideCt = ct
                 if (machAlign(ct) > malign) malign = machAlign(ct)
@@ -2274,8 +2277,10 @@ KwDefault   = "default" KwEnd ;
     // offset the next one lands at and its alignment so far. An explicit [n x i8] pad
     // slot puts every slot at a multiple of its machAlign and rounds the size up to
     // the struct's, so llvm.Run's packed layout and clang's natural one coincide - and
-    // a struct of integers and pointers lays out exactly as cc's (cAbiLayout).
+    // a struct without float or function-pointer members lays out exactly as cc's
+    // (cAbiLayout).
     function mPadTo(L, a) {
+        L.bits = -1
         if (a > L.align) L.align = a
         var n = cRoundUp(L.off, a) - L.off
         if (n > 0) { L.ltys.push(llvm.types.NewArray(n, i8)); L.off = L.off + n }
@@ -2292,11 +2297,28 @@ KwDefault   = "default" KwEnd ;
                 continue
             }
             for (var j = 0; j < g.fields.length; j++) {
-                var fa = machAlign(fieldCt(g.fields[j]))
+                var fa = g.fields[j].pad == true ? 1 : machAlign(fieldCt(g.fields[j]))
                 if (fa > a) a = fa
             }
         }
         return a
+    }
+    // A bit-field in the struct under construction, placed as cAbiLayout places it:
+    // after the bits before it, unless it would straddle a unit of its type. It is
+    // read and written through that unit (bfLoad, bfStore), so the bytes it occupies
+    // are only reserved here, as an [n x i8] slot; L.bits is where the next one may
+    // start while a run of bit-fields lasts.
+    function mBitField(fields, order, name, f, ct, L) {
+        var unitBits = machBytes(ct) * 8
+        var w = f.bits | 0
+        var at = L.bits >= 0 ? L.bits : L.off * 8
+        if (w == 0 || (at - at % unitBits) != (at + w - 1) - (at + w - 1) % unitBits) at = cRoundUp(at, machAlign(ct) * 8)
+        if (f.pad != true && machAlign(ct) > L.align) L.align = machAlign(ct)
+        var unit = at - at % unitBits
+        registerField(fields, order, name, f, ct, -1, unit / 8, at - unit)
+        var need = cRoundUp(at + w, 8) / 8
+        if (need > L.off) { L.ltys.push(llvm.types.NewArray(need - L.off, i8)); L.off = need }
+        L.bits = at + w
     }
     // A union slot in the struct under construction, sized to the union's alignment.
     function mPushUnion(L, r) {
@@ -2316,7 +2338,7 @@ KwDefault   = "default" KwEnd ;
             if (g.anonFields != undefined) {
                 if (g.isUnion == true) {
                     mPadTo(L, groupsMAlign(g.anonFields))
-                    var r = layoutUnionAt(fields, order, g.anonFields, name, L.ltys.length)
+                    var r = layoutUnionAt(fields, order, g.anonFields, name, L.ltys.length, L.off)
                     if (r.wideCt == undefined) fail("an empty anonymous union in " + tagName(name) + " has no layout")
                     mPushUnion(L, r)
                     ms.push(cAbiSub(r.cc))
@@ -2332,11 +2354,12 @@ KwDefault   = "default" KwEnd ;
             for (var j = 0; j < fl.length; j++) {
                 var f = fl[j]
                 var ct = fieldCt(f)
+                ms.push(cAbiMember(ct, f))
+                if (f.bits != undefined) { mBitField(fields, order, name, f, ct, L); continue }
                 mPadTo(L, machAlign(ct))
-                registerField(fields, order, name, f, ct, L.ltys.length)
+                registerField(fields, order, name, f, ct, L.ltys.length, 0, 0)
                 L.ltys.push(ctLTy(ct))
                 L.off = L.off + machBytes(ct)
-                ms.push(cAbiMember(ct, f))
             }
         }
         return cAbiLayout(ms, false)
@@ -2349,12 +2372,12 @@ KwDefault   = "default" KwEnd ;
         if (hasOwn(structs, name)) fail(tagName(name) + " defined twice")
         var fields = {}
         var order = []
-        var L = {ltys: [], off: 0, align: 1}
+        var L = {ltys: [], off: 0, align: 1, bits: -1}
         var wideCt = ctInt
         var groups = items.slice(1)
         var cc = undefined
         if (isUnion) {
-            var r = layoutUnionAt(fields, order, groups, name, 0)
+            var r = layoutUnionAt(fields, order, groups, name, 0, 0)
             if (r.wideCt == undefined) fail("an empty " + tagName(name) + " has no layout")
             mPushUnion(L, r)
             wideCt = r.wideCt
@@ -2368,15 +2391,15 @@ KwDefault   = "default" KwEnd ;
                          mbytes: L.off, malign: L.align, wideCt: wideCt}
     }
     // A bit field holds only its declared width: an unsigned one WRAPS, a signed one
-    // sign-extends. Normalizing on every STORE keeps reads plain loads.
-    // A bit-field: its width, its signedness, and vct, the type its value has in an
+    // sign-extends.
+    // A bit-field: its width, its bit offset in its unit, its signedness, and vct, the type its value has in an
     // expression. A field whose every value fits an int promotes to int, one of 32
     // unsigned bits to unsigned int (C11 6.3.1.1p2), and a wider one keeps its 64-bit
     // type, as clang does; prom carries that to promote(), so _Generic still sees the
     // declared type.
     // Twin of bitField in c-interpreter.abnf.
-    function bitField(f, ct) {
-        var bf = {w: f.bits | 0, sign: f.uns != true, vct: ct}
+    function bitField(f, ct, shift) {
+        var bf = {w: f.bits | 0, shift: shift, sign: f.uns != true && ct.bool != true, vct: ct}
         if (ct.k == "int" && ct.bool != true && bf.w <= 32) {
             var to = (bf.w < 32 || bf.sign) ? ctInt : ctUInt
             if (!ctEq(to, promote(ct))) { bf.vct = {k: "int", w: ct.w, u: ct.u, prom: to} }
@@ -2394,6 +2417,44 @@ KwDefault   = "default" KwEnd ;
         var sh = llvm.constant.NewInt(is64 ? i64 : i32, bits - bf.w)
         if (bf.sign) return b.NewAShr(b.NewShl(v, sh), sh)
         return b.NewLShr(b.NewShl(v, sh), sh)
+    }
+    // The address of a member: its LLVM slot, typed as the member's own cell (an
+    // anonymous union's members share one slot typed as the widest of them), or a
+    // bit-field's storage unit at its byte offset.
+    function fieldAddr(b, st, f, addr) {
+        if (f.boff == undefined) return cellAddr(b, ctLTy(f.ct), b.NewGetElementPtr(st.lty, addr, [zero, llvm.constant.NewInt(i32, f.idx)]))
+        var p8 = b.NewGetElementPtr(i8, b.NewBitCast(addr, llvm.types.NewPointer(i8)), [llvm.constant.NewInt(i64, f.boff)])
+        return b.NewBitCast(p8, llvm.types.NewPointer(ctLTy(f.ct)))
+    }
+    // A place's value: a bit-field is its bits of the unit, shifted down and
+    // sign- or zero-extended.
+    function loadPlace(b, p) {
+        var v = loadCt(b, p.ct, p.v)
+        var bf = p.bf
+        if (bf == undefined || bf.w <= 0) return v
+        var t = llIs64(v) ? i64 : i32
+        var bits = llIs64(v) ? 64 : 32
+        if (bits - bf.shift - bf.w > 0) v = b.NewShl(v, llvm.constant.NewInt(t, bits - bf.shift - bf.w))
+        if (bits - bf.w <= 0) return v
+        var sh = llvm.constant.NewInt(t, bits - bf.w)
+        return bf.sign ? b.NewAShr(v, sh) : b.NewLShr(v, sh)
+    }
+    // Store v (already bfNormV'd for a bit-field) into a place and answer the stored
+    // value. A bit-field replaces its own bits of the unit and keeps the others,
+    // which belong to its neighbours.
+    function storePlace(b, p, v) {
+        var bf = p.bf
+        if (bf == undefined || bf.w <= 0) return storeTo(b, p.ct, p.v, v)
+        var old = loadCt(b, p.ct, p.v)
+        var t = old.Type()
+        var bits = llIs64(old) ? 64 : 32
+        var ones = llvm.constant.NewInt(t, -1)
+        var sh = llvm.constant.NewInt(t, bf.shift)
+        var mask = b.NewShl(b.NewLShr(ones, llvm.constant.NewInt(t, bits - bf.w)), sh)
+        var nv = b.NewOr(b.NewAnd(old, b.NewXor(mask, ones)), b.NewAnd(b.NewShl(v, sh), mask))
+        var lt = ctLTy(p.ct)
+        b.NewStore(llvm.types.Equal(lt, t) ? nv : b.NewTrunc(nv, lt), cellAddr(b, lt, p.v))
+        return v
     }
     // An omitted tag ('struct { int x; } s;') still needs a layout, so it gets a
     // synthetic name; the '$' keeps it unspellable from C source.
@@ -2460,18 +2521,29 @@ KwDefault   = "default" KwEnd ;
     // other parts keep what earlier items or the zero fill put there (C11 6.7.9p19).
     // Twin of runDesigInit in c-interpreter.abnf.
     function emitDesigInit(b, ct, steps, v, addr) {
+        var bf = undefined
         for (var i = 0; i < steps.length; i++) {
             var d = steps[i]
             if (d.fld != undefined) {
                 var f = fieldOf(ct.s, d.fld)
-                addr = b.NewGetElementPtr(structOf(ct.s).lty, addr, [zero, llvm.constant.NewInt(i32, f.idx)])
+                addr = fieldAddr(b, structOf(ct.s), f, addr)
+                bf = f.bf
                 ct = f.ct
             } else {
                 addr = b.NewGetElementPtr(ctLTy(ct), addr, [zero, llvm.constant.NewInt(i32, d.at | 0)])
+                bf = undefined
                 ct = ct.e
             }
         }
-        return emitInit(b, ct, v, addr)
+        if (bf == undefined) return emitInit(b, ct, v, addr)
+        // A bit-field item is one expression, possibly in braces of its own.
+        while (typeof v != "function") {
+            if (v.list == undefined || v.list.length != 1) fail("a bit-field needs one initializer")
+            v = v.list[0].v
+        }
+        var r = v(b)
+        storePlace(r.b, {ct: ct, v: addr, bf: bf}, bfNormV(r.b, bf, coerce(r.b, ct, r)))
+        return r.b
     }
     // Pre-fill an aggregate with zeroes (an alloca is not zeroed, and C requires every
     // field a brace initializer does not mention to be zero). A union is zeroed through
@@ -2497,15 +2569,11 @@ KwDefault   = "default" KwEnd ;
         }
         for (var i = 0; i < st.order.length; i++) {
             var f = fieldOf(ct.s, st.order[i])
-            var slot = b.NewGetElementPtr(st.lty, addr, [zero, llvm.constant.NewInt(i32, f.idx)])
-            b = zeroAggregate(b, f.ct, memberCell(b, f, slot))
+            b = zeroAggregate(b, f.ct, fieldAddr(b, st, f, addr))
         }
         return b
     }
 
-    // A member's slot typed as the member's own cell: an anonymous union's members
-    // share one slot typed as the widest of them.
-    function memberCell(b, f, slot) { return cellAddr(b, ctLTy(f.ct), slot) }
     // An aggregate travels as the ADDRESS of its storage: an array decays to it in C,
     // and a struct value uses it because a whole struct never lives in a register here.
     // Whoever RECEIVES such a value copies the members out.
@@ -2530,9 +2598,7 @@ KwDefault   = "default" KwEnd ;
             }
             for (var j = 0; j < st.order.length; j++) {
                 var f = fieldOf(ct.s, st.order[j])
-                var cj = llvm.constant.NewInt(i32, f.idx)
-                b = emitCopy(b, f.ct, memberCell(b, f, b.NewGetElementPtr(st.lty, dst, [zero, cj])),
-                                      memberCell(b, f, b.NewGetElementPtr(st.lty, src, [zero, cj])))
+                b = emitCopy(b, f.ct, fieldAddr(b, st, f, dst), fieldAddr(b, st, f, src))
             }
             return b
         }
@@ -3242,14 +3308,14 @@ KwDefault   = "default" KwEnd ;
             } else if (s.fld != undefined) {
                 if (ct.k != "struct") fail("'.' needs a struct value: ." + s.fld)
                 var f = fieldOf(ct.s, s.fld)
-                addr = b.NewGetElementPtr(structOf(ct.s).lty, addr, [zero, llvm.constant.NewInt(i32, f.idx)])
+                addr = fieldAddr(b, structOf(ct.s), f, addr)
                 ct = f.ct
                 bf = f.bf
             } else {
                 if (ct.k != "ptr" || ct.p.k != "struct") fail("'->' needs a struct pointer: ->" + s.arw)
                 var base2 = b.NewLoad(i32p, addr)
                 var f2 = fieldOf(ct.p.s, s.arw)
-                addr = b.NewGetElementPtr(structOf(ct.p.s).lty, base2, [zero, llvm.constant.NewInt(i32, f2.idx)])
+                addr = fieldAddr(b, structOf(ct.p.s), f2, base2)
                 ct = f2.ct
                 bf = f2.bf
             }
@@ -3387,7 +3453,7 @@ KwDefault   = "default" KwEnd ;
         var ct = r.ct != undefined ? r.ct : ctInt
         if (ct.k == "arr") return {b: r.b, v: r.b.NewGetElementPtr(ctLTy(ct), r.v, [zero, zero]), ct: {k: "ptr", p: ct.e}}
         if (ct.k == "struct") return {b: r.b, v: r.v, ct: ct}
-        return {b: r.b, v: loadCt(r.b, ct, r.v), ct: r.bf != undefined ? r.bf.vct : ct}
+        return {b: r.b, v: loadPlace(r.b, r), ct: r.bf != undefined ? r.bf.vct : ct}
     }
     function makeLoadOf(placeT) {
         return function(b) { return placeValOf(placeT(b)) }
@@ -3409,15 +3475,13 @@ KwDefault   = "default" KwEnd ;
             if (ct.k != "struct") fail("'.' needs a struct value: ." + s.fld)
             var f = fieldOf(ct.s, s.fld)
             var sty = structOf(ct.s).lty
-            return {b: b, v: b.NewGetElementPtr(sty, b.NewBitCast(v, llvm.types.NewPointer(sty)),
-                                                [zero, llvm.constant.NewInt(i32, f.idx)]),
+            return {b: b, v: fieldAddr(b, structOf(ct.s), f, b.NewBitCast(v, llvm.types.NewPointer(sty))),
                     ct: f.ct, bf: f.bf}
         }
         if (ct.k != "ptr" || ct.p.k != "struct") fail("'->' needs a struct pointer: ->" + s.arw)
         var f2 = fieldOf(ct.p.s, s.arw)
         var sty2 = structOf(ct.p.s).lty
-        return {b: b, v: b.NewGetElementPtr(sty2, b.NewBitCast(v, llvm.types.NewPointer(sty2)),
-                                            [zero, llvm.constant.NewInt(i32, f2.idx)]),
+        return {b: b, v: fieldAddr(b, structOf(ct.p.s), f2, b.NewBitCast(v, llvm.types.NewPointer(sty2))),
                 ct: f2.ct, bf: f2.bf}
     }
     makeNeg = function(t) {
@@ -3724,7 +3788,7 @@ KwDefault   = "default" KwEnd ;
             // Assigning a whole struct or union copies its members (C11 6.5.16.1).
             if (op == "=" && isAggCt(p.ct)) { return {b: emitCopy(b, p.ct, p.v, v), v: p.v, ct: p.ct} }
             if (op != "=") {
-                var cur = {b: b, v: loadCt(b, p.ct, p.v), ct: p.ct}
+                var cur = {b: b, v: loadPlace(b, p), ct: p.ct}
                 var ra = applyOp(b, op, cur, r)
                 b = ra.b
                 v = ra.v
@@ -3734,8 +3798,7 @@ KwDefault   = "default" KwEnd ;
             } else {
                 v = coerce(b, p.ct, r)
             }
-            v = bfNormV(b, p.bf, v)
-            v = storeTo(b, p.ct, p.v, v)
+            v = storePlace(b, p, bfNormV(b, p.bf, v))
             return {b: b, v: v, ct: p.bf != undefined ? p.bf.vct : p.ct}
         }
     }
@@ -3757,9 +3820,8 @@ KwDefault   = "default" KwEnd ;
         return function(b) {
             var p = placeT(b)
             b = p.b
-            var old = loadCt(b, p.ct, p.v)
-            var nv = bfNormV(b, p.bf, emitStep(b, p.ct, old, op))
-            nv = storeTo(b, p.ct, p.v, nv)
+            var old = loadPlace(b, p)
+            var nv = storePlace(b, p, bfNormV(b, p.bf, emitStep(b, p.ct, old, op)))
             return {b: b, v: nv, ct: p.bf != undefined ? p.bf.vct : p.ct}
         }
     }
@@ -3767,8 +3829,8 @@ KwDefault   = "default" KwEnd ;
         return function(b) {
             var p = placeT(b)
             b = p.b
-            var old = loadCt(b, p.ct, p.v)
-            storeTo(b, p.ct, p.v, bfNormV(b, p.bf, emitStep(b, p.ct, old, op)))
+            var old = loadPlace(b, p)
+            storePlace(b, p, bfNormV(b, p.bf, emitStep(b, p.ct, old, op)))
             return {b: b, v: old, ct: p.bf != undefined ? p.bf.vct : p.ct}
         }
     }

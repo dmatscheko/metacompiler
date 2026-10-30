@@ -50,7 +50,8 @@
 # string that is not valid UTF-8 is visible only in the output bytes (php/bytes,
 # go/bytes and bash/bytes - the NUL bytes printf writes - likewise), bash/stack, whose
 # failure is a native stack overflow, and bash/heap, a run far past the IR
-# interpreter's step brake whose failure is running out of string heap. Their
+# interpreter's step brake whose failure is running out of string heap, and c/bytes,
+# the C compiler's byte layout and malloc, which the interpreter half cannot run. Their
 # fixtures are the real toolchain's output, not blessed ones of ours - except
 # batch/nest (output captures nested twelve deep), whose fixture is the
 # interpreter half's, as there is no cmd.exe.
@@ -145,7 +146,8 @@ EXPECT_ROWS="brainfuck:features:tests/brainfuck-test-features.txt:tests/brainfuc
              batch:nest:tests/batch-native-nest.cmd:tests/batch-nest.expected
              lua:bytes:tests/lua-test-bytes.lua:tests/lua-bytes.expected
              go:bytes:tests/go-test-bytes.go:tests/go-bytes.expected
-             php:bytes:tests/php-test-bytes.php:tests/php-bytes.expected"
+             php:bytes:tests/php-test-bytes.php:tests/php-bytes.expected
+             c:bytes:tests/c-native-bytes.c:tests/c-bytes.expected"
 
 JOBS="${MEC_JOBS:-$( (sysctl -n hw.ncpu || nproc || echo 4) 2>/dev/null )}"
 case "$JOBS" in ''|*[!0-9]*) JOBS=4 ;; esac

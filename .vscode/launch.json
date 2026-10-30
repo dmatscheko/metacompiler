@@ -1127,6 +1127,12 @@
             "program": "${workspaceFolder}","args": ["languages/c-to-llvm-ir.abnf", "tests/c-test-widen.c", "-q"]
         },
         {
+            "name": "C byte layout and malloc (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/c-to-llvm-ir.abnf", "tests/c-native-bytes.c", "-q"]
+        },
+        {
             "name": "C widen2: typedef, float, goto, union, sizeof expr (compiler)",
             "type": "go",
             "request": "launch",
