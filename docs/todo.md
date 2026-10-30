@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-850** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-851** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -66,25 +66,16 @@ its report; anything structural there is a CORE ticket.
 
 # RB — Ruby
 
-### T-839 ruby: features left from the string/array/error rounds · P3 · RB · IN PROGRESS (RB worker, round 22) [V RB worker]
-Each fails vs /usr/bin/ruby 2.6 today. Strings: code-point `s[1]`, `s[1,2]`, center, reverse of astral
-text (run/native) — needs code-point String#[] with an O(1) ASCII fast path in all three engines;
-`128512.chr("UTF-8")`, `255.chr.bytes` (binary strings not modelled). Enumerators: `[1,2].cycle` without
-a block, `Range#lazy` (enumerators are materialised arrays; needs a lazy kind). Control: catch/throw +
-UncaughtThrowError, `loop` ended by StopIteration, method_missing (+ `super` inside it, compiler),
-Exception#cause. Methods: Integer.sqrt, Proc#>> / #curry, Regexp.last_match, pp. Globals: $stdout /
-STDOUT, bare `p` (compiled NameError), bare `new` in `def self.make`. Numeric: `(-8.0)**(1.0/3)` is a
-Complex; Rational#round(half:) rounds half up. Cleanup: regex.js rxSplit is no longer used by ruby —
-remove it if no language calls it (comments in kotlin-rt.metajs, python, jsrtregexjs.go name it).
-
-### T-840 ruby compiler: `next v` inside begin/ensure inside a block returns the control signal · P2 · RB · IN PROGRESS (RB worker, round 22) [V RB worker]
-`p [1,2,3].map { |x| begin; next x*10 if x==2; x; ensure; nil; end }` → ruby and interp `[1, 20, 3]`,
-run `[1, &{3 <nil>}, 3]`. excDispatch in a block function has no loop to continue, so the signal escapes
-as a value; a block-level `next` across a try must become the block's return value. Check native too.
-
-### T-841 ruby: `$0` / `$PROGRAM_NAME` are nil · P2 · RB · IN PROGRESS (RB worker, round 22) [V PY worker]
-`p __FILE__; p $0; p $PROGRAM_NAME` → /usr/bin/ruby prints the script path three times; all legs print
-the path then `nil`, `nil`. So the common `main(3) if __FILE__ == $0` guard runs nothing in every leg.
+### T-850 ruby: binary strings, blockless enumerators, statement-line and zsuper gaps · P3 · RB · OPEN [V RB worker]
+Oracle /usr/bin/ruby 2.6 (use LC_ALL=en_US.UTF-8, or `p` escapes non-ASCII). (1) `255.chr.bytes` → `[255]`; ours
+`[195, 191]` — strings are untagged UTF-16 text, a byte >127 cannot be one byte; needs an ASCII-8BIT string kind
+in all three engines and the C floor. (2) `e = [1,2,3].map; loop { e.next }` → `[nil, nil, nil]`; ours nil
+(a materialised enumerator does not know its map result). (3) PARSE: `i = 0; j = 1; while i < 3; i += 1; end;
+p i` fails in all legs (ruby 3) — an assignment, `;`, then `while` on one line. (4) zsuper with keywords:
+`class X; def f(*a, k: 1) [a, k] end end; class Y < X; def f(*r, k: 2) super end end; p Y.new.f(1, 2)` → ruby
+`[[1, 2], 2]`, interp `[[1, 2], 1]`, compiler `[[1, 2, 2], 1]`. (5) `class E < Nope; end` → ruby NameError
+"uninitialized constant Nope"; all legs engine error. (6) `$stdout.p` → MRI "private method `p'", ours
+"undefined method". (7) assigning `$0` does not update `$PROGRAM_NAME` (alias).
 
 # JS — JavaScript and TypeScript
 
@@ -932,6 +923,9 @@ T-842 ts/js: RegExp to string, method shadowing an inherited getter, `o?.#f` —
 T-838 ts/js: decorator and constructor semantics left over — PARTIAL 171fb506 — derived-constructor this/super/return errors, __proto__: in literals, home-object super, tagged-template invalid escapes, TS x! targets, import/export import aliases, accessor auto-accessors, Set methods, WeakMap/WeakSet, queueMicrotask, URI functions, isWellFormed/toWellFormed; decorators, constructability and Date/setTimeout filed as T-847
 T-778 bash: printf `%f %e %g %a` print the operand as text — DONE 01c030c6 (%f %e %g %a/F E G A print the exact digits of the double strtold reads — interp via c-printf.js, compiler via an exact big-integer reader + C port in bash-rt.c with no double; invalid/too-large diagnostics per bash 5.3; integer error wording, \\v\\f\\r whitespace and message precedence fixed alongside; 9695-row probe matches real bash)
 T-848 bash: backslash-newline inside an array literal does not parse — DONE 57147b97 (WsNL takes a backslash-newline in both grammars — array literals, (( ;; )); also LineCont in the compiler's ${...} words and in subscripts of both; name-splitting continuations filed as T-849)
+T-841 ruby: `$0` / `$PROGRAM_NAME` are nil — DONE 308d58d3 ($0 / $PROGRAM_NAME are the script path in both halves)
+T-840 ruby compiler: `next v` inside begin/ensure inside a block returns the control signal — DONE 308d58d3 (next v in a begin closure of a block becomes the block's value; break throws the block-break marker)
+T-839 ruby: features left from the string/array/error rounds — PARTIAL b25b9b95 — character String#[]/center/reverse with ASCII fast path, Integer.sqrt, last_match, cause, pp/bare p/bare new, Proc >>/<</curry, Rational round(half:), loop/StopIteration, catch/throw/UncaughtThrowError, method_missing/respond_to_missing?, IO objects, Complex power, chr(UTF-8), lazy enumerators, rxSplit removed; binary strings and a blockless map enumerator filed as T-850
 
 # Settled — do not re-open
 
