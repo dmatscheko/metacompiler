@@ -116,7 +116,7 @@ in the receiver rule (a companion member should hide a top-level declaration of 
 
 # GO — Go  (oracle: `go run`)
 
-### T-869 go: FMA fusion, complex64, cmplx trig, `*p` through *complex128 · P2 · GO · OPEN [V CORE worker]
+### T-869 go: FMA fusion, complex64, cmplx trig, `*p` through *complex128 · P2 · GO · IN PROGRESS (GO worker, round 12) [V CORE worker]
 (1) WRONG ANSWER, every leg: Go on arm64 fuses `a*b+c` / `a*b-c` into FMA in user code (the spec permits it, gc does it):
 `float64(i)*0.37 - 30` → go -25.56, ours -25.560000000000002; complex `z*z`, `z/w` differ in the last digit. Model gc's
 fusion rule (an explicit float64() conversion or assignment prevents it) in all three engines — check against `go run`.
