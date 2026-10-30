@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-866** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-867** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -128,10 +128,10 @@ nestOwner / nestedOf are keyed by simple class name (last wins); key them by bin
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-865 bash: `$NAME"` glued inside a nested "…"; a redirection alone on a line · P3 · SH · IN PROGRESS (SH worker, round 14) [V SH worker]
-(1) with `x=abc xb=ZZ`, `echo "${u:-a"$x"b}"` → bash 5.3 (and /bin/bash 3.2) `aZZ` (the inner `"` closes, so `$x"b` reads
-the name `xb`), ours expands `$x` — both engines. (2) a command that is only a redirection (`>&6` on its own line) does
-not parse in either half; bash runs it and answers 1 (bad fd) — also `>file` alone must create/truncate the file.
+### T-866 bash: a prefix assignment after a leading redirection · P3 · SH · OPEN [V SH worker]
+`>/dev/null x=5 echo hi` → bash prints `hi` (x=5 is a prefix assignment for echo); both halves: parse error. A simple
+command is `{ redirection | assignment }* word { word | redirection }*` — redirections and assignments may interleave
+before the command word.
 
 # C — C subset
 
@@ -916,6 +916,7 @@ T-857 kotlin: local fun vs interface default, lambda-param `+=`, nested-class na
 T-860 bash: $LINENO, quotes in quoted ${v-w}, case in "$( )", fd dup order, here-doc forms — DONE 12813383 ($LINENO per bash's measured line rules incl. eval and functions — bash bench +0.92%; double-quoted ${v-w} expansion rules; NotEsac in case patterns; fd number must touch its operator; here-doc bodies moved next to their markers by the splice pass — <<\\EOF, several per line; llvm.Run models write(2) and fflush(NULL); c.setSrcMap maps rewritten-source positions back for parse errors and c.lineOf)
 T-859 ruby: class-body scope gate, nested reopen, visibility queries, encoding remainders — PARTIAL 46515fe9 — class/module bodies are a local scope gate in both halves (regression fixed; compiler too), class X in a module is M::X with lexical constant lookup, module reopen in the compiler, public/private/protected_method_defined? and method_defined? per MRI, module private sections, US-ASCII and invalid-UTF-8 strings, byte escapes, interpolated binary, pack/unpack integer/string/base64 directives; in-place re-encoding of a plain String, float pack and String#encode filed as T-864
 T-863 bash: newlines in [[ ]], fd 3+, ${!u} error under 2>/dev/null, $( ) LINENO, quote corner — DONE de8a711c (newlines in [[ ]] per bash's 17 measured shapes, and after && || | in command lists; fds 3-9 incl. exec scoping and bad-fd errors; $( ) LINENO numbered from the enclosing command line; " inside '...' in a quoted ${v-w}; the ${!u} 2>/dev/null item does not reproduce at HEAD — pinned by ie1. DECLINED remainder: $LINENO of a compound command written on one line inside $( ) (bash 23 vs ours 22) and of a function defined and called inside $( ) (44 vs 42) — bash re-flows re-parsed compound commands through its command printer; two rounds found no rule that reproduces it, and one case fits no pure printer model)
+T-865 bash: `$NAME"` glued inside a nested "…"; a redirection alone on a line — DONE 1f9dce1b (GlueRef reads a $NAME across the quotes of a quoted ${v-w} word as bash does, = bash 5.3 and 3.2 on 9 forms; here-doc pre-pass keeps its place after a ' holding a "; RedirCommand: redirections alone run : with them, redirections before an assignment; no filesystem by design, so >file creates nothing. DECLINED: "${u:-a"$x"$'b'}" — bash turns $'b' into text before reading the glued name, an internal quirk with no further use)
 
 # Settled — do not re-open
 
