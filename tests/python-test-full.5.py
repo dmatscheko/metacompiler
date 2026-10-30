@@ -1,5 +1,6 @@
-# Full-syntax test: Python (3.12 core grammar) - part 5, sections 151 and 152:
-# random's str seed and statistics' paired measures. Seeding MT19937 from a
+# Full-syntax test: Python (3.12 core grammar) - part 5, sections 151, 152 and
+# 182: random's str seed, statistics' paired measures, and a module that runs its
+# own main(). Seeding MT19937 from a
 # SHA-512 digest is costly enough in the -frozen interpreter leg to need a file
 # of its own under the step brake (-max-steps, 100M per call); see
 # tests/python-test-full.py for the conventions.
@@ -48,8 +49,24 @@ def s152():
                             "x is constant"])
 
 
+# ===== SECTION 182: a module that runs main() itself =====
+# This file ends in the `if __name__ == "__main__":` guard, so its main() runs
+# exactly once: the implicit entry a module with a main() otherwise gets is
+# skipped when the top level calls main or tests __name__. Rows from CPython 3.14.
+S182runs = [0]
+
+def s182():
+    S182runs[0] += 1
+    check("entry1", S182runs[0] == 1 and __name__ == "__main__")
+
 def main():
     s151() # SECTION-CALL 151
     s152() # SECTION-CALL 152
+    s182() # SECTION-CALL 182
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]
+
+if __name__ == "__main__":
+    S182rc = main()
+    if S182rc != 0:
+        exit(S182rc)

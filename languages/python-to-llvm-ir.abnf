@@ -190,7 +190,8 @@ Program     <~~ buildMain(takeAll()) ~~>
 // Imports are module level (column 0), so they are tried at the TopStmt level
 // (before Statement, outside the stmtPos wrapper); an import that binds a name
 // pushes that binding's statement for buildMain(takeAll()).
-TopStmt     = SameLevel ( ImportLine | Statement ) ;
+TopStmt     <~~ if (pyCurMod == "__main__" && pyTopRunsEntry(c.srcSlice(up.start, up.pos), pyEntryName())) { pyTopEntry = true } ~~>
+            = SameLevel ( ImportLine | Statement ) ;
 ImportLine  = ( Import | FromImport ) NL ;
 
 // Module level imports. resolveImport (lib/compile-core.js) checks each module
@@ -5262,10 +5263,14 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // Whether main() exists is a runtime question here (the top level may bind it
         // any way it likes), so the test is emitted: js_scope_typeof answers "undefined"
         // for a name that is not bound anywhere instead of raising, which is exactly what
-        // makes it safe to ask about a name that may not exist. A script without a main()
-        // has already done its work top to bottom and simply returns.
-        var entry = c.mainName
-        if (entry == undefined || entry == "") { entry = "main" }
+        // makes it safe to ask about a name that may not exist. A script without a main(),
+        // or one whose top level runs it (pyTopRunsEntry), has already done its work top
+        // to bottom and simply returns.
+        if (pyTopEntry) {
+            b.NewRet(hUndef)
+            return
+        }
+        var entry = pyEntryName()
         var tv = callExt(b, "js_scope_typeof", [curScopeV, emitStr(b, entry)])
         var isFn = emitBin(b, "==", tv, emitStr(b, "function"))
         var callB = curF.NewBlock("")

@@ -1,6 +1,6 @@
 // python-import.js -- the module tables the import statements of both python
-// grammars read, for python-interpreter.abnf and python-to-llvm-ir.abnf
-// (include).
+// grammars read, and the main module's implicit-entry test, for
+// python-interpreter.abnf and python-to-llvm-ir.abnf (include).
 
 // The modules (and submodules) written in Python: lib/python-<top>.py.
 var pyLibMods = ["copy", "dataclasses", "collections", "json", "itertools",
@@ -60,4 +60,63 @@ function pyLibAll(src, mod) {
         q = src.indexOf("\"", close + 1)
     }
     return out
+}
+
+// The implicit entry: a main module that defines the entry function (main, or
+// -main's name) is entered through it after its top level ran - unless that top
+// level runs the program itself, the way a real script does. pyTopRunsEntry
+// answers that for the source text of one top-level statement: it does when it
+// calls the entry by name, or when it is an `if` that tests __name__ (the
+// `if __name__ == "__main__":` guard). A def, class or decorated definition never
+// does, and strings and comments are skipped, so a quoted name or a remark does
+// not count.
+var pyTopEntry = false
+function pyEntryName() {
+    var e = c.mainName
+    return (e == undefined || e == "") ? "main" : e
+}
+function pyTopRunsEntry(src, entry) {
+    var n = src.length
+    var i = 0
+    var first = ""
+    var prev = ""
+    while (i < n) {
+        var ch = src.charAt(i)
+        if (ch == "#") {
+            while (i < n && src.charAt(i) != "\n") { i++ }
+        } else if (ch == "'" || ch == "\"") {
+            var q = src.substring(i, i + 3) == ch + ch + ch ? ch + ch + ch : ch
+            i += q.length
+            while (i < n && src.substring(i, i + q.length) != q) {
+                if (src.charAt(i) == "\\") { i++ }
+                i++
+            }
+            i += q.length
+            prev = ch
+        } else if (pyEntryIdChar(ch)) {
+            var j = i
+            while (j < n && pyEntryIdChar(src.charAt(j))) { j++ }
+            var w = src.substring(i, j)
+            if (first == "") {
+                first = w
+                if (w == "def" || w == "class" || w == "async") { return false }
+            }
+            if (first == "if" && w == "__name__") { return true }
+            if (w == entry && prev != ".") {
+                var k = j
+                while (k < n && (src.charAt(k) == " " || src.charAt(k) == "\t")) { k++ }
+                if (src.charAt(k) == "(") { return true }
+            }
+            prev = "a"
+            i = j
+        } else {
+            if (ch == "@" && first == "") { return false }
+            if (ch != " " && ch != "\t" && ch != "\n" && ch != "\r") { prev = ch }
+            i++
+        }
+    }
+    return false
+}
+function pyEntryIdChar(ch) {
+    return (ch >= "a" && ch <= "z") || (ch >= "A" && ch <= "Z") || (ch >= "0" && ch <= "9") || ch == "_" || ch > "\x7f"
 }

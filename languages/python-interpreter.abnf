@@ -107,7 +107,8 @@ Program     <~~ runProgram(takeAll()) ~~>
             = [ NL ] { TopStmt } ;
 // Imports are module level (column 0), so they are tried at the TopStmt level
 // (before Statement); an import that binds a name pushes that binding's statement.
-TopStmt     = SameLevel ( ImportLine | Statement ) ;
+TopStmt     <~~ if (pyCurMod == "__main__" && pyTopRunsEntry(c.srcSlice(up.start, up.pos), pyEntryName())) { pyTopEntry = true } ~~>
+            = SameLevel ( ImportLine | Statement ) ;
 ImportLine  = ( Import | FromImport ) NL ;
 
 // Module level imports. resolveImport (lib/interp-core.js) checks each module
@@ -15081,10 +15082,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
 
     // A module that defines a top-level main() (the ratchet files do) is run for its
     // definitions and then entered through it; its return value is the exit status.
-    // A script without one has already done its work top to bottom.
-    var entry = c.mainName
-    if (entry == undefined || entry == "") { entry = "main" }
-    if (hasOwn(globalScope, entry) && typeof globalScope[entry] == "function") {
+    // A script without one, or one whose top level runs it (pyTopRunsEntry), has
+    // already done its work top to bottom.
+    var entry = pyEntryName()
+    if (!pyTopEntry && hasOwn(globalScope, entry) && typeof globalScope[entry] == "function") {
         var ret = anytype
         try {
             ret = globalScope[entry]()
