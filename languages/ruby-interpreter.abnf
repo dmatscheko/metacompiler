@@ -9418,7 +9418,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (name == "public_instance_methods") {
                 return publicOnly(target, args.length > 0 && !rtest(args[0]) ? ownInstanceMethods(target) : allInstanceMethods(target))
             }
-            if (name == "method_defined?") { return symListHas(allInstanceMethods(target), rstr(args[0])) }
+            if (name == "method_defined?" || name == "public_method_defined?" || name == "private_method_defined?" || name == "protected_method_defined?") {
+                var mvk = methodVisIn(target, rstr(args[0]), !(args.length > 1 && !rtest(args[1])))
+                if (name == "method_defined?") { return mvk == "public" || mvk == "protected" }
+                return mvk == name.substring(0, name.indexOf("_"))
+            }
             if (name == "constants") { return constNames(target, !(args.length > 0 && !rtest(args[0]))) }
             // Module#ancestors / #include? / #< / #<= / #> / #>=: the reflection surface.
             if (name == "ancestors") { return ancestorsOf(target) }
@@ -11865,6 +11869,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 if (fn.singleton === true) { scopePut(mod, "$s$" + fn.name, makeMethodClosure(fn)); snamePut(mod, fn.name) }
                 else {
                     scopePut(mod, fn.name, makeMethodClosure(fn))
+                    if (curVis == "private" || curVis == "protected") { scopePut(mod, "$v$" + fn.name, curVis) }
                     mod.__methodNames.push(fn.name)
                     imnNote(mod, fn.name)
                     // module_function: the method is ALSO callable on the module.
@@ -13074,12 +13079,44 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
         return out
     }
+    // The visibility of instance method n of a class, "" when it has none:
+    // Module#public_method_defined? and its private / protected twins, which see
+    // the class alone when inherit is false. initialize and its kin are private
+    // whatever the body says; past the program's classes the builtin table
+    // decides, with the private Kernel methods and the top-level defs (private
+    // methods of Object). Twins: rubyMethodVis in abnf/jsrtruby.go, rbMethodVis
+    // in lib/ruby-rt.metajs.
+    function methodVisIn(cls, n, inherit) {
+        var c = anytype
+        c = cls
+        while (c != undefined && c != null && c.__builtin !== true) {
+            var lv = levelVis(c, n)
+            if (lv != "") { return n == "initialize" || n == "initialize_copy" || n == "respond_to_missing?" ? "private" : lv }
+            if (!inherit) { return "" }
+            c = c.__super
+        }
+        if (n == "initialize" || rbRespondsPrivate(n) || hasOwn(globalScope, "$d$" + n)) { return "private" }
+        return rbResponds(c != undefined && c != null ? c.__name : "Object", n) ? "public" : ""
+    }
+    // One class's own answer for methodVisIn: its own method, a visibility
+    // directive over an inherited one, or a mixed-in module's method.
+    function levelVis(c, n) {
+        if (hasOwn(c, "$v$" + n) && lookupMethod(c, n) !== undefined) { return c["$v$" + n] }
+        if (hasOwn(c, n)) { return "public" }
+        var mods = []
+        if (c.__prepends != undefined) { mods = mods.concat(c.__prepends) }
+        if (c.__mixins != undefined) { mods = mods.concat(c.__mixins) }
+        for (var m = mods.length - 1; m >= 0; m--) {
+            if (hasOwn(mods[m], n)) { return hasOwn(mods[m], "$v$" + n) ? mods[m]["$v$" + n] : "public" }
+        }
+        return ""
+    }
     // The declared visibility of a method, looked up along the class chain.
     function visOf(cls, name) {
         var c = cls
         while (c != undefined && c != null) {
-            if (hasOwn(c, "$v$" + name)) { return c["$v$" + name] }
-            if (hasOwn(c, name)) { return "public" }
+            var lv = levelVis(c, name)
+            if (lv != "") { return lv }
             c = c.__super
         }
         return "public"

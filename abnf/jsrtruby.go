@@ -2041,6 +2041,50 @@ func rubyRestricted(cls interface{}, n string) bool {
 	return false
 }
 
+// rubyMethodVis is the visibility of instance method n of a class, "" when it
+// has none: Module#method_defined? and its public / private / protected twins,
+// which see the class alone when inherit is false. A restricted method is kept
+// under "$q$" + n, a private one also marked "$pv$" + n (emitMethods in
+// ruby-to-llvm-ir.abnf). initialize and its kin are private whatever the body
+// says; past the program's classes the builtin table decides, with the private
+// Kernel methods and the top-level defs. Twins: methodVisIn in
+// ruby-interpreter.abnf, rbMethodVis in lib/ruby-rt.metajs.
+func (rt *jsrt) rubyMethodVis(o *jsObject, n string, inherit bool) string {
+	c := o
+	for c != nil {
+		if _, b := c.props["__rbuiltin"]; b {
+			break
+		}
+		if _, has := c.props["$q$"+n]; has {
+			if _, p := c.props["$pv$"+n]; p {
+				return "private"
+			}
+			return "protected"
+		}
+		if v, has := c.props[n]; has && isCallable(v) {
+			if n == "initialize" || n == "initialize_copy" || n == "respond_to_missing?" {
+				return "private"
+			}
+			return "public"
+		}
+		if !inherit {
+			return ""
+		}
+		c, _ = c.props["__super"].(*jsObject)
+	}
+	if n == "initialize" || rt.rubyRespondsPrivate(n) {
+		return "private"
+	}
+	bn := "Object"
+	if c != nil {
+		bn, _ = c.props["__rbuiltin"].(string)
+	}
+	if rubyResponds(bn, n) {
+		return "public"
+	}
+	return ""
+}
+
 // rubyRespondClass is the builtin class respond_to? looks up, "" for a user
 // instance or class (or anything else that answers from its own tables).
 func (rt *jsrt) rubyRespondClass(v interface{}) string {

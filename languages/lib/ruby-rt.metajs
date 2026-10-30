@@ -7825,6 +7825,30 @@ function rbRestricted(cls, n) {
     return false
 }
 
+// The visibility of instance method n of a class, "" when it has none. Twin of
+// rubyMethodVis in abnf/jsrtruby.go, which states the rule.
+function rbMethodVis(cls, n, inherit) {
+    var c = anytype
+    c = cls
+    while (c !== undefined && c !== null && rbIsObj(c) && c["__rbuiltin"] === undefined) {
+        if (c["$q$" + n] !== undefined) {
+            if (c["$pv$" + n] !== undefined) { return "private" }
+            return "protected"
+        }
+        if (typeof c[n] == "function") {
+            if (n == "initialize" || n == "initialize_copy" || n == "respond_to_missing?") { return "private" }
+            return "public"
+        }
+        if (!inherit) { return "" }
+        c = c["__super"]
+    }
+    if (n == "initialize" || rbRespondsPriv(n)) { return "private" }
+    var bn = "Object"
+    if (c !== undefined && c !== null && rbIsObj(c) && typeof c["__rbuiltin"] == "string") { bn = c["__rbuiltin"] }
+    if (rbResponds(bn, n)) { return "public" }
+    return ""
+}
+
 function rbMethod(target, name, args) {
     // Object#send / #__send__ / #public_send: the method NAME is the first
     // argument and the rest of the list (block marker included) is the call.
@@ -8358,15 +8382,10 @@ function rbMethod(target, name, args) {
                 if (rbNPos(args) > 0 && !rbTruthy(rbArgAt(args, 0))) { return rbPublicIMethods(target, rbOwnIMethods(target)) }
                 return rbPublicIMethods(target, rbAllIMethods(target))
             }
-            if (name == "method_defined?") {
-                var mdn = rbStr(rbArgAt(args, 0))
-                var mds = rbAllIMethods(target)
-                var mdi = 0
-                while (mdi < mds.length) {
-                    if (mds[mdi]["s"] == mdn) { return true }
-                    mdi = mdi + 1
-                }
-                return false
+            if (name == "method_defined?" || name == "public_method_defined?" || name == "private_method_defined?" || name == "protected_method_defined?") {
+                var mvk = rbMethodVis(target, rbStr(rbArgAt(args, 0)), rbNPos(args) < 2 || rbTruthy(rbArgAt(args, 1)))
+                if (name == "method_defined?") { return mvk == "public" || mvk == "protected" }
+                return mvk == name.substring(0, name.indexOf("_"))
             }
             if (name == "constants") { return rbConstNames(target, rbNPos(args) == 0 || rbTruthy(rbArgAt(args, 0))) }
             if (name == "class") {

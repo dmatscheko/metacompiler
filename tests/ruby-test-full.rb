@@ -5127,6 +5127,52 @@ def s122
         S122Y != S122M::S122Y && S122Y.instance_methods(false) == [:e] && S122M::S122Y.new.d == 4)
 end
 
+# ===== SECTION 123: visibility queries =====
+# Module#public_method_defined? / private_method_defined? /
+# protected_method_defined? answer the method's visibility along the ancestors
+# (only the class itself with a false second argument); method_defined? is public
+# or protected. initialize, the private Kernel methods and a mixed-in module's
+# private methods are private, and a subclass may make an inherited method
+# private or public again. /usr/bin/ruby 2.6 settles each.
+class S123A
+  def pub; end
+  def initialize; end
+  private
+  def pri; end
+  protected
+  def pro; end
+  public
+  private def pri2; end
+end
+class S123B < S123A
+  def pro; end
+  private :pub
+end
+module S123M
+  def mpub; mpri + 1; end
+  private
+  def mpri; 10; end
+end
+class S123C
+  include S123M
+end
+def s123
+  vk = lambda do |k, n|
+    [k.method_defined?(n), k.public_method_defined?(n), k.private_method_defined?(n), k.protected_method_defined?(n)]
+  end
+  check("vq123a", vk[S123A, :pub] == [true, true, false, false] && vk[S123A, :pri] == [false, false, true, false] &&
+        vk[S123A, :pro] == [true, false, false, true] && vk[S123A, :pri2] == [false, false, true, false] &&
+        vk[S123A, :initialize] == [false, false, true, false] && vk[S123A, :puts] == [false, false, true, false] &&
+        vk[S123A, :nope] == [false, false, false, false] && vk[S123A, :to_s] == [true, true, false, false])
+  check("vq123b", vk[S123B, :pub] == [false, false, true, false] && vk[S123B, :pro] == [true, true, false, false] &&
+        vk[S123B, :pri] == [false, false, true, false] && S123B.private_method_defined?(:pri, false) == false &&
+        S123B.public_method_defined?(:pro, false) && String.public_method_defined?(:upcase) &&
+        !String.private_method_defined?(:upcase) && Integer.method_defined?(:+))
+  me = begin; S123C.new.mpri; rescue NoMethodError => e; e.message; end
+  check("vq123c", vk[S123C, :mpub] == [true, true, false, false] && vk[S123C, :mpri] == [false, false, true, false] &&
+        S123M.private_method_defined?(:mpri) && S123C.new.mpub == 11 && me.start_with?("private method `mpri' called for"))
+end
+
 s39() # SECTION-CALL 39
 s40() # SECTION-CALL 40
 s41() # SECTION-CALL 41
@@ -5211,5 +5257,6 @@ s119() # SECTION-CALL 119
 s120() # SECTION-CALL 120
 s121() # SECTION-CALL 121
 s122() # SECTION-CALL 122
+s123() # SECTION-CALL 123
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

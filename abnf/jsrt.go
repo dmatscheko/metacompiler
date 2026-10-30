@@ -11526,14 +11526,13 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 					return rubyPublicIMethods(o, rubyOwnIMethods(o))
 				}
 				return rubyPublicIMethods(o, rt.rubyAllIMethods(o))
-			case "method_defined?":
-				n := rt.rubyStr(argAt(args, 0))
-				for _, e := range rt.rubyAllIMethods(o).elems {
-					if e.(jsSym).s == n {
-						return true
-					}
+			case "method_defined?", "public_method_defined?", "private_method_defined?", "protected_method_defined?":
+				pos, _ := rubyBlockArgs(args)
+				k := rt.rubyMethodVis(o, rt.rubyStr(argAt(pos, 0)), len(pos) < 2 || rubyTruthy(pos[1]))
+				if name == "method_defined?" {
+					return k == "public" || k == "protected"
 				}
-				return false
+				return k == name[:strings.IndexByte(name, '_')]
 			case "constants":
 				pos, _ := rubyBlockArgs(args)
 				return rt.rubyConstNames(o, len(pos) == 0 || rubyTruthy(pos[0]))

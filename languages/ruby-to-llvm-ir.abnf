@@ -7763,6 +7763,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             var rk = ""
             for (var q = 0; q < restrictedList.length; q++) { if (restrictedList[q].name == m.name) { rk = restrictedList[q].kind } }
             if (rk != "" && prefix == "") { key = "$q$" + m.name }
+            // $pv$ tells a private method from a protected one (rubyMethodVis in
+            // abnf/jsrtruby.go).
+            if (rk == "private" && prefix == "") { callExt(b, "js_set", [dstV, emitStr(b, "$pv$" + m.name), hTrue]) }
             curMethName = m.name
             curMethParams = paramNames(m.params)
             curMethPs = m.params
@@ -7849,6 +7852,30 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // The method descriptors a whole ancestry contributes, in the order emitMethods
     // wants them: FARTHEST ancestor first, because emitMethods js_sets in order and
     // the last write wins.
+    // The private / protected methods a class gets from its included modules: the
+    // module's visibility, unless the class defines or restricts the name itself.
+    // The nearest module defining a name decides, as its def is the one the class
+    // keeps (mixinDefsAll).
+    var moduleRestricted = {}
+    function mixinRestricted(anc, r) {
+        var out = []
+        var seen = {}
+        for (var i = 0; i < r.methods.length; i++) { seen["$" + r.methods[i].name] = true }
+        for (var j = 0; j < r.restricted.length; j++) { seen["$" + r.restricted[j].name] = true }
+        for (var a = 0; a < anc.length; a++) {
+            var d = mixinDefs(anc[a])
+            var mr = anytype
+            mr = moduleRestricted["$" + anc[a]]
+            for (var k = 0; k < d.length; k++) {
+                if (seen["$" + d[k].name] === true) { continue }
+                seen["$" + d[k].name] = true
+                for (var q = 0; mr != undefined && q < mr.length; q++) {
+                    if (mr[q].name == d[k].name) { out.push(mr[q]) }
+                }
+            }
+        }
+        return out
+    }
     function mixinDefsAll(anc) {
         var out = []
         for (var i = anc.length - 1; i >= 0; i--) {
@@ -7960,6 +7987,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // it; it owes #between?, #clamp and #==, since the runtime already compares
         // through <=>.
         var incAnc = mixAncestry(r.includes, 0)
+        r.restricted = r.restricted.concat(mixinRestricted(incAnc, r))
         var preAnc = mixAncestry(r.prepends, 0)
         var extAnc = mixAncestry(r.extends, 0)
         var own = mixinDefsAll(incAnc)
@@ -8414,7 +8442,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         for (var m3 = 0; m3 < r.sdefs.length; m3++) { snames.push(r.sdefs[m3].name) }
         snames = unionNames(classSMethods["$" + name], snames)
         classSMethods["$" + name] = snames
-        if (restrictedMethods["$" + name] == undefined) { restrictedMethods["$" + name] = [] }
+        moduleRestricted["$" + name] = moduleRestricted["$" + name] == undefined ? r.restricted : moduleRestricted["$" + name].concat(r.restricted)
+        var rnames = []
+        for (var m4 = 0; m4 < r.restricted.length; m4++) { rnames.push(r.restricted[m4].name) }
+        restrictedMethods["$" + name] = unionNames(restrictedMethods["$" + name], rnames)
         // A module's instance methods are emitted onto the module object too (Ruby
         // keeps them there), and one of them may call `super` - which only means
         // anything once the module is mixed into a class. Allowing the emission here
@@ -8459,7 +8490,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             var savedModObj = curModObjBody
             curModObjBody = name
             b = emitMethods(b, modV, mixDefs, "", name, [])
-            b = emitMethods(b, modV, r.methods, "", name, [])
+            b = emitMethods(b, modV, r.methods, "", name, r.restricted)
             curModObjBody = savedModObj
             // The module's instance-method NAMES, which is what
             // `obj.extend(M); obj.singleton_methods' has to answer. keysOf would not
