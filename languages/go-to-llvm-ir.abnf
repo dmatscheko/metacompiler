@@ -5649,6 +5649,15 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     }
     // Each value reports its static type (ArgExpr); one going into a result of
     // interface type is boxed (goDtBoxTo). Twin of goRetBox in go-interpreter.abnf.
+    // A returned constant kr needs converting unless the result is a plain int and
+    // kr an integer constant, which already is one. Twin of goRetKMark in
+    // go-interpreter.abnf.
+    function goRetAdopts(ty, kr) {
+        if (typeof ty != "string") { return false }
+        var w = goTyWord(ty)
+        if (w == "") { return false }
+        return kr.k.f || (w != "int" && w != "int64")
+    }
     function makeReturn(itemsIn) {
         var sp = goSplitArgs(itemsIn)
         goRetNote(sp.krs)
@@ -5663,7 +5672,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                 b = r.b
                 v = curRtys.length == 1 ? emitStoreCopy(b, r.v, curRtys[0]) : r.v
                 // A constant takes the result type: `return 1` from a float64 func is 1.0.
-                if (curRtys.length == 1 && sp.krs[0] != null && typeof curRtys[0] == "string") { v = emitAdoptTy(b, curRtys[0], v) }
+                if (curRtys.length == 1 && sp.krs[0] != null && goRetAdopts(curRtys[0], sp.krs[0])) { v = emitAdoptTy(b, curRtys[0], v) }
                 if (curRtys.length == 1 && goDtBoxTo(atys[0], curRtys[0]) != "") { v = emitDtBox(b, v, goDtBoxTo(atys[0], curRtys[0])) }
                 if (curRtys.length == 1 && sp.rns[0] && goRuneSlotTy(curRtys[0])) { v = emitGiConv(b, v, {w: 32, u: false}) }
             } else if (items.length > 1) {
@@ -5672,7 +5681,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                     var r2 = items[i](b)
                     b = r2.b
                     var rv = i < curRtys.length ? emitStoreCopy(b, r2.v, curRtys[i]) : r2.v
-                    if (i < curRtys.length && sp.krs[i] != null && typeof curRtys[i] == "string") { rv = emitAdoptTy(b, curRtys[i], rv) }
+                    if (i < curRtys.length && sp.krs[i] != null && goRetAdopts(curRtys[i], sp.krs[i])) { rv = emitAdoptTy(b, curRtys[i], rv) }
                     if (i < curRtys.length && goDtBoxTo(atys[i], curRtys[i]) != "") { rv = emitDtBox(b, rv, goDtBoxTo(atys[i], curRtys[i])) }
                     if (i < curRtys.length && sp.rns[i] && goRuneSlotTy(curRtys[i])) { rv = emitGiConv(b, rv, {w: 32, u: false}) }
                     callExt(b, "js_arr_push", [arr, rv])

@@ -5754,9 +5754,10 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         var bx = null
         for (var b = 0; b < items.length; b++) {
             // "$r": a rune constant, an int32 where the result type takes one.
-            // "$k": another constant, which takes the result type (gAdoptTy).
+            // "$k" / "$kf": another integer / float constant, which takes the
+            // result type (goRetKMark).
             var bt = sp.rns[b] ? "$r" : goDtBoxTyP(sp.atys[b])
-            if (bt == "" && sp.krs[b] != null) { bt = "$k" }
+            if (bt == "" && sp.krs[b] != null) { bt = sp.krs[b].k.f ? "$kf" : "$k" }
             if (bt != "") {
                 if (bx == null) { bx = []; for (var z = 0; z < items.length; z++) { bx.push("") } }
                 bx[b] = bt
@@ -5781,9 +5782,17 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         for (var i = 0; i < v.length; i++) { out.push(i < rtl.length ? goRetBox1(v[i], bx[i], rtl[i]) : v[i]) }
         return out
     }
+    // A returned constant converted to its result type, except an integer one
+    // into a plain int, which it already is. Twin of goRetAdopts in
+    // go-to-llvm-ir.abnf.
+    function goRetKMark(bt, rt, v) {
+        var w = goTyWord(rt)
+        if (bt == "$k" && (w == "int" || w == "int64")) { return v }
+        return gAdoptTy(rt, v)
+    }
     function goRetBox1(v, bt, rt) {
         if (bt == "$r") { return goRuneSlotTy(rt) ? szConv(v, 32, false) : v }
-        if (bt == "$k") { return gAdoptTy(rt, v) }
+        if (bt == "$k" || bt == "$kf") { return goRetKMark(bt, rt, v) }
         return (bt != "" && goIsIfaceTy(rt)) ? goDtBox(v, bt) : v
     }
     // items = [{v: thunk}...]: one label; no values means 'default'.

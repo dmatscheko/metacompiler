@@ -1136,8 +1136,13 @@ func s126() {
 // 1.0. The expected values are go run's.
 type cx127 struct{ z complex128 }
 
-func one127() complex128 { return 1 }
-func half127() float64   { return 1 }
+type deg127 float64
+
+func one127() complex128      { return 1 }
+func half127() float64        { return 1 }
+func int127() int             { return 2.0 }
+func pair127() (int, float64) { return 4, 5 }
+func deg127f() deg127         { return 7 }
 
 func s127() {
 	var z complex128 = 3
@@ -1146,6 +1151,8 @@ func s127() {
 	xs[0] = 7
 	p := cx127{z: 2}
 	check("cxloc127", fmt.Sprint(z, zero, xs, p, one127()) == "(3+0i) (0+0i) [(7+0i) (2.5+0i)] {(2+0i)} (1+0i)" && half127()/2 == 0.5)
+	pa, pb := pair127()
+	check("kret127", int127()/4 == 0 && pa/3 == 1 && pb/2 == 2.5 && deg127f()/2 == 3.5)
 	m := map[complex128]int{1i: 2, 3: 4}
 	m[2i] = 6
 	k := 2.0
