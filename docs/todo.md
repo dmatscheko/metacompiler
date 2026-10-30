@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-867** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-868** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -128,10 +128,11 @@ nestOwner / nestedOf are keyed by simple class name (last wins); key them by bin
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-866 bash: a prefix assignment after a leading redirection · P3 · SH · IN PROGRESS (SH worker, round 15) [V SH worker]
-`>/dev/null x=5 echo hi` → bash prints `hi` (x=5 is a prefix assignment for echo); both halves: parse error. A simple
-command is `{ redirection | assignment }* word { word | redirection }*` — redirections and assignments may interleave
-before the command word.
+### T-867 bash: a prefix assignment is visible while the command's own words expand · P1 · SH · IN PROGRESS (SH worker, round 16) [V SH worker + master]
+WRONG ANSWER, every leg: `e=5 echo "e=$e"` → bash `e=`, ours `e=5`; `x=1; x=2 echo "x=$x"` → bash `x=1`, ours `x=2`.
+bash expands the command's words first; prefix assignments only affect the command's environment (a function or
+builtin sees them during its run, and they are restored after — except for special builtins in POSIX mode).
+Restructure makeSimpleCommand in both engines: expand words, then apply the prefix assignments around the call.
 
 # C — C subset
 
@@ -917,6 +918,7 @@ T-860 bash: $LINENO, quotes in quoted ${v-w}, case in "$( )", fd dup order, here
 T-859 ruby: class-body scope gate, nested reopen, visibility queries, encoding remainders — PARTIAL 46515fe9 — class/module bodies are a local scope gate in both halves (regression fixed; compiler too), class X in a module is M::X with lexical constant lookup, module reopen in the compiler, public/private/protected_method_defined? and method_defined? per MRI, module private sections, US-ASCII and invalid-UTF-8 strings, byte escapes, interpolated binary, pack/unpack integer/string/base64 directives; in-place re-encoding of a plain String, float pack and String#encode filed as T-864
 T-863 bash: newlines in [[ ]], fd 3+, ${!u} error under 2>/dev/null, $( ) LINENO, quote corner — DONE de8a711c (newlines in [[ ]] per bash's 17 measured shapes, and after && || | in command lists; fds 3-9 incl. exec scoping and bad-fd errors; $( ) LINENO numbered from the enclosing command line; " inside '...' in a quoted ${v-w}; the ${!u} 2>/dev/null item does not reproduce at HEAD — pinned by ie1. DECLINED remainder: $LINENO of a compound command written on one line inside $( ) (bash 23 vs ours 22) and of a function defined and called inside $( ) (44 vs 42) — bash re-flows re-parsed compound commands through its command printer; two rounds found no rule that reproduces it, and one case fits no pure printer model)
 T-865 bash: `$NAME"` glued inside a nested "…"; a redirection alone on a line — DONE 1f9dce1b (GlueRef reads a $NAME across the quotes of a quoted ${v-w} word as bash does, = bash 5.3 and 3.2 on 9 forms; here-doc pre-pass keeps its place after a ' holding a "; RedirCommand: redirections alone run : with them, redirections before an assignment; no filesystem by design, so >file creates nothing. DECLINED: "${u:-a"$x"$'b'}" — bash turns $'b' into text before reading the glued name, an internal quirk with no further use)
+T-866 bash: a prefix assignment after a leading redirection — DONE 1a1f2704 (redirections interleave with leading assignments in PrefixCommand and Assignment, both grammars — = bash 5.3)
 
 # Settled — do not re-open
 
