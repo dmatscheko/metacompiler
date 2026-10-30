@@ -32,6 +32,11 @@ union UB { unsigned a : 3; signed b : 5; int i; };
 struct FS { char c; float f; short s; float g; };
 struct FN { char c; int (*fn)(int); float f; };
 int twice(int x) { return 2 * x; }
+/* An anonymous struct inside a union: its members at their own offsets, sharing the
+   union's bytes with the other members. */
+union AS { struct { char a; int b : 5; int c : 3; }; long long q;
+           struct { char d[3]; union { short e; char f; }; }; };
+struct AN { char k; union { char m; struct { char p; union { int r; struct { short s1, s2; }; }; }; }; char t; };
 unsigned fbits(float f) {
     unsigned char *b = (unsigned char *)&f;
     return b[0] | b[1] << 8 | b[2] << 16 | (unsigned)b[3] << 24;
@@ -102,6 +107,21 @@ int main(void) {
     struct FN fc = fn[1];
     check(sizeof(struct FN) == 24 && (char *)&fn[1].f - (char *)&fn[0] == 40 && fn[1].fn(21) == 42
           && fc.fn(4) == 8 && fc.f == 1.25f && fc.c == 7);
+
+    union AS as;
+    as.q = 0; as.a = 9; as.b = -3; as.c = 2;
+    int ab = as.d[1];
+    as.e = 301;
+    check(sizeof as == 8 && ab == 93 && as.a == 9 && as.d[0] == 9 && as.e == 301 && as.f == 45
+          && (char *)&as.e - (char *)&as == 4 && as.b == -3 && as.c == 2);
+    struct AN an = { 1, { 2 }, 3 };
+    an.r = 0x00050004;
+    check(sizeof an == 16 && an.s1 == 4 && an.s2 == 5 && an.m == 2 && an.p == 2 && an.t == 3
+          && (char *)&an.s2 - (char *)&an == 10 && (char *)&an.t - (char *)&an == 12);
+    /* A member's offset from a null pointer, as offsetof is commonly spelled. */
+    long o1 = (char *)&((struct AN *)0)->s2 - (char *)0;
+    long o2 = (long)&((struct FN *)0)->f;
+    check(o1 == 10 && o2 == 16 && (struct FN *)0 == 0);
 
     putchar('0' + nchecks / 10); putchar('0' + nchecks % 10);
     putchar(' '); putchar('c'); putchar('h'); putchar('e'); putchar('c'); putchar('k');

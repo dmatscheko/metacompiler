@@ -1903,6 +1903,12 @@ KwDefault   = "default" KwEnd ;
                     return {b: r.b, v: k64exact(p64), ct: ct, cv: u64Num(p64, ct.u == true), p64: p64}
                 }
                 var cv = convertNum(ct, (r.p64 != undefined && ct.k == "int" && ct.bool != true) ? r.p64.lo : r.cv)
+                // A constant address is an inttoptr constant: clang refuses a bitcast
+                // or a ptrtoint of an integer, which llvm.Run would let through.
+                if (isPtrLike(ct)) {
+                    var a64 = r.p64 != undefined ? k64exact(r.p64) : k64exact(u64FromNum(trunc0(r.cv)))
+                    return {b: r.b, v: llvm.constant.NewIntToPtr(a64, i32p), ct: ct, cv: cv}
+                }
                 return {b: r.b, v: (ct.k == "flt") ? zero : kint(cv | 0), ct: ct, cv: cv}
             }
             // Pointer <-> integer is ptrtoint / inttoptr (LLVM has no sext from a pointer).
@@ -2277,8 +2283,9 @@ KwDefault   = "default" KwEnd ;
         if (f.dims != undefined) return arrCt(f.dims, base, 0)
         return base
     }
-    // Give one named member its parent-level LLVM slot, or a bit-field the byte offset
-    // of its storage unit and its bit offset in it (boff, shift). An unnamed ':n' bit
+    // Give one named member its parent-level LLVM slot, or - for a bit-field, or any
+    // member when slot is -1 - the byte offset of its storage (boff), and a bit-field
+    // its bit offset in that unit (shift). An unnamed ':n' bit
     // field is pure padding: its bits are laid out but no name is bound to them.
     function registerField(fields, order, name, f, ct, slot, boff, shift) {
         // The braces are load-bearing: a value-less `return` as the UNBRACED body of an
@@ -2287,7 +2294,7 @@ KwDefault   = "default" KwEnd ;
         if (hasOwn(fields, f.name)) fail("duplicate field " + f.name + " in " + tagName(name))
         var bf = undefined
         if (f.bits != undefined) { bf = bitField(f, ct, shift) }
-        fields[f.name] = {idx: slot, ct: ct, bf: bf, boff: f.bits != undefined ? boff : undefined}
+        fields[f.name] = {idx: slot, ct: ct, bf: bf, boff: (f.bits != undefined || slot < 0) ? boff : undefined}
         order.push(f.name)
     }
     // A union-like run of member groups: every member selects the SAME parent slot, so
@@ -2300,10 +2307,19 @@ KwDefault   = "default" KwEnd ;
         var ms = []
         for (var i = 0; i < groups.length; i++) {
             var g = groups[i]
+            if (g.anonFields != undefined && g.isUnion != true) {
+                // An anonymous STRUCT has several members at one union slot, so they are
+                // reached by byte offset from the union's start; the slot is typed as
+                // the struct's synthetic tag, which has its size and alignment.
+                var sL = {ltys: [], off: 0, align: 1, bits: -1, at: boff}
+                ms.push(cAbiSub(layoutStructInto(fields, [], g.anonFields, name, sL)))
+                var sct = ctStruct(anonMemberTag(fields, g, boff))
+                order.push(sct.s)
+                if (wideCt == undefined || machBytes(sct) > machBytes(wideCt)) wideCt = sct
+                if (machAlign(sct) > malign) malign = machAlign(sct)
+                continue
+            }
             if (g.anonFields != undefined) {
-                // An anonymous STRUCT inside a union would need several distinct slots
-                // at one parent index, which this one-slot model cannot express.
-                if (g.isUnion != true) fail("an anonymous struct inside a union is not supported (in " + tagName(name) + ")")
                 var r = layoutUnionAt(fields, [], g.anonFields, name, slot, boff)
                 order.push(anonMemberTag(fields, g, boff))
                 if (r.wideCt != undefined && (wideCt == undefined || machBytes(r.wideCt) > machBytes(wideCt))) wideCt = r.wideCt
@@ -2364,7 +2380,7 @@ KwDefault   = "default" KwEnd ;
         if (w == 0 || (at - at % unitBits) != (at + w - 1) - (at + w - 1) % unitBits) at = cRoundUp(at, machAlign(ct) * 8)
         if (f.pad != true && machAlign(ct) > L.align) L.align = machAlign(ct)
         var unit = at - at % unitBits
-        registerField(fields, order, name, f, ct, -1, unit / 8, at - unit)
+        registerField(fields, order, name, f, ct, -1, (L.at != undefined ? L.at : 0) + unit / 8, at - unit)
         var need = cRoundUp(at + w, 8) / 8
         if (need > L.off) { L.ltys.push(llvm.types.NewArray(need - L.off, i8)); L.off = need }
         L.bits = at + w
@@ -2379,27 +2395,30 @@ KwDefault   = "default" KwEnd ;
     // A struct-like run of member groups: one LLVM member per field, appended to L.
     // An anonymous struct member is FLATTENED into the parent (its fields simply keep
     // taking the next slots, aligned as the nested struct would be); an anonymous
-    // union member takes a single shared slot. Returns cc's layout of the run.
+    // union member takes a single shared slot. Inside a union, L.at is the run's byte
+    // offset in the tag and its members are registered by byte offset (slot -1),
+    // since L's slots are not the tag's. Returns cc's layout of the run.
     function layoutStructInto(fields, order, groups, name, L) {
         var ms = []
+        var base = L.at != undefined ? L.at : 0
         for (var i = 0; i < groups.length; i++) {
             var g = groups[i]
             if (g.anonFields != undefined) {
                 if (g.isUnion == true) {
                     mPadTo(L, groupsMAlign(g.anonFields))
                     var uat = L.off
-                    var r = layoutUnionAt(fields, [], g.anonFields, name, L.ltys.length, L.off)
+                    var r = layoutUnionAt(fields, [], g.anonFields, name, L.at != undefined ? -1 : L.ltys.length, base + uat)
                     if (r.wideCt == undefined) fail("an empty anonymous union in " + tagName(name) + " has no layout")
                     mPushUnion(L, r)
                     ms.push(cAbiSub(r.cc))
-                    order.push(anonMemberTag(fields, g, uat))
+                    order.push(anonMemberTag(fields, g, base + uat))
                 } else {
                     var ga = groupsMAlign(g.anonFields)
                     mPadTo(L, ga)
                     var sat = L.off
                     ms.push(cAbiSub(layoutStructInto(fields, [], g.anonFields, name, L)))
                     mPadTo(L, ga)
-                    order.push(anonMemberTag(fields, g, sat))
+                    order.push(anonMemberTag(fields, g, base + sat))
                 }
                 continue
             }
@@ -2410,7 +2429,7 @@ KwDefault   = "default" KwEnd ;
                 ms.push(cAbiMember(ct, f))
                 if (f.bits != undefined) { mBitField(fields, order, name, f, ct, L); continue }
                 mPadTo(L, machAlign(ct))
-                registerField(fields, order, name, f, ct, L.ltys.length, 0, 0)
+                registerField(fields, order, name, f, ct, L.at != undefined ? -1 : L.ltys.length, base + L.off, 0)
                 L.ltys.push(ctLTy(ct))
                 L.off = L.off + machBytes(ct)
             }

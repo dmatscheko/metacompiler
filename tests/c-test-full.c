@@ -350,6 +350,12 @@ struct S12W { unsigned long long e : 40; unsigned long long g : 33; long long h 
 struct S12D { int k; union { int u; char ch; }; int t; };
 struct S12E { char a; struct { char x; long y; }; char z; };
 struct S12D s12_gd = { 1, { 2 }, 3 };
+/* An anonymous struct inside a union: its members are distinct, and the union
+   initializes through it as its first member. */
+struct S12H { int a; union { struct { short lo, hi; }; int w; }; int z; };
+union S12V { struct { char x; double y; }; char raw[16]; };
+struct S12N { char k; union { char m; struct { char p; union { int r; struct { short s1, s2; }; }; }; }; char t; };
+struct S12H s12_gh = { 7, { { 8, 9 } }, 10 };
 int s12(void) {
     struct S12F f;
     int nine = 9;
@@ -389,6 +395,23 @@ int s12(void) {
     struct S12E e4 = e1;
     check(1212, e1.x == 'b' && e1.y == 40 && e1.z == 'c' && e2.y == 3 && e2.z == 4
                 && e3.x == 0 && e3.y == 20 && e3.z == 21 && e4.y == 40 && e4.z == 'c');
+    struct S12H h1 = { 1, { { 2, 3 } }, 4 };
+    struct S12H h2 = { 5, 6, 7 };
+    struct S12H h3 = { .hi = 11, .z = 12 };
+    struct S12H ha[2] = { { 1, { { 2, 3 } }, 4 }, { 5, { { 6, 7 } }, 8 } };
+    check(1213, h1.a == 1 && h1.lo == 2 && h1.hi == 3 && h1.z == 4 && h2.lo == 6 && h2.hi == 7
+                && h2.z == 0 && h3.lo == 0 && h3.hi == 11 && h3.z == 12 && ha[1].lo == 6
+                && ha[1].hi == 7 && ha[1].z == 8 && s12_gh.lo == 8 && s12_gh.hi == 9 && s12_gh.z == 10
+                && sizeof(struct S12H) == 12 && sizeof(union S12V) == 16);
+    union S12V v1 = { { 'x', 1.5 } };
+    union S12V v2 = v1;
+    struct S12N n1 = { 1, { 2 }, 3 };
+    struct S12H *hp = &h1;
+    hp->hi += 10;
+    n1.s1 = 40; n1.s2 = 50; n1.t = 6;
+    struct S12N n2 = n1;
+    check(1214, v2.x == 'x' && v2.y == 1.5 && h1.hi == 13 && h1.lo == 2 && n2.k == 1 && n2.s1 == 40
+                && n2.s2 == 50 && n2.t == 6 && sizeof(struct S12N) == 16);
     return 0;
 }
 
