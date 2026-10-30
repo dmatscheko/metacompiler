@@ -3269,6 +3269,15 @@ function rbDictFind(keys, k) {
     // A Range is a VALUE key too - `h[1..3]' has to find the entry `h[1..3] = v'
     // made, and two range literals are two distinct objects that rtDictFind (an
     // identity/strictEq scan) can never match.
+    // An object whose class defines eql? is keyed by it.
+    if (rbUserObj(k) && rbFindMethod(k, "eql?") !== undefined) {
+        var u = 0
+        while (u < keys.length) {
+            if (rbUserObj(keys[u]) && rbEql(k, keys[u])) { return u }
+            u = u + 1
+        }
+        return 0 - 1
+    }
     if (rbIsArr(k) || rbIsDict(k) || rbIsRange(k)) {
         var a = 0
         while (a < keys.length) {
@@ -3464,6 +3473,10 @@ function rbArrIndex(t, v) {
 // Ruby's eql?: == that does NOT convert across classes, so `1.eql?(1.0)` is
 // false where `1 == 1.0` is true. Array#uniq and Array#- compare with this.
 function rbEql(a, b) {
+    if (rbUserObj(a)) {
+        var em = rbFindMethod(a, "eql?")
+        if (em !== undefined) { return rbTruthy(em.apply(undefined, [a, b])) }
+    }
     if (rbClassName(a) != rbClassName(b)) { return false }
     return rbEq(a, b)
 }
@@ -3472,10 +3485,17 @@ function rbEql(a, b) {
 function rbSpaceship(l, r) {
     if (rbUserObj(l)) {
         var m = rbFindMethod(l, "<=>")
-        if (m !== undefined) { return Math.trunc(rbToF(m.apply(undefined, [l, r]))) }
-        return null
+        if (m === undefined) { return null }
+        var uc = anytype
+        uc = m.apply(undefined, [l, r])
+        if (rtIsNil(uc)) { return null }
+        return Math.trunc(rbToF(uc))
     }
-    if (rbIsNum(l) && rbIsNum(r)) { return rbNumCmp(l, r) }
+    // A NaN compares with nothing.
+    if (rbIsNum(l) && rbIsNum(r)) {
+        if ((rbIsFlo(l) && l["f"] !== l["f"]) || (rbIsFlo(r) && r["f"] !== r["f"])) { return null }
+        return rbNumCmp(l, r)
+    }
     if ((typeof l == "object" && rtTag(l, "__rstr")) || (typeof r == "object" && rtTag(r, "__rstr"))) { return rbSpaceship(rbSV(l), rbSV(r)) }
     if (typeof l == "string" && typeof r == "string") {
         if (l < r) { return 0 - 1 }
@@ -3506,6 +3526,8 @@ function rbSpaceship(l, r) {
         }
         return rbCmpSign(l.length - r.length)
     }
+    // Object#<=>: 0 for equal values (nil <=> nil), nil otherwise.
+    if (rbEq(l, r)) { return 0 }
     return null
 }
 
@@ -3533,6 +3555,7 @@ function rbCmp(l, r) {
         // A CATCHABLE ArgumentError, not a host abort: MRI's sort raises one and a
         // program may rescue it.
         var ln = rbClassName(l)
+        if (rbUserObj(l)) { ln = l["__class"]["__name"] }
         js_rraise(rbBuiltinClass("ArgumentError"),
                   "comparison of " + (ln == "" ? "Object" : ln) + " with " + rbCmpName(r) + " failed")
     }
@@ -4425,6 +4448,21 @@ function rbRangeMethod(t, name, args) {
             fail("cannot take the length of an endless range")
         }
     }
+    // #min / #max of a range with a numeric end are its bounds (range_min /
+    // range_max). Twin of the arm in ruby-interpreter.abnf's rangeMethod.
+    var rhi = anytype
+    rhi = t["end"]
+    if (npos == 0 && blk === null && (name == "min" || name == "max") && rbIsNum(rhi)) {
+        var rlo = anytype
+        rlo = t["begin"]
+        var mc = rbSpaceship(rlo, rhi)
+        if (mc === null || mc > 0 || (mc == 0 && t["excl"] === true)) { return null }
+        if (name == "min") { return rlo }
+        if (t["excl"] !== true) { return rhi }
+        if (!(typeof rhi == "number" || rbIsBig(rhi))) { rbRaiseErr(name, "TypeError", "cannot exclude non Integer end value") }
+        if (!(typeof rlo == "number" || rbIsBig(rlo))) { rbRaiseErr(name, "TypeError", "cannot exclude end value with non Integer begin value") }
+        return rbBin("-", rhi, 1)
+    }
     if (npos == 0 && blk === null) {
         // #size, #length and #count all answer the ELEMENT COUNT, and that is a
         // DELIBERATE divergence. MRI's Range#size is nil for a non-numeric range
@@ -4439,15 +4477,30 @@ function rbRangeMethod(t, name, args) {
     // Range#step(n): every n-th element. Without a block MRI answers an
     // ArithmeticSequence; the nearest thing in this value model is an
     // Enumerator, which answers #to_a and #each the same way.
+    // A Float bound or step walks doubles (rbnFloatStep).
     if (name == "step") {
-        var by = Math.trunc(rbToF(rbArgAt(args, 0)))
-        if (by <= 0) { rbRaiseErr(name, "ArgumentError", "step can't be 0 or negative") }
-        var src = rbRangeToArr(t)
         var picked = []
-        var si = 0
-        while (si < src.length) {
-            picked.push(src[si])
-            si = si + by
+        var sby = anytype
+        sby = rbArgAt(args, 0)
+        if (rbIsFlo(t["begin"]) || rbIsFlo(t["end"]) || rbIsFlo(sby)) {
+            var fu = rbToF(sby)
+            if (fu < 0) { rbRaiseErr(name, "ArgumentError", "step can't be negative") }
+            if (fu == 0) { rbRaiseErr(name, "ArgumentError", "step can't be 0") }
+            var fs = rbnFloatStep(rbToF(t["begin"]), rbToF(t["end"]), fu, t["excl"] === true)
+            var fi = 0
+            while (fi < fs.length) {
+                picked.push(rbMkFlo(fs[fi]))
+                fi = fi + 1
+            }
+        } else {
+            var by = Math.trunc(rbToF(sby))
+            if (by <= 0) { rbRaiseErr(name, "ArgumentError", "step can't be 0 or negative") }
+            var src = rbRangeToArr(t)
+            var si = 0
+            while (si < src.length) {
+                picked.push(src[si])
+                si = si + by
+            }
         }
         if (blk !== null) {
             var pi = 0
@@ -8064,6 +8117,8 @@ function js_rcase(l, r) {
 // js_rcase above is for). Not exported: only the regex-aware js_rxwhen is emitted.
 function rbWhen(l, r) {
     if (rbIsObj(l) && l["__isclass"] === true) { return rbIsA(r, l) }
+    // Proc#=== / Method#=== call it: `when ->(x) { x > 2 }'.
+    if (rbIsFn(l)) { return rbTruthy(rbCall1(l, r)) }
     // `when' is Ruby's ===, and a Range's === is MEMBERSHIP. The emitter routes a
     // range LITERAL to js_rcase by syntax, so this only bites when the when value
     // is a variable (`when r').

@@ -4652,6 +4652,45 @@ def s105
   check("fd105k", n[0].fdiv(n[1]) == 10.0)
 end
 
+# ===== SECTION 106: Comparable, <=>, === with a Proc, Range bounds and Float steps, eql? keys =====
+# Comparable gives == (<=> answers 0) and clamp, and a nil <=> makes < raise;
+# Object#<=> is 0 for equal values; a Proc in `when' is called; NaN is in no range;
+# a range's min / max with a numeric end are its bounds; a Float step walks doubles;
+# a Hash keys an object by its class's eql? / hash. /usr/bin/ruby 2.6 settles each.
+class S106V
+  include Comparable
+  attr_reader :n
+  def initialize(n); @n = n; end
+  def <=>(o)
+    return nil unless o.is_a?(S106V)
+    n <=> o.n
+  end
+end
+class S106K
+  attr_reader :v
+  def initialize(v); @v = v; end
+  def hash; v.hash; end
+  def eql?(o); o.is_a?(S106K) && v == o.v; end
+end
+def s106
+  v = [1, 2, 5, 3]
+  e1 = begin; S106V.new(v[0]) < v[2]; rescue ArgumentError => e; e.message; end
+  check("cm106a", S106V.new(v[0]) == S106V.new(v[0]) && S106V.new(v[0]) != S106V.new(v[1]) &&
+        S106V.new(v[2]).clamp(S106V.new(v[0]), S106V.new(v[3])).n == 3 && e1 == "comparison of S106V with 5 failed")
+  check("sp106b", [nil <=> nil, true <=> true, false <=> true] == [0, 0, nil])
+  f = ->(x) { x > 2 }
+  r = case 2.5
+      when f then "big"
+      else "small"
+      end
+  nan = Float::NAN
+  check("cw106c", r == "big" && !((0..9) === nan) && !(0..9).include?(nan))
+  check("rg106d", (1.0..2.0).min == 1.0 && (1.0..2.0).max.is_a?(Float) && (1..1.5).max == 1.5 && (1...4).max == 3 &&
+        (1.0..2.0).step(0.5).to_a == [1.0, 1.5, 2.0] && (1.0...2.0).step(0.5).to_a == [1.0, 1.5])
+  hh = {S106K.new(v[0]) => "one"}
+  check("ek106e", hh[S106K.new(v[0])] == "one" && [S106K.new(v[0]), S106K.new(v[0])].uniq.size == 1)
+end
+
 s39() # SECTION-CALL 39
 s40() # SECTION-CALL 40
 s41() # SECTION-CALL 41
@@ -4719,5 +4758,6 @@ s102() # SECTION-CALL 102
 s103() # SECTION-CALL 103
 s104() # SECTION-CALL 104
 s105() # SECTION-CALL 105
+s106() # SECTION-CALL 106
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

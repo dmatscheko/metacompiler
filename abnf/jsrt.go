@@ -7297,15 +7297,31 @@ func (rt *jsrt) rubyRangeMethod(t *jsObject, name string, args []interface{}) in
 	// Range#step(n): every n-th element.
 	// Without a block MRI answers an ArithmeticSequence; the nearest thing in this
 	// value model is an Enumerator, which answers #to_a and #each the same way.
+	// A Float bound or step walks doubles (rubyFloatStep).
 	case "step":
-		by := int(math.Trunc(rubyToF(argAt(pos, 0))))
-		if by <= 0 {
-			rt.rubyRaiseErr(name, "ArgumentError", "step can't be 0 or negative")
-		}
-		src := rt.rubyRangeToArr(t)
 		picked := &jsArray{}
-		for i := 0; i < len(src.elems); i += by {
-			picked.elems = append(picked.elems, src.elems[i])
+		_, fb := t.props["begin"].(jsFlo)
+		_, fe := t.props["end"].(jsFlo)
+		if _, fs := argAt(pos, 0).(jsFlo); fb || fe || fs {
+			unit := rubyToF(argAt(pos, 0))
+			if unit < 0 {
+				rt.rubyRaiseErr(name, "ArgumentError", "step can't be negative")
+			}
+			if unit == 0 {
+				rt.rubyRaiseErr(name, "ArgumentError", "step can't be 0")
+			}
+			for _, d := range rubyFloatStep(rubyToF(t.props["begin"]), rubyToF(t.props["end"]), unit, rt.truthy(t.props["excl"])) {
+				picked.elems = append(picked.elems, jsFlo{f: d})
+			}
+		} else {
+			by := int(math.Trunc(rubyToF(argAt(pos, 0))))
+			if by <= 0 {
+				rt.rubyRaiseErr(name, "ArgumentError", "step can't be 0 or negative")
+			}
+			src := rt.rubyRangeToArr(t)
+			for i := 0; i < len(src.elems); i += by {
+				picked.elems = append(picked.elems, src.elems[i])
+			}
 		}
 		if blk != nil {
 			for _, v := range picked.elems {
@@ -7324,6 +7340,28 @@ func (rt *jsrt) rubyRangeMethod(t *jsObject, name string, args []interface{}) in
 		case "size", "length", "count":
 			rt.fail("cannot take the length of an endless range")
 		}
+	}
+	// #min / #max of a range with a numeric end are its bounds (range_min /
+	// range_max). Twin of the arm in ruby-interpreter.abnf's rangeMethod.
+	if hi := t.props["end"]; len(pos) == 0 && blk == nil && (name == "min" || name == "max") && rubyIsNum(hi) {
+		lo, excl := t.props["begin"], rt.truthy(t.props["excl"])
+		c, ok := rt.rubySpaceship(lo, hi)
+		if !ok || c > 0 || (c == 0 && excl) {
+			return jsNull
+		}
+		if name == "min" {
+			return lo
+		}
+		if !excl {
+			return hi
+		}
+		if !rubyIsIntV(hi) {
+			rt.rubyRaiseErr(name, "TypeError", "cannot exclude non Integer end value")
+		}
+		if !rubyIsIntV(lo) {
+			rt.rubyRaiseErr(name, "TypeError", "cannot exclude end value with non Integer begin value")
+		}
+		return rt.rubyBin("-", hi, float64(1))
 	}
 	if len(pos) == 0 && blk == nil {
 		switch name {
@@ -9657,6 +9695,15 @@ func (rt *jsrt) rubyDictFind(keys *jsArray, k interface{}) int {
 	if i := rt.dictFind(keys, k); i >= 0 {
 		return i
 	}
+	// An object whose class defines eql? is keyed by it.
+	if m, own := rubyFindMethod(k, "eql?"); own && rubyUserObj(k) {
+		for i, e := range keys.elems {
+			if rubyUserObj(e) && rubyTruthy(rt.call(m, jsUndef, []interface{}{k, e})) {
+				return i
+			}
+		}
+		return -1
+	}
 	if !rubyValueKey(k) {
 		return -1
 	}
@@ -9672,6 +9719,9 @@ func (rt *jsrt) rubyDictFind(keys *jsArray, k interface{}) int {
 // `1.eql?(1.0)` is false where `1 == 1.0` is true. It is what Array#uniq
 // compares with (and what Hash keying is defined on).
 func (rt *jsrt) rubyEql(a, b interface{}) bool {
+	if m, own := rubyFindMethod(a, "eql?"); own && rubyUserObj(a) {
+		return rubyTruthy(rt.call(m, jsUndef, []interface{}{a, b}))
+	}
 	return rubyClassName(a) == rubyClassName(b) && rt.rubyEq(a, b)
 }
 
@@ -9720,7 +9770,9 @@ func rubyValueKey(v interface{}) bool {
 func (rt *jsrt) rubySpaceship(l, r interface{}) (int, bool) {
 	if rubyUserObj(l) {
 		if m, ok := rubyFindMethod(l, "<=>"); ok {
-			return int(rubyToF(rt.call(m, jsUndef, []interface{}{l, r}))), true
+			if c := rt.call(m, jsUndef, []interface{}{l, r}); isUndefOrNull(c) != true {
+				return int(rubyToF(c)), true
+			}
 		}
 		return 0, false
 	}
@@ -9736,6 +9788,10 @@ func (rt *jsrt) rubySpaceship(l, r interface{}) (int, bool) {
 			return c, true
 		}
 		x, y := rubyToF(l), rubyToF(r)
+		// A NaN compares with nothing.
+		if x != x || y != y {
+			return 0, false
+		}
 		switch {
 		case x < y:
 			return -1, true
@@ -9787,6 +9843,10 @@ func (rt *jsrt) rubySpaceship(l, r interface{}) (int, bool) {
 			return rubyCmpSign(len(la.elems) - len(ra.elems)), true
 		}
 	}
+	// Object#<=>: 0 for equal values (nil <=> nil), nil otherwise.
+	if rt.rubyEq(l, r) {
+		return 0, true
+	}
 	return 0, false
 }
 
@@ -9824,6 +9884,11 @@ func (rt *jsrt) rubyCmp(l, r interface{}) int {
 		// A CATCHABLE ArgumentError, not a host abort: MRI's sort raises one and
 		// a program may rescue it. The message is rb_cmperr's.
 		ln := rubyClassName(l)
+		if o, isObj := l.(*jsObject); isObj && rubyUserObj(l) {
+			if cls, ok := o.props["__class"].(*jsObject); ok {
+				ln, _ = cls.props["__name"].(string)
+			}
+		}
 		if ln == "" {
 			ln = "Object"
 		}
@@ -14989,6 +15054,10 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		// which is what js_rcase above is for).
 		"js_rwhen": func(a []uint64) uint64 {
 			l, r := u(a[0]), u(a[1])
+			// Proc#=== / Method#=== call it: `when ->(x) { x > 2 }'.
+			if isCallable(l) {
+				return boolH(rt.truthy(rt.call(l, jsUndef, []interface{}{r})))
+			}
 			if lo, ok := l.(*jsObject); ok {
 				if _, isCls := lo.props["__isclass"]; isCls {
 					return boolH(rt.rubyIsA(r, l))

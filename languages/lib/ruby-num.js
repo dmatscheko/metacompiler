@@ -208,6 +208,35 @@ function rbnRoundHalf(x, s, mode) {
     return x
 }
 
+// The doubles a Range#step over Floats visits (ruby_float_step in numeric.c): the
+// count is decided once, allowing for the rounding error of (end - beg) / unit,
+// so the last step is neither lost nor added, and no value passes the end.
+function rbnFloatStep(beg, end, unit, excl) {
+    var out = []
+    if (unit - unit !== 0) {
+        if (unit > 0 ? beg <= end : beg >= end) { out.push(beg) }
+        return out
+    }
+    var n = (end - beg) / unit
+    var err = (Math.abs(beg) + Math.abs(end) + Math.abs(end - beg)) / Math.abs(unit) * Math.pow(2, 0 - 52)
+    if (err > 0.5) { err = 0.5 }
+    if (excl) {
+        if (n <= 0) { return out }
+        if (n < 1) { n = 0 } else { n = Math.floor(n - err) }
+    } else {
+        if (n < 0) { return out }
+        n = Math.floor(n + err)
+    }
+    var i = 0
+    while (i <= n) {
+        var d = i * unit + beg
+        if (unit >= 0 ? end < d : d < end) { d = end }
+        if (!excl || (unit >= 0 ? d < end : d > end)) { out.push(d) }
+        i = i + 1
+    }
+    return out
+}
+
 // One step of Array#sum's Kahan-Babuska summation (ary_add_one in array.c):
 // st.f is the running sum, st.c the compensation answered as f + c at the end. A
 // NaN sticks, and infinities of opposite signs make one.

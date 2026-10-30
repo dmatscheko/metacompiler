@@ -566,3 +566,54 @@ func (rt *jsrt) rubyHashEach(keys, vals *jsArray, blk interface{}) {
 		}
 	}
 }
+
+// rubyIsIntV: an Integer, small or big.
+func rubyIsIntV(v interface{}) bool {
+	switch v.(type) {
+	case float64, *jsBigInt:
+		return true
+	}
+	return false
+}
+
+// rubyFloatStep is the doubles a Range#step over Floats visits
+// (ruby_float_step). Twin of rbnFloatStep in lib/ruby-num.js.
+func rubyFloatStep(beg, end, unit float64, excl bool) []float64 {
+	out := []float64{}
+	if math.IsInf(unit, 0) {
+		if (unit > 0 && beg <= end) || (unit < 0 && beg >= end) {
+			out = append(out, beg)
+		}
+		return out
+	}
+	n := (end - beg) / unit
+	err := (math.Abs(beg) + math.Abs(end) + math.Abs(end-beg)) / math.Abs(unit) * 0x1p-52
+	if err > 0.5 {
+		err = 0.5
+	}
+	if excl {
+		if n <= 0 {
+			return out
+		}
+		if n < 1 {
+			n = 0
+		} else {
+			n = math.Floor(n - err)
+		}
+	} else {
+		if n < 0 {
+			return out
+		}
+		n = math.Floor(n + err)
+	}
+	for i := 0.0; i <= n; i++ {
+		d := float64(i*unit) + beg
+		if (unit >= 0 && end < d) || (unit < 0 && d < end) {
+			d = end
+		}
+		if !excl || (unit >= 0 && d < end) || (unit < 0 && d > end) {
+			out = append(out, d)
+		}
+	}
+	return out
+}

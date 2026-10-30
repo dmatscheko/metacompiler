@@ -5407,7 +5407,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     function spaceship(l, r) {
         if (isUserObj(l)) { return mcall(l, "<=>", [r], null) }
         if (isRStr(l) || isRStr(r)) { return spaceship(rsText(l), rsText(r)) }
-        if (isNumV(l) && isNumV(r)) { return numCmp(l, r) }
+        // A NaN compares with nothing.
+        if (isNumV(l) && isNumV(r)) { return isNaNV(l) || isNaNV(r) ? null : numCmp(l, r) }
         if (typeof l == "string" && typeof r == "string") { return l < r ? -1 : (l > r ? 1 : 0) }
         // A Symbol IS Comparable in Ruby - Symbol#<=> compares the NAMES - so
         // `[:b, :a].sort', #min, #max, #between? and `:a < :b' all work in MRI. It is
@@ -5422,8 +5423,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             }
             return cmpSign(l.length - r.length)
         }
-        return null
+        // Object#<=>: 0 for equal values (nil <=> nil), nil otherwise.
+        return rubyEq(l, r) ? 0 : null
     }
+    function isNaNV(v) { return isFlo(v) && v.f !== v.f }
     // MRI's rb_cmperr message, which `sort`, `min`, `max` and `<` all raise on an
     // incomparable pair: the FIRST operand is named by its class, and the second by
     // its class UNLESS it is a special constant or a Float, which are inspected -
@@ -5561,13 +5564,22 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // Range#step(n): every n-th element. Without a block MRI answers an
         // ArithmeticSequence; the nearest thing in this value model is an Enumerator,
         // which answers #to_a and #each the same way.
+        // A Float bound or step walks doubles (rbnFloatStep).
         if (name == "step") {
-            var by = Math.trunc(toF(args[0]))
-            if (by <= 0) { raiseErr(name, "ArgumentError", "step can't be 0 or negative") }
-            var src = anytype
-            src = rangeToA(t)
             var picked = []
-            for (var pi = 0; pi < src.length; pi += by) { picked.push(src[pi]) }
+            if (isFlo(t.lo) || isFlo(t.hi) || isFlo(args[0])) {
+                var fu = toF(args[0])
+                if (fu < 0) { raiseErr(name, "ArgumentError", "step can't be negative") }
+                if (fu == 0) { raiseErr(name, "ArgumentError", "step can't be 0") }
+                var fs = rbnFloatStep(toF(t.lo), toF(t.hi), fu, t.excl === true)
+                for (var fi = 0; fi < fs.length; fi++) { picked.push(mkFlo(fs[fi])) }
+            } else {
+                var by = Math.trunc(toF(args[0]))
+                if (by <= 0) { raiseErr(name, "ArgumentError", "step can't be 0 or negative") }
+                var src = anytype
+                src = rangeToA(t)
+                for (var pi = 0; pi < src.length; pi += by) { picked.push(src[pi]) }
+            }
             if (blk != null) {
                 for (var pj = 0; pj < picked.length; pj++) { blockCall(blk, [picked[pj]]) }
                 return t
@@ -5582,6 +5594,19 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (name == "size" || name == "length" || name == "count") {
                 fail("cannot take the length of an endless range")
             }
+        }
+        // #min / #max of a range with a numeric end are its bounds (range_min /
+        // range_max): (1.0..2.0).max is 2.0, (1..1.5).max is 1.5, and an exclusive
+        // Integer end steps back by one.
+        if (args.length == 0 && blk == null && (name == "min" || name == "max") && isNumV(t.hi)) {
+            var mc = anytype
+            mc = spaceship(t.lo, t.hi)
+            if (mc === null || mc > 0 || (mc == 0 && t.excl === true)) { return null }
+            if (name == "min") { return t.lo }
+            if (t.excl !== true) { return t.hi }
+            if (!(typeof t.hi == "number" || isBig(t.hi))) { raiseErr(name, "TypeError", "cannot exclude non Integer end value") }
+            if (!(typeof t.lo == "number" || isBig(t.lo))) { raiseErr(name, "TypeError", "cannot exclude end value with non Integer begin value") }
+            return numBin("-", t.hi, 1)
         }
         // Range#size / #min / #max on their own: arrayMethod has no `size' arm, and
         // #min of an EMPTY range is nil in MRI ((1..-1).min), not the low bound.
@@ -9069,9 +9094,13 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                         return toF(mcall(target, "<=>", [args[0]], null)) >= 0
                             && toF(mcall(target, "<=>", [args[1]], null)) <= 0
                     }
-                    if (name == "clamp") { return target }
+                    if (name == "clamp") {
+                        if (rcmp(target, args[0]) < 0) { return args[0] }
+                        if (rcmp(target, args[1]) > 0) { return args[1] }
+                        return target
+                    }
                     if (name == "<" || name == ">" || name == "<=" || name == ">=") {
-                        var cv2 = toF(mcall(target, "<=>", [args[0]], null))
+                        var cv2 = rcmp(target, args[0])
                         if (name == "<") { return cv2 < 0 }
                         if (name == ">") { return cv2 > 0 }
                         if (name == "<=") { return cv2 <= 0 }
@@ -9215,7 +9244,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // where `1 == 1.0` is true. Array#-, #uniq, #& and #| all compare with this;
     // #include?, #index and #count(v) are ==. The compiler half spells it rbEql /
     // rt.rubyEql.
-    function arrEql(a, b) { return classOf(a) === classOf(b) && rubyEq(a, b) }
+    function arrEql(a, b) {
+        if (isUserObj(a) && typeof lookupMethod(a.__class, "eql?") == "function") { return rtest(mcall(a, "eql?", [b], null)) }
+        return classOf(a) === classOf(b) && rubyEq(a, b)
+    }
     // Array#eql? is eql? element by element, so [1].eql?([1.0]) is false. Twins:
     // rubyEqlDeep in abnf/jsrtruby.go, rbEqlDeep in lib/ruby-rt.metajs.
     function valEql(a, b) {
@@ -9669,7 +9701,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 ukey = blk == null ? t[i] : blockCall(blk, [t[i]])
                 var seen = false
                 for (var uj = 0; uj < uk.length; uj++) {
-                    if (classOf(uk[uj]) === classOf(ukey) && rubyEq(uk[uj], ukey)) { seen = true; break }
+                    if (arrEql(uk[uj], ukey)) { seen = true; break }
                 }
                 if (!seen) {
                     uq.push(t[i])
@@ -13907,6 +13939,12 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (isNumV(l) && isNumV(r)) { return numEq(l, r) }
         if (isRange(l) && isRange(r)) { return rubyEq(l.lo, r.lo) && rubyEq(l.hi, r.hi) && l.excl === r.excl }
         if (isUserObj(l) && typeof lookupMethod(l.__class, "==") == "function") { return rtest(mcall(l, "==", [r], null)) }
+        // Comparable#==: <=> answers 0. Twin of comparableMethods in the compiler.
+        if (isUserObj(l) && typeof lookupMethod(l.__class, "<=>") == "function" && userIsA(l, hostGlobals["Comparable"])) {
+            var ceq = anytype
+            ceq = mcall(l, "<=>", [r], null)
+            return typeof ceq == "number" && ceq == 0
+        }
         // undefined and nil both spell Ruby's nil (the compiled halves bind an
         // absent argument to undefined), so the two must compare equal here too.
         if (l === undefined || l === null || r === undefined || r === null) {
@@ -13940,6 +13978,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // object, plain == otherwise. It is what `case/when` dispatches on.
     function caseEq(l, r) {
         if (isRange(l)) { return rangeCover(l, r) }
+        // Proc#=== / Method#=== call it: `when ->(x) { x > 2 }'.
+        if (typeof l == "function") { return rtest(blockCall(l, [r])) }
         if (isRegex(l)) { return reMatchOp(l, r) !== null }
         if (l !== null && l !== undefined && typeof l == "object" && l.__isclass === true) { return valueIsA(r, l) }
         if (isUserObj(l) && typeof lookupMethod(l.__class, "===") == "function") { return rtest(mcall(l, "===", [r], null)) }
@@ -13996,6 +14036,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // the same shape the compiled halves' fallback scans have.
     core.keyEq = function(a, b) {
         if (isRStr(a) || isRStr(b)) { return rsText(a) === rsText(b) }
+        // An object whose class defines eql? is keyed by it.
+        if (isUserObj(b) && typeof lookupMethod(b.__class, "eql?") == "function") { return rtest(mcall(b, "eql?", [a], null)) }
         if (Array.isArray(a) && Array.isArray(b)) { return rubyEq(a, b) }
         if (isDict(a) && isDict(b)) { return rubyEq(a, b) }
         // A Range is a VALUE key for the same reason an Array is: two range

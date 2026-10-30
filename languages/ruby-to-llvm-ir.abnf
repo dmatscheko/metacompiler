@@ -7424,7 +7424,34 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     }
     // include Comparable on a class that defines <=>: the runtime already compares
     // two such objects through their <=> (rubySpaceship in abnf/jsrt.go), so all the
-    // mixin still owes is #between?.
+    // mixin still owes is #between?, #clamp and #== (true when <=> answers 0).
+    function pushAll(dst, src) {
+        for (var i = 0; i < src.length; i++) { dst.push(src[i]) }
+    }
+    function comparableMethods() {
+        var eq = {name: "==", params: [paramDesc({param: "o"})], body: function(b) {
+            var selfV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "self")])
+            var argsV = callExt(b, "js_arr_new", [])
+            callExt(b, "js_arr_push", [argsV, callExt(b, "js_scope_get", [curScopeV, emitStr(b, "o")])])
+            var cV = callExt(b, "js_rxmcall", [selfV, emitStr(b, methodKey("<=>")), argsV])
+            return {b: b, v: callExt(b, "js_seq", [cV, emitNum(b, 0)])}
+        }}
+        var clamp = {name: "clamp", params: [paramDesc({param: "lo"}), paramDesc({param: "hi"})], body: function(b) {
+            var selfV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "self")])
+            var loV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "lo")])
+            var hiV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "hi")])
+            var lowB = curF.NewBlock("")
+            var restB = curF.NewBlock("")
+            b.NewCondBr(truthy(b, callExt(b, "js_rlt", [selfV, loV])), lowB, restB)
+            lowB.NewRet(loV)
+            var highB = curF.NewBlock("")
+            var inB = curF.NewBlock("")
+            restB.NewCondBr(truthy(restB, callExt(restB, "js_rgt", [selfV, hiV])), highB, inB)
+            highB.NewRet(hiV)
+            return {b: inB, v: selfV}
+        }}
+        return [comparableBetween(), clamp, eq]
+    }
     function comparableBetween() {
         return {name: "between?", params: [paramDesc({param: "lo"}), paramDesc({param: "hi"})], body: function(b) {
             var selfV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "self")])
@@ -7731,13 +7758,13 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // A mixin is spliced at BUILD time: an included module's methods go in FRONT
         // of the class's own (so the class wins), a prepended module's behind them
         // (so the module wins). `include Comparable` has no compiled module behind
-        // it; all it owes is #between?, since the runtime already compares through
-        // <=>.
+        // it; it owes #between?, #clamp and #==, since the runtime already compares
+        // through <=>.
         var incAnc = mixAncestry(r.includes, 0)
         var preAnc = mixAncestry(r.prepends, 0)
         var extAnc = mixAncestry(r.extends, 0)
         var own = mixinDefsAll(incAnc)
-        if (nameIn(incAnc, "Comparable")) { own.push(comparableBetween()) }
+        if (nameIn(incAnc, "Comparable")) { pushAll(own, comparableMethods()) }
         for (var a2 = 0; a2 < r.methods.length; a2++) { own.push(r.methods[a2]) }
         // The prepended methods sit on the CLASS itself while the class's own move
         // into a synthetic ancestor, which is how a `super` inside a prepended method
@@ -7987,7 +8014,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         var savedCls = curClsName
         curClsName = name
         var own = mixinDefsAll(newAnc)
-        if (nameIn(newAnc, "Comparable")) { own.push(comparableBetween()) }
+        if (nameIn(newAnc, "Comparable")) { pushAll(own, comparableMethods()) }
         for (var m = 0; m < r.methods.length; m++) { own.push(r.methods[m]) }
         var ownDstV = prev.core ? callExt(b, "js_get", [clsV, emitStr(b, "__super")]) : clsV
         b = emitMethods(b, ownDstV, own, "", name, r.restricted)
