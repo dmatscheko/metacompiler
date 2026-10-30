@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-868** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-869** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -100,13 +100,15 @@ not change the renderer.
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-862 kotlin: member vs top-level fun, qualifiedName, named args on nested ctors · P2 · KT · IN PROGRESS (KT worker, round 6) [V KT worker]
-(1) all engines: top-level `fun f() = 9` + `interface M { fun f(): Int; fun g() = f() + 10 }` + `class A : M { override
-fun f() = 1 }` → `A().g()` prints 19; Kotlin's rule (implicit receiver's member beats a top-level function) gives 11
-(spec-only, no kotlinc) — kt_barecall cannot tell the global scope from local ones. (2) all engines: `O.Inner::class.
-qualifiedName` → `Inner`; Kotlin `O.Inner`. (3) compiled legs: `class O1 { class In(val a: Int, val b: Int = 10) }`;
-`O1.In(b = 1, a = 2)` → `a1 b2` (interp right: `a2 b1`) — emit-time tables ctorParamNames / classOwnProps / innerOwner /
-nestOwner / nestedOf are keyed by simple class name (last wins); key them by binary name.
+### T-868 kotlin: nested names leak globally; builtin qualifiedName; type-blind receiver rule · P2 · KT · OPEN [V KT worker]
+(1) WRONG ANSWER, every leg: `class In { override fun toString() = "top" }` + `class O1 { class In … }` → `println(In(1))`
+prints "O1"'s, Kotlin "top" (interp: `globalScope[name] = cls` for nested classes); a nested class `N` anywhere also
+breaks an enum's bare `N` entry. (2) every leg: `IllegalStateException("x")::class.qualifiedName` → "IllegalStateException"
+(stdlib `java.lang.IllegalStateException`), printing the KClass gives "class IllegalStateException"; `String::class.
+qualifiedName` → "String" (`kotlin.String`). (3) REGRESSION from the receiver rule: member `log(a: Int, b: Int = 1)` +
+top-level `log(s: String)`: `log("hi")` inside the class now picks the member (arity only); Kotlin picks the top-level by
+type. The rule must check applicability by argument types where they are known. (4) companion members do not take part
+in the receiver rule (a companion member should hide a top-level declaration of the same name; spec-only).
 
 # GO — Go  (oracle: `go run`)
 
@@ -919,6 +921,7 @@ T-859 ruby: class-body scope gate, nested reopen, visibility queries, encoding r
 T-863 bash: newlines in [[ ]], fd 3+, ${!u} error under 2>/dev/null, $( ) LINENO, quote corner — DONE de8a711c (newlines in [[ ]] per bash's 17 measured shapes, and after && || | in command lists; fds 3-9 incl. exec scoping and bad-fd errors; $( ) LINENO numbered from the enclosing command line; " inside '...' in a quoted ${v-w}; the ${!u} 2>/dev/null item does not reproduce at HEAD — pinned by ie1. DECLINED remainder: $LINENO of a compound command written on one line inside $( ) (bash 23 vs ours 22) and of a function defined and called inside $( ) (44 vs 42) — bash re-flows re-parsed compound commands through its command printer; two rounds found no rule that reproduces it, and one case fits no pure printer model)
 T-865 bash: `$NAME"` glued inside a nested "…"; a redirection alone on a line — DONE 1f9dce1b (GlueRef reads a $NAME across the quotes of a quoted ${v-w} word as bash does, = bash 5.3 and 3.2 on 9 forms; here-doc pre-pass keeps its place after a ' holding a "; RedirCommand: redirections alone run : with them, redirections before an assignment; no filesystem by design, so >file creates nothing. DECLINED: "${u:-a"$x"$'b'}" — bash turns $'b' into text before reading the glued name, an internal quirk with no further use)
 T-866 bash: a prefix assignment after a leading redirection — DONE 1a1f2704 (redirections interleave with leading assignments in PrefixCommand and Assignment, both grammars — = bash 5.3)
+T-862 kotlin: member vs top-level fun, qualifiedName, named args on nested ctors — DONE 33383d41 (implicit-receiver members beat top-level declarations — interp-core globalHit/globalSet hooks, compiler js_ktrecvof branch only for names declared both ways; nested KClass simpleName/qualifiedName/java.name per stdlib; emit-time tables keyed by binary name so nested named args order right)
 
 # Settled — do not re-open
 
