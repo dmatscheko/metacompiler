@@ -66,7 +66,7 @@ its report; anything structural there is a CORE ticket.
 
 # RB — Ruby
 
-### T-859 ruby: class-body scope gate, nested reopen, visibility queries, encoding remainders · P3 · RB · OPEN [V RB worker]
+### T-859 ruby: class-body scope gate, nested reopen, visibility queries, encoding remainders · P3 · RB · IN PROGRESS (RB worker, round 25) [V RB worker]
 Oracle LC_ALL=en_US.UTF-8 /usr/bin/ruby 2.6. (1) WRONG ACCEPT (interp): a class body nested in another body can read
 the enclosing body's local variables (`x = 1; class A; p x; end` → MRI NameError); nested bodies now share the scope
 chain for constants, but locals must stop at the class/module gate. (2) interp: `class X; end; module M; class X; end;
