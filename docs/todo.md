@@ -130,7 +130,7 @@ mutators must bump the new modCount. (5) `xs += emptyList()` in a loop over xs d
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-860 bash: $LINENO, quotes in quoted ${v-w}, case in "$( )", fd dup order, here-doc forms · P2 · SH · OPEN [V SH worker + master]
+### T-860 bash: $LINENO, quotes in quoted ${v-w}, case in "$( )", fd dup order, here-doc forms · P2 · SH · IN PROGRESS (SH worker, round 12) [V SH worker + master]
 bash 5.3 vs ours (interp = compiler unless noted). (1) `$LINENO` is unset (empty) at top level and in functions; bash gives
 the line number (13 for `f() { echo $LINENO; }` defined on line 13). (2) `echo "${u:-'ab'}"` → bash `'ab'` (a `'` is
 ordinary inside a quoted ${v-w}), ours `ab`. (3) `r="$(case $x in a) echo q;; esac)"` → bash `q`, ours the literal
@@ -140,12 +140,6 @@ text (case inside a double-quoted $( ) not parsed). (4) `echo 1 >&2 2>&1` → ba
 inside a spliced logical line reports the line's start with shifted columns.
 
 # C — C subset
-
-### T-858 c: `<stddef.h>` gives no `offsetof` / `NULL` / `size_t` · P3 · C · IN PROGRESS (C worker, round 12) [V C worker]
-`#include <stddef.h>` is accepted and ignored, so `offsetof(struct S, g)` is "function not defined" and a program
-must spell the null-pointer idiom. cc: offsetof is a constant expression (4 for `struct S { char c; int g; }`). Add
-offsetof (constant-folded from the layout, both halves — the interpreter must answer cc's byte offsets, not cell
-counts), NULL, size_t, ptrdiff_t through the built-in header table in c-literals.js.
 
 # CORE — MetaJS, the engines, shared runtime, tooling
 
@@ -922,6 +916,7 @@ T-856 c compiler: anonymous struct inside a union; null-based offsetof natively 
 T-855 ruby: private/constant/enumerator gaps — DONE e1ab0f6f (private/protected/public def; MRI's private-method message; run-time reopen decision after a failed superclass; blockless each_with_object/each_entry/find_index enumerators; nested names M::X in superclass/inspect/ancestors; uninitialized constant naming per MRI. Item 6 DECLINED: each_slice/each_cons StopIteration#result follows Ruby 3.1 (the receiver) consistently in all engines and is pinned by enum-block-still-yields; 2.6's nil is the older behaviour)
 T-854 ruby: binary (ASCII-8BIT) strings — DONE 074917f6 (binary String box {__rbin} / jsRBin with raw bytes; producers chr>127, b, force_encoding BINARY, pack C*; bytes/bytesize/getbyte/each_byte/[]/inspect \\xHH/encoding/==/hash/+/<< with CompatibilityError/*/unpack C c U; puts writes raw bytes via the existing writeBytes host — od-checked = ruby; Encoding objects)
 T-849 bash: a backslash-newline that splits a name is not spliced — DONE 4c9f2756 (pre-parse splice BsSplice in shared bash-splice.abnf: joins \\⏎ everywhere bash does — not in '...', $'...', comments, quoted here-doc bodies — and restores the removed newlines at the next line break so line numbers hold; eval/trap strings too; parser.go setSrc re-registers the rewritten program source; plus $'...' keeps a backslash-newline)
+T-858 c: `<stddef.h>` gives no `offsetof` / `NULL` / `size_t` — DONE ef5212f7 (offsetof after <stddef.h> folded from cc's layout offsets in both halves — expressions, enumerators, dimensions, nested and indexed designators, cc's bit-field error; NULL from stddef/stdio/stdlib/string; size_t/ptrdiff_t already predefined)
 
 # Settled — do not re-open
 
