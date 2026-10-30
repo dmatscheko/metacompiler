@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-853** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-854** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -79,19 +79,13 @@ p i` fails in all legs (ruby 3) — an assignment, `;`, then `while` on one line
 
 # JS — JavaScript and TypeScript
 
-### T-847 ts/js: decorators, constructability, Date/setTimeout; a `__proto__` binding crashes · P3 · JS · IN PROGRESS (JS worker, round 33) [V JS worker]
-(1) Decorators (TS, both halves): addInitializer, field decorators, and tsc 6.0.3's order — evaluate all
-decorator expressions class-first in source order; apply static methods → instance methods → static fields
-→ instance fields → class; then static-method initializers, static field init + per-field extra
-initializers, class initializers; per instance, method initializers first, then each field + its extra
-initializers. Needs makeClassValue/applyDecorators (interp) and emitClass/applyDeco (compiler) restructured
-into those phases. Probe: the JS worker's deco.ts. (2) Constructability: `new (()=>1)()`, `new o.m()`,
-class/static methods, generators, async functions and `new Math.max()` construct (node: TypeError "... is
-not a constructor"); natively `new Math.max()` aborts "js_keys: not an object". Route: a per-function-index
-non-constructor table registered at boot (like js_jssrc), read at `new` in Go and layer 2, plus a flag in the
-interpreters' fn meta. (3) Date and setTimeout are missing. (4) `const __proto__ = 7` crashes the js/ts
-interpreters at tag time under goja ("Object prototype may only be an Object or null ... at declIsConst":
-jsConstNames[name] = true on a host object); node is fine.
+### T-853 ts/js: bound functions and `new`; TS error site text; accessor decorators · P3 · JS · OPEN [V JS worker]
+(1) `function plain(this:any){this.p=1}; new (plain.bind(null))()` → node `ok 1`; all TS legs "Cannot set properties
+of null (setting 'p')" (a bound function's `new` must ignore the bound this). (2) `new (arrow.bind(null))()` constructs;
+node TypeError — record the bound target in the Go twin and layer 2. (3) TS error site text keeps the type assertion:
+`new (arrow as any)()` → "arrowasany is not a constructor", node "arrow is not a constructor". (4) decorators on
+getters, setters, `accessor` fields and parameters are parsed and ignored. (5) Date: V8's legacy parse of `"5"` and the
+zone name at year −271821 differ from node.
 
 # JV — Java
 
@@ -925,6 +919,7 @@ T-840 ruby compiler: `next v` inside begin/ensure inside a block returns the con
 T-839 ruby: features left from the string/array/error rounds — PARTIAL b25b9b95 — character String#[]/center/reverse with ASCII fast path, Integer.sqrt, last_match, cause, pp/bare p/bare new, Proc >>/<</curry, Rational round(half:), loop/StopIteration, catch/throw/UncaughtThrowError, method_missing/respond_to_missing?, IO objects, Complex power, chr(UTF-8), lazy enumerators, rxSplit removed; binary strings and a blockless map enumerator filed as T-850
 T-844 c: declaration gaps left from the scope/designator round — DONE 1e3d17a3 (shared cInitWalk does brace elision for both engines; cConstOf folds enumerators/header constants in dimensions, enumerators and designators; extern int a[] + int a[3] merge per 6.2.7p3; typedef extern in a block binds the global; bool is a type only after <stdbool.h>; parameters share the body's outermost scope)
 T-851 c: `sizeof` of a struct ignores alignment padding; block-scope enums — DONE 7fa9bd46..45dd3ec2 (cAbiLayout: cc's padded layout for sizeof/_Alignof in both halves, explicit padding members in the compiled structs; compiled half packs bit-fields into their storage units so malloc(n*sizeof) is exact — new c-native-bytes.c byte-layout row; block-scope enums, struct values in []-sized arrays, file-scope initializers after all declarations)
+T-847 ts/js: decorators, constructability, Date/setTimeout; a `__proto__` binding crashes — DONE 184ac024..f19a083f (decorators in tsc 6.0.3's phases incl. field decorators and addInitializer, 24/24 probe lines; new refuses arrows/methods/generators/async/non-constructor builtins via a boot-time constructor table; Date and timers with a virtual loop clock, 93/95 Date probe rows = node; const __proto__ no longer crashes; bound functions filed as T-853)
 
 # Settled — do not re-open
 
