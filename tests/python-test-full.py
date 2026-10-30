@@ -1350,6 +1350,10 @@ def s29():
     check("bit13", (True & 1) == 1 and not ((True & 1) is True) and (True << 1) == 2)
     check("bit14", (v[10] << 45) == 8972014882652160 and (v[10] << 46) == 17944029765304320)
     check("bit15", (v[7] >> 200) == 0 and (v[4] >> 200) == -1 and (v[2] << 99) == 633825300114114700748351602688)
+    # One precedence level each, loosest first: | then ^ then & then the shifts.
+    a, b, c, n = v[7] // 2, v[7] // 4, v[2], v[7] // 2 - 1
+    check("bit16", [a ^ b >> c, a | b << c, a & b >> c, a ^ b & c, a | b & c, n ^ n >> 1, a | b ^ c & a]
+          == [7, 6, 0, 7, 7, 7, 7] and ({1, 2} | {3} & {3, 4}) == {1, 2, 3})
 
 # ===== SECTION 30: integer literals past 2**53 =====
 # Whether an integer literal needs the arbitrary precision box is decided on the

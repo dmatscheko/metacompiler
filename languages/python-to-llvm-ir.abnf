@@ -825,11 +825,17 @@ Comparison  <~~ push(makeCompare(takeAll())) ~~>
                     | ( "is" KwEnd ) <~~ push("is") ~~> BitExpr
                     | ( "in" KwEnd ) <~~ push("in") ~~> BitExpr } ;
 
-// Bitwise / shift operators ( | ^ & << >> ) sit just above comparison. On two
-// sets they are the set algebra, on numbers the 32 bit integer operators; js_pybin
-// decides by the operand shapes. With no such operator the layer is transparent.
-BitExpr     <~~ push(makeBit(takeAll(), up.pos)) ~~>
-            = Arith { ( "|" | "^" | "&" | "<<" | ">>" ) <~~ push(up.in) ~~> Arith } ;
+// Bitwise / shift operators sit just above comparison, one level each: | then ^
+// then & then the shifts. On two sets they are the set algebra, on numbers the
+// integer operators; js_pybin decides by the operand shapes.
+BitExpr     <~~ push(foldBinary(takeAll())) ~~>
+            = BitXor { "|" <~~ push("|") ~~> BitXor } ;
+BitXor      <~~ push(foldBinary(takeAll())) ~~>
+            = BitAnd { "^" <~~ push("^") ~~> BitAnd } ;
+BitAnd      <~~ push(foldBinary(takeAll())) ~~>
+            = ShiftExpr { "&" <~~ push("&") ~~> ShiftExpr } ;
+ShiftExpr   <~~ push(foldBinary(takeAll())) ~~>
+            = Arith { ( "<<" | ">>" ) <~~ push(up.in) ~~> Arith } ;
 
 Arith       <~~ push(foldBinary(takeAll())) ~~>
             = Term { ( "+" | "-" ) <~~ push(up.in) ~~> Term } ;
@@ -3773,10 +3779,6 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return {b: r.b, v: callExt(r.b, "js_pyunary", [emitStr(r.b, op), r.v])}
         }
     }
-    // | ^ & << >>: on two sets these are the set algebra (union, symmetric
-    // difference, intersection), on numbers the 32 bit integer operators; js_pybin
-    // decides by the operand shapes, like every other user visible operator here.
-    function makeBit(items, pos) { return foldBinary(items) }
     // ( a ): plain grouping. ( a, b, ... ) / ( a, ): a tuple (a comma pushed a
     // {tcomma} marker, so items has more than one), which may hold a *spread.
     function makeParen(items, pos) {
