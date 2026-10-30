@@ -2,6 +2,84 @@
 // (include) and languages/lib/ruby-rt.metajs (import). Go twins in
 // abnf/jsrtrubystr.go. Written in the subset both engines accept.
 
+// Enumerator::Lazy, and the endless Enumerator of a blockless Array#cycle: an
+// Enumerator object that also carries __rlazy, a SOURCE - kind "arr" (items),
+// "cycle" (items, forever) or "range" (lo, lo+1, ... up to hi; hi null is
+// endless) - and the OPS map / select / reject / take_while / drop_while / take,
+// {k, f, n}, applied to one value at a time. rbaLazyFirst pulls the first n
+// results (all of them when n < 0); call(f, v) runs a block, test(v) is Ruby
+// truthiness. A take op ends the run once its count has passed it, so nothing
+// past it is evaluated. Go twin: rubyLazyFirst in abnf/jsrtrubystr.go.
+function rbaLazyFirst(lz, n, call, test) {
+    var out = []
+    var ops = lz.ops
+    var cnt = []
+    var on = []
+    var j = 0
+    while (j < ops.length) {
+        cnt.push(0)
+        on.push(false)
+        j = j + 1
+    }
+    var i = 0
+    var done = n == 0
+    while (!done) {
+        var v = anytype
+        if (lz.kind == "range") {
+            v = lz.lo + i
+            if (lz.hi !== null && (lz.excl ? v >= lz.hi : v > lz.hi)) { break }
+        } else {
+            var len = lz.items.length
+            if (len == 0 || (lz.kind == "arr" && i >= len)) { break }
+            v = lz.items[i % len]
+        }
+        i = i + 1
+        var keep = true
+        j = 0
+        while (keep && j < ops.length) {
+            var op = ops[j]
+            if (op.k == "map") {
+                v = call(op.f, v)
+            } else if (op.k == "select") {
+                keep = test(call(op.f, v))
+            } else if (op.k == "reject") {
+                keep = !test(call(op.f, v))
+            } else if (op.k == "take_while") {
+                if (!test(call(op.f, v))) {
+                    keep = false
+                    done = true
+                }
+            } else if (op.k == "drop_while") {
+                if (!on[j]) {
+                    if (test(call(op.f, v))) { keep = false } else { on[j] = true }
+                }
+            } else if (op.k == "take") {
+                if (op.n <= 0) {
+                    keep = false
+                    done = true
+                } else {
+                    cnt[j] = cnt[j] + 1
+                    if (cnt[j] >= op.n) { done = true }
+                }
+            }
+            j = j + 1
+        }
+        if (keep) {
+            out.push(v)
+            if (n >= 0 && out.length >= n) { done = true }
+        }
+    }
+    return out
+}
+
+// The lazy name an op is reached by, or "" when the method is not one.
+function rbaLazyOp(name) {
+    if (name == "map" || name == "collect") { return "map" }
+    if (name == "select" || name == "filter") { return "select" }
+    if (name == "reject" || name == "take_while" || name == "drop_while") { return name }
+    return ""
+}
+
 // Array#insert's splice position on an array of n (rb_ary_insert): -1 is the end
 // and another negative one counts from after the last element. -1 when it lies
 // before the start, which is IndexError "index POS too small for array; minimum:

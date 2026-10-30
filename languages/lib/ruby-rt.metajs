@@ -4427,6 +4427,7 @@ function rbRangeEq(l, r) {
 // it. ruby-interpreter.abnf's rangeMethod is the same shape; rubyRangeMethod in
 // abnf/jsrt.go is the twin.
 function rbRangeMethod(t, name, args) {
+    if (name == "lazy") { return rbRangeLazy(t) }
     var blk = rbBlockOf(args)
     var npos = rbNPos(args)
     var endless = rtIsNil(t["end"]) || rtIsNil(t["begin"])
@@ -6077,6 +6078,7 @@ function rbEnumSrc(t) {
     return t
 }
 function rbEnumInspect(e) {
+    if (e["__rlazy"] === true) { return e["desc"] }
     var meth = anytype
     meth = e["meth"]
     if (meth === undefined) { return "#<Enumerator: " + rbInspect(e["items"]) + ">" }
@@ -6187,10 +6189,92 @@ function rbIsEnum(v) {
     if (!rbIsObj(v)) { return false }
     return v["__renum"] === true
 }
+// An Enumerator::Lazy or the endless Enumerator of Array#cycle - see
+// rbaLazyFirst in lib/ruby-arr.js. Twin of mkLazy / lazyMethod in
+// ruby-interpreter.abnf, which state the rules.
+function rbMkLazy(kind, items, lo, hi, excl, lazy, desc) {
+    return {__renum: true, __rlazy: true, items: items, pos: 0, op: "each", kind: kind, lo: lo, hi: hi, excl: excl,
+            ops: [], lazy: lazy, desc: desc}
+}
+function rbLazyCopy(t, op, lazy, desc) {
+    var c = rbMkLazy(t["kind"], t["items"], t["lo"], t["hi"], t["excl"], lazy, desc)
+    c["ops"] = rtCopyArr(t["ops"])
+    if (op !== null) { c["ops"].push(op) }
+    return c
+}
+function rbLazyFirst(t, n) { return rbaLazyFirst(t, n, rbCall1, rbTruthy) }
+function rbRangeLazy(r) {
+    var d = "#<Enumerator::Lazy: " + rbInspect(r) + ">"
+    var hi = anytype
+    hi = rtIsNil(r["end"]) ? null : r["end"]
+    if (rbIsFlo(hi) && rbToF(hi) > 0 && rbToF(hi) - rbToF(hi) != 0) { hi = null }
+    if (typeof r["begin"] == "number" && (hi === null || typeof hi == "number")) {
+        return rbMkLazy("range", [], r["begin"], hi, r["excl"] === true, true, d)
+    }
+    return rbMkLazy("arr", rbRangeToArr(r), 0, null, false, true, d)
+}
+function rbLazyMethod(t, name, args) {
+    var blk = rbBlockOf(args)
+    var nPos = rbNPos(args)
+    var lop = rbaLazyOp(name)
+    var desc = t["desc"]
+    if (lop != "" && blk !== null) { return rbLazyCopy(t, {k: lop, f: blk, n: 0}, true, "#<Enumerator::Lazy: " + desc + ":" + name + ">") }
+    if (name == "take" && t["lazy"] === true) {
+        var tn = Math.trunc(rbToF(rbArgAt(args, 0)))
+        return rbLazyCopy(t, {k: "take", f: null, n: tn}, true, "#<Enumerator::Lazy: " + desc + ":take(" + tn + ")>")
+    }
+    if (name == "take") { return rbLazyFirst(t, Math.trunc(rbToF(rbArgAt(args, 0)))) }
+    if (name == "first") {
+        if (nPos > 0) { return rbLazyFirst(t, Math.trunc(rbToF(rbArgAt(args, 0)))) }
+        var f1 = rbLazyFirst(t, 1)
+        if (f1.length > 0) { return f1[0] }
+        return null
+    }
+    if (name == "to_a" || name == "force" || name == "entries") { return rbLazyFirst(t, -1) }
+    if (name == "each" && blk !== null) {
+        var all = rbLazyFirst(t, -1)
+        var i = 0
+        while (i < all.length) {
+            rbCall1(blk, all[i])
+            i = i + 1
+        }
+        return t
+    }
+    if (name == "lazy") {
+        if (t["lazy"] === true) { return t }
+        return rbLazyCopy(t, null, true, "#<Enumerator::Lazy: " + desc + ">")
+    }
+    if (name == "next" || name == "peek") {
+        var pos = Math.trunc(rbToF(t["pos"]))
+        var got = rbLazyFirst(t, pos + 1)
+        if (got.length <= pos) {
+            var e = rbExc(rbBuiltinClass("StopIteration"), ["iteration reached an end"])
+            e["__rframe"] = name
+            js_rraise(e, undefined)
+        }
+        if (name == "next") { t["pos"] = pos + 1 }
+        return got[got.length - 1]
+    }
+    if (name == "rewind") {
+        t["pos"] = 0
+        return t
+    }
+    if (name == "size") {
+        if (t["kind"] == "arr" && t["ops"].length == 0) { return t["items"].length }
+        return null
+    }
+    if (name == "inspect" || name == "to_s") { return desc }
+    if (name == "class") { return rbBuiltinClass("Enumerator") }
+    rbNoMethod(t, name)
+    return null
+}
+
 function rbEnumMethod(t, name, args) {
+    if (t["__rlazy"] === true) { return rbLazyMethod(t, name, args) }
     var items = t["items"]
     var blk = rbBlockOf(args)
     var nPos = rbNPos(args)
+    if (name == "lazy") { return rbMkLazy("arr", rtCopyArr(items), 0, null, false, true, "#<Enumerator::Lazy: " + rbEnumInspect(t) + ">") }
     if (name == "to_a" || name == "entries" || name == "force") { return rtCopyArr(items) }
     if (name == "size" || name == "length" || name == "count") {
         if (nPos == 0 && blk === null) { return items.length }
@@ -6952,11 +7036,12 @@ function rbArrayMethod(t, name, args) {
     if (name == "shuffle!") { return t }
     // cycle(n) { } runs the block over the whole array n times; cycle { } with no
     // count repeats FOREVER, and the way out is the block's own `break'.
+    if (name == "lazy") { return rbMkLazy("arr", rtCopyArr(t), 0, null, false, true, "#<Enumerator::Lazy: " + rbInspect(t) + ">") }
     if (name == "cycle") {
         var cn = 0
         if (nPos > 0) { cn = Math.trunc(rbToF(rbPosAt(args, nPos, 0))) }
         if (blk === null) {
-            if (nPos == 0) { fail("cycle without a count needs a block") }
+            if (nPos == 0) { return rbMkLazy("cycle", rtCopyArr(t), 0, null, false, false, "#<Enumerator: " + rbInspect(t) + ":cycle>") }
             var cyc = []
             var ci = 0
             while (ci < cn) {

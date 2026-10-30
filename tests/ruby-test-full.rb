@@ -4894,6 +4894,26 @@ def s117
         e1 == "1114112 out of char range" && e2 == "invalid codepoint 0xD800 in UTF-8")
 end
 
+# ===== SECTION 118: Array#cycle without a block; Enumerator::Lazy =====
+# A blockless cycle is an endless Enumerator; #lazy chains map / select /
+# reject / take_while / drop_while / take one value at a time, so an endless
+# range answers, and nothing past a take is evaluated. /usr/bin/ruby 2.6 settles
+# each.
+def s118
+  e = [1, 2].cycle
+  n = [e.next, e.next, e.next]
+  check("cy118a", [1, 2].cycle.first(5) == [1, 2, 1, 2, 1] && [1, 2].cycle.take(3) == [1, 2, 1] && n == [1, 2, 1] &&
+        [].cycle.first(2) == [])
+  seen = []
+  t = (1..Float::INFINITY).lazy.map { |x| seen << x; x }.take(2).to_a
+  check("lz118b", (1..Float::INFINITY).lazy.map { |x| x * 2 }.select { |x| x % 3 == 0 }.first(3) == [6, 12, 18] &&
+        (1..20).lazy.select(&:even?).map { |x| x * x }.first(2) == [4, 16] && t == [1, 2] && seen == [1, 2] &&
+        (1..10).lazy.take_while { |x| x < 4 }.to_a == [1, 2, 3] && (1..6).lazy.drop_while { |x| x < 4 }.force == [4, 5, 6] &&
+        [1, 2].cycle.lazy.map { |x| x * 10 }.first(3) == [10, 20, 10])
+  check("lz118c", (1..3).lazy.map { |x| x }.inspect == "#<Enumerator::Lazy: #<Enumerator::Lazy: 1..3>:map>" &&
+        [1, 2].cycle.inspect == "#<Enumerator: [1, 2]:cycle>")
+end
+
 s39() # SECTION-CALL 39
 s40() # SECTION-CALL 40
 s41() # SECTION-CALL 41
@@ -4973,5 +4993,6 @@ s114() # SECTION-CALL 114
 s115() # SECTION-CALL 115
 s116() # SECTION-CALL 116
 s117() # SECTION-CALL 117
+s118() # SECTION-CALL 118
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

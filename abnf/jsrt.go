@@ -7295,6 +7295,9 @@ func (rt *jsrt) rubyRangeEq(l, r *jsObject) bool {
 // zip / group_by / each_slice / find / reverse_each / …) working without a second
 // copy of it. Twin: rbRangeMethod in languages/lib/ruby-rt.metajs.
 func (rt *jsrt) rubyRangeMethod(t *jsObject, name string, args []interface{}) interface{} {
+	if name == "lazy" {
+		return rt.rubyRangeLazy(t)
+	}
 	pos, blk := rubyBlockArgs(args)
 	endless := isUndefOrNull(t.props["begin"]) || isUndefOrNull(t.props["end"])
 	switch name {
@@ -12396,6 +12399,9 @@ func (rt *jsrt) rubyEnumSrc(t *jsArray) interface{} {
 }
 
 func (rt *jsrt) rubyEnumInspect(e *jsObject) string {
+	if e.props["__rlazy"] == true {
+		return e.props["desc"].(string)
+	}
 	meth, has := e.props["meth"].(string)
 	if !has {
 		return "#<Enumerator: " + rt.rubyInspect(e.props["items"]) + ">"
@@ -12455,6 +12461,16 @@ func rubyIsEnum(v interface{}) bool {
 }
 
 func (rt *jsrt) rubyEnumMethod(t *jsObject, name string, args []interface{}) interface{} {
+	if t.props["__rlazy"] == true {
+		return rt.rubyLazyMethod(t, name, args)
+	}
+	if name == "lazy" {
+		its, _ := t.props["items"].(*jsArray)
+		if its == nil {
+			its = &jsArray{}
+		}
+		return rubyMkLazy("arr", &jsArray{elems: append([]interface{}{}, its.elems...)}, 0, jsNull, false, true, "#<Enumerator::Lazy: "+rt.rubyEnumInspect(t)+">")
+	}
 	items, _ := t.props["items"].(*jsArray)
 	if items == nil {
 		items = &jsArray{}
@@ -13037,6 +13053,8 @@ func (rt *jsrt) rubyArrayMethod(t *jsArray, name string, args []interface{}) int
 		return &jsArray{elems: append([]interface{}{}, t.elems...)}
 	case "shuffle!":
 		return t
+	case "lazy":
+		return rubyMkLazy("arr", &jsArray{elems: append([]interface{}{}, t.elems...)}, 0, jsNull, false, true, "#<Enumerator::Lazy: "+rt.rubyInspect(t)+">")
 	// cycle(n) { } runs the block over the whole array n times; cycle { } with no
 	// count repeats FOREVER, and the way out is the block's own `break'.
 	case "cycle":
@@ -13046,7 +13064,7 @@ func (rt *jsrt) rubyArrayMethod(t *jsArray, name string, args []interface{}) int
 		}
 		if blk == nil {
 			if len(pos) == 0 {
-				rt.fail("cycle without a count needs a block")
+				return rubyMkLazy("cycle", &jsArray{elems: append([]interface{}{}, t.elems...)}, 0, jsNull, false, false, "#<Enumerator: "+rt.rubyInspect(t)+":cycle>")
 			}
 			cyc := &jsArray{}
 			for i := 0; i < n; i++ {

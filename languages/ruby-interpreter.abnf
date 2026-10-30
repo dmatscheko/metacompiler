@@ -5561,6 +5561,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // The methods of a Range; iteration and the Enumerable methods go through the
     // materialized array, membership stays lazy (an endless range has no array).
     function rangeMethod(t, name, args, blk) {
+        if (name == "lazy") { return rangeLazy(t) }
         if (name == "to_a" || name == "entries" || name == "to_ary") { return rangeToA(t) }
         if (name == "include?" || name == "member?" || name == "cover?" || name == "===") { return rangeCover(t, args[0]) }
         if (name == "begin") { return t.lo }
@@ -9611,6 +9612,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     }
     function enumSrc(t) { return nmDeleg.arr === t ? nmDeleg.recv : t }
     function enumInspect(e) {
+        if (e.__rlazy === true) { return e.desc }
         if (e.meth == undefined) { return "#<Enumerator: " + rinspect(e.items) + ">" }
         var d = "#<Enumerator: " + rinspect(e.src) + ":" + e.meth
         if (e.margs.length > 0) {
@@ -9646,8 +9648,71 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     function isEnum(v) {
         return v !== null && v !== undefined && typeof v == "object" && v.__renum === true
     }
+    // An Enumerator::Lazy or the endless Enumerator of Array#cycle - see
+    // rbaLazyFirst in lib/ruby-arr.js. desc is its #inspect. Twins: rbMkLazy in
+    // lib/ruby-rt.metajs, rubyMkLazy in abnf/jsrtrubystr.go.
+    function mkLazy(kind, items, lo, hi, excl, lazy, desc) {
+        return {__renum: true, __rlazy: true, items: items, pos: 0, op: "each", kind: kind, lo: lo, hi: hi, excl: excl,
+                ops: [], lazy: lazy, desc: desc}
+    }
+    function lazyCopy(t, op, lazy, desc) {
+        var c = mkLazy(t.kind, t.items, t.lo, t.hi, t.excl, lazy, desc)
+        c.ops = t.ops.slice(0)
+        if (op !== null) { c.ops.push(op) }
+        return c
+    }
+    function lazyFirst(t, n) { return rbaLazyFirst(t, n, function(f, v) { return blockCall(f, [v]) }, rtest) }
+    // Range#lazy: an Integer range is walked one value at a time; any other is
+    // materialized first.
+    function rangeLazy(r) {
+        var d = "#<Enumerator::Lazy: " + rinspect(r) + ">"
+        var hi = anytype
+        hi = r.hi === undefined ? null : r.hi
+        if (isFlo(hi) && toF(hi) > 0 && toF(hi) - toF(hi) != 0) { hi = null }
+        if (typeof r.lo == "number" && (hi === null || typeof hi == "number")) { return mkLazy("range", [], r.lo, hi, r.excl === true, true, d) }
+        return mkLazy("arr", rangeToA(r), 0, null, false, true, d)
+    }
+    function lazyMethod(t, name, args, blk) {
+        var lop = rbaLazyOp(name)
+        if (lop != "" && blk != null) { return lazyCopy(t, {k: lop, f: blk, n: 0}, true, "#<Enumerator::Lazy: " + t.desc + ":" + name + ">") }
+        if (name == "take" && t.lazy) {
+            var tn = Math.trunc(toF(args[0]))
+            return lazyCopy(t, {k: "take", f: null, n: tn}, true, "#<Enumerator::Lazy: " + t.desc + ":take(" + tn + ")>")
+        }
+        if (name == "take") { return lazyFirst(t, Math.trunc(toF(args[0]))) }
+        if (name == "first") {
+            if (args.length > 0) { return lazyFirst(t, Math.trunc(toF(args[0]))) }
+            var f1 = lazyFirst(t, 1)
+            return f1.length > 0 ? f1[0] : null
+        }
+        if (name == "to_a" || name == "force" || name == "entries") { return lazyFirst(t, -1) }
+        if (name == "each" && blk != null) {
+            var all = lazyFirst(t, -1)
+            for (var i = 0; i < all.length; i++) { blockCall(blk, [all[i]]) }
+            return t
+        }
+        if (name == "lazy") { return t.lazy ? t : lazyCopy(t, null, true, "#<Enumerator::Lazy: " + t.desc + ">") }
+        if (name == "next" || name == "peek") {
+            var got = lazyFirst(t, t.pos + 1)
+            if (got.length <= t.pos) {
+                var si = anytype
+                si = mkExc(hostGlobals["StopIteration"], "iteration reached an end")
+                si.__rframe = name
+                throw {__exc: true, v: si}
+            }
+            if (name == "next") { t.pos = t.pos + 1 }
+            return got[got.length - 1]
+        }
+        if (name == "rewind") { t.pos = 0; return t }
+        if (name == "size") { return t.kind == "arr" && t.ops.length == 0 ? t.items.length : null }
+        if (name == "inspect" || name == "to_s") { return t.desc }
+        if (name == "class") { return hostGlobals["Enumerator"] }
+        noMethod(t, name)
+    }
     function enumMethod(t, name, args, blk) {
+        if (t.__rlazy === true) { return lazyMethod(t, name, args, blk) }
         var items = t.items
+        if (name == "lazy") { return mkLazy("arr", items.slice(0), 0, null, false, true, "#<Enumerator::Lazy: " + enumInspect(t) + ">") }
         if (name == "to_a" || name == "entries" || name == "force") { return items.slice(0) }
         if (name == "size" || name == "length" || name == "count") {
             if (args.length == 0 && blk == null) { return items.length }
@@ -10038,9 +10103,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (name == "shuffle!") { return t }
         // cycle(n) { } runs the block over the whole array n times; cycle { } with no
         // count repeats FOREVER, and the way out is the block's own `break'.
+        if (name == "lazy") { return mkLazy("arr", t.slice(0), 0, null, false, true, "#<Enumerator::Lazy: " + rinspect(t) + ">") }
         if (name == "cycle") {
             if (blk == null) {
-                if (args.length == 0) { fail("cycle without a count needs a block") }
+                if (args.length == 0) { return mkLazy("cycle", t.slice(0), 0, null, false, false, "#<Enumerator: " + rinspect(t) + ":cycle>") }
                 var cyc = []
                 var cn = Math.trunc(toF(args[0]))
                 for (i = 0; i < cn; i++) { for (var cj = 0; cj < t.length; cj++) { cyc.push(t[cj]) } }

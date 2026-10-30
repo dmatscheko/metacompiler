@@ -58,6 +58,211 @@ func (rt *jsrt) rubyChrUtf8(x float64) string {
 	return string(rune(cp))
 }
 
+// rubyMkLazy is an Enumerator::Lazy or the endless Enumerator of Array#cycle.
+// Twins: mkLazy in ruby-interpreter.abnf (which states the rules), rbMkLazy in
+// lib/ruby-rt.metajs; the run itself is rubyLazyFirst, twin of rbaLazyFirst in
+// lib/ruby-arr.js.
+func rubyMkLazy(kind string, items *jsArray, lo float64, hi interface{}, excl, lazy bool, desc string) *jsObject {
+	o := newJSObject()
+	o.set("__renum", true)
+	o.set("__rlazy", true)
+	o.set("items", items)
+	o.set("pos", float64(0))
+	o.set("op", "each")
+	o.set("kind", kind)
+	o.set("lo", lo)
+	o.set("hi", hi)
+	o.set("excl", excl)
+	o.set("ops", &jsArray{})
+	o.set("lazy", lazy)
+	o.set("desc", desc)
+	return o
+}
+
+func rubyLazyCopy(t *jsObject, op *jsObject, lazy bool, desc string) *jsObject {
+	c := rubyMkLazy(t.props["kind"].(string), t.props["items"].(*jsArray), t.props["lo"].(float64), t.props["hi"],
+		t.props["excl"] == true, lazy, desc)
+	ops := &jsArray{elems: append([]interface{}{}, t.props["ops"].(*jsArray).elems...)}
+	if op != nil {
+		ops.elems = append(ops.elems, op)
+	}
+	c.set("ops", ops)
+	return c
+}
+
+func (rt *jsrt) rubyLazyFirst(t *jsObject, n int) []interface{} {
+	out := []interface{}{}
+	ops := t.props["ops"].(*jsArray).elems
+	items := t.props["items"].(*jsArray).elems
+	kind := t.props["kind"].(string)
+	lo := t.props["lo"].(float64)
+	hi, bounded := t.props["hi"].(float64)
+	excl := t.props["excl"] == true
+	cnt := make([]int, len(ops))
+	on := make([]bool, len(ops))
+	call := func(f, v interface{}) interface{} { return rt.call(f, jsUndef, []interface{}{v}) }
+	done := n == 0
+	for i := 0; !done; i++ {
+		var v interface{}
+		if kind == "range" {
+			x := lo + float64(i)
+			if bounded && ((excl && x >= hi) || (!excl && x > hi)) {
+				break
+			}
+			v = x
+		} else {
+			if len(items) == 0 || (kind == "arr" && i >= len(items)) {
+				break
+			}
+			v = items[i%len(items)]
+		}
+		keep := true
+		for j := 0; keep && j < len(ops); j++ {
+			op := ops[j].(*jsObject)
+			f := op.props["f"]
+			switch op.props["k"] {
+			case "map":
+				v = call(f, v)
+			case "select":
+				keep = rubyTruthy(call(f, v))
+			case "reject":
+				keep = !rubyTruthy(call(f, v))
+			case "take_while":
+				if !rubyTruthy(call(f, v)) {
+					keep, done = false, true
+				}
+			case "drop_while":
+				if !on[j] {
+					if rubyTruthy(call(f, v)) {
+						keep = false
+					} else {
+						on[j] = true
+					}
+				}
+			case "take":
+				if lim := int(rubyToF(op.props["n"])); lim <= 0 {
+					keep, done = false, true
+				} else {
+					cnt[j]++
+					if cnt[j] >= lim {
+						done = true
+					}
+				}
+			}
+		}
+		if keep {
+			out = append(out, v)
+			if n >= 0 && len(out) >= n {
+				done = true
+			}
+		}
+	}
+	return out
+}
+
+func (rt *jsrt) rubyRangeLazy(r *jsObject) interface{} {
+	d := "#<Enumerator::Lazy: " + rt.rubyInspect(r) + ">"
+	hi := r.props["end"]
+	if isUndefOrNull(hi) {
+		hi = jsNull
+	} else if f, isFlo := hi.(jsFlo); isFlo && math.IsInf(f.f, 1) {
+		hi = jsNull
+	}
+	lo, loNum := r.props["begin"].(float64)
+	_, hiNum := hi.(float64)
+	if loNum && (hi == jsNull || hiNum) {
+		return rubyMkLazy("range", &jsArray{}, lo, hi, r.props["excl"] == true, true, d)
+	}
+	return rubyMkLazy("arr", rt.rubyRangeToArr(r), 0, jsNull, false, true, d)
+}
+
+func (rt *jsrt) rubyLazyMethod(t *jsObject, name string, args []interface{}) interface{} {
+	pos, blk := rubyBlockArgs(args)
+	desc := t.props["desc"].(string)
+	lazy := t.props["lazy"] == true
+	if k := rubyLazyOp(name); k != "" && blk != nil {
+		op := newJSObject()
+		op.set("k", k)
+		op.set("f", blk)
+		op.set("n", float64(0))
+		return rubyLazyCopy(t, op, true, "#<Enumerator::Lazy: "+desc+":"+name+">")
+	}
+	switch name {
+	case "take":
+		tn := int(math.Trunc(rubyToF(argAt(pos, 0))))
+		if lazy {
+			op := newJSObject()
+			op.set("k", "take")
+			op.set("f", jsNull)
+			op.set("n", float64(tn))
+			return rubyLazyCopy(t, op, true, "#<Enumerator::Lazy: "+desc+":take("+strconv.Itoa(tn)+")>")
+		}
+		return &jsArray{elems: rt.rubyLazyFirst(t, tn)}
+	case "first":
+		if len(pos) > 0 {
+			return &jsArray{elems: rt.rubyLazyFirst(t, int(math.Trunc(rubyToF(pos[0]))))}
+		}
+		if f1 := rt.rubyLazyFirst(t, 1); len(f1) > 0 {
+			return f1[0]
+		}
+		return jsNull
+	case "to_a", "force", "entries":
+		return &jsArray{elems: rt.rubyLazyFirst(t, -1)}
+	case "each":
+		if blk != nil {
+			for _, v := range rt.rubyLazyFirst(t, -1) {
+				rt.call(blk, jsUndef, []interface{}{v})
+			}
+			return t
+		}
+	case "lazy":
+		if lazy {
+			return t
+		}
+		return rubyLazyCopy(t, nil, true, "#<Enumerator::Lazy: "+desc+">")
+	case "next", "peek":
+		cur := int(rubyToF(t.props["pos"]))
+		got := rt.rubyLazyFirst(t, cur+1)
+		if len(got) <= cur {
+			e := rt.rubyExc(rt.rubyBuiltinClass("StopIteration"), []interface{}{"iteration reached an end"})
+			e.set("__rframe", name)
+			panic(&jsThrown{value: e})
+		}
+		if name == "next" {
+			t.set("pos", float64(cur+1))
+		}
+		return got[len(got)-1]
+	case "rewind":
+		t.set("pos", float64(0))
+		return t
+	case "size":
+		if t.props["kind"] == "arr" && len(t.props["ops"].(*jsArray).elems) == 0 {
+			return float64(len(t.props["items"].(*jsArray).elems))
+		}
+		return jsNull
+	case "inspect", "to_s":
+		return desc
+	case "class":
+		return rt.rubyBuiltinClass("Enumerator")
+	}
+	rt.rubyNoMethod(t, name)
+	return nil
+}
+
+// rubyLazyOp is the lazy op a method name is, or "". Twin of rbaLazyOp in
+// lib/ruby-arr.js.
+func rubyLazyOp(name string) string {
+	switch name {
+	case "map", "collect":
+		return "map"
+	case "select", "filter":
+		return "select"
+	case "reject", "take_while", "drop_while":
+		return name
+	}
+	return ""
+}
+
 // rubyFindRunes is the first index >= from where t occurs in s, or -1.
 func rubyFindRunes(s, t []rune, from int) int {
 	for i := from; i+len(t) <= len(s); i++ {
