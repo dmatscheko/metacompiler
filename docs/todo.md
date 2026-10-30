@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-860** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-861** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -130,11 +130,14 @@ mutators must bump the new modCount. (5) `xs += emptyList()` in a loop over xs d
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-849 bash: a backslash-newline that splits a name is not spliced · P3 · SH · IN PROGRESS (SH worker, round 11) [V SH worker]
-bash removes `\⏎` before tokenizing; ours does not inside names. bash 5.3 vs ours (interp): `x\⏎y=3; echo $xy`
-→ `3` vs "command not found: xy=3"; `echo ${#arr\⏎[@]}`, `echo ${#\⏎arr[@]}` → `3` vs parse failure;
-`echo ${\⏎x:-dflt}` → `dflt` vs parse failure; `echo $x\⏎y` not isolated. Compiler not checked. Needs a
-splice in VarName / AsgIdent / PeName, or a pre-parse splice that keeps source positions.
+### T-860 bash: $LINENO, quotes in quoted ${v-w}, case in "$( )", fd dup order, here-doc forms · P2 · SH · OPEN [V SH worker + master]
+bash 5.3 vs ours (interp = compiler unless noted). (1) `$LINENO` is unset (empty) at top level and in functions; bash gives
+the line number (13 for `f() { echo $LINENO; }` defined on line 13). (2) `echo "${u:-'ab'}"` → bash `'ab'` (a `'` is
+ordinary inside a quoted ${v-w}), ours `ab`. (3) `r="$(case $x in a) echo q;; esac)"` → bash `q`, ours the literal
+text (case inside a double-quoted $( ) not parsed). (4) `echo 1 >&2 2>&1` → bash prints 1 on stderr, ours nothing.
+(5) `cmd <<\EOF` (backslash-quoted delimiter) and two here-documents on one line do not parse (HdScan limits).
+(6) llvm.Run drops the arithmetic-error stderr text that the native binary prints (seen with -qq). (7) a parse error
+inside a spliced logical line reports the line's start with shifted columns.
 
 # C — C subset
 
@@ -918,6 +921,7 @@ T-846 kotlin: modCount CME and smaller gaps — DONE dffa62ee..ad6f21a6 (modCoun
 T-856 c compiler: anonymous struct inside a union; null-based offsetof natively — DONE 01655e39 (anonymous struct in a union placed by byte offset from the union's start in the compiler; a folded integer constant cast to a pointer is an inttoptr constant, readable by llvm.Run's constValue; the interpreter's cell-counted offsets stay the documented 7.9 limit)
 T-855 ruby: private/constant/enumerator gaps — DONE e1ab0f6f (private/protected/public def; MRI's private-method message; run-time reopen decision after a failed superclass; blockless each_with_object/each_entry/find_index enumerators; nested names M::X in superclass/inspect/ancestors; uninitialized constant naming per MRI. Item 6 DECLINED: each_slice/each_cons StopIteration#result follows Ruby 3.1 (the receiver) consistently in all engines and is pinned by enum-block-still-yields; 2.6's nil is the older behaviour)
 T-854 ruby: binary (ASCII-8BIT) strings — DONE 074917f6 (binary String box {__rbin} / jsRBin with raw bytes; producers chr>127, b, force_encoding BINARY, pack C*; bytes/bytesize/getbyte/each_byte/[]/inspect \\xHH/encoding/==/hash/+/<< with CompatibilityError/*/unpack C c U; puts writes raw bytes via the existing writeBytes host — od-checked = ruby; Encoding objects)
+T-849 bash: a backslash-newline that splits a name is not spliced — DONE 4c9f2756 (pre-parse splice BsSplice in shared bash-splice.abnf: joins \\⏎ everywhere bash does — not in '...', $'...', comments, quoted here-doc bodies — and restores the removed newlines at the next line break so line numbers hold; eval/trap strings too; parser.go setSrc re-registers the rewritten program source; plus $'...' keeps a backslash-newline)
 
 # Settled — do not re-open
 
