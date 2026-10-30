@@ -320,13 +320,13 @@ isWellFormed/toWellFormed, Set#union etc., `accessor` auto-accessors (treated as
 
 # JV — Java
 
-### T-767 java: a C-style array declarator on a method parameter (`double u[]`) breaks both halves · P1 · JV · OPEN [V]
+### T-767 java: a C-style array declarator on a method parameter (`double u[]`) breaks both halves · P1 · JV · IN PROGRESS (JV worker, round 13) [V]
 `static void add(double u[], double au[]) { au[0] = 0; au[0] += u[0]; au[1] = 7; }` with x={2.5,0.0}, y={0,0}: interp
 `2.5 0.0 2 7` (element type lost: 0 stored as int, `+=` narrows), run/native `js runtime error: member assignment '0' on NaN`;
 java `2.5 0.0 2.5 7.0` (BG spectralnorm.java-8). `double[] u` is right; local and field `T x[]` are right. Files: Param
 `[ CDims ]` in java-interpreter.abnf ~444 and java-to-llvm-ir.abnf ~437.
 
-### T-776 java: a null Integer as array index, array dimension or charAt argument raises no NPE · P1 · JV · OPEN [V]
+### T-776 java: a null Integer as array index, array dimension or charAt argument raises no NPE · P1 · JV · IN PROGRESS (JV worker, round 13) [V]
 Neighbour of T-494. `static Integer nn() { return (Integer) nulls[0]; }`: `new int[nn()]` → all legs `len 0`; `base[nn()]` →
 interp `null`, run/native `10`; `base[nn()] = 5` → `set`; `new int[2][nn()]` → `0`; `"abc".charAt(nn())` → `a`; java NPE for each.
 The 12 other unboxing contexts are right. Files: index, array-creation and charAt operand paths in both java grammars and
@@ -372,7 +372,7 @@ map.` and `7`). `val r = try {..} catch {..}` outside a lambda is right. Check a
 
 # SW — Swift  (oracle: swiftc 6.1.2)
 
-### T-766 swift: `String(format:, args...)` returns the format unchanged · P1 · SW · OPEN [V]
+### T-766 swift: `String(format:, args...)` returns the format unchanged · P1 · SW · IN PROGRESS (SW worker, round 10) [V]
 `import Foundation; print(String(format: "%.3f", xs[0])); print(String(format: "%d items", ns[1]))` → all legs `%.3f`,
 `%d items`; swiftc `1.500`, `42 items` (BG spectralnorm.swift-8 printed `%.9f`). The labelled `format:` initializer is
 ignored in both swift grammars and lib/swift-rt.metajs. Oracle note: swiftc needs `-sdk
