@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-836** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-838** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -348,90 +348,23 @@ not change the renderer.
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-802 kotlin compiler: `a[i] = x` never calls a user `operator fun set` · P1 · KT · IN PROGRESS (KT worker, round 2) [V]
-`class S1(var v: Int) { operator fun set(i: Int, x: Int) { v = x + i } }`, `class S2` with get and set: `a[n[0]] = n[1]` →
-interp `s1 8` (right by the operator convention), run/native `s1 0`; `b[n[0]] = n[1]; b[n[0]]` → interp `71 72`, compiled
-`0 1`; `b[n[0]] += n[1]` → interp 791, compiled 0 — the write is dropped silently. The emitter dispatches "get"
-(emitOpDispatch, kotlin-to-llvm-ir.abnf ~4423) and invoke, but "$set" (listed in opConventions ~3118) has no dispatch site.
-Oracle: the Kotlin operator-convention spec (no kotlinc here).
+### T-836 kotlin: edges left by the operator/cast/range fixes · P3 · KT · OPEN [V KT worker]
+Each checked against java 24 + kotlin-stdlib 2.2.21 unless noted. (1) `"\n\n  a\n\n".trimIndent()` →
+stdlib `"\na\n"` (drops only a blank FIRST and a blank LAST line), ours `"a"` in all engines.
+(2) compiled `is Comparable<*>` is true for any value, so `Dog() as Comparable<*>` does not throw
+(JVM ClassCastException). (3) `t!!.i++` / `t!!.i = v`: `!!` inside an assignment target is still
+the identity (expressions throw NPE correctly). (4) the ConcurrentModificationException check is
+size-based: an add+remove in one iteration, or `sort()` during iteration, does not throw (ArrayList
+modCount does). (5) the ClassCastException message names a nested class by its simple name; the JVM
+says `Outer$Inner`. (6) LongRange `first`/`last`/`contains` near 2^53 still read the double fields
+(iteration, count, toString are exact). (7) `null as String` passes in every leg; Kotlin/JVM throws
+NullPointerException (message from kotlinc codegen — spec-only, no kotlinc here).
 
-### T-803 kotlin compiler: an indexed write to an implicit-this property named `data` is lost · P1 · KT · IN PROGRESS (KT worker, round 2) [V]
-`class A1 { var data = mutableListOf(0, 0); fun w(i: Int, x: Int) { data[i] = x }; fun r() = data[0] + data.size }`, `a.w(0, 5)`
-→ interp `[5, 0] 7`, run/native `[0, 0] 2`. A field named `items`, `this.data[i] = x`, `data[i] += x` and a local `data` work.
-`data` is a soft keyword (`data class`): the statement is probably read as a modifier, or the NotColon guard eats it.
-File: statement / modifier rules in kotlin-to-llvm-ir.abnf.
-
-### T-804 kotlin compiler: ordered comparisons with NaN, each compiled leg wrong differently · P1 · KT · IN PROGRESS (KT worker, round 2) [V]
-v = doubleArrayOf(NaN, 0.0, 1.0), every pair: interp (JLS/IEEE) all NaN rows `lt=false le=false gt=false ge=false`; llvm.Run
-`gt=true ge=true`; native `le=true ge=true`. It changes control flow (`while (nan > w.toDouble() && w < 3) w++` runs 3 times on
-run). js_ktcmp (abnf/jsrtkotlin.go ~982 via rt.jsCompare; lib/kotlin-rt.metajs ~2014 ktCmpVals) maps the relational operators
-onto a three-way compare, which cannot say "unordered"; Doubles need direct relational ops. Oracle: java.
-
-### T-805 kotlin: Double total order and boxed equality (NaN largest, -0.0 < 0.0, NaN equals NaN) are not applied · P1 · KT · IN PROGRESS (KT worker, round 2) [V]
-nz=-0.0, z=0.0, nan from an array: `listOf(nz)==listOf(z), listOf(nan)==listOf(nan), setOf(nz,z).size, setOf(nan,nan).size,
-(nz as Any).equals(z), listOf(z,nz,nan,nan).distinct(), listOf(1.0,nan).indexOf(nan), listOf(nz).contains(z)` → all legs
-`true false 1 2 true [0.0, NaN, NaN] -1 true`, oracle `false true 2 1 false [0.0, -0.0, NaN] 1 false`. `nz.compareTo(z),
-nan.compareTo(z), z.compareTo(nan), …, nan.equals(nan), nz.equals(z)` → ours `0 0 0 … false … true` (run also `nan>z` true),
-oracle `-1 1 -1 … true … false`. `listOf(3.0,-0.0,0.0,NaN,-1.0,-Inf).sorted()` → `[-0.0, 0.0, 3.0, NaN, -Infinity, -1.0]` (oracle
-`[-Infinity, -1.0, -0.0, 0.0, 3.0, NaN]`), max/min wrong too. `data class D(val d: Double)`: `D(nz)==D(z)` true, `D(nan)==D(nan)`
-false (spec: false, true). minOf/maxOf/Math.min/max on (-0.0,0.0) and NaN: interp returns the first argument, compiled the
-second (oracle -0.0 / 0.0 / NaN). Oracle: java Double.compare / Math.min/max / collections, and kotlin-stdlib
-CollectionsKt.sorted etc. Files: lib/kotlin-rt.metajs ktCmpKeys/ktCmpVals (~1327), jsrtkotlin.go comparators and equality,
-the interpreter's min/max builtins, data-class equals emission. May need a value-model decision for Double through Any.
-
-### T-806 kotlin: indexed and compound assignment evaluate the RHS first · P1 · KT · IN PROGRESS (KT worker, round 2) [V]
-Same class as T-479 (js, java), fixed there, not here. `arr=[1,2,3]; i=0; arr[i++] = arr[i] + 10` → all legs `[11, 2, 3] 1`,
-java `[12, 2, 3] 1`; `i=0; arr[i] = i++ + i++` → `[11, 2, 1]` (java `[1, 2, 3]` from `[12,2,3]`); `var x=5; x += x++ * 2` → 16 (java
-15); user get/set logging `b[t("i",2)] += t("v",5)` → interp `vig2s2=11` (expected `ig2vs2=11`). Kotlin's order is receiver,
-index, value, with the LHS value saved first (same as java). Files: assignment emitters in both kotlin grammars.
-
-### T-807 kotlin: `x!!` on null does not throw NullPointerException · P1 · KT · IN PROGRESS (KT worker, round 2) [V]
-`fun pick(i: Int): String? = if (i > 9) "x" else null`; `try { val t = pick(0)!!; println("nn2 $t") } catch (e: Exception) {…}`
-→ all legs `nn2 0 null`; Kotlin `caught NullPointerException null` (Intrinsics.checkNotNull). `pick(0)!!.length` inside
-`catch (e: NullPointerException)` aborts the process (exit 1). The grammars drop `!!` as identity (kotlin-interpreter.abnf
-~1125/1133/1435, and the compiler's equivalents).
-
-### T-808 kotlin: LongRange iteration near or above 2^53 runs in doubles and never ends · P1 · KT · IN PROGRESS (KT worker, round 2) [V]
-`val ls = longArrayOf(9007199254740993L); for (i in ls[0]..ls[0] + 1) println("it $i ${i % 10}")` → run/native print
-`it 9007199254740992 0` forever, interp hangs (all killed by the timeout); expected `…993 3`, `…994 4`. `for (i in
-Long.MAX_VALUE-1..Long.MAX_VALUE)` prints `9223372036854776000` forever; `.toList()`/`.count()` hang too. A 3e9 range is
-right. Remainder of T-347 (PARTIAL), which claimed LongRange. Files: range iteration in both kotlin grammars,
-jsrtkotlin.go, lib/kotlin-rt.metajs.
-
-### T-809 kotlin compiler: `for (i in a..Int.MAX_VALUE)` and `step MAX` overflow and loop forever · P1 · KT · IN PROGRESS (KT worker, round 2) [V finder only]
-ii = intArrayOf(Int.MAX_VALUE, Int.MIN_VALUE): `for (i in ii[0]-2..ii[0])` (capped by `if (sum > 10) break`) → interp 3,
-run/native 11 (infinite); `for (i in 0..ii[0] step ii[0])` → 2 vs 11. downTo Int.MIN_VALUE and `toList()` are right. The
-lowering is `i <= last; i += step` with no last-element exit. File: for-over-IntRange in kotlin-to-llvm-ir.abnf.
-
-### T-810 kotlin: `as` casts never throw ClassCastException · P1 · KT · IN PROGRESS (KT worker, round 2) [V]
-`fun anyOf(i: Int): Any = if (i == 0) "str" else if (i == 1) 42 else 2.5`; `anyOf(1) as String` → all legs succeed (`.length`
-on an Int gives `kotlin.Unit`); `"str" as Int` → `ok str`; Kotlin/JVM ClassCastException. java's T-495 is DONE; kotlin never got
-the fix. `as?` is right.
-
-### T-811 kotlin native: `abs(Int.MIN_VALUE)` returns 2147483648 · P1 · KT · IN PROGRESS (KT worker, round 2) [V]
-`abs(i)` and `Math.abs(i)` for Int.MIN_VALUE → interp/run `-2147483648`, native `2147483648` (an out-of-range Int); java
-`-2147483648`. Long abs is right. File: the abs builtin in lib/kotlin-rt.metajs (no 32-bit wrap) or the floor.
-
-### T-812 kotlin: `Double.mod(Double)` — native silently wrong, interp/run abort · P1 · KT · IN PROGRESS (KT worker, round 2) [V finder only]
-`2.5.mod(2.0), (-2.5).mod(2.0), (-2.5).mod(-2.0), (-7.0).mod(3.0)` → native `0 0 0 2`, interp "unknown Double method: mod", run
-"method call 'mod' on a number"; stdlib (floored) `0.5 1.5 -0.5 2.0`. Int/Long `.mod` are right.
-
-### T-813 kotlin: missing JVM exceptions — getValue, negative array size, subList bounds · P2 · KT · IN PROGRESS (KT worker, round 2) [V finder only]
-`mapOf("a" to 1).getValue("b")` in `catch (e: NoSuchElementException)` → uncatchable host error "key b is missing in the map",
-exit 1 (stdlib NoSuchElementException "Key b is missing in the map."). `IntArray(-1)` / `Array(-1){0}` → size 0
-(NegativeArraySizeException: -1). `xs.subList(2, 1)` → interp/native `[]`, llvm.Run Go panic "slice bounds out of range [2:1]"
-(IllegalArgumentException "fromIndex(2) > toIndex(1)"). Files: jsrtkotlin.go (subList), lib/kotlin-rt.metajs, interp builtins.
-
-### T-814 kotlin: removing from a MutableList inside its for-each does not throw ConcurrentModificationException · P2 · KT · IN PROGRESS (KT worker, round 2) [V finder only]
-`for (e in ml) if (e == 2) ml.remove(e)` on [1,2,3,4] → all legs `cme none [1, 3, 4]`; java ArrayList `cme caught [1, 3, 4]`.
-Needs a modCount on lists.
-
-### T-815 kotlin: `when (x) { in someList -> … }` does not parse; missing stdlib members · P3 · KT · IN PROGRESS (KT worker, round 2) [V finder only]
-An `in` condition whose operand is not a range (`in someList`, `in listOf("a","b")`) fails to parse in every leg. Missing:
-trimMargin, replaceIndent, Double.withSign/ulp/nextUp, Int.takeHighestOneBit/rotateLeft/inc(), MutableList.iterator(),
-addAll(index, list), StringBuilder(String).insert/setLength/deleteCharAt.
-
----
+### T-837 kotlin: a lambda whose body is a `try` expression returns Unit · P2 · KT · OPEN [V master]
+`println(m.let { try { it.getValue("b") } catch (e: NoSuchElementException) { e.message } })` and
+`println(m.let { try { 7 } catch (e: Exception) { 8 } })` print `kotlin.Unit` (interpreter; Kotlin
+spec: the lambda's value is its last expression, a try is an expression → `Key b is missing in the
+map.` and `7`). `val r = try {..} catch {..}` outside a lambda is right. Check all three engines.
 
 # GO — Go  (oracle: `go run`)
 
@@ -1224,6 +1157,20 @@ T-763 c compiler: `*pp = ptr` through a pointer-to-pointer fails to build — DO
 T-771 c: a storage class or qualifier before a typedef name is rejected — DONE e4564525 (qualifiers/specifiers on either side of a typedef name in all declaration forms; local static via TdStatic; `Num const x` parameters)
 T-774 c native: printf binds to a silent zero-returning stub — DONE 12f0c9b2 (new llvm.UndefinedSymbols; C -exe refuses 'function not defined: printf' like cc's link error; SHOULD FAIL row c-fail-test-printf.c)
 T-764 c interp: union type punning and byte-level pointer differences are not modelled — PARTIAL 55058606 — union type punning and byte-level pointer differences recorded in manual 7.9 as a permanent interpreter limit (cell memory; the compiled half matches cc); enum char constants and __LINE__ fixed; the remaining loud gaps filed as T-833
+T-802 kotlin compiler: `a[i] = x` never calls a user `operator fun set` — DONE 304c79d0 (indexed targets go through operator get/set for =, op= and ++)
+T-803 kotlin compiler: an indexed write to an implicit-this property named `data` is lost — DONE 304c79d0 (data/value before [ is no longer read as a modifier)
+T-806 kotlin: indexed and compound assignment evaluate the RHS first — DONE 304c79d0 (receiver, index, current value, rhs, write — java+stdlib; cta7 corrected from RI to IR)
+T-807 kotlin: `x!!` on null does not throw NullPointerException — DONE 304c79d0 (x!! on null throws NPE with null message; `t!!.i++` target form filed as T-836)
+T-810 kotlin: `as` casts never throw ClassCastException — DONE 304c79d0 (as throws ClassCastException with the JVM message for builtins and program classes; compiled `is` now sees every listed interface)
+T-804 kotlin compiler: ordered comparisons with NaN, each compiled leg wrong differently — DONE e3241821 (js_ktcmp compares two numbers as IEEE doubles)
+T-805 kotlin: Double total order and boxed equality (NaN largest, -0.0 < 0.0, NaN equals NaN) are not applied — DONE e3241821 (Double total order for compareTo/equals/collections/sort/data classes via js_ktequals; == stays IEEE; maxOf/minOf are Math.max/min)
+T-809 kotlin compiler: `for (i in a..Int.MAX_VALUE)` and `step MAX` overflow and loop forever — DONE d4e00ae1 (compiled for runs to getProgressionLastElement via js_ktforlast; until Int.MIN_VALUE no longer wraps)
+T-808 kotlin: LongRange iteration near or above 2^53 runs in doubles and never ends — DONE b01c7bc4 (range objects carry exact Long bounds and step; iteration/emptiness/count/reversed/step/toString exact; first/last/contains filed as T-836)
+T-811 kotlin native: `abs(Int.MIN_VALUE)` returns 2147483648 — DONE d4e00ae1 (native abs(Int.MIN_VALUE) wraps)
+T-812 kotlin: `Double.mod(Double)` — native silently wrong, interp/run abort — DONE d4e00ae1 (Double/Float.mod use the stdlib's FloorDivMod body)
+T-813 kotlin: missing JVM exceptions — getValue, negative array size, subList bounds — DONE d4e00ae1 (getValue, negative array sizes, List(-1), subList messages = java+stdlib)
+T-814 kotlin: removing from a MutableList inside its for-each does not throw ConcurrentModificationException — DONE d4e00ae1 (for over a mutable list throws CME on a size change; modCount precision filed as T-836)
+T-815 kotlin: `when (x) { in someList -> … }` does not parse; missing stdlib members — DONE 0312d4e0 (when-in/!in, trimMargin, replaceIndent, withSign, ulp, nextUp/Down, take*OneBit, rotate*, inc/dec, MutableList.iterator, addAll(index), StringBuilder insert/deleteCharAt/setLength)
 
 # Settled — do not re-open
 
