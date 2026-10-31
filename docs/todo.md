@@ -104,7 +104,7 @@ not change the renderer.
 
 # GO — Go  (oracle: `go run`)
 
-### T-878 go: FMA where gc does NOT fuse — constant-propagated operands, variables, inlining · P3 · GO · OPEN [V master]
+### T-878 go: FMA where gc does NOT fuse — constant-propagated operands, variables, inlining · P3 · GO · IN PROGRESS (GO worker, round 13) [V master]
 `z := complex(1.1, 2.3); w := complex(0.7, -1.9); fmt.Println(z*w)` → go `(5.139999999999999-0.48i)` (gc propagates the
 constants and folds z*w at compile time, no FMA); ours fuses → `(5.14-0.4800000000000002i)` in every leg (main was right
 by not fusing at all). The GO worker's remaining model gaps: a product reaching the add through a variable (gc fuses
