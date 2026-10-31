@@ -86,22 +86,6 @@ not change the renderer.
 
 # GO — Go  (oracle: `go run`)
 
-### T-887 go: replace the gc-imitating FMA analysis with one source-shape rule via `llvm.fmuladd` · P2 · GO · IN PROGRESS (GO worker, round 15) [V]
-The fusion decision now copies parts of gc's optimiser: whole-function constant
-analysis, an unreassigned product local fused like gc's SSA value, per-part negation
-tracking for complex values (languages/lib/go-constfold.js, both Go grammars,
-abnf/jsrtgolang.go). The Go spec only says an implementation MAY fuse, and an explicit
-`float64()` / `float32()` conversion prevents it. Rule to implement: fuse exactly a
-product that is a direct operand of `+` / `-` within one expression, not separated by
-an explicit conversion; nothing else, no constant or local tracking. Compiler: emit
-`llvm.fmuladd` for that shape and plain fmul/fadd elsewhere (no `contract` flags, so
-LLVM never fuses on its own). llvm.Run must execute `llvm.fmuladd` as a real fused
-operation, as AArch64 native does. Interpreter: fuse the same shape. Delete the
-analysis this replaces. Assertions whose `go run` digits differ under the simpler rule
-are corrected to it and listed as a by-design divergence (manual 7.9); the `math`
-library ports keep their own fusion, since that is a property of the library's source
-expressions. Verify all four legs agree on a generated float-expression probe.
-
 # SW — Swift  (oracle: swiftc 6.1.2)
 
 # DA — Dart  (no dart here: spec-only)
@@ -915,6 +899,7 @@ T-884 ruby: `private_class_method :new` (Singleton idiom); `Class.new(P) { … }
 T-883 regex step limit gives a wrong answer; engine-dependent regexp error text; test.sh arg parsing — DONE 1763c087 (ERE-only memoized backtracking — RE2 BitState idea — in regex.js, the Go twin and bash-rt.c: nested-loop patterns answer as bash 5.3, memo forced on from step 0 byte-identical on 6×2800 random cases, other dialects untouched; the security-review off-by-one in bash-rt.c re_seen fixed and checked with -fsanitize=array-bounds at the exact 8388608-bit boundary; js/ts step-limit error text agrees across engines; test.sh reads args as JSON strings. Residual: the old cap can still fire on subjects past ~262k chars, where the memo starts after the linear budget)
 T-885 bash `=~`: compiler `+` over an empty-matching body; POSIX leftmost-longest — PARTIAL→closed 6f0b9836 — compiler + over an empty-matching body takes the {1,} path; the ERE match is the longest at the leftmost start in all engines (RX_MATCHL, last in the dispatch chain: bash/js/python bench flat, a regex-only bash microbenchmark +36% for successful matches); also fixed: blanks and ; & < > inside ( ) of an =~ regex belong to the regex. DECLINED: POSIX's subexpression rule for how groups split the longest match ((x|xy)(z|yz) on xyz → bash xy|z, ours x|yz) — it applies per iteration and over uncaptured parts, needs comparing whole parse trees, which the visit memo cannot prune soundly; the fix is a POSIX tagged-NFA engine (Okui-Suzuki / Laurikari) in regex.js, the Go twin and bash-rt.c
 T-886 gates red: metajs-lint findings in js-builtins.js; java/kotlin CCE-message duplicate — DONE 4b77ebef (js-builtins.js rewritten into the MetaJS lint subset — __dMaxMs constant, __arrDrop helper — lint 7 → 0; the four CCE-message bodies share lib/java-cce.js — shape-scan back at its recorded 1 group / 6 lines; no rule or ratchet loosened, node/java 4-leg probes agree)
+T-887 go: replace the gc-imitating FMA analysis with one source-shape rule via `llvm.fmuladd` — DONE 79221623 (a float product that is a direct operand of +/- fuses, also through parens, unary minus and v += x*y; with two products the right one; nothing else; compiler emits llvm.fmuladd with no contract flags, llvm.Run computes math.FMA / correctly rounded binary32; complex multiply fuses each part's right product; ~540 net lines of gc imitation deleted; fma128c/d/e/g/h/i now assert the rule's answer, by-design divergence from go run on arm64 in manual 7.9; 8400-line generated probe 4 legs agree)
 
 # Settled — do not re-open
 
