@@ -152,7 +152,7 @@
 // grammar overrides this by ASSIGNMENT after the include (see the shared-helper
 // entry in docs/abnf-dialect-gotchas.md).
 var rxFail = function (msg) {
-    println("regexp error: " + msg)
+    eprintln("regexp error: " + msg)
     exit(1)
 }
 

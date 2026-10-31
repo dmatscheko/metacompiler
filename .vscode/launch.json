@@ -442,6 +442,41 @@
             "program": "${workspaceFolder}","args": ["languages/c-interpreter.abnf", "-code", "int f() { return 0; }", "-qq"]
         },
         {
+            "name": "JS to LLVM IR -qq, a compile error still shows SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "expectError": "js compiler error: undefined label 'nowhere'",
+            "program": "${workspaceFolder}","args": ["languages/js-to-llvm-ir.abnf", "-code", "while (true) { break nowhere; }", "-qq"]
+        },
+        {
+            "name": "TypeScript to LLVM IR -qq, a compile error still shows SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "expectError": "typescript compiler error: undefined label 'nowhere'",
+            "program": "${workspaceFolder}","args": ["languages/typescript-to-llvm-ir.abnf", "-code", "while (true) { break nowhere; }", "-qq"]
+        },
+        {
+            "name": "Go to LLVM IR -qq, a compile error still shows SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "expectError": "go compiler error: break nowhere: no such loop label",
+            "program": "${workspaceFolder}","args": ["languages/go-to-llvm-ir.abnf", "-code", "package main; func main() { for { break nowhere } }", "-qq"]
+        },
+        {
+            "name": "Ruby to LLVM IR -qq, a compile error still shows SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "expectError": "ruby compiler error: invalid regexp /(/: unterminated group",
+            "program": "${workspaceFolder}","args": ["languages/ruby-to-llvm-ir.abnf", "-code", "x = /(/", "-qq"]
+        },
+        {
+            "name": "Dart interpreter -qq, a regexp error still shows SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "expectError": "regexp error: step limit exceeded",
+            "program": "${workspaceFolder}","args": ["languages/dart-interpreter.abnf", "-code", "void main() { print(RegExp(r'^(a+)+$').hasMatch('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaab')); }", "-qq"]
+        },
+        {
             "name": "MetaJS interpreter (pinning self test)",
             "type": "go",
             "request": "launch",

@@ -522,7 +522,7 @@
 @str.1000255 = global [11 x i8] c"rtJvmF32Str"
 @str.1000256 = global [2 x i8] c"ip"
 @str.1000257 = global [2 x i8] c"fp"
-@str.1000258 = global [7 x i8] c"println"
+@str.1000258 = global [8 x i8] c"eprintln"
 @jsgc.1000076 = global [4 x i64] zeroinitializer
 @str.1000259 = global [14 x i8] c"regexp error: "
 @str.1000260 = global [4 x i8] c"exit"
@@ -22354,7 +22354,7 @@ entry:
 
 4:
 	%5 = phi i64 [ %1, %3 ]
-	%6 = call i64 @js_scope_cget(i64* getelementptr ([4 x i64], [4 x i64]* @jsgc.1000076, i64 0, i64 0), i64 %env, i8* getelementptr ([7 x i8], [7 x i8]* @str.1000258, i64 0, i64 0), i64 7)
+	%6 = call i64 @js_scope_cget(i64* getelementptr ([4 x i64], [4 x i64]* @jsgc.1000076, i64 0, i64 0), i64 %env, i8* getelementptr ([8 x i8], [8 x i8]* @str.1000258, i64 0, i64 0), i64 8)
 	%7 = call i64 @js_str_mem(i8* getelementptr ([14 x i8], [14 x i8]* @str.1000259, i64 0, i64 0), i64 14)
 	%8 = call i64 @js_add(i64 %7, i64 %2)
 	%9 = call i64 @js_call1(i64 %6, i64 %8)

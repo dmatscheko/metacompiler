@@ -5339,7 +5339,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         if (lbl == null) { return makeBreak() }
         return function(b) {
             var e = loopFor(lbl)
-            if (e == null) { println("go compiler error: break " + lbl + ": no such loop label"); exit(1) }
+            if (e == null) { eprintln("go compiler error: break " + lbl + ": no such loop label"); exit(1) }
             b.NewBr(e.brk)
             return deadBlock()
         }
@@ -5349,7 +5349,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         if (lbl == null) { return makeContinue() }
         return function(b) {
             var e = loopFor(lbl)
-            if (e == null) { println("go compiler error: continue " + lbl + ": no such loop label"); exit(1) }
+            if (e == null) { eprintln("go compiler error: continue " + lbl + ": no such loop label"); exit(1) }
             b.NewBr(e.cont)
             return deadBlock()
         }
@@ -7417,7 +7417,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // Go stdlib packages the runtime provides (resolveImport lives in lib/compile-core.js;
     // exact-match paths, so sub-packages like "encoding/json" are listed in full).
     core.stdlibImports = ["fmt", "os", "errors"]
-    function fail(msg) { println("go compiler error: " + msg); exit(1) }
+    function fail(msg) { eprintln("go compiler error: " + msg); exit(1) }
 
     // Project-file imports: import "mathbox" -> mathbox.go (a slash path like "a/b" ->
     // a/b.go), searched under the program's directory and the -i roots. The file is parsed
@@ -7559,7 +7559,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         if (rts == undefined || rts.length == 0) { rts = [libPath("runtime.ll"), libPath("go-rt.ll")] }
         var buildErr = llvm.BuildExecutable(m, c.exePath, rts)
         if (buildErr != "") {
-            println(buildErr)
+            eprintln(buildErr)
             exit(1)
         }
         println("go compiler: wrote executable " + c.exePath)

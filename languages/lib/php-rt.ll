@@ -791,7 +791,7 @@
 @str.1000420 = global [14 x i8] c"(): Argument #"
 @str.1000421 = global [12 x i8] c") not passed"
 @str.1000422 = global [15 x i8] c"phsNotPassedMsg"
-@str.1000423 = global [7 x i8] c"println"
+@str.1000423 = global [8 x i8] c"eprintln"
 @jsgc.1000090 = global [4 x i64] zeroinitializer
 @str.1000424 = global [14 x i8] c"regexp error: "
 @str.1000425 = global [4 x i8] c"exit"
@@ -35850,7 +35850,7 @@ entry:
 
 4:
 	%5 = phi i64 [ %1, %3 ]
-	%6 = call i64 @js_scope_cget(i64* getelementptr ([4 x i64], [4 x i64]* @jsgc.1000090, i64 0, i64 0), i64 %env, i8* getelementptr ([7 x i8], [7 x i8]* @str.1000423, i64 0, i64 0), i64 7)
+	%6 = call i64 @js_scope_cget(i64* getelementptr ([4 x i64], [4 x i64]* @jsgc.1000090, i64 0, i64 0), i64 %env, i8* getelementptr ([8 x i8], [8 x i8]* @str.1000423, i64 0, i64 0), i64 8)
 	%7 = call i64 @js_str_mem(i8* getelementptr ([14 x i8], [14 x i8]* @str.1000424, i64 0, i64 0), i64 14)
 	%8 = call i64 @js_add(i64 %7, i64 %2)
 	%9 = call i64 @js_call1(i64 %6, i64 %8)

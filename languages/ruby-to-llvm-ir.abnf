@@ -2523,7 +2523,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // Go twin (abnf/jsrtregex.go, reached by the js_rx* externs); this copy is here
     // so a regexp literal can be checked for validity while the tags run.
     include("lib/regex.js")
-    rxFail = function (msg) { println("ruby compiler error: " + msg); exit(1) }
+    rxFail = function (msg) { eprintln("ruby compiler error: " + msg); exit(1) }
     // The builtin method names, for a bare name inside a method added to a builtin
     // class (builtinSelfMethod).
     include("lib/ruby-respond.js")
@@ -2680,7 +2680,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         return {b: contB, v: tv}
     }
 
-    function fail(msg) { println("ruby compiler error: " + msg); exit(1) }
+    function fail(msg) { eprintln("ruby compiler error: " + msg); exit(1) }
 
     // The source position of a statement, for -trace / -cfgraph / -callgraph /
     // -why: the same marker every other handle-IR language emits, but it cannot
@@ -6358,7 +6358,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             // pattern is a compile error with a source position rather than a
             // surprise at run time.
             var probe = rxCompile(lit, neutral)
-            if (!probe.ok) { println("ruby compiler error: invalid regexp /" + lit + "/: " + probe.err); exit(1) }
+            if (!probe.ok) { eprintln("ruby compiler error: invalid regexp /" + lit + "/: " + probe.err); exit(1) }
             return function(b) {
                 return {b: b, v: callExt(b, "js_rxnew", [emitStr(b, lit), emitStr(b, neutral)])}
             }
@@ -9071,7 +9071,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (rts == undefined || rts.length == 0) { rts = [libPath("runtime.ll"), libPath("ruby-rt.ll")] }
         var buildErr = llvm.BuildExecutable(m, c.exePath, rts)
         if (buildErr != "") {
-            println(buildErr)
+            eprintln(buildErr)
             exit(1)
         }
         println("ruby compiler: wrote executable " + c.exePath)

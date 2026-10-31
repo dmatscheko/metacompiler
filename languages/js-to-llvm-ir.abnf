@@ -3365,7 +3365,7 @@ NotFuncHead = :script(~~
 
     // A clean compile-time abort (used by the shared notImpl helper in compile-core.js
     // for constructs that parse but cannot be lowered).
-    function fail(msg) { println("js compiler error: " + msg); exit(1) }
+    function fail(msg) { eprintln("js compiler error: " + msg); exit(1) }
 
     // ----- the dynamic `this`, for a NATIVE build only -------------------------
     // js_this reads abnf/jsrt.go's OWN CALL STACK (rt.thisStack), which the C floor
@@ -7729,8 +7729,7 @@ NotFuncHead = :script(~~
         for (var i = labelStack.length - 1; i >= 0; i--) {
             if (labelStack[i].name == name) { return labelStack[i] }
         }
-        println("js compiler error: undefined label '" + name + "'")
-        exit(1)
+        fail("undefined label '" + name + "'")
     }
     function makeLabeledStmt(t, name) {
         return function(b) {
@@ -7818,8 +7817,7 @@ NotFuncHead = :script(~~
         return function(b) {
             var l = findLabel(name)
             if (l.cont == null) {
-                println("js compiler error: 'continue " + name + "' does not label a loop")
-                exit(1)
+                fail("'continue " + name + "' does not label a loop")
             }
             emitIterUnwind(b, (l.tag == curFTag) ? l.fon : 0) // A continue to an OUTER loop, too.
             if (l.tag == curFTag) { b.NewBr(l.cont) }
@@ -8028,8 +8026,7 @@ NotFuncHead = :script(~~
                 cases.push(cur)
             } else {
                 if (cur == null) {
-                    println("js compiler error: switch: a statement before the first case label")
-                    exit(1)
+                    fail("switch: a statement before the first case label")
                 }
                 cur.body.push(p)
             }
@@ -8542,7 +8539,7 @@ NotFuncHead = :script(~~
         if (rts == undefined || rts.length == 0) { rts = [libPath("runtime.ll"), libPath("js-rt.ll")] }
         var buildErr = llvm.BuildExecutable(m, c.exePath, rts)
         if (buildErr != "") {
-            println(buildErr)
+            eprintln(buildErr)
             exit(1)
         }
         println("js compiler: wrote executable " + c.exePath)
