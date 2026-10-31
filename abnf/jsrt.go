@@ -9323,7 +9323,7 @@ func (rt *jsrt) rubyNeg(v interface{}) interface{} {
 		return rt.rubyBigNarrow(new(big.Int).Neg(t.v))
 	}
 	switch v.(type) {
-	case string, *jsRStr:
+	case string, *jsRStr, *jsRBin:
 		return rt.rubyMethod(v, "-@", nil)
 	}
 	if rubyUserObj(v) {
@@ -11472,6 +11472,14 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 				nm, fn := rt.rubyBlockMethod(args)
 				rubySingPut(o, nm, fn)
 				return jsSym{s: nm}
+			case "include":
+				// Module#include run at run time; MRI includes the last first.
+				if pos, _ := rubyBlockArgs(args); objIsCls {
+					for i := len(pos) - 1; i >= 0; i-- {
+						rubyInclude(o, pos[i])
+					}
+					return o
+				}
 			case "class_eval", "module_eval", "class_exec", "module_exec":
 				// The literal block (marked __rself) takes the module as self.
 				// Twin of classEval in ruby-interpreter.abnf.

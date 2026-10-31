@@ -892,6 +892,7 @@ type jsRBin struct {
 	enc string
 	id  jsHandleID
 	str *jsRStr
+	fz  bool
 }
 
 func (t *jsRBin) encName() string {
@@ -1910,6 +1911,17 @@ func (rt *jsrt) rubyBinMethod(t *jsRBin, name string, args []interface{}) interf
 		return r
 	}
 	enc := t.encName()
+	// Twin of the frozen arms of binMethod in ruby-interpreter.abnf.
+	if name == "freeze" {
+		t.fz = true
+		return t
+	}
+	if name == "frozen?" {
+		return t.fz
+	}
+	if t.fz && (rubyStrMutator(name) || name == "force_encoding") {
+		rt.rubyRaiseErr(name, "FrozenError", "can't modify frozen String")
+	}
 	bytesArr := func() *jsArray {
 		a := &jsArray{elems: make([]interface{}, len(t.b))}
 		for i := 0; i < len(t.b); i++ {
@@ -1954,8 +1966,13 @@ func (rt *jsrt) rubyBinMethod(t *jsRBin, name string, args []interface{}) interf
 		return t
 	case "b":
 		return &jsRBin{b: t.b}
-	case "dup", "clone", "+@":
-		return rubyEncStr(t.b, enc)
+	case "dup", "clone", "+@", "-@":
+		if (name == "+@" && !t.fz) || (name == "-@" && t.fz) {
+			return t
+		}
+		cp := rubyEncStr(t.b, enc)
+		rubyStrSetFz(cp, name == "-@" || (name == "clone" && t.fz))
+		return cp
 	case "valid_encoding?":
 		return enc == "ASCII-8BIT" || (enc == "US-ASCII" && rubyAsciiOnly(t.b))
 	case "ascii_only?":
@@ -1965,7 +1982,7 @@ func (rt *jsrt) rubyBinMethod(t *jsRBin, name string, args []interface{}) interf
 			return float64(rubyU8Len(t.b))
 		}
 		return float64(len(t.b))
-	case "to_s", "to_str", "-@", "itself":
+	case "to_s", "to_str", "itself":
 		return t
 	case "equal?":
 		return argAt(pos, 0) == interface{}(t)
@@ -2050,6 +2067,16 @@ func (rt *jsrt) rubyBinMethod(t *jsRBin, name string, args []interface{}) interf
 		}
 	}
 	return r
+}
+
+// rubyStrSetFz sets the frozen flag of a String rubyEncStr built.
+func rubyStrSetFz(v interface{}, fz bool) {
+	switch t := v.(type) {
+	case *jsRBin:
+		t.fz = fz
+	case *jsRStr:
+		t.fz = fz
+	}
 }
 
 // rubyBinOpName: the operators a binary String reaches through rubyBin.

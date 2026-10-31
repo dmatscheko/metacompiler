@@ -364,6 +364,54 @@ def s132
         S132A.instance_methods(false).sort == [:base, :dm, :kn, :name2, :q, :uses] && a.respond_to?(:uses))
 end
 
+# ===== SECTION 133: frozen binary Strings; super above Object; class_eval mixins =====
+# A binary String freezes like any other: frozen? answers true, its mutators and
+# force_encoding raise FrozenError, clone keeps the flag, dup and +@ drop it, -@
+# answers a frozen one. A super in a top-level def, a method of Object with
+# nothing above it, is a rescuable NoMethodError naming the method. In a class_eval block `include M' mixes M
+# into the class, a bare `private' makes the defs after it private (callable
+# on the implicit self, with or without arguments), and Module#include with a
+# receiver includes its last argument first; a method a module_eval gave M
+# reaches a class that includes M later. /usr/bin/ruby 2.6 settles each.
+def s133fz(s)
+  begin; s.force_encoding("UTF-8"); :none; rescue FrozenError => e; e.class; end
+end
+def s133top
+  super
+rescue NoMethodError => e
+  [6, e.class, e.name]
+end
+module S133M; def hi; "hi"; end; end
+module S133M2; def hi; "m2"; end; def lo; "lo"; end; end
+module S133N; end
+S133N.module_eval { def m2; :m2; end }
+class S133A; end
+S133A.class_eval do
+  include S133M
+  def early; helper + 1; end
+  private
+  def helper; 41; end
+  def twice(x); x * 2; end
+  public
+  def late; twice(5); end
+end
+class S133B; include S133N; end
+class S133C; end
+S133C.include(S133M, S133M2)
+def s133
+  x = "\xC3\xA9".b.freeze
+  y = "\xff".b
+  check("fz133a", x.frozen? && s133fz(x) == FrozenError && x.clone.frozen? && !x.dup.frozen? &&
+        !(+x).frozen? && (-y).frozen? && !y.frozen? && (+y).equal?(y) && x.encoding == Encoding::ASCII_8BIT &&
+        (begin; x << "a"; rescue FrozenError; true; end))
+  pv = begin; S133A.new.twice(1); rescue NoMethodError => e; e.message[0, 22]; end
+  check("su133b", s133top == [6, NoMethodError, :s133top])
+  check("ce133c", S133A.new.hi == "hi" && S133A.new.early == 42 && S133A.new.late == 10 &&
+        !S133A.new.respond_to?(:helper) && S133A.private_method_defined?(:helper) && pv == "private method `twice'" &&
+        S133A.include?(S133M) && S133B.new.m2 == :m2 && S133C.new.hi == "hi" && S133C.new.lo == "lo" &&
+        S133C.ancestors.take(3) == [S133C, S133M, S133M2])
+end
+
 s122() # SECTION-CALL 122
 s123() # SECTION-CALL 123
 s124() # SECTION-CALL 124
@@ -375,5 +423,6 @@ s129() # SECTION-CALL 129
 s130() # SECTION-CALL 130
 s131() # SECTION-CALL 131
 s132() # SECTION-CALL 132
+s133() # SECTION-CALL 133
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

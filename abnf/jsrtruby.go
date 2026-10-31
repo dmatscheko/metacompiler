@@ -196,7 +196,11 @@ func (rt *jsrt) addRubyFmtExterns(m map[string]func(args []uint64) uint64) {
 		}
 		self := rubyScopeSelf(rt, a[0])
 		// A bare name that is no local is a call on self - one the emitter could
-		// not see, as in a Proc that define_method runs with another self.
+		// not see, as in a Proc that define_method runs with another self, which
+		// reaches a private or protected method too.
+		if o, isObj := self.(*jsObject); isObj && rubyRestricted(o.props["__class"], name) {
+			return m["js_rxmcall"]([]uint64{w(self), rt.wrapStr("$q$" + name), w(&jsArray{})})
+		}
 		if o, isObj := self.(*jsObject); isObj && rubySingRespond(o, name) {
 			return m["js_rxmcall"]([]uint64{w(self), a[1], w(&jsArray{})})
 		}
@@ -220,6 +224,19 @@ func (rt *jsrt) addRubyFmtExterns(m map[string]func(args []uint64) uint64) {
 			name = rt.rubyStr(args.elems[0])
 		}
 		rt.rubyNoMethod(u(a[0]), name)
+		return 0
+	}
+	// A super above a top-level def: NoMethodError. Twin of noSuper in
+	// ruby-interpreter.abnf.
+	m["js_rnosuper"] = func(a []uint64) uint64 {
+		name := rt.rubyStr(u(a[1]))
+		rt.rubyNameErr("NoMethodError", "super: no superclass method `"+name+"' for "+rt.rubyNoMethodDesc(u(a[0])), name, u(a[0]))
+		return 0
+	}
+	m["js_rinclude"] = func(a []uint64) uint64 {
+		if c, isObj := u(a[0]).(*jsObject); isObj {
+			rubyInclude(c, u(a[1]))
+		}
 		return 0
 	}
 	m["js_rcatch"] = func(a []uint64) uint64 { return w(rt.rubyCatch(u(a[0]), u(a[1]))) }
@@ -264,8 +281,10 @@ func (rt *jsrt) addRubyFmtExterns(m map[string]func(args []uint64) uint64) {
 		return w(rt.rubyMethod(u(a[1]), "send", u(a[2]).(*jsArray).elems))
 	}
 	// The callee of a bare `name(args)` that names no def: the chain walk of
-	// js_scope_get, with a miss raising MRI's NoMethodError on the implicit self.
-	// Twin of js_rfn in languages/lib/ruby-rt.metajs.
+	// js_scope_get, then a method of the implicit self the emitter could not see
+	// (one a class_eval block defined, private ones included), with a miss raising
+	// MRI's NoMethodError on the implicit self. Twin of js_rfn in
+	// languages/lib/ruby-rt.metajs.
 	m["js_rfn"] = func(a []uint64) uint64 {
 		name := rt.toString(u(a[1]))
 		for sc := rt.scopeOf(a[0]); sc != nil; sc = sc.parent {
@@ -273,7 +292,19 @@ func (rt *jsrt) addRubyFmtExterns(m map[string]func(args []uint64) uint64) {
 				return w(v)
 			}
 		}
-		rt.rubyNoMethod(rubyScopeSelf(rt, a[0]), name)
+		self := rubyScopeSelf(rt, a[0])
+		if o, isObj := self.(*jsObject); isObj {
+			key := name
+			if rubyRestricted(o.props["__class"], name) {
+				key = "$q$" + name
+			}
+			if _, found := rubyFindMethod(o, key); found {
+				return w(&hostFunc{name: "method:" + name, fn: func(rt *jsrt, this uint64, args []interface{}) interface{} {
+					return rt.rubyMethod(o, key, args)
+				}})
+			}
+		}
+		rt.rubyNoMethod(self, name)
 		return 0
 	}
 	// An @ivar write where self is a class object. Twin of js_rcivset in
@@ -3249,7 +3280,11 @@ func (rt *jsrt) rubyRStrMethod(b *jsRStr, name string, args []interface{}) (inte
 	}
 	switch name {
 	case "freeze":
+		// The binary String this box became answers clone, +@ and -@.
 		b.fz = true
+		if b.bin != nil {
+			b.bin.fz = true
+		}
 		return b, true
 	case "frozen?":
 		return b.fz, true
@@ -3277,6 +3312,61 @@ func (rt *jsrt) rubyRStrMethod(b *jsRStr, name string, args []interface{}) (inte
 		return rt.rubyObjectId(b), true
 	}
 	return nil, false
+}
+
+// rubyInclude mixes the program's module m into the class c at run time. An include
+// is spliced by copying: each method m holds (plain-named, with its $q$ / $pv$ / $aw$
+// visibility slots) is copied onto c unless c defines it itself (its __imn), c is
+// recorded among m's includers for a method m gains later (rubyIncludersPut), and
+// the ancestry goes in front of c's __mixorder with the $mix$ record is_a? reads.
+// An already included module is left alone, as MRI does. Twins: js_rinclude in
+// lib/ruby-rt.metajs, includeInto in ruby-interpreter.abnf.
+func rubyInclude(c *jsObject, mv interface{}) {
+	m, isObj := mv.(*jsObject)
+	if !isObj {
+		return
+	}
+	nm, _ := m.props["__name"].(string)
+	if c.props["$mix$"+nm] == interface{}(m) {
+		return
+	}
+	own := map[string]bool{}
+	if ns, has := c.props["__imn"].(*jsArray); has {
+		for _, e := range ns.elems {
+			if s, isStr := e.(string); isStr {
+				own[s] = true
+			}
+		}
+	}
+	for k := range m.props {
+		base := k
+		for _, pre := range []string{"$q$", "$pv$", "$aw$"} {
+			if strings.HasPrefix(base, pre) {
+				base = base[len(pre):]
+				break
+			}
+		}
+		if base == "" || strings.HasPrefix(base, "$") || strings.HasPrefix(base, "__") || own[base] {
+			continue
+		}
+		c.set(k, m.props[k])
+	}
+	if incl, has := m.props["__incl"].(*jsArray); has {
+		incl.elems = append(incl.elems, c)
+	}
+	order := &jsArray{elems: []interface{}{m}}
+	c.set("$mix$"+nm, m)
+	if mo, has := m.props["__mixorder"].(*jsArray); has {
+		for _, e := range mo.elems {
+			if eo, isO := e.(*jsObject); isO {
+				en, _ := eo.props["__name"].(string)
+				c.set("$mix$"+en, eo)
+				order.elems = append(order.elems, eo)
+			}
+		}
+	}
+	rubyPushAll(order, c.props["__mixorder"])
+	c.set("__mixorder", order)
 }
 
 // rubyStrPromote: a mutator is about to reach v. A plain string becomes a box, and
@@ -3396,7 +3486,7 @@ func init() {
 		// Unary plus: the identity on a number, String#+@ on a String.
 		m["js_rpos"] = func(a []uint64) uint64 {
 			switch u(a[0]).(type) {
-			case string, *jsRStr:
+			case string, *jsRStr, *jsRBin:
 				return w(rt.rubyMethod(u(a[0]), "+@", nil))
 			}
 			return a[0]

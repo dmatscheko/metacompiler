@@ -3780,6 +3780,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     function binMethod(t, name, args, blk) {
         var b = t.__rbin
         var enc = binEnc(t)
+        // The frozen flag lives on the box as on a String box.
+        if (name == "freeze") { t.__fz = true; return t }
+        if (t.__fz === true && (strMutator(name) || name == "force_encoding")) {
+            raiseErr(name, "FrozenError", "can't modify frozen String")
+        }
         if (name == "bytes") { return binBytes(b) }
         if (name == "bytesize") { return b.length }
         if (name == "getbyte") {
@@ -3811,11 +3816,22 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             return t
         }
         if (name == "b") { return mkBin(b) }
-        if (name == "dup" || name == "clone" || name == "+@") { return encStr(b, enc) }
+        if (name == "dup" || name == "clone" || (name == "+@" && t.__fz === true)) {
+            var cp = anytype
+            cp = encStr(b, enc)
+            cp.__fz = name == "clone" && t.__fz === true
+            return cp
+        }
+        if (name == "-@" && t.__fz !== true) {
+            var fc = anytype
+            fc = encStr(b, enc)
+            fc.__fz = true
+            return fc
+        }
         if (name == "valid_encoding?") { return enc == "ASCII-8BIT" || (enc == "US-ASCII" && rbsAsciiOnly(b)) }
         if (name == "ascii_only?") { return rbsAsciiOnly(b) }
         if (name == "size" || name == "length") { return enc == "UTF-8" ? rbsU8Len(b) : b.length }
-        if (name == "to_s" || name == "to_str" || name == "-@") { return t }
+        if (name == "to_s" || name == "to_str" || name == "-@" || name == "+@") { return t }
         if (name == "<<" || name == "concat") {
             for (var k = 0; k < args.length; k++) {
                 var a = anytype
@@ -5578,7 +5594,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (isRat(v)) { return mkRat(rneg(v.n), v.d) }
         if (isCpx(v)) { return mkCpx(rneg(v.re), rneg(v.im)) }
         if (isUserObj(v)) { return mcall(v, "-@", [], null) }
-        if (typeof v == "string" || isRStr(v)) { return mcall(v, "-@", [], null) }
+        if (typeof v == "string" || isRStr(v) || isBin(v)) { return mcall(v, "-@", [], null) }
         fail("cannot negate")
     }
     // `x = *v`: an Array is copied, anything else is wrapped in a one-element Array
@@ -5608,7 +5624,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         return function() {
             var v = anytype
             v = t()
-            if (typeof v == "string" || isRStr(v)) { return mcall(v, "+@", [], null) }
+            if (typeof v == "string" || isRStr(v) || isBin(v)) { return mcall(v, "+@", [], null) }
             return v
         }
     }
@@ -8283,6 +8299,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         var what = respondsPrivate(name) ? "private method `" + name + "' called for " : "undefined method `" + name + "' for "
         nameErr("NoMethodError", what + noMethodDesc(r), name, r)
     }
+    // A super that finds no method above the running one. Twins: the
+    // js_rnosuper of abnf/jsrtruby.go and lib/ruby-rt.metajs.
+    function noSuper(t, name) {
+        nameErr("NoMethodError", "super: no superclass method `" + name + "' for " + noMethodDesc(t), name, t)
+    }
     // A NameError / NoMethodError carrying MRI's #name and #receiver, in the hidden
     // __nmname / __nmrecv slots. MRI reports both at the calling statement, in the
     // calling method's own frame, which an empty __rframe asks excSite for. Twins:
@@ -9066,6 +9087,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (name == "frozen?") {
             if (target === null || target === undefined || typeof target == "boolean") { return true }
             if (isUserObj(target)) { return target.__fz === true }
+            if (isBin(target)) { return target.__fz === true }
             return isRStr(target) ? target.__fz : (isSym(target) || isNumV(target))
         }
         if (name == "equal?") { return identicalP(target, args[0]) }
@@ -9672,6 +9694,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             }
             if (name == "extend") {
                 for (var cxi = 0; cxi < args.length; cxi++) { singExtend(target, args[cxi]) }
+                return target
+            }
+            if (name == "include") {
+                includeInto(target, args)
                 return target
             }
             if (name == "define_singleton_method") { return blockMethodDef(target, true, args, blk) }
@@ -12927,15 +12953,25 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             } else {
                 args = currentParamValues(getVar("$sparams"))
             }
-            if (dc == null || dc == undefined) { fail("super called outside of a method") }
-            // A method defined in a prepended module supers into the class itself.
+            if (mn == null || mn == undefined) { fail("super called outside of a method") }
+            // A method defined in a prepended module supers into the class itself;
+            // a top-level def belongs to Object, which has nothing above it here.
             var m = anytype
-            m = hasOwn(prependOwners, "$" + dc.__name) ? lookupOwn(prependOwners["$" + dc.__name], mn) : undefined
-            if (typeof m != "function") { m = lookupMethod(dc.__super, mn) }
+            m = undefined
+            if (dc != null && dc != undefined) {
+                m = hasOwn(prependOwners, "$" + dc.__name) ? lookupOwn(prependOwners["$" + dc.__name], mn) : undefined
+                // The modules the owner includes sit right above it, the last one nearest.
+                var mx = dc.__mixins == undefined ? 0 : dc.__mixins.length
+                while (typeof m != "function" && mx > 0) {
+                    mx = mx - 1
+                    m = lookupOwn(dc.__mixins[mx], mn)
+                }
+                if (typeof m != "function") { m = lookupMethod(dc.__super, mn) }
+            }
             // Object#method_missing, which a `super' in a method_missing reaches:
             // NoMethodError for the missing name.
             if (typeof m != "function" && mn == "method_missing" && args.length > 0) { noMethod(self, rstr(args[0])) }
-            if (typeof m != "function") { fail("super: no superclass method '" + mn + "'") }
+            if (typeof m != "function") { noSuper(self, mn) }
             return m.apply(undefined, concat2impl([self], args))
         }
     }
@@ -14800,10 +14836,13 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         for (var i = 0; i < list.length; i++) { if (list[i] === m) { return true } }
         return false
     }
-    hostGlobals["include"] = function() {
-        var c = directiveClass()
-        for (var i = 0; i < arguments.length; i++) {
-            var m = arguments[i]
+    // The modules go in last to first, so the first one listed is the nearest
+    // ancestor, as MRI's `include A, B' gives [C, A, B]. Twins: rubyInclude in
+    // abnf/jsrtruby.go, js_rinclude in lib/ruby-rt.metajs.
+    function includeInto(c, mods) {
+        for (var i = mods.length - 1; i >= 0; i--) {
+            var m = mods[i]
+            if (mixinListHas(c.__mixins, m)) { continue }
             if (m != undefined && m != null && m.__mixins != undefined) {
                 for (var j = 0; j < m.__mixins.length; j++) {
                     if (!mixinListHas(c.__mixins, m.__mixins[j])) { c.__mixins.push(m.__mixins[j]) }
@@ -14811,6 +14850,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             }
             c.__mixins.push(m)
         }
+    }
+    hostGlobals["include"] = function() {
+        includeInto(directiveClass(), argsArray(arguments))
         return null
     }
     // prepend M: M's methods come BEFORE the class's own, and a `super` inside one of

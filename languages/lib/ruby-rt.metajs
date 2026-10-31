@@ -312,6 +312,12 @@ function rbBinMethod(t, name, args) {
     var b = t["__s"]
     var enc = rbBinEnc(t)
     var blk = rbBlockOf(args)
+    // Twin of the frozen arms of binMethod in ruby-interpreter.abnf.
+    if (name == "freeze") { t["__fz"] = true; return t }
+    if (name == "frozen?") { return t["__fz"] === true }
+    if (t["__fz"] === true && (rbStrMutator(name) || name == "force_encoding")) {
+        rbRaiseErr(name, "FrozenError", "can't modify frozen String")
+    }
     if (name == "bytes") { return rbBinBytes(b) }
     if (name == "bytesize") { return b.length }
     if (name == "getbyte") {
@@ -341,14 +347,18 @@ function rbBinMethod(t, name, args) {
         return t
     }
     if (name == "b") { return rbMkBin(b) }
-    if (name == "dup" || name == "clone" || name == "+@") { return rbEncStr(b, enc) }
+    if (name == "dup" || name == "clone" || (name == "+@" && t["__fz"] === true) || (name == "-@" && t["__fz"] !== true)) {
+        var cp = rbEncStr(b, enc)
+        cp["__fz"] = name == "-@" || (name == "clone" && t["__fz"] === true)
+        return cp
+    }
     if (name == "valid_encoding?") { return enc == "ASCII-8BIT" || (enc == "US-ASCII" && rbsAsciiOnly(b)) }
     if (name == "ascii_only?") { return rbsAsciiOnly(b) }
     if (name == "size" || name == "length") {
         if (enc == "UTF-8") { return rbsU8Len(b) }
         return b.length
     }
-    if (name == "to_s" || name == "to_str" || name == "-@" || name == "itself") { return t }
+    if (name == "to_s" || name == "to_str" || name == "-@" || name == "+@" || name == "itself") { return t }
     if (name == "equal?") { return rbIdenticalP(t, rbArgAt(args, 0)) }
     if (name == "<<" || name == "concat") {
         var n = rbNPos(args)
@@ -709,7 +719,7 @@ function js_rtos(v) {
 }
 // Unary plus: the identity on a number, String#+@ on a String.
 function js_rpos(v) {
-    if (typeof v == "string" || (typeof v == "object" && rtTag(v, "__rstr"))) { return rbMethod(v, "+@", []) }
+    if (typeof v == "string" || (typeof v == "object" && (rtTag(v, "__rstr") || rtTag(v, "__rbin")))) { return rbMethod(v, "+@", []) }
     return v
 }
 
@@ -2157,7 +2167,7 @@ function rbNeg(v) {
     if (rbIsRat(v)) { return {__rat: true, n: rbNeg(v["n"]), d: v["d"]} }
     if (rbIsCpx(v)) { return rbMkCpx(rbNeg(v["re"]), rbNeg(v["im"])) }
     if (rbUserObj(v)) { return rbMethod(v, "-@", []) }
-    if (typeof v == "string" || (typeof v == "object" && rtTag(v, "__rstr"))) { return rbMethod(v, "-@", []) }
+    if (typeof v == "string" || (typeof v == "object" && (rtTag(v, "__rstr") || rtTag(v, "__rbin")))) { return rbMethod(v, "-@", []) }
     fail("cannot negate a " + typeof v)
     return 0
 }
@@ -4037,6 +4047,47 @@ function rbIncludersPut(m, nm, fn) {
         i = i + 1
     }
     return undefined
+}
+// Module#include run at run time: the program's module m mixed into the class c.
+// Twin of rubyInclude in abnf/jsrtruby.go, which states the rule.
+function js_rinclude(c, m) {
+    if (!rbIsObj(m)) { return null }
+    var nm = m["__name"]
+    if (c["$mix$" + nm] === m) { return null }
+    var own = {}
+    var ns = anytype
+    ns = c["__imn"]
+    var i = 0
+    while (ns !== undefined && ns !== null && i < ns.length) { own["$" + ns[i]] = true; i = i + 1 }
+    var ks = keysOf(m)
+    var k = 0
+    while (k < ks.length) {
+        var key = ks[k]
+        var base = key
+        if (base.length > 3 && base.substring(0, 3) == "$q$") { base = base.substring(3) }
+        else if (base.length > 4 && (base.substring(0, 4) == "$pv$" || base.substring(0, 4) == "$aw$")) { base = base.substring(4) }
+        if (base.length > 0 && base.charAt(0) != "$" && own["$" + base] !== true) { c[key] = m[key] }
+        k = k + 1
+    }
+    var incl = anytype
+    incl = m["__incl"]
+    if (incl !== undefined && incl !== null) { incl.push(c) }
+    var order = [m]
+    c["$mix$" + nm] = m
+    var mo = anytype
+    mo = m["__mixorder"]
+    var j = 0
+    while (mo !== undefined && mo !== null && j < mo.length) {
+        c["$mix$" + mo[j]["__name"]] = mo[j]
+        order.push(mo[j])
+        j = j + 1
+    }
+    var prev = anytype
+    prev = c["__mixorder"]
+    var p = 0
+    while (prev !== undefined && prev !== null && p < prev.length) { order.push(prev[p]); p = p + 1 }
+    c["__mixorder"] = order
+    return null
 }
 function rbOwnIMethods(o) {
     var out = []
@@ -8110,6 +8161,14 @@ function js_rnomethod(self, args) {
     return null
 }
 
+// A super above a top-level def: NoMethodError. Twin of noSuper in
+// ruby-interpreter.abnf.
+function js_rnosuper(self, name) {
+    var n = rbStr(name)
+    rbNameErr("NoMethodError", "super: no superclass method `" + n + "' for " + rbNoMethodDesc(self), n, self)
+    return null
+}
+
 // The private methods every object has: the "private" row of ruby-respond.js and
 // the top-level defs, recorded as "$p$" slots on the Object class object. Twin of
 // rubyRespondsPrivate in abnf/jsrtruby.go.
@@ -8630,6 +8689,12 @@ function rbMethod(target, name, args) {
                 }
                 else { rbSingPut(target, dnm, dfn) }
                 return rbSym(dnm)
+            }
+            // Module#include run at run time; MRI includes the last first.
+            if (name == "include" && target["__isclass"] === true) {
+                var ii = rbNPos(args) - 1
+                while (ii >= 0) { js_rinclude(target, rbArgAt(args, ii)); ii = ii - 1 }
+                return target
             }
             if (name == "instance_methods" && target["__isclass"] === true) {
                 if (rbNPos(args) > 0 && !rbTruthy(rbArgAt(args, 0))) { return rbOwnIMethods(target) }
@@ -10663,14 +10728,15 @@ function js_rlvar(scope, name) {
     }
     var lself = rbScopeSelf(scope)
     // A bare name that is no local is a call on self - one the emitter could not
-    // see, as in a Proc that define_method runs with another self.
+    // see, as in a Proc that define_method runs with another self, which reaches a
+    // private or protected method too.
+    if (rbIsObj(lself) && rbRestricted(lself["__class"], n)) { return js_rxmcall(lself, "$q$" + n, []) }
     if (rbIsObj(lself) && rbSingRespond(lself, n)) { return js_rxmcall(lself, n, []) }
     rbNameErr("NameError", "undefined local variable or method `" + n + "' for " + rbNoMethodDesc(lself), n, lself)
     return null
 }
-// The callee of a bare `name(args)` that names no def: a chain walk, with a miss
-// raising MRI's NoMethodError on the implicit self. Twin of js_rfn in
-// abnf/jsrtruby.go.
+// The callee of a bare `name(args)` that names no def. Twin of js_rfn in
+// abnf/jsrtruby.go, which states the rule.
 function js_rfn(scope, name) {
     var n = rbStr(name)
     var s = anytype
@@ -10679,7 +10745,14 @@ function js_rfn(scope, name) {
         if (scopeHas(s, n)) { return scopeGet(s, n) }
         s = scopeParent(s)
     }
-    rbNoMethod(rbScopeSelf(scope), n)
+    var fself = rbScopeSelf(scope)
+    if (rbIsObj(fself)) {
+        var fk = n
+        if (rbRestricted(fself["__class"], n)) { fk = "$q$" + n }
+        var fm = rbFindMethod(fself, fk)
+        if (fm !== undefined) { return rbBindMethod(fself, fk, fm) }
+    }
+    rbNoMethod(fself, n)
     return null
 }
 // The COUNT of first / last / pop / shift / take - see rubyArrCountArg in abnf/jsrt.go.

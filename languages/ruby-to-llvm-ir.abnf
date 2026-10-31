@@ -3788,12 +3788,18 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
         return null
     }
+    // The visibility a bare private / protected / public in a class_eval block
+    // gives the defs after it, which is the block's own: it starts public.
+    var curEvalVis = "public"
     function evalBlockT(blkMethT) {
         return function(b) {
             var saved = curEvalDef
+            var savedVis = curEvalVis
             curEvalDef = true
+            curEvalVis = "public"
             var r = blkMethT(b)
             curEvalDef = saved
+            curEvalVis = savedVis
             return r
         }
     }
@@ -5654,6 +5660,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // body, a `def self.m') - a class method, the class's own or an inherited one.
     function selfCallOf(name) {
         if (selfMethod(curClsName, name) || isSelfCall(name)) { return true }
+        // In a class_eval block self is the module, and include / extend act on it.
+        if (curEvalDef && (name == "include" || name == "extend") && rubyAllMethods["$" + name] !== true && !knownLocal(name)) { return true }
         if (!curSelfIsCls) { return false }
         // Where self is the class, a bare `new' is Class#new on it.
         if (name == "new") { return true }
@@ -6109,11 +6117,14 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     function emitSingletonDef(b, targetV, m) {
         var savedMeth = curMethName
         var savedParams = curMethParams
+        var savedTop = curTopDef
         curMethName = m.name
         curMethParams = paramNames(m.params)
+        curTopDef = false
         var savedPs = curMethPs
         curMethPs = m.params
         var idx = emitFunc(m.params, m.body, true, false, false, true, m.pos)
+        curTopDef = savedTop
         curMethName = savedMeth
         curMethParams = savedParams
         curMethPs = savedPs
@@ -7186,6 +7197,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         return curClsPath == "" || name.indexOf("::") >= 0 ? name : curClsPath + "::" + name
     }
     var curMethName = ""
+    // Whether the method being emitted is a top-level def, a method of Object.
+    var curTopDef = false
     var curMethParams = []
     // The parameter descriptors of the method being emitted, which a zsuper reads.
     var curMethPs = []
@@ -7210,6 +7223,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 }
                 var mmSelf = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "self")])
                 return {b: b, v: callExt(b, "js_rnomethod", [mmSelf, mmArgs])}
+            }
+            // Nothing sits above Object here: NoMethodError, once the arguments ran.
+            if (curClsName == "" && curTopDef) {
+                if (explicit) { b = emitArgs(b, unwrapArgs(argTs)).b }
+                return {b: b, v: callExt(b, "js_rnosuper", [emitIvarSelf(b), emitStr(b, curMethName)])}
             }
             if (curClsName == "" || (classSupers["$" + curClsName] == undefined
                                      && classHasSuper["$" + curClsName] !== true)) {
@@ -7350,6 +7368,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (name === rhsLocal && curFrame === rhsFrame && !knownLocal(name)) { return {b: b, v: rhsLocalRead(b, name)} }
             // A name assigned as a local so far reads the local, whatever method shares it.
             var local = knownLocal(name)
+            if (!local && curEvalDef && (name == "private" || name == "protected" || name == "public")) {
+                curEvalVis = name
+                return {b: b, v: hNull}
+            }
             // A BARE `rand` is Kernel#rand called with no arguments, not a name. Guarded
             // exactly like the `rand(...)' call arm above, so a program that defines a rand
             // of its own still wins.
@@ -7485,11 +7507,14 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (curEvalDef) { return {b: emitEvalDef(b, fn), v: hNull} }
             var savedMN = curMethName
             var savedMP = curMethParams
+            var savedTop = curTopDef
             curMethName = fn.name
             curMethParams = paramNames(fn.params)
+            curTopDef = true
             var savedPs = curMethPs
             curMethPs = fn.params
             var idx = emitFunc(fn.params, fn.body, false, false, false, true, fn.pos)
+            curTopDef = savedTop
             curMethName = savedMN
             curMethParams = savedMP
             curMethPs = savedPs
@@ -7908,11 +7933,14 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         var savedMP = curMethParams
         var savedPs = curMethPs
         var savedEval = curEvalDef
+        var savedTop = curTopDef
         curMethName = fn.name
         curMethParams = paramNames(fn.params)
         curMethPs = fn.params
         curEvalDef = false
+        curTopDef = false
         var idx = emitFunc(fn.params, fn.body, true, false, false, true, fn.pos)
+        curTopDef = savedTop
         curMethName = savedMN
         curMethParams = savedMP
         curMethPs = savedPs
@@ -7923,7 +7951,16 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         var wrapV = callExt(b, "js_rblkwrap", [cloV])
         callExt(b, "js_set", [wrapV, emitStr(b, "__rself"), hTrue])
         callExt(b, "js_arr_push", [argsV, wrapV])
-        callExt(b, "js_rxmcall", [callExt(b, "js_scope_get", [curScopeV, emitStr(b, "self")]), emitStr(b, "define_method"), argsV])
+        var evSelfV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "self")])
+        callExt(b, "js_rxmcall", [evSelfV, emitStr(b, "define_method"), argsV])
+        // A restricted one is laid out as emitMethods lays out a class's: the method
+        // under $q$, a stub that raises under its name.
+        if (curEvalVis != "public") {
+            callExt(b, "js_set", [evSelfV, emitStr(b, "$q$" + fn.name), callExt(b, "js_get", [evSelfV, emitStr(b, fn.name)])])
+            if (curEvalVis == "private") { callExt(b, "js_set", [evSelfV, emitStr(b, "$pv$" + fn.name), hTrue]) }
+            var sidx = emitFunc([], restrictedStub(curEvalVis, fn.name), true)
+            callExt(b, "js_set", [evSelfV, emitStr(b, fn.name), callExt(b, "js_closure", [handle(sidx), curScopeV])])
+        }
         return b
     }
     function superForwarder(owner, n, key) {
@@ -8025,12 +8062,12 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         for (var i = 0; i < anc.length; i++) {
             if (!mixNameHasObject(anc[i])) { continue }
             var modV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, anc[i])])
+            // A program's module is also included at run time (js_rinclude in
+            // abnf/jsrtruby.go): the methods a module_eval gave it join the class,
+            // and the class joins its includers for a define_method run later.
+            if (orderKey == "__mixorder" && moduleDefs["$" + anc[i]] != undefined) { callExt(b, "js_rinclude", [dstV, modV]) }
             callExt(b, "js_set", [dstV, emitStr(b, slot + anc[i]), modV])
             callExt(b, "js_arr_push", [listV, modV])
-            // An include copies the module's methods now, so a program's module keeps
-            // its includers (__incl) for a define_method it runs later
-            // (rubyIncludersPut in abnf/jsrt.go).
-            if (orderKey == "__mixorder" && moduleDefs["$" + anc[i]] != undefined) { callExt(b, "js_arr_push", [callExt(b, "js_get", [modV, emitStr(b, "__incl")]), dstV]) }
         }
         callExt(b, "js_set", [dstV, emitStr(b, orderKey), listV])
         return b
