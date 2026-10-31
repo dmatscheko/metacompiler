@@ -313,7 +313,7 @@ method 'remove'". Both loud.
 
 # GO — Go  (oracle: `go run`)
 
-### T-904 go: a variable typed by a conversion loses its type when an untyped constant is assigned later · P1 · GO · OPEN [V]
+### T-904 go: a variable typed by a conversion loses its type when an untyped constant is assigned later · P1 · GO · IN PROGRESS (GO worker, round 16) [V]
 `c := float64(3); c = 7; fmt.Println(c/2)` → go 3.5, all legs 3. `var u = uint8(3); u = 255; u++` → go 0, ours 256.
 `i := int8(1); i = 127; i++` → go -128, ours 128. `h := complex128(3); h = 6` → go `(6+0i)`, ours `6` (complex64 and
 float32 `g = 16777217` the same). `var a float64 = 3; a = 7`, `d := 3.0; d = 7` and the un-reassigned `float64(3)/2` are right:
@@ -321,22 +321,22 @@ the conversion's type is not recorded as the variable's declared type for `:=` /
 assignment is untyped. Also the remaining form of T-869 (4): `var c = complex64(complex(1,2)); q := &c; *q = 2` prints `2`.
 Files: declared-type recording for `:=` and `var x = expr` in go-interpreter.abnf and go-to-llvm-ir.abnf.
 
-### T-905 go compiler: a store through a pointer to a complex struct field or slice element is lost · P1 · GO · OPEN [V]
+### T-905 go compiler: a store through a pointer to a complex struct field or slice element is lost · P1 · GO · IN PROGRESS (GO worker, round 16) [V]
 `type S struct{x int; c complex128}`; `s := S{}; pc := &s.c; *pc = 4; fmt.Println(s, *pc)` → go and interp `{0 (4+0i)} (4+0i)`,
 run and native `{0 (0+0i)} (4+0i)`. `ca := []complex128{1,2}; pca := &ca[0]; *pca = 5; fmt.Println(ca)` → go `[(5+0i) (2+0i)]`,
 run/native `[(1+0i) (2+0i)]`. complex64 the same; int and float fields through `&s.x` are right, so the pointer addresses a
 copy of the complex box. Files: go-to-llvm-ir.abnf, address-of a field / index of complex type (the goRefTy deref path).
 
-### T-910 go and swift compilers accept `break` outside a loop; compile errors say "js runtime error:" · P3 · GO · OPEN [V] (break; the error prefix is [V finder only])
+### T-910 go and swift compilers accept `break` outside a loop; compile errors say "js runtime error:" · P3 · GO · IN PROGRESS (GO worker, round 16) [V] (break; the error prefix is [V finder only])
 `break` at function level compiles and exits 0 in both compilers; gc and swiftc reject it. The go and swift compile-time
 "variable not defined" errors carry the prefix `js runtime error:`. Shared: swift-to-llvm-ir.abnf.
 
-### T-927 go: a struct type with a map of itself hangs every engine before main · P1 · GO · OPEN [V]
+### T-927 go: a struct type with a map of itself hangs every engine before main · P1 · GO · IN PROGRESS (GO worker, round 16) [V]
 `type S struct { n int; m map[int]S }`; `func main() { var s S; fmt.Println("len", len(s.m), s.n) }` → go `len 0 0`; interp and
 llvm.Run produce nothing and hang (killed at 20 s), the native `-exe` build never finishes. `[]S` of itself is right. Also
 fixedbugs/bug190.go. Files: zero-value / type registration for map element types in both go grammars.
 
-### T-928 go: `*p` / `x.a` as the target of a select-case receive or a for-range assignment does not parse · P2 · GO · OPEN [V]
+### T-928 go: `*p` / `x.a` as the target of a select-case receive or a for-range assignment does not parse · P2 · GO · IN PROGRESS (GO worker, round 16) [V]
 `for *p, *q = range arr { … }` → go `sum 17 i 2 v 6`, both halves "Not everything could be parsed" at the `=`.
 `case *p = <-c:`, `case x.a = <-c:`, `case (<-c):` → interp parse failure, compiler "composite literal not implemented" (finder).
 Corpus: chan/select4, fixedbugs/gcc61253, fixedbugs/issue20923 (all three parsed in the July sweep: lost since), chan/select3,
