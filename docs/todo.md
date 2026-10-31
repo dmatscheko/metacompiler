@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-886** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-887** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -105,6 +105,13 @@ not change the renderer.
 # C — C subset
 
 # CORE — MetaJS, the engines, shared runtime, tooling
+
+### T-886 gates red: metajs-lint findings in js-builtins.js; java/kotlin CCE-message duplicate · P1 · CORE · IN PROGRESS (CORE worker, round 14) [V master]
+`tests/gates.sh` on main b29e3bcf: FAILED shape-scan metajs-lint. (1) metajs-lint: `exponent-literal` js-builtins.js:996, 1370,
+1377 (`8.64e15`); `frozen-builtin` js-builtins.js:514, 515, 1584, 1608 (`.splice(`) — rewrite in the MetaJS dialect (see the
+lint's rule text for why each is a gap) with no behaviour change. (2) shape-scan: a NEW cross-language duplicate,
+java-rt:jvCceMsg / kotlin-rt:ktCceMsg (16 lines) — share one body (a lib file both layer-2 sources import, like the existing
+shared libs) so shape-scan is back at its recorded ratchet (1 group / 6 recoverable lines: jvFloFix/k1FloFix is the old one).
 
 ### T-184 dart: `IndexError` vs `RangeError` text for `[1,2,3][7]` · P3 · DA · BLOCKED - needs a Dart VM to settle [U spec-only]
 A reviewer argued the VM prints `RangeError (index): Invalid value: Not in inclusive
