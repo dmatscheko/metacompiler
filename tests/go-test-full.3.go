@@ -1402,6 +1402,32 @@ func s132f() {
 		"(0.1+0.3i) (0.10000000149011612+0.30000001192092896i) (0+0i) [(1+0i) (0+2i) (0-1i) (0.5+0i)] {(3+0i)} 7" && fmt.Sprintf("%T", ws[2]) == "complex64")
 }
 
+// ===== SECTION 133: a variable typed by a conversion =====
+// `x := T(v)` and `var x = T(v)` declare x of type T, so a constant assigned to x
+// later is converted to T: a float64 divides as one, a sized integer wraps, a
+// complex prints as one. The expected values are go run's.
+func s133() {
+	c := float64(3)
+	c = 7
+	var u = uint8(3)
+	u = 255
+	u++
+	i := int8(1)
+	i = 127
+	i++
+	check("convty133", fmt.Sprint(c/2, u, i) == "3.5 0 -128")
+	h := complex128(3)
+	h = 6
+	h6 := complex64(3)
+	h6 = 6
+	g := float32(1)
+	g = 16777217
+	var cc = complex64(complex(1, 2))
+	q := &cc
+	*q = 2
+	check("convcx133", fmt.Sprint(h, h6, g, cc) == "(6+0i) (6+0i) 1.6777216e+07 (2+0i)")
+}
+
 func main() {
 	s94()   // SECTION-CALL 94
 	s95()   // SECTION-CALL 95
@@ -1440,6 +1466,7 @@ func main() {
 	s130()  // SECTION-CALL 130
 	s131()  // SECTION-CALL 131
 	s132f() // SECTION-CALL 132
+	s133()  // SECTION-CALL 133
 	fmt.Println("full:", checks, "checks,", fails, "failures")
 	os.Exit(fails)
 }

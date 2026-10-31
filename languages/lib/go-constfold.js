@@ -1624,6 +1624,9 @@ function goConvC(items, pos) {
     var k = constAt(items[2].cke)
     goConvConst(k, items[2].cks, items[2].cke, items[0].conv)
     goTkConv(items[0].conv, items[2].cks, items[2].cke, pos)
+    // T(x) is a value of type T: `c := float64(3)` declares a float64, so a later
+    // `c = 7` converts the constant to it.
+    if (!goIsIfaceTy(stBare(items[0].conv))) { regSt(pos, items[0].conv) }
     // float32(c) rounds the exact constant once (goConstTo's float32 rule).
     var tt = goTkType(items[0].conv)
     if (k != null && !cIsCx(k) && tt != null && tt.u == "float32") { return [items[0], cMaterialize(cRoundFlo(cAsF(k), true))] }
