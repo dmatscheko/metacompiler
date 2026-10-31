@@ -66,3 +66,15 @@ for ((i = 0; i < 20000; i++)); do
   read -r q <<< "$w:$i"
 done
 echo "commands $n $c $p ${#q} ${q: -6}"
+# A read of several names, a pipeline, a copy of a long value and `set --` on every
+# pass: the values go to their slots' buffers and the parameters to their own block, a
+# pipeline's stages give back what they stored, and the copy is the copier's own.
+n=0
+for ((i = 0; i < 20000; i++)); do
+  IFS=, read -r a b <<< "$w$i,x$i"
+  echo "$w$i" | read x
+  y="$w$i"; x=$y
+  set -- "$w$i" "$b"
+  n=$((n + ${#a} + ${#x} + ${#1}))
+done
+echo "shapes $n $b ${x: -6} $2"

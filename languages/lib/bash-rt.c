@@ -102,6 +102,21 @@ int *ss_rec[4096];
 int ss_rcap[4096];
 int ss_an[4096];
 int ss_depth;
+/* The rest of a level's state a subshell ends with: the positional frame and
+ * the argv floor below which this level must not write (rt_setargs), the arena
+ * floor (nothing the subshell stored outlives it, so its pins go too), the
+ * local save stack's depth (rt_glob_swap leaves the entries below it alone) and
+ * the parameter block. */
+int ss_atop[4096];
+int ss_abase[4096];
+int ss_afn[4096];
+int ss_afl[4096];
+long ss_floor[4096];
+int ss_lstop[4096];
+char *ss_pb[4096];
+long ss_pbcap[4096];
+int ss_pbsh[4096];
+int ss_pbdep[4096];
 
 /* Standard input for `read`: the buffer and the read position. */
 char *stdin_buf;
@@ -132,10 +147,23 @@ int argv_cap;
 int argv_top;
 int frame_base;
 int frame_n;
+int argv_floor;
+/* THE PARAMETER BLOCK: the strings `set --` stores, copied into one malloc'd
+ * block (pb_buf, pb_cap bytes) so the parameters pin nothing in the arena. The
+ * next `set --` replaces it and frees it unless a variable, a `local` save,
+ * standard input, a frame below or an array element (pb_sh) holds a string in
+ * it, or it belongs to an outer subshell level (pb_dep). */
+char *pb_buf;
+long pb_cap;
+int pb_sh;
+int pb_dep;
 
 /* ---- prototypes of every runtime helper (any chunk may call any other) ---- */
 char *rt_bump(int n);
 char *rt_sown(int id, char *v, int n);
+char *rt_vown(int id, char *v);
+char *rt_rkeep(long m, char *v, int id);
+int rt_rkeep_end(long m, long lm);
 char *rt_lbump(int n);
 int rt_islist(char *v);
 char *rt_lcat(char *a, char *b);
@@ -249,7 +277,11 @@ char *rt_slicefields(char *f, int off, int n, char *sep, int star);
 char *rt_globescape(char *s);
 char *rt_catfields(char *a, char *b);
 char *rt_mapf(char *v, int op, char *p, char *r, int mode, char *sep, int star);
-int rt_argpush(char *v);
+int rt_setargs(char *v);
+int rt_pstat(char *k, int st);
+int rt_pbin(char *v);
+int rt_pbfree_ok(int from);
+int rt_argroom(int t);
 int rt_argcall(char *v);
 int rt_echo(char *fields, int newline, int escapes);
 char *rt_param(int n);
@@ -375,8 +407,10 @@ void rt_die(char *what, int want, int used, int cap)
  * line's end; a chunk it leaves is reused when the heap grows again. That is
  * sound because a string kept beyond that point is either older than the mark
  * or written into a store that outlives it - a variable, an array, a
- * positional parameter, a capture buffer, a subshell snapshot - and every such
- * write raises the FLOOR (rt_pin): a string release never goes below it. A
+ * subshell snapshot - and every such write raises the FLOOR (rt_pin): a
+ * string release never goes below it. Positional parameters (the parameter
+ * block) and capture buffers are malloc'd instead, and nothing a subshell
+ * stores outlives it, so its end puts the floor back (rt_ss_restore). A
  * list is never stored (each store takes a joined string or one field), so
  * its release has no floor. A scalar assignment also moves its value down
  * onto the mark (rt_keep), so the garbage its own expansion made goes back
@@ -578,6 +612,28 @@ char *rt_keep(long m, long lm, char *v, int id) {
     v = (char *)memmove(h_chunk[k] + (lo - h_cvs[k]), v, (unsigned long)(n + 1));
     rt_hset(0, lo + n + 1);
     return v;
+}
+
+/* One value of a `read` of several names, before any is stored: a value made
+ * at or above where a release to mark m lands goes to slot id's buffer, so
+ * rt_rkeep_end can give back everything the command allocated. rk_stay records
+ * a value rt_sown could not take, which keeps the arena as it is. */
+int rk_stay;
+char *rt_rkeep(long m, char *v, int id) {
+    char *o;
+    if (rt_vpos(v) < rt_alo(m)) return v;
+    o = rt_sown(id, v, (int)strlen(v));
+    if (o == 0) {
+        rk_stay = 1;
+        return v;
+    }
+    return o;
+}
+
+int rt_rkeep_end(long m, long lm) {
+    if (rk_stay == 0) rt_release(m, lm);
+    rk_stay = 0;
+    return 0;
 }
 
 /* The list a followed by the raw bytes b (more fields, already encoded). */
@@ -814,6 +870,22 @@ char *rt_sown(int id, char *v, int n) {
     ab_shared[id] = 0;
     ab_depth[id] = ss_depth;
     return nb;
+}
+
+/* `x=$y`: v is the value of another variable or of a parameter. When it is a
+ * string of another slot's buffer or of the parameter block, slot id takes its
+ * own copy (rt_sown), so the buffer stays its owner's to rewrite or free. */
+char *rt_vown(int id, char *v) {
+    int i = 0;
+    char *o;
+    int hit = rt_pbin(v);
+    while (hit == 0 && i < ab_n) {
+        if (ab_ids[i] != id && rt_abin(ab_ids[i], v) != 0) hit = 1;
+        i = i + 1;
+    }
+    if (hit == 0) return v;
+    o = rt_sown(id, v, (int)strlen(v));
+    return o != 0 ? o : v;
 }
 
 /* A subshell of depth d has ended and the variables are the snapshot again:
@@ -4947,6 +5019,7 @@ int rt_arr_set(char *nm, char *k, char *v) {
     rt_pin();
     rt_abheld(k);
     rt_abheld(v);
+    if (rt_pbin(v) != 0) pb_sh = 1;
     if (at >= 0) {
         rt_ar_put(r, at, v);
         return 0;
@@ -4974,6 +5047,7 @@ int rt_arr_iset(char *nm, char *k, char *v) {
     char **ks;
     ar_old = 0;
     rt_abheld(v);
+    if (rt_pbin(v) != 0) pb_sh = 1;
     if (k == &bad_key[0]) {
         arith_err = 1;
         return 0;
@@ -6406,17 +6480,9 @@ int rt_echo(char *fields, int newline, int escapes) {
  * its fields, so nothing has to pin them. */
 int rt_argcall(char *v) {
     int p = rt_fpos(v);
-    char **na;
     while (p >= 0) {
         int t = argv_top;
-        if (t >= argv_cap) {
-            argv_cap = argv_cap == 0 ? 4096 : argv_cap * 2;
-            na = (char **)malloc((unsigned long)argv_cap * 8);
-            if (na == 0) rt_die("positional-parameter stack", 1, t, argv_cap);
-            if (t > 0) memmove(na, argv, (unsigned long)t * 8);
-            if (argv != 0) free(argv);
-            argv = na;
-        }
+        rt_argroom(t);
         argv[t] = rt_fat(v, p);
         rt_abheld(argv[t]);
         argv_top = t + 1;
@@ -6425,10 +6491,106 @@ int rt_argcall(char *v) {
     return 0;
 }
 
-/* rt_argcall for `set --`, whose parameters outlive the statement. */
-int rt_argpush(char *v) {
-    rt_argcall(v);
-    rt_pin();
+/* PIPESTATUS[k] = st. The key is the emitter's static text and a status from 0
+ * to 255 is a static one too (st_txt), so nothing in the arena is pinned. */
+char st_txt[1024];
+int rt_pstat(char *k, int st) {
+    long fl = a_floor;
+    char *v;
+    if (st < 0 || st > 255) {
+        rt_arr_iset("PIPESTATUS", k, rt_int2str((long)st));
+        return 0;
+    }
+    v = st_txt + 4 * st;
+    if (v[0] == 0) {
+        v[0] = (char)(48 + (st >= 100 ? st / 100 : (st >= 10 ? st / 10 : st)));
+        if (st >= 100) { v[1] = (char)(48 + st / 10 % 10); v[2] = (char)(48 + st % 10); }
+        else if (st >= 10) v[1] = (char)(48 + st % 10);
+    }
+    rt_arr_iset("PIPESTATUS", k, v);
+    a_floor = fl;
+    return 0;
+}
+
+/* Room on the argv stack for entry t, doubling it when it is full. */
+int rt_argroom(int t) {
+    char **na;
+    if (t < argv_cap) return 0;
+    argv_cap = argv_cap == 0 ? 4096 : argv_cap * 2;
+    na = (char **)malloc((unsigned long)argv_cap * 8);
+    if (na == 0) rt_die("positional-parameter stack", 1, t, argv_cap);
+    if (t > 0) memmove(na, argv, (unsigned long)t * 8);
+    if (argv != 0) free(argv);
+    argv = na;
+    return 0;
+}
+
+/* Is v a string of the parameter block? */
+int rt_pbin(char *v) {
+    return pb_buf != 0 && v >= pb_buf && v < pb_buf + pb_cap ? 1 : 0;
+}
+
+/* May the parameter block made at this level go: does nothing but the frames
+ * from argv entry `from` up hold it? */
+int rt_pbfree_ok(int from) {
+    int j = 0;
+    if (pb_buf == 0 || pb_sh != 0 || rt_pbin(stdin_buf) != 0) return 0;
+    while (j < nvars) {
+        if (rt_pbin(gvars[j]) != 0) return 0;
+        j = j + 1;
+    }
+    j = 0;
+    while (j < ls_top) {
+        if (rt_pbin(ls_val[j]) != 0) return 0;
+        j = j + 1;
+    }
+    j = 0;
+    while (j < from) {
+        if (rt_pbin(argv[j]) != 0) return 0;
+        j = j + 1;
+    }
+    return 1;
+}
+
+/* `set -- WORDS`, the fields of v: they replace the current frame in place when
+ * it is the top of the stack and this subshell level's own (argv_floor), else
+ * they are a new frame on top. Their strings go to a fresh parameter block. */
+int rt_setargs(char *v) {
+    int base = argv_top;
+    int p = rt_fpos(v);
+    int t;
+    long len = 0;
+    char *nb;
+    char *old = pb_buf;
+    int oldok;
+    if (frame_base + frame_n == argv_top && frame_base >= argv_floor) base = frame_base;
+    t = base;
+    while (p >= 0) {
+        rt_argroom(t);
+        argv[t] = rt_fat(v, p);
+        len = len + (long)strlen(argv[t]) + 1;
+        t = t + 1;
+        p = rt_fnext(v, p);
+    }
+    nb = rt_xalloc("parameter block", len + 1);
+    len = 0;
+    argv_top = t;
+    t = base;
+    while (t < argv_top) {
+        long n = (long)strlen(argv[t]) + 1;
+        memmove(nb + len, argv[t], (unsigned long)n);
+        argv[t] = nb + len;
+        len = len + n;
+        t = t + 1;
+    }
+    oldok = pb_dep == ss_depth ? rt_pbfree_ok(base) : 0;
+    pb_buf = nb;
+    pb_cap = len + 1;
+    pb_sh = 0;
+    pb_dep = ss_depth;
+    if (oldok != 0) free(old);
+    frame_base = base;
+    frame_n = argv_top - base;
     return 0;
 }
 
@@ -6534,23 +6696,13 @@ int rt_putc(int c)
         if (d > 0) {
             buf = cap_buf[d - 1];
             l = cap_len[d - 1];
-            /* A full buffer GROWS - a fresh, doubled block out of the arena
-             * and a copy - rather than truncating the substitution. */
+            /* A full buffer GROWS, doubled, rather than truncating the
+             * substitution. It is malloc'd: a subshell gives back what it
+             * pinned in the arena, and the buffer outlives it. */
             if (l + 1 >= cap_sz[d - 1]) {
-                int nsz;
-                char *nb;
-                int t;
-                nsz = cap_sz[d - 1] * 2;
-                nb = rt_bump(nsz);
-                t = 0;
-                while (t < l) {
-                    nb[t] = buf[t];
-                    t = t + 1;
-                }
-                cap_buf[d - 1] = nb;
-                rt_pin();
-                cap_sz[d - 1] = nsz;
-                buf = nb;
+                cap_sz[d - 1] = cap_sz[d - 1] * 2;
+                buf = rt_xgrow("command-substitution buffer", buf, (long)cap_sz[d - 1]);
+                cap_buf[d - 1] = buf;
             }
             /* A command substitution drops a NUL byte, as bash does. */
             if (c != 0) {
@@ -6586,9 +6738,8 @@ int rt_cap_begin(int u)
         rt_die("command-substitution nesting", 1, d, 4096);
     }
     if (cap_sz[d] == 0) {
-        buf = rt_bump(8192);
+        buf = rt_xalloc("command-substitution buffer", 8192);
         cap_buf[d] = buf;
-        rt_pin();
         cap_sz[d] = 8192;
     }
     cap_len[d] = 0;
@@ -6697,6 +6848,17 @@ int rt_ss_save(int u)
         r = r + 1;
     }
     ss_an[d] = ar_cnt;
+    ss_atop[d] = argv_top;
+    ss_abase[d] = frame_base;
+    ss_afn[d] = frame_n;
+    ss_afl[d] = argv_floor;
+    ss_floor[d] = a_floor;
+    ss_lstop[d] = ls_top;
+    ss_pb[d] = pb_buf;
+    ss_pbcap[d] = pb_cap;
+    ss_pbsh[d] = pb_sh;
+    ss_pbdep[d] = pb_dep;
+    argv_floor = argv_top;
     ss_depth = d + 1;
     return 0;
 }
@@ -6721,6 +6883,16 @@ int rt_ss_restore(int u)
     }
     rt_abdrop(d);
     rt_ebsub(d);
+    if (pb_buf != ss_pb[d] && rt_pbfree_ok(0) != 0) free(pb_buf);
+    pb_buf = ss_pb[d];
+    pb_cap = ss_pbcap[d];
+    pb_sh = ss_pbsh[d];
+    pb_dep = ss_pbdep[d];
+    argv_top = ss_atop[d];
+    frame_base = ss_abase[d];
+    frame_n = ss_afn[d];
+    argv_floor = ss_afl[d];
+    if (a_floor > ss_floor[d]) a_floor = ss_floor[d];
     p = nvars;
     arr_rows = 0;
     r = 0;
@@ -6915,7 +7087,7 @@ int rt_glob_swap(int id)
         s = s + ls_acnt[t];
         t = t + 1;
     }
-    if (t >= ls_top) return 0;
+    if (t >= ls_top || (ss_depth > 0 && t < ss_lstop[ss_depth - 1])) return 0;
     v = gvars[id];
     r = rt_ar_find(varnames[id]);
     cnt = ls_acnt[t];

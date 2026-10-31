@@ -1698,7 +1698,11 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var rtMapf = rtDecl("rt_mapf", true, [1, 0, 1, 1, 0, 1, 0])
 
     // the positional parameters.
-    var rtArgPush = rtDecl("rt_argpush", false, [1])
+    var rtSetArgs = rtDecl("rt_setargs", false, [1])
+    var rtVown = rtDecl("rt_vown", true, [0, 1])
+    var rtRkeep = rtDecl("rt_rkeep", true, [3, 1, 0])
+    var rtRkeepEnd = rtDecl("rt_rkeep_end", false, [3, 3])
+    var rtPstat = rtDecl("rt_pstat", false, [1, 0])
     var rtArgCall = rtDecl("rt_argcall", false, [1])
     var rtIsList = rtDecl("rt_islist", false, [1])
     // `echo` with its flag scan at RUN TIME - see emitEcho.
@@ -2465,7 +2469,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // f: an unquoted $* under a null IFS is a field list (starArg).
         if (name == "*") { return {f: true, fn: function(b) { return {b: b, v: starParams(b)} }, c: undefined} }
         var multi = (name == "@")
-        return {f: multi, lean: true, fn: function(b) { return {b: b, v: varString(b, name)} }, c: undefined}
+        return {f: multi, lean: true, vref: true, fn: function(b) { return {b: b, v: varString(b, name)} }, c: undefined}
     }
     function mkArith(intThunk) {
         return {lean: true, fn: function(b) { var r = intThunk(b); return {b: r.b, v: r.b.NewCall(rtInt2str, r.v)} }, c: undefined}
@@ -3264,6 +3268,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // rt_sapp appends in place to the slot's own buffer (bash-rt.c, "append buffers").
             var sid = llvm.constant.NewInt(i32, getVarId(a.name))
             storeVar(b, a.name, heapKeep(b, mk, a.name, b.NewCall(rtSapp, [sid, loadVar(b, a.name), v])))
+        } else if (a.valT != null && a.valT.vref == true) {
+            // `x=$y` takes its own copy of a value in y's buffer (rt_vown).
+            storeVar(b, a.name, b.NewCall(rtVown, [llvm.constant.NewInt(i32, getVarId(a.name)), v]))
         } else {
             storeVar(b, a.name, heapKeep(b, mk, a.name, v))
         }
@@ -3993,13 +4000,14 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 var isLast = (k == stages.length - 1)
                 if (!isLast) { b.NewCall(rtCapBegin, zero) }
                 b = stages[k](b)
+                // The text a stage hands on lives until the pipeline ends: every release
+                // the next stage makes goes to a mark taken after it.
                 if (!isLast) {
                     b.NewStore(b.NewCall(rtCapEnd, zero), gStdin)
                     b.NewStore(zero, gStdinPos)
-                    heapPin(b)
                 }
                 var stv = b.NewLoad(i32, gStatus)
-                b.NewCall(rtArrSet, [psName, gepStr(b, numToStr(k)), i2s(b, stv)])
+                b.NewCall(rtPstat, [gepStr(b, numToStr(k)), stv])
                 var fail0 = b.NewICmp(llvm.enum.IPredEQ, b.NewLoad(i32, ff), zero)
                 var bad = b.NewAnd(fail0, b.NewICmp(llvm.enum.IPredNE, stv, zero))
                 b.NewStore(b.NewSelect(bad, stv, b.NewLoad(i32, ff)), ff)
@@ -4486,7 +4494,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // otherwise unmodified" - not field 0, and not stripped.
         var rawReply = (arrName == null && names.length == 0)
         // One name is the read's only store: what the read allocated besides goes back.
-        var mk = (arrName == null && names.length == 1) ? ((cmk != null) ? cmk : heapMark(b)) : null
+        // Several are kept in their slots' buffers first (rt_rkeep), and then it goes back.
+        var mk = (arrName == null && names.length >= 1) ? ((cmk != null) ? cmk : heapMark(b)) : null
+        var mk1 = (names.length == 1) ? mk : null
         var line = b.NewCall(rtReadLine, zero)
         // A readonly target, once the line is read: the array or the last name fails the
         // read (status 1), REPLY or an earlier name stops it there (2), bash 5.3. Twin of
@@ -4524,10 +4534,17 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (rawReply) { storeVar(okB, "REPLY", line) }
         // An -i name's arithmetic error abandons the line: the names after it keep their values.
         okB.NewStore(gepStr(okB, "read: "), gArPfx)
+        var fvs = []
         for (k = 0; k < roK; k++) {
             var isLast = (k == names.length - 1) ? 1 : 0
-            var fv = okB.NewCall(rtField, [line, ifs, llvm.constant.NewInt(i32, k), llvm.constant.NewInt(i32, isLast)])
-            okB = emitAssign(okB, {name: names[k], op: "=", idxT: null, lit: null, valT: doneWord(fv)}, false, mk)
+            fvs.push(okB.NewCall(rtField, [line, ifs, llvm.constant.NewInt(i32, k), llvm.constant.NewInt(i32, isLast)]))
+        }
+        if (mk != null && mk1 == null) {
+            for (k = 0; k < roK; k++) { fvs[k] = okB.NewCall(rtRkeep, [mk.a, fvs[k], llvm.constant.NewInt(i32, getVarId(names[k]))]) }
+            okB.NewCall(rtRkeepEnd, [mk.a, mk.l])
+        }
+        for (k = 0; k < roK; k++) {
+            okB = emitAssign(okB, {name: names[k], op: "=", idxT: null, lit: null, valT: doneWord(fvs[k])}, false, mk1)
         }
         if (roK < names.length) { roRefused(okB, names[roK], "") }
         okB.NewStore(emptyPtr(okB), gArPfx)
@@ -4647,16 +4664,15 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     i = i + 1
                 }
             } else if (a == "--") {
-                // Rebind the positional parameters: push the remaining words as a new frame.
-                var base = b.NewLoad(i32, gArgvTop)
+                // Rebind the positional parameters to the fields of the remaining words.
+                var listV = nilList(b)
                 var j
                 for (j = i + 1; j < args.length; j++) {
                     var ra = args[j].fn(b)
                     b = ra.b
-                    b.NewCall(rtArgPush, ra.v)
+                    listV = b.NewCall(rtCatFields, [listV, ra.v])
                 }
-                b.NewStore(base, gFrameBase)
-                b.NewStore(b.NewSub(b.NewLoad(i32, gArgvTop), base), gFrameN)
+                b.NewCall(rtSetArgs, listV)
                 i = args.length
             } else if (a.length > 1 && (a.charAt(0) == "-" || a.charAt(0) == "+")) {
                 var on2 = (a.charAt(0) == "-") ? one : zero

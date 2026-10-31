@@ -1339,6 +1339,33 @@ s81() {
   r=$( { : "${u:=9}"; echo no; } 2>/dev/null ); check rr10 "$r|$?|${u-unset}" "|1|unset"
   r=$( { : "${ro:=9}"; echo "$? $ro"; } 2>/dev/null ); check rr11 "$r" "0 1"
 }
+# ===== SECTION 82: positional parameters across subshells; values a pass keeps =====
+# `set --` in a ( ) or $( ) rebinds the subshell's parameters only, a function's its own;
+# the new values may read the old ones. A copy of a long value, the names of one read,
+# a pipeline's stages and PIPESTATUS each keep their own values from pass to pass.
+s82f() { set -- "$@" in; s82g "$@"; echo "$# ${!#} $*"; }
+s82g() { set -- g1; }
+s82() {
+  local w=wwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwww
+  local r i x y a b c acc=""
+  set -- p q
+  ( set -- sub; : ); check pp1 "$# $*" "2 p q"
+  r=$(set -- c1 c2 c3; echo "$#"); check pp2 "$r|$# $*" "3|2 p q"
+  r=$(s82f x y); check pp3 "$r|$*" "3 in x y in|p q"
+  set -- "$w" b c
+  for i in 1 2 3; do set -- "$2" "$1$i" "$3"; done
+  check pp4 "$# ${#1} ${#2} $3 ${2: -3}" "3 2 80 c w13"
+  x=$1; set -- other; check pp5 "${#x} $1" "2 other"
+  for i in 1 2 3; do y="$w$i"; x=$y; y=s$i; acc+="${x: -2}$y "; done
+  check pk2 "$acc" "w1s1 w2s2 w3s3 "
+  acc=""
+  for i in 1 2 3; do IFS=, read -r a b c <<< "$w$i,x$i,$i,z"; acc+="${a: -2}/$b/$c "; done
+  check pk3 "$acc" "w1/x1/1,z w2/x2/2,z w3/x3/3,z "
+  acc=""
+  for i in 1 2; do r=$(echo "$w$i" | { read a; echo "${a: -2}"; }); acc+="$r "; done
+  check pk4 "$acc" "w1 w2 "
+  (exit 3) | (exit 300) | true; check pk5 "${PIPESTATUS[*]}" "3 44 0"
+}
 # ===== END SECTIONS =====
 
 s47   # SECTION-CALL 47
@@ -1375,5 +1402,6 @@ s78   # SECTION-CALL 78
 s79   # SECTION-CALL 79
 s80   # SECTION-CALL 80
 s81   # SECTION-CALL 81
+s82   # SECTION-CALL 82
 echo "full: $checks checks, $fails failures"
 exit $fails
