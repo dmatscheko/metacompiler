@@ -76,10 +76,10 @@ func (rt *jsrt) pyDViewHas(v, x interface{}) bool {
 			return false
 		}
 		i := rt.pyDictFind(keys, t.elems[0])
-		return i >= 0 && rt.pyEqual(vals.elems[i], t.elems[1])
+		return i >= 0 && rt.pyIdEq(vals.elems[i], t.elems[1])
 	}
 	for _, e := range vals.elems {
-		if rt.pyEqual(e, x) {
+		if rt.pyIdEq(e, x) {
 			return true
 		}
 	}

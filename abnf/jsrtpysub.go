@@ -680,6 +680,11 @@ func (rt *jsrt) pyNewInstance(cls *jsObject, args []interface{}, kw interface{})
 	if init, found := pyLookup(cls, "__init__"); found && isCallable(init) {
 		self := append([]interface{}{inst}, args...)
 		rt.call(init, jsUndef, rt.pyBindCall(init, self, kw))
+		// BaseException.__new__ stores the positional arguments as args, so an
+		// __init__ that never calls BaseException's still has them.
+		if _, has := inst.props["args"]; !has && pyIsExcClass(cls) {
+			inst.set("args", pyTup(&jsArray{elems: append([]interface{}{}, args...)}))
+		}
 	} else if bt == "" && (len(args) > 0 || pyKwCount(kw) > 0) && !pyIsExcClass(cls) {
 		// Neither __init__ nor __new__ anywhere but object's.
 		rt.pyRaise("TypeError", rt.toString(cls.props["__name"])+"() takes no arguments")
@@ -737,12 +742,41 @@ func pyUnwrapBuiltin(v interface{}) interface{} {
 // true.
 func (rt *jsrt) pyUserTruthy(cls *jsObject, v interface{}) bool {
 	if m, found := pyLookup(cls, "__bool__"); found && isCallable(m) {
-		return rt.pyTruthyOf(rt.call(m, jsUndef, []interface{}{v}))
+		r := rt.call(m, jsUndef, []interface{}{v})
+		b, isBool := r.(bool)
+		if !isBool {
+			rt.pyRaise("TypeError", "__bool__ should return bool, returned "+pyTypeName(rt, r))
+		}
+		return b
 	}
 	if m, found := pyLookup(cls, "__len__"); found && isCallable(m) {
-		return rt.pyTruthyOf(rt.call(m, jsUndef, []interface{}{v}))
+		return rt.pyTruthyOf(rt.pyLenOut(rt.call(m, jsUndef, []interface{}{v})))
 	}
 	return true
+}
+
+// pyLenOut is what a class's __len__ answered, as len() takes it: a
+// non-negative int that fits a machine index. Twin of pyLenOut in
+// languages/python-interpreter.abnf and lib/python-rt.metajs.
+func (rt *jsrt) pyLenOut(r interface{}) interface{} {
+	neg := false
+	switch n := r.(type) {
+	case bool:
+		return pyBoolInt(n)
+	case float64:
+		neg = n < 0
+	case *jsBigInt:
+		if !n.v.IsInt64() {
+			rt.pyRaise("OverflowError", "cannot fit 'int' into an index-sized integer")
+		}
+		neg = n.v.Sign() < 0
+	default:
+		rt.pyRaise("TypeError", "'"+pyTypeName(rt, r)+"' object cannot be interpreted as an integer")
+	}
+	if neg {
+		rt.pyRaise("ValueError", "__len__() should return >= 0")
+	}
+	return r
 }
 
 // pyUserIter is what an instance's __iter__ answers - or, under the legacy

@@ -3781,6 +3781,15 @@ func (rt *jsrt) pyDictFind(keys *jsArray, k interface{}) int {
 	if !rt.pyLang {
 		return -1
 	}
+	// A NaN key equals no key, not even itself, so only its own box finds it.
+	if f, isFlo := k.(*jsPyFlo); isFlo && f.f != f.f {
+		for i, e := range keys.elems {
+			if e == k {
+				return i
+			}
+		}
+		return -1
+	}
 	// Tried TWICE: a float box's alias is the plain number and the plain
 	// number's is the bool, so {True: "t"}[1.0] takes two steps.
 	alias, ok := pyKeyAlias(k)
@@ -3843,7 +3852,7 @@ func (rt *jsrt) dictKeyEq(a, b interface{}) bool {
 			return rt.pyUserKeyEq(a, b)
 		}
 		if pyIsFlo(a) || pyIsFlo(b) {
-			return rt.pyNumEq(a, b)
+			return rt.pyEqual(a, b)
 		}
 		// PYTHON: a TUPLE key hashes by its CONTENTS, so `{(1,2): "x"}[(1,2)]` is
 		// a hit off two different objects, and the comparison is Python's == (as
@@ -17305,11 +17314,11 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		"js_pylen": func(a []uint64) uint64 { // len() for strings, lists and dicts.
 			if _, cls, isInst := pyInstance(u(a[0])); isInst { // A user class may define __len__.
 				if m, found := pyLookup(cls, "__len__"); found && isCallable(m) {
-					return w(rt.call(m, jsUndef, []interface{}{u(a[0])}))
+					return w(rt.pyLenOut(rt.call(m, jsUndef, []interface{}{u(a[0])})))
 				}
 			}
 			if m := pyMetaFind(u(a[0]), "__len__"); m != nil {
-				return w(rt.call(m, jsUndef, []interface{}{u(a[0])}))
+				return w(rt.pyLenOut(rt.call(m, jsUndef, []interface{}{u(a[0])})))
 			}
 			if els, ok := pySetElems(u(a[0])); ok {
 				return rt.wrapNum(float64(len(els.elems)))
@@ -18066,7 +18075,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 					vals[i] = rt.pyByteVal(e)
 				}
 			}
-			if isUndefOrNull(u(a[3])) || rt.toNumber(u(a[3])) == 1 {
+			if isUndefOrNull(u(a[3])) || rt.pySliceArg(u(a[3])) == 1 {
 				idx := rt.pySliceIndices(len(arr.elems), u(a[1]), u(a[2]), u(a[3]))
 				lo := len(arr.elems)
 				hi := lo
@@ -18222,6 +18231,20 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		"js_pyexcchain": func(a []uint64) uint64 {
 			rt.pyExcChain(u(a[0]))
 			return 0
+		},
+		// The body of a generator function, with PEP 479 applied: a
+		// StopIteration leaving it becomes a RuntimeError caused by it, so it
+		// cannot silently end the loop that steps the generator.
+		"js_pygenwrap": func(a []uint64) uint64 {
+			body := u(a[0])
+			return w(jsHostFunc("genbody", func(rt *jsrt, this uint64, args []interface{}) (res interface{}) {
+				defer func() {
+					if r := recover(); r != nil {
+						panic(rt.pyGenStop(r))
+					}
+				}()
+				return rt.call(body, jsUndef, args)
+			}))
 		},
 		// (handled value) -> what a parked generator takes off the stack: the
 		// value's own entry and everything above it; js_pyexcunpark puts that
@@ -19122,6 +19145,9 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				}
 				return rt.wrapStr("\x00")
 			}
+			if i, ok := rt.pyIndexOf(v); ok {
+				return pyExternMaps[rt]["js_pychr"]([]uint64{w(i)})
+			}
 			if _, isNum := v.(float64); !isNum {
 				panic(&jsThrown{value: rt.pyExcInstance("TypeError", "'"+pyTypeName(rt, v)+"' object cannot be interpreted as an integer")})
 			}
@@ -19333,18 +19359,23 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			if !isUndefOrNull(rt.pyKwArg(el[1], "start")) {
 				start = rt.pyKwArg(el[1], "start")
 			}
-			// A start that is no plain number (a big int, a bool) counts by
-			// Python's +.
-			s, plain := start.(float64)
-			var out []interface{}
-			for i, e := range rt.pyElemsOf(src) {
-				var n interface{} = s + float64(i)
-				if !plain {
-					n = rt.pyExt("js_pybin", "+", start, float64(i))
+			step := rt.pyStepper(src)
+			n := start
+			return w(rt.pyLazyIter("enumerate", func() (interface{}, bool) {
+				v, ok := step()
+				if !ok {
+					return nil, false
 				}
-				out = append(out, pyTup(&jsArray{elems: []interface{}{n, e}}))
-			}
-			return w(rt.pyMkIter("enumerate", out))
+				row := pyTup(&jsArray{elems: []interface{}{n, v}})
+				// A start that is no plain number (a big int, a bool) counts
+				// by Python's +.
+				if f, plain := n.(float64); plain {
+					n = f + 1
+				} else {
+					n = rt.pyExt("js_pybin", "+", n, 1.0)
+				}
+				return row, true
+			}))
 		},
 		// zip(*iterables, strict=False), bound as [positionals, keywords]. The
 		// sources are stepped in turn, one row at a time, so zip(it, it) pairs
@@ -19360,22 +19391,13 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			for _, s := range pos {
 				steps = append(steps, rt.pyStepper(s))
 			}
-			var out []interface{}
-			for len(steps) > 0 {
-				row := pyTup(&jsArray{})
-				for k, step := range steps {
-					v, ok := step()
-					if !ok {
-						if strict {
-							rt.pyZipStrict(steps, k)
-						}
-						return w(rt.pyMkIter("zip", out))
-					}
-					row.elems = append(row.elems, v)
+			return w(rt.pyLazyIter("zip", func() (interface{}, bool) {
+				row, ok := rt.pyStepRow(steps, strict)
+				if !ok {
+					return nil, false
 				}
-				out = append(out, row)
-			}
-			return w(rt.pyMkIter("zip", out))
+				return pyTup(&jsArray{elems: row}), true
+			}))
 		},
 		// map(f, *iterables) steps its sources in turn like zip and stops at the
 		// shortest, so an endless source beside a finite one ends. Twin of
@@ -19387,37 +19409,34 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			for _, s := range pyTailArgs(args) {
 				steps = append(steps, rt.pyStepper(s))
 			}
-			var out []interface{}
-			for len(steps) > 0 {
-				var row []interface{}
-				for _, step := range steps {
-					v, ok := step()
-					if !ok {
-						return w(rt.pyMkIter("map", out))
-					}
-					row = append(row, v)
+			return w(rt.pyLazyIter("map", func() (interface{}, bool) {
+				row, ok := rt.pyStepRow(steps, false)
+				if !ok {
+					return nil, false
 				}
-				out = append(out, rt.callPyValue(f, row, jsUndef))
-			}
-			return w(rt.pyMkIter("map", out))
+				return rt.callPyValue(f, row, jsUndef), true
+			}))
 		},
 		// filter(f, xs): a None (or missing) function keeps the TRUTHY elements,
 		// which is CPython's documented special case.
 		"js_pyfilterfn": func(a []uint64) uint64 {
-			f, src := u(a[0]), u(a[1])
-			var out []interface{}
-			for _, e := range rt.pyElemsOf(src) {
-				keep := false
-				if isUndefOrNull(f) {
-					keep = rt.pyTruthyOf(e)
-				} else {
-					keep = rt.pyTruthyOf(rt.callPyValue(f, []interface{}{e}, jsUndef))
+			f := u(a[0])
+			step := rt.pyStepper(u(a[1]))
+			return w(rt.pyLazyIter("filter", func() (interface{}, bool) {
+				for {
+					e, ok := step()
+					if !ok {
+						return nil, false
+					}
+					if isUndefOrNull(f) {
+						if rt.pyTruthyOf(e) {
+							return e, true
+						}
+					} else if rt.pyTruthyOf(rt.callPyValue(f, []interface{}{e}, jsUndef)) {
+						return e, true
+					}
 				}
-				if keep {
-					out = append(out, e)
-				}
-			}
-			return w(rt.pyMkIter("filter", out))
+			}))
 		},
 		// reversed(seq): a class's own __reversed__ answers; otherwise the value
 		// must be a sequence (a user class needs __len__ and __getitem__) - a
@@ -19562,6 +19581,9 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			args := rt.argArray(u(a[0]))
 			l, r := argAt(args, 0), argAt(args, 1)
 			if len(args) > 2 && !isUndefOrNull(args[2]) {
+				if v, ok := rt.pyUserPow3(l, r, args[2]); ok {
+					return w(v)
+				}
 				bl, ok1 := pyBigOperand(l)
 				br, ok2 := pyBigOperand(r)
 				bm, ok3 := pyBigOperand(args[2])
@@ -20831,7 +20853,7 @@ func (rt *jsrt) pyEqual(x, y interface{}) bool {
 			return false
 		}
 		for i := range xa.elems {
-			if !rt.pyEqual(xa.elems[i], ya.elems[i]) {
+			if !rt.pyIdEq(xa.elems[i], ya.elems[i]) {
 				return false
 			}
 		}
@@ -20844,7 +20866,7 @@ func (rt *jsrt) pyEqual(x, y interface{}) bool {
 		}
 		for i, k := range xk.elems {
 			j := rt.pyDictFind(yk, k)
-			if j < 0 || !rt.pyEqual(xv.elems[i], yv.elems[j]) {
+			if j < 0 || !rt.pyIdEq(xv.elems[i], yv.elems[j]) {
 				return false
 			}
 		}
@@ -21100,7 +21122,7 @@ func (rt *jsrt) pyTypeArgRepr(v interface{}) string {
 func (rt *jsrt) pySliceIndices(n int, loV, hiV, stepV interface{}) []int {
 	step := 1
 	if !isUndefOrNull(stepV) {
-		step = int(rt.toNumber(stepV))
+		step = rt.pySliceArg(stepV)
 		if step == 0 {
 			rt.pyRaise("ValueError", "slice step cannot be zero")
 		}
@@ -21110,10 +21132,10 @@ func (rt *jsrt) pySliceIndices(n int, loV, hiV, stepV interface{}) []int {
 		lo, hi = n-1, -n-1
 	}
 	if !isUndefOrNull(loV) {
-		lo = rt.pyClampIndex(int(rt.toNumber(loV)), n, step)
+		lo = rt.pyClampIndex(rt.pySliceArg(loV), n, step)
 	}
 	if !isUndefOrNull(hiV) {
-		hi = rt.pyClampIndex(int(rt.toNumber(hiV)), n, step)
+		hi = rt.pyClampIndex(rt.pySliceArg(hiV), n, step)
 	}
 	var out []int
 	for i := lo; (step > 0 && i < hi) || (step < 0 && i > hi); i += step {
@@ -21152,7 +21174,34 @@ func (rt *jsrt) pySliceStart(n int, loV interface{}) int {
 	if isUndefOrNull(loV) {
 		return 0
 	}
-	return rt.pyClampIndex(int(rt.toNumber(loV)), n, 1)
+	return rt.pyClampIndex(rt.pySliceArg(loV), n, 1)
+}
+
+// pySliceArg is one slice bound or step as an index: an int (a bool is one, an
+// object with __index__ the int it answers). An int beyond 2**62 either way
+// clamps there: no sequence is that long, so the clamped bound selects what the
+// real one does. Twin of pySliceInt in python-interpreter.abnf and
+// lib/python-rt.metajs.
+func (rt *jsrt) pySliceArg(v interface{}) int {
+	switch x := v.(type) {
+	case float64:
+		return int(x)
+	case bool:
+		if x {
+			return 1
+		}
+		return 0
+	case *jsBigInt:
+		if x.v.Sign() < 0 {
+			return -(1 << 62)
+		}
+		return 1 << 62
+	case *jsObject:
+		if r, ok := rt.pyIndexOf(x); ok {
+			return rt.pySliceArg(r)
+		}
+	}
+	panic(&jsThrown{value: rt.pyExcInstance("TypeError", "slice indices must be integers or None or have an __index__ method")})
 }
 
 // pySeqElems is the element list of anything a slice assignment may take on its
@@ -21239,12 +21288,18 @@ func pySetElems(v interface{}) (*jsArray, bool) {
 }
 
 func (rt *jsrt) pySetHas(els *jsArray, v interface{}) bool {
+	_, ok := rt.pySetMember(els, v)
+	return ok
+}
+
+// pySetMember is the member of els equal to v, as a set lookup finds it.
+func (rt *jsrt) pySetMember(els *jsArray, v interface{}) (interface{}, bool) {
 	for _, e := range els.elems {
 		if rt.pyKeyEq(e, v) {
-			return true
+			return e, true
 		}
 	}
-	return false
+	return nil, false
 }
 
 func (rt *jsrt) pySetAdd(els *jsArray, v interface{}) {
@@ -21343,9 +21398,37 @@ func pyIdHashed(v interface{}) bool {
 	return how == pyHashById
 }
 
+// pyIdEq is how a container compares its elements, for `in`, count, index,
+// remove and the container's own == and ordering: `x is y or x == y`, so the
+// one NaN object or an instance whose __eq__ says no still finds itself. Twin
+// of pyAIdEq in lib/python-rt.metajs.
+func (rt *jsrt) pyIdEq(x, y interface{}) bool {
+	return pySame(x, y) || rt.pyEqual(x, y)
+}
+
+// pySame is Python's `is` for the boxed values whose == can deny their own
+// identity: a float box, an instance, a list or tuple.
+func pySame(x, y interface{}) bool {
+	switch a := x.(type) {
+	case *jsPyFlo:
+		b, ok := y.(*jsPyFlo)
+		return ok && a == b
+	case *jsObject:
+		b, ok := y.(*jsObject)
+		return ok && a == b
+	case *jsArray:
+		b, ok := y.(*jsArray)
+		return ok && a == b
+	}
+	return false
+}
+
 // pyKeyEq is Python's key equality, for set members and for a dict key that is
 // an instance: ==, under the hash rule when an instance is involved.
 func (rt *jsrt) pyKeyEq(a, b interface{}) bool {
+	if pySame(a, b) {
+		return true
+	}
 	if oa, _, ok := pyInstance(a); ok {
 		if ob, isObj := b.(*jsObject); isObj && ob == oa {
 			return true
@@ -21461,7 +21544,7 @@ func (rt *jsrt) pyClassNew(name string, bases *jsArray) *jsObject {
 	}
 	cls.set("__basesl", bl)
 	mro := &jsArray{elems: []interface{}{cls}}
-	for _, c := range pyLinearize(baseObjs) {
+	for _, c := range rt.pyLinearize(baseObjs) {
 		mro.elems = append(mro.elems, c)
 	}
 	cls.set("__mro", mro)
@@ -21487,7 +21570,12 @@ func (rt *jsrt) pySetBin(op string, l, r interface{}) (interface{}, bool) {
 		return newPySet(out), true
 	case "&":
 		for _, e := range le.elems {
-			if rt.pySetHas(re, e) {
+			if m, ok := rt.pySetMember(re, e); ok {
+				// CPython walks the smaller set, the right one on a tie, and
+				// keeps the member it walked: {1.0} & {1} is {1}.
+				if len(re.elems) <= len(le.elems) {
+					e = m
+				}
 				rt.pySetAdd(out, e)
 			}
 		}
@@ -22086,9 +22174,9 @@ func pyMRO(c *jsObject) []*jsObject {
 
 // pyLinearize is the C3 merge of the bases' MROs with the base list itself -
 // the order Python computes, minus the class itself (the caller prepends it).
-// A hierarchy C3 cannot resolve consistently falls back to first-seen order
-// rather than aborting the program.
-func pyLinearize(bases []*jsObject) []*jsObject {
+// A hierarchy C3 cannot resolve raises CPython's TypeError, naming the heads
+// left over.
+func (rt *jsrt) pyLinearize(bases []*jsObject) []*jsObject {
 	if len(bases) == 0 {
 		return nil
 	}
@@ -22127,13 +22215,22 @@ func pyLinearize(bases []*jsObject) []*jsObject {
 				break
 			}
 		}
-		if pick == nil { // Inconsistent hierarchy: take the first head there is.
+		if pick == nil {
+			var heads []string
 			for _, s := range seqs {
-				if len(s) > 0 {
-					pick = s[0]
-					break
+				if len(s) == 0 {
+					continue
+				}
+				n := rt.toString(s[0].props["__name"])
+				dup := false
+				for _, h := range heads {
+					dup = dup || h == n
+				}
+				if !dup {
+					heads = append(heads, n)
 				}
 			}
+			rt.pyRaise("TypeError", "Cannot create a consistent method resolution order (MRO) for bases "+strings.Join(heads, ", "))
 		}
 		out = append(out, pick)
 		for i, s := range seqs {
@@ -23131,6 +23228,10 @@ func (rt *jsrt) pySetAttrRaw(obj interface{}, name string, v interface{}) {
 		if d, has := inst.props["__pydict"].(*jsObject); has {
 			pyInstDictPull(inst, d)
 		}
+		// BaseException's __cause__ setter also sets __suppress_context__.
+		if name == "__cause__" && rt.pyIsInstance(obj, rt.pyExcClass("BaseException")) {
+			inst.set("__suppress_context__", true)
+		}
 		return
 	}
 	if cls, ok := pyClassObj(obj); ok {
@@ -23572,19 +23673,6 @@ func (rt *jsrt) pyMethodCall(target interface{}, name string, args []interface{}
 		}
 		rt.pyRaise("AttributeError", "'tuple' object has no attribute '"+name+"'")
 	}
-	// rt.memberCall is the SHARED member-call table that many languages land
-	// in, and some of its names are ones Python cannot utter: `xs.sumOf(f)`
-	// and `xs.size()` must raise AttributeError. They are denied HERE,
-	// in python's own dispatcher and after the user-class arms above (so a Python
-	// class that DEFINES a method called forEach is unaffected), rather than in
-	// the shared table - isEmpty and removeLast are real Swift and Dart methods
-	// and stay there and in languages/lib/{swift,dart}-rt.metajs.
-	//
-	// The denial is keyed by RECEIVER TYPE and not by name alone: `get` is a
-	// real dict method (d.get(k, default)) and `add` is a real set method, so a
-	// flat name switch would break both. The same table is pyDForeign in
-	// languages/lib/python-rt.metajs, which is what keeps llvm.Run and the
-	// native binary agreeing.
 	// conjugate() of a complex flips the sign of its imaginary part.
 	if name == "conjugate" {
 		if re, im, ok := pyComplexParts(target); ok {
@@ -23603,11 +23691,17 @@ func (rt *jsrt) pyMethodCall(target interface{}, name string, args []interface{}
 	if pyNumTypeName(target) != "" || pyIsTup(target) {
 		rt.pyRaise("AttributeError", "'"+pyTypeName(rt, target)+"' object has no attribute '"+name+"'")
 	}
-	if pyForeignMethod(target, name) {
-		// A REAL, catchable AttributeError and not rt.fail: CPython's is catchable,
-		// the interpreter half raises one (pyAttrErr in
-		// languages/python-interpreter.abnf) and layer 2 throws one, so `try:
-		// xs.add(3) / except AttributeError` has to behave the same in all three.
+	// Every str, list, dict and set method was answered above, so any other
+	// name on one (or on None) is CPython's catchable AttributeError, as it is
+	// in the interpreter half (pyAttrErr in languages/python-interpreter.abnf)
+	// and layer 2. rt.memberCall below is the SHARED member-call table, and
+	// pyForeignMethod denies the names in it no Python receiver has; isEmpty and
+	// removeLast are real Swift and Dart methods, so they stay in that table.
+	_, isStr := target.(string)
+	_, isArr := target.(*jsArray)
+	_, _, isDict := dictParts(target)
+	_, isSet := pySetElems(target)
+	if isStr || isArr || isDict || isSet || isUndefOrNull(target) || pyForeignMethod(name) {
 		panic(&jsThrown{value: rt.pyExcInstance("AttributeError",
 			"'"+pyTypeName(rt, target)+"' object has no attribute '"+name+"'")})
 	}
@@ -23664,7 +23758,7 @@ func (rt *jsrt) pyListMethod(arr *jsArray, name string, args []interface{}, kw i
 		}
 		c := 0
 		for _, e := range arr.elems {
-			if rt.pyEqual(e, args[0]) {
+			if rt.pyIdEq(e, args[0]) {
 				c++
 			}
 		}
@@ -23707,7 +23801,7 @@ func (rt *jsrt) pyListMethod(arr *jsArray, name string, args []interface{}, kw i
 		return jsUndef
 	case "remove":
 		for i, e := range arr.elems {
-			if rt.pyEqual(e, argAt(args, 0)) {
+			if rt.pyIdEq(e, argAt(args, 0)) {
 				arr.dropIdx()
 				arr.elems = append(arr.elems[:i], arr.elems[i+1:]...)
 				return jsUndef
@@ -23726,7 +23820,7 @@ func (rt *jsrt) pyListMethod(arr *jsArray, name string, args []interface{}, kw i
 		// last element only; the ValueError carries no repr in 3.14.
 		from, to := rt.pySliceRange(argAt(args, 1), argAt(args, 2), n)
 		for i := from; i < to; i++ {
-			if rt.pyEqual(arr.elems[i], argAt(args, 0)) {
+			if rt.pyIdEq(arr.elems[i], argAt(args, 0)) {
 				return float64(i)
 			}
 		}
@@ -24314,12 +24408,20 @@ func (rt *jsrt) pySetAlgebra(els *jsArray, name string, args []interface{}) *jsA
 	out := &jsArray{elems: append([]interface{}{}, els.elems...)}
 	keep := name == "intersection"
 	for _, a := range args {
+		_, isSet := pySetElems(a)
 		other := &jsArray{elems: rt.pyElemsOf(a)}
 		kept := &jsArray{}
 		for _, e := range out.elems {
-			if rt.pySetHas(other, e) == keep {
-				rt.pySetAdd(kept, e)
+			m, ok := rt.pySetMember(other, e)
+			if ok != keep {
+				continue
 			}
+			// An intersection keeps the member of the side CPython walks: an
+			// iterable argument, or the smaller set (the argument on a tie).
+			if ok && (!isSet || len(other.elems) <= len(out.elems)) {
+				e = m
+			}
+			rt.pySetAdd(kept, e)
 		}
 		out = kept
 	}
@@ -24431,31 +24533,13 @@ func init() {
 	})
 }
 
-// pyForeignMethod answers whether NAME is a member-table method that Python's
-// receiver type does not have. Keep in step with pyDForeign in
+// pyForeignMethod answers whether NAME is a member-table method that no Python
+// receiver has (Kotlin's, Swift's and Dart's). Keep in step with pyDForeign in
 // languages/lib/python-rt.metajs.
-func pyForeignMethod(target interface{}, name string) bool {
-	switch target.(type) {
-	case *jsArray:
-		// Kotlin's, Java's, Dart's and Swift's list methods. `count` is NOT here:
-		// Python has list.count(x) and it is answered above.
-		switch name {
-		case "isEmpty", "removeLast", "sumOf", "forEach",
-			"add", "size", "get", "contains", "map", "filter", "any":
-			return true
-		}
-	case string:
-		// Java's and Kotlin's string methods. Python spells them len(s), s[i],
-		// s == t, s[a:b] and s.index(t).
-		switch name {
-		case "isEmpty", "length", "charAt", "equals", "substring", "indexOf":
-			return true
-		}
-	default:
-		switch name {
-		case "isEmpty", "removeLast", "sumOf", "forEach":
-			return true
-		}
+func pyForeignMethod(name string) bool {
+	switch name {
+	case "isEmpty", "removeLast", "sumOf", "forEach":
+		return true
 	}
 	return false
 }
@@ -24854,6 +24938,46 @@ func (rt *jsrt) pyStepper(v interface{}) func() (interface{}, bool) {
 	}
 }
 
+// pyLazyIter is a cursor named name (map, filter, zip, enumerate) that answers
+// step's items on demand, so its sources are stepped one item at a time. Twin
+// of pyMkLazy in languages/python-interpreter.abnf and pyALazyIter in
+// lib/python-rt.metajs.
+func (rt *jsrt) pyLazyIter(name string, step func() (interface{}, bool)) *jsObject {
+	it := newJSObject()
+	it.set("__pyit", name)
+	it.set("next", jsHostFunc("pylazy.next", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		out := newJSObject()
+		v, ok := step()
+		if !ok {
+			v = jsUndef
+		}
+		out.set("value", v)
+		out.set("done", !ok)
+		return out
+	}))
+	return it
+}
+
+// pyStepRow steps each source once, in turn: the row, or false when one ran out
+// (with no sources at all, at once). strict is zip's length check.
+func (rt *jsrt) pyStepRow(steps []func() (interface{}, bool), strict bool) ([]interface{}, bool) {
+	if len(steps) == 0 {
+		return nil, false
+	}
+	row := make([]interface{}, 0, len(steps))
+	for k, step := range steps {
+		v, ok := step()
+		if !ok {
+			if strict {
+				rt.pyZipStrict(steps, k)
+			}
+			return nil, false
+		}
+		row = append(row, v)
+	}
+	return row, true
+}
+
 // pyZipStrict is strict zip's check once source k ran out: a later k is
 // shorter than the ones before it; k == 0 asks whether any other source still
 // has an item.
@@ -25199,6 +25323,10 @@ func (rt *jsrt) pySeqIdx(c, k interface{}) int {
 		}
 		return 0
 	case *jsBigInt:
+		// An int that fits a Py_ssize_t is merely out of range.
+		if x.v.IsInt64() {
+			return rt.pySliceArg(x)
+		}
 		panic(&jsThrown{value: rt.pyExcInstance("IndexError", "cannot fit 'int' into an index-sized integer")})
 	case *jsObject:
 		if r, ok := rt.pyIndexOf(x); ok {
@@ -25246,6 +25374,10 @@ func (rt *jsrt) pyRangeArg(v interface{}) float64 {
 			return 1
 		}
 		return 0
+	case *jsObject:
+		if i, ok := rt.pyIndexOf(x); ok {
+			return rt.pyRangeArg(i)
+		}
 	}
 	panic(&jsThrown{value: rt.pyExcInstance("TypeError",
 		"'"+pyTypeName(rt, v)+"' object cannot be interpreted as an integer")})
@@ -25650,7 +25782,7 @@ func (rt *jsrt) pyContains(x, y interface{}) bool {
 	switch c := y.(type) {
 	case *jsArray:
 		for _, e := range c.elems {
-			if rt.pyEqual(e, x) {
+			if rt.pyIdEq(e, x) {
 				return true
 			}
 		}
@@ -25673,7 +25805,7 @@ func (rt *jsrt) pyContains(x, y interface{}) bool {
 			if done, _ := st.props["done"].(bool); done {
 				return false
 			}
-			if rt.pyEqual(st.props["value"], x) {
+			if rt.pyIdEq(st.props["value"], x) {
 				return true
 			}
 		}
@@ -25684,7 +25816,7 @@ func (rt *jsrt) pyContains(x, y interface{}) bool {
 			if done, _ := st.props["done"].(bool); done {
 				return false
 			}
-			if rt.pyEqual(st.props["value"], x) {
+			if rt.pyIdEq(st.props["value"], x) {
 				return true
 			}
 		}
@@ -25820,19 +25952,8 @@ func (rt *jsrt) pyDunderBin(op string, l, r interface{}) (interface{}, bool) {
 	if _, isStr := l.(string); isStr && op == "%" {
 		return nil, false
 	}
-	if li {
-		if m, found := pyLookup(lcls, pyBinDunder[op]); found && isCallable(m) {
-			if v := rt.call(m, jsUndef, []interface{}{l, r}); v != pyNotImplemented {
-				return v, true
-			}
-		}
-	}
-	if ri {
-		if m, found := pyLookup(rcls, pyBinReflected[op]); found && isCallable(m) {
-			if v := rt.call(m, jsUndef, []interface{}{r, l}); v != pyNotImplemented {
-				return v, true
-			}
-		}
+	if v, ok := rt.pyUserBin(op, l, r, lcls, rcls, li, ri); ok {
+		return v, true
 	}
 	if op == "!=" { // Python's default __ne__ is the negation of __eq__.
 		v, _ := rt.pyDunderBin("==", l, r)
@@ -25845,10 +25966,83 @@ func (rt *jsrt) pyDunderBin(op string, l, r interface{}) (interface{}, bool) {
 		}
 		return l == r, true
 	}
+	// Sequence repetition takes any count with __index__.
+	if op == "*" {
+		if v, ok := rt.pySeqRepeat(a, r); ok {
+			return v, true
+		}
+		if v, ok := rt.pySeqRepeat(b, l); ok {
+			return v, true
+		}
+	}
 	if msg := rt.pyBinTypeErr(op, l, r, a, b); msg != "" {
 		panic(&jsThrown{value: rt.pyExcInstance("TypeError", msg)})
 	}
 	return rt.pyExt("js_pybin", op, a, b), true
+}
+
+// pyUserBin offers op to the left instance's dunder, then to the right one's
+// reflected form; ok is false when both decline. The right operand goes FIRST
+// when its class is a proper subclass of the left one's and - for an
+// arithmetic operator - overrides the reflected method (CPython's binary_op1
+// and do_richcompare). Twin of pyUserBin in languages/python-interpreter.abnf
+// and lib/python-rt.metajs.
+func (rt *jsrt) pyUserBin(op string, l, r interface{}, lcls, rcls *jsObject, li, ri bool) (interface{}, bool) {
+	var g interface{}
+	if ri {
+		if m, found := pyLookup(rcls, pyBinReflected[op]); found && isCallable(m) {
+			g = m
+		}
+	}
+	first := false
+	if g != nil && li && rcls != lcls && pyClassIn(pyMRO(rcls), lcls) {
+		_, cmp := pyBinCmp[op]
+		lm, _ := pyLookup(lcls, pyBinReflected[op])
+		first = cmp || !pySameFn(lm, g)
+	}
+	if first {
+		if v := rt.call(g, jsUndef, []interface{}{r, l}); v != pyNotImplemented {
+			return v, true
+		}
+	}
+	if li {
+		if m, found := pyLookup(lcls, pyBinDunder[op]); found && isCallable(m) {
+			if v := rt.call(m, jsUndef, []interface{}{l, r}); v != pyNotImplemented {
+				return v, true
+			}
+		}
+	}
+	if g != nil && !first {
+		if v := rt.call(g, jsUndef, []interface{}{r, l}); v != pyNotImplemented {
+			return v, true
+		}
+	}
+	return nil, false
+}
+
+// pyBinCmp is the set of comparison operators: their reflection is tried
+// first for a subclass operand whether or not the subclass overrides it.
+var pyBinCmp = map[string]bool{"==": true, "!=": true, "<": true, ">": true, "<=": true, ">=": true}
+
+func pyClassIn(mro []*jsObject, c *jsObject) bool {
+	for _, k := range mro {
+		if k == c {
+			return true
+		}
+	}
+	return false
+}
+
+// pySameFn reports whether two class members are the same function value.
+func pySameFn(a, b interface{}) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	va, vb := reflect.ValueOf(a), reflect.ValueOf(b)
+	if va.Kind() == reflect.Func || vb.Kind() == reflect.Func {
+		return va.Kind() == vb.Kind() && va.Pointer() == vb.Pointer()
+	}
+	return a == b
 }
 
 // ----------------------------------------------------------------------------
@@ -26480,7 +26674,7 @@ func (rt *jsrt) pyOrder(op string, l, r interface{}) bool {
 // elements that are not equal decides, with op itself; otherwise the lengths do.
 func (rt *jsrt) pySeqOrder(op string, l, r []interface{}) interface{} {
 	for i := 0; i < len(l) && i < len(r); i++ {
-		if !rt.pyEqual(l[i], r[i]) {
+		if !rt.pyIdEq(l[i], r[i]) {
 			return rt.pyExt("js_pybin", op, l[i], r[i])
 		}
 	}
@@ -26617,7 +26811,7 @@ func pyExcParentName(name string) string {
 		return "ValueError"
 	case "UnicodeDecodeError", "UnicodeEncodeError":
 		return "UnicodeError"
-	case "Exception", "GeneratorExit", "SystemExit":
+	case "Exception", "GeneratorExit", "SystemExit", "KeyboardInterrupt":
 		return "BaseException"
 	}
 	return "Exception"
@@ -26673,6 +26867,58 @@ func (rt *jsrt) pyExcInstance(name string, msg string) interface{} {
 	return inst
 }
 
+// pyUserPow3 is pow(a, b, m) with an instance among them: a's __pow__(b, m),
+// then b's __rpow__(a, m); ok is false when none is an instance. Twin of
+// pyUserPow3 in languages/python-interpreter.abnf and lib/python-rt.metajs.
+func (rt *jsrt) pyUserPow3(a, b, m interface{}) (interface{}, bool) {
+	_, acls, aInst := pyInstance(a)
+	_, bcls, bInst := pyInstance(b)
+	_, _, mInst := pyInstance(m)
+	if !aInst && !bInst && !mInst {
+		return nil, false
+	}
+	if aInst {
+		if f, found := pyLookup(acls, "__pow__"); found && isCallable(f) {
+			if v := rt.call(f, jsUndef, []interface{}{a, b, m}); v != pyNotImplemented {
+				return v, true
+			}
+		}
+	}
+	if bInst && !(aInst && acls == bcls) {
+		if g, found := pyLookup(bcls, "__rpow__"); found && isCallable(g) {
+			if v := rt.call(g, jsUndef, []interface{}{b, a, m}); v != pyNotImplemented {
+				return v, true
+			}
+		}
+	}
+	rt.pyRaise("TypeError", "unsupported operand type(s) for ** or pow(): '"+pyTypeName(rt, a)+"', '"+
+		pyTypeName(rt, b)+"', '"+pyTypeName(rt, m)+"'")
+	return nil, false
+}
+
+// pyGenStop is the panic r that leaves a generator body, with a thrown
+// StopIteration replaced by a RuntimeError caused by it (see js_pygenwrap).
+func (rt *jsrt) pyGenStop(r interface{}) interface{} {
+	t, ok := r.(*jsThrown)
+	if !ok {
+		return r
+	}
+	_, cls, isInst := pyInstance(t.value)
+	if !isInst {
+		return r
+	}
+	for _, k := range pyMRO(cls) {
+		if n, has := k.props["__name"]; has && rt.toString(n) == "StopIteration" {
+			re := rt.pyExcInstance("RuntimeError", "generator raised StopIteration")
+			rt.pySetAttrRaw(re, "__cause__", t.value)
+			rt.pySetAttrRaw(re, "__context__", t.value)
+			rt.pySetAttrRaw(re, "__suppress_context__", true)
+			return &jsThrown{value: re}
+		}
+	}
+	return r
+}
+
 // pyExcChain makes the exception being handled v's __context__ (see
 // js_pyexcchain).
 func (rt *jsrt) pyExcChain(v interface{}) {
@@ -26713,6 +26959,31 @@ func (rt *jsrt) pyUserFormat(x interface{}, spec string) (string, bool) {
 		rt.pyRaise("TypeError", "unsupported format string passed to "+pyTypeName(rt, x)+".__format__")
 	}
 	return "", false
+}
+
+// pyPctNum is the operand of %-conversion typ: an int subclass instance
+// converts by its value, and so does a float subclass instance where a float
+// is accepted; anything else stays as it is, for the error to name. Twin of
+// pyPctNum in languages/python-interpreter.abnf and pyBPctNum in
+// lib/python-rt.metajs.
+func pyPctNum(v interface{}, typ byte) interface{} {
+	if typ == 's' || typ == 'r' || typ == 'a' {
+		return v
+	}
+	o, isObj := v.(*jsObject)
+	if !isObj {
+		return v
+	}
+	inner := pyUnwrapBuiltin(o)
+	switch pyNumTypeName(inner) {
+	case "int":
+		return inner
+	case "float":
+		if typ != 'x' && typ != 'X' && typ != 'o' && typ != 'c' {
+			return inner
+		}
+	}
+	return v
 }
 
 // ----- Python's format mini-language (js_pyformat): see pyFormat -----
@@ -26852,6 +27123,7 @@ func pyPctIntText(b *big.Int, base int, prefix string, prec int, upper bool) str
 func (rt *jsrt) pyPctOne(v interface{}, typ byte, left, zero, plus, space, alt bool, width, prec int) string {
 	var body string
 	numeric := false
+	v = pyPctNum(v, typ)
 	switch typ {
 	case 's', 'r', 'a':
 		switch typ {
@@ -27236,6 +27508,8 @@ func (rt *jsrt) pyFormat(v interface{}, spec, conv string) string {
 	if isPyComplex(x) {
 		tn = "complex"
 	}
+	// A builtin type's subclass instance formats its value.
+	x = pyUnwrapBuiltin(x)
 	fail := func(kind, msg string) {
 		panic(&jsThrown{value: rt.pyExcInstance(kind, msg)})
 	}
@@ -27664,6 +27938,15 @@ func (rt *jsrt) pySeqRepeat(seq, n interface{}) (interface{}, bool) {
 			rt.pyRaise("OverflowError", "cannot fit 'int' into an index-sized integer")
 		}
 		cnt, exact = float64(c.v.Int64()), c.v
+	case *jsObject:
+		_, isStr := seq.(string)
+		_, isArr := seq.(*jsArray)
+		if isStr || isArr {
+			if i, ok := rt.pyIndexOf(c); ok {
+				return rt.pySeqRepeat(seq, i)
+			}
+		}
+		return nil, false
 	default:
 		return nil, false
 	}

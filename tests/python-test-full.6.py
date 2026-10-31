@@ -1,7 +1,7 @@
-# Full-syntax test: Python (3.12 core grammar) - part 6, section 183: a source
-# file with CRLF line endings. Every line of this file ends in CRLF, which is
-# the point of it - keep it that way; see tests/python-test-full.py for the
-# conventions.
+# Full-syntax test: Python (3.12 core grammar) - part 6, sections 183 and 185: a
+# source file with CRLF line endings, which runs its main() indirectly. Every
+# line of this file ends in CRLF, which is the point of it - keep it that way;
+# see tests/python-test-full.py for the conventions.
 
 fails = [0]
 checks = [0]
@@ -34,7 +34,25 @@ f"
 q""") == [112, 10, 113] and len(f"""{y}
 """) == 2)
 
+# ===== SECTION 185: a module that runs main() through another function =====
+# The top level below calls S185start, which calls main: main runs exactly
+# once, as in CPython, and the implicit entry a module with a main() otherwise
+# gets is skipped. Rows from CPython 3.14.
+S185runs = [0]
+
+def s185():
+    S185runs[0] += 1
+    check("entry2", S185runs[0] == 1)
+
 def main():
     s183() # SECTION-CALL 183
+    s185() # SECTION-CALL 185
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]
+
+def S185start():
+    rc = main()
+    if rc != 0:
+        exit(rc)
+
+if checks[0] == 0: S185start()

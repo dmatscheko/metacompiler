@@ -66,11 +66,14 @@ function pyLibAll(src, mod) {
 // -main's name) is entered through it after its top level ran - unless that top
 // level runs the program itself, the way a real script does. pyTopRunsEntry
 // answers that for the source text of one top-level statement: it does when it
-// calls the entry by name, or when it is an `if` that tests __name__ (the
-// `if __name__ == "__main__":` guard). A def, class or decorated definition never
-// does, and strings and comments are skipped, so a quoted name or a remark does
-// not count.
+// calls the entry by name, when it is an `if` that tests __name__ (the
+// `if __name__ == "__main__":` guard), or when it has a call STATEMENT of a
+// function defined earlier at the top level, which may run the entry itself.
+// A def, class or decorated definition never does (a def records its name in
+// pyTopDefs), and strings and comments are skipped, so a quoted name or a remark
+// does not count.
 var pyTopEntry = false
+var pyTopDefs = []
 function pyEntryName() {
     var e = c.mainName
     return (e == undefined || e == "") ? "main" : e
@@ -80,6 +83,8 @@ function pyTopRunsEntry(src, entry) {
     var i = 0
     var first = ""
     var prev = ""
+    var depth = 0
+    var stmtStart = true
     while (i < n) {
         var ch = src.charAt(i)
         if (ch == "#") {
@@ -93,29 +98,47 @@ function pyTopRunsEntry(src, entry) {
             }
             i += q.length
             prev = ch
+            stmtStart = false
         } else if (pyEntryIdChar(ch)) {
             var j = i
             while (j < n && pyEntryIdChar(src.charAt(j))) { j++ }
             var w = src.substring(i, j)
             if (first == "") {
                 first = w
+                if (w == "def" || w == "async") { pyTopDefs.push(pyTopDefName(src, j)) }
                 if (w == "def" || w == "class" || w == "async") { return false }
             }
             if (first == "if" && w == "__name__") { return true }
-            if (w == entry && prev != ".") {
-                var k = j
-                while (k < n && (src.charAt(k) == " " || src.charAt(k) == "\t")) { k++ }
-                if (src.charAt(k) == "(") { return true }
+            var k = j
+            while (k < n && (src.charAt(k) == " " || src.charAt(k) == "\t")) { k++ }
+            if (src.charAt(k) == "(" && prev != ".") {
+                if (w == entry) { return true }
+                if (stmtStart && depth == 0 && pyTopDefs.indexOf(w) >= 0) { return true }
             }
             prev = "a"
+            stmtStart = false
             i = j
         } else {
             if (ch == "@" && first == "") { return false }
+            if (ch == "(" || ch == "[" || ch == "{") { depth++ }
+            if (ch == ")" || ch == "]" || ch == "}") { depth-- }
+            if (depth == 0 && (ch == "\n" || ch == ":" || ch == ";")) { stmtStart = true }
+            else if (ch != " " && ch != "\t" && ch != "\r") { stmtStart = false }
             if (ch != " " && ch != "\t" && ch != "\n" && ch != "\r") { prev = ch }
             i++
         }
     }
     return false
+}
+// The name a `def` or `async def` statement defines, read after its first word.
+function pyTopDefName(src, at) {
+    var i = at
+    while (i < src.length && !pyEntryIdChar(src.charAt(i))) { i++ }
+    var j = i
+    while (j < src.length && pyEntryIdChar(src.charAt(j))) { j++ }
+    var w = src.substring(i, j)
+    if (w == "def") { return pyTopDefName(src, j) }
+    return w
 }
 function pyEntryIdChar(ch) {
     return (ch >= "a" && ch <= "z") || (ch >= "A" && ch <= "Z") || (ch >= "0" && ch <= "9") || ch == "_" || ch > "\x7f"

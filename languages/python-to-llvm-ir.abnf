@@ -2834,13 +2834,17 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var r = cl[0].citer(b)
             b = r.b
             var srcV = callExt(b, "js_pyyfsrc", [r.v])
-            // A walrus scope belongs to the enclosing function's IR.
+            // A walrus binds in the scope around the generator expression, which
+            // is the generator function's env parameter.
             var savedWal = walrusScopeV
             walrusScopeV = null
-            var idx = emitClosure(["gx*src"], function(fb) { return emitCompChain(fb, inner, 0, null, exprT) }, false)
+            var idx = emitClosure(["gx*src"], function(fb) {
+                walrusScopeV = curF.Params[0]
+                return emitCompChain(fb, inner, 0, null, exprT)
+            }, false)
             walrusScopeV = savedWal
             // Like a def, it closes over a class body's cell, not its namespace.
-            var clo = callExt(b, "js_genfn", [callExt(b, "js_closure", [handle(idx), pyClosureBase(b)])])
+            var clo = callExt(b, "js_genfn", [callExt(b, "js_pygenwrap", [callExt(b, "js_closure", [handle(idx), pyClosureBase(b)])])])
             var argsV = callExt(b, "js_arr_new", [])
             callExt(b, "js_arr_push", [argsV, srcV])
             return {b: b, v: callExt(b, "js_call", [clo, hUndef, argsV])}
@@ -4011,10 +4015,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // try/except/else/finally: the try body and ONE dispatching catch closure (see
     // makeHandlerBody - it holds every except clause of the statement) are handed to
     // js_try; raise -> js_throw is recovered and the caught value arrives as the
-    // closure's parameter. The else clause is appended to the try body so it runs
-    // only when the body completes without a raise (an exception in an else clause is
-    // then caught by the except - a rare deviation). A return/break/continue leaving the
-    // try or except becomes a control signal that excDispatch re-issues here.
+    // closure's parameter. A return/break/continue leaving the try or except becomes
+    // a control signal that excDispatch re-issues here. The else clause runs outside
+    // the handlers (they do not catch what it raises) and the finally around both:
+    //     try: (try: BODY; ran = True / except: ...); if ran: ELSE / finally: ...
+    // Twin of makeTry in python-interpreter.abnf.
     function makeTry(items, pos) {
         var tryT = anytype, elseT = anytype, finallyT = anytype
         var clauses = []
@@ -4024,32 +4029,75 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             else if (items[i].elsebody != undefined) { elseT = items[i].elsebody }
             else if (items[i].finalbody != undefined) { finallyT = items[i].finalbody }
         }
-        var bodyT = tryT
+        var bodyT = clauses.length > 0 ? handlersLevel(tryT, clauses) : tryT
         if (elseT != undefined) {
-            bodyT = function(b) { return elseT(tryT(b)) }
+            bodyT = function(b) {
+                hidCount++
+                var ranName = "$tr" + hidCount
+                pyDeclInner(ranName)
+                callExt(b, "js_scope_decl", [curScopeV, emitStr(b, ranName), hFalse])
+                var ob = handlersLevel(function(bb) {
+                    var tb = tryT(bb)
+                    callExt(tb, "js_scope_set", [curScopeV, emitStr(tb, ranName), hTrue])
+                    return tb
+                }, clauses)(b)
+                var elseB = curF.NewBlock("")
+                var doneB = curF.NewBlock("")
+                ob.NewCondBr(truthy(ob, callExt(ob, "js_scope_get", [curScopeV, emitStr(ob, ranName)])), elseB, doneB)
+                elseT(elseB).NewBr(doneB)
+                return doneB
+            }
         }
+        if (finallyT != undefined) { return finallyLevel(bodyT, finallyT) }
+        return bodyT
+    }
+    // The handled-exception stack's depth as a statement starts (see js_pyexcenter
+    // in abnf/jsrt.go) lives in a scope between the statement's closures and the
+    // code around it, and the statement's finally closure cuts the stack back to it
+    // however the statement is left. "pyexd*" is no Python name, and a body closure
+    // opens its own scope anyway.
+    function pyExcDepthScope(b) {
+        var exs = callExt(b, "js_scope_new", [curScopeV])
+        callExt(b, "js_scope_decl", [exs, emitStr(b, "pyexd*"), callExt(b, "js_pyexcdepth", [])])
+        return exs
+    }
+    function pyExcLeaveClosure(b, exs) {
+        return callExt(b, "js_closure", [handle(emitClosure([], function(fb) {
+            callExt(fb, "js_pyexcleave", [callExt(fb, "js_scope_get", [curScopeV, emitStr(fb, "pyexd*")])])
+            return fb
+        }, true)), exs])
+    }
+    // try BODY except ...: one js_try with the dispatching catch closure.
+    function handlersLevel(bodyT, clauses) {
         return function(b) {
             var tryClo = callExt(b, "js_closure", [handle(emitClosure([], bodyT, true)), curScopeV])
-            var catchClo = hUndef
-            var finClo = hUndef
-            if (clauses.length > 0) {
-                // The handled-exception stack's depth as the statement starts (see
-                // js_pyexcenter in abnf/jsrt.go) lives in a scope between the
-                // statement's closures and the code around it, and the FINALLY cuts
-                // the stack back to it - so it is cut however the statement is
-                // left, by a handler that raises included. "pyexd*" is no Python
-                // name, and a body closure opens its own scope anyway.
-                var exs = callExt(b, "js_scope_new", [curScopeV])
-                callExt(b, "js_scope_decl", [exs, emitStr(b, "pyexd*"), callExt(b, "js_pyexcdepth", [])])
-                catchClo = callExt(b, "js_closure",
+            var exs = pyExcDepthScope(b)
+            var catchClo = callExt(b, "js_closure",
                                    [handle(emitClosure(["__caught"], makeHandlerBody(clauses), true)), exs])
-                finClo = callExt(b, "js_closure", [handle(emitClosure([], function(fb) {
-                    callExt(fb, "js_pyexcleave", [callExt(fb, "js_scope_get", [curScopeV, emitStr(fb, "pyexd*")])])
-                    return finallyT != undefined ? finallyT(fb) : fb
-                }, true)), exs])
-            } else if (finallyT != undefined) {
-                finClo = callExt(b, "js_closure", [handle(emitClosure([], finallyT, true)), curScopeV])
-            }
+            var ctl = callExt(b, "js_try", [tryClo, catchClo, pyExcLeaveClosure(b, exs)])
+            return excDispatch(b, ctl)
+        }
+    }
+    // try BODY finally FIN. An exception leaving BODY is put on the handled stack by
+    // a catch closure that re-raises it, so FIN runs while it is being handled and an
+    // exception raised in FIN takes it as its __context__; FIN is itself a js_try
+    // whose finally cuts the stack back, however FIN is left.
+    function finallyLevel(bodyT, finallyT) {
+        return function(b) {
+            var tryClo = callExt(b, "js_closure", [handle(emitClosure([], bodyT, true)), curScopeV])
+            var exs = pyExcDepthScope(b)
+            var catchClo = callExt(b, "js_closure", [handle(emitClosure(["__caught"], function(cb) {
+                var caught = callExt(cb, "js_scope_get", [curScopeV, emitStr(cb, "__caught")])
+                callExt(cb, "js_pyexcenter", [caught])
+                callExt(cb, "js_throw", [caught])
+                cb.NewRet(hUndef) // Never reached: js_throw unwinds on the host side.
+                return deadBlock()
+            }, true)), exs])
+            var finClo = callExt(b, "js_closure", [handle(emitClosure([], function(fb) {
+                var finBody = callExt(fb, "js_closure", [handle(emitClosure([], finallyT, true)), curScopeV])
+                var fctl = callExt(fb, "js_try", [finBody, hUndef, pyExcLeaveClosure(fb, curScopeV)])
+                return excDispatch(fb, fctl)
+            }, true)), exs])
             var ctl = callExt(b, "js_try", [tryClo, catchClo, finClo])
             return excDispatch(b, ctl)
         }
@@ -4488,7 +4536,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var clo = callExt(b, "js_closure", [handle(idx), er.env])
             // A body with a yield in it is a generator FUNCTION: calling it makes a
             // generator instead of running the body.
-            if (isGen) { clo = callExt(b, "js_genfn", [clo]) }
+            if (isGen) { clo = callExt(b, "js_genfn", [callExt(b, "js_pygenwrap", [clo])]) }
             clo = emitSig(b, clo, plist)
             clo = callExt(b, "js_pyfnname", [clo, emitStr(b, name)])
             if (doc != null) { clo = callExt(b, "js_pyfndoc", [clo, emitStr(b, doc)]) }
@@ -5056,7 +5104,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                         "OSError", "ExceptionGroup", "AssertionError",
                         "ZeroDivisionError", "IndexError", "KeyError", "UnboundLocalError",
                         "NotImplementedError", "RecursionError", "OverflowError", "UnicodeError", "UnicodeDecodeError",
-                        "UnicodeEncodeError", "GeneratorExit", "MemoryError", "SystemExit", "ImportError", "ModuleNotFoundError",
+                        "UnicodeEncodeError", "GeneratorExit", "KeyboardInterrupt", "MemoryError", "SystemExit", "ImportError", "ModuleNotFoundError",
                         "BlockingIOError", "ChildProcessError", "ConnectionError", "BrokenPipeError", "ConnectionAbortedError", "ConnectionRefusedError", "ConnectionResetError", "FileExistsError", "FileNotFoundError", "InterruptedError", "IsADirectoryError", "NotADirectoryError", "PermissionError", "ProcessLookupError", "TimeoutError", "EOFError"]
         var excParent = {}
         excParent["ZeroDivisionError"] = "ArithmeticError"
@@ -5073,6 +5121,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         excParent["UnicodeEncodeError"] = "UnicodeError"
         excParent["GeneratorExit"] = "BaseException"
         excParent["SystemExit"] = "BaseException"
+        excParent["KeyboardInterrupt"] = "BaseException"
         excParent["ModuleNotFoundError"] = "ImportError"
         excParent["BlockingIOError"] = "OSError"
         excParent["ChildProcessError"] = "OSError"

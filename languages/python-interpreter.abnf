@@ -1199,12 +1199,12 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (isView(x)) return x.__vd.keys.length
         if (pyUser(x)) {
             var f = clsFind(x.__class, "__len__")
-            if (f != null) { return f(x) }
+            if (f != null) { return pyLenOut(f(x)) }
         } else if (Array.isArray(x)) {
             return x.length
         }
         var ml = pyMetaFind(x, "__len__")
-        if (ml != null) { return ml(x) }
+        if (ml != null) { return pyLenOut(ml(x)) }
         pyListErr("TypeError", "object of type '" + pyTypeOf(x).__name + "' has no len()")
     }
     // list(x): a fresh list from any iterable (lists copy, dicts give their keys).
@@ -2201,16 +2201,16 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // structural test, so it gets the two explicit arms below instead
     // (makeForStmt and iterToList).
     //
-    // The SOURCE is materialized, and that is the line drawn: CPython's
-    // map/filter/zip/enumerate are lazy in their input too, so
-    // `map(f, endless())` works there and hangs here. iter(gen) answers the
-    // GENERATOR ITSELF - CPython's rule as well - so a generator stays lazy.
+    // iter(gen) answers the GENERATOR ITSELF - CPython's rule as well - so a
+    // generator stays lazy; map, filter, zip and enumerate are lazy cursors
+    // (pyMkLazy) that step their sources one item at a time.
     function pyMkIter(name, arr) {
         var it = {__pyit: name, __a: arr, __i: 0}
         it.next = function() { return pyItStep(it) }
         return it
     }
     function pyItStep(it) {
+        if (it.__lz !== undefined) { return pyLazyStep(it) }
         if (it.__g !== undefined) { return pySeqStep(it) }
         if (it.__w !== undefined) { pyWatchCheck(it) }
         if (it.__i >= it.__a.length) { return {value: undefined, done: true} }
@@ -2313,9 +2313,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // followed by list(it) does not repeat an element.
     function pyItRest(it) {
         var out = []
-        if (it.__g !== undefined) {
+        if (it.__g !== undefined || it.__lz !== undefined) {
             while (true) {
-                var s = pySeqStep(it)
+                var s = pyItStep(it)
                 if (s.done) { return out }
                 out.push(s.value)
             }
@@ -2414,10 +2414,47 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var s = anytype
         s = (start === undefined) ? 0 : start
         if (pyKwArg(kw, "start") !== undefined) { s = pyKwArg(kw, "start") }
-        var a = iterToList(src)
-        var out = []
-        for (var i = 0; i < a.length; i++) { out.push(pyTup([binOp("+", s, i), a[i]])) }
-        return pyMkIter("enumerate", out)
+        return pyMkLazy("enumerate", [pyStepper(src)], s, false)
+    }
+    // A lazy cursor over steppers ss (pyStepper): map calls f on each row and
+    // stops at the shortest source, zip makes each row a tuple (strict f: a
+    // length mismatch is CPython's ValueError), filter keeps the items f (None:
+    // truthiness) accepts, enumerate pairs each item with the count f. Twin of
+    // rt.pyLazyIter in abnf/jsrt.go and pyALazyIter in lib/python-rt.metajs.
+    function pyMkLazy(kind, ss, f, strict) {
+        var it = pyMkIter(kind, [])
+        it.__lz = ss
+        it.__lf = f
+        it.__ls = strict
+        return it
+    }
+    function pyLazyStep(it) {
+        var ss = it.__lz
+        var kind = it.__pyit
+        if (kind == "filter") {
+            while (true) {
+                var fs = pyStep(ss[0])
+                if (fs.done) { return {value: undefined, done: true} }
+                var keep = (it.__lf === undefined || it.__lf === null) ? pytruthy(fs.value) : pytruthy(pyCall(it.__lf, [fs.value], null))
+                if (keep) { return {value: fs.value, done: false} }
+            }
+        }
+        if (ss.length == 0) { return {value: undefined, done: true} }
+        var row = []
+        for (var k = 0; k < ss.length; k++) {
+            var st = pyStep(ss[k])
+            if (st.done) {
+                if (it.__ls) { pyZipStrict(ss, k) }
+                return {value: undefined, done: true}
+            }
+            row.push(st.value)
+        }
+        if (kind == "map") { return {value: pyCall(it.__lf, row, null), done: false} }
+        if (kind == "zip") { return {value: pyTup(row), done: false} }
+        var n = anytype
+        n = it.__lf
+        it.__lf = binOp("+", n, 1)
+        return {value: pyTup([n, row[0]]), done: false}
     }
     // zip(*iterables, strict=False). The sources are stepped in turn, one row at
     // a time, so zip(it, it) pairs consecutive items, and strict= is CPython's
@@ -2427,34 +2464,20 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var kw = kTakeNamed()
         pyKwOnly(kw, "zip", "strict", "strict")
         var strict = pytruthy(pyKwArg(kw, "strict"))
-        var ds = []
-        var i
-        for (i = 0; i < arguments.length; i++) { ds.push(pyDelegOf(arguments[i])) }
-        var out = []
-        while (ds.length > 0) {
-            var row = []
-            for (var k = 0; k < ds.length; k++) {
-                var st = pyDelegStep(ds[k], undefined)
-                if (st.done) {
-                    if (strict) { pyZipStrict(ds, k) }
-                    return pyMkIter("zip", out)
-                }
-                row.push(st.value)
-            }
-            out.push(pyTup(row))
-        }
-        return pyMkIter("zip", out)
+        var ss = []
+        for (var i = 0; i < arguments.length; i++) { ss.push(pyStepper(arguments[i])) }
+        return pyMkLazy("zip", ss, null, strict)
     }
     // strict zip's check once source K ran out: a later K is shorter than the
     // ones before it; K == 0 asks whether any other source still has an item.
-    function pyZipStrict(ds, k) {
+    function pyZipStrict(ss, k) {
         var j = k
         var what = "shorter"
         if (k == 0) {
             what = "longer"
             j = 1
-            while (j < ds.length && pyDelegStep(ds[j], undefined).done) { j++ }
-            if (j == ds.length) { return }
+            while (j < ss.length && pyStep(ss[j]).done) { j++ }
+            if (j == ss.length) { return }
         }
         pyListErr("ValueError", "zip() argument " + (j + 1) + " is " + what + " than argument" + (j == 1 ? " " : "s 1-") + j)
     }
@@ -2462,35 +2485,13 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // shortest, so an endless source beside a finite one ends. Twin of js_pymapfn
     // in abnf/jsrt.go and lib/python-rt.metajs.
     hostGlobals["map"] = function() {
-        var f = arguments[0]
-        var ds = []
-        var i
-        for (i = 1; i < arguments.length; i++) { ds.push(pyDelegOf(arguments[i])) }
-        var out = []
-        while (ds.length > 0) {
-            var row = []
-            for (var k = 0; k < ds.length; k++) {
-                var st = pyDelegStep(ds[k], undefined)
-                if (st.done) { return pyMkIter("map", out) }
-                row.push(st.value)
-            }
-            out.push(pyCall(f, row, null))
-        }
-        return pyMkIter("map", out)
+        var ss = []
+        for (var i = 1; i < arguments.length; i++) { ss.push(pyStepper(arguments[i])) }
+        return pyMkLazy("map", ss, arguments[0], false)
     }
     // filter(None, xs) keeps the TRUTHY elements - CPython's documented special
     // case for a None function.
-    hostGlobals["filter"] = function(f, v) {
-        var a = iterToList(v)
-        var out = []
-        for (var i = 0; i < a.length; i++) {
-            var keep = false
-            if (f === undefined || f === null) { keep = pytruthy(a[i]) }
-            else { keep = pytruthy(pyCall(f, [a[i]], null)) }
-            if (keep) { out.push(a[i]) }
-        }
-        return pyMkIter("filter", out)
-    }
+    hostGlobals["filter"] = function(f, v) { return pyMkLazy("filter", [pyStepper(v)], f, false) }
     // reversed(seq): a class's own __reversed__ answers; otherwise the value must
     // be a sequence (a user class needs __len__ and __getitem__) - a set, a
     // generator or an iterator is CPython's TypeError. Twin of js_pyreversed in
@@ -2643,6 +2644,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // abnf/jsrt.go and languages/lib/python-rt.metajs.
     hostGlobals["pow"] = function(a, b, m) {
         if (m === undefined || m === null) { return binOp("**", a, b) }
+        if (pyUser(a) || pyUser(b) || pyUser(m)) { return pyUserPow3(a, b, m) }
         if (!pyIsIntOrBool(a) || !pyIsIntOrBool(b) || !pyIsIntOrBool(m)) {
             pyRaise(pyMakeExc("TypeError", ["pow() 3rd argument not allowed unless all arguments are integers"]))
         }
@@ -2653,6 +2655,25 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return r
     }
     function pyIsIntOrBool(v) { return typeof v == "number" || typeof v == "boolean" || bigIsBig(v) }
+    // pow(a, b, m) with an instance among them: a's __pow__(b, m), then b's
+    // __rpow__(a, m). Twin of pyUserPow3 in abnf/jsrt.go and lib/python-rt.metajs.
+    function pyUserPow3(a, b, m) {
+        var f = pyUser(a) ? clsFind(a.__class, "__pow__") : null
+        if (f != null) {
+            var v = anytype
+            v = f(a, b, m)
+            if (v !== pyNotImpl) { return v }
+        }
+        var g = pyUser(b) && !(pyUser(a) && a.__class === b.__class) ? clsFind(b.__class, "__rpow__") : null
+        if (g != null) {
+            var w = anytype
+            w = g(b, a, m)
+            if (w !== pyNotImpl) { return w }
+        }
+        pyRaise(pyMakeExc("TypeError", ["unsupported operand type(s) for ** or pow(): '" + pyTypeOf(a).__name + "', '"
+            + pyTypeOf(b).__name + "', '" + pyTypeOf(m).__name + "'"]))
+        return undefined
+    }
     // callable(x): a function, a class object, or an instance whose class
     // defines __call__.
     hostGlobals["callable"] = function(v) {
@@ -3219,6 +3240,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // because MetaJS is TYPED and `n` could not be rewritten in place.
         if (typeof n == "boolean") { v = n ? 1 : 0 }
         else if (typeof n == "number") { v = Math.trunc(n) }
+        else if (pyHasIndex(n)) { return pyChrOf(pyIndexOf(n)) }
         else {
             pyRaise(pyMakeExc("TypeError", ["'" + pyTypeOf(n).__name + "' object cannot be interpreted as an integer"]))
             return ""
@@ -3502,7 +3524,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function pyKeyAlias(k) {
         if (k === true) { return 1 }
         if (k === false) { return 0 }
-        if (isFlo(k)) { return k.__flo }
+        // Beyond 2^53 an int is a big box, which the scan already compares exactly.
+        if (isFlo(k)) { return Math.abs(k.__flo) < 9007199254740992 ? k.__flo : undefined }
         if (typeof k == "number") {
             if (k == 1) { return true }
             if (k == 0) { return false }
@@ -3526,7 +3549,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // A slice key, by its bounds.
         if (isSlice(a) && isSlice(b)) { return pyEq(a, b) }
         if (!pyNumeric(a) || !pyNumeric(b)) { return false }
-        return floVal(a) == floVal(b)
+        return pyEq(a, b)
     }
     // CPython's key match when an instance is on either side and a !== b: the
     // hashes must agree, and only then is == asked, so a user __hash__/__eq__
@@ -3618,20 +3641,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // the "==" arm of rt.pyDunderBin in abnf/jsrt.go and pyADunderBin in
     // lib/python-rt.metajs.
     function pyUserEq(a, b) {
-        if (pyUser(a)) {
-            var f = clsFind(a.__class, "__eq__")
-            if (f != null) {
-                var ea = f(a, b)
-                if (ea !== pyNotImpl) { return ea }
-            }
-        }
-        if (pyUser(b)) {
-            var g = clsFind(b.__class, "__eq__")
-            if (g != null) {
-                var eb = g(b, a)
-                if (eb !== pyNotImpl) { return eb }
-            }
-        }
+        var e = pyUserBin(a, b, "__eq__", "__eq__", true)
+        if (e !== pyNotImpl) { return e }
         var x = pyBDelSelf(a)
         var y = pyBDelSelf(b)
         if (x !== a || y !== b) { return pyEq(x, y) }
@@ -3640,21 +3651,35 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // != with an instance on either side: __ne__ the same way, and when both
     // decline, the negation of ==.
     function pyUserNe(a, b) {
-        if (pyUser(a)) {
-            var f = clsFind(a.__class, "__ne__")
-            if (f != null) {
-                var na = f(a, b)
-                if (na !== pyNotImpl) { return na }
-            }
-        }
-        if (pyUser(b)) {
-            var g = clsFind(b.__class, "__ne__")
-            if (g != null) {
-                var nb = g(b, a)
-                if (nb !== pyNotImpl) { return nb }
-            }
-        }
+        var ne = pyUserBin(a, b, "__ne__", "__ne__", true)
+        if (ne !== pyNotImpl) { return ne }
         return !pytruthy(pyUserEq(a, b))
+    }
+    // A binary dunder offered to the left operand's class (name), then reflected
+    // to the right one's (rname); NotImplemented when both decline. The right
+    // operand goes FIRST when its class is a proper subclass of the left one's and
+    // - for an arithmetic operator, cmp false - overrides the reflected method
+    // (CPython's binary_op1 and do_richcompare). Twin of pyUserBin in
+    // abnf/jsrtpysub.go and lib/python-rt.metajs.
+    function pyUserBin(l, r, name, rname, cmp) {
+        var g = pyUser(r) ? clsFind(r.__class, rname) : null
+        var first = false
+        if (g != null && pyUser(l) && r.__class !== l.__class && clsIsSub(r.__class, l.__class)) {
+            first = cmp || g !== clsFind(l.__class, rname)
+        }
+        if (first) {
+            var v0 = g(r, l)
+            if (v0 !== pyNotImpl) { return v0 }
+        }
+        if (pyUser(l)) {
+            var f = clsFind(l.__class, name)
+            if (f != null) {
+                var lv = f(l, r)
+                if (lv !== pyNotImpl) { return lv }
+            }
+        }
+        if (g != null && !first) { return g(r, l) }
+        return pyNotImpl
     }
 
     // ----- repr() of a str: CPython's unicode_repr ---------------------------
@@ -3941,8 +3966,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // The C3 linearization of a base list - the order CPython computes, minus the
     // class itself (the caller prepends it). This body is pyLinearize in
     // abnf/jsrt.go and pyDLinearize in languages/lib/python-rt.metajs; a hierarchy
-    // C3 cannot resolve consistently falls back to first-seen order there, and here,
-    // rather than aborting the program.
+    // C3 cannot resolve raises CPython's TypeError, naming the heads left over.
     function clsLinearize(bases) {
         if (bases.length == 0) { return [] }
         var seqs = []
@@ -3968,11 +3992,12 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 if (!inTail) { pick = head }
             }
             if (pick == null) {
+                var heads = []
                 for (var s3 = 0; s3 < seqs.length; s3++) {
-                    if (pick == null && seqs[s3].length > 0) { pick = seqs[s3][0] }
+                    if (seqs[s3].length > 0 && heads.indexOf(seqs[s3][0].__name) < 0) { heads.push(seqs[s3][0].__name) }
                 }
+                pyRaise(pyMakeExc("TypeError", ["Cannot create a consistent method resolution order (MRO) for bases " + heads.join(", ")]))
             }
-            if (pick == null) { return out }
             out.push(pick)
             for (var s4 = 0; s4 < seqs.length; s4++) {
                 if (seqs[s4].length > 0 && seqs[s4][0] === pick) { seqs[s4] = seqs[s4].slice(1) }
@@ -4385,11 +4410,32 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     function pyUserTruthy(v) {
         var b = clsFind(v.__class, "__bool__")
-        if (b != null) { return pytruthy(b(v)) }
+        if (b != null) {
+            var r = anytype
+            r = b(v)
+            if (typeof r != "boolean") { pyListErr("TypeError", "__bool__ should return bool, returned " + pyTypeOf(r).__name) }
+            return r
+        }
         var n = clsFind(v.__class, "__len__")
-        if (n != null) { return pytruthy(n(v)) }
+        if (n != null) { return pytruthy(pyLenOut(n(v))) }
         return true
     }
+    // What a class's __len__ answered, as len() takes it: a non-negative int
+    // that fits a machine index. Twin of pyLenOut in abnf/jsrt.go and
+    // lib/python-rt.metajs.
+    function pyLenOut(r) {
+        if (typeof r == "boolean") { return r ? 1 : 0 }
+        if (bigIsBig(r)) {
+            if (bigCmpFlo(r, -9223372036854775808) < 0 || bigCmpFlo(r, 9223372036854775808) >= 0) {
+                pyListErr("OverflowError", "cannot fit 'int' into an index-sized integer")
+            }
+        } else if (typeof r != "number") {
+            pyListErr("TypeError", "'" + pyTypeOf(r).__name + "' object cannot be interpreted as an integer")
+        }
+        if (pyNeg(r)) { pyListErr("ValueError", "__len__() should return >= 0") }
+        return r
+    }
+    function pyNeg(r) { return bigIsBig(r) ? r.sign < 0 : r < 0 }
 
     // A builtin subclass's own __getitem__: dict's asks the class's __missing__
     // for an absent key. Twin of pyBGetItem in abnf/jsrtpysub.go and
@@ -4473,6 +4519,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (typeof i == "number") { return i }
         if (typeof i == "boolean") { return i ? 1 : 0 }
         if (pyHasIndex(i)) { return pySeqIdx(o, pyIndexOf(i)) }
+        // An int that fits a Py_ssize_t is merely out of range.
+        if (bigIsBig(i) && bigCmpFlo(i, -9223372036854775808) >= 0 && bigCmpFlo(i, 9223372036854775808) < 0) {
+            return pySliceArg(i)
+        }
         var tn = pyTypeOf(i).__name
         if (tn == "int") { pyListErr("IndexError", "cannot fit 'int' into an index-sized integer") }
         if (typeof o == "string") { pyListErr("TypeError", "string indices must be integers, not '" + tn + "'") }
@@ -6863,7 +6913,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (name == "__next__") { return genSend(target, undefined) }
             if (name == "close") { return genClose(target) }
             if (name == "throw") { return genThrow(target, args.length > 0 ? args[0] : undefined) }
-            fail("unknown generator method: " + name)
+            pyAttrErr(target, name)
         }
         if (isBytes(target)) { return pyBytesMethod(target, name, args, kw) }
         if (isSlice(target) && name == "indices") { return pySliceIndices(target, pyArgAt(args, 0)) }
@@ -6873,8 +6923,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (pyIsListMethod(name) && (!isTup(target) || pyIsTupleMethod(name))) { return pyListMethod(target, name, args, kw) }
             var ldel = pyValDunder(target, name)
             if (ldel != null) { return ldel.apply(undefined, [target].concat(args)) }
-            if (isTup(target) || pyForeignMethod(target, name)) { pyAttrErr(target, name) }
-            fail("unknown list method: " + name)
+            pyAttrErr(target, name)
         }
         if (isDict(target)) {
             // THE WHOLE DICT AND SET METHOD SURFACE. A set is a dict whose keys
@@ -6891,9 +6940,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 if (pyIsSetMethod(name)) { return pySetMethod(target, name, args) }
                 var sdl = pyValDunder(target, name)
                 if (sdl != null) { return sdl.apply(undefined, [target].concat(args)) }
-                if (pyIsDictOnly(name)) { pyAttrErr(target, name) }
-                if (pyForeignMethod(target, name)) { pyAttrErr(target, name) }
-                fail("unknown dict method: " + name)
+                pyAttrErr(target, name)
             }
             if (pyIsDictMethod(name)) {
                 var dr = pyDictMethod(target, name, args, kw)
@@ -6902,9 +6949,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             }
             var ddel = pyValDunder(target, name)
             if (ddel != null) { return ddel.apply(undefined, [target].concat(args)) }
-            if (pyIsSetOnly(name)) { pyAttrErr(target, name) }
-            if (pyForeignMethod(target, name)) { pyAttrErr(target, name) }
-            fail("unknown dict method: " + name)
+            pyAttrErr(target, name)
         }
         // A method on a builtin TYPE OBJECT - dict.fromkeys(ks). The mcall path AND
         // the value path (pyattr) both need it, or it is reachable one way and not
@@ -6934,11 +6979,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         var sdel = pyValDunder(target, name)
         if (sdel != null) { return sdel.apply(undefined, [target].concat(args)) }
-        if (pyForeignMethod(target, name)) { pyAttrErr(target, name) }
         // A function's own attribute holding a callable - f.g = g; f.g(3) - is
         // called as it is read, with no receiver.
         if (typeof target == "function") { return pyCall(pyattr(target, name), args, kw) }
-        fail("method call ." + name + "() on " + pstr(target))
+        pyAttrErr(target, name)
     }
 
     // bytes(source, encoding, errors), with the keywords already in their slots:
@@ -7462,7 +7506,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (args.length != 1) { pyListErr("TypeError", "list.count() takes exactly one argument") }
             var cn = 0
             for (var ci = 0; ci < n; ci++) {
-                if (pytruthy(binOp("==", xs[ci], args[0]))) { cn++ }
+                if (pyIdEq(xs[ci], args[0])) { cn++ }
             }
             return cn
         }
@@ -7495,7 +7539,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         if (name == "remove") {
             for (var ri = 0; ri < n; ri++) {
-                if (pytruthy(binOp("==", xs[ri], pyArgAt(args, 0)))) {
+                if (pyIdEq(xs[ri], pyArgAt(args, 0))) {
                     listRemoveAt(xs, ri)
                     return undefined
                 }
@@ -7516,7 +7560,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var to = pyListClamp(pyArgAt(args, 2), n, n)
             if (to < from) { to = from }
             for (var xi = from; xi < to; xi++) {
-                if (pytruthy(binOp("==", xs[xi], pyArgAt(args, 0)))) { return xi }
+                if (pyIdEq(xs[xi], pyArgAt(args, 0))) { return xi }
             }
             if (isTup(xs)) { pyListErr("ValueError", "tuple.index(x): x not in tuple") }
             pyListErr("ValueError", "list.index(x): x not in list")
@@ -7526,12 +7570,16 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return undefined
     }
     function pyArgAt(args, i) { return i < args.length ? args[i] : undefined }
+    // How a container compares its elements: `x is y or x == y`. Twin of
+    // pyIdEq in abnf/jsrt.go and pyAIdEq in lib/python-rt.metajs.
+    function pyIdEq(a, b) { return a === b || pytruthy(binOp("==", a, b)) }
     function pyListErr(kind, msg) { pyRaise(pyMakeExc(kind, [msg])) }
     // An index argument as a plain number. A bool IS an int in Python, a float
     // box is not an index at all - and the TypeError is CPython's own text.
     function pyNumOf(v) {
         if (typeof v == "number") { return v }
         if (typeof v == "boolean") { return v ? 1 : 0 }
+        if (pyHasIndex(v)) { return pyNumOf(pyIndexOf(v)) }
         pyListErr("TypeError", "'" + pyTypeOf(v).__name + "' object cannot be interpreted as an integer")
         return 0
     }
@@ -7647,19 +7695,6 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (name == "add" || name == "pop" || name == "clear") { return true }
         if (name == "copy" || name == "remove" || name == "discard") { return true }
         if (name == "union" || name == "update" || name == "issubset") { return true }
-        return pyIsSetOnlyAlgebra(name)
-    }
-    // The names one of the two types owns and the other does NOT, which is
-    // exactly what CPython raises AttributeError for. They are narrower than the
-    // sets above: pop, clear, copy and update are on BOTH a dict and a set.
-    function pyIsDictOnly(name) {
-        if (name == "keys" || name == "values" || name == "items") { return true }
-        if (name == "get" || name == "setdefault" || name == "popitem") { return true }
-        return false
-    }
-    function pyIsSetOnly(name) {
-        if (name == "add" || name == "remove") { return true }
-        if (name == "discard" || name == "union" || name == "issubset") { return true }
         return pyIsSetOnlyAlgebra(name)
     }
     // The set algebra methods, which a dict does not have either.
@@ -7894,11 +7929,15 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return sym
         }
         for (var ai = 0; ai < args.length; ai++) {
+            var isSetArg = isSet(args[ai])
             var other = pySetOf(pyIterOrTypeErr(args[ai]))
             var kept = newSet()
             for (var k = 0; k < out.keys.length; k++) {
-                var hit = dictFind(other, out.keys[k]) >= 0
-                if (hit == (name == "intersection")) { setAdd(kept, out.keys[k]) }
+                var at = dictFind(other, out.keys[k])
+                // An intersection keeps the member of the side CPython walks:
+                // an iterable argument, or the smaller set (the argument on a tie).
+                if (at >= 0 && name == "intersection" && (!isSetArg || other.keys.length <= out.keys.length)) { setAdd(kept, other.keys[at]) }
+                else if ((at >= 0) == (name == "intersection")) { setAdd(kept, out.keys[k]) }
             }
             out = kept
         }
@@ -7920,38 +7959,6 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var els = pyIterOrTypeErr(args[ui])
             for (var ei = 0; ei < els.length; ei++) { setAdd(s, els[ei]) }
         }
-    }
-
-    // The member-call names that the COMPILED halves reach through
-    // rt.memberCall - the table nine languages share - and that Python's
-    // receiver type does not have (`xs.size()`, `"ab".charAt(0)`). CPython raises
-    // AttributeError, and so do all three engines; here that is only the ERROR.
-    //
-    // Keyed by RECEIVER TYPE, not by name alone: `get` is a real dict method and
-    // `add` a real set method. Keep in step with pyForeignMethod in abnf/jsrt.go
-    // and pyDForeign in languages/lib/python-rt.metajs.
-    //
-    // A name Python DOES have and this project does not is deliberately NOT
-    // here: it still aborts, because a hard stop says "unimplemented" where a
-    // catchable AttributeError would let a program silently take the wrong
-    // branch.
-    function pyForeignMethod(target, name) {
-        if (Array.isArray(target)) {
-            // Kotlin's, Java's, Dart's and Swift's list methods. `count` is not
-            // among them - Python has list.count(x), answered above.
-            if (name == "add" || name == "size" || name == "get") { return true }
-            if (name == "contains" || name == "map" || name == "filter") { return true }
-            if (name == "any") { return true }
-        }
-        if (typeof target == "string") {
-            // Java's and Kotlin's string methods. Python spells them len(s),
-            // s[i], s == t, s[a:b] and s.index(t).
-            if (name == "length" || name == "charAt" || name == "equals") { return true }
-            if (name == "substring" || name == "indexOf") { return true }
-        }
-        if (name == "isEmpty" || name == "removeLast") { return true }
-        if (name == "sumOf" || name == "forEach") { return true }
-        return false
     }
 
     // The AttributeError CPython raises for a method its type does not have,
@@ -8078,7 +8085,12 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             for (i = 0; i < l.keys.length; i++) { setAdd(out, l.keys[i]) }
             for (i = 0; i < r.keys.length; i++) { setAdd(out, r.keys[i]) }
         } else if (op == "&") {
-            for (i = 0; i < l.keys.length; i++) { if (dictFind(r, l.keys[i]) >= 0) { setAdd(out, l.keys[i]) } }
+            // CPython walks the smaller set, the right one on a tie, and keeps
+            // the member it walked: {1.0} & {1} is {1}.
+            for (i = 0; i < l.keys.length; i++) {
+                var at = dictFind(r, l.keys[i])
+                if (at >= 0) { setAdd(out, r.keys.length <= l.keys.length ? r.keys[at] : l.keys[i]) }
+            }
         } else if (op == "-") {
             for (i = 0; i < l.keys.length; i++) { if (dictFind(r, l.keys[i]) < 0) { setAdd(out, l.keys[i]) } }
         } else {
@@ -8137,23 +8149,16 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function userOp(op, l, r) {
         var n = hasOwn(pyDunder, op) ? pyDunder[op] : null
         if (n == null) { return null }
-        if (pyUser(l)) {
-            var f = clsFind(l.__class, n)
-            if (f != null) {
-                var lv = f(l, r)
-                if (lv !== pyNotImpl) { return {v: lv} }
-            }
-        }
-        if (pyUser(r)) {
-            var rn = hasOwn(pyReflected, op) ? pyReflected[op] : "__r" + n.substring(2)
-            var g = clsFind(r.__class, rn)
-            if (g != null) {
-                var rv = g(r, l)
-                if (rv !== pyNotImpl) { return {v: rv} }
-            }
-        }
+        var cmp = hasOwn(pyReflected, op)
+        var uv = pyUserBin(l, r, n, cmp ? pyReflected[op] : "__r" + n.substring(2), cmp)
+        if (uv !== pyNotImpl) { return {v: uv} }
         var a = pyBDelSelf(l)
         var b = pyBDelSelf(r)
+        // Sequence repetition takes any count with __index__.
+        if (op == "*") {
+            if ((typeof a == "string" || Array.isArray(a)) && pyHasIndex(r)) { return {v: pyRepeat(a, pyIndexOf(r))} }
+            if ((typeof b == "string" || Array.isArray(b)) && pyHasIndex(l)) { return {v: pyRepeat(b, pyIndexOf(l))} }
+        }
         var msg = pyBinTypeErr(op, l, r, a, b)
         if (msg != "") { pyListErr("TypeError", msg) }
         return {v: binOp(op, a, b)}
@@ -8407,6 +8412,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // Python's ==, for the pairs where at least one side is a float box.
     function floEq(a, b) {
         if (!pyNumeric(a) || !pyNumeric(b)) { return false }
+        // An arbitrary precision int against a float: exactly, not through a double.
+        if (bigIsBig(a)) { return bigCmpFlo(a, floVal(b)) == 0 }
+        if (bigIsBig(b)) { return bigCmpFlo(b, floVal(a)) == 0 }
         return floVal(a) == floVal(b)
     }
     // --- complex ---
@@ -9816,9 +9824,21 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (upper) { out = out.toUpperCase() }
         return neg ? ("-" + out) : out
     }
-    function pyPctOne(v, typ, left, zero, plus, space, alt, width, prec) {
+    // The operand of conversion typ: an int subclass instance converts by its
+    // value, and so does a float subclass instance where a float is accepted;
+    // anything else stays as it is, for the error to name. Twin of rt.pyPctNum
+    // in abnf/jsrt.go and pyBPctNum in lib/python-rt.metajs.
+    function pyPctNum(v, typ) {
+        if (!pyUser(v) || v.__val === undefined || typ == "s" || typ == "r" || typ == "a") { return v }
+        var tn = pyNumTName(v.__val)
+        if (tn == "int" || (tn == "float" && typ != "x" && typ != "X" && typ != "o" && typ != "c")) { return v.__val }
+        return v
+    }
+    function pyPctOne(v0, typ, left, zero, plus, space, alt, width, prec) {
         var body = anytype
         var numeric = false
+        var v = anytype
+        v = pyPctNum(v0, typ)
         if (typ == "s" || typ == "r" || typ == "a") {
             body = (typ == "s") ? pstr(v) : (typ == "a" ? hostGlobals["ascii"](v) : prepr(v))
             if (prec >= 0 && pyLen(body) > prec) { body = body.substring(0, pySCpUnit(body, prec)) }
@@ -10365,6 +10385,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         if (spec == "") { return (typeof x == "string") ? x : pstr(x) }
         var tn = isCplx(x) ? "complex" : pyTypeOf(x).__name
+        // A builtin type's subclass instance formats its value.
+        if (pyUser(x) && x.__val !== undefined) { x = x.__val }
         var i = 0
         var fill = " "
         var fillGiven = false
@@ -11175,7 +11197,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             genCur.pop()
             scopes = mine
             while (pyCurExc.length > g.eb) { pyCurExc.pop() }
-            throw e
+            throw pyGenStopExc(e)
         }
         g.running = false
         genCur.pop()
@@ -11187,6 +11209,17 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return {yielded: false, value: st.ret}
         }
         return {yielded: true, value: r.value}
+    }
+    // PEP 479: a StopIteration leaving a generator's body is replaced by a
+    // RuntimeError caused by it, so it cannot silently end the loop that steps
+    // the generator. Twin of js_pygenstop in abnf/jsrt.go and lib/python-rt.metajs.
+    function pyGenStopExc(e) {
+        if (!excIsUser(e) || !pyUser(e.v) || !clsIsSub(e.v.__class, hostGlobals["StopIteration"])) { return e }
+        var re = pyMakeExc("RuntimeError", ["generator raised StopIteration"])
+        re.__cause__ = e.v
+        re.__context__ = e.v
+        re.__suppress_context__ = true
+        return {__exc: true, v: re}
     }
     // gen.send(v) / next(gen): the next value, or StopIteration carrying the return
     // value once the body has finished - exactly Python's protocol.
@@ -11475,10 +11508,24 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         return floVal(v)
     }
+    // One slice bound or step as an index: an int (a bool is one, an object with
+    // __index__ the int it answers). An int beyond 2**62 either way clamps there:
+    // no sequence is that long, so the clamped bound selects what the real one
+    // does. Twin of pySliceArg in abnf/jsrt.go and lib/python-rt.metajs.
+    function pySliceArg(v) {
+        if (typeof v == "number") { return v }
+        if (typeof v == "boolean") { return v ? 1 : 0 }
+        if (bigIsBig(v)) { return v.sign < 0 ? -4611686018427387904 : 4611686018427387904 }
+        if (pyHasIndex(v)) { return pySliceArg(pyIndexOf(v)) }
+        pyListErr("TypeError", "slice indices must be integers or None or have an __index__ method")
+        return 0
+    }
     // The indices a slice selects, in order - Python's rules: negative bounds wrap,
     // open ends follow the direction, and a negative step walks backwards.
-    function sliceIdx(n, lo, hi, st) {
-        if (st === undefined || st === null) { st = 1 }
+    function sliceIdx(n, lo0, hi0, st0) {
+        var lo = lo0 === undefined || lo0 === null ? undefined : pySliceArg(lo0)
+        var hi = hi0 === undefined || hi0 === null ? undefined : pySliceArg(hi0)
+        var st = st0 === undefined || st0 === null ? 1 : pySliceArg(st0)
         if (st === 0) { pyListErr("ValueError", "slice step cannot be zero") }
         var out = []
         var i
@@ -11564,7 +11611,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // the class's names. Twin of compOpen in python-to-llvm-ir.abnf.
     function compRunOwn(cl, exprT, out) {
         if (scopes[scopes.length - 1].__pycell === undefined) {
-            scopes.push({})
+            scopes.push({__pycomp: true})
             compRun(cl, 0, exprT, out)
             scopes.pop()
             return
@@ -11575,7 +11622,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         for (var k = 1; k < cl.length; k++) { own.push(cl[k]) }
         var saved = scopes
         scopes = pyClosureScopes()
-        scopes.push({})
+        scopes.push({__pycomp: true})
         try { compRun(own, 0, exprT, out) }
         finally { scopes = saved }
     }
@@ -11603,7 +11650,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // Like a def, it closes over a class body's cell, not its namespace.
             var g = newGenObject(function() { return undefined }, pyClosureScopes(), pyGenExpPlist, [], [], null)
             var own = pyClosureScopes()
-            own.push({__pyfn: true, __pyd: ""})
+            own.push({__pyfn: true, __pyd: "", __pycomp: true})
             g.gx = {cl: cl, exprT: exprT, src: src, lv: [], started: false, scopes: own}
             return g
         }
@@ -11617,7 +11664,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         scopes = g.gx.scopes
         var r = anytype
         try { r = gxNext(g.gx) }
-        catch (e) { g.st.done = true; throw e }
+        catch (e) { g.st.done = true; throw pyGenStopExc(e) }
         finally { scopes = saved }
         if (r === null) {
             g.st.done = true
@@ -11766,9 +11813,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 for (var bi = 0; bi < vals.length; bi++) { bv.push(pyByteVal(vals[bi])) }
                 vals = bv
             }
-            if (st === undefined || st === null || st === 1) {
+            if (st === undefined || st === null || pySliceArg(st) === 1) {
                 var ixc = sliceIdx(o.length, lo, hi, 1)
-                var at = ixc.length > 0 ? ixc[0] : (lo === undefined || lo === null ? 0 : (lo < 0 ? lo + o.length : (lo > o.length ? o.length : lo)))
+                var at = ixc.length > 0 ? ixc[0] : pySliceBound(lo === undefined || lo === null ? undefined : pySliceArg(lo), o.length, 0, o.length, 0)
                 var tail = o.slice(at + ixc.length)
                 listTruncate(o, at)
                 for (var a2 = 0; a2 < vals.length; a2++) { o.push(vals[a2]) }
@@ -11889,13 +11936,21 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (parts.length == 1 && !sawComma) { return parts[0] }
         return makeTupleLit(parts)
     }
-    // name := value: assign in the enclosing scope and yield the value.
+    // name := value: assign in the enclosing scope and yield the value. Inside
+    // a comprehension or generator expression the enclosing scope is the one
+    // around the outermost of them (a __pycomp scope), as PEP 572 has it.
     function makeWalrus(name, valT) {
         sbName(name)
         return function() {
             var v = anytype
             v = valT()
-            pySet(name, v)
+            var k = scopes.length
+            while (k > 1 && scopes[k - 1].__pycomp === true) { k-- }
+            if (k == scopes.length) { pySet(name, v); return v }
+            var saved = scopes
+            scopes = saved.slice(0, k)
+            try { pySet(name, v) }
+            finally { scopes = saved }
             return v
         }
     }
@@ -12323,7 +12378,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 var r = anytype
                 r = items[i + 1]()
                 res = binOp(items[i].cop, l, r)
-                if (!pytruthy(res)) { return res }
+                // The last link's value is the answer as it is, never tested.
+                if (i + 2 < items.length && !pytruthy(res)) { return res }
                 l = r
             }
             return res
@@ -12433,7 +12489,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                       "NameError", "UnboundLocalError", "AttributeError", "RuntimeError",
                       "StopIteration", "NotImplementedError", "RecursionError", "AssertionError",
                       "OSError", "ExceptionGroup", "OverflowError", "UnicodeError", "UnicodeDecodeError",
-                      "UnicodeEncodeError", "GeneratorExit", "MemoryError", "SystemExit", "ImportError", "ModuleNotFoundError",
+                      "UnicodeEncodeError", "GeneratorExit", "KeyboardInterrupt", "MemoryError", "SystemExit", "ImportError", "ModuleNotFoundError",
                       "BlockingIOError", "ChildProcessError", "ConnectionError", "BrokenPipeError", "ConnectionAbortedError", "ConnectionRefusedError", "ConnectionResetError", "FileExistsError", "FileNotFoundError", "InterruptedError", "IsADirectoryError", "NotADirectoryError", "PermissionError", "ProcessLookupError", "TimeoutError", "EOFError"]
     var pyExcParent = {}
     pyExcParent["Exception"] = "BaseException"
@@ -12463,6 +12519,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     pyExcParent["GeneratorExit"] = "BaseException"
     pyExcParent["MemoryError"] = "Exception"
     pyExcParent["SystemExit"] = "BaseException"
+    pyExcParent["KeyboardInterrupt"] = "BaseException"
     pyExcParent["ImportError"] = "Exception"
     pyExcParent["ModuleNotFoundError"] = "ImportError"
     pyExcParent["BlockingIOError"] = "OSError"
@@ -12677,27 +12734,48 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             else if (items[i].finalbody != undefined) { finallyT = items[i].finalbody }
             else if (items[i].handler != undefined) { clauses.push(items[i]) }
         }
+        // The else clause runs outside the handlers (they do not catch what it
+        // raises) and inside the finally. A finally entered by an exception runs
+        // while that exception is being handled, so one it raises takes it as
+        // its __context__.
         return function() {
             var savedChain = scopes.slice()
             var box = {sig: undefined}
             var threw = false
             try {
-                box.sig = tryT()
-            } catch (e) {
-                scopes = savedChain.slice()
-                if (!excIsUser(e)) { throw e }
-                threw = true
-                box.sig = runHandlers(clauses, e)
-            } finally {
+                try {
+                    box.sig = tryT()
+                } catch (e) {
+                    scopes = savedChain.slice()
+                    if (!excIsUser(e)) { throw e }
+                    threw = true
+                    box.sig = runHandlers(clauses, e)
+                }
                 scopes = savedChain.slice()
                 if (!threw && box.sig == undefined && elseT != null) { box.sig = elseT() }
-                if (finallyT != null) {
-                    var fr = finallyT()
-                    if (fr != undefined) { return fr }
-                }
+            } catch (e2) {
+                scopes = savedChain.slice()
+                if (finallyT == null) { throw e2 }
+                var fr2 = runFinally(finallyT, e2)
+                if (fr2 != undefined) { return fr2 }
+                throw e2
+            }
+            scopes = savedChain.slice()
+            if (finallyT != null) {
+                var fr = finallyT()
+                if (fr != undefined) { return fr }
             }
             return box.sig
         }
+    }
+    function runFinally(finallyT, e) {
+        var user = excIsUser(e)
+        if (user) { pyCurExc.push(e.v) }
+        var r = anytype
+        try { r = finallyT() } finally {
+            if (user) { pyCurExc.pop() }
+        }
+        return r
     }
     function runHandlers(clauses, e) {
         var isStar = clauses.length > 0 && clauses[0].star
@@ -13260,6 +13338,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         scopePut(o, name, v)
         if (o.__pydict != undefined) { pyInstDictPull(o) }
+        // BaseException's __cause__ setter also sets __suppress_context__. Twin of
+        // pySetAttrRaw in abnf/jsrt.go and lib/python-rt.metajs.
+        if (name == "__cause__" && clsIsSub(cls, hostGlobals["BaseException"])) { o.__suppress_context__ = true }
     }
     function pyattr(o, name, raw) {
         if (pyHooks > 0 && raw !== true && pyHasGetHook(o)) { return pyHookGet(o, name) }
@@ -13805,7 +13886,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // abnf/jsrt.go and pyUserFormat in lib/python-rt.metajs.
     function pyUserFormat(x, spec) {
         var mro = clsMRO(x.__class)
-        for (var i = 0; i < mro.length; i++) {
+        // A builtin class on the MRO formats with the builtin formatter.
+        for (var i = 0; i < mro.length && mro[i].__builtin !== true; i++) {
             if (!hasOwn(mro[i], "__format__")) { continue }
             var r = anytype
             r = pyCall(mro[i].__format__, [x, spec], null)

@@ -7997,6 +7997,418 @@ def s184():
         return __doc__
     check("moddoc2", f() is __doc__ and __doc__.split("\n")[0] == "Python full-syntax ratchet.")
 
+# ===== SECTION 186: try's else clause and finally's exception context =====
+# An exception raised in a try's else clause is not caught by that try's except
+# clauses but still runs its finally (also inside a with and a generator). A
+# finally entered by an exception runs while it is being handled, so one raised
+# there takes it as __context__; assigning __cause__ sets __suppress_context__.
+# Rows from CPython 3.14.
+def s186():
+    log = []
+    def f(n):
+        try:
+            pass
+        except Exception:
+            return "exc"
+        else:
+            if n > 0:
+                raise KeyError(n)
+            return "else-ret"
+        finally:
+            log.append("finally %d" % n)
+    def run(n):
+        try:
+            return f(n)
+        except KeyError as k:
+            return "caught %s" % k
+    check("tryelse1", [run(1), run(0)] == ["caught 1", "else-ret"] and log == ["finally 1", "finally 0"])
+    class CM:
+        def __enter__(self): return self
+        def __exit__(self, t, v, tb):
+            log.append(t.__name__ if t else None)
+            return True
+    def g():
+        with CM():
+            try:
+                pass
+            except KeyError:
+                log.append("wrong")
+            else:
+                raise KeyError("in-else")
+    def gen():
+        try:
+            yield 1
+        except ValueError:
+            yield 2
+        else:
+            raise KeyError("gen-else")
+        finally:
+            log.append("gen finally")
+    del log[:]
+    g()
+    got = []
+    try:
+        for v in gen():
+            got.append(v)
+    except KeyError as e:
+        got.append(str(e))
+    check("tryelse2", log == ["KeyError", "gen finally"] and got == [1, "'gen-else'"])
+    def helper():
+        raise TypeError("t")
+    ctx = []
+    try:
+        try:
+            raise KeyError("k2")
+        finally:
+            helper()
+    except TypeError as e:
+        ctx.append(repr(e.__context__))
+    try:
+        try:
+            raise KeyError("k3")
+        except KeyError:
+            pass
+        finally:
+            helper()
+    except TypeError as e:
+        ctx.append(repr(e.__context__))
+    try:
+        try:
+            raise KeyError("k4")
+        except KeyError:
+            raise ValueError("v4")
+        finally:
+            helper()
+    except TypeError as e:
+        ctx.append(repr(e.__context__) + " " + repr(e.__context__.__context__))
+    check("finctx1", ctx == ["KeyError('k2')", "None", "ValueError('v4') KeyError('k4')"])
+    e = ValueError("x")
+    sup = [e.__suppress_context__]
+    e.__cause__ = KeyError("c")
+    sup.append(e.__suppress_context__)
+    check("finctx2", sup == [False, True])
+
+# ===== SECTION 187: a right operand of a subclass type goes first =====
+# When the right operand's class is a proper subclass of the left one's and
+# overrides the reflected method, that method is tried first; a comparison's
+# reflection is tried first for any subclass. Rows from CPython 3.14.
+def s187():
+    class Base:
+        def __add__(self, o): return "Base.add"
+        def __mul__(self, o): return "Base.mul"
+        def __eq__(self, o): return "Base.eq"
+        def __lt__(self, o): return "Base.lt"
+        def __radd__(self, o): return "Base.radd"
+    class Sub(Base):
+        def __radd__(self, o): return "Sub.radd"
+        def __rmul__(self, o): return "Sub.rmul"
+        def __eq__(self, o): return "Sub.eq"
+        def __gt__(self, o): return "Sub.gt"
+    class Sub2(Base):
+        pass
+    class NI(Base):
+        def __radd__(self, o): return NotImplemented
+        def __gt__(self, o): return NotImplemented
+    class Ne(Base):
+        def __ne__(self, o): return "Ne.ne"
+    b, s, s2 = Base(), Sub(), Sub2()
+    check("rsub1", [b + s, b * s, b == s, b < s] == ["Sub.radd", "Sub.rmul", "Sub.eq", "Sub.gt"])
+    check("rsub2", [s + b, s * b, s == b, b + s2, b == s2, b < s2] == ["Base.add", "Base.mul", "Sub.eq", "Base.add", "Base.eq", "Base.lt"])
+    check("rsub3", [b + NI(), b < NI(), b != Ne()] == ["Base.add", "Base.lt", "Ne.ne"])
+
+# ===== SECTION 188: slice bounds past 2**53 and slice assignment's clamp =====
+# A slice bound or step of any int size selects what CPython's clamped bound
+# does; an int index that fits a C ssize_t is merely out of range. A slice
+# assignment starting below -len splices at 0. Rows from CPython 3.14.
+def s188():
+    l = [1, 2, 3]
+    s = "abcdef"
+    rows = []
+    for b in [4611686018427387904, 2**63, 10**20]:
+        rows.append([l[:b], l[-b:], s[:b], l[b:], l[1:b:2], s[-b:], l[::b], l[::-b]])
+    check("bigslice1", rows == [[[1, 2, 3], [1, 2, 3], "abcdef", [], [2], "abcdef", [1], [3]]] * 3)
+    msgs = []
+    for k in [2**53 + 1, -(2**63), 2**63]:
+        try:
+            l[k]
+        except IndexError as e:
+            msgs.append(str(e))
+    check("bigslice2", msgs == ["list index out of range", "list index out of range",
+                                "cannot fit 'int' into an index-sized integer"])
+    m = [1, 2, 3]
+    m[-10:0] = [0]
+    m2 = [1, 2, 3]
+    m2[-10**20:1] = [8]
+    m3 = [1, 2, 3]
+    m3[10**20:] = [9]
+    check("sliceset1", [m, m2, m3] == [[0, 1, 2, 3], [8, 2, 3], [1, 2, 3, 9]])
+
+# ===== SECTION 189: __index__ in slices, range, repetition and chr =====
+# An object whose class defines __index__ is an int wherever CPython asks for
+# an index: slice bounds, range arguments, a sequence repetition count and chr.
+# Rows from CPython 3.14.
+def s189():
+    class Num:
+        def __init__(self, v): self.v = v
+        def __index__(self): return self.v
+    n = Num(3)
+    m = [0, 1, 2, 3]
+    m[Num(1):n] = ["x"]
+    check("index1", [[0, 1, 2, 3][Num(1):n], "abcd"[Num(1):n], [0, 1, 2, 3][::Num(2)], m] ==
+          [[1, 2], "bc", [0, 2], [0, "x", 3]])
+    check("index2", [list(range(n)), list(range(Num(1), n)), list(range(0, Num(6), Num(2)))] == [[0, 1, 2], [1, 2], [0, 2, 4]])
+    check("index3", ["ab" * n, [0] * n, n * "xy", (1,) * n, chr(Num(65))] == ["ababab", [0, 0, 0], "xyxyxy", (1, 1, 1), "A"])
+    msgs = []
+    for f in [lambda: [1][1.0:], lambda: "a" * object(), lambda: chr(object())]:
+        try:
+            f()
+        except TypeError as e:
+            msgs.append(str(e))
+    check("index4", msgs == ["slice indices must be integers or None or have an __index__ method",
+                             "can't multiply sequence by non-int of type 'object'",
+                             "'object' object cannot be interpreted as an integer"])
+# ===== SECTION 190: map, filter, zip and enumerate are lazy =====
+# Each pulls from its source only as far as it is stepped, so they work over an
+# endless iterator, and building one runs nothing. Rows from CPython 3.14.
+def s190():
+    from itertools import count, islice
+    check("lazy1", next(map(lambda p: p + 1, count(5))) == 6 and next(filter(lambda p: p > 3, count(1))) == 4)
+    check("lazy2", list(islice(zip(count(1), count(10)), 2)) == [(1, 10), (2, 11)] and next(enumerate(count(7))) == (0, 7))
+    log = []
+    def gen(n):
+        for i in range(n):
+            log.append(i)
+            yield i
+    m = map(lambda p: p * 2, gen(3))
+    f = filter(lambda p: p > 0, gen(3))
+    e = enumerate(gen(3), 10)
+    z = zip(gen(3), gen(2))
+    check("lazy3", log == [])
+    check("lazy4", next(m) == 0 and log == [0] and next(f) == 1 and log == [0, 0, 1])
+    check("lazy5", next(e) == (10, 0) and next(z) == (0, 0) and list(z) == [(1, 1)])
+    check("lazy6", list(m) == [2, 4] and list(f) == [2] and list(e) == [(11, 1), (12, 2)] and iter(m) is m)
+
+# ===== SECTION 191: an exception class whose __init__ skips super() =====
+# BaseException.__new__ keeps the constructor's arguments as args, so they are
+# there although __init__ never passes them on. Rows from CPython 3.14.
+def s191():
+    class NoSuper(Exception):
+        def __init__(self, x, y):
+            self.x = x
+    e = NoSuper(1, 2)
+    check("excargs1", e.args == (1, 2) and str(e) == "(1, 2)" and repr(e) == "NoSuper(1, 2)" and e.x == 1)
+    class Kw(ValueError):
+        def __init__(self, a, b=5):
+            self.b = b
+    k = Kw(1, b=7)
+    check("excargs2", k.args == (1,) and str(k) == "1" and k.b == 7)
+    class Zero(Exception):
+        def __init__(self):
+            pass
+    try:
+        raise NoSuper("p", "q")
+    except NoSuper as err:
+        check("excargs3", err.args == ("p", "q") and Zero().args == () and repr(Zero()) == "Zero()")
+
+# ===== SECTION 192: int and float subclasses in %-formatting and format() =====
+# An int subclass instance formats as its int value, a float subclass instance
+# as its float value; %x of a float subclass is still refused. Rows from
+# CPython 3.14.
+def s192():
+    class Money(int):
+        pass
+    class F(float):
+        pass
+    m = Money(5)
+    f = F(2.5)
+    check("subfmt1", "%d %x %5.1f %o %e" % (m, m, m, m, m) == "5 5   5.0 5 5.000000e+00")
+    check("subfmt2", "%d %5.2f %g %x %c" % (f, f, f, Money(255), Money(65)) == "2  2.50 2.5 ff A")
+    check("subfmt3", format(m, ">6") == "     5" and format(m, "x") == "5" and format(f, ".3f") == "2.500")
+    check("subfmt4", "{:>6}|{:.2f}|{:x}".format(m, f, m) == "     5|2.50|5" and f"{m:04d}|{f:+.1f}" == "0005|+2.5")
+    try:
+        "%x" % f
+        check("subfmt5", False)
+    except TypeError as e:
+        check("subfmt5", str(e) == "%x format: an integer is required, not F")
+
+# ===== SECTION 193: an unknown method on a builtin raises AttributeError =====
+# Calling a method a builtin type does not have is a catchable AttributeError
+# with CPython's text, for str, list, dict, set and None alike. Rows from
+# CPython 3.14.
+def s193():
+    msgs = []
+    for v in ["x", [], {}, {1}, None, ()]:
+        try:
+            v.nope()
+        except AttributeError as e:
+            msgs.append(str(e))
+    check("noattr1", msgs == ["'str' object has no attribute 'nope'", "'list' object has no attribute 'nope'",
+                              "'dict' object has no attribute 'nope'", "'set' object has no attribute 'nope'",
+                              "'NoneType' object has no attribute 'nope'", "'tuple' object has no attribute 'nope'"])
+    check("noattr2", hasattr("x", "upper") and not hasattr([], "nope") and getattr([], "nope", 5) == 5)
+
+# ===== SECTION 194: StopIteration inside a generator becomes RuntimeError =====
+# PEP 479: a StopIteration leaving a generator's body is replaced by a
+# RuntimeError caused by it, so it cannot silently end the loop over the
+# generator. A return still ends it normally. Rows from CPython 3.14.
+def s194():
+    def pairs(xs):
+        it = iter(xs)
+        for a in it:
+            yield a, next(it)
+    try:
+        list(pairs([1, 2, 3]))
+        check("pep479a", False)
+    except RuntimeError as e:
+        check("pep479a", str(e) == "generator raised StopIteration" and type(e.__cause__) is StopIteration
+              and e.__suppress_context__ and e.__context__ is e.__cause__)
+    check("pep479b", list(pairs([1, 2, 3, 4])) == [(1, 2), (3, 4)])
+    def g2():
+        yield 1
+        raise StopIteration("x")
+    seen = []
+    try:
+        for v in g2():
+            seen.append(v)
+    except RuntimeError as e:
+        seen.append(repr(e.__cause__))
+    check("pep479c", seen == [1, "StopIteration('x')"])
+    it = iter([1])
+    try:
+        list(next(it) for _ in range(3))
+        check("pep479d", False)
+    except RuntimeError as e:
+        check("pep479d", str(e) == "generator raised StopIteration")
+    def g3():
+        yield 1
+        return 5
+    gen = g3()
+    next(gen)
+    try:
+        next(gen)
+    except StopIteration as e:
+        check("pep479e", e.value == 5 and list(g3()) == [1])
+
+# ===== SECTION 195: containers compare their elements by identity first =====
+# `in`, count, index, remove and a container's == and dict/set keys ask
+# `x is y or x == y`, so the one NaN object and an instance whose __eq__ says
+# no still find themselves; two distinct NaNs do not. Rows from CPython 3.14.
+def s195():
+    nan = float("nan")
+    class N:
+        def __eq__(self, o):
+            return False
+        __hash__ = object.__hash__
+    n = N()
+    def rem(x):
+        l = [1, x, 2]
+        l.remove(x)
+        return len(l)
+    check("ident1", nan in [nan] and [nan] == [nan] and [nan, 1].count(nan) == 1 and [1, nan].index(nan) == 1 and rem(nan) == 2)
+    check("ident2", nan in (nan,) and (nan,) == (nan,) and {"a": nan} == {"a": nan} and [[nan]] == [[nan]])
+    s = {nan}
+    s.add(nan)
+    d = {}
+    d[nan] = 1
+    d[nan] = 2
+    check("ident3", len(s) == 1 and len(d) == 1 and d[nan] == 2 and nan in d and nan in {nan})
+    check("ident4", n in [n] and [n] == [n] and [n, 1].count(n) == 1 and [1, n].index(n) == 1 and rem(n) == 2 and n in (n,))
+    check("ident5", not (n == n) and not (nan == nan) and float("nan") not in [float("nan")] and len({float("nan"), float("nan")}) == 2)
+
+# ===== SECTION 196: int and float dict and set keys at large magnitudes =====
+# An int and a float are one key exactly when they are equal, which beyond
+# 2**53 has to be decided exactly; an intersection keeps the members of the
+# set it walks. Rows from CPython 3.14.
+def s196():
+    rows = []
+    for i, f in [(2**53 + 1, 2.0**53), (2**64, 2.0**64), (10**20, 1e20), (2**100 + 1, 2.0**100), (-2**70, -2.0**70)]:
+        d = {i: "int"}
+        d[f] = "float"
+        rows.append((len(d), d[i], len({i, f}), f in {i}, i in {f}, f in {i: 0}, i in {f: 0}))
+    check("bigkey1", rows[0] == (2, "int", 2, False, False, False, False) and rows[3] == rows[0])
+    check("bigkey2", rows[1] == (1, "float", 1, True, True, True, True) and rows[2] == rows[1] and rows[4] == rows[1])
+    d = {2.0**64: "a"}
+    d[2**64] = "b"
+    check("bigkey3", list(d.items()) == [(2.0**64, "b")] and type(list(d)[0]) is float)
+    a = {1.0} & {1}
+    b = {1} & {1.0, 5}
+    c = {1.0}.intersection([1])
+    check("bigkey4", [type(x).__name__ for x in [list(a)[0], list(b)[0], list(c)[0]]] == ["int", "int", "int"])
+
+# ===== SECTION 197: a walrus in a comprehension binds in the enclosing scope =====
+# PEP 572: the target of := inside a list comprehension or a generator
+# expression binds in the scope around it - the function, or the module.
+# Rows from CPython 3.14.
+S197list = [(s197m := v) for v in (1, 2, 3)]
+S197sum = sum((s197g := v) for v in (4, 5))
+def s197():
+    def w2():
+        g = list((t := v) for v in [1, 2])
+        return g, t
+    check("walrus1", w2() == ([1, 2], 2))
+    def w3():
+        if any((hit := x) > 1 for x in [0, 1, 5, 7]):
+            return hit
+        return None
+    check("walrus2", w3() == 5)
+    check("walrus3", S197list == [1, 2, 3] and s197m == 3 and S197sum == 9 and s197g == 5)
+    check("walrus4", max((mm := x) for x in [4, 9, 2]) == 9 and mm == 2)
+
+# ===== SECTION 198: the data model's result checks =====
+# __bool__ must answer a bool and __len__ a non-negative index-sized int;
+# pow() with three arguments reaches __pow__ and __rpow__; a class C3 cannot
+# order is refused; KeyboardInterrupt is a BaseException. A comparison's own
+# answer is not tested for truth. Rows from CPython 3.14.
+def s198():
+    class B1:
+        def __bool__(self):
+            return 1
+    class L1:
+        def __len__(self):
+            return -1
+    class L2:
+        def __len__(self):
+            return 2**70
+    out = []
+    for f in [lambda: bool(B1()), lambda: len(L1()), lambda: len(L2()), lambda: not L1()]:
+        try:
+            out.append(f())
+        except (TypeError, ValueError, OverflowError) as e:
+            out.append(type(e).__name__ + ": " + str(e))
+    check("dmodel1", out == ["TypeError: __bool__ should return bool, returned int", "ValueError: __len__() should return >= 0",
+                             "OverflowError: cannot fit 'int' into an index-sized integer", "ValueError: __len__() should return >= 0"])
+    class P:
+        def __pow__(self, o, m=None):
+            return ("pow", o, m)
+        def __rpow__(self, o, m=None):
+            return ("rpow", o, m)
+    check("dmodel2", pow(P(), 2, 5) == ("pow", 2, 5) and pow(2, P(), 5) == ("rpow", 2, 5) and pow(P(), 3) == ("pow", 3, None))
+    class X:
+        pass
+    class Y(X):
+        pass
+    try:
+        pow(2, 3, Y())
+        check("dmodel3", False)
+    except TypeError as e:
+        check("dmodel3", str(e) == "unsupported operand type(s) for ** or pow(): 'int', 'int', 'Y'")
+    try:
+        class Z(X, Y):
+            pass
+        check("dmodel4", False)
+    except TypeError as e:
+        check("dmodel4", str(e) == "Cannot create a consistent method resolution order (MRO) for bases X, Y")
+    check("dmodel5", issubclass(KeyboardInterrupt, BaseException) and not issubclass(KeyboardInterrupt, Exception))
+    calls = []
+    class R:
+        def __bool__(self):
+            calls.append(1)
+            return False
+    class E:
+        def __eq__(self, o):
+            return R()
+    check("dmodel6", type(E() == 3) is R and calls == [])
+
 def main():
     s01() # SECTION-CALL 01
     s02() # SECTION-CALL 02
@@ -8146,5 +8558,18 @@ def main():
     s161() # SECTION-CALL 161
     s181() # SECTION-CALL 181
     s184() # SECTION-CALL 184
+    s186() # SECTION-CALL 186
+    s187() # SECTION-CALL 187
+    s188() # SECTION-CALL 188
+    s189() # SECTION-CALL 189
+    s190() # SECTION-CALL 190
+    s191() # SECTION-CALL 191
+    s192() # SECTION-CALL 192
+    s193() # SECTION-CALL 193
+    s194() # SECTION-CALL 194
+    s195() # SECTION-CALL 195
+    s196() # SECTION-CALL 196
+    s197() # SECTION-CALL 197
+    s198() # SECTION-CALL 198
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]
