@@ -102,14 +102,6 @@ not change the renderer.
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-885 bash `=~`: compiler `+` over an empty-matching body; POSIX leftmost-longest · P2 · SH · IN PROGRESS (SH worker, round 19) [V CORE worker]
-bash 5.3. (1) WRONG, compiler only (interp right): `[[ "" =~ (b?)+ ]]`, `[[ aa =~ ^(a?(b?)+b?)+$ ]]`, `[[ x =~ ^x(a*)+$ ]]` → bash
-`Y`, llvm.Run/native `N 1`. bash-rt.c guards the FIRST `+` iteration with PROG; regex.js emits one copy plus a star — route `+`
-through bash-rt.c's existing `{1,}` path. (2) WRONG, both halves: bash `=~` is POSIX leftmost-LONGEST, ours leftmost-first:
-`[[ ab =~ (a|ab) ]]` → bash `ab`, ours `a`; `[[ xyz =~ (x|xy)(z|yz) ]]` → bash `xy z`, ours `x yz`; `[[ abab =~ (ab|a)(bab)? ]]`
-→ bash `abab|a|bab`, ours `ab|ab|`. The whole match must be the longest at the leftmost start (subexpression rule per POSIX
-/ macOS regex) — measure the cost; DECLINE part (2) with evidence if it needs a separate engine.
-
 # C — C subset
 
 # CORE — MetaJS, the engines, shared runtime, tooling
@@ -905,6 +897,7 @@ T-880 ruby/js/typescript/go compilers: errors still on stdout under -qq — DONE
 T-882 ruby: a `self.new` override never runs; inherited / included hooks never fire — DONE 93919050 (C.new dispatches like a class method when the program defines a new; class-method super walks up to Class's own new/hooks; inherited/included/extended/prepended/method_added fire in every engine incl. the ClassMethods idiom; also fixed: 'yield if cond' parse, interp super with keyword/splat args, bare name in class methods. DECLINED: "str".extend(M) — builtin values have no singleton table; niche)
 T-884 ruby: `private_class_method :new` (Singleton idiom); `Class.new(P) { … }` — DONE 5ad62e67 (private_class_method / public_class_method in every engine incl. inherited and reopened classes and the Singleton idiom; CONST = Class.new(Super) { body } read as a class declaration; also fixed: send of a private method in the compiled engines, public_send of a private method now raises, respond_to? on Class/Module objects. DECLINED: an anonymous Class.new held in a local (the compiler builds method tables from the class name at compile time); the class name being set before inherited runs (needs nil-name classes in all three runtimes); Integer.respond_to?(:sqrt) false — builtin classes' own class methods are not in the respond tables, rare)
 T-883 regex step limit gives a wrong answer; engine-dependent regexp error text; test.sh arg parsing — DONE 1763c087 (ERE-only memoized backtracking — RE2 BitState idea — in regex.js, the Go twin and bash-rt.c: nested-loop patterns answer as bash 5.3, memo forced on from step 0 byte-identical on 6×2800 random cases, other dialects untouched; the security-review off-by-one in bash-rt.c re_seen fixed and checked with -fsanitize=array-bounds at the exact 8388608-bit boundary; js/ts step-limit error text agrees across engines; test.sh reads args as JSON strings. Residual: the old cap can still fire on subjects past ~262k chars, where the memo starts after the linear budget)
+T-885 bash `=~`: compiler `+` over an empty-matching body; POSIX leftmost-longest — PARTIAL→closed 6f0b9836 — compiler + over an empty-matching body takes the {1,} path; the ERE match is the longest at the leftmost start in all engines (RX_MATCHL, last in the dispatch chain: bash/js/python bench flat, a regex-only bash microbenchmark +36% for successful matches); also fixed: blanks and ; & < > inside ( ) of an =~ regex belong to the regex. DECLINED: POSIX's subexpression rule for how groups split the longest match ((x|xy)(z|yz) on xyz → bash xy|z, ours x|yz) — it applies per iteration and over uncaptured parts, needs comparing whole parse trees, which the visit memo cannot prune soundly; the fix is a POSIX tagged-NFA engine (Okui-Suzuki / Laurikari) in regex.js, the Go twin and bash-rt.c
 
 # Settled — do not re-open
 
