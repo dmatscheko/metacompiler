@@ -86,7 +86,7 @@ not change the renderer.
 
 # GO — Go  (oracle: `go run`)
 
-### T-887 go: replace the gc-imitating FMA analysis with one source-shape rule via `llvm.fmuladd` · P2 · GO · OPEN [V]
+### T-887 go: replace the gc-imitating FMA analysis with one source-shape rule via `llvm.fmuladd` · P2 · GO · IN PROGRESS (GO worker, round 15) [V]
 The fusion decision now copies parts of gc's optimiser: whole-function constant
 analysis, an unreassigned product local fused like gc's SSA value, per-part negation
 tracking for complex values (languages/lib/go-constfold.js, both Go grammars,

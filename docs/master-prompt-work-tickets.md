@@ -158,6 +158,9 @@ Rules:
   Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 - Never touch the main checkout (/Users/dma/Eigenes/Development/metacompiler): no
   stash, reset, checkout, clean or commit there. Do not run tests/gates.sh.
+- To wait for a background job, wait on its PID or its output file. Never loop on
+  `pgrep -f '<pattern>'`: the loop's own command line matches and it never ends. Before
+  your final report, stop every background job and loop you started.
 - Do not spawn subagents. Do not hand back while work is in progress: your worktree
   is deleted when you finish. Before your final report, `git rebase main` again (main
   may have moved), resolve conflicts (for a conflicted .ll: take either side, then
