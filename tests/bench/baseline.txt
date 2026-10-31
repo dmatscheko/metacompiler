@@ -5,10 +5,10 @@
 # tests/bench.sh --record when you land an intended change, and say in the commit
 # message which rows moved and why.
 # recorded with the runtime.c of the commit that wrote this line, 5 draws, min of 3 runs.
-# recorded at commit 0c58d764, 5 draws, min of 3 runs.
-bash       46727717         -          -
+# recorded at commit 3aa7c22e, 5 draws, min of 3 runs.
+bash       47844545         -          -
 batch      34138696         -          -
-c          10983473         -          -
+c          11268659         -          -
 csharp     4216815177       11747664   98
 dart       557061747        6468800    5
 go         89863253         10680208   1
