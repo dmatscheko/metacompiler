@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-883** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-884** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -112,12 +112,14 @@ not change the renderer.
 
 # CORE — MetaJS, the engines, shared runtime, tooling
 
-### T-880 ruby/js/typescript/go compilers: errors still on stdout under -qq · P3 · CORE · IN PROGRESS (CORE worker, round 12) [V CORE worker]
-Follow-up of the -qq channel fix: still `println` — js-to-llvm-ir.abnf `fail` (~3368) and `buildErr` (~7724, 7813, 8023,
-8537); typescript-to-llvm-ir.abnf `fail` (~2320), `buildErr` (~6757, 6840, 7038, 7470); ruby-to-llvm-ir.abnf `rxFail`
-(~2526), `fail` (~2683), `buildErr` (~6330, 8977); go-to-llvm-ir.abnf `fail` (~5144, 5154, 7214), `buildErr` (~7354).
-Also lib/regex.js default `rxFail` (~155, `println("regexp error: ")`) — compiled into eight layer-2 .ll files, regenerate
-with gen-all; bash-interpreter and dart-interpreter do not override it. Add -qq SHOULD FAIL rows like the existing ones.
+### T-883 regex step limit gives a wrong answer; engine-dependent regexp error text; test.sh arg parsing · P3 · CORE · IN PROGRESS (CORE worker, round 13) [V CORE worker]
+(1) WRONG: bash `[[ $s =~ ^(a+)+$ ]]` on a 58-char "aaa…ab" → real bash 1 (no match, a POSIX ERE engine does not backtrack
+exponentially); our interpreter hits the regex step limit and exits 1 with an error. An ERE (posix flag) match has no
+backreferences, so it can run without backtracking (NFA/DFA simulation) — at least for the bash `e` dialect. (2) js: a regexp
+hitting the step limit reports "js runtime error: regexp: step limit exceeded" under llvm.Run but "regexp error: step limit
+exceeded" natively (js-rt.metajs does not override rxFail as java/kotlin/php do) — make the halves agree. (3) tooling:
+test.sh's launch.json args parser (~938) does not JSON-unescape args and truncates an arg containing `]`, so a `-code` row
+with `[[ … ]]` or `\"` cannot be written.
 
 ### T-184 dart: `IndexError` vs `RangeError` text for `[1,2,3][7]` · P3 · DA · BLOCKED - needs a Dart VM to settle [U spec-only]
 A reviewer argued the VM prints `RangeError (index): Invalid value: Not in inclusive
@@ -906,6 +908,7 @@ T-845 compiler grammars: `fail` prints on stdout, so `-qq` swallows compile erro
 T-877 ruby compiler: super misses and into modules; multi-argument include; run-time private — DONE 679b977c (js_rsuper walks __super and raises the rescuable NoMethodError on a miss; super into an included module's method via hidden $sup keys — also fixed D>M>Base#f ordering and a prepend stack overflow; super inside a module method continues through self's ancestors in the interp; include/prepend/extend with several modules applied last-first; run-time send(:private/:protected/:public) in all engines, gated in the compiler like arity tracking)
 T-879 go: a complex multiply with a negated part fuses the wrong product — DONE a4a6a990 (a product with a run-time negated factor becomes FNMULD, so gc fuses the other product — real and imaginary parts tracked per part through complex/real/imag/unary minus/locals; complex v *= x goes through the same fusion; generated 96-function probe 33–42 wrong → 4–10, none regressed. DECLINED, same class as T-878: a conjugate through an inlined call (z * cmplx.Conj(w)) needs gc's inliner, and gc constant-folding a slice literal read back in the same function needs its value tracking)
 T-881 ruby: super into builtin methods; `==` result coerced to a boolean — DONE 86ea9dcb (super reaches builtin Object/Kernel/Comparable/Exception methods on user instances in all engines, Object#initialize arity per MRI; a user == keeps its value through the operator and send, != negates it; interp anonymous * / ** parameters; Module#private etc. with an explicit receiver raise MRI's error; compiled *_instance_methods follow run-time visibility. DECLINED: a user-defined #frozen? is never called by the interpreter — exotic)
+T-880 ruby/js/typescript/go compilers: errors still on stdout under -qq — DONE 2455a7e7 (js/ts/ruby/go fail and buildErr to stderr, js/ts hand-written errors through fail with the right prefix, regex.js default rxFail to stderr with the eight layer-2 .ll regenerated; 5 -qq SHOULD FAIL rows)
 
 # Settled — do not re-open
 
