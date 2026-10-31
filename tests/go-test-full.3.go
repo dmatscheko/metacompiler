@@ -1173,7 +1173,8 @@ func s127() {
 // float product written as a direct operand of + or - fuses, through parentheses
 // and unary minus, in v += x*y, for float32 too, but not through an explicit
 // float64() conversion. With a product on both sides the right one fuses. A
-// product held in a local does not fuse; one of locals with known values does.
+// product held in a local does not fuse; a product of locals does, whatever values
+// gc knows they hold.
 // A complex multiply is a*c - b*d and a*d + b*c, each fusing its right product,
 // in v *= w too. Integers do not fuse. go run on arm64 agrees except where gc's
 // optimiser decides otherwise, which the spec permits: fma128c, d, e, g, h and i
