@@ -106,13 +106,6 @@ not change the renderer.
 
 # CORE — MetaJS, the engines, shared runtime, tooling
 
-### T-886 gates red: metajs-lint findings in js-builtins.js; java/kotlin CCE-message duplicate · P1 · CORE · IN PROGRESS (CORE worker, round 14) [V master]
-`tests/gates.sh` on main b29e3bcf: FAILED shape-scan metajs-lint. (1) metajs-lint: `exponent-literal` js-builtins.js:996, 1370,
-1377 (`8.64e15`); `frozen-builtin` js-builtins.js:514, 515, 1584, 1608 (`.splice(`) — rewrite in the MetaJS dialect (see the
-lint's rule text for why each is a gap) with no behaviour change. (2) shape-scan: a NEW cross-language duplicate,
-java-rt:jvCceMsg / kotlin-rt:ktCceMsg (16 lines) — share one body (a lib file both layer-2 sources import, like the existing
-shared libs) so shape-scan is back at its recorded ratchet (1 group / 6 recoverable lines: jvFloFix/k1FloFix is the old one).
-
 ### T-184 dart: `IndexError` vs `RangeError` text for `[1,2,3][7]` · P3 · DA · BLOCKED - needs a Dart VM to settle [U spec-only]
 A reviewer argued the VM prints `RangeError (index): Invalid value: Not in inclusive
 range 0..2: 7` (a plain RangeError); the current engines print the IndexError form
@@ -905,6 +898,7 @@ T-882 ruby: a `self.new` override never runs; inherited / included hooks never f
 T-884 ruby: `private_class_method :new` (Singleton idiom); `Class.new(P) { … }` — DONE 5ad62e67 (private_class_method / public_class_method in every engine incl. inherited and reopened classes and the Singleton idiom; CONST = Class.new(Super) { body } read as a class declaration; also fixed: send of a private method in the compiled engines, public_send of a private method now raises, respond_to? on Class/Module objects. DECLINED: an anonymous Class.new held in a local (the compiler builds method tables from the class name at compile time); the class name being set before inherited runs (needs nil-name classes in all three runtimes); Integer.respond_to?(:sqrt) false — builtin classes' own class methods are not in the respond tables, rare)
 T-883 regex step limit gives a wrong answer; engine-dependent regexp error text; test.sh arg parsing — DONE 1763c087 (ERE-only memoized backtracking — RE2 BitState idea — in regex.js, the Go twin and bash-rt.c: nested-loop patterns answer as bash 5.3, memo forced on from step 0 byte-identical on 6×2800 random cases, other dialects untouched; the security-review off-by-one in bash-rt.c re_seen fixed and checked with -fsanitize=array-bounds at the exact 8388608-bit boundary; js/ts step-limit error text agrees across engines; test.sh reads args as JSON strings. Residual: the old cap can still fire on subjects past ~262k chars, where the memo starts after the linear budget)
 T-885 bash `=~`: compiler `+` over an empty-matching body; POSIX leftmost-longest — PARTIAL→closed 6f0b9836 — compiler + over an empty-matching body takes the {1,} path; the ERE match is the longest at the leftmost start in all engines (RX_MATCHL, last in the dispatch chain: bash/js/python bench flat, a regex-only bash microbenchmark +36% for successful matches); also fixed: blanks and ; & < > inside ( ) of an =~ regex belong to the regex. DECLINED: POSIX's subexpression rule for how groups split the longest match ((x|xy)(z|yz) on xyz → bash xy|z, ours x|yz) — it applies per iteration and over uncaptured parts, needs comparing whole parse trees, which the visit memo cannot prune soundly; the fix is a POSIX tagged-NFA engine (Okui-Suzuki / Laurikari) in regex.js, the Go twin and bash-rt.c
+T-886 gates red: metajs-lint findings in js-builtins.js; java/kotlin CCE-message duplicate — DONE 4b77ebef (js-builtins.js rewritten into the MetaJS lint subset — __dMaxMs constant, __arrDrop helper — lint 7 → 0; the four CCE-message bodies share lib/java-cce.js — shape-scan back at its recorded 1 group / 6 lines; no rule or ratchet loosened, node/java 4-leg probes agree)
 
 # Settled — do not re-open
 
