@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-955** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-957** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -286,30 +286,16 @@ not change the renderer.
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-921 kotlin: `==` on `Any`-typed boxed Doubles uses IEEE equality instead of `equals` · P1 · KT · IN PROGRESS (KT worker, round 10) [V]
-Incomplete part of T-805. `val a: Any = Double.NaN; val b: Any = Double.NaN; val z: Any = -0.0; val y: Any = 0.0;
-println("${a == b} ${z == y}")` → Kotlin `true false` (for a static type other than Float/Double, kotlinc emits
-`Intrinsics.areEqual`, which is `equals`; checked with java + kotlin-stdlib 2.2.21); all legs `false true`. Static
-`Double?` == `Double?` stays IEEE and is right. Files: the `==` lowering in both kotlin grammars (js_ktequals when either static
-type is not Float/Double).
+### T-955 kotlin: fail-fast iteration is missing for the other higher-order functions and for sets · P2 · KT · OPEN [V]
+Found by the KT worker, round 10. `val ml = mutableListOf(1,2,3); ml.filter { ml.add(9); true }` (also `any`, `count`, `all`,
+`none`, `sumOf`, `first { }` and the rest that iterate) runs to the end; the JVM throws ConcurrentModificationException for each.
+`val s = mutableSetOf(1,2); s.forEach { s.add(it + 10) }` and `s.map { … }` likewise: JVM CME, ours none. for loops, list
+forEach / forEachIndexed / map and map views already check (kIterN0 / ktIterStart / k4IterStart in the three engines).
 
-### T-922 kotlin: no ConcurrentModificationException for map iteration and for list higher-order functions · P1 · KT · IN PROGRESS (KT worker, round 10) [V]
-Incomplete part of T-814 / T-846 / T-857. All legs print "none" where the JVM throws CME: `for (k in mp.keys) if (k == 1)
-mp[3] = 3`; `for ((k, v) in mp2) if (k == 1) mp2.remove(2)`; `ml.forEach { if (it == 1) ml.add(5) }`; `ml.forEachIndexed {…}`;
-`ml.map { if (it == 1) ml.add(5); it }`; `for (x in ml.withIndex()) …add…` (LinkedHashMap / ArrayList behaviour confirmed with java
-24). Replacing an existing key's value (`mp[1] = 9` while iterating values) correctly does not throw. Files: map mutators must
-bump modCount; forEach / forEachIndexed / map / withIndex must check it (lib/kotlin-rt.metajs, abnf/jsrtkotlin.go, the
-interpreter).
-
-### T-923 kotlin: `as` to a collection interface never throws ClassCastException · P1 · KT · IN PROGRESS (KT worker, round 10) [V]
-Incomplete part of T-810. `val lst: Any = listOf(1, 2); val str: Any = "s"`; `lst as Map<*, *>` → all legs `[1, 2]`;
-`str as List<*>` → `s`; `lst as Set<*>` → `[1, 2]`; Kotlin/JVM throws ClassCastException for all three. `lst is Map<*, *>` is
-correctly false and `lst as Number` throws, so `as` must use the same type test as `is` for collection types. Files: the `as`
-lowering / js_ktas in both kotlin grammars, abnf/jsrtkotlin.go, lib/kotlin-rt.metajs.
-
-### T-924 kotlin: multi-index `operator get/set` and `MutableIterator.remove()` are missing · P3 · KT · IN PROGRESS (KT worker, round 10) [V finder only]
-`g[r, c] = v` → "index with more than one argument not implemented" in both halves; `it.remove()` on a MutableIterator → "unknown
-method 'remove'". Both loud.
+### T-956 kotlin: `map.keys.remove(k)` / `map.values.remove(v)` change only the view · P2 · KT · OPEN [V]
+Found by the KT worker, round 10. `val m = mutableMapOf(1 to "a", 2 to "b"); m.keys.remove(1); println(m)` → JVM `{2=b}`,
+every engine `{1=a, 2=b}`; same for `m.values.remove("a")` and `m.entries.removeIf { … }`. The view's iterator `remove()`
+already reaches the map (the `__wsrc` link); the view's own remove/removeAll/retainAll/removeIf/clear should too.
 
 # GO — Go  (oracle: `go run`)
 
@@ -1328,6 +1314,10 @@ T-883 regex step limit gives a wrong answer; engine-dependent regexp error text;
 T-885 bash `=~`: compiler `+` over an empty-matching body; POSIX leftmost-longest — PARTIAL→closed 6f0b9836 — compiler + over an empty-matching body takes the {1,} path; the ERE match is the longest at the leftmost start in all engines (RX_MATCHL, last in the dispatch chain: bash/js/python bench flat, a regex-only bash microbenchmark +36% for successful matches); also fixed: blanks and ; & < > inside ( ) of an =~ regex belong to the regex. DECLINED: POSIX's subexpression rule for how groups split the longest match ((x|xy)(z|yz) on xyz → bash xy|z, ours x|yz) — it applies per iteration and over uncaptured parts, needs comparing whole parse trees, which the visit memo cannot prune soundly; the fix is a POSIX tagged-NFA engine (Okui-Suzuki / Laurikari) in regex.js, the Go twin and bash-rt.c
 T-886 gates red: metajs-lint findings in js-builtins.js; java/kotlin CCE-message duplicate — DONE 4b77ebef (js-builtins.js rewritten into the MetaJS lint subset — __dMaxMs constant, __arrDrop helper — lint 7 → 0; the four CCE-message bodies share lib/java-cce.js — shape-scan back at its recorded 1 group / 6 lines; no rule or ratchet loosened, node/java 4-leg probes agree)
 T-887 go: replace the gc-imitating FMA analysis with one source-shape rule via `llvm.fmuladd` — DONE 79221623 (a float product that is a direct operand of +/- fuses, also through parens, unary minus and v += x*y; with two products the right one; nothing else; compiler emits llvm.fmuladd with no contract flags, llvm.Run computes math.FMA / correctly rounded binary32; complex multiply fuses each part's right product; ~540 net lines of gc imitation deleted; fma128c/d/e/g/h/i now assert the rule's answer, by-design divergence from go run on arm64 in manual 7.9; 8400-line generated probe 4 legs agree)
+T-921 kotlin: `==` on `Any`-typed boxed Doubles uses IEEE equality instead of `equals` — DONE 1ab27940 26c609c7 (Any/Number/T-typed operands compare by equals; a smart cast to Double/Float found in the source keeps IEEE)
+T-922 kotlin: no ConcurrentModificationException for map iteration and for list higher-order functions — DONE da1d17ac (map mutators bump modCount in place, views and withIndex linked to their source; for loops and forEach/forEachIndexed/map check it; the rest is T-955)
+T-923 kotlin: `as` to a collection interface never throws ClassCastException — DONE 66bbc58e (List/Set/Map/Collection/Iterable and Mutable* in both cast tables, JVM CCE text)
+T-924 kotlin: multi-index `operator get/set` and `MutableIterator.remove()` are missing — DONE 936a249a (multi-index operator get/set incl. compound assignment; iterator remove() reaches the map behind a view; widen2 row now passes)
 
 # Settled — do not re-open
 
