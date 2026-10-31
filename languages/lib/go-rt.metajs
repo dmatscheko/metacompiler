@@ -1661,7 +1661,8 @@ function js_gocellset(c, v) { return goCellStore(c, v) }
 // js_goaddr(x, k, pcls, as): &x.f / &x[i]. A cell of class pcls over the struct that
 // holds field k (the embedded one, for a promoted field) or over x's backing array
 // at the element's offset, carrying as for errors.As; the value itself when it is
-// a reference already, as makeAddrVar decides for a variable. A package variable
+// a reference already, as makeAddrVar decides for a variable (a "$cx" complex is a
+// scalar and gets the cell). A package variable
 // gets the scope cell &name would. Twins: js_goaddr in abnf/jsrtgolang.go, goAddrOf
 // in go-interpreter.abnf.
 function js_goaddr(x0, k, pcls, as) {
@@ -1708,7 +1709,7 @@ function js_goaddr(x0, k, pcls, as) {
         var vc = goClassOf(v)
         if (vc === undefined) { return v }
         var vn = goStrOf(vc.__name)
-        if (vn != "$ptr" && vn != "$sl") { return v }
+        if (vn != "$ptr" && vn != "$sl" && vn != "$cx") { return v }
     }
     var cell = {__class: pcls, h: h, k: key}
     if (as !== undefined) { cell.as = as }

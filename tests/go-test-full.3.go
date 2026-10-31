@@ -1428,6 +1428,32 @@ func s133() {
 	check("convcx133", fmt.Sprint(h, h6, g, cc) == "(6+0i) (6+0i) 1.6777216e+07 (2+0i)")
 }
 
+// ===== SECTION 134: a pointer to a complex field or element =====
+// A complex is a scalar, so &s.c and &a[i] of a complex type address the field and
+// the element: a store through the pointer reaches s and a. The expected values
+// are go run's.
+type s134 struct {
+	x int
+	c complex128
+	h complex64
+}
+
+func s134f() {
+	s := s134{}
+	pc := &s.c
+	*pc = 4
+	ph := &s.h
+	*ph = 2i
+	*ph += 1
+	ca := []complex128{1, 2}
+	pa := &ca[0]
+	*pa = 5
+	var arr [2]complex64
+	pr := &arr[1]
+	*pr = 9
+	check("cxaddr134", fmt.Sprint(s, *pc, ca, arr, pc == &s.c) == "{0 (4+0i) (1+2i)} (4+0i) [(5+0i) (2+0i)] [(0+0i) (9+0i)] true")
+}
+
 func main() {
 	s94()   // SECTION-CALL 94
 	s95()   // SECTION-CALL 95
@@ -1467,6 +1493,7 @@ func main() {
 	s131()  // SECTION-CALL 131
 	s132f() // SECTION-CALL 132
 	s133()  // SECTION-CALL 133
+	s134f() // SECTION-CALL 134
 	fmt.Println("full:", checks, "checks,", fails, "failures")
 	os.Exit(fails)
 }

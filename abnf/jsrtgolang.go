@@ -2551,7 +2551,7 @@ func init() {
 		// struct that holds field k (the embedded one, for a promoted field) or
 		// over x's backing array at the element's offset, carrying as for
 		// errors.As; the value itself when it is a reference already, as makeAddrVar
-		// decides for a variable. A package variable gets the scope cell &name
+		// decides for a variable (a "$cx" complex is a scalar and gets the cell). A package variable gets the scope cell &name
 		// would. Twins: js_goaddr in lib/go-rt.metajs, goAddrOf in
 		// go-interpreter.abnf.
 		m["js_goaddr"] = func(a []uint64) uint64 {
@@ -2591,7 +2591,7 @@ func init() {
 				return m["js_gofield"](a[:2])
 			}
 			if vo, isObj := v.(*jsObject); isObj {
-				if vc := goClassOf(vo); vc == nil || (vc.props["__name"] != "$ptr" && vc.props["__name"] != "$sl") {
+				if vc := goClassOf(vo); vc == nil || (vc.props["__name"] != "$ptr" && vc.props["__name"] != "$sl" && vc.props["__name"] != "$cx") {
 					return w(v)
 				}
 			}
