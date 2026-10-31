@@ -76,16 +76,6 @@ include M; def f; "K>" + super; end; end` (super into an included module's metho
 
 # JS — JavaScript and TypeScript
 
-### T-870 ts/js: toStringTag for Map/Set/typed arrays; Uint8Array gaps · P3 · JS · IN PROGRESS (JS worker, round 35) [V CORE worker]
-`Object.prototype.toString.call(new Map())` → node `[object Map]`, ours `[object Object]` (a `__#@toStringTag` getter in
-js-builtins.js is honoured only by llvm.Run, not by the interpreter or native) — same for Set and Uint8Array. Uint8Array:
-no ArrayBuffer; a write past the end makes an ordinary property where node drops it.
-
-### T-861 ts/js: `bind` on a class · P3 · JS · IN PROGRESS (JS worker, round 35) [V JS worker]
-`class K { constructor(a, b) { this.s = a + b; } }; new (K.bind(null, 7))(8).s` → node 15; all three of our engines
-"TypeError: K.bind is not a function" (a class descriptor is not callable, so it has no bind, although `"bind" in K`
-is true). Also `K.call`/`K.apply` must throw node's "Class constructor K cannot be invoked without 'new'".
-
 # JV — Java
 
 # CS — C#  (no dotnet here: spec-only, ECMA-334 and the .NET reference source)
@@ -917,6 +907,8 @@ T-874 bash: declare -g, top-level local, readonly on read/printf -v/let, remaini
 T-876 kotlin: an enum value is not an `Enum<*>` — DONE d03d1858 (a value whose class descriptor carries __isenum is an Enum in is/!is/as?/when/filterIsInstance — interp, Go twin, layer 2; = JDK 24 instanceof via kotlin-stdlib)
 T-875 ruby: frozen binary strings, super with no superclass method, class_eval block gaps (compiler) — DONE edc80b61 (frozen binary Strings incl. clone/dup/+@/-@ and FrozenError on mutators; super with no superclass method is a rescuable NoMethodError — interp everywhere, compiler for top-level defs via js_rnosuper; super searches included modules first in the interp; run-time Module#include (js_rinclude) so module_eval'd methods reach later includers; include and bare visibility words inside class_eval blocks)
 T-869 go: FMA fusion, complex64, cmplx trig, `*p` through *complex128 — DONE 2444244d (gc's arm64 FMA fusion modelled per measured rules — fused operand, blockers, two-multiply choice by CSE per function, complex mult/div — via a host fma (runtime.c d_fma host 113, Go math.FMA); complex64 with float32 rounding via js_gocxop; cmplx trig/hyperbolic and math Sinh..Log2; *p stores through pointer types; also fixed a package function losing to a same-named main-file function, and f(0, g(x)) argument order; go bench −0.2%)
+T-861 ts/js: `bind` on a class — DONE eccc75c5 (bind on a class constructs through the class with node's name/length/new.target; call/apply/bare call of a class raise node's TypeError — interps, Go twin, layer 2, emitters)
+T-870 ts/js: toStringTag for Map/Set/typed arrays; Uint8Array gaps — DONE eccc75c5 (toStringTag getters for Map/Set/WeakMap/WeakSet/Uint8Array/ArrayBuffer, hidden Date tag, [object Function] for classes, no Symbol.toStringTag gate; ArrayBuffer with byteLength/slice/isView and shared views; out-of-range typed-array writes dropped)
 
 # Settled — do not re-open
 
