@@ -64,7 +64,7 @@ its report; anything structural there is a CORE ticket.
 
 # PY — Python
 
-### T-902 python: `map` / `filter` / `zip` / `enumerate` drain their iterable when created · P1 · PY · OPEN [V]
+### T-902 python: `map` / `filter` / `zip` / `enumerate` drain their iterable when created · P1 · PY · IN PROGRESS (PY worker, round 17) [V]
 Neighbour of T-768 / T-550. `next(map(lambda p: p+1, count(5)))`, `list(islice(zip(count(1), count(10)), 2))`,
 `next(filter(lambda p: p > 3, count(1)))`, `next(enumerate(count(7)))` → python `6`, `[(1, 10), (2, 11)]`, `4`, `(0, 7)`; interp
 and native hang (timeout), run hits the IR step brake. Finite source, observable order: a generator that prints `pull i` before
@@ -72,13 +72,13 @@ each yield, `m1 = map(lambda p: p*2, gen(3)); print("made map1"); print("first",
 `first 0`; all legs pull 0, 1, 2 first. Same for filter, enumerate, zip and two-iterable map. Files: these builtins in
 python-interpreter.abnf, python-to-llvm-ir.abnf, lib/python-rt.metajs.
 
-### T-903 python: the implicit `main()` entry still runs when the top level calls main indirectly · P2 · PY · OPEN [V]
+### T-903 python: the implicit `main()` entry still runs when the top level calls main indirectly · P2 · PY · IN PROGRESS (PY worker, round 17) [V]
 Neighbour of T-769. `def main(): print("main ran")` / `def run(): main()` / `xs=[1]` / `if xs[0]: run()` → python prints
 `main ran` once, all legs twice. The heuristic (pyTopRunsEntry) only sees a direct top-level call or a `__name__` test; a program
 whose top level executes any call statement probably should not get the implicit entry. Files: pyTopRunsEntry in both python
 grammars.
 
-### T-941 python: a raise in a try's `else` clause - the compiler catches it with the same try's `except`, the interpreter skips `finally` · P1 · PY · OPEN [V]
+### T-941 python: a raise in a try's `else` clause - the compiler catches it with the same try's `except`, the interpreter skips `finally` · P1 · PY · IN PROGRESS (PY worker, round 17) [V]
 `def f(n): try: pass / except Exception: return "exc" / else: if n > 0: raise KeyError(n); return "else-ret" / finally:
 print("finally", n)`, called with 1 inside `try … except KeyError as k: print("caught", k)` → python `finally 1`, `caught 1`; run
 and native `finally 1`, `result exc` (the else raise is swallowed by the except); interp `caught 1` with no `finally 1`. Also inside
@@ -86,12 +86,12 @@ and native `finally 1`, `result exc` (the else raise is swallowed by the except)
 the try body (its comment calls this "a rare deviation"; not in manual 7.9). Interpreter: makeTry runs elseT() inside the host
 `finally {}`, so a throw there skips finallyT(). Files: makeTry in both python grammars.
 
-### T-942 python: a right operand of a subclass type that overrides the reflected method is not tried first · P1 · PY · OPEN [V]
+### T-942 python: a right operand of a subclass type that overrides the reflected method is not tried first · P1 · PY · IN PROGRESS (PY worker, round 17) [V]
 Base has `__add__ __mul__ __eq__ __lt__`, Sub(Base) has `__radd__ __rmul__ __eq__ __gt__`: `b+s`, `b*s`, `b==s`, `b<s` → python
 `Sub.radd Sub.rmul Sub.eq Sub.gt`; all legs `Base.add Base.mul Base.eq Base.lt`. `1 + s`, `2.0 + F(1.0)`, `5 - I(1)` are right.
 Files: the user-class binary-operator dispatch in both python grammars, lib/python-num.js / layer 2.
 
-### T-943 python: int / float dict and set keys at large magnitudes - three engines, three wrong answers · P1 · PY · OPEN [V]
+### T-943 python: int / float dict and set keys at large magnitudes - three engines, three wrong answers · P1 · PY · IN PROGRESS (PY worker, round 17) [V]
 Per pair (i, f): `d = {i: "int"}; d[f] = "float"; s = {i, f}`, print `len(d) d[i] len(s)` and `f in {i}`, `i in {f}`, `f in {i:0}`,
 `i in {f:0}`. (2**53+1, 2.0**53) unequal: python `2 int 2 False False False False`, interp `1 float 1 True True True True` (lossy
 key equality merges them), run/native right. (2**64, 2.0**64) equal, also 2**100 and 10**20 vs 1e20: python `1 float 1 True True
@@ -99,7 +99,7 @@ True True`; run `2 int 1 … False False` (the dict misses although == and hash 
 (2**100+1, 2.0**100): interp merges again. Interp also `{1.0} & {1}` → `{1.0}` (python `{1}`). Files: dict/set key hashing and
 equality for the big-int box in abnf/jsrt*.go, layer 2 / lib/runtime.c, the interpreter's key normalisation.
 
-### T-944 python: `in`, `==`, `count`, `index`, `remove` and dict/set keys ignore identity · P1 · PY · OPEN [V]
+### T-944 python: `in`, `==`, `count`, `index`, `remove` and dict/set keys ignore identity · P1 · PY · IN PROGRESS (PY worker, round 17) [V]
 CPython compares `x is y or x == y`. `class E: __eq__ = lambda s, o: False; __hash__ = object.__hash__`; `e = E(); xs = [e]`:
 `e in xs`, `e in (e,)` → python True True, interp True True, run/native False False; `xs == xs`, `[e] == [e]` the same;
 `xs.count(e)` → python 1, all legs 0; `xs.index(e)` → python 0, all legs ValueError. The same NaN object: `n in [n]`, `[n] == [n]`
@@ -107,57 +107,57 @@ True in python, False in run/native; `{n}` + `s.add(n)` → python len 1, run/na
 run `{nan: 1, nan: 2}`, native `{nan: 2}`. Two distinct NaNs are handled right, so identity is available. Files: list
 count/index/remove in all engines, `in` / sequence == / dict-set lookup in abnf/jsrt*.go and layer 2.
 
-### T-945 python: slice bounds beyond 2**53 give wrong slices, differently per engine · P1 · PY · OPEN [V]
+### T-945 python: slice bounds beyond 2**53 give wrong slices, differently per engine · P1 · PY · IN PROGRESS (PY worker, round 17) [V]
 `l = [1,2,3]; s = "abcdef"; b = 4611686018427387904` (also 2**63, 10**20): `l[:b] l[-b:] s[:b] l[b:] l[1:b:2]` → python `[1, 2, 3]
 [1, 2, 3] 'abcdef' [] [2]`; interp and native `[] [] '' [] []`; run `[] [1, 2, 3] '' [1, 2, 3] []`. Step `l[::10**20]` → python
 `[1]`, interp `[3]`, native `[]`, run "slice step cannot be zero". Bounds up to 2**53 are right: the big-int box is not clamped.
 P3 companion: `l[2**53+1]` says "cannot fit 'int' into an index-sized integer" (CPython says "list index out of range" below
 2**63). Files: sliceIdx / pySliceStep (interp), js_pyslice (abnf/jsrt*.go), the layer-2 clamp.
 
-### T-946 python: `__index__` is ignored by slices (silently), `range`, sequence repetition and `chr` · P1 · PY · OPEN [V]
+### T-946 python: `__index__` is ignored by slices (silently), `range`, sequence repetition and `chr` · P1 · PY · IN PROGRESS (PY worker, round 17) [V]
 `class Num: __index__ returns v`; `n = Num(3)`: `range(n)` → python `range(0, 3)`, all legs TypeError; `[0,1,2,3][Num(1):n]` →
 python `[1, 2]`, all legs `[]`; `"ab" * n` → `ababab`, `[0] * n` → `[0, 0, 0]`, all legs TypeError "can't multiply sequence";
 `chr(Num(65))` → `A`, all legs TypeError. Indexing `[..][Num(1)]`, `hex`, `bin` are right. Files: the integer coercion used by
 slice, range, `*` and chr in both grammars and layer 2.
 
-### T-947 python compiler: an Exception subclass whose `__init__` skips `super().__init__` has no args · P1 · PY · OPEN [V]
+### T-947 python compiler: an Exception subclass whose `__init__` skips `super().__init__` has no args · P1 · PY · IN PROGRESS (PY worker, round 17) [V]
 `class NoSuper(Exception): def __init__(self, x, y): self.x = x`; `e = NoSuper(1, 2)`: `str(e) repr(e) e.args` → python and interp
 `(1, 2)  NoSuper(1, 2)  (1, 2)`; run and native `<__main__.NoSuper object>` twice, then uncaught AttributeError 'args' (exit 1).
 BaseException.__new__ stores args before __init__ runs. Files: exception construction in python-to-llvm-ir.abnf / layer 2.
 
-### T-948 python: walrus targets inside a generator expression (and in the interp a module-level comprehension) do not bind outside · P1 · PY · OPEN [V]
+### T-948 python: walrus targets inside a generator expression (and in the interp a module-level comprehension) do not bind outside · P1 · PY · IN PROGRESS (PY worker, round 17) [V]
 `def w2(): g = list((t := v) for v in [1, 2]); return g, t` → python `([1, 2], 2)`, all legs UnboundLocalError 't'; module-level
 `sum((m := v) for v in data), m` the same. Interp only: module-level `print([(m := v) for v in data], m)` with m new → NameError
 (python, run, native `[1, 2, 3] 3`). PEP 572: the target binds in the enclosing non-comprehension scope. Files: comprehension
 scoping in both python grammars.
 
-### T-949 python: PEP 479 - a StopIteration inside a generator is not turned into RuntimeError · P1 · PY · OPEN [V]
+### T-949 python: PEP 479 - a StopIteration inside a generator is not turned into RuntimeError · P1 · PY · IN PROGRESS (PY worker, round 17) [V]
 `def pairs(xs): it = iter(xs); for a in it: yield a, next(it)`; `list(pairs([1,2,3,4,5]))` inside `try … except RuntimeError as e`
 → python `RE generator raised StopIteration` (with `__cause__` the StopIteration); all legs let StopIteration escape uncaught,
 exit 1, nothing printed. Files: generator resumption in both grammars / layer 2.
 
-### T-950 python: a raise in `finally` while an exception propagates has `__context__` None; `__cause__ =` keeps `__suppress_context__` False · P1 · PY · OPEN [V]
+### T-950 python: a raise in `finally` while an exception propagates has `__context__` None; `__cause__ =` keeps `__suppress_context__` False · P1 · PY · IN PROGRESS (PY worker, round 17) [V]
 `try: raise KeyError("k2") finally: helper()` (helper raises TypeError) → python `e.__context__` KeyError('k2'); all legs None.
 Context from an except body and from `__exit__` is right. Assigning `e.__cause__ = X` must set `__suppress_context__` True (all
 legs False). Files: the finally lowering in both grammars.
 
-### T-951 python: int / float subclass instances rejected by %-formatting and `format(x, spec)` · P1 · PY · OPEN [V]
+### T-951 python: int / float subclass instances rejected by %-formatting and `format(x, spec)` · P1 · PY · IN PROGRESS (PY worker, round 17) [V]
 `class Money(int)`, `class F(float)`: `"%d" % Money(5)` → python `5`, all legs TypeError "%d format: a real number is required, not
 Money" (also %x, %5.1f, %i); `format(Money(5), ">6")` → `     5`, all legs "unsupported format string passed to
 Money.__format__"; `"%d" % F(2.5)` → 2. Files: the %-format and format() paths in both grammars and layer 2 (accept int/float
 subclasses by their primitive value).
 
-### T-952 python: an unknown method on a str or list is an uncatchable host error, not AttributeError · P2 · PY · OPEN [V]
+### T-952 python: an unknown method on a str or list is an uncatchable host error, not AttributeError · P2 · PY · IN PROGRESS (PY worker, round 17) [V]
 `for v in ["x", 1, 1.5, [], {}, (), None]: try: v.nope() except AttributeError as e: print("AE", e)` → python one AE line each;
 interp aborts with "method call .nope() on x", run/native "unknown String method: nope" (and "unknown list method"). int, float,
 dict, tuple and None are right; `"x".__setitem__(0, "b")` fails the same way. Breaks duck-typing via try/except AttributeError.
 Files: the str / list method dispatch fallbacks in both grammars and layer 2.
 
-### T-953 python interp: slice assignment with a start below -len never terminates · P1 · PY · OPEN [V]
+### T-953 python interp: slice assignment with a start below -len never terminates · P1 · PY · IN PROGRESS (PY worker, round 17) [V]
 `l = [1, 2, 3]; l[-10:0] = [0]` → python, run, native `[0, 1, 2, 3]`; interp hangs (killed). `at = lo + o.length` for `lo < 0` is
 not clamped to 0 before listTruncate / slice (python-interpreter.abnf, slice assignment).
 
-### T-954 python: smaller data-model gaps · P3 · PY · OPEN [V finder only]
+### T-954 python: smaller data-model gaps · P3 · PY · IN PROGRESS (PY worker, round 17) [V finder only]
 All legs agree, python differs: bound-method equality `a.m == a.m` is False (python True); `__bool__` returning 1 and `__len__`
 returning -1 or 2**70 raise nothing (python TypeError / ValueError / OverflowError); an inconsistent MRO is accepted; `pow(obj, 2, 5)`
 does not reach `__pow__(self, o, m)`; `gen.send(5)` on a just-started generator does not raise TypeError, `gi_running` missing;
@@ -203,7 +203,7 @@ same for Integer/Array); default `inspect` omits instance variables (`#<Pt>` vs 
 
 # JS — JavaScript and TypeScript
 
-### T-911 ts/js: `Error(…)`, `TypeError(…)`, `Date()` without `new` throw "Class constructor … cannot be invoked without 'new'" · P1 · JS · OPEN [V]
+### T-911 ts/js: `Error(…)`, `TypeError(…)`, `Date()` without `new` throw "Class constructor … cannot be invoked without 'new'" · P1 · JS · IN PROGRESS (JS worker, round 36) [V]
 `try { throw Error(m) } catch (e) { println(e.name, e.message, e instanceof Error) }` → node `Error boom true`; all legs
 `TypeError Class constructor Error cannot be invoked without 'new' true`. Same for TypeError, RangeError, SyntaxError,
 AggregateError; `typeof Date()` → node `string`, all legs an uncaught TypeError. Inverse cases: `Map()` / `Set()` / `WeakMap()`
@@ -213,7 +213,7 @@ function"). `throw Error("x")` is common JS. Files: the class-call-without-new c
 abnf/jsrtjsprint.go, its twin in lib/js-rt.metajs, the call arm of both interpreters) - builtins that are callable must bypass
 it, each with its own call semantics.
 
-### T-912 ts/js compiled: a data property on a nearer prototype does not shadow a farther inherited accessor · P1 · JS · OPEN [V]
+### T-912 ts/js compiled: a data property on a nearer prototype does not shadow a farther inherited accessor · P1 · JS · IN PROGRESS (JS worker, round 36) [V]
 Neighbour of T-783 (fixed in the interpreter). `proto = { get acc() { return "lit" } }; mid = Object.create(proto);
 Object.defineProperty(mid, "acc", { value: "mid" }); Object.create(mid).acc` → node and interp `mid`; run `mid`, native `lit`.
 After an extra own key on mid: run `mid2`, native `lit`. `class A { get acc() {…} } class B extends A {}`;
@@ -221,35 +221,35 @@ After an extra own key on mid: run `mid2`, native `lit`. `class A { get acc() {�
 accessor-holder walk on read (jsvAccHolder in abnf/jsrt*.go must stop at the nearest level that has the key), its twin in
 lib/js-rt.metajs.
 
-### T-913 ts/js llvm.Run: an invalid length through `Object.defineProperty` is an uncatchable host error · P1 · JS · OPEN [V]
+### T-913 ts/js llvm.Run: an invalid length through `Object.defineProperty` is an uncatchable host error · P1 · JS · IN PROGRESS (JS worker, round 36) [V]
 Incomplete part of T-777. `try { Object.defineProperty([], "length", { value: 1.5 }) } catch (e) { println(e.name, e.message) }`
 → node, interp, native `RangeError Invalid array length`; run exits 1 with `js runtime error: invalid array length 1.5` (value -1
 the same). `a.length = 1.5` and `a["length"] = …` are right everywhere. Files: defineProperty on an array's length in the Go twin
 (abnf/jsrt*.go: an rt.fail where a RangeError must be thrown).
 
-### T-914 ts/js: `replaceAll` with a non-global RegExp does not throw · P2 · JS · OPEN [V]
+### T-914 ts/js: `replaceAll` with a non-global RegExp does not throw · P2 · JS · IN PROGRESS (JS worker, round 36) [V]
 Neighbour of T-786. `"a".replaceAll(/a/, "b")` inside try/catch → node `TypeError String.prototype.replaceAll called with a
 non-global RegExp argument`; all legs nothing. Files: replaceAll in abnf/jsrt.go, lib/js-rt.metajs, both interpreters.
 
-### T-915 ts/js: smaller leftovers - toStringTag of Symbol/BigInt, class-decorator context, Annex-B `\u{…}`, `\p{L}` · P3 · JS · OPEN [V finder only]
+### T-915 ts/js: smaller leftovers - toStringTag of Symbol/BigInt, class-decorator context, Annex-B `\u{…}`, `\p{L}` · P3 · JS · IN PROGRESS (JS worker, round 36) [V finder only]
 `Object.prototype.toString.call(Symbol("q"))` / `.call(1n)` → node `[object Symbol]` / `[object BigInt]`, all legs
 `[object Object]`. A class decorator's context reports `static=false private=false`; tsc 6 + node `undefined undefined`.
 `/\u{61}/` without the u flag throws "invalid unicode escape" in all legs; node accepts it (Annex B: `u` 61 times).
 `/\p{L}/u.test("é")` → node true, all legs false.
 
-### T-937 ts: an arrow with an untyped parameter and a return annotation `(x): T =>` does not parse · P2 · JS · OPEN [V]
+### T-937 ts: an arrow with an untyped parameter and a return annotation `(x): T =>` does not parse · P2 · JS · IN PROGRESS (JS worker, round 36) [V]
 `keep(vals, (x): boolean => x >= lim)` → tsc 6 + node `big=4,5`; both halves fail at the `:`. `const g = (x): boolean => …` and
 type predicates `(x): x is number =>` the same; `(x: number): boolean =>` works. Corpus:
 contextuallyTypedFunctionExpressionsAndReturnAnnotations, thisTypeInTypePredicate, intraExpressionInferences.
 
-### T-938 ts compiler: parses 90 fewer must-parse corpus files than the interpreter · P2 · JS · OPEN [V]
+### T-938 ts compiler: parses 90 fewer must-parse corpus files than the interpreter · P2 · JS · IN PROGRESS (JS worker, round 36) [V]
 5197 vs 5287 of 5527; 79 of the compiler-only failures are tsc-clean. Repro (verified):
 `type Ret<T> = T extends () => infer R ? R : never;` → interp and tsc fine, compiler fails at 1:26. Finder's clusters (~60 files): a
 function type in a conditional `extends`; `infer X extends C`; `typeof import("m")`; `using` / `await using` in for heads (~14);
 `export default class {}` (decoratedDefaultExports*, decoratorOnClass4/8); `export {} from './0' with {…}`; a tagged template after
 `new`; a raw NUL in a string.
 
-### T-939 js: halves disagree on line terminators, NUL in strings, parenthesised update targets · P2 · JS · OPEN [V finder only]
+### T-939 js: halves disagree on line terminators, NUL in strings, parenthesised update targets · P2 · JS · IN PROGRESS (JS worker, round 36) [V finder only]
 Compiler only (node and interp accept): U+2028 / U+2029 / CR ending a statement; a raw NUL inside a string literal; `(o.n)++`,
 `(a)++`, `(a)--` (pass/0fa2102f53acd283, 5b8fad162f489b3b, 6498dcc494193cb4, c7e5fba8bf3854cd). Interpreter only: `([1].a) = v`
 (pass/687f678cde900411, parsed in the August sweep - lost), and early/2b4520facdc72696 `--0`, early/8b659d2805837e98 `++0` now
@@ -286,14 +286,14 @@ not change the renderer.
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-921 kotlin: `==` on `Any`-typed boxed Doubles uses IEEE equality instead of `equals` · P1 · KT · OPEN [V]
+### T-921 kotlin: `==` on `Any`-typed boxed Doubles uses IEEE equality instead of `equals` · P1 · KT · IN PROGRESS (KT worker, round 10) [V]
 Incomplete part of T-805. `val a: Any = Double.NaN; val b: Any = Double.NaN; val z: Any = -0.0; val y: Any = 0.0;
 println("${a == b} ${z == y}")` → Kotlin `true false` (for a static type other than Float/Double, kotlinc emits
 `Intrinsics.areEqual`, which is `equals`; checked with java + kotlin-stdlib 2.2.21); all legs `false true`. Static
 `Double?` == `Double?` stays IEEE and is right. Files: the `==` lowering in both kotlin grammars (js_ktequals when either static
 type is not Float/Double).
 
-### T-922 kotlin: no ConcurrentModificationException for map iteration and for list higher-order functions · P1 · KT · OPEN [V]
+### T-922 kotlin: no ConcurrentModificationException for map iteration and for list higher-order functions · P1 · KT · IN PROGRESS (KT worker, round 10) [V]
 Incomplete part of T-814 / T-846 / T-857. All legs print "none" where the JVM throws CME: `for (k in mp.keys) if (k == 1)
 mp[3] = 3`; `for ((k, v) in mp2) if (k == 1) mp2.remove(2)`; `ml.forEach { if (it == 1) ml.add(5) }`; `ml.forEachIndexed {…}`;
 `ml.map { if (it == 1) ml.add(5); it }`; `for (x in ml.withIndex()) …add…` (LinkedHashMap / ArrayList behaviour confirmed with java
@@ -301,13 +301,13 @@ mp[3] = 3`; `for ((k, v) in mp2) if (k == 1) mp2.remove(2)`; `ml.forEach { if (i
 bump modCount; forEach / forEachIndexed / map / withIndex must check it (lib/kotlin-rt.metajs, abnf/jsrtkotlin.go, the
 interpreter).
 
-### T-923 kotlin: `as` to a collection interface never throws ClassCastException · P1 · KT · OPEN [V]
+### T-923 kotlin: `as` to a collection interface never throws ClassCastException · P1 · KT · IN PROGRESS (KT worker, round 10) [V]
 Incomplete part of T-810. `val lst: Any = listOf(1, 2); val str: Any = "s"`; `lst as Map<*, *>` → all legs `[1, 2]`;
 `str as List<*>` → `s`; `lst as Set<*>` → `[1, 2]`; Kotlin/JVM throws ClassCastException for all three. `lst is Map<*, *>` is
 correctly false and `lst as Number` throws, so `as` must use the same type test as `is` for collection types. Files: the `as`
 lowering / js_ktas in both kotlin grammars, abnf/jsrtkotlin.go, lib/kotlin-rt.metajs.
 
-### T-924 kotlin: multi-index `operator get/set` and `MutableIterator.remove()` are missing · P3 · KT · OPEN [V finder only]
+### T-924 kotlin: multi-index `operator get/set` and `MutableIterator.remove()` are missing · P3 · KT · IN PROGRESS (KT worker, round 10) [V finder only]
 `g[r, c] = v` → "index with more than one argument not implemented" in both halves; `it.remove()` on a MutableIterator → "unknown
 method 'remove'". Both loud.
 
@@ -429,31 +429,31 @@ range 0..2: 7` (a plain RangeError); the current engines print the IndexError fo
 `RangeError (index): Index out of range: index should be less than 3: 7`, which is
 believed to be the modern VM's. Leave as is unless a real dart run settles it.
 
-### T-888 metajs native: `String.replace` loses the text after the match when the receiver has a non-ASCII character · P1 · CORE · OPEN [V]
+### T-888 metajs native: `String.replace` loses the text after the match when the receiver has a non-ASCII character · P1 · CORE · IN PROGRESS (CORE worker, round 15) [V]
 `"éaéé".replace("a","_")` → node, interp, run `é_éé`; native `é_�` (length 3). `"a🎉b🎉".replace("b","_")` → native `a🎉_`
 (node `a🎉_🎉`). The floor's replace (runtime.c, the string-method mid 23 branch) slices the tail as
 `str_slice(recv, at + str_len(pat), n)` with `n = str_ulen(recv)` (UTF-16 units) where `str_slice` takes byte offsets; the end
 must be the byte length. Every language whose layer 2 calls `.replace` on a non-ASCII string is exposed. Files: lib/runtime.c.
 
-### T-889 metajs: `String.replace` inserts `$&` `$$` `` $` `` `$'` literally · P1 · CORE · OPEN [V]
+### T-889 metajs: `String.replace` inserts `$&` `$$` `` $` `` `$'` literally · P1 · CORE · IN PROGRESS (CORE worker, round 15) [V]
 `"xaby".replace("ab", R)` for R = `[$&]` `[$$]` `` [$`] `` `[$']` → node and the goja interp `x[ab]y` `x[$]y` `x[x]y` `x[y]y`;
 run, native and -frozen print the pattern literally (`x[$&]y` …). Decide with the layer-2 users first: a layer-2 caller that relies
 on literal insertion must switch to a function replacement or an escaped `$$`. Files: abnf/jsrt.go (string method "replace"),
 lib/runtime.c mid 23.
 
-### T-890 metajs: `split` ignores the limit, `split()` splits into characters, `split("")` is per code point · P1 · CORE · OPEN [V]
+### T-890 metajs: `split` ignores the limit, `split()` splits into characters, `split("")` is per code point · P1 · CORE · IN PROGRESS (CORE worker, round 15) [V]
 `"a,b,c".split(",", n)` for n = 0,1,2 → node `0 1 2`; run/native/frozen `3 3 3`. `"".split(",", 1)` → node 1, goja interp 0.
 `"a,b,c".split()` → node length 1; run/native/frozen 5. `String.fromCharCode(55356,57225).split("").length` → node and native 2,
 run/frozen/goja 1 (`"a🎉b🎉".split("")` node 6, twin 4). Files: abnf/jsrt.go split, lib/runtime.c mid 26, the goja path in
 metajs-interpreter.abnf.
 
-### T-891 metajs: `join(undefined)`, `indexOf(undefined)` over holes, and boolean / null array indices · P1 · CORE · OPEN [V]
+### T-891 metajs: `join(undefined)`, `indexOf(undefined)` over holes, and boolean / null array indices · P1 · CORE · IN PROGRESS (CORE worker, round 15) [V]
 `[1,2,3].join(undefined)` → node `1,2,3`; run/native/frozen `1undefined2undefined3`. `h=[]; h[2]=7; h.indexOf(undefined)` →
 node -1; run/native/frozen 0 (holes are not skipped; js got this in T-640). `[10,20][true]`, `[10,20][null]` → node
 `undefined undefined`; run/native/frozen `20 10` (the key is coerced to a number index instead of the property "true"/"null").
 goja interp correct throughout. Files: abnf/jsrt.go (join, indexOf, array getMember), lib/runtime.c.
 
-### T-892 metajs: `trim()` strips three different whitespace sets, none of them JavaScript's · P1 · CORE · OPEN [V]
+### T-892 metajs: `trim()` strips three different whitespace sets, none of them JavaScript's · P1 · CORE · IN PROGRESS (CORE worker, round 15) [V]
 `(c+"x"+c).trim().length` for c = U+0009, U+00A0, U+2003, U+FEFF, U+0085: node and goja `1 1 1 1 3`; run/frozen `1 1 1 3 1`
 (Go `strings.TrimSpace`: strips U+0085, keeps U+FEFF); native `1 3 3 3 3` (the floor's `is_space` is ASCII-only). JS trims
 WhiteSpace + LineTerminator (incl. U+FEFF, U+00A0, U+1680, U+2000-200A, U+2028/9, U+202F, U+205F, U+3000), not U+0085.
@@ -462,24 +462,24 @@ is a malformed string` (python-rt.metajs pyCplxFromStr uses `.trim()`); the same
 Check every layer-2 `.trim()` caller against its own language's whitespace rule when fixing. Files: abnf/jsrt.go (trim),
 lib/runtime.c `is_space`.
 
-### T-893 metajs: string `<` `>` and the default `sort()` compare by code point, not by UTF-16 code unit · P1 · CORE · OPEN [V]
+### T-893 metajs: string `<` `>` and the default `sort()` compare by code point, not by UTF-16 code unit · P1 · CORE · IN PROGRESS (CORE worker, round 15) [V]
 `a = [U+FFFF, "🎉"]`: `a[0] < a[1]` and `a.slice(0).sort()[0].charCodeAt(0)` → node `false 55356`; all our legs `true 65535`.
 Same for U+E000 against an astral character, and lone surrogates (goja orders those yet differently). The js language is right;
 this is MetaJS's raw string compare in the twin and the floor (and the default comparator of the floor's sort). Layer 2 relies on
 this compare for every language's sort: fix in one place and re-run --cross. Files: abnf/jsrt.go string compare, lib/runtime.c
 string compare and the sort default comparator.
 
-### T-894 metajs: `for (let i …)` shares one binding across iterations · P1 · CORE · OPEN [V]
+### T-894 metajs: `for (let i …)` shares one binding across iterations · P1 · CORE · IN PROGRESS (CORE worker, round 15) [V]
 `for (let i=0;i<3;i++) fs.push(function(){return i;})` then `fs[0]()+fs[1]()+fs[2]()` → node `012`, all legs `333`. Same class as
 T-478 (js, DONE); never applied to MetaJS. Files: metajs-interpreter.abnf (For), metajs-to-llvm-ir.abnf (For).
 
-### T-895 metajs: assignment evaluates the right-hand side before the target, and compound assignment reads late · P1 · CORE · OPEN [V]
+### T-895 metajs: assignment evaluates the right-hand side before the target, and compound assignment reads late · P1 · CORE · IN PROGRESS (CORE worker, round 15) [V]
 `getX()[key()] = note("rhs")` → node logs `obj,key,rhs`, all legs `rhs,obj,key`. `zz=1; zz += (zz = 5) + zz` → node 11, ours 15.
 `s="a"; s += s += "b"` → node `aab`, ours `abab`. `arr=[1,2,3]; idx=0; arr[idx++] = arr[idx]*10` → node `20,2,3`, ours `10,2,3`.
 Same class as T-479 / T-806 (fixed for js, java, kotlin). Files: assignment in metajs-interpreter.abnf and
 metajs-to-llvm-ir.abnf.
 
-### T-896 metajs: `parseInt` / `parseFloat` - Infinity, NBSP, radix range, -0, and 18-20 digit rounding · P1 · CORE · OPEN [V]
+### T-896 metajs: `parseInt` / `parseFloat` - Infinity, NBSP, radix range, -0, and 18-20 digit rounding · P1 · CORE · IN PROGRESS (CORE worker, round 15) [V]
 node vs ours: `parseFloat("Infinity")`, `("-Infinity")` → Infinity / -Infinity; run/native/frozen NaN (goja right).
 `parseFloat(NBSP+"12")`, `parseInt(NBSP+"12")` → 12; native NaN. `parseInt("12", 37)` → NaN; run/frozen 39.
 `parseInt("12", 1)` → NaN; run/frozen 0. `1/parseInt("-0")` → -Infinity; goja interp and native Infinity.
@@ -488,23 +488,23 @@ Radix 10 must be exact up to 20 significant digits: `parseInt("12345678901234567
 12345678901234567000, run 12345678901234571000, native 12345678901234570000. Files: abnf/jsrt.go jsParseInt / jsParseFloat,
 lib/runtime.c host ids 4 and 5.
 
-### T-897 metajs: `Math.pow(±1, ±Infinity)` and `Math.pow(1, NaN)` return 1 · P1 · CORE · OPEN [V]
+### T-897 metajs: `Math.pow(±1, ±Infinity)` and `Math.pow(1, NaN)` return 1 · P1 · CORE · IN PROGRESS (CORE worker, round 15) [V]
 node `NaN NaN NaN` for `Math.pow(1, Infinity)`, `Math.pow(-1, Infinity)`, `Math.pow(1, NaN)`; all our legs `1 1 1` (C `pow`
 rules, not ECMAScript Number::exponentiate). Check `**` and the other languages that route through the same pow before changing
 the shared one (C, python, go want 1). Files: lib/runtime.c d_pow, the jsrt.go pow path, installGojaMathSurface.
 
-### T-898 metajs: the `\u{…}` escape is read as four hex digits · P1 · CORE · OPEN [V]
+### T-898 metajs: the `\u{…}` escape is read as four hex digits · P1 · CORE · IN PROGRESS (CORE worker, round 15) [V]
 `"\u{1F600}".length`, `.charCodeAt(0)`, `"\u{41}".charCodeAt(0)` → node `2 55357 65`; all legs `4 16886 17462` (`\u{1F6` taken
 as one escape, then `00}`). js, swift, ruby decode it right with their own rules; lua prints 4 too and is correct (UTF-8 bytes).
 Files: MetaJS's literal unescape (the shared `unescapeJs` in lib/interp-core.js and lib/compile-core.js reads `\u` as exactly 4
 hex digits; check which other grammars rely on it before widening).
 
-### T-899 metajs: a lone-surrogate needle never matches half of a surrogate pair · P1 · CORE · OPEN [V]
+### T-899 metajs: a lone-surrogate needle never matches half of a surrogate pair · P1 · CORE · IN PROGRESS (CORE worker, round 15) [V]
 `s = "x" + String.fromCharCode(55357,56832) + "y"`: `s.indexOf(String.fromCharCode(56832))` → node 2, run/native/frozen -1;
 `s.split(String.fromCharCode(55357)).length` → node 2, all legs 1; `s.replace(lo,"L")` changes nothing. The search runs over the
 UTF-8 bytes, where a pair is one 4-byte sequence. Files: lib/runtime.c str_index_of and its split/replace users, abnf/jsrt.go.
 
-### T-900 metajs: ToNumber of strings and ToPrimitive of objects are not JavaScript's - decide and record · P2 · CORE · OPEN [V]
+### T-900 metajs: ToNumber of strings and ToPrimitive of objects are not JavaScript's - decide and record · P2 · CORE · IN PROGRESS (CORE worker, round 15) [V]
 node vs run/native/frozen: `"0x10"-0` 16 vs NaN (`"0b11"`, `"0o7"` too); `"1_000"-0` NaN vs 1000; `"inf"-0` NaN vs Infinity;
 `(NBSP+"1")-0` 1 vs NaN; `[]-0` 0 vs NaN; `[1]*1` 1 vs NaN; `[]==""` true vs false; `[0]==0` true vs false; `o<=o` (same
 object) true vs false. About 550 of 1936 `==` pairs of a 44x44 table differ; the goja interp is right on objects. String→number is
@@ -512,7 +512,7 @@ object) true vs false. About 550 of 1936 `==` pairs of a 44x44 table differ; the
 dialect in 7.9, or implement StringToNumber and ToPrimitive in the twin and the floor; `"1_000"` and `"inf"` being numbers is a
 wrong answer either way.
 
-### T-901 metajs: the goja interpreter leg diverges from -frozen and node · P2 · CORE · OPEN [V]
+### T-901 metajs: the goja interpreter leg diverges from -frozen and node · P2 · CORE · IN PROGRESS (CORE worker, round 15) [V]
 Byte-identity between goja and -frozen is a matrix invariant, but these are unpinned: `-4 * 0` is +0 under goja (`1/p` Infinity;
 -frozen and node -Infinity); `"\ud83d".trim()` is U+FFFD under goja; `(hi+hi).split(lo).length` 3 under goja (node 1);
 `1/parseInt("-0")` Infinity; `"" + main` is 765 characters of the interpreter's own closure source and `"" + Math.floor` names
@@ -532,7 +532,7 @@ destructuring target, python comprehension/genexp, swift array/dict/type, go gen
 per-grammar fix (cut or reorder each alternative) and memoising rule results at a position in the PEG engine (abnf/), which
 fixes all seven at once; measure the memo cost on the matrix. Shared: the seven grammars.
 
-### T-926 tooling: sweep.sh misclassifications; probe.sh builds the native leg with no timeout · P3 · CORE · OPEN [V finder only]
+### T-926 tooling: sweep.sh misclassifications; probe.sh builds the native leg with no timeout · P3 · CORE · IN PROGRESS (CORE worker, round 15) [V finder only]
 tests/reference/sweep.sh: 53 java files carry `@run compile/fail` without `@compile/fail` and are scored must-parse (CyclicScoping_*
 among them); bash case_/012-in-pattern-regression.sh and extglob-match/020 are scored reject because `bash -n` does not run their
 `shopt -s extglob`; typescript's directory rule scores as must-parse 219 interpreter / 251 compiler failures that tsc reports
