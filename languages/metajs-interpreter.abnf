@@ -1051,6 +1051,9 @@ KwDefault   = "default" KwEnd ;
         // renders a float the way C's %g does needs a FIXED digit count, and the
         // dialect has only the shortest round-tripping form.
         "floPrec": floPrec,
+        // fma(x, y, z): x*y + z rounded once; host id 113 of runtime.c, and the
+        // grammar hosts' fmaHost (abnf/jsrtint.go) is what this name resolves to.
+        "fma": fma,
         "exit": exit, "anytype": anytypeMarker,
         // The eleven sized-integer names, the same set languages/lib/runtime.c
         // seeds and abnf/jsrtint.go's giBindings adds.

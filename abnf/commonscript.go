@@ -237,6 +237,8 @@ func NewCommonScript(vm *goja.Runtime, compilerFuncMap *map[string]r.Object, pre
 	// languages/lib/runtime.c is host id 70. The three must agree or the matrix
 	// goes red.
 	vm.Set("floPrec", func(v float64, n int) string { return floPrecStr(v, n) })
+	// fma(x, y, z): x*y + z rounded once (fmaHost, jsrtint.go).
+	vm.Set("fma", func(x, y, z float64) float64 { return math.FMA(x, y, z) })
 
 	installGojaFnMeta(vm)
 	installGojaArrKind(vm)

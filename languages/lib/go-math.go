@@ -1110,3 +1110,292 @@ func Cbrt(x float64) float64 {
 	}
 	return t
 }
+
+// ----- the hyperbolic and inverse functions, Log1p, Log2 and Log10 -----
+//
+// Go's pure-Go algorithms (arm64 has no assembly for any of them). The compiler
+// fuses a written `x*y + z` here as gc does (languages/lib/go-constfold.js); an
+// explicit FMA stands where gc also fuses a product held in a variable, which
+// the grammars do not model: `sq := x * x; ... sq + Q2` is FMA(x, x, Q2).
+
+func Sinh(x float64) float64 {
+	const (
+		P0 = -0.6307673640497716991184787251e+6
+		P1 = -0.8991272022039509355398013511e+5
+		P2 = -0.2894211355989563807284660366e+4
+		P3 = -0.2630563213397497062819489e+2
+		Q0 = -0.6307673640497716991212077277e+6
+		Q1 = 0.1521517378790019070696485176e+5
+		Q2 = -0.173678953558233699533450911e+3
+	)
+	sign := false
+	if x < 0 {
+		x = -x
+		sign = true
+	}
+	var temp float64
+	switch {
+	case x > 21:
+		temp = Exp(x) * 0.5
+	case x > 0.5:
+		ex := Exp(x)
+		temp = (ex - 1/ex) * 0.5
+	default:
+		sq := x * x
+		temp = (((P3*sq+P2)*sq+P1)*sq + P0) * x
+		temp = temp / ((FMA(x, x, Q2)*sq+Q1)*sq + Q0)
+	}
+	if sign {
+		temp = -temp
+	}
+	return temp
+}
+
+func Cosh(x float64) float64 {
+	x = Abs(x)
+	if x > 21 {
+		return Exp(x) * 0.5
+	}
+	ex := Exp(x)
+	return (ex + 1/ex) * 0.5
+}
+
+func Tanh(x float64) float64 {
+	const MAXLOG = 8.8029691931113054295988e+01
+	z := Abs(x)
+	switch {
+	case z > 0.5*MAXLOG:
+		if x < 0 {
+			return -1
+		}
+		return 1
+	case z >= 0.625:
+		s := Exp(2 * z)
+		z = 1 - 2/(s+1)
+		if x < 0 {
+			z = -z
+		}
+	default:
+		if x == 0 {
+			return x
+		}
+		s := x * x
+		z = x + x*s*((-9.64399179425052238628e-1*s+-9.92877231001918586564e1)*s+-1.61468768441708447952e3)/((FMA(x, x, 1.12811678491632931402e2)*s+2.23548839060100448583e3)*s+4.84406305325125486048e3)
+	}
+	return z
+}
+
+func Asin(x float64) float64 {
+	if x == 0 {
+		return x
+	}
+	sign := false
+	if x < 0 {
+		x = -x
+		sign = true
+	}
+	if x > 1 {
+		return NaN()
+	}
+	temp := Sqrt(1 - x*x)
+	if x > 0.7 {
+		temp = Pi/2 - satan(temp/x)
+	} else {
+		temp = satan(x / temp)
+	}
+	if sign {
+		temp = -temp
+	}
+	return temp
+}
+
+func Acos(x float64) float64 { return Pi/2 - Asin(x) }
+
+func Asinh(x float64) float64 {
+	const (
+		Ln2      = 6.93147180559945286227e-01
+		NearZero = 1.0 / (1 << 28)
+		Large    = 1 << 28
+	)
+	if IsNaN(x) || IsInf(x, 0) {
+		return x
+	}
+	sign := false
+	if x < 0 {
+		x = -x
+		sign = true
+	}
+	var temp float64
+	switch {
+	case x > Large:
+		temp = Log(x) + Ln2
+	case x > 2:
+		temp = Log(2*x + 1/(Sqrt(x*x+1)+x))
+	case x < NearZero:
+		temp = x
+	default:
+		temp = Log1p(x + x*x/(1+Sqrt(1+x*x)))
+	}
+	if sign {
+		temp = -temp
+	}
+	return temp
+}
+
+func Acosh(x float64) float64 {
+	const Large = 1 << 28
+	switch {
+	case x < 1 || IsNaN(x):
+		return NaN()
+	case x == 1:
+		return 0
+	case x >= Large:
+		return Log(x) + Ln2
+	case x > 2:
+		return Log(2*x - 1/(x+Sqrt(x*x-1)))
+	}
+	t := x - 1
+	return Log1p(t + Sqrt(2*t+t*t))
+}
+
+func Atanh(x float64) float64 {
+	const NearZero = 1.0 / (1 << 28)
+	switch {
+	case x < -1 || x > 1 || IsNaN(x):
+		return NaN()
+	case x == 1:
+		return Inf(1)
+	case x == -1:
+		return Inf(-1)
+	}
+	sign := false
+	if x < 0 {
+		x = -x
+		sign = true
+	}
+	var temp float64
+	switch {
+	case x < NearZero:
+		temp = x
+	case x < 0.5:
+		temp = x + x
+		temp = 0.5 * Log1p(temp+temp*x/(1-x))
+	default:
+		temp = 0.5 * Log1p((x+x)/(1-x))
+	}
+	if sign {
+		temp = -temp
+	}
+	return temp
+}
+
+// In Log1p hfsq and R are products: gc fuses each where it is an operand of an
+// add or subtract, and hfsq + R, an add of two products the function makes
+// twice, fuses the one computed first (goFmaLeft in
+// languages/lib/go-constfold.js): hr.
+func Log1p(x float64) float64 {
+	const (
+		Sqrt2M1     = 4.142135623730950488017e-01
+		Sqrt2HalfM1 = -2.928932188134524755992e-01
+		Small       = 1.0 / (1 << 29)
+		Tiny        = 1.0 / (1 << 54)
+		Two53       = 1 << 53
+		Ln2Hi       = 6.93147180369123816490e-01
+		Ln2Lo       = 1.90821492927058770002e-10
+		Lp1         = 6.666666666666735130e-01
+		Lp2         = 3.999999999940941908e-01
+		Lp3         = 2.857142874366239149e-01
+		Lp4         = 2.222219843214978396e-01
+		Lp5         = 1.818357216161805012e-01
+		Lp6         = 1.531383769920937332e-01
+		Lp7         = 1.479819860511658591e-01
+	)
+	switch {
+	case x < -1 || IsNaN(x):
+		return NaN()
+	case x == -1:
+		return Inf(-1)
+	case IsInf(x, 1):
+		return Inf(1)
+	}
+	absx := Abs(x)
+	var f float64
+	var iu uint64
+	k := 1
+	if absx < Sqrt2M1 {
+		if absx < Small {
+			if absx < Tiny {
+				return x
+			}
+			return x - x*x*0.5
+		}
+		if x > Sqrt2HalfM1 {
+			k = 0
+			f = x
+			iu = 1
+		}
+	}
+	var c float64
+	if k != 0 {
+		var u float64
+		if absx < Two53 {
+			u = 1.0 + x
+			iu = Float64bits(u)
+			k = int((iu >> 52) - 1023)
+			if k > 0 {
+				c = 1.0 - (u - x)
+			} else {
+				c = x - (u - 1.0)
+			}
+			c /= u
+		} else {
+			u = x
+			iu = Float64bits(u)
+			k = int((iu >> 52) - 1023)
+			c = 0
+		}
+		iu &= 0x000fffffffffffff
+		if iu < 0x0006a09e667f3bcd {
+			u = Float64frombits(iu | 0x3ff0000000000000)
+		} else {
+			k++
+			u = Float64frombits(iu | 0x3fe0000000000000)
+			iu = (0x0010000000000000 - iu) >> 2
+		}
+		f = u - 1.0
+	}
+	hfsq := 0.5 * f * f
+	var s, R, z float64
+	if iu == 0 {
+		if f == 0 {
+			if k == 0 {
+				return 0
+			}
+			c += float64(k) * Ln2Lo
+			return float64(k)*Ln2Hi + c
+		}
+		w := 1.0 - 0.66666666666666666*f
+		if k == 0 {
+			return FMA(-hfsq, w, f)
+		}
+		return float64(k)*Ln2Hi - (FMA(hfsq, w, -(float64(k)*Ln2Lo+c)) - f)
+	}
+	s = f / (2.0 + f)
+	z = s * s
+	R = z * (Lp1 + z*(Lp2+z*(Lp3+z*(Lp4+z*(Lp5+z*(Lp6+z*Lp7))))))
+	hr := FMA(0.5*f, f, R)
+	if k == 0 {
+		return f - (hfsq - s*hr)
+	}
+	return float64(k)*Ln2Hi - (FMA(0.5*f, f, -(s*hr+(float64(k)*Ln2Lo+c))) - f)
+}
+
+func Log10(x float64) float64 { return Log(x) * (1 / Ln10) }
+
+func Log2(x float64) float64 {
+	frac, exp := Frexp(x)
+	if frac == 0.5 {
+		return float64(exp - 1)
+	}
+	return Log(frac)*(1/Ln2) + float64(exp)
+}

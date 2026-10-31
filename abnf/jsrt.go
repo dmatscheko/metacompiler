@@ -16510,18 +16510,6 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		// See goF32Fix in abnf/jsrtgolang.go for why it is a post-fix and not a
 		// replacement, and languages/lib/go-rt.metajs for its native twin.
 		"js_gf32fix": func(a []uint64) uint64 { return rt.goF32Fix(u(a[0]), u(a[1]), u(a[2]), u(a[3])) },
-		// Go's own complex division - Smith's algorithm plus the C99 G.5.1 fixups,
-		// which is what the gc runtime does and not the textbook formula. See
-		// goCxDiv in abnf/jsrtgolang.go. It answers a plain {re, im} object because
-		// the $cx class descriptor lives in the emitted module's scope.
-		"js_gocxdiv": func(a []uint64) uint64 {
-			re, im := goCxDiv(rt.toNumber(u(a[0])), rt.toNumber(u(a[1])),
-				rt.toNumber(u(a[2])), rt.toNumber(u(a[3])))
-			o := newJSObject()
-			o.set("re", re)
-			o.set("im", im)
-			return w(o)
-		},
 		"js_csflo": func(a []uint64) uint64 { return w(jsJFlo{f: rt.toNumber(u(a[0])), sty: floCS}) },
 		// The integral casts ((int), (long), (short), (byte)): truncate towards
 		// zero and wrap to 32 bits, which is what the compiler emitted before.

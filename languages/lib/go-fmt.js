@@ -17,7 +17,7 @@
 //   gfHIntNeg(v)        whether an integer is negative
 //   gfHNum(v)           the double a float (or a small integer) holds
 //   gfHF32(v)           whether a float is a float32
-//   gfHCx(v)            a complex value's parts, [re, im]
+//   gfHCx(v)            a complex value's parts and whether it is a complex64, [re, im, c64]
 //   gfHElems(v)         a slice's or an array's elements
 //   gfHIsBytes(v)       whether a slice or an array is a []byte or [n]byte (a
 //                       list without an element type: gfAllBytes)
@@ -982,7 +982,7 @@ function gfComplex(f, v, verb) {
     var parts = gfHCx(v)
     var g = gfCopy(f)
     g.plus = true
-    return "(" + gfFloatVerb(f, parts[0], false, verb, v) + gfFloatVerb(g, parts[1], false, verb, v) + "i)"
+    return "(" + gfFloatVerb(f, parts[0], parts[2], verb, v) + gfFloatVerb(g, parts[1], parts[2], verb, v) + "i)"
 }
 
 // fmtFloat in format.go: the sign, the padding, and the # flag's trailing zeros.

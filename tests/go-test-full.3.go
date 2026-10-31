@@ -1168,6 +1168,146 @@ func s127() {
 	check("atan2127", math.Atan2(1, -1) == 3*math.Pi/4 && math.Atan2(math.Copysign(0, -1), -2) == -math.Pi && fmt.Sprint(math.Atan2(3, 7), math.Atan2(-5, -0.5)) == "0.40489178628508343 -1.6704649792860586")
 }
 
+// ===== SECTION 128: a multiply fused into an add, as gc does on arm64 =====
+// The spec lets x*y + z round once, and gc on arm64 does whenever an operand of a
+// float add or subtract IS a multiply: through parentheses and unary minus, in
+// v += x*y, for float32 too, but not through an explicit float64() conversion.
+// With a multiply on both sides the function decides: alone in its function the
+// add fuses the right one, beside another such add (a complex multiply is one) the
+// left one. Complex multiplication and division fuse the same way. Integers do
+// not fuse. The helpers are not inlined, because an inlined call joins its
+// caller's function. The expected values are go run's on arm64.
+var fma128v = []float64{1.0000000009313226, -1, 0.37, 30, 1.0000000004656613, 0.1, 0.3, 3.7, 2.9, 1.000244140625}
+
+//go:noinline
+func dot128(a, b, c, d float64) float64 { return a*b + c*d }
+
+//go:noinline
+func dots128(a, b, c, d float64) (float64, float64) { return a*b + c*d, a*c + b*d }
+
+//go:noinline
+func cx128(z, w complex128) (complex128, complex128) { return z * w, z / w }
+
+//go:noinline
+func cxs128(z, w complex128) (complex128, complex128) { return z * w, w * w }
+
+func s128() {
+	a, m, k, t, h := fma128v[0], fma128v[1], fma128v[2], fma128v[3], fma128v[4]
+	n := len(fma128v) + 2
+	check("fma128a", fmt.Sprint(a*a+m, m+a*a, a*a-1, 1-a*a, -(a*a)+1, (a*a)+m, float64(a*a)+m, float64(n)*k-t) ==
+		"1.8626451500983188e-09 1.8626451500983188e-09 1.8626451500983188e-09 -1.8626451500983188e-09 -1.8626451500983188e-09 1.8626451500983188e-09 1.862645149230957e-09 -25.56")
+	s := m
+	s += a * a
+	u := 1.0
+	u -= a * a
+	var f, g float32 = float32(fma128v[9]), float32(fma128v[9])
+	check("fma128b", fmt.Sprint(s, u, f*g-1, 1-f*g, float32(f*g)-1) == "1.8626451500983188e-09 -1.8626451500983188e-09 0.00048834085 -0.00048834085 0.00048828125")
+	x, y := dots128(a, a, h, -h)
+	i, j := 7, 9
+	check("fma128c", fmt.Sprint(dot128(a, a, h, -h), x, y, i*j+2, 2-i*j, -(i*j)+1) == "9.313225743986381e-10 9.313225754828403e-10 4.336808689942018e-19 65 -61 -62")
+	z := complex(fma128v[5], fma128v[6])
+	w := complex(fma128v[7], fma128v[8])
+	p, q := cx128(z, w)
+	r, o := cxs128(z, w)
+	check("fma128d", fmt.Sprint(p, q, r, o) == "(-0.4999999999999999+1.4i) (0.056108597285067875+0.037104072398190045i) (-0.4999999999999999+1.4000000000000001i) (5.280000000000002+21.46i)")
+}
+
+// ===== SECTION 129: a store through a pointer takes the pointee's type =====
+// `*p = v` converts an untyped constant to the type p points at, as `x = v`
+// does: 5 stored through a *complex128 is (5+0i), 3 through a *float64 divides
+// as a float, a defined float type and a **complex128 the same. The expected
+// values are go run's.
+type cel129 float64
+
+func s129() {
+	var z complex128 = 1i
+	p := &z
+	*p = 5
+	var f float64
+	q := &f
+	*q = 3
+	var c cel129
+	r := &c
+	*r = 7
+	check("ptrst129", fmt.Sprint(z, *p, f/2, c/2) == "(5+0i) (5+0i) 1.5 3.5")
+	pp := &p
+	**pp = 2
+	var u uint8 = 250
+	s := &u
+	*s += 10
+	check("ptrst129b", fmt.Sprint(z, u) == "(2+0i) 4")
+}
+
+// ===== SECTION 130: math/cmplx's trigonometric functions and math's hyperbolic ones =====
+// cmplx Sin, Cos, Tan, Cot, Sinh, Cosh, Tanh, Asin, Acos, Atan and their
+// hyperbolic inverses, over math Sinh, Cosh, Tanh, Asin, Acos, Asinh, Acosh,
+// Atanh, Log1p, Log2 and Log10; Tan near a pole takes the series. The expected
+// values are go run's on arm64.
+func s130() {
+	z := complex(0.75, -1.25)
+	w := complex(0.3, 0.2)
+	check("ctrig130", fmt.Sprint(cmplx.Sin(z), cmplx.Cos(z), cmplx.Tan(z)) ==
+		"(1.2872229100264918-1.1721063598927026i) (1.381738730634259+1.0919301355539746i) (0.16080778591620642-0.9753632850312357i)")
+	check("chyp130", fmt.Sprint(cmplx.Sinh(z), cmplx.Cosh(z), cmplx.Tanh(z)) ==
+		"(0.2592948545511628-1.2286345240950955i) (0.40824259187796885-0.7803659308458533i) (1.372607570533783-0.38579595260975064i)")
+	check("cinv130", fmt.Sprint(cmplx.Asin(z), cmplx.Acos(z), cmplx.Atan(z)) ==
+		"(0.45327617763879385-1.1323936316053085i) (1.1175201491561026+1.1323936316053085i) (1.1071487177940904-0.5493061443340549i)")
+	check("cinvh130", fmt.Sprint(cmplx.Asinh(w), cmplx.Acosh(w), cmplx.Atanh(w), cmplx.Cot(w), cmplx.Tan(complex(math.Pi/2, 1e-9))) ==
+		"(0.3010735394466424+0.19245144716045318i) (0.20772637624812318+1.2727619269517418i) (0.29574992023641433+0.21547449370018829i) (2.207905035537343-1.6061528688158473i) (61.232339957367344+9.999999999999963e+08i)")
+	check("mhyp130", fmt.Sprint(math.Sinh(0.3), math.Cosh(-2.5), math.Tanh(0.4), math.Asin(0.6), math.Acos(-0.2), math.Asinh(3), math.Acosh(1.5), math.Atanh(0.3)) ==
+		"0.3045202934471426 6.132289479663686 0.3799489622552249 0.6435011087932843 1.7721542475852274 1.8184464592320668 0.9624236501192069 0.30951960420311175")
+	check("mlog130", fmt.Sprint(math.Log1p(1e-5), math.Log1p(-0.3), math.Log2(10), math.Log10(2), math.Log2(8)) ==
+		"9.999950000333332e-06 -0.35667494393873234 3.321928094887362 0.3010299956639812 3")
+}
+
+// ===== SECTION 131: a package calls its own function; a constant before a call =====
+// The main file's Abs below does not change what math's functions, which call
+// math's own Abs, answer. A call's arguments run their calls first (gc's order),
+// and a constant or nil argument before them is converted where it stands. The
+// expected values are go run's.
+func Abs(v complex128) complex128 { return v * v }
+
+func add131(a, b float64) float64 { return a + b }
+
+func half131(a float64) float64 { return a / 2 }
+
+func pick131(a []int, b string) string { return fmt.Sprint(len(a), b) }
+
+func s131() {
+	x := []float64{2.5, -7.25}
+	check("ownfn131", fmt.Sprint(math.Round(x[0]), math.Mod(x[1], x[0]), math.Float64bits(x[0]), Abs(2i)) == "3 -2.25 4612811918334230528 (-4+0i)")
+	var z float64 = 1
+	check("kfirst131", fmt.Sprint(add131(0, half131(x[0])), add131(0.5, half131(z)), pick131(nil, fmt.Sprint(z)), math.Max(0, math.Abs(x[1]))) == "1.25 1017.25")
+	var p, q float64 = 0, half131(x[1])
+	check("kfirst131b", fmt.Sprint(p, q) == "0 -3.625")
+}
+
+// ===== SECTION 132: complex64 =====
+// complex(float32, float32) and complex64(x) make a complex64, whose parts are
+// float32: + and - round in float32, * and / compute in float64 and narrow, an
+// untyped constant beside one converts first, real and imag answer float32, and
+// it prints at 32 bits. A complex64 slot - a var, an element, a field, a map key,
+// an appended constant - holds one. The expected values are go run's.
+var c132 = []float32{0.1, 0.3, 3.7, 2.9}
+
+type s132 struct{ z complex64 }
+
+func s132f() {
+	z := complex(c132[0], c132[1])
+	w := complex(c132[2], c132[3])
+	check("c64ops132", fmt.Sprint(z, w, z+w, z-w, z*w, z/w, -z, 1/z, z*2, z+1) ==
+		"(0.1+0.3i) (3.7+2.9i) (3.8+3.2i) (-3.6000001-2.6000001i) (-0.50000006+1.4000001i) (0.056108598+0.037104074i) (-0.1-0.3i) (0.99999994-3i) (0.2+0.6i) (1.1+0.3i)")
+	check("c64parts132", fmt.Sprint(real(z), imag(w), real(z)*2) == "0.1 2.9 0.2" && fmt.Sprintf("%T %T %.3f", z, real(z), w) == "complex64 float32 (3.700+2.900i)")
+	c128 := complex(float64(c132[0]), float64(c132[1]))
+	var zero complex64
+	ws := []complex64{1, 2i}
+	ws = append(ws, -1i, 0.5)
+	p := s132{3}
+	m := map[complex64]int{z: 7}
+	check("c64conv132", fmt.Sprint(complex64(c128), complex128(z), zero, ws, p, m[z]) ==
+		"(0.1+0.3i) (0.10000000149011612+0.30000001192092896i) (0+0i) [(1+0i) (0+2i) (0-1i) (0.5+0i)] {(3+0i)} 7" && fmt.Sprintf("%T", ws[2]) == "complex64")
+}
+
 func main() {
 	s94()   // SECTION-CALL 94
 	s95()   // SECTION-CALL 95
@@ -1201,6 +1341,11 @@ func main() {
 	s125()  // SECTION-CALL 125
 	s126()  // SECTION-CALL 126
 	s127()  // SECTION-CALL 127
+	s128()  // SECTION-CALL 128
+	s129()  // SECTION-CALL 129
+	s130()  // SECTION-CALL 130
+	s131()  // SECTION-CALL 131
+	s132f() // SECTION-CALL 132
 	fmt.Println("full:", checks, "checks,", fails, "failures")
 	os.Exit(fails)
 }

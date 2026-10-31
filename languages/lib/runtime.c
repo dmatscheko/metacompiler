@@ -5609,6 +5609,125 @@ int d_isinf_d(double x) { union DB u; u.d = x; return d_is_inf(u.l); }
 double d_bits_to_d(long b) { union DB u; u.l = b; return u.d; }
 long d_d_to_bits(double x) { union DB u; u.d = x; return u.l; }
 
+long fma_nz(long x) { if (x != 0) { return 1; } return 0; }
+/* A pattern's sign; em[0] its biased exponent and em[1] its mantissa with the
+ * implicit bit set, a subnormal normalized. */
+long fma_split(long b, long *em) {
+	long e = u_shr64(b, 52) & 2047;
+	long m = b & 4503599627370495L;
+	long sh;
+	if (e == 0) {
+		sh = u_lzc64(m) - 11;
+		em[0] = 1 - sh;
+		em[1] = m << sh;
+	} else {
+		em[0] = e;
+		em[1] = m | 4503599627370496L;
+	}
+	return u_shr64(b, 63);
+}
+/* u[0]:u[1] shifted left by n < 128, in place. */
+void fma_shl(long *u, long n) {
+	if (n == 0) { return; }
+	if (n >= 64) { u[0] = u[1] << (n - 64); u[1] = 0; return; }
+	u[0] = (u[0] << n) | u_shr64(u[1], 64 - n);
+	u[1] = u[1] << n;
+}
+/* u[0]:u[1] shifted right by n, the bits shifted out ORed into the lowest bit. */
+void fma_shr_sticky(long *u, long n) {
+	long lost;
+	if (n == 0) { return; }
+	if (n >= 128) { u[1] = fma_nz(u[0] | u[1]); u[0] = 0; return; }
+	if (n >= 64) {
+		lost = u[1];
+		if (n > 64) { lost = lost | (u[0] & ((1L << (n - 64)) - 1)); }
+		u[1] = u_shr64(u[0], n - 64) | fma_nz(lost);
+		u[0] = 0;
+		return;
+	}
+	lost = u[1] & ((1L << n) - 1);
+	u[1] = u_shr64(u[1], n) | (u[0] << (64 - n)) | fma_nz(lost);
+	u[0] = u_shr64(u[0], n);
+}
+/* math/fma.go's arithmetic: the 106-bit product, the addend aligned to it with a
+ * sticky bit, one add or subtract, and one round to nearest even. */
+long fma_bits(long bx, long by, long bz) {
+	long xem[2]; long yem[2]; long zem[2]; long p[2]; long q[2]; long lo[1]; long cy[1];
+	long xs = fma_split(bx, xem);
+	long ys = fma_split(by, yem);
+	long zs = fma_split(bz, zem);
+	long ps = xs ^ ys;
+	long pe = xem[0] + yem[0] - 1023 + 1;
+	long ze = zem[0];
+	long t; long nz; long m; long n; long top;
+	p[0] = u_mul64(xem[1] << 10, yem[1] << 11, lo);
+	p[1] = lo[0];
+	q[0] = zem[1] << 10;
+	q[1] = 0;
+	t = u_shr64(p[0], 62) & 1;
+	if (t == 0) { fma_shl(p, 1); pe = pe - 1; }
+	if (pe < ze || (pe == ze && u_lt64(p[0], q[0]))) {
+		t = ps; ps = zs; zs = t;
+		t = pe; pe = ze; ze = t;
+		t = p[0]; p[0] = q[0]; q[0] = t;
+		t = p[1]; p[1] = q[1]; q[1] = t;
+	}
+	if (ps != zs && pe == ze && p[0] == q[0] && p[1] == q[1]) { return 0; }
+	fma_shr_sticky(q, pe - ze);
+	if (ps == zs) {
+		p[1] = u_add64(p[1], q[1], 0, cy);
+		p[0] = u_add64(p[0], q[0], cy[0], cy);
+		top = u_shr64(p[0], 63);
+		pe = pe - (1 - top);
+		fma_shr_sticky(p, 64 + top);
+		m = p[1];
+	} else {
+		t = p[1] - q[1];
+		cy[0] = 0;
+		if (u_lt64(p[1], q[1])) { cy[0] = 1; }
+		p[1] = t;
+		p[0] = p[0] - q[0] - cy[0];
+		nz = u_lzc64(p[0]);
+		if (nz == 64) { nz = nz + u_lzc64(p[1]); }
+		pe = pe - nz;
+		fma_shl(p, nz - 1);
+		m = p[0] | fma_nz(p[1]);
+	}
+	if (pe > 1022 + 1023 || (pe == 1022 + 1023 && u_shr64(m + 512, 63) == 1)) {
+		return (ps << 63) | DINF;
+	}
+	if (pe < 0) {
+		n = 0 - pe;
+		if (n >= 64) { m = fma_nz(m); }
+		else { m = u_shr64(m, n) | fma_nz(m & ((1L << n) - 1)); }
+		pe = 0;
+	}
+	/* Half to even: a tie (low ten bits exactly 1 << 9) clears the last bit. */
+	t = m & 1023;
+	m = u_shr64(m + 512, 10);
+	if (t == 512) { m = m & (0 - 2); }
+	if (m == 0) { pe = 0; }
+	return (ps << 63) + (pe << 52) + m;
+}
+
+/* fma (host id 113): x*y + z rounded ONCE, as arm64's FMADD and Go's math.FMA compute it
+ * (the Go twin calls math.FMA). Zeros, infinities and NaNs involve at most one
+ * rounding, so the plain operations answer them; everything else is fma_bits.
+ * A zero z leaves RN(x*y), whose sign is the exact product's even when it
+ * underflows, which `x*y + 0.0` would lose. */
+double d_fma(double x, double y, double z) {
+	long bx = d_d_to_bits(x);
+	long by = d_d_to_bits(y);
+	long bz = d_d_to_bits(z);
+	long ex = u_shr64(bx, 52) & 2047;
+	long ey = u_shr64(by, 52) & 2047;
+	long ez = u_shr64(bz, 52) & 2047;
+	if (x == 0.0 || y == 0.0 || ex == 2047 || ey == 2047) { return x * y + z; }
+	if (z == 0.0) { return x * y; }
+	if (ez == 2047) { return z; }
+	return d_bits_to_d(fma_bits(bx, by, bz));
+}
+
 /* mPi4: the binary digits of 4/pi, Go's trig_reduce.go table. Read three
  * consecutive entries per reduction, so the linear chain costs nothing that
  * matters on a path taken only for |x| >= 2^29. */
@@ -6626,6 +6745,8 @@ long host_call(long id, long self, long args) {
 	 * the goja grammar host also uses (installGojaMathSurface). */
 	case 92: { return mk_num(d_from_long(d_clz32(to_int32(arg_num(args, 0))))); }
 	case 93: { return mk_dnum(d_fround(arg_d(args, 0))); }
+	/* fma(x, y, z): x*y + z rounded once. Twin of fmaHost in abnf/jsrtint.go. */
+	case 113: { return mk_dnum(d_fma(arg_d(args, 0), arg_d(args, 1), arg_d(args, 2))); }
 	/* fnMeta(f, key) / fnMetaSet(f, name, length): see js_jsfnmeta. */
 	case 94: { return fn_meta_get(arg_at(args, 0), arg_str(args, 1)); }
 	case 95: {
@@ -7807,6 +7928,7 @@ void boot(void) {
 	seed_root("scopeDecl", mk_host(68));
 	seed_root("isGenerator", mk_host(69));
 	seed_root("floPrec", mk_host(70));
+	seed_root("fma", mk_host(113));
 	seed_root("fnMeta", mk_host(94));
 	seed_root("fnMetaSet", mk_host(95));
 	seed_root("arrKind", mk_host(99));

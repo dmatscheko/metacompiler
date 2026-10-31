@@ -620,6 +620,7 @@ function gopObj(o, depth) {
     // are cxStr in go-interpreter.abnf (which has the details) and the $cx arm of
     // gopObj in abnf/jsrtgolang.go.
     if (name == "$cx") {
+        if (goIsF32(o.re)) { return "(" + g1F32Str(goNum(o.re)) + goCxSign(g1F32Str(goNum(o.im))) + "i)" }
         return "(" + floStr(flo(goNum(o.re), 1)) + goCxSign(floStr(flo(goNum(o.im), 1))) + "i)"
     }
 
@@ -898,7 +899,79 @@ function js_gf32fix(op, rr, l, r) {
     return a >= b
 }
 
-// js_gocxdiv is Go's OWN complex division and not the textbook formula. The gc
+// js_gofma(x, y, z, code): z +- x*y or x*y +- z rounded ONCE, the multiply and
+// add gc fuses on arm64; undefined when it is not a float operation, and the
+// emitter then emits the two operators. code: 1 subtract, 2 the product is the
+// left operand, 4 the product is negated, 8 float32, 16 the static type is a
+// float. fma is the floor's d_fma (host id 113). Twin of goFmaStep in
+// go-interpreter.abnf and js_gofma in abnf/jsrtgolang.go.
+function js_gofma(x, y, z, code) {
+    var c = goNum(code)
+    var fl = c >= 16
+    if (fl) { c = c - 16 }
+    var f32 = c >= 8
+    if (f32) { c = c - 8 }
+    var neg = c >= 4
+    if (neg) { c = c - 4 }
+    if (!fl && !floIs(x) && !floIs(y)) { return undefined }
+    if (!goFmaNum(x) || !goFmaNum(y) || !goFmaNum(z)) { return undefined }
+    var p = goNum(x)
+    var q = goNum(y)
+    var r = goNum(z)
+    if (neg !== (c == 1)) { p = -p }
+    if (c == 3) { r = -r }
+    if (f32 || goIsF32(x) || goIsF32(y) || goIsF32(z)) { return flo(goFma32(rtF32Round(p), rtF32Round(q), rtF32Round(r)), 4) }
+    return flo(fma(p, q, r), 1)
+}
+function goFmaNum(v) { return floIs(v) || (typeof v == "number" && !sintIs(v)) }
+// x*y + z rounded once to binary32, for binary32 x, y and z: see goFma32 in
+// abnf/jsrtgolang.go. Twin of gFma32 in go-interpreter.abnf.
+function goFma32(x, y, z) {
+    var p = x * y
+    var s = p + z
+    var r = rtF32Round(s)
+    var d = s - r
+    if (d !== 0 && r - r === 0) {
+        var o = r + 2 * d
+        if (rtF32Round(o) === o && o - s === d) {
+            var bb = s - p
+            var e = (p - (s - bb)) + (z - bb)
+            if (e !== 0 && (e > 0) === (d > 0)) { return o }
+        }
+    }
+    return r
+}
+
+// js_gocxop(op, a, b, c, d): one complex operation on the parts (a+bi) and
+// (c+di), as a plain {re, im} object - the emitter builds the $cx. The operations
+// and the complex64 width are goCxOp's in abnf/jsrtgolang.go; twin of the cx*
+// functions in go-interpreter.abnf.
+function js_gocxop(op, av, bv, cv, dv) {
+    var o = goNum(op)
+    var w32 = o == 7 || (o != 8 && (goIsF32(av) || goIsF32(bv) || goIsF32(cv) || goIsF32(dv)))
+    if (o == 6 && !w32) { return {re: av, im: bv} }
+    if (o == 9 && !w32) { return {re: flo(goNum(av), 1), im: 0} }
+    var a = goCxIn(av, w32)
+    var b = goCxIn(bv, w32)
+    var c = goCxIn(cv, w32)
+    var d = goCxIn(dv, w32)
+    var re = a
+    var im = b
+    if (o == 0) { re = a + c; im = b + d }
+    else if (o == 1) { re = a - c; im = b - d }
+    else if (o == 2) { re = fma(-b, d, a * c); im = fma(b, c, a * d) }
+    else if (o == 3) { re = fma(-b, d, a * c); im = fma(a, d, b * c) }
+    else if (o == 4) { var q = goCxDivParts(a, b, c, d); re = q.re; im = q.im }
+    else if (o == 5) { re = -a; im = -b }
+    if (w32) { return {re: flo(rtF32Round(re), 4), im: flo(rtF32Round(im), 4)} }
+    return {re: re, im: im}
+}
+function goCxIn(v, w32) {
+    var x = v === undefined ? 0 : goNum(v)
+    return w32 ? rtF32Round(x) : x
+}
+
+// goCxDivParts is Go's OWN complex division and not the textbook formula. The gc
 // runtime's complex128div (runtime/complex.go) is SMITH'S ALGORITHM - R. L.
 // Smith, "Algorithm 116: Complex division", CACM 5(8):435, 1962 - followed by the
 // C99 G.5.1 fixups that recover the infinities a NaN pair hides. The difference
@@ -907,30 +980,25 @@ function js_gf32fix(op, rr, l, r) {
 // (...+0.008000000000000002i), and (0.1+0.2i)/(-0.0+0i) is (+Inf+Infi) where the
 // textbook formula gives (NaN+NaNi).
 //
-// It answers a plain {re, im} object rather than a $cx: the class descriptor
-// lives in the emitted module's scope, so the emitter builds the complex. The
-// twins are cxDiv in languages/go-interpreter.abnf and goCxDiv in
+// The twins are cxDiv in languages/go-interpreter.abnf and goCxDiv in
 // abnf/jsrtgolang.go; keep the three in step.
-function js_gocxdiv(av, bv, cv, dv) {
-    var a = goNum(av)
-    var b = goNum(bv)
-    var c = goNum(cv)
-    var d = goNum(dv)
+function goCxDivParts(a, b, c, d) {
     var inf = 1 / 0
     var e = 0
     var f = 0
     // Scaling by the LARGER component keeps the ratio at most 1, which is what
     // stops 1e300/1e300 overflowing the denominator.
+    // complex128div's four multiply-adds are fused (go-constfold.js).
     if (goAbsF(c) >= goAbsF(d)) {
         var ra = d / c
-        var de = c + ra * d
-        e = (a + b * ra) / de
-        f = (b - a * ra) / de
+        var de = fma(ra, d, c)
+        e = fma(b, ra, a) / de
+        f = fma(-a, ra, b) / de
     } else {
         var rb = c / d
-        var de2 = d + rb * c
-        e = (a * rb + b) / de2
-        f = (b * rb - a) / de2
+        var de2 = fma(rb, c, d)
+        e = fma(a, rb, b) / de2
+        f = fma(b, rb, -a) / de2
     }
     if (e !== e && f !== f) {
         if (c === 0 && d === 0 && (a === a || b === b)) {
@@ -1015,7 +1083,7 @@ function gopFmtTy(a) {
         return "float64"
     }
     var cls = goClassOf(a)
-    if (cls !== undefined && goStrOf(cls.__name) == "$cx") { return "complex128" }
+    if (cls !== undefined && goStrOf(cls.__name) == "$cx") { return goIsF32(a.re) ? "complex64" : "complex128" }
     return ""
 }
 
@@ -1024,7 +1092,7 @@ function gfHKind(v) {
     if (ty == "nil") { return "nil" }
     if (ty == "bool" || ty == "string") { return ty }
     if (ty == "float64" || ty == "float32") { return "float" }
-    if (ty == "complex128") { return "complex" }
+    if (ty == "complex128" || ty == "complex64") { return "complex" }
     if (ty != "") { return "int" }
     if (Array.isArray(v)) { return "list" }
     if (goIsDict(v)) { return "map" }
@@ -1053,7 +1121,7 @@ function gfHIntMag(v) {
 }
 function gfHNum(v) { return goNum(v) }
 function gfHF32(v) { return goIsF32(v) }
-function gfHCx(v) { return [goNum(v.re), goNum(v.im)] }
+function gfHCx(v) { return [goNum(v.re), goNum(v.im), goIsF32(v.re)] }
 function gfHElems(v) {
     if (Array.isArray(v)) { return v }
     var back = v.a
@@ -2579,7 +2647,7 @@ function goTypeNameOf(v) {
     var cls = goClassOf(v)
     if (cls !== undefined) {
         var nm = goStrOf(cls.__name)
-        if (nm == "$cx") { return "complex128" }
+        if (nm == "$cx") { return goIsF32(v.re) ? "complex64" : "complex128" }
         return nm
     }
     if (Array.isArray(v)) { return "slice" }

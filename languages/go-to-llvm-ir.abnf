@@ -471,14 +471,17 @@ Block       <~~ push(makeBlockStmt(takeAll())); cScopeExit() ~~>
 // A function's body is the SAME block as its parameters and results: when a `:=`
 // at its top level names one of them (cShortName), it runs in their scope, so
 // `i, j := 0, n` with i a named result assigns that result instead of shadowing it.
-FuncBody    <~~ var fbi = takeAll(); push(cBodyShared() ? makeSeq(fbi) : makeBlockStmt(fbi)); cScopeExit() ~~>
-            = "{" CScopeOn { Statement } "}" ;
+FuncBody    <~~ var fbi = takeAll(); push(cBodyShared() ? makeSeq(fbi) : makeBlockStmt(fbi)); cScopeExit(); goFmaFnExit() ~~>
+            = "{" CScopeOn FmaFnOn { Statement } "}" ;
 // Always-empty matches whose only purpose is their TAG, the shape NoBody uses: Go
 // source holds no NUL byte, so the optional never consumes anything. A rule's own tag
 // runs AFTER its children, and these three have to run before theirs - a '{' opens a
 // named-constant scope, a switch body takes its truncation mark, and a 'case' spends
 // it (Go scopes each case clause, while this body is parsed flat).
 CScopeOn    <~~ cScopeEnter() ~~> = [ "\x00" ] ;
+// A function body is one SSA function to gc, which decides which of two
+// multiplies an add fuses (goFmaLeft in go-constfold.js).
+FmaFnOn     <~~ goFmaFnEnter() ~~> = [ "\x00" ] ;
 CSwOn       <~~ cSwEnter() ~~> = [ "\x00" ] ;
 CCaseOn     <~~ cSwCase() ~~> = [ "\x00" ] ;
 
@@ -619,7 +622,7 @@ IdxE        <~~ var ie = pop(); push(ie); push({ksty: stAt(up.pos), kr: goKRec(u
 
 ExprList    = StoreExpr { "," StoreExpr } ;
 // One value of a := / = / var, followed by the static type it reports (goSplitSty).
-StoreExpr   <~~ var se = pop(); push(se); push({sty: stStoreAt(up.pos), rn: goIsRuneC(up.pos), kr: goKRec(up.start, up.pos), pu: goPure(up.start, up.pos), nl: goNilSrc(up.start, up.pos)}) ~~> = Expression ;
+StoreExpr   <~~ var se = pop(); push(se); push({sty: stStoreAt(up.pos), rn: goIsRuneC(up.pos), kr: goKRec(up.start, up.pos), pu: goPure(up.start, up.pos), nl: goNilSrc(up.start, up.pos), fm: fmaAt(up.pos)}) ~~> = Expression ;
 
 Empty       <~~ push(function(b) { return b }) ~~>
             = ";" ;
@@ -1000,7 +1003,7 @@ PtrTypeT    = "*" Type ;
 // `interface` and its SkipBlock eats the `{}`.
 ConvType    <~~ push({conv: firstType(up.in)}) ~~>
             = "[" "]" Type | ArrayTypeT | MapTypeT | ChanTypeT | IfaceTypeT | "any" KwEnd | "error" KwEnd | ScalarType KwEnd ;
-ScalarType  = "uintptr" | "float32" | "float64" | "uint16" | "uint32" | "uint64"
+ScalarType  = "uintptr" | "float32" | "float64" | "complex128" | "complex64" | "uint16" | "uint32" | "uint64"
             | "int16" | "int32" | "int64" | "uint8" | "int8" | "byte" | "rune"
             | "uint" | "int" ;
 
@@ -1637,9 +1640,12 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             // does: emitBin returns a value and cannot move the caller's basic block,
             // so the branch has to happen behind a js_call. Gated on usesComplex, so a
             // program with no complex value emits none of it.
-            if (usesComplex) { return {b: r.b, v: emitHelper(r.b, "$cxneg", [r.v])} }
-            return {b: r.b, v: callExt(r.b, "js_gineg", [r.v])}
+            return emitNegV(r.b, r.v)
         }
+    }
+    function emitNegV(b, v) {
+        if (usesComplex) { return {b: b, v: emitHelper(b, "$cxneg", [v])} }
+        return {b: b, v: callExt(b, "js_gineg", [v])}
     }
     function makeCompl(items) {
         var t = items[0]
@@ -1891,7 +1897,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     }
     function noteTy(s) {
         if (typeof s == "string" && s.indexOf("float32") >= 0) { usesF32 = true }
-        if (typeof s == "string" && s.indexOf("complex128") >= 0) { usesComplex = true }
+        if (typeof s == "string" && (s.indexOf("complex128") >= 0 || s.indexOf("complex64") >= 0)) { usesComplex = true }
         if (typeof s != "string") { return s }
         return goArrConstLen(s)
     }
@@ -1938,6 +1944,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         var it = goIntTy(goTyWord(ty))
         if (it != null) { return emitGiConv(b, v, it) }
         if (goTyWord(ty) == "complex128") { return emitHelper(b, "$cxadopt", [v]) }
+        if (goTyWord(ty) == "complex64") { return emitHelper(b, "$cxto64", [v]) }
         return v
     }
     // goAssignAdopt's conversion (go-constfold.js). Twin of goAdoptThunk in
@@ -2118,11 +2125,18 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         if (folded != null) { return goTkFolded(folded, tk, pos, sty) }
         if (ty == null) { goKOperands(items, ts, sty) }
         goShiftCounts(items, ops, ts)
+        // Read BEFORE the clear below, which also erases the last operand's entry.
+        var fplan = goFmaPlan(items, ops, sty)
+        var fnegs = goFmaSwap(items, ts, fplan)
         ts = goRunOrder(items, ts)
         regConst(pos, null)
         regCFn(pos, cfn)
         regSt(pos, sty)
         regTk(pos, tk)
+        regFma(pos, goFmaProduct(items, ops, sty, goFmaPair(ts, ops, ty)))
+        if (fplan != null) { return goFmaRunC(ts, ops, fplan, fnegs, ty, sty) }
+        var cxf = goFmaCxRun(items, ops, sty)
+        if (cxf != null) { return goCxRunC(ts, ops, cxf) }
         if (ty == null) {
             var flat = [ts[0]]
             for (var j = 0; j < ops.length; j++) { flat.push(ops[j]); flat.push(ts[j + 1]) }
@@ -2140,6 +2154,108 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             }
             return {b: b, v: v}
         }
+    }
+
+    // ----- the fused multiply-add (go-constfold.js has the rule) -----
+    // A fused operand's thunk is swapped for its multiply's PAIR thunk, which
+    // answers the two factors as v and q instead of their rounded product; the
+    // answer is each step's neg. Twin of goFmaSwap in go-interpreter.abnf.
+    function goFmaSwap(items, ts, plan) {
+        var negs = []
+        if (plan == null) { return negs }
+        for (var k = 0; k < plan.length; k++) {
+            var f = plan[k] == 0 ? null : goFmaOperand(items, k, plan[k])
+            if (f != null) { ts[plan[k] == 2 ? 0 : k + 1] = f.pair }
+            if (plan[k] >= 10) { ts[0] = goFmaOperand(items, k, 2).pair }
+            negs.push(f != null && f.neg)
+        }
+        return negs
+    }
+    // A run of static complex type: one goFmaCxMul record per operator, null for
+    // anything but '*'. Twin of goFmaCxRun in go-interpreter.abnf.
+    function goFmaCxRun(items, ops, sty) {
+        var cxs = []
+        var any = false
+        for (var k = 0; k < ops.length; k++) {
+            var cx = ops[k] == "*" ? goFmaCxMul(sty, goFmaText(items[1].as, items[3 * k + 4].at)) : null
+            if (cx != null) { any = true }
+            cxs.push(cx)
+        }
+        return any ? cxs : null
+    }
+    function goCxRunC(ts, ops, cxs) {
+        return function(b) {
+            var r = ts[0](b)
+            b = r.b
+            var v = r.v
+            for (var k = 0; k < ops.length; k++) {
+                var rr = ts[k + 1](b)
+                b = rr.b
+                if (cxs[k] != null && usesComplex) { v = emitCxCall(b, goFmaCxLeft(cxs[k]) ? "*L" : "*", v, rr.v) }
+                else { v = emitBin(b, ops[k], v, rr.v) }
+            }
+            return {b: b, v: v}
+        }
+    }
+    function goFmaPair(ts, ops, ty) {
+        var n = ops.length
+        if (ops[n - 1] != "*") { return null }
+        return function(b) {
+            var r = ts[0](b)
+            b = r.b
+            var a = r.v
+            for (var k = 0; k + 1 < n; k++) {
+                var rr = ts[k + 1](b)
+                b = rr.b
+                a = ty == null ? emitBin(b, ops[k], a, rr.v) : emitTypedBin(b, ty, ops[k], a, rr.v)
+            }
+            var rq = ts[n](b)
+            return {b: rq.b, v: a, q: rq.v}
+        }
+    }
+    function goFmaRunC(ts, ops, plan, negs, ty, sty) {
+        var f32 = ty == "float32" || stBare(sty) == "float32"
+        var fl = ty != null || isFloatTy(stBare(sty))
+        return function(b) {
+            var r = ts[0](b)
+            b = r.b
+            var v = r.v
+            var vq = r.q
+            for (var k = 0; k < ops.length; k++) {
+                var rr = ts[k + 1](b)
+                b = rr.b
+                if (plan[k] >= 10) {
+                    // Both operands are pairs: the one not fused is rounded first.
+                    var sd = goFmaSide(plan[k])
+                    if (sd == 1) { v = emitBin(b, "*", v, vq) } else { rr = {b: b, v: emitBin(b, "*", rr.v, rr.q), q: hUndef} }
+                    var e0 = sd == 1 ? emitFmaStep(b, ops[k], v, rr.v, rr.q, 1, false, fl, f32) : emitFmaStep(b, ops[k], rr.v, v, vq, 2, false, fl, f32)
+                    b = e0.b
+                    v = e0.v
+                }
+                else if (plan[k] == 1) { var e1 = emitFmaStep(b, ops[k], v, rr.v, rr.q, 1, negs[k], fl, f32); b = e1.b; v = e1.v }
+                else if (plan[k] == 2) { var e2 = emitFmaStep(b, ops[k], rr.v, v, vq, 2, negs[k], fl, f32); b = e2.b; v = e2.v }
+                else if (ty == null) { v = emitBin(b, ops[k], v, rr.v) }
+                else { v = emitTypedBin(b, ty, ops[k], v, rr.v) }
+            }
+            return {b: b, v: v}
+        }
+    }
+    // One fused step: z op x*y (side 1) or x*y op z (side 2), the product negated
+    // when neg. js_gofma rounds a float multiply-add once and answers undefined for
+    // anything else - integers, complex values - which then takes the multiply and
+    // the add as written; fl (the run is statically a float) leaves that arm out.
+    // Twin of goFmaStep in go-interpreter.abnf.
+    function emitFmaStep(b, op, z, x, y, side, neg, fl, f32) {
+        var code = (op == "-" ? 1 : 0) + (side == 2 ? 2 : 0) + (neg ? 4 : 0) + (f32 ? 8 : 0) + (fl ? 16 : 0)
+        var r = callExt(b, "js_gofma", [x, y, z, emitNum(b, code)])
+        if (fl) { return {b: b, v: r} }
+        return emitSelectI1(b, b.NewICmp(llvm.enum.IPredNE, r, hUndef),
+            function(tb) { return {b: tb, v: r} },
+            function(eb) {
+                var p = emitBin(eb, "*", x, y)
+                if (neg) { var n = emitNegV(eb, p); eb = n.b; p = n.v }
+                return {b: eb, v: side == 1 ? emitBin(eb, op, z, p) : emitBin(eb, op, p, z)}
+            })
     }
 
     // STRUCT TYPE NAMES ARE PER PACKAGE, and the key carries the package because the
@@ -2309,27 +2425,39 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         return false
     }
     // An operand list in gc's order (goNeedsOrder, go-constfold.js): the FIRST
-    // operand emits every impure one, in source order, and each later impure operand
-    // answers the value already emitted, which dominates it. Twin of goOrderThunks
-    // in go-interpreter.abnf.
-    function goOrderThunks(ts, pures) {
+    // operand that is not FIXED (a constant or the literal nil, which the caller may
+    // replace; fixed may be null) emits every impure one, in source order, and each
+    // later impure operand answers the value already emitted, which dominates it. A
+    // fixed operand is emitted where it stands. Twin of goOrderThunks in
+    // go-interpreter.abnf.
+    function goOrderThunks(ts, pures, fixed) {
         if (!goNeedsOrder(pures)) { return ts }
-        var held = {v: []}
-        var out = [goOrderFirst(ts, pures, held)]
-        for (var i = 1; i < ts.length; i++) { out.push(pures[i] ? ts[i] : goOrderHeld(held, i)) }
+        var h = 0
+        while (h < ts.length && fixed != null && fixed[h]) { h = h + 1 }
+        if (h == ts.length) { return ts }
+        var held = {v: [], q: []}
+        var out = []
+        for (var i = 0; i < ts.length; i++) {
+            if (i == h) { out.push(goOrderFirst(ts, pures, fixed, held, h)) }
+            else if (pures[i] || (fixed != null && fixed[i])) { out.push(ts[i]) }
+            else { out.push(goOrderHeld(held, i)) }
+        }
         return out
     }
-    function goOrderFirst(ts, pures, held) {
+    // A held operand keeps q too: the second factor of a fused multiply's pair.
+    function goOrderFirst(ts, pures, fixed, held, h) {
         return function(b) {
             var r = []
+            var q = []
             for (var j = 0; j < ts.length; j++) {
-                if (pures[j]) { r.push(hUndef) } else { var e = ts[j](b); b = e.b; r.push(e.v) }
+                if (pures[j] || (fixed != null && fixed[j])) { r.push(hUndef); q.push(hUndef) } else { var e = ts[j](b); b = e.b; r.push(e.v); q.push(e.q == undefined ? hUndef : e.q) }
             }
             held.v = r
-            return pures[0] ? ts[0](b) : {b: b, v: r[0]}
+            held.q = q
+            return pures[h] ? ts[h](b) : {b: b, v: r[h], q: q[h]}
         }
     }
-    function goOrderHeld(held, i) { return function(b) { return {b: b, v: held.v[i]} } }
+    function goOrderHeld(held, i) { return function(b) { return {b: b, v: held.v[i], q: held.q[i]} } }
     // emitArgs plus Go's f(xs...): js_gospread flattens the last element in place.
     function emitArgs2(b, args, spread) {
         var ea = emitArgs(b, args)
@@ -2948,7 +3076,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             estys.push("")
             pures.push(false)
         }
-        return {args: plain ? goOrderThunks(args, pures) : args, estys: estys}
+        return {args: plain ? goOrderThunks(args, pures, null) : args, estys: estys}
     }
     // An element's static type; a type a box is made for is declared up front
     // (declDtClasses runs before the program's code is emitted).
@@ -3294,46 +3422,30 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                             function(eb) { return {b: eb, v: emitNum(eb, 0)} })
         return {b: ri.b, re: rr.v, im: ri.v}
     }
-    // The complex form of one operator, emitted into its own block. The parts are
-    // plain numbers, so the arithmetic goes to the externs DIRECTLY: emitBin would
-    // truncate '- * /' to an integer and 0.5 is a legal real part.
-    //
-    // THE ADDS ARE js_add AND NOT js_jadd: js_jadd carries an int32 FAST PATH, and
-    // -0.0 is one of the operands it takes, so `-0.0 + -0.0` would come back +0.0 -
-    // the imaginary part of `(1-1i) * (0-0i)`, which go prints `(0-0i)`. js_add is the
-    // generic add, which is IEEE for a pair of numbers.
+    // The complex form of one operator, emitted into its own block.
     function emitCxOp(b, op, l, r) {
         var lp = emitCxParts(b, l)
         b = lp.b
         var rp = emitCxParts(b, r)
         b = rp.b
-        if (op == "+") { return {b: b, v: emitNewCx(b, callExt(b, "js_add", [lp.re, rp.re]),
-                                                      callExt(b, "js_add", [lp.im, rp.im]))} }
-        if (op == "-") { return {b: b, v: emitNewCx(b, callExt(b, "js_sub", [lp.re, rp.re]),
-                                                      callExt(b, "js_sub", [lp.im, rp.im]))} }
-        if (op == "*") {
-            var ac = callExt(b, "js_mul", [lp.re, rp.re])
-            var bd = callExt(b, "js_mul", [lp.im, rp.im])
-            var ad = callExt(b, "js_mul", [lp.re, rp.im])
-            var bc = callExt(b, "js_mul", [lp.im, rp.re])
-            return {b: b, v: emitNewCx(b, callExt(b, "js_sub", [ac, bd]), callExt(b, "js_add", [ad, bc]))}
-        }
-        // DIVISION IS SMITH'S ALGORITHM plus the C99 G.5.1 infinity fixups, as the gc
-        // runtime's complex128div is - not the textbook formula (see the division note
-        // in go-interpreter.abnf). It goes to an extern rather than into emitted
-        // IR because it is five branches deep; js_gocxdiv answers a plain
-        // {re, im} object and the $cx is built here, so the class descriptor
-        // stays in the emitter where it lives.
-        var q = callExt(b, "js_gocxdiv", [lp.re, lp.im, rp.re, rp.im])
-        return {b: b, v: emitNewCx(b, callExt(b, "js_get", [q, emitStr(b, "re")]),
-                                      callExt(b, "js_get", [q, emitStr(b, "im")]))}
+        return {b: b, v: emitCxOpParts(b, cxOpCodes[op], lp.re, lp.im, rp.re, rp.im)}
+    }
+    // js_gocxop does the arithmetic on the parts (goCxOp in abnf/jsrtgolang.go has
+    // the operations: gc's fused multiplies - "*L" fusing the left product of the
+    // imaginary part, as goFmaCxLeft picks - Smith's division, and the complex64
+    // width) and answers a plain {re, im} object; the $cx is built here, where its
+    // class descriptor lives.
+    var cxOpCodes = {"+": 0, "-": 1, "*": 2, "*L": 3, "/": 4}
+    function emitCxOpParts(b, code, a, bi, c, d) {
+        var q = callExt(b, "js_gocxop", [emitNum(b, code), a, bi, c, d])
+        return emitNewCx(b, callExt(b, "js_get", [q, emitStr(b, "re")]), callExt(b, "js_get", [q, emitStr(b, "im")]))
     }
     // '+ - * /' with a complex operand on either side. The dispatch lives in a
     // GENERATED function rather than at the operator site: emitBin returns a value and
     // cannot move the caller's basic block, so the branch has to happen behind a
     // js_call. The plain form is emitted inside the ELSE block on purpose - the
     // externs would have to cope with a complex operand if it ran eagerly.
-    var cxFns = {"+": "$cxadd", "-": "$cxsub", "*": "$cxmul", "/": "$cxdiv",
+    var cxFns = {"+": "$cxadd", "-": "$cxsub", "*": "$cxmul", "*L": "$cxmull", "/": "$cxdiv",
                  "+=": "$cxadd", "-=": "$cxsub", "*=": "$cxmul", "/=": "$cxdiv"}
     function declCxOp(b, name, op) {
         funcCount++
@@ -3350,7 +3462,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         var isr = callExt(fb, "js_is_type", [r, emitStr(fb, "$cx")])
         var cxPath = function(cb) { return emitCxOp(cb, op, l, r) }
         var res = emitSelect(fb, isl, cxPath, function(eb) {
-            return emitSelect(eb, isr, cxPath, function(e2) { return {b: e2, v: emitBinNum(e2, op, l, r)} })
+            return emitSelect(eb, isr, cxPath, function(e2) { return {b: e2, v: emitBinNum(e2, op == "*L" ? "*" : op, l, r)} })
         })
         res.b.NewRet(res.v)
         curF = savedF
@@ -3358,23 +3470,17 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), callExt(b, "js_closure", [handle(idx), curScopeV])])
         return b
     }
-    // -v on a value that may or may not be complex: component-wise for a complex,
-    // js_gineg (which keeps a float64 a float64 and negates an integer at its own
-    // width) for everything else.
-    //
-    // THE COMPONENTS NEGATE WITH js_neg AND NOT WITH `0 - x`: `0 - 0.0` is +0.0, so
-    // subtracting from zero LOSES the sign of a negative zero, which go keeps -
-    // `-(0+0i)` over variables prints `(-0-0i)`. js_neg is `mk_num(d_neg(...))` in
-    // the floor, and d_neg writes the SIGN BIT; js_gineg is not usable on a
-    // component because it would wrap a fractional part to an integer width.
+    // -v on a value that may or may not be complex: component-wise for a complex
+    // (js_gocxop's negation keeps the sign of a zero part and the width), js_gineg
+    // (which keeps a float64 a float64 and negates an integer at its own width) for
+    // everything else.
     function declCxNeg(b) {
         return declFn(b, "$cxneg", 1, function(fb, as, f) {
             var v = as[0]
             return emitSelect(fb, callExt(fb, "js_is_type", [v, emitStr(fb, "$cx")]),
                 function(tb) {
-                    return {b: tb, v: emitNewCx(tb,
-                        callExt(tb, "js_neg", [callExt(tb, "js_get", [v, emitStr(tb, "re")])]),
-                        callExt(tb, "js_neg", [callExt(tb, "js_get", [v, emitStr(tb, "im")])]))}
+                    return {b: tb, v: emitCxOpParts(tb, 5, callExt(tb, "js_get", [v, emitStr(tb, "re")]),
+                        callExt(tb, "js_get", [v, emitStr(tb, "im")]), emitNum(tb, 0), emitNum(tb, 0))}
                 },
                 function(eb) { return {b: eb, v: callExt(eb, "js_gineg", [v])} })
         })
@@ -3393,12 +3499,15 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         var v = callExt(fb, "js_arg", [f.Params[1], handle(0)])
         var pr = prop
         var dv = dflt
-        // real(z) and imag(z) are float64 VALUES in Go, so the answer BOXES:
+        // real(z) and imag(z) are float VALUES in Go, so the answer BOXES:
         // real(a) of 1234567.125 prints 1.234567125e+06 and not 1234567.125,
-        // and real(z)/2 is a float division. js_gflo is the identity on a value
-        // that is already a box, so a component that arrived boxed is unharmed.
+        // and real(z)/2 is a float division; a complex64's part is a float32
+        // (js_gocxop's operation 9).
         var res = emitSelect(fb, callExt(fb, "js_is_type", [v, emitStr(fb, "$cx")]),
-                             function(tb) { return {b: tb, v: callExt(tb, "js_gflo", [callExt(tb, "js_get", [v, emitStr(tb, pr)])])} },
+                             function(tb) {
+                                 var q = callExt(tb, "js_gocxop", [emitNum(tb, 9), callExt(tb, "js_get", [v, emitStr(tb, pr)]), emitNum(tb, 0), emitNum(tb, 0), emitNum(tb, 0)])
+                                 return {b: tb, v: callExt(tb, "js_get", [q, emitStr(tb, "re")])}
+                             },
                              function(eb) { return {b: eb, v: callExt(eb, "js_gflo", [dv == 0 ? emitNum(eb, 0) : v])} })
         res.b.NewRet(res.v)
         curF = savedF
@@ -3417,7 +3526,8 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         curScopeV = callExt(fb, "js_scope_new", [f.Params[0]])
         var re = callExt(fb, "js_arg", [f.Params[1], handle(0)])
         var im = callExt(fb, "js_arg", [f.Params[1], handle(1)])
-        fb.NewRet(emitNewCx(fb, re, im))
+        // complex(float32, float32) is a complex64 (js_gocxop's operation 6).
+        fb.NewRet(emitCxOpParts(fb, 6, re, im, emitNum(fb, 0), emitNum(fb, 0)))
         curF = savedF
         curScopeV = savedScope
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "complex"), callExt(b, "js_closure", [handle(idx), curScopeV])])
@@ -3435,6 +3545,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         b = declCxOp(b, "$cxadd", "+")
         b = declCxOp(b, "$cxsub", "-")
         b = declCxOp(b, "$cxmul", "*")
+        b = declCxOp(b, "$cxmull", "*L")
         b = declCxOp(b, "$cxdiv", "/")
         b = declCxNeg(b)
         b = declCxPart(b, "real", "re", 1)
@@ -3448,7 +3559,15 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                 function(tb) { return {b: tb, v: v} },
                 function(eb) { return {b: eb, v: emitNewCx(eb, v, emitNum(eb, 0))} })
         })
+        // complex64(v) and complex128(v), of a complex or a real value - and a value
+        // put in a complex64 location. Twin of cxConv in go-interpreter.abnf.
+        b = declFn(b, "$cxto64", 1, function(fb, as, f) { return emitCxConvParts(fb, 7, as[0]) })
+        b = declFn(b, "$cxto128", 1, function(fb, as, f) { return emitCxConvParts(fb, 8, as[0]) })
         return b
+    }
+    function emitCxConvParts(b, code, v) {
+        var p = emitCxParts(b, v)
+        return {b: p.b, v: emitCxOpParts(p.b, code, p.re, p.im, emitNum(p.b, 0), emitNum(p.b, 0))}
     }
     function emitCxCall(b, op, l, r) {
         var fV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, cxFns[op])])
@@ -4457,9 +4576,9 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         while (i < items.length && typeof items[i] != "string") { i++ }
         var ref = {name: items[i], path: items.slice(i + 1), stars: i, tys: []}
         // tys[k]: the static type of what path[k] applies to, read now, while the
-        // binding the name refers to is in scope.
+        // binding the name refers to is in scope; not known behind a star.
         for (var k = 0; k <= ref.path.length; k++) {
-            ref.tys.push(goRefTy({name: ref.name, path: ref.path.slice(0, k), stars: i}))
+            ref.tys.push(i > 0 && ref.path.length > 0 ? "" : goRefTy({name: ref.name, path: ref.path.slice(0, k), stars: i}))
         }
         return goRefKeysC(ref)
     }
@@ -4628,6 +4747,10 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             }
         }
         if (op != "=") { exprs[0] = goAssignOpOperand(exprs[0], op, sp.krs[0], goRefTy(refs[0])) }
+        // v += x*y / v -= x*y with the multiply fused (goFmaAssign).
+        var fa = op == "=" ? null : goFmaAssign(op, sp.fms[0], goRefTy(refs[0]))
+        if (fa != null) { exprs[0] = fa.pair }
+        var faTy = stBare(goRefTy(refs[0]))
         return function(b) {
             if (op != "=") {
                 var rl = emitRefLoc(b, refs[0])
@@ -4635,6 +4758,10 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                 b = rr.b
                 var rv = exprs[0](b)
                 b = rv.b
+                if (fa != null) {
+                    var fr = emitFmaStep(b, op == "+=" ? "+" : "-", rr.v, rv.v, rv.q, 1, fa.neg, isFloatTy(faTy), faTy == "float32")
+                    return emitLocWrite(fr.b, refs[0], rl.loc, fr.v)
+                }
                 return emitLocWrite(b, refs[0], rl.loc, emitBin(b, op, rr.v, rv.v))
             }
             var locs = []
@@ -4932,6 +5059,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         if (isF32Ty(wd)) { return callExt(b, "js_gflo32", [emitNum(b, 0)]) }
         if (isFloatTy(wd)) { return callExt(b, "js_gflo", [emitNum(b, 0)]) }
         if (wd == "complex128") { return emitNewCx(b, emitNum(b, 0), emitNum(b, 0)) }
+        if (wd == "complex64") { return emitHelper(b, "$cxto64", [emitNum(b, 0)]) }
         if (wd == "string") { return emitStr(b, "") }
         if (wd == "bool") { return hFalse }
         // THE ZERO VALUE OF A MAP TYPE IS A MARKED EMPTY MAP, not nil - the twin of
@@ -5866,6 +5994,14 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         // first, which unwraps a sized-integer box and would lose the width.
         if (isIfaceTyText(to)) { return t }
         regConv(pos, to)
+        if (to == "complex64" || to == "complex128") {
+            usesComplex = true
+            var cxh = to == "complex64" ? "$cxto64" : "$cxto128"
+            return function(b) {
+                var rc = t(b)
+                return {b: rc.b, v: emitHelper(rc.b, cxh, [rc.v])}
+            }
+        }
         var isSliceTy = to.length > 1 && to.charCodeAt(0) == 91 && to.charCodeAt(1) == 93
         return function(b) {
             var r = t(b)
@@ -7252,6 +7388,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         var savedPendT = cPendT
         var savedSts = stByPos
         var savedSwMarks = cSwMarks
+        var savedFma = goFmaEnterFile()
         constByPos = {}
         cFnByPos = {}
         convByPos = {}
@@ -7270,6 +7407,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         cPendT = savedPendT
         stByPos = savedSts
         cSwMarks = savedSwMarks
+        goFmaLeaveFile(savedFma)
         importDepth = importDepth - 1
         c.popSource()
         curPkgName = savedPkg

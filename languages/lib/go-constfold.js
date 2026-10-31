@@ -764,6 +764,8 @@ function regConst(pos, c) {
     if (pos == undefined || pos == null) { return }
     stByPos["p" + pos] = ""
     tkByPos["p" + pos] = null
+    fmaByPos["p" + pos] = null
+    negByPos["p" + pos] = false
     constByPos["p" + pos] = (c == null) ? cNone : c
     if (c == null) { cFnByPos["p" + pos] = cFnNone } else { cFnByPos["p" + pos] = cKonstFn(c) }
 }
@@ -938,7 +940,7 @@ function goComplC(items) {
 function goNegC(t, pos, s) {
     var inner = cfnAt(pos)
     var c = constAt(pos)
-    if (c == null) { regCFn(pos, cNegFn(inner)); goTkNeg(pos, s); return makeNeg(t) }
+    if (c == null) { regCFn(pos, cNegFn(inner)); goTkNeg(pos, s); goFmaNeg(pos); return makeNeg(t) }
     var nc = cNeg(c)
     regConst(pos, nc)
     // UNARY MINUS IS A FOLD SITE because a Go CONSTANT HAS NO SIGNED ZERO:
@@ -959,9 +961,179 @@ function goNegC(t, pos, s) {
 function goParenC(items, pos) {
     var c = constAt(items[1].at)
     if (c != null) { regConst(pos, c) }
-    else { regCFn(pos, cfnAt(items[1].at)); regTk(pos, tkAt(items[1].at)) }
+    else { regCFn(pos, cfnAt(items[1].at)); regTk(pos, tkAt(items[1].at)); fmaByPos["p" + pos] = fmaAt(items[1].at); negByPos["p" + pos] = negByPos["p" + items[1].at] === true }
     return items[0]
 }
+
+// ----- FUSED MULTIPLY-ADD -----
+// Go's spec lets an implementation round x*y + z once, and gc on arm64 does: an
+// add or subtract whose operand is a float multiply becomes one FMADD, FMSUB,
+// FNMADD or FNMSUB (ARM64.rules, `(FADDD a (FMULD x y)) => (FMADDD a x y)` and
+// its siblings). Measured against `go run`, the operand has to BE the multiply:
+// parentheses and unary minus are transparent, and an explicit conversion
+// float64(x*y) rounds the product first. Not modelled: a product reaching the add
+// through a variable (gc fuses `t := x*y; t + z` while t is an SSA value, but not
+// across a loop or branch merge, nor once a call or a store has made it a memory
+// load) or through an inlined call (`f(x, y) + z` with f returning x*y).
+//
+// fmaByPos maps the end position of a multiply to {pair, neg, n, t}: pair is the
+// grammar's thunk that evaluates the two FACTORS instead of their rounded
+// product, neg says a unary minus is wrapped around the product, n that gc sees a
+// negated multiply (FNMULD: an odd number of minus signs on it and its factors),
+// and t its text. negByPos marks a run-time unary minus, for that count.
+var fmaByPos = {}
+var negByPos = {}
+function regFma(pos, f) {
+    if (pos == undefined || pos == null) { return }
+    fmaByPos["p" + pos] = f
+}
+function fmaAt(pos) {
+    if (pos == undefined || pos == null) { return null }
+    var f = fmaByPos["p" + pos]
+    return f == undefined ? null : f
+}
+function goFmaNeg(pos) {
+    var f = fmaAt(pos)
+    if (f != null) { fmaByPos["p" + pos] = {pair: f.pair, neg: !f.neg, n: !f.n, t: f.t} }
+    negByPos["p" + pos] = true
+}
+// The product a multiply run [t, {at, as}, op, t, {at, as}, ...] ends in, or null:
+// its LAST operator must be a run-time '*', and a static type other than a float
+// one rules it out, as does a constant factor 2, 1 or -1, which gc rewrites into
+// x + x, x and -x before it fuses anything. pair is built by the grammar. Every
+// product is counted under its text in the enclosing function (fmaFn), for
+// goFmaLeft.
+function goFmaProduct(items, ops, sty, pair) {
+    if (ops[ops.length - 1] != "*" || !goFmaTy(sty)) { return null }
+    var k = items.length - 1
+    if (goFmaUnit(constAt(items[k].at)) || (ops.length == 1 && goFmaUnit(constAt(items[1].at)))) { return null }
+    var nl = ops.length == 1 && negByPos["p" + items[1].at] === true
+    var nr = negByPos["p" + items[k].at] === true
+    var t = goFmaText(items[1].as, items[k - 3].at) + "*" + goFmaText(items[k].as, items[k].at)
+    if (ops.length == 1) {
+        var u = goFmaText(items[k].as, items[k].at) + "*" + goFmaText(items[1].as, items[1].at)
+        if (u < t) { t = u }
+    }
+    var n = fmaFn.texts["t" + t]
+    fmaFn.texts["t" + t] = n == undefined ? 1 : n + 1
+    return {pair: pair, neg: false, n: nl !== nr, t: t}
+}
+function goFmaUnit(c) {
+    if (c == null || cIsCx(c)) { return false }
+    var v = cToF64(c)
+    return v === 2 || v === 1 || v === 0 - 1
+}
+function goFmaText(from, to) {
+    var s = c.srcSlice(from, to)
+    var r = ""
+    for (var i = 0; i < s.length; i++) { if (s.charCodeAt(i) > 32) { r = r + s.charAt(i) } }
+    return r
+}
+// Could a value of static type sty be a float? "" is not known.
+function goFmaTy(sty) {
+    var t = stBare(sty)
+    return t != "string" && t != "bool" && goIntTy(t) == null && t.indexOf("complex") != 0
+}
+// For each step k of an additive run, which operand fuses: 0 none, 1 the right
+// one, 2 the left one (only the first step's left operand can be a multiply).
+// With a multiply on both sides the order of ARM64.rules decides: a plain
+// multiply before a negated one, then the right operand before the left - in
+// the order the operands have when the rules run, which for an add (+ commutes)
+// gc's CSE pass may have swapped: 10 + i says choice i of fmaChoices decides
+// once the function is walked (goFmaSide).
+function goFmaPlan(items, ops, sty) {
+    var plan = []
+    var any = false
+    for (var k = 0; k < ops.length; k++) {
+        var s = 0
+        if ((ops[k] == "+" || ops[k] == "-") && goFmaTy(sty)) {
+            var r = fmaAt(items[3 * k + 4].at)
+            var l = k == 0 ? fmaAt(items[1].at) : null
+            if (r != null && l != null && ops[k] == "+" && !r.neg && !l.neg && r.n === l.n) {
+                var w = stBare(sty) == "float32" ? 32 : 64
+                if (w == 32) { fmaFn.k32 = fmaFn.k32 + 1 } else { fmaFn.k64 = fmaFn.k64 + 1 }
+                fmaChoices.push({fn: fmaFn, w: w, tl: l.t, tr: r.t})
+                s = 9 + fmaChoices.length
+            }
+            else if (r != null && !r.n) { s = 1 }
+            else if (l != null && !l.n) { s = 2 }
+            else if (r != null) { s = 1 }
+            else if (l != null) { s = 2 }
+        }
+        if (s != 0) { any = true }
+        plan.push(s)
+    }
+    return any ? plan : null
+}
+// ----- which of two multiplies an add fuses -----
+// gc's CSE pass (ssa/cse.go) puts a commutative operation's two arguments in the
+// order of their equivalence classes whenever the operation shares a class with
+// another one, which for an add of two multiplies means: when the function holds
+// two or more such adds (a complex multiply is one more, its imaginary part). Then
+// a multiply computed only here is ordered by its value ID, the later one first,
+// and one the function computes again (a CSE duplicate) after both - so the add
+// fuses the LEFT multiply unless only the right one is computed elsewhere too. A
+// function with one such add keeps the source order and fuses the RIGHT one.
+// Measured against `go run`. fmaFn counts per function, float32 adds apart.
+var fmaFn = {k64: 0, k32: 0, texts: {}}
+var fmaFnStack = []
+var fmaChoices = []
+function goFmaFnEnter() {
+    fmaFnStack.push(fmaFn)
+    fmaFn = {k64: 0, k32: 0, texts: {}}
+}
+function goFmaFnExit() { fmaFn = fmaFnStack.pop() }
+// An imported file has its own offsets and its own top level, so it gets fresh
+// tables (as constByPos does): goFmaEnterFile answers what goFmaLeaveFile restores.
+function goFmaEnterFile() {
+    var sv = {f: fmaByPos, n: negByPos, fn: fmaFn}
+    fmaByPos = {}
+    negByPos = {}
+    fmaFn = {k64: 0, k32: 0, texts: {}}
+    return sv
+}
+function goFmaLeaveFile(sv) {
+    fmaByPos = sv.f
+    negByPos = sv.n
+    fmaFn = sv.fn
+}
+// A complex multiply of static type sty adds one such add to the function; its
+// two multiplies are computed again if the function writes the same complex
+// multiply (text t) twice, and then the multiply without the most recently
+// defined factor fuses - taken to be the imaginary part of the right operand,
+// so the right one.
+function goFmaCxMul(sty, t) {
+    if (stBare(sty).indexOf("complex") != 0) { return null }
+    fmaFn.k64 = fmaFn.k64 + 1
+    var n = fmaFn.texts["c" + t]
+    fmaFn.texts["c" + t] = n == undefined ? 1 : n + 1
+    return {fn: fmaFn, t: t}
+}
+function goFmaCxLeft(cx) { return cx.fn.k64 > 1 && cx.fn.texts["c" + cx.t] < 2 }
+// Does the function f fuse the LEFT multiply of an add of two (a complex multiply
+// passes no texts)?
+function goFmaLeft(f, w, tl, tr) {
+    if ((w == 32 ? f.k32 : f.k64) < 2) { return false }
+    var dl = tl != "" && f.texts["t" + tl] != undefined && f.texts["t" + tl] > 1
+    var dr = tr != "" && f.texts["t" + tr] != undefined && f.texts["t" + tr] > 1
+    return !(dr && !dl)
+}
+// The side a plan entry fuses, once every function is walked.
+function goFmaSide(p) {
+    if (p < 10) { return p }
+    var ch = fmaChoices[p - 10]
+    return goFmaLeft(ch.fn, ch.w, ch.tl, ch.tr) ? 2 : 1
+}
+// `v += x*y` and `v -= x*y` are v = v + x*y and fuse the same way: the
+// registration of the multiply on the right of a compound assignment to a
+// location of static type ty, or null.
+function goFmaAssign(op, fm, ty) {
+    if ((op != "+=" && op != "-=") || fm == null || !goFmaTy(ty)) { return null }
+    return fm
+}
+// The registrations of the fused operands of step k: the right one for side 1
+// and both, the left one for side 2 and both.
+function goFmaOperand(items, k, side) { return fmaAt(side == 2 ? items[1].at : items[3 * k + 4].at) }
 function cFromRadixText(text) {
     var radix = 10
     var start = 0
@@ -1227,19 +1399,21 @@ function goSplitSty(xs) {
     var krs = []
     var pures = []
     var nls = []
+    var fms = []
     var i = 0
     while (i < xs.length) {
-        if (typeof xs[i] == "function") { ts.push(xs[i]); tys.push(""); rns.push(false); krs.push(null); pures.push(false); nls.push(false) }
+        if (typeof xs[i] == "function") { ts.push(xs[i]); tys.push(""); rns.push(false); krs.push(null); pures.push(false); nls.push(false); fms.push(null) }
         else if (xs[i].sty != undefined && tys.length > 0) {
             tys[tys.length - 1] = xs[i].sty
             rns[rns.length - 1] = xs[i].rn === true
             krs[krs.length - 1] = xs[i].kr == undefined ? null : xs[i].kr
             pures[pures.length - 1] = xs[i].pu === true
             nls[nls.length - 1] = xs[i].nl === true
+            fms[fms.length - 1] = xs[i].fm == undefined ? null : xs[i].fm
         }
         i = i + 1
     }
-    return {ts: goOrderThunks(ts, pures), tys: tys, rns: rns, krs: krs, nls: nls}
+    return {ts: goOrderThunks(ts, pures, goFixedOps(krs, nls)), tys: tys, rns: rns, krs: krs, nls: nls, fms: fms}
 }
 // ----- AN UNTYPED CONSTANT AT A TYPED LOCATION -----
 // Go converts an untyped constant to the type of the location it reaches - its
@@ -1276,6 +1450,8 @@ function goConstTo(t, kr, ty, ctx) {
     }
     // A complex128 location makes the real constant the complex (k+0i).
     if (w == "complex128") { return t == null ? t : cMaterialize(cxOf(kr.k)) }
+    // ... and a complex64 one its complex64 (goAdoptThunk rounds the parts).
+    if (w == "complex64") { return t == null ? t : goAdoptThunk(t, w) }
     var it = goIntTy(w)
     if (it == null) { return t }
     var iv = goKInt(kr.k)
@@ -1689,7 +1865,7 @@ function goAssignAdopt(t, sty, ty) {
     var w = goTyWord(bt)
     if (w != bt) { return t }
     if (typeof definedUnder[w] == "string") { w = goTyWord(resolveDefined(w)) }
-    if (!isFloatTy(w) && goIntTy(w) == null && w != "complex128") { return t }
+    if (!isFloatTy(w) && goIntTy(w) == null && w != "complex128" && w != "complex64") { return t }
     return goAdoptThunk(t, bt)
 }
 // A composite literal of type ty: a fresh value.
@@ -1818,6 +1994,8 @@ function stChainFrom(head, hty, loc, text) {
     }
     if (ty == "" && i < text.length && text.charAt(i) == "(") {
         if (goIsDefTy(head) || goDtWide["$" + head] === true) { ty = head }
+        // Inside a package its own function wins, as in goCallBoxC.
+        else if (!loc && goWalkPkg != "" && goFnRty["$" + goWalkPkg + "." + head] !== undefined) { ty = goFnRty["$" + goWalkPkg + "." + head] }
         else if (!loc && goFnRty["$" + head] !== undefined) { ty = goFnRty["$" + head] }
         if (ty != "") {
             i = stClose(text, i)
@@ -2169,7 +2347,14 @@ function goSplitArgs(items) {
         else if (it != null && it.spread === true) { spread = true }
         i = i + 1
     }
-    return {args: goOrderThunks(args, pures), atys: atys, rns: rns, krs: krs, nls: nls, spread: spread}
+    return {args: goOrderThunks(args, pures, goFixedOps(krs, nls)), atys: atys, rns: rns, krs: krs, nls: nls, spread: spread}
+}
+// The operands a store or a call may replace by their converted value: the
+// constants and the literal nils (goOrderThunks' fixed).
+function goFixedOps(krs, nls) {
+    var f = []
+    for (var i = 0; i < krs.length; i++) { f.push(krs[i] != null || nls[i]) }
+    return f
 }
 // gc's order of evaluation (cmd/compile/internal/walk/order.go): within a statement
 // every call and receive runs first, left to right, and the plain operands are read
@@ -2222,7 +2407,7 @@ function goRunOrder(items, ts) {
     var pures = []
     var k = 1
     while (k < items.length) { pures.push(goPure(items[k].as, items[k].at)); k = k + 3 }
-    return goOrderThunks(ts, pures)
+    return goOrderThunks(ts, pures, null)
 }
 // The elements {ekey, enest, eval, epu} of a composite literal, in gc's order when
 // none is keyed or a nested group: a keyed element may be built out of source order.
@@ -2237,7 +2422,7 @@ function goOrderEls(els) {
         pures.push(e.epu === true)
         i = i + 1
     }
-    var o = goOrderThunks(ts, pures)
+    var o = goOrderThunks(ts, pures, null)
     i = 0
     while (i < els.length) { els[i].eval = o[i]; i = i + 1 }
     return els
@@ -2460,6 +2645,8 @@ function goCallBoxC(items) {
         var t = sp.args[j]
         if (pts != null && !(sp.spread && j == sp.args.length - 1)) {
             t = goConstTo(t, sp.krs[j], goParamTyAt(pts, j), "argument to " + name)
+            // A complex constant (goKRec keeps none) at a complex64 parameter.
+            if (stBare(goParamTyAt(pts, j)) == "complex64" && stBare(sp.atys[j]) != "complex64") { t = goAdoptThunk(t, "complex64") }
             t = goNilTo(t, sp.nls[j], goParamTyAt(pts, j))
             t = goDtBoxThunk(t, goDtBoxTo(sp.atys[j], goParamTyAt(pts, j)))
         }
@@ -2495,10 +2682,19 @@ function goChanSendBoxC(items3, text, pos) {
     return items
 }
 // The static type of an assignment target {name, path, stars} (makeTargetRef): a
-// name's binding type, through its field and index suffixes; "" behind a star.
+// name's binding type, through its field and index suffixes, or through the
+// pointers `*p = v` and `**pp = v` store through; "" when not known.
 function goRefTy(ref) {
-    if (ref.stars > 0) { return "" }
     var ht = cTyLookup(ref.name)
+    if (ref.stars > 0) {
+        if (ref.path.length > 0) { return "" }
+        var st = stBare(ht)
+        for (var k = 0; k < ref.stars; k++) {
+            if (st.charAt(0) != "*") { return "" }
+            st = st.substring(1)
+        }
+        return st
+    }
     if (ref.path.length == 0) { return ht }
     var t = ref.name
     var i = 0
@@ -4020,6 +4216,8 @@ function goNameC(name, pos) {
     }
     regConst(pos, cLookup(name))
     var ty = cTyLookup(name)
+    // Inside a package its own function wins, as in goCallBoxC.
+    if (ty == "" && goWalkPkg != "" && goFnSig["$" + goWalkPkg + "." + name] !== undefined && !cIsLocal(name)) { ty = goFnSig["$" + goWalkPkg + "." + name] }
     if (ty == "" && goFnSig["$" + name] !== undefined && !cIsLocal(name)) { ty = goFnSig["$" + name] }
     regSt(pos, ty)
     var x = cXLookup(name)

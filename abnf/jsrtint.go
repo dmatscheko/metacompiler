@@ -476,6 +476,7 @@ func programJSBindings() map[string]interface{} {
 	b["floPrec"] = jsHostFunc("floPrec", func(rt *jsrt, this uint64, args []interface{}) interface{} {
 		return floPrecStr(rt.toNumber(argAt(args, 0)), int(jsToInt(rt.toNumber(argAt(args, 1)))))
 	})
+	b["fma"] = fmaHost
 	fnMetaBindings(b)
 	arrKindBindings(b)
 	byteBindings(b)
@@ -516,6 +517,16 @@ func programJSBindings() map[string]interface{} {
 	delete(b, "rawSet")
 	return b
 }
+
+// fmaHost is the host global fma(x, y, z): x*y + z rounded ONCE, which the
+// dialect cannot spell - Go fuses a multiply into an add on arm64 (see
+// goFmaStep in languages/lib/go-constfold.js). math.FMA is that rounding on
+// every architecture. The grammar hosts bind it too (frozenBaseBindings,
+// commonscript.go); host id 113 of languages/lib/runtime.c (d_fma) is the
+// native engine.
+var fmaHost = jsHostFunc("fma", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+	return math.FMA(rt.toNumber(argAt(args, 0)), rt.toNumber(argAt(args, 1)), rt.toNumber(argAt(args, 2)))
+})
 
 // keysBindings adds keysOf and delKey, which languages/lib/runtime.c seeds as
 // host ids 61 and 63 - the pair a layer-2 file needs to WALK and to PRUNE an

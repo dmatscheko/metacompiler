@@ -455,14 +455,17 @@ Block       <~~ push(makeBlockStmt(takeAll())); cScopeExit() ~~>
 // A function's body is the SAME block as its parameters and results: when a `:=`
 // at its top level names one of them (cShortName), it runs in their scope, so
 // `i, j := 0, n` with i a named result assigns that result instead of shadowing it.
-FuncBody    <~~ push(goStmts(takeAll(), !cBodyShared())); cScopeExit() ~~>
-            = "{" CScopeOn { Statement } "}" ;
+FuncBody    <~~ push(goStmts(takeAll(), !cBodyShared())); cScopeExit(); goFmaFnExit() ~~>
+            = "{" CScopeOn FmaFnOn { Statement } "}" ;
 // Always-empty matches whose only purpose is their TAG, the shape NoBody uses: Go
 // source holds no NUL byte, so the optional never consumes anything. A rule's own tag
 // runs AFTER its children, and these three have to run before theirs - a '{' opens a
 // named-constant scope, a switch body takes its truncation mark, and a 'case' spends
 // it (Go scopes each case clause, while this body is parsed flat).
 CScopeOn    <~~ cScopeEnter() ~~> = [ "\x00" ] ;
+// A function body is one SSA function to gc, which decides which of two
+// multiplies an add fuses (goFmaLeft in go-constfold.js).
+FmaFnOn     <~~ goFmaFnEnter() ~~> = [ "\x00" ] ;
 CSwOn       <~~ cSwEnter() ~~> = [ "\x00" ] ;
 CCaseOn     <~~ cSwCase() ~~> = [ "\x00" ] ;
 
@@ -605,7 +608,7 @@ IdxE        <~~ var ie = pop(); push(ie); push({ksty: stAt(up.pos), kr: goKRec(u
 
 ExprList    = StoreExpr { "," StoreExpr } ;
 // One value of a := / = / var, followed by the static type it reports (goSplitSty).
-StoreExpr   <~~ var se = pop(); push(se); push({sty: stStoreAt(up.pos), rn: goIsRuneC(up.pos), kr: goKRec(up.start, up.pos), pu: goPure(up.start, up.pos), nl: goNilSrc(up.start, up.pos)}) ~~> = Expression ;
+StoreExpr   <~~ var se = pop(); push(se); push({sty: stStoreAt(up.pos), rn: goIsRuneC(up.pos), kr: goKRec(up.start, up.pos), pu: goPure(up.start, up.pos), nl: goNilSrc(up.start, up.pos), fm: fmaAt(up.pos)}) ~~> = Expression ;
 
 Empty       <~~ push(function() {}) ~~>
             = ";" ;
@@ -1044,7 +1047,7 @@ PtrTypeT    = "*" Type ;
 // `interface` and its SkipBlock eats the `{}`.
 ConvType    <~~ push({conv: firstType(up.in)}) ~~>
             = "[" "]" Type | ArrayTypeT | MapTypeT | ChanTypeT | IfaceTypeT | "any" KwEnd | "error" KwEnd | ScalarType KwEnd ;
-ScalarType  = "uintptr" | "float32" | "float64" | "uint16" | "uint32" | "uint64"
+ScalarType  = "uintptr" | "float32" | "float64" | "complex128" | "complex64" | "uint16" | "uint32" | "uint64"
             | "int16" | "int32" | "int64" | "uint8" | "int8" | "byte" | "rune"
             | "uint" | "int" ;
 
@@ -2089,7 +2092,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             return a.w == 64 ? base : base + a.w
         }
         if (typeof a == "number") { return (a - a === 0 && a == gtrunc(a)) ? "int" : "float64" }
-        if (isCx(a)) { return "complex128" }
+        if (isCx(a)) { return isCx64(a) ? "complex64" : "complex128" }
         return ""
     }
     // The gfH* hooks lib/go-fmt.js reads values through. The twins are the gfH*
@@ -2099,7 +2102,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         if (ty == "nil") { return "nil" }
         if (ty == "bool" || ty == "string") { return ty }
         if (ty == "float64" || ty == "float32") { return "float" }
-        if (ty == "complex128") { return "complex" }
+        if (ty == "complex128" || ty == "complex64") { return "complex" }
         if (ty != "") { return "int" }
         if (isSl(v) || Array.isArray(v)) { return "list" }
         if (isMap(v)) { return "map" }
@@ -2119,7 +2122,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     }
     function gfHNum(v) { return szIs(v) ? szNum(v) : gNumF(v) }
     function gfHF32(v) { return isF32(v) }
-    function gfHCx(v) { return [gNumF(v.re), gNumF(v.im)] }
+    function gfHCx(v) { return [gNumF(v.re), gNumF(v.im), isCx64(v)] }
     function gfHElems(v) { return isSl(v) ? goSlotsBox(slElems(v), v.et) : v }
     function gfHIsBytes(v) {
         if (isSl(v) && (v.et == "byte" || v.et == "uint8")) { return true }
@@ -2331,21 +2334,31 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // An operand list in gc's order (goNeedsOrder, go-constfold.js): reading the FIRST
     // operand runs every impure one, in source order, and each later read of an
     // impure operand takes the value held. A pure operand calls nothing, so nothing
-    // re-enters this list between its first read and its last. Twin of
+    // re-enters this list between its first read and its last. A FIXED operand (a
+    // constant or the literal nil, which the caller may replace by its converted
+    // value - fixed may be null) has no effect and no order: it is read where it
+    // stands, and the first operand that is not fixed runs the impure ones. Twin of
     // goOrderThunks in go-to-llvm-ir.abnf.
-    function goOrderThunks(ts, pures) {
+    function goOrderThunks(ts, pures, fixed) {
         if (!goNeedsOrder(pures)) { return ts }
+        var h = 0
+        while (h < ts.length && fixed != null && fixed[h]) { h = h + 1 }
+        if (h == ts.length) { return ts }
         var held = {v: []}
-        var out = [goOrderFirst(ts, pures, held)]
-        for (var i = 1; i < ts.length; i++) { out.push(pures[i] ? ts[i] : goOrderHeld(held, i)) }
+        var out = []
+        for (var i = 0; i < ts.length; i++) {
+            if (i == h) { out.push(goOrderFirst(ts, pures, fixed, held, h)) }
+            else if (pures[i] || (fixed != null && fixed[i])) { out.push(ts[i]) }
+            else { out.push(goOrderHeld(held, i)) }
+        }
         return out
     }
-    function goOrderFirst(ts, pures, held) {
+    function goOrderFirst(ts, pures, fixed, held, h) {
         return function() {
             var r = []
-            for (var j = 0; j < ts.length; j++) { r.push(pures[j] ? undefined : ts[j]()) }
+            for (var j = 0; j < ts.length; j++) { r.push(pures[j] || (fixed != null && fixed[j]) ? undefined : ts[j]()) }
             held.v = r
-            return pures[0] ? ts[0]() : r[0]
+            return pures[h] ? ts[h]() : r[h]
         }
     }
     function goOrderHeld(held, i) { return function() { return held.v[i] } }
@@ -3001,6 +3014,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         // T(nil) of a slice type is its nil slice. Twin of makeConv and declConv in
         // go-to-llvm-ir.abnf.
         if ((v === null || v === undefined) && to.indexOf("[]") == 0) { return goZeroTy(to) }
+        if (to == "complex64" || to == "complex128") { return cxConv(to == "complex64", v) }
         if (to == "string") {
             if (szIs(v)) { return fromCodePoint(szNum(v)) }
             if (typeof v == "number") { return fromCodePoint(v) }
@@ -3473,11 +3487,18 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         if (folded != null) { return goTkFolded(folded, tk, pos, sty) }
         if (ty == null) { goKOperands(items, ts, sty) }
         goShiftCounts(items, ops, ts)
+        // Read BEFORE the clear below, which also erases the last operand's entry.
+        var fplan = goFmaPlan(items, ops, sty)
+        var fnegs = goFmaSwap(items, ts, fplan)
         ts = goRunOrder(items, ts)
         regConst(pos, null)
         regCFn(pos, cfn)
         regSt(pos, sty)
         regTk(pos, tk)
+        regFma(pos, goFmaProduct(items, ops, sty, goFmaPair(ts, ops, ty)))
+        if (fplan != null) { return goFmaRunC(ts, ops, fplan, fnegs, ty, sty) }
+        var cxf = goFmaCxRun(items, ops, sty)
+        if (cxf != null) { return goCxRunC(ts, ops, cxf) }
         if (ty == null) {
             var flat = [ts[0]]
             for (var j = 0; j < ops.length; j++) { flat.push(ops[j]); flat.push(ts[j + 1]) }
@@ -3491,6 +3512,129 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             return v
         }
     }
+    // ----- the fused multiply-add (go-constfold.js has the rule) -----
+    // A fused operand's thunk is swapped for its multiply's PAIR thunk, which
+    // answers the two factors {fa, fb} unmultiplied; the answer is each step's neg.
+    function goFmaSwap(items, ts, plan) {
+        var negs = []
+        if (plan == null) { return negs }
+        for (var k = 0; k < plan.length; k++) {
+            var f = plan[k] == 0 ? null : goFmaOperand(items, k, plan[k])
+            if (f != null) { ts[plan[k] == 2 ? 0 : k + 1] = f.pair }
+            if (plan[k] >= 10) { ts[0] = goFmaOperand(items, k, 2).pair }
+            negs.push(f != null && f.neg)
+        }
+        return negs
+    }
+    // A run of static complex type: each multiply fuses as cxMulF says.
+    // The answer has one goFmaCxMul record per operator, null for a '/'.
+    function goFmaCxRun(items, ops, sty) {
+        var cxs = []
+        var any = false
+        for (var k = 0; k < ops.length; k++) {
+            var cx = ops[k] == "*" ? goFmaCxMul(sty, goFmaText(items[1].as, items[3 * k + 4].at)) : null
+            if (cx != null) { any = true }
+            cxs.push(cx)
+        }
+        return any ? cxs : null
+    }
+    function goCxRunC(ts, ops, cxs) {
+        return function() {
+            var v = anytype
+            v = ts[0]()
+            for (var k = 0; k < ops.length; k++) {
+                var w = anytype
+                w = ts[k + 1]()
+                if (cxs[k] != null && (isCx(v) || isCx(w))) { v = cxMulF(v, w, goFmaCxLeft(cxs[k])) }
+                else { v = binOp(ops[k], v, w) }
+            }
+            return v
+        }
+    }
+    // The pair thunk of a multiply run: everything before the last '*', and the
+    // last operand. Twin of goFmaPair in go-to-llvm-ir.abnf.
+    function goFmaPair(ts, ops, ty) {
+        var n = ops.length
+        if (ops[n - 1] != "*") { return null }
+        return function() {
+            var a = anytype
+            a = ts[0]()
+            for (var k = 0; k + 1 < n; k++) { a = ty == null ? binOp(ops[k], a, ts[k + 1]()) : goTypedOp(ty, ops[k], a, ts[k + 1]()) }
+            var b = anytype
+            b = ts[n]()
+            return {fa: a, fb: b}
+        }
+    }
+    function goFmaRunC(ts, ops, plan, negs, ty, sty) {
+        var f32 = ty == "float32" || stBare(sty) == "float32"
+        var fl = ty != null || isFloatTy(stBare(sty))
+        return function() {
+            var v = anytype
+            v = ts[0]()
+            for (var k = 0; k < ops.length; k++) {
+                var w = anytype
+                w = ts[k + 1]()
+                if (plan[k] >= 10) {
+                    // Both operands are pairs: the one not fused is rounded first.
+                    var sd = goFmaSide(plan[k])
+                    if (sd == 1) { v = binOp("*", v.fa, v.fb) } else { w = binOp("*", w.fa, w.fb) }
+                    v = goFmaStep(ops[k], v, w, sd, false, fl, f32)
+                }
+                else if (plan[k] != 0) { v = goFmaStep(ops[k], v, w, plan[k], negs[k], fl, f32) }
+                else if (ty == null) { v = binOp(ops[k], v, w) }
+                else { v = goTypedOp(ty, ops[k], v, w) }
+            }
+            return v
+        }
+    }
+    // One fused step, l op r with the operand on side 1 (right) or 2 (left) a pair
+    // whose product is negated when neg. A float multiply rounds once with the add
+    // (fl: the run is statically a float); anything else - integers, complex
+    // values - is the multiply and the add as written. Twin of js_gofma in
+    // languages/lib/go-rt.metajs and abnf/jsrtgolang.go.
+    function goFmaStep(op, l, r, side, neg, fl, f32) {
+        var pr = side == 1 ? r : l
+        var z = anytype
+        z = side == 1 ? l : r
+        var x = anytype
+        x = pr.fa
+        var y = anytype
+        y = pr.fb
+        if (fl || ((isFlo(x) || isFlo(y)) && gFmaNum(x) && gFmaNum(y) && gFmaNum(z))) {
+            var a = gNumF(x)
+            var b = gNumF(y)
+            var c = gNumF(z)
+            if (neg !== (op == "-" && side == 1)) { a = -a }
+            if (op == "-" && side == 2) { c = -c }
+            if (f32 || isF32(x) || isF32(y) || isF32(z)) { return gFlo32(gFma32(coreF32Round(a), coreF32Round(b), coreF32Round(c))) }
+            return gFlo(fma(a, b, c))
+        }
+        var p = anytype
+        p = binOp("*", x, y)
+        if (neg) { p = gNegV(p) }
+        return side == 1 ? binOp(op, z, p) : binOp(op, p, z)
+    }
+    function gFmaNum(v) { return isFlo(v) || (typeof v == "number") }
+    // x*y + z rounded once to binary32, for binary32 x, y and z. The product is
+    // exact in a double, so s = p + z has the only rounding, and rounding s again to
+    // 24 bits is right unless s fell exactly halfway between two binary32 values:
+    // then the error TwoSum recovers says which way the exact sum lies. Twin of
+    // goFma32 in languages/lib/go-rt.metajs and abnf/jsrtgolang.go.
+    function gFma32(x, y, z) {
+        var p = gMulF(x, y)
+        var s = gAddF(p, z)
+        var r = coreF32Round(s)
+        var d = s - r
+        if (d !== 0 && r - r === 0) {
+            var o = r + 2 * d
+            if (coreF32Round(o) === o && o - s === d) {
+                var bb = s - p
+                var e = (p - (s - bb)) + (z - bb)
+                if (e !== 0 && (e > 0) === (d > 0)) { return o }
+            }
+        }
+        return r
+    }
 
     // ----- Complex numbers -----
     // complex128 is a {re, im} box. It only ever enters through an imaginary literal or
@@ -3498,6 +3642,21 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // four arithmetic operators below can afford one cheap isCx probe and otherwise
     // hand straight back to the untyped path.
     function newCx(re, im) { return {__cx: true, re: re, im: im} }
+    // A complex64 is the same box with c64 set and both parts rounded to float32.
+    // gc computes its + and - in float32 and its * and / in float64, narrowing
+    // the result; an untyped constant beside one converts to complex64 first.
+    // Twin of goCxOp in abnf/jsrtgolang.go and js_gocxop in
+    // languages/lib/go-rt.metajs, where the parts are float32 boxes instead.
+    function newCx64(re, im) { return {__cx: true, re: coreF32Round(re), im: coreF32Round(im), c64: true} }
+    function isCx64(v) { return isCx(v) && v.c64 === true }
+    // complex64(v) (w32) or complex128(v), of a complex or a real value.
+    function cxConv(w32, v) {
+        var re = isCx(v) ? v.re : (szIs(v) ? szNum(v) : gNumF(v))
+        var im = isCx(v) ? v.im : 0
+        return w32 ? newCx64(re, im) : newCx(re, im)
+    }
+    // A part of an operand, rounded to float32 when the operation is complex64.
+    function cxPt(n, w32) { return w32 ? coreF32Round(n) : n }
     // The two constructors cMaterialize and goImagLitC reach a complex value through,
     // spelled so that both halves say the same thing (the compiled twin emits IR here).
     function makeImag(v) { return makeConst(newCx(0, v)) }
@@ -3647,12 +3806,31 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // operator - `complex(-0.0, 0.0) * complex(-2, 3)` is (-0+0i) in go, and the
     // imaginary part is `(-0.0)*3 + 0.0*(-2)`, i.e. -0 + -0, which is the ONE
     // addition in the whole set that answers a negative zero.
-    function cxAdd(l, r) { return newCx(gAddF(cxRe(l), cxRe(r)), gAddF(cxIm(l), cxIm(r))) }
-    function cxSub(l, r) { return newCx(gSubF(cxRe(l), cxRe(r)), gSubF(cxIm(l), cxIm(r))) }
-    function cxMul(l, r) {
-        var a = cxRe(l), b = cxIm(l), c2 = cxRe(r), d = cxIm(r)
-        return newCx(gSubF(gMulF(a, c2), gMulF(b, d)), gAddF(gMulF(a, d), gMulF(b, c2)))
+    function cxAdd(l, r) {
+        var w = isCx64(l) || isCx64(r)
+        var re = gAddF(cxPt(cxRe(l), w), cxPt(cxRe(r), w))
+        var im = gAddF(cxPt(cxIm(l), w), cxPt(cxIm(r), w))
+        return w ? newCx64(re, im) : newCx(re, im)
     }
+    function cxSub(l, r) {
+        var w = isCx64(l) || isCx64(r)
+        var re = gSubF(cxPt(cxRe(l), w), cxPt(cxRe(r), w))
+        var im = gSubF(cxPt(cxIm(l), w), cxPt(cxIm(r), w))
+        return w ? newCx64(re, im) : newCx(re, im)
+    }
+    function cxMul(l, r) { return cxMulF(l, r, false) }
+    // gc multiplies (a+bi)(c+di) as a*c - b*d and a*d + b*c and fuses both
+    // (go-constfold.js): the subtract its right multiply, the add the one
+    // goFmaLeft picks.
+    function cxMulF(l, r, left) {
+        var w = isCx64(l) || isCx64(r)
+        var a = cxPt(cxRe(l), w), b = cxPt(cxIm(l), w), c2 = cxPt(cxRe(r), w), d = cxPt(cxIm(r), w)
+        var im = left ? gFmaF(a, d, gMulF(b, c2)) : gFmaF(b, c2, gMulF(a, d))
+        var re = gFmaF(-b, d, gMulF(a, c2))
+        return w ? newCx64(re, im) : newCx(re, im)
+    }
+    // x*y + z rounded once, on plain numbers.
+    function gFmaF(x, y, z) { return fma(x, y, z) }
     // DIVISION IS NOT THE TEXTBOOK FORMULA, because Go's is not. The gc runtime's
     // complex128div is SMITH'S ALGORITHM (R. L. Smith, CACM 5(8):435, 1962) plus
     // the C99 G.5.1 infinity fixups, and the difference shows on ORDINARY values
@@ -3662,21 +3840,26 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // (NaN+NaNi). The twins are js_gocxdiv in languages/lib/go-rt.metajs and in
     // abnf/jsrtgolang.go; keep the three in step.
     function cxDiv(l, r) {
-        var a = cxRe(l), b = cxIm(l), c2 = cxRe(r), d = cxIm(r)
+        var w = isCx64(l) || isCx64(r)
+        var q = cxDivF(cxPt(cxRe(l), w), cxPt(cxIm(l), w), cxPt(cxRe(r), w), cxPt(cxIm(r), w))
+        return w ? newCx64(q.re, q.im) : q
+    }
+    function cxDivF(a, b, c2, d) {
         var e = 0
         var f = 0
         // Scaling by the LARGER component keeps the ratio at most 1, which is what
         // stops 1e300/1e300 overflowing the denominator.
+        // complex128div's four multiply-adds are fused (go-constfold.js).
         if (gAbsF(c2) >= gAbsF(d)) {
             var ra = gDivF(d, c2)
-            var de = gAddF(c2, gMulF(ra, d))
-            e = gDivF(gAddF(a, gMulF(b, ra)), de)
-            f = gDivF(gSubF(b, gMulF(a, ra)), de)
+            var de = gFmaF(ra, d, c2)
+            e = gDivF(gFmaF(b, ra, a), de)
+            f = gDivF(gFmaF(-a, ra, b), de)
         } else {
             var rb = gDivF(c2, d)
-            var de2 = gAddF(d, gMulF(rb, c2))
-            e = gDivF(gAddF(gMulF(a, rb), b), de2)
-            f = gDivF(gSubF(gMulF(b, rb), a), de2)
+            var de2 = gFmaF(rb, c2, d)
+            e = gDivF(gFmaF(a, rb, b), de2)
+            f = gDivF(gFmaF(b, rb, -a), de2)
         }
         if (e !== e && f !== f) {
             // C99 G.5.1: recover the infinities and zeros a NaN pair hides.
@@ -3720,6 +3903,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // `(1.234567125e+06-0.5i)`, `+Inf`, and the sign of a -0.0 part. The twins are
     // the $cx arm of gopObj in abnf/jsrtgolang.go and of go-rt.metajs's gopObj.
     function cxStr(v) {
+        if (isCx64(v)) { return "(" + gF32Str(v.re) + cxSign(gF32Str(v.im)) + "i)" }
         return "(" + gFloStr(gNumF(v.re)) + cxSign(gFloStr(gNumF(v.im))) + "i)"
     }
     // The ALWAYS-WRITTEN sign, put in front of an already rendered imaginary
@@ -3735,23 +3919,21 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     }
     // -x keeps the operand's type: a float64 negates as a float64 (so -0.0 and
     // -1.0/0.0 are real), a complex component-wise, everything else as an integer.
-    makeNeg = function(t) {
-        return function() {
-            var v = anytype
-            v = t()
-            if (isFlo(v)) { return isF32(v) ? {__flo: gNegF(v.__flo), __f32: true} : gFlo(gNegF(v.__flo)) }
-            if (isCx(v)) { return newCx(gNegF(v.re), gNegF(v.im)) }
-            // An integer negates at its OWN width, so -int8(-128) is -128 again
-            // (the wrap the hardware does) rather than 128.
-            return szNeg(v)
-        }
+    makeNeg = function(t) { return function() { return gNegV(t()) } }
+    function gNegV(v) {
+        if (isFlo(v)) { return isF32(v) ? {__flo: gNegF(v.__flo), __f32: true} : gFlo(gNegF(v.__flo)) }
+        if (isCx(v)) { return isCx64(v) ? newCx64(gNegF(v.re), gNegF(v.im)) : newCx(gNegF(v.re), gNegF(v.im)) }
+        // An integer negates at its OWN width, so -int8(-128) is -128 again
+        // (the wrap the hardware does) rather than 128.
+        return szNeg(v)
     }
     // real(z) and imag(z) are float64 VALUES in Go, so they box: `real(a)` of
     // 1234567.125 prints 1.234567125e+06 and not 1234567.125, and `real(z)/2` is
     // a float division.
-    hostGlobals["real"] = function(v) { return gFlo(gNumF(cxRe(v))) }
-    hostGlobals["imag"] = function(v) { return gFlo(gNumF(cxIm(v))) }
-    hostGlobals["complex"] = function(re, im) { return newCx(cxRe(re), cxRe(im)) }
+    hostGlobals["real"] = function(v) { return isCx64(v) ? gFlo32(v.re) : gFlo(gNumF(cxRe(v))) }
+    hostGlobals["imag"] = function(v) { return isCx64(v) ? gFlo32(v.im) : gFlo(gNumF(cxIm(v))) }
+    // complex(float32, float32) is a complex64.
+    hostGlobals["complex"] = function(re, im) { return (isF32(re) || isF32(im)) ? newCx64(cxRe(re), cxRe(im)) : newCx(cxRe(re), cxRe(im)) }
     // The four operators complex changes. Overridden by ASSIGNMENT over whatever the
     // shared core installed, and each keeps the old function to delegate to.
     var coreAddOp = binOps["+"]
@@ -4352,6 +4534,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         if (it != null) { return szConv(0, it.w, it.u) }
         if (isFloatTy(w)) { return w == "float32" ? gFlo32(0) : gFlo(0) }
         if (w == "complex128") { return newCx(0, 0) }
+        if (w == "complex64") { return newCx64(0, 0) }
         if (w == "string") { return "" }
         if (w == "bool") { return false }
         if (w == "map") { return newNilMap(goZeroTy(mapValText(t)), t) }
@@ -4999,6 +5182,8 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         }
         if (op != "=") {
             exprs[0] = goAssignOpOperand(exprs[0], op, sp.krs[0], goRefTy(refs[0]))
+            var fa = goFmaAssign(op, sp.fms[0], goRefTy(refs[0]))
+            if (fa != null) { return goFmaAssignC(refs[0], op == "+=" ? "+" : "-", fa, stBare(goRefTy(refs[0]))) }
             return function() {
                 var loc = refLoc(refs[0])
                 var cur = locRead(refs[0], loc)
@@ -5012,6 +5197,18 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             for (var k = 0; k < exprs.length; k++) vals.push(exprs[k]())
             if (refs.length > 1 && exprs.length == 1) vals = goMvArr(vals[0]) // Unpack multi returns.
             for (var r = 0; r < refs.length; r++) locWrite(refs[r], locs[r], vals[r])
+        }
+    }
+    // v += x*y / v -= x*y with the multiply fused (goFmaAssign).
+    function goFmaAssignC(ref, op, fa, ty) {
+        var pair = fa.pair
+        var neg = fa.neg
+        var fl = isFloatTy(ty)
+        var f32 = ty == "float32"
+        return function() {
+            var loc = refLoc(ref)
+            var cur = locRead(ref, loc)
+            locWrite(ref, loc, goFmaStep(op, cur, pair(), 1, neg, fl, f32))
         }
     }
     // lastDeclNames is written at BUILD time by the short declaration just built, and
@@ -5112,6 +5309,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         // untyped constant's float64 box.
         // An integer constant beyond 2^53 arrives as a 64-bit box and rounds to the
         // nearest double, as go's constant conversion does.
+        if (isCx(v) && goTyWord(ty) == "complex64") { return cxConv(true, v) }
         if (typeof v != "number" && !isFlo(v) && !szIs(v)) { return v }
         // A DEFINED type adopts as what it is defined over: `type C float64; var t C =
         // 37` holds 37.0. Twin of emitAdoptTy in go-to-llvm-ir.abnf.
@@ -5119,7 +5317,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         if (hasOwn(definedUnder, w)) { ty = resolveDefined(w); w = goTyWord(ty) }
         if (w == "float32") { return gFlo32(szIs(v) ? szNum(v) : gNumF(v)) }
         if (isFloatTy(ty) && (typeof v == "number" || szIs(v))) { return gFlo(szNum(v)) }
-        if (w == "complex128") { return newCx(szIs(v) ? szNum(v) : gNumF(v), 0) }
+        if (w == "complex128" || w == "complex64") { return cxConv(w == "complex64", v) }
         var it = goIntTy(w)
         if (it != null && (typeof v == "number" || szIs(v))) { return szConv(v, it.w, it.u) }
         // A float box in an integer slot is an untyped float constant of integral
@@ -5550,7 +5748,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             var base = v.u ? "uint" : "int"
             return v.w == 64 ? base : base + v.w
         }
-        if (isCx(v)) { return "complex128" }
+        if (isCx(v)) { return isCx64(v) ? "complex64" : "complex128" }
         if (isMap(v)) { return "map" }
         if (isSl(v) || Array.isArray(v)) { return "slice" }
         if (typeof v == "object" && v.__class != undefined) { return v.__class.__name }
@@ -5670,7 +5868,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // abnf/jsrtgolang.go and languages/lib/go-rt.metajs.
     var goScalarTys = {bool: 1, string: 1, int: 1, int8: 1, int16: 1, int32: 1, int64: 1,
                        uint: 1, uint8: 1, uint16: 1, uint32: 1, uint64: 1, uintptr: 1,
-                       byte: 1, rune: 1, float32: 1, float64: 1, complex128: 1}
+                       byte: 1, rune: 1, float32: 1, float64: 1, complex64: 1, complex128: 1}
     function goAssertType(v, want) {
         if (hasOwn(ifaceMeths, want)) { return goAssertIface(v, want) }
         // A DEFINED non-struct type (or an array of one), and a func type, is
@@ -6814,6 +7012,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         var savedPendT = cPendT
         var savedSts = stByPos
         var savedSwMarks = cSwMarks
+        var savedFma = goFmaEnterFile()
         constByPos = {}
         cFnByPos = {}
         convByPos = {}
@@ -6850,6 +7049,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         cPendT = savedPendT
         stByPos = savedSts
         cSwMarks = savedSwMarks
+        goFmaLeaveFile(savedFma)
         c.popSource()
         curPkgName = savedPkg
         goWalkPkg = savedWalk
