@@ -102,7 +102,7 @@ not change the renderer.
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-876 kotlin: an enum value is not an `Enum<*>` · P3 · KT · OPEN [V KT worker]
+### T-876 kotlin: an enum value is not an `Enum<*>` · P3 · KT · IN PROGRESS (KT worker, round 9) [V KT worker]
 WRONG, every leg: `enum class Color { RED }; val c: Any = Color.RED; c is Enum<*>` → false; Kotlin true (every enum class
 extends kotlin.Enum; also `c is Comparable<*>` true). Check `as Enum<*>` and `c::class.supertypes`-free forms only.
 
@@ -133,13 +133,6 @@ for a dereference.
 ---
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
-
-### T-874 bash: declare -g, top-level local, readonly on read/printf -v/let, remaining arena growth · P2 · SH · IN PROGRESS (SH worker, round 18) [V SH worker]
-bash 5.3, both halves. WRONG: `x=1; f(){ local x=2; declare -g x=3; echo $x; }; f; echo $x` → bash `2`/`3`, ours `3`/`1`
-(also under a prefix binding). WRONG: `local y=5` at top level → bash "local: can only be used in a function", status 1,
-y unset; ours sets y, status 0. readonly is not enforced by `read`, `printf -v`, `mapfile`, `let`/`(( ))`, `${v:=w}`.
-MEMORY (native, 300k passes, 166-byte words): `IFS=, read -r a b` 200 MB, `echo | read x` 151 MB (pipeline/PIPESTATUS
-pin), `y=…; x=$y` 99 MB (x shares y's buffer), `set --` 59 MB — the rest of the loop bodies now stay at ~3.8 MB.
 
 # C — C subset
 
@@ -927,6 +920,7 @@ T-868 kotlin: nested names leak globally; builtin qualifiedName; type-blind rece
 T-871 bash: prefix assignments with declaration builtins, local, unset, arrays, readonly; native arena growth — PARTIAL 6fc7fc4b — prefix + declaration builtins (PrefixDecl), += prefixes, function prefix bindings as the function's frame (local inherits, unset reveals the caller's, hides arrays), readonly refused on assignment/prefix/local/declare/unset/for; per-statement arena release: 300k-pass loops 52–199 MB → 3.7–3.8 MB; bash bench +0.77%. Compiler lexical attributes under a prefix (n=4 f keeps -i/-u) recorded as a compile-time-attribute divergence in manual 7.9. Rest filed as T-874
 T-872 ruby: binary case mapping, re-encode back to UTF-8 in place, public over inherited private, module_eval — DONE fb23db4d (binary strings case-map ASCII only and their bang methods mutate in place; force_encoding back to UTF-8 in place through aliases; compiler public :m over an inherited or mixed-in private method; module_eval/class_eval/class_exec with a block; the real trigger of the rescue case was 'rescue X => e' followed by a line starting with '[' parsed as e[...] — fixed with SameLine TIndex. DECLINED: [-Float::NAN].pack("E") sign bit — no engine can read a NaN's sign (MetaJS has no bit access, manual 7.7; go-math.go documents the same), and a new sign-bit primitive in all three host engines for negative-NaN packing alone is not worth the shared-engine change; the string form of module_eval needs a run-time parser in the compiled half)
 T-873 kotlin: unqualified `is` matches nested classes; interface companion calls (compiled) — DONE 50489dc1 (a type test's name is resolved lexically to one declared type and matched by its full binary name in is/as/as?/when-is/filterIsInstance/reified is — interp, Go twin, layer 2; interface companion objects emitted like a class's, incl. named companions and const vals)
+T-874 bash: declare -g, top-level local, readonly on read/printf -v/let, remaining arena growth — DONE dc24378b (declare -g reaches the global past locals and prefix bindings — interp onGlobal, compiler rt_glob_swap; top-level local refused with bash's message; readonly enforced by read/printf -v/mapfile/let/(( ))/$(( ))/${v:=w} with bash's statuses — the compiler's run-time-computed arithmetic names stay a recorded 7.9 limit; RSS for the four loop shapes 65–203 MB → 3 MB; also fixed: set -- inside ( ) leaked to the caller in the compiler. DECLINED: declare -g inside a subshell inside a function shows the new value inside the subshell (bash keeps the local visible) — not a regression, needs the subshell to snapshot the local save stack)
 
 # Settled — do not re-open
 
