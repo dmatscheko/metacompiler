@@ -766,6 +766,7 @@ function regConst(pos, c) {
     tkByPos["p" + pos] = null
     fmaByPos["p" + pos] = null
     negByPos["p" + pos] = false
+    cxnByPos["p" + pos] = null
     knByPos["p" + pos] = null
     constByPos["p" + pos] = (c == null) ? cNone : c
     if (c == null) { cFnByPos["p" + pos] = cFnNone } else { cFnByPos["p" + pos] = cKonstFn(c) }
@@ -962,7 +963,7 @@ function goNegC(t, pos, s) {
 function goParenC(items, pos) {
     var c = constAt(items[1].at)
     if (c != null) { regConst(pos, c) }
-    else { regCFn(pos, cfnAt(items[1].at)); regTk(pos, tkAt(items[1].at)); fmaByPos["p" + pos] = fmaAt(items[1].at); negByPos["p" + pos] = negByPos["p" + items[1].at] === true; regKn(pos, knAt(items[1].at)) }
+    else { regCFn(pos, cfnAt(items[1].at)); regTk(pos, tkAt(items[1].at)); fmaByPos["p" + pos] = fmaAt(items[1].at); negByPos["p" + pos] = negByPos["p" + items[1].at] === true; cxnByPos["p" + pos] = cxnAt(items[1].at); regKn(pos, knAt(items[1].at)) }
     return items[0]
 }
 
@@ -1000,7 +1001,45 @@ function goFmaNeg(pos) {
     var f = fmaAt(pos)
     if (f != null) { fmaByPos["p" + pos] = {pair: f.pair, neg: !f.neg, n: !f.n, t: f.t, kv: f.kv, via: f.via} }
     negByPos["p" + pos] = true
+    var nx = {kv: knAt(pos), via: null}
+    cxnByPos["p" + pos] = {re: nx, im: nx}
 }
+// ----- a complex value with a negated part -----
+// gc multiplies (a+bi)(c+di) as a*c - b*d and a*d + b*c on the parts, and a
+// factor that is a run-time negation turns its multiply into an FNMULD
+// ((FMULD (FNEGD x) y) => (FNMULD x y)) in the same rewrite sweep that the add
+// or subtract after it is matched in - so with two negated factors too, which
+// cancel only a sweep later. ARM64.rules then fuse the multiply that is still an
+// FMULD: (FSUBD (FMULD x y) a) => (FNMSUBD a x y) fuses a*c when only b*d is
+// negated, and an add fuses its one FMULD (both negated or neither: as
+// goFmaCxMode decides). Measured with `go build -gcflags=-S`.
+// cxnByPos maps the end position of a value to {re, im}, each part null or the
+// record {kv, via} (live as goFmaLive says) of a negation that part is; a real
+// value is both parts. A unary minus negates both (gc does not fold a double
+// negation), complex(x, y), real(z) and imag(z) pass parts on, and a local
+// holding a value carries its record to its reads.
+var cxnByPos = {}
+function cxnAt(pos) {
+    if (pos == undefined || pos == null) { return null }
+    var x = cxnByPos["p" + pos]
+    return x == undefined ? null : x
+}
+// The negation record of part p of x, a cxnAt record, or null.
+function goCxnOf(x, p) { return x == null ? null : x[p] }
+function goCxnReg(pos, re, im) { if (re != null || im != null) { cxnByPos["p" + pos] = {re: re, im: im} } }
+// The cxnAt records of a run's operands, or null when its static type sty is not
+// complex.
+function goCxnRun(items, sty) {
+    if (stBare(sty).indexOf("complex") != 0) { return null }
+    var xs = []
+    for (var j = 1; j < items.length; j += 3) { xs.push(cxnAt(items[j].at)) }
+    return xs
+}
+// Is part p of a complex operand's record x a run-time negation?
+function goCxnPart(x, p) { return x != null && x[p] != null && goFmaLive(x[p]) }
+// A local's record x read through the binding o.
+function goCxnVia(x, o) { return {re: goCxnThrough(x.re, o), im: goCxnThrough(x.im, o)} }
+function goCxnThrough(p, o) { return p == null ? null : {kv: p.kv, via: (p.via == null ? [] : p.via).concat([o])} }
 // The product a multiply run [t, {at, as}, op, t, {at, as}, ...] ends in, or null:
 // its LAST operator must be a run-time '*', and a static type other than a float
 // one rules it out, as does a constant factor 2, 1 or -1, which gc rewrites into
@@ -1114,9 +1153,10 @@ function goFmaFnExit() { fmaFn = fmaFnStack.pop() }
 // An imported file has its own offsets and its own top level, so it gets fresh
 // tables (as constByPos does): goFmaEnterFile answers what goFmaLeaveFile restores.
 function goFmaEnterFile() {
-    var sv = {f: fmaByPos, n: negByPos, k: knByPos, fn: fmaFn}
+    var sv = {f: fmaByPos, n: negByPos, x: cxnByPos, k: knByPos, fn: fmaFn}
     fmaByPos = {}
     negByPos = {}
+    cxnByPos = {}
     knByPos = {}
     fmaFn = {adds: [], texts: {}, k: null}
     return sv
@@ -1124,6 +1164,7 @@ function goFmaEnterFile() {
 function goFmaLeaveFile(sv) {
     fmaByPos = sv.f
     negByPos = sv.n
+    cxnByPos = sv.x
     knByPos = sv.k
     fmaFn = sv.fn
 }
@@ -1131,18 +1172,34 @@ function goFmaLeaveFile(sv) {
 // two multiplies are computed again if the function writes the same complex
 // multiply (text t) twice, and then the multiply without the most recently
 // defined factor fuses - taken to be the imaginary part of the right operand,
-// so the right one. kv: the bindings under which both operands are known.
-function goFmaCxMul(sty, t, kv) {
+// so the right one. kv: the bindings under which both operands are known; l and
+// r: the operands' cxnAt records.
+function goFmaCxMul(sty, t, kv, l, r) {
     if (stBare(sty).indexOf("complex") != 0) { return null }
-    var cx = {fn: fmaFn, t: t, kv: kv, w: 64, m: -1, cx: true}
+    var cx = {fn: fmaFn, t: t, kv: kv, w: 64, m: -1, cx: true, l: l, r: r}
     fmaFn.adds.push(cx)
-    goFmaNoteText("c" + t, cx)
+    if (t != null) { goFmaNoteText("c" + t, cx) }
     return cx
 }
-// How a complex multiply rounds: 0 fusing the right multiply of the imaginary
-// part, 1 the left one, 2 folded by gc, so fusing nothing.
+// `v *= x` to a location of static type ty is v = v * x: its goFmaCxMul record
+// (xr: x's cxnAt record; v is assigned, so neither known nor negated), or null.
+function goFmaCxAssign(op, ty, xr) { return op == "*=" ? goFmaCxMul(ty, null, null, null, xr) : null }
+// How a complex multiply rounds: 0 fusing b*d in the real part and the right
+// multiply b*c of the imaginary one, 1 b*d and the left one a*d, 2 folded by gc,
+// so fusing nothing, 3 and 4 as 0 and 1 but fusing a*c in the real part.
 function goFmaCxMode(cx) {
-    if (cx.m < 0) { cx.m = !goFmaLive(cx) ? 2 : (goFmaAdds(cx.fn, 64) > 1 && goFmaDups(cx.fn, "c" + cx.t) < 2 ? 1 : 0) }
+    if (cx.m < 0) {
+        if (!goFmaLive(cx)) { cx.m = 2 }
+        else {
+            var a = goCxnPart(cx.l, "re")
+            var b = goCxnPart(cx.l, "im")
+            var c = goCxnPart(cx.r, "re")
+            var d = goCxnPart(cx.r, "im")
+            var im = goFmaAdds(cx.fn, 64) > 1 && goFmaDups(cx.fn, "c" + cx.t) < 2 ? 1 : 0
+            if ((a || d) !== (b || c)) { im = a || d ? 0 : 1 }
+            cx.m = (b || d) && !(a || c) ? im + 3 : im
+        }
+    }
     return cx.m
 }
 // Does the function f fuse the LEFT multiply of an add of two (a complex multiply
@@ -1271,7 +1328,8 @@ function goFmaReach(via) {
 }
 // The names a := or var declares (sp is goSplitSty's answer): a function's local
 // with a known value is known, under its own binding record {re, used}, and one
-// holding a product carries it (THROUGH A VARIABLE). The answer has the record of
+// holding a product carries it (THROUGH A VARIABLE), one holding a negation its
+// cxnByPos record (under the binding record cb). The answer has the record of
 // each name that holds a product, else null, for goFmaDeclPair.
 function goKnBind(names, sp) {
     var own = []
@@ -1284,6 +1342,7 @@ function goKnBind(names, sp) {
                 o = {re: false, used: false}
                 cBindX(names[i], {pr: f, via: (f.via == null ? [] : f.via).concat([o]), fn: fmaFn})
             }
+            else if (sp.cns[i] != null) { cBindX(names[i], {cn: sp.cns[i], cb: {re: false}, fn: fmaFn}) }
         }
         own.push(o)
     }
@@ -1295,13 +1354,20 @@ function goKnName(name, pos) {
     if (x == null || x.fn !== fmaFn) { return }
     if (x.kn != undefined) { regKn(pos, x.kn) }
     if (x.pr != undefined) { regFma(pos, {pair: goFmaVarPair(name, x.via, x.pr.neg), neg: x.pr.neg, n: x.pr.n, t: x.pr.t, kv: null, via: x.via}) }
+    if (x.cn != undefined) { cxnByPos["p" + pos] = goCxnVia(x.cn, x.cb) }
 }
 // complex(re, im), real(z) and imag(z) of known arguments, ending at pos, are
 // known: gc folds them as it folds arithmetic, a part of a complex late
 // (goFmaSeen), which knLate in the list marks.
 var knLate = {re: false}
-function goKnCallC(name, kns, pos) {
+function goKnCallC(name, sp, pos) {
+    var kns = sp.kns
     if ((name != "complex" && name != "real" && name != "imag") || cFind(name) != null || kns.length == 0) { return }
+    if (name == "complex" && kns.length == 2) { goCxnReg(pos, goCxnOf(sp.cns[0], "re"), goCxnOf(sp.cns[1], "re")) }
+    if (name != "complex" && kns.length == 1) {
+        var r = goCxnOf(sp.cns[0], name == "real" ? "re" : "im")
+        goCxnReg(pos, r, r)
+    }
     var kv = name == "complex" ? [] : [knLate]
     for (var i = 0; i < kns.length; i++) {
         if (kns[i] == null) { return }
@@ -1315,6 +1381,7 @@ function goKnAssign(name) {
     var x = cXLookup(name)
     if (x != null && x.kn != undefined) { x.kn[x.kn.length - 1].re = true }
     if (x != null && x.via != undefined) { x.via[x.via.length - 1].re = true }
+    if (x != null && x.cb != undefined) { x.cb.re = true }
 }
 function cFromRadixText(text) {
     var radix = 10
@@ -1590,9 +1657,10 @@ function goSplitSty(xs) {
     var nls = []
     var fms = []
     var kns = []
+    var cns = []
     var i = 0
     while (i < xs.length) {
-        if (typeof xs[i] == "function") { ts.push(xs[i]); tys.push(""); rns.push(false); krs.push(null); pures.push(false); nls.push(false); fms.push(null); kns.push(null) }
+        if (typeof xs[i] == "function") { ts.push(xs[i]); tys.push(""); rns.push(false); krs.push(null); pures.push(false); nls.push(false); fms.push(null); kns.push(null); cns.push(null) }
         else if (xs[i].sty != undefined && tys.length > 0) {
             tys[tys.length - 1] = xs[i].sty
             rns[rns.length - 1] = xs[i].rn === true
@@ -1601,10 +1669,11 @@ function goSplitSty(xs) {
             nls[nls.length - 1] = xs[i].nl === true
             fms[fms.length - 1] = fmaAt(xs[i].ep)
             kns[kns.length - 1] = xs[i].ep == undefined ? null : knAt(xs[i].ep)
+            cns[cns.length - 1] = cxnAt(xs[i].ep)
         }
         i = i + 1
     }
-    return {ts: goOrderThunks(ts, pures, goFixedOps(krs, nls)), tys: tys, rns: rns, krs: krs, nls: nls, fms: fms, kns: kns}
+    return {ts: goOrderThunks(ts, pures, goFixedOps(krs, nls)), tys: tys, rns: rns, krs: krs, nls: nls, fms: fms, kns: kns, cns: cns}
 }
 // ----- AN UNTYPED CONSTANT AT A TYPED LOCATION -----
 // Go converts an untyped constant to the type of the location it reaches - its
@@ -2524,11 +2593,12 @@ function goSplitArgs(items) {
     var pures = [] // an operand with no call in it (goPure)
     var nls = []   // an operand that is the literal nil (goNilSrc)
     var kns = []   // an argument's known list (knAt)
+    var cns = []   // an argument's negation record (cxnAt)
     var spread = false
     var i = 0
     while (i < items.length) {
         var it = items[i]
-        if (typeof it == "function") { args.push(it); atys.push(""); rns.push(false); krs.push(null); pures.push(false); nls.push(false); kns.push(null) }
+        if (typeof it == "function") { args.push(it); atys.push(""); rns.push(false); krs.push(null); pures.push(false); nls.push(false); kns.push(null); cns.push(null) }
         else if (it != null && it.aty !== undefined) {
             if (atys.length > 0) {
                 atys[atys.length - 1] = it.aty
@@ -2537,12 +2607,13 @@ function goSplitArgs(items) {
                 pures[pures.length - 1] = it.pu === true
                 nls[nls.length - 1] = it.nl === true
                 kns[kns.length - 1] = it.ep == undefined ? null : knAt(it.ep)
+                cns[cns.length - 1] = cxnAt(it.ep)
             }
         }
         else if (it != null && it.spread === true) { spread = true }
         i = i + 1
     }
-    return {args: goOrderThunks(args, pures, goFixedOps(krs, nls)), atys: atys, rns: rns, krs: krs, nls: nls, kns: kns, spread: spread}
+    return {args: goOrderThunks(args, pures, goFixedOps(krs, nls)), atys: atys, rns: rns, krs: krs, nls: nls, kns: kns, cns: cns, spread: spread}
 }
 // The operands a store or a call may replace by their converted value: the
 // constants and the literal nils (goOrderThunks' fixed).

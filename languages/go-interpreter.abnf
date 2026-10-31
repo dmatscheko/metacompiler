@@ -1142,7 +1142,7 @@ NewType     <~~ push({nty: firstType(up.in)}) ~~>
 // trailing '...' spreads a slice into the variadic parameter.
 Call        <~~ var ci = goAppendC(takeAll(), up.in); var csp = goSplitArgs(ci.slice(1))
                 var icv = goIfaceConvC(ci)
-                push(icv != null ? icv : makeCall(goCallBoxC(ci), csp.atys, goTpInfer(ci[0], csp, []))); goLenConstC(ci, up.start, up.pos); goKnCallC(ci[0], csp.kns, up.pos) ~~>
+                push(icv != null ? icv : makeCall(goCallBoxC(ci), csp.atys, goTpInfer(ci[0], csp, []))); goLenConstC(ci, up.start, up.pos); goKnCallC(ci[0], csp, up.pos) ~~>
             = Id <~~ push(goLtyName(up.in)) ~~> "(" [ ArgExpr { "," ArgExpr } [ Spread ] [ "," ] ] ")" ;
 // A call argument reports its static type after it, for goSplitArgs.
 ArgExpr     <~~ var ae = pop(); push(goRuneDefC(ae, up.pos)); push({aty: stAt(up.pos), kr: goKRec(up.start, up.pos), pu: goPure(up.start, up.pos), nl: goNilSrc(up.start, up.pos), ep: up.pos}) ~~> = Expression ;
@@ -3491,6 +3491,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         var fplan = goFmaPlan(items, ops, sty)
         var fnegs = goFmaSwap(items, ts, fplan)
         var kns = goKnRun(items)
+        var cxns = goCxnRun(items, sty)
         ts = goRunOrder(items, ts)
         var prod = goFmaProduct(items, ops, sty, goFmaPair(ts, ops, ty), kns)
         regConst(pos, null)
@@ -3500,7 +3501,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         regTk(pos, tk)
         regFma(pos, prod)
         if (fplan != null) { return goFmaRunC(ts, ops, fplan, fnegs, ty, sty) }
-        var cxf = goFmaCxRun(items, ops, sty, kns)
+        var cxf = goFmaCxRun(items, ops, sty, kns, cxns)
         if (cxf != null) { return goCxRunC(ts, ops, cxf) }
         if (ty == null) {
             var flat = [ts[0]]
@@ -3533,11 +3534,12 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     }
     // A run of static complex type: each multiply fuses as cxMulF says.
     // The answer has one goFmaCxMul record per operator, null for a '/'.
-    function goFmaCxRun(items, ops, sty, kns) {
+    function goFmaCxRun(items, ops, sty, kns, cxns) {
+        if (cxns == null) { return null }
         var cxs = []
         var any = false
         for (var k = 0; k < ops.length; k++) {
-            var cx = ops[k] == "*" ? goFmaCxMul(sty, goFmaText(items[1].as, items[3 * k + 4].at), kns[k + 1]) : null
+            var cx = ops[k] == "*" ? goFmaCxMul(sty, goFmaText(items[1].as, items[3 * k + 4].at), kns[k + 1], k == 0 ? cxns[0] : null, cxns[k + 1]) : null
             if (cx != null) { any = true }
             cxs.push(cx)
         }
@@ -3868,8 +3870,8 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     }
     function cxMul(l, r) { return cxMulF(l, r, 0) }
     // gc multiplies (a+bi)(c+di) as a*c - b*d and a*d + b*c and fuses both
-    // (go-constfold.js): the subtract its right multiply, the add the one
-    // goFmaCxMode picks - or, mode 2, neither, as gc folds known operands.
+    // (go-constfold.js): each part the multiply goFmaCxMode picks - or, mode 2,
+    // neither, as gc folds known operands.
     function cxMulF(l, r, mode) {
         var w = isCx64(l) || isCx64(r)
         var a = cxPt(cxRe(l), w), b = cxPt(cxIm(l), w), c2 = cxPt(cxRe(r), w), d = cxPt(cxIm(r), w)
@@ -3878,8 +3880,8 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             var im2 = gAddF(gMulF(a, d), gMulF(b, c2))
             return w ? newCx64(re2, im2) : newCx(re2, im2)
         }
-        var im = mode == 1 ? gFmaF(a, d, gMulF(b, c2)) : gFmaF(b, c2, gMulF(a, d))
-        var re = gFmaF(-b, d, gMulF(a, c2))
+        var im = mode == 1 || mode == 4 ? gFmaF(a, d, gMulF(b, c2)) : gFmaF(b, c2, gMulF(a, d))
+        var re = mode >= 3 ? gFmaF(a, c2, -gMulF(b, d)) : gFmaF(-b, d, gMulF(a, c2))
         return w ? newCx64(re, im) : newCx(re, im)
     }
     // x*y + z rounded once, on plain numbers.
@@ -5237,6 +5239,16 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             exprs[0] = goAssignOpOperand(exprs[0], op, sp.krs[0], goRefTy(refs[0]))
             var fa = goFmaAssign(op, sp.fms[0], goRefTy(refs[0]))
             if (fa != null) { return goFmaAssignC(refs[0], op == "+=" ? "+" : "-", fa, stBare(goRefTy(refs[0]))) }
+            var cxa = goFmaCxAssign(op, goRefTy(refs[0]), sp.cns[0])
+            if (cxa != null) {
+                return function() {
+                    var cloc = refLoc(refs[0])
+                    var ccur = locRead(refs[0], cloc)
+                    var cw = anytype
+                    cw = exprs[0]()
+                    locWrite(refs[0], cloc, (isCx(ccur) || isCx(cw)) ? cxMulF(ccur, cw, goFmaCxMode(cxa)) : applyOp(op, ccur, cw))
+                }
+            }
             return function() {
                 var loc = refLoc(refs[0])
                 var cur = locRead(refs[0], loc)

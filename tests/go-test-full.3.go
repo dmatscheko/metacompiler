@@ -1178,7 +1178,9 @@ func s127() {
 // not fuse. A multiply of two values gc knows - constants, and locals set to one
 // and never assigned again - is folded first and fuses nothing; a complex one
 // still counts as an add of two multiplies. A product read through a local that
-// holds it, and is never assigned again, fuses as if written in place. The helpers are not inlined, because an inlined call
+// holds it, and is never assigned again, fuses as if written in place. A complex
+// factor with a negated part (a conjugate) leaves the other product of a part to
+// fuse, in v *= w too. The helpers are not inlined, because an inlined call
 // joins its caller's function. The expected values are go run's on arm64.
 var fma128v = []float64{1.0000000009313226, -1, 0.37, 30, 1.0000000004656613, 0.1, 0.3, 3.7, 2.9, 1.000244140625}
 
@@ -1258,6 +1260,16 @@ func via128b(a, h float64) float64 {
 	return t + u
 }
 
+//go:noinline
+func ng128(xs []float64) (complex128, complex128, complex128) {
+	u := complex(xs[3], xs[5])
+	v := complex(xs[4], -xs[2])
+	w := complex(xs[4], xs[2])
+	t := u
+	t *= v
+	return u * v, u * complex(real(w), -imag(w)), t
+}
+
 func s128() {
 	a, m, k, t, h := fma128v[0], fma128v[1], fma128v[2], fma128v[3], fma128v[4]
 	n := len(fma128v) + 2
@@ -1282,6 +1294,8 @@ func s128() {
 	check("fma128h", fmt.Sprint(via128(fma128v[7], fma128v[8], fma128v[6])) == "11.03 -10.43 10.43 11.030000000000001 11.03" &&
 		via128b(a, h) == 9.313225754828403e-10)
 	check("fma128g", fmt.Sprint(ckn128(a, a, h, -h)) == "(5.139999999999999-0.48i) (5.139999999999999-0.48i) 9.313225754828403e-10")
+	check("fma128i", fmt.Sprint(ng128([]float64{0.3, -0.77, 1.9, 1.1, 0.7, 2.3})) ==
+		"(5.139999999999999-0.4800000000000001i) (5.139999999999999-0.4800000000000001i) (5.139999999999999-0.4800000000000001i)")
 }
 
 // ===== SECTION 129: a store through a pointer takes the pointee's type =====

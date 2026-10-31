@@ -1270,7 +1270,7 @@ LitExpr     <~~ var le = pop(); push(le); push({lesty: goLitEsty(up.pos), pu: go
 // variadic parameter.
 Call        <~~ var ci = goAppendC(takeAll(), up.in); var csp = goSplitArgs(ci.slice(1))
                 var icv = goIfaceConvC(ci)
-                push(icv != null ? icv : makeCall(goCallBoxC(ci), csp.atys, goTpInfer(ci[0], csp, []))); goLenConstC(ci, up.start, up.pos); goKnCallC(ci[0], csp.kns, up.pos) ~~>
+                push(icv != null ? icv : makeCall(goCallBoxC(ci), csp.atys, goTpInfer(ci[0], csp, []))); goLenConstC(ci, up.start, up.pos); goKnCallC(ci[0], csp, up.pos) ~~>
             = Id <~~ push(goLtyName(up.in)) ~~> "(" [ ArgExpr { "," ArgExpr } [ Spread ] [ "," ] ] ")" ;
 // A call argument reports its static type after it, for goSplitArgs.
 ArgExpr     <~~ var ae = pop(); push(goRuneDefC(ae, up.pos)); push({aty: stAt(up.pos), kr: goKRec(up.start, up.pos), pu: goPure(up.start, up.pos), nl: goNilSrc(up.start, up.pos), ep: up.pos}) ~~> = Expression ;
@@ -2129,6 +2129,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         var fplan = goFmaPlan(items, ops, sty)
         var fnegs = goFmaSwap(items, ts, fplan)
         var kns = goKnRun(items)
+        var cxns = goCxnRun(items, sty)
         ts = goRunOrder(items, ts)
         var prod = goFmaProduct(items, ops, sty, goFmaPair(ts, ops, ty), kns)
         regConst(pos, null)
@@ -2138,7 +2139,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         regTk(pos, tk)
         regFma(pos, prod)
         if (fplan != null) { return goFmaRunC(ts, ops, fplan, fnegs, ty, sty) }
-        var cxf = goFmaCxRun(items, ops, sty, kns)
+        var cxf = goFmaCxRun(items, ops, sty, kns, cxns)
         if (cxf != null) { return goCxRunC(ts, ops, cxf) }
         if (ty == null) {
             var flat = [ts[0]]
@@ -2178,18 +2179,19 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     }
     // A run of static complex type: one goFmaCxMul record per operator, null for
     // anything but '*'. Twin of goFmaCxRun in go-interpreter.abnf.
-    function goFmaCxRun(items, ops, sty, kns) {
+    function goFmaCxRun(items, ops, sty, kns, cxns) {
+        if (cxns == null) { return null }
         var cxs = []
         var any = false
         for (var k = 0; k < ops.length; k++) {
-            var cx = ops[k] == "*" ? goFmaCxMul(sty, goFmaText(items[1].as, items[3 * k + 4].at), kns[k + 1]) : null
+            var cx = ops[k] == "*" ? goFmaCxMul(sty, goFmaText(items[1].as, items[3 * k + 4].at), kns[k + 1], k == 0 ? cxns[0] : null, cxns[k + 1]) : null
             if (cx != null) { any = true }
             cxs.push(cx)
         }
         return any ? cxs : null
     }
     // goFmaCxMode's answer as the operator emitCxCall takes.
-    var cxMulOps = ["*", "*L", "*N"]
+    var cxMulOps = ["*", "*L", "*N", "*R", "*RL"]
     function goCxRunC(ts, ops, cxs) {
         return function(b) {
             var r = ts[0](b)
@@ -3485,11 +3487,12 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         return {b: b, v: emitCxOpParts(b, cxOpCodes[op], lp.re, lp.im, rp.re, rp.im)}
     }
     // js_gocxop does the arithmetic on the parts (goCxOp in abnf/jsrtgolang.go has
-    // the operations: gc's fused multiplies - "*L" fusing the left product of the
-    // imaginary part, as goFmaCxLeft picks - Smith's division, and the complex64
+    // the operations: gc's fused multiplies - "*L" and "*RL" fusing the left
+    // product of the imaginary part, "*R" and "*RL" that of the real part, as
+    // goFmaCxMode picks - Smith's division, and the complex64
     // width) and answers a plain {re, im} object; the $cx is built here, where its
     // class descriptor lives.
-    var cxOpCodes = {"+": 0, "-": 1, "*": 2, "*L": 3, "/": 4, "*N": 10}
+    var cxOpCodes = {"+": 0, "-": 1, "*": 2, "*L": 3, "/": 4, "*N": 10, "*R": 11, "*RL": 12}
     function emitCxOpParts(b, code, a, bi, c, d) {
         var q = callExt(b, "js_gocxop", [emitNum(b, code), a, bi, c, d])
         return emitNewCx(b, callExt(b, "js_get", [q, emitStr(b, "re")]), callExt(b, "js_get", [q, emitStr(b, "im")]))
@@ -3499,7 +3502,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // cannot move the caller's basic block, so the branch has to happen behind a
     // js_call. The plain form is emitted inside the ELSE block on purpose - the
     // externs would have to cope with a complex operand if it ran eagerly.
-    var cxFns = {"+": "$cxadd", "-": "$cxsub", "*": "$cxmul", "*L": "$cxmull", "*N": "$cxmuln", "/": "$cxdiv",
+    var cxFns = {"+": "$cxadd", "-": "$cxsub", "*": "$cxmul", "*L": "$cxmull", "*N": "$cxmuln", "*R": "$cxmulr", "*RL": "$cxmulrl", "/": "$cxdiv",
                  "+=": "$cxadd", "-=": "$cxsub", "*=": "$cxmul", "/=": "$cxdiv"}
     function declCxOp(b, name, op) {
         funcCount++
@@ -3601,6 +3604,8 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         b = declCxOp(b, "$cxmul", "*")
         b = declCxOp(b, "$cxmull", "*L")
         b = declCxOp(b, "$cxmuln", "*N")
+        b = declCxOp(b, "$cxmulr", "*R")
+        b = declCxOp(b, "$cxmulrl", "*RL")
         b = declCxOp(b, "$cxdiv", "/")
         b = declCxNeg(b)
         b = declCxPart(b, "real", "re", 1)
@@ -4805,6 +4810,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         // v += x*y / v -= x*y with the multiply fused (goFmaAssign).
         var fa = op == "=" ? null : goFmaAssign(op, sp.fms[0], goRefTy(refs[0]))
         if (fa != null) { exprs[0] = fa.pair }
+        var cxa = fa == null ? goFmaCxAssign(op, goRefTy(refs[0]), sp.cns[0]) : null
         var faTy = stBare(goRefTy(refs[0]))
         return function(b) {
             if (op != "=") {
@@ -4821,6 +4827,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                     var fr = emitFmaStep(b, op == "+=" ? "+" : "-", rr.v, rv.v, rv.q, 1, fa.neg, isFloatTy(faTy), faTy == "float32")
                     return emitLocWrite(fr.b, refs[0], rl.loc, fr.v)
                 }
+                if (cxa != null && usesComplex) { return emitLocWrite(b, refs[0], rl.loc, emitCxCall(b, cxMulOps[goFmaCxMode(cxa)], rr.v, rv.v)) }
                 return emitLocWrite(b, refs[0], rl.loc, emitBin(b, op, rr.v, rv.v))
             }
             var locs = []

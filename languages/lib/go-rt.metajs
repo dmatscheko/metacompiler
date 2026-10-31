@@ -961,6 +961,8 @@ function js_gocxop(op, av, bv, cv, dv) {
     else if (o == 1) { re = a - c; im = b - d }
     else if (o == 2) { re = fma(-b, d, a * c); im = fma(b, c, a * d) }
     else if (o == 3) { re = fma(-b, d, a * c); im = fma(a, d, b * c) }
+    else if (o == 11) { re = fma(a, c, -(b * d)); im = fma(b, c, a * d) }
+    else if (o == 12) { re = fma(a, c, -(b * d)); im = fma(a, d, b * c) }
     else if (o == 10) { re = a * c - b * d; im = a * d + b * c }
     else if (o == 4) { var q = goCxDivParts(a, b, c, d); re = q.re; im = q.im }
     else if (o == 5) { re = -a; im = -b }
