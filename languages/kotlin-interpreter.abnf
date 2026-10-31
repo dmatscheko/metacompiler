@@ -4509,18 +4509,55 @@ NotMemberKw = :script(~~
     // its next node along with the current one, so its hasNext() is whether the
     // element just taken was not the last of the n0.n the loop started with. A
     // sequence's cursor (n0 null) counts its pulls in `length` and is not checked.
+    // A map iterates like a set, and a map's view (keys, values, entries) or a
+    // withIndex() checks the collection it reads (kViewOwner): a map's own key
+    // array (n0.w), which every structural change of the map bumps.
     // Twin of emitForMore in kotlin-to-llvm-ir.abnf.
     function kForN0(src, subj) {
         if (kIsCursor(src)) { return null }
-        return {n: src.length, m: arrMod(src), set: kIsSet(subj) && subj.__jc !== "java.util.PriorityQueue"}
+        var o = kViewOwner(subj)
+        var w = src
+        if (kIsMap(o)) { w = o.keys } else if (o !== subj) { w = kIsSet(o) ? o.keys : o }
+        return {w: w, n: w.length, m: arrMod(w), set: kIterIsSet(o)}
     }
     function kForNext(src, i, n0) {
         var more = i < src.length || kForMore(src)
-        if (n0 !== null && (src.length !== n0.n || arrMod(src) !== n0.m)) {
-            if (n0.set ? i < n0.n : i !== src.length) { kThrowExc("ConcurrentModificationException", null) }
+        if (n0 !== null && (n0.w.length !== n0.n || arrMod(n0.w) !== n0.m)) {
+            if (n0.set ? i < n0.n : i !== n0.w.length) { kThrowExc("ConcurrentModificationException", null) }
             if (n0.set) { return false }
         }
         return more
+    }
+    // Whether a java.util iterator over v prefetches its next node: a map's and a
+    // set's, not a PriorityQueue's. Twin of ktIterIsSet in abnf/jsrtkotlin.go.
+    function kIterIsSet(v) { return kIsMap(v) || (kIsSet(v) && v.__jc !== "java.util.PriorityQueue") }
+    // A map's keys / entries view, tagged with its JVM class and linked to the map.
+    function kMapView(s, m, view) {
+        s.__wsrc = m
+        return kJvmTagged(s, kMapViewClass(m, view))
+    }
+    // A snapshot array (a map's values, xs.withIndex()) linked to the collection
+    // it reads, and the collection a view or such an array reads, else v. Twins
+    // of ktViewOf / ktViewOwner in abnf/jsrtkotlin.go.
+    function kViewOf(a, owner) { return arrPropsSet(a, {__wsrc: owner}) }
+    function kViewOwner(v) {
+        if (v === null || v === undefined || typeof v != "object") { return v }
+        var s = anytype
+        if (Array.isArray(v)) {
+            var p = arrProps(v)
+            if (p === undefined) { return v }
+            s = p.__wsrc
+        } else {
+            s = v.__wsrc
+        }
+        return s === undefined ? v : s
+    }
+    // map / forEach / forEachIndexed over es: its iterator's check, as a for loop
+    // makes it (kForNext); null for a set's elements handed over as a plain
+    // Collection. Twin of ktIterStart in abnf/jsrtkotlin.go.
+    function kIterN0(es, kind) {
+        if (kind == "Collection" && kViewOwner(es) === es) { return null }
+        return kForN0(es, es)
     }
     function kForAt(src, i) { return kIsCursor(src) ? src.cur : src[i] }
     function kSeqMaterialize(seq) {
@@ -5491,6 +5528,18 @@ NotMemberKw = :script(~~
     }
     // a's elements replaced by es IN PLACE: a `for` walks a list's or a set's own
     // array, so a mutation it must see cannot swap the array out.
+    // Remove entry i of map m in place (a running loop watches m.keys), a
+    // structural change. No array.splice under the frozen engine. Twin of
+    // ktMapDropAt in abnf/jsrtkotlin.go.
+    function kMapDropAt(m, i) {
+        for (var j = i; j + 1 < m.keys.length; j++) {
+            m.keys[j] = m.keys[j + 1]
+            m.vals[j] = m.vals[j + 1]
+        }
+        m.keys.pop()
+        m.vals.pop()
+        arrModBump(m.keys)
+    }
     function kArrSetTo(a, es) {
         while (a.length > 0) { a.pop() }
         for (var i = 0; i < es.length; i++) { a.push(es[i]) }
@@ -5684,6 +5733,7 @@ NotMemberKw = :script(~~
         if (i >= 0) { m.vals[i] = v; return }
         m.keys.push(ck)
         m.vals.push(v)
+        arrModBump(m.keys)
         if (m.__jc === "java.util.TreeMap") { kSortedSink(m, m.keys, m.vals) }
     }
     // `==` for the collection operations: kEq, so setOf<Any>(1, 1L) has two elements.
@@ -6813,7 +6863,8 @@ NotMemberKw = :script(~~
         // same ones, so an array's answer is unchanged whichever branch reaches it.
         if (name == "map") {
             out = []
-            for (i = 0; i < es.length; i++) { out.push(f(es[i])) }
+            var mn0 = kIterN0(es, kind)
+            for (i = 0; kForNext(es, i, mn0); i++) { out.push(f(es[i])) }
             return {v: out}
         }
         if (name == "filter") {
@@ -6822,7 +6873,8 @@ NotMemberKw = :script(~~
             return {v: out}
         }
         if (name == "forEach") {
-            for (i = 0; i < es.length; i++) { f(es[i]) }
+            var fn0 = kIterN0(es, kind)
+            for (i = 0; kForNext(es, i, fn0); i++) { f(es[i]) }
             return {v: undefined}
         }
         if (name == "count") {
@@ -6990,7 +7042,8 @@ NotMemberKw = :script(~~
             return {v: out}
         }
         if (name == "forEachIndexed") {
-            for (i = 0; i < es.length; i++) { f(i, es[i]) }
+            var xn0 = kIterN0(es, kind)
+            for (i = 0; kForNext(es, i, xn0); i++) { f(i, es[i]) }
             return {v: undefined}
         }
         if (name == "filterNot") {
@@ -7167,7 +7220,7 @@ NotMemberKw = :script(~~
             for (i = 0; i < es.length; i++) {
                 out.push({__ktiv: true, index: i, value: es[i], first: i, second: es[i]})
             }
-            return {v: out}
+            return {v: kViewOf(out, es)}
         }
         // groupingBy: a Grouping of these elements by key, which eachCount / fold /
         // reduce / aggregate turn into a map (kGroupingMethod).
@@ -7660,16 +7713,7 @@ NotMemberKw = :script(~~
             if (i < 0) { return {v: null} }
             var gone = anytype
             gone = m.vals[i]
-            // No array.splice under the frozen engine: the two arrays are rebuilt.
-            var nk = []
-            var nv = []
-            for (var j = 0; j < m.keys.length; j++) {
-                if (j == i) { continue }
-                nk.push(m.keys[j])
-                nv.push(m.vals[j])
-            }
-            m.keys = nk
-            m.vals = nv
+            kMapDropAt(m, i)
             return {v: gone}
         }
         if (name == "containsKey") { return {v: kMapFind(m, f) >= 0} }
@@ -7681,11 +7725,11 @@ NotMemberKw = :script(~~
         if (name == "isEmpty") { return {v: m.keys.length == 0} }
         if (name == "isNotEmpty") { return {v: m.keys.length > 0} }
         // Map.keys is a SET in Kotlin (java.util.Map.keySet), Map.values a Collection.
-        if (name == "keys") { return {v: kJvmTagged(kSetFrom(m.keys), kMapViewClass(m, "Key"))} }
-        if (name == "values") { return {v: arrKindSet(kSeqMethod(m.vals, "toList", []).v, 3)} }
+        if (name == "keys") { return {v: kMapView(kSetFrom(m.keys), m, "Key")} }
+        if (name == "values") { return {v: kViewOf(arrKindSet(kSeqMethod(m.vals, "toList", []).v, 3), m)} }
         // Map.entries is a SET of entries; Map.toList is a LIST of PAIRS:
         // `m.toList()` prints [(a, 1)] and `m.entries` prints [a=1].
-        if (name == "entries") { return {v: kJvmTagged(kSetOfDistinct(kElems(m)), kMapViewClass(m, "Entry"))} }
+        if (name == "entries") { return {v: kMapView(kSetOfDistinct(kElems(m)), m, "Entry")} }
         if (name == "toList") {
             var pl = []
             for (i = 0; i < m.keys.length; i++) { pl.push(kPair(m.keys[i], m.vals[i])) }
@@ -7696,7 +7740,7 @@ NotMemberKw = :script(~~
             for (i = 0; i < m.keys.length; i++) { kMapPut(out, m.keys[i], m.vals[i]) }
             return {v: out}
         }
-        if (name == "clear") { m.keys = []; m.vals = []; return {v: undefined}}
+        if (name == "clear") { kArrSetTo(m.keys, []); kArrSetTo(m.vals, []); arrModBump(m.keys); return {v: undefined}}
         // equals/hashCode are java.util.AbstractMap's: entry-wise equality, and a hash
         // that is the SUM of (key hash XOR value hash) - verified against java (JDK 24),
         // where Map.of(1, 2).hashCode() is 3.
@@ -7744,7 +7788,7 @@ NotMemberKw = :script(~~
             }
             return {v: mm}
         }
-        return kSeqMethodK(kElems(m), name, args, "Collection")
+        return kSeqMethodK(kViewOf(kElems(m), m), name, args, "Collection")
     }
 
     // The Set member surface. Only the members whose ANSWER is a Set, or that mutate
@@ -8354,7 +8398,8 @@ NotMemberKw = :script(~~
             var out
             if (name == "map") {
                 out = []
-                for (i = 0; i < tgt.length; i++) out.push(args[0](tgt[i]))
+                var mn0 = kIterN0(tgt, tgtKind)
+                for (i = 0; kForNext(tgt, i, mn0); i++) out.push(args[0](tgt[i]))
                 return kKindOut(tgt, name, out, tgtKind)
             }
             if (name == "filter") {
@@ -8363,7 +8408,8 @@ NotMemberKw = :script(~~
                 return kKindOut(tgt, name, out, tgtKind)
             }
             if (name == "forEach") {
-                for (i = 0; i < tgt.length; i++) args[0](tgt[i])
+                var fn0 = kIterN0(tgt, tgtKind)
+                for (i = 0; kForNext(tgt, i, fn0); i++) args[0](tgt[i])
                 return undefined
             }
             if (name == "count") {
@@ -11156,11 +11202,15 @@ NotMemberKw = :script(~~
             if (dst.keys.length != n) { arrModBump(dst.keys) }
             return dst
         }
+        // A map drops the keys src lacks and puts src's entries, so its
+        // modification count moves only for a structural change (java.util's
+        // remove / putAll).
         if (kIsMap(dst) && kIsMap(src)) {
-            var mk = src.keys
-            var mv = src.vals
-            dst.keys = []
-            dst.vals = []
+            var mk = src.keys.slice(0)
+            var mv = src.vals.slice(0)
+            for (var d = dst.keys.length - 1; d >= 0; d--) {
+                if (kMapFind(src, dst.keys[d]) < 0) { kMapDropAt(dst, d) }
+            }
             for (var k = 0; k < mk.length; k++) { kMapPut(dst, mk[k], mv[k]) }
             return dst
         }
@@ -11853,9 +11903,9 @@ NotMemberKw = :script(~~
         }
         if (kIsMap(o)) {
             if (name == "size") { return o.keys.length }
-            if (name == "keys") { return kJvmTagged(kSetFrom(o.keys), kMapViewClass(o, "Key")) }
-            if (name == "values") { return arrKindSet(kSeqMethod(o.vals, "toList", []).v, 3) }
-            if (name == "entries") { return kJvmTagged(kSetOfDistinct(kElems(o)), kMapViewClass(o, "Entry")) }
+            if (name == "keys") { return kMapView(kSetFrom(o.keys), o, "Key") }
+            if (name == "values") { return kViewOf(arrKindSet(kSeqMethod(o.vals, "toList", []).v, 3), o) }
+            if (name == "entries") { return kMapView(kSetOfDistinct(kElems(o)), o, "Entry") }
             return extPropGet(o, name)
         }
         if (kIsSet(o)) {

@@ -6305,6 +6305,40 @@ fun sec140() {
     check("isenum140d", when (vs[1]) { is Enum<*> -> "enum"; else -> "other" } == "enum" && vs[1] is Comparable<*>)
 }
 
+// ===== SECTION 141: map loops and list higher-order functions fail fast =====
+// A for over a map, its keys / values / entries, and Iterable.forEach /
+// forEachIndexed / map / withIndex all run the java.util iterator, which throws
+// ConcurrentModificationException from next() once the collection changed
+// structurally. A LinkedHashMap's iterator fetched its next node with the current
+// one, so a change at the last entry ends the loop quietly, and replacing a value
+// is no structural change. Every row is java 24's for the same LinkedHashMap /
+// ArrayList loop.
+fun cme141(f: () -> Unit): String {
+    try { f(); return "ok" } catch (e: ConcurrentModificationException) { return "cme" }
+}
+fun sec141() {
+    val m = listOf(
+        cme141 { val mp = mutableMapOf(1 to 1, 2 to 2); for (k in mp.keys) if (k == 1) mp[3] = 3 },
+        cme141 { val mp = mutableMapOf(1 to 1, 2 to 2); for (k in mp.keys) if (k == 2) mp[3] = 3 },
+        cme141 { val mp = mutableMapOf(1 to 1, 2 to 2, 3 to 3); for ((k, _) in mp) if (k == 1) mp.remove(2) },
+        cme141 { val mp = mutableMapOf(1 to 1, 2 to 2); for (e in mp.entries) if (e.key == 1) mp.clear() },
+        cme141 { val mp = mutableMapOf(1 to 1, 2 to 2); for (v in mp.values) if (v == 1) mp[7] = 7 },
+        cme141 { val mp = mutableMapOf(1 to 1, 2 to 2); for (v in mp.values) if (v == 1) mp[1] = 9 },
+        cme141 { val mp = mutableMapOf(1 to 1, 2 to 2); for (k in mp.keys) mp[k] = 0 },
+        cme141 { val mp = mutableMapOf(1 to 1, 2 to 2); mp.forEach { (k, _) -> if (k == 1) mp[3] = 3 } })
+    check("cme141a", m.joinToString(" ") == "cme ok cme cme cme ok ok cme")
+    val l = listOf(
+        cme141 { val ml = mutableListOf(1, 2, 3); ml.forEach { if (it == 1) ml.add(5) } },
+        cme141 { val ml = mutableListOf(1, 2, 3); ml.forEach { if (it == 3) ml.add(5) } },
+        cme141 { val ml = mutableListOf(1, 2, 3); ml.forEach { if (it == 2) ml.remove(1) } },
+        cme141 { val ml = mutableListOf(1, 2, 3); ml.forEachIndexed { i, x -> if (i == 0) ml.add(x) } },
+        cme141 { val ml = mutableListOf(1, 2, 3); ml.map { if (it == 1) ml.add(5); it } },
+        cme141 { val ml = mutableListOf(1, 2, 3); for (x in ml.withIndex()) if (x.index == 0) ml.add(9) },
+        cme141 { val ml = mutableListOf(1, 2, 3); for (x in ml.withIndex()) if (x.index == 0) ml[1] = 7 },
+        cme141 { val ml = mutableListOf(1, 2, 3); ml.forEach { if (it == 1) ml[2] = 8 } })
+    check("cme141b", l.joinToString(" ") == "cme cme ok cme cme cme ok ok")
+}
+
 fun main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -6442,6 +6476,7 @@ fun main() {
     sec138() // SECTION-CALL 138
     sec139() // SECTION-CALL 139
     sec140() // SECTION-CALL 140
+    sec141() // SECTION-CALL 141
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }

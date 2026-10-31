@@ -1282,7 +1282,16 @@ func init() {
 		// size and the count are both what they were, and js_ktforset(src) whether
 		// src is a set, whose iterator ends differently (kForNext in
 		// kotlin-interpreter.abnf). Anything but an array never changes under a
-		// loop. Twins in languages/lib/kotlin-rt.metajs.
+		// loop. js_ktwatch(src, it) is the array those two read: the map's own key
+		// array for a map or a map's view, the list or set a view or withIndex()
+		// reads (ktViewOwner), else the iterated it. Twins in
+		// languages/lib/kotlin-rt.metajs.
+		m["js_ktwatch"] = func(a []uint64) uint64 {
+			if wa := ktWatched(u(a[0])); wa != nil {
+				return w(wa)
+			}
+			return a[1]
+		}
 		m["js_ktmod"] = func(a []uint64) uint64 {
 			if o, ok := u(a[0]).(*jsArray); ok {
 				return w(float64(o.mod))
@@ -1297,8 +1306,8 @@ func init() {
 			return boolH(float64(len(o.elems)) == rt.toNumber(u(a[1])) && float64(o.mod) == rt.toNumber(u(a[2])))
 		}
 		m["js_ktforset"] = func(a []uint64) uint64 {
-			o, ok := u(a[0]).(*jsObject)
-			return boolH(ok && ktIsSet(o) && o.props["__jc"] != ktPqClass)
+			o, _ := ktViewOwner(u(a[0]))
+			return boolH(ktIterIsSet(o))
 		}
 		m["js_ktfill"] = func(a []uint64) uint64 {
 			dst, src := u(a[0]), u(a[1])
@@ -1327,11 +1336,17 @@ func init() {
 					return a[0]
 				}
 			}
+			// A map drops the keys src lacks and puts src's entries, so its
+			// modification count moves only for a structural change, as with
+			// java.util's remove / putAll.
 			if dk, dv, ok := dictParts(dst); ok {
 				if sk, sv, ok := dictParts(src); ok {
 					ks, vs := append([]interface{}{}, sk.elems...), append([]interface{}{}, sv.elems...)
-					dk.elems, dv.elems = nil, nil
-					dk.dropIdx()
+					for i := len(dk.elems) - 1; i >= 0; i-- {
+						if rt.ktMapFind(sk, dk.elems[i]) < 0 {
+							ktMapDropAt(dk, dv, i)
+						}
+					}
 					for i := range ks {
 						rt.ktMapPut(dst.(*jsObject), ks[i], vs[i])
 					}
@@ -4847,6 +4862,7 @@ func (rt *jsrt) ktMapPut(m *jsObject, k, v interface{}) {
 	keys.dropIdx()
 	keys.elems = append(keys.elems, k)
 	vals.elems = append(vals.elems, v)
+	keys.mod++
 	if m.props["__jc"] == "java.util.TreeMap" {
 		ktSortedSink(rt, m, keys, vals)
 	}
@@ -5587,10 +5603,12 @@ func (rt *jsrt) ktSeqMethodK(o *jsArray, name string, args []interface{}, kind s
 	// because a STRING reaches this function too (a String is a sequence of Char in
 	// Kotlin, so "abc".map { it.code } is ordinary). The bodies are the same ones, so
 	// an array's answer is unchanged whichever branch reaches it.
+	// map, forEach and forEachIndexed run the list's iterator, which fails fast
+	// when the body changes the list (ktListMore).
 	case "map":
-		out := make([]interface{}, len(es))
-		for i, e := range es {
-			out[i] = rt.ktCall(f, e)
+		out := make([]interface{}, 0, len(es))
+		for i, ck := 0, ktIterStart(o, kind); rt.ktIterMore(ck, o, i); i++ {
+			out = append(out, rt.ktCall(f, o.elems[i]))
 		}
 		return arr(out), true
 	case "filter":
@@ -5602,8 +5620,8 @@ func (rt *jsrt) ktSeqMethodK(o *jsArray, name string, args []interface{}, kind s
 		}
 		return arr(out), true
 	case "forEach":
-		for _, e := range es {
-			rt.ktCall(f, e)
+		for i, ck := 0, ktIterStart(o, kind); rt.ktIterMore(ck, o, i); i++ {
+			rt.ktCall(f, o.elems[i])
 		}
 		return jsUndef, true
 	case "count":
@@ -5864,8 +5882,8 @@ func (rt *jsrt) ktSeqMethodK(o *jsArray, name string, args []interface{}, kind s
 		}
 		return arr(out), true
 	case "forEachIndexed":
-		for i, e := range es {
-			rt.ktCall(f, float64(i), e)
+		for i, ck := 0, ktIterStart(o, kind); rt.ktIterMore(ck, o, i); i++ {
+			rt.ktCall(f, float64(i), o.elems[i])
 		}
 		return jsUndef, true
 	case "filterNot":
@@ -6121,7 +6139,7 @@ func (rt *jsrt) ktSeqMethodK(o *jsArray, name string, args []interface{}, kind s
 			p.set("second", e)
 			out[i] = p
 		}
-		return arr(out), true
+		return ktViewOf(arr(out), o), true
 	// groupingBy: a Grouping of these elements by key, which eachCount / fold /
 	// reduce / aggregate turn into a map (ktGroupingMethod).
 	case "groupingBy":
@@ -7332,9 +7350,7 @@ func (rt *jsrt) ktMapMethod(m *jsObject, name string, args []interface{}) (inter
 			return jsNull, true
 		}
 		old := vals.elems[i]
-		keys.dropIdx()
-		keys.elems = append(keys.elems[:i], keys.elems[i+1:]...)
-		vals.elems = append(vals.elems[:i], vals.elems[i+1:]...)
+		ktMapDropAt(keys, vals, i)
 		return old, true
 	case "containsKey":
 		return rt.ktMapFind(keys, f) >= 0, true
@@ -7358,7 +7374,7 @@ func (rt *jsrt) ktMapMethod(m *jsObject, name string, args []interface{}) (inter
 			// Collection.
 			return ktMapView(ktSetOfDistinct(keys.elems), m, "Key"), true
 		case "values":
-			return &jsArray{elems: append([]interface{}{}, vals.elems...), kind: ktArrVals}, true
+			return ktViewOf(&jsArray{elems: append([]interface{}{}, vals.elems...), kind: ktArrVals}, m), true
 		case "entries":
 			// Map.entries is a SET of entries; Map.toList is a LIST of PAIRS:
 			// `m.toList()` prints [(a, 1)] and `m.entries` prints [a=1].
@@ -7382,6 +7398,7 @@ func (rt *jsrt) ktMapMethod(m *jsObject, name string, args []interface{}) (inter
 		keys.dropIdx()
 		keys.elems = nil
 		vals.elems = nil
+		keys.mod++
 		return jsUndef, true
 	case "hashCode":
 		return float64(int32(ktElemHash(rt, m))), true
@@ -7461,8 +7478,9 @@ func (rt *jsrt) ktMapMethod(m *jsObject, name string, args []interface{}) (inter
 		}
 		return out, true
 	}
-	// map/filter/forEach/any/... over the entry sequence.
-	return rt.ktSeqMethodK(&jsArray{elems: ktElems(rt, m)}, name, args, ktKindColl)
+	// map/filter/forEach/any/... over the entry sequence, linked to the map so
+	// that the iterating ones fail fast when it changes.
+	return rt.ktSeqMethodK(ktViewOf(&jsArray{elems: ktElems(rt, m)}, m), name, args, ktKindColl)
 }
 
 // ============================================================================
@@ -8195,8 +8213,115 @@ func ktMapView(set interface{}, m interface{}, view string) interface{} {
 	}
 	if o, isObj := set.(*jsObject); isObj {
 		o.set("__jc", jc)
+		o.set("__wsrc", m)
 	}
 	return set
+}
+
+// ktViewOf links a snapshot array (a map's values, xs.withIndex()) to the
+// collection it reads, so a `for` over it fails fast when that one is changed.
+// Twin of kViewOf in kotlin-interpreter.abnf and languages/lib/kotlin-rt.metajs.
+func ktViewOf(a *jsArray, owner interface{}) *jsArray {
+	p := newJSObject()
+	p.set("__wsrc", owner)
+	a.props = p
+	return a
+}
+
+// ktViewOwner is the collection a map view (ktMapView) or a linked array
+// (ktViewOf) reads, and true; else v itself and false.
+func ktViewOwner(v interface{}) (interface{}, bool) {
+	switch o := v.(type) {
+	case *jsObject:
+		if s, has := o.props["__wsrc"]; has {
+			return s, true
+		}
+	case *jsArray:
+		if p, isObj := o.props.(*jsObject); isObj {
+			if s, has := p.props["__wsrc"]; has {
+				return s, true
+			}
+		}
+	}
+	return v, false
+}
+
+// ktWatched is the array whose size and modification count a loop over src
+// checks when src is not simply iterated in place: the key array of the map src
+// is or views, the elements of the set or the list a view or withIndex() reads;
+// nil for anything else.
+func ktWatched(src interface{}) *jsArray {
+	o, linked := ktViewOwner(src)
+	if keys, _, isDict := dictParts(o); isDict {
+		return keys
+	}
+	if !linked {
+		return nil
+	}
+	if keys, isSet := ktSetParts(o); isSet {
+		return keys
+	}
+	a, _ := o.(*jsArray)
+	return a
+}
+
+// ktIterIsSet: whether a java.util iterator over v prefetches its next node, so
+// that its hasNext() is decided before the body runs - a map's (LinkedHashMap,
+// HashMap, TreeMap) and a set's, but not a PriorityQueue's. kForNext in
+// kotlin-interpreter.abnf has the rule.
+func ktIterIsSet(v interface{}) bool {
+	if _, _, isDict := dictParts(v); isDict {
+		return true
+	}
+	o, ok := v.(*jsObject)
+	return ok && ktIsSet(o) && o.props["__jc"] != ktPqClass
+}
+
+// ktIterChk is the check of the java.util iterator a kotlin-stdlib higher-order
+// function (forEach, forEachIndexed, map) runs, as a `for` makes it: the watched
+// array w (o itself, or ktWatched), its size n and modification count m at the
+// start, and whether it iterates as a set (ktIterIsSet). A set's elements handed
+// over as a plain Collection are not checked (nil).
+type ktIterChk struct {
+	w    *jsArray
+	n, m int
+	set  bool
+}
+
+func ktIterStart(o *jsArray, kind string) *ktIterChk {
+	wa := ktWatched(o)
+	if wa == nil {
+		if kind == ktKindColl {
+			return nil
+		}
+		wa = o
+	}
+	ow, _ := ktViewOwner(o)
+	return &ktIterChk{w: wa, n: len(wa.elems), m: wa.mod, set: ktIterIsSet(ow)}
+}
+
+// ktIterMore: whether element i of o is taken. Unchanged, while i is below the
+// size; changed, a set's iterator throws ConcurrentModificationException when
+// the element just taken was not the last of the n it started with, a list's
+// (hasNext() is `i != size`) when i is not the current size. Twin of kForNext
+// in kotlin-interpreter.abnf and k4IterMore in languages/lib/kotlin-rt.metajs.
+func (rt *jsrt) ktIterMore(c *ktIterChk, o *jsArray, i int) bool {
+	if c != nil && (len(c.w.elems) != c.n || c.w.mod != c.m) {
+		if (c.set && i < c.n) || (!c.set && i != len(c.w.elems)) {
+			rt.ktRaiseV("ConcurrentModificationException", jsNull)
+		}
+		return false
+	}
+	return i < len(o.elems)
+}
+
+// ktMapDropAt removes entry i of a map, a structural change. Twin of kMapDropAt
+// in kotlin-interpreter.abnf and languages/lib/kotlin-rt.metajs.
+func ktMapDropAt(keys, vals *jsArray, i int) {
+	keys.dropIdx()
+	keys.elems = append(keys.elems[:i], keys.elems[i+1:]...)
+	vals.elems = append(vals.elems[:i], vals.elems[i+1:]...)
+	keys.mod++
 }
 
 // ktJvmIsA is `is C` for a concrete java.util collection class C (kotlin.collections'

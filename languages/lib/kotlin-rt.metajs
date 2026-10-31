@@ -513,8 +513,15 @@ function ktMapPut(m, k, v) {
     }
     keys.push(ck)
     vals.push(v)
+    arrModBump(keys)
     if (m["__jc"] === "java.util.TreeMap") { ktSortedSink(m, keys, vals) }
     return true
+}
+// ktMapDropAt (jsrtkotlin.go): remove entry i of a map, a structural change.
+function ktMapDropAt(keys, vals, i) {
+    k3RemoveAt(keys, i)
+    k3RemoveAt(vals, i)
+    arrModBump(keys)
 }
 
 // ktOrd (jsrtkotlin.go): the order of a sorted collection - its Comparator's
@@ -2345,9 +2352,12 @@ function js_ktfill(dst, src, add) {
     if (mk !== undefined && sks !== undefined) {
         var ks = k3Copy(sks)
         var vs = k3Copy(ktMapVals(src))
-        k3Clear(mk)
-        k3Clear(ktMapVals(dst))
-        var j = 0
+        var mv = ktMapVals(dst)
+        var j = mk.length - 1
+        while (j >= 0) {
+            if (ktMapFind(sks, mk[j]) < 0) { ktMapDropAt(mk, mv, j) }
+            j = j - 1
+        }
         for (j = 0; j < ks.length; j = j + 1) { ktMapPut(dst, ks[j], vs[j]) }
         return dst
     }
@@ -4636,8 +4646,10 @@ function ktSeqMethodK(arr, name, args, kind) {
         lc["arr"] = arr
         return lc
     }
+    // map, forEach and forEachIndexed run the list's iterator (k4IterMore).
     if (name == "map") {
-        for (i = 0; i < es.length; i = i + 1) { out.push(ktCall1(f, es[i])) }
+        mp = k4IterStart(es, kind)
+        for (i = 0; k4IterMore(mp, es, i); i = i + 1) { out.push(ktCall1(f, es[i])) }
         return out
     }
     if (name == "filter") {
@@ -4647,7 +4659,8 @@ function ktSeqMethodK(arr, name, args, kind) {
         return out
     }
     if (name == "forEach") {
-        for (i = 0; i < es.length; i = i + 1) { ktCall1(f, es[i]) }
+        mp = k4IterStart(es, kind)
+        for (i = 0; k4IterMore(mp, es, i); i = i + 1) { ktCall1(f, es[i]) }
         return undefined
     }
     if (name == "count") {
@@ -4872,7 +4885,8 @@ function ktSeqMethodK(arr, name, args, kind) {
         return out
     }
     if (name == "forEachIndexed") {
-        for (i = 0; i < es.length; i = i + 1) { ktCall2(f, i, es[i]) }
+        mp = k4IterStart(es, kind)
+        for (i = 0; k4IterMore(mp, es, i); i = i + 1) { ktCall2(f, i, es[i]) }
         return undefined
     }
     if (name == "filterNot") {
@@ -5030,7 +5044,7 @@ function ktSeqMethodK(arr, name, args, kind) {
         for (i = 0; i < es.length; i = i + 1) {
             out.push({__ktiv: true, index: i, value: es[i], first: i, second: es[i]})
         }
-        return out
+        return k4ViewOf(out, arr)
     }
     // groupingBy: a Grouping of these elements by key, which eachCount / fold /
     // reduce / aggregate turn into a map (k3GroupingMethod).
@@ -5907,8 +5921,7 @@ function ktMapMethod(m, name, args) {
         i = ktMapFind(keys, f)
         if (i < 0) { return null }
         v = vals[i]
-        k3RemoveAt(keys, i)
-        k3RemoveAt(vals, i)
+        ktMapDropAt(keys, vals, i)
         return v
     }
     if (name == "containsKey") { return ktMapFind(keys, f) >= 0 }
@@ -5926,7 +5939,7 @@ function ktMapMethod(m, name, args) {
         // Collection, Map.entries a SET of entries - and Map.toList is a LIST of
         // PAIRS, which is why they do not share one branch.
         if (name == "keys") { return ktMapView(k3SetOfDistinct(keys), m, "Key") }
-        if (name == "values") { return arrKindSet(k3Copy(vals), 3) }
+        if (name == "values") { return k4ViewOf(arrKindSet(k3Copy(vals), 3), m) }
         if (name == "entries") { return ktMapView(k3SetOfDistinct(ktElems(m)), m, "Entry") }
         out = []
         for (i = 0; i < keys.length; i = i + 1) {
@@ -5942,6 +5955,7 @@ function ktMapMethod(m, name, args) {
     if (name == "clear") {
         k3Clear(keys)
         k3Clear(vals)
+        arrModBump(keys)
         return undefined
     }
     if (name == "hashCode") { return k3I32(ktElemHash(m)) }
@@ -6016,7 +6030,7 @@ function ktMapMethod(m, name, args) {
         return out
     }
     // map/filter/forEach/any/... over the entry sequence.
-    return ktSeqMethodK(ktElems(m), name, args, "Collection")
+    return ktSeqMethodK(k4ViewOf(ktElems(m), m), name, args, "Collection")
 }
 
 function k3IsMapView(name) {
@@ -6209,12 +6223,78 @@ function js_ktmore(a, i) {
 // count at its start, whether it may take its next element - size and count
 // unchanged - and whether its source is a set.
 function js_ktmod(a) { return arrMod(a) }
+function js_ktwatch(src, it) {
+    var wa = k4Watched(src)
+    if (wa === undefined) { return it }
+    return wa
+}
 function js_ktforok(a, n0, m0) {
     if (!ktIsArr(a)) { return true }
     if (a.length != n0) { return false }
     return arrModIs(a, m0)
 }
-function js_ktforset(s) { return ktIsSet(s) && s["__jc"] !== KT_PQ_CLASS }
+function js_ktforset(s) { return k4IterIsSet(k4ViewOwner(s)) }
+// ktIterIsSet / ktViewOf / ktViewOwner / ktWatched (jsrtkotlin.go), which have
+// the rules.
+function k4IterIsSet(v) {
+    if (rtIsDictObj(v)) { return true }
+    return ktIsSet(v) && v["__jc"] !== KT_PQ_CLASS
+}
+function k4ViewOf(a, owner) {
+    var p = {}
+    p["__wsrc"] = owner
+    arrPropsSet(a, p)
+    return a
+}
+function k4ViewOwner(v) {
+    if (!ktIsObj(v)) { return v }
+    var s = anytype
+    if (ktIsArr(v)) {
+        var p = arrProps(v)
+        if (p === undefined) { return v }
+        s = p["__wsrc"]
+    } else {
+        s = v["__wsrc"]
+    }
+    if (s === undefined) { return v }
+    return s
+}
+function k4Watched(src) {
+    var o = k4ViewOwner(src)
+    var mk = ktMapKeys(o)
+    if (mk !== undefined) { return mk }
+    if (o === src) { return undefined }
+    var sk = ktSetElems(o)
+    if (sk !== undefined) { return sk }
+    return o
+}
+// ktIterStart / ktIterMore (jsrtkotlin.go): {w, n, m, set}, or undefined for a
+// set's elements handed over as a plain Collection.
+function k4IterStart(es, kind) {
+    var wa = k4Watched(es)
+    if (wa === undefined) {
+        if (kind == "Collection") { return undefined }
+        wa = es
+    }
+    var c = {}
+    c["w"] = wa
+    c["n"] = wa.length
+    c["m"] = arrMod(wa)
+    c["set"] = k4IterIsSet(k4ViewOwner(es))
+    return c
+}
+function k4IterMore(c, es, i) {
+    if (c !== undefined) {
+        var wa = c["w"]
+        if (wa.length != c["n"] || !arrModIs(wa, c["m"])) {
+            var bad = false
+            if (c["set"] === true) { bad = i < c["n"] } else { bad = i != wa.length }
+            if (bad) { ktRaise("ConcurrentModificationException", null) }
+            return false
+        }
+    }
+    return i < es.length
+}
 function js_ktitem(a, i) {
     if (typeof a == "string") { return js_kindex(a, i) }
     var v = a[i]
@@ -10192,6 +10272,7 @@ function ktMapView(set, m, view) {
         jc = jc + "$" + view + "Set"
     }
     set["__jc"] = jc
+    set["__wsrc"] = m
     return set
 }
 // `is C` for a concrete java.util collection class C, or undefined when t names

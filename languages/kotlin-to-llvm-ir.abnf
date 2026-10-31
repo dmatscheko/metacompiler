@@ -6151,9 +6151,10 @@ KwContract  = "contract" KwEnd ;
             var setB = curF.NewBlock("")
             var listB = curF.NewBlock("")
             var cmeB = curF.NewBlock("")
-            inB.NewCondBr(truthy(inB, callExt(inB, "js_ktforok", [aV, ck.n, ck.m])), bodyB, outB)
+            inB.NewCondBr(truthy(inB, callExt(inB, "js_ktforok", [ck.w, ck.n, ck.m])), bodyB, outB)
             outB.NewCondBr(truthy(outB, ck.s), setB, listB)
-            listB.NewCondBr(truthy(listB, callExt(listB, "js_seq", [iV, lenV])), exitB, cmeB)
+            var wLenV = callExt(listB, "js_get", [ck.w, emitStr(listB, "length")])
+            listB.NewCondBr(truthy(listB, callExt(listB, "js_seq", [iV, wLenV])), exitB, cmeB)
             setB.NewCondBr(truthy(setB, callExt(setB, "js_lt", [iV, ck.n])), cmeB, exitB)
             callExt(cmeB, "js_throw", [callExt(cmeB, "js_ktnewexc", [emitStr(cmeB, "ConcurrentModificationException"), hNull])])
             cmeB.NewRet(hUndef)
@@ -6162,9 +6163,12 @@ KwContract  = "contract" KwEnd ;
         moreB.NewCondBr(truthy(moreB, callExt(moreB, "js_ktmore", [aV, iV])), bodyB, outB)
     }
     // The check emitForMore makes, taken as a loop over srcV (iterated as itV)
-    // starts: the length, the modification count, and whether srcV is a set.
+    // starts: the array it watches (js_ktwatch: itV, or the key array of the map
+    // srcV is or views, or the list a withIndex() reads), its length and
+    // modification count, and whether srcV iterates as a set.
     function emitForStart(b, srcV, itV) {
-        return {n: callExt(b, "js_get", [itV, emitStr(b, "length")]), m: callExt(b, "js_ktmod", [itV]),
+        var wV = callExt(b, "js_ktwatch", [srcV, itV])
+        return {w: wV, n: callExt(b, "js_get", [wV, emitStr(b, "length")]), m: callExt(b, "js_ktmod", [wV]),
                 s: callExt(b, "js_ktforset", [srcV])}
     }
     function makeForList(bodyT, listT, name) {
