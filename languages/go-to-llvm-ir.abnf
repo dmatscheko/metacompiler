@@ -622,7 +622,7 @@ IdxE        <~~ var ie = pop(); push(ie); push({ksty: stAt(up.pos), kr: goKRec(u
 
 ExprList    = StoreExpr { "," StoreExpr } ;
 // One value of a := / = / var, followed by the static type it reports (goSplitSty).
-StoreExpr   <~~ var se = pop(); push(se); push({sty: stStoreAt(up.pos), rn: goIsRuneC(up.pos), kr: goKRec(up.start, up.pos), pu: goPure(up.start, up.pos), nl: goNilSrc(up.start, up.pos), fm: fmaAt(up.pos)}) ~~> = Expression ;
+StoreExpr   <~~ var se = pop(); push(se); push({sty: stStoreAt(up.pos), rn: goIsRuneC(up.pos), kr: goKRec(up.start, up.pos), pu: goPure(up.start, up.pos), nl: goNilSrc(up.start, up.pos), fm: fmaAt(up.pos), kn: knAt(up.pos)}) ~~> = Expression ;
 
 Empty       <~~ push(function(b) { return b }) ~~>
             = ";" ;
@@ -1270,10 +1270,10 @@ LitExpr     <~~ var le = pop(); push(le); push({lesty: goLitEsty(up.pos), pu: go
 // variadic parameter.
 Call        <~~ var ci = goAppendC(takeAll(), up.in); var csp = goSplitArgs(ci.slice(1))
                 var icv = goIfaceConvC(ci)
-                push(icv != null ? icv : makeCall(goCallBoxC(ci), csp.atys, goTpInfer(ci[0], csp, []))); goLenConstC(ci, up.start, up.pos) ~~>
+                push(icv != null ? icv : makeCall(goCallBoxC(ci), csp.atys, goTpInfer(ci[0], csp, []))); goLenConstC(ci, up.start, up.pos); goKnCallC(ci[0], csp.kns, up.pos) ~~>
             = Id <~~ push(goLtyName(up.in)) ~~> "(" [ ArgExpr { "," ArgExpr } [ Spread ] [ "," ] ] ")" ;
 // A call argument reports its static type after it, for goSplitArgs.
-ArgExpr     <~~ var ae = pop(); push(goRuneDefC(ae, up.pos)); push({aty: stAt(up.pos), kr: goKRec(up.start, up.pos), pu: goPure(up.start, up.pos), nl: goNilSrc(up.start, up.pos)}) ~~> = Expression ;
+ArgExpr     <~~ var ae = pop(); push(goRuneDefC(ae, up.pos)); push({aty: stAt(up.pos), kr: goKRec(up.start, up.pos), pu: goPure(up.start, up.pos), nl: goNilSrc(up.start, up.pos), kn: knAt(up.pos)}) ~~> = Expression ;
 // A returned value, which takes a rune constant at the RESULT's type (makeReturn).
 RetExpr     <~~ var re = pop(); push(re); push({aty: stAt(up.pos), rn: goIsRuneC(up.pos), kr: goKRec(up.start, up.pos), pu: goPure(up.start, up.pos)}) ~~> = Expression ;
 
@@ -2128,14 +2128,16 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         // Read BEFORE the clear below, which also erases the last operand's entry.
         var fplan = goFmaPlan(items, ops, sty)
         var fnegs = goFmaSwap(items, ts, fplan)
+        var kns = goKnRun(items)
         ts = goRunOrder(items, ts)
         regConst(pos, null)
+        regKn(pos, kns[ops.length])
         regCFn(pos, cfn)
         regSt(pos, sty)
         regTk(pos, tk)
-        regFma(pos, goFmaProduct(items, ops, sty, goFmaPair(ts, ops, ty)))
+        regFma(pos, goFmaProduct(items, ops, sty, goFmaPair(ts, ops, ty), kns))
         if (fplan != null) { return goFmaRunC(ts, ops, fplan, fnegs, ty, sty) }
-        var cxf = goFmaCxRun(items, ops, sty)
+        var cxf = goFmaCxRun(items, ops, sty, kns)
         if (cxf != null) { return goCxRunC(ts, ops, cxf) }
         if (ty == null) {
             var flat = [ts[0]]
@@ -2164,25 +2166,29 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         var negs = []
         if (plan == null) { return negs }
         for (var k = 0; k < plan.length; k++) {
-            var f = plan[k] == 0 ? null : goFmaOperand(items, k, plan[k])
+            var f = plan[k] == 0 || plan[k] >= 10 ? null : goFmaOperand(items, k, plan[k])
             if (f != null) { ts[plan[k] == 2 ? 0 : k + 1] = f.pair }
-            if (plan[k] >= 10) { ts[0] = goFmaOperand(items, k, 2).pair }
+            var ch = plan[k] >= 10 ? goFmaChoice(plan[k]) : null
+            if (ch != null && ch.r != null) { ts[k + 1] = ch.r.pair }
+            if (ch != null && ch.l != null) { ts[0] = ch.l.pair }
             negs.push(f != null && f.neg)
         }
         return negs
     }
     // A run of static complex type: one goFmaCxMul record per operator, null for
     // anything but '*'. Twin of goFmaCxRun in go-interpreter.abnf.
-    function goFmaCxRun(items, ops, sty) {
+    function goFmaCxRun(items, ops, sty, kns) {
         var cxs = []
         var any = false
         for (var k = 0; k < ops.length; k++) {
-            var cx = ops[k] == "*" ? goFmaCxMul(sty, goFmaText(items[1].as, items[3 * k + 4].at)) : null
+            var cx = ops[k] == "*" ? goFmaCxMul(sty, goFmaText(items[1].as, items[3 * k + 4].at), kns[k + 1]) : null
             if (cx != null) { any = true }
             cxs.push(cx)
         }
         return any ? cxs : null
     }
+    // goFmaCxMode's answer as the operator emitCxCall takes.
+    var cxMulOps = ["*", "*L", "*N"]
     function goCxRunC(ts, ops, cxs) {
         return function(b) {
             var r = ts[0](b)
@@ -2191,7 +2197,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             for (var k = 0; k < ops.length; k++) {
                 var rr = ts[k + 1](b)
                 b = rr.b
-                if (cxs[k] != null && usesComplex) { v = emitCxCall(b, goFmaCxLeft(cxs[k]) ? "*L" : "*", v, rr.v) }
+                if (cxs[k] != null && usesComplex) { v = emitCxCall(b, cxMulOps[goFmaCxMode(cxs[k])], v, rr.v) }
                 else { v = emitBin(b, ops[k], v, rr.v) }
             }
             return {b: b, v: v}
@@ -2225,12 +2231,17 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                 var rr = ts[k + 1](b)
                 b = rr.b
                 if (plan[k] >= 10) {
-                    // Both operands are pairs: the one not fused is rounded first.
+                    // Each multiply is a pair: the ones not fused are rounded first.
+                    var ch = goFmaChoice(plan[k])
                     var sd = goFmaSide(plan[k])
-                    if (sd == 1) { v = emitBin(b, "*", v, vq) } else { rr = {b: b, v: emitBin(b, "*", rr.v, rr.q), q: hUndef} }
-                    var e0 = sd == 1 ? emitFmaStep(b, ops[k], v, rr.v, rr.q, 1, false, fl, f32) : emitFmaStep(b, ops[k], rr.v, v, vq, 2, false, fl, f32)
-                    b = e0.b
-                    v = e0.v
+                    if (ch.l != null && sd != 2) { var lr = emitFmaRound(b, v, vq, ch.l.neg); b = lr.b; v = lr.v }
+                    if (ch.r != null && sd != 1) { rr = emitFmaRound(b, rr.v, rr.q, ch.r.neg) }
+                    if (sd == 0) { v = ty == null ? emitBin(b, ops[k], v, rr.v) : emitTypedBin(b, ty, ops[k], v, rr.v) }
+                    else {
+                        var e0 = sd == 1 ? emitFmaStep(b, ops[k], v, rr.v, rr.q, 1, ch.r.neg, fl, f32) : emitFmaStep(b, ops[k], rr.v, v, vq, 2, ch.l.neg, fl, f32)
+                        b = e0.b
+                        v = e0.v
+                    }
                 }
                 else if (plan[k] == 1) { var e1 = emitFmaStep(b, ops[k], v, rr.v, rr.q, 1, negs[k], fl, f32); b = e1.b; v = e1.v }
                 else if (plan[k] == 2) { var e2 = emitFmaStep(b, ops[k], rr.v, v, vq, 2, negs[k], fl, f32); b = e2.b; v = e2.v }
@@ -2239,6 +2250,12 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             }
             return {b: b, v: v}
         }
+    }
+    // The product x*y of a pair, negated when neg.
+    function emitFmaRound(b, x, y, neg) {
+        var p = emitBin(b, "*", x, y)
+        if (neg) { return emitNegV(b, p) }
+        return {b: b, v: p}
     }
     // One fused step: z op x*y (side 1) or x*y op z (side 2), the product negated
     // when neg. js_gofma rounds a float multiply-add once and answers undefined for
@@ -3435,7 +3452,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // imaginary part, as goFmaCxLeft picks - Smith's division, and the complex64
     // width) and answers a plain {re, im} object; the $cx is built here, where its
     // class descriptor lives.
-    var cxOpCodes = {"+": 0, "-": 1, "*": 2, "*L": 3, "/": 4}
+    var cxOpCodes = {"+": 0, "-": 1, "*": 2, "*L": 3, "/": 4, "*N": 10}
     function emitCxOpParts(b, code, a, bi, c, d) {
         var q = callExt(b, "js_gocxop", [emitNum(b, code), a, bi, c, d])
         return emitNewCx(b, callExt(b, "js_get", [q, emitStr(b, "re")]), callExt(b, "js_get", [q, emitStr(b, "im")]))
@@ -3445,7 +3462,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // cannot move the caller's basic block, so the branch has to happen behind a
     // js_call. The plain form is emitted inside the ELSE block on purpose - the
     // externs would have to cope with a complex operand if it ran eagerly.
-    var cxFns = {"+": "$cxadd", "-": "$cxsub", "*": "$cxmul", "*L": "$cxmull", "/": "$cxdiv",
+    var cxFns = {"+": "$cxadd", "-": "$cxsub", "*": "$cxmul", "*L": "$cxmull", "*N": "$cxmuln", "/": "$cxdiv",
                  "+=": "$cxadd", "-=": "$cxsub", "*=": "$cxmul", "/=": "$cxdiv"}
     function declCxOp(b, name, op) {
         funcCount++
@@ -3462,7 +3479,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         var isr = callExt(fb, "js_is_type", [r, emitStr(fb, "$cx")])
         var cxPath = function(cb) { return emitCxOp(cb, op, l, r) }
         var res = emitSelect(fb, isl, cxPath, function(eb) {
-            return emitSelect(eb, isr, cxPath, function(e2) { return {b: e2, v: emitBinNum(e2, op == "*L" ? "*" : op, l, r)} })
+            return emitSelect(eb, isr, cxPath, function(e2) { return {b: e2, v: emitBinNum(e2, op.charAt(0) == "*" ? "*" : op, l, r)} })
         })
         res.b.NewRet(res.v)
         curF = savedF
@@ -3546,6 +3563,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         b = declCxOp(b, "$cxsub", "-")
         b = declCxOp(b, "$cxmul", "*")
         b = declCxOp(b, "$cxmull", "*L")
+        b = declCxOp(b, "$cxmuln", "*N")
         b = declCxOp(b, "$cxdiv", "/")
         b = declCxNeg(b)
         b = declCxPart(b, "real", "re", 1)
@@ -4758,6 +4776,10 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                 b = rr.b
                 var rv = exprs[0](b)
                 b = rv.b
+                if (fa != null && fa.kv != null && !goFmaLive(fa)) {
+                    var fp = emitFmaRound(b, rv.v, rv.q, fa.neg)
+                    return emitLocWrite(fp.b, refs[0], rl.loc, emitBin(fp.b, op == "+=" ? "+" : "-", rr.v, fp.v))
+                }
                 if (fa != null) {
                     var fr = emitFmaStep(b, op == "+=" ? "+" : "-", rr.v, rv.v, rv.q, 1, fa.neg, isFloatTy(faTy), faTy == "float32")
                     return emitLocWrite(fr.b, refs[0], rl.loc, fr.v)
@@ -4852,6 +4874,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         // Each value reports its static type (StoreExpr): a struct value is copied and
         // the new name takes the type, so `b := a` copies and `q := p` aliases.
         var sp = goSplitSty(items.slice(i))
+        goKnBind(names, sp.kns)
         goTupleBind(names, sp.ts.length, sp.tys)
         var exprs = sp.ts
         if (names.length == exprs.length) {
@@ -4977,6 +5000,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         // Each initializer reports its static type (StoreExpr), so `var i any = a`
         // copies too. Twin of makeVarDecl in go-interpreter.abnf.
         var sp = goSplitSty(items.slice(i))
+        goKnBind(names, sp.kns)
         if (ty == "") { goTupleBind(names, sp.ts.length, sp.tys) }
         var inits = sp.ts
         if (inits.length == names.length) {

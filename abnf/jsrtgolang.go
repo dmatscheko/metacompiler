@@ -2152,9 +2152,10 @@ func goCxTy(o *jsObject) string {
 // 2 and 3 * (gc's fused multiply-adds, 3 fusing the left product of the
 // imaginary part - go-constfold.js has the rule), 4 / (goCxDiv), 5 the negation
 // of (a+bi), 6 complex(a, b), 7 the conversion of (a+bi) to complex64, 8 to
-// complex128, and 9 the part a as real() and imag() answer it, a float box. A complex64 - an operand with a float32 part, or op 7 - computes
-// from its parts rounded to float32 (an untyped constant converts) and rounds
-// both results again: + and - in float32, * and / in float64 then narrowed, as
+// complex128, 9 the part a as real() and imag() answer it, a float box, and 10
+// * with every product rounded, as gc folds known operands. A complex64 - an
+// operand with a float32 part, or op 7 - computes from its parts rounded to
+// float32 (an untyped constant converts) and rounds both results again: + and - in float32, * and / in float64 then narrowed, as
 // gc compiles them. Its parts come back as float32 boxes, a complex128's as
 // float64 values. Twin of the cx* functions in go-interpreter.abnf and
 // js_gocxop in languages/lib/go-rt.metajs.
@@ -2185,6 +2186,8 @@ func goCxOp(rt *jsrt, op int, v [4]interface{}) (interface{}, interface{}) {
 		re, im = math.FMA(-x[1], x[3], float64(x[0]*x[2])), math.FMA(x[1], x[2], float64(x[0]*x[3]))
 	case 3:
 		re, im = math.FMA(-x[1], x[3], float64(x[0]*x[2])), math.FMA(x[0], x[3], float64(x[1]*x[2]))
+	case 10:
+		re, im = float64(x[0]*x[2])-float64(x[1]*x[3]), float64(x[0]*x[3])+float64(x[1]*x[2])
 	case 4:
 		re, im = goCxDiv(x[0], x[1], x[2], x[3])
 	case 5:

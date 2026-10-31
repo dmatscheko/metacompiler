@@ -1175,8 +1175,10 @@ func s127() {
 // With a multiply on both sides the function decides: alone in its function the
 // add fuses the right one, beside another such add (a complex multiply is one) the
 // left one. Complex multiplication and division fuse the same way. Integers do
-// not fuse. The helpers are not inlined, because an inlined call joins its
-// caller's function. The expected values are go run's on arm64.
+// not fuse. A multiply of two values gc knows - constants, and locals set to one
+// and never assigned again - is folded first and fuses nothing; a complex one
+// still counts as an add of two multiplies. The helpers are not inlined, because an inlined call
+// joins its caller's function. The expected values are go run's on arm64.
 var fma128v = []float64{1.0000000009313226, -1, 0.37, 30, 1.0000000004656613, 0.1, 0.3, 3.7, 2.9, 1.000244140625}
 
 //go:noinline
@@ -1190,6 +1192,41 @@ func cx128(z, w complex128) (complex128, complex128) { return z * w, z / w }
 
 //go:noinline
 func cxs128(z, w complex128) (complex128, complex128) { return z * w, w * w }
+
+//go:noinline
+func kn128(c float64) (float64, float64, float64, float64) {
+	a := 1.1
+	b := 1.9
+	d := float64(a)
+	s := c
+	s += a * b
+	return a*b + c, s, c - a*b, -d*b + c
+}
+
+//go:noinline
+func knr128(c float64) (float64, float64) {
+	a := 1.1
+	b := 1.9
+	if c > 100 {
+		a = 2
+	}
+	f, r := 1.1, 0.0
+	for i := 0; i < 2; i++ {
+		if i == 0 {
+			r = f*b + c
+		}
+		f = f + c
+	}
+	return a*b + c, r
+}
+
+//go:noinline
+func ckn128(x, y, u, v float64) (complex128, complex128, float64) {
+	z := complex(1.1, 2.3)
+	w := complex(0.7, -1.9)
+	a, b := 0.7, -1.9
+	return z * w, z * complex(a, b), x*y + u*v
+}
 
 func s128() {
 	a, m, k, t, h := fma128v[0], fma128v[1], fma128v[2], fma128v[3], fma128v[4]
@@ -1210,6 +1247,9 @@ func s128() {
 	p, q := cx128(z, w)
 	r, o := cxs128(z, w)
 	check("fma128d", fmt.Sprint(p, q, r, o) == "(-0.4999999999999999+1.4i) (0.056108597285067875+0.037104072398190045i) (-0.4999999999999999+1.4000000000000001i) (5.280000000000002+21.46i)")
+	check("fma128e", fmt.Sprint(kn128(fma128v[6])) == "2.3899999999999997 2.3899999999999997 -1.7899999999999998 -1.7899999999999998")
+	check("fma128f", fmt.Sprint(knr128(fma128v[6])) == "2.39 2.39")
+	check("fma128g", fmt.Sprint(ckn128(a, a, h, -h)) == "(5.139999999999999-0.48i) (5.139999999999999-0.48i) 9.313225754828403e-10")
 }
 
 // ===== SECTION 129: a store through a pointer takes the pointee's type =====
