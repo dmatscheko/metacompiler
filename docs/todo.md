@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-881** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-882** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -66,13 +66,13 @@ its report; anything structural there is a CORE ticket.
 
 # RB — Ruby
 
-### T-877 ruby compiler: super misses and into modules; multi-argument include; run-time private · P2 · RB · IN PROGRESS (RB worker, round 29) [V RB worker]
-Oracle LC_ALL=en_US.UTF-8 /usr/bin/ruby 2.6; the interpreter is right on 1–4. (1) REJECTED: `class L; def g(a); super; end; end`
-→ compile error "super outside of a subclass not implemented"; oracle a rescuable NoMethodError. (2) `class Q < P; def h2;
-super; end; end` (P lacks h2) aborts "unknown super method" from js_supercall; oracle NoMethodError. (3) REJECTED: `class K;
-include M; def f; "K>" + super; end; end` (super into an included module's method) → not implemented; oracle "K>M#f".
-(4) REJECTED: static `include M1, M2` is a parse error; oracle works with ancestors [C, M1, M2]. (5) all engines:
-`A3.send(:private, :x)` → "undefined method `private' for A3:Class"; oracle x becomes private.
+### T-881 ruby: super into builtin methods; `==` result coerced to a boolean · P2 · RB · IN PROGRESS (RB worker, round 30) [V RB worker]
+Oracle LC_ALL=en_US.UTF-8 /usr/bin/ruby 2.6, both halves. REJECTED: `class B; def initialize(a); super(); end; end; B.new(1)`
+raises NoMethodError (oracle runs it — Object#initialize); same for super from `to_s`, `hash`, `frozen?`,
+`respond_to_missing?`; a super into `Comparable#==` from a class including Comparable fails in the interpreter only. WRONG:
+`class E; def ==(o); "yes"; end; end; p(E.new == E.new)` → oracle `"yes"`, ours `true` (also check `!=`, which MRI negates).
+Run-time visibility limits (all engines): private_instance_methods misses run-time changes; `C.private(:x)` with an explicit
+receiver should raise NoMethodError.
 
 # JS — JavaScript and TypeScript
 
@@ -911,6 +911,7 @@ T-861 ts/js: `bind` on a class — DONE eccc75c5 (bind on a class constructs thr
 T-870 ts/js: toStringTag for Map/Set/typed arrays; Uint8Array gaps — DONE eccc75c5 (toStringTag getters for Map/Set/WeakMap/WeakSet/Uint8Array/ArrayBuffer, hidden Date tag, [object Function] for classes, no Symbol.toStringTag gate; ArrayBuffer with byteLength/slice/isView and shared views; out-of-range typed-array writes dropped)
 T-878 go: FMA where gc does NOT fuse — constant-propagated operands, variables, inlining — DONE 3889f62b..374490fa (compile-time-known operands fold without FMA, deferred to whole-function analysis; a product read through an unreassigned local fuses like gc's SSA value; also a negated-last-factor ordering bug, goja/frozen binding drift, and software math.FMA's own guard. DECLINED with evidence: inlined helpers and directly-called closures (needs gc's inliner cost model), constant propagation through reassignment/phis (SSA data flow), store-to-load forwarding for address-taken locals (memory passes), t*1 rewrites — each was unfused before this round, none is a regression)
 T-845 compiler grammars: `fail` prints on stdout, so `-qq` swallows compile errors — DONE a18a3447 for every grammar but ruby/js/typescript/go (fail/buildErr/interp-core fail → eprintln, compile-core break/continue through fail with a re-freeze, 19 -qq SHOULD FAIL rows); those four and regex.js rxFail filed as T-880. DECLINED: batch's 'cannot find the batch label' message channel — no cmd.exe oracle here
+T-877 ruby compiler: super misses and into modules; multi-argument include; run-time private — DONE 679b977c (js_rsuper walks __super and raises the rescuable NoMethodError on a miss; super into an included module's method via hidden $sup keys — also fixed D>M>Base#f ordering and a prepend stack overflow; super inside a module method continues through self's ancestors in the interp; include/prepend/extend with several modules applied last-first; run-time send(:private/:protected/:public) in all engines, gated in the compiler like arity tracking)
 
 # Settled — do not re-open
 
