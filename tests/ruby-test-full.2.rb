@@ -541,6 +541,158 @@ def s136
         s136nm { S136M.module_function(:mm) } == "private method `module_function' called for S136M:Module" &&
         S136C.new.b == 2 && S136R.new.public == "pub")
 end
+# ===== SECTION 137: a class method `new'; super in a class method =====
+# `def self.new' (or `new' in `class << self', or in a module the class
+# extends) answers C.new and a bare `new' in a class method, a subclass
+# inherits it, and its `super' is Class#new - with the arguments and the block.
+# A super in any class method reaches the class method above, and a bare
+# `name' in one is Module#name. /usr/bin/ruby 2.6 settles each.
+class S137Pool
+  @made = 0
+  class << self
+    attr_reader :made
+    def new(*args, &blk)
+      @made += 1
+      super
+    end
+  end
+  def initialize(a, b = 2)
+    @s = a + b
+    @s += yield if block_given?
+  end
+  attr_reader :s
+end
+class S137Sub < S137Pool
+  @made = 100
+end
+class S137Cache
+  def self.new(k)
+    @c ||= {}
+    @c[k] ||= super(k)
+  end
+  def self.make(k); new(k); end
+  def initialize(k); @k = k; end
+end
+class S137A
+  def self.f(x, y = 1); "A#{x}#{y}"; end
+  def self.g; "Ag:#{name}"; end
+end
+class S137B < S137A
+  def self.f(x, y = 2); super + "B"; end
+  def self.g; super() + "Bg"; end
+end
+class S137C < S137B
+  def self.f(x, y = 3); super(x, 9) + "C"; end
+end
+module S137Counted
+  def new(*args)
+    @count = (@count || 0) + 1
+    super
+  end
+  def count; @count; end
+end
+class S137W
+  extend S137Counted
+  def initialize(n); @n = n; end
+end
+def s137
+  check("sn137a", S137Pool.new(1).s == 3 && S137Pool.new(1, 5) { 10 }.s == 16 && S137Pool.made == 2)
+  check("sn137b", S137Sub.new(3).s == 5 && S137Sub.made == 101 && S137Sub.new(3).class == S137Sub)
+  check("sn137c", S137Cache.new(1).equal?(S137Cache.make(1)) && !S137Cache.new(1).equal?(S137Cache.new(2)))
+  check("sn137d", S137B.f(1) == "A12B" && S137C.f(1) == "A19BC" && S137B.g == "Ag:S137BBg")
+  S137W.new(1)
+  check("sn137e", S137W.new(2).class == S137W && S137W.count == 2)
+end
+# ===== SECTION 138: the inherited / included / extended / prepended / method_added hooks =====
+# A new subclass is passed to its superclass's (or an ancestor's) #inherited,
+# already named; `include M' runs M.included(base) - every time, the last
+# module of `include A, B' first - and #extended, #prepended likewise, at run
+# time too (`base.extend(M)' in an #included is the ClassMethods idiom). A def
+# or an attr_* after a `def self.method_added' reports each new method name.
+# /usr/bin/ruby 2.6 settles each.
+S138LOG = []
+class S138Reg
+  @subs = []
+  def self.subs; @subs; end
+  def self.inherited(k)
+    super
+    S138Reg.subs << k.name
+  end
+end
+class S138R1 < S138Reg; end
+class S138R2 < S138Reg; end
+class S138R3 < S138R1; end
+module S138Plug
+  def self.included(base)
+    S138LOG << "inc #{base}"
+    base.extend(CM)
+  end
+  module CM
+    def label; "#{name}!"; end
+  end
+end
+module S138A; def self.included(b); S138LOG << "A #{b}"; end; end
+module S138B; def self.included(b); S138LOG << "B #{b}"; end; end
+module S138E
+  def self.extended(o); S138LOG << "ext #{o.class}"; end
+  def yo; "yo"; end
+end
+module S138Pre
+  def self.prepended(b); S138LOG << "pre #{b}"; end
+  def hi; "pre-" + super; end
+end
+class S138Host; include S138Plug; include S138Plug; end
+class S138Y; include S138A, S138B; extend S138E; end
+class S138PH; def hi; "ph"; end; prepend S138Pre; end
+class S138Watch
+  @log = []
+  def self.log; @log; end
+  def before; end
+  def self.method_added(m)
+    @log << m
+  end
+  def a; end
+  attr_accessor :w
+  define_method(:dm) { 1 }
+  def b; end
+end
+class S138Watch2 < S138Watch
+  @log = []
+  def c; end
+end
+def s138
+  check("hk138a", S138Reg.subs == ["S138R1", "S138R2", "S138R3"])
+  check("hk138b", S138Host.label == "S138Host!" && S138PH.new.hi == "pre-ph")
+  o = Object.new
+  o.extend(S138E)
+  check("hk138c", o.yo == "yo" && S138LOG == ["inc S138Host", "inc S138Host", "B S138Y", "A S138Y", "ext Class", "pre S138PH", "ext Object"])
+  check("hk138d", S138Watch.log == [:a, :w, :w=, :dm, :b] && S138Watch2.log == [:c])
+end
+# ===== SECTION 139: a modifier after a bare yield; super with keywords =====
+# `yield if block_given?' is the bare yield under a modifier, not a yield of an
+# `if' expression, and an explicit `super(a, k: v)' passes the keyword (and a
+# `*rest' its elements) through. /usr/bin/ruby 2.6 settles each.
+def s139y
+  r = [0]
+  r << yield if block_given?
+  r << (yield 2 unless !block_given?)
+  return yield(3) if block_given?
+  r
+end
+class S139P
+  def initialize(a, b: 1); @v = [a, b]; end
+  attr_reader :v
+end
+class S139K < S139P
+  def initialize(a, b: 2); super(a, b: b); end
+end
+class S139S < S139P
+  def initialize(*r); super(*r); end
+end
+def s139
+  check("ym139a", s139y == [0, nil] && s139y { |x| x.nil? ? 7 : x * 10 } == 30)
+  check("sk139b", S139K.new(1).v == [1, 2] && S139K.new(1, b: 5).v == [1, 5] && S139S.new(4, b: 6).v == [4, 6])
+end
 
 s122() # SECTION-CALL 122
 s123() # SECTION-CALL 123
@@ -557,5 +709,8 @@ s133() # SECTION-CALL 133
 s134() # SECTION-CALL 134
 s135() # SECTION-CALL 135
 s136() # SECTION-CALL 136
+s137() # SECTION-CALL 137
+s138() # SECTION-CALL 138
+s139() # SECTION-CALL 139
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

@@ -1171,7 +1171,7 @@ SuperExpr   <~~ push(makeSuper(takeAll())) ~~>
 
 // yield / yield(args) / yield args: call the block the current method was given.
 YieldExpr   <~~ push(makeYield(takeAll(), up.pos)) ~~>
-            = KwYield [ "(" [ Arg { "," Arg } ] ")" | SameLine Arg { "," Arg } ] ;
+            = KwYield [ "(" [ Arg { "," Arg } ] ")" | SameLine NoModKw Arg { "," Arg } ] ;
 
 // The numeric tower. Integers are exact (hex 0xff, binary 0b1010, octal 0o17 and
 // Ruby's bare-zero form 017, decimal with '_' separators, all via lib/numbers.abnf
@@ -2159,7 +2159,7 @@ NotKw       = :script(~~
 ~~) ;
 
 // NoModKw succeeds (matching empty) only when the next word is NOT a statement-
-// modifier keyword, so the optional argument of return/break/next leaves a trailing
+// modifier keyword, so the optional argument of return/break/next/yield leaves a trailing
 // `if`/`unless`/`while`/`until` to the enclosing ModStmt. Self contained like NotKw.
 NoModKw     = :script(~~
     (function() {
@@ -9674,17 +9674,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 else if (args.length > 0) { nd.__hdef = args[0] }
                 return nd
             }
-            if (name == "new") {
-                var obj = {__class: target}
-                var ini = anytype
-                ini = lookupMethod(target, "initialize")
-                if (typeof ini == "function") {
-                    blockStack.push(blk)
-                    ini.apply(undefined, concat2impl([obj], args))
-                    blockStack.pop()
-                }
-                return obj
-            }
+            // A `def self.new' (the class's or an inherited one) is reached below,
+            // with the other class methods; its `super' constructs (singSuper).
+            if (name == "new" && typeof lookupMethod(target, "$s$new") != "function" && typeof lookupMethod(target, "$x$new") != "function"
+                && typeof singFind(target, "new") != "function") { return newInstance(target, args, blk) }
             // A class method of the same name (`def self.to_s') answers instead.
             if ((name == "name" || name == "to_s" || name == "inspect") && !singRespond(target, name)) { return target.__name }
             // Class#superclass: nil for a module, and a ROOT class answers Object
@@ -12633,7 +12626,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             return blockCall(body, a)
         }
         copyArity(fn, wrapCore(body))
-        if (sing) { singPut(o, nm, fn) } else { scopePut(o, nm, fn); imnNote(o, nm); setterNote(nm) }
+        if (sing) { singPut(o, nm, fn) } else { scopePut(o, nm, fn); imnNote(o, nm); setterNote(nm); runHook(o, "method_added", mkSym(nm)) }
         return mkSym(nm)
     }
     // Struct.new(:a, :b [, keyword_init: true]): a new class, a subclass of Struct,
@@ -12884,8 +12877,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     function singExtend(o, m) {
         if (m == undefined || m == null) { return null }
         if (o.__sext == undefined) { o.__sext = [] }
-        if (mixinListHas(o.__sext, m)) { return null }
-        o.__sext.push(m)
+        if (!mixinListHas(o.__sext, m)) { o.__sext.push(m) }
+        if (m.__isclass === true) { runHook(m, "extended", o) }
         return null
     }
     // Object#singleton_methods: the direct defs first, then every extended module's
@@ -12993,14 +12986,14 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             mn = getVar("$mname")
             var args = anytype
             if (explicit) {
-                var av = []
-                var sp = splitBlock(argTs)
-                for (var j = 0; j < sp.args.length; j++) { av.push(sp.args[j]()) }
-                args = av
+                args = evalArgList(splitBlock(argTs).args)
             } else {
                 args = currentParamValues(getVar("$sparams"))
             }
             if (mn == null || mn == undefined) { fail("super called outside of a method") }
+            if (self !== null && self !== undefined && self.__isclass === true && dc != null && dc != undefined) {
+                return singSuper(self, dc, mn, args)
+            }
             // A method defined in a prepended module supers into the class itself;
             // a top-level def belongs to Object, which has nothing above it here.
             var m = anytype
@@ -13031,6 +13024,47 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
     }
     function lookupOwn(cls, name) { return hasOwn(cls, name) ? cls[name] : undefined }
+    // Class#new: a fresh instance, initialized. Twins: rubyNew in abnf/jsrtruby.go,
+    // js_rnew in lib/ruby-rt.metajs.
+    function newInstance(cls, args, blk) {
+        var obj = {__class: cls}
+        var ini = anytype
+        ini = lookupMethod(cls, "initialize")
+        if (typeof ini == "function") {
+            blockStack.push(blk)
+            ini.apply(undefined, concat2impl([obj], args))
+            blockStack.pop()
+        }
+        return obj
+    }
+    // A super in a class method: the class method of that name above the class
+    // (none above a module the class extends), else Class's own - #new
+    // constructs, and the hooks (#inherited, #included, ...) are empty. Twins:
+    // js_rsuper / rubySuperBuiltin in abnf/jsrtruby.go, js_rsuper / rbSuperBuiltin
+    // in lib/ruby-rt.metajs.
+    function singSuper(self, dc, mn, args) {
+        var m = anytype
+        m = dc.__ismodule === true ? undefined : lookupMethod(dc.__super, "$s$" + mn)
+        if (typeof m != "function" && dc.__ismodule !== true) { m = lookupMethod(dc.__super, "$x$" + mn) }
+        if (typeof m == "function") { return m.apply(undefined, concat2impl([self], args)) }
+        if (mn == "new") { return newInstance(self, args, currentBlock()) }
+        if (isHookName(mn)) { return null }
+        noSuper(self, mn)
+    }
+    function isHookName(n) {
+        return n == "inherited" || n == "included" || n == "extended" || n == "prepended" || n == "method_added"
+    }
+    // A Class / Module hook: the receiver's class method of that name, when it has
+    // one (Class's own is empty). A module's are its own; a class also inherits
+    // its superclass's.
+    function runHook(recv, name, arg) {
+        if (typeof singFind(recv, name) == "function"
+            || (recv.__ismodule === true ? hasOwn(recv, "$s$" + name) : typeof lookupMethod(recv, "$s$" + name) == "function")
+            || typeof lookupMethod(recv, "$x$" + name) == "function") {
+            mcall(recv, name, [arg], null)
+        }
+        return null
+    }
     // Ruby has no bare method references: an identifier that is not a local variable
     // is a parenthesis-less call of the method of that name (`pa, qa = s08_pair`).
     // rubyMethods records every name introduced by a top-level def, so makeVarRef can
@@ -13145,6 +13179,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             var sm2 = anytype
             sm2 = selfMethod(name)
             if (typeof sm2 == "function") { return boxOut(findSelf(), mcall(findSelf(), name, [], null)) }
+            // ... and a bare `name' Module#name.
+            if (name == "name" && rubyMethods["$name"] !== true && isClassObj(ivarSelf())) { return mcall(ivarSelf(), "name", [], null) }
             // A def, unless a top-level local of its name has been bound (a def body
             // cannot see that local).
             if (rubyMethods["$" + name] === true && hasVar("$d$" + name)) {
@@ -13241,6 +13277,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             }
             if (supExpr != null) { cls.__super = supExpr() }
             constBind(name, cls)
+            // A NEW class is announced to its superclass's #inherited, named and
+            // before its body runs.
+            if (cls !== existing && cls.__super != null && cls.__builtin !== true) { runHook(cls.__super, "inherited", cls) }
             // Run the body items in SOURCE order with self bound to the class object:
             // a `private` only affects the defs that come after it, and a class-body
             // statement may reference a method defined above it.
@@ -13398,6 +13437,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 scopePut(cls, fn.name, makeMethodClosure(fn))
                 imnNote(cls, fn.name)
                 if (curVis != "public" && curClass === cls) { scopePut(cls, "$v$" + fn.name, curVis) }
+                runHook(cls, "method_added", mkSym(fn.name))
             }
         }
     }
@@ -14901,17 +14941,20 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     }
     // The modules go in last to first, so the first one listed is the nearest
     // ancestor, as MRI's `include A, B' gives [C, A, B]. Twins: rubyInclude in
-    // abnf/jsrtruby.go, js_rinclude in lib/ruby-rt.metajs.
+    // abnf/jsrtruby.go, js_rinclude in lib/ruby-rt.metajs. Each module's #included
+    // runs as it goes in, and again for a module already there, as MRI's does.
     function includeInto(c, mods) {
         for (var i = mods.length - 1; i >= 0; i--) {
             var m = mods[i]
-            if (mixinListHas(c.__mixins, m)) { continue }
-            if (m != undefined && m != null && m.__mixins != undefined) {
-                for (var j = 0; j < m.__mixins.length; j++) {
-                    if (!mixinListHas(c.__mixins, m.__mixins[j])) { c.__mixins.push(m.__mixins[j]) }
+            if (!mixinListHas(c.__mixins, m)) {
+                if (m != undefined && m != null && m.__mixins != undefined) {
+                    for (var j = 0; j < m.__mixins.length; j++) {
+                        if (!mixinListHas(c.__mixins, m.__mixins[j])) { c.__mixins.push(m.__mixins[j]) }
+                    }
                 }
+                c.__mixins.push(m)
             }
-            c.__mixins.push(m)
+            if (m != undefined && m != null && m.__isclass === true) { runHook(m, "included", c) }
         }
     }
     hostGlobals["include"] = function() {
@@ -14932,6 +14975,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             pl.push(mods[j])
             c.__prepends = pl
             scopePut(prependOwners, "$" + mods[j].__name, c)
+            runHook(mods[j], "prepended", c)
         }
         return null
     }
@@ -14951,7 +14995,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     }
     hostGlobals["extend"] = function() {
         var c = directiveClass()
-        for (var i = arguments.length - 1; i >= 0; i--) { extendOnto(c, arguments[i]) }
+        for (var i = arguments.length - 1; i >= 0; i--) {
+            extendOnto(c, arguments[i])
+            runHook(arguments[i], "extended", c)
+        }
         return null
     }
     hostGlobals["alias_method"] = function(nu, old) { doAlias(directiveClass(), rstr(nu), rstr(old)); return null }

@@ -1202,7 +1202,7 @@ SuperExpr   <~~ push(makeSuper(takeAll())) ~~>
 
 // yield / yield(args) / yield args: call the block the current method was given.
 YieldExpr   <~~ push(makeYield(takeAll(), up.pos)) ~~>
-            = KwYield [ "(" [ Arg { "," Arg } ] ")" | SameLine Arg { "," Arg } ] ;
+            = KwYield [ "(" [ Arg { "," Arg } ] ")" | SameLine NoModKw Arg { "," Arg } ] ;
 
 // The numeric tower. Integers are exact (hex 0xff, binary 0b1010, octal 0o17 and
 // Ruby's bare-zero form 017, decimal with '_' separators, all via lib/numbers.abnf
@@ -2195,7 +2195,7 @@ NotKw       = :script(~~
 ~~) ;
 
 // NoModKw succeeds (matching empty) only when the next word is NOT a statement-
-// modifier keyword, so the optional argument of return/break/next leaves a trailing
+// modifier keyword, so the optional argument of return/break/next/yield leaves a trailing
 // `if`/`unless`/`while`/`until` to the enclosing ModStmt. Self contained like NotKw.
 NoModKw     = :script(~~
     (function() {
@@ -3351,7 +3351,15 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     function emitNew(b, cur, argThunks) {
         var ea = emitArgs(b, argThunks)
         b = ea.b
-        return {b: b, v: callExt(b, "js_rnew", [cur, ea.v])}
+        return {b: b, v: emitClassNew(b, cur, ea.v)}
+    }
+    // Whether the program defines a method `new' a class may answer instead of
+    // Class#new (`def self.new', or a module's `new' for `extend'): C.new is then
+    // an ordinary call, whose miss is Class#new.
+    var anySNew = false
+    function emitClassNew(b, clsV, argsV) {
+        if (anySNew) { return callExt(b, "js_rxmcall", [clsV, emitStr(b, "new"), argsV]) }
+        return callExt(b, "js_rnew", [clsV, argsV])
     }
     // ----- The Ruby operator table -----
     // Every binary operator routes to a Ruby specific extern (js_r*, abnf/jsrt.go)
@@ -5663,8 +5671,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // In a class_eval block self is the module, and include / extend act on it.
         if (curEvalDef && (name == "include" || name == "extend") && rubyAllMethods["$" + name] !== true && !knownLocal(name)) { return true }
         if (!curSelfIsCls) { return false }
-        // Where self is the class, a bare `new' is Class#new on it.
-        if (name == "new") { return true }
+        // Where self is the class, a bare `new' is Class#new on it, and a bare
+        // `name' Module#name.
+        if (name == "new" || name == "name") { return true }
         var c = curClsName
         var hops = 0
         while (c != undefined && c != "" && hops < 64) {
@@ -5680,7 +5689,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if ((name == "send" || name == "__send__") && isSelfCall(name)) {
             return callExt(b, "js_rselfsend", [curScopeV, selfV, argsV])
         }
-        if (name == "new" && curSelfIsCls && !classHasSMethod(curClsName, "new")) { return callExt(b, "js_rnew", [selfV, argsV]) }
+        if (name == "new" && curSelfIsCls) { return emitClassNew(b, selfV, argsV) }
         return callExt(b, "js_rxmcall", [selfV, emitMKey(b, selfV, name, true), argsV])
     }
     // Whether the program names :private / :protected / :public as a Symbol, the
@@ -7228,6 +7237,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // Whether the method being emitted is one of a prepending class's own, which
     // live one level down on its synthetic core (makeClassStmt).
     var curOwnOnCore = false
+    // Whether the method being emitted is a class method ("$s$" on the class).
+    var curMethSing = false
     // Where a super lookup starts: the level above the one the running method
     // lives on.
     function emitSuperStart(b, clsV) {
@@ -7271,6 +7282,12 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             var ownPs = curMethPs
             var clsV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, clsName)])
             var supV = curSuperKey != "" ? clsV : emitSuperStart(b, clsV)
+            // A class method's super is the one above the class itself (a prepend
+            // moves only the instance methods down).
+            if (curMethSing) {
+                methName = "$s$" + curMethName
+                supV = callExt(b, "js_get", [clsV, emitStr(b, "__super")])
+            }
             var selfV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "self")])
             var argsV = callExt(b, "js_arr_new", [])
             if (explicit) {
@@ -7423,7 +7440,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 return {b: b, v: callExt(b, "js_rxmcall", [selfV, emitMKey(b, selfV, name, true), callExt(b, "js_arr_new", [])])}
             }
             if (!local && bareSelfCallNames.indexOf(name) >= 0 && isSelfCall(name)) { return makePlainCall(name, [])(b) }
-            if (!local && name == "new" && curSelfIsCls) { return makePlainCall(name, [])(b) }
+            if (!local && (name == "new" || (name == "name" && rubyMethods["$name"] !== true)) && curSelfIsCls) { return makePlainCall(name, [])(b) }
             if (rubyMethods["$" + name] !== true && inDefFrame(name)) {
                 return {b: b, v: callExt(b, "js_rlvar", [curScopeV, emitStr(b, name)])}
             }
@@ -7784,6 +7801,41 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }}
     }
 
+    // A Class / Module hook as a class-body statement: the class method `hook' of
+    // the object bound to recvName (self, or a program's module), run with the body's
+    // self - or, given symName, that Symbol - as its argument; js_rsuper's miss is
+    // the empty builtin hook. Twin of runHook in ruby-interpreter.abnf.
+    function hookStmt(recvName, hook, symName) {
+        return function(b) {
+            var selfV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "self")])
+            var recvV = recvName == "self" ? selfV : callExt(b, "js_scope_get", [curScopeV, emitStr(b, recvName)])
+            var argsV = callExt(b, "js_arr_new", [])
+            callExt(b, "js_arr_push", [argsV, symName === null ? selfV : callExt(b, "js_sym", [emitStr(b, symName)])])
+            callExt(b, "js_rsuper", [recvV, recvV, emitStr(b, "$s$" + hook), argsV])
+            return {b: b, v: hNull}
+        }
+    }
+    // Whether the program's module modName defines the class method hook.
+    function modSDefHas(modName, hook) {
+        var sd = anytype
+        sd = moduleSDefs["$" + modName]
+        if (sd == undefined) { return false }
+        for (var i = 0; i < sd.length; i++) { if (sd[i].name == hook) { return true } }
+        return false
+    }
+    // Whether the class clsName or one above it defines the class method hook.
+    function sHookUp(clsName, hook) {
+        var c = clsName
+        var hops = 0
+        while (c != undefined && c != "" && hops < 64) {
+            var ss = anytype
+            ss = classSMethods["$" + c]
+            if (ss != undefined && nameIn(ss, hook)) { return true }
+            c = classSupers["$" + c]
+            hops = hops + 1
+        }
+        return false
+    }
     // clsItems walks a class or module body ONCE, in order, and sorts its items into
     // the lists the emitter needs. The order matters for exactly one thing - a
     // `private` line applies to the defs that follow it - so it is tracked here and
@@ -7793,6 +7845,14 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                  aliases: [], includes: [], prepends: [], extends: [], restricted: [], visnamed: []}
         var vis = "public"
         var named = []
+        // Whether a def here runs a #method_added: the body's own, defined above
+        // it, or one the class already has.
+        var maOwn = false
+        var maOn = function() {
+            if (maOwn || sHookUp(items[0], "method_added")) { return true }
+            var sp = r.supername.split("::")
+            return sHookUp(sp[sp.length - 1], "method_added")
+        }
         for (var i = from; i < items.length; i++) {
             var it = items[i]
             if (it == undefined) { continue }
@@ -7806,7 +7866,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 var dst = r.includes
                 if (it.mixkind == "prepend") { dst = r.prepends }
                 if (it.mixkind == "extend") { dst = r.extends }
-                for (var mi = it.mixnames.length - 1; mi >= 0; mi--) { dst.push(it.mixnames[mi]) }
+                var hook = it.mixkind == "include" ? "included" : it.mixkind + "ed"
+                for (var mi = it.mixnames.length - 1; mi >= 0; mi--) {
+                    dst.push(it.mixnames[mi])
+                    if (modSDefHas(it.mixnames[mi], hook)) { r.cstmts.push({t: hookStmt(it.mixnames[mi], hook, null), name: ""}) }
+                }
                 continue
             }
             if (it.alias != undefined) {
@@ -7815,7 +7879,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 rubyDefNames["$" + it.alias[0]] = true
                 continue
             }
-            if (it.defm != undefined) { r.methods.push({name: it.defm, params: it.defmparams, body: it.defmbody}); continue }
+            if (it.defm != undefined) {
+                r.methods.push({name: it.defm, params: it.defmparams, body: it.defmbody})
+                if (maOn()) { r.cstmts.push({t: hookStmt("self", "method_added", it.defm), name: ""}) }
+                continue
+            }
             if (it.sblock != undefined) {
                 var sb = it.sblock
                 for (var q = 0; q < sb.length; q++) {
@@ -7830,15 +7898,20 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                     if (sb[q].method != undefined) {
                         var sm = sb[q].method
                         r.sdefs.push({name: sm.name, params: sm.params, body: sm.body})
+                        if (sm.name == "method_added") { maOwn = true }
                     }
                 }
                 continue
             }
             if (it.method != undefined) {
                 var fn = it.method
-                if (fn.singleton === true) { r.sdefs.push({name: fn.name, params: fn.params, body: fn.body, pos: fn.pos}) }
+                if (fn.singleton === true) {
+                    r.sdefs.push({name: fn.name, params: fn.params, body: fn.body, pos: fn.pos})
+                    if (fn.name == "method_added") { maOwn = true }
+                }
                 else {
                     r.methods.push({name: fn.name, params: fn.params, body: fn.body, pos: fn.pos})
+                    if (maOn()) { r.cstmts.push({t: hookStmt("self", "method_added", fn.name), name: ""}) }
                     if (it.defvis != undefined) { named.push({visnames: [fn.name], vis: it.defvis}) }
                     else if (vis == "private" || vis == "protected") { r.restricted.push({name: fn.name, kind: vis}) }
                     if (vis == "module_function") { r.sdefs.push({name: fn.name, params: fn.params, body: fn.body, pos: fn.pos}) }
@@ -7850,6 +7923,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 for (var j = 0; j < a.names.length; j++) {
                     if (a.kind == "attr_reader" || a.kind == "attr_accessor") { r.methods.push(attrGetterMethod(a.names[j])) }
                     if (a.kind == "attr_writer" || a.kind == "attr_accessor") { r.methods.push(attrSetterMethod(a.names[j])) }
+                    if (maOn()) {
+                        if (a.kind != "attr_writer") { r.cstmts.push({t: hookStmt("self", "method_added", a.names[j]), name: ""}) }
+                        if (a.kind != "attr_reader") { r.cstmts.push({t: hookStmt("self", "method_added", a.names[j] + "="), name: ""}) }
+                    }
                 }
                 continue
             }
@@ -7895,6 +7972,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         var savedParams = curMethParams
         var savedPsM = curMethPs
         var savedSuperKey = curSuperKey
+        var savedSing = curMethSing
+        curMethSing = prefix == "$s$"
         if (prefix == "") { list = list.concat(inheritedRestricted(list, owner, restrictedList)) }
         for (var k = 0; k < list.length; k++) {
             var m = list[k]
@@ -7947,6 +8026,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         curMethParams = savedParams
         curMethPs = savedPsM
         curSuperKey = savedSuperKey
+        curMethSing = savedSing
         return b
     }
 
@@ -8242,6 +8322,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         var snames = []
         for (var m3 = 0; m3 < sdefs.length; m3++) { snames.push(sdefs[m3].name) }
         classSMethods["$" + name] = unionNames(classSMethods["$" + name], snames)
+        if (nameIn(snames, "new")) { anySNew = true }
         var rnames = []
         for (var m4 = 0; m4 < r.restricted.length; m4++) { rnames.push(r.restricted[m4].name) }
         restrictedMethods["$" + name] = unionNames(restrictedMethods["$" + name], rnames)
@@ -8261,8 +8342,6 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             var clsV = callExt(b, "js_obj_new", [])
             callExt(b, "js_set", [clsV, emitStr(b, "__isclass"), hTrue])
             callExt(b, "js_set", [clsV, emitStr(b, "__name"), emitStr(b, qn)])
-            b = emitNameList(b, clsV, imn, "__imn")
-            if (ipn.length > 0) { b = emitNameList(b, clsV, ipn, "__ipn") }
             var baseSet = false
             var baseV = hNull
             if (superName == "self") {
@@ -8281,6 +8360,17 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             }
             if (curClsBodyFn) { b = emitNestedBind(b, name, clsV) }
             else { callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), clsV]) }
+            // A new class is announced to its superclass's #inherited once it is
+            // named, before its mixins, methods and body. Twin of makeClassStmt in
+            // ruby-interpreter.abnf.
+            if (baseSet && superName != "self" && sHookUp(superName, "inherited")) {
+                callExt(b, "js_set", [clsV, emitStr(b, "__super"), baseV])
+                var inhArgs = callExt(b, "js_arr_new", [])
+                callExt(b, "js_arr_push", [inhArgs, clsV])
+                callExt(b, "js_rsuper", [baseV, baseV, emitStr(b, "$s$inherited"), inhArgs])
+            }
+            b = emitNameList(b, clsV, imn, "__imn")
+            if (ipn.length > 0) { b = emitNameList(b, clsV, ipn, "__ipn") }
             // The mixin record. A prepended module is an ancestor IN FRONT of the
             // class and an extended one belongs to the class OBJECT (`D.is_a?(M)'
             // after `extend M'), so the three go in three slots.
@@ -8665,6 +8755,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // A module opened twice is one module: the tables hold both bodies.
         moduleDefs["$" + name] = moduleDefs["$" + name] == undefined ? r.methods : moduleDefs["$" + name].concat(r.methods)
         moduleSDefs["$" + name] = moduleSDefs["$" + name] == undefined ? r.sdefs : moduleSDefs["$" + name].concat(r.sdefs)
+        for (var nw = 0; nw < r.methods.length; nw++) { if (r.methods[nw].name == "new") { anySNew = true } }
         moduleConsts["$" + name] = moduleConsts["$" + name] == undefined ? r.consts : moduleConsts["$" + name].concat(r.consts)
         // A module may include another module, and a class including THIS one has to
         // pick up both. The names are recorded here and closed over by mixAncestry

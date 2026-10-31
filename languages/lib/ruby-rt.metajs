@@ -8177,9 +8177,31 @@ function js_rsuper(sup, self, name, args) {
     return rbSuperBuiltin(self, rbStr(name), args)
 }
 
+// The Class / Module callbacks, empty unless a program defines them. Twin of
+// rubyHookName in abnf/jsrtruby.go.
+function rbHookName(n) {
+    return n == "inherited" || n == "included" || n == "extended" || n == "prepended" || n == "method_added"
+}
+// The class method `name' of a module or class run with arg, for a run-time
+// extend / include / define_method. Twin of rubyHook in abnf/jsrtruby.go.
+function rbHook(recv, name, arg) {
+    var f = anytype
+    f = rtFindMethod(recv, "$s$" + name)
+    if (typeof f == "function") { rtkCall(f, recv, [recv, arg]) }
+    return undefined
+}
 // A super that no compiled class or module above answers. Twin of
 // rubySuperBuiltin in abnf/jsrtruby.go, which states the rules.
 function rbSuperBuiltin(self, name, args) {
+    // A class method ("$s$" key, or a method of a module the class extends):
+    // Class#new constructs, and the hooks are empty.
+    var sing = name.length > 3 && name.substring(0, 3) == "$s$"
+    if (sing || (rbIsObj(self) && self["__isclass"] === true)) {
+        var sn = sing ? name.substring(3) : name
+        if (sn == "new") { return js_rnew(self, args) }
+        if (rbHookName(sn)) { return null }
+        if (sing) { return js_rnosuper(self, sn) }
+    }
     if (!rbUserObj(self) || self["__isclass"] === true) { return js_rnosuper(self, name) }
     var npos = rbNPos(args)
     if (name == "initialize") {
@@ -8760,6 +8782,7 @@ function rbMethod(target, name, args) {
                 var xi = rbNPos(args) - 1
                 while (xi >= 0) {
                     rbSingExtend(target, rbArgAt(args, xi))
+                    rbHook(rbArgAt(args, xi), "extended", target)
                     xi = xi - 1
                 }
                 return target
@@ -8797,6 +8820,7 @@ function rbMethod(target, name, args) {
                     target[dnm] = dfn
                     rbIMNote(target, dnm)
                     rbIncludersPut(target, dnm, dfn)
+                    rbHook(target, "method_added", rbSym(dnm))
                 }
                 else { rbSingPut(target, dnm, dfn) }
                 return rbSym(dnm)
@@ -8804,7 +8828,11 @@ function rbMethod(target, name, args) {
             // Module#include run at run time; MRI includes the last first.
             if (name == "include" && target["__isclass"] === true) {
                 var ii = rbNPos(args) - 1
-                while (ii >= 0) { js_rinclude(target, rbArgAt(args, ii)); ii = ii - 1 }
+                while (ii >= 0) {
+                    js_rinclude(target, rbArgAt(args, ii))
+                    rbHook(rbArgAt(args, ii), "included", target)
+                    ii = ii - 1
+                }
                 return target
             }
             if (name == "instance_methods" && target["__isclass"] === true) {
@@ -8858,6 +8886,7 @@ function rbMethod(target, name, args) {
             }
             // Class#name, #to_s and #inspect are the class NAME.
             if (name == "name" || name == "to_s" || name == "inspect") { return rbClassText(target, name) }
+            if (name == "new") { return js_rnew(target, args) }
             if (name == "sqrt" && target["__rbuiltin"] === "Integer") { return rbIntSqrt(rbArgAt(args, 0)) }
             // Regexp.last_match / last_match(n): $~, or its group n.
             if (name == "last_match" && target["__rbuiltin"] === "Regexp") {
@@ -10851,7 +10880,8 @@ function js_rlvar(scope, name) {
     // see, as in a Proc that define_method runs with another self, which reaches a
     // private or protected method too.
     if (rbIsObj(lself) && rbRestricted(lself["__class"], n)) { return js_rxmcall(lself, "$q$" + n, []) }
-    if (rbIsObj(lself) && rbSingRespond(lself, n)) { return js_rxmcall(lself, n, []) }
+    // Module#name, where self is a class or module (a method of an extended module).
+    if (rbIsObj(lself) && (rbSingRespond(lself, n) || (n == "name" && lself["__isclass"] === true))) { return js_rxmcall(lself, n, []) }
     rbNameErr("NameError", "undefined local variable or method `" + n + "' for " + rbNoMethodDesc(lself), n, lself)
     return null
 }

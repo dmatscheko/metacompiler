@@ -201,7 +201,7 @@ func (rt *jsrt) addRubyFmtExterns(m map[string]func(args []uint64) uint64) {
 		if o, isObj := self.(*jsObject); isObj && rubyRestricted(o.props["__class"], name) {
 			return m["js_rxmcall"]([]uint64{w(self), rt.wrapStr("$q$" + name), w(&jsArray{})})
 		}
-		if o, isObj := self.(*jsObject); isObj && rubySingRespond(o, name) {
+		if o, isObj := self.(*jsObject); isObj && (rubySingRespond(o, name) || (name == "name" && o.props["__isclass"] == true)) {
 			return m["js_rxmcall"]([]uint64{w(self), a[1], w(&jsArray{})})
 		}
 		rt.rubyNameErr("NameError", "undefined local variable or method `"+name+"' for "+rt.rubyNoMethodDesc(self), name, self)
@@ -2866,6 +2866,20 @@ func rubyBitLen(x *big.Int) int {
 // (comparableMethods), so == here is identity. Twin of superBuiltin in
 // ruby-interpreter.abnf, which states the rules.
 func (rt *jsrt) rubySuperBuiltin(self interface{}, name string, args []interface{}) interface{} {
+	// A class method ("$s$" key, or a method of a module the class extends):
+	// Class#new constructs, and the hooks are empty.
+	sn, isSing := strings.CutPrefix(name, "$s$")
+	if so, isObj := self.(*jsObject); isSing || (isObj && so.props["__isclass"] == true) {
+		if sn == "new" {
+			return rt.rubyNew(self, args)
+		}
+		if rubyHookName(sn) {
+			return jsNull
+		}
+		if isSing {
+			rt.rubyNoSuper(self, sn)
+		}
+	}
 	o, isObj := self.(*jsObject)
 	if !isObj || !rubyUserObj(o) || o.props["__isclass"] == true {
 		rt.rubyNoSuper(self, name)
@@ -2910,6 +2924,65 @@ func (rt *jsrt) rubySuperBuiltin(self interface{}, name string, args []interface
 	}
 	rt.rubyNoSuper(self, name)
 	return nil
+}
+
+// rubyNew is Class#new: an instance of a compiled class with its initialize run.
+// Proc.new { } is its block, Array / Hash / Regexp / Struct have their own
+// constructors, and an exception class makes the {__class, args} shape the rescue
+// clauses read. Twins: js_rnew in lib/ruby-rt.metajs, newInstance in
+// ruby-interpreter.abnf.
+func (rt *jsrt) rubyNew(clsV interface{}, argv []interface{}) interface{} {
+	if cls, isObj := clsV.(*jsObject); isObj {
+		if bn, isBuiltin := cls.props["__rbuiltin"].(string); isBuiltin {
+			switch bn {
+			case "Proc":
+				if _, blk := rubyBlockArgs(argv); blk != nil {
+					return blk
+				}
+				return jsNull
+			case "Array":
+				return rt.rubyArrNew(argv)
+			case "Hash":
+				return rubyNewHash(argv)
+			case "Regexp":
+				return rt.rubyRegexNew(argv)
+			case "Struct":
+				return rt.rubyStructNew(argv)
+			}
+			return rt.rubyExc(cls, argv)
+		}
+	}
+	inst := newJSObject()
+	inst.set("__class", clsV)
+	rt.rubyMethod(inst, "initialize", argv)
+	return inst
+}
+
+// rubyHookName: the Class / Module callbacks, empty unless a program defines them.
+// Twins: isHookName in ruby-interpreter.abnf, rbHookName in lib/ruby-rt.metajs.
+func rubyHookName(n string) bool {
+	switch n {
+	case "inherited", "included", "extended", "prepended", "method_added":
+		return true
+	}
+	return false
+}
+
+// rubyHook runs the class method `name` of a module or class (a class's own or
+// an inherited one) with arg, for a run-time extend / include / define_method.
+// Twins: runHook in ruby-interpreter.abnf, rbHook in lib/ruby-rt.metajs.
+func (rt *jsrt) rubyHook(recv interface{}, name string, arg interface{}) {
+	for c := recv; ; {
+		o, isObj := c.(*jsObject)
+		if !isObj {
+			return
+		}
+		if f, has := o.props["$s$"+name]; has && isCallable(f) {
+			rt.call(f, jsUndef, []interface{}{recv, arg})
+			return
+		}
+		c = o.props["__super"]
+	}
 }
 
 // rubyNoSuper raises the NoMethodError of a super with nothing above it. Twin of

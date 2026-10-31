@@ -11496,6 +11496,7 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 				pos, _ := rubyBlockArgs(args)
 				for i := len(pos) - 1; i >= 0; i-- {
 					rubySingExtend(o, pos[i])
+					rt.rubyHook(pos[i], "extended", o)
 				}
 				return o
 			case "define_singleton_method":
@@ -11507,6 +11508,7 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 				if pos, _ := rubyBlockArgs(args); objIsCls {
 					for i := len(pos) - 1; i >= 0; i-- {
 						rubyInclude(o, pos[i])
+						rt.rubyHook(pos[i], "included", o)
 					}
 					return o
 				}
@@ -11529,6 +11531,7 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 					o.props[nm] = fn
 					rubyIMNote(o, nm)
 					rubyIncludersPut(o, nm, fn)
+					rt.rubyHook(o, "method_added", jsSym{s: nm})
 					return jsSym{s: nm}
 				}
 			case "instance_methods":
@@ -11606,6 +11609,8 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 			switch name {
 			case "name", "to_s", "inspect":
 				return rt.rubyClassText(o, name)
+			case "new":
+				return rt.rubyNew(o, args)
 			}
 			bn, _ := o.props["__rbuiltin"].(string)
 			if bn == "Integer" && name == "sqrt" {
@@ -15811,48 +15816,14 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		// A lambda literal (->) / Kernel#lambda: an ordinary closure, remembered
 		// here so `lambda?` can tell it from a proc (their argument arity and their
 		// `return` differ in Ruby).
-		// C.new(args): build an instance of a compiled class and run its initialize.
-		// Two builtin classes are constructed directly: Proc.new { } is its block, and
-		// an exception class makes the {__class, args} shape the rescue clauses read.
+		// C.new(args) - see rubyNew.
 		"js_rnew": func(a []uint64) uint64 {
-			cls, _ := u(a[0]).(*jsObject)
 			args, _ := u(a[1]).(*jsArray)
 			var argv []interface{}
 			if args != nil {
 				argv = args.elems
 			}
-			if cls != nil {
-				if bn, isBuiltin := cls.props["__rbuiltin"].(string); isBuiltin {
-					if bn == "Proc" {
-						if _, blk := rubyBlockArgs(argv); blk != nil {
-							return w(blk)
-						}
-						return w(jsNull)
-					}
-					// Array.new(n) / Array.new(n, v) / Array.new(n) { |i| }, ahead
-					// of the exception construction below.
-					if bn == "Array" {
-						return w(rt.rubyArrNew(argv))
-					}
-					// Hash.new / Hash.new(v) / Hash.new { |h, k| }. The default
-					// lives in the hidden __hdef / __hdefp slot and
-					// rubyHashDefault honours it at every read.
-					if bn == "Hash" {
-						return w(rubyNewHash(argv))
-					}
-					if bn == "Regexp" {
-						return w(rt.rubyRegexNew(argv))
-					}
-					if bn == "Struct" {
-						return w(rt.rubyStructNew(argv))
-					}
-					return w(rt.rubyExc(cls, argv))
-				}
-			}
-			inst := newJSObject()
-			inst.set("__class", u(a[0]))
-			rt.rubyMethod(inst, "initialize", argv)
-			return w(inst)
+			return w(rt.rubyNew(u(a[0]), argv))
 		},
 		// Kernel#format / sprintf: the argument array is [format, args...].
 		"js_rformat": func(a []uint64) uint64 {
