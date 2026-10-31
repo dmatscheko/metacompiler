@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-902** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-911** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -64,11 +64,29 @@ its report; anything structural there is a CORE ticket.
 
 # PY — Python
 
+### T-902 python: `map` / `filter` / `zip` / `enumerate` drain their iterable when created · P1 · PY · OPEN [V]
+Neighbour of T-768 / T-550. `next(map(lambda p: p+1, count(5)))`, `list(islice(zip(count(1), count(10)), 2))`,
+`next(filter(lambda p: p > 3, count(1)))`, `next(enumerate(count(7)))` → python `6`, `[(1, 10), (2, 11)]`, `4`, `(0, 7)`; interp
+and native hang (timeout), run hits the IR step brake. Finite source, observable order: a generator that prints `pull i` before
+each yield, `m1 = map(lambda p: p*2, gen(3)); print("made map1"); print("first", next(m1))` → python `made map1`, `pull 0`,
+`first 0`; all legs pull 0, 1, 2 first. Same for filter, enumerate, zip and two-iterable map. Files: these builtins in
+python-interpreter.abnf, python-to-llvm-ir.abnf, lib/python-rt.metajs.
+
+### T-903 python: the implicit `main()` entry still runs when the top level calls main indirectly · P2 · PY · OPEN [V]
+Neighbour of T-769. `def main(): print("main ran")` / `def run(): main()` / `xs=[1]` / `if xs[0]: run()` → python prints
+`main ran` once, all legs twice. The heuristic (pyTopRunsEntry) only sees a direct top-level call or a `__name__` test; a program
+whose top level executes any call statement probably should not get the implicit entry. Files: pyTopRunsEntry in both python
+grammars.
+
 # RB — Ruby
 
 # JS — JavaScript and TypeScript
 
 # JV — Java
+
+### T-909 java: `System.err.flush()` throws · P3 · JV · OPEN [V]
+interp NullPointerException; run and native "method call 'flush' on a undefined"; `System.out.flush()` works. Files: the
+System.err surface in both java grammars / java-rt.metajs.
 
 # CS — C#  (no dotnet here: spec-only, ECMA-334 and the .NET reference source)
 
@@ -86,6 +104,24 @@ not change the renderer.
 
 # GO — Go  (oracle: `go run`)
 
+### T-904 go: a variable typed by a conversion loses its type when an untyped constant is assigned later · P1 · GO · OPEN [V]
+`c := float64(3); c = 7; fmt.Println(c/2)` → go 3.5, all legs 3. `var u = uint8(3); u = 255; u++` → go 0, ours 256.
+`i := int8(1); i = 127; i++` → go -128, ours 128. `h := complex128(3); h = 6` → go `(6+0i)`, ours `6` (complex64 and
+float32 `g = 16777217` the same). `var a float64 = 3; a = 7`, `d := 3.0; d = 7` and the un-reassigned `float64(3)/2` are right:
+the conversion's type is not recorded as the variable's declared type for `:=` / `var x = T(…)`, so the later constant
+assignment is untyped. Also the remaining form of T-869 (4): `var c = complex64(complex(1,2)); q := &c; *q = 2` prints `2`.
+Files: declared-type recording for `:=` and `var x = expr` in go-interpreter.abnf and go-to-llvm-ir.abnf.
+
+### T-905 go compiler: a store through a pointer to a complex struct field or slice element is lost · P1 · GO · OPEN [V]
+`type S struct{x int; c complex128}`; `s := S{}; pc := &s.c; *pc = 4; fmt.Println(s, *pc)` → go and interp `{0 (4+0i)} (4+0i)`,
+run and native `{0 (0+0i)} (4+0i)`. `ca := []complex128{1,2}; pca := &ca[0]; *pca = 5; fmt.Println(ca)` → go `[(5+0i) (2+0i)]`,
+run/native `[(1+0i) (2+0i)]`. complex64 the same; int and float fields through `&s.x` are right, so the pointer addresses a
+copy of the complex box. Files: go-to-llvm-ir.abnf, address-of a field / index of complex type (the goRefTy deref path).
+
+### T-910 go and swift compilers accept `break` outside a loop; compile errors say "js runtime error:" · P3 · GO · OPEN [V] (break; the error prefix is [V finder only])
+`break` at function level compiles and exits 0 in both compilers; gc and swiftc reject it. The go and swift compile-time
+"variable not defined" errors carry the prefix `js runtime error:`. Shared: swift-to-llvm-ir.abnf.
+
 # SW — Swift  (oracle: swiftc 6.1.2)
 
 # DA — Dart  (no dart here: spec-only)
@@ -102,7 +138,25 @@ not change the renderer.
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
+### T-908 bash: the `builtin` and `command` builtins are missing · P2 · SH · OPEN [V]
+`x=9 builtin echo hi`, `x=3 command eval 'echo $x'` → bash `hi`, `3`; every engine "command not found: builtin/command", exit
+127. Both are common in real scripts (`command -v`, wrapping a builtin in a same-named function). Files: builtin dispatch in both
+bash grammars, lib/bash-rt.c.
+
 # C — C subset
+
+### T-906 c: `u"…"` holds an astral character as one unit; non-ASCII character constants do not parse · P1 · C · OPEN [V]
+Neighbour of T-758. `pl(u"\U0001F600"[0]); pl(u"\U0001F600"[1]); pl(sizeof(u"\U0001F600"))` (pl = putchar-based print) → cc
+`55357 56832 6`; all legs `128512 0 8` (a char16_t string must hold a UTF-16 surrogate pair). Indexing `u"😀"[2]` crashes the
+interpreter with "invalid load at address 16". `U"😀"`, `L"€"`, `u"é"`, `u8"é"` are right. Loud companion: `L'é'`, `u'€'`,
+`U'😀'` do not parse in either half (cc 233, 8364, 128512). Files: languages/lib/c-literals.js (u-prefix encoding, character
+constants), CharConst in both C grammars.
+
+### T-907 c: `&function` is rejected - "variable not defined" · P2 · C · OPEN [V]
+Neighbour of T-755. `int md(int a,int b){return a%b;}` / `int (*single)(int,int) = &md;` at file scope → every leg fails with
+"variable not defined: md" (cc prints 1 for `single(9,4)`); inside a function the interpreter accepts it, run and native fail
+the same way. Without the `&` it works. Files: makeAddr in c-to-llvm-ir.abnf (local and global), the global initializer in
+c-interpreter.abnf.
 
 # CORE — MetaJS, the engines, shared runtime, tooling
 
