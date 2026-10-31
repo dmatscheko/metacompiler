@@ -70,9 +70,10 @@ const (
 	rxOpMinLen  = 33
 	rxOpReqCU   = 34
 	rxOpCsReset = 35
-	// Under e, rxOpClass and rxOpSplit become these (rxMemoOps).
+	// Under e, rxOpClass, rxOpSplit and rxOpMatch become these (rxMemoOps).
 	rxOpClassM = 36
 	rxOpSplitM = 37
+	rxOpMatchL = 38
 )
 
 // The verbs' kinds, and st.verb for a recursion that loops (RX_VCOMMIT ..
@@ -6551,6 +6552,9 @@ type rxRunSt struct {
 	// the name of the latest (*MARK) passed on the path, or -1.
 	acc   bool
 	lmark int
+	// best and bcaps are the longest match rxOpMatchL has recorded, or -1.
+	best  int
+	bcaps []int
 }
 
 func (re *rxRe) assertOK(text []rune, kind, sp int) bool {
@@ -7164,6 +7168,20 @@ func (re *rxRe) run(text []rune, pcIn, spIn int, caps, marks []int, st *rxRunSt,
 				}
 				st.bt = append(st.bt, rxBtAlt, re.bs[pc], sp)
 				pc = re.as[pc]
+			case rxOpMatchL:
+				// See RX_MATCHL in lib/regex.js: the longest match at the
+				// leftmost start wins, so a shorter one is only recorded.
+				if (st.mustEnd >= 0 && sp != st.mustEnd) || sp == st.adv {
+					break fwd
+				}
+				if sp == n {
+					return sp
+				}
+				if sp > st.best {
+					st.best = sp
+					st.bcaps = append(st.bcaps[:0], caps...)
+				}
+				break fwd
 			default:
 				break fwd
 			}
@@ -7377,7 +7395,8 @@ func (re *rxRe) budget(text []rune) {
 
 // rxMemoOps turns the ERE program's rxOpClass and rxOpSplit into rxOpClassM and
 // rxOpSplitM, whose repeated visit at one position fails once the search has
-// spent its linear budget. Twin of rxMemoOps in lib/regex.js, which states why
+// spent its linear budget, and its rxOpMatch into the leftmost-longest
+// rxOpMatchL. Twin of rxMemoOps in lib/regex.js, which states why
 // that is sound.
 func rxMemoOps(pg *rxProg) {
 	for i, op := range pg.ops {
@@ -7385,6 +7404,8 @@ func rxMemoOps(pg *rxProg) {
 			pg.ops[i] = rxOpClassM
 		} else if op == rxOpSplit {
 			pg.ops[i] = rxOpSplitM
+		} else if op == rxOpMatch {
+			pg.ops[i] = rxOpMatchL
 		}
 	}
 }
@@ -7494,7 +7515,7 @@ func (re *rxRe) attempt(text []rune, at, mustEnd, gpos, glast, adv int) (*rxMatc
 	for i := range marks {
 		marks[i] = -1
 	}
-	st := &rxRunSt{steps: re.steps, mustEnd: mustEnd, lbt: -1, gpos: gpos, glast: glast, adv: adv, wrap: -1, lmark: -1, bt: re.bt[:0]}
+	st := &rxRunSt{steps: re.steps, mustEnd: mustEnd, lbt: -1, gpos: gpos, glast: glast, adv: adv, wrap: -1, lmark: -1, bt: re.bt[:0], best: -1}
 	defer func() { re.bt = st.bt[:0] }()
 	if len(re.cmin) > 0 {
 		st.ctr = make([]int, len(re.cmin))
@@ -7505,6 +7526,12 @@ func (re *rxRe) attempt(text []rune, at, mustEnd, gpos, glast, adv int) (*rxMatc
 	}
 	end := re.run(text, 0, at, caps, marks, st, 0)
 	re.steps = st.steps
+	// A match rxOpMatchL recorded wins over running out of alternatives or steps.
+	if end < 0 && st.best >= 0 {
+		end = st.best
+		caps = st.bcaps
+		st.over = false
+	}
 	if end >= 0 {
 		return &rxMatch{begin: caps[0], end: caps[1], caps: caps, mark: st.lmark}, true
 	}

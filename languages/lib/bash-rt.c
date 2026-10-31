@@ -7508,10 +7508,13 @@ int rt_fskind(char *p)
  *   * re_alt/re_cat/re_rep/re_atom parse the ERE and emit 4-word instructions
  *     into re_prog. Recursion is the C call stack, as rt_glob already does it.
  *   * re_run walks that program over an explicit backtrack stack (re_bx,
- *     re_by), so a long subject cannot exhaust the C stack. Leftmost-first,
- *     greedy.
- *   * a * or + loop is fenced by SAVE/PROG on a scratch slot, so an iteration
- *     that consumed nothing cannot repeat.
+ *     re_by), so a long subject cannot exhaust the C stack. POSIX takes the
+ *     LONGEST match at the leftmost start, so a MATCH only records its end
+ *     and captures (re_best) and the run backtracks on for a longer one; the
+ *     captures are those of the first path, in greedy leftmost-first order,
+ *     that reaches the longest end.
+ *   * a * loop (and the starred tail of + and {m,}) is fenced by SAVE/PROG on
+ *     a scratch slot, so an iteration that consumed nothing cannot repeat.
  *   * a search past its linear budget visits each consuming instruction and
  *     SPLIT at most once per position (re_seen), so a pattern that would
  *     backtrack exponentially stays within the step cap.
@@ -7562,6 +7565,7 @@ int re_bad;                   /* NEW GLOBAL: compile error code, 0 = fine   */
 unsigned char re_vis[1048576]; /* NEW GLOBAL                                */
 long re_lin;                  /* NEW GLOBAL: the linear budget, in steps     */
 int re_vclr;                  /* NEW GLOBAL: re_vis cleared for this search  */
+int re_best[128];             /* NEW GLOBAL: the longest match's captures    */
 
 /* The mutually recursive halves, declared before any body needs them. */
 int re_alt(void);
@@ -8046,9 +8050,6 @@ int re_rep(void)
     int qd;
     int sc;
     int gotq;
-    int pt;
-    int ps;
-    int st;
     int mv;
     int nv;
     int mv2;
@@ -8138,62 +8139,46 @@ int re_rep(void)
             re_set(hole2, 1, astart);
             return 0;
         }
-        if (empty_ok == 0) {                  /* + */
-            pt = re_mark();
-            re_set(hole1, 1, hole2);
-            re_set(hole2, 0, 6);              /* OP_SAVE */
-            re_set(hole2, 1, pt);
-            re_emit(10, pt, 0);               /* OP_PROG */
-            ps = re_emit(4, hole2, 0);        /* OP_SPLIT */
-            re_set(ps, 2, re_pc);
+        /* * is {0,} and + is {1,}: the first iteration of + is a mandatory
+         * copy outside the empty-iteration guard, so [[ "" =~ (b?)+ ]] matches. */
+        mv2 = (empty_ok != 0) ? 0 : 1;
+        nv = -1;
+    } else {
+        /* ---- {m}, {m,}, {m,n} */
+        re_pos = re_pos + 1;
+        mv = re_num();
+        m = mv;
+        if (re_at(0) == 44) {                 /* , */
+            re_pos = re_pos + 1;
+            if (re_at(0) == 125) {            /* } */
+                n = -1;
+            } else {
+                n = re_num();
+            }
+        } else {
+            n = mv;
+        }
+        if (re_at(0) != 125) {
+            re_bad = 3;                       /* Invalid content of \{\} */
             return 0;
         }
-        /* * */
-        st = re_mark();
-        re_set(hole2, 0, 6);
-        re_set(hole2, 1, st);
-        re_emit(10, st, 0);
-        re_emit(5, hole1, 0);
-        re_set(hole1, 0, 4);
-        re_set(hole1, 1, hole2);
-        re_set(hole1, 2, re_pc);
-        return 0;
-    }
-
-    /* ---- {m}, {m,}, {m,n} */
-    re_pos = re_pos + 1;
-    mv = re_num();
-    m = mv;
-    if (re_at(0) == 44) {                     /* , */
         re_pos = re_pos + 1;
-        if (re_at(0) == 125) {                /* } */
-            n = -1;
-        } else {
-            n = re_num();
+        nv = n;
+        mv2 = m;
+        if (nv >= 0 && nv < mv2) {
+            re_bad = 3;
+            return 0;
         }
-    } else {
-        n = mv;
-    }
-    if (re_at(0) != 125) {
-        re_bad = 3;                           /* Invalid content of \{\} */
-        return 0;
-    }
-    re_pos = re_pos + 1;
-    nv = n;
-    mv2 = m;
-    if (nv >= 0 && nv < mv2) {
-        re_bad = 3;
-        return 0;
-    }
-    /* "a{2}{3}" is status 2 in bash 5.3, exactly like "a**". */
-    if (re_isq() != 0) {
-        re_bad = 5;
-        return 0;
-    }
-    if (nv == 0 && mv2 == 0) {
-        /* {0}: the atom never runs at all - jump straight past it. */
-        re_set(hole1, 1, aend);
-        return 0;
+        /* "a{2}{3}" is status 2 in bash 5.3, exactly like "a**". */
+        if (re_isq() != 0) {
+            re_bad = 5;
+            return 0;
+        }
+        if (nv == 0 && mv2 == 0) {
+            /* {0}: the atom never runs at all - jump straight past it. */
+            re_set(hole1, 1, aend);
+            return 0;
+        }
     }
     if (nv < 0) {
         /* {m,}: m mandatory copies, then a starred one. */
@@ -8394,6 +8379,22 @@ int re_clean(int csp)
     return 1;
 }
 
+/* re_run's answer r once it stops: a match found earlier (bend >= 0) wins over
+ * running out of alternatives or steps, its captures put back into re_slot. */
+int re_done(int bend, int r)
+{
+    int i;
+    int n;
+    if (bend < 0) {
+        return r;
+    }
+    n = (re_ng < 63) ? (re_ng + 1) * 2 : 128;
+    for (i = 0; i < n; i++) {
+        re_slot[i] = re_best[i];
+    }
+    return 1;
+}
+
 /* the backtracking VM. 1 match, 0 fail, -2 step cap (or a backtrack stack
  * deeper than RE_BT). A SPLIT pushes the alternative not taken, a SAVE or
  * CLEAR the old value of each slot it writes; a failure pops back to the
@@ -8419,16 +8420,19 @@ int re_run(int rpc, int rsp)
     int fail;
     int i;
     int bx;
+    int bend;
+    int nb;
 
     pc = rpc;
     sp = rsp;
     top = 0;
+    bend = -1;
     slen = re_slen;
     subj = re_subj;
     while (1) {
         st = re_steps;
         if (st >= re_cap) {
-            return -2;
+            return re_done(bend, -2);
         }
         re_steps = st + 1;
         op = re_get(pc, 0);
@@ -8485,7 +8489,7 @@ int re_run(int rpc, int rsp)
             }
         } else if (op == 4) {                 /* OP_SPLIT */
             if (top == 1048576) {
-                return -2;
+                return re_done(bend, -2);
             }
             re_bx[top] = vy;
             re_by[top] = sp;
@@ -8498,7 +8502,7 @@ int re_run(int rpc, int rsp)
              * branch that set it fails, so a dead alternative cannot leave an
              * offset behind. */
             if (top == 1048576) {
-                return -2;
+                return re_done(bend, -2);
             }
             re_bx[top] = -1 - vx;
             re_by[top] = re_slot[vx];
@@ -8506,7 +8510,18 @@ int re_run(int rpc, int rsp)
             re_slot[vx] = sp;
             pc = pc1;
         } else if (op == 7) {                 /* OP_MATCH */
-            return 1;
+            /* Nothing is longer than a match to the end of the subject. */
+            if (sp == slen) {
+                return 1;
+            }
+            if (sp > bend) {
+                bend = sp;
+                nb = (re_ng < 63) ? (re_ng + 1) * 2 : 128;
+                for (i = 0; i < nb; i++) {
+                    re_best[i] = re_slot[i];
+                }
+            }
+            fail = 1;
         } else if (op == 8) {                 /* OP_BOL */
             if (sp != 0) {
                 fail = 1;
@@ -8528,7 +8543,7 @@ int re_run(int rpc, int rsp)
         } else if (op == 11) {                /* OP_CLEAR */
             /* OP_SAVE's undo, once per slot of the range. */
             if (top + (vy - vx + 1) > 1048576) {
-                return -2;
+                return re_done(bend, -2);
             }
             for (i = vx; i < vy + 1; i++) {
                 re_bx[top] = -1 - i;
@@ -8544,7 +8559,7 @@ int re_run(int rpc, int rsp)
         if (fail != 0) {
             while (1) {
                 if (top == 0) {
-                    return 0;
+                    return re_done(bend, 0);
                 }
                 top = top - 1;
                 bx = re_bx[top];

@@ -473,6 +473,16 @@ s11() {
   re='^(a|aa)*c'; [[ ${as}b =~ $re ]]; check dbr74 "$?" 1
   re='(a?){20}a{20}x'; [[ ${as}b =~ $re ]]; check dbr75 "$?" 1
   re='^(a+)+b'; [[ ${as}b =~ $re ]]; check dbr76 "$?-${#BASH_REMATCH[1]}" 0-58
+  # + is {1,}: its first iteration may match empty, only the later ones may not
+  re='(b?)+'; [[ "" =~ $re ]]; check dbr77 "$?-${#BASH_REMATCH[@]}" 0-2
+  re='^(a?(b?)+b?)+$'; [[ aa =~ $re ]]; check dbr78 "$?-[${BASH_REMATCH[1]}][${BASH_REMATCH[2]}]" "0-[a][]"
+  re='^x(a*)+$'; [[ x =~ $re ]]; check dbr79 "$?" 0
+  re='(a|b?)+b'; [[ b =~ $re ]]; check dbr80 "$?-${BASH_REMATCH[0]}" 0-b
+  # POSIX: the LONGEST match at the leftmost start, whatever the alternation order
+  re='(a|ab)'; [[ ab =~ $re ]]; check dbr81 "${BASH_REMATCH[0]}-${BASH_REMATCH[1]}" ab-ab
+  re='(ab|a)(bab)?'; [[ abab =~ $re ]]; check dbr82 "${BASH_REMATCH[0]}|${BASH_REMATCH[1]}|${BASH_REMATCH[2]}" "abab|a|bab"
+  re='a|ab|abc'; [[ xabcx =~ $re ]]; check dbr83 "${BASH_REMATCH[0]}" abc
+  re='(a|ab|aba)*'; [[ abab =~ $re ]]; check dbr84 "${BASH_REMATCH[0]}-${BASH_REMATCH[1]}" abab-ab
 }
 
 # ===== SECTION 12: the test builtin =====

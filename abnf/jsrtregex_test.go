@@ -6,7 +6,8 @@ import (
 )
 
 // TestRxEreMemo: under e a search that would backtrack exponentially finishes
-// within the step cap (rxMemoOps) and gives the answer bash 5.3 gives.
+// within the step cap (rxMemoOps), and every search gives the answer bash 5.3
+// gives, the leftmost-longest match.
 func TestRxEreMemo(t *testing.T) {
 	a := strings.Repeat("a", 200)
 	cases := []struct {
@@ -19,6 +20,10 @@ func TestRxEreMemo(t *testing.T) {
 		{"^((a?|b?){20})c", a + "b", -1},
 		{"^(a+)+b", a + "b", 201},
 		{"^(a*)*$", a, 200},
+		// the longest match at the leftmost start, whatever the alternation order
+		{"(a|ab)", "ab", 2},
+		{"a|ab|abc", "xabcx", 4},
+		{"(ab|a)(bab)?", "abab", 4},
 	}
 	for _, c := range cases {
 		re := rxCompile(c.pat, "e")

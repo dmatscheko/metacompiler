@@ -195,9 +195,10 @@ var RX_MINLEN = 33 // fail unless a units are left (PCRE2's minimum length)
 var RX_REQCU = 34  // fail when the class clss[pc] matches nothing from b units on (rxReqCU)
 var RX_CSRESET = 35 // no calls in progress (rxCsn)
 // Under e, RX_CLASS and RX_SPLIT become these, whose visits a search past its
-// linear budget remembers (rxMemoOps):
+// linear budget remembers, and RX_MATCH becomes RX_MATCHL (rxMemoOps):
 var RX_CLASSM = 36
 var RX_SPLITM = 37
+var RX_MATCHL = 38
 var RX_VCOMMIT = 1
 var RX_VPRUNE = 2
 var RX_VSKIP = 3
@@ -6628,6 +6629,22 @@ function rxRun(re, text, pcIn, spIn, caps, marks, st, base, keep) {
                 top = rxBtPush(top, RX_BT_ALT, bs[pc], sp)
                 btn = bk.length
                 pc = as[pc]
+            } else if (op == RX_MATCHL) {
+                // RX_MATCH under e. POSIX takes the LONGEST match at the leftmost
+                // start, so a match short of the end is only recorded (st.best,
+                // st.bcaps) and the run backtracks on for a longer one; rxAttempt
+                // answers the record once the run is out of alternatives. The
+                // captures are the first path's, in leftmost-first order, to reach
+                // the longest end. Twin of OP_MATCH in lib/bash-rt.c.
+                if ((st.mustEnd >= 0 && sp != st.mustEnd) || sp == st.adv) {
+                    break
+                }
+                if (sp == n) { return sp }
+                if (sp > st.best) {
+                    st.best = sp
+                    st.bcaps = rxCopy(caps)
+                }
+                break
             } else {
                 break
             }
@@ -6900,9 +6917,16 @@ function rxAttempt(re, text, at, mustEnd, gpos, glast, adv) {
     }
     // The search's counter (rxBudget) carries over from attempt to attempt.
     var st = {steps: re.steps, over: false, mustEnd: mustEnd, lbt: -1, ctr: ctr, cbeg: cbeg,
-              gpos: gpos, glast: glast, adv: adv, wrap: 0 - 1, verb: 0, acc: false, lmark: 0 - 1}
+              gpos: gpos, glast: glast, adv: adv, wrap: 0 - 1, verb: 0, acc: false, lmark: 0 - 1,
+              best: 0 - 1, bcaps: caps}
     var end = rxRun(re, text, 0, at, caps, marks, st, 0, 0)
     re.steps = st.steps
+    // A match RX_MATCHL recorded wins over running out of alternatives or steps.
+    if (end < 0 && st.best >= 0) {
+        end = st.best
+        caps = st.bcaps
+        st.over = false
+    }
     // Under C the outcomes besides a match and none are records with a
     // negative begin: -2 the step limit (PHP's backtrack limit), -4 a
     // recursion that would loop, -1 a (*COMMIT) (no match from any start)
@@ -6928,7 +6952,7 @@ function rxBudget(re, text) {
 }
 
 // rxMemoOps turns the ERE program's RX_CLASS and RX_SPLIT into RX_CLASSM and
-// RX_SPLITM. An ERE has no backreference, so no capture steers the match, and
+// RX_SPLITM, and its RX_MATCH into the leftmost-longest RX_MATCHL. An ERE has no backreference, so no capture steers the match, and
 // what follows a visit to one of them at sp depends on (pc, sp) alone - for a
 // SPLIT, provided no loop iteration began at sp (rxMarksBelow), as then an
 // RX_PROG ahead can fail; a CLASS consumes, after which every RX_PROG passes.
@@ -6944,6 +6968,7 @@ function rxMemoOps(pg) {
     while (i < ops.length) {
         if (ops[i] == RX_CLASS) { ops[i] = RX_CLASSM }
         else if (ops[i] == RX_SPLIT) { ops[i] = RX_SPLITM }
+        else if (ops[i] == RX_MATCH) { ops[i] = RX_MATCHL }
         i = i + 1
     }
 }
