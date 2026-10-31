@@ -94,12 +94,6 @@ not change the renderer.
 
 # GO — Go  (oracle: `go run`)
 
-### T-879 go: a complex multiply with a negated part fuses the wrong product · P3 · GO · IN PROGRESS (GO worker, round 14) [V GO worker]
-`arr := []float64{0.3, -0.77, 1.9, 1.1, 0.7, 2.3}; u := complex(arr[3], arr[5]); v := complex(arr[4], -arr[2]); u*v` →
-go `(5.139999999999999-0.4800000000000001i)`, ours `(5.14-0.4800000000000001i)` in every leg (conjugate multiplies in FFT
-code). A negated part makes b*d an FNMULD, so ARM64.rules fuse the LEFT product of the real part; our complex-multiply model
-always fuses the right one. Verify with `go build -gcflags=-S`.
-
 # SW — Swift  (oracle: swiftc 6.1.2)
 
 # DA — Dart  (no dart here: spec-only)
@@ -912,6 +906,7 @@ T-870 ts/js: toStringTag for Map/Set/typed arrays; Uint8Array gaps — DONE eccc
 T-878 go: FMA where gc does NOT fuse — constant-propagated operands, variables, inlining — DONE 3889f62b..374490fa (compile-time-known operands fold without FMA, deferred to whole-function analysis; a product read through an unreassigned local fuses like gc's SSA value; also a negated-last-factor ordering bug, goja/frozen binding drift, and software math.FMA's own guard. DECLINED with evidence: inlined helpers and directly-called closures (needs gc's inliner cost model), constant propagation through reassignment/phis (SSA data flow), store-to-load forwarding for address-taken locals (memory passes), t*1 rewrites — each was unfused before this round, none is a regression)
 T-845 compiler grammars: `fail` prints on stdout, so `-qq` swallows compile errors — DONE a18a3447 for every grammar but ruby/js/typescript/go (fail/buildErr/interp-core fail → eprintln, compile-core break/continue through fail with a re-freeze, 19 -qq SHOULD FAIL rows); those four and regex.js rxFail filed as T-880. DECLINED: batch's 'cannot find the batch label' message channel — no cmd.exe oracle here
 T-877 ruby compiler: super misses and into modules; multi-argument include; run-time private — DONE 679b977c (js_rsuper walks __super and raises the rescuable NoMethodError on a miss; super into an included module's method via hidden $sup keys — also fixed D>M>Base#f ordering and a prepend stack overflow; super inside a module method continues through self's ancestors in the interp; include/prepend/extend with several modules applied last-first; run-time send(:private/:protected/:public) in all engines, gated in the compiler like arity tracking)
+T-879 go: a complex multiply with a negated part fuses the wrong product — DONE a4a6a990 (a product with a run-time negated factor becomes FNMULD, so gc fuses the other product — real and imaginary parts tracked per part through complex/real/imag/unary minus/locals; complex v *= x goes through the same fusion; generated 96-function probe 33–42 wrong → 4–10, none regressed. DECLINED, same class as T-878: a conjugate through an inlined call (z * cmplx.Conj(w)) needs gc's inliner, and gc constant-folding a slice literal read back in the same function needs its value tracking)
 
 # Settled — do not re-open
 
