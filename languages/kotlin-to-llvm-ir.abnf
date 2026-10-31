@@ -4661,6 +4661,7 @@ KwContract  = "contract" KwEnd ;
             // read. js_kindex, not js_get, so a STRING yields the Char at that index
             // (Kotlin's CharSequence.get) while a list still yields its element.
             var ir2 = s.idx(b)
+            if (ir2.vs !== undefined) { return {b: ir2.b, v: emitMultiIdx(ir2.b, cur, "get", ir2.vs)} }
             var keyV = ir2.v
             // js_ktindex is a Map MISS as null (kotlin.Map.get answers null where the
             // shared read answers undefined), then js_rxktindex - js_kindex plus
@@ -5217,12 +5218,26 @@ KwContract  = "contract" KwEnd ;
         }
     }
 
-    // The index operator's argument list. Kotlin's `a[i, j]` is `get(i, j)`; only the
-    // one-argument form is modelled, so a wider one is reported and its thunk fails
-    // rather than silently indexing by the first argument.
+    // The index operator's argument list. Kotlin's `a[i, j]` is `get(i, j)` and
+    // `a[i, j] = v` is `set(i, j, v)`: a wider list's thunk answers every value in
+    // vs, which the reads and writes hand to the receiver's operator member
+    // (emitMultiIdx). Twin of kIndexArg in kotlin-interpreter.abnf.
     function kIndexArg(items, pos) {
         if (items.length == 1) { return items[0] }
-        return notImplExpr("index with more than one argument", pos)
+        return function(b) {
+            var vs = []
+            for (var i = 0; i < items.length; i++) {
+                var r = items[i](b)
+                b = r.b
+                vs.push(r.v)
+            }
+            return {b: b, v: vs[0], vs: vs}
+        }
+    }
+    function emitMultiIdx(b, objV, mth, vs) {
+        var argsV = callExt(b, "js_arr_new", [])
+        for (var i = 0; i < vs.length; i++) { callExt(b, "js_arr_push", [argsV, vs[i]]) }
+        return callExt(b, "js_ktsmcall", [objV, emitStr(b, mth), argsV])
     }
     function makeCall(items) {
         var name = items[0]
@@ -5483,7 +5498,7 @@ KwContract  = "contract" KwEnd ;
                 o = callExt(b, "js_get", [o, emitStr(b, s.key)])
             } else {
                 var r = s.idx(b)
-                var gr = emitIdxRead(r.b, o, r.v, "js_get")
+                var gr = emitIdxRead(r.b, o, r.v, "js_get", r.vs)
                 b = gr.b
                 o = gr.v
             }
@@ -5493,7 +5508,7 @@ KwContract  = "contract" KwEnd ;
         if (last.safe === true) { b = emitSafeStep(b, o, skips) }
         if (last.key != undefined) return {b: b, obj: o, key: emitStr(b, last.key), isIndex: false, skips: skips}
         var kr = last.idx(b)
-        return {b: kr.b, obj: o, key: kr.v, isIndex: true, skips: skips}
+        return {b: kr.b, obj: o, key: kr.v, keys: kr.vs, isIndex: true, skips: skips}
     }
     function emitSafeStep(b, o, skips) {
         var skipB = curF.NewBlock("")
@@ -5517,20 +5532,29 @@ KwContract  = "contract" KwEnd ;
     // An indexed read or write of an assignment target: the receiver's `operator fun
     // get` / `set` when some class declares one, else the builtin access. Twin of
     // kReadSlot / kSetIndex in kotlin-interpreter.abnf.
-    function emitIdxRead(b, objV, keyV, ext) {
+    // keys (a multi-argument index, kIndexArg) goes to the operator member directly.
+    function emitIdxRead(b, objV, keyV, ext, keys) {
+        if (keys !== undefined) { return {b: b, v: emitMultiIdx(b, objV, "get", keys)} }
         return emitOpDispatch(b, objV, "get", [keyV], function(bb) { return callExt(bb, ext, [objV, keyV]) })
     }
-    function emitIdxWrite(b, objV, keyV, v) {
+    function emitIdxWrite(b, objV, keyV, v, keys) {
+        if (keys !== undefined) {
+            var sv = []
+            for (var i = 0; i < keys.length; i++) { sv.push(keys[i]) }
+            sv.push(v)
+            emitMultiIdx(b, objV, "set", sv)
+            return b
+        }
         return emitOpDispatch(b, objV, "set", [keyV, v], function(bb) { callExt(bb, "js_ktset", [objV, keyV, v]); return v }).b
     }
     // The slot p (an emitRefPath result) read and written: `[i]` through the
     // conventions, `.name` through js_ktfget / js_ktset.
     function emitSlotRead(b, p) {
-        if (p.isIndex) { return emitIdxRead(b, p.obj, p.key, "js_ktfget") }
+        if (p.isIndex) { return emitIdxRead(b, p.obj, p.key, "js_ktfget", p.keys) }
         return {b: b, v: callExt(b, "js_ktfget", [p.obj, p.key])}
     }
     function emitSlotWrite(b, p, v) {
-        if (p.isIndex) { return emitIdxWrite(b, p.obj, p.key, v) }
+        if (p.isIndex) { return emitIdxWrite(b, p.obj, p.key, v, p.keys) }
         callExt(b, "js_ktset", [p.obj, p.key, v])
         return b
     }
@@ -5698,12 +5722,14 @@ KwContract  = "contract" KwEnd ;
                 var sp = {skips: []}
                 var bb = (last.safe === true) ? emitSafeStep(rb.b, objV, sp.skips) : rb.b
                 var keyV = anytype
+                var keyVs = anytype
                 if (isField) {
                     keyV = emitStr(bb, fname)
                 } else {
                     var ir = last.idx(bb)
                     bb = ir.b
                     keyV = ir.v
+                    keyVs = ir.vs
                 }
                 var emitNewVal = function(b2, old, isV) {
                     var rv = rhsT(b2)
@@ -5741,7 +5767,7 @@ KwContract  = "contract" KwEnd ;
                     callExt(bb, "js_call", [sV, hUndef, sargsV])
                     return emitSafeJoin(bb, v, sp)
                 }
-                var slot = {obj: objV, key: keyV, isIndex: !isField}
+                var slot = {obj: objV, key: keyV, keys: keyVs, isIndex: !isField}
                 var oldM = hUndef
                 if (op != "=") {
                     var rm = emitSlotRead(bb, slot)

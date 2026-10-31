@@ -4606,7 +4606,26 @@ NotMemberKw = :script(~~
         if (name == "next") {
             if (!c.pend && !kCursorPull(c)) { kThrowExc("NoSuchElementException", null) }
             c.pend = false
+            c.lr = c.length - 1
             return {v: c.cur}
+        }
+        // MutableIterator.remove() over a collection (arr): the element next() last
+        // answered leaves it - and the map it is a snapshot of (kViewOwner), entry for
+        // entry in the same order - and the cursor steps back over it. Without such
+        // an element it is ArrayList.Itr's IllegalStateException. Twin of
+        // ktCursorMethod in abnf/jsrtkotlin.go.
+        if (name == "remove" && c.arr !== undefined) {
+            if (c.lr === undefined || c.lr < 0) { kThrowExc("IllegalStateException", null) }
+            var own = anytype
+            own = kViewOwner(c.arr)
+            if (kIsMap(own)) { kMapDropAt(own, c.lr) }
+            var a = c.arr
+            for (var j = c.lr; j + 1 < a.length; j++) { a[j] = a[j + 1] }
+            a.pop()
+            arrModBump(a)
+            c.length = c.length - 1
+            c.lr = 0 - 1
+            return {v: undefined}
         }
         return null
     }
@@ -7874,7 +7893,8 @@ NotMemberKw = :script(~~
             return {v: ss}
         }
         // A set is a Collection: the same answer kinds as a values view's (kind 3).
-        var sq = kSeqMethodK(s.keys, name, args, "Collection")
+        // A map's keys / entries view hands over its elements linked to the map.
+        var sq = kSeqMethodK(s.__wsrc !== undefined ? kViewOf(s.keys, s.__wsrc) : s.keys, name, args, "Collection")
         if (sq != null && Array.isArray(sq.v) && sq.v !== s.keys) {
             var sk = kResultKind(3, name)
             if (sk != 0) { arrKindSet(sq.v, sk) }
@@ -9837,12 +9857,26 @@ NotMemberKw = :script(~~
         fnRefNames.push(f.name)
         globalScope[f.name] = cl
     }
-    // The index operator's argument list. Kotlin's `a[i, j]` is `get(i, j)`; only the
-    // one-argument form is modelled, so a wider one is reported and its thunk fails
-    // rather than silently indexing by the first argument.
+    // The index operator's argument list. Kotlin's `a[i, j]` is `get(i, j)` and
+    // `a[i, j] = v` is `set(i, j, v)`: a wider list evaluates to a {__kmidx} key,
+    // which kIndex / kSetIndex hand to the receiver's operator member (kMultiIdx).
+    // Twin of kIndexArg in kotlin-to-llvm-ir.abnf.
     function kIndexArg(items, pos) {
         if (items.length == 1) { return items[0] }
-        return notImplExpr("index with more than one argument", pos)
+        return function() {
+            var a = []
+            for (var i = 0; i < items.length; i++) { a.push(items[i]()) }
+            return {__kmidx: true, a: a}
+        }
+    }
+    function kIsMultiIdx(i) { return i !== null && typeof i == "object" && i.__kmidx === true }
+    // The operator `get` / `set` of a class instance o, called with args.
+    function kMultiIdx(o, name, args) {
+        if (o !== null && typeof o == "object" && o.__class != undefined && o.__class != null) {
+            var f = clsFind(o.__class, name)
+            if (typeof f == "function") { return f.apply(undefined, concat2impl([o], args)) }
+        }
+        fail("no operator " + name + " with " + args.length + " arguments on " + kstr(o))
     }
     // Kotlin folds a unary minus into an integer LITERAL when typing it: `2147483648`
     // on its own is out of Int range and would be a Long, but `-2147483648` is
@@ -12235,6 +12269,7 @@ NotMemberKw = :script(~~
     }
     function kIndex(o, i) {
         if (o === undefined || o === null) { fail("indexing of " + kstr(o)) }
+        if (kIsMultiIdx(i)) { return kMultiIdx(o, "get", i.a) }
         // m.groups[1] / m.groups["name"]: a MatchGroup (value + range) or null.
         if (isKGroups(o)) { return krxGroupAt(o.md, i) }
         // m[k] on a Map: the missing key answers null, exactly as kotlin.Map.get does.
@@ -12773,6 +12808,7 @@ NotMemberKw = :script(~~
         // THE INDEXED WRITE IS BOUNDS-CHECKED, exactly like kIndex's read. `l[9] = 5`
         // IS MutableList.set(9, 5) in Kotlin and throws IndexOutOfBoundsException.
         // Twins: js_ktset in abnf/jsrtkotlin.go and in languages/lib/kotlin-rt.metajs.
+        if (kIsMultiIdx(i)) { kMultiIdx(o, "set", concat2impl(i.a, [v])); return }
         if (Array.isArray(o)) {
             var wix = kNum(i)
             if (wix < 0 || wix >= o.length) { kIndexOob("IndexOutOfBoundsException", wix, o.length) }

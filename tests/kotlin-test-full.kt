@@ -6361,6 +6361,45 @@ fun sec142() {
                      cce142 { mp as Map<*, *> } == "ok:{1=2}" && cce142 { lst as MutableList<*> } == "ok:[1, 2]")
 }
 
+// ===== SECTION 143: multi-index operators and MutableIterator.remove() =====
+// `g[r, c]` is `g.get(r, c)` and `g[r, c] = v` is `g.set(r, c, v)`, compound forms
+// included. remove() drops the element next() last answered, from a list, a set,
+// a map through its entries / keys / values iterators; a second remove() or one
+// before next() is ArrayList.Itr's message-less IllegalStateException. java 24
+// runs the same loops over ArrayList / LinkedHashSet / LinkedHashMap.
+class Grid143(val w: Int) {
+    val cells = IntArray(w * 2)
+    operator fun get(r: Int, c: Int): Int = cells[r * w + c]
+    operator fun set(r: Int, c: Int, v: Int) { cells[r * w + c] = v }
+}
+fun sec143() {
+    val g = Grid143(3)
+    g[1, 2] = 7
+    g[0, 1] = 4
+    g[1, 2] += 5
+    check("midx143a", g[1, 2] == 12 && g[0, 1] == 4 && g.cells.toList() == listOf(0, 4, 0, 0, 0, 12))
+    val ml = mutableListOf(1, 2, 3, 4, 5, 6)
+    val it = ml.iterator()
+    while (it.hasNext()) { if (it.next() % 2 == 0) it.remove() }
+    val ml2 = mutableListOf(1, 2, 3)
+    val it2 = ml2.iterator()
+    it2.next(); it2.hasNext(); it2.remove()
+    var ise = ""
+    try { it2.next(); it2.remove(); it2.remove() } catch (e: IllegalStateException) { ise = "ise" + e.message }
+    check("itrm143b", ml.toString() == "[1, 3, 5]" && ml2.toString() == "[3]" && ise == "isenull")
+    val mp = mutableMapOf(1 to "a", 2 to "b", 3 to "c", 4 to "d")
+    val mi = mp.iterator()
+    while (mi.hasNext()) { if (mi.next().key == 2) mi.remove() }
+    val ki = mp.keys.iterator()
+    while (ki.hasNext()) { if (ki.next() == 1) ki.remove() }
+    val vi = mp.values.iterator()
+    while (vi.hasNext()) { if (vi.next() == "d") vi.remove() }
+    val st = mutableSetOf("x", "y", "z")
+    val si = st.iterator()
+    while (si.hasNext()) { if (si.next() == "y") si.remove() }
+    check("itrm143c", mp.toString() == "{3=c}" && st.toString() == "[x, z]" && st.size == 2 && "y" !in st)
+}
+
 fun main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -6500,6 +6539,7 @@ fun main() {
     sec140() // SECTION-CALL 140
     sec141() // SECTION-CALL 141
     sec142() // SECTION-CALL 142
+    sec143() // SECTION-CALL 143
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }

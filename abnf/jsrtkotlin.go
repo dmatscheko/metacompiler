@@ -7041,6 +7041,10 @@ func (rt *jsrt) ktSetMethod(s *jsObject, name string, args []interface{}) (inter
 	case "toSortedSet":
 		return rt.ktSetFrom(ktSortBy(rt, keys.elems, nil, false).elems), true
 	}
+	// A map's keys / entries view hands over its elements linked to the map.
+	if owner, isView := s.props["__wsrc"]; isView {
+		ktViewOf(keys, owner)
+	}
 	v, handled := rt.ktSeqMethodK(keys, name, args, ktKindColl)
 	// A set is a Collection: the same answer kinds as a values view's.
 	if out, isOut := v.(*jsArray); isOut && out != keys {
@@ -10661,7 +10665,36 @@ func (rt *jsrt) ktCursorMethod(c *jsObject, name string) (interface{}, bool) {
 			rt.ktRaiseV("NoSuchElementException", jsNull)
 		}
 		c.set("pend", false)
+		n, _ := c.props["length"].(float64)
+		c.set("lr", n-1)
 		return c.props["cur"], true
+	// MutableIterator.remove() over a collection: the element next() last
+	// answered leaves it, and the map it is a snapshot of (ktViewOwner) entry for
+	// entry, and the cursor steps back over it; without such an element it is
+	// ArrayList.Itr's IllegalStateException. Twin of kCursorMethod in
+	// kotlin-interpreter.abnf and k4CursorMethod in languages/lib/kotlin-rt.metajs.
+	case "remove":
+		a, isArr := c.props["arr"].(*jsArray)
+		if !isArr {
+			return nil, false
+		}
+		lr, has := c.props["lr"].(float64)
+		if !has || lr < 0 {
+			rt.ktRaiseV("IllegalStateException", jsNull)
+		}
+		at := int(lr)
+		if own, linked := ktViewOwner(a); linked {
+			if keys, vals, isDict := dictParts(own); isDict {
+				ktMapDropAt(keys, vals, at)
+			}
+		}
+		a.dropIdx()
+		a.elems = append(a.elems[:at], a.elems[at+1:]...)
+		a.mod++
+		n, _ := c.props["length"].(float64)
+		c.set("length", n-1)
+		c.set("lr", float64(-1))
+		return jsUndef, true
 	}
 	return nil, false
 }

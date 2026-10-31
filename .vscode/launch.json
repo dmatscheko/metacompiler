@@ -842,10 +842,9 @@
             "program": "${workspaceFolder}","args": ["languages/kotlin-to-llvm-ir.abnf", "tests/kotlin-test-widen2.kt", "-q", "-warn-unsupported"]
         },
         {
-            "name": "Kotlin widen2 declarations SHOULD FAIL",
+            "name": "Kotlin widen2 declarations (compiler, no flags)",
             "type": "go",
             "request": "launch",
-            "expectError": "index with more than one argument not implemented",
             "program": "${workspaceFolder}","args": ["languages/kotlin-to-llvm-ir.abnf", "tests/kotlin-test-widen2.kt", "-q"]
         },
         {

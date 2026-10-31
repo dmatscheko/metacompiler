@@ -5834,7 +5834,9 @@ function ktSetMethod(s, name, args) {
     if (name == "toMutableSet") { return k3SetFrom(keys) }
     if (name == "toHashSet") { return k3SetFrom(keys) }
     if (name == "toSortedSet") { return k3SetFrom(ktSortBy(keys, null, false)) }
-    // A set is a Collection: the same answer kinds as a values view's (kind 3).
+    // A set is a Collection: the same answer kinds as a values view's (kind 3). A
+    // map's keys / entries view hands over its elements linked to the map.
+    if (s["__wsrc"] !== undefined) { k4ViewOf(keys, s["__wsrc"]) }
     var sq = ktSeqMethodK(keys, name, args, "Collection")
     if (ktIsArr(sq) && sq !== keys) {
         var sk = ktResultKind(3, name)
@@ -6210,7 +6212,22 @@ function k4CursorMethod(c, name) {
             if (!k4CursorPull(c)) { ktNoElemNull() }
         }
         c["pend"] = false
+        c["lr"] = c["length"] - 1
         return c["cur"]
+    }
+    // MutableIterator.remove() (jsrtkotlin.go ktCursorMethod, which has the rule).
+    if (name == "remove") {
+        var a = c["arr"]
+        if (a === undefined) { return KT_MISS }
+        var lr = c["lr"]
+        if (lr === undefined || lr < 0) { ktRaise("IllegalStateException", null) }
+        var own = k4ViewOwner(a)
+        if (rtIsDictObj(own)) { ktMapDropAt(ktMapKeys(own), ktMapVals(own), lr) }
+        k3RemoveAt(a, lr)
+        arrModBump(a)
+        c["length"] = c["length"] - 1
+        c["lr"] = 0 - 1
+        return undefined
     }
     return KT_MISS
 }

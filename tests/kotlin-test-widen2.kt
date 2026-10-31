@@ -1,12 +1,10 @@
 /* Kotlin widened surface v2: type/member declarations this grammar pair recognizes
  * (interface, object, enum class, annotation class, typealias, companion object, init
  * block, secondary constructor, property accessor, destructuring), plus the
- * multi-statement lambda body and the extension DELEGATED property - all of them
- * genuinely lowered. What is left unsupported is ONE construct, the multi-argument
- * indexed access in a top-level property initializer. Without flags the run stops there
- * with a clean file:line message (this file SHOULD fail by default); with
- * -warn-unsupported it is warned, dropped, and the rest runs, so the lowered forms
- * self-check. main() ends with exitProcess(fails), so that run exits 0 when they pass.
+ * multi-statement lambda body, the extension DELEGATED property and the multi-argument
+ * indexed access - all of them genuinely lowered, so the lowered forms self-check with
+ * and without -warn-unsupported. main() ends with exitProcess(fails), so a run exits 0
+ * when they pass.
  * SkipBlock is stressed inside the skipped bodies: nested braces, a string holding a
  * lone } and a string template ${...}, and a char literal. The marker interface and
  * empty object below exercise the OPTIONAL body (a bodiless declaration - no { } at all). **/
@@ -63,10 +61,8 @@ class StoreDelegate(val tag: String) {
 fun storeDelegate(tag: String) = StoreDelegate(tag)
 val Int.viaStore: String by storeDelegate("m")
 
-// A MULTI-ARGUMENT indexed access (operator get(a, b)) - outside the subset in both
-// halves, and the one construct in this file that is. It sits in a top-level property
-// INITIALIZER so that it aborts the default run before main() and is warned-and-dropped
-// under -warn-unsupported.
+// A MULTI-ARGUMENT indexed access (operator get(a, b)) in a top-level property
+// initializer.
 class Grid { operator fun get(r: Int, c: Int) = r * 10 + c }
 val cell = Grid()[1, 2]
 
@@ -119,6 +115,7 @@ fun main() {
     // one delegate object is shared by every read (so `reads` counts across receivers).
     if (7.viaStore != "m:7:viaStore") { fails = fails + 1 }
     if (9.viaStore != "m:9:viaStore") { fails = fails + 1 }
+    if (cell != 12) { fails = fails + 1 }
 
     exitProcess(fails)
 }
