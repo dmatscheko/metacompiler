@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-882** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-883** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -66,13 +66,11 @@ its report; anything structural there is a CORE ticket.
 
 # RB — Ruby
 
-### T-881 ruby: super into builtin methods; `==` result coerced to a boolean · P2 · RB · IN PROGRESS (RB worker, round 30) [V RB worker]
-Oracle LC_ALL=en_US.UTF-8 /usr/bin/ruby 2.6, both halves. REJECTED: `class B; def initialize(a); super(); end; end; B.new(1)`
-raises NoMethodError (oracle runs it — Object#initialize); same for super from `to_s`, `hash`, `frozen?`,
-`respond_to_missing?`; a super into `Comparable#==` from a class including Comparable fails in the interpreter only. WRONG:
-`class E; def ==(o); "yes"; end; end; p(E.new == E.new)` → oracle `"yes"`, ours `true` (also check `!=`, which MRI negates).
-Run-time visibility limits (all engines): private_instance_methods misses run-time changes; `C.private(:x)` with an explicit
-receiver should raise NoMethodError.
+### T-882 ruby: a `self.new` override never runs; inherited / included hooks never fire · P2 · RB · IN PROGRESS (RB worker, round 31) [V RB worker]
+Oracle LC_ALL=en_US.UTF-8 /usr/bin/ruby 2.6, every engine. (1) `class C; def self.new(*a); o = super; puts "made"; o; end; end;
+C.new` → oracle prints "made"; ours ignores the override. (2) `class P; def self.inherited(sub); puts "inh #{sub}"; end; end;
+class Kid < P; end` → "inh Kid"; ours nothing. (3) `module U; def self.included(base); puts "inc #{base}"; end; end; class
+W; include U; end` → "inc W"; ours nothing (also extended / prepended, method_added if cheap). Common idioms.
 
 # JS — JavaScript and TypeScript
 
@@ -907,6 +905,7 @@ T-878 go: FMA where gc does NOT fuse — constant-propagated operands, variables
 T-845 compiler grammars: `fail` prints on stdout, so `-qq` swallows compile errors — DONE a18a3447 for every grammar but ruby/js/typescript/go (fail/buildErr/interp-core fail → eprintln, compile-core break/continue through fail with a re-freeze, 19 -qq SHOULD FAIL rows); those four and regex.js rxFail filed as T-880. DECLINED: batch's 'cannot find the batch label' message channel — no cmd.exe oracle here
 T-877 ruby compiler: super misses and into modules; multi-argument include; run-time private — DONE 679b977c (js_rsuper walks __super and raises the rescuable NoMethodError on a miss; super into an included module's method via hidden $sup keys — also fixed D>M>Base#f ordering and a prepend stack overflow; super inside a module method continues through self's ancestors in the interp; include/prepend/extend with several modules applied last-first; run-time send(:private/:protected/:public) in all engines, gated in the compiler like arity tracking)
 T-879 go: a complex multiply with a negated part fuses the wrong product — DONE a4a6a990 (a product with a run-time negated factor becomes FNMULD, so gc fuses the other product — real and imaginary parts tracked per part through complex/real/imag/unary minus/locals; complex v *= x goes through the same fusion; generated 96-function probe 33–42 wrong → 4–10, none regressed. DECLINED, same class as T-878: a conjugate through an inlined call (z * cmplx.Conj(w)) needs gc's inliner, and gc constant-folding a slice literal read back in the same function needs its value tracking)
+T-881 ruby: super into builtin methods; `==` result coerced to a boolean — DONE 86ea9dcb (super reaches builtin Object/Kernel/Comparable/Exception methods on user instances in all engines, Object#initialize arity per MRI; a user == keeps its value through the operator and send, != negates it; interp anonymous * / ** parameters; Module#private etc. with an explicit receiver raise MRI's error; compiled *_instance_methods follow run-time visibility. DECLINED: a user-defined #frozen? is never called by the interpreter — exotic)
 
 # Settled — do not re-open
 
