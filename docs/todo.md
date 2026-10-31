@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-877** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-878** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -66,13 +66,13 @@ its report; anything structural there is a CORE ticket.
 
 # RB — Ruby
 
-### T-875 ruby: frozen binary strings, super with no superclass method, class_eval block gaps (compiler) · P3 · RB · IN PROGRESS (RB worker, round 28) [V RB worker]
-Oracle LC_ALL=en_US.UTF-8 /usr/bin/ruby 2.6. (1) WRONG: `"\xC3\xA9".b.freeze` returns an unfrozen copy in every engine
-(`frozen?` false, `force_encoding` raises no FrozenError). (2) `super` in a top-level def with no superclass method, inside
-`rescue NoMethodError` → oracle `[6, NoMethodError]`; interp aborts "super called outside of a method", compiler exits 1
-silently. (3) compiler only (interp right): inside a class_eval/module_eval block, `include M` raises "undefined method
-`include'", a bare `private` before a def raises NameError; and `M.module_eval { def m2 }` followed by a later static
-`include M` in a class leaves m2 missing (NoMethodError).
+### T-877 ruby compiler: super misses and into modules; multi-argument include; run-time private · P2 · RB · IN PROGRESS (RB worker, round 29) [V RB worker]
+Oracle LC_ALL=en_US.UTF-8 /usr/bin/ruby 2.6; the interpreter is right on 1–4. (1) REJECTED: `class L; def g(a); super; end; end`
+→ compile error "super outside of a subclass not implemented"; oracle a rescuable NoMethodError. (2) `class Q < P; def h2;
+super; end; end` (P lacks h2) aborts "unknown super method" from js_supercall; oracle NoMethodError. (3) REJECTED: `class K;
+include M; def f; "K>" + super; end; end` (super into an included module's method) → not implemented; oracle "K>M#f".
+(4) REJECTED: static `include M1, M2` is a parse error; oracle works with ancestors [C, M1, M2]. (5) all engines:
+`A3.send(:private, :x)` → "undefined method `private' for A3:Class"; oracle x becomes private.
 
 # JS — JavaScript and TypeScript
 
@@ -918,6 +918,7 @@ T-872 ruby: binary case mapping, re-encode back to UTF-8 in place, public over i
 T-873 kotlin: unqualified `is` matches nested classes; interface companion calls (compiled) — DONE 50489dc1 (a type test's name is resolved lexically to one declared type and matched by its full binary name in is/as/as?/when-is/filterIsInstance/reified is — interp, Go twin, layer 2; interface companion objects emitted like a class's, incl. named companions and const vals)
 T-874 bash: declare -g, top-level local, readonly on read/printf -v/let, remaining arena growth — DONE dc24378b (declare -g reaches the global past locals and prefix bindings — interp onGlobal, compiler rt_glob_swap; top-level local refused with bash's message; readonly enforced by read/printf -v/mapfile/let/(( ))/$(( ))/${v:=w} with bash's statuses — the compiler's run-time-computed arithmetic names stay a recorded 7.9 limit; RSS for the four loop shapes 65–203 MB → 3 MB; also fixed: set -- inside ( ) leaked to the caller in the compiler. DECLINED: declare -g inside a subshell inside a function shows the new value inside the subshell (bash keeps the local visible) — not a regression, needs the subshell to snapshot the local save stack)
 T-876 kotlin: an enum value is not an `Enum<*>` — DONE d03d1858 (a value whose class descriptor carries __isenum is an Enum in is/!is/as?/when/filterIsInstance — interp, Go twin, layer 2; = JDK 24 instanceof via kotlin-stdlib)
+T-875 ruby: frozen binary strings, super with no superclass method, class_eval block gaps (compiler) — DONE edc80b61 (frozen binary Strings incl. clone/dup/+@/-@ and FrozenError on mutators; super with no superclass method is a rescuable NoMethodError — interp everywhere, compiler for top-level defs via js_rnosuper; super searches included modules first in the interp; run-time Module#include (js_rinclude) so module_eval'd methods reach later includers; include and bare visibility words inside class_eval blocks)
 
 # Settled — do not re-open
 
