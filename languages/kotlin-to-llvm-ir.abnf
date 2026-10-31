@@ -3290,7 +3290,8 @@ KwContract  = "contract" KwEnd ;
     // plain operator's method when the value has no plusAssign (emitCompound).
     var opMethodOf = {"+": "plus", "-": "minus", "*": "times", "/": "div", "%": "rem",
                       "+=": "plus", "-=": "minus", "*=": "times", "/=": "div", "%=": "rem",
-                      "==": "equals", "!=": "equals", "==.": "equals", "!=.": "equals"}
+                      "==": "equals", "!=": "equals", "==.": "equals", "!=.": "equals",
+                      "==:": "equals", "!=:": "equals"}
     // A zero-width "is one of these classes" probe, folded with or.
     function emitClassProbe(b, v, cls) {
         var hit = truthy(b, callExt(b, "js_is_type", [v, emitStr(b, cls[0])]))
@@ -3335,7 +3336,7 @@ KwContract  = "contract" KwEnd ;
         var argsV = callExt(objB, "js_arr_new", [])
         callExt(objB, "js_arr_push", [argsV, r])
         var ov = callExt(objB, "js_ktsmcall", [l, emitStr(objB, mth), argsV])
-        if (op == "!=" || op == "!=.") { ov = callExt(objB, "js_not", [ov]) }
+        if (op == "!=" || op == "!=." || op == "!=:") { ov = callExt(objB, "js_not", [ov]) }
         objB.NewBr(mergeB)
         var pr = emitPrimBin(primB, op, l, r)
         pr.b.NewBr(mergeB)
@@ -3483,6 +3484,9 @@ KwContract  = "contract" KwEnd ;
         // still uses its own equals.
         if (op == "==." || op == "==") { return callExt(b, "js_kteq", [l, r, op == "==." ? hTrue : hFalse]) }
         if (op == "!=." || op == "!=") { return callExt(b, "js_ktne", [l, r, op == "!=." ? hTrue : hFalse]) }
+        // "==:" - an operand declared with a non-floating type - is Any.equals.
+        if (op == "==:") { return callExt(b, "js_ktequals", [l, r]) }
+        if (op == "!=:") { return callExt(b, "js_not", [callExt(b, "js_ktequals", [l, r])]) }
         return coreEmitBinK(b, op, l, r)
     }
     // Kotlin folds a unary minus into an integer LITERAL when typing it: `2147483648`

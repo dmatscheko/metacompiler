@@ -5589,7 +5589,18 @@ fun sec122() {
     check("nan122j", xs.max().isNaN() && xs.min().isNaN() && xs.maxBy { it }.isNaN() && xs.minBy { it } == Double.NEGATIVE_INFINITY)
     check("nan122k", "" + listOf(z, nz).max() + listOf(z, nz).min() + listOf(nz, z).max() + listOf(nz, z).min() == "0.0-0.00.0-0.0")
     check("nan122l", "" + maxOf(nz, z) + minOf(z, nz) + maxOf(nan, z) + minOf(z, nan) + Math.max(nz, z) + Math.min(z, nz) == "0.0-0.0NaNNaN0.0-0.0")
+    // `==` with an operand not statically Float/Double is Intrinsics.areEqual, i.e.
+    // equals; Double? == Double? stays IEEE.
+    val an: Any = nan
+    val bn: Any = v[0]
+    val az: Any = z
+    val anz: Any = nz
+    val qn: Double? = nan
+    val qn2: Double? = v[0]
+    check("nan122m", an == bn && !(an != bn) && !(anz == az) && anz != az && an == nan && !(az == nz))
+    check("nan122n", !(qn == qn2) && same122(nan, v[0]) && !same122(nz, z))
 }
+fun <T> same122(p: T, q: T): Boolean = p == q
 
 // ===== SECTION 123: a `for` over a progression ending at the type's edge =====
 // The loop runs from first to the progression's LAST element (kotlin.internal.

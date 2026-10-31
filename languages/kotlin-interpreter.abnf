@@ -3272,6 +3272,9 @@ NotMemberKw = :script(~~
     binOps["!="] = function(l, r) { return !kEqOp(l, r, true) }
     binOps["==."] = function(l, r) { return kEqOp(l, r, false) }
     binOps["!=."] = function(l, r) { return !kEqOp(l, r, false) }
+    // "==:" is the equality ktEqOps gives an operand declared with a non-floating type.
+    binOps["==:"] = function(l, r) { return kEq(l, r, false) }
+    binOps["!=:"] = function(l, r) { return !kEq(l, r, false) }
     // The `==` operator: on two Doubles (or two Floats) IEEE 754, so NaN == NaN is
     // false and -0.0 == 0.0 true - Kotlin's rule for operands statically typed as
     // floating point, which this value model assumes for two float boxes - and

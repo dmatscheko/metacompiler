@@ -267,35 +267,65 @@ function ktMemberIsVal(cls, name) {
 // An equality chain's operators, renamed "==." / "!=." (equality that tells the
 // integer types apart) unless an operand is an integer LITERAL, which keeps "==" /
 // "!=" (by value): a literal whose expected type was not seen here is still an Int.
+// An operator with an operand that is a name DECLARED with a type other than Float
+// or Double is "==:" / "!=:", Any.equals: Kotlin's == is IEEE 754 only when both
+// operands are statically floating point, so through Any NaN equals NaN and -0.0
+// is not 0.0.
 // The operands are read off the source (from..to); a text the scan cannot split is
 // treated as having a literal.
 function ktEqOps(items, from, to) {
     if (items.length < 3) { return items }
-    if (ktEqHasLit(c.srcSlice(from, to))) { return items }
+    var opnds = ktEqOperands(c.srcSlice(from, to))
+    if (opnds == null) { return items }
+    var typed = opnds.length * 2 - 1 == items.length
     var out = []
+    var k = 0
     for (var i = 0; i < items.length; i++) {
         var it = items[i]
-        if (it === "==") { out.push("==.") }
-        else if (it === "!=") { out.push("!=.") }
-        else { out.push(it) }
+        if (it === "==" || it === "!=") {
+            var byEq = typed && (ktEqNonFlo(opnds[k], from) || ktEqNonFlo(opnds[k + 1], from))
+            if (it === "==") { out.push(byEq ? "==:" : "==.") } else { out.push(byEq ? "!=:" : "!=.") }
+        } else { out.push(it) }
+        if (i % 2 == 1) { k++ }
     }
     return out
 }
-function ktEqHasLit(raw) {
+// Whether an operand's text is a name declared with a type other than Float or
+// Double, nullable or not.
+function ktEqNonFlo(t, at) {
+    var s = ""
+    for (var i = 0; i < t.length; i++) {
+        var ch = t.charAt(i)
+        if (ch != " " && ch != "\t" && ch != "\n" && ch != "\r") { s = s + ch }
+    }
+    if (s.length == 0 || (s.charAt(0) >= "0" && s.charAt(0) <= "9")) { return false }
+    for (var j = 0; j < s.length; j++) { if (!ktIdChar(s.charAt(j))) { return false } }
+    var saved = ktAt
+    ktAt = at
+    var ty = ktDeclTypeOf(s)
+    ktAt = saved
+    if (ty == "") { return false }
+    var b = ktBaseName(ty)
+    return b != "Double" && b != "Float"
+}
+// The operand texts of an equality chain, or null when an operand is an integer
+// literal or the text holds a string, char or comment the scan does not split.
+function ktEqOperands(raw) {
+    var out = []
     var depth = 0
     var from = 0
-    var ops = 0
     var i = 0
     while (i < raw.length) {
         var ch = raw.charAt(i)
-        if (ch == "\"" || ch == "'" || (ch == "/" && (raw.charAt(i + 1) == "/" || raw.charAt(i + 1) == "*"))) { return true }
+        if (ch == "\"" || ch == "'" || (ch == "/" && (raw.charAt(i + 1) == "/" || raw.charAt(i + 1) == "*"))) { return null }
         if (ch == "(" || ch == "[" || ch == "{") { depth++ }
         else if (ch == ")" || ch == "]" || ch == "}") { depth-- }
         else if (depth == 0 && (ch == "=" || ch == "!") && raw.charAt(i + 1) == "=") {
             var prev = i > 0 ? raw.charAt(i - 1) : ""
             if (ch == "=" && (prev == "<" || prev == ">" || prev == "!" || prev == "=")) { i++; continue }
-            if (ktIsIntLitText(raw.substring(from, i))) { return true }
-            ops++
+            var o = raw.substring(from, i)
+            if (ktIsIntLitText(o)) { return null }
+            out.push(o)
             i = i + 2
             if (raw.charAt(i) == "=") { i++ }
             from = i
@@ -303,8 +333,11 @@ function ktEqHasLit(raw) {
         }
         i++
     }
-    if (ops == 0) { return true }
-    return ktIsIntLitText(raw.substring(from))
+    if (out.length == 0) { return null }
+    var last = raw.substring(from)
+    if (ktIsIntLitText(last)) { return null }
+    out.push(last)
+    return out
 }
 // Whether an operand's text is an integer literal, signed and parenthesized or not.
 function ktIsIntLitText(t) {
