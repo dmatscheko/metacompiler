@@ -5695,6 +5695,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // a class body); where it can change at run time the same rule is applied per
     // call (js_rvkey) - inside a class body, and on the implicit self anywhere.
     function emitMKey(b, recvV, name, implicit) {
+        // Module#private / #public / #protected / #module_function are private
+        // methods themselves, so an explicit receiver is checked at run time.
+        if (!implicit && (name == "private" || name == "public" || name == "protected" || name == "module_function")) {
+            return callExt(b, "js_rvisdir", [recvV, emitIvarSelf(b), emitStr(b, name)])
+        }
         if (usesDynVis && (implicit || curClsName != "")) { return callExt(b, "js_rvkey", [recvV, emitStr(b, name)]) }
         return emitStr(b, methodKey(name))
     }

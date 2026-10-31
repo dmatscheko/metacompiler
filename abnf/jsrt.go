@@ -9792,6 +9792,18 @@ func rubyExcInspect(name, msg string) string {
 	return "#<" + name + ": " + msg + ">"
 }
 
+// rubyEqOp is the == operator: a user class's own #== answers whatever it
+// returns, unconverted, and every other pair rubyEq's truth value. Twin of
+// binOps["=="] in ruby-interpreter.abnf.
+func (rt *jsrt) rubyEqOp(l, r interface{}) interface{} {
+	if rubyUserObj(l) {
+		if m, ok := rubyFindMethod(l, "=="); ok {
+			return rt.call(m, jsUndef, []interface{}{l, r})
+		}
+	}
+	return rt.rubyEq(l, r)
+}
+
 // rubyEq is Ruby's ==: numeric across the whole tower (2.0 == 2, 1r/2r == 0.5), a
 // user class's own == when it defines one, and the structural comparison of
 // Array/Hash (pyEqual) otherwise. A Symbol only equals another Symbol.
@@ -10805,8 +10817,11 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 				return rt.rubyCaseEqv(target, args[1])
 			}
 		}
-		if len(args) == 2 && (mn == "==" || mn == "!=") {
-			return rt.rubyEq(target, args[1]) == (mn == "==")
+		if len(args) == 2 && mn == "==" {
+			return rt.rubyEqOp(target, args[1])
+		}
+		if len(args) == 2 && mn == "!=" {
+			return !rt.rubyEq(target, args[1])
 		}
 		if len(args) == 2 && rubyIsBinOpName(mn) {
 			// The comparisons are NOT rubyBin's (it has no <=> arm at all): they
@@ -15516,7 +15531,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			}
 			return w(-rubyToF(u(a[0])) - 1)
 		},
-		"js_req": func(a []uint64) uint64 { return boolH(rt.rubyEq(u(a[0]), u(a[1]))) },
+		"js_req": func(a []uint64) uint64 { return w(rt.rubyEqOp(u(a[0]), u(a[1]))) },
 		"js_rne": func(a []uint64) uint64 { return boolH(!rt.rubyEq(u(a[0]), u(a[1]))) },
 		// < > <= >= between two MODULES is the ancestry relation, not a value
 		// comparison: `A < M' after `include M' is true and `A < String' is NIL,

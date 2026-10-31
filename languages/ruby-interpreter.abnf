@@ -8304,6 +8304,39 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     function noSuper(t, name) {
         nameErr("NoMethodError", "super: no superclass method `" + name + "' for " + noMethodDesc(t), name, t)
     }
+    // A super that no user class or module above answers reaches the builtin
+    // Object / Kernel / Comparable method of that name on a user instance.
+    // Object#initialize takes no arguments; #to_s and #inspect are the default
+    // forms rstr / rinspect give a class defining neither. Twins:
+    // rubySuperBuiltin in abnf/jsrtruby.go, rbSuperBuiltin in lib/ruby-rt.metajs.
+    function superBuiltin(self, name, args) {
+        if (!isUserObj(self) || self.__isclass === true) { noSuper(self, name) }
+        if (name == "initialize") {
+            if (args.length > 0) { raiseErr(name, "ArgumentError", "wrong number of arguments (given " + args.length + ", expected 0)") }
+            return null
+        }
+        if (name == "to_s" || name == "inspect") { return "#<" + self.__class.__name + ">" }
+        if (name == "hash") { return strHash("o" + intText(objectId(self))) }
+        if (name == "object_id") { return objectId(self) }
+        if (name == "equal?" || name == "eql?") { return identicalP(self, args[0]) }
+        // Comparable#== is identity, or <=> answering 0; Object#== is identity.
+        if (name == "==") {
+            if (self === args[0]) { return true }
+            if (userIsA(self, hostGlobals["Comparable"]) && typeof lookupMethod(self.__class, "<=>") == "function") {
+                var c = anytype
+                c = mcall(self, "<=>", [args[0]], null)
+                return typeof c == "number" && c == 0
+            }
+            return false
+        }
+        if (name == "!=") { return !rtest(binOps["=="](self, args[0])) }
+        if (name == "frozen?") { return self.__fz === true }
+        if (name == "freeze") { self.__fz = true; return self }
+        if (name == "dup" || name == "clone") { return singCopy(self, name == "clone") }
+        if (name == "respond_to?") { return respondTo(self, args) }
+        if (name == "respond_to_missing?") { return false }
+        noSuper(self, name)
+    }
     // A NameError / NoMethodError carrying MRI's #name and #receiver, in the hidden
     // __nmname / __nmrecv slots. MRI reports both at the calling statement, in the
     // calling method's own frame, which an empty __rframe asks excSite for. Twins:
@@ -12070,7 +12103,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             }
             else if (typeof items[i] == "string") { name = items[i] }
             else if (items[i].body != undefined) { body = items[i].body }
-            else if (items[i].param != undefined) { params.push(items[i]) }
+            // An anonymous `*' or `**' is a parameter with a null name.
+            else if (items[i].param != undefined || items[i].splat === true || items[i].kwrest === true) { params.push(items[i]) }
         }
         return {name: name, params: params, singleton: singleton, owner: null, srecv: srecv,
                 body: body != null ? body : makeBody([])}
@@ -12992,7 +13026,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             // Object#method_missing, which a `super' in a method_missing reaches:
             // NoMethodError for the missing name.
             if (typeof m != "function" && mn == "method_missing" && args.length > 0) { noMethod(self, rstr(args[0])) }
-            if (typeof m != "function") { noSuper(self, mn) }
+            if (typeof m != "function") { return superBuiltin(self, mn, args) }
             return m.apply(undefined, concat2impl([self], args))
         }
     }
@@ -13478,7 +13512,15 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // A call with an EXPLICIT receiver may not reach a private method, and may reach a
     // protected one only from inside the same class. Twin of js_rvisfail in abnf/jsrt.go.
     function visCheck(recv, name) {
-        if (!isUserObj(recv)) { return }
+        if (!isUserObj(recv)) {
+            // Module#private / #public / #protected / #module_function are private
+            // themselves. Twin of js_rvisdir in abnf/jsrtruby.go.
+            if ((name == "private" || name == "public" || name == "protected" || name == "module_function")
+                && isClassObj(recv) && findSelf() !== recv) {
+                nameErr("NoMethodError", "private method `" + name + "' called for " + noMethodDesc(recv), name, recv)
+            }
+            return
+        }
         var v = visOf(recv.__class, name)
         if (v == "public") { return }
         var self = findSelf()
@@ -15152,8 +15194,18 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (isRegex(l) && isRegex(r)) { return l.src === r.src && reOpts(l.rflags, false) == reOpts(r.rflags, false) }
         return false
     }
-    binOps["=="] = function(l, r) { return rubyEq(l, r) }
-    binOps["!="] = function(l, r) { return !rubyEq(l, r) }
+    // A user class's own #== answers whatever it returns, unconverted; only the
+    // comparisons built on it (!=, Array#==, include?) read it as a truth value.
+    // Twins: js_req in abnf/jsrt.go and lib/ruby-rt.metajs.
+    binOps["=="] = function(l, r) {
+        if (isUserObj(l) && typeof lookupMethod(l.__class, "==") == "function") { return mcall(l, "==", [r], null) }
+        return rubyEq(l, r)
+    }
+    // != calls #== even on the receiver itself, where rubyEq answers identity first.
+    binOps["!="] = function(l, r) {
+        if (isUserObj(l) && typeof lookupMethod(l.__class, "==") == "function") { return !rtest(mcall(l, "==", [r], null)) }
+        return !rubyEq(l, r)
+    }
     // === is the case-equality operator: membership for a range, is_a? for a class
     // object, plain == otherwise. It is what `case/when` dispatches on.
     function caseEq(l, r) {

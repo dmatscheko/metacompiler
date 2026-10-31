@@ -479,6 +479,68 @@ def s134
         pw == "protected method `w' called" && a.v + a.x == "vx" && S134V.public_method_defined?(:v) &&
         S134V.protected_method_defined?(:w) && ne == "undefined method `nope' for class `S134V'")
 end
+# ===== SECTION 135: super into a builtin method; the value of a user == =====
+# A super that no user class or module above answers reaches the builtin method:
+# Object#initialize (which takes no arguments, so a zsuper passing one is an
+# ArgumentError), #to_s, #hash, #frozen?, #==, #!=, #dup, Kernel's
+# #respond_to_missing?, Comparable#== and Exception#message. An anonymous `*'
+# parameter takes any arguments. A user #== answers its own value unconverted
+# (`!=' negates it). /usr/bin/ruby 2.6 settles each.
+class S135A; attr_reader :a; def initialize(a); super(); @a = a; end; end
+class S135B; def initialize(a); super; end; end
+class S135C; def initialize(*); super(); end; def to_s; "<" + super + ">"; end; def hash; super; end; def frozen?; super; end; end
+class S135D; def respond_to_missing?(m, p = false); m == :zz || super; end; def method_missing(m, *a); m == :zz ? 1 : super; end; end
+class S135E; def ==(o); o.is_a?(S135E) || super; end; def dup; [super]; end; def freeze; super; end; end
+class S135V; include Comparable; attr_reader :v; def initialize(v); @v = v; end; def <=>(o); v <=> o.v; end; def ==(o); super; end; end
+class S135Y; def ==(o); "yes"; end; end
+class S135N; def ==(o); nil; end; end
+class S135Err < StandardError; def initialize(m = "dflt"); super; end; def message; "m: " + super; end; end
+def s135
+  b = begin; S135B.new(1); "none"; rescue ArgumentError => e; e.message; end
+  c = S135C.new(1, 2)
+  check("su135a", S135A.new(3).a == 3 && b == "wrong number of arguments (given 1, expected 0)" && c.class == S135C)
+  d = S135D.new
+  e = S135E.new
+  dv = e.dup
+  m = begin; raise S135Err; rescue S135Err => x; x.message; end
+  check("su135b", c.to_s.start_with?("<#<S135C") && c.hash == c.hash && c.frozen? == false &&
+        d.respond_to?(:zz) && !d.respond_to?(:yy) && d.zz == 1 && e == e && !(e == 1) && e != 1 &&
+        dv.length == 1 && dv[0].class == S135E && e.freeze.frozen? && m == "m: dflt")
+  check("cm135c", S135V.new(1) == S135V.new(1) && !(S135V.new(1) == S135V.new(2)))
+  y = S135Y.new
+  n = S135N.new
+  check("eq135d", (y == y) == "yes" && (y != y) == false && (n == n).nil? && (n != n) == true &&
+        y.send(:==, 1) == "yes" && [y].include?(1))
+end
+# ===== SECTION 136: run-time visibility in reflection; directives are private =====
+# `C.send(:private, :m)' (and :protected, :public) moves m between the lists
+# private_instance_methods / protected_instance_methods / public_instance_methods
+# answer, an inherited method included. Module#private, #public, #protected and
+# #module_function are private methods: a call with an explicit receiver is a
+# NoMethodError, while a user class may define its own #public. /usr/bin/ruby 2.6
+# settles each.
+class S136P; def inh; 1; end; end
+class S136C < S136P; def a; 1; end; def b; 2; end; protected def c; 3; end; private def d; 4; end; end
+module S136M; def mm; end; end
+class S136R; def public; "pub"; end; end
+def s136nm
+  yield
+  "ran"
+rescue NoMethodError => e
+  e.message.split("\n")[0]
+end
+def s136
+  S136C.send(:protected, :a)
+  S136C.send(:public, :c, :d)
+  S136C.send(:private, :inh)
+  check("vr136a", S136C.protected_instance_methods(false) == [:a] && S136C.public_instance_methods(false).sort == [:b, :c, :d] &&
+        S136C.private_instance_methods(false) == [:inh] && S136C.instance_methods(false).sort == [:a, :b, :c, :d])
+  S136C.send(:public, :a)
+  check("vr136b", S136C.protected_instance_methods(false) == [] && S136C.public_instance_methods(false).sort == [:a, :b, :c, :d])
+  check("vd136c", s136nm { S136C.private(:b) } == "private method `private' called for S136C:Class" &&
+        s136nm { S136M.module_function(:mm) } == "private method `module_function' called for S136M:Module" &&
+        S136C.new.b == 2 && S136R.new.public == "pub")
+end
 
 s122() # SECTION-CALL 122
 s123() # SECTION-CALL 123
@@ -493,5 +555,7 @@ s131() # SECTION-CALL 131
 s132() # SECTION-CALL 132
 s133() # SECTION-CALL 133
 s134() # SECTION-CALL 134
+s135() # SECTION-CALL 135
+s136() # SECTION-CALL 136
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

@@ -229,8 +229,7 @@ func (rt *jsrt) addRubyFmtExterns(m map[string]func(args []uint64) uint64) {
 	// A super above a top-level def: NoMethodError. Twin of noSuper in
 	// ruby-interpreter.abnf.
 	m["js_rnosuper"] = func(a []uint64) uint64 {
-		name := rt.rubyStr(u(a[1]))
-		rt.rubyNameErr("NoMethodError", "super: no superclass method `"+name+"' for "+rt.rubyNoMethodDesc(u(a[0])), name, u(a[0]))
+		rt.rubyNoSuper(u(a[0]), rt.rubyStr(u(a[1])))
 		return 0
 	}
 	// super: (class to start at, self, method key, args) - the method found up the
@@ -250,7 +249,19 @@ func (rt *jsrt) addRubyFmtExterns(m map[string]func(args []uint64) uint64) {
 			}
 			cls = o.props["__super"]
 		}
-		return m["js_rnosuper"]([]uint64{a[1], a[2]})
+		args, _ := u(a[3]).(*jsArray)
+		return w(rt.rubySuperBuiltin(u(a[1]), name, args.elems))
+	}
+	// An explicit-receiver call of a visibility directive: NoMethodError on a
+	// class or module other than self, else the method key. Twins: visCheck in
+	// ruby-interpreter.abnf, js_rvisdir in lib/ruby-rt.metajs.
+	m["js_rvisdir"] = func(a []uint64) uint64 {
+		recv := u(a[0])
+		if o, isObj := recv.(*jsObject); isObj && o.props["__isclass"] == true && !rubyIdenticalP(recv, u(a[1])) {
+			name := rt.rubyStr(u(a[2]))
+			rt.rubyNameErr("NoMethodError", "private method `"+name+"' called for "+rt.rubyNoMethodDesc(recv), name, recv)
+		}
+		return a[2]
 	}
 	// The key a call on the implicit self dispatches by, where visibility can
 	// change at run time: "$q$" + name for a restricted method (emitSelfKey in
@@ -2136,7 +2147,7 @@ func (rt *jsrt) rubyVisIMethods(o *jsObject, want string, inherit bool) *jsArray
 		if ns, isArr := ao.props["__imn"].(*jsArray); isArr {
 			for _, e := range ns.elems {
 				n := e.(string)
-				if _, q := ao.props["$q$"+n]; q {
+				if q, has := ao.props["$q$"+n]; has && !rubyIdenticalP(ao.props[n], q) {
 					note(n, "protected")
 				} else {
 					note(n, "public")
@@ -2195,6 +2206,7 @@ func (rt *jsrt) rubySetVis(c *jsObject, mode string, names []interface{}) interf
 			}
 			rt.rubyNameErr("NameError", "undefined method `"+n+"' for class `"+rt.rubyStr(c)+"'", n, c)
 		}
+		rubyVisRelist(c, n, mode == "private")
 		if mode != "private" {
 			c.del("$pv$" + n)
 		}
@@ -2217,6 +2229,36 @@ func (rt *jsrt) rubySetVis(c *jsObject, mode string, names []interface{}) interf
 		}})
 	}
 	return c
+}
+
+// rubyVisRelist keeps a class's own-name lists in step with a visibility set at
+// run time: a private name is in __ipn, a public or protected one in __imn
+// (ownIPNames / ownIMNames in ruby-to-llvm-ir.abnf). Twin of rbVisRelist in
+// lib/ruby-rt.metajs.
+func rubyVisRelist(c *jsObject, n string, private bool) {
+	from, to := "__imn", "__ipn"
+	if !private {
+		from, to = to, from
+	}
+	if l, ok := c.props[from].(*jsArray); ok {
+		kept := &jsArray{}
+		for _, e := range l.elems {
+			if e != n {
+				kept.elems = append(kept.elems, e)
+			}
+		}
+		c.set(from, kept)
+	}
+	out := &jsArray{}
+	if l, ok := c.props[to].(*jsArray); ok {
+		out.elems = append(out.elems, l.elems...)
+	}
+	for _, e := range out.elems {
+		if e == n {
+			return
+		}
+	}
+	c.set(to, &jsArray{elems: append(out.elems, n)})
 }
 
 // rubyMethodVis is the visibility of instance method n of a class, "" when it
@@ -2816,6 +2858,64 @@ func rubyBitLen(x *big.Int) int {
 		return new(big.Int).Not(x).BitLen()
 	}
 	return x.BitLen()
+}
+
+// rubySuperBuiltin is a super that no compiled class or module above answers:
+// the builtin Object / Kernel / Exception method of that name on a user
+// instance, else NoMethodError. Comparable#== is compiled into the class
+// (comparableMethods), so == here is identity. Twin of superBuiltin in
+// ruby-interpreter.abnf, which states the rules.
+func (rt *jsrt) rubySuperBuiltin(self interface{}, name string, args []interface{}) interface{} {
+	o, isObj := self.(*jsObject)
+	if !isObj || !rubyUserObj(o) || o.props["__isclass"] == true {
+		rt.rubyNoSuper(self, name)
+	}
+	pos, _ := rubyBlockArgs(args)
+	switch name {
+	case "initialize":
+		if len(pos) > 0 {
+			rt.rubyRaiseErr(name, "ArgumentError", fmt.Sprintf("wrong number of arguments (given %d, expected 0)", len(pos)))
+		}
+		return jsNull
+	case "to_s", "inspect":
+		if msg, ok := rt.rubyExcMessage(o); ok && name == "to_s" && rubyExcInst(o) {
+			return msg
+		}
+		cn, _ := o.props["__class"].(*jsObject).props["__name"].(string)
+		return "#<" + cn + ">"
+	case "message":
+		if rubyExcInst(o) {
+			return rt.rubyStr(o)
+		}
+	case "hash":
+		return rubyStrHash("o" + rt.rubyInspect(rt.rubyObjectId(o)))
+	case "object_id":
+		return rt.rubyObjectId(o)
+	case "==", "equal?", "eql?":
+		return rubyIdenticalP(o, argAt(pos, 0))
+	case "!=":
+		return !rt.rubyEq(o, argAt(pos, 0))
+	case "frozen?":
+		fz, _ := o.props["__fz"].(bool)
+		return fz
+	case "freeze":
+		o.set("__fz", true)
+		return o
+	case "dup", "clone":
+		return rubySingCopy(o, name == "clone")
+	case "respond_to?":
+		return rt.rubyRespond(o, pos)
+	case "respond_to_missing?":
+		return false
+	}
+	rt.rubyNoSuper(self, name)
+	return nil
+}
+
+// rubyNoSuper raises the NoMethodError of a super with nothing above it. Twin of
+// noSuper in ruby-interpreter.abnf.
+func (rt *jsrt) rubyNoSuper(self interface{}, name string) {
+	rt.rubyNameErr("NoMethodError", "super: no superclass method `"+name+"' for "+rt.rubyNoMethodDesc(self), name, self)
 }
 
 // rubyObjectId is Object#object_id. Twin of objectId in

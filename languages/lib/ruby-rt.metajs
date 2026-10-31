@@ -4166,7 +4166,7 @@ function rbVisIMethods(o, want, inherit) {
             var m = 0
             while (imn !== undefined && imn !== null && m < imn.length) {
                 names.push(imn[m])
-                vis.push(a["$q$" + imn[m]] !== undefined ? "protected" : "public")
+                vis.push(a["$q$" + imn[m]] !== undefined && a[imn[m]] !== a["$q$" + imn[m]] ? "protected" : "public")
                 m = m + 1
             }
         }
@@ -8174,6 +8174,33 @@ function js_rnosuper(self, name) {
 function js_rsuper(sup, self, name, args) {
     var m = rtFindMethod(sup, name)
     if (typeof m == "function") { return rtkCall(m, self, rtPrepend(self, args)) }
+    return rbSuperBuiltin(self, rbStr(name), args)
+}
+
+// A super that no compiled class or module above answers. Twin of
+// rubySuperBuiltin in abnf/jsrtruby.go, which states the rules.
+function rbSuperBuiltin(self, name, args) {
+    if (!rbUserObj(self) || self["__isclass"] === true) { return js_rnosuper(self, name) }
+    var npos = rbNPos(args)
+    if (name == "initialize") {
+        if (npos > 0) { rbRaiseErr(name, "ArgumentError", "wrong number of arguments (given " + npos + ", expected 0)") }
+        return null
+    }
+    if (name == "to_s" && rbExcInst(self)) { return rbExcMessage(self) }
+    if (name == "to_s" || name == "inspect") { return "#<" + self["__class"]["__name"] + ">" }
+    if (name == "message" && rbExcInst(self)) { return rbStr(self) }
+    if (name == "hash") { return rbStrHash("o" + rbInspect(rbObjectId(self))) }
+    if (name == "object_id") { return rbObjectId(self) }
+    if (name == "==" || name == "equal?" || name == "eql?") { return rbIdenticalP(self, rbArgAt(args, 0)) }
+    if (name == "!=") { return !rbEq(self, rbArgAt(args, 0)) }
+    if (name == "frozen?") { return self["__fz"] === true }
+    if (name == "freeze") {
+        self["__fz"] = true
+        return self
+    }
+    if (name == "dup" || name == "clone") { return rbSingCopy(self, name == "clone") }
+    if (name == "respond_to?") { return js_rrespond(self, args) }
+    if (name == "respond_to_missing?") { return false }
     return js_rnosuper(self, name)
 }
 
@@ -8216,7 +8243,10 @@ function rbSetVis(c, mode, args) {
         var f = rtFindMethod(c, key)
         if (typeof f != "function") {
             if (rbMethodVis(c, n, true) == "") { rbNameErr("NameError", "undefined method `" + n + "' for class `" + rbStr(c) + "'", n, c) }
-        } else if (mode == "public") {
+            continue
+        }
+        rbVisRelist(c, n, mode == "private")
+        if (mode == "public") {
             delKey(c, "$pv$" + n)
             c[n] = f
             if (c["$q$" + n] !== undefined) { c["$q$" + n] = f }
@@ -8230,6 +8260,44 @@ function rbSetVis(c, mode, args) {
 }
 function rbVisStub(mode, n) {
     return function(recv) { js_rvisfail(recv, mode, n) }
+}
+// A class's own-name lists kept in step with a visibility set at run time. Twin
+// of rubyVisRelist in abnf/jsrtruby.go, which states the layout.
+function rbVisRelist(c, n, priv) {
+    var from = priv ? "__imn" : "__ipn"
+    var to = priv ? "__ipn" : "__imn"
+    var fl = anytype
+    fl = c[from]
+    if (fl !== undefined && fl !== null) {
+        var kept = []
+        var i = 0
+        while (i < fl.length) {
+            if (fl[i] != n) { kept.push(fl[i]) }
+            i = i + 1
+        }
+        c[from] = kept
+    }
+    var tl = anytype
+    tl = c[to]
+    var out = []
+    var j = 0
+    while (tl !== undefined && tl !== null && j < tl.length) {
+        if (tl[j] == n) { return undefined }
+        out.push(tl[j])
+        j = j + 1
+    }
+    out.push(n)
+    c[to] = out
+    return undefined
+}
+// An explicit-receiver call of a visibility directive. Twin of js_rvisdir in
+// abnf/jsrtruby.go.
+function js_rvisdir(recv, self, name) {
+    if (rbIsObj(recv) && recv["__isclass"] === true && !rbIdenticalP(recv, self)) {
+        var n = rbStr(name)
+        rbNameErr("NoMethodError", "private method `" + n + "' called for " + rbNoMethodDesc(recv), n, recv)
+    }
+    return name
 }
 
 // The visibility of instance method n of a class, "" when it has none. Twin of
@@ -8268,7 +8336,8 @@ function rbMethod(target, name, args) {
         // The comparisons are NOT rbBin's (it has no <=> arm at all): they are the
         // js_rlt/js_rcmp family, exactly as the emitter spells them.
         // Twin of the == / != arm of rubyMethod's send in abnf/jsrt.go.
-        if (args.length == 2 && (mn == "==" || mn == "!=")) { return rbEq(target, args[1]) == (mn == "==") }
+        if (args.length == 2 && mn == "==") { return js_req(target, args[1]) }
+        if (args.length == 2 && mn == "!=") { return !rbEq(target, args[1]) }
         // === by name is `when''s case equality, unless a user class has its own.
         if (args.length == 2 && mn == "===" && !(rbUserObj(target) && rbFindMethod(target, "===") !== undefined)) {
             return js_rxwhen(target, args[1])
@@ -9039,7 +9108,15 @@ function js_rbnot(v) {
     return rtABigNarrow(rtABigSub(rtABigNeg(b), rtABigFromNum(1)))
 }
 
-function js_req(l, r) { return rbEq(l, r) }
+// The == operator: a user class's own #== answers whatever it returns,
+// unconverted. Twin of rubyEqOp in abnf/jsrt.go.
+function js_req(l, r) {
+    if (rbUserObj(l)) {
+        var m = rbFindMethod(l, "==")
+        if (m !== undefined) { return m.apply(undefined, [l, r]) }
+    }
+    return rbEq(l, r)
+}
 function js_rne(l, r) { return !rbEq(l, r) }
 // < > <= >= between two MODULES is the ancestry relation, not a value comparison:
 // `A < M' after `include M' is true and `A < String' is NIL, where rbCmp's contract
