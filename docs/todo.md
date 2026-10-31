@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-884** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-885** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -66,11 +66,11 @@ its report; anything structural there is a CORE ticket.
 
 # RB — Ruby
 
-### T-882 ruby: a `self.new` override never runs; inherited / included hooks never fire · P2 · RB · IN PROGRESS (RB worker, round 31) [V RB worker]
-Oracle LC_ALL=en_US.UTF-8 /usr/bin/ruby 2.6, every engine. (1) `class C; def self.new(*a); o = super; puts "made"; o; end; end;
-C.new` → oracle prints "made"; ours ignores the override. (2) `class P; def self.inherited(sub); puts "inh #{sub}"; end; end;
-class Kid < P; end` → "inh Kid"; ours nothing. (3) `module U; def self.included(base); puts "inc #{base}"; end; end; class
-W; include U; end` → "inc W"; ours nothing (also extended / prepended, method_added if cheap). Common idioms.
+### T-884 ruby: `private_class_method :new` (Singleton idiom); `Class.new(P) { … }` · P3 · RB · IN PROGRESS (RB worker, round 32) [V RB worker]
+Oracle LC_ALL=en_US.UTF-8 /usr/bin/ruby 2.6, every engine. (1) REJECTED: `class Lazy; private_class_method :new; def self.instance;
+@i ||= new; end; end; Lazy.instance` → works in ruby; `Lazy.new` from outside → "private method `new' called for Lazy:Class";
+ours raises NoMethodError at the directive. (2) `Class.new(P) { def f; 1; end }` (anonymous class, runs P.inherited) is
+unsupported — implement if cheap in both halves, else record the decline.
 
 # JS — JavaScript and TypeScript
 
@@ -909,6 +909,7 @@ T-877 ruby compiler: super misses and into modules; multi-argument include; run-
 T-879 go: a complex multiply with a negated part fuses the wrong product — DONE a4a6a990 (a product with a run-time negated factor becomes FNMULD, so gc fuses the other product — real and imaginary parts tracked per part through complex/real/imag/unary minus/locals; complex v *= x goes through the same fusion; generated 96-function probe 33–42 wrong → 4–10, none regressed. DECLINED, same class as T-878: a conjugate through an inlined call (z * cmplx.Conj(w)) needs gc's inliner, and gc constant-folding a slice literal read back in the same function needs its value tracking)
 T-881 ruby: super into builtin methods; `==` result coerced to a boolean — DONE 86ea9dcb (super reaches builtin Object/Kernel/Comparable/Exception methods on user instances in all engines, Object#initialize arity per MRI; a user == keeps its value through the operator and send, != negates it; interp anonymous * / ** parameters; Module#private etc. with an explicit receiver raise MRI's error; compiled *_instance_methods follow run-time visibility. DECLINED: a user-defined #frozen? is never called by the interpreter — exotic)
 T-880 ruby/js/typescript/go compilers: errors still on stdout under -qq — DONE 2455a7e7 (js/ts/ruby/go fail and buildErr to stderr, js/ts hand-written errors through fail with the right prefix, regex.js default rxFail to stderr with the eight layer-2 .ll regenerated; 5 -qq SHOULD FAIL rows)
+T-882 ruby: a `self.new` override never runs; inherited / included hooks never fire — DONE 93919050 (C.new dispatches like a class method when the program defines a new; class-method super walks up to Class's own new/hooks; inherited/included/extended/prepended/method_added fire in every engine incl. the ClassMethods idiom; also fixed: 'yield if cond' parse, interp super with keyword/splat args, bare name in class methods. DECLINED: "str".extend(M) — builtin values have no singleton table; niche)
 
 # Settled — do not re-open
 
