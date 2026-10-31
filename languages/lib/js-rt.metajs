@@ -8835,6 +8835,9 @@ function jsonHRaise(t) { jbRaise(t) }
 
 import "./regex.js"
 
+// rxFail is regex.js's error knob, set by assignment: the Go twin's wording.
+rxFail = function (msg) { fail("regexp: " + msg) }
+
 // ----- flags ------------------------------------------------------------------
 //
 // Three of JavaScript's letters are match modes and map straight onto the engine's

@@ -1775,6 +1775,18 @@
             "program": "${workspaceFolder}","args": ["languages/bash-to-llvm-ir.abnf", "tests/bash-test-bytes.sh", "-q"]
         },
         {
+            "name": "Bash -code [[ =~ ]] over a nested loop answers without backtracking (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/bash-interpreter.abnf", "-code", "s=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaab; [[ $s =~ ^(a+)+$ ]]; echo \"[[ =~ ]] status $?\"", "-q"]
+        },
+        {
+            "name": "Bash -code [[ =~ ]] over a nested loop answers without backtracking (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/bash-to-llvm-ir.abnf", "-code", "s=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaab; [[ $s =~ ^(a+)+$ ]]; echo \"[[ =~ ]] status $?\"", "-q"]
+        },
+        {
             "name": "Batch features (interpreter)",
             "type": "go",
             "request": "launch",
@@ -3068,6 +3080,19 @@
             "program": "${workspaceFolder}","args": ["languages/js-to-llvm-ir.abnf", "tests/js-abort-test.js", "-q", "-exe", "tests/js-abort.out"]
         },
         {
+            "name": "JavaScript abort probe, regexp step limit (interpreter, SHOULD FAIL)",
+            "type": "go",
+            "request": "launch",
+            "expectError": "regexp: step limit exceeded",
+            "program": "${workspaceFolder}","args": ["languages/js-interpreter.abnf", "tests/js-abort-test-regexp.js", "-q"]
+        },
+        {
+            "name": "JavaScript abort probe, regexp step limit, native binary SHOULD ABORT, ALL HALVES (interpreter vs llvm.Run vs native)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/js-to-llvm-ir.abnf", "tests/js-abort-test-regexp.js", "-q", "-exe", "tests/js-abort-regexp.out"]
+        },
+        {
             "name": "TypeScript abort probe, uncaught Error (interpreter, SHOULD FAIL)",
             "type": "go",
             "request": "launch",
@@ -3079,6 +3104,19 @@
             "type": "go",
             "request": "launch",
             "program": "${workspaceFolder}","args": ["languages/typescript-to-llvm-ir.abnf", "tests/typescript-abort-test.ts", "-q", "-exe", "tests/typescript-abort.out"]
+        },
+        {
+            "name": "TypeScript abort probe, regexp step limit (interpreter, SHOULD FAIL)",
+            "type": "go",
+            "request": "launch",
+            "expectError": "regexp: step limit exceeded",
+            "program": "${workspaceFolder}","args": ["languages/typescript-interpreter.abnf", "tests/typescript-abort-test-regexp.ts", "-q"]
+        },
+        {
+            "name": "TypeScript abort probe, regexp step limit, native binary SHOULD ABORT, ALL HALVES (interpreter vs llvm.Run vs native)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/typescript-to-llvm-ir.abnf", "tests/typescript-abort-test-regexp.ts", "-q", "-exe", "tests/typescript-abort-regexp.out"]
         },
         {
             "name": "JavaScript abort probe, unhandled rejection (interpreter, SHOULD FAIL)",

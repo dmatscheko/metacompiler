@@ -464,6 +464,15 @@ s11() {
   # the captures inside a repeated group are cleared at the start of every iteration,
   # so a group that took part in an EARLIER iteration but not the last one is empty
   re='^((a)|b*)*$'; [[ ab =~ $re ]]; check dbr72 "[${BASH_REMATCH[1]}][${BASH_REMATCH[2]}]" "[b][]"
+  # a POSIX ERE matcher does not backtrack exponentially: nested and overlapping
+  # loops over 58 a's answer at once, the failures included
+  local as=""
+  local k
+  for ((k = 0; k < 58; k++)); do as="${as}a"; done
+  re='^(a+)+$'; [[ ${as}b =~ $re ]]; check dbr73 "$?" 1
+  re='^(a|aa)*c'; [[ ${as}b =~ $re ]]; check dbr74 "$?" 1
+  re='(a?){20}a{20}x'; [[ ${as}b =~ $re ]]; check dbr75 "$?" 1
+  re='^(a+)+b'; [[ ${as}b =~ $re ]]; check dbr76 "$?-${#BASH_REMATCH[1]}" 0-58
 }
 
 # ===== SECTION 12: the test builtin =====

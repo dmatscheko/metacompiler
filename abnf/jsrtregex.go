@@ -70,6 +70,9 @@ const (
 	rxOpMinLen  = 33
 	rxOpReqCU   = 34
 	rxOpCsReset = 35
+	// Under e, rxOpClass and rxOpSplit become these (rxMemoOps).
+	rxOpClassM = 36
+	rxOpSplitM = 37
 )
 
 // The verbs' kinds, and st.verb for a recursion that loops (RX_VCOMMIT ..
@@ -4349,6 +4352,10 @@ type rxRe struct {
 	flags               string
 	// steps is the current search's step counter (budget).
 	steps int
+	// ere is the e flag, and vis the visits a search past its linear budget
+	// remembers (rxMemoOps).
+	ere bool
+	vis []bool
 	// pcre is the C flag (rxPcre): see rxRunUndo. acc is an rxOpAccept, which
 	// an (*ACCEPT) in an atomic group's body continues at; vmarks the (*MARK)
 	// names by id.
@@ -6410,6 +6417,9 @@ func rxCompile(pattern, flags string) *rxRe {
 	if len(pg.calls) > 0 {
 		pg.emitSubs(st.gnodes)
 	}
+	if ere {
+		rxMemoOps(pg)
+	}
 	names, nameGroups := st.names, st.nameGroups
 	if re2 {
 		names, nameGroups = tr.names, tr.nameGroups
@@ -6429,7 +6439,7 @@ func rxCompile(pattern, flags string) *rxRe {
 		supp: uni || java && (re2 || st.supp || rxSuppJ(ast) || rxHasSurr(pat)) || pcre && ucase, bfail: bfail, gflags: gflags,
 		pcre: pcre, acc: pg.acc, vmarks: tp.marks,
 		cmin: pg.cmin, cmax: pg.cmax, cgreedy: pg.cgreedy, cemp: pg.cemp, lbmin: pg.lbmin, lbmax: pg.lbmax,
-		src: pattern, flags: flags, jbegin: jbegin, jmin: jmin,
+		src: pattern, flags: flags, jbegin: jbegin, jmin: jmin, ere: ere,
 	}
 }
 
@@ -7137,6 +7147,23 @@ func (re *rxRe) run(text []rune, pcIn, spIn int, caps, marks []int, st *rxRunSt,
 					break fwd
 				}
 				pc++
+			case rxOpClassM:
+				// rxOpClass and rxOpSplit once the linear budget is spent: a
+				// repeated visit fails (rxMemoOps).
+				if st.steps >= 0 && re.memoSeen(pc, sp, n) {
+					break fwd
+				}
+				if sp >= n || !re.clss[pc].match(text[sp], re.icase) {
+					break fwd
+				}
+				pc++
+				sp++
+			case rxOpSplitM:
+				if st.steps >= 0 && rxMarksBelow(marks, sp) && re.memoSeen(pc, sp, n) {
+					break fwd
+				}
+				st.bt = append(st.bt, rxBtAlt, re.bs[pc], sp)
+				pc = re.as[pc]
 			default:
 				break fwd
 			}
@@ -7343,6 +7370,53 @@ func (re *rxRe) search(text []rune, start int) (*rxMatch, bool) {
 // lib/regex.js).
 func (re *rxRe) budget(text []rune) {
 	re.steps = -(len(text) + 1) * len(re.ops) * rxStepK
+	if re.ere {
+		re.vis = nil
+	}
+}
+
+// rxMemoOps turns the ERE program's rxOpClass and rxOpSplit into rxOpClassM and
+// rxOpSplitM, whose repeated visit at one position fails once the search has
+// spent its linear budget. Twin of rxMemoOps in lib/regex.js, which states why
+// that is sound.
+func rxMemoOps(pg *rxProg) {
+	for i, op := range pg.ops {
+		if op == rxOpClass {
+			pg.ops[i] = rxOpClassM
+		} else if op == rxOpSplit {
+			pg.ops[i] = rxOpSplitM
+		}
+	}
+}
+
+// rxMarksBelow: did every loop iteration on the current path begin before sp?
+// Twin of rxMarksBelow in lib/regex.js.
+func rxMarksBelow(marks []int, sp int) bool {
+	for _, m := range marks {
+		if m >= sp {
+			return false
+		}
+	}
+	return true
+}
+
+// memoSeen: was pc already visited at sp in this search? It records the visit
+// otherwise; no memo past 8M states. Twin of rxMemoSeen in lib/regex.js.
+func (re *rxRe) memoSeen(pc, sp, n int) bool {
+	w := n + 1
+	size := len(re.ops) * w
+	if size > 8388608 {
+		return false
+	}
+	if re.vis == nil {
+		re.vis = make([]bool, size)
+	}
+	k := pc*w + sp
+	if re.vis[k] {
+		return true
+	}
+	re.vis[k] = true
+	return false
 }
 
 // searchAdv is search with CPython's must_advance: when adv, a match that is

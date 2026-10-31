@@ -7512,6 +7512,9 @@ int rt_fskind(char *p)
  *     greedy.
  *   * a * or + loop is fenced by SAVE/PROG on a scratch slot, so an iteration
  *     that consumed nothing cannot repeat.
+ *   * a search past its linear budget visits each consuming instruction and
+ *     SPLIT at most once per position (re_seen), so a pattern that would
+ *     backtrack exponentially stays within the step cap.
  *
  * Sizes (the grammar's RE_* constants), written as literals because the C
  * subset has no #define:
@@ -7554,6 +7557,11 @@ int re_bx[1048576];           /* NEW GLOBAL                                 */
 int re_by[1048576];           /* NEW GLOBAL                                 */
 int re_fold;                  /* NEW GLOBAL: the "i" flag                   */
 int re_bad;                   /* NEW GLOBAL: compile error code, 0 = fine   */
+/* The visit memo of a search that has spent its linear budget (re_seen): one
+ * bit per (instruction, subject position), 8M of them. */
+unsigned char re_vis[1048576]; /* NEW GLOBAL                                */
+long re_lin;                  /* NEW GLOBAL: the linear budget, in steps     */
+int re_vclr;                  /* NEW GLOBAL: re_vis cleared for this search  */
 
 /* The mutually recursive halves, declared before any body needs them. */
 int re_alt(void);
@@ -8338,6 +8346,53 @@ int re_alt(void)
     return 0;
 }
 
+/* 1 when instruction spc (a consuming one, or a SPLIT that re_clean allows)
+ * was already visited at subject position ssp in this search, recording the
+ * visit otherwise; such a repeated visit fails. Answers 0 (no memo) past
+ * re_vis's 8M bits. Twin of rxMemoOps in lib/regex.js, which states why that
+ * is sound. */
+int re_seen(int spc, int ssp)
+{
+    int w;
+    int k;
+    int nb;
+    int i;
+    int bit;
+    w = re_slen + 1;
+    if ((long)re_pc * (long)w > 8388608) {
+        return 0;
+    }
+    if (re_vclr == 0) {
+        nb = (re_pc * w) / 8 + 1;
+        for (i = 0; i < nb; i++) {
+            re_vis[i] = 0;
+        }
+        re_vclr = 1;
+    }
+    k = spc * w + ssp;
+    bit = 1 << (k % 8);
+    if (((int)re_vis[k / 8] & bit) != 0) {
+        return 1;
+    }
+    re_vis[k / 8] = re_vis[k / 8] | (unsigned char)bit;
+    return 0;
+}
+
+/* 1 when every loop iteration on the current path began before csp: no
+ * empty-iteration guard slot holds csp. */
+int re_clean(int csp)
+{
+    int i;
+    int last;
+    last = (re_nmark < 64) ? re_nmark : 64;
+    for (i = 0; i < last; i++) {
+        if (re_slot[128 + i] >= csp) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
 /* the backtracking VM. 1 match, 0 fail, -2 step cap (or a backtrack stack
  * deeper than RE_BT). A SPLIT pushes the alternative not taken, a SAVE or
  * CLEAR the old value of each slot it writes; a failure pops back to the
@@ -8382,10 +8437,19 @@ int re_run(int rpc, int rsp)
         pc1 = pc + 1;
         sp1 = sp + 1;
         fail = 0;
+        /* Once the linear budget is spent, a consuming instruction (CHAR, ANY,
+         * CLASS) or a SPLIT is visited at most once per position (re_seen). */
+        if (op < 5 && st >= re_lin) {
+            if (op < 4 || re_clean(sp) != 0) {
+                fail = re_seen(pc, sp);
+            }
+        }
 
         /* Every byte read is fenced by sp < slen, so no path loads the NUL
          * terminator or anything after it. */
-        if (op == 1) {                        /* OP_CHAR */
+        if (fail != 0) {
+            /* a visit re_seen already tried */
+        } else if (op == 1) {                 /* OP_CHAR */
             if (atEnd) {
                 fail = 1;
             } else {
@@ -8577,8 +8641,10 @@ int rt_regex_search(char *pat, char *subj, char *flags, int *caps, int ncaps)
     slen = rt_strlen(subj);
     re_subj = subj;
     re_slen = slen;
-    re_cap = 400000 + (long)(slen + 1) * (long)re_pc * 4;
+    re_lin = (long)(slen + 1) * (long)re_pc * 4;
+    re_cap = 400000 + re_lin;
     re_steps = 0;
+    re_vclr = 0;
     pairs = re_ng + 1;
 
     /* ---- search: leftmost wins, so the start position is tried in order. */

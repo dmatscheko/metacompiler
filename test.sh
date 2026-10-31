@@ -935,13 +935,34 @@ awk '
         expexit = $0; sub(/.*"expectExit":[[:space:]]*/, "", expexit); sub(/[^0-9].*/, "", expexit)
     }
     /"args":/ {
-        a = $0; sub(/.*"args":[[:space:]]*\[/, "", a); sub(/\].*/, "", a)
-        gsub(/"[[:space:]]*,[[:space:]]*"/, "\t", a)   # arg boundaries -> tab
-        sub(/^[[:space:]]*"/, "", a); sub(/"[[:space:]]*$/, "", a)
-        if (a ~ /-----/ || a ~ /-freeze/) next
-        print name "\t" experr "\t" expexit "\t" a
+        # The array is read as JSON strings up to the "]" outside them, with
+        # \" \\ \/ unescaped. An escaped tab or newline could not survive the
+        # tab-separated record, so any other escape is refused.
+        a = $0; sub(/.*"args":[[:space:]]*\[/, "", a)
+        rec = ""; arg = ""; ins = 0; nargs = 0
+        for (i = 1; i <= length(a); i++) {
+            c = substr(a, i, 1)
+            if (!ins) {
+                if (c == "]") break
+                if (c == "\"") { ins = 1; arg = "" }
+                continue
+            }
+            if (c == "\\") {
+                i++; c = substr(a, i, 1)
+                if (c != "\"" && c != "\\" && c != "/") {
+                    printf "test.sh: launch.json entry \"%s\": the escape \\%s in its args is not supported\n", name, c > "/dev/stderr"
+                    exit 1
+                }
+            } else if (c == "\"") {
+                ins = 0; rec = rec (nargs++ ? "\t" : "") arg
+                continue
+            }
+            arg = arg c
+        }
+        if (rec ~ /-----/ || rec ~ /-freeze/) next
+        print name "\t" experr "\t" expexit "\t" rec
     }
-' .vscode/launch.json > "$ENTRIES"
+' .vscode/launch.json > "$ENTRIES" || exit 2
 
 if [ "$LIST" -eq 1 ]; then
     cut -f1,4- "$ENTRIES" | nl -ba | sed 's/\t/  |  /g'

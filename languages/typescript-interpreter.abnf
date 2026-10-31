@@ -2278,7 +2278,7 @@ NotFuncHead = :script(~~
     // typescript-to-llvm-ir.abnf). rxFail is a KNOB and is overridden by ASSIGNMENT, never
     // by declaration - see the shared-helper entry in docs/abnf-dialect-gotchas.md.
     include("lib/regex.js")
-    rxFail = function (msg) { fail(msg) }
+    rxFail = function (msg) { fail("regexp: " + msg) }
 
     // JSON.stringify / JSON.parse, shared with layer 2 (abnf/jsrtjson.go is the Go twin);
     // the jsonH* hooks it calls are defined beside jsJsonObj below.

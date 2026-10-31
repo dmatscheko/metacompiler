@@ -18,7 +18,8 @@
 // BACKREFERENCES, all of which the target languages have and none of which a
 // Thompson/RE2 construction can do. The cost - exponential blowup on a pathological
 // pattern - is bounded by a step cap (RX_STEPS), which reports a clean error instead
-// of hanging.
+// of hanging. A POSIX ERE (e) has no backreferences, so there a search that has spent
+// its linear budget remembers its visits instead (rxMemoOps) and stays polynomial.
 //
 // The whole file is written in the RESTRICTED JS subset that both engines accept:
 // no for...in, no array.splice, array.length is not assignable, no split/join/
@@ -193,6 +194,10 @@ var RX_SPSET = 32  // back to the position marks[a] holds
 var RX_MINLEN = 33 // fail unless a units are left (PCRE2's minimum length)
 var RX_REQCU = 34  // fail when the class clss[pc] matches nothing from b units on (rxReqCU)
 var RX_CSRESET = 35 // no calls in progress (rxCsn)
+// Under e, RX_CLASS and RX_SPLIT become these, whose visits a search past its
+// linear budget remembers (rxMemoOps):
+var RX_CLASSM = 36
+var RX_SPLITM = 37
 var RX_VCOMMIT = 1
 var RX_VPRUNE = 2
 var RX_VSKIP = 3
@@ -5893,7 +5898,8 @@ function rxCompile(pattern, flags) {
                 icase: icase, dotall: dotall, multi: multi, jsrep: jsrep, java: java,
                 py: false, uni: false, supp: false, bfail: bfail, gflags: "",
                 cmin: [], cmax: [], cgreedy: [], cemp: [], lbmin: [], lbmax: [], vmarks: [],
-                src: pattern, flags: flags, hitEnd: false, reqEnd: false, jbegin: false, jmin: 0, jcut: 0, steps: 0}
+                src: pattern, flags: flags, hitEnd: false, reqEnd: false, jbegin: false, jmin: 0, jcut: 0, steps: 0,
+                ere: false, vis: []}
     }
     var pg = rxNewProg()
     pg.jsrep = jsrep
@@ -5928,6 +5934,7 @@ function rxCompile(pattern, flags) {
     rxAdd(pg, RX_SAVE, 1, 0, pg.dummy)
     rxAdd(pg, RX_MATCH, 0, 0, pg.dummy)
     if (pg.calls.length > 0) { rxEmitSubs(pg, ast, st.gnodes) }
+    if (ere) { rxMemoOps(pg) }
     var jbegin = java && rxBeginJ(ast)
     // Go's and PCRE2's searches have no Start node to model (R, C).
     var jmin = java && !re2 && !pcre && !jbegin ? rxMinLen(ast) : 0
@@ -5939,7 +5946,7 @@ function rxCompile(pattern, flags) {
         py: py, uni: uni, supp: supp, bfail: bfail, gflags: java ? rxFlagsGet(st) : st.gflags, pcre: pcre,
         acc: pg.acc, cmin: pg.cmin, cmax: pg.cmax, cgreedy: pg.cgreedy, cemp: pg.cemp, lbmin: pg.lbmin, lbmax: pg.lbmax,
         src: pattern, flags: flags, hitEnd: false, reqEnd: false, jbegin: jbegin, jmin: jmin, steps: 0,
-        jcut: 0
+        jcut: 0, ere: ere, vis: []
     }
 }
 
@@ -6609,6 +6616,18 @@ function rxRun(re, text, pcIn, spIn, caps, marks, st, base, keep) {
                 top = rxVerb(as[pc], bs[pc], sp, top)
                 btn = bk.length
                 pc = pc + 1
+            } else if (op == RX_CLASSM) {
+                // RX_CLASS and RX_SPLIT once the linear budget is spent: a
+                // repeated visit fails (rxMemoOps).
+                if (st.steps >= 0 && rxMemoSeen(re, pc, sp, n)) { break }
+                if (sp >= n || !rxClsMatch(clss[pc], text.charCodeAt(sp), re.icase)) { break }
+                pc = pc + 1
+                sp = sp + 1
+            } else if (op == RX_SPLITM) {
+                if (st.steps >= 0 && rxMarksBelow(marks, sp) && rxMemoSeen(re, pc, sp, n)) { break }
+                top = rxBtPush(top, RX_BT_ALT, bs[pc], sp)
+                btn = bk.length
+                pc = as[pc]
             } else {
                 break
             }
@@ -6905,6 +6924,58 @@ function rxAttempt(re, text, at, mustEnd, gpos, glast, adv) {
 // against the fixed RX_STEPS.
 function rxBudget(re, text) {
     re.steps = 0 - (text.length + 1) * re.ops.length * RX_STEPK
+    if (re.ere) { re.vis = [] }
+}
+
+// rxMemoOps turns the ERE program's RX_CLASS and RX_SPLIT into RX_CLASSM and
+// RX_SPLITM. An ERE has no backreference, so no capture steers the match, and
+// what follows a visit to one of them at sp depends on (pc, sp) alone - for a
+// SPLIT, provided no loop iteration began at sp (rxMarksBelow), as then an
+// RX_PROG ahead can fail; a CLASS consumes, after which every RX_PROG passes.
+// Every epsilon cycle passes an RX_PROG that fails it, so a second visit is
+// never inside the first one's own run: the first failed, and the second would
+// too. A search that has spent its linear budget therefore remembers its visits
+// (rxMemoSeen) and fails a repeated one, which bounds it by instructions x
+// positions, as a POSIX matcher is - ^(a+)+$ on "aa...ab" no longer revisits
+// exponentially many paths. Twin of re_seen in lib/bash-rt.c.
+function rxMemoOps(pg) {
+    var ops = pg.ops
+    var i = 0
+    while (i < ops.length) {
+        if (ops[i] == RX_CLASS) { ops[i] = RX_CLASSM }
+        else if (ops[i] == RX_SPLIT) { ops[i] = RX_SPLITM }
+        i = i + 1
+    }
+}
+
+// rxMarksBelow: did every loop iteration on the current path begin before sp?
+function rxMarksBelow(marks, sp) {
+    var i = 0
+    while (i < marks.length) {
+        if (marks[i] >= sp) { return false }
+        i = i + 1
+    }
+    return true
+}
+
+// rxMemoSeen: was pc already visited at sp in this search? It records the
+// visit otherwise. No memo (false) past 8M states.
+function rxMemoSeen(re, pc, sp, n) {
+    var w = n + 1
+    var size = re.ops.length * w
+    if (size > 8388608) { return false }
+    var vis = re.vis
+    if (vis.length == 0) {
+        var i = 0
+        while (i < size) {
+            vis.push(0)
+            i = i + 1
+        }
+    }
+    var k = pc * w + sp
+    if (vis[k] == 1) { return true }
+    vis[k] = 1
+    return false
 }
 
 function rxSearch(re, text, start) {
