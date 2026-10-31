@@ -261,6 +261,9 @@ path, never `git add -A`. Untracked files you did not create are the user's, not
   2.6; `node --check` is CommonJS - use `new vm.Script(src)` for the Script goal.
 - An assertion that passes before the fix has no discriminating power: check it fails
   on the old code.
+- A wait loop `until ! pgrep -f 'test.sh --full'` matches its own command line and
+  never ends, and it outlives the worker that started it. Wait on the job's PID or its
+  output file instead, and check for orphaned loops before the final summary.
 - Chasing an oracle's implementation-defined output grows into a copy of its
   optimiser: the Go FMA work added ~450 lines of gc-style constant and SSA tracking to
   match last-digit rounding the spec leaves open. Decline at the first sign of it.
@@ -278,6 +281,11 @@ find prompt yourself; the user reviews the work and decides what runs next.
    recorded from the committed tree.
 3. `tests/bench.sh --draws 5` shows no unexplained regression.
 4. No worker worktrees or branches of yours are left behind.
+5. No background work of this session is left running. Before the final summary, list
+   every background task, subagent and wait loop (ListAgents, and
+   `ps -axo pid,etime,command | grep "eval 'until"` for shell loops your workers
+   left), decide for each whether its result is still needed, and stop the ones that
+   are not (TaskStop, or `kill` on the loop's PID). Name what you stopped in the summary.
 
 If the same ticket fails in two consecutive rounds with no new insight, stop
 assigning it: mark it BLOCKED with the evidence and move on.
