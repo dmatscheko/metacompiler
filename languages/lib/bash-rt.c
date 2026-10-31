@@ -8363,7 +8363,8 @@ int re_seen(int spc, int ssp)
         return 0;
     }
     if (re_vclr == 0) {
-        nb = (re_pc * w) / 8 + 1;
+        /* the bytes holding the re_pc * w bits in use: at most 1048576 */
+        nb = (re_pc * w + 7) / 8;
         for (i = 0; i < nb; i++) {
             re_vis[i] = 0;
         }

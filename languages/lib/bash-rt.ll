@@ -61069,8 +61069,8 @@ dead795:
 	%27 = load i32, i32* @re_pc
 	%28 = load i32, i32* %4
 	%29 = mul i32 %27, %28
-	%30 = sdiv i32 %29, 8
-	%31 = add i32 %30, 1
+	%30 = add i32 %29, 7
+	%31 = sdiv i32 %30, 8
 	store i32 %31, i32* %6
 	store i32 0, i32* %7
 	br label %51
