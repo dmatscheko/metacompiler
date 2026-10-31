@@ -69,7 +69,7 @@ done
 FULL_TIMEOUT=900
 
 # A FLOOR on the total ratchet assertion count (the files legitimately grow).
-FULL_ASSERTIONS=15406
+FULL_ASSERTIONS=15407
 
 # A CEILING on section gaps, summed per half over all languages. A gapped half
 # still reports the assertions it ran, so the total barely moves when a section
