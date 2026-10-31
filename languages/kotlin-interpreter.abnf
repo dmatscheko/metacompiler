@@ -3865,7 +3865,8 @@ NotMemberKw = :script(~~
         return makeIsCheck(operand, m)
     }
     // x as T: a ClassCastException when x is not a T, judged for the builtin value
-    // types and for a class or interface the program declares; any other T (a type
+    // types, the collection interfaces (a checkcast to java.util.List, ...: `is`'s
+    // own test) and for a class or interface the program declares; any other T (a type
     // parameter, a library type) is unchecked, as an erased cast is. null passes a
     // nullable T and is a NullPointerException for a non-null one ktNullCastType
     // names, which is the check kotlinc emits. Twin of makeCast in
@@ -3899,7 +3900,12 @@ NotMemberKw = :script(~~
                      "$Short": "java.lang.Short", "$Byte": "java.lang.Byte", "$Double": "java.lang.Double",
                      "$Float": "java.lang.Float", "$Char": "java.lang.Character",
                      "$Boolean": "java.lang.Boolean", "$Number": "java.lang.Number",
-                     "$Comparable": "java.lang.Comparable"}
+                     "$Comparable": "java.lang.Comparable",
+                     "$List": "java.util.List", "$MutableList": "java.util.List",
+                     "$Set": "java.util.Set", "$MutableSet": "java.util.Set",
+                     "$Map": "java.util.Map", "$MutableMap": "java.util.Map",
+                     "$Collection": "java.util.Collection", "$MutableCollection": "java.util.Collection",
+                     "$Iterable": "java.lang.Iterable", "$MutableIterable": "java.lang.Iterable"}
     // T without its nullability mark and its type arguments.
     function kCastBase(t) {
         var b = t

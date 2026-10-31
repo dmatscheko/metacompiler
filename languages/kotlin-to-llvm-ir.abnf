@@ -4278,15 +4278,21 @@ KwContract  = "contract" KwEnd ;
         return makeIsCheck(operand, m)
     }
     // x as T: js_ktcast throws ClassCastException when x is not a T, judged for the
-    // builtin value types and for a class or interface the program declares (known
-    // at emission, after the walk); any other T is unchecked, as an erased cast is.
+    // builtin value types, the collection interfaces and for a class or interface
+    // the program declares (known at emission, after the walk); any other T is
+    // unchecked, as an erased cast is.
     // A null is checked here: the NullPointerException for a non-null T that
     // ktNullCastType names. Twin of makeCast in kotlin-interpreter.abnf.
     var ktCastLang = {"$String": "java.lang.String", "$Int": "java.lang.Integer", "$Long": "java.lang.Long",
                       "$Short": "java.lang.Short", "$Byte": "java.lang.Byte", "$Double": "java.lang.Double",
                       "$Float": "java.lang.Float", "$Char": "java.lang.Character",
                       "$Boolean": "java.lang.Boolean", "$Number": "java.lang.Number",
-                      "$Comparable": "java.lang.Comparable"}
+                      "$Comparable": "java.lang.Comparable",
+                      "$List": "java.util.List", "$MutableList": "java.util.List",
+                      "$Set": "java.util.Set", "$MutableSet": "java.util.Set",
+                      "$Map": "java.util.Map", "$MutableMap": "java.util.Map",
+                      "$Collection": "java.util.Collection", "$MutableCollection": "java.util.Collection",
+                      "$Iterable": "java.lang.Iterable", "$MutableIterable": "java.lang.Iterable"}
     function makeCast(operand, tname) {
         var base = tname
         var lt = base.indexOf("<")

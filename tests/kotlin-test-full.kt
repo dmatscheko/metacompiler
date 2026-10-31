@@ -6339,6 +6339,28 @@ fun sec141() {
     check("cme141b", l.joinToString(" ") == "cme cme ok cme cme cme ok ok")
 }
 
+// ===== SECTION 142: `as` a collection interface is a checkcast =====
+// `x as List<*>` / `Set<*>` / `Map<*, *>` / `Collection<*>` / `Iterable<*>` is a
+// checkcast to the java.util (java.lang) interface: the same test as `is`, and a
+// ClassCastException naming both classes otherwise. java 24's casts of the same
+// objects (Arrays$ArrayList, LinkedHashSet, Collections$SingletonMap, String).
+fun cce142(f: () -> Any): String {
+    try { return "ok:" + f() } catch (e: ClassCastException) { return "cce:" + e.message!!.substringBefore(" (") }
+}
+fun sec142() {
+    val lst: Any = listOf(1, 2)
+    val str: Any = "s"
+    val st: Any = setOf(1, 2)
+    val mp: Any = mapOf(1 to 2)
+    check("cce142a", cce142 { lst as Map<*, *> } == "cce:class java.util.Arrays\$ArrayList cannot be cast to class java.util.Map" &&
+                     cce142 { str as List<*> } == "cce:class java.lang.String cannot be cast to class java.util.List" &&
+                     cce142 { lst as Set<*> } == "cce:class java.util.Arrays\$ArrayList cannot be cast to class java.util.Set")
+    check("cce142b", cce142 { mp as Iterable<*> }.startsWith("cce:") && cce142 { st as List<*> }.startsWith("cce:") &&
+                     cce142 { mp as Collection<*> }.startsWith("cce:") && cce142 { str as MutableList<*> }.startsWith("cce:"))
+    check("cce142c", cce142 { lst as Collection<*> } == "ok:[1, 2]" && cce142 { st as Iterable<*> } == "ok:[1, 2]" &&
+                     cce142 { mp as Map<*, *> } == "ok:{1=2}" && cce142 { lst as MutableList<*> } == "ok:[1, 2]")
+}
+
 fun main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -6477,6 +6499,7 @@ fun main() {
     sec139() // SECTION-CALL 139
     sec140() // SECTION-CALL 140
     sec141() // SECTION-CALL 141
+    sec142() // SECTION-CALL 142
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }
