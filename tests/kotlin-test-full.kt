@@ -6279,6 +6279,21 @@ fun sec139() {
     check("ifcomp139b", Nm139.of() == "named" && Nm139.Factory.of() == "named")
 }
 
+// ===== SECTION 140: an enum entry is an Enum<*> =====
+// Every enum class implicitly extends kotlin.Enum (java.lang.Enum on the JVM), an
+// entry with its own body included; nothing else is one. JDK 24 instanceof on the
+// equivalent java enums answers the same.
+enum class Col140 { RED, GREEN }
+enum class Op140 { PLUS { override fun ap(a: Int) = a + 1 }; abstract fun ap(a: Int): Int }
+class Pl140(val x: Int)
+fun sec140() {
+    val vs: List<Any> = listOf(Col140.RED, Op140.PLUS, Pl140(1), "s", 1)
+    check("isenum140a", vs.map { it is Enum<*> }.joinToString() == "true, true, false, false, false")
+    check("isenum140b", vs.filterIsInstance<Enum<*>>().map { it.name + it.ordinal }.joinToString() == "RED0, PLUS0")
+    check("isenum140c", (vs[0] as? Enum<*>)?.name == "RED" && (vs[2] as? Enum<*>) == null)
+    check("isenum140d", when (vs[1]) { is Enum<*> -> "enum"; else -> "other" } == "enum" && vs[1] is Comparable<*>)
+}
+
 fun main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -6415,6 +6430,7 @@ fun main() {
     sec137() // SECTION-CALL 137
     sec138() // SECTION-CALL 138
     sec139() // SECTION-CALL 139
+    sec140() // SECTION-CALL 140
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }

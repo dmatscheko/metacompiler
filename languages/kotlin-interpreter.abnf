@@ -12307,6 +12307,10 @@ NotMemberKw = :script(~~
         if (v === null || v === undefined) { return opt }
         if (t == "Any" || t == "Object") { return true }
         if (t == "Comparable") { return kIsComparable(v) }
+        // Every enum class extends kotlin.Enum; an entry's class carries __isenum.
+        // Twin of ktIsEnumEntry in abnf/jsrtkotlin.go and ktIsType in kotlin-rt.metajs.
+        if (t == "Enum" && typeof v == "object" && v.__class != undefined && v.__class != null &&
+            v.__class.__isenum === true) { return true }
         if (kIsChar(v)) { return t == "Char" }
         // A sized integer carries its real type, so `5L is Long` holds and
         // `5L is Int` does not - where the shared rtIsType answers "integral

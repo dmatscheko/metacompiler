@@ -1550,6 +1550,9 @@ func init() {
 				if ktTypeBase(rt.toString(u(a[1]))) == "Comparable" {
 					return boolH(ktIsCmp(v))
 				}
+				if ktTypeBase(rt.toString(u(a[1]))) == "Enum" && ktIsEnumEntry(v) {
+					return boolH(true)
+				}
 				// A PROGRESSION is an IntRange / CharRange / IntProgression and
 				// NOT a List - the shared probe has no arm for it.
 				if rg, isRg := ktRangeOf(v); isRg {
@@ -9458,6 +9461,18 @@ func ktTypeBase(t string) string {
 // enum, and a class naming Comparable among its supertypes (the emitter's __cmp
 // mark), directly or through a parent. Twin of kIsComparable in
 // kotlin-interpreter.abnf and ktIsCmp in languages/lib/kotlin-rt.metajs.
+// ktIsEnumEntry is `is Enum`: every enum class extends kotlin.Enum, and every
+// entry's descriptor (its own, for an entry with a body) carries __isenum. Twin of
+// kIsType in kotlin-interpreter.abnf and ktIsType in languages/lib/kotlin-rt.metajs.
+func ktIsEnumEntry(v interface{}) bool {
+	if o, ok := v.(*jsObject); ok {
+		if cls, ok := o.props["__class"].(*jsObject); ok {
+			return cls.props["__isenum"] == true
+		}
+	}
+	return false
+}
+
 func ktIsCmp(v interface{}) bool {
 	switch o := v.(type) {
 	case string, bool, jsChar:

@@ -6564,6 +6564,8 @@ function ktIsType(v, tname) {
     if (typeof v != "number") {
         var bt = k4bStripQ(k4bStripAngle(tname))
         if (bt == "Comparable") { return ktIsCmp(v) }
+        // Every enum class extends kotlin.Enum; an entry's descriptor carries __isenum.
+        if (bt == "Enum" && ktIsObj(v) && ktIsObj(v["__class"]) && v["__class"]["__isenum"] === true) { return true }
         // A PROGRESSION is an IntRange / CharRange / IntProgression and NOT a
         // List - the shared js_is_type has no arm for it.
         if (ktIsRange(v)) { return k4RangeIsType(v, tname) }
