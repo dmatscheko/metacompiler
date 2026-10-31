@@ -8169,6 +8169,14 @@ function js_rnosuper(self, name) {
     return null
 }
 
+// super, or its NoMethodError when nothing above defines the method. Twin of
+// js_rsuper in abnf/jsrtruby.go.
+function js_rsuper(sup, self, name, args) {
+    var m = rtFindMethod(sup, name)
+    if (typeof m == "function") { return rtkCall(m, self, rtPrepend(self, args)) }
+    return js_rnosuper(self, name)
+}
+
 // The private methods every object has: the "private" row of ruby-respond.js and
 // the top-level defs, recorded as "$p$" slots on the Object class object. Twin of
 // rubyRespondsPrivate in abnf/jsrtruby.go.
@@ -8183,11 +8191,45 @@ function rbRespondsPriv(n) {
 function rbRestricted(cls, n) {
     var c = cls
     while (c !== undefined && c !== null && rbIsObj(c)) {
-        if (c["$q$" + n] !== undefined) { return true }
+        if (c["$q$" + n] !== undefined) { return c[n] !== c["$q$" + n] }
         if (c[n] !== undefined) { return false }
         c = c["__super"]
     }
     return false
+}
+
+// The key a call on the implicit self dispatches by. Twin of js_rvkey in
+// abnf/jsrtruby.go.
+function js_rvkey(self, name) {
+    if (rbIsObj(self) && rbRestricted(self["__class"], name)) { return "$q$" + name }
+    return name
+}
+
+// Module#private / #protected / #public with method names. Twin of rubySetVis
+// in abnf/jsrtruby.go, which states the layout.
+function rbSetVis(c, mode, args) {
+    var i = 0
+    while (i < rbNPos(args)) {
+        var n = rbStr(rbArgAt(args, i))
+        i = i + 1
+        var key = rbRestricted(c, n) ? "$q$" + n : n
+        var f = rtFindMethod(c, key)
+        if (typeof f != "function") {
+            if (rbMethodVis(c, n, true) == "") { rbNameErr("NameError", "undefined method `" + n + "' for class `" + rbStr(c) + "'", n, c) }
+        } else if (mode == "public") {
+            delKey(c, "$pv$" + n)
+            c[n] = f
+            if (c["$q$" + n] !== undefined) { c["$q$" + n] = f }
+        } else {
+            c["$q$" + n] = f
+            if (mode == "private") { c["$pv$" + n] = true } else { delKey(c, "$pv$" + n) }
+            c[n] = rbVisStub(mode, n)
+        }
+    }
+    return c
+}
+function rbVisStub(mode, n) {
+    return function(recv) { js_rvisfail(recv, mode, n) }
 }
 
 // The visibility of instance method n of a class, "" when it has none. Twin of
@@ -8196,7 +8238,7 @@ function rbMethodVis(cls, n, inherit) {
     var c = anytype
     c = cls
     while (c !== undefined && c !== null && rbIsObj(c) && c["__rbuiltin"] === undefined) {
-        if (c["$q$" + n] !== undefined) {
+        if (c["$q$" + n] !== undefined && c[n] !== c["$q$" + n]) {
             if (c["$pv$" + n] !== undefined) { return "private" }
             return "protected"
         }
@@ -8644,12 +8686,12 @@ function rbMethod(target, name, args) {
         // user `method' is plausible. All three engines do the same thing, so this
         // is a divergence from MRI only.
         if (target["__isclass"] === true || target["__class"] !== undefined) {
+            // The last module first, so the first is the nearer ancestor.
             if (name == "extend") {
-                var xn = rbNPos(args)
-                var xi = 0
-                while (xi < xn) {
+                var xi = rbNPos(args) - 1
+                while (xi >= 0) {
                     rbSingExtend(target, rbArgAt(args, xi))
-                    xi = xi + 1
+                    xi = xi - 1
                 }
                 return target
             }
@@ -8766,6 +8808,7 @@ function rbMethod(target, name, args) {
             if (name == "private_instance_methods" || name == "protected_instance_methods") {
                 return rbVisIMethods(target, name.substring(0, name.indexOf("_")), !(rbNPos(args) > 0 && !rbTruthy(rbArgAt(args, 0))))
             }
+            if (name == "private" || name == "protected" || name == "public") { return rbSetVis(target, name, args) }
             if (name == "method_defined?" || name == "public_method_defined?" || name == "private_method_defined?" || name == "protected_method_defined?") {
                 var mvk = rbMethodVis(target, rbStr(rbArgAt(args, 0)), rbNPos(args) < 2 || rbTruthy(rbArgAt(args, 1)))
                 if (name == "method_defined?") { return mvk == "public" || mvk == "protected" }

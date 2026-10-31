@@ -581,16 +581,7 @@ func keysBindings(b map[string]interface{}) {
 		if !ok {
 			return true
 		}
-		key := rt.toString(argAt(args, 1))
-		if _, had := o.props[key]; had {
-			delete(o.props, key)
-			for i, k := range o.keys {
-				if k == key {
-					o.keys = append(o.keys[:i], o.keys[i+1:]...)
-					break
-				}
-			}
-		}
+		o.del(rt.toString(argAt(args, 1)))
 		return true
 	})
 }

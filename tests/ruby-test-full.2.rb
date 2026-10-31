@@ -411,6 +411,74 @@ def s133
         S133A.include?(S133M) && S133B.new.m2 == :m2 && S133C.new.hi == "hi" && S133C.new.lo == "lo" &&
         S133C.ancestors.take(3) == [S133C, S133M, S133M2])
 end
+# ===== SECTION 134: super through mixins; multi-argument mixins; run-time visibility =====
+# A super reaches the nearest ancestor above the running method: from a class's
+# method into a module it includes (with or without a superclass), from one
+# included module into the next or into the superclass, and from a prepending
+# class's own method past the prepended module. Nothing above is a rescuable
+# NoMethodError. `include M1, M2' (and prepend / extend, static or with a
+# receiver) make M1 the nearer ancestor. `C.send(:private, :m)' (and :protected,
+# :public) changes m's visibility at run time; an implicit-self call still
+# reaches it, a missing name is a NameError. /usr/bin/ruby 2.6 settles each.
+module S134N; def f; "N"; end; def g(x); "Ng#{x}"; end; end
+module S134M; include S134N; def f; "M>" + super; end; end
+module S134O; def f; "O>" + super; end; end
+module S134P; def f; "P>" + super; end; end
+class S134Base; def f; "B"; end; end
+class S134A < S134Base
+  include S134M
+  include S134O
+  def f; "A>" + super; end
+end
+class S134K; include S134N, S134O; def f; "K>" + super; end; def g(x); "Kg>" + super(x + 1); end; end
+class S134S < S134A; def f; "S>" + super; end; end
+class S134Q < S134Base; prepend S134P; include S134O; def f; "Q>" + super; end; end
+class S134R < S134Base; include S134M; end
+class S134L; def g(a); super; end; end
+class S134T < S134Base; def h(a, b = 2); super; end; end
+class S134U; include S134O; end
+module S134X; def w; "x"; end; end
+module S134Y; def w; "y"; end; end
+class S134E; extend S134X, S134Y; end
+class S134F; prepend S134X, S134Y; def w; "f"; end; end
+class S134G; end
+S134G.extend(S134X, S134Y)
+class S134V
+  def x; "x"; end
+  def y; "y" + x; end
+  def z(o); o.w; end
+  def w; "w"; end
+  private
+  def v; "v"; end
+end
+def s134nm
+  yield
+rescue NoMethodError => e
+  e.message[0, 31]
+end
+def s134
+  check("su134a", S134A.new.f == "A>O>M>N" && S134K.new.f == "K>N" && S134K.new.g(1) == "Kg>Ng2" &&
+        S134S.new.f == "S>A>O>M>N" && S134Q.new.f == "P>Q>O>B" && S134R.new.f == "M>N")
+  check("su134b", s134nm { S134L.new.g(1) } == "super: no superclass method `g'" &&
+        s134nm { S134T.new.h(1) } == "super: no superclass method `h'" &&
+        s134nm { S134U.new.f } == "super: no superclass method `f'")
+  o = Object.new
+  o.extend(S134X, S134Y)
+  check("mx134c", S134K.ancestors.take(3) == [S134K, S134N, S134O] && S134E.w == "x" &&
+        S134F.ancestors.take(3) == [S134X, S134Y, S134F] && S134F.new.w == "x" && S134G.w == "x" && o.w == "x")
+  a = S134V.new
+  r = S134V.send(:private, :x)
+  ay = a.y
+  px = s134nm { a.x }
+  S134V.send(:protected, :w)
+  pw = begin; a.w; rescue NoMethodError => e; e.message[0, 27]; end
+  zw = a.z(S134V.new)
+  S134V.send(:public, :v, :x)
+  ne = begin; S134V.send(:private, :nope); rescue NameError => e; e.message; end
+  check("vs134d", r == S134V && ay == "yx" && px == "private method `x' called for #" && zw == "w" &&
+        pw == "protected method `w' called" && a.v + a.x == "vx" && S134V.public_method_defined?(:v) &&
+        S134V.protected_method_defined?(:w) && ne == "undefined method `nope' for class `S134V'")
+end
 
 s122() # SECTION-CALL 122
 s123() # SECTION-CALL 123
@@ -424,5 +492,6 @@ s130() # SECTION-CALL 130
 s131() # SECTION-CALL 131
 s132() # SECTION-CALL 132
 s133() # SECTION-CALL 133
+s134() # SECTION-CALL 134
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

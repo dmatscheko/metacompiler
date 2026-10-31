@@ -233,6 +233,36 @@ func (rt *jsrt) addRubyFmtExterns(m map[string]func(args []uint64) uint64) {
 		rt.rubyNameErr("NoMethodError", "super: no superclass method `"+name+"' for "+rt.rubyNoMethodDesc(u(a[0])), name, u(a[0]))
 		return 0
 	}
+	// super: (class to start at, self, method key, args) - the method found up the
+	// __super chain from there, called on self, or the NoMethodError of a super
+	// with nothing above it. Twins: makeSuper in ruby-interpreter.abnf, js_rsuper
+	// in lib/ruby-rt.metajs.
+	m["js_rsuper"] = func(a []uint64) uint64 {
+		name := rt.toString(u(a[2]))
+		for cls := u(a[0]); ; {
+			o, isObj := cls.(*jsObject)
+			if !isObj {
+				break
+			}
+			if f, has := o.props[name]; has && isCallable(f) {
+				args, _ := u(a[3]).(*jsArray)
+				return w(rt.call(f, jsUndef, append([]interface{}{u(a[1])}, args.elems...)))
+			}
+			cls = o.props["__super"]
+		}
+		return m["js_rnosuper"]([]uint64{a[1], a[2]})
+	}
+	// The key a call on the implicit self dispatches by, where visibility can
+	// change at run time: "$q$" + name for a restricted method (emitSelfKey in
+	// ruby-to-llvm-ir.abnf). Twin of js_rvkey in lib/ruby-rt.metajs.
+	m["js_rvkey"] = func(a []uint64) uint64 {
+		if o, isObj := u(a[0]).(*jsObject); isObj {
+			if name := rt.toString(u(a[1])); rubyRestricted(o.props["__class"], name) {
+				return rt.wrapStr("$q$" + name)
+			}
+		}
+		return a[1]
+	}
 	m["js_rinclude"] = func(a []uint64) uint64 {
 		if c, isObj := u(a[0]).(*jsObject); isObj {
 			rubyInclude(c, u(a[1]))
@@ -2120,15 +2150,16 @@ func (rt *jsrt) rubyVisIMethods(o *jsObject, want string, inherit bool) *jsArray
 // rubyRestricted: is n a private or protected method of a class chain (an
 // instance's __class)? The emitter keeps such a method under "$q$" + n (methodKey
 // in ruby-to-llvm-ir.abnf), and a nearer class holding only the plain name
-// overrides it as a public one.
+// overrides it as a public one. A level whose plain name holds the "$q$" method
+// itself was made public at run time (rubySetVis).
 func rubyRestricted(cls interface{}, n string) bool {
 	for cls != nil {
 		clsObj, ok := cls.(*jsObject)
 		if !ok {
 			break
 		}
-		if _, has := clsObj.props["$q$"+n]; has {
-			return true
+		if q, has := clsObj.props["$q$"+n]; has {
+			return !rubyIdenticalP(clsObj.props[n], q)
 		}
 		if _, has := clsObj.props[n]; has {
 			return false
@@ -2136,6 +2167,56 @@ func rubyRestricted(cls interface{}, n string) bool {
 		cls = clsObj.props["__super"]
 	}
 	return false
+}
+
+// rubySetVis is Module#private / #protected / #public with method names (reached
+// through send): the layout emitMethods gives a restricted method, made at run
+// time - the method under "$q$" + n, "$pv$" + n marking a private one, and the
+// plain name bound to a stub that raises. Public binds the plain name to the
+// method itself. Answers the class, as MRI 2.6 does. Twins: setVisOn in
+// ruby-interpreter.abnf, rbSetVis in lib/ruby-rt.metajs.
+func (rt *jsrt) rubySetVis(c *jsObject, mode string, names []interface{}) interface{} {
+	for _, nv := range names {
+		n := rt.rubyStr(nv)
+		key := n
+		if rubyRestricted(c, n) {
+			key = "$q$" + n
+		}
+		var f interface{}
+		for cls := c; cls != nil && f == nil; {
+			if v, has := cls.props[key]; has && isCallable(v) {
+				f = v
+			}
+			cls, _ = cls.props["__super"].(*jsObject)
+		}
+		if f == nil {
+			if rt.rubyMethodVis(c, n, true) != "" {
+				continue
+			}
+			rt.rubyNameErr("NameError", "undefined method `"+n+"' for class `"+rt.rubyStr(c)+"'", n, c)
+		}
+		if mode != "private" {
+			c.del("$pv$" + n)
+		}
+		if mode == "public" {
+			c.set(n, f)
+			if _, has := c.props["$q$"+n]; has {
+				c.set("$q$"+n, f)
+			}
+			continue
+		}
+		c.set("$q$"+n, f)
+		if mode == "private" {
+			c.set("$pv$"+n, true)
+		}
+		vis, name := mode, n
+		c.set(n, &hostFunc{name: n, fn: func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			recv := argAt(args, 0)
+			rt.rubyNameErr("NoMethodError", vis+" method `"+name+"' called for "+rt.rubyNoMethodDesc(recv), name, recv)
+			return nil
+		}})
+	}
+	return c
 }
 
 // rubyMethodVis is the visibility of instance method n of a class, "" when it
@@ -2152,7 +2233,7 @@ func (rt *jsrt) rubyMethodVis(o *jsObject, n string, inherit bool) string {
 		if _, b := c.props["__rbuiltin"]; b {
 			break
 		}
-		if _, has := c.props["$q$"+n]; has {
+		if q, has := c.props["$q$"+n]; has && !rubyIdenticalP(c.props[n], q) {
 			if _, p := c.props["$pv$"+n]; p {
 				return "private"
 			}

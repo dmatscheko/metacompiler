@@ -9525,8 +9525,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             // because a user `method' is plausible. All three engines do the same
             // thing, so this is not a halves divergence - but it is a divergence
             // from MRI.
+            // extend(M1, M2) extends with the LAST first, so M1 is the nearer ancestor.
             if (name == "extend") {
-                for (var xi = 0; xi < args.length; xi++) { singExtend(target, args[xi]) }
+                for (var xi = args.length - 1; xi >= 0; xi--) { singExtend(target, args[xi]) }
                 return target
             }
             if (name == "define_singleton_method") {
@@ -9669,6 +9670,18 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (name == "private_instance_methods" || name == "protected_instance_methods") {
                 return visInstanceMethods(target, name.substring(0, name.indexOf("_")), !(args.length > 0 && !rtest(args[0])))
             }
+            // Module#private / #protected / #public with method names, reached
+            // through send; a name the class does not have is a NameError, and a
+            // builtin method is left as it is. Answers the class, as MRI 2.6 does.
+            // Twins: rubySetVis in abnf/jsrtruby.go, rbSetVis in lib/ruby-rt.metajs.
+            if (name == "private" || name == "protected" || name == "public") {
+                for (var vi = 0; vi < args.length; vi++) {
+                    var vn = rstr(args[vi])
+                    if (typeof lookupMethod(target, vn) == "function") { setVisOn(target, name, [args[vi]]) }
+                    else if (methodVisIn(target, vn, true) == "") { nameErr("NameError", "undefined method `" + vn + "' for class `" + target.__name + "'", vn, target) }
+                }
+                return target
+            }
             if (name == "method_defined?" || name == "public_method_defined?" || name == "private_method_defined?" || name == "protected_method_defined?") {
                 var mvk = methodVisIn(target, rstr(args[0]), !(args.length > 1 && !rtest(args[1])))
                 if (name == "method_defined?") { return mvk == "public" || mvk == "protected" }
@@ -9693,7 +9706,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 if (typeof cgm == "function") { return applyMethod(cgm, target, args, blk) }
             }
             if (name == "extend") {
-                for (var cxi = 0; cxi < args.length; cxi++) { singExtend(target, args[cxi]) }
+                for (var cxi = args.length - 1; cxi >= 0; cxi--) { singExtend(target, args[cxi]) }
                 return target
             }
             if (name == "include") {
@@ -12958,7 +12971,15 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             // a top-level def belongs to Object, which has nothing above it here.
             var m = anytype
             m = undefined
-            if (dc != null && dc != undefined) {
+            // A module's method supers into whatever FOLLOWS the module among the
+            // ancestors of self's class: a later included module, or the class's
+            // superclass chain. The module is matched by name, as prependOwners is.
+            var after = dc != null && dc != undefined && dc.__ismodule === true && isUserObj(self) ? ancestorsOf(self.__class) : []
+            var ai = 0
+            while (ai < after.length && after[ai].__name !== dc.__name) { ai = ai + 1 }
+            if (ai < after.length) {
+                for (var aj = ai + 1; aj < after.length && typeof m != "function"; aj++) { m = lookupOwn(after[aj], mn) }
+            } else if (dc != null && dc != undefined) {
                 m = hasOwn(prependOwners, "$" + dc.__name) ? lookupOwn(prependOwners["$" + dc.__name], mn) : undefined
                 // The modules the owner includes sit right above it, the last one nearest.
                 var mx = dc.__mixins == undefined ? 0 : dc.__mixins.length
@@ -14861,8 +14882,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     var prependOwners = {}
     hostGlobals["prepend"] = function() {
         var c = directiveClass()
+        // prepend(M1, M2) prepends the LAST first, so M1 ends up in front.
         var mods = []
-        for (var i = 0; i < arguments.length; i++) { mods.push(arguments[i]) }
+        for (var i = arguments.length - 1; i >= 0; i--) { mods.push(arguments[i]) }
         for (var j = 0; j < mods.length; j++) {
             var pl = c.__prepends
             pl.push(mods[j])
@@ -14887,7 +14909,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     }
     hostGlobals["extend"] = function() {
         var c = directiveClass()
-        for (var i = 0; i < arguments.length; i++) { extendOnto(c, arguments[i]) }
+        for (var i = arguments.length - 1; i >= 0; i--) { extendOnto(c, arguments[i]) }
         return null
     }
     hostGlobals["alias_method"] = function(nu, old) { doAlias(directiveClass(), rstr(nu), rstr(old)); return null }
@@ -14895,15 +14917,17 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // private / protected / public: with no argument they switch the mode for the
     // defs that follow, with arguments they mark exactly those methods.
     function visDirective(mode, args) {
-        var c = directiveClass()
         if (args.length == 0) { curVis = mode; return null }
+        setVisOn(directiveClass(), mode, args)
+        return null
+    }
+    function setVisOn(c, mode, args) {
         for (var i = 0; i < args.length; i++) {
             scopePut(c, "$v$" + rstr(args[i]), mode)
             setterNote(rstr(args[i]))
             if (c.__vdn == undefined) { c.__vdn = [] }
             c.__vdn.push(rstr(args[i]))
         }
-        return null
     }
     // The frozen engine has no Array.prototype, so `arguments` is copied by hand.
     function argsArray(a) {

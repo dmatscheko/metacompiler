@@ -152,6 +152,20 @@ func (o *jsObject) set(key string, v interface{}) {
 	o.props[key] = v
 }
 
+// del drops an own property and its key-order entry, if there is one.
+func (o *jsObject) del(key string) {
+	if _, had := o.props[key]; !had {
+		return
+	}
+	delete(o.props, key)
+	for i, k := range o.keys {
+		if k == key {
+			o.keys = append(o.keys[:i], o.keys[i+1:]...)
+			return
+		}
+	}
+}
+
 // jsArray is a MetaJS array.
 type jsArray struct {
 	id    jsHandleID
@@ -11463,9 +11477,10 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 			// the same thing - a known divergence from MRI.
 			switch name {
 			case "extend":
+				// The last module first, so the first is the nearer ancestor.
 				pos, _ := rubyBlockArgs(args)
-				for _, m := range pos {
-					rubySingExtend(o, m)
+				for i := len(pos) - 1; i >= 0; i-- {
+					rubySingExtend(o, pos[i])
 				}
 				return o
 			case "define_singleton_method":
@@ -11608,6 +11623,9 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 			case "private_instance_methods", "protected_instance_methods":
 				pos, _ := rubyBlockArgs(args)
 				return rt.rubyVisIMethods(o, name[:strings.IndexByte(name, '_')], len(pos) == 0 || rubyTruthy(pos[0]))
+			case "private", "protected", "public":
+				pos, _ := rubyBlockArgs(args)
+				return rt.rubySetVis(o, name, pos)
 			case "method_defined?", "public_method_defined?", "private_method_defined?", "protected_method_defined?":
 				pos, _ := rubyBlockArgs(args)
 				k := rt.rubyMethodVis(o, rt.rubyStr(argAt(pos, 0)), len(pos) < 2 || rubyTruthy(pos[1]))
@@ -15390,15 +15408,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		"js_del": func(a []uint64) uint64 {
 			key := rt.toString(u(a[1]))
 			if o, ok := u(a[0]).(*jsObject); ok {
-				if _, had := o.props[key]; had {
-					delete(o.props, key)
-					for i, k := range o.keys {
-						if k == key {
-							o.keys = append(o.keys[:i], o.keys[i+1:]...)
-							break
-						}
-					}
-				}
+				o.del(key)
 			}
 			return boolH(true)
 		},
