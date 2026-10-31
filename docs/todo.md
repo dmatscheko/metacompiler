@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-878** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-879** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -104,15 +104,12 @@ not change the renderer.
 
 # GO — Go  (oracle: `go run`)
 
-### T-869 go: FMA fusion, complex64, cmplx trig, `*p` through *complex128 · P2 · GO · IN PROGRESS (GO worker, round 12) [V CORE worker]
-(1) WRONG ANSWER, every leg: Go on arm64 fuses `a*b+c` / `a*b-c` into FMA in user code (the spec permits it, gc does it):
-`float64(i)*0.37 - 30` → go -25.56, ours -25.560000000000002; complex `z*z`, `z/w` differ in the last digit. Model gc's
-fusion rule (an explicit float64() conversion or assignment prevents it) in all three engines — check against `go run`.
-(2) complex64 (float32 rounding of every complex op). (3) cmplx Sin/Cos/Tan/Asin/Acos/Atan/Sinh/Cosh/Tanh (needs math
-Sinh/Cosh/Asin in go-math.go). (4) `*p = 5` with p `*complex128` stores a real number (go `(5+0i)`): goRefTy answers ""
-for a dereference.
-
----
+### T-878 go: FMA where gc does NOT fuse — constant-propagated operands, variables, inlining · P3 · GO · OPEN [V master]
+`z := complex(1.1, 2.3); w := complex(0.7, -1.9); fmt.Println(z*w)` → go `(5.139999999999999-0.48i)` (gc propagates the
+constants and folds z*w at compile time, no FMA); ours fuses → `(5.14-0.4800000000000002i)` in every leg (main was right
+by not fusing at all). The GO worker's remaining model gaps: a product reaching the add through a variable (gc fuses
+while it is an SSA value), inlined helpers (`f(a,b)+c` fuses; they also shift the per-function two-multiply count),
+constant propagation, dead/duplicate code misleading the CSE choice. Model constant-valued operands at least.
 
 # SW — Swift  (oracle: swiftc 6.1.2)
 
@@ -919,6 +916,7 @@ T-873 kotlin: unqualified `is` matches nested classes; interface companion calls
 T-874 bash: declare -g, top-level local, readonly on read/printf -v/let, remaining arena growth — DONE dc24378b (declare -g reaches the global past locals and prefix bindings — interp onGlobal, compiler rt_glob_swap; top-level local refused with bash's message; readonly enforced by read/printf -v/mapfile/let/(( ))/$(( ))/${v:=w} with bash's statuses — the compiler's run-time-computed arithmetic names stay a recorded 7.9 limit; RSS for the four loop shapes 65–203 MB → 3 MB; also fixed: set -- inside ( ) leaked to the caller in the compiler. DECLINED: declare -g inside a subshell inside a function shows the new value inside the subshell (bash keeps the local visible) — not a regression, needs the subshell to snapshot the local save stack)
 T-876 kotlin: an enum value is not an `Enum<*>` — DONE d03d1858 (a value whose class descriptor carries __isenum is an Enum in is/!is/as?/when/filterIsInstance — interp, Go twin, layer 2; = JDK 24 instanceof via kotlin-stdlib)
 T-875 ruby: frozen binary strings, super with no superclass method, class_eval block gaps (compiler) — DONE edc80b61 (frozen binary Strings incl. clone/dup/+@/-@ and FrozenError on mutators; super with no superclass method is a rescuable NoMethodError — interp everywhere, compiler for top-level defs via js_rnosuper; super searches included modules first in the interp; run-time Module#include (js_rinclude) so module_eval'd methods reach later includers; include and bare visibility words inside class_eval blocks)
+T-869 go: FMA fusion, complex64, cmplx trig, `*p` through *complex128 — DONE 2444244d (gc's arm64 FMA fusion modelled per measured rules — fused operand, blockers, two-multiply choice by CSE per function, complex mult/div — via a host fma (runtime.c d_fma host 113, Go math.FMA); complex64 with float32 rounding via js_gocxop; cmplx trig/hyperbolic and math Sinh..Log2; *p stores through pointer types; also fixed a package function losing to a same-named main-file function, and f(0, g(x)) argument order; go bench −0.2%)
 
 # Settled — do not re-open
 
