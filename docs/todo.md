@@ -102,10 +102,6 @@ not change the renderer.
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-876 kotlin: an enum value is not an `Enum<*>` · P3 · KT · IN PROGRESS (KT worker, round 9) [V KT worker]
-WRONG, every leg: `enum class Color { RED }; val c: Any = Color.RED; c is Enum<*>` → false; Kotlin true (every enum class
-extends kotlin.Enum; also `c is Comparable<*>` true). Check `as Enum<*>` and `c::class.supertypes`-free forms only.
-
 # GO — Go  (oracle: `go run`)
 
 ### T-869 go: FMA fusion, complex64, cmplx trig, `*p` through *complex128 · P2 · GO · IN PROGRESS (GO worker, round 12) [V CORE worker]
@@ -138,7 +134,7 @@ for a dereference.
 
 # CORE — MetaJS, the engines, shared runtime, tooling
 
-### T-845 compiler grammars: `fail` prints on stdout, so `-qq` swallows compile errors · P2 · CORE · OPEN [V C worker]
+### T-845 compiler grammars: `fail` prints on stdout, so `-qq` swallows compile errors · P2 · CORE · IN PROGRESS (CORE worker, round 11) [V C worker]
 With `-qq` (and inside `-pipe`) a compile error of most `*-to-llvm-ir.abnf` grammars vanishes and only
 rc=1 is left, because their `fail` uses `println` — the channel -qq silences. C now uses `eprintln`;
 check every other compiler (and interpreter) grammar's error path and add one -qq row that shows the
@@ -921,6 +917,7 @@ T-871 bash: prefix assignments with declaration builtins, local, unset, arrays, 
 T-872 ruby: binary case mapping, re-encode back to UTF-8 in place, public over inherited private, module_eval — DONE fb23db4d (binary strings case-map ASCII only and their bang methods mutate in place; force_encoding back to UTF-8 in place through aliases; compiler public :m over an inherited or mixed-in private method; module_eval/class_eval/class_exec with a block; the real trigger of the rescue case was 'rescue X => e' followed by a line starting with '[' parsed as e[...] — fixed with SameLine TIndex. DECLINED: [-Float::NAN].pack("E") sign bit — no engine can read a NaN's sign (MetaJS has no bit access, manual 7.7; go-math.go documents the same), and a new sign-bit primitive in all three host engines for negative-NaN packing alone is not worth the shared-engine change; the string form of module_eval needs a run-time parser in the compiled half)
 T-873 kotlin: unqualified `is` matches nested classes; interface companion calls (compiled) — DONE 50489dc1 (a type test's name is resolved lexically to one declared type and matched by its full binary name in is/as/as?/when-is/filterIsInstance/reified is — interp, Go twin, layer 2; interface companion objects emitted like a class's, incl. named companions and const vals)
 T-874 bash: declare -g, top-level local, readonly on read/printf -v/let, remaining arena growth — DONE dc24378b (declare -g reaches the global past locals and prefix bindings — interp onGlobal, compiler rt_glob_swap; top-level local refused with bash's message; readonly enforced by read/printf -v/mapfile/let/(( ))/$(( ))/${v:=w} with bash's statuses — the compiler's run-time-computed arithmetic names stay a recorded 7.9 limit; RSS for the four loop shapes 65–203 MB → 3 MB; also fixed: set -- inside ( ) leaked to the caller in the compiler. DECLINED: declare -g inside a subshell inside a function shows the new value inside the subshell (bash keeps the local visible) — not a regression, needs the subshell to snapshot the local save stack)
+T-876 kotlin: an enum value is not an `Enum<*>` — DONE d03d1858 (a value whose class descriptor carries __isenum is an Enum in is/!is/as?/when/filterIsInstance — interp, Go twin, layer 2; = JDK 24 instanceof via kotlin-stdlib)
 
 # Settled — do not re-open
 
