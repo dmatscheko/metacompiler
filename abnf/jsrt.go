@@ -10850,6 +10850,9 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 				return v
 			}
 		}
+		if name != "public_send" {
+			mn = rubySendKey(target, mn)
+		}
 		return rt.rubyMethod(target, mn, args[1:])
 	}
 	if rt.rubyBuiltinExt {

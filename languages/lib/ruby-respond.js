@@ -8,7 +8,8 @@
 // name missing here that an engine does answer only makes respond_to? say false.
 //
 // Row 0 ("*") holds the names every builtin class answers; each other row is a
-// class name followed by its own names. Row "private" holds the private Kernel
+// class name followed by its own names. Rows "Class" and "Module" are a class or
+// module OBJECT's. Row "private" holds the private Kernel
 // methods every object has, which respond_to? reports only with include_all.
 //
 // Included by ruby-interpreter.abnf (include("lib/ruby-respond.js")) and
@@ -143,7 +144,21 @@ function rbRespondRows() {
          "map", "max", "max_by", "min", "min_by", "minmax", "next", "nil?", "none?", "one?",
          "partition", "peek", "public_send", "reduce", "reject", "reverse_each", "rewind",
          "select", "send", "size", "sort", "sort_by", "sum", "take", "take_while", "tally",
-         "to_a", "uniq", "with_index", "with_object", "zip"]
+         "to_a", "uniq", "with_index", "with_object", "zip"],
+        ["Class", "<", "<=", ">", ">=", "ancestors", "class_eval", "constants", "equal?",
+         "frozen?", "include?", "instance_methods", "instance_of?",
+         "instance_variable_get", "instance_variable_set", "instance_variables", "is_a?",
+         "kind_of?", "method_defined?", "module_eval", "name", "new", "nil?",
+         "private_instance_methods", "private_method_defined?",
+         "public_instance_methods", "public_method_defined?", "public_send", "send",
+         "singleton_methods", "superclass"],
+        ["Module", "<", "<=", ">", ">=", "ancestors", "class_eval", "constants",
+         "equal?", "frozen?", "include?", "instance_methods", "instance_of?",
+         "instance_variable_get", "instance_variable_set", "instance_variables", "is_a?",
+         "kind_of?", "method_defined?", "module_eval", "name", "nil?",
+         "private_instance_methods", "private_method_defined?",
+         "public_instance_methods", "public_method_defined?", "public_send", "send",
+         "singleton_methods"]
     ]
 }
 var rbRespondSet = {}

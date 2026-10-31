@@ -8143,6 +8143,12 @@ function js_rrespond(target, args) {
         return rbResponds(rcls, n) || (all && rbRespondsPriv(n))
     }
     if (!rbIsObj(target)) { return rbMethod(target, "respond_to?", args) }
+    // A class or module object: a private class method (Class#new included), then
+    // the Class / Module row.
+    if (target["__isclass"] === true) {
+        if (js_rvkey(target, n) != n) { return all }
+        if (rbResponds(target["__ismodule"] === true ? "Module" : "Class", n)) { return true }
+    }
     if (rbResponds("", n)) { return true }
     if (rbSingFind(target, n) !== undefined) { return true }
     if (rbRestricted(target["__class"], n)) { return all }
@@ -8247,10 +8253,21 @@ function rbRestricted(cls, n) {
     return false
 }
 
-// The key a call on the implicit self dispatches by. Twin of js_rvkey in
-// abnf/jsrtruby.go.
+// The key a call on the implicit self, or a #send, dispatches by. Twin of
+// rubySendKey in abnf/jsrtruby.go, which states the rule.
 function js_rvkey(self, name) {
-    if (rbIsObj(self) && rbRestricted(self["__class"], name)) { return "$q$" + name }
+    if (!rbIsObj(self)) { return name }
+    if (self["__isclass"] !== true) {
+        if (rbRestricted(self["__class"], name)) { return "$q$" + name }
+        return name
+    }
+    var c = anytype
+    c = self
+    while (c !== undefined && c !== null && rbIsObj(c)) {
+        if (c["$s$$q$" + name] !== undefined) { return "$q$" + name }
+        if (c["$s$" + name] !== undefined) { return name }
+        c = c["__super"]
+    }
     return name
 }
 
@@ -8381,6 +8398,7 @@ function rbMethod(target, name, args) {
         if (mn == "respond_to?") { return js_rrespond(target, rest) }
         // js_rxmcall, so a Regexp / MatchData method or a String one taking a
         // pattern reaches the regexp half.
+        if (name != "public_send") { return js_rxmcall(target, js_rvkey(target, mn), rest) }
         return js_rxmcall(target, mn, rest)
     }
     if (rbBuiltinExtOn) {

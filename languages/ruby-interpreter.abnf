@@ -272,6 +272,22 @@ StructNew   <~~ push(foldCallMember([makeVarRef("Struct"), {phead: null}, {kind:
 StructDecl  <~~ push(makeClassStmt(takeAll(), up.pos)) ~~>
             = ClassPath <~~ push(up.in) ~~> "=" StructNew <~~ push({superexpr: pop()}) ~~>
               ( KwDo ClassItems End | "{" ClassItems "}" ) ;
+// CONST = Class.new(SUPER) [do BODY end]: Class.new answers a new class and the
+// constant assignment names it, so this is `class CONST < SUPER; BODY; end'.
+// Twin of ClassNewDecl in ruby-to-llvm-ir.abnf.
+ClassNewDecl <~~ push(makeClassStmt(takeAll(), up.pos)) ~~>
+            = "" ConstAhead ClassPath <~~ push(up.in) ~~> "=" "Class" KwEnd "." "new" KwEnd
+              [ "(" ScopedName <~~ push({supername: up.in}) ~~> ")" ]
+              [ KwDo ClassItems End | "{" ClassItems "}" ] HeaderEnd ;
+// A constant path starts here: `::' or a capital letter.
+ConstAhead = :script(~~
+    (function() {
+        var cc = c.peek(0)
+        if (cc === 58 && c.peek(1) === 58) { cc = c.peek(2) }
+        if (cc >= 65 && cc <= 90) { return undefined }
+        return abnf.newToken("\x01notconst", 0)
+    })()
+~~) ;
 // Anything else in a class body - @@classvar = v, include M, private, alias - runs
 // as an ordinary statement with `self` bound to the class object.
 ClassBodyStmt <~~ push({cstmt: sitedStmt(pop())}) ~~>
@@ -286,7 +302,9 @@ AttrSym     = ":" SymName <~~ push({aname: up.in}) ~~> :whitespace(Whitespace) ;
 VisDef      <~~ var n = takeAll(); push({method: n[1], mvis: n[0]}) ~~>
             = VisDefWord Def ;
 VisDefWord  = "private" KwEnd <~~ push("private") ~~> | "protected" KwEnd <~~ push("protected") ~~>
-            | "public" KwEnd <~~ push("public") ~~> ;
+            | "public" KwEnd <~~ push("public") ~~>
+            | "private_class_method" KwEnd <~~ push("private_class_method") ~~>
+            | "public_class_method" KwEnd <~~ push("public_class_method") ~~> ;
 
 End         = "end" KwEnd ;
 
@@ -637,7 +655,7 @@ OrWord      = "or" KwEnd ;
 AndWord     = "and" KwEnd ;
 NotWord     = "not" KwEnd ;
 
-AssignExpr  = StructDecl | Assignment | Ternary ;
+AssignExpr  = StructDecl | ClassNewDecl | Assignment | Ternary ;
 Ternary     <~~ push(makeTernary(takeAll())) ~~>
             = OrExpr [ "?" Expression ":" Expression ] ;
 
@@ -9028,6 +9046,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             var tdf = anytype
             tdf = recvSendDef(target, sname)
             if (tdf !== undefined) { return tdf.apply(undefined, args.slice(1)) }
+            // public_send keeps to what an explicit receiver may call.
+            if (name == "public_send") { visCheck(target, sname) }
             return mcall(target, sname, args.slice(1), blk)
         }
         // A Proc / block closure: Proc#call, and the two call shorthands p.(x) and p[x].
@@ -12921,6 +12941,13 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     function respondTo(target, args) {
         var n = rstr(args[0])
         var all = args.length > 1 && rtest(args[1])
+        // A class or module object: a private class method (Class#new included),
+        // then the Class / Module row. Twins: rubyRespond in abnf/jsrtruby.go,
+        // js_rrespond in lib/ruby-rt.metajs.
+        if (target.__isclass === true) {
+            if (sVisOf(target, n) == "private") { return all }
+            if (rbResponds(target.__ismodule === true ? "Module" : "Class", n)) { return true }
+        }
         if (rbResponds("", n)) { return true }
         if (typeof singFind(target, n) == "function") { return true }
         if (target.__isclass !== true && typeof lookupMethod(target.__class, n) == "function"
@@ -13557,6 +13584,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             // themselves. Twin of js_rvisdir in abnf/jsrtruby.go.
             if ((name == "private" || name == "public" || name == "protected" || name == "module_function")
                 && isClassObj(recv) && findSelf() !== recv) {
+                nameErr("NoMethodError", "private method `" + name + "' called for " + noMethodDesc(recv), name, recv)
+            }
+            if (isClassObj(recv) && findSelf() !== recv && sVisOf(recv, name) == "private") {
                 nameErr("NoMethodError", "private method `" + name + "' called for " + noMethodDesc(recv), name, recv)
             }
             return
@@ -15006,6 +15036,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // private / protected / public: with no argument they switch the mode for the
     // defs that follow, with arguments they mark exactly those methods.
     function visDirective(mode, args) {
+        if (mode == "private_class_method" || mode == "public_class_method") {
+            return sVisDirective(mode.substring(0, mode.indexOf("_")), args)
+        }
         if (args.length == 0) { curVis = mode; return null }
         setVisOn(directiveClass(), mode, args)
         return null
@@ -15024,6 +15057,29 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         for (var i = 0; i < a.length; i++) { out.push(a[i]) }
         return out
     }
+    // private_class_method / public_class_method: the visibility of class methods,
+    // kept apart from the instance methods' as "$sv$" + name. Twin of the
+    // srestricted list in ruby-to-llvm-ir.abnf.
+    function sVisDirective(mode, args) {
+        var c = directiveClass()
+        for (var i = 0; i < args.length; i++) {
+            if (Array.isArray(args[i])) { sVisDirective(mode, args[i]); continue }
+            scopePut(c, "$sv$" + rstr(args[i]), mode)
+        }
+        return null
+    }
+    // The visibility of class method n of class object c: the nearest level that
+    // either sets one or defines the method itself (a redefinition is public).
+    function sVisOf(c, n) {
+        while (c != undefined && c != null) {
+            if (hasOwn(c, "$sv$" + n)) { return c["$sv$" + n] }
+            if (hasOwn(c, "$s$" + n)) { return "public" }
+            c = c.__super
+        }
+        return "public"
+    }
+    hostGlobals["private_class_method"] = function() { return sVisDirective("private", argsArray(arguments)) }
+    hostGlobals["public_class_method"] = function() { return sVisDirective("public", argsArray(arguments)) }
     hostGlobals["private"] = function() { return visDirective("private", argsArray(arguments)) }
     hostGlobals["protected"] = function() { return visDirective("protected", argsArray(arguments)) }
     hostGlobals["public"] = function() { return visDirective("public", argsArray(arguments)) }

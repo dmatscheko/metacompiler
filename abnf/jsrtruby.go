@@ -264,13 +264,12 @@ func (rt *jsrt) addRubyFmtExterns(m map[string]func(args []uint64) uint64) {
 		return a[2]
 	}
 	// The key a call on the implicit self dispatches by, where visibility can
-	// change at run time: "$q$" + name for a restricted method (emitSelfKey in
-	// ruby-to-llvm-ir.abnf). Twin of js_rvkey in lib/ruby-rt.metajs.
+	// change at run time (emitMKey in ruby-to-llvm-ir.abnf): rubySendKey. Twin of
+	// js_rvkey in lib/ruby-rt.metajs.
 	m["js_rvkey"] = func(a []uint64) uint64 {
-		if o, isObj := u(a[0]).(*jsObject); isObj {
-			if name := rt.toString(u(a[1])); rubyRestricted(o.props["__class"], name) {
-				return rt.wrapStr("$q$" + name)
-			}
+		name := rt.toString(u(a[1]))
+		if key := rubySendKey(u(a[0]), name); key != name {
+			return rt.wrapStr(key)
 		}
 		return a[1]
 	}
@@ -2029,6 +2028,19 @@ var rubyRespondNames = map[string][]string{
 		"public_send", "reduce", "reject", "reverse_each", "rewind", "select", "send", "size",
 		"sort", "sort_by", "sum", "take", "take_while", "tally", "to_a", "uniq", "with_index",
 		"with_object", "zip"},
+	"Class": {"<", "<=", ">", ">=", "ancestors", "class_eval", "constants", "equal?",
+		"frozen?", "include?", "instance_methods", "instance_of?",
+		"instance_variable_get", "instance_variable_set", "instance_variables", "is_a?",
+		"kind_of?", "method_defined?", "module_eval", "name", "new", "nil?",
+		"private_instance_methods", "private_method_defined?", "public_instance_methods",
+		"public_method_defined?", "public_send", "send", "singleton_methods",
+		"superclass"},
+	"Module": {"<", "<=", ">", ">=", "ancestors", "class_eval", "constants", "equal?",
+		"frozen?", "include?", "instance_methods", "instance_of?",
+		"instance_variable_get", "instance_variable_set", "instance_variables", "is_a?",
+		"kind_of?", "method_defined?", "module_eval", "name", "nil?",
+		"private_instance_methods", "private_method_defined?", "public_instance_methods",
+		"public_method_defined?", "public_send", "send", "singleton_methods"},
 }
 
 var rubyRespondSet = func() map[string]bool {
@@ -2068,6 +2080,16 @@ func (rt *jsrt) rubyRespond(target interface{}, args []interface{}) interface{} 
 	if !isObj {
 		return rt.rubyMethod(target, "respond_to?", args)
 	}
+	// A class or module object: a private class method (Class#new included), then
+	// the Class / Module row.
+	if o.props["__isclass"] == true {
+		if rubySendKey(o, n) != n {
+			return all
+		}
+		if rubyResponds(rubyClassRow(o), n) {
+			return true
+		}
+	}
 	if rubyResponds("", n) {
 		return true
 	}
@@ -2087,6 +2109,14 @@ func (rt *jsrt) rubyRespond(target interface{}, args []interface{}) interface{} 
 		}
 	}
 	return false
+}
+
+// rubyClassRow is the respond_to? row of a class or module object.
+func rubyClassRow(o *jsObject) string {
+	if o.props["__ismodule"] == true {
+		return "Module"
+	}
+	return "Class"
 }
 
 // rubyRespondsPrivate: is n a private method every object has?
@@ -2178,6 +2208,38 @@ func rubyRestricted(cls interface{}, n string) bool {
 		cls = clsObj.props["__super"]
 	}
 	return false
+}
+
+// rubySendKey is the key a call that visibility does not stop - #send, or one on
+// the implicit self - reaches method n of target by: "$q$" + n for a restricted
+// instance method (rubyRestricted), or for a private class method, kept under
+// "$s$$q$" + n behind a raising "$s$" + n (emitMethods in ruby-to-llvm-ir.abnf).
+// Twin of js_rvkey in lib/ruby-rt.metajs.
+func rubySendKey(target interface{}, n string) string {
+	o, isObj := target.(*jsObject)
+	if !isObj {
+		return n
+	}
+	if o.props["__isclass"] != true {
+		if rubyRestricted(o.props["__class"], n) {
+			return "$q$" + n
+		}
+		return n
+	}
+	for c := interface{}(o); c != nil; {
+		co, ok := c.(*jsObject)
+		if !ok {
+			break
+		}
+		if _, has := co.props["$s$$q$"+n]; has {
+			return "$q$" + n
+		}
+		if _, has := co.props["$s$"+n]; has {
+			return n
+		}
+		c = co.props["__super"]
+	}
+	return n
 }
 
 // rubySetVis is Module#private / #protected / #public with method names (reached

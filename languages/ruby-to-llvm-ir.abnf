@@ -272,10 +272,12 @@ MixName     <~~ push(up.in) ~~> = ScopedName ;
 VisStmt     <~~ push({vis: up.in}) ~~> = VisWord KwEnd LineEnd ;
 VisWord     = "private" | "protected" | "public" | "module_function" ;
 // `private :a, :b' (protected, public): the visibility of the named methods, wherever
-// in the body they are defined.
+// in the body they are defined; private_class_method / public_class_method set a
+// class method's.
 VisNamesStmt <~~ var n = takeAll(); push({visnames: n.slice(1), vis: n[0]}) ~~>
             = VisNameWord VisName { "," VisName } LineEnd ;
-VisNameWord <~~ push(up.in) ~~> = ( "private" | "protected" | "public" ) KwEnd ;
+VisNameWord <~~ push(up.in) ~~>
+            = ( "private_class_method" | "public_class_method" | "private" | "protected" | "public" ) KwEnd ;
 VisName     = ":" :whitespace() SymNameSfx <~~ push(up.in) ~~> :whitespace(Whitespace) ;
 // `private def m ... end': `def' answers the Symbol :m, so this is `private :m' for
 // the method the def just defined.
@@ -317,6 +319,22 @@ StructNew   <~~ push(foldCallMember([makeVarRef("Struct"), {phead: null}, {kind:
 StructDecl  <~~ push(makeClassStmt(takeAll(), up.pos)) ~~>
             = ClassPath <~~ push(up.in) ~~> "=" StructNew <~~ push({superexpr: pop(), smembers: lastStructMembers}) ~~>
               ( KwDo ClassItems End | "{" ClassItems "}" ) ;
+// CONST = Class.new(SUPER) [do BODY end]: Class.new answers a new class and the
+// constant assignment names it, so this is `class CONST < SUPER; BODY; end'.
+// Twin of ClassNewDecl in ruby-interpreter.abnf.
+ClassNewDecl <~~ push(makeClassStmt(takeAll(), up.pos)) ~~>
+            = "" ConstAhead ClassPath <~~ push(up.in) ~~> "=" "Class" KwEnd "." "new" KwEnd
+              [ "(" ScopedName <~~ push({supername: up.in}) ~~> ")" ]
+              [ KwDo ClassItems End | "{" ClassItems "}" ] HeaderEnd ;
+// A constant path starts here: `::' or a capital letter.
+ConstAhead = :script(~~
+    (function() {
+        var cc = c.peek(0)
+        if (cc === 58 && c.peek(1) === 58) { cc = c.peek(2) }
+        if (cc >= 65 && cc <= 90) { return undefined }
+        return abnf.newToken("\x01notconst", 0)
+    })()
+~~) ;
 // Anything else in a class body - @@classvar = v, include M, private, alias - runs
 // as an ordinary statement with `self` bound to the class object.
 ClassBodyStmt <~~ push({cstmt: pop(), ctext: up.in}) ~~>
@@ -676,7 +694,7 @@ OrWord      = "or" KwEnd ;
 AndWord     = "and" KwEnd ;
 NotWord     = "not" KwEnd ;
 
-AssignExpr  = StructDecl | Assignment | Ternary ;
+AssignExpr  = StructDecl | ClassNewDecl | Assignment | Ternary ;
 Ternary     <~~ push(makeTernary(takeAll())) ~~>
             = OrExpr [ "?" Expression ":" Expression ] ;
 
@@ -3538,9 +3556,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                         var rea = emitArgs(b, unwrapArgs(s.args))
                         b = rea.b
                         cur = callExt(b, "js_rrespond", [cur, rea.v])
-                    } else if (s.name == "send" || s.name == "__send__" || s.name == "public_send") {
+                    } else if (s.name == "send" || s.name == "__send__") {
                         // A top-level def answers a send the receiver has no method
-                        // for, and only the scope knows the defs.
+                        // for, and only the scope knows the defs; public_send keeps
+                        // to public methods and is an ordinary call.
                         var esa = emitArgs(b, unwrapArgs(s.args))
                         b = esa.b
                         cur = callExt(b, "js_rselfsend", [curScopeV, cur, esa.v])
@@ -5689,7 +5708,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if ((name == "send" || name == "__send__") && isSelfCall(name)) {
             return callExt(b, "js_rselfsend", [curScopeV, selfV, argsV])
         }
-        if (name == "new" && curSelfIsCls) { return emitClassNew(b, selfV, argsV) }
+        if (name == "new" && curSelfIsCls && !isSRestricted(curClsName, "new")) { return emitClassNew(b, selfV, argsV) }
         return callExt(b, "js_rxmcall", [selfV, emitMKey(b, selfV, name, true), argsV])
     }
     // Whether the program names :private / :protected / :public as a Symbol, the
@@ -7318,16 +7337,20 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                                            callExt(b, "js_scope_get", [curScopeV, emitStr(b, kwNs[kn])])])
                 }
                 if (kwD != null) { callExt(b, "js_arr_push", [argsV, kwD]) }
-                var blkV = curBlockV(b)
-                var wrapB = curF.NewBlock("")
-                var goB = curF.NewBlock("")
-                b.NewCondBr(truthy(b, blkV), wrapB, goB)
-                callExt(wrapB, "js_arr_push", [argsV, callExt(wrapB, "js_rblkwrap", [blkV])])
-                wrapB.NewBr(goB)
-                b = goB
+                b = emitPushBlock(b, argsV)
             }
             return {b: b, v: callExt(b, "js_rsuper", [supV, selfV, emitStr(b, methName), argsV])}
         }
+    }
+    // Pass the running method's block on: argsV gains its block marker, if any.
+    function emitPushBlock(b, argsV) {
+        var blkV = curBlockV(b)
+        var wrapB = curF.NewBlock("")
+        var goB = curF.NewBlock("")
+        b.NewCondBr(truthy(b, blkV), wrapB, goB)
+        callExt(wrapB, "js_arr_push", [argsV, callExt(wrapB, "js_rblkwrap", [blkV])])
+        wrapB.NewBr(goB)
+        return goB
     }
     // Whether a class above clsName (declared in this file) defines name.
     function superHasMethod(clsName, name) {
@@ -7696,8 +7719,40 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         return false
     }
     function methodKey(name) {
-        if (curClsName != "" && isRestricted(curClsName, name)) { return "$q$" + name }
+        if (curClsName != "" && (curSelfIsCls ? isSRestricted(curClsName, name) : isRestricted(curClsName, name))) { return "$q$" + name }
         return name
+    }
+    // The class-method twin of restrictedMethods: per class, the last
+    // private_class_method / public_class_method per name, kept as "$s$$q$" + name
+    // behind a raising "$s$" + name stub (emitMethods). The walk stops at the
+    // nearest class that sets one or defines the method itself.
+    var classSVis = {}
+    function noteSVis(name, r) {
+        var prev = classSVis["$" + name]
+        var out = prev == undefined ? [] : prev
+        for (var i = 0; i < r.svis.length; i++) {
+            var kept = []
+            for (var j = 0; j < out.length; j++) { if (out[j].name != r.svis[i].name) { kept.push(out[j]) } }
+            kept.push(r.svis[i])
+            out = kept
+        }
+        classSVis["$" + name] = out
+        for (var k = 0; k < r.srestricted.length; k++) { if (r.srestricted[k].name == "new") { anySNew = true } }
+    }
+    function isSRestricted(clsName, name) {
+        var c = clsName
+        var hops = 0
+        while (c != undefined && c != "" && hops < 64) {
+            hops = hops + 1
+            var v = classSVis["$" + c]
+            if (v != undefined) {
+                for (var i = 0; i < v.length; i++) { if (v[i].name == name) { return v[i].kind == "private" } }
+            }
+            var ms = classSMethods["$" + c]
+            if (ms != undefined && nameIn(ms, name)) { return false }
+            c = classSupers["$" + c]
+        }
+        return false
     }
     // Raise a NameError / NoMethodError carrying #name and #receiver as nameErr's
     // does (ruby-interpreter.abnf), at the calling statement; b ends there.
@@ -7842,9 +7897,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // nowhere else.
     function clsItems(items, from) {
         var r = {supername: "", methods: [], sdefs: [], cstmts: [], consts: [],
-                 aliases: [], includes: [], prepends: [], extends: [], restricted: [], visnamed: []}
+                 aliases: [], includes: [], prepends: [], extends: [], restricted: [], visnamed: [],
+                 svis: [], srestricted: []}
         var vis = "public"
         var named = []
+        var snamed = []
         // Whether a def here runs a #method_added: the body's own, defined above
         // it, or one the class already has.
         var maOwn = false
@@ -7858,7 +7915,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (it == undefined) { continue }
             if (it.supername != undefined) { r.supername = it.supername; continue }
             if (it.superexpr != undefined) { r.superexpr = it.superexpr; r.smembers = it.smembers; continue }
-            if (it.visnames != undefined) { named.push(it); continue }
+            if (it.visnames != undefined) {
+                if (isSVisWord(it.vis)) { snamed.push(it) } else { named.push(it) }
+                continue
+            }
             if (it.vis != undefined) { vis = visWordOf(it.vis); continue }
             if (it.mixkind != undefined) {
                 // `include M1, M2' mixes in M2 first, so M1 ends up the nearer
@@ -7908,6 +7968,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 if (fn.singleton === true) {
                     r.sdefs.push({name: fn.name, params: fn.params, body: fn.body, pos: fn.pos})
                     if (fn.name == "method_added") { maOwn = true }
+                    if (it.defvis != undefined && isSVisWord(it.defvis)) { snamed.push({visnames: [fn.name], vis: it.defvis}) }
                 }
                 else {
                     r.methods.push({name: fn.name, params: fn.params, body: fn.body, pos: fn.pos})
@@ -7957,7 +8018,60 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
         // The body's own, before a class adds its mixins' (mixinRestricted).
         r.ownrestricted = r.restricted
+        // The class methods' (private_class_method), the last directive for a name
+        // winning: r.svis keeps both kinds, r.srestricted the private ones.
+        for (var si = 0; si < snamed.length; si++) {
+            var sk = visWordOf(snamed[si].vis) == "private_class_method" ? "private" : "public"
+            for (var sj = 0; sj < snamed[si].visnames.length; sj++) {
+                var sn = snamed[si].visnames[sj]
+                var skept = []
+                for (var sr = 0; sr < r.svis.length; sr++) { if (r.svis[sr].name != sn) { skept.push(r.svis[sr]) } }
+                skept.push({name: sn, kind: sk})
+                r.svis = skept
+            }
+        }
+        for (var sq = 0; sq < r.svis.length; sq++) {
+            if (r.svis[sq].kind == "private") { r.srestricted.push(r.svis[sq]) }
+            var sOwn = false
+            for (var sd = 0; sd < r.sdefs.length; sd++) { if (r.sdefs[sd].name == r.svis[sq].name) { sOwn = true } }
+            if (!sOwn) { r.sdefs.push(sVisForwarder(r.svis[sq].name)) }
+        }
         return r
+    }
+    // A class method whose visibility is set without a def of its own here:
+    // Class#new, or one inherited from the superclass, which this class gets a
+    // copy of. In a reopening body it may be one an earlier body defined, which
+    // emitReopen keeps under ownKey.
+    function sVisForwarder(n) {
+        var d = {name: n, params: [paramDesc({param: "$fwd", splat: true})], svisFwd: true, ownKey: ""}
+        d.body = function(b) {
+            var selfV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "self")])
+            var argsV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "$fwd")])
+            b = emitPushBlock(b, argsV)
+            if (n == "new" && d.ownKey == "") { return {b: b, v: callExt(b, "js_rnew", [selfV, argsV])} }
+            var clsV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, curClsName)])
+            if (d.ownKey != "") { return {b: b, v: callExt(b, "js_rsuper", [clsV, selfV, emitStr(b, d.ownKey), argsV])} }
+            var supV = callExt(b, "js_get", [clsV, emitStr(b, "__super")])
+            var key = isSRestricted(classSupers["$" + curClsName], n) ? "$s$$q$" + n : "$s$" + n
+            return {b: b, v: callExt(b, "js_rsuper", [supV, selfV, emitStr(b, key), argsV])}
+        }
+        return d
+    }
+    // The class methods left restricted after body r: prev minus r's public ones,
+    // plus its private ones.
+    function sResAfter(prev, r) {
+        var out = []
+        for (var i = 0; i < prev.length; i++) {
+            var keep = true
+            for (var j = 0; j < r.svis.length; j++) { if (r.svis[j].name == prev[i]) { keep = false } }
+            if (keep) { out.push(prev[i]) }
+        }
+        for (var k = 0; k < r.srestricted.length; k++) { out.push(r.srestricted[k].name) }
+        return out
+    }
+    function isSVisWord(w) {
+        var t = visWordOf(w)
+        return t == "private_class_method" || t == "public_class_method"
     }
 
     // emitMethods attaches one method list to a runtime object. `prefix` is "" for an
@@ -7992,7 +8106,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             }
             var rk = ""
             for (var q = 0; q < restrictedList.length; q++) { if (restrictedList[q].name == m.name) { rk = restrictedList[q].kind } }
-            if (rk != "" && prefix == "") { key = "$q$" + m.name }
+            if (rk != "") { key = prefix + "$q$" + m.name }
             // $pv$ tells a private method from a protected one (rubyMethodVis in
             // abnf/jsrtruby.go).
             if (rk == "private" && prefix == "") { callExt(b, "js_set", [dstV, emitStr(b, "$pv$" + m.name), hTrue]) }
@@ -8016,9 +8130,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (shadowed) { callExt(b, "js_set", [dstV, emitStr(b, "$sup" + k + "$" + m.name), fnV]) }
             // The marker js_rattrw looks for: a public attr_writer of an instance method.
             if (m.attrw != undefined && rk == "" && prefix == "") { callExt(b, "js_set", [dstV, emitStr(b, "$aw$" + m.attrw), hTrue]) }
-            if (rk != "" && prefix == "") {
+            if (rk != "") {
+                nextSelfIsCls = prefix == "$s$"
                 var sidx = emitFunc([], restrictedStub(rk, m.name), true)
-                callExt(b, "js_set", [dstV, emitStr(b, m.name),
+                callExt(b, "js_set", [dstV, emitStr(b, prefix + m.name),
                                       callExt(b, "js_closure", [handle(sidx), curScopeV])])
             }
         }
@@ -8280,7 +8395,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             return function(b) {
                 var bkey = "$" + curClsName + "::" + name
                 if (curClsName == "" && emittedClasses[bkey] == undefined) {
-                    emittedClasses[bkey] = {anc: [], snames: [], core: false, imn: null}
+                    emittedClasses[bkey] = {anc: [], snames: [], core: false, imn: null, sres: []}
                     callExt(b, "js_rbreopen", [])
                 }
                 if (emittedClasses[bkey] == undefined) { notImpl("a nested class named like a builtin class", pos) }
@@ -8326,6 +8441,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         var rnames = []
         for (var m4 = 0; m4 < r.restricted.length; m4++) { rnames.push(r.restricted[m4].name) }
         restrictedMethods["$" + name] = unionNames(restrictedMethods["$" + name], rnames)
+        noteSVis(name, r)
         if (superName != "") { classSupers["$" + name] = superName }
         var coreName = name + "$core"
         // A superclass that is neither builtin nor compiled may be missing at run
@@ -8337,7 +8453,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             var imn = ownIMNames([], r)
             var ipn = ownIPNames([], r)
             var qn = qualName(name)
-            emittedClasses[ekey] = {anc: incAnc, snames: snames, core: front.length > 0, imn: imn, ipn: ipn, mayFail: mayFail, qn: qn}
+            emittedClasses[ekey] = {anc: incAnc, snames: snames, core: front.length > 0, imn: imn, ipn: ipn, mayFail: mayFail, qn: qn,
+                                    sres: sResAfter([], r)}
             lexNote(qn, r)
             var clsV = callExt(b, "js_obj_new", [])
             callExt(b, "js_set", [clsV, emitStr(b, "__isclass"), hTrue])
@@ -8423,7 +8540,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             b = emitMethods(b, ownDstV, own, "", name, r.restricted, ownFrom)
             curOwnOnCore = false
             b = emitMethods(b, clsV, front, "", name, [])
-            b = emitMethods(b, clsV, sdefs, "$s$", name, [])
+            b = emitMethods(b, clsV, sdefs, "$s$", name, r.srestricted)
             b = emitAliases(b, ownDstV, r)
             // A subclass with no initialize of its own INHERITS one, so the default is
             // only emitted when nothing above supplies it: a root class, or one whose
@@ -8659,7 +8776,16 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         prev.anc = newAnc.concat(prev.anc)
         b = emitMixRecord(b, clsV, prev.anc, "$mix$", "__mixorder")
         var snames = []
-        for (var k = 0; k < r.sdefs.length; k++) { snames.push(r.sdefs[k].name) }
+        for (var k = 0; k < r.sdefs.length; k++) {
+            var sd = r.sdefs[k]
+            snames.push(sd.name)
+            if (sd.svisFwd === true && nameIn(prev.snames, sd.name)) {
+                sd.ownKey = "$s$$o$" + sd.name
+                var fromKey = (nameIn(prev.sres, sd.name) ? "$s$$q$" : "$s$") + sd.name
+                callExt(b, "js_set", [clsV, emitStr(b, sd.ownKey), callExt(b, "js_get", [clsV, emitStr(b, fromKey)])])
+            }
+        }
+        prev.sres = sResAfter(prev.sres, r)
         prev.snames = unionNames(prev.snames, snames)
         b = emitNameList(b, clsV, prev.snames, "__snames")
         // The reopening body's new instance-method names join the list at run time,
@@ -8685,7 +8811,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         curOwnOnCore = prev.core
         b = emitMethods(b, ownDstV, own, "", name, r.restricted, ownFrom)
         curOwnOnCore = false
-        b = emitMethods(b, clsV, r.sdefs, "$s$", name, [])
+        b = emitMethods(b, clsV, r.sdefs, "$s$", name, r.srestricted)
         b = emitAliases(b, ownDstV, r)
         // As in makeClassStmt, the body runs with the reopening's methods in place.
         var cb = emitClassBody(b, clsV, r)
@@ -8780,6 +8906,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         var rnames = []
         for (var m4 = 0; m4 < r.restricted.length; m4++) { rnames.push(r.restricted[m4].name) }
         restrictedMethods["$" + name] = unionNames(restrictedMethods["$" + name], rnames)
+        noteSVis(name, r)
         return function(b) {
             // A module statement for a name the same enclosing class or module has
             // already emitted reopens that module object.
@@ -8828,7 +8955,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             // objects keep __methodNames.
             b = emitNameList(b, modV, mnames, "__mnames")
             b = emitNameList(b, modV, snames, "__snames")
-            b = emitMethods(b, modV, r.sdefs, "$s$", name, [])
+            b = emitMethods(b, modV, r.sdefs, "$s$", name, r.srestricted)
             for (var ai = 0; ai < r.aliases.length; ai++) {
                 callExt(b, "js_set", [modV, emitStr(b, r.aliases[ai].to),
                                       callExt(b, "js_get", [modV, emitStr(b, r.aliases[ai].from)])])

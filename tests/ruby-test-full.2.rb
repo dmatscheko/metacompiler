@@ -694,6 +694,108 @@ def s139
   check("sk139b", S139K.new(1).v == [1, 2] && S139K.new(1, b: 5).v == [1, 5] && S139S.new(4, b: 6).v == [4, 6])
 end
 
+# ===== SECTION 140: private_class_method; send past visibility =====
+# private_class_method :new is the Singleton idiom: a class method or a bare
+# `new' inside the class reaches it, an explicit receiver outside raises, and a
+# subclass inherits the restriction unless it says public_class_method. #send
+# reaches a private method (instance or class) and #public_send does not; a
+# class or module object answers respond_to? for the Class or Module methods; a
+# reopened class or a module may restrict a class method it defined before.
+# /usr/bin/ruby 2.6 settles each.
+class S140L
+  private_class_method :new
+  def self.instance; @i ||= new; end
+  def self.make(&b); new(&b); end
+  def initialize(&b); @v = b ? b.call : 0; end
+  attr_reader :v
+end
+class S140D < S140L
+  def self.mk; new; end
+end
+class S140U < S140L
+  public_class_method :new
+end
+class S140K
+  def self.a; 1; end
+  def self.b; 2; end
+  private_class_method :a, :b
+  public_class_method :a
+  private_class_method def self.z; 7; end
+  def self.go; b + z; end
+end
+class S140K
+  def self.c; 4; end
+end
+class S140K
+  private_class_method :c
+  def self.c2; c * 10; end
+end
+class S140B
+  def self.helper; "h"; end
+end
+class S140E < S140B
+  private_class_method :helper
+  def self.use; helper * 2; end
+end
+module S140M
+  def self.inner; 40; end
+  private_class_method :inner
+  def self.outer; inner + 2; end
+end
+class S140V
+  def pub; 2; end
+  private
+  def pv(x); x * 3; end
+end
+def s140e
+  yield
+  "no error"
+rescue NoMethodError => e
+  e.message
+end
+def s140
+  check("sg140a", S140L.instance.equal?(S140L.instance) && S140L.make { 5 }.v == 5)
+  check("sg140b", s140e { S140L.new } == "private method `new' called for S140L:Class")
+  check("sg140c", S140D.mk.class == S140D && s140e { S140D.new } == "private method `new' called for S140D:Class")
+  check("sg140d", S140U.new.class == S140U && S140L.send(:new).class == S140L)
+  check("sg140e", S140L.respond_to?(:new) == false && S140L.respond_to?(:new, true) && S140U.respond_to?(:new))
+  check("rt140m", S140B.respond_to?(:new) && S140B.respond_to?(:superclass) && S140M.respond_to?(:name) && !S140M.respond_to?(:new))
+  check("pc140f", S140K.a == 1 && S140K.go == 9 && s140e { S140K.b } == "private method `b' called for S140K:Class")
+  check("pc140g", s140e { S140K.z } == "private method `z' called for S140K:Class" && S140K.send(:z) == 7)
+  check("pc140h", S140K.c2 == 40 && s140e { S140K.c }.start_with?("private method `c' called for S140K:Class"))
+  check("pc140i", S140E.use == "hh" && S140B.helper == "h" && s140e { S140E.helper } == "private method `helper' called for S140E:Class")
+  check("pc140j", S140M.outer == 42 && s140e { S140M.inner } == "private method `inner' called for S140M:Module")
+  check("sd140k", S140V.new.send(:pv, 4) == 12 && S140V.new.__send__(:pv, 2) == 6 && S140V.new.public_send(:pub) == 2)
+  check("sd140l", s140e { S140V.new.public_send(:pv, 1) }.start_with?("private method `pv' called for"))
+end
+
+# ===== SECTION 141: CONST = Class.new(Super) { body } =====
+# Class.new answers a new class (running the superclass's #inherited) and the
+# constant assignment names it; the block is its body. The block-less form is
+# the usual way to declare an exception class. /usr/bin/ruby 2.6 settles each.
+class S141P
+  def self.inherited(k); (@seen ||= []) << k; end
+  def self.seen; @seen; end
+  def g; 2; end
+end
+S141K = Class.new(S141P) { def f; 1; end }
+S141E = Class.new(StandardError)
+module S141M
+  Err = Class.new(ArgumentError)
+  Obj = Class.new do
+    define_method(:d) { 6 }
+    def h; 3; end
+  end
+end
+def s141
+  check("cn141a", S141K.new.f == 1 && S141K.new.g == 2 && S141K.superclass == S141P && S141K.name == "S141K")
+  check("cn141b", S141P.seen == [S141K])
+  e = begin; raise S141E, "boom"; rescue StandardError => x; x; end
+  check("cn141c", e.class == S141E && e.message == "boom" && S141E.superclass == StandardError)
+  check("cn141d", S141M::Err.superclass == ArgumentError && S141M::Err.name == "S141M::Err")
+  check("cn141e", S141M::Obj.new.d == 6 && S141M::Obj.new.h == 3 && S141M::Obj.superclass == Object)
+end
+
 s122() # SECTION-CALL 122
 s123() # SECTION-CALL 123
 s124() # SECTION-CALL 124
@@ -712,5 +814,7 @@ s136() # SECTION-CALL 136
 s137() # SECTION-CALL 137
 s138() # SECTION-CALL 138
 s139() # SECTION-CALL 139
+s140() # SECTION-CALL 140
+s141() # SECTION-CALL 141
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])
