@@ -25,6 +25,7 @@ sweep · **D** guard review · **E** small open-source programs · **F** perform
 | A dart | never | | | |
 | A metajs | 2026-10-31 | 2eba3f2e | first run, oracle node 24 (vm.Script): number->string (~5700 doubles), bitwise/shift tables, Math specials, charAt/slice/substring/indexOf args (~2700 rows), array sort/slice/splice/length, typeof, exceptions/finally, switch, closures, eval order, object keys, String/Array methods, parseInt/Float, ==/ToNumber tables, goja vs -frozen | 14: T-888..T-901 |
 | A regression (run 2 tickets: c, python, swift, java, go, bash, ruby T-772, harness) | 2026-10-31 | 2eba3f2e | every DONE / done part of T-753..T-801 (non-js) and the c/bash/go/java/python/gates follow-ups T-833..T-887 re-probed with neighbours: no regressions; T-768, T-769, T-869 incomplete; matrix 544/544 | 9: T-902..T-910 |
+| A regression (run 2 tickets: ts/js, kotlin, ruby) | 2026-10-31 | 2eba3f2e | every DONE / done part of the ts/js tickets T-777..T-794, T-802..T-832 and the kotlin/ruby/ts follow-ups T-833..T-887 re-probed with neighbours (MEC_GC stress/poison on every agreeing native leg): no regressions; T-777, T-783, T-786, T-805, T-810, T-814, T-822, T-823, T-830 incomplete | 14: T-911..T-924 |
 | A regression (run 1 tickets) | 2026-10-29 | 9bd2229e | every DONE / done-part of T-465..T-555 re-probed on HEAD with neighbours: no regressions | 4: T-776..T-779 (new neighbouring defects) |
 | B kotlin | 2026-07-14 | 5a5f5ab5 | both Kotlin grammars | concepts consolidated in that commit |
 | B other languages | never | | | |

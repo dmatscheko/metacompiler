@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-911** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-925** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -80,7 +80,74 @@ grammars.
 
 # RB — Ruby
 
+### T-916 ruby interp: an exception leaving a class or module body leaks that class's lexical scope · P1 · RB · OPEN [V]
+`begin; class Gate; raise ArgumentError, "in body" if $f; end; rescue ArgumentError => e; end`, then `class Other; end;
+p Other.name` → ruby, run, native `"Other"`; interp `"Gate::Other"` (and `Gate::Mo`, `Gate::Gm::After` for later modules after a
+raise out of a module body). Knock-ons in the interpreter: a later `class String; def shout2…` defines Gate::String (NoMethodError
+on `"a".shout2`), errors say `uninitialized constant Gate::Zq`, inspect prints `#<Gate::Pt>`. Same family as the scope-chain
+leaks fixed in T-850: the nesting pop is skipped on the exception path. Files: class/module body evaluation in
+ruby-interpreter.abnf.
+
+### T-917 ruby: `local !~ /re/` with a space after the local is parsed as a call of the local · P1 · RB · OPEN [V]
+Neighbour of T-823. `s = ["abc"][0]; z = s !~/z/; p z` and `p n !~ /5/`, `[s].map { |t| t !~ /q/ }` → ruby `true` …; interp
+"call of a non function: s", run "call of a non function value: abc", native "… [object Object]". `s[0] !~ /z/`, `s =~ /b/`,
+`s != "q"` are right. Files: the command-call / juxtaposition rule in both ruby grammars (a known local followed by `!~` is the
+operator).
+
+### T-918 ruby: tr / count / delete / squeeze and regex positions on astral text · P2 · RB · OPEN [V finder only]
+Incomplete part of T-830 / T-839. t = "x😀😀y": `t.tr("😀","o")` ruby `"xooy"`, interp `"xooooy"`, run `"x����y"`, native
+unchanged; `t.count("😀")` ruby 2, interp 4, run/native 0; `t.delete("😀")` ruby `"xy"`, run `"x����y"`, native unchanged;
+`t.squeeze` ruby `"x😀y"`, run bytes broken, interp/native unchanged; `t.scan(/./).size` ruby 4, interp/native 6;
+`t =~ /y/` ruby 3, interp/native 5 (UTF-16 offsets). Files: rbStrTr / count / delete / squeeze and the match index in
+lib/ruby-rt.metajs, abnf/jsrtruby.go, the interpreter.
+
+### T-919 ruby: re-adding a key deleted during `Hash#each` raises nothing · P2 · RB · OPEN [V finder only]
+Incomplete part of T-822. `h = {a: 1, b: 2}; h.each { |k, v| h.delete(:a); h[:a] = 3 }` → ruby RuntimeError "can't add a new key
+into hash during iteration", h `{:b=>2}`; all legs no error, `{:b=>2, :a=>3}`. The new-key test must look at the live key set.
+
+### T-920 ruby: an assignment target rooted at a parenthesised call does not parse; smaller gaps · P2 · RB · OPEN [V finder only]
+`def arr(i); A[i]; end; arr(0)[1] = 5; obj(1).f = 7; arr(0)[0] += 1` → interp and run "Not everything could be parsed" at the
+first; ruby runs it. (`H.new.get(0)[0][0] = 9` works.) Kotlin has the same shape: `rec(p, "R").w++` does not parse. Smaller, loud
+or cosmetic, all with ruby 2.6 as the oracle: `(1..).each_slice(2).first(2)` "cannot convert an endless range to an array" (ruby
+`[[1, 2], [3, 4]]`); `String.class_eval { def shout; upcase + "!"; end }` then `"hi".shout` → NoMethodError (ruby `"HI!"`, the
+same for Integer/Array); default `inspect` omits instance variables (`#<Pt>` vs `#<Pt:0x… @a=3, @b="s">`); `"\x7f".succ.bytes`
+→ `[194, 128]` (ruby `[1, 0]`). Shared: kotlin grammars for the `rec(p).w++` target.
+
 # JS — JavaScript and TypeScript
+
+### T-911 ts/js: `Error(…)`, `TypeError(…)`, `Date()` without `new` throw "Class constructor … cannot be invoked without 'new'" · P1 · JS · OPEN [V]
+`try { throw Error(m) } catch (e) { println(e.name, e.message, e instanceof Error) }` → node `Error boom true`; all legs
+`TypeError Class constructor Error cannot be invoked without 'new' true`. Same for TypeError, RangeError, SyntaxError,
+AggregateError; `typeof Date()` → node `string`, all legs an uncaught TypeError. Inverse cases: `Map()` / `Set()` / `WeakMap()`
+throw with the wrong text (node "Constructor Map requires 'new'"), and `Promise(() => 1)` returns a promise where node throws
+"Promise constructor cannot be invoked without 'new'". Not a regression (before the class-call check these said "Error is not a
+function"). `throw Error("x")` is common JS. Files: the class-call-without-new check (js_jscallerr / jsvClassCallErr in
+abnf/jsrtjsprint.go, its twin in lib/js-rt.metajs, the call arm of both interpreters) - builtins that are callable must bypass
+it, each with its own call semantics.
+
+### T-912 ts/js compiled: a data property on a nearer prototype does not shadow a farther inherited accessor · P1 · JS · OPEN [V]
+Neighbour of T-783 (fixed in the interpreter). `proto = { get acc() { return "lit" } }; mid = Object.create(proto);
+Object.defineProperty(mid, "acc", { value: "mid" }); Object.create(mid).acc` → node and interp `mid`; run `mid`, native `lit`.
+After an extra own key on mid: run `mid2`, native `lit`. `class A { get acc() {…} } class B extends A {}`;
+`Object.defineProperty(B.prototype, "acc", { value: "mid3" }); new B().acc` → node/interp `mid3`, run and native `A`. Files: the
+accessor-holder walk on read (jsvAccHolder in abnf/jsrt*.go must stop at the nearest level that has the key), its twin in
+lib/js-rt.metajs.
+
+### T-913 ts/js llvm.Run: an invalid length through `Object.defineProperty` is an uncatchable host error · P1 · JS · OPEN [V]
+Incomplete part of T-777. `try { Object.defineProperty([], "length", { value: 1.5 }) } catch (e) { println(e.name, e.message) }`
+→ node, interp, native `RangeError Invalid array length`; run exits 1 with `js runtime error: invalid array length 1.5` (value -1
+the same). `a.length = 1.5` and `a["length"] = …` are right everywhere. Files: defineProperty on an array's length in the Go twin
+(abnf/jsrt*.go: an rt.fail where a RangeError must be thrown).
+
+### T-914 ts/js: `replaceAll` with a non-global RegExp does not throw · P2 · JS · OPEN [V]
+Neighbour of T-786. `"a".replaceAll(/a/, "b")` inside try/catch → node `TypeError String.prototype.replaceAll called with a
+non-global RegExp argument`; all legs nothing. Files: replaceAll in abnf/jsrt.go, lib/js-rt.metajs, both interpreters.
+
+### T-915 ts/js: smaller leftovers - toStringTag of Symbol/BigInt, class-decorator context, Annex-B `\u{…}`, `\p{L}` · P3 · JS · OPEN [V finder only]
+`Object.prototype.toString.call(Symbol("q"))` / `.call(1n)` → node `[object Symbol]` / `[object BigInt]`, all legs
+`[object Object]`. A class decorator's context reports `static=false private=false`; tsc 6 + node `undefined undefined`.
+`/\u{61}/` without the u flag throws "invalid unicode escape" in all legs; node accepts it (Annex B: `u` 61 times).
+`/\p{L}/u.test("é")` → node true, all legs false.
 
 # JV — Java
 
@@ -101,6 +168,31 @@ not change the renderer.
 
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
+
+### T-921 kotlin: `==` on `Any`-typed boxed Doubles uses IEEE equality instead of `equals` · P1 · KT · OPEN [V]
+Incomplete part of T-805. `val a: Any = Double.NaN; val b: Any = Double.NaN; val z: Any = -0.0; val y: Any = 0.0;
+println("${a == b} ${z == y}")` → Kotlin `true false` (for a static type other than Float/Double, kotlinc emits
+`Intrinsics.areEqual`, which is `equals`; checked with java + kotlin-stdlib 2.2.21); all legs `false true`. Static
+`Double?` == `Double?` stays IEEE and is right. Files: the `==` lowering in both kotlin grammars (js_ktequals when either static
+type is not Float/Double).
+
+### T-922 kotlin: no ConcurrentModificationException for map iteration and for list higher-order functions · P1 · KT · OPEN [V]
+Incomplete part of T-814 / T-846 / T-857. All legs print "none" where the JVM throws CME: `for (k in mp.keys) if (k == 1)
+mp[3] = 3`; `for ((k, v) in mp2) if (k == 1) mp2.remove(2)`; `ml.forEach { if (it == 1) ml.add(5) }`; `ml.forEachIndexed {…}`;
+`ml.map { if (it == 1) ml.add(5); it }`; `for (x in ml.withIndex()) …add…` (LinkedHashMap / ArrayList behaviour confirmed with java
+24). Replacing an existing key's value (`mp[1] = 9` while iterating values) correctly does not throw. Files: map mutators must
+bump modCount; forEach / forEachIndexed / map / withIndex must check it (lib/kotlin-rt.metajs, abnf/jsrtkotlin.go, the
+interpreter).
+
+### T-923 kotlin: `as` to a collection interface never throws ClassCastException · P1 · KT · OPEN [V]
+Incomplete part of T-810. `val lst: Any = listOf(1, 2); val str: Any = "s"`; `lst as Map<*, *>` → all legs `[1, 2]`;
+`str as List<*>` → `s`; `lst as Set<*>` → `[1, 2]`; Kotlin/JVM throws ClassCastException for all three. `lst is Map<*, *>` is
+correctly false and `lst as Number` throws, so `as` must use the same type test as `is` for collection types. Files: the `as`
+lowering / js_ktas in both kotlin grammars, abnf/jsrtkotlin.go, lib/kotlin-rt.metajs.
+
+### T-924 kotlin: multi-index `operator get/set` and `MutableIterator.remove()` are missing · P3 · KT · OPEN [V finder only]
+`g[r, c] = v` → "index with more than one argument not implemented" in both halves; `it.remove()` on a MutableIterator → "unknown
+method 'remove'". Both loud.
 
 # GO — Go  (oracle: `go run`)
 
