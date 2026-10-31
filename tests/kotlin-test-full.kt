@@ -5599,6 +5599,12 @@ fun sec122() {
     val qn2: Double? = v[0]
     check("nan122m", an == bn && !(an != bn) && !(anz == az) && anz != az && an == nan && !(az == nz))
     check("nan122n", !(qn == qn2) && same122(nan, v[0]) && !same122(nz, z))
+    // A smart cast makes the operands statically Double again: IEEE (the Kotlin
+    // reference, "Floating-point numbers comparison": declared, inferred or the
+    // result of a smart cast).
+    val sa: Any = nan
+    val sb: Any = v[0]
+    check("nan122o", if (sa is Double && sb is Double) !(sa == sb) else false)
 }
 fun <T> same122(p: T, q: T): Boolean = p == q
 

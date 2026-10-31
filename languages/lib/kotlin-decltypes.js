@@ -302,11 +302,34 @@ function ktEqNonFlo(t, at) {
     for (var j = 0; j < s.length; j++) { if (!ktIdChar(s.charAt(j))) { return false } }
     var saved = ktAt
     ktAt = at
-    var ty = ktDeclTypeOf(s)
+    var d = ktDeclAt(s)
     ktAt = saved
-    if (ty == "") { return false }
-    var b = ktBaseName(ty)
-    return b != "Double" && b != "Float"
+    if (d == null || d.ty == "") { return false }
+    var b = ktBaseName(d.ty)
+    if (b == "Double" || b == "Float") { return false }
+    return !ktFloSmartCast(s, c.srcSlice(d.at, at))
+}
+// Whether the source between a declaration and a use (whitespace dropped) tests
+// the name with `is Double` / `is Float`, directly or as a `when` subject: a smart
+// cast makes the operand statically floating point again, and the text cannot tell
+// the scope of one, so any such test keeps IEEE equality.
+function ktFloSmartCast(name, raw) {
+    var t = ""
+    for (var i = 0; i < raw.length; i++) {
+        var ch = raw.charAt(i)
+        if (ch != " " && ch != "\t" && ch != "\n" && ch != "\r") { t = t + ch }
+    }
+    var subj = t.indexOf("when(" + name + ")") >= 0
+    var tests = ["isDouble", "isFloat"]
+    for (var k = 0; k < tests.length; k++) {
+        var at = t.indexOf(tests[k])
+        while (at >= 0) {
+            var from = at - name.length
+            if (subj || (from >= 0 && t.substring(from, at) == name && (from == 0 || !ktIdChar(t.charAt(from - 1))))) { return true }
+            at = t.indexOf(tests[k], at + 1)
+        }
+    }
+    return false
 }
 // The operand texts of an equality chain, or null when an operand is an integer
 // literal or the text holds a string, char or comment the scan does not split.
