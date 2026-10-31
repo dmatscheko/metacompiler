@@ -622,7 +622,7 @@ IdxE        <~~ var ie = pop(); push(ie); push({ksty: stAt(up.pos), kr: goKRec(u
 
 ExprList    = StoreExpr { "," StoreExpr } ;
 // One value of a := / = / var, followed by the static type it reports (goSplitSty).
-StoreExpr   <~~ var se = pop(); push(se); push({sty: stStoreAt(up.pos), rn: goIsRuneC(up.pos), kr: goKRec(up.start, up.pos), pu: goPure(up.start, up.pos), nl: goNilSrc(up.start, up.pos), fm: fmaAt(up.pos), kn: knAt(up.pos)}) ~~> = Expression ;
+StoreExpr   <~~ var se = pop(); push(se); push({sty: stStoreAt(up.pos), rn: goIsRuneC(up.pos), kr: goKRec(up.start, up.pos), pu: goPure(up.start, up.pos), nl: goNilSrc(up.start, up.pos), ep: up.pos}) ~~> = Expression ;
 
 Empty       <~~ push(function(b) { return b }) ~~>
             = ";" ;
@@ -1273,7 +1273,7 @@ Call        <~~ var ci = goAppendC(takeAll(), up.in); var csp = goSplitArgs(ci.s
                 push(icv != null ? icv : makeCall(goCallBoxC(ci), csp.atys, goTpInfer(ci[0], csp, []))); goLenConstC(ci, up.start, up.pos); goKnCallC(ci[0], csp.kns, up.pos) ~~>
             = Id <~~ push(goLtyName(up.in)) ~~> "(" [ ArgExpr { "," ArgExpr } [ Spread ] [ "," ] ] ")" ;
 // A call argument reports its static type after it, for goSplitArgs.
-ArgExpr     <~~ var ae = pop(); push(goRuneDefC(ae, up.pos)); push({aty: stAt(up.pos), kr: goKRec(up.start, up.pos), pu: goPure(up.start, up.pos), nl: goNilSrc(up.start, up.pos), kn: knAt(up.pos)}) ~~> = Expression ;
+ArgExpr     <~~ var ae = pop(); push(goRuneDefC(ae, up.pos)); push({aty: stAt(up.pos), kr: goKRec(up.start, up.pos), pu: goPure(up.start, up.pos), nl: goNilSrc(up.start, up.pos), ep: up.pos}) ~~> = Expression ;
 // A returned value, which takes a rune constant at the RESULT's type (makeReturn).
 RetExpr     <~~ var re = pop(); push(re); push({aty: stAt(up.pos), rn: goIsRuneC(up.pos), kr: goKRec(up.start, up.pos), pu: goPure(up.start, up.pos)}) ~~> = Expression ;
 
@@ -2130,12 +2130,13 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         var fnegs = goFmaSwap(items, ts, fplan)
         var kns = goKnRun(items)
         ts = goRunOrder(items, ts)
+        var prod = goFmaProduct(items, ops, sty, goFmaPair(ts, ops, ty), kns)
         regConst(pos, null)
         regKn(pos, kns[ops.length])
         regCFn(pos, cfn)
         regSt(pos, sty)
         regTk(pos, tk)
-        regFma(pos, goFmaProduct(items, ops, sty, goFmaPair(ts, ops, ty), kns))
+        regFma(pos, prod)
         if (fplan != null) { return goFmaRunC(ts, ops, fplan, fnegs, ty, sty) }
         var cxf = goFmaCxRun(items, ops, sty, kns)
         if (cxf != null) { return goCxRunC(ts, ops, cxf) }
@@ -2251,11 +2252,47 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             return {b: b, v: v}
         }
     }
-    // The product x*y of a pair, negated when neg.
+    // The product x*y of a pair, negated when neg; y null is a pair whose x is
+    // the product already (goFmaVarPair).
     function emitFmaRound(b, x, y, neg) {
-        var p = emitBin(b, "*", x, y)
+        var p = y == null ? x : emitBin(b, "*", x, y)
         if (neg) { return emitNegV(b, p) }
         return {b: b, v: p}
+    }
+    // A variable that holds a product (THROUGH A VARIABLE in go-constfold.js):
+    // the value of its declaration, exprs[si], keeps the factors of its product
+    // f beside it as name$fa and name$fb when a read may fuse. Twin of
+    // goFmaDeclPair in go-interpreter.abnf.
+    function goFmaDeclPair(exprs, si, name, own, f) {
+        var t = exprs[si]
+        var pair = f.pair
+        var neg = f.neg
+        return function(b) {
+            if (!own.used) { return t(b) }
+            var pr = pair(b)
+            b = pr.b
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name + "$fa"), pr.v])
+            if (pr.q != null) { callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name + "$fb"), pr.q]) }
+            return emitFmaRound(b, pr.v, pr.q, neg)
+        }
+    }
+    // The pair of a read of such a variable: its factors, or its value whole (q
+    // null) once the product no longer reaches the read, negated when the
+    // product carries a unary minus (neg). Twin of goFmaVarPair in
+    // go-interpreter.abnf.
+    function goFmaVarPair(name, via, neg) {
+        var rv = makeVarRef(name)
+        var ra = makeVarRef(name + "$fa")
+        var rb = makeVarRef(name + "$fb")
+        return function(b) {
+            if (!goFmaReach(via)) {
+                var w = rv(b)
+                if (neg) { w = emitNegV(w.b, w.v) }
+                return {b: w.b, v: w.v, q: null}
+            }
+            var a = ra(b)
+            return {b: a.b, v: a.v, q: rb(a.b).v}
+        }
     }
     // One fused step: z op x*y (side 1) or x*y op z (side 2), the product negated
     // when neg. js_gofma rounds a float multiply-add once and answers undefined for
@@ -4776,7 +4813,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                 b = rr.b
                 var rv = exprs[0](b)
                 b = rv.b
-                if (fa != null && fa.kv != null && !goFmaLive(fa)) {
+                if (fa != null && goFmaLazy(fa) && !goFmaLive(fa)) {
                     var fp = emitFmaRound(b, rv.v, rv.q, fa.neg)
                     return emitLocWrite(fp.b, refs[0], rl.loc, emitBin(fp.b, op == "+=" ? "+" : "-", rr.v, fp.v))
                 }
@@ -4874,7 +4911,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         // Each value reports its static type (StoreExpr): a struct value is copied and
         // the new name takes the type, so `b := a` copies and `q := p` aliases.
         var sp = goSplitSty(items.slice(i))
-        goKnBind(names, sp.kns)
+        var own = goKnBind(names, sp)
         goTupleBind(names, sp.ts.length, sp.tys)
         var exprs = sp.ts
         if (names.length == exprs.length) {
@@ -4884,6 +4921,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                 exprs[si] = goConstTo(exprs[si], sp.krs[si], sp.rns[si] ? "rune" : "any", names.length > 1 ? "multiple assignment" : "assignment")
                 exprs[si] = goStoreThunk(exprs[si], goStCopyTy(sp.tys[si]))
                 if (sp.rns[si]) { exprs[si] = goI32Thunk(exprs[si]) }
+                if (own[si] != null) { exprs[si] = goFmaDeclPair(exprs, si, names[si], own[si], sp.fms[si]) }
             }
         }
         return function(b) {
@@ -5000,7 +5038,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         // Each initializer reports its static type (StoreExpr), so `var i any = a`
         // copies too. Twin of makeVarDecl in go-interpreter.abnf.
         var sp = goSplitSty(items.slice(i))
-        goKnBind(names, sp.kns)
+        var own = goKnBind(names, sp)
         if (ty == "") { goTupleBind(names, sp.ts.length, sp.tys) }
         var inits = sp.ts
         if (inits.length == names.length) {
@@ -5010,6 +5048,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                 inits[vi] = goNilTo(inits[vi], sp.nls[vi], ty)
                 inits[vi] = goDtBoxThunk(goStoreThunk(inits[vi], goStCopyTy(sp.tys[vi])), goDtBoxTo(sp.tys[vi], ty))
                 if (sp.rns[vi] && (ty == "" || goIsIfaceTy(stBare(ty)))) { inits[vi] = goI32Thunk(inits[vi]) }
+                if (own[vi] != null) { inits[vi] = goFmaDeclPair(inits, vi, names[vi], own[vi], sp.fms[vi]) }
             }
         }
         return function(b) {

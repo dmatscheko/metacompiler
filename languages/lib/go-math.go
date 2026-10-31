@@ -505,7 +505,9 @@ func FMA(x, y, z float64) float64 {
 	if z-z != 0 {
 		return z
 	}
-	p := x * y
+	// float64() rounds p on its own: gc fuses a product held in a local into
+	// the add that reads it, and z + p must be the rounded sum.
+	p := float64(x * y)
 	ap, ax, ay, az := p, x, y, z
 	if ap < 0 {
 		ap = -ap

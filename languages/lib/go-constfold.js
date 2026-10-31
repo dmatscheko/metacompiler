@@ -974,17 +974,17 @@ function goParenC(items, pos) {
 // parentheses and unary minus are transparent, and an explicit conversion
 // float64(x*y) rounds the product first. A multiply of two values gc knows at
 // compile time is folded to a constant before the rules run and fuses nothing
-// (KNOWN VALUES below). Not modelled: a product reaching the add through a
-// variable (gc fuses `t := x*y; t + z` while t is an SSA value, but not across a
-// branch merge, nor once &t has made it a memory load) or through an inlined call
-// (`f(x, y) + z` with f returning x*y).
+// (KNOWN VALUES below). A product also reaches the add through a local that
+// holds it (THROUGH A VARIABLE below). Not modelled: a product reaching the add
+// through an inlined call (`f(x, y) + z` with f returning x*y).
 //
-// fmaByPos maps the end position of a multiply to {pair, neg, n, t, kv}: pair is
-// the grammar's thunk that evaluates the two FACTORS instead of their rounded
-// product, neg says a unary minus is wrapped around the product, n that gc sees a
-// negated multiply (FNMULD: an odd number of minus signs on it and its factors),
-// t its text, and kv the bindings under which both factors are known (null: they
-// are not). negByPos marks a run-time unary minus, for that count.
+// fmaByPos maps the end position of a multiply to {pair, neg, n, t, kv, via}:
+// pair is the grammar's thunk that evaluates the two FACTORS instead of their
+// rounded product, neg says a unary minus is wrapped around the product, n that
+// gc sees a negated multiply (FNMULD: an odd number of minus signs on it and its
+// factors), t its text, kv the bindings under which both factors are known (null:
+// they are not), and via, for a variable read, the bindings it reaches the read
+// through (null: none). negByPos marks a run-time unary minus, for that count.
 var fmaByPos = {}
 var negByPos = {}
 function regFma(pos, f) {
@@ -998,7 +998,7 @@ function fmaAt(pos) {
 }
 function goFmaNeg(pos) {
     var f = fmaAt(pos)
-    if (f != null) { fmaByPos["p" + pos] = {pair: f.pair, neg: !f.neg, n: !f.n, t: f.t, kv: f.kv} }
+    if (f != null) { fmaByPos["p" + pos] = {pair: f.pair, neg: !f.neg, n: !f.n, t: f.t, kv: f.kv, via: f.via} }
     negByPos["p" + pos] = true
 }
 // The product a multiply run [t, {at, as}, op, t, {at, as}, ...] ends in, or null:
@@ -1018,7 +1018,7 @@ function goFmaProduct(items, ops, sty, pair, kns) {
         var u = goFmaText(items[k].as, items[k].at) + "*" + goFmaText(items[1].as, items[1].at)
         if (u < t) { t = u }
     }
-    var f = {pair: pair, neg: false, n: nl !== nr, t: t, kv: kns[kns.length - 1]}
+    var f = {pair: pair, neg: false, n: nl !== nr, t: t, kv: kns[kns.length - 1], via: null}
     goFmaNoteText("t" + t, f)
     return f
 }
@@ -1054,9 +1054,9 @@ function goFmaPlan(items, ops, sty) {
     for (var k = 0; k < ops.length; k++) {
         var s = 0
         if ((ops[k] == "+" || ops[k] == "-") && goFmaTy(sty)) {
-            var r = fmaAt(items[3 * k + 4].at)
-            var l = k == 0 ? fmaAt(items[1].at) : null
-            if (goFmaBoth(l, r, ops[k]) || (r != null && r.kv != null) || (l != null && l.kv != null)) {
+            var r = goFmaUse(fmaAt(items[3 * k + 4].at))
+            var l = k == 0 ? goFmaUse(fmaAt(items[1].at)) : null
+            if (goFmaBoth(l, r, ops[k]) || goFmaLazy(r) || goFmaLazy(l)) {
                 var ch = {fn: fmaFn, w: stBare(sty) == "float32" ? 32 : 64, l: l, r: r, op: ops[k], sd: -1}
                 if (goFmaBoth(l, r, ops[k])) { fmaFn.adds.push(ch) }
                 fmaChoices.push(ch)
@@ -1068,6 +1068,16 @@ function goFmaPlan(items, ops, sty) {
         plan.push(s)
     }
     return any ? plan : null
+}
+// Does whether f fuses depend on bindings assigned later?
+function goFmaLazy(f) { return f != null && (f.kv != null || f.via != null) }
+// f, an operand an add may fuse, marking the variables it is read through as
+// needing their factors (goFmaVarPair).
+function goFmaUse(f) {
+    if (f != null && f.via != null) {
+        for (var i = 0; i < f.via.length; i++) { f.via[i].used = true }
+    }
+    return f
 }
 // An add of two multiplies, which goFmaLeft decides.
 function goFmaBoth(l, r, op) { return r != null && l != null && op == "+" && !r.neg && !l.neg && r.n === l.n }
@@ -1169,6 +1179,7 @@ function goFmaDups(f, key) {
 // and a multiply of real() or imag() parts, is folded later or not at all.
 function goFmaSeen(f) {
     if (f.cx === true || goFmaLive(f)) { return true }
+    if (f.kv == null) { return false }
     for (var i = 0; i < f.kv.length; i++) { if (f.kv[i] === knLate) { return true } }
     return false
 }
@@ -1192,7 +1203,7 @@ function goFmaSide(p) {
 // location of static type ty, or null.
 function goFmaAssign(op, fm, ty) {
     if ((op != "+=" && op != "-=") || fm == null || !goFmaTy(ty)) { return null }
-    return fm
+    return goFmaUse(fm)
 }
 // The registrations of the fused operands of step k: the right one for side 1
 // and both, the left one for side 2 and both.
@@ -1234,24 +1245,56 @@ function goKnRun(items) {
     }
     return kns
 }
-// Is a multiply (or complex multiply) still computed at run time?
+// Is a multiply (or complex multiply) still computed at run time, and if it is
+// read through variables, does it still reach the read?
 function goFmaLive(f) {
+    if (f.via != null && !goFmaReach(f.via)) { return false }
     if (f.kv == null) { return true }
     for (var i = 0; i < f.kv.length; i++) { if (f.kv[i].re) { return true } }
     return false
 }
-// The names a := or var declares, each with its value's known list (goSplitSty's
-// kns): a function's local with a known value is known, under its own record.
-function goKnBind(names, kns) {
-    if (cScopes.length < 2 || names.length != kns.length) { return }
+// ----- THROUGH A VARIABLE -----
+// gc fuses a product an add reads through a local, `t := x*y; t + z`, while t
+// is that multiply's SSA value: a local of the function declared with it and
+// never assigned again nor addressed (else it is a phi or a memory load), also
+// through another such local (`u := t`). The variable keeps the factors it was
+// computed from beside it, as name$fa and name$fb, once a read may fuse
+// (goFmaUse marks the binding used); a read's pair reads them back, or answers
+// the value whole when the product no longer reaches it (goFmaLive), which every
+// rounding takes as the product - negated first when the product carries a
+// unary minus (`t := -(x*y)`), which the rounding negates again. Measured
+// against `go run`.
+// Is none of the variables a product is read through assigned?
+function goFmaReach(via) {
+    for (var j = 0; j < via.length; j++) { if (via[j].re) { return false } }
+    return true
+}
+// The names a := or var declares (sp is goSplitSty's answer): a function's local
+// with a known value is known, under its own binding record {re, used}, and one
+// holding a product carries it (THROUGH A VARIABLE). The answer has the record of
+// each name that holds a product, else null, for goFmaDeclPair.
+function goKnBind(names, sp) {
+    var own = []
     for (var i = 0; i < names.length; i++) {
-        if (kns[i] != null) { cBindX(names[i], {kn: kns[i].concat([{re: false}]), fn: fmaFn}) }
+        var o = null
+        if (cScopes.length > 1 && names.length == sp.kns.length) {
+            var f = sp.fms[i]
+            if (sp.kns[i] != null) { cBindX(names[i], {kn: sp.kns[i].concat([{re: false}]), fn: fmaFn}) }
+            else if (f != null && f.kv == null) {
+                o = {re: false, used: false}
+                cBindX(names[i], {pr: f, via: (f.via == null ? [] : f.via).concat([o]), fn: fmaFn})
+            }
+        }
+        own.push(o)
     }
+    return own
 }
 // A name read in expression position at pos.
 function goKnName(name, pos) {
     var x = cXLookup(name)
-    if (x != null && x.kn != undefined && x.fn === fmaFn) { regKn(pos, x.kn) }
+    if (x == null || x.fn !== fmaFn) { return }
+    if (x.kn != undefined) { regKn(pos, x.kn) }
+    if (x.pr != undefined) { regFma(pos, {pair: goFmaVarPair(name, x.via, x.pr.neg), neg: x.pr.neg, n: x.pr.n, t: x.pr.t, kv: null, via: x.via}) }
 }
 // complex(re, im), real(z) and imag(z) of known arguments, ending at pos, are
 // known: gc folds them as it folds arithmetic, a part of a complex late
@@ -1266,10 +1309,12 @@ function goKnCallC(name, kns, pos) {
     }
     regKn(pos, kv)
 }
-// name is assigned, or has its address taken: it is no longer known anywhere.
+// name is assigned, or has its address taken: it is no longer known, nor holds
+// its product, anywhere.
 function goKnAssign(name) {
     var x = cXLookup(name)
     if (x != null && x.kn != undefined) { x.kn[x.kn.length - 1].re = true }
+    if (x != null && x.via != undefined) { x.via[x.via.length - 1].re = true }
 }
 function cFromRadixText(text) {
     var radix = 10
@@ -1533,6 +1578,9 @@ function goAddrNameC(t, name, pos) {
 // type binds at its default type, int32.
 // krs[k]: value k's goKRec record, or null.
 // The thunks come back in gc's order of evaluation (goOrderThunks).
+// fms[k] and kns[k]: value k's fmaByPos and knByPos entries, read by its end
+// position (ep): their binding records are shared, and a record pushed on the
+// parse stack comes back as a copy under goja.
 function goSplitSty(xs) {
     var ts = []
     var tys = []
@@ -1551,8 +1599,8 @@ function goSplitSty(xs) {
             krs[krs.length - 1] = xs[i].kr == undefined ? null : xs[i].kr
             pures[pures.length - 1] = xs[i].pu === true
             nls[nls.length - 1] = xs[i].nl === true
-            fms[fms.length - 1] = xs[i].fm == undefined ? null : xs[i].fm
-            kns[kns.length - 1] = xs[i].kn == undefined ? null : xs[i].kn
+            fms[fms.length - 1] = fmaAt(xs[i].ep)
+            kns[kns.length - 1] = xs[i].ep == undefined ? null : knAt(xs[i].ep)
         }
         i = i + 1
     }
@@ -2488,7 +2536,7 @@ function goSplitArgs(items) {
                 krs[krs.length - 1] = it.kr == undefined ? null : it.kr
                 pures[pures.length - 1] = it.pu === true
                 nls[nls.length - 1] = it.nl === true
-                kns[kns.length - 1] = it.kn == undefined ? null : it.kn
+                kns[kns.length - 1] = it.ep == undefined ? null : knAt(it.ep)
             }
         }
         else if (it != null && it.spread === true) { spread = true }
