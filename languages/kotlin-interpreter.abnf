@@ -2528,6 +2528,8 @@ NotMemberKw = :script(~~
     // kotlin.math on doubles (lib/kotlin-math.js), over StrictMath's fdlibm.
     include("lib/fdlibm.js")
     include("lib/kotlin-math.js")
+    // ClassCastException's text is the JVM's.
+    include("lib/java-cce.js")
 
     // ----- Imports (same policy as the compiler grammar) -----
     // Prefixes the runtime already provides as builtins; importing them is a no-op.
@@ -3886,7 +3888,7 @@ NotMemberKw = :script(~~
             }
             if (dest == "" || typeof v == "function") { return v }
             if (kIsType(v, judged)) { return v }
-            kThrowExc("ClassCastException", kCceMsg(jxkClass(v), dest))
+            kThrowExc("ClassCastException", jvmCceMsg(jxkClass(v), dest))
             return v
         }
     }
@@ -3993,29 +3995,6 @@ NotMemberKw = :script(~~
             }
         }
         return hasOwn(globalScope, n) ? kTypeDesc(globalScope[n], n) : undefined
-    }
-    // java's ClassCastException message. Twin of ktCceMsg in
-    // languages/lib/kotlin-rt.metajs and jvCceMsg in abnf/jsrtjavastr.go.
-    function kCceMsg(src, dst) {
-        var head = "class " + src + " cannot be cast to class " + dst + " ("
-        var bs = kCceBase(src)
-        var bd = kCceBase(dst)
-        if (bs && bd) { return head + src + " and " + dst + " are in module java.base of loader 'bootstrap')" }
-        if (!bs && !bd) { return head + src + " and " + dst + " are in unnamed module of loader 'app')" }
-        var ws = bs ? " is in module java.base of loader 'bootstrap'" : " is in unnamed module of loader 'app'"
-        var wd = bd ? " is in module java.base of loader 'bootstrap'" : " is in unnamed module of loader 'app'"
-        return head + src + ws + "; " + dst + wd + ")"
-    }
-    // Whether a binary class name is in java.base: a java.* class, an array of one,
-    // or an array of a primitive ([I, [[D).
-    function kCceBase(n) {
-        var k = 0
-        while (k < n.length && n.charAt(k) == "[") { k++ }
-        if (k > 0) {
-            if (n.charAt(k) != "L") { return true }
-            k++
-        }
-        return n.substring(k, k + 5) == "java."
     }
     // The suffixes CHAIN - `x as T is U` is a cast whose result is then type-tested -
     // so they are folded left to right rather than read as a single optional suffix.

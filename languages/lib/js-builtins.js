@@ -498,6 +498,12 @@ function __weakKey(k, what) {
         throw new TypeError("Invalid value used " + what)
     }
 }
+// Removes a dense array's element i: shift the tail down one, drop the last slot.
+// No splice: tools/metajs-lint holds every lib/*.js to the MetaJS subset.
+function __arrDrop(a, i) {
+    for (var j = i + 1; j < a.length; j++) { a[j - 1] = a[j] }
+    a.pop()
+}
 class __Weak {
     constructor() {
         this.__k = []
@@ -511,8 +517,8 @@ class __Weak {
     delete(k) {
         var i = this.__at(k)
         if (i < 0) { return false }
-        this.__k.splice(i, 1)
-        this.__v.splice(i, 1)
+        __arrDrop(this.__k, i)
+        __arrDrop(this.__v, i)
         return true
     }
 }
@@ -926,6 +932,8 @@ class Uint8Array {
 // abbreviation - and the clock from __jsClockMs(); the engine provides both. Strings
 // and toLocale* are node 24's in the en-US locale.
 var __msDay = 86400000
+// TimeClip's bound, 100,000,000 days either side of the epoch.
+var __dMaxMs = 8640000000000000
 var __dayNames = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
 var __monNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
 // The long name V8 shows for a zone, by the abbreviation the host reports; another
@@ -993,7 +1001,7 @@ function __dMake(y, mo, d, h, mi, s, ms) {
     return day * __msDay + Math.trunc(h) * 3600000 + Math.trunc(mi) * 60000 + Math.trunc(s) * 1000 + Math.trunc(ms)
 }
 function __dClip(t) {
-    if (t !== t || Math.abs(t) > 8.64e15) { return NaN }
+    if (t !== t || Math.abs(t) > __dMaxMs) { return NaN }
     return Math.trunc(t) + 0
 }
 // The local zone's offset in milliseconds at UTC time t.
@@ -1367,14 +1375,14 @@ function __dParse(str) {
     if (dv === null || tv === null) { return NaN }
     var t = __dMake(dv[0], dv[1], dv[2], tv[0], tv[1], tv[2], tv[3])
     if (tz.sign === null) {
-        if (Math.abs(t) > 8.64e15 + 864000000) { return NaN }
+        if (Math.abs(t) > __dMaxMs + 864000000) { return NaN }
         return __dClip(__dUTC(t))
     }
     var secs = (tz.h === null ? 0 : tz.h) * 3600 + (tz.m === null ? 0 : tz.m) * 60
     // V8 holds the offset in seconds as a 32-bit small integer.
     if (secs > 2147483647) { return NaN }
     t = t - secs * tz.sign * 1000
-    if (Math.abs(t) > 8.64e15) { return NaN }
+    if (Math.abs(t) > __dMaxMs) { return NaN }
     return __dClip(t)
 }
 function __dArgs(args, from, n, dflt) {
@@ -1581,7 +1589,7 @@ function __timerClear(h) {
     for (var i = 0; i < __timers.length; i++) {
         var tm = __timers[i]
         if (tm === h || (typeof h === "number" && tm.__id === h) || (typeof h === "string" && String(tm.__id) === h)) {
-            __timers.splice(i, 1)
+            __arrDrop(__timers, i)
             return
         }
     }
@@ -1605,7 +1613,7 @@ function __timerTick() {
         tm.__seq = __timerSeq
         tm.__due = tm.__due + tm.__ms
     } else {
-        __timers.splice(at, 1)
+        __arrDrop(__timers, at)
     }
     tm.__f(...tm.__args)
     return true

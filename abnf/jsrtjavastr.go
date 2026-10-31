@@ -1572,8 +1572,8 @@ func jvClassNameOf(v interface{}) string {
 // jvCceMsg is java 24's ClassCastException message: the two classes and where
 // each was loaded from (java.base for java.*, an array of primitives and an
 // array of java.* classes; the unnamed module of the app loader otherwise).
-// Twin of jCceMsg in java-interpreter.abnf and jvCceMsg in
-// languages/lib/java-rt.metajs.
+// Twin of jvmCceMsg in languages/lib/java-cce.js, which the java and kotlin
+// interpreters and layer 2 share.
 func jvCceMsg(src, dst string) string {
 	where := func(n string) bool {
 		e := strings.TrimLeft(n, "[")

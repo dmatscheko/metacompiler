@@ -79,6 +79,7 @@
 import "./runtime.metajs"
 import "./fdlibm.js"
 import "./java-chars.js"
+import "./java-cce.js"
 import "./regex.js"
 import "./java-regex.js"
 import "./utf16-strings.js"
@@ -2388,31 +2389,9 @@ function js_jvis(v, t0) {
 function js_jvcast(v, t, dst) {
     if (v === undefined || v === null || typeof v == "function" || js_jvis(v, t)) { return v }
     if ((t == "Comparable" || t == "CharSequence") && jvBoxName(v) == "" && !Array.isArray(v)) { return v }
-    jvThrowCls(jvCceCls, jvCceMsg(js_jvgetclass(v)["__cname"], dst))
+    jvThrowCls(jvCceCls, jvmCceMsg(js_jvgetclass(v)["__cname"], dst))
     return v
 }
-// java 24's ClassCastException message. Twin of jvCceMsg in
-// abnf/jsrtjavastr.go.
-function jvCceMsg(src, dst) {
-    var head = "class " + src + " cannot be cast to class " + dst + " ("
-    var bs = jvCceBase(src)
-    var bd = jvCceBase(dst)
-    if (bs && bd) { return head + src + " and " + dst + " are in module java.base of loader 'bootstrap')" }
-    if (!bs && !bd) { return head + src + " and " + dst + " are in unnamed module of loader 'app')" }
-    return head + src + jvCceWhere(bs) + "; " + dst + jvCceWhere(bd) + ")"
-}
-function jvCceWhere(base) {
-    if (base) { return " is in module java.base of loader 'bootstrap'" }
-    return " is in unnamed module of loader 'app'"
-}
-function jvCceBase(n) {
-    var i = 0
-    while (n.charAt(i) == "[") { i = i + 1 }
-    if (i > 0 && n.charAt(i) != "L") { return true }
-    if (i > 0) { i = i + 1 }
-    return n.substring(i, i + 5) == "java."
-}
-
 // String's chars / codePoints / lines: the stream's of() over the receiver's
 // array, or an ordinary call when the receiver is no String. Twin of
 // js_jvstrstream in abnf/jsrtjavastr.go.
