@@ -135,7 +135,7 @@ Sp          = { " " | "\t" | "\r" } ;
     }
 
     function calcError(msg) {
-        println("Error: " + msg)
+        eprintln("Error: " + msg)
         exit(1)
     }
 

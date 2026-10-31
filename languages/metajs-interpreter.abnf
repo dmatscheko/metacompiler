@@ -1013,7 +1013,7 @@ KwDefault   = "default" KwEnd ;
     }
     // fail(msg): a RUNTIME ERROR, not an exception, and NOT interp-core.js's
     // fail() - that one is the tag script's own diagnostic and prints
-    // "metajs interpreter error: ..." on stdout. Host id 36 of the C floor writes
+    // "metajs interpreter error: ..." on stderr. Host id 36 of the C floor writes
     // "js runtime error: " + the message to STDERR and exits 1, and abnf/jsrt.go's
     // rt.fail says the same words; this reproduces those bytes. Every layer-2 file
     // calls fail(), so it is part of the MetaJS host contract and not an extra.

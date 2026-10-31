@@ -172,7 +172,7 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
         for (var i = scopes.length - 1; i >= 0; i--) {
             if (hasOwn(scopes[i], name)) return scopes[i]
         }
-        println("Error: Variable not defined: " + name)
+        eprintln("Error: Variable not defined: " + name)
         exit(1)
     }
     function getVar(name) { return findScope(name)[name] }
@@ -185,7 +185,7 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
         }
         var f = hasOwn(funcs, name) ? funcs[name] : undefined
         if (f == undefined) {
-            println("Error: Function not defined: " + name)
+            eprintln("Error: Function not defined: " + name)
             exit(1)
         }
         // Every call gets a fresh scope chain: TinyC has no global variables.
@@ -386,7 +386,7 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
         exit(sret)
     }
     if (funcs[entry] == undefined) {
-        println("Error: TinyC programs need a " + entry + "() function.")
+        eprintln("Error: TinyC programs need a " + entry + "() function.")
         exit(1)
     }
 

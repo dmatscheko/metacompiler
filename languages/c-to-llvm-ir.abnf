@@ -4798,7 +4798,7 @@ KwDefault   = "default" KwEnd ;
         exit(sres.Ret)
     }
     if (funcs[entry] == undefined || funcs[entry].Blocks.length == 0) {
-        println("Error: C programs need a " + entry + "() function.")
+        eprintln("Error: C programs need a " + entry + "() function.")
         exit(1)
     }
     if (ginitF != undefined) { wrapEntry(entry, ginitF) }
@@ -4818,11 +4818,11 @@ KwDefault   = "default" KwEnd ;
         if (undef.length > 0) {
             var names = undef[0]
             for (var ui = 1; ui < undef.length; ui++) { names = names + ", " + undef[ui] }
-            println("c compiler: function not defined: " + names)
+            eprintln("c compiler: function not defined: " + names)
             exit(1)
         }
         var buildErr = llvm.BuildExecutable(m, c.exePath)
-        if (buildErr != "") { println(buildErr); exit(1) }
+        if (buildErr != "") { eprintln(buildErr); exit(1) }
         println("c compiler: wrote executable " + c.exePath)
         exit(0)
     }

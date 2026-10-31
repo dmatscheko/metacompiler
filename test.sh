@@ -763,7 +763,7 @@ cross_strip() {
 #
 # stdout and stderr are concatenated (stdout first) rather than compared
 # separately, because WHICH STREAM the diagnostic uses is itself a difference
-# between the legs: the interpreter halves print it on stdout, llvm.Run and the
+# between the legs: some interpreter halves print it on stdout, llvm.Run and the
 # native binaries on stderr. Concatenating per leg is deterministic and keeps
 # the program's own pre-abort output in the comparison too.
 #

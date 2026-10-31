@@ -89,7 +89,7 @@ var BRK = {sig: "break"}
 var CONT = {sig: "continue"}
 
 function fail(msg) {
-    println(core.lang + " interpreter error: " + msg)
+    eprintln(core.lang + " interpreter error: " + msg)
     exit(1)
 }
 

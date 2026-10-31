@@ -1053,7 +1053,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return items
     }
     function hasOwn(o, name) { return Object.prototype.hasOwnProperty.call(o, name) }
-    function fail(msg) { println("bash-to-llvm-ir error: " + msg); exit(2) }
+    function fail(msg) { eprintln("bash-to-llvm-ir error: " + msg); exit(2) }
 
     // A byte a \xHH / \NNN escape produced: a character below 0x80; above, the lone surrogate
     // U+DC80..U+DCFF standing for that raw byte (see ansiWord).
@@ -6088,7 +6088,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // running it in the built-in IR interpreter.
     if (c.exePath != undefined && c.exePath != "") {
         var buildErr = llvm.BuildExecutable(m, c.exePath, rts)
-        if (buildErr != "") { println(buildErr); exit(1) }
+        if (buildErr != "") { eprintln(buildErr); exit(1) }
         println("bash-to-llvm-ir: wrote executable " + c.exePath)
         exit(0)
     }

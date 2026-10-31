@@ -426,16 +426,13 @@ function retStmt(b, v) {
 function emitBreak(b) {
     if (loopStack.length > 0) { b.NewBr(loopStack[loopStack.length - 1].brk); return }
     if (inCtlBody()) { b.NewRet(callExt(b, "js_ctl_break", [])); return }
-    // Outside every loop and every try/finally closure: a plain grammar bug in
-    // the program; the bare loopStack read used to crash the compiler instead.
-    println("compile error: break outside of a loop")
-    exit(1)
+    // Outside every loop and every try/finally closure: the program is wrong.
+    fail("break outside of a loop")
 }
 function emitContinue(b) {
     if (loopStack.length > 0) { b.NewBr(loopStack[loopStack.length - 1].cont); return }
     if (inCtlBody()) { b.NewRet(callExt(b, "js_ctl_continue", [])); return }
-    println("compile error: continue outside of a loop")
-    exit(1)
+    fail("continue outside of a loop")
 }
 
 // A goto that leaves a try body is the fourth signal: js_ctl_goto(n) has kind 4 + n,

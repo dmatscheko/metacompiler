@@ -3225,7 +3225,7 @@ KwContract  = "contract" KwEnd ;
         return n == "" ? null : ktIsName(n)
     }
     // ----- Imports & errors -----
-    function fail(msg) { println("kotlin compiler error: " + msg); exit(1) }
+    function fail(msg) { eprintln("kotlin compiler error: " + msg); exit(1) }
 
     // ----- reified type parameters -----
     // The reified type-parameter names of the function whose body is being walked. A
@@ -8938,7 +8938,7 @@ KwContract  = "contract" KwEnd ;
         if (rts == undefined || rts.length == 0) { rts = [libPath("runtime.ll"), libPath("kotlin-rt.ll")] }
         var buildErr = llvm.BuildExecutable(m, c.exePath, rts)
         if (buildErr != "") {
-            println(buildErr)
+            eprintln(buildErr)
             exit(1)
         }
         println("kotlin compiler: wrote executable " + c.exePath)

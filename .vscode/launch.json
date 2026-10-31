@@ -309,6 +309,139 @@
             "program": "${workspaceFolder}","args": ["languages/c-preprocessor.abnf", "tests/c-fail-test-redef-block.c", "-pipe", "languages/c-to-llvm-ir.abnf", "-qq"]
         },
         {
+            "name": "Java to LLVM IR -qq, a compile error still shows SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "expectError": "java compiler error: unresolved import 'com.acme.external.Widget'",
+            "program": "${workspaceFolder}","args": ["languages/java-to-llvm-ir.abnf", "tests/java-fail-test-import.java", "-qq"]
+        },
+        {
+            "name": "Kotlin to LLVM IR -qq, a compile error still shows SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "expectError": "kotlin compiler error: unresolved import 'com.example.widget.Widget'",
+            "program": "${workspaceFolder}","args": ["languages/kotlin-to-llvm-ir.abnf", "tests/kotlin-fail-test-import.kt", "-qq"]
+        },
+        {
+            "name": "Kotlin interpreter -qq, an interpreter error still shows SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "expectError": "kotlin interpreter error: unresolved import 'com.example.widget.Widget'",
+            "program": "${workspaceFolder}","args": ["languages/kotlin-interpreter.abnf", "tests/kotlin-fail-test-import.kt", "-qq"]
+        },
+        {
+            "name": "Python to LLVM IR -qq, a compile error still shows SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "expectError": "python compiler error: unresolved import 'notarealmodule'",
+            "program": "${workspaceFolder}","args": ["languages/python-to-llvm-ir.abnf", "tests/python-fail-test-import.py", "-qq"]
+        },
+        {
+            "name": "PHP to LLVM IR -qq, a compile error still shows SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "expectError": "php compiler error: include/require not implemented",
+            "program": "${workspaceFolder}","args": ["languages/php-to-llvm-ir.abnf", "tests/php-test-recognize.php", "-qq"]
+        },
+        {
+            "name": "Dart to LLVM IR -qq, a compile error still shows SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "expectError": "dart compiler error: library directive not implemented",
+            "program": "${workspaceFolder}","args": ["languages/dart-to-llvm-ir.abnf", "tests/dart-test-recognize.dart", "-qq"]
+        },
+        {
+            "name": "Swift to LLVM IR -qq, a compile error still shows SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "expectError": "swift compiler error: await expression not implemented",
+            "program": "${workspaceFolder}","args": ["languages/swift-to-llvm-ir.abnf", "tests/swift-test-recognize.swift", "-qq"]
+        },
+        {
+            "name": "CSharp to LLVM IR -qq, a compile error still shows SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "expectError": "csharp compiler error: goto names an unknown label: nowhere",
+            "program": "${workspaceFolder}","args": ["languages/csharp-to-llvm-ir.abnf", "-code", "class P { static void Main() { goto nowhere; } }", "-qq"]
+        },
+        {
+            "name": "Lua to LLVM IR -qq, a compile error still shows SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "expectError": "lua compiler error: no visible label 'nowhere' for goto",
+            "program": "${workspaceFolder}","args": ["languages/lua-to-llvm-ir.abnf", "-code", "goto nowhere", "-qq"]
+        },
+        {
+            "name": "MetaJS to LLVM IR -qq, a compile error still shows SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "expectError": "metajs compiler error: unresolved import './nosuch.js'",
+            "program": "${workspaceFolder}","args": ["languages/metajs-to-llvm-ir.abnf", "-code", "import './nosuch.js'", "-qq"]
+        },
+        {
+            "name": "Bash to LLVM IR -qq, a compile error still shows SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "expectError": "bash-to-llvm-ir error: [ used without the closing",
+            "program": "${workspaceFolder}","args": ["languages/bash-to-llvm-ir.abnf", "-code", "[ a = b", "-qq"]
+        },
+        {
+            "name": "Bash interpreter -qq, an interpreter error still shows SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "expectError": "bash interpreter error: [ used without the closing",
+            "program": "${workspaceFolder}","args": ["languages/bash-interpreter.abnf", "-code", "[ a = b", "-qq"]
+        },
+        {
+            "name": "TinyC to LLVM IR -qq, a compile error still shows SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "expectError": "Error: Variable not defined: x",
+            "program": "${workspaceFolder}","args": ["languages/tinyc-to-llvm-ir.abnf", "-code", "func main() { return x; }", "-qq"]
+        },
+        {
+            "name": "TinyC interpreter -qq, an interpreter error still shows SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "expectError": "Error: Variable not defined: x",
+            "program": "${workspaceFolder}","args": ["languages/tinyc-interpreter.abnf", "-code", "func main() { return x; }", "-qq"]
+        },
+        {
+            "name": "Lisp to LLVM IR -qq, a compile error still shows SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "expectError": "Error: The head of a list must be a symbol",
+            "program": "${workspaceFolder}","args": ["languages/lisp-to-llvm-ir.abnf", "-code", "(1 2)", "-qq"]
+        },
+        {
+            "name": "Lisp interpreter -qq, an interpreter error still shows SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "expectError": "Error: The head of a list must be a symbol",
+            "program": "${workspaceFolder}","args": ["languages/lisp-interpreter.abnf", "-code", "(1 2)", "-qq"]
+        },
+        {
+            "name": "Calculator to LLVM IR -qq, a compile error still shows SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "expectError": "Error: this integer calculator needs a whole exponent",
+            "program": "${workspaceFolder}","args": ["languages/calculator-to-llvm-ir.abnf", "-code", "2^(0-1)", "-qq"]
+        },
+        {
+            "name": "Calculator scientific interpreter -qq, an error still shows SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "expectError": "Error: unknown function 'foo'",
+            "program": "${workspaceFolder}","args": ["languages/calculator-scientific-interpreter.abnf", "-code", "foo(1)", "-qq"]
+        },
+        {
+            "name": "C interpreter -qq, a missing main still shows SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "expectError": "Error: C programs need a main() function.",
+            "program": "${workspaceFolder}","args": ["languages/c-interpreter.abnf", "-code", "int f() { return 0; }", "-qq"]
+        },
+        {
             "name": "MetaJS interpreter (pinning self test)",
             "type": "go",
             "request": "launch",

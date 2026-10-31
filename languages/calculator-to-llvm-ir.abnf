@@ -86,7 +86,7 @@ Number      = "0" | "1"..."9" { "0"..."9" } ;
     }
 
     function calcError(msg) {
-        println("Error: " + msg)
+        eprintln("Error: " + msg)
         exit(1)
     }
 
@@ -191,7 +191,7 @@ Number      = "0" | "1"..."9" { "0"..."9" } ;
     // compilers, whose programs write to stdout.
     if (c.exePath != undefined && c.exePath != "") {
         var buildErr = llvm.BuildExecutable(m, c.exePath)
-        if (buildErr != "") { println(buildErr); exit(1) }
+        if (buildErr != "") { eprintln(buildErr); exit(1) }
         println("calculator-to-llvm-ir: wrote executable " + c.exePath + " (result is its exit code, mod 256)")
         exit(0)
     }
@@ -205,7 +205,7 @@ Number      = "0" | "1"..."9" { "0"..."9" } ;
     println("JS reference result: " + formula.v)
     println("Compiled result:     " + got)
     if (got != formula.v) {
-        println("MISMATCH!")
+        eprintln("MISMATCH!")
         exit(1)
     }
     println("OK")

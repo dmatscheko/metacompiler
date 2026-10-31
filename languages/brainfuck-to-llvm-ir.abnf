@@ -169,7 +169,7 @@ Whitespace = { !@+"><+-.,?[]" } ;
     // it; the Brainfuck program's output goes through putchar, so the binary prints it.
     if (c.exePath != undefined && c.exePath != "") {
         var buildErr = llvm.BuildExecutable(m, c.exePath)
-        if (buildErr != "") { println(buildErr); exit(1) }
+        if (buildErr != "") { eprintln(buildErr); exit(1) }
         println("brainfuck: wrote executable " + c.exePath)
         exit(0)
     }

@@ -94,7 +94,7 @@ class reported "constructor name does not match class". Nothing points at the
 duplicated name. `mec <grammar> -verify` now reports this as an error; run it
 after editing a script.
 
-**A warning belongs on `eprintln`, never on `println`.** `println` is bound to
+**A warning or an error belongs on `eprintln`, never on `println`.** `println` is bound to
 `outWriter`, which is stdout — the same channel a compiler grammar emits its
 MODULE on and an interpreter grammar prints the PROGRAM's output on, and the
 channel `-pipe` swaps out to capture one stage's text as the SOURCE of the next.
@@ -102,7 +102,8 @@ A `println("warning: …")` therefore ends up inside the emitted module, inside 
 program output, or inside the next stage's program text. `eprintln(…)` is the
 diagnostic channel: standard error, not redirectable, and deliberately NOT
 silenced by `-q`/`-qq` (those are about module and program output; a warning is a
-diagnostic about the compile). It is bound in both script hosts — goja in
+diagnostic about the compile; a compile error printed with `println` vanishes under
+`-qq`, leaving only the exit status). It is bound in both script hosts — goja in
 `abnf/commonscript.go`, frozen in `standardJSBindings` (`abnf/jsrt.go`) — and the
 two bindings must stay identical, since `./test.sh` compares the two engines'
 stderr byte for byte on every `-q` entry, exactly as it does their stdout.

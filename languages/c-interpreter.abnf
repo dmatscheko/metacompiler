@@ -3674,7 +3674,7 @@ KwDefault   = "default" KwEnd ;
         exit(sret)
     }
     if (funcs[entry] == undefined) {
-        println("Error: C programs need a " + entry + "() function.")
+        eprintln("Error: C programs need a " + entry + "() function.")
         exit(1)
     }
     var ret = callFunction(entry, []).v | 0

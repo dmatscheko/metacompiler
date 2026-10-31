@@ -2174,7 +2174,7 @@ HasStatic   = :script(~~
     var feCount = 0 // Names hidden foreach counters.
 
     // ----- Imports & errors -----
-    function fail(msg) { println("java compiler error: " + msg); exit(1) }
+    function fail(msg) { eprintln("java compiler error: " + msg); exit(1) }
 
     // ----- the scope probe -----
     // "the value of this name if it is declared anywhere up the chain, else a
@@ -6562,7 +6562,7 @@ HasStatic   = :script(~~
         if (rts == undefined || rts.length == 0) { rts = [libPath("runtime.ll"), libPath("java-rt.ll")] }
         var buildErr = llvm.BuildExecutable(m, c.exePath, rts)
         if (buildErr != "") {
-            println(buildErr)
+            eprintln(buildErr)
             exit(1)
         }
         println("java compiler: wrote executable " + c.exePath)

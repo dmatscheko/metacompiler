@@ -58,7 +58,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
 
     function fail(msg) {
-        println("Error: " + msg)
+        eprintln("Error: " + msg)
         exit(1)
     }
 
@@ -327,7 +327,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // actually called); llvm.BuildExecutable stubs such functions so the module still links.
     if (c.exePath != undefined && c.exePath != "") {
         var buildErr = llvm.BuildExecutable(m, c.exePath)
-        if (buildErr != "") { println(buildErr); exit(1) }
+        if (buildErr != "") { eprintln(buildErr); exit(1) }
         println("lisp: wrote executable " + c.exePath)
         exit(0)
     }

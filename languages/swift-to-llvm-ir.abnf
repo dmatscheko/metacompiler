@@ -2047,7 +2047,7 @@ KwContinue  = "continue" KwEnd ;
     var hidCount = 0     // Names hidden loop bounds.
     var classNames = {}  // Known struct/class names (constructor calls).
 
-    function fail(msg) { println("swift compiler error: " + msg); exit(1) }
+    function fail(msg) { eprintln("swift compiler error: " + msg); exit(1) }
 
     // ----- Imports -----
     // System frameworks / modules the platform already provides (the standard library,
@@ -12613,7 +12613,7 @@ KwContinue  = "continue" KwEnd ;
         if (rts == undefined || rts.length == 0) { rts = [libPath("runtime.ll"), libPath("swift-rt.ll")] }
         var buildErr = llvm.BuildExecutable(m, c.exePath, rts)
         if (buildErr != "") {
-            println(buildErr)
+            eprintln(buildErr)
             exit(1)
         }
         println("swift compiler: wrote executable " + c.exePath)

@@ -1617,7 +1617,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
 
     var hidCount = 0
 
-    function fail(msg) { println("php compiler error: " + msg); exit(1) }
+    function fail(msg) { eprintln("php compiler error: " + msg); exit(1) }
 
     // The source position of a statement, for -trace / -cfgraph / -callgraph /
     // -why. This is the same marker every other handle-IR language emits, but it
@@ -9318,7 +9318,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         if (rts == undefined || rts.length == 0) { rts = [libPath("runtime.ll"), libPath("php-rt.ll")] }
         var buildErr = llvm.BuildExecutable(m, c.exePath, rts)
         if (buildErr != "") {
-            println(buildErr)
+            eprintln(buildErr)
             exit(1)
         }
         println("php compiler: wrote executable " + c.exePath)

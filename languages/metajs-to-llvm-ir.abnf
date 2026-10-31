@@ -1129,7 +1129,7 @@ KwDefault   = "default" KwEnd ;
                 cases.push(cur)
             } else {
                 if (cur == null) {
-                    println("js compiler error: switch: a statement before the first case label")
+                    eprintln("js compiler error: switch: a statement before the first case label")
                     exit(1)
                 }
                 cur.body.push(p)
@@ -1207,7 +1207,7 @@ KwDefault   = "default" KwEnd ;
     // runs the program, and then calls main() - the self checking test convention.
     // ----- Project-file imports (see the ImportStmt rule) -----
     // compile-core's resolveImport calls fail() on an unresolved import; add a local one.
-    function fail(msg) { println("metajs compiler error: " + msg); exit(1) }
+    function fail(msg) { eprintln("metajs compiler error: " + msg); exit(1) }
     function metajsImport(items, pos) {
         resolveImport(items[items.length - 1], pos)
         return function(b) { return b }
@@ -1654,7 +1654,7 @@ KwDefault   = "default" KwEnd ;
         emitDispatch("jsdispatch", ownRt)
         if (ownRt) { rts = [libPath("runtime.ll"), libPath("metajs-rt.ll")] }
         var buildErr = llvm.BuildExecutable(m, c.exePath, rts)
-        if (buildErr != "") { println(buildErr); exit(1) }
+        if (buildErr != "") { eprintln(buildErr); exit(1) }
         println("js compiler: wrote executable " + c.exePath)
         exit(0)
     }

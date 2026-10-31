@@ -1138,7 +1138,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function hasOwn(o, name) { return Object.prototype.hasOwnProperty.call(o, name) }
 
     function fail(msg) {
-        println("bash interpreter error: " + msg)
+        eprintln("bash interpreter error: " + msg)
         exit(2)
     }
 

@@ -1259,7 +1259,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
 
     // resolveImport / notImpl (lib/compile-core.js) call fail; each compiler
     // defines it. Bare early returns are braced (MetaJS has no ASI).
-    function fail(msg) { println("python compiler error: " + msg); exit(1) }
+    function fail(msg) { eprintln("python compiler error: " + msg); exit(1) }
 
     // The source position of a statement, for -trace / -cfgraph / -callgraph /
     // -why. It is NOT core stmtPos (lib/compile-core.js), because up.pos is the
@@ -5603,7 +5603,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (rts == undefined || rts.length == 0) { rts = [libPath("runtime.ll"), libPath("python-rt.ll")] }
         var buildErr = llvm.BuildExecutable(m, c.exePath, rts)
         if (buildErr != "") {
-            println(buildErr)
+            eprintln(buildErr)
             exit(1)
         }
         println("python compiler: wrote executable " + c.exePath)

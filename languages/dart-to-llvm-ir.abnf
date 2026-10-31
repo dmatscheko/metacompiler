@@ -1320,7 +1320,7 @@ KwSuper     = "super" KwEnd ;
     // unescapeJs resolves the JS/Dart string escapes.
 
     // A clean compile-time abort (used by the shared notImpl helper in compile-core.js).
-    function fail(msg) { println("dart compiler error: " + msg); exit(1) }
+    function fail(msg) { eprintln("dart compiler error: " + msg); exit(1) }
 
     // ----- Project-file imports (import 'lib.dart';) -----
     // dart: libraries are builtins the runtime already provides, so importing one is a
@@ -5304,7 +5304,7 @@ KwSuper     = "super" KwEnd ;
         if (rts == undefined || rts.length == 0) { rts = [libPath("runtime.ll"), libPath("dart-rt.ll")] }
         var buildErr = llvm.BuildExecutable(m, c.exePath, rts)
         if (buildErr != "") {
-            println(buildErr)
+            eprintln(buildErr)
             exit(1)
         }
         println("dart compiler: wrote executable " + c.exePath)

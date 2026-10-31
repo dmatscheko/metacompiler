@@ -1660,7 +1660,7 @@ KwLet       = "let" KwEnd ;
     var feCount = 0 // Names hidden foreach counters.
 
     // ----- Imports & errors -----
-    function fail(msg) { println("csharp compiler error: " + msg); exit(1) }
+    function fail(msg) { eprintln("csharp compiler error: " + msg); exit(1) }
 
     // Import roots the runtime already provides (Console, collections, ...); importing
     // them is a no-op. Anything else is a library we cannot resolve.
@@ -3178,8 +3178,7 @@ KwLet       = "let" KwEnd ;
                     if (sc.names[j] == name) { b.NewBr(sc.blocks[j]); return deadBlock() }
                 }
             }
-            println("compile error: goto names an unknown label: " + name)
-            exit(1)
+            fail("goto names an unknown label: " + name)
             return b
         }
     }
@@ -3188,7 +3187,7 @@ KwLet       = "let" KwEnd ;
     var csSwitchStack = []
     function makeGotoCase(t) {
         return function(b) {
-            if (csSwitchStack.length == 0) { println("compile error: goto case outside of a switch"); exit(1); return b }
+            if (csSwitchStack.length == 0) { fail("goto case outside of a switch"); return b }
             var sw = csSwitchStack[csSwitchStack.length - 1]
             var r = t(b)
             callExt(r.b, "js_scope_set", [sw.scope, emitStr(r.b, sw.name), r.v])
@@ -3198,7 +3197,7 @@ KwLet       = "let" KwEnd ;
     }
     function makeGotoDefault() {
         return function(b) {
-            if (csSwitchStack.length == 0) { println("compile error: goto default outside of a switch"); exit(1); return b }
+            if (csSwitchStack.length == 0) { fail("goto default outside of a switch"); return b }
             b.NewBr(csSwitchStack[csSwitchStack.length - 1].dflt)
             return deadBlock()
         }
@@ -7281,7 +7280,7 @@ KwLet       = "let" KwEnd ;
         if (rts == undefined || rts.length == 0) { rts = [libPath("runtime.ll"), libPath("csharp-rt.ll")] }
         var buildErr = llvm.BuildExecutable(m, c.exePath, rts)
         if (buildErr != "") {
-            println(buildErr)
+            eprintln(buildErr)
             exit(1)
         }
         println("csharp compiler: wrote executable " + c.exePath)
