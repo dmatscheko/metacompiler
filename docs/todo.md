@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-887** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-888** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -85,6 +85,22 @@ not change the renderer.
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
 # GO — Go  (oracle: `go run`)
+
+### T-887 go: replace the gc-imitating FMA analysis with one source-shape rule via `llvm.fmuladd` · P2 · GO · OPEN [V]
+The fusion decision now copies parts of gc's optimiser: whole-function constant
+analysis, an unreassigned product local fused like gc's SSA value, per-part negation
+tracking for complex values (languages/lib/go-constfold.js, both Go grammars,
+abnf/jsrtgolang.go). The Go spec only says an implementation MAY fuse, and an explicit
+`float64()` / `float32()` conversion prevents it. Rule to implement: fuse exactly a
+product that is a direct operand of `+` / `-` within one expression, not separated by
+an explicit conversion; nothing else, no constant or local tracking. Compiler: emit
+`llvm.fmuladd` for that shape and plain fmul/fadd elsewhere (no `contract` flags, so
+LLVM never fuses on its own). llvm.Run must execute `llvm.fmuladd` as a real fused
+operation, as AArch64 native does. Interpreter: fuse the same shape. Delete the
+analysis this replaces. Assertions whose `go run` digits differ under the simpler rule
+are corrected to it and listed as a by-design divergence (manual 7.9); the `math`
+library ports keep their own fusion, since that is a property of the library's source
+expressions. Verify all four legs agree on a generated float-expression probe.
 
 # SW — Swift  (oracle: swiftc 6.1.2)
 

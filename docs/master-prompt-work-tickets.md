@@ -103,6 +103,13 @@ Rules:
   kotlin-stdlib-2.2.21.jar) can be called from a java program. TypeScript: a real tsc
   ships with VS Code (manual ch. 5). No dotnet, dart, kotlinc or php: for those, fix
   only what the language specification settles unambiguously and say so.
+- No optimizers. We emit LLVM IR and LLVM owns optimisation: never write an
+  inliner, constant propagation, SSA data flow or a memory pass, including to imitate
+  the oracle compiler's optimiser. Where the spec leaves a result to the
+  implementation (Go: an implementation "may" fuse a*b+c), choose ONE rule decided
+  from the source shape, express it in IR the way clang does (e.g. llvm.fmuladd), make
+  every leg follow it, and record the oracle's remaining difference as by design. If
+  matching the oracle needs its optimiser, report the ticket as DECLINED.
 - Use tests/probe.sh <lang> <file> --oracle <cmd> to compare all four legs.
 - Never special-case a test value. Never weaken an assertion to make it pass. A test
   that asserts a wrong answer is corrected to the oracle's answer (or removed if it
@@ -178,7 +185,8 @@ Never take a report at face value. For each worker branch:
    (`git diff main...<branch> -- . ':!*.ll' ':!abnf/jsagrammar.go'`). Reject or fix:
    history comments, special-cased values, weakened or deleted assertions without an
    oracle reason, wrappers on hot paths, copy-pasted bodies, unrelated changes, new
-   files nobody needs, edits to docs/todo.md.
+   files nobody needs, edits to docs/todo.md, and any optimiser-style analysis
+   (whole-function value tracking, inlining decisions) written to match an oracle.
 2. Reproduce at least one fix per ticket yourself with `tests/probe.sh` against the
    oracle, on the branch's binary.
 3. Integrate: `git merge --ff-only <branch>` if it is rebased on current `main`,
@@ -253,6 +261,9 @@ path, never `git add -A`. Untracked files you did not create are the user's, not
   2.6; `node --check` is CommonJS - use `new vm.Script(src)` for the Script goal.
 - An assertion that passes before the fix has no discriminating power: check it fails
   on the old code.
+- Chasing an oracle's implementation-defined output grows into a copy of its
+  optimiser: the Go FMA work added ~450 lines of gc-style constant and SSA tracking to
+  match last-digit rounding the spec leaves open. Decline at the first sign of it.
 
 ## Stop condition
 
