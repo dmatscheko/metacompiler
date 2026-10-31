@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-925** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-941** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -149,11 +149,40 @@ non-global RegExp argument`; all legs nothing. Files: replaceAll in abnf/jsrt.go
 `/\u{61}/` without the u flag throws "invalid unicode escape" in all legs; node accepts it (Annex B: `u` 61 times).
 `/\p{L}/u.test("é")` → node true, all legs false.
 
+### T-937 ts: an arrow with an untyped parameter and a return annotation `(x): T =>` does not parse · P2 · JS · OPEN [V]
+`keep(vals, (x): boolean => x >= lim)` → tsc 6 + node `big=4,5`; both halves fail at the `:`. `const g = (x): boolean => …` and
+type predicates `(x): x is number =>` the same; `(x: number): boolean =>` works. Corpus:
+contextuallyTypedFunctionExpressionsAndReturnAnnotations, thisTypeInTypePredicate, intraExpressionInferences.
+
+### T-938 ts compiler: parses 90 fewer must-parse corpus files than the interpreter · P2 · JS · OPEN [V]
+5197 vs 5287 of 5527; 79 of the compiler-only failures are tsc-clean. Repro (verified):
+`type Ret<T> = T extends () => infer R ? R : never;` → interp and tsc fine, compiler fails at 1:26. Finder's clusters (~60 files): a
+function type in a conditional `extends`; `infer X extends C`; `typeof import("m")`; `using` / `await using` in for heads (~14);
+`export default class {}` (decoratedDefaultExports*, decoratorOnClass4/8); `export {} from './0' with {…}`; a tagged template after
+`new`; a raw NUL in a string.
+
+### T-939 js: halves disagree on line terminators, NUL in strings, parenthesised update targets · P2 · JS · OPEN [V finder only]
+Compiler only (node and interp accept): U+2028 / U+2029 / CR ending a statement; a raw NUL inside a string literal; `(o.n)++`,
+`(a)++`, `(a)--` (pass/0fa2102f53acd283, 5b8fad162f489b3b, 6498dcc494193cb4, c7e5fba8bf3854cd). Interpreter only: `([1].a) = v`
+(pass/687f678cde900411, parsed in the August sweep - lost), and early/2b4520facdc72696 `--0`, early/8b659d2805837e98 `++0` now
+refused by the interpreter only (a halves divergence; see T-210 for the declined twin).
+
 # JV — Java
 
 ### T-909 java: `System.err.flush()` throws · P3 · JV · OPEN [V]
 interp NullPointerException; run and native "method call 'flush' on a undefined"; `System.out.flush()` works. Files: the
 System.err surface in both java grammars / java-rt.metajs.
+
+### T-931 java interp: unbounded recursion through a field initializer hangs instead of StackOverflowError · P1 · JV · OPEN [V]
+`class R1 { R1 fs = new R1(); }` with `try { new R1(); } catch (StackOverflowError e) { System.out.println("SOE"); }` → java,
+llvm.Run and native `start` / `SOE`; interp prints `start` and hangs (killed at 20 s). The recursion guard is not reached on the
+field-initializer path. Corpus: 8 javac files time out for this reason (DiamondRedundantArgs, T6951833, T7102515,
+QualifiedAccess_3, MethodReference55, …). Files: object construction in java-interpreter.abnf.
+
+### T-932 java: cyclic inheritance hangs the compiler and is accepted by the interpreter · P3 · JV · OPEN [V finder only]
+`interface A extends A.B { interface B {} }` → javac "cyclic inheritance involving A"; llvm.Run hangs, interp runs main. Corpus
+compiler timeouts: CyclicScoping_1/_2, ClassCycle4, CyclicInheritance, cycle/T8193561. Also accepted although javac rejects:
+`class var {}`, `yield(1, 2);`.
 
 # CS — C#  (no dotnet here: spec-only, ECMA-334 and the .NET reference source)
 
@@ -214,6 +243,17 @@ copy of the complex box. Files: go-to-llvm-ir.abnf, address-of a field / index o
 `break` at function level compiles and exits 0 in both compilers; gc and swiftc reject it. The go and swift compile-time
 "variable not defined" errors carry the prefix `js runtime error:`. Shared: swift-to-llvm-ir.abnf.
 
+### T-927 go: a struct type with a map of itself hangs every engine before main · P1 · GO · OPEN [V]
+`type S struct { n int; m map[int]S }`; `func main() { var s S; fmt.Println("len", len(s.m), s.n) }` → go `len 0 0`; interp and
+llvm.Run produce nothing and hang (killed at 20 s), the native `-exe` build never finishes. `[]S` of itself is right. Also
+fixedbugs/bug190.go. Files: zero-value / type registration for map element types in both go grammars.
+
+### T-928 go: `*p` / `x.a` as the target of a select-case receive or a for-range assignment does not parse · P2 · GO · OPEN [V]
+`for *p, *q = range arr { … }` → go `sum 17 i 2 v 6`, both halves "Not everything could be parsed" at the `=`.
+`case *p = <-c:`, `case x.a = <-c:`, `case (<-c):` → interp parse failure, compiler "composite literal not implemented" (finder).
+Corpus: chan/select4, fixedbugs/gcc61253, fixedbugs/issue20923 (all three parsed in the July sweep: lost since), chan/select3,
+fixedbugs/issue6847, range.go.
+
 # SW — Swift  (oracle: swiftc 6.1.2)
 
 # DA — Dart  (no dart here: spec-only)
@@ -221,6 +261,18 @@ copy of the complex box. Files: go-to-llvm-ir.abnf, address-of a field / index o
 ---
 
 # PHP — PHP  (no php here: spec-only, php.net / php-src behaviour)
+
+### T-929 php: `var_dump` of an array that holds a reference to itself never terminates · P1 · PHP · OPEN [V]
+`$a = array(array(1)); $a[0][] =& $a[0]; var_dump($a);` → all legs hang (killed at 20 s); without the var_dump they agree.
+php-src bug35163.phpt EXPECT prints the slot as `&array(…)` with `*RECURSION*` (spec-only oracle). The `dumping[]` guard in
+dumpOf (php-interpreter.abnf) covers objects only, and the `&` marker of a reference slot is never printed; the same in phDumping
+(lib/php-rt.metajs) and phpDumping (abnf/jsrtphp.go). Corpus: bug35163.php, bug35163_2.php.
+
+### T-930 php: parse gaps the corpus lost or never had · P3 · PHP · OPEN [V finder only]
+Oracle: php-src .phpt EXPECT. Property hooks on promoted constructor parameters (PHP 8.4, property_hooks/property_promotion,
+gh17101 - parsed in July, lost); `xor` / `and` / `or` in a const expression (`const T1 = 1 xor 0;`); interpreter only:
+`$o?->{$str . "bar"}` (nullsafe_operator/bug81216); a fully-qualified trait name in a trait adaptation, `\TraitC::exit as bye;`
+(grammar/semi_reserved_006, _008, lost since July).
 
 ---
 
@@ -234,6 +286,31 @@ copy of the complex box. Files: go-to-llvm-ir.abnf, address-of a field / index o
 `x=9 builtin echo hi`, `x=3 command eval 'echo $x'` → bash `hi`, `3`; every engine "command not found: builtin/command", exit
 127. Both are common in real scripts (`command -v`, wrapping a builtin in a same-named function). Files: builtin dispatch in both
 bash grammars, lib/bash-rt.c.
+
+### T-933 bash compiled: a computed `eval` silently does nothing; its assignment form keeps the comment · P1 · SH · OPEN [V]
+`for c in "${cmds[@]}"; do eval "$c"; done` over `('echo a' 'echo b # tail' … 'x=5 # t; echo no')`, then `echo "x=$x"` → bash
+and interp print a, b, c, `d # not`, e and `x=5`; run and native print none of the echoes and `x=5 # t; echo no`;
+-warn-unsupported says nothing. The grammar documents that a computed eval is lowered only for NAME=VALUE: anything else must at
+least be a loud compile error, and the NAME=VALUE form must stop at the first unquoted `#`, `;` or newline. Files:
+bash-to-llvm-ir.abnf (rt_eval_assign).
+
+### T-934 bash: backslash removal inside backtick command substitution · P1 · SH · OPEN [V]
+POSIX 2.6.3: inside backticks `\\` → `\`, `\$` → `$`, `` \` `` → backtick (and `\"` inside double quotes). ``echo "[2 `echo \\ `]"`` →
+bash `[2  ]`, all legs `[2 \]`. ``echo "2 `echo \\(`"`` → bash `2 (`, all legs a parse error; `` `echo \ ` `` and `` `echo \\\\ ` ``
+fail to parse at EOF (bash `[1  ]` / `[3 \]`). Corpus: command-sub/017, 021, 022, 023, 024 (022 and 024 parsed in July).
+
+### T-935 bash: declaration builtins refuse a computed or quoted operand and `+attr` · P2 · SH · OPEN [V]
+`declare ${names[0]}='hello there'`, `readonly "$binding"`, `local "$1"`, `declare 'q=1'`, `typeset +x e=E2`, `declare +i n` →
+"Not everything could be parsed" in both halves; bash `foo=hello there`, `bar=7`, `x=y`, `q=1`, `e=E2`, `n=2+3`. 16 of the 19
+oils must-parse files lost since the July sweep are this (append/015, assign-extended/033 034 035 036, assign/017 032 035 038,
+builtin-printf/006 007, nameref/005, nix-idioms/005, tilde/003, type-compat/005 006).
+
+### T-936 bash: an `eval` / `trap` string that does not parse aborts the program; `${ cmd;}` · P2 · SH · OPEN [V finder only]
+`eval '# only a comment'` and `eval '   '` abort the interpreter (run and native are right); `trap '# comment' EXIT; echo done`
+fails to parse in both halves (bash `done`); a snippet with a real syntax error (`eval 'echo z ${(m)foo} z'`) must report "bad
+substitution", set status 1 and continue - ours aborts in both halves. Corpus: builtin-trap/015, zsh-idioms/003 (lost since July),
+assign-extended/021, var-ref/013. Also bash 5.3 function substitution `${ cmd;}` / `${| cmd;}` does not parse
+(command-sub-ksh/001, 004).
 
 # C — C subset
 
@@ -249,6 +326,12 @@ Neighbour of T-755. `int md(int a,int b){return a%b;}` / `int (*single)(int,int)
 "variable not defined: md" (cc prints 1 for `single(9,4)`); inside a function the interpreter accepts it, run and native fail
 the same way. Without the `&` it works. Files: makeAddr in c-to-llvm-ir.abnf (local and global), the global initializer in
 c-interpreter.abnf.
+
+### T-940 c: array dimensions and enumerators accept only + - * / % << >> - no `sizeof`, `?:`, comparisons, `| & ^`, char constants · P2 · C · OPEN [V]
+`int b[1 | 2]; int c[2 ? 3 : 1]; int d[(3 > 1) + 1]; int f[4 == 4];` → cc `12 12 8 8 4`; both halves fail at the first.
+Finder, same cause: `int s[sizeof(int)];`, `char u['A' - 60];`, `enum { A = 1 | 4, B = (3 > 1) ? 7 : 2 };`. `sizeof` in a dimension
+is ordinary C. The DimShift chain in c-interpreter.abnf (and the compiler's) should be the full integer constant expression.
+Corpus: 00207.c (`int a[1 && 1]`).
 
 # CORE — MetaJS, the engines, shared runtime, tooling
 
@@ -347,6 +430,27 @@ Byte-identity between goja and -frozen is a matrix invariant, but these are unpi
 `1/parseInt("-0")` Infinity; `"" + main` is 765 characters of the interpreter's own closure source and `"" + Math.floor` names
 `14.gy/mec/abnf.installGojaMathSurface.func1` (other legs `[function]`). Files: metajs-interpreter.abnf (binOp, the string
 methods handed to goja natively), abnf/frozen.go vs the goja surface.
+
+### T-925 parse time grows exponentially with bracket nesting in seven grammars, both halves · P1 · CORE · OPEN [V]
+Found by the corpus sweep (go torture.go, swift structure_overflow.swift, dart deep_nesting_expression_test.dart time out).
+Measured on an idle machine, interpreter half (the compiler halves grow the same):
+kotlin `println((((((1))))))`: depth 6 1.85 s, 7 6.99 s, 8 27.2 s (x4/level); the real-shaped
+`val r = ((((((a + 1) * 2) + v[1]) * 2) + v[2]) * 2)` takes 2.4 s. php `[1, [1, [1, …]]]`: depth 4 0.17 s, 5 0.30, 6 0.83, and per
+the finder 16.6 s at 6 under load, >60 s at 10. Finder measurements, each about x1.6-2.3 per level: python `[[`/`((` (6.2 s at
+depth 15; JSON-shaped `[{"k": [{"k": …}]}]` 2.4 s at 6), swift `[[` (>60 s at 20), dart `((` (12.2 s at 10), c `((` (5.8 s at
+11), go nested index `s[s[s[…]]]` (11 s at 16). js, ts, java, csharp, ruby, lua and bash are linear. The trigger in each is an
+alternative that re-parses the whole bracket body before failing (kotlin lambda/destructuring/parenthesised callee, php list
+destructuring target, python comprehension/genexp, swift array/dict/type, go generic instantiation). Decide first between a
+per-grammar fix (cut or reorder each alternative) and memoising rule results at a position in the PEG engine (abnf/), which
+fixes all seven at once; measure the memo cost on the matrix. Shared: the seven grammars.
+
+### T-926 tooling: sweep.sh misclassifications; probe.sh builds the native leg with no timeout · P3 · CORE · OPEN [V finder only]
+tests/reference/sweep.sh: 53 java files carry `@run compile/fail` without `@compile/fail` and are scored must-parse (CyclicScoping_*
+among them); bash case_/012-in-pattern-regression.sh and extglob-match/020 are scored reject because `bash -n` does not run their
+`shopt -s extglob`; typescript's directory rule scores as must-parse 219 interpreter / 251 compiler failures that tsc reports
+grammar errors for (TS1xxx / TS17xxx / TS18xxx via getSemanticDiagnostics) - the honest TS interp ceiling is about 5303/5527.
+`find "$ROOT/$dir"` does not descend into a symlinked corpus directory (add `-L` or `$dir/`). tests/probe.sh runs the native
+`-exe` build without a timeout, so a hanging build (T-927) blocks the probe forever.
 
 # Closed
 
