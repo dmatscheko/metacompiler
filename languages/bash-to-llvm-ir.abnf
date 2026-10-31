@@ -720,12 +720,18 @@ CondMatchOp <~~ push({cop: up.in}) ~~> = "=~" ;
 RegexWord   <~~ push(mkNsWord(takeAll())) ~~> = RegexSeg :whitespace() { RegexSeg } ;
 // A QUOTED or backslash-escaped part of the regex is literal ([[ abc =~ "a.c" ]] is false
 // in bash 5.3), so those segments are regex-escaped.
-RegexSeg    = RxSq | RxDq | ExpSeg | RxEsc | RegexBare ;
+RegexSeg    = RxSq | RxDq | ExpSeg | RxEsc | RxGroup | RegexBare ;
 RxSq        = "'" :whitespace() { !@+"'" } <~~ push(makeConst(regexEscape(up.in))) ~~> "'" ;
 RxDq        <~~ push(mkQuotedRx(mkDqWord(takeAll()))) ~~>
             = '"' :whitespace() { DqExpSeg | DqEsc | DqLit } '"' ;
 RxEsc       <~~ push(makeConst(regexEscape(escChar(up.in)))) ~~> = "\\" AnyCh ;
-RegexBare   <~~ push(makeConst(up.in)) ~~> = !@+" \t\n\r;&<>$'\"\\`" ;
+RegexBare   <~~ push(makeConst(up.in)) ~~> = !@+" \t\n\r;&<>$'\"\\`(" ;
+// Inside ( ) blanks and ; & < > are ordinary characters as well: bash 5.3 reads
+// [[ $s =~ ^([^ ]+)(a;b) ]] as one regex word.
+RxGroup     = RxOpen :whitespace() { RxSq | RxDq | ExpSeg | RxEsc | RxGroup | RxInBare } RxClose ;
+RxOpen      <~~ push(makeConst(up.in)) ~~> = "(" ;
+RxClose     <~~ push(makeConst(up.in)) ~~> = ")" ;
+RxInBare    <~~ push(makeConst(up.in)) ~~> = !@+"()\n$'\"\\`" ;
 CondParen   = "(" CondOr Linebreak ")" ;
 CondUn      <~~ push(mkCondUn(takeAll())) ~~> = CondUnOp NsWord ;
 CondUnOp    <~~ push({cop: up.in}) ~~> = CondUnTok KwEnd ;

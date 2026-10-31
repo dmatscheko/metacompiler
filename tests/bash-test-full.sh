@@ -483,6 +483,10 @@ s11() {
   re='(ab|a)(bab)?'; [[ abab =~ $re ]]; check dbr82 "${BASH_REMATCH[0]}|${BASH_REMATCH[1]}|${BASH_REMATCH[2]}" "abab|a|bab"
   re='a|ab|abc'; [[ xabcx =~ $re ]]; check dbr83 "${BASH_REMATCH[0]}" abc
   re='(a|ab|aba)*'; [[ abab =~ $re ]]; check dbr84 "${BASH_REMATCH[0]}-${BASH_REMATCH[1]}" abab-ab
+  # inside ( ) of a literal regex, blanks and ; & < > belong to the word
+  local sp="key a;b"
+  if [[ $sp =~ ^([^ ]+)( a;b)$ ]]; then check dbr85 "${BASH_REMATCH[1]}" key; else check dbr85 no yes; fi
+  if [[ "x<y z" =~ (<y z) ]]; then check dbr86 "${BASH_REMATCH[1]}" "<y z"; else check dbr86 no yes; fi
 }
 
 # ===== SECTION 12: the test builtin =====
