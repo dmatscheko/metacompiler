@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-879** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-881** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -94,12 +94,11 @@ not change the renderer.
 
 # GO — Go  (oracle: `go run`)
 
-### T-878 go: FMA where gc does NOT fuse — constant-propagated operands, variables, inlining · P3 · GO · IN PROGRESS (GO worker, round 13) [V master]
-`z := complex(1.1, 2.3); w := complex(0.7, -1.9); fmt.Println(z*w)` → go `(5.139999999999999-0.48i)` (gc propagates the
-constants and folds z*w at compile time, no FMA); ours fuses → `(5.14-0.4800000000000002i)` in every leg (main was right
-by not fusing at all). The GO worker's remaining model gaps: a product reaching the add through a variable (gc fuses
-while it is an SSA value), inlined helpers (`f(a,b)+c` fuses; they also shift the per-function two-multiply count),
-constant propagation, dead/duplicate code misleading the CSE choice. Model constant-valued operands at least.
+### T-879 go: a complex multiply with a negated part fuses the wrong product · P3 · GO · IN PROGRESS (GO worker, round 14) [V GO worker]
+`arr := []float64{0.3, -0.77, 1.9, 1.1, 0.7, 2.3}; u := complex(arr[3], arr[5]); v := complex(arr[4], -arr[2]); u*v` →
+go `(5.139999999999999-0.4800000000000001i)`, ours `(5.14-0.4800000000000001i)` in every leg (conjugate multiplies in FFT
+code). A negated part makes b*d an FNMULD, so ARM64.rules fuse the LEFT product of the real part; our complex-multiply model
+always fuses the right one. Verify with `go build -gcflags=-S`.
 
 # SW — Swift  (oracle: swiftc 6.1.2)
 
@@ -121,11 +120,12 @@ constant propagation, dead/duplicate code misleading the CSE choice. Model const
 
 # CORE — MetaJS, the engines, shared runtime, tooling
 
-### T-845 compiler grammars: `fail` prints on stdout, so `-qq` swallows compile errors · P2 · CORE · IN PROGRESS (CORE worker, round 11) [V C worker]
-With `-qq` (and inside `-pipe`) a compile error of most `*-to-llvm-ir.abnf` grammars vanishes and only
-rc=1 is left, because their `fail` uses `println` — the channel -qq silences. C now uses `eprintln`;
-check every other compiler (and interpreter) grammar's error path and add one -qq row that shows the
-message survives.
+### T-880 ruby/js/typescript/go compilers: errors still on stdout under -qq · P3 · CORE · IN PROGRESS (CORE worker, round 12) [V CORE worker]
+Follow-up of the -qq channel fix: still `println` — js-to-llvm-ir.abnf `fail` (~3368) and `buildErr` (~7724, 7813, 8023,
+8537); typescript-to-llvm-ir.abnf `fail` (~2320), `buildErr` (~6757, 6840, 7038, 7470); ruby-to-llvm-ir.abnf `rxFail`
+(~2526), `fail` (~2683), `buildErr` (~6330, 8977); go-to-llvm-ir.abnf `fail` (~5144, 5154, 7214), `buildErr` (~7354).
+Also lib/regex.js default `rxFail` (~155, `println("regexp error: ")`) — compiled into eight layer-2 .ll files, regenerate
+with gen-all; bash-interpreter and dart-interpreter do not override it. Add -qq SHOULD FAIL rows like the existing ones.
 
 ### T-184 dart: `IndexError` vs `RangeError` text for `[1,2,3][7]` · P3 · DA · BLOCKED - needs a Dart VM to settle [U spec-only]
 A reviewer argued the VM prints `RangeError (index): Invalid value: Not in inclusive
@@ -909,6 +909,8 @@ T-875 ruby: frozen binary strings, super with no superclass method, class_eval b
 T-869 go: FMA fusion, complex64, cmplx trig, `*p` through *complex128 — DONE 2444244d (gc's arm64 FMA fusion modelled per measured rules — fused operand, blockers, two-multiply choice by CSE per function, complex mult/div — via a host fma (runtime.c d_fma host 113, Go math.FMA); complex64 with float32 rounding via js_gocxop; cmplx trig/hyperbolic and math Sinh..Log2; *p stores through pointer types; also fixed a package function losing to a same-named main-file function, and f(0, g(x)) argument order; go bench −0.2%)
 T-861 ts/js: `bind` on a class — DONE eccc75c5 (bind on a class constructs through the class with node's name/length/new.target; call/apply/bare call of a class raise node's TypeError — interps, Go twin, layer 2, emitters)
 T-870 ts/js: toStringTag for Map/Set/typed arrays; Uint8Array gaps — DONE eccc75c5 (toStringTag getters for Map/Set/WeakMap/WeakSet/Uint8Array/ArrayBuffer, hidden Date tag, [object Function] for classes, no Symbol.toStringTag gate; ArrayBuffer with byteLength/slice/isView and shared views; out-of-range typed-array writes dropped)
+T-878 go: FMA where gc does NOT fuse — constant-propagated operands, variables, inlining — DONE 3889f62b..374490fa (compile-time-known operands fold without FMA, deferred to whole-function analysis; a product read through an unreassigned local fuses like gc's SSA value; also a negated-last-factor ordering bug, goja/frozen binding drift, and software math.FMA's own guard. DECLINED with evidence: inlined helpers and directly-called closures (needs gc's inliner cost model), constant propagation through reassignment/phis (SSA data flow), store-to-load forwarding for address-taken locals (memory passes), t*1 rewrites — each was unfused before this round, none is a regression)
+T-845 compiler grammars: `fail` prints on stdout, so `-qq` swallows compile errors — DONE a18a3447 for every grammar but ruby/js/typescript/go (fail/buildErr/interp-core fail → eprintln, compile-core break/continue through fail with a re-freeze, 19 -qq SHOULD FAIL rows); those four and regex.js rxFail filed as T-880. DECLINED: batch's 'cannot find the batch label' message channel — no cmd.exe oracle here
 
 # Settled — do not re-open
 
