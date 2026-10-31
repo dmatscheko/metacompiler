@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-941** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-955** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -77,6 +77,94 @@ Neighbour of T-769. `def main(): print("main ran")` / `def run(): main()` / `xs=
 `main ran` once, all legs twice. The heuristic (pyTopRunsEntry) only sees a direct top-level call or a `__name__` test; a program
 whose top level executes any call statement probably should not get the implicit entry. Files: pyTopRunsEntry in both python
 grammars.
+
+### T-941 python: a raise in a try's `else` clause - the compiler catches it with the same try's `except`, the interpreter skips `finally` · P1 · PY · OPEN [V]
+`def f(n): try: pass / except Exception: return "exc" / else: if n > 0: raise KeyError(n); return "else-ret" / finally:
+print("finally", n)`, called with 1 inside `try … except KeyError as k: print("caught", k)` → python `finally 1`, `caught 1`; run
+and native `finally 1`, `result exc` (the else raise is swallowed by the except); interp `caught 1` with no `finally 1`. Also inside
+`with` (compiled: `__exit__` sees None) and in a generator (interp drops the finally). Compiler: makeTry appends the else block to
+the try body (its comment calls this "a rare deviation"; not in manual 7.9). Interpreter: makeTry runs elseT() inside the host
+`finally {}`, so a throw there skips finallyT(). Files: makeTry in both python grammars.
+
+### T-942 python: a right operand of a subclass type that overrides the reflected method is not tried first · P1 · PY · OPEN [V]
+Base has `__add__ __mul__ __eq__ __lt__`, Sub(Base) has `__radd__ __rmul__ __eq__ __gt__`: `b+s`, `b*s`, `b==s`, `b<s` → python
+`Sub.radd Sub.rmul Sub.eq Sub.gt`; all legs `Base.add Base.mul Base.eq Base.lt`. `1 + s`, `2.0 + F(1.0)`, `5 - I(1)` are right.
+Files: the user-class binary-operator dispatch in both python grammars, lib/python-num.js / layer 2.
+
+### T-943 python: int / float dict and set keys at large magnitudes - three engines, three wrong answers · P1 · PY · OPEN [V]
+Per pair (i, f): `d = {i: "int"}; d[f] = "float"; s = {i, f}`, print `len(d) d[i] len(s)` and `f in {i}`, `i in {f}`, `f in {i:0}`,
+`i in {f:0}`. (2**53+1, 2.0**53) unequal: python `2 int 2 False False False False`, interp `1 float 1 True True True True` (lossy
+key equality merges them), run/native right. (2**64, 2.0**64) equal, also 2**100 and 10**20 vs 1e20: python `1 float 1 True True
+True True`; run `2 int 1 … False False` (the dict misses although == and hash agree), native `2 int 2 … False False`.
+(2**100+1, 2.0**100): interp merges again. Interp also `{1.0} & {1}` → `{1.0}` (python `{1}`). Files: dict/set key hashing and
+equality for the big-int box in abnf/jsrt*.go, layer 2 / lib/runtime.c, the interpreter's key normalisation.
+
+### T-944 python: `in`, `==`, `count`, `index`, `remove` and dict/set keys ignore identity · P1 · PY · OPEN [V]
+CPython compares `x is y or x == y`. `class E: __eq__ = lambda s, o: False; __hash__ = object.__hash__`; `e = E(); xs = [e]`:
+`e in xs`, `e in (e,)` → python True True, interp True True, run/native False False; `xs == xs`, `[e] == [e]` the same;
+`xs.count(e)` → python 1, all legs 0; `xs.index(e)` → python 0, all legs ValueError. The same NaN object: `n in [n]`, `[n] == [n]`
+True in python, False in run/native; `{n}` + `s.add(n)` → python len 1, run/native 2; `d[n] = 1; d[n] = 2` → python `{nan: 2}`,
+run `{nan: 1, nan: 2}`, native `{nan: 2}`. Two distinct NaNs are handled right, so identity is available. Files: list
+count/index/remove in all engines, `in` / sequence == / dict-set lookup in abnf/jsrt*.go and layer 2.
+
+### T-945 python: slice bounds beyond 2**53 give wrong slices, differently per engine · P1 · PY · OPEN [V]
+`l = [1,2,3]; s = "abcdef"; b = 4611686018427387904` (also 2**63, 10**20): `l[:b] l[-b:] s[:b] l[b:] l[1:b:2]` → python `[1, 2, 3]
+[1, 2, 3] 'abcdef' [] [2]`; interp and native `[] [] '' [] []`; run `[] [1, 2, 3] '' [1, 2, 3] []`. Step `l[::10**20]` → python
+`[1]`, interp `[3]`, native `[]`, run "slice step cannot be zero". Bounds up to 2**53 are right: the big-int box is not clamped.
+P3 companion: `l[2**53+1]` says "cannot fit 'int' into an index-sized integer" (CPython says "list index out of range" below
+2**63). Files: sliceIdx / pySliceStep (interp), js_pyslice (abnf/jsrt*.go), the layer-2 clamp.
+
+### T-946 python: `__index__` is ignored by slices (silently), `range`, sequence repetition and `chr` · P1 · PY · OPEN [V]
+`class Num: __index__ returns v`; `n = Num(3)`: `range(n)` → python `range(0, 3)`, all legs TypeError; `[0,1,2,3][Num(1):n]` →
+python `[1, 2]`, all legs `[]`; `"ab" * n` → `ababab`, `[0] * n` → `[0, 0, 0]`, all legs TypeError "can't multiply sequence";
+`chr(Num(65))` → `A`, all legs TypeError. Indexing `[..][Num(1)]`, `hex`, `bin` are right. Files: the integer coercion used by
+slice, range, `*` and chr in both grammars and layer 2.
+
+### T-947 python compiler: an Exception subclass whose `__init__` skips `super().__init__` has no args · P1 · PY · OPEN [V]
+`class NoSuper(Exception): def __init__(self, x, y): self.x = x`; `e = NoSuper(1, 2)`: `str(e) repr(e) e.args` → python and interp
+`(1, 2)  NoSuper(1, 2)  (1, 2)`; run and native `<__main__.NoSuper object>` twice, then uncaught AttributeError 'args' (exit 1).
+BaseException.__new__ stores args before __init__ runs. Files: exception construction in python-to-llvm-ir.abnf / layer 2.
+
+### T-948 python: walrus targets inside a generator expression (and in the interp a module-level comprehension) do not bind outside · P1 · PY · OPEN [V]
+`def w2(): g = list((t := v) for v in [1, 2]); return g, t` → python `([1, 2], 2)`, all legs UnboundLocalError 't'; module-level
+`sum((m := v) for v in data), m` the same. Interp only: module-level `print([(m := v) for v in data], m)` with m new → NameError
+(python, run, native `[1, 2, 3] 3`). PEP 572: the target binds in the enclosing non-comprehension scope. Files: comprehension
+scoping in both python grammars.
+
+### T-949 python: PEP 479 - a StopIteration inside a generator is not turned into RuntimeError · P1 · PY · OPEN [V]
+`def pairs(xs): it = iter(xs); for a in it: yield a, next(it)`; `list(pairs([1,2,3,4,5]))` inside `try … except RuntimeError as e`
+→ python `RE generator raised StopIteration` (with `__cause__` the StopIteration); all legs let StopIteration escape uncaught,
+exit 1, nothing printed. Files: generator resumption in both grammars / layer 2.
+
+### T-950 python: a raise in `finally` while an exception propagates has `__context__` None; `__cause__ =` keeps `__suppress_context__` False · P1 · PY · OPEN [V]
+`try: raise KeyError("k2") finally: helper()` (helper raises TypeError) → python `e.__context__` KeyError('k2'); all legs None.
+Context from an except body and from `__exit__` is right. Assigning `e.__cause__ = X` must set `__suppress_context__` True (all
+legs False). Files: the finally lowering in both grammars.
+
+### T-951 python: int / float subclass instances rejected by %-formatting and `format(x, spec)` · P1 · PY · OPEN [V]
+`class Money(int)`, `class F(float)`: `"%d" % Money(5)` → python `5`, all legs TypeError "%d format: a real number is required, not
+Money" (also %x, %5.1f, %i); `format(Money(5), ">6")` → `     5`, all legs "unsupported format string passed to
+Money.__format__"; `"%d" % F(2.5)` → 2. Files: the %-format and format() paths in both grammars and layer 2 (accept int/float
+subclasses by their primitive value).
+
+### T-952 python: an unknown method on a str or list is an uncatchable host error, not AttributeError · P2 · PY · OPEN [V]
+`for v in ["x", 1, 1.5, [], {}, (), None]: try: v.nope() except AttributeError as e: print("AE", e)` → python one AE line each;
+interp aborts with "method call .nope() on x", run/native "unknown String method: nope" (and "unknown list method"). int, float,
+dict, tuple and None are right; `"x".__setitem__(0, "b")` fails the same way. Breaks duck-typing via try/except AttributeError.
+Files: the str / list method dispatch fallbacks in both grammars and layer 2.
+
+### T-953 python interp: slice assignment with a start below -len never terminates · P1 · PY · OPEN [V]
+`l = [1, 2, 3]; l[-10:0] = [0]` → python, run, native `[0, 1, 2, 3]`; interp hangs (killed). `at = lo + o.length` for `lo < 0` is
+not clamped to 0 before listTruncate / slice (python-interpreter.abnf, slice assignment).
+
+### T-954 python: smaller data-model gaps · P3 · PY · OPEN [V finder only]
+All legs agree, python differs: bound-method equality `a.m == a.m` is False (python True); `__bool__` returning 1 and `__len__`
+returning -1 or 2**70 raise nothing (python TypeError / ValueError / OverflowError); an inconsistent MRO is accepted; `pow(obj, 2, 5)`
+does not reach `__pow__(self, o, m)`; `gen.send(5)` on a just-started generator does not raise TypeError, `gi_running` missing;
+`KeyboardInterrupt` undefined; interp only: `E(False) == 3` with `__eq__` returning an object calls that object's `__bool__`;
+`sorted` is not timsort, so lists with NaN order differently (`[nan, 1.0, 0.5, nan, -1.0, inf, -0.0, 0.0]` → python
+`[0.5, nan, -1.0, nan, -0.0, 0.0, 1.0, inf]`) and the comparison call sequence differs; codecs utf-16/32, cp1252 and the
+surrogateescape handler raise LookupError.
 
 # RB — Ruby
 
