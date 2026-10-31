@@ -455,17 +455,14 @@ Block       <~~ push(makeBlockStmt(takeAll())); cScopeExit() ~~>
 // A function's body is the SAME block as its parameters and results: when a `:=`
 // at its top level names one of them (cShortName), it runs in their scope, so
 // `i, j := 0, n` with i a named result assigns that result instead of shadowing it.
-FuncBody    <~~ push(goStmts(takeAll(), !cBodyShared())); cScopeExit(); goFmaFnExit() ~~>
-            = "{" CScopeOn FmaFnOn { Statement } "}" ;
+FuncBody    <~~ push(goStmts(takeAll(), !cBodyShared())); cScopeExit() ~~>
+            = "{" CScopeOn { Statement } "}" ;
 // Always-empty matches whose only purpose is their TAG, the shape NoBody uses: Go
 // source holds no NUL byte, so the optional never consumes anything. A rule's own tag
 // runs AFTER its children, and these three have to run before theirs - a '{' opens a
 // named-constant scope, a switch body takes its truncation mark, and a 'case' spends
 // it (Go scopes each case clause, while this body is parsed flat).
 CScopeOn    <~~ cScopeEnter() ~~> = [ "\x00" ] ;
-// A function body is one SSA function to gc, which decides which of two
-// multiplies an add fuses (goFmaLeft in go-constfold.js).
-FmaFnOn     <~~ goFmaFnEnter() ~~> = [ "\x00" ] ;
 CSwOn       <~~ cSwEnter() ~~> = [ "\x00" ] ;
 CCaseOn     <~~ cSwCase() ~~> = [ "\x00" ] ;
 
@@ -1142,10 +1139,10 @@ NewType     <~~ push({nty: firstType(up.in)}) ~~>
 // trailing '...' spreads a slice into the variadic parameter.
 Call        <~~ var ci = goAppendC(takeAll(), up.in); var csp = goSplitArgs(ci.slice(1))
                 var icv = goIfaceConvC(ci)
-                push(icv != null ? icv : makeCall(goCallBoxC(ci), csp.atys, goTpInfer(ci[0], csp, []))); goLenConstC(ci, up.start, up.pos); goKnCallC(ci[0], csp, up.pos) ~~>
+                push(icv != null ? icv : makeCall(goCallBoxC(ci), csp.atys, goTpInfer(ci[0], csp, []))); goLenConstC(ci, up.start, up.pos) ~~>
             = Id <~~ push(goLtyName(up.in)) ~~> "(" [ ArgExpr { "," ArgExpr } [ Spread ] [ "," ] ] ")" ;
 // A call argument reports its static type after it, for goSplitArgs.
-ArgExpr     <~~ var ae = pop(); push(goRuneDefC(ae, up.pos)); push({aty: stAt(up.pos), kr: goKRec(up.start, up.pos), pu: goPure(up.start, up.pos), nl: goNilSrc(up.start, up.pos), ep: up.pos}) ~~> = Expression ;
+ArgExpr     <~~ var ae = pop(); push(goRuneDefC(ae, up.pos)); push({aty: stAt(up.pos), kr: goKRec(up.start, up.pos), pu: goPure(up.start, up.pos), nl: goNilSrc(up.start, up.pos)}) ~~> = Expression ;
 // A returned value, which takes a rune constant at the RESULT's type (makeReturn).
 RetExpr     <~~ var re = pop(); push(re); push({aty: stAt(up.pos), rn: goIsRuneC(up.pos), kr: goKRec(up.start, up.pos), pu: goPure(up.start, up.pos)}) ~~> = Expression ;
 
@@ -3490,19 +3487,14 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         // Read BEFORE the clear below, which also erases the last operand's entry.
         var fplan = goFmaPlan(items, ops, sty)
         var fnegs = goFmaSwap(items, ts, fplan)
-        var kns = goKnRun(items)
-        var cxns = goCxnRun(items, sty)
         ts = goRunOrder(items, ts)
-        var prod = goFmaProduct(items, ops, sty, goFmaPair(ts, ops, ty), kns)
+        var prod = goFmaProduct(ops, sty, goFmaPair(ts, ops, ty))
         regConst(pos, null)
-        regKn(pos, kns[ops.length])
         regCFn(pos, cfn)
         regSt(pos, sty)
         regTk(pos, tk)
         regFma(pos, prod)
         if (fplan != null) { return goFmaRunC(ts, ops, fplan, fnegs, ty, sty) }
-        var cxf = goFmaCxRun(items, ops, sty, kns, cxns)
-        if (cxf != null) { return goCxRunC(ts, ops, cxf) }
         if (ty == null) {
             var flat = [ts[0]]
             for (var j = 0; j < ops.length; j++) { flat.push(ops[j]); flat.push(ts[j + 1]) }
@@ -3523,40 +3515,11 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         var negs = []
         if (plan == null) { return negs }
         for (var k = 0; k < plan.length; k++) {
-            var f = plan[k] == 0 || plan[k] >= 10 ? null : goFmaOperand(items, k, plan[k])
+            var f = plan[k] == 0 ? null : goFmaOperand(items, k, plan[k])
             if (f != null) { ts[plan[k] == 2 ? 0 : k + 1] = f.pair }
-            var ch = plan[k] >= 10 ? goFmaChoice(plan[k]) : null
-            if (ch != null && ch.r != null) { ts[k + 1] = ch.r.pair }
-            if (ch != null && ch.l != null) { ts[0] = ch.l.pair }
             negs.push(f != null && f.neg)
         }
         return negs
-    }
-    // A run of static complex type: each multiply fuses as cxMulF says.
-    // The answer has one goFmaCxMul record per operator, null for a '/'.
-    function goFmaCxRun(items, ops, sty, kns, cxns) {
-        if (cxns == null) { return null }
-        var cxs = []
-        var any = false
-        for (var k = 0; k < ops.length; k++) {
-            var cx = ops[k] == "*" ? goFmaCxMul(sty, goFmaText(items[1].as, items[3 * k + 4].at), kns[k + 1], k == 0 ? cxns[0] : null, cxns[k + 1]) : null
-            if (cx != null) { any = true }
-            cxs.push(cx)
-        }
-        return any ? cxs : null
-    }
-    function goCxRunC(ts, ops, cxs) {
-        return function() {
-            var v = anytype
-            v = ts[0]()
-            for (var k = 0; k < ops.length; k++) {
-                var w = anytype
-                w = ts[k + 1]()
-                if (cxs[k] != null && (isCx(v) || isCx(w))) { v = cxMulF(v, w, goFmaCxMode(cxs[k])) }
-                else { v = binOp(ops[k], v, w) }
-            }
-            return v
-        }
     }
     // The pair thunk of a multiply run: everything before the last '*', and the
     // last operand. Twin of goFmaPair in go-to-llvm-ir.abnf.
@@ -3573,76 +3536,26 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         }
     }
     function goFmaRunC(ts, ops, plan, negs, ty, sty) {
-        var f32 = ty == "float32" || stBare(sty) == "float32"
-        var fl = ty != null || isFloatTy(stBare(sty))
+        var fw = goFmaWidth(ty, sty)
         return function() {
             var v = anytype
             v = ts[0]()
             for (var k = 0; k < ops.length; k++) {
                 var w = anytype
                 w = ts[k + 1]()
-                if (plan[k] >= 10) {
-                    // Each multiply is a pair: the ones not fused are rounded first.
-                    var ch = goFmaChoice(plan[k])
-                    var sd = goFmaSide(plan[k])
-                    if (ch.l != null && sd != 2) { v = goFmaRound(v, ch.l.neg) }
-                    if (ch.r != null && sd != 1) { w = goFmaRound(w, ch.r.neg) }
-                    if (sd == 0) { v = ty == null ? binOp(ops[k], v, w) : goTypedOp(ty, ops[k], v, w) }
-                    else { v = goFmaStep(ops[k], v, w, sd, sd == 1 ? ch.r.neg : ch.l.neg, fl, f32) }
-                }
-                else if (plan[k] != 0) { v = goFmaStep(ops[k], v, w, plan[k], negs[k], fl, f32) }
+                if (plan[k] != 0) { v = goFmaStep(ops[k], v, w, plan[k], negs[k], fw) }
                 else if (ty == null) { v = binOp(ops[k], v, w) }
                 else { v = goTypedOp(ty, ops[k], v, w) }
             }
             return v
         }
     }
-    // The product of a pair, negated when neg; a pair marked whole is the
-    // product already (goFmaVarPair).
-    function goFmaRound(pr, neg) {
-        var p = anytype
-        p = pr.whole === true ? pr.fa : binOp("*", pr.fa, pr.fb)
-        return neg ? gNegV(p) : p
-    }
-    // A variable that holds a product (THROUGH A VARIABLE in go-constfold.js):
-    // the value of its declaration, exprs[si], keeps the factors of its product
-    // f beside it as name$fa and name$fb when a read may fuse, which is settled
-    // by the first run. Twin of goFmaDeclPair in go-to-llvm-ir.abnf.
-    function goFmaDeclPair(exprs, si, name, own, f) {
-        var t = exprs[si]
-        var ka = name + "$fa"
-        var kb = name + "$fb"
-        var pair = f.pair
-        var neg = f.neg
-        var keep = function() {
-            var pr = pair()
-            declVar(ka, pr.fa)
-            declVar(kb, pr.fb)
-            return goFmaRound(pr, neg)
-        }
-        return function() {
-            exprs[si] = own.used ? keep : t
-            return exprs[si]()
-        }
-    }
-    // The pair of a read of such a variable: its factors, or its value whole once
-    // the product no longer reaches the read, negated when the product carries a
-    // unary minus (neg). Twin of goFmaVarPair in go-to-llvm-ir.abnf.
-    function goFmaVarPair(name, via, neg) {
-        var rv = makeVarRef(name)
-        var ra = makeVarRef(name + "$fa")
-        var rb = makeVarRef(name + "$fb")
-        return function() {
-            if (!goFmaReach(via)) { return {fa: neg ? gNegV(rv()) : rv(), whole: true} }
-            return {fa: ra(), fb: rb()}
-        }
-    }
     // One fused step, l op r with the operand on side 1 (right) or 2 (left) a pair
-    // whose product is negated when neg. A float multiply rounds once with the add
-    // (fl: the run is statically a float); anything else - integers, complex
-    // values - is the multiply and the add as written. Twin of js_gofma in
-    // languages/lib/go-rt.metajs and abnf/jsrtgolang.go.
-    function goFmaStep(op, l, r, side, neg, fl, f32) {
+    // whose product is negated when neg. A float multiply rounds once with the add,
+    // at width fw (goFmaWidth) or, at 0, the operands' own; anything else -
+    // integers, complex values - is the multiply and the add as written. Twin of
+    // emitFmaStep in go-to-llvm-ir.abnf.
+    function goFmaStep(op, l, r, side, neg, fw) {
         var pr = side == 1 ? r : l
         var z = anytype
         z = side == 1 ? l : r
@@ -3650,13 +3563,15 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         x = pr.fa
         var y = anytype
         y = pr.fb
-        if (fl || ((isFlo(x) || isFlo(y)) && gFmaNum(x) && gFmaNum(y) && gFmaNum(z))) {
+        var w = fw
+        if (w == 0 && (isFlo(x) || isFlo(y)) && gFmaNum(x) && gFmaNum(y) && gFmaNum(z)) { w = isF32(x) || isF32(y) || isF32(z) ? 32 : 64 }
+        if (w != 0) {
             var a = gNumF(x)
             var b = gNumF(y)
             var c = gNumF(z)
             if (neg !== (op == "-" && side == 1)) { a = -a }
             if (op == "-" && side == 2) { c = -c }
-            if (f32 || isF32(x) || isF32(y) || isF32(z)) { return gFlo32(gFma32(coreF32Round(a), coreF32Round(b), coreF32Round(c))) }
+            if (w == 32) { return gFlo32(gFma32(coreF32Round(a), coreF32Round(b), coreF32Round(c))) }
             return gFlo(fma(a, b, c))
         }
         var p = anytype
@@ -3669,7 +3584,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // exact in a double, so s = p + z has the only rounding, and rounding s again to
     // 24 bits is right unless s fell exactly halfway between two binary32 values:
     // then the error TwoSum recovers says which way the exact sum lies. Twin of
-    // goFma32 in languages/lib/go-rt.metajs and abnf/jsrtgolang.go.
+    // fma32 in abnf/llvmmap.go, llvm.Run's llvm.fmuladd.f32.
     function gFma32(x, y, z) {
         var p = gMulF(x, y)
         var s = gAddF(p, z)
@@ -3868,20 +3783,13 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         var im = gSubF(cxPt(cxIm(l), w), cxPt(cxIm(r), w))
         return w ? newCx64(re, im) : newCx(re, im)
     }
-    function cxMul(l, r) { return cxMulF(l, r, 0) }
-    // gc multiplies (a+bi)(c+di) as a*c - b*d and a*d + b*c and fuses both
-    // (go-constfold.js): each part the multiply goFmaCxMode picks - or, mode 2,
-    // neither, as gc folds known operands.
-    function cxMulF(l, r, mode) {
+    // (a+bi)(c+di) is a*c - b*d and a*d + b*c, and the fused multiply-add rule
+    // (go-constfold.js) applies to each part as written: the right product fuses.
+    function cxMul(l, r) {
         var w = isCx64(l) || isCx64(r)
         var a = cxPt(cxRe(l), w), b = cxPt(cxIm(l), w), c2 = cxPt(cxRe(r), w), d = cxPt(cxIm(r), w)
-        if (mode == 2) {
-            var re2 = gSubF(gMulF(a, c2), gMulF(b, d))
-            var im2 = gAddF(gMulF(a, d), gMulF(b, c2))
-            return w ? newCx64(re2, im2) : newCx(re2, im2)
-        }
-        var im = mode == 1 || mode == 4 ? gFmaF(a, d, gMulF(b, c2)) : gFmaF(b, c2, gMulF(a, d))
-        var re = mode >= 3 ? gFmaF(a, c2, -gMulF(b, d)) : gFmaF(-b, d, gMulF(a, c2))
+        var re = gFmaF(-b, d, gMulF(a, c2))
+        var im = gFmaF(b, c2, gMulF(a, d))
         return w ? newCx64(re, im) : newCx(re, im)
     }
     // x*y + z rounded once, on plain numbers.
@@ -5239,16 +5147,6 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             exprs[0] = goAssignOpOperand(exprs[0], op, sp.krs[0], goRefTy(refs[0]))
             var fa = goFmaAssign(op, sp.fms[0], goRefTy(refs[0]))
             if (fa != null) { return goFmaAssignC(refs[0], op == "+=" ? "+" : "-", fa, stBare(goRefTy(refs[0]))) }
-            var cxa = goFmaCxAssign(op, goRefTy(refs[0]), sp.cns[0])
-            if (cxa != null) {
-                return function() {
-                    var cloc = refLoc(refs[0])
-                    var ccur = locRead(refs[0], cloc)
-                    var cw = anytype
-                    cw = exprs[0]()
-                    locWrite(refs[0], cloc, (isCx(ccur) || isCx(cw)) ? cxMulF(ccur, cw, goFmaCxMode(cxa)) : applyOp(op, ccur, cw))
-                }
-            }
             return function() {
                 var loc = refLoc(refs[0])
                 var cur = locRead(refs[0], loc)
@@ -5268,13 +5166,11 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     function goFmaAssignC(ref, op, fa, ty) {
         var pair = fa.pair
         var neg = fa.neg
-        var fl = isFloatTy(ty)
-        var f32 = ty == "float32"
+        var fw = goFmaWidth(null, ty)
         return function() {
             var loc = refLoc(ref)
             var cur = locRead(ref, loc)
-            if (goFmaLazy(fa) && !goFmaLive(fa)) { locWrite(ref, loc, binOp(op, cur, goFmaRound(pair(), neg))) }
-            else { locWrite(ref, loc, goFmaStep(op, cur, pair(), 1, neg, fl, f32)) }
+            locWrite(ref, loc, goFmaStep(op, cur, pair(), 1, neg, fw))
         }
     }
     // lastDeclNames is written at BUILD time by the short declaration just built, and
@@ -5312,7 +5208,6 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         // Each value reports its static type (StoreExpr): a struct value is copied and
         // the new name takes the type, so `b := a` copies and `q := p` aliases.
         var sp = goSplitSty(items.slice(i))
-        var own = goKnBind(names, sp)
         goTupleBind(names, sp.ts.length, sp.tys)
         var exprs = sp.ts
         if (names.length == exprs.length) {
@@ -5322,7 +5217,6 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                 exprs[si] = goConstTo(exprs[si], sp.krs[si], sp.rns[si] ? "rune" : "any", names.length > 1 ? "multiple assignment" : "assignment")
                 exprs[si] = goStoreThunk(exprs[si], goStCopyTy(sp.tys[si]))
                 if (sp.rns[si]) { exprs[si] = goI32Thunk(exprs[si]) }
-                if (own[si] != null) { exprs[si] = goFmaDeclPair(exprs, si, names[si], own[si], sp.fms[si]) }
             }
         }
         return function() {
@@ -5417,7 +5311,6 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         // struct, and so does `var i any = a` (a typed struct declaration copies by its
         // type as well).
         var sp = goSplitSty(items.slice(i))
-        var own = goKnBind(names, sp)
         if (ty == "") { goTupleBind(names, sp.ts.length, sp.tys) }
         var inits = sp.ts
         if (inits.length == names.length) {
@@ -5427,7 +5320,6 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                 inits[vi] = goNilTo(inits[vi], sp.nls[vi], ty)
                 inits[vi] = goDtBoxThunk(goStoreThunk(inits[vi], goStCopyTy(sp.tys[vi])), goDtBoxTo(sp.tys[vi], ty))
                 if (sp.rns[vi] && (ty == "" || goIsIfaceTy(stBare(ty)))) { inits[vi] = goI32Thunk(inits[vi]) }
-                if (own[vi] != null) { inits[vi] = goFmaDeclPair(inits, vi, names[vi], own[vi], sp.fms[vi]) }
             }
         }
         // A type naming a generic function's type parameters is resolved at run time.

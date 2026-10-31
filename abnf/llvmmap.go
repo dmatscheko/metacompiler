@@ -1396,7 +1396,10 @@ func callgraph(m *ir.Module) string {
 // store, getelementptr (into arrays and packed structs), the integer arithmetic /
 // logic / shift / compare instructions, casts, select, phi, br, condbr, ret,
 // direct calls, the host externs of an attached runtime, and the libc subset of
-// libcNative. Not supported: floats, indirect calls, and everything else.
+// libcNative. A float is carried as its IEEE-754 bit pattern (a float's in the low
+// 32 bits): bitcast, fneg, fptrunc double to float, fpext float to double and the
+// llvm.fmuladd intrinsics. Not supported: float arithmetic otherwise, indirect
+// calls, and everything else.
 
 // RunResult is what llvm.Run() returns to JS.
 type RunResult struct {
@@ -1531,6 +1534,9 @@ const (
 	dOpMask // zext / trunc / ptrtoint: mask the operand to w bits.
 	dOpSExt
 	dOpCopy // inttoptr / bitcast: the value passes through unchanged.
+	dOpFNeg // fneg: flip the sign bit of a w-bit float.
+	dOpFPTrunc
+	dOpFPExt
 	dOpSelect
 	dOpPhi // A phi behind a non-phi instruction; the block loop handles the leading ones.
 	dOpCall
@@ -1897,6 +1903,15 @@ func (ma *machine) decodeInst(inst ir.Instruction, dst int32, opnd func(value.Va
 		d.op, d.x, d.w = dOpMask, opnd(inst.From), wbits(inst.To)
 	case *ir.InstBitCast:
 		d.op, d.x = dOpCopy, opnd(inst.From)
+	case *ir.InstFNeg:
+		d.op, d.x, d.w = dOpFNeg, opnd(inst.X), 64
+		if types.Equal(inst.X.Type(), types.Float) {
+			d.w = 32
+		}
+	case *ir.InstFPTrunc:
+		d.op, d.x = dOpFPTrunc, opnd(inst.From)
+	case *ir.InstFPExt:
+		d.op, d.x = dOpFPExt, opnd(inst.From)
 	case *ir.InstSelect:
 		d.op, d.x, d.y, d.z = dOpSelect, opnd(inst.Cond), opnd(inst.ValueTrue), opnd(inst.ValueFalse)
 	case *ir.InstPhi:
@@ -2435,6 +2450,12 @@ func (ma *machine) exec(fr *frame, in *dinst, prev int32) {
 		fr.regs[in.dst] = maskTo(fr.rd(in.x), uint64(in.w))
 	case dOpCopy:
 		fr.regs[in.dst] = fr.rd(in.x)
+	case dOpFNeg:
+		fr.regs[in.dst] = fr.rd(in.x) ^ 1<<(in.w-1)
+	case dOpFPTrunc:
+		fr.regs[in.dst] = uint64(math.Float32bits(float32(math.Float64frombits(fr.rd(in.x)))))
+	case dOpFPExt:
+		fr.regs[in.dst] = math.Float64bits(float64(math.Float32frombits(uint32(fr.rd(in.x)))))
 	case dOpSExt:
 		fr.regs[in.dst] = maskTo(uint64(signedOf(fr.rd(in.x), uint64(in.w))), uint64(in.w2))
 	case dOpLoad:
@@ -2945,6 +2966,16 @@ func (ma *machine) resolveExtern(f *ir.Func) func(args []uint64) uint64 {
 		return fn
 	}
 	switch name {
+	// x*y + z rounded ONCE, as AArch64's fmadd computes it natively.
+	case "llvm.fmuladd.f64":
+		return func(a []uint64) uint64 {
+			return math.Float64bits(math.FMA(math.Float64frombits(a[0]), math.Float64frombits(a[1]), math.Float64frombits(a[2])))
+		}
+	case "llvm.fmuladd.f32":
+		return func(a []uint64) uint64 {
+			f := func(i int) float64 { return float64(math.Float32frombits(uint32(a[i]))) }
+			return uint64(math.Float32bits(float32(fma32(f(0), f(1), f(2)))))
+		}
 	case "putchar":
 		return func(args []uint64) uint64 {
 			ma.out.WriteByte(byte(args[0]))
@@ -2979,4 +3010,24 @@ func (ma *machine) resolveExtern(f *ir.Func) func(args []uint64) uint64 {
 		}
 	}
 	return nil
+}
+
+// fma32 is x*y + z rounded once to binary32, for binary32 x, y and z. The
+// product is exact in a double, so s = p + z holds the only rounding, and
+// rounding s again to 24 bits is right unless s fell exactly halfway between two
+// binary32 values: there the error TwoSum recovers says which way the exact sum
+// lies. Twin of gFma32 in languages/go-interpreter.abnf.
+func fma32(x, y, z float64) float64 {
+	p := float64(x * y)
+	s := p + z
+	r := float64(float32(s))
+	if d := s - r; d != 0 && !math.IsInf(r, 0) {
+		if o := r + 2*d; float64(float32(o)) == o && o-s == d {
+			bb := s - p
+			if e := (p - (s - bb)) + (z - bb); e != 0 && (e > 0) == (d > 0) {
+				return o
+			}
+		}
+	}
+	return r
 }

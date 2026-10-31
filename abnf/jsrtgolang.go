@@ -71,29 +71,22 @@ func init() {
 
 		// A Go string is its bytes, written as they are: three that spell a
 		// surrogate are not a character to clean (the floor's RT_RAW_STR).
-		// js_gofma(x, y, z, code): z +- x*y or x*y +- z rounded ONCE, the multiply
-		// and add gc fuses on arm64; undefined when it is not a float operation,
-		// and the emitter then emits the two operators. code: 1 subtract, 2 the
-		// product is the left operand, 4 the product is negated, 8 float32, 16
-		// the static type is a float. Twin of goFmaStep in go-interpreter.abnf and
-		// js_gofma in languages/lib/go-rt.metajs.
-		m["js_gofma"] = func(a []uint64) uint64 {
+		// A fused multiply-add (go-constfold.js has the rule) is one llvm.fmuladd
+		// in the module, and these carry its operands across. js_gofbits(v): the
+		// IEEE-754 bits of the number v. js_gofbox(bits, style): those bits as a
+		// float box of style 1 (float64) or 4 (float32), both raw words.
+		// js_gofmaw(x, y, z), where the static type does not settle it: true for
+		// a float32 operation, false for a float64 one, undefined when it is no
+		// float operation. Twins of js_gofbits and js_gofbox in
+		// languages/lib/runtime.c and of js_gofmaw in languages/lib/go-rt.metajs.
+		m["js_gofbits"] = func(a []uint64) uint64 { return math.Float64bits(rt.toNumber(u(a[0]))) }
+		m["js_gofbox"] = func(a []uint64) uint64 { return rt.wrap(jsJFlo{f: math.Float64frombits(a[0]), sty: uint8(a[1])}) }
+		m["js_gofmaw"] = func(a []uint64) uint64 {
 			x, y, z := u(a[0]), u(a[1]), u(a[2])
-			code := int(rt.toNumber(u(a[3])))
-			if code&16 == 0 && !(goFmaFlo(x) || goFmaFlo(y)) || !goFmaNum(x) || !goFmaNum(y) || !goFmaNum(z) {
+			if !(goFmaFlo(x) || goFmaFlo(y)) || !goFmaNum(x) || !goFmaNum(y) || !goFmaNum(z) {
 				return jsHUndefined
 			}
-			p, q, r := rt.toNumber(x), rt.toNumber(y), rt.toNumber(z)
-			if (code&4 != 0) != (code&3 == 1) {
-				p = -p
-			}
-			if code&3 == 3 {
-				r = -r
-			}
-			if code&8 != 0 || goIsF32(x) || goIsF32(y) || goIsF32(z) {
-				return rt.wrap(jsJFlo{f: goFma32(jvmFround(p), jvmFround(q), jvmFround(r)), sty: floGoF})
-			}
-			return rt.wrap(jsJFlo{f: math.FMA(p, q, r), sty: floGo})
+			return rt.wrap(goIsF32(x) || goIsF32(y) || goIsF32(z))
 		}
 		// js_gocxop(op, a, b, c, d): one complex operation on the parts (a+bi) and
 		// (c+di), as a plain {re, im} object - the emitter builds the $cx. See
@@ -2112,26 +2105,6 @@ func goFmaNum(v interface{}) bool {
 	return false
 }
 
-// goFma32 is x*y + z rounded once to binary32, for binary32 x, y and z. The
-// product is exact in a double, so s = p + z holds the only rounding, and
-// rounding s again to 24 bits is right unless s fell exactly halfway between two
-// binary32 values: there the error TwoSum recovers says which way the exact sum
-// lies. Twin of gFma32 in go-interpreter.abnf and goFma32 in go-rt.metajs.
-func goFma32(x, y, z float64) float64 {
-	p := float64(x * y)
-	s := p + z
-	r := jvmFround(s)
-	if d := s - r; d != 0 && !math.IsInf(r, 0) {
-		if o := r + 2*d; jvmFround(o) == o && o-s == d {
-			bb := s - p
-			if e := (p - (s - bb)) + (z - bb); e != 0 && (e > 0) == (d > 0) {
-				return o
-			}
-		}
-	}
-	return r
-}
-
 // goIsF32 is the WIDTH question asked of a runtime value: a tag-14 box carrying
 // Go's 32-bit style. The twins are goIsF32 in languages/lib/go-rt.metajs (which
 // reads floStyle(v) == 4) and v.__f32 in languages/go-interpreter.abnf.
@@ -2149,17 +2122,15 @@ func goCxTy(o *jsObject) string {
 }
 
 // goCxOp is one complex operation on the parts (a+bi) and (c+di): op 0 +, 1 -,
-// 2, 3, 11 and 12 * (gc's fused multiply-adds, 3 and 12 fusing the left product
-// of the imaginary part, 11 and 12 that of the real part - go-constfold.js has
-// the rule), 4 / (goCxDiv), 5 the negation
-// of (a+bi), 6 complex(a, b), 7 the conversion of (a+bi) to complex64, 8 to
-// complex128, 9 the part a as real() and imag() answer it, a float box, and 10
-// * with every product rounded, as gc folds known operands. A complex64 - an
-// operand with a float32 part, or op 7 - computes from its parts rounded to
-// float32 (an untyped constant converts) and rounds both results again: + and - in float32, * and / in float64 then narrowed, as
-// gc compiles them. Its parts come back as float32 boxes, a complex128's as
-// float64 values. Twin of the cx* functions in go-interpreter.abnf and
-// js_gocxop in languages/lib/go-rt.metajs.
+// 2 * (a*c - b*d and a*d + b*c, each fusing its right product as go-constfold.js
+// rules), 4 / (goCxDiv), 5 the negation of (a+bi), 6 complex(a, b), 7 the
+// conversion of (a+bi) to complex64, 8 to complex128, and 9 the part a as real()
+// and imag() answer it, a float box. A complex64 - an operand with a float32
+// part, or op 7 - computes from its parts rounded to float32 (an untyped constant
+// converts) and rounds both results again: + and - in float32, * and / in
+// float64 then narrowed, as gc compiles them. Its parts come back as float32
+// boxes, a complex128's as float64 values. Twin of the cx* functions in
+// go-interpreter.abnf and js_gocxop in languages/lib/go-rt.metajs.
 func goCxOp(rt *jsrt, op int, v [4]interface{}) (interface{}, interface{}) {
 	w32 := op == 7 || op != 8 && (goIsF32(v[0]) || goIsF32(v[1]) || goIsF32(v[2]) || goIsF32(v[3]))
 	if op == 6 && !w32 {
@@ -2185,14 +2156,6 @@ func goCxOp(rt *jsrt, op int, v [4]interface{}) (interface{}, interface{}) {
 		re, im = x[0]-x[2], x[1]-x[3]
 	case 2:
 		re, im = math.FMA(-x[1], x[3], float64(x[0]*x[2])), math.FMA(x[1], x[2], float64(x[0]*x[3]))
-	case 3:
-		re, im = math.FMA(-x[1], x[3], float64(x[0]*x[2])), math.FMA(x[0], x[3], float64(x[1]*x[2]))
-	case 11:
-		re, im = math.FMA(x[0], x[2], -float64(x[1]*x[3])), math.FMA(x[1], x[2], float64(x[0]*x[3]))
-	case 12:
-		re, im = math.FMA(x[0], x[2], -float64(x[1]*x[3])), math.FMA(x[0], x[3], float64(x[1]*x[2]))
-	case 10:
-		re, im = float64(x[0]*x[2])-float64(x[1]*x[3]), float64(x[0]*x[3])+float64(x[1]*x[2])
 	case 4:
 		re, im = goCxDiv(x[0], x[1], x[2], x[3])
 	case 5:

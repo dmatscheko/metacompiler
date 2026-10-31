@@ -519,8 +519,8 @@ func programJSBindings() map[string]interface{} {
 }
 
 // fmaHost is the host global fma(x, y, z): x*y + z rounded ONCE, which the
-// dialect cannot spell - Go fuses a multiply into an add on arm64 (see
-// goFmaStep in languages/lib/go-constfold.js). math.FMA is that rounding on
+// dialect cannot spell - Go fuses a multiply into an add (see FUSED
+// MULTIPLY-ADD in languages/lib/go-constfold.js). math.FMA is that rounding on
 // every architecture. The grammar hosts bind it too (frozenBaseBindings,
 // commonscript.go); host id 113 of languages/lib/runtime.c (d_fma) is the
 // native engine.

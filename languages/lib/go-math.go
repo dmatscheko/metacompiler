@@ -505,9 +505,7 @@ func FMA(x, y, z float64) float64 {
 	if z-z != 0 {
 		return z
 	}
-	// float64() rounds p on its own: gc fuses a product held in a local into
-	// the add that reads it, and z + p must be the rounded sum.
-	p := float64(x * y)
+	p := x * y
 	ap, ax, ay, az := p, x, y, z
 	if ap < 0 {
 		ap = -ap
@@ -1293,8 +1291,7 @@ func Atanh(x float64) float64 {
 
 // In Log1p hfsq and R are products: gc fuses each where it is an operand of an
 // add or subtract, and hfsq + R, an add of two products the function makes
-// twice, fuses the one computed first (goFmaLeft in
-// languages/lib/go-constfold.js): hr.
+// twice, fuses the one computed first: hr.
 func Log1p(x float64) float64 {
 	const (
 		Sqrt2M1     = 4.142135623730950488017e-01

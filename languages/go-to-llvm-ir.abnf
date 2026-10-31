@@ -471,17 +471,14 @@ Block       <~~ push(makeBlockStmt(takeAll())); cScopeExit() ~~>
 // A function's body is the SAME block as its parameters and results: when a `:=`
 // at its top level names one of them (cShortName), it runs in their scope, so
 // `i, j := 0, n` with i a named result assigns that result instead of shadowing it.
-FuncBody    <~~ var fbi = takeAll(); push(cBodyShared() ? makeSeq(fbi) : makeBlockStmt(fbi)); cScopeExit(); goFmaFnExit() ~~>
-            = "{" CScopeOn FmaFnOn { Statement } "}" ;
+FuncBody    <~~ var fbi = takeAll(); push(cBodyShared() ? makeSeq(fbi) : makeBlockStmt(fbi)); cScopeExit() ~~>
+            = "{" CScopeOn { Statement } "}" ;
 // Always-empty matches whose only purpose is their TAG, the shape NoBody uses: Go
 // source holds no NUL byte, so the optional never consumes anything. A rule's own tag
 // runs AFTER its children, and these three have to run before theirs - a '{' opens a
 // named-constant scope, a switch body takes its truncation mark, and a 'case' spends
 // it (Go scopes each case clause, while this body is parsed flat).
 CScopeOn    <~~ cScopeEnter() ~~> = [ "\x00" ] ;
-// A function body is one SSA function to gc, which decides which of two
-// multiplies an add fuses (goFmaLeft in go-constfold.js).
-FmaFnOn     <~~ goFmaFnEnter() ~~> = [ "\x00" ] ;
 CSwOn       <~~ cSwEnter() ~~> = [ "\x00" ] ;
 CCaseOn     <~~ cSwCase() ~~> = [ "\x00" ] ;
 
@@ -1270,10 +1267,10 @@ LitExpr     <~~ var le = pop(); push(le); push({lesty: goLitEsty(up.pos), pu: go
 // variadic parameter.
 Call        <~~ var ci = goAppendC(takeAll(), up.in); var csp = goSplitArgs(ci.slice(1))
                 var icv = goIfaceConvC(ci)
-                push(icv != null ? icv : makeCall(goCallBoxC(ci), csp.atys, goTpInfer(ci[0], csp, []))); goLenConstC(ci, up.start, up.pos); goKnCallC(ci[0], csp, up.pos) ~~>
+                push(icv != null ? icv : makeCall(goCallBoxC(ci), csp.atys, goTpInfer(ci[0], csp, []))); goLenConstC(ci, up.start, up.pos) ~~>
             = Id <~~ push(goLtyName(up.in)) ~~> "(" [ ArgExpr { "," ArgExpr } [ Spread ] [ "," ] ] ")" ;
 // A call argument reports its static type after it, for goSplitArgs.
-ArgExpr     <~~ var ae = pop(); push(goRuneDefC(ae, up.pos)); push({aty: stAt(up.pos), kr: goKRec(up.start, up.pos), pu: goPure(up.start, up.pos), nl: goNilSrc(up.start, up.pos), ep: up.pos}) ~~> = Expression ;
+ArgExpr     <~~ var ae = pop(); push(goRuneDefC(ae, up.pos)); push({aty: stAt(up.pos), kr: goKRec(up.start, up.pos), pu: goPure(up.start, up.pos), nl: goNilSrc(up.start, up.pos)}) ~~> = Expression ;
 // A returned value, which takes a rune constant at the RESULT's type (makeReturn).
 RetExpr     <~~ var re = pop(); push(re); push({aty: stAt(up.pos), rn: goIsRuneC(up.pos), kr: goKRec(up.start, up.pos), pu: goPure(up.start, up.pos)}) ~~> = Expression ;
 
@@ -2128,19 +2125,14 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         // Read BEFORE the clear below, which also erases the last operand's entry.
         var fplan = goFmaPlan(items, ops, sty)
         var fnegs = goFmaSwap(items, ts, fplan)
-        var kns = goKnRun(items)
-        var cxns = goCxnRun(items, sty)
         ts = goRunOrder(items, ts)
-        var prod = goFmaProduct(items, ops, sty, goFmaPair(ts, ops, ty), kns)
+        var prod = goFmaProduct(ops, sty, goFmaPair(ts, ops, ty))
         regConst(pos, null)
-        regKn(pos, kns[ops.length])
         regCFn(pos, cfn)
         regSt(pos, sty)
         regTk(pos, tk)
         regFma(pos, prod)
         if (fplan != null) { return goFmaRunC(ts, ops, fplan, fnegs, ty, sty) }
-        var cxf = goFmaCxRun(items, ops, sty, kns, cxns)
-        if (cxf != null) { return goCxRunC(ts, ops, cxf) }
         if (ty == null) {
             var flat = [ts[0]]
             for (var j = 0; j < ops.length; j++) { flat.push(ops[j]); flat.push(ts[j + 1]) }
@@ -2168,44 +2160,14 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         var negs = []
         if (plan == null) { return negs }
         for (var k = 0; k < plan.length; k++) {
-            var f = plan[k] == 0 || plan[k] >= 10 ? null : goFmaOperand(items, k, plan[k])
+            var f = plan[k] == 0 ? null : goFmaOperand(items, k, plan[k])
             if (f != null) { ts[plan[k] == 2 ? 0 : k + 1] = f.pair }
-            var ch = plan[k] >= 10 ? goFmaChoice(plan[k]) : null
-            if (ch != null && ch.r != null) { ts[k + 1] = ch.r.pair }
-            if (ch != null && ch.l != null) { ts[0] = ch.l.pair }
             negs.push(f != null && f.neg)
         }
         return negs
     }
-    // A run of static complex type: one goFmaCxMul record per operator, null for
-    // anything but '*'. Twin of goFmaCxRun in go-interpreter.abnf.
-    function goFmaCxRun(items, ops, sty, kns, cxns) {
-        if (cxns == null) { return null }
-        var cxs = []
-        var any = false
-        for (var k = 0; k < ops.length; k++) {
-            var cx = ops[k] == "*" ? goFmaCxMul(sty, goFmaText(items[1].as, items[3 * k + 4].at), kns[k + 1], k == 0 ? cxns[0] : null, cxns[k + 1]) : null
-            if (cx != null) { any = true }
-            cxs.push(cx)
-        }
-        return any ? cxs : null
-    }
-    // goFmaCxMode's answer as the operator emitCxCall takes.
-    var cxMulOps = ["*", "*L", "*N", "*R", "*RL"]
-    function goCxRunC(ts, ops, cxs) {
-        return function(b) {
-            var r = ts[0](b)
-            b = r.b
-            var v = r.v
-            for (var k = 0; k < ops.length; k++) {
-                var rr = ts[k + 1](b)
-                b = rr.b
-                if (cxs[k] != null && usesComplex) { v = emitCxCall(b, cxMulOps[goFmaCxMode(cxs[k])], v, rr.v) }
-                else { v = emitBin(b, ops[k], v, rr.v) }
-            }
-            return {b: b, v: v}
-        }
-    }
+    // The pair thunk of a multiply run: everything before the last '*', and the
+    // last operand. Twin of goFmaPair in go-interpreter.abnf.
     function goFmaPair(ts, ops, ty) {
         var n = ops.length
         if (ops[n - 1] != "*") { return null }
@@ -2223,8 +2185,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         }
     }
     function goFmaRunC(ts, ops, plan, negs, ty, sty) {
-        var f32 = ty == "float32" || stBare(sty) == "float32"
-        var fl = ty != null || isFloatTy(stBare(sty))
+        var fw = goFmaWidth(ty, sty)
         return function(b) {
             var r = ts[0](b)
             b = r.b
@@ -2233,85 +2194,60 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             for (var k = 0; k < ops.length; k++) {
                 var rr = ts[k + 1](b)
                 b = rr.b
-                if (plan[k] >= 10) {
-                    // Each multiply is a pair: the ones not fused are rounded first.
-                    var ch = goFmaChoice(plan[k])
-                    var sd = goFmaSide(plan[k])
-                    if (ch.l != null && sd != 2) { var lr = emitFmaRound(b, v, vq, ch.l.neg); b = lr.b; v = lr.v }
-                    if (ch.r != null && sd != 1) { rr = emitFmaRound(b, rr.v, rr.q, ch.r.neg) }
-                    if (sd == 0) { v = ty == null ? emitBin(b, ops[k], v, rr.v) : emitTypedBin(b, ty, ops[k], v, rr.v) }
-                    else {
-                        var e0 = sd == 1 ? emitFmaStep(b, ops[k], v, rr.v, rr.q, 1, ch.r.neg, fl, f32) : emitFmaStep(b, ops[k], rr.v, v, vq, 2, ch.l.neg, fl, f32)
-                        b = e0.b
-                        v = e0.v
-                    }
-                }
-                else if (plan[k] == 1) { var e1 = emitFmaStep(b, ops[k], v, rr.v, rr.q, 1, negs[k], fl, f32); b = e1.b; v = e1.v }
-                else if (plan[k] == 2) { var e2 = emitFmaStep(b, ops[k], rr.v, v, vq, 2, negs[k], fl, f32); b = e2.b; v = e2.v }
+                if (plan[k] == 1) { var e1 = emitFmaStep(b, ops[k], v, rr.v, rr.q, 1, negs[k], fw); b = e1.b; v = e1.v }
+                else if (plan[k] == 2) { var e2 = emitFmaStep(b, ops[k], rr.v, v, vq, 2, negs[k], fw); b = e2.b; v = e2.v }
                 else if (ty == null) { v = emitBin(b, ops[k], v, rr.v) }
                 else { v = emitTypedBin(b, ty, ops[k], v, rr.v) }
             }
             return {b: b, v: v}
         }
     }
-    // The product x*y of a pair, negated when neg; y null is a pair whose x is
-    // the product already (goFmaVarPair).
-    function emitFmaRound(b, x, y, neg) {
-        var p = y == null ? x : emitBin(b, "*", x, y)
-        if (neg) { return emitNegV(b, p) }
-        return {b: b, v: p}
-    }
-    // A variable that holds a product (THROUGH A VARIABLE in go-constfold.js):
-    // the value of its declaration, exprs[si], keeps the factors of its product
-    // f beside it as name$fa and name$fb when a read may fuse. Twin of
-    // goFmaDeclPair in go-interpreter.abnf.
-    function goFmaDeclPair(exprs, si, name, own, f) {
-        var t = exprs[si]
-        var pair = f.pair
-        var neg = f.neg
-        return function(b) {
-            if (!own.used) { return t(b) }
-            var pr = pair(b)
-            b = pr.b
-            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name + "$fa"), pr.v])
-            if (pr.q != null) { callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name + "$fb"), pr.q]) }
-            return emitFmaRound(b, pr.v, pr.q, neg)
-        }
-    }
-    // The pair of a read of such a variable: its factors, or its value whole (q
-    // null) once the product no longer reaches the read, negated when the
-    // product carries a unary minus (neg). Twin of goFmaVarPair in
-    // go-interpreter.abnf.
-    function goFmaVarPair(name, via, neg) {
-        var rv = makeVarRef(name)
-        var ra = makeVarRef(name + "$fa")
-        var rb = makeVarRef(name + "$fb")
-        return function(b) {
-            if (!goFmaReach(via)) {
-                var w = rv(b)
-                if (neg) { w = emitNegV(w.b, w.v) }
-                return {b: w.b, v: w.v, q: null}
-            }
-            var a = ra(b)
-            return {b: a.b, v: a.v, q: rb(a.b).v}
-        }
-    }
     // One fused step: z op x*y (side 1) or x*y op z (side 2), the product negated
-    // when neg. js_gofma rounds a float multiply-add once and answers undefined for
-    // anything else - integers, complex values - which then takes the multiply and
-    // the add as written; fl (the run is statically a float) leaves that arm out.
-    // Twin of goFmaStep in go-interpreter.abnf.
-    function emitFmaStep(b, op, z, x, y, side, neg, fl, f32) {
-        var code = (op == "-" ? 1 : 0) + (side == 2 ? 2 : 0) + (neg ? 4 : 0) + (f32 ? 8 : 0) + (fl ? 16 : 0)
-        var r = callExt(b, "js_gofma", [x, y, z, emitNum(b, code)])
-        if (fl) { return {b: b, v: r} }
-        return emitSelectI1(b, b.NewICmp(llvm.enum.IPredNE, r, hUndef),
-            function(tb) { return {b: tb, v: r} },
+    // when neg, as one llvm.fmuladd - the call clang emits for a contracted
+    // a*b + c, and no instruction carries a `contract` flag, so LLVM fuses here
+    // and nowhere else. fw is goFmaWidth's answer; at 0 js_gofmaw answers at run
+    // time - true for float32, false for float64, undefined for anything else,
+    // which then takes the multiply and the add as written. Twin of goFmaStep in
+    // go-interpreter.abnf.
+    function emitFmaStep(b, op, z, x, y, side, neg, fw) {
+        var nx = neg !== (op == "-" && side == 1)
+        var nz = op == "-" && side == 2
+        if (fw != 0) { return {b: b, v: emitFmulAdd(b, x, y, z, nx, nz, fw == 32)} }
+        var w = callExt(b, "js_gofmaw", [x, y, z])
+        return emitSelectI1(b, b.NewICmp(llvm.enum.IPredNE, w, hUndef),
+            function(tb) {
+                return emitSelectI1(tb, tb.NewICmp(llvm.enum.IPredEQ, w, hTrue),
+                    function(t32) { return {b: t32, v: emitFmulAdd(t32, x, y, z, nx, nz, true)} },
+                    function(t64) { return {b: t64, v: emitFmulAdd(t64, x, y, z, nx, nz, false)} })
+            },
             function(eb) {
                 var p = emitBin(eb, "*", x, y)
                 if (neg) { var n = emitNegV(eb, p); eb = n.b; p = n.v }
                 return {b: eb, v: side == 1 ? emitBin(eb, op, z, p) : emitBin(eb, op, p, z)}
             })
+    }
+    // llvm.fmuladd of the numbers x, y and z, x and z negated first when nx and
+    // nz, at float width when f32, boxed as a float of that width. A number
+    // crosses into IR as its IEEE-754 bits (js_gofbits) and back (js_gofbox,
+    // style 4 float32, 1 float64).
+    function emitFmulAdd(b, x, y, z, nx, nz, f32) {
+        var r = b.NewCall(goFmulAddFn(f32), [emitFmaArg(b, x, nx, f32), emitFmaArg(b, y, false, f32), emitFmaArg(b, z, nz, f32)])
+        if (f32) { r = b.NewFPExt(r, llvm.types.Double) }
+        return callExt(b, "js_gofbox", [b.NewBitCast(r, i64), handle(f32 ? 4 : 1)])
+    }
+    function emitFmaArg(b, v, neg, f32) {
+        var d = b.NewBitCast(callExt(b, "js_gofbits", [v]), llvm.types.Double)
+        if (f32) { d = b.NewFPTrunc(d, llvm.types.Float) }
+        return neg ? b.NewFNeg(d) : d
+    }
+    var goFmulAdd = {}
+    function goFmulAddFn(f32) {
+        var name = f32 ? "llvm.fmuladd.f32" : "llvm.fmuladd.f64"
+        if (goFmulAdd[name] == undefined) {
+            var t = f32 ? llvm.types.Float : llvm.types.Double
+            goFmulAdd[name] = m.NewFunc(name, t, [llvm.ir.NewParam("", t), llvm.ir.NewParam("", t), llvm.ir.NewParam("", t)])
+        }
+        return goFmulAdd[name]
     }
 
     // STRUCT TYPE NAMES ARE PER PACKAGE, and the key carries the package because the
@@ -3487,12 +3423,10 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         return {b: b, v: emitCxOpParts(b, cxOpCodes[op], lp.re, lp.im, rp.re, rp.im)}
     }
     // js_gocxop does the arithmetic on the parts (goCxOp in abnf/jsrtgolang.go has
-    // the operations: gc's fused multiplies - "*L" and "*RL" fusing the left
-    // product of the imaginary part, "*R" and "*RL" that of the real part, as
-    // goFmaCxMode picks - Smith's division, and the complex64
-    // width) and answers a plain {re, im} object; the $cx is built here, where its
-    // class descriptor lives.
-    var cxOpCodes = {"+": 0, "-": 1, "*": 2, "*L": 3, "/": 4, "*N": 10, "*R": 11, "*RL": 12}
+    // the operations, the complex64 width, and the multiply's fused products) and
+    // answers a plain {re, im} object; the $cx is built here, where its class
+    // descriptor lives.
+    var cxOpCodes = {"+": 0, "-": 1, "*": 2, "/": 4}
     function emitCxOpParts(b, code, a, bi, c, d) {
         var q = callExt(b, "js_gocxop", [emitNum(b, code), a, bi, c, d])
         return emitNewCx(b, callExt(b, "js_get", [q, emitStr(b, "re")]), callExt(b, "js_get", [q, emitStr(b, "im")]))
@@ -3502,7 +3436,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // cannot move the caller's basic block, so the branch has to happen behind a
     // js_call. The plain form is emitted inside the ELSE block on purpose - the
     // externs would have to cope with a complex operand if it ran eagerly.
-    var cxFns = {"+": "$cxadd", "-": "$cxsub", "*": "$cxmul", "*L": "$cxmull", "*N": "$cxmuln", "*R": "$cxmulr", "*RL": "$cxmulrl", "/": "$cxdiv",
+    var cxFns = {"+": "$cxadd", "-": "$cxsub", "*": "$cxmul", "/": "$cxdiv",
                  "+=": "$cxadd", "-=": "$cxsub", "*=": "$cxmul", "/=": "$cxdiv"}
     function declCxOp(b, name, op) {
         funcCount++
@@ -3519,7 +3453,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         var isr = callExt(fb, "js_is_type", [r, emitStr(fb, "$cx")])
         var cxPath = function(cb) { return emitCxOp(cb, op, l, r) }
         var res = emitSelect(fb, isl, cxPath, function(eb) {
-            return emitSelect(eb, isr, cxPath, function(e2) { return {b: e2, v: emitBinNum(e2, op.charAt(0) == "*" ? "*" : op, l, r)} })
+            return emitSelect(eb, isr, cxPath, function(e2) { return {b: e2, v: emitBinNum(e2, op, l, r)} })
         })
         res.b.NewRet(res.v)
         curF = savedF
@@ -3602,10 +3536,6 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         b = declCxOp(b, "$cxadd", "+")
         b = declCxOp(b, "$cxsub", "-")
         b = declCxOp(b, "$cxmul", "*")
-        b = declCxOp(b, "$cxmull", "*L")
-        b = declCxOp(b, "$cxmuln", "*N")
-        b = declCxOp(b, "$cxmulr", "*R")
-        b = declCxOp(b, "$cxmulrl", "*RL")
         b = declCxOp(b, "$cxdiv", "/")
         b = declCxNeg(b)
         b = declCxPart(b, "real", "re", 1)
@@ -4810,7 +4740,6 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         // v += x*y / v -= x*y with the multiply fused (goFmaAssign).
         var fa = op == "=" ? null : goFmaAssign(op, sp.fms[0], goRefTy(refs[0]))
         if (fa != null) { exprs[0] = fa.pair }
-        var cxa = fa == null ? goFmaCxAssign(op, goRefTy(refs[0]), sp.cns[0]) : null
         var faTy = stBare(goRefTy(refs[0]))
         return function(b) {
             if (op != "=") {
@@ -4819,15 +4748,10 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                 b = rr.b
                 var rv = exprs[0](b)
                 b = rv.b
-                if (fa != null && goFmaLazy(fa) && !goFmaLive(fa)) {
-                    var fp = emitFmaRound(b, rv.v, rv.q, fa.neg)
-                    return emitLocWrite(fp.b, refs[0], rl.loc, emitBin(fp.b, op == "+=" ? "+" : "-", rr.v, fp.v))
-                }
                 if (fa != null) {
-                    var fr = emitFmaStep(b, op == "+=" ? "+" : "-", rr.v, rv.v, rv.q, 1, fa.neg, isFloatTy(faTy), faTy == "float32")
+                    var fr = emitFmaStep(b, op == "+=" ? "+" : "-", rr.v, rv.v, rv.q, 1, fa.neg, goFmaWidth(null, faTy))
                     return emitLocWrite(fr.b, refs[0], rl.loc, fr.v)
                 }
-                if (cxa != null && usesComplex) { return emitLocWrite(b, refs[0], rl.loc, emitCxCall(b, cxMulOps[goFmaCxMode(cxa)], rr.v, rv.v)) }
                 return emitLocWrite(b, refs[0], rl.loc, emitBin(b, op, rr.v, rv.v))
             }
             var locs = []
@@ -4918,7 +4842,6 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         // Each value reports its static type (StoreExpr): a struct value is copied and
         // the new name takes the type, so `b := a` copies and `q := p` aliases.
         var sp = goSplitSty(items.slice(i))
-        var own = goKnBind(names, sp)
         goTupleBind(names, sp.ts.length, sp.tys)
         var exprs = sp.ts
         if (names.length == exprs.length) {
@@ -4928,7 +4851,6 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                 exprs[si] = goConstTo(exprs[si], sp.krs[si], sp.rns[si] ? "rune" : "any", names.length > 1 ? "multiple assignment" : "assignment")
                 exprs[si] = goStoreThunk(exprs[si], goStCopyTy(sp.tys[si]))
                 if (sp.rns[si]) { exprs[si] = goI32Thunk(exprs[si]) }
-                if (own[si] != null) { exprs[si] = goFmaDeclPair(exprs, si, names[si], own[si], sp.fms[si]) }
             }
         }
         return function(b) {
@@ -5045,7 +4967,6 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         // Each initializer reports its static type (StoreExpr), so `var i any = a`
         // copies too. Twin of makeVarDecl in go-interpreter.abnf.
         var sp = goSplitSty(items.slice(i))
-        var own = goKnBind(names, sp)
         if (ty == "") { goTupleBind(names, sp.ts.length, sp.tys) }
         var inits = sp.ts
         if (inits.length == names.length) {
@@ -5055,7 +4976,6 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                 inits[vi] = goNilTo(inits[vi], sp.nls[vi], ty)
                 inits[vi] = goDtBoxThunk(goStoreThunk(inits[vi], goStCopyTy(sp.tys[vi])), goDtBoxTo(sp.tys[vi], ty))
                 if (sp.rns[vi] && (ty == "" || goIsIfaceTy(stBare(ty)))) { inits[vi] = goI32Thunk(inits[vi]) }
-                if (own[vi] != null) { inits[vi] = goFmaDeclPair(inits, vi, names[vi], own[vi], sp.fms[vi]) }
             }
         }
         return function(b) {

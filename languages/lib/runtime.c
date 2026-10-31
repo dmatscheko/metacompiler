@@ -7728,6 +7728,12 @@ long js_jflo(long v)  { return jf_make(to_number(v), 0); }
 long js_gflo(long v)  { return jf_make(to_number(v), 1); }
 long js_csflo(long v) { return jf_make(to_number(v), 2); }
 long js_jfdiv(long l, long r) { return jf_arith(3, l, r); }
+/* Go's fused multiply-add is one llvm.fmuladd in the module, and these carry
+ * its operands across as raw words: js_gofbits answers the bits of a number,
+ * js_gofbox boxes result bits as a float of style sty (1 float64, 4 float32).
+ * Twins of the same externs in abnf/jsrtgolang.go. */
+long js_gofbits(long v) { return to_number(v); }
+long js_gofbox(long bits, long sty) { return jf_make(bits, sty); }
 /* A literal a double cannot hold exactly: the emitter passes its DIGITS,
  * because emitNum would already have rounded 9223372036854775807 to
  * 9223372036854776000 on the way into the module. (text, radix, bits,

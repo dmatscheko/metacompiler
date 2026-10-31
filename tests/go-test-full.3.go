@@ -1168,20 +1168,16 @@ func s127() {
 	check("atan2127", math.Atan2(1, -1) == 3*math.Pi/4 && math.Atan2(math.Copysign(0, -1), -2) == -math.Pi && fmt.Sprint(math.Atan2(3, 7), math.Atan2(-5, -0.5)) == "0.40489178628508343 -1.6704649792860586")
 }
 
-// ===== SECTION 128: a multiply fused into an add, as gc does on arm64 =====
-// The spec lets x*y + z round once, and gc on arm64 does whenever an operand of a
-// float add or subtract IS a multiply: through parentheses and unary minus, in
-// v += x*y, for float32 too, but not through an explicit float64() conversion.
-// With a multiply on both sides the function decides: alone in its function the
-// add fuses the right one, beside another such add (a complex multiply is one) the
-// left one. Complex multiplication and division fuse the same way. Integers do
-// not fuse. A multiply of two values gc knows - constants, and locals set to one
-// and never assigned again - is folded first and fuses nothing; a complex one
-// still counts as an add of two multiplies. A product read through a local that
-// holds it, and is never assigned again, fuses as if written in place. A complex
-// factor with a negated part (a conjugate) leaves the other product of a part to
-// fuse, in v *= w too. The helpers are not inlined, because an inlined call
-// joins its caller's function. The expected values are go run's on arm64.
+// ===== SECTION 128: a multiply fused into an add =====
+// The spec lets x*y + z round once, and the rule is decided from the source: a
+// float product written as a direct operand of + or - fuses, through parentheses
+// and unary minus, in v += x*y, for float32 too, but not through an explicit
+// float64() conversion. With a product on both sides the right one fuses. A
+// product held in a local does not fuse; one of locals with known values does.
+// A complex multiply is a*c - b*d and a*d + b*c, each fusing its right product,
+// in v *= w too. Integers do not fuse. go run on arm64 agrees except where gc's
+// optimiser decides otherwise, which the spec permits: fma128c, d, e, g, h and i
+// hold this rule's answers (go run's differ in the last place).
 var fma128v = []float64{1.0000000009313226, -1, 0.37, 30, 1.0000000004656613, 0.1, 0.3, 3.7, 2.9, 1.000244140625}
 
 //go:noinline
@@ -1260,6 +1256,12 @@ func via128b(a, h float64) float64 {
 	return t + u
 }
 
+type f128 float64
+type g128 float32
+
+//go:noinline
+func gen128[T float32 | float64](a, b, c T) T { return a*b + c }
+
 //go:noinline
 func ng128(xs []float64) (complex128, complex128, complex128) {
 	u := complex(xs[3], xs[5])
@@ -1283,19 +1285,24 @@ func s128() {
 	check("fma128b", fmt.Sprint(s, u, f*g-1, 1-f*g, float32(f*g)-1) == "1.8626451500983188e-09 -1.8626451500983188e-09 0.00048834085 -0.00048834085 0.00048828125")
 	x, y := dots128(a, a, h, -h)
 	i, j := 7, 9
-	check("fma128c", fmt.Sprint(dot128(a, a, h, -h), x, y, i*j+2, 2-i*j, -(i*j)+1) == "9.313225743986381e-10 9.313225754828403e-10 4.336808689942018e-19 65 -61 -62")
+	check("fma128c", fmt.Sprint(dot128(a, a, h, -h), x, y, i*j+2, 2-i*j, -(i*j)+1) == "9.313225743986381e-10 9.313225743986381e-10 -4.336808689942018e-19 65 -61 -62")
 	z := complex(fma128v[5], fma128v[6])
 	w := complex(fma128v[7], fma128v[8])
 	p, q := cx128(z, w)
 	r, o := cxs128(z, w)
-	check("fma128d", fmt.Sprint(p, q, r, o) == "(-0.4999999999999999+1.4i) (0.056108597285067875+0.037104072398190045i) (-0.4999999999999999+1.4000000000000001i) (5.280000000000002+21.46i)")
-	check("fma128e", fmt.Sprint(kn128(fma128v[6])) == "2.3899999999999997 2.3899999999999997 -1.7899999999999998 -1.7899999999999998")
+	check("fma128d", fmt.Sprint(p, q, r, o) == "(-0.4999999999999999+1.4i) (0.056108597285067875+0.037104072398190045i) (-0.4999999999999999+1.4i) (5.280000000000002+21.46i)")
+	check("fma128e", fmt.Sprint(kn128(fma128v[6])) == "2.39 2.39 -1.79 -1.79")
 	check("fma128f", fmt.Sprint(knr128(fma128v[6])) == "2.39 2.39 2.39")
-	check("fma128h", fmt.Sprint(via128(fma128v[7], fma128v[8], fma128v[6])) == "11.03 -10.43 10.43 11.030000000000001 11.03" &&
-		via128b(a, h) == 9.313225754828403e-10)
-	check("fma128g", fmt.Sprint(ckn128(a, a, h, -h)) == "(5.139999999999999-0.48i) (5.139999999999999-0.48i) 9.313225754828403e-10")
+	check("fma128h", fmt.Sprint(via128(fma128v[7], fma128v[8], fma128v[6])) == "11.030000000000001 -10.43 10.43 11.030000000000001 11.030000000000001" &&
+		via128b(a, h) == 9.313225746154785e-10)
+	check("fma128g", fmt.Sprint(ckn128(a, a, h, -h)) == "(5.14-0.4800000000000001i) (5.14-0.4800000000000001i) 9.313225743986381e-10")
 	check("fma128i", fmt.Sprint(ng128([]float64{0.3, -0.77, 1.9, 1.1, 0.7, 2.3})) ==
-		"(5.139999999999999-0.4800000000000001i) (5.139999999999999-0.4800000000000001i) (5.139999999999999-0.4800000000000001i)")
+		"(5.14-0.4800000000000001i) (5.14-0.4800000000000001i) (5.14-0.4800000000000001i)")
+	// A defined float type and a type parameter fuse at their values' width.
+	fa, fm := f128(a), f128(m)
+	ga, gb := g128(f), g128(g)
+	check("fma128j", fa*fa+fm == 1.8626451500983188e-09 && ga*gb-1 == 0.00048834085 && gen128(a, a, m) == 1.8626451500983188e-09 &&
+		fmt.Sprint(gen128(f, g, -1)) == "0.00048834085")
 }
 
 // ===== SECTION 129: a store through a pointer takes the pointee's type =====

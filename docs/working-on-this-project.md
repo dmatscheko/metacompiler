@@ -798,6 +798,17 @@ a decision was taken:
   reference, so `P{1}` and `&P{1}` are the same object and `fmt` distinguishes
   them by static type. A real pointer cell pulls in auto-deref, method dispatch,
   assignment targets and equality.
+- **Go, fused multiply-add**: the spec lets `x*y + z` round once and leaves
+  where to the implementation. All engines follow one rule decided from the
+  source (FUSED MULTIPLY-ADD in `lib/go-constfold.js`): a float product written as
+  a direct operand of `+`/`-` fuses - through parentheses and unary minus, in
+  `v += x*y`, the right one of two - and nothing else; the compiler emits
+  `llvm.fmuladd`, which `llvm.Run` computes as `math.FMA`. gc on arm64 decides
+  from its optimised SSA instead: it folds products of values it knows, fuses a
+  product read through a local, and lets CSE choose which of two products
+  fuses. `go run` therefore differs in the last place on those shapes
+  (fma128c/d/e/g/h/i in `go-test-full.3.go` assert the rule's answers); on
+  amd64 gc fuses nothing at all.
 - **PHP**: `Generator::send()` works in the compiler and cannot work in the
   interpreter without a suspendable body — a model difference, stated in both
   `:description` blocks.
