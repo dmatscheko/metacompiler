@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-888** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-902** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -111,6 +111,96 @@ A reviewer argued the VM prints `RangeError (index): Invalid value: Not in inclu
 range 0..2: 7` (a plain RangeError); the current engines print the IndexError form
 `RangeError (index): Index out of range: index should be less than 3: 7`, which is
 believed to be the modern VM's. Leave as is unless a real dart run settles it.
+
+### T-888 metajs native: `String.replace` loses the text after the match when the receiver has a non-ASCII character · P1 · CORE · OPEN [V]
+`"éaéé".replace("a","_")` → node, interp, run `é_éé`; native `é_�` (length 3). `"a🎉b🎉".replace("b","_")` → native `a🎉_`
+(node `a🎉_🎉`). The floor's replace (runtime.c, the string-method mid 23 branch) slices the tail as
+`str_slice(recv, at + str_len(pat), n)` with `n = str_ulen(recv)` (UTF-16 units) where `str_slice` takes byte offsets; the end
+must be the byte length. Every language whose layer 2 calls `.replace` on a non-ASCII string is exposed. Files: lib/runtime.c.
+
+### T-889 metajs: `String.replace` inserts `$&` `$$` `` $` `` `$'` literally · P1 · CORE · OPEN [V]
+`"xaby".replace("ab", R)` for R = `[$&]` `[$$]` `` [$`] `` `[$']` → node and the goja interp `x[ab]y` `x[$]y` `x[x]y` `x[y]y`;
+run, native and -frozen print the pattern literally (`x[$&]y` …). Decide with the layer-2 users first: a layer-2 caller that relies
+on literal insertion must switch to a function replacement or an escaped `$$`. Files: abnf/jsrt.go (string method "replace"),
+lib/runtime.c mid 23.
+
+### T-890 metajs: `split` ignores the limit, `split()` splits into characters, `split("")` is per code point · P1 · CORE · OPEN [V]
+`"a,b,c".split(",", n)` for n = 0,1,2 → node `0 1 2`; run/native/frozen `3 3 3`. `"".split(",", 1)` → node 1, goja interp 0.
+`"a,b,c".split()` → node length 1; run/native/frozen 5. `String.fromCharCode(55356,57225).split("").length` → node and native 2,
+run/frozen/goja 1 (`"a🎉b🎉".split("")` node 6, twin 4). Files: abnf/jsrt.go split, lib/runtime.c mid 26, the goja path in
+metajs-interpreter.abnf.
+
+### T-891 metajs: `join(undefined)`, `indexOf(undefined)` over holes, and boolean / null array indices · P1 · CORE · OPEN [V]
+`[1,2,3].join(undefined)` → node `1,2,3`; run/native/frozen `1undefined2undefined3`. `h=[]; h[2]=7; h.indexOf(undefined)` →
+node -1; run/native/frozen 0 (holes are not skipped; js got this in T-640). `[10,20][true]`, `[10,20][null]` → node
+`undefined undefined`; run/native/frozen `20 10` (the key is coerced to a number index instead of the property "true"/"null").
+goja interp correct throughout. Files: abnf/jsrt.go (join, indexOf, array getMember), lib/runtime.c.
+
+### T-892 metajs: `trim()` strips three different whitespace sets, none of them JavaScript's · P1 · CORE · OPEN [V]
+`(c+"x"+c).trim().length` for c = U+0009, U+00A0, U+2003, U+FEFF, U+0085: node and goja `1 1 1 1 3`; run/frozen `1 1 1 3 1`
+(Go `strings.TrimSpace`: strips U+0085, keeps U+FEFF); native `1 3 3 3 3` (the floor's `is_space` is ASCII-only). JS trims
+WhiteSpace + LineTerminator (incl. U+FEFF, U+00A0, U+1680, U+2000-200A, U+2028/9, U+202F, U+205F, U+3000), not U+0085.
+Knock-on in layer 2: python `complex(" 1+2j ")` with NBSP padding → python3 and run `(1+2j)`, native `ValueError: complex() arg
+is a malformed string` (python-rt.metajs pyCplxFromStr uses `.trim()`); the same `.trim()` sits in csharp-rt.metajs csParseInt.
+Check every layer-2 `.trim()` caller against its own language's whitespace rule when fixing. Files: abnf/jsrt.go (trim),
+lib/runtime.c `is_space`.
+
+### T-893 metajs: string `<` `>` and the default `sort()` compare by code point, not by UTF-16 code unit · P1 · CORE · OPEN [V]
+`a = [U+FFFF, "🎉"]`: `a[0] < a[1]` and `a.slice(0).sort()[0].charCodeAt(0)` → node `false 55356`; all our legs `true 65535`.
+Same for U+E000 against an astral character, and lone surrogates (goja orders those yet differently). The js language is right;
+this is MetaJS's raw string compare in the twin and the floor (and the default comparator of the floor's sort). Layer 2 relies on
+this compare for every language's sort: fix in one place and re-run --cross. Files: abnf/jsrt.go string compare, lib/runtime.c
+string compare and the sort default comparator.
+
+### T-894 metajs: `for (let i …)` shares one binding across iterations · P1 · CORE · OPEN [V]
+`for (let i=0;i<3;i++) fs.push(function(){return i;})` then `fs[0]()+fs[1]()+fs[2]()` → node `012`, all legs `333`. Same class as
+T-478 (js, DONE); never applied to MetaJS. Files: metajs-interpreter.abnf (For), metajs-to-llvm-ir.abnf (For).
+
+### T-895 metajs: assignment evaluates the right-hand side before the target, and compound assignment reads late · P1 · CORE · OPEN [V]
+`getX()[key()] = note("rhs")` → node logs `obj,key,rhs`, all legs `rhs,obj,key`. `zz=1; zz += (zz = 5) + zz` → node 11, ours 15.
+`s="a"; s += s += "b"` → node `aab`, ours `abab`. `arr=[1,2,3]; idx=0; arr[idx++] = arr[idx]*10` → node `20,2,3`, ours `10,2,3`.
+Same class as T-479 / T-806 (fixed for js, java, kotlin). Files: assignment in metajs-interpreter.abnf and
+metajs-to-llvm-ir.abnf.
+
+### T-896 metajs: `parseInt` / `parseFloat` - Infinity, NBSP, radix range, -0, and 18-20 digit rounding · P1 · CORE · OPEN [V]
+node vs ours: `parseFloat("Infinity")`, `("-Infinity")` → Infinity / -Infinity; run/native/frozen NaN (goja right).
+`parseFloat(NBSP+"12")`, `parseInt(NBSP+"12")` → 12; native NaN. `parseInt("12", 37)` → NaN; run/frozen 39.
+`parseInt("12", 1)` → NaN; run/frozen 0. `1/parseInt("-0")` → -Infinity; goja interp and native Infinity.
+Radix 10 must be exact up to 20 significant digits: `parseInt("123456789012345678")` node 123456789012345680, run/native
+123456789012345700; `"99999999999999999999"` node 1e20, run 100000000000000020000; `"12345678901234567891"` node
+12345678901234567000, run 12345678901234571000, native 12345678901234570000. Files: abnf/jsrt.go jsParseInt / jsParseFloat,
+lib/runtime.c host ids 4 and 5.
+
+### T-897 metajs: `Math.pow(±1, ±Infinity)` and `Math.pow(1, NaN)` return 1 · P1 · CORE · OPEN [V]
+node `NaN NaN NaN` for `Math.pow(1, Infinity)`, `Math.pow(-1, Infinity)`, `Math.pow(1, NaN)`; all our legs `1 1 1` (C `pow`
+rules, not ECMAScript Number::exponentiate). Check `**` and the other languages that route through the same pow before changing
+the shared one (C, python, go want 1). Files: lib/runtime.c d_pow, the jsrt.go pow path, installGojaMathSurface.
+
+### T-898 metajs: the `\u{…}` escape is read as four hex digits · P1 · CORE · OPEN [V]
+`"\u{1F600}".length`, `.charCodeAt(0)`, `"\u{41}".charCodeAt(0)` → node `2 55357 65`; all legs `4 16886 17462` (`\u{1F6` taken
+as one escape, then `00}`). js, swift, ruby decode it right with their own rules; lua prints 4 too and is correct (UTF-8 bytes).
+Files: MetaJS's literal unescape (the shared `unescapeJs` in lib/interp-core.js and lib/compile-core.js reads `\u` as exactly 4
+hex digits; check which other grammars rely on it before widening).
+
+### T-899 metajs: a lone-surrogate needle never matches half of a surrogate pair · P1 · CORE · OPEN [V]
+`s = "x" + String.fromCharCode(55357,56832) + "y"`: `s.indexOf(String.fromCharCode(56832))` → node 2, run/native/frozen -1;
+`s.split(String.fromCharCode(55357)).length` → node 2, all legs 1; `s.replace(lo,"L")` changes nothing. The search runs over the
+UTF-8 bytes, where a pair is one 4-byte sequence. Files: lib/runtime.c str_index_of and its split/replace users, abnf/jsrt.go.
+
+### T-900 metajs: ToNumber of strings and ToPrimitive of objects are not JavaScript's - decide and record · P2 · CORE · OPEN [V]
+node vs run/native/frozen: `"0x10"-0` 16 vs NaN (`"0b11"`, `"0o7"` too); `"1_000"-0` NaN vs 1000; `"inf"-0` NaN vs Infinity;
+`(NBSP+"1")-0` 1 vs NaN; `[]-0` 0 vs NaN; `[1]*1` 1 vs NaN; `[]==""` true vs false; `[0]==0` true vs false; `o<=o` (same
+object) true vs false. About 550 of 1936 `==` pairs of a 44x44 table differ; the goja interp is right on objects. String→number is
+`strconv.ParseFloat` by design (metajs-interpreter.abnf comment, T-392) but manual 7.9 does not list it. Either record both as
+dialect in 7.9, or implement StringToNumber and ToPrimitive in the twin and the floor; `"1_000"` and `"inf"` being numbers is a
+wrong answer either way.
+
+### T-901 metajs: the goja interpreter leg diverges from -frozen and node · P2 · CORE · OPEN [V]
+Byte-identity between goja and -frozen is a matrix invariant, but these are unpinned: `-4 * 0` is +0 under goja (`1/p` Infinity;
+-frozen and node -Infinity); `"\ud83d".trim()` is U+FFFD under goja; `(hi+hi).split(lo).length` 3 under goja (node 1);
+`1/parseInt("-0")` Infinity; `"" + main` is 765 characters of the interpreter's own closure source and `"" + Math.floor` names
+`14.gy/mec/abnf.installGojaMathSurface.func1` (other legs `[function]`). Files: metajs-interpreter.abnf (binOp, the string
+methods handed to goja natively), abnf/frozen.go vs the goja surface.
 
 # Closed
 

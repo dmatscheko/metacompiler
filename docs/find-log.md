@@ -23,7 +23,7 @@ sweep · **D** guard review · **E** small open-source programs · **F** perform
 | A php | never | | | |
 | A csharp | never | | | |
 | A dart | never | | | |
-| A metajs | never | | | |
+| A metajs | 2026-10-31 | 2eba3f2e | first run, oracle node 24 (vm.Script): number->string (~5700 doubles), bitwise/shift tables, Math specials, charAt/slice/substring/indexOf args (~2700 rows), array sort/slice/splice/length, typeof, exceptions/finally, switch, closures, eval order, object keys, String/Array methods, parseInt/Float, ==/ToNumber tables, goja vs -frozen | 14: T-888..T-901 |
 | A regression (run 1 tickets) | 2026-10-29 | 9bd2229e | every DONE / done-part of T-465..T-555 re-probed on HEAD with neighbours: no regressions | 4: T-776..T-779 (new neighbouring defects) |
 | B kotlin | 2026-07-14 | 5a5f5ab5 | both Kotlin grammars | concepts consolidated in that commit |
 | B other languages | never | | | |
