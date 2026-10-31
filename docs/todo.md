@@ -66,12 +66,6 @@ its report; anything structural there is a CORE ticket.
 
 # RB — Ruby
 
-### T-884 ruby: `private_class_method :new` (Singleton idiom); `Class.new(P) { … }` · P3 · RB · IN PROGRESS (RB worker, round 32) [V RB worker]
-Oracle LC_ALL=en_US.UTF-8 /usr/bin/ruby 2.6, every engine. (1) REJECTED: `class Lazy; private_class_method :new; def self.instance;
-@i ||= new; end; end; Lazy.instance` → works in ruby; `Lazy.new` from outside → "private method `new' called for Lazy:Class";
-ours raises NoMethodError at the directive. (2) `Class.new(P) { def f; 1; end }` (anonymous class, runs P.inherited) is
-unsupported — implement if cheap in both halves, else record the decline.
-
 # JS — JavaScript and TypeScript
 
 # JV — Java
@@ -910,6 +904,7 @@ T-879 go: a complex multiply with a negated part fuses the wrong product — DON
 T-881 ruby: super into builtin methods; `==` result coerced to a boolean — DONE 86ea9dcb (super reaches builtin Object/Kernel/Comparable/Exception methods on user instances in all engines, Object#initialize arity per MRI; a user == keeps its value through the operator and send, != negates it; interp anonymous * / ** parameters; Module#private etc. with an explicit receiver raise MRI's error; compiled *_instance_methods follow run-time visibility. DECLINED: a user-defined #frozen? is never called by the interpreter — exotic)
 T-880 ruby/js/typescript/go compilers: errors still on stdout under -qq — DONE 2455a7e7 (js/ts/ruby/go fail and buildErr to stderr, js/ts hand-written errors through fail with the right prefix, regex.js default rxFail to stderr with the eight layer-2 .ll regenerated; 5 -qq SHOULD FAIL rows)
 T-882 ruby: a `self.new` override never runs; inherited / included hooks never fire — DONE 93919050 (C.new dispatches like a class method when the program defines a new; class-method super walks up to Class's own new/hooks; inherited/included/extended/prepended/method_added fire in every engine incl. the ClassMethods idiom; also fixed: 'yield if cond' parse, interp super with keyword/splat args, bare name in class methods. DECLINED: "str".extend(M) — builtin values have no singleton table; niche)
+T-884 ruby: `private_class_method :new` (Singleton idiom); `Class.new(P) { … }` — DONE 5ad62e67 (private_class_method / public_class_method in every engine incl. inherited and reopened classes and the Singleton idiom; CONST = Class.new(Super) { body } read as a class declaration; also fixed: send of a private method in the compiled engines, public_send of a private method now raises, respond_to? on Class/Module objects. DECLINED: an anonymous Class.new held in a local (the compiler builds method tables from the class name at compile time); the class name being set before inherited runs (needs nil-name classes in all three runtimes); Integer.respond_to?(:sqrt) false — builtin classes' own class methods are not in the respond tables, rare)
 
 # Settled — do not re-open
 
