@@ -8147,6 +8147,9 @@ func (rt *jsrt) rubyMemberCall(target interface{}, name string, args []interface
 				}
 			}
 		}
+		if rt.rubyEnumAnswers(target, name) {
+			return rt.rubyEnumMixin(target, name, args)
+		}
 		// A call nothing answers goes to the class's method_missing, with the name
 		// as a Symbol in front of the arguments. Twin of the method_missing arm of
 		// mcall in ruby-interpreter.abnf.
@@ -13346,7 +13349,7 @@ func (rt *jsrt) rubyArrayMethod(t *jsArray, name string, args []interface{}) int
 		for i, e := range t.elems {
 			rt.call(blk, jsUndef, []interface{}{e, float64(i)})
 		}
-		return t
+		return rt.rubyEnumSrc(t)
 	case "each_index":
 		for i := range t.elems {
 			rt.call(blk, jsUndef, []interface{}{float64(i)})
@@ -13439,7 +13442,7 @@ func (rt *jsrt) rubyArrayMethod(t *jsArray, name string, args []interface{}) int
 		for _, v := range rev.elems {
 			rt.call(blk, jsUndef, []interface{}{v})
 		}
-		return t
+		return rt.rubyEnumSrc(t)
 	case "reverse", "reverse!":
 		rev := make([]interface{}, 0, len(t.elems))
 		for i := len(t.elems) - 1; i >= 0; i-- {

@@ -4585,6 +4585,11 @@ rbExcParent["$Encoding::ConverterNotFoundError"] = "EncodingError"
 // Enumerator::Lazy < Enumerator: not an exception, but the table is where a builtin
 // class's superclass and ancestors are read from by name.
 rbExcParent["$Enumerator::Lazy"] = "Enumerator"
+// The numeric classes are Numerics, and Numeric brings in Comparable.
+rbExcParent["$Integer"] = "Numeric"
+rbExcParent["$Float"] = "Numeric"
+rbExcParent["$Rational"] = "Numeric"
+rbExcParent["$Complex"] = "Numeric"
 
 function rbExcParentOf(name) {
     var p = rbExcParent["$" + name]
@@ -7432,7 +7437,7 @@ function rbArrayMethod(t, name, args) {
             rbCall2(blk, t[w], w)
             w = w + 1
         }
-        return t
+        return rbEnumSrc(t)
     }
     if (name == "each_index") {
         var ei = 0
@@ -7531,7 +7536,7 @@ function rbArrayMethod(t, name, args) {
             rbCall1(blk, rvz[qz])
             qz = qz + 1
         }
-        return t
+        return rbEnumSrc(t)
     }
     if (name == "reverse" || name == "reverse!") {
         var rev = []
@@ -8282,6 +8287,7 @@ function rbMemberCall(target, name, args) {
                 if (name == "name" || name == "to_s") { return target["__renc"] }
                 if (name == "ascii_compatible?") { return true }
             }
+            if (rbEnumAnswers(target, name)) { return rbEnumMixin(target, name, args) }
             // A call nothing answers goes to the class's method_missing, with the
             // name as a Symbol in front of the arguments. Twin of the method_missing
             // arm of mcall in ruby-interpreter.abnf.
@@ -8341,6 +8347,7 @@ function js_rrespond(target, args) {
     if (rbSingFind(target, n) !== undefined) { return true }
     if (rbRestricted(target["__class"], n)) { return all }
     if (rbSingRespond(target, n) || (all && rbRespondsPriv(n))) { return true }
+    if (rbEnumAnswers(target, n)) { return true }
     // respond_to_missing? - see respondTo in ruby-interpreter.abnf.
     if (rbUserObj(target) && rbFindMethod(target, "respond_to_missing?") !== undefined) {
         return rbTruthy(rbMethod(target, "respond_to_missing?", [rbSym(n), all]))
@@ -9509,11 +9516,15 @@ function rbBuiltinExtFind(v, name) {
     if (rbIsObj(v)) {
         if (v["__class"] !== undefined || v["__isclass"] === true) { return undefined }
     }
+    // The value's class, then its builtin superclasses (a method a program gave
+    // Numeric reaches an Integer).
     var cn = rbClassName(v)
-    if (cn == "") { return undefined }
     var bm = anytype
-    bm = rbBuiltinClass(cn)[name]
-    if (bm !== undefined && rbIsFn(bm)) { return bm }
+    while (cn != "") {
+        bm = rbBuiltinClass(cn)[name]
+        if (bm !== undefined && rbIsFn(bm)) { return bm }
+        cn = rbExcParentOf(cn)
+    }
     return undefined
 }
 
@@ -10496,6 +10507,33 @@ function rbDelegArr(arr, recv, name, args) {
     rbNmDeleg[0] = sa
     rbNmDeleg[1] = sr
     return v
+}
+
+// An Enumerable method on an instance of a class that includes Enumerable and
+// defines #each. Twins: enumAnswers in ruby-interpreter.abnf, rubyEnumAnswers in
+// abnf/jsrtruby.go.
+function rbEnumAnswers(t, name) {
+    return rbEnumName(name) && rbUserObj(t) && rbFindMethod(t, "each") !== undefined && rbIsA(t, rbBuiltinClass("Enumerable"))
+}
+// Such a method is answered by the values #each yields, packed as Enumerable#to_a
+// packs them, run as an Array. Twins: enumMixin in ruby-interpreter.abnf,
+// rubyEnumMixin in abnf/jsrtruby.go.
+function rbEnumMixin(t, name, args) {
+    var items = []
+    rbMethod(t, "each", [js_rblkwrap(function() {
+        if (arguments.length == 1) {
+            items.push(arguments[0])
+        } else if (arguments.length == 0) {
+            items.push(null)
+        } else {
+            var a = []
+            var i = 0
+            while (i < arguments.length) { a.push(arguments[i]); i = i + 1 }
+            items.push(a)
+        }
+        return null
+    })])
+    return rbDelegArr(items, t, name, args)
 }
 
 // The receiver as a NoMethodError / NameError message names it. Twin of

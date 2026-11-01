@@ -8336,6 +8336,22 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         nmDeleg.recv = sr
         return v
     }
+    // An Enumerable method on an instance of a class that includes Enumerable: the
+    // values #each yields, packed as Enumerable#to_a packs them, answer it as an
+    // Array would. Twins: rubyEnumMixin in abnf/jsrtruby.go, rbEnumMixin in
+    // lib/ruby-rt.metajs.
+    function enumAnswers(t, name) {
+        return rbEnumName(name) && userIsA(t, hostGlobals["Enumerable"]) && typeof lookupMethod(t.__class, "each") == "function"
+    }
+    function enumMixin(t, name, args, blk) {
+        var items = []
+        mcall(t, "each", [], function() {
+            var a = argsArray(arguments)
+            if (a.length == 1) { items.push(a[0]) } else { items.push(a.length == 0 ? null : a) }
+            return null
+        })
+        return delegArr(items, t, name, args, blk)
+    }
     function noMethodDesc(t) {
         var cn = classOf(t).__name
         var d = rinspect(t)
@@ -9466,6 +9482,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                     if (name == "name" || name == "to_s") { return target.__renc }
                     if (name == "ascii_compatible?") { return true }
                 }
+                if (enumAnswers(target, name)) { return enumMixin(target, name, args, blk) }
                 // A call nothing answers goes to the class's method_missing, with
                 // the name as a Symbol in front of the arguments. Twins:
                 // rubyMemberCall in abnf/jsrt.go, rbMemberCall in lib/ruby-rt.metajs.
@@ -10478,7 +10495,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 return enumAt(mkEnum(wpairs), enumSrc(t), name, args)
             }
             for (i = 0; i < t.length; i++) { blockCall(blk, [t[i], i]) }
-            return t
+            return enumSrc(t)
         }
         var out
         if (name == "map" || name == "collect") {
@@ -10539,7 +10556,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             for (i = t.length - 1; i >= 0; i--) { rvz.push(t[i]) }
             if (blk == null) { return enumAt(mkEnum(rvz), enumSrc(t), name, args) }
             for (i = 0; i < rvz.length; i++) { blockCall(blk, [rvz[i]]) }
-            return t
+            return enumSrc(t)
         }
         if (name == "reverse" || name == "reverse!") {
             var rev = []
@@ -13093,6 +13110,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (target.__isclass !== true && typeof lookupMethod(target.__class, n) == "function"
             && visOf(target.__class, n) != "public") { return all }
         if (singRespond(target, n) || (all && respondsPrivate(n))) { return true }
+        if (target.__isclass !== true && enumAnswers(target, n)) { return true }
         // A class that answers calls through method_missing says which in
         // respond_to_missing?. Twins: rubyRespond in abnf/jsrtruby.go, js_rrespond
         // in lib/ruby-rt.metajs.
@@ -14895,6 +14913,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         hostGlobals[builtinClassNames[bci]] = mkBuiltinClass(builtinClassNames[bci], null)
         if (isBuiltinModule(builtinClassNames[bci])) { hostGlobals[builtinClassNames[bci]].__ismodule = true }
     }
+    // The numeric classes are Numerics, and Numeric brings in Comparable. Twins:
+    // rubyExcParent in abnf/jsrtruby.go, rbExcParent in lib/ruby-rt.metajs.
+    for (var nci = 0; nci < 4; nci++) { hostGlobals[["Integer", "Float", "Rational", "Complex"][nci]].__super = hostGlobals["Numeric"] }
     // The module a builtin class includes, for ancestors / include? / is_a? (a
     // Struct.new instance is an Enumerable through its superclass). Twins:
     // rubyBuiltinMixin in abnf/jsrt.go, rbBuiltinMixin in lib/ruby-rt.metajs.

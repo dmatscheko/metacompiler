@@ -1357,6 +1357,65 @@ def s153
                     P153.new(1).is_a?(Struct), s.is_a?(Struct), Struct === s, s.is_a?(Comparable), P153.ancestors.size,
                     (case s when Enumerable then :enum end)] == [true, true, true, true, true, true, true, false, 7, :enum])
 end
+# ===== SECTION 154: Enumerable over a user #each; Numeric in the numeric classes =====
+# A class that includes Enumerable and defines #each answers Enumerable's methods
+# over what #each yields, a Struct.new instance too, and respond_to? says so; a
+# class with #each that does not include it does not. each_with_index and
+# reverse_each with a block answer their receiver: the object, a Range, a Hash.
+# Integer, Float, Rational and Complex are Numerics - superclass, ancestors, the
+# module relations - and a method a program gives Numeric reaches them.
+# /usr/bin/ruby 2.6 settles each.
+class B154
+  include Enumerable
+  def initialize(a); @a = a; end
+  def each
+    @a.each { |x| yield x }
+    self
+  end
+end
+class E154
+  def each; yield 1; end
+end
+class Numeric
+  def s154_half; self / 2.0; end
+end
+def s154
+  b = B154.new([3, 1, 2])
+  r = begin
+    [b.map { |x| x * 2 }, b.sort, b.min, b.max, b.include?(2), b.to_a, b.select { |x| x > 1 },
+     b.reject { |x| x > 1 }, b.inject(:+), b.sort_by { |x| -x }, b.first, b.first(2), b.count,
+     b.min_by { |x| -x }, b.group_by(&:odd?), b.partition { |x| x > 1 }, b.each_slice(2).to_a,
+     b.sum { |x| x * 10 }, b.minmax, b.find_index(2), b.to_h { |x| [x, -x] }, b.entries]
+  rescue NoMethodError
+    nil
+  end
+  check("enm154a", r == [[6, 2, 4], [1, 2, 3], 1, 3, true, [3, 1, 2], [3, 2], [1], 6, [3, 2, 1], 3, [3, 1], 3,
+                         3, {true => [3, 1], false => [2]}, [[3, 2], [1]], [[3, 1], [2]], 60, [1, 3], 2,
+                         {3 => -3, 1 => -1, 2 => -2}, [3, 1, 2]])
+  st = Struct.new(:a, :b).new(4, 5)
+  w = begin
+    [st.map { |v| v * 2 }, st.sort.reverse, st.max, b.respond_to?(:map), b.respond_to?(:size),
+     b.each_with_index { |x, i| x }.equal?(b), b.reverse_each { |x| x }.equal?(b),
+     (begin; E154.new.map { |x| x }; rescue NoMethodError; :nm; end)]
+  rescue NoMethodError
+    nil
+  end
+  check("enm154b", w == [[8, 10], [5, 4], 5, true, false, true, true, :nm])
+  check("enm154c", (1..3).each_with_index { |x, i| x } == (1..3) && (1..3).reverse_each { |x| x } == (1..3) &&
+        {a: 1}.each_with_index { |x, i| x } == {a: 1} && [1, 2].each_with_index { |x, i| x } == [1, 2])
+  check("num154a", [Integer.superclass, Float.superclass, Rational.superclass, Complex.superclass,
+                    Numeric.superclass, 3.class.superclass.superclass] == [Numeric, Numeric, Numeric, Numeric, Object, Object])
+  check("num154b", Float.ancestors == [Float, Numeric, Comparable, Object, Kernel, BasicObject] &&
+        Integer.ancestors == [Integer, Numeric, Comparable, Object, Kernel, BasicObject] &&
+        [Integer < Numeric, Integer < Comparable, Numeric > Float, Float < Integer, Integer.include?(Comparable),
+         Integer.ancestors.include?(Numeric)] == [true, true, true, nil, true, true])
+  h = begin
+    [3.s154_half, 2.5.s154_half, 3.respond_to?(:s154_half)]
+  rescue NoMethodError
+    nil
+  end
+  check("num154c", h == [1.5, 1.25, true])
+end
 s122() # SECTION-CALL 122
 s123() # SECTION-CALL 123
 s124() # SECTION-CALL 124
@@ -1389,5 +1448,6 @@ s150() # SECTION-CALL 150
 s151() # SECTION-CALL 151
 s152() # SECTION-CALL 152
 s153() # SECTION-CALL 153
+s154() # SECTION-CALL 154
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

@@ -11,6 +11,9 @@
 // class name followed by its own names. Rows "Class" and "Module" are a class or
 // module OBJECT's. Row "private" holds the private Kernel
 // methods every object has, which respond_to? reports only with include_all.
+// Row "Enumerable" holds what an instance of a class that includes Enumerable and
+// defines #each answers: MRI 2.6's Enumerable methods, run on the Array of what
+// #each yields.
 //
 // Included by ruby-interpreter.abnf (include("lib/ruby-respond.js")) and
 // imported by lib/ruby-rt.metajs. The Go twin's copy is rubyRespondNames in
@@ -145,6 +148,13 @@ function rbRespondRows() {
          "partition", "peek", "public_send", "reduce", "reject", "reverse_each", "rewind",
          "select", "send", "size", "sort", "sort_by", "sum", "take", "take_while", "tally",
          "to_a", "uniq", "with_index", "with_object", "zip"],
+        ["Enumerable", "all?", "any?", "chunk_while", "collect", "collect_concat", "count",
+         "cycle", "detect", "drop", "drop_while", "each_cons", "each_entry", "each_slice",
+         "each_with_index", "each_with_object", "entries", "filter", "find", "find_all",
+         "find_index", "first", "flat_map", "group_by", "include?", "inject", "lazy", "map",
+         "max", "max_by", "min", "min_by", "minmax", "none?", "one?", "partition", "reduce",
+         "reject", "reverse_each", "select", "slice_when", "sort", "sort_by", "sum", "take",
+         "take_while", "to_a", "to_h", "uniq", "zip"],
         ["Class", "<", "<=", ">", ">=", "ancestors", "class_eval", "constants", "equal?",
          "frozen?", "include?", "instance_methods", "instance_of?",
          "instance_variable_get", "instance_variable_set", "instance_variables", "is_a?",
@@ -281,4 +291,10 @@ function rbResponds(cls, name) {
 function rbRespondsPrivate(name) {
     rbResponds("", name)
     return rbRespondSet["$private#" + name] === true
+}
+
+// The Enumerable methods of the "Enumerable" row.
+function rbEnumName(name) {
+    rbResponds("", name)
+    return rbRespondSet["$Enumerable#" + name] === true
 }

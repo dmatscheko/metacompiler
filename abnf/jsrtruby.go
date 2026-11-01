@@ -63,6 +63,10 @@ func init() {
 	// Enumerator::Lazy < Enumerator: not an exception, but the table is where a
 	// builtin class's superclass and ancestors are read from by name.
 	rubyExcParent["Enumerator::Lazy"] = "Enumerator"
+	// The numeric classes are Numerics, and Numeric brings in Comparable.
+	for _, n := range []string{"Integer", "Float", "Rational", "Complex"} {
+		rubyExcParent[n] = "Numeric"
+	}
 	rxExtraExterns = append(rxExtraExterns, func(rt *jsrt, m map[string]func(args []uint64) uint64) {
 		rt.addRubyFmtExterns(m)
 	})
@@ -2112,6 +2116,13 @@ var rubyRespondNames = map[string][]string{
 		"public_send", "reduce", "reject", "reverse_each", "rewind", "select", "send", "size",
 		"sort", "sort_by", "sum", "take", "take_while", "tally", "to_a", "uniq", "with_index",
 		"with_object", "zip"},
+	"Enumerable": {"all?", "any?", "chunk_while", "collect", "collect_concat", "count",
+		"cycle", "detect", "drop", "drop_while", "each_cons", "each_entry", "each_slice",
+		"each_with_index", "each_with_object", "entries", "filter", "find", "find_all",
+		"find_index", "first", "flat_map", "group_by", "include?", "inject", "lazy", "map",
+		"max", "max_by", "min", "min_by", "minmax", "none?", "one?", "partition", "reduce",
+		"reject", "reverse_each", "select", "slice_when", "sort", "sort_by", "sum", "take",
+		"take_while", "to_a", "to_h", "uniq", "zip"},
 	"Class": {"<", "<=", ">", ">=", "ancestors", "class_eval", "constants", "equal?",
 		"frozen?", "include?", "instance_methods", "instance_of?",
 		"instance_variable_get", "instance_variable_set", "instance_variables", "is_a?",
@@ -2259,6 +2270,9 @@ func (rt *jsrt) rubyRespond(target interface{}, args []interface{}) interface{} 
 	if rubySingRespond(o, n) || (all && rt.rubyRespondsPrivate(n)) {
 		return true
 	}
+	if rt.rubyEnumAnswers(o, n) {
+		return true
+	}
 	// respond_to_missing? - see respondTo in ruby-interpreter.abnf.
 	if rubyUserObj(o) {
 		if _, has := rubyFindMethod(o, "respond_to_missing?"); has {
@@ -2277,6 +2291,39 @@ func rubyClassRow(o *jsObject) string {
 }
 
 // rubyRespondsPrivate: is n a private method every object has?
+// rubyEnumAnswers: an Enumerable method on an instance of a class that includes
+// Enumerable and defines #each. Twins: enumAnswers in ruby-interpreter.abnf,
+// rbEnumAnswers in lib/ruby-rt.metajs.
+func (rt *jsrt) rubyEnumAnswers(t interface{}, name string) bool {
+	if !rubyRespondSet["Enumerable#"+name] || !rubyUserObj(t) {
+		return false
+	}
+	if _, has := rubyFindMethod(t, "each"); !has {
+		return false
+	}
+	return rt.rubyIsA(t, rt.rubyBuiltinClass("Enumerable"))
+}
+
+// rubyEnumMixin answers such a method: the values #each yields, packed as
+// Enumerable#to_a packs them, run as an Array. Twins: enumMixin in
+// ruby-interpreter.abnf, rbEnumMixin in lib/ruby-rt.metajs.
+func (rt *jsrt) rubyEnumMixin(t interface{}, name string, args []interface{}) interface{} {
+	items := &jsArray{}
+	collect := &hostFunc{name: "", fn: func(_ *jsrt, _ uint64, a []interface{}) interface{} {
+		switch len(a) {
+		case 0:
+			items.elems = append(items.elems, jsNull)
+		case 1:
+			items.elems = append(items.elems, a[0])
+		default:
+			items.elems = append(items.elems, &jsArray{elems: append([]interface{}{}, a...)})
+		}
+		return jsNull
+	}}
+	rt.rubyMethod(t, "each", []interface{}{rubyBlkWrap(collect)})
+	return rt.rubyDelegArr(items, t, name, args)
+}
+
 func (rt *jsrt) rubyRespondsPrivate(n string) bool {
 	if rubyRespondSet["private#"+n] {
 		return true
@@ -3486,12 +3533,12 @@ func (rt *jsrt) rubyBuiltinExtFind(v interface{}, name string) (interface{}, boo
 			return nil, false
 		}
 	}
-	cn := rubyClassName(v)
-	if cn == "" {
-		return nil, false
-	}
-	if bm, has := rt.rubyBuiltinClass(cn).props[name]; has && isCallable(bm) {
-		return bm, true
+	// The value's class, then its builtin superclasses (a method a program gave
+	// Numeric reaches an Integer).
+	for cn := rubyClassName(v); cn != ""; cn = rubyExcParent[cn] {
+		if bm, has := rt.rubyBuiltinClass(cn).props[name]; has && isCallable(bm) {
+			return bm, true
+		}
 	}
 	return nil, false
 }
