@@ -93,12 +93,12 @@ foreign object).
 
 # JV — Java
 
-### T-998 java compiled: an interface extending `Comparable<T>` fails with "variable not defined: Comparable" · P2 · JV · OPEN [V]
+### T-998 java compiled: an interface extending `Comparable<T>` fails with "variable not defined: Comparable" · P2 · JV · IN PROGRESS (JV worker, round 17) [V]
 Found by the master probing round 16 (oracle java 24). `interface Shape extends Comparable<Shape> { double area(); default int
 compareTo(Shape o) {..} }` with a class implementing it → interpreter and java agree; llvm.Run and native abort with "js runtime
 error: variable not defined: Comparable" (pre-existing on main). Library interfaces as an interface's superinterface need a stub.
 
-### T-999 java: package access is not checked; tests/java-test-multifile.java imports non-public classes · P3 · JV · OPEN [V]
+### T-999 java: package access is not checked; tests/java-test-multifile.java imports non-public classes · P3 · JV · IN PROGRESS (JV worker, round 17) [V]
 Found by the JV worker, round 16 (oracle javac 24). `util.Toolbox` / `util.Pair` in tests/imports/util are not public; javac refuses
 the import ("Toolbox is not public in util; cannot be accessed from outside package"). Both halves accept it. Fix the test (make
 them public) and refuse access to a package-private type from another package. Generic constructors' type-parameter lists are
