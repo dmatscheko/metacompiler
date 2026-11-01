@@ -8010,26 +8010,75 @@ func (rt *jsrt) rubyAncestorHas(cls interface{}, m interface{}) bool {
 	return false
 }
 
-// Module#< / #<= / #> / #>=: the ancestry relation, and NIL for two unrelated
-// modules - which is why these do not go through rubyCmp, whose contract is to raise.
-// rubyRel is what js_rlt / js_rgt / js_rle / js_rge do: the module relation when
-// both sides are class objects, the ordinary comparison otherwise.
-func (rt *jsrt) rubyRel(op string, l, r interface{}) uint64 {
-	_, lIsCls := rubyIsClassObj(l)
-	_, rIsCls := rubyIsClassObj(r)
-	if lIsCls && rIsCls {
-		return rt.wrap(rt.rubyModRel(l, r, op))
+// rubyRel is < > <= >= (js_rlt / js_rgt / js_rle / js_rge, and `send(:<)'). They
+// are METHODS of Comparable, Hash and Module, not of Object: an Array, nil, true, a
+// Range or a Complex has none, so `[1] < 2' is a NoMethodError, not a failed
+// comparison. A user object answers through its own method, or Comparable's when
+// its class includes it. Between two modules they are the ancestry relation (NIL
+// for two unrelated ones, where rubyCmp's contract is to raise); on a Hash, the
+// subset relation. Twins: relOp in ruby-interpreter.abnf, rbRel in
+// lib/ruby-rt.metajs.
+func (rt *jsrt) rubyRel(op string, l, r interface{}) interface{} {
+	switch l.(type) {
+	case float64, jsFlo, jsRat, *jsBigInt, string, *jsRStr, *jsRBin, jsSym:
+	default:
+		if rubyUserObj(l) {
+			if m, own := rubyFindMethod(l, op); own {
+				return rt.call(m, jsUndef, []interface{}{l, r})
+			}
+			if !rt.rubyIsA(l, rt.rubyBuiltinClass("Comparable")) {
+				rt.rubyNoMethod(l, op)
+			}
+		} else if _, lIsCls := rubyIsClassObj(l); lIsCls {
+			if _, rIsCls := rubyIsClassObj(r); !rIsCls {
+				rt.rubyRaiseErr(op, "TypeError", "compared with non class/module")
+			}
+			return rt.rubyModRel(l, r, op)
+		} else if _, _, isDict := dictParts(l); isDict {
+			return rt.rubyHashRel(op, l, r)
+		} else {
+			rt.rubyNoMethod(l, op)
+		}
 	}
 	c := rt.rubyCmp(l, r)
 	switch op {
 	case "<":
-		return rt.wrap(c < 0)
+		return c < 0
 	case ">":
-		return rt.wrap(c > 0)
+		return c > 0
 	case "<=":
-		return rt.wrap(c <= 0)
+		return c <= 0
 	}
-	return rt.wrap(c >= 0)
+	return c >= 0
+}
+
+// rubyHashRel is Hash#<=, "every pair of l is in r" (values by ==); < also wants r
+// larger, and > / >= swap the sides. The right side converts through #to_hash.
+// Twins: hashRel in ruby-interpreter.abnf, rbHashRel in lib/ruby-rt.metajs.
+func (rt *jsrt) rubyHashRel(op string, l, r interface{}) bool {
+	h := r
+	if _, _, isDict := dictParts(h); !isDict {
+		h, _ = rt.rubyFmtUserConv(r, "to_hash", "")
+	}
+	if _, _, isDict := dictParts(h); !isDict {
+		rt.rubyRaiseErr(op, "TypeError", "no implicit conversion of "+rubyFmtConvName(r)+" into Hash")
+	}
+	a, b := l, h
+	if op == ">" || op == ">=" {
+		a, b = h, l
+	}
+	ak, av, _ := dictParts(a)
+	bk, bv, _ := dictParts(b)
+	if len(ak.elems) > len(bk.elems) || ((op == "<" || op == ">") && len(ak.elems) == len(bk.elems)) {
+		return false
+	}
+	for i := range ak.elems {
+		at := rt.rubyDictFind(bk, ak.elems[i])
+		if at < 0 || !rt.rubyEq(av.elems[i], bv.elems[at]) {
+			return false
+		}
+	}
+	return true
 }
 
 func (rt *jsrt) rubyModRel(l, r interface{}, op string) interface{} {
@@ -10349,10 +10398,7 @@ func (rt *jsrt) rubyCmpName(v interface{}) string {
 	case bool, float64, jsFlo, jsSym:
 		return rt.rubyInspect(v)
 	}
-	if n := rubyClassName(v); n != "" {
-		return n
-	}
-	return "Object"
+	return rubyOwnerName(v)
 }
 
 // rubyCmp backs < > <= >=, which raise in Ruby when the values cannot be compared.
@@ -11037,9 +11083,7 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 			// are the js_rlt/js_rcmp family, exactly as the emitter spells them.
 			switch mn {
 			case "<", ">", "<=", ">=":
-				c := rt.rubyCmp(target, args[1])
-				return (mn == "<" && c < 0) || (mn == ">" && c > 0) ||
-					(mn == "<=" && c <= 0) || (mn == ">=" && c >= 0)
+				return rt.rubyRel(mn, target, args[1])
 			case "<=>":
 				if c, ok := rt.rubySpaceship(target, args[1]); ok {
 					return float64(c)
@@ -13120,6 +13164,23 @@ func rubyIsEnum(v interface{}) bool {
 func (rt *jsrt) rubyEnumMethod(t *jsObject, name string, args []interface{}) interface{} {
 	if t.props["__rlazy"] == true {
 		return rt.rubyLazyMethod(t, name, args)
+	}
+	// A deferred Enumerator over a user #each: #each with a block IS its method
+	// with that block (so `find.each { }' stops #each early, as MRI's does), and
+	// its size is nil - there is no #size to ask. Anything but #inspect
+	// runs the method first. Twins: enumMethod in ruby-interpreter.abnf,
+	// rbEnumMethod in lib/ruby-rt.metajs.
+	if t.props["__rdefer"] == true {
+		meth, _ := t.props["meth"].(string)
+		if _, blk := rubyBlockArgs(args); name == "each" && blk != nil {
+			return rt.rubyEnumRun(t.props["src"], meth, append(append([]interface{}{}, t.props["margs"].(*jsArray).elems...), args[len(args)-1]))
+		}
+		if name == "size" {
+			return jsNull
+		}
+		if name != "inspect" && name != "to_s" && name != "class" {
+			rt.rubyEnumForce(t)
+		}
 	}
 	if name == "lazy" {
 		its, _ := t.props["items"].(*jsArray)
@@ -16100,10 +16161,10 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		// < > <= >= between two MODULES is the ancestry relation, not a value
 		// comparison: `A < M' after `include M' is true and `A < String' is NIL,
 		// where rubyCmp's contract is to raise.
-		"js_rlt": func(a []uint64) uint64 { return rt.rubyRel("<", u(a[0]), u(a[1])) },
-		"js_rgt": func(a []uint64) uint64 { return rt.rubyRel(">", u(a[0]), u(a[1])) },
-		"js_rle": func(a []uint64) uint64 { return rt.rubyRel("<=", u(a[0]), u(a[1])) },
-		"js_rge": func(a []uint64) uint64 { return rt.rubyRel(">=", u(a[0]), u(a[1])) },
+		"js_rlt": func(a []uint64) uint64 { return rt.wrap(rt.rubyRel("<", u(a[0]), u(a[1]))) },
+		"js_rgt": func(a []uint64) uint64 { return rt.wrap(rt.rubyRel(">", u(a[0]), u(a[1]))) },
+		"js_rle": func(a []uint64) uint64 { return rt.wrap(rt.rubyRel("<=", u(a[0]), u(a[1]))) },
+		"js_rge": func(a []uint64) uint64 { return rt.wrap(rt.rubyRel(">=", u(a[0]), u(a[1]))) },
 		"js_rcmp": func(a []uint64) uint64 { // <=>: nil when the two cannot be compared
 			c, ok := rt.rubySpaceship(u(a[0]), u(a[1]))
 			if !ok {
@@ -17905,6 +17966,10 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			// call, so it never reaches rubyEnumMethod. Only ruby builds a __renum
 			// object, so no other language can reach this arm.
 			if rubyIsEnum(u(a[0])) {
+				// Iterating a deferred Enumerator runs its method.
+				if e := u(a[0]).(*jsObject); e.props["__rdefer"] == true {
+					rt.rubyEnumForce(e)
+				}
 				if items, isArr := u(a[0]).(*jsObject).props["items"].(*jsArray); isArr {
 					return rt.wrapNum(float64(len(items.elems)))
 				}

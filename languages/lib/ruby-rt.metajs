@@ -3959,8 +3959,7 @@ function rbCmpSign(n) {
 function rbCmpName(v) {
     if (rtIsNil(v) || v === true || v === false) { return rbInspect(v) }
     if (typeof v == "number" || rbIsFlo(v) || rbIsSym(v)) { return rbInspect(v) }
-    var n = rbClassName(v)
-    return n == "" ? "Object" : n
+    return rbOwnerName(v)
 }
 
 // < > <= >= raise in Ruby when the values cannot be compared.
@@ -6821,15 +6820,34 @@ function rbIsEnum(v) {
 // ruby-interpreter.abnf, which state the rules.
 function rbMkLazy(kind, items, lo, hi, excl, lazy, desc) {
     return {__renum: true, __rlazy: true, items: items, pos: 0, op: "each", kind: kind, lo: lo, hi: hi, excl: excl,
-            ops: [], lazy: lazy, desc: desc}
+            ops: [], lazy: lazy, desc: desc, src: null}
 }
 function rbLazyCopy(t, op, lazy, desc) {
     var c = rbMkLazy(t["kind"], t["items"], t["lo"], t["hi"], t["excl"], lazy, desc)
     c["ops"] = rtCopyArr(t["ops"])
     if (op !== null) { c["ops"].push(op) }
+    c["src"] = t["src"]
     return c
 }
-function rbLazyFirst(t, n) { return rbaLazyFirst(t, n, rbCall1, rbTruthy) }
+function rbLazyFirst(t, n) { return rbaLazyFirst(t, n, rbCall1, rbTruthy, rbLazyDrive) }
+// The #each of a Lazy's user source. Twin of lazyDrive in ruby-interpreter.abnf.
+function rbLazyDrive(src, step) {
+    var tag = {}
+    var each = js_rblkwrap(function() {
+        var it = anytype
+        it = null
+        if (arguments.length == 1) { it = arguments[0] }
+        if (arguments.length > 1) {
+            var a = []
+            var i = 0
+            while (i < arguments.length) { a.push(arguments[i]); i = i + 1 }
+            it = a
+        }
+        if (step(it)) { js_rthrow([tag]) }
+        return null
+    })
+    js_rcatch(tag, function() { return rbMethod(src, "each", [each]) })
+}
 function rbRangeLazy(r) {
     var d = "#<Enumerator::Lazy: " + rbInspect(r) + ">"
     var hi = anytype
@@ -6906,6 +6924,17 @@ function rbLazyMethod(t, name, args) {
 
 function rbEnumMethod(t, name, args) {
     if (t["__rlazy"] === true) { return rbLazyMethod(t, name, args) }
+    // A deferred Enumerator over a user #each. Twin of the arm in rubyEnumMethod in
+    // abnf/jsrt.go, which states the rule.
+    if (t["__rdefer"] === true) {
+        if (name == "each" && rbBlockOf(args) !== null) {
+            var dargs = rtCopyArr(t["margs"])
+            dargs.push(args[args.length - 1])
+            return rbEnumRun(t["src"], t["meth"], dargs)
+        }
+        if (name == "size") { return null }
+        if (name != "inspect" && name != "to_s" && name != "class") { rbEnumForce(t) }
+    }
     var items = t["items"]
     var blk = rbBlockOf(args)
     var nPos = rbNPos(args)
@@ -8668,10 +8697,7 @@ function rbMethod(target, name, args) {
             return js_rxwhen(target, args[1])
         }
         if (args.length == 2 && rbIsBinOpName(mn)) {
-            if (mn == "<") { return rbCmp(target, args[1]) < 0 }
-            if (mn == ">") { return rbCmp(target, args[1]) > 0 }
-            if (mn == "<=") { return rbCmp(target, args[1]) <= 0 }
-            if (mn == ">=") { return rbCmp(target, args[1]) >= 0 }
+            if (mn == "<" || mn == ">" || mn == "<=" || mn == ">=") { return rbRel(mn, target, args[1]) }
             if (mn == "<=>") { return js_rcmp(target, args[1]) }
             if (mn == "&") { return js_rband(target, args[1]) }
             if (mn == "|") { return js_rbor(target, args[1]) }
@@ -9412,8 +9438,17 @@ function js_rlen(v, name) {
     if (typeof v == "string") { return rbCharCount(v) }
     if (rbIsArr(v)) { return v.length }
     if (rbIsDict(v)) { return v["keys"].length }
-    // An Enumerator's length is its element count.
-    if (rbIsEnum(v)) { return v["items"].length }
+    // An Enumerator's length is its element count; a deferred one's #size is nil,
+    // as is a Lazy's over a user #each, and iterating a deferred one runs its
+    // method.
+    if (rbIsEnum(v)) {
+        if (name !== null && v["__rlazy"] === true && v["kind"] == "each") { return null }
+        if (v["__rdefer"] === true) {
+            if (name !== null) { return null }
+            rbEnumForce(v)
+        }
+        return v["items"].length
+    }
     // A Range's length is its ELEMENT COUNT, computed arithmetically rather than by
     // materializing, because for-in asks for it once and then indexes. See
     // js_pyget.
@@ -9496,28 +9531,65 @@ function js_req(l, r) {
     return rbEq(l, r)
 }
 function js_rne(l, r) { return !rbEq(l, r) }
-// < > <= >= between two MODULES is the ancestry relation, not a value comparison:
-// `A < M' after `include M' is true and `A < String' is NIL, where rbCmp's contract
-// is to raise.
-// The `typeof l == "object"' guard is NOT redundant with rbIsClassObj, it is the
-// whole cost of this arm: js_rlt runs once per iteration of a `while i < n'
-// loop, and in MetaJS A CALL IS A SCOPE FRAME. `typeof' is an operator, so a
-// numeric operand short-circuits with no call at all.
+// < > <= >=: an Integer or a plain String compares directly. Every other receiver
+// goes through rbRel, so a `while i < n' loop pays no call for it - in MetaJS A
+// CALL IS A SCOPE FRAME.
 function js_rlt(l, r) {
-    if (typeof l == "object" && rbIsClassObj(l) && rbIsClassObj(r)) { return rbModRel(l, r, "<") }
+    if (typeof l != "number" && typeof l != "string") { return rbRel("<", l, r) }
     return rbCmp(l, r) < 0
 }
 function js_rgt(l, r) {
-    if (typeof l == "object" && rbIsClassObj(l) && rbIsClassObj(r)) { return rbModRel(l, r, ">") }
+    if (typeof l != "number" && typeof l != "string") { return rbRel(">", l, r) }
     return rbCmp(l, r) > 0
 }
 function js_rle(l, r) {
-    if (typeof l == "object" && rbIsClassObj(l) && rbIsClassObj(r)) { return rbModRel(l, r, "<=") }
+    if (typeof l != "number" && typeof l != "string") { return rbRel("<=", l, r) }
     return rbCmp(l, r) <= 0
 }
 function js_rge(l, r) {
-    if (typeof l == "object" && rbIsClassObj(l) && rbIsClassObj(r)) { return rbModRel(l, r, ">=") }
+    if (typeof l != "number" && typeof l != "string") { return rbRel(">=", l, r) }
     return rbCmp(l, r) >= 0
+}
+// The comparison operators on any receiver. Twin of rubyRel in abnf/jsrt.go, which
+// states the rule.
+function rbRel(op, l, r) {
+    if (rbUserObj(l)) {
+        var m = rbFindMethod(l, op)
+        if (m !== undefined) { return m.apply(undefined, [l, r]) }
+        if (!rbIsA(l, rbBuiltinClass("Comparable"))) { rbNoMethod(l, op) }
+    } else if (rbIsClassObj(l)) {
+        if (!rbIsClassObj(r)) { rbRaiseErr(op, "TypeError", "compared with non class/module") }
+        return rbModRel(l, r, op)
+    } else if (rbIsDict(l)) {
+        return rbHashRel(op, l, r)
+    } else if (!((rbIsNum(l) && !rbIsCpx(l)) || typeof l == "string" || rtTag(l, "__rstr") || rtTag(l, "__rbin") || rbIsSym(l))) {
+        rbNoMethod(l, op)
+    }
+    var c = rbCmp(l, r)
+    if (op == "<") { return c < 0 }
+    if (op == ">") { return c > 0 }
+    if (op == "<=") { return c <= 0 }
+    return c >= 0
+}
+// Hash#<= and its three siblings. Twin of rubyHashRel in abnf/jsrt.go.
+function rbHashRel(op, l, r) {
+    var h = anytype
+    h = r
+    if (!rbIsDict(h)) { h = rbFmtUserConv(r, "to_hash", "") }
+    if (!rbIsDict(h)) { rbRaiseErr(op, "TypeError", "no implicit conversion of " + rbFmtConvName(r) + " into Hash") }
+    var a = l
+    var b = h
+    if (op == ">" || op == ">=") { a = h; b = l }
+    var ak = a["keys"]
+    var bk = b["keys"]
+    if (ak.length > bk.length || ((op == "<" || op == ">") && ak.length == bk.length)) { return false }
+    var i = 0
+    while (i < ak.length) {
+        var at = rbDictFind(bk, ak[i])
+        if (at < 0 || !rbEq(a["vals"][i], b["vals"][at])) { return false }
+        i = i + 1
+    }
+    return true
 }
 
 // <=>: nil when the two cannot be compared.
@@ -10611,13 +10683,41 @@ function rbDelegArr(arr, recv, name, args) {
 function rbEnumAnswers(t, name) {
     return rbEnumName(name) && rbUserObj(t) && rbIsA(t, rbBuiltinClass("Enumerable"))
 }
+// Called without a block, #lazy and the methods rbaEnumDefers names answer a Lazy
+// over the receiver or a DEFERRED Enumerator, and run nothing. Twins: enumMixin in
+// ruby-interpreter.abnf, rubyEnumMixin in abnf/jsrtruby.go.
+function rbEnumMixin(t, name, args) {
+    if (rbBlockOf(args) === null) {
+        if (name == "lazy") {
+            var lz = rbMkLazy("each", [], 0, null, false, true, "#<Enumerator::Lazy: " + rbInspect(t) + ">")
+            lz["src"] = t
+            return lz
+        }
+        if (rbaEnumDefers(name, rbNPos(args))) {
+            var de = rbEnumAt(rbMkEnumOp([], name), t, name, args)
+            de["__rdefer"] = true
+            return de
+        }
+    }
+    return rbEnumRun(t, name, args)
+}
+// A deferred Enumerator's method runs once. Twin of enumForce in
+// ruby-interpreter.abnf.
+function rbEnumForce(t) {
+    t["__rdefer"] = false
+    var e = rbEnumRun(t["src"], t["meth"], rtCopyArr(t["margs"]))
+    if (rbIsEnum(e)) {
+        t["items"] = e["items"]
+        t["op"] = e["op"]
+    }
+}
 // Such a method is answered by the values #each yields, packed as Enumerable#to_a
 // packs them, run as an Array. The methods rbaEnumSpreads names get a
 // multi-value yield's values as their block's arguments; the k-th call of each
 // of them is for the k-th element. A method rbaEnumStop names ends #each early.
-// Twins: enumMixin in ruby-interpreter.abnf, which states the rules,
-// rubyEnumMixin in abnf/jsrtruby.go.
-function rbEnumMixin(t, name, args) {
+// Twins: enumRun in ruby-interpreter.abnf, which states the rules, rubyEnumRun in
+// abnf/jsrtruby.go.
+function rbEnumRun(t, name, args) {
     var items = []
     var multi = []
     var blk = rbBlockOf(args)

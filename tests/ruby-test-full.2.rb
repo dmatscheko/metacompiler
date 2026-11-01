@@ -1624,6 +1624,104 @@ def s157
                          ["undefined method `**' for [1]:Array", :**, [1]]] &&
                    [1, 2] * S157T.new == [1, 2, 1, 2] && [1, 2] * 1.9 == [1, 2] && [1, 2] * "-" == "1-2")
 end
+# ===== SECTION 158: < > <= >= are Comparable's, Hash's and Module's methods =====
+# Array, nil, true, false, Range, Regexp, Complex and a plain object have no <:
+# a NoMethodError, not a failed comparison - even `[1] < [2]' and `nil <= nil'.
+# A class's own < answers; a class with <=> but without Comparable has none of
+# the comparison methods (between?, clamp). Hash's are the subset relation, and
+# its right side must be a Hash. Module < non-module is a TypeError. The
+# ArgumentError names a user class on either side. /usr/bin/ruby 2.6 settles each.
+class S158A; def <(o); "lt#{o}"; end; def >=(o); [:ge, o]; end; end
+class S158R; def <=>(o); 0; end; end
+module S158M; include Comparable; end
+class S158W
+  include S158M
+  attr_reader :v
+  def initialize(v); @v = v; end
+  def <=>(o); o.is_a?(S158W) ? v <=> o.v : nil; end
+end
+def s158m(&b)
+  b.call
+rescue NoMethodError, ArgumentError, TypeError => e
+  [e.class, e.message.lines[0].chomp]
+end
+def s158
+  ops = [:<, :>, :<=, :>=]
+  nm = [[1], nil, true, false, (1..2), /a/, Complex(1, 2)].map do |v|
+    ops.map { |op| s158m { v.send(op, 2) } }
+  end
+  check("cmp158a", nm[0] == ops.map { |op| [NoMethodError, "undefined method `#{op}' for [1]:Array"] } &&
+                   nm[1][1] == [NoMethodError, "undefined method `>' for nil:NilClass"] &&
+                   nm[2][2] == [NoMethodError, "undefined method `<=' for true:TrueClass"] &&
+                   nm[3][3] == [NoMethodError, "undefined method `>=' for false:FalseClass"] &&
+                   nm[4][0] == [NoMethodError, "undefined method `<' for 1..2:Range"] &&
+                   nm[5][1] == [NoMethodError, "undefined method `>' for /a/:Regexp"] &&
+                   nm[6][0] == [NoMethodError, "undefined method `<' for (1+2i):Complex"] &&
+                   s158m { [1] < [2] } == [NoMethodError, "undefined method `<' for [1]:Array"] &&
+                   s158m { nil <= nil } == [NoMethodError, "undefined method `<=' for nil:NilClass"] &&
+                   s158m { true >= true } == [NoMethodError, "undefined method `>=' for true:TrueClass"] &&
+                   s158m { S158R.new < 1 }[0] == NoMethodError && s158m { S158R.new.between?(1, 2) }[0] == NoMethodError &&
+                   s158m { S158R.new.clamp(1, 2) }[0] == NoMethodError)
+  check("cmp158b", (S158A.new < 3) == "lt3" && (S158A.new >= 4) == [:ge, 4] && S158A.new.send(:<, 5) == "lt5" &&
+                   (S158W.new(1) < S158W.new(2)) == true && S158W.new(3).send(:>=, S158W.new(2)) == true &&
+                   S158W.new(2).between?(S158W.new(1), S158W.new(3)) &&
+                   s158m { S158W.new(1) < 5 } == [ArgumentError, "comparison of S158W with 5 failed"] &&
+                   s158m { 5 < S158W.new(1) } == [ArgumentError, "comparison of Integer with S158W failed"] &&
+                   s158m { 1.5 >= S158W.new(1) } == [ArgumentError, "comparison of Float with S158W failed"] &&
+                   s158m { :a < 2 } == [ArgumentError, "comparison of Symbol with 2 failed"] &&
+                   s158m { String < 2 } == [TypeError, "compared with non class/module"] &&
+                   (String < Comparable) == true && (:a < :b) == true && (2**70 < 2**71) == true)
+  h = {1 => 2}
+  check("hsh158c", (h < {1 => 2, 3 => 4}) == true && (h < {1 => 2}) == false && (h <= {1 => 2}) == true &&
+                   (h <= {1 => 3}) == false && ({1 => 2, 3 => 4} > h) == true && (h > h) == false &&
+                   ({1 => 2.0, 3 => 4} >= h) == true && ({} <= h) == true && (h >= {}) == true &&
+                   ops.map { |op| s158m { h.send(op, 2) } } == ops.map { [TypeError, "no implicit conversion of Integer into Hash"] } &&
+                   s158m { h < nil } == [TypeError, "no implicit conversion of nil into Hash"])
+end
+# ===== SECTION 159: a blockless Enumerator or a Lazy over a user #each runs nothing until used =====
+# `find', `map', `each_slice(2)' ... without a block answer an Enumerator and
+# do not call #each; its #size is nil (the class has no #size), its #each with a
+# block is the method with that block (so find's stops #each early), and
+# anything else runs it. #lazy runs #each only as far as its first(n) / take
+# needs. /usr/bin/ruby 2.6 settles each.
+class S159E
+  include Enumerable
+  def initialize(l); @l = l; end
+  def each
+    [1, 2, 3].each { |x| @l << x; yield x }
+    @l << :end
+    self
+  end
+end
+def s159
+  r = []
+  [:find, :map, :select, :sort_by, :each_with_index, :group_by, :min_by, :reverse_each].each do |m|
+    l = []; e = S159E.new(l).send(m); r << [e.class, e.size, l]
+  end
+  l = []; e = S159E.new(l).each_slice(2); r << [e.class, e.size, l]
+  check("enm159a", r == [[Enumerator, nil, []]] * 9)
+  w = []
+  l = []; e = S159E.new(l).find; w << e.each { |x| x == 2 } << l
+  l = []; e = S159E.new(l).take_while; w << e.each { |x| x < 2 } << l
+  l = []; e = S159E.new(l).map; w << e.with_index { |x, i| x * i } << l
+  l = []; e = S159E.new(l).each_slice(2); w << e.map { |s| s.sum } << l
+  l = []; e = S159E.new(l).each_with_index; w << e.to_a << l
+  l = []; e = S159E.new(l).sort_by; w << e.each { |x| -x } << l
+  check("enm159b", w == [2, [1, 2], [1], [1, 2], [0, 2, 6], [1, 2, 3, :end], [3, 3], [1, 2, 3, :end],
+                         [[1, 0], [2, 1], [3, 2]], [1, 2, 3, :end], [3, 2, 1], [1, 2, 3, :end]])
+  z = []
+  l = []; z << S159E.new(l).lazy.map { |x| x * 3 }.first(1) << l
+  l = []; z << S159E.new(l).lazy.select(&:odd?).first(2) << l
+  l = []; z << S159E.new(l).lazy.take(2).to_a << l
+  l = []; z << S159E.new(l).lazy.take_while { |x| x < 2 }.to_a << l
+  l = []; z << S159E.new(l).lazy.each_slice(2).first(1) << l
+  l = []; z << S159E.new(l).lazy.drop_while { |x| x < 2 }.first << l
+  l = []; z << S159E.new(l).lazy.map { |x| x * 2 }.to_a << l
+  l = []; z << S159E.new(l).lazy.first(0) << l
+  l = []; zl = S159E.new(l).lazy; z << zl.class << zl.size << l
+  check("lzy159c", z == [[3], [1], [1, 3], [1, 2, 3], [1, 2], [1, 2], [1], [1, 2], [[1, 2]], [1, 2], 2, [1, 2],
+                         [2, 4, 6], [1, 2, 3, :end], [], [], Enumerator::Lazy, nil, []])
+end
 s122() # SECTION-CALL 122
 s123() # SECTION-CALL 123
 s124() # SECTION-CALL 124
@@ -1660,5 +1758,7 @@ s154() # SECTION-CALL 154
 s155() # SECTION-CALL 155
 s156() # SECTION-CALL 156
 s157() # SECTION-CALL 157
+s158() # SECTION-CALL 158
+s159() # SECTION-CALL 159
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

@@ -90,6 +90,7 @@ func rubyMkLazy(kind string, items *jsArray, lo float64, hi interface{}, excl, l
 	o.set("ops", &jsArray{})
 	o.set("lazy", lazy)
 	o.set("desc", desc)
+	o.set("src", jsNull)
 	return o
 }
 
@@ -101,6 +102,7 @@ func rubyLazyCopy(t *jsObject, op *jsObject, lazy bool, desc string) *jsObject {
 		ops.elems = append(ops.elems, op)
 	}
 	c.set("ops", ops)
+	c.set("src", t.props["src"])
 	return c
 }
 
@@ -113,7 +115,13 @@ func (rt *jsrt) rubyLazyFirst(t *jsObject, n int) []interface{} {
 	excl := t.props["excl"] == true
 	st := &rubyLazyState{out: []interface{}{}, n: n, cnt: make([]int, len(ops)), on: make([]bool, len(ops)),
 		buf: make([][]interface{}, len(ops)), done: n == 0, stopAt: -1}
-	for i := 0; !st.done; i++ {
+	if kind == "each" && !st.done {
+		rt.rubyLazyDrive(t.props["src"], func(v interface{}) bool {
+			rt.rubyLazyRun(st, ops, v, 0)
+			return st.done
+		})
+	}
+	for i := 0; kind != "each" && !st.done; i++ {
 		var v interface{}
 		if kind == "range" {
 			x := lo + float64(i)
@@ -137,6 +145,31 @@ func (rt *jsrt) rubyLazyFirst(t *jsObject, n int) []interface{} {
 		}
 	}
 	return st.out
+}
+
+// rubyLazyDrive runs the #each of a Lazy's user source, handing step each value
+// (a multi-value yield packed as an Array), and leaves it through catch/throw once
+// step answers true - so `lazy.map { }.first(1)' runs #each only up to its first
+// value. Twin of the drive argument of rbaLazyFirst in lib/ruby-arr.js.
+func (rt *jsrt) rubyLazyDrive(src interface{}, step func(interface{}) bool) {
+	tag := newJSObject()
+	each := &hostFunc{name: "", fn: func(rt *jsrt, _ uint64, a []interface{}) interface{} {
+		var it interface{} = jsNull
+		switch len(a) {
+		case 0:
+		case 1:
+			it = a[0]
+		default:
+			it = &jsArray{elems: append([]interface{}{}, a...)}
+		}
+		if step(it) {
+			rt.rubyThrow(tag, jsNull)
+		}
+		return jsNull
+	}}
+	rt.rubyCatch(tag, &hostFunc{name: "", fn: func(rt *jsrt, _ uint64, _ []interface{}) interface{} {
+		return rt.rubyMethod(src, "each", []interface{}{rubyBlkWrap(each)})
+	}})
 }
 
 // rubyLazyState is one rubyLazyFirst run. Twin of the st object of rbaLazyFirst.

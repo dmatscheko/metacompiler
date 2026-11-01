@@ -127,7 +127,10 @@ func (rt *jsrt) addRubyFmtExterns(m map[string]func(args []uint64) uint64) {
 		default:
 			_, _, isDict := dictParts(v)
 			_, isRng := rubyIsRange(v)
-			counted = isDict || isRng || rubyIsEnum(v)
+			// A deferred Enumerator's #size, and a Lazy's over a user #each, is
+			// nil: rubyEnumMethod answers it.
+			counted = isDict || isRng || (rubyIsEnum(v) && v.(*jsObject).props["__rdefer"] != true &&
+				v.(*jsObject).props["kind"] != "each")
 		}
 		if counted {
 			return pylen(a[:1])
@@ -2302,13 +2305,62 @@ func (rt *jsrt) rubyEnumAnswers(t interface{}, name string) bool {
 	return rt.rubyIsA(t, rt.rubyBuiltinClass("Enumerable"))
 }
 
-// rubyEnumMixin answers such a method: the values #each yields, packed as
+// rubyEnumMixin answers such a method. Called without a block, #lazy and the
+// methods rubyEnumDefers names do not run #each at all: they answer a Lazy over
+// the receiver, or a DEFERRED Enumerator that runs the method when it is used
+// (rubyEnumForce). Twins: enumMixin in ruby-interpreter.abnf, rbEnumMixin in
+// lib/ruby-rt.metajs.
+func (rt *jsrt) rubyEnumMixin(t interface{}, name string, args []interface{}) interface{} {
+	if pos, blk := rubyBlockArgs(args); blk == nil {
+		if name == "lazy" {
+			lz := rubyMkLazy("each", &jsArray{}, 0, jsNull, false, true, "#<Enumerator::Lazy: "+rt.rubyInspect(t)+">")
+			lz.set("src", t)
+			return lz
+		}
+		if rubyEnumDefers(name, len(pos)) {
+			e := rubyEnumAt(rubyMkEnumOp(&jsArray{}, name), t, name, pos)
+			e.set("__rdefer", true)
+			return e
+		}
+	}
+	return rt.rubyEnumRun(t, name, args)
+}
+
+// rubyEnumDefers: does the Enumerable method name, given nargs arguments and no
+// block, answer an Enumerator? Twin of rbaEnumDefers in lib/ruby-arr.js.
+func rubyEnumDefers(name string, nargs int) bool {
+	switch name {
+	case "each_slice", "each_cons", "each_with_object":
+		return nargs == 1
+	case "cycle":
+		return nargs <= 1
+	case "map", "collect", "flat_map", "collect_concat", "select", "filter", "find_all", "reject",
+		"find", "detect", "find_index", "group_by", "partition", "min_by", "max_by", "minmax_by",
+		"sort_by", "take_while", "drop_while", "each_with_index", "each_entry", "reverse_each":
+		return nargs == 0
+	}
+	return false
+}
+
+// rubyEnumForce runs a deferred Enumerator's method, once, and takes over the
+// element list and pending op of the Enumerator it answers.
+func (rt *jsrt) rubyEnumForce(t *jsObject) {
+	t.set("__rdefer", false)
+	meth, _ := t.props["meth"].(string)
+	margs := append([]interface{}{}, t.props["margs"].(*jsArray).elems...)
+	if e, isObj := rt.rubyEnumRun(t.props["src"], meth, margs).(*jsObject); isObj && rubyIsEnum(e) {
+		t.set("items", e.props["items"])
+		t.set("op", e.props["op"])
+	}
+}
+
+// rubyEnumRun runs such a method: the values #each yields, packed as
 // Enumerable#to_a packs them, run as an Array. The methods rubyEnumSpreads names
 // get a multi-value yield's values as their block's arguments; the k-th call of
 // each of them is for the k-th element. A method rubyEnumStop names ends #each
-// early. Twins: enumMixin in ruby-interpreter.abnf, which states the rules,
-// rbEnumMixin in lib/ruby-rt.metajs.
-func (rt *jsrt) rubyEnumMixin(t interface{}, name string, args []interface{}) interface{} {
+// early. Twins: enumRun in ruby-interpreter.abnf, which states the rules,
+// rbEnumRun in lib/ruby-rt.metajs.
+func (rt *jsrt) rubyEnumRun(t interface{}, name string, args []interface{}) interface{} {
 	items := &jsArray{}
 	var multi []bool
 	var blk interface{}

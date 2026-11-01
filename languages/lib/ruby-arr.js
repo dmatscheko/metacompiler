@@ -5,13 +5,15 @@
 // Enumerator::Lazy, and the endless Enumerator of a blockless Array#cycle or of
 // each_slice / each_cons on an endless range: an Enumerator object that also
 // carries __rlazy, a SOURCE - kind "arr" (items), "cycle" (items, forever) or
-// "range" (lo, lo+1, ... up to hi; hi null is endless) - and the OPS map /
-// select / reject / take_while / drop_while / take / slice / cons, {k, f, n},
-// applied to one value at a time. rbaLazyFirst pulls the first n results (all of
-// them when n < 0); call(f, v) runs a block, test(v) is Ruby truthiness. A take
-// op ends the run once its count has passed it, so nothing past it is
-// evaluated. Go twin: rubyLazyFirst in abnf/jsrtrubystr.go.
-function rbaLazyFirst(lz, n, call, test) {
+// "range" (lo, lo+1, ... up to hi; hi null is endless) or "each" (the #each of
+// a user Enumerable, src) - and the OPS map / select / reject / take_while /
+// drop_while / take / slice / cons, {k, f, n}, applied to one value at a time.
+// rbaLazyFirst pulls the first n results (all of them when n < 0); call(f, v)
+// runs a block, test(v) is Ruby truthiness. A take op ends the run once its count
+// has passed it, so nothing past it is evaluated. An "each" source is PUSHED:
+// drive(src, step) runs its #each, calls step(v) per value and leaves #each once
+// step answers true. Go twin: rubyLazyFirst in abnf/jsrtrubystr.go.
+function rbaLazyFirst(lz, n, call, test, drive) {
     var ops = lz.ops
     var st = {out: [], n: n, cnt: [], on: [], buf: [], done: n == 0, full: false, stopAt: 0 - 1}
     var j = 0
@@ -21,8 +23,14 @@ function rbaLazyFirst(lz, n, call, test) {
         st.buf.push([])
         j = j + 1
     }
+    if (lz.kind == "each" && !st.done) {
+        drive(lz.src, function(v) {
+            rbaLazyRun(st, ops, v, 0, call, test)
+            return st.done
+        })
+    }
     var i = 0
-    while (!st.done) {
+    while (lz.kind != "each" && !st.done) {
         var v = anytype
         if (lz.kind == "range") {
             v = lz.lo + i
@@ -230,6 +238,18 @@ function rbaEnumStop(n, hasBlk, nargs) {
 function rbaEnumProbe(n) {
     if (n == "any?" || n == "all?" || n == "none?" || n == "one?") { return "any?" }
     return "include?"
+}
+// Does the Enumerable method n, given nargs arguments and no block, answer an
+// Enumerator? Go twin: rubyEnumDefers in abnf/jsrtruby.go.
+function rbaEnumDefers(n, nargs) {
+    if (n == "each_slice" || n == "each_cons" || n == "each_with_object") { return nargs == 1 }
+    if (n == "cycle") { return nargs <= 1 }
+    if (nargs != 0) { return false }
+    return n == "map" || n == "collect" || n == "flat_map" || n == "collect_concat" || n == "select"
+        || n == "filter" || n == "find_all" || n == "reject" || n == "find" || n == "detect"
+        || n == "find_index" || n == "group_by" || n == "partition" || n == "min_by" || n == "max_by"
+        || n == "minmax_by" || n == "sort_by" || n == "take_while" || n == "drop_while"
+        || n == "each_with_index" || n == "each_entry" || n == "reverse_each"
 }
 
 // Enumerable#slice_before / #slice_after, given whether each element matched:

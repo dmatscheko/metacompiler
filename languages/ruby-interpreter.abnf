@@ -7884,7 +7884,16 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (isDict(v)) { return v.keys.length }
         // An Enumerator's length is its element count. A bare `.size' / `.length'
         // is lowered to this shortcut in BOTH halves rather than to a method call.
-        if (isEnum(v)) { return v.items.length }
+        // A deferred one's #size is nil, as is a Lazy's over a user #each, and
+        // iterating a deferred one runs its method.
+        if (isEnum(v)) {
+            if (v.__rlazy === true && v.kind == "each") { return null }
+            if (v.__rdefer === true) {
+                if (name != null) { return null }
+                enumForce(v)
+            }
+            return v.items.length
+        }
         // A Range's size is its element COUNT; a Range object here has no .length.
         if (isRange(v)) { return rangeToA(v).length }
         if (v === null || v === undefined) { fail("length of nil") }
@@ -8373,12 +8382,40 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // element arrives and its answers replayed to the Array method, or else the
     // method's pattern / value test run on that one element. An element is
     // collected once its test returns: one whose block raised into a rescue in
-    // #each is skipped, as MRI's iteration skips it. Twins:
-    // rubyEnumMixin in abnf/jsrtruby.go, rbEnumMixin in lib/ruby-rt.metajs.
+    // #each is skipped, as MRI's iteration skips it. That is enumRun; twins:
+    // rubyEnumRun in abnf/jsrtruby.go, rbEnumRun in lib/ruby-rt.metajs.
     function enumAnswers(t, name) {
         return rbEnumName(name) && userIsA(t, hostGlobals["Enumerable"])
     }
+    // Called without a block, #lazy and the methods rbaEnumDefers names do not run
+    // #each at all: they answer a Lazy over the receiver, or a DEFERRED Enumerator
+    // that runs the method when it is used (enumForce). Twins: rubyEnumMixin in
+    // abnf/jsrtruby.go, rbEnumMixin in lib/ruby-rt.metajs.
     function enumMixin(t, name, args, blk) {
+        if (blk == null && name == "lazy") {
+            var lz = mkLazy("each", [], 0, null, false, true, "#<Enumerator::Lazy: " + rinspect(t) + ">")
+            lz.src = t
+            return lz
+        }
+        if (blk == null && rbaEnumDefers(name, args.length)) {
+            var de = enumAt(mkEnumOp([], name), t, name, args)
+            de.__rdefer = true
+            return de
+        }
+        return enumRun(t, name, args, blk)
+    }
+    // A deferred Enumerator's method runs once; the Enumerator takes over the
+    // element list and pending op of the one it answers.
+    function enumForce(t) {
+        t.__rdefer = false
+        var e = anytype
+        e = enumRun(t.src, t.meth, t.margs.slice(0), null)
+        if (isEnum(e)) {
+            t.items = e.items
+            t.op = e.op
+        }
+    }
+    function enumRun(t, name, args, blk) {
         var items = []
         var multi = []
         var kind = rbaEnumStop(name, blk != null, args.length)
@@ -9554,9 +9591,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             var m = anytype
             m = lookupMethod(target.__class, name)
             if (typeof m != "function") {
-                // Comparable: a class that defines <=> gets the comparison methods
-                // (that is all `include Comparable` does).
-                if (typeof lookupMethod(target.__class, "<=>") == "function") {
+                // Comparable's methods, built on the class's own <=>: only a class
+                // that includes Comparable has them.
+                if (typeof lookupMethod(target.__class, "<=>") == "function" && userIsA(target, hostGlobals["Comparable"])) {
                     if (name == "between?") {
                         return toF(mcall(target, "<=>", [args[0]], null)) >= 0
                             && toF(mcall(target, "<=>", [args[1]], null)) <= 0
@@ -10372,15 +10409,31 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // lib/ruby-rt.metajs, rubyMkLazy in abnf/jsrtrubystr.go.
     function mkLazy(kind, items, lo, hi, excl, lazy, desc) {
         return {__renum: true, __rlazy: true, items: items, pos: 0, op: "each", kind: kind, lo: lo, hi: hi, excl: excl,
-                ops: [], lazy: lazy, desc: desc}
+                ops: [], lazy: lazy, desc: desc, src: null}
     }
     function lazyCopy(t, op, lazy, desc) {
         var c = mkLazy(t.kind, t.items, t.lo, t.hi, t.excl, lazy, desc)
         c.ops = t.ops.slice(0)
         if (op !== null) { c.ops.push(op) }
+        c.src = t.src
         return c
     }
-    function lazyFirst(t, n) { return rbaLazyFirst(t, n, function(f, v) { return blockCall(f, [v]) }, rtest) }
+    function lazyFirst(t, n) { return rbaLazyFirst(t, n, function(f, v) { return blockCall(f, [v]) }, rtest, lazyDrive) }
+    // The #each of a Lazy's user source, each value (a multi-value yield packed as
+    // an Array) handed to step, left through catch/throw once step answers true.
+    // Twins: rubyLazyDrive in abnf/jsrtrubystr.go, rbLazyDrive in lib/ruby-rt.metajs.
+    function lazyDrive(src, step) {
+        var tag = {}
+        hostGlobals["catch"](tag, function() {
+            return mcall(src, "each", [], function() {
+                var a = argsArray(arguments)
+                var it = anytype
+                it = a.length == 1 ? a[0] : (a.length == 0 ? null : a)
+                if (step(it)) { hostGlobals["throw"](tag, null) }
+                return null
+            })
+        })
+    }
     // Range#lazy: an Integer range is walked one value at a time; any other is
     // materialized first.
     function rangeLazy(r) {
@@ -10437,6 +10490,16 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     }
     function enumMethod(t, name, args, blk) {
         if (t.__rlazy === true) { return lazyMethod(t, name, args, blk) }
+        // A deferred Enumerator over a user #each: #each with a block IS its method
+        // with that block (so `find.each { }' stops #each early, as MRI's does), and
+        // its size is nil - there is no #size to ask. Anything but #inspect
+        // runs the method first. Twins: rubyEnumMethod in abnf/jsrt.go,
+        // rbEnumMethod in lib/ruby-rt.metajs.
+        if (t.__rdefer === true) {
+            if (name == "each" && blk != null) { return enumRun(t.src, t.meth, t.margs.slice(0), blk) }
+            if (name == "size") { return null }
+            if (name != "inspect" && name != "to_s" && name != "class") { enumForce(t) }
+        }
         var items = t.items
         if (name == "lazy") { return mkLazy("arr", items.slice(0), 0, null, false, true, "#<Enumerator::Lazy: " + enumInspect(t) + ">") }
         if (name == "to_a" || name == "entries" || name == "force") { return items.slice(0) }
@@ -15734,13 +15797,49 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     binOps["=~"] = function(l, r) { return reMatchOp(l, r) }
     binOps["!~"] = function(l, r) { return reMatchOp(l, r) === null }
     binOps["<=>"] = function(l, r) { return spaceship(l, r) }
-    // < > <= >= between two MODULES is the ancestry relation, not a value
-    // comparison: `A < M' after `include M' is true and `A < String' is nil, where
-    // rcmp's contract is to raise.
-    binOps["<"]  = function(l, r) { if (isClassObj(l) && isClassObj(r)) { return modRel(l, r, "<") }  return rcmp(l, r) < 0 }
-    binOps[">"]  = function(l, r) { if (isClassObj(l) && isClassObj(r)) { return modRel(l, r, ">") }  return rcmp(l, r) > 0 }
-    binOps["<="] = function(l, r) { if (isClassObj(l) && isClassObj(r)) { return modRel(l, r, "<=") } return rcmp(l, r) <= 0 }
-    binOps[">="] = function(l, r) { if (isClassObj(l) && isClassObj(r)) { return modRel(l, r, ">=") } return rcmp(l, r) >= 0 }
+    // < > <= >= are METHODS of Comparable, Hash and Module, not of Object: an Array,
+    // nil, true, a Range or a Complex has none, so `[1] < 2' is a NoMethodError, not
+    // a failed comparison. A user object answers through its own method, or
+    // Comparable's when its class includes it (mcall). Between two MODULES they are
+    // the ancestry relation (`A < String' is nil, where rcmp's contract is to
+    // raise); on a Hash, the subset relation. Twins: rubyRel in abnf/jsrt.go, rbRel
+    // in lib/ruby-rt.metajs.
+    function relOp(op, l, r) {
+        if (isUserObj(l)) { return mcall(l, op, [r], null) }
+        if (isClassObj(l)) {
+            if (!isClassObj(r)) { raiseErr(op, "TypeError", "compared with non class/module") }
+            return modRel(l, r, op)
+        }
+        if (isDict(l)) { return hashRel(op, l, r) }
+        if (!((isNumV(l) && !isCpx(l)) || typeof l == "string" || isRStr(l) || isSym(l))) { noMethod(l, op) }
+        var c = rcmp(l, r)
+        if (op == "<") { return c < 0 }
+        if (op == ">") { return c > 0 }
+        if (op == "<=") { return c <= 0 }
+        return c >= 0
+    }
+    // Hash#<= is "every pair of l is in r" (values by ==); < also wants r larger,
+    // and > / >= swap the sides. The right side converts through #to_hash. Twins:
+    // rubyHashRel in abnf/jsrt.go, rbHashRel in lib/ruby-rt.metajs.
+    function hashRel(op, l, r) {
+        var h = anytype
+        h = r
+        if (!isDict(h)) { h = fmtUserConv(r, "to_hash", "") }
+        if (!isDict(h)) { raiseErr(op, "TypeError", "no implicit conversion of " + fmtConvName(r) + " into Hash") }
+        var a = l
+        var b = h
+        if (op == ">" || op == ">=") { a = h; b = l }
+        if (a.keys.length > b.keys.length || ((op == "<" || op == ">") && a.keys.length == b.keys.length)) { return false }
+        for (var i = 0; i < a.keys.length; i++) {
+            var at = dictFind(b, a.keys[i])
+            if (at < 0 || !rubyEq(a.vals[i], b.vals[at])) { return false }
+        }
+        return true
+    }
+    binOps["<"]  = function(l, r) { return relOp("<", l, r) }
+    binOps[">"]  = function(l, r) { return relOp(">", l, r) }
+    binOps["<="] = function(l, r) { return relOp("<=", l, r) }
+    binOps[">="] = function(l, r) { return relOp(">=", l, r) }
     binOps["-"]  = function(l, r) { return rbin("-", l, r) }
     binOps["*"]  = function(l, r) { if (typeof l == "string" || isRStr(l)) { return mkRStr(strRepeat(rsText(l), toF(r))) } return rbin("*", l, r) }
     binOps["/"]  = function(l, r) { return rbin("/", l, r) }
