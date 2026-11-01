@@ -88,10 +88,11 @@ int cap_depth;
  * the whole array store, so `a=(p q); ( a[0]=Z )` leaves the caller with "p q".
  * A row's key and value are heap strings never rewritten in place, so copying the
  * pointers is a complete snapshot. Each depth keeps its own malloc'd blocks -
- * ss_blk[d]: nvars values, then a key and a value per row; ss_rec[d]: rows,
+ * ss_blk[d]: ss_nv[d] values, then a key and a value per row; ss_rec[d]: rows,
  * marks and sortedness of each of the ss_an[d] records - made the first time the
  * depth is reached and reused after, grown when the store has outgrown them. A
- * record made inside the subshell is emptied on the way out. So the nesting is
+ * record made inside the subshell is emptied on the way out, and so is a slot
+ * (rt_varslot_new). So the nesting is
  * bounded by SSMAX = 4096, recursion through $( ) included.
  *
  * Attributes (-i/-u/-l/-A) are not here: bash-to-llvm-ir.abnf keeps them in
@@ -101,6 +102,7 @@ long ss_cap[4096];
 int *ss_rec[4096];
 int ss_rcap[4096];
 int ss_an[4096];
+int ss_nv[4096];
 int ss_depth;
 /* The rest of a level's state a subshell ends with: the positional frame and
  * the argv floor below which this level must not write (rt_setargs), the arena
@@ -305,6 +307,7 @@ int rt_fskind(char *p);
 char *rt_getvar_byname(char *n);
 char *rt_getvar_ind(char *n);
 int rt_varslot(char *n);
+int rt_varslot_new(char *n);
 int rt_setvar_byname(char *n, char *v);
 int rt_indbr(char *v);
 char *rt_nref_end(char *n);
@@ -5189,21 +5192,24 @@ char *rt_eown(char *old, char *v, int n)
 /* The key an INDEXED subscript's value names: a negative index counts back from
  * one past the highest one (${a[-1]} is the last element; a set scalar is
  * element 0). One still negative after that is bash's "bad array subscript":
- * reported, and answered with bad_key, which no element has and rt_arr_iset
- * refuses to write. Twin of subKey in bash-interpreter.abnf. */
-char *rt_arr_ikey(char *nm, long k) {
+ * reported as lbl, and answered with bad_key, which no element has and
+ * rt_arr_iset refuses to write. Twin of arrIdxKey in bash-interpreter.abnf. */
+char *rt_arr_ikeyl(char *nm, long k, char *lbl) {
     int saved;
     if (k < 0) k = (rt_arr_any(nm) != 0 ? rt_arr_nextidx(nm) : (long)rt_sc_count(nm)) + k;
     if (k < 0) {
         saved = sink_out;
         sink_out = sink_err;
         rt_diag_pfx();
-        rt_prints(nm);
+        rt_prints(lbl);
         rt_prints(": bad array subscript\n");
         sink_out = saved;
         return &bad_key[0];
     }
     return rt_int2str(k);
+}
+char *rt_arr_ikey(char *nm, long k) {
+    return rt_arr_ikeyl(nm, k, nm);
 }
 
 /* The names declared associative anywhere in the program, registered by main's
@@ -5235,6 +5241,25 @@ char *rt_arr_key(char *nm, char *sub) {
     if (rt_streq(sub, "@") != 0 || rt_streq(sub, "*") != 0) return sub;
     if (rt_isassoc(nm) != 0) return sub;
     return rt_arr_ikey(nm, rt_arith(sub));
+}
+
+/* The key of the assignment NAME[SUB]=v, lbl being "NAME[SUB]" as written. An
+ * indexed array's SUB is arithmetic even when it expands to @; a written @ or *
+ * (whole) and an index still negative from the end are bash's "bad array
+ * subscript", which abandons the command line. Twin of asgKey in
+ * bash-interpreter.abnf. */
+char *rt_arr_akey(char *nm, char *sub, char *lbl, int whole) {
+    long k;
+    char *key;
+    if (rt_isassoc(nm) != 0) return sub;
+    key = &bad_key[0];
+    if (whole != 0) rt_berr("", lbl, "bad array subscript");
+    else {
+        k = rt_arith(sub);
+        if (arith_err == 0) key = rt_arr_ikeyl(nm, k, lbl);
+    }
+    if (key == &bad_key[0]) arith_err = 1;
+    return key;
 }
 
 /* The value an element store keeps under its array's attributes `at` (1 -i,
@@ -5754,8 +5779,10 @@ char *rt_nref_end(char *n)
 
 /* ${!REF} of the nameref n: the name its chain ends at, or n's own value when
  * that is unset or empty. A circular chain is "invalid indirect expansion"
- * instead of the warning, which abandons the line. */
-char *rt_nref_name(char *n)
+ * instead of the warning, which abandons the line. A computed nameref the
+ * declaration refused is no nameref when it runs: ${!REF} is then the
+ * indirection through its value, and ${REF@A} (own) names n itself. */
+char *rt_nref_name(char *n, int own)
 {
     int i = rt_varslot(n);
     char *v = i >= 0 ? gvars[i] : &unset_marker[0];
@@ -5769,7 +5796,7 @@ char *rt_nref_name(char *n)
         arith_err = 1;
         return empty;
     }
-    if (e == n) return v;
+    if (e == n && own == 0) return v;
     return e;
 }
 
@@ -5781,11 +5808,17 @@ int rt_unset_ref(char *n)
     return rt_unset_name(e);
 }
 
-/* The attribute letters `at` (bash's order: a/A i r x l u) with the x of an
- * exported NAME put in its place. */
+/* The attribute letters `at` (bash's order: a/A i n r x l u) with the n of a
+ * nameref and the x of an exported NAME put in their places. */
 char *rt_xletters(char *nm, char *at) {
     int i = 0;
-    if ((rt_arr_marks(nm) & 16) == 0) return at;
+    int mk = rt_arr_marks(nm);
+    if ((mk & 32) != 0) {
+        while (at[i] != 0 && at[i] != 114 && at[i] != 108 && at[i] != 117) i = i + 1;
+        at = rt_strcat(rt_strcat(rt_substr(at, 0, i), "n"), rt_substr(at, i, -1));
+        i = 0;
+    }
+    if ((mk & 16) == 0) return at;
     while (at[i] != 0 && at[i] != 108 && at[i] != 117) i = i + 1;
     return rt_strcat(rt_strcat(rt_substr(at, 0, i), "x"), rt_substr(at, i, -1));
 }
@@ -6984,6 +7017,7 @@ int rt_ss_save(int u)
         blk[i] = gvars[i];
         i = i + 1;
     }
+    ss_nv[d] = nvars;
     p = nvars;
     r = 0;
     while (r < ar_cnt) {
@@ -7029,7 +7063,7 @@ int rt_ss_restore(int u)
     rec = ss_rec[d];
     i = 0;
     while (i < nvars) {
-        gvars[i] = blk[i];
+        gvars[i] = i < ss_nv[d] ? blk[i] : &unset_marker[0];
         i = i + 1;
     }
     rt_abdrop(d);
@@ -7044,7 +7078,7 @@ int rt_ss_restore(int u)
     frame_n = ss_afn[d];
     argv_floor = ss_afl[d];
     if (a_floor > ss_floor[d]) a_floor = ss_floor[d];
-    p = nvars;
+    p = ss_nv[d];
     arr_rows = 0;
     r = 0;
     while (r < ar_cnt) {
@@ -7397,6 +7431,30 @@ int rt_varslot(char *n)
     return -1;
 }
 
+/* The slot of n, made now when n is a name the program never mentions (a
+ * nameref's computed target, `declare "$n=v"`): the name is copied off the
+ * arena, which a statement may give back. Answers -1 for no name. */
+int rt_varslot_new(char *n)
+{
+    int h;
+    int i = rt_varslot(n);
+    if (i >= 0 || rt_isname(n) == 0) return i;
+    if (nvars >= 1024) {
+        rt_die("variables", 1, nvars, 1024);
+    }
+    i = nvars;
+    varnames[i] = (char *)rt_xalloc("variable name", (long)rt_strlen(n) + 1);
+    memmove(varnames[i], n, (unsigned long)rt_strlen(n) + 1);
+    gvars[i] = &unset_marker[0];
+    nvars = i + 1;
+    if (vh_built != 0) {
+        h = rt_vhash(n);
+        while (vh_tab[h] != 0) h = (h + 1) & 4095;
+        vh_tab[h] = i + 1;
+    }
+    return i;
+}
+
 /* ${!name}: the value of the variable whose NAME is `n`, or the unset marker.
  * Names are distinct, so at most one slot can match. */
 /* "$*" joins with the FIRST character of IFS (a space when IFS is unset). The
@@ -7484,9 +7542,10 @@ char *rt_getvar_byname(char *n)
 
 /* The same lookup, writing instead of reading; both follow a chain of namerefs
  * (rt_nref_end), and a circular one abandons the line. A name the program
- * never mentions has no slot and is silently dropped. NAME[SUB] - a nameref to
+ * never mentions gets a slot now. NAME[SUB] - a nameref to
  * an element - stores the element, its subscript evaluated now; NAME[@] and
- * NAME[*] are bash's "bad array subscript". Twin of elemRefSet in
+ * NAME[*] are bash's "bad array subscript" even for an associative array, and
+ * abandon the line. Twin of elemRefSet in
  * bash-interpreter.abnf. */
 int rt_setvar_byname(char *n, char *v)
 {
@@ -7501,15 +7560,21 @@ int rt_setvar_byname(char *n, char *v)
     i = rt_indbr(n);
     if (i > 0) {
         char *nm = rt_substr(n, 0, i);
-        char *k = rt_arr_key(nm, rt_substr(n, i + 1, rt_strlen(n) - i - 2));
-        if (rt_streq(k, "@") != 0 || rt_streq(k, "*") != 0) return rt_berr("", n, "bad array subscript");
+        char *sub = rt_substr(n, i + 1, rt_strlen(n) - i - 2);
+        char *k;
+        if (rt_streq(sub, "@") != 0 || rt_streq(sub, "*") != 0) {
+            rt_berr("", n, "bad array subscript");
+            arith_err = 1;
+            return 0;
+        }
+        k = rt_arr_akey(nm, sub, n, 0);
         if (arith_err != 0) return 0;
         if (rt_isassoc(nm) != 0) return rt_arr_set(nm, k, v);
         i = rt_varslot(nm);
         if (i >= 0) rt_arr_adopt(nm, i);
         return rt_arr_iset(nm, k, v);
     }
-    i = rt_varslot(n);
+    i = rt_varslot_new(n);
     if (i >= 0) gvars[i] = v;
     rt_pin();
     return 0;
@@ -7731,7 +7796,7 @@ int rt_decl_word(char *w, int d, int x)
     if (w[i] == 43 && w[i + 1] == 61) app = 1;
     else if (w[i] != 61 && w[i] != 0) return 1;
     nm = rt_substr(w, 0, i);
-    id = rt_varslot(nm);
+    id = rt_varslot_new(nm);
     if (d >= 0 && id >= 0 && rt_local_here(id, d) == 0) rt_local_new(id, d, w[i] == 0 ? 1 : 0);
     if (x != 0) rt_xmark(nm, x > 0 ? 1 : 0);
     if (w[i] == 0) return 0;

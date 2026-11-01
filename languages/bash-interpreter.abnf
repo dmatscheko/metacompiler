@@ -307,7 +307,8 @@ AsgOne      <~~ push({a: parseAssign(takeAll())}) ~~>
 // The right hand side of an assignment: a word, or a parenthesised array literal. `+=`
 // appends (a string for a scalar, elements for an array).
 AsgTail     = [ AsgIdx ] :whitespace() AsgOp2 :whitespace() AsgRhs ;
-AsgIdx      <~~ push({aidx: 1}) ~~> = "[" IdxWord "]" ;
+// {aidx} is the subscript as written, which bash's "NAME[SUB]: bad array subscript" quotes.
+AsgIdx      <~~ push({aidx: arSrc(up.start + 1, up.pos - 1)}) ~~> = "[" IdxWord "]" ;
 AsgOp2      <~~ push({aop2: up.in}) ~~> = "+=" | AsgEq ;
 AsgRhs      = ArrayLit | AsgWord ;
 AsgWord     = [ NsWord ] ;
@@ -1586,13 +1587,13 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return getVarVal(t)
     }
     // A store through a nameref whose target is the element NAME[SUB]: the subscript is
-    // evaluated now, as in `NAME[SUB]=v`; NAME[@] and NAME[*] are refused. Answers the
-    // stored text. Twin of the subscript
-    // arm of rt_setvar_byname.
+    // evaluated now, as in `NAME[SUB]=v`, and NAME[@] and NAME[*] are refused even for an
+    // associative array. Answers the stored text. Twin of the subscript arm of
+    // rt_setvar_byname.
     function elemRefSet(name, append, v) {
         var sp = splitSubscript(name)
-        if (sp.key == "@" || sp.key == "*") { diagErr(name + ": bad array subscript\n"); return "" }
-        var key = subKey(sp.name, sp.key)
+        var whole = sp.key == "@" || sp.key == "*"
+        var key = arrAkey(sp.name, sp.key, name, assocFact(sp.name, false) && !whole, whole)
         if (arithErr || abortSignal != null) { return "" }
         if (!assocFact(sp.name, false)) { arrAdopt(sp.name) }
         arrEnsure(sp.name, false)
@@ -3762,7 +3763,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var rn = refTarget(a.name)
         if (rn == "") { arithErr = true; return null }
         if (rn == a.name) { return a }
-        return {name: rn, idxT: a.idxT, op: a.op, valT: a.valT, lit: a.lit}
+        return {name: rn, idxT: a.idxT, op: a.op, valT: a.valT, lit: a.lit, isrc: a.isrc, lbl: a.lbl}
     }
     // An attribute map holds FALSE for a name whose attribute was dropped - by `unset`, or by
     // a call frame unwinding a `local` - so membership alone is not the answer.
@@ -4092,22 +4093,22 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     // The key an indexed subscript's value names: a negative index counts back from one past
     // the highest index, so ${a[-1]} is the last element. One still negative after that is
-    // bash's "bad array subscript": reported, and answered with BAD_KEY, which no element has
-    // and arrSet refuses to write. Twin of rt_arr_ikey.
+    // bash's "bad array subscript": reported as lbl, and answered with BAD_KEY, which no
+    // element has and arrSet refuses to write. Twin of rt_arr_ikeyl.
     var BAD_KEY = "\x03bad"
-    function arrIdxKey(name, k) {
+    function arrIdxKey(name, k, lbl) {
         var kk = anytype
         kk = k
         // A set scalar is element 0 of the array its name would be.
         if (arIsNeg(kk)) { kk = arOp("+", isArr(name) ? arrNextIdx(name) : (isSetVar(name) ? 1 : 0), kk) }
-        if (arIsNeg(kk)) { diagErr(name + ": bad array subscript\n"); return BAD_KEY }
+        if (arIsNeg(kk)) { diagErr(lbl + ": bad array subscript\n"); return BAD_KEY }
         return numToStr(kk)
     }
     // The key a subscript's TEXT names: an associative array's is the text itself, an indexed
     // array's an arithmetic expression; "@" and "*" name the whole array. Twin of rt_arr_key.
     function subKey(name, sub) {
         if (sub == "@" || sub == "*" || assocFact(name, false)) { return sub }
-        return arrIdxKey(name, arEval(sub))
+        return arrIdxKey(name, arEval(sub), name)
     }
     function joinList(list, sep) {
         var out = ""
@@ -4977,7 +4978,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         arWs()
         if (arAt(0) != 93) { arErr("missing `]'"); return null }
         arP = arP + 1
-        return arrIdxKey(nm, k)
+        return arrIdxKey(nm, k, nm)
     }
     // A variable's value as an operand: empty is 0, anything else is itself an expression.
     function arValue(nm, key) {
@@ -5294,19 +5295,16 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var op = "="
         var valT = null
         var lit = null
+        var isrc = null
         var i
+        for (i = 1; i < items.length; i++) { if (typeof items[i] != "function" && items[i].aidx != undefined) { isrc = items[i].aidx } }
         for (i = 1; i < items.length; i++) {
             var it = items[i]
-            if (typeof it == "function") { if (idxT == null && op == "=" && lit == null && valT == null && hasIdxMark(items)) { idxT = it } else { valT = it } }
+            if (typeof it == "function") { if (idxT == null && op == "=" && lit == null && valT == null && isrc != null) { idxT = it } else { valT = it } }
             else if (it.aop2 != undefined) { op = it.aop2 }
             else if (it.arr != undefined) { lit = it.arr }
         }
-        return {name: name, idxT: idxT, op: op, valT: valT, lit: lit}
-    }
-    function hasIdxMark(items) {
-        var i
-        for (i = 0; i < items.length; i++) { if (typeof items[i] != "function" && items[i].aidx != undefined) { return true } }
-        return false
+        return {name: name, idxT: idxT, op: op, valT: valT, lit: lit, isrc: isrc, lbl: name}
     }
     // Evaluate an array literal into a list of (key, value) pairs; a bare word contributes
     // one element per FIELD, so a=($x) with x="a b c" really is three elements.
@@ -5428,13 +5426,29 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         runAssignV(a, assoc, (a.valT != null) ? wordJoin(a.valT()) : "")
     }
+    // The key NAME[SUB]=v stores under, w being SUB expanded and lbl the "NAME[SUB]" an error
+    // quotes as written. An indexed array's SUB is arithmetic even when it expands to @; a
+    // written @ or * (whole) and an index still negative from the end are bash's "bad array
+    // subscript", which abandons the command line. Twin of rt_arr_akey.
+    function arrAkey(name, w, lbl, isAs, whole) {
+        if (isAs || arithErr || abortSignal != null) { return w }
+        var key = BAD_KEY
+        if (whole) { diagErr(lbl + ": bad array subscript\n") }
+        else { var k = arEval(w); if (!arithErr) { key = arrIdxKey(name, k, lbl) } }
+        if (key == BAD_KEY) { arithErr = true }
+        return key
+    }
+    // Through a nameref r, `r[SUB]=v` quotes r[SUB].
+    function asgKey(a, isAs) {
+        return arrAkey(a.name, wordJoin(a.idxT()), a.lbl + "[" + a.isrc + "]", isAs, a.isrc == "@" || a.isrc == "*")
+    }
     // The same, with the value already expanded.
     function runAssignV(a, assoc, v) {
         a = refAssign(a)
         if (a == null) { return }
         var isAs = assocFact(a.name, assoc)
         if (a.idxT != null) {
-            var key = subKey(a.name, wordJoin(a.idxT()))
+            var key = asgKey(a, isAs)
             if (arithErr || abortSignal != null) { return }
             if (!isAs) { arrAdopt(a.name) }
             arrEnsure(a.name, assoc)

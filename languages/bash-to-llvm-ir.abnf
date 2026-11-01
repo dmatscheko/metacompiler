@@ -297,7 +297,8 @@ AsgOne      <~~ push({a: parseAssign(takeAll())}) ~~>
 // The right hand side of an assignment: a word, or a parenthesised array literal. `+=`
 // appends (a string for a scalar, elements for an array).
 AsgTail     = [ AsgIdx ] :whitespace() AsgOp2 :whitespace() AsgRhs ;
-AsgIdx      <~~ push({aidx: 1}) ~~> = "[" IdxWord "]" ;
+// {aidx} is the subscript as written, which bash's "NAME[SUB]: bad array subscript" quotes.
+AsgIdx      <~~ push({aidx: arSrc(up.start + 1, up.pos - 1)}) ~~> = "[" IdxWord "]" ;
 AsgOp2      <~~ push({aop2: up.in}) ~~> = "+=" | AsgEq ;
 AsgRhs      = ArrayLit | AsgWord ;
 AsgWord     = [ NsWord ] ;
@@ -1657,33 +1658,53 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (!hasOwn(fnSlots, key)) { fnSlots[key] = m.NewGlobalDef("fnk_" + name, zero) }
         return fnSlots[key]
     }
-    // A definition or `unset -f` run inside a ( ) or $( ) ends with it: the fnk_ slots its
-    // body stores are saved where it starts (rec.save, filled once the body is emitted) and
-    // restored where it ends. fnTouch is the record of the subshell being emitted; only the
-    // stores written inside it are seen, not one made by a function it calls. Twin of
-    // funcLog in bash-interpreter.abnf.
+    // A definition or `unset -f` run inside a ( ) or $( ) ends with it: the fnk_ slots it may
+    // store are saved where it starts (rec.save) and restored where it ends (rec.rst). Those
+    // are the stores written inside it (fnTouch is the record of the subshell being emitted)
+    // and every store written in a function body, which a call from it may run - a body
+    // later in the file included, so fnTouchFinish fills the blocks once the program is
+    // emitted. Twin of funcLog in bash-interpreter.abnf.
     var fnTouch = null
+    var fnTouchRecs = []
+    var fnInBody = {names: [], seen: {}}
+    function fnTouchNote(rec, name) {
+        if (!hasOwn(rec.seen, "$" + name)) { rec.seen["$" + name] = true; rec.names.push(name) }
+    }
     function fnStore(b, v, name) {
-        if (fnTouch != null && !hasOwn(fnTouch.seen, "$" + name)) { fnTouch.seen["$" + name] = true; fnTouch.names.push(name) }
+        if (fnTouch != null) { fnTouchNote(fnTouch, name) } else if (curFrame != null) { fnTouchNote(fnInBody, name) }
         b.NewStore(v, fnSlot(name))
     }
     function fnTouchBegin(b) {
-        var rec = {save: curF.NewBlock(""), body: curF.NewBlock(""), names: [], seen: {}, prev: fnTouch}
+        var rec = {save: curF.NewBlock(""), body: curF.NewBlock(""), rst: null, entry: curEntry, names: [], seen: {}, prev: fnTouch}
         b.NewBr(rec.save)
+        rec.save.NewBr(rec.body)
         fnTouch = rec
         return rec
     }
+    // Answers the block after the restore.
     function fnTouchEnd(rec, end) {
         fnTouch = rec.prev
         var i
-        for (i = 0; i < rec.names.length; i++) {
-            var s = fnSlot(rec.names[i])
-            var t = slotOf(i32)
-            rec.save.NewStore(rec.save.NewLoad(i32, s), t)
-            end.NewStore(end.NewLoad(i32, t), s)
-            if (fnTouch != null && !hasOwn(fnTouch.seen, "$" + rec.names[i])) { fnTouch.seen["$" + rec.names[i]] = true; fnTouch.names.push(rec.names[i]) }
+        for (i = 0; fnTouch != null && i < rec.names.length; i++) { fnTouchNote(fnTouch, rec.names[i]) }
+        rec.rst = curF.NewBlock("")
+        var cont = curF.NewBlock("")
+        end.NewBr(rec.rst)
+        rec.rst.NewBr(cont)
+        fnTouchRecs.push(rec)
+        return cont
+    }
+    function fnTouchFinish() {
+        var i, k
+        for (i = 0; i < fnTouchRecs.length; i++) {
+            var rec = fnTouchRecs[i]
+            for (k = 0; k < fnInBody.names.length; k++) { fnTouchNote(rec, fnInBody.names[k]) }
+            for (k = 0; k < rec.names.length; k++) {
+                var s = fnSlot(rec.names[k])
+                var t = rec.entry.NewAlloca(i32)
+                rec.save.NewStore(rec.save.NewLoad(i32, s), t)
+                rec.rst.NewStore(rec.rst.NewLoad(i32, t), s)
+            }
         }
-        rec.save.NewBr(rec.body)
     }
     function fnIsDefined(b, name) {
         return b.NewICmp(llvm.enum.IPredNE, b.NewLoad(i32, fnSlot(name)), zero)
@@ -1838,11 +1859,12 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // rule, and rt_arr_slice slices by index.
     var rtArrIset = rtDecl("rt_arr_iset", false, [1, 1, 1])
     var rtArrKey = rtDecl("rt_arr_key", true, [1, 1])
+    var rtArrAkey = rtDecl("rt_arr_akey", true, [1, 1, 1, 0])
     var rtAssocAdd = rtDecl("rt_assoc_add", false, [1])
     var rtUnsetName = rtDecl("rt_unset_name", false, [1])
     var rtUnsetRef = rtDecl("rt_unset_ref", false, [1])
     var rtNmark = rtDecl("rt_nmark", false, [1, 0])
-    var rtNrefName = rtDecl("rt_nref_name", true, [1])
+    var rtNrefName = rtDecl("rt_nref_name", true, [1, 0])
     var rtIsAssoc = rtDecl("rt_isassoc", false, [1])
     var rtArrIkey = rtDecl("rt_arr_ikey", true, [1, 3])
     var rtArrLitKey = rtDecl("rt_arr_litkey", 3, [1, 1, 1, 3, 0])
@@ -2051,7 +2073,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var myTraps = trapList
             trapList = savedTraps
             subEnd = subshellEnd(subEnd, myTraps, optSave)
-            fnTouchEnd(ft, subEnd)
+            subEnd = fnTouchEnd(ft, subEnd)
             var v = subEnd.NewCall(rtCapEnd, one)
             return {b: subEnd, v: v}
         }}
@@ -2269,11 +2291,24 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // The scalar letters come from the lexical tables, which is the compiler's
         // documented attribute scope (manual 7.9); only array-ness is asked at RUN time,
         // because `q=(1 2)` declares nothing, hence the select. Through a chain of namerefs
-        // whose targets are all written literally they are the last target's.
+        // whose targets are all written literally they are the last target's; a computed
+        // target is known at run time only, so its letters are picked there by the name the
+        // chain landed on (nmv) from every name the tables know.
         function attrLetters(b, nmv) {
             var xfName = name
             var hop = 0
             while (hop < 8 && typeof attrOn(refVars, xfName) == "string") { xfName = attrOn(refVars, xfName); hop = hop + 1 }
+            if (typeof attrOn(refVars, xfName) == "boolean" && attrOn(refVars, xfName)) {
+                var pick = emptyPtr(b)
+                var k
+                for (k = 0; k < varIdList.length; k++) {
+                    var lk = scalarAttrLetters(varIdList[k])
+                    if (lk != "") { pick = b.NewSelect(b.NewICmp(llvm.enum.IPredNE, b.NewCall(rtStreq, [nmv, gepStr(b, varIdList[k])]), zero), gepStr(b, lk), pick) }
+                }
+                var arrK = b.NewSelect(b.NewICmp(llvm.enum.IPredNE, b.NewCall(rtArrAny, nmv), zero), gepStr(b, "a"), emptyPtr(b))
+                arrK = b.NewSelect(b.NewICmp(llvm.enum.IPredNE, b.NewCall(rtIsAssoc, nmv), zero), gepStr(b, "A"), arrK)
+                return b.NewCall(rtXletters, [nmv, b.NewCall(rtStrcat, [arrK, pick])])
+            }
             var sc = scalarAttrLetters(xfName)
             if (rtAssoc || hasOwn(assocArrays, "$" + xfName)) { return b.NewCall(rtXletters, [nmv, gepStr(b, "A" + sc)]) }
             var isArrRt = b.NewICmp(llvm.enum.IPredNE, b.NewCall(rtArrAny, nmv), zero)
@@ -2559,7 +2594,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (pe == "ind") {
             return {f: true, c: undefined, fn: function(b) {
                 // ${!REF} of a nameref is the name its chain ends at.
-                if (attrOn(refVars, name)) { return {b: b, v: b.NewCall(rtNrefName, gepStr(b, name))} }
+                if (attrOn(refVars, name)) { return {b: b, v: b.NewCall(rtNrefName, [gepStr(b, name), zero])} }
                 return {b: b, v: b.NewCall(rtGetInd, b.NewCall(rtIndName, [gepStr(b, name), nullStr, varString(b, name), one]))}
             }}
         }
@@ -2584,7 +2619,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (xf != "") {
             return {c: undefined, fn: function(b) {
                 var t0 = targetOf(b); b = t0.b
-                var nmv = (!indirect && attrOn(refVars, name)) ? b.NewCall(rtNrefName, gepStr(b, name)) : ((t0.v != null) ? t0.v : gepStr(b, name))
+                var nmv = (!indirect && attrOn(refVars, name)) ? b.NewCall(rtNrefName, [gepStr(b, name), one]) : ((t0.v != null) ? t0.v : gepStr(b, name))
                 var v0 = valOf(b, t0.v)
                 return {b: b, v: applyXf(b, v0, b.NewCall(rtIsset, v0), nmv)}
             }}
@@ -3393,25 +3428,20 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // items = [{aname}, {aidx}?, idxWord?, {aop2}, valueWord? | {arr}]
     function mkArrayKV(items) { return {kv: 1, key: items[0], val: items[1]} }
     function mkArrayLit(items) { return {arr: items} }
-    function hasIdxMark(items) {
-        var i
-        for (i = 0; i < items.length; i++) { if (items[i].aidx != undefined) { return true } }
-        return false
-    }
     function parseAssign(items) {
         var name = items[0].aname
-        var idxT = null, op = "=", valT = null, lit = null
-        var wantIdx = hasIdxMark(items)
+        var idxT = null, op = "=", valT = null, lit = null, isrc = null
         var i
+        for (i = 1; i < items.length; i++) { if (items[i].aidx != undefined) { isrc = items[i].aidx } }
         for (i = 1; i < items.length; i++) {
             var it = items[i]
             if (it.fn != undefined) {
-                if (wantIdx && idxT == null && valT == null && op == "=") { idxT = it } else { valT = it }
+                if (isrc != null && idxT == null && valT == null && op == "=") { idxT = it } else { valT = it }
             }
             else if (it.aop2 != undefined) { op = it.aop2 }
             else if (it.arr != undefined) { lit = it.arr }
         }
-        return {name: name, idxT: idxT, op: op, valT: valT, lit: lit}
+        return {name: name, idxT: idxT, op: op, valT: valT, lit: lit, isrc: isrc}
     }
     // An array literal element list; a bare word contributes one element per FIELD. Every
     // word is expanded BEFORE the array is cleared: f=([5]=x "${f[@]}") reads the old f.
@@ -3464,6 +3494,15 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // abandons the line.
         return (at & 1) != 0 ? emitAbortCheck(b) : b
     }
+    // The key of NAME[SUB]=v for a name not declared associative: rt_arr_akey refuses a
+    // written @ or * and an index still negative from the end, quoting the subscript as
+    // written. Twin of asgKey in bash-interpreter.abnf.
+    function asgKeyOf(b, a) {
+        var r = evalWord(b, a.idxT)
+        var whole = (a.isrc == "@" || a.isrc == "*") ? one : zero
+        var lbl = gepStr(r.b, a.name + "[" + a.isrc + "]")
+        return {b: r.b, v: r.v, k: r.b.NewCall(rtArrAkey, [gepStr(r.b, a.name), r.v, lbl, whole])}
+    }
     // An expansion error in a value abandons the command before anything is stored:
     // `k=$(( 1/0 ))` leaves k as it was. Twin of runAssign in bash-interpreter.abnf.
     function emitAssign(b, a, assoc0, mk) {
@@ -3489,7 +3528,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return emitAbortCheck(b)
         }
         if (a.idxT != null) {
-            var rk = subKeyOf(b, a.name, a.idxT, null)
+            var rk = (assoc || (a.idxT.c != undefined && isIndexLit(a.idxT.c))) ? subKeyOf(b, a.name, a.idxT, null) : asgKeyOf(b, a)
             b = rk.b
             b = emitAbortCheck(b)
             if (!assoc) { b.NewCall(rtArrAdopt, [nm, llvm.constant.NewInt(i32, getVarId(a.name))]) }
@@ -3786,24 +3825,27 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (isArray && asgs[j] == null) { b.NewCall(rtArrDmark, gepStr(b, names[j])) }
             if (asgs[j] != null) {
                 var a = asgs[j]
-                if (v != null) { a = {name: a.name, op: a.op, idxT: a.idxT, lit: null, valT: doneWord(v)} }
+                if (v != null) { a = {name: a.name, op: a.op, idxT: a.idxT, lit: null, valT: doneWord(v), isrc: a.isrc} }
                 var prevV = selfRef ? loadVar(b, names[j]) : null
                 b = emitAssign(b, a, assoc, null)
                 if (selfRef) {
-                    var selfB = curF.NewBlock(""), okB = curF.NewBlock("")
+                    // Refused, the name keeps its value and gets no nameref mark.
+                    var selfB = curF.NewBlock(""), okB = curF.NewBlock(""), joinB = curF.NewBlock("")
                     b.NewCondBr(b.NewICmp(llvm.enum.IPredNE, b.NewCall(rtStreq, [loadVar(b, names[j]), gepStr(b, names[j])]), zero), selfB, okB)
                     storeVarRaw(selfB, names[j], prevV)
                     emitDiag(selfB, gepStr(selfB, selfMsg))
                     selfB.NewStore(one, selfBadP)
-                    selfB.NewBr(okB)
-                    b = okB
+                    selfB.NewBr(joinB)
+                    okB.NewCall(rtNmark, [gepStr(okB, names[j]), one])
+                    okB.NewBr(joinB)
+                    b = joinB
                 }
             }
             else if (localize && curFrame == null) { storeVarRaw(b, names[j], unsetPtr(b)) }
             if (isRef) {
                 var lt = (asgs[j] != null && v == null && asgs[j].valT != null) ? asgs[j].valT.c : undefined
                 refVars["$" + names[j]] = (lt != undefined && isIdentText(lt)) ? lt : true
-                b.NewCall(rtNmark, [gepStr(b, names[j]), one])
+                if (!selfRef) { b.NewCall(rtNmark, [gepStr(b, names[j]), one]) }
             }
             if (asgs[j] == null && !isArray && kw != "export" && kw != "readonly") { b.NewCall(rtArrSmark, gepStr(b, names[j])) }
             return b
@@ -3990,11 +4032,11 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     // The SCALAR attribute letters of a name, in bash's own order (i, l, u; the array letter
     // goes in front of them): `declare -iu n` prints `declare -iu`.
-    // In bash's order, i n r l u; rt_xletters puts in the x of an exported name.
+    // In bash's order, i n r l u; rt_xletters puts in the n of a nameref and the x of an
+    // exported name, both run-time marks (a computed nameref may be refused when it runs).
     function scalarAttrLetters(name) {
         var out = ""
         if (attrOn(intVars, name)) { out = out + "i" }
-        if (attrOn(refVars, name)) { out = out + "n" }
         if (attrOn(roVars, name)) { out = out + "r" }
         if (attrOn(loVars, name)) { out = out + "l" }
         if (attrOn(upVars, name)) { out = out + "u" }
@@ -4510,7 +4552,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var myTraps = trapList
             trapList = savedTraps
             subEnd = subshellEnd(subEnd, myTraps, optSave)
-            fnTouchEnd(ft, subEnd)
+            subEnd = fnTouchEnd(ft, subEnd)
             eeDone = false
             asgKept = false
             return subEnd
@@ -6776,6 +6818,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         mainExit.NewStore(mainExit.NewLoad(i32, gExitCode), gStatus)
         var xb = emitTraps(mainExit, progTraps)
         xb.NewRet(xb.NewLoad(i32, gExitCode))
+        fnTouchFinish()
         // languages/c-to-llvm-ir.abnf does not put a global's initializer in the global
         // itself; it emits __mec_ginit(), which main calls. bash-rt.c's main is stripped
         // when its module is generated, so THIS main has to make the call - and it is not

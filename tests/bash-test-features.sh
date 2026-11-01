@@ -853,6 +853,45 @@ declare -n xsr=xsr 2>/dev/null
 check nsf1 "$?/$xsr" "1/1"
 xsv=xsq; declare -n xsq=$xsv 2>/dev/null
 check nsf2 "$?/${xsq-unset}" "1/unset"
+xsw=xsp; xsp=old; declare -n xsp=$xsw 2>/dev/null
+check nsf3 "$?/$xsp/${xsp@a}" "1/old/"
+xsp=new
+check nsf4 "$xsp/$xsw/${xsp@A}" "new/xsp/xsp='new'"
+
+# ----- a computed nameref: the attributes and the slot of the variable it lands on -----
+declare -i xci=4; declare -u xcu=ab
+xct=xci; declare -n xcr1=$xct xcr2=xcr1
+check ncr1 "${xcr1@a}/${xcr2@A}" "i/declare -i xci='4'"
+xct=xcu; declare -n xcr3=$xct
+check ncr2 "${xcr3@a}/${xcr3@A}" "u/declare -u xcu='AB'"
+xcn=xcd; xcn=${xcn}q; declare -n xcr4=$xcn
+xcr4=5; xcr4+=6
+check ncr3 "$xcr4/${!xcn}" "56/56"
+( xcr4=sub ); declare "${xcn}x=dyn"; xcm=${xcn}x
+check ncr4 "$xcr4/${!xcm}" "56/dyn"
+
+# ----- bad array subscripts in an assignment: the subscript as written, the line abandoned -----
+xba=(x y z)
+r=$(exec 2>&1; xba[-9]=W; echo no); check bas1 "$?[$r]" "1[$0: line $LINENO: xba[-9]: bad array subscript]"
+r=$(exec 2>&1; xba[ 1 - 10 ]+=W; echo no); check bas2 "$?[$r]" "1[$0: line $LINENO: xba[ 1 - 10 ]: bad array subscript]"
+r=$(exec 2>&1; xba[@]=W; echo no); check bas3 "$?[$r]" "1[$0: line $LINENO: xba[@]: bad array subscript]"
+xbf() { xba[*]=W; echo no; }
+r=$(exec 2>&1; xbf; echo no); check bas4 "$?[$r]" "1[$0: line $((LINENO - 1)): xba[*]: bad array subscript]"
+r=$(exec 2>&1; xbs=@; xba[$xbs]=W; echo no); check bas5 "$?[$r]" "1[$0: line $LINENO: @: arithmetic syntax error: operand expected (error token is \"@\")]"
+declare -n xbr='xba[-9]' xbq='xba[@]'
+r=$(exec 2>&1; xbr=W; echo no); check bas6 "$?[$r]" "1[$0: line $LINENO: xba[-9]: bad array subscript]"
+r=$(exec 2>&1; xbq=W; echo no); check bas7 "$?[$r]" "1[$0: line $LINENO: xba[@]: bad array subscript]"
+xba[-1]=L
+check bas8 "${xba[*]}" "x y L"
+
+# ----- a function a function defines, run in a subshell, is gone when it ends -----
+xfr() { ( xfm; xfi ); }
+xfm() { xfi() { echo in; }; }
+r=$(xfr; xfi 2>/dev/null || echo gone); check fsd1 "$r" "in
+gone"
+r=$( (xfm); xfi 2>/dev/null || echo gone; x=$(xfm; xfi); echo "$x"; xfi 2>/dev/null || echo gone); check fsd2 "$r" "gone
+in
+gone"
 
 # ----- standard error is fd 2 in every leg -----
 # Not a check: ./test.sh --cross diffs the two halves' merged output, so this line and an
