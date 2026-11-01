@@ -75,7 +75,7 @@ Also tests/python-test-full.5.py peaks at ~90M steps per call (the brake is 1e8)
 
 # RB — Ruby
 
-### T-1011 ruby: `compare_by_identity`; `default_proc=` type check; nested `for` destructure; value of `for`; `lazy.class` · P3 · RB · OPEN [V]
+### T-1011 ruby: `compare_by_identity`; `default_proc=` type check; nested `for` destructure; value of `for`; `lazy.class` · P3 · RB · IN PROGRESS (RB worker, round 37) [V]
 Found by the RB worker, round 36 (oracle ruby 2.6). `compare_by_identity`/`compare_by_identity?` → NoMethodError; needs an identity
 flag on the dict passed into the shared lookups (dictFind in lib/interp-core.js, rubyDictFind/dictAppend in abnf/jsrt.go, layer 2
 rbDictFind/rbDictSet) and string keys kept as objects - a CORE-shared change. `h.default_proc = 5` → TypeError "wrong default_proc
@@ -85,7 +85,7 @@ type Integer (expected Proc)"; ours stores it. `for a, (b, c) in [[1, [2, 3]]]; 
 
 # JS — JavaScript and TypeScript
 
-### T-1015 js: invalid regex errors are late and uncatchable; Go twin turns lone surrogates in regex text into U+FFFD; `sc=Zyyy` on Unicode 17 scripts · P3 · JS · OPEN [V]
+### T-1015 js: invalid regex errors are late and uncatchable; Go twin turns lone surrogates in regex text into U+FFFD; `sc=Zyyy` on Unicode 17 scripts · P3 · JS · IN PROGRESS (JS worker, round 39) [V]
 Found by the JS worker, round 38 (oracle node 24). A bad pattern only fails when matched, and then aborts instead of raising a
 catchable SyntaxError at construction: `new RegExp("\\p{scx=Foo}","u")` → node SyntaxError "Invalid property name", ours "ok" then
 an uncatchable abort at .test; `new RegExp("p{l}","u").test("p{l}")` → node SyntaxError "Incomplete quantifier", ours true; the literal
@@ -94,7 +94,7 @@ text to U+FFFD (U+D800 matches \p{Grapheme_Base}). `\p{sc=Zyyy}` matches Unicode
 
 # JV — Java
 
-### T-1013 java: protected receiver rule, package-private constructors, untyped receivers escape the access check · P3 · JV · OPEN [V]
+### T-1013 java: protected receiver rule, package-private constructors, untyped receivers escape the access check · P3 · JV · IN PROGRESS (JV worker, round 19) [V]
 Found by the JV worker, round 18 (oracle javac 24). `class Sub extends q.Box { int peek(Box b) { return b.prot(); } }` → javac "prot()
 has protected access in Box" (JLS 6.6.2.1: the receiver must be Sub or below); all legs print 3. `new Box(3)` with a package-private
 `Box(int)` from another package (and a public `Box()`) → javac "constructor Box in class Box cannot be applied to given types;"; all
@@ -167,7 +167,7 @@ is lost when the argument is copied); php's "count(): Recursion detected" and pr
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-1012 bash compiled: computed `read "$n"` and computed declare operands are compile-time limitations · P3 · SH · OPEN [V]
+### T-1012 bash compiled: computed `read "$n"` and computed declare operands are compile-time limitations · P3 · SH · IN PROGRESS (SH worker, round 25) [V]
 Found by the SH worker, round 24 (oracle bash 5.3). `n=v; read "$n" <<< x` and `declare -a 'b[-8]=R'` / `declare "$spec"` work in
 the interpreter but the compiler refuses them at compile time. Also untested: `declare -f` printing of the new body forms
 (`for ..; { ..; }`, `f() for ..`, `f() if ..`) against bash's deparse.
