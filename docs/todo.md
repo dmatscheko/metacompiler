@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1023** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1024** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -136,11 +136,13 @@ are queued, buffers past capacity instead of blocking. go/test/chan powser1/2, s
 (10000 nested drains overflow the stack) still fail. Needs a suspension mechanism that works in all three engines (the manual calls
 real coroutines out of the subset - decide first). Go also runs the most recently spawned goroutine first; we run spawn order.
 
-### T-1021 go: interface dispatch to a method promoted from a defined non-struct type; `%T` of a method expression · P3 · GO · IN PROGRESS (GO worker, round 21) [V]
-Found by the GO worker, round 20 (oracle go run). `type T []int; func (t *T) Sum() int {..}; type U struct{ *T }; type Summer interface{
-Sum() int }; var s Summer = &U{&t}; s.Sum()` → go the sum; interpreter 0, run/native "range over a object" (goHasMethod/goMethod only
-follow embedded fields holding class instances - interpreter, abnf/jsrtgolang.go/jsrt.go, go-rt.metajs). `fmt.Printf("%T %T", (*P).Add,
-P.Twice)` → `func(*main.P, int) int func(main.P) int`; ours `%!T(0x...)` (stChainFrom gives a method expression no func type).
+### T-1023 go: a struct value's method set includes pointer methods in type switches/assertions; embedding another package's defined non-struct type · P3 · GO · OPEN [V]
+Found by the GO worker, round 21 (oracle go run). `type S struct{n int}; func (s *S) Inc(){}; func (s S) Get() int {..}`; with
+interfaces Incer{Inc();Get()} and Getter{Get()}, `switch v.(type){case Incer: ..; case Getter: ..}` for v = S{1}, and `var g Getter =
+S{3}; _, ok := g.(Incer)` → go `getter`, false; ours `incer`, true (goHasMethod/goSatisfies ignore __ptr$ for a __vv struct value, in
+the interpreter, abnf/jsrtgolang.go and go-rt.metajs). Package dtbox `type L []int` with Push/Len, main `type Mine struct{ dtbox.L;
+tag string }; m := &Mine{}; m.Push(4); fmt.Println(m.Len(), m.L)` → go `1 [4]`; interpreter "append() needs a slice", compiler "len()
+of a object" (goPromDt matches only when the field's type text equals its name).
 
 # SW — Swift  (oracle: swiftc 6.1.2)
 
@@ -1093,6 +1095,7 @@ T-983 python: codecs beyond utf-8/16/32, ascii, latin-1, cp1252 raise LookupErro
 T-1005 python: generator `gi_running` — DONE - gi_running in all engines, read-only; generator/tuple new-attribute errors; full.5 split only gained 1.6M steps (random.seed costs 88M), filed
 T-1003 go: a promoted method used as a method-expression value — DONE - promoted methods (incl. via embedded defined non-struct types) as method-expression values and on expression receivers, all three engines
 T-1014 c#: 5-arg `CompareOrdinal`, method group → `Comparison<string>`, `CompareTo` on strings, `char.ConvertFromUtf32` — DONE - 5-arg CompareOrdinal with .NET's range checks, BCL static method groups as delegates, String.CompareTo refused as culture collation, char.ConvertFromUtf32
+T-1021 go: interface dispatch to a method promoted from a defined non-struct type; `%T` of a method expression — DONE - methods promoted from embedded defined non-struct types join the struct's descriptor (interface dispatch, promoted String), %T of method expressions
 
 # Settled — do not re-open
 
