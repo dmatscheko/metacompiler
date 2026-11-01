@@ -123,10 +123,10 @@ real coroutines out of the subset - decide first). Go also runs the most recentl
 
 # PHP — PHP  (no php here: spec-only, php.net / php-src behaviour)
 
-### T-1050 php: Generator::throw(); `yield from` value and send forwarding · P3 · PHP · OPEN [V spec-only]
+### T-1050 php: Generator::throw(); `yield from` value and send forwarding · P3 · PHP · IN PROGRESS (PHP worker, round 38) [V spec-only]
 PHP manual: `function thr() { try { yield 1; } catch (Exception $e) { echo "[caught ", $e->getMessage(), "]"; yield 99; } } $t = thr(); $t->current(); echo $t->throw(new Exception("boom"));` → "[caught boom]99"; ours (all engines): "Call to undefined method Generator::throw()". `function inner(){ yield 1; yield 2; return 3; } function outer(){ $r = yield from inner(); yield $r; }` → foreach prints 123; ours 12 (yield from evaluates to null; send() not forwarded to the delegate). Both currently documented as "Deviation" in the grammars — remove those notes when fixed.
 
-### T-1051 php: array refcount/COW remainder; print_r recursion depth; stale comments · P4 · PHP · OPEN [V spec-only]
+### T-1051 php: array refcount/COW remainder; print_r recursion depth; stale comments · P4 · PHP · IN PROGRESS (PHP worker, round 38) [V spec-only]
 Remainder of T-1036 (counts stay correct-but-high): arrays holding reference cells that die by overwrite / frame-local / temporary never release (needs per-array refcount or COW); unfinished generators never release; frames unwound by an exception keep parameter-copy holders (js_phown not joined to phpFrames unwinding); property-hook set parameters not covered by the compiler's param-copy release. print_r: `$y=[1]; $y[]=&$y; print_r($y)` prints one level deeper than PHP 8 (*RECURSION* at [1]) because the stdlib print_r's by-value param loses identity. Housekeeping: tests/php-test-full.php header still lists "references returned from functions" as out of scope (section 83 tests them); the phpRefHolders comment in abnf/jsrtphp.go says unwinding does not release (stale).
 
 # LUA — Lua  (oracle: lua 5.5 binary, suite is 5.4)
