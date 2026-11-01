@@ -1476,22 +1476,31 @@ function swBrCheck(s, e) {
 
 // ----- a name nothing declares: "cannot find 'x' in scope" -----
 // swiftc rejects a reference to a name no declaration in scope binds, reached or
-// not. This front end has no scope tables, so the check is FLOW-INSENSITIVE and
-// errs only on the safe side: a name counts as declared when it occurs anywhere
-// in the walked source other than as a reference (a binder, a parameter, a member,
-// a label or a type position), and only a lower-case name is checked, since an
-// upper-case one is a type the stdlib may declare. A reference inside a type that
-// may inherit members (an inheritance clause, an extension, a protocol, or a type
-// some extension adds conformances to) is exempt: an implicit `self.member` there
-// can come from the stdlib, and so is one inside an #if (swnSkip). What remains
-// must be a stdlib or C library function or an implicit binding (swnKnown). The Id rule notes every identifier (swnId), each
-// reference rule notes its own (swnUse), and Program calls swnCheck.
+// not. The check errs only on the safe side. A LOCAL binder - a parameter, a
+// closure parameter, a let/var, an if/while/guard binding, a loop variable - is
+// noted (swnBind) and scoped by the first enclosing statement that reduces around
+// it (swnScope: a block, a function, an initializer, a subscript, a closure, a
+// loop, an if or while with bindings); one no such statement claims is file-wide.
+// A reference to a name only local binders declare must lie inside one of their
+// scopes. Every other identifier that is not a reference (a member, a type, a
+// label, a pattern binding) declares its name file-wide.
+// A lower-case name must be a stdlib or C library function or an implicit binding
+// (swnKnown), an upper-case one a type of the implicitly imported modules
+// (swnStd) unless the file imports a module. A reference inside a type that may
+// inherit members from outside the program (swnOpen) is exempt, as an implicit
+// `self.member` there can come from the stdlib, and so is one inside an #if
+// (swnSkip). The Id rule notes every identifier (swnId), each reference rule notes
+// its own (swnUse), and Program calls swnCheck.
 var swnIds = []
 var swnUses = []
 var swnUseAt = {}
+var swnBinders = []
+var swnBindAt = {}
+var swnPend = []
 var swnTypes = []
-var swnOpenNames = {}
+var swnForeign = false
 var swnKnown = {}
+var swnStd = {}
 function swnKnownInit() {
     var ns = ["self", "super", "newValue", "oldValue", "error", "_",
               "print", "debugPrint", "dump", "min", "max", "abs", "zip", "stride", "sequence",
@@ -1518,9 +1527,93 @@ function swnKnownInit() {
               "inout", "operator", "fallthrough", "some", "any", "get", "set", "willSet", "didSet", "lazy",
               "weak", "unowned", "mutating", "nonmutating", "override", "final", "open", "public",
               "private", "internal", "fileprivate", "convenience", "required", "dynamic", "optional",
-              "indirect", "prefix", "postfix", "infix", "nil", "true", "false"]
+              "indirect", "prefix", "postfix", "infix", "nil", "true", "false",
+              "withoutActuallyEscaping", "withTaskCancellationHandler", "withDiscardingTaskGroup",
+              "withThrowingDiscardingTaskGroup", "withUnsafeCurrentTask", "withTaskExecutorPreference",
+              "asyncDetached", "detach", "extractIsolation", "globalConcurrentExecutor", "pointwiseMax",
+              "pointwiseMin", "rawValue", "hashValue", "hash", "allCases"]
     var i = 0
     while (i < ns.length) { swnKnown["$" + ns[i]] = true; i = i + 1 }
+    // The upper-case top-level names of Swift, _Concurrency and _StringProcessing
+    // (swiftc 6.1.2's interfaces), which every file sees without an import.
+    var std = (""
+    + "Actor AdditiveArithmetic Any AnyActor AnyBidirectionalCollection AnyClass AnyCollection "
+    + "AnyHashable AnyIndex AnyIterator AnyKeyPath AnyObject AnyRandomAccessCollection "
+    + "AnyRegexOutput AnySequence Array ArrayLiteralConvertible ArraySlice AsyncCompactMapSequence "
+    + "AsyncDropFirstSequence AsyncDropWhileSequence AsyncFilterSequence AsyncFlatMapSequence "
+    + "AsyncIteratorProtocol AsyncMapSequence AsyncPrefixSequence AsyncPrefixWhileSequence "
+    + "AsyncSequence AsyncStream AsyncThrowingCompactMapSequence AsyncThrowingDropWhileSequence "
+    + "AsyncThrowingFilterSequence AsyncThrowingFlatMapSequence AsyncThrowingMapSequence "
+    + "AsyncThrowingPrefixWhileSequence AsyncThrowingStream AutoreleasingUnsafeMutablePointer "
+    + "BidirectionalCollection BidirectionalIndexable BidirectionalSlice BinaryFloatingPoint "
+    + "BinaryInteger BitwiseCopyable Bool BooleanLiteralConvertible BooleanLiteralType CBool CChar "
+    + "CChar16 CChar32 CChar8 CDouble CFloat CFloat16 CInt CLong CLongDouble CLongLong CShort "
+    + "CSignedChar CUnsignedChar CUnsignedInt CUnsignedLong CUnsignedLongLong CUnsignedShort "
+    + "CVaListPointer CVarArg CWideChar CancellationError CaseIterable Character "
+    + "CheckedContinuation Clock ClosedRange ClosedRangeIndex Codable CodingKey "
+    + "CodingKeyRepresentable CodingUserInfoKey Collection CollectionDifference CollectionOfOne "
+    + "CommandLine Comparable ConcurrentValue ContiguousArray ContinuousClock Copyable "
+    + "CountableClosedRange CountablePartialRangeFrom CountableRange CustomConsumingRegexComponent "
+    + "CustomDebugStringConvertible CustomLeafReflectable CustomPlaygroundDisplayConvertible "
+    + "CustomPlaygroundQuickLookable CustomReflectable CustomStringConvertible Decodable Decoder "
+    + "DecodingError DefaultBidirectionalIndices DefaultIndices DefaultRandomAccessIndices "
+    + "DefaultStringInterpolation Dictionary DictionaryIndex DictionaryIterator DictionaryLiteral "
+    + "DictionaryLiteralConvertible DiscardingTaskGroup DiscontiguousSlice Double "
+    + "DropFirstSequence DropWhileSequence Duration DurationProtocol EmptyCollection EmptyIterator "
+    + "Encodable Encoder EncodingError EnumeratedIterator EnumeratedSequence Equatable Error "
+    + "Executor ExecutorJob ExpressibleByArrayLiteral ExpressibleByBooleanLiteral "
+    + "ExpressibleByDictionaryLiteral ExpressibleByExtendedGraphemeClusterLiteral "
+    + "ExpressibleByFloatLiteral ExpressibleByIntegerLiteral ExpressibleByNilLiteral "
+    + "ExpressibleByStringInterpolation ExpressibleByStringLiteral "
+    + "ExpressibleByUnicodeScalarLiteral ExtendedGraphemeClusterLiteralConvertible "
+    + "ExtendedGraphemeClusterType FixedWidthInteger FlattenBidirectionalCollection "
+    + "FlattenBidirectionalCollectionIndex FlattenCollection FlattenCollectionIndex "
+    + "FlattenSequence Float Float16 Float32 Float64 Float80 FloatLiteralConvertible "
+    + "FloatLiteralType FloatingPoint FloatingPointClassification FloatingPointRoundingRule "
+    + "FloatingPointSign GlobalActor Hashable Hasher Identifiable ImplicitlyUnwrappedOptional "
+    + "Indexable IndexableBase IndexingIterator InstantProtocol Int Int128 Int16 Int32 Int64 Int8 "
+    + "IntegerLiteralConvertible IntegerLiteralType IteratorOverOne IteratorProtocol "
+    + "IteratorSequence Job JobPriority JoinedIterator JoinedSequence KeyPath KeyValuePairs "
+    + "KeyedDecodingContainer KeyedDecodingContainerProtocol KeyedEncodingContainer "
+    + "KeyedEncodingContainerProtocol LazyBidirectionalCollection LazyCollection "
+    + "LazyCollectionProtocol LazyDropWhileBidirectionalCollection LazyDropWhileCollection "
+    + "LazyDropWhileIndex LazyDropWhileIterator LazyDropWhileSequence "
+    + "LazyFilterBidirectionalCollection LazyFilterCollection LazyFilterIndex LazyFilterIterator "
+    + "LazyFilterSequence LazyMapBidirectionalCollection LazyMapCollection LazyMapIterator "
+    + "LazyMapRandomAccessCollection LazyMapSequence LazyPrefixWhileBidirectionalCollection "
+    + "LazyPrefixWhileCollection LazyPrefixWhileIndex LazyPrefixWhileIterator "
+    + "LazyPrefixWhileSequence LazyRandomAccessCollection LazySequence LazySequenceProtocol "
+    + "LosslessStringConvertible ManagedBuffer ManagedBufferPointer MemoryLayout Mirror MirrorPath "
+    + "MutableBidirectionalSlice MutableCollection MutableIndexable MutableRandomAccessSlice "
+    + "MutableRangeReplaceableBidirectionalSlice MutableRangeReplaceableRandomAccessSlice "
+    + "MutableRangeReplaceableSlice MutableSlice Never NilLiteralConvertible Numeric "
+    + "ObjectIdentifier OpaquePointer OptionSet Optional PartialAsyncTask PartialKeyPath "
+    + "PartialRangeFrom PartialRangeThrough PartialRangeUpTo PlaygroundQuickLook PrefixSequence "
+    + "RandomAccessCollection RandomAccessIndexable RandomAccessSlice RandomNumberGenerator Range "
+    + "RangeExpression RangeReplaceableBidirectionalSlice RangeReplaceableCollection "
+    + "RangeReplaceableIndexable RangeReplaceableRandomAccessSlice RangeReplaceableSlice RangeSet "
+    + "RawRepresentable ReferenceWritableKeyPath Regex RegexComponent RegexRepetitionBehavior "
+    + "RegexSemanticLevel RegexWordBoundaryKind Repeated Result ReversedCollection ReversedIndex "
+    + "ReversedRandomAccessCollection SIMD SIMD16 SIMD2 SIMD3 SIMD32 SIMD4 SIMD64 SIMD8 SIMDMask "
+    + "SIMDScalar SIMDStorage Self Sendable Sequence SerialExecutor Set SetAlgebra SetIndex "
+    + "SetIterator SignedInteger SignedNumeric SingleValueDecodingContainer "
+    + "SingleValueEncodingContainer Slice StaticBigInt StaticString StrideThrough "
+    + "StrideThroughIterator StrideTo StrideToIterator Strideable String "
+    + "StringInterpolationConvertible StringInterpolationProtocol StringLiteralConvertible "
+    + "StringLiteralType StringProtocol Substring SuspendingClock SystemRandomNumberGenerator Task "
+    + "TaskExecutor TaskGroup TaskPriority TextOutputStream TextOutputStreamable "
+    + "ThrowingDiscardingTaskGroup ThrowingTaskGroup UInt UInt128 UInt16 UInt32 UInt64 UInt8 UTF16 "
+    + "UTF32 UTF8 UnboundedRange UnboundedRange_ UnfoldFirstSequence UnfoldSequence Unicode "
+    + "UnicodeCodec UnicodeDecodingResult UnicodeScalar UnicodeScalarLiteralConvertible "
+    + "UnicodeScalarType UnkeyedDecodingContainer UnkeyedEncodingContainer Unmanaged UnownedJob "
+    + "UnownedSerialExecutor UnownedTaskExecutor UnsafeBufferPointer UnsafeBufferPointerIterator "
+    + "UnsafeConcurrentValue UnsafeContinuation UnsafeCurrentTask UnsafeMutableBufferPointer "
+    + "UnsafeMutablePointer UnsafeMutableRawBufferPointer UnsafeMutableRawBufferPointerIterator "
+    + "UnsafeMutableRawPointer UnsafePointer UnsafeRawBufferPointer UnsafeRawBufferPointerIterator "
+    + "UnsafeRawPointer UnsafeSendable UnsafeThrowingContinuation UnsignedInteger Void "
+    + "WritableKeyPath Zip2Iterator Zip2Sequence "        ).split(" ")
+    var j = 0
+    while (j < std.length) { swnStd["$" + std[j]] = true; j = j + 1 }
 }
 swnKnownInit()
 function swnId(name, pos) { swnIds.push({n: swBt(name), pos: pos}) }
@@ -1530,56 +1623,267 @@ function swnUse(name, pos) {
     swnUseAt["p" + pos + "$" + name] = true
     return name
 }
-// A type declaration's text and extent: it is open when its header, before the
-// body's brace, has an inheritance clause, or when it is a protocol or an
-// extension, which also opens the type it extends.
-function swnType(text, s, e) {
+// An argument label names a parameter of the callee: neither a reference nor a
+// declaration. Returns the name.
+function swnLabel(name, pos) {
+    swnUseAt["p" + pos + "$" + name] = true
+    return name
+}
+// A local binder at its Id's position; s < 0 until a statement scopes it, and a
+// file-wide one is never scoped later (swnCheck).
+function swnBind(name, pos) {
+    if (swnBindAt["p" + pos + "$" + name] === true) { return }
+    swnBindAt["p" + pos + "$" + name] = true
+    swnPend.push(swnBinders.length)
+    swnBinders.push({n: name, pos: pos, s: -1, e: -1})
+}
+// A parameter's bound name is its LAST identifier (Param's {pid} items).
+function swnParam(items) {
+    var k = items.length - 1
+    while (k >= 0 && items[k].pid == undefined) { k = k - 1 }
+    if (k >= 0) { swnBind(items[k].pid, items[k].pidAt) }
+}
+function swnScope(s, e) {
+    var rest = []
+    var i = 0
+    while (i < swnPend.length) {
+        var b = swnBinders[swnPend[i]]
+        if (b.pos > s && b.pos <= e) { b.s = s; b.e = e } else { rest.push(swnPend[i]) }
+        i = i + 1
+    }
+    swnPend = rest
+}
+function swnImport(path) {
+    var dot = path.indexOf(".")
+    if ((dot < 0 ? path : path.substring(0, dot)) != "Swift") { swnForeign = true }
+}
+// A type declaration's extent and header: the name it declares or extends, the
+// names its inheritance clause lists, and whether it has a where clause.
+function swnType(s, e) {
+    var text = c.srcSlice(s, e)
     var b = text.indexOf("{")
     var head = b < 0 ? text : text.substring(0, b)
     var kw = ["extension", "protocol", "struct", "class", "actor", "enum"]
     var k = 0
     while (k < kw.length && head.substring(0, kw[k].length) != kw[k]) { k = k + 1 }
-    var rest = k < kw.length ? head.substring(kw[k].length) : head
-    var n = 0
-    while (n < rest.length && rest.charAt(n) != ":" && rest.charAt(n) != "<" && rest.charAt(n) != "." && rest.charAt(n) != "{") { n = n + 1 }
-    var name = rest.substring(0, n)
-    var open = k < 2 || head.indexOf(":") >= 0
-    if (k == 0 && open) { swnOpenNames["$" + name] = true }
-    swnTypes.push({n: name, s: s, e: e, open: open})
+    var i = k < kw.length ? kw[k].length : 0
+    while (i < head.length && swnSpace(head.charCodeAt(i))) { i = i + 1 }
+    var st = i
+    while (i < head.length && (swnIdCh(head.charCodeAt(i)) || head.charAt(i) == "." || head.charAt(i) == "`")) { i = i + 1 }
+    var name = swBt(head.substring(st, i))
+    var depth = 0
+    var inh = []
+    var hasWhere = false
+    var colon = false
+    var cur = ""
+    while (i < head.length) {
+        var ch = head.charAt(i)
+        if (ch == "<" || ch == "(" || ch == "[") { depth = depth + 1 }
+        else if (ch == ">" || ch == ")" || ch == "]") { depth = depth - 1 }
+        if (depth == 0 && head.substring(i, i + 5) == "where" && (i == 0 || !swnIdCh(head.charCodeAt(i - 1)))
+            && (i + 5 >= head.length || !swnIdCh(head.charCodeAt(i + 5)))) { hasWhere = true; break }
+        if (depth == 0 && ch == ":" && !colon) { colon = true }
+        else if (colon && depth == 0 && (ch == "," || ch == "&")) { inh.push(cur); cur = "" }
+        else if (colon) { cur = cur + ch }
+        i = i + 1
+    }
+    if (colon) { inh.push(cur) }
+    var names = []
+    var q = 0
+    while (q < inh.length) {
+        var t = swnTrim(inh[q])
+        if (t.substring(0, 11) == "@unchecked ") { t = swnTrim(t.substring(11)) }
+        if (t.charAt(0) == "~") { t = swnTrim(t.substring(1)) }
+        if (t != "") { names.push(t) }
+        q = q + 1
+    }
+    if (k == 4) { names.push("Actor") }
+    swnTypes.push({n: name, s: s, e: e, ext: k == 0, inh: names, wh: hasWhere, skip: false})
+}
+function swnSpace(ch) { return ch == 32 || ch == 9 || ch == 10 || ch == 13 }
+function swnIdCh(ch) { return (ch >= 97 && ch <= 122) || (ch >= 65 && ch <= 90) || (ch >= 48 && ch <= 57) || ch == 95 || ch >= 128 }
+function swnTrim(t) {
+    var a = 0
+    var z = t.length
+    while (a < z && swnSpace(t.charCodeAt(a))) { a = a + 1 }
+    while (z > a && swnSpace(t.charCodeAt(z - 1))) { z = z - 1 }
+    return t.substring(a, z)
 }
 // An #if region: the walk keeps a branch without evaluating its condition, and
 // swiftc does not type-check an inactive one.
-function swnSkip(s, e) { swnTypes.push({n: "", s: s, e: e, open: true}) }
+function swnSkip(s, e) { swnTypes.push({n: "", s: s, e: e, ext: false, inh: [], wh: false, skip: true}) }
+// A member attribute: the arguments of a builtin one (`@available(swift, ...)`,
+// lower-case) are not expressions; a property wrapper's (a type) are.
+function swnAttr(text, s, e) {
+    var ch = text.charCodeAt(1)
+    if (ch >= 97 && ch <= 122) { swnSkip(s, e) }
+}
 function swnChecked(n) {
     if (n == "" || swnKnown["$" + n] === true) { return false }
     var ch = n.charCodeAt(0)
+    if (ch >= 65 && ch <= 90) { return !swnForeign && swnStd["$" + n] !== true }
     return (ch >= 97 && ch <= 122) || ch == 95
+}
+// The stdlib protocols (and raw-value types) whose conformance adds no member a
+// method body could name implicitly beyond swnKnown's.
+var swnClosedStd = {"$Equatable": true, "$Hashable": true, "$Comparable": true, "$Error": true,
+    "$CustomStringConvertible": true, "$CustomDebugStringConvertible": true, "$Sendable": true,
+    "$CaseIterable": true, "$Identifiable": true, "$Codable": true, "$Encodable": true,
+    "$Decodable": true, "$AnyObject": true, "$RawRepresentable": true, "$Copyable": true,
+    "$BitwiseCopyable": true, "$Int": true, "$UInt": true, "$Int8": true, "$Int16": true,
+    "$Int32": true, "$Int64": true, "$UInt8": true, "$UInt16": true, "$UInt32": true,
+    "$UInt64": true, "$Double": true, "$Float": true, "$String": true, "$Character": true}
+// May the program type `name` inherit members from outside the program? It may
+// when it is not declared here (an extension of a stdlib type), when a
+// declaration or extension of it has a where clause, or when something it
+// inherits may. Under an import every inheritance clause counts as open.
+function swnOpen(name, seen) {
+    if (seen["$" + name] === true) { return false }
+    seen["$" + name] = true
+    var decl = false
+    var i = 0
+    while (i < swnTypes.length) {
+        var t = swnTypes[i]
+        if (!t.skip && t.n == name) {
+            if (!t.ext) { decl = true }
+            if (t.wh || (swnForeign && t.inh.length > 0)) { return true }
+            var q = 0
+            while (q < t.inh.length) {
+                var h = t.inh[q]
+                if (swnClosedStd["$" + h] !== true && swnOpen(h, seen)) { return true }
+                q = q + 1
+            }
+        }
+        i = i + 1
+    }
+    return !decl
+}
+function swnInOpen(pos) {
+    var i = 0
+    while (i < swnTypes.length) {
+        var t = swnTypes[i]
+        if (pos > t.s && pos <= t.e && (t.skip || swnOpen(t.n, {}))) { return true }
+        i = i + 1
+    }
+    return false
 }
 function swnCheck() {
     var declared = {}
     var i = 0
     while (i < swnIds.length) {
         var d = swnIds[i]
-        if (swnUseAt["p" + d.pos + "$" + d.n] !== true) { declared["$" + d.n] = true }
+        if (swnUseAt["p" + d.pos + "$" + d.n] !== true && swnBindAt["p" + d.pos + "$" + d.n] !== true) { declared["$" + d.n] = true }
         i = i + 1
+    }
+    var scoped = {}
+    var b = 0
+    while (b < swnBinders.length) {
+        var bd = swnBinders[b]
+        if (bd.s < 0) { declared["$" + bd.n] = true }
+        else {
+            if (scoped["$" + bd.n] == undefined) { scoped["$" + bd.n] = [] }
+            scoped["$" + bd.n].push(bd)
+        }
+        b = b + 1
     }
     var u = 0
     while (u < swnUses.length) {
         var r = swnUses[u]
         // `_x` is the storage of a property-wrapped x.
         var wrapped = r.n.charAt(0) == "_" && declared["$" + r.n.substring(1)] === true
-        if (swnChecked(r.n) && declared["$" + r.n] !== true && !wrapped && !swnInOpen(r.pos)) {
+        if (swnChecked(r.n) && declared["$" + r.n] !== true && !wrapped && !swnInScope(scoped["$" + r.n], r.pos)
+            && !swnInOpen(r.pos)) {
             fail(c.curFile() + ":" + c.lineOf(r.pos) + ": cannot find '" + r.n + "' in scope")
         }
         u = u + 1
     }
+    // What no statement scoped is a top-level binder of this file: file-wide, and
+    // not to be scoped by a statement of a file walked later.
+    var f = 0
+    while (f < swnPend.length) { swnBinders[swnPend[f]].s = -2; f = f + 1 }
+    swnPend = []
 }
-function swnInOpen(pos) {
+function swnInScope(bs, pos) {
+    if (bs == undefined) { return false }
     var i = 0
-    while (i < swnTypes.length) {
-        var t = swnTypes[i]
-        if (pos > t.s && pos <= t.e && (t.open || swnOpenNames["$" + t.n] === true)) { return true }
+    while (i < bs.length) {
+        if (pos > bs[i].s && pos <= bs[i].e) { return true }
         i = i + 1
     }
     return false
+}
+
+// ----- MemoryLayout<T>.size / .stride / .alignment -----
+// The layout swiftc gives T on a 64-bit target, from T's text, or null when T is
+// not one this front end can lay out (a nominal type of the program, a generic
+// parameter). A tuple lays its elements out in order, each at its alignment. An
+// Optional reuses a spare bit pattern of its payload when the payload has one
+// (Bool, String, Character, the collections, or a tuple holding one) and appends
+// a tag byte otherwise. The answer is the member's decimal text, or "".
+function swMemLayout(t, member) {
+    var l = swMemLay(t)
+    if (l == null) { return "" }
+    if (member == "size") { return "" + l.size }
+    if (member == "alignment") { return "" + l.align }
+    if (member == "stride") {
+        var st = Math.ceil(l.size / l.align) * l.align
+        return "" + (st < 1 ? 1 : st)
+    }
+    return ""
+}
+function swMemLay(t) {
+    var n = t.length
+    if (n == 0) { return null }
+    var last = t.charAt(n - 1)
+    var inner = ""
+    if (last == "?" || last == "!") { inner = t.substring(0, n - 1) }
+    else if (t.substring(0, 9) == "Optional<" && last == ">") { inner = t.substring(9, n - 1) }
+    if (inner != "") {
+        var p = swMemLay(inner)
+        if (p == null) { return null }
+        if (p.xi) { return p }
+        return {size: p.size + 1, align: p.align, xi: false}
+    }
+    if ((t.charAt(0) == "[" && last == "]") || (last == ">" && (t.substring(0, 4) == "Set<"
+        || t.substring(0, 6) == "Array<" || t.substring(0, 11) == "Dictionary<"))) {
+        return {size: 8, align: 8, xi: true}
+    }
+    if (t.charAt(0) == "(" && last == ")") { return swMemLayTuple(t.substring(1, n - 1)) }
+    if (t == "Void") { return {size: 0, align: 1, xi: false} }
+    if (t == "Int" || t == "UInt" || t == "Int64" || t == "UInt64" || t == "Double" || t == "Float64") { return {size: 8, align: 8, xi: false} }
+    if (t == "Int32" || t == "UInt32" || t == "Float" || t == "Float32") { return {size: 4, align: 4, xi: false} }
+    if (t == "Int16" || t == "UInt16") { return {size: 2, align: 2, xi: false} }
+    if (t == "Int8" || t == "UInt8") { return {size: 1, align: 1, xi: false} }
+    if (t == "Bool") { return {size: 1, align: 1, xi: true} }
+    if (t == "String" || t == "Character") { return {size: 16, align: 8, xi: true} }
+    return null
+}
+// A tuple type's element list, split at its top-level commas, each element's
+// `label:` dropped.
+function swMemLayTuple(body) {
+    if (body == "") { return {size: 0, align: 1, xi: false} }
+    var size = 0
+    var align = 1
+    var xi = false
+    var depth = 0
+    var st = 0
+    var i = 0
+    while (i <= body.length) {
+        var ch = i < body.length ? body.charAt(i) : ","
+        if (ch == "(" || ch == "[" || ch == "<") { depth = depth + 1 }
+        else if (ch == ")" || ch == "]" || ch == ">") { depth = depth - 1 }
+        else if (ch == "," && depth == 0) {
+            var el = body.substring(st, i)
+            var colon = el.indexOf(":")
+            if (colon >= 0 && el.charAt(0) != "[") { el = el.substring(colon + 1) }
+            var e = swMemLay(el)
+            if (e == null) { return null }
+            size = Math.ceil(size / e.align) * e.align + e.size
+            if (e.align > align) { align = e.align }
+            if (e.xi) { xi = true }
+            st = i + 1
+        }
+        i = i + 1
+    }
+    return {size: size, align: align, xi: xi}
 }

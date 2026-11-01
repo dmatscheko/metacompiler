@@ -372,6 +372,48 @@
             "program": "${workspaceFolder}","args": ["languages/swift-to-llvm-ir.abnf", "tests/swift-fail-test-undefined.swift", "-q"]
         },
         {
+            "name": "Swift interpreter name out of its scope SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "expectError": "swift-fail-test-scope.swift:22: cannot find 'doubled' in scope",
+            "program": "${workspaceFolder}","args": ["languages/swift-interpreter.abnf", "tests/swift-fail-test-scope.swift", "-q"]
+        },
+        {
+            "name": "Swift compiler name out of its scope SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "expectError": "swift-fail-test-scope.swift:22: cannot find 'doubled' in scope",
+            "program": "${workspaceFolder}","args": ["languages/swift-to-llvm-ir.abnf", "tests/swift-fail-test-scope.swift", "-q"]
+        },
+        {
+            "name": "Swift interpreter undefined member of a closed type SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "expectError": "swift-fail-test-member.swift:18: cannot find 'speed' in scope",
+            "program": "${workspaceFolder}","args": ["languages/swift-interpreter.abnf", "tests/swift-fail-test-member.swift", "-q"]
+        },
+        {
+            "name": "Swift compiler undefined member of a closed type SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "expectError": "swift-fail-test-member.swift:18: cannot find 'speed' in scope",
+            "program": "${workspaceFolder}","args": ["languages/swift-to-llvm-ir.abnf", "tests/swift-fail-test-member.swift", "-q"]
+        },
+        {
+            "name": "Swift interpreter undefined upper-case name SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "expectError": "swift-fail-test-upper.swift:16: cannot find 'Vector3' in scope",
+            "program": "${workspaceFolder}","args": ["languages/swift-interpreter.abnf", "tests/swift-fail-test-upper.swift", "-q"]
+        },
+        {
+            "name": "Swift compiler undefined upper-case name SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "expectError": "swift-fail-test-upper.swift:16: cannot find 'Vector3' in scope",
+            "program": "${workspaceFolder}","args": ["languages/swift-to-llvm-ir.abnf", "tests/swift-fail-test-upper.swift", "-q"]
+        },
+        {
             "name": "Swift interpreter break outside a loop SHOULD FAIL",
             "type": "go",
             "request": "launch",

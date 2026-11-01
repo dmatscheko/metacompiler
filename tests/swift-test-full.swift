@@ -6011,6 +6011,27 @@ func s158() {
     check("158d", steps == 2)
 }
 
+// ===== SECTION 159: MemoryLayout of builtin types; a -D condition that is not set =====
+// swiftc without -D DEBUG compiles the #else branch of `#if DEBUG`.
+func s159() {
+    var mode = ""
+#if DEBUG
+    mode = "debug"
+#elseif !DEBUG && true
+    mode = "release"
+#else
+    mode = "neither"
+#endif
+    check("159a", mode == "release")
+    check("159b", MemoryLayout<Int>.size == 8 && MemoryLayout<Int8>.stride == 1
+        && MemoryLayout<UInt16>.alignment == 2 && MemoryLayout<Double>.size == 8
+        && MemoryLayout<String>.size == 16 && MemoryLayout<[Int]>.size == 8)
+    check("159c", MemoryLayout<Int?>.size == 9 && MemoryLayout<Int?>.stride == 16
+        && MemoryLayout<Bool?>.size == 1 && MemoryLayout<String?>.size == 16)
+    check("159d", MemoryLayout<(Int8, Int16, Int8)>.size == 5 && MemoryLayout<(Int8, Int16, Int8)>.stride == 6
+        && MemoryLayout<(Bool, Int)>.size == 16 && MemoryLayout<Void>.stride == 1)
+}
+
 func main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -6170,6 +6191,7 @@ func main() {
     s156() // SECTION-CALL 156
     s157() // SECTION-CALL 157
     s158() // SECTION-CALL 158
+    s159() // SECTION-CALL 159
     print("full: \(checks) checks, \(fails) failures")
 }
 

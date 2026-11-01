@@ -301,6 +301,7 @@ PoundSkipScan = :script(~~
                 if (name == "true" || name == "1") { v = 1 }
                 if (name == "false" || name == "0") { v = 0 }
                 if (name == "_compiler_version") { v = 1 }
+                if (v == 2 && !(j < n && s.charCodeAt(j) == 40) && name.charAt(0) != "$") { v = 0 }
                 if ((name == "compiler" || name == "swift" || name == "_compiler_version") && arg != "") {
                     var a = ""
                     for (var q = 0; q < arg.length; q++) { if (arg.charCodeAt(q) != 32) { a += arg.charAt(q) } }
@@ -494,12 +495,12 @@ MemMut      <~~ push({mmut: 1}) ~~> = "mutating" KwEnd ;
 // wrapper, and everything else (@objc, @escaping, ...) is parsed and dropped. An
 // argument list that reads as call arguments is kept too: `@Clamped(0, 10) var x
 // = 5` constructs the wrapper as Clamped(wrappedValue: 5, 0, 10).
-MemAttr     = "@" Id <~~ push({mattr: swBt(up.in)}) ~~> { "." Id } [ MemAttrArgs | SkipParen ] ;
+MemAttr     <~~ swnAttr(up.in, up.start, up.pos) ~~> = "@" Id <~~ push({mattr: swBt(up.in)}) ~~> { "." Id } [ MemAttrArgs | SkipParen ] ;
 MemAttrArgs <~~ push({mattrArgs: takeAll()}) ~~> = "(" [ CallArg { "," CallArg } ] ")" ;
 ClassMod    = "class" KwEnd ;
 
 // func name(label param: Type, ...) -> Ret { ... }
-FunDecl     <~~ var fd = makeFun(takeAll(), up.start, up.pos); swInitClaim(up.start, up.pos, false); swNoteTop(fd.name); push(fd) ~~>
+FunDecl     <~~ swnScope(up.start, up.pos); var fd = makeFun(takeAll(), up.start, up.pos); swInitClaim(up.start, up.pos, false); swNoteTop(fd.name); push(fd) ~~>
             = KwFunc FuncName [ FunGenParams ] ParamList [ FnEffects ] [ "->" FunRetType <~~ push({rtxt: stripWs(up.in)}) ~~> ] [ GenWhere ] FnBody ;
 // AnnType, except that a type no adoption acts on is captured as TEXT too: the
 // member-chain typer (swChainAnns) reads a function's declared return type.
@@ -542,8 +543,8 @@ ParamList   <~~ var ps = takeAll(); swAnnParams(ps); push({params: ps}) ~~>
 // With two identifiers the first is the ARGUMENT LABEL and the second the bound
 // name; with one, the label and the name are the same. The label `_` means "no
 // label". The declared type is kept as text, for picking between overloads.
-Param       <~~ push(makeParam(takeAll())) ~~>
-            = { ParamLead } Id <~~ push({pid: swBt(up.in)}) ~~> [ Id <~~ push({pid: swBt(up.in)}) ~~> ] ":" [ ParamInout ] { ParamAttr } ParamType [ ParamVariadic ] [ "=" ParamDflt ] ;
+Param       <~~ var pi = takeAll(); swnParam(pi); push(makeParam(pi)) ~~>
+            = { ParamLead } Id <~~ push({pid: swBt(up.in), pidAt: up.pos}) ~~> [ Id <~~ push({pid: swBt(up.in), pidAt: up.pos}) ~~> ] ":" [ ParamInout ] { ParamAttr } ParamType [ ParamVariadic ] [ "=" ParamDflt ] ;
 ParamInout  <~~ push({pinout: 1}) ~~> = "inout" KwEnd ;
 // A DECLARATION attribute in front of the parameter name - `func f(@_noImplicitCopy
 // _ x: K)`. It contributes nothing here, so it pushes nothing; its argument list (if
@@ -563,9 +564,9 @@ ParamAttr   = "@" ( "isolated" NoSpaceParen "(" "any" KwEnd ")"
 ArgAttrName = ( "convention" | "differentiable" | "_opaqueReturnTypeOf" ) KwEnd ;
 
 // class / struct with stored properties, methods and an explicit init.
-StructDecl  <~~ swnType(up.in, up.start, up.pos); push(makeStructStmt(takeAll())) ~~>
+StructDecl  <~~ swnType(up.start, up.pos); push(makeStructStmt(takeAll())) ~~>
             = KwStruct Id <~~ push(swBt(up.in)) ~~> [ TypeGenParams ] [ ":" InheritList ] [ GenWhere ] "{" { Member } "}" ;
-ClassDecl   <~~ swnType(up.in, up.start, up.pos); push(makeClassStmt(takeAll())) ~~>
+ClassDecl   <~~ swnType(up.start, up.pos); push(makeClassStmt(takeAll())) ~~>
             = KwClass Id <~~ push(swBt(up.in)) ~~> [ TypeGenParams ] [ ":" InheritList ] [ GenWhere ] "{" { Member } "}" ;
 // A generic function's parameter names, open while its declaration is walked
 // (swGenOpen in lib/swift-dotwant.js; makeFun closes them).
@@ -582,7 +583,7 @@ InheritList = InheritName { "," InheritName } ;
 InheritName <~~ push({inherit: swNoteInherit(stripWs(up.in))}) ~~> = [ "~" ] Type ;
 // An actor is a class with an isolation domain. There is no executor in this
 // runtime (async functions are defined, never awaited), so it lowers like a class.
-ActorDecl   <~~ swnType(up.in, up.start, up.pos); push(makeClassStmt(takeAll())) ~~>
+ActorDecl   <~~ swnType(up.start, up.pos); push(makeClassStmt(takeAll())) ~~>
             = KwActor Id <~~ push(swBt(up.in)) ~~> [ TypeGenParams ] [ ":" InheritList ] [ GenWhere ] "{" { Member } "}" ;
 KwActor     = "actor" KwEnd ;
 TypeList    = Type { "," Type } ;
@@ -599,7 +600,7 @@ MemberSemi  <~~ push({}) ~~> = ";" ;
 // TypeAliasDecl clears lastDeclRec, so it contributes none.
 MemberType  <~~ push({nested: pop(), nrec: lastDeclRec}) ~~>
             = [ Modifiers ] ( StructDecl | ClassDecl | ActorDecl | EnumDecl | TypeAliasDecl ) ;
-InitDecl    <~~ swDotClaim(up.start, up.pos, ""); swInitClaim(up.start, up.pos, true); push({method: makeInit(takeAll())}) ~~>
+InitDecl    <~~ swnScope(up.start, up.pos); swDotClaim(up.start, up.pos, ""); swInitClaim(up.start, up.pos, true); push({method: makeInit(takeAll())}) ~~>
             = KwInit [ "?" | "!" ] [ SkipAngle ] ParamList [ FnEffects ] [ GenWhere ] FnBody ;
 // deinit is accepted and ignored (the builder ignores its {} marker) - this runtime
 // is garbage collected, so there is no deterministic point at which to run it.
@@ -607,7 +608,7 @@ DeinitDecl  <~~ push({}) ~~> = KwDeinit SkipBlock ;
 // subscript(i: Int) -> Int { get { ... } set { ... } } becomes the pair of ordinary
 // methods __sub_get / __sub_set, which is what [i] reads and writes dispatch to. A
 // second subscript of a different arity is an overload of the same pair.
-SubscriptDecl <~~ swDotClaim(up.start, up.pos, ""); var ms = makeSubscript(takeAll()); for (var i = 0; i < ms.length; i++) { push(ms[i]) } ~~>
+SubscriptDecl <~~ swnScope(up.start, up.pos); swDotClaim(up.start, up.pos, ""); var ms = makeSubscript(takeAll()); for (var i = 0; i < ms.length; i++) { push(ms[i]) } ~~>
             = KwSubscript [ SkipAngle ] ParamList [ "->" AnnType ] [ GenWhere ] PropAccessors ;
 MethodDecl  <~~ push({method: makeFun(takeAll(), up.start, up.pos)}) ~~>
             = KwFunc FuncName [ FunGenParams ] ParamList [ FnEffects ] [ "->" AnnType <~~ push({rtxt: stripWs(up.in)}) ~~> ] [ GenWhere ] FnBody ;
@@ -650,7 +651,7 @@ ImplicitGetter <~~ push(makeImplicitGetter(pop())) ~~> = FnBody ;
 // An enum declares cases (bare, with a raw value, or with associated values) and,
 // like a struct, methods / computed properties / static members. Its body is the
 // SAME Member list a struct has plus CaseDecl.
-EnumDecl    <~~ swnType(up.in, up.start, up.pos); push(makeEnumStmt(takeAll())) ~~>
+EnumDecl    <~~ swnType(up.start, up.pos); push(makeEnumStmt(takeAll())) ~~>
             = KwEnum Id <~~ push(swBt(up.in)) ~~> [ TypeGenParams ] [ ":" EnumConform ] [ GenWhere ] "{" { Member } "}" ;
 // The FIRST entry of an enum's inheritance clause may be its raw-value type
 // (`: Int`, `: String`); every entry there may equally be a PROTOCOL.
@@ -676,7 +677,7 @@ UnsupDecl   = ImportDecl | ProtocolDecl | ExtensionDecl | TypeAliasDecl ;
 // project file (Geom -> Geom.swift, A.B -> A/B.swift) whose top-level declarations are
 // stashed by buildMain (importDepth > 0) and prepended to jsmain. The submodule kind is
 // parsed and dropped. It pushes no statement, so buildMain never sees the import itself.
-ImportDecl  <~~ resolveImport(pop(), up.pos) ~~>
+ImportDecl  <~~ var ip = pop(); swnImport(ip); resolveImport(ip, up.pos) ~~>
             = KwImport [ ImportKind ] ImportPath [ ";" ] ;
 ImportPath  <~~ push(stripWs(up.in)) ~~>
             = Id { "." ( Id | "*" ) } ;
@@ -692,7 +693,7 @@ ImportKind  = ( "typealias" | "struct" | "class" | "enum" | "protocol"
 // a call made from inside a protocol extension DYNAMICALLY only for a name the
 // protocol declares. A member the extension alone introduces is bound statically to
 // the extension's own implementation even when the conforming type declares one.
-ProtocolDecl <~~ swnType(up.in, up.start, up.pos); push(makeProtocolStmt(takeAll())) ~~>
+ProtocolDecl <~~ swnType(up.start, up.pos); push(makeProtocolStmt(takeAll())) ~~>
             = KwProtocol Id <~~ push(swBt(up.in)) ~~> [ SkipAngle ] [ ":" InheritList ] [ GenWhere ]
               "{" { ProtoMember } "}" ;
 // A requirement has no body, so it is matched BEFORE the member forms: `var name:
@@ -723,7 +724,7 @@ ProtoSubscript <~~ push({}) ~~>
 // extension T { ... } adds members to an existing type - a struct/class/enum, a
 // protocol (whose members become the defaults of every conforming type) or a
 // builtin (Int, String, Array, ...), which keeps its members in a side table.
-ExtensionDecl <~~ swnType(up.in, up.start, up.pos); push(makeExtensionStmt(takeAll())) ~~>
+ExtensionDecl <~~ swnType(up.start, up.pos); push(makeExtensionStmt(takeAll())) ~~>
             = KwExtension ExtType [ ":" InheritList ] [ GenWhere ] "{" { Member } "}" ;
 ExtType     <~~ push({extname: stripWs(up.in)}) ~~> = Type ;
 // typealias: an alias needs nothing at run time; its target text is recorded for
@@ -897,11 +898,11 @@ Fallthrough <~~ push(makeFallthrough()) ~~>
 // condition item is emitted in turn and branches to the failure block; the names a
 // binding declares live in a child scope for if/while and, Swift-style, in the
 // ENCLOSING scope for guard (whose else branch is expected to leave that scope).
-CplxIf      <~~ var ci = takeAll(); push(swLblStmt(itemLbl(ci), makeCondIf(itemsAfterLbl(ci)), false)); swBrClaim(up.start, up.pos, "if", itemLbl(ci)) ~~>
+CplxIf      <~~ swnScope(up.start, up.pos); var ci = takeAll(); push(swLblStmt(itemLbl(ci), makeCondIf(itemsAfterLbl(ci)), false)); swBrClaim(up.start, up.pos, "if", itemLbl(ci)) ~~>
             = [ LoopLabel ] KwIf CplxCondClause Block [ KwElse ElseBody ] ;
 CplxGuard   <~~ push(makeCondGuard(takeAll())) ~~>
             = KwGuard CplxCondClause KwElse Block ;
-CplxWhile   <~~ var li = takeAll(); swBrClaim(up.start, up.pos, "loop", itemLbl(li)); push(makeCondWhile(li)) ~~>
+CplxWhile   <~~ swnScope(up.start, up.pos); var li = takeAll(); swBrClaim(up.start, up.pos, "loop", itemLbl(li)); push(makeCondWhile(li)) ~~>
             = [ LoopLabel ] KwWhile CplxCondClause Block ;
 // A complex clause requires either a comma (2+ conditions) or a leading binding.
 CplxCondClause <~~ push({conds: takeAll()}) ~~>
@@ -919,7 +920,7 @@ CondInit    <~~ push({cinit: pop()}) ~~> = Expression ;
 PatWhere    <~~ push({cwhere: pop()}) ~~> = KwWhere Expression ;
 BindPat     <~~ push({bnames: takeAll()}) ~~>
             = "(" BindName { "," BindName } ")" | BindName ;
-BindName    <~~ push(swBt(up.in)) ~~> = Wildcard | Id ;
+BindName    <~~ push(swBt(up.in)); swnBind(swBt(up.in), up.pos) ~~> = Wildcard | Id ;
 
 // A pattern: `_`, `let x`, `x?` (optional pattern), a tuple of patterns, or an
 // enum case - `.busy`, `Load19.busy`, optionally with a sub-pattern argument list.
@@ -976,7 +977,7 @@ PatArg      = [ PatArgLabel ] Pattern ;
 PatArgLabel = Id ":" ;
 Wildcard    = "_" KwEnd ;
 
-Block       <~~ swAnnClose(); push(makeBlockStmt(takeAll())) ~~>
+Block       <~~ swnScope(up.start, up.pos); swAnnClose(); push(makeBlockStmt(takeAll())) ~~>
             = "{" <~~ swAnnOpen() ~~> { PoundIfStmt | Statement } "}" ;
 RetBody     <~~ swAnnClose(); push(makeBlockStmt(takeAll())) ~~>
             = "{" <~~ swAnnOpen() ~~> Return { PoundIfStmt | Statement } "}" ;
@@ -993,7 +994,7 @@ LocalComputed <~~ takeAll(); push(notImplStmt("a local computed variable", up.st
 DeclPlain   <~~ push(makeSeq(swBindsShared(takeAll(), makeDecl))) ~~>
             = ( "let" | "var" ) KwEnd DeclBind { "," DeclBind } [ ";" ] ;
 DeclBind    <~~ push({dbind: takeAll()}) ~~>
-            = Id <~~ push(swBt(up.in)) ~~> [ ":" DeclAnnType ] [ "=" Expression <~~ push({itext: up.in, iat: up.start + ":" + up.pos}) ~~> ] [ LocalObs ] ;
+            = Id <~~ push(swBt(up.in)); swnBind(swBt(up.in), up.pos) ~~> [ ":" DeclAnnType ] [ "=" Expression <~~ push({itext: up.in, iat: up.start + ":" + up.pos}) ~~> ] [ LocalObs ] ;
 // `var w = 0 { didSet { ... } }` on a top-level or local variable: the observers are
 // the same accessors a property's are, and only willSet/didSet are accepted here.
 LocalObs    <~~ push({lobs: takeAll()}) ~~> = "{" ObsAccessor { ObsAccessor } "}" ;
@@ -1068,7 +1069,7 @@ DeclTupTy   <~~ push({dtty: stripWs(up.in)}) ~~> = Type ;
 TupNames    <~~ push({tnames: takeAll()}) ~~>
             = "(" TupName { "," TupName } ")" ;
 TupName     = TupNames | TupLeaf ;
-TupLeaf     <~~ push(swBt(up.in)) ~~> = Wildcard | Id ;
+TupLeaf     <~~ push(swBt(up.in)); swnBind(swBt(up.in), up.pos) ~~> = Wildcard | Id ;
 // (x, y) = (y, x) - assignment through a tuple pattern (a swap, typically).
 TupleAssign <~~ push(makeTupleAssign(takeAll())) ~~>
             = TupNames "=" Expression [ ";" ] ;
@@ -1092,23 +1093,23 @@ For         = ForCase | ForRange | ForList | ForAwait ;
 ForAwait    <~~ var li = takeAll(); swBrClaim(up.start, up.pos, "loop", itemLbl(li)); push(notImplStmt("for await", up.start)) ~~>
             = [ LoopLabel ] KwFor [ KwTry ] KwAwait [ "var" KwEnd ] ForPat [ ForPatType ] KwIn
               Expression [ ForWhere ] Block ;
-ForCase     <~~ var li = takeAll(); swBrClaim(up.start, up.pos, "loop", itemLbl(li)); push(makeForCase(li)) ~~>
+ForCase     <~~ swnScope(up.start, up.pos); var li = takeAll(); swBrClaim(up.start, up.pos, "loop", itemLbl(li)); push(makeForCase(li)) ~~>
             = [ LoopLabel ] KwFor KwCase Pattern KwIn Expression [ ForWhere ] Block ;
 // The bounds are read at AddExpr level, BELOW RangeExpr, so the loop keeps its own
 // range operator instead of receiving one range value.
 // `for var x in xs` only makes x mutable, which every loop variable here already is.
 // The inline tags hand the loop variable's annotation to the body (swForSeq).
-ForRange    <~~ var li = takeAll(); swBrClaim(up.start, up.pos, "loop", itemLbl(li)); push(makeForRange(li)) ~~>
+ForRange    <~~ swnScope(up.start, up.pos); var li = takeAll(); swBrClaim(up.start, up.pos, "loop", itemLbl(li)); push(makeForRange(li)) ~~>
             = [ LoopLabel ] KwFor [ "var" KwEnd ] ForPat <~~ swForPat(up.in) ~~> KwIn AddExpr RangeOp
               AddExpr <~~ swForSeq("") ~~> [ ForWhere ] Block ;
 RangeOp     = "..." <~~ push({rop: "..."}) ~~>
             | "..<" <~~ push({rop: "..<"}) ~~> ;
-ForList     <~~ var li = takeAll(); swBrClaim(up.start, up.pos, "loop", itemLbl(li)); push(makeForList(li)) ~~>
+ForList     <~~ swnScope(up.start, up.pos); var li = takeAll(); swBrClaim(up.start, up.pos, "loop", itemLbl(li)); push(makeForList(li)) ~~>
             = [ LoopLabel ] KwFor [ "var" KwEnd ] ForPat <~~ swForPat(up.in) ~~> [ ForPatType ] KwIn
               Expression <~~ swForSeq(up.in) ~~> [ ForWhere ] Block ;
 // The loop variable: a name, _ , or a tuple pattern (for (k, v) in aDictionary).
 ForPat      = TupNames | ForName ;
-ForName     <~~ push({fname: swBt(up.in)}) ~~> = Wildcard | Id ;
+ForName     <~~ push({fname: swBt(up.in)}); swnBind(swBt(up.in), up.pos) ~~> = Wildcard | Id ;
 // `for x: Double in xs` - the annotation types the loop variable (swForSeq).
 // The element literal adopts it - `for x: Double in [1, 2]` walks 1.0 and 2.0 - so a
 // simple name's annotation travels to makeForList as {fty}; a tuple pattern's
@@ -1565,7 +1566,7 @@ NoTrailCtx  = :script(~~
 // carry their argument label (Swift 5.3 multiple trailing closures).
 TrailArg    <~~ push(makeTrailArg(pop())) ~~> = Closure ;
 LabTrail    <~~ push(makeLabTrail(takeAll())) ~~>
-            = Id <~~ push({alabel: swBt(up.in)}) ~~> ":" Closure ;
+            = Id <~~ push({alabel: swnLabel(swBt(up.in), up.pos)}) ~~> ":" Closure ;
 
 // An argument carries its label (matched against the parameter labels of the
 // callee, so a call may leave defaulted parameters out) and, for &x, the name it
@@ -1585,7 +1586,7 @@ OpRefChar   = @+"+-*/%<>=!&|^~?" ;
 // `["+": (+)]` / `let f: (Int, Int) -> Bool = (<)`: an operator in parentheses is the
 // same value. Tried after Paren, which no run of operator characters can complete.
 OpParen     = "(" OpRefArg ")" ;
-ArgLabel    = Id <~~ push({alabel: swBt(up.in)}) ~~> ":" ;
+ArgLabel    = Id <~~ push({alabel: swnLabel(swBt(up.in), up.pos)}) ~~> ":" ;
 // &x: an inout argument. Spelled ( "&" !"&" ) so it cannot start on the first
 // character of a && operator. A PATH after the name (`&p.a`, `&xs[i]`,
 // `&b.inner.n`) is the place an assignment target names, and travels as {apath}.
@@ -1685,7 +1686,7 @@ Shorthand   = "$" :whitespace() ShortIdx :whitespace(Whitespace) ;
 ShortIdx    <~~ swNoteShort(up.in, up.start); push(makeVarRef("$" + up.in)) ~~>
             = "0"..."9" { "0"..."9" } ;
 
-Closure     <~~ swBrCheck(up.start, up.pos); push(makeClosure(takeAll(), up.in, up.pos)) ~~>
+Closure     <~~ swnScope(up.start, up.pos); swBrCheck(up.start, up.pos); push(makeClosure(takeAll(), up.in, up.pos)) ~~>
             = "{" [ ClosureSig ] { PoundIfLam | LamStmt } "}" ;
 // A closure's own signature declares types just as a func does, and they adopt the
 // same way: `{ (x: Double) -> Double in x / 2 }` called with 3 has to divide 3.0.
@@ -1695,7 +1696,7 @@ ClosureSig  <~~ push(makeClosureSig(takeAll())) ~~>
             = [ CaptureList ] "(" [ ClParam { "," ClParam } ] ")" [ FnEffects ] [ "->" ClRetTy ] KwIn
             | [ CaptureList ] ClParam { "," ClParam } [ "->" ClRetTy ] KwIn
             | CaptureList KwIn ;
-ClParam     = Id <~~ push(swBt(up.in)) ~~> [ ":" [ ClInout ] ClParamTy ] ;
+ClParam     = Id <~~ push(swBt(up.in)); swnBind(swBt(up.in), up.pos) ~~> [ ":" [ ClInout ] ClParamTy ] ;
 ClParamTy   <~~ push({cptype: stripWs(up.in)}) ~~> = Type ;
 ClInout     <~~ push({cinout: 1}) ~~> = "inout" KwEnd ;
 ClRetTy     <~~ push({crtype: stripWs(up.in)}) ~~> = Type ;
@@ -7184,6 +7185,12 @@ KwContinue  = "continue" KwEnd ;
     // that spells them does - a case's payload, a static factory's instance. Twin in
     // swift-interpreter.abnf.
     function swGenMember(items, txt) {
+        // MemoryLayout<T>.size of a T laid out from its text (swMemLayout). Twin in
+        // swift-interpreter.abnf.
+        if (items[0] == "MemoryLayout" && items[2].kind == "field") {
+            var ml = swMemLayout(items[1].gargs, items[2].name)
+            if (ml != "") { return swIntLit(ml) }
+        }
         var call = foldCallMember([makeVarRef(items[0]), items[2]], txt)
         var g = items[1].gargs
         if (swGenAnn(items[0], g) != "" || swGenInScope(g)) { return call }
@@ -9606,7 +9613,8 @@ KwContinue  = "continue" KwEnd ;
     // whose default language mode is 5.10 (_compiler_version(>=V) is compiler's);
     // the legacy quoted _compiler_version("...") is always true, as on every
     // compiler built without a vendor version (swiftc 6.1.2 included); true /
-    // false / 1 / 0 are literals;
+    // false / 1 / 0 are literals; any other bare name (DEBUG) is a -D compilation
+    // condition, and none is set, so it is false;
     // os(...), canImport(...), a $Feature or anything unparsed is unknown, which
     // keeps a branch LIVE, so such a condition picks the first branch. ! && || and
     // parentheses combine them. Twin of the evaluator inside PoundSkipScan, which
@@ -9678,6 +9686,7 @@ KwContinue  = "continue" KwEnd ;
             if (name == "true" || name == "1") { v = 1 }
             if (name == "false" || name == "0") { v = 0 }
             if (name == "_compiler_version") { v = 1 }
+            if (v == 2 && !(j < n && s.charCodeAt(j) == 40) && name.charAt(0) != "$") { v = 0 }
             if ((name == "compiler" || name == "swift" || name == "_compiler_version") && arg != "") {
                 var a = ""
                 for (var q = 0; q < arg.length; q++) { if (arg.charCodeAt(q) != 32) { a += arg.charAt(q) } }
