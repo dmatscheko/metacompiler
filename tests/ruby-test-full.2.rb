@@ -857,6 +857,18 @@ def s142
         defined?(K3).nil?)
 end
 
+# ===== SECTION 143: `local !~ /re/` =====
+# `!~` after a name is always the operator, a local's or a method's: it never
+# opens the argument of a paren-less call. /usr/bin/ruby 2.6 settles each.
+def s143m(*a); a.empty? ? "abc" : a; end
+def s143
+  s = ["abc"][0]
+  z = s !~/z/
+  w = s !~ /b/
+  m = [s].map { |t| t !~ /q/ }
+  check("nm143a", z == true && w == false && m == [true] && (s !~ /a/) == false && (s143m !~ /z/) == true)
+end
+
 s122() # SECTION-CALL 122
 s123() # SECTION-CALL 123
 s124() # SECTION-CALL 124
@@ -878,5 +890,6 @@ s139() # SECTION-CALL 139
 s140() # SECTION-CALL 140
 s141() # SECTION-CALL 141
 s142() # SECTION-CALL 142
+s143() # SECTION-CALL 143
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

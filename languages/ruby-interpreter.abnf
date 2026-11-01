@@ -2377,7 +2377,7 @@ CmdArgAhead = :script(~~
             if (nx === 32 || nx === 9 || nx === 61 || nx < 0) { return no }
             return undefined
         }
-        if (cc === 33) { if (nx === 61) { return no } return undefined }
+        if (cc === 33) { if (nx === 61 || nx === 126) { return no } return undefined }
         // `x ? a.b : c` - a ':' that is NOT glued to a name is the ternary's colon,
         // not the start of a :symbol argument.
         if (cc === 58) { if (nx === 32 || nx === 9 || nx === 10 || nx < 0) { return no } return undefined }
