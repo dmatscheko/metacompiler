@@ -7286,6 +7286,34 @@ fun s166() {
         listOf("ab").map(String::uppercase) == listOf("AB") && listOf(1).map(Int::inc) == listOf(2) && f(5) == "5")
 }
 
+// ===== SECTION 167: nested builtin receivers, one-expression `when` lambdas =====
+// An unqualified call the innermost builtin receiver does not declare belongs to the
+// next receiver out: `append` inside `with(list)` nested in `sb.apply` is the
+// builder's, `put` inside `with(sb)` the map's, `uppercase()` inside `with(sb)` the
+// String's; a name the inner receiver declares (`last()` on the builder) stays its.
+// A lambda whose body is one `when` written with `;` or across lines infers its
+// result type like the one-line form (kotlinc 2.2.21).
+inline fun <reified T> List<T>.el167() = T::class.simpleName
+fun s167() {
+    check("nrc167a", StringBuilder().apply { with(listOf(1, 2, 3)) { append(size) } }.toString() == "3" &&
+        StringBuilder("x").apply { with(listOf(1, 2, 3)) { append(size); append(first()) } }.toString() == "x31")
+    check("nrc167b", with(listOf(4, 5)) { StringBuilder().apply { append(size); append(last()) }.toString() } == "22" &&
+        StringBuilder().apply { with("hey") { append(length); append(uppercase()) } }.toString() == "3HEY")
+    check("nrc167c", StringBuilder().let { sb ->
+            mutableMapOf<String, Int>().apply { with(sb) { append("q"); put("k", length) } } == mapOf("k" to 1) &&
+                sb.toString() == "q" } &&
+        "ab".run { StringBuilder().apply { append(uppercase()); append(length) }.toString() } == "AB2")
+    check("nrc167d", StringBuilder().apply { with('x') { append(uppercase()); append(isLetter()) } }.toString() == "Xtrue" &&
+        mutableSetOf(1).apply { with(mapOf(1 to 2)) { add(size + 10) } } == setOf(1, 11))
+    check("rinf167e", listOf(1).map { when (it) { 1 -> "a"; else -> "b" } }.el167() == "String" &&
+        listOf(1).map {
+            when (it) {
+                1 -> 'a'
+                else -> 'b'
+            }
+        }.el167() == "Char")
+}
+
 fun main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -7449,6 +7477,7 @@ fun main() {
     s164() // SECTION-CALL 164
     s165() // SECTION-CALL 165
     s166() // SECTION-CALL 166
+    s167() // SECTION-CALL 167
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }

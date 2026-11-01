@@ -1611,7 +1611,7 @@ function ktLamResTy(args, ptys) {
         body = body.substring(arrow + 2)
     }
     body = ktTrimWs(body)
-    if (names.length != ptys.length || body == "" || body.indexOf(";") >= 0 || body.indexOf("\n") >= 0) { return "" }
+    if (names.length != ptys.length || body == "" || ktTopBreak(body)) { return "" }
     // Each binding sits at ktAt itself, so it is the closest declaration the body sees.
     var bound = []
     for (var i = 0; i < names.length; i++) {
@@ -1633,6 +1633,26 @@ function ktLamResTy(args, ptys) {
     var rt = ktStaticTy(body)
     for (var j = 0; j < bound.length; j++) { bound[j].pop() }
     return rt
+}
+// Whether s holds a `;` or a line break outside brackets and quotes - a statement
+// boundary, so s is not one expression. A break inside a `when`'s braces is not one.
+function ktTopBreak(s) {
+    var depth = 0
+    var k = 0
+    while (k < s.length) {
+        var ch = s.charAt(k)
+        if (ch == "\"" || ch == "'") {
+            var q = ktQuoteEnd(s, k)
+            if (q < 0) { return true }
+            k = q + 1
+            continue
+        }
+        if (ch == "(" || ch == "[" || ch == "{") { depth++ }
+        else if (ch == ")" || ch == "]" || ch == "}") { depth-- }
+        else if (depth == 0 && (ch == ";" || ch == "\n")) { return true }
+        k++
+    }
+    return false
 }
 // The type property `name` of a value of type ty has: a declared class's member,
 // a collection's or array's size, a string's length, indices and lastIndex.

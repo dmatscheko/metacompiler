@@ -13770,7 +13770,7 @@ NotMemberKw = :script(~~ "pure";
         // its reason.
         if (!hasOwn(hostGlobals, name)) {
             for (var cj = 0; cj < chain.length; cj++) {
-                if (typeof chain[cj] == "string") { return {v: kBoundBuiltin(chain[cj], name)} }
+                if (typeof chain[cj] == "string" && !kBuiltinLacks(chain[cj], name)) { return {v: kBoundBuiltin(chain[cj], name)} }
             }
             // toString(), hashCode() and equals() are members of kotlin.Any, so EVERY implicit
             // receiver has them whatever its shape - a Pair, a Map.Entry, a number, a
@@ -13882,6 +13882,7 @@ NotMemberKw = :script(~~ "pure";
                 // through, which is what the compiler half does (js_ktget consults the
                 // scope first). A builtin receiver has no member of any of these names.
                 if (hasOwn(hostGlobals, name)) { return null }
+                if (kBuiltinLacks(cur, name)) { return null }
                 return {v: kBoundBuiltin(cur, name)}
             }
             // A PLAIN OBJECT receiver that is neither a class instance nor one of the
@@ -13915,6 +13916,43 @@ NotMemberKw = :script(~~ "pure";
     var krpn = ["size", "length", "keys", "values", "entries", "indices", "lastIndex",
                 "value", "isInitialized", "isSuccess", "isFailure", "code"]
     for (var krpi = 0; krpi < krpn.length; krpi++) { kRecvProps["$" + krpn[krpi]] = true }
+    // The member table of the builtin receivers, for the names whose owners differ:
+    // each entry lists the kinds declaring the name (L list/array/progression, S set,
+    // M map, B StringBuilder, T String, C Char, X Regex, H MatchResult, U Result). An
+    // unlisted name belongs to every builtin receiver. Twin of ktBuiltinMembers in
+    // abnf/jsrtkotlin.go, which has the rules; keep the string identical.
+    var kBuiltinMembers = {}
+    var kbmn = ("append:B appendLine:B appendRange:B insert:B insertRange:B " +
+        "setLength:B setCharAt:B deleteCharAt:B deleteRange:B setRange:B capacity:B " +
+        "ensureCapacity:B trimToSize:B reverse:LB clear:LSMB add:LS addAll:LS addFirst:L " +
+        "addLast:L removeAt:L removeFirst:L removeLast:L remove:LSM removeAll:LS retainAll:LS " +
+        "put:M putAll:M putIfAbsent:M getOrPut:M getOrDefault:MU containsKey:M containsValue:M " +
+        "mapKeys:M mapValues:M filterKeys:M filterValues:M sort:L sortBy:L sortDescending:L " +
+        "sortWith:L shuffle:L subList:L toSortedMap:M uppercase:TC lowercase:TC isLetter:C " +
+        "isDigit:C isLetterOrDigit:C isUpperCase:C isLowerCase:C isWhitespace:C digitToInt:C " +
+        "getOrThrow:U exceptionOrNull:U onSuccess:U onFailure:U containsMatchIn:X " +
+        "matchEntire:X findAll:X first:LSBT last:LSBT joinToString:LS substring:BT " +
+        "toList:LSMBT map:LSMBTU filter:LSMBT forEach:LSMBT reversed:LSBT").split(" ")
+    for (var kbmi = 0; kbmi < kbmn.length; kbmi++) {
+        var kbmc = kbmn[kbmi].indexOf(":")
+        kBuiltinMembers["$" + kbmn[kbmi].substring(0, kbmc)] = kbmn[kbmi].substring(kbmc + 1)
+    }
+    // A builtin receiver that does not declare `name`: an unqualified call of it
+    // belongs to an outer implicit receiver (`sb.apply { with(list) { append(size) } }`).
+    function kBuiltinLacks(recv, name) {
+        var kinds = kBuiltinMembers["$" + name]
+        if (kinds == undefined) { return false }
+        var k = "L"
+        if (typeof recv == "string") { k = "T" }
+        else if (kIsChar(recv)) { k = "C" }
+        else if (recv.__sb === true) { k = "B" }
+        else if (kIsSet(recv)) { k = "S" }
+        else if (isKRegex(recv)) { k = "X" }
+        else if (isKMatch(recv)) { k = "H" }
+        else if (kIsResult(recv)) { k = "U" }
+        else if (kIsMap(recv)) { k = "M" }
+        return kinds.indexOf(k) < 0
+    }
     // A bare call's named arguments reach the member as a call SPEC, so
     // `run { split(",", limit = 2) }` binds limit as `s.split(",", limit = 2)` does.
     function kBoundBuiltin(self, name) {

@@ -8496,6 +8496,48 @@ function k4IsBuiltinRecv(v) {
     return ktIsSb(v)
 }
 
+// The member table of the builtin receivers, for the names whose owners differ,
+// built on first use. Twin of ktBuiltinMembers in jsrtkotlin.go, which has the
+// rules; keep the string identical.
+var k4BuiltinMembers = undefined
+
+// ktBuiltinLacks (jsrtkotlin.go): a builtin receiver that does not declare `name`,
+// so an unqualified call of it belongs to an outer implicit receiver.
+function k4BuiltinLacks(recv, name) {
+    if (k4BuiltinMembers === undefined) {
+        k4BuiltinMembers = {}
+        var es = ("append:B appendLine:B appendRange:B insert:B insertRange:B " +
+            "setLength:B setCharAt:B deleteCharAt:B deleteRange:B setRange:B capacity:B " +
+            "ensureCapacity:B trimToSize:B reverse:LB clear:LSMB add:LS addAll:LS addFirst:L " +
+            "addLast:L removeAt:L removeFirst:L removeLast:L remove:LSM removeAll:LS retainAll:LS " +
+            "put:M putAll:M putIfAbsent:M getOrPut:M getOrDefault:MU containsKey:M containsValue:M " +
+            "mapKeys:M mapValues:M filterKeys:M filterValues:M sort:L sortBy:L sortDescending:L " +
+            "sortWith:L shuffle:L subList:L toSortedMap:M uppercase:TC lowercase:TC isLetter:C " +
+            "isDigit:C isLetterOrDigit:C isUpperCase:C isLowerCase:C isWhitespace:C digitToInt:C " +
+            "getOrThrow:U exceptionOrNull:U onSuccess:U onFailure:U containsMatchIn:X " +
+            "matchEntire:X findAll:X first:LSBT last:LSBT joinToString:LS substring:BT " +
+            "toList:LSMBT map:LSMBTU filter:LSMBT forEach:LSMBT reversed:LSBT").split(" ")
+        var i = 0
+        while (i < es.length) {
+            var c = es[i].indexOf(":")
+            k4BuiltinMembers["$" + es[i].substring(0, c)] = es[i].substring(c + 1)
+            i = i + 1
+        }
+    }
+    var kinds = k4BuiltinMembers["$" + name]
+    if (kinds === undefined) { return false }
+    var k = "L"
+    if (typeof recv == "string") { k = "T" }
+    else if (ktIsChar(recv)) { k = "C" }
+    else if (ktIsSb(recv)) { k = "B" }
+    else if (ktIsSet(recv)) { k = "S" }
+    else if (ktRxIsRegex(recv)) { k = "X" }
+    else if (ktRxIsMatch(recv)) { k = "H" }
+    else if (ktIsResult(recv)) { k = "U" }
+    else if (ktIsObj(recv) && rtIsDictObj(recv)) { k = "M" }
+    return kinds.indexOf(k) < 0
+}
+
 // k4Bound is jsHostFunc(name, ...) of the Go twin: the bound builtin that reaches
 // the whole method surface through the hub.
 function k4Bound(recv, name) {
@@ -8595,6 +8637,7 @@ function ktRecvMember(recv, name, iscall) {
         if (!rtIsNil(fv)) { return fv }
         return KT_MISS
     }
+    if (k4BuiltinLacks(recv, name)) { return KT_MISS }
     return k4Bound(recv, name)
 }
 

@@ -9181,6 +9181,69 @@ func ktIsBuiltinRecv(v interface{}) bool {
 	return false
 }
 
+// ktBuiltinMembers is the member table of the builtin receivers, for the names whose
+// owners differ: each entry lists the receiver kinds that declare the name as a
+// member or stdlib extension (kotlinc 2.2.21 resolves `T::name` for exactly these).
+// L is a list, an array or a progression, S a set, M a map, B a StringBuilder, T a
+// String, C a Char, X a Regex, H a MatchResult, U a Result. A name absent from the
+// table is taken to belong to every builtin receiver, which leaves its dispatch to
+// the method surface. Keep the string identical to kBuiltinMembers in
+// kotlin-interpreter.abnf and k4BuiltinMembers in languages/lib/kotlin-rt.metajs.
+var ktBuiltinMembers = func() map[string]string {
+	t := map[string]string{}
+	for _, e := range strings.Fields("append:B appendLine:B appendRange:B insert:B insertRange:B " +
+		"setLength:B setCharAt:B deleteCharAt:B deleteRange:B setRange:B capacity:B " +
+		"ensureCapacity:B trimToSize:B reverse:LB clear:LSMB add:LS addAll:LS addFirst:L " +
+		"addLast:L removeAt:L removeFirst:L removeLast:L remove:LSM removeAll:LS retainAll:LS " +
+		"put:M putAll:M putIfAbsent:M getOrPut:M getOrDefault:MU containsKey:M containsValue:M " +
+		"mapKeys:M mapValues:M filterKeys:M filterValues:M sort:L sortBy:L sortDescending:L " +
+		"sortWith:L shuffle:L subList:L toSortedMap:M uppercase:TC lowercase:TC isLetter:C " +
+		"isDigit:C isLetterOrDigit:C isUpperCase:C isLowerCase:C isWhitespace:C digitToInt:C " +
+		"getOrThrow:U exceptionOrNull:U onSuccess:U onFailure:U containsMatchIn:X " +
+		"matchEntire:X findAll:X first:LSBT last:LSBT joinToString:LS substring:BT " +
+		"toList:LSMBT map:LSMBTU filter:LSMBT forEach:LSMBT reversed:LSBT") {
+		i := strings.IndexByte(e, ':')
+		t[e[:i]] = e[i+1:]
+	}
+	return t
+}()
+
+// ktBuiltinLacks reports a builtin receiver that does not declare `name`, so an
+// unqualified call of it belongs to an outer implicit receiver:
+// `sb.apply { with(list) { append(size) } }` appends to the builder.
+func ktBuiltinLacks(recv interface{}, name string) bool {
+	kinds, listed := ktBuiltinMembers[name]
+	if !listed {
+		return false
+	}
+	k := byte('L')
+	switch t := recv.(type) {
+	case string:
+		k = 'T'
+	case jsChar:
+		k = 'C'
+	case *jsObject:
+		switch {
+		case ktIsSb(t):
+			k = 'B'
+		case ktIsSet(t):
+			k = 'S'
+		case ktRxIsRegex(t):
+			k = 'X'
+		case ktRxIsMatch(t):
+			k = 'H'
+		case ktIsRange(t): // a progression shares the list row
+		default:
+			if _, isRes := ktIsResult(t); isRes {
+				k = 'U'
+			} else if _, _, isDict := dictParts(t); isDict {
+				k = 'M'
+			}
+		}
+	}
+	return strings.IndexByte(kinds, k) < 0
+}
+
 // ktRecvMember answers an unqualified name against an implicit receiver.
 //
 // `iscall` is the SYNTACTIC POSITION of the name: true for `first()`, false for a
@@ -9290,6 +9353,9 @@ func (rt *jsrt) ktRecvMember(recv interface{}, name string, iscall bool) (interf
 				return v, true
 			}
 		}
+		return nil, false
+	}
+	if ktBuiltinLacks(recv, name) {
 		return nil, false
 	}
 	self := recv
