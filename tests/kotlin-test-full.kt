@@ -7015,6 +7015,68 @@ fun s159() {
         s.drop(1).take(1).javaClass.simpleName == "SubSequence" && s.take(0).javaClass.simpleName == "EmptySequence")
 }
 
+// ===== SECTION 160: javaClass of computed receivers, reified primitives and inferred T =====
+// javaClass follows the JVM type of its receiver: a loop or inline-lambda variable,
+// an arithmetic result, an `if` of primitive branches, a function result, a property
+// or a primitive array's element of a primitive static type is unboxed (`int`),
+// while a cast, a `!!` and a list's or an Array's element stay boxed. A reified
+// T::class.java of T = Int is java.lang.Integer; a reified T written without type
+// arguments is inferred from the argument's static type, also in a call nested in
+// another reified function's body. An anonymous object's KClass has a null
+// simpleName and qualifiedName, its java class the simpleName "" (kotlinc 2.2.21 on
+// java 24).
+class Q160(val v: Int) {
+    val n = 5
+    fun m(): Int = v
+    fun own() = this.v.javaClass.name
+}
+interface S160
+fun f160(): Int = 3
+fun g160() = 4L
+inline fun <reified T : Any> jn160() = T::class.java.name
+inline fun <reified T : Any> kc160() = T::class
+inline fun <reified T : Any> inf160(x: T) = T::class.simpleName
+inline fun <reified T : Any> nest160(x: T): String = inf160(1.5) + "/" + T::class.simpleName
+inline fun <reified T> is160(x: Any) = x is T
+inline fun <reified T> chk160(x: Any): String = "" + (x is T) + "," + is160<Long>(x)
+fun s160() {
+    val x = 4
+    val sh: Short = 3
+    val xs = listOf(1, 2)
+    val zs: List<Int> = listOf(7)
+    val ia = intArrayOf(1, 2)
+    val str = "hey"
+    val a: Any = 3
+    val q = Q160(1)
+    val jc = StringBuilder()
+    for (i in 0 until 1) jc.append(i.javaClass.name + " ")
+    for (ch in 'a'..'a') jc.append(ch.javaClass.name + " ")
+    for (e in xs) jc.append(e.javaClass.name + " ")
+    xs.forEach { jc.append(it.javaClass.name + " ") }
+    xs.forEachIndexed { i, e -> jc.append(i.javaClass.name + e.javaClass.name + " ") }
+    repeat(1) { jc.append(it.javaClass.name + " ") }
+    x.let { jc.append(it.javaClass.name) }
+    check("jstat160a", "" + jc == "int char int int int int intint intint int int")
+    check("jstat160b", (x + 1).javaClass.name == "int" && (x * 1.5).javaClass.name == "double" &&
+        (-sh).javaClass.name == "int" && (x shl 2).javaClass.name == "int" && (x > 1).javaClass.name == "boolean" &&
+        (if (x > 1) 1 else 2).javaClass.name == "int" && f160().javaClass.name == "int" && g160().javaClass.name == "long")
+    check("jstat160c", q.v.javaClass.name == "int" && q.n.javaClass.name == "int" && q.m().javaClass.name == "int" &&
+        q.own() == "int" && Q160(2).v.javaClass.name == "int" && ia[0].javaClass.name == "int" &&
+        str[0].javaClass.name == "char" && str.length.javaClass.name == "int" && xs.size.javaClass.name == "int")
+    check("jbox160d", zs[0].javaClass.name == "java.lang.Integer" && (a as Int).javaClass.name == "java.lang.Integer" &&
+        xs.first().javaClass.name == "java.lang.Integer" && listOf<Any>(1)[0].javaClass.name == "java.lang.Integer")
+    check("reif160e", jn160<Int>() == "java.lang.Integer" && jn160<Char>() == "java.lang.Character" &&
+        jn160<String>() == "java.lang.String" && kc160<Int>().java == Int::class.javaObjectType &&
+        kc160<Int>().java != Int::class.java && kc160<Int>() == Int::class && kc160<Long>().java.simpleName == "Long" &&
+        kc160<Int>().simpleName == "Int")
+    check("reif160f", inf160(5) == "Int" && inf160("s") == "String" && inf160(2.5) == "Double" && inf160(5L) == "Long" &&
+        inf160(listOf(1)) == "List" && inf160('c') == "Char" && inf160(x + 1) == "Int" && nest160(3) == "Double/Int" &&
+        nest160<Any>("a") == "Double/Any" && chk160<Int>(5) == "true,false" && chk160<Long>(5L) == "true,true")
+    val o = object : S160 {}
+    check("anon160g", o::class.simpleName == null && o::class.qualifiedName == null && o.javaClass.simpleName == "" &&
+        o::class.java.simpleName == "")
+}
+
 fun main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -7171,6 +7233,7 @@ fun main() {
     s157() // SECTION-CALL 157
     s158() // SECTION-CALL 158
     s159() // SECTION-CALL 159
+    s160() // SECTION-CALL 160
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }

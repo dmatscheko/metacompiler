@@ -564,7 +564,7 @@ VisDecl     <~~ ktAt = up.start; push(makeDecl(takeAll())) ~~>
 
 // The generic parameter names are remembered while the body walks, so an `x is T`
 // inside can be resolved against the call site's type arguments (reified).
-FunDecl     <~~ ktNoteBody(up.start, up.pos); ktNoteGeneric(c.srcSlice(up.start, up.pos), "fun"); push(makeFun(takeAll())); retLblPop() ~~>
+FunDecl     <~~ ktNoteBody(up.start, up.pos); ktNoteGeneric(c.srcSlice(up.start, up.pos), "fun"); ktNoteFunRet(c.srcSlice(up.start, up.pos), up.start); push(makeFun(takeAll())); retLblPop() ~~>
             = KwFun <~~ tpBegin() ~~> [ TypeParams ] KId <~~ push(up.in); retLblPush(up.in, "fun") ~~> [ SkipAngle ] ParamList [ ":" RetType ] [ WhereClause ] [ ContractClause ] [ WhereClause ] FunBody ;
 // The declared RETURN type, same rule again at the last binding site a value crosses:
 // `fun sf(): Long = 1` answers a Long, so `sf() * 1000000 * 1000000` is 64 bit.
@@ -1070,7 +1070,7 @@ Do          <~~ push(makeDo(pop(), pop())) ~~>
 // destructuring form for ((a, b) in pairs) is tried second (it opens with a second
 // paren, which ForIn's leading Id rejects).
 For         = ForIn | ForDestruct ;
-ForIn       <~~ push(makeForIn(pop(), pop(), pop())) ~~>
+ForIn       <~~ ktNoteForVar(c.srcSlice(up.start, up.pos), up.start, up.pos); push(makeForIn(pop(), pop(), pop())) ~~>
             = KwFor "(" KId <~~ push(up.in) ~~> KwIn Expression ")" Statement ;
 // A destructuring for-loop, for ((px, py) in points): the element is decomposed with
 // the same componentN protocol as a destructuring declaration, once per iteration.
@@ -1839,7 +1839,7 @@ DNameKwVB   <~~ push(dName(takeAll(), false)) ~~>
 // its own - f { ... } (the sole argument, e.g. module { single { ... } }). Either form
 // works as a Primary anywhere, including as an argument to an outer call
 // (modules(module(createdAtStart = true) { ... }, module { ... }, ...)).
-Call        <~~ push(makeCall(takeAll())); retLblPop() ~~>
+Call        <~~ push(makeCall(takeAll(), up.start, up.pos)); retLblPop() ~~>
             = KId <~~ push(up.in); retLblPush(up.in, "lam") ~~> [ TypeArgs ] ( SameLine "(" [ Arg { "," Arg } [ "," ] ] ")" { Lambda } | Lambda { Lambda } ) ;
 // The explicit type arguments of a call - tag17<String>(x) - kept so that a reified
 // type parameter inside the callee resolves to the real type name.
@@ -9406,7 +9406,8 @@ NotMemberKw = :script(~~ "pure";
         }
     }
 
-    foldCallMember = function(items, txt) {
+    // raw is the chain's source as written when it reads javaClass, "" else.
+    foldCallMember = function(items, txt, raw) {
         if (items.length == 1) return items[0]
         var primary = items[0]
         var suffixes = items.slice(1)
@@ -9414,20 +9415,22 @@ NotMemberKw = :script(~~ "pure";
             suffixes[0] = kAdoptMArgs(suffixes[0], ktLeadType(txt, suffixes[0].safe == true ? "?." : "."))
         } else if (suffixes[0].kind == "index") {
             kAdoptIdxSfx(suffixes[0], ktLeadType(txt, "["))
-        } else if (suffixes[0].kind == "field" && suffixes[0].name == "javaClass" && suffixes[0].safe != true) {
-            suffixes[0].jprim = ktJvmPrimRecv(txt)
         }
         var tpsW = curTParams()
         // A call or an index after a run of member reads - `b.xs.add(3)`, `b.m[1]` -
-        // takes the last member's declared type, read when it first runs (a class may
-        // be declared after its use).
+        // takes the last member's declared type, and a javaClass read judges its
+        // receiver's JVM type (ktNoteJavaClassRecvs), both when it first runs (a class
+        // or a function may be declared after its use).
         var lazyAt = ktChainSites(suffixes)
+        var lazyJc = ktNoteJavaClassRecvs(suffixes, raw)
+        var pending = lazyJc || lazyAt.length > 0
         var lead = ktLeadName(txt)
         var leadAt = ktAt
         return function() {
-            if (lazyAt.length > 0) {
+            if (pending) {
                 for (var li = 0; li < lazyAt.length; li++) { kAdoptChainSfx(lead, leadAt, suffixes, lazyAt[li]) }
-                lazyAt = []
+                if (lazyJc) { ktJvmPrimSfxs(suffixes) }
+                pending = false
             }
             var cur = anytype // A member chain hops between types.
             cur = primary()
@@ -9457,9 +9460,9 @@ NotMemberKw = :script(~~ "pure";
                     }
                     if (s.ktRes != undefined) { cur = kAdoptTy(cur, s.ktRes) }
                 } else if (s.kind == "field") {
-                    // javaClass of a statically primitive receiver (ktJvmPrimRecv) is
-                    // the primitive class, `int`. Twin of emitSuffix in
-                    // kotlin-to-llvm-ir.abnf.
+                    // javaClass of a receiver whose JVM type is primitive
+                    // (ktNoteJavaClassRecvs) is the primitive class, `int`. Twin of
+                    // emitSuffix in kotlin-to-llvm-ir.abnf.
                     cur = s.jprim === true ? kGetField(kValClass(cur), "java") : kGetField(cur, s.name)
                 } else if (s.kind == "dotanon") {
                     cur = s.t()
@@ -9770,7 +9773,7 @@ NotMemberKw = :script(~~ "pure";
         if (n > 1 && lastIt != null && typeof lastIt == "object" && lastIt.incdec != undefined) {
             return makeCallAssign([{chain: items.slice(0, n - 1)}, lastIt.incdec, null], pos, true)
         }
-        return foldCallMember(items, txt)
+        return foldCallMember(items, txt, txt.indexOf("javaClass") >= 0 ? c.srcSlice(ktAt, pos) : "")
     }
     function assignConv(op) {
         if (op == "+=") { return "plusAssign" }
@@ -9991,7 +9994,7 @@ NotMemberKw = :script(~~ "pure";
         // function type the function's results.
         var itxt = ktInitText(txt, name, dty)
         if (dty != "") { plan = kPlanOf(dty) }
-        ktNoteDecl(name, i == 2 ? dty : ktExprType(itxt), dty == "" ? ktLitType(itxt) : "")
+        ktNoteDecl(name, i == 2 ? dty : ktExprType(itxt), dty == "" ? ktStaticTy(itxt) : "")
         return function() {
             var v = anytype // A declaration binds a value of any type.
             // A BareDecl (`val f1: String`, filled in by a later definite assignment)
@@ -10441,6 +10444,13 @@ NotMemberKw = :script(~~ "pure";
         }
         return {names: names, fwd: fwd}
     }
+    // A reified type argument's class is the BOXED one on the JVM: `T::class.java` of
+    // T = Int is java.lang.Integer where `Int::class.java` is int (kKClassJava). Twin
+    // of reifiedKClass in kotlin-to-llvm-ir.abnf.
+    function kReifiedBoxed(k) {
+        k.rbox = true
+        return k
+    }
     // `T::class` for the idx-th type parameter T of the running call (entry e of
     // typeKlsStack): the class of its type argument, Any when the call gave none.
     // Twin of the T$rk parameter in kotlin-to-llvm-ir.abnf (reifiedKSlot).
@@ -10448,7 +10458,7 @@ NotMemberKw = :script(~~ "pure";
         if (e === null || e.k === null || idx >= e.k.names.length) { return kClassLitNamed("Any") }
         if (e.k.fwd[idx] >= 0) { return kReifiedClass(e.up, e.k.fwd[idx]) }
         var n = e.k.names[idx]
-        if (kIsTypeName(n) || n.indexOf(".") >= 0) { return kClassLitNamed(n) }
+        if (kIsTypeName(n) || n.indexOf(".") >= 0) { return kReifiedBoxed(kClassLitNamed(n)) }
         var d = anytype
         d = kScopeType(n)
         if (d !== undefined && d !== null && d.__name == n) { return kClassOfDesc(d) }
@@ -11507,8 +11517,9 @@ NotMemberKw = :script(~~ "pure";
             r.init = makeConst(null)
             if (r.getter != undefined) { r.hasField = false }
         }
-        ktNoteDecl(r.prop, r.ty)
-        ktNoteMember(r.prop, r.ty != "" ? r.ty : ktExprType(r.itxt))
+        var plty = r.ty != "" ? "" : ktStaticTy(r.itxt)
+        ktNoteDecl(r.prop, r.ty, plty)
+        ktNoteMember(r.prop, r.ty != "" ? r.ty : ktExprType(r.itxt), plty)
         r.init = kAdoptThunk(r.init, r.ty)
         return r
     }
@@ -12235,13 +12246,19 @@ NotMemberKw = :script(~~ "pure";
     // `P(1).javaClass`. A nested one has simpleName `Inner`, qualifiedName
     // `Outer.Inner` and renders "class Outer$Inner"; a builtin throwable's is
     // package-qualified (java.lang.IllegalStateException) - kotlin-stdlib's
-    // ClassReference reads all three off the java class. Twin of ktClassOfDesc in
+    // ClassReference reads all three off the java class. An anonymous object's is
+    // marked anon: its simpleName and qualifiedName are null, where its java
+    // class's simpleName is "". Twin of ktClassOfDesc in
     // abnf/jsrtkotlin.go and languages/lib/kotlin-rt.metajs.
     function kClassOfDesc(d) {
         var bn = anytype
         bn = d.__bname
         if (typeof bn == "string" && bn != "") { return kJavaClass(bn) }
-        if (typeof d.__name == "string") { return kJavaClass(d.__name) }
+        if (typeof d.__name == "string") {
+            var o = kJavaClass(d.__name)
+            if (d.__name == "<object>") { o.anon = true }
+            return o
+        }
         return kKClass(d.__name)
     }
     // A collection's KClass is its JVM class (kJavaClass): kotlin-stdlib's
@@ -12256,13 +12273,14 @@ NotMemberKw = :script(~~ "pure";
     // `javaClass`, and a collection's KClass: a class literal that also carries the
     // JVM binary name jc (jname), which .name and toString answer. simpleName is the
     // part after the package and the enclosing class ("" for an anonymous class,
-    // Outer$1), an array's its element's with "[]" (`[I` is int[]). Twin of
-    // ktJavaClass in abnf/jsrtkotlin.go and languages/lib/kotlin-rt.metajs.
+    // Outer$1 or this engine's <object>), an array's its element's with "[]" (`[I`
+    // is int[]). Twin of ktJavaClass in abnf/jsrtkotlin.go and
+    // languages/lib/kotlin-rt.metajs.
     function kJavaClass(jc) {
         var cut = -1
         for (var i = 0; i < jc.length; i++) { if (jc.charAt(i) == "." || jc.charAt(i) == "$") { cut = i } }
         var sn = jc.substring(cut + 1)
-        if (cut >= 0 && jc.charAt(cut) == "$" && kAllDigits(sn)) { sn = "" }
+        if ((cut >= 0 && jc.charAt(cut) == "$" && kAllDigits(sn)) || jc == "<object>") { sn = "" }
         if (jc.charAt(0) == "[") {
             sn = jc.length == 2 ? kJvmPrimNames["IJDFCZBS".indexOf(jc.charAt(1))] : jc.substring(cut + 1, jc.length - 1)
             sn = sn + "[]"
@@ -12278,15 +12296,16 @@ NotMemberKw = :script(~~ "pure";
     var kPrimKNames = ["Int", "Long", "Double", "Float", "Char", "Boolean", "Byte", "Short"]
     var kPrimWrappers = ["Integer", "Long", "Double", "Float", "Character", "Boolean", "Byte", "Short"]
     // KClass.java (wrapper false) and .javaObjectType (true): a primitive type's two
-    // java classes, `int` (marked jprim) and java.lang.Integer; a builtin type of
+    // java classes, `int` (marked jprim) and java.lang.Integer, the latter also for a
+    // reified type argument's class (kReifiedBoxed); a builtin type of
     // kJavaOfType the java class it maps to; every other KClass already is its java
     // class. Twin of ktKClassJava in abnf/jsrtkotlin.go and
     // languages/lib/kotlin-rt.metajs.
     function kKClassJava(co, wrapper) {
-        if (co.jname !== undefined) { return co }
+        if (co.jname !== undefined) { return co.anon === true ? kJavaClass(co.jname) : co }
         for (var i = 0; i < kPrimKNames.length; i++) {
             if (kPrimKNames[i] == co.kname) {
-                if (wrapper) { return kJavaClass("java.lang." + kPrimWrappers[i]) }
+                if (wrapper || co.rbox === true) { return kJavaClass("java.lang." + kPrimWrappers[i]) }
                 var o = kJavaClass(kJvmPrimNames[i])
                 o.jprim = true
                 return o
@@ -12695,6 +12714,7 @@ NotMemberKw = :script(~~ "pure";
         // does.
         if (o.__kclass === true) {
             if (name == "name" && o.jname !== undefined) { return o.jname }
+            if ((name == "simpleName" || name == "qualifiedName") && o.anon === true) { return null }
             if (name == "qualifiedName") { return kKClassFq(o) }
             if (name == "simpleName" || name == "qualifiedName" || name == "name") { return o.kname }
             if (name == "java" || name == "javaObjectType") { return kKClassJava(o, name == "javaObjectType") }
@@ -13298,7 +13318,10 @@ NotMemberKw = :script(~~ "pure";
 
     // f(args): a global function, a builtin, a class constructor, or an object with an
     // `operator fun invoke`.
-    function makeCall(items) {
+    // at..to is a Call's source, where a reified generic function called without type
+    // arguments has them inferred (ktInferTArgs). Twin of makeCall in
+    // kotlin-to-llvm-ir.abnf.
+    function makeCall(items, at, to) {
         var name = items[0]
         var targs = null
         var start = 1
@@ -13308,6 +13331,8 @@ NotMemberKw = :script(~~ "pure";
             var rawT = items[1].targs
             targl = ktSplitTArgs(rawT.substring(1, rawT.length - 1))
             start = 2
+        } else if (at !== undefined) {
+            targs = ktInferTArgs(name, at, to)
         }
         var args = items.slice(start)
         var body = makeCallBody(name, targs, args, kLexAt())

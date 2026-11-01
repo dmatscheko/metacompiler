@@ -7363,6 +7363,7 @@ function ktJavaClass(jc) {
             if (dg) { sn = "" }
         }
     }
+    if (jc == "<object>") { sn = "" }
     if (jc.charAt(0) == "[") {
         if (jc.length == 2) { sn = ktJvmPrimName(jc.charAt(1)) } else { sn = jc.substring(cut + 1, jc.length - 1) }
         sn = sn + "[]"
@@ -7372,17 +7373,21 @@ function ktJavaClass(jc) {
     return o
 }
 // KClass.java (wrapper false) and .javaObjectType (true): a primitive type's two
-// java classes, `int` (marked jprim) and java.lang.Integer. Twin of ktKClassJava in
-// abnf/jsrtkotlin.go, which has the rules.
+// java classes, `int` (marked jprim) and java.lang.Integer, the latter also for a
+// reified type argument's class (rbox). Twin of ktKClassJava in abnf/jsrtkotlin.go,
+// which has the rules.
 function ktKClassJava(co, wrapper) {
-    if (co["jname"] !== undefined) { return co }
+    if (co["jname"] !== undefined) {
+        if (co["anon"] === true) { return ktJavaClass(co["jname"]) }
+        return co
+    }
     var kn = co["kname"]
     var knames = ["Int", "Long", "Double", "Float", "Char", "Boolean", "Byte", "Short"]
     var wrappers = ["Integer", "Long", "Double", "Float", "Character", "Boolean", "Byte", "Short"]
     var i = 0
     while (i < knames.length) {
         if (knames[i] == kn) {
-            if (wrapper) { return ktJavaClass("java.lang." + wrappers[i]) }
+            if (wrapper || co["rbox"] === true) { return ktJavaClass("java.lang." + wrappers[i]) }
             var o = ktJavaClass(ktJvmPrimName("IJDFCZBS".charAt(i)))
             o["jprim"] = true
             return o
@@ -7606,7 +7611,11 @@ function ktClassOfDesc(d) {
         if (bn.length > 0) { return ktJavaClass(bn) }
     }
     var n = d["__name"]
-    if (typeof n == "string") { return ktJavaClass(n) }
+    if (typeof n == "string") {
+        var o = ktJavaClass(n)
+        if (n == "<object>") { o["anon"] = true }
+        return o
+    }
     return ktClassLit(n)
 }
 
@@ -10982,6 +10991,7 @@ function js_ktfget(o, name) {
     // A KClass. simpleName and qualifiedName agree for a top-level class in the
     // default package (see ktKClassFq), and .java is the same handle again.
     if (ktIsClassLit(o)) {
+        if ((name == "simpleName" || name == "qualifiedName") && o["anon"] === true) { return null }
         if (name == "simpleName") { return o["kname"] }
         if (name == "qualifiedName") { return ktKClassFq(o) }
         if (name == "name") {

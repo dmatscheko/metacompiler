@@ -481,7 +481,7 @@ TopBareProp <~~ push(makeBareDecl(takeAll())) ~~>
 TopDecl     <~~ ktAt = up.start; push(makeDecl(takeAll(), up.in)) ~~>
             = ( "val" | "var" ) KwEnd NotHardKw KId <~~ push(up.in) ~~> [ ":" DeclType ] "=" Expression { PropVis } [ ";" ] ;
 
-FunDecl     <~~ ktNoteBody(up.start, up.pos); ktNoteGeneric(c.srcSlice(up.start, up.pos), "fun"); push(makeFun(takeAll(), retLblTop(), reifiedTop())); retLblPop(); reifiedPop() ~~>
+FunDecl     <~~ ktNoteBody(up.start, up.pos); ktNoteGeneric(c.srcSlice(up.start, up.pos), "fun"); ktNoteFunRet(c.srcSlice(up.start, up.pos), up.start); push(makeFun(takeAll(), retLblTop(), reifiedTop())); retLblPop(); reifiedPop() ~~>
 // The angle run AFTER the name - `fun naturalOrder<in T : Comparable<T>>(a: T, b: T)`
 // (psi/examples/util/Comparison.kt, clean tree) - is where Kotlin's parser still accepts
 // type parameters even though the language wants them before the name. Skipped, not
@@ -991,7 +991,7 @@ Do          <~~ push(makeDo(pop(), pop())) ~~>
 // destructuring form for ((a, b) in pairs) is tried last (it opens with a second
 // paren, which the other two reject).
 For         = ForRange | ForList | ForDestruct ;
-ForRange    <~~ push(makeForRange(takeAll())) ~~>
+ForRange    <~~ ktNoteForVar(c.srcSlice(up.start, up.pos), up.start, up.pos); push(makeForRange(takeAll())) ~~>
             = KwFor "(" KId <~~ push(up.in) ~~> KwIn AddExpr RangeOp AddExpr [ StepSfx ] ")" Statement ;
 // `..<` (Kotlin 1.9's open-ended range) must be tried before `..`, which would match
 // its first two characters and strand the `<`. It means exactly what `until` means.
@@ -1001,7 +1001,7 @@ RangeOp     = "..<" <~~ push({rop: "until"}) ~~>
             | KwDownTo <~~ push({rop: "downTo"}) ~~> ;
 StepSfx     <~~ push({step: pop()}) ~~>
             = KwStep AddExpr ;
-ForList     <~~ push(makeForList(pop(), pop(), pop())) ~~>
+ForList     <~~ ktNoteForVar(c.srcSlice(up.start, up.pos), up.start, up.pos); push(makeForList(pop(), pop(), pop())) ~~>
             = KwFor "(" KId <~~ push(up.in) ~~> KwIn Expression ")" Statement ;
 // A destructuring for-loop, for ((px, py) in points): genuine. Each element is
 // destructured with the componentN convention (the same one val (a, b) = e uses), so
@@ -1795,7 +1795,7 @@ DestructLParam <~~ push({destruct: takeAll(), pos: up.pos}) ~~>   // Each entry 
 // its own - f { ... } (the sole argument, e.g. module { single { ... } }). Either form
 // works as a Primary anywhere, including as an argument to an outer call
 // (modules(module(createdAtStart = true) { ... }, module { ... }, ...)).
-Call        <~~ push(makeCall(takeAll())); retLblPop() ~~>
+Call        <~~ push(makeCall(takeAll(), up.start, up.pos)); retLblPop() ~~>
             = NotHardKw KId <~~ push(up.in); retLblPush(up.in, "lam") ~~> [ TypeArgs ] ( SameLine "(" [ CallArgs ] ")" { TrailLambda } | TrailLambda { TrailLambda } ) ;
 // Explicit type arguments at a call site. Erased, except when the callee has a reified
 // type parameter: then the argument's NAME is what fills the callee's hidden parameter.
@@ -3287,7 +3287,17 @@ KwContract  = "contract" KwEnd ;
     // type argument that is the caller's own reified T hands that class on. Twin of
     // kReifiedClass in kotlin-interpreter.abnf.
     function reifiedKSlot(name) { return name + "$rk" }
-    function reifiedKClass(t) { return makeQualRef(ktTArgBase(t), "class") }
+    // The class is marked rbox: a reified type argument's class is the BOXED one on
+    // the JVM, so `T::class.java` of T = Int is java.lang.Integer (ktKClassJava in
+    // abnf/jsrtkotlin.go). Twin of kReifiedBoxed in kotlin-interpreter.abnf.
+    function reifiedKClass(t) {
+        var lit = makeQualRef(ktTArgBase(t), "class")
+        return function(b) {
+            var r = lit(b)
+            callExt(r.b, "js_set", [r.v, emitStr(r.b, "rbox"), hTrue])
+            return r
+        }
+    }
 
     // ----- Kotlin's operator conventions -----
     // a + b is a.plus(b), -a is a.unaryMinus(), a[i] is a.get(i), a() is a.invoke(),
@@ -4504,7 +4514,8 @@ KwContract  = "contract" KwEnd ;
         }
     }
 
-    foldCallMember = function(items, txt) {
+    // raw is the chain's source as written when it reads javaClass, "" else.
+    foldCallMember = function(items, txt, raw) {
         if (items.length == 1) return items[0]
         var primary = items[0]
         var suffixes = items.slice(1)
@@ -4512,8 +4523,6 @@ KwContract  = "contract" KwEnd ;
             suffixes[0] = ktAdoptMArgs(suffixes[0], ktLeadType(txt, suffixes[0].safe == true ? "?." : "."))
         } else if (suffixes[0].kind == "index") {
             ktAdoptIdxSfx(suffixes[0], ktLeadType(txt, "["))
-        } else if (suffixes[0].kind == "field" && suffixes[0].name == "javaClass" && suffixes[0].safe != true) {
-            suffixes[0].jprim = ktJvmPrimRecv(txt)
         }
         // A reified extension's type arguments as class literals, made here, where a
         // type argument that is the enclosing function's reified T is still known.
@@ -4526,9 +4535,11 @@ KwContract  = "contract" KwEnd ;
             tks.tkls = tkl
         }
         // A call or an index after a run of member reads - `b.xs.add(3)`, `b.m[1]` -
-        // takes the last member's declared type, read at emit time (a class may be
-        // declared after its use).
+        // takes the last member's declared type, and a javaClass read judges its
+        // receiver's JVM type (ktNoteJavaClassRecvs), both at emit time (a class or a
+        // function may be declared after its use).
         var lazyAt = ktChainSites(suffixes)
+        var lazyJc = ktNoteJavaClassRecvs(suffixes, raw)
         var lead = ktLeadName(txt)
         var leadAt = ktAt
         // `Outer.In(b = 1, a = 2)`: a call whose receiver is a run of plain member
@@ -4689,8 +4700,9 @@ KwContract  = "contract" KwEnd ;
                     callExt(b, "js_arr_push", [gargsV, cur])
                     return {b: b, v: callExt(b, "js_call", [gV, hUndef, gargsV])}
                 }
-                // javaClass of a statically primitive receiver (ktJvmPrimRecv) is the
-                // primitive class, `int`: the value's KClass read as .java.
+                // javaClass of a receiver whose JVM type is primitive
+                // (ktNoteJavaClassRecvs) is the primitive class, `int`: the value's
+                // KClass read as .java.
                 if (s.jprim == true) {
                     var pcV = callExt(b, "js_ktvalclass", [cur])
                     return {b: b, v: callExt(b, "js_ktfget", [pcV, emitStr(b, "java")])}
@@ -4722,6 +4734,7 @@ KwContract  = "contract" KwEnd ;
         return function(b) {
             for (var li = 0; li < lazyAt.length; li++) { ktAdoptChainSfx(lead, leadAt, suffixes, lazyAt[li]) }
             lazyAt = []
+            if (lazyJc) { ktJvmPrimSfxs(suffixes); lazyJc = false }
             var r = primary(b)
             b = r.b
             var cur = r.v
@@ -5288,7 +5301,10 @@ KwContract  = "contract" KwEnd ;
         for (var i = 0; i < vs.length; i++) { callExt(b, "js_arr_push", [argsV, vs[i]]) }
         return callExt(b, "js_ktsmcall", [objV, emitStr(b, mth), argsV])
     }
-    function makeCall(items) {
+    // from..to is a Call's source, where a reified generic function called without
+    // type arguments has them inferred (ktInferTArgs). Twin of makeCall in
+    // kotlin-interpreter.abnf.
+    function makeCall(items, from, to) {
         var name = items[0]
         var at = 1
         var targs = []
@@ -5298,9 +5314,15 @@ KwContract  = "contract" KwEnd ;
         // in declaration order: its name as an `is` test judges it, and its class.
         var reified = reifiedFuns["$" + name]
         if (reified != undefined) {
+            var inf = (targs.length == 0 && from !== undefined) ? ktInferTArgs(name, from, to) : null
             for (var ri = 0; ri < reified.length; ri++) {
-                args = args.concat([{at: makeIsNameConst(targs.length > ri ? targs[ri] : "Any")}])
-                args = args.concat([{at: reifiedKClass(targs.length > ri ? targs[ri] : "Any")}])
+                var rta = targs.length > ri ? targs[ri] : "Any"
+                if (inf != null) {
+                    var gtps = ktGenerics["$" + name].tps
+                    for (var gi = 0; gi < gtps.length; gi++) { if (gtps[gi] == reified[ri]) { rta = inf[gi] } }
+                }
+                args = args.concat([{at: makeIsNameConst(rta)}])
+                args = args.concat([{at: reifiedKClass(rta)}])
             }
         }
         // A builder call's static type, and its elements retyped by the explicit type
@@ -5869,7 +5891,7 @@ KwContract  = "contract" KwEnd ;
         if (n > 1 && lastIt != null && typeof lastIt == "object" && lastIt.incdec != undefined) {
             return makeCallAssign([{chain: items.slice(0, n - 1)}, lastIt.incdec, null], pos, true)
         }
-        return foldCallMember(items, txt)
+        return foldCallMember(items, txt, txt.indexOf("javaClass") >= 0 ? c.srcSlice(ktAt, pos) : "")
     }
     // ++ / -- keep the type of what they step (js_ktstep): a Double stays a Double,
     // a Char stays a Char, and a sized integer steps at its own WIDTH - which is what
@@ -5980,7 +6002,7 @@ KwContract  = "contract" KwEnd ;
         var itxt = ktInitText(txt, name, dt)
         var sp = anytype
         sp = typed ? ktAdoptPlan(dt) : null
-        ktNoteDecl(name, typed ? dt : ktExprType(itxt), typed ? "" : ktLitType(itxt))
+        ktNoteDecl(name, typed ? dt : ktExprType(itxt), typed ? "" : ktStaticTy(itxt))
         return function(b) {
             var r = init(b)
             b = r.b
@@ -6736,8 +6758,10 @@ KwContract  = "contract" KwEnd ;
         // slot is optional.
         if (items[at] != undefined && items[at].pmods != undefined) { li = items[at].pmods === true; at++ }
         if (items[at] != undefined && items[at].pty != undefined) { ty = items[at].pty; at++ }
-        ktNoteDecl(items[0], ty)
-        ktNoteMember(items[0], ty != "" ? ty : ktExprType(ktInitText(txt, items[0], "")))
+        var pitxt = ty != "" ? "" : ktInitText(txt, items[0], "")
+        var plty = ty != "" ? "" : ktStaticTy(pitxt)
+        ktNoteDecl(items[0], ty, plty)
+        ktNoteMember(items[0], ty != "" ? ty : ktExprType(pitxt), plty)
         // A bodiless property (abstract/lateinit/interface: no `= init`) still needs a
         // backing field so an implicit `name = ...` in a method resolves to this.name and
         // reads before assignment are defined. Default it to null (identical to `= null`).

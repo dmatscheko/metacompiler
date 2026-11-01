@@ -3019,10 +3019,14 @@ func init() {
 						return w(jn)
 					}
 					return w(co.props["kname"])
-				case "qualifiedName":
+				case "qualifiedName", "simpleName":
+					if an, _ := co.props["anon"].(bool); an {
+						return w(jsNull)
+					}
+					if name == "simpleName" {
+						return w(co.props["kname"])
+					}
 					return w(ktKClassFq(co))
-				case "simpleName":
-					return w(co.props["kname"])
 				case "java", "javaObjectType":
 					return w(ktKClassJava(co, name == "javaObjectType"))
 				case "javaClass":
@@ -11149,14 +11153,19 @@ func ktEnumDecl(v interface{}) *jsObject {
 // ktClassOfDesc is the KClass of a declared type: the java class its binary name
 // names, a top-level class's its own name (a nested one: simpleName Inner,
 // qualifiedName Outer.Inner, "class Outer$Inner"; a builtin throwable's is
-// package-qualified). Twin of kClassOfDesc
-// in kotlin-interpreter.abnf.
+// package-qualified). An anonymous object's KClass is marked anon: its simpleName
+// and qualifiedName are null, where its java class's simpleName is "". Twin of
+// kClassOfDesc in kotlin-interpreter.abnf.
 func ktClassOfDesc(d *jsObject) *jsObject {
 	if bn, ok := d.props["__bname"].(string); ok && bn != "" {
 		return ktJavaClass(bn)
 	}
 	if n, ok := d.props["__name"].(string); ok {
-		return ktJavaClass(n)
+		o := ktJavaClass(n)
+		if n == "<object>" {
+			o.set("anon", true)
+		}
+		return o
 	}
 	return ktClassLit(d.props["__name"])
 }
@@ -11164,13 +11173,13 @@ func ktClassOfDesc(d *jsObject) *jsObject {
 // ktJavaClass is `javaClass`, and a collection's KClass: a class literal that also
 // carries the JVM binary name jc (jname), which .name and toString answer.
 // simpleName is the part after the package and the enclosing class ("" for an
-// anonymous class, Outer$1), an array's its element's with "[]" (`[I` is int[]).
-// Twin of kJavaClass in kotlin-interpreter.abnf and ktJavaClass in
-// languages/lib/kotlin-rt.metajs.
+// anonymous class, Outer$1 or this engine's <object>), an array's its element's
+// with "[]" (`[I` is int[]). Twin of kJavaClass in kotlin-interpreter.abnf and
+// ktJavaClass in languages/lib/kotlin-rt.metajs.
 func ktJavaClass(jc string) *jsObject {
 	cut := strings.LastIndexAny(jc, ".$")
 	sn := jc[cut+1:]
-	if cut >= 0 && jc[cut] == '$' && sn != "" && luAllDigits(sn) {
+	if (cut >= 0 && jc[cut] == '$' && sn != "" && luAllDigits(sn)) || jc == "<object>" {
 		sn = ""
 	}
 	if strings.HasPrefix(jc, "[") {
@@ -11194,17 +11203,22 @@ var ktPrimWrappers = [...]string{"Integer", "Long", "Double", "Float", "Characte
 
 // ktKClassJava is KClass.java (wrapper false) and .javaObjectType (true). A primitive
 // type's KClass has two java classes, `int` and java.lang.Integer; every other KClass
-// already is its java class. The primitive one is marked jprim, because
-// java.lang.Class renders it as the bare name. Twin of kKClassJava in
+// already is its java class, an anonymous one's without its anon mark. The primitive
+// one is marked jprim, because java.lang.Class renders it as the bare name. A
+// reified type argument's class (marked rbox) is the boxed one, as the JVM passes
+// it: `T::class.java` of T = Int is java.lang.Integer. Twin of kKClassJava in
 // kotlin-interpreter.abnf and ktKClassJava in languages/lib/kotlin-rt.metajs.
 func ktKClassJava(co *jsObject, wrapper bool) *jsObject {
-	if _, has := co.props["jname"]; has {
+	if jn, has := co.props["jname"].(string); has {
+		if an, _ := co.props["anon"].(bool); an {
+			return ktJavaClass(jn)
+		}
 		return co
 	}
 	kn, _ := co.props["kname"].(string)
 	for i, p := range ktPrimKNames {
 		if p == kn {
-			if wrapper {
+			if rb, _ := co.props["rbox"].(bool); wrapper || rb {
 				return ktJavaClass("java.lang." + ktPrimWrappers[i])
 			}
 			o := ktJavaClass(ktJvmPrimNames[i])
