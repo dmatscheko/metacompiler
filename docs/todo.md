@@ -74,7 +74,7 @@ in languages/lib/python-random.py) - make the seeding cheaper.
 
 # RB — Ruby
 
-### T-1018 ruby: an Enumerator is not Enumerable; Hash#to_proc; `lazy.instance_of?(Enumerator)`; default_proc lambda arity · P3 · RB · OPEN [V]
+### T-1018 ruby: an Enumerator is not Enumerable; Hash#to_proc; `lazy.instance_of?(Enumerator)`; default_proc lambda arity · P3 · RB · IN PROGRESS (RB worker, round 38) [V]
 Found by the RB worker, round 37 (oracle ruby 2.6). `[1].each.is_a?(Enumerable)`, `[1].cycle.is_a?(Enumerable)`,
 `[1,2].lazy.kind_of?(Enumerable)` → true; ours false (rubyIsA in abnf/jsrt.go, rbIsA in layer 2, valueIsA in the interpreter need an
 Enumerator arm). `{1=>2}.to_proc.call(1)` → 2; ours nothing, so `h.default_proc = {}` stores the Hash. `[1].lazy.instance_of?(Enumerator)`
@@ -92,7 +92,7 @@ text to U+FFFD (U+D800 matches \p{Grapheme_Base}). `\p{sc=Zyyy}` matches Unicode
 
 # JV — Java
 
-### T-1016 java: overload resolution still counts inaccessible constructors (and probably methods) as candidates · P3 · JV · OPEN [V]
+### T-1016 java: overload resolution still counts inaccessible constructors (and probably methods) as candidates · P3 · JV · IN PROGRESS (JV worker, round 20) [V]
 Found by the JV worker, round 19 (oracle java 24). `package r; public class K { public int v; private K(int a,int b){v=a+b;} public
 K(double d,int b){v=b;} }`, then from another package `new K(1,2).v` → java 2 (the private ctor is not a candidate, JLS 15.12.2.1);
 interpreter, compiler and native 3. jOvCtorSig needs the call site's package and top-level type to filter candidates; check private
@@ -114,7 +114,7 @@ Found by the CORE worker, round 15. The interpreter's stripWs deletes every ASCI
 strings.TrimSpace, native strips ASCII 9-13 and 32: `int.Parse(" 1 2 ")` and `int.Parse(" 1")` give three answers.
 .NET's NumberStyles.Integer allows leading/trailing white space (U+0009-U+000D, U+0020) only; settle with a real dotnet.
 
-### T-1022 c#: `ParamName` empty on runtime-thrown exceptions; unknown member of a BCL type fails late · P3 · CS · OPEN [V spec-only]
+### T-1022 c#: `ParamName` empty on runtime-thrown exceptions; unknown member of a BCL type fails late · P3 · CS · IN PROGRESS (CS worker, round 3) [V spec-only]
 Found by the CS worker, round 2 (.NET reference source). `try { char.ConvertFromUtf32(-1); } catch (ArgumentOutOfRangeException e)
 { Console.WriteLine(e.ParamName); }` → .NET "utf32"; ours "" (every runtime throw site carries the name only inside Message).
 `string.NoSuch` / `Math.NoSuch` read as a value → C# compile error; ours a delegate that fails when called.
