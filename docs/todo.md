@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1078** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1079** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -69,7 +69,7 @@ Remainder of T-1028; each needs a table-size decision before work starts. CJK fa
 
 # RB — Ruby
 
-### T-1069 ruby: external Enumerator iteration (next/peek/rewind) over a user #each, to_enum/enum_for · P3 · RB · IN PROGRESS (RB worker, round 46) [V]
+### T-1069 ruby: external Enumerator iteration (next/peek/rewind) over a user #each, to_enum/enum_for · P3 · RB · OPEN [V]
 Structural; touches the shared generator floor (Go twin jsGenerator / runtime.c gen_resume/gen_close) - coordinate as a shared-file change. Oracle /usr/bin/ruby 2.6, class whose #each logs 1,2,3,:end and yields 10,20,30 (returns :done):
 - `e.next` -> 10, log [1]; `e.peek` -> 20, log [1, 2]; after the third next, StopIteration "iteration reached an end", `result` :done. `rewind` drops the run WITHOUT running ensure (MRI runs none on rewind or at exit).
 - `lazy.map { |v| v + 1 }.next` twice -> 11, 21, log [1, 2]; `C.new(l).map.next` -> 10, log [1]; `each_slice(2).next` -> [10, 20] then [30].
@@ -77,13 +77,13 @@ Structural; touches the shared generator floor (Go twin jsGenerator / runtime.c 
 - `for` over a user #each must interleave the body with #each's side effects (today all yields are collected first).
 Needs: interpreter coroutine running src.each(&blk) with blk = coYield, switching run state (block/self frames, rescue state) on resume; compiled: one emitted generator closure registered with the Go twin / layer 2 (js_genfn/js_yield are emitter-only externs); per-coroutine rubyCatchTags (Go) and js_rcatch/js_rthrow state (layer 2) plus the current-exception slot; close of an unfinished one must skip ensure.
 
-### T-1070 ruby: Enumerator#each value, for-over-Lazy value, user #inspect ivars, Lazy respond_to?/class · P3 · RB · IN PROGRESS (RB worker, round 46) [V]
-Oracle /usr/bin/ruby 2.6; all engines unless noted:
-- Enumerator#each with a block returns the Enumerator; MRI returns the underlying method's value (nil for each_slice, receiver for each/each_with_index, `[1, 2].map.each {}` -> [nil, nil]); so `for` over map/select/with_index Enumerators answers the Enumerator instead of MRI's Array.
-- `for x in (1..3).lazy.map {...}; end` answers the Lazy; MRI nil.
-- `#inspect` of a user object omits ivars: ours `#<Q>`, MRI `#<Q:0x... @a=1>` (decide a deterministic address rendering).
-- Lazy respond_to? wrong in the interpreter, incomplete compiled; layer 2's Lazy#class answers Enumerator.
-- `[7, 8].each.with_object([])` without a block crashes the interpreter ("Cannot read property 'apply' of undefined").
+### T-1078 ruby: Lazy eager Enumerable surface; Lazy freeze/clone/dup; Enumerator-based Lazy #each value · P3 · RB · OPEN [V]
+Oracle /usr/bin/ruby 2.6; all engines raise NoMethodError where MRI answers:
+- eager on a Lazy: `(1..3).lazy.sum` -> 6; count/include?/min/max/sort/reduce/inject/find/detect/group_by/partition/min_by/each_with_index/each_with_object/with_index answer eagerly; find and include? must stop early on an endless source (`(1..Float::INFINITY).lazy.map { _1 * 2 }.find { |x| x > 10 }` -> 12 - use a block param in 2.6).
+- lazy-returning: zip/uniq/flat_map/grep/drop/chunk_while answer a Lazy.
+- freeze/clone/dup of a Lazy.
+- `[1,2].each.lazy.each{}` -> [1, 2] (ours nil); `for x in C.new.lazy; end` -> the user #each's value (ours nil): record the source #each value for an Enumerator-based Lazy.
+Note: ruby-test-full.rb's -frozen interpreter leg is at ~95-100M of the 100M step brake; new sections go in full.2.
 
 # JS — JavaScript and TypeScript
 
@@ -1135,6 +1135,7 @@ T-1071 csharp: member access on null never raises a catchable NullReferenceExcep
 T-1073 kotlin: compiled reified call to a function declared later crashes — DONE (KT r24, c50317b5): reified hidden args appended at emit time / inferred at first run, so calls to later-declared reified functions work in all legs; forwarded reified T in is-checks (plain + extension) fixed in both engines; member form covered; 4 legs = kotlinc
 T-1074 kotlin: KClass javaPrimitiveType/hashCode; destructured-lambda and smart-cast javaClass — DONE (KT r24, 377b9b84): KClass javaPrimitiveType/hashCode, KClass keys in sets/maps compare by name (run/native), destructured lambda/for/val components and let-after-cast smart cast typed; 4 legs = kotlinc
 T-1076 csharp: compound assignment evaluates the right side before reading the left — DONE (CS r14, 4 commits to 318d9fc6): compound assignment reads the target before the RHS for every target kind; also fixed: simple assignment evaluates receiver+indices before the RHS, ??= evaluates its target once, prefix ++/-- on member chains parses, bare-named static-field path roots compiled; 3 legs agree with ECMA-334 12.21
+T-1070 ruby: Enumerator#each value, for-over-Lazy value, user #inspect ivars, Lazy respond_to?/class — DONE (RB r46, 2ca7d081): Enumerator#each answers the underlying method's value, for over map/select/with_index Enumerators and Lazy answers MRI's value, user #inspect/#to_s carry address (2*object_id, 16 hex) + ivars with cycle cut, Lazy class/respond_to?, blockless with_object; 4 legs = ruby 2.6
 
 # Settled — do not re-open
 
