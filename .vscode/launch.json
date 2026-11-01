@@ -477,6 +477,20 @@
             "program": "${workspaceFolder}","args": ["languages/csharp-to-llvm-ir.abnf", "-code", "class P { static void Main() { goto nowhere; } }", "-qq"]
         },
         {
+            "name": "CSharp interpreter String.CompareTo is the culture's collation SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "expectError": "csharp interpreter error: String.CompareTo is the culture's collation, which is not modelled",
+            "program": "${workspaceFolder}","args": ["languages/csharp-interpreter.abnf", "-code", "using System; class Program { static void Main() { string[] s = { \"x\", \"a\" }; Console.WriteLine(s[0].CompareTo(s[1])); } }", "-q"]
+        },
+        {
+            "name": "CSharp compiler String.CompareTo is the culture's collation SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "expectError": "js runtime error: String.CompareTo is the culture's collation, which is not modelled",
+            "program": "${workspaceFolder}","args": ["languages/csharp-to-llvm-ir.abnf", "-code", "using System; class Program { static void Main() { string[] s = { \"x\", \"a\" }; Console.WriteLine(s[0].CompareTo(s[1])); } }", "-qq"]
+        },
+        {
             "name": "Lua to LLVM IR -qq, a compile error still shows SHOULD FAIL",
             "type": "go",
             "request": "launch",

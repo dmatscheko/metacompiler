@@ -4547,7 +4547,8 @@ KwLet       = "let" KwEnd ;
                         var cpr = emitPropGet(b, cur, s.name)
                         b = cpr.b
                         cur = cpr.v
-                    } else if (csMethNames[s.name] === true) {
+                    } else if (csMethNames[s.name] === true
+                               || (i == 0 && csBclStaticTypes[seedName] === true && csLocalTypes[seedName] == undefined)) {
                         var mgr = emitFieldOrMethodGroup(b, cur, s.name)
                         b = mgr.b
                         cur = mgr.v
@@ -5832,6 +5833,10 @@ KwLet       = "let" KwEnd ;
     // parameter). They gate the two runtime shapes below.
     var csMethNames = {}
     var csDataNames = {}
+    // The type objects that dispatch their statics by name (js_cstype's __cstype): a
+    // member of one read as a value is a BCL static method group (`string.CompareOrdinal`).
+    var csBclStaticTypes = {string: true, String: true, char: true, Char: true,
+                            Math: true, MathF: true, Enumerable: true}
     function csNoteMethName(name) { csMethNames[name] = true }
     function csNoteDataName(name) { csDataNames[name] = true }
     function csAccAmbig(name) { return csAccNames[name] === true && csPlainNames[name] === true }
@@ -7166,9 +7171,15 @@ KwLet       = "let" KwEnd ;
                             "double", "Double", "float", "Single", "StringComparison", "StringSplitOptions",
                             "NormalizationForm", "StringComparer", "Enumerable", "Math", "MathF",
                             "MidpointRounding"]
+        // String and Char are the SAME object as string and char, as in the interpreter,
+        // so a static method group memoised on it is one delegate under either name.
+        var csTypeAlias = {String: "string", Char: "char"}
         for (var cti = 0; cti < csTypeIdents.length; cti++) {
-            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, csTypeIdents[cti]),
-                                         callExt(b, "js_cstype", [emitStr(b, csTypeIdents[cti])])])
+            var ctn = csTypeIdents[cti]
+            var ctV = (csTypeAlias[ctn] != undefined)
+                ? callExt(b, "js_scope_get", [curScopeV, emitStr(b, csTypeAlias[ctn])])
+                : callExt(b, "js_cstype", [emitStr(b, ctn)])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, ctn), ctV])
         }
         b = emitValEqDecl(b)
         csDfltResolve()

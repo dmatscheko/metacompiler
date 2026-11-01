@@ -1728,10 +1728,14 @@ function js_csmg(recv, name, bound) {
         }
         return undefined
     }
-    var cls = recv["__class"]
-    if (cls === undefined || cls === null) { return undefined }
-    var m = rtFindMethod(cls, name)
-    if (!csIsFn(m)) { return undefined }
+    // A BCL type object (__cstype) dispatches its statics by name, so every member
+    // read as a value is a static method group.
+    if (recv["__cstype"] === undefined) {
+        var cls = recv["__class"]
+        if (cls === undefined || cls === null) { return undefined }
+        var m = rtFindMethod(cls, name)
+        if (!csIsFn(m)) { return undefined }
+    }
     var key = "__mg_" + name
     var had = recv[key]
     if (had !== undefined) { return had }

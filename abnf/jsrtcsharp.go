@@ -1278,7 +1278,9 @@ func init() {
 				}
 				return w(jsUndef)
 			}
-			found := false
+			// A BCL type object (__cstype) dispatches its statics by name, so
+			// every member read as a value is a static method group.
+			_, found := o.props["__cstype"]
 			for cls := o.props["__class"]; cls != nil && !found; {
 				clsObj, ok := cls.(*jsObject)
 				if !ok {

@@ -3063,6 +3063,18 @@ KwLet       = "let" KwEnd ;
         }
         var key = "__mg_" + name
         if (hasOwn(o, key)) { return o[key] }
+        // A BCL static method group (`string.CompareOrdinal`, `Math.Abs`): the type
+        // object dispatches its statics by name, so the delegate forwards to mcall0.
+        // Memoised, so one method answers one delegate (20.5).
+        if (o.__cstype !== undefined) {
+            var bcl = function() {
+                var bargs = []
+                for (var bi = 0; bi < arguments.length; bi++) { bargs.push(arguments[bi]) }
+                return mcall0(o, name, bargs)
+            }
+            o[key] = bcl
+            return bcl
+        }
         var m = undefined
         var dc = null
         for (var c = o.__class; c != undefined && m == undefined; c = c.__super) {

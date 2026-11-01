@@ -351,6 +351,8 @@ func (rt *jsrt) csxStrMethod(s, name string, args []interface{}) (interface{}, b
 		return rt.csxStrCmpMethod(s, name, args), true
 	}
 	switch {
+	case name == "CompareTo":
+		rt.fail("String.CompareTo is the culture's collation, which is not modelled")
 	case name == "Normalize":
 		rt.csxNormalized(u, args)
 		return s, true
@@ -443,12 +445,25 @@ func (rt *jsrt) csxCharArg(args []interface{}) int {
 	return rt.csxCode(argAt(args, 0))
 }
 
+// csxFromUtf32 is lib/csharp-strings.js's: a Unicode scalar value's UTF-16 form.
+func (rt *jsrt) csxFromUtf32(v int) string {
+	if v < 0 || v > 0x10FFFF || (v >= 0xD800 && v <= 0xDFFF) {
+		rt.csThrow("ArgumentOutOfRangeException", "A valid UTF32 value is between 0x000000 and 0x10ffff, inclusive, and should not include surrogate codepoint values (0x00d800 ~ 0x00dfff). (Parameter 'utf32')")
+	}
+	if v < 0x10000 {
+		return strFromUnits([]uint16{uint16(v)})
+	}
+	return strFromUnits([]uint16{uint16(0xD800 + (v-0x10000)/1024), uint16(0xDC00 + (v-0x10000)%1024)})
+}
+
 func (rt *jsrt) csxCharStatic(name string, args []interface{}) interface{} {
 	switch name {
 	case "ToUpper":
 		return jsChar{code: int32(jvChUp(rt.csxCode(argAt(args, 0))))}
 	case "ToLower":
 		return jsChar{code: int32(jvChLo(rt.csxCode(argAt(args, 0))))}
+	case "ConvertFromUtf32":
+		return rt.csxFromUtf32(rt.csxNum(argAt(args, 0)))
 	}
 	c := rt.csxCharArg(args)
 	switch name {
@@ -539,6 +554,8 @@ func (rt *jsrt) csxStringStatic(name string, args []interface{}) interface{} {
 		return csxEqStr(rt.csxCmpKind(args[2]), args[0], args[1])
 	case name == "CompareOrdinal" && n == 2:
 		return csxCompareOrdinal(args[0], args[1])
+	case name == "CompareOrdinal" && n == 5:
+		return rt.csxCompareOrdinalRange(args)
 	case name == "Compare":
 		if _, ok := csxIsEnumBox(argAt(args, 2)); ok && n == 3 {
 			return csxCmpStr(rt.csxCmpKind(args[2]), args[0], args[1])
@@ -572,6 +589,37 @@ func csxCompareOrdinal(a, b interface{}) float64 {
 		}
 	}
 	return float64(len(u) - len(v))
+}
+
+// csxCompareOrdinalRange is lib/csharp-strings.js's: CompareOrdinal(a, ia, b, ib,
+// length) over Min(length, Length - index) units of each; null before validation.
+func (rt *jsrt) csxCompareOrdinalRange(args []interface{}) float64 {
+	as, aok := args[0].(string)
+	bs, bok := args[2].(string)
+	if !aok || !bok {
+		return csxCompareOrdinal(args[0], args[2])
+	}
+	ia, ib, n := rt.csxNum(args[1]), rt.csxNum(args[3]), rt.csxNum(args[4])
+	if n < 0 {
+		l := strconv.Itoa(n)
+		rt.csThrow("ArgumentOutOfRangeException", "length ('"+l+"') must be a non-negative value. (Parameter 'length')\nActual value was "+l+".")
+	}
+	u, v := strUnits(as), strUnits(bs)
+	na, nb := len(u)-ia, len(v)-ib
+	if n < na {
+		na = n
+	}
+	if n < nb {
+		nb = n
+	}
+	if ia < 0 || ib < 0 || na < 0 || nb < 0 {
+		p := "indexB"
+		if ia < 0 || (ib >= 0 && na < 0) {
+			p = "indexA"
+		}
+		rt.csThrow("ArgumentOutOfRangeException", "Index was out of range. Must be non-negative and less than or equal to the size of the collection. (Parameter '"+p+"')")
+	}
+	return csxCompareOrdinal(strFromUnits(u[ia:ia+na]), strFromUnits(v[ib:ib+nb]))
 }
 
 func (rt *jsrt) csxNewString(args []interface{}) string {

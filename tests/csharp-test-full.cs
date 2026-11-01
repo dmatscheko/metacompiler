@@ -3075,6 +3075,43 @@ b";                                                   // verbatim keeps the newl
                 && string.CompareOrdinal(emoji, "") < 0 && string.CompareOrdinal("｡", emoji) > 0
                 && string.Compare(emoji, "", StringComparison.Ordinal) < 0
                 && StringComparer.Ordinal.Compare(emoji, "￿") < 0 && string.CompareOrdinal(emoji, "\uD83D") > 0);
+            // CompareOrdinal(a, ia, b, ib, length) compares Min(length, Length - index)
+            // units of each; null is answered before the ranges are checked, and a
+            // negative length or an index past the end throws.
+            string[] r = { "hello", "yellow", "abcd", "abxy", "abc", "abcdef" };
+            Program.Check("s48o3", string.CompareOrdinal(r[0], n[4], r[1], n[4], n[0] - 1) == 0
+                && string.CompareOrdinal(r[2], n[3], r[3], n[3], n[1]) == 0
+                && string.CompareOrdinal(r[2], n[3], r[3], n[3], n[1] + 1) == 'c' - 'x'
+                && string.CompareOrdinal(r[4], n[4], r[5], n[4], n[0] * 2) == -3
+                && string.CompareOrdinal(r[4], n[0] - 2, "x", n[4], n[0]) == 0
+                && string.CompareOrdinal(null, n[3], r[4], n[0] * 9, n[4]) == -1
+                && string.CompareOrdinal(r[4], n[0], null, n[3], n[4]) == 1);
+            string rx = "";
+            try { string.CompareOrdinal(r[4], n[3], r[4], n[3], n[3] - 1); } catch (ArgumentOutOfRangeException e) { rx += e.Message.Split('\n')[0] + ";"; }
+            try { string.CompareOrdinal(r[4], n[3] - 1, r[4], n[3], n[4]); } catch (ArgumentOutOfRangeException e) { rx += e.Message.Split('(')[1]; }
+            try { string.CompareOrdinal(r[4], n[3], r[4], n[0] - 1, n[4]); } catch (ArgumentOutOfRangeException e) { rx += e.Message.Split('(')[1]; }
+            Program.Check("s48o4", rx == "length ('-1') must be a non-negative value. (Parameter 'length');Parameter 'indexA')Parameter 'indexB')");
+            // A static method group converts to a delegate (ECMA-334 10.8): one
+            // delegate per method, whichever alias names the type.
+            var ws = new List<string> { "b", "a", "B", "c", "aa" };
+            ws.Sort(string.CompareOrdinal);
+            Comparison<string> cf = string.CompareOrdinal;
+            Comparison<string> cg = String.CompareOrdinal;
+            Func<double, double> sq = Math.Sqrt;
+            Func<char, bool> dig = char.IsDigit;
+            Program.Check("s48m1", string.Join(",", ws) == "B,a,aa,b,c" && cf(r[2], r[3]) == 'c' - 'x' && cf == cg
+                && sq(16.0) == 4.0 && dig('7') && !dig('x'));
+            // char.ConvertFromUtf32: a BMP scalar is one unit, an astral one a
+            // surrogate pair; a surrogate code point or one past U+10FFFF throws.
+            int[] cp = { 65, 0x1F600, 0x10FFFF, 0xFFFF, -1, 0xD800, 0xDFFF, 0x110000 };
+            string u1 = char.ConvertFromUtf32(cp[1]);
+            Program.Check("s48u1", char.ConvertFromUtf32(cp[0]) == "A" && u1.Length == 2 && u1[0] == '\uD83D' && u1[1] == '\uDE00'
+                && char.ConvertFromUtf32(cp[2]) == "􏿿" && char.ConvertFromUtf32(cp[3]) == "￿");
+            int bad = 0;
+            for (int i = 4; i < cp.Length; i++) {
+                try { char.ConvertFromUtf32(cp[i]); } catch (ArgumentOutOfRangeException e) { if (e.Message.EndsWith("(Parameter 'utf32')")) { bad++; } }
+            }
+            Program.Check("s48u2", bad == 4);
         }
 
         // ===== SECTION 49: composite formatting, StringComparison, StringSplitOptions =====

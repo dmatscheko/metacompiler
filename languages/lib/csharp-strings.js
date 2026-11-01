@@ -15,8 +15,8 @@
 //
 // Comparison and search are ORDINAL: the culture-sensitive forms
 // (String.Compare, CompareTo, IndexOf(string) under a culture with ignorable
-// characters) are not modelled, and String.Compare / CompareTo are absent rather
-// than wrong. Case mapping is per unit and simple (one unit to one unit), which
+// characters) are not modelled, and String.Compare / CompareTo fail deliberately
+// rather than answer wrong. Case mapping is per unit and simple (one unit to one unit), which
 // is what .NET's ToUpper/ToLower do: "ß".ToUpper() stays "ß".
 
 // char.IsWhiteSpace: the Unicode separators (Zs, Zl, Zp), U+0009..U+000D and U+0085.
@@ -277,6 +277,7 @@ function csxToChars(s, b, n) {
 function csxStrMethod(s, name, args) {
     var n = args.length
     if (csxHasCmpArg(name, args)) { return csxStrCmpMethod(s, name, args) }
+    if (name == "CompareTo") { fail("String.CompareTo is the culture's collation, which is not modelled") }
     if (name == "Substring") { return csxSubstring(s, args) }
     if (name == "IndexOf") { return csxIndexOf(s, args) }
     if (name == "LastIndexOf") { return csxLastIndexOf(s, args) }
@@ -347,10 +348,20 @@ function csxCharArg(args) {
     }
     return csxkCode(args[0])
 }
+// char.ConvertFromUtf32: the UTF-16 form of a Unicode scalar value; a surrogate
+// code point or a value outside 0..0x10FFFF is out of range.
+function csxFromUtf32(v) {
+    if (v < 0 || v > 1114111 || (v >= 55296 && v <= 57343)) {
+        csxkThrow("ArgumentOutOfRangeException", "A valid UTF32 value is between 0x000000 and 0x10ffff, inclusive, and should not include surrogate codepoint values (0x00d800 ~ 0x00dfff). (Parameter 'utf32')")
+    }
+    if (v < 65536) { return String.fromCharCode(v) }
+    return String.fromCharCode(55296 + Math.floor((v - 65536) / 1024)) + String.fromCharCode(56320 + (v - 65536) % 1024)
+}
 // System.Char's static members.
 function csxCharStatic(name, args) {
     if (name == "ToUpper") { return csxkChar(jxChUp(csxkCode(args[0]))) }
     if (name == "ToLower") { return csxkChar(jxChLo(csxkCode(args[0]))) }
+    if (name == "ConvertFromUtf32") { return csxFromUtf32(csxkNum(args[0])) }
     var c = csxCharArg(args)
     if (name == "IsDigit") { return jcIsDigit(c) }
     if (name == "IsLetter") { return jcIsLetter(c) }
@@ -404,6 +415,27 @@ function csxCompareOrdinal(a, b) {
     }
     return a.length - b.length
 }
+// String.CompareOrdinal(a, ia, b, ib, length): the ordinal comparison of
+// a[ia, ia + Min(length, a.Length - ia)) with the same range of b. null is
+// tested before the range arguments are validated, as .NET does.
+function csxCompareOrdinalRange(args) {
+    var a = args[0]
+    var b = args[2]
+    if (a === null || a === undefined || b === null || b === undefined) { return csxCompareOrdinal(a, b) }
+    var ia = csxkNum(args[1])
+    var ib = csxkNum(args[3])
+    var len = csxkNum(args[4])
+    if (len < 0) {
+        csxkThrow("ArgumentOutOfRangeException", "length ('" + len + "') must be a non-negative value. (Parameter 'length')\nActual value was " + len + ".")
+    }
+    var na = Math.min(len, a.length - ia)
+    var nb = Math.min(len, b.length - ib)
+    if (ia < 0 || ib < 0 || na < 0 || nb < 0) {
+        var p = (ia < 0 || (ib >= 0 && na < 0)) ? "indexA" : "indexB"
+        csxkThrow("ArgumentOutOfRangeException", "Index was out of range. Must be non-negative and less than or equal to the size of the collection. (Parameter '" + p + "')")
+    }
+    return csxCompareOrdinal(a.substring(ia, ia + na), b.substring(ib, ib + nb))
+}
 // System.String's static members.
 function csxStringStatic(name, args) {
     var n = args.length
@@ -417,6 +449,7 @@ function csxStringStatic(name, args) {
     if (name == "Equals" && n == 2) { return args[0] === args[1] }
     if (name == "Equals" && n == 3) { return csxEqStr(csxCmpKind(args[2]), args[0], args[1]) }
     if (name == "CompareOrdinal" && n == 2) { return csxCompareOrdinal(args[0], args[1]) }
+    if (name == "CompareOrdinal" && n == 5) { return csxCompareOrdinalRange(args) }
     if (name == "Compare") {
         if (n == 3 && csxIsEnumBox(args[2])) { return csxCmpStr(csxCmpKind(args[2]), args[0], args[1]) }
         fail("String.Compare without an ordinal StringComparison is the culture's collation, which is not modelled")
