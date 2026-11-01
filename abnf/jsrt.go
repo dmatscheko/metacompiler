@@ -6692,6 +6692,23 @@ func (rt *jsrt) rubyStrOperand(r interface{}) string {
 	return ""
 }
 
+// rubyArrOperand is the right side of Array#+, #-, #& and #|: an Array, or an
+// object that converts implicitly through #to_ary; anything else is MRI's
+// TypeError (`[1] + nil'). Twins: arrOperand in ruby-interpreter.abnf,
+// rbArrOperand in lib/ruby-rt.metajs.
+func (rt *jsrt) rubyArrOperand(op string, r interface{}) *jsArray {
+	if a, ok := r.(*jsArray); ok {
+		return a
+	}
+	if v, conv := rt.rubyFmtUserConv(r, "to_ary", ""); conv {
+		if a, ok := v.(*jsArray); ok {
+			return a
+		}
+	}
+	rt.rubyRaiseErr(op, "TypeError", "no implicit conversion of "+rubyFmtConvName(r)+" into Array")
+	return nil
+}
+
 // rubyNumOperandErr raises for an arithmetic operator whose operands are not
 // both numbers, worded as MRI 2.6 does: a number on the left is a TypeError
 // naming the right side (`1 + nil' is "nil can't be coerced into Integer"), and
@@ -6779,11 +6796,10 @@ func (rt *jsrt) rubyBin(op string, l, r interface{}) interface{} {
 			return &jsRStr{s: strConcat(ls, rt.rubyStrOperand(r))}
 		}
 		if la, ok := l.(*jsArray); ok {
-			if ra, ok2 := r.(*jsArray); ok2 {
-				out := &jsArray{}
-				out.elems = append(append(out.elems, la.elems...), ra.elems...)
-				return out
-			}
+			ra := rt.rubyArrOperand(op, r)
+			out := &jsArray{}
+			out.elems = append(append(out.elems, la.elems...), ra.elems...)
+			return out
 		}
 	case "*":
 		if ls, ok := l.(string); ok {
@@ -6812,37 +6828,32 @@ func (rt *jsrt) rubyBin(op string, l, r interface{}) interface{} {
 	// arms they reached rubyNumBin and ABORTED with "not a number in '&'".
 	case "&":
 		if la, ok := l.(*jsArray); ok {
-			if ra, ok2 := r.(*jsArray); ok2 {
-				return rt.rubyArrAnd(la, ra)
-			}
+			return rt.rubyArrAnd(la, rt.rubyArrOperand(op, r))
 		}
 	case "|":
 		if la, ok := l.(*jsArray); ok {
-			if ra, ok2 := r.(*jsArray); ok2 {
-				return rt.rubyArrOr(la, ra)
-			}
+			return rt.rubyArrOr(la, rt.rubyArrOperand(op, r))
 		}
 	case "-":
 		if la, ok := l.(*jsArray); ok {
-			if ra, ok2 := r.(*jsArray); ok2 {
-				// Array#- is eql?/hash, like uniq and unlike include?: MRI answers
-				// `[1, 2.0] - [2]` with [1, 2.0]. This was pyEqual, which converts
-				// across the numeric classes and dropped the 2.0.
-				out := &jsArray{}
-				for _, e := range la.elems {
-					drop := false
-					for _, x := range ra.elems {
-						if rt.rubyEql(e, x) {
-							drop = true
-							break
-						}
-					}
-					if !drop {
-						out.elems = append(out.elems, e)
+			ra := rt.rubyArrOperand(op, r)
+			// Array#- is eql?/hash, like uniq and unlike include?: MRI answers
+			// `[1, 2.0] - [2]` with [1, 2.0]. This was pyEqual, which converts
+			// across the numeric classes and dropped the 2.0.
+			out := &jsArray{}
+			for _, e := range la.elems {
+				drop := false
+				for _, x := range ra.elems {
+					if rt.rubyEql(e, x) {
+						drop = true
+						break
 					}
 				}
-				return out
+				if !drop {
+					out.elems = append(out.elems, e)
+				}
 			}
+			return out
 		}
 	case "%":
 		if ls, ok := l.(string); ok {
@@ -13876,6 +13887,10 @@ func (rt *jsrt) rubyArrayMethod(t *jsArray, name string, args []interface{}) int
 			}
 			if hit {
 				hits++
+			}
+			// Each predicate stops at the first element that decides it.
+			if (name == "all?" && !hit) || (name == "one?" && hits > 1) || ((name == "any?" || name == "none?") && hit) {
+				break
 			}
 		}
 		switch name {

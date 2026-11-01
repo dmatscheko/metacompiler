@@ -5149,7 +5149,8 @@ function rbBin(op, l, r) {
             if (typeof r == "object" && rtTag(r, "__rbin")) { return rbBinCat(l, r) }
             return rbMkRStr(l + rbStrOperand(r), false)
         }
-        if (rbIsArr(l) && rbIsArr(r)) {
+        if (rbIsArr(l)) {
+            if (!rbIsArr(r)) { return rbBin(op, l, rbArrOperand(op, r)) }
             var out = rtCopyArr(l)
             var i = 0
             while (i < r.length) {
@@ -5188,7 +5189,8 @@ function rbBin(op, l, r) {
         // Array#- is eql?/hash, like uniq and unlike include?: MRI answers
         // `[1, 2.0] - [2]` with [1, 2.0] (rbPyEqual would convert across the
         // numeric classes and drop the 2.0).
-        if (rbIsArr(l) && rbIsArr(r)) {
+        if (rbIsArr(l)) {
+            if (!rbIsArr(r)) { return rbBin(op, l, rbArrOperand(op, r)) }
             var diff = []
             var a = 0
             while (a < l.length) {
@@ -5210,10 +5212,10 @@ function rbBin(op, l, r) {
     // Array#& (intersection) and Array#| (union). Both keep the LEFT-hand order,
     // both dedupe, and both compare with eql? like Array#- above.
     if (op == "&") {
-        if (rbIsArr(l) && rbIsArr(r)) { return rbArrAnd(l, r) }
+        if (rbIsArr(l)) { return rbArrAnd(l, rbArrOperand(op, r)) }
     }
     if (op == "|") {
-        if (rbIsArr(l) && rbIsArr(r)) { return rbArrOr(l, r) }
+        if (rbIsArr(l)) { return rbArrOr(l, rbArrOperand(op, r)) }
     }
     if (op == "%") {
         if (typeof l == "string") { return rbMkRStr(rbFormat(l, r, "%"), false) }
@@ -7927,6 +7929,8 @@ function rbArrayMethod(t, name, args) {
             else { hit = rbTruthy(t[qi]) }
             if (hit) { hits = hits + 1 }
             qi = qi + 1
+            // Each predicate stops at the first element that decides it.
+            if (name == "all?" ? !hit : (name == "one?" ? hits > 1 : hit)) { break }
         }
         if (name == "all?") { return hits == t.length }
         if (name == "any?") { return hits > 0 }
@@ -10458,6 +10462,17 @@ function rbStrOperand(r) {
     if (typeof cv == "string") { return cv }
     rbRaiseErr("+", "TypeError", "no implicit conversion of " + rbFmtConvName(r) + " into String")
     return ""
+}
+
+// The right side of Array#+, #-, #& and #|: an Array, or an object that converts
+// implicitly through #to_ary; anything else is MRI's TypeError. Twin of
+// rubyArrOperand in abnf/jsrt.go.
+function rbArrOperand(op, r) {
+    if (rbIsArr(r)) { return r }
+    var cv = rbFmtUserConv(r, "to_ary", "")
+    if (rbIsArr(cv)) { return cv }
+    rbRaiseErr(op, "TypeError", "no implicit conversion of " + rbFmtConvName(r) + " into Array")
+    return []
 }
 
 // An operator rbBin's String and Array arms did not take, on a value that is not

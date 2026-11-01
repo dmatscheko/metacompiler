@@ -1513,6 +1513,35 @@ def s155
                          UnboundMethod, [4, 2, 3], "#<UnboundMethod: B155#each>", [:nope, "undefined method `nope' for class `B155'"],
                          "bind argument must be an instance of B155", "#<Method: B155(Enumerable)#map>", [3, 6], true])
 end
+# ===== SECTION 156: all? / any? / none? / one? stop early; Array#+ - & | operand =====
+# Each predicate stops at the element that decides it (one? at the second hit),
+# over an Array, a Range and a Hash. Array#+, #-, #& and #| take an Array or a
+# #to_ary object; anything else is a TypeError, so `[[1], nil].sum([])` is
+# rescuable. /usr/bin/ruby 2.6 settles each.
+class S156A; def to_ary; [9]; end; end
+def s156
+  r = []
+  s = []; r << [1, 2, 3].any? { |x| s << x; true } << s
+  s = []; r << [1, 2, 3].all? { |x| s << x; false } << s
+  s = []; r << [1, 2, 3].none? { |x| s << x; true } << s
+  s = []; r << [1, 2, 3, 4].one? { |x| s << x; true } << s
+  s = []; r << (1..5).any? { |x| s << x; x == 2 } << s
+  s = []; r << (1..5).one? { |x| s << x; x > 1 } << s
+  s = []; r << {a: 1, b: 2}.all? { |k, v| s << k; false } << s
+  check("enm156a", r == [true, [1], false, [1], false, [1], false, [1, 2], true, [1, 2], false, [1, 2, 3],
+                         false, [:a]])
+  e = [[[1], nil], [[1], 3], ["a", nil]].map do |a|
+    begin; a.sum(a[0].is_a?(Array) ? [] : ""); rescue TypeError => x; x.message; end
+  end
+  w = [:+, :-, :&, :|].map do |op|
+    [begin; [1].send(op, nil); rescue TypeError => x; x.message; end, [1].send(op, S156A.new)]
+  end
+  check("ary156b", e == ["no implicit conversion of nil into Array", "no implicit conversion of Integer into Array",
+                         "no implicit conversion of nil into String"] &&
+                   w == [["no implicit conversion of nil into Array", [1, 9]], ["no implicit conversion of nil into Array", [1]],
+                         ["no implicit conversion of nil into Array", []], ["no implicit conversion of nil into Array", [1, 9]]] &&
+                   [[1], [2]].sum([]) == [1, 2])
+end
 s122() # SECTION-CALL 122
 s123() # SECTION-CALL 123
 s124() # SECTION-CALL 124
@@ -1547,5 +1576,6 @@ s152() # SECTION-CALL 152
 s153() # SECTION-CALL 153
 s154() # SECTION-CALL 154
 s155() # SECTION-CALL 155
+s156() # SECTION-CALL 156
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

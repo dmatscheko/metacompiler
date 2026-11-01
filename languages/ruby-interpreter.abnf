@@ -5617,15 +5617,15 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (isBin(l)) { return binMethod(l, op, [r], null) }
         if (isRStr(l) || isRStr(r) || isBin(r)) { return rbin(op, rsText(l), binText(r)) }
         if (Array.isArray(l)) {
-            if (op == "-" && Array.isArray(r)) { return arrDiff(l, r) }
+            if (op == "-") { return arrDiff(l, arrOperand(op, r)) }
             // Array#* is repetition with an Integer and JOIN with a String.
             if (op == "*" && typeof r == "string") { return arrJoin(l, r) }
             if (op == "*" && toF(r) < 0) { raiseErr("*", "ArgumentError", "negative argument") }
             if (op == "*") { return arrRepeat(l, r) }
             // Array#& (intersection) and Array#| (union). Both keep the LEFT-hand
             // order, both dedupe, and both compare with eql? like Array#- above.
-            if (op == "&" && Array.isArray(r)) { return arrAnd(l, r) }
-            if (op == "|" && Array.isArray(r)) { return arrOr(l, r) }
+            if (op == "&") { return arrAnd(l, arrOperand(op, r)) }
+            if (op == "|") { return arrOr(l, arrOperand(op, r)) }
         }
         // TrueClass / FalseClass / NilClass #& #| #^ are the NON-short-circuit logical
         // operators over the right side's truthiness (nil acts as false). Twin of
@@ -6303,8 +6303,20 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (isBin(l) || (isBin(r) && (typeof l == "string" || isRStr(l)))) { return binCat(l, r) }
         if (typeof l == "string") { return mkRStr(l + strOperand(r)) }
         if (isRStr(l)) { return mkRStr(l.__rs + strOperand(r)) }
-        if (Array.isArray(l) && Array.isArray(r)) { return l.concat(r) }
+        if (Array.isArray(l)) { return l.concat(arrOperand("+", r)) }
         return numBin("+", l, r)
+    }
+    // The right side of Array#+, #-, #& and #|: an Array, or an object that
+    // converts implicitly through #to_ary; anything else is MRI's TypeError
+    // (`[1] + nil`). Twins: rubyArrOperand in abnf/jsrt.go, rbArrOperand in
+    // lib/ruby-rt.metajs.
+    function arrOperand(op, r) {
+        if (Array.isArray(r)) { return r }
+        var cv = anytype
+        cv = fmtUserConv(r, "to_ary", "")
+        if (Array.isArray(cv)) { return cv }
+        raiseErr(op, "TypeError", "no implicit conversion of " + fmtConvName(r) + " into Array")
+        return []
     }
     // The right side of String#+: a String, or an object that converts implicitly
     // through #to_str; anything else is MRI's TypeError (`"a" + 1' does not
@@ -10884,6 +10896,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 else if (args.length > 0) { pv = rtest(caseEq(args[0], t[i])) }
                 else { pv = rtest(t[i]) }
                 if (pv) { hits = hits + 1 }
+                // Each predicate stops at the first element that decides it.
+                if (name == "all?" ? !pv : (name == "one?" ? hits > 1 : pv)) { break }
             }
             if (name == "all?") { return hits == t.length }
             if (name == "any?") { return hits > 0 }
