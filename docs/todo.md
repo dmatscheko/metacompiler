@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1068** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1069** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -100,9 +100,8 @@ Found by the CORE worker, round 15. The interpreter's stripWs deletes every ASCI
 strings.TrimSpace, native strips ASCII 9-13 and 32: `int.Parse(" 1 2 ")` and `int.Parse(" 1")` give three answers.
 .NET's NumberStyles.Integer allows leading/trailing white space (U+0009-U+000D, U+0020) only; settle with a real dotnet.
 
-### T-1065 csharp: `obj.P++` / `obj.P--` bypass the property setter · P3 · CS · IN PROGRESS (CS worker, round 11) [V]
-Spec-only. makeIncDec's field path reads/writes the raw slot instead of dispatching get/set like makeAssign (csFindAcc `__set_` / emitPropSet); the halves even disagree:
-`class A { public virtual int K { get => 7; set {} } } class B : A { public override int K { get; set; } } class D : B { public override int K { set { base.K = value + 100; } } }` then `D d = new D(); d.K++; Console.WriteLine(d.K);` -> spec 101; interpreter 0, run/native 1. Check prefix/postfix values, static properties and indexers (`a[i]++`) too.
+### T-1068 csharp: `o.P ??= x` reads the raw slot instead of the getter · P3 · CS · OPEN [V]
+Spec-only (ECMA-334 12.21.5). `class C { string s = "init"; public int Sets = 0; public string P { get { return s; } set { Sets++; s = value; } } }` then `C c = new C(); string r = c.P ??= "other"; Console.WriteLine(r + " " + c.P + " " + c.Sets);` -> spec `init init 0`; all three legs `other other 1`. makeRefRead (both C# grammars) uses hasOwn/js_get; route the qualified read through the getter dispatch csQualWrite already uses. Check indexers (`d[k] ??= v`, user `this[]`) and static properties too.
 
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
@@ -1130,6 +1129,7 @@ T-1052 ruby: Array </>/<=/>= should be NoMethodError; blockless/lazy Enumerators
 T-1061 csharp: base property writes; System.Type ToString; typeof namespace — DONE (CS r10, 31d2be99): base.K =/+=/++ call the base setter non-virtually; System.Type prints its FullName; typeof is namespace/outer-qualified (Demo.Outer+Inner), keyword types map to System.*; 3 legs agree with spec (probe: 31/3211 setter chain)
 T-1062 kotlin: javaClass/KClass leftovers (sequences, static-typed primitives, equality, reified) — PARTIAL→split (KT r22, 38b24c15): javaClass by static type for literals/declared names, KClass==java class equality, reified T::class (incl. forwarding; fixed 'T:Any' bound-in-name bug), kotlin.UInt/Unit/[I/java.util.* java names, lazy sequence{} chain classes; 4 legs = kotlinc. generateSequence class needs real lazy generators (subset limit, declined)
 T-1063 php: Exception data model - $previous/getPrevious(), real property layout — DONE (PHP r41, cf62ea41): Exception/Error declare php-src's 7-slot property table (visibility+defaults), $previous ctor arg + getPrevious(), finally-escape chaining with cycle guards; running-generator Error asserted previous-free; 3 legs agree with php-src (probe incl. protected-access error, foreach 0, (array) 7 keys)
+T-1065 csharp: `obj.P++` / `obj.P--` bypass the property setter — DONE (CS r11, 998e63fe): one csQualWrite per engine handles every qualified store (dict, user indexer, setter, Capacity, slot); ++/--/compound go through getter+setter; prefix/postfix values per ECMA-334 12.8.16; 3 legs agree with spec
 
 # Settled — do not re-open
 
