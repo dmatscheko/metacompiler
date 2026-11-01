@@ -5154,13 +5154,14 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         }
     }
     // items = [{cast}, operandThunk]
-    // (kind) of t at pos; with display_errors=1 an (int) or (float) is checked
-    // first (__mec_castchk). Twin of makeCast in php-interpreter.abnf.
+    // (kind) of t at pos; with display_errors=1 an (int), (float) or (string) is
+    // checked first (__mec_castchk). Twin of makeCast in php-interpreter.abnf.
     function makeCast(items, pos) {
         var kind = items[0].cast
         var t = items[1]
-        var num = kind == "int" || kind == "integer" || kind == "float" || kind == "double" || kind == "real"
-        var site = num ? diagSite("__mec_castchk", pos) : null
+        var chk = kind == "int" || kind == "integer" || kind == "float" || kind == "double" || kind == "real"
+            || kind == "string" || kind == "binary"
+        var site = chk ? diagSite("__mec_castchk", pos) : null
         return function(b) {
             var r = t(b)
             var cb = site == null ? r.b : site(r.b, [emitStr(r.b, kind), r.v])

@@ -1622,6 +1622,14 @@ function s39() {
         && wordwrap("A very long woooooooooooord.", 8, "\n", true) === "A very\nlong\nwooooooo\nooooord."
         && chunk_split("abcd", 2, "|") === "ab|cd|");
     check("str14", ord("A") === 65 && ord("") === 0 && chr(97) === "a" && chr(321) === "A");
+    check("html1", htmlspecialchars("<'\">", ENT_COMPAT) === "&lt;'&quot;&gt;" && htmlspecialchars("'\"", ENT_NOQUOTES) === "'\""
+        && htmlspecialchars("'", ENT_QUOTES | ENT_HTML5) === "&apos;" && htmlspecialchars("'", 1) === "&#039;"
+        && [ENT_QUOTES, ENT_SUBSTITUTE, ENT_XHTML, ENT_HTML5, ENT_DISALLOWED] === [3, 8, 32, 48, 128]);
+    check("html2", htmlspecialchars_decode("&lt;&#039;&#x27;&apos;&quot;&#65;&copy;") === "<''&apos;\"&#65;&copy;"
+        && htmlspecialchars_decode("&quot;&#39;", ENT_NOQUOTES) === "&quot;&#39;" && htmlspecialchars_decode("&apos;", ENT_QUOTES | ENT_HTML5) === "'");
+    check("html3", html_entity_decode("&copy;&euro;&#x1F600;&#0;&apos;&amp;amp;") === "\u{a9}\u{20ac}\u{1f600}&#0;&apos;&amp;"
+        && html_entity_decode("&apos;&copy;", ENT_QUOTES | ENT_XML1) === "'&copy;" && html_entity_decode("&apos;", ENT_QUOTES | ENT_XHTML) === "'"
+        && html_entity_decode("&amp") === "&amp" && html_entity_decode("&#1114112;&#xD800;&#X41;") === "&#1114112;&#xD800;A");
     check("fmt1", sprintf("%d items", 5) === "5 items" && sprintf("%05.2f", 3.14159) === "03.14" && sprintf("%-6s|", "ab") === "ab    |"
         && sprintf("%6s|", "ab") === "    ab|" && sprintf("%'*8s", "ab") === "******ab" && sprintf("%.3s", "abcdef") === "abc");
     check("fmt2", sprintf("%x %X %o %b", 255, 255, 8, 5) === "ff FF 10 101" && sprintf("%+d %+d", 5, -5) === "+5 -5"
@@ -2641,11 +2649,11 @@ class S59It extends ArrayIterator {
 }
 function s59() {
     $f = s59f();
-    check("mag1", $f[0] === "s59f" && $f[1] === "{closure:s59f():2603}|{closure:s59f():2603}"
-        && $f[2] === "{closure:s59f():2604}" && $f[3] === "{closure:{closure:s59f():2605}:2605}"
+    check("mag1", $f[0] === "s59f" && $f[1] === "{closure:s59f():2611}|{closure:s59f():2611}"
+        && $f[2] === "{closure:s59f():2612}" && $f[3] === "{closure:{closure:s59f():2613}:2613}"
         && $f[4] === "s59f");
     $m = (new S59C)->m();
-    check("mag2", $m[0] === "{closure:S59C::m():2610}|{closure:S59C::m():2610}|S59C"
+    check("mag2", $m[0] === "{closure:S59C::m():2618}|{closure:S59C::m():2618}|S59C"
         && $m[1] === "m" && $m[2] === "S59C::m" && (new S59H)->p === "\$p::get|S59H::\$p::get");
     check("spl1", class_exists('ArrayIterator') && class_exists('arrayobject') && class_exists("SplStack")
         && class_exists('SplObjectStorage') && interface_exists('SeekableIterator')

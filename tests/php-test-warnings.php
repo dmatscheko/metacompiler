@@ -152,6 +152,8 @@ $v = $ops[1] + 1; check("add-leading-numeric", [$v, lastErr()], [6, want(E_WARNI
 $v = $ops[1] % 3; check("mod-leading-numeric", [$v, lastErr()], [2, want(E_WARNING, 'A non-numeric value encountered', __LINE__)]);
 $v = $ops[3] * 2.0; check("mul-clean", lastErr(), null);
 $v = "x" . $ops[4]; check("concat-array", [$v, lastErr()], ["xArray", want(E_WARNING, 'Array to string conversion', __LINE__)]);
+$v = (string)$ops[4]; check("cast-string-array", [$v, lastErr()], ["Array", want(E_WARNING, 'Array to string conversion', __LINE__)]);
+$v = strval($ops[4]); check("strval-array", [$v, lastErr()], ["Array", want(E_WARNING, 'Array to string conversion', __LINE__)]);
 $cv = 7.5; $cv %= 2; check("mod-assign-float", [$cv, lastErr()], [1, want(E_DEPRECATED, 'Implicit conversion from float 7.5 to int loses precision', __LINE__)]);
 $v = "ab" | "  "; check("bitor-strings-clean", lastErr(), null);
 

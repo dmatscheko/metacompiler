@@ -9342,8 +9342,8 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         }
     }
     // items = [{cast}, operandThunk]
-    // (kind) of t at pos; with display_errors=1 an (int) or (float) is checked
-    // first (__mec_castchk). Twin of makeCast in php-to-llvm-ir.abnf.
+    // (kind) of t at pos; with display_errors=1 an (int), (float) or (string) is
+    // checked first (__mec_castchk). Twin of makeCast in php-to-llvm-ir.abnf.
     function makeCast(items, pos) {
         var kind = items[0].cast
         var t = items[1]
@@ -9357,8 +9357,9 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         }
     }
     function castChkSite(kind, pos) {
-        var num = kind == "int" || kind == "integer" || kind == "float" || kind == "double" || kind == "real"
-        return num ? diagSite("__mec_castchk", pos) : null
+        var chk = kind == "int" || kind == "integer" || kind == "float" || kind == "double" || kind == "real"
+            || kind == "string" || kind == "binary"
+        return chk ? diagSite("__mec_castchk", pos) : null
     }
     function phpCast(kind, v) {
         // (int) of an out-of-range float WRAPS modulo 2^64 rather than saturating:
