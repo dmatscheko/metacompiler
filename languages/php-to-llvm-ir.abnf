@@ -1875,6 +1875,43 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         return classFindF
     }
     function phClsFind(b, nameV) { return b.NewCall(classFindFn(), [curScopeV, nameV]) }
+    // php_cls_name(env, nm): the declared name of the class, interface or trait nm
+    // denotes in env, false for none (__mec_clsname).
+    var clsNameF = undefined
+    function clsNameFn() {
+        if (clsNameF == undefined) {
+            clsNameF = m.NewFunc("php_cls_name", i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("nm", i64)])
+            var env = clsNameF.Params[0]
+            var nm = clsNameF.Params[1]
+            var eb = clsNameF.NewBlock("entry")
+            var hitB = clsNameF.NewBlock("hit")
+            var missB = clsNameF.NewBlock("miss")
+            missB.NewRet(hFalse)
+            var cls = eb.NewCall(classFindFn(), [env, nm])
+            var isC = truthy(eb, callExt(eb, "js_phclsexists", [cls, nm, hFalse]))
+            var isI = truthy(eb, callExt(eb, "js_phclsexists", [cls, nm, hTrue]))
+            var some = eb.NewAnd(eb.NewICmp(llvm.enum.IPredNE, cls, hNull), eb.NewOr(isC, isI))
+            eb.NewCondBr(some, hitB, missB)
+            hitB.NewRet(callExt(hitB, "js_phcname", [cls]))
+        }
+        return clsNameF
+    }
+    // php_frame_cls(env, which): the name of the frame's self or static class
+    // (frameClsName), null outside a class.
+    var frameClsNameF = undefined
+    function frameClsNameV(b, env, which) {
+        if (frameClsNameF == undefined) {
+            frameClsNameF = m.NewFunc("php_frame_cls", i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("nm", i64)])
+            var eb = frameClsNameF.NewBlock("entry")
+            var hitB = frameClsNameF.NewBlock("hit")
+            var missB = frameClsNameF.NewBlock("miss")
+            missB.NewRet(hNull)
+            var cls = eb.NewCall(scopeProbeFn(), [frameClsNameF.Params[0], frameClsNameF.Params[1], hNull])
+            eb.NewCondBr(eb.NewICmp(llvm.enum.IPredEQ, cls, hNull), missB, hitB)
+            hitB.NewRet(callExt(hitB, "js_phcname", [cls]))
+        }
+        return b.NewCall(frameClsNameF, [env, emitStr(b, frameClsName(which))])
+    }
     // A class-or-object argument: a string becomes the descriptor it names (null
     // when none), anything else passes as it is.
     function phClsArg(b, v) {
@@ -7263,6 +7300,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             cbVisChk(restB, env, v, hNull, where)
             restB.NewBr(okB)
         }
+        notStrB = cbCompound(f, notStrB, env, v, where)
         notStrB.NewCondBr(truthy(notStrB, callExt(notStrB, "js_phcbarr", [v, where])), arrB, restB)
         var cnA = callExt(arrB, "js_phstr", [callExt(arrB, "js_phget", [v, emitNum(arrB, 0)])])
         var mnA = callExt(arrB, "js_phstr", [callExt(arrB, "js_phget", [v, emitNum(arrB, 1)])])
@@ -7273,6 +7311,35 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         cbVisChk(arrB, env, v, clsA, where)
         arrB.NewBr(okB)
         return f
+    }
+    // [$object_or_class, "K::m"] is the closure __mec_cbcompound makes of it in
+    // env's frame, when the program compiled that function (makeCall); the check
+    // answers that closure. Answers the block any other v continues in. Twin of
+    // cbCompound in php-interpreter.abnf.
+    function cbCompound(f, b, env, v, where) {
+        var arrB = f.NewBlock("")
+        var strB = f.NewBlock("")
+        var sepB = f.NewBlock("")
+        var callB = f.NewBlock("")
+        var cloB = f.NewBlock("")
+        var contB = f.NewBlock("")
+        b.NewCondBr(truthy(b, callExt(b, "js_phis", [emitStr(b, "array"), v])), arrB, contB)
+        var mV = callExt(arrB, "js_phget", [v, emitNum(arrB, 1)])
+        arrB.NewCondBr(truthy(arrB, callExt(arrB, "js_phis", [emitStr(arrB, "string"), mV])), strB, contB)
+        var atV = callExt(strB, "js_phstrpos", [mV, emitStr(strB, "::"), hNull])
+        strB.NewCondBr(truthy(strB, callExt(strB, "js_phis", [emitStr(strB, "int"), atV])), sepB, contB)
+        var fnV = sepB.NewCall(scopeProbeFn(), [env, emitStr(sepB, "__mec_cbcompound"), hNull])
+        sepB.NewCondBr(sepB.NewICmp(llvm.enum.IPredEQ, fnV, hNull), contB, callB)
+        var argsV = callExt(callB, "js_arr_new", [])
+        callExt(callB, "js_arr_push", [argsV, v])
+        callExt(callB, "js_arr_push", [argsV, where])
+        callExt(callB, "js_arr_push", [argsV, callB.NewCall(scopeProbeFn(), [env, emitStr(callB, "$this"), hNull])])
+        callExt(callB, "js_arr_push", [argsV, frameClsNameV(callB, env, "self")])
+        callExt(callB, "js_arr_push", [argsV, frameClsNameV(callB, env, "static")])
+        var cloV = callExt(callB, "js_call", [fnV, hUndef, argsV])
+        callB.NewCondBr(truthy(callB, callExt(callB, "js_phis", [emitStr(callB, "array"), cloV])), contB, cloB)
+        cloB.NewRet(cloV)
+        return contB
     }
     // A static method of Closure named through the class is a valid callback
     // (js_phclost): it branches to okB. Answers the block anything else continues in.
@@ -7368,7 +7435,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             || name == "is_a" || name == "is_subclass_of" || name == "get_parent_class"
             || name == "define" || name == "defined" || name == "constant" || name == "error_reporting"
             || phpIsKind(name) != "" || phpNativeExt(name) != "" || name == "strtolower" || name == "strtoupper"
-            || name == "__mec_callable" || name == "__mec_ifaces" || name == "realpath"
+            || name == "__mec_callable" || name == "__mec_ifaces" || name == "__mec_clsname" || name == "realpath"
     }
     // The natives lib/php-stdlib.php is written on, each ONE extern taking its
     // arguments in order, an absent optional one as null (abnf/jsrtphpstr.go,
@@ -7568,6 +7635,12 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             var allowV = vs.length > 2 ? vs[2] : sub
             return {b: inst.b, v: callExt(inst.b, "js_phisaof", [vs[0], inst.v, vs[1], allowV, sub])}
         }
+        // __mec_clsname($name): the declared name of the class $name denotes, false
+        // for none. Twin of the native in php-interpreter.abnf.
+        if (name == "__mec_clsname") {
+            var cnN = callExt(b, "js_phstr", [vs[0]])
+            return {b: b, v: b.NewCall(clsNameFn(), [curScopeV, cnN])}
+        }
         if (name == "__mec_ifaces") {
             var ia = phClsArg(b, vs[0])
             return {b: ia.b, v: callExt(ia.b, "js_phifaces", [ia.v])}
@@ -7638,19 +7711,26 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     // caller, which the library function's own frame does not have. Twin of
     // callerCallable in php-interpreter.abnf. The check raises at the call's own
     // site, as the library's callback checks below do.
-    function callerCallable(a, name, raw, site) {
+    function callerCallable(a, name, raw, site, dsite) {
         return {pos: function(b) {
             var r = a.pos(b)
             siteStore(r.b, site)
             if (raw != null) { raw.v = r.v }
             var where = emitStr(r.b, name + "(): Argument #1 ($callback) must be a valid callback")
-            return callableV(r.b, cbCheckV(r.b, r.v, where, true, false), true, false)
+            var db = cbDepr(r.b, dsite, r.v)
+            return callableV(db, cbCheckV(db, r.v, where, true, false), true, false)
         }}
+    }
+    // The deprecations of callback cbV, checked in this frame, at dsite (makeCall;
+    // null for none). Answers the block. Twin of cbDepr in php-interpreter.abnf.
+    function cbDepr(b, dsite, cbV) {
+        if (dsite == null) { return b }
+        return dsite(b, [cbV, frameClsNameV(b, curScopeV, "self"), frameClsNameV(b, curScopeV, "static")])
     }
     // is_callable($v): the check call_user_func makes, in this frame, inside a try
     // whose TypeError answers false. syntax_only and callable_name are not
     // modelled. Twin of phpIsCallable in php-interpreter.abnf.
-    function makeIsCallable(a) {
+    function makeIsCallable(a, dsite) {
         hidCount++
         var vName = "0icv" + hidCount
         var okName = "0icok" + hidCount
@@ -7664,7 +7744,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                             {catchbody: function(b) { return b }, catchname: undefined, catchtype: ["TypeError"]}])
         return function(b) {
             var r = a.pos(b)
-            b = r.b
+            b = cbDepr(r.b, dsite, r.v)
             callExt(b, "js_pyset_var", [curScopeV, emitStr(b, vName), r.v])
             callExt(b, "js_pyset_var", [curScopeV, emitStr(b, okName), hFalse])
             b = tryS(b)
@@ -7708,11 +7788,12 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     // first, and it is the last argument. One at a fixed position is judged once
     // every argument is, after the array $array before it (libChecks on the
     // argument list). Twin of libArgs in php-interpreter.abnf.
-    function libCallable(a, where, site) {
+    function libCallable(a, where, site, dsite) {
         return {pos: function(b) {
             var r = a.pos(b)
             siteStore(r.b, site)
-            return callableV(r.b, cbCheckV(r.b, r.v, emitStr(r.b, where), true, false), true, false)
+            var db = cbDepr(r.b, dsite, r.v)
+            return callableV(db, cbCheckV(db, r.v, emitStr(db, where), true, false), true, false)
         }}
     }
     // call_user_func(f, ...): when f names a library function that takes a
@@ -7743,7 +7824,8 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     }
     // pa, when given, says argsV is a PHP array (cufaArr): pa.a0 and pa.at are
     // the keys of $array and of the callback, pa.where the TypeError's wording.
-    function libChecks(b, argsV, name, cb, at, pa) {
+    // dsite raises the callback's deprecations first (cbDepr).
+    function libChecks(b, argsV, name, cb, at, pa, dsite) {
         var getX = pa == undefined ? "js_get" : "js_phget"
         var atK = pa == undefined ? emitNum(b, at) : pa.at
         if (cb.arr > 0) {
@@ -7765,6 +7847,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         var joinB = curF.NewBlock("")
         if (cb.nul) { b.NewCondBr(b.NewICmp(llvm.enum.IPredEQ, cbV, hNull), joinB, bindB) } else { b.NewBr(bindB) }
         var whereV = pa == undefined ? emitStr(bindB, libCbWhere(name, cb, at)) : pa.where
+        bindB = cbDepr(bindB, dsite == undefined ? null : dsite, cbV)
         var chkV = cbCheckV(bindB, cbV, whereV, true, false)
         // A function's name stays as it is, for the library to call by name and
         // its trace to show; any other callable is bound here. Twin of cbResolve in
@@ -7964,6 +8047,15 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         if (phpLibDynCall(phsCase(bare, false), cbAt == undefined ? 1000 : cbAt.at, args, "aname", "aspread")) { phpLibAll() }
         // call_user_func of a library function that takes a callback: that callback
         // is judged here too, the first user frame (cufLib).
+        // The program's check of a callback in this frame: [$object_or_class, "K::m"]
+        // needs __mec_cbcompound, and with display_errors=1 the callable's
+        // deprecations are raised first (__mec_cbdepr). Twin of makeCall in
+        // php-interpreter.abnf.
+        var cbLc = phsCase(name, false)
+        var cbChk = site != 0 && (cbLc == "call_user_func" || cbLc == "call_user_func_array" || cbLc == "is_callable"
+                                  || libCbArg["$" + cbLc] != undefined)
+        if (cbChk) { phpLibRef("__mec_cbcompound", true) }
+        var cbdSite = cbChk ? diagSite("__mec_cbdepr", start) : null
         var cufRaw = null
         if ((name == "call_user_func" || name == "call_user_func_array") && args.length > 0
             && args[0].pos != undefined && args[0].aname == undefined) {
@@ -7972,12 +8064,12 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             if (name == "call_user_func_array" && args.length == 2 && argsArePlain(args) && libDynSite()) {
                 cufRaw = {v: hUndef, arr: true}
             }
-            args[0] = callerCallable(args[0], name, cufRaw, site)
+            args[0] = callerCallable(args[0], name, cufRaw, site, cbdSite)
         }
         if (cufOp) { return function(b) { return emitCufOp(b, name, args, cufRaw, site) } }
         if (name == "is_callable" && args.length > 0 && args[0].pos != undefined && args[0].aname == undefined) {
             nsUsed = true
-            return makeIsCallable(args[0])
+            return makeIsCallable(args[0], cbdSite)
         }
         var lcName = phsCase(name, false)
         var libCb = libCbArg["$" + lcName] == undefined ? null : libCbArg["$" + lcName]
@@ -7986,7 +8078,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         if (libCb != null && libCb.at < 0 && args.length > libN && argsArePlain(args)) {
             nsUsed = true
             for (var lk = args.length - libN; lk < args.length; lk++) {
-                args[lk] = libCallable(args[lk], libCbWhere(lcName, libCb, lk), site)
+                args[lk] = libCallable(args[lk], libCbWhere(lcName, libCb, lk), site, cbdSite)
             }
         } else if (libCb != null && libCb.at >= 0
                    && ((args.length > libCb.at && argsArePlain(args.slice(0, libCb.at + 1))) || libNamedCb(args, libCb))) {
@@ -8043,7 +8135,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             b = ea.b
             if (libFixed) {
                 siteStore(b, site)
-                b = libChecks(b, ea.v, lcName, libCb, libCb.at)
+                b = libChecks(b, ea.v, lcName, libCb, libCb.at, undefined, cbdSite)
             }
             if (cufRaw != null && cufRaw.arr === true) {
                 var cufaV = b.NewCall(libDynArrFn(), [curScopeV, cufRaw.v, callExt(b, "js_get", [ea.v, emitNum(b, 1)])])

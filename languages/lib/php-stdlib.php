@@ -6,13 +6,14 @@
 // all run this one text and agree by construction. It is written on the engine
 // natives - count, strlen, array_push, array_values, array_key_exists,
 // array_key_last, array_pop, substr, strpos, strrpos, strcmp, ord, chr,
-// strtolower, strtoupper (lib/php-strings.js, abnf/jsrtphpstr.go) and nine
+// strtolower, strtoupper (lib/php-strings.js, abnf/jsrtphpstr.go) and ten
 // intrinsics: __mec_fmtfloat for sprintf's float conversions ("r" is the
 // shortest digits serialize_precision=-1 lays out), __mec_math for
 // the math library's double operations, __mec_aptr for the internal array
 // pointer, __mec_precision for the precision setting, __mec_oid for an
 // object's handle, __mec_callable for the TypeError of an invalid callback
-// argument, __mec_ifaces for the interfaces a class names and __mec_pregc /
+// argument, __mec_ifaces for the interfaces a class names, __mec_clsname for
+// the declared name of the class a name denotes (false for none) and __mec_pregc /
 // __mec_pregx for preg_* (lib/php-preg.js). A native also gets a
 // wrapper here of the same name, which is what a string callable or f(...)
 // reaches: a direct call never does, since the call is lowered to the native
@@ -675,6 +676,95 @@ function array_uintersect_uassoc($array, ...$rest) { [$cb, $kcb] = __mec_takecb(
 // keeps it (zend_call_function).
 function call_user_func($callback, ...$args) { return $callback(...$args); }
 function call_user_func_array($callback, $args) { return $callback(...($args)); }
+// The class a callable's class part $name denotes, checked in class scope $scope
+// with called scope $static (names, or null): [its name, the "self", "parent" or
+// "static" that names it relatively], or null for none
+// (zend_is_callable_check_class).
+function __mec_cbclass($name, $scope, $static) {
+    $lc = strtolower($name);
+    if ($lc === "self") { return $scope === null ? null : [$scope, "self"]; }
+    if ($lc === "parent") {
+        $p = $scope === null ? false : get_parent_class($scope);
+        return $p === false ? null : [$p, "parent"];
+    }
+    if ($lc === "static") { return $static === null ? null : [$static, "static"]; }
+    $c = __mec_clsname($name);
+    return $c === false ? null : [$c, null];
+}
+// The byte offset of the "::" splitting a callable's method part "K::m" (the
+// last one), or false (zend_is_callable_check_func).
+function __mec_cbsep($m) {
+    $at = strrpos($m, ":");
+    return $at !== false && $at > 0 && $m[$at - 1] === ":" ? $at - 1 : false;
+}
+// The deprecations checking callable $cb in a frame of class scope $scope and
+// called scope $static raises (zend_is_callable_at_frame): "self::m" or
+// ["self", "m"] (or parent, static) whose class it reaches, then
+// [$object_or_class, "K::m"] whose K the array's own class is an instance of.
+function __mec_cbdepr($cb, $scope, $static, $file = null, $line = 0) {
+    if (is_string($cb)) {
+        $org = null;
+        $m = $cb;
+    } elseif (is_array($cb) && count($cb) == 2 && array_key_exists(0, $cb) && array_key_exists(1, $cb) && is_string($cb[1])) {
+        $m = $cb[1];
+        if (is_object($cb[0])) {
+            $org = get_class($cb[0]);
+        } elseif (is_string($cb[0])) {
+            $k = __mec_cbclass($cb[0], $scope, $static);
+            if ($k === null) { return; }
+            if ($k[1] !== null) { __mec_diag(8192, "Use of \"" . $k[1] . "\" in callables is deprecated", $file, $line); }
+            $org = $k[0];
+        } else { return; }
+    } else { return; }
+    $at = __mec_cbsep($m);
+    if ($at === false || $at == 0) { return; }
+    $k = __mec_cbclass(substr($m, 0, $at), $org ?? $scope, $static);
+    if ($k === null) { return; }
+    if ($org === null) {
+        if ($k[1] !== null) { __mec_diag(8192, "Use of \"" . $k[1] . "\" in callables is deprecated", $file, $line); }
+    } elseif (is_a($org, $k[0], true)) {
+        __mec_diag(8192, "Callables of the form [\"" . $org . "\", \"" . $m . "\"] are deprecated", $file, $line);
+    }
+}
+// The TypeError of an invalid callback: $where, then why.
+function __mec_cbfail($where, $why) {
+    throw new TypeError($where . (substr($where, -1) === ":" ? " " : ", ") . $why);
+}
+// The callable [$object_or_class, "K::m"] as a closure: K is checked against the
+// array's own class (an instance of it) and the method is K's, called without
+// virtual dispatch on the object, or for a class name on the frame's $this ($this_)
+// when that is an instance (zend_is_callable_check_func). An invalid one is the
+// TypeError $where begins; any other callable is answered as it is.
+function __mec_cbcompound($cb, $where, $this_, $scope, $static) {
+    if (!is_array($cb) || count($cb) != 2 || !array_key_exists(0, $cb) || !array_key_exists(1, $cb) || !is_string($cb[1])) { return $cb; }
+    $m = $cb[1];
+    $at = __mec_cbsep($m);
+    if ($at === false) { return $cb; }
+    if (is_object($cb[0])) {
+        $org = get_class($cb[0]);
+        $obj = $cb[0];
+    } elseif (is_string($cb[0])) {
+        $k = __mec_cbclass($cb[0], $scope, $static);
+        if ($k === null) { return $cb; }
+        $org = $k[0];
+        $obj = is_object($this_) && $this_ instanceof $org ? $this_ : null;
+    } else { return $cb; }
+    if ($at == 0) { __mec_cbfail($where, "invalid function name"); }
+    $cname = substr($m, 0, $at);
+    $k = __mec_cbclass($cname, $org, $static);
+    if ($k === null) {
+        $lc = strtolower($cname);
+        __mec_cbfail($where, $lc === "parent" ? "cannot access \"parent\" when current class scope has no parent"
+            : ($lc === "static" ? "cannot access \"static\" when no class scope is active" : "class \"" . $cname . "\" not found"));
+    }
+    $cls = $k[0];
+    if (!is_a($org, $cls, true)) { __mec_cbfail($where, "class " . $org . " is not a subclass of " . $cls); }
+    $mn = substr($m, $at + 2);
+    if (!method_exists($cls, $mn) && !method_exists($cls, "__call") && !method_exists($cls, "__callStatic")) {
+        __mec_cbfail($where, "class " . $cls . " does not have a method \"" . $mn . "\"");
+    }
+    return Closure::bind(function (...$args) use ($mn) { return self::$mn(...$args); }, $obj, $cls);
+}
 function array_map($callback, $array, ...$arrays) {
     if ($callback !== null) { __mec_callable($callback, 'array_map(): Argument #1 ($callback) must be a valid callback or null'); }
     if (!is_array($array)) {

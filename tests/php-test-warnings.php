@@ -286,6 +286,29 @@ $v = array_key_exists($fk[1], $fa); check("key-float-key-exists-integral", [$v, 
 unset($fa[$fk[2]][$fk[3]]); check("key-float-unset-nested", [$fa, lastErr()], [[1 => "one", 4 => []], want(E_DEPRECATED, 'Implicit conversion from float 0.5 to int loses precision', __LINE__)]);
 unset($fa[$fk[0]]); check("key-float-unset", [$fa, lastErr()], [[4 => []], want(E_DEPRECATED, 'Implicit conversion from float 1.5 to int loses precision', __LINE__)]);
 
+// ----- callables naming a class relatively (zend_is_callable_at_frame) -----
+// "parent::m" or ["static", "m"] whose class is reached, and [$object_or_class,
+// "K::m"] whose K the array's own class is an instance of, judged in the frame
+// that hands the callable over; the latter calls K's method itself.
+class WarnCbA { public function m($x) { return "A" . $x; } public static function s() { return "As"; } }
+class WarnCbB extends WarnCbA {
+    public function m($x) { return "B" . $x; }
+    public static function s() { return "Bs"; }
+    public function go() {
+        $v = call_user_func([$this, "parent::m"], 1); check("cb-compound", [$v, lastErr()], ["A1", want(E_DEPRECATED, 'Callables of the form ["WarnCbB", "parent::m"] are deprecated', __LINE__)]);
+        $v = is_callable([$this, "parent::m"]); check("cb-compound-is-callable", [$v, lastErr()], [true, want(E_DEPRECATED, 'Callables of the form ["WarnCbB", "parent::m"] are deprecated', __LINE__)]);
+        $v = array_map([$this, "parent::m"], [2]); check("cb-compound-array-map", [$v, lastErr()], [["A2"], want(E_DEPRECATED, 'Callables of the form ["WarnCbB", "parent::m"] are deprecated', __LINE__)]);
+        $v = call_user_func_array(["WarnCbB", "parent::s"], []); check("cb-compound-class", [$v, lastErr()], ["As", want(E_DEPRECATED, 'Callables of the form ["WarnCbB", "parent::s"] are deprecated', __LINE__)]);
+        $v = call_user_func("parent::s"); check("cb-parent-string", [$v, lastErr()], ["As", want(E_DEPRECATED, 'Use of "parent" in callables is deprecated', __LINE__)]);
+        $v = call_user_func(["static", "s"]); check("cb-static-array", [$v, lastErr()], ["Bs", want(E_DEPRECATED, 'Use of "static" in callables is deprecated', __LINE__)]);
+        $v = call_user_func([$this, "m"], 3); check("cb-plain", [$v, lastErr()], ["B3", null]);
+    }
+}
+(new WarnCbB)->go();
+$v = is_callable([new WarnCbA, "parent::m"]); check("cb-compound-no-parent", [$v, lastErr()], [false, null]);
+try { call_user_func([new WarnCbA, "parent::m"]); $v = "none"; } catch (TypeError $e) { $v = $e->getMessage(); }
+check("cb-compound-no-parent-error", $v, 'call_user_func(): Argument #1 ($callback) must be a valid callback, cannot access "parent" when current class scope has no parent');
+
 // ----- done -----
 echo "warnings: " . $checks . " checks, " . $fails . " failures\n";
 exit($fails);

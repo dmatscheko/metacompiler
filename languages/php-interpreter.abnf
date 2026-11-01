@@ -4788,7 +4788,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                 var cn = relName(cur.substring(0, sep))
                 return dynStatic(cn, cur.substring(sep + 2), argset)
             }
-            libArgs(cur, argset)
+            libArgs(cur, argset, null)
             return callDyn(cur, argset)
         }
         if (isArr(cur)) {
@@ -5120,10 +5120,21 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // TypeError answers false. syntax_only and callable_name are not modelled.
     // Twin of makeIsCallable in php-to-llvm-ir.abnf.
     function phpIsCallable(v) {
+        // The check may call into the library (cbCompound), whose frame a TypeError
+        // leaves unwound here, as a catch clause would (excTryTyped).
+        var sc = scopes.slice()
+        var dep = coreDepth
+        var top = phpTop
         try {
             phpCheckCallback(v, "is_callable()", true, false)
         } catch (e) {
-            if (excIsUser(e) && isObj(e.v) && e.v.__class.__name == "TypeError") { return false }
+            if (excIsUser(e) && isObj(e.v) && e.v.__class.__name == "TypeError") {
+                scopes = sc
+                coreDepth = dep
+                callsUnwound(dep)
+                phpTop = top
+                return false
+            }
             throw e
         }
         return true
@@ -5138,6 +5149,15 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             cbFail(where, "cannot access " + (acc == 1 ? "private" : "protected") + " method " + cls.__name + "::" + mname + "()")
         }
     }
+    // [$object_or_class, "K::m"] as the closure __mec_cbcompound makes of it in this
+    // frame, when the program compiled it (cbLibRef); any other cur as it is. Twin
+    // of php_cbcheck in php-to-llvm-ir.abnf.
+    function cbCompound(cur, where) {
+        if (cur.keys.length != 2 || typeof arrGet(cur, 1) != "string" || arrGet(cur, 1).indexOf("::") < 0) { return cur }
+        if (!varExists("__mec_cbcompound")) { return cur }
+        return callNamed("__mec_cbcompound", argsOf([cur, where, frameThis(), clsNameOr(ctxSelf()), clsNameOr(ctxStatic())]))
+    }
+    function clsNameOr(k) { return k == null || k == undefined ? null : k.__name }
     // ns says the check runs in the frame the callback is named in (cbNonStatic); a
     // library function's own check runs in its frame and leaves that to the caller's.
     // internal says the check runs in a method of an internal class (CB_INT).
@@ -5155,6 +5175,9 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             cbFail(where, "function \"" + cur + "\" not found or invalid function name")
         }
         if (isArr(cur)) {
+            var cc = anytype
+            cc = cbCompound(cur, where)
+            if (typeof cc == "function") { return cc }
             if (cur.keys.length != 2) { cbFail(where, "array callback must have exactly two members") }
             var recv = anytype
             recv = arrGet(cur, 0)
@@ -6855,6 +6878,10 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                     "$array_udiff_uassoc": {at: -2, nul: false, arr: 0},
                     "$array_uintersect_uassoc": {at: -2, nul: false, arr: 0}}
     // The TypeError's wording for the callback at position at.
+    // The deprecations of callback cb, checked in this frame, at dsite (makeCall).
+    function cbDepr(dsite, cb) {
+        if (dsite != null) { dsite([cb, clsNameOr(ctxSelf()), clsNameOr(ctxStatic())]) }
+    }
     function libCbWhere(name, cb, at) {
         return name + "(): Argument #" + (at + 1) + (cb.at < 0 ? "" : " ($callback)") + " must be a valid callback"
                + (cb.nul ? " or null" : "")
@@ -6866,8 +6893,9 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // before the callback is checked first; the arguments are all evaluated by
     // then. A direct call and a call through a function's name both come here, and
     // so do a callback and an array passed by name.
+    // dsite, when not null, raises the callback's deprecations first (makeCall).
     // Twin of libCallable, libChecks and emitLibDyn in php-to-llvm-ir.abnf.
-    function libArgs(name, argset) {
+    function libArgs(name, argset, dsite) {
         var lc = phsCase(fnName(name), false)
         if (!hasOwn(libCbArg, "$" + lc)) { return }
         var cb = libCbArg["$" + lc]
@@ -6891,14 +6919,14 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             var cv = anytype
             cv = nm["$callback"]
             if (cv === null && cb.nul) { return }
-            phpCheckCallback(cv, libCbWhere(lc, cb, at), true, false)
-            scopePut(nm, "$callback", cbResolve(cv, false))
+            cbDepr(dsite, cv)
+            scopePut(nm, "$callback", cbResolve(phpCheckCallback(cv, libCbWhere(lc, cb, at), true, false), false))
             return
         }
         for (var k = at; k < at + n; k++) {
             if (pos[k] === null && cb.nul) { continue }
-            phpCheckCallback(pos[k], libCbWhere(lc, cb, k), true, false)
-            pos[k] = cbResolve(pos[k], false)
+            cbDepr(dsite, pos[k])
+            pos[k] = cbResolve(phpCheckCallback(pos[k], libCbWhere(lc, cb, k), true, false), false)
         }
     }
     // A method callable whose method some class restricts, which the CALLER's class
@@ -6965,8 +6993,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         return function(a2) { return staticCall(cls, mn, a2, cn, bound) }
     }
     function callerCallable(cur, fname) {
-        phpCheckCallback(cur, fname + "(): Argument #1 ($callback) must be a valid callback", true, false)
-        return cbResolve(cur, false)
+        return cbResolve(phpCheckCallback(cur, fname + "(): Argument #1 ($callback) must be a valid callback", true, false), false)
     }
     // A checked callback bound in the frame it is handed over in: a method some
     // class restricts as visBound binds it, a method named through its class as
@@ -7040,6 +7067,13 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         var resolveCb = name == "call_user_func" || name == "call_user_func_array"
         var libCb = hasOwn(libCbArg, "$" + phsCase(name, false))
         var site = callSite(start)
+        // The program's check of a callback in this frame: [$object_or_class, "K::m"]
+        // needs __mec_cbcompound, and with display_errors=1 the callable's
+        // deprecations are raised first (__mec_cbdepr). Twin of makeCall in
+        // php-to-llvm-ir.abnf.
+        var cbChk = site != "" && (resolveCb || libCb || name == "is_callable")
+        if (cbChk) { phpLibRef("__mec_cbcompound", true) }
+        var cbdSite = cbChk ? diagSite("__mec_cbdepr", start) : null
         // A native whose arguments zpp reads for this site is called as its
         // library declaration too (nativeRefuses).
         if (site != "" && hasOwn(phpBuiltins, name) && !fccLib && phpLibZppNative(name) && (diagOn || strictFiles[c.curFileAbs()] === true)) {
@@ -7081,6 +7115,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                 return phpCast(opCast, argset.pos[0])
             }
             if (akeSite != null) { akeSite([argset.pos[1], argset.pos[0]]) }
+            if (cbdSite != null && !libCb && argset.pos.length > 0) { cbDepr(cbdSite, argset.pos[0]) }
             if (resolveCb && argset.pos.length > 0) {
                 argset.pos[0] = callerCallable(argset.pos[0], name)
                 // call_user_func of a library function that takes a callback: that
@@ -7088,7 +7123,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                 // in php-to-llvm-ir.abnf.
                 if (name == "call_user_func" && typeof argset.pos[0] == "string") {
                     var inner = {pos: argset.pos.slice(1), named: argset.named, holes: [], fcc: false}
-                    libArgs(argset.pos[0], inner)
+                    libArgs(argset.pos[0], inner, null)
                     for (var ii = 0; ii < inner.pos.length; ii++) { argset.pos[ii + 1] = inner.pos[ii] }
                 }
                 if (name == "call_user_func_array" && typeof argset.pos[0] == "string" && argset.pos.length > 1
@@ -7097,7 +7132,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                 }
             }
             if (cufOp) { return phpInvoke(argset.pos[0], cufArgs(name, argset, site)) }
-            if (libCb) { libArgs(name, argset) }
+            if (libCb) { libArgs(name, argset, cbdSite) }
             // f(1, ?) / f(1, ...) is a PARTIAL: bind what is there, wait for the rest.
             if (isPartial(argset)) {
                 var pname = name
@@ -7115,7 +7150,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                 if (libCb) {
                     var lf = getVar(name)
                     var lname = name
-                    return fnFresh(function(a2) { libArgs(lname, a2); return lf(a2) }, lf)
+                    return fnFresh(function(a2) { libArgs(lname, a2, null); return lf(a2) }, lf)
                 }
                 var df = anyCase ? fnGet(name) : getVar(name)
                 return fnFresh(df, df)
@@ -7176,7 +7211,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             if (typeof arr.keys[i] == "number") { inner.pos.push(deref(arr.vals[i])) }
             else { scopePut(inner.named, "$" + arr.keys[i], deref(arr.vals[i])) }
         }
-        libArgs(f, inner)
+        libArgs(f, inner, null)
         var out = arrCopy(arr)
         var p = 0
         for (var j = 0; j < arr.keys.length; j++) {
@@ -8211,6 +8246,10 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         "__mec_callable": function(cb, where) { return phpCheckCallback(cb, phpStr(where), true, false) },
         "is_callable": function(v) { return phpIsCallable(v) },
         "__mec_ifaces": function(v) { return phpIfaceNames(v) },
+        "__mec_clsname": function(v) {
+            var k = findClass(phpStr(v))
+            return k == null ? false : k.__name
+        },
         "__mec_math": function(op, x, y) { return mkFlo(phsMath(phpStr(op), numOf(toNumV(x)), numOf(toNumV(y)))) },
         // preg_*'s compile and match (lib/php-preg.js). Twins of js_phpregc and
         // js_phpregx in abnf/jsrtphppreg.go and lib/php-rt.metajs.
