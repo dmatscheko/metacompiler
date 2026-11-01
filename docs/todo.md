@@ -182,19 +182,6 @@ range 0..2: 7` (a plain RangeError); the current engines print the IndexError fo
 `RangeError (index): Index out of range: index should be less than 3: 7`, which is
 believed to be the modern VM's. Leave as is unless a real dart run settles it.
 
-### T-925 parse time grows exponentially with bracket nesting in seven grammars, both halves · P1 · CORE · IN PROGRESS (CORE worker, round 17) [V]
-Found by the corpus sweep (go torture.go, swift structure_overflow.swift, dart deep_nesting_expression_test.dart time out).
-Measured on an idle machine, interpreter half (the compiler halves grow the same):
-kotlin `println((((((1))))))`: depth 6 1.85 s, 7 6.99 s, 8 27.2 s (x4/level); the real-shaped
-`val r = ((((((a + 1) * 2) + v[1]) * 2) + v[2]) * 2)` takes 2.4 s. php `[1, [1, [1, …]]]`: depth 4 0.17 s, 5 0.30, 6 0.83, and per
-the finder 16.6 s at 6 under load, >60 s at 10. Finder measurements, each about x1.6-2.3 per level: python `[[`/`((` (6.2 s at
-depth 15; JSON-shaped `[{"k": [{"k": …}]}]` 2.4 s at 6), swift `[[` (>60 s at 20), dart `((` (12.2 s at 10), c `((` (5.8 s at
-11), go nested index `s[s[s[…]]]` (11 s at 16). js, ts, java, csharp, ruby, lua and bash are linear. The trigger in each is an
-alternative that re-parses the whole bracket body before failing (kotlin lambda/destructuring/parenthesised callee, php list
-destructuring target, python comprehension/genexp, swift array/dict/type, go generic instantiation). Decide first between a
-per-grammar fix (cut or reorder each alternative) and memoising rule results at a position in the PEG engine (abnf/), which
-fixes all seven at once; measure the memo cost on the matrix. Shared: the seven grammars.
-
 # Closed
 
 (The master moves DONE / DECLINED tickets here, one line each:
@@ -1098,6 +1085,7 @@ T-1001 java interpreter: default method from a more specific superinterface lose
 T-1007 c#: `string.CompareOrdinal` of an astral character vs an ASCII one has the wrong sign — DECLINED: not reproducible - csxCompareOrdinal already compares UTF-16 code units in all legs; regression assertion s48o2 added (fails under code-point order)
 T-991 js: member store on a primitive base; `(this).x++`; compiler parse of `println("s".x = 5)` — DONE - member writes on primitives dropped (sloppy) / TypeError (strict) in all engines, (this) targets, logical-assignment places evaluated once
 T-992 js: regex `\p{scx=..}` and 30 more ES binary properties; non-ASCII case folding under `iu`; private brand check in decorator access — DONE - Script_Extensions and the 30 ES binary properties (Unicode 17 tables), Unicode simple case folding under iu incl. \w/\b, private brand checks in decorator access
+T-925 parse time grows exponentially with bracket nesting in seven grammars, both halves — DONE - packrat memo for pure recursive productions in abnf/parser.go ("pure" directive for peek-only guards), Go SliceAhead guard; bracket nesting linear in all seven grammars, no measurable cost
 
 # Settled — do not re-open
 
