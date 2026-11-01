@@ -5707,8 +5707,8 @@ NotMemberKw = :script(~~ "pure";
     // ----- Extension functions: the receiver becomes `this` -----
     // Method names the runtime implements on strings/lists/dicts (the compiler
     // grammar uses the same list): an extension never shadows them on a builtin
-    // receiver, so both engines make the same dispatch decision for every
-    // (receiver, name).
+    // receiver whose member table lists them, so both engines make the same
+    // dispatch decision for every (receiver, name).
     var extFuns = {}
     var classMethodNames = {}
     var builtinMethodNames = {}
@@ -5783,7 +5783,9 @@ NotMemberKw = :script(~~ "pure";
                 if (ktExtTested(l[i].ty) && kIsType(target, l[i].ty)) { return l[i].fn }
             }
         }
-        if (!extResolves(name)) { return null }
+        // An untested extension of a builtin method's name applies to a receiver
+        // without that member (emitExtChain's probe).
+        if (!extResolves(name) && (classMethodNames["$" + name] == true || kExtMemberWins(target, name))) { return null }
         for (var j = l.length - 1; j >= 0; j--) {
             if (!ktExtTested(l[j].ty)) { return l[j].fn }
         }
@@ -5791,12 +5793,14 @@ NotMemberKw = :script(~~ "pure";
     }
     // Whether recv.name is a MEMBER of the receiver: a method on a class instance's
     // supertype graph, and on any other value a name the runtime implements
-    // (builtinMethodNames). Twin of js_ktextok in abnf/jsrtkotlin.go.
+    // (builtinMethodNames) that a builtin receiver's member table lists. Twin of
+    // js_ktextok in abnf/jsrtkotlin.go.
     function kExtMemberWins(target, name) {
         if (target !== null && target !== undefined && typeof target == "object" && target.__class != undefined) {
             return lookupMethod(target, name) != null
         }
-        return builtinMethodNames["$" + name] == true
+        if (builtinMethodNames["$" + name] != true) { return false }
+        return !kIsBuiltinRecv(target) || !kBuiltinLacks(target, name)
     }
 
     // args is the positional argument list; spec (optional) additionally carries the
@@ -13770,7 +13774,12 @@ NotMemberKw = :script(~~ "pure";
         // its reason.
         if (!hasOwn(hostGlobals, name)) {
             for (var cj = 0; cj < chain.length; cj++) {
-                if (typeof chain[cj] == "string" && !kBuiltinLacks(chain[cj], name)) { return {v: kBoundBuiltin(chain[cj], name)} }
+                if (typeof chain[cj] != "string") { continue }
+                if (!kBuiltinLacks(chain[cj], name)) { return {v: kBoundBuiltin(chain[cj], name)} }
+                if (iscall) {
+                    var sx = kRecvExt(chain[cj], name)
+                    if (sx != null) { return sx }
+                }
             }
             // toString(), hashCode() and equals() are members of kotlin.Any, so EVERY implicit
             // receiver has them whatever its shape - a Pair, a Map.Entry, a number, a
@@ -13806,7 +13815,7 @@ NotMemberKw = :script(~~ "pure";
                 // down uses, for the same reasons.
                 if (typeof cur == "string") {
                     if (kRecvProps["$" + name] === true) { return {v: kGetField(cur, name)} }
-                    if (!iscall) {
+                    if (!iscall && !kBuiltinLacks(cur, name)) {
                         var sv = anytype
                         sv = kGetField(cur, name)
                         if (sv !== undefined) { return {v: sv} }
@@ -13853,10 +13862,7 @@ NotMemberKw = :script(~~ "pure";
             // `with('q') { isLetter() }`) - have a real method surface in mcall and a
             // real property surface in kGetField, which is what makes them belong here
             // rather than in the plain-object arm below.
-            if (cls == undefined && cur.__isclass == undefined &&
-                (Array.isArray(cur) || kIsMap(cur) || kIsSet(cur) || cur.__sb === true ||
-                 isRange(cur) || isKRegex(cur) || isKMatch(cur) || kIsResult(cur) ||
-                 kIsChar(cur))) {
+            if (kIsBuiltinRecv(cur)) {
                 // A property this receiver does not have (a StringBuilder's `size`)
                 // misses like any other value, as js_ktget's caller treats it.
                 if (kRecvProps["$" + name] === true) {
@@ -13868,8 +13874,10 @@ NotMemberKw = :script(~~ "pure";
                 // VALUE POSITION is a field read and nothing else (`first`/`last`/
                 // `step` on a progression). A miss belongs to an outer receiver:
                 // Kotlin has no unqualified value that means a bound method. Twin of
-                // ktRecvMember in abnf/jsrtkotlin.go.
+                // ktRecvMember in abnf/jsrtkotlin.go. A name outside the receiver's
+                // member table misses in either position.
                 if (!iscall) {
+                    if (kBuiltinLacks(cur, name)) { return null }
                     var bv = anytype
                     bv = kGetField(cur, name)
                     if (bv !== undefined) { return {v: bv} }
@@ -13882,8 +13890,14 @@ NotMemberKw = :script(~~ "pure";
                 // through, which is what the compiler half does (js_ktget consults the
                 // scope first). A builtin receiver has no member of any of these names.
                 if (hasOwn(hostGlobals, name)) { return null }
-                if (kBuiltinLacks(cur, name)) { return null }
+                if (kBuiltinLacks(cur, name)) { return kRecvExt(cur, name) }
                 return {v: kBoundBuiltin(cur, name)}
+            }
+            // An extension the receiver's type takes (`fun Q.b()`, then `b()` inside
+            // `fun Q.a()`), when it has no member of the name.
+            if (iscall && cur === start && cls != undefined && cls != null) {
+                var xr = kRecvExt(cur, name)
+                if (xr != null) { return xr }
             }
             // A PLAIN OBJECT receiver that is neither a class instance nor one of the
             // collection kinds: a lazy, a Result, a MatchResult. Its OWN properties
@@ -13916,42 +13930,139 @@ NotMemberKw = :script(~~ "pure";
     var krpn = ["size", "length", "keys", "values", "entries", "indices", "lastIndex",
                 "value", "isInitialized", "isSuccess", "isFailure", "code"]
     for (var krpi = 0; krpi < krpn.length; krpi++) { kRecvProps["$" + krpn[krpi]] = true }
-    // The member table of the builtin receivers, for the names whose owners differ:
-    // each entry lists the kinds declaring the name (L list/array/progression, S set,
-    // M map, B StringBuilder, T String, C Char, X Regex, H MatchResult, U Result). An
-    // unlisted name belongs to every builtin receiver. Twin of ktBuiltinMembers in
-    // abnf/jsrtkotlin.go, which has the rules; keep the string identical.
+    // The member table of the builtin receivers: each name a builtin receiver kind
+    // declares, with the kinds that do (L MutableList, R read-only List, A Array, Q
+    // Sequence, G progression, D deque, S set, M map, B StringBuilder, T String, C Char,
+    // X Regex, H MatchResult, U Result). An unlisted name belongs to no builtin
+    // receiver. Twin of ktBuiltinMembers in abnf/jsrtkotlin.go, which has the rules;
+    // keep the string identical.
     var kBuiltinMembers = {}
-    var kbmn = ("append:B appendLine:B appendRange:B insert:B insertRange:B " +
-        "setLength:B setCharAt:B deleteCharAt:B deleteRange:B setRange:B capacity:B " +
-        "ensureCapacity:B trimToSize:B reverse:LB clear:LSMB add:LS addAll:LS addFirst:L " +
-        "addLast:L removeAt:L removeFirst:L removeLast:L remove:LSM removeAll:LS retainAll:LS " +
-        "put:M putAll:M putIfAbsent:M getOrPut:M getOrDefault:MU containsKey:M containsValue:M " +
-        "mapKeys:M mapValues:M filterKeys:M filterValues:M sort:L sortBy:L sortDescending:L " +
-        "sortWith:L shuffle:L subList:L toSortedMap:M uppercase:TC lowercase:TC isLetter:C " +
-        "isDigit:C isLetterOrDigit:C isUpperCase:C isLowerCase:C isWhitespace:C digitToInt:C " +
-        "getOrThrow:U exceptionOrNull:U onSuccess:U onFailure:U containsMatchIn:X " +
-        "matchEntire:X findAll:X first:LSBT last:LSBT joinToString:LS substring:BT " +
-        "toList:LSMBT map:LSMBTU filter:LSMBT forEach:LSMBT reversed:LSBT").split(" ")
+    var kbmn = ("add:LDS addAll:LDS addFirst:LDS addLast:LDS all:LRAQGDSMBT also:LRAQGDSMBTCXHU " +
+        "any:LRAQGDSMBT append:B appendLine:B appendRange:B apply:LRAQGDSMBTCXHU " +
+        "asIterable:LRAQGDSMBT asList:A asReversed:LRD asSequence:LRAQGDSMBT " +
+        "associate:LRAQGDSBT associateBy:LRAQGDSBT associateWith:LRAQGDSBT average:LRAQGDS " +
+        "binarySearch:LRAD capacity:B capitalize:T chars:BT chunked:LRQGDSBT clear:LDSMB " +
+        "clone:LADSM code:C coerceAtLeast:BTC coerceAtMost:BTC coerceIn:BTC " +
+        "commonPrefixWith:BT commonSuffixWith:BT comparator:SM compareTo:BTC component1:LRAD " +
+        "component2:LRAD component3:LRAD concatToString:A contains:LRAQGDSMBT " +
+        "containsAll:LRDS containsKey:M containsMatchIn:X containsValue:M " +
+        "contentDeepEquals:A contentDeepToString:A contentEquals:ABT contentToString:A " +
+        "copyOf:A copyOfRange:A count:LRAQGDSMBT dec:C decapitalize:T delete:B " +
+        "deleteCharAt:B deleteRange:B destructured:H digitToInt:C digitToIntOrNull:C " +
+        "distinct:LRAQGDS distinctBy:LRAQGDS downTo:C drop:LRAQGDSBT dropLast:LRADBT " +
+        "dropLastWhile:LRADBT dropWhile:LRAQGDSBT element:DS elementAt:LRAQGDSBT " +
+        "elementAtOrElse:LRAQGDSBT elementAtOrNull:LRAQGDSBT endExclusive:G endInclusive:G " +
+        "endsWith:BT ensureCapacity:LB entries:M equals:LRAQGDSMBTCXHU escape:X " +
+        "escapeReplacement:X exceptionOrNull:U fill:LAD filter:LRAQGDSMBT " +
+        "filterIndexed:LRAQGDSBT filterIsInstance:LRAQGDS filterKeys:M filterNot:LRAQGDSMBT " +
+        "filterNotNull:LRAQGDS filterValues:M find:LRAQGDSBTX findAll:X findLast:LRAQGDSBT " +
+        "first:LRAQGDSBT firstNotNullOf:LRAQGDSMBT firstNotNullOfOrNull:LRAQGDSMBT " +
+        "firstOrNull:LRAQGDSBT flatMap:LRAQGDSMBT flatten:LRQDS floor:S fold:LRAQGDSBTU " +
+        "foldIndexed:LRAQGDSBT foldRight:LRADBT foldRightIndexed:LRADBT forEach:LRAQGDSMBT " +
+        "forEachIndexed:LRAQGDSBT format:T fromLiteral:X get:LRADMBT getFirst:LDS " +
+        "getLast:LDS getOrDefault:MU getOrElse:LRADMBTU getOrNull:LRADBTU getOrPut:M " +
+        "getOrThrow:U getValue:M groupBy:LRAQGDSBT groupValues:H groupingBy:LRAQGDSBT " +
+        "groups:H hashCode:LRAQGDSMBTCXHU ifBlank:BT ifEmpty:LRAQDSMBT inc:C " +
+        "indexOf:LRAQGDSBT indexOfFirst:LRAQGDSBT indexOfLast:LRAQGDSBT indices:LRADSBT " +
+        "insert:B insertRange:B intern:T intersect:LRAGDS isBlank:BT isDigit:C " +
+        "isEmpty:LRAGDSMBT isFailure:U isISOControl:C isLetter:C isLetterOrDigit:C " +
+        "isLowerCase:C isNotBlank:BT isNotEmpty:LRADSMBT isSuccess:U isTitleCase:C " +
+        "isUpperCase:C isWhitespace:C iterator:LRAQGDSMBT javaClass:LRAQGDSMBTCXHU " +
+        "joinToString:LRAQGDS keys:M last:LRAQGDSBT lastIndex:LRADBT lastIndexOf:LRAQGDSBT " +
+        "lastOrNull:LRAQGDSBT length:BT let:LRAQGDSMBTCXHU lines:BT lowercase:TC " +
+        "lowercaseChar:C map:LRAQGDSMBTU mapIndexed:LRAQGDSBT mapIndexedNotNull:LRAQGDSBT " +
+        "mapKeys:M mapNotNull:LRAQGDSMBT mapValues:M matchEntire:X matches:BTX max:LRAQGDSBT " +
+        "maxBy:LRAQGDSMBT maxByOrNull:LRAQGDSMBT maxOf:LRAQGDSMBT maxOfOrNull:LRAQGDSMBT " +
+        "maxOrNull:LRAQGDSBT maxWith:LRAQGDSMBT maxWithOrNull:LRAQGDSMBT merge:M " +
+        "min:LRAQGDSBT minBy:LRAQGDSMBT minByOrNull:LRAQGDSMBT minOf:LRAQGDSMBT " +
+        "minOfOrNull:LRAQGDSMBT minOrNull:LRAQGDSBT minWith:LRAQGDSMBT " +
+        "minWithOrNull:LRAQGDSMBT minus:LRQGDSMC minusAssign:LDSM next:H none:LRAQGDSMBT " +
+        "offer:DS offerFirst:D offerLast:D onEach:LRAQGDSMBT onEachIndexed:LRAQGDSMBT " +
+        "onFailure:U onSuccess:U options:X padEnd:BT padStart:BT partition:LRAQGDSBT " +
+        "pattern:X peek:DS peekFirst:D peekLast:D plus:LRAQGDSMTC plusAssign:LDSM poll:DS " +
+        "pollFirst:DS pollLast:DS pop:D push:D put:M putAll:M putIfAbsent:M random:LRAGDSBT " +
+        "randomOrNull:LRAGDSBT range:H rangeTo:BTC rangeUntil:BTC reduce:LRAQGDSBT " +
+        "reduceIndexed:LRAQGDSBT reduceIndexedOrNull:LRAQGDSBT reduceOrNull:LRAQGDSBT " +
+        "reduceRight:LRADBT reduceRightIndexed:LRADBT reduceRightIndexedOrNull:LRADBT " +
+        "reduceRightOrNull:LRADBT remove:LDSM removeAll:LDS removeAt:LD removeFirst:LDS " +
+        "removeFirstOrNull:LD removeIf:LDS removeLast:LDS removeLastOrNull:LD " +
+        "removePrefix:BT removeRange:BT removeSuffix:BT removeSurrounding:BT repeat:BT " +
+        "replace:MBTX replaceFirst:BTX replaceFirstChar:T replaceIndent:T " +
+        "requireNoNulls:LRQGDS retainAll:LDS reverse:LADB reversed:LRAGDSMBT reversedArray:A " +
+        "run:LRAQGDSMBTCXHU runCatching:LRAQGDSMBTCXHU runningFold:LRAQGDSBT " +
+        "runningReduce:LRAQGDSBT scan:LRAQGDSBT set:LADMB setCharAt:B setLength:B setRange:B " +
+        "setValue:M shuffle:LAD shuffled:LRQGDS single:LRAQGDSBT singleOrNull:LRAQGDSBT " +
+        "size:LRADSM slice:LRADBT sliceArray:A sort:LAD sortBy:LAD sortByDescending:LAD " +
+        "sortDescending:LAD sortWith:LAD sorted:LRAQGDS sortedArray:A " +
+        "sortedArrayDescending:A sortedBy:LRAQGDS sortedByDescending:LRAQGDS " +
+        "sortedDescending:LRAQGDS sortedWith:LRAQGDS split:BTX start:G startsWith:BT step:G " +
+        "subList:LRD subSequence:BT substring:BT substringAfter:T substringAfterLast:T " +
+        "substringBefore:T substringBeforeLast:T subtract:LRAGDS sum:LRAQGDS sumOf:LRAQGDSBT " +
+        "take:LRAQGDSBT takeIf:LRAQGDSMBTCXHU takeLast:LRADBT takeLastWhile:LRADBT " +
+        "takeUnless:LRAQGDSMBTCXHU takeWhile:LRAQGDSBT to:LRAQGDSMBTCXHU toBooleanArray:LRA " +
+        "toByte:TC toByteArray:LRAT toChar:C toCharArray:LRABT toDouble:TC toDoubleArray:LRA " +
+        "toDoubleOrNull:T toFloat:TC toFloatArray:LRA toFloatOrNull:T toHashSet:LRAQGDSBT " +
+        "toInt:TC toIntArray:LRADS toIntOrNull:T toList:LRAQGDSMBT toLong:TC toLongArray:LRA " +
+        "toLongOrNull:T toLowerCase:TC toMap:LRAQM toMutableList:LRAQGDSBT toMutableMap:M " +
+        "toMutableSet:LRAQGDS toRegex:T toSet:LRAQGDSBT toShort:TC toShortArray:LRA " +
+        "toSortedMap:M toSortedSet:LRAQGDSBT toString:LRAQGDSMBTCXHU toTypedArray:LRADS " +
+        "toUByte:T toUInt:T toULong:T toUShort:T toUpperCase:TC trim:BT trimEnd:BT " +
+        "trimIndent:T trimMargin:T trimStart:BT trimToSize:LB union:LRAGDS until:C " +
+        "unzip:LRAQ uppercase:TC uppercaseChar:C value:H values:M windowed:LRQGDSBT " +
+        "withIndex:LRAQGDSBT zip:LRAQGDSBT zipWithNext:LRQGDSBT").split(" ")
     for (var kbmi = 0; kbmi < kbmn.length; kbmi++) {
         var kbmc = kbmn[kbmi].indexOf(":")
         kBuiltinMembers["$" + kbmn[kbmi].substring(0, kbmc)] = kbmn[kbmi].substring(kbmc + 1)
     }
+    // The member-table row of a builtin receiver. Twin of ktBuiltinKind in
+    // abnf/jsrtkotlin.go.
+    function kBuiltinKind(recv) {
+        if (typeof recv == "string") { return "T" }
+        if (kIsChar(recv)) { return "C" }
+        if (Array.isArray(recv)) {
+            var ak = arrKind(recv)
+            if (ak == 0 || ak == 3) { return "L" }
+            if (ak == 4 || ak == -4) { return "R" }
+            if (ak < 0) { return "D" }
+            return ak == 2 ? "Q" : "A"
+        }
+        if (recv.__sb === true) { return "B" }
+        if (kIsSet(recv)) { return "S" }
+        if (isKRegex(recv)) { return "X" }
+        if (isKMatch(recv)) { return "H" }
+        if (isRange(recv)) { return "G" }
+        if (kIsResult(recv)) { return "U" }
+        return "M"
+    }
     // A builtin receiver that does not declare `name`: an unqualified call of it
-    // belongs to an outer implicit receiver (`sb.apply { with(list) { append(size) } }`).
+    // belongs to an outer implicit receiver (`sb.apply { with(list) { append(size) } }`)
+    // or to an extension.
     function kBuiltinLacks(recv, name) {
         var kinds = kBuiltinMembers["$" + name]
-        if (kinds == undefined) { return false }
-        var k = "L"
-        if (typeof recv == "string") { k = "T" }
-        else if (kIsChar(recv)) { k = "C" }
-        else if (recv.__sb === true) { k = "B" }
-        else if (kIsSet(recv)) { k = "S" }
-        else if (isKRegex(recv)) { k = "X" }
-        else if (isKMatch(recv)) { k = "H" }
-        else if (kIsResult(recv)) { k = "U" }
-        else if (kIsMap(recv)) { k = "M" }
-        return kinds.indexOf(k) < 0
+        return kinds == undefined || kinds.indexOf(kBuiltinKind(recv)) < 0
+    }
+    // A receiver whose members come from the runtime rather than from a class
+    // descriptor (recvLookup's builtin arm). Twin of ktIsBuiltinRecv in
+    // abnf/jsrtkotlin.go.
+    function kIsBuiltinRecv(v) {
+        if (typeof v == "string") { return true }
+        if (v === null || v === undefined || typeof v != "object" || v.__class != undefined || v.__isclass != undefined) { return false }
+        return Array.isArray(v) || kIsMap(v) || kIsSet(v) || v.__sb === true || isRange(v) ||
+               isKRegex(v) || isKMatch(v) || kIsResult(v) || kIsChar(v)
+    }
+    // The extension an unqualified call of `name` binds on the implicit receiver
+    // recv, as a bound callable, or null. Twin of js_ktextrecv in abnf/jsrtkotlin.go.
+    // An untested declaration binds only the receiver kinds of its type (ktExtKinds).
+    function kRecvExt(recv, name) {
+        var xf = extFor(name, recv)
+        if (xf == null) { return null }
+        var l = extTyped["$" + name]
+        for (var i = 0; i < l.length; i++) {
+            if (l[i].fn !== xf || ktExtTested(l[i].ty)) { continue }
+            var ks = ktExtKinds(l[i].ty)
+            if (ks != "" && !(kIsBuiltinRecv(recv) && ks.indexOf(kBuiltinKind(recv)) >= 0)) { return null }
+        }
+        return {v: boundMethod(recv, xf)}
     }
     // A bare call's named arguments reach the member as a call SPEC, so
     // `run { split(",", limit = 2) }` binds limit as `s.split(",", limit = 2)` does.
@@ -13994,6 +14105,8 @@ NotMemberKw = :script(~~ "pure";
         return kRecvDeclaring(findDispatch(), name, iscall)
     }
     function kRecvDeclaring(start, name, iscall) {
+        // A builtin receiver declares the names of its member table, in call position.
+        if (iscall && kIsBuiltinRecv(start) && !kBuiltinLacks(start, name)) { return start }
         var cur = anytype
         cur = start
         while (cur != undefined && cur != null && typeof cur == "object") {
@@ -14033,6 +14146,7 @@ NotMemberKw = :script(~~ "pure";
         if (iscall && !kMemberAccepts(name, kCallArgc, kCallSpec)) { return null }
         var r = kRecvOf(name, iscall)
         if (r == null) { return null }
+        if (kIsBuiltinRecv(r)) { return {v: kBoundBuiltin(r, name)} }
         if (hasOwn(r, name)) { return {v: kLateinitCheck(r, name, r[name])} }
         var g = clsFind(r.__class, "get$" + name)
         if (typeof g == "function") { return {v: g(r)} }

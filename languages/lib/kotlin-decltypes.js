@@ -517,6 +517,22 @@ function ktExtTested(ty) {
     var b = ktBaseName(ty)
     return ktExtValueTys["$" + b] == true || ktClassExt["$" + b] != undefined || ktDeclTypeNames["$" + b] == true
 }
+// The builtin receivers an untested extension type can bind as an IMPLICIT receiver,
+// as member-table rows (ktBuiltinMembers in abnf/jsrtkotlin.go): `fun
+// MutableList<Int>.f()` does not take a listOf inside `with`. "" is any receiver (a
+// type parameter, Any).
+var ktExtKindTab = {"$MutableList": "LD", "$ArrayList": "LD", "$List": "LRD", "$MutableCollection": "LDS",
+    "$Collection": "LRDS", "$MutableIterable": "LDS", "$Iterable": "LRDSG", "$MutableSet": "S", "$Set": "S",
+    "$HashSet": "S", "$LinkedHashSet": "S", "$MutableMap": "M", "$Map": "M", "$HashMap": "M",
+    "$LinkedHashMap": "M", "$Array": "A", "$IntArray": "A", "$LongArray": "A", "$DoubleArray": "A",
+    "$FloatArray": "A", "$ShortArray": "A", "$ByteArray": "A", "$CharArray": "A", "$BooleanArray": "A",
+    "$Sequence": "Q", "$IntRange": "G", "$LongRange": "G", "$CharRange": "G", "$IntProgression": "G",
+    "$ArrayDeque": "D", "$StringBuilder": "B", "$CharSequence": "BT", "$Regex": "X", "$MatchResult": "H",
+    "$Result": "U"}
+function ktExtKinds(ty) {
+    var k = ktExtKindTab["$" + ktBaseName(ty)]
+    return k == undefined ? "" : k
+}
 // The interfaces, objects and enum classes the program declares (the classes are
 // ktClassExt), each noted from its declaration's text after keyword kw
 // (`interfaceShape{...}`, `objectOrigin{...}`, `enumclassColor{...}`).

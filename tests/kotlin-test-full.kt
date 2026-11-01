@@ -7314,6 +7314,43 @@ fun s167() {
         }.el167() == "Char")
 }
 
+// ===== SECTION 168: builtin receivers' member table, extensions on implicit receivers =====
+// A builtin implicit receiver answers only the names its kind declares, so a class
+// member or an extension called unqualified inside `with(list)` binds the receiver
+// that has it; a read-only List has no `add`, which belongs to the set outside. An
+// extension called unqualified binds the innermost receiver of its type, and one
+// named like a StringBuilder method still applies to a MutableList (kotlinc 2.2.21).
+class Q168(val n: Int) {
+    fun tag(x: Int) = "q" + (x + n)
+    fun count(): Int = 99
+    fun go() = with(listOf(1, 2, 3)) { tag(size) }
+    fun cnt() = with(listOf(1, 2)) { count() }
+}
+class B168(var v: Int) { fun bump(x: Int) { v += x } }
+fun MutableList<Int>.twice168(x: Int) { add(x * 2) }
+fun MutableList<Int>.append(x: Int) { add(x * 100) }
+fun Q168.b168() = n * 2
+fun Q168.a168() = b168() + 1
+fun String.w168() = "<" + this + ">"
+fun String.v168() = w168() + length
+fun Any.d168() = "d:" + this
+fun s168() {
+    val b = B168(0)
+    with(b) { with(listOf(3, 4)) { bump(size) } }
+    check("mbr168a", Q168(5).go() == "q8" && Q168(5).cnt() == 2 && b.v == 2)
+    val ml = mutableListOf(1)
+    with(ml) { twice168(5) }
+    val m2 = mutableListOf(1)
+    with(m2) { append(5) }
+    m2.append(6)
+    check("ext168b", ml == listOf(1, 10) && m2 == listOf(1, 500, 600) &&
+        StringBuilder().apply { with(listOf(7, 8)) { append(size) } }.toString() == "2")
+    check("ext168c", Q168(4).a168() == 9 && with(Q168(5)) { b168() } == 10 && "ab".v168() == "<ab>2" &&
+        with(listOf(1)) { d168() } == "d:[1]")
+    check("ro168d", mutableSetOf(1).apply { with(listOf(9)) { add(1); add(2) } } == setOf(1, 2) &&
+        mutableListOf(0).apply { with(arrayOf(4, 5)) { add(size) } } == listOf(0, 2))
+}
+
 fun main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -7478,6 +7515,7 @@ fun main() {
     s165() // SECTION-CALL 165
     s166() // SECTION-CALL 166
     s167() // SECTION-CALL 167
+    s168() // SECTION-CALL 168
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }

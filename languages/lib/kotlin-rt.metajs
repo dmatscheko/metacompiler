@@ -7048,10 +7048,11 @@ function js_ktcast(v, tname, dst) {
 // js_ktextok (jsrtkotlin.go): whether the extension chain takes the extension
 // declared for tname - v has that type and no member of the name.
 function js_ktextok(v, tname, name, builtin) {
-    if (!ktIsType(v, tname)) { return false }
+    if (tname != "" && !ktIsType(v, tname)) { return false }
     if (ktIsObj(v)) {
         if (v["__class"] !== undefined && v["__class"] !== null) { return !ktClassChainHas(v, name) }
     }
+    if (builtin === true && k4IsBuiltinRecv(v)) { return k4BuiltinLacks(v, name) }
     return builtin !== true
 }
 
@@ -8496,27 +8497,109 @@ function k4IsBuiltinRecv(v) {
     return ktIsSb(v)
 }
 
-// The member table of the builtin receivers, for the names whose owners differ,
-// built on first use. Twin of ktBuiltinMembers in jsrtkotlin.go, which has the
-// rules; keep the string identical.
+// The member table of the builtin receivers, built on first use. Twin of
+// ktBuiltinMembers in jsrtkotlin.go, which has the rules; keep the string identical.
 var k4BuiltinMembers = undefined
 
+// ktBuiltinKind (jsrtkotlin.go): the member-table row of a builtin receiver.
+function k4BuiltinKind(recv) {
+    if (typeof recv == "string") { return "T" }
+    if (ktIsChar(recv)) { return "C" }
+    if (ktIsArr(recv)) {
+        var ak = arrKind(recv)
+        if (ak == 0 || ak == 3) { return "L" }
+        if (ak == 4 || ak == -4) { return "R" }
+        if (ak < 0) { return "D" }
+        if (ak == 2) { return "Q" }
+        return "A"
+    }
+    if (ktIsSb(recv)) { return "B" }
+    if (ktIsSet(recv)) { return "S" }
+    if (ktRxIsRegex(recv)) { return "X" }
+    if (ktRxIsMatch(recv)) { return "H" }
+    if (ktIsRange(recv)) { return "G" }
+    if (ktIsResult(recv)) { return "U" }
+    return "M"
+}
+
 // ktBuiltinLacks (jsrtkotlin.go): a builtin receiver that does not declare `name`,
-// so an unqualified call of it belongs to an outer implicit receiver.
+// so an unqualified call of it belongs to an outer implicit receiver or an extension.
 function k4BuiltinLacks(recv, name) {
     if (k4BuiltinMembers === undefined) {
         k4BuiltinMembers = {}
-        var es = ("append:B appendLine:B appendRange:B insert:B insertRange:B " +
-            "setLength:B setCharAt:B deleteCharAt:B deleteRange:B setRange:B capacity:B " +
-            "ensureCapacity:B trimToSize:B reverse:LB clear:LSMB add:LS addAll:LS addFirst:L " +
-            "addLast:L removeAt:L removeFirst:L removeLast:L remove:LSM removeAll:LS retainAll:LS " +
-            "put:M putAll:M putIfAbsent:M getOrPut:M getOrDefault:MU containsKey:M containsValue:M " +
-            "mapKeys:M mapValues:M filterKeys:M filterValues:M sort:L sortBy:L sortDescending:L " +
-            "sortWith:L shuffle:L subList:L toSortedMap:M uppercase:TC lowercase:TC isLetter:C " +
-            "isDigit:C isLetterOrDigit:C isUpperCase:C isLowerCase:C isWhitespace:C digitToInt:C " +
-            "getOrThrow:U exceptionOrNull:U onSuccess:U onFailure:U containsMatchIn:X " +
-            "matchEntire:X findAll:X first:LSBT last:LSBT joinToString:LS substring:BT " +
-            "toList:LSMBT map:LSMBTU filter:LSMBT forEach:LSMBT reversed:LSBT").split(" ")
+        var es = ("add:LDS addAll:LDS addFirst:LDS addLast:LDS all:LRAQGDSMBT also:LRAQGDSMBTCXHU " +
+            "any:LRAQGDSMBT append:B appendLine:B appendRange:B apply:LRAQGDSMBTCXHU " +
+            "asIterable:LRAQGDSMBT asList:A asReversed:LRD asSequence:LRAQGDSMBT " +
+            "associate:LRAQGDSBT associateBy:LRAQGDSBT associateWith:LRAQGDSBT average:LRAQGDS " +
+            "binarySearch:LRAD capacity:B capitalize:T chars:BT chunked:LRQGDSBT clear:LDSMB " +
+            "clone:LADSM code:C coerceAtLeast:BTC coerceAtMost:BTC coerceIn:BTC " +
+            "commonPrefixWith:BT commonSuffixWith:BT comparator:SM compareTo:BTC component1:LRAD " +
+            "component2:LRAD component3:LRAD concatToString:A contains:LRAQGDSMBT " +
+            "containsAll:LRDS containsKey:M containsMatchIn:X containsValue:M " +
+            "contentDeepEquals:A contentDeepToString:A contentEquals:ABT contentToString:A " +
+            "copyOf:A copyOfRange:A count:LRAQGDSMBT dec:C decapitalize:T delete:B " +
+            "deleteCharAt:B deleteRange:B destructured:H digitToInt:C digitToIntOrNull:C " +
+            "distinct:LRAQGDS distinctBy:LRAQGDS downTo:C drop:LRAQGDSBT dropLast:LRADBT " +
+            "dropLastWhile:LRADBT dropWhile:LRAQGDSBT element:DS elementAt:LRAQGDSBT " +
+            "elementAtOrElse:LRAQGDSBT elementAtOrNull:LRAQGDSBT endExclusive:G endInclusive:G " +
+            "endsWith:BT ensureCapacity:LB entries:M equals:LRAQGDSMBTCXHU escape:X " +
+            "escapeReplacement:X exceptionOrNull:U fill:LAD filter:LRAQGDSMBT " +
+            "filterIndexed:LRAQGDSBT filterIsInstance:LRAQGDS filterKeys:M filterNot:LRAQGDSMBT " +
+            "filterNotNull:LRAQGDS filterValues:M find:LRAQGDSBTX findAll:X findLast:LRAQGDSBT " +
+            "first:LRAQGDSBT firstNotNullOf:LRAQGDSMBT firstNotNullOfOrNull:LRAQGDSMBT " +
+            "firstOrNull:LRAQGDSBT flatMap:LRAQGDSMBT flatten:LRQDS floor:S fold:LRAQGDSBTU " +
+            "foldIndexed:LRAQGDSBT foldRight:LRADBT foldRightIndexed:LRADBT forEach:LRAQGDSMBT " +
+            "forEachIndexed:LRAQGDSBT format:T fromLiteral:X get:LRADMBT getFirst:LDS " +
+            "getLast:LDS getOrDefault:MU getOrElse:LRADMBTU getOrNull:LRADBTU getOrPut:M " +
+            "getOrThrow:U getValue:M groupBy:LRAQGDSBT groupValues:H groupingBy:LRAQGDSBT " +
+            "groups:H hashCode:LRAQGDSMBTCXHU ifBlank:BT ifEmpty:LRAQDSMBT inc:C " +
+            "indexOf:LRAQGDSBT indexOfFirst:LRAQGDSBT indexOfLast:LRAQGDSBT indices:LRADSBT " +
+            "insert:B insertRange:B intern:T intersect:LRAGDS isBlank:BT isDigit:C " +
+            "isEmpty:LRAGDSMBT isFailure:U isISOControl:C isLetter:C isLetterOrDigit:C " +
+            "isLowerCase:C isNotBlank:BT isNotEmpty:LRADSMBT isSuccess:U isTitleCase:C " +
+            "isUpperCase:C isWhitespace:C iterator:LRAQGDSMBT javaClass:LRAQGDSMBTCXHU " +
+            "joinToString:LRAQGDS keys:M last:LRAQGDSBT lastIndex:LRADBT lastIndexOf:LRAQGDSBT " +
+            "lastOrNull:LRAQGDSBT length:BT let:LRAQGDSMBTCXHU lines:BT lowercase:TC " +
+            "lowercaseChar:C map:LRAQGDSMBTU mapIndexed:LRAQGDSBT mapIndexedNotNull:LRAQGDSBT " +
+            "mapKeys:M mapNotNull:LRAQGDSMBT mapValues:M matchEntire:X matches:BTX max:LRAQGDSBT " +
+            "maxBy:LRAQGDSMBT maxByOrNull:LRAQGDSMBT maxOf:LRAQGDSMBT maxOfOrNull:LRAQGDSMBT " +
+            "maxOrNull:LRAQGDSBT maxWith:LRAQGDSMBT maxWithOrNull:LRAQGDSMBT merge:M " +
+            "min:LRAQGDSBT minBy:LRAQGDSMBT minByOrNull:LRAQGDSMBT minOf:LRAQGDSMBT " +
+            "minOfOrNull:LRAQGDSMBT minOrNull:LRAQGDSBT minWith:LRAQGDSMBT " +
+            "minWithOrNull:LRAQGDSMBT minus:LRQGDSMC minusAssign:LDSM next:H none:LRAQGDSMBT " +
+            "offer:DS offerFirst:D offerLast:D onEach:LRAQGDSMBT onEachIndexed:LRAQGDSMBT " +
+            "onFailure:U onSuccess:U options:X padEnd:BT padStart:BT partition:LRAQGDSBT " +
+            "pattern:X peek:DS peekFirst:D peekLast:D plus:LRAQGDSMTC plusAssign:LDSM poll:DS " +
+            "pollFirst:DS pollLast:DS pop:D push:D put:M putAll:M putIfAbsent:M random:LRAGDSBT " +
+            "randomOrNull:LRAGDSBT range:H rangeTo:BTC rangeUntil:BTC reduce:LRAQGDSBT " +
+            "reduceIndexed:LRAQGDSBT reduceIndexedOrNull:LRAQGDSBT reduceOrNull:LRAQGDSBT " +
+            "reduceRight:LRADBT reduceRightIndexed:LRADBT reduceRightIndexedOrNull:LRADBT " +
+            "reduceRightOrNull:LRADBT remove:LDSM removeAll:LDS removeAt:LD removeFirst:LDS " +
+            "removeFirstOrNull:LD removeIf:LDS removeLast:LDS removeLastOrNull:LD " +
+            "removePrefix:BT removeRange:BT removeSuffix:BT removeSurrounding:BT repeat:BT " +
+            "replace:MBTX replaceFirst:BTX replaceFirstChar:T replaceIndent:T " +
+            "requireNoNulls:LRQGDS retainAll:LDS reverse:LADB reversed:LRAGDSMBT reversedArray:A " +
+            "run:LRAQGDSMBTCXHU runCatching:LRAQGDSMBTCXHU runningFold:LRAQGDSBT " +
+            "runningReduce:LRAQGDSBT scan:LRAQGDSBT set:LADMB setCharAt:B setLength:B setRange:B " +
+            "setValue:M shuffle:LAD shuffled:LRQGDS single:LRAQGDSBT singleOrNull:LRAQGDSBT " +
+            "size:LRADSM slice:LRADBT sliceArray:A sort:LAD sortBy:LAD sortByDescending:LAD " +
+            "sortDescending:LAD sortWith:LAD sorted:LRAQGDS sortedArray:A " +
+            "sortedArrayDescending:A sortedBy:LRAQGDS sortedByDescending:LRAQGDS " +
+            "sortedDescending:LRAQGDS sortedWith:LRAQGDS split:BTX start:G startsWith:BT step:G " +
+            "subList:LRD subSequence:BT substring:BT substringAfter:T substringAfterLast:T " +
+            "substringBefore:T substringBeforeLast:T subtract:LRAGDS sum:LRAQGDS sumOf:LRAQGDSBT " +
+            "take:LRAQGDSBT takeIf:LRAQGDSMBTCXHU takeLast:LRADBT takeLastWhile:LRADBT " +
+            "takeUnless:LRAQGDSMBTCXHU takeWhile:LRAQGDSBT to:LRAQGDSMBTCXHU toBooleanArray:LRA " +
+            "toByte:TC toByteArray:LRAT toChar:C toCharArray:LRABT toDouble:TC toDoubleArray:LRA " +
+            "toDoubleOrNull:T toFloat:TC toFloatArray:LRA toFloatOrNull:T toHashSet:LRAQGDSBT " +
+            "toInt:TC toIntArray:LRADS toIntOrNull:T toList:LRAQGDSMBT toLong:TC toLongArray:LRA " +
+            "toLongOrNull:T toLowerCase:TC toMap:LRAQM toMutableList:LRAQGDSBT toMutableMap:M " +
+            "toMutableSet:LRAQGDS toRegex:T toSet:LRAQGDSBT toShort:TC toShortArray:LRA " +
+            "toSortedMap:M toSortedSet:LRAQGDSBT toString:LRAQGDSMBTCXHU toTypedArray:LRADS " +
+            "toUByte:T toUInt:T toULong:T toUShort:T toUpperCase:TC trim:BT trimEnd:BT " +
+            "trimIndent:T trimMargin:T trimStart:BT trimToSize:LB union:LRAGDS until:C " +
+            "unzip:LRAQ uppercase:TC uppercaseChar:C value:H values:M windowed:LRQGDSBT " +
+            "withIndex:LRAQGDSBT zip:LRAQGDSBT zipWithNext:LRQGDSBT").split(" ")
         var i = 0
         while (i < es.length) {
             var c = es[i].indexOf(":")
@@ -8525,17 +8608,8 @@ function k4BuiltinLacks(recv, name) {
         }
     }
     var kinds = k4BuiltinMembers["$" + name]
-    if (kinds === undefined) { return false }
-    var k = "L"
-    if (typeof recv == "string") { k = "T" }
-    else if (ktIsChar(recv)) { k = "C" }
-    else if (ktIsSb(recv)) { k = "B" }
-    else if (ktIsSet(recv)) { k = "S" }
-    else if (ktRxIsRegex(recv)) { k = "X" }
-    else if (ktRxIsMatch(recv)) { k = "H" }
-    else if (ktIsResult(recv)) { k = "U" }
-    else if (ktIsObj(recv) && rtIsDictObj(recv)) { k = "M" }
-    return kinds.indexOf(k) < 0
+    if (kinds === undefined) { return true }
+    return kinds.indexOf(k4BuiltinKind(recv)) < 0
 }
 
 // k4Bound is jsHostFunc(name, ...) of the Go twin: the bound builtin that reaches
@@ -8630,14 +8704,15 @@ function ktRecvMember(recv, name, iscall) {
     if (k4RecvProp(name)) { return js_ktfget(recv, name) }
     // VALUE POSITION on a builtin receiver is a field read and nothing else (`with(1..7
     // step 2) { first }`); a miss belongs to an outer receiver, since Kotlin has no
-    // unqualified value that means a bound method. Only a call binds.
+    // unqualified value that means a bound method. Only a call binds. A name
+    // outside the receiver's member table misses in either position.
+    if (k4BuiltinLacks(recv, name)) { return KT_MISS }
     if (!iscall) {
         var fv = anytype
         fv = js_ktfget(recv, name)
         if (!rtIsNil(fv)) { return fv }
         return KT_MISS
     }
-    if (k4BuiltinLacks(recv, name)) { return KT_MISS }
     return k4Bound(recv, name)
 }
 
@@ -12304,6 +12379,59 @@ function js_ktrecvof(env, name, iscall) {
     }
     return k6RecvStack(undefined, name, iscall)
 }
+// js_ktextrecv (jsrtkotlin.go's js_ktextrecv, which has the rules): the implicit
+// receiver an unqualified call of the extension name `name` binds, or undefined.
+function js_ktextrecv(env, name, tys) {
+    var s = anytype
+    s = env
+    while (s !== undefined && s !== null) {
+        if (scopeHas(s, name)) { return undefined }
+        s = scopeParent(s)
+    }
+    s = env
+    while (s !== undefined && s !== null) {
+        if (scopeHas(s, "this")) {
+            if (k6ExtBinds(scopeGet(s, "this"), name, tys)) { return scopeGet(s, "this") }
+        }
+        s = scopeParent(s)
+    }
+    s = env
+    while (s !== undefined && s !== null) {
+        if (scopeHas(s, "__dispatch")) {
+            if (k6ExtBinds(scopeGet(s, "__dispatch"), name, tys)) { return scopeGet(s, "__dispatch") }
+            s = undefined
+        } else {
+            s = scopeParent(s)
+        }
+    }
+    var i = ktRecvStack.length - 1
+    while (i >= 0) {
+        if (k6ExtBinds(ktRecvStack[i], name, tys)) { return ktRecvStack[i] }
+        i = i - 1
+    }
+    return undefined
+}
+// Whether receiver r has a member `name` or one of the extension types tys.
+function k6ExtBinds(r, name, tys) {
+    if (rtIsNil(r)) { return false }
+    if (ktIsObj(r) && r["__class"] !== undefined && r["__class"] !== null) {
+        if (k4Own(r, name) || ktClassChainHas(r, name)) { return true }
+    } else {
+        if (k4IsBuiltinRecv(r) && !k4BuiltinLacks(r, name)) { return true }
+    }
+    var i = 0
+    while (i < tys.length) {
+        var ty = tys[i]
+        if (ty.length > 0 && ty.charAt(0) == "*") {
+            if (ty.length == 1) { return true }
+            if (k4IsBuiltinRecv(r) && ty.substring(1).indexOf(k4BuiltinKind(r)) >= 0) { return true }
+        } else {
+            if (ktIsType(r, ty)) { return true }
+        }
+        i = i + 1
+    }
+    return false
+}
 // The dispatch receiver's answer r, else the receiver stack's, innermost first.
 function k6RecvStack(r, name, iscall) {
     if (r !== undefined) { return r }
@@ -12320,6 +12448,7 @@ function k6RecvStack(r, name, iscall) {
 // `name` - an instance, else the companion object of its class or of a superclass -
 // or undefined.
 function k6RecvDeclaring(v, name, iscall) {
+    if (iscall && k4IsBuiltinRecv(v) && !k4BuiltinLacks(v, name)) { return v }
     var o = anytype
     o = v
     var guard = 0

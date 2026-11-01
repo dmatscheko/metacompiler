@@ -2796,8 +2796,16 @@ KwContract  = "contract" KwEnd ;
             localB.NewRet(callExt(localB, "js_call",
                 [localB.NewCall(rtDelegRead(), [callExt(localB, "js_scope_get", [ps[0], ps[1]])]),
                  hUndef, ps[2]]))
-            var selfV = memberB.NewCall(rtKtGet(), [ps[0], emitStr(memberB, "this")])
-            memberB.NewRet(callExt(memberB, "js_ktsmcall", [selfV, ps[1], ps[2]]))
+            // The receiver is the innermost one declaring the name (js_ktrecvof), so a
+            // builtin receiver in between does not take a member of the class:
+            // `with(listOf(1)) { tag(size) }` inside a member of Q is this@Q.tag.
+            var declB = curF.NewBlock("")
+            var thisB = curF.NewBlock("")
+            var rV = callExt(memberB, "js_ktrecvof", [ps[0], ps[1], hTrue])
+            memberB.NewCondBr(truthy(memberB, callExt(memberB, "js_sne", [rV, hUndef])), declB, thisB)
+            declB.NewRet(callExt(declB, "js_ktsmcall", [rV, ps[1], ps[2]]))
+            var selfV = thisB.NewCall(rtKtGet(), [ps[0], emitStr(thisB, "this")])
+            thisB.NewRet(callExt(thisB, "js_ktsmcall", [selfV, ps[1], ps[2]]))
         })
     }
     // kt_clsfind(cls, name) is jsrtkotlin.go's ktClsFind: the member of that name on a
@@ -3134,8 +3142,8 @@ KwContract  = "contract" KwEnd ;
     // ----- Extension functions: the receiver becomes `this` -----
     // Method names the runtime implements on strings/lists/dicts (the interpreter
     // grammar uses the same list): an extension never shadows them on a builtin
-    // receiver, so both engines make the same dispatch decision for every
-    // (receiver, name).
+    // receiver whose member table lists them, so both engines make the same
+    // dispatch decision for every (receiver, name).
     var extFunNames = {}
     // Every receiver type an extension name is declared for (ktExtRecvTy), one entry
     // per type, latest last.
@@ -3215,7 +3223,11 @@ KwContract  = "contract" KwEnd ;
             if (ktExtTested(xl[xu])) { xtested++ } else { xany = true }
         }
         var untested = xany && extResolves(s.name)
-        if (xtested == 0) { return untested ? emitExtCall(b, cur, s, extKey(s.name, "")) : fallback(b) }
+        // An untested extension of a builtin method's name is the receiver's to
+        // decide: it applies when the receiver has no member of the name
+        // (js_ktextok, the empty type matching every receiver).
+        var probe = xany && !untested && classMethodNames["$" + s.name] != true
+        if (xtested == 0 && !probe) { return untested ? emitExtCall(b, cur, s, extKey(s.name, "")) : fallback(b) }
         var bi = builtinMethodNames["$" + s.name] == true ? hTrue : hFalse
         var xm = curF.NewBlock("")
         var xin = []
@@ -3229,10 +3241,50 @@ KwContract  = "contract" KwEnd ;
             xin.push(llvm.ir.NewIncoming(xr.v, xr.b))
             b = xnB
         }
+        if (probe) {
+            var pyB = curF.NewBlock("")
+            var pnB = curF.NewBlock("")
+            b.NewCondBr(truthy(b, callExt(b, "js_ktextok", [cur, emitStr(b, ""), emitStr(b, s.name), bi])), pyB, pnB)
+            var pr = emitExtCall(pyB, cur, s, extKey(s.name, ""))
+            pr.b.NewBr(xm)
+            xin.push(llvm.ir.NewIncoming(pr.v, pr.b))
+            b = pnB
+        }
         var xf = untested ? emitExtCall(b, cur, s, extKey(s.name, "")) : fallback(b)
         xf.b.NewBr(xm)
         xin.push(llvm.ir.NewIncoming(xf.v, xf.b))
         return {b: xm, v: xm.NewPhi(xin)}
+    }
+
+    // An unqualified call `name(args)` of an extension name: the extension chain on
+    // the receiver js_ktextrecv picks, with the member surface as its fallback, else
+    // plain(b) when no implicit receiver qualifies. Twin of recvLookup's extension arm
+    // in kotlin-interpreter.abnf.
+    function emitBareExt(b, name, args, plain) {
+        // The untested declarations share one slot, the latest one's: "*" and the
+        // receiver kinds it can bind (ktExtKinds). It never applies to a name some
+        // class declares as a method (emitExtChain), so it is then left out.
+        var xl = extRecvTys["$" + name]
+        var tysV = callExt(b, "js_arr_new", [])
+        var untested = ""
+        for (var i = 0; i < xl.length; i++) {
+            if (ktExtTested(xl[i])) { callExt(b, "js_arr_push", [tysV, emitStr(b, xl[i])]) }
+            else if (classMethodNames["$" + name] != true) { untested = "*" + ktExtKinds(xl[i]) }
+        }
+        if (untested != "") { callExt(b, "js_arr_push", [tysV, emitStr(b, untested)]) }
+        var rV = callExt(b, "js_ktextrecv", [curScopeV, emitStr(b, name), tysV])
+        var recvB = curF.NewBlock("")
+        var plainB = curF.NewBlock("")
+        var mrg = curF.NewBlock("")
+        b.NewCondBr(truthy(b, callExt(b, "js_sne", [rV, hUndef])), recvB, plainB)
+        var r1 = emitExtChain(recvB, rV, {kind: "mcall", name: name, args: args}, function(fb) {
+            var ma = emitArgs(fb, orderArgs(args, undefined))
+            return {b: ma.b, v: callExt(ma.b, "js_ktsmcall", [rV, emitStr(ma.b, name), ma.v])}
+        })
+        r1.b.NewBr(mrg)
+        var r2 = plain(plainB)
+        r2.b.NewBr(mrg)
+        return {b: mrg, v: mrg.NewPhi([llvm.ir.NewIncoming(r1.v, r1.b), llvm.ir.NewIncoming(r2.v, r2.b)])}
     }
 
     // ----- explicit TYPE ARGUMENTS on a method call -----
@@ -5515,8 +5567,9 @@ KwContract  = "contract" KwEnd ;
     }
     // An argument already evaluated.
     function ktValThunk(v) { return function(b) { return {b: b, v: v} } }
-    // A call of a name that no implicit receiver's member takes.
-    function makePlainCall(name, args) {
+    // A call of a name that no implicit receiver's member takes; noExt skips the
+    // extension arm (emitBareExt's fallback).
+    function makePlainCall(name, args, noExt) {
         return function(b) {
             // Regex(pattern) / Regex(pattern, options). Kotlin has no regexp literal,
             // so this constructor call IS the literal syntax; the pattern is compiled
@@ -5581,6 +5634,14 @@ KwContract  = "contract" KwEnd ;
                     emV = emR.v
                 }
                 return {b: b, v: callExt(b, "js_ktnewexc", [emitStr(b, name), emV])}
+            }
+            // An unqualified call of an EXTENSION name binds the innermost implicit
+            // receiver that has a member of the name or the extension's receiver type
+            // (js_ktextrecv); the extension chain then picks the declaration, or the
+            // member. With no such receiver the name is an ordinary call.
+            if (noExt != true && extFunNames["$" + name] == true && funNames["$" + name] != true
+                && classNames["$" + name] == undefined) {
+                return emitBareExt(b, name, args, makePlainCall(name, args, true))
             }
             // A BARE call to a method of the enclosing class (own or inherited):
             // `secret()` inside a method is `this.secret()`, and so is `area()` inside

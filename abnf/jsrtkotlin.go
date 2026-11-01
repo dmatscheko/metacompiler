@@ -1557,15 +1557,22 @@ func init() {
 		// js_ktextok(v, type, name, builtin) is whether the extension chain takes the
 		// extension declared for type: v has that type and no member of the name -
 		// a method on a class instance's chain, else (builtin) a name the runtime
-		// implements. Twin of kExtMemberWins in kotlin-interpreter.abnf and
-		// js_ktextok in languages/lib/kotlin-rt.metajs.
+		// implements. An empty type is an untested extension, which every receiver
+		// has. Twin of kExtMemberWins in kotlin-interpreter.abnf and js_ktextok in
+		// languages/lib/kotlin-rt.metajs.
 		m["js_ktextok"] = func(a []uint64) uint64 {
 			v := u(a[0])
-			if !ktIsType(v, rt.toString(u(a[1]))) {
+			if ty := rt.toString(u(a[1])); ty != "" && !ktIsType(v, ty) {
 				return boolH(false)
 			}
 			if o, isObj := v.(*jsObject); isObj && o.props["__class"] != nil {
 				return boolH(!ktClassChainHas(o, rt.toString(u(a[2]))))
+			}
+			// A builtin-looking name is a member only of the receivers whose member
+			// table lists it: `fun MutableList<Int>.append(x: Int)` is not hidden by
+			// StringBuilder.append.
+			if ktIsBuiltinRecv(v) && rt.truthy(u(a[3])) {
+				return boolH(ktBuiltinLacks(v, rt.toString(u(a[2]))))
 			}
 			return boolH(!rt.truthy(u(a[3])))
 		}
@@ -2991,6 +2998,67 @@ func init() {
 			for i := len(ktRecvStack) - 1; i >= 0; i-- {
 				if r := rt.ktRecvDeclaring(ktRecvStack[i], name, iscall); r != nil {
 					return w(r)
+				}
+			}
+			return w(jsUndef)
+		}
+
+		// js_ktextrecv(env, name, types) is the implicit receiver an unqualified call
+		// of the extension name `name` binds: innermost first, the first receiver that
+		// has a member of that name or the type of one of its declarations (types
+		// lists the tested receiver types, and "*" plus the member-table rows an
+		// untested one binds, every receiver when there are none); undefined
+		// when a binding of the name is in scope or no receiver qualifies. Twin of
+		// recvLookup's extension arm in kotlin-interpreter.abnf and js_ktextrecv in
+		// languages/lib/kotlin-rt.metajs.
+		m["js_ktextrecv"] = func(a []uint64) uint64 {
+			sc := rt.scopeOf(a[0])
+			name := rt.toString(u(a[1]))
+			tys, _ := u(a[2]).(*jsArray)
+			for s := sc; s != nil; s = s.parent {
+				if _, ok := s.get(name); ok {
+					return w(jsUndef)
+				}
+			}
+			binds := func(r interface{}) bool {
+				if isUndefOrNull(r) {
+					return false
+				}
+				if o, isObj := r.(*jsObject); isObj && o.props["__class"] != nil {
+					if _, own := o.props[name]; own || ktClassChainHas(o, name) {
+						return true
+					}
+				} else if ktIsBuiltinRecv(r) && !ktBuiltinLacks(r, name) {
+					return true
+				}
+				for _, t := range tys.elems {
+					ty := rt.toString(t)
+					if kinds, untested := strings.CutPrefix(ty, "*"); untested {
+						if kinds == "" || strings.IndexByte(kinds, ktBuiltinKind(r)) >= 0 {
+							return true
+						}
+					} else if ktIsType(r, ty) {
+						return true
+					}
+				}
+				return false
+			}
+			for s := sc; s != nil; s = s.parent {
+				if t, ok := s.get("this"); ok && binds(t) {
+					return w(t)
+				}
+			}
+			for s := sc; s != nil; s = s.parent {
+				if d, ok := s.get("__dispatch"); ok {
+					if binds(d) {
+						return w(d)
+					}
+					break
+				}
+			}
+			for i := len(ktRecvStack) - 1; i >= 0; i-- {
+				if binds(ktRecvStack[i]) {
+					return w(ktRecvStack[i])
 				}
 			}
 			return w(jsUndef)
@@ -4466,9 +4534,12 @@ func ktHasMethod(v interface{}, name string) bool {
 
 // ktRecvDeclaring is the receiver on v's __outer chain that declares `name` (see
 // js_ktrecvof) - an instance, else the companion object of its class or of a
-// superclass - or nil. Twin of
-// kRecvDeclaring in kotlin-interpreter.abnf.
-func (rt *jsrt) ktRecvDeclaring(v interface{}, name string, iscall bool) *jsObject {
+// superclass - or nil. A builtin receiver declares the names of its member table, in
+// call position. Twin of kRecvDeclaring in kotlin-interpreter.abnf.
+func (rt *jsrt) ktRecvDeclaring(v interface{}, name string, iscall bool) interface{} {
+	if iscall && ktIsBuiltinRecv(v) && !ktBuiltinLacks(v, name) {
+		return v
+	}
 	for g := 0; g < 64; g++ {
 		o, isObj := v.(*jsObject)
 		if !isObj {
@@ -9181,67 +9252,145 @@ func ktIsBuiltinRecv(v interface{}) bool {
 	return false
 }
 
-// ktBuiltinMembers is the member table of the builtin receivers, for the names whose
-// owners differ: each entry lists the receiver kinds that declare the name as a
-// member or stdlib extension (kotlinc 2.2.21 resolves `T::name` for exactly these).
-// L is a list, an array or a progression, S a set, M a map, B a StringBuilder, T a
-// String, C a Char, X a Regex, H a MatchResult, U a Result. A name absent from the
-// table is taken to belong to every builtin receiver, which leaves its dispatch to
-// the method surface. Keep the string identical to kBuiltinMembers in
-// kotlin-interpreter.abnf and k4BuiltinMembers in languages/lib/kotlin-rt.metajs.
+// ktBuiltinMembers is the member table of the builtin receivers: each name a builtin
+// receiver kind declares as a member or a stdlib extension, with the kinds that do
+// (kotlinc 2.2.21 resolves `T::name` for exactly these, for some type argument). L is
+// a MutableList (an ArrayList, a map's values view), R a read-only List (listOf,
+// Arrays.asList), A an Array or a primitive array, Q a Sequence, G a progression, D a
+// deque or LinkedList, S a set (TreeSet, PriorityQueue), M a map, B a StringBuilder,
+// T a String, C a Char, X a Regex, H a MatchResult, U a Result. A name absent from the
+// table belongs to no builtin receiver. Keep the string identical to kBuiltinMembers
+// in kotlin-interpreter.abnf and k4BuiltinMembers in languages/lib/kotlin-rt.metajs.
 var ktBuiltinMembers = func() map[string]string {
 	t := map[string]string{}
-	for _, e := range strings.Fields("append:B appendLine:B appendRange:B insert:B insertRange:B " +
-		"setLength:B setCharAt:B deleteCharAt:B deleteRange:B setRange:B capacity:B " +
-		"ensureCapacity:B trimToSize:B reverse:LB clear:LSMB add:LS addAll:LS addFirst:L " +
-		"addLast:L removeAt:L removeFirst:L removeLast:L remove:LSM removeAll:LS retainAll:LS " +
-		"put:M putAll:M putIfAbsent:M getOrPut:M getOrDefault:MU containsKey:M containsValue:M " +
-		"mapKeys:M mapValues:M filterKeys:M filterValues:M sort:L sortBy:L sortDescending:L " +
-		"sortWith:L shuffle:L subList:L toSortedMap:M uppercase:TC lowercase:TC isLetter:C " +
-		"isDigit:C isLetterOrDigit:C isUpperCase:C isLowerCase:C isWhitespace:C digitToInt:C " +
-		"getOrThrow:U exceptionOrNull:U onSuccess:U onFailure:U containsMatchIn:X " +
-		"matchEntire:X findAll:X first:LSBT last:LSBT joinToString:LS substring:BT " +
-		"toList:LSMBT map:LSMBTU filter:LSMBT forEach:LSMBT reversed:LSBT") {
+	for _, e := range strings.Fields("add:LDS addAll:LDS addFirst:LDS addLast:LDS all:LRAQGDSMBT also:LRAQGDSMBTCXHU " +
+		"any:LRAQGDSMBT append:B appendLine:B appendRange:B apply:LRAQGDSMBTCXHU " +
+		"asIterable:LRAQGDSMBT asList:A asReversed:LRD asSequence:LRAQGDSMBT " +
+		"associate:LRAQGDSBT associateBy:LRAQGDSBT associateWith:LRAQGDSBT average:LRAQGDS " +
+		"binarySearch:LRAD capacity:B capitalize:T chars:BT chunked:LRQGDSBT clear:LDSMB " +
+		"clone:LADSM code:C coerceAtLeast:BTC coerceAtMost:BTC coerceIn:BTC " +
+		"commonPrefixWith:BT commonSuffixWith:BT comparator:SM compareTo:BTC component1:LRAD " +
+		"component2:LRAD component3:LRAD concatToString:A contains:LRAQGDSMBT " +
+		"containsAll:LRDS containsKey:M containsMatchIn:X containsValue:M " +
+		"contentDeepEquals:A contentDeepToString:A contentEquals:ABT contentToString:A " +
+		"copyOf:A copyOfRange:A count:LRAQGDSMBT dec:C decapitalize:T delete:B " +
+		"deleteCharAt:B deleteRange:B destructured:H digitToInt:C digitToIntOrNull:C " +
+		"distinct:LRAQGDS distinctBy:LRAQGDS downTo:C drop:LRAQGDSBT dropLast:LRADBT " +
+		"dropLastWhile:LRADBT dropWhile:LRAQGDSBT element:DS elementAt:LRAQGDSBT " +
+		"elementAtOrElse:LRAQGDSBT elementAtOrNull:LRAQGDSBT endExclusive:G endInclusive:G " +
+		"endsWith:BT ensureCapacity:LB entries:M equals:LRAQGDSMBTCXHU escape:X " +
+		"escapeReplacement:X exceptionOrNull:U fill:LAD filter:LRAQGDSMBT " +
+		"filterIndexed:LRAQGDSBT filterIsInstance:LRAQGDS filterKeys:M filterNot:LRAQGDSMBT " +
+		"filterNotNull:LRAQGDS filterValues:M find:LRAQGDSBTX findAll:X findLast:LRAQGDSBT " +
+		"first:LRAQGDSBT firstNotNullOf:LRAQGDSMBT firstNotNullOfOrNull:LRAQGDSMBT " +
+		"firstOrNull:LRAQGDSBT flatMap:LRAQGDSMBT flatten:LRQDS floor:S fold:LRAQGDSBTU " +
+		"foldIndexed:LRAQGDSBT foldRight:LRADBT foldRightIndexed:LRADBT forEach:LRAQGDSMBT " +
+		"forEachIndexed:LRAQGDSBT format:T fromLiteral:X get:LRADMBT getFirst:LDS " +
+		"getLast:LDS getOrDefault:MU getOrElse:LRADMBTU getOrNull:LRADBTU getOrPut:M " +
+		"getOrThrow:U getValue:M groupBy:LRAQGDSBT groupValues:H groupingBy:LRAQGDSBT " +
+		"groups:H hashCode:LRAQGDSMBTCXHU ifBlank:BT ifEmpty:LRAQDSMBT inc:C " +
+		"indexOf:LRAQGDSBT indexOfFirst:LRAQGDSBT indexOfLast:LRAQGDSBT indices:LRADSBT " +
+		"insert:B insertRange:B intern:T intersect:LRAGDS isBlank:BT isDigit:C " +
+		"isEmpty:LRAGDSMBT isFailure:U isISOControl:C isLetter:C isLetterOrDigit:C " +
+		"isLowerCase:C isNotBlank:BT isNotEmpty:LRADSMBT isSuccess:U isTitleCase:C " +
+		"isUpperCase:C isWhitespace:C iterator:LRAQGDSMBT javaClass:LRAQGDSMBTCXHU " +
+		"joinToString:LRAQGDS keys:M last:LRAQGDSBT lastIndex:LRADBT lastIndexOf:LRAQGDSBT " +
+		"lastOrNull:LRAQGDSBT length:BT let:LRAQGDSMBTCXHU lines:BT lowercase:TC " +
+		"lowercaseChar:C map:LRAQGDSMBTU mapIndexed:LRAQGDSBT mapIndexedNotNull:LRAQGDSBT " +
+		"mapKeys:M mapNotNull:LRAQGDSMBT mapValues:M matchEntire:X matches:BTX max:LRAQGDSBT " +
+		"maxBy:LRAQGDSMBT maxByOrNull:LRAQGDSMBT maxOf:LRAQGDSMBT maxOfOrNull:LRAQGDSMBT " +
+		"maxOrNull:LRAQGDSBT maxWith:LRAQGDSMBT maxWithOrNull:LRAQGDSMBT merge:M " +
+		"min:LRAQGDSBT minBy:LRAQGDSMBT minByOrNull:LRAQGDSMBT minOf:LRAQGDSMBT " +
+		"minOfOrNull:LRAQGDSMBT minOrNull:LRAQGDSBT minWith:LRAQGDSMBT " +
+		"minWithOrNull:LRAQGDSMBT minus:LRQGDSMC minusAssign:LDSM next:H none:LRAQGDSMBT " +
+		"offer:DS offerFirst:D offerLast:D onEach:LRAQGDSMBT onEachIndexed:LRAQGDSMBT " +
+		"onFailure:U onSuccess:U options:X padEnd:BT padStart:BT partition:LRAQGDSBT " +
+		"pattern:X peek:DS peekFirst:D peekLast:D plus:LRAQGDSMTC plusAssign:LDSM poll:DS " +
+		"pollFirst:DS pollLast:DS pop:D push:D put:M putAll:M putIfAbsent:M random:LRAGDSBT " +
+		"randomOrNull:LRAGDSBT range:H rangeTo:BTC rangeUntil:BTC reduce:LRAQGDSBT " +
+		"reduceIndexed:LRAQGDSBT reduceIndexedOrNull:LRAQGDSBT reduceOrNull:LRAQGDSBT " +
+		"reduceRight:LRADBT reduceRightIndexed:LRADBT reduceRightIndexedOrNull:LRADBT " +
+		"reduceRightOrNull:LRADBT remove:LDSM removeAll:LDS removeAt:LD removeFirst:LDS " +
+		"removeFirstOrNull:LD removeIf:LDS removeLast:LDS removeLastOrNull:LD " +
+		"removePrefix:BT removeRange:BT removeSuffix:BT removeSurrounding:BT repeat:BT " +
+		"replace:MBTX replaceFirst:BTX replaceFirstChar:T replaceIndent:T " +
+		"requireNoNulls:LRQGDS retainAll:LDS reverse:LADB reversed:LRAGDSMBT reversedArray:A " +
+		"run:LRAQGDSMBTCXHU runCatching:LRAQGDSMBTCXHU runningFold:LRAQGDSBT " +
+		"runningReduce:LRAQGDSBT scan:LRAQGDSBT set:LADMB setCharAt:B setLength:B setRange:B " +
+		"setValue:M shuffle:LAD shuffled:LRQGDS single:LRAQGDSBT singleOrNull:LRAQGDSBT " +
+		"size:LRADSM slice:LRADBT sliceArray:A sort:LAD sortBy:LAD sortByDescending:LAD " +
+		"sortDescending:LAD sortWith:LAD sorted:LRAQGDS sortedArray:A " +
+		"sortedArrayDescending:A sortedBy:LRAQGDS sortedByDescending:LRAQGDS " +
+		"sortedDescending:LRAQGDS sortedWith:LRAQGDS split:BTX start:G startsWith:BT step:G " +
+		"subList:LRD subSequence:BT substring:BT substringAfter:T substringAfterLast:T " +
+		"substringBefore:T substringBeforeLast:T subtract:LRAGDS sum:LRAQGDS sumOf:LRAQGDSBT " +
+		"take:LRAQGDSBT takeIf:LRAQGDSMBTCXHU takeLast:LRADBT takeLastWhile:LRADBT " +
+		"takeUnless:LRAQGDSMBTCXHU takeWhile:LRAQGDSBT to:LRAQGDSMBTCXHU toBooleanArray:LRA " +
+		"toByte:TC toByteArray:LRAT toChar:C toCharArray:LRABT toDouble:TC toDoubleArray:LRA " +
+		"toDoubleOrNull:T toFloat:TC toFloatArray:LRA toFloatOrNull:T toHashSet:LRAQGDSBT " +
+		"toInt:TC toIntArray:LRADS toIntOrNull:T toList:LRAQGDSMBT toLong:TC toLongArray:LRA " +
+		"toLongOrNull:T toLowerCase:TC toMap:LRAQM toMutableList:LRAQGDSBT toMutableMap:M " +
+		"toMutableSet:LRAQGDS toRegex:T toSet:LRAQGDSBT toShort:TC toShortArray:LRA " +
+		"toSortedMap:M toSortedSet:LRAQGDSBT toString:LRAQGDSMBTCXHU toTypedArray:LRADS " +
+		"toUByte:T toUInt:T toULong:T toUShort:T toUpperCase:TC trim:BT trimEnd:BT " +
+		"trimIndent:T trimMargin:T trimStart:BT trimToSize:LB union:LRAGDS until:C " +
+		"unzip:LRAQ uppercase:TC uppercaseChar:C value:H values:M windowed:LRQGDSBT " +
+		"withIndex:LRAQGDSBT zip:LRAQGDSBT zipWithNext:LRQGDSBT") {
 		i := strings.IndexByte(e, ':')
 		t[e[:i]] = e[i+1:]
 	}
 	return t
 }()
 
-// ktBuiltinLacks reports a builtin receiver that does not declare `name`, so an
-// unqualified call of it belongs to an outer implicit receiver:
-// `sb.apply { with(list) { append(size) } }` appends to the builder.
-func ktBuiltinLacks(recv interface{}, name string) bool {
-	kinds, listed := ktBuiltinMembers[name]
-	if !listed {
-		return false
-	}
-	k := byte('L')
+// ktBuiltinKind is the member-table row of a builtin receiver (see ktBuiltinMembers),
+// 0 for any other value. A List's row comes from its array kind, the only record of
+// which factory made it.
+func ktBuiltinKind(recv interface{}) byte {
 	switch t := recv.(type) {
 	case string:
-		k = 'T'
+		return 'T'
 	case jsChar:
-		k = 'C'
+		return 'C'
+	case *jsArray:
+		switch {
+		case t.kind == 0 || t.kind == ktArrVals:
+			return 'L'
+		case t.kind == ktArrFixed || t.kind == ktArrAsList:
+			return 'R'
+		case t.kind < 0:
+			return 'D'
+		case t.kind == ktArrSeq:
+			return 'Q'
+		}
+		return 'A'
 	case *jsObject:
 		switch {
 		case ktIsSb(t):
-			k = 'B'
+			return 'B'
 		case ktIsSet(t):
-			k = 'S'
+			return 'S'
 		case ktRxIsRegex(t):
-			k = 'X'
+			return 'X'
 		case ktRxIsMatch(t):
-			k = 'H'
-		case ktIsRange(t): // a progression shares the list row
-		default:
-			if _, isRes := ktIsResult(t); isRes {
-				k = 'U'
-			} else if _, _, isDict := dictParts(t); isDict {
-				k = 'M'
-			}
+			return 'H'
+		case ktIsRange(t):
+			return 'G'
+		}
+		if _, isRes := ktIsResult(t); isRes {
+			return 'U'
+		}
+		if _, _, isDict := dictParts(t); isDict {
+			return 'M'
 		}
 	}
-	return strings.IndexByte(kinds, k) < 0
+	return 0
+}
+
+// ktBuiltinLacks reports a builtin receiver that does not declare `name`, so an
+// unqualified call of it belongs to an outer implicit receiver or to an extension:
+// `sb.apply { with(list) { append(size) } }` appends to the builder.
+func ktBuiltinLacks(recv interface{}, name string) bool {
+	return strings.IndexByte(ktBuiltinMembers[name], ktBuiltinKind(recv)) < 0
 }
 
 // ktRecvMember answers an unqualified name against an implicit receiver.
@@ -9346,16 +9495,17 @@ func (rt *jsrt) ktRecvMember(recv interface{}, name string, iscall bool) (interf
 	// the arm that answers `with(1..7 step 2) { first }`). A miss is a MISS: Kotlin
 	// has no unqualified value that means a bound method, so the name belongs to an
 	// outer receiver - `append(n)` inside sb.apply { } in a member of a class with a
-	// property n. Only a call binds the method below.
+	// property n. Only a call binds the method below. A name outside the receiver's
+	// member table misses in either position.
+	if ktBuiltinLacks(recv, name) {
+		return nil, false
+	}
 	if !iscall {
 		if ktRefRead != nil {
 			if v := ktRefRead(recv, name); !isUndefOrNull(v) {
 				return v, true
 			}
 		}
-		return nil, false
-	}
-	if ktBuiltinLacks(recv, name) {
 		return nil, false
 	}
 	self := recv
