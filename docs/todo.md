@@ -115,11 +115,11 @@ strings.TrimSpace, native strips ASCII 9-13 and 32: `int.Parse(" 1 2 ")` and `in
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-972 kotlin: `rec(p, "R").w++` - an increment of a property of a call result · P3 · KT · OPEN [U]
+### T-972 kotlin: `rec(p, "R").w++` - an increment of a property of a call result · P3 · KT · IN PROGRESS (KT worker, round 12) [U]
 Moved from the ruby ticket T-920, where it was listed by mistake. `class R(var w: Int); fun rec(p: R, s: String) = p;
 val p = R(1); rec(p, "R").w++; println(p.w)` → Kotlin 2; re-probe both halves before assigning.
 
-### T-976 kotlin: `x.keys -= 2` corrupts the map; views are snapshots; lambdas see re-read elements · P2 · KT · OPEN [V]
+### T-976 kotlin: `x.keys -= 2` corrupts the map; views are snapshots; lambdas see re-read elements · P2 · KT · IN PROGRESS (KT worker, round 12) [V]
 Found by the KT worker, round 11 (oracle: kotlin-stdlib 2.2.21 driven from java 24).
 - `val x = mutableMapOf(1 to "a", 2 to "b", 3 to "a"); x.keys -= 2; println(x)` → `{1=a, 3=a}` (keys is a val, so -= is
   minusAssign = remove); interp `{}`, run/native `{1=a, 2=b, 3=a, keys=[1, 3]}`. ktAssignIsVal / ktMemberIsVal
