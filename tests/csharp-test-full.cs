@@ -3786,6 +3786,56 @@ b";                                                   // verbatim keeps the newl
                 && m.Count() == 400 && l.Count(s => s.Length > 1) == 3);
         }
 
+        // ===== SECTION 61: ++ / -- on a property or an indexer =====
+        //
+        // `o.P++` is `o.P = o.P + 1` through the accessors (ECMA-334 12.8.16): the get
+        // accessor reads, the set accessor writes the stepped value, and the result is
+        // the value read (postfix) or the value handed to the setter (prefix) - never
+        // a re-read. An override declaring only `set` keeps the inherited automatic
+        // getter, and `base.K = ...` writes its backing field. The same holds for a
+        // static property and a user indexer. No C# toolchain here: the values follow
+        // the specification.
+        class S61A { public virtual int K { get => 7; set { } } }
+        class S61B : S61A { public override int K { get; set; } }
+        class S61D : S61B { public override int K { set { base.K = value + 100; } } }
+        class S61Cnt
+        {
+            public int Sets = 0;
+            int v = 10;
+            public int P { get { return v; } set { Sets++; v = value * 2; } }
+            public static int Sv = 5;
+            public static int SP { get { return Sv; } set { Sv = value + 1000; } }
+        }
+        class S61Idx
+        {
+            int[] data = new int[4];
+            public int Writes = 0;
+            public int this[int i] { get { return data[i] + 1; } set { Writes++; data[i] = value; } }
+        }
+        static void S61()
+        {
+            var d = new S61D();
+            d.K++;
+            int r1 = d.K--;
+            int r2 = ++d.K;
+            Program.Check("s61o1", r1 == 101 && r2 == 201 && d.K == 301);
+            var c = new S61Cnt();
+            int a = c.P++;
+            int b = ++c.P;
+            int e = c.P--;
+            int f = --c.P;
+            Program.Check("s61p1", a == 10 && b == 23 && e == 46 && f == 89 && c.P == 178 && c.Sets == 4);
+            int s1 = S61Cnt.SP++;
+            int s2 = --S61Cnt.SP;
+            Program.Check("s61s1", s1 == 5 && s2 == 1005 && S61Cnt.Sv == 2005);
+            var x = new S61Idx();
+            int i0 = x[1]++;
+            int i1 = ++x[2];
+            int i2 = x[2]--;
+            int i3 = --x[2];
+            Program.Check("s61i1", i0 == 1 && x[1] == 3 && i1 == 2 && i2 == 3 && i3 == 2 && x[2] == 3 && x.Writes == 4);
+        }
+
         static int Main()
         {
             Program.S01(); // SECTION-CALL 01
@@ -3848,6 +3898,7 @@ b";                                                   // verbatim keeps the newl
             Program.S58(); // SECTION-CALL 58
             Program.S59(); // SECTION-CALL 59
             Program.S60(); // SECTION-CALL 60
+            Program.S61(); // SECTION-CALL 61
             Console.WriteLine("full: " + Program.Checks + " checks, " + Program.Fails + " failures");
             return Program.Fails;
         }

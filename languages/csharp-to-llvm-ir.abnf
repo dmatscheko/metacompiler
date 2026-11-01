@@ -3567,56 +3567,71 @@ KwLet       = "let" KwEnd ;
                     // An event that manages its own subscription list: the accessor takes
                     // the handler itself, not the combined delegate.
                     b = emitEvtCall(b, p.obj, p.keyName, op, v)
-                } else if (p.isField && p.keyName == "Capacity" && csPropAcc[p.keyName] == undefined) {
-                    // List<T>.Capacity's setter, or a member of that name (js_cscapset).
-                    if (op != "=") {
-                        var oldc = callExt(b, "js_csmcall", [p.obj, emitStr(b, "Capacity"), callExt(b, "js_arr_new", [])])
-                        var rcc = emitCompound(b, op, oldc, v)
-                        b = rcc.b
-                        v = rcc.v
-                    }
-                    callExt(b, "js_cscapset", [p.obj, v])
-                } else if (p.isField && csPropAcc[p.keyName] != undefined) {
-                    // A property with a set accessor body ('b.W = 5').
-                    if (op != "=") {
-                        var opr = emitPropGet(b, p.obj, p.keyName)
-                        b = opr.b
-                        var oldp = opr.v
-                        v = emitNarrowLike(b, oldp, emitBin(b, op, oldp, v))
-                    }
-                    b = emitPropSet(b, p.obj, p.keyName, v)
-                } else if (p.isField) {
-                    if (op != "=") {
-                        var oldf = callExt(b, "js_get", [p.obj, p.key])
-                        var rc1 = emitCompound(b, op, oldf, v)
-                        b = rc1.b
-                        v = rc1.v
-                    }
-                    // The member's DECLARED type adopts the written value: `c.D = 3`
-                    // on a `public double D;` stores 3.0, so `c.D / 2` is 1.5.
-                    if (csAdoptMems[p.keyName] != undefined) {
-                        v = callExt(b, "js_csadoptmem", [p.obj, p.key, v])
-                    }
-                    callExt(b, "js_set", [p.obj, p.key, v])
-                } else if (csHasIndexer) {
-                    if (op != "=") {
-                        var oldx = emitIndexGet(b, p.obj, p.key)
-                        b = oldx.b
-                        v = emitNarrowLike(b, oldx.v, emitBin(b, op, oldx.v, v))
-                    }
-                    if (elty != "") { v = emitAdopt(b, elty, v) }
-                    b = emitIndexSet(b, p.obj, p.key, v)
                 } else {
-                    if (op != "=") {
-                        var oldm = callExt(b, "js_csidx", [p.obj, p.key])
-                        v = emitNarrowLike(b, oldm, emitBin(b, op, oldm, v))
-                    }
-                    if (elty != "") { v = emitAdopt(b, elty, v) }
-                    callExt(b, "js_csidxset", [p.obj, p.key, v])
+                    var rhs = v
+                    var rq = csQualWrite(b, p, v, (op == "=") ? null : function(bx, oldX) {
+                        return emitCompound(bx, op, oldX, rhs)
+                    }, elty)
+                    b = rq.b
+                    v = rq.v
                 }
             }
             return {b: b, v: v}
         }
+    }
+    // A store through a qualified target `o.M` / `o[i]`: List<T>.Capacity's setter, a
+    // property's set accessor, the member slot, a user indexer's set accessor, or the
+    // built-in element. A non-null mkNew(b, old) makes the stored value from the current
+    // one, read through the matching get accessor (compound assignment, ++ / --); a null
+    // mkNew stores v. Returns {b, v: the stored value, old}. Twin of csQualWrite in
+    // csharp-interpreter.abnf; csUnqualWrite is the unqualified target's.
+    function csQualWrite(b, p, v, mkNew, elty) {
+        var old = hUndef
+        var rn = anytype
+        if (p.isField && p.keyName == "Capacity" && csPropAcc[p.keyName] == undefined) {
+            // List<T>.Capacity's setter, or a member of that name (js_cscapset).
+            if (mkNew != null) {
+                old = callExt(b, "js_csmcall", [p.obj, emitStr(b, "Capacity"), callExt(b, "js_arr_new", [])])
+                rn = mkNew(b, old)
+                b = rn.b
+                v = rn.v
+            }
+            callExt(b, "js_cscapset", [p.obj, v])
+        } else if (p.isField && csPropAcc[p.keyName] != undefined) {
+            // A property with a set accessor body ('b.W = 5').
+            if (mkNew != null) {
+                var opr = emitPropGet(b, p.obj, p.keyName)
+                old = opr.v
+                rn = mkNew(opr.b, old)
+                b = rn.b
+                v = rn.v
+            }
+            b = emitPropSet(b, p.obj, p.keyName, v)
+        } else if (p.isField) {
+            if (mkNew != null) {
+                old = callExt(b, "js_get", [p.obj, p.key])
+                rn = mkNew(b, old)
+                b = rn.b
+                v = rn.v
+            }
+            // The member's DECLARED type adopts the written value: `c.D = 3`
+            // on a `public double D;` stores 3.0, so `c.D / 2` is 1.5.
+            if (csAdoptMems[p.keyName] != undefined) {
+                v = callExt(b, "js_csadoptmem", [p.obj, p.key, v])
+            }
+            callExt(b, "js_set", [p.obj, p.key, v])
+        } else {
+            if (mkNew != null) {
+                var oxr = emitIndexGet(b, p.obj, p.key)
+                old = oxr.v
+                rn = mkNew(oxr.b, old)
+                b = rn.b
+                v = rn.v
+            }
+            if (elty != "") { v = emitAdopt(b, elty, v) }
+            b = emitIndexSet(b, p.obj, p.key, v)
+        }
+        return {b: b, v: v, old: old}
     }
     // '++x' / 'x++': the same update; the prefix form yields the NEW value, the postfix
     // form the old one.
@@ -3643,17 +3658,10 @@ KwLet       = "let" KwEnd ;
                 return {b: b, v: pre ? newV : oldV}
             }
             var p = emitRefPath(b, ref)
-            b = p.b
-            if (p.isField) {
-                var oldM = callExt(b, "js_get", [p.obj, p.key])
-                var newM = callExt(b, "js_csstep", [oldM, oneV])
-                callExt(b, "js_set", [p.obj, p.key, newM])
-                return {b: b, v: pre ? newM : oldM}
-            }
-            var oldI = callExt(b, "js_csidx", [p.obj, p.key])
-            var newI = callExt(b, "js_csstep", [oldI, oneV])
-            callExt(b, "js_csidxset", [p.obj, p.key, newI])
-            return {b: b, v: pre ? newI : oldI}
+            var rq = csQualWrite(p.b, p, hUndef, function(bx, oldX) {
+                return {b: bx, v: callExt(bx, "js_csstep", [oldX, oneV])}
+            }, "")
+            return {b: rq.b, v: pre ? rq.v : rq.old}
         }
     }
 

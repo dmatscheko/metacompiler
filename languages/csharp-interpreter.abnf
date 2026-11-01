@@ -3512,35 +3512,51 @@ KwLet       = "let" KwEnd ;
                 csSetVar(ref.name, v)
             } else {
                 var p = csResolveRef(ref)
-                if (isDict(p.obj)) {
-                    if (op != "=") { var di = dictFind(p.obj, p.key); v = applyOp(op, di < 0 ? 0 : p.obj.vals[di], v) }
-                    dictSet(p.obj, p.key, v)
-                } else if (p.isIndex == true && csHasIndexer && csFindAcc(p.obj, "__setindex") != undefined) {
-                    if (op != "=") { v = applyOp(op, csGetIndex(p.obj, p.key), v) }
-                    csFindAcc(p.obj, "__setindex")(p.obj, p.key, v)
-                } else if ((op == "+=" || op == "-=") && csFindAcc(p.obj, csEvtKey(op) + p.key) != undefined) {
+                if ((op == "+=" || op == "-=") && p.isIndex != true && !isDict(p.obj)
+                    && csFindAcc(p.obj, csEvtKey(op) + p.key) != undefined) {
                     // An event that manages its own subscription list: the accessor takes
                     // the handler itself, not the combined delegate.
                     var ev = csFindAcc(p.obj, csEvtKey(op) + p.key)
                     if (p.obj.__isclass === true) { ev(v) } else { ev(p.obj, v) }
-                } else if (!hasOwn(p.obj, p.key) && csFindAcc(p.obj, "__set_" + p.key) != undefined) {
-                    // A property with a set accessor body ('b.W = 5').
-                    if (op != "=") { v = applyOp(op, core.getField(p.obj, p.key), v) }
-                    var st = csFindAcc(p.obj, "__set_" + p.key)
-                    if (p.obj.__isclass === true) { st(v) } else { st(p.obj, v) }
-                } else if (p.key == "Capacity" && p.isIndex != true && Array.isArray(p.obj)) {
-                    // List<T>.Capacity's setter (lib/csharp-collections.js).
-                    if (op != "=") { v = applyOp(op, csxListMethod(p.obj, "Capacity", []), v) }
-                    csxListMethod(p.obj, "set_Capacity", [v])
                 } else {
-                    if (op != "=") v = applyOp(op, hasOwn(p.obj, p.key) ? p.obj[p.key] : undefined, v)
-                    if (elty != "") { v = csImplicitConv(elty, v) }
-                    else if (p.isIndex != true && csAdoptMems[p.key] != undefined) { v = csAdoptMemW(p.obj, p.key, v) }
-                    p.obj[p.key] = v
+                    var rhs = anytype
+                    rhs = v
+                    v = csQualWrite(p, v, op == "=" ? null : function(old) { return applyOp(op, old, rhs) }, elty)
                 }
             }
             return v
         }
+    }
+    // A store through a qualified target `o.M` / `o[i]`: a dictionary entry, a user
+    // indexer's set accessor, a property's set accessor, List<T>.Capacity's setter, or
+    // the plain slot. A non-null mk(old) makes the stored value from the current one,
+    // read through the matching get accessor (compound assignment, ++ / --); a null mk
+    // stores v. Returns the stored value. Twin of csQualWrite in csharp-to-llvm-ir.abnf.
+    function csQualWrite(p, v0, mk, elty) {
+        var v = anytype
+        v = v0
+        if (isDict(p.obj)) {
+            if (mk != null) { var di = dictFind(p.obj, p.key); v = mk(di < 0 ? 0 : p.obj.vals[di]) }
+            dictSet(p.obj, p.key, v)
+        } else if (p.isIndex == true && csHasIndexer && csFindAcc(p.obj, "__setindex") != undefined) {
+            if (mk != null) { v = mk(csGetIndex(p.obj, p.key)) }
+            csFindAcc(p.obj, "__setindex")(p.obj, p.key, v)
+        } else if (!hasOwn(p.obj, p.key) && csFindAcc(p.obj, "__set_" + p.key) != undefined) {
+            // A property with a set accessor body ('b.W = 5').
+            if (mk != null) { v = mk(core.getField(p.obj, p.key)) }
+            var st = csFindAcc(p.obj, "__set_" + p.key)
+            if (p.obj.__isclass === true) { st(v) } else { st(p.obj, v) }
+        } else if (p.key == "Capacity" && p.isIndex != true && Array.isArray(p.obj)) {
+            // List<T>.Capacity's setter (lib/csharp-collections.js).
+            if (mk != null) { v = mk(csxListMethod(p.obj, "Capacity", [])) }
+            csxListMethod(p.obj, "set_Capacity", [v])
+        } else {
+            if (mk != null) { v = mk(hasOwn(p.obj, p.key) ? p.obj[p.key] : undefined) }
+            if (elty != "") { v = csImplicitConv(elty, v) }
+            else if (p.isIndex != true && csAdoptMems[p.key] != undefined) { v = csAdoptMemW(p.obj, p.key, v) }
+            p.obj[p.key] = v
+        }
+        return v
     }
     // '++x' / 'x++': the same update; the prefix form yields the NEW value, the postfix
     // form the old one.
@@ -3567,20 +3583,10 @@ KwLet       = "let" KwEnd ;
                 csSetVar(ref.name, nn)
                 return pre ? nn : n
             }
-            var p = csResolveRef(ref)
-            if (isDict(p.obj)) {
-                var di = dictFind(p.obj, p.key)
-                var m = anytype
-                m = di < 0 ? 0 : p.obj.vals[di]
-                var mn = csStep(m, d)
-                dictSet(p.obj, p.key, mn)
-                return pre ? mn : m
-            }
-            var m2 = anytype
-            m2 = hasOwn(p.obj, p.key) ? p.obj[p.key] : undefined
-            var m2n = csStep(m2, d)
-            p.obj[p.key] = m2n
-            return pre ? m2n : m2
+            var old = anytype
+            var nv = anytype
+            nv = csQualWrite(csResolveRef(ref), undefined, function(o) { old = o; return csStep(o, d) }, "")
+            return pre ? nv : old
         }
     }
 
