@@ -594,7 +594,7 @@ ExprBody    <~~ push(makeExprBody(pop())) ~~>
 // against the call site, exactly as the non-extension form does. Recording them here is
 // what makes that work; TypeParams is item-neutral (it only calls tpSet), so
 // registerExtFun's positional item list is unchanged.
-ExtFun      <~~ ktNoteBody(up.start, up.pos); registerExtFun(takeAll()); retLblPop() ~~>
+ExtFun      <~~ ktNoteBody(up.start, up.pos); ktNoteGeneric(c.srcSlice(up.start, up.pos), "fun"); registerExtFun(takeAll()); retLblPop() ~~>
             = KwFun <~~ tpBegin() ~~> [ TypeParams ] ExtRecv KId <~~ push(up.in); retLblPush(up.in, "fun") ~~> [ SkipAngle ] ParamList [ ":" Type ] [ WhereClause ] [ ContractClause ] [ WhereClause ] FunBody ;
 ExtRecv     <~~ push({extRecv: up.in}) ~~>
             = AnnoRecv { RecvSeg } ;
@@ -1473,9 +1473,9 @@ RefSfx      <~~ push({kind: "refsfx", name: pop()}) ~~>
 // `emptyMap<K, V>()` and every other type-argument-carrying call are unaffected.
 MTypeArgs   <~~ push({mtargs: up.in}) ~~>
             = SkipAngle ;
-MethodSfx   <~~ var mc = popMCall(); push({kind:"mcall", name: mc.name, targ: mc.targ, lex: mc.lex, args: takeAll()}); retLblPop() ~~>
+MethodSfx   <~~ var mc = popMCall(); push({kind:"mcall", name: mc.name, targ: mc.targ, lex: mc.lex, args: takeAll(), at: up.start}); retLblPop() ~~>
             = "." KId <~~ push({mname: up.in}); retLblPush(up.in, "lam") ~~> [ MTypeArgs ] MArgs ;
-SafeMethodSfx <~~ var mcs = popMCall(); push({kind:"mcall", name: mcs.name, targ: mcs.targ, lex: mcs.lex, args: takeAll(), safe: true}); retLblPop() ~~>
+SafeMethodSfx <~~ var mcs = popMCall(); push({kind:"mcall", name: mcs.name, targ: mcs.targ, lex: mcs.lex, args: takeAll(), safe: true, at: up.start}); retLblPop() ~~>
             = "?." KId <~~ push({mname: up.in}); retLblPush(up.in, "lam") ~~> [ MTypeArgs ] MArgs ;
 FieldSfx    = "." KId <~~ push({kind:"field", name: up.in}) ~~> ;
 // `receiver.{ ... }` and `receiver.(expr)` - the anonymous-method syntax of very early
@@ -3080,7 +3080,7 @@ NotMemberKw = :script(~~ "pure";
         var tys = ktMArgTypes(s.name, as.length, el, ktIsMapTy(ty))
         var out = []
         for (var j = 0; j < as.length; j++) { out.push(j < tys.length ? kAdoptThunk(as[j], tys[j]) : as[j]) }
-        var ns = {kind: s.kind, name: s.name, targ: s.targ, args: out, safe: s.safe}
+        var ns = {kind: s.kind, name: s.name, targ: s.targ, args: out, safe: s.safe, at: s.at, lex: s.lex}
         var rty = ktMResType(s.name, as.length, el)
         if (rty != "") { ns.ktRes = rty }
         return ns
@@ -9451,10 +9451,18 @@ NotMemberKw = :script(~~ "pure";
                     // - `inline fun <reified T> Any.isA() = this is T`, then
                     // `"x".isA<String>()`. The plain call form `isA<String>(x)` pushes
                     // the call site's type arguments; the method-suffix form does the
-                    // same here. Same stack, same rule.
-                    if (s.targ != undefined && s.targ != null && s.targ != "") {
-                        if (s.tjudgedArgs === undefined) { s.tjudgedArgs = kIsNames(parseTypeArgs(s.targ), s.lex) }
-                        if (s.tkinfo === undefined) { s.tkinfo = kTypeArgInfo(parseTypeArgs(s.targ), tpsW) }
+                    // same here. Same stack, same rule. Written without type arguments,
+                    // they are inferred from the receiver's static type (the chain's
+                    // source up to the call).
+                    if (s.tjudgedArgs === undefined) {
+                        var tl = anytype
+                        tl = null
+                        if (s.targ != undefined && s.targ != null && s.targ != "") { tl = parseTypeArgs(s.targ) }
+                        else if (txt != undefined && s.at !== undefined) { tl = ktInferExtTArgs(s.name, leadAt, s.at) }
+                        s.tjudgedArgs = tl === null ? null : kIsNames(tl, s.lex)
+                        s.tkinfo = tl === null ? null : kTypeArgInfo(tl, tpsW)
+                    }
+                    if (s.tjudgedArgs !== null) {
                         kTypeArgsPush(kFwdIsNames(s.tjudgedArgs, s.tkinfo), s.tkinfo)
                         try { cur = mcall(cur, s.name, spec.pos, spec) } finally { kTypeArgsPop() }
                     } else {
@@ -12347,6 +12355,23 @@ NotMemberKw = :script(~~ "pure";
         }
         return null
     }
+    // Class.kotlin: a primitive java class (`long`) is its kotlin type's KClass, a
+    // wrapper (java.lang.Long) the same KClass marked rbox, whose .java is that
+    // wrapper again; a java class kJavaOfType maps a builtin type of its simple name
+    // to (java.util.List), or a primitive array ([I), is that type's KClass; every
+    // other java class already is its KClass. Twin of ktKClassOfJava in
+    // abnf/jsrtkotlin.go and languages/lib/kotlin-rt.metajs.
+    function kKClassOfJava(jc) {
+        var jn = jc.jname
+        if (jn === undefined) { return jc }
+        for (var i = 0; i < kPrimKNames.length; i++) {
+            if (jn == kJvmPrimNames[i]) { return kClassLitNamed(kPrimKNames[i]) }
+            if (jn == "java.lang." + kPrimWrappers[i]) { return kReifiedBoxed(kClassLitNamed(kPrimKNames[i])) }
+            if (jn == "[" + "IJDFCZBS".charAt(i)) { return kClassLitNamed(kPrimKNames[i] + "Array") }
+        }
+        if (kJavaOfType["$" + jc.kname] === jn) { return kClassLitNamed(jc.kname) }
+        return jc
+    }
     // KClass.hashCode is its java object class's (kotlin.jvm.internal.ClassReference),
     // here the hash of that class's name, so Int::class and Int::class.javaObjectType
     // agree and every equal pair (kEq) hashes alike. Twin of ktKClassHash in
@@ -12762,6 +12787,7 @@ NotMemberKw = :script(~~ "pure";
             if (name == "java" || name == "javaObjectType") { return kKClassJava(o, name == "javaObjectType") }
             if (name == "javaPrimitiveType") { return kKClassPrim(o) }
             if (name == "javaClass") { return o }
+            if (name == "kotlin") { return kKClassOfJava(o) }
             fail("member ." + name + " of a class literal")
         }
         if (o.__isclass === true) {

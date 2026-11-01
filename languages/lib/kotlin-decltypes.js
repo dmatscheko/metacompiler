@@ -583,6 +583,21 @@ function ktNoteGeneric(raw, kw) {
     }
     var n0 = i
     while (i < raw.length && ktIdChar(raw.charAt(i))) { i++ }
+    // An extension's receiver type (`T.`, `List<T>.`, `T?.`) comes before its name.
+    var recv = ""
+    var r0 = n0
+    var r = i
+    while (kw == "fun" && r > 0) {
+        r = ktSkipWs(raw, r)
+        if (raw.charAt(r) == "<") { r = ktMatchClose(raw, r, "<", ">") + 1 }
+        if (r > 0 && raw.charAt(r) == "?") { r++ }
+        if (r <= 0 || raw.charAt(r) != ".") { break }
+        recv = ktTrimWs(raw.substring(r0, r))
+        n0 = r + 1
+        i = n0
+        while (i < raw.length && ktIdChar(raw.charAt(i))) { i++ }
+        r = i
+    }
     var name = raw.substring(n0, i)
     i = ktSkipWs(raw, i)
     if (raw.charAt(i) == "<") {
@@ -604,7 +619,10 @@ function ktNoteGeneric(raw, kw) {
             ptys.push(colon.length < 2 ? "" : stripWs(ktSplitTop(colon[1], "=")[0]))
         }
     }
-    ktGenerics["$" + name] = ktGenerics["$" + name] == undefined ? {tps: tps, ptys: ptys, rf: rf} : "#"
+    // An extension is filed apart (under ".name"): only a call in method position
+    // can reach it.
+    var key = (recv == "" ? "$" : ".") + name
+    ktGenerics[key] = ktGenerics[key] == undefined ? {tps: tps, ptys: ptys, rf: rf, recv: recv} : "#"
 }
 // The type arguments a call of the reified generic function `name` written without
 // any infers, one per type parameter, or null for any other callee: the static type
@@ -642,6 +660,52 @@ function ktInferTArgs(name, at, to) {
     }
     ktAt = saved
     return out
+}
+// The type arguments a method-position call of the reified generic extension
+// `name` written without any infers, one per type parameter, or null for any other
+// callee: what the static type of the receiver (the source at..to) binds the type
+// parameter to in the declared receiver type (`T`, `List<T>`), Any when it binds none.
+function ktInferExtTArgs(name, at, to) {
+    var g = ktGenerics["." + name]
+    if (g == undefined || g == "#" || g.rf != true) { return null }
+    var saved = ktAt
+    ktAt = at
+    var ty = ktStaticTy(c.srcSlice(at, to))
+    ktAt = saved
+    // A non-null receiver type is reached on a nullable value only through `?.`.
+    if (g.recv.charAt(g.recv.length - 1) != "?" && ty.charAt(ty.length - 1) == "?") { ty = ty.substring(0, ty.length - 1) }
+    var out = []
+    for (var k = 0; k < g.tps.length; k++) {
+        var b = ty == "" ? "" : ktBindTParam(g.recv, ty, g.tps[k])
+        out.push(b == "" ? "Any" : b)
+    }
+    return out
+}
+// The type the type parameter tp stands for when the type text pat (written with it)
+// is the type ty, "" when pat does not mention it where ty spells one.
+function ktBindTParam(pat, ty, tp) {
+    var p = ktTrimWs(pat)
+    var t = ktTrimWs(ty)
+    var w = ["out ", "in "]
+    for (var m = 0; m < w.length; m++) {
+        if (p.substring(0, w[m].length) == w[m]) { p = ktTrimWs(p.substring(w[m].length)) }
+    }
+    if (p.charAt(p.length - 1) == "?") {
+        p = p.substring(0, p.length - 1)
+        if (t.charAt(t.length - 1) == "?") { t = t.substring(0, t.length - 1) }
+    }
+    if (p == tp) { return t }
+    var lp = p.indexOf("<")
+    var lt = t.indexOf("<")
+    if (lp < 0 || lt < 0 || p.charAt(p.length - 1) != ">" || t.charAt(t.length - 1) != ">") { return "" }
+    var pa = ktSplitTop(p.substring(lp + 1, p.length - 1), ",")
+    var ta = ktSplitTop(t.substring(lt + 1, t.length - 1), ",")
+    if (pa.length != ta.length) { return "" }
+    for (var i = 0; i < pa.length; i++) {
+        var b = ktBindTParam(pa[i], ta[i], tp)
+        if (b != "") { return b }
+    }
+    return ""
 }
 function ktSkipWs(s, i) {
     while (i < s.length && (s.charAt(i) == " " || s.charAt(i) == "\t" || s.charAt(i) == "\n" || s.charAt(i) == "\r")) { i++ }

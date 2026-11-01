@@ -3035,6 +3035,8 @@ func init() {
 					return w(ktKClassPrim(co))
 				case "javaClass":
 					return w(co)
+				case "kotlin":
+					return w(ktKClassOfJava(co))
 				}
 				rt.fail("member .%s of a class literal", name)
 			}
@@ -11261,6 +11263,35 @@ func ktKClassPrim(co *jsObject) interface{} {
 		}
 	}
 	return jsNull
+}
+
+// ktKClassOfJava is Class.kotlin: a primitive java class (`long`) is its kotlin
+// type's KClass, a wrapper (java.lang.Long) the same KClass marked rbox, whose .java
+// is that wrapper again; a java class ktJavaOfType maps a builtin type of its
+// simple name to (java.util.List), or a primitive array ([I), is that type's KClass;
+// every other java class already is its KClass. Twin of kKClassOfJava in
+// kotlin-interpreter.abnf and languages/lib/kotlin-rt.metajs.
+func ktKClassOfJava(jc *jsObject) *jsObject {
+	jn, has := jc.props["jname"].(string)
+	if !has {
+		return jc
+	}
+	for i, p := range ktPrimKNames {
+		switch jn {
+		case ktJvmPrimNames[i]:
+			return ktClassLit(p)
+		case "java.lang." + ktPrimWrappers[i]:
+			o := ktClassLit(p)
+			o.set("rbox", true)
+			return o
+		case "[" + "IJDFCZBS"[i:i+1]:
+			return ktClassLit(p + "Array")
+		}
+	}
+	if kn, _ := jc.props["kname"].(string); ktJavaOfType[kn] == jn {
+		return ktClassLit(kn)
+	}
+	return jc
 }
 
 // ktKClassHash is KClass.hashCode: the hash of its java object class's name, so

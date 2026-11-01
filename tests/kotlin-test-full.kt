@@ -7156,6 +7156,40 @@ fun s162() {
     check("smart162f", cast162(3) == "int java.lang.Integer" && cond162(4, true) == "java.lang.Integer")
 }
 
+// ===== SECTION 163: reified extensions called without type arguments, Class.kotlin =====
+// A reified type parameter of an extension called in method position without type
+// arguments is inferred from the receiver's static type, where the declared
+// receiver type (`T`, `List<T>`, `Map<K, V>`, `T?`) binds it; `Class.kotlin` maps a
+// java class back to its KClass - a primitive or wrapper class to its kotlin type's,
+// whose java class it keeps, a mapped builtin's or a primitive array's to that
+// type's (kotlinc 2.2.21 on java 24).
+inline fun <reified T : Any> T.rn163() = T::class.simpleName + " " + (this is T) + " " + ("q" is T)
+inline fun <reified T> List<T>.el163() = T::class.simpleName
+inline fun <reified T> T?.nn163(): String = T::class.java.toString()
+inline fun <reified K, reified V> Map<K, V>.kv163() = K::class.simpleName + "/" + V::class.simpleName
+inline fun <reified T> List<T>.is163(x: Any) = x is T
+inline fun <reified T> Array<out T>.ar163() = T::class.simpleName
+class P163(val xs: List<Double>)
+fun s163() {
+    val a: Any = 5
+    val n: Int? = 3
+    val ls: List<Char>? = listOf('a')
+    val ar: Array<String> = arrayOf("a")
+    check("rext163a", 5.rn163() == "Int true false" && "s".rn163() == "String true true" && a.rn163() == "Any true true" &&
+        2.5.rn163() == "Double true false" && 5.rn163<Number>() == "Number true false")
+    check("rext163b", listOf(1, 2).el163() == "Int" && listOf("a").el163() == "String" && P163(listOf(1.0)).xs.el163() == "Double" &&
+        ls?.el163() == "Char" && n.nn163() == "class java.lang.Integer" && mapOf(1 to "a").kv163() == "Int/String" &&
+        !listOf(1).is163("x") && listOf("a").is163("x") && ar.ar163() == "String")
+    val lk = Long::class.javaObjectType.kotlin
+    check("jkot163c", lk == Long::class && lk.simpleName == "Long" && lk.qualifiedName == "kotlin.Long" &&
+        "" + lk.java == "class java.lang.Long" && "" + lk.javaPrimitiveType == "long" &&
+        Long::class.javaPrimitiveType!!.kotlin == Long::class && "" + Long::class.java.kotlin.java == "long" &&
+        lk.hashCode() == Long::class.hashCode() && 5.javaClass.kotlin == Int::class && Char::class.java.kotlin.simpleName == "Char")
+    check("jkot163d", String::class.java.kotlin == String::class && IntArray::class.java.kotlin.simpleName == "IntArray" &&
+        IntArray::class.java.kotlin.qualifiedName == "kotlin.IntArray" && Number::class.java.kotlin.qualifiedName == "kotlin.Number" &&
+        UInt::class.java.kotlin.simpleName == "UInt" && P163::class.java.kotlin == P163::class && P163(listOf()).javaClass.kotlin.simpleName == "P163")
+}
+
 fun main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -7315,6 +7349,7 @@ fun main() {
     s160() // SECTION-CALL 160
     s161() // SECTION-CALL 161
     s162() // SECTION-CALL 162
+    s163() // SECTION-CALL 163
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }

@@ -521,7 +521,7 @@ ExprBody    <~~ push(makeExprBody(pop())) ~~>
 // decoration: `inline fun <reified T> Any.isA(): Boolean = this is T` resolves `is T`
 // against the call site, exactly as the non-extension form does. TypeParams only fills
 // pendingReified, so the item list makeFun reads is unchanged.
-ExtFun      <~~ ktNoteBody(up.start, up.pos); push(makeExtFunStmt(takeAll(), retLblTop(), reifiedTop())); retLblPop(); reifiedPop() ~~>
+ExtFun      <~~ ktNoteBody(up.start, up.pos); ktNoteGeneric(c.srcSlice(up.start, up.pos), "fun"); push(makeExtFunStmt(takeAll(), retLblTop(), reifiedTop())); retLblPop(); reifiedPop() ~~>
             = KwFun [ TypeParams ] ExtRecv KId <~~ push(up.in); retLblPush(up.in, "fun"); reifiedPush() ~~> ParamList [ ":" Type ] [ WhereClause ] FunBody ;
 ExtRecv     <~~ push({extRecv: up.in}) ~~>
             = AnnoRecv { RecvSeg } ;
@@ -1452,9 +1452,9 @@ RefName     = KId <~~ push(up.in) ~~> | "class" KwEnd <~~ push("class") ~~> ;
 // Twin of MTypeArgs in kotlin-interpreter.abnf; see there.
 MTypeArgs   <~~ push({mtargs: up.in}) ~~>
             = SkipAngle ;
-MethodSfx   <~~ var mc = popMCall(); push({kind:"mcall", name: mc.name, targ: mc.targ, args: takeAll()}); retLblPop() ~~>
+MethodSfx   <~~ var mc = popMCall(); push({kind:"mcall", name: mc.name, targ: mc.targ, args: takeAll(), at: up.start}); retLblPop() ~~>
             = "." KId <~~ push({mname: up.in}); retLblPush(up.in, "lam") ~~> [ MTypeArgs ] MArgs ;
-SafeMethodSfx <~~ var mcs = popMCall(); push({kind:"mcall", name: mcs.name, targ: mcs.targ, args: takeAll(), safe: true}); retLblPop() ~~>
+SafeMethodSfx <~~ var mcs = popMCall(); push({kind:"mcall", name: mcs.name, targ: mcs.targ, args: takeAll(), safe: true, at: up.start}); retLblPop() ~~>
             = "?." KId <~~ push({mname: up.in}); retLblPush(up.in, "lam") ~~> [ MTypeArgs ] MArgs ;
 FieldSfx    = "." KId <~~ push({kind:"field", name: up.in}) ~~> ;
 SafeFieldSfx = "?." KId <~~ push({kind:"field", name: up.in, safe: true}) ~~> ;
@@ -3157,12 +3157,26 @@ KwContract  = "contract" KwEnd ;
         // contributes nothing.
         var exr = reifiedFuns["$" + s.name]
         var exn = exr == undefined ? 0 : exr.length
+        var xtis = s.tisn
+        var xtkl = s.tkls
+        var xinf = (exn > 0 && xtkl == undefined && s.rinf != undefined) ? ktInferExtTArgs(s.name, s.rinf.at, s.at) : null
+        if (xinf != null) {
+            xtis = []
+            xtkl = []
+            reifiedStack.push(s.rinf.rctx)
+            for (var xr = 0; xr < exn; xr++) {
+                var xta = reifiedTArg("." + s.name, exr[xr], xr, [], xinf)
+                xtis.push(reifiedIsName(xta))
+                xtkl.push(reifiedKClass(xta))
+            }
+            reifiedStack.pop()
+        }
         for (var xi = 0; xi < exn; xi++) {
-            var has = s.tkls != undefined && xi < s.tkls.length
-            var xnr = (has ? s.tisn[xi] : makeIsNameConst("Any"))(b)
+            var has = xtkl != undefined && xi < xtkl.length
+            var xnr = (has ? xtis[xi] : makeIsNameConst("Any"))(b)
             b = xnr.b
             callExt(b, "js_arr_push", [eargsV, xnr.v])
-            var xkr = (has ? s.tkls[xi] : reifiedKClass("Any"))(b)
+            var xkr = (has ? xtkl[xi] : reifiedKClass("Any"))(b)
             b = xkr.b
             callExt(b, "js_arr_push", [eargsV, xkr.v])
         }
@@ -4525,10 +4539,16 @@ KwContract  = "contract" KwEnd ;
         }
         // A reified extension's type arguments as `is` names and class literals, made
         // here, where a type argument that is the enclosing function's reified T is
-        // still known.
+        // still known. Written without type arguments, they are inferred from the
+        // receiver's static type (the chain's source from rinf.at up to the call) when
+        // the call is emitted.
         for (var tk = 0; tk < suffixes.length; tk++) {
             var tks = suffixes[tk]
-            if (tks.kind != "mcall" || tks.targ == undefined || tks.targ == null || tks.targ == "") { continue }
+            if (tks.kind != "mcall") { continue }
+            if (tks.targ == undefined || tks.targ == null || tks.targ == "") {
+                if (txt != undefined && tks.at !== undefined) { tks.rinf = {at: ktAt, rctx: reifiedTop()} }
+                continue
+            }
             var tkn = typeArgNames(tks.targ)
             var tkl = []
             var tkis = []
@@ -5344,15 +5364,21 @@ KwContract  = "contract" KwEnd ;
         reifiedStack.push(rctx)
         var inf = (targs.length == 0 && from !== undefined) ? ktInferTArgs(name, from, to) : null
         for (var ri = 0; ri < reified.length; ri++) {
-            var rta = targs.length > ri ? targs[ri] : "Any"
-            if (inf != null) {
-                var gtps = ktGenerics["$" + name].tps
-                for (var gi = 0; gi < gtps.length; gi++) { if (gtps[gi] == reified[ri]) { rta = inf[gi] } }
-            }
+            var rta = reifiedTArg("$" + name, reified[ri], ri, targs, inf)
             args.push({at: reifiedIsName(rta)})
             args.push({at: reifiedKClass(rta)})
         }
         reifiedStack.pop()
+    }
+    // The type argument of the ri-th reified type parameter rn: the explicit one at
+    // its position, else the one inferred for it (inf, one per type parameter gk of
+    // the callee's ktGenerics entry), else Any.
+    function reifiedTArg(gk, rn, ri, targs, inf) {
+        var rta = targs.length > ri ? targs[ri] : "Any"
+        if (inf == null) { return rta }
+        var gtps = ktGenerics[gk].tps
+        for (var gi = 0; gi < gtps.length; gi++) { if (gtps[gi] == rn) { rta = inf[gi] } }
+        return rta
     }
     function ktAdoptGenericArgs(name, targs, args) {
         var n = 0
@@ -6847,7 +6873,8 @@ KwContract  = "contract" KwEnd ;
         for (var j = 0; j < as.length; j++) {
             out.push(j < tys.length ? {at: ktAdoptThunk(as[j].at, tys[j])} : as[j])
         }
-        var ns = {kind: s.kind, name: s.name, targ: s.targ, args: out, safe: s.safe}
+        var ns = {kind: s.kind, name: s.name, targ: s.targ, args: out, safe: s.safe, at: s.at,
+                  tkls: s.tkls, tisn: s.tisn, rinf: s.rinf}
         var rty = ktMResType(s.name, as.length, el)
         if (rty != "") { ns.ktRes = rty }
         return ns

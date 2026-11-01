@@ -7391,15 +7391,34 @@ function ktKClassJava(co, wrapper) {
     }
     var kn = co["kname"]
     var i = ktPrimKNames.indexOf(kn)
-    if (i >= 0) {
-        var wrappers = ["Integer", "Long", "Double", "Float", "Character", "Boolean", "Byte", "Short"]
-        return ktJavaClass("java.lang." + wrappers[i])
-    }
+    if (i >= 0) { return ktJavaClass("java.lang." + ktPrimWrappers[i]) }
     var jt = ktJavaOfType["$" + kn]
     if (jt !== undefined) { return ktJavaClass(jt) }
     return co
 }
 var ktPrimKNames = ["Int", "Long", "Double", "Float", "Char", "Boolean", "Byte", "Short"]
+var ktPrimWrappers = ["Integer", "Long", "Double", "Float", "Character", "Boolean", "Byte", "Short"]
+// Class.kotlin (jsrtkotlin.go ktKClassOfJava): a primitive java class is its
+// kotlin type's KClass, a wrapper the same KClass marked rbox, a mapped builtin's
+// java class or a primitive array's that type's KClass; any other is itself.
+function ktKClassOfJava(jc) {
+    var jn = jc["jname"]
+    if (jn === undefined) { return jc }
+    var i = 0
+    while (i < ktPrimKNames.length) {
+        var d = "IJDFCZBS".charAt(i)
+        if (jn == ktJvmPrimName(d)) { return ktClassLit(ktPrimKNames[i]) }
+        if (jn == "java.lang." + ktPrimWrappers[i]) {
+            var o = ktClassLit(ktPrimKNames[i])
+            o["rbox"] = true
+            return o
+        }
+        if (jn == "[" + d) { return ktClassLit(ktPrimKNames[i] + "Array") }
+        i = i + 1
+    }
+    if (ktJavaOfType["$" + jc["kname"]] === jn) { return ktClassLit(jc["kname"]) }
+    return jc
+}
 // KClass.javaPrimitiveType (jsrtkotlin.go ktKClassPrim): a primitive type's
 // primitive java class (marked jprim), a reified type argument's too; null else.
 function ktKClassPrim(co) {
@@ -11022,6 +11041,7 @@ function js_ktfget(o, name) {
         if (name == "javaPrimitiveType") { return ktKClassPrim(o) }
         if (name == "javaClass") { return o }
         if (name == "javaObjectType") { return ktKClassJava(o, true) }
+        if (name == "kotlin") { return ktKClassOfJava(o) }
         fail("member ." + name + " of a class literal")
         return undefined
     }
