@@ -1586,33 +1586,67 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var rtIndList = rtDecl("rt_indlist", false, [1])
     var rtIndPart = rtDecl("rt_indpart", true, [1, 0])
 
-    var funcs = {}        // user functions: "$"+name -> IR func (bashfn_NAME)
-    var declaredFuncs = {}  // every name the program DEFINES somewhere (collected during the
-                            // walk, so a call emitted before the definition still resolves)
-    var definedFuncs = {}   // names whose body has already been emitted
-    var declaredFuncList = []  // the same names as declaredFuncs, in an enumerable order
-    var declaredSeen = {}
+    var funcDefs = {}       // "$"+name -> how many definitions of it the program has (counted
+                            // during the walk, so a call emitted before a definition sees it)
+    var defFuncs = {}       // "$"+name+"#"+k -> the IR function of the k-th definition
+    var declaredFuncList = []  // the names of funcDefs, in an enumerable order
     var fnCount = 0
 
     function bashFnParams() { return [] }
-    // The call of a user function; its status is $?. A call made as a CONDITION counts itself
-    // in cond_depth for as long as it runs, which keeps set -e off in the body: the body is
-    // emitted once, so only the run time knows how it was called.
-    function emitFnCall(b, f) {
+    // The call of the definition of user function `name` in force (fnSlot), which must be one;
+    // its status is $?, and the block after it is returned. With several definitions the slot's
+    // number picks the IR function. A call made as a CONDITION counts itself in cond_depth for
+    // as long as it runs, which keeps set -e off in the body: the body is emitted once, so only
+    // the run time knows how it was called.
+    function emitFnCall(b, name) {
         if (condDepth > 0) { b.NewStore(b.NewAdd(b.NewLoad(i32, gCondRt), one), gCondRt) }
-        storeStatus(b, b.NewCall(f))
+        var nd = funcDefs["$" + name]
+        if (nd == 1) { storeStatus(b, b.NewCall(defFunc(name, 1))) }
+        else {
+            var k = b.NewLoad(i32, fnSlot(name))
+            var done = curF.NewBlock("")
+            var j
+            for (j = 1; j < nd; j++) {
+                var hit = curF.NewBlock(""), miss = curF.NewBlock("")
+                b.NewCondBr(b.NewICmp(llvm.enum.IPredEQ, k, llvm.constant.NewInt(i32, j)), hit, miss)
+                storeStatus(hit, hit.NewCall(defFunc(name, j)))
+                hit.NewBr(done)
+                b = miss
+            }
+            storeStatus(b, b.NewCall(defFunc(name, nd)))
+            b.NewBr(done)
+            b = done
+        }
         if (condDepth > 0) { b.NewStore(b.NewSub(b.NewLoad(i32, gCondRt), one), gCondRt) }
+        return b
     }
-    // The IR function for a bash function name, declared on first reference. A forward call
-    // (`f` above its `f() {...}`) is ordinary in a shell script, so it must not fall through
-    // to "command not found".
+    // Non-null for a name the program defines somewhere (funcDefs is complete before
+    // anything is emitted).
     function funcFor(name) {
+        if (!hasOwn(funcDefs, "$" + name)) { return null }
+        return defFunc(name, 1)
+    }
+    // The IR function of the k-th definition of `name`, declared on first reference.
+    function defFunc(name, k) {
+        var key = "$" + name + "#" + k
+        if (!hasOwn(defFuncs, key)) {
+            defFuncs[key] = m.NewFunc("bashfn_" + name + ((k == 1) ? "" : "_" + fnCount), i32)
+            fnCount = fnCount + 1
+        }
+        return defFuncs[key]
+    }
+    // i32 fnk_NAME: which definition of the name is in force, 0 until one has RUN. A name is
+    // looked up when it is called, so `f; f() {...}` is "f: command not found", a definition
+    // in a branch not taken defines nothing, and a redefinition is what an earlier caller's
+    // body runs.
+    var fnSlots = {}
+    function fnSlot(name) {
         var key = "$" + name
-        if (hasOwn(funcs, key)) { return funcs[key] }
-        if (!hasOwn(declaredFuncs, key)) { return null }
-        var f = m.NewFunc("bashfn_" + name, i32)
-        funcs[key] = f
-        return f
+        if (!hasOwn(fnSlots, key)) { fnSlots[key] = m.NewGlobalDef("fnk_" + name, zero) }
+        return fnSlots[key]
+    }
+    function fnIsDefined(b, name) {
+        return b.NewICmp(llvm.enum.IPredNE, b.NewLoad(i32, fnSlot(name)), zero)
     }
 
     // ===================================================================================
@@ -2345,7 +2379,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     }
                     var de = emptyPtr(b)
                     if (idxWordT != null) {
-                        var rw = (idxO == "-" || idxO == "+") ? dfltWordEmit(b, idxWordT) : evalWord(b, idxWordT)
+                        // the word is used when the arm the subscript selects is blank (unset, for +)
+                        var useW = b.NewSelect(whole, blankL, blankE)
+                        if (idxO == "+") { useW = b.NewXor(useW, llvm.constant.NewInt(llvm.types.I1, 1)) }
+                        var rw = lazyWord(b, useW, idxWordT, idxO == "-" || idxO == "+")
                         b = rw.b
                         de = rw.v
                     }
@@ -2566,7 +2603,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                               : b.NewICmp(llvm.enum.IPredEQ, v, unsetPtr(b))
             var d = emptyPtr(b)
             if (wordT != null) {
-                var r = (o == "-" || o == "+") ? dfltWordEmit(b, wordT) : evalWord(b, wordT)
+                var r = lazyWord(b, (o == "+") ? b.NewXor(blank, llvm.constant.NewInt(llvm.types.I1, 1)) : blank, wordT, o == "-" || o == "+")
                 b = r.b
                 d = r.v
             }
@@ -3842,6 +3879,19 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var r = w.spw.fn(b)
         return {b: r.b, v: r.b.NewCall(rtFinList, [r.v])}
     }
+    // The word of ${v-w}, ${v=w}, ${v?w} and ${v+w} is expanded only when the operator uses it:
+    // with x set, ${x:-$(cmd)} runs nothing and ${x:-$((1/0))} raises nothing. `take` is the
+    // i1 that selects the word; the other path answers "", which the caller's select discards.
+    // A literal word has no effects and is emitted inline. dflt: expand it with dfltWordEmit.
+    function lazyWord(b, take, w, dflt) {
+        if (w.c != undefined) { return dflt ? dfltWordEmit(b, w) : evalWord(b, w) }
+        var e = emptyPtr(b)
+        var wB = curF.NewBlock(""), jB = curF.NewBlock("")
+        b.NewCondBr(take, wB, jB)
+        var r = dflt ? dfltWordEmit(wB, w) : evalWord(wB, w)
+        r.b.NewBr(jB)
+        return {b: jB, v: jB.NewPhi([llvm.ir.NewIncoming(r.v, r.b), llvm.ir.NewIncoming(e, b)])}
+    }
     // A ${v-w} word: the unsplit word every use reads, carrying in `spw` the form whose
     // unquoted parts (BraceUq) split, for dfltWordEmit.
     function mkBraceWord(items) {
@@ -5070,11 +5120,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var cname = cands[ci]
             var hit = curF.NewBlock(""), miss = curF.NewBlock("")
             var same = b.NewCall(rtStreq, [nameV, gepStr(b, cname)])
-            if (ci < cands.length - 5 && hasOwn(shellBuiltins, "$" + cname)) { same = b.NewAnd(same, b.NewLoad(i32, fnDefFlag(cname))) }
+            if (ci < cands.length - 5) { same = b.NewAnd(same, b.NewZExt(fnIsDefined(b, cname), i32)) }
             b.NewCondBr(b.NewICmp(llvm.enum.IPredNE, same, zero), hit, miss)
             var hb = hit
             if (ci < cands.length - 5) {
-                var f = funcFor(cname)
                 var savedTop = slotOf(i32)
                 var savedBase = slotOf(i32)
                 var savedN = slotOf(i32)
@@ -5085,7 +5134,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 var base = hb.NewLoad(i32, savedTop)
                 hb.NewStore(base, gFrameBase)
                 hb.NewStore(hb.NewSub(hb.NewLoad(i32, gArgvTop), base), gFrameN)
-                emitFnCall(hb, f)
+                hb = emitFnCall(hb, cname)
                 hb.NewStore(hb.NewLoad(i32, savedBase), gFrameBase)
                 hb.NewStore(hb.NewLoad(i32, savedN), gFrameN)
                 hb.NewStore(hb.NewLoad(i32, savedTop), gArgvTop)
@@ -5135,13 +5184,6 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var shellKwWords = "if then else elif fi case esac for select while until do done in function time { } ! [[ ]] coproc".split(" ")
     var swi
     for (swi = 0; swi < shellKnownWords.length; swi++) { shellBuiltins["$" + shellKnownWords[swi]] = true }
-    // i32 fndef_NAME: 1 once the definition of a function named like a builtin has run.
-    var fnDefFlags = {}
-    function fnDefFlag(name) {
-        var key = "$" + name
-        if (!hasOwn(fnDefFlags, key)) { fnDefFlags[key] = m.NewGlobalDef("fndef_" + name, zero) }
-        return fnDefFlags[key]
-    }
     function wrapperWords(w) {
         var out = {cmdT: w.cmdT, argTs: w.argTs, noFn: false, notBuiltin: null}
         while ((out.cmdT.c == "builtin" || out.cmdT.c == "command") && out.argTs.length > 0 && out.argTs[0].c != undefined) {
@@ -5191,7 +5233,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // The call of user function f with argTs: every ARGUMENT FIELD is pushed and made this
     // call's frame. The stack top, base and count are all restored afterwards, so recursion
     // nests correctly. tdp: the prefix bindings' save-stack depth (tmpDepth), or null.
-    function emitUserCall(b, f, argTs, tdp) {
+    function emitUserCall(b, name, argTs, tdp) {
         var savedTop = slotOf(i32)
         var savedBase = slotOf(i32)
         var savedN = slotOf(i32)
@@ -5209,7 +5251,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         b.NewStore(base, gFrameBase)
         b.NewStore(b.NewSub(b.NewLoad(i32, gArgvTop), base), gFrameN)
         if (tdp != null) { b.NewStore(b.NewAdd(b.NewLoad(i32, tdp), one), gLsTb) }
-        emitFnCall(b, f)
+        b = emitFnCall(b, name)
         b.NewStore(b.NewLoad(i32, savedBase), gFrameBase)
         b.NewStore(b.NewLoad(i32, savedN), gFrameN)
         b.NewStore(b.NewLoad(i32, savedTop), gArgvTop)
@@ -5246,15 +5288,15 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 return b
             }
             if (cmd == undefined) { return emitComputedCommand(b, cmdT, argTs, hasCmdSub(cmdT, argTs, asgs), noFn) }
-            // A function hides the builtin of its name (`echo() { builtin echo "<$*>"; }`).
+            // A function hides the builtin of its name (`echo() { builtin echo "<$*>"; }`) from
+            // the moment its definition has run (fnSlot); before that, and inside `builtin` /
+            // `command`, the builtin runs, and a name that is no builtin is not found. Twin of
+            // the function arm at the start of runCommand.
             var f = noFn ? null : funcFor(cmd)
-            // A function of a builtin's name hides the builtin from the moment its definition
-            // has run (fnDefFlag); before that, and inside `builtin` / `command`, the builtin
-            // runs. Twin of the function arm at the start of runCommand.
-            if (f != null && hasOwn(shellBuiltins, "$" + cmd)) {
+            if (f != null) {
                 var callB = curF.NewBlock(""), bltB = curF.NewBlock(""), join = curF.NewBlock("")
-                b.NewCondBr(b.NewICmp(llvm.enum.IPredNE, b.NewLoad(i32, fnDefFlag(cmd)), zero), callB, bltB)
-                emitUserCall(callB, f, argTs, tdp).NewBr(join)
+                b.NewCondBr(fnIsDefined(b, cmd), callB, bltB)
+                emitUserCall(callB, cmd, argTs, tdp).NewBr(join)
                 noFn = true
                 cmdMark = cmk
                 tmpDepth = tdp
@@ -5262,7 +5304,6 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 noFn = false
                 return join
             }
-            if (f != null) { return emitUserCall(b, f, argTs, tdp) }
             if (cmd == "builtin" || cmd == "command") { return emitWrapper(b, cmd, argTs, hasCmdSub(cmdT, argTs, asgs)) }
             if (cmd == "echo") { return emitEcho(b, argTs) }
             if (cmd == "[" || cmd == "test") { return emitTest(b, cmd, argTs) }
@@ -6277,30 +6318,24 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
     }
 
-    // items = [{fname}, bodyThunk]. Emits bashfn_NAME immediately (so recursion resolves).
+    // items = [{fname}, bodyThunk]. Each definition is numbered (funcDefs) while the program
+    // is parsed; running it stores that number in fnk_NAME. The body is emitted the first time
+    // the definition is.
     function makeFuncDef(items) {
         var fname = items[0].fname
         var bodyT = items[1]
-        declaredFuncs["$" + fname] = true
+        var kdef = hasOwn(funcDefs, "$" + fname) ? funcDefs["$" + fname] + 1 : 1
+        funcDefs["$" + fname] = kdef
         // The same set as an ARRAY: the run-time command dispatch has to enumerate the names, and
         // keysOf is not bound for grammar scripts.
-        if (!hasOwn(declaredSeen, "$" + fname)) {
-            declaredSeen["$" + fname] = true
-            declaredFuncList.push(fname)
-        }
+        if (kdef == 1) { declaredFuncList.push(fname) }
+        var emitted = false
         return function(b) {
-            var i
-            var key = "$" + fname
-            var f = null
-            if (hasOwn(funcs, key) && !hasOwn(definedFuncs, key)) {
-                f = funcs[key]              // a forward declaration made by an earlier call
-            } else {
-                var suffix = hasOwn(funcs, key) ? ("_" + fnCount) : ""
-                fnCount = fnCount + 1
-                f = m.NewFunc("bashfn_" + fname + suffix, i32)
-                funcs[key] = f
-            }
-            definedFuncs[key] = true
+            b.NewStore(llvm.constant.NewInt(i32, kdef), fnSlot(fname))
+            storeStatusI(b, 0)
+            if (emitted) { return b }
+            emitted = true
+            var f = defFunc(fname, kdef)
             // bash's loops do not reach into a called function: the body starts with none.
             var savedF = curF, savedEntry = curEntry, savedExit = curExit, savedFrame = curFrame, savedLoops = loopStack
             var savedExitRd = curExitRd, savedRedirs = redirStack, savedRetSub = retInSub
@@ -6327,8 +6362,6 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             attrUnwind(undoBase)
             curF = savedF; curEntry = savedEntry; curExit = savedExit; curFrame = savedFrame; loopStack = savedLoops
             curExitRd = savedExitRd; redirStack = savedRedirs; retInSub = savedRetSub
-            if (hasOwn(shellBuiltins, key)) { b.NewStore(one, fnDefFlag(fname)) }
-            storeStatusI(b, 0)
             return b
         }
     }

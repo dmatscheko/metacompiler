@@ -1366,6 +1366,37 @@ s82() {
   check pk4 "$acc" "w1 w2 "
   (exit 3) | (exit 300) | true; check pk5 "${PIPESTATUS[*]}" "3 44 0"
 }
+# ===== SECTION 83: the word of ${v-w} is expanded only when used; a name is looked up when it is called =====
+# The word of each of the eight operators is expanded only when the operator takes it: with x
+# set, ${x:-$((n+=1))} counts nothing and ${x:-$((1/0))} raises nothing. A function exists from
+# the moment its definition has RUN: a call before it, or of a definition in a branch not
+# taken, is not found (127), and a caller's body runs the definition in force when it calls.
+# Every expected value is bash 5.3's.
+s83() {
+  local x=1 e= n=0 r s83a=(p q)
+  local -A s83m=([k]=v)
+  local u; unset u
+  r="${x:-$((n+=1))}${x-$((n+=2))}${x:=$((n+=4))}${x:?$((n+=8))}${u+$((n+=16))}${e:+$((n+=32))}"
+  check lzw1 "$r $n" "1111 0"
+  r="${e:-$((n+=1))}${u-$((n+=2))}${x+$((n+=4))}${x:+$((n+=8))}"
+  check lzw2 "$r $n" "13715 15"
+  r="${s83a[0]:-$((n+=100))}${s83a[7]:-$((n+=1))}${s83a[@]:-$((n+=200))}${s83m[k]-$((n+=300))}${s83m[z]+$((n+=400))}"
+  check lzw3 "$r $n" "p16p qv 16"
+  r=$( { : "${x:-$((1/0))}" "${x:-$(echo side >&2)}"; echo ok; } 2>&1 )
+  check lzw4 "$r" "ok"
+  r=$( { : "${u:-$(echo side >&2)}"; } 2>&1 )
+  check lzw5 "$r" "side"
+  s83h() { echo h1; }
+  s83k() { s83h; }
+  s83h() { echo h2; }
+  check fnl1 "$(s83k)" "h2"
+  r=$(s83n 2>/dev/null); local st=$?
+  s83n() { echo n; }
+  check fnl2 "$st[$r] $(s83n)" "127[] n"
+  if false; then s83q() { echo q; }; fi
+  r=$(s83q 2>/dev/null)
+  check fnl3 "$?[$r]" "127[]"
+}
 # ===== END SECTIONS =====
 
 s47   # SECTION-CALL 47
@@ -1403,5 +1434,6 @@ s79   # SECTION-CALL 79
 s80   # SECTION-CALL 80
 s81   # SECTION-CALL 81
 s82   # SECTION-CALL 82
+s83   # SECTION-CALL 83
 echo "full: $checks checks, $fails failures"
 exit $fails
