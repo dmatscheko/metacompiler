@@ -75,7 +75,7 @@ Also tests/python-test-full.5.py peaks at ~90M steps per call (the brake is 1e8)
 
 # RB — Ruby
 
-### T-1008 ruby: compiled `for k, v in hash` raises KeyError; `default_proc=`; missing Hash methods · P2 · RB · OPEN [V]
+### T-1008 ruby: compiled `for k, v in hash` raises KeyError; `default_proc=`; missing Hash methods · P2 · RB · IN PROGRESS (RB worker, round 36) [V]
 Found by the RB worker, round 35 (oracle ruby 2.6). `for k, v in {a: 1, b: 2}; p [k, v]; end` → ruby `[:a, 1]` `[:b, 2]`; interpreter
 right, llvm.Run KeyError (makeForIn in ruby-to-llvm-ir.abnf calls js_pylen/js_pyget on the hash); `for` over a hash also does not
 raise the iteration count (MRI raises on an insert in the body). `h.default_proc = proc {..}` → the interpreter stores a key
