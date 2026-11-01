@@ -10104,7 +10104,7 @@ function js_ktrnum(v) {
 // jsrtkotlin.go js_ktforlast: the LAST element a `for` over first..bound (mode
 // 0), until (1) or downTo (2) reaches - getProgressionLastElement - or null for
 // an empty progression. Ints are exact in doubles; a Long operand takes the 64
-// bit path.
+// bit path, unsigned when a bound is a ULong.
 function js_ktforlast(first, bound, step, mode) {
     if (sintIs(first) || sintIs(bound) || sintIs(step)) { return k4ForLastL(first, bound, step, mode) }
     var f = ktNum(first)
@@ -10127,22 +10127,39 @@ function k4ModP(a, s) {
     return r
 }
 function k4ForLastL(first, bound, step, mode) {
-    var s = ktNorm(k1Val(step), 64, 0)
-    if (k1Cmp("<=", s, 0)) { k4StepBad(step) }
-    var f = ktNorm(k1Val(first), 64, 0)
-    var b = ktNorm(k1Val(bound), 64, 0)
+    if (k1Cmp("<=", ktNorm(k1Val(step), 64, 0), 0)) { k4StepBad(step) }
+    var un = 0
+    if (k4IsULongBox(first) || k4IsULongBox(bound)) { un = 1 }
+    var s = ktNorm(k1Val(step), 64, un)
+    var f = ktNorm(k1Val(first), 64, un)
+    var b = ktNorm(k1Val(bound), 64, un)
     if (mode == 1) {
-        if (k1Cmp("==", b, k1MinI64())) { return null }
+        if (un == 1) {
+            if (k1Cmp("==", b, ktNorm(0, 64, 1))) { return null }
+        } else if (k1Cmp("==", b, k1MinI64())) { return null }
         b = k1Arith("-", b, 1)
     }
     if (mode == 2) {
         if (k1Cmp("<", f, b)) { return null }
         if (k1Cmp("==", f, b)) { return b }
-        return k1Arith("+", b, k4ModL(k1Arith("-", k4ModL(f, s), k4ModL(b, s)), s))
+        return k1Arith("+", b, k4DiffModL(f, b, s))
     }
     if (k1Cmp(">", f, b)) { return null }
     if (k1Cmp("==", f, b)) { return b }
-    return k1Arith("-", b, k4ModL(k1Arith("-", k4ModL(b, s), k4ModL(f, s)), s))
+    return k1Arith("-", b, k4DiffModL(b, f, s))
+}
+// getProgressionLastElement's differenceModulo: both residues lie in [0, s), so
+// a negative difference needs s added once (which also undoes an unsigned wrap).
+function k4DiffModL(a, b, s) {
+    var ma = k4ModL(a, s)
+    var mb = k4ModL(b, s)
+    var d = k1Arith("-", ma, mb)
+    if (k1Cmp("<", ma, mb)) { d = k1Arith("+", d, s) }
+    return d
+}
+function k4IsULongBox(v) {
+    if (!sintIs(v)) { return false }
+    return sintWidth(v) == 64 && sintUns(v)
 }
 function k4ModL(a, s) {
     var r = k1Arith("%", a, s)
@@ -10174,15 +10191,22 @@ function js_ktrange(from, to, st, down) {
     return rg
 }
 
-// A Long range's first, bound and step EXACTLY (lf / lt / ls, Long boxes): the
-// from / to / st doubles cannot step past 2^53, so the iteration, the count and
-// toString use these. Twin of ktRangeLong in abnf/jsrtkotlin.go.
+// A Long or ULong range's first, bound and step EXACTLY (lf / lt / ls, Long or
+// ULong boxes): the from / to / st doubles cannot step past 2^53, so the
+// iteration, membership, the count and toString use these. Twin of ktRangeLong
+// in abnf/jsrtkotlin.go.
 function k4RangeLong(rg, from, to, st) {
-    if (rg["lg"] === true) {
-        rg["lf"] = ktNorm(k1Val(from), 64, 0)
-        rg["lt"] = ktNorm(k1Val(to), 64, 0)
-        rg["ls"] = ktNorm(k1Val(st), 64, 0)
+    if (k4RangeExact(rg)) {
+        var un = k4RangeU(rg)
+        rg["lf"] = ktNorm(k1Val(from), 64, un)
+        rg["lt"] = ktNorm(k1Val(to), 64, un)
+        rg["ls"] = ktNorm(k1Val(st), 64, un)
     }
+}
+function k4RangeExact(rg) { return rg["lg"] === true || rg["un"] === 64 }
+function k4RangeU(rg) {
+    if (rg["un"] === 64) { return 1 }
+    return 0
 }
 // The half-open form's inclusive bound: one less, or the type's EMPTY range at
 // its MIN_VALUE. A floating range keeps its bound as endExclusive instead - an
@@ -10195,22 +10219,25 @@ function k4RangeDec(rg) {
     }
     var atMin = false
     if (rg["lg"] === true) { atMin = k1Cmp("==", rg["lt"], k1MinI64()) }
+    else if (rg["un"] === 64) { atMin = k1Cmp("==", rg["lt"], ktNorm(0, 64, 1)) }
     else if (rg["ch"] === true || rg["un"] === 32 || rg["un"] === 64) { atMin = rg["to"] == 0 }
     else { atMin = rg["to"] == 0 - 2147483648 }
     if (atMin) {
         rg["from"] = 1
         if (rg["un"] === 32 || rg["un"] === 64) { rg["from"] = k4RangeMax(rg) }
         rg["to"] = 0
-        if (rg["lg"] === true) {
+        if (k4RangeExact(rg)) {
             rg["lf"] = ktNorm(1, 64, 0)
-            rg["lt"] = ktNorm(0, 64, 0)
+            if (rg["un"] === 64) { rg["lf"] = ktNorm(0 - 1, 64, 1) }
+            rg["lt"] = ktNorm(0, 64, k4RangeU(rg))
         }
         return
     }
     rg["to"] = rg["to"] - 1
-    if (rg["lg"] === true) { rg["lt"] = k1Arith("-", rg["lt"], 1) }
+    if (k4RangeExact(rg)) { rg["lt"] = k1Arith("-", rg["lt"], 1) }
 }
-// ktRangeLastEl over a Long range's exact bounds (jsrtkotlin.go ktRangeLastL).
+// ktRangeLastEl over a Long or ULong range's exact bounds (jsrtkotlin.go
+// ktRangeLastL).
 function k4RangeLastL(rg) {
     var mode = 0
     if (rg["down"] === true) { mode = 2 }
@@ -10228,7 +10255,7 @@ function js_ktrestep(r, st) {
     // `(1..5) step 1` prints "1..5 step 1" and `is IntRange` is false for it.
     return {__range: true, from: r["from"], to: r["to"], st: stn,
             down: r["down"], ch: r["ch"], fl: r["fl"], pg: true, lg: r["lg"] === true, un: r["un"],
-            lf: r["lf"], lt: r["lt"], ls: ktNorm(k1Val(st), 64, 0)}
+            lf: r["lf"], lt: r["lt"], ls: ktNorm(k1Val(st), 64, k4RangeU(r))}
 }
 
 function k4IsF32(v) {
@@ -10249,9 +10276,10 @@ function k4RangeMax(rg) {
 function k4RangeEndEx(rg) {
     if (rg["oe"] === true) { return k4RangeEl(rg, rg["to"]) }
     if (rg["fl"] === true || rg["pg"] === true || rg["down"] === true) { return KT_MISS }
-    var lg = rg["lg"] === true
+    var lg = k4RangeExact(rg)
     var top = rg["to"] == k4RangeMax(rg)
-    if (lg) { top = k1Cmp("==", rg["lt"], k1MaxI64()) }
+    if (rg["lg"] === true) { top = k1Cmp("==", rg["lt"], k1MaxI64()) }
+    if (rg["un"] === 64) { top = k1Cmp("==", rg["lt"], ktNorm(0 - 1, 64, 1)) }
     if (top) { ktRaise("IllegalStateException", "Cannot return the exclusive upper bound of a range that includes MAX_VALUE.") }
     if (lg) { return k1Arith("+", rg["lt"], 1) }
     return k4RangeEl(rg, rg["to"] + 1)
@@ -10309,7 +10337,7 @@ function ktRangeLastEl(rg) {
 
 function ktRangeList(rg) {
     var out = []
-    if (rg["lg"] === true) {
+    if (k4RangeExact(rg)) {
         if (ktRangeEmpty(rg)) { return out }
         var last = k4RangeLastL(rg)
         var li = rg["lf"]
@@ -10336,7 +10364,7 @@ function ktRangeEmpty(rg) {
         if (rg["oe"] === true) { return !(rg["from"] < rg["to"]) }
         return !(rg["from"] <= rg["to"])
     }
-    if (rg["lg"] === true) {
+    if (k4RangeExact(rg)) {
         if (rg["down"] === true) { return k1Cmp("<", rg["lf"], rg["lt"]) }
         return k1Cmp(">", rg["lf"], rg["lt"])
     }
@@ -10351,7 +10379,7 @@ function ktRangeEmpty(rg) {
 function ktRangeRev(rg) {
     var rv = {__range: true, from: ktRangeLastEl(rg), to: rg["from"], st: rg["st"],
               down: rg["down"] !== true, ch: rg["ch"], fl: false, pg: true, lg: rg["lg"] === true, un: rg["un"]}
-    if (rg["lg"] === true) {
+    if (k4RangeExact(rg)) {
         rv["lf"] = k4RangeLastL(rg)
         rv["lt"] = rg["lf"]
         rv["ls"] = rg["ls"]
@@ -10363,7 +10391,7 @@ function ktRangeRev(rg) {
 // must not materialize a million cells to pick one.
 function ktRangeCount(rg) {
     if (ktRangeEmpty(rg)) { return 0 }
-    if (rg["lg"] === true) {
+    if (k4RangeExact(rg)) {
         var lspan = k1Arith("-", k4RangeLastL(rg), rg["lf"])
         if (rg["down"] === true) { lspan = k1Arith("-", rg["lf"], k4RangeLastL(rg)) }
         return sintNum(k1Arith("/", lspan, rg["ls"])) + 1
@@ -10557,7 +10585,7 @@ function ktRangeHas(rg, x) {
         if (ktIsChar(x)) { return false }
         if (typeof x != "number") { return false }
     }
-    if (rg["lg"] === true) { return ktRangeHasL(rg, x) }
+    if (k4RangeExact(rg)) { return ktRangeHasL(rg, x) }
     var n = k4RangeNum(x)
     if (rg["down"] === true) {
         if (n > rg["from"] || n < rg["to"]) { return false }
@@ -10567,10 +10595,10 @@ function ktRangeHas(rg, x) {
     return (n - rg["from"]) % rg["st"] == 0
 }
 
-// ktRangeHasL is ktRangeHasL (jsrtkotlin.go): ktRangeHas over a Long range's exact
-// bounds.
+// ktRangeHasL is ktRangeHasL (jsrtkotlin.go): ktRangeHas over a Long or ULong
+// range's exact bounds.
 function ktRangeHasL(rg, x) {
-    var n = ktAdoptLong(x)
+    var n = js_ktadopt(x, 64, rg["un"] === 64)
     var lo = rg["lf"]
     var hi = rg["lt"]
     var down = rg["down"] === true
@@ -10600,7 +10628,7 @@ function ktRangeStr(rg) {
     }
     var a = k2Render(k4RangeEl(rg, rg["from"]), 1)
     var b = k2Render(k4RangeEl(rg, ktRangeLastEl(rg)), 1)
-    if (rg["lg"] === true) {
+    if (k4RangeExact(rg)) {
         a = k2Render(rg["lf"], 1)
         b = k2Render(k4RangeLastL(rg), 1)
     }
@@ -10618,6 +10646,10 @@ function ktRangeEq(a, b) {
     if ((a["oe"] === true) != (b["oe"] === true)) { return false }
     if (ktRangeEmpty(a)) { return ktRangeEmpty(b) }
     if (ktRangeEmpty(b)) { return false }
+    if (k4RangeExact(a) && k4RangeExact(b)) {
+        if (!k1Cmp("==", a["lf"], b["lf"]) || !k1Cmp("==", a["ls"], b["ls"])) { return false }
+        return k1Cmp("==", k4RangeLastL(a), k4RangeLastL(b)) && (a["down"] === true) == (b["down"] === true)
+    }
     if (a["from"] != b["from"]) { return false }
     if (ktRangeLastEl(a) != ktRangeLastEl(b)) { return false }
     return k4RangeSigned(a) == k4RangeSigned(b)
@@ -10637,10 +10669,10 @@ function ktRangeHash(rg) {
     var first = anytype
     var last = anytype
     var step = anytype
-    if (rg["lg"] === true) {
+    if (k4RangeExact(rg)) {
         first = rg["lf"]
         last = k4RangeLastL(rg)
-        step = rg["ls"]
+        step = ktNorm(k1Val(rg["ls"]), 64, 0)
         if (rg["down"] === true) { step = k1Arith("-", 0, step) }
     } else {
         first = k4RangeEl(rg, rg["from"])
@@ -10927,9 +10959,9 @@ function js_ktfget(o, name) {
     // is not Kotlin (IntRange is an Iterable, not a Collection) but the
     // interpreter half answers the element count, so this one does too.
     if (ktIsRange(o) && rtIsNil(r)) {
-        // A Long range answers from its exact bounds (lf / lt), which the doubles
-        // cannot hold past 2^53.
-        var lg = o["lg"] === true
+        // A Long or ULong range answers from its exact bounds (lf / lt), which the
+        // doubles cannot hold past 2^53.
+        var lg = k4RangeExact(o)
         if (name == "first" || name == "start") {
             if (lg) { return o["lf"] }
             return k4RangeEl(o, o["from"])
@@ -11152,6 +11184,13 @@ function js_kttype(name) {
         o["SIZE_BITS"] = 16
         o["SIZE_BYTES"] = 2
         o["invoke"] = k4CharOf
+        return o
+    }
+    // The range companions' EMPTY is what `x until T.MIN_VALUE` answers
+    // (k4RangeDec).
+    if (name == "IntRange" || name == "LongRange" || name == "CharRange" || name == "UIntRange" || name == "ULongRange") {
+        var mn = js_kttype(name.substring(0, name.length - 5))["MIN_VALUE"]
+        o["EMPTY"] = k4RangeMake(mn, mn, "until")
         return o
     }
     // The float companions, boxed so that Double.NaN is a Double rather than an

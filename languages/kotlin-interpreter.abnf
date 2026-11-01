@@ -3404,23 +3404,26 @@ NotMemberKw = :script(~~ "pure";
     // `lg` marks a LongRange / LongProgression: a bound was a Long, so every element,
     // first, last, start and endInclusive is a Long again. `f32` marks a floating range
     // over Floats (ClosedFloatRange), whose bounds read back as Floats.
-    // A Long range also keeps its first, bound and step EXACTLY (lf / lt / ls, Long
-    // boxes): from / to / st are doubles, which cannot step past 2^53, so the
-    // iteration, the count and toString use these. Twin of ktRangeLong in
-    // abnf/jsrtkotlin.go and k4RangeLong in languages/lib/kotlin-rt.metajs.
     // `un` is 32 for a UIntRange / UIntProgression and 64 for a ULong one (0
     // otherwise): its elements and bounds read back as UInts / ULongs.
+    // A Long or ULong range also keeps its first, bound and step EXACTLY (lf / lt /
+    // ls, Long or ULong boxes, so the box's own arithmetic is signed or unsigned):
+    // from / to / st are doubles, which cannot step past 2^53, so the iteration,
+    // membership, bounds and toString use these. Twin of ktRangeLong in
+    // abnf/jsrtkotlin.go and k4RangeLong in languages/lib/kotlin-rt.metajs.
     function kRange(from, to, down) {
         var rg = {__range: true, from: kNum(from), to: kNum(to), st: 1, down: down,
                   ch: kIsChar(from), fl: kIsFlo(from), f32: kIsF32(from), pg: false, lg: kIsLongBox(from) || kIsLongBox(to),
                   un: kRangeUn(from)}
-        if (rg.lg) {
-            rg.lf = kAdoptLong(from)
-            rg.lt = kAdoptLong(to)
-            rg.ls = kAdoptLong(1)
+        if (kRangeExact(rg)) {
+            rg.lf = kRangeAdopt(rg, from)
+            rg.lt = kRangeAdopt(rg, to)
+            rg.ls = kRangeAdopt(rg, 1)
         }
         return rg
     }
+    function kRangeExact(rg) { return rg.lg === true || rg.un == 64 }
+    function kRangeAdopt(rg, v) { return kAdoptTy(v, rg.un == 64 ? "ULong" : "Long") }
     // The half-open `..<` / until: the inclusive bound is one less. A bound at the
     // element type's MIN_VALUE has no predecessor, and kotlin.ranges.until answers
     // that type's EMPTY range instead: IntRange(1, 0), LongRange(1, 0),
@@ -3433,18 +3436,18 @@ NotMemberKw = :script(~~ "pure";
             rg.oe = true
             return rg
         }
-        var atMin = rg.lg === true ? kCmpI("==", rg.lt, szMake(kLongMinP, 64, kNoU)) : rg.to == (rg.ch || rg.un > 0 ? 0 : 0 - 2147483648)
+        var atMin = kRangeExact(rg) ? kCmpI("==", rg.lt, rg.lg === true ? szMake(kLongMinP, 64, kNoU) : 0) : rg.to == (rg.ch || rg.un > 0 ? 0 : 0 - 2147483648)
         if (atMin) {
             rg.from = rg.un > 0 ? kRangeMax(rg) : 1
             rg.to = 0
-            if (rg.lg) {
-                rg.lf = kAdoptLong(1)
-                rg.lt = kAdoptLong(0)
+            if (kRangeExact(rg)) {
+                rg.lf = rg.un == 64 ? szMake(kULongMaxP, 64, true) : kAdoptLong(1)
+                rg.lt = kRangeAdopt(rg, 0)
             }
             return rg
         }
         rg.to = rg.to - 1
-        if (rg.lg) { rg.lt = kArith("-", rg.lt, 1) }
+        if (kRangeExact(rg)) { rg.lt = kArith("-", rg.lt, 1) }
         return rg
     }
     // `r step k` (and IntProgression.step(k)): the same bounds and direction.
@@ -3453,18 +3456,28 @@ NotMemberKw = :script(~~ "pure";
         if (stn <= 0) { kStepBad(st) }
         var out = {__range: true, from: rg.from, to: rg.to, st: stn, down: rg.down,
                    ch: rg.ch, fl: rg.fl, pg: true, lg: rg.lg, un: rg.un}
-        if (rg.lg) {
+        if (kRangeExact(rg)) {
             out.lf = rg.lf
             out.lt = rg.lt
-            out.ls = kAdoptLong(st)
+            out.ls = kRangeAdopt(rg, st)
         }
         return out
     }
-    // rangeLastEl over a Long range's exact bounds - getProgressionLastElement.
+    // rangeLastEl over a Long or ULong range's exact bounds -
+    // getProgressionLastElement, whose differenceModulo(a, b, c) is
+    // (a mod c - b mod c) mod c: both residues lie in [0, c), so a negative
+    // difference needs c added once, which also undoes an unsigned wrap.
     function kRangeLastL(rg) {
         if (rg.down ? !kCmpI(">", rg.lf, rg.lt) : !kCmpI("<", rg.lf, rg.lt)) { return rg.lt }
-        if (rg.down) { return kArith("+", rg.lt, kModL(kArith("-", kModL(rg.lf, rg.ls), kModL(rg.lt, rg.ls)), rg.ls)) }
-        return kArith("-", rg.lt, kModL(kArith("-", kModL(rg.lt, rg.ls), kModL(rg.lf, rg.ls)), rg.ls))
+        if (rg.down) { return kArith("+", rg.lt, kDiffModL(rg.lf, rg.lt, rg.ls)) }
+        return kArith("-", rg.lt, kDiffModL(rg.lt, rg.lf, rg.ls))
+    }
+    function kDiffModL(a, b, st) {
+        var ma = anytype
+        var mb = anytype
+        ma = kModL(a, st)
+        mb = kModL(b, st)
+        return kCmpI("<", ma, mb) ? kArith("+", kArith("-", ma, mb), st) : kArith("-", ma, mb)
     }
     function kModL(a, st) {
         var r = anytype
@@ -3492,7 +3505,7 @@ NotMemberKw = :script(~~ "pure";
     function rangeRev(rg) {
         var rv = {__range: true, from: rangeLastEl(rg), to: rg.from, st: rg.st,
                   down: !rg.down, ch: rg.ch, fl: false, pg: true, lg: rg.lg, un: rg.un}
-        if (rg.lg) {
+        if (kRangeExact(rg)) {
             rv.lf = kRangeLastL(rg)
             rv.lt = rg.lf
             rv.ls = rg.ls
@@ -3635,7 +3648,7 @@ NotMemberKw = :script(~~ "pure";
             return kNum(x) >= rg.from && (rg.oe === true ? kNum(x) < rg.to : kNum(x) <= rg.to)
         }
         if (rg.ch !== kIsChar(x)) { return false }
-        if (rg.lg === true) { return rangeHasL(rg, x) }
+        if (kRangeExact(rg)) { return rangeHasL(rg, x) }
         var n = kNum(x)
         if (rg.down) {
             if (n > rg.from || n < rg.to) { return false }
@@ -3644,13 +3657,13 @@ NotMemberKw = :script(~~ "pure";
         if (n < rg.from || n > rg.to) { return false }
         return (n - rg.from) % rg.st == 0
     }
-    // rangeHas over a Long range's exact bounds: x lies between first and the bound,
-    // a whole number of steps from first. Twin of ktRangeHasL in abnf/jsrtkotlin.go
-    // and languages/lib/kotlin-rt.metajs.
+    // rangeHas over a Long or ULong range's exact bounds: x lies between first and
+    // the bound, a whole number of steps from first. Twin of ktRangeHasL in
+    // abnf/jsrtkotlin.go and languages/lib/kotlin-rt.metajs.
     function rangeHasL(rg, x) {
         if (!szIs(x) && typeof x != "number") { return false }
         var n = anytype
-        n = kAdoptLong(x)
+        n = kRangeAdopt(rg, x)
         var lo = anytype
         var hi = anytype
         lo = rg.down ? rg.lt : rg.lf
@@ -3678,9 +3691,9 @@ NotMemberKw = :script(~~ "pure";
     function kRangeEndEx(rg) {
         if (rg.oe === true) { return rangeEl(rg, rg.to) }
         if (rg.fl === true || rg.pg === true || rg.down) { return undefined }
-        var top = rg.lg === true ? kCmpI("==", rg.lt, szMake(kLongMaxP, 64, kNoU)) : rg.to == kRangeMax(rg)
+        var top = kRangeExact(rg) ? kCmpI("==", rg.lt, szMake(rg.lg === true ? kLongMaxP : kULongMaxP, 64, rg.lg !== true)) : rg.to == kRangeMax(rg)
         if (top) { kRaise("IllegalStateException", "Cannot return the exclusive upper bound of a range that includes MAX_VALUE.") }
-        if (rg.lg === true) { return kArith("+", rg.lt, 1) }
+        if (kRangeExact(rg)) { return kArith("+", rg.lt, 1) }
         return rangeEl(rg, rg.to + 1)
     }
     // The MAX_VALUE of an integral range's element type, as a double.
@@ -3693,7 +3706,7 @@ NotMemberKw = :script(~~ "pure";
         // ClosedFloatingPointRange.isEmpty is !(start <= endInclusive): a NaN bound
         // empties it. The open form's is !(start < endExclusive).
         if (rg.fl === true) { return rg.oe === true ? !(rg.from < rg.to) : !(rg.from <= rg.to) }
-        if (rg.lg === true && rg.lf !== undefined) { return rg.down ? kCmpI("<", rg.lf, rg.lt) : kCmpI(">", rg.lf, rg.lt) }
+        if (kRangeExact(rg)) { return rg.down ? kCmpI("<", rg.lf, rg.lt) : kCmpI(">", rg.lf, rg.lt) }
         return rg.down ? (rg.from < rg.to) : (rg.from > rg.to)
     }
     function rangeSigned(rg) { return rg.down ? -rg.st : rg.st }
@@ -3706,7 +3719,7 @@ NotMemberKw = :script(~~ "pure";
         if (rg.fl === true) { return kstr(rangeEl(rg, rg.from)) + (rg.oe === true ? "..<" : "..") + kstr(rangeEl(rg, rg.to)) }
         var a = kstr(rangeEl(rg, rg.from))
         var b = kstr(rangeEl(rg, rangeLastEl(rg)))
-        if (rg.lg === true && rg.lf !== undefined) {
+        if (kRangeExact(rg)) {
             a = kstr(rg.lf)
             b = kstr(kRangeLastL(rg))
         }
@@ -3722,6 +3735,9 @@ NotMemberKw = :script(~~ "pure";
         if ((a.oe === true) !== (b.oe === true)) { return false }
         if (rangeEmpty(a)) { return rangeEmpty(b) }
         if (rangeEmpty(b)) { return false }
+        if (kRangeExact(a) && kRangeExact(b)) {
+            return kCmpI("==", a.lf, b.lf) && kCmpI("==", kRangeLastL(a), kRangeLastL(b)) && kCmpI("==", a.ls, b.ls) && a.down === b.down
+        }
         if (a.from !== b.from) { return false }
         if (rangeLastEl(a) !== rangeLastEl(b)) { return false }
         return rangeSigned(a) === rangeSigned(b)
@@ -3737,10 +3753,10 @@ NotMemberKw = :script(~~ "pure";
         var first = anytype
         var last = anytype
         var step = anytype
-        if (rg.lg === true && rg.lf !== undefined) {
+        if (kRangeExact(rg)) {
             first = rg.lf
             last = kRangeLastL(rg)
-            step = rg.down ? kArith("-", 0, rg.ls) : rg.ls
+            step = kAdoptLong(rg.down ? kArith("-", 0, rg.ls) : rg.ls)
         } else {
             first = rangeEl(rg, rg.from)
             last = rangeEl(rg, rangeLastEl(rg))
@@ -3854,7 +3870,7 @@ NotMemberKw = :script(~~ "pure";
     // The elements of a range, boxed back into Chars when the bounds were Chars.
     function rangeList(rg) {
         var out = []
-        if (rg.lg === true && rg.lf !== undefined) {
+        if (kRangeExact(rg)) {
             if (rangeEmpty(rg)) { return out }
             var last = anytype
             var li = anytype
@@ -4270,6 +4286,15 @@ NotMemberKw = :script(~~ "pure";
                                if (n < 0 || n > 65535) { kThrowExc("IllegalArgumentException", "Invalid Char code: " + kstr(code)) }
                                return kChar(n)
                            }}
+    // The range companions' EMPTY is what `x until T.MIN_VALUE` answers (kRangeDec).
+    // Twin of ktTypeObj in abnf/jsrtkotlin.go and js_kttype in
+    // languages/lib/kotlin-rt.metajs.
+    var kRangeTys = ["Int", "Long", "Char", "UInt", "ULong"]
+    for (var kri = 0; kri < kRangeTys.length; kri++) {
+        var krMin = anytype
+        krMin = hostGlobals[kRangeTys[kri]].MIN_VALUE
+        hostGlobals[kRangeTys[kri] + "Range"] = {EMPTY: kRangeDec(kRange(krMin, krMin, false))}
+    }
     // The float companions, boxed so that Double.NaN is a Double rather than an Int:
     // kotlin.Double declares MIN_VALUE as the smallest POSITIVE value, as
     // java.lang.Double does.
@@ -11951,6 +11976,7 @@ NotMemberKw = :script(~~ "pure";
             base = hv ? getVar(baseName) : null
             var isCls = kIsTypeName(baseName) || (hv && base !== null && base !== undefined && typeof base == "object" && base.__isclass === true)
             if (name == "class") {
+                if (!hv && baseName.indexOf(".") >= 0) { return kClassLitDotted(baseName) }
                 if (!hv || kIsTypeName(baseName)) { return kClassLitNamed(baseName) }
                 return isCls ? kClassOfDesc(base) : kClassOf(base)
             }
@@ -12062,6 +12088,24 @@ NotMemberKw = :script(~~ "pure";
             if (d !== undefined && d !== null && typeof d == "object" && d.__isclass === true) { return kClassOfDesc(d) }
         }
         return kKClass(n)
+    }
+    // `a.b.c::class`: a nested type's descriptor (kQualDesc), else, when the first
+    // segment is a value, the class of the member chain read off it (`p.x::class`
+    // is Int, `Color.RED::class` is Color); else a package-qualified type
+    // (`kotlin.Int::class`), whose class is its simple name's. Twin of makeQualRef
+    // in kotlin-to-llvm-ir.abnf.
+    function kClassLitDotted(n) {
+        var segs = n.split(".")
+        var d = anytype
+        d = kQualDesc(n)
+        if (d !== undefined && d !== null && typeof d == "object" && d.__isclass === true) { return kClassOfDesc(d) }
+        if (segs[0] == "kotlin" || segs[0] == "java") { return kClassLitNamed(segs[segs.length - 1]) }
+        if (!hasVar(segs[0]) || kIsTypeName(segs[0])) { return kClassLitNamed(n) }
+        var v = anytype
+        v = getVar(segs[0])
+        for (var i = 1; i < segs.length; i++) { v = kGetField(v, segs[i]) }
+        if (v !== null && v !== undefined && typeof v == "object" && v.__isclass === true) { return kClassOfDesc(v) }
+        return kClassOf(v)
     }
     // The KClass of a type known by its simple name alone. kotlin.String and
     // kotlin.Any are java.lang.String and java.lang.Object at run time, the classes
@@ -12401,18 +12445,18 @@ NotMemberKw = :script(~~ "pure";
             var rx = anytype
             rx = kIdxExt(o, name)
             if (rx !== undefined) { return rx }
-            // A Long range answers from its exact bounds (lf / lt), which the doubles
-            // cannot hold past 2^53.
-            if (name == "first" || name == "start") { return o.lg === true ? o.lf : rangeEl(o, o.from) }
+            // A Long or ULong range answers from its exact bounds (lf / lt), which the
+            // doubles cannot hold past 2^53.
+            if (name == "first" || name == "start") { return kRangeExact(o) ? o.lf : rangeEl(o, o.from) }
             // IntProgression.last is "the last element in the progression", NOT the
             // bound it was built from: (1..10 step 4).last is 9. IntProgression.step
             // carries the DIRECTION - kotlin.ranges.downTo is documented as "a
             // progression ... with the step -1".
-            if (name == "last") { return o.lg === true ? kRangeLastL(o) : rangeEl(o, rangeLastEl(o)) }
+            if (name == "last") { return kRangeExact(o) ? kRangeLastL(o) : rangeEl(o, rangeLastEl(o)) }
             // ClosedRange.start / ClosedRange.endInclusive are the BOUNDS the range was
             // built from, not the last ELEMENT - the two coincide for every plain
             // `a..b`, and a stepped progression declares neither in Kotlin.
-            if (name == "endInclusive") { return o.lg === true ? o.lt : rangeEl(o, o.to) }
+            if (name == "endInclusive") { return kRangeExact(o) ? o.lt : rangeEl(o, o.to) }
             if (name == "endExclusive") {
                 var ex = anytype
                 ex = kRangeEndEx(o)

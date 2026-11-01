@@ -6866,6 +6866,48 @@ fun s155() {
         (us[0] until us[0] - 1u).count() == 0 && (1L until Long.MIN_VALUE + uls.size - 4).last == 0L)
 }
 
+// ===== SECTION 156: exact ULong ranges, member class literals, range EMPTY =====
+// A ULong range past 2^53 keeps its bounds, elements and membership exact, in
+// `..`, until, downTo, step and a `for` loop alike. `a.b::class` is the class of
+// the member value read off `a` (a property, a Pair component, an enum entry), a
+// nested type's descriptor, or a package-qualified type. IntRange, LongRange,
+// CharRange, UIntRange and ULongRange have a companion EMPTY equal to every empty
+// range of their type (kotlinc 2.2.21 on java 24).
+class P156(val x: Int, val s: String)
+class Q156(val p: P156)
+enum class C156 { RED }
+object O156 { val n = 3L }
+fun s156() {
+    val uls = listOf(18446744073709551613uL, ULong.MAX_VALUE, 18446744073709551610uL, 9223372036854775807uL)
+    val big = uls[0]..uls[1]
+    check("ulexact156a", "$big" == "18446744073709551613..18446744073709551615" && big.toList().size == 3 &&
+        !(uls[0] - 1uL in big) && uls[0] + 1uL in big && big.first == uls[0] && big.last == uls[1] && big.count() == 3 &&
+        big.toList() == listOf(uls[0], uls[0] + 1uL, uls[1]))
+    val ex = uls[0] until uls[1]
+    val dn = uls[1] downTo uls[2] step 2
+    check("ulexact156b", ex.toList() == listOf(uls[0], uls[0] + 1uL) && "$ex" == "18446744073709551613..18446744073709551614" &&
+        (uls[0]..<uls[1]).endInclusive == uls[0] + 1uL && "$dn" == "18446744073709551615 downTo 18446744073709551611 step 2" &&
+        dn.toList() == listOf(uls[1], uls[1] - 2uL, uls[1] - 4uL) && dn.last == uls[2] + 1uL && !(uls[1] - 1uL in dn) &&
+        (uls[0]..uls[1]) == (uls[0]..uls[1]) && (uls[0]..uls[1]) != (uls[0] + 1uL..uls[1]))
+    val seen = mutableListOf<ULong>()
+    for (u in uls[3]..uls[3] + 2uL) seen.add(u)
+    for (u in uls[1] downTo uls[1] - 1uL) seen.add(u)
+    for (u in uls[0] until uls[1]) seen.add(u)
+    check("ulexact156c", seen == listOf(uls[3], uls[3] + 1uL, uls[3] + 2uL, uls[1], uls[1] - 1uL, uls[0], uls[0] + 1uL))
+    val p = P156(4, "a")
+    val q = Q156(p)
+    val r = 1 to 2.5
+    check("clsmem156d", listOf(p.x::class.simpleName, p.s::class.simpleName, q.p::class.simpleName, q.p.s::class.simpleName,
+        r.first::class.simpleName, r.second::class.simpleName, O156.n::class.simpleName, C156.RED::class.simpleName,
+        kotlin.Int::class.simpleName) == listOf("Int", "String", "P156", "String", "Int", "Double", "Long", "C156", "Int"))
+    val ns = listOf(1, 0)
+    check("rempty156e", (ns[0] until Int.MIN_VALUE) == IntRange.EMPTY && "${IntRange.EMPTY}" == "1..0" &&
+        "${LongRange.EMPTY}" == "1..0" && CharRange.EMPTY == ('b' until Char.MIN_VALUE) && "${UIntRange.EMPTY}" == "4294967295..0" &&
+        "${ULongRange.EMPTY}" == "18446744073709551615..0" && IntRange.EMPTY.isEmpty() && LongRange.EMPTY.toList().isEmpty() &&
+        IntRange.EMPTY.first == ns[0] && ULongRange.EMPTY.first == ULong.MAX_VALUE && LongRange.EMPTY.hashCode() == -1 &&
+        LongRange.EMPTY == (5L..2L) && IntRange.EMPTY.count() == ns[1])
+}
+
 fun main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -7018,6 +7060,7 @@ fun main() {
     s153() // SECTION-CALL 153
     s154() // SECTION-CALL 154
     s155() // SECTION-CALL 155
+    s156() // SECTION-CALL 156
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }

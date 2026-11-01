@@ -610,6 +610,12 @@ func ktTypeObj(name string) *jsObject {
 		o.set("NEGATIVE_INFINITY", jsJFlo{f: math.Inf(-1), sty: sty})
 		o.set("SIZE_BITS", bits)
 		o.set("SIZE_BYTES", bits/8)
+	case "IntRange", "LongRange", "CharRange", "UIntRange", "ULongRange":
+		// The range companions' EMPTY is what `x until T.MIN_VALUE` answers
+		// (ktRangeOpenEnd). Twin of hostGlobals["IntRange"] in
+		// kotlin-interpreter.abnf and js_kttype in languages/lib/kotlin-rt.metajs.
+		mn := ktTypeObj(strings.TrimSuffix(name, "Range")).props["MIN_VALUE"]
+		o.set("EMPTY", ktRangeMake(mn, mn, "until"))
 	}
 	return o
 }
@@ -1396,7 +1402,8 @@ func init() {
 		// first..bound (mode 0), first until bound (1) or first downTo bound (2)
 		// reaches - kotlin.internal.getProgressionLastElement - or null when the
 		// progression is empty. A step that is not positive throws, as `step` does.
-		// It answers a Long when an operand is one. Twin of js_ktforlast in
+		// It answers a Long when an operand is one, and a ULong, compared and
+		// stepped unsigned, when a bound is one. Twin of js_ktforlast in
 		// languages/lib/kotlin-rt.metajs; the interpreter half iterates the range
 		// object (rangeList).
 		m["js_ktforlast"] = func(a []uint64) uint64 {
@@ -1406,42 +1413,27 @@ func init() {
 			if s <= 0 {
 				rt.ktStepBad(step)
 			}
-			f, b := giVal(rt, first), giVal(rt, bound)
-			_, fl := first.(jsGInt)
-			_, bl := bound.(jsGInt)
+			fg, fl := first.(jsGInt)
+			bg, bl := bound.(jsGInt)
 			_, sl := step.(jsGInt)
-			long := fl || bl || sl
+			rg := ktRange{lf: giVal(rt, first), lt: giVal(rt, bound), ls: s, down: mode == 2, lg: true}
+			if fl && fg.u && fg.w == 64 || bl && bg.u && bg.w == 64 {
+				rg.lg, rg.un = false, 64
+			}
 			if mode == 1 {
-				if long && b == math.MinInt64 {
-					return w(jsNull)
+				if fl || bl || sl {
+					if rg.lt == math.MinInt64 && rg.lg || rg.lt == 0 && !rg.lg {
+						return w(jsNull)
+					}
 				}
-				b--
+				rg.lt--
 			}
-			mod := func(x int64) int64 {
-				r := x % s
-				if r < 0 {
-					r += s
-				}
-				return r
+			if ktRangeEmpty(rg) {
+				return w(jsNull)
 			}
-			last := b
-			if mode == 2 {
-				if f < b {
-					return w(jsNull)
-				}
-				if f > b {
-					last = b + mod(mod(f)-mod(b))
-				}
-			} else {
-				if f > b {
-					return w(jsNull)
-				}
-				if f < b {
-					last = b - mod(mod(b)-mod(f))
-				}
-			}
-			if long {
-				return w(jsGInt{v: last, w: 64})
+			last := ktRangeLastL(rg)
+			if fl || bl || sl {
+				return w(ktRangeBox(rg, last))
 			}
 			return rt.wrapNum(float64(last))
 		}
@@ -3158,26 +3150,26 @@ func init() {
 			// nothing else.
 			if rg, isRg := ktRangeOf(o); isRg && isUndefOrNull(u(r)) {
 				switch name {
-				// A Long range answers from its exact bounds (lf / lt), which the
-				// doubles cannot hold past 2^53.
+				// A Long or ULong range answers from its exact bounds (lf / lt),
+				// which the doubles cannot hold past 2^53.
 				case "first", "start":
-					if rg.lg {
-						return w(jsGInt{v: rg.lf, w: 64})
+					if ktRangeExact(rg) {
+						return w(ktRangeBox(rg, rg.lf))
 					}
 					return w(ktRangeEl(rg, rg.from))
 				// IntProgression.last is the last ELEMENT, not the bound it was
 				// built from: (1..10 step 4).last is 9.
 				case "last":
-					if rg.lg {
-						return w(jsGInt{v: ktRangeLastL(rg), w: 64})
+					if ktRangeExact(rg) {
+						return w(ktRangeBox(rg, ktRangeLastL(rg)))
 					}
 					return w(ktRangeEl(rg, ktRangeLastEl(rg)))
 				// ClosedRange.start / ClosedRange.endInclusive are the BOUNDS -
 				// they coincide with first/last for every plain a..b, and a
 				// stepped progression declares neither in Kotlin.
 				case "endInclusive":
-					if rg.lg {
-						return w(jsGInt{v: rg.lt, w: 64})
+					if ktRangeExact(rg) {
+						return w(ktRangeBox(rg, rg.lt))
 					}
 					return w(ktRangeEl(rg, rg.to))
 				case "endExclusive":
@@ -7722,9 +7714,10 @@ type ktRange struct {
 	// `x is IntRange` has to answer false to.
 	pg bool
 	// lg marks a LongRange / LongProgression: a bound was a Long, so every element,
-	// first, last, start and endInclusive is a Long again. lf, lt and ls are its
-	// first, bound and step EXACTLY - from/to/st are doubles, which cannot step
-	// past 2^53 - and the iteration, the count and toString use them.
+	// first, last, start and endInclusive is a Long again. A Long or ULong range
+	// (ktRangeExact) keeps lf, lt and ls, its first, bound and step EXACTLY - a
+	// ULong's as its bits - since from/to/st are doubles, which cannot step past
+	// 2^53, and the iteration, membership, the count and toString use them.
 	lg         bool
 	lf, lt, ls int64
 	// un is 32 for a UIntRange / UIntProgression and 64 for a ULong one (0
@@ -7732,13 +7725,27 @@ type ktRange struct {
 	un uint8
 }
 
-// ktRangeLong fills the exact bounds of a Long range from its bound values.
+// ktRangeLong fills the exact bounds of a Long or ULong range from its bound
+// values.
 func ktRangeLong(rg ktRange, from, to, st interface{}) ktRange {
-	if rg.lg {
+	if ktRangeExact(rg) {
 		rg.lf, rg.lt, rg.ls = ktLongOf(from), ktLongOf(to), ktLongOf(st)
 	}
 	return rg
 }
+
+func ktRangeExact(rg ktRange) bool { return rg.lg || rg.un == 64 }
+
+// ktRangeLess orders two exact bounds, unsigned for a ULong range.
+func ktRangeLess(rg ktRange, a, b int64) bool {
+	if rg.un == 64 {
+		return uint64(a) < uint64(b)
+	}
+	return a < b
+}
+
+// ktRangeBox is an exact bound as the range's element: a Long or a ULong.
+func ktRangeBox(rg ktRange, v int64) jsGInt { return jsGInt{v: v, w: 64, u: rg.un == 64} }
 
 func ktLongOf(v interface{}) int64 {
 	if g, ok := v.(jsGInt); ok {
@@ -7748,25 +7755,38 @@ func ktLongOf(v interface{}) int64 {
 	return int64(f)
 }
 
-// ktRangeLastL is ktRangeLastEl over the exact bounds of a Long range.
+// ktRangeLastL is ktRangeLastEl over the exact bounds of a Long or ULong range:
+// getProgressionLastElement, whose differenceModulo(a, b, c) is
+// (a mod c - b mod c) mod c. Both residues lie in [0, c), so a negative
+// difference needs c added once. Twin of kRangeLastL in kotlin-interpreter.abnf.
 func ktRangeLastL(rg ktRange) int64 {
 	mod := func(x int64) int64 {
+		if rg.un == 64 {
+			return int64(uint64(x) % uint64(rg.ls))
+		}
 		r := x % rg.ls
 		if r < 0 {
 			r += rg.ls
 		}
 		return r
 	}
+	diffMod := func(a, b int64) int64 {
+		d := mod(a) - mod(b)
+		if d < 0 {
+			d += rg.ls
+		}
+		return d
+	}
 	if rg.down {
-		if rg.lf <= rg.lt {
+		if !ktRangeLess(rg, rg.lt, rg.lf) {
 			return rg.lt
 		}
-		return rg.lt + mod(mod(rg.lf)-mod(rg.lt))
+		return rg.lt + diffMod(rg.lf, rg.lt)
 	}
-	if rg.lf >= rg.lt {
+	if !ktRangeLess(rg, rg.lf, rg.lt) {
 		return rg.lt
 	}
-	return rg.lt - mod(mod(rg.lt)-mod(rg.lf))
+	return rg.lt - diffMod(rg.lt, rg.lf)
 }
 
 // ktAdoptLong is js_ktadopt at Long: an element of a LongArray is a Long, so an
@@ -7833,7 +7853,7 @@ func ktRangeOpenEnd(rg ktRange) ktRange {
 	if rg.lg && rg.lt == math.MinInt64 || !rg.lg && rg.to == min {
 		rg.from, rg.to, rg.lf, rg.lt = 1, 0, 1, 0
 		if rg.un > 0 {
-			rg.from = ktRangeMax(rg)
+			rg.from, rg.lf = ktRangeMax(rg), -1
 		}
 		return rg
 	}
@@ -7849,7 +7869,7 @@ func ktRangeOpenEnd(rg ktRange) ktRange {
 func ktRangeRev(rg ktRange) ktRange {
 	rv := ktRange{from: ktRangeLastEl(rg), to: rg.from, st: rg.st,
 		down: !rg.down, ch: rg.ch, pg: true, lg: rg.lg, un: rg.un}
-	if rg.lg {
+	if ktRangeExact(rg) {
 		rv.lf, rv.lt, rv.ls = ktRangeLastL(rg), rg.lf, rg.ls
 	}
 	return rv
@@ -7861,12 +7881,12 @@ func ktRangeCount(rg ktRange) int {
 	if ktRangeEmpty(rg) {
 		return 0
 	}
-	if rg.lg {
+	if ktRangeExact(rg) {
 		span := ktRangeLastL(rg) - rg.lf
 		if rg.down {
 			span = -span
 		}
-		return int(span/rg.ls) + 1
+		return int(uint64(span)/uint64(rg.ls)) + 1
 	}
 	span := ktRangeLastEl(rg) - rg.from
 	if rg.down {
@@ -8019,7 +8039,7 @@ func ktRangeOf(v interface{}) (ktRange, bool) {
 	rg.lg, _ = o.props["lg"].(bool)
 	un, _ := o.props["un"].(float64)
 	rg.un = uint8(un)
-	if rg.lg {
+	if ktRangeExact(rg) {
 		rg.lf, rg.lt, rg.ls = ktLongOf(o.props["lf"]), ktLongOf(o.props["lt"]), ktLongOf(o.props["ls"])
 	}
 	return rg, true
@@ -8050,10 +8070,10 @@ func ktMakeRange(rg ktRange) *jsObject {
 	if rg.un > 0 {
 		o.set("un", float64(rg.un))
 	}
-	if rg.lg {
-		o.set("lf", jsGInt{v: rg.lf, w: 64})
-		o.set("lt", jsGInt{v: rg.lt, w: 64})
-		o.set("ls", jsGInt{v: rg.ls, w: 64})
+	if ktRangeExact(rg) {
+		o.set("lf", ktRangeBox(rg, rg.lf))
+		o.set("lt", ktRangeBox(rg, rg.lt))
+		o.set("ls", ktRangeBox(rg, rg.ls))
 	}
 	return o
 }
@@ -8127,12 +8147,14 @@ func (rt *jsrt) ktRangeEndEx(rg ktRange) (interface{}, bool) {
 	top := rg.to == ktRangeMax(rg)
 	if rg.lg {
 		top = rg.lt == math.MaxInt64
+	} else if rg.un == 64 {
+		top = rg.lt == -1
 	}
 	if top {
 		rt.ktRaise("IllegalStateException", "Cannot return the exclusive upper bound of a range that includes MAX_VALUE.")
 	}
-	if rg.lg {
-		return jsGInt{v: rg.lt + 1, w: 64}, true
+	if ktRangeExact(rg) {
+		return ktRangeBox(rg, rg.lt+1), true
 	}
 	return ktRangeEl(rg, rg.to+1), true
 }
@@ -8168,11 +8190,11 @@ func ktRangeEmpty(rg ktRange) bool {
 		}
 		return !(rg.from <= rg.to)
 	}
-	if rg.lg {
+	if ktRangeExact(rg) {
 		if rg.down {
-			return rg.lf < rg.lt
+			return ktRangeLess(rg, rg.lf, rg.lt)
 		}
-		return rg.lf > rg.lt
+		return ktRangeLess(rg, rg.lt, rg.lf)
 	}
 	if rg.down {
 		return rg.from < rg.to
@@ -8182,7 +8204,7 @@ func ktRangeEmpty(rg ktRange) bool {
 
 func ktRangeList(rg ktRange) []interface{} {
 	out := []interface{}{}
-	if rg.lg {
+	if ktRangeExact(rg) {
 		if ktRangeEmpty(rg) {
 			return out
 		}
@@ -8191,7 +8213,7 @@ func ktRangeList(rg ktRange) []interface{} {
 			step = -step
 		}
 		for i := rg.lf; ; i += step {
-			out = append(out, jsGInt{v: i, w: 64})
+			out = append(out, ktRangeBox(rg, i))
 			if i == last {
 				return out
 			}
@@ -8233,7 +8255,7 @@ func ktRangeHas(rg ktRange, x interface{}) bool {
 	if !ok {
 		return false
 	}
-	if rg.lg {
+	if ktRangeExact(rg) {
 		return ktRangeHasL(rg, x)
 	}
 	if rg.down {
@@ -8248,9 +8270,10 @@ func ktRangeHas(rg ktRange, x interface{}) bool {
 	return math.Mod(n-rg.from, rg.st) == 0
 }
 
-// ktRangeHasL is ktRangeHas over a Long range's exact bounds: x lies between first
-// and the bound, a whole number of steps from first. Twin of rangeHasL in
-// kotlin-interpreter.abnf and ktRangeHasL in languages/lib/kotlin-rt.metajs.
+// ktRangeHasL is ktRangeHas over a Long or ULong range's exact bounds: x lies
+// between first and the bound, a whole number of steps from first. Twin of
+// rangeHasL in kotlin-interpreter.abnf and ktRangeHasL in
+// languages/lib/kotlin-rt.metajs.
 func ktRangeHasL(rg ktRange, x interface{}) bool {
 	g, isG := x.(jsGInt)
 	f, isF := x.(float64)
@@ -8265,14 +8288,14 @@ func ktRangeHasL(rg ktRange, x interface{}) bool {
 	if rg.down {
 		lo, hi = rg.lt, rg.lf
 	}
-	if n < lo || n > hi {
+	if ktRangeLess(rg, n, lo) || ktRangeLess(rg, hi, n) {
 		return false
 	}
 	off := n - rg.lf
 	if rg.down {
 		off = rg.lf - n
 	}
-	return off%rg.ls == 0
+	return uint64(off)%uint64(rg.ls) == 0
 }
 
 func ktRangeSigned(rg ktRange) float64 {
@@ -8299,8 +8322,8 @@ func (rt *jsrt) ktRangeStr(rg ktRange) string {
 	}
 	a := rt.ktpRender(ktRangeEl(rg, rg.from), 1)
 	b := rt.ktpRender(ktRangeEl(rg, ktRangeLastEl(rg)), 1)
-	if rg.lg {
-		a, b = strconv.FormatInt(rg.lf, 10), strconv.FormatInt(ktRangeLastL(rg), 10)
+	if ktRangeExact(rg) {
+		a, b = rt.ktpRender(ktRangeBox(rg, rg.lf), 1), rt.ktpRender(ktRangeBox(rg, ktRangeLastL(rg)), 1)
 	}
 	if rg.down {
 		return a + " downTo " + b + " step " + rt.ktpRender(rg.st, 1)
@@ -8324,6 +8347,9 @@ func ktRangeEq(a, b ktRange) bool {
 	if ktRangeEmpty(b) {
 		return false
 	}
+	if ktRangeExact(a) && ktRangeExact(b) {
+		return a.lf == b.lf && ktRangeLastL(a) == ktRangeLastL(b) && a.ls == b.ls && a.down == b.down
+	}
 	return a.from == b.from && ktRangeLastEl(a) == ktRangeLastEl(b) &&
 		ktRangeSigned(a) == ktRangeSigned(b)
 }
@@ -8340,12 +8366,12 @@ func ktRangeHash(rt *jsrt, rg ktRange) int32 {
 		return -1
 	}
 	var first, last, step interface{}
-	if rg.lg {
+	if ktRangeExact(rg) {
 		ls := rg.ls
 		if rg.down {
 			ls = -ls
 		}
-		first, last, step = jsGInt{v: rg.lf, w: 64}, jsGInt{v: ktRangeLastL(rg), w: 64}, jsGInt{v: ls, w: 64}
+		first, last, step = ktRangeBox(rg, rg.lf), ktRangeBox(rg, ktRangeLastL(rg)), jsGInt{v: ls, w: 64}
 	} else {
 		first, last, step = ktRangeEl(rg, rg.from), ktRangeEl(rg, ktRangeLastEl(rg)), ktRangeSigned(rg)
 	}

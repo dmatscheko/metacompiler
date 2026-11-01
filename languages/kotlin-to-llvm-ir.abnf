@@ -8146,13 +8146,22 @@ KwContract  = "contract" KwEnd ;
             if (name == "class") {
                 // `Outer.Inner::class` is the class of the nested descriptor: read
                 // from the first segment that is a declared type on, as kQualDesc
-                // does in kotlin-interpreter.abnf.
+                // does in kotlin-interpreter.abnf. Without one, a package-qualified
+                // `kotlin.Int::class` names its simple name's type, and any other
+                // `p.x::class` is the class of the member chain read off the value
+                // `p` (kClassLitDotted in kotlin-interpreter.abnf).
                 var segs = baseName.split(".")
-                for (var j = 0; j < segs.length - 1; j++) {
-                    if (classNames[segs[j]] == undefined && interfaceNames["$" + segs[j]] != true) { continue }
-                    baseV = b.NewCall(rtRefBase(), [curScopeV, emitStr(b, segs[j])])
-                    for (var k = j + 1; k < segs.length; k++) { baseV = callExt(b, "js_ktfget", [baseV, emitStr(b, segs[k])]) }
-                    break
+                var from = -1
+                for (var j = 0; j < segs.length - 1 && from < 0; j++) {
+                    if (classNames[segs[j]] != undefined || interfaceNames["$" + segs[j]] == true) { from = j }
+                }
+                if (from < 0 && segs.length > 1) {
+                    if (segs[0] == "kotlin" || segs[0] == "java") { return makeQualRef(segs[segs.length - 1], name)(b) }
+                    if (ktTypeNameSet["$" + segs[0]] != true) { from = 0 }
+                }
+                if (from >= 0) {
+                    baseV = b.NewCall(rtRefBase(), [curScopeV, emitStr(b, segs[from])])
+                    for (var k = from + 1; k < segs.length; k++) { baseV = callExt(b, "js_ktfget", [baseV, emitStr(b, segs[k])]) }
                 }
                 return {b: b, v: callExt(b, "js_ktclasslit", [baseV])}
             }
@@ -8901,9 +8910,11 @@ KwContract  = "contract" KwEnd ;
         // Kotlin's number types as VALUES, for their companion constants: Long.MAX_VALUE
         // cannot be written as a plain number at all. The twin is hostGlobals["Int"] etc
         // in kotlin-interpreter.abnf; the objects come from js_kttype
-        // (abnf/jsrtkotlin.go).
+        // (abnf/jsrtkotlin.go). The integral range types are values for the same
+        // reason: their companion's EMPTY.
         var ktNumTypes = ["Int", "Long", "Byte", "Short", "UInt", "ULong", "UByte", "UShort",
-                          "Char", "Double", "Float"]
+                          "Char", "Double", "Float", "IntRange", "LongRange", "CharRange",
+                          "UIntRange", "ULongRange"]
         for (var kt = 0; kt < ktNumTypes.length; kt++) {
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, ktNumTypes[kt]),
                                          callExt(b, "js_kttype", [emitStr(b, ktNumTypes[kt])])])
