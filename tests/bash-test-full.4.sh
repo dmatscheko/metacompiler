@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Full-syntax test: Bash (the practical POSIX-plus-bash shell language) - part 4
-# of 4, section 61, whose sizes alone take ~65M of the step brake. The split is
+# of 5, section 61, whose sizes alone take ~65M of the step brake. The split is
 # explained in tests/bash-test-full.sh.
 #
 # This file belongs to the SECOND test group (./test.sh --full): it is NOT part

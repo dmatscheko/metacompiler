@@ -552,7 +552,7 @@ PeXfOp      <~~ push({xf: up.in}) ~~> = "Q" | "E" | "P" | "A" | "K" | "a" | "k" 
 // An empty SUBSCRIPT is no target: `${b[]}` is the run-time "bad substitution" (PeBad).
 // peTgt: the target as written, the prefix of an arithmetic error in ${v:off} (ArOff).
 PeTarget    <~~ peTgt = arSrc(up.start, up.pos) ~~> = PeIdxRef | PeName ;
-PeIdxRef    <~~ push({hasIdx: 1}) ~~> = PeName "[" !"]" IdxWord "]" ;
+PeIdxRef    <~~ push({hasIdx: 1, idxAll: idxAllOf(arSrc(up.start, up.pos))}) ~~> = PeName "[" !"]" IdxWord "]" ;
 IdxWord     <~~ push(mkWord(takeAll())) ~~> = { IdxSeg } ;
 IdxSeg      = SqSeg | DqSeg | ExpSeg | EscSeg | IdxBare ;
 IdxBare     <~~ push(makeConst(up.in)) ~~> = !@+"]}\"'\\$`" ;
@@ -1900,6 +1900,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // rule, and rt_arr_slice slices by index.
     var rtArrIset = rtDecl("rt_arr_iset", false, [1, 1, 1])
     var rtArrKey = rtDecl("rt_arr_key", true, [1, 1])
+    var rtArrKey1 = rtDecl("rt_arr_key1", true, [1, 1])
     var rtArrAkey = rtDecl("rt_arr_akey", true, [1, 1, 1, 0])
     var rtTakeSubbad = rtDecl("rt_take_subbad", false, [])
     var rtAssocAdd = rtDecl("rt_assoc_add", false, [1])
@@ -2181,6 +2182,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // cell.sub). A ${!REF:?} error names "!REF". Twin of mkParamExp in bash-interpreter.abnf.
     function mkParamExp(items) {
         var name = "", indp = false, hasIdx = false, bare = true, pfx = false
+        var idxIt = null
         var wordObjs = []
         var rest = []
         var i
@@ -2190,7 +2192,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (typeof it != "function") {
                 if (it.indp != undefined) { indp = true; continue }
                 if (it.pname != undefined) { name = it.pname; continue }
-                if (it.hasIdx != undefined) { hasIdx = true; continue }
+                if (it.hasIdx != undefined) { hasIdx = true; idxIt = it; continue }
                 if (it.op != undefined || it.pe != undefined || it.xf != undefined) { bare = false }
                 if (it.pfx != undefined) { pfx = true }
             }
@@ -2218,9 +2220,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (idxW == null) {
                 tg = b.NewCall(rtIndName, [gepStr(b, name), nullStr, varString(b, name), one])
             } else {
-                var rs = subKeyOf(b, name, idxW, null)
+                var ikind = idxKind(idxIt, idxW)
+                var rs = subKeyOf(b, name, idxW, null, ikind == 0)
                 b = rs.b
-                var sv = b.NewCall(rtIndSub, [gepStr(b, name), rs.k, subKind(b, subKindC(idxW), rs.v)])
+                var sv = b.NewCall(rtIndSub, [gepStr(b, name), rs.k, subKind(b, ikind, rs.v)])
                 tg = b.NewCall(rtIndName, [gepStr(b, name), rs.v, sv, zero])
             }
             var cls = b.NewCall(rtIndList, tg)
@@ -2266,6 +2269,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var ariths = []    // bare arithmetic thunks (the ${v:off:len} offsets)
         var wordT = null
         var hasIdx = false
+        var idxIt = null
         var rtNm = false, rtAssoc = false
         var errName = null
         var i
@@ -2273,7 +2277,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var it = items[i]
             if (typeof it == "function") { ariths.push(it) }
             else if (it.qname != undefined) { errName = it.qname }
-            else if (it.hasIdx != undefined) { hasIdx = true }
+            else if (it.hasIdx != undefined) { hasIdx = true; idxIt = it }
             else if (it.rtNm != undefined) { rtNm = true }
             else if (it.rtAssoc != undefined) { rtNm = true; rtAssoc = true }
             else if (it.fn != undefined) { words.push(it); wordT = it }
@@ -2388,8 +2392,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // The subscript, and the key it names: an associative array's is the text, an
             // indexed array's an arithmetic expression (rt_arr_key; a canonical literal index
             // needs no evaluation). Computed ONCE per expansion, so `${a[i++]}` steps i once.
-            var subOf = function(b) { return subKeyOf(b, name, idxW, rtNm ? cell.nm : null) }
-            var kindC = subKindC(idxW)
+            var kindC = idxKind(idxIt, idxW)
+            var subOf = function(b) { return subKeyOf(b, name, idxW, rtNm ? cell.nm : null, kindC == 0) }
             var kindOf = function(b, sub) { return subKind(b, kindC, sub) }
             if (pe == "len") {
                 return {c: undefined, fn: function(b) {
@@ -4462,6 +4466,18 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     // The kind of subscript word w names - 0 a key, 1 "@" (fields), 2 "*" (joined) - when it
     // is a literal, else -1: subKind then asks at run time.
+    // The subscript of ${NAME[SUB]} as written, when it is @ or * (the whole array), else "".
+    // Only a WRITTEN @ or * names the whole array; an expanded one is an element's key. Twin
+    // of idxAllOf in bash-interpreter.abnf.
+    function idxAllOf(t) {
+        var s0 = t.slice(t.indexOf("[") + 1, t.length - 1)
+        return (s0 == "@" || s0 == "*") ? s0 : ""
+    }
+    // The subscript kind a PeIdxRef item fixes (subKindC's numbers), or the word's own.
+    function idxKind(it, w) {
+        if (it == null || it.idxAll == undefined) { return subKindC(w) }
+        return (it.idxAll == "@") ? 1 : ((it.idxAll == "*") ? 2 : 0)
+    }
     function subKindC(w) { return (w.c == undefined) ? -1 : ((w.c == "@") ? 1 : ((w.c == "*") ? 2 : 0)) }
     function subKind(b, kc, sub) {
         if (kc >= 0) { return llvm.constant.NewInt(i32, kc) }
@@ -4475,10 +4491,12 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // A literal subscript that is a canonical index needs no evaluation, and one that is a
     // plain variable name reads that variable's slot directly.
     // nmv, when not null, is the array's name as a run-time value (an indirection's target).
-    function subKeyOf(b, name, w, nmv) {
+    // elem: the subscript names an element even when it expands to @ or * (rt_arr_key1).
+    function subKeyOf(b, name, w, nmv, elem) {
         var r = evalWord(b, w)
         var key = r.v
-        if (nmv != null) { key = r.b.NewCall(rtArrKey, [nmv, r.v]) }
+        var keyF = (elem == true) ? rtArrKey1 : rtArrKey
+        if (nmv != null) { key = r.b.NewCall(keyF, [nmv, r.v]) }
         else if (hasOwn(assocArrays, "$" + name)) { key = r.v }
         else if (w.c != undefined && isIndexLit(w.c)) { key = gepStr(r.b, w.c) }
         else if (w.c != undefined && isIdentText(w.c)) {
@@ -4492,7 +4510,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             key = jb.NewPhi([llvm.ir.NewIncoming(r.v, bb), llvm.ir.NewIncoming(ik, ib)])
             return {b: jb, v: r.v, k: key}
         }
-        else { key = r.b.NewCall(rtArrKey, [gepStr(r.b, name), r.v]) }
+        else { key = r.b.NewCall(keyF, [gepStr(r.b, name), r.v]) }
         return {b: r.b, v: r.v, k: key}
     }
     function isIdentText(t) {

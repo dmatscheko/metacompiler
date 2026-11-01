@@ -593,7 +593,7 @@ PeXfOp      <~~ push({xf: up.in}) ~~> = "Q" | "E" | "P" | "A" | "K" | "a" | "k" 
 // An empty SUBSCRIPT is no target: `${b[]}` is the run-time "bad substitution" (PeBad).
 // peTgt: the target as written, the prefix of an arithmetic error in ${v:off} (ArOff).
 PeTarget    <~~ peTgt = arSrc(up.start, up.pos) ~~> = PeIdxRef | PeName ;
-PeIdxRef    <~~ push({hasIdx: 1}) ~~> = PeName "[" !"]" IdxWord "]" ;
+PeIdxRef    <~~ push({hasIdx: 1, idxAll: idxAllOf(arSrc(up.start, up.pos))}) ~~> = PeName "[" !"]" IdxWord "]" ;
 IdxWord     <~~ push(mkWord(takeAll())) ~~> = { IdxSeg } ;
 IdxSeg      = SqSeg | DqSeg | ExpSeg | EscSeg | IdxBare ;
 IdxBare     <~~ push(makeConst(up.in)) ~~> = !@+"]}\"'\\$`" ;
@@ -1703,7 +1703,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         noRef = noRef - 1
         return {name: name, had: had, val: val, an: attrOn(refVars, name),
                 ai: attrOn(intVars, name), au: attrOn(upVars, name), al: attrOn(loVars, name),
-                ad: attrOn(dclVars, name), ar: attrOn(roVars, name), ax: attrOn(exVars, name), hasArr: hadA, arr: hadA ? arrCopy(arrs[ak]) : {assoc: false, keys: [], vals: {}, gone: {}, lit: false, decl: false}}
+                ad: attrOn(dclVars, name), ar: attrOn(roVars, name), ax: attrOn(exVars, name), hasArr: hadA, arr: hadA ? arrCopy(arrs[ak]) : {assoc: false, keys: [], vals: {}, gone: {}, lit: false, decl: false, nb: 1024, hv: {}}}
     }
     // The saved entry holding NAME's GLOBAL binding while a local or a prefix binding hides
     // it: the first entry of the outermost frame that saved NAME. null when the global is
@@ -2566,6 +2566,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // `cell`. A ${!REF:?} error names "!REF". Twin of mkParamExp in bash-to-llvm-ir.abnf.
     function mkParamExp(items) {
         var name = "", indp = false, hasIdx = false, bare = true, pfx = false
+        var idxAll0 = anytype
+        idxAll0 = null
         var fns = []
         var rest = []
         var i
@@ -2574,7 +2576,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (typeof it == "function") { fns.push(it); continue }
             if (it.indp != undefined) { indp = true; continue }
             if (it.pname != undefined) { name = it.pname; continue }
-            if (it.hasIdx != undefined) { hasIdx = true; continue }
+            if (it.hasIdx != undefined) { hasIdx = true; idxAll0 = idxAllItem(it); continue }
             if (it.op != undefined || it.pe != undefined || it.xf != undefined) { bare = false }
             if (it.pfx != undefined) { pfx = true }
             rest.push(it)
@@ -2612,8 +2614,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var refName = name
         return function() {
             var tg = anytype
-            if (idxT == null) { tg = indName(refName, null, null) }
-            else { var raw = wordJoin(idxT()); tg = indName(refName, subKey(refName, raw), raw) }
+            if (idxT == null) { tg = indName(refName, null, null, false) }
+            else { var raw = wordJoin(idxT()); var ik = subKeyAll(refName, raw, idxAll0); tg = indName(refName, ik, raw, (idxAll0 == null) ? (ik == "@" || ik == "*") : idxAll0 != "") }
             if (tg != null && (tg == "@" || tg == "*" || isElemRef(tg))) {
                 var key = "$" + tg
                 if (!hasOwn(byTarget, key)) { byTarget[key] = paramCore(targetItems(tg, "!" + refName, rest), null) }
@@ -2632,7 +2634,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var sp = splitSubscript(tg)
             var sub = sp.key
             out.push({pname: sp.name})
-            out.push({hasIdx: 1})
+            out.push({hasIdx: 1, idxAll: (sub == "@" || sub == "*") ? sub : ""})
             out.push(function() { return sub })
         }
         var i
@@ -2649,12 +2651,14 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var wordT = null
         var hasIdx = false
         var errName = null
+        var idxAll = anytype
+        idxAll = null
         var i
         for (i = 0; i < items.length; i++) {
             var it = items[i]
             if (typeof it == "function") { args.push(it); wordT = it }
             else if (it.qname != undefined) { errName = it.qname }
-            else if (it.hasIdx != undefined) { hasIdx = true }
+            else if (it.hasIdx != undefined) { hasIdx = true; idxAll = idxAllItem(it) }
             else if (it.lenp != undefined) { lenp = true }
             else if (it.badsub != undefined) { badsub = it.badsub }
             else if (it.indp != undefined) { indp = true }
@@ -2688,6 +2692,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             && (pe == "substr" || isPatOp(pe) || op != "" || xf != "")) {
             var posSub = name
             hasIdx = true
+            idxAll = name
             var posArgs = [function() { return posSub }]
             for (var pa = 0; pa < args.length; pa++) { posArgs.push(args[pa]) }
             args = posArgs
@@ -2705,25 +2710,26 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // ${!a[@]} / ${!a[*]} list the keys.
         if (idxT != null && !(indp && !bare)) {
             var readIdx = function() {
-                return subKey(name, wordJoin(idxT()))
+                return subKeyAll(name, wordJoin(idxT()), idxAll)
             }
+            var isWhole = function(sub) { return (idxAll == null) ? (sub == "@" || sub == "*") : idxAll != "" }
             if (pe == "len") {
                 return function() {
                     var sub = readIdx()
-                    if (sub == "@" || sub == "*") { return numToStr(scKeyList(name).length) }
+                    if (isWhole(sub)) { return numToStr(scKeyList(name).length) }
                     return numToStr(charLen(scGet(name, sub)))
                 }
             }
             if (pe == "ind") {
                 return function() {
                     var raw = wordJoin(idxT())
-                    var sub = subKey(name, raw)
-                    if (sub == "@" || sub == "*") {
+                    var sub = subKeyAll(name, raw, idxAll)
+                    if (isWhole(sub)) {
                         var ks = scKeyList(name)
                         if (sub == "@") { return encFields(ks) }
                         return starJoinSp(ks)
                     }
-                    var it = indName(name, sub, raw)
+                    var it = indName(name, sub, raw, false)
                     return (it == null) ? "" : indVal(it)
                 }
             }
@@ -2733,7 +2739,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 var lenT = (args.length > 1) ? args[1] : null
                 return function() {
                     var sub = readIdx()
-                    if (sub != "@" && sub != "*") { return sliceStr(scGet(name, sub), offT, lenT) }
+                    if (!isWhole(sub)) { return sliceStr(scGet(name, sub), offT, lenT) }
                     // NAME[@] / NAME[*] of a SCALAR is the substring of its value, as ${NAME:off}
                     // (bash 5.3: s=hello; "${s[@]:1:-1}" is ell); an offset outside the value
                     // is no word for [@]. Twin of the scalar arm of rt_arr_slice.
@@ -2770,7 +2776,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 var idxName = name
                 return function() {
                     var sub = readIdx()
-                    if (sub != "@" && sub != "*") {
+                    if (!isWhole(sub)) {
                         return xformOne(scGet(idxName, sub), idxXf, idxName, scHas(idxName, sub))
                     }
                     // @A, @K and @k describe the WHOLE VARIABLE when the subscript is @ or *,
@@ -2835,7 +2841,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     var sub = readIdx()
                     var pat = (idxPat != null) ? wordJoin(idxPat()) : ""
                     var rep = (idxRep != null) ? wordJoin(idxRep()) : ""
-                    if (sub != "@" && sub != "*") {
+                    if (!isWhole(sub)) {
                         return applyPatOp(scGet(patName, sub), idxPe, idxAnch, pat, rep)
                     }
                     var pvals = scValList(patName)
@@ -2854,7 +2860,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return function() {
                 var sub = readIdx()
                 var qn = (errName != null) ? errName : (isPosName(name) ? name : name + "[" + sub + "]")
-                if (sub == "@" || sub == "*") { return listOpValue(name, sub, idxOp, idxWordT, qn) }
+                if (isWhole(sub)) { return listOpValue(name, sub, idxOp, idxWordT, qn) }
                 return elemOpValue(name, sub, idxOp, idxWordT, qn)
             }
         }
@@ -2873,7 +2879,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 if (rt == "") { diagErr(name + ": invalid indirect expansion\n"); arithErr = true }
                 return rt
             }
-            var it = indName(name, null, null)
+            var it = indName(name, null, null, false)
             return (it == null) ? "" : indVal(it)
         } }
         // ${!prefix*} and ${!prefix@} answer the NAMES of the set variables with that prefix,
@@ -2966,7 +2972,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // invalid variable name"; either abandons the line as an expansion error does. The answer
     // is null for an unset target or after an error. Twin of rt_indname / rt_indsub in
     // languages/lib/bash-rt.c.
-    function indName(name, sub, raw) {
+    // whole: sub names the whole array (a written @ or *).
+    function indName(name, sub, raw, whole) {
         var v = ""
         if (sub == null) {
             var special = !isIdentText(name) && !allDigits(name)
@@ -2976,7 +2983,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (!isArr(name) && !isSetVar(name) && !attrOn(dclVars, name)) {
                 return indFail(name + "[" + raw + "]: invalid indirect expansion")
             }
-            if (sub == "@" || sub == "*") {
+            if (whole) {
                 var vals = scValList(name)
                 if (vals.length == 0) { return null }
                 v = joinList(vals, (sub == "@") ? " " : ifsFirst())
@@ -3732,8 +3739,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
 
     // ---- arrays -------------------------------------------------------------------------
-    // One store for both kinds: keys are strings, kept in insertion order for an associative
-    // array and in numeric order for an indexed one (which is also what ${!a[*]} reports).
+    // One store for both kinds: keys are strings, kept in bash's hash order for an associative
+    // array (assocInsert) and in numeric order for an indexed one (which is also what ${!a[*]} reports).
     var intVars = {}   // names declared with `declare -i`: their assignments are arithmetic
     var upVars = {}    // `declare -u`: EVERY later assignment is upper-cased, not just the first
     var loVars = {}    // `declare -l`: likewise, lower-cased
@@ -3806,7 +3813,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var nm = stNames[i]
             var ak = arrKey(nm)
             var hadA = hasOwn(arrs, ak) && arrs[ak] != null
-            out.push({hasArr: hadA, arr: hadA ? arrCopy(arrs[ak]) : {assoc: false, keys: [], vals: {}, gone: {}, lit: false, decl: false},
+            out.push({hasArr: hadA, arr: hadA ? arrCopy(arrs[ak]) : {assoc: false, keys: [], vals: {}, gone: {}, lit: false, decl: false, nb: 1024, hv: {}},
                       ai: attrOn(intVars, nm), au: attrOn(upVars, nm), al: attrOn(loVars, nm), ad: attrOn(dclVars, nm),
                       ar: attrOn(roVars, nm), ax: attrOn(exVars, nm), an: attrOn(refVars, nm)})
         }
@@ -3851,7 +3858,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     function arrNew(name, assoc) {
         touchState(name)
-        arrs[arrKey(name)] = {assoc: assocFact(name, assoc), keys: [], vals: {}, gone: {}, lit: false, decl: false}
+        arrs[arrKey(name)] = {assoc: assocFact(name, assoc), keys: [], vals: {}, gone: {}, lit: false, decl: false, nb: 1024, hv: {}}
         return arrs[arrKey(name)]
     }
     function arrEnsure(name, assoc) {
@@ -3872,7 +3879,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var a = arrEnsure(name, false)
         var kk = arrNorm(a, key)
         if (!arrLive(a, kk)) {
-            if (a.assoc) { a.keys.push(kk) }
+            if (a.assoc) { assocInsert(a, kk) }
             else {
                 // keep the index list in numeric order, so ${!a[*]} and ${a[@]} are sorted; the
                 // scan runs from the end and stops at the first smaller index, so appending in
@@ -3893,6 +3900,60 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         a.vals["$" + kk] = val
         a.gone["$" + kk] = false
     }
+    // AN ASSOCIATIVE ARRAY LISTS IN bash 5.3's HASH ORDER: a table of a.nb buckets (1024,
+    // four times as many once the elements reach twice the buckets) indexed by FNV-1 of the
+    // key's bytes, walked bucket by bucket, each bucket newest first; growing re-inserts the
+    // elements in that walk's order. a.keys is kept in the walk's order. Twin of rt_as_ins in
+    // bash-rt.c.
+    function assocHash(a, k) {
+        var hk = "$" + k
+        if (hasOwn(a.hv, hk)) { return a.hv[hk] }
+        var h = 2166136261
+        var bs = strBytes(k)
+        var i
+        for (i = 0; i < bs.length; i++) {
+            // h * 16777619 mod 2^32, then XOR with the byte as a signed char.
+            h = ((h % 256) * 16777216 + h * 403) % 4294967296
+            var lo = h % 256
+            var hi = h - lo
+            if (bs[i] >= 128) { hi = 4294967040 - hi }
+            h = hi + (lo ^ (bs[i] % 256))
+        }
+        a.hv[hk] = h
+        return h
+    }
+    function assocInsert(a, kk) {
+        if (a.keys.length >= a.nb * 2) { assocGrow(a) }
+        var bk = assocHash(a, kk) % a.nb
+        // The first key of a bucket >= bk (the keys ascend by bucket).
+        var lo = 0, hi = a.keys.length
+        while (lo < hi) {
+            var mid = (lo + hi - (lo + hi) % 2) / 2
+            if (assocHash(a, a.keys[mid]) % a.nb < bk) { lo = mid + 1 } else { hi = mid }
+        }
+        a.keys = a.keys.slice(0, lo).concat([kk], a.keys.slice(lo))
+    }
+    function assocGrow(a) {
+        var nb = a.nb * 4
+        var groups = {}
+        var i
+        for (i = 0; i < a.keys.length; i++) {
+            var g = "$" + (assocHash(a, a.keys[i]) % nb)
+            if (!hasOwn(groups, g)) { groups[g] = [] }
+            groups[g].push(a.keys[i])
+        }
+        var out = []
+        var b
+        for (b = 0; b < nb; b++) {
+            var gk = "$" + b
+            if (!hasOwn(groups, gk)) { continue }
+            var gl = groups[gk]
+            var q
+            for (q = gl.length - 1; q >= 0; q--) { out.push(gl[q]) }
+        }
+        a.keys = out
+        a.nb = nb
+    }
     // Is key kk an element of store a? The frozen engine has no `delete`, so an erased key
     // keeps its slot in vals and is marked in gone.
     function arrLive(a, kk) {
@@ -3900,7 +3961,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     // A shallow copy of one array store, for `local`'s save entry.
     function arrCopy(a) {
-        var c2 = {assoc: a.assoc, keys: [], vals: {}, gone: {}, lit: a.lit, decl: a.decl}
+        var c2 = {assoc: a.assoc, keys: [], vals: {}, gone: {}, lit: a.lit, decl: a.decl, nb: a.nb, hv: {}}
         var i
         for (i = 0; i < a.keys.length; i++) {
             var kk = a.keys[i]
@@ -4132,6 +4193,23 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     // The key a subscript's TEXT names: an associative array's is the text itself, an indexed
     // array's an arithmetic expression; "@" and "*" name the whole array. Twin of rt_arr_key.
+    // The subscript of ${NAME[SUB]} as written, when it is @ or * (the whole array), else "".
+    function idxAllOf(t) {
+        var s0 = t.slice(t.indexOf("[") + 1, t.length - 1)
+        return (s0 == "@" || s0 == "*") ? s0 : ""
+    }
+    // The key of ${NAME[SUB]}: `all` is idxAllOf's answer, and only a WRITTEN @ or * names the
+    // whole array - an expanded one is an associative array's key "@" and an indexed array's
+    // arithmetic (bash 5.3: x=@; "${m[$x]}" is m's element @). null (a subscript that is
+    // text already) decides by the text itself. Twin of subKeyOf's elem in
+    // bash-to-llvm-ir.abnf.
+    function subKeyAll(name, sub, all) {
+        if (all == null) { return subKey(name, sub) }
+        if (all != "") { return all }
+        if (assocFact(name, false)) { return sub }
+        return arrIdxKey(name, arEval(sub), name)
+    }
+    function idxAllItem(it) { return (it.idxAll != undefined) ? it.idxAll : null }
     function subKey(name, sub) {
         if (sub == "@" || sub == "*" || assocFact(name, false)) { return sub }
         return arrIdxKey(name, arEval(sub), name)

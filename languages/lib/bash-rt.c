@@ -62,7 +62,7 @@ char *varnames[1024];
 int ls_id[512];
 char *ls_val[512];
 int ls_acnt[512];
-int ls_amark[512];   /* the record's marks (1 2 4 16, see rt_arr_mark), and 8 when it was not sorted */
+int ls_amark[512];   /* the record's marks (1 2 4 16 32 and the growth bits, see rt_arr_mark), and 8 when it was not sorted */
 int ls_top;
 int ls_tmp[512];     /* a function's prefix binding (rt_push_tmp): 1, and 2 once a `local` claimed it */
 int ls_tb;           /* 1 + where the next call's frame starts when prefix bindings open it, else 0 */
@@ -180,6 +180,10 @@ long rt_str2int(char *s);
 long rt_arith(char *s);
 int rt_isassoc(char *nm);
 char *rt_arr_key(char *nm, char *sub);
+char *rt_arr_key1(char *nm, char *sub);
+long rt_as_hash(char *k);
+long rt_as_nb(int r);
+int rt_as_first(int r, long bk);
 int rt_arith_fail(char *expr, char *msg, char *tok);
 int rt_class(char *p, int ch);
 int rt_cpw(char *s);
@@ -4721,7 +4725,7 @@ int rt_bnd_opened2(int opened, char *f, int lead, int trail) {
  * name and not the size of every other array. Record r keeps its rows in two
  * malloc'd vectors, ar_k[r] / ar_v[r] (ar_n[r] used of ar_cap[r]), in the order
  * ${!a[*]} and ${a[@]} report: index order for an indexed array (rt_arr_iset),
- * insertion order for an associative one (rt_arr_set). ar_srt[r] says every key
+ * bash's hash order for an associative one (rt_as_ins). ar_srt[r] says every key
  * is a canonical decimal (rt_iscanon) and they ascend, which lets a lookup
  * bisect; any other record of 16 rows or more is looked up through ar_kh[r], an
  * open-addressing table of row + 1 by key, built on the first lookup, extended by
@@ -4913,6 +4917,16 @@ int rt_ar_pos(int r, char *k)
         }
         return -1;
     }
+    if ((ar_mk[r] & 2048) != 0 && n >= 16) {
+        long hm = rt_as_nb(r) - 1;
+        long bk = rt_as_hash(k) & hm;
+        i = rt_as_first(r, bk);
+        while (i < n && (rt_as_hash(ks[i]) & hm) == bk) {
+            if (rt_streq(k, ks[i]) != 0) return i;
+            i = i + 1;
+        }
+        return -1;
+    }
     if (n >= 16) {
         if (ar_kh[r] == 0) {
             m = 32;
@@ -4946,10 +4960,12 @@ int rt_ar_pos(int r, char *k)
     return -1;
 }
 
-/* Insert (k, v) as row `at` of record r. */
+/* Insert (k, v) as row `at` of record r; the rows are no longer known to be in
+ * hash order (rt_as_ins). */
 void rt_ar_ins(int r, int at, char *k, char *v)
 {
     int n = ar_n[r];
+    ar_mk[r] = ar_mk[r] & ~2048;
     rt_ar_room(r, n + 1);
     if (at < n) {
         memmove(ar_k[r] + at + 1, ar_k[r] + at, (unsigned long)(n - at) * 8);
@@ -5122,7 +5138,107 @@ void rt_ar_put(int r, int at, char *v)
     if (eb_n != 0 && ar_hold == 0) rt_ebdrop(ar_old);
 }
 
-/* i32 rt_arr_set(i8* nm, i8* k, i8* v): update the row of k, or append one. */
+/* AN ASSOCIATIVE ARRAY KEEPS ITS ROWS IN bash 5.3's HASH ORDER: a table of
+ * buckets (1024, four times as many once the rows reach twice the buckets)
+ * indexed by FNV-1 of the key's bytes, walked bucket by bucket, each bucket
+ * newest first; growing re-inserts the rows in that walk's order. The number of
+ * times the table grew is in ar_mk bits 256..1792; bit 2048 says the rows are
+ * in that order, so rt_ar_pos bisects for a key's bucket. Twin of assocHash,
+ * assocInsert and assocGrow in bash-interpreter.abnf. */
+long rt_as_hash(char *k)
+{
+    long h = 2166136261L;
+    int i = 0;
+    int c;
+    while (k[i] != 0) {
+        c = (int)(unsigned char)k[i];
+        if (c >= 128) c = c - 256;
+        h = (h * 16777619L) & 4294967295L;
+        h = (h ^ (long)c) & 4294967295L;
+        i = i + 1;
+    }
+    return h;
+}
+
+long rt_as_nb(int r)
+{
+    int g = (ar_mk[r] >> 8) & 7;
+    return (long)1024 << (2 * g);
+}
+
+void rt_as_grow(int r)
+{
+    int n = ar_n[r];
+    long nb = rt_as_nb(r) * 4;
+    int *at = (int *)rt_xalloc("array rows", (nb + 1) * 4);
+    char **tk = (char **)rt_xalloc("array rows", (long)n * 8 + 8);
+    char **tv = (char **)rt_xalloc("array rows", (long)n * 8 + 8);
+    long b;
+    int i;
+    b = 0;
+    while (b <= nb) {
+        at[b] = 0;
+        b = b + 1;
+    }
+    i = 0;
+    while (i < n) {
+        b = rt_as_hash(ar_k[r][i]) & (nb - 1);
+        at[b + 1] = at[b + 1] + 1;
+        i = i + 1;
+    }
+    b = 0;
+    while (b < nb) {
+        at[b + 1] = at[b + 1] + at[b];
+        b = b + 1;
+    }
+    /* Walking the rows backwards reverses each bucket's order. */
+    i = n - 1;
+    while (i >= 0) {
+        b = rt_as_hash(ar_k[r][i]) & (nb - 1);
+        tk[at[b]] = ar_k[r][i];
+        tv[at[b]] = ar_v[r][i];
+        at[b] = at[b] + 1;
+        i = i - 1;
+    }
+    if (n > 0) {
+        memmove(ar_k[r], tk, (unsigned long)n * 8);
+        memmove(ar_v[r], tv, (unsigned long)n * 8);
+    }
+    free(at);
+    free(tk);
+    free(tv);
+    ar_mk[r] = ar_mk[r] + 256;
+    rt_ar_khdrop(r);
+}
+
+/* The first row of r whose bucket is >= bk: the rows ascend by bucket. */
+int rt_as_first(int r, long bk)
+{
+    long m = rt_as_nb(r) - 1;
+    int lo = 0;
+    int hi = ar_n[r];
+    while (lo < hi) {
+        int mid = (lo + hi) / 2;
+        if ((rt_as_hash(ar_k[r][mid]) & m) < bk) lo = mid + 1;
+        else hi = mid;
+    }
+    return lo;
+}
+
+void rt_as_ins(int r, char *k, char *v)
+{
+    ar_srt[r] = 0;
+    if (ar_n[r] > 0 && (ar_mk[r] & 2048) == 0) {
+        /* Rows put there another way keep their order. */
+        rt_ar_ins(r, ar_n[r], k, v);
+        return;
+    }
+    if (ar_n[r] >= 2 * rt_as_nb(r)) rt_as_grow(r);
+    rt_ar_ins(r, rt_as_first(r, rt_as_hash(k) & (rt_as_nb(r) - 1)), k, v);
+    ar_mk[r] = ar_mk[r] | 2048;
+}
+
+/* i32 rt_arr_set(i8* nm, i8* k, i8* v): update the row of k, or add one. */
 int rt_arr_set(char *nm, char *k, char *v) {
     int r = rt_ar_rec(nm);
     int at = rt_ar_pos(r, k);
@@ -5136,6 +5252,10 @@ int rt_arr_set(char *nm, char *k, char *v) {
         rt_ar_put(r, at, v);
         return 0;
     }
+    if (rt_isassoc(nm) != 0) {
+        rt_as_ins(r, k, v);
+        return 0;
+    }
     n = ar_n[r];
     if (ar_srt[r] != 0 && (rt_iscanon(k) == 0 || (n > 0 && rt_str2int(ar_k[r][n - 1]) >= rt_str2int(k))))
         ar_srt[r] = 0;
@@ -5146,9 +5266,8 @@ int rt_arr_set(char *nm, char *k, char *v) {
 /* AN INDEXED ARRAY KEEPS ITS ROWS IN INDEX ORDER, the order bash lists ${!a[*]}
  * and ${a[@]} in whatever order the elements were assigned (a[5]=x; a[2]=y lists
  * 2 5): a new row goes in front of the first row of the same array with a greater
- * index, and a key is matched by its numeric value. An associative array keeps
- * insertion order (manual 7.9), so its writes stay on rt_arr_set. A write to
- * bad_key is dropped. */
+ * index, and a key is matched by its numeric value. An associative array's writes
+ * stay on rt_arr_set (rt_as_ins). A write to bad_key is dropped. */
 char bad_key[1];
 int sub_bad;   /* the last rt_arr_akey refused its subscript (rt_take_subbad) */
 int rt_arr_iset(char *nm, char *k, char *v) {
@@ -5309,6 +5428,13 @@ int rt_isassoc(char *nm) {
  * name the whole array and pass through. Twin of subKey in bash-interpreter.abnf. */
 char *rt_arr_key(char *nm, char *sub) {
     if (rt_streq(sub, "@") != 0 || rt_streq(sub, "*") != 0) return sub;
+    return rt_arr_key1(nm, sub);
+}
+
+/* The same for a subscript that names an element whatever it expanded to:
+ * x=@; "${m[$x]}" is the element of key @. Twin of subKeyAll in
+ * bash-interpreter.abnf. */
+char *rt_arr_key1(char *nm, char *sub) {
     if (rt_isassoc(nm) != 0) return sub;
     return rt_arr_ikey(nm, rt_arith(sub));
 }
@@ -5937,7 +6063,7 @@ int rt_xmark(char *nm, int on) {
         return 0;
     }
     r = rt_ar_find(nm);
-    if (r >= 0) ar_mk[r] = ar_mk[r] & 39;
+    if (r >= 0) ar_mk[r] = ar_mk[r] & 3879;
     return 0;
 }
 
@@ -5958,7 +6084,7 @@ int rt_nmark(char *nm, int on) {
         return 0;
     }
     r = rt_ar_find(nm);
-    if (r >= 0) ar_mk[r] = ar_mk[r] & 23;
+    if (r >= 0) ar_mk[r] = ar_mk[r] & 3863;
     return 0;
 }
 
@@ -7419,7 +7545,7 @@ int rt_ls_restore(int t, int rows)
     }
     arr_rows = arr_rows - ar_n[r] + cnt;
     ar_n[r] = cnt;
-    ar_mk[r] = ls_amark[t] & 55;
+    ar_mk[r] = ls_amark[t] & 3895;
     ar_srt[r] = (ls_amark[t] & 8) != 0 ? 0 : 1;
     rt_ar_khdrop(r);
     return 0;

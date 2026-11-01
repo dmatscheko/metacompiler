@@ -782,8 +782,7 @@ a decision was taken:
 - **Bash**: both our engines accept
   `[[:word:]]` and `[[:ascii:]]` which bash rejects, and converging means changing
   `regex.js`, shared by ten languages; bash *errors* on
-  `declare -A f=([k]=v one two)` where we accept; bash's associative-array
-  iteration is hash order (unspecified) against our insertion order; and `rt_eg`'s
+  `declare -A f=([k]=v one two)` where we accept; and `rt_eg`'s
   `*`/`+` arm evaluates itself at `k == 0` and discards the result, because the IR
   computes both operands of an `And` and the arena offsets are observable through
   pointer identity.
