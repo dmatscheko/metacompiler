@@ -311,6 +311,45 @@ func phpMissArgMsg(name string, passed, req int, exact bool, where string) strin
 	return s + " and " + how + " " + strconv.Itoa(req) + " expected"
 }
 
+// phpNatTypeMsg is phsNatTypeMsg: zend_wrong_parameter_type_error's text.
+func phpNatTypeMsg(name string, n int, pname, typ, given string) string {
+	return name + "(): Argument #" + strconv.Itoa(n) + " ($" + pname + ") must be of type " + typ + ", " + given + " given"
+}
+
+// phpNatStr, phpNatInt and phpNatArr read argument n of internal function fn,
+// whose parameter pname declares string, int or array, as a coercive-mode call
+// does (zend_parse_arg_str_weak, zend_parse_arg_long_weak): null reads as "" or
+// 0, and a value it does not read is the TypeError. Twins of phpNatStr /
+// phpNatInt / phpNatArr in languages/php-interpreter.abnf.
+func (rt *jsrt) phpNatStr(fn string, n int, pname string, v interface{}) string {
+	if s, ok := v.(string); ok {
+		return s
+	}
+	_, isBool := v.(bool)
+	if isNullish(v) || isBool || phpIsNum(v) || (phpIsObj(v) && rt.phpMethodOf(v, "__toString") != nil) {
+		return rt.phpStr(v)
+	}
+	rt.phpRaise("TypeError", phpNatTypeMsg(fn, n, pname, "string", rt.phpValueName(v)))
+	return ""
+}
+
+func (rt *jsrt) phpNatInt(fn string, n int, pname string, v interface{}) int64 {
+	if isNullish(v) {
+		return 0
+	}
+	r := rt.phpWeakInt(v)
+	if r == nil {
+		rt.phpRaise("TypeError", phpNatTypeMsg(fn, n, pname, "int", rt.phpValueName(v)))
+	}
+	return rt.phpToLong(r)
+}
+
+func (rt *jsrt) phpNatArr(fn string, n int, pname string, v interface{}) {
+	if !phpIsArr(v) {
+		rt.phpRaise("TypeError", phpNatTypeMsg(fn, n, pname, "array", rt.phpValueName(v)))
+	}
+}
+
 // phpNotPassedMsg is phsNotPassedMsg: zend_handle_undef_args' text.
 func phpNotPassedMsg(name string, n int, pname string) string {
 	return name + "(): Argument #" + strconv.Itoa(n) + " (" + pname + ") not passed"
@@ -477,8 +516,13 @@ func init() {
 		w := rt.wrap
 		num := func(v interface{}) int { return int(rt.phpToLong(v)) }
 		m["js_phsubstr"] = func(a []uint64) uint64 {
+			s := rt.phpNatStr("substr", 1, "string", u(a[0]))
+			from := int(rt.phpNatInt("substr", 2, "offset", u(a[1])))
 			l := u(a[2])
-			return w(phpSubstr(rt.phpStr(u(a[0])), num(u(a[1])), num(l), !isNullish(l)))
+			if isNullish(l) {
+				return w(phpSubstr(s, from, 0, false))
+			}
+			return w(phpSubstr(s, from, int(rt.phpNatInt("substr", 3, "length", l)), true))
 		}
 		pos := func(name string, at int) uint64 {
 			if at == -2 {
@@ -489,24 +533,30 @@ func init() {
 			}
 			return w(phpMkInt(int64(at)))
 		}
+		posArgs := func(name string, a []uint64) (string, string, int) {
+			h := rt.phpNatStr(name, 1, "haystack", u(a[0]))
+			n := rt.phpNatStr(name, 2, "needle", u(a[1]))
+			return h, n, int(rt.phpNatInt(name, 3, "offset", u(a[2])))
+		}
 		m["js_phstrpos"] = func(a []uint64) uint64 {
-			return pos("strpos", phpStrpos(rt.phpStr(u(a[0])), rt.phpStr(u(a[1])), num(u(a[2]))))
+			return pos("strpos", phpStrpos(posArgs("strpos", a)))
 		}
 		m["js_phstrrpos"] = func(a []uint64) uint64 {
-			return pos("strrpos", phpStrrpos(rt.phpStr(u(a[0])), rt.phpStr(u(a[1])), num(u(a[2]))))
+			return pos("strrpos", phpStrrpos(posArgs("strrpos", a)))
 		}
 		m["js_phstrcmp"] = func(a []uint64) uint64 {
-			return w(phpMkInt(int64(strings.Compare(phpRaw(rt.phpStr(u(a[0]))), phpRaw(rt.phpStr(u(a[1])))))))
+			s1 := rt.phpNatStr("strcmp", 1, "string1", u(a[0]))
+			return w(phpMkInt(int64(strings.Compare(phpRaw(s1), phpRaw(rt.phpNatStr("strcmp", 2, "string2", u(a[1])))))))
 		}
 		m["js_phord"] = func(a []uint64) uint64 {
-			s := phpRaw(rt.phpStr(u(a[0])))
+			s := phpRaw(rt.phpNatStr("ord", 1, "character", u(a[0])))
 			if s == "" {
 				return w(phpMkInt(0))
 			}
 			return w(phpMkInt(int64(s[0])))
 		}
 		m["js_phstrlen"] = func(a []uint64) uint64 {
-			return w(phpMkInt(int64(len(phpRaw(rt.phpStr(u(a[0])))))))
+			return w(phpMkInt(int64(len(phpRaw(rt.phpNatStr("strlen", 1, "string", u(a[0])))))))
 		}
 		// A string literal assembled from bytes, one per character (dqPiece in
 		// php-to-llvm-ir.abnf).
@@ -531,14 +581,19 @@ func init() {
 			return w(s)
 		}
 		m["js_phchr"] = func(a []uint64) uint64 {
-			b := rt.phpToLong(u(a[0])) % 256
+			b := rt.phpNatInt("chr", 1, "codepoint", u(a[0])) % 256
 			if b < 0 {
 				b += 256
 			}
 			return w(phpBytesText(string([]byte{byte(b)})))
 		}
 		m["js_phcase"] = func(a []uint64) uint64 {
-			return w(phpCase(rt.phpStr(u(a[0])), rt.truthy(u(a[1]))))
+			up := rt.truthy(u(a[1]))
+			fn := "strtolower"
+			if up {
+				fn = "strtoupper"
+			}
+			return w(phpCase(rt.phpNatStr(fn, 1, "string", u(a[0])), up))
 		}
 		m["js_phfmtfloat"] = func(a []uint64) uint64 {
 			x := phpNumOf(rt.phpToNum(u(a[0])))
@@ -668,15 +723,27 @@ func init() {
 			y := phpNumOf(rt.phpToNum(u(a[2])))
 			return w(phpMkFlo(phpMath(rt.phpStr(u(a[0])), x, y)))
 		}
+		// (key, array, op): op says the program's direct call, which PHP compiles
+		// to an opcode. Twin of phpKeyExists in php-interpreter.abnf.
 		m["js_phkeyexists"] = func(a []uint64) uint64 {
 			keys, _, ok := phpArrParts(u(a[1]))
 			if !ok {
 				rt.phpRaise("TypeError", "array_key_exists(): Argument #2 ($array) must be of type array, "+
 					rt.phpValueName(u(a[1]))+" given")
 			}
-			return w(rt.phpKeyIndex(keys, u(a[0])) >= 0)
+			k := u(a[0])
+			_, isStr := k.(string)
+			_, isBool := k.(bool)
+			if !isStr && !isBool && !isNullish(k) && !phpIsNum(k) {
+				if rt.truthy(u(a[2])) {
+					rt.phpRaise("TypeError", "Cannot access offset of type "+rt.phpDebugType(k)+" on array")
+				}
+				rt.phpRaise("TypeError", "array_key_exists(): Argument #1 ($key) must be a valid array offset type")
+			}
+			return w(rt.phpKeyIndex(keys, k) >= 0)
 		}
 		m["js_phkeylast"] = func(a []uint64) uint64 {
+			rt.phpNatArr("array_key_last", 1, "array", u(a[0]))
 			keys, _, ok := phpArrParts(u(a[0]))
 			if !ok || len(keys.elems) == 0 {
 				return w(jsNull)
@@ -735,6 +802,7 @@ func init() {
 		// array_pop: the last value, and PHP's next free key steps back when the
 		// popped key was the last one handed out.
 		m["js_phpop"] = func(a []uint64) uint64 {
+			rt.phpNatArr("array_pop", 1, "array", u(a[0]))
 			o, ok := phpAsArr(u(a[0]))
 			if !ok {
 				return w(jsNull)

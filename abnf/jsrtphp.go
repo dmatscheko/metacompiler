@@ -2311,6 +2311,19 @@ func (rt *jsrt) phpLen(v interface{}) float64 {
 // ----- casts -----------------------------------------------------------------
 
 func (rt *jsrt) phpCast(kind string, v interface{}) interface{} {
+	// An array casts to int or float as 1 when it has elements, else 0
+	// (zval_get_long_func, zval_get_double_func). Twin of phpCast in
+	// php-interpreter.abnf and phCast in lib/php-rt.metajs.
+	if keys, _, ok := phpArrParts(v); ok && (kind == "int" || kind == "integer" || kind == "float" || kind == "double" || kind == "real") {
+		n := float64(0)
+		if len(keys.elems) > 0 {
+			n = 1
+		}
+		if kind == "int" || kind == "integer" {
+			return phpMkInt(int64(n))
+		}
+		return phpMkFlo(n)
+	}
 	switch kind {
 	case "int", "integer":
 		// (int) of an out-of-range float WRAPS modulo 2^64 rather than saturating:
@@ -4775,11 +4788,11 @@ func init() {
 		m["js_phinc"] = func(a []uint64) uint64 { return w(rt.phpIncDec(u(a[0]), true)) }
 		m["js_phdec"] = func(a []uint64) uint64 { return w(rt.phpIncDec(u(a[0]), false)) }
 		m["js_phintdiv"] = func(a []uint64) uint64 {
-			y := rt.phpToLong(u(a[1]))
+			x := rt.phpNatInt("intdiv", 1, "num1", u(a[0]))
+			y := rt.phpNatInt("intdiv", 2, "num2", u(a[1]))
 			if y == 0 {
 				rt.phpRaise("DivisionByZeroError", "Division by zero")
 			}
-			x := rt.phpToLong(u(a[0]))
 			if y == -1 && x == phpIntMin {
 				rt.phpRaise("ArithmeticError", "Division of PHP_INT_MIN by -1 is not an integer")
 			}

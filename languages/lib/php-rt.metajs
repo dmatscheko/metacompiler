@@ -3020,8 +3020,16 @@ function phObjCast(v) {
 }
 
 function phCast(kind, v) {
-    if (kind == "int" || kind == "integer") { return phToLong(v) }
-    if (kind == "float" || kind == "double" || kind == "real") { return phMkFlo(phNumOf(phToNum(v))) }
+    // An array casts to int or float as 1 when it has elements, else 0. Twin of
+    // phpCast in abnf/jsrtphp.go.
+    if (kind == "int" || kind == "integer") {
+        if (phIsArr(v)) { return phArrParts(v).k.length > 0 ? 1 : 0 }
+        return phToLong(v)
+    }
+    if (kind == "float" || kind == "double" || kind == "real") {
+        if (phIsArr(v)) { return phMkFlo(phArrParts(v).k.length > 0 ? 1 : 0) }
+        return phMkFlo(phNumOf(phToNum(v)))
+    }
     if (kind == "string" || kind == "binary") { return phStr(v) }
     if (kind == "bool" || kind == "boolean") { return phTest(v) }
     if (kind == "array") {
@@ -3770,9 +3778,9 @@ function phIncDec(v, inc) {
 }
 
 function js_phintdiv(l, r) {
-    var y = phToLong(r)
+    var x = phToLong(phNatInt("intdiv", 1, "num1", l))
+    var y = phToLong(phNatInt("intdiv", 2, "num2", r))
     if (phIsZero(y)) { phRaise("DivisionByZeroError", "Division by zero") }
-    var x = phToLong(l)
     if (sintCmp(y, 0 - 1) == 0 && sintCmp(x, phIntMin()) == 0) {
         phRaise("ArithmeticError", "Division of PHP_INT_MIN by -1 is not an integer")
     }
@@ -4456,8 +4464,34 @@ function js_phvals(v) {
 
 function phInt(v) { return phNumOf(phToLong(v)) }
 
+// Argument n of internal function fn whose parameter pname declares string, int
+// or array, as a coercive-mode call reads it (zend_parse_arg_str_weak,
+// zend_parse_arg_long_weak): null reads as "" or 0, and a value it does not read
+// is the TypeError. Twins of phpNatStr / phpNatInt / phpNatArr in
+// php-interpreter.abnf.
+function phNatStr(fn, n, pname, v) {
+    if (typeof v == "string") { return v }
+    if (rtIsNil(v) || typeof v == "boolean" || phIsNum(v)) { return phStr(v) }
+    if (phIsObj(v) && typeof phMethodOf(v, "__toString") == "function") { return phStr(v) }
+    phRaise("TypeError", phsNatTypeMsg(fn, n, pname, "string", phValueName(v)))
+    return ""
+}
+function phNatInt(fn, n, pname, v) {
+    if (phIsInt(v)) { return v }
+    if (rtIsNil(v)) { return 0 }
+    var r = phWeakInt(v)
+    if (r === undefined) { phRaise("TypeError", phsNatTypeMsg(fn, n, pname, "int", phValueName(v))) }
+    return r
+}
+function phNatArr(fn, n, pname, v) {
+    if (!phIsArr(v)) { phRaise("TypeError", phsNatTypeMsg(fn, n, pname, "array", phValueName(v))) }
+}
+
 function js_phsubstr(s, start, len) {
-    return phsSubstr(phStr(s), phInt(start), phInt(len), !rtIsNil(len))
+    var str = phNatStr("substr", 1, "string", s)
+    var from = phInt(phNatInt("substr", 2, "offset", start))
+    if (rtIsNil(len)) { return phsSubstr(str, from, 0, false) }
+    return phsSubstr(str, from, phInt(phNatInt("substr", 3, "length", len)), true)
 }
 
 function phPosResult(name, at) {
@@ -4468,11 +4502,25 @@ function phPosResult(name, at) {
     return at
 }
 
-function js_phstrpos(h, needle, off) { return phPosResult("strpos", phsStrpos(phStr(h), phStr(needle), phInt(off))) }
-function js_phstrrpos(h, needle, off) { return phPosResult("strrpos", phsStrrpos(phStr(h), phStr(needle), phInt(off))) }
-function js_phstrcmp(a, b) { return phsStrcmp(phStr(a), phStr(b)) }
-function js_phord(s) { return phsOrd(phStr(s)) }
-function js_phstrlen(s) { return phsLen(phStr(s)) }
+// strpos / strrpos (name) of haystack h, needle n and offset off.
+function phStrposOf(name, h, needle, off) {
+    var hs = phNatStr(name, 1, "haystack", h)
+    var ns = phNatStr(name, 2, "needle", needle)
+    var o = phInt(phNatInt(name, 3, "offset", off))
+    if (name == "strpos") { return phPosResult(name, phsStrpos(hs, ns, o)) }
+    return phPosResult(name, phsStrrpos(hs, ns, o))
+}
+function js_phstrpos(h, needle, off) { return phStrposOf("strpos", h, needle, off) }
+function js_phstrrpos(h, needle, off) { return phStrposOf("strrpos", h, needle, off) }
+function js_phstrcmp(a, b) {
+    var sa = phNatStr("strcmp", 1, "string1", a)
+    return phsStrcmp(sa, phNatStr("strcmp", 2, "string2", b))
+}
+function js_phord(s) { return phsOrd(phNatStr("ord", 1, "character", s)) }
+function js_phstrlen(s) {
+    if (typeof s == "string") { return phsLen(s) }
+    return phsLen(phNatStr("strlen", 1, "string", s))
+}
 // A string literal assembled from bytes (dqPiece in php-to-llvm-ir.abnf).
 function js_phfrombytes(s) { return phsFromBytes(s) }
 // $s[$k] = $v on a string: the string with the one byte replaced.
@@ -4483,8 +4531,11 @@ function js_phsetoffset(s, k, v) {
     if (r === null) { fail("cannot write to a negative string offset") }
     return r
 }
-function js_phchr(n) { return phsChr(phInt(n)) }
-function js_phcase(s, up) { return phsCase(phStr(s), up === true) }
+function js_phchr(n) { return phsChr(phInt(phNatInt("chr", 1, "codepoint", n))) }
+function js_phcase(s, up) {
+    if (typeof s == "string") { return phsCase(s, up === true) }
+    return phsCase(phNatStr(up === true ? "strtoupper" : "strtolower", 1, "string", s), up === true)
+}
 
 // sprintf's float conversions of |x|: "f" and "e" exact (php-strings.js), "g"
 // the zend_gcvt renderer echo uses, at the requested precision, "r" the same
@@ -4538,17 +4589,23 @@ function js_phpregx(key, s, pos) {
 
 function js_phmath(op, x, y) { return phMkFlo(phsMath(phStr(op), phNumOf(phToNum(x)), phNumOf(phToNum(y)))) }
 
-function js_phkeyexists(k, a) {
+// (key, array, op): op says the program's direct call, which PHP compiles to an
+// opcode. Twin of phpKeyExists in php-interpreter.abnf.
+function js_phkeyexists(k, a, op) {
     var p = phArrParts(a)
     if (p === undefined) {
         phRaise("TypeError", "array_key_exists(): Argument #2 ($array) must be of type array, " + phValueName(a) + " given")
+    }
+    if (!(typeof k == "string" || typeof k == "boolean" || rtIsNil(k) || phIsNum(k))) {
+        if (op === true) { phRaise("TypeError", "Cannot access offset of type " + phDebugType(k) + " on array") }
+        phRaise("TypeError", "array_key_exists(): Argument #1 ($key) must be a valid array offset type")
     }
     return phFind(a, p, phNormKey(k)) >= 0
 }
 
 function js_phkeylast(a) {
     var p = phArrParts(a)
-    if (p === undefined) { return null }
+    if (p === undefined) { phNatArr("array_key_last", 1, "array", a) }
     if (p.k.length == 0) { return null }
     return p.k[p.k.length - 1]
 }
@@ -4556,7 +4613,10 @@ function js_phkeylast(a) {
 // array_pop: the last value, and PHP's next free key steps back when the popped
 // key was the last one handed out.
 function js_phpop(a) {
-    if (!phIsDict(a)) { return null }
+    if (!phIsDict(a)) {
+        phNatArr("array_pop", 1, "array", a)
+        return null
+    }
     var keys = a["keys"]
     var vals = a["vals"]
     if (keys.length == 0) { return null }

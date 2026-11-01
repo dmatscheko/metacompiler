@@ -979,7 +979,9 @@ function s76() {
 // on line <l> and exactly|at least <r> expected" - the file and line the CALLER's,
 // <f> "Class::m" for a method (the class it is declared in), "exactly" when every
 // non-variadic parameter is required. A call an internal function makes (a
-// callback) names no site: "<n> passed and exactly <r> expected". A named argument
+// callback) names no site: "<n> passed and exactly <r> expected"; a direct
+// call_user_func is compiled into its caller (zend_compile_func_cuf), so the call
+// it makes names the caller's. A named argument
 // that skips a required parameter raises "<f>(): Argument #<i> ($<p>) not passed"
 // (zend_handle_undef_args) instead, for an internal function too. A library
 // method counts like an internal function (SplStack::push is
@@ -1025,12 +1027,12 @@ function s77() {
         && substr($cm, strlen($cm) - strlen($tail)) === $tail);
     $n = [];
     try { array_map('s77two', [1]); } catch (ArgumentCountError $e) { $n[] = $e->getMessage(); }
-    try { call_user_func('s77one'); } catch (ArgumentCountError $e) { $n[] = $e->getMessage(); }
+    try { call_user_func('s77one'); } catch (ArgumentCountError $e) { $n[] = s77t($e, __LINE__); }
     try { s77two(b: 1); } catch (ArgumentCountError $e) { $n[] = $e->getMessage(); }
     try { s77two(a: 1); } catch (ArgumentCountError $e) { $n[] = s77t($e, __LINE__); }
     try { s77opt(x: 1); } catch (ArgumentCountError $e) { $n[] = s77t($e, __LINE__); }
     check("tfa3", $n === ["Too few arguments to function s77two(), 1 passed and exactly 2 expected",
-        "Too few arguments to function s77one(), 0 passed and exactly 1 expected",
+        "Too few arguments to function s77one(), 0 passed in F on line L and exactly 1 expected",
         "s77two(): Argument #1 (\$a) not passed",
         "Too few arguments to function s77two(), 1 passed in F on line L and exactly 2 expected",
         "Too few arguments to function s77opt(), 0 passed in F on line L and at least 1 expected"]);
@@ -2000,6 +2002,80 @@ function s92() {
         && s92keys($d) === "|*|message,|Exception|string,|*|code,|*|file,|*|line,|Exception|trace,|Exception|previous,extra");
 }
 
+// ===== SECTION 93: internal-function argument types; frameless builtins =====
+// An internal function reads each argument against its declared type in coercive
+// mode (zend_parse_arg_str_weak, zend_parse_arg_long_weak): scalars convert, an
+// object with __toString reads as string, and anything else is the TypeError
+// "<f>(): Argument #<n> ($<p>) must be of type <t>, <given> given" with the
+// parameter names of ext/standard/basic_functions.stub.php. A direct two-argument
+// array_key_exists compiles to ZEND_ARRAY_KEY_EXISTS, whose bad key is "Cannot
+// access offset of type <t> on array"; called by name it is the argument error.
+// call_user_func, call_user_func_array and the one-argument strval / intval /
+// floatval / boolval compile to opcodes (zend_try_compile_special_func), so the
+// trace shows no frame for them. (int) and (float) of an array are 1 when it is
+// non-empty, else 0. A call through an undefined function name reports its own
+// line, and a foreach header reports the line of its expression's last token.
+class S93Str { function __toString(): string { return "abc"; } }
+class S93Bad { function __toString(): string { throw new Exception("ts"); } }
+function s93m($f) {
+    try { $f(); return "none"; } catch (Throwable $e) { return get_class($e) . ": " . $e->getMessage(); }
+}
+function s93id($x = 0) { return $x; }
+function s93thrower($x = 0) { throw new Exception("t"); }
+function s93gen($l) { yield 1; throw new Exception("g" . $l); }
+function s93top($e) { $t = $e->getTrace(); return $t[0]["function"] . "@" . ($t[0]["line"] ?? "-") . " " . $t[1]["function"]; }
+function s93() {
+    $te = "TypeError: ";
+    check("zpp1", s93m(fn() => strlen([])) === $te . "strlen(): Argument #1 (\$string) must be of type string, array given"
+        && s93m(fn() => strlen(new stdClass)) === $te . "strlen(): Argument #1 (\$string) must be of type string, stdClass given");
+    check("zpp2", s93m(fn() => substr("abc", "x")) === $te . "substr(): Argument #2 (\$offset) must be of type int, string given"
+        && s93m(fn() => strpos("a", [])) === $te . "strpos(): Argument #2 (\$needle) must be of type string, array given"
+        && s93m(fn() => strrpos([], "a")) === $te . "strrpos(): Argument #1 (\$haystack) must be of type string, array given"
+        && s93m(fn() => strcmp("a", [])) === $te . "strcmp(): Argument #2 (\$string2) must be of type string, array given"
+        && s93m(fn() => ord([])) === $te . "ord(): Argument #1 (\$character) must be of type string, array given"
+        && s93m(fn() => chr("x")) === $te . "chr(): Argument #1 (\$codepoint) must be of type int, string given"
+        && s93m(fn() => strtoupper([])) === $te . "strtoupper(): Argument #1 (\$string) must be of type string, array given"
+        && s93m(fn() => intdiv([], 0)) === $te . "intdiv(): Argument #1 (\$num1) must be of type int, array given");
+    $s = "x";
+    check("zpp3", s93m(fn() => array_key_last("x")) === $te . "array_key_last(): Argument #1 (\$array) must be of type array, string given"
+        && s93m(function () use ($s) { return array_pop($s); }) === $te . "array_pop(): Argument #1 (\$array) must be of type array, string given"
+        && s93m(function () use ($s) { return array_push($s, 1); }) === $te . "array_push(): Argument #1 (\$array) must be of type array, string given");
+    check("zpp4", strlen(12) === 2 && strlen(1.5) === 3 && strlen(true) === 1 && strlen(new S93Str) === 3
+        && substr("abcdef", "2") === "cdef" && chr("65") === "A" && intdiv("7", 2) === 3 && strtolower(new S93Str) === "abc");
+    $ake = "array_key_exists";
+    check("zpp5", s93m(fn() => array_key_exists([], [])) === $te . "Cannot access offset of type array on array"
+        && s93m(fn() => array_key_exists(new stdClass, [])) === $te . "Cannot access offset of type stdClass on array"
+        && s93m(fn() => $ake([], [])) === $te . "array_key_exists(): Argument #1 (\$key) must be a valid array offset type"
+        && s93m(fn() => array_key_exists(1, 5)) === $te . "array_key_exists(): Argument #2 (\$array) must be of type array, int given"
+        && array_key_exists("1", [1 => 0]) && $ake(null, ["" => 1]));
+    check("cast1", (int)[] === 0 && (int)[1, 2] === 1 && (float)[] === 0.0 && (float)[3] === 1.0 && intval([1]) === 1 && floatval([]) === 0.0);
+    $u = "s93nofn";
+    $l = 0;
+    try { s93id(1);
+        $l = __LINE__; $u(); } catch (Error $e) { $l = $e->getLine() - $l; }
+    check("dyn1", $l === 0);
+    $f = [];
+    try { call_user_func('s93thrower'); } catch (Exception $e) { $f[] = s93top($e) === "s93thrower@" . __LINE__ . " s93"; }
+    try { call_user_func_array('s93thrower', [1]); } catch (Exception $e) { $f[] = s93top($e) === "s93thrower@" . __LINE__ . " s93"; }
+    try { strval(new S93Bad); } catch (Exception $e) { $f[] = s93top($e) === "__toString@" . __LINE__ . " s93"; }
+    try { strlen(new S93Bad); } catch (Exception $e) { $f[] = s93top($e) === "__toString@" . __LINE__ . " s93"; }
+    check("fr1", $f === [true, true, true, true]);
+    check("fr2", s93m(fn() => call_user_func_array('s93id', 5)) === $te . "call_user_func_array(): Argument #2 (\$args) must be of type array, int given"
+        && call_user_func('s93id', 4) === 4 && call_user_func_array('s93id', ['x' => 5]) === 5);
+    $g = [];
+    try {
+        foreach (
+            s93gen(__LINE__)
+            as $v) { }
+    } catch (Exception $e) { $g[] = "g" . $e->getTrace()[0]["line"] === $e->getMessage(); }
+    try {
+        foreach (s93gen(
+            __LINE__
+        ) as $v) { }
+    } catch (Exception $e) { $g[] = "g" . $e->getTrace()[0]["line"] === $e->getMessage(); }
+    check("fe1", $g === [true, true]);
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -2037,6 +2113,7 @@ function main() {
     s90(); // SECTION-CALL 90
     s91(); // SECTION-CALL 91
     s92(); // SECTION-CALL 92
+    s93(); // SECTION-CALL 93
     echo "full: " . $checks . " checks, " . $failures . " failures\n";
     return $failures;
 }

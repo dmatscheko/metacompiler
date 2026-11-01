@@ -538,8 +538,12 @@ ForPost     <~~ push({k: "post", t: exprToStmt(seqExprs(takeAll()))}) ~~> = Expr
 
 // foreach ($arr as $v) / foreach ($arr as $k => $v)
 ForEach     <~~ loopLeave(); push(makeForeach(takeAll(), up.start)) ~~>
-            = KwForeach <~~ loopEnter() ~~> "(" Expression KwAs ForeachVars ")" ( AltForeachBody | Body ) ;
+            = KwForeach <~~ loopEnter() ~~> "(" FeIter KwAs ForeachVars ")" ( AltForeachBody | Body ) ;
 AltForeachBody = ":" AltBody KwEndforeach Semi ;
+// The iterated expression, and the line its compilation ends on (phsTailBreaks),
+// where the loop's ZEND_FE_RESET and ZEND_FE_FETCH stand. Twin of FeIter in
+// php-interpreter.abnf.
+FeIter      <~~ push({feLine: c.lineOf(up.start) + phsTailBreaks(c.srcSlice(up.start, up.pos))}) ~~> = Expression ;
 // 'as [$k, $v]' destructures each element; the pattern is the same one list()/[] uses
 // in an assignment, so both spellings bind identically.
 ForeachVars = DestructPat | ForeachKV ;
@@ -3534,10 +3538,14 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         // An object is iterated over the properties visible from the class scope
         // the loop is in (js_phfeobj), whose getIterator runs as called from the
         // loop. Twin of makeForeach in php-interpreter.abnf.
-        var site = callSite(start)
         var srcT = items[0]
         var refT = false
-        for (var ri = 1; ri < items.length; ri++) { if (items[ri].feref != undefined) { refT = true } }
+        var feLine = 0
+        for (var ri = 1; ri < items.length; ri++) {
+            if (items[ri].feref != undefined) { refT = true }
+            if (items[ri].feLine != undefined) { feLine = items[ri].feLine }
+        }
+        var site = start == undefined ? 0 : callSiteLine(feLine)
         var iterT = function(b) {
             // 'as &$v' writes into a source that is only an expression here.
             if (refT) { curWrites["*"] = true }
@@ -4520,7 +4528,10 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                     cur = rg.v
                 } else if (s.kind == "call") {
                     // $f(...): the value made callable, its method resolved here.
+                    // The callee is resolved at the call's own site
+                    // (ZEND_INIT_DYNAMIC_CALL), which a name naming nothing reports.
                     if (hasFcc(s.args)) {
+                        siteStore(b, site)
                         var rcf = callableV(b, cur, false, false)
                         b = rcf.b
                         cur = fccFresh(b, rcf.v)
@@ -4528,6 +4539,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                     }
                     // $f(1, ?) : a partial over whatever the chain has produced.
                     if (hasPlace(s.args)) {
+                        siteStore(b, site)
                         var rcv0 = callableV(b, cur, false, false)
                         var rpv = emitPartialFor(rcv0.b, rcv0.v, "", "call", "\x00pfafn", s.args, null)
                         b = rpv.b
@@ -4540,14 +4552,17 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                     if (plain2 && hasVarArg(s.args)) {
                         // The callee is resolved first, so a variable argument can be
                         // handed over as a reference where its parameter takes one.
+                        siteStore(b, site)
                         rc2 = callableV(b, cur, false, false)
                         ea2 = emitDynRefArgs(rc2.b, s.args, rc2.v)
                         b = ea2.b
                     } else if (plain2) {
                         ea2 = emitPhArgs(b, s.args, null)
+                        siteStore(ea2.b, site)
                         rc2 = callableV(ea2.b, cur, false, false)
                         b = rc2.b
                     } else {
+                        siteStore(b, site)
                         rc2 = callableV(b, cur, false, false)
                         ea2 = emitArgTmp(rc2.b, s.args, {dyn: true, fV: rc2.v})
                         b = ea2.b
@@ -4555,21 +4570,9 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                     if (plain2 && s.lib === true) { b = emitLibDyn(b, cur, ea2.v, s.args.length) }
                     ea2 = {b: b, v: dynPlaceArgs(b, rc2.v, ea2.v, plain2)}
                     siteStore(b, site)
-                    if (magicInvoke) {
-                        // An INSTANCE used as a callable runs its __invoke method.
-                        var invB = curF.NewBlock("")
-                        var fnB = curF.NewBlock("")
-                        var endI = curF.NewBlock("")
-                        b.NewCondBr(emitIsObj(b, rc2.v), invB, fnB)
-                        var iv = callExt(invB, "js_phmcall", [rc2.v, emitStr(invB, "__invoke"), ea2.v])
-                        invB.NewBr(endI)
-                        var fv = callExt(fnB, "js_call", [rc2.v, hUndef, ea2.v])
-                        fnB.NewBr(endI)
-                        b = endI
-                        cur = endI.NewPhi([llvm.ir.NewIncoming(iv, invB), llvm.ir.NewIncoming(fv, fnB)])
-                    } else {
-                        cur = callExt(b, "js_call", [rc2.v, hUndef, ea2.v])
-                    }
+                    var rvc = emitValueCall(b, rc2.v, ea2.v)
+                    b = rvc.b
+                    cur = rvc.v
                 } else if (s.kind == "static") {
                     var curV = cur
                     var rs = emitStaticAccessV(function(bb) { return {b: bb, v: staticBaseV(bb, curV)} },
@@ -5393,6 +5396,20 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     function placedArg(rec) {
         dynPlaceNamed = true
         return rec
+    }
+    // The call of fV, a value php_callable made callable, with the placed argument
+    // list argsV: an INSTANCE used as a callable runs its __invoke method.
+    function emitValueCall(b, fV, argsV) {
+        if (!magicInvoke) { return {b: b, v: callExt(b, "js_call", [fV, hUndef, argsV])} }
+        var invB = curF.NewBlock("")
+        var fnB = curF.NewBlock("")
+        var endI = curF.NewBlock("")
+        b.NewCondBr(emitIsObj(b, fV), invB, fnB)
+        var iv = callExt(invB, "js_phmcall", [fV, emitStr(invB, "__invoke"), argsV])
+        invB.NewBr(endI)
+        var fv = callExt(fnB, "js_call", [fV, hUndef, argsV])
+        fnB.NewBr(endI)
+        return {b: endI, v: endI.NewPhi([llvm.ir.NewIncoming(iv, invB), llvm.ir.NewIncoming(fv, fnB)])}
     }
     // The argument list of a call through a value, placed for the callee fV: argsV is
     // the runtime list of a plain call, else the PHP array emitArgTmp collected.
@@ -7335,10 +7352,47 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     }
     function phpNativeArgc(ext) {
         if (ext == "js_phsubstr" || ext == "js_phstrpos" || ext == "js_phstrrpos" || ext == "js_phfmtfloat" ||
-            ext == "js_phmath" || ext == "js_phpregx") { return 3 }
-        if (ext == "js_phkeyexists" || ext == "js_phstrcmp" || ext == "js_phaptr" || ext == "js_phrefid") { return 2 }
+            ext == "js_phmath" || ext == "js_phpregx" || ext == "js_phkeyexists") { return 3 }
+        if (ext == "js_phstrcmp" || ext == "js_phaptr" || ext == "js_phrefid") { return 2 }
         if (ext == "js_phbindwhy" || ext == "js_phcountrecs") { return 0 }
         return 1
+    }
+    // The cast a one-argument call of name compiles to (zend_compile_func_cast),
+    // "" for none. Twin of phpOpCast in php-interpreter.abnf.
+    function phpOpCast(name) {
+        if (name == "strval") { return "string" }
+        if (name == "intval") { return "int" }
+        if (name == "floatval" || name == "doubleval") { return "float" }
+        if (name == "boolval") { return "bool" }
+        return ""
+    }
+    // call_user_func(f, ...) / call_user_func_array(f, $args) as PHP compiles them
+    // (ZEND_INIT_USER_CALL, ZEND_SEND_USER, ZEND_SEND_ARRAY): the callback args[0]
+    // resolves (callerCallable), then this frame calls it with the arguments after
+    // it, or with those the array spreads. raw is cufRaw. Twin of cufArgs in
+    // php-interpreter.abnf.
+    function emitCufOp(b, name, args, raw, site) {
+        var rf = args[0].pos(b)
+        b = rf.b
+        var argsV = anytype
+        if (name == "call_user_func") {
+            var ea = emitPhArgs(b, args.slice(1), null)
+            b = ea.b
+            siteStore(b, site)
+            if (raw != null) { b = emitLibDyn(b, raw.v, ea.v, args.length - 1) }
+            argsV = dynPlaceArgs(b, rf.v, ea.v, true)
+        } else {
+            var ra = args[1].pos(b)
+            siteStore(ra.b, site)
+            b = emitArrArg(ra.b, "call_user_func_array(): Argument #2 ($args)", ra.v)
+            var arrV = ra.v
+            if (raw != null) { arrV = b.NewCall(libDynArrFn(), [curScopeV, raw.v, arrV]) }
+            var et = emitArgTmp(b, [{aspread: function(bb) { return {b: bb, v: arrV} }}], {dyn: true, fV: rf.v})
+            b = et.b
+            argsV = dynPlaceArgs(b, rf.v, et.v, false)
+        }
+        siteStore(b, site)
+        return emitValueCall(b, rf.v, argsV)
     }
     // Is a call of native name with n arguments one PHP compiles to an opcode of the
     // calling frame (zend_try_compile_special_func), so that no frame of its own
@@ -7372,11 +7426,28 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         var vs = []
         for (var i = 0; i < args.length; i++) { var r = args[i].pos(b); b = r.b; vs.push(r.v) }
         siteStore(b, site)
-        if (site == 0 || name.substring(0, 5) == "__mec" || natInline(name, vs.length)) { return emitBuiltinOp(b, name, vs) }
+        if (site == 0 || name.substring(0, 5) == "__mec" || natInline(name, vs.length)) {
+            // The program's array_key_exists is its opcode, whose TypeError for an
+            // invalid key differs (js_phkeyexists' third argument).
+            if (site != 0 && name == "array_key_exists") { vs.push(hTrue) }
+            return emitBuiltinOp(b, name, vs)
+        }
         var nr = emitRecPush(b, frameDesc({name: name, nat: vs.length, lib: true}, name + "/" + vs.length), handle(site), vs)
         var res = emitBuiltinOp(b, name, vs)
         res.b.NewStore(nr.prev, topGlobal())
         return res
+    }
+    // The TypeError of a parameter declaring array (head: "f(): Argument #n
+    // ($name)") for a value v that is no array; answers the block that goes on.
+    function emitArrArg(b, head, v) {
+        var okB = curF.NewBlock("")
+        var badB = curF.NewBlock("")
+        b.NewCondBr(truthy(b, callExt(b, "js_phis", [emitStr(b, "array"), v])), okB, badB)
+        var gotV = callExt(badB, "js_phcat", [callExt(badB, "js_phvname", [v]), emitStr(badB, " given")])
+        callExt(badB, "js_phraise", [emitStr(badB, "TypeError"),
+            callExt(badB, "js_phcat", [emitStr(badB, head + " must be of type array, "), gotV])])
+        badB.NewBr(okB) // never taken: js_phraise throws
+        return okB
     }
     function emitBuiltinOp(b, name, vs) {
         // strlen counts BYTES (PHP strings are byte strings), count() counts elements.
@@ -7386,17 +7457,12 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         if (name == "count" && vs.length > 1) { return {b: b, v: callExt(b, "js_phcountm", [vs[0], vs[1]])} }
         if (name == "count") { return {b: b, v: callExt(b, "js_phcount", [vs[0]])} }
         if (name == "array_push") {
-            for (var pv = 1; pv < vs.length; pv++) { callExt(b, "js_phpush", [vs[0], vs[pv]]) }
-            return {b: b, v: callExt(b, "js_phlen", [vs[0]])}
+            var pushB = emitArrArg(b, "array_push(): Argument #1 ($array)", vs[0])
+            for (var pv = 1; pv < vs.length; pv++) { callExt(pushB, "js_phpush", [vs[0], vs[pv]]) }
+            return {b: pushB, v: callExt(pushB, "js_phlen", [vs[0]])}
         }
         if (name == "array_values") {
-            var okB = curF.NewBlock("")
-            var badB = curF.NewBlock("")
-            b.NewCondBr(truthy(b, callExt(b, "js_phis", [emitStr(b, "array"), vs[0]])), okB, badB)
-            var gotV = callExt(badB, "js_phcat", [callExt(badB, "js_phvname", [vs[0]]), emitStr(badB, " given")])
-            callExt(badB, "js_phraise", [emitStr(badB, "TypeError"),
-                callExt(badB, "js_phcat", [emitStr(badB, "array_values(): Argument #1 ($array) must be of type array, "), gotV])])
-            badB.NewBr(okB) // never taken: js_phraise throws
+            var okB = emitArrArg(b, "array_values(): Argument #1 ($array)", vs[0])
             return {b: okB, v: callExt(okB, "js_phvals", [vs[0]])}
         }
         // abs goes through PHP's own coercion so a float argument stays a float.
@@ -7521,10 +7587,12 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     // call_user_func's callback is resolved where it is HANDED over: PHP resolves a
     // relative callable ('parent::m', ['self', 'm']) in the class scope of the
     // caller, which the library function's own frame does not have. Twin of
-    // callerCallable in php-interpreter.abnf.
-    function callerCallable(a, name, raw) {
+    // callerCallable in php-interpreter.abnf. The check raises at the call's own
+    // site, as the library's callback checks below do.
+    function callerCallable(a, name, raw, site) {
         return {pos: function(b) {
             var r = a.pos(b)
+            siteStore(r.b, site)
             if (raw != null) { raw.v = r.v }
             var where = emitStr(r.b, name + "(): Argument #1 ($callback) must be a valid callback")
             return callableV(r.b, cbCheckV(r.b, r.v, where, true, false), true, false)
@@ -7591,9 +7659,10 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     // first, and it is the last argument. One at a fixed position is judged once
     // every argument is, after the array $array before it (libChecks on the
     // argument list). Twin of libArgs in php-interpreter.abnf.
-    function libCallable(a, where) {
+    function libCallable(a, where, site) {
         return {pos: function(b) {
             var r = a.pos(b)
+            siteStore(r.b, site)
             return callableV(r.b, cbCheckV(r.b, r.v, emitStr(r.b, where), true, false), true, false)
         }}
     }
@@ -7713,17 +7782,17 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                 var posB = f.NewBlock("")
                 var namedB = f.NewBlock("")
                 var atK = emitNum(hitB, cb.at)
-                hitB.NewCondBr(truthy(hitB, callExt(hitB, "js_phkeyexists", [atK, cpV])), posB, namedB)
+                hitB.NewCondBr(truthy(hitB, callExt(hitB, "js_phkeyexists", [atK, cpV, hNull])), posB, namedB)
                 var zK = emitNum(posB, 0)
                 libChecks(posB, cpV, cb.n, cb, cb.at, {a0: zK, at: atK, where: emitStr(posB, libCbWhere(cb.n, cb, cb.at))}).NewBr(doneB)
                 var byNameB = f.NewBlock("")
                 var cbK = emitStr(namedB, "callback")
-                namedB.NewCondBr(truthy(namedB, callExt(namedB, "js_phkeyexists", [cbK, cpV])), byNameB, doneB)
-                var hasZ = truthy(byNameB, callExt(byNameB, "js_phkeyexists", [emitNum(byNameB, 0), cpV]))
+                namedB.NewCondBr(truthy(namedB, callExt(namedB, "js_phkeyexists", [cbK, cpV, hNull])), byNameB, doneB)
+                var hasZ = truthy(byNameB, callExt(byNameB, "js_phkeyexists", [emitNum(byNameB, 0), cpV, hNull]))
                 var a0K = byNameB.NewSelect(hasZ, emitNum(byNameB, 0), emitStr(byNameB, "array"))
                 var chkB = f.NewBlock("")
                 if (cb.arr > 0) {
-                    byNameB.NewCondBr(truthy(byNameB, callExt(byNameB, "js_phkeyexists", [a0K, cpV])), chkB, doneB)
+                    byNameB.NewCondBr(truthy(byNameB, callExt(byNameB, "js_phkeyexists", [a0K, cpV, hNull])), chkB, doneB)
                 } else { byNameB.NewBr(chkB) }
                 libChecks(chkB, cpV, cb.n, cb, cb.at, {a0: a0K, at: cbK, where: emitStr(chkB, libCbWhere(cb.n, cb, cb.at))}).NewBr(doneB)
                 continue
@@ -7826,6 +7895,22 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         // which COUNT_RECURSIVE needs to see it reached again. Twin of makeCall in
         // php-interpreter.abnf.
         if (name == "sizeof") { name = "count" }
+        // The program's direct strval / intval / floatval / doubleval / boolval of
+        // one argument is a cast, and its call_user_func / call_user_func_array a
+        // call of the callback made from this frame (zend_try_compile_special_func),
+        // so no frame of the library's is in progress. Twin of makeCall in
+        // php-interpreter.abnf.
+        var opCast = site != 0 && args.length == 1 && argsArePlain(args) ? phpOpCast(name) : ""
+        if (opCast != "") {
+            var castArg = args[0]
+            return makeCast([{cast: opCast}, function(b) {
+                var rc = castArg.pos(b)
+                siteStore(rc.b, site)
+                return rc
+            }])
+        }
+        var cufOp = site != 0 && argsArePlain(args)
+            && ((name == "call_user_func" && args.length > 0) || (name == "call_user_func_array" && args.length == 2))
         var cbAt = libCbArg["$" + phsCase(bare, false)]
         if (phpLibDynCall(phsCase(bare, false), cbAt == undefined ? 1000 : cbAt.at, args, "aname", "aspread")) { phpLibAll() }
         // call_user_func of a library function that takes a callback: that callback
@@ -7838,8 +7923,9 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             if (name == "call_user_func_array" && args.length == 2 && argsArePlain(args) && libDynSite()) {
                 cufRaw = {v: hUndef, arr: true}
             }
-            args[0] = callerCallable(args[0], name, cufRaw)
+            args[0] = callerCallable(args[0], name, cufRaw, site)
         }
+        if (cufOp) { return function(b) { return emitCufOp(b, name, args, cufRaw, site) } }
         if (name == "is_callable" && args.length > 0 && args[0].pos != undefined && args[0].aname == undefined) {
             nsUsed = true
             return makeIsCallable(args[0])
@@ -7851,7 +7937,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         if (libCb != null && libCb.at < 0 && args.length > libN && argsArePlain(args)) {
             nsUsed = true
             for (var lk = args.length - libN; lk < args.length; lk++) {
-                args[lk] = libCallable(args[lk], libCbWhere(lcName, libCb, lk))
+                args[lk] = libCallable(args[lk], libCbWhere(lcName, libCb, lk), site)
             }
         } else if (libCb != null && libCb.at >= 0
                    && ((args.length > libCb.at && argsArePlain(args.slice(0, libCb.at + 1))) || libNamedCb(args, libCb))) {
@@ -7903,7 +7989,10 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             var fV = anyCase ? fk.v : callExt(b, "js_scope_get", [curScopeV, emitStr(b, name)])
             var ea = emitPhArgs(b, args, sigOf(name))
             b = ea.b
-            if (libFixed) { b = libChecks(b, ea.v, lcName, libCb, libCb.at) }
+            if (libFixed) {
+                siteStore(b, site)
+                b = libChecks(b, ea.v, lcName, libCb, libCb.at)
+            }
             if (cufRaw != null && cufRaw.arr === true) {
                 var cufaV = b.NewCall(libDynArrFn(), [curScopeV, cufRaw.v, callExt(b, "js_get", [ea.v, emitNum(b, 1)])])
                 callExt(b, "js_set", [ea.v, emitNum(b, 1), cufaV])
@@ -7940,11 +8029,15 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     var siteF = null
     function callSite(pos) {
         if (pos == undefined || phpLibDepth > 0) { return 0 }
+        return callSiteLine(c.lineOf(pos))
+    }
+    function callSiteLine(line) {
+        if (phpLibDepth > 0) { return 0 }
         var f = c.curFileAbs()
         var k = 0
         while (k < siteFiles.length && siteFiles[k] != f) { k = k + 1 }
         if (k == siteFiles.length) { siteFiles.push(f) }
-        return (k + 1) * 16777216 + c.lineOf(pos)
+        return (k + 1) * 16777216 + line
     }
     function siteGlobal() {
         if (siteG == null) { siteG = m.NewGlobalDef("php.site", llvm.constant.NewInt(i64, 0)) }

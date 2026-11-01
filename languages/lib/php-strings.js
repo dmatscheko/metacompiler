@@ -758,6 +758,24 @@ function phsMissArgMsg(name, passed, req, exact, where) {
         + " and " + (exact ? "exactly" : "at least") + " " + req + " expected"
 }
 function phsCallSite(file, line) { return " in " + file + " on line " + line }
+// The line breaks in src, an expression's text, before its last operand: its
+// last character that is no white space, comma or closing bracket. The
+// expression's compilation ends on that line (zend_compile_expr_inner sets the
+// line of each node it compiles), which the opcodes after it then stand on.
+function phsTailBreaks(src) {
+    var i = src.length - 1
+    while (i > 0 && " \t\r\n,)]}".indexOf(src.charAt(i)) >= 0) { i = i - 1 }
+    var n = 0
+    for (var j = 0; j < i; j++) { if (src.charCodeAt(j) == 10) { n = n + 1 } }
+    return n
+}
+// The TypeError text of argument n (1-based) of internal function name, whose
+// parameter pname (without its '$') declares typ, given a value
+// zend_zval_value_name calls given (zend_wrong_parameter_type_error). Twin of
+// phpNatTypeMsg in abnf/jsrtphpstr.go.
+function phsNatTypeMsg(name, n, pname, typ, given) {
+    return name + "(): Argument #" + n + " ($" + pname + ") must be of type " + typ + ", " + given + " given"
+}
 // A named-argument call that leaves required parameter n (1-based, pname with its
 // '$') unfilled before a later one it fills (zend_handle_undef_args).
 function phsNotPassedMsg(name, n, pname) { return name + "(): Argument #" + n + " (" + pname + ") not passed" }

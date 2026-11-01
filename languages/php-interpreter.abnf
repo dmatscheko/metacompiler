@@ -513,8 +513,11 @@ ForPost     <~~ push({k: "post", t: exprToStmt(seqExprs(takeAll()))}) ~~> = Expr
 
 // foreach ($arr as $v) / foreach ($arr as $k => $v)
 ForEach     <~~ loopLeave(); push(makeForeach(takeAll(), up.start)) ~~>
-            = KwForeach <~~ loopEnter() ~~> "(" Expression KwAs ForeachVars ")" ( AltForeachBody | Body ) ;
+            = KwForeach <~~ loopEnter() ~~> "(" FeIter KwAs ForeachVars ")" ( AltForeachBody | Body ) ;
 AltForeachBody = ":" AltBody KwEndforeach Semi ;
+// The iterated expression, and the line its compilation ends on (phsTailBreaks),
+// where the loop's ZEND_FE_RESET and ZEND_FE_FETCH stand.
+FeIter      <~~ push({feLine: c.lineOf(up.start) + phsTailBreaks(c.srcSlice(up.start, up.pos))}) ~~> = Expression ;
 ForeachVars = DestructPat | ForeachKV ;
 ForeachKV   = ForeachV1 [ "=>" ForeachV2 ] ;
 // The bound slot is any assignable TARGET, not just a variable: PHP writes into
@@ -1702,8 +1705,11 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // Twin of callSite in php-to-llvm-ir.abnf.
     function callSite(pos) {
         if (pos == undefined || phpLibDepth > 0) { return "" }
+        return callSiteLine(c.lineOf(pos))
+    }
+    function callSiteLine(line) {
+        if (phpLibDepth > 0) { return "" }
         var file = c.curFileAbs()
-        var line = c.lineOf(pos)
         var t = phsCallSite(file, line)
         siteParts[t] = {file: file, line: line}
         return t
@@ -3068,12 +3074,14 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         var pat = null
         var byrefs = []
         var body = null
+        var feLine = 0
         for (var i = 1; i < items.length; i++) {
             if (items[i].body != undefined) { body = items[i].body }
             else if (items[i].pat != undefined) { pat = items[i].pat }
             else if (items[i].byref != undefined) { byrefs.push(true) }
             else if (items[i].v1 != undefined) { keyRefs.push(items[i].v1) }
             else if (items[i].v2 != undefined) { keyRefs.push(items[i].v2) }
+            else if (items[i].feLine != undefined) { feLine = items[i].feLine }
         }
         // One slot is the VALUE; two make the first the key and the second the value.
         // A '=>' whose value side is a pattern leaves exactly one slot AND a pattern.
@@ -3082,8 +3090,9 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         else if (keyRefs.length > 1) { keyRef = keyRefs[0]; valRef = keyRefs[1] }
         var byref = byrefs.length > 0
         // A generator's body, and an iterator's methods, run as called from the loop
-        // (ZEND_FE_RESET, ZEND_FE_FETCH). Twin of feStep in php-to-llvm-ir.abnf.
-        var site = callSite(start)
+        // (ZEND_FE_RESET, ZEND_FE_FETCH), on the line of FeIter. Twin of feStep in
+        // php-to-llvm-ir.abnf.
+        var site = start == undefined ? "" : callSiteLine(feLine)
         return function() {
             var it = anytype
             it = iterT()
@@ -6887,6 +6896,13 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         if (isCloStatic(cn, mn, null)) { return cloStaticFn(mn) }
         return boundStatic(resolveClassName(cn), mn, cn, false, isArr(cur) ? CB_ARR : (internal ? CB_INT : CB_STR))
     }
+    // Are the call's arguments all positional, with no unpacking?
+    function phpArgsPlain(args) {
+        for (var i = 0; i < args.length; i++) {
+            if (args[i] == null || args[i].argval === undefined || args[i].argname !== undefined) { return false }
+        }
+        return true
+    }
     function makeCall(items, start) {
         var name = phpLibRef(items[0], true)
         // A name written in another letter case: a builtin or library function is
@@ -6927,12 +6943,8 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         // A native given a count it refuses, or arguments that may be named, is
         // called as its library declaration (nativeRefuses), compiled here.
         if (hasOwn(phpBuiltins, name) && !fccLib) {
-            var plain = true
-            for (var pa = 0; pa < args.length; pa++) {
-                if (args[pa] == null || args[pa].argval === undefined || args[pa].argname !== undefined) { plain = false }
-            }
             if (phpLib == null) { phpLib = phpLibIndex(load("lib/php-stdlib.php")) }
-            if (!plain || phpLibArityBad(phpLib, name, args.length)) { phpLibLoad(phpLibKey(phpLib, name)) }
+            if (!phpArgsPlain(args) || phpLibArityBad(phpLib, name, args.length)) { phpLibLoad(phpLibKey(phpLib, name)) }
         }
         var resolveCb = name == "call_user_func" || name == "call_user_func_array"
         var libCb = hasOwn(libCbArg, "$" + phsCase(name, false))
@@ -6948,8 +6960,23 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         var natFn = anytype
         natFn = site != "" && hasOwn(phpBuiltins, name) && name.substring(0, 5) != "__mec" && !natInline(name, args.length)
             ? {name: name, params: []} : null
+        // The program's direct call of array_key_exists is its opcode, whose
+        // TypeError for an invalid key differs (phpKeyExists). Twin of emitBuiltin
+        // in php-to-llvm-ir.abnf.
+        if (name == "array_key_exists" && site != "" && natInline(name, args.length) && phpArgsPlain(args)) {
+            name = "__mec_keyexists"
+        }
+        // The program's direct strval / intval / floatval / doubleval / boolval of
+        // one argument is a cast, and its call_user_func / call_user_func_array a
+        // call of the callback made from this frame (zend_try_compile_special_func),
+        // so no frame of the library's is in progress. Twin of makeCall in
+        // php-to-llvm-ir.abnf.
+        var opCast = site != "" && args.length == 1 && phpArgsPlain(args) ? phpOpCast(name) : ""
+        var cufOp = site != "" && phpArgsPlain(args)
+            && ((name == "call_user_func" && args.length > 0) || (name == "call_user_func_array" && args.length == 2))
         return function() {
             var argset = evalArgs(args, site, kept && varExists(fk) ? calleeParams(getVar(fk)) : null)
+            if (opCast != "") { return phpCast(opCast, argset.pos[0]) }
             if (resolveCb && argset.pos.length > 0) {
                 argset.pos[0] = callerCallable(argset.pos[0], name)
                 // call_user_func of a library function that takes a callback: that
@@ -6965,6 +6992,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                     argset.pos[1] = cufaLib(argset.pos[0], argset.pos[1])
                 }
             }
+            if (cufOp) { return phpInvoke(argset.pos[0], cufArgs(name, argset, site)) }
             if (libCb) { libArgs(name, argset) }
             // f(1, ?) / f(1, ...) is a PARTIAL: bind what is there, wait for the rest.
             if (isPartial(argset)) {
@@ -6996,6 +7024,32 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             if (countSite != null) { countSite([]) }
             return cn
         }
+    }
+    // The cast a one-argument call of name compiles to (zend_compile_func_cast),
+    // "" for none. Twin of phpOpCast in php-to-llvm-ir.abnf.
+    function phpOpCast(name) {
+        if (name == "strval") { return "string" }
+        if (name == "intval") { return "int" }
+        if (name == "floatval" || name == "doubleval") { return "float" }
+        if (name == "boolval") { return "bool" }
+        return ""
+    }
+    // The arguments call_user_func (name) hands its callback, the ones after it,
+    // or those call_user_func_array spreads out of its array (ZEND_SEND_USER,
+    // ZEND_SEND_ARRAY), as a call standing at site has them.
+    function cufArgs(name, argset, site) {
+        if (name == "call_user_func") {
+            var inner = argsOf(argset.pos.slice(1))
+            inner.site = site
+            phpSite = site
+            return inner
+        }
+        var arr = anytype
+        arr = argset.pos[1]
+        if (!isArr(arr)) {
+            phpRaise("TypeError", "call_user_func_array(): Argument #2 ($args) must be of type array, " + phpValueName(arr) + " given")
+        }
+        return evalArgs([{argspread: function() { return arr }}], site, null)
     }
     // Is a call of native name with n arguments one PHP compiles to an opcode of the
     // calling frame (zend_try_compile_special_func), so that no frame of its own
@@ -7951,8 +8005,9 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     var phpBuiltins = {
         "count": function(a, mode) { return phpCount(a, mode) },
         // PHP strings are byte strings: strlen("\u{2764}") is 3, not 1.
-        "strlen": function(s) { return phsLen(phpStr(s)) },
+        "strlen": function(s) { return phsLen(typeof s == "string" ? s : phpNatStr("strlen", 1, "string", s)) },
         "array_push": function(a) {
+            phpNatArr("array_push", 1, "array", a)
             for (var i = 1; i < arguments.length; i++) { arrPush(a, arguments[i]) }
             return a.keys.length
         },
@@ -7974,15 +8029,21 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         // lib/php-strings.js, shared with layer 2; the Go twins are in
         // abnf/jsrtphpstr.go.
         "substr": function(s, start, len) {
-            return phsSubstr(phpStr(s), phpInt(start), phpInt(len), len !== null && len !== undefined)
+            var str = phpNatStr("substr", 1, "string", s)
+            var from = phpInt(phpNatInt("substr", 2, "offset", start))
+            var has = len !== null && len !== undefined
+            return phsSubstr(str, from, has ? phpInt(phpNatInt("substr", 3, "length", len)) : 0, has)
         },
-        "strpos": function(h, n, off) { return phpPosResult("strpos", phsStrpos(phpStr(h), phpStr(n), phpInt(off))) },
-        "strrpos": function(h, n, off) { return phpPosResult("strrpos", phsStrrpos(phpStr(h), phpStr(n), phpInt(off))) },
-        "strcmp": function(a, b) { return phsStrcmp(phpStr(a), phpStr(b)) },
-        "ord": function(s) { return phsOrd(phpStr(s)) },
-        "chr": function(n) { return phsChr(phpInt(n)) },
-        "strtolower": function(s) { return phsCase(phpStr(s), false) },
-        "strtoupper": function(s) { return phsCase(phpStr(s), true) },
+        "strpos": function(h, n, off) { return phpStrposOf("strpos", h, n, off) },
+        "strrpos": function(h, n, off) { return phpStrposOf("strrpos", h, n, off) },
+        "strcmp": function(a, b) {
+            var sa = phpNatStr("strcmp", 1, "string1", a)
+            return phsStrcmp(sa, phpNatStr("strcmp", 2, "string2", b))
+        },
+        "ord": function(s) { return phsOrd(phpNatStr("ord", 1, "character", s)) },
+        "chr": function(n) { return phsChr(phpInt(phpNatInt("chr", 1, "codepoint", n))) },
+        "strtolower": function(s) { return phsCase(phpNatStr("strtolower", 1, "string", s), false) },
+        "strtoupper": function(s) { return phsCase(phpNatStr("strtoupper", 1, "string", s), true) },
         // sprintf's float conversions of |x|: "f" and "e" exact, "g" the zend_gcvt
         // renderer echo uses, at the requested precision, and "r" the same layout of
         // the shortest digits (serialize_precision=-1).
@@ -8055,12 +8116,8 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             var r = phpPregExec(phpStr(key), phpStr(s), phpInt(pos))
             return typeof r == "number" ? r : arrOf(r)
         },
-        "array_key_exists": function(k, a) {
-            if (!isArr(a)) {
-                phpRaise("TypeError", "array_key_exists(): Argument #2 ($array) must be of type array, " + phpValueName(a) + " given")
-            }
-            return arrHas(a, k)
-        },
+        "array_key_exists": function(k, a) { return phpKeyExists(k, a, false) },
+        "__mec_keyexists": function(k, a) { return phpKeyExists(k, a, true) },
         // The internal array pointer behind current/key/next/prev/reset/end: a
         // position in the array's order, kept in a hidden __pos (absent = 0), where a
         // position at or past the end is PHP's invalid pointer. op moves it, then
@@ -8080,11 +8137,15 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             if (o == "key") { return p < n ? a.keys[p] : null }
             return p < n ? deref(a.vals[p]) : false
         },
-        "array_key_last": function(a) { return isArr(a) && a.keys.length > 0 ? a.keys[a.keys.length - 1] : null },
+        "array_key_last": function(a) {
+            phpNatArr("array_key_last", 1, "array", a)
+            return a.keys.length > 0 ? a.keys[a.keys.length - 1] : null
+        },
         // array_pop: the last value, and PHP's next free key steps back when the
         // popped key was the last one handed out.
         "array_pop": function(a) {
-            if (!isArr(a) || a.keys.length == 0) { return null }
+            phpNatArr("array_pop", 1, "array", a)
+            if (a.keys.length == 0) { return null }
             var k = a.keys.pop()
             var v = deref(a.vals.pop())
             a.__idx = null
@@ -8096,9 +8157,9 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         // where 7 / 2 is float(3.5). It is also the one place a 64 bit quotient can
         // fail to exist, since PHP_INT_MIN / -1 has no int result.
         "intdiv": function(a, b) {
-            var pb = toLongP(b)
+            var pa = toLongP(phpNatInt("intdiv", 1, "num1", a))
+            var pb = toLongP(phpNatInt("intdiv", 2, "num2", b))
             if (i64IsZero(pb)) { phpRaise("DivisionByZeroError", "Division by zero") }
-            var pa = toLongP(a)
             if (i64Eq(pb, I64_NEG1) && i64Eq(pa, I64_MIN_P)) {
                 phpRaise("ArithmeticError", "Division of PHP_INT_MIN by -1 is not an integer")
             }
@@ -8165,6 +8226,27 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         }
     }
     function phpInt(v) { return trunc(numOf(toNumV(v))) }
+    // Argument n of internal function fn whose parameter pname declares string,
+    // int or array, as a coercive-mode call reads it (zend_parse_arg_str_weak,
+    // zend_parse_arg_long_weak): null reads as "" or 0 (deprecated since 8.1), and
+    // a value it does not read is the TypeError. Twins of phNatStr / phNatInt /
+    // phNatArr in lib/php-rt.metajs and phpNatStr / phpNatInt / phpNatArr in
+    // abnf/jsrtphpstr.go.
+    function phpNatStr(fn, n, pname, v) {
+        if (typeof v == "string") { return v }
+        if (v === null || v === undefined || isNum(v) || typeof v == "boolean"
+            || (isObj(v) && classFind(v.__class, "__tostring") != null)) { return phpStr(v) }
+        phpRaise("TypeError", phsNatTypeMsg(fn, n, pname, "string", phpValueName(v)))
+    }
+    function phpNatInt(fn, n, pname, v) {
+        var r = anytype
+        r = v === null || v === undefined ? 0 : phpWeakInt(v)
+        if (r == null) { phpRaise("TypeError", phsNatTypeMsg(fn, n, pname, "int", phpValueName(v))) }
+        return r
+    }
+    function phpNatArr(fn, n, pname, v) {
+        if (!isArr(v)) { phpRaise("TypeError", phsNatTypeMsg(fn, n, pname, "array", phpValueName(v))) }
+    }
     // get_class(): the class of an object, a closure or a generator; anything else
     // is a TypeError. Twin of js_phgetclass in lib/php-rt.metajs and
     // abnf/jsrtphp.go.
@@ -8187,6 +8269,27 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         }
         if (at < 0) { return false }
         return at
+    }
+    // strpos / strrpos (name) of haystack h, needle n and offset off.
+    function phpStrposOf(name, h, n, off) {
+        var hs = phpNatStr(name, 1, "haystack", h)
+        var ns = phpNatStr(name, 2, "needle", n)
+        var o = phpInt(phpNatInt(name, 3, "offset", off))
+        return phpPosResult(name, name == "strpos" ? phsStrpos(hs, ns, o) : phsStrrpos(hs, ns, o))
+    }
+    // array_key_exists(k, a): a key no array offset takes is the TypeError of the
+    // opcode a direct call compiles to (op: zend_array_key_exists_fast), else of
+    // the function (PHP_FUNCTION(array_key_exists)). Twin of js_phkeyexists in
+    // lib/php-rt.metajs and abnf/jsrtphpstr.go.
+    function phpKeyExists(k, a, op) {
+        if (!isArr(a)) {
+            phpRaise("TypeError", "array_key_exists(): Argument #2 ($array) must be of type array, " + phpValueName(a) + " given")
+        }
+        if (!(typeof k == "string" || isNum(k) || typeof k == "boolean" || k === null || k === undefined)) {
+            phpRaise("TypeError", op ? "Cannot access offset of type " + phpDebugType(k) + " on array"
+                : "array_key_exists(): Argument #1 ($key) must be a valid array offset type")
+        }
+        return arrHas(a, k)
     }
     // class_exists() / interface_exists(): the name denotes, in any letter case, a
     // class (not an interface or a trait) / an interface, the engine's own
@@ -9190,8 +9293,13 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         // (int) of an out-of-range float WRAPS modulo 2^64 rather than saturating:
         // (int)(PHP_INT_MAX * 2 + 4) is int(0). Corpus: tests/int_overflow_64bit.phpt
         // and tests/int_underflow_64bit.phpt.
-        if (kind == "int" || kind == "integer") { return toLong(v) }
-        if (kind == "float" || kind == "double" || kind == "real") { return mkFlo(numOf(toNumV(v))) }
+        // An array casts to int or float as 1 when it has elements, else 0
+        // (zval_get_long_func, zval_get_double_func). Twin of phpCast in
+        // abnf/jsrtphp.go and phCast in lib/php-rt.metajs.
+        if (kind == "int" || kind == "integer") { return isArr(v) ? (v.keys.length > 0 ? 1 : 0) : toLong(v) }
+        if (kind == "float" || kind == "double" || kind == "real") {
+            return mkFlo(isArr(v) ? (v.keys.length > 0 ? 1 : 0) : numOf(toNumV(v)))
+        }
         if (kind == "string" || kind == "binary") { return phpStr(v) }
         if (kind == "bool" || kind == "boolean") { return phptest(v) }
         if (kind == "array") {
