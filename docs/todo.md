@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-965** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-966** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -109,57 +109,12 @@ same for Integer/Array); default `inspect` omits instance variables (`#<Pt>` vs 
 
 # JS — JavaScript and TypeScript
 
-### T-911 ts/js: `Error(…)`, `TypeError(…)`, `Date()` without `new` throw "Class constructor … cannot be invoked without 'new'" · P1 · JS · IN PROGRESS (JS worker, round 36) [V]
-`try { throw Error(m) } catch (e) { println(e.name, e.message, e instanceof Error) }` → node `Error boom true`; all legs
-`TypeError Class constructor Error cannot be invoked without 'new' true`. Same for TypeError, RangeError, SyntaxError,
-AggregateError; `typeof Date()` → node `string`, all legs an uncaught TypeError. Inverse cases: `Map()` / `Set()` / `WeakMap()`
-throw with the wrong text (node "Constructor Map requires 'new'"), and `Promise(() => 1)` returns a promise where node throws
-"Promise constructor cannot be invoked without 'new'". Not a regression (before the class-call check these said "Error is not a
-function"). `throw Error("x")` is common JS. Files: the class-call-without-new check (js_jscallerr / jsvClassCallErr in
-abnf/jsrtjsprint.go, its twin in lib/js-rt.metajs, the call arm of both interpreters) - builtins that are callable must bypass
-it, each with its own call semantics.
-
-### T-912 ts/js compiled: a data property on a nearer prototype does not shadow a farther inherited accessor · P1 · JS · IN PROGRESS (JS worker, round 36) [V]
-Neighbour of T-783 (fixed in the interpreter). `proto = { get acc() { return "lit" } }; mid = Object.create(proto);
-Object.defineProperty(mid, "acc", { value: "mid" }); Object.create(mid).acc` → node and interp `mid`; run `mid`, native `lit`.
-After an extra own key on mid: run `mid2`, native `lit`. `class A { get acc() {…} } class B extends A {}`;
-`Object.defineProperty(B.prototype, "acc", { value: "mid3" }); new B().acc` → node/interp `mid3`, run and native `A`. Files: the
-accessor-holder walk on read (jsvAccHolder in abnf/jsrt*.go must stop at the nearest level that has the key), its twin in
-lib/js-rt.metajs.
-
-### T-913 ts/js llvm.Run: an invalid length through `Object.defineProperty` is an uncatchable host error · P1 · JS · IN PROGRESS (JS worker, round 36) [V]
-Incomplete part of T-777. `try { Object.defineProperty([], "length", { value: 1.5 }) } catch (e) { println(e.name, e.message) }`
-→ node, interp, native `RangeError Invalid array length`; run exits 1 with `js runtime error: invalid array length 1.5` (value -1
-the same). `a.length = 1.5` and `a["length"] = …` are right everywhere. Files: defineProperty on an array's length in the Go twin
-(abnf/jsrt*.go: an rt.fail where a RangeError must be thrown).
-
-### T-914 ts/js: `replaceAll` with a non-global RegExp does not throw · P2 · JS · IN PROGRESS (JS worker, round 36) [V]
-Neighbour of T-786. `"a".replaceAll(/a/, "b")` inside try/catch → node `TypeError String.prototype.replaceAll called with a
-non-global RegExp argument`; all legs nothing. Files: replaceAll in abnf/jsrt.go, lib/js-rt.metajs, both interpreters.
-
-### T-915 ts/js: smaller leftovers - toStringTag of Symbol/BigInt, class-decorator context, Annex-B `\u{…}`, `\p{L}` · P3 · JS · IN PROGRESS (JS worker, round 36) [V finder only]
-`Object.prototype.toString.call(Symbol("q"))` / `.call(1n)` → node `[object Symbol]` / `[object BigInt]`, all legs
-`[object Object]`. A class decorator's context reports `static=false private=false`; tsc 6 + node `undefined undefined`.
-`/\u{61}/` without the u flag throws "invalid unicode escape" in all legs; node accepts it (Annex B: `u` 61 times).
-`/\p{L}/u.test("é")` → node true, all legs false.
-
-### T-937 ts: an arrow with an untyped parameter and a return annotation `(x): T =>` does not parse · P2 · JS · IN PROGRESS (JS worker, round 36) [V]
-`keep(vals, (x): boolean => x >= lim)` → tsc 6 + node `big=4,5`; both halves fail at the `:`. `const g = (x): boolean => …` and
-type predicates `(x): x is number =>` the same; `(x: number): boolean =>` works. Corpus:
-contextuallyTypedFunctionExpressionsAndReturnAnnotations, thisTypeInTypePredicate, intraExpressionInferences.
-
-### T-938 ts compiler: parses 90 fewer must-parse corpus files than the interpreter · P2 · JS · IN PROGRESS (JS worker, round 36) [V]
-5197 vs 5287 of 5527; 79 of the compiler-only failures are tsc-clean. Repro (verified):
-`type Ret<T> = T extends () => infer R ? R : never;` → interp and tsc fine, compiler fails at 1:26. Finder's clusters (~60 files): a
-function type in a conditional `extends`; `infer X extends C`; `typeof import("m")`; `using` / `await using` in for heads (~14);
-`export default class {}` (decoratedDefaultExports*, decoratorOnClass4/8); `export {} from './0' with {…}`; a tagged template after
-`new`; a raw NUL in a string.
-
-### T-939 js: halves disagree on line terminators, NUL in strings, parenthesised update targets · P2 · JS · IN PROGRESS (JS worker, round 36) [V finder only]
-Compiler only (node and interp accept): U+2028 / U+2029 / CR ending a statement; a raw NUL inside a string literal; `(o.n)++`,
-`(a)++`, `(a)--` (pass/0fa2102f53acd283, 5b8fad162f489b3b, 6498dcc494193cb4, c7e5fba8bf3854cd). Interpreter only: `([1].a) = v`
-(pass/687f678cde900411, parsed in the August sweep - lost), and early/2b4520facdc72696 `--0`, early/8b659d2805837e98 `++0` now
-refused by the interpreter only (a halves divergence; see T-210 for the declined twin).
+### T-965 ts/js: `\p{…}` property escapes under the u flag; decorator `context.metadata`; `[1].a++` in the js compiler · P3 · JS · OPEN [V]
+Left from T-915 and found by the JS worker, round 36 (oracle node 24 / tsc 6). `/\p{L}/u.test("é")` → node true; ours does not
+support property escapes (the tables exist behind java-regex.js's jxPropCls knob; JS needs its own knob with ECMAScript's
+property-name grammar and the Go-twin wiring). A class decorator's context lacks `metadata` (node/tsc give an object). `[1].a++`
+(postfix update on a non-name, non-parenthesised base) does not parse in the js compiler (a perf trade documented at IncDec;
+re-measure with a guard like ParenUpdAhead).
 
 # JV — Java
 
@@ -1227,6 +1182,14 @@ T-933 bash compiled: a computed `eval` silently does nothing; its assignment for
 T-934 bash: backslash removal inside backtick command substitution — DONE 999a7dd4
 T-936 bash: an `eval` / `trap` string that does not parse aborts the program; `${ cmd;}` — DONE 452ff4b5
 T-935 bash: declaration builtins refuse a computed or quoted operand and `+attr` — DONE 33691db2 (computed operands, +attr and declare -- in both engines; the compiler refuses a computed operand together with readonly or an attribute option at compile time, since attributes are compile-time there; also fixed set -u breaking every function call)
+T-911 ts/js: `Error(…)`, `TypeError(…)`, `Date()` without `new` throw "Class constructor … cannot be invoked without 'new'" — DONE bb0b453d
+T-912 ts/js compiled: a data property on a nearer prototype does not shadow a farther inherited accessor — DONE bb0b453d
+T-913 ts/js llvm.Run: an invalid length through `Object.defineProperty` is an uncatchable host error — DONE bb0b453d
+T-914 ts/js: `replaceAll` with a non-global RegExp does not throw — DONE bb0b453d
+T-937 ts: an arrow with an untyped parameter and a return annotation `(x): T =>` does not parse — DONE bb0b453d
+T-938 ts compiler: parses 90 fewer must-parse corpus files than the interpreter — DONE bb0b453d
+T-939 js: halves disagree on line terminators, NUL in strings, parenthesised update targets — DONE bb0b453d
+T-915 ts/js: smaller leftovers - toStringTag of Symbol/BigInt, class-decorator context, Annex-B `\u{…}`, `\p{L}` — PARTIAL bb0b453d (Symbol/BigInt toStringTag, class-decorator context keys, Annex-B incomplete \x \u; \p{} is T-965)
 
 # Settled — do not re-open
 
