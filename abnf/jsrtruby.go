@@ -448,7 +448,8 @@ func (rt *jsrt) addRubyFmtExterns(m map[string]func(args []uint64) uint64) {
 		}
 		return m["js_rattrset"](a[:4])
 	}
-	// for VARS in COLL: js_rforit opens the loop, js_rfornext answers the next
+	// for VARS in COLL: js_rforit opens the loop (an Enumerator runs over its #to_a,
+	// see rubyForEnumVal), js_rfornext answers the next
 	// element or undefined when the loop is done, js_rforend closes it (from the
 	// loop's ensure). A Hash yields its live entries as [key, value] pairs inside
 	// an iteration over it (rubyHashIter's count), so an insertion in the body
@@ -459,6 +460,11 @@ func (rt *jsrt) addRubyFmtExterns(m map[string]func(args []uint64) uint64) {
 	m["js_rforit"] = func(a []uint64) uint64 {
 		c := u(a[0])
 		it := newJSObject()
+		it.set("v", c)
+		if rubyIsEnum(c) {
+			it.set("v", rubyForEnumVal(c.(*jsObject)))
+			c = rt.rubyMethod(c, "to_a", nil)
+		}
 		it.set("c", c)
 		it.set("i", float64(0))
 		if d, isObj := c.(*jsObject); isObj {
@@ -502,6 +508,11 @@ func (rt *jsrt) addRubyFmtExterns(m map[string]func(args []uint64) uint64) {
 		}
 		it.set("i", float64(i+1))
 		return m["js_pyget"]([]uint64{w(c), w(float64(i))})
+	}
+	// js_rforval: the loop's value when it runs to its end - COLL, or for an
+	// Enumerator rubyForEnumVal's answer.
+	m["js_rforval"] = func(a []uint64) uint64 {
+		return w(u(a[0]).(*jsObject).props["v"])
 	}
 	m["js_rforend"] = func(a []uint64) uint64 {
 		it := u(a[0]).(*jsObject)
@@ -1835,6 +1846,23 @@ func (rt *jsrt) rubyStopIter(name string, t *jsObject) {
 // rubyObjCmp is Object#<=> on a user object whose class defines no <=>: is it
 // 0 (else nil)? Twin of objCmp in ruby-interpreter.abnf, which states the rule,
 // and rbObjCmp in lib/ruby-rt.metajs.
+// rubyForEnumVal: what `for` over an Enumerator answers. Twin of forEnumVal in
+// ruby-interpreter.abnf, which states the rule, and rbForEnumVal in
+// languages/lib/ruby-rt.metajs.
+func rubyForEnumVal(e *jsObject) interface{} {
+	m, isStr := e.props["meth"].(string)
+	if !isStr {
+		return e
+	}
+	if m == "each_slice" || m == "each_cons" {
+		return jsNull
+	}
+	if !strings.HasPrefix(m, "each") || (m == "each" && e.props["__rdefer"] == true) {
+		return e
+	}
+	return e.props["src"]
+}
+
 func (rt *jsrt) rubyObjCmp(l, r interface{}) bool {
 	if rubyIdenticalP(l, r) {
 		return true

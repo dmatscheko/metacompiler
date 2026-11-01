@@ -3107,7 +3107,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     }
 
     // for VARS in COLL ... end. The loop variables are {ftgt} multiple-assignment
-    // targets (see ForVarList); the value of the loop is COLL, as Array#each answers
+    // targets (see ForVarList); the value of the loop is COLL (an Enumerator: see
+    // forEnumVal), as Array#each answers
     // its receiver, or the value of the `break` that ended it.
     function forTargets(items) {
         var ts = []
@@ -3129,16 +3130,34 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             coll = collT()
             if (isDict(coll)) { return forInHash(coll, tgts, whole, body) }
             var seq = []
+            var val = anytype
+            val = coll
             if (Array.isArray(coll)) { seq = coll }
             else if (isRange(coll)) { seq = rangeToA(coll) }
+            else if (isEnum(coll)) {
+                val = forEnumVal(coll)
+                seq = mcall(coll, "to_a", [], null)
+            }
             else { fail("for-in needs an array or a hash") }
             for (var i = 0; i < seq.length; i++) {
                 var st = forStep(tgts, whole, body, seq[i])
                 if (st.sig != undefined) { return st.sig }
                 if (st.stop) { return st.v }
             }
-            return coll
+            return val
         }
+    }
+    // `for` over an Enumerator runs over its elements (#to_a). The loop answers what
+    // the Enumerator's #each would: nil after each_slice / each_cons, the receiver
+    // after the other each* methods (a user #each answers its own value, so that one
+    // and every other Enumerator answer the Enumerator). Twins: js_rforit in
+    // abnf/jsrtruby.go and lib/ruby-rt.metajs.
+    function forEnumVal(e) {
+        var m = e.meth
+        if (typeof m != "string") { return e }
+        if (m == "each_slice" || m == "each_cons") { return null }
+        if (m.indexOf("each") != 0 || (m == "each" && e.__rdefer === true)) { return e }
+        return e.src
     }
     // One pass of a for body with el bound to the loop variables.
     function forStep(tgts, whole, body, el) {

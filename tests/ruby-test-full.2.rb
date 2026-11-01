@@ -1785,6 +1785,24 @@ def s162
   check("cmp162b", (Object.new <=> 1).nil? && (S162Q.new <=> 1) == 0 && (S162R.new <=> 1) == 0 && (S162R.new <= 1) == true &&
         [S162X.new].max.class == S162X)
 end
+
+# ===== SECTION 163: for over an Enumerator =====
+# `for' over an Enumerator runs over its elements, and answers what the
+# Enumerator's #each does: nil after each_slice / each_cons, the receiver after
+# the other each* methods; a break still answers its value. /usr/bin/ruby 2.6
+# settles each.
+def s163
+  r = []
+  v = for x in [1, 2, 3].each_slice(2); r << x; end
+  w = []
+  u = for a, i in [5, 6].each_with_index; w << [a, i]; end
+  check("for163a", r == [[1, 2], [3]] && v.nil? && w == [[5, 0], [6, 1]] && u == [5, 6])
+  c = []
+  t = for x in (1..4).each_cons(3); c << x; end
+  s = for x in "ab".each_char; c << x; end
+  b = for x in [1, 2].each_slice(1); break 7; end
+  check("for163b", c == [[1, 2, 3], [2, 3, 4], "a", "b"] && t.nil? && s == "ab" && b == 7)
+end
 s122() # SECTION-CALL 122
 s123() # SECTION-CALL 123
 s124() # SECTION-CALL 124
@@ -1826,5 +1844,6 @@ s159() # SECTION-CALL 159
 s160() # SECTION-CALL 160
 s161() # SECTION-CALL 161
 s162() # SECTION-CALL 162
+s163() # SECTION-CALL 163
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

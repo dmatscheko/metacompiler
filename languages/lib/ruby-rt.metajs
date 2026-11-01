@@ -10190,7 +10190,13 @@ function js_rattrw(o, k, v, sk, mk) {
 // for VARS in COLL: open, step and close the loop. Twin of js_rforit in
 // abnf/jsrtruby.go, which states the rule.
 function js_rforit(c) {
-    var it = {c: c, i: 0, h: false, ks: false, k: null, lev: 0, n: 0}
+    var v = anytype
+    v = c
+    if (rbIsEnum(c)) {
+        v = rbForEnumVal(c)
+        c = rbMethod(c, "to_a", [])
+    }
+    var it = {c: c, i: 0, h: false, ks: false, k: null, lev: 0, n: 0, v: v}
     if (rbIsDict(c)) {
         var lev = c["__iter"]
         if (lev === undefined) { lev = 0 }
@@ -10222,6 +10228,18 @@ function js_rfornext(it) {
     if (i >= it["n"]) { return undefined }
     it["i"] = i + 1
     return js_pyget(c, i)
+}
+// The loop's value when it runs to its end. Twin of js_rforval in
+// abnf/jsrtruby.go.
+function js_rforval(it) { return it["v"] }
+// What `for` over an Enumerator answers. Twin of rubyForEnumVal in
+// abnf/jsrtruby.go and forEnumVal in ruby-interpreter.abnf, which states the rule.
+function rbForEnumVal(e) {
+    var m = e["meth"]
+    if (typeof m != "string") { return e }
+    if (m == "each_slice" || m == "each_cons") { return null }
+    if (m.indexOf("each") != 0 || (m == "each" && e["__rdefer"] === true)) { return e }
+    return e["src"]
 }
 function js_rforend(it) {
     if (it["h"]) { it["c"]["__iter"] = it["lev"] }

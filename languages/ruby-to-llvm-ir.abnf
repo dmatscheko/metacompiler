@@ -4049,7 +4049,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // for VARS in COLL ... end, lowered as a counted loop over the collection. The
     // loop variables are {ftgt} multiple-assignment targets (see ForVarList), written
     // with the ordinary assignment rule: `for` opens no scope, so they outlive the loop.
-    // Its value is COLL, or the value of the `break` that ended it (a bare break: nil).
+    // Its value is js_rforval's (COLL, or for an Enumerator what its #each answers),
+    // or the value of the `break` that ended it (a bare break: nil).
     // Twin of makeForIn in ruby-interpreter.abnf.
     function forTargets(items) {
         var ts = []
@@ -4076,7 +4077,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             var itName = "$forit" + hidCount
             var valName = "$forv" + hidCount
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, itName), callExt(b, "js_rforit", [rc.v])])
-            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, valName), rc.v])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, valName),
+                callExt(b, "js_rforval", [callExt(b, "js_scope_get", [curScopeV, emitStr(b, itName)])])])
             var loopT = function(lb) {
                 var headB = curF.NewBlock("")
                 var bodyB = curF.NewBlock("")
