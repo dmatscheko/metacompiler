@@ -2257,6 +2257,20 @@ HasStatic   = :script(~~
     rxPropCls = function (st, name, at) { return jxPropCls(st, name, at) }
     rxGraphNext = function (text, i, limit) { return jxGraphNext(text, i, limit) }
 
+    // System.err is written a line at a time (the hosts have eprintln only), so
+    // text after its last newline waits for the next write. Twin of js_jveprint /
+    // js_jvewrite in abnf/jsrtjava.go and lib/java-rt.metajs.
+    var jErrPend = ""
+    function jErrWrite(s) {
+        var t = jErrPend + s
+        var k = t.indexOf("\n")
+        while (k >= 0) {
+            eprintln(t.substring(0, k))
+            t = t.substring(k + 1, t.length)
+            k = t.indexOf("\n")
+        }
+        jErrPend = t
+    }
     function jArgList(args) {
         var out = []
         for (var i = 0; i < args.length; i++) { out.push(args[i]) }
@@ -2272,6 +2286,13 @@ HasStatic   = :script(~~
             printf: function() { print(jOutText(jStrStatic("format", jArgList(arguments)))) },
             format: function() { print(jOutText(jStrStatic("format", jArgList(arguments)))) },
             // Every write above reaches the output at once, so there is nothing to flush.
+            flush: function() {}
+        },
+        err: {
+            println: function(x) { jErrWrite((arguments.length == 0 ? "" : jOutText(jstr(x))) + "\n") },
+            print: function(x) { jErrWrite(jOutText(jstr(x))) },
+            printf: function() { jErrWrite(jOutText(jStrStatic("format", jArgList(arguments)))) },
+            format: function() { jErrWrite(jOutText(jStrStatic("format", jArgList(arguments)))) },
             flush: function() {}
         },
         exit: function(code) { exit(code | 0) },

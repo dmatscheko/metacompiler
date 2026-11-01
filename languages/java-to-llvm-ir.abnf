@@ -6316,6 +6316,47 @@ HasStatic   = :script(~~
         }
     }
 
+    // A PrintStream object: println / print / printf / format / flush. println
+    // and print are NOT the shared host functions, which hand the raw runtime
+    // value to Go's %v. Each is a one-line closure over the stream's line and
+    // write externs (js_jvprint / js_jvwrite for System.out, js_jveprint /
+    // js_jvewrite for System.err), which render the way java does - see
+    // abnf/jsrtjava.go. The whole ARGUMENT ARRAY is passed, so the no-argument
+    // println() stays distinguishable from println(null). Twin of System.out
+    // and System.err in java-interpreter.abnf.
+    function jvStream(b, lineExt, writeExt) {
+        var objV = callExt(b, "js_obj_new", [])
+        var lineF = emitFunc([], function(bb) {
+            callExt(bb, lineExt, [curF.Params[1]])
+            bb.NewRet(hUndef)
+            return deadBlock()
+        }, false, null)
+        var writeF = emitFunc([], function(bb) {
+            callExt(bb, writeExt, [curF.Params[1]])
+            bb.NewRet(hUndef)
+            return deadBlock()
+        }, false, null)
+        // printf / format: String.format's text, written as print writes.
+        var printfF = emitFunc([], function(bb) {
+            var one = callExt(bb, "js_arr_new", [])
+            callExt(bb, "js_arr_push", [one, callExt(bb, "js_jvstrstatic", [emitStr(bb, "format"), curF.Params[1]])])
+            callExt(bb, writeExt, [one])
+            bb.NewRet(hUndef)
+            return deadBlock()
+        }, false, null)
+        // flush(): every write reaches the output at once.
+        var flushF = emitFunc([], function(bb) {
+            bb.NewRet(hUndef)
+            return deadBlock()
+        }, false, null)
+        callExt(b, "js_set", [objV, emitStr(b, "println"), callExt(b, "js_closure", [handle(lineF), curScopeV])])
+        callExt(b, "js_set", [objV, emitStr(b, "print"), callExt(b, "js_closure", [handle(writeF), curScopeV])])
+        callExt(b, "js_set", [objV, emitStr(b, "printf"), callExt(b, "js_closure", [handle(printfF), curScopeV])])
+        callExt(b, "js_set", [objV, emitStr(b, "format"), callExt(b, "js_closure", [handle(printfF), curScopeV])])
+        callExt(b, "js_set", [objV, emitStr(b, "flush"), callExt(b, "js_closure", [handle(flushF), curScopeV])])
+        return objV
+    }
+
     // The program: jsmain(env, args) builds System, the classes, then calls Main.main.
     function buildMain(items) {
         // The walk of an imported file ends here too: stash its class
@@ -6334,50 +6375,16 @@ HasStatic   = :script(~~
         jMainF = f
         var b = f.NewBlock("entry")
         curScopeV = callExt(b, "js_scope_new", [f.Params[0]])
-        // System.out.println / System.out.print / System.exit / System.arraycopy.
+        // System.out / System.err (jvStream) / System.exit / System.arraycopy.
         var sysV = callExt(b, "js_obj_new", [])
-        var outV = callExt(b, "js_obj_new", [])
-        // println/print are NOT the shared host functions, which hand the raw
-        // runtime value to Go's %v. Each is a one-line closure over js_jvprint /
-        // js_jvwrite, which render the way java does - see abnf/jsrtjava.go. The
-        // whole ARGUMENT ARRAY is passed, so the no-argument println() stays
-        // distinguishable from println(null).
-        var jvPrintlnF = emitFunc([], function(bb) {
-            callExt(bb, "js_jvprint", [curF.Params[1]])
-            bb.NewRet(hUndef)
-            return deadBlock()
-        }, false, null)
-        var jvPrintF = emitFunc([], function(bb) {
-            callExt(bb, "js_jvwrite", [curF.Params[1]])
-            bb.NewRet(hUndef)
-            return deadBlock()
-        }, false, null)
         var jvArraycopyF = emitFunc([], function(bb) {
             callExt(bb, "js_jvarraycopy", [curF.Params[1]])
             bb.NewRet(hUndef)
             return deadBlock()
         }, false, null)
         callExt(b, "js_set", [sysV, emitStr(b, "arraycopy"), callExt(b, "js_closure", [handle(jvArraycopyF), curScopeV])])
-        callExt(b, "js_set", [outV, emitStr(b, "println"), callExt(b, "js_closure", [handle(jvPrintlnF), curScopeV])])
-        callExt(b, "js_set", [outV, emitStr(b, "print"), callExt(b, "js_closure", [handle(jvPrintF), curScopeV])])
-        // printf / format: String.format's text, written as print writes.
-        var jvPrintfF = emitFunc([], function(bb) {
-            var one = callExt(bb, "js_arr_new", [])
-            callExt(bb, "js_arr_push", [one, callExt(bb, "js_jvstrstatic", [emitStr(bb, "format"), curF.Params[1]])])
-            callExt(bb, "js_jvwrite", [one])
-            bb.NewRet(hUndef)
-            return deadBlock()
-        }, false, null)
-        callExt(b, "js_set", [outV, emitStr(b, "printf"), callExt(b, "js_closure", [handle(jvPrintfF), curScopeV])])
-        callExt(b, "js_set", [outV, emitStr(b, "format"), callExt(b, "js_closure", [handle(jvPrintfF), curScopeV])])
-        // flush(): every write above reaches the output at once. Twin of the
-        // flush member in java-interpreter.abnf.
-        var jvFlushF = emitFunc([], function(bb) {
-            bb.NewRet(hUndef)
-            return deadBlock()
-        }, false, null)
-        callExt(b, "js_set", [outV, emitStr(b, "flush"), callExt(b, "js_closure", [handle(jvFlushF), curScopeV])])
-        callExt(b, "js_set", [sysV, emitStr(b, "out"), outV])
+        callExt(b, "js_set", [sysV, emitStr(b, "out"), jvStream(b, "js_jvprint", "js_jvwrite")])
+        callExt(b, "js_set", [sysV, emitStr(b, "err"), jvStream(b, "js_jveprint", "js_jvewrite")])
         callExt(b, "js_set", [sysV, emitStr(b, "exit"), callExt(b, "js_scope_get", [curScopeV, emitStr(b, "exit")])])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "System"), sysV])
         // Java's Math (abs/max/min, double-aware) instead of the runtime's

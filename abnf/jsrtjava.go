@@ -2164,6 +2164,27 @@ func init() {
 			fmt.Fprint(outWriter, jvOutText(jvpFirst(rt, u(a[0]))))
 			return 0
 		}
+		// System.err.println / System.err.print: standard error is written a line
+		// at a time (the hosts have eprintln only), so text after its last newline
+		// waits for the next write. Twin of js_jveprint / js_jvewrite in
+		// lib/java-rt.metajs and jErrWrite in java-interpreter.abnf.
+		errPend := ""
+		errWrite := func(s string) {
+			t := errPend + s
+			for k := strings.IndexByte(t, '\n'); k >= 0; k = strings.IndexByte(t, '\n') {
+				fmt.Fprintln(warnWriter, t[:k])
+				t = t[k+1:]
+			}
+			errPend = t
+		}
+		m["js_jveprint"] = func(a []uint64) uint64 {
+			errWrite(jvOutText(jvpFirst(rt, u(a[0]))) + "\n")
+			return 0
+		}
+		m["js_jvewrite"] = func(a []uint64) uint64 {
+			errWrite(jvOutText(jvpFirst(rt, u(a[0]))))
+			return 0
+		}
 		// System.arraycopy(src, srcPos, dest, destPos, length), its argument
 		// array whole. Twin of js_jvarraycopy in languages/lib/java-rt.metajs,
 		// which documents the checks.

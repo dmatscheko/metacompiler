@@ -1627,15 +1627,19 @@ class S100 {
     }
 }
 
-// ===== SECTION 101: System.out.flush =====
+// ===== SECTION 101: System.out.flush and System.err.flush =====
 //
 // flush() writes out what print() buffered; output written before and after it
-// keeps its order.
+// keeps its order. System.err is a PrintStream with the same members.
 class S101 {
     static void run() {
         System.out.print("");
         System.out.flush();
         Main.check("flush101", true);
+        System.err.print("");
+        System.err.printf("");
+        System.err.flush();
+        Main.check("flush101err", System.err != null);
     }
 }
 
