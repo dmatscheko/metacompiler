@@ -142,7 +142,7 @@ real coroutines out of the subset - decide first). Go also runs the most recentl
 ### T-1053 php: copy-on-write array identity (refcount release, print_r recursion depth) · P4 · PHP · OPEN [V spec-only] · NEEDS DESIGN
 Remainder of T-1000/T-1025/T-1036/T-1051. Engines copy arrays eagerly on assignment and have no point where an array dies, so: reference holders of overwritten / frame-local / temporary arrays and of unfinished generators are never released (counts stay correct-but-high, so `&` may survive a copy PHP would unwrap); property-hook set parameters aren't covered by the compiler's param-copy release; print_r recursion depth is wrong (`$y=[1]; $y[]=&$y; print_r($y)` → PHP *RECURSION* at [1], ours one level deeper; `$a=["k"=>[2]]; $a["k"][]=&$a;` two deeper) because the interpreter's by-value param copy loses array identity; `$w=$z; print_r($w)` differs too. Options: real per-array refcount + COW in all three engines (touches every in-place array write), or an engine-level print_r like var_dump plus targeted release points. Needs a design decision before work.
 
-### T-1093 php: `[$this, 'parent::m']` / `['B', 'parent::m']` callables · P3 · PHP · OPEN [V]
+### T-1093 php: `[$this, 'parent::m']` / `['B', 'parent::m']` callables · P3 · PHP · IN PROGRESS (PHP worker, round 47) [V]
 
 Spec: zend_is_callable_check_func (Zend/zend_API.c), where a "parent::" prefix makes the call non-virtual and resolves it on the parent class. Each engine needs the check and the dispatch: phpCheckCallback/phpInvoke (interp), compiler callerCallable, Go phpCbMeth/js_phcbcls, and php-rt.metajs.
 
@@ -153,7 +153,7 @@ Required behaviour:
 
 The PHP r46 worker left a ready probe at scratchpad/PHP46/p9.php.
 
-### T-1094 php: fractional float key deprecation in array literals, isset, unset, array_key_exists · P3 · PHP · OPEN [V]
+### T-1094 php: fractional float key deprecation in array literals, isset, unset, array_key_exists · P3 · PHP · IN PROGRESS (PHP worker, round 47) [V]
 
 Writes, reads and compound assignments already emit "Implicit conversion from float 1.5 to int loses precision". The deprecation is still missing for:
 - `[1.5 => x]` (zend_ast / ZEND_INIT_ARRAY → zend_dval_to_lval_safe);
@@ -163,7 +163,7 @@ Writes, reads and compound assignments already emit "Implicit conversion from fl
 
 Check the php-src sources for each site, because some of them may truncate silently (array_key_exists in particular). Add assertions to tests/php-test-warnings.php.
 
-### T-1095 php: ENT_* constants undefined (htmlspecialchars($s, ENT_QUOTES) fatals) · P3 · PHP · OPEN [V]
+### T-1095 php: ENT_* constants undefined (htmlspecialchars($s, ENT_QUOTES) fatals) · P3 · PHP · IN PROGRESS (PHP worker, round 47) [V]
 
 `htmlspecialchars("<a href='x'>", ENT_QUOTES)` dies with 'Uncaught Error: Undefined constant "ENT_QUOTES"' on every leg.
 
