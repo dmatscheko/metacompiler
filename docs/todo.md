@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1033** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1034** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -72,8 +72,8 @@ python3 3.14: `type(range(3)).__name__` → range, `type(iter(range(3))).__name_
 
 # RB — Ruby
 
-### T-1030 ruby: Proc#=== as an operator returns a boolean; Struct is not Enumerable · P3 · RB · IN PROGRESS (RB worker, round 39) [V]
-ruby 2.6: `pr = proc{|x| x*2}; p(pr === 3)` → 6, `p({a: 1}.to_proc === :a)` → 1; ours: interp `true`, llvm.Run/native `false` (js_rcase has no callable arm and falls to rubyEq; interpreter and layer 2 need the same arm; case/when with a proc already works). `Struct.new(:a).new(1).is_a?(Enumerable)` → true; ours false in all three engines. Found by RB r38.
+### T-1033 ruby: Enumerable methods on classes that include Enumerable; Numeric in Integer/Float ancestry · P3 · RB · OPEN [V]
+ruby 2.6: `class Bag; include Enumerable; def initialize(a); @a=a; end; def each; @a.each { |x| yield x }; self; end; end` then `Bag.new([3,1]).map{|x| x*2}` → [6, 2], `.sort` → [1, 3], `.min`, `.include?`, `.to_a`, `.select` likewise; `Struct.new(:a).new(4).map { |v| v * 2 }` → [8]. Ours: NoMethodError undefined method `map' (interpreter: on `sort`) in all three engines — needs an Enumerable surface built on the user's #each. Also `Integer.superclass` → Numeric, `Float.ancestors` → [Float, Numeric, Comparable, Object, Kernel, BasicObject], `Integer < Numeric` / `Integer < Comparable` → true; ours Object / [Float, Object, Kernel, BasicObject] / nil / nil. Found by RB r39.
 
 # JS — JavaScript and TypeScript
 
@@ -1075,6 +1075,7 @@ T-1018 ruby: an Enumerator is not Enumerable; Hash#to_proc; `lazy.instance_of?(E
 T-1023 go: a struct value's method set includes pointer methods in type switches/assertions; embedding another package's defined non-struct type — DONE (GO r22, 1ac92568): value method sets exclude pointer methods in type switches/assertions (incl. embedded fields); embedded-interface bodies now parse (goIfaceSet); imported defined non-struct types promote methods. Master probe (sent back once for interface{G;S}) vs go run: 4 legs agree.
 T-1015 js: invalid regex errors are late and uncatchable; Go twin turns lone surrogates in regex text into U+FFFD; `sc=Zyyy` on Unicode 17 scripts — DONE (JS r39, b35b47a1): catchable SyntaxError for bad RegExp patterns/flags with node's texts; regex literals early-error in JS+TS; Annex B escapes; duplicate group names; String.fromCodePoint lone surrogate (Go twin); \p{} at Unicode 17 via a JS-only correction table. Master probe vs node 24 (20 patterns + \p + surrogate): 4 legs agree; full matrix 601/601 and js+python ratchets green after rebase.
 T-1024 kotlin: range type identity and function-spelled range builders — DONE (KT r16, c63345a8): range type identity (ClosedRange/OpenEndRange/IntRange/LongRange), range class names, OpenEnd{Double,Float}Range for ..< on floats, .rangeTo/.rangeUntil call spellings. Master probe vs kotlinc 2.2.21 (22 lines): 4 legs agree.
+T-1030 ruby: Proc#=== as an operator returns a boolean; Struct is not Enumerable — DONE (RB r39, 3c0648fe): === returns the call's value for Proc/Method/user #=== (case/when/rescue still truthy); builtin classes include Enumerable/Comparable in is_a?/ancestors/include?/<. Master probe vs ruby 2.6 (=== on Range/Class/Regexp/Proc/user, case/when incl. lambdas and user ===, rescue lists): 4 legs agree.
 
 # Settled — do not re-open
 
