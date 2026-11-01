@@ -2,23 +2,6 @@
 // (include) and languages/lib/ruby-rt.metajs (import). Go twins in
 // abnf/jsrtrubystr.go. Written in the subset both engines accept.
 
-// The index of the first key a Hash#each block ADDED, keys.length when it added
-// none. Insertion appends and a deletion keeps the order, so the keys are the
-// starting ones (a subsequence of orig, in order) followed by the added ones,
-// and a deleted key put back is one of those. Go twin: rubyFirstAdded in
-// abnf/jsrtrubystr.go.
-function rbaFirstAdded(orig, keys) {
-    var p = 0
-    var j = 0
-    while (j < keys.length) {
-        while (p < orig.length && orig[p] !== keys[j]) { p = p + 1 }
-        if (p == orig.length) { return j }
-        p = p + 1
-        j = j + 1
-    }
-    return keys.length
-}
-
 // Enumerator::Lazy, and the endless Enumerator of a blockless Array#cycle or of
 // each_slice / each_cons on an endless range: an Enumerator object that also
 // carries __rlazy, a SOURCE - kind "arr" (items), "cycle" (items, forever) or

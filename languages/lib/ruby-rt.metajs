@@ -3689,6 +3689,7 @@ function rbDictSet(d, k, v) {
         d["vals"][i] = v
         return undefined
     }
+    if (d["__iter"] !== undefined) { rbHashAddCheck(d, "") }
     // A String key is stored as its text: MRI keys a Hash by a frozen COPY.
     keys.push(rbSV(k))
     d["vals"].push(v)
@@ -6338,36 +6339,59 @@ function rbMSort(a, blk, byKey) {
     }
     return out
 }
-// The decorate-sort step of sort_by / min_by / max_by: each element paired with
-// its block value, stably sorted on that key.
-// Hash#each / #each_pair. An entry deleted before it is reached is not yielded;
-// a key the block ADDS, a deleted one put back included, is MRI's RuntimeError,
-// and is taken out again. Twin of hashEach in ruby-interpreter.abnf, which
-// states the rule.
+// Hash#name called with a block runs inside an iteration over the Hash. Twin of
+// hashIterates in ruby-interpreter.abnf, which states the rule.
+function rbHashIterates(name, args) {
+    if (name == "sort" || rbBlockOf(args) === null) { return false }
+    if (name == "min" || name == "max") { return rbNPos(args) == 0 }
+    return name == "each" || name == "each_pair" || name == "each_key" || name == "each_value"
+        || name == "transform_values" || name == "transform_keys" || name == "to_h" || rbHashEnumName(name)
+}
+// Hash d's method name, or Enumerator recv's over d, with d's iteration count
+// raised for the duration. Twin of hashIter in ruby-interpreter.abnf.
+function rbHashIter(d, recv, name, args) {
+    var lev = 0
+    if (d["__iter"] !== undefined) { lev = d["__iter"] }
+    d["__iter"] = lev + 1
+    var r = anytype
+    try {
+        if (recv !== d) { r = rbEnumMethod(recv, name, args) }
+        else if (name == "each") {
+            rbHashEach(d["keys"], d["vals"], rbBlockOf(args))
+            r = d
+        } else { r = rbHashMethod(d, d["keys"], d["vals"], name, args) }
+    } catch (e) {
+        d["__iter"] = lev
+        throw e
+    }
+    d["__iter"] = lev
+    return r
+}
+// A key Hash d does not hold yet is refused while an iteration over it runs.
+// Twin of hashPut in ruby-interpreter.abnf.
+function rbHashAddCheck(d, frame) {
+    var lev = d["__iter"]
+    if (lev !== undefined && lev > 0) {
+        var e = rbExc(rbBuiltinClass("RuntimeError"), ["can't add a new key into hash during iteration"])
+        e["__rframe"] = frame
+        js_rraise(e, undefined)
+    }
+    return undefined
+}
+// Hash#each / #each_pair. An entry deleted before it is reached is not yielded.
+// Twin of hashEach in ruby-interpreter.abnf.
 function rbHashEach(keys, vals, blk) {
-    var orig = keys.slice(0)
     var i = 0
     while (i < keys.length) {
         var k = anytype
         k = keys[i]
-        var tail = anytype
-        tail = keys[keys.length - 1]
         rbCall2(blk, rbKeyOut(k), vals[i])
-        var n1 = keys.length
-        if (n1 > 0 && keys[n1 - 1] !== tail) {
-            var fa = rbaFirstAdded(orig, keys)
-            if (fa < n1) {
-                while (keys.length > fa) {
-                    keys.pop()
-                    vals.pop()
-                }
-                rbRaiseErr("each", "RuntimeError", "can't add a new key into hash during iteration")
-            }
-        }
         if (i < keys.length && keys[i] === k) { i = i + 1 }
     }
     return undefined
 }
+// The decorate-sort step of sort_by / min_by / max_by: each element paired with
+// its block value, stably sorted on that key.
 function rbArrKeyed(t, blk) {
     var pairs = []
     var i = 0
@@ -6987,7 +7011,10 @@ function rbHashMethod(o, keys, vals, name, args) {
                 var at = rbDictFind(mg["keys"], sk[j])
                 if (at >= 0 && blk !== null) {
                     mg["vals"][at] = rbCall3(blk, sk[j], mg["vals"][at], sv[j])
-                } else { rbDictSet(mg, sk[j], sv[j]) }
+                } else {
+                    if (at < 0) { rbHashAddCheck(mg, name) }
+                    rbDictSet(mg, sk[j], sv[j])
+                }
                 j = j + 1
             }
         }
@@ -8775,7 +8802,11 @@ function rbMethod(target, name, args) {
         rbNoMethod(target, name)
     }
     if (rbIsArr(target)) { return rbArrayMethod(target, name, args) }
-    if (rbIsEnum(target)) { return rbEnumMethod(target, name, args) }
+    if (rbIsEnum(target)) {
+        var esrc = target["src"]
+        if (rbIsDict(esrc) && target["__rlazy"] !== true && rbBlockOf(args) !== null) { return rbHashIter(esrc, target, name, args) }
+        return rbEnumMethod(target, name, args)
+    }
     if (rbIsObj(target)) {
         if (rbIsRange(target)) { return rbRangeMethod(target, name, args) }
         if (rbIsDict(target)) {
@@ -8798,14 +8829,8 @@ function rbMethod(target, name, args) {
             // js_rget. String and Array answer it too.
             if (name == "[]") { return js_rget(target, rbArgAt(args, 0)) }
             if (name == "include?" || name == "has_key?" || name == "key?") { return rbDictFind(keys, rbArgAt(args, 0)) >= 0 }
-            if (name == "each") {
-                // The block, NOT args[0]: the block marker makes the two different
-                // things.
-                var eblk = rbBlockOf(args)
-                if (eblk === null) { return rbEnumAt(rbMkEnum(rbHashPairs(keys, vals)), target, name, args) }
-                rbHashEach(keys, vals, eblk)
-                return target
-            }
+            if (rbHashIterates(name, args)) { return rbHashIter(target, target, name, args) }
+            if (name == "each") { return rbEnumAt(rbMkEnum(rbHashPairs(keys, vals)), target, name, args) }
             // Hash#default is the value Hash.new(v) recorded; a hash built with a
             // BLOCK answers nil here, exactly as MRI does (the block is #default_proc).
             if (name == "default") {

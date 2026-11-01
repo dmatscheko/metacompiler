@@ -1039,6 +1039,54 @@ def s148
                   Integer.instance_methods(false).include?(:even?) && !Integer.instance_methods(false).include?(:upcase))
 end
 
+# ===== SECTION 149: a new key while a Hash iteration runs =====
+# While any block-taking Hash method (each, each_key, select, map, count, ...) or
+# an Enumerator over the Hash runs its block, storing a key the Hash does not
+# hold raises RuntimeError AT the store, so the rest of the block never runs;
+# writing an existing key, deleting, and Hash#sort's comparator are allowed. A
+# break or raise out of the block ends the iteration. /usr/bin/ruby 2.6 settles
+# each.
+def s149try
+  yield
+  nil
+rescue RuntimeError => e
+  e.message
+end
+def s149
+  ms = "can't add a new key into hash during iteration"
+  h = {a: 1, b: 2}
+  e1 = s149try { h.each { h.delete(:b); h[:b] = 3 } }
+  ran = false
+  g = {a: 1}
+  e2 = s149try { g.each { g[:c] = 9; ran = true } }
+  check("hi149a", e1 == ms && h == {a: 1} && e2 == ms && !ran && g == {a: 1})
+  rs = [:each_key, :each_value, :select, :map, :count, :sort_by, :each_with_index, :delete_if].map do |m|
+    w = {a: 1}
+    [s149try { w.send(m) { w[:z] = 5; 0 } }, w]
+  end
+  check("hi149b", rs.all? { |r| r == [ms, {a: 1}] })
+  x = {a: 1, b: 2}
+  x.each { |k, v| x[k] = v + 1 }
+  x.each { break }
+  x[:c] = 0
+  s149try { x.each { raise "out" } }
+  x[:d] = 0
+  x.sort { |p, q| x[:e] = 1; 0 }
+  y = {a: 1}
+  e3 = s149try { y.each { y.each { }; y[:n] = 1 } }
+  ran = false
+  e4 = s149try { y.each { y.merge!(q: 1); ran = true } }
+  y.each { y.update(a: 2) }
+  check("hi149c", x == {a: 2, b: 3, c: 0, d: 0, e: 1} && e3 == ms && e4 == ms && !ran && y == {a: 2})
+  z = {a: 1}
+  e5 = s149try { z.each_with_index.map { z[:q] = 1 } }
+  e6 = s149try { z.each.each { z[:q] = 1 } }
+  d = Hash.new { |hh, k| hh[k] = 0 }
+  d[:a] = 1
+  e7 = s149try { d.each { d[:m] } }
+  check("hi149d", e5 == ms && e6 == ms && z == {a: 1} && e7 == ms && d == {a: 1})
+end
+
 s122() # SECTION-CALL 122
 s123() # SECTION-CALL 123
 s124() # SECTION-CALL 124
@@ -1066,5 +1114,6 @@ s145() # SECTION-CALL 145
 s146() # SECTION-CALL 146
 s147() # SECTION-CALL 147
 s148() # SECTION-CALL 148
+s149() # SECTION-CALL 149
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

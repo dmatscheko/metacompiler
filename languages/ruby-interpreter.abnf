@@ -9336,151 +9336,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             noMethod(target, name)
         }
         if (isDict(target)) {
-            if (name == "inspect") { return rinspect(target) }
-            if (name == "size" || name == "length") { return target.keys.length }
-            if (name == "keys") {
-                var dks = []
-                for (var dk = 0; dk < target.keys.length; dk++) { dks.push(keyOut(target.keys[dk])) }
-                return dks
-            }
-            if (name == "values") { return target.vals.slice(0) }
-            // Hash#to_a is the list of [key, value] PAIRS, as in MRI.
-            if (name == "to_a" || name == "entries") { return hashPairs(target) }
-            // Hash#[] as a METHOD (h.send(:[], k)); the subscript itself goes through
-            // rindex. String and Array answer it too.
-            if (name == "[]") { return rindex(target, args[0]) }
-            if (name == "include?" || name == "has_key?" || name == "key?") { return dictFind(target, args[0]) >= 0 }
-            if (name == "each" || name == "each_pair") {
-                if (blk == null) { return enumAt(mkEnum(hashPairs(target)), target, name, args) }
-                hashEach(target, blk)
-                return target
-            }
-            // Hash#default is the value Hash.new(v) recorded; a hash built with a
-            // BLOCK answers nil here, exactly as MRI does (the block is #default_proc).
-            if (name == "default") {
-                var hdv = anytype
-                hdv = target.__hdef
-                return hdv == undefined ? null : hdv
-            }
-            // Hash#fetch DELIBERATELY ignores the default: MRI raises KeyError for a
-            // missing key unless a second argument or a block supplies the answer.
-            if (name == "fetch") {
-                var fi = dictFind(target, args[0])
-                if (fi >= 0) { return target.vals[fi] }
-                if (args.length > 1) { return args[1] }
-                if (blk != null) { return blockCall(blk, [args[0]]) }
-                raiseErr(name, "KeyError", "key not found: " + rinspect(args[0]))
-            }
-            // ----- the Hash-specific half of the Enumerable surface -----
-            // merge / dup / clone CARRY THE RECEIVER'S DEFAULT over, which is what
-            // makes `Hash.new(0).merge(other)["missing"]` still answer 0 in MRI.
-            if (name == "merge" || name == "merge!" || name == "update") {
-                var mg = name == "merge" ? hashCopy(target) : target
-                for (var mi = 0; mi < args.length; mi++) {
-                    var src = args[mi]
-                    if (!isDict(src)) { continue }
-                    for (var mk = 0; mk < src.keys.length; mk++) {
-                        var mfound = dictFind(mg, src.keys[mk])
-                        if (mfound >= 0 && blk != null) {
-                            mg.vals[mfound] = blockCall(blk, [src.keys[mk], mg.vals[mfound], src.vals[mk]])
-                        } else { dictSet(mg, src.keys[mk], src.vals[mk]) }
-                    }
-                }
-                return mg
-            }
-            if (name == "dup" || name == "clone") { return hashCopy(target) }
-            // Hash#to_h with a block maps each pair through it, as Array#to_h does.
-            if (name == "to_h") { return blk == null ? target : arrayMethod(hashPairs(target), name, args, blk) }
-            if (name == "delete") {
-                var xi = dictFind(target, args[0])
-                if (xi < 0) { return blk != null ? blockCall(blk, [args[0]]) : null }
-                var xv = target.vals[xi]
-                // This dialect has no splice: rebuild both sides without the hit.
-                var nk = []
-                var nv = []
-                for (var xj = 0; xj < target.keys.length; xj++) {
-                    if (xj != xi) { nk.push(target.keys[xj]); nv.push(target.vals[xj]) }
-                }
-                arrReplace(target.keys, nk)
-                arrReplace(target.vals, nv)
-                return xv
-            }
-            if (name == "clear") { arrReplace(target.keys, []); arrReplace(target.vals, []); return target }
-            // Hash#compact: a new Hash without the nil values.
-            if (name == "compact") {
-                var hc = {__dict: true, keys: [], vals: []}
-                for (var hci = 0; hci < target.keys.length; hci++) {
-                    if (target.vals[hci] !== null && target.vals[hci] !== undefined) { dictSet(hc, target.keys[hci], target.vals[hci]) }
-                }
-                return hc
-            }
-            if (name == "each_key") {
-                for (var ek = 0; ek < target.keys.length; ek++) { blockCall(blk, [keyOut(target.keys[ek])]) }
-                return target
-            }
-            if (name == "each_value") {
-                for (var ev = 0; ev < target.vals.length; ev++) { blockCall(blk, [target.vals[ev]]) }
-                return target
-            }
-            // Hash#values_at takes KEYS, where Array#values_at takes indices, so it
-            // must not reach the pair delegation below.
-            if (name == "values_at") {
-                var va = []
-                for (var vi = 0; vi < args.length; vi++) {
-                    var vf = dictFind(target, args[vi])
-                    va.push(vf < 0 ? hashDefault(target, args[vi]) : target.vals[vf])
-                }
-                return va
-            }
-            // dig: self[k], then the rest of the path is dug out of that value by
-            // its own #dig; nil stops the walk. Twin of Hash#dig in abnf/jsrt.go
-            // and lib/ruby-rt.metajs.
-            if (name == "dig") {
-                var df = dictFind(target, args[0])
-                var dv = df < 0 ? hashDefault(target, args[0]) : target.vals[df]
-                if (args.length == 1 || dv === null || dv === undefined) { return dv }
-                return mcall(dv, "dig", args.slice(1), null)
-            }
-            if (name == "invert") {
-                var iv = {__dict: true, keys: [], vals: []}
-                for (var ii = 0; ii < target.keys.length; ii++) { dictSet(iv, rsText(target.vals[ii]), keyOut(target.keys[ii])) }
-                return iv
-            }
-            if (name == "key") {
-                for (var ky = 0; ky < target.vals.length; ky++) { if (rubyEq(target.vals[ky], args[0])) { return keyOut(target.keys[ky]) } }
-                return null
-            }
-            if (name == "transform_values") {
-                var tv = hashCopy(target)
-                for (var ti = 0; ti < tv.vals.length; ti++) { tv.vals[ti] = blockCall(blk, [tv.vals[ti]]) }
-                return tv
-            }
-            if (name == "transform_keys") {
-                var tk = {__dict: true, keys: [], vals: []}
-                for (var tj = 0; tj < target.keys.length; tj++) { dictSet(tk, rsText(blockCall(blk, [keyOut(target.keys[tj])])), target.vals[tj]) }
-                return tk
-            }
-            // Everything else Enumerable is answered over the [key, value] PAIRS,
-            // which is what MRI's Hash does (Hash includes Enumerable and yields a
-            // pair). select / filter / reject answer a HASH again, everything else
-            // the Array that Enumerable builds. The list is explicit rather than a
-            // fallthrough so that a name Hash does NOT have (push, rotate, ...) is
-            // still reported instead of silently answered over the pairs.
-            if (hashEnumName(name)) {
-                var hp = hashPairs(target)
-                if (name == "select" || name == "filter" || name == "reject"
-                    || name == "select!" || name == "filter!" || name == "reject!"
-                    || name == "keep_if" || name == "delete_if") {
-                    if (blk == null) { return enumAt(mkEnumOp(hp, name), target, name, args) }
-                    var keep = name == "reject" || name == "reject!" || name == "delete_if"
-                        ? arrayMethod(hp, "reject", args, blk) : arrayMethod(hp, "select", args, blk)
-                    var hs = pairsToHash(keep, target)
-                    if (name == "select" || name == "filter" || name == "reject") { return hs }
-                    return arrReplaceDict(target, hs)
-                }
-                return delegArr(hp, target, name, args, blk)
-            }
-            noMethod(target, name)
+            if (blk != null && hashIterates(name, args)) { return hashIter(target, target, name, args, blk) }
+            return hashMethod(target, name, args, blk)
         }
         if (target === null || target === undefined) {
             // NilClass's conversions, as MRI answers them.
@@ -9492,7 +9349,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             noMethod(target, name)
         }
         if (Array.isArray(target)) { return arrayMethod(target, name, args, blk) }
-        if (isEnum(target)) { return enumMethod(target, name, args, blk) }
+        if (isEnum(target)) {
+            if (blk != null && isDict(target.src) && target.__rlazy !== true) { return hashIter(target.src, target, name, args, blk) }
+            return enumMethod(target, name, args, blk)
+        }
         if (target.__class != undefined) {
             // The SINGLETON table comes first: `def obj.m', `class << obj' and an
             // extended module all sit in front of the object's own class.
@@ -9775,37 +9635,200 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (blk == null) { return function(x, y) { return rcmp(x, y) } }
         return function(x, y) { return Math.trunc(toF(blockCall(blk, [x, y]))) }
     }
-    // sort_by / min_by / max_by: decorate, sort on the key, undecorate. The sort is
-    // the stable one above, which is what MRI's sort_by promises.
+    // Hash's own methods. Twin of the Hash arm of rubyMethod in abnf/jsrt.go and
+    // rbHashMethod in lib/ruby-rt.metajs.
+    function hashMethod(target, name, args, blk) {
+        if (name == "inspect") { return rinspect(target) }
+        if (name == "size" || name == "length") { return target.keys.length }
+        if (name == "keys") {
+            var dks = []
+            for (var dk = 0; dk < target.keys.length; dk++) { dks.push(keyOut(target.keys[dk])) }
+            return dks
+        }
+        if (name == "values") { return target.vals.slice(0) }
+        // Hash#to_a is the list of [key, value] PAIRS, as in MRI.
+        if (name == "to_a" || name == "entries") { return hashPairs(target) }
+        // Hash#[] as a METHOD (h.send(:[], k)); the subscript itself goes through
+        // rindex. String and Array answer it too.
+        if (name == "[]") { return rindex(target, args[0]) }
+        if (name == "include?" || name == "has_key?" || name == "key?") { return dictFind(target, args[0]) >= 0 }
+        if (name == "each" || name == "each_pair") {
+            if (blk == null) { return enumAt(mkEnum(hashPairs(target)), target, name, args) }
+            hashEach(target, blk)
+            return target
+        }
+        // Hash#default is the value Hash.new(v) recorded; a hash built with a
+        // BLOCK answers nil here, exactly as MRI does (the block is #default_proc).
+        if (name == "default") {
+            var hdv = anytype
+            hdv = target.__hdef
+            return hdv == undefined ? null : hdv
+        }
+        // Hash#fetch DELIBERATELY ignores the default: MRI raises KeyError for a
+        // missing key unless a second argument or a block supplies the answer.
+        if (name == "fetch") {
+            var fi = dictFind(target, args[0])
+            if (fi >= 0) { return target.vals[fi] }
+            if (args.length > 1) { return args[1] }
+            if (blk != null) { return blockCall(blk, [args[0]]) }
+            raiseErr(name, "KeyError", "key not found: " + rinspect(args[0]))
+        }
+        // ----- the Hash-specific half of the Enumerable surface -----
+        // merge / dup / clone CARRY THE RECEIVER'S DEFAULT over, which is what
+        // makes `Hash.new(0).merge(other)["missing"]` still answer 0 in MRI.
+        if (name == "merge" || name == "merge!" || name == "update") {
+            var mg = name == "merge" ? hashCopy(target) : target
+            for (var mi = 0; mi < args.length; mi++) {
+                var src = args[mi]
+                if (!isDict(src)) { continue }
+                for (var mk = 0; mk < src.keys.length; mk++) {
+                    var mfound = dictFind(mg, src.keys[mk])
+                    if (mfound >= 0 && blk != null) {
+                        mg.vals[mfound] = blockCall(blk, [src.keys[mk], mg.vals[mfound], src.vals[mk]])
+                    } else { hashPut(mg, src.keys[mk], src.vals[mk], name) }
+                }
+            }
+            return mg
+        }
+        if (name == "dup" || name == "clone") { return hashCopy(target) }
+        // Hash#to_h with a block maps each pair through it, as Array#to_h does.
+        if (name == "to_h") { return blk == null ? target : arrayMethod(hashPairs(target), name, args, blk) }
+        if (name == "delete") {
+            var xi = dictFind(target, args[0])
+            if (xi < 0) { return blk != null ? blockCall(blk, [args[0]]) : null }
+            var xv = target.vals[xi]
+            // This dialect has no splice: rebuild both sides without the hit.
+            var nk = []
+            var nv = []
+            for (var xj = 0; xj < target.keys.length; xj++) {
+                if (xj != xi) { nk.push(target.keys[xj]); nv.push(target.vals[xj]) }
+            }
+            arrReplace(target.keys, nk)
+            arrReplace(target.vals, nv)
+            return xv
+        }
+        if (name == "clear") { arrReplace(target.keys, []); arrReplace(target.vals, []); return target }
+        // Hash#compact: a new Hash without the nil values.
+        if (name == "compact") {
+            var hc = {__dict: true, keys: [], vals: []}
+            for (var hci = 0; hci < target.keys.length; hci++) {
+                if (target.vals[hci] !== null && target.vals[hci] !== undefined) { dictSet(hc, target.keys[hci], target.vals[hci]) }
+            }
+            return hc
+        }
+        if (name == "each_key") {
+            for (var ek = 0; ek < target.keys.length; ek++) { blockCall(blk, [keyOut(target.keys[ek])]) }
+            return target
+        }
+        if (name == "each_value") {
+            for (var ev = 0; ev < target.vals.length; ev++) { blockCall(blk, [target.vals[ev]]) }
+            return target
+        }
+        // Hash#values_at takes KEYS, where Array#values_at takes indices, so it
+        // must not reach the pair delegation below.
+        if (name == "values_at") {
+            var va = []
+            for (var vi = 0; vi < args.length; vi++) {
+                var vf = dictFind(target, args[vi])
+                va.push(vf < 0 ? hashDefault(target, args[vi]) : target.vals[vf])
+            }
+            return va
+        }
+        // dig: self[k], then the rest of the path is dug out of that value by
+        // its own #dig; nil stops the walk. Twin of Hash#dig in abnf/jsrt.go
+        // and lib/ruby-rt.metajs.
+        if (name == "dig") {
+            var df = dictFind(target, args[0])
+            var dv = df < 0 ? hashDefault(target, args[0]) : target.vals[df]
+            if (args.length == 1 || dv === null || dv === undefined) { return dv }
+            return mcall(dv, "dig", args.slice(1), null)
+        }
+        if (name == "invert") {
+            var iv = {__dict: true, keys: [], vals: []}
+            for (var ii = 0; ii < target.keys.length; ii++) { dictSet(iv, rsText(target.vals[ii]), keyOut(target.keys[ii])) }
+            return iv
+        }
+        if (name == "key") {
+            for (var ky = 0; ky < target.vals.length; ky++) { if (rubyEq(target.vals[ky], args[0])) { return keyOut(target.keys[ky]) } }
+            return null
+        }
+        if (name == "transform_values") {
+            var tv = hashCopy(target)
+            for (var ti = 0; ti < tv.vals.length; ti++) { tv.vals[ti] = blockCall(blk, [tv.vals[ti]]) }
+            return tv
+        }
+        if (name == "transform_keys") {
+            var tk = {__dict: true, keys: [], vals: []}
+            for (var tj = 0; tj < target.keys.length; tj++) { dictSet(tk, rsText(blockCall(blk, [keyOut(target.keys[tj])])), target.vals[tj]) }
+            return tk
+        }
+        // Everything else Enumerable is answered over the [key, value] PAIRS,
+        // which is what MRI's Hash does (Hash includes Enumerable and yields a
+        // pair). select / filter / reject answer a HASH again, everything else
+        // the Array that Enumerable builds. The list is explicit rather than a
+        // fallthrough so that a name Hash does NOT have (push, rotate, ...) is
+        // still reported instead of silently answered over the pairs.
+        if (hashEnumName(name)) {
+            var hp = hashPairs(target)
+            if (name == "select" || name == "filter" || name == "reject"
+                || name == "select!" || name == "filter!" || name == "reject!"
+                || name == "keep_if" || name == "delete_if") {
+                if (blk == null) { return enumAt(mkEnumOp(hp, name), target, name, args) }
+                var keep = name == "reject" || name == "reject!" || name == "delete_if"
+                    ? arrayMethod(hp, "reject", args, blk) : arrayMethod(hp, "select", args, blk)
+                var hs = pairsToHash(keep, target)
+                if (name == "select" || name == "filter" || name == "reject") { return hs }
+                return arrReplaceDict(target, hs)
+            }
+            return delegArr(hp, target, name, args, blk)
+        }
+        noMethod(target, name)
+    }
+    // MRI counts the iterations running over a Hash (iter_lev): while one runs,
+    // inserting a NEW key raises RuntimeError at the insertion (hashPut), and a
+    // break, throw or raise out of the block ends the count. Every block a Hash
+    // method runs is called inside its iteration except Hash#sort's comparator
+    // and min(n) / max(n)'s, which compare an Array copy. Twins: rubyHashIter in
+    // abnf/jsrtrubystr.go, rbHashIter in lib/ruby-rt.metajs.
+    function hashIterates(n, args) {
+        if (n == "sort" || ((n == "min" || n == "max") && args.length > 0)) { return false }
+        return n == "each" || n == "each_pair" || n == "each_key" || n == "each_value"
+            || n == "transform_values" || n == "transform_keys" || n == "to_h" || hashEnumName(n)
+    }
+    // recv is the Hash d itself, or an Enumerator over d run with a block.
+    function hashIter(d, recv, name, args, blk) {
+        var lev = d.__iter == undefined ? 0 : d.__iter
+        d.__iter = lev + 1
+        var r = anytype
+        try { r = recv === d ? hashMethod(d, name, args, blk) : enumMethod(recv, name, args, blk) } finally { d.__iter = lev }
+        return r
+    }
+    // h[k] = v and merge! / update: a key the Hash does not hold yet is refused
+    // while an iteration over it runs (hashIter). frame names the raising method,
+    // empty for the subscript, which MRI reports in the caller's own frame.
+    function hashPut(d, k, v, frame) {
+        if (d.__iter != undefined && d.__iter > 0 && dictFind(d, k) < 0) {
+            var e = anytype
+            e = mkExc(hostGlobals["RuntimeError"], "can't add a new key into hash during iteration")
+            e.__rframe = frame
+            throw {__exc: true, v: e}
+        }
+        dictSet(d, k, v)
+    }
     // Hash#each / #each_pair. An entry deleted before it is reached is not
-    // yielded; a key the block ADDS, a deleted one put back included, is MRI's
-    // RuntimeError, and is taken out again. While the last key is still last
-    // nothing was appended, so only a block that moved it pays for the scan.
-    // Twins: rbHashEach in lib/ruby-rt.metajs, rubyHashEach in abnf/jsrtrubystr.go.
+    // yielded; hashPut refuses an added one. Twins: rbHashEach in
+    // lib/ruby-rt.metajs, rubyHashEach in abnf/jsrtrubystr.go.
     function hashEach(d, blk) {
-        var orig = d.keys.slice(0)
         var i = 0
         while (i < d.keys.length) {
             var k = anytype
             k = d.keys[i]
-            var tail = anytype
-            tail = d.keys[d.keys.length - 1]
             blockCall(blk, [keyOut(k), d.vals[i]])
-            var n1 = d.keys.length
-            if (n1 > 0 && d.keys[n1 - 1] !== tail) {
-                var fa = rbaFirstAdded(orig, d.keys)
-                if (fa < n1) {
-                    while (d.keys.length > fa) {
-                        d.keys.pop()
-                        d.vals.pop()
-                    }
-                    d.__idx = null
-                    raiseErr("each", "RuntimeError", "can't add a new key into hash during iteration")
-                }
-            }
             if (i < d.keys.length && d.keys[i] === k) { i = i + 1 }
         }
     }
+    // sort_by / min_by / max_by: decorate, sort on the key, undecorate. The sort is
+    // the stable one above, which is what MRI's sort_by promises.
     function arrKeyed(t, blk) {
         var pairs = []
         for (var i = 0; i < t.length; i++) { pairs.push([blockCall(blk, [t[i]]), t[i]]) }
@@ -13986,7 +14009,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     function rsetIndex(o, k, v) {
         // A String key is stored as its text: MRI keys a Hash by a frozen COPY, so a
         // later mutation of the key string does not move the entry.
-        if (isDict(o)) { dictSet(o, rsText(k), v); return }
+        if (isDict(o)) { hashPut(o, rsText(k), v, ""); return }
         if (isUserObj(o) && typeof lookupMethod(o.__class, "[]=") == "function") {
             mcall(o, "[]=", [k, v], null)
             return
@@ -14037,7 +14060,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             mcall(o, "[]=", (k2 !== undefined && k2 !== null) ? [k1, k2, v] : [k1, v], null)
             return o
         }
-        if (isDict(o)) { dictSet(o, rsText(k1), v); return o }
+        if (isDict(o)) { hashPut(o, rsText(k1), v, ""); return o }
         // A box changes in place; a plain string answers a NEW box, which the
         // caller writes back to the variable or element it was read from.
         if (isRStr(o)) {

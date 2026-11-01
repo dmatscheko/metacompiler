@@ -897,43 +897,62 @@ func rubyKahan(f, c, x float64) (float64, float64) {
 	return t, c
 }
 
+// rubyHashIterates: Hash#name called with a block runs inside an iteration over
+// the Hash. Twin of hashIterates in ruby-interpreter.abnf, which states the rule.
+func rubyHashIterates(name string, args []interface{}) bool {
+	switch name {
+	case "each", "each_pair", "each_key", "each_value", "transform_values", "transform_keys", "to_h":
+	case "sort":
+		return false
+	default:
+		if !rubyHashEnumName(name) {
+			return false
+		}
+	}
+	pos, blk := rubyBlockArgs(args)
+	return blk != nil && !((name == "min" || name == "max") && len(pos) > 0)
+}
+
+// rubyHashIter runs Hash d's method name, or Enumerator recv's over d, with d's
+// iteration count raised for the duration. Twin of hashIter in
+// ruby-interpreter.abnf.
+func (rt *jsrt) rubyHashIter(d, recv *jsObject, name string, args []interface{}) interface{} {
+	lev, _ := d.props["__iter"].(float64)
+	d.set("__iter", lev+1)
+	defer d.set("__iter", lev)
+	if recv != d {
+		return rt.rubyEnumMethod(recv, name, args)
+	}
+	keys, vals, _ := dictParts(d)
+	if name == "each" {
+		_, blk := rubyBlockArgs(args)
+		rt.rubyHashEach(keys, vals, blk)
+		return d
+	}
+	v, _ := rt.rubyHashMethod(d, keys, vals, name, args)
+	return v
+}
+
+// rubyHashAddCheck refuses a key Hash d does not hold yet while an iteration
+// over it runs. Twin of hashPut in ruby-interpreter.abnf.
+func (rt *jsrt) rubyHashAddCheck(d *jsObject, frame string) {
+	if lev, _ := d.props["__iter"].(float64); lev > 0 {
+		e := rt.rubyExc(rt.rubyBuiltinClass("RuntimeError"), []interface{}{"can't add a new key into hash during iteration"})
+		e.set("__rframe", frame)
+		panic(&jsThrown{value: e})
+	}
+}
+
 // rubyHashEach is Hash#each / #each_pair. An entry deleted before it is reached is
-// not yielded; a key the block ADDS, a deleted one put back included, is MRI's
-// RuntimeError, and is taken out again. Twin of hashEach in
-// ruby-interpreter.abnf, which states the rule.
+// not yielded. Twin of hashEach in ruby-interpreter.abnf.
 func (rt *jsrt) rubyHashEach(keys, vals *jsArray, blk interface{}) {
-	orig := append([]interface{}{}, keys.elems...)
 	for i := 0; i < len(keys.elems); {
 		k := keys.elems[i]
-		tail := keys.elems[len(keys.elems)-1]
 		rt.call(blk, jsUndef, []interface{}{rt.rubyKeyOut(k), vals.elems[i]})
-		if n1 := len(keys.elems); n1 > 0 && keys.elems[n1-1] != tail {
-			if fa := rubyFirstAdded(orig, keys.elems); fa < n1 {
-				keys.elems, vals.elems = keys.elems[:fa], vals.elems[:fa]
-				keys.dropIdx()
-				rt.rubyRaiseErr("each", "RuntimeError", "can't add a new key into hash during iteration")
-			}
-		}
 		if i < len(keys.elems) && keys.elems[i] == k {
 			i++
 		}
 	}
-}
-
-// rubyFirstAdded is the index of the first key a Hash#each block added. Twin of
-// rbaFirstAdded in lib/ruby-arr.js, which states the rule.
-func rubyFirstAdded(orig, keys []interface{}) int {
-	p := 0
-	for j, k := range keys {
-		for p < len(orig) && orig[p] != k {
-			p++
-		}
-		if p == len(orig) {
-			return j
-		}
-		p++
-	}
-	return len(keys)
 }
 
 // rubyIsIntV: an Integer, small or big.

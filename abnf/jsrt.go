@@ -8595,6 +8595,7 @@ func (rt *jsrt) rubyIndexSet(t, k, v interface{}) {
 		if i := rt.rubyDictFind(keys, k); i >= 0 {
 			vals.elems[i] = v
 		} else {
+			rt.rubyHashAddCheck(t.(*jsObject), "")
 			dictAppend(keys, vals, k, v)
 		}
 		return
@@ -11548,12 +11549,22 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 		return rt.rubyArrayMethod(o, name, args)
 	case *jsObject:
 		if rubyIsEnum(o) {
+			if src, isObj := o.props["src"].(*jsObject); isObj && o.props["__rlazy"] != true {
+				if _, _, isDict := dictParts(src); isDict {
+					if _, blk := rubyBlockArgs(args); blk != nil {
+						return rt.rubyHashIter(src, o, name, args)
+					}
+				}
+			}
 			return rt.rubyEnumMethod(o, name, args)
 		}
 		if _, isRng := o.props["__rrange"]; isRng {
 			return rt.rubyRangeMethod(o, name, args)
 		}
 		if keys, vals, isDict := dictParts(o); isDict {
+			if rubyHashIterates(name, args) {
+				return rt.rubyHashIter(o, o, name, args)
+			}
 			switch name {
 			case "inspect":
 				return rt.rubyInspect(o)
@@ -12528,6 +12539,7 @@ func (rt *jsrt) rubyHashMethod(o *jsObject, keys, vals *jsArray, name string, ar
 					}
 					continue
 				}
+				rt.rubyHashAddCheck(mg, name)
 				mkeys.elems = append(mkeys.elems, skeys.elems[i])
 				mvals.elems = append(mvals.elems, svals.elems[i])
 			}
