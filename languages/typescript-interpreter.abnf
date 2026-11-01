@@ -7014,8 +7014,8 @@ NotFuncHead = :script(~~
         if (useLast) {
             at = rv.lastIndex
             if (typeof at != "number") { at = 0 }
-            // Under u a lastIndex inside a surrogate pair reads the pair.
-            if (rv.unicode && at > 0 && at < s.length && rxCpAt(s, at - 1) > 65535) { at = at - 1 }
+            // Under u or v a lastIndex inside a surrogate pair reads the pair.
+            if ((rv.unicode || rv.unicodeSets) && at > 0 && at < s.length && rxCpAt(s, at - 1) > 65535) { at = at - 1 }
         }
         if (at < 0 || at > s.length) { if (useLast) { rv.lastIndex = 0 } return null }
         // Sticky is the engine's own anchored entry point: rxMatchAt tries ONE
@@ -7027,7 +7027,7 @@ NotFuncHead = :script(~~
     }
     // See the twin of this comment in js-interpreter.abnf.
     function jsReAdv(rv, s, i) {
-        if (rv.unicode && i + 1 < s.length && rxCpAt(s, i) > 65535) { return i + 2 }
+        if ((rv.unicode || rv.unicodeSets) && i + 1 < s.length && rxCpAt(s, i) > 65535) { return i + 2 }
         return i + 1
     }
     function reTest(rv, s) {

@@ -65,7 +65,7 @@ func jsxNeutral(flags string) string {
 	case jsxHasFlag(flags, 'u'):
 		return out + "SU"
 	case jsxHasFlag(flags, 'v'):
-		return out + "oU"
+		return out + "SUv"
 	}
 	return out + "o"
 }
@@ -93,14 +93,14 @@ func jsxSyntaxErr(src, fl string, ctor bool) string {
 	if re.ok || re.unsup {
 		return ""
 	}
-	return "Invalid regular expression: /" + src + "/" + fl + ": " + re.err
+	return "Invalid regular expression: /" + src + "/" + jsxCanonFlags(fl) + ": " + re.err
 }
 
 // jsxAdv is AdvanceStringIndex: past the empty match at i, a whole surrogate pair
-// under u. Twins: jsReAdv in both *-interpreter.abnf, jxAdv in
+// under u or v. Twins: jsReAdv in both *-interpreter.abnf, jxAdv in
 // languages/lib/js-rt.metajs.
 func jsxAdv(o *jsObject, text []rune, i int) int {
-	if jsxBool(o, "unicode") && i+1 < len(text) && isHighSurr(text[i]) && isLowSurr(text[i+1]) {
+	if (jsxBool(o, "unicode") || jsxBool(o, "unicodeSets")) && i+1 < len(text) && isHighSurr(text[i]) && isLowSurr(text[i+1]) {
 		return i + 2
 	}
 	return i + 1
@@ -271,8 +271,8 @@ func (rt *jsrt) jsxExec(o *jsObject, s string) interface{} {
 	at := 0
 	if useLast {
 		at = jsxLastIndex(o)
-		// Under u a lastIndex inside a surrogate pair reads the pair.
-		if jsxBool(o, "unicode") && at > 0 && at < len(text) && isLowSurr(text[at]) && isHighSurr(text[at-1]) {
+		// Under u or v a lastIndex inside a surrogate pair reads the pair.
+		if (jsxBool(o, "unicode") || jsxBool(o, "unicodeSets")) && at > 0 && at < len(text) && isLowSurr(text[at]) && isHighSurr(text[at-1]) {
 			at--
 		}
 	}

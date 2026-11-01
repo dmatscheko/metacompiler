@@ -199,6 +199,11 @@ var RX_CSRESET = 35 // no calls in progress (rxCsn)
 var RX_CLASSM = 36
 var RX_SPLITM = 37
 var RX_MATCHL = 38
+// An ECMAScript lookbehind's body runs BACKWARD (ES2025 22.2.2.4 direction
+// -1): these match the character / the group's text ending at sp, and move sp
+// back over it.
+var RX_CLASSB = 39
+var RX_BREFB = 40
 var RX_VCOMMIT = 1
 var RX_VPRUNE = 2
 var RX_VSKIP = 3
@@ -231,6 +236,13 @@ var RX_JUWORDB = 18 // \b under UNICODE_CHARACTER_CLASS: Unicode \w
 var RX_JUNWORDB = 19
 var RX_PUWORDB = 20  // \b under P without a: Python's Unicode \w (rxPyWordHit)
 var RX_PUNWORDB = 21
+// ECMAScript's (o, S): ^ and $ where m is in force, at a LineTerminator (\n,
+// \r, U+2028, U+2029) or the text's edge; \b and \B where i is in force under
+// U, whose word characters also hold U+017F and U+212A (WordCharacters).
+var RX_EBOL = 22
+var RX_EEOL = 23
+var RX_EUWORDB = 24
+var RX_EUNWORDB = 25
 
 // ----- Character-class shorthands -----
 var RX_SD = 1      // \d
@@ -280,7 +292,7 @@ var RX_STEPK = 4
 
 function rxNewCls() {
     return {neg: false, lo: [], hi: [], sp: [], subs: [], ands: [], props: [], x: false, u: false, pu: false,
-            cpg: false, jf: 0}
+            cpg: false, jf: 0, cs: false, v: false}
 }
 
 function rxClsAdd(cls, from, to) {
@@ -647,7 +659,7 @@ function rxCaseU(c, mode) {
 // must reject both cases of a listed letter, which is only true in that order.
 function rxClsMatch(cls, c, icase) {
     var hit = rxClsHit(cls, c)
-    if (!hit && icase) {
+    if (!hit && icase && !cls.cs) {
         if (cls.jf > 0) { hit = rxClsHitFold(cls, c, false) }
         else {
             var alt = rxSwapCase(c)
@@ -659,8 +671,9 @@ function rxClsMatch(cls, c, icase) {
 }
 
 function rxClsMatchX(cls, c, icase) {
+    if (icase && cls.v && !cls.cs) { return rxClsHitV(cls, c, cls.jf) != cls.neg }
     var hit = rxClsHitX(cls, c)
-    if (!hit && icase) {
+    if (!hit && icase && !cls.cs) {
         if (cls.jf > 0) { hit = rxClsHitFold(cls, c, true) }
         else {
             var alt = rxSwapCase(c)
@@ -714,9 +727,11 @@ function rxWordIU(cls) {
     cls.sp = keep
 }
 
-// rxIsWordAt: is c a word character for \b, which under JavaScript's i and u
-// flags also takes U+017F and U+212A (rxWordIU)?
-function rxIsWordAt(re, c) { return rxIsWordCode(c) || (re.jfold == 2 && (c == 383 || c == 8490)) }
+// rxIsWordAtE: is c a word character for RX_EUWORDB (rxWordIU)?
+function rxIsWordAtE(c) { return rxIsWordCode(c) || c == 383 || c == 8490 }
+
+// rxIsLineTermE: is c an ECMAScript LineTerminator?
+function rxIsLineTermE(c) { return c == 10 || c == 13 || c == 8232 || c == 8233 }
 
 // rxFoldSame: are code units a and b one character under JavaScript's i flag?
 function rxFoldSame(a, b, mode) {
@@ -742,7 +757,8 @@ function rxFoldSame(a, b, mode) {
 //         for a case-insensitive one, 2 under Java's UNICODE_CASE, 3 under
 //         Python's Unicode IGNORECASE
 //   gidx  capture index for "group" (-1: non-capturing), assertion kind for "assert",
-//         group index for "bref", 1 for a negative "look"
+//         group index for "bref", 1 for a negative "look" or "lookb"
+//   max of a "lookb" is 1 for an ECMAScript one, whose body matches backward
 
 // rxIsMetaCh answers whether a character has to be backslashed to stay a literal.
 // Whitespace and # are included because the x (extended) flag would otherwise drop
@@ -1140,6 +1156,10 @@ function rxHexVal(c) {
     return -1
 }
 
+// The properties of strings of ES2025 table 68, which only v accepts.
+var RX_STRPROPS = ",Basic_Emoji,Emoji_Keycap_Sequence,RGI_Emoji_Modifier_Sequence,RGI_Emoji_Flag_Sequence,"
+                  + "RGI_Emoji_Tag_Sequence,RGI_Emoji_ZWJ_Sequence,RGI_Emoji,"
+
 // rxEsc reads the escape whose backslash has already been consumed. It answers
 // {kind: 0, ch: code} for a literal character and {kind: 1, sp: code} for a
 // shorthand class; kind 2 is a backreference (ch = group number), and kind 3 a
@@ -1182,6 +1202,11 @@ function rxEsc(st, inClass) {
         var phad = st.err
         if (pe >= st.n) {
             rxErr(st, "Invalid property name")
+            st.pcls = rxNewCls()
+        } else if (st.vset && c == 112 && RX_STRPROPS.indexOf("," + p.substring(st.i + 1, pe) + ",") >= 0) {
+            // A property of strings (v only) is accepted, and not implemented.
+            rxUnsup(st, "properties of strings are not supported")
+            st.pstr = true
             st.pcls = rxNewCls()
         } else {
             st.pcls = rxPropClsEs(st, p.substring(st.i + 1, pe))
@@ -1567,6 +1592,385 @@ function rxParseClass(st) {
     return node
 }
 
+// ----- ECMAScript's v flag: class set expressions (ES2025 22.2.1, UnicodeSetsMode) -----
+//
+// Under v a class is a union, an intersection (&&) or a subtraction (--) of
+// operands: characters, ranges of them, \d-style and \p{..} escapes, nested
+// classes, and \q{..|..} string disjunctions. A set is {cls, strs, may}: cls the
+// single characters as a class tree, strs the strings of any other length (code
+// point arrays), may the static MayContainStrings, which a negated class must
+// not be. The parse and its errors follow V8's (regexp-parser.cc), node's.
+
+// The kinds of operand rxOperandV reads (st.vkind).
+var RX_VCHAR = 1
+var RX_VRANGE = 2
+var RX_VESC = 3
+var RX_VNEST = 4
+var RX_VSTR = 5
+
+function rxSetV() {
+    var c = rxNewCls()
+    c.x = true
+    return {cls: c, strs: [], may: false}
+}
+
+// rxCharV reads a ClassSetCharacter: a character other than a syntax character
+// or the first of a reserved double punctuator, or an escape of one.
+function rxCharV(st) {
+    var p = st.p
+    if (st.i >= st.n) {
+        rxErr(st, "Unterminated character class")
+        return 0
+    }
+    var c = p.charCodeAt(st.i)
+    var nx = st.i + 1 < st.n ? p.charCodeAt(st.i + 1) : 0
+    if (c == 92) {
+        if (nx == 98) {
+            st.i = st.i + 2
+            return 8
+        }
+        if (nx > 0 && "&-!#%,:;<=>@`~".indexOf(String.fromCharCode(nx)) >= 0) {
+            st.i = st.i + 2
+            return nx
+        }
+        if (nx > 0 && "dDsSwWpPq".indexOf(String.fromCharCode(nx)) >= 0) {
+            rxErr(st, "Invalid escape")
+            return 0
+        }
+        st.i = st.i + 1
+        return rxEsc(st, true).ch
+    }
+    if ("()[]{}/-\\|".indexOf(String.fromCharCode(c)) >= 0) {
+        rxErr(st, "Invalid character in character class")
+        return 0
+    }
+    if (nx == c && "&!#$%*+,.:;<=>?@^`~".indexOf(String.fromCharCode(c)) >= 0) {
+        rxErr(st, "Invalid set operation in character class")
+        return 0
+    }
+    var cp = rxCpAt(p, st.i)
+    st.i = st.i + (cp > 65535 ? 2 : 1)
+    return cp
+}
+
+// rxOperandV reads a ClassSetOperand into a set; st.vkind says which kind it
+// was, and st.vch is the character of an RX_VCHAR.
+function rxOperandV(st) {
+    var p = st.p
+    var set = rxSetV()
+    st.vkind = RX_VCHAR
+    if (st.i >= st.n) {
+        rxErr(st, "Unterminated character class")
+        return set
+    }
+    var c = p.charCodeAt(st.i)
+    var nx = st.i + 1 < st.n ? p.charCodeAt(st.i + 1) : 0
+    if (c == 92 && nx == 113) {
+        st.vkind = RX_VSTR
+        rxStringsV(st, set)
+        return set
+    }
+    if (c == 92 && nx > 0 && "dDsSwWpP".indexOf(String.fromCharCode(nx)) >= 0) {
+        st.vkind = RX_VESC
+        st.i = st.i + 1
+        st.pstr = false
+        var e = rxEsc(st, true)
+        if (e.kind == 1) {
+            rxClsAddSp(set.cls, e.sp)
+        } else {
+            var subs = set.cls.subs
+            subs.push(st.pcls)
+            set.may = st.pstr
+        }
+        return set
+    }
+    if (c == 91) {
+        st.i = st.i + 1
+        var nest = rxClassV(st)
+        st.vkind = RX_VNEST
+        return nest
+    }
+    st.vch = rxCharV(st)
+    rxClsAdd(set.cls, st.vch, st.vch)
+    return set
+}
+
+// rxStringsV reads \q{..|..}, st.i at the backslash: each one-character string
+// is a character of the set, every other one a string.
+function rxStringsV(st, set) {
+    var p = st.p
+    st.i = st.i + 2
+    if (st.i >= st.n || p.charCodeAt(st.i) != 123) {
+        rxErr(st, "Invalid escape")
+        return
+    }
+    st.i = st.i + 1
+    var cur = []
+    while (st.err == "" && st.i < st.n && p.charCodeAt(st.i) != 125) {
+        if (p.charCodeAt(st.i) == 124) {
+            rxAddStrV(st, set, cur)
+            cur = []
+            st.i = st.i + 1
+        } else {
+            cur.push(rxCharV(st))
+        }
+    }
+    rxAddStrV(st, set, cur)
+    if (st.i < st.n) { st.i = st.i + 1 }
+}
+
+function rxAddStrV(st, set, s) {
+    if (s.length == 1) {
+        rxClsAdd(set.cls, s[0], s[0])
+        return
+    }
+    set.may = true
+    if (!rxHasStrV(st, set.strs, s)) {
+        var strs = set.strs
+        strs.push(s)
+    }
+}
+
+// rxHasStrV: is s one of strs, compared as the i in force compares?
+function rxHasStrV(st, strs, s) {
+    var k = 0
+    while (k < strs.length) {
+        var t = strs[k]
+        if (t.length == s.length) {
+            var j = 0
+            while (j < s.length && (t[j] == s[j] || (st.icase && rxFoldSame(t[j], s[j], 2)))) { j = j + 1 }
+            if (j == s.length) { return true }
+        }
+        k = k + 1
+    }
+    return false
+}
+
+// rxClassV reads a class, the [ consumed, and answers its set.
+function rxClassV(st) {
+    var p = st.p
+    var neg = false
+    if (st.i < st.n && p.charCodeAt(st.i) == 94) {
+        neg = true
+        st.i = st.i + 1
+    }
+    var set = rxSetV()
+    if (st.i < st.n && p.charCodeAt(st.i) == 93) {
+        st.i = st.i + 1
+        set.cls.neg = neg
+        return set
+    }
+    var first = rxOperandV(st)
+    var c = st.i < st.n ? p.charCodeAt(st.i) : 0
+    var nx = st.i + 1 < st.n ? p.charCodeAt(st.i + 1) : 0
+    if (st.err == "" && (c == 45 || c == 38) && nx == c) {
+        set = rxSetOpV(st, first, c)
+    } else {
+        set = rxUnionV(st, first)
+    }
+    if (st.err != "") { return set }
+    if (st.i >= st.n) {
+        rxErr(st, "Unterminated character class")
+        return set
+    }
+    st.i = st.i + 1
+    if (neg && set.may) { rxErr(st, "Negated character class may contain strings") }
+    set.cls.neg = neg
+    return set
+}
+
+// rxUnionV reads a ClassUnion on from its first operand. A range's ends must be
+// characters.
+function rxUnionV(st, first) {
+    var p = st.p
+    var set = rxSetV()
+    var last = st.vkind
+    var ch = st.vch
+    rxUnionAddV(st, set, first, last)
+    while (st.err == "" && st.i < st.n && p.charCodeAt(st.i) != 93) {
+        if (p.charCodeAt(st.i) == 45) {
+            if (st.i + 1 < st.n && p.charCodeAt(st.i + 1) == 45) {
+                rxErr(st, "Invalid set operation in character class")
+                return set
+            }
+            if (last != RX_VCHAR) {
+                rxErr(st, "Invalid character class")
+                return set
+            }
+            st.i = st.i + 1
+            rxOperandV(st)
+            if (st.err != "") { return set }
+            if (st.vkind != RX_VCHAR) {
+                rxErr(st, "Invalid character class")
+                return set
+            }
+            if (ch > st.vch) {
+                rxErr(st, "Range out of order in character class")
+                return set
+            }
+            rxClsAdd(set.cls, ch, st.vch)
+            last = RX_VRANGE
+        } else {
+            var op = rxOperandV(st)
+            last = st.vkind
+            ch = st.vch
+            rxUnionAddV(st, set, op, last)
+        }
+    }
+    return set
+}
+
+function rxUnionAddV(st, set, op, kind) {
+    if (kind == RX_VCHAR) {
+        rxClsAdd(set.cls, st.vch, st.vch)
+        return
+    }
+    var subs = set.cls.subs
+    subs.push(op.cls)
+    var k = 0
+    while (k < op.strs.length) {
+        if (!rxHasStrV(st, set.strs, op.strs[k])) {
+            var strs = set.strs
+            strs.push(op.strs[k])
+        }
+        k = k + 1
+    }
+    if (op.may) { set.may = true }
+}
+
+// rxSetOpV reads a ClassSubtraction (k 45, --) or ClassIntersection (k 38, &&)
+// on from its first operand. MayContainStrings is the first operand's, and of
+// an intersection every operand's.
+function rxSetOpV(st, first, k) {
+    var p = st.p
+    var set = first
+    while (st.err == "" && st.i + 1 < st.n && p.charCodeAt(st.i) == k && p.charCodeAt(st.i + 1) == k) {
+        st.i = st.i + 2
+        if (k == 38 && st.i < st.n && p.charCodeAt(st.i) == 38) {
+            rxErr(st, "Invalid character in character class")
+            return set
+        }
+        var op = rxOperandV(st)
+        var keep = []
+        var j = 0
+        while (j < set.strs.length) {
+            if (rxHasStrV(st, op.strs, set.strs[j]) == (k == 38)) { keep.push(set.strs[j]) }
+            j = j + 1
+        }
+        var cls = rxClsAnd(set.cls, k == 38 ? op.cls : rxClsNot(op.cls))
+        set = {cls: cls, strs: keep, may: set.may && (k == 45 || op.may)}
+    }
+    if (st.err == "" && st.i < st.n && p.charCodeAt(st.i) != 93) {
+        rxErr(st, "Invalid set operation in character class")
+    }
+    return set
+}
+
+// rxParseClassV reads a class under v, the [ consumed. One with strings
+// matches the longest string it can, then a character, then the empty string
+// (ES2025 22.2.2.9 CompileAtom).
+function rxParseClassV(st) {
+    var set = rxClassV(st)
+    set.cls.v = true
+    set.cls.cs = !st.icase
+    var cn = rxNode("cls")
+    cn.cls = set.cls
+    var strs = set.strs
+    if (strs.length == 0) { return cn }
+    var alt = rxNode("alt")
+    var arms = alt.items
+    var most = 0
+    var k = 0
+    while (k < strs.length) {
+        if (strs[k].length > most) { most = strs[k].length }
+        k = k + 1
+    }
+    var len = most
+    while (len >= 2) {
+        k = 0
+        while (k < strs.length) {
+            if (strs[k].length == len) {
+                var cat = rxNode("cat")
+                var chars = cat.items
+                var j = 0
+                while (j < len) {
+                    var one = rxNode("cls")
+                    rxClsAdd(one.cls, strs[k][j], strs[k][j])
+                    one.cls.cs = !st.icase
+                    chars.push(one)
+                    j = j + 1
+                }
+                arms.push(cat)
+            }
+            k = k + 1
+        }
+        len = len - 1
+    }
+    arms.push(cn)
+    if (rxHasStrV(st, strs, [])) { arms.push(rxNode("empty")) }
+    var g = rxNode("group")
+    g.items.push(alt)
+    return g
+}
+
+// rxClsHitV is rxClsHitX under v and i: every operand is case-folded before the
+// set operations (MaybeSimpleCaseFolding), so c is in a leaf when any member of
+// its case-fold orbit is, and the tree combines those answers.
+function rxClsHitV(cls, c, jf) {
+    var hit = rxClsHitL(cls, c)
+    var o = rxFoldNext(c, jf)
+    var guard = 0
+    while (!hit && o != c && guard < 8) {
+        hit = rxClsHitL(cls, o)
+        o = rxFoldNext(o, jf)
+        guard = guard + 1
+    }
+    var subs = cls.subs
+    var i = 0
+    while (!hit && i < subs.length) {
+        hit = rxClsHitV(subs[i], c, jf) != subs[i].neg
+        i = i + 1
+    }
+    var ands = cls.ands
+    i = 0
+    while (hit && i < ands.length) {
+        hit = rxClsHitV(ands[i], c, jf) != ands[i].neg
+        i = i + 1
+    }
+    return hit
+}
+
+// rxClsHitL: the class's own ranges, shorthands and properties.
+function rxClsHitL(cls, c) {
+    if (rxClsHit(cls, c)) { return true }
+    var props = cls.props
+    var i = 0
+    while (i < props.length) {
+        if (rxPropHit(props[i], c)) { return true }
+        i = i + 1
+    }
+    return false
+}
+
+// rxClsJf marks a class tree with JavaScript's i flag (jf), and under u gives
+// its \w and \W WordCharacters' extra members (rxWordIU).
+function rxClsJf(cls, jf) {
+    cls.jf = jf
+    if (jf == 2) { rxWordIU(cls) }
+    var subs = cls.subs
+    var i = 0
+    while (i < subs.length) {
+        rxClsJf(subs[i], jf)
+        i = i + 1
+    }
+    var ands = cls.ands
+    i = 0
+    while (i < ands.length) {
+        rxClsJf(ands[i], jf)
+        i = i + 1
+    }
+}
+
 // rxParseClassJ reads a java.util.regex class; the [ has already been consumed.
 function rxParseClassJ(st) {
     var node = rxNode("cls")
@@ -1898,12 +2302,14 @@ function rxIdCharEs(st, c, start) {
 }
 
 // rxModifiersEs reads an ECMAScript modifiers group (?ims-ims:X), st.i at the
-// first letter: the engine has no scoped flags, so a well-formed one is read on
-// as a group and reported as unsupported (rxUnsup), and anything else is the
-// SyntaxError.
+// first letter: X is parsed with the i, m and s in force that the letters say
+// (ES2025 22.2.2.3 UpdateModifiers), the folding marked on its classes and
+// backreferences (rxParsePiece), the rest chosen as each atom is read.
 function rxModifiersEs(st) {
     var p = st.p
     var seen = ""
+    var on = ""
+    var off = ""
     var neg = false
     while (st.i < st.n) {
         var c = p.charAt(st.i)
@@ -1912,11 +2318,19 @@ function rxModifiersEs(st) {
                 rxErr(st, "Invalid flag group")
                 return rxNode("empty")
             }
-            rxUnsup(st, "modifiers are not supported")
             st.i = st.i + 1
+            var icase = st.icase
+            var multi = st.multi
+            var dotall = st.dotall
+            rxFlagsSet(st, on, true)
+            rxFlagsSet(st, off, false)
+            if (st.icase) { st.anyI = true }
             var g = rxNode("group")
             g.items.push(rxParseAlt(st))
             rxExpect(st, 41, "unterminated group")
+            st.icase = icase
+            st.multi = multi
+            st.dotall = dotall
             return g
         }
         if (c == "-" && !neg) {
@@ -1927,6 +2341,7 @@ function rxModifiersEs(st) {
                 return rxNode("empty")
             }
             seen = seen + c
+            if (neg) { off = off + c } else { on = on + c }
         } else {
             rxErr(st, "Invalid group")
             return rxNode("empty")
@@ -2043,10 +2458,11 @@ function rxParseGroup(st) {
         if (k == 60 || (k == 39 && !st.java && !st.es)) { // (?<name>  (?'name'
             if (k == 60 && st.i + 1 < st.n) {
                 var k2 = p.charCodeAt(st.i + 1)
-                if ((k2 == 61 || k2 == 33) && (st.java || st.py)) { // (?<= (?<!
+                if ((k2 == 61 || k2 == 33) && (st.java || st.py || st.es)) { // (?<= (?<!
                     st.i = st.i + 2
                     var lb = rxNode("lookb")
                     if (k2 == 33) { lb.gidx = 1 }
+                    if (st.es) { lb.max = 1 }
                     var bopen = st.open
                     var bthen = st.tctx
                     st.open = []
@@ -2477,6 +2893,7 @@ function rxParseAtom(st) {
     if (c == 91) {
         st.i = st.i + 1
         if (st.java) { return rxParseClassJ(st) }
+        if (st.vset) { return rxParseClassV(st) }
         return rxParseClass(st)
     }
     // Java reads a { where an atom belongs as a quantifier of NOTHING: {2}a and
@@ -2488,6 +2905,10 @@ function rxParseAtom(st) {
         dot.cls.neg = true
         if (!st.dotall) { rxClsAdd(dot.cls, 10, 10) }
         if (st.java && !st.dotall && !st.unix) { rxAddLineSepJ(dot.cls) }
+        if (st.es && !st.dotall) {
+            rxClsAdd(dot.cls, 13, 13)
+            rxClsAdd(dot.cls, 8232, 8233)
+        }
         return dot
     }
     if (c == 94) { // ^
@@ -2496,6 +2917,7 @@ function rxParseAtom(st) {
         b.gidx = RX_BOL
         if (st.py) { b.gidx = st.multi ? RX_MBOL : RX_BOS }
         if (st.java) { b.gidx = !st.multi ? RX_BOS : st.unix ? RX_JUBOL : RX_JBOL }
+        if (st.es) { b.gidx = st.multi ? RX_EBOL : RX_BOS }
         return b
     }
     if (c == 36) { // $
@@ -2504,6 +2926,7 @@ function rxParseAtom(st) {
         d.gidx = RX_EOL
         if (st.py) { d.gidx = st.multi ? RX_MEOL : RX_EOSNL }
         if (st.java) { d.gidx = rxEolJ(st, st.multi) }
+        if (st.es) { d.gidx = st.multi ? RX_EEOL : RX_EOS }
         return d
     }
     if (c == 92 && st.ere) {
@@ -2597,6 +3020,7 @@ function rxParseAtom(st) {
             if (nxt == 90) { a.gidx = st.py ? RX_EOS : RX_EOSNL }
             if (st.pyuni && nxt == 98) { a.gidx = RX_PUWORDB }
             if (st.pyuni && nxt == 66) { a.gidx = RX_PUNWORDB }
+            if (st.es && st.icase && st.uni) { a.gidx = nxt == 98 ? RX_EUWORDB : RX_EUNWORDB }
             // Go's \b and \B are ASCII \w ones (R).
             if (st.java && !st.re2) {
                 if (nxt == 98) { a.gidx = st.uclass ? RX_JUWORDB : RX_JWORDB }
@@ -2620,6 +3044,15 @@ function rxParseAtom(st) {
         if (e.kind == 3) {
             var pn = rxNode("cls")
             pn.cls = st.pcls
+            // ECMAScript's \P{..} is complemented BEFORE the i flag folds case, so
+            // it stands in a class tree (and \P{Ll} matches "A" under u).
+            if (st.es) {
+                pn.cls = rxNewCls()
+                pn.cls.x = true
+                pn.cls.v = st.vset
+                var psubs = pn.cls.subs
+                psubs.push(st.pcls)
+            }
             return pn
         }
         var ln = rxNode("cls")
@@ -2821,6 +3254,13 @@ function rxParsePiece(st) {
         if (atom.t == "bref") { atom.min = st.pyuni ? 3 : 1 }
     }
     if (st.java && st.icase && atom.t == "bref") { atom.min = st.ucase ? 2 : 1 }
+    // ECMAScript's i can be off where the atom stands though on elsewhere
+    // (rxModifiersEs): its class, or its backreference (min 4), then compares
+    // exactly.
+    if (st.es && !st.icase) {
+        if (atom.t == "cls") { atom.cls.cs = true }
+        if (atom.t == "bref") { atom.min = 4 }
+    }
     rxSkipX(st)
     var seen = 0
     while (st.i < st.n) {
@@ -3005,9 +3445,10 @@ function rxParseAlt(st) {
 
 // cmin/cmax/cgreedy describe counted loop i (RX_CINIT .. RX_CINC), and cemp
 // its iteration count from which an iteration that consumed nothing leaves it;
-// lbmin/lbmax the length range of lookbehind i (-1: unbounded).
+// lbmin/lbmax the length range of lookbehind i (-1: unbounded); back is set
+// while an ECMAScript lookbehind's body is emitted, which runs backward.
 function rxNewProg() {
-    return {ops: [], as: [], bs: [], clss: [], nmarks: 0, jsrep: false, java: false, re2: false, pcre: false,
+    return {ops: [], as: [], bs: [], clss: [], nmarks: 0, jsrep: false, java: false, re2: false, pcre: false, back: false,
             dummy: rxNewCls(), cmin: [], cmax: [], cgreedy: [], cemp: [], lbmin: [], lbmax: [], calls: [], thens: [],
             thenNodes: [], acc: 0}
 }
@@ -3062,7 +3503,7 @@ function rxEmit(pg, node) {
     var t = node.t
     if (t == "empty") { return }
     if (t == "cls") {
-        rxAdd(pg, node.cls.x ? RX_CLASSX : RX_CLASS, 0, 0, node.cls)
+        rxAdd(pg, pg.back ? RX_CLASSB : node.cls.x ? RX_CLASSX : RX_CLASS, 0, 0, node.cls)
         return
     }
     if (t == "assert") {
@@ -3070,14 +3511,15 @@ function rxEmit(pg, node) {
         return
     }
     if (t == "bref") {
-        rxAdd(pg, RX_BREF, node.gidx, node.min, pg.dummy)
+        rxAdd(pg, pg.back ? RX_BREFB : RX_BREF, node.gidx, node.min, pg.dummy)
         return
     }
     if (t == "cat") {
+        // Backward, a sequence is matched last item first.
         var items = node.items
         var i = 0
         while (i < items.length) {
-            rxEmit(pg, items[i])
+            rxEmit(pg, items[pg.back ? items.length - 1 - i : i])
             i = i + 1
         }
         return
@@ -3089,17 +3531,22 @@ function rxEmit(pg, node) {
     if (t == "group") {
         var gi = node.gidx
         var kids = node.items
-        if (gi >= 0) { rxAdd(pg, RX_SAVE, 2 * gi, 0, pg.dummy) }
+        var gb = pg.back ? 1 : 0
+        if (gi >= 0) { rxAdd(pg, RX_SAVE, 2 * gi + gb, 0, pg.dummy) }
         if (kids.length > 0) { rxEmit(pg, kids[0]) }
-        if (gi >= 0) { rxAdd(pg, RX_SAVE, 2 * gi + 1, 0, pg.dummy) }
+        if (gi >= 0) { rxAdd(pg, RX_SAVE, 2 * gi + 1 - gb, 0, pg.dummy) }
         return
     }
-    if (t == "look") {
+    if (t == "look" || (t == "lookb" && node.max == 1)) {
         // b: 0 positive, 1 negative, 2 the positive assertion of a conditional
-        // (node.min 1).
+        // (node.min 1). A lookahead's body runs forward, an ECMAScript
+        // lookbehind's backward, wherever they stand.
         var lk = rxAdd(pg, RX_LOOK, 0, node.gidx == 1 ? 1 : node.min == 1 ? 2 : 0, pg.dummy)
+        var lback = pg.back
+        pg.back = t == "lookb"
         var lkids = node.items
         if (lkids.length > 0) { rxEmit(pg, lkids[0]) }
+        pg.back = lback
         rxAdd(pg, RX_LOOKEND, 0, 0, pg.dummy)
         rxSetA(pg, lk, rxHere(pg))
         return
@@ -6196,6 +6643,7 @@ function rxCompile(pattern, flags) {
     var uni = false
     var strict = false
     var onig = false
+    var vset = false
     // C is followed by PHP's modifiers rather than these letters (rxPcre).
     var pcre = flags.length > 0 && flags.charAt(0) == "C"
     var fi = pcre ? flags.length : 0
@@ -6220,6 +6668,7 @@ function rxCompile(pattern, flags) {
         else if (f == "U") { uni = true }
         else if (f == "S") { strict = true }
         else if (f == "O") { onig = true }
+        else if (f == "v") { vset = true }
         fi = fi + 1
     }
     // R reads the pattern as Go does and compiles its J spelling (rxRe2).
@@ -6268,7 +6717,8 @@ function rxCompile(pattern, flags) {
         canon: false, pyuni: py && !pyascii, re2: re2, pcre: pcre, open: [], tctx: [], brbase: 0 - 1,
         inlook: 0, startopt: false, uni: uni, noauto: noauto,
         es: octal || strict, strict: strict, hasNames: rxCountGroups(pat, false) > 0, unsup: false,
-        apath: [], nalts: 0, npaths: [], late: "", unsupMsg: ""
+        apath: [], nalts: 0, npaths: [], late: "", unsupMsg: "", anyI: false,
+        vset: vset, vkind: 0, vch: 0, pstr: false
     }
     // Under P and J case folding and line anchoring are decided per atom while
     // parsing.
@@ -6277,6 +6727,9 @@ function rxCompile(pattern, flags) {
         multi = false
     }
     var ast = rxParseAlt(st)
+    // A scoped (?i:X) folds case in X alone: the program folds, and every class
+    // and backreference read with i off is marked to compare exactly.
+    if (st.anyI) { icase = true }
     // A search steps over a surrogate pair whole: under J when the pattern has
     // a supplementary character (java.util.regex's hasSupplementary), and always
     // under P, where the text is code points.
@@ -6363,7 +6816,8 @@ function rxCompile(pattern, flags) {
         var fi2 = 0
         while (fi2 < fc.length) {
             fc[fi2].jf = jfold
-            if (jfold == 2) { rxWordIU(fc[fi2]) }
+            if (fc[fi2].v && !fc[fi2].cs) { rxClsJf(fc[fi2], jfold) }
+            else if (jfold == 2 && !fc[fi2].cs) { rxWordIU(fc[fi2]) }
             fi2 = fi2 + 1
         }
     }
@@ -6429,11 +6883,19 @@ function rxAssertOK(re, text, kind, sp) {
         if (kind == RX_PUWORDB) { return pb != pa }
         return pb == pa
     }
+    if (kind == RX_EBOL) { return sp == 0 || rxIsLineTermE(text.charCodeAt(sp - 1)) }
+    if (kind == RX_EEOL) { return sp == n || rxIsLineTermE(text.charCodeAt(sp)) }
+    if (kind == RX_EUWORDB || kind == RX_EUNWORDB) {
+        var eb = sp > 0 && rxIsWordAtE(text.charCodeAt(sp - 1))
+        var ea = sp < n && rxIsWordAtE(text.charCodeAt(sp))
+        if (kind == RX_EUWORDB) { return eb != ea }
+        return eb == ea
+    }
     if (kind >= RX_JBOL) { return rxAssertJ(re, text, kind, sp) }
     var before = false
     var after = false
-    if (sp > 0) { before = rxIsWordAt(re, text.charCodeAt(sp - 1)) }
-    if (sp < n) { after = rxIsWordAt(re, text.charCodeAt(sp)) }
+    if (sp > 0) { before = rxIsWordCode(text.charCodeAt(sp - 1)) }
+    if (sp < n) { after = rxIsWordCode(text.charCodeAt(sp)) }
     if (kind == RX_WORDB) { return before != after }
     return before == after
 }
@@ -6729,7 +7191,7 @@ function rxRun(re, text, pcIn, spIn, caps, marks, st, base, keep) {
                 pc = as[pc]
             } else if (op == RX_LOOKEND) {
                 return sp
-            } else if (op == RX_BREF) {
+            } else if (op == RX_BREF || op == RX_BREFB) {
                 var g = as[pc]
                 // A reference to a group NUMBER the pattern never defined (\1 in a
                 // pattern with no groups) is out of range in caps. Treated exactly like
@@ -6751,23 +7213,28 @@ function rxRun(re, text, pcIn, spIn, caps, marks, st, base, keep) {
                     pc = pc + 1
                 } else {
                     var len = to - from
-                    if (sp + len > n) {
+                    // RX_BREFB compares the text ending at sp.
+                    var bat = op == RX_BREF ? sp : sp - len
+                    if (bat + len > n) {
                         re.hitEnd = true
+                        break
+                    }
+                    if (bat < 0) {
                         break
                     }
                     var bi = 0
                     var bmis = false
                     while (bi < len && !bmis) {
                         var lc = text.charCodeAt(from + bi)
-                        var rc = text.charCodeAt(sp + bi)
+                        var rc = text.charCodeAt(bat + bi)
                         // P compares an astral character whole.
                         if (re.py && lc >= 55296 && lc <= 56319) {
                             lc = rxCpAt(text, from + bi)
-                            rc = rxCpAt(text, sp + bi)
+                            rc = rxCpAt(text, bat + bi)
                             if (lc > 65535) { bi = bi + 1 }
                         }
                         if (lc != rc) {
-                            if (!re.icase && bs[pc] == 0) {
+                            if ((!re.icase && bs[pc] == 0) || bs[pc] == 4) {
                                 bmis = true
                             } else if (bs[pc] == 2) {
                                 // Java's CIBackRef under UNICODE_CASE.
@@ -6789,7 +7256,7 @@ function rxRun(re, text, pcIn, spIn, caps, marks, st, base, keep) {
                         break
                     }
                     pc = pc + 1
-                    sp = sp + len
+                    sp = op == RX_BREF ? sp + len : bat
                 }
             } else if (op == RX_MATCH) {
                 // rxMatchWhole CONSTRAINS THE RUN rather than rewriting the pattern: a
@@ -7080,6 +7547,21 @@ function rxRun(re, text, pcIn, spIn, caps, marks, st, base, keep) {
                     st.bcaps = rxCopy(caps)
                 }
                 break
+            } else if (op == RX_CLASSB) {
+                if (sp <= 0) {
+                    break
+                }
+                var bc = text.charCodeAt(sp - 1)
+                // Under U a surrogate pair is one character, read from its low half.
+                if (re.uni && bc >= 56320 && bc <= 57343 && sp >= 2) {
+                    var bh = text.charCodeAt(sp - 2)
+                    if (bh >= 55296 && bh <= 56319) { bc = rxCpAt(text, sp - 2) }
+                }
+                if (!(clss[pc].x ? rxClsMatchX(clss[pc], bc, re.icase) : rxClsMatch(clss[pc], bc, re.icase))) {
+                    break
+                }
+                pc = pc + 1
+                sp = sp - (bc > 65535 ? 2 : 1)
             } else {
                 break
             }

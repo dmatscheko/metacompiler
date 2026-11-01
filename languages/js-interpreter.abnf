@@ -8587,7 +8587,7 @@ NotFuncHead = :script(~~
     //   y  sticky: search from lastIndex and reject a match that does not BEGIN there
     //   d  hasIndices: presentation only, the match record already carries the offsets
     //   u  code points, and the strict grammar without Annex B (jsnReNeutral)
-    //   v  as u, plus class-set syntax, which this engine does not implement
+    //   v  as u, plus class set expressions
     function jsReHas(flags, letter) {
         for (var i = 0; i < flags.length; i++) { if (flags.charAt(i) == letter) { return true } }
         return false
@@ -8693,8 +8693,8 @@ NotFuncHead = :script(~~
         if (useLast) {
             at = rv.lastIndex
             if (typeof at != "number") { at = 0 }
-            // Under u a lastIndex inside a surrogate pair reads the pair.
-            if (rv.unicode && at > 0 && at < s.length && rxCpAt(s, at - 1) > 65535) { at = at - 1 }
+            // Under u or v a lastIndex inside a surrogate pair reads the pair.
+            if ((rv.unicode || rv.unicodeSets) && at > 0 && at < s.length && rxCpAt(s, at - 1) > 65535) { at = at - 1 }
         }
         if (at < 0 || at > s.length) { if (useLast) { rv.lastIndex = 0 } return null }
         // Sticky is the engine's own anchored entry point: rxMatchAt tries ONE
@@ -8704,10 +8704,10 @@ NotFuncHead = :script(~~
         if (useLast) { rv.lastIndex = m.end }
         return reResult(rv, s, m)
     }
-    // AdvanceStringIndex: past the empty match at i, a whole surrogate pair under u.
+    // AdvanceStringIndex: past the empty match at i, a whole surrogate pair under u or v.
     // Twins: jsxAdv in abnf/jsrtregexjs.go, jxAdv in languages/lib/js-rt.metajs.
     function jsReAdv(rv, s, i) {
-        if (rv.unicode && i + 1 < s.length && rxCpAt(s, i) > 65535) { return i + 2 }
+        if ((rv.unicode || rv.unicodeSets) && i + 1 < s.length && rxCpAt(s, i) > 65535) { return i + 2 }
         return i + 1
     }
     function reTest(rv, s) {

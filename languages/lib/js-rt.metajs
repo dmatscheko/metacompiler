@@ -8938,10 +8938,10 @@ function jxCanonFlags(flags) {
     return out
 }
 
-// AdvanceStringIndex: past the empty match at i, a whole surrogate pair under u.
-// Twin of jsxAdv in abnf/jsrtregexjs.go.
+// AdvanceStringIndex: past the empty match at i, a whole surrogate pair under u
+// or v. Twin of jsxAdv in abnf/jsrtregexjs.go.
 function jxAdv(o, s, i) {
-    if (jxBool(o, "unicode")) {
+    if (jxBool(o, "unicode") || jxBool(o, "unicodeSets")) {
         if (i + 1 < s.length) {
             if (rxCpAt(s, i) > 65535) { return i + 2 }
         }
@@ -9098,8 +9098,8 @@ function jxExec(o, s) {
     var at = 0
     if (useLast) {
         at = jxLastIndex(o)
-        // Under u a lastIndex inside a surrogate pair reads the pair.
-        if (jxBool(o, "unicode")) {
+        // Under u or v a lastIndex inside a surrogate pair reads the pair.
+        if (jxBool(o, "unicode") || jxBool(o, "unicodeSets")) {
             if (at > 0 && at < s.length) {
                 if (rxCpAt(s, at - 1) > 65535) { at = at - 1 }
             }

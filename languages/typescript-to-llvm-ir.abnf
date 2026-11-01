@@ -93,9 +93,8 @@ skipped under -warn-unsupported): `with`, a logical assignment (&&= ||= ??=) to 
 super property, and the assign-nowhere heads the spec calls early errors ('0 = 0',
 'for (0 of 0)'). Deliberate semantic simplifications, because the runtime has no
 model for them: a regular expression is
-matched by the shared engine (abnf/jsrtregex.go plus abnf/jsrtregexjs.go), which is one
-permissive dialect shared by four languages and so has no lookbehind and no property
-escapes, and the
+matched by the shared engine (abnf/jsrtregex.go plus abnf/jsrtregexjs.go), which has
+no properties of strings (the v flag's RGI_Emoji and kin), and the
 string parts of a tagged template are an object with index keys rather than an Array.
 
 ASYNC IS AWAITS-AS-YIELDS: an async function answers a real Promise, `await` suspends,

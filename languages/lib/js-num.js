@@ -392,22 +392,22 @@ function jsnReFlagsOk(fl) {
 // for group 1 (node), not "" (Perl, Python, Ruby, Java), and a repeated atom's
 // captures are cleared at the start of every iteration. o is ECMAScript's escapes and
 // early errors, with Annex B's legacy readings while U is off; S is u's strict
-// grammar instead; U reads pattern and text as code points. v gets o and U: its
-// class-set syntax is not implemented. Twin of jsxNeutral in abnf/jsrtregexjs.go.
+// grammar instead; U reads pattern and text as code points. v is u plus class
+// set expressions (regex.js's v). Twin of jsxNeutral in abnf/jsrtregexjs.go.
 function jsnReNeutral(fl) {
     var out = "j"
     if (fl.indexOf("i") >= 0) { out = out + "i" }
     if (fl.indexOf("s") >= 0) { out = out + "s" }
     if (fl.indexOf("m") >= 0) { out = out + "m" }
     if (fl.indexOf("u") >= 0) { return out + "SU" }
-    if (fl.indexOf("v") >= 0) { return out + "oU" }
+    if (fl.indexOf("v") >= 0) { return out + "SUv" }
     return out + "o"
 }
 
 // The SyntaxError message of a RegExp with source src and flags fl, or "": flags
 // jsnReFlagsOk refuses (ctor: the RegExp constructor's wording, else a literal's),
 // or a pattern lib/regex.js refuses as malformed. A pattern it refuses only for a
-// feature it does not implement (re.unsup: lookbehind, modifiers) raises nothing
+// feature it does not implement (re.unsup: a property of strings) raises nothing
 // here and fails when it is matched. Twin of jsxSyntaxErr in abnf/jsrtregexjs.go.
 function jsnReSyntaxErr(src, fl, ctor) {
     if (!jsnReFlagsOk(fl)) {
@@ -416,7 +416,14 @@ function jsnReSyntaxErr(src, fl, ctor) {
     }
     var re = rxGet(src, jsnReNeutral(fl))
     if (re.ok || re.unsup) { return "" }
-    return "Invalid regular expression: /" + src + "/" + fl + ": " + re.err
+    // The flags as RegExp#flags spells them.
+    var canon = ""
+    var i = 0
+    while (i < 8) {
+        if (fl.indexOf("dgimsuvy".charAt(i)) >= 0) { canon = canon + "dgimsuvy".charAt(i) }
+        i = i + 1
+    }
+    return "Invalid regular expression: /" + src + "/" + canon + ": " + re.err
 }
 
 // ----- Number#toFixed / toExponential / toPrecision (ES2023 21.1.3) -----

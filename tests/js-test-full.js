@@ -2082,6 +2082,55 @@ function s151() {
         !/^\p{Grapheme_Base}$/u.test(s) && String.fromCodePoint(0xdc00, 0x41).length === 2)
 }
 
+// ===== SECTION 152: RegExp lookbehind, modifiers, line terminators, the v flag =====
+// A lookbehind matches its body BACKWARD from where it stands: greedy loops take
+// from the right, a capture inside a loop keeps its leftmost iteration, and a
+// backreference must follow its group in the text to see it. (?ims-ims:X) sets
+// the flags inside X alone. \r, U+2028 and U+2029 end lines as \n does. Under v a
+// class is a union, intersection (&&) or subtraction (--) of characters, ranges,
+// escapes, nested classes and \q{..} strings, the longest string matching first;
+// under i every operand is case-folded before the set operations. Values read
+// off node 24.
+function s152() {
+    var j = function (v) { return JSON.stringify(v) }
+    check("lb152a", j(/(?<=\$)\d+(\.\d*)?/.exec("cost $10.53")) === '["10.53",".53"]' &&
+        j("ab cb bb".match(/(?<!a)b/g)) === '["b","b","b"]' && /(?<=^|,)\w+/g.exec("aa,bb").index === 0 &&
+        j("aa,bb,cc".match(/(?<=^|,)\w+/g)) === '["aa","bb","cc"]' && /(?<=(?<=x)a)b/.exec("ab xab").index === 5 &&
+        /(?<=\u{1F600})x/u.test("\u{1F600}x") && /(?<=a{2})b/.exec("ab aab").index === 5)
+    check("lb152b", j(/(?<=(\d+)(\d+))$/.exec("1053")) === '["","1","053"]' &&
+        j(/(?<=(\d+?)(\d+?))$/.exec("1053")) === '["","5","3"]' && /(?<=([ab])+)c/.exec("abc")[1] === "a" &&
+        /(?<=\1(a))c/.exec("aac")[1] === "a" && j(/(?<=(.)\1)c/.exec("xyzzc")) === '["c","z"]' &&
+        /(?<=\1(.))c/.exec("xyzzc")[1] === "z" && /(?<=(a|ab))c/.exec("abc")[1] === "ab" &&
+        j(/(?<!(a))b/.exec("ab cb")) === '["b",null]')
+    check("mod152c", /(?i:a)b/.exec("AB Ab").index === 3 && /(?-i:a)b/i.exec("Ab aB").index === 3 &&
+        /(?i-s:a.)b/s.test("Axb") && !/(?i-s:a.)b/s.test("A\nb") && /(?s:a.)b/.test("a\nb") &&
+        /(?m:^b)/.test("a\nb") && !/(?-m:^b)/m.test("a\nb") && /(a)(?i:\1)/.test("aA") &&
+        /(a)(?-i:\1)/i.exec("aA Aa aa").index === 6 && /(?i:[a-c]+)D/.exec("ABCd ABCD").index === 5 &&
+        /(?i:(?-i:a)b)/.test("aB") && !/(?i:(?-i:a)b)/.test("AB"))
+    check("lt152d", !/./.test("\r") && !/./.test("\u2028") && /^b/m.test("a\rb") && /a$/m.test("a\u2029b") &&
+        /a.b/s.test("a\rb"))
+    check("v152e", "ab12cd".match(/[\w--\d]+/v)[0] === "ab" && "ab12cd".match(/[\w&&\d]+/v)[0] === "12" &&
+        "hello".match(/[[a-z]--[aeiou]]+/v)[0] === "h" && /[\q{abc|ab|a}]/v.exec("xabcd")[0] === "abc" &&
+        j("1ab2abab3".match(/[\d\q{ab}]+/gv)) === '["1ab2abab3"]' && /[\q{AB}]/vi.exec("xaby")[0] === "ab" &&
+        !/[\w--K]/vi.test("k") && /[\w--K]/v.test("k") && !/[^k]/vi.test("K") && !/\P{Ll}/vi.test("A") &&
+        /\P{Ll}/iu.test("A") && !/[\W]/vi.test("S") && /[^\W]/vi.test("\u017f") &&
+        "abcDEFghi".match(/[\p{L}--\p{Lu}]+/gv).join() === "abc,ghi" && /[\q{ab|b}]/v.exec("b")[0] === "b" &&
+        "\u{1F600}x".match(/(?:)/gv).length === 3 && /^[\q{ab|}]$/v.test(""))
+    var err = function (src, fl) {
+        try { new RegExp(src, fl) } catch (e) { return e.message }
+        return "ok"
+    }
+    var pre = "Invalid regular expression: "
+    check("v152f", err("\\{1}n", "v") === pre + "/\\{1}n/v: Lone quantifier brackets" &&
+        err("[a&&b--c]", "v") === pre + "/[a&&b--c]/v: Invalid set operation in character class" &&
+        err("[(]", "v") === pre + "/[(]/v: Invalid character in character class" &&
+        err("[^\\q{ab}]", "v") === pre + "/[^\\q{ab}]/v: Negated character class may contain strings" &&
+        err("[a-\\d]", "v") === pre + "/[a-\\d]/v: Invalid character class" && err("[!!]", "vi") === pre + "/[!!]/iv: Invalid set operation in character class" &&
+        err("[a&&&b]", "v") === pre + "/[a&&&b]/v: Invalid character in character class" && err("[^\\q{a}]", "v") === "ok" &&
+        err("[^[\\q{ab}&&a]]", "v") === "ok" && err("(", "ui") === pre + "/(/iu: Unterminated group" &&
+        err("(?<=a)+", "v") === pre + "/(?<=a)+/v: Invalid quantifier")
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -2150,6 +2199,7 @@ function main() {
     s149() // SECTION-CALL 149
     s150() // SECTION-CALL 150
     s151() // SECTION-CALL 151
+    s152() // SECTION-CALL 152
     println("full: " + checks + " checks, " + failures + " failures")
     return failures
 }

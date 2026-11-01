@@ -74,6 +74,10 @@ const (
 	rxOpClassM = 36
 	rxOpSplitM = 37
 	rxOpMatchL = 38
+	// An ECMAScript lookbehind's body runs backward; see RX_CLASSB and
+	// RX_BREFB in lib/regex.js.
+	rxOpClassB = 39
+	rxOpBrefB  = 40
 )
 
 // The verbs' kinds, and st.verb for a recursion that loops (RX_VCOMMIT ..
@@ -112,6 +116,12 @@ const (
 	// \b and \B under P without a: Python's Unicode \w (rxPyWord).
 	rxPUWordB  = 20
 	rxPUNWordB = 21
+	// ECMAScript's ^ and $ under m and \b \B under i and U; see RX_EBOL ..
+	// RX_EUNWORDB in lib/regex.js.
+	rxEBOL     = 22
+	rxEEOL     = 23
+	rxEUWordB  = 24
+	rxEUNWordB = 25
 )
 
 // ----- Character-class shorthands -----
@@ -170,6 +180,9 @@ type rxCls struct {
 	// jf is JavaScript's i flag, 1 without u and 2 with it: the class also takes
 	// a character any member of whose case-fold orbit it holds (see lib/regex.js).
 	jf int
+	// cs marks an ECMAScript class read where i is off, and v one read under
+	// the v flag (see lib/regex.js).
+	cs, v bool
 }
 
 func rxNewCls() *rxCls { return &rxCls{} }
@@ -341,8 +354,11 @@ func (c *rxCls) hitX(ch rune) bool {
 }
 
 func (c *rxCls) matchX(ch rune, icase bool) bool {
+	if icase && c.v && !c.cs {
+		return c.hitV(ch, c.jf) != c.neg
+	}
 	hit := c.hitX(ch)
-	if !hit && icase {
+	if !hit && icase && !c.cs {
 		if c.jf > 0 {
 			hit = c.hitFold(ch, true)
 		} else if alt := rxSwapCase(ch); alt >= 0 {
@@ -385,11 +401,12 @@ func (c *rxCls) wordIU() {
 	c.sp = keep
 }
 
-// isWordAt: is c a word character for \b, which under JavaScript's i and u flags
-// also takes U+017F and U+212A (wordIU)? Twin of rxIsWordAt in lib/regex.js.
-func (re *rxRe) isWordAt(c rune) bool {
-	return rxIsWord(c) || (re.jfold == 2 && (c == 383 || c == 8490))
-}
+// rxIsWordAtE: is c a word character for rxEUWordB? Twin of rxIsWordAtE in
+// lib/regex.js.
+func rxIsWordAtE(c rune) bool { return rxIsWord(c) || c == 383 || c == 8490 }
+
+// rxIsLineTermE: is c an ECMAScript LineTerminator?
+func rxIsLineTermE(c rune) bool { return c == '\n' || c == '\r' || c == 0x2028 || c == 0x2029 }
 
 // rxFoldSame: are code units a and b one character under JavaScript's i flag?
 // Twin of rxFoldSame in lib/regex.js.
@@ -540,7 +557,7 @@ func (c *rxCls) hitU(ch rune) bool {
 // must reject both cases of a listed letter, which is only true in that order.
 func (c *rxCls) match(ch rune, icase bool) bool {
 	hit := c.hit(ch)
-	if !hit && icase {
+	if !hit && icase && !c.cs {
 		if c.jf > 0 {
 			hit = c.hitFold(ch, false)
 		} else if alt := rxSwapCase(ch); alt >= 0 {
@@ -657,6 +674,14 @@ type rxSt struct {
 	// unsupMsg the first construct the engine lacks (failUnsup).
 	late     string
 	unsupMsg string
+	// anyI: an ECMAScript (?i:X) turned i on somewhere (modifiersEs).
+	anyI bool
+	// vset is JavaScript's v; vkind and vch the operand operandV read last, and
+	// pstr whether the \p{..} just read is a property of strings.
+	vset  bool
+	vkind int
+	vch   rune
+	pstr  bool
 	// apath, nalts and npaths place each named group in the alternations
 	// (dupNameEs).
 	apath  []int
@@ -1114,6 +1139,11 @@ func rxHexVal(c rune) int {
 	return -1
 }
 
+// rxStrProps are the properties of strings, which only v accepts. Twin of
+// RX_STRPROPS in lib/regex.js.
+const rxStrProps = ",Basic_Emoji,Emoji_Keycap_Sequence,RGI_Emoji_Modifier_Sequence,RGI_Emoji_Flag_Sequence," +
+	"RGI_Emoji_Tag_Sequence,RGI_Emoji_ZWJ_Sequence,RGI_Emoji,"
+
 type rxEscRes struct {
 	kind int // 0 literal character, 1 shorthand class, 2 backreference, 3 \p{..} (st.pcls)
 	ch   rune
@@ -1183,11 +1213,21 @@ func (st *rxSt) esc(inClass bool) rxEscRes {
 		}
 		// node names a class's bad property apart.
 		had := st.err
-		if pe >= st.n {
+		name := ""
+		if pe < st.n {
+			name = string(st.p[st.i+1 : pe])
+		}
+		switch {
+		case pe >= st.n:
 			st.fail("Invalid property name")
 			st.pcls = rxNewCls()
-		} else {
-			st.pcls = st.jupPropClsEs(string(st.p[st.i+1 : pe]))
+		case st.vset && c == 'p' && strings.Contains(rxStrProps, ","+name+","):
+			// A property of strings (v only) is accepted, and not implemented.
+			st.failUnsup("properties of strings are not supported")
+			st.pstr = true
+			st.pcls = rxNewCls()
+		default:
+			st.pcls = st.jupPropClsEs(name)
 		}
 		if inClass && had == "" && st.err == "Invalid property name" {
 			st.err = "Invalid property name in character class"
@@ -1750,7 +1790,375 @@ func (st *rxSt) rangeJ(bits *rxCls) *rxCls {
 }
 
 // The union, intersection and complement of class trees, by reference.
-func rxClsOr(a, b *rxCls) *rxCls  { return &rxCls{subs: []*rxCls{a, b}, x: true} }
+func rxClsOr(a, b *rxCls) *rxCls { return &rxCls{subs: []*rxCls{a, b}, x: true} }
+
+// ----- ECMAScript's v flag: class set expressions -----
+//
+// Twin of the v section of lib/regex.js (rxParseClassV and its helpers), which
+// states the rules.
+
+// The kinds of operand operandV reads (st.vkind).
+const (
+	rxVChar = iota + 1
+	rxVRange
+	rxVEsc
+	rxVNest
+	rxVStr
+)
+
+// rxSetV is a v class set: cls the single characters, strs the strings of any
+// other length, may MayContainStrings.
+type rxSetV struct {
+	cls  *rxCls
+	strs [][]rune
+	may  bool
+}
+
+func rxNewSetV() *rxSetV { return &rxSetV{cls: &rxCls{x: true}} }
+
+// charV reads a ClassSetCharacter. Twin of rxCharV.
+func (st *rxSt) charV() rune {
+	if st.i >= st.n {
+		st.fail("Unterminated character class")
+		return 0
+	}
+	c := st.p[st.i]
+	nx := rune(0)
+	if st.i+1 < st.n {
+		nx = st.p[st.i+1]
+	}
+	if c == '\\' {
+		switch {
+		case nx == 'b':
+			st.i += 2
+			return 8
+		case nx > 0 && strings.ContainsRune("&-!#%,:;<=>@`~", nx):
+			st.i += 2
+			return nx
+		case nx > 0 && strings.ContainsRune("dDsSwWpPq", nx):
+			st.fail("Invalid escape")
+			return 0
+		}
+		st.i++
+		return st.esc(true).ch
+	}
+	if strings.ContainsRune("()[]{}/-\\|", c) {
+		st.fail("Invalid character in character class")
+		return 0
+	}
+	if nx == c && strings.ContainsRune("&!#$%*+,.:;<=>?@^`~", c) {
+		st.fail("Invalid set operation in character class")
+		return 0
+	}
+	cp, w := rxCpAt(st.p, st.i)
+	st.i += w
+	return cp
+}
+
+// operandV reads a ClassSetOperand. Twin of rxOperandV.
+func (st *rxSt) operandV() *rxSetV {
+	set := rxNewSetV()
+	st.vkind = rxVChar
+	if st.i >= st.n {
+		st.fail("Unterminated character class")
+		return set
+	}
+	c := st.p[st.i]
+	nx := rune(0)
+	if st.i+1 < st.n {
+		nx = st.p[st.i+1]
+	}
+	if c == '\\' && nx == 'q' {
+		st.vkind = rxVStr
+		st.stringsV(set)
+		return set
+	}
+	if c == '\\' && nx > 0 && strings.ContainsRune("dDsSwWpP", nx) {
+		st.vkind = rxVEsc
+		st.i++
+		st.pstr = false
+		e := st.esc(true)
+		if e.kind == 1 {
+			set.cls.addSp(e.sp)
+		} else {
+			set.cls.subs = append(set.cls.subs, st.pcls)
+			set.may = st.pstr
+		}
+		return set
+	}
+	if c == '[' {
+		st.i++
+		nest := st.classV()
+		st.vkind = rxVNest
+		return nest
+	}
+	st.vch = st.charV()
+	set.cls.add(st.vch, st.vch)
+	return set
+}
+
+// stringsV reads \q{..|..}. Twin of rxStringsV.
+func (st *rxSt) stringsV(set *rxSetV) {
+	st.i += 2
+	if st.i >= st.n || st.p[st.i] != '{' {
+		st.fail("Invalid escape")
+		return
+	}
+	st.i++
+	cur := []rune{}
+	for st.err == "" && st.i < st.n && st.p[st.i] != '}' {
+		if st.p[st.i] == '|' {
+			st.addStrV(set, cur)
+			cur = []rune{}
+			st.i++
+		} else {
+			cur = append(cur, st.charV())
+		}
+	}
+	st.addStrV(set, cur)
+	if st.i < st.n {
+		st.i++
+	}
+}
+
+func (st *rxSt) addStrV(set *rxSetV, s []rune) {
+	if len(s) == 1 {
+		set.cls.add(s[0], s[0])
+		return
+	}
+	set.may = true
+	if !st.hasStrV(set.strs, s) {
+		set.strs = append(set.strs, s)
+	}
+}
+
+// hasStrV: is s one of strs, compared as the i in force compares? Twin of
+// rxHasStrV.
+func (st *rxSt) hasStrV(strs [][]rune, s []rune) bool {
+	for _, t := range strs {
+		if len(t) != len(s) {
+			continue
+		}
+		j := 0
+		for j < len(s) && (t[j] == s[j] || (st.icase && rxFoldSame(t[j], s[j], 2))) {
+			j++
+		}
+		if j == len(s) {
+			return true
+		}
+	}
+	return false
+}
+
+// classV reads a class, the [ consumed. Twin of rxClassV.
+func (st *rxSt) classV() *rxSetV {
+	neg := false
+	if st.i < st.n && st.p[st.i] == '^' {
+		neg = true
+		st.i++
+	}
+	if st.i < st.n && st.p[st.i] == ']' {
+		st.i++
+		set := rxNewSetV()
+		set.cls.neg = neg
+		return set
+	}
+	first := st.operandV()
+	c, nx := rune(0), rune(0)
+	if st.i < st.n {
+		c = st.p[st.i]
+	}
+	if st.i+1 < st.n {
+		nx = st.p[st.i+1]
+	}
+	var set *rxSetV
+	if st.err == "" && (c == '-' || c == '&') && nx == c {
+		set = st.setOpV(first, c)
+	} else {
+		set = st.unionV(first)
+	}
+	if st.err != "" {
+		return set
+	}
+	if st.i >= st.n {
+		st.fail("Unterminated character class")
+		return set
+	}
+	st.i++
+	if neg && set.may {
+		st.fail("Negated character class may contain strings")
+	}
+	set.cls.neg = neg
+	return set
+}
+
+// unionV reads a ClassUnion on from its first operand. Twin of rxUnionV.
+func (st *rxSt) unionV(first *rxSetV) *rxSetV {
+	set := rxNewSetV()
+	last, ch := st.vkind, st.vch
+	st.unionAddV(set, first, last)
+	for st.err == "" && st.i < st.n && st.p[st.i] != ']' {
+		if st.p[st.i] != '-' {
+			op := st.operandV()
+			last, ch = st.vkind, st.vch
+			st.unionAddV(set, op, last)
+			continue
+		}
+		if st.i+1 < st.n && st.p[st.i+1] == '-' {
+			st.fail("Invalid set operation in character class")
+			return set
+		}
+		if last != rxVChar {
+			st.fail("Invalid character class")
+			return set
+		}
+		st.i++
+		st.operandV()
+		if st.err != "" {
+			return set
+		}
+		if st.vkind != rxVChar {
+			st.fail("Invalid character class")
+			return set
+		}
+		if ch > st.vch {
+			st.fail("Range out of order in character class")
+			return set
+		}
+		set.cls.add(ch, st.vch)
+		last = rxVRange
+	}
+	return set
+}
+
+func (st *rxSt) unionAddV(set, op *rxSetV, kind int) {
+	if kind == rxVChar {
+		set.cls.add(st.vch, st.vch)
+		return
+	}
+	set.cls.subs = append(set.cls.subs, op.cls)
+	for _, s := range op.strs {
+		if !st.hasStrV(set.strs, s) {
+			set.strs = append(set.strs, s)
+		}
+	}
+	if op.may {
+		set.may = true
+	}
+}
+
+// setOpV reads a ClassSubtraction (k '-') or ClassIntersection (k '&') on
+// from its first operand. Twin of rxSetOpV.
+func (st *rxSt) setOpV(first *rxSetV, k rune) *rxSetV {
+	set := first
+	for st.err == "" && st.i+1 < st.n && st.p[st.i] == k && st.p[st.i+1] == k {
+		st.i += 2
+		if k == '&' && st.i < st.n && st.p[st.i] == '&' {
+			st.fail("Invalid character in character class")
+			return set
+		}
+		op := st.operandV()
+		var keep [][]rune
+		for _, s := range set.strs {
+			if st.hasStrV(op.strs, s) == (k == '&') {
+				keep = append(keep, s)
+			}
+		}
+		b := op.cls
+		if k == '-' {
+			b = rxClsNot(op.cls)
+		}
+		set = &rxSetV{cls: rxClsAnd(set.cls, b), strs: keep, may: set.may && (k == '-' || op.may)}
+	}
+	if st.err == "" && st.i < st.n && st.p[st.i] != ']' {
+		st.fail("Invalid set operation in character class")
+	}
+	return set
+}
+
+// parseClassV reads a class under v, the [ consumed. Twin of rxParseClassV.
+func (st *rxSt) parseClassV() *rxNode {
+	set := st.classV()
+	set.cls.v = true
+	set.cls.cs = !st.icase
+	cn := rxNewNode("cls")
+	cn.cls = set.cls
+	if len(set.strs) == 0 {
+		return cn
+	}
+	alt := rxNewNode("alt")
+	most := 0
+	for _, s := range set.strs {
+		if len(s) > most {
+			most = len(s)
+		}
+	}
+	for n := most; n >= 2; n-- {
+		for _, s := range set.strs {
+			if len(s) != n {
+				continue
+			}
+			cat := rxNewNode("cat")
+			for _, ch := range s {
+				one := rxNewNode("cls")
+				one.cls.add(ch, ch)
+				one.cls.cs = !st.icase
+				cat.items = append(cat.items, one)
+			}
+			alt.items = append(alt.items, cat)
+		}
+	}
+	alt.items = append(alt.items, cn)
+	if st.hasStrV(set.strs, []rune{}) {
+		alt.items = append(alt.items, rxNewNode("empty"))
+	}
+	g := rxNewNode("group")
+	g.items = append(g.items, alt)
+	return g
+}
+
+// hitV is hitX under v and i. Twin of rxClsHitV in lib/regex.js.
+func (c *rxCls) hitV(ch rune, jf int) bool {
+	hit := c.hitL(ch)
+	for o, guard := jupFoldNext(ch, jf), 0; !hit && o != ch && guard < 8; o, guard = jupFoldNext(o, jf), guard+1 {
+		hit = c.hitL(o)
+	}
+	for i := 0; !hit && i < len(c.subs); i++ {
+		hit = c.subs[i].hitV(ch, jf) != c.subs[i].neg
+	}
+	for i := 0; hit && i < len(c.ands); i++ {
+		hit = c.ands[i].hitV(ch, jf) != c.ands[i].neg
+	}
+	return hit
+}
+
+// hitL: the class's own ranges, shorthands and properties.
+func (c *rxCls) hitL(ch rune) bool {
+	if c.hit(ch) {
+		return true
+	}
+	for _, p := range c.props {
+		if rxPropHit(p, ch) {
+			return true
+		}
+	}
+	return false
+}
+
+// setJf marks a class tree with JavaScript's i flag. Twin of rxClsJf.
+func (c *rxCls) setJf(jf int) {
+	c.jf = jf
+	if jf == 2 {
+		c.wordIU()
+	}
+	for _, s := range c.subs {
+		s.setJf(jf)
+	}
+	for _, a := range c.ands {
+		a.setJf(jf)
+	}
+}
+
 func rxClsAnd(a, b *rxCls) *rxCls { return &rxCls{subs: []*rxCls{a}, ands: []*rxCls{b}, x: true} }
 func rxClsNot(a *rxCls) *rxCls    { return &rxCls{subs: []*rxCls{a}, neg: true, x: true} }
 
@@ -1859,7 +2267,7 @@ func (st *rxSt) idCharEs(c rune, start bool) bool {
 // modifiersEs reads an ECMAScript modifiers group (?ims-ims:X). Twin of
 // rxModifiersEs in lib/regex.js.
 func (st *rxSt) modifiersEs() *rxNode {
-	seen := ""
+	seen, on, off := "", "", ""
 	neg := false
 	for ; st.i < st.n; st.i++ {
 		c := st.p[st.i]
@@ -1869,11 +2277,17 @@ func (st *rxSt) modifiersEs() *rxNode {
 				st.fail("Invalid flag group")
 				return rxNewNode("empty")
 			}
-			st.failUnsup("modifiers are not supported")
 			st.i++
+			icase, multi, dotall := st.icase, st.multi, st.dotall
+			st.setFlags(on, true)
+			st.setFlags(off, false)
+			if st.icase {
+				st.anyI = true
+			}
 			g := rxNewNode("group")
 			g.items = append(g.items, st.parseAlt())
 			st.expect(')', "unterminated group")
+			st.icase, st.multi, st.dotall = icase, multi, dotall
 			return g
 		case c == '-' && !neg:
 			neg = true
@@ -1883,6 +2297,11 @@ func (st *rxSt) modifiersEs() *rxNode {
 				return rxNewNode("empty")
 			}
 			seen += string(c)
+			if neg {
+				off += string(c)
+			} else {
+				on += string(c)
+			}
 		default:
 			st.fail("Invalid group")
 			return rxNewNode("empty")
@@ -1994,11 +2413,14 @@ func (st *rxSt) parseGroup() *rxNode {
 		case k == '<' || (k == '\'' && !st.java && !st.es):
 			if k == '<' && st.i+1 < st.n {
 				k2 := st.p[st.i+1]
-				if (k2 == '=' || k2 == '!') && (st.java || st.py) {
+				if (k2 == '=' || k2 == '!') && (st.java || st.py || st.es) {
 					st.i += 2
 					lb := rxNewNode("lookb")
 					if k2 == '!' {
 						lb.gidx = 1
+					}
+					if st.es {
+						lb.max = 1
 					}
 					lb.items = append(lb.items, st.parseLookBody())
 					st.expect(')', "unterminated group")
@@ -2306,6 +2728,9 @@ func (st *rxSt) parseAtom() *rxNode {
 		if st.java {
 			return st.parseClassJ()
 		}
+		if st.vset {
+			return st.parseClassV()
+		}
 		return st.parseClass()
 	case '.':
 		st.i++
@@ -2317,6 +2742,10 @@ func (st *rxSt) parseAtom() *rxNode {
 		if st.java && !st.dotall && !st.unix {
 			dot.cls.add('\r', '\r')
 			dot.cls.add(0x85, 0x85)
+			dot.cls.add(0x2028, 0x2029)
+		}
+		if st.es && !st.dotall {
+			dot.cls.add('\r', '\r')
 			dot.cls.add(0x2028, 0x2029)
 		}
 		return dot
@@ -2338,6 +2767,12 @@ func (st *rxSt) parseAtom() *rxNode {
 				b.gidx = rxJBOL
 			}
 		}
+		if st.es {
+			b.gidx = rxBOS
+			if st.multi {
+				b.gidx = rxEBOL
+			}
+		}
 		return b
 	case '$':
 		st.i++
@@ -2351,6 +2786,12 @@ func (st *rxSt) parseAtom() *rxNode {
 		}
 		if st.java {
 			d.gidx = st.eolJ(st.multi)
+		}
+		if st.es {
+			d.gidx = rxEOS
+			if st.multi {
+				d.gidx = rxEEOL
+			}
 		}
 		return d
 	case '\\':
@@ -2464,6 +2905,12 @@ func (st *rxSt) parseAtom() *rxNode {
 			if st.pyuni && nxt == 'B' {
 				a.gidx = rxPUNWordB
 			}
+			if st.es && st.icase && st.uni {
+				a.gidx = rxEUWordB
+				if nxt == 'B' {
+					a.gidx = rxEUNWordB
+				}
+			}
 			// Go's \b and \B are ASCII \w ones (R).
 			if st.java && !st.re2 {
 				switch nxt {
@@ -2498,6 +2945,11 @@ func (st *rxSt) parseAtom() *rxNode {
 		if e.kind == 3 {
 			pn := rxNewNode("cls")
 			pn.cls = st.pcls
+			// ECMAScript's \P{..} is complemented before i folds case (see
+			// rxParseAtom in lib/regex.js).
+			if st.es {
+				pn.cls = &rxCls{x: true, v: st.vset, subs: []*rxCls{st.pcls}}
+			}
 			return pn
 		}
 		ln := rxNewNode("cls")
@@ -2686,6 +3138,15 @@ func (st *rxSt) parsePiece() *rxNode {
 		atom.min = 1
 		if st.ucase {
 			atom.min = 2
+		}
+	}
+	// ECMAScript's i off where the atom stands (see rxParsePiece in lib/regex.js).
+	if st.es && !st.icase {
+		if atom.t == "cls" {
+			atom.cls.cs = true
+		}
+		if atom.t == "bref" {
+			atom.min = 4
 		}
 	}
 	st.skipX()
@@ -3079,6 +3540,8 @@ type rxProg struct {
 	thenNodes []*rxNode
 	// acc is an rxOpAccept (rxRe.acc).
 	acc int
+	// back is set while an ECMAScript lookbehind's body is emitted.
+	back bool
 }
 
 // loG / hiG are the smallest and largest group NUMBER declared inside a subtree, or
@@ -3139,12 +3602,35 @@ func (pg *rxProg) add(op, a, b int, cls *rxCls) int {
 
 func (pg *rxProg) here() int { return len(pg.ops) }
 
+// emitLook emits a lookahead, or an ECMAScript lookbehind, whose body runs
+// backward; the body of either runs that way wherever it stands. Twin of the
+// "look" case of rxEmit in lib/regex.js.
+func (pg *rxProg) emitLook(node *rxNode) {
+	neg := 0
+	if node.gidx == 1 {
+		neg = 1
+	} else if node.min == 1 {
+		neg = 2 // a conditional's positive assertion
+	}
+	lk := pg.add(rxOpLook, 0, neg, pg.dummy)
+	back := pg.back
+	pg.back = node.t == "lookb"
+	if len(node.items) > 0 {
+		pg.emit(node.items[0])
+	}
+	pg.back = back
+	pg.add(rxOpLookEnd, 0, 0, pg.dummy)
+	pg.as[lk] = pg.here()
+}
+
 func (pg *rxProg) emit(node *rxNode) {
 	switch node.t {
 	case "empty":
 		return
 	case "cls":
-		if node.cls.x {
+		if pg.back {
+			pg.add(rxOpClassB, 0, 0, node.cls)
+		} else if node.cls.x {
 			pg.add(rxOpClassX, 0, 0, node.cls)
 		} else {
 			pg.add(rxOpClass, 0, 0, node.cls)
@@ -3152,37 +3638,39 @@ func (pg *rxProg) emit(node *rxNode) {
 	case "assert":
 		pg.add(rxOpAssert, node.gidx, 0, pg.dummy)
 	case "bref":
-		pg.add(rxOpBref, node.gidx, node.min, pg.dummy)
+		if pg.back {
+			pg.add(rxOpBrefB, node.gidx, node.min, pg.dummy)
+		} else {
+			pg.add(rxOpBref, node.gidx, node.min, pg.dummy)
+		}
 	case "cat":
-		for _, it := range node.items {
-			pg.emit(it)
+		// Backward, a sequence is matched last item first.
+		for i := range node.items {
+			if pg.back {
+				pg.emit(node.items[len(node.items)-1-i])
+			} else {
+				pg.emit(node.items[i])
+			}
 		}
 	case "alt":
 		pg.emitAlt(node)
 	case "group":
 		gi := node.gidx
+		gb := 0
+		if pg.back {
+			gb = 1
+		}
 		if gi >= 0 {
-			pg.add(rxOpSave, 2*gi, 0, pg.dummy)
+			pg.add(rxOpSave, 2*gi+gb, 0, pg.dummy)
 		}
 		if len(node.items) > 0 {
 			pg.emit(node.items[0])
 		}
 		if gi >= 0 {
-			pg.add(rxOpSave, 2*gi+1, 0, pg.dummy)
+			pg.add(rxOpSave, 2*gi+1-gb, 0, pg.dummy)
 		}
 	case "look":
-		neg := 0
-		if node.gidx == 1 {
-			neg = 1
-		} else if node.min == 1 {
-			neg = 2 // a conditional's positive assertion
-		}
-		lk := pg.add(rxOpLook, 0, neg, pg.dummy)
-		if len(node.items) > 0 {
-			pg.emit(node.items[0])
-		}
-		pg.add(rxOpLookEnd, 0, 0, pg.dummy)
-		pg.as[lk] = pg.here()
+		pg.emitLook(node)
 	case "op":
 		pg.add(node.gidx, node.min, node.max, pg.dummy)
 	case "atom":
@@ -3191,6 +3679,10 @@ func (pg *rxProg) emit(node *rxNode) {
 		pg.add(rxOpAtomEnd, 0, 0, pg.dummy)
 		pg.as[am] = pg.here()
 	case "lookb":
+		if node.max == 1 {
+			pg.emitLook(node)
+			return
+		}
 		id := len(pg.lbmin)
 		pg.lbmin = append(pg.lbmin, node.items[0].minLen())
 		// Lengths count characters; a J character is up to two UTF-16 units.
@@ -6758,7 +7250,8 @@ func rxCompile(pattern, flags string) *rxRe {
 	st := &rxSt{p: pat, ext: ext, dotall: dotall, octal: octal, ere: ere, posix: posix, java: java, errAt: -1,
 		py: py, icase: icase, multi: multi, ucase: ucase, unix: unix, gnodes: []*rxNode{nil},
 		pyuni: py && !strings.ContainsRune(letters, 'a'), re2: re2, pcre: pcre, brbase: -1, uni: uni,
-		es: octal || strict, strict: strict, hasNames: rxCountGroups(pat, false) > 0}
+		es: octal || strict, strict: strict, hasNames: rxCountGroups(pat, false) > 0,
+		vset: strings.ContainsRune(letters, 'v')}
 	// Under P and J case folding and line anchoring are decided per atom while
 	// parsing.
 	if py || java {
@@ -6772,6 +7265,10 @@ func rxCompile(pattern, flags string) *rxRe {
 		st.ntotal = rxCountGroups(st.p, !st.noauto)
 	}
 	ast := st.parseAlt()
+	// A scoped (?i:X) folds case in X alone (see rxCompile in lib/regex.js).
+	if st.anyI {
+		icase = true
+	}
 	// Resolve every \k<name> now that the whole name table is known.
 	for _, nd := range st.pending {
 		gi := st.nameIdx(nd.bname)
@@ -6870,7 +7367,9 @@ func rxCompile(pattern, flags string) *rxRe {
 		}
 		for _, fc := range pg.clss {
 			fc.jf = jfold
-			if jfold == 2 {
+			if fc.v && !fc.cs {
+				fc.setJf(jfold)
+			} else if jfold == 2 && !fc.cs {
 				fc.wordIU()
 			}
 		}
@@ -7059,15 +7558,28 @@ func (re *rxRe) assertOK(text []rune, kind, sp int) bool {
 		}
 		return pb == pa
 	}
+	switch kind {
+	case rxEBOL:
+		return sp == 0 || rxIsLineTermE(text[sp-1])
+	case rxEEOL:
+		return sp == n || rxIsLineTermE(text[sp])
+	case rxEUWordB, rxEUNWordB:
+		eb := sp > 0 && rxIsWordAtE(text[sp-1])
+		ea := sp < n && rxIsWordAtE(text[sp])
+		if kind == rxEUWordB {
+			return eb != ea
+		}
+		return eb == ea
+	}
 	if kind >= rxJBOL {
 		return re.assertJ(text, kind, sp)
 	}
 	before, after := false, false
 	if sp > 0 {
-		before = re.isWordAt(text[sp-1])
+		before = rxIsWord(text[sp-1])
 	}
 	if sp < n {
-		after = re.isWordAt(text[sp])
+		after = rxIsWord(text[sp])
 	}
 	if kind == rxWordB {
 		return before != after
@@ -7340,7 +7852,7 @@ func (re *rxRe) run(text []rune, pcIn, spIn int, caps, marks []int, st *rxRunSt,
 				pc = re.as[pc]
 			case rxOpLookEnd:
 				return sp
-			case rxOpBref:
+			case rxOpBref, rxOpBrefB:
 				g := re.as[pc]
 				// A reference to a group NUMBER the pattern never defined (\1 in a
 				// pattern with no groups) is out of range in caps. Treated exactly like
@@ -7362,14 +7874,22 @@ func (re *rxRe) run(text []rune, pcIn, spIn int, caps, marks []int, st *rxRunSt,
 				}
 				length := to - from
 				mis := false
-				if sp+length > n {
+				// rxOpBrefB compares the text ending at sp.
+				at := sp
+				if re.ops[pc] == rxOpBrefB {
+					at = sp - length
+				}
+				if at+length > n {
 					re.hitEnd = true
 					break fwd
 				}
+				if at < 0 {
+					break fwd
+				}
 				for bi := 0; bi < length && !mis; bi++ {
-					lc, rc := text[from+bi], text[sp+bi]
+					lc, rc := text[from+bi], text[at+bi]
 					if lc != rc {
-						if !re.icase && re.bs[pc] == 0 {
+						if (!re.icase && re.bs[pc] == 0) || re.bs[pc] == 4 {
 							mis = true
 						} else if re.bs[pc] == 2 {
 							// Java's CIBackRef under UNICODE_CASE.
@@ -7395,7 +7915,10 @@ func (re *rxRe) run(text []rune, pcIn, spIn int, caps, marks []int, st *rxRunSt,
 					break fwd
 				}
 				pc++
-				sp += length
+				sp = at
+				if re.ops[pc-1] == rxOpBref {
+					sp += length
+				}
 			case rxOpMatch:
 				// See RX_MATCH in lib/regex.js: mustEnd constrains the run, and adv
 				// is the start of an attempt that may not match empty (searchAdv).
@@ -7646,6 +8169,21 @@ func (re *rxRe) run(text []rune, pcIn, spIn int, caps, marks []int, st *rxRunSt,
 					st.bcaps = append(st.bcaps[:0], caps...)
 				}
 				break fwd
+			case rxOpClassB:
+				if sp <= 0 {
+					break fwd
+				}
+				c, w := text[sp-1], 1
+				// Under U a surrogate pair is one character, read from its low half.
+				if re.uni && c >= 0xDC00 && c <= 0xDFFF && sp >= 2 && isHighSurr(text[sp-2]) {
+					c, w = rxCpAt(text, sp-2)
+				}
+				cls := re.clss[pc]
+				if cls.x && !cls.matchX(c, re.icase) || !cls.x && !cls.match(c, re.icase) {
+					break fwd
+				}
+				pc++
+				sp -= w
 			default:
 				break fwd
 			}
