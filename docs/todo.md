@@ -64,7 +64,7 @@ its report; anything structural there is a CORE ticket.
 
 # PY — Python
 
-### T-1020 python: CJK/idna/punycode/escape codecs; dir() of a generator; new attribute on an iterator; python-test-full.5.py near the step brake · P3 · PY · OPEN [V]
+### T-1020 python: CJK/idna/punycode/escape codecs; dir() of a generator; new attribute on an iterator; python-test-full.5.py near the step brake · P3 · PY · IN PROGRESS (PY worker, round 20) [V]
 Found by the PY worker, round 19 (oracle python3 3.14). Still "unknown encoding": shift_jis, gbk, big5, euc_*, iso2022_*, cp932/949/950,
 hz, johab, gb18030 (large tables), raw_unicode_escape, idna, punycode (feasible); unicode_escape decode needs \N{name} (unsupported by
 design). `dir(g)` on a generator → NotImplementedError in interpreter and Go twin; python lists gi_running etc. `iter([1]).foo = 1` →
@@ -122,7 +122,7 @@ Found by the CS worker, round 2 (.NET reference source). `try { char.ConvertFrom
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-1019 kotlin: toSortedSet(comparator) ignored; String range crashes llvm.Run; String coerceAtLeast/AtMost/In · P3 · KT · OPEN [V]
+### T-1019 kotlin: toSortedSet(comparator) ignored; String range crashes llvm.Run; String coerceAtLeast/AtMost/In · P3 · KT · IN PROGRESS (KT worker, round 15) [V]
 Found by the KT worker, round 14 (oracle kotlinc 2.2.21). `xs.toSortedSet(reverseOrder())` → descending; ours ascending (all engines);
 toSortedSet() builds a plain set from the sorted list, not a TreeSet, so a later add() may not keep order. `("" .. "￿").contains(s)`
 and `s in "a".."z"` → llvm.Run only "js runtime error: range bound is not a number" (interpreter and native right). `"b".coerceAtLeast("c")`,
