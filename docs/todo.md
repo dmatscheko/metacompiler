@@ -211,13 +211,13 @@ gh17101 - parsed in July, lost); `xor` / `and` / `or` in a const expression (`co
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-963 bash compiled: `${x:-word}` expands word eagerly; a function can be called before its definition ran · P2 · SH · OPEN [V]
+### T-963 bash compiled: `${x:-word}` expands word eagerly; a function can be called before its definition ran · P2 · SH · IN PROGRESS (SH worker, round 21) [V]
 Found by the SH worker, round 20 (oracle bash 5.3). With x set, `${x:-$(echo side >&2)}` prints "side" and `${x:-$((1/0))}`
 raises a division error in llvm.Run and native; bash and the interpreter expand nothing (the word is expanded only when used;
 same for :=, :?, :+ and their colon-less forms). And `f; f(){ echo f; }` → bash "f: command not found", 127; the compiler
 resolves f statically and runs it.
 
-### T-964 bash: `unset -f`, `command -V`, namerefs in the interpreter, `declare -p` of a computed export · P3 · SH · OPEN [V]
+### T-964 bash: `unset -f`, `command -V`, namerefs in the interpreter, `declare -p` of a computed export · P3 · SH · IN PROGRESS (SH worker, round 21) [V]
 Found by the SH worker, round 20 (oracle bash 5.3). `unset -f f` unsupported in both engines; `command -V echo` → bash "echo is a
 shell builtin", ours status 1; `declare -n r=v` unsupported in the interpreter (oils nameref/005); after `export "${d[@]}"`,
 `declare -p foo2` lacks -x (oils nix-idioms/005). Also: an error from `${!v}` with an invalid name prints "bash: z=9: invalid
