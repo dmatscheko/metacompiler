@@ -308,7 +308,8 @@ char *rt_getvar_byname(char *n);
 char *rt_getvar_ind(char *n);
 int rt_varslot(char *n);
 int rt_varslot_new(char *n);
-int rt_setvar_byname(char *n, char *v);
+int rt_setvar_byname(char *n, char *v, int app, int at);
+char *rt_nref_base(char *n);
 int rt_indbr(char *v);
 char *rt_nref_end(char *n);
 int rt_unset_name(char *n);
@@ -1354,7 +1355,7 @@ long ar_store(char *nm, char *key, long v)
     if (ar_noeval > 0 || arith_err != 0) return v;
     if (key != 0) rt_arr_iset(nm, key, rt_int2str(v));
     else if (rt_arr_any(nm) != 0) rt_arr_iset(nm, "0", rt_int2str(v));
-    else rt_setvar_byname(nm, rt_int2str(v));
+    else rt_setvar_byname(nm, rt_int2str(v), 0, 0);
     return v;
 }
 
@@ -5081,6 +5082,7 @@ int rt_arr_set(char *nm, char *k, char *v) {
  * insertion order (manual 7.9), so its writes stay on rt_arr_set. A write to
  * bad_key is dropped. */
 char bad_key[1];
+int sub_bad;   /* the last rt_arr_akey refused its subscript (rt_take_subbad) */
 int rt_arr_iset(char *nm, char *k, char *v) {
     int r;
     int n;
@@ -5251,6 +5253,7 @@ char *rt_arr_key(char *nm, char *sub) {
 char *rt_arr_akey(char *nm, char *sub, char *lbl, int whole) {
     long k;
     char *key;
+    sub_bad = 0;
     if (rt_isassoc(nm) != 0) return sub;
     key = &bad_key[0];
     if (whole != 0) rt_berr("", lbl, "bad array subscript");
@@ -5258,8 +5261,22 @@ char *rt_arr_akey(char *nm, char *sub, char *lbl, int whole) {
         k = rt_arith(sub);
         if (arith_err == 0) key = rt_arr_ikeyl(nm, k, lbl);
     }
-    if (key == &bad_key[0]) arith_err = 1;
+    if (key == &bad_key[0] && arith_err == 0) {
+        arith_err = 1;
+        sub_bad = 1;
+    }
     return key;
+}
+
+/* A bad subscript rt_arr_akey refused, which a builtin's store (declare, local,
+ * read, printf -v) turns into a failure of the builtin, where an assignment
+ * abandons the line: 1 when the last store was refused so, which clears it.
+ * Twin of takeSubBad in bash-interpreter.abnf. */
+int rt_take_subbad(void) {
+    int e = sub_bad != 0 && arith_err != 0 ? 1 : 0;
+    if (e != 0) arith_err = 0;
+    sub_bad = 0;
+    return e;
 }
 
 /* The value an element store keeps under its array's attributes `at` (1 -i,
@@ -5283,11 +5300,28 @@ char *rt_attrv(char *old, char *v, int at) {
 
 /* One [k]=v of an INDEXED array literal, v under the attributes `at`. The answer
  * is the index a following bare word takes, one past k - b=([3]=c [1]=a b) puts b
- * at 2 - or `next` unchanged when k was a bad subscript or v an arithmetic
- * error. */
+ * at 2. A k that is @, * or an index still negative from the end is reported
+ * quoting the element ("[-9]=v: bad array subscript") and, like an arithmetic
+ * error, stops the literal: arith_err is left set, the rest stores nothing, and
+ * the line is abandoned. Twin of applyArrayLit in bash-interpreter.abnf. */
 long rt_arr_litkey(char *nm, char *k, char *v, long next, int at) {
-    char *key = rt_arr_key(nm, k);
-    if (key == &bad_key[0]) return next;
+    char *lbl;
+    char *key;
+    long kv;
+    if (arith_err != 0) return next;
+    lbl = rt_strcat(rt_strcat(rt_strcat("[", k), "]="), v);
+    if (rt_streq(k, "@") != 0 || rt_streq(k, "*") != 0) {
+        rt_berr("", lbl, "cannot assign to non-numeric index");
+        arith_err = 1;
+        return next;
+    }
+    kv = rt_arith(k);
+    if (arith_err != 0) return next;
+    key = rt_arr_ikeyl(nm, kv, lbl);
+    if (key == &bad_key[0]) {
+        arith_err = 1;
+        return next;
+    }
     if (at != 0) v = rt_attrv(0, v, at);
     if (arith_err != 0) return next;
     rt_arr_iset(nm, key, v);
@@ -5316,6 +5350,7 @@ long rt_letfields(char *list, int need)
 long rt_arr_litwords(char *nm, char *f, long next, int at) {
     int p = rt_fpos(f);
     char *v;
+    if (arith_err != 0) return next;
     while (p >= 0) {
         v = rt_fat(f, p);
         if (at != 0) v = rt_attrv(0, v, at);
@@ -5565,13 +5600,24 @@ int rt_arr_del(char *nm, char *k) {
  * no variable at all is left alone. Twin of unsetElem in bash-interpreter.abnf. */
 int rt_arr_unset(char *nm, char *sub) {
     int r = rt_ar_find(nm);
+    char *k;
+    long kv;
     if ((r >= 0 && (ar_n[r] > 0 || (ar_mk[r] & 3) != 0)) || rt_isassoc(nm) != 0) {
-        rt_arr_del(nm, rt_arr_key(nm, sub));
+        /* An index still negative from the end is "unset: [SUB]: bad array
+         * subscript", status 1. */
+        k = sub;
+        if (rt_streq(sub, "@") == 0 && rt_streq(sub, "*") == 0 && rt_isassoc(nm) == 0) {
+            kv = rt_arith(sub);
+            if (arith_err != 0) return 1;
+            k = rt_arr_ikeyl(nm, kv, rt_strcat(rt_strcat("unset: [", sub), "]"));
+        }
+        if (k == &bad_key[0]) return 1;
+        rt_arr_del(nm, k);
         return 0;
     }
     if (rt_getvar_byname(nm) == &unset_marker[0] && rt_arr_smarked(nm) == 0) return 0;
     if (rt_streq(sub, "@") == 0 && rt_streq(sub, "*") == 0 && rt_arith(sub) == 0) {
-        rt_setvar_byname(nm, &unset_marker[0]);
+        rt_setvar_byname(nm, &unset_marker[0], 0, 0);
         return 0;
     }
     rt_berr("unset", nm, "not an array variable");
@@ -7545,11 +7591,14 @@ char *rt_getvar_byname(char *n)
  * never mentions gets a slot now. NAME[SUB] - a nameref to
  * an element - stores the element, its subscript evaluated now; NAME[@] and
  * NAME[*] are bash's "bad array subscript" even for an associative array, and
- * abandon the line. Twin of elemRefSet in
+ * abandon the line. With app, v is appended to the old value (an element's key
+ * evaluated once); at is the attributes of the variable it lands on (rt_attrv),
+ * which the emitter picks by rt_nref_base. Twin of elemRefSet and storeAttr in
  * bash-interpreter.abnf. */
-int rt_setvar_byname(char *n, char *v)
+int rt_setvar_byname(char *n, char *v, int app, int at)
 {
     int i;
+    char *old;
     if (nref_any != 0) {
         n = rt_nref_end(n);
         if (n == 0) {
@@ -7565,19 +7614,45 @@ int rt_setvar_byname(char *n, char *v)
         if (rt_streq(sub, "@") != 0 || rt_streq(sub, "*") != 0) {
             rt_berr("", n, "bad array subscript");
             arith_err = 1;
+            sub_bad = 1;
             return 0;
         }
         k = rt_arr_akey(nm, sub, n, 0);
+        if (arith_err != 0) return 0;
+        old = app != 0 ? rt_arr_get(nm, k) : 0;
+        if (at != 0) v = rt_attrv(old, v, at);
+        else if (old != 0) v = rt_strcat(old, v);
         if (arith_err != 0) return 0;
         if (rt_isassoc(nm) != 0) return rt_arr_set(nm, k, v);
         i = rt_varslot(nm);
         if (i >= 0) rt_arr_adopt(nm, i);
         return rt_arr_iset(nm, k, v);
     }
+    old = app != 0 ? rt_getvar_byname(n) : 0;
+    if (old == &unset_marker[0]) old = empty;
+    if (at != 0) v = rt_attrv(old, v, at);
+    else if (old != 0) v = rt_strcat(old, v);
+    if (arith_err != 0) return 0;
     i = rt_varslot_new(n);
     if (i >= 0) gvars[i] = v;
     rt_pin();
     return 0;
+}
+
+/* The variable a store through n lands on: the end of its nameref chain, less
+ * any [SUB] ("" for a circular chain, which the store itself reports). */
+char *rt_nref_base(char *n)
+{
+    int i;
+    if (nref_any != 0) {
+        nref_quiet = nref_quiet + 1;
+        n = rt_nref_end(n);
+        nref_quiet = nref_quiet - 1;
+        if (n == 0) return empty;
+    }
+    i = rt_indbr(n);
+    if (i > 0) return rt_substr(n, 0, i);
+    return n;
 }
 
 /* A name an indirection may land on: a NAME, NAME[SUB], a positional parameter
@@ -7687,7 +7762,7 @@ int rt_unset_name(char *n)
             return rt_arr_unset(rt_substr(n, 0, i), rt_substr(n, i + 1, len - i - 2));
         }
     }
-    rt_setvar_byname(n, &unset_marker[0]);
+    rt_setvar_byname(n, &unset_marker[0], 0, 0);
     rt_arr_clear(n);
     rt_xmark(n, 0);
     return 0;
@@ -7767,7 +7842,7 @@ int rt_eval_assign(char *s)
             i = i + 1;
         }
         v[o] = 0;
-        rt_setvar_byname(rt_substr(s, start, vs - 1 - start), v);
+        rt_setvar_byname(rt_substr(s, start, vs - 1 - start), v, 0, 0);
         while (s[i] == 32 || s[i] == 9) i = i + 1;
         if (s[i] == 59) i = i + 1;
     }
@@ -7802,7 +7877,7 @@ int rt_decl_word(char *w, int d, int x)
     if (w[i] == 0) return 0;
     v = rt_substr(w, i + 1 + app, -1);
     if (app != 0) v = rt_strcat(rt_getvar_byname(nm), v);
-    rt_setvar_byname(nm, v);
+    rt_setvar_byname(nm, v, 0, 0);
     return 0;
 }
 

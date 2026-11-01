@@ -91,6 +91,9 @@ CompoundList <~~ push(makeSeq(linkAsync(takeAll()))) ~~>
             = OptSep Statement { ListSep Statement } ListOptSep ;
 // An eval or trap string, its continuations joined (see compileSnippet).
 Spliced     <~~ push(up.in) ~~> = BsSplice :whitespace() { AnyCh | "\n" } ;
+// An eval or trap string runs line by line like a script (see makeLines).
+Snippet     <~~ push(makeLines(splitLines(takeAll()))) ~~>
+            = OptSep [ Statement { TopSep Statement } TopOptSep ] ;
 
 
 // --- compound statements
@@ -139,7 +142,7 @@ UntilStmt   <~~ push(makeUntil(takeAll())) ~~>
 // Each part is arithmetic text that, like (( )), is expanded FIRST when it holds an
 // expansion (e='1 + 2'; `i < $e * 2` is i < 5), and may be empty: an empty condition is 1.
 CForStmt    <~~ push(atLine(makeCFor(takeAll()), srcLine(up.start))) ~~>
-            = KwFor "((" :whitespace() CfPart ";" CfCond ";" CfPart "))" :whitespace(Whitespace) OptSep KwDo CompoundList KwDone ;
+            = KwFor "((" :whitespace() CfPart ";" CfCond ";" CfPart "))" :whitespace(Whitespace) OptSep LoopBody ;
 CfPart      = CfDyn | CfSt | CfZero ;
 CfCond      = CfDyn | CfSt | CfOne ;
 CfDyn       <~~ push(mkArDyn(pop())) ~~> = CfHasExp CfDynWord ;
@@ -152,7 +155,9 @@ CfOne       <~~ push(mkNum("1")) ~~> = WsNL ;
 
 // for NAME in WORD...; do LIST; done   /   for NAME; do LIST; done (the positional parameters)
 ForStmt     <~~ push(atLine(makeFor(takeAll()), srcLine(up.start))) ~~>
-            = KwFor ForName [ ForIn ] Sep KwDo CompoundList KwDone ;
+            = KwFor ForName [ ForIn ] Sep LoopBody ;
+// A for loop's body is do LIST done or, as bash also takes it, { LIST; }.
+LoopBody    = ( KwDo CompoundList KwDone ) | ( "{" BraceKwEnd CompoundList "}" ) ;
 ForIn       = KwIn ForWords ;
 ForName     <~~ push({fname: up.in}) ~~>
             = Name ;
@@ -164,7 +169,7 @@ FuncDef     <~~ push(makeFuncDef(takeAll(), arSrc(up.start, up.pos))) ~~>
             = FuncDefHead OptSep FuncBody ;
 // A function body may be any compound command; { LIST; } and ( LIST ) are the two that
 // appear in the wild ( `f() ( cd /tmp; pwd )` runs the body in a subshell ).
-FuncBody    = FuncBraceBody | Subshell ;
+FuncBody    = FuncBraceBody | Subshell | IfStmt | CForStmt | ForStmt | WhileStmt | UntilStmt | CaseStmt | ArithCmd | CondCmd ;
 FuncBraceBody <~~ push(makeGroup(pop())) ~~> = "{" BraceKwEnd CompoundList "}" ;
 FuncDefHead = ( KwFunction FuncName [ "(" ")" ] ) | ( FuncName "(" ")" ) ;
 FuncName    = FuncNameTok :whitespace(Whitespace) ;
@@ -213,8 +218,9 @@ FlowCmd     <~~ push(eeExempt(pop())) ~~> = IfStmt | CForStmt | ForStmt | WhileS
 PrefixCommand <~~ push(atLine(makePrefixCmd(takeAll()), lnPop())) ~~>
             = { RedirItem } AsgPrefix1 { AsgPrefix | RedirItem } NotIoRedir NotReserved CWord { CmdSuffix } ;
 AsgPrefix1  <~~ lnPush(up.pos) ~~> = AsgPrefix ;
+// A subscripted one (`a[1]=Q cmd`) parses too: bash refuses it when it runs (mkPrefixAsg).
 AsgPrefix   <~~ push(mkPrefixAsg(takeAll())) ~~>
-            = AsgIdent <~~ push({aname: up.in}) ~~> :whitespace() AsgPOp :whitespace() [ NsWord ] ;
+            = AsgIdent <~~ push({aname: up.in}) ~~> :whitespace() [ AsgIdx ] AsgPOp :whitespace() [ NsWord ] ;
 AsgPOp      <~~ push({pop: up.in}) ~~> = "+=" | AsgEq ;
 AsgEq       = "=" ;
 // NAME=VALUE... before a declaration builtin (makePrefixDecl has the rules).
@@ -298,7 +304,7 @@ AsgOne      <~~ push({a: parseAssign(takeAll())}) ~~>
 // appends (a string for a scalar, elements for an array).
 AsgTail     = [ AsgIdx ] :whitespace() AsgOp2 :whitespace() AsgRhs ;
 // {aidx} is the subscript as written, which bash's "NAME[SUB]: bad array subscript" quotes.
-AsgIdx      <~~ push({aidx: arSrc(up.start + 1, up.pos - 1)}) ~~> = "[" IdxWord "]" ;
+AsgIdx      <~~ push({aidx: arSrc(up.start + 1, up.pos - 1)}) ~~> = "[" :whitespace() IdxWord "]" ;
 AsgOp2      <~~ push({aop2: up.in}) ~~> = "+=" | AsgEq ;
 AsgRhs      = ArrayLit | AsgWord ;
 AsgWord     = [ NsWord ] ;
@@ -312,7 +318,7 @@ ArrayItems  = { ArrayItem } ;
 ArrayItem   = ArrayKV | CWord ;
 // `[k]=v` inside an array literal is an assignment too: bash 5.3 keeps `A=([0]=$x)`
 // unsplit exactly as it keeps `A=$x`.
-ArrayKV     <~~ push(mkArrayKV(takeAll())) ~~> = "[" IdxWord "]" :whitespace() "=" :whitespace() NsWord ;
+ArrayKV     <~~ push(mkArrayKV(takeAll())) ~~> = "[" :whitespace() IdxWord "]" :whitespace() "=" :whitespace() NsWord ;
 WsNL        = { @+" \t\r\n" | Comment } ;
 AsgIdent    = ( "a"..."z" | "A"..."Z" | "_" ) :whitespace() { "a"..."z" | "A"..."Z" | "0"..."9" | "_" } ;
 
@@ -1366,6 +1372,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // size and stride; llvmlink.go checks the sizes match.
     var gStatus = rtGlobal("last_status", i32)   // $?
     var gExited = rtGlobal("exited", i32)        // set by `exit`
+    var gSsDepth = rtGlobal("ss_depth", i32)     // the subshell nesting
     var gExitCode = rtGlobal("exit_code", i32)
 
     // A real "" at a NONZERO address. The IR interpreter traps loads at address 0, so an
@@ -1432,7 +1439,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function storeVar(b, name, v) {
         var al = refAlias(name)
         if (al != null) { storeVar(b, al, v); return }
-        if (attrOn(refVars, name)) { b.NewCall(rtSetByName, [gepStr(b, name), v]); return }
+        if (attrOn(refVars, name)) { var nv = gepStr(b, name); b.NewCall(rtSetByName, [nv, v, zero, refAttrs(b, nv)]); return }
         b.NewStore(attrCase(b, name, v), varPtr(b, name))
         heapPin(b)
     }
@@ -1577,7 +1584,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
 
     // Name-based variable access is in bash-rt.c, as loops over the {name, slot} table
     // `varnames`; the emitter only fills that table in main's entry block.
-    var rtSetByName = rtDecl("rt_setvar_byname", false, [1, 1])
+    var rtSetByName = rtDecl("rt_setvar_byname", false, [1, 1, 0, 0])
+    var rtNrefBase = rtDecl("rt_nref_base", true, [1])
     var rtEvalAssign = rtDecl("rt_eval_assign", false, [1])
     // i32 rt_decl_word(i8* w, i32 d, i32 x): one computed operand of a declaration (bash-rt.c).
     var rtDeclWord = rtDecl("rt_decl_word", false, [1, 0, 0])
@@ -1860,6 +1868,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var rtArrIset = rtDecl("rt_arr_iset", false, [1, 1, 1])
     var rtArrKey = rtDecl("rt_arr_key", true, [1, 1])
     var rtArrAkey = rtDecl("rt_arr_akey", true, [1, 1, 1, 0])
+    var rtTakeSubbad = rtDecl("rt_take_subbad", false, [])
     var rtAssocAdd = rtDecl("rt_assoc_add", false, [1])
     var rtUnsetName = rtDecl("rt_unset_name", false, [1])
     var rtUnsetRef = rtDecl("rt_unset_ref", false, [1])
@@ -2727,7 +2736,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 return {b: b, v: b.NewCall(rtPcheck, [v, b.NewZExt(blank, i32), gepStr(b, indirect ? "!" + name : name), msg])}
             }
             var picked = b.NewSelect(blank, d, v)
-            if (o == "=" && t6.v != null) { b.NewCall(rtSetByName, [t6.v, picked]) }
+            if (o == "=" && t6.v != null) { b.NewCall(rtSetByName, [t6.v, picked, zero, refAttrs(b, t6.v)]) }
             if (o == "=" && t6.v == null) {
                 // the default is stored under the name's attributes, and expands as stored
                 var setB = curF.NewBlock(""), joinB = curF.NewBlock("")
@@ -3490,9 +3499,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (vals[i].k != null) { next = b.NewCall(rtArrLitKey, [nm, vals[i].k, vals[i].v, next, atC]) }
             else { next = b.NewCall(rtArrLitWords, [nm, vals[i].v, next, atC]) }
         }
-        // -i stops the literal at an element that is an arithmetic error, which then
-        // abandons the line.
-        return (at & 1) != 0 ? emitAbortCheck(b) : b
+        // A bad subscript, or under -i an element that is an arithmetic error, stops the
+        // literal and abandons the line.
+        return emitAbortCheck(b)
     }
     // The key of NAME[SUB]=v for a name not declared associative: rt_arr_akey refuses a
     // written @ or * and an index still negative from the end, quoting the subscript as
@@ -3523,18 +3532,37 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         if (viaRef) {
             var tg = gepStr(b, a.name)
-            if (a.op == "+=") { v = b.NewCall(rtStrcat, [b.NewCall(rtGetByName, tg), v]) }
-            b.NewCall(rtSetByName, [tg, v])
+            b.NewCall(rtSetByName, [tg, v, (a.op == "+=") ? one : zero, refAttrs(b, tg)])
             return emitAbortCheck(b)
         }
         if (a.idxT != null) {
-            var rk = (assoc || (a.idxT.c != undefined && isIndexLit(a.idxT.c))) ? subKeyOf(b, a.name, a.idxT, null) : asgKeyOf(b, a)
+            var lit = assoc || (a.idxT.c != undefined && isIndexLit(a.idxT.c))
+            // A builtin's store (a.soft, an i32 slot: declare, local, read, printf -v): a
+            // refused subscript sets the slot and stores nothing, where an assignment abandons
+            // the line; the subscript's arithmetic errors carry no builtin's prefix. Twin of
+            // takeSubBad in bash-interpreter.abnf.
+            var soft = a.soft != undefined && !lit
+            var pfx = soft ? b.NewLoad(i8ptr, gArPfx) : null
+            if (soft) { b.NewStore(emptyPtr(b), gArPfx) }
+            var rk = lit ? subKeyOf(b, a.name, a.idxT, null) : asgKeyOf(b, a)
             b = rk.b
+            var skipB = null
+            if (soft) {
+                b.NewStore(pfx, gArPfx)
+                var rf = b.NewCall(rtTakeSubbad)
+                b.NewStore(b.NewOr(b.NewLoad(i32, a.soft), rf), a.soft)
+                var setB = curF.NewBlock("")
+                skipB = curF.NewBlock("")
+                b.NewCondBr(b.NewICmp(llvm.enum.IPredNE, rf, zero), skipB, setB)
+                b = setB
+            }
             b = emitAbortCheck(b)
             if (!assoc) { b.NewCall(rtArrAdopt, [nm, llvm.constant.NewInt(i32, getVarId(a.name))]) }
             var ebox = {b: b}
             emitElemSet(ebox, a.name, nm, rk.k, (a.op == "+=") ? b.NewCall(rtArrGet, [nm, rk.k]) : null, v, assoc, mk)
-            return ebox.b
+            if (skipB == null) { return ebox.b }
+            ebox.b.NewBr(skipB)
+            return skipB
         }
         // On an array name, a scalar assignment is to element 0 and `+=` appends to its text
         // (bash 5.3 answers `abd c` for e=(ab c); e+=d), both under the array's attributes.
@@ -3580,6 +3608,17 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function emitStoreAttr(b, name, v) {
         return emitAssign(b, {name: name, op: "=", idxT: null, lit: null, valT: doneWord(v)}, false, null)
     }
+    // The assignment a builtin makes to the variable it was handed by NAME (read, printf
+    // -v): v into NAME, or into an element for NAME[SUB], a refused subscript recorded in the
+    // i32 slot subP (emitAssign's a.soft).
+    function namedAsg(name, v, subP) {
+        var bi = name.indexOf("[")
+        if (bi > 0 && name.charAt(name.length - 1) == "]") {
+            var sub = name.slice(bi + 1, name.length - 1)
+            return {name: name.slice(0, bi), op: "=", idxT: makeConst(sub), isrc: sub, lit: null, valT: doneWord(v), soft: subP}
+        }
+        return {name: name, op: "=", idxT: null, lit: null, valT: doneWord(v)}
+    }
     // A word whose value is already expanded.
     function doneWord(v) { return {fn: function(b) { return {b: b, v: v} }, c: undefined, done: true} }
     // Stores v as element `key` of array `name` (nm, its name as an i8*) under the array's
@@ -3596,6 +3635,21 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (mk != null) { b.NewCall(rtArrKeep, [mk.a, mk.l, nm, key, v, assoc ? one : zero]) }
         else { b.NewCall(assoc ? rtArrSet : rtArrIset, [nm, key, v]) }
         box.b = b
+    }
+    // The attributes of the variable a store through the name nv (an i8*) lands on, picked at
+    // run time (rt_nref_base) from every name the tables know: they are lexical here (manual
+    // 7.9), and a nameref's or a computed name's target is known only when it runs.
+    function refAttrs(b, nv) {
+        var land = null
+        var at = zero
+        var k
+        for (k = 0; k < varIdList.length; k++) {
+            var bits = elemAttrs(varIdList[k])
+            if (bits == 0) { continue }
+            if (land == null) { land = b.NewCall(rtNrefBase, nv) }
+            at = b.NewSelect(b.NewICmp(llvm.enum.IPredNE, b.NewCall(rtStreq, [land, gepStr(b, varIdList[k])]), zero), llvm.constant.NewInt(i32, bits), at)
+        }
+        return at
     }
     // The attributes rt_attrv applies to an element of `name`: 1 -i, 2 -u, 4 -l.
     function elemAttrs(name) {
@@ -3707,6 +3761,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var setRo = kw == "readonly" || flags.indexOf("r") >= 0
         var isRef = kw != "export" && flags.indexOf("n") >= 0
         var selfBadP = null      // i32 slot: a computed nameref value named its own variable
+        var subBadP = null       // i32 slot: an element operand's subscript was refused
+        var anyIdx = false
+        for (i = 0; i < asgs.length; i++) { if (asgs[i] != null && asgs[i].idxT != null) { anyIdx = true } }
         // 1: the declaration exports its names, -1: it takes the attribute away (rt_xmark).
         var xCode = 0
         if (kw == "export" || flags.indexOf("x") >= 0) { xCode = 1 }
@@ -3816,7 +3873,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (setRo) { roVars["$" + names[j]] = true }
             if (xCode != 0) { b.NewCall(rtXmark, [gepStr(b, names[j]), (xCode > 0) ? one : zero]) }
             // A global `declare -a a` keeps a's elements; only a value or a local starts empty.
-            if (isArray && asgs[j] != null) { b.NewCall(rtArrClear, gepStr(b, names[j])) }
+            // `declare -a b[3]=x` stores one element and keeps the rest.
+            if (isArray && asgs[j] != null && asgs[j].idxT == null) { b.NewCall(rtArrClear, gepStr(b, names[j])) }
             if (isArray && asgs[j] == null && localize && curFrame != null) {
                 // A local scalar declared an array again becomes an empty one (bash 5.3).
                 var keepV = assoc ? null : b.NewICmp(llvm.enum.IPredNE, b.NewCall(rtArrAny, gepStr(b, names[j])), zero)
@@ -3825,7 +3883,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (isArray && asgs[j] == null) { b.NewCall(rtArrDmark, gepStr(b, names[j])) }
             if (asgs[j] != null) {
                 var a = asgs[j]
-                if (v != null) { a = {name: a.name, op: a.op, idxT: a.idxT, lit: null, valT: doneWord(v), isrc: a.isrc} }
+                if (v != null || a.idxT != null) { a = {name: a.name, op: a.op, idxT: a.idxT, lit: (v != null) ? null : a.lit, valT: (v != null) ? doneWord(v) : a.valT, isrc: a.isrc, soft: subBadP} }
                 var prevV = selfRef ? loadVar(b, names[j]) : null
                 b = emitAssign(b, a, assoc, null)
                 if (selfRef) {
@@ -3933,6 +3991,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (anyDyn) { b.NewStore(zero, badP) }
             selfBadP = isRef ? slotOf(i32) : null
             if (isRef) { b.NewStore(zero, selfBadP) }
+            subBadP = anyIdx ? slotOf(i32) : null
+            if (anyIdx) { b.NewStore(zero, subBadP) }
             var o
             for (o = 0; o < order.length; o++) {
                 if (order[o].dyn != undefined) { b = emitDeclDyn(b, order[o].dyn, badP); continue }
@@ -3942,6 +4002,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             storeStatusI(b, roFail ? 1 : 0)
             if (anyDyn) { storeStatus(b, b.NewOr(b.NewLoad(i32, gStatus), b.NewLoad(i32, badP))) }
             if (isRef) { storeStatus(b, b.NewOr(b.NewLoad(i32, gStatus), b.NewLoad(i32, selfBadP))) }
+            if (anyIdx) { storeStatus(b, b.NewOr(b.NewLoad(i32, gStatus), b.NewLoad(i32, subBadP))) }
             roFail = false
             return b
         }
@@ -4904,12 +4965,12 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     // Its lines count from line0, or from the current command's line when line0 is 0. Twin of
     // compileSnippet in bash-interpreter.abnf.
-    function compileSnippet(src, line0) {
+    function compileSnippet(src, line0, lines) {
         if (snipIsEmpty(src)) { return function(b) { storeStatusI(b, 0); return b } }
         if (src.indexOf("\\\n") >= 0 || src.indexOf("<<") >= 0) { src = c.compile(c.parseFrom(c.agrammar, src, "Spliced")).stack[0] }
         var sv = snipLine0
         snipLine0 = line0 > 0 ? line0 : emitLine
-        var t = arCompile(src, "CompoundList", false)
+        var t = arCompile(src, lines ? "Snippet" : "CompoundList", false)
         snipLine0 = sv
         return function(b) {
             var svLn = lnCtx
@@ -4927,8 +4988,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // cmk: the mark the command started at, or null (cmdMark).
     function emitPrintf(b, args, cmk) {
         var a = args
-        var dest = null
-        if (a.length >= 2 && a[0].c == "-v") { dest = a[1].c; a = a.slice(2) }
+        var destW = null
+        if (a.length >= 2 && a[0].c == "-v") { destW = a[1]; a = a.slice(2) }
+        var dest = (destW != null) ? destW.c : null
         if (a.length > 0 && a[0].c == "--") { a = a.slice(1) }
         if (a.length == 0) { storeStatusI(b, 0); return b }
         var mk = (cmk != null) ? cmk : heapMark(b)
@@ -4945,13 +5007,28 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         b = emitAbortCheck(b)
         var out = b.NewCall(rtPrintf, [rf.v, listV])
+        if (destW == null) {
+            b.NewCall(rtPfOut, out)
+            storeStatus(b, b.NewLoad(i32, gPrintfRc))
+            return b
+        }
         if (dest != null && roRefused(b, dest, "")) { storeStatusI(b, 1); return b }
+        // A refused subscript in the name fails printf with status 1.
+        var subP = slotOf(i32)
+        b.NewStore(zero, subP)
         if (dest != null) {
             b.NewStore(gepStr(b, "printf: "), gArPfx)
-            b = emitAssign(b, {name: dest, op: "=", idxT: null, lit: null, valT: doneWord(b.NewCall(rtPfValue, out))}, false, mk)
+            b = emitAssign(b, namedAsg(dest, b.NewCall(rtPfValue, out), subP), false, mk)
             b.NewStore(emptyPtr(b), gArPfx)
-        } else { b.NewCall(rtPfOut, out) }
-        storeStatus(b, b.NewLoad(i32, gPrintfRc))
+        } else {
+            // A computed name is stored by name at run time (rt_setvar_byname).
+            var rd = evalWord(b, destW)
+            b = rd.b
+            b.NewCall(rtSetByName, [rd.v, b.NewCall(rtPfValue, out), zero, refAttrs(b, rd.v)])
+            b.NewStore(b.NewCall(rtTakeSubbad), subP)
+            b = emitAbortCheck(b)
+        }
+        storeStatus(b, b.NewSelect(b.NewICmp(llvm.enum.IPredNE, b.NewLoad(i32, subP), zero), one, b.NewLoad(i32, gPrintfRc)))
         return b
     }
 
@@ -4973,11 +5050,20 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // NO NAMES AT ALL: bash assigns the line to REPLY "without the ending delimiter but
         // otherwise unmodified" - not field 0, and not stripped.
         var rawReply = (arrName == null && names.length == 0)
+        var anyElem = false
+        for (i = 0; i < names.length; i++) { if (names[i].indexOf("[") > 0) { anyElem = true } }
+        // An -a name that is no NAME (`read -a 'b[1]'`) fails the read, its line consumed.
+        var badArr = arrName != null && !isIdentText(arrName)
         // One name is the read's only store: what the read allocated besides goes back.
         // Several are kept in their slots' buffers first (rt_rkeep), and then it goes back.
-        var mk = (arrName == null && names.length >= 1) ? ((cmk != null) ? cmk : heapMark(b)) : null
+        var mk = (arrName == null && names.length >= 1 && !anyElem) ? ((cmk != null) ? cmk : heapMark(b)) : null
         var mk1 = (names.length == 1) ? mk : null
         var line = b.NewCall(rtReadLine, zero)
+        if (badArr) {
+            emitDiag(b, gepStr(b, "read: `" + arrName + "': not a valid identifier\n"))
+            storeStatusI(b, 1)
+            return b
+        }
         // A readonly target, once the line is read: the array or the last name fails the
         // read (status 1), REPLY or an earlier name stops it there (2), bash 5.3. Twin of
         // readBuiltin in bash-interpreter.abnf.
@@ -4991,7 +5077,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var eof = b.NewICmp(llvm.enum.IPredNE, b.NewLoad(i32, gReadEof), zero)
         var eofB = curF.NewBlock(""), okB = curF.NewBlock(""), merge = curF.NewBlock("")
         b.NewCondBr(eof, eofB, okB)
-        for (k = 0; k < roK; k++) { eofB = emitStoreAttr(eofB, names[k], emptyPtr(eofB)) }
+        var subP = slotOf(i32)
+        eofB.NewStore(zero, subP)
+        for (k = 0; k < roK; k++) { eofB = emitAssign(eofB, namedAsg(names[k], emptyPtr(eofB), subP), false, null) }
         if (roK < names.length) { roRefused(eofB, names[roK], "") }
         if (rawReply) { storeVar(eofB, "REPLY", emptyPtr(eofB)) }
         if (arrName != null) { eofB.NewCall(rtArrClear, gepStr(eofB, arrName)) }
@@ -5023,8 +5111,17 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             for (k = 0; k < roK; k++) { fvs[k] = okB.NewCall(rtRkeep, [mk.a, fvs[k], llvm.constant.NewInt(i32, getVarId(names[k]))]) }
             okB.NewCall(rtRkeepEnd, [mk.a, mk.l])
         }
+        // A refused subscript stops the read like a readonly name: 2, or 1 for the last name.
+        okB.NewStore(zero, subP)
         for (k = 0; k < roK; k++) {
-            okB = emitAssign(okB, {name: names[k], op: "=", idxT: null, lit: null, valT: doneWord(fvs[k])}, false, mk1)
+            okB = emitAssign(okB, namedAsg(names[k], fvs[k], subP), false, mk1)
+            if (names[k].indexOf("[") < 0) { continue }
+            var refB = curF.NewBlock(""), goB = curF.NewBlock("")
+            okB.NewCondBr(okB.NewICmp(llvm.enum.IPredNE, okB.NewLoad(i32, subP), zero), refB, goB)
+            refB.NewStore(emptyPtr(refB), gArPfx)
+            storeStatusI(refB, (k < names.length - 1) ? 2 : 1)
+            refB.NewBr(merge)
+            okB = goB
         }
         if (roK < names.length) { roRefused(okB, names[roK], "") }
         okB.NewStore(emptyPtr(okB), gArPfx)
@@ -5284,8 +5381,20 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var run = curF.NewBlock(""), skip = curF.NewBlock("")
             b.NewCondBr(b.NewICmp(llvm.enum.IPredNE, b.NewLoad(i32, tr.flag), zero), run, skip)
             run.NewStore(zero, tr.flag)
+            // A line the trap abandons (in a subshell, the rest of the trap) leaves the
+            // status. Twin of runExitTrap in bash-interpreter.abnf.
+            var savedExit = curExit, savedExitRd = curExitRd
+            var trapExit = curF.NewBlock(""), softB = curF.NewBlock("")
+            curExit = trapExit
+            curExitRd = redirStack.length
             var rb = tr.body(run)
+            curExit = savedExit
+            curExitRd = savedExitRd
             rb.NewBr(skip)
+            trapExit.NewCondBr(trapExit.NewICmp(llvm.enum.IPredEQ, trapExit.NewLoad(i32, gExited), llvm.constant.NewInt(i32, 2)),
+                               softB, viaUnwind(savedExit, savedExitRd))
+            softB.NewStore(zero, gExited)
+            softB.NewBr(skip)
             b = skip
         }
         b.NewStore(b.NewLoad(i32, sv), gStatus)
@@ -5760,7 +5869,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 if (src != "-") {
                     var flag = m.NewGlobalDef("trap_flag" + trapCount, zero)
                     trapCount = trapCount + 1
-                    trapList.push({flag: flag, src: src, body: compileSnippet(src, 1)})
+                    trapList.push({flag: flag, src: src, body: compileSnippet(src, 1, true)})
                     b.NewStore(one, flag)
                 }
                 storeStatusI(b, 0)
@@ -5777,7 +5886,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 }
                 if (allConst) {
                     if (esrc == "") { storeStatusI(b, 0); return b }
-                    return compileSnippet(esrc, 0)(b)
+                    return compileSnippet(esrc, 0, true)(b)
                 }
                 // A COMPUTED eval cannot be compiled in general. The one shape a compiler can
                 // still honour is a string of assignments, `eval "NAME=VALUE"`, which becomes a
@@ -5971,7 +6080,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             for (k = 0; k < args0.length; k++) { argTs.push(expandedWord(bx, args0[k])) }
             b = emitAbortCheck(bx.b)
             var olds = []
-            if (redirs0.length > 0) { for (k = 0; k < asgs.length; k++) { olds.push(loadVar(b, asgs[k].aname)) } }
+            if (redirs0.length > 0) { for (k = 0; k < asgs.length; k++) { olds.push(asgs[k].bad != null ? null : loadVar(b, asgs[k].aname)) } }
             var depth = slotOf(i32)
             b.NewStore(b.NewLoad(i32, gLsTop), depth)
             // For a function the bindings begin the call's frame (tmpDepth, rt_fn_enter),
@@ -5980,11 +6089,12 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var isFn = cmd0.c != undefined && !noFn && funcFor(cmd0.c) != null
             var vals = []
             for (k = 0; k < asgs.length; k++) {
+                if (prefixBad(b, asgs[k])) { vals.push(null); continue }
+                // A readonly name keeps its value, unexpanded; the command still runs.
+                if (roRefused(b, asgs[k].aname, "")) { vals.push(loadVar(b, asgs[k].aname)); continue }
                 var r = prefixVal(b, asgs[k])
                 b = r.b
                 var v = r.v
-                // A readonly name keeps its value; the command still runs.
-                if (roRefused(b, asgs[k].aname, "")) { vals.push(loadVar(b, asgs[k].aname)); continue }
                 b.NewCall(isFn ? rtPushTmp : rtPushLocal, llvm.constant.NewInt(i32, getVarId(asgs[k].aname)))
                 if (isFn) { b.NewCall(rtArrClear, gepStr(b, asgs[k].aname)) }
                 // No attrCase: the binding takes no attributes. Twin of applyPrefix. Nothing
@@ -6015,7 +6125,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (empty == null) { return b }
             var keepB = curF.NewBlock(""), done = curF.NewBlock("")
             b.NewCondBr(empty, keepB, done)
-            for (k = 0; k < asgs.length; k++) { keepB = emitStoreAttr(keepB, asgs[k].aname, vals[k]) }
+            for (k = 0; k < asgs.length; k++) { if (vals[k] != null) { keepB = emitStoreAttr(keepB, asgs[k].aname, vals[k]) } }
             keepB.NewBr(done)
             return done
         }
@@ -6036,10 +6146,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return {s: w.s, f: w.f, c: undefined, fn: function(b) {
             var cur = []
             var k
-            for (k = 0; k < asgs.length; k++) { cur.push(loadVar(b, asgs[k].aname)) }
-            for (k = asgs.length - 1; k >= 0; k--) { storeVarRaw(b, asgs[k].aname, olds[k]) }
+            for (k = 0; k < asgs.length; k++) { cur.push(olds[k] == null ? null : loadVar(b, asgs[k].aname)) }
+            for (k = asgs.length - 1; k >= 0; k--) { if (olds[k] != null) { storeVarRaw(b, asgs[k].aname, olds[k]) } }
             var r = w.fn(b)
-            for (k = 0; k < asgs.length; k++) { storeVarRaw(r.b, asgs[k].aname, cur[k]) }
+            for (k = 0; k < asgs.length; k++) { if (olds[k] != null) { storeVarRaw(r.b, asgs[k].aname, cur[k]) } }
             return r
         }}
     }
@@ -6157,6 +6267,38 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // back the strings it allocated and did not store (heapRelease to a mark taken before
     // it): a later statement's store would otherwise raise the floor over them for as long
     // as the enclosing loop runs. An assignment has given back its own already (asgKept).
+    // The lines of an eval or trap string (splitLines): an expansion error abandons the rest
+    // of its line with status 1 and the next line runs, as in a script (runProgram); each
+    // line has its own exit block, and any other exit goes on to the enclosing one. Twin of
+    // makeLines in bash-interpreter.abnf.
+    function makeLines(lines) {
+        var seqs = []
+        var i
+        for (i = 0; i < lines.length; i++) { seqs.push(makeSeq(lines[i])) }
+        return function(b) {
+            var savedExit = curExit, savedExitRd = curExitRd
+            var li
+            for (li = 0; li < seqs.length; li++) {
+                var lineExit = curF.NewBlock(""), next = curF.NewBlock("")
+                curExit = lineExit
+                curExitRd = redirStack.length
+                b = emitAbortCheck(seqs[li](b))
+                b.NewBr(next)
+                curExit = savedExit
+                curExitRd = savedExitRd
+                // In a subshell the abandoned line ends the subshell instead, status 1.
+                var softB = curF.NewBlock("")
+                var soft = lineExit.NewICmp(llvm.enum.IPredEQ, lineExit.NewLoad(i32, gExited), llvm.constant.NewInt(i32, 2))
+                var top = lineExit.NewICmp(llvm.enum.IPredEQ, lineExit.NewLoad(i32, gSsDepth), zero)
+                lineExit.NewCondBr(lineExit.NewAnd(soft, top), softB, viaUnwind(savedExit, savedExitRd))
+                softB.NewStore(zero, gExited)
+                storeStatusI(softB, 1)
+                softB.NewBr(next)
+                b = next
+            }
+            return b
+        }
+    }
     function makeSeq(thunks) {
         return function(b) {
             var i
@@ -6453,7 +6595,15 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
 
     function mkPrefixAsg(items) {
-        return {aname: items[0].aname, op: items[1].pop, val: (items.length > 2) ? items[2] : null}
+        var r = {aname: items[0].aname, op: "=", val: null, bad: null}
+        var i
+        for (i = 1; i < items.length; i++) {
+            var it = items[i]
+            if (it.fn != undefined) { if (r.bad == null && i == items.length - 1 && items[i - 1].pop != undefined) { r.val = it } }
+            else if (it.aidx != undefined) { r.bad = r.aname + "[" + it.aidx + "]" }
+            else if (it.pop != undefined) { r.op = it.pop }
+        }
+        return r
     }
     // NAME=VALUE... before a declaration builtin: a name the builtin lists takes the prefix
     // value when the builtin keeps it (export, readonly, -x, -r, local, and declare/typeset
@@ -6493,9 +6643,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var k
             var whole = true
             for (k = 0; k < asgs.length; k++) {
+                if (prefixBad(b, asgs[k])) { continue }
+                if (roRefused(b, asgs[k].aname, "")) { whole = false; continue }
                 var r = prefixVal(b, asgs[k])
                 b = r.b
-                if (roRefused(b, asgs[k].aname, "")) { whole = false; continue }
                 b.NewCall(rtPushLocal, llvm.constant.NewInt(i32, getVarId(asgs[k].aname)))
                 storeVarRaw(b, asgs[k].aname, r.v)
                 cell["$" + asgs[k].aname] = r.v
@@ -6513,8 +6664,15 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     function prefixHas(asgs, nm) {
         var k
-        for (k = 0; k < asgs.length; k++) { if (asgs[k].aname == nm) { return true } }
+        for (k = 0; k < asgs.length; k++) { if (asgs[k].bad == null && asgs[k].aname == nm) { return true } }
         return false
+    }
+    // A subscripted prefix assignment: reported, and it binds nothing. Twin of the bad arm of
+    // applyPrefix in bash-interpreter.abnf, where mkPrefixAsg documents it.
+    function prefixBad(b, a) {
+        if (a.bad == null) { return false }
+        emitDiag(b, gepStr(b, "`" + a.bad + "': not a valid identifier\n"))
+        return true
     }
     function prefixCell(cell, nm) { return {s: false, f: false, c: undefined, fn: function(b) { return {b: b, v: cell["$" + nm]} }} }
     // A prefix assignment's value: its word, after the name's value for `+=`.

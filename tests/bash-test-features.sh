@@ -893,6 +893,75 @@ r=$( (xfm); xfi 2>/dev/null || echo gone; x=$(xfm; xfi); echo "$x"; xfi 2>/dev/n
 in
 gone"
 
+# ----- an abandoned line in eval or a trap: the next line runs, in a subshell it ends -----
+xbo=""; eval 'xba[-9]=W; xbo+=no
+xbo+=yes' 2>/dev/null; xbo+=" $?"
+check bae1 "$xbo" "yes 0"
+xbh() { eval 'xbo=$((1/0)); xbo=no'; xbo="$? $xbo"; }
+xbo=a; xbh 2>/dev/null; check bae2 "$xbo" "1 a"
+r=$(eval 'xba[-9]=W
+echo no' 2>/dev/null; echo no); check bae3 "$?[$r]" "1[]"
+r=$(trap 'xba[-9]=W
+echo no' EXIT 2>/dev/null; echo body); check bae4 "$?[$r]" "0[body]"
+
+# ----- bad subscripts outside an assignment statement -----
+r=$(exec 2>&1; xba+=([-9]=Q); echo no); check bal1 "$?[$r]" "1[$0: line $LINENO: [-9]=Q: bad array subscript]"
+r=$(exec 2>&1; xbd=([@]=R); echo no); check bal2 "$?[$r]" "1[$0: line $LINENO: [@]=R: cannot assign to non-numeric index]"
+r=$(exec 2>&1; xba+=([ -9 ]=Q); echo no); check bal3 "$?[$r]" "1[$0: line $LINENO: [ -9 ]=Q: bad array subscript]"
+xbd=([ 1 ]=R [ 2]=S); check bal4 "${xbd[*]} ${!xbd[*]}" "R S 1 2"
+r=$(exec 2>&1; declare xba[-9]=Q; echo "st=$? ${xba[*]}"); check bal5 "$r" "$0: line $LINENO: xba[-9]: bad array subscript
+st=1 x y L"
+xbb=(p q); declare -a xbb[3]=x; check bal6 "${xbb[*]}" "p q x"
+r=$(exec 2>&1; read 'xba[-9]' xbv <<< 'A B'; echo "st=$? [$xbv]"); check bal7 "$r" "$0: line $LINENO: xba[-9]: bad array subscript
+st=2 []"
+r=$(exec 2>&1; read xbv 'xba[-9]' <<< 'A B'; echo "st=$? [$xbv]"); check bal8 "$r" "$0: line $LINENO: xba[-9]: bad array subscript
+st=1 [A]"
+r=$(exec 2>&1; read -a 'xb-c' <<< 'A B'; echo "st=$?"); check bal9 "$r" "$0: line $LINENO: read: \`xb-c': not a valid identifier
+st=1"
+r=$(exec 2>&1; printf -v 'xba[-9]' %s Q; echo "st=$?"); check bal10 "$r" "$0: line $LINENO: xba[-9]: bad array subscript
+st=1"
+r=$(exec 2>&1; unset 'xba[-9]'; echo "st=$? ${xba[*]}"); check bal11 "$r" "$0: line $LINENO: unset: [-9]: bad array subscript
+st=1 x y L"
+r=$(exec 2>&1; unset 'xba[1/0]'; echo no); check bal12 "$?[$r]" "1[$0: line $LINENO: 1/0: division by 0 (error token is \"0\")]"
+r=$(read 'xba[1]' <<< 'R'; printf -v 'xba[2]' %s P; xbn=xbv; printf -v "$xbn" %s-%s a b; echo "${xba[*]} $xbv")
+check bal13 "$r" "x R P a-b"
+
+# ----- a subscripted prefix assignment is not an assignment; a readonly one is not expanded -----
+r=$(exec 2>&1; x=1 xba[1]=$(echo SIDE >&2) y=2 echo hi); check bap1 "$r" "$0: line $LINENO: \`xba[1]': not a valid identifier
+hi"
+r=$(exec 2>&1; readonly xro=1; xro=$(echo SIDE >&2) echo hi); check bap2 "$r" "$0: line $LINENO: xro: readonly variable
+hi"
+
+# ----- a loop body in braces, a function body that is a compound command -----
+xbo=""; for i in a b; { xbo+=$i; }; for ((i = 0; i < 2; i++)) { xbo+=$i; }
+check bab1 "$xbo" "ab01"
+xbf2() for i in p q; do echo "$i"; done
+xbf3() if [ 1 ]; then echo t; fi
+check bab2 "$(xbf2; xbf3)" "p
+q
+t"
+
+# ----- $LINENO in a function a $( ) defines: bash runs it from its printed text -----
+r=$(xbl() { echo "l $LINENO"
+echo "l2 $LINENO"; }
+xbl
+echo "n $LINENO"
+); check bln1 "$r" "l $((LINENO + 2))
+l2 $((LINENO + 4))
+n $((LINENO + 7))"
+
+# ----- the attributes of the variable a computed nameref lands on -----
+declare -i xbi=1
+xbt=xbi
+declare -n xbk="$xbt"
+xbk+=5; xbo=$xbi; xbk=2+3
+check bnr1 "$xbo $xbi" "6 5"
+declare -u xbu=ab
+declare -n xbru="${xbt%i}u"
+xbru=xy; check bnr2 "$xbu" "XY"
+declare -n xbe='xba[1-10]'
+r=$(exec 2>&1; xbe+=V; echo no); check bnr3 "$?[$r]" "1[$0: line $LINENO: xba[1-10]: bad array subscript]"
+
 # ----- standard error is fd 2 in every leg -----
 # Not a check: ./test.sh --cross diffs the two halves' merged output, so this line and an
 # arithmetic error's message reach it from llvm.Run as they do from the interpreter.
