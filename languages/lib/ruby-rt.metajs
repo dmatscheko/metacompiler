@@ -4478,8 +4478,21 @@ function rbBuiltinClass(name) {
         c["$c$InvalidByteSequenceError"] = rbBuiltinClass("Encoding::InvalidByteSequenceError")
         c["$c$ConverterNotFoundError"] = rbBuiltinClass("Encoding::ConverterNotFoundError")
     }
+    // The `$mix$' record rbMixIsA reads, so a Struct.new instance is_a?
+    // Enumerable through its superclass.
+    var mx = rbBuiltinMixin(name)
+    if (mx != "") { c["$mix$" + mx] = rbBuiltinClass(mx) }
     rbClassTable[k] = c
     return c
+}
+
+// The module a builtin class includes: Enumerable for the collections and
+// Struct, Comparable for String, Symbol and Numeric. Twin of rubyBuiltinMixin in
+// abnf/jsrt.go.
+function rbBuiltinMixin(name) {
+    if (name == "Array" || name == "Hash" || name == "Range" || name == "Struct" || name == "Enumerator") { return "Enumerable" }
+    if (name == "String" || name == "Symbol" || name == "Numeric") { return "Comparable" }
+    return ""
 }
 
 // rbMathCall: Ruby's Math module. Every method answers a FLOAT - Ruby's
@@ -4677,7 +4690,9 @@ function rbIsA(v, cls) {
             if (kind == "Enumerator") { return true }
             return kind == "Hash"
         }
-        return false
+        // Otherwise a compiled class may inherit from the builtin
+        // (Struct.new(:a)'s superclass is Struct): the chain walk below.
+        if (typeof v != "object") { return false }
     }
     if (!rbIsObj(v)) { return false }
     var c = v["__class"]
@@ -4723,6 +4738,8 @@ function rbAncestors(cls) {
             var bn = c["__name"]
             while (typeof bn == "string" && bn != "" && !rbRootAncestor(bn)) {
                 out.push(rbBuiltinClass(bn))
+                var bmx = rbBuiltinMixin(bn)
+                if (bmx != "") { out.push(rbBuiltinClass(bmx)) }
                 bn = rbExcParentOf(bn)
             }
             c = null
@@ -9447,17 +9464,23 @@ function js_rcase(l, r) {
     return rbEq(l, r)
 }
 
-// A plain `when V` value: a class matches by is_a?, everything else by == (an
-// Array compares STRUCTURALLY here - only a RANGE means membership, which is what
-// js_rcase above is for). Not exported: only the regex-aware js_rxwhen is emitted.
+// Ruby's ===, for a plain `when V` value and the === operator: a class matches by
+// is_a?, everything else by == (an Array compares STRUCTURALLY here - only a
+// `when *list' splat means membership, which is what js_rcase above is for).
+// Proc#=== / Method#=== and a user #=== answer the call's own result (`pr === 3'
+// is 6), which case/when reads as a truth value. Not exported: only the
+// regex-aware js_rxwhen is emitted. Twin of js_rwhen in abnf/jsrt.go.
 function rbWhen(l, r) {
     if (rbIsObj(l) && l["__isclass"] === true) { return rbIsA(r, l) }
-    // Proc#=== / Method#=== call it: `when ->(x) { x > 2 }'.
-    if (typeof l == "function") { return rbTruthy(rbCall1(l, r)) }
+    if (typeof l == "function") { return rbCall1(l, r) }
     // `when' is Ruby's ===, and a Range's === is MEMBERSHIP. The emitter routes a
     // range LITERAL to js_rcase by syntax, so this only bites when the when value
     // is a variable (`when r').
     if (rbIsRange(l)) { return rbOpenRangeCover(l, r) }
+    if (rbUserObj(l)) {
+        var m = rbFindMethod(l, "===")
+        if (m !== undefined) { return m.apply(undefined, [l, r]) }
+    }
     return rbEq(l, r)
 }
 

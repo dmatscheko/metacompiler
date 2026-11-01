@@ -3426,7 +3426,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     binExt["%="] = "js_rmod"
     binExt["=="] = "js_req"
     binExt["!="] = "js_rne"
-    binExt["==="] = "js_rxcase"
+    binExt["==="] = "js_rxwhen"
     // =~ / !~ : the match operators. js_rxmatch answers the INDEX of the match (not
     // a boolean) or nil, which is what `("zzz" =~ /b/) == nil` needs.
     binExt["=~"] = "js_rxmatch"

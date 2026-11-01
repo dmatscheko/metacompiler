@@ -7268,8 +7268,26 @@ func (rt *jsrt) rubyBuiltinClass(name string) *jsObject {
 			c.set("$c$"+n, rt.rubyBuiltinClass("Encoding::"+n))
 		}
 	}
+	// The `$mix$' record rubyMixIsA reads, so a Struct.new instance is_a?
+	// Enumerable through its superclass.
+	if mx := rubyBuiltinMixin(name); mx != "" {
+		c.set("$mix$"+mx, rt.rubyBuiltinClass(mx))
+	}
 	rt.rubyClasses[name] = c
 	return c
+}
+
+// rubyBuiltinMixin is the module a builtin class includes: Enumerable for the
+// collections and Struct, Comparable for String, Symbol and Numeric. Twins:
+// rbBuiltinMixin in lib/ruby-rt.metajs, builtinMixin in ruby-interpreter.abnf.
+func rubyBuiltinMixin(name string) string {
+	switch name {
+	case "Array", "Hash", "Range", "Struct", "Enumerator":
+		return "Enumerable"
+	case "String", "Symbol", "Numeric":
+		return "Comparable"
+	}
+	return ""
 }
 
 // rubyMathCall is Ruby's Math module: every method answers a FLOAT, which is the
@@ -7862,7 +7880,8 @@ func (rt *jsrt) rubyIsA(v interface{}, cls interface{}) bool {
 		case "Enumerator::Lazy":
 			return rubyIsLazyEnum(v)
 		}
-		return false
+		// Otherwise a compiled class may inherit from the builtin
+		// (Struct.new(:a)'s superclass is Struct): the chain walk below.
 	}
 	for c := interface{}(nil); ; {
 		o, isObj := v.(*jsObject)
@@ -7934,6 +7953,9 @@ func (rt *jsrt) rubyAncestors(cls interface{}) *jsArray {
 			// name chase stops before them rather than duplicating them.
 			for bn, _ := co.props["__name"].(string); bn != "" && !rubyRootAncestor(bn); bn = rubyExcParent[bn] {
 				out.elems = append(out.elems, rt.rubyBuiltinClass(bn))
+				if mx := rubyBuiltinMixin(bn); mx != "" {
+					out.elems = append(out.elems, rt.rubyBuiltinClass(mx))
+				}
 			}
 			break
 		}
@@ -16083,14 +16105,16 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			}
 			return boolH(rt.rubyEq(l, r))
 		},
-		// A plain `when V` value: a class matches by is_a?, everything else by ==
-		// (an Array compares structurally here - only a RANGE means membership,
-		// which is what js_rcase above is for).
+		// Ruby's ===, for a plain `when V' value and the === operator: a class
+		// matches by is_a?, everything else by == (an Array compares structurally
+		// here - only a `when *list' splat means membership, which is what js_rcase
+		// above is for). Proc#=== / Method#=== and a user #=== answer the call's
+		// own result (`pr === 3' is 6), which case/when reads as a truth value.
+		// Twins: caseEq in ruby-interpreter.abnf, rbWhen in lib/ruby-rt.metajs.
 		"js_rwhen": func(a []uint64) uint64 {
 			l, r := u(a[0]), u(a[1])
-			// Proc#=== / Method#=== call it: `when ->(x) { x > 2 }'.
 			if isCallable(l) {
-				return boolH(rt.truthy(rt.call(l, jsUndef, []interface{}{r})))
+				return w(rt.call(l, jsUndef, []interface{}{r}))
 			}
 			if lo, ok := l.(*jsObject); ok {
 				if _, isCls := lo.props["__isclass"]; isCls {
@@ -16102,6 +16126,11 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			// the when value is a variable (`when r').
 			if lo, isRng := rubyIsRange(l); isRng {
 				return boolH(rt.rubyOpenRangeCover(lo, r))
+			}
+			if rubyUserObj(l) {
+				if m, ok := rubyFindMethod(l, "==="); ok {
+					return w(rt.call(m, jsUndef, []interface{}{l, r}))
+				}
 			}
 			return boolH(rt.rubyEq(l, r))
 		},

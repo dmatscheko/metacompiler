@@ -14895,6 +14895,18 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         hostGlobals[builtinClassNames[bci]] = mkBuiltinClass(builtinClassNames[bci], null)
         if (isBuiltinModule(builtinClassNames[bci])) { hostGlobals[builtinClassNames[bci]].__ismodule = true }
     }
+    // The module a builtin class includes, for ancestors / include? / is_a? (a
+    // Struct.new instance is an Enumerable through its superclass). Twins:
+    // rubyBuiltinMixin in abnf/jsrt.go, rbBuiltinMixin in lib/ruby-rt.metajs.
+    function builtinMixin(n) {
+        if (n == "Array" || n == "Hash" || n == "Range" || n == "Struct" || n == "Enumerator") { return "Enumerable" }
+        if (n == "String" || n == "Symbol" || n == "Numeric") { return "Comparable" }
+        return ""
+    }
+    for (var bmi = 0; bmi < builtinClassNames.length; bmi++) {
+        var bmx = builtinMixin(builtinClassNames[bmi])
+        if (bmx != "") { hostGlobals[builtinClassNames[bmi]].__mixins = [hostGlobals[bmx]] }
+    }
     // An Encoding is one object per encoding, its name in __renc. Twins:
     // rubyBuiltinClass in abnf/jsrt.go, rbBuiltinClass in lib/ruby-rt.metajs.
     function mkEnc(n) { return {__class: hostGlobals["Encoding"], __renc: n} }
@@ -15468,14 +15480,16 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         return !rubyEq(l, r)
     }
     // === is the case-equality operator: membership for a range, is_a? for a class
-    // object, plain == otherwise. It is what `case/when` dispatches on.
+    // object, plain == otherwise. It is what `case/when` dispatches on. Proc#===,
+    // Method#=== and a user #=== answer the call's own result (`proc { |x| x * 2 }
+    // === 3' is 6), which case/when reads as a truth value. Twins: js_rwhen in
+    // abnf/jsrt.go, rbWhen in lib/ruby-rt.metajs.
     function caseEq(l, r) {
         if (isRange(l)) { return rangeCover(l, r) }
-        // Proc#=== / Method#=== call it: `when ->(x) { x > 2 }'.
-        if (typeof l == "function") { return rtest(blockCall(l, [r])) }
+        if (typeof l == "function") { return blockCall(l, [r]) }
         if (isRegex(l)) { return reMatchOp(l, r) !== null }
         if (l !== null && l !== undefined && typeof l == "object" && l.__isclass === true) { return valueIsA(r, l) }
-        if (isUserObj(l) && typeof lookupMethod(l.__class, "===") == "function") { return rtest(mcall(l, "===", [r], null)) }
+        if (isUserObj(l) && typeof lookupMethod(l.__class, "===") == "function") { return mcall(l, "===", [r], null) }
         return rubyEq(l, r)
     }
     binOps["==="] = function(l, r) { return caseEq(l, r) }

@@ -1315,6 +1315,48 @@ def s152
   end
   check("dp152b", good == [7, 8, 9, 10, 11, 12, "{}3"])
 end
+# ===== SECTION 153: the value of ===; the modules a builtin class includes =====
+# Proc#=== / Method#=== and a user #=== answer the call's own result, not a
+# boolean; Array#=== is ==, not membership (a `when *list' splat is). Struct,
+# Array, Hash, Range and Enumerator include Enumerable, String, Symbol and Numeric
+# Comparable - in #ancestors, #include?, the module relations and is_a?, and a
+# Struct.new instance is_a? Struct. /usr/bin/ruby 2.6 settles each.
+S153 = Struct.new(:a)
+class P153 < Struct.new(:x); end
+class X153
+  def ===(o); o * 5; end
+end
+def s153m(x); x * 3; end
+def s153
+  pr = proc { |x| x * 2 }
+  check("ceq153a", [pr === 3, {a: 1}.to_proc === :a, :upcase.to_proc === "ab", method(:s153m) === 4,
+                    proc { nil } === 1, X153.new === 2] == [6, 1, "AB", 12, nil, 10])
+  big = ->(x) { x > 2 }
+  hits = [1, 5].map do |v|
+    case v
+    when big then :big
+    else :small
+    end
+  end
+  wx = case 3
+       when X153.new then :hit
+       end
+  ws = case 7
+       when 1, *[5, 7] then :splat
+       end
+  check("ceq153b", hits == [:small, :big] && wx == :hit && ws == :splat && ([1, 2] === 2) == false && [1, 2] === [1, 2])
+  check("mix153a", S153.ancestors == [S153, Struct, Enumerable, Object, Kernel, BasicObject] &&
+        [Array, Hash, Range, Enumerator, Struct].all? { |c| c.ancestors == [c, Enumerable, Object, Kernel, BasicObject] } &&
+        [String, Symbol].all? { |c| c.ancestors == [c, Comparable, Object, Kernel, BasicObject] } &&
+        Numeric.ancestors == [Numeric, Comparable, Object, Kernel, BasicObject])
+  check("mix153b", [S153.include?(Enumerable), Struct.include?(Enumerable), S153 < Enumerable, Struct <= Enumerable,
+                    Enumerable > Struct, Array.include?(Enumerable), Hash < Enumerable, String.include?(Comparable),
+                    String < Enumerable, Array.include?(Comparable)] == [true, true, true, true, true, true, true, true, nil, false])
+  s = S153.new(1)
+  check("mix153c", [s.is_a?(Enumerable), s.kind_of?(Enumerable), Enumerable === s, P153.new(1).is_a?(Enumerable),
+                    P153.new(1).is_a?(Struct), s.is_a?(Struct), Struct === s, s.is_a?(Comparable), P153.ancestors.size,
+                    (case s when Enumerable then :enum end)] == [true, true, true, true, true, true, true, false, 7, :enum])
+end
 s122() # SECTION-CALL 122
 s123() # SECTION-CALL 123
 s124() # SECTION-CALL 124
@@ -1346,5 +1388,6 @@ s149() # SECTION-CALL 149
 s150() # SECTION-CALL 150
 s151() # SECTION-CALL 151
 s152() # SECTION-CALL 152
+s153() # SECTION-CALL 153
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])
