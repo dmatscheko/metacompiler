@@ -125,12 +125,12 @@ strings.TrimSpace, native strips ASCII 9-13 and 32: `int.Parse(" 1 2 ")` and `in
 
 # GO — Go  (oracle: `go run`)
 
-### T-988 go: a plain send on an unbuffered or full channel never blocks (cooperative channel model) · P3 · GO · OPEN [V]
+### T-988 go: a plain send on an unbuffered or full channel never blocks (cooperative channel model) · P3 · GO · IN PROGRESS (GO worker, round 19) [V]
 Found by the GO worker, round 18 (oracle go run). Select send arms now wait for room or a receiver, but a send statement outside a
 select still proceeds: `c := make(chan int, 1); c <- 1; c <- 2` → go deadlocks (fatal error, exit 2); ours goes on. Unbuffered
 sends hand off without waiting for a receiver. go/test/chan fifo, powser1/2, sendstmt, goroutines, select8, sieve1 still fail.
 
-### T-989 go: an empty array literal loses its element type; promoted method on embedded slice type (compiler); typeparam/slices.go · P3 · GO · OPEN [V]
+### T-989 go: an empty array literal loses its element type; promoted method on embedded slice type (compiler); typeparam/slices.go · P3 · GO · IN PROGRESS (GO worker, round 19) [V]
 Found by the GO worker, round 18 (oracle go run). `var v interface{} = [0]string{}` → `%T` gives `[0]interface {}` (go `[0]string`)
 and `case [0]string:` does not match - arrays carry no element type, gfCommonTy falls back with no elements. Compiler only:
 go/test/ddd.go `(*U).Sum(&U{}, ...)` (Sum promoted from embedded *T, T = []T) prints `(*U).Sum 0[object Object]1352` and panics.
