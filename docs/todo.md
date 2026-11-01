@@ -117,13 +117,13 @@ strings.TrimSpace, native strips ASCII 9-13 and 32: `int.Parse(" 1 2 ")` and `in
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-1099 kotlin: class-property value read inside a builtin receiver returns a host function (compiled legs) · P3 · KT · OPEN [V]
+### T-1099 kotlin: class-property value read inside a builtin receiver returns a host function (compiled legs) · P3 · KT · IN PROGRESS (KT worker, round 30) [V]
 
 The interpreter matches kotlinc; llvm.Run and native do not. For `class K { val log = "L"; val items = "I"; val push = "P"; fun go() = with(listOf(9)) { log + items + push } }`, `K().go()` should print `LIP`. llvm.Run prints `[function]IP` and native prints `[function]I[function]`.
 
 The `kt_ktgetp` fast path probes the name on the list through `kt_fprobe` / `js_ktfget`, which returns the runtime's own method value. A bare property read should consult the builtin member table only for real Kotlin members of that kind, and only properties: `size`, `length`, `indices`, `lastIndex`, and so on. Mind the lookup's speed; it is the hottest name lookup (run tests/bench.sh kotlin --paired).
 
-### T-1100 kotlin: buildSet { } (and buildSet(capacity)) · P3 · KT · OPEN [V]
+### T-1100 kotlin: buildSet { } (and buildSet(capacity)) · P3 · KT · IN PROGRESS (KT worker, round 30) [V]
 
 `buildSet { add(3); add(size) }` prints `[3, 1]` under kotlinc 2.2.21. All three of our engines fail with "unknown name: buildSet". Model it on buildList: a MutableSet receiver that keeps insertion order (LinkedHashSet) and returns a read-only Set.
 
