@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1057** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1058** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -139,14 +139,21 @@ Found by PHP r38 (expected values derived from php-src): `$o=new stdClass; $o->a
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-1044 bash: per-scope associative kind; compiled computed `declare -A`/array literals; prefix-assignment and assoc-key edge cases · P3 · SH · IN PROGRESS (SH worker, round 28) [V]
-Oracle bash 5.3, LC_ALL=C (remainder of T-1034 + finds of SH r27, repros in scratchpad SH27/):
-- `local m[@]=z` with a global assoc m: bash makes the local indexed (needs a per-scope "is associative" fact; ours is one fact per name).
-- Compiler: `declare -A "$s"` / `export -a "$s"` refused at compile time (needs a run-time associative table); `declare -a "$n=(1 2)"` refused at run time (needs a run-time array-literal parser); bare words in an assoc literal are joined instead of field-split.
-- Prefix assignment before a builtin should make a temporary -x variable: `n=2+3 declare -p n` → `declare -x n="2+3"`; `a=5 declare -p a` hides the array. `y=5 export -n y` / `z=5 declare +x z` should restore the old value.
-- `${m[$x]}` with x='@' on an assoc expands everything instead of key "@". `m=([x]=0 a 1)` → "must use subscript when assigning associative array". Empty assoc key via expansion (`m[$k]=v`, `${m[$k]}`, `unset 'm[$k]'`) lacks bash's diagnostics. `unset 'b[""]'` → bash unsets b[0]; ours arithmetic syntax error.
-- `$(( 0 && b[]=4 ))` → "attempted assignment to non-variable". `declare -n r7; r7='b[]'` → "`b[]': not a valid identifier"; ours binds r7 to b[]. `declare +a` of an empty declared array isn't refused.
-- Assoc `declare -p` key order differs from bash.
+### T-1057 bash: assoc/declare remainder after T-1044 · P3 · SH · OPEN [V]
+Left over from T-1044 (verify each vs /opt/homebrew/bin/bash 5.3, LC_ALL=C):
+- per-scope assoc kind: `local m[@]=z` inside a function shadowing a global assoc
+- compiled half: `declare -A "$s"`, `export -a "$s"`, `declare -a "$n=(1 2)"` (word-expanded declaration operands)
+- `unset 'm[$k]'` / `unset 'b[""]'` / `printf -v 'm[$k]'` must word-expand the subscript
+- `${#m[$k]}` with empty k (bad array subscript diagnostic)
+- `a=5 eval ...` prefix bindings
+New defects found during T-1044:
+- `$'\xff'` as an assoc subscript (byte key hashing/printing)
+- LC_ALL=C non-ASCII keys in `declare -p` quoting
+- `export -i`
+- compiled `[[ -v m[$x] ]]`
+- diagnostic label for `declare m[$k]=v`
+- `read m[$k]` with empty k
+- compiled `declare -r` on a nameref
 
 # C — C subset
 
@@ -1107,6 +1114,7 @@ T-1050 php: Generator::throw(); `yield from` value and send forwarding — DONE 
 T-1051 php: array refcount/COW remainder; print_r recursion depth; stale comments — PARTIAL→split (PHP r38, 652f03e2): stale comments fixed; exception-unwound param-copy holders kept by design (PHP's trace keeps frame args). print_r depth + per-array COW + property-hook params need array copy-on-write identity → design ticket.
 T-1049 csharp: null message on non-Argument exceptions gives "" — DONE (CS r7, 6ded3040): null message → "Exception of type 'X' was thrown." for all non-Argument exceptions (BCL + user); inner exceptions in ToString; user override of Message honoured (and no more compiler crash on __get_Message). Master spec probe + the 3 earlier exception probes: all legs agree.
 T-1047 kotlin: interpreter `Pair::class.simpleName` is null — DONE (KT r20, f4fa2bad): Pair/Triple KClass (+ is Triple, Pair::class unless user-declared); map-entry node classes; StringBuilder/Regex classes; kotlin.-qualified unsigned/array types; shared JVM-class helper; compiled unnamed companion as Owner.Companion. Master probe vs kotlinc 2.2.21 (19 lines): 4 legs agree.
+T-1044 bash: per-scope associative kind; compiled computed `declare -A`/array literals; prefix-assignment and assoc-key edge cases — PARTIAL→split (SH r28, 4 commits): prefix bindings before declaration builtins, assoc arrays in bash hash order, must-use-subscript + empty-key diagnostics, expanded @ as key, unsplit assoc literal words; probed 4 legs vs bash 5.3; remainder filed as follow-up
 
 # Settled — do not re-open
 
