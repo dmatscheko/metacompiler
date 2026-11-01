@@ -3488,7 +3488,7 @@ KwLet       = "let" KwEnd ;
         return {b: kr.b, obj: o, key: kr.v, isField: false}
     }
     // Reads the current value of an assignment target (for '??=', which must not assign
-    // when the place already holds a value).
+    // when the place already holds a value), through csQualRead for a qualified one.
     function makeRefRead(ref) {
         if (ref.bprop != undefined) { return makeBaseProp(ref.bprop) }
         var defClass = curClassName
@@ -3497,9 +3497,7 @@ KwLet       = "let" KwEnd ;
                 return csEmitVarRead(b, defClass, ref.name)
             }
             var p = emitRefPath(b, ref)
-            b = p.b
-            if (p.isField) { return {b: b, v: callExt(b, "js_get", [p.obj, p.key])} }
-            return {b: b, v: callExt(b, "js_csidx", [p.obj, p.key])}
+            return csQualRead(p.b, p)
         }
     }
     function makeAssign(items, pos) {
@@ -3579,41 +3577,41 @@ KwLet       = "let" KwEnd ;
             return {b: b, v: v}
         }
     }
+    // The value a qualified target `o.M` / `o[i]` holds, read as an ordinary member or
+    // element access reads it: List<T>.Capacity, a property's get accessor, the member
+    // slot, a user indexer's get accessor, or the built-in element (a dictionary's
+    // throws KeyNotFoundException). Twin of the read in makeRefRead in
+    // csharp-interpreter.abnf.
+    function csQualRead(b, p) {
+        if (p.isField && p.keyName == "Capacity" && csPropAcc[p.keyName] == undefined) {
+            return {b: b, v: callExt(b, "js_csmcall", [p.obj, emitStr(b, "Capacity"), callExt(b, "js_arr_new", [])])}
+        }
+        if (p.isField && csPropAcc[p.keyName] != undefined) { return emitPropGet(b, p.obj, p.keyName) }
+        if (p.isField) { return {b: b, v: callExt(b, "js_get", [p.obj, p.key])} }
+        return emitIndexGet(b, p.obj, p.key)
+    }
     // A store through a qualified target `o.M` / `o[i]`: List<T>.Capacity's setter, a
     // property's set accessor, the member slot, a user indexer's set accessor, or the
     // built-in element. A non-null mkNew(b, old) makes the stored value from the current
-    // one, read through the matching get accessor (compound assignment, ++ / --); a null
-    // mkNew stores v. Returns {b, v: the stored value, old}. Twin of csQualWrite in
+    // one, read by csQualRead (compound assignment, ++ / --); a null mkNew stores v.
+    // Returns {b, v: the stored value, old}. Twin of csQualWrite in
     // csharp-interpreter.abnf; csUnqualWrite is the unqualified target's.
     function csQualWrite(b, p, v, mkNew, elty) {
         var old = hUndef
-        var rn = anytype
+        if (mkNew != null) {
+            var orr = csQualRead(b, p)
+            old = orr.v
+            var rn = mkNew(orr.b, old)
+            b = rn.b
+            v = rn.v
+        }
         if (p.isField && p.keyName == "Capacity" && csPropAcc[p.keyName] == undefined) {
             // List<T>.Capacity's setter, or a member of that name (js_cscapset).
-            if (mkNew != null) {
-                old = callExt(b, "js_csmcall", [p.obj, emitStr(b, "Capacity"), callExt(b, "js_arr_new", [])])
-                rn = mkNew(b, old)
-                b = rn.b
-                v = rn.v
-            }
             callExt(b, "js_cscapset", [p.obj, v])
         } else if (p.isField && csPropAcc[p.keyName] != undefined) {
             // A property with a set accessor body ('b.W = 5').
-            if (mkNew != null) {
-                var opr = emitPropGet(b, p.obj, p.keyName)
-                old = opr.v
-                rn = mkNew(opr.b, old)
-                b = rn.b
-                v = rn.v
-            }
             b = emitPropSet(b, p.obj, p.keyName, v)
         } else if (p.isField) {
-            if (mkNew != null) {
-                old = callExt(b, "js_get", [p.obj, p.key])
-                rn = mkNew(b, old)
-                b = rn.b
-                v = rn.v
-            }
             // The member's DECLARED type adopts the written value: `c.D = 3`
             // on a `public double D;` stores 3.0, so `c.D / 2` is 1.5.
             if (csAdoptMems[p.keyName] != undefined) {
@@ -3621,13 +3619,6 @@ KwLet       = "let" KwEnd ;
             }
             callExt(b, "js_set", [p.obj, p.key, v])
         } else {
-            if (mkNew != null) {
-                var oxr = emitIndexGet(b, p.obj, p.key)
-                old = oxr.v
-                rn = mkNew(oxr.b, old)
-                b = rn.b
-                v = rn.v
-            }
             if (elty != "") { v = emitAdopt(b, elty, v) }
             b = emitIndexSet(b, p.obj, p.key, v)
         }

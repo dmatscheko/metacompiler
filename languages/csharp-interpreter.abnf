@@ -3459,17 +3459,15 @@ KwLet       = "let" KwEnd ;
         return {obj: o, key: lk, isIndex: last.key == undefined}
     }
     // Reads the current value of an assignment target (for '??=', which must not assign
-    // when the place already holds a value).
+    // when the place already holds a value). The read is an ordinary member or element
+    // access (ECMA-334 12.21.5): a property's get accessor, a user indexer's, and a
+    // dictionary's, which throws KeyNotFoundException for a missing key.
     function makeRefRead(ref) {
         if (ref.bprop != undefined) { return makeBaseProp(ref.bprop) }
         return function() {
             if (ref.path.length == 0) { return csGetVar(ref.name) }
             var p = csResolveRef(ref)
-            if (isDict(p.obj)) {
-                var di = dictFind(p.obj, p.key)
-                return di < 0 ? undefined : p.obj.vals[di]
-            }
-            return hasOwn(p.obj, p.key) ? p.obj[p.key] : undefined
+            return p.isIndex == true ? csGetIndex(p.obj, p.key) : core.getField(p.obj, p.key)
         }
     }
     function makeAssign(items, pos) {
@@ -3536,7 +3534,9 @@ KwLet       = "let" KwEnd ;
         var v = anytype
         v = v0
         if (isDict(p.obj)) {
-            if (mk != null) { var di = dictFind(p.obj, p.key); v = mk(di < 0 ? 0 : p.obj.vals[di]) }
+            // The read half of `d[k] += v` / `d[k]++` is the indexer's get, which
+            // throws KeyNotFoundException for a missing key.
+            if (mk != null) { v = mk(csGetIndex(p.obj, p.key)) }
             dictSet(p.obj, p.key, v)
         } else if (p.isIndex == true && csHasIndexer && csFindAcc(p.obj, "__setindex") != undefined) {
             if (mk != null) { v = mk(csGetIndex(p.obj, p.key)) }

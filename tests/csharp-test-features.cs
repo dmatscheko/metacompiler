@@ -461,6 +461,21 @@ namespace Demo
             public static void Swap(ref int a, ref int b) { int t = a; a = b; b = t; }
             public static bool TryGet(int k, out int v) { v = k * 2; return k > 0; }
         }
+        // '??=' reads its target through the get accessor (ECMA-334 12.21.5), so a
+        // property or indexer whose backing slot differs from its name still counts
+        // as holding a value; Sets counts the set accessor's runs.
+        class NcBox
+        {
+            string s = "init";
+            string[] slots = {"a", null};
+            public int Sets = 0;
+            public static int SSets = 0;
+            static string ss = "sinit";
+            public string P { get { return s; } set { Sets++; s = value; } }
+            public static string SP { get { return ss; } set { SSets++; ss = value; } }
+            public string this[int i] { get { return slots[i]; } set { Sets++; slots[i] = value; } }
+            public string Inner(string w) { string r1 = P ??= w; string r2 = this.P ??= w; return r1 + r2; }
+        }
 
         // ----- constructor initializers and constructor overloads (ECMA-334
         // 15.11.2 / 12.6.4): the ': base(d)' header selects the base constructor,
@@ -1462,6 +1477,22 @@ namespace Demo
             RfBox.Swap(ref rfp, ref rfq);
             Program.Check("ref-param-swap", rfp == 2 && rfq == 1);
             Program.Check("out-param-declaring", RfBox.TryGet(rfN[1], out int rfo) && rfo == 4);
+            NcBox ncb = new NcBox();
+            string ncr = ncb.P ??= rfW[0];
+            Program.Check("nullcoal-assign-prop-getter", ncr == "init" && ncb.P == "init" && ncb.Sets == 0);
+            Program.Check("nullcoal-assign-this-prop", ncb.Inner(rfW[0]) == "initinit" && ncb.Sets == 0);
+            string ncs = NcBox.SP ??= rfW[0];
+            Program.Check("nullcoal-assign-static-prop", ncs == "sinit" && NcBox.SSets == 0);
+            string nci0 = ncb[0] ??= rfW[0];
+            string nci1 = ncb[1] ??= rfW[0];
+            Program.Check("nullcoal-assign-indexer", nci0 == "a" && nci1 == "s" && ncb[1] == "s" && ncb.Sets == 1);
+            Dictionary<string, int> ncd = new Dictionary<string, int>();
+            string ncm = "";
+            try { ncd[rfW[0]] += 1; } catch (KeyNotFoundException) { ncm = "knf"; }
+            Program.Check("dict-compound-missing-key-throws", ncm == "knf" && ncd.Count == 0);
+            Dictionary<string, string> ncd2 = new Dictionary<string, string>();
+            try { string ncq = ncd2[rfW[0]] ??= "v"; } catch (KeyNotFoundException) { ncm = "knf2"; }
+            Program.Check("dict-nullcoal-missing-key-throws", ncm == "knf2" && ncd2.Count == 0);
 
             Console.WriteLine("features: " + Program.Checks + " checks, " + Program.Fails + " failures");
             return Program.Fails;
