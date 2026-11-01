@@ -186,13 +186,13 @@ Found by the GO worker, round 16. `lbl: if x > 0 { print(1); break lbl }` → sw
 
 # PHP — PHP  (no php here: spec-only, php.net / php-src behaviour)
 
-### T-929 php: `var_dump` of an array that holds a reference to itself never terminates · P1 · PHP · OPEN [V]
+### T-929 php: `var_dump` of an array that holds a reference to itself never terminates · P1 · PHP · IN PROGRESS (PHP worker, round 33) [V]
 `$a = array(array(1)); $a[0][] =& $a[0]; var_dump($a);` → all legs hang (killed at 20 s); without the var_dump they agree.
 php-src bug35163.phpt EXPECT prints the slot as `&array(…)` with `*RECURSION*` (spec-only oracle). The `dumping[]` guard in
 dumpOf (php-interpreter.abnf) covers objects only, and the `&` marker of a reference slot is never printed; the same in phDumping
 (lib/php-rt.metajs) and phpDumping (abnf/jsrtphp.go). Corpus: bug35163.php, bug35163_2.php.
 
-### T-930 php: parse gaps the corpus lost or never had · P3 · PHP · OPEN [V finder only]
+### T-930 php: parse gaps the corpus lost or never had · P3 · PHP · IN PROGRESS (PHP worker, round 33) [V finder only]
 Oracle: php-src .phpt EXPECT. Property hooks on promoted constructor parameters (PHP 8.4, property_hooks/property_promotion,
 gh17101 - parsed in July, lost); `xor` / `and` / `or` in a const expression (`const T1 = 1 xor 0;`); interpreter only:
 `$o?->{$str . "bar"}` (nullsafe_operator/bug81216); a fully-qualified trait name in a trait adaptation, `\TraitC::exit as bye;`
