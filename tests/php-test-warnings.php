@@ -262,6 +262,30 @@ $wk[2.0] = "b"; check("key-float-write-integral", [$wk, lastErr()], [[1 => "a", 
 $wk2 = []; $wk2[2.5]["x"] = 1; check("key-float-write-nested", [$wk2, lastErr()], [[2 => ["x" => 1]], want(E_DEPRECATED, 'Implicit conversion from float 2.5 to int loses precision', __LINE__)]);
 $wo = new stdClass; $wo->a = []; $wo->a[3.5] = 1; check("key-float-write-prop", [$wo->a, lastErr()], [[3 => 1], want(E_DEPRECATED, 'Implicit conversion from float 3.5 to int loses precision', __LINE__)]);
 
+// ----- the same key elsewhere (zend_dval_to_lval_safe, slow_index_convert) -----
+// an array literal's key, isset() and empty() at each level (and of a string's
+// last offset), '??', '??=' (fetched for isset, then written), unset() and
+// array_key_exists().
+$fk = [1.5, 2.0, 4.5, 0.5, 7.5];
+$v = [$fk[0] => "a", $fk[1] => "b"]; check("key-float-literal", [$v, lastErr()], [[1 => "a", 2 => "b"], want(E_DEPRECATED, 'Implicit conversion from float 1.5 to int loses precision', __LINE__)]);
+$v = [1.5 => "c"]; check("key-float-literal-const", [$v, lastErr()], [[1 => "c"], want(E_DEPRECATED, 'Implicit conversion from float 1.5 to int loses precision', __LINE__)]);
+$v = [$fk[1] => "d"]; check("key-float-literal-integral", [$v, lastErr()], [[2 => "d"], null]);
+$fa = [1 => "one", 4 => [0 => "z"]];
+$v = isset($fa[$fk[0]]); check("key-float-isset", [$v, lastErr()], [true, want(E_DEPRECATED, 'Implicit conversion from float 1.5 to int loses precision', __LINE__)]);
+$v = isset($fa[$fk[2]][$fk[3]]); check("key-float-isset-nested", [$v, lastErr()], [true, want(E_DEPRECATED, 'Implicit conversion from float 0.5 to int loses precision', __LINE__)]);
+$v = isset($fa[$fk[2]]["q"]); check("key-float-isset-level", [$v, lastErr()], [false, want(E_DEPRECATED, 'Implicit conversion from float 4.5 to int loses precision', __LINE__)]);
+$fs = "abc";
+$v = isset($fs[$fk[0]]); check("key-float-isset-string", [$v, lastErr()], [true, want(E_DEPRECATED, 'Implicit conversion from float 1.5 to int loses precision', __LINE__)]);
+$v = empty($fa[$fk[4]]); check("key-float-empty", [$v, lastErr()], [true, want(E_DEPRECATED, 'Implicit conversion from float 7.5 to int loses precision', __LINE__)]);
+$v = $fa[$fk[0]] ?? "dflt"; check("key-float-coalesce", [$v, lastErr()], ["one", want(E_DEPRECATED, 'Implicit conversion from float 1.5 to int loses precision', __LINE__)]);
+$fc = [];
+$fc[$fk[3]] ??= "n"; check("key-float-coalesce-assign", [$fc, lastErr()], [[0 => "n"], want(E_DEPRECATED, 'Implicit conversion from float 0.5 to int loses precision', __LINE__)]);
+$v = $fs[$fk[0]] ??= "x"; check("key-float-coalesce-assign-string", [$v, lastErr()], ["b", null]);
+$v = array_key_exists($fk[2], $fa); check("key-float-key-exists", [$v, lastErr()], [true, want(E_DEPRECATED, 'Implicit conversion from float 4.5 to int loses precision', __LINE__)]);
+$v = array_key_exists($fk[1], $fa); check("key-float-key-exists-integral", [$v, lastErr()], [false, null]);
+unset($fa[$fk[2]][$fk[3]]); check("key-float-unset-nested", [$fa, lastErr()], [[1 => "one", 4 => []], want(E_DEPRECATED, 'Implicit conversion from float 0.5 to int loses precision', __LINE__)]);
+unset($fa[$fk[0]]); check("key-float-unset", [$fa, lastErr()], [[4 => []], want(E_DEPRECATED, 'Implicit conversion from float 1.5 to int loses precision', __LINE__)]);
+
 // ----- done -----
 echo "warnings: " . $checks . " checks, " . $fails . " failures\n";
 exit($fails);

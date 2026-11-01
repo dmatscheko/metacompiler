@@ -1182,16 +1182,16 @@ ConstRef    <~~ push(makeConstRef(lastSeg(stripWs(up.in)), up.pos)) ~~>
 // language construct, not a function - the operands are storage LOCATIONS, so a
 // missing variable or a missing array key answers false instead of aborting.
 // empty(e) is the negation of PHP truthiness, and unset() removes the binding.
-IssetExpr   <~~ push(makeIsset(takeAll())) ~~>
+IssetExpr   <~~ push(makeIsset(takeAll(), up.start)) ~~>
             = KwIsset "(" TgtOnly { "," TgtOnly } [ "," ] ")" ;
 // empty() of a STORAGE LOCATION is decided here, at parse time: it walks the
 // location like isset() and never diagnoses (`empty($undef[0])` is true); any
 // other operand is an ordinary expression.
-EmptyTgt    <~~ push(makeEmptyTgt(pop())) ~~>
+EmptyTgt    <~~ push(makeEmptyTgt(pop(), up.start)) ~~>
             = KwEmpty "(" TgtOnly ")" ;
 EmptyExpr   <~~ push(makeEmpty(pop())) ~~>
             = KwEmpty "(" Expression ")" ;
-UnsetStmt   <~~ push(makeUnset(takeAll())) ~~>
+UnsetStmt   <~~ push(makeUnset(takeAll(), up.start)) ~~>
             = KwUnset "(" TgtOnly { "," TgtOnly } [ "," ] ")" Semi ;
 KwIsset     = CiI :whitespace() CiS CiS CiE CiT :whitespace(Whitespace) KwEnd ;
 KwEmpty     = CiE :whitespace() CiM CiP CiT CiY :whitespace(Whitespace) KwEnd ;
@@ -4248,7 +4248,10 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     // makeAssign. Twin of makeArray in php-interpreter.abnf.
     var refLitAt = [-1, -1]
     var litCells = []
+    // With display_errors=1 each key is checked (__mec_fkeychk) once the element's
+    // value is read. Twin of makeArray in php-interpreter.abnf.
     function makeArray(items, start, end) {
+        var keySite = diagSite("__mec_fkeychk", start)
         var refs = false
         var nested = []
         for (var r = 0; r < items.length; r++) {
@@ -4269,6 +4272,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                         callExt(b, "js_phrebind", [hUndef, rv.v])
                         cells.push(rv.v)
                     }
+                    if (keySite != null) { b = keySite(b, [d, rk.v]) }
                     callExt(b, "js_phset", [d, rk.v, rv.v])
                 } else if (items[k].er != undefined) {
                     var rc = targetCell(b, items[k].er); b = rc.b
@@ -4456,11 +4460,15 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         // (__mec_bindchk); js_phbindwhy before it drops one a binding no site
         // checks left behind.
         var dimSite = null
+        var isSite = null
         var propSite = null
         var bindSite = null
         for (var q = 0; q < suffixes.length; q++) {
             if (suffixes[q].nullsafe === true) { hasNs = true }
-            if (suffixes[q].kind == "index" && dimSite == null) { dimSite = diagSite("__mec_dimchk", start) }
+            if (suffixes[q].kind == "index" && dimSite == null) {
+                dimSite = diagSite("__mec_dimchk", start)
+                isSite = diagSite("__mec_fkeychk", start)
+            }
             if ((suffixes[q].kind == "field" || suffixes[q].kind == "dynfield") && propSite == null) { propSite = diagSite("__mec_propchk", start) }
             if (suffixes[q].kind == "mcall" && isBindName(suffixes[q].name) && bindSite == null) { bindSite = diagSite("__mec_bindchk", start) }
         }
@@ -4581,7 +4589,9 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                     cur = rs.v
                 } else if (mode === coalIs) {
                     var iri = s.idx(b)
-                    var rif = emitIsFetch(iri.b, cur, iri.v)
+                    b = iri.b
+                    if (isSite != null) { b = isSite(b, [cur, iri.v]) }
+                    var rif = emitIsFetch(b, cur, iri.v)
                     b = rif.b
                     cur = rif.v
                 } else {
@@ -5033,8 +5043,9 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     // scope probe (an undeclared name answers null, not an error); an element goes
     // through js_phaisset and a property through js_phisset, false for a missing key
     // AND for a null value - PHP's rule - while an ArrayAccess object's element is
-    // what its offsetExists answers.
-    function emitIssetOne(b, ref) {
+    // what its offsetExists answers. site, when not null, checks each key
+    // (__mec_issetchk).
+    function emitIssetOne(b, ref, site) {
         if (ref.path.length == 0) {
             if (ref.sbase != undefined) {
                 var rb = ref.sbase(b)
@@ -5054,17 +5065,21 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             var rd = phDeref(rn2.b, rawVarV(rn2.b, rn2.v))
             return {b: rd.b, v: isSetHandle(rd.b, rd.v)}
         }
-        var p = emitRefPathIs(b, ref)
+        var p = emitRefPathV(b, ref, false, true, site)
         b = p.b
         if (p.kind == "append") { return {b: b, v: hFalse} }
         if (p.kind == "field") { return emitPropIsset(b, p.obj, p.key, p.keyName, p.thisObj) }
+        if (site != null) { b = site(b, [p.obj, p.key, hTrue]) }
         return {b: b, v: callExt(b, "js_phaisset", [p.obj, p.key])}
     }
-    function makeIsset(refs) {
+    // With display_errors=1 each key is checked (__mec_issetchk). Twin of makeIsset
+    // in php-interpreter.abnf.
+    function makeIsset(refs, pos) {
+        var site = diagSite("__mec_issetchk", pos)
         return function(b) {
             var v = hTrue
             for (var i = 0; i < refs.length; i++) {
-                var r = emitIssetOne(b, refs[i])
+                var r = emitIssetOne(b, refs[i], site)
                 b = r.b
                 v = i == 0 ? r.v : b.NewSelect(truthy(b, v), r.v, hFalse)
             }
@@ -5080,7 +5095,8 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     // empty() of a location: true when it is not set, else the negated truthiness of
     // what it holds. ONE non-creating walk serves both questions, so an index
     // expression on the path runs once. Twin of makeEmptyTgt in php-interpreter.abnf.
-    function makeEmptyTgt(ref) {
+    function makeEmptyTgt(ref, pos) {
+        var site = diagSite("__mec_issetchk", pos)
         return function(b) {
             if (ref.path.length == 0) {
                 var r0 = anytype
@@ -5097,12 +5113,15 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                 }
                 return {b: r0.b, v: callExt(r0.b, "js_phnot", [r0.v])}
             }
-            var p = emitRefPathIs(b, ref)
+            var p = emitRefPathV(b, ref, false, true, site)
             b = p.b
             if (p.kind == "append") { return {b: b, v: hTrue} }
             var is = anytype
             if (p.kind == "field") { is = emitPropIsset(b, p.obj, p.key, p.keyName, p.thisObj) }
-            else { is = {b: b, v: callExt(b, "js_phaisset", [p.obj, p.key])} }
+            else {
+                if (site != null) { b = site(b, [p.obj, p.key, hTrue]) }
+                is = {b: b, v: callExt(b, "js_phaisset", [p.obj, p.key])}
+            }
             b = is.b
             var setB = curF.NewBlock("")
             var mergeB = curF.NewBlock("")
@@ -5116,7 +5135,10 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     // unset($x): drop the binding. A variable becomes undefined in its own slot - NOT
     // through a cell, since unset() breaks the reference rather than clearing what it
     // points at - an element is removed from the array and a property is cleared.
-    function makeUnset(refs) {
+    // With display_errors=1 each array key is checked (__mec_fkeychk). Twin of
+    // makeUnset in php-interpreter.abnf.
+    function makeUnset(refs, pos) {
+        var site = diagSite("__mec_fkeychk", pos)
         return function(b) {
             for (var i = 0; i < refs.length; i++) {
                 var ref = refs[i]
@@ -5133,9 +5155,12 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                     }
                 } else {
                     noteWrite(ref)
-                    var p = emitRefPath(b, ref)
+                    var p = emitRefPathV(b, ref, false, false, site)
                     b = p.b
-                    if (p.kind == "index") { callExt(b, "js_phunset", [p.obj, p.key]) }
+                    if (p.kind == "index") {
+                        if (site != null) { b = site(b, [p.obj, p.key]) }
+                        callExt(b, "js_phunset", [p.obj, p.key])
+                    }
                     else if (p.kind == "field") {
                         // js_set aborts with `member assignment 'p' on null`, and
                         // `unset($undef->p)` is a no-op in PHP 8 - unset() diagnoses
@@ -6038,7 +6063,8 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     // for isset (emitIsFetch, zend_fetch_dimension_address_read with BP_VAR_IS).
     function emitRefPath(b, ref) { return emitRefPathV(b, ref, false, false) }
     function emitRefPathIs(b, ref) { return emitRefPathV(b, ref, false, true) }
-    // ik, when given, checks each array level's key on the way (rwSite's k).
+    // ik, when given, checks each array level's key on the way (rwSite's k, or for
+    // isset (isf) __mec_issetchk of a step that is not the last).
     function emitRefPathV(b, ref, viv, isf, ik) {
         if (viv) { noteWrite(ref) }
         var rr = refRootV(b, ref, viv)
@@ -6107,6 +6133,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                 var ri = s.idx(b)
                 b = ri.b
                 if (isf === true) {
+                    if (ik != undefined && ik != null) { b = ik(b, [o, ri.v, hFalse]) }
                     var rif = emitIsFetch(b, o, ri.v)
                     b = rif.b
                     o = rif.v
@@ -6156,7 +6183,11 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         var ref = items[0]
         var op = items[1]
         var valT = items[2]
-        if (op == "??=") { return function(b) { return emitCoalesceAssign(b, ref, valT) } }
+        if (op == "??=") {
+            var cis = diagSite("__mec_issetchk", pos)
+            var cfk = diagSite("__mec_fkeychk", pos)
+            return function(b) { return emitCoalesceAssign(b, ref, valT, cis, cfk) }
+        }
         var rw = op == "=" ? null : rwSite(ref, pos)
         var oc = op == "=" ? null : diagSite("__mec_opchk", pos)
         // A plain store checks each array level's key on the way and the last one.
@@ -6237,8 +6268,10 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     // '$t ??= e' fetches $t for isset (BP_VAR_IS: an ArrayAccess level asks
     // offsetExists before offsetGet, a missing property __isset) and, only when that
     // is null, evaluates e and walks $t again to store it - e short-circuits as the
-    // right operand of '??' does. Twin of coalesceAssign in php-interpreter.abnf.
-    function emitCoalesceAssign(b, ref, valT) {
+    // right operand of '??' does. With display_errors=1 each array key is checked
+    // on both walks (isk: __mec_issetchk, fk: __mec_fkeychk). Twin of coalesceAssign
+    // in php-interpreter.abnf.
+    function emitCoalesceAssign(b, ref, valT, isk, fk) {
         var mr = memoRefV(b, ref)
         var m = mr.ref
         b = mr.b
@@ -6256,8 +6289,8 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                 ro = readVarV(rn.b, rn.v)
             }
         } else {
-            var p = emitRefPathIs(b, m)
-            if (p.kind == "index") { ro = emitIsFetch(p.b, p.obj, p.key) }
+            var p = emitRefPathV(b, m, false, true, isk)
+            if (p.kind == "index") { ro = emitIsFetch(isk == null ? p.b : isk(p.b, [p.obj, p.key, hFalse]), p.obj, p.key) }
             else if (p.kind == "append") { ro = {b: p.b, v: hNull} }
             else {
                 var is = emitPropIsset(p.b, p.obj, p.key, p.keyName, p.thisObj)
@@ -6277,8 +6310,10 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         var sb = r.b
         var v = callExt(sb, "js_phcopy", [r.v])
         if (m.path.length > 0) {
-            var pw = emitRefPathV(sb, m, true)
-            sb = writeRefSlot(pw.b, pw, v)
+            var pw = emitRefPathV(sb, m, true, false, fk)
+            sb = pw.b
+            if (fk != null && pw.kind == "index") { sb = fk(sb, [pw.obj, pw.key]) }
+            sb = writeRefSlot(sb, pw, v)
         } else if (m.sbase != undefined) {
             var wb = m.sbase(sb)
             var ws = sNameV(wb.b, m)
@@ -7428,8 +7463,9 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     // the arguments are read, as for any call, for an error it raises. The
     // program's call (not the library's, nor of a __mec helper) has a record
     // holding the arguments as passed, unless PHP compiles it to an opcode
-    // (natInline). Twin of makeCall in php-interpreter.abnf.
-    function emitBuiltin(b, name, args, site) {
+    // (natInline). keySite, when not null, checks array_key_exists' key
+    // (__mec_fkeychk). Twin of makeCall in php-interpreter.abnf.
+    function emitBuiltin(b, name, args, site, keySite) {
         if ((name == "array_push" || name == "array_pop") && args.length > 0 && args[0].vtext != null) {
             noteWrite(argTarget(args[0].vtext))
         }
@@ -7439,7 +7475,10 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         if (site == 0 || name.substring(0, 5) == "__mec" || natInline(name, vs.length)) {
             // The program's array_key_exists is its opcode, whose TypeError for an
             // invalid key differs (js_phkeyexists' third argument).
-            if (site != 0 && name == "array_key_exists") { vs.push(hTrue) }
+            if (site != 0 && name == "array_key_exists") {
+                if (keySite != null) { b = keySite(b, [vs[1], vs[0]]) }
+                vs.push(hTrue)
+            }
             return emitBuiltinOp(b, name, vs)
         }
         var nr = emitRecPush(b, frameDesc({name: name, nat: vs.length, lib: true}, name + "/" + vs.length), handle(site), vs)
@@ -7964,6 +8003,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         // With display_errors=1 count() with a mode warns of each recursion it met
         // (__mec_countchk). Twin of makeCall in php-interpreter.abnf.
         var countSite = name == "count" && args.length > 1 ? diagSite("__mec_countchk", start) : null
+        var keySite = name == "array_key_exists" && site != 0 && args.length == 2 ? diagSite("__mec_fkeychk", start) : null
         if (lowered && !hasFcc(args) && !hasPlace(args)) {
             if (phpLib == null) { phpLib = phpLibIndex(load("lib/php-stdlib.php")) }
             var libKey = phpLibKey(phpLib, name)
@@ -7997,7 +8037,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                 var rcn = emitBuiltin(b, name, args, site)
                 return {b: countSite(rcn.b, []), v: rcn.v}
             }
-            if (lowered) { return emitBuiltin(b, name, args, site) }
+            if (lowered) { return emitBuiltin(b, name, args, site, keySite) }
             var fV = anyCase ? fk.v : callExt(b, "js_scope_get", [curScopeV, emitStr(b, name)])
             var ea = emitPhArgs(b, args, sigOf(name))
             b = ea.b

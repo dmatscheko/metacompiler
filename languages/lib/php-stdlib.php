@@ -3319,9 +3319,19 @@ function __mec_dimchk($container, $offset, $file = null, $line = 0) {
     }
 }
 // The key of an array element that is written (zend_fetch_dimension_address_inner
-// for BP_VAR_W, ZEND_ASSIGN_DIM): a float that is not an integer.
+// for BP_VAR_W, ZEND_ASSIGN_DIM), unset (ZEND_UNSET_DIM), fetched for '??'
+// (slow_index_convert), given in an array literal (ZEND_ADD_ARRAY_ELEMENT) or to
+// array_key_exists (zend_array_key_exists_fast): a float that is not an integer.
 function __mec_fkeychk($container, $offset, $file = null, $line = 0) {
     if (is_float($offset) && is_array($container)) { __mec_f2ichk($offset, $file, $line); }
+}
+// The key of an isset() or empty() step: a float that is not an integer, of an
+// array (zend_find_array_dim_slow) and, at the $last step, of a string too
+// (zend_isset_dim_slow's strict zval_get_long_ex).
+function __mec_issetchk($container, $offset, $last, $file = null, $line = 0) {
+    if (is_float($offset) && (is_array($container) || ($last && is_string($container)))) {
+        __mec_f2ichk($offset, $file, $line);
+    }
 }
 // The key of an array element that is read, also by a compound assignment or
 // ++/-- (zend_undefined_offset, zend_undefined_index): a float that is not an

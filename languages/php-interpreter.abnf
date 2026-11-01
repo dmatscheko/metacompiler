@@ -454,7 +454,7 @@ Empty       <~~ push(makeConstStmt()) ~~>
             = ";" ;
 
 // unset($a, $b): removes the bindings (a later isset($a) is false).
-UnsetStmt   <~~ push(makeUnset(takeAll())) ~~>
+UnsetStmt   <~~ push(makeUnset(takeAll(), up.start)) ~~>
             = KwUnset "(" IsTarget { "," IsTarget } [ "," ] ")" Semi ;
 IsTarget    <~~ push({istgt: pop()}) ~~>
             = TgtOnly ;
@@ -1103,12 +1103,12 @@ GlobalsAll  <~~ push(makeGlobalsAll()) ~~>
 
 // isset()/empty() are language constructs, not calls: isset() must NOT evaluate a
 // missing variable into an error, and empty() applies PHP truthiness.
-IssetExpr   <~~ push(makeIsset(takeAll())) ~~>
+IssetExpr   <~~ push(makeIsset(takeAll(), up.start)) ~~>
             = KwIsset "(" IsTarget { "," IsTarget } [ "," ] ")" ;
 // empty() of a STORAGE LOCATION is decided here, at parse time: it reads like
 // isset() and never diagnoses (`empty($undef[0])` is true); any other operand is
 // an ordinary expression.
-EmptyTgt    <~~ push(makeEmptyTgt(pop())) ~~>
+EmptyTgt    <~~ push(makeEmptyTgt(pop(), up.start)) ~~>
             = KwEmpty "(" TgtOnly ")" ;
 EmptyExpr   <~~ push(makeEmpty(pop())) ~~>
             = KwEmpty "(" Expression ")" ;
@@ -3538,17 +3538,20 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     }
 
     // ----- isset / empty / unset -----
-    function makeIsset(items) {
+    // With display_errors=1 each key is checked (__mec_issetchk). Twin of makeIsset
+    // in php-to-llvm-ir.abnf.
+    function makeIsset(items, pos) {
         var refs = []
         for (var i = 0; i < items.length; i++) { if (items[i].istgt != undefined) { refs.push(items[i].istgt) } }
+        var site = diagSite("__mec_issetchk", pos)
         return function() {
-            for (var i = 0; i < refs.length; i++) { if (!refExists(refs[i])) { return false } }
+            for (var i = 0; i < refs.length; i++) { if (!refExists(refs[i], site)) { return false } }
             return true
         }
     }
-    function refExists(ref) {
+    function refExists(ref, site) {
         var v = anytype
-        v = refProbe(ref, true)
+        v = refProbe(ref, true, site, true)
         return v !== null && v !== undefined
     }
     // The value at a storage location, or null when any step of it is missing -
@@ -3556,7 +3559,9 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // For isset an ArrayAccess object's last step asks phpAAIsset alone (true
     // stands in for the value); for empty and every earlier step it asks
     // phpAAIsset, then offsetGet (zend_std_has_dimension, zend_std_read_dimension).
-    function refProbe(ref, isset) {
+    // site, when not null, checks each key (__mec_issetchk), the last one as
+    // isset()'s or empty()'s own when strict.
+    function refProbe(ref, isset, site, strict) {
         var o = anytype
         // A CALL head has no variable to probe: the call runs and the walk starts
         // from what it returned.
@@ -3596,6 +3601,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             }
             var k = anytype
             k = st.idx()
+            if (site != null) { site([o, k, strict && i == ref.path.length - 1]) }
             if (isArr(o)) { if (!arrHas(o, k)) { return null } }
             else if (phpIsAA(o)) {
                 if (!phpAAIsset(o, k)) { return null }
@@ -3630,10 +3636,16 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         return n < phsLen(s)
     }
     function makeEmpty(t) { return function() { return !phptest(t()) } }
-    function makeEmptyTgt(ref) { return function() { return !phptest(refProbe(ref, false)) } }
-    function makeUnset(items) {
+    function makeEmptyTgt(ref, pos) {
+        var site = diagSite("__mec_issetchk", pos)
+        return function() { return !phptest(refProbe(ref, false, site, true)) }
+    }
+    // With display_errors=1 each array key is checked (__mec_fkeychk). Twin of
+    // makeUnset in php-to-llvm-ir.abnf.
+    function makeUnset(items, pos) {
         var refs = []
         for (var i = 0; i < items.length; i++) { if (items[i].istgt != undefined) { refs.push(items[i].istgt) } }
+        var site = diagSite("__mec_fkeychk", pos)
         return function() {
             for (var i = 0; i < refs.length; i++) {
                 var ref = refs[i]
@@ -3659,9 +3671,14 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                     if (nm == "$this") { phpNoThis() }
                     continue
                 }
-                var p = resolveRefPhpV(ref, false, null)
+                var p = resolveRefPhpV(ref, false, site)
                 if (p.last.key != undefined) { if (isObj(p.obj)) { phpUnsetProp(p.obj, p.last.key) } }
-                else if (p.last.append !== true && isArr(p.obj)) { arrDel(p.obj, p.last.idx()) }
+                else if (p.last.append !== true && isArr(p.obj)) {
+                    var uk = anytype
+                    uk = p.last.idx()
+                    if (site != null) { site([p.obj, uk]) }
+                    arrDel(p.obj, uk)
+                }
                 else if (p.last.append !== true && phpIsAA(p.obj)) { mcall(p.obj, "offsetUnset", argsOf([p.last.idx()])) }
             }
             return null
@@ -3826,7 +3843,10 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // php-to-llvm-ir.abnf.
     var refLitAt = [-1, -1]
     var litCells = []
+    // With display_errors=1 each key is checked (__mec_fkeychk) once the element's
+    // value is read. Twin of makeArray in php-to-llvm-ir.abnf.
     function makeArray(items, start, end) {
+        var keySite = diagSite("__mec_fkeychk", start)
         var refs = false
         var nested = []
         for (var r = 0; r < items.length; r++) {
@@ -3845,6 +3865,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                         var nk = anytype
                         nk = it.hk()
                         nv = it.hv()
+                        if (keySite != null) { keySite([d, nk]) }
                         arrSet(d, nk, nv)
                     } else {
                         nv = it.elem()
@@ -3852,9 +3873,20 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                     }
                     for (var c = 0; c < litCells.length; c++) { cells.push(litCells[c]) }
                 }
-                else if (it.hr != undefined) { cells.push(arrRefAt(d, phpKey(it.hk()), it.hr)) }
+                else if (it.hr != undefined) {
+                    var rk = anytype
+                    rk = it.hk()
+                    if (keySite != null) { keySite([d, rk]) }
+                    cells.push(arrRefAt(d, phpKey(rk), it.hr))
+                }
                 else if (it.er != undefined) { cells.push(arrRefAt(d, undefined, it.er)) }
-                else if (it.hk != undefined) { arrSet(d, it.hk(), phpCopy(it.hv())) }
+                else if (it.hk != undefined) {
+                    var ek = anytype
+                    ek = it.hk()
+                    var ev = phpCopy(it.hv())
+                    if (keySite != null) { keySite([d, ek]) }
+                    arrSet(d, ek, ev)
+                }
                 else if (it.spread != undefined) {
                     var sv = it.spread()
                     if (isArr(sv)) {
@@ -4670,10 +4702,14 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         // A ->bindTo() or ->call() raises the warning of a refused binding after it
         // (__mec_bindchk).
         var dimSite = null
+        var isSite = null
         var propSite = null
         var bindSite = null
         for (var k = 0; k < suffixes.length; k++) {
-            if (suffixes[k].kind == "index" && dimSite == null) { dimSite = diagSite("__mec_dimchk", start) }
+            if (suffixes[k].kind == "index" && dimSite == null) {
+                dimSite = diagSite("__mec_dimchk", start)
+                isSite = diagSite("__mec_fkeychk", start)
+            }
             if ((suffixes[k].kind == "field" || suffixes[k].kind == "dfield") && propSite == null) { propSite = diagSite("__mec_propchk", start) }
             if (suffixes[k].kind == "mcall" && isBindName(suffixes[k].name) && bindSite == null) { bindSite = diagSite("__mec_bindchk", start) }
             if (suffixes[k].kind == "mcall") { suffixes[k].kd = argsKept(suffixes[k].args) }
@@ -4705,7 +4741,12 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                 }
                 else if (s.kind == "call") { cur = phpInvoke(cur, evalArgs(s.args, site, null)) }
                 else if (s.kind == "static") { cur = s.run(cur, site) }
-                else if (mode === coalIs) { cur = phpIndexIs(cur, s.idx()) }
+                else if (mode === coalIs) {
+                    var ik = anytype
+                    ik = s.idx()
+                    if (isSite != null) { isSite([cur, ik]) }
+                    cur = phpIndexIs(cur, ik)
+                }
                 else {
                     var ix = anytype
                     ix = s.idx()
@@ -6456,7 +6497,11 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         var ref = items[0]
         var op = items[1]
         var valT = items[2]
-        if (op == "??=") { return function() { return coalesceAssign(ref, valT) } }
+        if (op == "??=") {
+            var cis = diagSite("__mec_issetchk", pos)
+            var cfk = diagSite("__mec_fkeychk", pos)
+            return function() { return coalesceAssign(ref, valT, cis, cfk) }
+        }
         var rw = op == "=" ? null : rwSite(ref, pos)
         var oc = op == "=" ? null : diagSite("__mec_opchk", pos)
         // A plain store checks each array level's key on the way and the last one.
@@ -6498,15 +6543,17 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // '$t ??= e' fetches $t for isset (BP_VAR_IS: an ArrayAccess level asks
     // offsetExists before offsetGet, a missing property __isset) and, only when that
     // is null, evaluates e and walks $t again to store it - e short-circuits as the
-    // right operand of '??' does. Twin of emitCoalesceAssign in php-to-llvm-ir.abnf.
-    function coalesceAssign(ref, valT) {
+    // right operand of '??' does. With display_errors=1 each array key is checked
+    // on both walks (isk: __mec_issetchk, fk: __mec_fkeychk). Twin of
+    // emitCoalesceAssign in php-to-llvm-ir.abnf.
+    function coalesceAssign(ref, valT, isk, fk) {
         var m = memoRef(ref)
         var old = anytype
-        old = refProbe(m, false)
+        old = refProbe(m, false, isk, false)
         if (old !== null && old !== undefined) { return old }
         var v = anytype
         v = phpCopy(valT())
-        if (m.path.length > 0) { storeAt(resolveRefPhp(m), v) }
+        if (m.path.length > 0) { storeAt(resolveRefPhpV(m, true, fk), v, fk) }
         else if (m.sref != null) { m.sref().v = v }
         else { phpSet(refName(m), v) }
         return v
@@ -7015,6 +7062,9 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         if (name == "array_key_exists" && site != "" && natInline(name, args.length) && phpArgsPlain(args)) {
             name = "__mec_keyexists"
         }
+        // With display_errors=1 its key is checked (__mec_fkeychk). Twin of
+        // emitBuiltin in php-to-llvm-ir.abnf.
+        var akeSite = name == "__mec_keyexists" ? diagSite("__mec_fkeychk", start) : null
         // The program's direct strval / intval / floatval / doubleval / boolval of
         // one argument is a cast, and its call_user_func / call_user_func_array a
         // call of the callback made from this frame (zend_try_compile_special_func),
@@ -7030,6 +7080,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                 if (castSite != null) { castSite([opCast, argset.pos[0]]) }
                 return phpCast(opCast, argset.pos[0])
             }
+            if (akeSite != null) { akeSite([argset.pos[1], argset.pos[0]]) }
             if (resolveCb && argset.pos.length > 0) {
                 argset.pos[0] = callerCallable(argset.pos[0], name)
                 // call_user_func of a library function that takes a callback: that
