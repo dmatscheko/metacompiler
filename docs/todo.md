@@ -96,7 +96,7 @@ foreign object).
 
 # JV — Java
 
-### T-974 java: cyclic inheritance across files, through a redefined Object, and in type-variable bounds is not refused · P3 · JV · OPEN [V]
+### T-974 java: cyclic inheritance across files, through a redefined Object, and in type-variable bounds is not refused · P3 · JV · IN PROGRESS (JV worker, round 16) [V]
 Left from T-932 (oracle javac 24). Multi-file cycles (javac corpus ClassCycle1a/2a/3a and the staticImport case), the
 redefineObject cases, and `<E extends T, T extends E>` (generics/6677785) are accepted; javac "cyclic inheritance involving X" /
 "cyclic inheritance involving E".
