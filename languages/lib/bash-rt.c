@@ -1421,6 +1421,8 @@ long ar_primary(void)
         char *nm = ar_name();
         char *key = ar_subscript(nm);
         if (ar_bad != 0) return 0;
+        ar_ws();
+        if (ar_at(0) == 61 && ar_at(1) != 61) return 0;
         v = ar_value(nm, key);
         ar_ws();
         if ((ar_at(0) == 43 && ar_at(1) == 43) || (ar_at(0) == 45 && ar_at(1) == 45)) {
@@ -5787,7 +5789,8 @@ int rt_arr_any(char *nm) {
 int rt_arr_plus(char *kw, char *nm, int pa, int pA)
 {
     int as;
-    if (rt_arr_any(nm) == 0) return 0;
+    int r = rt_ar_find(nm);
+    if (r < 0 || (ar_n[r] == 0 && (ar_mk[r] & 3) == 0)) return 0;
     as = rt_isassoc(nm);
     if ((pa == 0 || as != 0) && (pA == 0 || as == 0)) return 0;
     rt_berr(kw, nm, "cannot destroy array variables in this way");
@@ -5957,6 +5960,44 @@ int rt_nmark(char *nm, int on) {
     r = rt_ar_find(nm);
     if (r >= 0) ar_mk[r] = ar_mk[r] & 23;
     return 0;
+}
+
+/* A store that lands on the nameref n itself (its value unset or empty) must name
+ * a variable, NAME or NAME[SUB]: otherwise bash's "not a valid identifier" (under
+ * the storing builtin's ar_pfx), arith_err and sub_bad, and 1. Twin of refSelfBad
+ * in bash-interpreter.abnf. */
+int rt_nref_self_bad(char *n, char *v)
+{
+    if (nref_any == 0 || (rt_arr_marks(n) & 32) == 0 || rt_isasgref(v) != 0) return 0;
+    rt_berr("", rt_strcat(rt_strcat(rt_strcat(ar_pfx(), "`"), v), "'"), "not a valid identifier");
+    arith_err = 1;
+    sub_bad = 1;
+    return 1;
+}
+
+/* A declaration's value v for the nameref n itself (its value unset or empty)
+ * that names no variable: the declaration (keyword kw) fails, and 1. bash 5.3
+ * reports a redeclared local (mode 1) as `local -n` would and keeps it; export
+ * (mode 2) adds a report of the empty name and keeps it; any other declaration
+ * takes the nameref away. Twin of the same check in declOneN in
+ * bash-interpreter.abnf. */
+int rt_decl_nref(char *kw, char *n, char *v, int mode)
+{
+    int i;
+    if (nref_any == 0 || (rt_arr_marks(n) & 32) == 0 || rt_isasgref(v) != 0) return 0;
+    i = rt_varslot(n);
+    if (i >= 0 && gvars[i] != &unset_marker[0] && gvars[i][0] != 0) return 0;
+    if (mode == 1) return rt_nref_bad(kw, v);
+    rt_berr(kw, rt_strcat(rt_strcat("`", v), "'"), "not a valid identifier");
+    if (mode == 2) {
+        rt_berr(kw, "`'", "not a valid identifier");
+        return 1;
+    }
+    if (i >= 0) gvars[i] = &unset_marker[0];
+    rt_arr_clear(n);
+    rt_xmark(n, 0);
+    rt_nmark(n, 0);
+    return 1;
 }
 
 /* The variable a chain of namerefs from n ends at: n itself when it is no
@@ -7823,6 +7864,7 @@ int rt_setvar_byname(char *n, char *v, int app, int at)
         if (rt_isassoc(n) != 0) return rt_arr_set(n, "0", v);
         return rt_arr_iset(n, "0", v);
     }
+    if (rt_nref_self_bad(n, v) != 0) return 0;
     i = rt_varslot_new(n);
     if (i >= 0) gvars[i] = v;
     rt_pin();

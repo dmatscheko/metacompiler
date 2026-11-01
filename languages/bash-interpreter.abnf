@@ -1615,6 +1615,14 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function unsetVar(name) { touchVar(name); vars["$" + name] = ""; varsHas["$" + name] = false }
 
     function pushLocalFrame() { localFrames.push([]) }
+    // A subshell keeps the function context it starts in (a `local` there redeclares the
+    // caller's local), on a copy the parent's frames never see.
+    function framesCopy() {
+        var out = []
+        var i
+        for (i = 0; i < localFrames.length; i++) { out.push(localFrames[i].slice(0)) }
+        return out
+    }
     function popLocalFrame() {
         var fr = localFrames.pop()
         var i
@@ -3097,7 +3105,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var fresh = localize && !localHere(names[k])
             if ((asgs[k] != null || fresh || plus.indexOf("r") >= 0) && roRefused(names[k], (kw == "readonly" || kw == "export") ? "" : kw + ": ")) { roFail = true; return }
             // +a of an indexed array, +A of an associative one, is refused. Twin of rt_arr_plus.
-            if (!fresh && isArr(names[k]) && arrKeyList(names[k]).length > 0 && (arrs[arrKey(names[k])].assoc ? plus.indexOf("A") : plus.indexOf("a")) >= 0) {
+            if (!fresh && isArr(names[k]) && (arrs[arrKey(names[k])].assoc ? plus.indexOf("A") : plus.indexOf("a")) >= 0) {
                 diagErr(kw + ": " + names[k] + ": cannot destroy array variables in this way\n")
                 roFail = true
                 return
@@ -3142,7 +3150,30 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 if (wasSet) { arrs[arrKey(names[k])].lit = true }
             }
             if (asgs[k] != null) {
-                if (asgs[k].lit != null) { runAssign(asgs[k], assoc, true) } else { runAssignV(asgs[k], assoc, v) }
+                if (asgs[k].lit != null) { runAssign(asgs[k], assoc, true) }
+                else {
+                    // A value that names no variable, for a nameref itself (its value unset or
+                    // empty), fails the declaration. bash 5.3 reports a redeclared local as
+                    // `local -n` would and keeps it; export adds a report of the empty name and
+                    // keeps it; any other takes the nameref away (`declare -p` finds nothing).
+                    // An -i one is evaluated first, and refused as an assignment. Twin of
+                    // rt_decl_nref.
+                    var nk2 = "$" + names[k]
+                    if (!isRef && anyRef && attrOn(refVars, names[k]) && !attrOn(intVars, names[k]) && asgs[k].idxT == null
+                        && (!varsHas[nk2] || vars[nk2] == "") && !bashIsRef(v)) {
+                        roFail = true
+                        if (localize) { diagErr(bashRefBad(kw, v)); return }
+                        diagErr(kw + ": `" + v + "': not a valid identifier\n")
+                        if (kw == "export") { diagErr("export: `': not a valid identifier\n") }
+                        else { unsetVar(names[k]); dropAttrs(names[k]) }
+                        return
+                    }
+                    // The value's arithmetic errors (-i) carry the keyword; the subscript's not.
+                    var svp = arPfx
+                    arPfx = kw + ": "
+                    runAssignV(asgs[k], assoc, v)
+                    arPfx = svp
+                }
             }
             else if (inherit) { setVarVal(names[k], inhV) }
             else if (fresh) { unsetVar(names[k]) }
@@ -4183,7 +4214,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             capNul["$" + capStack.length] = false
             var saved = saveShellState()
             var savedFrames = localFrames
-            localFrames = []
+            localFrames = framesCopy()
             exitTrap = null
             // set -e is not inherited by a command substitution (bash without inherit_errexit)
             optErrExit = false
@@ -5023,6 +5054,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var nm = arName()
             var key = arSubscript(nm)
             if (arBad) { return 0 }
+            // A name an `=` follows is not evaluated: it is the misplaced assignment the
+            // caller reports (`1 && x=4`). Twin of ar_primary.
+            arWs()
+            if (arAt(0) == 61 && arAt(1) != 61) { return 0 }
             var v2 = arValue(nm, key)
             arWs()
             if ((arAt(0) == 43 && arAt(1) == 43) || (arAt(0) == 45 && arAt(1) == 45)) {
@@ -5477,7 +5512,11 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // subscript for an associative array too.
     function asgKey(a, isAs) {
         var none = a.isrc == ""
-        return arrAkey(a.name, wordJoin(a.idxT()), a.lbl + "[" + a.isrc + "]", isAs && !none, none || a.isrc == "@" || a.isrc == "*")
+        var svp = arPfx
+        arPfx = ""
+        var k = arrAkey(a.name, wordJoin(a.idxT()), a.lbl + "[" + a.isrc + "]", isAs && !none, none || a.isrc == "@" || a.isrc == "*")
+        arPfx = svp
+        return k
     }
     // The same, with the value already expanded.
     function runAssignV(a, assoc, v) {
@@ -5498,10 +5537,20 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // On an array name `+=` appends to element 0's text: e=(ab c); e+=d is `abd c`.
             if (isArr(a.name)) { elemSet(a.name, "0", arrGet(a.name, "0"), v) }
             else if (attrOn(intVars, a.name)) { var sv = arOp("+", arEval(quietVal(a.name)), arEval(v)); if (!arithErr) { setVarVal(a.name, numToStr(sv)) } }
-            else { setVarVal(a.name, quietVal(a.name) + v) }
+            else if (!refSelfBad(a.name, quietVal(a.name) + v)) { setVarVal(a.name, quietVal(a.name) + v) }
             return
         }
         storeAttr(a.name, v, false)
+    }
+    // A store that lands on a nameref itself (its value unset or empty) must name a
+    // variable, NAME or NAME[SUB]: otherwise bash's "not a valid identifier", which abandons
+    // the line, or fails the builtin that stored (subBad). Twin of rt_nref_self_bad.
+    function refSelfBad(name, v) {
+        if (!anyRef || !attrOn(refVars, name) || bashIsRef(v)) { return false }
+        diagErr(arPfx + "`" + v + "': not a valid identifier\n")
+        arithErr = true
+        subBad = true
+        return true
     }
     // v stored as NAME's value the way `NAME=v` stores it: element 0 of an array name, the
     // value of v as arithmetic under -i (`declare -i n` makes n=EXPR evaluate EXPR; an error
@@ -5515,8 +5564,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (attrOn(intVars, name)) {
             var iv = arEval(v)
             if (arithErr) { return "" }
-            setVarVal(name, numToStr(iv))
-        } else { setVarVal(name, v) }
+            v = numToStr(iv)
+        }
+        if (refSelfBad(name, v)) { return "" }
+        setVarVal(name, v)
         return getVarVal(name)
     }
 
@@ -7158,7 +7209,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return function() {
             lastBgPid = lastBgPid + 1
             var saved = saveShellState()
-            localFrames = []
+            localFrames = framesCopy()
             exitTrap = null
             var r = anytype
             r = t()
@@ -7383,7 +7434,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function subshellOf(bodyT, keepLoops) {
         return function() {
             var saved = saveShellState()
-            localFrames = []
+            localFrames = framesCopy()
             exitTrap = null
             var savedLoops = loopDepth
             if (!keepLoops) { loopDepth = 0 }
@@ -7959,6 +8010,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 if (fRef) { noRef = noRef + 1 }
                 storeAttr(fname, vals[k], false)
                 if (fRef) { noRef = noRef - 1 }
+                // A word that names no variable ends the loop, status 1.
+                if (fRef && takeSubBad()) { setStatus(1); return 1 }
                 r = bodyT()
                 if (typeof r == "object") {
                     var sg = loopSignal(r)

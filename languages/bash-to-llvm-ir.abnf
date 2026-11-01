@@ -1872,6 +1872,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var rtArrAny = rtDecl("rt_arr_any", false, [1])
     var rtArrPlus = rtDecl("rt_arr_plus", false, [1, 1, 0, 0])
     var rtNrefBad = rtDecl("rt_nref_bad", false, [1, 1])
+    var rtDeclNref = rtDecl("rt_decl_nref", false, [1, 1, 1, 0])
+    var rtNrefSelfBad = rtDecl("rt_nref_self_bad", false, [1, 1])
     var rtArrList = rtDecl("rt_arr_list", true, [1, 1, 0, 0])
     // The scalar-aware quartet, EXPANSION SITES ONLY - see languages/lib/bash-rt.c.
     var rtScGet = rtDecl("rt_sc_get", true, [1, 1])
@@ -3587,6 +3589,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (viaRef) {
             var tg = gepStr(b, a.name)
             b.NewCall(rtSetByName, [tg, v, (a.op == "+=") ? one : zero, refAttrs(b, tg, false)])
+            // A builtin's store refused (rt_nref_self_bad) fails the builtin instead.
+            if (a.soft != undefined) { b.NewStore(b.NewOr(b.NewLoad(i32, a.soft), b.NewCall(rtTakeSubbad)), a.soft) }
             return emitAbortCheck(b)
         }
         if (a.idxT != null) {
@@ -3671,7 +3675,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var sub = name.slice(bi + 1, name.length - 1)
             return {name: name.slice(0, bi), op: "=", idxT: makeConst(sub), isrc: sub, lit: null, valT: doneWord(v), soft: subP}
         }
-        return {name: name, op: "=", idxT: null, lit: null, valT: doneWord(v)}
+        return {name: name, op: "=", idxT: null, lit: null, valT: doneWord(v), soft: subP}
     }
     // A word whose value is already expanded.
     function doneWord(v) { return {fn: function(b) { return {b: b, v: v} }, c: undefined, done: true} }
@@ -3973,6 +3977,29 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (setRo) { roVars["$" + names[j]] = true }
             // A name with an attribute has a slot, where refAttrs looks for it.
             if (integer || upper || lower || setRo) { getVarId(names[j]) }
+            // A value that names no variable, for a nameref itself, fails the declaration
+            // (rt_decl_nref). Twin of the same check in declOneN in bash-interpreter.abnf.
+            var refJoin = null
+            var ra0 = asgs[j]
+            if (ra0 != null && !isRef && attrOn(refVars, names[j]) && !attrOn(intVars, names[j]) && ra0.lit == null && ra0.idxT == null) {
+                var rv = v
+                if (rv == null && ra0.valT == null) { rv = emptyPtr(b) }
+                else if (rv == null) {
+                    var rr = ra0.valT.fn(b)
+                    b = rr.b
+                    rv = (ra0.valT.f == true) ? wordJoin(b, rr.v) : rr.v
+                    if (ra0.valT.c == undefined && ra0.valT.done != true) { b = emitAbortCheck(b) }
+                }
+                v = rv
+                var mode = localize ? one : ((kw == "export") ? llvm.constant.NewInt(i32, 2) : zero)
+                var rbad = b.NewCall(rtDeclNref, [gepStr(b, kw), gepStr(b, names[j]), rv, mode])
+                var rbadB = curF.NewBlock(""), rokB = curF.NewBlock("")
+                refJoin = curF.NewBlock("")
+                b.NewCondBr(b.NewICmp(llvm.enum.IPredNE, rbad, zero), rbadB, rokB)
+                rbadB.NewStore(one, refuseP)
+                rbadB.NewBr(refJoin)
+                b = rokB
+            }
             if (xCode != 0) { b.NewCall(rtXmark, [gepStr(b, names[j]), (xCode > 0) ? one : zero]) }
             // A global `declare -a a` keeps a's elements; only a value or a local starts empty.
             var arrJ = isArray || darrs[j] != null
@@ -3993,9 +4020,12 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 var a = asgs[j]
                 if (v != null || a.idxT != null) { a = {name: a.name, op: a.op, idxT: a.idxT, lit: (v != null) ? null : a.lit, valT: (v != null) ? doneWord(v) : a.valT, isrc: a.isrc, soft: subBadP} }
                 var prevV = selfRef ? loadVar(b, names[j]) : null
+                // The value's arithmetic errors (-i) carry the keyword; the subscript's not.
+                if (a.lit == null) { b.NewStore(gepStr(b, kw + ": "), gArPfx) }
                 litDecl = true
                 b = emitAssign(b, a, assoc, null)
                 litDecl = false
+                if (a.lit == null) { b.NewStore(emptyPtr(b), gArPfx) }
                 if (selfRef) {
                     // Refused, the name keeps its value and gets no nameref mark.
                     var selfB = curF.NewBlock(""), okB = curF.NewBlock(""), joinB = curF.NewBlock("")
@@ -4016,6 +4046,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 if (!selfRef) { b.NewCall(rtNmark, [gepStr(b, names[j]), one]) }
             }
             if (asgs[j] == null && !arrJ && kw != "export" && kw != "readonly") { b.NewCall(rtArrSmark, gepStr(b, names[j])) }
+            if (refJoin != null) { b.NewBr(refJoin); b = refJoin }
             return b
         }
         // The fields of a computed operand, each NAME, NAME=VALUE, NAME+=VALUE, NAME[SUB]= /
@@ -4138,7 +4169,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return function(b) {
             var j
             var vals = []
-            refuseP = (isRef || plusArr) && !query ? slotOf(i32) : null
+            var anyRefName = false
+            for (j = 0; j < names.length; j++) { if (attrOn(refVars, names[j])) { anyRefName = true } }
+            refuseP = (isRef || plusArr || anyRefName) && !query ? slotOf(i32) : null
             if (refuseP != null) { b.NewStore(zero, refuseP) }
             for (j = 0; j < names.length && !query; j++) {
                 var a = asgs[j]
@@ -5298,7 +5331,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         b.NewStore(zero, subP)
         for (k = 0; k < stopK; k++) {
             b = emitAssign(b, namedAsg(names[k], fvs[k], subP), false, mk1)
-            if (names[k].indexOf("[") < 0) { continue }
+            if (names[k].indexOf("[") < 0 && !attrOn(refVars, names[k])) { continue }
             var refB = curF.NewBlock(""), goB = curF.NewBlock("")
             b.NewCondBr(b.NewICmp(llvm.enum.IPredNE, b.NewLoad(i32, subP), zero), refB, goB)
             refB.NewStore(emptyPtr(refB), gArPfx)
@@ -7089,7 +7122,17 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var body2 = body
             if (attrOn(refVars, fname)) {
                 refVars["$" + fname] = true
-                storeVarRaw(body, fname, body.NewCall(rtFAt, [list, i]))
+                // A word that names no variable ends the loop, status 1 (rt_nref_self_bad).
+                var fv = body.NewCall(rtFAt, [list, i])
+                var fbad = body.NewCall(rtNrefSelfBad, [gepStr(body, fname), fv])
+                var fbadB = curF.NewBlock("")
+                body2 = curF.NewBlock("")
+                body.NewCondBr(body.NewICmp(llvm.enum.IPredNE, fbad, zero), fbadB, body2)
+                fbadB.NewCall(rtTakeSubbad)
+                fbadB.NewStore(one, lst)
+                fbadB.NewBr(ex)
+                storeVarRaw(body2, fname, fv)
+                heapPin(body2)
             }
             else { body2 = emitStoreAttr(body, fname, body.NewCall(rtFAt, [list, i])) }
             loopStack.push({brk: ex, cont: step, lst: lst, rd: redirStack.length})

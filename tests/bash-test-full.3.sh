@@ -1857,6 +1857,62 @@ $0: line $LINENO: b[]: bad array subscript
   declare -A s93e; n='s93e[@]'; printf -v "$n" %s q2; check aks3 "$(declare -p s93e)" 'declare -A s93e=(["@"]="q2" )'
   declare -A s93f; n='s93f[*]'; read "$n" <<< z2; check aks4 "$(declare -p s93f)" 'declare -A s93f=(["*"]="z2" )'
 }
+# ===== SECTION 94: misplaced assignments, nameref stores, declare prefixes, +a of empty arrays =====
+# A name an `=` follows is not evaluated before the misplaced assignment is reported. A store
+# landing on a nameref itself must name a variable: an assignment is abandoned, read / printf
+# -v / a for loop fail, a declaration fails and (outside a local) takes the nameref away. A
+# declaration's value reports its arithmetic errors under the keyword, its subscript not.
+# A subshell in a function redeclares the function's locals. +a / +A refuse an empty array
+# too. Every expected value is bash 5.3's.
+s94() {
+  local r x l
+  s94b=(1 2 3)
+  x='1+'; r=$( (echo $(( 1 && x=4 ))) 2>&1); check aen1 "$r" "$0: line $LINENO: 1 && x=4 : attempted assignment to non-variable (error token is \"=4 \")"
+  r=$( (echo $(( 1 && s94b[] = 4 ))) 2>&1); check aen2 "$r" "$0: line $LINENO: 1 && s94b[] = 4 : attempted assignment to non-variable (error token is \"= 4 \")"
+  r=$( (declare -n s94r; s94r='s94b[]'; echo "st=$?") 2>&1); check nrs1 "$r" "$0: line $LINENO: \`s94b[]': not a valid identifier"
+  r=$( (declare -n s94r; s94r=''; echo "st=$?") 2>&1); check nrs2 "$r" "$0: line $LINENO: \`': not a valid identifier"
+  r=$( (declare -n s94r; s94r='s94b[1]'; declare -p s94r) 2>&1); check nrs3 "$r" 'declare -n s94r="s94b[1]"'
+  r=$( (declare -n s94r; read s94r <<< '1x'; echo "st=$?"; declare -p s94r) 2>&1); l=$LINENO
+  check nrs4 "$r" "$0: line $l: read: \`1x': not a valid identifier
+st=1
+declare -n s94r"
+  r=$( (declare -n s94r; printf -v s94r %s 'b[]'; echo "st=$?") 2>&1); check nrs5 "$r" "$0: line $LINENO: printf: \`b[]': not a valid identifier
+st=1"
+  r=$( (declare -n s94r; for s94r in s94a '1y' s94c; do :; done; echo "st=$?"; declare -p s94r) 2>&1); l=$LINENO
+  check nrs6 "$r" "$0: line $l: \`1y': not a valid identifier
+st=1
+declare -n s94r=\"s94a\""
+  r=$( (declare -n s94r; for s94r in s94a s94c; do :; done; declare -p s94r) 2>&1); check nrs7 "$r" 'declare -n s94r="s94c"'
+  g94() { declare -n s94r; declare s94r='1x'; echo "st=$?"; declare -p s94r; }; l=$LINENO
+  r=$(g94 2>&1); check nrs8 "$r" "$0: line $l: declare: \`1x': invalid variable name for name reference
+st=1
+declare -n s94r"
+  r=$( (declare -gn s94g; declare -g s94g='1x'; echo "st=$?"; declare -p s94g) 2>&1); l=$LINENO
+  check nrsa "$r" "$0: line $l: declare: \`1x': not a valid identifier
+st=1
+$0: line $l: declare: s94g: not found"
+  g94() { declare -n s94r; local s94r='1x'; echo "in $?"; declare -p s94r; }; l=$LINENO
+  r=$(g94 2>&1); check nrs9 "$r" "$0: line $l: local: \`1x': invalid variable name for name reference
+in 1
+declare -n s94r"
+  g94() { local s94l=5; ( local s94l; echo "[$s94l]"; declare s94j=2; declare -p s94j ); declare -p s94j 2>/dev/null; }
+  check lsub1 "$(g94)" '[5]
+declare -- s94j="2"'
+  r=$( (declare -i s94i=1x; echo "st=$?") 2>&1); check dpf1 "$r" "$0: line $LINENO: declare: 1x: value too great for base (error token is \"1x\")"
+  g94() { local -i s94i=1/0; echo in; }; l=$LINENO
+  r=$(g94 2>&1); check dpf2 "$r" "$0: line $l: local: 1/0: division by 0 (error token is \"0\")"
+  r=$( (declare s94i[1/0]=3; echo "st=$?") 2>&1); check dpf3 "$r" "$0: line $LINENO: 1/0: division by 0 (error token is \"0\")"
+  r=$( (declare -a s94e; declare +a s94e; echo "st=$?"; declare -p s94e) 2>&1); l=$LINENO
+  check pla4 "$r" "$0: line $l: declare: s94e: cannot destroy array variables in this way
+st=1
+declare -a s94e"
+  r=$( (s94e=(1); unset 's94e[0]'; declare -g +a s94e; echo "st=$?") 2>&1); l=$LINENO
+  check pla5 "$r" "$0: line $l: declare: s94e: cannot destroy array variables in this way
+st=1"
+  r=$( (declare -A s94m; declare +A s94m; echo "st=$?") 2>&1); l=$LINENO
+  check pla6 "$r" "$0: line $l: declare: s94m: cannot destroy array variables in this way
+st=1"
+}
 # ===== END SECTIONS =====
 
 s47   # SECTION-CALL 47
@@ -1905,5 +1961,6 @@ s90   # SECTION-CALL 90
 s91   # SECTION-CALL 91
 s92   # SECTION-CALL 92
 s93   # SECTION-CALL 93
+s94   # SECTION-CALL 94
 echo "full: $checks checks, $fails failures"
 exit $fails
