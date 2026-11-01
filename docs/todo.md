@@ -86,7 +86,7 @@ Found by the RB worker, round 33 (oracle /usr/bin/ruby 2.6, LC_ALL=en_US.UTF-8):
 
 # JS — JavaScript and TypeScript
 
-### T-965 ts/js: `\p{…}` property escapes under the u flag; decorator `context.metadata`; `[1].a++` in the js compiler · P3 · JS · OPEN [V]
+### T-965 ts/js: `\p{…}` property escapes under the u flag; decorator `context.metadata`; `[1].a++` in the js compiler · P3 · JS · IN PROGRESS (JS worker, round 37) [V]
 Left from T-915 and found by the JS worker, round 36 (oracle node 24 / tsc 6). `/\p{L}/u.test("é")` → node true; ours does not
 support property escapes (the tables exist behind java-regex.js's jxPropCls knob; JS needs its own knob with ECMAScript's
 property-name grammar and the Go-twin wiring). A class decorator's context lacks `metadata` (node/tsc give an object). `[1].a++`
