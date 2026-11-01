@@ -122,7 +122,7 @@ Found by the CORE worker, round 15. The interpreter's stripWs deletes every ASCI
 strings.TrimSpace, native strips ASCII 9-13 and 32: `int.Parse(" 1 2 ")` and `int.Parse(" 1")` give three answers.
 .NET's NumberStyles.Integer allows leading/trailing white space (U+0009-U+000D, U+0020) only; settle with a real dotnet.
 
-### T-1007 c#: `string.CompareOrdinal` of an astral character vs an ASCII one has the wrong sign · P3 · CS · OPEN [V spec-only]
+### T-1007 c#: `string.CompareOrdinal` of an astral character vs an ASCII one has the wrong sign · P3 · CS · IN PROGRESS (CS worker, round 1) [V spec-only]
 Found by the CORE worker, round 16 (.NET: ordinal = UTF-16 code-unit order). `string.CompareOrdinal("😀", "a")` must be positive
 (0xD83D > 0x61); all legs give the wrong sign (matrix row `-0--`, expected `-0-+`). Use the UTF-16 comparison (str_cmp16).
 
