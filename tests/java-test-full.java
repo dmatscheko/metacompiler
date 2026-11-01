@@ -192,6 +192,7 @@ class Main {
         S94.run(); // SECTION-CALL 94
         S95.run(); // SECTION-CALL 95
         S96.run(); // SECTION-CALL 96
+        S97.run(); // SECTION-CALL 97
         S100.run(); // SECTION-CALL 100
         S101.run(); // SECTION-CALL 101
         S102.run(); // SECTION-CALL 102
@@ -5409,5 +5410,51 @@ class S96 {
         try { s.codePointBefore(0); } catch (StringIndexOutOfBoundsException e) { r = r + " " + e.getMessage(); }
         try { s.codePointBefore(5); } catch (StringIndexOutOfBoundsException e) { r = r + " " + e.getMessage(); }
         Main.check("cpb96", r.equals("97 128512 55357 98 55357 Index -1 out of bounds for length 4 Index 4 out of bounds for length 4"));
+    }
+}
+
+// ===== SECTION 97: library interfaces as supertypes =====
+//
+// An interface may extend a library interface (Comparable<T>, Runnable) and
+// give it a default body; a class reaching one through an interface, directly,
+// or as an anonymous class is an instance of it (JLS 9.1.3, 15.20.2), also
+// before an interface it names is declared. Every expected value is java
+// 24.0.2's.
+interface Shape97 extends Comparable<Shape97> {
+    double area();
+    default int compareTo(Shape97 o) { return Double.compare(area(), o.area()); }
+}
+interface Task97 extends Runnable, Comparable<Task97> { }
+class Sq97 implements Shape97 {
+    double s;
+    Sq97(double s) { this.s = s; }
+    public double area() { return s * s; }
+    public String toString() { return "Sq" + (int) s; }
+}
+class Early97 implements Later97 {
+    static boolean seen = new Early97() instanceof Iterable;
+}
+interface Later97 extends Iterable<Integer> {
+    default Iterator<Integer> iterator() { return List.of(1, 2).iterator(); }
+}
+class T97 implements Task97 {
+    public void run() { }
+    public int compareTo(Task97 o) { return 0; }
+}
+class S97 {
+    static void run() {
+        List<Shape97> l = new ArrayList<>(List.of(new Sq97(3), new Sq97(1), new Sq97(2)));
+        Collections.sort(l);
+        Shape97 a = new Sq97(2);
+        Comparable<Shape97> c = a;
+        Main.check("lib97", (l + " " + a.compareTo(new Sq97(5)) + " " + c.compareTo(new Sq97(1))).equals("[Sq1, Sq2, Sq3] -1 1"));
+        Object o = a;
+        Object t = new T97();
+        Object r = new Runnable() { public void run() { } };
+        Object e = new Early97();
+        int sum = 0;
+        for (int x : (Later97) e) { sum += x; }
+        Main.check("libis97", (o instanceof Comparable) && (t instanceof Comparable) && (t instanceof Runnable)
+            && (r instanceof Runnable) && !(r instanceof Comparable) && Early97.seen && (e instanceof Iterable) && sum == 3);
     }
 }

@@ -6664,13 +6664,12 @@ HasStatic   = :script(~~
         jOvIfaceSupers(name, supers)
         var cls = {__isclass: true, __isiface: true, __name: name, __bname: jBinOf(name), __abstract: []}
         globalScope[name] = cls
-        var inherited = []
+        cls.__ifaces = []
         var i2 = 0
         for (i2 = 0; i2 < supers.length; i2++) {
             var sp = globalScope[supers[i2]]
-            if (sp != undefined && sp != null) { inherited.push(sp) } else { jNoteLateIface(cls, supers[i2]) }
+            if (sp != undefined && sp != null) { cls.__ifaces.push(sp) } else { jNoteLateIface(cls, supers[i2]) }
         }
-        cls.__ifaces = inherited
         jLateIfaceHit(name, cls)
         var i3 = 0
         for (i3 = 0; i3 < members.length; i3++) {
@@ -7121,13 +7120,23 @@ HasStatic   = :script(~~
         for (var i = 0; i < xs.length; i++) { if (xs[i] == s) { return true } }
         return false
     }
-    function jNoteLateIface(cls, nm) { jLateIfaces.push({cls: cls, name: jSimpleName(nm)}) }
+    // An interface a type names before it is declared: a stub carrying only
+    // the name stands in on __ifaces, since the name is all `instanceof`
+    // reads, and the declaration replaces it (jLateIfaceHit). A library
+    // interface the program never declares (Comparable, Runnable) keeps its
+    // stub. Twin of jAddLibIface in java-to-llvm-ir.abnf.
+    function jNoteLateIface(cls, nm) {
+        var stub = {__name: jSimpleName(nm)}
+        if (cls.__ifaces == undefined) { cls.__ifaces = [] }
+        cls.__ifaces.push(stub)
+        jLateIfaces.push({cls: cls, name: stub.__name, stub: stub})
+    }
     function jLateIfaceHit(name, iface) {
         for (var i = 0; i < jLateIfaces.length; i++) {
             var li = jLateIfaces[i]
             if (li.name != name) { continue }
-            if (li.cls.__ifaces == undefined) { li.cls.__ifaces = [] }
-            li.cls.__ifaces.push(iface)
+            var ifs = li.cls.__ifaces
+            for (var k = 0; k < ifs.length; k++) { if (ifs[k] === li.stub) { ifs[k] = iface } }
         }
     }
     // "Outer", "Nested" -> "Outer.Nested" (the type arguments are already gone).

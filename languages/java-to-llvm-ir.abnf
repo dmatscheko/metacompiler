@@ -5144,6 +5144,10 @@ HasStatic   = :script(~~
     // The name of the type declaration whose walk just finished (see makeNestedMember).
     var lastTypeName = ""
 
+    function jAddLibIface(xs, nm) {
+        for (var i = 0; i < xs.length; i++) { if (xs[i] == nm) { return } }
+        xs.push(nm)
+    }
     // rinfo is a record's jRecParams (component types, varargs).
     function buildClassStmt(name, members, recordParams, rinfo) {
         jStmtTypes["$" + name] = true
@@ -5217,11 +5221,16 @@ HasStatic   = :script(~~
             var ctors = []
             var superName = null
             var impls = []
+            // Library interfaces the program does not declare (Comparable,
+            // Runnable): each gets a stub descriptor on __ifaces carrying only its
+            // name, which is all `instanceof` reads.
+            var libImpls = []
             var i
             for (i = 0; i < members.length; i++) {
-                if (members[i].ext != undefined
-                    && (members[i].lib !== true || classNames["$" + baseTypeName(members[i].ext)] == true)) {
-                    superName = baseTypeName(members[i].ext)
+                if (members[i].ext != undefined) {
+                    var ename = baseTypeName(members[i].ext)
+                    if (members[i].lib !== true || classNames["$" + ename] == true) { superName = ename }
+                    else { jAddLibIface(libImpls, jSimpleName(ename)) }
                 }
                 if (members[i].impls != undefined) {
                     for (var q = 0; q < members[i].impls.length; q++) {
@@ -5229,6 +5238,7 @@ HasStatic   = :script(~~
                         // is registered under its simple one.
                         var iname = jSimpleName(baseTypeName(members[i].impls[q]))
                         if (interfaceNames["$" + iname] == true) { impls.push(iname) }
+                        else if (classNames["$" + iname] != true) { jAddLibIface(libImpls, iname) }
                     }
                 }
             }
@@ -5248,6 +5258,12 @@ HasStatic   = :script(~~
                 if (impls[i] == chained) { continue }
                 if (ifacesV == null) { ifacesV = callExt(b, "js_arr_new", []) }
                 callExt(b, "js_arr_push", [ifacesV, callExt(b, "js_scope_get", [curScopeV, emitStr(b, impls[i])])])
+            }
+            for (i = 0; i < libImpls.length; i++) {
+                if (ifacesV == null) { ifacesV = callExt(b, "js_arr_new", []) }
+                var stubV = callExt(b, "js_obj_new", [])
+                callExt(b, "js_set", [stubV, emitStr(b, "__name"), emitStr(b, libImpls[i])])
+                callExt(b, "js_arr_push", [ifacesV, stubV])
             }
             if (ifacesV != null) { callExt(b, "js_set", [clsV, emitStr(b, "__ifaces"), ifacesV]) }
             // Nested / inner types first: they are hoisted into this scope AND stored
@@ -5993,8 +6009,9 @@ HasStatic   = :script(~~
         // The first super-interface takes the __super slot and the others go on
         // __ifaces; the defaults of ALL of them are copied in (buildClassStmt), so
         // an interface owns every default it inherits and a class copying from it
-        // with js_get finds them.
-        if (supers.length > 0) { members = [{ext: supers[0]}, {impls: supers}].concat(members) }
+        // with js_get finds them. lib: a library super-interface the program does
+        // not declare (Comparable<T>) has no descriptor, and buildClassStmt drops it.
+        if (supers.length > 0) { members = [{ext: supers[0], lib: true}, {impls: supers}].concat(members) }
         return buildInterfaceStmt(name, members)
     }
     // The descriptor of an interface: like a class, minus the constructor.
