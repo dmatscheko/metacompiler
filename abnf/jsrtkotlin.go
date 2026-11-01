@@ -9969,6 +9969,8 @@ func ktJvmTagged(o *jsObject, builder string, n int) *jsObject {
 		jc = "java.util.TreeSet"
 	case "sortedMapOf", "TreeMap":
 		jc = "java.util.TreeMap"
+	case "buildSet":
+		jc = "kotlin.collections.builders.SetBuilder"
 	}
 	if jc != "" {
 		o.set("__jc", jc)
@@ -10023,6 +10025,14 @@ func ktGlobalFn(rt *jsrt, name string) interface{} {
 			l := &jsArray{}
 			rt.ktWithRecv(l, argAt(args, len(args)-1), l)
 			return l
+		})
+	case "buildSet":
+		// The receiver is a MutableSet that keeps insertion order, and the result is
+		// that set as a read-only Set (a SetBuilder on the JVM).
+		return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			s := ktJvmTagged(ktMakeSet(), name, 0)
+			rt.ktWithRecv(s, argAt(args, len(args)-1), s)
+			return s
 		})
 	case "buildString":
 		return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {

@@ -7351,10 +7351,11 @@ fun s168() {
         mutableListOf(0).apply { with(arrayOf(4, 5)) { add(size) } } == listOf(0, 2))
 }
 
-// ===== SECTION 169: value reads through a builtin receiver =====
+// ===== SECTION 169: value reads through a builtin receiver, buildSet =====
 // A bare name in value position reads only a PROPERTY of a builtin implicit
 // receiver's kind; a function member (List.first(), map, reverse) or a name the
-// receiver lacks falls through to the enclosing class.
+// receiver lacks falls through to the enclosing class. buildSet's receiver is an
+// insertion-ordered MutableSet.
 class K169 {
     val log = "L"; val items = "I"; val push = "P"; val map = "M"; val first = "F"; val reverse = "V"
     fun go() = with(listOf(9)) { log + items + push + map + first + size }
@@ -7365,6 +7366,10 @@ class K169 {
 fun s169() {
     check("rcv169a", K169().go() == "LIPMF1")
     check("rcv169b", K169().sb() == "V2" && K169().rg() == "12M")
+    check("bset169c", buildSet { add(3); add(size) }.toString() == "[3, 1]" &&
+        buildSet(4) { add("a"); add("b"); add("a"); addAll(listOf("c", "b")) } == setOf("a", "b", "c"))
+    check("bset169d", buildSet<Int> { add(2); add(1); remove(3) }.toList() == listOf(2, 1) &&
+        buildSet { add(1) }.javaClass.name == "kotlin.collections.builders.SetBuilder")
 }
 
 fun main() {

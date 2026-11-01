@@ -9468,6 +9468,7 @@ function ktJvmTagged(o, builder, n) {
     if (builder == "hashMapOf" || builder == "HashMap") { jc = "java.util.HashMap" }
     if (builder == "sortedSetOf" || builder == "TreeSet") { jc = "java.util.TreeSet" }
     if (builder == "sortedMapOf" || builder == "TreeMap") { jc = "java.util.TreeMap" }
+    if (builder == "buildSet") { jc = "kotlin.collections.builders.SetBuilder" }
     if (jc != "") { o["__jc"] = jc }
     return o
 }
@@ -9520,6 +9521,14 @@ function ktGlobalFn(name) {
             var l = []
             ktWithRecv(l, arguments[arguments.length - 1], [l])
             return l
+        }
+    }
+    // buildSet's receiver keeps insertion order; the result is a read-only Set.
+    if (name == "buildSet") {
+        return function () {
+            var st = ktJvmTagged(ktMakeSet(), name, 0)
+            ktWithRecv(st, arguments[arguments.length - 1], [st])
+            return st
         }
     }
     if (name == "buildString") {

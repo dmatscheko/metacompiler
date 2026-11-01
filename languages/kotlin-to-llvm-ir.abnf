@@ -4943,14 +4943,15 @@ KwContract  = "contract" KwEnd ;
         }
     }
     // THE SCOPE FUNCTIONS' RECEIVER LAMBDAS. `x.apply { }`, `x.run { }`, `with(x) { }`,
-    // buildString / buildList / buildMap { } bind their receiver as the lambda's `this`,
-    // the INNERMOST implicit receiver, so it must shadow an enclosing extension's or
-    // member's `this` (`fun String.f() = StringBuilder().apply { append(length) }` reads
-    // the builder's length). The runtime keeps the receiver on ktRecvStack, which the
-    // name lookup reaches only after every scope `this`, and layer 2 cannot open a scope
-    // to bind it; but every one of these passes the receiver as the lambda's first
-    // argument (ktWithRecv), so the lambda itself binds it. Twin of the scope ktWithRecv
-    // opens in abnf/jsrtkotlin.go and of kSetRecv in kotlin-interpreter.abnf.
+    // buildString / buildList / buildSet / buildMap { } bind their receiver as the
+    // lambda's `this`, the INNERMOST implicit receiver, so it must shadow an enclosing
+    // extension's or member's `this` (`fun String.f() = StringBuilder().apply {
+    // append(length) }` reads the builder's length). The runtime keeps the receiver on
+    // ktRecvStack, which the name lookup reaches only after every scope `this`, and
+    // layer 2 cannot open a scope to bind it; but every one of these passes the receiver
+    // as the lambda's first argument (ktWithRecv), so the lambda itself binds it. Twin of
+    // the scope ktWithRecv opens in abnf/jsrtkotlin.go and of kSetRecv in
+    // kotlin-interpreter.abnf.
     //
     // Whether it WAS called as one is the runtime's to say: a user function or member of
     // the name (`fun run(f: (Int) -> Int)` on some class) calls it as a plain lambda.
@@ -4963,7 +4964,7 @@ KwContract  = "contract" KwEnd ;
     // the callee's label entry: only blanks or the call's own `(...)` / `<...>` lie
     // between the callee name and the lambda.
     var recvLamMember = {"$apply": true, "$run": true}
-    var recvLamGlobal = {"$with": 2, "$buildString": 1, "$buildList": 1, "$buildMap": 1}
+    var recvLamGlobal = {"$with": 2, "$buildString": 1, "$buildList": 1, "$buildSet": 1, "$buildMap": 1}
     function recvLamOf(entry, at) {
         if (entry == null || entry.kind != "lam" || entry.end === undefined || at === undefined) { return null }
         var k = "$" + entry.lbl
@@ -9102,7 +9103,7 @@ KwContract  = "contract" KwEnd ;
         // are shapes whose whole member surface already lives in jsrtkotlin.go, so
         // the declaration is the entire port.
         var ktBuilders = ["mapOf", "mutableMapOf", "hashMapOf", "linkedMapOf", "sortedMapOf",
-                          "emptyMap", "buildMap", "buildList", "buildString", "Pair", "Triple",
+                          "emptyMap", "buildMap", "buildList", "buildSet", "buildString", "Pair", "Triple",
                           "with", "run", "repeat", "StringBuilder", "String", "generateSequence",
                           // stdlib top-level functions; their twins are the hostGlobals
                           // block in kotlin-interpreter.abnf. listOfNotNull is here rather

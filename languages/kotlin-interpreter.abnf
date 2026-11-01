@@ -4500,6 +4500,13 @@ NotMemberKw = :script(~~ "pure";
         if (typeof f == "function") { kSetRecv({v: l, noit: true}); f(l) }
         return l
     }
+    // buildSet's receiver keeps insertion order; the result is a read-only Set.
+    hostGlobals["buildSet"] = function() {
+        var f = arguments[arguments.length - 1]
+        var s = kJvmTagged(kMakeSet(), "kotlin.collections.builders.SetBuilder")
+        if (typeof f == "function") { kSetRecv({v: s, noit: true}); f(s) }
+        return s
+    }
     hostGlobals["Pair"] = function(a, b) { return {first: a, second: b} }
     hostGlobals["Triple"] = function(a, b, c) { return {first: a, second: b, third: c} }
     // with(receiver) { ... }: the scope function that is a top-level FUNCTION rather
