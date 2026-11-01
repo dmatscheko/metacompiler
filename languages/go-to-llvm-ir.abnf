@@ -389,7 +389,8 @@ FTRets      = FTRetNamed | Type | "(" [ Type { "," Type } ] ")" ;
 FTRetNamed  = NamedAhead "(" FTRetGrp { "," FTRetGrp } ")" ;
 FTRetGrp    = Id { "," Id } Type ;
 // Channel and (anonymous) interface types are parsed in every type position.
-ChanTypeT   = ( "chan" KwEnd [ "<-" ] | "<-" "chan" KwEnd ) Type ;
+// `chan (<-chan int)`: a parenthesized element type keeps its own `<-`.
+ChanTypeT   = ( "chan" KwEnd [ "<-" ] | "<-" "chan" KwEnd ) ( "(" Type ")" | Type ) ;
 IfaceTypeT  = "interface" KwEnd SkipBlock ;
 
 // Every statement production pushes exactly one thunk: function() -> undefined | signal.
@@ -414,9 +415,61 @@ GoStmt      <~~ push(makeGoStmt(pop(), up.pos)) ~~>
 Select      <~~ push(goSwLblC(makeSelect(takeAll()), goSwLblAt(up.start))); goBrClaim(up.start, up.pos, false) ~~>
             = "select" <~~ goSwLbl(up.start) ~~> KwEnd "{" { SelArm } "}" ;
 SelArm      = SelRecv | SelSend | SelDefault ;
-SelRecv     <~~ push(makeSelRecv(takeAll())) ~~>
-            = "case" KwEnd [ Id <~~ push(cPoisonName(up.in)) ~~> [ "," Id <~~ push(cPoisonName(up.in)) ~~> ] ( ":=" | "=" ) ]
-              "<-" Expression ":" SelBody ;
+SelRecv     <~~ push(makeSelRecv(goTgtC(takeAll()))) ~~>
+            = "case" KwEnd [ SelAsgAhead GoTgt [ "," GoTgt ] "="
+                           | Id <~~ push(cPoisonName(up.in)) ~~> [ "," Id <~~ push(cPoisonName(up.in)) ~~> ] ":=" ]
+              ( "<-" Expression | "(" "<-" Expression ")" ) ":" SelBody ;
+// `for *p, x.a = range xs` and `case *p, ok = <-c:` assign to TARGETS (goTgtC): the
+// lookaheads decide before anything is pushed. RangeTgtAhead: a `=` followed by
+// `range`, with a target that is not a plain name before it (plain names keep
+// ForRange's own arm). SelAsgAhead: a `=` before the `<-` of the receive.
+RangeTgtAhead = :script(~~
+    (function () {
+        var depth = 0
+        var shaped = false
+        for (var i = 0; i < 4096; i++) {
+            var cc = c.peek(i)
+            if (cc < 0) { break }
+            if (cc === 40 || cc === 91) { depth++; shaped = true; continue }
+            if (cc === 41 || cc === 93) { depth--; if (depth < 0) { break }; continue }
+            if (depth > 0) { continue }
+            if (cc === 42 || cc === 46) { shaped = true; continue }
+            if (cc === 123 || cc === 59 || cc === 10) { break }
+            if (cc === 61) {
+                var pv = i > 0 ? c.peek(i - 1) : 0
+                if (c.peek(i + 1) === 61 || pv === 58 || pv === 33 || pv === 60 || pv === 62) { break }
+                var j = i + 1
+                while (c.peek(j) === 32 || c.peek(j) === 9) { j++ }
+                var nx = c.peek(j + 5)
+                var word = c.peek(j) === 114 && c.peek(j + 1) === 97 && c.peek(j + 2) === 110 && c.peek(j + 3) === 103 && c.peek(j + 4) === 101
+                if (shaped && word && !((nx >= 48 && nx <= 57) || (nx >= 65 && nx <= 90) || (nx >= 97 && nx <= 122) || nx === 95)) { return undefined }
+                break
+            }
+        }
+        return abnf.newToken("\x01not-a-range-target", 0)
+    })()
+~~) ;
+SelAsgAhead = :script(~~
+    (function () {
+        var depth = 0
+        for (var i = 0; i < 4096; i++) {
+            var cc = c.peek(i)
+            if (cc < 0) { break }
+            if (cc === 40 || cc === 91) { depth++; continue }
+            if (cc === 41 || cc === 93) { depth--; if (depth < 0) { break }; continue }
+            if (depth > 0) { continue }
+            if (cc === 58 || cc === 123 || cc === 59 || cc === 10) { break }
+            if (cc === 60 && c.peek(i + 1) === 45) { break }
+            if (cc === 61) {
+                var pv = i > 0 ? c.peek(i - 1) : 0
+                if (c.peek(i + 1) === 61 || pv === 33 || pv === 60 || pv === 62) { break }
+                return undefined
+            }
+        }
+        return abnf.newToken("\x01not-a-receive-assignment", 0)
+    })()
+~~) ;
+GoTgt       <~~ push({rt: pop()}) ~~> = Target ;
 SelSend     <~~ push(makeSelSend(takeAll())) ~~>
             = "case" KwEnd PostfixExpr "<-" Expression ":" SelBody ;
 SelDefault  <~~ push(makeSelDefault(takeAll())) ~~>
@@ -643,9 +696,9 @@ ForEver     <~~ push(makeForEver(takeAll())); goBrClaim(up.start, up.pos, true) 
 // `for range 4`) and `for i, v = range s` over already-declared names. Each name is
 // wrapped as {rv: ...} rather than pushed bare, because with the group optional
 // makeForRange can no longer tell "no names" from "one name" by item count alone.
-ForRange    <~~ push(makeForRange(takeAll())); goBrClaim(up.start, up.pos, true) ~~>
+ForRange    <~~ push(makeForRange(goTgtC(takeAll()))); goBrClaim(up.start, up.pos, true) ~~>
             = "for" KwEnd <~~ push({lbl: cRangeStart(takeLabel())}) ~~>
-              [ Id <~~ push({rv: cRangeVar(up.in)}) ~~> [ "," Id <~~ push({rv: cRangeVar(up.in)}) ~~> ] ( ":=" | "=" <~~ push({rset: true}) ~~> ) ]
+              [ RangeTgtAhead GoTgt [ "," GoTgt ] "=" | Id <~~ push({rv: cRangeVar(up.in)}) ~~> [ "," Id <~~ push({rv: cRangeVar(up.in)}) ~~> ] ( ":=" | "=" <~~ push({rset: true}) ~~> ) ]
               "range" KwEnd CondOn Expression <~~ push(goRangeC(up.pos)) ~~> CondOff Block ;
 ForClassic  <~~ push(makeForClassic(takeAll())); goBrClaim(up.start, up.pos, true) ~~>
             = "for" KwEnd <~~ push({lbl: takeLabel()}) ~~> CondOn [ FInit ] ";" [ FCond ] ";" [ FPost ] CondOff Block ;

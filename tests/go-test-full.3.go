@@ -1526,6 +1526,50 @@ func s136f() {
 	check("selfmap136", out == "0 0 0 0 1 5 0 3 0 0")
 }
 
+// ===== SECTION 137: `*p` and `x.a` as range and receive targets =====
+// A range clause and a select receive spelled with `=` store into any assignable
+// target - a pointer's target, a field, an element - and into names declared
+// outside; a received value may be parenthesized, and an element type of a channel
+// type too. The expected values are go run's.
+type x137 struct{ a int }
+
+func s137() {
+	arr := []int{5, 6}
+	var i, v int
+	p, q := &i, &v
+	sum := 0
+	for *p, *q = range arr {
+		sum += *p + *q
+	}
+	var x x137
+	for x.a = range 3 {
+	}
+	xs := []int{0, 0}
+	for xs[1] = range 4 {
+	}
+	check("rngtgt137", sum == 12 && i == 1 && v == 6 && x.a == 2 && xs[1] == 3)
+	c := make(chan int, 4)
+	c <- 7
+	c <- 8
+	c <- 9
+	c <- 10
+	select {
+	case *p = <-c:
+	}
+	select {
+	case x.a = <-c:
+	}
+	n, ok := 0, false
+	select {
+	case n, ok = <-c:
+	}
+	select {
+	case (<-c):
+	}
+	var cc chan (<-chan int)
+	check("seltgt137", i == 7 && x.a == 8 && n == 9 && ok && len(c) == 0 && cc == nil)
+}
+
 func main() {
 	s94()   // SECTION-CALL 94
 	s95()   // SECTION-CALL 95
@@ -1568,6 +1612,7 @@ func main() {
 	s134f() // SECTION-CALL 134
 	s135()  // SECTION-CALL 135
 	s136f() // SECTION-CALL 136
+	s137()  // SECTION-CALL 137
 	fmt.Println("full:", checks, "checks,", fails, "failures")
 	os.Exit(fails)
 }

@@ -4067,6 +4067,38 @@ function goIsSeqTy(t0) {
     return t.indexOf("func(func(") == 0 || t.indexOf("iter.Seq") == 0
 }
 
+// ----- a range clause or a select receive that ASSIGNS -----
+// `for *p, x.a = range xs` and `case *p, ok = <-c:` store each value in a target
+// ({rt}: a GoTgt ref). The statement binds hidden names in their place, as its `:=`
+// form would, and its body (the last item) opens with `T1, T2 = h1, h2` - built
+// by the engine's own makeAssign and makeBlockStmt. A range clause's items start
+// with its {lbl} and carry each name as {rv}; a receive's carry the bare names.
+var goTgtSeq = 0
+function goTgtC(items) {
+    var refs = []
+    var names = []
+    var out = []
+    var isRange = items[0].lbl !== undefined
+    for (var i = 0; i < items.length; i++) {
+        var it = items[i]
+        if (i < items.length - 1 && it != null && typeof it == "object" && it.rt !== undefined) {
+            var nm = "tgt$" + goTgtSeq
+            goTgtSeq = goTgtSeq + 1
+            refs.push(it.rt)
+            names.push(nm)
+            out.push(isRange ? {rv: nm} : nm)
+        } else { out.push(it) }
+    }
+    if (refs.length == 0) { return items }
+    var asg = refs.slice(0)
+    asg.push({op: "="})
+    for (var k = 0; k < names.length; k++) {
+        asg.push(makeVarRef(names[k]))
+        asg.push({sty: ""})
+    }
+    out[out.length - 1] = makeBlockStmt([makeAssign(asg), out[out.length - 1]])
+    return out
+}
 // ----- break and continue need an enclosing statement -----
 // Each one is noted by its source offset; a for statement claims those inside it, a
 // switch or select the breaks, and a function body rejects what is left: a branch
