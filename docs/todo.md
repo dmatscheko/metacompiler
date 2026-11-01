@@ -155,7 +155,7 @@ run time (the if's scope covers both branches - needs the then-block's extent).
 
 # PHP — PHP  (no php here: spec-only, php.net / php-src behaviour)
 
-### T-970 php: `print_r` of a self-referencing array never terminates; `count($x, COUNT_RECURSIVE)`; `&` marker needs reference counts · P3 · PHP · OPEN [V spec-only]
+### T-970 php: `print_r` of a self-referencing array never terminates; `count($x, COUNT_RECURSIVE)`; `&` marker needs reference counts · P3 · PHP · IN PROGRESS (PHP worker, round 34) [V spec-only]
 Found by the PHP worker, round 33 (oracle: php-src EXPECT blocks / php.net). `$x=[1,[2]]; $x[1][] = &$x[1]; print_r($x);` never
 ends (php prints `*RECURSION*` where it re-enters); print_r is in lib/php-stdlib.php, where arrays have no identity - needs an
 identity primitive. `count([1,[2,3]], COUNT_RECURSIVE)` → 4, ours 2. var_dump's `&` marker counts only holders inside the dumped
