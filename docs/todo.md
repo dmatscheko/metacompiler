@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1002** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1004** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -121,16 +121,16 @@ strings.TrimSpace, native strips ASCII 9-13 and 32: `int.Parse(" 1 2 ")` and `in
 
 # GO — Go  (oracle: `go run`)
 
-### T-988 go: a plain send on an unbuffered or full channel never blocks (cooperative channel model) · P3 · GO · IN PROGRESS (GO worker, round 19) [V]
-Found by the GO worker, round 18 (oracle go run). Select send arms now wait for room or a receiver, but a send statement outside a
-select still proceeds: `c := make(chan int, 1); c <- 1; c <- 2` → go deadlocks (fatal error, exit 2); ours goes on. Unbuffered
-sends hand off without waiting for a receiver. go/test/chan fifo, powser1/2, sendstmt, goroutines, select8, sieve1 still fail.
+### T-1002 go: goroutines cannot suspend, so a send inside a goroutine never blocks · P3 · GO · OPEN [V design]
+Found by the GO worker, round 19 (oracle go run). Goroutines run to completion; a send inside a goroutine, or from main while others
+are queued, buffers past capacity instead of blocking. go/test/chan powser1/2, sieve1, select8 (endless producers) and goroutines
+(10000 nested drains overflow the stack) still fail. Needs a suspension mechanism that works in all three engines (the manual calls
+real coroutines out of the subset - decide first). Go also runs the most recently spawned goroutine first; we run spawn order.
 
-### T-989 go: an empty array literal loses its element type; promoted method on embedded slice type (compiler); typeparam/slices.go · P3 · GO · IN PROGRESS (GO worker, round 19) [V]
-Found by the GO worker, round 18 (oracle go run). `var v interface{} = [0]string{}` → `%T` gives `[0]interface {}` (go `[0]string`)
-and `case [0]string:` does not match - arrays carry no element type, gfCommonTy falls back with no elements. Compiler only:
-go/test/ddd.go `(*U).Sum(&U{}, ...)` (Sum promoted from embedded *T, T = []T) prints `(*U).Sum 0[object Object]1352` and panics.
-go/test/typeparam/slices.go: interpreter `panic: _Max([]) = %!q(<nil>), want ""`, compiler "variable not defined: Elem".
+### T-1003 go: a promoted method used as a method-expression value · P3 · GO · OPEN [V]
+Found by the GO worker, round 19 (oracle go run). `f := (*Q).Add` (Add promoted from embedded *P), `f(&Q{&P{1}}, 2)` → go 3; both
+halves "call of a non function: f". Same for `(*U).Sum` promoted through an embedded *T over a defined non-struct type. The call form
+`(*Q).Add(&Q{..}, 2)` works; the value form needs a closure taking the receiver from its first argument, in all three engines.
 
 # SW — Swift  (oracle: swiftc 6.1.2)
 
@@ -1101,6 +1101,8 @@ T-970 php: `print_r` of a self-referencing array never terminates; `count($x, CO
 T-998 java compiled: an interface extending `Comparable<T>` fails with "variable not defined: Comparable" — DONE - library interfaces as supertypes get stub descriptors; instanceof Comparable/Runnable/Iterable true for user classes; all legs
 T-999 java: package access is not checked; tests/java-test-multifile.java imports non-public classes — DONE - import of a non-public type from another package refused with javac's message; multifile test fixed; constructor type-variable cycles checked
 T-993 swift: local func called before its declaration; body-less `@_silgen_name` func; if-let binding used in its else branch — DONE - local funcs hoisted per statement list, if-let binding scoped to condition+then; body-less @_silgen_name parses and is refused loudly (calling C needs an FFI, out of scope)
+T-988 go: a plain send on an unbuffered or full channel never blocks (cooperative channel model) — PARTIAL - main's hopeless send deadlocks (exit 2), go-statement args evaluated at the statement, glued <- fixed; a blocking send inside a goroutine needs suspendable goroutines, filed
+T-989 go: an empty array literal loses its element type; promoted method on embedded slice type (compiler); typeparam/slices.go — DONE - empty/interface-element arrays keep their type, slice exprs typed, generic func value G[T], method-expression calls take the receiver
 
 # Settled — do not re-open
 
