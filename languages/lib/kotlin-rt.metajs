@@ -1409,6 +1409,8 @@ function ktStructEq(a, b) {
         if (!bRg) { return false }
         return ktRangeEq(a, b)
     }
+    if (ktIsCRange(a)) { return k4CRangeEq(a, b) }
+    if (ktIsCRange(b)) { return false }
     // A SET first, so a Set never reaches the element-WISE array branch: two sets
     // are equal when they hold the same elements in ANY order, and a Set is never
     // equal to a List.
@@ -1580,6 +1582,7 @@ function ktElemHash(v) {
     // A PROGRESSION hashes by its bounds, not its elements - and an EMPTY one
     // hashes to -1, which is what makes (5..1) and (7..3) agree with their equals.
     if (ktIsRange(v)) { return ktRangeHash(v) }
+    if (ktIsCRange(v)) { return k4CRangeHash(v) }
     // A NESTED collection hashes element-wise, exactly as kHash does in the other
     // half.
     if (ktIsArr(v)) {
@@ -2659,6 +2662,7 @@ function k2Obj(o, depth) {
     // A PROGRESSION prints its BOUNDS - "1..5", "10 downTo 1 step 1",
     // "1..9 step 4" - which is IntRange.toString / IntProgression.toString.
     if (o["__range"] === true) { return ktRangeStr(o) }
+    if (o["__crange"] === true) { return k4CRangeStr(o) }
     // A KClass. java.lang.Class.toString() is "class Box" too, which is why
     // .java answers the same handle. The twin is the __kclass arm of kstr.
     if (o["__kclass"] === true) {
@@ -3327,6 +3331,7 @@ function ktStrMethod(s, name, args) {
     if (name == "uppercase" || name == "toUpperCase") { return s.toUpperCase() }
     if (name == "lowercase" || name == "toLowerCase") { return s.toLowerCase() }
     if (name == "hashCode") { return k2StrHash(s) }
+    if (name == "coerceAtLeast" || name == "coerceAtMost" || name == "coerceIn") { return ktCoerceCmp(s, name, args) }
     return k2StrMethod2(s, name, args)
 }
 
@@ -5110,7 +5115,7 @@ function ktSeqMethodK(arr, name, args, kind) {
     if (name == "toSet") { return k3SetFrom(es) }
     if (name == "toMutableSet") { return k3SetFrom(es) }
     if (name == "toHashSet") { return k3SetFrom(es) }
-    if (name == "toSortedSet") { return k3SetFrom(ktSortBy(es, null, false)) }
+    if (name == "toSortedSet") { return ktTreeSet(es, args[0]) }
     if (name == "reversed") {
         for (i = es.length - 1; i >= 0; i = i - 1) { out.push(es[i]) }
         return out
@@ -5966,7 +5971,7 @@ function ktSetMethod(s, name, args) {
     if (name == "toSet") { return k3SetFrom(keys) }
     if (name == "toMutableSet") { return k3SetFrom(keys) }
     if (name == "toHashSet") { return k3SetFrom(keys) }
-    if (name == "toSortedSet") { return k3SetFrom(ktSortBy(keys, null, false)) }
+    if (name == "toSortedSet") { return ktTreeSet(keys, args[0]) }
     // A set is a Collection: the same answer kinds as a values view's (kind 3).
     // The elements are handed over linked to the set, or to the map a keys /
     // entries view reads, so that a member taking a lambda fails fast.
@@ -6878,6 +6883,7 @@ function ktIsType(v, tname) {
         // A PROGRESSION is an IntRange / CharRange / IntProgression and NOT a
         // List - the shared js_is_type has no arm for it.
         if (ktIsRange(v)) { return k4RangeIsType(v, tname) }
+        if (ktIsCRange(v)) { return bt == "Any" || bt == k4CRangeType(v) }
         var ci = ktCollIsType(v, bt)
         if (ci !== undefined) { return ci }
         if (js_is_type(v, tname) === true) { return true }
@@ -8609,6 +8615,7 @@ function k4IsTypeName(v, t, opt) {
     }
     // A PROGRESSION before the collection names, so it is not a List.
     if (ktIsRange(v)) { return k4RangeIsType(v, t) }
+    if (ktIsCRange(v)) { return t == "Any" || t == k4CRangeType(v) }
     if (t == "Any") { return true }
     if (t == "Object") { return true }
     if (t == "String") { return typeof v == "string" }
@@ -8907,12 +8914,21 @@ function k4JavaCollection(name, src) {
         if (name == "LinkedList") { arrKindSet(out, -3) }
         return out
     }
-    var s = ktJvmTagged(ktMakeSet(), name, 0)
-    if (ktIsFn(src)) { s["__cmp"] = src }
+    return ktSetFill(ktJvmTagged(ktMakeSet(), name, 0), src, els)
+}
+
+// jsrtkotlin.go ktSetFill: set s (tagged before it fills, so a TreeSet sorts on
+// each insertion) given its Comparator cmp, when cmp is one, and the elements es.
+function ktSetFill(s, cmp, es) {
+    if (ktIsFn(cmp)) { s["__cmp"] = cmp }
     var k = 0
-    for (k = 0; k < els.length; k = k + 1) { ktSetAdd(s, els[k]) }
+    for (k = 0; k < es.length; k = k + 1) { ktSetAdd(s, es[k]) }
     return s
 }
+
+// jsrtkotlin.go ktTreeSet: a java.util.TreeSet of es (toSortedSet, sortedSetOf),
+// in cmp's order when it is a Comparator, else ascending.
+function ktTreeSet(es, cmp) { return ktSetFill(ktJvmTagged(ktMakeSet(), "TreeSet", 0), cmp, es) }
 
 // The name groups of ktGlobalFn, hoisted out so the big if-chain reads as the Go
 // switch does.
@@ -9316,16 +9332,17 @@ function ktGlobalFn(name) {
             return ktJvmTagged(out, name, 0)
         }
     }
-    // A java.util.TreeSet: ascending order, not insertion order.
+    // A java.util.TreeSet: ascending order, or the order of the Comparator it is
+    // given first.
     if (name == "sortedSetOf") {
         return function () {
             var as = []
-            var i = 0
+            var i = arguments.length > 0 && ktIsFn(arguments[0]) ? 1 : 0
             while (i < arguments.length) {
                 as.push(arguments[i])
                 i = i + 1
             }
-            return ktJvmTagged(k4SetFrom(ktSortBy(as, undefined, false)), name, 0)
+            return ktTreeSet(as, arguments.length > 0 ? arguments[0] : undefined)
         }
     }
     if (name == "emptySet") {
@@ -9641,6 +9658,10 @@ function ktSmcall(recv, name, args) {
         if (!ktMiss(csm)) { return csm }
     }
 
+    if (ktIsCRange(rv)) {
+        var crm = k4CRangeMethod(rv, name, as)
+        if (!ktMiss(crm)) { return crm }
+    }
     // A PROGRESSION. The members whose answer IS the range are answered from
     // the bounds; everything else is a Collection/Iterable extension and runs on
     // the materialized elements. `contains` is answered arithmetically so that
@@ -9836,6 +9857,11 @@ function ktSmcall(recv, name, args) {
             if (name == "equals") {
                 if (!ktClassChainHas(rv, "equals")) { return ktIdent(rv, k4At(as, 0)) }
             }
+            // The coerce family of a Comparable class (kotlin.ranges').
+            if (!ktClassChainHas(rv, name) && ktClassChainHas(rv, "compareTo")) {
+                var cc = ktCoerceCmp(rv, name, as)
+                if (!ktMiss(cc)) { return cc }
+            }
         }
     }
 
@@ -9958,6 +9984,77 @@ function k4LateinitCheck(o, name, v) {
 // range-ness IS the answer - js_ktfget, k2Render, ktIsType, ktIdent, ktHash -
 // answer from the bounds instead. Nothing outside those sites ever sees the
 // object, which is why the shared js_* of abnf/jsrt.go need no arm for it.
+// jsrtkotlin.go ktCRange: a..b / a..<b over bounds that are not numbers or Chars
+// (a String, a class with compareTo) is kotlin.ranges' ComparableRange /
+// ComparableOpenEndRange: it holds its two bounds, iterates nothing and orders by
+// compareTo. `open` marks the `..<` form, whose bound is endExclusive.
+function k4IsRangeNum(v) { return typeof v == "number" || ktIsChar(v) || sintIs(v) || floIs(v) }
+function ktCRange(lo, hi, open) {
+    var r = {}
+    r["__crange"] = true
+    r["open"] = open
+    r["start"] = lo
+    if (open) { r["endExclusive"] = hi } else { r["endInclusive"] = hi }
+    return r
+}
+function ktIsCRange(v) { return ktIsObj(v) && v["__crange"] === true }
+function k4CRangeEnd(r) { return r["open"] === true ? r["endExclusive"] : r["endInclusive"] }
+function k4CRangeType(r) { return r["open"] === true ? "OpenEndRange" : "ClosedRange" }
+// x lies below r's bound (strictly, for the open form).
+function k4CRangeBelow(r, x) {
+    var c = ktCompareTo(x, k4CRangeEnd(r))
+    return c < 0 || (c == 0 && r["open"] !== true)
+}
+function k4CRangeEmpty(r) { return !k4CRangeBelow(r, r["start"]) }
+function k4CRangeStr(r) {
+    return k2Render(r["start"], 1) + (r["open"] === true ? "..<" : "..") + k2Render(k4CRangeEnd(r), 1)
+}
+// Two empty ranges are equal whatever their bounds; an empty one hashes to -1.
+function k4CRangeEq(a, b) {
+    if (!ktIsCRange(b)) { return false }
+    if ((a["open"] === true) !== (b["open"] === true)) { return false }
+    if (k4CRangeEmpty(a) && k4CRangeEmpty(b)) { return true }
+    return ktEqVals(a["start"], b["start"]) && ktEqVals(k4CRangeEnd(a), k4CRangeEnd(b))
+}
+function k4CRangeHash(r) {
+    if (k4CRangeEmpty(r)) { return -1 }
+    return k0Wrap32(31 * ktElemHash(r["start"]) + ktElemHash(k4CRangeEnd(r)))
+}
+function k4CRangeMethod(r, name, args) {
+    if (name == "contains") {
+        var x = k4At(args, 0)
+        return ktCompareTo(x, r["start"]) >= 0 && k4CRangeBelow(r, x)
+    }
+    if (name == "isEmpty") { return k4CRangeEmpty(r) }
+    if (name == "toString") { return k4CRangeStr(r) }
+    if (name == "equals") { return k4CRangeEq(r, k4At(args, 0)) }
+    if (name == "hashCode") { return k4CRangeHash(r) }
+    return KT_MISS
+}
+
+// jsrtkotlin.go ktCoerceCmp: coerceAtLeast / coerceAtMost / coerceIn on a
+// Comparable that is not a number, ordered by compareTo.
+function ktCoerceCmp(t, name, args) {
+    var lo = anytype
+    lo = k4At(args, 0)
+    if (name == "coerceAtLeast") { return ktCompareTo(t, lo) < 0 ? lo : t }
+    if (name == "coerceAtMost") { return ktCompareTo(t, lo) > 0 ? lo : t }
+    if (name != "coerceIn") { return KT_MISS }
+    var hi = anytype
+    hi = k4At(args, 1)
+    if (args.length == 1 && ktIsCRange(lo)) {
+        if (k4CRangeEmpty(lo)) { ktRaise("IllegalArgumentException", "Cannot coerce value to an empty range: " + k4CRangeStr(lo) + ".") }
+        hi = k4CRangeEnd(lo)
+        lo = lo["start"]
+    } else if (!rtIsNil(lo) && !rtIsNil(hi) && ktCompareTo(lo, hi) > 0) {
+        ktRaise("IllegalArgumentException", "Cannot coerce value to an empty range: maximum " +
+            k2Render(hi, 0) + " is less than minimum " + k2Render(lo, 0) + ".")
+    }
+    if (!rtIsNil(lo) && ktCompareTo(t, lo) < 0) { return lo }
+    if (!rtIsNil(hi) && ktCompareTo(t, hi) > 0) { return hi }
+    return t
+}
+
 function ktIsRange(v) {
     if (!ktIsObj(v)) { return false }
     return v["__range"] === true
@@ -10035,6 +10132,13 @@ function k4ModL(a, s) {
 // The last argument (jsrtkotlin.go js_ktrange): 1 downTo, 2 the half-open `..<`
 // / until, whose inclusive bound is one less, 0 `..`.
 function js_ktrange(from, to, st, down) {
+    if (!k4IsRangeNum(from) && down !== 1) {
+        // A class declaring `operator fun rangeTo` / `rangeUntil` builds its own
+        // value.
+        var op = down === 2 ? "rangeUntil" : "rangeTo"
+        if (k0IsRec(from) && ktClassChainHas(from, op)) { return ktCall2(k0FindMember(from, op), from, to) }
+        return ktCRange(from, to, down === 2)
+    }
     var stn = k4RangeNum(st)
     if (stn <= 0) { k4StepBad(st) }
     // `fl` marks a ClosedFloatingPointRange - `1.0..2.0`. Kotlin declares no step

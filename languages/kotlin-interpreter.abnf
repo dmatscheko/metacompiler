@@ -3587,6 +3587,7 @@ NotMemberKw = :script(~~ "pure";
                     v = kRangeStep(v, r)
                 } else if (isRange(v)) { fail("chained range expression") }
                 else if (rop == "downTo") { v = kRange(v, r, true) }
+                else if (!kIsRangeNum(v)) { v = kRangeOp(v, r, rop == "..") }
                 else if (rop == "..") { v = kRange(v, r, false) }
                 else { v = kRangeDec(kRange(v, r, false)) }   // ..< / until
             }
@@ -3694,6 +3695,74 @@ NotMemberKw = :script(~~ "pure";
         var h = (Math.imul(31, kHash(first)) + kHash(last)) | 0
         if (rg.fl === true || (rg.st == 1 && !rg.down && rg.pg !== true)) { return h }
         return (Math.imul(31, h) + kHash(step)) | 0
+    }
+    // a..b / a..<b over bounds that are not numbers or Chars (a String, a class
+    // with compareTo) is kotlin.ranges' ComparableRange / ComparableOpenEndRange:
+    // it holds its two bounds, iterates nothing and orders by compareTo. `open`
+    // marks the `..<` form, whose bound is endExclusive. Twin of ktCRange in
+    // abnf/jsrtkotlin.go and languages/lib/kotlin-rt.metajs.
+    function kIsRangeNum(v) { return typeof v == "number" || kIsChar(v) || szIs(v) || kIsFlo(v) }
+    function kCRange(lo, hi, open) {
+        var r = {__crange: true, open: open, start: lo}
+        if (open) { r.endExclusive = hi } else { r.endInclusive = hi }
+        return r
+    }
+    // A class declaring `operator fun rangeTo` / `rangeUntil` builds its own value.
+    function kRangeOp(lo, hi, closed) {
+        var op = closed ? "rangeTo" : "rangeUntil"
+        if (lookupMethod(lo, op) != null) { return mcall(lo, op, [hi]) }
+        return kCRange(lo, hi, !closed)
+    }
+    function kIsCRange(v) { return v !== null && v !== undefined && typeof v == "object" && v.__crange === true }
+    function kCRangeEnd(r) { return r.open ? r.endExclusive : r.endInclusive }
+    function kCRangeEmpty(r) { return kCompareTo(r.start, kCRangeEnd(r)) >= (r.open ? 0 : 1) }
+    function kCRangeStr(r) { return kstr(r.start) + (r.open ? "..<" : "..") + kstr(kCRangeEnd(r)) }
+    // Two empty ranges are equal whatever their bounds; an empty one hashes to -1.
+    function kCRangeEq(a, b) {
+        if (!kIsCRange(b) || a.open !== b.open) { return false }
+        if (kCRangeEmpty(a) && kCRangeEmpty(b)) { return true }
+        return kEq(a.start, b.start, false) && kEq(kCRangeEnd(a), kCRangeEnd(b), false)
+    }
+    function kCRangeHash(r) {
+        if (kCRangeEmpty(r)) { return -1 }
+        return (Math.imul(31, kHash(r.start)) + kHash(kCRangeEnd(r))) | 0
+    }
+    function kCRangeMethod(r, name, args) {
+        if (name == "contains") {
+            var x = anytype
+            x = args[0]
+            return {v: kCompareTo(x, r.start) >= 0 && kCompareTo(x, kCRangeEnd(r)) < (r.open ? 0 : 1)}
+        }
+        if (name == "isEmpty") { return {v: kCRangeEmpty(r)} }
+        if (name == "toString") { return {v: kCRangeStr(r)} }
+        if (name == "equals") { return {v: kCRangeEq(r, args[0])} }
+        if (name == "hashCode") { return {v: kCRangeHash(r)} }
+        return null
+    }
+    // coerceAtLeast / coerceAtMost / coerceIn on a Comparable that is not a number
+    // (kotlin.ranges' T : Comparable<T> overloads), ordered by compareTo; null for
+    // any other name. Twin of ktCoerceCmp in abnf/jsrtkotlin.go and
+    // languages/lib/kotlin-rt.metajs.
+    function kCoerceCmp(t, name, args) {
+        if (name == "coerceAtLeast") { return {v: kCompareTo(t, args[0]) < 0 ? args[0] : t} }
+        if (name == "coerceAtMost") { return {v: kCompareTo(t, args[0]) > 0 ? args[0] : t} }
+        if (name != "coerceIn") { return null }
+        var lo = anytype
+        var hi = anytype
+        if (args.length == 1 && kIsCRange(args[0])) {
+            if (kCRangeEmpty(args[0])) { kThrowExc("IllegalArgumentException", "Cannot coerce value to an empty range: " + kCRangeStr(args[0]) + ".") }
+            lo = args[0].start
+            hi = kCRangeEnd(args[0])
+        } else {
+            lo = args[0]
+            hi = args.length > 1 ? args[1] : null
+            if (lo !== null && lo !== undefined && hi !== null && hi !== undefined && kCompareTo(lo, hi) > 0) {
+                kThrowExc("IllegalArgumentException", "Cannot coerce value to an empty range: maximum " + kstr(hi) + " is less than minimum " + kstr(lo) + ".")
+            }
+        }
+        if (lo !== null && lo !== undefined && kCompareTo(t, lo) < 0) { return {v: lo} }
+        if (hi !== null && hi !== undefined && kCompareTo(t, hi) > 0) { return {v: hi} }
+        return {v: t}
     }
     // The LAST ELEMENT of a progression, which is what IntProgression.last answers -
     // getProgressionLastElement in kotlin.internal.ProgressionUtil. For a step of 1 it
@@ -4223,14 +4292,13 @@ NotMemberKw = :script(~~ "pure";
     hostGlobals["hashSetOf"] = function() {
         return kJvmTagged(hostGlobals["mutableSetOf"].apply(undefined, arguments), "java.util.HashSet")
     }
-    // sortedSetOf is a java.util.TreeSet: ascending order, not insertion order.
+    // sortedSetOf is a java.util.TreeSet: ascending order, or the order of the
+    // Comparator it is given first.
     hostGlobals["sortedSetOf"] = function() {
         var raw = []
         for (var i = 0; i < arguments.length; i++) { raw.push(arguments[i]) }
-        var s = kMakeSet()
-        var sorted = kSortBy(raw, null, false)
-        for (var j = 0; j < sorted.length; j++) { kSetAdd(s, sorted[j]) }
-        return kJvmTagged(s, "java.util.TreeSet")
+        var cmp = typeof raw[0] == "function" ? raw.shift() : null
+        return kTreeSet(raw, cmp)
     }
     // The PRIMITIVE-array builders are arrayOf. This value model cannot tell one
     // element WIDTH from another - a Byte and an Int are the same host number.
@@ -4272,17 +4340,23 @@ NotMemberKw = :script(~~ "pure";
             }
             var els = []
             if (Array.isArray(src)) { els = src } else if (kIsSet(src)) { els = src.keys }
-            if (kind == "set") {
-                var s = kJvmTagged(kMakeSet(), jc)
-                if (typeof src == "function") { s.__cmp = src }
-                for (var k = 0; k < els.length; k++) { kSetAdd(s, els[k]) }
-                return s
-            }
+            if (kind == "set") { return kSetFill(kJvmTagged(kMakeSet(), jc), src, els) }
             var out = []
             for (var j = 0; j < els.length; j++) { out.push(els[j]) }
             return out
         }
     }
+    // Set s (tagged before it fills, so a TreeSet sorts on each insertion) given
+    // its Comparator cmp, when cmp is one, and the elements es. Twin of ktSetFill in
+    // abnf/jsrtkotlin.go and languages/lib/kotlin-rt.metajs.
+    function kSetFill(s, cmp, es) {
+        if (typeof cmp == "function") { s.__cmp = cmp }
+        for (var k = 0; k < es.length; k++) { kSetAdd(s, es[k]) }
+        return s
+    }
+    // A java.util.TreeSet of es (toSortedSet, sortedSetOf), in cmp's order when it
+    // is a Comparator, else ascending.
+    function kTreeSet(es, cmp) { return kSetFill(kJvmTagged(kMakeSet(), "java.util.TreeSet"), cmp, es) }
     hostGlobals["ArrayList"] = kJavaCollection("list", "")
     hostGlobals["LinkedHashSet"] = kJavaCollection("set", "")
     hostGlobals["HashSet"] = function(src) { return kJvmTagged(hostGlobals["LinkedHashSet"](src), "java.util.HashSet") }
@@ -5467,6 +5541,7 @@ NotMemberKw = :script(~~ "pure";
         // A range renders as its BOUNDS - "1..3", "10 downTo 1 step 1" - which is
         // IntRange.toString / IntProgression.toString.
         if (isRange(v)) { return rangeStr(v) }
+        if (kIsCRange(v)) { return kCRangeStr(v) }
         // A list (and an array, which this value model cannot tell apart from a list)
         // renders as java.util.AbstractCollection.toString does: "[1, 2]", elements
         // separated by a comma and a space, a String element unquoted (not
@@ -7320,7 +7395,7 @@ NotMemberKw = :script(~~ "pure";
             return {v: out}
         }
         if (name == "toSet" || name == "toMutableSet" || name == "toHashSet") { return {v: kSetFrom(es)} }
-        if (name == "toSortedSet") { return {v: kSetFrom(kSortBy(es, null, false))} }
+        if (name == "toSortedSet") { return {v: kTreeSet(es, args[0])} }
         if (name == "reversed" || name == "asReversed") {
             out = []
             for (i = es.length - 1; i >= 0; i--) { out.push(es[i]) }
@@ -8057,12 +8132,7 @@ NotMemberKw = :script(~~ "pure";
             return {v: keep}
         }
         if (name == "toSet" || name == "toMutableSet" || name == "toHashSet") { return {v: kSetFrom(s.keys)} }
-        if (name == "toSortedSet") {
-            var ss = kMakeSet()
-            var sorted = kSortBy(s.keys, null, false)
-            for (i = 0; i < sorted.length; i++) { kSetAdd(ss, sorted[i]) }
-            return {v: ss}
-        }
+        if (name == "toSortedSet") { return {v: kTreeSet(s.keys, args[0])} }
         // A set is a Collection: the same answer kinds as a values view's (kind 3).
         // The elements are handed over linked to the set, or to the map a keys /
         // entries view reads, so that a member taking a lambda fails fast.
@@ -8204,6 +8274,8 @@ NotMemberKw = :script(~~ "pure";
             if (name == "hashCode") return kHash(target)
             var ksm = kStrMethod2(target, name, args)
             if (ksm != null) { return ksm.v }
+            var kcc = kCoerceCmp(target, name, args)
+            if (kcc != null) { return kcc.v }
             return mfallback(target, name, args, "String")
         }
         // Int/Long/Double receivers: the handful of member functions Kotlin defines on
@@ -8563,6 +8635,10 @@ NotMemberKw = :script(~~ "pure";
         // Iterable, so its empty-receiver messages are the Collection ones. The kind is
         // remembered here because rangeList() below is what loses it.
         var tgtKind = "List"
+        if (kIsCRange(tgt)) {
+            var crm = kCRangeMethod(tgt, name, args)
+            if (crm != null) { return crm.v }
+        }
         if (isRange(tgt)) {
             if (name == "contains") return rangeHas(tgt, args[0])
             // The members whose answer IS the range: toString / hashCode / equals
@@ -8691,6 +8767,10 @@ NotMemberKw = :script(~~ "pure";
             if (typeof fv == "function") { return fv.apply(undefined, args) }
             var rf2 = recvFn(name)
             if (rf2 != null) { return rf2.apply(undefined, concat2impl([target], args)) }
+            if (lookupMethod(target, "compareTo") != null) {
+                var ucc = kCoerceCmp(target, name, args)
+                if (ucc != null) { return ucc.v }
+            }
             fail("unknown method '" + name + "' on " + target.__class.__name)
         }
         if (hasOwn(target, name) && typeof target[name] == "function") return target[name].apply(undefined, args)
@@ -8780,6 +8860,7 @@ NotMemberKw = :script(~~ "pure";
             return lh
         }
         if (isRange(v)) { return rangeHashK(v) }
+        if (kIsCRange(v)) { return kCRangeHash(v) }
         // java.util.AbstractSet.hashCode is the plain SUM of the element hashes, which
         // is what makes it order-independent. Verified against java (JDK 24):
         // Set.of(1, 2).hashCode() is 3, where the LIST fold answers 994.
@@ -9074,6 +9155,7 @@ NotMemberKw = :script(~~ "pure";
             if (!isRange(a) || !isRange(b)) { return -1 }
             return rangeEqK(a, b) ? 1 : -1
         }
+        if (kIsCRange(a) || kIsCRange(b)) { return kIsCRange(a) && kCRangeEq(a, b) ? 1 : -1 }
         // Pair/Triple are data classes in Kotlin; here they are the plain {first,
         // second[, third]} shape, which no descriptor covers.
         if (kIsPair(a) || kIsPair(b)) {
@@ -12665,6 +12747,7 @@ NotMemberKw = :script(~~ "pure";
             if (t == "IntProgression") { return true }
             return t == "IntRange" && plain
         }
+        if (kIsCRange(v)) { return t == "Any" || t == (v.open ? "OpenEndRange" : "ClosedRange") }
         var ci = kCollIsType(v, t)
         if (ci !== undefined) { return ci }
         if (typeof v == "object" && v.__class != undefined && v.__class != null) {

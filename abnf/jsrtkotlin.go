@@ -1587,6 +1587,10 @@ func init() {
 					}
 					return boolH(ktRangeIsType(rg, strings.TrimSuffix(t, "?")))
 				}
+				if cr, isCr := ktCRangeOf(v); isCr {
+					t := ktTypeBase(rt.toString(u(a[1])))
+					return boolH(t == "Any" || t == ktCRangeType(cr))
+				}
 				ct := rt.toString(u(a[1]))
 				if i := strings.IndexByte(ct, '<'); i >= 0 {
 					ct = ct[:i]
@@ -1860,6 +1864,11 @@ func init() {
 					return rt.wrap(v)
 				}
 			}
+			if cr, isCr := ktCRangeOf(recv); isCr {
+				if v, ok := rt.ktCRangeMethod(cr, mname, arr.elems); ok {
+					return rt.wrap(v)
+				}
+			}
 			// A PROGRESSION. The members whose answer IS the range are answered
 			// from the bounds; everything else is a Collection/Iterable extension
 			// and runs on the materialized elements. `contains` is answered
@@ -2097,6 +2106,12 @@ func init() {
 					// kotlin-interpreter.abnf.
 					if mname == "equals" && !ktClassChainHas(mo, "equals") {
 						return boolH(rt.strictEq(recv, argAt(arr.elems, 0)))
+					}
+					// The coerce family of a Comparable class (kotlin.ranges').
+					if !ktClassChainHas(mo, mname) && ktClassChainHas(mo, "compareTo") {
+						if v, ok := rt.ktCoerceCmp(recv, mname, arr.elems); ok {
+							return rt.wrap(v)
+						}
 					}
 				}
 			}
@@ -2671,6 +2686,19 @@ func init() {
 		m["js_ktrange"] = func(a []uint64) uint64 {
 			from, to, st := u(a[0]), u(a[1]), u(a[2])
 			fn, fok := ktRangeNum(from)
+			mode := rt.toNumber(u(a[3]))
+			if !fok && mode != 1 {
+				// A class declaring `operator fun rangeTo` / `rangeUntil` builds
+				// its own value.
+				op := "rangeTo"
+				if mode == 2 {
+					op = "rangeUntil"
+				}
+				if fo, isObj := from.(*jsObject); isObj && ktMemberCall != nil && ktClassChainHas(fo, op) {
+					return w(ktMemberCall(from, op, []interface{}{to}))
+				}
+				return w(ktCRange(from, to, mode == 2))
+			}
 			tn, tok := ktRangeNum(to)
 			sn, sok := ktRangeNum(st)
 			if !fok || !tok || !sok {
@@ -2681,7 +2709,6 @@ func init() {
 			}
 			_, isCh := from.(jsChar)
 			ff, isFl := from.(jsJFlo)
-			mode := rt.toNumber(u(a[3]))
 			rg := ktRangeLong(ktRange{from: fn, to: tn, st: sn,
 				down: mode == 1, ch: isCh, fl: isFl, f32: isFl && jvmIs32(ff.sty),
 				lg: ktIsLongBox(from) || ktIsLongBox(to)}, from, to, st)
@@ -3331,6 +3358,8 @@ func (rt *jsrt) ktStrMethod(s, name string, args []interface{}) (interface{}, bo
 		return caseMapMode(s, caseFull|caseSigma), true
 	case "hashCode":
 		return float64(ktStrHash(rt, s)), true
+	case "coerceAtLeast", "coerceAtMost", "coerceIn":
+		return rt.ktCoerceCmp(s, name, args)
 	}
 	return rt.ktStrMethod2(s, name, args)
 }
@@ -4140,6 +4169,9 @@ func (rt *jsrt) ktpObj(o *jsObject, depth int) (string, bool) {
 	// "1..9 step 4" - which is IntRange.toString / IntProgression.toString.
 	if rg, isRg := ktRangeOf(o); isRg {
 		return rt.ktRangeStr(rg), true
+	}
+	if cr, isCr := ktCRangeOf(o); isCr {
+		return rt.ktCRangeStr(cr), true
 	}
 	// A KClass. java.lang.Class.toString() is "class Box" too, which is why .java
 	// answers the same handle. The twin is the __kclass arm of kstr.
@@ -4986,6 +5018,12 @@ func (rt *jsrt) ktStructEq(a, b interface{}) (bool, bool) {
 			return false, true
 		}
 		return ktRangeEq(arg, brg), true
+	}
+	if acr, isCr := ktCRangeOf(a); isCr {
+		return rt.ktCRangeEq(acr, b), true
+	}
+	if _, isCr := ktCRangeOf(b); isCr {
+		return false, true
 	}
 	// A SET first, so a Set never reaches the element-WISE array branch: two sets
 	// are equal when they hold the same elements in ANY order, and a Set is never
@@ -6049,7 +6087,7 @@ func (rt *jsrt) ktSeqMethodK(o *jsArray, name string, args []interface{}, kind s
 	case "toSet", "toMutableSet", "toHashSet":
 		return rt.ktSetFrom(es), true
 	case "toSortedSet":
-		return rt.ktSetFrom(ktSortBy(rt, es, nil, false).elems), true
+		return rt.ktTreeSet(es, argAt(args, 0)), true
 	case "reversed", "asReversed":
 		out := make([]interface{}, len(es))
 		for i, e := range es {
@@ -6911,6 +6949,9 @@ func ktElemHash(rt *jsrt, v interface{}) int64 {
 	if rg, ok := ktRangeOf(v); ok {
 		return int64(ktRangeHash(rt, rg))
 	}
+	if cr, ok := ktCRangeOf(v); ok {
+		return int64(rt.ktCRangeHash(cr))
+	}
 	switch t := v.(type) {
 	case *jsArray:
 		var h int32 = 1
@@ -7088,7 +7129,7 @@ func (rt *jsrt) ktSetMethod(s *jsObject, name string, args []interface{}) (inter
 	case "toSet", "toMutableSet", "toHashSet":
 		return rt.ktSetFrom(keys.elems), true
 	case "toSortedSet":
-		return rt.ktSetFrom(ktSortBy(rt, keys.elems, nil, false).elems), true
+		return rt.ktTreeSet(keys.elems, argAt(args, 0)), true
 	}
 	// The elements are handed over linked to the set, or to the map a keys /
 	// entries view reads, so that a member taking a lambda fails fast.
@@ -8163,6 +8204,138 @@ func ktRangeHash(rt *jsrt, rg ktRange) int32 {
 	return int32(31)*h + int32(ktElemHash(rt, step))
 }
 
+// ktCRange: a..b / a..<b over bounds that are not numbers or Chars (a String, a
+// class with compareTo) is kotlin.ranges' ComparableRange /
+// ComparableOpenEndRange: it holds its two bounds, iterates nothing and orders by
+// compareTo. `open` marks the `..<` form, whose bound is endExclusive. Twin of
+// kCRange in kotlin-interpreter.abnf and languages/lib/kotlin-rt.metajs.
+func ktCRange(lo, hi interface{}, open bool) *jsObject {
+	o := newJSObject()
+	o.set("__crange", true)
+	o.set("open", open)
+	o.set("start", lo)
+	if open {
+		o.set("endExclusive", hi)
+	} else {
+		o.set("endInclusive", hi)
+	}
+	return o
+}
+
+func ktCRangeOf(v interface{}) (*jsObject, bool) {
+	o, isObj := v.(*jsObject)
+	if !isObj || o.props["__crange"] != true {
+		return nil, false
+	}
+	return o, true
+}
+
+func ktCRangeOpen(r *jsObject) bool { return r.props["open"] == true }
+
+func ktCRangeEnd(r *jsObject) interface{} {
+	if ktCRangeOpen(r) {
+		return r.props["endExclusive"]
+	}
+	return r.props["endInclusive"]
+}
+
+func ktCRangeType(r *jsObject) string {
+	if ktCRangeOpen(r) {
+		return "OpenEndRange"
+	}
+	return "ClosedRange"
+}
+
+// ktCRangeBelow: x lies below r's bound (strictly, for the open form).
+func (rt *jsrt) ktCRangeBelow(r *jsObject, x interface{}) bool {
+	c := rt.ktCompareTo(x, ktCRangeEnd(r))
+	return c < 0 || (c == 0 && !ktCRangeOpen(r))
+}
+
+func (rt *jsrt) ktCRangeEmpty(r *jsObject) bool { return !rt.ktCRangeBelow(r, r.props["start"]) }
+
+func (rt *jsrt) ktCRangeStr(r *jsObject) string {
+	op := ".."
+	if ktCRangeOpen(r) {
+		op = "..<"
+	}
+	return rt.ktpRender(r.props["start"], 1) + op + rt.ktpRender(ktCRangeEnd(r), 1)
+}
+
+// Two empty ranges are equal whatever their bounds; an empty one hashes to -1.
+func (rt *jsrt) ktCRangeEq(a *jsObject, bv interface{}) bool {
+	b, isCr := ktCRangeOf(bv)
+	if !isCr || ktCRangeOpen(a) != ktCRangeOpen(b) {
+		return false
+	}
+	if rt.ktCRangeEmpty(a) && rt.ktCRangeEmpty(b) {
+		return true
+	}
+	return rt.ktEqVals(a.props["start"], b.props["start"]) && rt.ktEqVals(ktCRangeEnd(a), ktCRangeEnd(b))
+}
+
+func (rt *jsrt) ktCRangeHash(r *jsObject) int32 {
+	if rt.ktCRangeEmpty(r) {
+		return -1
+	}
+	return int32(31)*int32(ktElemHash(rt, r.props["start"])) + int32(ktElemHash(rt, ktCRangeEnd(r)))
+}
+
+func (rt *jsrt) ktCRangeMethod(r *jsObject, name string, args []interface{}) (interface{}, bool) {
+	switch name {
+	case "contains":
+		x := argAt(args, 0)
+		return rt.ktCompareTo(x, r.props["start"]) >= 0 && rt.ktCRangeBelow(r, x), true
+	case "isEmpty":
+		return rt.ktCRangeEmpty(r), true
+	case "toString":
+		return rt.ktCRangeStr(r), true
+	case "equals":
+		return rt.ktCRangeEq(r, argAt(args, 0)), true
+	case "hashCode":
+		return float64(rt.ktCRangeHash(r)), true
+	}
+	return nil, false
+}
+
+// ktCoerceCmp is coerceAtLeast / coerceAtMost / coerceIn on a Comparable that is
+// not a number (kotlin.ranges' T : Comparable<T> overloads), ordered by compareTo.
+// Twin of kCoerceCmp in kotlin-interpreter.abnf and languages/lib/kotlin-rt.metajs.
+func (rt *jsrt) ktCoerceCmp(t interface{}, name string, args []interface{}) (interface{}, bool) {
+	switch name {
+	case "coerceAtLeast":
+		if o := argAt(args, 0); rt.ktCompareTo(t, o) < 0 {
+			return o, true
+		}
+		return t, true
+	case "coerceAtMost":
+		if o := argAt(args, 0); rt.ktCompareTo(t, o) > 0 {
+			return o, true
+		}
+		return t, true
+	case "coerceIn":
+	default:
+		return nil, false
+	}
+	lo, hi := argAt(args, 0), argAt(args, 1)
+	if cr, isCr := ktCRangeOf(lo); isCr && len(args) == 1 {
+		if rt.ktCRangeEmpty(cr) {
+			rt.ktRaise("IllegalArgumentException", "Cannot coerce value to an empty range: "+rt.ktCRangeStr(cr)+".")
+		}
+		lo, hi = cr.props["start"], ktCRangeEnd(cr)
+	} else if !isUndefOrNull(lo) && !isUndefOrNull(hi) && rt.ktCompareTo(lo, hi) > 0 {
+		rt.ktRaise("IllegalArgumentException", "Cannot coerce value to an empty range: maximum "+
+			rt.ktpRender(hi, 0)+" is less than minimum "+rt.ktpRender(lo, 0)+".")
+	}
+	if !isUndefOrNull(lo) && rt.ktCompareTo(t, lo) < 0 {
+		return lo, true
+	}
+	if !isUndefOrNull(hi) && rt.ktCompareTo(t, hi) > 0 {
+		return hi, true
+	}
+	return t, true
+}
+
 // `r is T`. A plain a..b is an IntRange (a CharRange when the bounds were Chars)
 // and therefore an IntProgression too; a STEPPED or downTo progression is an
 // IntProgression and NOT an IntRange, which is what `10 downTo 1 is IntRange`
@@ -9195,15 +9368,26 @@ func (rt *jsrt) ktJavaCollection(name string, src interface{}) interface{} {
 	if k, isList := ktListCtorKinds[name]; isList {
 		return &jsArray{elems: append([]interface{}{}, els...), kind: k}
 	}
-	// A TreeSet is tagged before it fills, so each insertion sorts.
-	s := ktJvmTagged(ktMakeSet(), name, 0)
-	if isCallable(src) {
-		s.set("__cmp", src)
+	return rt.ktSetFill(ktJvmTagged(ktMakeSet(), name, 0), src, els)
+}
+
+// ktSetFill fills set s (tagged before it fills, so a TreeSet sorts on each
+// insertion) given its Comparator cmp, when cmp is one, and the elements es. Twin
+// of kSetFill in kotlin-interpreter.abnf and languages/lib/kotlin-rt.metajs.
+func (rt *jsrt) ktSetFill(s *jsObject, cmp interface{}, es []interface{}) *jsObject {
+	if isCallable(cmp) {
+		s.set("__cmp", cmp)
 	}
-	for _, e := range els {
+	for _, e := range es {
 		rt.ktSetAdd(s, e)
 	}
 	return s
+}
+
+// ktTreeSet is a java.util.TreeSet of es (toSortedSet, sortedSetOf), in cmp's
+// order when it is a Comparator, else ascending.
+func (rt *jsrt) ktTreeSet(es []interface{}, cmp interface{}) *jsObject {
+	return rt.ktSetFill(ktJvmTagged(ktMakeSet(), "TreeSet", 0), cmp, es)
 }
 
 // The array kind of each List (and deque) constructor; a bare ArrayDeque is
@@ -9590,9 +9774,13 @@ func ktGlobalFn(rt *jsrt, name string) interface{} {
 			return c
 		})
 	case "sortedSetOf":
-		// A java.util.TreeSet: ascending order, not insertion order.
+		// A java.util.TreeSet: ascending order, or the order of the Comparator it
+		// is given first.
 		return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
-			return ktJvmTagged(rt.ktSetFrom(ktSortBy(rt, args, nil, false).elems), name, 0)
+			if len(args) > 0 && isCallable(args[0]) {
+				return rt.ktTreeSet(args[1:], args[0])
+			}
+			return rt.ktTreeSet(args, nil)
 		})
 	case "emptySet":
 		return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {

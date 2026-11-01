@@ -6690,6 +6690,67 @@ fun s150() {
     check("utf16ord150d", cs(ts) == up && pq.poll() == "ax" && pq.poll() == sm)
 }
 
+// ===== SECTION 151: toSortedSet and sortedSetOf are TreeSets =====
+// toSortedSet() / toSortedSet(comparator) and sortedSetOf([comparator,] ...)
+// answer a java.util.TreeSet: ordered by the comparator when one is given, and a
+// later add() keeps that order (kotlinc 2.2.21 on java 24).
+fun s151() {
+    val xs = listOf(3, 1, 2, 5, 4)
+    val d = xs.toSortedSet(reverseOrder())
+    d.add(0); d.add(9)
+    check("sortedset151a", "$d" == "[9, 5, 4, 3, 2, 1, 0]" && d.first() == 9)
+    val a = xs.toSortedSet()
+    a.add(0); a.add(-1)
+    check("sortedset151b", "$a" == "[-1, 0, 1, 2, 3, 4, 5]")
+    val ws = listOf("bb", "a", "ccc", "dd")
+    check("sortedset151c", "${ws.toSortedSet(compareBy { it.length })}" == "[a, bb, ccc]" &&
+        "${arrayOf(5, 2, 8).toSortedSet(reverseOrder())}" == "[8, 5, 2]" &&
+        "${setOf(4, 1, 3).toSortedSet(reverseOrder())}" == "[4, 3, 1]" &&
+        "${xs.asSequence().toSortedSet(reverseOrder())}" == "[5, 4, 3, 2, 1]")
+    val ts = setOf(4, 1, 3).toSortedSet()
+    ts.add(2)
+    check("sortedset151d", "$ts" == "[1, 2, 3, 4]" && "${sortedSetOf(reverseOrder(), 1, 5, 3)}" == "[5, 3, 1]")
+}
+
+// ===== SECTION 152: ranges over Comparable bounds =====
+// a..b over Strings (or any Comparable that is not a number) is a ComparableRange
+// and a..<b a ComparableOpenEndRange: `in` compares by compareTo, toString shows
+// the bounds, two empty ranges are equal and hash to -1. The coerce family on a
+// Comparable orders by compareTo too; a class declaring `operator fun rangeTo`
+// builds its own value (kotlinc 2.2.21 on java 24).
+data class W152(val n: Int) : Comparable<W152> {
+    override fun compareTo(other: W152) = n.compareTo(other.n)
+}
+class D152(val d: Int) {
+    operator fun rangeTo(o: D152) = "span $d-${o.d}"
+}
+fun s152() {
+    val ws = listOf("m", "a", "z", "zz", "", "B", "abc", "\uFFFF")
+    val r = ws[1]..ws[2]
+    val hits = ws.map { if (it in r) 1 else 0 }
+    val all = ws.count { ("" .. "\uFFFF").contains(it) }
+    check("crange152a", hits == listOf(1, 1, 1, 0, 0, 0, 1, 0) && all == 8 && "zz" !in r &&
+        "$r" == "a..z" && r.start + r.endInclusive == "az" && !r.isEmpty() && (ws[2]..ws[1]).isEmpty())
+    val u = ws[1]..<ws[2]
+    check("crange152b", "$u" == "a..<z" && "z" !in u && "m" in u && u.start + u.endExclusive == "az" &&
+        (ws[2]..<ws[2]).isEmpty())
+    check("crange152c", r == ("a".."z") && r.hashCode() == 3129 && ("b".."a").hashCode() == -1 &&
+        ("b".."a") == ("c".."a") && !r.equals("a"))
+    val c = ws.map { "${it.coerceAtLeast("c")}/${it.coerceAtMost("c")}/${it.coerceIn("b", "y")}" }
+    check("crange152d", c[0] == "m/c/m" && c[1] == "c/a/b" && c[3] == "zz/c/y" && c[4] == "c//b" &&
+        ws[1].coerceIn(ws[2]..ws[3]) == "z" && ws[6].coerceIn("abd".."b") == "abd")
+    var msg = ""
+    try { ws[0].coerceIn("z", "a") } catch (e: IllegalArgumentException) { msg = "" + e.message }
+    check("crange152e", msg == "Cannot coerce value to an empty range: maximum a is less than minimum z.")
+    val vr = W152(1)..W152(5)
+    check("crange152f", "$vr" == "W152(n=1)..W152(n=5)" && W152(3) in vr && W152(7) !in vr &&
+        W152(9).coerceIn(W152(1), W152(4)) == W152(4) && W152(0).coerceAtLeast(W152(2)) == W152(2))
+    val any: Any = r
+    check("crange152g", any is ClosedRange<*> && any !is IntRange &&
+        (when (ws[0]) { in "a".."l" -> "low"; in "m".."z" -> "high"; else -> "none" }) == "high")
+    check("crange152h", D152(1)..D152(4) == "span 1-4")
+}
+
 fun main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -6837,6 +6898,8 @@ fun main() {
     s148() // SECTION-CALL 148
     s149() // SECTION-CALL 149
     s150() // SECTION-CALL 150
+    s151() // SECTION-CALL 151
+    s152() // SECTION-CALL 152
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }
