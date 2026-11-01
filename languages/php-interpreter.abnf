@@ -6310,7 +6310,8 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         var last = stepOf(ref.path[ref.path.length - 1])
         return {obj: o, last: last}
     }
-    function storeAt(p, v) {
+    // fk, when not null, checks the key of an array element (makeAssign).
+    function storeAt(p, v, fk) {
         if (p.last.append === true) {
             if (!isArr(p.obj) && phpIsAA(p.obj)) { mcall(p.obj, "offsetSet", argsOf([null, v])) } else { arrPush(p.obj, v) }
             return
@@ -6318,7 +6319,11 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         if (p.last.key != undefined) { phpSetProp(p.obj, p.last.key, v); return }
         var key = anytype
         key = p.last.idx()
-        if (isArr(p.obj)) { arrSet(p.obj, key, v); return }
+        if (isArr(p.obj)) {
+            if (fk != null && fk != undefined) { fk([p.obj, key]) }
+            arrSet(p.obj, key, v)
+            return
+        }
         if (phpIsAA(p.obj)) { mcall(p.obj, "offsetSet", argsOf([key, v])); return }
         if (isObj(p.obj)) { phpSetProp(p.obj, phpStr(key), v); return }
         fail("cannot assign into this value")
@@ -6454,6 +6459,8 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         if (op == "??=") { return function() { return coalesceAssign(ref, valT) } }
         var rw = op == "=" ? null : rwSite(ref, pos)
         var oc = op == "=" ? null : diagSite("__mec_opchk", pos)
+        // A plain store checks each array level's key on the way and the last one.
+        var fk = op == "=" ? diagSite("__mec_fkeychk", pos) : null
         // An array literal with '&' elements is a temporary: once copied it no
         // longer holds their cells. Twin of makeAssign in php-to-llvm-ir.abnf.
         var lit = op == "=" && items.length > 3 && items[3].rlit === true
@@ -6478,12 +6485,12 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                 phpSet(nm, v)
             } else {
                 rwVarChk(rw, ref)
-                var p = op == "=" ? resolveRefPhp(ref) : resolveRefPhpV(memoRef(ref), true, rw == null ? null : rw.k)
+                var p = op == "=" ? resolveRefPhpV(ref, true, fk) : resolveRefPhpV(memoRef(ref), true, rw == null ? null : rw.k)
                 if (op != "=") {
                     rwSlotChk(rw, p)
                     v = compoundOp(oc, op, readAt(p), v)
                 }
-                storeAt(p, v)
+                storeAt(p, v, fk)
             }
             return v
         }

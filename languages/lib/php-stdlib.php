@@ -3190,6 +3190,11 @@ function __mec_dimchk($container, $offset, $file = null, $line = 0) {
         __mec_diag(2, "Trying to access array offset on " . __mec_vname($container), $file, $line);
     }
 }
+// The key of an array element that is written (zend_fetch_dimension_address_inner
+// for BP_VAR_W, ZEND_ASSIGN_DIM): a float that is not an integer.
+function __mec_fkeychk($container, $offset, $file = null, $line = 0) {
+    if (is_float($offset) && is_array($container)) { __mec_f2ichk($offset, $file, $line); }
+}
 // The key of an array element that is read, also by a compound assignment or
 // ++/-- (zend_undefined_offset, zend_undefined_index): a float that is not an
 // integer, and a key the array does not have.

@@ -253,6 +253,13 @@ $v = substr("abc", $zn[1]); check("zpp-native-float", [$v, lastErr()], ["bc", wa
 $zf = "strtoupper";
 $v = $zf($zn[0]); check("zpp-native-dynamic", [$v, lastErr()], ["", want(E_DEPRECATED, 'strtoupper(): Passing null to parameter #1 ($string) of type string is deprecated', __LINE__)]);
 
+// ----- the key of an array element that is written (ZEND_ASSIGN_DIM, zend_fetch_dimension_address_inner_W) -----
+// a float that is not an integer, at the last level and at each level on the way.
+$wk = []; $wk[1.5] = "a"; check("key-float-write", [$wk, lastErr()], [[1 => "a"], want(E_DEPRECATED, 'Implicit conversion from float 1.5 to int loses precision', __LINE__)]);
+$wk[2.0] = "b"; check("key-float-write-integral", [$wk, lastErr()], [[1 => "a", 2 => "b"], null]);
+$wk2 = []; $wk2[2.5]["x"] = 1; check("key-float-write-nested", [$wk2, lastErr()], [[2 => ["x" => 1]], want(E_DEPRECATED, 'Implicit conversion from float 2.5 to int loses precision', __LINE__)]);
+$wo = new stdClass; $wo->a = []; $wo->a[3.5] = 1; check("key-float-write-prop", [$wo->a, lastErr()], [[3 => 1], want(E_DEPRECATED, 'Implicit conversion from float 3.5 to int loses precision', __LINE__)]);
+
 // ----- done -----
 echo "warnings: " . $checks . " checks, " . $fails . " failures\n";
 exit($fails);

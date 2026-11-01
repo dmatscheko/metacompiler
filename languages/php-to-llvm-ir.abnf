@@ -6158,6 +6158,8 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         if (op == "??=") { return function(b) { return emitCoalesceAssign(b, ref, valT) } }
         var rw = op == "=" ? null : rwSite(ref, pos)
         var oc = op == "=" ? null : diagSite("__mec_opchk", pos)
+        // A plain store checks each array level's key on the way and the last one.
+        var fk = op == "=" ? diagSite("__mec_fkeychk", pos) : null
         // An array literal with '&' elements is a temporary: once copied it no
         // longer holds their cells. Twin of makeAssign in php-interpreter.abnf.
         var lit = op == "=" && items.length > 3 && items[3].rlit === true
@@ -6207,12 +6209,13 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                 // A PHP string is a value, so the string with the one byte replaced
                 // (js_phsetoffset) is assigned back to the variable.
                 setVarV(strB, rn6.v, callExt(strB, "js_phsetoffset", [rcv.v, rk6.v, v])).NewBr(endB6)
+                if (fk != null) { arrB = fk(arrB, [rcv.v, rk6.v]) }
                 callExt(arrB, "js_phset", [rcv.v, rk6.v, callExt(arrB, "js_phcopy", [v])])
                 arrB.NewBr(endB6)
                 b = endB6
             } else {
                 if (op != "=") { b = rwVarChk(b, rw, ref) }
-                var p = emitRefPathV(b, ref, true, false, op == "=" || rw == null ? null : rw.k)
+                var p = emitRefPathV(b, ref, true, false, op == "=" ? fk : (rw == null ? null : rw.k))
                 b = p.b
                 if (op != "=") {
                     b = rwSlotChk(b, rw, p)
@@ -6220,6 +6223,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                     b = rold2.b
                     v = compoundOp(b, oc, op, rold2.v, v)
                 } else {
+                    if (fk != null && p.kind == "index") { b = fk(b, [p.obj, p.key]) }
                     v = callExt(b, "js_phcopy", [v])
                 }
                 b = writeRefSlot(b, p, v)
