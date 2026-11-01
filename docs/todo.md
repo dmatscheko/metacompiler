@@ -112,7 +112,7 @@ strings.TrimSpace, native strips ASCII 9-13 and 32: `int.Parse(" 1 2 ")` and `in
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-1081 kotlin: static typer gaps for reified inference; List/Nothing class names · P3 · KT · OPEN [V]
+### T-1081 kotlin: static typer gaps for reified inference; List/Nothing class names · P3 · KT · IN PROGRESS (KT worker, round 26) [V]
 Oracle kotlinc 2.2.21; all engines:
 - ktStaticTy cannot type: `arrayOf("a")` without type args (`arrayOf("a").arrName()` -> String, ours Any), `listOf(this)` inside a reified extension (-> Long, ours Any), a `map {}` result (`listOf(1).map { it.toString() }.elName()` -> String, ours Any).
 - `List::class.qualifiedName` -> kotlin.collections.List (ours List); `"" + List::class.java` -> "interface java.util.List" (ours "class java.util.List"); interfaces print as "interface" generally.
