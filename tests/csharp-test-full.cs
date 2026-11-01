@@ -3068,6 +3068,13 @@ b";                                                   // verbatim keeps the newl
             Program.Check("s48o1", string.CompareOrdinal("abc", "abd") < 0 && string.CompareOrdinal("b", "a") > 0
                 && string.CompareOrdinal("ab", "ab") == 0 && string.CompareOrdinal(null, "a") < 0
                 && string.CompareOrdinal("B", "a") < 0);
+            // An astral character is two surrogate units (0xD83D 0xDE00): above 'a',
+            // below U+E000 and U+FF61, although its code point is above both.
+            string emoji = "😀";
+            Program.Check("s48o2", string.CompareOrdinal(emoji, "a") > 0 && string.CompareOrdinal("a", emoji) < 0
+                && string.CompareOrdinal(emoji, "") < 0 && string.CompareOrdinal("｡", emoji) > 0
+                && string.Compare(emoji, "", StringComparison.Ordinal) < 0
+                && StringComparer.Ordinal.Compare(emoji, "￿") < 0 && string.CompareOrdinal(emoji, "\uD83D") > 0);
         }
 
         // ===== SECTION 49: composite formatting, StringComparison, StringSplitOptions =====
