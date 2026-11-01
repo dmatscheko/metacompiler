@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1042** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1043** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -114,8 +114,11 @@ Found by CS r4 + master probe.
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-1038 kotlin: unsigned ranges lose their type · P3 · KT · IN PROGRESS (KT worker, round 18) [V]
-kotlinc 2.2.21: `val r = 1u..4000000000u; println(r is UIntRange)` → true; ours false in all three engines (the range value has no unsigned marker). Consequence: endExclusive on UIntRange/ULongRange checks the signed MAX_VALUE — `(1u..2147483647u).endExclusive` wrongly throws, `(1u..UInt.MAX_VALUE).endExclusive` does not throw. Found by KT r17.
+### T-1042 kotlin: exact ULong ranges past 2^53; `expr.member::class`; IntRange.EMPTY · P3 · KT · OPEN [V]
+kotlinc 2.2.21 (found by KT r18):
+- `val big = 18446744073709551613uL..ULong.MAX_VALUE`: kotlinc prints `18446744073709551613..18446744073709551615`, toList → 3 elements, `18446744073709551612uL in big` → false. Ours: `18446744073709551615..18446744073709551615`, toList hangs, `in` true (bounds held as doubles; needs an unsigned twin of the exact Long-range path lf/lt/ls in all engines; endExclusive MAX test too).
+- `class P(val x: Int); println(P(4).x::class.simpleName)` → Int; ours prints the source text `p.x` (any member-access receiver of ::class, e.g. `r.first::class`).
+- `IntRange.EMPTY` (and the other range companions) → interpreter "unknown name: IntRange"; kotlinc: `(1 until Int.MIN_VALUE) == IntRange.EMPTY` → true. Check compiled legs too.
 
 # GO — Go  (oracle: `go run`)
 
@@ -1096,6 +1099,7 @@ T-1032 kotlin: enum compareTo/ranges, Boolean ranges, IntRange.endExclusive — 
 T-1033 ruby: Enumerable methods on classes that include Enumerable; Numeric in Integer/Float ancestry — DONE (RB r40, dc3bbb43): Enumerable surface on a user #each (and Struct) via to_a delegation, respond_to? agrees; Integer/Float/Rational/Complex under Numeric incl. methods added to Numeric. Master probe vs ruby 2.6 (40 lines: 30+ Enumerable methods, Struct, Numeric ancestry, Numeric#twice): 4 legs agree.
 T-1029 python: range/reversed type identity; dotted codec names accepted — DONE (PY r21, 07577a53): range is its own type (repr/slices/attrs/hash/errors), per-source iterator + reverse-iterator types, lazy reversed() of a user sequence, dotted codec names only via aliases. Master probe vs python3 3.14 (range surface, iterator types, reversed, idna): 4 legs agree.
 T-1028 python: CJK multibyte codecs, `\N{...}` escapes, idna nameprep — PARTIAL→split (PY r21, 07577a53): idna nameprep (RFC 3491 over Unicode 3.2, shared python-nameprep.txt; tables linked when the program names 'idna'). CJK codecs (~75K mappings), \N{} (name DB ~450 KB), DeprecationWarning (needs warnings plumbing) filed as follow-up.
+T-1038 kotlin: unsigned ranges lose their type — DONE (KT r18, 43324a36): ranges carry an unsigned width (UIntRange/ULongRange identity, UInt/ULong elements, unsigned MAX for endExclusive) through step/reversed/downTo; until at MIN_VALUE answers EMPTY. Master probe vs kotlinc 2.2.21 (24 lines): 4 legs agree.
 
 # Settled — do not re-open
 
