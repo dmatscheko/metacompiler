@@ -187,7 +187,7 @@ it out (the save is lexical). rt_setvar_byname drops a write to a name the progr
 
 # C — C subset
 
-### T-982 c compiled: an indirect call through a function pointer loses the return type · P2 · C · OPEN [V]
+### T-982 c compiled: an indirect call through a function pointer loses the return type · P2 · C · IN PROGRESS (C worker, round 15) [V]
 Found by the C worker, round 14 (oracle cc). `double dh(double x){return x/2;} double (*fp)(double)=dh; (int)(fp(9.0)*10)` → cc
 and the interpreter 45, llvm.Run and native 0; `long (*bp)(long)` returning x*2^32 likewise. emitIndirectCall always answers ctInt
 through the i32 trampoline because a function-pointer ct ({k:"fnp"}) carries no signature.
