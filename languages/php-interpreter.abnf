@@ -2125,8 +2125,10 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // the copy itself out of the frame, every other store copying it again: what
     // the call returns, when that is no scalar, and a reference bound to the
     // parameter, which leaves a cell in its slot; either keeps the holders, as
-    // does a frame an exception unwinds. Twin of js_phown and js_phleave in lib/php-rt.metajs and
-    // abnf/jsrtphp.go. keptCells counts the references copies have kept.
+    // does a frame an exception unwinds (its arguments live on in the exception's
+    // trace, phpOwnLeave in abnf/jsrtphp.go). Twin of js_phown and js_phleave in
+    // lib/php-rt.metajs and abnf/jsrtphp.go. keptCells counts the references
+    // copies have kept.
     var OWN_KEY = "\x00own"
     var keptCells = 0
     function frameOwn(fr, name, copy) {

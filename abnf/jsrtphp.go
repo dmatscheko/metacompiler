@@ -314,11 +314,11 @@ func phpCellOf(v interface{}) *jsObject {
 // one slot that made it. It is counted where a reference is bound or unbound - '=&',
 // foreach by reference, use (&$v) and a closure call's frame, [&$v], global,
 // static, a by-reference parameter, unset() and an array copy keeping the cell -
-// and a frame returning normally releases the slots its text names (frameLeave in
-// php-interpreter.abnf); an array literal with '&' elements releases its cells once
-// assigned and copied. It is not released when another array holding the cell is
-// discarded, nor by a frame an exception unwinds or a generator left unfinished,
-// so it can only run high. A by-reference variadic's array is a holder. var_dump
+// and a frame returning, or unwound by an exception, releases the slots its text
+// names (js_phleave, js_phunwind); an array literal with '&' elements releases its
+// cells once assigned and copied. It is not released when another array holding
+// the cell is discarded, nor by a generator left unfinished, so it can only run
+// high. A by-reference variadic's array is a holder. var_dump
 // prints a cell held more than once as &value. The count is read when the copy
 // is made, at the assignment; PHP reads it at the copy's first write, so
 // `$a = [&$x]; $b = $a; unset($x);
@@ -5540,8 +5540,9 @@ func (rt *jsrt) phpGenStart(g *jsGenerator, traverse bool) interface{} {
 // phpOwnLeave gives them back (js_phown). Only two things can carry the copy
 // itself out of the frame, every other store copying it again: ret, what the
 // call returns, when that is no scalar, and a reference bound to the parameter,
-// which leaves a cell in its slot; either keeps the holders, as does a frame an
-// exception unwinds. Twin of
+// which leaves a cell in its slot; either keeps the holders. So does a frame an
+// exception unwinds: the exception's trace keeps the frame's arguments as they
+// are when it is made (zend.exception_ignore_args is off by default). Twin of
 // frameOwnLeave in php-interpreter.abnf and phOwnLeave in lib/php-rt.metajs.
 func (rt *jsrt) phpOwnLeave(sc *jsScope, ret interface{}) {
 	d, ok := sc.get("\x00own")

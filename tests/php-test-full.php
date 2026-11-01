@@ -32,8 +32,8 @@
 // (it would change the semantics of every section), the standard library
 // beyond the array, string and math functions (sections 38, 39 and 42), define(),
 // superglobals other than $GLOBALS, include/require/eval, fibers,
-// references returned from functions, reflection (attributes are applied,
-// never read back), and the deprecation notice of the "${var}"
+// reflection (attributes are applied, never read back), and the
+// deprecation notice of the "${var}"
 // interpolation form.
 // Expected values follow real PHP 8.3 (e.g. 7 / 2 === 3.5 and strlen counts
 // bytes); validated against the manual by hand - no local php binary.
