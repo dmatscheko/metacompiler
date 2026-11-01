@@ -6788,6 +6788,50 @@ data class W153(val n: Int) : Comparable<W153> {
     override fun compareTo(other: W153) = n.compareTo(other.n)
 }
 
+// ===== SECTION 154: enum and Boolean ordering, IntRange.endExclusive =====
+// kotlin.Enum.compareTo is final and answers the ordinal difference, so an enum
+// orders by declaration in compareTo, `<`, a when's `in a..b`, rangeTo, sorting
+// and the coerce family; an entry with a body orders as its enum. Boolean is
+// Comparable too (false first), with rangeTo / rangeUntil / coerce*. The
+// endExclusive of an IntRange / LongRange / CharRange is endInclusive + 1, and an
+// IllegalStateException when the bound is MAX_VALUE (kotlinc 2.2.21 on java 24).
+enum class Col154 { A, B, C, D }
+enum class Op154 { ADD { override fun ap(x: Int) = x + 1 }, MUL { override fun ap(x: Int) = x * 2 };
+    abstract fun ap(x: Int): Int
+}
+fun s154() {
+    val cs = Col154.entries
+    check("enumcmp154a", cs[1].compareTo(cs[2]) == -1 && cs[3].compareTo(cs[0]) == 3 && cs[2].compareTo(cs[2]) == 0 &&
+        cs[0] < cs[1] && !(cs[3] <= cs[2]) && Op154.MUL.compareTo(Op154.ADD) == 1 && Op154.ADD < Op154.MUL &&
+        compareValues(cs[3], cs[1]) == 2)
+    val r = cs[0]..cs[2]
+    check("enumcmp154b", "$r" == "A..C" && cs[1] in r && cs[3] !in r && cs[1] !in cs[0].rangeTo(cs[0]) &&
+        cs[0].rangeTo(cs[2]).contains(cs[1]) && "${cs[0].rangeUntil(cs[2])}" == "A..<C" &&
+        cs[2] !in cs[0]..<cs[2] && (cs[2]..cs[0]).isEmpty())
+    check("enumcmp154c", listOf(cs[2], cs[0], cs[3], cs[1]).sorted() == cs && listOf(cs[2], cs[3]).max() == cs[3] &&
+        cs[3].coerceAtMost(cs[1]) == cs[1] && cs[0].coerceIn(cs[1], cs[2]) == cs[1] &&
+        cs[3].coerceIn(cs[1]..cs[2]) == cs[2] && cs.sortedWith(compareByDescending { it }).first() == cs[3])
+    val ws = cs.map { when (it) { in cs[0]..cs[1] -> "lo"; !in cs[0]..cs[2] -> "top"; else -> "mid" } }
+    val chs = listOf('a', 'm').map { when (it) { in 'a'..'f' -> 1; else -> 0 } }
+    val lgs = listOf(5L, 9000000000L).map { when (it) { in 1L..4000000000L -> 1; else -> 0 } }
+    val dbs = listOf(0.5, 1.5).map { when (it) { in 1.0..2.0 -> 1; else -> 0 } }
+    check("whenin154d", ws == listOf("lo", "lo", "mid", "top") && chs == listOf(1, 0) && lgs == listOf(1, 0) &&
+        dbs == listOf(0, 1))
+    val bs = listOf(false, true)
+    check("boolrange154e", "${bs[0]..bs[1]}" == "false..true" && "${bs[0].rangeTo(bs[1])}" == "false..true" &&
+        bs[1] in bs[0]..bs[1] && bs[0] !in bs[1]..bs[1] && "${bs[0].rangeUntil(bs[1])}" == "false..<true" &&
+        bs[1] !in bs[0].rangeUntil(bs[1]) && bs[1].coerceAtMost(bs[0]) == false && (bs[1]..bs[0]).isEmpty())
+    val ns = listOf(1, 5, Int.MAX_VALUE)
+    val ls = listOf(1L, 9L, Long.MAX_VALUE)
+    val chr = listOf('a', 'e', '￿')
+    check("endex154f", (ns[0]..ns[1]).endExclusive == 6 && (ns[1]..ns[0]).endExclusive == 2 &&
+        (ns[0] until ns[1]).endExclusive == 5 && (ls[0]..ls[1]).endExclusive == 10L &&
+        (chr[0]..chr[1]).endExclusive == 'f' && (chr[0]..<chr[1]).endExclusive == 'e')
+    val tops = listOf({ (ns[0]..ns[2]).endExclusive }, { (ls[0]..ls[2]).endExclusive }, { (chr[0]..chr[2]).endExclusive })
+        .map { try { it(); "ok" } catch (e: IllegalStateException) { e.message } }
+    check("endex154g", tops.all { it == "Cannot return the exclusive upper bound of a range that includes MAX_VALUE." })
+}
+
 fun main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -6938,6 +6982,7 @@ fun main() {
     s151() // SECTION-CALL 151
     s152() // SECTION-CALL 152
     s153() // SECTION-CALL 153
+    s154() // SECTION-CALL 154
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }

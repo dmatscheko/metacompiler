@@ -1985,6 +1985,16 @@ func init() {
 						return rt.wrap(float64(1))
 					}
 					return rt.wrap(float64(-1))
+				// Boolean is Comparable, so kotlin.ranges' `T.rangeTo` and the
+				// coerce family apply.
+				case "rangeTo", "rangeUntil":
+					if cr, ok := ktCRangeFn(recv, mname, arr.elems); ok {
+						return w(cr)
+					}
+				case "coerceAtLeast", "coerceAtMost", "coerceIn":
+					if v, ok := rt.ktCoerceCmp(recv, mname, arr.elems); ok {
+						return rt.wrap(v)
+					}
 				}
 			}
 			if v, handled := rt.ktNumMethod(recv, mname, arr.elems); handled {
@@ -3171,8 +3181,8 @@ func init() {
 					}
 					return w(ktRangeEl(rg, rg.to))
 				case "endExclusive":
-					if rg.oe {
-						return w(ktRangeEl(rg, rg.to))
+					if v, ok := rt.ktRangeEndEx(rg); ok {
+						return w(v)
 					}
 				case "step":
 					return w(ktRangeSigned(rg))
@@ -8034,6 +8044,33 @@ func ktRangeEl(rg ktRange, n float64) interface{} {
 		return jsGInt{v: int64(n), w: 64}
 	}
 	return n
+}
+
+// ktRangeEndEx is OpenEndRange.endExclusive: a half-open floating range's bound,
+// else (an IntRange, LongRange or CharRange) endInclusive + 1, which kotlin.ranges
+// refuses when that bound is the type's MAX_VALUE. A stepped or downward
+// progression is no OpenEndRange. Twin of kRangeEndEx in kotlin-interpreter.abnf
+// and k4RangeEndEx in languages/lib/kotlin-rt.metajs.
+func (rt *jsrt) ktRangeEndEx(rg ktRange) (interface{}, bool) {
+	if rg.oe {
+		return ktRangeEl(rg, rg.to), true
+	}
+	if rg.fl || rg.pg || rg.down {
+		return nil, false
+	}
+	top := rg.to == 2147483647
+	if rg.lg {
+		top = rg.lt == math.MaxInt64
+	} else if rg.ch {
+		top = rg.to == 65535
+	}
+	if top {
+		rt.ktRaise("IllegalStateException", "Cannot return the exclusive upper bound of a range that includes MAX_VALUE.")
+	}
+	if rg.lg {
+		return jsGInt{v: rg.lt + 1, w: 64}, true
+	}
+	return ktRangeEl(rg, rg.to+1), true
 }
 
 // The LAST ELEMENT of a progression, which is what IntProgression.last answers -

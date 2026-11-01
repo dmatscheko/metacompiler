@@ -9745,8 +9745,8 @@ function ktSmcall(recv, name, args) {
     var ev = ktEnumMethod(rv, name, as)
     if (!ktMiss(ev)) { return ev }
 
-    // A BOOLEAN receiver owns hashCode/toString/not/equals/compareTo - none of
-    // which any branch below claims.
+    // A BOOLEAN receiver owns hashCode/toString/not/equals/compareTo, the range
+    // builders and the coerce family - none of which any branch below claims.
     if (typeof rv == "boolean") {
         if (name == "hashCode") {
             if (rv) { return 1231 }
@@ -9769,6 +9769,11 @@ function ktSmcall(recv, name, args) {
             if (rv) { return 1 }
             return -1
         }
+        // Boolean is Comparable, so kotlin.ranges' `T.rangeTo` and the coerce
+        // family apply.
+        var bcr = k4CRangeFn(rv, name, as)
+        if (!ktMiss(bcr)) { return bcr }
+        if (name == "coerceAtLeast" || name == "coerceAtMost" || name == "coerceIn") { return ktCoerceCmp(rv, name, as) }
     }
 
     var nv = ktNumMethod(rv, name, as)
@@ -10217,6 +10222,18 @@ function k4IsF32(v) {
     return ktIsF32(v)
 }
 
+// jsrtkotlin.go ktRangeEndEx: OpenEndRange.endExclusive, KT_MISS on a stepped or
+// downward progression.
+function k4RangeEndEx(rg) {
+    if (rg["oe"] === true) { return k4RangeEl(rg, rg["to"]) }
+    if (rg["fl"] === true || rg["pg"] === true || rg["down"] === true) { return KT_MISS }
+    var lg = rg["lg"] === true
+    var top = rg["to"] == 2147483647
+    if (lg) { top = k1Cmp("==", rg["lt"], k1MaxI64()) } else if (rg["ch"] === true) { top = rg["to"] == 65535 }
+    if (top) { ktRaise("IllegalStateException", "Cannot return the exclusive upper bound of a range that includes MAX_VALUE.") }
+    if (lg) { return k1Arith("+", rg["lt"], 1) }
+    return k4RangeEl(rg, rg["to"] + 1)
+}
 function k4RangeEl(rg, n) {
     if (rg["ch"] === true) { return ktChar(n) }
     if (rg["fl"] === true) {
@@ -10888,7 +10905,10 @@ function js_ktfget(o, name) {
             if (lg) { return o["lt"] }
             return k4RangeEl(o, o["to"])
         }
-        if (name == "endExclusive" && o["oe"] === true) { return k4RangeEl(o, o["to"]) }
+        if (name == "endExclusive") {
+            var ex = k4RangeEndEx(o)
+            if (!ktMiss(ex)) { return ex }
+        }
         if (name == "step") {
             if (o["down"] === true) { return -o["st"] }
             return o["st"]

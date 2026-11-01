@@ -4459,14 +4459,17 @@ KwContract  = "contract" KwEnd ;
                         if (cond.neg) { b.NewCondBr(truthy(b, hitV), nextB, matchB) }
                         else          { b.NewCondBr(truthy(b, hitV), matchB, nextB) }
                     } else {
-                        // in lo..hi (or !in): both bounds are evaluated, like in Kotlin.
+                        // in lo..hi (or !in): both bounds are evaluated, like in Kotlin,
+                        // and compared by Kotlin's `>=` / `<=` (js_ktcmp: a Char, a Long,
+                        // a Double, an enum or a user compareTo), as the range's contains
+                        // does.
                         var rl = cond.lo(b)
                         b = rl.b
                         var rh = cond.hi(b)
                         b = rh.b
                         var subjV2 = callExt(b, "js_scope_get", [curScopeV, emitStr(b, wName)])
-                        var inRange = b.NewAnd(truthy(b, callExt(b, "js_ge", [subjV2, rl.v])),
-                                               truthy(b, callExt(b, "js_le", [subjV2, rh.v])))
+                        var inRange = b.NewAnd(truthy(b, callExt(b, "js_ktcmp", [emitStr(b, ">="), subjV2, rl.v])),
+                                               truthy(b, callExt(b, "js_ktcmp", [emitStr(b, "<="), subjV2, rh.v])))
                         if (cond.neg) { b.NewCondBr(inRange, nextB, matchB) }
                         else          { b.NewCondBr(inRange, matchB, nextB) }
                     }
@@ -7319,6 +7322,18 @@ KwContract  = "contract" KwEnd ;
             return deadBlock()
         }, false)
     }
+    // kotlin.Enum.compareTo, installed on every enum descriptor: final, and the
+    // ordinal difference, as java.lang.Enum's. Twin of kEnumCompareTo in
+    // kotlin-interpreter.abnf.
+    function emitEnumCompareTo() {
+        return emitFunc(["other"], function(bb) {
+            var thisV = callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, "this")])
+            var otherV = callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, "other")])
+            bb.NewRet(callExt(bb, "js_ktarith", [emitStr(bb, "-"), callExt(bb, "js_get", [thisV, emitStr(bb, "ordinal")]),
+                                                callExt(bb, "js_get", [otherV, emitStr(bb, "ordinal")])]))
+            return deadBlock()
+        }, true)
+    }
     function emitComponentFunc(prop) {
         return emitFunc([], function(bb) {
             var thisV = callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, "this")])
@@ -8372,6 +8387,8 @@ KwContract  = "contract" KwEnd ;
             // __entries is the entry list in DECLARATION order, which is what
             // values() / valueOf() / entries read (ktEnumMethod in
             // abnf/jsrtkotlin.go). The interpreter half keeps the same field.
+            callExt(b, "js_set", [clsV, emitStr(b, "compareTo"),
+                                  callExt(b, "js_closure", [handle(emitEnumCompareTo()), curScopeV])])
             var entriesV = callExt(b, "js_arr_new", [])
             callExt(b, "js_set", [clsV, emitStr(b, "__entries"), entriesV])
             // Bare `entries` inside an enum's own member or its companion: Kotlin 1.9's

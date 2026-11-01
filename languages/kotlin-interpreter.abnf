@@ -3643,6 +3643,19 @@ NotMemberKw = :script(~~ "pure";
         if (rg.lg === true) { return kAdoptLong(n) }
         return n
     }
+    // OpenEndRange.endExclusive: a half-open floating range's bound, else (an
+    // IntRange, LongRange or CharRange) endInclusive + 1, which kotlin.ranges
+    // refuses when that bound is the type's MAX_VALUE. A stepped or downward
+    // progression is no OpenEndRange: undefined. Twin of ktRangeEndEx in
+    // abnf/jsrtkotlin.go and k4RangeEndEx in languages/lib/kotlin-rt.metajs.
+    function kRangeEndEx(rg) {
+        if (rg.oe === true) { return rangeEl(rg, rg.to) }
+        if (rg.fl === true || rg.pg === true || rg.down) { return undefined }
+        var top = rg.lg === true ? kCmpI("==", rg.lt, szMake(kLongMaxP, 64, kNoU)) : rg.to == (rg.ch ? 65535 : 2147483647)
+        if (top) { kRaise("IllegalStateException", "Cannot return the exclusive upper bound of a range that includes MAX_VALUE.") }
+        if (rg.lg === true) { return kArith("+", rg.lt, 1) }
+        return rangeEl(rg, rg.to + 1)
+    }
     function rangeEmpty(rg) {
         // ClosedFloatingPointRange.isEmpty is !(start <= endInclusive): a NaN bound
         // empties it. The open form's is !(start < endExclusive).
@@ -8431,6 +8444,9 @@ NotMemberKw = :script(~~ "pure";
             if (name == "equals") return args[0] === target
             // java.lang.Boolean.compareTo: false sorts before true.
             if (name == "compareTo") return target === args[0] ? 0 : (target ? 1 : 0 - 1)
+            // Boolean is Comparable, so kotlin.ranges' coerce family applies.
+            var bcc = kCoerceCmp(target, name, args)
+            if (bcc != null) return bcc.v
             return mfallback(target, name, args, "Boolean")
         }
         // A function value: f.invoke(args) is the call itself (slot?.invoke(1)).
@@ -9308,10 +9324,13 @@ NotMemberKw = :script(~~ "pure";
                         hit = mcall(cond.coll(), "contains", [s])
                         if (cond.neg) hit = !hit
                     } else {
-                        // in lo..hi (or !in): both bounds are evaluated, like in Kotlin.
+                        // in lo..hi (or !in): both bounds are evaluated, like in Kotlin,
+                        // and compared by Kotlin's own `>=` / `<=` (a Char, a Long, a
+                        // Double, an enum or a user compareTo), as the range's contains
+                        // does. Twin of the js_ktcmp pair in kotlin-to-llvm-ir.abnf.
                         var lo = cond.lo()
                         var hi = cond.hi()
-                        hit = (s >= lo && s <= hi)
+                        hit = binOps[">="](s, lo) && binOps["<="](s, hi)
                         if (cond.neg) hit = !hit
                     }
                     if (hit) { var rb = arms[a].body(); if (subjName != null) scopes.pop(); return rb }
@@ -11247,6 +11266,10 @@ NotMemberKw = :script(~~ "pure";
         cls.__cparams = cparams
         kNoteCtorMembers(cparams)
         cls.__isenum = true
+        // kotlin.Enum.compareTo is final and orders by declaration: the ordinal
+        // difference, as java.lang.Enum does. Twin of emitEnumCompareTo in
+        // kotlin-to-llvm-ir.abnf.
+        cls.compareTo = kEnumCompareTo
         cls.__ctor = makeCtor(cls, cparams, supersOf(items), parts.inits)
         kBindType(name, cls)
         var all = []
@@ -11279,6 +11302,7 @@ NotMemberKw = :script(~~ "pure";
         attachCompanion(cls, parts.companion)
         push({nname: name, nval: cls, inner: false})
     }
+    function kEnumCompareTo(a, b) { return a.ordinal - b.ordinal }
     function enumEntryOf(items) {
         var r = {name: "", args: [], members: []}
         for (var i = 0; i < items.length; i++) {
@@ -12354,7 +12378,11 @@ NotMemberKw = :script(~~ "pure";
             // built from, not the last ELEMENT - the two coincide for every plain
             // `a..b`, and a stepped progression declares neither in Kotlin.
             if (name == "endInclusive") { return o.lg === true ? o.lt : rangeEl(o, o.to) }
-            if (name == "endExclusive" && o.oe === true) { return rangeEl(o, o.to) }
+            if (name == "endExclusive") {
+                var ex = anytype
+                ex = kRangeEndEx(o)
+                if (ex !== undefined) { return ex }
+            }
             if (name == "step") { return o.down ? -o.st : o.st }
             // `.size` on a progression is not Kotlin (IntRange is an Iterable, not a
             // Collection), but both halves answer the element count rather than
