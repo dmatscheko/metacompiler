@@ -3,9 +3,15 @@
 // is parsed with the same grammar; its classes register like the main file's.
 // java.util.List is a builtin no-op import, mixed in on purpose; util.Pair
 // imports a second module file (one class per file, like idiomatic Java).
+// PeerShape is named by no import: like javac's source path, the run finds it
+// as PeerShape.java under the include root, since Square extends it.
 import java.util.List;
 import util.Toolbox;
 import util.Pair;
+
+class Square extends PeerShape {
+    int sides() { return 4; }
+}
 
 class Main {
     static int fails = 0;
@@ -21,6 +27,8 @@ class Main {
         Main.check("imported static method", Toolbox.clamp(15, 0, 10) == 10);
         Pair p = new Pair(19, 23);
         Main.check("imported class", p.sum() == 42);
+        Square sq = new Square();
+        Main.check("superclass from a peer file", sq.sides() == 4 && sq.name().equals("shape"));
 
         if (Main.fails == 0) {
             System.out.println("java multifile test passed");

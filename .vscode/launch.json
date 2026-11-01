@@ -638,6 +638,48 @@
             "program": "${workspaceFolder}","args": ["languages/java-to-llvm-ir.abnf", "tests/java-fail-test-cycle.java", "-q"]
         },
         {
+            "name": "Java interpreter cyclic type-variable bounds SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "expectError": "java interpreter error: cyclic inheritance involving B",
+            "program": "${workspaceFolder}","args": ["languages/java-interpreter.abnf", "tests/java-fail-test-cycle-tyvar.java", "-q"]
+        },
+        {
+            "name": "Java compiler cyclic type-variable bounds SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "expectError": "java compiler error: cyclic inheritance involving B",
+            "program": "${workspaceFolder}","args": ["languages/java-to-llvm-ir.abnf", "tests/java-fail-test-cycle-tyvar.java", "-q"]
+        },
+        {
+            "name": "Java interpreter redeclared Object with a supertype SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "expectError": "java interpreter error: cyclic inheritance involving java.lang.Runnable",
+            "program": "${workspaceFolder}","args": ["languages/java-interpreter.abnf", "tests/java-fail-test-cycle-object.java", "-q"]
+        },
+        {
+            "name": "Java compiler redeclared Object with a supertype SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "expectError": "java compiler error: cyclic inheritance involving java.lang.Runnable",
+            "program": "${workspaceFolder}","args": ["languages/java-to-llvm-ir.abnf", "tests/java-fail-test-cycle-object.java", "-q"]
+        },
+        {
+            "name": "Java interpreter cyclic inheritance across files SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "expectError": "java interpreter error: cyclic inheritance involving cyc.Peer",
+            "program": "${workspaceFolder}","args": ["languages/java-interpreter.abnf", "tests/imports/cyc/Loop.java", "-q"]
+        },
+        {
+            "name": "Java compiler cyclic inheritance across files SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "expectError": "java compiler error: cyclic inheritance involving cyc.Peer",
+            "program": "${workspaceFolder}","args": ["languages/java-to-llvm-ir.abnf", "tests/imports/cyc/Loop.java", "-q"]
+        },
+        {
             "name": "Kotlin interpreter",
             "type": "go",
             "request": "launch",

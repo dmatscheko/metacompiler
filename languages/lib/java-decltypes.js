@@ -565,14 +565,37 @@ var jLastTyVar = ""
 function jNoteTyVar(name, ofClass) {
     jTyVars["$" + name] = "Object"
     jLastTyVar = name
+    jTyList.push(name)
     if (ofClass) {
         if (jClsTyParams["$" + curClassName] == undefined) { jClsTyParams["$" + curClassName] = [] }
         jClsTyParams["$" + curClassName].push(name)
     }
 }
 function jNoteTyBound(b) {
-    if (jLastTyVar != "") { jTyVars["$" + jLastTyVar] = jOvBare(b) }
+    if (jLastTyVar != "") {
+        jTyVars["$" + jLastTyVar] = jOvBare(b)
+        jTyListBound["$" + jLastTyVar] = jNoTyArgs(b)
+    }
     jLastTyVar = ""
+}
+// The type parameter list being read: its type variables in order, and each
+// one's first bound as written (jNoTyArgs). JLS 4.4: a type variable depends
+// on the type variable that is its bound, and one that depends on itself is
+// javac's "cyclic inheritance involving T". jTyListEnd tests the list as it
+// closes and keeps the first such variable for jCycCheck.
+var jTyList = []
+var jTyListBound = {}
+var jCycTyVar = ""
+function jTyListEnd() {
+    for (var i = 0; i < jTyList.length && jCycTyVar == ""; i++) {
+        var t = jTyListBound["$" + jTyList[i]]
+        for (var n = 0; t != undefined && n < jTyList.length && t != jTyList[i]; n++) {
+            t = jTyListBound["$" + t]
+        }
+        if (t == jTyList[i] && jPkgPrefix == "") { jCycTyVar = t }
+    }
+    jTyList = []
+    jTyListBound = {}
 }
 // A declared type name that is a type variable (and no class or interface).
 function jTyVarErasure(b) {
@@ -2493,9 +2516,55 @@ var jCycDecls = {}
 var jCycOrder = []
 var jCycCur = ""
 var jCycPkg = ""
-// The user's `package p.q;`, which a clause may spell out (`p.q.A.B`).
+// The user's `package p.q;`, which a clause may spell out (`p.q.A.B`), and the
+// package of the user file being walked (jImportCands).
+var jFilePkg = ""
 function jCycNotePkg(p) {
-    if (jPkgPrefix == "" && jCycPkg == "") { jCycPkg = p }
+    if (jPkgPrefix != "") { return }
+    jFilePkg = p
+    if (jCycPkg == "") { jCycPkg = p }
+}
+// The files `import a.b.C;` may name: a/b/C.java, then a/b.java (C a member
+// type of b), each beside the importing file, then under its source root, the
+// directory its own `package` names as javac's source path does.
+function jImportCands(path) {
+    var rel = path.split(".").join("/")
+    var cands = [rel + ".java"]
+    var cut = -1
+    for (var k = 0; k < rel.length; k++) { if (rel.charAt(k) == "/") { cut = k } }
+    if (cut < 0) { return cands }
+    cands.push(rel.substring(0, cut) + ".java")
+    if (jFilePkg != "") {
+        var up = ""
+        var segs = jFilePkg.split(".")
+        for (var i = 0; i < segs.length; i++) { up = up + "../" }
+        cands.push(up + cands[0])
+        cands.push(up + cands[1])
+    }
+    return cands
+}
+// A clause name no declaration resolves may name a type of the program's own
+// package that another file declares: javac finds it on its source path as
+// Name.java beside the program and compiles that file too (JLS 7.2). Each
+// such file is loaded as an import is, until no clause is left that a new
+// file answers. importedFiles is the grammar's set of loaded files; the
+// program's own file is entered first so it is never loaded twice.
+function jCycLoadPeers() {
+    var me = c.curFile()
+    var cut = -1
+    for (var k = 0; k < me.length; k++) { if (me.charAt(k) == "/") { cut = k } }
+    importedFiles["$" + c.findImport(me.substring(cut + 1))] = true
+    var n = -1
+    while (n != jCycOrder.length) {
+        n = jCycOrder.length
+        for (var i = 0; i < n; i++) {
+            var d = jCycOrder[i]
+            var refs = jCycDecls["$" + d]
+            for (var j = 0; j < refs.length; j++) {
+                if (jCycResolve(d, refs[j], {}).length == 0) { core.importFile(refs[j], null) }
+            }
+        }
+    }
 }
 // A type declaration entered: its path is the enclosing types' names and its
 // own, dot-joined (stack is the grammar's jClassStack).
@@ -2519,14 +2588,18 @@ function jCycEnter(stack, n) {
 // no nested declaration has been entered since jCycEnter.
 function jCycSuper(name) {
     if (jCycCur == "") { return name }
+    jCycDecls["$" + jCycCur].push(jNoTyArgs(name))
+    return name
+}
+// A type's name without its type arguments: "a.B<C>.D<E>" -> "a.B.D".
+function jNoTyArgs(name) {
     var out = ""
     var depth = 0
     for (var i = 0; i < name.length; i++) {
         var ch = name.charAt(i)
         if (ch == "<") { depth++ } else if (ch == ">") { depth-- } else if (depth == 0) { out = out + ch }
     }
-    jCycDecls["$" + jCycCur].push(out)
-    return name
+    return out
 }
 function jCycParent(p) {
     var k = p.length - 1
@@ -2570,9 +2643,17 @@ function jCycMember(t, s, busy) {
     busy["$" + t] = false
     return found
 }
-// The first declaration, in source order, that depends on itself: its
-// qualified name for the diagnostic, or "".
+// The name javac gives declaration path p in its diagnostic.
+function jCycShow(p) {
+    var parts = p.split(".")
+    for (var i = 0; i < parts.length; i++) { parts[i] = jNrSimple(parts[i]) }
+    return (jCycPkg == "" ? "" : jCycPkg + ".") + parts.join(".")
+}
+// The first declaration, in source order, that depends on itself, else the
+// first type variable that does (jTyListEnd): its name for the diagnostic,
+// or "". The peer files are loaded first (jCycLoadPeers).
 function jCycCheck() {
+    jCycLoadPeers()
     var edges = {}
     for (var i = 0; i < jCycOrder.length; i++) {
         var d = jCycOrder[i]
@@ -2590,11 +2671,7 @@ function jCycCheck() {
         var work = edges["$" + start].slice(0)
         while (work.length > 0) {
             var t = work.pop()
-            if (t == start) {
-                var parts = start.split(".")
-                for (var p = 0; p < parts.length; p++) { parts[p] = jNrSimple(parts[p]) }
-                return (jCycPkg == "" ? "" : jCycPkg + ".") + parts.join(".")
-            }
+            if (t == start) { return jCycShow(start) }
             if (seen["$" + t] != true) {
                 seen["$" + t] = true
                 var more = edges["$" + t]
@@ -2602,5 +2679,15 @@ function jCycCheck() {
             }
         }
     }
-    return ""
+    // A redeclared java.lang.Object, the one class without a supertype (JLS
+    // 4.3.2), depends on itself through any type it names, since every type
+    // has Object as a supertype. javac names the first type named, as resolved
+    // from package java.lang.
+    var obj = jCycPkg == "java.lang" ? jCycDecls["$Object"] : undefined
+    if (obj != undefined && obj.length > 0) {
+        var sup = jCycResolve("Object", obj[0], {})
+        if (sup.length > 0) { return jCycShow(sup[sup.length - 1]) }
+        return obj[0].indexOf(".") < 0 ? "java.lang." + obj[0] : obj[0]
+    }
+    return jCycTyVar
 }

@@ -1288,10 +1288,10 @@ SkipAngle   = "<" { SkipAngle | SkipAngleItem } ">" ;
 // A type parameter list, of a class or of a method: each name is a type
 // variable, which a static type reads as its erasure (jNoteTyVar in
 // lib/java-decltypes.js); a list of another shape is skipped whole.
-ClsTyParams = "<" ClsTyParam { "," ClsTyParam } ">" | SkipAngle ;
+ClsTyParams <~~ jTyListEnd() ~~> = "<" ClsTyParam { "," ClsTyParam } ">" | SkipAngle ;
 ClsTyParam  = { Annotation } ClsTyVar [ KwExtends TyBound { "&" Type } ] ;
 ClsTyVar    <~~ jNoteTyVar(up.in, true) ~~> = Id ;
-MTyParams   = "<" MTyParam { "," MTyParam } ">" | SkipAngle ;
+MTyParams   <~~ jTyListEnd() ~~> = "<" MTyParam { "," MTyParam } ">" | SkipAngle ;
 MTyParam    = { Annotation } MTyVar [ KwExtends TyBound { "&" Type } ] ;
 MTyVar      <~~ jNoteTyVar(up.in, false) ~~> = Id ;
 TyBound     <~~ jNoteTyBound(stripWs(up.in)) ~~> = Type ;
@@ -2205,8 +2205,9 @@ HasStatic   = :script(~~
     // resolve. resolveImport / stripWs live in lib/compile-core.js.
     core.stdlibImports = ["java", "java.util", "java.io", "java.lang", "java.math", "java.time", "java.util.function", "javax"]
 
-    // Project-file imports: 'import a.b.C;' looks for a/b/C.java, then a/b.java
-    // under the program's directory and the -i roots (c.findImport). The file is
+    // Project-file imports: 'import a.b.C;' loads the first file jImportCands
+    // names that c.findImport locates (beside the importing file, or under an -i
+    // root); jFilePkg is the importing file's package again afterwards. The file is
     // parsed with this grammar and walked with the same tags: its class
     // statements are stashed by buildMain (importDepth > 0) and prepended to
     // jsmain, so the classes register before the main file's code runs. A file
@@ -2216,11 +2217,7 @@ HasStatic   = :script(~~
     // imported files top-level items: stashImported / emitImported (compile-core)
     core.importFile = function(path, pos) {
         if (path.length > 2 && path.substring(path.length - 2) == ".*") { return false }
-        var rel = path.split(".").join("/")
-        var cands = [rel + ".java"]
-        var cut = -1
-        for (var k = 0; k < rel.length; k++) { if (rel.charAt(k) == "/") { cut = k } }
-        if (cut > 0) { cands.push(rel.substring(0, cut) + ".java") }
+        var cands = jImportCands(path)
         for (var i = 0; i < cands.length; i++) {
             var file = c.findImport(cands[i])
             if (file == "") { continue }
@@ -2229,9 +2226,11 @@ HasStatic   = :script(~~
             var text = c.readFile(file)
             var asg = c.parse(c.agrammar, text, null, file)
             c.pushSource(file, text)
+            var pkg = jFilePkg
             importDepth = importDepth + 1
             c.compile(asg)
             importDepth = importDepth - 1
+            jFilePkg = pkg
             c.popSource()
             return true
         }

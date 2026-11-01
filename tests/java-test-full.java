@@ -1657,7 +1657,9 @@ class S101 {
 // (tests/java-fail-test-cycle.java). These shapes sit one step away and are
 // legal: a member type extending its enclosing type, a sibling member named
 // through the enclosing type, and a supertype named through an inherited
-// member type.
+// member type. A type variable bounded by another of its list is legal while
+// the chain ends at a type that is not one of them (cyclic bounds:
+// tests/java-fail-test-cycle-tyvar.java).
 class S102 {
     class A { class B extends A {} }
     class P extends Q {}
@@ -1671,7 +1673,13 @@ class S102 {
         Object r = o.new Q().new R();
         Main.check("cyc102a", b instanceof A && r instanceof P && r instanceof Q);
         Main.check("cyc102b", new M() instanceof N && new S102I.J() instanceof S102H.K);
+        S102T<Integer, Integer> t = new S102T<Integer, Integer>();
+        Main.check("cyc102c", t.first(7, 8) == 7 && S102.<String, String>pick("x").equals("x"));
     }
+    static <S extends Comparable<S>, R extends S> R pick(R r) { return r; }
+}
+class S102T<A extends B, B extends Number> {
+    A first(A a, B b) { return a; }
 }
 class S102H { interface K {} }
 class S102I extends S102H { static class J implements K {} }
