@@ -6556,6 +6556,28 @@ fun sec147() {
     var n2 = 0
     val so = listOf(1, 2, 3, 4).singleOrNull { n2++; it > 1 }
     check("one147c", n == 3 && msg == "Collection contains more than one matching element." && so == null && n2 == 3)
+    // keys / values / entries are LIVE views, one object per map: a later put, an
+    // iterator's remove and clear show through them (java 24 LinkedHashMap / TreeMap).
+    val m = mutableMapOf(1 to "a", 2 to "b", 3 to "c")
+    val ks = m.keys
+    val vs = m.values
+    val es = m.entries
+    m[2] = "z"
+    ks.remove(1)
+    m[5] = "e"
+    val r2 = mutableListOf("$m $ks $vs $es")
+    val it = vs.iterator()
+    it.next(); it.remove()
+    r2.add("$ks $vs $es ${m.keys === ks}")
+    m.clear(); m[9] = "q"
+    r2.add("$ks $vs $es")
+    check("view147d", r2.joinToString(" ") ==
+        "{2=z, 3=c, 5=e} [2, 3, 5] [z, c, e] [2=z, 3=c, 5=e] [3, 5] [c, e] [3=c, 5=e] true [9] [q] [9=q]")
+    val t = sortedMapOf(3 to "c", 1 to "a")
+    val tk = t.keys
+    val tv = t.values
+    t[2] = "b"; t[0] = "o"; t.remove(1)
+    check("view147e", "$tk $tv ${t.entries}" == "[0, 2, 3] [o, b, c] [0=o, 2=b, 3=c]")
 }
 
 fun main() {

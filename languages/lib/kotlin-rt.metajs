@@ -509,19 +509,69 @@ function ktMapPut(m, k, v) {
     var i = ktMapFind(keys, ck)
     if (i >= 0) {
         vals[i] = v
+        if (m["__vw"] !== undefined) { ktMapViewsPut(m, i) }
         return false
     }
     keys.push(ck)
     vals.push(v)
     arrModBump(keys)
     if (m["__jc"] === "java.util.TreeMap") { ktSortedSink(m, keys, vals) }
+    if (m["__vw"] !== undefined) { ktMapViewsPut(m, -1) }
     return true
 }
 // ktMapDropAt (jsrtkotlin.go): remove entry i of a map, a structural change.
-function ktMapDropAt(keys, vals, i) {
+function ktMapDropAt(m, i) {
+    var keys = ktMapKeys(m)
     k3RemoveAt(keys, i)
-    k3RemoveAt(vals, i)
+    k3RemoveAt(ktMapVals(m), i)
     arrModBump(keys)
+    if (m["__vw"] !== undefined) { ktMapViewsSync(m) }
+}
+// ktMapViewOf / ktMapViewsSync / ktMapViewsPut (jsrtkotlin.go, which has the rule):
+// a map's keys / values / entries views, made once, kept on the map and re-read
+// after every change of it.
+function ktMapViewOf(m, name) {
+    var vw = anytype
+    vw = m["__vw"]
+    if (vw === undefined) {
+        vw = {}
+        m["__vw"] = vw
+    }
+    var v = anytype
+    v = vw[name]
+    if (v !== undefined) { return v }
+    if (name == "keys") { v = ktMapView(k3SetOfDistinct(ktMapKeys(m)), m, "Key") }
+    else if (name == "values") { v = k4ViewOf(arrKindSet(k3Copy(ktMapVals(m)), 3), m) }
+    else { v = ktMapView(k3SetOfDistinct(ktElems(m)), m, "Entry") }
+    vw[name] = v
+    return v
+}
+function ktMapViewsSync(m) {
+    var vw = m["__vw"]
+    if (vw["keys"] !== undefined) { k3Replace(ktSetElems(vw["keys"]), ktMapKeys(m)) }
+    if (vw["values"] !== undefined) { k3Replace(vw["values"], ktMapVals(m)) }
+    if (vw["entries"] !== undefined) { k3Replace(ktSetElems(vw["entries"]), ktElems(m)) }
+}
+function ktMapViewsPut(m, i) {
+    if (i < 0 && m["__jc"] === "java.util.TreeMap") {
+        ktMapViewsSync(m)
+        return
+    }
+    var vw = m["__vw"]
+    var keys = ktMapKeys(m)
+    var vals = ktMapVals(m)
+    var at = i
+    if (i < 0) { at = keys.length - 1 }
+    if (i < 0 && vw["keys"] !== undefined) { ktSetElems(vw["keys"]).push(keys[at]) }
+    var va = anytype
+    va = vw["values"]
+    if (va !== undefined) {
+        if (i < 0) { va.push(vals[at]) } else { va[at] = vals[at] }
+    }
+    if (vw["entries"] !== undefined) {
+        var es = ktSetElems(vw["entries"])
+        if (i < 0) { es.push(ktMapEntry(keys[at], vals[at])) } else { es[at] = ktMapEntry(keys[at], vals[at]) }
+    }
 }
 
 // ktOrd (jsrtkotlin.go): the order of a sorted collection - its Comparator's
@@ -2356,10 +2406,9 @@ function js_ktfill(dst, src, add) {
     if (mk !== undefined && sks !== undefined) {
         var ks = k3Copy(sks)
         var vs = k3Copy(ktMapVals(src))
-        var mv = ktMapVals(dst)
         var j = mk.length - 1
         while (j >= 0) {
-            if (ktMapFind(sks, mk[j]) < 0) { ktMapDropAt(mk, mv, j) }
+            if (ktMapFind(sks, mk[j]) < 0) { ktMapDropAt(dst, j) }
             j = j - 1
         }
         for (j = 0; j < ks.length; j = j + 1) { ktMapPut(dst, ks[j], vs[j]) }
@@ -5984,7 +6033,7 @@ function ktMapMethod(m, name, args) {
         i = ktMapFind(keys, f)
         if (i < 0) { return null }
         v = vals[i]
-        ktMapDropAt(keys, vals, i)
+        ktMapDropAt(m, i)
         return v
     }
     if (name == "containsKey") { return ktMapFind(keys, f) >= 0 }
@@ -6001,9 +6050,7 @@ function ktMapMethod(m, name, args) {
         // Map.keys is a SET in Kotlin (java.util.Map.keySet), Map.values a
         // Collection, Map.entries a SET of entries - and Map.toList is a LIST of
         // PAIRS, which is why they do not share one branch.
-        if (name == "keys") { return ktMapView(k3SetOfDistinct(keys), m, "Key") }
-        if (name == "values") { return k4ViewOf(arrKindSet(k3Copy(vals), 3), m) }
-        if (name == "entries") { return ktMapView(k3SetOfDistinct(ktElems(m)), m, "Entry") }
+        if (name != "toList") { return ktMapViewOf(m, name) }
         out = []
         for (i = 0; i < keys.length; i = i + 1) {
             out.push({first: keys[i], second: vals[i]})
@@ -6019,6 +6066,7 @@ function ktMapMethod(m, name, args) {
         k3Clear(keys)
         k3Clear(vals)
         arrModBump(keys)
+        if (m["__vw"] !== undefined) { ktMapViewsSync(m) }
         return undefined
     }
     if (name == "hashCode") { return k3I32(ktElemHash(m)) }
@@ -6283,9 +6331,10 @@ function k4CursorMethod(c, name) {
         var lr = c["lr"]
         if (lr === undefined || lr < 0) { ktRaise("IllegalStateException", null) }
         var own = k4ViewOwner(a)
-        if (rtIsDictObj(own)) { ktMapDropAt(ktMapKeys(own), ktMapVals(own), lr) }
         k3RemoveAt(a, lr)
         arrModBump(a)
+        // After the cursor's own array: the map re-reads its views, which may be it.
+        if (rtIsDictObj(own)) { ktMapDropAt(own, lr) }
         c["length"] = c["length"] - 1
         c["lr"] = 0 - 1
         return undefined
@@ -6352,7 +6401,7 @@ function k4ViewWrite(view, gone) {
         } else {
             at = ktMapFind(mk, e)
         }
-        if (at >= 0) { ktMapDropAt(mk, mv, at) }
+        if (at >= 0) { ktMapDropAt(m, at) }
     }
 }
 function k4ViewOwner(v) {

@@ -4557,6 +4557,44 @@ NotMemberKw = :script(~~
         s.__wsrc = m
         return kJvmTagged(s, kMapViewClass(m, view))
     }
+    // Map.keys / values / entries ("keys" | "values" | "entries"): made once and kept
+    // on the map (__vw), as java's keySet() / values() / entrySet() hand out one LIVE
+    // object - kMapViewsSync re-reads them after every change of the map. Twin of
+    // ktMapViewOf in abnf/jsrtkotlin.go and languages/lib/kotlin-rt.metajs.
+    function kMapViewOf(m, name) {
+        if (m.__vw === undefined) { m.__vw = {k: null, v: null, e: null} }
+        var vw = m.__vw
+        if (name == "keys") {
+            if (vw.k === null) { vw.k = kMapView(kSetOfDistinct(m.keys), m, "Key") }
+            return vw.k
+        }
+        if (name == "values") {
+            if (vw.v === null) { vw.v = kViewOf(arrKindSet(m.vals.slice(0), 3), m) }
+            return vw.v
+        }
+        if (vw.e === null) { vw.e = kMapView(kSetOfDistinct(kElems(m)), m, "Entry") }
+        return vw.e
+    }
+    function kMapViewsSync(m) {
+        var vw = m.__vw
+        if (vw.k !== null) { kArrSetTo(vw.k.keys, m.keys.slice(0)) }
+        if (vw.v !== null) { kArrSetTo(vw.v, m.vals.slice(0)) }
+        if (vw.e !== null) { kArrSetTo(vw.e.keys, kElems(m)) }
+    }
+    // The views after a put: entry i took a new value, or (i < 0) a key was appended
+    // - a TreeMap sorts it in, so its views are re-read whole.
+    function kMapViewsPut(m, i) {
+        if (i < 0 && m.__jc === "java.util.TreeMap") { kMapViewsSync(m); return }
+        var vw = m.__vw
+        var at = i < 0 ? m.keys.length - 1 : i
+        if (i < 0 && vw.k !== null) { vw.k.keys.push(m.keys[at]) }
+        if (vw.v !== null) { if (i < 0) { vw.v.push(m.vals[at]) } else { vw.v[at] = m.vals[at] } }
+        if (vw.e !== null) {
+            var en = anytype
+            en = kMapEntry(m.keys[at], m.vals[at])
+            if (i < 0) { vw.e.keys.push(en) } else { vw.e.keys[at] = en }
+        }
+    }
     // A map's keys / values / entries view writes through: each element its own
     // remove / removeAll / retainAll / removeIf / clear dropped (gone) takes its
     // entry out of the map - the entry with that key, the first with that value,
@@ -4680,11 +4718,13 @@ NotMemberKw = :script(~~
             if (c.lr === undefined || c.lr < 0) { kThrowExc("IllegalStateException", null) }
             var own = anytype
             own = kViewOwner(c.arr)
-            if (kIsMap(own)) { kMapDropAt(own, c.lr) }
             var a = c.arr
             for (var j = c.lr; j + 1 < a.length; j++) { a[j] = a[j + 1] }
             a.pop()
             arrModBump(a)
+            // After the cursor's own array: the map re-reads its views (kMapViewsSync),
+            // which may be that array.
+            if (kIsMap(own)) { kMapDropAt(own, c.lr) }
             c.length = c.length - 1
             c.lr = 0 - 1
             return {v: undefined}
@@ -5626,6 +5666,7 @@ NotMemberKw = :script(~~
         m.keys.pop()
         m.vals.pop()
         arrModBump(m.keys)
+        if (m.__vw !== undefined) { kMapViewsSync(m) }
     }
     function kArrSetTo(a, es) {
         while (a.length > 0) { a.pop() }
@@ -5817,11 +5858,16 @@ NotMemberKw = :script(~~
         var ck = anytype
         ck = kCanonKey(m, k)
         var i = kMapFind(m, ck)
-        if (i >= 0) { m.vals[i] = v; return }
+        if (i >= 0) {
+            m.vals[i] = v
+            if (m.__vw !== undefined) { kMapViewsPut(m, i) }
+            return
+        }
         m.keys.push(ck)
         m.vals.push(v)
         arrModBump(m.keys)
         if (m.__jc === "java.util.TreeMap") { kSortedSink(m, m.keys, m.vals) }
+        if (m.__vw !== undefined) { kMapViewsPut(m, 0 - 1) }
     }
     // `==` for the collection operations: kEq, so setOf<Any>(1, 1L) has two elements.
     function kEqVals(a, b) { return kEq(a, b, false) }
@@ -7845,12 +7891,10 @@ NotMemberKw = :script(~~
         if (name == "size") { return {v: m.keys.length} }
         if (name == "isEmpty") { return {v: m.keys.length == 0} }
         if (name == "isNotEmpty") { return {v: m.keys.length > 0} }
-        // Map.keys is a SET in Kotlin (java.util.Map.keySet), Map.values a Collection.
-        if (name == "keys") { return {v: kMapView(kSetFrom(m.keys), m, "Key")} }
-        if (name == "values") { return {v: kViewOf(arrKindSet(kSeqMethod(m.vals, "toList", []).v, 3), m)} }
-        // Map.entries is a SET of entries; Map.toList is a LIST of PAIRS:
+        // Map.keys is a SET in Kotlin (java.util.Map.keySet), Map.values a Collection,
+        // Map.entries a SET of entries - and Map.toList is a LIST of PAIRS:
         // `m.toList()` prints [(a, 1)] and `m.entries` prints [a=1].
-        if (name == "entries") { return {v: kMapView(kSetOfDistinct(kElems(m)), m, "Entry")} }
+        if (name == "keys" || name == "values" || name == "entries") { return {v: kMapViewOf(m, name)} }
         if (name == "toList") {
             var pl = []
             for (i = 0; i < m.keys.length; i++) { pl.push(kPair(m.keys[i], m.vals[i])) }
@@ -7861,7 +7905,13 @@ NotMemberKw = :script(~~
             for (i = 0; i < m.keys.length; i++) { kMapPut(out, m.keys[i], m.vals[i]) }
             return {v: out}
         }
-        if (name == "clear") { kArrSetTo(m.keys, []); kArrSetTo(m.vals, []); arrModBump(m.keys); return {v: undefined}}
+        if (name == "clear") {
+            kArrSetTo(m.keys, [])
+            kArrSetTo(m.vals, [])
+            arrModBump(m.keys)
+            if (m.__vw !== undefined) { kMapViewsSync(m) }
+            return {v: undefined}
+        }
         // equals/hashCode are java.util.AbstractMap's: entry-wise equality, and a hash
         // that is the SUM of (key hash XOR value hash) - verified against java (JDK 24),
         // where Map.of(1, 2).hashCode() is 3.
@@ -12091,9 +12141,7 @@ NotMemberKw = :script(~~
         }
         if (kIsMap(o)) {
             if (name == "size") { return o.keys.length }
-            if (name == "keys") { return kMapView(kSetFrom(o.keys), o, "Key") }
-            if (name == "values") { return kViewOf(arrKindSet(kSeqMethod(o.vals, "toList", []).v, 3), o) }
-            if (name == "entries") { return kMapView(kSetOfDistinct(kElems(o)), o, "Entry") }
+            if (name == "keys" || name == "values" || name == "entries") { return kMapViewOf(o, name) }
             return extPropGet(o, name)
         }
         if (kIsSet(o)) {

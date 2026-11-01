@@ -1342,12 +1342,12 @@ func init() {
 			// A map drops the keys src lacks and puts src's entries, so its
 			// modification count moves only for a structural change, as with
 			// java.util's remove / putAll.
-			if dk, dv, ok := dictParts(dst); ok {
+			if dk, _, ok := dictParts(dst); ok {
 				if sk, sv, ok := dictParts(src); ok {
 					ks, vs := append([]interface{}{}, sk.elems...), append([]interface{}{}, sv.elems...)
 					for i := len(dk.elems) - 1; i >= 0; i-- {
 						if rt.ktMapFind(sk, dk.elems[i]) < 0 {
-							ktMapDropAt(dk, dv, i)
+							rt.ktMapDropAt(dst.(*jsObject), i)
 						}
 					}
 					for i := range ks {
@@ -4858,16 +4858,20 @@ func (rt *jsrt) ktGroupingMethod(g *jsObject, name string, args []interface{}) (
 func (rt *jsrt) ktMapPut(m *jsObject, k, v interface{}) {
 	keys, vals, _ := dictParts(m)
 	k = rt.ktCanonKey(m, keys, k)
-	if i := rt.ktMapFind(keys, k); i >= 0 {
+	i := rt.ktMapFind(keys, k)
+	if i >= 0 {
 		vals.elems[i] = v
-		return
+	} else {
+		keys.dropIdx()
+		keys.elems = append(keys.elems, k)
+		vals.elems = append(vals.elems, v)
+		keys.mod++
+		if m.props["__jc"] == "java.util.TreeMap" {
+			ktSortedSink(rt, m, keys, vals)
+		}
 	}
-	keys.dropIdx()
-	keys.elems = append(keys.elems, k)
-	vals.elems = append(vals.elems, v)
-	keys.mod++
-	if m.props["__jc"] == "java.util.TreeMap" {
-		ktSortedSink(rt, m, keys, vals)
+	if vw, has := m.props["__vw"].(*jsObject); has {
+		rt.ktMapViewsPut(m, vw, i)
 	}
 }
 
@@ -7407,7 +7411,7 @@ func (rt *jsrt) ktMapMethod(m *jsObject, name string, args []interface{}) (inter
 			return jsNull, true
 		}
 		old := vals.elems[i]
-		ktMapDropAt(keys, vals, i)
+		rt.ktMapDropAt(m, i)
 		return old, true
 	case "containsKey":
 		return rt.ktMapFind(keys, f) >= 0, true
@@ -7425,17 +7429,11 @@ func (rt *jsrt) ktMapMethod(m *jsObject, name string, args []interface{}) (inter
 	case "isNotEmpty":
 		return len(keys.elems) > 0, true
 	case "keys", "toList", "entries", "values":
-		switch name {
-		case "keys":
-			// Map.keys is a SET in Kotlin (java.util.Map.keySet), Map.values a
-			// Collection.
-			return ktMapView(ktSetOfDistinct(keys.elems), m, "Key"), true
-		case "values":
-			return ktViewOf(&jsArray{elems: append([]interface{}{}, vals.elems...), kind: ktArrVals}, m), true
-		case "entries":
-			// Map.entries is a SET of entries; Map.toList is a LIST of PAIRS:
-			// `m.toList()` prints [(a, 1)] and `m.entries` prints [a=1].
-			return ktMapView(ktSetOfDistinct(ktElems(rt, m)), m, "Entry"), true
+		// Map.keys is a SET in Kotlin (java.util.Map.keySet), Map.values a
+		// Collection, Map.entries a SET of entries - and Map.toList is a LIST of
+		// PAIRS: `m.toList()` prints [(a, 1)] and `m.entries` prints [a=1].
+		if name != "toList" {
+			return rt.ktMapViewOf(m, name), true
 		}
 		out := make([]interface{}, len(keys.elems))
 		for i := range keys.elems {
@@ -7456,6 +7454,9 @@ func (rt *jsrt) ktMapMethod(m *jsObject, name string, args []interface{}) (inter
 		keys.elems = nil
 		vals.elems = nil
 		keys.mod++
+		if vw, has := m.props["__vw"].(*jsObject); has {
+			rt.ktMapViewsSync(m, vw)
+		}
 		return jsUndef, true
 	case "hashCode":
 		return float64(int32(ktElemHash(rt, m))), true
@@ -8275,6 +8276,83 @@ func ktMapView(set interface{}, m interface{}, view string) interface{} {
 	return set
 }
 
+// ktMapViewOf is Map.keys / values / entries ("keys" | "values" | "entries"): made
+// once and kept on the map (__vw), as java's keySet() / values() / entrySet() hand
+// out one LIVE object - ktMapViewsSync re-reads them after every change of the map.
+// Twin of kMapViewOf in kotlin-interpreter.abnf and languages/lib/kotlin-rt.metajs.
+func (rt *jsrt) ktMapViewOf(m *jsObject, name string) interface{} {
+	vw, has := m.props["__vw"].(*jsObject)
+	if !has {
+		vw = newJSObject()
+		m.set("__vw", vw)
+	}
+	if v, made := vw.props[name]; made {
+		return v
+	}
+	keys, vals, _ := dictParts(m)
+	var v interface{}
+	switch name {
+	case "keys":
+		v = ktMapView(ktSetOfDistinct(keys.elems), m, "Key")
+	case "values":
+		v = ktViewOf(&jsArray{elems: append([]interface{}{}, vals.elems...), kind: ktArrVals}, m)
+	default:
+		v = ktMapView(ktSetOfDistinct(ktElems(rt, m)), m, "Entry")
+	}
+	vw.set(name, v)
+	return v
+}
+
+func (rt *jsrt) ktMapViewsSync(m *jsObject, vw *jsObject) {
+	keys, vals, _ := dictParts(m)
+	if s, ok := ktSetParts(vw.props["keys"]); ok {
+		s.dropIdx()
+		s.elems = append([]interface{}{}, keys.elems...)
+	}
+	if a, ok := vw.props["values"].(*jsArray); ok {
+		a.dropIdx()
+		a.elems = append([]interface{}{}, vals.elems...)
+	}
+	if s, ok := ktSetParts(vw.props["entries"]); ok {
+		s.dropIdx()
+		s.elems = ktElems(rt, m)
+	}
+}
+
+// ktMapViewsPut keeps the views after a put: entry i took a new value, or (i < 0) a
+// key was appended - a TreeMap sorts it in, so its views are re-read whole.
+func (rt *jsrt) ktMapViewsPut(m *jsObject, vw *jsObject, i int) {
+	if i < 0 && m.props["__jc"] == "java.util.TreeMap" {
+		rt.ktMapViewsSync(m, vw)
+		return
+	}
+	keys, vals, _ := dictParts(m)
+	at := i
+	if i < 0 {
+		at = len(keys.elems) - 1
+	}
+	if s, ok := ktSetParts(vw.props["keys"]); ok && i < 0 {
+		s.dropIdx()
+		s.elems = append(s.elems, keys.elems[at])
+	}
+	if a, ok := vw.props["values"].(*jsArray); ok {
+		a.dropIdx()
+		if i < 0 {
+			a.elems = append(a.elems, vals.elems[at])
+		} else {
+			a.elems[at] = vals.elems[at]
+		}
+	}
+	if s, ok := ktSetParts(vw.props["entries"]); ok {
+		s.dropIdx()
+		if e := ktMapEntry(keys.elems[at], vals.elems[at]); i < 0 {
+			s.elems = append(s.elems, e)
+		} else {
+			s.elems[at] = e
+		}
+	}
+}
+
 // ktViewOf links a snapshot array (a map's values, xs.withIndex()) to the
 // collection it reads, so a `for` over it fails fast when that one is changed.
 // Twin of kViewOf in kotlin-interpreter.abnf and languages/lib/kotlin-rt.metajs.
@@ -8323,7 +8401,7 @@ func (rt *jsrt) ktViewWrite(view interface{}, gone []interface{}) {
 			at = rt.ktMapFind(mk, g)
 		}
 		if at >= 0 {
-			ktMapDropAt(mk, mv, at)
+			rt.ktMapDropAt(owner.(*jsObject), at)
 		}
 	}
 }
@@ -8500,11 +8578,15 @@ func (rt *jsrt) ktBestBy(o *jsArray, sel interface{}, wantMax bool, ck *ktIterCh
 
 // ktMapDropAt removes entry i of a map, a structural change. Twin of kMapDropAt
 // in kotlin-interpreter.abnf and languages/lib/kotlin-rt.metajs.
-func ktMapDropAt(keys, vals *jsArray, i int) {
+func (rt *jsrt) ktMapDropAt(m *jsObject, i int) {
+	keys, vals, _ := dictParts(m)
 	keys.dropIdx()
 	keys.elems = append(keys.elems[:i], keys.elems[i+1:]...)
 	vals.elems = append(vals.elems[:i], vals.elems[i+1:]...)
 	keys.mod++
+	if vw, has := m.props["__vw"].(*jsObject); has {
+		rt.ktMapViewsSync(m, vw)
+	}
 }
 
 // ktJvmIsA is `is C` for a concrete java.util collection class C (kotlin.collections'
@@ -10862,14 +10944,16 @@ func (rt *jsrt) ktCursorMethod(c *jsObject, name string) (interface{}, bool) {
 			rt.ktRaiseV("IllegalStateException", jsNull)
 		}
 		at := int(lr)
-		if own, linked := ktViewOwner(a); linked {
-			if keys, vals, isDict := dictParts(own); isDict {
-				ktMapDropAt(keys, vals, at)
-			}
-		}
 		a.dropIdx()
 		a.elems = append(a.elems[:at], a.elems[at+1:]...)
 		a.mod++
+		// After the cursor's own array: the map re-reads its views
+		// (ktMapViewsSync), which may be that array.
+		if own, linked := ktViewOwner(a); linked {
+			if _, _, isDict := dictParts(own); isDict {
+				rt.ktMapDropAt(own.(*jsObject), at)
+			}
+		}
 		n, _ := c.props["length"].(float64)
 		c.set("length", n-1)
 		c.set("lr", float64(-1))
