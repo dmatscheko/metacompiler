@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-983** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-984** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -64,13 +64,9 @@ its report; anything structural there is a CORE ticket.
 
 # PY — Python
 
-### T-957 python: remainder of the data-model gaps · P3 · PY · IN PROGRESS (PY worker, round 18) [V]
-Left from T-954, plus one found by the PY worker, round 17 (oracle python3 3.14):
-- bound-method equality: `a.m == a.m` → True, every engine False (bound methods are plain closures; needs `__self__` / `__func__` equality).
-- `pow(2, 3, int)` (any non-number, non-instance modulus) → CPython "unsupported operand type(s) for ** or pow(): 'int', 'int', 'type'",
-  all legs "pow() 3rd argument not allowed unless all arguments are integers".
-- `sorted` / `list.sort` with NaN must follow timsort's comparison sequence (e.g. `sorted([3, nan, 1, 2])` → `[3, nan, 1, 2]`).
-- codecs: utf-16 / utf-32 (with BOM), cp1252 and the surrogateescape error handler in `encode` / `decode`.
+### T-983 python: codecs beyond utf-8/16/32, ascii, latin-1, cp1252 raise LookupError (utf-7, cp437, mac-roman...) · P3 · PY · OPEN [V]
+Found by the PY worker, round 18 (oracle python3 3.14). `"é".encode("utf-7")` → b'+AOk-'; ours LookupError: unknown encoding.
+languages/lib/python-codecs.js (+ Go twin abnf/jsrtpycodecs.go) is the place; charmap codecs are table-driven like cp1252.
 
 # RB — Ruby
 
@@ -1111,6 +1107,7 @@ T-962 swift: a labelled `if` does not parse — DONE d58d5902 (labelled if / if-
 T-963 bash compiled: `${x:-word}` expands word eagerly; a function can be called before its definition ran — DONE - lazy ${v-w} words and call-time function lookup through fnk_ slots, both engines
 T-964 bash: `unset -f`, `command -V`, namerefs in the interpreter, `declare -p` of a computed export — PARTIAL - unset -f/-v/-n, command -V for builtins/keywords, export/readonly in declare -p, namerefs; rest filed as follow-ups
 T-966 c: a parenthesised function name as callee; `sizeof expr` in a constant expression; unsigned rules in the fold — DONE - parenthesised callees, sizeof expr in constant expressions, typed (unsigned) constant fold; both halves
+T-957 python: remainder of the data-model gaps — DONE - bound-method ==/hash, pow 3-arg slot walk, CPython listsort port, utf-16/32/cp1252 codecs with all error handlers
 
 # Settled — do not re-open
 
