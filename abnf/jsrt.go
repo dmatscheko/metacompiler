@@ -491,8 +491,6 @@ type jsrt struct {
 	rubyGlobals map[string]interface{}
 	// rubyCatchTags: the tags of the Kernel#catch calls running, innermost last.
 	rubyCatchTags []interface{}
-	// rubyIOErrPend: what $stderr was given after its last newline.
-	rubyIOErrPend string
 
 	// ktRndDef is kotlin.random.Random.Default - the one generator every unseeded
 	// `random()` draws from. Built lazily by ktRndDefault (abnf/jsrtkotlin.go);
@@ -3286,8 +3284,8 @@ func (rt *jsrt) getMember(obj interface{}, key interface{}) interface{} {
 			switch ks {
 			case "length":
 				return float64(rt.strLen(o))
-			case "charCodeAt", "charAt", "indexOf", "replace", "slice", "substring", "split",
-				"toUpperCase", "toLowerCase", "trim":
+			case "charCodeAt", "charAt", "indexOf", "lastIndexOf", "replace", "slice", "substring",
+				"split", "toUpperCase", "toLowerCase", "trim":
 				return &boundMethod{recv: o, name: ks}
 			}
 		}
@@ -14227,6 +14225,28 @@ func (rt *jsrt) builtinMethod(m *boundMethod, args []interface{}) interface{} {
 				}
 			}
 			return float64(rt.strIndexOf(recv, argS(0)))
+		case "lastIndexOf":
+			// The rightmost match starting at or before the position, in code
+			// units; a NaN or missing position is the end (ECMA-262 22.1.3.11).
+			// Twin of mid 30 in languages/lib/runtime.c's builtin_method.
+			hay, needle := strUnits(recv), strUnits(argS(0))
+			i := len(hay) - len(needle)
+			if p := argN(1); p == p && p < float64(i) {
+				i = jsToInt(p)
+				if i < 0 {
+					i = 0
+				}
+			}
+			for ; i >= 0; i-- {
+				j := 0
+				for j < len(needle) && hay[i+j] == needle[j] {
+					j++
+				}
+				if j == len(needle) {
+					return float64(i)
+				}
+			}
+			return float64(-1)
 		case "replace":
 			pat := argS(0)
 			at := rt.strIndexOf(recv, pat)
@@ -19578,11 +19598,11 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		},
 		// enumerate(iterable, start=0), bound as [positionals, keywords]; both
 		// may be passed by keyword.
-		// _mec_eprintln(s): one line on the diagnostic channel, standard error
-		// (lib/python-sys.py's sys.stderr). Twin of js_pyeprintln in
-		// lib/python-rt.metajs and _mec_eprintln in python-interpreter.abnf.
-		"js_pyeprintln": func(a []uint64) uint64 {
-			fmt.Fprintln(warnWriter, rt.toString(u(a[0])))
+		// _mec_eprint(s): s on standard error, without a newline
+		// (lib/python-sys.py's sys.stderr). Twin of js_pyeprint in
+		// lib/python-rt.metajs and _mec_eprint in python-interpreter.abnf.
+		"js_pyeprint": func(a []uint64) uint64 {
+			fmt.Fprint(warnWriter, rt.toString(u(a[0])))
 			return w(jsUndef)
 		},
 		// _mec_readin(kind): standard input (readIn), for lib/python-sys.py's
@@ -20347,6 +20367,11 @@ func standardJSBindings() map[string]interface{} {
 		// goja binding in commonscript.go. The two hosts must stay identical.
 		"eprintln": jsHostFunc("eprintln", func(rt *jsrt, this uint64, args []interface{}) interface{} {
 			fmt.Fprintln(warnWriter, rt.printArgs(args)...)
+			return jsUndef
+		}),
+		// eprint is eprintln without the newline. Host id 7 in languages/lib/runtime.c.
+		"eprint": jsHostFunc("eprint", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			fmt.Fprint(warnWriter, rt.printArgs(args)...)
 			return jsUndef
 		}),
 		"printf": jsHostFunc("printf", func(rt *jsrt, this uint64, args []interface{}) interface{} {
@@ -23728,6 +23753,11 @@ func (rt *jsrt) pyMethodCall(target interface{}, name string, args []interface{}
 			var sent interface{} = jsUndef
 			if len(args) > 0 {
 				sent = args[0]
+			}
+			// A generator that never ran has no yield to receive a value.
+			if name == "send" && sent != jsUndef && sent != jsNull && !g.started && !g.done {
+				panic(&jsThrown{value: rt.pyExcInstance("TypeError",
+					"can't send non-None value to a just-started generator")})
 			}
 			return rt.pyGenValue(g.step(rt, sent))
 		case "throw":

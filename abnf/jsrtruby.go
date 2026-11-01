@@ -1780,7 +1780,7 @@ func rubyPutsLine(s string) string {
 
 // rubyIOMethod answers the methods of $stdout / STDOUT (fd 1) and $stderr /
 // STDERR (fd 2). Twin of ioMethod in ruby-interpreter.abnf, which states the
-// rules; standard error is written a line at a time there, and here too.
+// rules; standard error is unbuffered there, and here too.
 func (rt *jsrt) rubyIOMethod(o *jsObject, fd int, name string, args []interface{}) interface{} {
 	pos, _ := rubyBlockArgs(args)
 	// raw: s is a binary String's bytes, written to standard output as they are.
@@ -1793,12 +1793,7 @@ func (rt *jsrt) rubyIOMethod(o *jsObject, fd int, name string, args []interface{
 			}
 			return
 		}
-		t := rt.rubyIOErrPend + s
-		for k := strings.IndexByte(t, '\n'); k >= 0; k = strings.IndexByte(t, '\n') {
-			fmt.Fprintln(warnWriter, wtf8Clean(t[:k]))
-			t = t[k+1:]
-		}
-		rt.rubyIOErrPend = t
+		fmt.Fprint(warnWriter, wtf8Clean(s))
 	}
 	var puts func(v interface{})
 	puts = func(v interface{}) {

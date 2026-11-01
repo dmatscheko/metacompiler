@@ -2164,25 +2164,15 @@ func init() {
 			fmt.Fprint(outWriter, jvOutText(jvpFirst(rt, u(a[0]))))
 			return 0
 		}
-		// System.err.println / System.err.print: standard error is written a line
-		// at a time (the hosts have eprintln only), so text after its last newline
-		// waits for the next write. Twin of js_jveprint / js_jvewrite in
-		// lib/java-rt.metajs and jErrWrite in java-interpreter.abnf.
-		errPend := ""
-		errWrite := func(s string) {
-			t := errPend + s
-			for k := strings.IndexByte(t, '\n'); k >= 0; k = strings.IndexByte(t, '\n') {
-				fmt.Fprintln(warnWriter, t[:k])
-				t = t[k+1:]
-			}
-			errPend = t
-		}
+		// System.err.println / System.err.print write through at once, a fragment
+		// without a newline too. Twin of js_jveprint / js_jvewrite in
+		// lib/java-rt.metajs and System.err in java-interpreter.abnf.
 		m["js_jveprint"] = func(a []uint64) uint64 {
-			errWrite(jvOutText(jvpFirst(rt, u(a[0]))) + "\n")
+			fmt.Fprintln(warnWriter, jvOutText(jvpFirst(rt, u(a[0]))))
 			return 0
 		}
 		m["js_jvewrite"] = func(a []uint64) uint64 {
-			errWrite(jvOutText(jvpFirst(rt, u(a[0]))))
+			fmt.Fprint(warnWriter, jvOutText(jvpFirst(rt, u(a[0]))))
 			return 0
 		}
 		// System.arraycopy(src, srcPos, dest, destPos, length), its argument

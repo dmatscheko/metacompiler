@@ -3947,6 +3947,7 @@ long method_id_string(long name) {
 	if (str_eq_c(name, "toUpperCase")) { return 27; }
 	if (str_eq_c(name, "toLowerCase")) { return 28; }
 	if (str_eq_c(name, "trim"))        { return 29; }
+	if (str_eq_c(name, "lastIndexOf")) { return 30; }
 	return 0;
 }
 
@@ -4081,7 +4082,7 @@ void set_member(long obj, long key, long val) {
 
 /* ------------------------------------------------------------- printing - */
 
-long OUTFD;   /* 1 for println/print, 2 for eprintln */
+long OUTFD;   /* 1 for println/print, 2 for eprintln/eprint */
 
 long from_char_code(long args);
 long arg_at(long args, long i);
@@ -5132,6 +5133,24 @@ long builtin_method(long recv, long mid, long args) {
 			long from = arr_len(args) > 1 ? clamp_sub(arg_num(args, 1), n) : 0;
 			return mk_num(d_from_long(u_index_of(recv, arg_str(args, 0), from)));
 		}
+		if (mid == 30) {                                      /* lastIndexOf, in UNITS */
+			/* The rightmost match at or before the position; a NaN or missing
+			 * position is the end (ECMA-262 22.1.3.11). */
+			long sub = arg_str(args, 0);
+			long m = str_ulen(sub);
+			long i = n - m;
+			if (arr_len(args) > 1) {
+				long p = arg_num(args, 1);
+				if (!d_is_nan(p) && clamp_sub(p, n) < i) { i = clamp_sub(p, n); }
+			}
+			while (i >= 0) {
+				long j = 0;
+				while (j < m && str_ucode(recv, i + j) == str_ucode(sub, j)) { j = j + 1; }
+				if (j == m) { return mk_num(d_from_long(i)); }
+				i = i - 1;
+			}
+			return mk_num(d_from_long(-1));
+		}
 		if (mid == 23) {                                      /* replace, first only */
 			long pat = arg_str(args, 0);
 			long rep = arg_str(args, 1);
@@ -5182,7 +5201,7 @@ long builtin_method(long recv, long mid, long args) {
 
 /* ------------------------------------------------------- host functions - */
 
-/* ids: 1 println  2 print  3 eprintln  4 parseInt  5 parseFloat  6 exit
+/* ids: 1 println  2 print  3 eprintln  4 parseInt  5 parseFloat  6 exit  7 eprint
  *      10 floor 11 abs 12 max 13 min 14 imul 15 ceil 16 trunc 17 round
  *      18 sign  19 sqrt 20 pow
  *      30 String.fromCharCode  31 Array.isArray  32 byteLen  97 unicodeCase
@@ -6675,10 +6694,10 @@ long host_call(long id, long self, long args) {
 	 * jump table, so a builtin costs the same whatever its id. Every case
 	 * returns or exits; none falls through. */
 	switch (id) {
-	case 1: case 2: case 3: {
-		OUTFD = (id == 3) ? 2 : 1;
+	case 1: case 2: case 3: case 7: {
+		OUTFD = (id == 3 || id == 7) ? 2 : 1;
 		while (i < n) { if (i > 0) { o_ch(32); } print_val(arr_get(args, i)); i = i + 1; }
-		if (id != 2) { o_ch(10); }
+		if (id == 1 || id == 3) { o_ch(10); }
 		OUTFD = 1;
 		return H_UNDEF;
 	}
@@ -6954,6 +6973,18 @@ long host_call(long id, long self, long args) {
 	 * A generator is an OBJECT to typeof in all three halves, so this is a
 	 * refinement of typeof and never contradicts it. */
 	case 69: { return mk_bool(tag_of(arg_at(args, 0)) == 15); }
+	/* genState(g): a generator's run state - 0 created and never resumed, 1
+	 * suspended at a yield, 2 finished (or closed), 3 running (inside its own
+	 * body). Python's "can't send non-None value to a just-started generator"
+	 * and gi_running read it. Anything but a generator aborts, like host_scope.
+	 * Twin of genState in abnf/jsrtint.go's scopeBindings. */
+	case 114: {
+		long g = arg_at(args, 0);
+		if (tag_of(g) != 15) { die2("not a generator: ", type_of(g)); }
+		if (fe(g) != 0) { return mk_num(d_from_long(2)); }
+		if (fc(g) == 0) { return mk_num(d_from_long(0)); }
+		{ long *cb = (long *)fc(g); return mk_num(d_from_long(cb[1])); }
+	}
 	/* floPrec(v, n): the correctly rounded n SIGNIFICANT DIGIT decimal of |v|,
 	 * written DIGITS "e" EXP - the digits with no point and the trailing zeros
 	 * stripped, and EXP the decimal exponent of the FIRST digit. It is the digit
@@ -8210,6 +8241,7 @@ void boot(void) {
 	seed_root("println", mk_host(1));
 	seed_root("print", mk_host(2));
 	seed_root("eprintln", mk_host(3));
+	seed_root("eprint", mk_host(7));
 	seed_root("parseInt", mk_host(4));
 	seed_root("parseFloat", mk_host(5));
 	seed_root("exit", mk_host(6));
@@ -8250,6 +8282,7 @@ void boot(void) {
 	seed_root("scopeHas", mk_host(67));
 	seed_root("scopeDecl", mk_host(68));
 	seed_root("isGenerator", mk_host(69));
+	seed_root("genState", mk_host(114));
 	seed_root("floPrec", mk_host(70));
 	seed_root("fma", mk_host(113));
 	seed_root("fnMeta", mk_host(94));

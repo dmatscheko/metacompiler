@@ -258,6 +258,15 @@ function s07() {
                    ax.indexOf("X", -3) === 1 && ax.indexOf("", 9) === 5)
     check("str23", "\u00e9a\u00e9a".indexOf("a", 2) === 3 &&
                    "\ud83c\udf89a\ud83c\udf89a".indexOf("a", 3) === 5)
+    // lastIndexOf: the rightmost match at or before the position, a NaN position
+    // is the end, and the search counts UTF-16 code units.
+    check("str24", ax.lastIndexOf("a") === 4 && ax.lastIndexOf("a", 3) === 2 &&
+                   ax.lastIndexOf("X", -3) === -1 && ax.lastIndexOf("a", -3) === 0 &&
+                   ax.lastIndexOf("", 9) === 5 && ax.lastIndexOf("aXaXaX") === -1 &&
+                   ax.lastIndexOf("a", parseFloat("x")) === 4)
+    check("str25", "\u00e9a\u00e9a".lastIndexOf("\u00e9") === 2 &&
+                   "a\ud83c\udf89b\ud83c\udf89".lastIndexOf("\ud83c\udf89", 3) === 1 &&
+                   "a\ud83c\udf89".lastIndexOf("\udf89") === 2)
 }
 
 // ===== SECTION 08: UTF-16 string semantics =====
@@ -1652,6 +1661,7 @@ function s31() {
     check("hg01", typeof println === "function" && typeof print === "function")
     check("hg02", typeof printf === "function" && typeof sprintf === "function")
     check("hg03", typeof eprintln === "function" && typeof sprint === "function")
+    check("hg03a", typeof eprint === "function" && eprint("") === undefined)
     // fail() is a runtime ERROR and exits, so only its binding can be checked.
     check("hg04", typeof fail === "function" && typeof exit === "function")
     check("hg05", typeof parseInt === "function" && typeof parseFloat === "function")
@@ -1675,6 +1685,7 @@ function s31() {
     check("hg19", typeof scopeNew === "function" && typeof scopeParent === "function")
     check("hg20", typeof scopeGet === "function" && typeof scopeHas === "function")
     check("hg21", typeof scopeDecl === "function" && typeof isGenerator === "function")
+    check("hg21g", typeof genState === "function")
     // A function's `name` and `length` (host ids 94/95), kept on the function value:
     // ""/0 until set, a repeat overwrites, undefined for a non-function or another key.
     check("hg21a", typeof fnMeta === "function" && typeof fnMetaSet === "function")

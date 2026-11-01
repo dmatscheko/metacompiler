@@ -4,17 +4,16 @@
 #
 # The module object itself is the runtime's (_mec_mod_sys, with exit and the
 # int-digits limit); this file adds its data and the text streams to it.
-# Helpers carry the _mec_sys prefix. stdout writes through print; stderr is
-# line buffered onto the runtime's diagnostic channel (_mec_eprintln), so a
-# trailing fragment without a newline is not written. stdin reads standard
-# input a line at a time (_mec_readin). argv holds only an empty script name.
+# Helpers carry the _mec_sys prefix. stdout writes through print, stderr through
+# the runtime's diagnostic channel (_mec_eprint); both write a fragment without
+# a newline at once, so flush() has nothing to do. stdin reads standard input a
+# line at a time (_mec_readin). argv holds only an empty script name.
 
 
 class _mec_sys_Stream:
     def __init__(self, name, err):
         self.name = "<" + name + ">"
         self._mec_sys_err = err
-        self._mec_sys_buf = ""
 
     def write(self, s):
         if not isinstance(s, str):
@@ -22,13 +21,7 @@ class _mec_sys_Stream:
         if not self._mec_sys_err:
             print(s, end="")
             return len(s)
-        buf = self._mec_sys_buf + s
-        nl = buf.rfind("\n")
-        if nl >= 0:
-            for line in buf[:nl].split("\n"):
-                _mec_eprintln(line)
-            buf = buf[nl + 1:]
-        self._mec_sys_buf = buf
+        _mec_eprint(s)
         return len(s)
 
     def writelines(self, lines):

@@ -3232,28 +3232,15 @@ function js_jvwrite(args) {
     return undefined
 }
 
-// System.err.println / System.err.print: standard error is written a line at a
-// time (the hosts have eprintln only), so text after its last newline waits for
-// the next write. Twin of js_jveprint / js_jvewrite in abnf/jsrtjava.go.
-var jvErrPend = ""
-function jvErrWrite(s) {
-    var t = jvErrPend + s
-    var k = t.indexOf("\n")
-    while (k >= 0) {
-        eprintln(t.substring(0, k))
-        t = t.substring(k + 1, t.length)
-        k = t.indexOf("\n")
-    }
-    jvErrPend = t
-}
-
+// System.err.println / System.err.print write through at once, a fragment
+// without a newline too. Twin of js_jveprint / js_jvewrite in abnf/jsrtjava.go.
 function js_jveprint(args) {
-    jvErrWrite(jvOutText(jpFirst(args)) + "\n")
+    eprintln(jvOutText(jpFirst(args)))
     return undefined
 }
 
 function js_jvewrite(args) {
-    jvErrWrite(jvOutText(jpFirst(args)))
+    eprint(jvOutText(jpFirst(args)))
     return undefined
 }
 

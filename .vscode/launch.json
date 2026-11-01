@@ -3302,6 +3302,19 @@
             "program": "${workspaceFolder}","args": ["languages/python-to-llvm-ir.abnf", "tests/python-abort-test-uncaught.py", "-q", "-exe", "tests/python-abort-uncaught.out"]
         },
         {
+            "name": "Python abort probe, stderr fragment before SystemExit (interpreter, SHOULD FAIL)",
+            "type": "go",
+            "request": "launch",
+            "expectError": "stderr fragment, exit message",
+            "program": "${workspaceFolder}","args": ["languages/python-interpreter.abnf", "tests/python-abort-test-stderr.py", "-q"]
+        },
+        {
+            "name": "Python abort probe stderr fragment, native binary SHOULD ABORT, ALL HALVES (interpreter vs llvm.Run vs native)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/python-to-llvm-ir.abnf", "tests/python-abort-test-stderr.py", "-q", "-exe", "tests/python-abort-stderr.out"]
+        },
+        {
             "name": "JavaScript abort probe, uncaught Error (interpreter, SHOULD FAIL)",
             "type": "go",
             "request": "launch",
@@ -3453,7 +3466,7 @@
             "name": "Ruby abort probe, raise (interpreter, SHOULD FAIL)",
             "type": "go",
             "request": "launch",
-            "expectError": "tests/ruby-abort-test.rb:6:in `<main>': abort probe (RuntimeError)",
+            "expectError": "stderr fragment, tests/ruby-abort-test.rb:8:in `<main>': abort probe (RuntimeError)",
             "program": "${workspaceFolder}","args": ["languages/ruby-interpreter.abnf", "tests/ruby-abort-test.rb", "-q"]
         },
         {
@@ -3526,7 +3539,7 @@
             "name": "Java abort probe, uncaught RuntimeException (interpreter, SHOULD FAIL)",
             "type": "go",
             "request": "launch",
-            "expectError": "java.lang.RuntimeException: abort probe",
+            "expectError": "stderr fragment, Exception in thread",
             "program": "${workspaceFolder}","args": ["languages/java-interpreter.abnf", "tests/java-abort-test.java", "-q"]
         },
         {

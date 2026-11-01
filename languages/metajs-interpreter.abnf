@@ -8,7 +8,7 @@ do-while, for(;;), switch (=== comparison, fallthrough, stacked labels, default)
 break, continue, return, throw and try/catch/finally (the catch binding is optional),
 import './file.js' of a project file (its top level runs into the shared global scope),
 numbers (doubles, hex 0x literals included), strings with the methods length/charAt/
-charCodeAt/indexOf/replace/slice/substring/split/toUpperCase/toLowerCase/trim,
+charCodeAt/indexOf/lastIndexOf/replace/slice/substring/split/toUpperCase/toLowerCase/trim,
 booleans, null, undefined,
 arrays (push/pop/shift/unshift/reverse/slice/indexOf/join/concat/sort; nothing else -
 no map/forEach), object literals, member
@@ -503,6 +503,7 @@ KwDefault   = "default" KwEnd ;
     function siPrintln() { return println.apply(undefined, siPrintArgs(arguments)) }
     function siPrint() { return print.apply(undefined, siPrintArgs(arguments)) }
     function siEprintln() { return eprintln.apply(undefined, siPrintArgs(arguments)) }
+    function siEprint() { return eprint.apply(undefined, siPrintArgs(arguments)) }
     // to_int32 for a value outside the int64 range, the twin of runtime.c's
     // to_int32 and abnf/jsrt.go's rt.toInt32. `%` is fmod, which is exact for an
     // integral operand, so the reduction loses nothing; an infinity reduces to
@@ -985,6 +986,9 @@ KwDefault   = "default" KwEnd ;
     // ratchet in tests/metajs-test-full.js can therefore prove is that all three
     // halves answer false for every value a MetaJS program can build.
     function isGeneratorHost(v) { return false }
+    // genState(g): host id 114, a generator's run state. With no generator to
+    // ask about, every value is the floor's "not a generator" abort.
+    function genStateHost(v) { fail("not a generator: " + siTypeof(v)) }
 
     // ----- THE HOST-GLOBAL SET IS THE C FLOOR'S seed_root LIST, EXACTLY -----
     //
@@ -1029,7 +1033,7 @@ KwDefault   = "default" KwEnd ;
 
     var hostGlobals = {
         "println": siPrintln, "print": siPrint, "printf": printf, "sprintf": sprintf,
-        "eprintln": siEprintln,
+        "eprintln": siEprintln, "eprint": siEprint,
         // sprint: fmt.Sprint's text - the rendering println gives, returned rather
         // than printed, with a space between two adjacent NON-string operands.
         // fmt_sprint in languages/lib/runtime.c (host id 35) and standardJSBindings
@@ -1077,14 +1081,14 @@ KwDefault   = "default" KwEnd ;
         "sintStr": siStr, "sintNum": siNum,
         "keysOf": keysOfHost,
         "delKey": delKeyHost,
-        // The five scope names and isGenerator, host ids 64..69 of
+        // The five scope names, isGenerator and genState, host ids 64..69 and 114 of
         // languages/lib/runtime.c and abnf/jsrtint.go's scopeBindings.
         "scopeNew": scNew,
         "scopeParent": scParent,
         "scopeGet": scGet,
         "scopeHas": scHas,
         "scopeDecl": scDecl,
-        "isGenerator": isGeneratorHost,
+        "isGenerator": isGeneratorHost, "genState": genStateHost,
         // fnMeta(f, key) / fnMetaSet(f, name, length): host ids 94/95, a
         // function's name and length kept on the function value. Both grammar
         // hosts bind them (fnMetaBindings in abnf/jsrtint.go, installGojaFnMeta
@@ -1227,8 +1231,8 @@ KwDefault   = "default" KwEnd ;
     // floor's answer and the checks below change nothing.
     var arrMembers = {length: 1, push: 1, pop: 1, shift: 1, unshift: 1, reverse: 1,
                       slice: 1, indexOf: 1, join: 1, concat: 1, sort: 1}
-    var strMembers = {length: 1, charCodeAt: 1, charAt: 1, indexOf: 1, replace: 1, slice: 1,
-                      substring: 1, split: 1, toUpperCase: 1, toLowerCase: 1, trim: 1}
+    var strMembers = {length: 1, charCodeAt: 1, charAt: 1, indexOf: 1, lastIndexOf: 1, replace: 1,
+                      slice: 1, substring: 1, split: 1, toUpperCase: 1, toLowerCase: 1, trim: 1}
     var emptyArr = []
     var emptyObj = {}
     function getMember(o, k) {

@@ -214,6 +214,9 @@ func NewCommonScript(vm *goja.Runtime, compilerFuncMap *map[string]r.Object, pre
 	// name identically (standardJSBindings in jsrt.go); the two must agree or the
 	// matrix goes red.
 	vm.Set("eprintln", func(a ...interface{}) (int, error) { return fmt.Fprintln(warnWriter, a...) })
+	// eprint is eprintln without the newline: a program's standard error, where a
+	// fragment must reach the stream as written.
+	vm.Set("eprint", func(a ...interface{}) { fmt.Fprint(warnWriter, a...) })
 
 	vm.Set("sprintf", fmt.Sprintf) // Sprintf is no output.
 	vm.Set("exit", os.Exit)

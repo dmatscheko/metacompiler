@@ -6504,9 +6504,9 @@ function pyStopIter(args, val) {
     throw exc
 }
 
-// Go: js_pyeprintln. One line on standard error, for sys.stderr.
-function js_pyeprintln(s) {
-    eprintln(pyToStr(s))
+// Go: js_pyeprint. s on standard error, without a newline, for sys.stderr.
+function js_pyeprint(s) {
+    eprint(pyToStr(s))
     return undefined
 }
 
@@ -10251,6 +10251,11 @@ function pyDMethodCall(target, name, args, kw) {
             var sent = anytype
             sent = undefined
             if (args.length > 0) { sent = args[0] }
+            // A generator that never ran has no yield to receive a value.
+            if (name == "send" && sent !== undefined && sent !== null && isGenerator(target) &&
+                genState(target) == 0) {
+                pyRaiseExc("TypeError", "can't send non-None value to a just-started generator")
+            }
             var st = anytype
             // A CLOSED generator needs no special case here: close() below is a
             // real close in the floor (runtime.c's gen_close sets the cell's done

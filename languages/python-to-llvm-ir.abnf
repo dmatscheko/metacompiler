@@ -4956,15 +4956,15 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // `sys`, as far as sys.get_int_max_str_digits / set_int_max_str_digits
         // (pySysCall in abnf/jsrtpynum.go and lib/python-rt.metajs).
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "_mec_mod_sys"), callExt(b, "js_pysys_module", [])])
-        // _mec_eprintln(s): one line on standard error, for lib/python-sys.py's
+        // _mec_eprint(s): s on standard error, for lib/python-sys.py's
         // sys.stderr. No builtin name, so it is declared here and not bound
         // through declBind (which would make it a member of `builtins`).
         funcCount++
         var epIdx = funcCount
         var epf = m.NewFunc("jsf_" + epIdx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
         var epb = epf.NewBlock("entry")
-        epb.NewRet(epb.NewCall(getExtern("js_pyeprintln", 1), [epb.NewCall(getExtern("js_arg", 2), [epf.Params[1], handle(0)])]))
-        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "_mec_eprintln"), callExt(b, "js_closure", [handle(epIdx), curScopeV])])
+        epb.NewRet(epb.NewCall(getExtern("js_pyeprint", 1), [epb.NewCall(getExtern("js_arg", 2), [epf.Params[1], handle(0)])]))
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "_mec_eprint"), callExt(b, "js_closure", [handle(epIdx), curScopeV])])
         // _mec_readin(kind): standard input, for lib/python-sys.py's sys.stdin.
         funcCount++
         var riIdx = funcCount

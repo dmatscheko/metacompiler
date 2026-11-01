@@ -465,7 +465,7 @@ func programJSBindings() map[string]interface{} {
 	giBindings(b)
 	jfBindings(b)    // the boxed double, jsrtjvm.go - the same argument, one type over.
 	keysBindings(b)  // keysOf, below - the same argument again, for object enumeration.
-	scopeBindings(b) // the scope API and isGenerator - the argument once more, for the
+	scopeBindings(b) // the scope API, isGenerator and genState - the argument once more, for the
 	// one piece of floor storage layer 2 is HANDED and could not open.
 	// floPrec, host id 70 of languages/lib/runtime.c: a layer-2 file that renders
 	// a float the way C's %g does needs the value rounded to a FIXED number of
@@ -809,8 +809,8 @@ func hostBytes(rt *jsrt, v interface{}) []byte {
 	return out
 }
 
-// scopeBindings adds the FIVE scope* host globals and isGenerator, which
-// languages/lib/runtime.c seeds as host ids 64..69.
+// scopeBindings adds the FIVE scope* host globals, isGenerator and genState,
+// which languages/lib/runtime.c seeds as host ids 64..69 and 114.
 //
 // WHY THEY EXIST. A scope is the floor's private storage. An emitter hands a
 // layer-2 function a scope handle - js_pyset_var's `s`, and every `defined?` /
@@ -896,6 +896,23 @@ func scopeBindings(b map[string]interface{}) {
 	b["isGenerator"] = jsHostFunc("isGenerator", func(rt *jsrt, this uint64, args []interface{}) interface{} {
 		_, ok := argAt(args, 0).(*jsGenerator)
 		return ok
+	})
+	// genState(g): 0 created and never resumed, 1 suspended at a yield, 2
+	// finished (or closed), 3 running. Host id 114 in languages/lib/runtime.c,
+	// which explains.
+	b["genState"] = jsHostFunc("genState", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		g, ok := argAt(args, 0).(*jsGenerator)
+		switch {
+		case !ok:
+			rt.fail("not a generator: %s", rt.typeOf(argAt(args, 0)))
+		case g.done:
+			return float64(2)
+		case g.running:
+			return float64(3)
+		case g.started:
+			return float64(1)
+		}
+		return float64(0)
 	})
 }
 

@@ -11600,24 +11600,16 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // Twins: rubyPutsLine in abnf/jsrtruby.go, rbPutsLine in lib/ruby-rt.metajs.
     function putsLine(s) { return s.length > 0 && s.charCodeAt(s.length - 1) == 10 ? s : s + "\n" }
     // ----- $stdout / STDOUT and $stderr / STDERR: IO objects over fd 1 and 2 -----
-    // Standard error is written a line at a time (the hosts have eprintln only), so
-    // text after its last newline waits for the next write. Twins: rubyIOMethod
-    // in abnf/jsrtruby.go, rbIOMethod in lib/ruby-rt.metajs.
-    var ioErrPend = ""
+    // Standard error is unbuffered: a fragment without a newline is written at
+    // once. Twins: rubyIOMethod in abnf/jsrtruby.go, rbIOMethod in
+    // lib/ruby-rt.metajs.
     // raw: s is a binary String's bytes, written as they are.
     function ioWrite(io, s, raw) {
         if (io.__rio != 2) {
             if (raw) { writeBytes(s) } else { print(s) }
             return
         }
-        var t = ioErrPend + s
-        var k = t.indexOf("\n")
-        while (k >= 0) {
-            eprintln(t.substring(0, k))
-            t = t.substring(k + 1, t.length)
-            k = t.indexOf("\n")
-        }
-        ioErrPend = t
+        eprint(s)
     }
     function ioPuts(io, v) {
         if (Array.isArray(v)) {

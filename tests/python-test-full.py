@@ -367,6 +367,22 @@ def s12():
     for v in ge:
         tot += v
     check("gen6", tot == 5)
+    # A generator that has not started has no yield to receive a value: only
+    # None may be sent to it, and a closed one just stops (CPython 3.14).
+    def sent(g, v):
+        try:
+            return g.send(v)
+        except TypeError as err:
+            return str(err)
+        except StopIteration:
+            return "stop"
+    msg = "can't send non-None value to a just-started generator"
+    closed = echo()
+    closed.close()
+    check("gen7", sent(echo(), 5) == msg and sent(echo(), 0) == msg and sent(echo(), None) == 1
+          and sent((v for v in [1]), 1) == msg and sent(closed, 5) == "stop")
+    started = echo()
+    check("gen8", sent(started, 5) == msg and sent(started, None) == 1 and sent(started, 4) == 8)
 
 # ===== SECTION 13: classes and inheritance =====
 def s13():

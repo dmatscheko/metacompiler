@@ -5032,10 +5032,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // by construction: they run at program time, long after the whole script has
     // been evaluated.
     hostGlobals["_mec_mod_sys"] = {__pymod: "sys"}
-    // _mec_eprintln(s): one line on standard error, for lib/python-sys.py's
-    // sys.stderr. Twin of js_pyeprintln in abnf/jsrt.go and lib/python-rt.metajs.
-    hostGlobals["_mec_eprintln"] = function(s) {
-        eprintln(pstr(s))
+    // _mec_eprint(s): s on standard error, without a newline, for
+    // lib/python-sys.py's sys.stderr. Twin of js_pyeprint in abnf/jsrt.go and
+    // lib/python-rt.metajs.
+    hostGlobals["_mec_eprint"] = function(s) {
+        eprint(pstr(s))
         return undefined
     }
     // _mec_readin(kind): standard input for lib/python-sys.py's sys.stdin - the
@@ -11110,7 +11111,12 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     // gen.send(v) / next(gen): the next value, or StopIteration carrying the return
     // value once the body has finished - exactly Python's protocol.
+    // A generator that never ran has no yield to receive a value. Twins: the
+    // "send" arms of js_pymcall in abnf/jsrt.go and lib/python-rt.metajs.
     function genSend(g, sendv) {
+        if (sendv !== undefined && sendv !== null && g.st.started !== true && g.st.done !== true) {
+            pyListErr("TypeError", "can't send non-None value to a just-started generator")
+        }
         var r = genStep(g, sendv)
         if (!r.yielded) { pyRaise(pyStopIter(r.value)) }
         return r.value

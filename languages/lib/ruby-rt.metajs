@@ -9361,21 +9361,13 @@ function rbPutsLine(s) {
 // $stdout / STDOUT and $stderr / STDERR: IO objects over fd 1 and 2. Twin of
 // ioMethod in ruby-interpreter.abnf, which states the rules.
 function js_rio(fd) { return {__class: rbBuiltinClass("IO"), __rio: rbToF(fd)} }
-var rbIOErrPend = ""
 // raw: s is a binary String's bytes, written as they are.
 function rbIOWrite(io, s, raw) {
     if (io["__rio"] != 2) {
         if (raw) { writeBytes(s) } else { print(s) }
         return undefined
     }
-    var t = rbIOErrPend + s
-    var k = t.indexOf("\n")
-    while (k >= 0) {
-        eprintln(t.substring(0, k))
-        t = t.substring(k + 1, t.length)
-        k = t.indexOf("\n")
-    }
-    rbIOErrPend = t
+    eprint(s)
     return undefined
 }
 function rbIOPuts(io, v) {
