@@ -95,7 +95,7 @@ Found by the CORE worker, round 15. The interpreter's stripWs deletes every ASCI
 strings.TrimSpace, native strips ASCII 9-13 and 32: `int.Parse(" 1 2 ")` and `int.Parse(" 1")` give three answers.
 .NET's NumberStyles.Integer allows leading/trailing white space (U+0009-U+000D, U+0020) only; settle with a real dotnet.
 
-### T-1037 csharp: Parse overflow; two-arg Argument* ctors; absent members == null · P3 · CS · OPEN [V spec-only]
+### T-1037 csharp: Parse overflow; two-arg Argument* ctors; absent members == null · P3 · CS · IN PROGRESS (CS worker, round 5) [V spec-only]
 Per .NET docs/reference source, ours wrong in all three engines:
 - `int.Parse("3000000000")` → OverflowException "Value was either too large or too small for an Int32."; `byte.Parse("300")` → "...for an unsigned byte." Ours: -1294967296 / 44 (csParseInt wraps via csNorm, no range check).
 - `new ArgumentOutOfRangeException("r", "too big").Message` → "too big (Parameter 'r')"; ours uses the default text. `new ArgumentException("m", "pn").Message` → "m (Parameter 'pn')"; ours "m".
