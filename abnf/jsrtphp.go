@@ -5268,9 +5268,15 @@ func init() {
 		m["js_phgenstart"] = func(a []uint64) uint64 {
 			return w(rt.phpGenStart(u(a[0]).(*jsGenerator), rt.phpTest(u(a[1]))))
 		}
-		// js_phgenstep(g): a later step, the body's yield evaluating to null.
+		// js_phgenstep(g, sent): a later step, the body's yield evaluating to
+		// sent - what a 'yield from' was itself sent, a throw() included.
+		// Twin of js_phgenstep in lib/php-rt.metajs.
 		m["js_phgenstep"] = func(a []uint64) uint64 {
-			return w(rt.phpGenStep(u(a[0]).(*jsGenerator), jsNull))
+			g := u(a[0]).(*jsGenerator)
+			if t, ok := u(a[1]).(*phpGenThrowIn); ok {
+				return w(rt.phpGenThrow(g, t.v))
+			}
+			return w(rt.phpGenStep(g, u(a[1])))
 		}
 		// js_phfestep(it, first, needKey, traverse): one step of foreach's walk
 		// over a generator (js_phgenstart, js_phgenstep), or over an Iterator:
@@ -5424,6 +5430,10 @@ func (rt *jsrt) phpGenCall(g *jsGenerator, name string, args []interface{}) inte
 	case "rewind":
 		rt.phpGenRewind(g, false)
 		return jsNull
+	case "throw":
+		g.prime(rt)
+		rt.phpGenThrow(g, a0)
+		return phpGenCur(g, g.lastValue)
 	case "current", "key", "valid", "getReturn":
 	default:
 		rt.phpRaise("Error", "Call to undefined method Generator::"+name+"()")
@@ -5444,6 +5454,36 @@ func (rt *jsrt) phpGenCall(g *jsGenerator, name string, args []interface{}) inte
 		return jsNull
 	}
 	return g.retValue
+}
+
+// phpGenThrowIn is what Generator::throw sends a body parked inside a 'yield
+// from' over another generator: that yield answers it as its value, and
+// js_phgenstep throws it into the inner generator in turn. It is a type of its
+// own so that no value a program sends can pass for one.
+type phpGenThrowIn struct{ v interface{} }
+
+// phpGenDelegating reports whether a yielded value is the record of a 'yield
+// from' over a generator (__gendel, php-to-llvm-ir.abnf's emitYieldFrom).
+func phpGenDelegating(v interface{}) bool {
+	if o, ok := v.(*jsObject); ok {
+		return o.props["__gendel"] == true
+	}
+	return false
+}
+
+// phpGenThrow throws e into a started generator at the yield it is parked at,
+// or, when that yield is a 'yield from' over another generator, into that one
+// (zend_generator_throw_exception on zend_generator_get_current); a finished
+// generator throws it at the caller. Twin of phGenThrow in lib/php-rt.metajs and
+// genThrowTo in php-interpreter.abnf.
+func (rt *jsrt) phpGenThrow(g *jsGenerator, e interface{}) interface{} {
+	if g.done {
+		panic(&jsThrown{value: e})
+	}
+	if g.delegating {
+		return rt.phpGenStep(g, &phpGenThrowIn{v: e})
+	}
+	return rt.phpGenStep(g, &genThrowSignal{v: e})
 }
 
 // phpGenCur is what current() and key() answer: null once the body is done.

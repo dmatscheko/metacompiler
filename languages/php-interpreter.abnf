@@ -50,7 +50,7 @@ static local variables, global constants and the magic __FUNCTION__ / __CLASS__.
 
 Generators are covered. A generator's body runs on a coroutine of the tag host, so it
 is suspended at each yield and stepped by foreach, yield from and the Generator methods
-(current, key, next, send, valid, rewind, getReturn); an unbounded generator is
+(current, key, next, send, throw, valid, rewind, getReturn); an unbounded generator is
 iterable, and every side effect happens exactly once, in order.
 
 Warnings, notices and deprecations are raised only with the compiler flag
@@ -3112,6 +3112,10 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         }
         if (name == "rewind") { genRewind(g, false); return null }
         genPrime(g)
+        if (name == "throw") {
+            genThrowTo(g, args.pos.length > 0 ? args.pos[0] : null)
+            return g.cur
+        }
         if (name == "current") { return g.cur }
         if (name == "key") { return g.key }
         if (name == "valid") { return !g.done }
@@ -3128,6 +3132,14 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // false for an element 'yield from' passes through, whose key leaves the
     // automatic one alone.
     function genYield(k, v, auto) {
+        var sent = anytype
+        sent = genPark(k, v, auto)
+        if (isGenThrow(sent)) { throw {__exc: true, v: sent.genThrow} }
+        return sent
+    }
+    // genYield, but what the resume sent is answered as it is, a throw-in record
+    // included: the yield of a 'yield from' over a generator hands both on to it.
+    function genPark(k, v, auto) {
         var g = genCur.length > 0 ? genCur[genCur.length - 1] : null
         if (g == null) { fail("yield outside a generator") }
         if (auto && typeof k == "number" && k >= g.auto) { g.auto = trunc(k) + 1 }
@@ -3136,6 +3148,15 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         g.cf = callFrames
         g.cd = callDepths
         return coYield({k: k, v: v})
+    }
+    // Generator::throw(e) resumes the body with a throw-in record, which the
+    // yield it is parked at raises; a finished generator throws e at the caller
+    // (zend_generator_throw_exception). Twin of phGenThrow in lib/php-rt.metajs
+    // and phpGenThrow in abnf/jsrtphp.go.
+    function isGenThrow(v) { return v !== null && v !== undefined && typeof v == "object" && v.genThrow !== undefined }
+    function genThrowTo(g, e) {
+        if (g.done) { throw {__exc: true, v: e} }
+        genStep(g, {genThrow: e})
     }
     // items = [{yval}?, {yval}?, {yfrom}?]. Two {yval}s mean 'yield $k => $v'.
     function makeYield(items) {
@@ -3157,13 +3178,18 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                 // generator is continued from where it is parked.
                 var src = anytype
                 src = from()
+                // What the outer generator is sent, or has thrown into it, goes on
+                // to the inner one, and the inner one's return value is the value
+                // of the expression (ZEND_YIELD_FROM, zend_generator_get_current).
                 if (isGen(src)) {
                     genPrime(src)
                     while (!src.done) {
-                        genYield(src.key, src.cur, false)
-                        genStep(src, null)
+                        var sent = anytype
+                        sent = genPark(src.key, src.cur, false)
+                        if (isGenThrow(sent)) { genThrowTo(src, sent.genThrow) }
+                        else { genStep(src, sent === undefined ? null : sent) }
                     }
-                    return null
+                    return src.ret
                 }
                 // An Iterator is driven through its methods, the way foreach drives
                 // one (an IteratorAggregate hands over its iterator first).

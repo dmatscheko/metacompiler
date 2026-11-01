@@ -1752,6 +1752,55 @@ function s88() {
     check("nl1", $m[0][0][0] === 1 && $m["k"][0] === 8 && $b === 8);
 }
 
+// ===== SECTION 89: Generator::throw, and what 'yield from' answers and forwards =====
+// throw(e) first runs a fresh body to its first yield, raises e at the yield
+// the body is parked at and answers the next current(); a finished generator
+// throws e at the caller (Generator::throw, php-src
+// Zend/tests/generators/throw_caught.phpt). Parked inside a 'yield from' over
+// a generator, the body hands sends and throws on to it (zend_generator_get_current),
+// and the expression's value is that generator's return value - null over an
+// array (ZEND_YIELD_FROM).
+function s89thr() { try { yield 1; } catch (Exception $e) { yield "c:" . $e->getMessage(); } yield 3; }
+function s89fin() { global $s89log; try { yield 1; yield 2; } finally { $s89log .= "F"; } }
+function s89inner() { $x = yield 1; $y = yield 2; return "r" . $x . "|" . $y; }
+function s89outer() { $r = yield from s89inner(); yield $r; }
+function s89catcher() { try { yield 1; yield 2; } catch (Exception $e) { yield "in:" . $e->getMessage(); return 5; } }
+function s89deleg() { $r = yield from s89catcher(); yield "ret" . $r; }
+function s89plain() { yield 1; yield 2; }
+function s89deleg2() { try { yield from s89plain(); } catch (Exception $e) { yield "out:" . $e->getMessage(); } }
+function s89arr() { $r = yield from [1, 2]; yield $r === null ? "n" : "v"; }
+function s89() {
+    global $s89log;
+    $t = s89thr();
+    $t->current();
+    $a = $t->throw(new Exception("boom"));
+    $t->next();
+    $fresh = s89thr();
+    check("gt1", $a === "c:boom" && $t->current() === 3 && $fresh->throw(new Exception("x")) === "c:x");
+    $s89log = "";
+    $f = s89fin();
+    $f->current();
+    $m = "";
+    try { $f->throw(new Exception("u")); } catch (Exception $e) { $m .= $e->getMessage(); }
+    try { $f->throw(new Exception("d")); } catch (Exception $e) { $m .= $e->getMessage(); }
+    check("gt2", $m === "ud" && $s89log === "F" && !$f->valid());
+    $s = "";
+    foreach (s89outer() as $k => $v) { $s .= $k . "=" . $v . ";"; }
+    foreach (s89arr() as $v) { $s .= $v; }
+    check("gt3", $s === "0=1;1=2;0=r|;12n");
+    $o = s89outer();
+    $o->current();
+    $sent = $o->send("a") . "," . $o->send("b");
+    check("gt4", $sent === "2,ra|b");
+    $d = s89deleg();
+    $d->current();
+    $in = $d->throw(new Exception("e"));
+    $d->next();
+    $d2 = s89deleg2();
+    $d2->current();
+    check("gt5", $in === "in:e" && $d->current() === "ret5" && $d2->throw(new Exception("q")) === "out:q");
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -1785,6 +1834,7 @@ function main() {
     s86(); // SECTION-CALL 86
     s87(); // SECTION-CALL 87
     s88(); // SECTION-CALL 88
+    s89(); // SECTION-CALL 89
     echo "full: " . $checks . " checks, " . $failures . " failures\n";
     return $failures;
 }

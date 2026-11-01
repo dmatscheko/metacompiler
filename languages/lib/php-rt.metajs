@@ -2846,9 +2846,13 @@ function js_phgenstart(g, traverse) {
     return phGenAt(g)
 }
 
-// A later step: resume the body, its yield evaluating to null. Twin of
-// m["js_phgenstep"] in abnf/jsrtphp.go.
-function js_phgenstep(g) { return phGenStep(g, null) }
+// A later step: resume the body, its yield evaluating to sent - what a 'yield
+// from' was itself sent, a throw() included. Twin of m["js_phgenstep"] in
+// abnf/jsrtphp.go.
+function js_phgenstep(g, sent) {
+    if (phIsGenThrow(sent)) { return phGenThrow(g, sent["__phgthrow"]) }
+    return phGenStep(g, sent, false)
+}
 
 // One step of foreach's walk over a generator (js_phgenstart, js_phgenstep), or
 // over an Iterator: rewind (first) / next, valid, current and, when the loop
@@ -2857,7 +2861,7 @@ function js_phgenstep(g) { return phGenStep(g, null) }
 function js_phfestep(it, first, needKey, traverse) {
     if (phIsGen(it)) {
         if (first === true) { return js_phgenstart(it, traverse) }
-        return phGenStep(it, null)
+        return phGenStep(it, null, false)
     }
     if (first === true) { js_phmcall(it, "rewind", []) } else { js_phmcall(it, "next", []) }
     var st = {}
@@ -3044,6 +3048,7 @@ function phGenState(g) {
     st["ret"] = null       // the body's return value, once done (getReturn())
     st["auto"] = 0
     st["moved"] = false    // resumed past its first yield: it cannot be rewound
+    st["del"] = false      // parked at a 'yield from' over another generator
     phGenCell.push(g)
     phGenSt.push(st)
     return st
@@ -3051,8 +3056,9 @@ function phGenState(g) {
 
 // One handshake. The record the floor answers is returned UNCHANGED, because the
 // emitter reads .value and .done off it (and unpacks the __genkv record itself);
-// what happens here is only the bookkeeping the inspection half reads.
-function phGenStep(g, sent) {
+// what happens here is only the bookkeeping the inspection half reads. With thr
+// the handshake is the floor's g.throw(sent): sent raised at the yield.
+function phGenStep(g, sent, thr) {
     var st = phGenState(g)
     if (st["done"]) {
         var end = {}
@@ -3062,7 +3068,16 @@ function phGenStep(g, sent) {
     }
     if (st["started"]) { st["moved"] = true }
     st["started"] = true
-    var r = g.next(sent)
+    var r = anytype
+    // A body an exception leaves is finished.
+    try {
+        if (thr === true) { r = g["throw"](sent) } else { r = g.next(sent) }
+    } catch (e) {
+        st["done"] = true
+        st["last"] = null
+        st["key"] = null
+        throw e
+    }
     if (phTest(r["done"])) {
         st["done"] = true
         st["ret"] = r["value"]
@@ -3077,9 +3092,11 @@ function phGenStep(g, sent) {
     raw = r["value"]
     var kv = false
     var from = false
+    st["del"] = false
     if (raw !== undefined && raw !== null && typeof raw == "object") {
         kv = raw["__genkv"] === true
         from = raw["__genfrom"] === true
+        st["del"] = raw["__gendel"] === true
     }
     if (kv) {
         st["key"] = raw["k"]
@@ -3098,11 +3115,39 @@ function phGenStep(g, sent) {
     return r
 }
 
+// Generator::throw(e) on a started generator: e is raised at the yield the body
+// is parked at, or, when that yield is a 'yield from' over another generator,
+// sent to it as a {__phgthrow} record that js_phgenstep throws into that one
+// (zend_generator_throw_exception on zend_generator_get_current); a finished
+// generator throws e at the caller. Twin of phpGenThrow in abnf/jsrtphp.go and
+// genThrowTo in php-interpreter.abnf.
+function phGenThrow(g, e) {
+    var st = phGenState(g)
+    if (st["done"]) { throw e }
+    if (st["del"]) {
+        var t = {}
+        t["__phgthrow"] = e
+        return phGenStep(g, t, false)
+    }
+    return phGenStep(g, e, true)
+}
+
+// The record phGenThrow sends: a raw object, which no PHP value is (an instance
+// has a __class, an array is a __dict box).
+function phIsGenThrow(v) {
+    if (v === undefined) { return false }
+    if (v === null) { return false }
+    if (typeof v != "object") { return false }
+    if (v["__class"] !== undefined) { return false }
+    if (v["__dict"] === true) { return false }
+    return v["__phgthrow"] !== undefined
+}
+
 // Run an unstarted body up to its first yield (zend_generator_ensure_initialized).
 function phGenPrime(g) {
     var st = phGenState(g)
     if (!st["started"]) {
-        if (!st["done"]) { phGenStep(g, undefined) }
+        if (!st["done"]) { phGenStep(g, undefined, false) }
     }
 }
 
@@ -3145,12 +3190,12 @@ function phGenCall(g, name, args) {
     var st = phGenState(g)
     if (name == "send") {
         phGenPrime(g)
-        phGenStep(g, a0)
+        phGenStep(g, a0, false)
         return st["last"]
     }
     if (name == "next") {
         phGenPrime(g)
-        phGenStep(g, null)
+        phGenStep(g, null, false)
         return null
     }
     if (name == "rewind") {
@@ -3158,6 +3203,10 @@ function phGenCall(g, name, args) {
         return null
     }
     phGenPrime(g)
+    if (name == "throw") {
+        phGenThrow(g, a0)
+        return st["last"]
+    }
     if (name == "current") { return st["last"] }
     if (name == "key") { return st["key"] }
     if (name == "valid") { return !st["done"] }

@@ -3333,8 +3333,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             sawYield = true
             if (fromT != null) {
                 var rf = fromT(b)
-                b = rf.b
-                return {b: emitYieldFrom(b, rf.v), v: hNull}
+                return emitYieldFrom(rf.b, rf.v)
             }
             var v = hNull
             if (valT != null) { var rv = valT(b); b = rv.b; v = rv.v }
@@ -3376,8 +3375,11 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     // generator through its next() handshake (so a delegated-to generator stays lazy).
     // In a program with iterators an Iterator (or an IteratorAggregate's) is walked
     // the way foreach walks one (feStep).
-    // Deviation: the expression's own value (a sub-generator's return) is not
-    // propagated, exactly as in php-interpreter.abnf.
+    // Over a GENERATOR, what this generator is sent goes on to it (a throw() as
+    // the {__phgthrow} record js_phgenstep takes, since the yield's own record
+    // says __gendel), and its return value is the value of the expression; over
+    // anything else the value is null (ZEND_YIELD_FROM). Twin of makeYield in
+    // php-interpreter.abnf.
     function emitYieldFrom(b, srcV) {
         hidCount++
         var itN = "\x00yi" + hidCount
@@ -3385,8 +3387,10 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         var stN = "\x00ys" + hidCount
         var gnN = "\x00yg" + hidCount
         var lnN = "\x00yl" + hidCount
+        var gdN = "\x00yd" + hidCount
         if (usesIter) { srcV = callExt(b, "js_phfeobj", [srcV, hNull, hFalse]) }
         var isGen = callExt(b, "js_phisa", [srcV, emitStr(b, "Generator")])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, gdN), isGen])
         if (usesIter) {
             isGen = b.NewSelect(truthy(b, isGen), hTrue, callExt(b, "js_phisa", [srcV, emitStr(b, "Iterator")]))
         }
@@ -3447,7 +3451,9 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         callExt(bindB, "js_set", [pair, emitStr(bindB, "__genfrom"), hTrue])
         callExt(bindB, "js_set", [pair, emitStr(bindB, "k"), keyV])
         callExt(bindB, "js_set", [pair, emitStr(bindB, "v"), valV])
-        callExt(bindB, "js_yield", [pair])
+        callExt(bindB, "js_set", [pair, emitStr(bindB, "__gendel"),
+                                  callExt(bindB, "js_scope_get", [curScopeV, emitStr(bindB, gdN)])])
+        var sentV = callExt(bindB, "js_yield", [pair])
         bindB.NewBr(postB)
         var ixP = callExt(postB, "js_scope_get", [curScopeV, emitStr(postB, ixN)])
         callExt(postB, "js_scope_set", [curScopeV, emitStr(postB, ixN),
@@ -3455,9 +3461,23 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         var gPost = curF.NewBlock("")
         postB.NewCondBr(truthy(postB, callExt(postB, "js_scope_get", [curScopeV, emitStr(postB, gnN)])), gPost, headB)
         var itP = callExt(gPost, "js_scope_get", [curScopeV, emitStr(gPost, itN)])
-        callExt(gPost, "js_scope_set", [curScopeV, emitStr(gPost, stN), feStep(gPost, itP, false, hTrue, false)])
-        gPost.NewBr(headB)
-        return exitB
+        var sendB = gPost
+        if (usesIter) {
+            sendB = curF.NewBlock("")
+            var iterB = curF.NewBlock("")
+            gPost.NewCondBr(truthy(gPost, callExt(gPost, "js_scope_get", [curScopeV, emitStr(gPost, gdN)])), sendB, iterB)
+            callExt(iterB, "js_scope_set", [curScopeV, emitStr(iterB, stN), feStep(iterB, itP, false, hTrue, false)])
+            iterB.NewBr(headB)
+        }
+        callExt(sendB, "js_scope_set", [curScopeV, emitStr(sendB, stN), callExt(sendB, "js_phgenstep", [itP, sentV])])
+        sendB.NewBr(headB)
+        var retB = curF.NewBlock("")
+        var doneB = curF.NewBlock("")
+        exitB.NewCondBr(truthy(exitB, callExt(exitB, "js_scope_get", [curScopeV, emitStr(exitB, gdN)])), retB, doneB)
+        var itR = callExt(retB, "js_scope_get", [curScopeV, emitStr(retB, itN)])
+        var retV = callExt(retB, "js_phmcall", [itR, emitStr(retB, "getReturn"), callExt(retB, "js_arr_new", [])])
+        retB.NewBr(doneB)
+        return {b: doneB, v: doneB.NewPhi([llvm.ir.NewIncoming(retV, retB), llvm.ir.NewIncoming(hNull, exitB)])}
     }
     // One step of foreach's generator walk, or, in a program with iterators,
     // js_phfestep, which also drives an Iterator. The first step of a generator
@@ -3467,7 +3487,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         var travV = traverse ? hTrue : hFalse
         if (usesIter) { return callExt(b, "js_phfestep", [itV, first ? hTrue : hFalse, needKey, travV]) }
         if (first) { return callExt(b, "js_phgenstart", [itV, travV]) }
-        return callExt(b, "js_phgenstep", [itV])
+        return callExt(b, "js_phgenstep", [itV, hNull])
     }
     function makeForeachGen(iterT, keyName, valName, pat, body, byRef) {
         return function(b) {

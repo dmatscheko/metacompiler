@@ -779,8 +779,10 @@ type jsGenerator struct {
 	autoKey   float64
 
 	// PHP: the body was resumed past its first yield, so it cannot be rewound
-	// (phpGenStep in jsrtphp.go).
-	moved bool
+	// (phpGenStep in jsrtphp.go); delegating: it is parked at the yield of a
+	// 'yield from' over another generator (phpGenThrow).
+	moved      bool
+	delegating bool
 }
 
 // genExit is the sentinel finish() sends INTO a suspended body so that the
@@ -863,6 +865,7 @@ func (g *jsGenerator) step(rt *jsrt, sent interface{}) interface{} {
 		g.lastKey = jsUndef
 	} else {
 		g.lastValue, g.lastKey = genSplitKV(st.value, g.autoKey)
+		g.delegating = phpGenDelegating(st.value)
 		// The next automatic key follows the largest integer key used so far,
 		// a keyless yield's or an explicit one's (PHP's largest_used_integer_key);
 		// a string key, and any key a 'yield from' delegated (a __genfrom record),
