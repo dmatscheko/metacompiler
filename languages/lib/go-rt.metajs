@@ -3010,8 +3010,9 @@ function js_gorundefers(list) {
 // an already-bound nullary closure on goQueue and returns, and a receive that
 // finds its channel empty RUNS THE QUEUE - each queued goroutine to completion,
 // in spawn order - until one of them fills the channel. Nothing ever suspends
-// mid-body, so there is no stack to keep. The buffer size of `make(chan T, n)`
-// is not modeled (a send never blocks), the ELEMENT TYPE is, so a receive from a
+// mid-body, so there is no stack to keep, and a send with no room goes into the
+// buffer while another goroutine may yet receive it (chanSend in
+// go-interpreter.abnf). The ELEMENT TYPE is modeled too, so a receive from a
 // closed channel yields its zero value.
 
 var goQueue = []
@@ -3019,6 +3020,8 @@ var goQueue = []
 var goDepth = 0
 // Thrown to unwind a goroutine that blocks forever past every frame (goBlock).
 var goParkSig = {gopark: true}
+// How many goroutines goBlock abandoned (goDrain).
+var goParked = 0
 
 // goBlock: an operation that cannot proceed with nothing left to run (a nil
 // channel, an empty one after a drain, a select with no arm ready). A goroutine
@@ -3058,6 +3061,7 @@ function goDrain() {
                 goDepth = goDepth - 1
                 throw e
             }
+            goParked = goParked + 1
         }
         goDepth = goDepth - 1
     }
@@ -3455,6 +3459,9 @@ function js_gochan_send(ch, v) {
     if (ch === undefined || ch === null) { goBlock() }
     if (!goIsChan(ch)) { fail("send on a non-channel") }
     if (ch.closed === true) { throw goRTErr("runtime.plainError", "send on closed channel") }
+    // Main's send that nothing left could receive. Twin of chanSend in
+    // go-interpreter.abnf.
+    if (ch.buf.length >= ch.cap && goDepth == 0 && goQueue.length == 0 && goParked == 0) { goBlock() }
     ch.buf.push(v)
     return undefined
 }

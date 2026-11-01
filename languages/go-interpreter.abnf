@@ -388,8 +388,10 @@ Fallthrough <~~ push(makeFallthrough()) ~~>
 
 // go f(args) / go pkg.Fn(args): a goroutine. Concurrency is COOPERATIVE and
 // deterministic: the call is QUEUED and runs when a receive needs it (see goDrain).
-GoStmt      <~~ push(makeGoStmt(pop(), up.pos)) ~~>
-            = "go" KwEnd PostfixExpr [ ";" ] ;
+// The function value and the arguments are evaluated by the go statement itself,
+// as for defer (Go spec "Go statements").
+GoStmt      <~~ push(makeGoStmt(takeAll())) ~~>
+            = "go" KwEnd DeferTarget "(" [ Expression { "," Expression } [ Spread ] [ "," ] ] ")" [ ";" ] ;
 // select { case v := <-ch: ...; case ch <- x: ...; default: ... }. The arms are tried
 // in source order and the first READY one runs, which under the cooperative model is
 // deterministic. An arm's body is a statement list, so it needs NotSelLabel to stop
@@ -455,7 +457,7 @@ SelAsgAhead = :script(~~
 ~~) ;
 GoTgt       <~~ push({rt: pop()}) ~~> = Target ;
 SelSend     <~~ push(makeSelSend(takeAll())) ~~>
-            = "case" KwEnd PostfixExpr "<-" Expression ":" SelBody ;
+            = "case" KwEnd ( Recv | PostfixExpr ) "<-" Expression ":" SelBody ;
 SelDefault  <~~ push(makeSelDefault(takeAll())) ~~>
             = "default" KwEnd ":" SelBody ;
 SelBody     <~~ push(makeSeq(takeAll())); cScopeExit() ~~>
@@ -547,7 +549,7 @@ RecvOk      <~~ push(makeRecvOk(takeAll())) ~~>
               ( ":=" <~~ push({decl: true}) ~~> | "=" <~~ push({decl: false}) ~~> ) "<-" Expression NotComma ;
 // A '<-' that opens a line is the next statement's receive, not this send.
 ChanSend    <~~ push(makeChanSend(goChanSendBoxC(takeAll(), up.in, up.pos), up.pos)) ~~>
-            = PostfixExpr SameLine "<-" SendVal ;
+            = ( Recv | PostfixExpr ) SameLine "<-" SendVal ;
 // The sent value, followed by its goKRec record (goChanSendBoxC).
 SendVal     <~~ var sv = pop(); push(sv); push({kr: goKRec(up.start, up.pos), nl: goNilSrc(up.start, up.pos)}) ~~> = Expression ;
 
@@ -835,9 +837,11 @@ EqExpr      <~~ push(goCmpFold(takeAll())) ~~>
               { ( "==" | "!=" ) <~~ push(up.in) ~~> RelExpr <~~ push({at: up.pos, as: up.start}) ~~> } ;
 
 // SameLine: a '<' opening a line is the receive '<-ch' of the next statement.
+// NotArrow: a "<" glued to a "-" is the arrow "<-" (Go lexes the longest token), so
+// `<-cc <- 2` sends on the received channel rather than comparing cc < -2.
 RelExpr     <~~ push(goCmpFold(takeAll())) ~~>
             = AddExpr <~~ push({at: up.pos, as: up.start}) ~~>
-              { SameLine ( "<=" | ">=" | "<" | ">" ) <~~ push(up.in) ~~> AddExpr <~~ push({at: up.pos, as: up.start}) ~~> } ;
+              { SameLine ( "<=" | ">=" | "<" NotArrow | ">" ) <~~ push(up.in) ~~> AddExpr <~~ push({at: up.pos, as: up.start}) ~~> } ;
 
 // Go's two binary levels below the comparisons: '+ - | ^' bind loosest, then
 // '* / % << >> & &^'. The single-character '&' and '|' must not swallow the first
@@ -858,6 +862,9 @@ NotAmp = :script(~~
 ~~) ;
 NotBar = :script(~~
     (c.peek(0) === 124) ? abnf.newToken("\x01logical-or", 0) : undefined
+~~) ;
+NotArrow = :script(~~
+    (c.peek(0) === 45) ? abnf.newToken("\x01arrow", 0) : undefined
 ~~) ;
 
 UnaryExpr   = Recv | Neg | Not | Compl | Plus | AddrOf | Deref | PostfixExpr ;
@@ -3024,14 +3031,16 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // ----- Channels and goroutines -----
     // Concurrency is COOPERATIVE and deterministic: `go f()` queues f, and a receive
     // that finds the channel empty runs the queued goroutines until one fills it. A
-    // send never blocks (an unbuffered channel behaves as one with room), which is what
-    // makes a single-threaded interpreter able to run the handshake at all: the sender
-    // hands its value over and the receiver picks it up when it drains the queue.
+    // goroutine cannot suspend mid-body, so a send with no room still goes into the
+    // buffer while some other goroutine may yet receive it (an unbuffered channel then
+    // behaves as one with room): that is what makes a single-threaded interpreter
+    // able to run the handshake at all. Main's send blocks for good when nothing else
+    // is left that could receive (chanSend).
     // A receive on a channel that stays empty with nothing left to run blocks (goBlock).
     // cap is the buffer size of make(chan T, n). Twin of js_gochan_new in
     // lib/go-rt.metajs and abnf/jsrt.go.
     function newChan(n, zero) { return {__chan: true, buf: [], closed: false, czero: zero, cap: n} }
-    // len(ch): the values queued, which a send that never blocks can push past the
+    // len(ch): the values queued, which a send that cannot block can push past the
     // buffer size, so at most cap - Go's own count, where that send would wait.
     function chanLen(ch) { return ch.buf.length < ch.cap ? ch.buf.length : ch.cap }
     function isChan(v) { return v != undefined && v != null && typeof v == "object" && v.__chan == true }
@@ -3048,6 +3057,9 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // exit status 2 (its goroutine trace after a blank line is not reproduced).
     // Twins: goBlock in lib/go-rt.metajs and abnf/jsrtgolang.go.
     var GO_PARK = {__gopark: true}
+    // How many goroutines were abandoned that way: each was waiting on something,
+    // which a later send might have been.
+    var goParked = 0
     function goBlock() {
         if (goDepth > 0) { throw GO_PARK }
         goDrain()
@@ -3070,6 +3082,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             } catch (e) {
                 if (e !== GO_PARK) { goDepth--; throw e }
                 scopes = sc
+                goParked++
             }
             goDepth--
         }
@@ -3101,10 +3114,14 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         if (ch.buf.length < ch.cap) { goOfferMove(ch) }
         return v
     }
+    // A send with no room from main, with no goroutine queued and none abandoned, can
+    // never be received: it deadlocks (Go spec "Send statements": it blocks until
+    // the send can proceed). Twins: js_gochan_send in lib/go-rt.metajs, abnf/jsrt.go.
     function chanSend(ch, v) {
         if (ch === null || ch === undefined) { goBlock() }
         if (!isChan(ch)) fail("send on a non-channel")
         if (ch.closed) { goPlainPanic("send on closed channel") }
+        if (ch.buf.length >= ch.cap && goDepth == 0 && goQueue.length == 0 && goParked == 0) { goBlock() }
         ch.buf.push(v)
     }
     // {v, ok}: ok is false exactly when the channel is closed and drained, and then
@@ -6186,19 +6203,24 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             frame[i].f.apply(undefined, frame[i].args)
         }
     }
-    // items = [{dfn}, argThunks..., {spread}?]: the callee and the arguments are
-    // evaluated at defer time; the call runs at function exit, in LIFO order.
-    function makeDefer(items) {
+    // items = [{dfn}, argThunks..., {spread}?]: a thunk that evaluates the callee and
+    // the arguments NOW, to {f, args}, for a call that runs later (defer, go).
+    function makeLaterCall(items, what) {
         var fnT = items[0].dfn
-        var rest = items.slice(1)
-        var sfx = makeCallSfx(rest)
+        var sfx = makeCallSfx(items.slice(1))
         return function() {
             var f = fnT()
-            if (typeof f != "function") { fail("defer needs a function") }
-            var argv = callArgs(sfx)
+            if (typeof f != "function") { fail(what + " needs a function") }
+            return {f: f, args: callArgs(sfx)}
+        }
+    }
+    // The deferred call runs at function exit, in LIFO order.
+    function makeDefer(items) {
+        var callT = makeLaterCall(items, "defer")
+        return function() {
+            var c = callT()
             if (deferFrames.length == 0) { fail("defer outside a function") }
-            var frame = deferFrames[deferFrames.length - 1]
-            frame.push({f: f, args: argv})
+            deferFrames[deferFrames.length - 1].push(c)
         }
     }
 
@@ -6207,14 +6229,16 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // go f(...): the call is QUEUED and runs when a receive needs it (see goDrain).
     // The goroutine runs later, from whatever drains the queue (a receive, a select,
     // sync.WaitGroup.Wait in another package), so it keeps the scope chain of the
-    // `go` statement - a snapshot, which also keeps this iteration's loop variables.
-    function makeGoStmt(callT, pos) {
+    // `go` statement.
+    function makeGoStmt(items) {
+        var callT = makeLaterCall(items, "go")
         return function() {
+            var c = callT()
             var env = scopes.slice(0)
             goSpawn(function() {
                 var saved = scopes
                 scopes = env
-                callT()
+                c.f.apply(undefined, c.args)
                 scopes = saved
             })
             return undefined

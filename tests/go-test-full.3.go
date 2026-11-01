@@ -1809,6 +1809,56 @@ func s140() {
 	check("selrecv140", got == "handed 40 handed2 3 behind 1 1 9 b 2")
 }
 
+// ===== SECTION 141: go statements and send statements =====
+// A go statement evaluates the function value and the arguments when it runs, not
+// when the goroutine does; a "<-" glued together is the arrow token, so `<-cc <- 2`
+// sends on the channel received from cc; a send from main with a goroutine still
+// to run waits for it rather than deadlocking.
+func s141add(out chan int, a, b int) { out <- a + b }
+
+func s141() {
+	out := make(chan int, 4)
+	x := 1
+	f := s141add
+	go f(out, x, 10)
+	go func(v int) { out <- v * 100 }(x)
+	xs := []int{2, 3}
+	go s141add(out, xs[0], xs[1])
+	x = 5
+	f = nil
+	xs[0] = 50
+	sum := <-out + <-out + <-out
+	check("goargs141", sum == 11+100+5)
+	cc := make(chan chan int, 1)
+	c := make(chan int, 2)
+	cc <- c
+	sent := false
+	select {
+	case <-cc <- 2:
+		sent = true
+	default:
+	}
+	cc <- c
+	<-cc <- 3
+	b := make(chan bool, 1)
+	b <- false || true
+	check("arrow141", sent && <-c == 2 && <-c == 3 && <-b)
+	work := make(chan int, 1)
+	done := make(chan int)
+	go func() {
+		t := 0
+		for v := range work {
+			t += v
+		}
+		done <- t
+	}()
+	for i := 1; i <= 4; i++ {
+		work <- i
+	}
+	close(work)
+	check("sendwait141", <-done == 10)
+}
+
 func main() {
 	s94()   // SECTION-CALL 94
 	s95()   // SECTION-CALL 95
@@ -1855,6 +1905,7 @@ func main() {
 	s138()  // SECTION-CALL 138
 	s139()  // SECTION-CALL 139
 	s140()  // SECTION-CALL 140
+	s141()  // SECTION-CALL 141
 	fmt.Println("full:", checks, "checks,", fails, "failures")
 	os.Exit(fails)
 }

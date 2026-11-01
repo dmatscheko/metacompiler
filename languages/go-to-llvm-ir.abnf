@@ -405,9 +405,10 @@ Fallthrough <~~ push({isFallthrough: true}) ~~>
 // go f(args) / go pkg.Fn(args): a goroutine. Concurrency is COOPERATIVE and
 // deterministic (the model of go-interpreter.abnf, shared through the runtime): the
 // call is emitted into a closure that js_gospawn only QUEUES, and a receive that
-// finds its channel empty runs the queue until one of them fills it.
-GoStmt      <~~ push(makeGoStmt(pop(), up.pos)) ~~>
-            = "go" KwEnd PostfixExpr [ ";" ] ;
+// finds its channel empty runs the queue until one of them fills it. The function
+// value and the arguments are evaluated by the go statement itself, as for defer.
+GoStmt      <~~ push(makeGoStmt(takeAll())) ~~>
+            = "go" KwEnd DeferTarget "(" [ Expression { "," Expression } [ Spread ] [ "," ] ] ")" [ ";" ] ;
 // select { case v := <-ch: ...; case ch <- x: ...; default: ... }: the arms are tried
 // in source order and the first READY one runs. An arm body is a statement list, so
 // NotSelLabel stops it before the next 'case' / 'default' (both would otherwise parse
@@ -471,7 +472,7 @@ SelAsgAhead = :script(~~
 ~~) ;
 GoTgt       <~~ push({rt: pop()}) ~~> = Target ;
 SelSend     <~~ push(makeSelSend(takeAll())) ~~>
-            = "case" KwEnd PostfixExpr "<-" Expression ":" SelBody ;
+            = "case" KwEnd ( Recv | PostfixExpr ) "<-" Expression ":" SelBody ;
 SelDefault  <~~ push(makeSelDefault(takeAll())) ~~>
             = "default" KwEnd ":" SelBody ;
 SelBody     <~~ push(makeSeq(takeAll())); cScopeExit() ~~>
@@ -563,7 +564,7 @@ RecvOk      <~~ push(makeRecvOk(takeAll())) ~~>
               ( ":=" <~~ push({decl: true}) ~~> | "=" <~~ push({decl: false}) ~~> ) "<-" Expression NotComma ;
 // A '<-' that opens a line is the next statement's receive, not this send.
 ChanSend    <~~ push(makeChanSend(goChanSendBoxC(takeAll(), up.in, up.pos), up.pos)) ~~>
-            = PostfixExpr SameLine "<-" SendVal ;
+            = ( Recv | PostfixExpr ) SameLine "<-" SendVal ;
 // The sent value, followed by its goKRec record (goChanSendBoxC).
 SendVal     <~~ var sv = pop(); push(sv); push({kr: goKRec(up.start, up.pos), nl: goNilSrc(up.start, up.pos)}) ~~> = Expression ;
 
@@ -855,9 +856,11 @@ EqExpr      <~~ push(goCmpFold(takeAll())) ~~>
               { ( "==" | "!=" ) <~~ push(up.in) ~~> RelExpr <~~ push({at: up.pos, as: up.start}) ~~> } ;
 
 // SameLine: a '<' opening a line is the receive '<-ch' of the next statement.
+// NotArrow: a "<" glued to a "-" is the arrow "<-" (Go lexes the longest token), so
+// `<-cc <- 2` sends on the received channel rather than comparing cc < -2.
 RelExpr     <~~ push(goCmpFold(takeAll())) ~~>
             = AddExpr <~~ push({at: up.pos, as: up.start}) ~~>
-              { SameLine ( "<=" | ">=" | "<" | ">" ) <~~ push(up.in) ~~> AddExpr <~~ push({at: up.pos, as: up.start}) ~~> } ;
+              { SameLine ( "<=" | ">=" | "<" NotArrow | ">" ) <~~ push(up.in) ~~> AddExpr <~~ push({at: up.pos, as: up.start}) ~~> } ;
 
 // Go's two binary levels below the comparisons: '+ - | ^' bind loosest, then
 // '* / % << >> & &^'. The single-character '&' and '|' must not swallow the first
@@ -878,6 +881,9 @@ NotAmp = :script(~~
 ~~) ;
 NotBar = :script(~~
     (c.peek(0) === 124) ? abnf.newToken("\x01logical-or", 0) : undefined
+~~) ;
+NotArrow = :script(~~
+    (c.peek(0) === 45) ? abnf.newToken("\x01arrow", 0) : undefined
 ~~) ;
 
 UnaryExpr   = Recv | Neg | Not | Compl | Plus | AddrOf | Deref | PostfixExpr ;
@@ -3074,10 +3080,10 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             return {b: b, v: callExt(b, "js_closure", [handle(idx), curScopeV])}
         }
     }
-    // items = [fname, {mname}?, argThunks...]: the function value and the arguments
-    // are evaluated at defer time and pushed as a [f, args] pair onto the innermost
-    // function's $defers list; js_gorundefers runs them LIFO at every return.
-    function makeDefer(items) {
+    // items = [{dfn}, argThunks..., {spread}?]: a thunk that evaluates the function
+    // value and the arguments NOW, to a [f, args] pair, for a call that runs later
+    // (defer, go). Twin of makeLaterCall in go-interpreter.abnf.
+    function makeLaterCall(items) {
         var fnT = items[0].dfn
         var argTs = items.slice(1)
         var spread = false
@@ -3091,7 +3097,17 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             var pairV = callExt(b, "js_arr_new", [])
             callExt(b, "js_arr_push", [pairV, fV])
             callExt(b, "js_arr_push", [pairV, ea.v])
-            callExt(b, "js_arr_push", [callExt(b, "js_scope_get", [curScopeV, emitStr(b, "$defers")]), pairV])
+            return {b: b, v: pairV}
+        }
+    }
+    // The pair goes onto the innermost function's $defers list; js_gorundefers runs
+    // them LIFO at every return.
+    function makeDefer(items) {
+        var callT = makeLaterCall(items)
+        return function(b) {
+            var r = callT(b)
+            b = r.b
+            callExt(b, "js_arr_push", [callExt(b, "js_scope_get", [curScopeV, emitStr(b, "$defers")]), r.v])
             return b
         }
     }
@@ -5952,10 +5968,24 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     }
     // ----- Goroutines, channels and select -----
 
-    // go f(...): the whole call goes into a nullary closure that js_gospawn queues.
-    function makeGoStmt(callT, pos) {
+    // go f(...): the [f, args] pair is evaluated now and kept in a scope of its own;
+    // the nullary closure js_gospawn queues makes the call.
+    function makeGoStmt(items) {
+        var callT = makeLaterCall(items)
         return function(b) {
-            callExt(b, "js_gospawn", [emitCallClosure(b, callT)])
+            var r = callT(b)
+            b = r.b
+            var savedScope = curScopeV
+            curScopeV = callExt(b, "js_scope_new", [savedScope])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "$gocall"), r.v])
+            var closV = emitCallClosure(b, function(gb) {
+                var pairV = callExt(gb, "js_scope_get", [curScopeV, emitStr(gb, "$gocall")])
+                callExt(gb, "js_call", [callExt(gb, "js_get", [pairV, emitNum(gb, 0)]), hUndef,
+                                        callExt(gb, "js_get", [pairV, emitNum(gb, 1)])])
+                return {b: gb, v: hUndef}
+            })
+            curScopeV = savedScope
+            callExt(b, "js_gospawn", [closV])
             return b
         }
     }

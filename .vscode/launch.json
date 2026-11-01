@@ -3496,6 +3496,20 @@
             "program": "${workspaceFolder}","args": ["languages/go-to-llvm-ir.abnf", "tests/go-abort-deadlock-test.go", "-q", "-exe", "tests/go-abort-deadlock.out"]
         },
         {
+            "name": "Go abort probe, send deadlock (interpreter, SHOULD FAIL)",
+            "type": "go",
+            "request": "launch",
+            "expectError": "fatal error: all goroutines are asleep - deadlock!",
+            "expectExit": 2,
+            "program": "${workspaceFolder}","args": ["languages/go-interpreter.abnf", "tests/go-abort-send-test.go", "-q"]
+        },
+        {
+            "name": "Go abort probe, send deadlock, native binary SHOULD ABORT, ALL HALVES (interpreter vs llvm.Run vs native)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/go-to-llvm-ir.abnf", "tests/go-abort-send-test.go", "-q", "-exe", "tests/go-abort-send.out"]
+        },
+        {
             "name": "Go abort probe, unbounded recursion (interpreter, SHOULD FAIL)",
             "type": "go",
             "request": "launch",

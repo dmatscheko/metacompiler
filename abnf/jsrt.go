@@ -563,6 +563,8 @@ type jsrt struct {
 	goQueue []interface{}
 	// goDepth counts the goroutines running right now (drains nest), so 0 is main.
 	goDepth int
+	// goParked counts the goroutines goBlock abandoned (goRun).
+	goParked int
 	// goOffers / goOfferPend: a select's send offers (goOfferMove in jsrtgolang.go).
 	goOffers    []goOffer
 	goOfferPend []goOffer
@@ -2414,6 +2416,7 @@ func (rt *jsrt) goRun(t interface{}) {
 			if _, park := caught.(goParkSignal); !park {
 				panic(caught)
 			}
+			rt.goParked++
 		}
 	}()
 	rt.call(t, jsUndef, nil)
@@ -17446,6 +17449,11 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			}
 			if o.props["closed"] == true {
 				panic(goRTErr("runtime.plainError", "send on closed channel"))
+			}
+			// Main's send that nothing left could receive. Twin of chanSend in
+			// go-interpreter.abnf.
+			if float64(len(buf.elems)) >= rt.toNumber(o.props["cap"]) && rt.goDepth == 0 && len(rt.goQueue) == 0 && rt.goParked == 0 {
+				rt.goBlock()
 			}
 			buf.elems = append(buf.elems, u(a[1]))
 			return 0
