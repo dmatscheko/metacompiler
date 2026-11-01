@@ -307,12 +307,10 @@ func (st *rxSt) propCls(name string, at int) *rxCls {
 	return cls
 }
 
-// propClsEs is ECMAScript's reading of \p{name} under the u flag; twin of
-// jxPropClsEs in lib/java-regex.js, which describes it.
-func (st *rxSt) propClsEs(name string) *rxCls {
-	if cls := st.jupPropClsEs(name); cls != nil {
-		return cls
-	}
+// jxPropClsEs is ECMAScript's reading of \p{name} under the u flag over
+// java.lang.Character's tables; twin of jxPropClsEs in lib/java-regex.js, which
+// describes it.
+func (st *rxSt) jxPropClsEs(name string) *rxCls {
 	cls := rxNewCls()
 	key, val, isPair := strings.Cut(name, "=")
 	ok := false

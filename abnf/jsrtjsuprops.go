@@ -7,11 +7,22 @@ import "strings"
 // same tables (node 24, Unicode 17.0; that file's header describes the encoding).
 
 // The \p{..} ids rxPropHit is asked for: jupPBin + b is binary property b,
-// jupPScx + n Script_Extensions containing script ordinal n.
+// jupPScx + n Script_Extensions containing script ordinal n, jupPGc + t general
+// category t, jupPSc + n script n and jupPJv + i the property jxPropClsEs reads as
+// jupJvIDs[i], each corrected by jupU17Table.
 const (
 	jupPBin = 2048
 	jupPScx = 2304
+	jupPGc  = 2560
+	jupPSc  = 2624
+	jupPJv  = 2880
 )
+
+// jupJvIDs and jupScNew are JUP_JV_IDS and JUP_SC_NEW of lib/js-uprops.js.
+var jupJvIDs = []int{rxPAlpha, rxPLower, rxPUpper, rxPCased, rxPWhite, rxPBin, rxPBin + 1, rxPBin + 2,
+	rxPBin + 3, rxPBin + 4, rxPBin + 5, rxPBin + 6, rxPBin + 7, rxPAssigned}
+
+var jupScNew = []string{"Sidetic", "Sidt", "Tolong_Siki", "Tols", "Beria_Erfe", "Berf", "Tai_Yo", "Tayo"}
 
 var jupBinNames = []string{
 	"Bidi_Control", "Bidi_C", "Case_Ignorable", "CI", "Changes_When_Casefolded", "CWCF",
@@ -415,6 +426,32 @@ const jupBinTable = "" +
 	"0?jk0?jl0?jm0?jn0?jo0?jp00=k00=l00id00ie00kd00ke032K032M0?bN0?bT0?hk0?hm0?ja0?jb0?jc0?jd0?je0?jf0?jg" +
 	"0?jh0?ji0?jj0?jk0?jl0?jm0?jn0?jo0?jp0?oN0?oP"
 
+const jupU17Table = "" +
+	"00:E00:E50100100R?00R?50600100bL00bL50?00100dL00dL50@00101[?01[M60X00001[P01[[60X00002310231J00000" +
+	"02>802>8L0000002H502H5L0000002H702H=L0000002H?02H@L0000002HB02HBL0000002HF02HGL0000002HI02HLL00000" +
+	"02HN02HOL0000002HQ02HQL0000002HT02HUL0000002HW02HYL0000002H[02H^L0000002Ha02HhL0000002Hl02HpL00000" +
+	"02I102I1L0000002I302I7L0000002ID02INL0000002IQ02IRL0000002IT02ITL0000002IW02IWL0000002IY02I_L00000" +
+	"02I`02I`I0000002Ia02IkL0000002Im02InL0000002J002J5L0000002J@02JAL0000002JH02JHL0000002JJ02JJL00000" +
+	"02JM02JOL0000002JR02JVL0000002JX02JYL0000002J]02J`L0000002Jc02JmL0000002Jp02K3L0000002K602K7L00000" +
+	"02K902K=L0000002K@02K@L0000002KB02KBL0000002KE02KXL0000002K[02K`L0000002Kg02KgL0000002Kl02KmL00000" +
+	"02Ko02L1L0000002L302L4L0000002L>02L>L0000002L@02LAL0000002MU02MWL0000002_F02_FL000000:O>0:O>10100=" +
+	"0:O?0:O?20100;0:OB0:OB10100=0:OD0:OD10100=0:Ob0:Ob40100;0?`30?`BL060000?g@0?gAL060000?h80?h>L06000" +
+	"0@U00@UI52]0010@l50@l54060010@l60@l75060010@l@0@l@H060000@lA0@lHL060000@lk0@ll6060010A^P0A^P61S001" +
+	"0A^Q0A^Q81S0010A^R0A^T61S0010A^U0A^U81S0010A^V0A^V61S0010A^W0A^W81S0010Aga0AhH52^0010AhI0AhI42^001" +
+	"0AhJ0AhK52^0010AhP0AhY92^0000FkP0Fki12_00=0Fkl0FlC22_00;0Fpc0Fpd40S00Q0Fpe0Fpg:0S00Q0HOi0HOp52800Q" +
+	"0He90HeN52800Q0Hg00Hhc52800Q0Ldk0LdmL000000Lkk0Ll@L000000LlP0Ll`L000000Lla0LlaI000000NK00NKN52`001" +
+	"0NKP0NKR52`0010NKS0NKS62`0010NKT0NKU52`0010NKV0NKV62`0010NKW0NK^52`0010NK_0NK`62`0010NKa0NKe52`001" +
+	"0NKf0NKf62`0010NKo0NKo52`0010NKp0NKp42`0010O000O03L000000O050O0[L000000O0a0O2CL000000O2P0O2_L00000" +
+	"0O2b0O2pL000000O310O3>L000000O3A0O3fL000000O4=0O4?L000000O4`0O4`L000000O5]0O5`L000000O6^0O6^L00000" +
+	"0O9P0O9UL000000O<R0O<SL000000O>D0O>EL000000O>H0O>HL000000O>L0O>ML000000O?b0O?cL000000O?g0O?gL00000" +
+	"0OCo0OCoL000000OE60OE8L000000OE?0OE?L000000OEX0OE_L000000OEb0OEcL000000OEl0OF6L000000OF80OF9L00000" +
+	"0OF>0OF?L000000OFA0OFDL000000OFG0OFSL000000OFV0OFWL000000OFY0OFaL000000OFd0OFlL000000OFn0OG1L00000" +
+	"0OG50OG@L000000OGD0OGKL000000OGO0OGPL000000OGR0OGRL000000OGT0OGWL000000OGY0OG_L000000OGa0OGcL00000" +
+	"0OGe0OGjL000000OK60OK:L000000OKC0OKDL000000OKH0OKHL001600OKV0OKXL000000OKZ0OKZL000000OKb0OKcL00000" +
+	"0OMe0OMpL000000OOE0OOIL000000ORa0ORlL000000OS00OS1L000000OS@0OSHI000000OX00OYGL000000OYP0OY^L00000" +
+	"0OZ:0OZ:L001600OZ>0OZ>L001600O[80O[8L001600O[=0O[=L001600O[Z0O[ZL001600O[`0O[`L001600O`k0O`kL00000" +
+	"0[Lk0[Lp50S00Q0]kR0]k^50S00Q0c>a0dAj50S00Q"
+
 const jupScxTable = "" +
 	"002h002h0000:m00:m0100;700;70200;900;;0200;=00;=0300;G00;G0400;I00;I0200<000<00500<100<10600<200<207" +
 	"00<300<30800<400<40900<500<50:00<600<60;00<700<70<00<800<80=00<900<90>00<:00<:0?00<;00<;0@00<<00<<0A" +
@@ -690,32 +727,69 @@ const jupFoldNTable = "" +
 	"01oS01oS01oT01oT01oU01oU01oV01oV01oW01oW01oX01oX01oY01oY01oZ01oZ01o[01o[01o]01o]01o^01o^01o_01o_01o`" +
 	"01o`01od01od01om01om01p301p301p<01p<01pd01pd01pm01pm024V024V024Z024Z024[024["
 
-// jupPropClsEs is the class of the names lib/js-uprops.js answers, or nil for
-// the rest. Twin of jupPropClsEs there.
+// jupPropClsEs is ECMAScript's reading of \p{name} under the u flag: the names
+// lib/js-uprops.js answers, else jxPropClsEs's with their ids read over
+// jupU17Table (jupID). Twin of jupPropClsEs there.
 func (st *rxSt) jupPropClsEs(name string) *rxCls {
 	key, val, isPair := strings.Cut(name, "=")
+	cls := rxNewCls()
 	if !isPair {
 		for i, n := range jupBinNames {
 			if n == name {
-				cls := rxNewCls()
 				jxProps(cls, jupPBin+i/2)
 				return cls
 			}
 		}
-		return nil
+	} else if scx := key == "Script_Extensions" || key == "scx"; scx || key == "Script" || key == "sc" {
+		n := jupScriptOrd(val)
+		if n < 0 {
+			st.fail("Invalid property name")
+			return cls
+		}
+		if scx {
+			jxProps(cls, jupPScx+n)
+		} else {
+			jxProps(cls, jupPSc+n)
+		}
+		return cls
 	}
-	if key != "Script_Extensions" && key != "scx" {
-		return nil
+	cls = st.jxPropClsEs(name)
+	for k, a := range cls.props {
+		cls.props[k] = jupID(a)
 	}
-	// The script is named as for Script; its ordinal is the id jxScriptEs gives.
-	sc := rxNewCls()
-	if !jxScriptEs(sc, val) {
-		st.fail("Invalid property name")
-		return sc
-	}
-	cls := rxNewCls()
-	jxProps(cls, jupPScx+sc.props[0]-rxPSc)
 	return cls
+}
+
+// jupScriptOrd is the ordinal of the script a Script value v names, else -1.
+// Twin of jupScriptOrd in lib/js-uprops.js.
+func jupScriptOrd(v string) int {
+	for i, n := range jupScNew {
+		if n == v {
+			return 172 + i/2
+		}
+	}
+	sc := rxNewCls()
+	if jxScriptEs(sc, v) {
+		return sc.props[0] - rxPSc
+	}
+	return -1
+}
+
+// jupID is jxPropClsEs's property id a as the id that reads it over
+// jupU17Table. Twin of jupId in lib/js-uprops.js.
+func jupID(a int) int {
+	switch {
+	case a >= rxPSc && a < rxPBlk:
+		return jupPSc + a - rxPSc
+	case a >= rxPGc && a < rxPSc:
+		return jupPGc + a - rxPGc
+	}
+	for i, x := range jupJvIDs {
+		if x == a {
+			return jupPJv + i
+		}
+	}
+	return a
 }
 
 // jupPropHit answers the ids above. Twin of jupPropHit in lib/js-uprops.js.
@@ -723,10 +797,13 @@ func jupPropHit(id, c int) bool {
 	if c < 0 || c > 0x10FFFF {
 		return false
 	}
+	if id >= jupPGc {
+		return jupU17Hit(id, c)
+	}
 	if id >= jupPScx {
 		k := jupScxSet(c)
-		if k < 0 {
-			return jxScript(c) == id-jupPScx
+		if k < 0 || jupScxSets[k] == "" {
+			return jupScript(c) == id-jupPScx
 		}
 		set := jupScxSets[k]
 		for i := 0; i < len(set); i += 2 {
@@ -737,6 +814,48 @@ func jupPropHit(id, c int) bool {
 		return false
 	}
 	return jupBinHit(id-jupPBin, c)
+}
+
+// jupU17Hit reports whether c has the jupPGc, jupPSc or jupPJv property id.
+// Twin of jupU17Hit in lib/js-uprops.js.
+func jupU17Hit(id, c int) bool {
+	t := jupU17Table
+	r := jupU17Run(c)
+	switch {
+	case id >= jupPJv:
+		i := id - jupPJv
+		if r < 0 {
+			return rxPropHit(jupJvIDs[i], rune(c))
+		}
+		if jupJvIDs[i] == rxPAssigned {
+			return jcDig(t, r*14+8) != 0
+		}
+		return jcNum(t, r*14+11, 3)>>i&1 == 1
+	case id >= jupPSc:
+		return jupScript(c) == id-jupPSc
+	case r < 0:
+		return jxGc(c) == id-jupPGc
+	}
+	return jcDig(t, r*14+8) == id-jupPGc
+}
+
+// jupScript is the script ordinal of c. Twin of jupScript in lib/js-uprops.js.
+func jupScript(c int) int {
+	if r := jupU17Run(c); r >= 0 {
+		return jcNum(jupU17Table, r*14+9, 2)
+	}
+	return jxScript(c)
+}
+
+// jupU17Run is the record of jupU17Table that holds c, else -1. Twin of
+// jupU17Run in lib/js-uprops.js.
+func jupU17Run(c int) int {
+	t := jupU17Table
+	r := jcRun(t, c, 14)
+	if jcNum(t, r*14, 4) <= c && c <= jcNum(t, r*14+4, 4) {
+		return r
+	}
+	return -1
 }
 
 // jupBinHit reports whether code point c has binary property b.
@@ -759,7 +878,8 @@ func jupBinHit(b, c int) bool {
 }
 
 // jupScxSet is the index in jupScxSets of c's Script_Extensions when they are
-// not just its Script, else -1. Twin of jupScxSet in lib/js-uprops.js.
+// not just its Script, else -1; an empty set is a script java.lang.Character does
+// not know and jupU17Table gives. Twin of jupScxSet in lib/js-uprops.js.
 func jupScxSet(c int) int {
 	t := jupScxTable
 	a, z := 0, len(t)/10

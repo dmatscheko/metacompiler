@@ -646,6 +646,22 @@ type rxSt struct {
 	startopt bool
 	// uni is the U flag: JavaScript's u, where the pattern is code points.
 	uni bool
+	// es is ECMAScript's escapes and errors (o or S), strict the S flag (u's
+	// strict grammar), hasNames whether the pattern names a group, and unsup
+	// that err reports a feature the engine lacks (rxUnsup in lib/regex.js).
+	es       bool
+	strict   bool
+	hasNames bool
+	unsup    bool
+	// late is a syntax error node reports once the whole pattern is read, and
+	// unsupMsg the first construct the engine lacks (failUnsup).
+	late     string
+	unsupMsg string
+	// apath, nalts and npaths place each named group in the alternations
+	// (dupNameEs).
+	apath  []int
+	nalts  int
+	npaths [][]int
 }
 
 // escU is JavaScript's \u escape under U, after the u: \u{h..} is the code point,
@@ -1124,7 +1140,11 @@ func rxBadEscP(c rune, inClass bool) bool {
 func (st *rxSt) esc(inClass bool) rxEscRes {
 	var res rxEscRes
 	if st.i >= st.n {
-		st.fail("trailing backslash in pattern")
+		if st.es {
+			st.fail("\\ at end of pattern")
+		} else {
+			st.fail("trailing backslash in pattern")
+		}
 		return res
 	}
 	c := st.p[st.i]
@@ -1146,6 +1166,11 @@ func (st *rxSt) esc(inClass bool) rxEscRes {
 		}
 		return rxEscRes{ch: rune(v)}
 	}
+	if st.es {
+		if r, ok := st.escEs(c, inClass); ok {
+			return r
+		}
+	}
 	// JavaScript's \p{name} and \P{name} under U; without U they are identity escapes.
 	if st.uni && (c == 'p' || c == 'P') {
 		res.kind = 3
@@ -1156,12 +1181,20 @@ func (st *rxSt) esc(inClass bool) rxEscRes {
 				pe++
 			}
 		}
+		// node names a class's bad property apart.
+		had := st.err
 		if pe >= st.n {
 			st.fail("Invalid property name")
 			st.pcls = rxNewCls()
+		} else {
+			st.pcls = st.jupPropClsEs(string(st.p[st.i+1 : pe]))
+		}
+		if inClass && had == "" && st.err == "Invalid property name" {
+			st.err = "Invalid property name in character class"
+		}
+		if pe >= st.n {
 			return res
 		}
-		st.pcls = st.propClsEs(string(st.p[st.i+1 : pe]))
 		st.pcls.neg = c == 'P'
 		st.i = pe + 1
 		return res
@@ -1238,6 +1271,10 @@ func (st *rxSt) esc(inClass bool) rxEscRes {
 			st.i = x0
 			return rxEscRes{ch: rune(c)}
 		}
+		if got < 2 && st.uni {
+			st.fail("Invalid escape")
+			return res
+		}
 		if got == 0 {
 			st.fail("invalid hex escape")
 		}
@@ -1246,7 +1283,7 @@ func (st *rxSt) esc(inClass bool) rxEscRes {
 		if st.uni {
 			v := st.escU()
 			if v < 0 {
-				st.fail("invalid unicode escape")
+				st.fail("Invalid Unicode escape")
 			}
 			return rxEscRes{ch: rune(v)}
 		}
@@ -1283,32 +1320,100 @@ func (st *rxSt) esc(inClass bool) rxEscRes {
 		if int(c-'0') <= st.ntotal {
 			return rxEscRes{kind: 2, ch: c - '0'}
 		}
-		if !st.octal {
-			st.fail("invalid group reference " + string(c))
-			return res
-		}
-		// JavaScript Annex B. 8 and 9 are not octal digits, so they are an identity
-		// escape; 0-3 admit three octal digits and 4-7 only two, which is what makes
-		// node read /\400/ as the two characters \40 and "0".
-		if c > '7' {
-			return rxEscRes{ch: c}
-		}
-		oval := c - '0'
-		omax := 2
-		if c <= '3' {
-			omax = 3
-		}
-		for ogot := 1; ogot < omax && st.i < st.n; ogot++ {
-			oc := st.p[st.i]
-			if oc < '0' || oc > '7' {
-				break
-			}
-			oval = oval*8 + (oc - '0')
-			st.i++
-		}
-		return rxEscRes{ch: oval}
+		st.fail("invalid group reference " + string(c))
+		return res
 	}
 	return rxEscRes{ch: c}
+}
+
+// escEs reads the ECMAScript escapes whose reading differs from the shared one,
+// for esc under o or S; ok is false for the escapes every dialect shares. Twin of
+// rxEscEs in lib/regex.js, which states the rules.
+func (st *rxSt) escEs(c rune, inClass bool) (res rxEscRes, ok bool) {
+	switch {
+	case c >= '0' && c <= '9':
+		return st.escDecEs(c, inClass), true
+	case c == 'c':
+		cx := rune(0)
+		if st.i < st.n {
+			cx = st.p[st.i]
+		}
+		if (cx >= 'A' && cx <= 'Z') || (cx >= 'a' && cx <= 'z') || (inClass && !st.uni && (rxIsDigit(cx) || cx == '_')) {
+			st.i++
+			return rxEscRes{ch: cx % 32}, true
+		}
+		if st.uni {
+			st.fail("Invalid Unicode escape")
+			return res, true
+		}
+		// Annex B: the backslash stands for itself, and the c is read again.
+		st.i--
+		return rxEscRes{ch: '\\'}, true
+	case c == 'k':
+		if st.uni || st.hasNames {
+			if inClass {
+				st.fail("Invalid escape")
+			} else {
+				st.fail("Invalid named reference")
+			}
+			return res, true
+		}
+		return rxEscRes{ch: c}, true
+	case strings.ContainsRune("dDwWsSfnrtvxu", c), c == 'b' && inClass, st.uni && (c == 'p' || c == 'P'):
+		return res, false
+	case st.uni && !strings.ContainsRune("^$\\.*+?()[]{}|/", c) && !(inClass && c == '-'):
+		st.fail("Invalid escape")
+		return res, true
+	}
+	return rxEscRes{ch: c}, true
+}
+
+// escDecEs reads an ECMAScript escape that starts with the digit c: a
+// backreference, a legacy octal or identity escape, or an error. Twin of
+// rxEscDecEs in lib/regex.js, which states the rules.
+func (st *rxSt) escDecEs(c rune, inClass bool) rxEscRes {
+	if !inClass && c != '0' {
+		j, v := st.i, int(c-'0')
+		for j < st.n && rxIsDigit(st.p[j]) {
+			if v <= st.ntotal {
+				v = v*10 + int(st.p[j]-'0')
+			}
+			j++
+		}
+		if v <= st.ntotal {
+			st.i = j
+			return rxEscRes{kind: 2, ch: rune(v)}
+		}
+		if st.uni {
+			st.fail("Invalid escape")
+			return rxEscRes{}
+		}
+	}
+	if st.uni {
+		if c > '7' {
+			st.fail("Invalid escape")
+		} else if c != '0' || (st.i < st.n && rxIsDigit(st.p[st.i])) {
+			st.fail("Invalid decimal escape")
+		}
+		return rxEscRes{}
+	}
+	if c > '7' {
+		return rxEscRes{ch: c}
+	}
+	oval := c - '0'
+	omax := 2
+	if c <= '3' {
+		omax = 3
+	}
+	for ogot := 1; ogot < omax && st.i < st.n; ogot++ {
+		oc := st.p[st.i]
+		if oc < '0' || oc > '7' {
+			break
+		}
+		oval = oval*8 + (oc - '0')
+		st.i++
+	}
+	return rxEscRes{ch: oval}
 }
 
 func (st *rxSt) parseClass() *rxNode {
@@ -1321,7 +1426,7 @@ func (st *rxSt) parseClass() *rxNode {
 	first := true
 	for st.i < st.n {
 		c := st.p[st.i]
-		if c == ']' && !first {
+		if c == ']' && (!first || st.es) { // in ECMAScript [] and [^] are classes
 			st.i++
 			return node
 		}
@@ -1329,8 +1434,9 @@ func (st *rxSt) parseClass() *rxNode {
 		// A POSIX bracket [:alpha:] is a real class under the "e" (POSIX ERE) and
 		// "p" (POSIX classes only, which is Ruby) dialects, and is not supported
 		// anywhere else; without one of those, report it rather than silently
-		// reading it as a set of punctuation characters.
-		if c == '[' && st.i+1 < st.n && st.p[st.i+1] == ':' {
+		// reading it as a set of punctuation characters. ECMAScript has no POSIX
+		// brackets: there [[:a:]] is a class of [ : a and a literal ].
+		if c == '[' && st.i+1 < st.n && st.p[st.i+1] == ':' && !st.es {
 			if !st.posix {
 				st.fail("POSIX bracket expressions are not supported")
 				return node
@@ -1367,6 +1473,11 @@ func (st *rxSt) parseClass() *rxNode {
 			e := st.esc(true)
 			if e.kind == 1 {
 				cls.addSp(e.sp)
+				// Under S a class escape cannot be a range's end (Annex B reads the
+				// '-' literally).
+				if st.strict && st.i+1 < st.n && st.p[st.i] == '-' && st.p[st.i+1] != ']' {
+					st.fail("Invalid character class")
+				}
 				continue
 			}
 			// A \p{..} property (U) is a nested class, and cannot end a range.
@@ -1400,6 +1511,10 @@ func (st *rxSt) parseClass() *rxNode {
 					return node
 				}
 				if e2.kind == 1 {
+					if st.strict {
+						st.fail("Invalid character class")
+						return node
+					}
 					// "a-\d" is not a range; take the '-' literally and the class on.
 					cls.add(loCode, loCode)
 					cls.add('-', '-')
@@ -1411,6 +1526,10 @@ func (st *rxSt) parseClass() *rxNode {
 				st.i++
 				hiCode = c2
 			}
+			if hiCode < loCode && st.es {
+				st.fail("Range out of order in character class")
+				return node
+			}
 			if hiCode < loCode {
 				st.fail("character class range is out of order")
 				return node
@@ -1420,7 +1539,11 @@ func (st *rxSt) parseClass() *rxNode {
 			cls.add(loCode, loCode)
 		}
 	}
-	st.fail("unterminated character class")
+	if st.es {
+		st.fail("Unterminated character class")
+	} else {
+		st.fail("unterminated character class")
+	}
 	return node
 }
 
@@ -1675,6 +1798,129 @@ func (st *rxSt) readGroupName(closer rune) string {
 	return name
 }
 
+// readGroupNameEs reads an ECMAScript group name and its closing >. Twin of
+// rxReadGroupNameEs in lib/regex.js, which states the rules.
+func (st *rxSt) readGroupNameEs() string {
+	var name []rune
+	bad := false
+	for !bad && st.i < st.n && st.p[st.i] != '>' {
+		c, w := st.p[st.i], 1
+		if isHighSurr(c) && st.i+1 < st.n && isLowSurr(st.p[st.i+1]) {
+			c, w = surrPair(c, st.p[st.i+1]), 2
+		}
+		if c == '\\' {
+			c, w = -1, 0
+			if st.i+1 < st.n && st.p[st.i+1] == 'u' {
+				st.i += 2
+				c = rune(st.escU())
+			}
+		}
+		if c < 0 || !st.idCharEs(c, len(name) == 0) {
+			bad = true
+		} else {
+			st.i += w
+			name = append(name, c)
+		}
+	}
+	if bad || len(name) == 0 || st.i >= st.n {
+		st.fail("Invalid capture group name")
+		return ""
+	}
+	st.i++
+	return string(name)
+}
+
+// idCharEs: may c start (start) or continue an IdentifierName? Twin of
+// rxIdCharEs in lib/regex.js.
+func (st *rxSt) idCharEs(c rune, start bool) bool {
+	switch {
+	case c == '$' || c == '_' || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z'):
+		return true
+	case c >= '0' && c <= '9':
+		return !start
+	case c < 128:
+		return false
+	case !start && (c == 0x200C || c == 0x200D):
+		return true
+	}
+	had := st.err
+	name := "ID_Continue"
+	if start {
+		name = "ID_Start"
+	}
+	cls := st.jupPropClsEs(name)
+	if st.err != had {
+		st.err = had
+		return true
+	}
+	return cls.matchX(c, false)
+}
+
+// modifiersEs reads an ECMAScript modifiers group (?ims-ims:X). Twin of
+// rxModifiersEs in lib/regex.js.
+func (st *rxSt) modifiersEs() *rxNode {
+	seen := ""
+	neg := false
+	for ; st.i < st.n; st.i++ {
+		c := st.p[st.i]
+		switch {
+		case c == ':':
+			if seen == "" {
+				st.fail("Invalid flag group")
+				return rxNewNode("empty")
+			}
+			st.failUnsup("modifiers are not supported")
+			st.i++
+			g := rxNewNode("group")
+			g.items = append(g.items, st.parseAlt())
+			st.expect(')', "unterminated group")
+			return g
+		case c == '-' && !neg:
+			neg = true
+		case c == 'i' || c == 'm' || c == 's':
+			if strings.ContainsRune(seen, c) {
+				st.fail("Repeated flag in flag group")
+				return rxNewNode("empty")
+			}
+			seen += string(c)
+		default:
+			st.fail("Invalid group")
+			return rxNewNode("empty")
+		}
+	}
+	st.fail("Invalid group")
+	return rxNewNode("empty")
+}
+
+// dupNameEs records where the group named nm stands and answers whether an
+// earlier group of that name could take part in the same match. Twin of
+// rxDupNameEs in lib/regex.js, which states the rule.
+func (st *rxSt) dupNameEs(nm string) bool {
+	cur := st.apath
+	dup := false
+	for k, n := range st.names {
+		if n != nm || dup {
+			continue
+		}
+		old := st.npaths[k]
+		apart := false
+		for j := 0; !apart && j+1 < len(cur) && j+1 < len(old) && cur[j] == old[j]; j += 2 {
+			apart = cur[j+1] != old[j+1]
+		}
+		dup = !apart
+	}
+	st.npaths = append(st.npaths, append([]int(nil), cur...))
+	return dup
+}
+
+// failUnsup notes a construct the language accepts and this engine does not
+// implement, and the parse goes on. Twin of rxUnsup in lib/regex.js.
+func (st *rxSt) failUnsup(msg string) {
+	if st.unsupMsg == "" {
+		st.unsupMsg = msg
+	}
+}
+
 // readGroupNameJ reads a java.util.regex group name, an ASCII letter and then
 // letters and digits, and its closing >. Twin of rxReadGroupNameJ in lib/regex.js.
 func (st *rxSt) readGroupNameJ() string {
@@ -1700,6 +1946,10 @@ func (st *rxSt) expect(c rune, msg string) {
 		st.i++
 		return
 	}
+	// ECMAScript has one wording for every group left open.
+	if st.es && c == ')' {
+		msg = "Unterminated group"
+	}
 	st.fail(msg)
 }
 
@@ -1711,6 +1961,8 @@ func (st *rxSt) parseGroup() *rxNode {
 		if st.i >= st.n {
 			if st.java {
 				st.failAt("Unknown inline modifier", st.i)
+			} else if st.es {
+				st.fail("Invalid group")
 			} else {
 				st.fail("unterminated group")
 			}
@@ -1724,7 +1976,7 @@ func (st *rxSt) parseGroup() *rxNode {
 			g.items = append(g.items, st.parseAlt())
 			st.expect(')', "unterminated group")
 			return g
-		case k == '#' && !st.java: // java.util.regex has no (?# comment
+		case k == '#' && !st.java && !st.es: // java.util.regex and ECMAScript have no (?# comment
 			for st.i < st.n && st.p[st.i] != ')' {
 				st.i++
 			}
@@ -1739,7 +1991,7 @@ func (st *rxSt) parseGroup() *rxNode {
 			lk.items = append(lk.items, st.parseLookBody())
 			st.expect(')', "unterminated lookahead")
 			return lk
-		case k == '<' || (k == '\'' && !st.java):
+		case k == '<' || (k == '\'' && !st.java && !st.es):
 			if k == '<' && st.i+1 < st.n {
 				k2 := st.p[st.i+1]
 				if (k2 == '=' || k2 == '!') && (st.java || st.py) {
@@ -1753,8 +2005,12 @@ func (st *rxSt) parseGroup() *rxNode {
 					return lb
 				}
 				if k2 == '=' || k2 == '!' {
-					st.fail("lookbehind is not supported")
-					return rxNewNode("empty")
+					st.failUnsup("lookbehind is not supported")
+					st.i += 2
+					ub := rxNewNode("lookb")
+					ub.items = append(ub.items, st.parseAlt())
+					st.expect(')', "unterminated group")
+					return ub
 				}
 			}
 			st.i++
@@ -1762,7 +2018,12 @@ func (st *rxSt) parseGroup() *rxNode {
 			if k == '\'' {
 				closer = '\''
 			}
-			nm := st.readGroupName(closer)
+			var nm string
+			if st.es {
+				nm = st.readGroupNameEs()
+			} else {
+				nm = st.readGroupName(closer)
+			}
 			if st.java && st.nameIdx(nm) >= 0 {
 				st.failAt("Named capturing group <"+nm+"> is already defined", st.i-1)
 			}
@@ -1775,6 +2036,10 @@ func (st *rxSt) parseGroup() *rxNode {
 			ng.gidx = st.ngroups
 			if ng.gidx == len(st.gnodes) {
 				st.gnodes = append(st.gnodes, ng)
+			}
+			// node reports a repeated name after the rest of the pattern (st.late).
+			if st.es && st.dupNameEs(nm) && st.late == "" {
+				st.late = "Duplicate capture group name"
 			}
 			st.names = append(st.names, nm)
 			st.nameGroups = append(st.nameGroups, ng.gidx)
@@ -1807,6 +2072,9 @@ func (st *rxSt) parseGroup() *rxNode {
 				return rxNewNode("empty")
 			}
 			return st.parseFlagsJ()
+		}
+		if st.es {
+			return st.modifiersEs()
 		}
 		st.fail("unsupported group form (?" + string(st.p[st.i]) + ")")
 		return rxNewNode("empty")
@@ -2106,11 +2374,16 @@ func (st *rxSt) parseAtom() *rxNode {
 		}
 		// \k<name>: a NAMED backreference. The group it names may be declared LATER
 		// in the pattern (a forward reference is legal), so the node is parked on
-		// st.pending and resolved once the whole pattern has been read.
-		if nxt == 'k' && st.i+2 < st.n && st.p[st.i+2] == '<' {
+		// st.pending and resolved once the whole pattern has been read. In Annex B a
+		// pattern without named groups reads \k as the letter k (escEs).
+		if nxt == 'k' && st.i+2 < st.n && st.p[st.i+2] == '<' && (!st.es || st.uni || st.hasNames) {
 			st.i += 3
 			kb := rxNewNode("bref")
-			kb.bname = st.readGroupName('>')
+			if st.es {
+				kb.bname = st.readGroupNameEs()
+			} else {
+				kb.bname = st.readGroupName('>')
+			}
 			if st.java {
 				// Java resolves the name as it reads it: the group must already be open.
 				kb.gidx = st.nameIdx(kb.bname)
@@ -2166,7 +2439,8 @@ func (st *rxSt) parseAtom() *rxNode {
 			op.gidx = rxOpGBound
 			return op
 		}
-		if nxt == 'b' || nxt == 'B' || nxt == 'A' || nxt == 'z' || nxt == 'Z' {
+		// ECMAScript has no \A \z \Z (escEs).
+		if nxt == 'b' || nxt == 'B' || (!st.es && (nxt == 'A' || nxt == 'z' || nxt == 'Z')) {
 			st.i += 2
 			a := rxNewNode("assert")
 			switch nxt {
@@ -2244,16 +2518,35 @@ func (st *rxSt) parseAtom() *rxNode {
 	case '*', '+', '?':
 		if st.ere {
 			st.fail("Invalid preceding regular expression")
+		} else if st.es {
+			st.fail("Nothing to repeat")
 		} else {
 			st.fail("quantifier with nothing to repeat")
 		}
 		st.i++
 		return rxNewNode("empty")
+	case '}', ']':
+		if st.strict {
+			st.fail("Lone quantifier brackets")
+			return rxNewNode("empty")
+		}
 	case '{':
 		// Java reads a { where an atom belongs as a quantifier of NOTHING: {2}a and
 		// a{1}{2} are legal, and a bare { is "Illegal repetition".
 		if st.java {
 			return rxNewNode("empty")
+		}
+		// ECMAScript: a {n}, {n,} or {n,m} where an atom belongs repeats nothing. Any
+		// other { is a literal in Annex B, and under S so is no lone { } or ].
+		if st.es {
+			if _, _, ok := st.parseBound(); ok {
+				st.fail("Nothing to repeat")
+				return rxNewNode("empty")
+			}
+			if st.strict {
+				st.fail("Lone quantifier brackets")
+				return rxNewNode("empty")
+			}
 		}
 		// A { that opens an interval where no atom precedes it is the same error; a {
 		// NOT followed by a digit is an ordinary character (bash matches "a{b").
@@ -2433,11 +2726,21 @@ func (st *rxSt) parsePiece() *rxNode {
 				if ivl {
 					st.fail("Invalid content of \\{\\}")
 				}
+				// Under S a { after an atom must be its quantifier; after one it is
+				// read as an atom ("Lone quantifier brackets").
+				if st.strict && seen == 0 && atom.t != "assert" && atom.t != "look" && atom.t != "lookb" {
+					st.fail("Incomplete quantifier")
+				}
 				return atom
 			}
 			minV, maxV = lo, hi
-			if maxV >= 0 && maxV < minV {
-				st.fail("quantifier bounds are out of order")
+			// A second quantifier is reported first in ECMAScript (below).
+			if maxV >= 0 && maxV < minV && !(st.es && (seen > 0 || atom.t == "assert")) {
+				if st.es {
+					st.fail("numbers out of order in {} quantifier")
+				} else {
+					st.fail("quantifier bounds are out of order")
+				}
 				return atom
 			}
 		default:
@@ -2451,9 +2754,20 @@ func (st *rxSt) parsePiece() *rxNode {
 		if seen > 1 {
 			if st.ere {
 				st.fail("Invalid preceding regular expression")
+			} else if st.es {
+				st.fail("Nothing to repeat")
 			} else {
 				st.fail("multiple repeat")
 			}
+			return atom
+		}
+		// ECMAScript quantifies no ^ $ \b \B, no lookbehind, and under U no lookahead either.
+		if st.es && atom.t == "assert" {
+			st.fail("Nothing to repeat")
+			return atom
+		}
+		if (st.uni && atom.t == "look") || (st.es && atom.t == "lookb") {
+			st.fail("Invalid quantifier")
 			return atom
 		}
 		rep := rxNewNode("rep")
@@ -2472,12 +2786,13 @@ func (st *rxSt) parsePiece() *rxNode {
 			if q == '?' {
 				rep.greedy = false
 				st.i++
-			} else if q == '+' {
+			} else if q == '+' && !st.es {
 				st.i++
 				poss = st.java
 			}
 		}
-		// Outside J a possessive quantifier is read as greedy; under J it is
+		// Outside J a possessive quantifier is read as greedy (ECMAScript has none:
+		// X*+ is two quantifiers, the error above); under J it is
 		// (?>(?>X)*), as in lib/regex.js.
 		// Pattern's CharPropertyGreedy (see lib/regex.js).
 		if st.java && rep.greedy && !poss && maxV < 0 && atom.t == "cls" {
@@ -2534,6 +2849,11 @@ func (st *rxSt) parseAlt() *rxNode {
 	if st.pcre {
 		st.tctx = append(st.tctx, alt)
 	}
+	// Under o or S, st.apath is where the parser stands (dupNameEs).
+	if st.es {
+		st.apath = append(st.apath, st.nalts, 0)
+		st.nalts++
+	}
 	alt.items = append(alt.items, st.parseCat())
 	for st.i < st.n && st.p[st.i] == '|' {
 		st.i++
@@ -2543,10 +2863,16 @@ func (st *rxSt) parseAlt() *rxNode {
 			}
 			st.ngroups = brbase
 		}
+		if st.es {
+			st.apath[len(st.apath)-1]++
+		}
 		alt.items = append(alt.items, st.parseCat())
 		if st.err != "" {
 			break
 		}
+	}
+	if st.es {
+		st.apath = st.apath[:len(st.apath)-2]
 	}
 	if brbase >= 0 && most > st.ngroups {
 		st.ngroups = most
@@ -4417,6 +4743,8 @@ func (pg *rxProg) splitTo(at, body, out int, greedy bool) {
 type rxRe struct {
 	ok  bool
 	err string
+	// unsup: err names a feature the engine does not implement (rxSt.unsup).
+	unsup bool
 	// bt is the backtrack stack's storage, kept from one attempt to the next.
 	bt         []int
 	ops        []int
@@ -6374,6 +6702,7 @@ func rxCompile(pattern, flags string) *rxRe {
 	// already) is JavaScript's text without u: the pattern is UTF-16 units, as the
 	// text is.
 	uni := strings.ContainsRune(letters, 'U')
+	strict := strings.ContainsRune(letters, 'S')
 	wide := strings.ContainsRune(letters, 'W')
 	bfail := java || py || strings.ContainsRune(letters, 'n')
 	// R reads the pattern as Go does and compiles its J spelling (rxRe2).
@@ -6428,7 +6757,8 @@ func rxCompile(pattern, flags string) *rxRe {
 	}
 	st := &rxSt{p: pat, ext: ext, dotall: dotall, octal: octal, ere: ere, posix: posix, java: java, errAt: -1,
 		py: py, icase: icase, multi: multi, ucase: ucase, unix: unix, gnodes: []*rxNode{nil},
-		pyuni: py && !strings.ContainsRune(letters, 'a'), re2: re2, pcre: pcre, brbase: -1, uni: uni}
+		pyuni: py && !strings.ContainsRune(letters, 'a'), re2: re2, pcre: pcre, brbase: -1, uni: uni,
+		es: octal || strict, strict: strict, hasNames: rxCountGroups(pat, false) > 0}
 	// Under P and J case folding and line anchoring are decided per atom while
 	// parsing.
 	if py || java {
@@ -6445,17 +6775,31 @@ func rxCompile(pattern, flags string) *rxRe {
 	// Resolve every \k<name> now that the whole name table is known.
 	for _, nd := range st.pending {
 		gi := st.nameIdx(nd.bname)
-		if gi < 0 {
+		if gi < 0 && st.es {
+			if st.late == "" {
+				st.late = "Invalid named capture referenced"
+			}
+		} else if gi < 0 {
 			st.fail("unknown group name '" + nd.bname + "'")
 		}
 		nd.gidx = gi
 	}
 	if st.err == "" && st.i < st.n {
-		if st.p[st.i] == ')' {
+		if st.p[st.i] == ')' && st.es {
+			st.fail("Unmatched ')'")
+		} else if st.p[st.i] == ')' {
 			st.fail("unmatched ) in pattern")
 		} else {
 			st.fail("unexpected character in pattern")
 		}
+	}
+	// Then what node reports once the whole pattern is read (o and S), and last a
+	// construct this engine does not implement (failUnsup).
+	if st.err == "" && st.late != "" {
+		st.err = st.late
+	}
+	if st.err == "" && st.unsupMsg != "" {
+		st.err, st.unsup = st.unsupMsg, true
 	}
 	// CPython checks a look-behind's width when it compiles the parsed pattern,
 	// so every parse error is reported first.
@@ -6472,7 +6816,7 @@ func rxCompile(pattern, flags string) *rxRe {
 		st.err, st.errAt = tp.err, tp.errAt
 	}
 	if st.err != "" {
-		return &rxRe{ok: false, err: st.err, errAt: st.errAt, icase: icase, dotall: dotall, multi: multi,
+		return &rxRe{ok: false, err: st.err, unsup: st.unsup, errAt: st.errAt, icase: icase, dotall: dotall, multi: multi,
 			jsrep: jsrep, java: java, bfail: bfail, src: pattern, flags: flags}
 	}
 	// Under J gflags is Pattern.flags(): the letters in force at the end.

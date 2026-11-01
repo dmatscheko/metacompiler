@@ -1147,7 +1147,7 @@ function rxHexVal(c) {
 function rxEsc(st, inClass) {
     var res = {kind: 0, ch: 0, sp: 0}
     if (st.i >= st.n) {
-        rxErr(st, "trailing backslash in pattern")
+        rxErr(st, st.es ? "\\ at end of pattern" : "trailing backslash in pattern")
         return res
     }
     var p = st.p
@@ -1169,6 +1169,7 @@ function rxEsc(st, inClass) {
         res.ch = bv
         return res
     }
+    if (st.es && rxEscEs(st, c, inClass, res)) { return res }
     // JavaScript's \p{name} and \P{name} under U; without U they are identity escapes.
     if (st.uni && (c == 112 || c == 80)) {
         res.kind = 3
@@ -1177,12 +1178,16 @@ function rxEsc(st, inClass) {
             pe = st.i + 1
             while (pe < st.n && p.charCodeAt(pe) != 125) { pe = pe + 1 }
         }
+        // node names a class's bad property apart.
+        var phad = st.err
         if (pe >= st.n) {
             rxErr(st, "Invalid property name")
             st.pcls = rxNewCls()
-            return res
+        } else {
+            st.pcls = rxPropClsEs(st, p.substring(st.i + 1, pe))
         }
-        st.pcls = rxPropClsEs(st, p.substring(st.i + 1, pe))
+        if (inClass && phad == "" && st.err == "Invalid property name") { st.err = "Invalid property name in character class" }
+        if (pe >= st.n) { return res }
         st.pcls.neg = c == 80
         st.i = pe + 1
         return res
@@ -1222,13 +1227,17 @@ function rxEsc(st, inClass) {
             res.ch = c
             return res
         }
+        if (got < 2 && st.uni) {
+            rxErr(st, "Invalid escape")
+            return res
+        }
         if (got == 0) { rxErr(st, "invalid hex escape") }
         res.ch = v
         return res
     }
     if (c == 117 && st.uni) { // JavaScript's \u under U (rxEscU)
         var ju = rxEscU(st)
-        if (ju < 0) { rxErr(st, "invalid unicode escape") }
+        if (ju < 0) { rxErr(st, "Invalid Unicode escape") }
         res.ch = ju
         return res
     }
@@ -1268,25 +1277,7 @@ function rxEsc(st, inClass) {
             res.ch = c - 48
             return res
         }
-        if (!st.octal) {
-            rxErr(st, "invalid group reference " + (c - 48))
-            return res
-        }
-        // JavaScript Annex B. 8 and 9 are not octal digits, so they are an identity
-        // escape; 0-3 admit three octal digits and 4-7 only two, which is what makes
-        // node read /\400/ as the two characters \40 and "0".
-        if (c > 55) { res.ch = c; return res }
-        var oval = c - 48
-        var omax = c <= 51 ? 3 : 2
-        var ogot = 1
-        while (ogot < omax && st.i < st.n) {
-            var oc = p.charCodeAt(st.i)
-            if (oc < 48 || oc > 55) { break }
-            oval = oval * 8 + (oc - 48)
-            st.i = st.i + 1
-            ogot = ogot + 1
-        }
-        res.ch = oval
+        rxErr(st, "invalid group reference " + (c - 48))
         return res
     }
     if ((st.java || st.py || st.uni) && c >= 55296 && c <= 56319) {
@@ -1295,6 +1286,102 @@ function rxEsc(st, inClass) {
     }
     res.ch = c
     return res
+}
+
+// rxEscEs reads the ECMAScript escapes whose reading differs from the shared
+// one, for rxEsc under o or S: c (already consumed) is the character after the
+// backslash. It answers false for the escapes every dialect shares. The only
+// letters with a meaning are d D w W s S f n r t v x u c k, b in a class and p P
+// under U; any other character is an identity escape in Annex B (o without U),
+// and under U only a syntax character, '/', or '-' in a class may be escaped
+// (ES2025 22.2.1 and B.1.2).
+function rxEscEs(st, c, inClass, res) {
+    var p = st.p
+    if (c >= 48 && c <= 57) { return rxEscDecEs(st, c, inClass, res) }
+    if (c == 99) { // \cX
+        var cx = st.i < st.n ? p.charCodeAt(st.i) : 0
+        if ((cx >= 65 && cx <= 90) || (cx >= 97 && cx <= 122)
+            || (inClass && !st.uni && (rxIsDigitCode(cx) || cx == 95))) {
+            st.i = st.i + 1
+            res.ch = cx % 32
+            return true
+        }
+        if (st.uni) {
+            rxErr(st, "Invalid Unicode escape")
+            return true
+        }
+        // Annex B: the backslash stands for itself, and the c is read again.
+        st.i = st.i - 1
+        res.ch = 92
+        return true
+    }
+    if (c == 107) { // \k not followed by <name>, or in a class
+        if (st.uni || st.hasNames) {
+            rxErr(st, inClass ? "Invalid escape" : "Invalid named reference")
+            return true
+        }
+        res.ch = c
+        return true
+    }
+    if ("dDwWsSfnrtvxu".indexOf(String.fromCharCode(c)) >= 0) { return false }
+    if (c == 98 && inClass) { return false }
+    if (st.uni && (c == 112 || c == 80)) { return false }
+    if (st.uni && "^$\\.*+?()[]{}|/".indexOf(String.fromCharCode(c)) < 0 && !(inClass && c == 45)) {
+        rxErr(st, "Invalid escape")
+        return true
+    }
+    res.ch = c
+    return true
+}
+
+// rxEscDecEs reads an ECMAScript escape that starts with the digit c. Outside a
+// class a DecimalEscape is a backreference when its whole value names a group,
+// forward references included. Otherwise, and always in a class, Annex B reads a
+// legacy octal escape - 0-3 take up to three octal digits, 4-7 two, and 8 and 9
+// are identity escapes, so /\400/ is \40 then "0" - while under U only a \0 that
+// no digit follows is an escape.
+function rxEscDecEs(st, c, inClass, res) {
+    var p = st.p
+    if (!inClass && c != 48) {
+        var j = st.i
+        var v = c - 48
+        while (j < st.n && rxIsDigitCode(p.charCodeAt(j))) {
+            if (v <= st.ntotal) { v = v * 10 + (p.charCodeAt(j) - 48) }
+            j = j + 1
+        }
+        if (v <= st.ntotal) {
+            st.i = j
+            res.kind = 2
+            res.ch = v
+            return true
+        }
+        if (st.uni) {
+            rxErr(st, "Invalid escape")
+            return true
+        }
+    }
+    if (st.uni) {
+        if (c > 55) { rxErr(st, "Invalid escape") }
+        else if (c != 48 || (st.i < st.n && rxIsDigitCode(p.charCodeAt(st.i)))) { rxErr(st, "Invalid decimal escape") }
+        res.ch = 0
+        return true
+    }
+    if (c > 55) {
+        res.ch = c
+        return true
+    }
+    var oval = c - 48
+    var omax = c <= 51 ? 3 : 2
+    var ogot = 1
+    while (ogot < omax && st.i < st.n) {
+        var oc = p.charCodeAt(st.i)
+        if (oc < 48 || oc > 55) { break }
+        oval = oval * 8 + (oc - 48)
+        st.i = st.i + 1
+        ogot = ogot + 1
+    }
+    res.ch = oval
+    return true
 }
 
 // rxEscU is JavaScript's \u escape under U, after the u: \u{h..} is the code point,
@@ -1362,7 +1449,7 @@ function rxParseClass(st) {
     var first = true
     while (st.i < st.n) {
         var c = p.charCodeAt(st.i)
-        if (c == 93 && !first) { // ]
+        if (c == 93 && (!first || st.es)) { // ], and in ECMAScript [] and [^] are classes
             st.i = st.i + 1
             return node
         }
@@ -1370,8 +1457,9 @@ function rxParseClass(st) {
         // A POSIX bracket [:alpha:] is a real class under the "e" (POSIX ERE) and
         // "p" (POSIX classes only, which is Ruby) dialects, and is not supported
         // anywhere else; without one of those, report it rather than silently
-        // reading it as a set of punctuation characters.
-        if (c == 91 && st.i + 1 < st.n && p.charCodeAt(st.i + 1) == 58) {
+        // reading it as a set of punctuation characters. ECMAScript has no POSIX
+        // brackets: there [[:a:]] is a class of [ : a and a literal ].
+        if (c == 91 && st.i + 1 < st.n && p.charCodeAt(st.i + 1) == 58 && !st.es) {
             if (!st.posix) {
                 rxErr(st, "POSIX bracket expressions are not supported")
                 return node
@@ -1409,6 +1497,11 @@ function rxParseClass(st) {
             var e = rxEsc(st, true)
             if (e.kind == 1) {
                 rxClsAddSp(cls, e.sp)
+                // Under S a class escape cannot be a range's end (Annex B reads the
+                // '-' literally).
+                if (st.strict && st.i + 1 < st.n && p.charCodeAt(st.i) == 45 && p.charCodeAt(st.i + 1) != 93) {
+                    rxErr(st, "Invalid character class")
+                }
                 continue
             }
             // A \p{..} property (U) is a nested class, and cannot end a range.
@@ -1445,6 +1538,10 @@ function rxParseClass(st) {
                     return node
                 }
                 if (e2.kind == 1) {
+                    if (st.strict) {
+                        rxErr(st, "Invalid character class")
+                        return node
+                    }
                     // "a-\d" is not a range; take the '-' literally and the class on.
                     rxClsAdd(cls, loCode, loCode)
                     rxClsAdd(cls, 45, 45)
@@ -1458,7 +1555,7 @@ function rxParseClass(st) {
                 hiCode = c2
             }
             if (hiCode < loCode) {
-                rxErr(st, "character class range is out of order")
+                rxErr(st, st.es ? "Range out of order in character class" : "character class range is out of order")
                 return node
             }
             rxClsAdd(cls, loCode, hiCode)
@@ -1466,7 +1563,7 @@ function rxParseClass(st) {
             rxClsAdd(cls, loCode, loCode)
         }
     }
-    rxErr(st, "unterminated character class")
+    rxErr(st, st.es ? "Unterminated character class" : "unterminated character class")
     return node
 }
 
@@ -1750,6 +1847,137 @@ function rxReadGroupName(st, closer) {
     return name
 }
 
+// rxReadGroupNameEs reads an ECMAScript group name and its closing >: an
+// IdentifierName, any character of which may be spelled \uHHHH, \u{H..} or a
+// surrogate pair of those (ES2025 22.2.1 RegExpIdentifierName).
+function rxReadGroupNameEs(st) {
+    var p = st.p
+    var name = ""
+    var bad = false
+    while (!bad && st.i < st.n && p.charCodeAt(st.i) != 62) {
+        var c = rxCpAt(p, st.i)
+        var w = c > 65535 ? 2 : 1
+        if (c == 92) {
+            w = 0
+            c = -1
+            if (st.i + 1 < st.n && p.charCodeAt(st.i + 1) == 117) {
+                st.i = st.i + 2
+                c = rxEscU(st)
+            }
+        }
+        if (c < 0 || !rxIdCharEs(st, c, name == "")) {
+            bad = true
+        } else {
+            st.i = st.i + w
+            name = name + rxCpStr(c)
+        }
+    }
+    if (bad || name == "" || st.i >= st.n) {
+        rxErr(st, "Invalid capture group name")
+        return ""
+    }
+    st.i = st.i + 1
+    return name
+}
+
+// rxIdCharEs: may c start (start) or continue an IdentifierName? Beyond ASCII
+// that is ID_Start / ID_Continue (or ZWNJ, ZWJ), read through the rxPropClsEs
+// knob; a grammar that leaves the knob unset accepts every such character.
+function rxIdCharEs(st, c, start) {
+    if (c == 36 || c == 95 || (c >= 65 && c <= 90) || (c >= 97 && c <= 122)) { return true }
+    if (c >= 48 && c <= 57) { return !start }
+    if (c < 128) { return false }
+    if (!start && (c == 8204 || c == 8205)) { return true }
+    var had = st.err
+    var cls = rxPropClsEs(st, start ? "ID_Start" : "ID_Continue")
+    if (st.err != had) {
+        st.err = had
+        return true
+    }
+    return rxClsMatchX(cls, c, false)
+}
+
+// rxModifiersEs reads an ECMAScript modifiers group (?ims-ims:X), st.i at the
+// first letter: the engine has no scoped flags, so a well-formed one is read on
+// as a group and reported as unsupported (rxUnsup), and anything else is the
+// SyntaxError.
+function rxModifiersEs(st) {
+    var p = st.p
+    var seen = ""
+    var neg = false
+    while (st.i < st.n) {
+        var c = p.charAt(st.i)
+        if (c == ":") {
+            if (seen == "") {
+                rxErr(st, "Invalid flag group")
+                return rxNode("empty")
+            }
+            rxUnsup(st, "modifiers are not supported")
+            st.i = st.i + 1
+            var g = rxNode("group")
+            g.items.push(rxParseAlt(st))
+            rxExpect(st, 41, "unterminated group")
+            return g
+        }
+        if (c == "-" && !neg) {
+            neg = true
+        } else if (c == "i" || c == "m" || c == "s") {
+            if (seen.indexOf(c) >= 0) {
+                rxErr(st, "Repeated flag in flag group")
+                return rxNode("empty")
+            }
+            seen = seen + c
+        } else {
+            rxErr(st, "Invalid group")
+            return rxNode("empty")
+        }
+        st.i = st.i + 1
+    }
+    rxErr(st, "Invalid group")
+    return rxNode("empty")
+}
+
+// rxDupNameEs records where the group named nm stands (st.npaths, parallel to
+// st.names) and answers whether an earlier group of that name could take part in
+// the same match: ECMAScript lets a name repeat only in different branches of one
+// alternation (ES2025 22.2.1.1, /(?<n>a)|(?<n>b)/ but not /(?<n>a)(?<n>b)/).
+function rxDupNameEs(st, nm) {
+    var cur = st.apath
+    var names = st.names
+    var paths = st.npaths
+    var dup = false
+    var k = 0
+    while (k < names.length && !dup) {
+        if (names[k] == nm) {
+            var old = paths[k]
+            var apart = false
+            var j = 0
+            while (!apart && j + 1 < cur.length && j + 1 < old.length && cur[j] == old[j]) {
+                if (cur[j + 1] != old[j + 1]) { apart = true }
+                j = j + 2
+            }
+            if (!apart) { dup = true }
+        }
+        k = k + 1
+    }
+    var here = []
+    var i = 0
+    while (i < cur.length) {
+        here.push(cur[i])
+        i = i + 1
+    }
+    paths.push(here)
+    return dup
+}
+
+// rxUnsup notes a construct the language accepts and this engine does not
+// implement. The parse goes on, so that a syntax error anywhere in the pattern
+// still wins; with none, rxCompile reports the first such note as re.err with
+// re.unsup set, which a caller may raise later than a syntax error.
+function rxUnsup(st, msg) {
+    if (st.unsupMsg == "") { st.unsupMsg = msg }
+}
+
 // rxReadGroupNameJ reads a java.util.regex group name, an ASCII letter and then
 // letters and digits, and its closing >.
 function rxReadGroupNameJ(st) {
@@ -1779,7 +2007,7 @@ function rxParseGroup(st) {
     if (st.i < st.n && p.charCodeAt(st.i) == 63 && !st.ere) { // ?
         st.i = st.i + 1
         if (st.i >= st.n) {
-            if (st.java) { rxErrAt(st, "Unknown inline modifier", st.i) } else { rxErr(st, "unterminated group") }
+            if (st.java) { rxErrAt(st, "Unknown inline modifier", st.i) } else { rxErr(st, st.es ? "Invalid group" : "unterminated group") }
             return rxNode("empty")
         }
         var k = p.charCodeAt(st.i)
@@ -1790,7 +2018,7 @@ function rxParseGroup(st) {
             rxExpect(st, 41, "unterminated group")
             return g
         }
-        if (k == 35 && !st.java) { // (?# comment; java.util.regex has none
+        if (k == 35 && !st.java && !st.es) { // (?# comment; java.util.regex and ECMAScript have none
             while (st.i < st.n && p.charCodeAt(st.i) != 41) { st.i = st.i + 1 }
             rxExpect(st, 41, "unterminated comment group")
             return rxNode("empty")
@@ -1812,7 +2040,7 @@ function rxParseGroup(st) {
             rxExpect(st, 41, "unterminated lookahead")
             return lk
         }
-        if (k == 60 || (k == 39 && !st.java)) { // (?<name>  (?'name'
+        if (k == 60 || (k == 39 && !st.java && !st.es)) { // (?<name>  (?'name'
             if (k == 60 && st.i + 1 < st.n) {
                 var k2 = p.charCodeAt(st.i + 1)
                 if ((k2 == 61 || k2 == 33) && (st.java || st.py)) { // (?<= (?<!
@@ -1832,14 +2060,18 @@ function rxParseGroup(st) {
                     return lb
                 }
                 if (k2 == 61 || k2 == 33) {
-                    rxErr(st, "lookbehind is not supported")
-                    return rxNode("empty")
+                    rxUnsup(st, "lookbehind is not supported")
+                    st.i = st.i + 2
+                    var ub = rxNode("lookb")
+                    ub.items.push(rxParseAlt(st))
+                    rxExpect(st, 41, "unterminated group")
+                    return ub
                 }
             }
             st.i = st.i + 1
             var closer = 62
             if (k == 39) { closer = 39 }
-            var nm = rxReadGroupName(st, closer)
+            var nm = st.es ? rxReadGroupNameEs(st) : rxReadGroupName(st, closer)
             if (st.java && rxNameIdx(st.names, st.nameGroups, nm) >= 0) {
                 rxErrAt(st, "Named capturing group <" + nm + "> is already defined", st.i - 1)
             }
@@ -1852,6 +2084,8 @@ function rxParseGroup(st) {
             ng.gidx = st.ngroups
             var ngn = st.gnodes
             if (ng.gidx == ngn.length) { ngn.push(ng) }
+            // node reports a repeated name after the rest of the pattern (st.late).
+            if (st.es && rxDupNameEs(st, nm) && st.late == "") { st.late = "Duplicate capture group name" }
             var names = st.names
             var nidx = st.nameGroups
             names.push(nm)
@@ -1882,6 +2116,9 @@ function rxParseGroup(st) {
                 return rxNode("empty")
             }
             return rxParseFlagsJ(st)
+        }
+        if (st.es) {
+            return rxModifiersEs(st)
         }
         rxErr(st, "unsupported group form (?" + p.charAt(st.i) + ")")
         return rxNode("empty")
@@ -2221,7 +2458,8 @@ function rxExpect(st, code, msg) {
         st.i = st.i + 1
         return
     }
-    rxErr(st, msg)
+    // ECMAScript has one wording for every group left open.
+    rxErr(st, st.es && code == 41 ? "Unterminated group" : msg)
 }
 
 function rxParseAtom(st) {
@@ -2287,10 +2525,12 @@ function rxParseAtom(st) {
         if (st.i + 1 < st.n) { nxt = p.charCodeAt(st.i + 1) }
         // \k<name>: a NAMED backreference. The group it names may be declared LATER
         // in the pattern (a forward reference is legal), so the node is parked on
-        // st.pending and resolved once the whole pattern has been read.
-        if (nxt == 107 && st.i + 2 < st.n && p.charCodeAt(st.i + 2) == 60) {
+        // st.pending and resolved once the whole pattern has been read. In Annex B a
+        // pattern without named groups reads \k as the letter k (rxEscEs).
+        if (nxt == 107 && st.i + 2 < st.n && p.charCodeAt(st.i + 2) == 60
+            && (!st.es || st.uni || st.hasNames)) {
             st.i = st.i + 3
-            var knm = rxReadGroupName(st, 62)
+            var knm = st.es ? rxReadGroupNameEs(st) : rxReadGroupName(st, 62)
             var kb = rxNode("bref")
             kb.bname = knm
             if (st.java) {
@@ -2346,7 +2586,8 @@ function rxParseAtom(st) {
             gb.gidx = RX_GBOUND
             return gb
         }
-        if (nxt == 98 || nxt == 66 || nxt == 65 || nxt == 122 || nxt == 90) {
+        // ECMAScript has no \A \z \Z (rxEscEs).
+        if (nxt == 98 || nxt == 66 || (!st.es && (nxt == 65 || nxt == 122 || nxt == 90))) {
             st.i = st.i + 2
             var a = rxNode("assert")
             if (nxt == 98) { a.gidx = RX_WORDB }
@@ -2395,8 +2636,24 @@ function rxParseAtom(st) {
     }
     if (c == 42 || c == 43 || c == 63) {
         rxErr(st, st.ere ? "Invalid preceding regular expression"
-                         : "quantifier with nothing to repeat")
+                         : st.es ? "Nothing to repeat" : "quantifier with nothing to repeat")
         st.i = st.i + 1
+        return rxNode("empty")
+    }
+    // ECMAScript: a {n}, {n,} or {n,m} where an atom belongs repeats nothing. Any
+    // other { is a literal in Annex B, and under S so is no lone { } or ].
+    if (c == 123 && st.es) {
+        if (rxParseBound(st) != null) {
+            rxErr(st, "Nothing to repeat")
+            return rxNode("empty")
+        }
+        if (st.strict) {
+            rxErr(st, "Lone quantifier brackets")
+            return rxNode("empty")
+        }
+    }
+    if ((c == 125 || c == 93) && st.strict) {
+        rxErr(st, "Lone quantifier brackets")
         return rxNode("empty")
     }
     // A { that opens an interval where no atom precedes it is the same error; a { that
@@ -2592,12 +2849,16 @@ function rxParsePiece(st) {
             var bd = rxParseBound(st)
             if (bd == null) {
                 if (ivl) { rxErr(st, "Invalid content of \\{\\}") }
+                // Under S a { after an atom must be its quantifier; after one it is
+                // read as an atom ("Lone quantifier brackets").
+                if (st.strict && seen == 0 && atom.t != "assert" && atom.t != "look" && atom.t != "lookb") { rxErr(st, "Incomplete quantifier") }
                 return atom
             }
             minV = bd.min
             maxV = bd.max
-            if (maxV >= 0 && maxV < minV) {
-                rxErr(st, "quantifier bounds are out of order")
+            // A second quantifier is reported first in ECMAScript (below).
+            if (maxV >= 0 && maxV < minV && !(st.es && (seen > 0 || atom.t == "assert"))) {
+                rxErr(st, st.es ? "numbers out of order in {} quantifier" : "quantifier bounds are out of order")
                 return atom
             }
         } else {
@@ -2611,7 +2872,16 @@ function rxParsePiece(st) {
         seen = seen + 1
         if (seen > 1) {
             rxErr(st, st.ere ? "Invalid preceding regular expression"
-                             : "multiple repeat")
+                             : st.es ? "Nothing to repeat" : "multiple repeat")
+            return atom
+        }
+        // ECMAScript quantifies no ^ $ \b \B, no lookbehind, and under U no lookahead either.
+        if (st.es && atom.t == "assert") {
+            rxErr(st, "Nothing to repeat")
+            return atom
+        }
+        if ((st.uni && atom.t == "look") || (st.es && atom.t == "lookb")) {
+            rxErr(st, "Invalid quantifier")
             return atom
         }
         var rep = rxNode("rep")
@@ -2626,9 +2896,10 @@ function rxParsePiece(st) {
         if (st.i < st.n && !st.ere) {
             var q = st.p.charCodeAt(st.i)
             if (q == 63) { rep.greedy = false; st.i = st.i + 1 }
-            else if (q == 43) { st.i = st.i + 1; poss = st.java }
+            else if (q == 43 && !st.es) { st.i = st.i + 1; poss = st.java }
         }
-        // Outside J a possessive quantifier is read as greedy. Under J, X*+ is
+        // Outside J a possessive quantifier is read as greedy (ECMAScript has none:
+        // X*+ is two quantifiers, the error above). Under J, X*+ is
         // Pattern.java's possessive Curly: every iteration of X is its first
         // success, and the loop never gives one back - (?>(?>X)*).
         // Under J a greedy X*, X+ or X{n,} of one class is Pattern's
@@ -2679,6 +2950,14 @@ function rxParseAlt(st) {
     var most = st.ngroups
     var tctx = st.tctx
     if (st.pcre) { tctx.push(alt) }
+    // Under o or S, st.apath is where the parser stands: (alternation, branch) pairs
+    // from the outermost in (rxDupNameEs).
+    var apath = st.apath
+    if (st.es) {
+        apath.push(st.nalts)
+        apath.push(0)
+        st.nalts = st.nalts + 1
+    }
     items.push(rxParseCat(st))
     while (st.i < st.n && st.p.charCodeAt(st.i) == 124) {
         st.i = st.i + 1
@@ -2686,8 +2965,13 @@ function rxParseAlt(st) {
             if (st.ngroups > most) { most = st.ngroups }
             st.ngroups = brbase
         }
+        if (st.es) { apath[apath.length - 1] = apath[apath.length - 1] + 1 }
         items.push(rxParseCat(st))
         if (st.err != "") { break }
+    }
+    if (st.es) {
+        apath.pop()
+        apath.pop()
     }
     if (brbase >= 0 && most > st.ngroups) { st.ngroups = most }
     if (st.pcre) {
@@ -5910,6 +6194,7 @@ function rxCompile(pattern, flags) {
     var pyascii = false
     var re2 = false
     var uni = false
+    var strict = false
     var onig = false
     // C is followed by PHP's modifiers rather than these letters (rxPcre).
     var pcre = flags.length > 0 && flags.charAt(0) == "C"
@@ -5933,6 +6218,7 @@ function rxCompile(pattern, flags) {
         else if (f == "a") { pyascii = true }
         else if (f == "R") { re2 = true }
         else if (f == "U") { uni = true }
+        else if (f == "S") { strict = true }
         else if (f == "O") { onig = true }
         fi = fi + 1
     }
@@ -5980,7 +6266,9 @@ function rxCompile(pattern, flags) {
         py: py, icase: icase, multi: multi, gend: 0, gflags: "",
         ucase: ucase && java, uclass: false, unix: unix && java, inl: false, supp: false,
         canon: false, pyuni: py && !pyascii, re2: re2, pcre: pcre, open: [], tctx: [], brbase: 0 - 1,
-        inlook: 0, startopt: false, uni: uni, noauto: noauto
+        inlook: 0, startopt: false, uni: uni, noauto: noauto,
+        es: octal || strict, strict: strict, hasNames: rxCountGroups(pat, false) > 0, unsup: false,
+        apath: [], nalts: 0, npaths: [], late: "", unsupMsg: ""
     }
     // Under P and J case folding and line anchoring are decided per atom while
     // parsing.
@@ -5998,13 +6286,24 @@ function rxCompile(pattern, flags) {
     var pi = 0
     while (pi < pend.length) {
         var gi = rxNameIdx(st.names, st.nameGroups, pend[pi].bname)
-        if (gi < 0) { rxErr(st, "unknown group name '" + pend[pi].bname + "'") }
+        if (gi < 0 && st.es) {
+            if (st.late == "") { st.late = "Invalid named capture referenced" }
+        } else if (gi < 0) {
+            rxErr(st, "unknown group name '" + pend[pi].bname + "'")
+        }
         pend[pi].gidx = gi
         pi = pi + 1
     }
     if (st.err == "" && st.i < st.n) {
-        if (pat.charCodeAt(st.i) == 41) { rxErr(st, "unmatched ) in pattern") }
+        if (pat.charCodeAt(st.i) == 41) { rxErr(st, st.es ? "Unmatched ')'" : "unmatched ) in pattern") }
         else { rxErr(st, "unexpected character in pattern") }
+    }
+    // Then what node reports once the whole pattern is read (o and S), and last a
+    // construct this engine does not implement (rxUnsup).
+    if (st.err == "" && st.late != "") { st.err = st.late }
+    if (st.err == "" && st.unsupMsg != "") {
+        st.err = st.unsupMsg
+        st.unsup = true
     }
     // CPython checks a look-behind's width when it compiles the parsed pattern,
     // so every parse error is reported first.
@@ -6016,7 +6315,7 @@ function rxCompile(pattern, flags) {
         st.errAt = tp.errAt
     }
     if (st.err != "") {
-        return {ok: false, err: st.err, errAt: st.errAt, ops: [], as: [], bs: [], clss: [],
+        return {ok: false, err: st.err, unsup: st.unsup, errAt: st.errAt, ops: [], as: [], bs: [], clss: [],
                 ngroups: 0, nmarks: 0, names: [], nameGroups: [],
                 icase: icase, dotall: dotall, multi: multi, jsrep: jsrep, java: java,
                 py: false, uni: false, supp: false, bfail: bfail, gflags: "",
@@ -6074,7 +6373,7 @@ function rxCompile(pattern, flags) {
     // Go's and PCRE2's searches have no Start node to model (R, C).
     var jmin = java && !re2 && !pcre && !jbegin ? rxMinLen(ast) : 0
     return {
-        ok: true, err: "", errAt: -1, ops: pg.ops, as: pg.as, bs: pg.bs, clss: pg.clss,
+        ok: true, err: "", unsup: false, errAt: -1, ops: pg.ops, as: pg.as, bs: pg.bs, clss: pg.clss,
         ngroups: st.ngroups, nmarks: pg.nmarks, vmarks: tp.marks, names: re2 ? tr.names : pcre ? tp.names : st.names,
         nameGroups: re2 ? tr.nameGroups : pcre ? tp.nameGroups : st.nameGroups,
         icase: icase, dotall: dotall, multi: multi, jsrep: jsrep, java: java,

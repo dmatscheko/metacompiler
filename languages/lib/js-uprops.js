@@ -21,6 +21,13 @@
 // a two-digit index into JUP_SCX_SETS, each set a string of two-digit script
 // ordinals (java-regex.js's jxScNameTab order).
 //
+// java.lang.Character's tables are Unicode 16.0. JUP_U17 corrects them for every
+// code point whose General_Category, Script or one of the properties JUP_JV_IDS
+// lists is not node's: runs of first code point, last code point, a one-digit
+// category (Character.getType's numbering), a two-digit script ordinal (past
+// jxScNameTab's 172, the scripts of JUP_SC_NEW) and a three-digit mask of the
+// properties, bit i for JUP_JV_IDS[i].
+//
 // Case folding is a RING per orbit - the code points the i flag treats as one
 // character - as records of a code point and the next member of its orbit, sorted
 // by code point. Under u an orbit is the simple case folding's (jupFoldUTab);
@@ -29,9 +36,18 @@
 // character it would map into ASCII or to more than one unit).
 
 // The \p{..} ids regex.js's rxPropHit is asked for: JUP_PBIN + b is binary
-// property b, JUP_PSCX + n Script_Extensions containing script ordinal n.
+// property b, JUP_PSCX + n Script_Extensions containing script ordinal n,
+// JUP_PGC + t general category t, JUP_PSC + n script n and JUP_PJV + i the
+// property java-regex.js reads as JUP_JV_IDS[i], each corrected by JUP_U17.
 var JUP_PBIN = 2048
 var JUP_PSCX = 2304
+var JUP_PGC = 2560
+var JUP_PSC = 2624
+var JUP_PJV = 2880
+var JUP_JV_IDS = [RX_PALPHA, RX_PLOWER, RX_PUPPER, RX_PCASED, RX_PWHITE, RX_PBIN, RX_PBIN + 1, RX_PBIN + 2,
+    RX_PBIN + 3, RX_PBIN + 4, RX_PBIN + 5, RX_PBIN + 6, RX_PBIN + 7, RX_PASSIGNED]
+// The Unicode 17.0 scripts, long name and alias, ordinals 172 on.
+var JUP_SC_NEW = ["Sidetic", "Sidt", "Tolong_Siki", "Tols", "Beria_Erfe", "Berf", "Tai_Yo", "Tayo"]
 
 var JUP_BIN_NAMES = [
     "Bidi_Control", "Bidi_C", "Case_Ignorable", "CI", "Changes_When_Casefolded", "CWCF",
@@ -462,6 +478,37 @@ function jupScxTab() {
     }
     return jupScxTable
 }
+var jupU17Table = ""
+function jupU17Tab() {
+    if (jupU17Table == "") {
+        jupU17Table = ""
+        + "00:E00:E50100100R?00R?50600100bL00bL50?00100dL00dL50@00101[?01[M60X00001[P01[[60X00002310231J00000"
+        + "02>802>8L0000002H502H5L0000002H702H=L0000002H?02H@L0000002HB02HBL0000002HF02HGL0000002HI02HLL00000"
+        + "02HN02HOL0000002HQ02HQL0000002HT02HUL0000002HW02HYL0000002H[02H^L0000002Ha02HhL0000002Hl02HpL00000"
+        + "02I102I1L0000002I302I7L0000002ID02INL0000002IQ02IRL0000002IT02ITL0000002IW02IWL0000002IY02I_L00000"
+        + "02I`02I`I0000002Ia02IkL0000002Im02InL0000002J002J5L0000002J@02JAL0000002JH02JHL0000002JJ02JJL00000"
+        + "02JM02JOL0000002JR02JVL0000002JX02JYL0000002J]02J`L0000002Jc02JmL0000002Jp02K3L0000002K602K7L00000"
+        + "02K902K=L0000002K@02K@L0000002KB02KBL0000002KE02KXL0000002K[02K`L0000002Kg02KgL0000002Kl02KmL00000"
+        + "02Ko02L1L0000002L302L4L0000002L>02L>L0000002L@02LAL0000002MU02MWL0000002_F02_FL000000:O>0:O>10100="
+        + "0:O?0:O?20100;0:OB0:OB10100=0:OD0:OD10100=0:Ob0:Ob40100;0?`30?`BL060000?g@0?gAL060000?h80?h>L06000"
+        + "0@U00@UI52]0010@l50@l54060010@l60@l75060010@l@0@l@H060000@lA0@lHL060000@lk0@ll6060010A^P0A^P61S001"
+        + "0A^Q0A^Q81S0010A^R0A^T61S0010A^U0A^U81S0010A^V0A^V61S0010A^W0A^W81S0010Aga0AhH52^0010AhI0AhI42^001"
+        + "0AhJ0AhK52^0010AhP0AhY92^0000FkP0Fki12_00=0Fkl0FlC22_00;0Fpc0Fpd40S00Q0Fpe0Fpg:0S00Q0HOi0HOp52800Q"
+        + "0He90HeN52800Q0Hg00Hhc52800Q0Ldk0LdmL000000Lkk0Ll@L000000LlP0Ll`L000000Lla0LlaI000000NK00NKN52`001"
+        + "0NKP0NKR52`0010NKS0NKS62`0010NKT0NKU52`0010NKV0NKV62`0010NKW0NK^52`0010NK_0NK`62`0010NKa0NKe52`001"
+        + "0NKf0NKf62`0010NKo0NKo52`0010NKp0NKp42`0010O000O03L000000O050O0[L000000O0a0O2CL000000O2P0O2_L00000"
+        + "0O2b0O2pL000000O310O3>L000000O3A0O3fL000000O4=0O4?L000000O4`0O4`L000000O5]0O5`L000000O6^0O6^L00000"
+        + "0O9P0O9UL000000O<R0O<SL000000O>D0O>EL000000O>H0O>HL000000O>L0O>ML000000O?b0O?cL000000O?g0O?gL00000"
+        + "0OCo0OCoL000000OE60OE8L000000OE?0OE?L000000OEX0OE_L000000OEb0OEcL000000OEl0OF6L000000OF80OF9L00000"
+        + "0OF>0OF?L000000OFA0OFDL000000OFG0OFSL000000OFV0OFWL000000OFY0OFaL000000OFd0OFlL000000OFn0OG1L00000"
+        + "0OG50OG@L000000OGD0OGKL000000OGO0OGPL000000OGR0OGRL000000OGT0OGWL000000OGY0OG_L000000OGa0OGcL00000"
+        + "0OGe0OGjL000000OK60OK:L000000OKC0OKDL000000OKH0OKHL001600OKV0OKXL000000OKZ0OKZL000000OKb0OKcL00000"
+        + "0OMe0OMpL000000OOE0OOIL000000ORa0ORlL000000OS00OS1L000000OS@0OSHI000000OX00OYGL000000OYP0OY^L00000"
+        + "0OZ:0OZ:L001600OZ>0OZ>L001600O[80O[8L001600O[=0O[=L001600O[Z0O[ZL001600O[`0O[`L001600O`k0O`kL00000"
+        + "0[Lk0[Lp50S00Q0]kR0]k^50S00Q0c>a0dAj50S00Q"
+    }
+    return jupU17Table
+}
 var jupFoldUTable = ""
 function jupFoldUTab() {
     if (jupFoldUTable == "") {
@@ -723,14 +770,15 @@ function jupFoldNTab() {
     return jupFoldNTable
 }
 
-// regex.js's rxPropClsEs knob: the names this file answers, else java-regex.js's.
+// regex.js's rxPropClsEs knob: the names this file answers, else java-regex.js's
+// with their ids read over JUP_U17 (jupId).
 function jupPropClsEs(st, name) {
     var eq = name.indexOf("=")
+    var cls = rxNewCls()
     if (eq < 0) {
         var i = 0
         while (i < JUP_BIN_NAMES.length) {
             if (JUP_BIN_NAMES[i] == name) {
-                var cls = rxNewCls()
                 jxProps(cls, JUP_PBIN + Math.floor(i / 2), -1)
                 return cls
             }
@@ -738,29 +786,60 @@ function jupPropClsEs(st, name) {
         }
     } else {
         var key = name.substring(0, eq)
-        if (key == "Script_Extensions" || key == "scx") {
-            // The script is named as for Script; its ordinal is the id jxScriptEs gives.
-            var sc = rxNewCls()
-            if (jxScriptEs(sc, name.substring(eq + 1))) {
-                var xc = rxNewCls()
-                jxProps(xc, JUP_PSCX + sc.props[0] - RX_PSC, -1)
-                return xc
+        var scx = key == "Script_Extensions" || key == "scx"
+        if (scx || key == "Script" || key == "sc") {
+            var n = jupScriptOrd(name.substring(eq + 1))
+            if (n < 0) {
+                rxErr(st, "Invalid property name")
+                return cls
             }
-            rxErr(st, "Invalid property name")
-            return sc
+            jxProps(cls, (scx ? JUP_PSCX : JUP_PSC) + n, -1)
+            return cls
         }
     }
-    return jxPropClsEs(st, name)
+    cls = jxPropClsEs(st, name)
+    var k = 0
+    while (k < cls.props.length) {
+        cls.props[k] = jupId(cls.props[k])
+        k = k + 1
+    }
+    return cls
+}
+
+// The ordinal of the script a Script value v names, else -1.
+function jupScriptOrd(v) {
+    var i = 0
+    while (i < JUP_SC_NEW.length) {
+        if (JUP_SC_NEW[i] == v) { return 172 + Math.floor(i / 2) }
+        i = i + 1
+    }
+    var sc = rxNewCls()
+    if (jxScriptEs(sc, v)) { return sc.props[0] - RX_PSC }
+    return 0 - 1
+}
+
+// java-regex.js's property id a as the id of this file that reads it over JUP_U17.
+function jupId(a) {
+    if (a >= RX_PSC && a < RX_PBLK) { return JUP_PSC + a - RX_PSC }
+    if (a >= RX_PGC && a < RX_PSC) { return JUP_PGC + a - RX_PGC }
+    var i = 0
+    while (i < JUP_JV_IDS.length) {
+        if (JUP_JV_IDS[i] == a) { return JUP_PJV + i }
+        i = i + 1
+    }
+    return a
 }
 
 // regex.js's rxPropHit knob: this file's ids, else java-regex.js's.
 function jupPropHit(id, c) {
     if (id < JUP_PBIN) { return jxPropHit(id, c) }
     if (c < 0 || c > 1114111) { return false }
+    if (id >= JUP_PGC) { return jupU17Hit(id, c) }
     if (id >= JUP_PSCX) {
         var k = jupScxSet(c)
-        if (k < 0) { return jxScript(c) == id - JUP_PSCX }
+        if (k < 0) { return jupScript(c) == id - JUP_PSCX }
         var set = JUP_SCX_SETS[k]
+        if (set == "") { return jupScript(c) == id - JUP_PSCX }
         var i = 0
         while (i < set.length) {
             if (jcNum(set, i, 2) == id - JUP_PSCX) { return true }
@@ -769,6 +848,36 @@ function jupPropHit(id, c) {
         return false
     }
     return jupBinHit(id - JUP_PBIN, c)
+}
+
+// Whether c has the JUP_PGC, JUP_PSC or JUP_PJV property id.
+function jupU17Hit(id, c) {
+    var t = jupU17Tab()
+    var r = jupU17Run(c)
+    if (id >= JUP_PJV) {
+        var i = id - JUP_PJV
+        if (r < 0) { return jxPropHit(JUP_JV_IDS[i], c) }
+        if (JUP_JV_IDS[i] == RX_PASSIGNED) { return jcDig(t, r * 14 + 8) != 0 }
+        return Math.floor(jcNum(t, r * 14 + 11, 3) / Math.pow(2, i)) % 2 == 1
+    }
+    if (id >= JUP_PSC) { return jupScript(c) == id - JUP_PSC }
+    if (r < 0) { return jxGc(c) == id - JUP_PGC }
+    return jcDig(t, r * 14 + 8) == id - JUP_PGC
+}
+
+// The script ordinal of c.
+function jupScript(c) {
+    var r = jupU17Run(c)
+    if (r < 0) { return jxScript(c) }
+    return jcNum(jupU17Tab(), r * 14 + 9, 2)
+}
+
+// The record of JUP_U17 that holds c, else -1.
+function jupU17Run(c) {
+    var t = jupU17Tab()
+    var r = jcRun(t, c, 14)
+    if (jcNum(t, r * 14, 4) <= c && c <= jcNum(t, r * 14 + 4, 4)) { return r }
+    return 0 - 1
 }
 
 // Whether code point c has binary property b.
@@ -787,7 +896,8 @@ function jupBinHit(b, c) {
 }
 
 // The index in JUP_SCX_SETS of c's Script_Extensions when they are not just its
-// Script, else -1. An empty set is a script java.lang.Character does not know.
+// Script, else -1. An empty set is a script java.lang.Character does not know
+// and JUP_U17 gives.
 function jupScxSet(c) {
     var t = jupScxTab()
     var a = 0

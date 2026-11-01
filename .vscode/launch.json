@@ -3514,6 +3514,34 @@
             "program": "${workspaceFolder}","args": ["languages/js-to-llvm-ir.abnf", "tests/js-fail-test-leading-zero-sep.js", "-q"]
         },
         {
+            "name": "JavaScript interpreter invalid regex literal SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "expectError": "/u: Invalid property name (tests/js-fail-test-regex-early.js:7)",
+            "program": "${workspaceFolder}","args": ["languages/js-interpreter.abnf", "tests/js-fail-test-regex-early.js", "-q"]
+        },
+        {
+            "name": "JavaScript compiler invalid regex literal SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "expectError": "/u: Invalid property name (tests/js-fail-test-regex-early.js:7)",
+            "program": "${workspaceFolder}","args": ["languages/js-to-llvm-ir.abnf", "tests/js-fail-test-regex-early.js", "-q"]
+        },
+        {
+            "name": "TypeScript interpreter invalid regex literal SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "expectError": "/u: Invalid property name (tests/typescript-fail-test-regex-early.ts:8)",
+            "program": "${workspaceFolder}","args": ["languages/typescript-interpreter.abnf", "tests/typescript-fail-test-regex-early.ts", "-q"]
+        },
+        {
+            "name": "TypeScript compiler invalid regex literal SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "expectError": "/u: Invalid property name (tests/typescript-fail-test-regex-early.ts:8)",
+            "program": "${workspaceFolder}","args": ["languages/typescript-to-llvm-ir.abnf", "tests/typescript-fail-test-regex-early.ts", "-q"]
+        },
+        {
             "name": "JavaScript interpreter BigInt with a leading 0 SHOULD FAIL",
             "type": "go",
             "request": "launch",

@@ -245,7 +245,7 @@ function jxPropCls(st, name, at) {
 // general category value or binary property, each spelled exactly as the
 // specification's tables spell it. Script_Extensions and the binary properties
 // java.lang.Character has no table for are lib/js-uprops.js's, which asks here for
-// the rest. Twin of propClsEs in abnf/jsrtjavaprops.go.
+// the rest. Twin of jxPropClsEs in abnf/jsrtjavaprops.go.
 function jxPropClsEs(st, name) {
     var cls = rxNewCls()
     var eq = name.indexOf("=")

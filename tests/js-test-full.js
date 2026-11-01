@@ -2039,6 +2039,49 @@ function s150() {
         /[\w-]+/iu.exec("\u017f\u212a-x!")[0] === "\u017f\u212a-x")
 }
 
+// ===== SECTION 151: RegExp syntax errors, Annex B escapes, Unicode 17 properties =====
+// A pattern string the grammar rejects throws a catchable SyntaxError when the RegExp
+// is built (by new RegExp, or by search and match on a string), naming the pattern,
+// its flags and the rule broken. Without u, Annex B reads what u rejects as literals:
+// \a, \8, a lone ] or {, an unmatched \k; \1-\7 past the group count and \0n are
+// octal escapes. \p{..} follows Unicode 17.0: its new code points, scripts and
+// category changes. String.fromCodePoint keeps a lone surrogate. Values read off
+// node 24.
+function s151() {
+    var err = function (src, fl) {
+        try { new RegExp(src, fl) } catch (e) { return e.name + ": " + e.message }
+        return "ok"
+    }
+    var pre = "SyntaxError: Invalid regular expression: "
+    check("rxerr151a", err("\\p{scx=Foo}", "u") === pre + "/\\p{scx=Foo}/u: Invalid property name" &&
+        err("p{l}", "u") === pre + "/p{l}/u: Incomplete quantifier" &&
+        err("a", "gg") === "SyntaxError: Invalid flags supplied to RegExp constructor 'gg'" &&
+        err("(", "") === pre + "/(/: Unterminated group" && err("a)", "") === pre + "/a)/: Unmatched ')'" &&
+        err("a{2,1}", "") === pre + "/a{2,1}/: numbers out of order in {} quantifier" &&
+        err("[b-a]", "") === pre + "/[b-a]/: Range out of order in character class" &&
+        err("x**", "") === pre + "/x**/: Nothing to repeat" && err("\\8", "u") === pre + "/\\8/u: Invalid escape" &&
+        err("[\\p{Foo}]", "u") === pre + "/[\\p{Foo}]/u: Invalid property name in character class" &&
+        err("}", "u") === pre + "/}/u: Lone quantifier brackets" && err("(?=a)*", "u") === pre + "/(?=a)*/u: Invalid quantifier")
+    check("rxerr151b", err("(?<a>x)(?<a>y)", "") === pre + "/(?<a>x)(?<a>y)/: Duplicate capture group name" &&
+        err("(?<a>x)|(?<a>y)", "") === "ok" && err("\\k<b>(?<a>x)", "") === pre + "/\\k<b>(?<a>x)/: Invalid named capture referenced" &&
+        err("(?<1>a)", "") === pre + "/(?<1>a)/: Invalid capture group name" && err("\\k<a>", "") === "ok" &&
+        err("(?ii:a)", "") === pre + "/(?ii:a)/: Repeated flag in flag group" && err("(?=a)*", "") === "ok" &&
+        err("(?<\u00e9>a)", "u") === "ok" && err("(?<\u00b2>a)", "") === pre + "/(?<\u00b2>a)/: Invalid capture group name")
+    var r = "ok"
+    try { "abc".search("(") } catch (e) { r = e.name + ": " + e.message }
+    check("rxerr151c", r === pre + "/(/: Unterminated group")
+    check("annexb151d", /\a/.test("a") && /\cA/.test("\x01") && /[\c1]/.test("\x11") && /\8/.test("8") && /\01/.test("\x01") &&
+        /a]/.test("a]") && /\k/.test("k") && /x{1/.test("x{1") && /[\c_]/.test("\x1f") && /\c1/.test("\\c1") &&
+        /(a)\2/.test("a\x02") && !/[]/.test("a") && /[^]/.test("\n") && /a{,2}/.test("a{,2}"))
+    check("u17151e", /^\p{sc=Zyyy}$/u.test("\u20c1") && /\p{sc=Sidt}/u.test("\u{10940}") &&
+        /\p{Script=Tolong_Siki}/u.test("\u{11db0}") && !/\p{Ll}/u.test("\u0295") && /\p{Lo}/u.test("\u0295") &&
+        !/\p{ExtPict}/u.test("\u2388") && /\p{Assigned}/u.test("\u{1ceba}") && /\p{sc=Latn}/u.test("\ua7ce") &&
+        /\p{scx=Berf}/u.test("\u{16ea0}"))
+    var s = String.fromCodePoint(0xd800)
+    check("sur151f", s.charCodeAt(0) === 0xd800 && !new RegExp("^" + s + "$", "u").test("\ufffd") &&
+        !/^\p{Grapheme_Base}$/u.test(s) && String.fromCodePoint(0xdc00, 0x41).length === 2)
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -2106,6 +2149,7 @@ function main() {
     s148() // SECTION-CALL 148
     s149() // SECTION-CALL 149
     s150() // SECTION-CALL 150
+    s151() // SECTION-CALL 151
     println("full: " + checks + " checks, " + failures + " failures")
     return failures
 }

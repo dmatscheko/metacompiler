@@ -2,7 +2,8 @@
 // ToNumber of a string, ES2023 7.1.4.1.1) and the globals parseFloat and parseInt
 // (19.2.4, 19.2.5); the writing of one by Number#toFixed, toExponential,
 // toPrecision and toLocaleString; the code-unit order of two strings, which relations and the
-// default sort use; a RegExp's `source` text; and String#toWellFormed.
+// default sort use; a RegExp's `source` text, its flags and its SyntaxError (over
+// lib/regex.js, which the includer brings in); and String#toWellFormed.
 //
 // Included by both js and typescript interpreters (include("lib/js-num.js")) and
 // imported by languages/lib/js-rt.metajs, so the interpreters and layer 2 run one
@@ -371,6 +372,51 @@ function jsnReSource(src) {
         i = i + 1
     }
     return out
+}
+
+// Whether fl is a valid RegExp flags string: letters of dgimsuvy, none twice, and
+// not both u and v (ES2025 22.2.3.1 RegExpInitialize).
+function jsnReFlagsOk(fl) {
+    var i = 0
+    while (i < fl.length) {
+        var c = fl.charAt(i)
+        if ("dgimsuvy".indexOf(c) < 0 || fl.substring(i + 1, fl.length).indexOf(c) >= 0) { return false }
+        i = i + 1
+    }
+    return fl.indexOf("u") < 0 || fl.indexOf("v") < 0
+}
+
+// The flags of lib/regex.js for a RegExp with the JavaScript flags fl. i, s and m
+// are match modes. j is JavaScript's loop reading: an iteration of an unbounded
+// repeat that consumed nothing is discarded, so /^(a*)*$/.exec("aaa") reports "aaa"
+// for group 1 (node), not "" (Perl, Python, Ruby, Java), and a repeated atom's
+// captures are cleared at the start of every iteration. o is ECMAScript's escapes and
+// early errors, with Annex B's legacy readings while U is off; S is u's strict
+// grammar instead; U reads pattern and text as code points. v gets o and U: its
+// class-set syntax is not implemented. Twin of jsxNeutral in abnf/jsrtregexjs.go.
+function jsnReNeutral(fl) {
+    var out = "j"
+    if (fl.indexOf("i") >= 0) { out = out + "i" }
+    if (fl.indexOf("s") >= 0) { out = out + "s" }
+    if (fl.indexOf("m") >= 0) { out = out + "m" }
+    if (fl.indexOf("u") >= 0) { return out + "SU" }
+    if (fl.indexOf("v") >= 0) { return out + "oU" }
+    return out + "o"
+}
+
+// The SyntaxError message of a RegExp with source src and flags fl, or "": flags
+// jsnReFlagsOk refuses (ctor: the RegExp constructor's wording, else a literal's),
+// or a pattern lib/regex.js refuses as malformed. A pattern it refuses only for a
+// feature it does not implement (re.unsup: lookbehind, modifiers) raises nothing
+// here and fails when it is matched. Twin of jsxSyntaxErr in abnf/jsrtregexjs.go.
+function jsnReSyntaxErr(src, fl, ctor) {
+    if (!jsnReFlagsOk(fl)) {
+        if (ctor) { return "Invalid flags supplied to RegExp constructor '" + fl + "'" }
+        return "Invalid regular expression flags"
+    }
+    var re = rxGet(src, jsnReNeutral(fl))
+    if (re.ok || re.unsup) { return "" }
+    return "Invalid regular expression: /" + src + "/" + fl + ": " + re.err
 }
 
 // ----- Number#toFixed / toExponential / toPrecision (ES2023 21.1.3) -----

@@ -8912,9 +8912,9 @@ rxFoldNext = function (c, mode) { return jupFoldNext(c, mode) }
 // Three of JavaScript's letters are match modes and map straight onto the engine's
 // neutral set: i (fold case), s (dot matches newline) and m (^ and $ are line
 // anchors). Unlike Ruby, 'm' must NOT be forced on - without it JavaScript's ^ and $
-// are string anchors. g (lastIndex iteration), y (sticky), d (hasIndices), u and v
-// (the strict parse-time grammar, checked by the ReStrictU guard in the grammar) are
-// not match modes at all.
+// are string anchors. g (lastIndex iteration), y (sticky) and d (hasIndices) are not
+// match modes at all, and u and v choose the grammar and the unit of text
+// (jsnReNeutral in lib/js-num.js).
 
 function jxHasFlag(flags, letter) {
     var i = 0
@@ -8935,27 +8935,6 @@ function jxCanonFlags(flags) {
         if (jxHasFlag(flags, c)) { out = out + c }
         i = i + 1
     }
-    return out
-}
-
-// jxNeutral maps them onto the engine's letters.
-//
-// "o" is unconditional: in a non-unicode pattern a backslash-digit escape with no
-// such group is a LEGACY OCTAL character escape (Annex B), not a backreference -
-// /\1/.test("") is false in node because \1 is U+0001. Under u/v that spelling is a
-// SyntaxError, which the ReStrictU parse guard already refuses before anything
-// reaches the engine.
-// "j" is unconditional too: JavaScript has the POSIX-style loop reading. An iteration
-// of an unbounded repeat that consumed nothing is DISCARDED rather than kept, so
-// /^(a*)*$/.exec("aaa") reports "aaa" for group 1 (node), not "" (Perl, Python, Ruby,
-// Java). It also clears the captures inside a repeated atom at the start of every
-// iteration, so /(?:(a)|b)+/.exec("ab") leaves group 1 undefined.
-function jxNeutral(flags) {
-    var out = "oj"
-    if (jxHasFlag(flags, "i")) { out = out + "i" }
-    if (jxHasFlag(flags, "s")) { out = out + "s" }
-    if (jxHasFlag(flags, "m")) { out = out + "m" }
-    if (jxHasFlag(flags, "u") || jxHasFlag(flags, "v")) { out = out + "U" }
     return out
 }
 
@@ -8985,7 +8964,7 @@ function jxNewRegex(src, jsFlags) {
     var fl = jxCanonFlags(jsFlags)
     var o = {}
     o["__jxsrc"] = src
-    o["__jxneutral"] = jxNeutral(fl)
+    o["__jxneutral"] = jsnReNeutral(fl)
     o["source"] = jsnReSource(src)
     o["flags"] = fl
     o["global"] = jxHasFlag(fl, "g")
@@ -9015,11 +8994,10 @@ function jxStr(v) {
     return "/" + src + "/" + fl
 }
 
-// jxProg is the compiled program behind a RegExp value. A pattern the shared engine
-// refuses is NOT reported at construction: the engine is deliberately one permissive
-// dialect for four languages, so it rejects a few patterns JavaScript accepts
-// (lookbehind, [[:alpha:]]). The failure is raised when the pattern is actually
-// MATCHED, exactly as js-interpreter.abnf's reProgOf does.
+// jxProg is the compiled program behind a RegExp value. A malformed pattern never gets
+// this far (jsnReSyntaxErr); one the engine refuses only for a feature it does not
+// implement (re.unsup) fails here, when it is matched, exactly as
+// js-interpreter.abnf's reProgOf does.
 function jxProg(o) {
     var src = o["__jxsrc"]
     var fl = o["__jxneutral"]
@@ -9296,7 +9274,15 @@ function jxReplace(o, s, repl, forceAll) {
 function jxRegexArg(v) {
     if (jxIsRe(v)) { return v }
     if (jvUndefOrNull(v)) { return jxNewRegex("", "") }
-    return jxNewRegex(jxToStr(v), "")
+    return jxNewChecked(jxToStr(v), "")
+}
+
+// jxNewChecked is RegExp(src, fl) at run time: a malformed pattern or bad flags is its
+// SyntaxError (jsnReSyntaxErr). Twin of jsxNewChecked in abnf/jsrtregexjs.go.
+function jxNewChecked(src, fl) {
+    var e = jsnReSyntaxErr(src, fl, true)
+    if (e != "") { jbRaise("SyntaxError: " + e) }
+    return jxNewRegex(src, fl)
 }
 
 // ----- the dispatcher ----------------------------------------------------------
@@ -9376,7 +9362,7 @@ function jxCtorArgs(args) {
     }
     var a1 = jvArg(args, 1)
     if (!jvUndefOrNull(a1)) { fl = jxToStr(a1) }
-    return jxNewRegex(src, fl)
+    return jxNewChecked(src, fl)
 }
 
 // ----- the externs -------------------------------------------------------------

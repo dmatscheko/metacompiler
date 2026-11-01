@@ -4603,7 +4603,12 @@ func (rt *jsrt) jsvMethod(target interface{}, name string, args []interface{}) (
 				if n != math.Trunc(n) || n < 0 || n > 0x10FFFF {
 					rt.bigRaise("RangeError: Invalid code point %s", rt.jsvString(n))
 				}
-				units = append(units, utf16.Encode([]rune{rune(n)})...)
+				// utf16.Encode would turn a lone surrogate into U+FFFD.
+				if n < 0x10000 {
+					units = append(units, uint16(n))
+				} else {
+					units = append(units, utf16.Encode([]rune{rune(n)})...)
+				}
 			}
 			return strFromUnits(units), true
 		}

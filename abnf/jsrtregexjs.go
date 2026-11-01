@@ -28,8 +28,8 @@ import (
 // Three of JavaScript's letters are match modes and map straight onto the engine's neutral
 // set: i (fold case), s (dot matches newline) and m (^ and $ are line anchors). Unlike
 // Ruby, 'm' must NOT be forced on - without it JavaScript's ^ and $ are string anchors.
-// g (lastIndex iteration), y (sticky), d (hasIndices), u and v (the strict parse-time
-// grammar, checked by the ReStrictU guard in the grammar) are not match modes at all.
+// g (lastIndex iteration), y (sticky) and d (hasIndices) are not match modes at all, and
+// u and v choose the grammar and the unit of text (jsxNeutral).
 
 func jsxHasFlag(flags string, letter byte) bool {
 	return strings.IndexByte(flags, letter) >= 0
@@ -46,20 +46,12 @@ func jsxCanonFlags(flags string) string {
 	return out
 }
 
+// jsxNeutral is the engine's flags for the JavaScript flags; twin of jsnReNeutral in
+// languages/lib/js-num.js, which explains each letter. "W" (no letter in
+// lib/regex.js, whose strings are UTF-16 already) makes the text UTF-16 units
+// (rxUnits), and the pattern too, except under U, where both are code points.
 func jsxNeutral(flags string) string {
-	// "o" is unconditional: in a non-unicode pattern a backslash-digit escape with no
-	// such group is a LEGACY OCTAL character escape (Annex B), not a backreference -
-	// /\1/.test("") is false in node because \1 is U+0001. Under u/v that spelling is
-	// a SyntaxError, which the ReStrictU parse guard already refuses before anything
-	// reaches the engine.
-	// "j" is unconditional too: JavaScript has the POSIX-style loop reading. An
-	// iteration of an unbounded repeat that consumed nothing is DISCARDED rather than
-	// kept, so /^(a*)*$/.exec("aaa") reports "aaa" for group 1 (node), not "" (Perl,
-	// Python, Ruby, Java). It also clears the captures inside a repeated atom at the
-	// start of every iteration: /(?:(a)|b)+/.exec("ab") leaves group 1 undefined.
-	// "W" is unconditional as well: the text is UTF-16 units (rxUnits), and so is the
-	// pattern, except under u ("U"), where both are code points.
-	out := "ojW"
+	out := "jW"
 	if jsxHasFlag(flags, 'i') {
 		out += "i"
 	}
@@ -69,10 +61,39 @@ func jsxNeutral(flags string) string {
 	if jsxHasFlag(flags, 'm') {
 		out += "m"
 	}
-	if jsxHasFlag(flags, 'u') || jsxHasFlag(flags, 'v') {
-		out += "U"
+	switch {
+	case jsxHasFlag(flags, 'u'):
+		return out + "SU"
+	case jsxHasFlag(flags, 'v'):
+		return out + "oU"
 	}
-	return out
+	return out + "o"
+}
+
+// jsxFlagsOk: twin of jsnReFlagsOk in languages/lib/js-num.js.
+func jsxFlagsOk(fl string) bool {
+	for i := 0; i < len(fl); i++ {
+		if !strings.ContainsRune("dgimsuvy", rune(fl[i])) || strings.IndexByte(fl[i+1:], fl[i]) >= 0 {
+			return false
+		}
+	}
+	return !(jsxHasFlag(fl, 'u') && jsxHasFlag(fl, 'v'))
+}
+
+// jsxSyntaxErr is the SyntaxError message of a RegExp with source src and flags fl,
+// or ""; twin of jsnReSyntaxErr in languages/lib/js-num.js, which states the rules.
+func jsxSyntaxErr(src, fl string, ctor bool) string {
+	if !jsxFlagsOk(fl) {
+		if ctor {
+			return "Invalid flags supplied to RegExp constructor '" + fl + "'"
+		}
+		return "Invalid regular expression flags"
+	}
+	re := rxGet(src, jsxNeutral(fl))
+	if re.ok || re.unsup {
+		return ""
+	}
+	return "Invalid regular expression: /" + src + "/" + fl + ": " + re.err
 }
 
 // jsxAdv is AdvanceStringIndex: past the empty match at i, a whole surrogate pair
@@ -164,11 +185,10 @@ func jsxLastIndex(o *jsObject) int {
 	return int(f)
 }
 
-// jsxProg is the compiled program behind a RegExp value. A pattern the shared engine
-// refuses is NOT reported here at construction: the engine is deliberately one permissive
-// dialect for four languages, so it rejects a few patterns JavaScript accepts (lookbehind,
-// [[:alpha:]]). The failure is raised when the pattern is actually MATCHED, exactly as
-// js-interpreter.abnf's reProgOf does.
+// jsxProg is the compiled program behind a RegExp value. A malformed pattern never gets
+// this far (jsxSyntaxErr); one the engine refuses only for a feature it does not
+// implement (re.unsup) fails here, when it is matched, exactly as js-interpreter.abnf's
+// reProgOf does.
 func (rt *jsrt) jsxProg(o *jsObject) *rxRe {
 	re := rxObjRe(o)
 	if !re.ok {
@@ -487,7 +507,17 @@ func (rt *jsrt) jsxRegexArg(v interface{}) *jsObject {
 	if isUndefOrNull(v) {
 		return jsxNewRegex("", "")
 	}
-	return jsxNewRegex(rt.toString(v), "")
+	return rt.jsxNewChecked(rt.toString(v), "")
+}
+
+// jsxNewChecked is RegExp(src, fl) at run time: a malformed pattern or bad flags is
+// its SyntaxError (jsxSyntaxErr). Twins: jsReNew in both *-interpreter.abnf,
+// jxNewChecked in languages/lib/js-rt.metajs.
+func (rt *jsrt) jsxNewChecked(src, fl string) *jsObject {
+	if e := jsxSyntaxErr(src, fl, true); e != "" {
+		rt.bigRaise("SyntaxError: %s", e)
+	}
+	return jsxNewRegex(src, fl)
 }
 
 // jsxMethod is the dispatcher: a RegExp receiver, or a string receiver whose argument is a
@@ -585,7 +615,7 @@ func (rt *jsrt) jsxCtorArgs(args []interface{}) *jsObject {
 	if v := argAt(args, 1); !isUndefOrNull(v) {
 		fl = rt.toString(v)
 	}
-	return jsxNewRegex(src, fl)
+	return rt.jsxNewChecked(src, fl)
 }
 
 func init() {
