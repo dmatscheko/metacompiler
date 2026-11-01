@@ -6861,7 +6861,7 @@ char *rt_var(char *nm, char *v)
  * Channel 1 goes to fd 2 one byte at a time through rt_ech, so a redirection
  * that reroutes the channel still decides where the text goes; $( ) capture is
  * channel 0 only, exactly like the shell. The INTERPRETER half writes channel 1
- * through the tag host's eprintln; see bash-interpreter.abnf writeChan. */
+ * through the tag host's eprint; see bash-interpreter.abnf writeChan. */
 int rt_putc(int c)
 {
     int chan;

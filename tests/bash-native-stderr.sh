@@ -3,7 +3,9 @@
 # order: bash writes each command's output as it runs. Checked from outside:
 # tests/native-full.sh runs the native binary with 2>&1 into a file (stdout is then
 # not a terminal) and compares with tests/bash-stderr.expected (real bash 5.3's
-# output). llvm.Run gives the same bytes (-qq, 2>&1).
+# output), and does the same for the interpreter half. llvm.Run gives the same bytes
+# (-qq, 2>&1). A partial line on standard error is written as it stands: no newline is
+# added, before later output or at exit.
 echo out1
 echo err1 >&2
 printf 'out2 '
@@ -14,3 +16,6 @@ f() { echo f-out; printf 'f-err\n' >&2; }
 f
 for i in 1 2; do echo "o$i"; echo "e$i" >&2; done
 echo end
+printf 'e-frag ' >&2
+echo o-after
+printf 'tail' >&2

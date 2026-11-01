@@ -1336,20 +1336,16 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // the level it is at that moment, so a $( ) opened inside does not take the copy over.
     // A capture makes channel 0 its own while it is open (capOpen / capClose).
     //
-    // Channel 1 goes to `eprintln`, the tag host's standard-error channel, which both script
+    // Channel 1 goes to `eprint`, the tag host's standard-error channel, which both script
     // hosts bind identically (goja in abnf/commonscript.go, the frozen engine in abnf/jsrt.go)
-    // so the matrix's byte-identical stderr holds. eprintln APPENDS a newline and there is no
-    // eprint, so channel 1 is LINE BUFFERED: bytes accumulate in errBuf and each complete line
-    // is handed over without its newline. That is exact for everything a shell writes to fd 2
-    // in practice; a final PARTIAL line (`printf x >&2`) is flushed at the end of the run and
-    // gains a newline - the one byte this half cannot match.
+    // so the matrix's byte-identical stderr holds. It writes the bytes as given, so a final
+    // partial line (`printf x >&2`) reaches the stream without a newline, as in bash.
     var sinkOut = 0
     var sinkErr = 1
-    var errBuf = ""
     var capSinks = []   // the sinkOut each open capture replaced
 
     function writeChan(ch, s) {
-        if (ch == 1) { errBuf = errBuf + s; flushErrLines(); return }
+        if (ch == 1) { eprint(s); return }
         if (ch == 2) { return }
         var lv = (ch == 0) ? capStack.length : ch - 3
         if (lv > capStack.length) { lv = capStack.length }
@@ -1442,23 +1438,6 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function normBytes(s) { return (rawSeen && hasRaw(s)) ? bytesStr(strBytes(s)) : s }
     // A byte an escape produced (\xHH, \NNN): a character below 0x80, a raw byte above.
     function escByte(v) { return (v < 128) ? pfChr(v) : rawByte(v) }
-    // Emit every COMPLETE line sitting in errBuf. charCodeAt, not indexOf on a "\n"
-    // literal: the frozen MetaJS subset the grammar hosts share is the reason every scan in
-    // this file is written as an explicit loop.
-    function flushErrLines() {
-        var i = 0
-        var start = 0
-        for (i = 0; i < errBuf.length; i++) {
-            if (errBuf.charCodeAt(i) == 10) {
-                eprintln(errBuf.slice(start, i))
-                start = i + 1
-            }
-        }
-        if (start > 0) { errBuf = errBuf.slice(start, errBuf.length) }
-    }
-    function flushErrTail() {
-        if (errBuf.length > 0) { eprintln(errBuf); errBuf = "" }
-    }
     function emitOut(s) { writeChan(sinkOut, s) }
     // A channel a redirection copies: "the current standard output" fixed to its level now.
     // Twin of rt_fix_chan in languages/lib/bash-rt.c.
@@ -7882,21 +7861,17 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 if (typeof r == "object") {
                     // An expansion error abandons the rest of its line, with status 1.
                     if (r.soft != undefined) { setStatus(1); i = stmts.length; continue }
-                    if (r.isExit != undefined) { var xc = runExitTrap(r.ret); flushErrTail(); exit(xc) }
+                    if (r.isExit != undefined) { exit(runExitTrap(r.ret)) }
                     setStatus(r.ret)
                 }
             }
             r = takeAbort()
             if (r != null) {
-                if (r.soft == undefined) { var ac = runExitTrap(r.ret); flushErrTail(); exit(ac) }
+                if (r.soft == undefined) { exit(runExitTrap(r.ret)) }
                 setStatus(1)
             }
         }
-        var fc = runExitTrap(lastStatus)
-        // A `printf x >&2` with no trailing newline is still sitting in errBuf; hand it over
-        // (see writeChan) rather than losing it.
-        flushErrTail()
-        exit(fc)
+        exit(runExitTrap(lastStatus))
     }
 
     c.compile(c.asg)

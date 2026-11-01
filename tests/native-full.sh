@@ -60,13 +60,16 @@
 # against a checked-in fixture, which is the only thing left when there is no
 # count to print. Each row is
 #
-#     <lang>:<label>:<source file>:<expectation>
+#     <lang>:<label>:<source file>:<expectation>[:interp]
 #
 # where <expectation> is either a fixture path - stdout must be BYTE-IDENTICAL to
 # it and the exit status must be 0 - or the word `exit-only`, which says the
 # program prints nothing and the exit status IS the assertion. calculator uses
 # `exit-only` rather than an empty fixture so that the row states what is actually
 # being checked instead of comparing two empty strings and looking like a test.
+# A trailing `:interp` also runs the INTERPRETER half (-q, standard error merged as
+# for the binary) against the same fixture: the only byte-exact check of what that
+# half writes, since every other gate compares line-normalised text.
 #
 # Regenerate a fixture with `tests/native-full.sh --bless`, and READ THE DIFF
 # before you do: blessing a wrong answer is how an expected-output gate dies.
@@ -142,7 +145,7 @@ EXPECT_ROWS="brainfuck:features:tests/brainfuck-test-features.txt:tests/brainfuc
              bash:bytes:tests/bash-test-bytes.sh:tests/bash-bytes.expected
              bash:heap:tests/bash-native-heap.sh:tests/bash-heap.expected
              bash:stack:tests/bash-native-stack.sh:tests/bash-stack.expected
-             bash:stderr:tests/bash-native-stderr.sh:tests/bash-stderr.expected
+             bash:stderr:tests/bash-native-stderr.sh:tests/bash-stderr.expected:interp
              batch:nest:tests/batch-native-nest.cmd:tests/batch-nest.expected
              lua:bytes:tests/lua-test-bytes.lua:tests/lua-bytes.expected
              go:bytes:tests/go-test-bytes.go:tests/go-bytes.expected
@@ -201,7 +204,7 @@ one_program() {
 # `exit-only`, the exit status alone is the verdict and any output at all is a
 # finding). Writes the same two files as one_program.
 one_expect() {
-    L="$1"; kind="$2"; f="$3"; want="$4"
+    L="$1"; kind="$2"; f="$3"; want="$4"; interp="${5:-}"
     tag="$L/$kind"
     bin="$OUT/$L.$kind.out"
     rm -f "$bin"
@@ -239,9 +242,19 @@ one_expect() {
                > "$OUT/$L.$kind.row"
         echo 1 > "$OUT/$L.$kind.rc"; return
     fi
+    if [ -n "$interp" ]; then
+        guard_timeout "$RUN_TIMEOUT" ./mec "languages/$L-interpreter.abnf" "$f" -q \
+            > "$OUT/$L.$kind.itxt" 2>&1
+        xi=$?
+        if [ "$xi" != 0 ] || ! cmp -s "$OUT/$L.$kind.itxt" "$want"; then
+            { printf "%-20s %-6s %s\n" "$tag" "$xi" "FAIL: the INTERPRETER half's output differs from $want (or exit != 0)"
+              diff "$want" "$OUT/$L.$kind.itxt" | head -6 | sed 's/^/    /'; } > "$OUT/$L.$kind.row"
+            echo 1 > "$OUT/$L.$kind.rc"; return
+        fi
+    fi
     if [ "$x" = 0 ] && cmp -s "$OUT/$L.$kind.txt" "$want"; then
         printf "%-20s %-6s %s\n" "$tag" "$x" \
-               "output matches $want byte-for-byte ($(wc -c < "$want" | tr -d ' ') bytes)" \
+               "output matches $want byte-for-byte ($(wc -c < "$want" | tr -d ' ') bytes)${interp:+, interpreter half too}" \
                > "$OUT/$L.$kind.row"
         echo 0 > "$OUT/$L.$kind.rc"
     else
@@ -295,6 +308,8 @@ for row in $EXPECT_ROWS; do
     rest="${rest#*:}"
     f="${rest%%:*}"
     want="${rest#*:}"
+    interp=""
+    case "$want" in *:interp) want="${want%:interp}"; interp=1 ;; esac
     if [ -n "$WANT" ]; then
         case " $WANT " in *" $L "*) ;; *) continue;; esac
     fi
@@ -305,7 +320,7 @@ for row in $EXPECT_ROWS; do
         continue
     fi
     if [ "$running" -ge "$JOBS" ]; then wait -n 2>/dev/null || wait; running=$((running - 1)); fi
-    one_expect "$L" "$kind" "$f" "$want" &
+    one_expect "$L" "$kind" "$f" "$want" "$interp" &
     running=$((running + 1))
 done
 wait
