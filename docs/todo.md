@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1052** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1053** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -69,11 +69,11 @@ Remainder of T-1028; each needs a table-size decision before work starts. CJK fa
 
 # RB — Ruby
 
-### T-1048 ruby: Enumerable over a user #each doesn't stop early; Array#* / #/ #% #** with bad operands · P3 · RB · IN PROGRESS (RB worker, round 43) [V]
-ruby 2.6 (found by RB r42), all three engines:
-- `class C; include Enumerable; def initialize(l);@l=l;end; def each; [1,2,3].each{|x| @l<<x; yield x}; end; end`; `log=[]; C.new(log).any?{|x| x==1}; p log` → [1]; ours [1, 2, 3]. Same for first, find, include? (→ [1]) and first(2) (→ [1, 2]), take_while. The to_a delegation runs #each to the end; needs a break out of the user's each from the collecting block.
-- `[1] * nil` → TypeError "no implicit conversion from nil to integer"; `[1] * :a` → "no implicit conversion of Symbol into Integer" (Hash/true/objects alike). Ours returns [].
-- `[1] / x`, `[1] % x` → NoMethodError "undefined method `/' for [1]:Array" (`**` adds "Did you mean?  *"); ours aborts with "not a number in '/'".
+### T-1052 ruby: Array </>/<=/>= should be NoMethodError; blockless/lazy Enumerators over a user #each run eagerly · P3 · RB · OPEN [V]
+ruby 2.6 (found by RB r43), all three engines:
+- `[1] < 2` (also >, <=, >=; likely nil/true on the left) → NoMethodError "undefined method `<' for [1]:Array" (Array is not Comparable); ours ArgumentError "comparison of Array with 2 failed" (binOps["<"] → rcmp path and compiled twins).
+- user Enumerable (each logs before yield): `C.new(log).find` with no block → Enumerator, log []; ours runs #each eagerly: [1, 2, 3, :end].
+- `C.new(log).lazy.map { |x| x * 3 }.first(1)` → log [1]; ours [1, 2, 3, :end] (needs a suspendable #each — possibly via the coroutine host the PHP interpreter now uses for generators).
 
 # JS — JavaScript and TypeScript
 
@@ -1098,6 +1098,7 @@ T-1042 kotlin: exact ULong ranges past 2^53; `expr.member::class`; IntRange.EMPT
 T-1043 ruby: all?/any?/none?/one? don't short-circuit; `[[1], nil].sum([])` escapes rescue — DONE (RB r42, d4af700b): all?/any?/none?/one? short-circuit (Array/Range/Hash); Array#+ - & | take Array/to_ary (incl. singleton) else catchable TypeError — fixes [[1], nil].sum([]). Master probe vs ruby 2.6 (sent back once for singleton to_ary in the interpreter): 4 legs agree.
 T-1045 csharp: null message in two-arg Argument* ctors; 3-argument exception ctors — DONE (CS r6, eddf9698): null message in 2-arg Argument* ctors falls back to the type default (.NET 9/10 source: message ?? SR.*; ticket text described .NET 8); 3-arg ArgumentException(message, paramName, inner) and ArgumentOutOfRangeException(paramName, actualValue, message) incl. ActualValue suffix. Master spec probe: 3 legs agree.
 T-1036 php: array refcount/COW for reference holders; generator eager-run and yield-in-catch bugs — PARTIAL→split (PHP r37, 168608a4): interpreter generators suspend (coroutines) with spec Generator methods; yield in try/catch/finally makes a generator; compiler by-ref $$n; by-value array param copies release holders; nested ref literals one temporary; count() recursion warning. Master spec probe: generator protocol (send/current/getReturn/rewind/finally/lazy start) 3 legs agree. Remainder filed.
+T-1048 ruby: Enumerable over a user #each doesn't stop early; Array#* / #/ #% #** with bad operands — DONE (RB r43, 8d529dd4): Enumerable over a user #each stops early (any?/all?/none?/one?/find/find_index/include?/first/take/take_while) via catch/throw out of #each; Array#* implicit-int TypeErrors; Array / % ** NoMethodError; find(ifnone); Go twin any?(pattern) uses ===. Master probe vs ruby 2.6 (21 lines with #each logs): 4 legs agree. did_you_mean second line not implemented anywhere (separate feature).
 
 # Settled — do not re-open
 
