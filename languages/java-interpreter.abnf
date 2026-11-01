@@ -348,7 +348,7 @@ Import      <~~ jImport(pop(), up.pos) ~~>
 QualName    <~~ push(stripWs(up.in)) ~~> = Id { "." Id } [ "." "*" ] ;
 
 ClassDecl   <~~ buildClass(takeAll()) ~~>
-            = [ LeadMods ] KwClass Id <~~ push(up.in); jEnterClass(up.in) ~~> [ ClsTyParams ]
+            = [ TyMods ] KwClass Id <~~ push(up.in); jEnterClass(up.in) ~~> [ ClsTyParams ]
               [ KwExtends ExtRef ]
               [ ImplementsSkip ] [ Permits ] "{" { Member } "}" ;
 // A supertype may be qualified and generic (`extends Outer.Super`, `extends
@@ -359,7 +359,7 @@ ExtRef      <~~ push({ext: jCycSuper(jJoinDots(takeAll()))}) ~~>
 
 // record Pair(int a, int b) { } -- generates fields, a constructor and accessors.
 RecordDecl  <~~ buildRecord(takeAll()) ~~>
-            = [ LeadMods ] KwRecord Id <~~ push(up.in); jEnterClass(up.in) ~~> [ ClsTyParams ] RParams
+            = [ TyMods ] KwRecord Id <~~ push(up.in); jEnterClass(up.in) ~~> [ ClsTyParams ] RParams
               [ ImplementsSkip ] [ Permits ] "{" { RMember } "}" ;
 // A record body is restricted (JLS 8.10.4): no INSTANCE initializer
 // (instance.initializer.not.allowed.in.records) and no instance FIELD
@@ -398,7 +398,7 @@ InstInit    <~~ push({kind: "iinit", body: pop()}) ~~>
 // invocation may only stand first, and it decides what initializes the object, so it
 // is parsed as a separate head rather than as an ordinary statement.
 Ctor        <~~ jTyPop(); push(makeCtor(takeAll())) ~~>
-            = [ LeadMods ] [ SkipAngle ] Id <~~ push(up.in) ~~> ParamList [ Throws ] CtorBody ;
+            = [ LeadMods ] [ MTyParams ] Id <~~ push(up.in) ~~> ParamList [ Throws ] CtorBody ;
 CtorBody    <~~ push(makeCtorBody(takeAll())) ~~>
             = "{" [ CtorCall ] { Statement } "}" ;
 // A record's COMPACT constructor: no parameter list at all - it receives the record
@@ -1348,6 +1348,11 @@ ModKw       = ( "public" | "private" | "protected" | "static" | "final" | "abstr
               | "synchronized" | "native" | "transient" | "volatile" | "strictfp"
               | "non-sealed" | "sealed" | "default" ) KwEnd ;
 LeadMods    = { Annotation | ModKw } ;
+// A class, record, interface or enum declaration's modifiers: LeadMods, with
+// `public` noted for the package-access check (jNoteTyMod in
+// lib/java-decltypes.js). A single token's up.in is its own text.
+TyMods      = { Annotation | TyModKw } ;
+TyModKw     <~~ jNoteTyMod(up.in) ~~> = ModKw ;
 ImplementsSkip = KwImplements ImplRef { "," ImplRef } ;
 ImplRef     <~~ push({impl: jNoteUtilType(jCycSuper(jJoinDots(takeAll())))}) ~~>
             = { Annotation } Id <~~ push(stripWs(up.in)) ~~> [ SkipAngle ] { "." { Annotation } Id <~~ push(stripWs(up.in)) ~~> [ SkipAngle ] } ;
@@ -1367,7 +1372,7 @@ IfaceExt    <~~ push({iext: jNoteUtilType(jCycSuper(jJoinDots(takeAll())))}) ~~>
 // time - so the declaration is parsed and dropped, like the annotations themselves.
 AnnotationDecl = LeadMods "@" KwInterface Id [ SkipAngle ] [ KwExtends Type { "," Type } ] SkipBlock ;
 Interface   <~~ buildInterface(takeAll()) ~~>
-            = LeadMods KwInterface Id <~~ push(up.in); jEnterClass(up.in) ~~> [ ClsTyParams ]
+            = TyMods KwInterface Id <~~ push(up.in); jEnterClass(up.in) ~~> [ ClsTyParams ]
               [ KwExtends IfaceExt { "," IfaceExt } ] [ Permits ] "{" { IMember } "}" ;
 // enum E { A(1), B { ... }; members }: a class whose constants are singleton
 // instances built once, in order. A constant with a body becomes an anonymous
@@ -1376,7 +1381,7 @@ Interface   <~~ buildInterface(takeAll()) ~~>
 // An enum has no type parameters (JLS 8.9, enum.cant.be.generic): there is no
 // [ SkipAngle ] after the name on purpose.
 EnumDecl    <~~ buildEnum(takeAll()) ~~>
-            = LeadMods KwEnum Id <~~ push(up.in); jEnterClass(up.in) ~~> [ ImplementsSkip ]
+            = TyMods KwEnum Id <~~ push(up.in); jEnterClass(up.in) ~~> [ ImplementsSkip ]
               "{" [ EnumConst { "," EnumConst } ] [ "," ] [ ";" { Member } ] "}" ;
 EnumConst   <~~ push(makeEnumConst(takeAll())) ~~>
             = { Annotation } Id <~~ push(up.in) ~~> [ EnumArgs ] [ EnumBody ] ;
@@ -6995,6 +7000,7 @@ HasStatic   = :script(~~
             jLoadLib("lib/java-pattern.java", "java.util.regex.")
         }
         resolveImport(path, pos)
+        jImportAccess(path, pos)
     }
     // A class named through its package (PkgClass) wants the library an
     // import of it loads, after the walk (jLoadWanted). Twin of jNotePkgClass

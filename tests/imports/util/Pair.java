@@ -1,16 +1,16 @@
 // A second project module: one class per file, like idiomatic Java.
 package util;
 
-class Pair {
+public class Pair {
     int a;
     int b;
 
-    Pair(int a, int b) {
+    public Pair(int a, int b) {
         this.a = a;
         this.b = b;
     }
 
-    int sum() {
+    public int sum() {
         return this.a + this.b;
     }
 }

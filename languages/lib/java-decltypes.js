@@ -2566,16 +2566,43 @@ function jCycLoadPeers() {
         }
     }
 }
+// ----- package access (JLS 6.6.1) -----
+//
+// A top-level type declared without `public` is accessible only inside its
+// own package, so javac refuses `import p.C;` (or an import of a member of C)
+// from a file of another package: "C is not public in p; cannot be accessed
+// from outside package". TyMods notes `public` (jNoteTyMod), jCycEnter
+// records each user top-level type's package and access under its qualified
+// name, and jImportAccess tests an import once its file has been walked. An
+// import is the only way this subset reaches another package's type.
+var jTyModsPub = false
+var jTopAccess = {}
+function jNoteTyMod(m) { if (m == "public") { jTyModsPub = true } }
+function jImportAccess(path, pos) {
+    var segs = stripWs(path).split(".")
+    var q = ""
+    for (var i = 0; i < segs.length; i++) {
+        q = i == 0 ? segs[0] : q + "." + segs[i]
+        var a = jTopAccess["$" + q]
+        if (a != undefined && !a.pub && a.pkg != jFilePkg) {
+            fail(segs[i] + " is not public in " + a.pkg + "; cannot be accessed from outside package ("
+                + c.curFile() + ":" + c.lineOf(pos) + ")")
+        }
+    }
+}
 // A type declaration entered: its path is the enclosing types' names and its
 // own, dot-joined (stack is the grammar's jClassStack).
 function jCycEnter(stack, n) {
     jCycCur = ""
+    var pub = jTyModsPub
+    jTyModsPub = false
     if (jPkgPrefix != "") { return }
     var p = ""
     for (var i = 0; i < stack.length; i++) {
         var s = stack[i]
         if (s != "" && s != undefined) { p = p == "" ? s : p + "." + s }
     }
+    if (p == "") { jTopAccess["$" + (jFilePkg == "" ? n : jFilePkg + "." + n)] = {pkg: jFilePkg, pub: pub} }
     p = p == "" ? n : p + "." + n
     if (jCycDecls["$" + p] == undefined) {
         jCycDecls["$" + p] = []

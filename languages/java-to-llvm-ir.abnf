@@ -325,7 +325,7 @@ Import      <~~ jImport(pop(), up.pos) ~~>
 QualName    <~~ push(stripWs(up.in)) ~~> = Id { "." Id } [ "." "*" ] ;
 
 ClassDecl   <~~ push(makeClassStmt(takeAll())) ~~>
-            = [ LeadMods ] KwClass Id <~~ push(up.in); jEnterClass(up.in) ~~> [ ClsTyParams ]
+            = [ TyMods ] KwClass Id <~~ push(up.in); jEnterClass(up.in) ~~> [ ClsTyParams ]
               [ KwExtends ExtRef ]
               [ ImplementsSkip ] [ PermitsSkip ] "{" { Member } "}" ;
 // A supertype may be qualified and generic (`extends Outer.Super`, `extends
@@ -336,7 +336,7 @@ ExtRef      <~~ var ps = takeAll(); jCycSuper(ps.join(".")); push({ext: jLastSeg
 
 // record Pair(int a, int b) { } -- generates fields, a constructor and accessors.
 RecordDecl  <~~ push(makeRecordStmt(takeAll())) ~~>
-            = [ LeadMods ] KwRecord Id <~~ push(up.in); jEnterClass(up.in) ~~> [ ClsTyParams ] RParams
+            = [ TyMods ] KwRecord Id <~~ push(up.in); jEnterClass(up.in) ~~> [ ClsTyParams ] RParams
               [ ImplementsSkip ] [ PermitsSkip ] "{" { RMember } "}" ;
 // A record body is restricted (JLS 8.10.4): no INSTANCE initializer
 // (instance.initializer.not.allowed.in.records) and no instance FIELD
@@ -386,7 +386,7 @@ AbstractMethod <~~ jTyPop(); push(makeAbstract(takeAll())); jRetPop() ~~>
 // no-argument super call, and a `this(args)` also suppresses the field initializers
 // (they run once, in the constructor that finally reaches super).
 Ctor        <~~ jTyPop(); push(makeCtor(takeAll())) ~~>
-            = [ LeadMods ] [ SkipAngle ] Id <~~ push(up.in) ~~> ParamList [ Throws ] CtorBody ;
+            = [ LeadMods ] [ MTyParams ] Id <~~ push(up.in) ~~> ParamList [ Throws ] CtorBody ;
 // A record's COMPACT constructor - `Range { ... }`, no parameter list: the record
 // components are the parameters, the body may reassign them, and the fields are
 // assigned from them afterwards (see buildClassStmt).
@@ -1333,6 +1333,11 @@ ModKw       = ( "public" | "private" | "protected" | "static" | "final" | "abstr
 // with no run-time meaning here, so the clause is parsed and dropped.
 PermitsSkip = "permits" KwEnd Type { "," Type } ;
 LeadMods    = { Annotation | ModKw } ;
+// A class, record, interface or enum declaration's modifiers: LeadMods, with
+// `public` noted for the package-access check (jNoteTyMod in
+// lib/java-decltypes.js). A single token's up.in is its own text.
+TyMods      = { Annotation | TyModKw } ;
+TyModKw     <~~ jNoteTyMod(up.in) ~~> = ModKw ;
 // `implements I, J` is kept: the first named interface becomes the class's
 // __super when it has no superclass (so its default methods and `instanceof`
 // work), and every further one is listed on __ifaces and has its default
@@ -1361,7 +1366,7 @@ AnnotationDecl <~~ push(makeAnnotationTypeStmt(takeAll())) ~~>
 // javac's parser refuses, and the two halves agree file for file without it.
 Interface   = InterfaceReal ;
 InterfaceReal <~~ push(makeInterfaceStmt(takeAll())) ~~>
-            = LeadMods KwInterface Id <~~ push(up.in); jEnterClass(up.in) ~~> [ ClsTyParams ]
+            = TyMods KwInterface Id <~~ push(up.in); jEnterClass(up.in) ~~> [ ClsTyParams ]
               [ KwExtends IType { "," IType } ] [ PermitsSkip ] "{" { IMember } "}" ;
 // An enum lowers to a class descriptor plus one instance per constant, stored on the
 // descriptor under the constant's name. The constants are built in textual order, so
@@ -1370,7 +1375,7 @@ InterfaceReal <~~ push(makeInterfaceStmt(takeAll())) ~~>
 // descriptor whose __super is the enum, so its overrides win over the enum's methods.
 EnumDecl    = EnumReal ;
 EnumReal    <~~ push(makeEnumStmt(takeAll())) ~~>
-            = LeadMods KwEnum Id <~~ push(up.in); jEnterClass(up.in) ~~> [ ImplementsSkip ]
+            = TyMods KwEnum Id <~~ push(up.in); jEnterClass(up.in) ~~> [ ImplementsSkip ]
               "{" [ EnumConst { "," EnumConst } ] [ "," ] [ ";" { Member } ] "}" ;
 EnumConst   <~~ push(makeEnumConst(takeAll())) ~~>
             = { Annotation } Id <~~ push(up.in) ~~>
@@ -4871,6 +4876,7 @@ HasStatic   = :script(~~
             jLoadLib("lib/java-pattern.java", "java.util.regex.")
         }
         resolveImport(path, pos)
+        jImportAccess(path, pos)
     }
     // A class named through its package (PkgClass) wants what an import of it
     // loads, after the walk (jLoadWanted). Twin of jNotePkgClass in
