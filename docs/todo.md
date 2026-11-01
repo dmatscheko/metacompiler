@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-990** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-991** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -173,23 +173,12 @@ value: `$x = 5; $a = [&$x, 1]; var_dump($a);` → php `&int(5)`, ours `int(5)` (
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-978 bash: `type`, `declare -f`/`-F`, `command -V` of a function · P3 · SH · IN PROGRESS (SH worker, round 22) [V]
-Found by the SH worker, round 21 (oracle bash 5.3). `f(){ :; }; type f` → bash "f is a function" plus the body; `declare -F f` →
-`f`; `declare -f f` prints the normalised body; `command -V f` → "f is a function". Not built in either half (round 21 added
-command -V only for builtins and keywords).
-
-### T-979 bash: diagnostics lack bash's "file: line N:" prefix (incl. `${!v}` bad substitution) · P3 · SH · IN PROGRESS (SH worker, round 22) [V]
-Found by the SH worker, round 21. bash prefixes runtime errors with the script name and line, e.g. `t.sh: line 3: ${!v}: bad
-substitution`; ours prints the message alone, so stderr differs from the oracle on every diagnostic.
-
-### T-980 bash: nameref limits and function definitions leaking out of subshells · P3 · SH · IN PROGRESS (SH worker, round 22) [V]
-Found by the SH worker, round 21. Namerefs (round 21) do not cover array-element targets (`declare -n r=a[1]`), `${!r}` (the
-target name) or circular-reference diagnostics; rt_setvar_byname drops writes through some indirect paths. Also `( f(){ :; } ); f`
-- bash: f is not defined outside the subshell; ours keeps it.
-
-### T-981 bash: "command not found" aborts the script with 127; bash continues · P2 · SH · IN PROGRESS (SH worker, round 22) [V]
-Found by the master probing round 21. `nosuchcmd; echo after` → bash prints the error and `after` (the status is 127 and the
-script goes on); both halves stop at the first unknown command with exit 127.
+### T-990 bash: bad array subscripts, `for i in; do`, compiled nameref/subshell-function edge cases · P3 · SH · OPEN [V]
+Found by the SH worker, round 22 (oracle bash 5.3). `a[-9]=W` → bash "a[-9]: bad array subscript" and abandons the line; ours "a:
+bad array subscript". `a[@]=W` → bash "a[@]: bad array subscript" status 1; ours status 0 (also through a nameref). `for i in; do`
+(empty list) does not parse in either engine. Compiler only: `@A`/`@a` through a computed nameref chain use the reference's own
+attributes; a computed self-reference sets the nameref mark; a function that defines another function, called in a subshell, leaks
+it out (the save is lexical). rt_setvar_byname drops a write to a name the program never mentions (no slot).
 
 # C — C subset
 
@@ -1117,6 +1106,10 @@ T-959 go, swift: an undefined name is a run-time error, not a compile error — 
 T-985 go: empty init statements misparse (`if ; cond`, `switch ; {}`); compiler reads a keyword as a variable — DONE - empty/call init statements in if/switch/type-switch/for headers, literals inside header indexes/calls; both halves
 T-986 go: deadlock message and exit status differ from the runtime's — DONE - fatal error: all goroutines are asleep - deadlock! on stderr, exit 2, all engines (trace omitted: addresses)
 T-984 go: an unbuffered or full-channel send never blocks; range over a nil channel runs zero times — PARTIAL - select send arms need room or a receiver, range over a nil chan blocks; a plain send outside select still never blocks, filed
+T-978 bash: `type`, `declare -f`/`-F`, `command -V` of a function — DONE - type [-t], command -V and declare -f/-F of functions via bash-deparse.js; heredoc/procsubst bodies refused loudly
+T-979 bash: diagnostics lack bash's "file: line N:" prefix (incl. `${!v}` bad substitution) — DONE - $0: line N: prefix on diagnostics in both engines
+T-980 bash: nameref limits and function definitions leaking out of subshells — DONE - nameref element targets, chains, cycle diagnostics; subshell function definitions end with the subshell
+T-981 bash: "command not found" aborts the script with 127; bash continues — DONE - command not found prints, sets 127 and continues
 
 # Settled — do not re-open
 
