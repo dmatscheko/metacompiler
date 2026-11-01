@@ -1066,7 +1066,14 @@ func init() {
 			// (Kotlin's Int.compareTo(Float) compiles to a JVM float comparison,
 			// i.e. exactly JLS 5.6.2.)
 			l, r = jvmFloCmpPair(rt, l, r)
-			c := rt.jsCompare(l, r)
+			var c int
+			ls, lok := l.(string)
+			rs, rok := r.(string)
+			if lok && rok {
+				c = jsvStrCmp(ls, rs) // by UTF-16 unit, as ktKeyLess
+			} else {
+				c = rt.jsCompare(l, r)
+			}
 			if c == 2 {
 				return boolH(false) // a NaN operand: every ordered relation is false (IEEE 754)
 			}
@@ -7254,11 +7261,13 @@ func (rt *jsrt) ktTimSort(es []interface{}, cmp func(a, b interface{}) int) *jsA
 	return &jsArray{elems: out}
 }
 
+// ktKeyLess orders two Strings by UTF-16 unit (java.lang.String.compareTo), which
+// Go's byte order - code point order - is not for an astral character.
 func ktKeyLess(rt *jsrt, a, b interface{}) bool {
 	as, aok := a.(string)
 	bs, bok := b.(string)
 	if aok && bok {
-		return as < bs
+		return jsvStrCmp(as, bs) < 0
 	}
 	if ca, ok := a.(jsChar); ok {
 		if cb, ok2 := b.(jsChar); ok2 {

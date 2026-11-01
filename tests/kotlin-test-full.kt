@@ -6668,6 +6668,28 @@ fun s149() {
     check("entry149", "$e1 $e2 $old $m" == "1=z! 2=b q {1=z!, 3=c!, 2=w!}")
 }
 
+// ===== SECTION 150: String order is by UTF-16 unit =====
+// String.compareTo compares UTF-16 code units, so an astral character (a
+// surrogate pair, U+D83D U+DE00) sorts BELOW U+E000..U+FFFF, unlike code point
+// order. The operators, max / min, maxOf, sorted and the sorted collections all
+// use that order (kotlinc 2.2.21 on java 24).
+fun s150() {
+    val xs = listOf("｡x", "😀", "x", "￿x", "ax")
+    val cs = { l: Iterable<String> -> l.map { it[0].code } }
+    val up = listOf(97, 55357, 57344, 65377, 65535)
+    val sm = xs[1]
+    check("utf16ord150a", sm < xs[2] && !(sm > xs[2]) && sm <= xs[0] && xs[3] >= sm &&
+        maxOf(sm, xs[2]) == xs[2] && minOf(xs[0], sm) == sm)
+    check("utf16ord150b", cs(xs.sorted()) == up && cs(xs.sortedDescending()) == up.reversed() &&
+        cs(xs.toSortedSet()) == up && cs(xs.sortedBy { it }) == up)
+    check("utf16ord150c", xs.max() == xs[3] && xs.maxOf { it } == xs[3] && xs.maxBy { it } == xs[3] &&
+        xs.filter { it != "ax" }.min() == sm && xs.count { it > "" } == 3)
+    val ts = sortedSetOf<String>()
+    for (x in xs) ts.add(x)
+    val pq = java.util.PriorityQueue<String>(xs)
+    check("utf16ord150d", cs(ts) == up && pq.poll() == "ax" && pq.poll() == sm)
+}
+
 fun main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -6814,6 +6836,7 @@ fun main() {
     sec147() // SECTION-CALL 147
     s148() // SECTION-CALL 148
     s149() // SECTION-CALL 149
+    s150() // SECTION-CALL 150
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }

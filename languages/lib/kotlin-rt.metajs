@@ -1478,9 +1478,12 @@ function ktStructEq(a, b) {
 // ktKeyLess (jsrtkotlin.go 4567): the "<" the sort and the comparators use.
 // A user Comparable answers through its own compareTo; without that arm every
 // element would compare as NaN and sorting would silently be a no-op.
+// Two Strings order by UTF-16 unit (java.lang.String.compareTo); the native `<`
+// compares bytes, which is code point order and puts an astral character above
+// U+E000..U+FFFF.
 function ktKeyLess(a, b) {
     if (typeof a == "string") {
-        if (typeof b == "string") { return a < b }
+        if (typeof b == "string") { return k2CmpText(a, b, false) < 0 }
     }
     if (ktIsChar(a)) {
         if (ktIsChar(b)) { return a["__char"] < b["__char"] }
@@ -2237,7 +2240,12 @@ function js_ktcmp(op, l, r) {
     if (typeof l == "number") {
         if (typeof r == "number") { return k1NumRel(op, ktNum(l), ktNum(r)) }
     }
-    var d = ktCmpVals(l, r)
+    var d = 0
+    if (typeof l == "string" && typeof r == "string") {
+        d = k2CmpText(l, r, false) // by UTF-16 unit, as ktKeyLess
+    } else {
+        d = ktCmpVals(l, r)
+    }
     if (op == "<") { return d < 0 }
     if (op == ">") { return d > 0 }
     if (op == "<=") { return d <= 0 }
@@ -4582,7 +4590,7 @@ function k3IsCollection(v) {
 // k3KeyLess is ktKeyLess (jsrtkotlin.go:4567).
 function k3KeyLess(a, b) {
     if (ktIsStr(a)) {
-        if (ktIsStr(b)) { return a < b }
+        if (ktIsStr(b)) { return k2CmpText(a, b, false) < 0 }
     }
     if (ktIsChar(a)) {
         if (ktIsChar(b)) { return ktCharCode(a) < ktCharCode(b) }

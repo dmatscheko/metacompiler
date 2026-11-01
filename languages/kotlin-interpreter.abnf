@@ -3243,6 +3243,7 @@ NotMemberKw = :script(~~ "pure";
                 if (isCmp) { return kCmpI(op, l, r) }
                 return kArith(op, l, r)
             }
+            if (isCmp && typeof l == "string" && typeof r == "string") { return f(kCmpText(l, r, false), 0) }
             return f(kNum(l), kNum(r))
         }
     }
@@ -6918,8 +6919,10 @@ NotMemberKw = :script(~~ "pure";
         return kConv(acc, isLong ? 64 : 32, false)
     }
     function kNum2(v) { return szIs(v) ? v : kNum(v) }
+    // Two Strings order by UTF-16 unit, as java.lang.String.compareTo does; a host
+    // `<` compares by code point and puts an astral character above U+E000..U+FFFF.
     function kKeyLess(a, b) {
-        if (typeof a == "string" && typeof b == "string") { return a < b }
+        if (typeof a == "string" && typeof b == "string") { return kCmpText(a, b, false) < 0 }
         if (kIsChar(a) && kIsChar(b)) { return a.__char < b.__char }
         if (kIsIntegral(a) && kIsIntegral(b)) { return kCmpI("<", a, b) }
         // A user Comparable: `listOf(V(3), V(1)).sorted()` sorts by the class's own
