@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1056** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1057** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -104,8 +104,12 @@ strings.TrimSpace, native strips ASCII 9-13 and 32: `int.Parse(" 1 2 ")` and `in
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-1047 kotlin: interpreter `Pair::class.simpleName` is null · P4 · KT · IN PROGRESS (KT worker, round 20) [V]
-kotlinc 2.2.21: `val r = 1L to 2; println(r::class.simpleName)` → Pair; llvm.Run and native print Pair, the interpreter prints null. Found by KT r19.
+### T-1056 kotlin: member call vs receiver-lambda param name clash; companion/enum-entry classes; primitive class rendering · P3 · KT · OPEN [V]
+kotlinc 2.2.21 (found by KT r20, repros in scratchpad KT20/):
+- Compiled: `fun applyTwice(x: Int, f: Int.() -> Int) = x.f().f()` + `object Obj { fun f(n: Int) = n * 2 }`; `println(Obj.f(4))` → 8 (interpreter 8); run/native "unknown name: f" (recvLambdaNames branch in kotlin-to-llvm-ir.abnf; methodClasses only records class methods, so object/companion receivers take the lambda arm). Same for a companion method f.
+- `C.Companion::class.simpleName` → Companion, qualifiedName C.Companion, javaClass.name C$Companion; `N.Named::class.simpleName` → Named. Interpreter: Companion/Companion/Companion; compiled: C/C/C and N (companion merged into the class descriptor — architectural).
+- `enum class E { A, B { override fun toString() = "b" } }`: `E.B::class.simpleName` → B, qualifiedName E.B, javaClass.name E$B, `E.B::class == E::class` false; ours E/E/E/true. `E.B.declaringJavaClass` → E; ours null/undefined.
+- `println(Int::class)` → "int (Kotlin reflection is not available)" (ours "class Int"; previously declined in T-868 — keep declined unless cheap); `Int::class.javaObjectType.name` → java.lang.Integer (ours Int). `sequenceOf(1)::class.simpleName` → null (anonymous class; ours non-null).
 
 # GO — Go  (oracle: `go run`)
 
@@ -1102,6 +1106,7 @@ T-1048 ruby: Enumerable over a user #each doesn't stop early; Array#* / #/ #% #*
 T-1050 php: Generator::throw(); `yield from` value and send forwarding — DONE (PHP r38, 652f03e2): Generator::throw (runs a fresh generator to its first yield; throws into a yield-from delegate); yield from evaluates to the delegate's return value and forwards send(); uncaught throw finishes the generator. Master spec probe: generator protocol incl. throw/yield-from, 3 legs agree.
 T-1051 php: array refcount/COW remainder; print_r recursion depth; stale comments — PARTIAL→split (PHP r38, 652f03e2): stale comments fixed; exception-unwound param-copy holders kept by design (PHP's trace keeps frame args). print_r depth + per-array COW + property-hook params need array copy-on-write identity → design ticket.
 T-1049 csharp: null message on non-Argument exceptions gives "" — DONE (CS r7, 6ded3040): null message → "Exception of type 'X' was thrown." for all non-Argument exceptions (BCL + user); inner exceptions in ToString; user override of Message honoured (and no more compiler crash on __get_Message). Master spec probe + the 3 earlier exception probes: all legs agree.
+T-1047 kotlin: interpreter `Pair::class.simpleName` is null — DONE (KT r20, f4fa2bad): Pair/Triple KClass (+ is Triple, Pair::class unless user-declared); map-entry node classes; StringBuilder/Regex classes; kotlin.-qualified unsigned/array types; shared JVM-class helper; compiled unnamed companion as Owner.Companion. Master probe vs kotlinc 2.2.21 (19 lines): 4 legs agree.
 
 # Settled — do not re-open
 
