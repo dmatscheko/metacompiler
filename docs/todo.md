@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1101** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1104** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -146,34 +146,23 @@ real coroutines out of the subset - decide first). Go also runs the most recentl
 ### T-1053 php: copy-on-write array identity (refcount release, print_r recursion depth) · P4 · PHP · OPEN [V spec-only] · NEEDS DESIGN
 Remainder of T-1000/T-1025/T-1036/T-1051. Engines copy arrays eagerly on assignment and have no point where an array dies, so: reference holders of overwritten / frame-local / temporary arrays and of unfinished generators are never released (counts stay correct-but-high, so `&` may survive a copy PHP would unwrap); property-hook set parameters aren't covered by the compiler's param-copy release; print_r recursion depth is wrong (`$y=[1]; $y[]=&$y; print_r($y)` → PHP *RECURSION* at [1], ours one level deeper; `$a=["k"=>[2]]; $a["k"][]=&$a;` two deeper) because the interpreter's by-value param copy loses array identity; `$w=$z; print_r($w)` differs too. Options: real per-array refcount + COW in all three engines (touches every in-place array write), or an engine-level print_r like var_dump plus targeted release points. Needs a design decision before work.
 
-### T-1093 php: `[$this, 'parent::m']` / `['B', 'parent::m']` callables · P3 · PHP · IN PROGRESS (PHP worker, round 47) [V]
+### T-1101 php: callable-typed parameters validated by shape only; static compound callables to non-static methods · P3 · PHP · OPEN [V]
 
-Spec: zend_is_callable_check_func (Zend/zend_API.c), where a "parent::" prefix makes the call non-virtual and resolves it on the parent class. Each engine needs the check and the dispatch: phpCheckCallback/phpInvoke (interp), compiler callerCallable, Go phpCbMeth/js_phcbcls, and php-rt.metajs.
+Spec: zend_is_callable_ex, which zend_verify_arg_type calls for a `callable` parameter, and Zend/tests/callable_self_parent_static_deprecation.phpt, section "Test callable type hint".
+- A `callable` parameter must run the full validity check, not a shape test, and must raise the self/parent/static and compound-form deprecations, as the call_user_func sites already do. An invalid callable must raise the TypeError "must be of type callable, array given".
+- `['K', 'parent::m']` naming a non-static method from a static context must be rejected with "non-static method K::m() cannot be called statically".
 
-Required behaviour:
-- the PHP 8.2+ deprecation 'Callables of the form ["B", "parent::m"] are deprecated' when display is on;
-- is_callable stays silent;
-- the error when the class has no parent.
+### T-1102 php: uncaught "Undefined constant" Error reports the caller's line · P3 · PHP · OPEN [V]
 
-The PHP r46 worker left a ready probe at scratchpad/PHP46/p9.php.
+In both engines, an uncaught Error 'Undefined constant "X"' reports the line of the enclosing call rather than the line where the constant is used. The r47 worker's repro is scratchpad/PHP47/ln2.php: PHP reports :4, ours :6. Check the getLine() of a caught Error too.
 
-### T-1094 php: fractional float key deprecation in array literals, isset, unset, array_key_exists · P3 · PHP · IN PROGRESS (PHP worker, round 47) [V]
+### T-1103 php: htmlspecialchars double_encode / ENT_SUBSTITUTE / HTML5 names; array_key_exists float key via callable or named args · P3 · PHP · OPEN [V]
 
-Writes, reads and compound assignments already emit "Implicit conversion from float 1.5 to int loses precision". The deprecation is still missing for:
-- `[1.5 => x]` (zend_ast / ZEND_INIT_ARRAY → zend_dval_to_lval_safe);
-- `isset($a[1.5])`;
-- `unset($a[1.5])`;
-- `array_key_exists(1.5, $a)`.
-
-Check the php-src sources for each site, because some of them may truncate silently (array_key_exists in particular). Add assertions to tests/php-test-warnings.php.
-
-### T-1095 php: ENT_* constants undefined (htmlspecialchars($s, ENT_QUOTES) fatals) · P3 · PHP · IN PROGRESS (PHP worker, round 47) [V]
-
-`htmlspecialchars("<a href='x'>", ENT_QUOTES)` dies with 'Uncaught Error: Undefined constant "ENT_QUOTES"' on every leg.
-
-Define the ENT_* family from ext/standard/html_tables.h / basic_functions.stub.php: ENT_COMPAT=2, ENT_QUOTES=3, ENT_NOQUOTES=0, ENT_HTML401=0, ENT_XML1=16, ENT_XHTML=32, ENT_HTML5=48, ENT_IGNORE=4, ENT_SUBSTITUTE=8, ENT_DISALLOWED=128. Make htmlspecialchars, htmlspecialchars_decode and html_entity_decode honour the quote flags; the default is ENT_QUOTES | ENT_SUBSTITUTE | ENT_HTML401, so a single quote becomes `&#039;`.
-
-Also confirm whether `(string)[1]` with display_errors=1 warns "Array to string conversion"; it was seen in passing and is not yet confirmed.
+Spec: ext/standard/html.c.
+- `double_encode=false` must leave existing entities (`&amp;`, `&#39;`, `&eacute;`) alone. It is currently ignored.
+- With ENT_SUBSTITUTE, invalid UTF-8 becomes U+FFFD; with ENT_IGNORE it is dropped. Without either flag the result is "".
+- html_entity_decode with ENT_HTML5 must decode the HTML5 names beyond the 4.01 set, for example `&apos;` and `&NewLine;`.
+- array_key_exists called through a callable or with named arguments still raises no fractional-float-key deprecation.
 
 # LUA — Lua  (oracle: lua 5.5 binary, suite is 5.4)
 
@@ -1199,6 +1188,9 @@ T-1069 ruby: external Enumerator iteration (next/peek/rewind) over a user #each,
 T-1087 php: argument-type checks for PHP-written stdlib builtins; object casts; deprecations — PARTIAL→DONE r46 (a5c94976..aa8f2c1e): zpp arg checks for PHP-written builtins (types audited vs PHP-8.4 stubs), per-site strict_types incl. dynamic/callback calls, (int)/(float) of object = 1 + warning, null-arg and float-key-write deprecations, (integer)/(boolean) cast parse; master-probed. Remainder filed as follow-ups
 T-1088 bash: computed option words / nameref -A in compiled declare; local -p; residual stderr tokens — DONE r33 (b558bec5): computed declare -A/-a/-g/-x/-- at run time (rt_decl_opt), declare -A via nameref, local/local -p, $'..' in ${s:..}, $"..", arithmetic subscript quote rule (real stdout fixes); master-probed vs bash 5.3. Residual token cosmetics + found defects filed as follow-ups
 T-1090 kotlin: class members / user extensions called inside builtin implicit receivers; List vs MutableList — DONE r29 (9275b32d): complete builtin member table (14 kinds, kotlinc-tested), class members and bare extension calls routed to the innermost declaring implicit receiver, List vs MutableList rows, extensions named like builtin methods; master-probed vs kotlinc 2.2.21
+T-1093 php: `[$this, 'parent::m']` / `['B', 'parent::m']` callables — DONE r47 (fdff473a): [$obj|'Cls', 'K::m'] non-virtual callables, self/parent/static + compound-form deprecations (is_callable deprecates too, per callable_self_parent_static_deprecation.phpt — ticket text was wrong), no-parent TypeError; master-probed
+T-1094 php: fractional float key deprecation in array literals, isset, unset, array_key_exists — DONE r47 (f517d6ef): float-key deprecation in literals, isset/empty, ??/??=, unset, array_key_exists
+T-1095 php: ENT_* constants undefined (htmlspecialchars($s, ENT_QUOTES) fatals) — DONE r47 (a0f891bc): ENT_* constants, quote flags, htmlspecialchars_decode/html_entity_decode (HTML 4.01 table, numeric), Array to string conversion on (string)[]/strval; master-probed
 
 # Settled — do not re-open
 
