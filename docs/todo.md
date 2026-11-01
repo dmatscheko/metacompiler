@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1096** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1099** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -177,14 +177,28 @@ Also confirm whether `(string)[1]` with display_errors=1 warns "Array to string 
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-1088 bash: computed option words / nameref -A in compiled declare; local -p; residual stderr tokens · P3 · SH · IN PROGRESS (SH worker, round 33) [V]
-Oracle /opt/homebrew/bin/bash 5.3:
-- compiled: a computed option word (`o=-A; declare $o x`) is a compile error; `declare -A` through a nameref unsupported.
-- `declare -- -A e=(..)`: the late-option marking must not apply after `--` (bash: `-A` is then an operand -> not a valid identifier, and e is indexed).
-- `local -p` unsupported in both engines.
-- `"${s:$'1'}"` inside double quotes: bash yields the value from offset 1 ($'..' is literal text `$'1'`? verify) - ours errors; unquoted already matches.
-- stderr-only wording: `${ia['$x']}`/`ia['$x']=q`/`${ia['$(echo 1)']}` bash token `'1'` (expands $ inside the single quotes as if double-quoted), ours `'$x'` (compiler idxQuoted needs a lazily compiled double-quoted sub-word); `$(( ia['$x'] ))` bash token `$x`, ours `'1'`; `"${m[[]-none}"` bash "bad substitution: no closing `}' in ...".
-Out of scope unless decided: nullglob/failglob (needs a pathname-expansion model); LC_ALL=C locale POLICY item (user decision).
+### T-1096 bash: array element through a nameref in the compiler (`declare -n r=t; r[z]=3`) · P3 · SH · OPEN [V]
+
+The compiler aborts with "an array through a nameref is not supported by this compiler" on `declare -n r=tt; r[q]=2`, and also on reads like `${r[q]}`, `${!r[@]}` and `${#r[@]}`. The interpreter handles them. Resolve the nameref at run time through the same slot lookup that rt_decl_opt uses for computed options.
+
+Related, both engines: in diagnostics about a nameref (cannot convert, readonly variable, cannot destroy), bash names the nameref itself, but ours name its target.
+
+### T-1097 bash: export -p / readonly -p NAME set the attribute; bad substitution aborts the command line · P3 · SH · OPEN [V]
+
+Oracle: /opt/homebrew/bin/bash 5.3.
+- `export -p nope` and `readonly -p nope` with a name give that name the attribute and print nothing. Afterwards `typeset -p nope` prints `declare -rx nope`. Ours treat them as queries, print "not found" and return 1.
+- After a bad substitution, bash abandons the rest of the command. Ours keeps expanding the remaining words: `echo ${#x-a} ${#y-b}` prints two messages where bash prints one, and a `$(...)` later on the same line still runs. This holds for every kind of bad substitution, in both engines.
+- `"${s:$'-1'}"`: bash re-reads this as `${s:-1}` and prints `hello`; ours prints `o`.
+- `m[[]=7` should be a syntax error ("unexpected EOF while looking for matching `]'", exit 2); ours accepts it.
+
+### T-1098 bash: subscript quote rule for run-time arithmetic text (variable values, let) + token cosmetics · P3 · SH · OPEN [V]
+
+When arithmetic text comes from a variable's value or a `let` argument, bash expands a subscript in it as if inside double quotes. For `z="iv['\$x']"; $(( z ))` and `let 'w=iv['\''$x'\'']'` the error token is `'1'`. Ours prints `'$x'`, and something odd for `let`.
+
+Residuals left by the subscript-quote work:
+- `$(( iv[ '1' ] ))`: bash's token keeps a trailing blank ("'1' "); ours drops it.
+- A double-quoted `"'1'"` inside a subscript, when the arithmetic text also contains `$`: bash shows `\'1\'`; ours shows `'1'`.
+- A `$'x'` inside a word with no closing `}`: bash's message shows it translated (`x`); ours shows it as written.
 
 # C — C subset
 
@@ -1179,6 +1193,7 @@ T-1085 kotlin: apply{} receiver inside an extension (compiled crash); implicit j
 T-1089 kotlin: nested builtin receivers in scope functions; single-line when lambda typing — DONE (KT r28, fb543678): kotlinc-derived builtin member table (9 kinds x 70 names) lets names an inner builtin receiver lacks fall through to the outer receiver, identical in all 3 engines; one-expression lambda bodies split only at top-level ; / newline (when lambdas type); 4 legs = kotlinc
 T-1069 ruby: external Enumerator iteration (next/peek/rewind) over a user #each, to_enum/enum_for — DONE r49 (af985019): suspendable Enumerator next/peek/rewind over user #each with ensure, map/lazy/each_slice .next, catch/throw across a suspended run; master-probed vs ruby 2.6, 4 legs agree
 T-1087 php: argument-type checks for PHP-written stdlib builtins; object casts; deprecations — PARTIAL→DONE r46 (a5c94976..aa8f2c1e): zpp arg checks for PHP-written builtins (types audited vs PHP-8.4 stubs), per-site strict_types incl. dynamic/callback calls, (int)/(float) of object = 1 + warning, null-arg and float-key-write deprecations, (integer)/(boolean) cast parse; master-probed. Remainder filed as follow-ups
+T-1088 bash: computed option words / nameref -A in compiled declare; local -p; residual stderr tokens — DONE r33 (b558bec5): computed declare -A/-a/-g/-x/-- at run time (rt_decl_opt), declare -A via nameref, local/local -p, $'..' in ${s:..}, $"..", arithmetic subscript quote rule (real stdout fixes); master-probed vs bash 5.3. Residual token cosmetics + found defects filed as follow-ups
 
 # Settled — do not re-open
 
