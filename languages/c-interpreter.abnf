@@ -3310,7 +3310,7 @@ KwDefault   = "default" KwEnd ;
         return {name: name, ptr: false, ct: ctFn}
     }
     // items = [{ptr}, name, [params...], bodyThunk].
-    function defineFnPtrFunc(items) { funcs[items[1]] = {params: items[2], body: items[3], rct: ctFn} }
+    function defineFnPtrFunc(items) { setFunc(items[1], {params: items[2], body: items[3], rct: ctFn}) }
     // The loop and branch forms all follow the same shape while a switch is seeking:
     // enter the BODY without evaluating anything (a jump into a loop skips the
     // controlling expression, C11 6.8.6.1), and if the label was found in there, carry
@@ -3575,15 +3575,20 @@ KwDefault   = "default" KwEnd ;
     // type is still what an unevaluated call (typeOnly) answers.
     function defineFunc(name, params, bodyT, star, ret) {
         var isPtr = typeof star == "string"
-        funcs[name] = {params: params, body: bodyT, ret: isPtr ? undefined : ret,
-                       rct: isPtr ? ptrTo(starCount(star), ret) : ret}
+        setFunc(name, {params: params, body: bodyT, ret: isPtr ? undefined : ret,
+                       rct: isPtr ? ptrTo(starCount(star), ret) : ret})
+    }
+    // Every function definition lands here. Twin of emitFunctionBody in c-to-llvm-ir.abnf.
+    function setFunc(name, f) {
+        cNoteFnDef(name)
+        funcs[name] = f
     }
     function starCount(text) { return text.split("*").length - 1 }
     // The C type a 'struct S' / 'union U' / 'struct S *' return type names.
     function makeRetCt(items) { return ptrTo(starsOf(items[1]), ctStruct(items[0])) }
     // items = [{ret}, name, [params...], bodyThunk].
     function defineSFunction(items) {
-        funcs[items[1]] = {params: items[2], body: items[3], ret: items[0].ret, rct: items[0].ret}
+        setFunc(items[1], {params: items[2], body: items[3], ret: items[0].ret, rct: items[0].ret})
     }
 
     // ----- typedef -----

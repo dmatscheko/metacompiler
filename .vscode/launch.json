@@ -302,6 +302,20 @@
             "program": "${workspaceFolder}","args": ["languages/c-to-llvm-ir.abnf", "tests/c-fail-test-redef-param.c", "-q"]
         },
         {
+            "name": "C interpreter, two definitions of one function SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "expectError": "redefinition of 'f'",
+            "program": "${workspaceFolder}","args": ["languages/c-interpreter.abnf", "tests/c-fail-test-redef-func.c", "-q"]
+        },
+        {
+            "name": "C to LLVM IR, two definitions of one function SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "expectError": "redefinition of 'f'",
+            "program": "${workspaceFolder}","args": ["languages/c-to-llvm-ir.abnf", "tests/c-fail-test-redef-func.c", "-q"]
+        },
+        {
             "name": "C preprocessor piped into C to LLVM IR -qq, a compile error still shows SHOULD FAIL",
             "type": "go",
             "request": "launch",

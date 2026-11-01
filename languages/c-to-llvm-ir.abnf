@@ -4703,6 +4703,7 @@ KwDefault   = "default" KwEnd ;
     // returned value to it like an assignment.
     var curFnRetNarrow = undefined
     function emitFunctionBody(name, params, bodyT, sretCt) {
+        cNoteFnDef(name)
         if (sretCt != undefined) { structRet[name] = sretCt }
         userFuncs[name] = params.length
         noteParamCts(name, params)

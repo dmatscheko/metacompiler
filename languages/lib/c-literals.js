@@ -645,6 +645,13 @@ function cRedeclCt(name, prev, ct) {
     fail("conflicting types for '" + name + "'")
     return prev
 }
+// A function has at most one definition (C11 6.9p3; cc: "redefinition of 'f'");
+// prototypes may repeat. Both engines call this from their function-definition sites.
+var cDefinedFns = {}
+function cNoteFnDef(name) {
+    if (hasOwn(cDefinedFns, name)) fail("redefinition of '" + name + "'")
+    cDefinedFns[name] = true
+}
 // The parameters of the parameter list walked last, which a function body that
 // follows it declares in its own outermost block.
 var fnParams = []
