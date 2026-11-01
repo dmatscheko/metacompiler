@@ -5663,7 +5663,9 @@ NotMemberKw = :script(~~ "pure";
         }
         // A class descriptor printed on its own is its name.
         if (typeof v == "object" && v.__isclass === true) { return v.__name }
-        // KClass.toString() and java.lang.Class.toString() are both "class Box".
+        // KClass.toString() and java.lang.Class.toString() are both "class Box"; a
+        // primitive java class is its bare name, `int`.
+        if (typeof v == "object" && v.__kclass === true && v.jprim === true) { return v.jname }
         if (typeof v == "object" && v.__kclass === true) { return "class " + (v.jname !== undefined ? v.jname : v.kname) }
         // A callable reference. Real kotlin-reflect renders "val Box.v: kotlin.Int";
         // without the reflection library on the class path it prints "property v (Kotlin
@@ -9461,7 +9463,7 @@ NotMemberKw = :script(~~ "pure";
                     // `X()::class`, `foo()::bar` - a reference whose RECEIVER is an
                     // arbitrary expression. The value in hand is that receiver, so the
                     // reference is always a BOUND one.
-                    cur = (s.name == "class") ? kClassOf(cur) : kRefMake(cur, s.name, true, null)
+                    cur = (s.name == "class") ? kValClass(cur) : kRefMake(cur, s.name, true, null)
                 } else if (s.kind == "invoke") {
                     // The value in hand is the callee: a class descriptor constructs, a
                     // function value applies, and anything else is offered its `invoke`
@@ -10970,6 +10972,8 @@ NotMemberKw = :script(~~ "pure";
         // ordinary spelling of an enum factory (the compiled half emits the companion
         // inside the entry scope). Read by recvLookup.
         obj.__class.__owner = cls
+        // Its JVM class is nested in the owner's: C$Companion, Outer$In$Named.
+        obj.__class.__bname = (cls.__bname != "" ? cls.__bname : cls.__name) + "$" + cname
         cls.__statics[cname] = obj
         cls.__companion = obj
     }
@@ -11341,6 +11345,8 @@ NotMemberKw = :script(~~ "pure";
             if (ent.members.length > 0) {
                 // An entry with a body is an anonymous subclass of the enum class.
                 ecls = newDescriptor(name, [{name: name, args: null, deleg: null}])
+                // Its JVM class is E$B: `E.B::class` and `E.B.javaClass` name it.
+                ecls.__bname = (cls.__bname != "" ? cls.__bname : name) + "$" + ent.name
                 var eparts = splitBody(ent.members, 0)
                 installMembers(ecls, eparts)
                 ecls.__parents = [cls]
@@ -11983,7 +11989,9 @@ NotMemberKw = :script(~~ "pure";
             if (name == "class") {
                 if (!hv && baseName.indexOf(".") >= 0) { return kClassLitDotted(baseName) }
                 if (!hv || kIsTypeName(baseName) || isTup) { return kClassLitNamed(baseName) }
-                return isCls ? kClassOfDesc(base) : kClassOf(base)
+                // `C::class` names the type C; a value (`c::class`) has its own class.
+                if (isCls && base.__name == baseName) { return kClassOfDesc(base) }
+                return kValClass(base)
             }
             // String::length - the base names a builtin type this value model has no
             // descriptor for. It is still a perfectly good unbound reference: the
@@ -12114,8 +12122,33 @@ NotMemberKw = :script(~~ "pure";
         var v = anytype
         v = getVar(segs[0])
         for (var i = 1; i < segs.length; i++) { v = kGetField(v, segs[i]) }
-        if (v !== null && v !== undefined && typeof v == "object" && v.__isclass === true) { return kClassOfDesc(v) }
-        return kClassOf(v)
+        return kValClass(v)
+    }
+    // `v::class` for a VALUE. A class descriptor read as a value is its companion
+    // object (Kotlin: a class name in value position denotes the companion), so its
+    // class is the companion's. Twin of js_ktvalclass in abnf/jsrtkotlin.go and
+    // languages/lib/kotlin-rt.metajs.
+    function kValClass(v) {
+        var o = anytype
+        o = kCompanionOf(v)
+        if (o !== null && o !== undefined && typeof o == "object" && o.__isclass === true) { return kClassOfDesc(o) }
+        return kClassOf(o)
+    }
+    // The value a class descriptor stands for in value position: its companion
+    // object when it has one; any other value is itself.
+    function kCompanionOf(v) {
+        if (v !== null && v !== undefined && typeof v == "object" && v.__isclass === true && v.__companion != undefined) { return v.__companion }
+        return v
+    }
+    // The enum class of an enum entry (the entry's own class, or for an entry with a
+    // body the enum class above it), null for any other value. Twin of ktEnumDecl in
+    // abnf/jsrtkotlin.go and languages/lib/kotlin-rt.metajs.
+    function kEnumDecl(v) {
+        if (v === null || v === undefined || typeof v != "object" || v.__class == undefined || v.__class == null) { return null }
+        var c = v.__class
+        if (c.__isenum !== true) { return null }
+        if (c.__entries == undefined) { c = c.__super }
+        return c
     }
     // The KClass of a type known by its simple name alone. kotlin.String and
     // kotlin.Any are java.lang.String and java.lang.Object at run time, the classes
@@ -12183,6 +12216,24 @@ NotMemberKw = :script(~~ "pure";
         return {__kclass: true, kname: sn, jname: jc}
     }
     var kJvmPrimNames = ["int", "long", "double", "float", "char", "boolean", "byte", "short"]
+    var kPrimKNames = ["Int", "Long", "Double", "Float", "Char", "Boolean", "Byte", "Short"]
+    var kPrimWrappers = ["Integer", "Long", "Double", "Float", "Character", "Boolean", "Byte", "Short"]
+    // KClass.java (wrapper false) and .javaObjectType (true): a primitive type's two
+    // java classes, `int` (marked jprim) and java.lang.Integer; every other KClass
+    // already is its java class. Twin of ktKClassJava in abnf/jsrtkotlin.go and
+    // languages/lib/kotlin-rt.metajs.
+    function kKClassJava(co, wrapper) {
+        if (co.jname !== undefined) { return co }
+        for (var i = 0; i < kPrimKNames.length; i++) {
+            if (kPrimKNames[i] == co.kname) {
+                if (wrapper) { return kJavaClass("java.lang." + kPrimWrappers[i]) }
+                var o = kJavaClass(kJvmPrimNames[i])
+                o.jprim = true
+                return o
+            }
+        }
+        return co
+    }
     // The JVM class of a List, a Set, a Map, a values view, a range, a Pair /
     // Triple, a map entry, a StringBuilder or a Regex, "" for any other value. Twin
     // of ktCollJvmClass in abnf/jsrtkotlin.go and languages/lib/kotlin-rt.metajs.
@@ -12386,8 +12437,13 @@ NotMemberKw = :script(~~ "pure";
         if (kIsPkg(o)) { return kPkgMember(o, name) }
         if (name == "javaClass") {
             var cjc = anytype
-            cjc = jxkClass(o)
+            cjc = jxkClass(kCompanionOf(o))
             if (typeof cjc == "string") { return kJavaClass(cjc) }
+        }
+        if (name == "declaringJavaClass") {
+            var edc = anytype
+            edc = kEnumDecl(o)
+            if (edc !== null) { return kClassOfDesc(edc) }
         }
         var krxf = krxField(o, name)
         if (krxf != null) { return krxf.v }
@@ -12531,7 +12587,8 @@ NotMemberKw = :script(~~ "pure";
             if (name == "name" && o.jname !== undefined) { return o.jname }
             if (name == "qualifiedName") { return kKClassFq(o) }
             if (name == "simpleName" || name == "qualifiedName" || name == "name") { return o.kname }
-            if (name == "java" || name == "javaClass" || name == "javaObjectType") { return o }
+            if (name == "java" || name == "javaObjectType") { return kKClassJava(o, name == "javaObjectType") }
+            if (name == "javaClass") { return o }
             fail("member ." + name + " of a class literal")
         }
         if (o.__isclass === true) {

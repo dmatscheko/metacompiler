@@ -6944,6 +6944,37 @@ fun s157() {
     check("comp157g", Cmp157.Companion.k == 5 && Cmp157.Companion.inc157(1) == 6 && Cmp157.inc157(2) == 7)
 }
 
+// ===== SECTION 158: companion and enum-entry classes, member vs receiver lambda =====
+// A class name in value position is its companion object, whose class is nested in
+// the owner's (C$Companion, Outer$In$Named); the type literal C::class is C itself.
+// An enum entry with a body is a subclass E$B (so E.B::class != E::class) while its
+// declaringJavaClass stays E. A primitive KClass has two java classes, `int` and
+// java.lang.Integer. A member of an object or a companion beats a receiver-lambda
+// parameter of the same name (kotlinc 2.2.21 on java 24).
+class Cmp158 { companion object { val k = 7; fun f(n: Int) = n * 3 } }
+class Nmd158 { companion object Named { fun g() = 2 } }
+class Out158 { class In158 { companion object { fun h() = 3 } } }
+object Obj158 { fun f(n: Int) = n * 2 }
+enum class En158 { A, B { override fun toString() = "b" }; fun f(n: Int) = n + 100 }
+fun twice158(x: Int, f: Int.() -> Int) = x.f().f()
+fun s158() {
+    check("comp158a", Cmp158.Companion::class.simpleName == "Companion" && Cmp158.Companion::class.qualifiedName == "Cmp158.Companion" &&
+        Cmp158.Companion.javaClass.name == "Cmp158\$Companion" && Cmp158.javaClass.name == "Cmp158\$Companion" &&
+        Cmp158::class.simpleName == "Cmp158")
+    val c: Any = Cmp158
+    check("comp158b", c::class.qualifiedName == "Cmp158.Companion" && Nmd158.Named::class.simpleName == "Named" &&
+        Nmd158.Named::class.qualifiedName == "Nmd158.Named" && Nmd158::class.simpleName == "Nmd158" &&
+        Out158.In158.Companion::class.qualifiedName == "Out158.In158.Companion" && Out158.In158.javaClass.name == "Out158\$In158\$Companion")
+    check("enum158c", En158.B::class.simpleName == "B" && En158.B::class.qualifiedName == "En158.B" && En158.B.javaClass.name == "En158\$B" &&
+        En158.B::class != En158::class && En158.A::class == En158::class && En158.entries.map { it.javaClass.name } == listOf("En158", "En158\$B"))
+    check("enum158d", En158.B.declaringJavaClass.name == "En158" && En158.A.declaringJavaClass.simpleName == "En158" && En158.B is En158)
+    check("prim158e", Int::class.javaObjectType.name == "java.lang.Integer" && Int::class.java.name == "int" &&
+        Char::class.javaObjectType.simpleName == "Character" && "" + Int::class.java == "int" &&
+        "" + Long::class.javaObjectType == "class java.lang.Long" && String::class.java.name == "java.lang.String")
+    check("recv158f", twice158(3) { this + 1 } == 5 && Obj158.f(4) == 8 && Cmp158.f(5) == 15 && Cmp158.Companion.f(6) == 18 && Cmp158.k == 7 &&
+        En158.A.f(1) == 101 && En158.B.f(2) == 102)
+}
+
 fun main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -7098,6 +7129,7 @@ fun main() {
     s155() // SECTION-CALL 155
     s156() // SECTION-CALL 156
     s157() // SECTION-CALL 157
+    s158() // SECTION-CALL 158
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }

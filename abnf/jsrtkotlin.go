@@ -2294,6 +2294,19 @@ func init() {
 			}
 			return w(ktClassOf(base))
 		}
+		// js_ktvalclass(v) is `v::class` for a VALUE. A class descriptor read as a
+		// value is its companion object (emitCompanion in
+		// languages/kotlin-to-llvm-ir.abnf), whose class is the descriptor's __class;
+		// every other value is js_ktclasslit's. Twin of js_ktvalclass in
+		// languages/lib/kotlin-rt.metajs and kValClass in kotlin-interpreter.abnf.
+		m["js_ktvalclass"] = func(a []uint64) uint64 {
+			if o, isObj := u(a[0]).(*jsObject); isObj {
+				if comp, has := o.props["__class"].(*jsObject); has && o.props["__isclass"] == true {
+					return w(ktClassOfDesc(comp))
+				}
+			}
+			return m["js_ktclasslit"](a)
+		}
 
 		// js_ktnameval(v, "topFun") remembers the name a `::` spelled against the
 		// closure it resolved to, so KFunction.name can answer it, and hands the value
@@ -3010,7 +3023,9 @@ func init() {
 					return w(ktKClassFq(co))
 				case "simpleName":
 					return w(co.props["kname"])
-				case "java", "javaClass", "javaObjectType":
+				case "java", "javaObjectType":
+					return w(ktKClassJava(co, name == "javaObjectType"))
+				case "javaClass":
 					return w(co)
 				}
 				rt.fail("member .%s of a class literal", name)
@@ -3018,6 +3033,11 @@ func init() {
 			if name == "javaClass" {
 				if jc, isStr := ktJvmClass(o).(string); isStr {
 					return w(ktJavaClass(jc))
+				}
+			}
+			if name == "declaringJavaClass" {
+				if d := ktEnumDecl(o); d != nil {
+					return w(ktClassOfDesc(d))
 				}
 			}
 			// `Col.entries` is a PROPERTY (an EnumEntries, which is a List) where
@@ -4213,6 +4233,9 @@ func (rt *jsrt) ktpObj(o *jsObject, depth int) (string, bool) {
 	// answers the same handle. The twin is the __kclass arm of kstr.
 	if co, isCls := ktIsClassLit(o); isCls {
 		if jn, has := co.props["jname"]; has {
+			if co.props["jprim"] == true {
+				return rt.ktpRender(jn, depth+1), true
+			}
 			return "class " + rt.ktpRender(jn, depth+1), true
 		}
 		return "class " + rt.ktpRender(co.props["kname"], depth+1), true
@@ -11095,6 +11118,28 @@ func ktClassOf(v interface{}) *jsObject {
 	return ktClassLit(ktSimpleName(v))
 }
 
+// ktEnumDecl is the enum class an enum entry belongs to - its own descriptor, or
+// for an entry with a body the enum descriptor above it - nil for any other value.
+// Enum.declaringJavaClass. Twin of kEnumDecl in kotlin-interpreter.abnf and
+// ktEnumDecl in languages/lib/kotlin-rt.metajs.
+func ktEnumDecl(v interface{}) *jsObject {
+	o, isObj := v.(*jsObject)
+	if !isObj {
+		return nil
+	}
+	cls, _ := o.props["__class"].(*jsObject)
+	if cls == nil {
+		return nil
+	}
+	if e, _ := cls.props["__isenum"].(bool); !e {
+		return nil
+	}
+	if _, has := cls.props["__entries"]; !has {
+		cls, _ = cls.props["__super"].(*jsObject)
+	}
+	return cls
+}
+
 // ktClassOfDesc is the KClass of a declared type: the java class its binary name
 // names (a nested one: simpleName Inner, qualifiedName Outer.Inner, "class
 // Outer$Inner"; a builtin throwable's is package-qualified). Twin of kClassOfDesc
@@ -11128,6 +11173,33 @@ func ktJavaClass(jc string) *jsObject {
 }
 
 var ktJvmPrimNames = [...]string{"int", "long", "double", "float", "char", "boolean", "byte", "short"}
+
+// The kotlin types and java wrapper classes of ktJvmPrimNames, index for index.
+var ktPrimKNames = [...]string{"Int", "Long", "Double", "Float", "Char", "Boolean", "Byte", "Short"}
+var ktPrimWrappers = [...]string{"Integer", "Long", "Double", "Float", "Character", "Boolean", "Byte", "Short"}
+
+// ktKClassJava is KClass.java (wrapper false) and .javaObjectType (true). A primitive
+// type's KClass has two java classes, `int` and java.lang.Integer; every other KClass
+// already is its java class. The primitive one is marked jprim, because
+// java.lang.Class renders it as the bare name. Twin of kKClassJava in
+// kotlin-interpreter.abnf and ktKClassJava in languages/lib/kotlin-rt.metajs.
+func ktKClassJava(co *jsObject, wrapper bool) *jsObject {
+	if _, has := co.props["jname"]; has {
+		return co
+	}
+	kn, _ := co.props["kname"].(string)
+	for i, p := range ktPrimKNames {
+		if p == kn {
+			if wrapper {
+				return ktJavaClass("java.lang." + ktPrimWrappers[i])
+			}
+			o := ktJavaClass(ktJvmPrimNames[i])
+			o.set("jprim", true)
+			return o
+		}
+	}
+	return co
+}
 
 // ktCollJvmClass is the JVM class of a List, a Set, a Map, a values view, a
 // range, a Pair / Triple, a map entry, a StringBuilder or a Regex, "" for any

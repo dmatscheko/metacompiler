@@ -4629,7 +4629,7 @@ KwContract  = "contract" KwEnd ;
             // `X()::class`, `foo()::bar` - a reference whose RECEIVER is an arbitrary
             // expression, so it is always a BOUND one.
             if (s.kind == "refsfx") {
-                if (s.name == "class") { return {b: b, v: callExt(b, "js_ktclasslit", [cur])} }
+                if (s.name == "class") { return {b: b, v: callExt(b, "js_ktvalclass", [cur])} }
                 return {b: b, v: emitRefValue(b, cur, s.name)}
             }
             if (s.kind == "invoke") {
@@ -7168,6 +7168,18 @@ KwContract  = "contract" KwEnd ;
         for (var i = 0; i < l.length; i++) { if (l[i] == clsName) { return } }
         l.push(clsName)
     }
+    // The __name of a companion's method holder (emitCompanion): owner-qualified, so
+    // the js_is_type probe above tells one class's companion from another's.
+    function ktCompHolderName(owner, compName) {
+        return owner + "$" + (compName != null ? compName : "Companion")
+    }
+    // A companion's methods, noted at declaration time against its holder's name: the
+    // receiver of `C.f()` is the class descriptor, whose __class is that holder.
+    function ktNoteCompMethods(owner, parts) {
+        if (parts.companion == null) { return }
+        var cm = splitMembers(parts.companion, takeHeader(parts.companion, 0).i).methods
+        for (var i = 0; i < cm.length; i++) { noteMethodClass(cm[i].name, ktCompHolderName(owner, parts.compName)) }
+    }
     // A function TYPE with a receiver carries `.(` - Recv.(A) -> R, Recv.() -> R - which
     // no other type shape does (a dotted name is followed by an identifier, never `(`).
     function isRecvFnType(t) {
@@ -8166,7 +8178,11 @@ KwContract  = "contract" KwEnd ;
                     baseV = b.NewCall(rtRefBase(), [curScopeV, emitStr(b, segs[from])])
                     for (var k = from + 1; k < segs.length; k++) { baseV = callExt(b, "js_ktfget", [baseV, emitStr(b, segs[k])]) }
                 }
-                return {b: b, v: callExt(b, "js_ktclasslit", [baseV])}
+                // A last segment that names no type is a VALUE (`C.Companion::class`,
+                // `c::class`), whose class js_ktvalclass answers.
+                var last = segs[segs.length - 1]
+                var isType = isTup || classNames[last] != undefined || interfaceNames["$" + last] == true || ktTypeNameSet["$" + last] == true
+                return {b: b, v: callExt(b, isType ? "js_ktclasslit" : "js_ktvalclass", [baseV])}
             }
             return {b: b, v: emitRefValue(b, baseV, name)}
         }
@@ -8235,6 +8251,7 @@ KwContract  = "contract" KwEnd ;
             noteMethodClass(methods[cm].name, name)
             declOpIfConvention(methods[cm].name, name)
         }
+        ktNoteCompMethods(name, parts)
         // A data / value class declares the equality convention (and, for data, copy's
         // named-argument slots and the componentN destructuring convention) implicitly.
         if (dmod != null) {
@@ -8308,7 +8325,7 @@ KwContract  = "contract" KwEnd ;
                 callExt(b, "js_set", [clsV, emitStr(b, "hashCode"),
                                       callExt(b, "js_closure", [handle(emitNameHashFunc(name)), curScopeV])])
             }
-            if (comp != null) { b = emitCompanion(b, clsV, comp, parts.compName) }
+            if (comp != null) { b = emitCompanion(b, clsV, comp, parts.compName, name) }
             if (parts.nested.length > 0) {
                 ktMirrorNested(b, curScopeV, outerScopeV, parts.nested)
                 curScopeV = outerScopeV
@@ -8351,8 +8368,10 @@ KwContract  = "contract" KwEnd ;
             ktNoteMethod(methods[cm])
             noteParams(methods[cm].name, methods[cm].params)
             own["$" + methods[cm].name] = true
+            noteMethodClass(methods[cm].name, name)
             declOpIfConvention(methods[cm].name, name)
         }
+        ktNoteCompMethods(name, parts)
         return function(b) {
             var clsV = callExt(b, "js_obj_new", [])
             callExt(b, "js_set", [clsV, emitStr(b, "__isclass"), hTrue])
@@ -8419,6 +8438,9 @@ KwContract  = "contract" KwEnd ;
                     entClsV = callExt(b, "js_obj_new", [])
                     callExt(b, "js_set", [entClsV, emitStr(b, "__isclass"), hTrue])
                     callExt(b, "js_set", [entClsV, emitStr(b, "__name"), emitStr(b, name)])
+                    // Its JVM class is E$B: `E.B::class` and `E.B.javaClass` name it.
+                    var enumBin = curBinPrefix == "" ? name : curBinPrefix + "$" + name
+                    callExt(b, "js_set", [entClsV, emitStr(b, "__bname"), emitStr(b, enumBin + "$" + entries[e].ename)])
                     callExt(b, "js_set", [entClsV, emitStr(b, "__isenum"), hTrue])
                     callExt(b, "js_set", [entClsV, emitStr(b, "__super"), clsV])
                     var eb = entries[e].body
@@ -8466,7 +8488,7 @@ KwContract  = "contract" KwEnd ;
             // It is emitted while curScopeV is still the ENTRY scope, so a bare entry
             // name (and the enum's own methods) resolve inside the companion's members,
             // which is what Kotlin's scoping says.
-            if (parts.companion != null) { b = emitCompanion(b, clsV, parts.companion, parts.compName) }
+            if (parts.companion != null) { b = emitCompanion(b, clsV, parts.companion, parts.compName, name) }
             b = emitNestedList(b, clsV, null, parts.nested, name)
             ktMirrorNested(b, curScopeV, saved, parts.nested)
             curScopeV = saved
@@ -8478,25 +8500,28 @@ KwContract  = "contract" KwEnd ;
     // into a holder that clsV.__class points at (so ClassName.m() dispatches through
     // js_mcall, which prepends clsV as the receiver), properties become fields of clsV
     // (so ClassName.prop reads them). The property initializers see clsV as 'this'.
-    function emitCompanion(b, clsV, comp, compName) {
+    // The holder is also the companion's CLASS: a class name in VALUE position is its
+    // companion object, so clsV read as a value (`C.javaClass`, `C.Companion::class`,
+    // js_ktvalclass) is C$Companion through __class, while the type literal `C::class`
+    // reads the descriptor itself (js_ktclasslit).
+    function emitCompanion(b, clsV, comp, compName, ownerName) {
         var chdr = takeHeader(comp, 0)
         var cparts = splitMembers(comp, chdr.i)
         var cprops = cparts.props
         var cmethods = cparts.methods
         emitClassNames.push("<companion>")
-        // The holder is also what carries the companion's SUPERTYPES, so it is built
-        // whenever the companion has either methods or an interface to inherit from.
-        if (cmethods.length > 0 || chdr.supers.length > 0) {
-            var own = {}
-            for (var oc = 0; oc < cmethods.length; oc++) { own["$" + cmethods[oc].name] = true }
-            var holderV = callExt(b, "js_obj_new", [])
-            for (var k = 0; k < cmethods.length; k++) {
-                var idx = emitFunc(cmethods[k].params, cmethods[k].body, true, false, cmethods[k].sig)
-                callExt(b, "js_set", [holderV, emitStr(b, cmethods[k].name), callExt(b, "js_closure", [handle(idx), curScopeV])])
-            }
-            b = emitSuperLinks(b, holderV, chdr.supers, own)
-            callExt(b, "js_set", [clsV, emitStr(b, "__class"), holderV])
+        var ownerBin = curBinPrefix == "" ? ownerName : curBinPrefix + "$" + ownerName
+        var own = {}
+        for (var oc = 0; oc < cmethods.length; oc++) { own["$" + cmethods[oc].name] = true }
+        var holderV = callExt(b, "js_obj_new", [])
+        callExt(b, "js_set", [holderV, emitStr(b, "__name"), emitStr(b, ktCompHolderName(ownerName, compName))])
+        callExt(b, "js_set", [holderV, emitStr(b, "__bname"), emitStr(b, ownerBin + "$" + (compName != null ? compName : "Companion"))])
+        for (var k = 0; k < cmethods.length; k++) {
+            var idx = emitFunc(cmethods[k].params, cmethods[k].body, true, false, cmethods[k].sig)
+            callExt(b, "js_set", [holderV, emitStr(b, cmethods[k].name), callExt(b, "js_closure", [handle(idx), curScopeV])])
         }
+        b = emitSuperLinks(b, holderV, chdr.supers, own)
+        callExt(b, "js_set", [clsV, emitStr(b, "__class"), holderV])
         for (var ap = 0; ap < cparts.accprops.length; ap++) { b = emitAccessorPair(b, clsV, cparts.accprops[ap]) }
         b = emitMemberExts(b, clsV, cparts.memberExts)
         b = emitMemberExtProps(b, clsV, cparts.memberExtProps)
@@ -8548,6 +8573,7 @@ KwContract  = "contract" KwEnd ;
         for (var om = 0; om < methods.length; om++) {
             ktNoteMethod(methods[om])
             noteParams(methods[om].name, methods[om].params)
+            noteMethodClass(methods[om].name, name)
             declOpIfConvention(methods[om].name, name)
         }
         return function(b) {
@@ -8587,7 +8613,9 @@ KwContract  = "contract" KwEnd ;
         for (var i = 0; i < methods.length; i++) {
             sig.push({name: methods[i].name, params: methods[i].params, from: name})
             ktNoteMethod(methods[i])
+            noteMethodClass(methods[i].name, name)
         }
+        ktNoteCompMethods(name, parts)
         for (var a = 0; a < parts.abstracts.length; a++) {
             sig.push({name: parts.abstracts[a].name, params: parts.abstracts[a].params, from: name})
             classMethodNames["$" + parts.abstracts[a].name] = true
@@ -8647,7 +8675,7 @@ KwContract  = "contract" KwEnd ;
             emitSuperName = savedSuper
             emitSuperRaw = savedSuperRaw
             b = emitNestedList(b, clsV, null, parts.nested, name)
-            if (parts.companion != null) { b = emitCompanion(b, clsV, parts.companion, parts.compName) }
+            if (parts.companion != null) { b = emitCompanion(b, clsV, parts.companion, parts.compName, name) }
             ktMirrorNested(b, curScopeV, outerV, parts.nested)
             curScopeV = outerV
             return b

@@ -2674,6 +2674,7 @@ function k2Obj(o, depth) {
     // A KClass. java.lang.Class.toString() is "class Box" too, which is why
     // .java answers the same handle. The twin is the __kclass arm of kstr.
     if (o["__kclass"] === true) {
+        if (o["jprim"] === true) { return o["jname"] }
         if (o["jname"] !== undefined) { return "class " + o["jname"] }
         return "class " + k2Render(o["kname"], depth + 1)
     }
@@ -7358,6 +7359,26 @@ function ktJavaClass(jc) {
     o["jname"] = jc
     return o
 }
+// KClass.java (wrapper false) and .javaObjectType (true): a primitive type's two
+// java classes, `int` (marked jprim) and java.lang.Integer. Twin of ktKClassJava in
+// abnf/jsrtkotlin.go, which has the rules.
+function ktKClassJava(co, wrapper) {
+    if (co["jname"] !== undefined) { return co }
+    var kn = co["kname"]
+    var knames = ["Int", "Long", "Double", "Float", "Char", "Boolean", "Byte", "Short"]
+    var wrappers = ["Integer", "Long", "Double", "Float", "Character", "Boolean", "Byte", "Short"]
+    var i = 0
+    while (i < knames.length) {
+        if (knames[i] == kn) {
+            if (wrapper) { return ktJavaClass("java.lang." + wrappers[i]) }
+            var o = ktJavaClass(ktJvmPrimName("IJDFCZBS".charAt(i)))
+            o["jprim"] = true
+            return o
+        }
+        i = i + 1
+    }
+    return co
+}
 // The java primitive a one-letter array descriptor names (`[I` is int[]).
 function ktJvmPrimName(c) {
     var names = ["int", "long", "double", "float", "char", "boolean", "byte", "short"]
@@ -7485,6 +7506,30 @@ function js_ktclasslit(base) {
     var c = ktClassOf(base)
     if (c !== undefined) { return ktClassOfDesc(c) }
     return ktClassLit(k4bSimpleName(base))
+}
+
+// js_ktvalclass(v) is `v::class` for a VALUE: a class descriptor read as a value is
+// its companion object, whose class is the descriptor's __class. Twin of
+// js_ktvalclass in abnf/jsrtkotlin.go, which has the rules.
+function js_ktvalclass(v) {
+    if (k0IsRec(v)) {
+        if (v["__isclass"] === true) {
+            var comp = v["__class"]
+            if (ktIsObj(comp)) { return ktClassOfDesc(comp) }
+        }
+    }
+    return js_ktclasslit(v)
+}
+
+// The enum class of an enum entry, null for any other value. Twin of ktEnumDecl
+// in abnf/jsrtkotlin.go.
+function ktEnumDecl(v) {
+    var cls = ktClassOf(v)
+    if (cls === undefined) { return null }
+    if (cls["__isenum"] !== true) { return null }
+    if (cls["__entries"] === undefined) { cls = cls["__super"] }
+    if (!ktIsObj(cls)) { return null }
+    return cls
 }
 
 // The KClass of a declared type, the java class its binary name names. Twin of
@@ -10875,15 +10920,19 @@ function js_ktfget(o, name) {
             if (o["jname"] !== undefined) { return o["jname"] }
             return o["kname"]
         }
-        if (name == "java") { return o }
+        if (name == "java") { return ktKClassJava(o, false) }
         if (name == "javaClass") { return o }
-        if (name == "javaObjectType") { return o }
+        if (name == "javaObjectType") { return ktKClassJava(o, true) }
         fail("member ." + name + " of a class literal")
         return undefined
     }
     if (name == "javaClass") {
         var cjc = jxkClass(o)
         if (typeof cjc == "string") { return ktJavaClass(cjc) }
+    }
+    if (name == "declaringJavaClass") {
+        var edc = ktEnumDecl(o)
+        if (edc !== null) { return ktClassOfDesc(edc) }
     }
     // `Col.entries` is a PROPERTY (an EnumEntries, which is a List) where values()
     // is a function, so it is read here too.
