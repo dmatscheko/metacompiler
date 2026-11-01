@@ -145,13 +145,13 @@ CForStmt    <~~ push(atLine(makeCFor(takeAll()), srcLine(up.start))) ~~>
             = KwFor "((" :whitespace() CfPart ";" CfCond ";" CfPart "))" :whitespace(Whitespace) OptSep LoopBody ;
 CfPart      = CfDyn | CfSt | CfRaw | CfZero ;
 CfCond      = CfDyn | CfSt | CfRaw | CfOne ;
-CfDyn       <~~ push(mkArDyn(pop())) ~~> = CfHasExp CfDynWord ;
+CfDyn       <~~ arSqClaim(up.start, up.pos); push(mkArDyn(pop())) ~~> = CfHasExp CfDynWord ;
 CfDynWord   <~~ push(mkNsWord(takeAll())) ~~> = CfDynSeg { CfDynSeg } ;
-CfDynSeg    = DqSeg | ExpSeg | ArDynParen | CfDynBare ;
-CfDynBare   <~~ push(makeConst(up.in)) ~~> = !@+"()$`\";" ;
+CfDynSeg    = DqSeg | ExpSeg | ArDynParen | ArDynSub | CfDynBare | ArDynLb ;
+CfDynBare   <~~ push(makeConst(up.in)) ~~> = !@+"()[$`\";" ;
 CfSt        <~~ arClaim(up.start, up.pos); push(pop()) ~~> = WsNL :whitespace(Whitespace) ArList :whitespace() WsNL CfEnd ;
 // A part the parser does not take (`b[]=0`) is read by the run-time evaluator, as (( )) is.
-CfRaw       <~~ push(mkArDyn(pop())) ~~> = WsNL !";" !"))" CfDynWord ;
+CfRaw       <~~ arSqClaim(up.start, up.pos); push(mkArDyn(pop())) ~~> = WsNL !";" !"))" CfDynWord ;
 CfZero      <~~ push(mkNum("0")) ~~> = WsNL ;
 CfOne       <~~ push(mkNum("1")) ~~> = WsNL ;
 
@@ -242,10 +242,10 @@ BraceGroup  <~~ push(eeExempt(makeGroupR(takeAll()))) ~~> = "{" BraceKwEnd Compo
 // $(( EXPR )) is. Twin of ArithCmd in bash-interpreter.abnf.
 ArithCmd    = ArithCmdDyn | ArithCmdSt | ArithCmdRaw ;
 ArithCmdSt  <~~ arClaim(up.start + 2, up.pos - 2); push(atLine(makeArithCmd(pop()), srcLine(up.pos))) ~~> = "((" :whitespace(Whitespace) ArList "))" ;
-ArithCmdDyn <~~ push(atLine(makeArithCmd(mkArDyn(pop())), srcLine(up.pos))) ~~> = "((" :whitespace() ArHasExp ArDynWord "))" ;
+ArithCmdDyn <~~ arSqClaim(up.start + 2, up.pos - 2); push(atLine(makeArithCmd(mkArDyn(pop())), srcLine(up.pos))) ~~> = "((" :whitespace() ArHasExp ArDynWord "))" ;
 // A text the arithmetic grammar rejects (`(( 1 + ))`) is still an arithmetic command: the
 // run-time evaluator reports bash's syntax error and the command fails with status 1.
-ArithCmdRaw <~~ push(atLine(makeArithCmd(mkArDyn(pop())), srcLine(up.pos))) ~~> = "((" :whitespace() ArDynWord "))" ;
+ArithCmdRaw <~~ arSqClaim(up.start + 2, up.pos - 2); push(atLine(makeArithCmd(mkArDyn(pop())), srcLine(up.pos))) ~~> = "((" :whitespace() ArDynWord "))" ;
 // [[ ... ]] : the conditional command (no word splitting, glob and regex matching).
 CondCmd     <~~ push(atLine(makeCondCmd(pop()), srcLine(up.pos))) ~~> = "[[" :whitespace(Whitespace) CondOr Linebreak "]]" ;
 
@@ -326,7 +326,7 @@ AsgWord     = [ NsWord ] ;
 // The right hand side of an assignment is NOT field-split (`y=$x` keeps every blank);
 // "$@" still contributes several fields, so `c=$@` joins them with a space.
 // Twin of NsWord in bash-interpreter.abnf; see there.
-NsWord      <~~ push(mkNsWord(takeAll())) ~~>
+NsWord      <~~ badClaim(up.start, up.pos, true); push(mkNsWord(takeAll())) ~~>
             = WordFirst :whitespace() { WordSeg } ;
 ArrayLit    <~~ push(mkArrayLit(takeAll())) ~~> = "(" :whitespace(WsNL) ArrayItems ")" ;
 ArrayItems  = { ArrayItem } ;
@@ -379,10 +379,10 @@ LtOne       = "<" NotLt ;
 // skipped in argument position, but NOT after = in an assignment); :whitespace() then turns
 // skipping off for the remaining segments so foo\"bar\"$x concatenates as one word.
 
-Word        <~~ push(mkWord(takeAll())) ~~>
+Word        <~~ badClaim(up.start, up.pos, true); push(mkWord(takeAll())) ~~>
             = WordFirst :whitespace() { WordSeg } ;
 WordFirst   = Tilde | WordSeg ;
-WordSeg     = SqSeg | DqSeg | AnsiSeg | UqExp | EscSeg | BraceLit | EgPfxLit | BareSeg ;
+WordSeg     = SqSeg | LocSeg | DqSeg | AnsiSeg | UqExp | EscSeg | BraceLit | EgPfxLit | BareSeg ;
 
 // An expansion OUTSIDE quotes is subject to word splitting on IFS; the same production
 // inside a double-quoted string (or a ${...} word) is not, which is the only difference
@@ -392,16 +392,16 @@ UqExp       <~~ push(mkSplittable(pop())) ~~> = ExpSeg ;
 // A word in COMMAND ARGUMENT position, where brace expansion applies and one written word
 // can therefore become several. Real bash does not brace-expand an assignment's right hand
 // side (a=x{1,2} really is the four characters x{1,2}), which is why this is its own rule.
-CWord       <~~ pushWords(mkWords(takeAll())) ~~>
+CWord       <~~ badClaim(up.start, up.pos, true); pushWords(mkWords(takeAll())) ~~>
             = CWordFirst :whitespace() { CWordSeg } ;
 CWordFirst  = Tilde | CWordSeg ;
-CWordSeg    = SqSeg | DqSeg | AnsiSeg | UqExp | EscSeg | BraceRange | BraceAlts | BraceLit | EgPfxLit | BareSeg ;
+CWordSeg    = SqSeg | LocSeg | DqSeg | AnsiSeg | UqExp | EscSeg | BraceRange | BraceAlts | BraceLit | EgPfxLit | BareSeg ;
 
 // {a,b,c} needs at least one comma; {x} is literal. {1..5} {5..1} {a..e} {1..9..3} are ranges.
 BraceAlts   <~~ push(mkBraceAlts(takeAll())) ~~>
             = "{" :whitespace() BraceAlt "," BraceAlt { "," BraceAlt } "}" ;
 BraceAlt    <~~ push({alt: takeAll()}) ~~> = { BraceAltSeg } ;
-BraceAltSeg = SqSeg | DqSeg | AnsiSeg | ExpSeg | EscSeg | BraceRange | BraceAlts | AltBare ;
+BraceAltSeg = SqSeg | LocSeg | DqSeg | AnsiSeg | ExpSeg | EscSeg | BraceRange | BraceAlts | AltBare ;
 AltBare     <~~ push(makeConst(up.in)) ~~> = !@+" \t\n\r;$'\"\\(){},&|<>`" ;
 BraceRange  <~~ push(mkBraceRange(takeAll())) ~~>
             = "{" :whitespace() RangeEnd ".." RangeEnd [ RangeStep ] "}" ;
@@ -425,8 +425,11 @@ AnsiLit     = !@+"'\\" ;
 SqSeg       = "'" :whitespace() { !@+"'" } <~~ push(makeConst(up.in)) ~~> "'" ;
 
 // "double quoted" : literal runs, escapes and $ expansions concatenated.
-DqSeg       <~~ push(mkDqWord(takeAll())) ~~>
+DqSeg       <~~ badClaim(up.start, up.pos, false); push(mkDqWord(takeAll())) ~~>
             = '"' :whitespace() { DqExpSeg | DqEsc | DqLit } '"' ;
+// $"..." : the double-quoted string in the C locale. Twin of LocSeg in bash-interpreter.abnf.
+LocSeg      <~~ push(mkDqWord(takeAll())) ~~>
+            = '$"' :whitespace() { DqExpSeg | DqEsc | DqLit } '"' ;
 DqLit       <~~ push(makeConst(up.in)) ~~>
             = !@+"\"$\\`" ;
 DqEsc       <~~ push(makeConst(dqEsc(up.in))) ~~>
@@ -494,8 +497,8 @@ ReplySub    <~~ push(mkFunSub(pop(), true)) ~~>
 // so e="1 + 2"; $(( $e * 2 )) is 5. Twin of ArithExp in bash-interpreter.abnf.
 ArithExp    = ArithDyn | ArithSt | ArithRaw | ArithBrk ;
 ArithSt     <~~ arClaim(up.start + 3, up.pos - 2); push(mkArith(pop())) ~~> = "$((" :whitespace(Whitespace) ArList "))" ;
-ArithDyn    <~~ push(mkArith(mkArDyn(pop()))) ~~> = "$((" :whitespace() ArHasExp ArDynWord "))" ;
-ArithRaw    <~~ push(mkArith(mkArDyn(pop()))) ~~> = "$((" :whitespace() ArDynWord "))" ;
+ArithDyn    <~~ arSqClaim(up.start + 3, up.pos - 2); push(mkArith(mkArDyn(pop()))) ~~> = "$((" :whitespace() ArHasExp ArDynWord "))" ;
+ArithRaw    <~~ arSqClaim(up.start + 3, up.pos - 2); push(mkArith(mkArDyn(pop()))) ~~> = "$((" :whitespace() ArDynWord "))" ;
 ArDynWord   <~~ push(mkNsWord(takeAll())) ~~> = { ArDynSeg } ;
 // The literal value of an -i assignment, which emitAssign wraps as $(( TEXT )): emitted as
 // arithmetic when it is an expression, else read by rt_arith at run time, which reports
@@ -503,25 +506,32 @@ ArDynWord   <~~ push(mkNsWord(takeAll())) ~~> = { ArDynSeg } ;
 ArIAsg      = ArIAsgSt | ArIAsgRaw ;
 ArIAsgSt    <~~ arClaim(up.start + 3, up.pos - 2) ~~> = "$((" :whitespace(Whitespace) ArList "))" ;
 ArIAsgRaw   <~~ push(mkArDyn(pop())) ~~> = "$((" :whitespace() ArDynWord "))" ;
-ArDynSeg    = DqSeg | ArDynAnsi | ExpSeg | ArDynParen | ArDynBare ;
+ArDynSeg    = LocSeg | DqSeg | ArDynAnsi | ExpSeg | ArDynParen | ArDynSub | ArDynBare | ArDynLb ;
 // A $'...' part is its value single-quoted (sh_single_quote), which arithmetic refuses:
 // bash 5.3 reports $(( a[$'1'] )) at '1'.
 ArDynAnsi   <~~ push(ansiWord(bashSq(ansiC(arSrc(up.start + 2, up.pos - 1))))) ~~> = "$'" :whitespace() { AnsiEsc | AnsiLit } "'" ;
 ArDynParen  = ArDynOpen { ArDynSeg } ArDynClose ;
 ArDynOpen   <~~ push(makeConst("(")) ~~> = "(" ;
 ArDynClose  <~~ push(makeConst(")")) ~~> = ")" ;
-ArDynBare   <~~ push(makeConst(up.in)) ~~> = !@+"()$`\"" ;
+// Twin of ArDynSub in bash-interpreter.abnf.
+ArDynSub    = ArDynSubOpen { ArDynSubSeg } ArDynSubClose ;
+ArDynSubOpen <~~ push(makeConst("[")) ~~> = "[" ;
+ArDynSubClose <~~ push(makeConst("]")) ~~> = "]" ;
+ArDynSubSeg = ArDynSq | LocSeg | DqSeg | ArDynSubAnsi | ExpSeg | ArDynParen | ArDynSub | ArDynSubBare ;
+ArDynSq     <~~ push(arSqPart(up.start, up.in, arSrc(up.start + 1, up.pos - 1))) ~~> = "'" { !@+"'" } "'" ;
+ArDynSubAnsi <~~ push(arSqAnsi(up.start, ansiC(arSrc(up.start + 2, up.pos - 1)))) ~~> = "$'" :whitespace() { AnsiEsc | AnsiLit } "'" ;
+ArDynSubBare <~~ push(makeConst(up.in)) ~~> = !@+"()[]$`\"'" ;
+ArDynBare   <~~ push(makeConst(up.in)) ~~> = !@+"()[$`\"" ;
+// A "[" without its "]".
+ArDynLb     <~~ push(makeConst("[")) ~~> = "[" ;
 // $[ expr ] : the obsolete spelling of $(( expr )), which bash still expands. Its text ends at
 // the "]" that closes the "$[", so a subscript's brackets are matched inside it.
 ArithBrk    = ArithBrkDyn | ArithBrkSt | ArithBrkRaw ;
 ArithBrkSt  <~~ arClaim(up.start + 2, up.pos - 1); push(mkArith(pop())) ~~> = "$[" :whitespace(Whitespace) ArList "]" ;
-ArithBrkDyn <~~ push(mkArith(mkArDyn(pop()))) ~~> = "$[" :whitespace() ArHasExp ArBrkWord "]" ;
-ArithBrkRaw <~~ push(mkArith(mkArDyn(pop()))) ~~> = "$[" :whitespace() ArBrkWord "]" ;
+ArithBrkDyn <~~ arSqClaim(up.start + 2, up.pos - 1); push(mkArith(mkArDyn(pop()))) ~~> = "$[" :whitespace() ArHasExp ArBrkWord "]" ;
+ArithBrkRaw <~~ arSqClaim(up.start + 2, up.pos - 1); push(mkArith(mkArDyn(pop()))) ~~> = "$[" :whitespace() ArBrkWord "]" ;
 ArBrkWord   <~~ push(mkNsWord(takeAll())) ~~> = { ArBrkSeg } ;
-ArBrkSeg    = DqSeg | ArDynAnsi | ExpSeg | ArDynParen | ArBrkPair | ArBrkBare ;
-ArBrkPair   = ArBrkOpen { ArBrkSeg } ArBrkClose ;
-ArBrkOpen   <~~ push(makeConst("[")) ~~> = "[" ;
-ArBrkClose  <~~ push(makeConst("]")) ~~> = "]" ;
+ArBrkSeg    = LocSeg | DqSeg | ArDynAnsi | ExpSeg | ArDynParen | ArDynSub | ArBrkBare ;
 ArBrkBare   <~~ push(makeConst(up.in)) ~~> = !@+"()[]$`\"" ;
 
 // ${...} : the whole parameter-expansion family. Inside the braces whitespace is NOT
@@ -574,6 +584,12 @@ IdxPair     = IdxOpen { IdxSeg } IdxClose ;
 IdxOpen     <~~ push(makeConst("[")) ~~> = "[" ;
 IdxClose    <~~ push(makeConst("]")) ~~> = "]" ;
 IdxBare     <~~ push(makeConst(up.in)) ~~> = !@+"[]}\"'\\$`" ;
+// A subscript text expanded as in double quotes (subDqWord). Twin of SubDqWord in
+// bash-interpreter.abnf.
+SubDqWord   <~~ push(mkWord(takeAll())) ~~> = SubDqSeg :whitespace() { SubDqSeg } ;
+SubDqSeg    = DqExpSeg | DqEsc | SubDqQuote | SubDqLit ;
+SubDqQuote  <~~ push(makeConst("")) ~~> = '"' ;
+SubDqLit    <~~ push(makeConst(up.in)) ~~> = !@+"\"$\\`" ;
 PeName      <~~ push({pname: up.in}) ~~> = PeNameTok ;
 PeNameTok   = PeIdent | PeDigits | "@" | "*" | "#" | "?" | "!" | "$" | "-" ;
 PeIdent     = ( "a"..."z" | "A"..."Z" | "_" ) { "a"..."z" | "A"..."Z" | "0"..."9" | "_" } ;
@@ -627,19 +643,29 @@ ArOff       <~~ arClaim(up.start, arPastWs(up.pos)); push(arIn(peTgt + ": ", pop
 // single quote is no quote there (bash 5.3: ${a[@]:'1'} is an arithmetic syntax error).
 ArOffDyn    <~~ push(mkArDyn(pop())) ~~> = ArOffWord ;
 ArOffWord   <~~ push(mkNsWord(takeAll())) ~~> = ArOffSeg { ArOffSeg } ;
-ArOffSeg    = DqSeg | ArDynAnsi | ExpSeg | ArDynParen | ArOffBare ;
+ArOffSeg    = LocSeg | DqSeg | ArDynAnsi | ExpSeg | ArDynParen | ArOffBare ;
 ArOffBare   <~~ push(makeConst(up.in)) ~~> = !@+"()$`\":}" ;
 ArEmpty     <~~ push(mkNum("0")) ~~> = ArEndHere ;
 PeArPad     = { PeBlank } ;
 PeBlank     = @+" \t" ;
+// Inside "..." a $'...' or $"..." part of an offset or a length is its text (extquote).
+// Twin of DqSubstrForm in bash-interpreter.abnf; see there.
+DqSubstrForm <~~ push({pe: "substr"}) ~~> = PeTarget ":" :whitespace(Whitespace) DqArOff [ DqSubLen ] :whitespace() PeArPad ;
+DqSubLen    = ":" DqArOff ;
+DqArOff     <~~ arClaim(up.start, arPastWs(up.pos)); push(arIn(peTgt + ": ", pop())) ~~> = ArList ArEndHere | ArEmpty | DqArOffDyn ;
+DqArOffDyn  <~~ push(mkArDyn(pop())) ~~> = DqArOffWord ;
+DqArOffWord <~~ push(mkNsWord(takeAll())) ~~> = DqArOffSeg { DqArOffSeg } ;
+DqArOffSeg  = DqSeg | DqXqAnsi | LocSeg | ExpSeg | ArDynParen | ArOffBare ;
+DqXqAnsi    = "$'" :whitespace() DqXqAnsiB "'" ;
+DqXqAnsiB   <~~ push(ansiWord(ansiC(up.in))) ~~> = { AnsiEsc | AnsiLit } ;
 
 // A word inside ${...}: anything up to the closing brace, expansions included.
 BraceWord   <~~ push(mkBraceWord(takeAll())) ~~> = BraceWSeg { BraceWSeg } ;
-BraceWSeg   = SqSeg | DqSeg | AnsiSeg | BraceUq | EscSeg ;
+BraceWSeg   = SqSeg | LocSeg | DqSeg | AnsiSeg | BraceUq | EscSeg ;
 // The UNQUOTED parts of a ${v-w} word: split when the ${...} itself stands unquoted
 // (see mkBraceWord).
 BraceUq     <~~ push({uq: pop()}) ~~> = ExpSeg | BraceBare ;
-BraceSeg    = SqSeg | DqSeg | AnsiSeg | ExpSeg | EscSeg | BraceBare ;
+BraceSeg    = SqSeg | LocSeg | DqSeg | AnsiSeg | ExpSeg | EscSeg | BraceBare ;
 BraceBare   <~~ push(makeConst(up.in)) ~~> = !@+"}\"'\\$`" ;
 
 // The expansions of a double-quoted context: a ' in the word of ${v-w} is kept, and the
@@ -647,12 +673,16 @@ BraceBare   <~~ push(makeConst(up.in)) ~~> = !@+"}\"'\\$`" ;
 DqExpSeg    = ArithExp | CmdSub | DqBackSub | FunSub | ReplySub | DqDollarBrace | DollarName | DollarDigit | DollarSpecial | DollarLit ;
 DqDollarBrace <~~ push(mkParamExp(dqIdxItems(takeAll()))) ~~>
             = "${" :whitespace() DqPeBody "}" ;
-DqPeBody    = PeLen | DqPeIndForm | DqPeCore | PeLenBad | PeBad ;
+DqPeBody    = PeLen | DqPeIndForm | DqPeCore | PeLenBad | DqPeBad ;
+// In double quotes, a bad ${NAME[...} whose "[" is never closed is reported with the whole
+// word it is in (dqBad, badClaim): bash 5.3, echo x"${m[[]-v}"y is "bad substitution: no
+// closing `}' in x"${m[[]-v}"y".
+DqPeBad     <~~ push(dqBad(up.start, arSrc(up.start, up.pos))) ~~> = PeBadFirst { PeBadCh } ;
 DqPeIndForm <~~ push({indp: 1}) ~~> = "!" ( PePfxNames | DqPeCore ) ;
-DqPeCore    = PePatForm | PeCaseForm | PeReplForm | PeXform | DqPeOpForm | PeSubstrForm | PePlain ;
+DqPeCore    = PePatForm | PeCaseForm | PeReplForm | PeXform | DqPeOpForm | DqSubstrForm | PePlain ;
 DqPeOpForm  = PeTarget PeOp [ DqBraceWord ] ;
 DqBraceWord <~~ push(mkBraceWord(takeAll())) ~~> = DqBrSeg { DqBrSeg } ;
-DqBrSeg     = DqBrSq | DqBrDq | AnsiSeg | DqBrGlue | DqExpSeg | DqBrEsc | BraceBare ;
+DqBrSeg     = DqBrSq | DqBrDq | AnsiSeg | LocSeg | DqBrGlue | DqExpSeg | DqBrEsc | BraceBare ;
 // Between the two 's a " is still a quote character and is removed:
 // "${u:-'a"b'}" -> 'ab'   "${u:-'a"}"b'}" -> 'a}b'
 DqBrSq      = DqBrQuote { GlueRef | DqExpSeg | DqBrEsc | DqBrSqDq | DqBrSqLit } DqBrQuote ;
@@ -1906,7 +1936,12 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var rtScList = rtDecl("rt_sc_list", true, [1, 1, 0, 0])
     var rtParams0 = rtDecl("rt_params0", true, [])
     var rtPfxNames = rtDecl("rt_pfxnames", true, [1, 1, 0])
-    var rtDeclp = rtDecl("rt_declp", false, [1, 1, 0])
+    var rtDeclp = rtDecl("rt_declp", false, [1, 1, 0, 1])
+    // `local` without names and `local -p NAME` (bash-rt.c).
+    var rtLocalNames = rtDecl("rt_local_names", true, [0, 0])
+    var rtLocalP = rtDecl("rt_local_p", false, [1, 1, 0, 0, 0])
+    // i32 rt_decl_opt(i8* f, i32 at): a computed option of a declaration (bash-rt.c).
+    var rtDeclOpt = rtDecl("rt_decl_opt", false, [1, 0])
     // The ${v@A} / ${v@K} / ${v@k} / ${v@a} family, all measured against bash 5.3.15 -
     // see the block comment above rt_declasg in languages/lib/bash-rt.c.
     var rtIsset = rtDecl("rt_isset", false, [1])
@@ -2301,6 +2336,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var pe = "", name = "", op = "", anchor = "", xf = "", pfx = ""
         var lenp = false, indp = false
         var badsub = null
+        var badNc = null
         var words = []     // word objects {fn, c}
         var ariths = []    // bare arithmetic thunks (the ${v:off:len} offsets)
         var wordT = null
@@ -2317,7 +2353,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             else if (it.rtNm != undefined) { rtNm = true }
             else if (it.fn != undefined) { words.push(it); wordT = it }
             else if (it.lenp != undefined) { lenp = true }
-            else if (it.badsub != undefined) { badsub = it.badsub }
+            else if (it.badsub != undefined) { badsub = it.badsub; badNc = it.nc }
             else if (it.indp != undefined) { indp = true }
             else if (it.xf != undefined) { xf = it.xf }
             else if (it.pfx != undefined) { pfx = it.pfx }
@@ -2336,7 +2372,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (badsub != null) {
             var badMsg = "${" + badsub + "}: bad substitution\n"
             return {c: undefined, fn: function(b) {
-                emitDiag(b, gepStr(b, badMsg))
+                emitDiag(b, gepStr(b, (badNc != null) ? badNcMsg(badNc()) : badMsg))
                 b.NewStore(one, gArithErr)
                 return {b: b, v: emptyPtr(b)}
             }}
@@ -3406,17 +3442,64 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function lnPop() { return lnStack.length > 0 ? lnStack.pop() : 0 }
     function arSrc(from, to) { return arInSnip ? arSnip.slice(from, to) : c.srcSlice(from, to) }
     function arCompile(text, rule, claimAll) {
-        var svS = arSnip, svIn = arInSnip, svR = arRecs
+        var svS = arSnip, svIn = arInSnip, svR = arRecs, svQ = arSqRecs, svB = badRecs
         arSnip = text
         arInSnip = true
         arRecs = []
+        arSqRecs = []
+        badRecs = []
         var t = c.compile(c.parseFrom(c.agrammar, text, rule)).stack[0]
         if (claimAll) { arClaimText(text, 0, text.length) }
         arSnip = svS
         arInSnip = svIn
         arRecs = svR
+        arSqRecs = svQ
+        badRecs = svB
         return t
     }
+    // Twin of arSqPart / arSqClaim in bash-interpreter.abnf; ansiWord keeps raw bytes.
+    var arSqRecs = []
+    function arSqPart(at, q, raw) {
+        var r = {at: at, strip: false}
+        arSqRecs.push(r)
+        return {c: undefined, fn: function(b) { return ansiWord(r.strip ? raw : q).fn(b) }}
+    }
+    function arSqAnsi(at, v) { return arSqPart(at, bashSq(v), v) }
+    function arSqClaim(from, to) {
+        var t = arSrc(from, to)
+        var strip = false
+        var i
+        for (i = 0; i < t.length; i++) {
+            var ch = t.charAt(i)
+            if (ch == "`" || (ch == "$" && t.charAt(i + 1) != "'" && t.charAt(i + 1) != "\"")) { strip = true }
+        }
+        var keep = []
+        for (i = 0; i < arSqRecs.length; i++) {
+            var r = arSqRecs[i]
+            if (r.at >= from && r.at < to) { r.strip = strip } else { keep.push(r) }
+        }
+        arSqRecs = keep
+    }
+    // Twin of badRecs / dqBad / badClaim in bash-interpreter.abnf.
+    var badRecs = []
+    function dqBad(at, t) {
+        if (!bashSubUnclosed(t)) { return {badsub: t} }
+        var r = {at: at, dq: "", word: ""}
+        badRecs.push(r)
+        // A function, as the item itself may be copied before the word claims it.
+        return {badsub: t, nc: function() { return r }}
+    }
+    function badClaim(from, to, word) {
+        var i
+        for (i = 0; i < badRecs.length; i++) {
+            var r = badRecs[i]
+            if (r.at >= from && r.at < to) {
+                if (word && r.word == "") { r.word = arSrc(from, to) }
+                if (!word && r.dq == "") { r.dq = arSrc(from, to) }
+            }
+        }
+    }
+    function badNcMsg(r) { return "bad substitution: no closing `}' in " + ((r.word != "") ? r.word : r.dq) + "\n" }
     function arRec(at) { var r = {ok: false, la: false, at: at, expr: "", tok: ""}; arRecs.push(r); return r }
     function arRecLa(at) { var r = arRec(at); r.la = true; return r }
     function arIsWs(ch) { return ch == " " || ch == "\t" || ch == "\n" }
@@ -3535,7 +3618,18 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var c0 = src.charAt(0)
         var aq = (c0 == "$") ? ansiWord(bashSq(ansiC(src.slice(2, src.length - 1)))) : makeConst((c0 == "\\") ? dqEsc(src) : src)
         var bare = c0 == "'" && (src.indexOf("$") >= 0 || src.indexOf("`") >= 0)
-        return {seg: seg, ansi: c0 == "$", aq: aq, aqd: (c0 == "$") ? seg : aq, aqa: bare ? seg : aq}
+        var aqT = bare ? subDqWord(src) : aq
+        return {seg: seg, ansi: c0 == "$", aq: aqT, aqd: (c0 == "$") ? seg : aqT, aqa: bare ? seg : aq}
+    }
+    // The word SRC is as a double-quoted subscript (SubDqWord), compiled when first emitted:
+    // a parse action may not start another parse.
+    function subDqWord(src) {
+        var t = null
+        return {fn: function(b) {
+            if (t == null) { t = arCompile(src, "SubDqWord", false) }
+            var r = t.fn(b)
+            return (t.f == true) ? {b: r.b, v: wordJoin(r.b, r.v)} : r
+        }}
     }
     // NAME[SUB]'s subscript: {aidx} as written, {aiw} the word, {aqw} {aqd} {aqa} an indexed
     // array's arithmetic text (idxQuoted) when a part of SUB is quoted, else null. Twin of
@@ -3845,6 +3939,17 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         return at
     }
+    // The scalarAttrLetters of the name nv holds when it runs, chosen as refAttrs chooses.
+    function attrLettersAt(b, nv) {
+        var at = emptyPtr(b)
+        var k
+        for (k = 0; k < varIdList.length; k++) {
+            var lt = scalarAttrLetters(varIdList[k])
+            if (lt == "") { continue }
+            at = b.NewSelect(b.NewICmp(llvm.enum.IPredNE, b.NewCall(rtStreq, [nv, gepStr(b, varIdList[k])]), zero), gepStr(b, lt), at)
+        }
+        return at
+    }
     // The attributes rt_attrv applies to an element of `name`: 1 -i, 2 -u, 4 -l.
     function elemAttrs(name) {
         return (attrOn(intVars, name) ? 1 : 0) + (attrOn(upVars, name) ? 2 : 0) + (attrOn(loVars, name) ? 4 : 0)
@@ -3925,13 +4030,14 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var lateBad = []
         if (late != null) { items = late.items; lateBad = late.bad }
         var lates = []
+        var dashEnd = false
         for (i = 1; i < items.length; i++) {
             var it = items[i]
             if (it.dflag != undefined) { opts = opts + it.dflag }
             if (it.dflag != undefined && it.dflag.charAt(0) == "+") { plus = plus + it.dflag; continue }
             if (it.dflag != undefined) { flags = flags + it.dflag; continue }
             // `--` ends the options.
-            if (it.dyn != undefined && order.length == 0 && it.dyn.length == 1 && it.dyn[0].c == "--") { continue }
+            if (it.dyn != undefined && order.length == 0 && it.dyn.length == 1 && it.dyn[0].c == "--") { dashEnd = true; continue }
             if (it.dyn != undefined) { order.push({dyn: it.dyn}); anyDyn = true; continue }
             order.push({j: names.length})
             lates.push((it.dlate != undefined) ? it.dlate : "")
@@ -3973,6 +4079,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // Under -a or -A, NAME=VALUE is NAME[0]=VALUE: the other elements stay, and += appends
         // to element 0 (bash 5.3). Twin of the same rewrite in makeDecl in
         // bash-interpreter.abnf.
+        var asgsWritten = asgs.slice(0)
         for (i = 0; i < asgs.length; i++) {
             var a0 = asgs[i]
             if (isArray && a0 != null && a0.idxT == null && a0.lit == null) {
@@ -4036,6 +4143,65 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (lates[k].indexOf("A") >= 0) { assocArrays["$" + names[k]] = true }
         }
         if (assoc && anyDyn) { assocDyn = true }
+        // A computed operand in front may expand to options, which apply to every operand after
+        // it when it runs: optP (i32 slot) says options may still come, rtAtP holds those read
+        // (rt_decl_opt). This compiler applies -a, -A, -g and -x; an attribute it decides at
+        // compile time stops the shell. Twin of bashDeclText in lib/bash-deparse.js.
+        var leadOpt = order.length > 0 && order[0].dyn != undefined && !dashEnd
+        var optOk = kw == "declare" || kw == "typeset" || kw == "local"
+        if (leadOpt && optOk) { assocDyn = true }
+        var optP = null
+        var rtAtP = null
+        // The depth rt_decl_word makes a local at: the call's, or -2 for -g in a function
+        // (the global binding, even where a local hides it), or -1 outside one.
+        var declDepth = function(b, localize) {
+            if (global && curFrame != null) { return llvm.constant.NewInt(i32, -2) }
+            if (!localize) { return llvm.constant.NewInt(i32, -1) }
+            var dep = b.NewLoad(i32, curFrame.depth)
+            if (rtAtP == null) { return dep }
+            var gl = b.NewICmp(llvm.enum.IPredNE, b.NewAnd(b.NewLoad(i32, rtAtP), llvm.constant.NewInt(i32, 64)), zero)
+            return b.NewSelect(gl, llvm.constant.NewInt(i32, -2), dep)
+        }
+        // The export code rt_decl_word takes (xCode), 1 once an -x was read.
+        var declX = function(b) {
+            var x = llvm.constant.NewInt(i32, xCode)
+            if (rtAtP == null) { return x }
+            var ex = b.NewICmp(llvm.enum.IPredNE, b.NewAnd(b.NewLoad(i32, rtAtP), llvm.constant.NewInt(i32, 256)), zero)
+            return b.NewSelect(ex, one, x)
+        }
+        // A computed option this compiler cannot apply stops the shell, status 2.
+        var optAbort = function(b, fld) {
+            emitOnStderr(b, b.NewCall(rtStrcat, [b.NewCall(rtStrcat, [gepStr(b, c.file + ": " + kw + ": a computed option cannot be compiled: "), fld]), gepStr(b, "\n")]))
+            b.NewStore(llvm.constant.NewInt(i32, 2), gExitCode)
+            b.NewStore(one, gExited)
+            b.NewBr(viaUnwind(curExit, curExitRd))
+        }
+        // Written operand j after computed options: the word rt_decl_word stores, as a computed
+        // operand would be (a literal was assigned with the words, and only its name is left).
+        var emitDeclWordAt = function(b, j, badP, pv) {
+            var a = asgsWritten[j]
+            if (a != null && a.lit == null && a.idxT != null) {
+                var abB = curF.NewBlock("")
+                optAbort(abB, gepStr(abB, "[" + a.isrc + "]"))
+                b.NewBr(abB)
+                return curF.NewBlock("")
+            }
+            var w = gepStr(b, (a == null) ? ((darrs[j] != null) ? darrs[j] : names[j]) : names[j])
+            if (a != null && a.lit == null) {
+                var v = pv
+                if (v == null) { v = (a.valT == null) ? emptyPtr(b) : gepStr(b, a.valT.c) }
+                w = b.NewCall(rtStrcat, [gepStr(b, names[j] + a.op), v])
+            }
+            var localize = !global && curFrame != null
+            var atV = b.NewOr(refAttrs(b, gepStr(b, names[j]), true), b.NewAnd(b.NewLoad(i32, rtAtP), llvm.constant.NewInt(i32, 48)))
+            if (isArray) { atV = b.NewOr(atV, llvm.constant.NewInt(i32, assoc ? 48 : 16)) }
+            var rc = b.NewCall(rtDeclWord, [w, declDepth(b, localize), declX(b), atV, gepStr(b, kw)])
+            var badB = curF.NewBlock(""), joinB = curF.NewBlock("")
+            b.NewCondBr(b.NewICmp(llvm.enum.IPredNE, rc, zero), badB, joinB)
+            badB.NewStore(one, badP)
+            badB.NewBr(joinB)
+            return joinB
+        }
         // One name, which -g declares on its global binding even where a local hides it
         // (rt_glob_swap). For a lexical local of this function the global's attributes are
         // the ones its `local` saved for the return (the name's first undo entry here):
@@ -4084,11 +4250,13 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // declOne in bash-interpreter.abnf.
             var tg = (!isRef && plus.indexOf("n") < 0 && attrOn(refVars, names[j]) && !fresh) ? refEnd(names[j]) : null
             if (tg != null) {
-                if (assoc) { fail("`" + kw + " -A` of a nameref is not supported by this compiler") }
+                if (assoc && (bareArr || a != null)) { assocArrays["$" + tg] = true }
                 var own = names[j]
                 names[j] = tg
+                if (a != null) { asgs[j] = {name: tg, op: a.op, idxT: a.idxT, lit: a.lit, valT: a.valT, isrc: a.isrc, lbl: a.lbl} }
                 b = declOne(b, j, v)
                 names[j] = own
+                asgs[j] = a
                 return b
             }
             var bad = null
@@ -4258,8 +4426,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // += or NAME[SUB] (rt_decl_word), a local of the call where the keyword makes one,
         // stored under the attributes its variable has here (and 16 for -a). A field that is
         // no name is bash's "not a valid identifier", and a refused store fails too
-        // (*badP = 1); one that is an option, or under -a an array literal, stops the shell,
-        // which cannot apply it here. Twin of makeDeclDyn in bash-interpreter.abnf.
+        // (*badP = 1); so is one starting with - or + once an operand has come. Before one it
+        // is an option (rt_decl_opt, optAbort for one that cannot be applied); under -a an
+        // array literal stops the shell, which cannot apply it here. Twin of makeDeclDyn in
+        // bash-interpreter.abnf.
         var emitDeclDyn = function(b, words, badP) {
             var listP = slotOf(i8ptr)
             b.NewStore(nilList(b), listP)
@@ -4282,24 +4452,35 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var fld = step.NewCall(rtGetField, [all, iv])
             var atV = refAttrs(step, step.NewCall(rtDeclName, fld), true)
             if (isArray) { atV = step.NewOr(atV, llvm.constant.NewInt(i32, assoc ? 48 : 16)) }
-            var rc = step.NewCall(rtDeclWord, [fld, localize ? step.NewLoad(i32, curFrame.depth) : llvm.constant.NewInt(i32, -1),
-                                               llvm.constant.NewInt(i32, xCode), atV, gepStr(step, (kw == "export") ? "" : kw)])
+            if (rtAtP != null) { atV = step.NewOr(atV, step.NewAnd(step.NewLoad(i32, rtAtP), llvm.constant.NewInt(i32, 48))) }
+            var rc = step.NewCall(rtDeclWord, [fld, declDepth(step, localize), declX(step), atV, gepStr(step, (kw == "export") ? "" : kw)])
             step = emitAbortCheck(step)
-            var badB = curF.NewBlock(""), optB = curF.NewBlock(""), nextB = curF.NewBlock(""), okB = curF.NewBlock("")
+            var isOpt = step.NewICmp(llvm.enum.IPredEQ, rc, llvm.constant.NewInt(i32, 2))
+            var optNow = (optP == null) ? null : step.NewLoad(i32, optP)
+            if (optP != null) { step.NewStore(step.NewSelect(isOpt, optNow, zero), optP) }
+            var badB = curF.NewBlock(""), nextB = curF.NewBlock(""), okB = curF.NewBlock("")
             var notIdB = curF.NewBlock(""), subB = curF.NewBlock("")
             step.NewCondBr(step.NewICmp(llvm.enum.IPredEQ, rc, zero), nextB, okB)
             okB.NewCondBr(okB.NewICmp(llvm.enum.IPredEQ, rc, one), badB, notIdB)
-            notIdB.NewCondBr(notIdB.NewICmp(llvm.enum.IPredEQ, rc, llvm.constant.NewInt(i32, 2)), optB, subB)
+            if (optP == null) { notIdB.NewCondBr(isOpt, badB, subB) }
+            else {
+                var optChkB = curF.NewBlock(""), optB = curF.NewBlock(""), endB = curF.NewBlock(""), setB = curF.NewBlock(""), abB = curF.NewBlock("")
+                notIdB.NewCondBr(isOpt, optChkB, subB)
+                optChkB.NewCondBr(optChkB.NewICmp(llvm.enum.IPredNE, optNow, zero), optB, badB)
+                var r = optB.NewCall(rtDeclOpt, [fld, optB.NewLoad(i32, rtAtP)])
+                optB.NewCondBr(optB.NewICmp(llvm.enum.IPredEQ, r, llvm.constant.NewInt(i32, -2)), endB, setB)
+                endB.NewStore(zero, optP)
+                endB.NewBr(nextB)
+                setB.NewStore(r, rtAtP)
+                if (optOk) { setB.NewCondBr(setB.NewICmp(llvm.enum.IPredSGE, r, zero), nextB, abB) } else { setB.NewBr(abB) }
+                optAbort(abB, fld)
+            }
             subB.NewStore(one, badP)
             subB.NewBr(nextB)
             emitDiag(badB, badB.NewCall(rtStrcat, [badB.NewCall(rtStrcat, [gepStr(badB, kw + ": `"), fld]),
                                                        gepStr(badB, "': not a valid identifier\n")]))
             badB.NewStore(one, badP)
             badB.NewBr(nextB)
-            emitOnStderr(optB, optB.NewCall(rtStrcat, [optB.NewCall(rtStrcat, [gepStr(optB, c.file + ": " + kw + ": a computed option cannot be compiled: "), fld]), gepStr(optB, "\n")]))
-            optB.NewStore(llvm.constant.NewInt(i32, 2), gExitCode)
-            optB.NewStore(one, gExited)
-            optB.NewBr(viaUnwind(curExit, curExitRd))
             nextB.NewStore(nextB.NewAdd(nextB.NewLoad(i32, iP), one), iP)
             nextB.NewBr(head)
             return done
@@ -4310,6 +4491,32 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         // The values phase one expanded, per declaration being emitted (null: emitAssign's own).
         var pre = {vals: []}
+        // Written operand j, the o-th: declared, or, a literal being assigned with the words,
+        // only what its marks refuse reported.
+        var declWritten = function(b, o, j) {
+            // export and readonly take no NAME[SUB].
+            if (darrs[j] != null && (kw == "export" || kw == "readonly")) {
+                emitDiag(b, gepStr(b, kw + ": `" + darrs[j] + "': not a valid identifier\n"))
+                roFail = true
+                return b
+            }
+            b = lateDiag(b, o)
+            if (asgs[j] == null || asgs[j].lit == null) { b = declAt(b, j, pre.vals[j]) }
+            else if (lates[j].indexOf("g") >= 0 && !global && curFrame != null && (kw == "local" || kw == "declare" || kw == "typeset")) {
+                // A literal a -g mark sent to the global still declares the name here,
+                // unset (bash 5.3).
+                var sa = asgs[j]
+                asgs[j] = null
+                b = declAt(b, j, null)
+                asgs[j] = sa
+            }
+            // An A mark made it associative, which the builtin's own -a refuses.
+            else if (ownFl.bareArr && !ownFl.assoc && lates[j].indexOf("A") >= 0) {
+                emitDiag(b, gepStr(b, kw + ": " + names[j] + ": cannot convert associative to indexed array\n"))
+                roFail = true
+            }
+            return b
+        }
         var body = function(b) {
             var j
             // bash 5.3: `local` outside every function declares nothing (an array literal
@@ -4320,6 +4527,36 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 return b
             }
             if (fnQuery != "") { return emitDeclFuncs(b, fnQuery, names) }
+            // `local` without names, whatever its options, lists the running call's locals
+            // (rt_local_names); `local -p NAME` prints only a local of it (rt_local_p). Twin
+            // of the same arm in makeDecl in bash-interpreter.abnf.
+            var fnId = (kw == "local") ? llvm.constant.NewInt(i32, getVarId("FUNCNAME")) : null
+            if (kw == "local" && order.length == 0) {
+                var lns = b.NewCall(rtLocalNames, [b.NewLoad(i32, curFrame.depth), fnId])
+                var liP = slotOf(i32)
+                b.NewStore(zero, liP)
+                var lHead = curF.NewBlock(""), lStep = curF.NewBlock(""), lDone = curF.NewBlock("")
+                b.NewBr(lHead)
+                var li = lHead.NewLoad(i32, liP)
+                lHead.NewCondBr(lHead.NewICmp(llvm.enum.IPredSLT, li, lHead.NewCall(rtNFields, lns)), lStep, lDone)
+                var lnm = lStep.NewCall(rtGetField, [lns, li])
+                lStep.NewCall(rtLocalP, [lnm, attrLettersAt(lStep, lnm), lStep.NewCall(rtIsAssoc, lnm), lStep.NewLoad(i32, curFrame.depth), fnId])
+                lStep.NewStore(lStep.NewAdd(li, one), liP)
+                lStep.NewBr(lHead)
+                storeStatusI(lDone, 0)
+                return lDone
+            }
+            if (kw == "local" && isPrint) {
+                var lacc = zero
+                for (j = 0; j < names.length; j++) {
+                    getVarId(names[j])
+                    var lrp = b.NewCall(rtLocalP, [gepStr(b, names[j]), gepStr(b, scalarAttrLetters(names[j])), b.NewCall(rtIsAssoc, gepStr(b, names[j])),
+                                                   b.NewLoad(i32, curFrame.depth), fnId])
+                    lacc = b.NewOr(lacc, lrp)
+                }
+                storeStatus(b, lacc)
+                return b
+            }
             if (query) {
                 // `declare -p NAME` PRINTS. The attribute letter is decided HERE because -i/-u/-l are
                 // compile-time facts in this grammar; rt_declp asks the runtime for array-ness and the value.
@@ -4330,7 +4567,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                         // The name gets its slot, which a computed operand may have stored into.
                         getVarId(names[j])
                         var lt = scalarAttrLetters(names[j])
-                        var rp = b.NewCall(rtDeclp, [gepStr(b, names[j]), gepStr(b, lt), b.NewCall(rtIsAssoc, gepStr(b, names[j]))])
+                        var rp = b.NewCall(rtDeclp, [gepStr(b, names[j]), gepStr(b, lt), b.NewCall(rtIsAssoc, gepStr(b, names[j])), gepStr(b, (kw == "typeset") ? kw : "declare")])
                         acc = b.NewSelect(b.NewICmp(llvm.enum.IPredNE, acc, zero), acc, rp)
                     }
                     storeStatus(b, acc)
@@ -4342,32 +4579,33 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (anyDyn) { b.NewStore(zero, badP) }
             subBadP = anyIdx ? slotOf(i32) : null
             if (anyIdx) { b.NewStore(zero, subBadP) }
+            if (leadOpt) {
+                optP = slotOf(i32)
+                rtAtP = slotOf(i32)
+                b.NewStore(one, optP)
+                b.NewStore(zero, rtAtP)
+            }
             var o
             for (o = 0; o < order.length; o++) {
                 if (order[o].dyn != undefined) { b = emitDeclDyn(b, order[o].dyn, badP); continue }
                 j = order[o].j
-                // export and readonly take no NAME[SUB].
-                if (darrs[j] != null && (kw == "export" || kw == "readonly")) {
-                    emitDiag(b, gepStr(b, kw + ": `" + darrs[j] + "': not a valid identifier\n"))
-                    roFail = true
-                    continue
+                // After options were read, a written operand is stored as a computed one.
+                var rtJoin = null
+                if (optP != null) {
+                    b.NewStore(zero, optP)
+                    if (optOk) {
+                        var stB = curF.NewBlock(""), rtB = curF.NewBlock("")
+                        rtJoin = curF.NewBlock("")
+                        b.NewCondBr(b.NewICmp(llvm.enum.IPredNE, b.NewLoad(i32, rtAtP), zero), rtB, stB)
+                        emitDeclWordAt(rtB, j, badP, pre.vals[j]).NewBr(rtJoin)
+                        b = stB
+                    }
                 }
-                b = lateDiag(b, o)
-                if (asgs[j] == null || asgs[j].lit == null) { b = declAt(b, j, pre.vals[j]) }
-                else if (lates[j].indexOf("g") >= 0 && !global && curFrame != null && (kw == "local" || kw == "declare" || kw == "typeset")) {
-                    // A literal a -g mark sent to the global still declares the name here,
-                    // unset (bash 5.3).
-                    var sa = asgs[j]
-                    asgs[j] = null
-                    b = declAt(b, j, null)
-                    asgs[j] = sa
-                }
-                // An A mark made it associative, which the builtin's own -a refuses.
-                else if (ownFl.bareArr && !ownFl.assoc && lates[j].indexOf("A") >= 0) {
-                    emitDiag(b, gepStr(b, kw + ": " + names[j] + ": cannot convert associative to indexed array\n"))
-                    roFail = true
-                }
+                b = declWritten(b, o, j)
+                if (rtJoin != null) { b.NewBr(rtJoin); b = rtJoin }
             }
+            optP = null
+            rtAtP = null
             b = lateDiag(b, order.length)
             storeStatusI(b, roFail ? 1 : 0)
             if (anyDyn) { storeStatus(b, b.NewOr(b.NewLoad(i32, gStatus), b.NewLoad(i32, badP))) }
@@ -4423,7 +4661,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return fs
     }
     // The declaration dt (bashDeclText) spells, its bad fields reported first, under the
-    // redirections. Twin of makeDeclDyn in bash-interpreter.abnf.
+    // redirections, after the literals of dt.pre. Twin of makeDeclDyn in bash-interpreter.abnf.
     function makeDeclSpelled(kw, dt, redirs) {
         var body = function(b) {
             var k
@@ -4432,8 +4670,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (dt.bad.length > 0 || dt.operands == 0) { storeStatusI(b, (dt.bad.length > 0) ? 1 : 0) }
             return b
         }
-        if (redirs.length == 0) { return body }
-        return mkRedirected([body].concat(redirs))
+        var run = (redirs.length == 0) ? body : mkRedirected([body].concat(redirs))
+        if (dt.pre == "") { return run }
+        return function(b) { return run(compileSnippet(dt.pre, 0)(b)) }
     }
     // A declaration CARRYING ITS OWN redirections. The declaration items are the ones
     // makeDecl understands; anything else on the stack is a redirection record.

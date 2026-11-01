@@ -28,6 +28,26 @@ function bashDeparse(src) {
     return {text: text}
 }
 
+// Whether the text of a bad ${...}, t, is [!]NAME[ with that "[" never closed: in double
+// quotes bash then looks past the "}" for the "]" and reports the whole word.
+function bashSubUnclosed(t) {
+    var i = (t.charAt(0) == "!") ? 1 : 0
+    var n0 = i
+    while (i < t.length) {
+        var cc = t.charCodeAt(i)
+        var w = (cc >= 97 && cc <= 122) || (cc >= 65 && cc <= 90) || cc == 95
+        if (!w && !(i > n0 && cc >= 48 && cc <= 57)) { break }
+        i = i + 1
+    }
+    if (i == n0 || t.charAt(i) != "[") { return false }
+    var depth = 0
+    for (; i < t.length; i++) {
+        if (t.charAt(i) == "[") { depth = depth + 1 }
+        else if (t.charAt(i) == "]") { depth = depth - 1; if (depth == 0) { return false } }
+    }
+    return true
+}
+
 // names sorted by their characters' codes, as `declare -f` lists functions.
 function bashSortNames(names) {
     var out = names.slice(0)
@@ -693,6 +713,17 @@ function bashDeclBadOpt(kw, flags) {
         if (kw == "readonly") { use = "readonly [-aAf] [name[=value] ...] or readonly -p" }
         return kw + ": -" + ch + ": invalid option\n" + kw + ": usage: " + use + "\n"
     }
+    // -a and -A both given (as -X, whatever +X follows) are refused without the usage line,
+    // except by a query (bash 5.3: `declare -aA +a q` and `local -aA l` fail with status 2,
+    // `declare -aAp q` prints).
+    if (kw == "export" || kw == "readonly" || flags.indexOf("p") >= 0 || flags.indexOf("f") >= 0 || flags.indexOf("F") >= 0) { return "" }
+    var on = ""
+    var sign = "-"
+    for (i = 0; i < flags.length; i++) {
+        var fc = flags.charAt(i)
+        if (fc == "-" || fc == "+") { sign = fc } else if (sign == "-") { on = on + fc }
+    }
+    if (on.indexOf("a") >= 0 && on.indexOf("A") >= 0) { return kw + ": -a: invalid option\n" }
     return ""
 }
 
@@ -732,8 +763,16 @@ function bashSubNeedsX(t) {
 // error, where the written `declare a[\1]=x` is a[1]). The second is spelled with its single
 // quotes and backslashes escaped, so it expands to them; kindOf(NAME) answers "A", "a", or "" when the kind is
 // not known yet, and then the answer is null.
+//
+// An array literal written after an option field was assigned as the words were expanded,
+// under the options written (fix_assignment_words never sees a computed one): {pre} is that
+// declaration, run first, and the literal's name alone stays in {text} (bash 5.3: with o=-A,
+// `declare $o y=([p]=1)` makes y=([0]="1"), then refuses converting it). pre is "" without one.
 function bashDeclText(items, fieldsOf, quote, kindOf) {
     var text = items[0].dkw
+    var pre = ""
+    var sflags = text
+    var fopt = false
     var xr = text == "export" || text == "readonly"
     var arr = false
     var opts = true
@@ -746,6 +785,7 @@ function bashDeclText(items, fieldsOf, quote, kindOf) {
         var it = items[i]
         if (it.dflag != undefined) {
             text = text + " " + it.dflag
+            sflags = sflags + " " + it.dflag
             if (it.dflag.charAt(0) == "-" && (it.dflag.indexOf("a") >= 0 || it.dflag.indexOf("A") >= 0)) { arr = true }
             if (it.dflag.charAt(0) == "-" && it.dflag.indexOf("A") >= 0) { assoc = true }
             continue
@@ -754,6 +794,11 @@ function bashDeclText(items, fieldsOf, quote, kindOf) {
             if (it.dname == undefined && it.src == undefined) { return null }
             opts = false
             operands = operands + 1
+            if (fopt && it.a != undefined && it.a.lit != null) {
+                pre = ((pre == "") ? sflags : pre) + " " + it.src
+                text = text + " " + it.a.name
+                continue
+            }
             text = text + " " + ((it.dname == undefined) ? it.src : ((it.darr != undefined) ? it.darr : it.dname))
             continue
         }
@@ -764,6 +809,7 @@ function bashDeclText(items, fieldsOf, quote, kindOf) {
             if (opts && f == "--") { opts = false; continue }
             if (opts && f.length > 1 && (f.charAt(0) == "-" || (f.charAt(0) == "+" && !xr)) && bashDeclFlagText(f)) {
                 text = text + " " + f
+                fopt = true
                 if (f.charAt(0) == "-" && (f.indexOf("a") >= 0 || f.indexOf("A") >= 0)) { arr = true }
                 if (f.charAt(0) == "-" && f.indexOf("A") >= 0) { assoc = true }
                 continue
@@ -782,7 +828,7 @@ function bashDeclText(items, fieldsOf, quote, kindOf) {
             text = text + " " + op
         }
     }
-    return {text: text, operands: operands, bad: bad}
+    return {text: text, pre: pre, operands: operands, bad: bad}
 }
 // AN OPTION WORD AFTER AN OPERAND. bash marks every array literal (NAME=(...), NAME+=(...))
 // that follows an unquoted word beginning with "-" for the kind its letters name - A
@@ -800,11 +846,19 @@ function bashDeclLate(items) {
     var bad = []
     var operands = 0
     var any = false
+    var ended = false
     var i
     for (i = 0; i < items.length; i++) {
         var it = items[i]
         if (it.dflag != undefined && (it.dflag.indexOf("p") >= 0 || it.dflag.indexOf("f") >= 0 || it.dflag.indexOf("F") >= 0)) { return null }
         if (it.dyn != undefined) {
+            // "--" ends the options only where the next one could be read; anywhere else it is
+            // an operand, and no mark. The marking itself ignores it (bash 5.3: `declare -- -A
+            // e=(a b)` makes e associative, `declare -- -- e` refuses the second "--").
+            if (it.dsrc == "--") {
+                if (operands == 0 && bad.length == 0 && !ended) { ended = true } else { bad.push({at: operands, w: "--"}) }
+                continue
+            }
             if (it.dsrc == undefined || !bashDeclOptWord(it.dsrc)) { return null }
             var w = it.dsrc.slice(1)
             if (w.indexOf("A") >= 0 && marks.indexOf("A") < 0) { marks = marks + "A" }

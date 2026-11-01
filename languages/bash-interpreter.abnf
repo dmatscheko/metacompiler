@@ -153,13 +153,13 @@ CForStmt    <~~ push(makeCFor(takeAll(), lineStr(up.start))) ~~>
             = KwFor "((" :whitespace() CfPart ";" CfCond ";" CfPart "))" :whitespace(Whitespace) OptSep LoopBody ;
 CfPart      = CfDyn | CfSt | CfRaw | CfZero ;
 CfCond      = CfDyn | CfSt | CfRaw | CfOne ;
-CfDyn       <~~ push(mkArDyn(pop())) ~~> = CfHasExp CfDynWord ;
+CfDyn       <~~ arSqClaim(up.start, up.pos); push(mkArDyn(pop())) ~~> = CfHasExp CfDynWord ;
 CfDynWord   <~~ push(mkNsWord(takeAll())) ~~> = CfDynSeg { CfDynSeg } ;
-CfDynSeg    = DqSeg | ExpSeg | ArDynParen | CfDynBare ;
-CfDynBare   <~~ push(makeConst(up.in)) ~~> = !@+"()$`\";" ;
+CfDynSeg    = DqSeg | ExpSeg | ArDynParen | ArDynSub | CfDynBare | ArDynLb ;
+CfDynBare   <~~ push(makeConst(up.in)) ~~> = !@+"()[$`\";" ;
 CfSt        <~~ arClaim(up.start, up.pos); push(pop()) ~~> = WsNL :whitespace(Whitespace) ArList :whitespace() WsNL CfEnd ;
 // A part the parser does not take (`b[]=0`) is read by the run-time evaluator, as (( )) is.
-CfRaw       <~~ push(mkArDyn(pop())) ~~> = WsNL !";" !"))" CfDynWord ;
+CfRaw       <~~ arSqClaim(up.start, up.pos); push(mkArDyn(pop())) ~~> = WsNL !";" !"))" CfDynWord ;
 CfZero      <~~ push(mkNum("0")) ~~> = WsNL ;
 CfOne       <~~ push(mkNum("1")) ~~> = WsNL ;
 
@@ -252,10 +252,10 @@ BraceGroup  <~~ push(eeExempt(makeGroupR(takeAll()))) ~~> = "{" BraceKwEnd Compo
 // $(( EXPR )) is (see ArithExp).
 ArithCmd    = ArithCmdDyn | ArithCmdSt | ArithCmdRaw ;
 ArithCmdSt  <~~ arClaim(up.start + 2, up.pos - 2); push(makeArithCmd(pop(), lineStr(up.pos))) ~~> = "((" :whitespace(Whitespace) ArList "))" ;
-ArithCmdDyn <~~ push(makeArithCmd(mkArDyn(pop()), lineStr(up.pos))) ~~> = "((" :whitespace() ArHasExp ArDynWord "))" ;
+ArithCmdDyn <~~ arSqClaim(up.start + 2, up.pos - 2); push(makeArithCmd(mkArDyn(pop()), lineStr(up.pos))) ~~> = "((" :whitespace() ArHasExp ArDynWord "))" ;
 // A text the arithmetic grammar rejects (`(( 1 + ))`) is still an arithmetic command: the
 // run-time evaluator reports bash's syntax error and the command fails with status 1.
-ArithCmdRaw <~~ push(makeArithCmd(mkArDyn(pop()), lineStr(up.pos))) ~~> = "((" :whitespace() ArDynWord "))" ;
+ArithCmdRaw <~~ arSqClaim(up.start + 2, up.pos - 2); push(makeArithCmd(mkArDyn(pop()), lineStr(up.pos))) ~~> = "((" :whitespace() ArDynWord "))" ;
 // [[ ... ]] : the conditional command (no word splitting, glob and regex matching).
 CondCmd     <~~ push(makeCondCmd(pop(), lineStr(up.pos))) ~~> = "[[" :whitespace(Whitespace) CondOr Linebreak "]]" ;
 
@@ -338,7 +338,7 @@ AsgWord     = [ NsWord ] ;
 // array literal - `A=($x)` - are split, and they go through CWord below. NsWord is the
 // same segment list read in the mode a double-quoted word uses: "$@" and "${a[@]}" still
 // contribute several fields, which is what makes `c=$@` join them with a space.
-NsWord      <~~ push(mkNsWord(takeAll())) ~~>
+NsWord      <~~ badClaim(up.start, up.pos, true); push(mkNsWord(takeAll())) ~~>
             = WordFirst :whitespace() { WordSeg } ;
 ArrayLit    <~~ push(mkArrayLit(takeAll())) ~~> = "(" :whitespace(WsNL) ArrayItems ")" ;
 ArrayItems  = { ArrayItem } ;
@@ -398,10 +398,10 @@ LtOne       = "<" NotLt ;
 // skipped in argument position, but NOT after = in an assignment); :whitespace() then turns
 // skipping off for the remaining segments so foo\"bar\"$x concatenates as one word.
 
-Word        <~~ push(mkWord(takeAll())) ~~>
+Word        <~~ badClaim(up.start, up.pos, true); push(mkWord(takeAll())) ~~>
             = WordFirst :whitespace() { WordSeg } ;
 WordFirst   = Tilde | WordSeg ;
-WordSeg     = SqSeg | DqSeg | AnsiSeg | UqExp | EscSeg | BraceLit | EgPfxLit | BareSeg ;
+WordSeg     = SqSeg | LocSeg | DqSeg | AnsiSeg | UqExp | EscSeg | BraceLit | EgPfxLit | BareSeg ;
 
 // An expansion OUTSIDE quotes is subject to word splitting on IFS; the same production
 // inside a double-quoted string (or a ${...} word) is not, which is the only difference
@@ -411,16 +411,16 @@ UqExp       <~~ push(mkSplittable(pop())) ~~> = ExpSeg ;
 // A word in COMMAND ARGUMENT position, where brace expansion applies and one written word
 // can therefore become several. Real bash does not brace-expand an assignment's right hand
 // side (a=x{1,2} really is the four characters x{1,2}), which is why this is its own rule.
-CWord       <~~ pushWords(mkWords(takeAll())) ~~>
+CWord       <~~ badClaim(up.start, up.pos, true); pushWords(mkWords(takeAll())) ~~>
             = CWordFirst :whitespace() { CWordSeg } ;
 CWordFirst  = Tilde | CWordSeg ;
-CWordSeg    = SqSeg | DqSeg | AnsiSeg | UqExp | EscSeg | BraceRange | BraceAlts | BraceLit | EgPfxLit | BareSeg ;
+CWordSeg    = SqSeg | LocSeg | DqSeg | AnsiSeg | UqExp | EscSeg | BraceRange | BraceAlts | BraceLit | EgPfxLit | BareSeg ;
 
 // {a,b,c} needs at least one comma; {x} is literal. {1..5} {5..1} {a..e} {1..9..3} are ranges.
 BraceAlts   <~~ push(mkBraceAlts(takeAll())) ~~>
             = "{" :whitespace() BraceAlt "," BraceAlt { "," BraceAlt } "}" ;
 BraceAlt    <~~ push({alt: takeAll()}) ~~> = { BraceAltSeg } ;
-BraceAltSeg = SqSeg | DqSeg | AnsiSeg | ExpSeg | EscSeg | BraceRange | BraceAlts | AltBare ;
+BraceAltSeg = SqSeg | LocSeg | DqSeg | AnsiSeg | ExpSeg | EscSeg | BraceRange | BraceAlts | AltBare ;
 AltBare     <~~ push(makeConst(up.in)) ~~> = !@+" \t\n\r;$'\"\\(){},&|<>`" ;
 BraceRange  <~~ push(mkBraceRange(takeAll())) ~~>
             = "{" :whitespace() RangeEnd ".." RangeEnd [ RangeStep ] "}" ;
@@ -444,8 +444,12 @@ AnsiLit     = !@+"'\\" ;
 SqSeg       = "'" :whitespace() { !@+"'" } <~~ push(makeConst(up.in)) ~~> "'" ;
 
 // "double quoted" : literal runs, escapes and $ expansions concatenated.
-DqSeg       <~~ push(mkDqWord(takeAll())) ~~>
+DqSeg       <~~ badClaim(up.start, up.pos, false); push(mkDqWord(takeAll())) ~~>
             = '"' :whitespace() { DqExpSeg | DqEsc | DqLit } '"' ;
+// $"..." : a string translated by the locale's message catalog, which in the C locale has
+// none, so it is the double-quoted string (bash 5.3: echo $"a b"c prints a bc).
+LocSeg      <~~ push(mkDqWord(takeAll())) ~~>
+            = '$"' :whitespace() { DqExpSeg | DqEsc | DqLit } '"' ;
 DqLit       <~~ push(makeConst(up.in)) ~~>
             = !@+"\"$\\`" ;
 DqEsc       <~~ push(makeConst(dqEsc(up.in))) ~~>
@@ -524,28 +528,38 @@ ReplySub    <~~ push(mkFunSub(pop(), true)) ~~>
 // evaluator, arEval; a text without one is parsed here, once.
 ArithExp    = ArithDyn | ArithSt | ArithRaw | ArithBrk ;
 ArithSt     <~~ arClaim(up.start + 3, up.pos - 2); push(mkArith(pop())) ~~> = "$((" :whitespace(Whitespace) ArList "))" ;
-ArithDyn    <~~ push(mkArith(mkArDyn(pop()))) ~~> = "$((" :whitespace() ArHasExp ArDynWord "))" ;
-ArithRaw    <~~ push(mkArith(mkArDyn(pop()))) ~~> = "$((" :whitespace() ArDynWord "))" ;
+ArithDyn    <~~ arSqClaim(up.start + 3, up.pos - 2); push(mkArith(mkArDyn(pop()))) ~~> = "$((" :whitespace() ArHasExp ArDynWord "))" ;
+ArithRaw    <~~ arSqClaim(up.start + 3, up.pos - 2); push(mkArith(mkArDyn(pop()))) ~~> = "$((" :whitespace() ArDynWord "))" ;
 ArDynWord   <~~ push(mkNsWord(takeAll())) ~~> = { ArDynSeg } ;
-ArDynSeg    = DqSeg | ArDynAnsi | ExpSeg | ArDynParen | ArDynBare ;
+ArDynSeg    = LocSeg | DqSeg | ArDynAnsi | ExpSeg | ArDynParen | ArDynSub | ArDynBare | ArDynLb ;
 // A $'...' part is its value single-quoted (sh_single_quote), which arithmetic refuses:
 // bash 5.3 reports $(( a[$'1'] )) at '1'.
 ArDynAnsi   <~~ push(makeConst(bashSq(ansiC(arSrc(up.start + 2, up.pos - 1), true)))) ~~> = "$'" :whitespace() { AnsiEsc | AnsiLit } "'" ;
 ArDynParen  = ArDynOpen { ArDynSeg } ArDynClose ;
 ArDynOpen   <~~ push(makeConst("(")) ~~> = "(" ;
 ArDynClose  <~~ push(makeConst(")")) ~~> = ")" ;
-ArDynBare   <~~ push(makeConst(up.in)) ~~> = !@+"()$`\"" ;
+// In a subscript a single-quoted part (and a $'...' one) is its text, unexpanded, when the
+// arithmetic text holds an expansion, and stays quoted when it does not (arSqClaim):
+// bash 5.3, with x=1, $(( a['1'] + $x )) is a[1]+1, $(( a['$x'] )) an error at "$x" and
+// $(( a['1'] )) one at "'1'".
+ArDynSub    = ArDynSubOpen { ArDynSubSeg } ArDynSubClose ;
+ArDynSubOpen <~~ push(makeConst("[")) ~~> = "[" ;
+ArDynSubClose <~~ push(makeConst("]")) ~~> = "]" ;
+ArDynSubSeg = ArDynSq | LocSeg | DqSeg | ArDynSubAnsi | ExpSeg | ArDynParen | ArDynSub | ArDynSubBare ;
+ArDynSq     <~~ push(arSqPart(up.start, up.in, arSrc(up.start + 1, up.pos - 1))) ~~> = "'" { !@+"'" } "'" ;
+ArDynSubAnsi <~~ push(arSqAnsi(up.start, ansiC(arSrc(up.start + 2, up.pos - 1), true))) ~~> = "$'" :whitespace() { AnsiEsc | AnsiLit } "'" ;
+ArDynSubBare <~~ push(makeConst(up.in)) ~~> = !@+"()[]$`\"'" ;
+ArDynBare   <~~ push(makeConst(up.in)) ~~> = !@+"()[$`\"" ;
+// A "[" without its "]".
+ArDynLb     <~~ push(makeConst("[")) ~~> = "[" ;
 // $[ expr ] : the obsolete spelling of $(( expr )), which bash still expands. Its text ends at
 // the "]" that closes the "$[", so a subscript's brackets are matched inside it.
 ArithBrk    = ArithBrkDyn | ArithBrkSt | ArithBrkRaw ;
 ArithBrkSt  <~~ arClaim(up.start + 2, up.pos - 1); push(mkArith(pop())) ~~> = "$[" :whitespace(Whitespace) ArList "]" ;
-ArithBrkDyn <~~ push(mkArith(mkArDyn(pop()))) ~~> = "$[" :whitespace() ArHasExp ArBrkWord "]" ;
-ArithBrkRaw <~~ push(mkArith(mkArDyn(pop()))) ~~> = "$[" :whitespace() ArBrkWord "]" ;
+ArithBrkDyn <~~ arSqClaim(up.start + 2, up.pos - 1); push(mkArith(mkArDyn(pop()))) ~~> = "$[" :whitespace() ArHasExp ArBrkWord "]" ;
+ArithBrkRaw <~~ arSqClaim(up.start + 2, up.pos - 1); push(mkArith(mkArDyn(pop()))) ~~> = "$[" :whitespace() ArBrkWord "]" ;
 ArBrkWord   <~~ push(mkNsWord(takeAll())) ~~> = { ArBrkSeg } ;
-ArBrkSeg    = DqSeg | ArDynAnsi | ExpSeg | ArDynParen | ArBrkPair | ArBrkBare ;
-ArBrkPair   = ArBrkOpen { ArBrkSeg } ArBrkClose ;
-ArBrkOpen   <~~ push(makeConst("[")) ~~> = "[" ;
-ArBrkClose  <~~ push(makeConst("]")) ~~> = "]" ;
+ArBrkSeg    = LocSeg | DqSeg | ArDynAnsi | ExpSeg | ArDynParen | ArDynSub | ArBrkBare ;
 ArBrkBare   <~~ push(makeConst(up.in)) ~~> = !@+"()[]$`\"" ;
 
 // ${...} : the whole parameter-expansion family. Inside the braces whitespace is NOT
@@ -683,20 +697,31 @@ ArOff       <~~ arClaim(up.start, arPastWs(up.pos)); push(arIn(peTgt + ": ", pop
 // single quote is no quote there (bash 5.3: ${a[@]:'1'} is an arithmetic syntax error).
 ArOffDyn    <~~ push(mkArDyn(pop())) ~~> = ArOffWord ;
 ArOffWord   <~~ push(mkNsWord(takeAll())) ~~> = ArOffSeg { ArOffSeg } ;
-ArOffSeg    = DqSeg | ArDynAnsi | ExpSeg | ArDynParen | ArOffBare ;
+ArOffSeg    = LocSeg | DqSeg | ArDynAnsi | ExpSeg | ArDynParen | ArOffBare ;
 ArOffBare   <~~ push(makeConst(up.in)) ~~> = !@+"()$`\":}" ;
 ArEmpty     <~~ push(mkNum("0")) ~~> = ArEndHere ;
 PeArPad     = { PeBlank } ;
 PeBlank     = @+" \t" ;
+// Inside "..." a $'...' or $"..." part of an offset or a length is its text, as if written
+// there (bash's extquote, on by default): bash 5.3 prints "${s:$'1'}" and "${s:$"1"}" as ello
+// where the unquoted ${s:$'1'} is an arithmetic syntax error.
+DqSubstrForm <~~ push({pe: "substr"}) ~~> = PeTarget ":" :whitespace(Whitespace) DqArOff [ DqSubLen ] :whitespace() PeArPad ;
+DqSubLen    = ":" DqArOff ;
+DqArOff     <~~ arClaim(up.start, arPastWs(up.pos)); push(arIn(peTgt + ": ", pop())) ~~> = ArList ArEndHere | ArEmpty | DqArOffDyn ;
+DqArOffDyn  <~~ push(mkArDyn(pop())) ~~> = DqArOffWord ;
+DqArOffWord <~~ push(mkNsWord(takeAll())) ~~> = DqArOffSeg { DqArOffSeg } ;
+DqArOffSeg  = DqSeg | DqXqAnsi | LocSeg | ExpSeg | ArDynParen | ArOffBare ;
+DqXqAnsi    = "$'" :whitespace() DqXqAnsiB "'" ;
+DqXqAnsiB   <~~ push(makeConst(ansiC(up.in, true))) ~~> = { AnsiEsc | AnsiLit } ;
 
 // A word inside ${...}: anything up to the closing brace, expansions included. A $'...'
 // part is ANSI-C quoted there too, even inside "...": bash 5.3 prints `"${u:-$'\x41'}"` as A.
 BraceWord   <~~ push(mkBraceWord(takeAll())) ~~> = BraceWSeg { BraceWSeg } ;
-BraceWSeg   = SqSeg | DqSeg | AnsiSeg | BraceUq | EscSeg ;
+BraceWSeg   = SqSeg | LocSeg | DqSeg | AnsiSeg | BraceUq | EscSeg ;
 // The UNQUOTED parts of a ${v-w} word: split when the ${...} itself stands unquoted
 // (see mkBraceWord).
 BraceUq     <~~ push({uq: pop()}) ~~> = ExpSeg | BraceBare ;
-BraceSeg    = SqSeg | DqSeg | AnsiSeg | ExpSeg | EscSeg | BraceBare ;
+BraceSeg    = SqSeg | LocSeg | DqSeg | AnsiSeg | ExpSeg | EscSeg | BraceBare ;
 BraceBare   <~~ push(makeConst(up.in)) ~~> = !@+"}\"'\\$`" ;
 
 // The expansions of a double-quoted context ("...", an unquoted here-document body). They
@@ -707,12 +732,16 @@ BraceBare   <~~ push(makeConst(up.in)) ~~> = !@+"}\"'\\$`" ;
 DqExpSeg    = ArithExp | CmdSub | DqBackSub | FunSub | ReplySub | DqDollarBrace | DollarName | DollarDigit | DollarSpecial | DollarLit ;
 DqDollarBrace <~~ push(mkParamExp(dqIdxItems(takeAll()))) ~~>
             = "${" :whitespace() DqPeBody "}" ;
-DqPeBody    = PeLen | DqPeIndForm | DqPeCore | PeLenBad | PeBad ;
+DqPeBody    = PeLen | DqPeIndForm | DqPeCore | PeLenBad | DqPeBad ;
+// In double quotes, a bad ${NAME[...} whose "[" is never closed is reported with the whole
+// word it is in (dqBad, badClaim): bash 5.3, echo x"${m[[]-v}"y is "bad substitution: no
+// closing `}' in x"${m[[]-v}"y".
+DqPeBad     <~~ push(dqBad(up.start, arSrc(up.start, up.pos))) ~~> = PeBadFirst { PeBadCh } ;
 DqPeIndForm <~~ push({indp: 1}) ~~> = "!" ( PePfxNames | DqPeCore ) ;
-DqPeCore    = PePatForm | PeCaseForm | PeReplForm | PeXform | DqPeOpForm | PeSubstrForm | PePlain ;
+DqPeCore    = PePatForm | PeCaseForm | PeReplForm | PeXform | DqPeOpForm | DqSubstrForm | PePlain ;
 DqPeOpForm  = PeTarget PeOp [ DqBraceWord ] ;
 DqBraceWord <~~ push(mkBraceWord(takeAll())) ~~> = DqBrSeg { DqBrSeg } ;
-DqBrSeg     = DqBrSq | DqBrDq | AnsiSeg | DqBrGlue | DqExpSeg | DqBrEsc | BraceBare ;
+DqBrSeg     = DqBrSq | DqBrDq | AnsiSeg | LocSeg | DqBrGlue | DqExpSeg | DqBrEsc | BraceBare ;
 // Between the two 's a " is still a quote character and is removed:
 // "${u:-'a"b'}" -> 'ab'   "${u:-'a"}"b'}" -> 'a}b'
 DqBrSq      = DqBrQuote { GlueRef | DqExpSeg | DqBrEsc | DqBrSqDq | DqBrSqLit } DqBrQuote ;
@@ -1791,6 +1820,26 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         for (i = 0; i < fr.length; i++) { if (fr[i].name == name) { return true } }
         return false
     }
+    // The locals of the innermost call frame, once each, in byte order (a prefix binding no
+    // `local` claimed is none, nor the call's own FUNCNAME).
+    function localNames() {
+        var out = []
+        var seen = {}
+        var fr = localFrames[localFrames.length - 1]
+        var i
+        for (i = 0; i < fr.length; i++) {
+            if ((fr[i].tmp == true && fr[i].loc != true) || fr[i].sys == true || hasOwn(seen, "$" + fr[i].name)) { continue }
+            seen["$" + fr[i].name] = true
+            out.push(fr[i].name)
+        }
+        return bashSortNames(out)
+    }
+    // A local's `declare -p` line: one unset since it was declared is still a local, and
+    // prints as declared without a value.
+    function declLocal(name) {
+        var l = declLineRaw(name)
+        return (l == "") ? "declare -- " + name : l
+    }
     function allDigits(s) {
         if (s.length == 0) { return false }
         var i
@@ -2684,6 +2733,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var pe = "", name = "", op = "", anchor = "", xf = "", pfx = ""
         var lenp = false, indp = false
         var badsub = null
+        var badNc = null
         var args = []
         var wordT = null
         var hasIdx = false
@@ -2698,7 +2748,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             else if (it.qname != undefined) { errName = it.qname }
             else if (it.hasIdx != undefined) { hasIdx = true; idxAll = idxAllItem(it); idxAq = idxAqItem(it) }
             else if (it.lenp != undefined) { lenp = true }
-            else if (it.badsub != undefined) { badsub = it.badsub }
+            else if (it.badsub != undefined) { badsub = it.badsub; badNc = it.nc }
             else if (it.indp != undefined) { indp = true }
             else if (it.xf != undefined) { xf = it.xf }
             else if (it.pfx != undefined) { pfx = it.pfx }
@@ -2716,7 +2766,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // the badsub arm of paramCore in bash-to-llvm-ir.abnf.
         if (badsub != null) {
             var badMsg = "${" + badsub + "}: bad substitution\n"
-            return function() { diagErr(badMsg); arithErr = true; return "" }
+            return function() { diagErr((badNc != null) ? badNcMsg(badNc()) : badMsg); arithErr = true; return "" }
         }
         if (indp && bare && pfx == "") { pe = "ind" }
         // $@ and $* WITH AN OPERATOR are the positional parameters as a LIST, exactly as
@@ -3325,6 +3375,24 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 return 1
             }
             if (fnQuery != "") { return declFuncs(fnQuery, names) }
+            // `local` without names, whatever its options, lists the running call's locals
+            // in byte order; `local -p NAME` prints only a local of it (bash 5.3). Twin of the
+            // same arm in makeDecl in bash-to-llvm-ir.abnf.
+            if (kw == "local" && names.length == 0) {
+                var lns = localNames()
+                for (k = 0; k < lns.length; k++) { emitOut(declLocal(lns[k]) + "\n") }
+                setStatus(0)
+                return 0
+            }
+            if (kw == "local" && isPrint) {
+                var lst = 0
+                for (k = 0; k < names.length; k++) {
+                    if (!localHere(names[k]) || tmpHere(names[k])) { diagErr("local: " + names[k] + ": not found\n"); lst = 1 }
+                    else { emitOut(declLocal(names[k]) + "\n") }
+                }
+                setStatus(lst)
+                return lst
+            }
             if (query) {
                 // -p with names PRINTS, -p bare stays silent (declLine's comment says why),
                 // and a name that is not set is a diagnostic and status 1.
@@ -3332,7 +3400,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     var pst = 0
                     for (k = 0; k < names.length; k++) {
                         var line = declLineRaw(names[k])
-                        if (line == "") { diagErr("declare: " + names[k] + ": not found\n"); pst = 1 }
+                        if (line == "") { diagErr(((kw == "typeset") ? kw : "declare") + ": " + names[k] + ": not found\n"); pst = 1 }
                         else { emitOut(line + "\n") }
                     }
                     setStatus(pst)
@@ -3427,6 +3495,12 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 return (abortSignal != null || arithErr) ? null : fs
             }, shellQuote, function(n) { return assocFact(n, false) ? "A" : "a" })
             if (dt == null) { return takeAbort() }
+            if (dt.pre != "") {
+                if (!hasOwn(compiled, "$" + dt.pre)) { compiled["$" + dt.pre] = compileSnippet(dt.pre, 0) }
+                var pr = anytype
+                pr = compiled["$" + dt.pre]()
+                if (typeof pr == "object") { return pr }
+            }
             var text = dt.text
             var operands = dt.operands
             var errs = ""
@@ -5114,17 +5188,70 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function lnIn(ln) { return "" + bashCsLine(lnCtx.tab, lnCtx.base, strToInt(ln)) }
     function arSrc(from, to) { return arInSnip ? arSnip.slice(from, to) : c.srcSlice(from, to) }
     function arCompile(text, rule, claimAll) {
-        var svS = arSnip, svIn = arInSnip, svR = arRecs
+        var svS = arSnip, svIn = arInSnip, svR = arRecs, svQ = arSqRecs, svB = badRecs
         arSnip = text
         arInSnip = true
         arRecs = []
+        arSqRecs = []
+        badRecs = []
         var t = c.compile(c.parseFrom(c.agrammar, text, rule)).stack[0]
         if (claimAll) { arClaimText(text, 0, text.length) }
         arSnip = svS
         arInSnip = svIn
         arRecs = svR
+        arSqRecs = svQ
+        badRecs = svB
         return t
     }
+    // The single-quoted parts of subscripts in an arithmetic text that is still being read:
+    // each is quoted or not by the enclosing text, which claims the parts inside it
+    // (arSqClaim). Twin of arSqPart in bash-to-llvm-ir.abnf.
+    var arSqRecs = []
+    function arSqPart(at, q, raw) {
+        var r = {at: at, strip: false}
+        arSqRecs.push(r)
+        return function() { return r.strip ? raw : q }
+    }
+    function arSqAnsi(at, v) { return arSqPart(at, bashSq(v), v) }
+    // bash expands an arithmetic text that holds a "$" or a "`" (a $'...' or $"..." is
+    // already quoted text by then), and only then is a subscript's quoting removed.
+    function arSqClaim(from, to) {
+        var t = arSrc(from, to)
+        var strip = false
+        var i
+        for (i = 0; i < t.length; i++) {
+            var ch = t.charAt(i)
+            if (ch == "`" || (ch == "$" && t.charAt(i + 1) != "'" && t.charAt(i + 1) != "\"")) { strip = true }
+        }
+        var keep = []
+        for (i = 0; i < arSqRecs.length; i++) {
+            var r = arSqRecs[i]
+            if (r.at >= from && r.at < to) { r.strip = strip } else { keep.push(r) }
+        }
+        arSqRecs = keep
+    }
+    // The bad ${...} of dqBad and the word around each, which the enclosing double-quoted
+    // string and word fill in (the innermost of each kind). Twin of badRecs in
+    // bash-to-llvm-ir.abnf.
+    var badRecs = []
+    function dqBad(at, t) {
+        if (!bashSubUnclosed(t)) { return {badsub: t} }
+        var r = {at: at, dq: "", word: ""}
+        badRecs.push(r)
+        // A function, as the item itself may be copied before the word claims it.
+        return {badsub: t, nc: function() { return r }}
+    }
+    function badClaim(from, to, word) {
+        var i
+        for (i = 0; i < badRecs.length; i++) {
+            var r = badRecs[i]
+            if (r.at >= from && r.at < to) {
+                if (word && r.word == "") { r.word = arSrc(from, to) }
+                if (!word && r.dq == "") { r.dq = arSrc(from, to) }
+            }
+        }
+    }
+    function badNcMsg(r) { return "bad substitution: no closing `}' in " + ((r.word != "") ? r.word : r.dq) + "\n" }
     function arRec(at) { var r = {ok: false, la: false, at: at, expr: "", tok: ""}; arRecs.push(r); return r }
     function arRecLa(at) { var r = arRec(at); r.la = true; return r }
     function arIsWs(ch) { return ch == " " || ch == "\t" || ch == "\n" }
@@ -5651,12 +5778,15 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // and ${NAME[SUB]} ($'...' re-quoted, \x as in double quotes), {aqd} for ${NAME[SUB]} in
     // double quotes ($'...' its value), {aqa} in an arithmetic expression, where a
     // single-quoted part holding a $ or ` loses its quotes (bash 5.3: $(( a['$x'] )) is an
-    // error at "$x"). Twin of idxQuoted in bash-to-llvm-ir.abnf.
+    // error at "$x"). In the first two such a part keeps its quotes and is expanded inside
+    // them (bash 5.3: with x=1, ${a['$x']} is an error at "'1'"). Twin of idxQuoted in
+    // bash-to-llvm-ir.abnf.
     function idxQuoted(seg, src) {
         var c0 = src.charAt(0)
         var aq = (c0 == "$") ? bashSq(seg()) : ((c0 == "\\") ? dqEsc(src) : src)
         var bare = c0 == "'" && (src.indexOf("$") >= 0 || src.indexOf("`") >= 0)
-        return {seg: seg, ansi: c0 == "$", aq: makeConst(aq), aqd: (c0 == "$") ? seg : makeConst(aq), aqa: bare ? seg : makeConst(aq)}
+        var aqT = bare ? function() { return subExpandDq(src) } : makeConst(aq)
+        return {seg: seg, ansi: c0 == "$", aq: aqT, aqd: (c0 == "$") ? seg : aqT, aqa: bare ? seg : makeConst(aq)}
     }
     // NAME[SUB]'s subscript: {aidx} as written, {aiw} the word, {aqw} {aqd} {aqa} an indexed
     // array's arithmetic text (idxQuoted) when a part of SUB is quoted, else null. Twin of
@@ -7624,6 +7754,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         adoptFrame = false
         if (own) { pushLocalFrame() }
         declareLocal("FUNCNAME")
+        localFrames[localFrames.length - 1][localFrames[localFrames.length - 1].length - 1].sys = true
         setVarVal("FUNCNAME", name)
         fnDepth = fnDepth + 1
         var r = anytype

@@ -721,6 +721,60 @@ ello b el'
   r=$(s114s=hello; e=$( (echo "${s114s:1'+'1}") 2>&1); s114h "$e" "s114s: 1'+'1: arithmetic syntax error: invalid arithmetic operator (error token is \"'+'1\")"; e=$( (echo ${s114s:\1}) 2>&1); s114h "$e" "s114s: \\1: arithmetic syntax error: operand expected"); check aoq2 "$r" '1
 1'
 }
+# ===== SECTION 115: computed option words of declare =====
+# An option that came out of an expansion is an option still: -A, -a, -g, -x act at run time,
+# also after an operand or a computed "--". It does not mark an array literal, which is
+# assigned indexed first and then refused, while a written -A marks one even after "--".
+# -a with -A is an invalid option, status 2. A nameref passes -A on to its target. Every
+# expected value is bash 5.3's.
+s115() {
+  local r
+  r=$(s115o=-A; declare $s115o s115x; s115x[k]=v; echo "1: ${s115x[k]} ${!s115x[@]}"; declare $s115o s115y=([p]=1 [q]=2) 2>/dev/null; echo "rc=$?"; declare -p s115y; s115w=-a; declare $s115w s115v=5; s115v[3]=7; declare -p s115v; declare s115q1=1 $s115o s115q2 2>/dev/null; echo "rc=$?"; declare -p s115q2); check dco1 "$r" '1: v k
+rc=1
+declare -a s115y=([0]="2")
+declare -a s115v=([0]="5" [3]="7")
+rc=1
+declare -- s115q2'
+  r=$(s115o=-A; s115f() { local og=-Ag; declare $og s115g; s115g[x]=1; declare $s115o s115l; s115l[m]=n; declare -p s115l; }; s115f; declare -p s115g); check dco2 "$r" 'declare -A s115l=([m]="n" )
+declare -A s115g=([x]="1" )'
+  r=$(declare -- -A s115e=(a b) 2>/dev/null; echo "rc=$?"; declare -p s115e; (declare -a -A s115t) 2>/dev/null; echo "rc=$?"; (declare -aA s115t) 2>/dev/null; echo "rc=$?"); check dco3 "$r" 'rc=1
+declare -A s115e=([a]="b" )
+rc=2
+rc=2'
+  r=$(declare -n s115r=s115tg; declare -A s115r=([x]=1 [y]=2); declare -p s115tg); check dco4 "$r" 'declare -A s115tg=([y]="2" [x]="1" )'
+}
+# ===== SECTION 116: local -p =====
+# local with no name lists the call's own locals, an unset one as `declare -- NAME`; a name
+# that is no local of the call is "not found", status 1. Every expected value is bash 5.3's.
+s116h() { case $1 in *"$2"*) echo 1 ;; *) echo 0 ;; esac; }
+s116() {
+  local r
+  r=$(s116g=1; s116f() { local s116b s116a=1; local -p; local -p s116a; local -p s116g 2>/dev/null; echo "rc=$?"; }; s116f); check lcp1 "$r" 'declare -- s116a="1"
+declare -- s116b
+declare -- s116a="1"
+rc=1'
+  r=$(s116f() { local e; e=$(local -p s116zz 2>&1); s116h "$e" "local: s116zz: not found"; e=$(typeset -p s116zz 2>&1); s116h "$e" "typeset: s116zz: not found"; }; s116f); check lcp2 "$r" '1
+1'
+}
+# ===== SECTION 117: quoting inside arithmetic text =====
+# In a ${v:off:len} in double quotes, $'...' and $"..." are their text. An arithmetic text
+# holding a "$" or a "`" is expanded first, and a subscript's single quotes are removed then,
+# their text unexpanded; without one they stay and are a syntax error. In double quotes, a
+# ${NAME[...} whose "[" is never closed is reported with its whole word. Every expected
+# value is bash 5.3's.
+s117h() { case $1 in *"$2"*) echo 1 ;; *) echo 0 ;; esac; }
+s117() {
+  local r
+  r=$(s117s=hello; echo "${s117s:$'1'} ${s117s:$"2"} ${s117s:1:$'3'}"; echo $"a b"c); check xq1 "$r" 'ello llo ell
+a bc'
+  r=$(s117iv=(10 20 30); x=1; echo $(( s117iv['1'] + $x )) $(( s117iv['1'"$x"] )) $[ s117iv['2'] + ${x} ]; for (( s117k=s117iv['1']+$x; s117k<0; s117k++ )); do :; done; echo "k=$s117k"); check xq2 "$r" '21 0 31
+k=21'
+  r=$(s117iv=(10 20 30); s117ia=(a b c); x=1; e=$( (echo $(( s117iv['$x'] ))) 2>&1); s117h "$e" '$x: arithmetic syntax error: operand expected (error token is "$x")'; e=$( (echo $(( s117iv['1'] ))) 2>&1); s117h "$e" "'1': arithmetic syntax error: operand expected (error token is \"'1'\")"; e=$( (echo "${s117ia['$x']}") 2>&1); s117h "$e" "'1': arithmetic syntax error: operand expected (error token is \"'1'\")"); check xq3 "$r" '1
+1
+1'
+  r=$(declare -A s117m; e=$( (echo x"${s117m[[]-v}"y) 2>&1); s117h "$e" 'bad substitution: no closing `}'"' in x\"\${s117m[[]-v}\"y"; e=$( (echo ${s117m[[]-v}) 2>&1); s117h "$e" '${s117m[[]-v}: bad substitution'); check xq4 "$r" '1
+1'
+}
 # ===== END SECTIONS =====
 
 s90   # SECTION-CALL 90
@@ -748,5 +802,8 @@ s111  # SECTION-CALL 111
 s112  # SECTION-CALL 112
 s113  # SECTION-CALL 113
 s114  # SECTION-CALL 114
+s115  # SECTION-CALL 115
+s116  # SECTION-CALL 116
+s117  # SECTION-CALL 117
 echo "full: $checks checks, $fails failures"
 exit $fails

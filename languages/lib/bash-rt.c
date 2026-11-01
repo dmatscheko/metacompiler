@@ -242,7 +242,7 @@ int rt_arr_count(char *nm);
 int rt_arr_any(char *nm);
 char *rt_arr_list(char *nm, char *sep, int star, int keys);
 int rt_sc_count(char *nm);
-int rt_declp(char *nm, char *flag, int assoc);
+int rt_declp(char *nm, char *flag, int assoc, char *who);
 char *rt_dqs(char *v);
 char *rt_ansiqs(char *v);
 char *rt_arrassign(char *nm, int assoc);
@@ -6880,8 +6880,9 @@ char *rt_prompt(char *s) {
 
 /* `declare -p NAME`. `flag` is the attribute letters the emitter knows, the
  * export mark is added here (rt_xletters); a name that is not set but carries
- * an attribute is printed as declared (`export e` gives `declare -x e`). */
-int rt_declp(char *nm, char *flag, int assoc) {
+ * an attribute is printed as declared (`export e` gives `declare -x e`). A name
+ * neither set nor declared is reported for the builtin who. */
+int rt_declp(char *nm, char *flag, int assoc, char *who) {
     int n = rt_arr_count(nm);
     int isarr = (n > 0 || rt_arr_marked(nm) != 0) ? 1 : 0;
     char *v;
@@ -6923,7 +6924,8 @@ int rt_declp(char *nm, char *flag, int assoc) {
             saved = sink_out;
             sink_out = sink_err;
             rt_diag_pfx();
-            rt_prints("declare: ");
+            rt_prints(who);
+            rt_prints(": ");
             rt_prints(nm);
             rt_prints(": not found\n");
             sink_out = saved;
@@ -7761,6 +7763,92 @@ int rt_local_here(int id, int d)
         t = t + 1;
     }
     return 0;
+}
+
+/* Is entry t of the frame starting at depth d one of the call's locals, as
+ * `local` lists them: no prefix binding no `local` claimed, nor the frame's
+ * first entry of fn, the $FUNCNAME rt_fn_enter saved. */
+int rt_local_listed(int t, int d, int fn)
+{
+    int u = d;
+    if (ls_id[t] < 0 || ls_tmp[t] == 1) return 0;
+    if (ls_id[t] != fn) return 1;
+    while (u < t && ls_id[u] != fn) u = u + 1;
+    return u < t ? 1 : 0;
+}
+
+/* The locals of the call whose frame starts at depth d (rt_local_listed), once
+ * each, as a field list in byte order. Twin of localNames in
+ * bash-interpreter.abnf. */
+char *rt_local_names(int d, int fn)
+{
+    char *out = &list_nil[0];
+    char *last = 0;
+    char *best = &empty[0];
+    int t;
+    while (best != 0) {
+        best = 0;
+        t = d;
+        while (t < ls_top) {
+            if (rt_local_listed(t, d, fn) != 0 && (last == 0 || rt_strcmp(varnames[ls_id[t]], last) > 0)
+                && (best == 0 || rt_strcmp(varnames[ls_id[t]], best) < 0)) best = varnames[ls_id[t]];
+            t = t + 1;
+        }
+        if (best != 0) out = rt_fadd(out, best);
+        last = best;
+    }
+    return out;
+}
+
+/* `local -p NAME`: NAME's line when it is one of the call's locals (a local
+ * unset since prints as declared, `declare -- NAME`), else "local: NAME: not
+ * found" and 1. flag and assoc as for rt_declp. Twin of the local arm of
+ * makeDecl in bash-interpreter.abnf. */
+int rt_local_p(char *nm, char *flag, int assoc, int d, int fn)
+{
+    int id = rt_varslot(nm);
+    int t = d;
+    int saved;
+    while (t < ls_top && !(ls_id[t] == id && rt_local_listed(t, d, fn) != 0)) t = t + 1;
+    if (id < 0 || t >= ls_top) {
+        saved = sink_out;
+        sink_out = sink_err;
+        rt_diag_pfx();
+        rt_prints("local: ");
+        rt_prints(nm);
+        rt_prints(": not found\n");
+        sink_out = saved;
+        return 1;
+    }
+    if (rt_arr_count(nm) == 0 && rt_arr_marked(nm) == 0 && rt_arr_dmarked(nm) == 0 && (rt_arr_marks(nm) & 32) == 0
+        && gvars[id] == &unset_marker[0] && rt_arr_smarked(nm) == 0 && rt_xletters(nm, flag)[0] == 0) {
+        rt_prints("declare -- ");
+        rt_prints(nm);
+        rt_prints("\n");
+        return 0;
+    }
+    return rt_declp(nm, flag, assoc, "local");
+}
+
+/* A computed option field of a declaration (rt_decl_word answered 2), given
+ * the options so far (at: 16|128 -a, 48 -A, 64 -g, 256 -x): the options with it, -2
+ * for the "--" that ends them, or -1 for one this compiler cannot apply, an
+ * attribute it decides at compile time, or -a with -A (bash's "-a: invalid
+ * option"). */
+int rt_decl_opt(char *f, int at)
+{
+    int i = 1;
+    if (rt_streq(f, "--") != 0) return -2;
+    if (f[0] != 45 || f[1] == 0) return -1;
+    while (f[i] != 0) {
+        if (f[i] == 97) at = at | 144;
+        else if (f[i] == 65) at = at | 48;
+        else if (f[i] == 103) at = at | 64;
+        else if (f[i] == 120) at = at | 256;
+        else return -1;
+        i = i + 1;
+    }
+    return (at & 160) == 160 ? -1 : at;
 }
 
 /* `unset NAME` of a local of the call whose frame starts at depth d: the export
@@ -8614,7 +8702,8 @@ int rt_decl_lit(char *nm, int id, char *v, int app, int at, int as)
  * `declare $v='x y'`): NAME, NAME=VALUE, NAME+=VALUE or NAME[SUB]= / +=, the
  * value taken as it is, or NAME[SUB] alone, which declare, typeset and local
  * (who) read as `-a NAME`, SUB never evaluated. With d >= 0 the name is made a
- * local of the call whose save stack starts at d, unless it already is one; a
+ * local of the call whose save stack starts at d, unless it already is one; d
+ * -2 (-g in a function) acts on the global binding a local hides (rt_glob_swap); a
  * fresh local takes none of the attributes at (1 -i, 2 -u, 4 -l, 8 readonly)
  * that the variable has where the declaration stands. at 16 is the
  * declaration's -a, 48 its -A: NAME declares an array (associative, refused for
@@ -8642,6 +8731,14 @@ int rt_decl_word(char *w, int d, int x, int at, char *who)
     char *v;
     if (w[0] == 45 || w[0] == 43) return 2;
     if (i == 0) return 1;
+    if (d == -2) {
+        id = rt_varslot_new(rt_substr(w, 0, i));
+        if (id < 0) return rt_decl_word(w, -1, x, at, who);
+        rt_glob_swap(id);
+        j = rt_decl_word(w, -1, x, at, who);
+        rt_glob_swap(id);
+        return j;
+    }
     j = i;
     if (w[j] == 91) {
         while (w[j] != 0 && w[j] != 93) j = j + 1;
