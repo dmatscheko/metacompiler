@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1081** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1082** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -112,10 +112,12 @@ strings.TrimSpace, native strips ASCII 9-13 and 32: `int.Parse(" 1 2 ")` and `in
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-1077 kotlin: reified type parameter as extension receiver; Class.kotlin · P3 · KT · IN PROGRESS (KT worker, round 25) [V]
-Oracle kotlinc 2.2.21:
-- `inline fun <reified T: Any> T.extName() = T::class.simpleName + " " + (this is T) + " " + ("q" is T)`; `5.extName()` -> "Int true false". Interpreter "Any false false", run/native "Any true true" (halves disagree). `List<T>.elName()` on listOf(1,2) -> Int, ours Any. Likely ktNoteGeneric reads the name of `fun <T> T.ext()` as "T".
-- `Long::class.javaObjectType.kotlin` aborts all engines ("member .kotlin of a class literal"); oracle gives the KClass (its javaPrimitiveType -> long).
+### T-1081 kotlin: static typer gaps for reified inference; List/Nothing class names · P3 · KT · OPEN [V]
+Oracle kotlinc 2.2.21; all engines:
+- ktStaticTy cannot type: `arrayOf("a")` without type args (`arrayOf("a").arrName()` -> String, ours Any), `listOf(this)` inside a reified extension (-> Long, ours Any), a `map {}` result (`listOf(1).map { it.toString() }.elName()` -> String, ours Any).
+- `List::class.qualifiedName` -> kotlin.collections.List (ours List); `"" + List::class.java` -> "interface java.util.List" (ours "class java.util.List"); interfaces print as "interface" generally.
+- `Nothing::class`: simpleName Void, qualifiedName java.lang.Void, javaPrimitiveType void (ours Nothing / kotlin.Nothing / null); `Nothing::class.java.kotlin.javaPrimitiveType` -> void.
+(KClass toString "(Kotlin reflection is not available)" suffix stays declined.)
 
 # GO — Go  (oracle: `go run`)
 
@@ -1140,6 +1142,7 @@ T-1076 csharp: compound assignment evaluates the right side before reading the l
 T-1070 ruby: Enumerator#each value, for-over-Lazy value, user #inspect ivars, Lazy respond_to?/class — DONE (RB r46, 2ca7d081): Enumerator#each answers the underlying method's value, for over map/select/with_index Enumerators and Lazy answers MRI's value, user #inspect/#to_s carry address (2*object_id, 16 hex) + ivars with cycle cut, Lazy class/respond_to?, blockless with_object; 4 legs = ruby 2.6
 T-1072 bash: assoc kind per scope / computed `declare -A`; small declaration leftovers — PARTIAL→split (SH r30, 3 commits): assoc kind per binding at run time (interp var field, C runtime array mark; computed declare -A compiled; cannot-convert refusal), export/readonly +X are non-identifier operands, quoted indexed subscripts in assignments are arithmetic errors, computed literals accept glob chars; 4 legs = bash 5.3. Reads with quoted subscripts + small items filed; LC_ALL=C policy item carried over
 T-1075 php: exception trace frames; file/line of engine-raised errors; __destruct — PARTIAL→split (PHP r43, 72cd7678): getTrace/getTraceAsString list calls in progress (functions, methods, closures, [internal function]; args per php-src escaping/15-char cut/float .0), engine-raised errors carry file/line/trace (php_here); closure/anon-class names use the absolute path; cost +0.68% paired bench / ~20 insns per call (within noise); 3 legs agree with php-src. __destruct DECLINED: refcount-timed destructors cannot be modelled faithfully without refcounting (docs 7.8); remaining trace gaps filed
+T-1077 kotlin: reified type parameter as extension receiver; Class.kotlin — DONE (KT r25, b9c0859b): generic extensions recorded (ExtFun never called ktNoteGeneric); reified extension type args inferred from the receiver's static type (T., List<T>., Map<K,V>., T?.) in both engines incl. after field reads; Class.kotlin maps java classes back to KClasses in all engines; 4 legs = kotlinc
 
 # Settled — do not re-open
 
