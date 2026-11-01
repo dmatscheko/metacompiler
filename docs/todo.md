@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-963** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-965** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -251,35 +251,17 @@ gh17101 - parsed in July, lost); `xor` / `and` / `or` in a const expression (`co
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-908 bash: the `builtin` and `command` builtins are missing · P2 · SH · IN PROGRESS (SH worker, round 20) [V]
-`x=9 builtin echo hi`, `x=3 command eval 'echo $x'` → bash `hi`, `3`; every engine "command not found: builtin/command", exit
-127. Both are common in real scripts (`command -v`, wrapping a builtin in a same-named function). Files: builtin dispatch in both
-bash grammars, lib/bash-rt.c.
+### T-963 bash compiled: `${x:-word}` expands word eagerly; a function can be called before its definition ran · P2 · SH · OPEN [V]
+Found by the SH worker, round 20 (oracle bash 5.3). With x set, `${x:-$(echo side >&2)}` prints "side" and `${x:-$((1/0))}`
+raises a division error in llvm.Run and native; bash and the interpreter expand nothing (the word is expanded only when used;
+same for :=, :?, :+ and their colon-less forms). And `f; f(){ echo f; }` → bash "f: command not found", 127; the compiler
+resolves f statically and runs it.
 
-### T-933 bash compiled: a computed `eval` silently does nothing; its assignment form keeps the comment · P1 · SH · IN PROGRESS (SH worker, round 20) [V]
-`for c in "${cmds[@]}"; do eval "$c"; done` over `('echo a' 'echo b # tail' … 'x=5 # t; echo no')`, then `echo "x=$x"` → bash
-and interp print a, b, c, `d # not`, e and `x=5`; run and native print none of the echoes and `x=5 # t; echo no`;
--warn-unsupported says nothing. The grammar documents that a computed eval is lowered only for NAME=VALUE: anything else must at
-least be a loud compile error, and the NAME=VALUE form must stop at the first unquoted `#`, `;` or newline. Files:
-bash-to-llvm-ir.abnf (rt_eval_assign).
-
-### T-934 bash: backslash removal inside backtick command substitution · P1 · SH · IN PROGRESS (SH worker, round 20) [V]
-POSIX 2.6.3: inside backticks `\\` → `\`, `\$` → `$`, `` \` `` → backtick (and `\"` inside double quotes). ``echo "[2 `echo \\ `]"`` →
-bash `[2  ]`, all legs `[2 \]`. ``echo "2 `echo \\(`"`` → bash `2 (`, all legs a parse error; `` `echo \ ` `` and `` `echo \\\\ ` ``
-fail to parse at EOF (bash `[1  ]` / `[3 \]`). Corpus: command-sub/017, 021, 022, 023, 024 (022 and 024 parsed in July).
-
-### T-935 bash: declaration builtins refuse a computed or quoted operand and `+attr` · P2 · SH · IN PROGRESS (SH worker, round 20) [V]
-`declare ${names[0]}='hello there'`, `readonly "$binding"`, `local "$1"`, `declare 'q=1'`, `typeset +x e=E2`, `declare +i n` →
-"Not everything could be parsed" in both halves; bash `foo=hello there`, `bar=7`, `x=y`, `q=1`, `e=E2`, `n=2+3`. 16 of the 19
-oils must-parse files lost since the July sweep are this (append/015, assign-extended/033 034 035 036, assign/017 032 035 038,
-builtin-printf/006 007, nameref/005, nix-idioms/005, tilde/003, type-compat/005 006).
-
-### T-936 bash: an `eval` / `trap` string that does not parse aborts the program; `${ cmd;}` · P2 · SH · IN PROGRESS (SH worker, round 20) [V finder only]
-`eval '# only a comment'` and `eval '   '` abort the interpreter (run and native are right); `trap '# comment' EXIT; echo done`
-fails to parse in both halves (bash `done`); a snippet with a real syntax error (`eval 'echo z ${(m)foo} z'`) must report "bad
-substitution", set status 1 and continue - ours aborts in both halves. Corpus: builtin-trap/015, zsh-idioms/003 (lost since July),
-assign-extended/021, var-ref/013. Also bash 5.3 function substitution `${ cmd;}` / `${| cmd;}` does not parse
-(command-sub-ksh/001, 004).
+### T-964 bash: `unset -f`, `command -V`, namerefs in the interpreter, `declare -p` of a computed export · P3 · SH · OPEN [V]
+Found by the SH worker, round 20 (oracle bash 5.3). `unset -f f` unsupported in both engines; `command -V echo` → bash "echo is a
+shell builtin", ours status 1; `declare -n r=v` unsupported in the interpreter (oils nameref/005); after `export "${d[@]}"`,
+`declare -p foo2` lacks -x (oils nix-idioms/005). Also: an error from `${!v}` with an invalid name prints "bash: z=9: invalid
+variable name" where bash prefixes "<file>: line N:".
 
 # C — C subset
 
@@ -1240,6 +1222,11 @@ T-905 go compiler: a store through a pointer to a complex struct field or slice 
 T-927 go: a struct type with a map of itself hangs every engine before main — DONE b47cdc69
 T-928 go: `*p` / `x.a` as the target of a select-case receive or a for-range assignment does not parse — DONE 9bea877a
 T-910 go and swift compilers accept `break` outside a loop; compile errors say "js runtime error:" — PARTIAL 22c1cfa6 (break/continue outside a loop rejected with gc's / swiftc's messages in all four halves; select break and labelled switch/select break fixed; undefined names are T-959)
+T-908 bash: the `builtin` and `command` builtins are missing — DONE e49058ad
+T-933 bash compiled: a computed `eval` silently does nothing; its assignment form keeps the comment — DONE a00efe29 (a computed eval of assignments is parsed with shell quoting; any other computed eval stops with a clear error, exit 2 - the compiled model cannot parse code at run time)
+T-934 bash: backslash removal inside backtick command substitution — DONE 999a7dd4
+T-936 bash: an `eval` / `trap` string that does not parse aborts the program; `${ cmd;}` — DONE 452ff4b5
+T-935 bash: declaration builtins refuse a computed or quoted operand and `+attr` — DONE 33691db2 (computed operands, +attr and declare -- in both engines; the compiler refuses a computed operand together with readonly or an attribute option at compile time, since attributes are compile-time there; also fixed set -u breaking every function call)
 
 # Settled — do not re-open
 
