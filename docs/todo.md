@@ -157,7 +157,7 @@ Follow-up of T-1000 (only correct-but-high counts remain, so `&` may survive a c
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-1017 bash: `read` without -r keeps backslashes; empty subscript `b[]` accepted; `declare NAME[SUB]` without a value refused; computed operand with an attribute option · P3 · SH · OPEN [V]
+### T-1017 bash: `read` without -r keeps backslashes; empty subscript `b[]` accepted; `declare NAME[SUB]` without a value refused; computed operand with an attribute option · P3 · SH · IN PROGRESS (SH worker, round 26) [V]
 Found by the SH worker, round 25 (oracle bash 5.3). `read v <<< 'z\y'; echo "[$v]"` → bash `[zy]`, ours `[z\y]` (all engines).
 `b=(1 2); b[]=x` → "b[]: bad array subscript", line abandoned; `local b[]=y` same, status 1; `printf -v 'b[]'` → "printf: `b[]': not a
 valid identifier" status 2; ours store into [0] or a scalar named "b[]". `declare c[1]` → bash status 0, `declare -p c` prints
