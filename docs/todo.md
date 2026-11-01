@@ -126,7 +126,7 @@ not modelled" error; the method group must convert to Comparison<string> (C# spe
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-1004 kotlin: string `<`/`>`, sorted, sortedDescending, maxOf, toSortedSet order by code point instead of UTF-16 · P3 · KT · OPEN [V]
+### T-1004 kotlin: string `<`/`>`, sorted, sortedDescending, maxOf, toSortedSet order by code point instead of UTF-16 · P3 · KT · IN PROGRESS (KT worker, round 14) [V]
 Found by the CORE worker, round 16 (oracle JVM). compareTo is right, but the operators and the sort/max family use code-point order in
 all three legs: strings starting with chars 97, 55357 (surrogate), 57344, 65377, 65535 sort ours `[97, 57344, 65377, 65535, 55357]`,
 JVM `[97, 55357, 57344, 65377, 65535]`. Route them through the UTF-16 comparison (str_cmp16).
