@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1028** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1030** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -64,13 +64,11 @@ its report; anything structural there is a CORE ticket.
 
 # PY — Python
 
-### T-1020 python: CJK/idna/punycode/escape codecs; dir() of a generator; new attribute on an iterator; python-test-full.5.py near the step brake · P3 · PY · IN PROGRESS (PY worker, round 20) [V]
-Found by the PY worker, round 19 (oracle python3 3.14). Still "unknown encoding": shift_jis, gbk, big5, euc_*, iso2022_*, cp932/949/950,
-hz, johab, gb18030 (large tables), raw_unicode_escape, idna, punycode (feasible); unicode_escape decode needs \N{name} (unsupported by
-design). `dir(g)` on a generator → NotImplementedError in interpreter and Go twin; python lists gi_running etc. `iter([1]).foo = 1` →
-python AttributeError "'list_iterator' object has no attribute 'foo' and no __dict__ ..."; interpreter and Go twin accept it.
-tests/python-test-full.5.py's -frozen leg is at 90M of the 100M brake: one `random.seed("é")` costs ~88M (SHA-512 + MT19937 seeding
-in languages/lib/python-random.py) - make the seeding cheaper.
+### T-1028 python: CJK multibyte codecs, `\N{...}` escapes, idna nameprep · P3 · PY · OPEN [V]
+Remainder of T-1020. Refused with NotImplementedError today: shift_jis, gbk, gb18030, big5, euc_jp/euc_kr, iso2022_*, cp932/949/950, hz, johab; the `\N{NAME}` escape in unicode_escape (needs the Unicode name DB); idna for labels needing nameprep (python3: `'bücher.de'.encode('idna')` → b'xn--bcher-kva.de', `b'xn--bcher-kva.de'.decode('idna')` → 'bücher.de'). unicode_escape decode should also emit CPython's DeprecationWarning on stderr for invalid escapes.
+
+### T-1029 python: range/reversed type identity; dotted codec names accepted · P3 · PY · OPEN [V]
+python3 3.14: `type(range(3)).__name__` → range, `type(iter(range(3))).__name__` → range_iterator, `type(reversed([1])).__name__` → list_reverseiterator. Ours: list, list_iterator, reversed. `"x".encode("unicode.escape")` → CPython LookupError: unknown encoding; ours accepts it ('.'→'_' normalisation). Found by PY r20.
 
 # RB — Ruby
 
@@ -1091,6 +1089,7 @@ T-1019 kotlin: toSortedSet(comparator) ignored; String range crashes llvm.Run; S
 T-1000 php: reference counts are never decremented (var_dump `&`, copy of an array holding a dead frame's reference) — PARTIAL→split (PHP r35, fb7351b2): refs released at normal frame exit, =& rebinding, ref-literal temporaries; var_dump & from refcount. Remainder filed as follow-up. Master spec probe (zend_array_dup_element rule): 3 legs agree.
 T-1016 java: overload resolution still counts inaccessible constructors (and probably methods) as candidates — DONE (JV r20, 2480267f): private/package-private/protected-for-new overloads and ctors dropped from static picks (JLS 6.6); pinned in java-test-multifile + imports/util/Gauge.java; master ran it under javac/java 24: passed. Runtime dispatcher (js_jvovcall) still context-blind when static types are unknown — no probe reached it.
 T-1022 c#: `ParamName` empty on runtime-thrown exceptions; unknown member of a BCL type fails late — DONE (CS r3, 9c4811dc): runtime throws set ParamName from the '(Parameter ..)' clause in all 3 engines; reading an unknown static member of Math/MathF/string/char/Enumerable fails at the read. Master spec probe: Substring(-1)/(1,5) ParamName, valid method groups Math.Abs/Sqrt/string.IsNullOrEmpty/Select(Math.Abs) all agree on 3 legs.
+T-1020 python: CJK/idna/punycode/escape codecs; dir() of a generator; new attribute on an iterator; python-test-full.5.py near the step brake — PARTIAL→split (PY r20, 4a64d854): generator dir(); no-__dict__ AttributeError for iterators; unicode_escape/raw_unicode_escape/punycode/ASCII idna codecs; random.seed bit ops 3x cheaper with identical sequences. Master probe vs python3 3.14 (7 seeds incl. bignum/neg/str/bytes, big & | ^ << >>, codecs, dir): 4 legs agree. CJK codecs, \N{}, idna nameprep remain.
 
 # Settled — do not re-open
 
