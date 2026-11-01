@@ -110,7 +110,7 @@ strings.TrimSpace, native strips ASCII 9-13 and 32: `int.Parse(" 1 2 ")` and `in
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-1089 kotlin: nested builtin receivers in scope functions; single-line when lambda typing · P3 · KT · OPEN [V]
+### T-1089 kotlin: nested builtin receivers in scope functions; single-line when lambda typing · P3 · KT · IN PROGRESS (KT worker, round 28) [V]
 Oracle kotlinc 2.2.21:
 - `StringBuilder().apply { with(listOf(1,2,3)) { append(size) } }` -> "3" appended (prints 3 / "31" in the worker's probe); interpreter "unknown list method: append", llvm.Run wrong value, native stops early. A builtin receiver claims every name in call position - needs a per-builtin-type member table so unknown names fall through to the outer receiver.
 - reified inference through a single-line when lambda: `listOf(1).map { when (it) { 1 -> "a" else -> "b" } }.elName()` (also with `;` separators) -> String; ours Any in all engines. The multi-line form already works.
