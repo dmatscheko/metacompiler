@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1024** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1025** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -122,11 +122,11 @@ Found by the CS worker, round 2 (.NET reference source). `try { char.ConvertFrom
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-1019 kotlin: toSortedSet(comparator) ignored; String range crashes llvm.Run; String coerceAtLeast/AtMost/In · P3 · KT · IN PROGRESS (KT worker, round 15) [V]
-Found by the KT worker, round 14 (oracle kotlinc 2.2.21). `xs.toSortedSet(reverseOrder())` → descending; ours ascending (all engines);
-toSortedSet() builds a plain set from the sorted list, not a TreeSet, so a later add() may not keep order. `("" .. "￿").contains(s)`
-and `s in "a".."z"` → llvm.Run only "js runtime error: range bound is not a number" (interpreter and native right). `"b".coerceAtLeast("c")`,
-coerceAtMost, coerceIn → "unknown String method" in all engines.
+### T-1024 · KT · OPEN · range type identity and function-spelled range builders
+`val a: Any = 1..5; a is ClosedRange<*>` / `a is OpenEndRange<*>` — kotlinc: true / true; ours (all three engines): false / false.
+`("a".."c")::class.simpleName` — kotlinc `ComparableRange`; ours `null`.
+`"a".rangeTo("c")` / `"a".rangeUntil("c")` — kotlinc `a..c` / `a..<c`; ours aborts.
+Repro: scratchpad KT15/p5.kt (from KT r15). Oracle: kotlinc 2.2.21.
 
 # GO — Go  (oracle: `go run`)
 
@@ -1096,6 +1096,7 @@ T-1005 python: generator `gi_running` — DONE - gi_running in all engines, read
 T-1003 go: a promoted method used as a method-expression value — DONE - promoted methods (incl. via embedded defined non-struct types) as method-expression values and on expression receivers, all three engines
 T-1014 c#: 5-arg `CompareOrdinal`, method group → `Comparison<string>`, `CompareTo` on strings, `char.ConvertFromUtf32` — DONE - 5-arg CompareOrdinal with .NET's range checks, BCL static method groups as delegates, String.CompareTo refused as culture collation, char.ConvertFromUtf32
 T-1021 go: interface dispatch to a method promoted from a defined non-struct type; `%T` of a method expression — DONE - methods promoted from embedded defined non-struct types join the struct's descriptor (interface dispatch, promoted String), %T of method expressions
+T-1019 kotlin: toSortedSet(comparator) ignored; String range crashes llvm.Run; String coerceAtLeast/AtMost/In — DONE (KT r15, a18ed20e): TreeSet for toSortedSet(cmp)/sortedSetOf(cmp,..)/TreeSet ctor; ComparableRange/OpenEndRange values; String+Comparable coerceAtLeast/AtMost/In; user operator rangeTo/rangeUntil. Master probe vs kotlinc 2.2.21: 4 legs agree.
 
 # Settled — do not re-open
 
