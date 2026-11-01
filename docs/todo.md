@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1066** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1067** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -107,13 +107,12 @@ Spec-only. makeIncDec's field path reads/writes the raw slot instead of dispatch
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-1062 kotlin: javaClass/KClass leftovers (sequences, static-typed primitives, equality, reified) · P3 · KT · IN PROGRESS (KT worker, round 22) [V]
-Oracle kotlinc 2.2.21; all three engines differ:
-- `generateSequence(1){it+1}.javaClass.name` aborts (javaClass of a sequence is null); oracle kotlin.sequences.GeneratorSequence. At least must not abort.
-- `5.javaClass.name` is `int` in the oracle (static type Int), ours java.lang.Integer; `(5 as Any).javaClass.name` stays java.lang.Integer.
-- `E.A.javaClass == E::class.java` and `P(1).javaClass == P::class.java` are true in the oracle, false here (top-level KClass carries no jname).
-- `inline fun <reified T: Any> nm() = T::class.simpleName; nm<C>()` prints C, ours T.
-- `UInt::class.java.name` = kotlin.UInt, `Unit::class.java.name` = kotlin.Unit; ours bare UInt / Unit.
+### T-1066 kotlin: static-type javaClass for computed receivers; reified primitives / inference · P3 · KT · OPEN [V]
+Oracle kotlinc 2.2.21; all engines differ:
+- `inline fun <reified T: Any> jn() = T::class.java.name; jn<Int>()` -> java.lang.Integer (reified primitive .java is the wrapper); ours int.
+- static type Int but not a literal/declared name -> oracle `int`, ours java.lang.Integer: for-loop var (`for (i in 0..1) i.javaClass`), inline-lambda `it` (`listOf(1).forEach { it.javaClass }`), `(x + 1).javaClass`, `f().javaClass` with `fun f(): Int`, `Q(1).v.javaClass`.
+- reified T inferred without type args: `inline fun <reified T: Any> inf(x: T) = T::class.simpleName; inf(5)` -> Int, ours Any (compiler passes "Any"; interpreter reads the nearest pushed type-arg entry, so a nested arg-less call sees the outer call's args - same for reified `is T`).
+- anonymous class: `s::class.simpleName` null in oracle, ours "" (KClass and Class conflated; `javaClass.simpleName` must stay "").
 
 # GO — Go  (oracle: `go run`)
 
@@ -1130,6 +1129,7 @@ T-1056 kotlin: member call vs receiver-lambda param name clash; companion/enum-e
 T-1060 php: Generator::throw() on a running generator — DONE (PHP r40, tests only): premise outdated - since php-src 6fa8a25a (GH-19326, PHP 8.3.25) throw() into a running generator raises only 'Cannot resume an already running generator' with no previous and discards the user exception; all engines already did this; pinned grun3-5 + oac3
 T-1052 ruby: Array </>/<=/>= should be NoMethodError; blockless/lazy Enumerators over a user #each run eagerly — PARTIAL→split (RB r44, 6febb1a8): < > <= >= dispatch as methods (NoMethodError on Array/nil/Range/..., user #<, Comparable required, Hash subset, Module ordering); blockless Enumerator over user #each deferred, Lazy over user #each stops early (first/take); 3 legs = ruby 2.6 modulo known did_you_mean/address simplifications; external next/peek remainder filed
 T-1061 csharp: base property writes; System.Type ToString; typeof namespace — DONE (CS r10, 31d2be99): base.K =/+=/++ call the base setter non-virtually; System.Type prints its FullName; typeof is namespace/outer-qualified (Demo.Outer+Inner), keyword types map to System.*; 3 legs agree with spec (probe: 31/3211 setter chain)
+T-1062 kotlin: javaClass/KClass leftovers (sequences, static-typed primitives, equality, reified) — PARTIAL→split (KT r22, 38b24c15): javaClass by static type for literals/declared names, KClass==java class equality, reified T::class (incl. forwarding; fixed 'T:Any' bound-in-name bug), kotlin.UInt/Unit/[I/java.util.* java names, lazy sequence{} chain classes; 4 legs = kotlinc. generateSequence class needs real lazy generators (subset limit, declined)
 
 # Settled — do not re-open
 
