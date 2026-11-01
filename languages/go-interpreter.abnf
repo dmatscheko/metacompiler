@@ -573,7 +573,7 @@ AssertType  <~~ push({at: goAssertTyC(goWalkQual(firstType(up.in)))}) ~~>
 MapOk       <~~ push(makeMapOk(goMapOkC(takeAll()))) ~~>
             = Id <~~ push(cPoisonName(up.in)) ~~> "," Id <~~ push(cPoisonName(up.in)) ~~>
               ( ":=" <~~ push({decl: true}) ~~> | "=" <~~ push({decl: false}) ~~> )
-              MapBase "[" IdxE "]" NotComma ;
+              MapBase "[" LitOn [ IdxE ] LitOff "]" NotComma ;
 // The map being indexed is a whole postfix expression MINUS its final index, so
 // 'v, ok := st.mp["a"]' and 'v, ok := outer[a][b]' reach MapOk rather than ShortDecl
 // (which would destructure the ONE value it finds). An IndexSfx is taken here only
@@ -651,7 +651,7 @@ TgtParen    <~~ push(makeTargetRef(takeAll())) ~~>
               { "." Id <~~ push({key: up.in}) ~~> | TIndex } ;
 TgtCore     = { "*" <~~ push({star: true}) ~~> } Id <~~ push(cAssignName(up.in)) ~~> ;
 TIndex      <~~ var tkm = pop(); push({idx: pop(), ksty: tkm.ksty, kk: tkm.kr}) ~~>
-            = "[" IdxE "]" ;
+            = "[" LitOn [ IdxE ] LitOff "]" ;
 // An index or map key reports its static type after it (goKeyBoxTy), and its
 // goKRec record (goIdxCheck).
 IdxE        <~~ var ie = pop(); push(ie); push({ksty: stAt(up.pos), kr: goKRec(up.start, up.pos)}) ~~> = Expression ;
@@ -666,7 +666,7 @@ Empty       <~~ push(function() {}) ~~>
 // Go style headers without parentheses. Composite literals are gated off inside.
 // 'if init; cond { }': the init statement is scoped to the whole if/else chain.
 If          <~~ push(makeIfG(takeAll())) ~~>
-            = "if" KwEnd CondOn [ InitAhead FInit ";" ] Expression CondOff Block [ "else" KwEnd ( If | Block ) ] ;
+            = "if" KwEnd CondOn [ ";" | InitAhead FInit ";" ] Expression CondOff Block [ "else" KwEnd ( If | Block ) ] ;
 
 // ForCond is tried before ForClassic: a classic header would leave the
 // composite literal gate pushed when it fails at its first semicolon.
@@ -690,7 +690,7 @@ ForClassic  <~~ push(makeForClassic(takeAll())); goBrClaim(up.start, up.pos, tru
 FInit       <~~ push({k:"init", t:pop(), names: takeDeclNames()}) ~~> = SimpleStmt2 ;
 FCond       <~~ push({k:"cond", t:pop()}) ~~> = Expression ;
 FPost       <~~ push({k:"post", t:pop()}) ~~> = SimpleStmt2 ;
-SimpleStmt2 = AssertOk | RecvOk | MapOk | ShortDecl | IncDecStmt | Assign | ExprOnly ;
+SimpleStmt2 = AssertOk | RecvOk | MapOk | ShortDecl | IncDecStmt | Assign | ChanSend | ExprOnly ;
 ForCond     <~~ push(makeWhileG(takeAll())); goBrClaim(up.start, up.pos, true) ~~>
             = "for" KwEnd NotSemi <~~ push({lbl: takeLabel()}) ~~> CondOn Expression CondOff Block ;
 // `for ; cond; post` is a classic header with an empty init: CondOn must not be
@@ -705,7 +705,7 @@ Switch      = TypeSwitch | ValueSwitch ;
 // subject's value inside the matching case body. Tried before the value switch so
 // its subject's '.(type)' is not mistaken for a value plus a type assertion.
 TypeSwitch  <~~ push(goSwLblC(makeTypeSwitch(takeAll()), goSwLblAt(up.start))); cSwExit(); goBrClaim(up.start, up.pos, false) ~~>
-            = "switch" <~~ goSwLbl(up.start) ~~> KwEnd TypeSwAhead [ InitAhead FInit ";" ] [ Id <~~ push({tsname: cTsName(cPoisonName(up.in))}) ~~> ":=" ]
+            = "switch" <~~ goSwLbl(up.start) ~~> KwEnd TypeSwAhead [ ";" | InitAhead FInit ";" ] [ Id <~~ push({tsname: cTsName(cPoisonName(up.in))}) ~~> ":=" ]
               CondOn AssertBase CondOff "." "(" "type" KwEnd ")"
               "{" CSwOn { TypeCase | Statement } "}" ;
 TypeCase    <~~ push(makeTypeCase(cTsCase(takeAll()))) ~~>
@@ -718,7 +718,7 @@ CaseType    <~~ push({ct: goAssertTyC(goWalkQual(goLtyRw(up.in)))}) ~~>
 // its Expression on the '{', leaking the marker (pushes are not rolled back) and
 // blocking every later composite literal.
 ValueSwitch <~~ push(goSwLblC(makeSwitch(goSwBoxC(takeAll())), goSwLblAt(up.start))); cSwExit(); goBrClaim(up.start, up.pos, false) ~~>
-            = "switch" <~~ goSwLbl(up.start) ~~> KwEnd [ InitAhead FInit ";" ]
+            = "switch" <~~ goSwLbl(up.start) ~~> KwEnd [ ";" | InitAhead FInit ";" ]
               ( "{" CSwOn { CaseLabel | Statement } "}"
               | SwitchSubj "{" CSwOn { CaseLabel | Statement } "}" ) ;
 SwitchSubj  = CondOn SwSubjE CondOff ;
@@ -933,7 +933,7 @@ TypeArgsKw   = "[" NonExprT "]" ;
 NonExprT     = "[" "]" Type | ArrayTypeT | MapTypeT | FuncTypeT | ChanTypeT | IfaceTypeT | StructTypeT ;
 // `x := w.f` followed by a line that opens with '(' is two statements (SameLine).
 MethodSfx   <~~ push(makeMethodSfx(popName(), takeAll(), up.start)) ~~>
-            = "." Id <~~ push({mname: up.in}) ~~> SameLine "(" [ ArgExpr { "," ArgExpr } [ Spread ] [ "," ] ] ")" ;
+            = "." Id <~~ push({mname: up.in}) ~~> SameLine "(" LitOn [ ArgExpr { "," ArgExpr } [ Spread ] [ "," ] ] LitOff ")" ;
 FieldSfx    <~~ push({kind: "field", name: pop().fname, at: up.start, rc: null, dt: null, dtk: false, me: "", pkg: curPkgName}) ~~>
             = "." Id <~~ push({fname: up.in}) ~~> ;
 SliceSfx    <~~ push(makeSliceSfx(takeAll(), up.start)) ~~>
@@ -941,9 +941,9 @@ SliceSfx    <~~ push(makeSliceSfx(takeAll(), up.start)) ~~>
               [ Expression <~~ push({hi: pop(), sk: goKRec(up.start, up.pos)}) ~~> ]
               [ ":" Expression <~~ push({mx: pop(), sk: goKRec(up.start, up.pos)}) ~~> ] "]" ;
 IndexSfx    <~~ var ikm = pop(); push({kind:"index", idx: pop(), ksty: ikm.ksty, kk: ikm.kr, at: up.start, rc: null}) ~~>
-            = "[" IdxE "]" ;
+            = "[" LitOn [ IdxE ] LitOff "]" ;
 CallSfx     <~~ push(makeCallSfx(takeAll())) ~~>
-            = "(" [ ArgExpr { "," ArgExpr } [ Spread ] [ "," ] ] ")" ;
+            = "(" LitOn [ ArgExpr { "," ArgExpr } [ Spread ] [ "," ] ] LitOff ")" ;
 Spread      <~~ push({spread: true}) ~~> = "..." ;
 // x.(T): a type assertion. The value is unchanged - a successful assertion yields
 // the same underlying value - but it is CHECKED, and a value that does not hold the
@@ -1193,7 +1193,7 @@ NewType     <~~ push({nty: firstType(up.in)}) ~~>
 Call        <~~ var ci = goAppendC(takeAll(), up.in); var csp = goSplitArgs(ci.slice(1))
                 var icv = goIfaceConvC(ci)
                 push(icv != null ? icv : makeCall(goCallBoxC(ci), csp.atys, goTpInfer(ci[0], csp, []))); goLenConstC(ci, up.start, up.pos) ~~>
-            = Id <~~ push(goLtyName(up.in)) ~~> "(" [ ArgExpr { "," ArgExpr } [ Spread ] [ "," ] ] ")" ;
+            = Id <~~ push(goLtyName(up.in)) ~~> "(" LitOn [ ArgExpr { "," ArgExpr } [ Spread ] [ "," ] ] LitOff ")" ;
 // A call argument reports its static type after it, for goSplitArgs.
 ArgExpr     <~~ var ae = pop(); push(goRuneDefC(ae, up.pos)); push({aty: stAt(up.pos), kr: goKRec(up.start, up.pos), pu: goPure(up.start, up.pos), nl: goNilSrc(up.start, up.pos)}) ~~> = Expression ;
 // A returned value, which takes a rune constant at the RESULT's type (makeReturn).
@@ -1295,7 +1295,23 @@ InitAhead = :script(~~
             if (cc === 40 || cc === 91) { depth++ }
             if (cc === 41 || cc === 93) { depth-- }
             if (depth === 0 && cc === 59) { return undefined }
-            if (depth === 0 && (cc === 123 || cc === 125)) { break }
+            if (depth === 0 && cc === 125) { break }
+            if (depth === 0 && cc === 123) {
+                // This '{' opens the body unless the header goes on after its '}' on the
+                // same line: `interface{}(x)`, `[]T{{1}}; ok`, `func() {}()`.
+                var j = i + 1
+                var bd = 1
+                while (j < 8192 && bd > 0 && c.peek(j) >= 0) {
+                    if (c.peek(j) === 123) { bd++ }
+                    if (c.peek(j) === 125) { bd-- }
+                    j++
+                }
+                while (c.peek(j) === 32 || c.peek(j) === 9) { j++ }
+                var nx = c.peek(j)
+                if (bd > 0 || nx < 0 || nx === 10 || nx === 13 || nx === 125 || nx === 47 || (nx === 101 && c.peek(j + 1) === 108)) { break }
+                i = j
+                continue
+            }
             i++
         }
         return abnf.newToken("\x01no-header-init", 0)
@@ -1337,7 +1353,23 @@ TypeSwAhead = :script(~~
             }
             if (cc === 40 || cc === 91) { depth++ }
             if (cc === 41 || cc === 93) { depth-- }
-            if (depth === 0 && (cc === 123 || cc === 125)) { break }
+            if (depth === 0 && cc === 125) { break }
+            if (depth === 0 && cc === 123) {
+                // This '{' opens the body unless the header goes on after its '}' on the
+                // same line: `interface{}(x)`, `[]T{{1}}; ok`, `func() {}()`.
+                var j = i + 1
+                var bd = 1
+                while (j < 8192 && bd > 0 && c.peek(j) >= 0) {
+                    if (c.peek(j) === 123) { bd++ }
+                    if (c.peek(j) === 125) { bd-- }
+                    j++
+                }
+                while (c.peek(j) === 32 || c.peek(j) === 9) { j++ }
+                var nx = c.peek(j)
+                if (bd > 0 || nx < 0 || nx === 10 || nx === 13 || nx === 125 || nx === 47 || (nx === 101 && c.peek(j + 1) === 108)) { break }
+                i = j
+                continue
+            }
             i++
         }
         return abnf.newToken("\x01not-a-type-switch", 0)

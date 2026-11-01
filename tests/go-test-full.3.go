@@ -1637,6 +1637,86 @@ func s138() {
 	check("seleval138", cnt == 2 && <-a1 == 1)
 }
 
+// ===== SECTION 139: empty and call init statements; literals inside a header =====
+// An if, switch or type switch header may have an EMPTY init statement (`if ;
+// cond`), and any simple statement - a call, a send - is an init or a for post.
+// Only a bare `T{...}` is barred from a header: inside an index, a call's
+// arguments or after a slice or map type it is an ordinary literal, and so is
+// the `{}` of `interface{}(x)`. The expected values are go run's.
+type T139 struct{ a int }
+
+func s139f(t T139) int { return t.a }
+
+func s139log(log *string, s string) func(string) {
+	return func(t string) { *log += s + t }
+}
+
+func s139() {
+	got := ""
+	if ; false {
+		got += "x"
+	}
+	if ; true {
+		got += "a"
+	}
+	switch ; {
+	case true:
+		got += "b"
+	}
+	n := 3
+	switch ; n {
+	case 3:
+		got += "c"
+	}
+	var v interface{} = "s"
+	switch ; v.(type) {
+	case string:
+		got += "d"
+	}
+	switch w := v; u := w.(type) {
+	case string:
+		got += u
+	}
+	if s139log(&got, "1")("2"); n > 2 {
+		got += "e"
+	}
+	check("init139", got == "abcds12e")
+	c := make(chan bool, 1)
+	for ; false; c <- false {
+	}
+	k := 0
+	c <- true
+	for i := 0; i < 3; c <- true {
+		<-c
+		k++
+		i++
+	}
+	check("post139", k == 3 && len(c) == 1)
+	m := map[T139][]int{T139{}: {1}, T139{1}: {2}}
+	hdr := ""
+	if x, y := m[T139{}][0], m[T139{1}][0]; x == 1 && y == 2 {
+		hdr += "i"
+	}
+	if s139f(T139{3}) == 3 {
+		hdr += "f"
+	}
+	for j := 0; j < s139f(T139{2}); j++ {
+		hdr += "l"
+	}
+	if s := []T139{{5}}; s[0].a == 5 {
+		hdr += "s"
+	}
+	switch x := interface{}(nil).(type) {
+	case nil:
+		hdr += fmt.Sprint(x)
+	}
+	switch y := interface{}(7).(type) {
+	case int:
+		hdr += fmt.Sprint(y)
+	}
+	check("lit139", hdr == "iflls<nil>7")
+}
+
 func main() {
 	s94()   // SECTION-CALL 94
 	s95()   // SECTION-CALL 95
@@ -1681,6 +1761,7 @@ func main() {
 	s136f() // SECTION-CALL 136
 	s137()  // SECTION-CALL 137
 	s138()  // SECTION-CALL 138
+	s139()  // SECTION-CALL 139
 	fmt.Println("full:", checks, "checks,", fails, "failures")
 	os.Exit(fails)
 }
