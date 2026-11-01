@@ -4268,7 +4268,7 @@ function js_ktstr(v) { return ktRender(v) }
 // Owned and defined here:
 //     ktSeqMethod(arr, name, args)    ktSetMethod(s, name, args)
 //     ktMapMethod(m, name, args)      ktEnumMethod(recv, name, args)
-//     ktSortBy(es, sel, desc)         ktSumOf(es, f)
+//     ktSortBy(es, sel, desc)         ktSumOf(es, f, ck)
 //     js_ktiter(v)                    the only exported extern in this section
 // Private helpers all carry the k3 prefix.
 //
@@ -4513,7 +4513,7 @@ function ktSortBy(es, sel, desc) {
 
 // ktSumOf is jsrtkotlin.go:4448 -- Kotlin's sumOf/sum at the WIDTH of what it is
 // summing: a Long selector sums to a Long and a Double selector to a Double.
-function ktSumOf(es, f) {
+function ktSumOf(es, f, ck) {
     var isFlo = false
     var isLong = false
     var vals = []
@@ -4525,7 +4525,7 @@ function ktSumOf(es, f) {
     if (f === null) { hasF = false }
     if (f === undefined) { hasF = false }
     var allF32 = es.length > 0
-    for (i = 0; i < es.length; i = i + 1) {
+    for (i = 0; k4IterMore(ck, es, i); i = i + 1) {
         v = es[i]
         if (hasF) { v = ktCall1(f, es[i]) }
         vals.push(v)
@@ -4630,6 +4630,10 @@ function ktSeqMethodK(arr, name, args, kind) {
     var mp = anytype
     var t = 0
     var s = ""
+    // A member taking a lambda runs the receiver's iterator, which fails fast
+    // when the lambda changes the collection (k4IterMore / k4IterPrev).
+    var ck = anytype
+    if (ktIsFn(f) || ktIsFn(ktArg(args, 1))) { ck = k4IterStart(es, kind) } else { ck = undefined }
     var b = false
     var b2 = false
     var d = false
@@ -4646,33 +4650,30 @@ function ktSeqMethodK(arr, name, args, kind) {
         lc["arr"] = arr
         return lc
     }
-    // map, forEach and forEachIndexed run the list's iterator (k4IterMore).
     if (name == "map") {
-        mp = k4IterStart(es, kind)
-        for (i = 0; k4IterMore(mp, es, i); i = i + 1) { out.push(ktCall1(f, es[i])) }
+        for (i = 0; k4IterMore(ck, es, i); i = i + 1) { out.push(ktCall1(f, es[i])) }
         return out
     }
     if (name == "filter") {
-        for (i = 0; i < es.length; i = i + 1) {
+        for (i = 0; k4IterMore(ck, es, i); i = i + 1) {
             if (k3Truthy(ktCall1(f, es[i]))) { out.push(es[i]) }
         }
         return out
     }
     if (name == "forEach") {
-        mp = k4IterStart(es, kind)
-        for (i = 0; k4IterMore(mp, es, i); i = i + 1) { ktCall1(f, es[i]) }
+        for (i = 0; k4IterMore(ck, es, i); i = i + 1) { ktCall1(f, es[i]) }
         return undefined
     }
     if (name == "count") {
         if (args.length == 0) { return es.length }
         n = 0
-        for (i = 0; i < es.length; i = i + 1) {
+        for (i = 0; k4IterMore(ck, es, i); i = i + 1) {
             if (k3Truthy(ktCall1(f, es[i]))) { n = n + 1 }
         }
         return n
     }
     if (name == "any") {
-        for (i = 0; i < es.length; i = i + 1) {
+        for (i = 0; k4IterMore(ck, es, i); i = i + 1) {
             if (k3Truthy(ktCall1(f, es[i]))) { return true }
         }
         return false
@@ -4692,7 +4693,7 @@ function ktSeqMethodK(arr, name, args, kind) {
     if (name == "first") {
         if (args.length == 1) {
             if (ktIsFn(f)) {
-                for (i = 0; i < es.length; i = i + 1) {
+                for (i = 0; k4IterMore(ck, es, i); i = i + 1) {
                     if (k3Truthy(ktCall1(f, es[i]))) { return es[i] }
                 }
                 ktNoMatch(ktPredWord(kind))
@@ -4706,9 +4707,8 @@ function ktSeqMethodK(arr, name, args, kind) {
         // `listOf(1,2,3,4).last { it < 3 }` is 2.
         if (args.length == 1) {
             if (ktIsFn(f)) {
-                for (i = es.length - 1; i >= 0; i = i - 1) {
-                    if (k3Truthy(ktCall1(f, es[i]))) { return es[i] }
-                }
+                mp = k4LastBy(es, f, ck, kind)
+                if (mp !== null) { return mp["v"] }
                 ktNoMatch(kind)
             }
         }
@@ -4720,7 +4720,7 @@ function ktSeqMethodK(arr, name, args, kind) {
             if (ktIsFn(f)) {
                 best = undefined
                 n = 0
-                for (i = 0; i < es.length; i = i + 1) {
+                for (i = 0; k4IterMore(ck, es, i); i = i + 1) {
                     if (k3Truthy(ktCall1(f, es[i]))) {
                         best = es[i]
                         n = n + 1
@@ -4740,7 +4740,7 @@ function ktSeqMethodK(arr, name, args, kind) {
     if (name == "singleOrNull") {
         best = null
         n = 0
-        for (i = 0; i < es.length; i = i + 1) {
+        for (i = 0; k4IterMore(ck, es, i); i = i + 1) {
             if (args.length == 0 || k3Truthy(ktCall1(f, es[i]))) {
                 best = es[i]
                 n = n + 1
@@ -4752,7 +4752,7 @@ function ktSeqMethodK(arr, name, args, kind) {
     if (name == "firstOrNull") {
         if (args.length == 1) {
             if (ktIsFn(f)) {
-                for (i = 0; i < es.length; i = i + 1) {
+                for (i = 0; k4IterMore(ck, es, i); i = i + 1) {
                     if (k3Truthy(ktCall1(f, es[i]))) { return es[i] }
                 }
                 return null
@@ -4767,9 +4767,8 @@ function ktSeqMethodK(arr, name, args, kind) {
     if (name == "lastOrNull") {
         if (args.length == 1) {
             if (ktIsFn(f)) {
-                for (i = es.length - 1; i >= 0; i = i - 1) {
-                    if (k3Truthy(ktCall1(f, es[i]))) { return es[i] }
-                }
+                mp = k4LastBy(es, f, ck, kind)
+                if (mp !== null) { return mp["v"] }
                 return null
             }
         }
@@ -4777,26 +4776,26 @@ function ktSeqMethodK(arr, name, args, kind) {
         return es[es.length - 1]
     }
     if (name == "find") {
-        for (i = 0; i < es.length; i = i + 1) {
+        for (i = 0; k4IterMore(ck, es, i); i = i + 1) {
             if (k3Truthy(ktCall1(f, es[i]))) { return es[i] }
         }
         return null
     }
     if (name == "all") {
-        for (i = 0; i < es.length; i = i + 1) {
+        for (i = 0; k4IterMore(ck, es, i); i = i + 1) {
             if (!k3Truthy(ktCall1(f, es[i]))) { return false }
         }
         return true
     }
     if (name == "none") {
         if (args.length == 0) { return es.length == 0 }
-        for (i = 0; i < es.length; i = i + 1) {
+        for (i = 0; k4IterMore(ck, es, i); i = i + 1) {
             if (k3Truthy(ktCall1(f, es[i]))) { return false }
         }
         return true
     }
     if (name == "indexOfFirst") {
-        for (i = 0; i < es.length; i = i + 1) {
+        for (i = 0; k4IterMore(ck, es, i); i = i + 1) {
             if (k3Truthy(ktCall1(f, es[i]))) { return i }
         }
         return -1
@@ -4804,14 +4803,14 @@ function ktSeqMethodK(arr, name, args, kind) {
     // The Indexed forms pass the element's index first.
     if (name == "fold" || name == "foldIndexed") {
         acc = ktArg(args, 0)
-        for (i = 0; i < es.length; i = i + 1) {
+        for (i = 0; k4IterMore(ck, es, i); i = i + 1) {
             if (name == "fold") { acc = ktCall2(ktArg(args, 1), acc, es[i]) } else { acc = ktCall(ktArg(args, 1), [i, acc, es[i]]) }
         }
         return acc
     }
     if (name == "foldRight" || name == "foldRightIndexed") {
         acc = ktArg(args, 0)
-        for (i = es.length - 1; i >= 0; i = i - 1) {
+        for (i = es.length - 1; k4IterPrev(ck, i); i = i - 1) {
             if (name == "foldRight") { acc = ktCall2(ktArg(args, 1), es[i], acc) } else { acc = ktCall(ktArg(args, 1), [i, es[i], acc]) }
         }
         return acc
@@ -4823,7 +4822,7 @@ function ktSeqMethodK(arr, name, args, kind) {
             ktRaise("UnsupportedOperationException", "Empty " + ktRedWord(kind, false) + " can't be reduced.")
         }
         acc = es[0]
-        for (i = 1; i < es.length; i = i + 1) {
+        for (i = 1; k4IterMore(ck, es, i); i = i + 1) {
             if (name == "reduce" || name == "reduceOrNull") { acc = ktCall2(f, acc, es[i]) }
             else { acc = ktCall(f, [i, acc, es[i]]) }
         }
@@ -4838,14 +4837,14 @@ function ktSeqMethodK(arr, name, args, kind) {
             ktRaise("UnsupportedOperationException", "Empty " + ktRedWord(kind, true) + " can't be reduced.")
         }
         acc = es[es.length - 1]
-        for (i = es.length - 2; i >= 0; i = i - 1) {
+        for (i = es.length - 2; k4IterPrev(ck, i); i = i - 1) {
             if (name == "reduceRight" || name == "reduceRightOrNull") { acc = ktCall2(f, es[i], acc) }
             else { acc = ktCall(f, [i, es[i], acc]) }
         }
         return acc
     }
-    if (name == "sumOf") { return ktSumOf(es, f) }
-    if (name == "sum") { return ktSumOf(es, null) }
+    if (name == "sumOf") { return ktSumOf(es, f, ck) }
+    if (name == "sum") { return ktSumOf(es, null, undefined) }
     if (name == "average") {
         if (es.length == 0) { return flo(NaN, 0) }
         t = 0
@@ -4853,7 +4852,7 @@ function ktSeqMethodK(arr, name, args, kind) {
         return flo(t / es.length, 0)
     }
     if (name == "flatMap") {
-        for (i = 0; i < es.length; i = i + 1) {
+        for (i = 0; k4IterMore(ck, es, i); i = i + 1) {
             oth = ktElems(ktCall1(f, es[i]))
             for (j = 0; j < oth.length; j = j + 1) { out.push(oth[j]) }
         }
@@ -4867,37 +4866,36 @@ function ktSeqMethodK(arr, name, args, kind) {
         return out
     }
     if (name == "mapIndexed") {
-        for (i = 0; i < es.length; i = i + 1) { out.push(ktCall2(f, i, es[i])) }
+        for (i = 0; k4IterMore(ck, es, i); i = i + 1) { out.push(ktCall2(f, i, es[i])) }
         return out
     }
     if (name == "mapIndexedNotNull") {
-        for (i = 0; i < es.length; i = i + 1) {
+        for (i = 0; k4IterMore(ck, es, i); i = i + 1) {
             v = ktCall2(f, i, es[i])
             if (!rtIsNil(v)) { out.push(v) }
         }
         return out
     }
     if (name == "mapNotNull") {
-        for (i = 0; i < es.length; i = i + 1) {
+        for (i = 0; k4IterMore(ck, es, i); i = i + 1) {
             v = ktCall1(f, es[i])
             if (v !== null) { out.push(v) }
         }
         return out
     }
     if (name == "forEachIndexed") {
-        mp = k4IterStart(es, kind)
-        for (i = 0; k4IterMore(mp, es, i); i = i + 1) { ktCall2(f, i, es[i]) }
+        for (i = 0; k4IterMore(ck, es, i); i = i + 1) { ktCall2(f, i, es[i]) }
         return undefined
     }
     if (name == "filterNot") {
-        for (i = 0; i < es.length; i = i + 1) {
+        for (i = 0; k4IterMore(ck, es, i); i = i + 1) {
             if (!k3Truthy(ktCall1(f, es[i]))) { out.push(es[i]) }
         }
         return out
     }
     if (name == "partition") {
         oth = []
-        for (i = 0; i < es.length; i = i + 1) {
+        for (i = 0; k4IterMore(ck, es, i); i = i + 1) {
             if (k3Truthy(ktCall1(f, es[i]))) { out.push(es[i]) } else { oth.push(es[i]) }
         }
         return {first: out, second: oth}
@@ -5014,11 +5012,11 @@ function ktSeqMethodK(arr, name, args, kind) {
     }
     if (name == "maxByOrNull") {
         if (es.length == 0) { return null }
-        return ktSortBy(es, f, true)[0]
+        return k4BestBy(es, f, true, ck)
     }
     if (name == "minByOrNull") {
         if (es.length == 0) { return null }
-        return ktSortBy(es, f, false)[0]
+        return k4BestBy(es, f, false, ck)
     }
     if (k3IsTakeDrop(name)) {
         k = k3Int(ktArg(args, 0))
@@ -5057,7 +5055,7 @@ function ktSeqMethodK(arr, name, args, kind) {
     }
     if (name == "groupBy") {
         mp = ktMakeMap()
-        for (i = 0; i < es.length; i = i + 1) {
+        for (i = 0; k4IterMore(ck, es, i); i = i + 1) {
             v = ktCall1(f, es[i])
             j = ktMapFind(ktMapKeys(mp), v)
             if (j < 0) { ktMapPut(mp, v, [k3ValueOf(args, es[i])]) }
@@ -5067,7 +5065,7 @@ function ktSeqMethodK(arr, name, args, kind) {
     }
     if (name == "associate") {
         mp = ktMakeMap()
-        for (i = 0; i < es.length; i = i + 1) {
+        for (i = 0; k4IterMore(ck, es, i); i = i + 1) {
             v = ktCall1(f, es[i])
             if (!ktIsPair(v)) { fail("associate() needs a Pair") }
             ktMapPut(mp, v["first"], v["second"])
@@ -5076,12 +5074,12 @@ function ktSeqMethodK(arr, name, args, kind) {
     }
     if (name == "associateWith") {
         mp = ktMakeMap()
-        for (i = 0; i < es.length; i = i + 1) { ktMapPut(mp, es[i], ktCall1(f, es[i])) }
+        for (i = 0; k4IterMore(ck, es, i); i = i + 1) { ktMapPut(mp, es[i], ktCall1(f, es[i])) }
         return mp
     }
     if (name == "associateBy") {
         mp = ktMakeMap()
-        for (i = 0; i < es.length; i = i + 1) { ktMapPut(mp, ktCall1(f, es[i]), k3ValueOf(args, es[i])) }
+        for (i = 0; k4IterMore(ck, es, i); i = i + 1) { ktMapPut(mp, ktCall1(f, es[i]), k3ValueOf(args, es[i])) }
         return mp
     }
     if (name == "toMap") {
@@ -5111,7 +5109,7 @@ function ktSeqMethodK(arr, name, args, kind) {
                 else if (i == 4) { trunc = k3StrArg(args[i]) }
             }
         }
-        for (i = 0; i < es.length; i = i + 1) {
+        for (i = 0; k4IterMore(ck, es, i); i = i + 1) {
             if (i > 0) { body = body + s }
             if (n >= 0 && i >= n) {
                 body = body + trunc
@@ -5165,12 +5163,11 @@ function ktSeqMethodK(arr, name, args, kind) {
     }
     if (name == "filterNotNull") { return k3FilterNotNull(es, false) }
     if (name == "requireNoNulls") { return k3FilterNotNull(es, true) }
-    if (name == "filterIndexed") { return k3FilterIndexed(es, f, false) }
-    if (name == "filterNotIndexed") { return k3FilterIndexed(es, f, true) }
+    if (name == "filterIndexed") { return k3FilterIndexed(es, f, false, ck) }
+    if (name == "filterNotIndexed") { return k3FilterIndexed(es, f, true, ck) }
     if (name == "findLast") {
-        for (i = es.length - 1; i >= 0; i = i - 1) {
-            if (k3Truthy(ktCall1(f, es[i]))) { return es[i] }
-        }
+        mp = k4LastBy(es, f, ck, kind)
+        if (mp !== null) { return mp["v"] }
         return null
     }
     if (name == "lastIndexOf") {
@@ -5180,17 +5177,21 @@ function ktSeqMethodK(arr, name, args, kind) {
         return -1
     }
     if (name == "indexOfLast") {
-        for (i = es.length - 1; i >= 0; i = i - 1) {
-            if (k3Truthy(ktCall1(f, es[i]))) { return i }
-        }
+        mp = k4LastBy(es, f, ck, kind)
+        if (mp !== null) { return mp["i"] }
         return -1
     }
-    if (name == "takeWhile") { return k3Sub(es, 0, k3WhileCut(es, f)) }
-    if (name == "dropWhile") { return k3Sub(es, k3WhileCut(es, f), es.length) }
-    if (name == "takeLastWhile") { return k3Sub(es, k3LastWhileCut(es, f), es.length) }
-    if (name == "dropLastWhile") { return k3Sub(es, 0, k3LastWhileCut(es, f)) }
+    if (name == "takeWhile") { return k3Sub(es, 0, k3WhileCut(es, f, ck)) }
+    if (name == "dropWhile") {
+        // dropWhile goes on iterating past the cut, takeWhile stops there.
+        k = k3WhileCut(es, f, ck)
+        if (k < es.length) { k4IterMore(ck, es, k + 1) }
+        return k3Sub(es, k, es.length)
+    }
+    if (name == "takeLastWhile") { return k3Sub(es, k3LastWhileCut(es, f, ck), es.length) }
+    if (name == "dropLastWhile") { return k3Sub(es, 0, k3LastWhileCut(es, f, ck)) }
     if (name == "distinctBy") {
-        for (i = 0; i < es.length; i = i + 1) {
+        for (i = 0; k4IterMore(ck, es, i); i = i + 1) {
             v = ktCall1(f, es[i])
             b = false
             for (j = 0; j < keys.length; j = j + 1) {
@@ -5240,7 +5241,7 @@ function ktSeqMethodK(arr, name, args, kind) {
         if (name == "maxOf") { b = true }
         if (name == "maxOfOrNull") { b = true }
         best = ktCall1(f, es[0])
-        for (i = 1; i < es.length; i = i + 1) { best = ktPick(best, ktCall1(f, es[i]), b) }
+        for (i = 1; k4IterMore(ck, es, i); i = i + 1) { best = ktPick(best, ktCall1(f, es[i]), b) }
         return best
     }
     // max()/min() were removed in Kotlin 1.7 and reintroduced as the throwing
@@ -5255,11 +5256,11 @@ function ktSeqMethodK(arr, name, args, kind) {
     }
     if (name == "maxBy") {
         if (es.length == 0) { ktNoElemNull() }
-        return ktSortBy(es, f, true)[0]
+        return k4BestBy(es, f, true, ck)
     }
     if (name == "minBy") {
         if (es.length == 0) { ktNoElemNull() }
-        return ktSortBy(es, f, false)[0]
+        return k4BestBy(es, f, false, ck)
     }
     // maxWith / minWith by a Comparator: the FIRST greatest (least) element.
     if (name == "maxWith" || name == "minWith" || name == "maxWithOrNull" || name == "minWithOrNull") {
@@ -5269,7 +5270,7 @@ function ktSeqMethodK(arr, name, args, kind) {
         }
         best = es[0]
         b = name == "maxWith" || name == "maxWithOrNull"
-        for (i = 1; i < es.length; i = i + 1) {
+        for (i = 1; k4IterMore(ck, es, i); i = i + 1) {
             n = ktNum(ktCall2(f, best, es[i]))
             if ((b && n < 0) || (!b && n > 0)) { best = es[i] }
         }
@@ -5277,7 +5278,7 @@ function ktSeqMethodK(arr, name, args, kind) {
     }
     // firstNotNullOf / firstNotNullOfOrNull: the first non-null transform.
     if (name == "firstNotNullOf" || name == "firstNotNullOfOrNull") {
-        for (i = 0; i < es.length; i = i + 1) {
+        for (i = 0; k4IterMore(ck, es, i); i = i + 1) {
             v = ktCall1(f, es[i])
             if (!rtIsNil(v)) { return v }
         }
@@ -5292,11 +5293,11 @@ function ktSeqMethodK(arr, name, args, kind) {
         return undefined
     }
     if (name == "onEach") {
-        for (i = 0; i < es.length; i = i + 1) { ktCall1(f, es[i]) }
+        for (i = 0; k4IterMore(ck, es, i); i = i + 1) { ktCall1(f, es[i]) }
         return arr
     }
     if (name == "onEachIndexed") {
-        for (i = 0; i < es.length; i = i + 1) { ktCall2(f, i, es[i]) }
+        for (i = 0; k4IterMore(ck, es, i); i = i + 1) { ktCall2(f, i, es[i]) }
         return arr
     }
     if (name == "plus") {
@@ -5368,9 +5369,9 @@ function ktSeqMethodK(arr, name, args, kind) {
     }
     if (name == "zipWithNext") {
         b = ktIsFn(f)
-        for (i = 0; i + 1 < es.length; i = i + 1) {
-            if (b) { out.push(ktCall2(f, es[i], es[i + 1])) }
-            else { out.push({first: es[i], second: es[i + 1]}) }
+        for (i = 1; k4IterMore(ck, es, i); i = i + 1) {
+            if (b) { out.push(ktCall2(f, es[i - 1], es[i])) }
+            else { out.push({first: es[i - 1], second: es[i]}) }
         }
         return out
     }
@@ -5379,7 +5380,7 @@ function ktSeqMethodK(arr, name, args, kind) {
             if (es.length == 0) { return out }
             acc = es[0]
             out.push(acc)
-            for (i = 1; i < es.length; i = i + 1) {
+            for (i = 1; k4IterMore(ck, es, i); i = i + 1) {
                 acc = ktCall2(f, acc, es[i])
                 out.push(acc)
             }
@@ -5387,7 +5388,7 @@ function ktSeqMethodK(arr, name, args, kind) {
         }
         acc = f
         out.push(acc)
-        for (i = 0; i < es.length; i = i + 1) {
+        for (i = 0; k4IterMore(ck, es, i); i = i + 1) {
             acc = ktCall2(ktArg(args, 1), acc, es[i])
             out.push(acc)
         }
@@ -5666,18 +5667,18 @@ function k3FilterNotNull(es, req) {
     return out
 }
 
-function k3FilterIndexed(es, f, invert) {
+function k3FilterIndexed(es, f, invert, ck) {
     var out = []
     var i = 0
-    for (i = 0; i < es.length; i = i + 1) {
+    for (i = 0; k4IterMore(ck, es, i); i = i + 1) {
         if (k3Truthy(ktCall2(f, i, es[i])) !== invert) { out.push(es[i]) }
     }
     return out
 }
 
-function k3WhileCut(es, f) {
+function k3WhileCut(es, f, ck) {
     var i = 0
-    for (i = 0; i < es.length; i = i + 1) {
+    for (i = 0; k4IterMore(ck, es, i); i = i + 1) {
         if (!k3Truthy(ktCall1(f, es[i]))) { return i }
     }
     return es.length
@@ -5700,9 +5701,9 @@ function k3BinSearch(es, args) {
 }
 
 // takeLastWhile / dropLastWhile cut after the last element the predicate rejects.
-function k3LastWhileCut(es, f) {
+function k3LastWhileCut(es, f, ck) {
     var i = es.length - 1
-    while (i >= 0) {
+    while (k4IterPrev(ck, i)) {
         if (!k3Truthy(ktCall1(f, es[i]))) { return i + 1 }
         i = i - 1
     }
@@ -5834,9 +5835,13 @@ function ktSetMethod(s, name, args) {
     if (name == "toMutableSet") { return k3SetFrom(keys) }
     if (name == "toHashSet") { return k3SetFrom(keys) }
     if (name == "toSortedSet") { return k3SetFrom(ktSortBy(keys, null, false)) }
-    // A set is a Collection: the same answer kinds as a values view's (kind 3). A
-    // map's keys / entries view hands over its elements linked to the map.
-    if (s["__wsrc"] !== undefined) { k4ViewOf(keys, s["__wsrc"]) }
+    // A set is a Collection: the same answer kinds as a values view's (kind 3).
+    // The elements are handed over linked to the set, or to the map a keys /
+    // entries view reads, so that a member taking a lambda fails fast.
+    var own = anytype
+    own = s
+    if (s["__wsrc"] !== undefined) { own = s["__wsrc"] }
+    if (k4ViewOwner(keys) !== own) { k4ViewOf(keys, own) }
     var sq = ktSeqMethodK(keys, name, args, "Collection")
     if (ktIsArr(sq) && sq !== keys) {
         var sk = ktResultKind(3, name)
@@ -6285,8 +6290,8 @@ function k4Watched(src) {
     if (sk !== undefined) { return sk }
     return o
 }
-// ktIterStart / ktIterMore (jsrtkotlin.go): {w, n, m, set}, or undefined for a
-// set's elements handed over as a plain Collection.
+// ktIterStart / ktIterMore (jsrtkotlin.go): {w, n, m, set}, or undefined for
+// elements handed over as a plain Collection that is no view of anything.
 function k4IterStart(es, kind) {
     var wa = k4Watched(es)
     if (wa === undefined) {
@@ -6311,6 +6316,44 @@ function k4IterMore(c, es, i) {
         }
     }
     return i < es.length
+}
+// kForPrev (kotlin-interpreter.abnf): a List's reverse walk.
+function k4IterPrev(c, i) {
+    if (i >= 0 && c !== undefined) {
+        var wa = c["w"]
+        if (wa.length != c["n"] || !arrModIs(wa, c["m"])) { ktRaise("ConcurrentModificationException", null) }
+    }
+    return i >= 0
+}
+// kLastBy (kotlin-interpreter.abnf): {i, v} of the last element f accepts, or null.
+function k4LastBy(es, f, ck, kind) {
+    var hit = anytype
+    hit = null
+    var i = 0
+    if (kind == "Collection") {
+        for (i = 0; k4IterMore(ck, es, i); i = i + 1) {
+            if (k3Truthy(ktCall1(f, es[i]))) { hit = {i: i, v: es[i]} }
+        }
+        return hit
+    }
+    for (i = es.length - 1; k4IterPrev(ck, i); i = i - 1) {
+        if (k3Truthy(ktCall1(f, es[i]))) { return {i: i, v: es[i]} }
+    }
+    return hit
+}
+// kBestBy (kotlin-interpreter.abnf): maxBy / minBy over a non-empty es.
+function k4BestBy(es, sel, wantMax, ck) {
+    var be = anytype
+    var bk = anytype
+    var k = anytype
+    var i = 0
+    be = es[0]
+    bk = ktCall1(sel, be)
+    for (i = 1; k4IterMore(ck, es, i); i = i + 1) {
+        k = ktCall1(sel, es[i])
+        if ((k3KeyLess(k, bk) === true) !== wantMax && !k3KeyEqual(k, bk)) { be = es[i]; bk = k }
+    }
+    return be
 }
 function js_ktitem(a, i) {
     if (typeof a == "string") { return js_kindex(a, i) }

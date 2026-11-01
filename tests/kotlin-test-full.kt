@@ -6406,6 +6406,62 @@ fun sec143() {
     check("itrm143c", mp.toString() == "{3=c}" && st.toString() == "[x, z]" && st.size == 2 && "y" !in st)
 }
 
+// ===== SECTION 144: every higher-order function fails fast, over sets too =====
+// filter / any / count / fold / sumOf / groupBy / maxBy / zipWithNext / takeWhile
+// / dropWhile ... run the receiver's java.util iterator, so a lambda that changes
+// the list or set structurally makes the next next() throw
+// ConcurrentModificationException after one call (n). any { true } and
+// first { } returning at once never step again; a List's last { } walks back from
+// the end, a set's walks forward over every element; replacing an element is no
+// structural change. Every row is kotlin-stdlib 2.2.21's function on java 24's
+// ArrayList / LinkedHashSet, called with the same lambda.
+var n144 = 0
+fun cme144(f: () -> Any?): String {
+    n144 = 0
+    try { return "ok:" + f() + "/" + n144 } catch (e: ConcurrentModificationException) { return "cme" + n144 }
+}
+fun sec144() {
+    val a = listOf(
+        cme144 { val c = mutableListOf(1, 2, 3); c.filter { n144++; c.add(9); true } },
+        cme144 { val c = mutableListOf(1, 2, 3); c.any { n144++; c.add(9); false } },
+        cme144 { val c = mutableListOf(1, 2, 3); c.count { n144++; c.add(9); true } },
+        cme144 { val c = mutableListOf(1, 2, 3); c.all { n144++; c.add(9); true } },
+        cme144 { val c = mutableListOf(1, 2, 3); c.first { n144++; c.add(9); it == 3 } },
+        cme144 { val c = mutableListOf(1, 2, 3); c.sumOf { n144++; c.add(9); it } },
+        cme144 { val c = mutableListOf(1, 2, 3); c.fold(0) { s, x -> n144++; c.add(9); s + x } },
+        cme144 { val c = mutableListOf(1, 2, 3); c.reduce { s, x -> n144++; c.add(9); s + x } },
+        cme144 { val c = mutableListOf(1, 2, 3); c.groupBy { n144++; c.add(9); it } },
+        cme144 { val c = mutableListOf(1, 2, 3); c.maxBy { n144++; c.add(9); it } },
+        cme144 { val c = mutableListOf(1, 2, 3); c.zipWithNext { x, _ -> n144++; c.add(9); x } },
+        cme144 { val c = mutableListOf(1, 2, 3); c.dropWhile { n144++; c.add(9); false } },
+        cme144 { val c = mutableListOf(1, 2, 3); c.joinToString { n144++; c.add(9); "" + it } },
+        cme144 { val c = mutableListOf(1, 2, 3); c.indexOfLast { n144++; c.add(9); false } })
+    check("cme144a", a.joinToString(" ") == "cme1 cme1 cme1 cme1 cme1 cme1 cme1 cme1 cme1 cme1 cme1 cme1 cme1 cme1")
+    val b = listOf(
+        cme144 { val c = mutableListOf(1, 2, 3); c.any { n144++; c.add(9); true } },
+        cme144 { val c = mutableListOf(1, 2, 3); c.first { n144++; c.add(9); it == 1 } },
+        cme144 { val c = mutableListOf(1, 2, 3); c.last { n144++; c.add(9); true } },
+        cme144 { val c = mutableListOf(1, 2, 3); c.takeWhile { n144++; c.add(9); false } },
+        cme144 { val c = mutableListOf(1, 2, 3); c.count { n144++; c[0] = 5; true } },
+        cme144 { val c = mutableListOf(1, 2, 3); c.count { n144++; if (it == 3) c.add(9); true } })
+    check("cme144b", b.joinToString(" ") == "ok:true/1 ok:1/1 ok:3/1 ok:[]/1 ok:3/3 cme3")
+    val s = listOf(
+        cme144 { val c = mutableSetOf(1, 2, 3); c.filter { n144++; c.add(9); true } },
+        cme144 { val c = mutableSetOf(1, 2, 3); c.any { n144++; c.add(9); false } },
+        cme144 { val c = mutableSetOf(1, 2, 3); c.last { n144++; c.add(9); true } },
+        cme144 { val c = mutableSetOf(1, 2, 3); c.sumOf { n144++; c.add(9); it } },
+        cme144 { val c = mutableSetOf(1, 2, 3); c.forEach { n144++; c.add(it + 10) } },
+        cme144 { val c = mutableSetOf(1, 2, 3); c.map { n144++; c.add(it + 10) } },
+        cme144 { val c = mutableSetOf(1, 2, 3); c.forEach { n144++; if (it == 3) c.add(13) }; c },
+        cme144 { val c = mutableSetOf(1, 2, 3); c.forEachIndexed { _, x -> n144++; c.remove(x) } })
+    check("cme144c", s.joinToString(" ") == "cme1 cme1 cme1 cme1 cme1 cme1 ok:[1, 2, 3, 13]/3 cme1")
+    val m = listOf(
+        cme144 { val c = mutableMapOf(1 to "a", 2 to "b"); c.any { n144++; c[9] = "z"; false } },
+        cme144 { val c = mutableMapOf(1 to "a", 2 to "b"); c.keys.filter { n144++; c[9] = "z"; true } },
+        cme144 { val c = mutableMapOf(1 to "a", 2 to "b"); c.values.any { n144++; c.remove(2); false } })
+    check("cme144d", m.joinToString(" ") == "cme1 cme1 cme1")
+}
+
 fun main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -6546,6 +6602,7 @@ fun main() {
     sec141() // SECTION-CALL 141
     sec142() // SECTION-CALL 142
     sec143() // SECTION-CALL 143
+    sec144() // SECTION-CALL 144
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }

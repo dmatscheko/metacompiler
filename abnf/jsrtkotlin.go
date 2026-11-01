@@ -5585,6 +5585,12 @@ func (rt *jsrt) ktSeqMethodK(o *jsArray, name string, args []interface{}, kind s
 	es := o.elems
 	f := argAt(args, 0)
 	arr := func(v []interface{}) *jsArray { return &jsArray{elems: v} }
+	// A member taking a lambda runs the receiver's iterator, which fails fast when
+	// the lambda changes the collection (ktIterMore / ktIterPrev).
+	var ck *ktIterChk
+	if isCallable(f) || isCallable(argAt(args, 1)) {
+		ck = ktIterStart(o, kind)
+	}
 	switch name {
 	case "isEmpty":
 		return len(es) == 0, true
@@ -5603,24 +5609,23 @@ func (rt *jsrt) ktSeqMethodK(o *jsArray, name string, args []interface{}, kind s
 	// because a STRING reaches this function too (a String is a sequence of Char in
 	// Kotlin, so "abc".map { it.code } is ordinary). The bodies are the same ones, so
 	// an array's answer is unchanged whichever branch reaches it.
-	// map, forEach and forEachIndexed run the list's iterator, which fails fast
-	// when the body changes the list (ktListMore).
 	case "map":
 		out := make([]interface{}, 0, len(es))
-		for i, ck := 0, ktIterStart(o, kind); rt.ktIterMore(ck, o, i); i++ {
+		for i := 0; rt.ktIterMore(ck, o, i); i++ {
 			out = append(out, rt.ktCall(f, o.elems[i]))
 		}
 		return arr(out), true
 	case "filter":
 		out := []interface{}{}
-		for _, e := range es {
+		for i := 0; rt.ktIterMore(ck, o, i); i++ {
+			e := o.elems[i]
 			if rt.truthy(rt.ktCall(f, e)) {
 				out = append(out, e)
 			}
 		}
 		return arr(out), true
 	case "forEach":
-		for i, ck := 0, ktIterStart(o, kind); rt.ktIterMore(ck, o, i); i++ {
+		for i := 0; rt.ktIterMore(ck, o, i); i++ {
 			rt.ktCall(f, o.elems[i])
 		}
 		return jsUndef, true
@@ -5629,14 +5634,16 @@ func (rt *jsrt) ktSeqMethodK(o *jsArray, name string, args []interface{}, kind s
 			return float64(len(es)), true
 		}
 		n := 0
-		for _, e := range es {
+		for i := 0; rt.ktIterMore(ck, o, i); i++ {
+			e := o.elems[i]
 			if rt.truthy(rt.ktCall(f, e)) {
 				n++
 			}
 		}
 		return float64(n), true
 	case "any":
-		for _, e := range es {
+		for i := 0; rt.ktIterMore(ck, o, i); i++ {
+			e := o.elems[i]
 			if rt.truthy(rt.ktCall(f, e)) {
 				return true, true
 			}
@@ -5658,7 +5665,8 @@ func (rt *jsrt) ktSeqMethodK(o *jsArray, name string, args []interface{}, kind s
 		return float64(-1), true
 	case "first":
 		if len(args) == 1 && isCallable(f) {
-			for _, e := range es {
+			for i := 0; rt.ktIterMore(ck, o, i); i++ {
+				e := o.elems[i]
 				if rt.truthy(rt.ktCall(f, e)) {
 					return e, true
 				}
@@ -5673,10 +5681,8 @@ func (rt *jsrt) ktSeqMethodK(o *jsArray, name string, args []interface{}, kind s
 		// last(predicate) is the last MATCHING element:
 		// `listOf(1,2,3,4).last { it < 3 }` is 2.
 		if len(args) == 1 && isCallable(f) {
-			for i := len(es) - 1; i >= 0; i-- {
-				if rt.truthy(rt.ktCall(f, es[i])) {
-					return es[i], true
-				}
+			if _, e, hit := rt.ktLastBy(o, f, ck, kind); hit {
+				return e, true
 			}
 			rt.ktNoMatch(kind)
 		}
@@ -5688,7 +5694,8 @@ func (rt *jsrt) ktSeqMethodK(o *jsArray, name string, args []interface{}, kind s
 		if len(args) == 1 && isCallable(f) {
 			var hit interface{} = jsUndef
 			n := 0
-			for _, e := range es {
+			for i := 0; rt.ktIterMore(ck, o, i); i++ {
+				e := o.elems[i]
 				if rt.truthy(rt.ktCall(f, e)) {
 					hit, n = e, n+1
 				}
@@ -5713,7 +5720,8 @@ func (rt *jsrt) ktSeqMethodK(o *jsArray, name string, args []interface{}, kind s
 	case "singleOrNull":
 		var one interface{} = jsNull
 		n := 0
-		for _, e := range es {
+		for i := 0; rt.ktIterMore(ck, o, i); i++ {
+			e := o.elems[i]
 			if len(args) == 0 || rt.truthy(rt.ktCall(f, e)) {
 				one, n = e, n+1
 			}
@@ -5724,7 +5732,8 @@ func (rt *jsrt) ktSeqMethodK(o *jsArray, name string, args []interface{}, kind s
 		return one, true
 	case "firstOrNull":
 		if len(args) == 1 && isCallable(f) {
-			for _, e := range es {
+			for i := 0; rt.ktIterMore(ck, o, i); i++ {
+				e := o.elems[i]
 				if rt.truthy(rt.ktCall(f, e)) {
 					return e, true
 				}
@@ -5740,10 +5749,8 @@ func (rt *jsrt) ktSeqMethodK(o *jsArray, name string, args []interface{}, kind s
 	// findLast case further down, which also names lastOrNull.
 	case "lastOrNull":
 		if len(args) == 1 && isCallable(f) {
-			for i := len(es) - 1; i >= 0; i-- {
-				if rt.truthy(rt.ktCall(f, es[i])) {
-					return es[i], true
-				}
+			if _, e, hit := rt.ktLastBy(o, f, ck, kind); hit {
+				return e, true
 			}
 			return jsNull, true
 		}
@@ -5752,14 +5759,16 @@ func (rt *jsrt) ktSeqMethodK(o *jsArray, name string, args []interface{}, kind s
 		}
 		return es[len(es)-1], true
 	case "find":
-		for _, e := range es {
+		for i := 0; rt.ktIterMore(ck, o, i); i++ {
+			e := o.elems[i]
 			if rt.truthy(rt.ktCall(f, e)) {
 				return e, true
 			}
 		}
 		return jsNull, true
 	case "all":
-		for _, e := range es {
+		for i := 0; rt.ktIterMore(ck, o, i); i++ {
+			e := o.elems[i]
 			if !rt.truthy(rt.ktCall(f, e)) {
 				return false, true
 			}
@@ -5769,14 +5778,16 @@ func (rt *jsrt) ktSeqMethodK(o *jsArray, name string, args []interface{}, kind s
 		if len(args) == 0 {
 			return len(es) == 0, true
 		}
-		for _, e := range es {
+		for i := 0; rt.ktIterMore(ck, o, i); i++ {
+			e := o.elems[i]
 			if rt.truthy(rt.ktCall(f, e)) {
 				return false, true
 			}
 		}
 		return true, true
 	case "indexOfFirst":
-		for i, e := range es {
+		for i := 0; rt.ktIterMore(ck, o, i); i++ {
+			e := o.elems[i]
 			if rt.truthy(rt.ktCall(f, e)) {
 				return float64(i), true
 			}
@@ -5785,7 +5796,8 @@ func (rt *jsrt) ktSeqMethodK(o *jsArray, name string, args []interface{}, kind s
 	// The Indexed forms pass the element's index first.
 	case "fold", "foldIndexed":
 		acc := argAt(args, 0)
-		for i, e := range es {
+		for i := 0; rt.ktIterMore(ck, o, i); i++ {
+			e := o.elems[i]
 			if name == "fold" {
 				acc = rt.ktCall(argAt(args, 1), acc, e)
 			} else {
@@ -5795,7 +5807,7 @@ func (rt *jsrt) ktSeqMethodK(o *jsArray, name string, args []interface{}, kind s
 		return acc, true
 	case "foldRight", "foldRightIndexed":
 		acc := argAt(args, 0)
-		for i := len(es) - 1; i >= 0; i-- {
+		for i := len(es) - 1; rt.ktIterPrev(ck, i); i-- {
 			if name == "foldRight" {
 				acc = rt.ktCall(argAt(args, 1), es[i], acc)
 			} else {
@@ -5812,7 +5824,7 @@ func (rt *jsrt) ktSeqMethodK(o *jsArray, name string, args []interface{}, kind s
 			rt.ktRaise("UnsupportedOperationException", "Empty "+ktRedWord(kind, false)+" can't be reduced.")
 		}
 		acc := es[0]
-		for i := 1; i < len(es); i++ {
+		for i := 1; rt.ktIterMore(ck, o, i); i++ {
 			if name == "reduce" || name == "reduceOrNull" {
 				acc = rt.ktCall(f, acc, es[i])
 			} else {
@@ -5831,7 +5843,7 @@ func (rt *jsrt) ktSeqMethodK(o *jsArray, name string, args []interface{}, kind s
 			rt.ktRaise("UnsupportedOperationException", "Empty "+ktRedWord(kind, true)+" can't be reduced.")
 		}
 		acc := es[len(es)-1]
-		for i := len(es) - 2; i >= 0; i-- {
+		for i := len(es) - 2; rt.ktIterPrev(ck, i); i-- {
 			if name == "reduceRight" || name == "reduceRightOrNull" {
 				acc = rt.ktCall(f, es[i], acc)
 			} else {
@@ -5840,9 +5852,9 @@ func (rt *jsrt) ktSeqMethodK(o *jsArray, name string, args []interface{}, kind s
 		}
 		return acc, true
 	case "sumOf":
-		return ktSumOf(rt, es, f), true
+		return ktSumOf(rt, o, f, ck), true
 	case "sum":
-		return ktSumOf(rt, es, nil), true
+		return ktSumOf(rt, o, nil, nil), true
 	case "average":
 		if len(es) == 0 {
 			return jsJFlo{f: math.NaN()}, true
@@ -5854,7 +5866,8 @@ func (rt *jsrt) ktSeqMethodK(o *jsArray, name string, args []interface{}, kind s
 		return jsJFlo{f: t / float64(len(es))}, true
 	case "flatMap":
 		out := []interface{}{}
-		for _, e := range es {
+		for i := 0; rt.ktIterMore(ck, o, i); i++ {
+			e := o.elems[i]
 			out = append(out, ktElems(rt, rt.ktCall(f, e))...)
 		}
 		return arr(out), true
@@ -5866,7 +5879,8 @@ func (rt *jsrt) ktSeqMethodK(o *jsArray, name string, args []interface{}, kind s
 		return arr(out), true
 	case "mapIndexed", "mapIndexedNotNull":
 		out := []interface{}{}
-		for i, e := range es {
+		for i := 0; rt.ktIterMore(ck, o, i); i++ {
+			e := o.elems[i]
 			if v := rt.ktCall(f, float64(i), e); name == "mapIndexed" || !isUndefOrNull(v) {
 				out = append(out, v)
 			}
@@ -5874,7 +5888,8 @@ func (rt *jsrt) ktSeqMethodK(o *jsArray, name string, args []interface{}, kind s
 		return arr(out), true
 	case "mapNotNull":
 		out := []interface{}{}
-		for _, e := range es {
+		for i := 0; rt.ktIterMore(ck, o, i); i++ {
+			e := o.elems[i]
 			v := rt.ktCall(f, e)
 			if _, isNull := v.(jsNullT); !isNull {
 				out = append(out, v)
@@ -5882,13 +5897,14 @@ func (rt *jsrt) ktSeqMethodK(o *jsArray, name string, args []interface{}, kind s
 		}
 		return arr(out), true
 	case "forEachIndexed":
-		for i, ck := 0, ktIterStart(o, kind); rt.ktIterMore(ck, o, i); i++ {
+		for i := 0; rt.ktIterMore(ck, o, i); i++ {
 			rt.ktCall(f, float64(i), o.elems[i])
 		}
 		return jsUndef, true
 	case "filterNot":
 		out := []interface{}{}
-		for _, e := range es {
+		for i := 0; rt.ktIterMore(ck, o, i); i++ {
+			e := o.elems[i]
 			if !rt.truthy(rt.ktCall(f, e)) {
 				out = append(out, e)
 			}
@@ -5896,7 +5912,8 @@ func (rt *jsrt) ktSeqMethodK(o *jsArray, name string, args []interface{}, kind s
 		return arr(out), true
 	case "partition":
 		yes, no := []interface{}{}, []interface{}{}
-		for _, e := range es {
+		for i := 0; rt.ktIterMore(ck, o, i); i++ {
+			e := o.elems[i]
 			if rt.truthy(rt.ktCall(f, e)) {
 				yes = append(yes, e)
 			} else {
@@ -6062,8 +6079,7 @@ func (rt *jsrt) ktSeqMethodK(o *jsArray, name string, args []interface{}, kind s
 		if len(es) == 0 {
 			return jsNull, true
 		}
-		s := ktSortBy(rt, es, f, name == "maxByOrNull")
-		return s.elems[0], true
+		return rt.ktBestBy(o, f, name == "maxByOrNull", ck), true
 	case "take", "drop", "takeLast", "dropLast":
 		k := jsToInt(rt.toNumber(argAt(args, 0)))
 		if k < 0 {
@@ -6150,7 +6166,8 @@ func (rt *jsrt) ktSeqMethodK(o *jsArray, name string, args []interface{}, kind s
 		return g, true
 	case "groupBy":
 		m := ktMakeMap()
-		for _, e := range es {
+		for i := 0; rt.ktIterMore(ck, o, i); i++ {
+			e := o.elems[i]
 			k := rt.ktCall(f, e)
 			v := rt.ktValueOf(args, e)
 			keys, vals, _ := dictParts(m)
@@ -6165,7 +6182,8 @@ func (rt *jsrt) ktSeqMethodK(o *jsArray, name string, args []interface{}, kind s
 		return m, true
 	case "associate":
 		m := ktMakeMap()
-		for _, e := range es {
+		for i := 0; rt.ktIterMore(ck, o, i); i++ {
+			e := o.elems[i]
 			p := rt.ktCall(f, e)
 			po, ok := ktIsPair(p)
 			if !ok {
@@ -6176,13 +6194,15 @@ func (rt *jsrt) ktSeqMethodK(o *jsArray, name string, args []interface{}, kind s
 		return m, true
 	case "associateWith":
 		m := ktMakeMap()
-		for _, e := range es {
+		for i := 0; rt.ktIterMore(ck, o, i); i++ {
+			e := o.elems[i]
 			rt.ktMapPut(m, e, rt.ktCall(f, e))
 		}
 		return m, true
 	case "associateBy":
 		m := ktMakeMap()
-		for _, e := range es {
+		for i := 0; rt.ktIterMore(ck, o, i); i++ {
+			e := o.elems[i]
 			rt.ktMapPut(m, rt.ktCall(f, e), rt.ktValueOf(args, e))
 		}
 		return m, true
@@ -6220,7 +6240,8 @@ func (rt *jsrt) ktSeqMethodK(o *jsArray, name string, args []interface{}, kind s
 		}
 		var sb strings.Builder
 		sb.WriteString(pre)
-		for i, e := range es {
+		for i := 0; rt.ktIterMore(ck, o, i); i++ {
+			e := o.elems[i]
 			if i > 0 {
 				sb.WriteString(sep)
 			}
@@ -6294,17 +6315,16 @@ func (rt *jsrt) ktSeqMethodK(o *jsArray, name string, args []interface{}, kind s
 		return arr(out), true
 	case "filterIndexed", "filterNotIndexed":
 		out := []interface{}{}
-		for i, e := range es {
+		for i := 0; rt.ktIterMore(ck, o, i); i++ {
+			e := o.elems[i]
 			if rt.truthy(rt.ktCall(f, float64(i), e)) != (name == "filterNotIndexed") {
 				out = append(out, e)
 			}
 		}
 		return arr(out), true
 	case "findLast":
-		for i := len(es) - 1; i >= 0; i-- {
-			if rt.truthy(rt.ktCall(f, es[i])) {
-				return es[i], true
-			}
+		if _, e, hit := rt.ktLastBy(o, f, ck, kind); hit {
+			return e, true
 		}
 		return jsNull, true
 	case "lastIndexOf":
@@ -6315,15 +6335,12 @@ func (rt *jsrt) ktSeqMethodK(o *jsArray, name string, args []interface{}, kind s
 		}
 		return float64(-1), true
 	case "indexOfLast":
-		for i := len(es) - 1; i >= 0; i-- {
-			if rt.truthy(rt.ktCall(f, es[i])) {
-				return float64(i), true
-			}
-		}
-		return float64(-1), true
+		i, _, _ := rt.ktLastBy(o, f, ck, kind)
+		return float64(i), true
 	case "takeWhile", "dropWhile":
 		cut := len(es)
-		for i, e := range es {
+		for i := 0; rt.ktIterMore(ck, o, i); i++ {
+			e := o.elems[i]
 			if !rt.truthy(rt.ktCall(f, e)) {
 				cut = i
 				break
@@ -6332,11 +6349,15 @@ func (rt *jsrt) ktSeqMethodK(o *jsArray, name string, args []interface{}, kind s
 		if name == "takeWhile" {
 			return arr(append([]interface{}{}, es[:cut]...)), true
 		}
+		// dropWhile goes on iterating past the cut, takeWhile stops there.
+		if cut < len(es) {
+			rt.ktIterMore(ck, o, cut+1)
+		}
 		return arr(append([]interface{}{}, es[cut:]...)), true
 	// takeLastWhile / dropLastWhile cut at the last element the predicate rejects.
 	case "takeLastWhile", "dropLastWhile":
 		cut := 0
-		for i := len(es) - 1; i >= 0; i-- {
+		for i := len(es) - 1; rt.ktIterPrev(ck, i); i-- {
 			if !rt.truthy(rt.ktCall(f, es[i])) {
 				cut = i + 1
 				break
@@ -6349,7 +6370,8 @@ func (rt *jsrt) ktSeqMethodK(o *jsArray, name string, args []interface{}, kind s
 	case "distinctBy":
 		out := []interface{}{}
 		keys := []interface{}{}
-		for _, e := range es {
+		for i := 0; rt.ktIterMore(ck, o, i); i++ {
+			e := o.elems[i]
 			k := rt.ktCall(f, e)
 			dup := false
 			for _, sk := range keys {
@@ -6407,7 +6429,8 @@ func (rt *jsrt) ktSeqMethodK(o *jsArray, name string, args []interface{}, kind s
 		}
 		wantMax := name == "maxOf" || name == "maxOfOrNull"
 		best := rt.ktCall(f, es[0])
-		for _, e := range es[1:] {
+		for i := 1; rt.ktIterMore(ck, o, i); i++ {
+			e := o.elems[i]
 			best = ktPick(rt, best, rt.ktCall(f, e), wantMax)
 		}
 		return best, true
@@ -6422,7 +6445,7 @@ func (rt *jsrt) ktSeqMethodK(o *jsArray, name string, args []interface{}, kind s
 		if len(es) == 0 {
 			rt.ktNoElem(nil)
 		}
-		return ktSortBy(rt, es, f, name == "maxBy").elems[0], true
+		return rt.ktBestBy(o, f, name == "maxBy", ck), true
 	// maxWith / minWith by a Comparator: the FIRST greatest (least) element.
 	case "maxWith", "minWith", "maxWithOrNull", "minWithOrNull":
 		if len(es) == 0 {
@@ -6433,7 +6456,8 @@ func (rt *jsrt) ktSeqMethodK(o *jsArray, name string, args []interface{}, kind s
 		}
 		best := es[0]
 		isMax := strings.HasPrefix(name, "max")
-		for _, e := range es[1:] {
+		for i := 1; rt.ktIterMore(ck, o, i); i++ {
+			e := o.elems[i]
 			c := rt.toNumber(rt.ktCall(f, best, e))
 			if (isMax && c < 0) || (!isMax && c > 0) {
 				best = e
@@ -6442,7 +6466,8 @@ func (rt *jsrt) ktSeqMethodK(o *jsArray, name string, args []interface{}, kind s
 		return best, true
 	// firstNotNullOf / firstNotNullOfOrNull: the first non-null transform.
 	case "firstNotNullOf", "firstNotNullOfOrNull":
-		for _, e := range es {
+		for i := 0; rt.ktIterMore(ck, o, i); i++ {
+			e := o.elems[i]
 			if v := rt.ktCall(f, e); !isUndefOrNull(v) {
 				return v, true
 			}
@@ -6482,12 +6507,14 @@ func (rt *jsrt) ktSeqMethodK(o *jsArray, name string, args []interface{}, kind s
 		}
 		return jsUndef, true
 	case "onEach":
-		for _, e := range es {
+		for i := 0; rt.ktIterMore(ck, o, i); i++ {
+			e := o.elems[i]
 			rt.ktCall(f, e)
 		}
 		return o, true
 	case "onEachIndexed":
-		for i, e := range es {
+		for i := 0; rt.ktIterMore(ck, o, i); i++ {
+			e := o.elems[i]
 			rt.ktCall(f, float64(i), e)
 		}
 		return o, true
@@ -6574,13 +6601,13 @@ func (rt *jsrt) ktSeqMethodK(o *jsArray, name string, args []interface{}, kind s
 		return arr(append([]interface{}{}, es[lo:hi]...)), true
 	case "zipWithNext":
 		out := []interface{}{}
-		for i := 0; i+1 < len(es); i++ {
+		for i := 1; rt.ktIterMore(ck, o, i); i++ {
 			if isCallable(f) {
-				out = append(out, rt.ktCall(f, es[i], es[i+1]))
+				out = append(out, rt.ktCall(f, o.elems[i-1], o.elems[i]))
 			} else {
 				p := newJSObject()
-				p.set("first", es[i])
-				p.set("second", es[i+1])
+				p.set("first", o.elems[i-1])
+				p.set("second", o.elems[i])
 				out = append(out, p)
 			}
 		}
@@ -6593,7 +6620,8 @@ func (rt *jsrt) ktSeqMethodK(o *jsArray, name string, args []interface{}, kind s
 			}
 			acc := es[0]
 			out = append(out, acc)
-			for _, e := range es[1:] {
+			for i := 1; rt.ktIterMore(ck, o, i); i++ {
+				e := o.elems[i]
 				acc = rt.ktCall(f, acc, e)
 				out = append(out, acc)
 			}
@@ -6601,7 +6629,8 @@ func (rt *jsrt) ktSeqMethodK(o *jsArray, name string, args []interface{}, kind s
 		}
 		acc := f
 		out = append(out, acc)
-		for _, e := range es {
+		for i := 0; rt.ktIterMore(ck, o, i); i++ {
+			e := o.elems[i]
 			acc = rt.ktCall(argAt(args, 1), acc, e)
 			out = append(out, acc)
 		}
@@ -7041,9 +7070,14 @@ func (rt *jsrt) ktSetMethod(s *jsObject, name string, args []interface{}) (inter
 	case "toSortedSet":
 		return rt.ktSetFrom(ktSortBy(rt, keys.elems, nil, false).elems), true
 	}
-	// A map's keys / entries view hands over its elements linked to the map.
-	if owner, isView := s.props["__wsrc"]; isView {
-		ktViewOf(keys, owner)
+	// The elements are handed over linked to the set, or to the map a keys /
+	// entries view reads, so that a member taking a lambda fails fast.
+	var own interface{} = s
+	if w, isView := s.props["__wsrc"]; isView {
+		own = w
+	}
+	if cur, _ := ktViewOwner(keys); cur != own {
+		ktViewOf(keys, own)
 	}
 	v, handled := rt.ktSeqMethodK(keys, name, args, ktKindColl)
 	// A set is a Collection: the same answer kinds as a values view's.
@@ -7073,15 +7107,15 @@ func ktIsCollection(v interface{}) bool {
 
 // ktSumOf is Kotlin's sumOf/sum, at the WIDTH of what it is summing: a Long
 // selector sums to a Long and a Double selector to a Double.
-func ktSumOf(rt *jsrt, es []interface{}, f interface{}) interface{} {
-	isFlo, isLong, allF32 := false, false, len(es) > 0
-	vals := make([]interface{}, len(es))
-	for i, e := range es {
-		v := e
+func ktSumOf(rt *jsrt, o *jsArray, f interface{}, ck *ktIterChk) interface{} {
+	isFlo, isLong, allF32 := false, false, len(o.elems) > 0
+	vals := make([]interface{}, 0, len(o.elems))
+	for i := 0; rt.ktIterMore(ck, o, i); i++ {
+		v := o.elems[i]
 		if f != nil {
-			v = rt.call(f, jsUndef, []interface{}{e})
+			v = rt.call(f, jsUndef, []interface{}{v})
 		}
-		vals[i] = v
+		vals = append(vals, v)
 		fv, ok := v.(jsJFlo)
 		if ok {
 			isFlo = true
@@ -8282,10 +8316,10 @@ func ktIterIsSet(v interface{}) bool {
 }
 
 // ktIterChk is the check of the java.util iterator a kotlin-stdlib higher-order
-// function (forEach, forEachIndexed, map) runs, as a `for` makes it: the watched
-// array w (o itself, or ktWatched), its size n and modification count m at the
-// start, and whether it iterates as a set (ktIterIsSet). A set's elements handed
-// over as a plain Collection are not checked (nil).
+// function (forEach, filter, any, fold, ...) runs, as a `for` makes it: the
+// watched array w (o itself, or ktWatched), its size n and modification count m
+// at the start, and whether it iterates as a set (ktIterIsSet). Elements handed
+// over as a plain Collection that is no view of anything are not checked (nil).
 type ktIterChk struct {
 	w    *jsArray
 	n, m int
@@ -8317,6 +8351,56 @@ func (rt *jsrt) ktIterMore(c *ktIterChk, o *jsArray, i int) bool {
 		return false
 	}
 	return i < len(o.elems)
+}
+
+// ktIterPrev: the same check for a List's reverse walk (listIterator(size)):
+// hasPrevious() is `cursor != 0`, and previous() checks the modification count
+// first. Twin of kForPrev in kotlin-interpreter.abnf and k4IterPrev in
+// languages/lib/kotlin-rt.metajs.
+func (rt *jsrt) ktIterPrev(c *ktIterChk, i int) bool {
+	if i >= 0 && c != nil && (len(c.w.elems) != c.n || c.w.mod != c.m) {
+		rt.ktRaiseV("ConcurrentModificationException", jsNull)
+	}
+	return i >= 0
+}
+
+// ktLastBy: the index and the element of the last element of o that f accepts
+// (last / lastOrNull / findLast / indexOfLast), -1 and false for none. A List
+// walks back from its end (listIterator(size)); any other Collection - a set, a
+// values view - is Iterable's walk forward over every element. Twin of kLastBy
+// in kotlin-interpreter.abnf and languages/lib/kotlin-rt.metajs.
+func (rt *jsrt) ktLastBy(o *jsArray, f interface{}, ck *ktIterChk, kind string) (int, interface{}, bool) {
+	at, hitE := -1, interface{}(jsNull)
+	if kind == ktKindColl {
+		for i := 0; rt.ktIterMore(ck, o, i); i++ {
+			if e := o.elems[i]; rt.truthy(rt.ktCall(f, e)) {
+				at, hitE = i, e
+			}
+		}
+		return at, hitE, at >= 0
+	}
+	for i := len(o.elems) - 1; rt.ktIterPrev(ck, i); i-- {
+		if e := o.elems[i]; rt.truthy(rt.ktCall(f, e)) {
+			return i, e, true
+		}
+	}
+	return at, hitE, false
+}
+
+// ktBestBy: maxBy / minBy over a non-empty o - the first element whose selector
+// value is the greatest (least), o's iterator checked by ck. Twin of kBestBy in
+// kotlin-interpreter.abnf and languages/lib/kotlin-rt.metajs.
+func (rt *jsrt) ktBestBy(o *jsArray, sel interface{}, wantMax bool, ck *ktIterChk) interface{} {
+	be := o.elems[0]
+	bk := rt.call(sel, jsUndef, []interface{}{be})
+	for i := 1; rt.ktIterMore(ck, o, i); i++ {
+		e := o.elems[i]
+		k := rt.call(sel, jsUndef, []interface{}{e})
+		if ktKeyLess(rt, k, bk) != wantMax && !ktKeyEqual(rt, k, bk) {
+			be, bk = e, k
+		}
+	}
+	return be
 }
 
 // ktMapDropAt removes entry i of a map, a structural change. Twin of kMapDropAt
