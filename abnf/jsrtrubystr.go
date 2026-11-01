@@ -798,30 +798,42 @@ func rubyKahan(f, c, x float64) (float64, float64) {
 }
 
 // rubyHashEach is Hash#each / #each_pair. An entry deleted before it is reached is
-// not yielded; a key ADDED by the block is MRI's RuntimeError, and is taken out
-// again. Twin of rbHashEach in lib/ruby-rt.metajs.
+// not yielded; a key the block ADDS, a deleted one put back included, is MRI's
+// RuntimeError, and is taken out again. Twin of hashEach in
+// ruby-interpreter.abnf, which states the rule.
 func (rt *jsrt) rubyHashEach(keys, vals *jsArray, blk interface{}) {
-	added := func() {
-		rt.rubyRaiseErr("each", "RuntimeError", "can't add a new key into hash during iteration")
-	}
-	left := len(keys.elems)
+	orig := append([]interface{}{}, keys.elems...)
 	for i := 0; i < len(keys.elems); {
 		k := keys.elems[i]
-		n0 := len(keys.elems)
-		if left == 0 {
-			added()
-		}
-		left--
+		tail := keys.elems[len(keys.elems)-1]
 		rt.call(blk, jsUndef, []interface{}{rt.rubyKeyOut(k), vals.elems[i]})
-		if len(keys.elems) > n0 {
-			keys.elems, vals.elems = keys.elems[:n0], vals.elems[:n0]
-			keys.dropIdx()
-			added()
+		if n1 := len(keys.elems); n1 > 0 && keys.elems[n1-1] != tail {
+			if fa := rubyFirstAdded(orig, keys.elems); fa < n1 {
+				keys.elems, vals.elems = keys.elems[:fa], vals.elems[:fa]
+				keys.dropIdx()
+				rt.rubyRaiseErr("each", "RuntimeError", "can't add a new key into hash during iteration")
+			}
 		}
 		if i < len(keys.elems) && keys.elems[i] == k {
 			i++
 		}
 	}
+}
+
+// rubyFirstAdded is the index of the first key a Hash#each block added. Twin of
+// rbaFirstAdded in lib/ruby-arr.js, which states the rule.
+func rubyFirstAdded(orig, keys []interface{}) int {
+	p := 0
+	for j, k := range keys {
+		for p < len(orig) && orig[p] != k {
+			p++
+		}
+		if p == len(orig) {
+			return j
+		}
+		p++
+	}
+	return len(keys)
 }
 
 // rubyIsIntV: an Integer, small or big.

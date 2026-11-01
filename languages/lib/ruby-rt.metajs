@@ -6306,24 +6306,28 @@ function rbMSort(a, blk, byKey) {
 // The decorate-sort step of sort_by / min_by / max_by: each element paired with
 // its block value, stably sorted on that key.
 // Hash#each / #each_pair. An entry deleted before it is reached is not yielded;
-// a key ADDED by the block is MRI's RuntimeError, and is taken out again. Twin of
-// hashEach in ruby-interpreter.abnf.
+// a key the block ADDS, a deleted one put back included, is MRI's RuntimeError,
+// and is taken out again. Twin of hashEach in ruby-interpreter.abnf, which
+// states the rule.
 function rbHashEach(keys, vals, blk) {
+    var orig = keys.slice(0)
     var i = 0
-    var left = keys.length
     while (i < keys.length) {
         var k = anytype
         k = keys[i]
-        var n0 = keys.length
-        if (left == 0) { rbRaiseErr("each", "RuntimeError", "can't add a new key into hash during iteration") }
-        left = left - 1
+        var tail = anytype
+        tail = keys[keys.length - 1]
         rbCall2(blk, rbKeyOut(k), vals[i])
-        if (keys.length > n0) {
-            while (keys.length > n0) {
-                keys.pop()
-                vals.pop()
+        var n1 = keys.length
+        if (n1 > 0 && keys[n1 - 1] !== tail) {
+            var fa = rbaFirstAdded(orig, keys)
+            if (fa < n1) {
+                while (keys.length > fa) {
+                    keys.pop()
+                    vals.pop()
+                }
+                rbRaiseErr("each", "RuntimeError", "can't add a new key into hash during iteration")
             }
-            rbRaiseErr("each", "RuntimeError", "can't add a new key into hash during iteration")
         }
         if (i < keys.length && keys[i] === k) { i = i + 1 }
     }

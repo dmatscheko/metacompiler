@@ -9740,26 +9740,30 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // sort_by / min_by / max_by: decorate, sort on the key, undecorate. The sort is
     // the stable one above, which is what MRI's sort_by promises.
     // Hash#each / #each_pair. An entry deleted before it is reached is not
-    // yielded; a key ADDED by the block is MRI's RuntimeError, and is taken out
-    // again (one that replaced a deleted key shows as more yields than entries).
-    // Twins: rbHashEach in lib/ruby-rt.metajs, rubyHashEach in abnf/jsrt.go.
+    // yielded; a key the block ADDS, a deleted one put back included, is MRI's
+    // RuntimeError, and is taken out again. While the last key is still last
+    // nothing was appended, so only a block that moved it pays for the scan.
+    // Twins: rbHashEach in lib/ruby-rt.metajs, rubyHashEach in abnf/jsrtrubystr.go.
     function hashEach(d, blk) {
+        var orig = d.keys.slice(0)
         var i = 0
-        var left = d.keys.length
         while (i < d.keys.length) {
             var k = anytype
             k = d.keys[i]
-            var n0 = d.keys.length
-            if (left == 0) { raiseErr("each", "RuntimeError", "can't add a new key into hash during iteration") }
-            left = left - 1
+            var tail = anytype
+            tail = d.keys[d.keys.length - 1]
             blockCall(blk, [keyOut(k), d.vals[i]])
-            if (d.keys.length > n0) {
-                while (d.keys.length > n0) {
-                    d.keys.pop()
-                    d.vals.pop()
+            var n1 = d.keys.length
+            if (n1 > 0 && d.keys[n1 - 1] !== tail) {
+                var fa = rbaFirstAdded(orig, d.keys)
+                if (fa < n1) {
+                    while (d.keys.length > fa) {
+                        d.keys.pop()
+                        d.vals.pop()
+                    }
+                    d.__idx = null
+                    raiseErr("each", "RuntimeError", "can't add a new key into hash during iteration")
                 }
-                d.__idx = null
-                raiseErr("each", "RuntimeError", "can't add a new key into hash during iteration")
             }
             if (i < d.keys.length && d.keys[i] === k) { i = i + 1 }
         }

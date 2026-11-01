@@ -885,6 +885,31 @@ def s144
         "a😀b".sub(/[^a]/, "Z") == "aZb")
 end
 
+# ===== SECTION 145: a key put back during Hash#each =====
+# A Hash#each block that deletes a key and stores it again ADDS a key: MRI raises
+# RuntimeError and the hash ends without it. Writing an existing key is not an
+# addition. /usr/bin/ruby 2.6 settles each.
+def s145
+  h = {a: 1, b: 2}
+  msg = nil
+  begin
+    h.each { |k, v| h.delete(:a); h[:a] = 3 }
+  rescue RuntimeError => e
+    msg = e.message
+  end
+  check("he145a", msg == "can't add a new key into hash during iteration" && h == {b: 2})
+  g = {a: 1, b: 2, c: 3}
+  msg = nil
+  begin
+    g.each { |k, v| g.delete(:b) if k == :a; g[:b] = 9 if k == :c }
+  rescue RuntimeError => e
+    msg = e.message
+  end
+  w = {a: 1, b: 2}
+  w.each { |k, v| w[k] = v * 10 }
+  check("he145b", msg == "can't add a new key into hash during iteration" && g == {a: 1, c: 3} && w == {a: 10, b: 20})
+end
+
 s122() # SECTION-CALL 122
 s123() # SECTION-CALL 123
 s124() # SECTION-CALL 124
@@ -908,5 +933,6 @@ s141() # SECTION-CALL 141
 s142() # SECTION-CALL 142
 s143() # SECTION-CALL 143
 s144() # SECTION-CALL 144
+s145() # SECTION-CALL 145
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])
