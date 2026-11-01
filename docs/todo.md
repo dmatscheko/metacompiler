@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1045** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1046** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -95,12 +95,8 @@ Found by the CORE worker, round 15. The interpreter's stripWs deletes every ASCI
 strings.TrimSpace, native strips ASCII 9-13 and 32: `int.Parse(" 1 2 ")` and `int.Parse(" 1")` give three answers.
 .NET's NumberStyles.Integer allows leading/trailing white space (U+0009-U+000D, U+0020) only; settle with a real dotnet.
 
-### T-1037 csharp: Parse overflow; two-arg Argument* ctors; absent members == null · P3 · CS · IN PROGRESS (CS worker, round 5) [V spec-only]
-Per .NET docs/reference source, ours wrong in all three engines:
-- `int.Parse("3000000000")` → OverflowException "Value was either too large or too small for an Int32."; `byte.Parse("300")` → "...for an unsigned byte." Ours: -1294967296 / 44 (csParseInt wraps via csNorm, no range check).
-- `new ArgumentOutOfRangeException("r", "too big").Message` → "too big (Parameter 'r')"; ours uses the default text. `new ArgumentException("m", "pn").Message` → "m (Parameter 'pn')"; ours "m".
-- `new Exception("x").InnerException == null` → True; ours False (C# ==/!= treat an absent member, read as undefined, as unequal to null; `is null` / `??` already work — js_cseq/csEq/js_jchareq).
-Found by CS r4 + master probe.
+### T-1045 csharp: null message in two-arg Argument* ctors; 3-argument exception ctors · P3 · CS · OPEN [V spec-only]
+Per dotnet/runtime source (found by CS r5), all three engines: `new ArgumentException(null, "pn").Message` → "Value does not fall within the expected range. (Parameter 'pn')"; `new ArgumentNullException("pn", null)` / `ArgumentOutOfRangeException("pn", null)` → "Exception of type 'System.X' was thrown. (Parameter 'pn')". Ours: Message null. 3-arg forms `ArgumentException(message, paramName, inner)` and `ArgumentOutOfRangeException(paramName, actualValue, message)` (appends "\nActual value was …") read only the first argument.
 
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
@@ -1094,6 +1090,7 @@ T-1038 kotlin: unsigned ranges lose their type — DONE (KT r18, 43324a36): rang
 T-1040 python: `type(x) is range` (and enumerate/zip/map/filter/reversed) is False — DONE (PY r22, fa60d906): type(v)/v.__class__ of range/enumerate/zip/map/filter/reversed return the builtin itself. Master probe vs python3 3.14 (is/==/dict keys/constructing via type(v)): 4 legs agree.
 T-1039 ruby: missing Array Enumerable methods; each_slice block result; multi-value yields; zip/method(:map) on a user Enumerable — DONE (RB r41, d270d298): member?/grep/grep_v/minmax_by/slice_before/slice_after/chunk/chain; each_slice/each_cons block → nil (2.6); multi-value yields per-method (13 unpack, rest pack); zip via to_a; each-less Enumerable fails on each; method(:map)/instance_method/UnboundMethod. Master probe vs ruby 2.6 (27 lines): 4 legs agree.
 T-1034 bash: subscript/attribute edge cases left by T-1017; read -n/-N; computed declare -A — PARTIAL→split (SH r27, 92e1b3da): prefix-binding export through local, read -n/-N, empty-subscript diagnostics (unset/${b[]}/+=/assoc literal/let/((...))), assoc @/* keys via read/printf -v, nameref value checks, declare +a/+A refusal. Master probe vs bash 5.3: 4 legs agree (external-command pipelines excluded). Per-scope assoc kind and compiler computed declare -A/array literal filed as follow-up.
+T-1037 csharp: Parse overflow; two-arg Argument* ctors; absent members == null — DONE (CS r5, 61eb7cf3): integral Parse overflow per type (format errors win, -0 ok for unsigned, .NET IsWhite set); two-arg Argument*/inner-exception ctors incl. : base(a,b); undefined == null in C# equality. Master spec probe (ctor messages, field/member == null, overflow, bounds): 3 legs agree.
 
 # Settled — do not re-open
 
