@@ -152,7 +152,7 @@ returns); interp and run abort with "send on a non-channel". A nil channel block
 
 # SW — Swift  (oracle: swiftc 6.1.2)
 
-### T-962 swift: a labelled `if` does not parse · P2 · SW · OPEN [V]
+### T-962 swift: a labelled `if` does not parse · P2 · SW · IN PROGRESS (SW worker, round 11) [V]
 Found by the GO worker, round 16. `lbl: if x > 0 { print(1); break lbl }` → swiftc accepts it (break leaves the if); both halves
 "Not everything could be parsed". Labelled `do` likewise (Swift reference, Labeled Statement).
 
