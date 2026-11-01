@@ -100,14 +100,14 @@ Found by the CORE worker, round 15. The interpreter's stripWs deletes every ASCI
 strings.TrimSpace, native strips ASCII 9-13 and 32: `int.Parse(" 1 2 ")` and `int.Parse(" 1")` give three answers.
 .NET's NumberStyles.Integer allows leading/trailing white space (U+0009-U+000D, U+0020) only; settle with a real dotnet.
 
-### T-1065 csharp: `obj.P++` / `obj.P--` bypass the property setter · P3 · CS · OPEN [V]
+### T-1065 csharp: `obj.P++` / `obj.P--` bypass the property setter · P3 · CS · IN PROGRESS (CS worker, round 11) [V]
 Spec-only. makeIncDec's field path reads/writes the raw slot instead of dispatching get/set like makeAssign (csFindAcc `__set_` / emitPropSet); the halves even disagree:
 `class A { public virtual int K { get => 7; set {} } } class B : A { public override int K { get; set; } } class D : B { public override int K { set { base.K = value + 100; } } }` then `D d = new D(); d.K++; Console.WriteLine(d.K);` -> spec 101; interpreter 0, run/native 1. Check prefix/postfix values, static properties and indexers (`a[i]++`) too.
 
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-1066 kotlin: static-type javaClass for computed receivers; reified primitives / inference · P3 · KT · OPEN [V]
+### T-1066 kotlin: static-type javaClass for computed receivers; reified primitives / inference · P3 · KT · IN PROGRESS (KT worker, round 23) [V]
 Oracle kotlinc 2.2.21; all engines differ:
 - `inline fun <reified T: Any> jn() = T::class.java.name; jn<Int>()` -> java.lang.Integer (reified primitive .java is the wrapper); ours int.
 - static type Int but not a literal/declared name -> oracle `int`, ours java.lang.Integer: for-loop var (`for (i in 0..1) i.javaClass`), inline-lambda `it` (`listOf(1).forEach { it.javaClass }`), `(x + 1).javaClass`, `f().javaClass` with `fun f(): Int`, `Q(1).v.javaClass`.
