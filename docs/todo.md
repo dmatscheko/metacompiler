@@ -98,14 +98,14 @@ Found by the CORE worker, round 15. The interpreter's stripWs deletes every ASCI
 strings.TrimSpace, native strips ASCII 9-13 and 32: `int.Parse(" 1 2 ")` and `int.Parse(" 1")` give three answers.
 .NET's NumberStyles.Integer allows leading/trailing white space (U+0009-U+000D, U+0020) only; settle with a real dotnet.
 
-### T-1027 csharp: ParamName is "" (not null) when unset; `int.Parse(null)` throws FormatException · P3 · CS · OPEN [V spec-only]
+### T-1027 csharp: ParamName is "" (not null) when unset; `int.Parse(null)` throws FormatException · P3 · CS · IN PROGRESS (CS worker, round 4) [V spec-only]
 `new ArgumentException("bad").ParamName == null` — .NET: True (ParamName is null when no name is passed); ours (all three engines): False, it prints as "". Same for ArgumentOutOfRangeException etc. constructed without a param name.
 `string s = null; int.Parse(s);` — .NET docs: ArgumentNullException with ParamName "s"; ours: FormatException "The input string was not in a correct format." in all legs (double.Parse already does the null check; csParseInt and its Go / layer-2 twins lack it; check long/short/byte/uint Parse too).
 
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-1032 kotlin: enum compareTo/ranges, Boolean ranges, IntRange.endExclusive · P3 · KT · OPEN [V]
+### T-1032 kotlin: enum compareTo/ranges, Boolean ranges, IntRange.endExclusive · P3 · KT · IN PROGRESS (KT worker, round 17) [V]
 kotlinc 2.2.21 (repros: scratchpad KT16/q3.kt, q4.kt): `enum class Col{A,B,C}; Col.B.compareTo(Col.C)` → -1; ours aborts in all engines ("unknown method 'compareTo'"). `Col.B in Col.A.rangeTo(Col.C)` → true; interpreter says false (run/native true). `false..true` / `false.rangeTo(true)` → prints `false..true`, `true in false..true` → true; run/native abort "method call 'rangeTo' on a boolean". `(1..5).endExclusive` → 6; interpreter prints kotlin.Unit, compiled legs wrong too. Found by KT r16.
 
 # GO — Go  (oracle: `go run`)
@@ -153,7 +153,7 @@ range 0..2: 7` (a plain RangeError); the current engines print the IndexError fo
 `RangeError (index): Index out of range: index should be less than 3: 7`, which is
 believed to be the modern VM's. Leave as is unless a real dart run settles it.
 
-### T-1035 C compiler silently merges two definitions of one function name into a corrupt module · P3 · CORE · OPEN [V]
+### T-1035 c: the C compiler silently merges two definitions of one function name into a corrupt module · P3 · CORE · OPEN [V]
 Defining the same C function twice (seen with a second `rt_isref` in languages/lib/bash-rt.c during SH r26) produces an LLVM module with "%entry already present" instead of a redefinition error. cc rejects it ("redefinition of 'rt_isref'"). The C front end should diagnose a duplicate function definition.
 
 # Closed
