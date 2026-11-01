@@ -1586,6 +1586,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         loVars["$" + e.name] = e.al
         dclVars["$" + e.name] = e.ad
         roVars["$" + e.name] = e.ar
+        exVars["$" + e.name] = e.ax
         if (e.hasArr) { arrs[arrKey(e.name)] = e.arr } else { arrs[arrKey(e.name)] = null }
     }
     // `unset NAME` where NAME is a local of a CALLER: bash removes that caller's local
@@ -1642,7 +1643,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var hadA = hasOwn(arrs, ak) && arrs[ak] != null
         return {name: name, had: isSetVar(name), val: quietVal(name),
                 ai: attrOn(intVars, name), au: attrOn(upVars, name), al: attrOn(loVars, name),
-                ad: attrOn(dclVars, name), ar: attrOn(roVars, name), hasArr: hadA, arr: hadA ? arrCopy(arrs[ak]) : {assoc: false, keys: [], vals: {}, gone: {}, lit: false, decl: false}}
+                ad: attrOn(dclVars, name), ar: attrOn(roVars, name), ax: attrOn(exVars, name), hasArr: hadA, arr: hadA ? arrCopy(arrs[ak]) : {assoc: false, keys: [], vals: {}, gone: {}, lit: false, decl: false}}
     }
     // The saved entry holding NAME's GLOBAL binding while a local or a prefix binding hides
     // it: the first entry of the outermost frame that saved NAME. null when the global is
@@ -2181,10 +2182,13 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // grammar, so they are absent here too; -a/-A/-i/-u/-l are answered.
     // bash answers ALL of them, in the order a/A, i, l, u: `declare -ai x` is `ai` and
     // `declare -iu n` is `iu`.
+    // The attribute letters in bash's order: a/A i r x l u.
     function varAttrs(name) {
         var out = ""
         if (isArr(name)) { out = arrs[arrKey(name)].assoc ? "A" : "a" }
         if (attrOn(intVars, name)) { out = out + "i" }
+        if (attrOn(roVars, name)) { out = out + "r" }
+        if (attrOn(exVars, name)) { out = out + "x" }
         if (attrOn(loVars, name)) { out = out + "l" }
         if (attrOn(upVars, name)) { out = out + "u" }
         return out
@@ -2269,7 +2273,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (declIsArr(name)) { return "declare -" + at + " " + declArrAssign(name) }
         if (declOnly(name)) { return "declare -" + at + " " + name }
         var head = "declare -" + ((at == "") ? "-" : at) + " " + name
-        if (!isSetVar(name)) { return attrOn(dclVars, name) ? head : "" }
+        if (!isSetVar(name)) { return (attrOn(dclVars, name) || at != "") ? head : "" }
         return head + "=" + declQuote(getVarVal(name))
     }
 
@@ -2281,6 +2285,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         loVars["$" + name] = false
         dclVars["$" + name] = false
         roVars["$" + name] = false
+        exVars["$" + name] = false
     }
     // ${!prefix*} / ${!prefix@}: the set variable names with that prefix, sorted.
     //     $ Zq=1; Zw=2; echo "${!Z*}"   ->  Zq Zw
@@ -2968,7 +2973,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 // the global's attributes or its array: `declare -i g; f(){ local g;
                 // g=1+1; }` prints 1+1, and `arr=(a b); f(){ local arr=Q; }` sees a
                 // one-element array. declareLocal has just saved all of it for the return.
+                // Only the export attribute carries over to the local.
+                var wasX = attrOn(exVars, names[k])
                 dropAttrs(names[k])
+                exVars["$" + names[k]] = wasX
                 arrs[arrKey(names[k])] = null
             }
             if (integer) { intVars["$" + names[k]] = true }
@@ -2993,6 +3001,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             else if (inherit) { setVarVal(names[k], inhV) }
             else if (fresh) { unsetVar(names[k]) }
             if (setRo) { roVars["$" + names[k]] = true }
+            if (kw == "export" && flags.indexOf("n") >= 0) { exVars["$" + names[k]] = false }
+            else if (kw == "export" || flags.indexOf("x") >= 0) { exVars["$" + names[k]] = true }
+            if (plus.indexOf("x") >= 0) { exVars["$" + names[k]] = false }
             if (asgs[k] == null && !isArray && kw != "export" && kw != "readonly") { dclVars["$" + names[k]] = true }
         }
         // The expanded values, one array per running declaration: the expansion of a value can
@@ -3607,6 +3618,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var dclVars = {}
     // `readonly` / -r: an assignment, a `local` or an `unset` of the name fails (roRefused).
     var roVars = {}
+    // `export` / -x: no environment is passed anywhere here, but `declare -p`, ${v@a} and
+    // ${v@A} show the attribute; `export -n` and +x take it away, and a local inherits it.
+    var exVars = {}
     // An attribute map holds FALSE for a name whose attribute was dropped - by `unset`, or by
     // a call frame unwinding a `local` - so membership alone is not the answer.
     function attrOn(m, name) {
@@ -3637,7 +3651,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var hadA = hasOwn(arrs, ak) && arrs[ak] != null
             out.push({hasArr: hadA, arr: hadA ? arrCopy(arrs[ak]) : {assoc: false, keys: [], vals: {}, gone: {}, lit: false, decl: false},
                       ai: attrOn(intVars, nm), au: attrOn(upVars, nm), al: attrOn(loVars, nm), ad: attrOn(dclVars, nm),
-                      ar: attrOn(roVars, nm)})
+                      ar: attrOn(roVars, nm), ax: attrOn(exVars, nm)})
         }
         return out
     }
@@ -3651,6 +3665,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             loVars["$" + nm] = snap[i].al
             dclVars["$" + nm] = snap[i].ad
             roVars["$" + nm] = snap[i].ar
+            exVars["$" + nm] = snap[i].ax
         }
         // A name FIRST SEEN inside the subshell has no saved entry, and leaving it is
         // the same leak the other way round: `( declare -A m=([z]=1) )` must not leave m

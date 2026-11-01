@@ -1571,8 +1571,12 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // `varnames`; the emitter only fills that table in main's entry block.
     var rtSetByName = rtDecl("rt_setvar_byname", false, [1, 1])
     var rtEvalAssign = rtDecl("rt_eval_assign", false, [1])
-    // i32 rt_decl_word(i8* w, i32 d): one computed operand of a declaration (bash-rt.c).
-    var rtDeclWord = rtDecl("rt_decl_word", false, [1, 0])
+    // i32 rt_decl_word(i8* w, i32 d, i32 x): one computed operand of a declaration (bash-rt.c).
+    var rtDeclWord = rtDecl("rt_decl_word", false, [1, 0, 0])
+    // The export attribute is the one the runtime keeps per name (rt_xmark), because a
+    // computed operand can export a name no lexical table sees.
+    var rtXmark = rtDecl("rt_xmark", false, [1, 0])
+    var rtXletters = rtDecl("rt_xletters", true, [1, 1])
     // i32 rt_inwords(i8* w, i8* list): 1 when w is one of the newline-separated words of list.
     var rtInWords = rtDecl("rt_inwords", false, [1, 1])
     var rtGetByName = rtDecl("rt_getvar_byname", true, [1])
@@ -2218,9 +2222,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // because `q=(1 2)` declares nothing, hence the select.
         function attrLetters(b, nmv) {
             var sc = scalarAttrLetters(xfName)
-            if (rtAssoc || hasOwn(assocArrays, "$" + xfName)) { return gepStr(b, "A" + sc) }
+            if (rtAssoc || hasOwn(assocArrays, "$" + xfName)) { return b.NewCall(rtXletters, [nmv, gepStr(b, "A" + sc)]) }
             var isArrRt = b.NewICmp(llvm.enum.IPredNE, b.NewCall(rtArrAny, nmv), zero)
-            return b.NewSelect(isArrRt, gepStr(b, "a" + sc), gepStr(b, sc))
+            return b.NewCall(rtXletters, [nmv, b.NewSelect(isArrRt, gepStr(b, "a" + sc), gepStr(b, sc))])
         }
         // `isset` is an i32 0/1: ${nosuch@Q} and ${nosuch@A} are EMPTY in bash 5.3.15, while
         // ${empty@Q} is ''.
@@ -3572,7 +3576,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // no attributes: it takes no attribute option and no readonly.
         var fk
         var attrOpt = false
-        for (fk = 0; fk < flags.length; fk++) { if ("-+xg".indexOf(flags.charAt(fk)) < 0) { attrOpt = true } }
+        for (fk = 0; fk < flags.length; fk++) { if ("-+xg".indexOf(flags.charAt(fk)) < 0 && !(kw == "export" && flags.charAt(fk) == "n")) { attrOpt = true } }
         for (fk = 0; fk < plus.length; fk++) { if ("-+xg".indexOf(plus.charAt(fk)) < 0) { attrOpt = true } }
         if (anyDyn && (kw == "readonly" || attrOpt)) {
             fail("a computed operand of `" + kw + " " + flags + plus + "` is not supported by this compiler")
@@ -3589,6 +3593,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var query = (flags.indexOf("p") >= 0) || (flags.indexOf("f") >= 0) || (flags.indexOf("F") >= 0)
         var isPrint = (flags.indexOf("p") >= 0) && (flags.indexOf("f") < 0) && (flags.indexOf("F") < 0)
         var setRo = kw == "readonly" || flags.indexOf("r") >= 0
+        // 1: the declaration exports its names, -1: it takes the attribute away (rt_xmark).
+        var xCode = 0
+        if (kw == "export" || flags.indexOf("x") >= 0) { xCode = 1 }
+        if ((kw == "export" && flags.indexOf("n") >= 0) || plus.indexOf("x") >= 0) { xCode = -1 }
         // A readonly name the declaration would assign or make local is refused (status 1).
         var roFail = false
         var k
@@ -3673,6 +3681,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (plus.indexOf("u") >= 0) { upVars["$" + names[j]] = false }
             if (plus.indexOf("l") >= 0) { loVars["$" + names[j]] = false }
             if (setRo) { roVars["$" + names[j]] = true }
+            if (xCode != 0) { b.NewCall(rtXmark, [gepStr(b, names[j]), (xCode > 0) ? one : zero]) }
             // A global `declare -a a` keeps a's elements; only a value or a local starts empty.
             if (isArray && asgs[j] != null) { b.NewCall(rtArrClear, gepStr(b, names[j])) }
             if (isArray && asgs[j] == null && localize && curFrame != null) {
@@ -3714,7 +3723,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var iv = head.NewLoad(i32, iP)
             head.NewCondBr(head.NewICmp(llvm.enum.IPredSLT, iv, n), step, done)
             var fld = step.NewCall(rtGetField, [all, iv])
-            var rc = step.NewCall(rtDeclWord, [fld, localize ? step.NewLoad(i32, curFrame.depth) : llvm.constant.NewInt(i32, -1)])
+            var rc = step.NewCall(rtDeclWord, [fld, localize ? step.NewLoad(i32, curFrame.depth) : llvm.constant.NewInt(i32, -1),
+                                               llvm.constant.NewInt(i32, xCode)])
             var badB = curF.NewBlock(""), optB = curF.NewBlock(""), nextB = curF.NewBlock(""), okB = curF.NewBlock("")
             step.NewCondBr(step.NewICmp(llvm.enum.IPredEQ, rc, zero), nextB, okB)
             okB.NewCondBr(okB.NewICmp(llvm.enum.IPredEQ, rc, one), badB, optB)
@@ -3755,6 +3765,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 if (isPrint && names.length > 0) {
                     var acc = zero
                     for (j = 0; j < names.length; j++) {
+                        // The name gets its slot, which a computed operand may have stored into.
+                        getVarId(names[j])
                         var lt = scalarAttrLetters(names[j])
                         var isAs = hasOwn(assocArrays, "$" + names[j]) ? one : zero
                         var rp = b.NewCall(rtDeclp, [gepStr(b, names[j]), gepStr(b, lt), isAs])
@@ -3851,9 +3863,11 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     // The SCALAR attribute letters of a name, in bash's own order (i, l, u; the array letter
     // goes in front of them): `declare -iu n` prints `declare -iu`.
+    // In bash's order, i r l u; rt_xletters puts in the x of an exported name.
     function scalarAttrLetters(name) {
         var out = ""
         if (attrOn(intVars, name)) { out = out + "i" }
+        if (attrOn(roVars, name)) { out = out + "r" }
         if (attrOn(loVars, name)) { out = out + "l" }
         if (attrOn(upVars, name)) { out = out + "u" }
         return out
@@ -5595,6 +5609,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     else if (sp0.key == null) {
                         storeVarRaw(b, sp0.name, unsetPtr(b))
                         b.NewCall(rtArrClear, gepStr(b, sp0.name))
+                        b.NewCall(rtXmark, [gepStr(b, sp0.name), zero])
                         // `unset` drops the attributes with the value, in bash and here.
                         intVars["$" + sp0.name] = false
                         upVars["$" + sp0.name] = false

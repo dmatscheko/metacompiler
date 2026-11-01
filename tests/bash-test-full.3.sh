@@ -1430,6 +1430,39 @@ true is a shell builtin"
   r=$(command -vV echo; command -Vv echo); check cv5 "$r" "echo is a shell builtin
 echo"
 }
+# ===== SECTION 85: the export and readonly attributes in declare -p, ${v@a} and ${v@A} =====
+# bash writes the letters in the order a/A i r x l u. `export` and -x set x, also through a
+# computed operand; `export -n`, +x and `unset` take it away, an assignment keeps it, and a
+# fresh `local` of an exported name inherits it. An exported or readonly name without a value
+# prints as declared. Every expected value is bash 5.3's.
+s85() {
+  local r d=(s85p=x s85q=y) e=s85s=z
+  export "${d[@]}"; export "$e"
+  check xa1 "$(declare -p s85p s85q s85s)" 'declare -x s85p="x"
+declare -x s85q="y"
+declare -x s85s="z"'
+  export s85a=1; s85a=2; declare -xu s85u=b; declare -ix s85i=3; declare -rx s85r=1
+  check xa2 "$(declare -p s85a s85u s85i s85r)" 'declare -x s85a="2"
+declare -xu s85u="B"
+declare -ix s85i="3"
+declare -rx s85r="1"'
+  check xa3 "${s85u@a}|${s85u@A}|${s85r@a}" "xu|declare -xu s85u='B'|rx"
+  declare -ax s85v=(1 2); s85v=(3 4)
+  check xa4 "$(declare -p s85v)|${s85v@a}" 'declare -ax s85v=([0]="3" [1]="4")|ax'
+  export s85e; readonly s85o
+  check xa5 "$(declare -p s85e s85o)" 'declare -x s85e
+declare -r s85o'
+  export s85n=1 s85m=1; export -n s85n; declare -g +x s85m
+  export s85w=1; unset s85w; s85w=2
+  check xa6 "$(declare -p s85n s85m s85w)" 'declare -- s85n="1"
+declare -- s85m="1"
+declare -- s85w="2"'
+  s85f() { local s85a; declare -p s85a; local s85l=1; export s85l; declare -p s85l; }
+  r=$(s85f; declare -p s85l 2>/dev/null; echo "st=$?")
+  check xa7 "$r" 'declare -x s85a
+declare -x s85l="1"
+st=1'
+}
 # ===== END SECTIONS =====
 
 s47   # SECTION-CALL 47
@@ -1469,5 +1502,6 @@ s81   # SECTION-CALL 81
 s82   # SECTION-CALL 82
 s83   # SECTION-CALL 83
 s84   # SECTION-CALL 84
+s85   # SECTION-CALL 85
 echo "full: $checks checks, $fails failures"
 exit $fails

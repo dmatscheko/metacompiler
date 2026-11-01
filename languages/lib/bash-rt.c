@@ -62,7 +62,7 @@ char *varnames[1024];
 int ls_id[512];
 char *ls_val[512];
 int ls_acnt[512];
-int ls_amark[512];   /* the record's marks (1 2 4, see rt_arr_mark), and 8 when it was not sorted */
+int ls_amark[512];   /* the record's marks (1 2 4 16, see rt_arr_mark), and 8 when it was not sorted */
 int ls_top;
 int ls_tmp[512];     /* a function's prefix binding (rt_push_tmp): 1, and 2 once a `local` claimed it */
 int ls_tb;           /* 1 + where the next call's frame starts when prefix bindings open it, else 0 */
@@ -307,7 +307,9 @@ char *rt_getvar_ind(char *n);
 int rt_varslot(char *n);
 int rt_setvar_byname(char *n, char *v);
 int rt_eval_assign(char *s);
-int rt_decl_word(char *w, int d);
+int rt_decl_word(char *w, int d, int x);
+int rt_xmark(char *nm, int on);
+char *rt_xletters(char *nm, char *at);
 int putchar(int c);
 
 /* ---- standard error and fail-stop ------------------------------------------
@@ -5669,7 +5671,34 @@ int rt_arr_smarked(char *nm) {
     return (rt_arr_marks(nm) & 4) != 0 ? 1 : 0;
 }
 
-/* i32 rt_arr_clear(i8* nm): drop every row of one array, and its marks. */
+/* EXPORTED is mark 16, the one attribute this runtime keeps per name: `export`
+ * and -x set it, `export -n`, +x and `unset` take it away. rt_arr_clear keeps it,
+ * so an array assignment keeps it and a fresh `local` inherits it, as in bash;
+ * the local save stack and the subshell snapshot carry it with the other marks.
+ * Twin of exVars in bash-interpreter.abnf. */
+int rt_xmark(char *nm, int on) {
+    int r;
+    if (on != 0) {
+        r = rt_ar_rec(nm);
+        ar_mk[r] = ar_mk[r] | 16;
+        return 0;
+    }
+    r = rt_ar_find(nm);
+    if (r >= 0) ar_mk[r] = ar_mk[r] & 7;
+    return 0;
+}
+
+/* The attribute letters `at` (bash's order: a/A i r x l u) with the x of an
+ * exported NAME put in its place. */
+char *rt_xletters(char *nm, char *at) {
+    int i = 0;
+    if ((rt_arr_marks(nm) & 16) == 0) return at;
+    while (at[i] != 0 && at[i] != 108 && at[i] != 117) i = i + 1;
+    return rt_strcat(rt_strcat(rt_substr(at, 0, i), "x"), rt_substr(at, i, -1));
+}
+
+/* i32 rt_arr_clear(i8* nm): drop every row of one array, and its marks but the
+ * export mark (rt_xmark). */
 int rt_arr_clear(char *nm) {
     int r = rt_ar_find(nm);
     int i = 0;
@@ -5680,7 +5709,7 @@ int rt_arr_clear(char *nm) {
     }
     arr_rows = arr_rows - ar_n[r];
     ar_n[r] = 0;
-    ar_mk[r] = 0;
+    ar_mk[r] = ar_mk[r] & 16;
     ar_srt[r] = 1;
     rt_ar_khdrop(r);
     return 0;
@@ -6221,11 +6250,15 @@ char *rt_prompt(char *s) {
     return dq;
 }
 
+/* `declare -p NAME`. `flag` is the attribute letters the emitter knows, the
+ * export mark is added here (rt_xletters); a name that is not set but carries
+ * an attribute is printed as declared (`export e` gives `declare -x e`). */
 int rt_declp(char *nm, char *flag, int assoc) {
     int n = rt_arr_count(nm);
     int isarr = (n > 0 || rt_arr_marked(nm) != 0) ? 1 : 0;
     char *v;
     int saved;
+    flag = rt_xletters(nm, flag);
     if (isarr == 0) {
         v = rt_getvar_byname(nm);
         /* Declared with -a/-A: with no value `declare -a e`; a plain assignment
@@ -6244,7 +6277,7 @@ int rt_declp(char *nm, char *flag, int assoc) {
             rt_prints("\n");
             return 0;
         }
-        if (v == &unset_marker[0] && rt_arr_smarked(nm) != 0) {
+        if (v == &unset_marker[0] && (rt_arr_smarked(nm) != 0 || flag[0] != 0)) {
             rt_prints("declare -");
             rt_prints(flag[0] == 0 ? "-" : flag);
             rt_prints(" ");
@@ -6993,6 +7026,7 @@ int rt_ls_restore(int t, int rows)
     gvars[ls_id[t]] = ls_val[t];
     if (cnt == 0 && ls_amark[t] == 0) {
         rt_arr_clear(nm);
+        rt_xmark(nm, 0);
         return 0;
     }
     r = rt_ar_rec(nm);
@@ -7003,7 +7037,7 @@ int rt_ls_restore(int t, int rows)
     }
     arr_rows = arr_rows - ar_n[r] + cnt;
     ar_n[r] = cnt;
-    ar_mk[r] = ls_amark[t] & 7;
+    ar_mk[r] = ls_amark[t] & 23;
     ar_srt[r] = (ls_amark[t] & 8) != 0 ? 0 : 1;
     rt_ar_khdrop(r);
     return 0;
@@ -7465,6 +7499,7 @@ int rt_unset_name(char *n)
     }
     rt_setvar_byname(n, &unset_marker[0]);
     rt_arr_clear(n);
+    rt_xmark(n, 0);
     return 0;
 }
 
@@ -7555,8 +7590,9 @@ int rt_eval_assign(char *s)
  * at d, unless it already is one. Answers 0, 1 for a word that is no name
  * (bash's "not a valid identifier"), 2 for one that starts with - or +: an
  * option, which only the emitter could apply. Twin of the computed operands of
- * makeDecl in bash-interpreter.abnf. */
-int rt_decl_word(char *w, int d)
+ * makeDecl in bash-interpreter.abnf. x > 0 exports the name, x < 0 takes the
+ * export attribute away (rt_xmark). */
+int rt_decl_word(char *w, int d, int x)
 {
     int i = 0;
     int app = 0;
@@ -7572,6 +7608,7 @@ int rt_decl_word(char *w, int d)
     nm = rt_substr(w, 0, i);
     id = rt_varslot(nm);
     if (d >= 0 && id >= 0 && rt_local_here(id, d) == 0) rt_local_new(id, d, w[i] == 0 ? 1 : 0);
+    if (x != 0) rt_xmark(nm, x > 0 ? 1 : 0);
     if (w[i] == 0) return 0;
     v = rt_substr(w, i + 1 + app, -1);
     if (app != 0) v = rt_strcat(rt_getvar_byname(nm), v);
