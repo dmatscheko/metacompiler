@@ -69,7 +69,7 @@ Remainder of T-1028; each needs a table-size decision before work starts. CJK fa
 
 # RB — Ruby
 
-### T-1104 ruby: interpreter `break` from a block is caught by the nearest call with a block literal (untagged) · P3 · RB · OPEN [V]
+### T-1104 ruby: interpreter `break` from a block is caught by the nearest call with a block literal (untagged) · P3 · RB · IN PROGRESS (RB worker, round 51) [V]
 
 Only the interpreter is wrong; llvm.Run and native match ruby 2.6.
 
@@ -82,7 +82,7 @@ p(c { |v| break v * 7 })                  # ruby: 7      interp: [:c, 7]
 
 `break` must end the call that the block was written for: the frame that received the block literal, not the innermost call currently running a block. Tag the break throw with the block's home call (as the compiled legs do) and catch it only there. A break from a proc whose home call has already returned must raise LocalJumpError.
 
-### T-1105 ruby: split tests/ruby-test-full.rb, which is ~0.4% below the -frozen 100M step brake · P3 · RB · OPEN [V]
+### T-1105 ruby: split tests/ruby-test-full.rb, which is ~0.4% below the -frozen 100M step brake · P3 · RB · IN PROGRESS (RB worker, round 51) [V]
 
 Under the -frozen interpreter the file takes about 99.5–99.7M steps against the 100M brake. Almost any per-call cost added to the interpreter trips it; the r50 worker had to add fast paths to bindParams and blkBind just to stay under it.
 
