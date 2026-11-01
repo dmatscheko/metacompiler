@@ -4283,7 +4283,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var i
         for (i = 0; i < items.length; i++) {
             var it = items[i]
-            if (it.dkw != undefined || it.dflag != undefined || it.dname != undefined || it.a != undefined || it.dyn != undefined) { core.push(it) }
+            if (it.dkw != undefined || it.dflag != undefined || it.dname != undefined || it.a != undefined || it.dyn != undefined) { core.push(bashDeclPlusOp(core, it, makeConst)) }
             else { reds.push(it) }
         }
         return makeDecl(core, reds)

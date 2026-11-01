@@ -679,16 +679,13 @@ function dpPrintCmd(c, ind, inline) {
 
 // The diagnostic for the first option letter keyword kw does not take (bash 5.3: export
 // and readonly take -aAfnp, the others -aAfFgiIlnprtux), its usage line included, or "".
-// flags are the option words joined, their signs kept; export and readonly take no +X.
+// flags are the option words joined, their signs kept.
 function bashDeclBadOpt(kw, flags) {
-    var xr = kw == "export" || kw == "readonly"
-    var ok = xr ? "aAfnp" : "aAfFgiIlnprtux"
-    var sign = "-"
+    var ok = (kw == "export" || kw == "readonly") ? "aAfnp" : "aAfFgiIlnprtux"
     var i
     for (i = 0; i < flags.length; i++) {
         var ch = flags.charAt(i)
-        if (ch == "-" || ch == "+") { sign = ch; continue }
-        if ((xr && sign == "+") || ok.indexOf(ch) >= 0) { continue }
+        if (ch == "-" || ch == "+" || ok.indexOf(ch) >= 0) { continue }
         var use = "declare [-aAfFgiIlnrtux] [name[=value] ...] or declare -p [-aAfFilnrtux] [name ...]"
         if (kw == "typeset") { use = "typeset [-aAfFgiIlnrtux] name[=value] ... or typeset -p [-aAfFilnrtux] [name ...]" }
         if (kw == "local") { use = "local [option] name[=value] ..." }
@@ -697,6 +694,19 @@ function bashDeclBadOpt(kw, flags) {
         return kw + ": -" + ch + ": invalid option\n" + kw + ": usage: " + use + "\n"
     }
     return ""
+}
+
+// EXPORT AND READONLY TAKE NO +X: their options end at the first word not starting with
+// "-", so `export +x v=1` has the operand +x, which is no name (bash 5.3: "`+x': not a
+// valid identifier", status 1, and v is still exported). The option item it, next after
+// core, becomes a computed operand of its one constant word (mkConst) from such a +X on.
+function bashDeclPlusOp(core, it, mkConst) {
+    if (it.dflag == undefined || (core[0].dkw != "export" && core[0].dkw != "readonly")) { return it }
+    var ended = it.dflag.charAt(0) == "+"
+    var k
+    for (k = 1; k < core.length; k++) { if (core[k].dyn != undefined) { ended = true } }
+    if (!ended) { return it }
+    return {dyn: [mkConst(it.dflag)]}
 }
 
 // Does the subscript text of a NAME[SUB] string need expanding (a $, a quote, a backslash or
@@ -717,6 +727,7 @@ function bashSubNeedsX(t) {
 // "not a valid identifier"]}, or null.
 function bashDeclText(items, fieldsOf, quote) {
     var text = items[0].dkw
+    var xr = text == "export" || text == "readonly"
     var arr = false
     var opts = true
     var operands = 0
@@ -742,13 +753,13 @@ function bashDeclText(items, fieldsOf, quote) {
         for (k = 0; k < fs.length; k++) {
             var f = fs[k]
             if (opts && f == "--") { opts = false; continue }
-            if (opts && f.length > 1 && (f.charAt(0) == "-" || f.charAt(0) == "+") && bashDeclFlagText(f)) {
+            if (opts && f.length > 1 && (f.charAt(0) == "-" || (f.charAt(0) == "+" && !xr)) && bashDeclFlagText(f)) {
                 text = text + " " + f
                 if (f.charAt(0) == "-" && (f.indexOf("a") >= 0 || f.indexOf("A") >= 0)) { arr = true }
                 continue
             }
             opts = false
-            var op = bashDeclOperand(f, arr, quote, items[0].dkw != "export" && items[0].dkw != "readonly")
+            var op = bashDeclOperand(f, arr, quote, !xr)
             if (op == "") { bad.push(f); continue }
             operands = operands + 1
             text = text + " " + op

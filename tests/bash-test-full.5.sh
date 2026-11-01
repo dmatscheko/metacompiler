@@ -546,6 +546,22 @@ declare -ax s106x=([0]="1" [1]="2")'
   r=$(s106p=(9 8); x=V; t='s106p+=(7 "a\"b" "$x" [7]="k$x")'; declare -a "$t"; declare -p s106p); check dlit4 "$r" 'declare -a s106p=([0]="7" [1]="a\"b" [2]="V" [7]="kV")'
   r=$(declare -i s106i; t='s106i=(1+1 [4]=2+4)'; declare -a "$t"; declare -p s106i); check dlit5 "$r" 'declare -ai s106i=([0]="2" [4]="6")'
 }
+# ===== SECTION 107: export and readonly take no +X =====
+# Their options end at the first word not starting with "-": +x is an operand, which is no
+# name ("not a valid identifier", status 1), and the rest are still declared. Every expected
+# value is bash 5.3's.
+s107() {
+  local r
+  r=$(export +x s107a=1 2>/dev/null; echo "st=$?"; declare -p s107a); check xpl1 "$r" 'st=1
+declare -x s107a="1"'
+  r=$(export +n s107b=2 2>/dev/null; echo "st=$?"; declare -p s107b); check xpl2 "$r" 'st=1
+declare -x s107b="2"'
+  r=$(readonly +r s107c=3 2>/dev/null; echo "st=$?"; declare -p s107c); check xpl3 "$r" 'st=1
+declare -r s107c="3"'
+  r=$(export -p +x >/dev/null 2>&1; echo "st=$?"); check xpl4 "$r" 'st=1'
+  r=$(export s107d=4; declare -g +x s107d; echo "st=$?"; declare -p s107d); check xpl5 "$r" 'st=0
+declare -- s107d="4"'
+}
 # ===== END SECTIONS =====
 
 s90   # SECTION-CALL 90
@@ -565,5 +581,6 @@ s103  # SECTION-CALL 103
 s104  # SECTION-CALL 104
 s105  # SECTION-CALL 105
 s106  # SECTION-CALL 106
+s107  # SECTION-CALL 107
 echo "full: $checks checks, $fails failures"
 exit $fails
