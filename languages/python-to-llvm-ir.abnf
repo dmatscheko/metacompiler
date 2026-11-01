@@ -2276,6 +2276,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return {b: r.b, v: callExt(r.b, "js_pyb", [r.v])}
         }
     }
+    // A program that names the idna codec in a string literal gets the nameprep
+    // tables at boot (buildMain, js_pynameprepdata); any other refuses a
+    // non-ASCII idna label with NotImplementedError (pycdIdnaRefuse).
+    var pyPrepWant = false
     // Adjacent pieces concatenate (implicit string concatenation). An all-constant
     // run folds to one constant at compile time; a run holding an f-string becomes a
     // chain of js_jadd.
@@ -2296,6 +2300,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (allConst) {
             var lit = ""
             for (var k = 0; k < items.length; k++) { lit += items[k].str }
+            if (lit.toLowerCase() == "idna") { pyPrepWant = true }
             walkStrConst = true
             walkStrText = lit
             return makeConst(lit)
@@ -4890,6 +4895,12 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // reaches past it into the host runtime's own scope. It is also where the
         // "pymod*" and "pydel*" marks live (pyOpenBoundary).
         curScopeV = pyOpenBoundary(b, f.Params[0], true)
+        // The tables live for the whole run, in the permanent region (js_gc_perm).
+        if (pyPrepWant) {
+            callExt(b, "js_gc_perm", [handle(1)])
+            callExt(b, "js_pynameprepdata", [emitStr(b, load("lib/unicode-norm.txt")), emitStr(b, load("lib/python-nameprep.txt"))])
+            callExt(b, "js_gc_perm", [handle(0)])
+        }
         // print(*objects, sep, end, file, flush): the Python renderer.
         b = declKwBuiltin(b, "print", "js_pyprint", ["sep", "end", "file", "flush"])
         // len(x): strings, lists, sets, dicts and __len__ via js_pylenof.

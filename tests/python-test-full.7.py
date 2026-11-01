@@ -1,9 +1,9 @@
-# Full-syntax test: Python (3.12 core grammar) - part 7, sections 199-207 and
+# Full-syntax test: Python (3.12 core grammar) - part 7, sections 199-208 and
 # 152: the data model's bound-method equality, three-argument pow's operand
 # protocol, list.sort's timsort, the codecs with the surrogateescape handler,
 # statistics' paired measures, a generator's gi_running and dir(), the
 # attributes an iterator or a builtin refuses, and the escape, punycode and
-# idna codecs, and range as a type of its own. A file of its own
+# idna codecs with nameprep, and range as a type of its own. A file of its own
 # because tests/python-test-full.py is close to the step brake (-max-steps, 100M
 # per call) of the -frozen interpreter leg; see tests/python-test-full.py for
 # the conventions.
@@ -407,6 +407,41 @@ def s207():
               "LookupError: unknown encoding: latin.1", "none", "none", "none", "none", "none", "none",
               "LookupError: unknown encoding: iso_646_irv_1991", "LookupError: unknown encoding: rot.13", "none"])
 
+# ===== SECTION 208: idna's nameprep =====
+# A non-ASCII label goes through nameprep (RFC 3491: map, Unicode 3.2's NFKC,
+# prohibit, bidi) and then punycode behind "xn--"; decoding checks that the
+# punycode encodes back. An error's position is within the nameprepped label,
+# offset by the label's start, so it can lie past the input's end. Rows from
+# CPython 3.14.
+def s208():
+    def err(f):
+        try:
+            f()
+        except Exception as e:
+            return type(e).__name__ + ": " + str(e)
+        return "none"
+    check("idna1", [s.encode("idna") for s in ["b\xfccher.de", "B\xdcCHER.DE.", "\ufb01x.example", "stra\xdfe.de",
+                                                "a\xadb.\xfc", "m\xfcnchen\u3002de", "\u216b.\xfc", "\u0627\u0628.\xfc",
+                                                "\U0002f868\xfc", "\u0221\xfc", "\u1e9e\xfc", "\u03a3\xfc", "\u3000\xfc"]]
+          == [b"xn--bcher-kva.de", b"xn--bcher-kva.DE.", b"fix.example", b"strasse.de", b"ab.xn--tda",
+              b"xn--mnchen-3ya.de", b"xii.xn--tda", b"xn--mgbc.xn--tda", b"xn--tda3962y", b"xn--tda99c",
+              b"xn--ss-yka", b"xn--tda53l", b"xn-- -eha"])
+    check("idna2", [err(lambda: s.encode("idna")) for s in ["\u0627a\u0628", "a\u0627", "\xfc\u2028x", "xn--\xfc",
+                                                             "\xe9" + "a" * 70, "\ufdfc\U00010054"]]
+          == ["UnicodeEncodeError: 'idna' codec can't encode character '\\x61' in position 1: Violation of BIDI requirement 2",
+              "UnicodeEncodeError: 'idna' codec can't encode character '\\x61' in position 0: Violation of BIDI requirement 2",
+              "UnicodeEncodeError: 'idna' codec can't encode character '\\u2028' in position 1: Invalid character '\\u2028'",
+              "UnicodeEncodeError: 'idna' codec can't encode characters in position 0-3: Label starts with ACE prefix",
+              "UnicodeEncodeError: 'idna' codec can't encode characters in position 0-70: label too long",
+              "UnicodeEncodeError: 'idna' codec can't encode characters in position 4-4: Violation of BIDI requirement 3"])
+    check("idna3", b"XN--BCHER-KVA.DE.".decode("idna") == "B\xfcCHER.DE."
+          and b"xn--bcher-kva.xn--mnchen-3ya".decode("idna") == "b\xfccher.m\xfcnchen"
+          and b"xn--d1acufc.xn--p1ai".decode("idna") == "\u0434\u043e\u043c\u0435\u043d.\u0440\u0444"
+          and err(lambda: b"xn--strae-oqa.de".decode("idna"))
+          == "UnicodeDecodeError: 'idna' codec can't decode bytes in position 0-12: IDNA does not round-trip, 'b'xn--strae-oqa'' != 'b'strasse''"
+          and err(lambda: b"caf\xc3\xa9.xn--bcher-kva".decode("idna"))
+          == "UnicodeDecodeError: 'idna' codec can't decode byte 0xc3 in position 3: ordinal not in range(128)")
+
 def main():
     s199() # SECTION-CALL 199
     s200() # SECTION-CALL 200
@@ -418,5 +453,6 @@ def main():
     s205() # SECTION-CALL 205
     s206() # SECTION-CALL 206
     s207() # SECTION-CALL 207
+    s208() # SECTION-CALL 208
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]

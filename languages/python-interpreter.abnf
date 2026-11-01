@@ -1115,8 +1115,18 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     include("lib/python-printable.js")
     // list.sort's timsort.
     include("lib/python-sort.js")
-    // str.encode's and bytes.decode's codecs and error handlers.
+    // str.encode's and bytes.decode's codecs and error handlers; the idna
+    // codec's nameprep runs NFKC (lib/js-norm.js), both tables loaded at its
+    // first non-ASCII label.
+    include("lib/js-norm.js")
     include("lib/python-codecs.js")
+    pycdPrepNeed = function() {
+        if (!pycdPrepReady[0]) {
+            if (!jsnormReady[0]) { jsnormLoad(load("lib/unicode-norm.txt")) }
+            pycdPrepLoad(load("lib/python-nameprep.txt"))
+        }
+        return true
+    }
     // str.isalpha / isdecimal / isdigit / isnumeric, over java.lang.Character's table.
     include("lib/java-chars.js")
     include("lib/python-chars.js")

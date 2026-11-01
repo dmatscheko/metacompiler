@@ -1265,10 +1265,8 @@ function pycdBnHex(a0) {
 }
 
 // IDNA (RFC 3490) as CPython's encodings.idna applies it, strict errors only.
-// A label that is all ASCII is exact; a label that is not, and a decoded xn--
-// label that is not ASCII, needs nameprep (RFC 3491) over Unicode 3.2's
-// tables, which are not here, and is refused. Encoding an ASCII name checks
-// its labels between "." only; any other name splits at the four IDNA dots.
+// An ASCII name checks its labels between "." only; any other name splits at
+// the four IDNA dots and each label goes through ToASCII (pycdIdnaToAscii).
 function pycdEncodeIdna(r, cps, errs) {
     if (errs != "strict") {
         r.err = "UnicodeError"
@@ -1281,35 +1279,233 @@ function pycdEncodeIdna(r, cps, errs) {
     }
     var labels = pycdIdnaSplit(cps, ascii)
     var last = labels.length - 2
-    if (!ascii && labels[last + 1] - labels[last] == 0 && labels.length > 2) { last = last - 2 }
-    for (var e = 0; e <= last && ascii; e = e + 2) {
-        if (e < last && labels[e + 1] == labels[e]) {
-            pycdIdnaEncErr(r, cps, labels[e], labels[e] + 1, "label empty")
-            return
-        }
-    }
-    for (var k = 0; k <= last; k = k + 2) {
-        var from = labels[k]
-        var to = labels[k + 1]
-        for (var j = from; j < to; j++) {
-            if (cps[j] >= 128) {
-                pycdIdnaRefuse(r)
+    if (ascii) {
+        for (var e = 0; e < last; e = e + 2) {
+            if (labels[e + 1] == labels[e]) {
+                pycdIdnaEncErr(r, cps, labels[e], labels[e] + 1, "label empty")
                 return
             }
         }
-        if (!ascii && to == from) {
-            pycdIdnaEncErr(r, cps, from, from + 1, "label empty")
-            return
+        for (var k = 0; k <= last; k = k + 2) {
+            if (labels[k + 1] - labels[k] >= 64) {
+                pycdIdnaEncErr(r, cps, labels[k], labels[k + 1], "label too long")
+                return
+            }
         }
-        if (to - from >= 64) {
-            pycdIdnaEncErr(r, cps, from, to, "label too long")
-            return
-        }
+        for (var c = 0; c < cps.length; c++) { r.b.push(cps[c]) }
+        return
     }
-    for (var c = 0; c < cps.length; c++) {
-        if (ascii || c < labels[last + 1]) { r.b.push(pycdIdnaDot(cps[c]) ? 46 : cps[c]) }
+    if (labels[last + 1] == labels[last] && labels.length > 2) { last = last - 2 }
+    for (var q = 0; q <= last; q = q + 2) {
+        if (q > 0) { r.b.push(46) }
+        var lab = []
+        for (var j = labels[q]; j < labels[q + 1]; j++) { lab.push(cps[j]) }
+        var t = pycdIdnaToAscii(lab)
+        if (t.refused) {
+            pycdIdnaRefuse(r)
+            return
+        }
+        if (t.why != "") {
+            pycdIdnaEncErr(r, cps, labels[q] + t.lo, labels[q] + t.hi, t.why)
+            return
+        }
+        for (var b = 0; b < t.b.length; b++) { r.b.push(t.b[b]) }
     }
     if (last < labels.length - 2) { r.b.push(46) }
+}
+
+// ToASCII of one label (RFC 3490 4.1, CPython's encodings.idna.ToASCII): its
+// bytes, or the error's reason and [lo, hi) within the label.
+function pycdIdnaToAscii(lab) {
+    var t = {b: [], why: "", lo: 0, hi: 0, refused: false}
+    var cps = lab
+    if (!pycdAllAscii(cps)) {
+        var np = pycdNameprep(cps)
+        if (np.why != "") { return np }
+        cps = np.b
+    }
+    if (pycdAllAscii(cps)) {
+        if (cps.length > 0 && cps.length < 64) {
+            t.b = cps
+            return t
+        }
+        return pycdIdnaWhy(t, 0, cps.length == 0 ? 1 : cps.length, cps.length == 0 ? "label empty" : "label too long")
+    }
+    if (cps.length >= 4 && pycdIdnaAce(pycdLowerAscii(cps), 0)) { return pycdIdnaWhy(t, 0, 4, "Label starts with ACE prefix") }
+    var puny = []
+    pycdEncodePuny(cps, puny)
+    t.b = [120, 110, 45, 45].concat(puny)
+    if (t.b.length >= 64) { return pycdIdnaWhy(t, 0, cps.length, "label too long") }
+    return t
+}
+
+function pycdIdnaWhy(t, lo, hi, why) {
+    t.why = why
+    t.lo = lo
+    t.hi = hi
+    return t
+}
+
+function pycdAllAscii(cps) {
+    for (var i = 0; i < cps.length; i++) {
+        if (cps[i] >= 128) { return false }
+    }
+    return true
+}
+
+function pycdLowerAscii(cps) {
+    var out = []
+    for (var i = 0; i < cps.length; i++) { out.push(cps[i] >= 65 && cps[i] <= 90 ? cps[i] + 32 : cps[i]) }
+    return out
+}
+
+// Nameprep (RFC 3491) as CPython's encodings.idna.nameprep applies it, over the
+// tables of lib/python-nameprep.txt (CPython's stringprep module and
+// unicodedata.ucd_3_2_0), one entry per line, code points in hex:
+//   x<lo> <hi>      B.1, mapped to nothing
+//   m<cp> <x>...    B.2, the case-folding map
+//   p<lo> <hi>      prohibited: C.1.2, C.2.2 and C.3 to C.9
+//   r<lo> <hi>      D.1, RandALCat
+//   l<lo> <hi>      D.2, LCat
+//   u<lo> <hi>      unassigned in Unicode 3.2
+//   n<cp> <x>...    Unicode 3.2's NFKC where it differs from today's
+// NFKC is lib/js-norm.js's, over today's tables. A code point Unicode 3.2 left
+// unassigned is a starter there that neither decomposes nor composes, so the
+// text normalized piece by piece between those code points (and the n ones and
+// lone surrogates) is exactly Unicode 3.2's NFKC. Unassigned code points are
+// allowed, as CPython allows them. pycdPrepNeed is a knob: it makes both table
+// sets ready (the interpreter loads the files) or answers false (a compiled
+// program registers them at boot through js_pynameprepdata).
+var pycdPrepRuns = {}    // kind letter -> [lo, hi, lo, hi, ...], ascending
+var pycdPrepMap = {}     // "$" + cp -> the code points of its m or n line
+var pycdPrepReady = [false]
+var pycdPrepNeed = function() { return pycdPrepReady[0] }
+
+function pycdPrepLoad(t) {
+    if (pycdPrepReady[0]) { return }
+    pycdPrepReady[0] = true
+    var kinds = "xprlu"
+    for (var k = 0; k < kinds.length; k++) { pycdPrepRuns[kinds.charAt(k)] = [] }
+    var i = 0
+    while (i < t.length) {
+        var end = i
+        while (end < t.length && t.charCodeAt(end) != 10) { end = end + 1 }
+        var kind = t.charAt(i)
+        var ns = jsnormNums(t, i + 1, end, false)
+        if (kind == "m" || kind == "n") {
+            var m = []
+            for (var j = 1; j < ns.length; j++) { m.push(ns[j]) }
+            pycdPrepMap[kind + ns[0]] = m
+        } else {
+            pycdPrepRuns[kind].push(ns[0])
+            pycdPrepRuns[kind].push(ns[1])
+        }
+        i = end + 1
+    }
+}
+
+// Whether cp lies in one of the runs of kind.
+function pycdPrepIn(kind, cp) {
+    var runs = pycdPrepRuns[kind]
+    var lo = 0
+    var hi = runs.length / 2 - 1
+    while (lo <= hi) {
+        var mid = Math.floor((lo + hi) / 2)
+        if (cp < runs[2 * mid]) { hi = mid - 1 }
+        else if (cp > runs[2 * mid + 1]) { lo = mid + 1 }
+        else { return true }
+    }
+    return false
+}
+
+// The nameprepped label, as {b: code points}, or the error's reason and
+// [lo, hi) within it.
+function pycdNameprep(cps) {
+    var t = {b: [], why: "", lo: 0, hi: 0, refused: false}
+    if (!pycdPrepNeed()) {
+        t.refused = true
+        return pycdIdnaWhy(t, 0, 0, "nameprep")
+    }
+    var mapped = []
+    for (var i = 0; i < cps.length; i++) {
+        var c = cps[i]
+        if (pycdPrepIn("x", c)) { continue }
+        var mv = pycdPrepMap["m" + c]
+        if (mv === undefined) { mapped.push(c) } else { for (var j = 0; j < mv.length; j++) { mapped.push(mv[j]) } }
+    }
+    var out = t.b
+    var piece = []
+    for (var k = 0; k <= mapped.length; k++) {
+        var d = k < mapped.length ? mapped[k] : 0 - 1
+        var nv = d < 0 ? undefined : pycdPrepMap["n" + d]
+        if (d >= 0 && nv === undefined && !pycdPrepIn("u", d) && (d < 55296 || d > 57343)) {
+            piece.push(d)
+            continue
+        }
+        var norm = jsnormApply(pycdCpsStr(piece), "NFKC")
+        pycdStrCps(norm, out)
+        piece = []
+        if (nv !== undefined) { for (var n = 0; n < nv.length; n++) { out.push(nv[n]) } }
+        else if (d >= 0) { out.push(d) }
+    }
+    for (var p = 0; p < out.length; p++) {
+        if (pycdPrepIn("p", out[p])) { return pycdIdnaWhy(t, p, p + 1, "Invalid character " + pycdCpRepr(out[p])) }
+    }
+    var ral = false
+    for (var a = 0; a < out.length; a++) {
+        if (pycdPrepIn("r", out[a])) { ral = true }
+    }
+    if (ral) {
+        for (var l = 0; l < out.length; l++) {
+            if (pycdPrepIn("l", out[l])) { return pycdIdnaWhy(t, l, l + 1, "Violation of BIDI requirement 2") }
+        }
+        if (!pycdPrepIn("r", out[0])) { return pycdIdnaWhy(t, 0, 1, "Violation of BIDI requirement 3") }
+        if (!pycdPrepIn("r", out[out.length - 1])) {
+            return pycdIdnaWhy(t, out.length - 1, out.length, "Violation of BIDI requirement 3")
+        }
+    }
+    return t
+}
+
+// Code points as a UTF-16 string, and back (a pair is one code point).
+function pycdCpsStr(cps) {
+    var s = ""
+    for (var i = 0; i < cps.length; i++) {
+        var v = cps[i]
+        if (v >= 65536) {
+            s = s + String.fromCharCode(55296 + Math.floor((v - 65536) / 1024)) + String.fromCharCode(56320 + (v - 65536) % 1024)
+        } else {
+            s = s + String.fromCharCode(v)
+        }
+    }
+    return s
+}
+function pycdStrCps(s, out) {
+    var i = 0
+    while (i < s.length) {
+        var c = s.charCodeAt(i)
+        if (c >= 55296 && c <= 56319 && i + 1 < s.length) {
+            var d = s.charCodeAt(i + 1)
+            if (d >= 56320 && d <= 57343) {
+                out.push(65536 + (c - 55296) * 1024 + (d - 56320))
+                i = i + 2
+                continue
+            }
+        }
+        out.push(c)
+        i = i + 1
+    }
+}
+
+// repr() of a one-character str.
+function pycdCpRepr(cp) {
+    if (cp == 39) { return "\"'\"" }
+    if (cp == 92) { return "'\\\\'" }
+    if (cp == 9) { return "'\\t'" }
+    if (cp == 10) { return "'\\n'" }
+    if (cp == 13) { return "'\\r'" }
+    if (pyIsPrintable(cp)) { return "'" + pycdCpsStr([cp]) + "'" }
+    return "'" + pycdEsc(cp) + "'"
 }
 
 // The labels of a name as [from, to) pairs of positions: split at "." only
@@ -1330,14 +1526,17 @@ function pycdIdnaDot(c) {
     return c == 46 || c == 12290 || c == 65294 || c == 65377
 }
 
+
+// A compiled program registers the nameprep tables only when it names the idna
+// codec in a string literal (python-to-llvm-ir.abnf).
 function pycdIdnaRefuse(r) {
     r.err = "NotImplementedError"
-    r.msg = "the idna codec's nameprep of a non-ASCII label is not supported"
+    r.msg = "the idna codec's nameprep tables are linked only into a program that names 'idna' in a string literal"
 }
 
 function pycdIdnaEncErr(r, cps, from, to, why) {
     var where = "characters in position " + from + "-" + (to - 1)
-    if (to - from == 1) { where = "character '" + pycdEsc(cps[from]) + "' in position " + from }
+    if (to - from == 1 && from < cps.length) { where = "character '" + pycdEsc(cps[from]) + "' in position " + from }
     r.err = "UnicodeEncodeError"
     r.msg = "'idna' codec can't encode " + where + ": " + why
 }
@@ -1351,7 +1550,7 @@ function pycdIdnaDecErr(r, bs, from, to, why) {
 
 // Decoding: a name without "xn--" anywhere is plain ASCII; otherwise each
 // label between "." is ASCII text, or an "xn--" label whose punycode must
-// encode back to it.
+// encode back to it under ToASCII.
 function pycdDecodeIdna(r, bs, errs) {
     if (errs != "strict") {
         r.err = "UnicodeError"
@@ -1397,26 +1596,27 @@ function pycdDecodeIdna(r, bs, errs) {
             r.msg = pr.msg
             return
         }
-        for (var u = 0; u < pr.s.length; u++) {
-            if (pr.s.charCodeAt(u) >= 128) {
-                pycdIdnaRefuse(r)
-                return
-            }
-        }
-        if (pr.s.length == 0) {
-            pycdIdnaDecErr(r, bs, from, from + 1, "label empty")
+        var res = []
+        pycdStrCps(pr.s, res)
+        var t = pycdIdnaToAscii(res)
+        if (t.refused) {
+            pycdIdnaRefuse(r)
             return
         }
-        if (pr.s.length >= 64) {
-            pycdIdnaDecErr(r, bs, from, from + pr.s.length, "label too long")
+        if (t.why != "") {
+            pycdIdnaDecErr(r, bs, from + t.lo, from + t.hi, t.why)
             return
         }
         var lab = []
         for (var q = from; q < to; q++) { lab.push(bs[q]) }
-        var back = []
-        for (var v = 0; v < pr.s.length; v++) { back.push(pr.s.charCodeAt(v)) }
-        pycdIdnaDecErr(r, bs, from, to, "IDNA does not round-trip, '" + pycdBytesRepr(lab) + "' != '" + pycdBytesRepr(back) + "'")
-        return
+        var low = pycdLowerAscii(lab)
+        var same = low.length == t.b.length
+        for (var v = 0; v < low.length && same; v++) { same = low[v] == t.b[v] }
+        if (!same) {
+            pycdIdnaDecErr(r, bs, from, to, "IDNA does not round-trip, '" + pycdBytesRepr(lab) + "' != '" + pycdBytesRepr(t.b) + "'")
+            return
+        }
+        r.s = r.s + pr.s
     }
     if (dot) { r.s = r.s + "." }
 }

@@ -3,6 +3,7 @@ package abnf
 import (
 	"fmt"
 	"math/big"
+	"sort"
 	"strings"
 )
 
@@ -1103,10 +1104,6 @@ func pycdPunyRun(bs []int, lo, hi int, errs, codec string) (out []uint16, exc, m
 	return out, "", ""
 }
 
-// pycdIdnaRefused is the error of a label that needs nameprep (Unicode 3.2
-// tables, which are not here).
-const pycdIdnaRefused = "the idna codec's nameprep of a non-ASCII label is not supported"
-
 func pycdIdnaDot(c int) bool {
 	return c == '.' || c == 0x3002 || c == 0xff0e || c == 0xff61
 }
@@ -1125,7 +1122,7 @@ func pycdIdnaSplit(cps []int, ascii bool) []int {
 
 func pycdIdnaEncErr(cps []int, from, to int, why string) ([]int, string, string) {
 	where := fmt.Sprintf("characters in position %d-%d", from, to-1)
-	if to-from == 1 {
+	if to-from == 1 && from < len(cps) {
 		where = fmt.Sprintf("character '%s' in position %d", pysEncEsc(cps[from]), from)
 	}
 	return nil, "UnicodeEncodeError", "'idna' codec can't encode " + where + ": " + why
@@ -1138,6 +1135,11 @@ func pycdIdnaDecErr(bs []int, from, to int, why string) ([]uint16, string, strin
 	}
 	return nil, "UnicodeDecodeError", "'idna' codec can't decode " + where + ": " + why
 }
+
+// pycdIdnaRefused is the error of a non-ASCII label in a program that did not
+// register the nameprep tables (python-to-llvm-ir.abnf links them only into a
+// program that names 'idna' in a string literal).
+const pycdIdnaRefused = "the idna codec's nameprep tables are linked only into a program that names 'idna' in a string literal"
 
 // pycdEncodeIdna is idna encoding. Twin of pycdEncodeIdna in
 // languages/lib/python-codecs.js, which states the rules.
@@ -1153,41 +1155,250 @@ func pycdEncodeIdna(cps []int, errs string) ([]int, string, string) {
 	}
 	labels := pycdIdnaSplit(cps, ascii)
 	last := len(labels) - 2
-	if !ascii && labels[last+1] == labels[last] && len(labels) > 2 {
+	if ascii {
+		for e := 0; e < last; e += 2 {
+			if labels[e+1] == labels[e] {
+				return pycdIdnaEncErr(cps, labels[e], labels[e]+1, "label empty")
+			}
+		}
+		for k := 0; k <= last; k += 2 {
+			if labels[k+1]-labels[k] >= 64 {
+				return pycdIdnaEncErr(cps, labels[k], labels[k+1], "label too long")
+			}
+		}
+		return append([]int(nil), cps...), "", ""
+	}
+	if labels[last+1] == labels[last] && len(labels) > 2 {
 		last -= 2
 	}
-	for e := 0; ascii && e < last; e += 2 {
-		if labels[e+1] == labels[e] {
-			return pycdIdnaEncErr(cps, labels[e], labels[e]+1, "label empty")
-		}
-	}
-	for k := 0; k <= last; k += 2 {
-		from, to := labels[k], labels[k+1]
-		for _, c := range cps[from:to] {
-			if c >= 0x80 {
-				return nil, "NotImplementedError", pycdIdnaRefused
-			}
-		}
-		if !ascii && to == from {
-			return pycdIdnaEncErr(cps, from, from+1, "label empty")
-		}
-		if to-from >= 64 {
-			return pycdIdnaEncErr(cps, from, to, "label too long")
-		}
-	}
 	var out []int
-	for i, c := range cps {
-		if ascii || i < labels[last+1] {
-			if pycdIdnaDot(c) {
-				c = '.'
-			}
-			out = append(out, c)
+	for q := 0; q <= last; q += 2 {
+		if q > 0 {
+			out = append(out, '.')
 		}
+		t := pycdIdnaToAscii(cps[labels[q]:labels[q+1]])
+		if t.refused {
+			return nil, "NotImplementedError", pycdIdnaRefused
+		}
+		if t.why != "" {
+			return pycdIdnaEncErr(cps, labels[q]+t.lo, labels[q]+t.hi, t.why)
+		}
+		out = append(out, t.b...)
 	}
 	if last < len(labels)-2 {
 		out = append(out, '.')
 	}
 	return out, "", ""
+}
+
+// pycdIdnaLabel is a label's ToASCII bytes, or the error's reason and
+// [lo, hi) within the label, or refused when nameprep has no tables.
+type pycdIdnaLabel struct {
+	b       []int
+	why     string
+	lo, hi  int
+	refused bool
+}
+
+// pycdIdnaToAscii is ToASCII of one label. Twin of pycdIdnaToAscii in
+// languages/lib/python-codecs.js.
+func pycdIdnaToAscii(lab []int) pycdIdnaLabel {
+	cps := lab
+	if !pycdAllAscii(cps) {
+		np := pycdNameprep(cps)
+		if np.why != "" {
+			return np
+		}
+		cps = np.b
+	}
+	if pycdAllAscii(cps) {
+		switch {
+		case len(cps) == 0:
+			return pycdIdnaLabel{why: "label empty", lo: 0, hi: 1}
+		case len(cps) >= 64:
+			return pycdIdnaLabel{why: "label too long", lo: 0, hi: len(cps)}
+		}
+		return pycdIdnaLabel{b: cps}
+	}
+	if len(cps) >= 4 && pycdIdnaAce(pycdLowerAscii(cps), 0) {
+		return pycdIdnaLabel{why: "Label starts with ACE prefix", lo: 0, hi: 4}
+	}
+	b := append([]int{'x', 'n', '-', '-'}, pycdEncodePuny(cps)...)
+	if len(b) >= 64 {
+		return pycdIdnaLabel{why: "label too long", lo: 0, hi: len(cps)}
+	}
+	return pycdIdnaLabel{b: b}
+}
+
+func pycdAllAscii(cps []int) bool {
+	for _, c := range cps {
+		if c >= 0x80 {
+			return false
+		}
+	}
+	return true
+}
+
+func pycdLowerAscii(cps []int) []int {
+	out := make([]int, len(cps))
+	for i, c := range cps {
+		if c >= 'A' && c <= 'Z' {
+			c += 32
+		}
+		out[i] = c
+	}
+	return out
+}
+
+// pycdPrepTables is the nameprep data of languages/lib/python-nameprep.txt,
+// whose format python-codecs.js states; a compiled program registers it at
+// boot through js_pynameprepdata, with lib/unicode-norm.txt for NFKC.
+type pycdPrepTables struct {
+	runs map[byte][]int // kind letter -> lo, hi, lo, hi, ... ascending
+	m, n map[int][]int
+}
+
+var pycdPrep *pycdPrepTables
+
+func pycdPrepData(text string) {
+	if pycdPrep != nil {
+		return
+	}
+	t := &pycdPrepTables{runs: map[byte][]int{}, m: map[int][]int{}, n: map[int][]int{}}
+	for _, line := range strings.Split(text, "\n") {
+		if line == "" {
+			continue
+		}
+		var ns []int
+		for _, f := range strings.Fields(line[1:]) {
+			ns = append(ns, jsvNormHex(f))
+		}
+		switch line[0] {
+		case 'm':
+			t.m[ns[0]] = ns[1:]
+		case 'n':
+			t.n[ns[0]] = ns[1:]
+		default:
+			t.runs[line[0]] = append(t.runs[line[0]], ns[0], ns[1])
+		}
+	}
+	pycdPrep = t
+}
+
+func (t *pycdPrepTables) in(kind byte, cp int) bool {
+	runs := t.runs[kind]
+	k := sort.Search(len(runs)/2, func(i int) bool { return runs[2*i+1] >= cp })
+	return k < len(runs)/2 && runs[2*k] <= cp
+}
+
+// pycdNameprep is nameprep (RFC 3491) of a label. Twin of pycdNameprep in
+// languages/lib/python-codecs.js, which states how Unicode 3.2's NFKC comes
+// out of today's tables.
+func pycdNameprep(cps []int) pycdIdnaLabel {
+	t := pycdPrep
+	if t == nil || jsvNorm == nil {
+		return pycdIdnaLabel{why: "nameprep", refused: true}
+	}
+	var mapped []int
+	for _, c := range cps {
+		if t.in('x', c) {
+			continue
+		}
+		if mv, ok := t.m[c]; ok {
+			mapped = append(mapped, mv...)
+		} else {
+			mapped = append(mapped, c)
+		}
+	}
+	var out, piece []int
+	for k := 0; k <= len(mapped); k++ {
+		d := -1
+		if k < len(mapped) {
+			d = mapped[k]
+		}
+		nv, isN := t.n[d]
+		if d >= 0 && !isN && !t.in('u', d) && (d < 0xD800 || d > 0xDFFF) {
+			piece = append(piece, d)
+			continue
+		}
+		out = append(out, pycdStrCps(jsvNormString(pycdCpsStr(piece), "NFKC"))...)
+		piece = piece[:0]
+		if isN {
+			out = append(out, nv...)
+		} else if d >= 0 {
+			out = append(out, d)
+		}
+	}
+	for p, c := range out {
+		if t.in('p', c) {
+			return pycdIdnaLabel{why: "Invalid character " + pycdCpRepr(c), lo: p, hi: p + 1}
+		}
+	}
+	ral := false
+	for _, c := range out {
+		ral = ral || t.in('r', c)
+	}
+	if ral {
+		for l, c := range out {
+			if t.in('l', c) {
+				return pycdIdnaLabel{why: "Violation of BIDI requirement 2", lo: l, hi: l + 1}
+			}
+		}
+		if !t.in('r', out[0]) {
+			return pycdIdnaLabel{why: "Violation of BIDI requirement 3", lo: 0, hi: 1}
+		}
+		if !t.in('r', out[len(out)-1]) {
+			return pycdIdnaLabel{why: "Violation of BIDI requirement 3", lo: len(out) - 1, hi: len(out)}
+		}
+	}
+	return pycdIdnaLabel{b: out}
+}
+
+func pycdCpsStr(cps []int) string {
+	u := make([]uint16, 0, len(cps))
+	for _, v := range cps {
+		if v >= 0x10000 {
+			u = append(u, uint16(0xD800+(v-0x10000)/1024), uint16(0xDC00+(v-0x10000)%1024))
+		} else {
+			u = append(u, uint16(v))
+		}
+	}
+	return strFromUnits(u)
+}
+
+func pycdStrCps(s string) []int {
+	u := strUnits(s)
+	var out []int
+	for i := 0; i < len(u); i++ {
+		c := int(u[i])
+		if c >= 0xD800 && c <= 0xDBFF && i+1 < len(u) && u[i+1] >= 0xDC00 && u[i+1] <= 0xDFFF {
+			out = append(out, 0x10000+(c-0xD800)*1024+int(u[i+1])-0xDC00)
+			i++
+			continue
+		}
+		out = append(out, c)
+	}
+	return out
+}
+
+// pycdCpRepr is repr() of a one-character str.
+func pycdCpRepr(cp int) string {
+	switch cp {
+	case '\'':
+		return `"'"`
+	case '\\':
+		return `'\\'`
+	case '\t':
+		return `'\t'`
+	case '\n':
+		return `'\n'`
+	case '\r':
+		return `'\r'`
+	}
+	if pyIsPrintable(rune(cp)) {
+		return "'" + string(rune(cp)) + "'"
+	}
+	return "'" + pysEncEsc(cp) + "'"
 }
 
 func pycdIdnaAce(bs []int, i int) bool {
@@ -1238,28 +1449,43 @@ func pycdDecodeIdna(bs []int, errs string) (out []uint16, exc, msg string) {
 		if exc != "" {
 			return nil, exc, msg
 		}
-		for _, u := range res {
-			if u >= 0x80 {
-				return nil, "NotImplementedError", pycdIdnaRefused
+		t := pycdIdnaToAscii(pycdStrCps(strFromUnits(res)))
+		if t.refused {
+			return nil, "NotImplementedError", pycdIdnaRefused
+		}
+		if t.why != "" {
+			return pycdIdnaDecErr(bs, from+t.lo, from+t.hi, t.why)
+		}
+		lab := bs[from:to]
+		low := pycdLowerAscii(lab)
+		same := len(low) == len(t.b)
+		for v := 0; same && v < len(low); v++ {
+			same = low[v] == t.b[v]
+		}
+		if !same {
+			la, ba := &jsArray{}, &jsArray{}
+			for _, c := range lab {
+				la.elems = append(la.elems, float64(c))
 			}
+			for _, c := range t.b {
+				ba.elems = append(ba.elems, float64(c))
+			}
+			return pycdIdnaDecErr(bs, from, to, "IDNA does not round-trip, '"+pyBytesRepr(la)+"' != '"+pyBytesRepr(ba)+"'")
 		}
-		switch {
-		case len(res) == 0:
-			return pycdIdnaDecErr(bs, from, from+1, "label empty")
-		case len(res) >= 64:
-			return pycdIdnaDecErr(bs, from, from+len(res), "label too long")
-		}
-		lab, back := &jsArray{}, &jsArray{}
-		for _, c := range bs[from:to] {
-			lab.elems = append(lab.elems, float64(c))
-		}
-		for _, u := range res {
-			back.elems = append(back.elems, float64(u))
-		}
-		return pycdIdnaDecErr(bs, from, to, "IDNA does not round-trip, '"+pyBytesRepr(lab)+"' != '"+pyBytesRepr(back)+"'")
+		out = append(out, res...)
 	}
 	if dot {
 		out = append(out, '.')
 	}
 	return out, "", ""
+}
+
+func init() {
+	rxExtraExterns = append(rxExtraExterns, func(rt *jsrt, m map[string]func(args []uint64) uint64) {
+		m["js_pynameprepdata"] = func(a []uint64) uint64 {
+			jsvNormData(rt.toString(rt.unwrap(a[0])))
+			pycdPrepData(rt.toString(rt.unwrap(a[1])))
+			return 0
+		}
+	})
 }

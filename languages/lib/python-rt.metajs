@@ -112,8 +112,19 @@ import "./python-dir.js"
 import "./python-printable.js"
 // list.sort's timsort.
 import "./python-sort.js"
-// str.encode's and bytes.decode's codecs and error handlers.
+// str.encode's and bytes.decode's codecs and error handlers; the idna codec's
+// nameprep runs NFKC (lib/js-norm.js).
+import "./js-norm.js"
 import "./python-codecs.js"
+
+// The tables of lib/unicode-norm.txt and lib/python-nameprep.txt, which the
+// emitted boot block of a program naming 'idna' hands over. Twin of
+// js_pynameprepdata in abnf/jsrtpycodecs.go.
+function js_pynameprepdata(norm, prep) {
+    jsnormLoad(norm)
+    pycdPrepLoad(prep)
+    return undefined
+}
 // str.isalpha / isdecimal / isdigit / isnumeric, over java.lang.Character's table.
 import "./java-chars.js"
 import "./python-chars.js"

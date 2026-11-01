@@ -130,21 +130,29 @@ func (n *jsvNormTables) compose(a, b int) int {
 
 // jsvNormalize is s in form, one of NFC, NFD, NFKC, NFKD. Twin of jsnormApply.
 func (rt *jsrt) jsvNormalize(s string, form string) string {
-	units := strUnits(s)
-	quick := true
+	if jsvNorm == nil && !jsvNormQuick(strUnits(s)) {
+		rt.fail("normalize: no tables registered (js_jsnormdata)")
+	}
+	return jsvNormString(s, form)
+}
+
+// jsvNormQuick reports whether every unit is below U+00A0, which no form changes.
+func jsvNormQuick(units []uint16) bool {
 	for _, c := range units {
 		if c >= 160 {
-			quick = false
-			break
+			return false
 		}
 	}
-	if quick {
+	return true
+}
+
+// jsvNormString is jsvNormalize once the tables are registered.
+func jsvNormString(s string, form string) string {
+	units := strUnits(s)
+	if jsvNormQuick(units) {
 		return s
 	}
 	n := jsvNorm
-	if n == nil {
-		rt.fail("normalize: no tables registered (js_jsnormdata)")
-	}
 	compat := form == "NFKC" || form == "NFKD"
 	var cps []int
 	for i := 0; i < len(units); i++ {
