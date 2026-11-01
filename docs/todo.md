@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1093** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1096** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -142,13 +142,34 @@ real coroutines out of the subset - decide first). Go also runs the most recentl
 ### T-1053 php: copy-on-write array identity (refcount release, print_r recursion depth) · P4 · PHP · OPEN [V spec-only] · NEEDS DESIGN
 Remainder of T-1000/T-1025/T-1036/T-1051. Engines copy arrays eagerly on assignment and have no point where an array dies, so: reference holders of overwritten / frame-local / temporary arrays and of unfinished generators are never released (counts stay correct-but-high, so `&` may survive a copy PHP would unwrap); property-hook set parameters aren't covered by the compiler's param-copy release; print_r recursion depth is wrong (`$y=[1]; $y[]=&$y; print_r($y)` → PHP *RECURSION* at [1], ours one level deeper; `$a=["k"=>[2]]; $a["k"][]=&$a;` two deeper) because the interpreter's by-value param copy loses array identity; `$w=$z; print_r($w)` differs too. Options: real per-array refcount + COW in all three engines (touches every in-place array write), or an engine-level print_r like var_dump plus targeted release points. Needs a design decision before work.
 
-### T-1087 php: argument-type checks for PHP-written stdlib builtins; object casts; deprecations · P3 · PHP · IN PROGRESS (PHP worker, round 46) [V]
-Spec-only (php-src stubs + zend_parse_parameters). All engines:
-- builtins implemented in PHP in lib/php-stdlib.php have no argument-type checks: they coerce an array to "Array" or raise a TypeError naming an inner native ("strlen()"). Affected: str_repeat, trim/ltrim/rtrim, explode, strrev, str_pad, ucfirst, lcfirst, ucwords, str_contains, str_starts_with, str_ends_with, str_split, stripos, strstr, substr_count, str_word_count, nl2br, htmlspecialchars, wordwrap; number_format and round with an array crash ("array used as a number"). Library parameter types are erased inside the stdlib - find a scheme with no per-call cost on the hot path (e.g. checks only on the cold coercion branch), measure with paired bench runs.
-- (int)/(float) of an object: PHP 1 plus warning "Object of class X could not be converted to int"; ours 0, no warning.
-- `[$this, 'parent::m']` callable rejected; PHP 8.4 accepts with a deprecation.
-- deprecations never emitted: null to an internal non-nullable parameter; "Implicit conversion from float 1.5 to int loses precision" for a fractional float key.
-- declare(strict_types=1) not applied to internal-function arguments (a program-wide flag would break library-internal calls; needs per-call-site strictness).
+### T-1093 php: `[$this, 'parent::m']` / `['B', 'parent::m']` callables · P3 · PHP · OPEN [V]
+
+Spec: zend_is_callable_check_func (Zend/zend_API.c), where a "parent::" prefix makes the call non-virtual and resolves it on the parent class. Each engine needs the check and the dispatch: phpCheckCallback/phpInvoke (interp), compiler callerCallable, Go phpCbMeth/js_phcbcls, and php-rt.metajs.
+
+Required behaviour:
+- the PHP 8.2+ deprecation 'Callables of the form ["B", "parent::m"] are deprecated' when display is on;
+- is_callable stays silent;
+- the error when the class has no parent.
+
+The PHP r46 worker left a ready probe at scratchpad/PHP46/p9.php.
+
+### T-1094 php: fractional float key deprecation in array literals, isset, unset, array_key_exists · P3 · PHP · OPEN [V]
+
+Writes, reads and compound assignments already emit "Implicit conversion from float 1.5 to int loses precision". The deprecation is still missing for:
+- `[1.5 => x]` (zend_ast / ZEND_INIT_ARRAY → zend_dval_to_lval_safe);
+- `isset($a[1.5])`;
+- `unset($a[1.5])`;
+- `array_key_exists(1.5, $a)`.
+
+Check the php-src sources for each site, because some of them may truncate silently (array_key_exists in particular). Add assertions to tests/php-test-warnings.php.
+
+### T-1095 php: ENT_* constants undefined (htmlspecialchars($s, ENT_QUOTES) fatals) · P3 · PHP · OPEN [V]
+
+`htmlspecialchars("<a href='x'>", ENT_QUOTES)` dies with 'Uncaught Error: Undefined constant "ENT_QUOTES"' on every leg.
+
+Define the ENT_* family from ext/standard/html_tables.h / basic_functions.stub.php: ENT_COMPAT=2, ENT_QUOTES=3, ENT_NOQUOTES=0, ENT_HTML401=0, ENT_XML1=16, ENT_XHTML=32, ENT_HTML5=48, ENT_IGNORE=4, ENT_SUBSTITUTE=8, ENT_DISALLOWED=128. Make htmlspecialchars, htmlspecialchars_decode and html_entity_decode honour the quote flags; the default is ENT_QUOTES | ENT_SUBSTITUTE | ENT_HTML401, so a single quote becomes `&#039;`.
+
+Also confirm whether `(string)[1]` with display_errors=1 warns "Array to string conversion"; it was seen in passing and is not yet confirmed.
 
 # LUA — Lua  (oracle: lua 5.5 binary, suite is 5.4)
 
@@ -1157,6 +1178,7 @@ T-1084 bash: subscript leftovers (${a[@]:'1'}, [[ -v a[@] ]], quoted computed de
 T-1085 kotlin: apply{} receiver inside an extension (compiled crash); implicit javaClass; unboxed inline-lambda it — DONE (KT r27, 49f0b1c3): scope-function receivers are the innermost implicit receiver inside extensions and members (compiled apply{append} crash fixed, this@label resolution, fall-through to outer receiver), implicit javaClass, unboxed inline-lambda it, reified T through multi-line when lambdas and member references (map(Int::toString) was Unit); native String receivers no longer answered by C-floor methods; classNames keys $-prefixed (FROZEN-DIFF). Master probe: single-line when lambda still infers Any - filed
 T-1089 kotlin: nested builtin receivers in scope functions; single-line when lambda typing — DONE (KT r28, fb543678): kotlinc-derived builtin member table (9 kinds x 70 names) lets names an inner builtin receiver lacks fall through to the outer receiver, identical in all 3 engines; one-expression lambda bodies split only at top-level ; / newline (when lambdas type); 4 legs = kotlinc
 T-1069 ruby: external Enumerator iteration (next/peek/rewind) over a user #each, to_enum/enum_for — DONE r49 (af985019): suspendable Enumerator next/peek/rewind over user #each with ensure, map/lazy/each_slice .next, catch/throw across a suspended run; master-probed vs ruby 2.6, 4 legs agree
+T-1087 php: argument-type checks for PHP-written stdlib builtins; object casts; deprecations — PARTIAL→DONE r46 (a5c94976..aa8f2c1e): zpp arg checks for PHP-written builtins (types audited vs PHP-8.4 stubs), per-site strict_types incl. dynamic/callback calls, (int)/(float) of object = 1 + warning, null-arg and float-key-write deprecations, (integer)/(boolean) cast parse; master-probed. Remainder filed as follow-ups
 
 # Settled — do not re-open
 
