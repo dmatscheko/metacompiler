@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1004** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1008** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -67,6 +67,11 @@ its report; anything structural there is a CORE ticket.
 ### T-983 python: codecs beyond utf-8/16/32, ascii, latin-1, cp1252 raise LookupError (utf-7, cp437, mac-roman...) · P3 · PY · OPEN [V]
 Found by the PY worker, round 18 (oracle python3 3.14). `"é".encode("utf-7")` → b'+AOk-'; ours LookupError: unknown encoding.
 languages/lib/python-codecs.js (+ Go twin abnf/jsrtpycodecs.go) is the place; charmap codecs are table-driven like cp1252.
+
+### T-1005 python: generator `gi_running` · P3 · PY · OPEN [V]
+Found by the CORE worker, round 16. The host genState(g) (0 not started, 1 suspended, 2 done, 3 running) is now reachable from layer 2
+and the Go twin; `g.gi_running` (True only while the generator's frame executes, e.g. read from inside its own body) is not exposed.
+Also tests/python-test-full.5.py peaks at ~90M steps per call (the brake is 1e8) - split it before it trips.
 
 # RB — Ruby
 
@@ -116,8 +121,17 @@ Found by the CORE worker, round 15. The interpreter's stripWs deletes every ASCI
 strings.TrimSpace, native strips ASCII 9-13 and 32: `int.Parse(" 1 2 ")` and `int.Parse(" 1")` give three answers.
 .NET's NumberStyles.Integer allows leading/trailing white space (U+0009-U+000D, U+0020) only; settle with a real dotnet.
 
+### T-1007 c#: `string.CompareOrdinal` of an astral character vs an ASCII one has the wrong sign · P3 · CS · OPEN [V spec-only]
+Found by the CORE worker, round 16 (.NET: ordinal = UTF-16 code-unit order). `string.CompareOrdinal("😀", "a")` must be positive
+(0xD83D > 0x61); all legs give the wrong sign (matrix row `-0--`, expected `-0-+`). Use the UTF-16 comparison (str_cmp16).
+
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
+
+### T-1004 kotlin: string `<`/`>`, sorted, sortedDescending, maxOf, toSortedSet order by code point instead of UTF-16 · P3 · KT · OPEN [V]
+Found by the CORE worker, round 16 (oracle JVM). compareTo is right, but the operators and the sort/max family use code-point order in
+all three legs: strings starting with chars 97, 55357 (surrogate), 57344, 65377, 65535 sort ours `[97, 57344, 65377, 65535, 55357]`,
+JVM `[97, 55357, 57344, 65377, 65535]`. Route them through the UTF-16 comparison (str_cmp16).
 
 # GO — Go  (oracle: `go run`)
 
@@ -161,6 +175,11 @@ bad array subscript". `a[@]=W` → bash "a[@]: bad array subscript" status 1; ou
 attributes; a computed self-reference sets the nameref mark; a function that defines another function, called in a subshell, leaks
 it out (the save is lexical). rt_setvar_byname drops a write to a name the program never mentions (no slot).
 
+### T-1006 bash interpreter: a stderr fragment without a trailing newline gets one added at exit · P3 · SH · OPEN [V]
+Found by the CORE worker, round 16. `printf 'frag' >&2` at the end of a script → bash writes `frag` with no newline; the interpreter
+buffers it (errBuf) and emits it with eprintln at exit, adding '\n'. The eprint host builtin now exists - write the fragment through.
+No assertion can see a trailing newline today; add a byte-exact stderr check.
+
 # C — C subset
 
 # CORE — MetaJS, the engines, shared runtime, tooling
@@ -183,37 +202,6 @@ alternative that re-parses the whole bracket body before failing (kotlin lambda/
 destructuring target, python comprehension/genexp, swift array/dict/type, go generic instantiation). Decide first between a
 per-grammar fix (cut or reorder each alternative) and memoising rule results at a position in the PEG engine (abnf/), which
 fixes all seven at once; measure the memo cost on the matrix. Shared: the seven grammars.
-
-### T-958 python: a generator's run state is not reachable from layer 2 (send to a just-started generator, gi_running) · P3 · CORE · IN PROGRESS (CORE worker, round 16) [V]
-Found by the PY worker, round 17. `def g(): yield 1` + `g().send(5)` → CPython "TypeError: can't send non-None value to a
-just-started generator"; ours sends. `gi_running` (True inside its own body) is missing. Layer 2 (python-rt.metajs) cannot read
-the floor generator cell's state (runtime.c cb[1]); needs a small floor accessor (and its Go-twin / interp counterparts), after
-which the PY group can implement both. Shared: runtime.c.
-
-### T-967 metajs goja leg: `[o] + ""` calls an element's own toString; other UTF-16 languages still order strings by code point · P3 · CORE · IN PROGRESS (CORE worker, round 16) [V]
-Found by the CORE worker, round 15. `var o = {toString: function () { return "x" }}; [o] + ""` → goja interp "x" (goja's
-Array join calls the element's own toString), -frozen / run / native "[object Object]" (manual 7.9: ToPrimitive never
-consults a stored toString). Pin goja to the dialect. Also: java, kotlin, csharp and dart (UTF-16 strings) still compare
-strings by code point in the floor and twin; their emitters could opt into str_cmp16 (js_rt_ecma's comparison only) -
-`"￿".compareTo("😀")` in Java is positive (unit 0xFFFF > 0xD83D), ours negative.
-
-### T-968 tooling: sweep.sh scores TypeScript files that tsc rejects with grammar errors as must-parse · P3 · CORE · IN PROGRESS (CORE worker, round 16) [V]
-Left from T-926. typescript's directory rule scores 219 interpreter / 251 compiler failures as must-parse although tsc reports
-grammar errors (TS1xxx / TS17xxx / TS18xxx via getSemanticDiagnostics) for them; the honest interp ceiling is about 5303/5527.
-Decision for the worker: derive a checked-in reject list once from a real tsc (VS Code ships one, manual ch. 5) rather than
-running tsc on every sweep.
-
-### T-973 frozen engine: `String.prototype.lastIndexOf` missing; --full step budget nearly exhausted · P2 · CORE · IN PROGRESS (CORE worker, round 16) [V]
-Found by the JV and PY workers, rounds 15 / 17. `"abcb".lastIndexOf("b")` in a tag script or layer 2 → goja 3, -frozen "call of
-a non function value: undefined". And the frozen interpreter legs of tests/java-test-full.java (90M-100M IR steps) and
-tests/python-test-full.py (98M-99M) sit just under the 1e8 -max-steps budget of ./test.sh --full: the next few assertions trip
-"step limit exceeded". Decide: raise the budget for --full, split the files (the .2/.3 convention), or find what makes those
-interpreters step-hungry - measure first.
-
-### T-975 stderr: a trailing fragment without a newline is never written · P3 · CORE · IN PROGRESS (CORE worker, round 16) [V]
-Found by the JV worker, round 15. Standard error is written a line at a time over eprintln in java (System.err), ruby ($stderr)
-and python (sys.stderr), so `System.err.print("x"); System.err.flush();` and a program ending on a partial stderr line lose the
-fragment; java / ruby / python3 write it. Flush the pending fragment on flush() and at exit, in all engines.
 
 # Closed
 
@@ -1103,6 +1091,11 @@ T-999 java: package access is not checked; tests/java-test-multifile.java import
 T-993 swift: local func called before its declaration; body-less `@_silgen_name` func; if-let binding used in its else branch — DONE - local funcs hoisted per statement list, if-let binding scoped to condition+then; body-less @_silgen_name parses and is refused loudly (calling C needs an FFI, out of scope)
 T-988 go: a plain send on an unbuffered or full channel never blocks (cooperative channel model) — PARTIAL - main's hopeless send deadlocks (exit 2), go-statement args evaluated at the statement, glued <- fixed; a blocking send inside a goroutine needs suspendable goroutines, filed
 T-989 go: an empty array literal loses its element type; promoted method on embedded slice type (compiler); typeparam/slices.go — DONE - empty/interface-element arrays keep their type, slice exprs typed, generic func value G[T], method-expression calls take the receiver
+T-975 stderr: a trailing fragment without a newline is never written — DONE - eprint host builtin; java/ruby/python stderr fragments written straight through in both engines
+T-973 frozen engine: `String.prototype.lastIndexOf` missing; --full step budget nearly exhausted — DONE - String.prototype.lastIndexOf in the frozen engine and runtime.c; java and python ratchets split under the step brake
+T-968 tooling: sweep.sh scores TypeScript files that tsc rejects with grammar errors as must-parse — DONE - sweep scores tsc-flagged TypeScript files reject? from tests/reference/typescript-tsc-flagged.txt (must-parse 99.6%)
+T-958 python: a generator's run state is not reachable from layer 2 (send to a just-started generator, gi_running) — PARTIAL - genState host (layer 2 reaches a generator's run state); python send to a just-started generator raises; gi_running filed for PY
+T-967 metajs goja leg: `[o] + ""` calls an element's own toString; other UTF-16 languages still order strings by code point — PARTIAL - goja leg's array join/ToPrimitive pinned to the floor; UTF-16 ordering gaps filed per language (java already correct)
 
 # Settled — do not re-open
 
