@@ -199,7 +199,7 @@ CExprItem   <~~ push({cat: up.pos, cks: up.start}) ~~> = Expression ;
 // as not implemented, so nobody mistakes the acceptance for support. The bodied form
 // is tried first, so `func f() {` never reaches here.
 FuncDecl    = FuncBodied | FuncNoBody ;
-FuncBodied  <~~ buildFunc(takeAll()) ~~>
+FuncBodied  <~~ goBrCheck(up.start, up.pos); buildFunc(takeAll()) ~~>
             = "func" KwEnd [ Receiver ] Id <~~ push(cPoisonName(goTpFnC(up.in))) ~~> [ TypeParams ] ParamList [ SameLine RetTypes ] FuncBody [ ";" ] ;
 FuncNoBody  <~~ buildFunc(takeAll()) ~~>
             = "func" KwEnd [ Receiver ] Id <~~ push(cPoisonName(goTpFnC(up.in))) ~~> [ TypeParams ] ParamList [ SameLine RetTypes ] NoBody [ ";" ] ;
@@ -395,8 +395,8 @@ GoStmt      <~~ push(makeGoStmt(pop(), up.pos)) ~~>
 // before the next 'case' / 'default' (both would otherwise parse as an identifier
 // expression, exactly as they would in a switch body - which is why that one is
 // parsed flat instead).
-Select      <~~ push(makeSelect(takeAll())) ~~>
-            = "select" KwEnd "{" { SelArm } "}" ;
+Select      <~~ push(goSwLblC(makeSelect(takeAll()), goSwLblAt(up.start))); goBrClaim(up.start, up.pos, false) ~~>
+            = "select" <~~ goSwLbl(up.start) ~~> KwEnd "{" { SelArm } "}" ;
 SelArm      = SelRecv | SelSend | SelDefault ;
 SelRecv     <~~ push(makeSelRecv(takeAll())) ~~>
             = "case" KwEnd [ Id <~~ push(cPoisonName(up.in)) ~~> [ "," Id <~~ push(cPoisonName(up.in)) ~~> ] ( ":=" | "=" ) ]
@@ -622,14 +622,14 @@ If          <~~ push(makeIfG(takeAll())) ~~>
 // label (see Labeled) at the 'for' keyword, BEFORE its body is built, so a nested
 // loop cannot steal the outer loop's label.
 For         = ForEver | ForRange | ForCond | ForClassic ;
-ForEver     <~~ push(makeForEver(takeAll())) ~~>
+ForEver     <~~ push(makeForEver(takeAll())); goBrClaim(up.start, up.pos, true) ~~>
             = "for" KwEnd <~~ push({lbl: takeLabel()}) ~~> Block ;
 // for i, v := range s / for _, v := range s / for i := range s / for range s
-ForRange    <~~ push(makeForRange(takeAll())) ~~>
+ForRange    <~~ push(makeForRange(takeAll())); goBrClaim(up.start, up.pos, true) ~~>
             = "for" KwEnd <~~ push({lbl: cRangeStart(takeLabel())}) ~~>
               [ Id <~~ push({rv: cRangeVar(up.in)}) ~~> [ "," Id <~~ push({rv: cRangeVar(up.in)}) ~~> ] ( ":=" | "=" <~~ push({rset: true}) ~~> ) ]
               "range" KwEnd CondOn Expression <~~ push(goRangeC(up.pos)) ~~> CondOff Block ;
-ForClassic  <~~ push(makeForClassic(takeAll())) ~~>
+ForClassic  <~~ push(makeForClassic(takeAll())); goBrClaim(up.start, up.pos, true) ~~>
             = "for" KwEnd <~~ push({lbl: takeLabel()}) ~~>
               CondOn [ FInit ] ";" [ FCond ] ";" [ FPost ] CondOff Block ;
 // The names a ':=' init declares are recorded so a classic for can give each
@@ -638,7 +638,7 @@ FInit       <~~ push({k:"init", t:pop(), names: takeDeclNames()}) ~~> = SimpleSt
 FCond       <~~ push({k:"cond", t:pop()}) ~~> = Expression ;
 FPost       <~~ push({k:"post", t:pop()}) ~~> = SimpleStmt2 ;
 SimpleStmt2 = AssertOk | RecvOk | MapOk | ShortDecl | IncDecStmt | Assign | ExprOnly ;
-ForCond     <~~ push(makeWhileG(takeAll())) ~~>
+ForCond     <~~ push(makeWhileG(takeAll())); goBrClaim(up.start, up.pos, true) ~~>
             = "for" KwEnd NotSemi <~~ push({lbl: takeLabel()}) ~~> CondOn Expression CondOff Block ;
 // `for ; cond; post` is a classic header with an empty init: CondOn must not be
 // pushed for an Expression that cannot start there.
@@ -651,8 +651,8 @@ Switch      = TypeSwitch | ValueSwitch ;
 // lists TYPES (compared with the runtime type test), and the bound name takes the
 // subject's value inside the matching case body. Tried before the value switch so
 // its subject's '.(type)' is not mistaken for a value plus a type assertion.
-TypeSwitch  <~~ push(makeTypeSwitch(takeAll())); cSwExit() ~~>
-            = "switch" KwEnd TypeSwAhead [ InitAhead FInit ";" ] [ Id <~~ push({tsname: cTsName(cPoisonName(up.in))}) ~~> ":=" ]
+TypeSwitch  <~~ push(goSwLblC(makeTypeSwitch(takeAll()), goSwLblAt(up.start))); cSwExit(); goBrClaim(up.start, up.pos, false) ~~>
+            = "switch" <~~ goSwLbl(up.start) ~~> KwEnd TypeSwAhead [ InitAhead FInit ";" ] [ Id <~~ push({tsname: cTsName(cPoisonName(up.in))}) ~~> ":=" ]
               CondOn AssertBase CondOff "." "(" "type" KwEnd ")"
               "{" CSwOn { TypeCase | Statement } "}" ;
 TypeCase    <~~ push(makeTypeCase(cTsCase(takeAll()))) ~~>
@@ -664,8 +664,8 @@ CaseType    <~~ push({ct: goAssertTyC(goWalkQual(goLtyRw(up.in)))}) ~~>
 // SwitchSubj: that would push the composite-literal gate marker (CondOn) and then fail
 // its Expression on the '{', leaking the marker (pushes are not rolled back) and
 // blocking every later composite literal.
-ValueSwitch <~~ push(makeSwitch(goSwBoxC(takeAll()))); cSwExit() ~~>
-            = "switch" KwEnd [ InitAhead FInit ";" ]
+ValueSwitch <~~ push(goSwLblC(makeSwitch(goSwBoxC(takeAll())), goSwLblAt(up.start))); cSwExit(); goBrClaim(up.start, up.pos, false) ~~>
+            = "switch" <~~ goSwLbl(up.start) ~~> KwEnd [ InitAhead FInit ";" ]
               ( "{" CSwOn { CaseLabel | Statement } "}"
               | SwitchSubj "{" CSwOn { CaseLabel | Statement } "}" ) ;
 SwitchSubj  = CondOn SwSubjE CondOff ;
@@ -686,9 +686,9 @@ RetVals     = RetExpr { "," RetExpr } ;
 
 // break / continue carry an optional label; the labelled forms travel up as a
 // signal until the loop that carries that label catches them.
-Break       <~~ push(makeBreakG(takeAll())) ~~>
+Break       <~~ push(makeBreakG(takeAll())); goBrNote(up.start, true) ~~>
             = "break" KwEnd [ SameLine Id <~~ push(up.in) ~~> ] [ ";" ] ;
-Continue    <~~ push(makeContinueG(takeAll())) ~~>
+Continue    <~~ push(makeContinueG(takeAll())); goBrNote(up.start, false) ~~>
             = "continue" KwEnd [ SameLine Id <~~ push(up.in) ~~> ] [ ";" ] ;
 Goto        <~~ push(makeGoto(takeAll())) ~~>
             = "goto" KwEnd Id <~~ push(up.in) ~~> [ ";" ] ;
@@ -1117,7 +1117,7 @@ RuneLit     <~~ push(goRuneLitC(pop(), up.pos)) ~~>
             = "'" :whitespace() { StrEsc | SqPlain } <~~ push(runeVal(up.in)) ~~> "'" :whitespace(Whitespace) ;
 
 // func(x int) int { ... }: a function literal; a real closure over its scope.
-FuncLit     <~~ push(makeFuncLit(takeAll())); regSt(up.pos, goFuncLitTy(c.srcSlice(up.start, up.pos))) ~~>
+FuncLit     <~~ goBrCheck(up.start, up.pos); push(makeFuncLit(takeAll())); regSt(up.pos, goFuncLitTy(c.srcSlice(up.start, up.pos))) ~~>
             = "func" KwEnd ParamList [ RetTypes ] FuncBody ;
 
 MapTypeZ    = "map" KwEnd "[" KType "]" ZType ;
@@ -6102,6 +6102,18 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // tried in source order and the FIRST ready one runs; without a ready arm the
     // default runs, and without a default the select waits by draining the goroutine
     // queue once more (a still-empty channel is then a deadlock, as in Go).
+    // `break L` of the switch or select labelled L (goSwLbl) ends it. Twin of
+    // goSwLblC in go-to-llvm-ir.abnf.
+    function goSwLblC(t, lbl) {
+        if (lbl == null) { return t }
+        return function() {
+            var r = t()
+            if (r !== undefined && r !== BRK && r !== CONT && r.sig == "break" && r.label == lbl) { return undefined }
+            return r
+        }
+    }
+    // An unlabelled break ends the select, as it ends a switch.
+    function selDone(r) { return r === BRK ? undefined : r }
     function makeSelect(items) {
         var arms = items
         return function() {
@@ -6110,7 +6122,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                 for (var i = 0; i < arms.length; i++) {
                     var a = arms[i]
                     if (a.kind == "default") { dflt = a; continue }
-                    if (a.kind == "send") { chanSend(a.chT(), a.valT()); return a.body() }
+                    if (a.kind == "send") { chanSend(a.chT(), a.valT()); return selDone(a.body()) }
                     if (chanReady(a.chT())) {
                         var r = chanRecv(a.chT())
                         scopes.push({})
@@ -6118,10 +6130,10 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                         if (a.okName != null && a.okName != "_") { declVar(a.okName, r.ok) }
                         var res = a.body()
                         scopes.pop()
-                        return res
+                        return selDone(res)
                     }
                 }
-                if (dflt != null) { return dflt.body() }
+                if (dflt != null) { return selDone(dflt.body()) }
                 if (pass == 0) { goDrain() }
             }
             fail("all goroutines are asleep - deadlock")

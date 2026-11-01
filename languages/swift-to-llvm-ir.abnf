@@ -163,7 +163,7 @@ IdBtChar    = "\x20"..."\x5f" | "\x61"..."\U0010ffff" ;
 
 // Top level items become statements of jsmain: the declarations first, then the
 // statements in source order (swTopItems).
-Program     <~~ buildMain(takeAll()) ~~>
+Program     <~~ swBrCheck(up.start, up.pos); buildMain(takeAll()) ~~>
             = [ Hashbang ] { TopItem } ;
 TopItem     = PoundIfTop StmtSep | OpDeclTop StmtSep | FunTop StmtSep | TypeTop StmtSep
             | UnsupTop StmtSep | TopStmt ;
@@ -512,9 +512,22 @@ FunRetType  = FnAnnType | LabelledTupleType | IntAnnType | OptNumAnnType | DeepA
 // RetBody is Block with a leading `return` REQUIRED, ordered ahead of ExprBody
 // because `return (1, 2)` would otherwise parse as one expression - the identifier
 // `return` applied to a tuple.
-FnBody      = RetBody | ExprBody | Block ;
+FnBody      <~~ swBrCheck(up.start, up.pos) ~~> = RetBody | ExprBody | Block ;
 ExprBody    <~~ swAnnClose(); var eb = takeAll(); push(makeExprBody(swDotPend(eb[0], eb[1], up.pos))) ~~>
-            = "{" <~~ swAnnOpen() ~~> Expression <~~ push({itext: up.in, iat: up.start + ":" + up.pos}) ~~> "}" ;
+            = "{" <~~ swAnnOpen() ~~> NotBranch Expression <~~ push({itext: up.in, iat: up.start + ":" + up.pos}) ~~> "}" ;
+// `{ break }` is a statement body, not the expression `break`: an identifier does not
+// exclude the keywords.
+NotBranch = :script(~~
+    (function() {
+        var p = 0
+        while (c.peek(p) === 32 || c.peek(p) === 9 || c.peek(p) === 10 || c.peek(p) === 13) { p++ }
+        var w = ""
+        while (c.peek(p) >= 97 && c.peek(p) <= 122) { w += String.fromCharCode(c.peek(p)); p++ }
+        var cc = c.peek(p)
+        var more = (cc >= 48 && cc <= 57) || (cc >= 65 && cc <= 90) || cc === 95
+        return ((w == "break" || w == "continue") && !more) ? abnf.newToken("\x01branch-statement", 0) : undefined
+    })()
+~~) ;
 // `throws(E)` is a TYPED throw (SE-0413); the thrown value is the same either way,
 // so the type is parsed and dropped.
 FnEffects   = { "throws" KwEnd [ ThrownType ] | ( "rethrows" | "async" ) KwEnd } ;
@@ -849,7 +862,7 @@ LocalType   = StructDecl | ClassDecl | ActorDecl | EnumDecl ;
 // that excDispatch re-issues in the enclosing frame. A catch
 // with no `let NAME` binds the implicit name `error`. Each part is marked so makeTry
 // can tell them apart.
-Do          <~~ push(makeTry(takeAll())) ~~>
+Do          <~~ push(makeTry(takeAll())); swBrInIf(up.start, up.pos) ~~>
             = KwDo TryBody { CatchClause } ;
 TryBody     <~~ push({trybody: pop()}) ~~>
             = Block ;
@@ -883,7 +896,7 @@ Fallthrough <~~ push(makeFallthrough()) ~~>
 // condition item is emitted in turn and branches to the failure block; the names a
 // binding declares live in a child scope for if/while and, Swift-style, in the
 // ENCLOSING scope for guard (whose else branch is expected to leave that scope).
-CplxIf      <~~ push(makeCondIf(takeAll())) ~~>
+CplxIf      <~~ push(makeCondIf(takeAll())); swBrInIf(up.start, up.pos) ~~>
             = KwIf CplxCondClause Block [ KwElse ElseBody ] ;
 CplxGuard   <~~ push(makeCondGuard(takeAll())) ~~>
             = KwGuard CplxCondClause KwElse Block ;
@@ -1059,14 +1072,14 @@ TupLeaf     <~~ push(swBt(up.in)) ~~> = Wildcard | Id ;
 TupleAssign <~~ push(makeTupleAssign(takeAll())) ~~>
             = TupNames "=" Expression [ ";" ] ;
 
-If          <~~ push(makeIf(takeAll())) ~~>
+If          <~~ push(makeIf(takeAll())); swBrInIf(up.start, up.pos) ~~>
             = KwIf Expression Block [ KwElse ElseBody ] ;
 ElseBody    = Block | CplxIf | If ;
 
-While       <~~ push(makeWhileL(takeAll())) ~~>
+While       <~~ push(makeWhileL(takeAll())); swBrClaim(up.start, up.pos, true) ~~>
             = [ LoopLabel ] KwWhile Expression Block ;
 
-Repeat      <~~ push(makeRepeat(takeAll())) ~~>
+Repeat      <~~ push(makeRepeat(takeAll())); swBrClaim(up.start, up.pos, true) ~~>
             = [ LoopLabel ] KwRepeat Block KwWhile Expression [ ";" ] ;
 
 // `for case PAT in xs` filters: only the elements the pattern matches run the body
@@ -1075,21 +1088,21 @@ Repeat      <~~ push(makeRepeat(takeAll())) ~~>
 For         = ForCase | ForRange | ForList | ForAwait ;
 // `for await x in seq` / `for try await` walk an AsyncSequence, which needs an
 // executor this runtime does not have: recognized, reported as not implemented.
-ForAwait    <~~ takeAll(); push(notImplStmt("for await", up.start)) ~~>
+ForAwait    <~~ takeAll(); push(notImplStmt("for await", up.start)); swBrClaim(up.start, up.pos, true) ~~>
             = [ LoopLabel ] KwFor [ KwTry ] KwAwait [ "var" KwEnd ] ForPat [ ForPatType ] KwIn
               Expression [ ForWhere ] Block ;
-ForCase     <~~ push(makeForCase(takeAll())) ~~>
+ForCase     <~~ push(makeForCase(takeAll())); swBrClaim(up.start, up.pos, true) ~~>
             = [ LoopLabel ] KwFor KwCase Pattern KwIn Expression [ ForWhere ] Block ;
 // The bounds are read at AddExpr level, BELOW RangeExpr, so the loop keeps its own
 // range operator instead of receiving one range value.
 // `for var x in xs` only makes x mutable, which every loop variable here already is.
 // The inline tags hand the loop variable's annotation to the body (swForSeq).
-ForRange    <~~ push(makeForRange(takeAll())) ~~>
+ForRange    <~~ push(makeForRange(takeAll())); swBrClaim(up.start, up.pos, true) ~~>
             = [ LoopLabel ] KwFor [ "var" KwEnd ] ForPat <~~ swForPat(up.in) ~~> KwIn AddExpr RangeOp
               AddExpr <~~ swForSeq("") ~~> [ ForWhere ] Block ;
 RangeOp     = "..." <~~ push({rop: "..."}) ~~>
             | "..<" <~~ push({rop: "..<"}) ~~> ;
-ForList     <~~ push(makeForList(takeAll())) ~~>
+ForList     <~~ push(makeForList(takeAll())); swBrClaim(up.start, up.pos, true) ~~>
             = [ LoopLabel ] KwFor [ "var" KwEnd ] ForPat <~~ swForPat(up.in) ~~> [ ForPatType ] KwIn
               Expression <~~ swForSeq(up.in) ~~> [ ForWhere ] Block ;
 // The loop variable: a name, _ , or a tuple pattern (for (k, v) in aDictionary).
@@ -1112,7 +1125,7 @@ Guard       <~~ push(makeGuard(takeAll())) ~~>
 // fallthrough. Body parsed FLAT (labels before Statement, a bare 'case' is a valid
 // identifier); the builder groups statements under the label they follow. break in
 // a case leaves the switch (loop stack), continue reaches the enclosing loop.
-Switch      <~~ push(makeSwitch(takeAll())) ~~>
+Switch      <~~ push(makeSwitch(takeAll())); swBrClaim(up.start, up.pos, false) ~~>
             = [ LoopLabel ] KwSwitch SwitchSubj "{" { PoundIfCase | CaseLabel | Statement } "}" ;
 SwitchSubj  <~~ push({subj: pop()}) ~~>
             = Expression ;
@@ -1128,8 +1141,8 @@ CaseWhere   <~~ push({cwhere: pop()}) ~~> = KwWhere Expression ;
 
 Return      <~~ push(makeReturn(takeAll(), up.pos)) ~~>
             = KwReturn [ Expression <~~ push({itext: up.in, iat: up.start + ":" + up.pos}) ~~> ] [ ";" ] ;
-Break       <~~ push(makeBreakL(takeAll())) ~~>    = KwBreak [ SameLine BreakLbl ] [ ";" ] ;
-Continue    <~~ push(makeContinueL(takeAll())) ~~> = KwContinue [ SameLine BreakLbl ] [ ";" ] ;
+Break       <~~ push(makeBreakL(takeAll())); swBrNote(up.start, true) ~~>    = KwBreak [ SameLine BreakLbl ] [ ";" ] ;
+Continue    <~~ push(makeContinueL(takeAll())); swBrNote(up.start, false) ~~> = KwContinue [ SameLine BreakLbl ] [ ";" ] ;
 BreakLbl    <~~ push({lbl: swBt(up.in)}) ~~> = Id ;
 
 // A zero-width guard that fails at end of line (a newline or a // comment before the
@@ -1671,7 +1684,7 @@ Shorthand   = "$" :whitespace() ShortIdx :whitespace(Whitespace) ;
 ShortIdx    <~~ swNoteShort(up.in, up.start); push(makeVarRef("$" + up.in)) ~~>
             = "0"..."9" { "0"..."9" } ;
 
-Closure     <~~ push(makeClosure(takeAll(), up.in, up.pos)) ~~>
+Closure     <~~ swBrCheck(up.start, up.pos); push(makeClosure(takeAll(), up.in, up.pos)) ~~>
             = "{" [ ClosureSig ] { PoundIfLam | LamStmt } "}" ;
 // A closure's own signature declares types just as a func does, and they adopt the
 // same way: `{ (x: Double) -> Double in x / 2 }` called with 3 has to divide 3.0.

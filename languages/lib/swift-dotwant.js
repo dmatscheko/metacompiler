@@ -1428,3 +1428,39 @@ function swDsFlush() {
         }
     }
 }
+
+// ----- break and continue need an enclosing statement -----
+// Each one is noted by its source offset; a loop claims those inside it, a switch
+// the breaks, an if or a do marks the breaks inside it (swiftc words those
+// differently), and a function body, a closure and a top-level statement reject
+// what is left: a branch cannot leave its function. A re-parse notes an offset once.
+var swBrPend = []
+function swBrNote(s, isBr) {
+    for (var i = 0; i < swBrPend.length; i++) {
+        if (swBrPend[i].s == s) { return }
+    }
+    swBrPend.push({s: s, br: isBr, inIf: false})
+}
+function swBrClaim(s, e, loop) {
+    var rest = []
+    for (var i = 0; i < swBrPend.length; i++) {
+        var n = swBrPend[i]
+        if (n.s < s || n.s >= e || !(loop || n.br)) { rest.push(n) }
+    }
+    swBrPend = rest
+}
+function swBrInIf(s, e) {
+    for (var i = 0; i < swBrPend.length; i++) {
+        if (swBrPend[i].s >= s && swBrPend[i].s < e) { swBrPend[i].inIf = true }
+    }
+}
+function swBrCheck(s, e) {
+    for (var i = 0; i < swBrPend.length; i++) {
+        var n = swBrPend[i]
+        if (n.s >= s && n.s < e) {
+            var msg = "'continue' is only allowed inside a loop"
+            if (n.br) { msg = n.inIf ? "unlabeled 'break' is only allowed inside a loop or switch, a labeled break is required to exit an if or do" : "'break' is only allowed inside a loop, if, do, or switch" }
+            fail(c.curFile() + ":" + c.lineOf(n.s) + ": " + msg)
+        }
+    }
+}

@@ -358,6 +358,20 @@
             "program": "${workspaceFolder}","args": ["languages/swift-to-llvm-ir.abnf", "tests/swift-test-recognize.swift", "-qq"]
         },
         {
+            "name": "Swift interpreter break outside a loop SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "expectError": "swift-fail-test-break.swift:7: 'break' is only allowed inside a loop, if, do, or switch",
+            "program": "${workspaceFolder}","args": ["languages/swift-interpreter.abnf", "tests/swift-fail-test-break.swift", "-q"]
+        },
+        {
+            "name": "Swift compiler break outside a loop SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "expectError": "swift-fail-test-break.swift:7: 'break' is only allowed inside a loop, if, do, or switch",
+            "program": "${workspaceFolder}","args": ["languages/swift-to-llvm-ir.abnf", "tests/swift-fail-test-break.swift", "-q"]
+        },
+        {
             "name": "CSharp to LLVM IR -qq, a compile error still shows SHOULD FAIL",
             "type": "go",
             "request": "launch",
@@ -1011,6 +1025,20 @@
             "request": "launch",
             "expectError": "invalid operation: negative shift count -1",
             "program": "${workspaceFolder}","args": ["languages/go-to-llvm-ir.abnf", "tests/go-fail-test-shift.go", "-q"]
+        },
+        {
+            "name": "Go interpreter break outside a loop SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "expectError": "go-fail-test-break.go:14: break is not in a loop, switch, or select",
+            "program": "${workspaceFolder}","args": ["languages/go-interpreter.abnf", "tests/go-fail-test-break.go", "-q"]
+        },
+        {
+            "name": "Go compiler break outside a loop SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "expectError": "go-fail-test-break.go:14: break is not in a loop, switch, or select",
+            "program": "${workspaceFolder}","args": ["languages/go-to-llvm-ir.abnf", "tests/go-fail-test-break.go", "-q"]
         },
         {
             "name": "Go interpreter float constant truncated SHOULD FAIL",

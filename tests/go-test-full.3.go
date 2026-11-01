@@ -1454,6 +1454,53 @@ func s134f() {
 	check("cxaddr134", fmt.Sprint(s, *pc, ca, arr, pc == &s.c) == "{0 (4+0i) (1+2i)} (4+0i) [(5+0i) (2+0i)] [(0+0i) (9+0i)] true")
 }
 
+// ===== SECTION 135: break in a select, and break of a labelled switch or select =====
+// An unlabelled break in a select arm ends the select, not the loop around it;
+// `break L` ends the switch or select labelled L, even from a loop inside it. The
+// expected values are go run's.
+func s135() {
+	c := make(chan int, 8)
+	for i := 0; i < 6; i++ {
+		c <- i
+	}
+	got := []int{}
+	for k := 0; k < 4; k++ {
+		select {
+		case v := <-c:
+			if v == 1 {
+				break
+			}
+			if v == 2 {
+				continue
+			}
+			got = append(got, v)
+		}
+		got = append(got, -1)
+	}
+	check("selbrk135", fmt.Sprint(got) == "[0 -1 -1 3 -1]")
+	n := 0
+L:
+	select {
+	case v := <-c:
+		if v > 0 {
+			break L
+		}
+		n = -1
+	}
+M:
+	switch {
+	default:
+		for i := 0; ; i++ {
+			if i == 2 {
+				break M
+			}
+			n += 10
+		}
+		n = 99
+	}
+	check("lblbrk135", n == 20 && len(c) == 1)
+}
+
 func main() {
 	s94()   // SECTION-CALL 94
 	s95()   // SECTION-CALL 95
@@ -1494,6 +1541,7 @@ func main() {
 	s132f() // SECTION-CALL 132
 	s133()  // SECTION-CALL 133
 	s134f() // SECTION-CALL 134
+	s135()  // SECTION-CALL 135
 	fmt.Println("full:", checks, "checks,", fails, "failures")
 	os.Exit(fails)
 }

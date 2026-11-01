@@ -4067,6 +4067,50 @@ function goIsSeqTy(t0) {
     return t.indexOf("func(func(") == 0 || t.indexOf("iter.Seq") == 0
 }
 
+// ----- break and continue need an enclosing statement -----
+// Each one is noted by its source offset; a for statement claims those inside it, a
+// switch or select the breaks, and a function body rejects what is left: a branch
+// cannot leave its function, so `break` at function level does not compile. A
+// re-parse of the same source notes it again (one note per offset).
+var goBrPend = []
+function goBrNote(s, isBr) {
+    var i = 0
+    while (i < goBrPend.length) {
+        if (goBrPend[i].s == s) { return }
+        i = i + 1
+    }
+    goBrPend.push({s: s, br: isBr})
+}
+function goBrClaim(s, e, loop) {
+    var rest = []
+    var i = 0
+    while (i < goBrPend.length) {
+        var n = goBrPend[i]
+        if (n.s < s || n.s >= e || !(loop || n.br)) { rest.push(n) }
+        i = i + 1
+    }
+    goBrPend = rest
+}
+function goBrCheck(s, e) {
+    var i = 0
+    while (i < goBrPend.length) {
+        var n = goBrPend[i]
+        if (n.s >= s && n.s < e) { fail(c.curFile() + ":" + c.lineOf(n.s) + ": " + (n.br ? "break is not in a loop, switch, or select" : "continue is not in a loop")) }
+        i = i + 1
+    }
+}
+// A labelled switch or select takes the pending label (takeLabel, one per grammar) at
+// its keyword, before its body is parsed, so a loop inside cannot claim it. Keyed by
+// the keyword's offset: a type switch that fails is re-read as a value switch.
+// goSwLblC (one per grammar) makes `break L` leave the statement.
+var goSwLbls = {}
+function goSwLbl(pos) {
+    if (pendingLabel != null) { goSwLbls[c.curFile() + ":" + pos] = takeLabel() }
+}
+function goSwLblAt(pos) {
+    var l = goSwLbls[c.curFile() + ":" + pos]
+    return l === undefined ? null : l
+}
 // The switch body's mark: its frame DEPTH as well as its length, so a truncation
 // that would land in the wrong frame does nothing at all instead.
 function cSwEnter() { cSwMarks.push({d: cScopes.length, k: cTop().n.length, ts: cTsPend}); cTsPend = "" }
