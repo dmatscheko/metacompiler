@@ -98,7 +98,7 @@ Found by the CORE worker, round 15. The interpreter's stripWs deletes every ASCI
 strings.TrimSpace, native strips ASCII 9-13 and 32: `int.Parse(" 1 2 ")` and `int.Parse(" 1")` give three answers.
 .NET's NumberStyles.Integer allows leading/trailing white space (U+0009-U+000D, U+0020) only; settle with a real dotnet.
 
-### T-1055 csharp: `base.Prop` / `base.Field` reads unsupported · P3 · CS · OPEN [V spec-only]
+### T-1055 csharp: `base.Prop` / `base.Field` reads unsupported · P3 · CS · IN PROGRESS (CS worker, round 8) [V spec-only]
 `class A { public virtual string P => "A"; } class B : A { public override string P => "B" + base.P; }` then `Console.WriteLine(new B().P)` → C#: "BA". Ours: interpreter "unknown name: base", run/native "variable not defined: base" — only `base.M(...)` calls work. Also blocks `public override string Message => "x" + base.Message;` (today an override drops the stored base message, which is only safe while base.Message is unreadable — revisit js_csexcvirt when fixing). Found by CS r7.
 
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
