@@ -8612,6 +8612,38 @@ function k4BuiltinLacks(recv, name) {
     return kinds.indexOf(k4BuiltinKind(recv)) < 0
 }
 
+// The PROPERTY subset of the member table, built on first use. Twin of
+// ktBuiltinProps in jsrtkotlin.go, which has the rules; keep the string identical.
+var k4BuiltinProps = undefined
+
+// ktBuiltinHasProp (jsrtkotlin.go): a builtin receiver whose kind declares `name`
+// as a property.
+function k4BuiltinHasProp(recv, name) {
+    if (k4BuiltinProps === undefined) {
+        k4BuiltinProps = {}
+        var es = ("code:C destructured:H endExclusive:G endInclusive:G entries:M first:G " +
+            "groupValues:H groups:H indices:LRADSBT isFailure:U isSuccess:U javaClass:LRAQGDSMBTCXHU keys:M " +
+            "last:G lastIndex:LRADBT length:BT options:X pattern:X range:H size:LRADSM start:G step:G " +
+            "value:H values:M").split(" ")
+        var i = 0
+        while (i < es.length) {
+            var c = es[i].indexOf(":")
+            k4BuiltinProps["$" + es[i].substring(0, c)] = es[i].substring(c + 1)
+            i = i + 1
+        }
+    }
+    var kinds = k4BuiltinProps["$" + name]
+    if (kinds === undefined) { return false }
+    return kinds.indexOf(k4BuiltinKind(recv)) >= 0
+}
+
+// js_ktbprop (jsrtkotlin.go) gates kt_ktgetp's speculative field read in VALUE
+// position: false only for a builtin receiver whose kind has no property of the name.
+function js_ktbprop(v, name) {
+    if (!k4IsBuiltinRecv(v)) { return true }
+    return k4BuiltinHasProp(v, name)
+}
+
 // k4Bound is jsHostFunc(name, ...) of the Go twin: the bound builtin that reaches
 // the whole method surface through the hub.
 function k4Bound(recv, name) {
@@ -8702,17 +8734,19 @@ function ktRecvMember(recv, name, iscall) {
     // `with(list) { lastIndex }` must work. kRecvProps in kotlin-interpreter.abnf
     // reads kGetField the same way.
     if (k4RecvProp(name)) { return js_ktfget(recv, name) }
-    // VALUE POSITION on a builtin receiver is a field read and nothing else (`with(1..7
-    // step 2) { first }`); a miss belongs to an outer receiver, since Kotlin has no
-    // unqualified value that means a bound method. Only a call binds. A name
-    // outside the receiver's member table misses in either position.
-    if (k4BuiltinLacks(recv, name)) { return KT_MISS }
+    // VALUE POSITION on a builtin receiver reads one of its kind's PROPERTIES and
+    // nothing else (`with(1..7 step 2) { first }`); anything else belongs to an
+    // outer receiver, since Kotlin has no unqualified value that means a bound
+    // method. Only a call binds. A name outside the receiver's member table misses
+    // in either position.
     if (!iscall) {
+        if (!k4BuiltinHasProp(recv, name)) { return KT_MISS }
         var fv = anytype
         fv = js_ktfget(recv, name)
         if (!rtIsNil(fv)) { return fv }
         return KT_MISS
     }
+    if (k4BuiltinLacks(recv, name)) { return KT_MISS }
     return k4Bound(recv, name)
 }
 
@@ -12335,9 +12369,8 @@ function js_ktget(env, name, iscall) {
             s = scopeParent(s)
         }
     }
-    // 4. The implicit-receiver STACK and the stdlib. js_ktglobal is the emitter's
-    //    own last-but-one arm, so natively this is normally already spent; it is
-    //    repeated because js_ktget is also called directly (kt_bareref's fallback).
+    // 4. The implicit-receiver STACK, then the stdlib: a stdlib global comes after
+    //    every receiver, so a class property shadows kotlin.math.log.
     var g = anytype
     g = js_ktglobal(name, iscall)
     if (g !== undefined) { return g }

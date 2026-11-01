@@ -7351,6 +7351,22 @@ fun s168() {
         mutableListOf(0).apply { with(arrayOf(4, 5)) { add(size) } } == listOf(0, 2))
 }
 
+// ===== SECTION 169: value reads through a builtin receiver =====
+// A bare name in value position reads only a PROPERTY of a builtin implicit
+// receiver's kind; a function member (List.first(), map, reverse) or a name the
+// receiver lacks falls through to the enclosing class.
+class K169 {
+    val log = "L"; val items = "I"; val push = "P"; val map = "M"; val first = "F"; val reverse = "V"
+    fun go() = with(listOf(9)) { log + items + push + map + first + size }
+    fun sb() = with(StringBuilder("xy")) { reverse + length }
+    fun rg() = with(1..7 step 2) { "" + first + step + map }
+}
+
+fun s169() {
+    check("rcv169a", K169().go() == "LIPMF1")
+    check("rcv169b", K169().sb() == "V2" && K169().rg() == "12M")
+}
+
 fun main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -7516,6 +7532,7 @@ fun main() {
     s166() // SECTION-CALL 166
     s167() // SECTION-CALL 167
     s168() // SECTION-CALL 168
+    s169() // SECTION-CALL 169
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }

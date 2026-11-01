@@ -2654,25 +2654,28 @@ KwContract  = "contract" KwEnd ;
             probeB.NewCondBr(truthy(probeB, clsV), instB, bltB)
             // A receiver that is not an object at all - a String, a Long, a Char - has
             // no member js_get can answer, so in VALUE position it takes Kotlin's field
-            // read for every name, which is what `fun String.f() = length` needs. A
-            // CALL on it goes to js_ktget like an object builtin's: natively the field
-            // probe would answer the C floor's own string method, so `split("")`
-            // inside `"abc".run { }` would drop Kotlin's empty edge elements.
+            // read, which is what `fun String.f() = length` needs. A CALL on it goes to
+            // js_ktget: natively the field probe would answer the C floor's own string
+            // method, so `split("")` inside `"abc".run { }` would drop Kotlin's empty
+            // edge elements.
             var rpB = curF.NewBlock("")
-            var npB = curF.NewBlock("")
-            bltB.NewCondBr(truthy(bltB, callExt(bltB, "js_seq",
-                [callExt(bltB, "js_typeof", [thV]), emitStr(bltB, "object")])), rpB, npB)
-            npB.NewCondBr(truthy(npB, ps[2]), dispB, fgB)
-            // kt_recvprop decides for a CALL - `first()` must stay a bound method.
-            // In VALUE position there is nothing to decide: Kotlin has no unqualified
-            // name that means a method, so the field read is simply tried, and a MISS
-            // falls to exactly the block instB would have fallen to (dispB).
-            // A CALL goes straight to js_ktget, whose ktRecvMember binds the
-            // receiver's Kotlin member: js_get under llvm.Run would answer the
-            // host's own JavaScript array method (sort() there sorts as strings).
+            var valB = curF.NewBlock("")
+            bltB.NewCondBr(truthy(bltB, ps[2]), rpB, valB)
+            // In VALUE position the field read is tried only for a property of the
+            // receiver's kind (js_ktbprop): Kotlin has no unqualified name that means
+            // a method, and js_ktfget would answer the runtime's own method for one,
+            // so `log` inside with(list) { } in a class with a `log` property must
+            // fall to dispB like any miss.
+            valB.NewCondBr(truthy(valB, callExt(valB, "js_ktbprop", [thV, ps[1]])), fgB, dispB)
+            // A CALL tries the field read for an object's kt_recvprop name only -
+            // `first()` must stay a bound method - and otherwise goes straight to
+            // js_ktget, whose ktRecvMember binds the receiver's Kotlin member: js_get
+            // under llvm.Run would answer the host's own JavaScript array method
+            // (sort() there sorts as strings).
             var rp2B = curF.NewBlock("")
-            rpB.NewCondBr(truthy(rpB, rpB.NewCall(rtRecvProp(), [ps[1]])), fgB, rp2B)
-            rp2B.NewCondBr(truthy(rp2B, ps[2]), dispB, fgB)
+            rpB.NewCondBr(truthy(rpB, callExt(rpB, "js_seq",
+                [callExt(rpB, "js_typeof", [thV]), emitStr(rpB, "object")])), rp2B, dispB)
+            rp2B.NewCondBr(truthy(rp2B, rp2B.NewCall(rtRecvProp(), [ps[1]])), fgB, dispB)
             var mV = instB.NewCall(rtSafeGet(), [thV, ps[1]])
             var hitB = curF.NewBlock("")
             var p2B = curF.NewBlock("")
@@ -2740,30 +2743,13 @@ KwContract  = "contract" KwEnd ;
             var dhitB = curF.NewBlock("")
             dprobeB.NewCondBr(truthy(dprobeB, callExt(dprobeB, "js_sne", [dmV, hUndef])), dhitB, missB)
             dhitB.NewRet(dmV)
-            // The last arm stays the extern. Kotlin's implicit receivers form a STACK
-            // that ktWithRecv (with / run / apply / buildString / buildList / buildMap,
-            // and every T.() -> R lambda) pushes INSIDE the runtime, and js_ktget walks
-            // it after the two probes above. An emitter cannot see that stack, and it
-            // cannot walk PAST the innermost `this` either.
-            //
-            // What CAN be reached is layer 2 itself, through an extern that takes no
-            // scope. js_ktglobal(name) is that extern - it is already emitted for a
-            // stdlib global - and languages/lib/kotlin-rt.metajs answers it from
-            // ktRecvStack FIRST, so `with(list) { size }` and `apply { add(3) }`
-            // resolve natively. In the Go twin js_ktglobal is ktGlobalFn, which
-            // answers undefined for a name it does not know, so this arm is a no-op
-            // under llvm.Run and the extern below still decides.
-            var gB = curF.NewBlock("")
-            var lastB = curF.NewBlock("")
-            // BOTH externs carry the syntactic position too. Natively `with` binds no
-            // scope `this` at all (layer 2 cannot make a scope), so the probes above
-            // all miss and js_ktglobal's walk of ktRecvStack is the ONLY place the
-            // receiver is seen - which is why the flag has to travel this far or the
-            // fix would hold under llvm.Run and not in the native binary.
-            var gV = callExt(missB, "js_ktglobal", [ps[1], ps[2]])
-            missB.NewCondBr(truthy(missB, callExt(missB, "js_sne", [gV, hUndef])), gB, lastB)
-            gB.NewRet(gV)
-            lastB.NewRet(callExt(lastB, "js_ktget", [ps[0], ps[1], ps[2]]))
+            // The last arm is the extern. It walks what the emitter cannot: every
+            // `this` PAST the innermost, the receiver STACK ktWithRecv pushes inside
+            // the runtime, and only then the stdlib globals - in that order, so `log`
+            // inside with(list) { } written in a member of a class with a `log`
+            // property reads the property, not kotlin.math.log. It carries the
+            // syntactic position too, for ktRecvMember.
+            missB.NewRet(callExt(missB, "js_ktget", [ps[0], ps[1], ps[2]]))
         })
     }
     // kt_barecall(env, name, args) - the ONE call site that has to choose between a

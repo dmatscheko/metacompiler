@@ -1576,6 +1576,14 @@ func init() {
 			}
 			return boolH(!rt.truthy(u(a[3])))
 		}
+		// js_ktbprop(v, name) gates kt_ktgetp's speculative field read in VALUE
+		// position: false only for a builtin receiver whose kind has no property of
+		// the name, where js_ktfget could answer the runtime's own method. Twin of
+		// js_ktbprop in languages/lib/kotlin-rt.metajs.
+		m["js_ktbprop"] = func(a []uint64) uint64 {
+			v := u(a[0])
+			return boolH(!ktIsBuiltinRecv(v) || ktBuiltinHasProp(v, rt.toString(u(a[1]))))
+		}
 		m["js_ktis"] = func(a []uint64) uint64 {
 			v := u(a[0])
 			switch v.(type) {
@@ -2952,6 +2960,11 @@ func init() {
 			// the same function the bare `abs(-3)` reaches. See ktPkgMember.
 			if name == "kotlin" || name == "java" {
 				return w(ktPkg(name))
+			}
+			// A stdlib global comes only after every implicit receiver, so a class
+			// property shadows kotlin.math.log.
+			if v := ktGlobalFn(rt, name); !isUndefOrNull(v) {
+				return w(v)
 			}
 			// `Unit` as a VALUE is the Unit object, which is undefined here.
 			// Twin of js_ktget in languages/lib/kotlin-rt.metajs.
@@ -9386,6 +9399,29 @@ func ktBuiltinKind(recv interface{}) byte {
 	return 0
 }
 
+// ktBuiltinProps is the PROPERTY subset of ktBuiltinMembers, in the same notation:
+// the names a builtin receiver kind declares as a `val`, so an unqualified name in
+// VALUE position reads one. Every other member is a function, and a bare name never
+// means a bound function, so `with(listOf(1)) { map }` reads an outer `map`. Keep the
+// string identical to kBuiltinProps in kotlin-interpreter.abnf and k4BuiltinProps in
+// languages/lib/kotlin-rt.metajs.
+var ktBuiltinProps = func() map[string]string {
+	t := map[string]string{}
+	for _, e := range strings.Fields("code:C destructured:H endExclusive:G endInclusive:G entries:M first:G " +
+		"groupValues:H groups:H indices:LRADSBT isFailure:U isSuccess:U javaClass:LRAQGDSMBTCXHU keys:M " +
+		"last:G lastIndex:LRADBT length:BT options:X pattern:X range:H size:LRADSM start:G step:G " +
+		"value:H values:M") {
+		i := strings.IndexByte(e, ':')
+		t[e[:i]] = e[i+1:]
+	}
+	return t
+}()
+
+// ktBuiltinHasProp reports a builtin receiver whose kind declares `name` as a property.
+func ktBuiltinHasProp(recv interface{}, name string) bool {
+	return strings.IndexByte(ktBuiltinProps[name], ktBuiltinKind(recv)) >= 0
+}
+
 // ktBuiltinLacks reports a builtin receiver that does not declare `name`, so an
 // unqualified call of it belongs to an outer implicit receiver or to an extension:
 // `sb.apply { with(list) { append(size) } }` appends to the builder.
@@ -9491,21 +9527,21 @@ func (rt *jsrt) ktRecvMember(recv interface{}, name string, iscall bool) (interf
 	if ktRecvProp(name) && ktRefRead != nil {
 		return ktRefRead(recv, name), true
 	}
-	// VALUE POSITION on a builtin receiver is a field read and nothing else (this is
-	// the arm that answers `with(1..7 step 2) { first }`). A miss is a MISS: Kotlin
-	// has no unqualified value that means a bound method, so the name belongs to an
-	// outer receiver - `append(n)` inside sb.apply { } in a member of a class with a
-	// property n. Only a call binds the method below. A name outside the receiver's
-	// member table misses in either position.
-	if ktBuiltinLacks(recv, name) {
-		return nil, false
-	}
+	// VALUE POSITION on a builtin receiver reads one of its kind's PROPERTIES and
+	// nothing else (`with(1..7 step 2) { first }`). Anything else is a MISS: Kotlin
+	// has no unqualified value that means a bound method, so `first` inside
+	// with(list) { } and `n` inside sb.apply { } belong to an outer receiver. Only a
+	// call binds the method below, and a name outside the receiver's member table
+	// misses in either position.
 	if !iscall {
-		if ktRefRead != nil {
+		if ktRefRead != nil && ktBuiltinHasProp(recv, name) {
 			if v := ktRefRead(recv, name); !isUndefOrNull(v) {
 				return v, true
 			}
 		}
+		return nil, false
+	}
+	if ktBuiltinLacks(recv, name) {
 		return nil, false
 	}
 	self := recv

@@ -13815,7 +13815,7 @@ NotMemberKw = :script(~~ "pure";
                 // down uses, for the same reasons.
                 if (typeof cur == "string") {
                     if (kRecvProps["$" + name] === true) { return {v: kGetField(cur, name)} }
-                    if (!iscall && !kBuiltinLacks(cur, name)) {
+                    if (!iscall && kBuiltinHasProp(cur, name)) {
                         var sv = anytype
                         sv = kGetField(cur, name)
                         if (sv !== undefined) { return {v: sv} }
@@ -13871,13 +13871,14 @@ NotMemberKw = :script(~~ "pure";
                     if (rpv !== undefined || iscall) { return {v: rpv} }
                     return null
                 }
-                // VALUE POSITION is a field read and nothing else (`first`/`last`/
-                // `step` on a progression). A miss belongs to an outer receiver:
-                // Kotlin has no unqualified value that means a bound method. Twin of
-                // ktRecvMember in abnf/jsrtkotlin.go. A name outside the receiver's
-                // member table misses in either position.
+                // VALUE POSITION reads one of the receiver kind's PROPERTIES and
+                // nothing else (`first`/`last`/`step` on a progression, but not
+                // List.first()). A miss belongs to an outer receiver: Kotlin has no
+                // unqualified value that means a bound method. Twin of ktRecvMember
+                // in abnf/jsrtkotlin.go. A name outside the receiver's member table
+                // misses in either position.
                 if (!iscall) {
-                    if (kBuiltinLacks(cur, name)) { return null }
+                    if (!kBuiltinHasProp(cur, name)) { return null }
                     var bv = anytype
                     bv = kGetField(cur, name)
                     if (bv !== undefined) { return {v: bv} }
@@ -14040,6 +14041,22 @@ NotMemberKw = :script(~~ "pure";
     function kBuiltinLacks(recv, name) {
         var kinds = kBuiltinMembers["$" + name]
         return kinds == undefined || kinds.indexOf(kBuiltinKind(recv)) < 0
+    }
+    // The PROPERTY subset of the member table: an unqualified name in VALUE position
+    // reads only one of these. Twin of ktBuiltinProps in abnf/jsrtkotlin.go, which has
+    // the rules; keep the string identical.
+    var kBuiltinProps = {}
+    var kbpn = ("code:C destructured:H endExclusive:G endInclusive:G entries:M first:G " +
+        "groupValues:H groups:H indices:LRADSBT isFailure:U isSuccess:U javaClass:LRAQGDSMBTCXHU keys:M " +
+        "last:G lastIndex:LRADBT length:BT options:X pattern:X range:H size:LRADSM start:G step:G " +
+        "value:H values:M").split(" ")
+    for (var kbpi = 0; kbpi < kbpn.length; kbpi++) {
+        var kbpc = kbpn[kbpi].indexOf(":")
+        kBuiltinProps["$" + kbpn[kbpi].substring(0, kbpc)] = kbpn[kbpi].substring(kbpc + 1)
+    }
+    function kBuiltinHasProp(recv, name) {
+        var kinds = kBuiltinProps["$" + name]
+        return kinds != undefined && kinds.indexOf(kBuiltinKind(recv)) >= 0
     }
     // A receiver whose members come from the runtime rather than from a class
     // descriptor (recvLookup's builtin arm). Twin of ktIsBuiltinRecv in
