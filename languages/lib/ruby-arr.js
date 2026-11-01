@@ -207,6 +207,31 @@ function rbaEnumSpreads(n) {
         || n == "count" || n == "take_while" || n == "uniq" || n == "to_h"
 }
 
+// The Enumerable methods MRI ends #each for once the elements so far decide the
+// answer: 1 at the first element whose test holds (any? none? find detect
+// find_index include? member?), 2 at the first whose test fails (all?
+// take_while), 3 at the second that holds (one?), 4 after a count (first take),
+// 0 never. find / detect / take_while without a block, and find_index without
+// one or a value, answer an Enumerator and iterate nothing. Go twin:
+// rubyEnumStop in abnf/jsrtrubystr.go.
+function rbaEnumStop(n, hasBlk, nargs) {
+    if (n == "first" || n == "take") { return 4 }
+    if (n == "any?" || n == "none?" || n == "include?" || n == "member?") { return 1 }
+    if (n == "all?") { return 2 }
+    if (n == "one?") { return 3 }
+    if (!hasBlk && (n != "find_index" || nargs == 0)) { return 0 }
+    if (n == "find" || n == "detect" || n == "find_index") { return 1 }
+    if (n == "take_while") { return 2 }
+    return 0
+}
+// The Array method that is such a method's test of one element without a
+// block: the pattern === (or truthiness) of any?, or the == of include?.
+// Go twin: rubyEnumProbe in abnf/jsrtrubystr.go.
+function rbaEnumProbe(n) {
+    if (n == "any?" || n == "all?" || n == "none?" || n == "one?") { return "any?" }
+    return "include?"
+}
+
 // Enumerable#slice_before / #slice_after, given whether each element matched:
 // a match opens a new slice before it, or closes the current one after it.
 function rbaSliceAt(t, hit, after) {

@@ -5303,8 +5303,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // An arithmetic operator whose operands are not both numbers, worded as MRI 2.6
     // does: a number on the left is a TypeError naming the right side (`1 + nil' is
     // "nil can't be coerced into Integer"), and a left side with no such operator -
-    // nil, true, a Symbol, a Hash - is a NoMethodError; so is << / >> on a left side
-    // that is not a number. An Array on the left, and any other operator, stays an
+    // nil, true, a Symbol, a Hash, an Array under / % ** - is a NoMethodError; so
+    // is << / >> on a left side that is not a number. Any other operator stays an
     // engine abort. Twins:
     // rubyNumOperandErr in abnf/jsrt.go, rbNumOperandErr in lib/ruby-rt.metajs.
     function numOperandErr(op, l, r) {
@@ -5313,7 +5313,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 var desc = isSym(r) ? rinspect(r) : fmtConvName(r)
                 raiseErr(op, "TypeError", desc + " can't be coerced into " + classOf(l).__name)
             }
-            if (!Array.isArray(l)) { noMethod(l, op) }
+            if (!Array.isArray(l) || op == "/" || op == "%" || op == "**") { noMethod(l, op) }
         }
         if ((op == "<<" || op == ">>") && numRank(l) < 0) { noMethod(l, op) }
         fail("not a number in '" + op + "'")
@@ -5620,8 +5620,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (op == "-") { return arrDiff(l, arrOperand(op, r)) }
             // Array#* is repetition with an Integer and JOIN with a String.
             if (op == "*" && typeof r == "string") { return arrJoin(l, r) }
-            if (op == "*" && toF(r) < 0) { raiseErr("*", "ArgumentError", "negative argument") }
-            if (op == "*") { return arrRepeat(l, r) }
+            if (op == "*") {
+                var times = implicitInt("*", r, "")
+                if (times < 0) { raiseErr("*", "ArgumentError", "negative argument") }
+                return arrRepeat(l, times)
+            }
             // Array#& (intersection) and Array#| (union). Both keep the LEFT-hand
             // order, both dedupe, and both compare with eql? like Array#- above.
             if (op == "&") { return arrAnd(l, arrOperand(op, r)) }
@@ -6945,18 +6948,21 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         raiseErr(fmtFrame, "TypeError", "can't convert " + fmtConvName(v) + " into Float")
         return 0
     }
-    // %c's message is NOT the Integer one, and MRI writes it TWO ways: nil is
-    // "no implicit conversion from nil to integer" and everything else is
-    // "no implicit conversion of Symbol into Integer" - a different preposition and a
-    // different case on "integer". Both are /usr/bin/ruby 2.6.10's own text.
-    function fmtCharOperand(v) {
+    // An Integer operand converted implicitly (MRI's NUM2LONG: a number, or what a
+    // user object's #to_int answers, then #alt when alt is not ""), as %c and
+    // Array#* take one. The refusal is NOT the Integer one, and MRI writes it TWO
+    // ways: nil is "no implicit conversion from nil to integer" and everything else
+    // is "no implicit conversion of Symbol into Integer" - a different preposition
+    // and a different case on "integer". Twins: rubyImplicitInt in abnf/jsrt.go,
+    // rbImplicitInt in lib/ruby-rt.metajs.
+    function implicitInt(frame, v, alt) {
         if (fmtIsNumV(v)) { return toF(v) }
-        var uc = fmtUserConv(v, "to_int", "to_i")
+        var uc = fmtUserConv(v, "to_int", alt)
         if (uc !== null && fmtIsNumV(uc)) { return toF(uc) }
         if (v === null || v === undefined) {
-            raiseErr(fmtFrame, "TypeError", "no implicit conversion from nil to integer")
+            raiseErr(frame, "TypeError", "no implicit conversion from nil to integer")
         }
-        raiseErr(fmtFrame, "TypeError", "no implicit conversion of " + fmtConvName(v) + " into Integer")
+        raiseErr(frame, "TypeError", "no implicit conversion of " + fmtConvName(v) + " into Integer")
         return 0
     }
     // MRI prints "Inf", "-Inf" and "NaN" for a non-finite float under every float
@@ -7148,7 +7154,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 if (charCount(v) != 1) { raiseErr(fmtFrame, "ArgumentError", "%c requires a character") }
                 body = v
             }
-            else { body = charFromCode(Math.trunc(fmtCharOperand(v))) }
+            else { body = charFromCode(Math.trunc(implicitInt(fmtFrame, v, "to_i"))) }
         }
         // %p is #inspect where %s is #to_s, and it truncates by BYTES the same way.
         else if (conv == "p") {
@@ -8360,7 +8366,14 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // fails on each, as MRI's does. The methods rbaEnumSpreads names hand a
     // multi-value yield to their block as the values themselves (`yield 1, 2`
     // gives `map { |x| }` 1), so their block is called with the packed Array's
-    // elements; the k-th call of each of them is for the k-th element. Twins:
+    // elements; the k-th call of each of them is for the k-th element.
+    // A method rbaEnumStop names stops #each, as a throw to a catch around it,
+    // once the elements so far decide the answer, which the collected prefix then
+    // gives as an Array. Its test of an element is the block, called as the
+    // element arrives and its answers replayed to the Array method, or else the
+    // method's pattern / value test run on that one element. An element is
+    // collected once its test returns: one whose block raised into a rescue in
+    // #each is skipped, as MRI's iteration skips it. Twins:
     // rubyEnumMixin in abnf/jsrtruby.go, rbEnumMixin in lib/ruby-rt.metajs.
     function enumAnswers(t, name) {
         return rbEnumName(name) && userIsA(t, hostGlobals["Enumerable"])
@@ -8368,15 +8381,55 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     function enumMixin(t, name, args, blk) {
         var items = []
         var multi = []
-        mcall(t, "each", [], function() {
-            var a = argsArray(arguments)
-            if (a.length == 1) { items.push(a[0]) } else { items.push(a.length == 0 ? null : a) }
-            multi.push(a.length > 1)
-            return null
-        })
+        var kind = rbaEnumStop(name, blk != null, args.length)
+        var useBlk = kind > 0 && kind < 4 && blk != null && (args.length == 0 || name == "find" || name == "detect")
+        var limit = -1
+        var cargs = args
+        if (kind == 4) {
+            limit = args.length == 0 ? (name == "first" ? 1 : 0) : Math.trunc(implicitInt(name, args[0], ""))
+            if (limit < 0) { raiseErr(name, "ArgumentError", "attempt to take negative size") }
+            if (args.length > 0) { cargs = [limit] }
+        }
+        var answers = []
+        var hits = [0]
+        var tag = {}
+        if (limit != 0) {
+            hostGlobals["catch"](tag, function() {
+                return mcall(t, "each", [], function() {
+                    var a = argsArray(arguments)
+                    var it = anytype
+                    it = a.length == 1 ? a[0] : (a.length == 0 ? null : a)
+                    var hit = false
+                    if (kind > 0 && kind < 4) {
+                        if (useBlk) {
+                            var res = anytype
+                            res = blk.apply(undefined, a.length > 1 && rbaEnumSpreads(name) ? a : [it])
+                            answers.push(res)
+                            hit = rtest(res)
+                        } else {
+                            hit = rtest(delegArr([it], t, rbaEnumProbe(name), args, null))
+                        }
+                        if (hit) { hits[0] = hits[0] + 1 }
+                        hit = kind == 1 ? hit : (kind == 2 ? !hit : hits[0] > 1)
+                    }
+                    items.push(it)
+                    multi.push(a.length > 1)
+                    if (kind == 4) { hit = items.length >= limit }
+                    if (hit) { hostGlobals["throw"](tag, null) }
+                    return null
+                })
+            })
+        }
         var b = anytype
         b = blk
-        if (blk != null && rbaEnumSpreads(name)) {
+        if (useBlk) {
+            var r = [0]
+            b = function() {
+                var i = r[0]
+                r[0] = i + 1
+                return answers[i]
+            }
+        } else if (blk != null && rbaEnumSpreads(name)) {
             var k = [0]
             b = function() {
                 var a = argsArray(arguments)
@@ -8386,7 +8439,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 return blk.apply(undefined, a)
             }
         }
-        return delegArr(items, t, name, args, b)
+        return delegArr(items, t, name, cargs, b)
     }
     // A zip / chain argument as an Array: itself, or what #to_a answers for a
     // value that responds to each; null for anything else. Twins: rubyEnumArgArr
@@ -10851,8 +10904,12 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (name == "take_while") { return arrSub(t, 0, cut) }
             return arrSub(t, cut, t.length - cut)
         }
+        // find(ifnone) answers what ifnone.call answers when nothing is found.
+        // Twins: the find arms of rubyArrayMethod in abnf/jsrt.go and
+        // rbArrayMethod in lib/ruby-rt.metajs.
         if (name == "find" || name == "detect") {
             for (i = 0; i < t.length; i++) { if (rtest(blockCall(blk, [t[i]]))) { return t[i] } }
+            if (args.length > 0 && args[0] !== null && args[0] !== undefined) { return mcall(args[0], "call", [], null) }
             return null
         }
         // inject / reduce: four forms - a block, a block with an initial value, a

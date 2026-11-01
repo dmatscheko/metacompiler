@@ -6730,7 +6730,7 @@ func (rt *jsrt) rubyNumOperandErr(op string, l, r interface{}) {
 			}
 			rt.rubyRaiseErr(op, "TypeError", desc+" can't be coerced into "+rubyOwnerName(l))
 		}
-		if _, isArr := l.(*jsArray); !isArr {
+		if _, isArr := l.(*jsArray); !isArr || op == "/" || op == "%" || op == "**" {
 			rt.rubyNoMethod(l, op)
 		}
 	case "<<", ">>":
@@ -6818,11 +6818,12 @@ func (rt *jsrt) rubyBin(op string, l, r interface{}) interface{} {
 			if sep, isStr := r.(string); isStr {
 				return rt.rubyArrJoin(la, sep)
 			}
-			if rubyToF(r) < 0 {
+			times := int(rt.rubyImplicitInt("*", r, ""))
+			if times < 0 {
 				rt.rubyRaiseErr("*", "ArgumentError", "negative argument")
 			}
 			out := &jsArray{}
-			for i := 0; i < int(rubyToF(r)); i++ {
+			for i := 0; i < times; i++ {
 				out.elems = append(out.elems, la.elems...)
 			}
 			return out
@@ -10643,8 +10644,8 @@ func rubyIntBody(f *big.Int, base int, upper, alt, sign bool, prec int) (body, p
 //
 // nil / true / false name THEMSELVES in the message and everything else names its CLASS,
 // which is MRI's wording and not a simplification. %c has a message of its own. The twins
-// are fmtIntOperand / fmtFloOperand / fmtCharOperand in ruby-interpreter.abnf and
-// rbFmtIntOperand / rbFmtFloOperand / rbFmtCharOperand in languages/lib/ruby-rt.metajs.
+// are fmtIntOperand / fmtFloOperand / implicitInt in ruby-interpreter.abnf and
+// rbFmtIntOperand / rbFmtFloOperand / rbImplicitInt in languages/lib/ruby-rt.metajs.
 // rubyOwnerName and NOT rubyClassName: rubyClassName answers "" for a USER OBJECT,
 // where the message must name the class ("Plain"). rubyOwnerName reads
 // __class.__name first.
@@ -10721,21 +10722,19 @@ func (rt *jsrt) rubyFmtFloOperand(v interface{}) float64 {
 	return 0
 }
 
-// %c's message is NOT the Integer one, and MRI writes it TWO ways: nil is
-// "no implicit conversion from nil to integer" and everything else is
-// "no implicit conversion of Symbol into Integer" - a different preposition and a
-// different case on "integer". Both are /usr/bin/ruby 2.6.10's own text.
-func (rt *jsrt) rubyFmtCharOperand(v interface{}) float64 {
+// rubyImplicitInt is an Integer operand converted implicitly, as %c and Array#*
+// take one. Twin of implicitInt in ruby-interpreter.abnf, which states the rule.
+func (rt *jsrt) rubyImplicitInt(frame string, v interface{}, alt string) float64 {
 	if rubyFmtIsNumV(v) {
 		return rubyToF(v)
 	}
-	if uc, has := rt.rubyFmtUserConv(v, "to_int", "to_i"); has && rubyFmtIsNumV(uc) {
+	if uc, has := rt.rubyFmtUserConv(v, "to_int", alt); has && rubyFmtIsNumV(uc) {
 		return rubyToF(uc)
 	}
 	if isUndefOrNull(v) {
-		rt.rubyRaiseErr(rt.rubyFmtFrame, "TypeError", "no implicit conversion from nil to integer")
+		rt.rubyRaiseErr(frame, "TypeError", "no implicit conversion from nil to integer")
 	}
-	rt.rubyRaiseErr(rt.rubyFmtFrame, "TypeError", "no implicit conversion of "+rubyFmtConvName(v)+" into Integer")
+	rt.rubyRaiseErr(frame, "TypeError", "no implicit conversion of "+rubyFmtConvName(v)+" into Integer")
 	return 0
 }
 
@@ -10933,7 +10932,7 @@ func (rt *jsrt) rubyFormat(spec string, arg interface{}) string {
 				}
 				body = s
 			} else {
-				body = rubyCharCode(int(math.Trunc(rt.rubyFmtCharOperand(av))))
+				body = rubyCharCode(int(math.Trunc(rt.rubyImplicitInt(rt.rubyFmtFrame, av, "to_i"))))
 			}
 		case 'p':
 			// %p is #inspect where %s is #to_s, and it truncates by BYTES the same
@@ -12525,18 +12524,6 @@ func (rt *jsrt) rubyFormatArgs(args []interface{}, frame string) string {
 	return rt.rubyFormat2(rt.rubyStr(args[0]), &jsArray{elems: args[1:]}, frame)
 }
 
-// rubyPatternHit is the `pattern === value` test that all?/any?/none?/one? apply
-// to a non-block argument: a class object matches by is_a?, everything else by ==.
-// It is the rule js_rwhen applies to a `when V` label.
-func (rt *jsrt) rubyPatternHit(pat, v interface{}) bool {
-	if o, isObj := pat.(*jsObject); isObj {
-		if _, isCls := o.props["__isclass"]; isCls {
-			return rt.rubyIsA(v, pat)
-		}
-	}
-	return rt.rubyEq(pat, v)
-}
-
 // rubyNewDict builds an empty Hash in the shared {__dict, keys, vals} shape that
 // group_by and tally answer with.
 func rubyNewDict() *jsObject {
@@ -13830,6 +13817,9 @@ func (rt *jsrt) rubyArrayMethod(t *jsArray, name string, args []interface{}) int
 				return e
 			}
 		}
+		if len(pos) > 0 && !isUndefOrNull(pos[0]) {
+			return rt.rubyMethod(pos[0], "call", nil)
+		}
 		return jsNull
 	// inject / reduce: four forms - a block, a block with an initial value, a
 	// Symbol naming a binary operator, and an initial value with that Symbol.
@@ -13882,10 +13872,8 @@ func (rt *jsrt) rubyArrayMethod(t *jsArray, name string, args []interface{}) int
 			case blk != nil:
 				hit = rubyTruthy(rt.call(blk, jsUndef, []interface{}{e}))
 			case len(pos) > 0:
-				// With an argument the test is `arg === element`, which for a
-				// class object is is_a? and == for everything else - the rule
-				// js_rwhen applies.
-				hit = rt.rubyPatternHit(pos[0], e)
+				// With an argument the test is `arg === element`.
+				hit = rt.rubyGrepHit(pos[0], e)
 			default:
 				hit = rubyTruthy(e)
 			}

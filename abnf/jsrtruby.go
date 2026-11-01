@@ -2305,25 +2305,97 @@ func (rt *jsrt) rubyEnumAnswers(t interface{}, name string) bool {
 // rubyEnumMixin answers such a method: the values #each yields, packed as
 // Enumerable#to_a packs them, run as an Array. The methods rubyEnumSpreads names
 // get a multi-value yield's values as their block's arguments; the k-th call of
-// each of them is for the k-th element. Twins: enumMixin in
-// ruby-interpreter.abnf, rbEnumMixin in lib/ruby-rt.metajs.
+// each of them is for the k-th element. A method rubyEnumStop names ends #each
+// early. Twins: enumMixin in ruby-interpreter.abnf, which states the rules,
+// rbEnumMixin in lib/ruby-rt.metajs.
 func (rt *jsrt) rubyEnumMixin(t interface{}, name string, args []interface{}) interface{} {
 	items := &jsArray{}
 	var multi []bool
-	collect := &hostFunc{name: "", fn: func(_ *jsrt, _ uint64, a []interface{}) interface{} {
+	var blk interface{}
+	pos := args
+	if n := len(args); n > 0 {
+		if b, isBlk := rubyBlkOf(args[n-1]); isBlk {
+			blk, pos = b, args[:n-1]
+		}
+	}
+	kind := rubyEnumStop(name, blk != nil, len(pos))
+	useBlk := kind > 0 && kind < 4 && blk != nil && (len(pos) == 0 || name == "find" || name == "detect")
+	limit := -1
+	if kind == 4 {
+		switch {
+		case len(pos) > 0:
+			limit = int(math.Trunc(rt.rubyImplicitInt(name, pos[0], "")))
+		case name == "first":
+			limit = 1
+		default:
+			limit = 0
+		}
+		if limit < 0 {
+			rt.rubyRaiseErr(name, "ArgumentError", "attempt to take negative size")
+		}
+		if len(pos) > 0 {
+			args = append([]interface{}{float64(limit)}, args[1:]...)
+		}
+	}
+	var answers []interface{}
+	hits := 0
+	tag := newJSObject()
+	collect := &hostFunc{name: "", fn: func(rt *jsrt, _ uint64, a []interface{}) interface{} {
+		var it interface{} = jsNull
 		switch len(a) {
 		case 0:
-			items.elems = append(items.elems, jsNull)
 		case 1:
-			items.elems = append(items.elems, a[0])
+			it = a[0]
 		default:
-			items.elems = append(items.elems, &jsArray{elems: append([]interface{}{}, a...)})
+			it = &jsArray{elems: append([]interface{}{}, a...)}
 		}
+		hit := false
+		if kind > 0 && kind < 4 {
+			if useBlk {
+				ba := []interface{}{it}
+				if len(a) > 1 && rubyEnumSpreads(name) {
+					ba = a
+				}
+				res := rt.call(blk, jsUndef, ba)
+				answers = append(answers, res)
+				hit = rubyTruthy(res)
+			} else {
+				hit = rubyTruthy(rt.rubyDelegArr(&jsArray{elems: []interface{}{it}}, t, rubyEnumProbe(name), pos))
+			}
+			if hit {
+				hits++
+			}
+			switch kind {
+			case 2:
+				hit = !hit
+			case 3:
+				hit = hits > 1
+			}
+		}
+		items.elems = append(items.elems, it)
 		multi = append(multi, len(a) > 1)
+		if kind == 4 {
+			hit = len(items.elems) >= limit
+		}
+		if hit {
+			rt.rubyThrow(tag, jsNull)
+		}
 		return jsNull
 	}}
-	rt.rubyMethod(t, "each", []interface{}{rubyBlkWrap(collect)})
-	if n := len(args); n > 0 && rubyEnumSpreads(name) {
+	if limit != 0 {
+		rt.rubyCatch(tag, &hostFunc{name: "", fn: func(rt *jsrt, _ uint64, _ []interface{}) interface{} {
+			return rt.rubyMethod(t, "each", []interface{}{rubyBlkWrap(collect)})
+		}})
+	}
+	if useBlk {
+		k := 0
+		replay := &hostFunc{name: "", fn: func(_ *jsrt, _ uint64, _ []interface{}) interface{} {
+			i := k
+			k++
+			return answers[i]
+		}}
+		args = append(append([]interface{}{}, pos...), rubyBlkWrap(replay))
+	} else if n := len(args); n > 0 && rubyEnumSpreads(name) {
 		if blk, isBlk := rubyBlkOf(args[n-1]); isBlk {
 			k := 0
 			spread := &hostFunc{name: "", fn: func(rt *jsrt, _ uint64, a []interface{}) interface{} {

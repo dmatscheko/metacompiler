@@ -2243,6 +2243,43 @@ func rubyEnumSpreads(n string) bool {
 	return false
 }
 
+// rubyEnumStop is how an Enumerable method ends #each early: 1 at the first
+// element whose test holds, 2 at the first whose test fails, 3 at the second
+// that holds, 4 after a count, 0 never. Twin of rbaEnumStop in
+// languages/lib/ruby-arr.js, which names the methods.
+func rubyEnumStop(n string, hasBlk bool, nargs int) int {
+	switch n {
+	case "first", "take":
+		return 4
+	case "any?", "none?", "include?", "member?":
+		return 1
+	case "all?":
+		return 2
+	case "one?":
+		return 3
+	}
+	if !hasBlk && (n != "find_index" || nargs == 0) {
+		return 0
+	}
+	switch n {
+	case "find", "detect", "find_index":
+		return 1
+	case "take_while":
+		return 2
+	}
+	return 0
+}
+
+// rubyEnumProbe is the Array method that tests one element for such a method
+// without a block. Twin of rbaEnumProbe in languages/lib/ruby-arr.js.
+func rubyEnumProbe(n string) string {
+	switch n {
+	case "any?", "all?", "none?", "one?":
+		return "any?"
+	}
+	return "include?"
+}
+
 // rubyGrepHit is Enumerable#grep's pattern === element. Twin of caseEq in
 // ruby-interpreter.abnf and js_rxwhen in lib/ruby-rt.metajs.
 func (rt *jsrt) rubyGrepHit(pat, v interface{}) bool {

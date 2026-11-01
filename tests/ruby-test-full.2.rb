@@ -1548,6 +1548,82 @@ def s156
   def t.to_str; "zz"; end
   check("ary156c", [[1] + o, [1, 7] - o, [1, 7] & o, [1] | o, "a" + t] == [[1, 7], [1], [7], [1, 7], "azz"])
 end
+# ===== SECTION 157: Enumerable over a user #each stops early; Array#* operand =====
+# An Enumerable method that the elements so far decide (any? all? none? one?
+# find find_index include? first take take_while) ends the includer's #each
+# there, running its ensure clauses; the block runs as each element arrives, and
+# first(0) never calls #each; an element whose block raised into a rescue in
+# #each is skipped. find(ifnone) answers ifnone.call. Array#* takes an
+# Integer (or #to_int) or a String and is a TypeError for anything else; Array
+# has no / % **. /usr/bin/ruby 2.6 settles each.
+class S157E
+  include Enumerable
+  def initialize(l); @l = l; end
+  def each
+    begin
+      [1, 2, 3].each { |x| @l << x; yield x }
+    ensure
+      @l << :e
+    end
+  end
+end
+class S157M
+  include Enumerable
+  def initialize(l); @l = l; end
+  def each
+    @l << :a; yield 1, 2
+    @l << :b; yield 3, 4
+    @l << :c; yield 5, 6
+  end
+end
+class S157T; def to_int; 2; end; end
+class S157R
+  include Enumerable
+  def each
+    [1, 2, 3].each { |x| begin; yield x; rescue StandardError; end }
+  end
+end
+def s157
+  r = []
+  l = []; r << S157E.new(l).any? { |x| l << "b#{x}"; x == 2 } << l
+  l = []; r << S157E.new(l).all? { |x| x < 2 } << l
+  l = []; r << S157E.new(l).none?(1..1) << l
+  l = []; r << S157E.new(l).one? { |x| x > 0 } << l
+  l = []; r << S157E.new(l).find { |x| x == 1 } << l
+  l = []; r << S157E.new(l).find_index(2) << l
+  l = []; r << S157E.new(l).include?(1) << l
+  l = []; r << S157E.new(l).first << l
+  l = []; r << S157E.new(l).first(2) << l
+  l = []; r << S157E.new(l).first(0) << l
+  l = []; r << S157E.new(l).take(5) << l
+  l = []; r << S157E.new(l).take_while { |x| x < 2 } << l
+  check("enm157a", r == [true, [1, "b1", 2, "b2", :e], false, [1, 2, :e], false, [1, :e], false, [1, 2, :e],
+                         1, [1, :e], 1, [1, 2, :e], true, [1, :e], 1, [1, :e], [1, 2], [1, 2, :e], [], [],
+                         [1, 2, 3], [1, 2, 3, :e], [1], [1, 2, :e]])
+  m = []
+  l = []; m << S157M.new(l).any? { |x| x == 3 } << l
+  l = []; m << S157M.new(l).find { |x| x == [3, 4] } << l
+  l = []; m << S157M.new(l).find_index { |x, y| y == 4 } << l
+  l = []; m << S157M.new(l).first(2) << l
+  e = begin; S157E.new(l = []).first(-1); rescue ArgumentError => x; [x.message, l]; end
+  check("enm157b", m == [true, [:a, :b], [3, 4], [:a, :b], 1, [:a, :b], [[1, 2], [3, 4]], [:a, :b]] &&
+                   e == ["attempt to take negative size", []] &&
+                   S157E.new([]).find(-> { :none }) { |x| x > 5 } == :none &&
+                   [1, 2].detect(-> { 0 }) { |x| x > 5 } == 0 &&
+                   S157R.new.take_while { |x| raise "r" if x == 2; true } == [1, 3])
+  w = [nil, :a, {}, true, Object.new, [2]].map do |v|
+    begin; [1] * v; rescue TypeError => x; x.message; end
+  end
+  o = [:/, :%, :**].map do |op|
+    begin; [1].send(op, 2); rescue NoMethodError => x; [x.message.lines[0].chomp, x.name, x.receiver]; end
+  end
+  check("ary157c", w == ["no implicit conversion from nil to integer", "no implicit conversion of Symbol into Integer",
+                         "no implicit conversion of Hash into Integer", "no implicit conversion of true into Integer",
+                         "no implicit conversion of Object into Integer", "no implicit conversion of Array into Integer"] &&
+                   o == [["undefined method `/' for [1]:Array", :/, [1]], ["undefined method `%' for [1]:Array", :%, [1]],
+                         ["undefined method `**' for [1]:Array", :**, [1]]] &&
+                   [1, 2] * S157T.new == [1, 2, 1, 2] && [1, 2] * 1.9 == [1, 2] && [1, 2] * "-" == "1-2")
+end
 s122() # SECTION-CALL 122
 s123() # SECTION-CALL 123
 s124() # SECTION-CALL 124
@@ -1583,5 +1659,6 @@ s153() # SECTION-CALL 153
 s154() # SECTION-CALL 154
 s155() # SECTION-CALL 155
 s156() # SECTION-CALL 156
+s157() # SECTION-CALL 157
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

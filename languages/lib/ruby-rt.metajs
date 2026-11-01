@@ -2872,8 +2872,8 @@ function rbIntBody(f, base, upper, alt, sign, prec) {
 //
 // nil / true / false name THEMSELVES in the message and everything else names its CLASS,
 // which is MRI's wording and not a simplification. %c has a message of its own. The twins
-// are fmtIntOperand / fmtFloOperand / fmtCharOperand in ruby-interpreter.abnf and
-// rubyFmtIntOperand / rubyFmtFloOperand / rubyFmtCharOperand in abnf/jsrt.go.
+// are fmtIntOperand / fmtFloOperand / implicitInt in ruby-interpreter.abnf and
+// rubyFmtIntOperand / rubyFmtFloOperand / rubyImplicitInt in abnf/jsrt.go.
 // rbOwnerName and NOT rbClassName: rbClassName answers "" for a USER OBJECT, and
 // MRI (like ruby-interpreter.abnf's classOf) names the user class.
 // rbOwnerName walks __class.__name first.
@@ -2928,16 +2928,14 @@ function rbFmtFloOperand(v) {
     rbRaiseErr(rbFmtFrame, "TypeError", "can't convert " + rbFmtConvName(v) + " into Float")
     return 0
 }
-// %c's message is NOT the Integer one, and MRI writes it TWO ways: nil is
-// "no implicit conversion from nil to integer" and everything else is
-// "no implicit conversion of Symbol into Integer" - a different preposition and a
-// different case on "integer". Both are /usr/bin/ruby 2.6.10's own text.
-function rbFmtCharOperand(v) {
+// An Integer operand converted implicitly, as %c and Array#* take one. Twin of
+// implicitInt in ruby-interpreter.abnf, which states the rule.
+function rbImplicitInt(frame, v, alt) {
     if (rbFmtIsNumV(v)) { return rbToF(v) }
-    var uc = rbFmtUserConv(v, "to_int", "to_i")
+    var uc = rbFmtUserConv(v, "to_int", alt)
     if (uc !== null && rbFmtIsNumV(uc)) { return rbToF(uc) }
-    if (rtIsNil(v)) { rbRaiseErr(rbFmtFrame, "TypeError", "no implicit conversion from nil to integer") }
-    rbRaiseErr(rbFmtFrame, "TypeError", "no implicit conversion of " + rbFmtConvName(v) + " into Integer")
+    if (rtIsNil(v)) { rbRaiseErr(frame, "TypeError", "no implicit conversion from nil to integer") }
+    rbRaiseErr(frame, "TypeError", "no implicit conversion of " + rbFmtConvName(v) + " into Integer")
     return 0
 }
 
@@ -3534,7 +3532,7 @@ function rbFormat(spec, arg, frame) {
                 if (rbCharCount(nx) != 1) { rbRaiseErr(rbFmtFrame, "ArgumentError", "%c requires a character") }
                 body = nx
             }
-            else { body = rbCharCode(Math.trunc(rbFmtCharOperand(nx))) }
+            else { body = rbCharCode(Math.trunc(rbImplicitInt(rbFmtFrame, nx, "to_i"))) }
         } else if (conv == "p") {
             // %p is #inspect where %s is #to_s, and its precision cuts the same
             // way: "%.2p" % "abcdef" is `"a'.
@@ -5172,7 +5170,7 @@ function rbBin(op, l, r) {
         if (rbIsArr(l)) {
             var rep = []
             var t = 0
-            var times = Math.trunc(rbToF(r))
+            var times = Math.trunc(rbImplicitInt("*", r, ""))
             if (times < 0) { rbRaiseErr("*", "ArgumentError", "negative argument") }
             while (t < times) {
                 var j = 0
@@ -7869,6 +7867,7 @@ function rbArrayMethod(t, name, args) {
             if (rbTruthy(rbCall1(blk, t[fi]))) { return t[fi] }
             fi = fi + 1
         }
+        if (nPos > 0 && !rtIsNil(args[0])) { return rbMethod(args[0], "call", []) }
         return null
     }
     // inject / reduce: four forms - a block, a block with an initial value, a
@@ -10500,7 +10499,7 @@ function rbNumOperandErr(op, l, r) {
             if (rbIsSym(r)) { desc = rbInspect(r) }
             rbRaiseErr(op, "TypeError", desc + " can't be coerced into " + rbOwnerName(l))
         }
-        if (!rbIsArr(l)) { rbNoMethod(l, op) }
+        if (!rbIsArr(l) || op == "/" || op == "%" || op == "**") { rbNoMethod(l, op) }
     }
     if ((op == "<<" || op == ">>") && rbNumRank(l) < 0) { rbNoMethod(l, op) }
     fail("not a number in '" + op + "'")
@@ -10615,26 +10614,63 @@ function rbEnumAnswers(t, name) {
 // Such a method is answered by the values #each yields, packed as Enumerable#to_a
 // packs them, run as an Array. The methods rbaEnumSpreads names get a
 // multi-value yield's values as their block's arguments; the k-th call of each
-// of them is for the k-th element. Twins: enumMixin in ruby-interpreter.abnf,
+// of them is for the k-th element. A method rbaEnumStop names ends #each early.
+// Twins: enumMixin in ruby-interpreter.abnf, which states the rules,
 // rubyEnumMixin in abnf/jsrtruby.go.
 function rbEnumMixin(t, name, args) {
     var items = []
     var multi = []
-    rbMethod(t, "each", [js_rblkwrap(function() {
-        if (arguments.length == 1) {
-            items.push(arguments[0])
-        } else if (arguments.length == 0) {
-            items.push(null)
-        } else {
-            var a = []
-            var i = 0
-            while (i < arguments.length) { a.push(arguments[i]); i = i + 1 }
-            items.push(a)
-        }
-        multi.push(arguments.length > 1)
-        return null
-    })])
     var blk = rbBlockOf(args)
+    var pos = rbPosArgs(args)
+    var kind = rbaEnumStop(name, blk !== null, pos.length)
+    var useBlk = kind > 0 && kind < 4 && blk !== null && (pos.length == 0 || name == "find" || name == "detect")
+    var limit = 0 - 1
+    var cargs = args
+    if (kind == 4) {
+        limit = 0
+        if (pos.length > 0) { limit = Math.trunc(rbImplicitInt(name, pos[0], "")) } else if (name == "first") { limit = 1 }
+        if (limit < 0) { rbRaiseErr(name, "ArgumentError", "attempt to take negative size") }
+        if (pos.length > 0) { cargs = [limit] }
+    }
+    var answers = []
+    var hits = [0]
+    var tag = {}
+    var collect = js_rblkwrap(function() {
+        var a = []
+        var i = 0
+        while (i < arguments.length) { a.push(arguments[i]); i = i + 1 }
+        var it = anytype
+        it = a.length == 1 ? a[0] : (a.length == 0 ? null : a)
+        var hit = false
+        if (kind > 0 && kind < 4) {
+            if (useBlk) {
+                var res = blk.apply(undefined, a.length > 1 && rbaEnumSpreads(name) ? a : [it])
+                answers.push(res)
+                hit = rbTruthy(res)
+            } else {
+                hit = rbTruthy(rbDelegArr([it], t, rbaEnumProbe(name), pos))
+            }
+            if (hit) { hits[0] = hits[0] + 1 }
+            hit = kind == 1 ? hit : (kind == 2 ? !hit : hits[0] > 1)
+        }
+        items.push(it)
+        multi.push(a.length > 1)
+        if (kind == 4) { hit = items.length >= limit }
+        if (hit) { js_rthrow([tag]) }
+        return null
+    })
+    if (limit != 0) { js_rcatch(tag, function() { return rbMethod(t, "each", [collect]) }) }
+    if (useBlk) {
+        var r = [0]
+        var replay = js_rblkwrap(function() {
+            var k = r[0]
+            r[0] = k + 1
+            return answers[k]
+        })
+        var rargs = rtCopyArr(pos)
+        rargs.push(replay)
+        return rbDelegArr(items, t, name, rargs)
+    }
     if (blk !== null && rbaEnumSpreads(name)) {
         var k = [0]
         var spread = js_rblkwrap(function() {
@@ -10650,7 +10686,7 @@ function rbEnumMixin(t, name, args) {
         sargs.push(spread)
         return rbDelegArr(items, t, name, sargs)
     }
-    return rbDelegArr(items, t, name, args)
+    return rbDelegArr(items, t, name, cargs)
 }
 // obj.method(name) for such a method. Twin of the Enumerable arm of the
 // "method" case in abnf/jsrt.go and of mcall in ruby-interpreter.abnf.
