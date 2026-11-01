@@ -7818,11 +7818,23 @@ func ktRangeMake(from, to interface{}, name string) *jsObject {
 }
 
 // ktRangeOpenEnd makes rg the half-open `..<` / until: the inclusive bound is one
-// less, while a floating range keeps its bound as endExclusive. Twin of kRangeDec
-// in kotlin-interpreter.abnf and languages/lib/kotlin-rt.metajs.
+// less, or the type's EMPTY range at its MIN_VALUE, while a floating range keeps
+// its bound as endExclusive. Twin of kRangeDec in kotlin-interpreter.abnf, which
+// has the rules, and languages/lib/kotlin-rt.metajs.
 func ktRangeOpenEnd(rg ktRange) ktRange {
 	if rg.fl {
 		rg.oe = true
+		return rg
+	}
+	min := float64(math.MinInt32)
+	if rg.ch || rg.un > 0 {
+		min = 0
+	}
+	if rg.lg && rg.lt == math.MinInt64 || !rg.lg && rg.to == min {
+		rg.from, rg.to, rg.lf, rg.lt = 1, 0, 1, 0
+		if rg.un > 0 {
+			rg.from = ktRangeMax(rg)
+		}
 		return rg
 	}
 	rg.to--

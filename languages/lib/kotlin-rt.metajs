@@ -10184,12 +10184,27 @@ function k4RangeLong(rg, from, to, st) {
         rg["ls"] = ktNorm(k1Val(st), 64, 0)
     }
 }
-// The half-open form's inclusive bound: one less. A floating range keeps its
-// bound as endExclusive instead - an OpenEndDoubleRange / OpenEndFloatRange.
-// Twin of ktRangeOpenEnd in abnf/jsrtkotlin.go.
+// The half-open form's inclusive bound: one less, or the type's EMPTY range at
+// its MIN_VALUE. A floating range keeps its bound as endExclusive instead - an
+// OpenEndDoubleRange / OpenEndFloatRange. Twin of ktRangeOpenEnd in
+// abnf/jsrtkotlin.go.
 function k4RangeDec(rg) {
     if (rg["fl"] === true) {
         rg["oe"] = true
+        return
+    }
+    var atMin = false
+    if (rg["lg"] === true) { atMin = k1Cmp("==", rg["lt"], k1MinI64()) }
+    else if (rg["ch"] === true || rg["un"] === 32 || rg["un"] === 64) { atMin = rg["to"] == 0 }
+    else { atMin = rg["to"] == 0 - 2147483648 }
+    if (atMin) {
+        rg["from"] = 1
+        if (rg["un"] === 32 || rg["un"] === 64) { rg["from"] = k4RangeMax(rg) }
+        rg["to"] = 0
+        if (rg["lg"] === true) {
+            rg["lf"] = ktNorm(1, 64, 0)
+            rg["lt"] = ktNorm(0, 64, 0)
+        }
         return
     }
     rg["to"] = rg["to"] - 1

@@ -6837,7 +6837,8 @@ fun s154() {
 // UIntRange / ULongRange (a UIntProgression / ULongProgression once stepped or
 // reversed), never an IntRange; UByte / UShort bounds build a UIntRange. The
 // elements, first, last and bounds are UInts / ULongs again, and endExclusive is
-// refused at the UNSIGNED MAX_VALUE (kotlinc 2.2.21 on java 24).
+// refused at the UNSIGNED MAX_VALUE. until / ..< at the element type's
+// MIN_VALUE answers that type's EMPTY range (kotlinc 2.2.21 on java 24).
 fun s155() {
     val us = listOf(1u, 5u, 2147483647u, 4000000000u, UInt.MAX_VALUE)
     val uls = listOf(1uL, 9uL, 9223372036854775807uL, ULong.MAX_VALUE)
@@ -6858,6 +6859,11 @@ fun s155() {
     val tops = listOf({ (us[0]..us[4]).endExclusive }, { (uls[0]..uls[3]).endExclusive })
         .map { try { it(); "ok" } catch (e: IllegalStateException) { e.message } }
     check("uendex155d", tops.all { it == "Cannot return the exclusive upper bound of a range that includes MAX_VALUE." })
+    val mins = listOf<Any>(1 until Int.MIN_VALUE + us.size - 5, 1L until Long.MIN_VALUE + uls.size - 4,
+        us[0] until us[0] - 1u, uls[0]..<uls[0] - 1uL, 'b' until 'a' - 97, us[0].rangeUntil(us[4] + 1u), 1 until -2147483647 + us.size - 5)
+    check("uempty155e", mins.map { "$it" } == listOf("1..0", "1..0", "4294967295..0", "18446744073709551615..0",
+        "\u0001..\u0000", "4294967295..0", "1..-2147483648") && (us[0] until us[0] - 1u).isEmpty() &&
+        (us[0] until us[0] - 1u).count() == 0 && (1L until Long.MIN_VALUE + uls.size - 4).last == 0L)
 }
 
 fun main() {

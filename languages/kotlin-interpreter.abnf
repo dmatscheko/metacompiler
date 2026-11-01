@@ -3421,12 +3421,26 @@ NotMemberKw = :script(~~ "pure";
         }
         return rg
     }
-    // The half-open `..<` / until: the inclusive bound is one less, unwrapped, so
-    // `x until Int.MIN_VALUE` is empty. A floating range keeps its bound as
-    // endExclusive instead.
+    // The half-open `..<` / until: the inclusive bound is one less. A bound at the
+    // element type's MIN_VALUE has no predecessor, and kotlin.ranges.until answers
+    // that type's EMPTY range instead: IntRange(1, 0), LongRange(1, 0),
+    // CharRange('\u0001', '\u0000'), UIntRange(UInt.MAX_VALUE, 0u),
+    // ULongRange(ULong.MAX_VALUE, 0uL). A floating range keeps its bound as
+    // endExclusive instead. Twin of ktRangeOpenEnd in abnf/jsrtkotlin.go and
+    // k4RangeDec in languages/lib/kotlin-rt.metajs.
     function kRangeDec(rg) {
         if (rg.fl) {
             rg.oe = true
+            return rg
+        }
+        var atMin = rg.lg === true ? kCmpI("==", rg.lt, szMake(kLongMinP, 64, kNoU)) : rg.to == (rg.ch || rg.un > 0 ? 0 : 0 - 2147483648)
+        if (atMin) {
+            rg.from = rg.un > 0 ? kRangeMax(rg) : 1
+            rg.to = 0
+            if (rg.lg) {
+                rg.lf = kAdoptLong(1)
+                rg.lt = kAdoptLong(0)
+            }
             return rg
         }
         rg.to = rg.to - 1
