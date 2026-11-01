@@ -179,7 +179,7 @@ it out (the save is lexical). rt_setvar_byname drops a write to a name the progr
 
 # C — C subset
 
-### T-996 c compiled: a function whose return type is a typedef name loses it on a direct call · P2 · C · OPEN [V]
+### T-996 c compiled: a function whose return type is a typedef name loses it on a direct call · P2 · C · IN PROGRESS (C worker, round 16) [V]
 Found by the C worker, round 15 (oracle cc). `typedef double D; D half(D x){return x/2;}` → `(int)(half(9.0)*10)` cc and interpreter
 45, llvm.Run/native 40; `typedef long L; L big(int x){return x*4294967296L;}` → `big(3)` 12884901888 vs 0. Also a function returning
 a typedef'd function pointer: `typedef double (*DF)(double); DF pick(int k){return dh;}` → `pick(1)(7.0)` loses the double. Likely
