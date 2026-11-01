@@ -747,12 +747,18 @@ NotTilde = :script(~~
 ~~) ;
 Target      <~~ push(makeTargetRef(takeAll())) ~~>
             = ( NumLit <~~ push({texpr: pop()}) ~~> TargetStep | Nil <~~ push({texpr: pop()}) ~~> TargetStep
+              | TargetCallAhead Call <~~ push({texpr: pop()}) ~~> TargetStep
               | TargetHead ) { TargetStep } ;
-// A numeric literal or nil is a head only with a step after it: `5.x = 1' calls
-// Integer#x=, `nil.x = 1' NilClass#x=. An index starts on the target's line, so
-// `rescue => e' before a line opening with `[' binds e.
-TargetStep  = "." Id <~~ push({key: up.in, call: true}) ~~> | "&." Id <~~ push({key: up.in, call: true, safe: true}) ~~>
+// A numeric literal, nil or a parenthesised call is a head only with a step after
+// it: `5.x = 1' calls Integer#x=, `nil.x = 1' NilClass#x=, `arr(0)[1] = 5' indexes
+// what arr(0) answers. A step may be a call with arguments (`h.get(0)[1] = 5').
+// An index starts on the target's line, so `rescue => e' before a line opening
+// with `[' binds e.
+TargetStep  = TargetCallAhead MethodSfx <~~ var ms = pop(); push({key: ms.name, call: true, msfx: ms}) ~~>
+            | TargetCallAhead SafeMethodSfx <~~ var ss = pop(); push({key: ss.name, call: true, safe: true, msfx: ss}) ~~>
+            | "." Id <~~ push({key: up.in, call: true}) ~~> | "&." Id <~~ push({key: up.in, call: true, safe: true}) ~~>
             | "::" Id <~~ push({key: up.in}) ~~> | SameLine TIndex ;
+:include("lib/ruby-target-call.abnf") ;
 // The '@@' alternative must come BEFORE '@' (PEG: the shorter one would win), and the
 // scoped-constant head before the plain name for the same reason. `self` is a head of
 // its own: `self.attr = v` is how a method writes through its own accessor.
@@ -4295,7 +4301,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         var o = rh.v
         for (var i = 0; i < ref.path.length - 1; i++) {
             var s = ref.path[i]
-            if (s.call) { var rc = emitStepCall(b, o, s.key, s.safe === true); b = rc.b; o = rc.v }
+            if (s.msfx != undefined) { var rs = foldStep(b, o, s.msfx); b = rs.b; o = rs.v }
+            else if (s.call) { var rc = emitStepCall(b, o, s.key, s.safe === true); b = rc.b; o = rc.v }
             else if (s.key != undefined) { o = callExt(b, "js_get", [o, emitStr(b, s.key)]) }
             else { var ri = s.idx(b); b = ri.b; o = callExt(b, core.indexExt, [o, ri.v]) }
         }
@@ -4313,6 +4320,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             k2V = kr2.v
         }
         return {b: b, obj: o, key: kr.v, key2: k2V, dict: false, two: last.idx2 != undefined && last.idx2 != null}
+    }
+    // A call step with arguments, emitted as the same suffix of an expression is.
+    // Twin of foldStep in ruby-interpreter.abnf.
+    function foldStep(b, o, sfx) {
+        return foldCallMember([function(bb) { return {b: bb, v: o} }, {phead: null}, sfx])(b)
     }
     // A `.name' / `&.name' step of a target path: a zero-argument call, which `&.'
     // skips (nil) on a nil receiver. `.new' is the constructor, as in an expression
@@ -4411,6 +4423,18 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             var v = op != "=" && !cond ? emitBin(r.b, op, old, r.v) : r.v
             return {b: emitPathSet(r.b, ref, p, v), v: v}
         }
+        // `o.a += v' is `o.a = o.a + v': the read is the getter call wherever the
+        // write is a setter call or a def names the getter.
+        function attrAssign(b) {
+            if (op != "=") {
+                if (attrDispatches(p.name) || rubyDefNames["$" + p.name] === true) {
+                    var rg = emitStepCall(b, p.obj, p.name, false)
+                    b = rg.b
+                    old = rg.v
+                } else { old = callExt(b, "js_get", [p.obj, p.key]) }
+            }
+            return cond ? emitCondSet(b, old, op, setAttr) : setAttr(b)
+        }
         return function(b) {
             old = hUndef
             if (ref.path.length == 0) {
@@ -4429,16 +4453,14 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             // A .field path targets an object property (js_get/js_set); a
             // [i] path targets an array/hash element (js_pyget/js_pyset).
             if (p.dict) {
-                // `o.a += v' is `o.a = o.a + v': the read is the getter call
-                // wherever the write is a setter call or a def names the getter.
-                if (op != "=") {
-                    if (attrDispatches(p.name) || rubyDefNames["$" + p.name] === true) {
-                        var rg = emitStepCall(b, p.obj, p.name, false)
-                        b = rg.b
-                        old = rg.v
-                    } else { old = callExt(b, "js_get", [p.obj, p.key]) }
-                }
-                return cond ? emitCondSet(b, old, op, setAttr) : setAttr(b)
+                if (!p.safe) { return attrAssign(b) }
+                // `recv&.name = v' on nil writes nothing and evaluates nothing more.
+                var setB = curF.NewBlock("")
+                var joinB = curF.NewBlock("")
+                b.NewCondBr(truthy(b, callExt(b, "js_seq", [p.obj, hNull])), joinB, setB)
+                var w = attrAssign(setB)
+                w.b.NewBr(joinB)
+                return {b: joinB, v: joinB.NewPhi([llvm.ir.NewIncoming(hNull, b), llvm.ir.NewIncoming(w.v, w.b)])}
             }
             if (op != "=") { old = callExt(b, core.indexExt, [p.obj, p.key]) }
             return cond ? emitCondSet(b, old, op, setElem) : setElem(b)

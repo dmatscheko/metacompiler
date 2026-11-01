@@ -1,0 +1,89 @@
+// TargetCallAhead, shared by ruby-interpreter.abnf and ruby-to-llvm-ir.abnf.
+// Include with :include("lib/ruby-target-call.abnf").
+// A call written with parentheses inside an assignment target: the head of
+// `arr(0)[1] = 5' and the step of `h.get(0)[0] = 9'. Both parse an argument
+// list, and Target is attempted at every assignment level, so the guard first
+// checks the whole shape from the source: the name (after a `.' / `&.' for a
+// step), its parenthesised arguments, at least one further step (`.name' with or
+// without arguments, `[..]', `::Name') and then an assignment operator. Anything
+// else - `f(x).y' read as a value - fails here without parsing the arguments.
+TargetCallAhead = :script(~~
+    (function() {
+        var no = abnf.newToken("\x01notargetcall", 0)
+        function isId(ch) { return (ch >= 48 && ch <= 57) || (ch >= 65 && ch <= 90) || (ch >= 97 && ch <= 122) || ch === 95 || ch >= 128 }
+        function blanks(i) {
+            var ch = c.peek(i)
+            while (ch === 32 || ch === 9) { i = i + 1; ch = c.peek(i) }
+            return i
+        }
+        function name(i) {
+            if (!isId(c.peek(i))) { return 0 - 1 }
+            while (isId(c.peek(i))) { i = i + 1 }
+            if (c.peek(i) === 63 || c.peek(i) === 33) { i = i + 1 }
+            return i
+        }
+        // Past the bracketed group that opens at i, strings stepped over, or -1.
+        function close(i) {
+            var depth = 0
+            var guard = 0
+            while (guard < 100000) {
+                guard = guard + 1
+                var d = c.peek(i)
+                if (d < 0) { return 0 - 1 }
+                if (d === 34 || d === 39) {
+                    var q = d
+                    i = i + 1
+                    var e = c.peek(i)
+                    while (e >= 0 && e !== q) {
+                        if (e === 92) { i = i + 1 }
+                        i = i + 1
+                        e = c.peek(i)
+                    }
+                    if (e !== q) { return 0 - 1 }
+                    i = i + 1
+                    continue
+                }
+                if (d === 40 || d === 91 || d === 123) { depth = depth + 1 }
+                else if (d === 41 || d === 93 || d === 125) {
+                    depth = depth - 1
+                    if (depth === 0) { return i + 1 }
+                }
+                i = i + 1
+            }
+            return 0 - 1
+        }
+        var i = blanks(0)
+        if (c.peek(i) === 46) { i = i + 1 }
+        else if (c.peek(i) === 38 && c.peek(i + 1) === 46) { i = i + 2 }
+        i = name(i)
+        if (i < 0 || c.peek(i) !== 40) { return no }
+        i = close(i)
+        var steps = 0
+        while (i >= 0 && steps < 1000) {
+            var j = blanks(i)
+            var ch = c.peek(j)
+            if (ch === 46 || (ch === 38 && c.peek(j + 1) === 46)) {
+                j = name(j + (ch === 46 ? 1 : 2))
+                if (j < 0) { return no }
+                if (c.peek(j) === 40) { j = close(j) }
+            } else if (ch === 91) {
+                j = close(j)
+            } else if (ch === 58 && c.peek(j + 1) === 58) {
+                j = name(j + 2)
+            } else {
+                break
+            }
+            i = j
+            steps = steps + 1
+        }
+        if (i < 0 || steps === 0) { return no }
+        i = blanks(i)
+        var a = c.peek(i)
+        var b = c.peek(i + 1)
+        if (a === 61) { return b === 61 || b === 126 || b === 62 ? no : undefined }
+        if ((a === 43 || a === 45 || a === 47 || a === 37 || a === 94) && b === 61) { return undefined }
+        if ((a === 42 || a === 124 || a === 38) && (b === 61 || (b === a && c.peek(i + 2) === 61))) { return undefined }
+        if ((a === 60 || a === 62) && b === a && c.peek(i + 2) === 61) { return undefined }
+        return no
+    })()
+~~) ;

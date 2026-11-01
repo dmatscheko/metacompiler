@@ -910,6 +910,37 @@ def s145
   check("he145b", msg == "can't add a new key into hash during iteration" && g == {a: 1, c: 3} && w == {a: 10, b: 20})
 end
 
+# ===== SECTION 146: assignment targets rooted at a parenthesised call =====
+# `f(x)[i] = v', `f(x).a = v' and a step with arguments (`o.get(0)[0] = v') assign
+# through what the call answers; `recv&.a = v' on nil writes nothing.
+# /usr/bin/ruby 2.6 settles each.
+class S146O
+  attr_accessor :f, :g
+  def initialize; @f = 1; @g = [0, 0]; end
+  def me(n); self; end
+end
+S146A = [[1, 2], [3, 4]]
+S146OS = [S146O.new, S146O.new]
+def s146arr(i); S146A[i]; end
+def s146obj(i); S146OS[i]; end
+def s146nil(i); nil; end
+def s146
+  s146arr(0)[1] = 5
+  s146obj(1).f = 7
+  s146arr(0)[0] += 1
+  s146obj(1).f += 1
+  s146arr(1)[0] ||= 9
+  x = s146arr(1)[1] = 8
+  check("ct146a", S146A == [[2, 5], [3, 8]] && S146OS[1].f == 8 && x == 8)
+  S146OS[0].me(1).f = 11
+  S146OS[0].me(1).me(2).g[1] = 5
+  s146obj(1).g[1] ||= 7
+  hits = 0
+  s146nil(0)&.f = (hits += 1)
+  s146obj(0)&.f -= 1
+  check("ct146b", S146OS[0].f == 10 && S146OS[0].g == [0, 5] && S146OS[1].g == [0, 0] && hits == 0)
+end
+
 s122() # SECTION-CALL 122
 s123() # SECTION-CALL 123
 s124() # SECTION-CALL 124
@@ -934,5 +965,6 @@ s142() # SECTION-CALL 142
 s143() # SECTION-CALL 143
 s144() # SECTION-CALL 144
 s145() # SECTION-CALL 145
+s146() # SECTION-CALL 146
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

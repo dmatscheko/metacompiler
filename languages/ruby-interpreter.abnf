@@ -708,12 +708,18 @@ NotTilde = :script(~~
 ~~) ;
 Target      <~~ push(makeTargetRef(takeAll())) ~~>
             = ( NumLit <~~ push({texpr: pop()}) ~~> TargetStep | Nil <~~ push({texpr: pop()}) ~~> TargetStep
+              | TargetCallAhead Call <~~ push({texpr: pop()}) ~~> TargetStep
               | TargetHead ) { TargetStep } ;
-// A numeric literal or nil is a head only with a step after it: `5.x = 1' calls
-// Integer#x=, `nil.x = 1' NilClass#x=. An index starts on the target's line, so
-// `rescue => e' before a line opening with `[' binds e.
-TargetStep  = "." Id <~~ push({key: up.in, call: true}) ~~> | "&." Id <~~ push({key: up.in, call: true, safe: true}) ~~>
+// A numeric literal, nil or a parenthesised call is a head only with a step after
+// it: `5.x = 1' calls Integer#x=, `nil.x = 1' NilClass#x=, `arr(0)[1] = 5' indexes
+// what arr(0) answers. A step may be a call with arguments (`h.get(0)[1] = 5').
+// An index starts on the target's line, so `rescue => e' before a line opening
+// with `[' binds e.
+TargetStep  = TargetCallAhead MethodSfx <~~ var ms = pop(); push({key: ms.name, call: true, msfx: ms}) ~~>
+            | TargetCallAhead SafeMethodSfx <~~ var ss = pop(); push({key: ss.name, call: true, safe: true, msfx: ss}) ~~>
+            | "." Id <~~ push({key: up.in, call: true}) ~~> | "&." Id <~~ push({key: up.in, call: true, safe: true}) ~~>
             | "::" Id <~~ push({key: up.in}) ~~> | SameLine TIndex ;
+:include("lib/ruby-target-call.abnf") ;
 // The '@@' alternative must come BEFORE '@' (PEG: the shorter one would win), and the
 // scoped-constant head before the plain name for the same reason. `self` is a head of
 // its own: `self.attr = v` is how a method writes through its own accessor.
@@ -11740,12 +11746,17 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // member chain reads it (foldCallMember); the last step is the place written.
     // A `&.name' step is the same call, skipped (nil) on a nil receiver.
     // Twin of emitRefPath in ruby-to-llvm-ir.abnf.
+    // A call step with arguments, applied as the same suffix of an expression is.
+    function foldStep(o, sfx) {
+        return foldCallMember([function() { return o }, {phead: null}, sfx])()
+    }
     function resolveRefRuby(ref) {
         var o = anytype
         o = readTarget(ref)
         for (var i = 0; i < ref.path.length - 1; i++) {
             var s = ref.path[i]
-            if (s.call) { o = s.safe === true && (o === null || o === undefined) ? null : boxOut(o, mcall(o, s.key, [], null)) }
+            if (s.msfx !== undefined) { o = foldStep(o, s.msfx) }
+            else if (s.call) { o = s.safe === true && (o === null || o === undefined) ? null : boxOut(o, mcall(o, s.key, [], null)) }
             else if (s.key != undefined) { o = hasOwn(o, s.key) ? o[s.key] : undefined } else { o = rindex(o, s.idx()) }
         }
         var last = ref.path[ref.path.length - 1]
@@ -11829,6 +11840,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 return v
             }
             var p = resolveRefRuby(ref)
+            // `recv&.name = v' on nil writes nothing and evaluates nothing more.
+            if (p.safe && (p.obj === null || p.obj === undefined)) { return null }
             if (op != "=") {
                 // A MISS answers the hash's default, exactly as Hash#[] does -
                 // `cnt[w] += 1' on a Hash.new(0) is the counter idiom.
