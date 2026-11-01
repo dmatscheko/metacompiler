@@ -1156,6 +1156,11 @@ IndexedInit <~~ push(makeIndexedInit(pop(), pop())) ~~>
 // appears in (curClassName is set while the class body is being built).
 BaseCall    <~~ push(makeBaseCall(popName(), takeAll())) ~~>
             = KwBase "." Id <~~ push({mname: up.in}) ~~> "(" ArgList ")" ;
+// base.P: the property or field P as the base class sees it - an accessor found
+// from the base of the defining class runs on `this`, anything else is the slot
+// `this` holds (ECMA-334, base access).
+BaseProp    <~~ push(makeBaseProp(pop())) ~~>
+            = KwBase "." Id <~~ push(up.in) ~~> !"(" ;
 
 // A primary followed by method calls, delegate calls, field reads and indexing. A bare
 // '(args)' suffix invokes a delegate / lambda value (a closure call).
@@ -1181,7 +1186,7 @@ NFSfx       <~~ push({kind: "nfg"}) ~~>
 // call succeeds, and the block or the `=>` behind it is then left unparsed. Neither
 // new alternative can shadow anything: one demands the `delegate` keyword, the other
 // an `=>` after its head.
-CallSeed    = KwExpr | NewExpr | BaseCall | Lambda | AnonMethod
+CallSeed    = KwExpr | NewExpr | BaseCall | BaseProp | Lambda | AnonMethod
             | AliasSeed | GenSeed | SelfCall | Primary | GenVarSeed | VarSeed ;
 // 'G<int>.Instance' / 'C<object>.Foo(x)' - a CONSTRUCTED type name as the receiver of
 // a static member. Type arguments are erased, so the seed is the plain class name and
@@ -3603,6 +3608,24 @@ KwLet       = "let" KwEnd ;
             var argv = [self]
             for (var i = 0; i < argThunks.length; i++) argv.push(argThunks[i]())
             return m.apply(undefined, argv)
+        }
+    }
+
+    // base.P: a get accessor declared from the base of the DEFINING class runs on
+    // `this`; otherwise P is a field or an automatic property, one slot on `this`.
+    // System.Exception's Message is the message its constructor stored (__excmsg,
+    // see initBase), which a derived override does not replace. Twin of
+    // makeBaseProp in csharp-to-llvm-ir.abnf.
+    function makeBaseProp(name) {
+        var defName = curClassName
+        return function() {
+            var self = getVar("this")
+            for (var c = getVar(defName).__super; c != undefined; c = c.__super) {
+                if (hasOwn(c, "__get_" + name)) { return c["__get_" + name](self) }
+            }
+            if (name == "Message" && hasOwn(self, "__excmsg")) { return self.__excmsg }
+            if (hasOwn(self, name)) { return self[name] }
+            fail("unknown base member '" + name + "'")
         }
     }
 
@@ -6083,15 +6106,18 @@ KwLet       = "let" KwEnd ;
             // runtime class' chain must then answer every read of Message, and a
             // stored own slot would win over an accessor here (core.getField), so
             // that constructor then runs on a scratch object and everything but the
-            // message is copied over. Twin of js_csexcvirt in abnf/jsrtcsharp.go and
-            // languages/lib/csharp-rt.metajs.
+            // message is copied over. The stored message is kept as __excmsg, which
+            // is what `base.Message` reads (makeBaseProp). Twin of js_csexcvirt in
+            // abnf/jsrtcsharp.go and languages/lib/csharp-rt.metajs.
             if (sup == null && cls.__excbase != undefined) {
                 if (csFindAcc(self, "__get_Message") == undefined) {
                     csExcBaseInit(self, cls.__excbase, bargs)
+                    self.__excmsg = self.Message
                     return
                 }
                 var eo = {__class: self.__class}
                 csExcBaseInit(eo, cls.__excbase, bargs)
+                self.__excmsg = eo.Message
                 var ks = ["ParamName", "InnerException", "ActualValue"]
                 for (var ki = 0; ki < ks.length; ki++) {
                     if (hasOwn(eo, ks[ki])) { self[ks[ki]] = eo[ks[ki]] }

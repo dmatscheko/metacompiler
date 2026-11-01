@@ -76,6 +76,8 @@ namespace Demo
         {
             return 10;
         }
+
+        public virtual string Kind => "animal";
     }
 
     class Bird : Animal
@@ -94,6 +96,14 @@ namespace Demo
         {
             return base.Base() + 5;
         }
+
+        public override string Kind => "bird<" + base.Kind;
+    }
+
+    class Chick : Bird                       // base.P starts above the defining class too
+    {
+        public override string Kind { get { return "chick<" + base.Kind; } }
+        public int BaseLegs => base.Legs;    // a field through base is this object's own
     }
 
     class Tag
@@ -190,6 +200,26 @@ namespace Demo
         string tag;
         public MsgOverEx(string m, string t) : base(m) { this.tag = t; }
         public override string Message => "msg:" + this.tag;
+        public string Stored => base.Message;
+    }
+
+    // base.Message inside an override is the message the constructor stored.
+    class BaseMsgEx : Exception
+    {
+        public BaseMsgEx(string m) : base(m) { }
+        public override string Message => "[" + base.Message + "]";
+    }
+
+    class BaseMsgSub : BaseMsgEx
+    {
+        public BaseMsgSub(string m) : base(m) { }
+        public override string Message => "<" + base.Message + ">";
+    }
+
+    class BaseArgEx : ArgumentException
+    {
+        public BaseArgEx(string m, string p) : base(m, p) { }
+        public override string Message => "!" + base.Message;
     }
 
     class MsgOverSub : MsgOverEx
@@ -826,6 +856,10 @@ namespace Demo
             Program.Check("class-inherited-field", bird.Legs == 2);
             Animal upcast = bird;
             Program.Check("class-upcast-dispatch", upcast.Name() == "bird");
+            Animal chick = new Chick();
+            Program.Check("class-base-prop",
+                          bird.Kind == "bird<animal" && chick.Kind == "chick<bird<animal"
+                          && new Chick().BaseLegs == 2);
 
             // ----- object and collection initializers -----
             Box b1 = new Box { W = 3, H = 4 };
@@ -1024,6 +1058,14 @@ namespace Demo
                           mo.Message == "msg:outer" && mo.ToString() == "MsgOverEx: msg:outer"
                           && new MsgOverSub().Message == "msg:sub"
                           && new Exception(nmsg[2]).Message == "hi");
+            // base.Message is System.Exception's own, the message the constructor
+            // stored - ArgumentException's with its " (Parameter '...')" suffix.
+            string bm = "";
+            try { throw new BaseMsgSub(nmsg[2]); } catch (Exception e) { bm = e.Message; }
+            Program.Check("exc-base-msg",
+                          new BaseMsgEx(nmsg[2]).Message == "[hi]" && bm == "<[hi]>"
+                          && new BaseArgEx(nmsg[2], nmsg[3]).Message == "!hi (Parameter 'outer')"
+                          && new MsgOverSub().Stored == "x");
 
             // ----- the one argument of ArgumentNullException is a PARAM NAME --------
             //

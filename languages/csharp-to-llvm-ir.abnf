@@ -1146,6 +1146,11 @@ IndexedInit <~~ push(makeIndexedInit(pop(), pop())) ~~>
 // appears in (curClassName is set while the class body is being built).
 BaseCall    <~~ push(makeBaseCall(popName(), takeAll())) ~~>
             = KwBase "." Id <~~ push({mname: up.in}) ~~> "(" ArgList ")" ;
+// base.P: the property or field P as the base class sees it - an accessor found
+// from the base of the defining class runs on `this`, anything else is the slot
+// `this` holds (ECMA-334, base access).
+BaseProp    <~~ push(makeBaseProp(pop())) ~~>
+            = KwBase "." Id <~~ push(up.in) ~~> !"(" ;
 
 // A primary followed by method calls, delegate calls, field reads and indexing. A bare
 // '(args)' suffix invokes a delegate / lambda value (a closure call).
@@ -1171,7 +1176,7 @@ NFSfx       <~~ push({kind: "nfg"}) ~~>
 // call succeeds, and the block or the `=>` behind it is then left unparsed. Neither
 // new alternative can shadow anything: one demands the `delegate` keyword, the other
 // an `=>` after its head.
-CallSeed    = KwExpr | NewExpr | BaseCall | Lambda | AnonMethod
+CallSeed    = KwExpr | NewExpr | BaseCall | BaseProp | Lambda | AnonMethod
             | AliasSeed | GenSeed | SelfCall | Primary | GenVarSeed | VarSeed ;
 // 'G<int>.Instance' / 'C<object>.Foo(x)' - a CONSTRUCTED type name as the receiver of
 // a static member. Type arguments are erased, so the seed is the plain class name and
@@ -3643,7 +3648,8 @@ KwLet       = "let" KwEnd ;
     // complete by the time a member chain emits code.
     var csHiddenNames = {}
     var csLocalTypes = {}
-    // The methods every class declares WITH A BODY: class name -> member name -> true.
+    // The methods every class declares WITH A BODY: class name -> member name -> true,
+    // with a property's get accessor under its '__get_P' member name.
     // An interface member without a default implementation is not one, so a receiver whose
     // declared type only promises the name still dispatches on the object's own class.
     var csBodyMembers = {}
@@ -3751,6 +3757,26 @@ KwLet       = "let" KwEnd ;
                 callExt(b, "js_arr_push", [argsV, r.v])
             }
             return {b: b, v: callExt(b, "js_supercall", [supV, thisV, emitStr(b, name), argsV])}
+        }
+    }
+
+    // base.P: a get accessor some class from the base of the defining class declares
+    // runs on `this` (js_supercall walks to it); otherwise P is a field or an automatic
+    // property, one slot on `this`. System.Exception's Message, which no user class in
+    // the chain declares, is the message its constructor stored (__excmsg, see
+    // js_csexcvirt). Twin of makeBaseProp in csharp-interpreter.abnf.
+    function makeBaseProp(name) {
+        var defName = curClassName
+        return function(b) {
+            var thisV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "this")])
+            var sup = csSupers[defName]
+            if (sup != undefined && csDeclaringClass(sup, "__get_" + name) != "") {
+                var clsV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, defName)])
+                var supV = callExt(b, "js_get", [clsV, emitStr(b, "__super")])
+                return {b: b, v: callExt(b, "js_supercall", [supV, thisV, emitStr(b, "__get_" + name), callExt(b, "js_arr_new", [])])}
+            }
+            var key = (name == "Message" && csMemberInfo(sup, name) == null) ? "__excmsg" : name
+            return {b: b, v: callExt(b, "js_get", [thisV, emitStr(b, key)])}
         }
     }
 
@@ -6454,8 +6480,8 @@ KwLet       = "let" KwEnd ;
                 // csharp-interpreter.abnf.
                 callExt(b, "js_csexc2", [thisEV, emitStr(b, excBase), hNull, hNull])
             }
-            // An override of the virtual Message property drops the stored message
-            // (js_csexcvirt).
+            // The stored message moves to __excmsg, and an override of the virtual
+            // Message property drops the own slot (js_csexcvirt).
             callExt(b, "js_csexcvirt", [thisEV])
         }
         var savedYield = sawYield
@@ -7141,6 +7167,7 @@ KwLet       = "let" KwEnd ;
             if (mm.kind == "field" || mm.kind == "prop") { dat[mm.name] = true }
             if (mm.adoptTy != undefined && mm.adoptTy != "") { tys[mm.name] = mm.adoptTy }
             if (mm.kind == "method") { bodies[mm.name] = true }
+            if (mm.kind == "prop" && mm.getT != null) { bodies["__get_" + mm.name] = true }
             if (mm.ext != undefined) { csSupers[name] = mm.ext }
         }
         csBodyMembers[name] = bodies

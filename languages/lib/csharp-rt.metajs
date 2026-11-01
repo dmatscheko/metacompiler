@@ -2401,12 +2401,14 @@ function js_csexc3(eo, n, a0, a1, a2) {
     if (n == "ArgumentOutOfRangeException") { avs = cpStr(a1) }
     return csxExcCtor3(eo, n, a0, a1, a2, avs)
 }
-// The end of System.Exception's constructor on an instance of a user class: an
-// override of the virtual Message property in its chain must answer every read of
-// Message, and an own slot would win over the accessor, so the stored message is
-// dropped. Twins: js_csexcvirt in abnf/jsrtcsharp.go and the same step in initBase
-// in languages/csharp-interpreter.abnf, where it is explained.
+// The end of System.Exception's constructor on an instance of a user class: the
+// stored message is kept as __excmsg, which `base.Message` reads. An override of the
+// virtual Message property in its chain must answer every read of Message, and an
+// own slot would win over the accessor, so the own slot is dropped. Twins:
+// js_csexcvirt in abnf/jsrtcsharp.go and the same step in initBase in
+// languages/csharp-interpreter.abnf, where it is explained.
 function js_csexcvirt(eo) {
+    eo["__excmsg"] = eo["Message"]
     if (rtFindMethod(eo["__class"], "__get_Message") !== undefined) { delKey(eo, "Message") }
     return eo
 }

@@ -1814,12 +1814,14 @@ func init() {
 			return a[0]
 		}
 		// js_csexcvirt(eo): the end of System.Exception's constructor on an instance
-		// of a user class. An override of the virtual Message property in its chain
-		// must answer every read of Message, and an own slot would win over the
-		// accessor, so the stored message is dropped. Twin of the same step in
-		// initBase in languages/csharp-interpreter.abnf, where it is explained.
+		// of a user class. The stored message is kept as __excmsg, which `base.Message`
+		// reads. An override of the virtual Message property in its chain must answer
+		// every read of Message, and an own slot would win over the accessor, so the
+		// own slot is dropped. Twin of the same step in initBase in
+		// languages/csharp-interpreter.abnf, where it is explained.
 		m["js_csexcvirt"] = func(a []uint64) uint64 {
 			if eo, ok := u(a[0]).(*jsObject); ok {
+				eo.set("__excmsg", eo.props["Message"])
 				if _, has := cspFindMethod(eo, "__get_Message"); has {
 					eo.del("Message")
 				}
