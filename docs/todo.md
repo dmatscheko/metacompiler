@@ -70,7 +70,7 @@ languages/lib/python-codecs.js (+ Go twin abnf/jsrtpycodecs.go) is the place; ch
 
 # RB — Ruby
 
-### T-971 ruby: smaller gaps found in round 33 · P3 · RB · OPEN [V]
+### T-971 ruby: smaller gaps found in round 33 · P3 · RB · IN PROGRESS (RB worker, round 34) [V]
 Found by the RB worker, round 33 (oracle /usr/bin/ruby 2.6, LC_ALL=en_US.UTF-8):
 - compiler: a constant assigned inside begin/rescue in a class or module body is invisible to that class's methods ("variable not
   defined: KC") and missing from Module#constants - `class Ka; begin; KC=3; rescue; end; def g; KC; end; end; p Ka.new.g` → 3.
