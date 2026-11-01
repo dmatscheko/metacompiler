@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1060** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1061** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -133,8 +133,8 @@ real coroutines out of the subset - decide first). Go also runs the most recentl
 ### T-1053 php: copy-on-write array identity (refcount release, print_r recursion depth) · P4 · PHP · OPEN [V spec-only] · NEEDS DESIGN
 Remainder of T-1000/T-1025/T-1036/T-1051. Engines copy arrays eagerly on assignment and have no point where an array dies, so: reference holders of overwritten / frame-local / temporary arrays and of unfinished generators are never released (counts stay correct-but-high, so `&` may survive a copy PHP would unwrap); property-hook set parameters aren't covered by the compiler's param-copy release; print_r recursion depth is wrong (`$y=[1]; $y[]=&$y; print_r($y)` → PHP *RECURSION* at [1], ours one level deeper; `$a=["k"=>[2]]; $a["k"][]=&$a;` two deeper) because the interpreter's by-value param copy loses array identity; `$w=$z; print_r($w)` differs too. Options: real per-array refcount + COW in all three engines (touches every in-place array write), or an engine-level print_r like var_dump plus targeted release points. Needs a design decision before work.
 
-### T-1054 php: interpreter `(array)` cast of an object drops references; generator self-resume message · P3 · PHP · IN PROGRESS (PHP worker, round 39) [V spec-only]
-Found by PHP r38 (expected values derived from php-src): `$o=new stdClass; $o->a=1; $r=&$o->a; $arr=(array)$o; $r=5; echo $arr["a"];` → 5 (run/native 5, interpreter 1). `$p->arr=[1]; $p->arr[]=&$p->arr; $h=(array)$p; $h["arr"][0]=7; echo $p->arr[0];` → 7 (interpreter 1). Cause: phpObjArr uses phpCopy(deref(...)); likely copySlot when not iterating (foreach must not gain holders). Also makes interpreter print_r/var_dump of such objects differ. Separately: a generator resuming itself should throw "Cannot resume an already running generator"; the Go twin fails with a generic error.
+### T-1060 php: Generator::throw() on a running generator · P3 · PHP · OPEN [V]
+Calling `$gen->throw(new Exception("x"))` from inside the running generator `$gen`: php-src (zend_generator throw path) raises the user exception at the generator's position first, then the resume Error "Cannot resume an already running generator", with the user exception chained as previous. Unverified in all three engines. Settle the exact order/chain from php-src (Zend/zend_generators.c) and assert it. Also assert the already-fixed `foreach ((array)$t as &$v) { $v[] = 5; }` leaves `count($t->arr)` at 1.
 
 # LUA — Lua  (oracle: lua 5.5 binary, suite is 5.4)
 
@@ -1119,6 +1119,7 @@ T-1049 csharp: null message on non-Argument exceptions gives "" — DONE (CS r7,
 T-1047 kotlin: interpreter `Pair::class.simpleName` is null — DONE (KT r20, f4fa2bad): Pair/Triple KClass (+ is Triple, Pair::class unless user-declared); map-entry node classes; StringBuilder/Regex classes; kotlin.-qualified unsigned/array types; shared JVM-class helper; compiled unnamed companion as Owner.Companion. Master probe vs kotlinc 2.2.21 (19 lines): 4 legs agree.
 T-1044 bash: per-scope associative kind; compiled computed `declare -A`/array literals; prefix-assignment and assoc-key edge cases — PARTIAL→split (SH r28, 4 commits): prefix bindings before declaration builtins, assoc arrays in bash hash order, must-use-subscript + empty-key diagnostics, expanded @ as key, unsplit assoc literal words; probed 4 legs vs bash 5.3; remainder filed as follow-up
 T-1055 csharp: `base.Prop` / `base.Field` reads unsupported — DONE (CS r8, cb5c2c80): base.Prop/base.Field reads in both grammars, base.Message via hidden __excmsg slot in all 3 engines; probed 3 legs vs spec (multi-level base.Name/base.V chains, nested Message overrides, ArgumentException suffix)
+T-1054 php: interpreter `(array)` cast of an object drops references; generator self-resume message — DONE (PHP r39, 485ec76e): (array) of an object copies the property table at cast time keeping references (3 engines); self-resume of a running generator raises 'Cannot resume an already running generator' and stays resumable; also unset($o->p) releases the reference holder (typed+untyped); probed 3 legs vs php-src semantics. Lazy stdClass table sharing after a cast is T-1053 (COW) territory
 
 # Settled — do not re-open
 
