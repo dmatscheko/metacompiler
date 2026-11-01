@@ -83,7 +83,7 @@ import (
 //                and write graph K to stdout as Graphviz DOT, then exit. K = calls | vars
 //                (from a -trace run) or static (from a -callgraph run)
 //  -freeze F     (re)create the frozen bootstrap snapshot from grammar file F, then exit
-//  -lb, -lf      parser block-list / found-list (debugging aids)
+//  -lb           parser block list (a debugging aid; turns the production memo off)
 //  -max-steps N  raise the IR interpreter's endless-loop brake: how many instructions ONE
 //                top-level call may run (default 100000000, 0 = no limit)
 //  -speed N      speed test: warm up once, then time N parse+compile cycles of the first file
@@ -103,26 +103,26 @@ type options struct {
 	cfHelpOnly int                        // The N of -cfN help (0 = every stage).
 	stageFlags map[int]*abnf.StageFlags   // By stage: the flags its grammar declares and the values set.
 
-	quietMost, quietFull                  bool
-	frozen, verify, pretty                bool
-	errorMode                             string   // -error short|code|short-all|code-all: parse-failure dump detail (default short).
-	warnImports                           bool     // -warn-imports: warn+skip unresolved imports instead of aborting.
-	importRoots                           []string // -i include roots for project-file imports, in order.
-	warnUnsupported                       bool     // -warn-unsupported: warn+placeholder for not-implemented syntax instead of aborting.
-	rtPrims                               bool     // -rt-prims: compile the derivable runtime primitives from MetaJS (languages/lib/rt-prims.metajs) instead of calling the Go externals.
-	rtLib                                 bool     // -rt-lib: compile a MetaJS source as a linkable RUNTIME LIBRARY (layer 2) - exported js_* shims, offset function/string names, jsdispatch_ext - instead of a program.
-	entryPoint                            string   // -main: entry-point function name a compiled program calls (default "main").
-	exePath                               string   // -exe PATH: a -to-llvm-ir grammar links a native executable at PATH (via clang) instead of running the module.
-	runtimeInputs                         []string // -rt FILE: extra files (.c/.ll/.o/.a) clang links into the -exe build; repeatable. Grammars read the list as c.runtime.
-	linkDirs                              []string // -L DIR: library search paths passed through to the -exe link.
-	linkLibs                              []string // -l NAME: system libraries passed through to the -exe link.
-	code                                  string   // -code VALUE: the final program's source, given inline instead of as a file.
-	codeSet, codeStdin                    bool     // -code / -code-stdin were passed (codeStdin reads the source from stdin).
-	speedTest, useBlockList, useFoundList bool
-	speedCount                            int   // Timed cycle count for -speed (>0 when set).
-	maxSteps                              int   // -max-steps N: the IR interpreter's per-call instruction budget (0 = no limit).
-	maxStepsSet                           bool  // -max-steps was passed; otherwise the built-in default stands.
-	pipeBounds                            []int // -pipe boundaries: file indices where a new pipeline segment starts.
+	quietMost, quietFull    bool
+	frozen, verify, pretty  bool
+	errorMode               string   // -error short|code|short-all|code-all: parse-failure dump detail (default short).
+	warnImports             bool     // -warn-imports: warn+skip unresolved imports instead of aborting.
+	importRoots             []string // -i include roots for project-file imports, in order.
+	warnUnsupported         bool     // -warn-unsupported: warn+placeholder for not-implemented syntax instead of aborting.
+	rtPrims                 bool     // -rt-prims: compile the derivable runtime primitives from MetaJS (languages/lib/rt-prims.metajs) instead of calling the Go externals.
+	rtLib                   bool     // -rt-lib: compile a MetaJS source as a linkable RUNTIME LIBRARY (layer 2) - exported js_* shims, offset function/string names, jsdispatch_ext - instead of a program.
+	entryPoint              string   // -main: entry-point function name a compiled program calls (default "main").
+	exePath                 string   // -exe PATH: a -to-llvm-ir grammar links a native executable at PATH (via clang) instead of running the module.
+	runtimeInputs           []string // -rt FILE: extra files (.c/.ll/.o/.a) clang links into the -exe build; repeatable. Grammars read the list as c.runtime.
+	linkDirs                []string // -L DIR: library search paths passed through to the -exe link.
+	linkLibs                []string // -l NAME: system libraries passed through to the -exe link.
+	code                    string   // -code VALUE: the final program's source, given inline instead of as a file.
+	codeSet, codeStdin      bool     // -code / -code-stdin were passed (codeStdin reads the source from stdin).
+	speedTest, useBlockList bool
+	speedCount              int   // Timed cycle count for -speed (>0 when set).
+	maxSteps                int   // -max-steps N: the IR interpreter's per-call instruction budget (0 = no limit).
+	maxStepsSet             bool  // -max-steps was passed; otherwise the built-in default stands.
+	pipeBounds              []int // -pipe boundaries: file indices where a new pipeline segment starts.
 
 	why       bool   // -why: report the extern each source statement lowered to (abnf/why.go).
 	whyFilter string // -why=NAME: keep only the statements whose report mentions NAME.
@@ -235,8 +235,6 @@ func parseArgs(args []string) (*options, error) {
 			}
 		case "-lb":
 			o.useBlockList = true
-		case "-lf":
-			o.useFoundList = true
 		case "-v":
 			o.verboseAll = true
 		case "-error":
@@ -515,12 +513,11 @@ func main() {
 
 	parseropts := &abnf.Parseropts{
 		UseBlockList:         o.useBlockList,
-		UseFoundList:         o.useFoundList,
 		PreventDefaultOutput: o.quietFull,
 	}
 
 	if o.speedTest {
-		speedtest(srcs[0], o.files[0], o.speedCount, o.useBlockList, o.useFoundList)
+		speedtest(srcs[0], o.files[0], o.speedCount, o.useBlockList)
 		return
 	}
 
@@ -839,10 +836,9 @@ anywhere among the files.
 // the repeated cycles: N parses, then N compiles of the pre-parsed ASG. The
 // result therefore reflects steady-state throughput, not the program start-up or
 // the file I/O.
-func speedtest(src, fileName string, count int, useBlockList, useFoundList bool) {
+func speedtest(src, fileName string, count int, useBlockList bool) {
 	parseropts := &abnf.Parseropts{
 		UseBlockList:         useBlockList,
-		UseFoundList:         useFoundList,
 		TraceEnabled:         false,
 		PreventDefaultOutput: true,
 	}

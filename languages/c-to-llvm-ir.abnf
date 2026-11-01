@@ -146,7 +146,7 @@ TdName      <~~ push({tname: up.in}) ~~> = NotCKw Id ;
 
 // An identifier that is not one of C's own keywords. A typedef USE is recognized
 // by shape alone, so without this guard 'return x;' would read as a declaration.
-NotCKw = :script(~~
+NotCKw = :script(~~ "pure";
     (function() {
         var s = 0 // Neither whitespace NOR COMMENTS are skipped before a :script.
         while (true) {
@@ -219,7 +219,7 @@ PPSp        = " " | "\t" ;
 
 // Succeeds when the directive's condition is FALSE, so the dead reading is PPCond's
 // first alternative. Pure: it re-derives the macro table from the text before it.
-PPCondFalse = :script(~~
+PPCondFalse = :script(~~ "pure";
     (function () {
         var CAP = 500000
         var pos = 0
@@ -452,7 +452,7 @@ PPCondFalse = :script(~~
 
 // A line inside a dead branch must not be one of the directives that structure the
 // conditional: those belong to the productions around it.
-NotPPBranch = :script(~~
+NotPPBranch = :script(~~ "pure";
     (function () {
         var s = 0
         while (true) {
@@ -489,7 +489,7 @@ NotPPBranch = :script(~~
     })()
 ~~) ;
 
-NotPPEnd = :script(~~
+NotPPEnd = :script(~~ "pure";
     (function () {
         var s = 0
         while (true) {
@@ -732,7 +732,7 @@ Goto        <~~ push(makeGoto(pop())) ~~>
 // A label must not be 'case'/'default': those belong to the enclosing switch.
 Label       <~~ push(makeLabel(takeAll())) ~~>
             = NotSwitchKw Id <~~ push(up.in) ~~> ":" Statement ;
-NotSwitchKw = :script(~~
+NotSwitchKw = :script(~~ "pure";
     (function() {
         var s = 0 // Neither whitespace NOR COMMENTS are skipped before a :script.
         while (true) {
@@ -931,7 +931,7 @@ DInit       = BraceInit | StrInit | AssignExpr ;
 StrInit     <~~ push(makeStrInit(up.in)) ~~> = StrTok { StrTok } StrInitEnd ;
 // A literal is the WHOLE initializer only when the initializer ends after it;
 // '"abc" + 1' is an expression and goes to AssignExpr.
-StrInitEnd = :script(~~
+StrInitEnd = :script(~~ "pure";
     (function() {
         var s = 0 // Neither whitespace NOR COMMENTS are skipped before a :script.
         while (true) {
@@ -992,7 +992,7 @@ ConstSubP   <~~ push(makeSubscript(takeAll())) ~~>
 // those after the matching ')' guards both, so any other '(' is not parsed as an
 // expression once more on every attempt at an lvalue or a call. A :script sees the
 // raw input, so the scan steps over blanks, comments and literals.
-ParenStepAhead = :script(~~
+ParenStepAhead = :script(~~ "pure";
     (function() {
         var s = 0
         var depth = 0
@@ -1058,7 +1058,7 @@ DerefP      <~~ push(makeDerefP(pop())) ~~>
             = "*" Lvalue NotIncDec ;
 // A place followed by '++' or '--' is '*(p++)', not '(*p)++', so the typed place
 // form has to decline it and leave the general '*' of an expression its turn.
-NotIncDec = :script(~~
+NotIncDec = :script(~~ "pure";
     (function() {
         var s = 0 // Neither whitespace NOR COMMENTS are skipped before a :script.
         while (true) {
@@ -1109,7 +1109,7 @@ BitXorExpr  <~~ push(foldBinary(takeAll())) ~~>
 // (0 && bump()) would otherwise parse as 0 & (&bump) and poison the parse.
 BitAndExpr  <~~ push(foldBinary(takeAll())) ~~>
             = EqExpr { "&" <~~ push("&") ~~> NotAmp EqExpr } ;
-NotAmp = :script(~~
+NotAmp = :script(~~ "pure";
     (function() {
         return (c.peek(0) === 38) ? abnf.newToken("\x01single-amp-only", 0) : undefined
     })()
@@ -1179,7 +1179,7 @@ SizeBase    = ScalarName
 // previous call stopped (kept on the parser stack), so a parse scans the file once.
 // A declarator's name is the last identifier outside brackets and parentheses, or
 // the one after `*` in a `(*Name)` function-pointer declarator.
-IsTypedef = :script(~~
+IsTypedef = :script(~~ "pure";
     (function() {
         var s = 0
         while (true) {

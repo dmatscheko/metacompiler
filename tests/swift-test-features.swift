@@ -1238,4 +1238,9 @@ for i in 0..<2 {
 }
 defer { tldLog += "2" }
 
+// ----- deeply nested brackets parse in linear time -----
+let dnv = [0, 1]
+let dnArr: [Any] = [[[[[[[[[[[[[[[[[[[[[[[[1]]]]]]]]]]]]]]]]]]]]]]]]
+check("deep-nesting", dnArr.count == 1 && ((((((((((((((((((((((((1)))))))))))))))))))))))) == 1 && dnv[dnv[dnv[dnv[dnv[dnv[dnv[dnv[dnv[dnv[dnv[dnv[dnv[dnv[dnv[dnv[dnv[dnv[dnv[dnv[dnv[dnv[dnv[dnv[0]]]]]]]]]]]]]]]]]]]]]]]] == 0)
+
 main()

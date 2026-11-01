@@ -150,7 +150,7 @@ LineComment = "//" :whitespace() { NotNewline } :whitespace(Whitespace) ;
 BlockComment = KDocOk "/*" :whitespace() { NestedComment | NotStar | "*" { "*" } NotStarSlash } "*" { "*" } "/" :whitespace(Whitespace) ;
 // A KDoc comment is NOT trivia to Kotlin's parser. Twin of KDocOk in
 // kotlin-interpreter.abnf; see there.
-KDocOk      = :script(~~
+KDocOk      = :script(~~ "pure";
     (function() {
         if (c.peek(0) !== 47 || c.peek(1) !== 42 || c.peek(2) !== 42) { return undefined }
         var tags = ["see", "throws", "exception", "sample", "param", "property"]
@@ -265,7 +265,7 @@ AnnEnumMod  = ( "annotation" | "enum" ) KwEnd NotColon NotClassW ;
 VarianceMod = ( "in" | "out" ) KwEnd ModWordAhead ;
 // A zero-width guard that fails unless the next token starts a modifier run or a
 // declaration - an `@` annotation, or one of the modifier / declaration keywords.
-ModWordAhead = :script(~~
+ModWordAhead = :script(~~ "pure";
     (function() {
         var kws = "|public|private|protected|internal|open|final|abstract|sealed|data"
                 + "|override|lateinit|const|inner|vararg|noinline|crossinline|tailrec"
@@ -345,7 +345,7 @@ DataMod     = "data" | "value" ;
 CompanionMod = "companion" KwEnd !"object" NotBrace NotColon ;
 // A zero-width guard that fails when the next non-whitespace character is `{`. It keeps
 // the `companion` MODIFIER off a `companion { ... }` BLOCK, which is a member of its own.
-NotBrace    = :script(~~
+NotBrace    = :script(~~ "pure";
     (function() {
         var i = 0
         var cc = c.peek(i)
@@ -386,7 +386,7 @@ AnnEntry    = KId [ SkipAngle ] { "." KId [ SkipAngle ] } [ AnnArgsOk SkipParen 
 // A zero-width guard that refuses an annotation argument list with an EMPTY argument,
 // a dangling `=` or a lone `*` (psi/emptyArgumentsInAnnotations.kt). Twin of AnnArgsOk
 // in kotlin-interpreter.abnf; see there.
-AnnArgsOk   = :script(~~
+AnnArgsOk   = :script(~~ "pure";
     (function() {
         var i = 0
         var steps = 0
@@ -909,7 +909,7 @@ Block       <~~ push(makeBlockStmt(takeAll())) ~~>
             = "{" [ Statement ] { NewStmtLine Statement } "}" ;
 // Kotlin refuses two statements on ONE line without a `;` between them. Twin of
 // NewStmtLine in kotlin-interpreter.abnf; see there.
-NewStmtLine = :script(~~
+NewStmtLine = :script(~~ "pure";
     (function() {
         if (c.peek(-1) === 59) { return undefined }
         var i = 0
@@ -1192,7 +1192,7 @@ IsKw        = KwIs <~~ push(false) ~~> | KwNotIs <~~ push(true) ~~> ;
 AsKw        = KwAsSafe <~~ push(true) ~~> | KwAs <~~ push(false) ~~> ;
 TypeName    <~~ push(stripWs(up.in)) ~~> = Type ;
 // A zero-width guard that fails when the next non-whitespace token is `->`.
-NotArrow    = :script(~~
+NotArrow    = :script(~~ "pure";
     (function() {
         var i = 0
         var cc = c.peek(i)
@@ -1207,7 +1207,7 @@ NotArrow    = :script(~~
 // the next token): the value of a labelled return must start on the SAME line,
 // otherwise `return@lbl` followed by another statement would swallow that
 // statement as its return value (newlines are insignificant everywhere else).
-SameLine    = :script(~~
+SameLine    = :script(~~ "pure";
     (function() {
         var i = 0
         var cc = c.peek(i)
@@ -1220,7 +1220,7 @@ SameLine    = :script(~~
 
 // A zero-width guard that fails when the next non-whitespace token is `(` - used to
 // tell a visibility-only accessor (private set) from a body accessor (set(v) { ... }).
-NotParen    = :script(~~
+NotParen    = :script(~~ "pure";
     (function() {
         var i = 0
         var cc = c.peek(i)
@@ -1233,7 +1233,7 @@ NotParen    = :script(~~
 // user infix operator can never be a keyword. The list holds the hard keywords plus the
 // soft ones that open a declaration or a clause (a name would be indistinguishable from
 // an infix operator there); anything else is a legal simpleIdentifier.
-NotKeyword  = :script(~~
+NotKeyword  = :script(~~ "pure";
     (function() {
         // The DECLARATION MODIFIERS that are soft keywords are deliberately NOT here:
         // Kotlin reads `x7 infix x9` and `@Ann() class C annotation y` as infix calls
@@ -1286,7 +1286,7 @@ NotKeyword  = :script(~~
 
 // A zero-width guard that fails when the next word is `class`, so `data`/`value` are
 // left to ClassDecl (which needs them) instead of being consumed as ignorable modifiers.
-NotClassW   = :script(~~
+NotClassW   = :script(~~ "pure";
     (function() {
         var i = 0
         var cc = c.peek(i)
@@ -1301,7 +1301,7 @@ NotClassW   = :script(~~
 // A zero-width guard that fails when the next non-whitespace token is `:` - used so a
 // soft-keyword modifier (data/value/inner/...) that is really a parameter or property
 // NAME is not consumed as a modifier (a genuine modifier is never followed by `:`).
-NotColon    = :script(~~
+NotColon    = :script(~~ "pure";
     (function() {
         var i = 0
         var cc = c.peek(i)
@@ -1316,7 +1316,7 @@ NotColon    = :script(~~
 // `@Ann(var first) = x` the parens are the pattern, in `@Ann("") (var first) = x`
 // they are the arguments. Trying the argument list first and rejecting it when an
 // `=` follows resolves the two exactly the way the Kotlin parser does.
-NotAssign   = :script(~~
+NotAssign   = :script(~~ "pure";
     (function() {
         var i = 0
         var cc = c.peek(i)
@@ -1402,7 +1402,7 @@ PreIncDec   <~~ push(makePreIncDec(takeAll())) ~~>
 // `++f(x).w` - a chain through a call. Twin of PreCallIncDec in kotlin-interpreter.abnf.
 PreCallIncDec <~~ var ch = pop(); push(makeCallAssign([ch, pop(), null], up.pos, false)) ~~>
             = ( "++" | "--" ) <~~ push(up.in) ~~> CallChain ;
-NoCallParen = :script(~~
+NoCallParen = :script(~~ "pure";
     (function() {
         var i = 0
         var cc = c.peek(i)
@@ -1472,7 +1472,7 @@ GenericSfx  = InstAhead SkipAngle ;
 // of file ) or a continuation token ( ( . == != -> ). `a < b` never reaches a closing
 // `>`; `a < b && c > d` bails on the `&`; `f(a < b, c > d)` closes but is followed by
 // `d`, so all three keep parsing as comparisons.
-InstAhead   = :script(~~
+InstAhead   = :script(~~ "pure";
     (function () {
         var i = 0
         var cc = c.peek(0)
@@ -1680,7 +1680,7 @@ ContinueExpr <~~ push(makeContinueExpr()) ~~> = KwContinue NotAtLbl NoSpacedAt ;
 // operand, so it is consumed and dropped and the operand is its own value.
 LabeledPrim <~~ var t = pop(); pop(); push(t) ~~>
             = LabelDef Primary ;
-NotAtLbl    = :script(~~
+NotAtLbl    = :script(~~ "pure";
     (function() {
         return (c.peek(0) === 64) ? abnf.newToken("\x01labelled", 0) : undefined
     })()
@@ -1819,7 +1819,7 @@ TplName     = ( "a"..."z" | "A"..."Z" | "_" ) { "a"..."z" | "A"..."Z" | "0"..."9
 // Twin of TplDollar in kotlin-interpreter.abnf; see there.
 TplDollar   <~~ push({s: "$"}) ~~>
             = "$" NotTplStart ;
-NotTplStart = :script(~~
+NotTplStart = :script(~~ "pure";
     (function() {
         var c0 = c.peek(0)
         if ((c0 >= 97 && c0 <= 122) || (c0 >= 65 && c0 <= 90) || c0 === 95 || c0 === 123) {
@@ -1852,7 +1852,7 @@ VarRef      <~~ push(makeVarRef(up.in)) ~~>
 // psi corpus tests exactly that. A backtick-quoted name scans as the empty word and is
 // allowed: `if` IS a legal identifier. `this` is deliberately absent as well: a BARE
 // `this` (no @label) is lowered through VarRef, which is where the receiver lives.
-NotHardKw   = :script(~~
+NotHardKw   = :script(~~ "pure";
     (function() {
         // catch / finally are here for the same reason the interpreter half has them:
         // `catch` with no parameter list (psi/recovery/CatchKeywordRBrace.kt) must not
@@ -1931,7 +1931,7 @@ ReturnAt    <~~ push(makeReturnAt(takeAll(), up.pos)) ~~>
 // labelled break, `break @loop` is a break followed by a dangling annotation and is
 // rejected (psi/newLabels/spaceBeforeLabelReference). Written as a guard rather than
 // with :whitespace() so that a failing alternative cannot leak the whitespace setting.
-AtAdjacent  = :script(~~
+AtAdjacent  = :script(~~ "pure";
     (function() {
         return (c.peek(0) === 64) ? undefined : abnf.newToken("\x01need-adjacent-at", 0)
     })()
@@ -1939,7 +1939,7 @@ AtAdjacent  = :script(~~
 // The other half of the same rule: a `@` reachable from a control keyword across
 // whitespace OR comments is an error, not an annotation. Twin of NoSpacedAt in
 // kotlin-interpreter.abnf; see there.
-NoSpacedAt  = :script(~~
+NoSpacedAt  = :script(~~ "pure";
     (function() {
         var i = 0
         var steps = 0
@@ -2214,7 +2214,7 @@ EnumEntrySkip = { ( Modifier | Annotation ) NotEntryEnd } NotHardKw KId [ SkipPa
 // modifier run from eating the entry's NAME when that name is itself a soft keyword:
 // in `enum class My { inline public, ... }` the entry is named `public` and only
 // `inline` is a modifier, and a PEG repetition never gives a consumed word back.
-NotEntryEnd = :script(~~
+NotEntryEnd = :script(~~ "pure";
     (function() {
         var i = 0
         var cc = c.peek(i)

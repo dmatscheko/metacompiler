@@ -252,7 +252,7 @@ RecvAnon    <~~ push({anon: true}) ~~>
 // or by '*' - `(p *T)` and `(p T)` are named, `(T)`, `(*T)` and `(T[P])` are not.
 // A :script SUCCEEDS by returning undefined and FAILS by returning an impossible
 // token, so the named case is the `undefined` one.
-RecvNamedAhead = :script(~~
+RecvNamedAhead = :script(~~ "pure";
     (function () {
         var i = 0
         var cc = 0
@@ -316,7 +316,7 @@ NamedRets   <~~ push(cNamedRets(takeAll())) ~~>
 NamedRetGrp = Id <~~ push(cPendName(up.in)) ~~> { "," Id <~~ push(cPendName(up.in)) ~~> } RType ;
 // A parenthesized list is NAMED exactly when some element at depth 1 is two words
 // separated by whitespace ('q, r int' has 'r int'; '(int, string)' has no such pair).
-NamedAhead = :script(~~
+NamedAhead = :script(~~ "pure";
     (function () {
         var i = 0
         var depth = 0
@@ -424,7 +424,7 @@ SelRecv     <~~ push(makeSelRecv(goTgtC(takeAll()))) ~~>
 // lookaheads decide before anything is pushed. RangeTgtAhead: a `=` followed by
 // `range`, with a target that is not a plain name before it (plain names keep
 // ForRange's own arm). SelAsgAhead: a `=` before the `<-` of the receive.
-RangeTgtAhead = :script(~~
+RangeTgtAhead = :script(~~ "pure";
     (function () {
         var depth = 0
         var shaped = false
@@ -450,7 +450,7 @@ RangeTgtAhead = :script(~~
         return abnf.newToken("\x01not-a-range-target", 0)
     })()
 ~~) ;
-SelAsgAhead = :script(~~
+SelAsgAhead = :script(~~ "pure";
     (function () {
         var depth = 0
         for (var i = 0; i < 4096; i++) {
@@ -478,7 +478,7 @@ SelDefault  <~~ push(makeSelDefault(takeAll())) ~~>
 SelBody     <~~ push(makeSeq(takeAll())); cScopeExit() ~~>
             = CScopeOn { SelStmt } ;
 SelStmt     = NotSelLabel Statement ;
-NotSelLabel = :script(~~
+NotSelLabel = :script(~~ "pure";
     (function () {
         var i = 0
         var cc = 0
@@ -588,7 +588,7 @@ MapBase     <~~ push(foldCallMember(goBoxArgsC(goRecvsC(takeAll(), up.start))));
 // Anchored to the very NEXT byte, so it is a script and not a lookahead: a '.', '['
 // or '(' that a space separates from the ']' is a suffix Go accepts and nobody
 // writes, and reading it here would take the index MapOk needs.
-SfxGlued    = :script(~~
+SfxGlued    = :script(~~ "pure";
     (function () {
         var cc = c.peek(0)
         if (cc === 46 || cc === 91 || cc === 40) { return undefined }
@@ -636,7 +636,7 @@ TgtDerefX   <~~ push(goDerefTgtC(pop())) ~~>
             = "*" DerefXNext PostfixExpr ;
 // The chain ahead opens with '(' or has a '(' outside its brackets before the first
 // byte no selector chain contains (an operator, a space, a line break).
-DerefXNext  = :script(~~
+DerefXNext  = :script(~~ "pure";
     (function () {
         if (c.peek(0) === 40) { return undefined }
         var depth = 0
@@ -781,7 +781,7 @@ Labeled     <~~ push(makeLabeled(pop(), pop())) ~~>
 // go-interpreter.abnf.
 LabelNoop   <~~ push(function(b) { return b }) ~~>
             = BlockEndAhead ;
-BlockEndAhead = :script(~~
+BlockEndAhead = :script(~~ "pure";
     (function () {
         var i = 0
         var cc = 0
@@ -805,7 +805,7 @@ BlockEndAhead = :script(~~
         return abnf.newToken("\x01not-a-label-only", 0)
     })()
 ~~) ;
-LabelAhead = :script(~~
+LabelAhead = :script(~~ "pure";
     (function () {
         var i = 0
         var cc = 0
@@ -876,13 +876,13 @@ MulExpr     <~~ push(goFold(takeAll(), up.pos)) ~~>
               { SameLine MulOp <~~ push(up.in) ~~> UnaryExpr <~~ push({at: up.pos, as: up.start}) ~~> } ;
 MulOp       = "*" | "/" | "%" | "<<" | ">>" | "&^" | AmpOp ;
 AmpOp       = "&" NotAmp ;
-NotAmp = :script(~~
+NotAmp = :script(~~ "pure";
     (c.peek(0) === 38) ? abnf.newToken("\x01logical-and", 0) : undefined
 ~~) ;
-NotBar = :script(~~
+NotBar = :script(~~ "pure";
     (c.peek(0) === 124) ? abnf.newToken("\x01logical-or", 0) : undefined
 ~~) ;
-NotArrow = :script(~~
+NotArrow = :script(~~ "pure";
     (c.peek(0) === 45) ? abnf.newToken("\x01arrow", 0) : undefined
 ~~) ;
 
@@ -916,7 +916,7 @@ AddrAny     <~~ push(goAddrC(pop(), up.pos)) ~~>
 // &name is only the variable form when the name is not the head of a composite
 // literal, a call, a selector or an index. Anchored to the very NEXT byte, so it must
 // be a script rather than a !"literal" lookahead (which would skip the whitespace).
-NotSfxStart = :script(~~
+NotSfxStart = :script(~~ "pure";
     (function () {
         var cc = c.peek(0)
         if (cc === 123 || cc === 40 || cc === 46 || cc === 91) {
@@ -958,7 +958,7 @@ NonExprT     = "[" "]" Type | ArrayTypeT | MapTypeT | FuncTypeT | ChanTypeT | If
 // reached (an index would fail there and the whole chain with it). Each bound is
 // tagged, so an omitted one is told apart from a following one.
 SliceSfx    <~~ push(makeSliceSfx(takeAll(), up.start)) ~~>
-            = "[" [ Expression <~~ push({lo: pop(), sk: goKRec(up.start, up.pos)}) ~~> ] ":"
+            = SliceAhead "[" [ Expression <~~ push({lo: pop(), sk: goKRec(up.start, up.pos)}) ~~> ] ":"
               [ Expression <~~ push({hi: pop(), sk: goKRec(up.start, up.pos)}) ~~> ]
               [ ":" Expression <~~ push({mx: pop(), sk: goKRec(up.start, up.pos)}) ~~> ] "]" ;
 // A call on an arbitrary value, not on a name: fs[0](), mk(1)(), p.f().g(). Primary's
@@ -973,6 +973,46 @@ FieldSfx    <~~ push({kind: "field", name: pop().fname, at: up.start, rc: null})
             = "." Id <~~ push({fname: up.in}) ~~> ;
 IndexSfx    <~~ var ikm = pop(); push({kind:"index", idx: pop(), ksty: ikm.ksty, kk: ikm.kr, at: up.start, rc: null}) ~~>
             = "[" LitOn [ IdxE ] LitOff "]" ;
+// SliceAhead fails unless the bracket ahead holds a ':' at its own nesting level, so a
+// plain index is not parsed as a slice's low bound first and then again by IndexSfx,
+// which doubled the work per nesting level of `s[s[s[0]]]`. Strings, runes, raw
+// strings and comments are skipped, so a ':' or a bracket inside one does not count.
+SliceAhead  = :script(~~ "pure";
+    (function () {
+        var no = abnf.newToken("\x01not-a-slice", 0)
+        var i = 0
+        var cc = c.peek(i)
+        while (cc === 32 || cc === 9 || cc === 10 || cc === 13) { i++; cc = c.peek(i) }
+        if (cc !== 91) { return no }
+        var depth = 0
+        i++
+        while (true) {
+            cc = c.peek(i)
+            if (cc < 0) { return no }
+            if (cc === 34 || cc === 39) {
+                i++
+                while (c.peek(i) >= 0 && c.peek(i) !== cc && c.peek(i) !== 10) { if (c.peek(i) === 92) { i++ } ; i++ }
+            } else if (cc === 96) {
+                i++
+                while (c.peek(i) >= 0 && c.peek(i) !== 96) { i++ }
+            } else if (cc === 47 && c.peek(i + 1) === 47) {
+                while (c.peek(i) >= 0 && c.peek(i) !== 10) { i++ }
+            } else if (cc === 47 && c.peek(i + 1) === 42) {
+                i += 2
+                while (c.peek(i) >= 0 && !(c.peek(i) === 42 && c.peek(i + 1) === 47)) { i++ }
+                i++
+            } else if (cc === 40 || cc === 91 || cc === 123) {
+                depth++
+            } else if (cc === 41 || cc === 93 || cc === 125) {
+                if (depth === 0) { return no }
+                depth--
+            } else if (cc === 58 && depth === 0) {
+                return undefined
+            }
+            i++
+        }
+    })()
+~~) ;
 // x.(T): a type assertion. The value is unchanged, but it is CHECKED, and a value
 // that does not hold the target type panics the way Go does: js_goifas by method set
 // for an interface, js_goassert by dynamic type for a predeclared scalar or a
@@ -1178,7 +1218,7 @@ SeqNest     <~~ push({enest: pop()}); goLitGrp(up.start, up.pos) ~~> = SeqBody ;
 // KeyAhead answers "is this composite-literal element keyed?" - is there a ':' before
 // the element's ',' or the closing '}' at bracket depth 0. It decides before anything
 // is pushed, so an unkeyed element leaks nothing.
-KeyAhead = :script(~~
+KeyAhead = :script(~~ "pure";
     (function () {
         var i = 0
         var depth = 0
@@ -1356,7 +1396,7 @@ CondOff = :script(~~
 // would be ATTEMPTED on a plain header, and its half-parsed pushes are not rolled
 // back (see the CondOn note above). TypeSwAhead is the same shape for '.(type)'.
 // Both are pure functions of (source, position): they only ever read with c.peek.
-InitAhead = :script(~~
+InitAhead = :script(~~ "pure";
     (function () {
         var i = 0
         var depth = 0
@@ -1416,7 +1456,7 @@ InitAhead = :script(~~
 // would be ATTEMPTED on every switch, and its half-parsed pushes are not rolled back
 // (see the CondOn note above). It is a pure function of (source, position): it only
 // ever reads with c.peek.
-TypeSwAhead = :script(~~
+TypeSwAhead = :script(~~ "pure";
     (function () {
         var i = 0
         var depth = 0
@@ -1478,7 +1518,7 @@ TypeSwAhead = :script(~~
 // in a grouped const/var block and in a struct body, 'green04 NEWLINE blue04' must not
 // read the second name as the first one's TYPE. It fails when a line break (or a line
 // comment) comes before the next token.
-SameLine = :script(~~
+SameLine = :script(~~ "pure";
     (function () {
         var i = 0
         var cc = 0
@@ -1508,7 +1548,7 @@ SameLine = :script(~~
 // only blew up later, in the emitter. The keyword forms have their own productions
 // (the anonymous-struct literal, the interface type), so rejecting them here loses
 // nothing. Comments are skipped as well as whitespace, since either may sit in front.
-NotTypeKw = :script(~~
+NotTypeKw = :script(~~ "pure";
     (function () {
         var i = 0
         var cc = 0

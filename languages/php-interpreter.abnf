@@ -118,7 +118,7 @@ InlineHtml  <~~ push(makeHtmlOut(pop(), true)) ~~>
 // before the token the scanner returns is matched.
 HtmlText    <~~ push(up.in) ~~>
             = :whitespace() HtmlScan :whitespace(Whitespace) ;
-HtmlScan = :script(~~
+HtmlScan = :script(~~ "pure";
     (function() {
         // Everything from here to the next opening tag is literal text. '<?php' is
         // matched case-insensitively (PHP's tag is), and '<?=' is the echo shorthand,
@@ -178,7 +178,7 @@ ShortOpen   = "<?=" :whitespace(Whitespace) ;
 // so every statement that ends in ';' accepts a '?>' AHEAD of it instead - the tag
 // itself is left in place and read as the InlineHtml statement that follows.
 Semi        = ";" | CloseAhead ;
-CloseAhead  = :script(~~
+CloseAhead  = :script(~~ "pure";
     (function() {
         var i = 0
         var cc = c.peek(i)
@@ -671,7 +671,7 @@ ChainPlain  = PlFieldSfx !"(" | PlDynFldSfx !"(" | IndexSfx ;
 // head) is followed by a step and an assignment operator or '++'/'--' comes right
 // after the target. The walk is as long as the target, never the whole statement, and
 // it only runs where the plain target declined: before a '(' or on a non-'$' head.
-CallTgtAhead = :script(~~
+CallTgtAhead = :script(~~ "pure";
     (function() {
         // Fast refusal before any helper exists: the head must be '$', '(' or a name
         // that a '(' or '::' follows. A comment in front goes to the full walk.
@@ -841,7 +841,7 @@ StaticHead  <~~ push({staticvar: takeAll()}) ~~>
             = StaticBase "::" ( StaticProp | StaticDynProp ) ;
 // Fails on a bare $GLOBALS (no '[' after it): that is GlobalsAll's read-only copy,
 // never a variable to bind or write.
-NotGlobalsBare = :script(~~
+NotGlobalsBare = :script(~~ "pure";
     (function() {
         var i = 0
         var cc = c.peek(i)
@@ -1048,7 +1048,7 @@ LvalArg     <~~ push(makeLvalArg(pop(), up.start)) ~~>
 // the noref mark lets bindParams raise.
 GlobalsArg  <~~ push({argval: pop(), noref: true}) ~~>
             = GlobalsAll ArgEnd ;
-ArgEnd      = :script(~~
+ArgEnd      = :script(~~ "pure";
     (function() {
         var i = 0
         var cc = c.peek(i)
@@ -1262,7 +1262,7 @@ DollarName  <~~ push(noteVarName(up.in)) ~~>
 // byte strings anyway. BinAhead admits it only when the quote or '<<<' follows the 'b'
 // directly, so a name that merely starts with b is never split.
 BinStr      = ( "b" | "B" ) BinAhead ( HeredocLit | DqStr | SqStr ) ;
-BinAhead    = :script(~~
+BinAhead    = :script(~~ "pure";
     (function() {
         var q = c.peek(0)
         if (q === 34 || q === 39) { return undefined }
@@ -1280,7 +1280,7 @@ TplBraceExpr <~~ push({e: pop()}) ~~>
             = CurlyOpen "{" :whitespace(Whitespace) Expression "}" ;
 // '{' opens a complex interpolation only when '$' follows it immediately (the scanner's
 // "{$" rule); in "a{b}" and "{ $b}" the brace is a literal character.
-CurlyOpen   = :script(~~ c.peek(1) === 36 ? undefined : abnf.newToken("\x01nocurly", 0) ~~) ;
+CurlyOpen   = :script(~~ "pure"; c.peek(1) === 36 ? undefined : abnf.newToken("\x01nocurly", 0) ~~) ;
 // The simple interpolation form: '$name', optionally followed by ONE '[key]' or
 // '->prop' step (PHP's "simple" syntax - anything richer needs the '{$...}' form).
 // The index key is an integer, a BARE word (taken as a string: "$map[key]") or
@@ -1355,7 +1355,7 @@ PhpInt      <~~ push(makeConst(phpIntLit(up.in))) ~~>
 // marker was single-quoted). Modelled on the Ruby grammar's heredoc lexer.
 HeredocLit  <~~ push(makeHeredoc(up.in, up.start)) ~~>
             = HdScan :whitespace(Whitespace) ;
-HdScan = :script(~~
+HdScan = :script(~~ "pure";
     (function() {
         var no = abnf.newToken("\x01noheredoc", 0)
         // Whitespace is not skipped before a script, so step over it here.
@@ -1448,7 +1448,7 @@ HdScan = :script(~~
 Name        = NotKw Id ;
 // Method / property / call names after '->' may be any identifier.
 MethodName  = Id ;
-NotKw       = :script(~~
+NotKw       = :script(~~ "pure";
     (function() {
         var i = 0
         var cc = c.peek(i)

@@ -3090,28 +3090,10 @@
             "program": "${workspaceFolder}","args": ["tests/parser-state-memo-test.abnf", "tests/parser-state-memo-test.txt", "-q"]
         },
         {
-            "name": "Parser state memo Test (-lf found list)",
-            "type": "go",
-            "request": "launch",
-            "program": "${workspaceFolder}","args": ["tests/parser-state-memo-test.abnf", "tests/parser-state-memo-test.txt", "-q", "-lf"]
-        },
-        {
             "name": "Parser state memo Test (-lb block list)",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["tests/parser-state-memo-test.abnf", "tests/parser-state-memo-test.txt", "-q", "-lb"]
-        },
-        {
-            "name": "Python found list -lf (interpreter)",
-            "type": "go",
-            "request": "launch",
-            "program": "${workspaceFolder}","args": ["languages/python-interpreter.abnf", "tests/python-test-1.py", "-q", "-lf"]
-        },
-        {
-            "name": "Python found list -lf (compiler)",
-            "type": "go",
-            "request": "launch",
-            "program": "${workspaceFolder}","args": ["languages/python-to-llvm-ir.abnf", "tests/python-test-1.py", "-q", "-lf"]
+            "program": "${workspaceFolder}","args": ["tests/parser-state-memo-test.abnf", "tests/parser-state-memo-test-lb.txt", "-q", "-lb"]
         },
         {
             "name": "Python block list -lb (compiler)",

@@ -1175,6 +1175,10 @@ c""".length == 5 && """v=${2 + 3}""" == "v=5")
         "a\uD83Db"[1].code == 55357)
 
     // ----- everything combined -----
+    // ----- deeply nested brackets parse in linear time -----
+    val dnv = intArrayOf(0, 1, 2)
+    check("deep-nesting", ((((((((((((((((1)))))))))))))))) == 1 && dnv[dnv[dnv[dnv[dnv[dnv[dnv[dnv[dnv[dnv[dnv[dnv[dnv[dnv[dnv[dnv[0]]]]]]]]]]]]]]]] == 0 && listOf(listOf(listOf(listOf(listOf(listOf(listOf(listOf(listOf(listOf(listOf(listOf(listOf(listOf(listOf(listOf(1)))))))))))))))).size == 1 &&
+        ((((((dnv[1] + 1) * 2) + dnv[1]) * 2) + dnv[2]) * 2) == 24)
     check("combined-pipeline", transform(listOf(1, 2, -3)) == "o1e2x")
 
     println("features: $checks checks, $fails failures")

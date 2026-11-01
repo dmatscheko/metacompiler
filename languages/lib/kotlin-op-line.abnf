@@ -10,7 +10,7 @@
 // innermost open bracket; inside `(`, `[` or `${` it succeeds.
 // Returns the impossible token to FAIL, undefined to succeed.
 
-OpSameLine = :script(~~
+OpSameLine = :script(~~ "pure";
     (function() {
         var no = abnf.newToken("\x01newline-ends-statement", 0)
         var i = 0

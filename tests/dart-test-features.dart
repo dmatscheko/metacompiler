@@ -836,6 +836,10 @@ int main() {
   // Error.safeToString quotes a String argument and keeps an astral character whole.
   check("assert-quote-astral", AssertionError("a\u{1F389}b").toString() == 'Assertion failed: "a\u{1F389}b"');
 
+  // ----- deeply nested brackets parse in linear time -----
+  var dnv = [0, 1];
+  check("deep-nesting", ((((((((((((((((1)))))))))))))))) == 1 && dnv[dnv[dnv[dnv[dnv[dnv[dnv[dnv[dnv[dnv[dnv[dnv[dnv[dnv[dnv[dnv[0]]]]]]]]]]]]]]]] == 0 && [[[[[[[[[[[[[[[[1]]]]]]]]]]]]]]]].length == 1);
+
   // ----- everything combined in one small pipeline -----
   check("combined-pipeline", transform([1, 2, -3]) == "o1e2x");
 

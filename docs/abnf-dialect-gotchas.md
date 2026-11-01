@@ -285,6 +285,22 @@ splits them apart again in the tag. Building that token from `c.peek` means
 decoding UTF-8 by hand, since a string of raw bytes is re-encoded on the way to
 Go and then no longer matches.
 
+**Open a `c.peek`-only guard with the directive `"pure";`, or the parse can go
+exponential.** The parser memoizes every recursive production per position
+(packrat), which is what keeps a grammar whose alternatives share a prefix
+holding a bracketed expression - kotlin's `((((1))))`, php's `[1, [1, …]]`,
+python's `[[…]]` - linear in the nesting depth instead of multiplying the work
+per level. But a production that can reach a `:script` is memoized only when
+every such script declares itself pure: `X = :script(~~ "pure"; (function () {
+… })() ~~)`. Pure means its answer depends on the text and the position alone
+(`c.peek`, `c.getSdx`), nothing else depends on whether it ran (a cache on the
+parser stack, like C's `IsTypedef` scan, is fine; Python's indent stack and Go's
+composite-literal gate are not), and a returned rule holds only terminals. One
+undeclared guard deep in the expression grammar switches the memo off for the
+whole expression grammar. A script with real state does not get the directive:
+when it sits on a recursive path, cut the re-parsing alternative instead, as
+Go's `SliceAhead` does for `s[s[0]]` (abnf/parser.go, `pureScriptDirective`).
+
 **Returning `undefined` from a `:script` means "match empty and SUCCEED"**, not
 "fail". To make a script FAIL, return an impossible token — the convention in
 this tree is `abnf.newToken("\x01<reason>", 0)`. A long-string scanner that

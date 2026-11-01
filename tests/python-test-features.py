@@ -2867,5 +2867,10 @@ check("module-fn-keyword-errors", [kw_err(lambda: math.sqrt(x=4)), kw_err(lambda
       ["TypeError: math.sqrt() takes no keyword arguments", "TypeError: isclose() got an unexpected keyword argument 'foo'",
        "ValueError: tolerances must be non-negative", "TypeError: sub() got an unexpected keyword argument 'cnt'"])
 
+# ----- deeply nested brackets parse in linear time -----
+dnv = [0, 1]
+check("deep-nesting", [len([[[[[[[[[[[[[[[[1]]]]]]]]]]]]]]]]), ((((((((((((((((1)))))))))))))))), dnv[dnv[dnv[dnv[dnv[dnv[dnv[dnv[dnv[dnv[dnv[dnv[dnv[dnv[dnv[dnv[0]]]]]]]]]]]]]]]], [{"k": [{"k": [{"k": [{"k": [{"k": [{"k": [{"k": [{"k": [{"k": [{"k": [{"k": [{"k": [{"k": [{"k": [{"k": [{"k": 1}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}][0]["k"][0]["k"][0]["k"][0]["k"][0]["k"][0]["k"][0]["k"][0]["k"][0]["k"][0]["k"][0]["k"][0]["k"][0]["k"][0]["k"][0]["k"][0]["k"]],
+      [1, 1, 0, 1])
+
 print(f"features: {checks[0]} checks, {fails[0]} failures")
 exit(fails[0])

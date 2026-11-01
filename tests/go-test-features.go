@@ -571,6 +571,10 @@ func main() {
 	tag := func(n int) string { return "odd" }
 	check("combined-pipeline", classify([]int{1, 2, -3, 4}, tag) == "oddevennegeven1")
 
+	// ----- deeply nested brackets parse in linear time -----
+	dnv := []int{0, 1}
+	check("deep-nesting", ((((((((((((((((((((((((1)))))))))))))))))))))))) == 1 && dnv[dnv[dnv[dnv[dnv[dnv[dnv[dnv[dnv[dnv[dnv[dnv[dnv[dnv[dnv[dnv[dnv[dnv[dnv[dnv[dnv[dnv[dnv[dnv[0]]]]]]]]]]]]]]]]]]]]]]]] == 0 && len([]interface{}{[]interface{}{[]interface{}{[]interface{}{[]interface{}{[]interface{}{[]interface{}{[]interface{}{[]interface{}{[]interface{}{[]interface{}{[]interface{}{[]interface{}{[]interface{}{[]interface{}{[]interface{}{[]interface{}{[]interface{}{[]interface{}{[]interface{}{[]interface{}{[]interface{}{[]interface{}{[]interface{}{1}}}}}}}}}}}}}}}}}}}}}}}}) == 1)
+
 	fmt.Println("features:", checks, "checks,", fails, "failures")
 	os.Exit(fails)
 }

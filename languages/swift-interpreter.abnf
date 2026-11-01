@@ -132,7 +132,7 @@ IdUni       = "\u00a8" | "\u00aa" | "\u00ad" | "\u00af" | "\u00b2"..."\u00b5" | 
             | "\u203f"..."\u2040" | "\u2054" | "\u2060"..."\u218f" | "\u2400"..."\u24ff"
             | "\u2776"..."\u2793" | "\u2c00"..."\u2dff" | "\u2e80"..."\u2fff" | "\u3004"..."\u3007"
             | "\u3021"..."\u302f" | "\u3031"..."\ufefe" | "\uff00"..."\U0010ffff" ;
-KwEnd = :script(~~
+KwEnd = :script(~~ "pure";
     (function() {
         var cc = c.peek(0)
         return ((cc >= 48 && cc <= 57) || (cc >= 65 && cc <= 90) || cc === 95 || (cc >= 97 && cc <= 122))
@@ -241,7 +241,7 @@ PoundCondChar = "\x00"..."\x09" | "\x0b" | "\x0c" | "\x0e"..."\U0010ffff" ;
 // one exactly as poundPick does, and then returns the raw body up to the next
 // directive at the same depth as ONE token; any other clause makes it fail.
 PoundSkip   = :whitespace() PoundSkipScan :whitespace(Whitespace) ;
-PoundSkipScan = :script(~~
+PoundSkipScan = :script(~~ "pure";
     (function() {
         var ev = function(s) {
             var vals = []
@@ -527,7 +527,7 @@ ExprBody    <~~ swAnnClose(); var eb = takeAll(); push(makeExprBody(swDotPend(eb
             = "{" <~~ swAnnOpen() ~~> NotBranch Expression <~~ push({itext: up.in, iat: up.start + ":" + up.pos}) ~~> "}" ;
 // `{ break }` is a statement body, not the expression `break`: an identifier does not
 // exclude the keywords.
-NotBranch = :script(~~
+NotBranch = :script(~~ "pure";
     (function() {
         var p = 0
         while (c.peek(p) === 32 || c.peek(p) === 9 || c.peek(p) === 10 || c.peek(p) === 13) { p++ }
@@ -772,7 +772,7 @@ TypeSuffixed = [ "~" ] TypeCore { NoSpace ( "?" | "!" ) | "." ( "Type" | "Protoc
 // A zero-width guard that fails when whitespace (or end of file) is ahead - the
 // dialect skips whitespace before each token, so "no space here" has to be asked
 // explicitly.
-NoSpace     = :script(~~
+NoSpace     = :script(~~ "pure";
     (function() {
         var cc = c.peek(0)
         return (cc === 32 || cc === 9 || cc === 10 || cc === 13 || cc < 0)
@@ -847,7 +847,7 @@ Statement   = AttrDecl StmtSep
 // statement's last token, since whitespace is skipped BEFORE a token. Each
 // alternative carries it, so one that only matched a PREFIX of the line gives way
 // to the next instead of failing the statement.
-StmtSep     = :script(~~
+StmtSep     = :script(~~ "pure";
     (function() {
         if (c.peek(-1) === 59) { return undefined }
         var i = 0
@@ -1178,7 +1178,7 @@ BreakLbl    <~~ push({lbl: swBt(up.in)}) ~~> = Id ;
 // A zero-width guard that fails at end of line (a newline or a // comment before the
 // next token): the label of `break outer` must start on the SAME line, otherwise a
 // bare `break` followed by a statement would swallow that statement's first name.
-SameLine    = :script(~~
+SameLine    = :script(~~ "pure";
     (function() {
         var i = 0
         var cc = c.peek(i)
@@ -1270,7 +1270,7 @@ RangeExpr   <~~ push(makeRange(takeAll())) ~~>
 // tight on the left with whitespace after is the postfix PartialRangeFrom: a
 // `let r = a...` line does not take the next line as its upper bound. Both range
 // operators are three characters long.
-RangeBinary = :script(~~
+RangeBinary = :script(~~ "pure";
     (function() {
         var l = c.peek(-4)
         var r = c.peek(0)
@@ -1294,11 +1294,11 @@ ShiftExpr   <~~ push(foldBinary(takeAll())) ~~>
             = CustomBin { ( "<<" | ">>" ) <~~ push(stripWs(up.in)) ~~> CustomBin } ;
 BitOr       = "|" NotChar124 ;
 BitAnd      = "&" NotAmpOp ;
-NotChar124  = :script(~~
+NotChar124  = :script(~~ "pure";
     (function() { return (c.peek(0) === 124) ? abnf.newToken("\x01or-follows", 0) : undefined })()
 ~~) ;
 // Rejects the first character of && and of the overflow operators &+ &- &*.
-NotAmpOp    = :script(~~
+NotAmpOp    = :script(~~ "pure";
     (function() {
         var ch = c.peek(0)
         return (ch === 38 || ch === 43 || ch === 45 || ch === 42)
@@ -1323,7 +1323,7 @@ UnaryExpr   = CustomPrefix | Neg | Not | BitNot | TryExpr | Await | EachExpr | O
 // `consume.x` stay a call and a member read - so a name has to follow on the same
 // line, which is swiftc's own test.
 OwnExpr     = ( "copy" | "consume" | "_move" | "_borrow" ) KwEnd OwnStart UnaryExpr ;
-OwnStart    = :script(~~
+OwnStart    = :script(~~ "pure";
     (function() {
         var i = 0
         var ch = c.peek(i)
@@ -1339,7 +1339,7 @@ OwnStart    = :script(~~
 // follow it: `each(1, 2)` is a call of a function named each, as swiftc reads it.
 // Ordered before CallMember so the modifier reading is tried first.
 EachExpr    <~~ push(makeEach(pop())) ~~> = "each" KwEnd EachStart UnaryExpr ;
-EachStart   = :script(~~
+EachStart   = :script(~~ "pure";
     (function() {
         var i = 0
         var ch = c.peek(i)
@@ -1356,14 +1356,14 @@ Not         <~~ push(makeNot(pop())) ~~>   = "!" UnaryExpr ;
 CustomPrefix <~~ push(makeCustomPrefix(takeAll())) ~~>
             = CustomOp <~~ push({op: stripWs(up.in)}) ~~> UnaryExpr <~~ swOpndName(up.in) ~~> ;
 BitNot      <~~ push(makeBitNot(pop())) ~~> = "~" NotChar61b UnaryExpr ;
-NotChar61b  = :script(~~
+NotChar61b  = :script(~~ "pure";
     (function() { return (c.peek(0) === 61) ? abnf.newToken("\x01eq-follows", 0) : undefined })()
 ~~) ;
 // A maximal run of operator characters that is NOT one of the built-in operators -
 // Swift lexes operators by maximal munch, so *** is one token and * another. The
 // scan is a pure function of (source, position): it skips the whitespace itself and
 // returns a token covering only the run.
-CustomOp    = :script(~~
+CustomOp    = :script(~~ "pure";
     (function() {
         // The operator-head scalar starting at byte i of the UTF-8 source - the ASCII
         // set and OpUni's ranges, in decimal - or -1.
@@ -1420,7 +1420,7 @@ CallMember  <~~ push(foldCallMember(takeAll(), up.in)) ~~>
 // free on the right, which is Swift's lexical rule for a postfix operator (a
 // closing bracket, `,` `;` `:` or a `.` count as free).
 PostOpSfx   <~~ push({kind: "postop", op: up.in}) ~~> = NoSpace PostOp ;
-PostOp      = :script(~~
+PostOp      = :script(~~ "pure";
     (function() {
         // The operator-head scalar starting at byte i of the UTF-8 source - the ASCII
         // set and OpUni's ranges, in decimal - or -1.
@@ -1473,10 +1473,10 @@ ForceSfx    <~~ push({kind:"force"}) ~~> = NoSpace "!" NotChar61 ;
 // x?.y / x?[i]: optional chaining - a nil anywhere along the chain makes the WHOLE
 // chain nil instead of failing. Adjacent, and not the start of ?? or a ternary.
 OptSfx      <~~ push({kind:"opt"}) ~~> = NoSpace "?" NotChar63 ;
-NotChar61   = :script(~~
+NotChar61   = :script(~~ "pure";
     (function() { return (c.peek(0) === 61) ? abnf.newToken("\x01eq-follows", 0) : undefined })()
 ~~) ;
-NotChar63   = :script(~~
+NotChar63   = :script(~~ "pure";
     (function() { return (c.peek(0) === 63) ? abnf.newToken("\x01q-follows", 0) : undefined })()
 ~~) ;
 // `trimmingPrefix(while: p)` is drop(while: p) under its newer name.
@@ -1508,7 +1508,7 @@ PartRangeDn <~~ push(makeRange(takeAll())) ~~> = RangeOp AddExpr ;
 // next must stay two statements, not a call of the first one's result.
 CallSfx     <~~ push({kind:"call", args: takeAll()}) ~~>
             = NoSpaceParen "(" [ CallArg { "," CallArg } ] ")" ;
-NoSpaceParen = :script(~~
+NoSpaceParen = :script(~~ "pure";
     (function() {
         return (c.peek(0) === 40) ? undefined : abnf.newToken("\x01space-before-paren", 0)
     })()
@@ -1518,7 +1518,7 @@ NoSpaceParen = :script(~~
 // statements. A space before it on the same line is still a call (`print ("x")`).
 // The same holds for the `[` of a subscript: `var t = 0` followed by `[1, 2].forEach`
 // is two statements.
-SameLineParen = :script(~~
+SameLineParen = :script(~~ "pure";
     (function() {
         var i = 0
         var cc = c.peek(i)
@@ -1537,7 +1537,7 @@ MArgs       = SameLineParen "(" [ CallArg { "," CallArg } ] ")" [ NoTrailCtx Tra
 // `check(xs.map { $0 })` inside a condition still work - and looks at the first word
 // it finds there. Without it, `if case .p = E.c(3) { body }` reads `{ body }` as a
 // trailing closure of E.c(3) and the if has no block left.
-NoTrailCtx  = :script(~~
+NoTrailCtx  = :script(~~ "pure";
     (function() {
         var j = 0
         var ch = c.peek(j)
@@ -1795,7 +1795,7 @@ SugarTy     <~~ push({sty: up.in}) ~~> = Type ;
 OptSugarCall <~~ push(swOptSugarCall(takeAll())) ~~>
             = CapPeek Id <~~ push({sty: up.in}) ~~> NoSpace "?" NoSpaceParen "(" CallArg { "," CallArg } ")" ;
 // A :script guard sees the input before whitespace is skipped.
-CapPeek     = :script(~~
+CapPeek     = :script(~~ "pure";
     (function() {
         var i = 0
         var cc = c.peek(0)
@@ -1830,7 +1830,7 @@ GenRef      <~~ push(swVarRef(takeAll()[0])) ~~> = GenName ;
 GenName     = Id <~~ push(swnUse(swBt(up.in), up.pos)) ~~> NoSpace GenArgs GenFollow ;
 GenArgs     = "<" GenArgList ">" ;
 GenArgList  <~~ push({gargs: stripWs(up.in)}) ~~> = Type { "," Type } ;
-GenFollow   = :script(~~
+GenFollow   = :script(~~ "pure";
     (function() {
         var cc = c.peek(0)
         return (cc === 40 || cc === 46) ? undefined : abnf.newToken("\x01not-a-generic-call", 0)
@@ -1905,7 +1905,7 @@ MlPlain     = !'"""' ( "\x00"..."\x5b" | "\x5d"..."\U0010ffff" ) ;
 // unbounded. A literal carrying its own `\####(` interpolation is DECLINED rather
 // than mis-read (a parse failure).
 RawStrN     <~~ push(makeRawScanned(up.in)) ~~> = RawScan ;
-RawScan     = :script(~~
+RawScan     = :script(~~ "pure";
     (function() {
         var i = 0
         var ch = c.peek(i)
@@ -2037,7 +2037,7 @@ OpUni       = "\u00a1"..."\u00a7" | "\u00a9" | "\u00ab"..."\u00ac" | "\u00ae" | 
             | "\u2020"..."\u2027" | "\u2030"..."\u203e" | "\u2041"..."\u2053" | "\u2055"..."\u205e"
             | "\u2190"..."\u23ff" | "\u2500"..."\u2775" | "\u2794"..."\u2bff" | "\u2e00"..."\u2e7f"
             | "\u3001"..."\u3003" | "\u3008"..."\u3020" | "\u3030" ;
-NotGenOpen  = :script(~~
+NotGenOpen  = :script(~~ "pure";
     (function() {
         var ch = c.peek(0)
         var name = (ch >= 97 && ch <= 122) || (ch >= 65 && ch <= 90) || ch === 95

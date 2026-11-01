@@ -41,10 +41,10 @@ CmtBody     = { "/*" CmtBody "*/" | CmtChar } ;
 CmtChar     = "*" NotSlashNext | "/" NotStarNext | CmtPlain ;
 CmtPlain    = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
 NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
-NotSlashNext = :script(~~
+NotSlashNext = :script(~~ "pure";
     (function() { return c.peek(0) === 47 ? abnf.newToken("\x01comment-close", 0) : undefined })()
 ~~) ;
-NotStarNext = :script(~~
+NotStarNext = :script(~~ "pure";
     (function() { return c.peek(0) === 42 ? abnf.newToken("\x01comment-open", 0) : undefined })()
 ~~) ;
 :include("lib/ident-dollar.abnf") ;
@@ -432,7 +432,7 @@ PatPostfix  <~~ push(makePostPat(takeAll())) ~~>
 PatNullCheck  <~~ push({post: "?"}) ~~> = "?" ;
 PatNullAssert <~~ push({post: "!"}) ~~> = "!" NotEqNext ;
 // Twin of NotEqNext in dart-interpreter.abnf.
-NotEqNext   = :script(~~
+NotEqNext   = :script(~~ "pure";
     (function() { return c.peek(0) === 61 ? abnf.newToken("\x01neq", 0) : undefined })()
 ~~) ;
 PatCast     = KwAs PatCastType ;
@@ -468,7 +468,7 @@ PatName     <~~ push({pvname: up.in}) ~~> = NotPatKw Id ;
 // A zero-width guard that fails when the next word is one of the operators that may
 // FOLLOW a pattern (as / when / in / is). Without it `ci as int` reads `ci` as the type
 // and `as` as the variable name, and the enclosing alternative is already committed.
-NotPatKw = :script(~~
+NotPatKw = :script(~~ "pure";
     (function() {
         var i = 0
         var cc = c.peek(i)
@@ -598,7 +598,7 @@ SwGuard     <~~ push({guard: pop()}) ~~> = KwWhen Expression ;
 SwBody      <~~ push(makeSwBody(takeAll())) ~~> = { NotSwEnd Statement } ;
 // A zero-width guard that stops a case body at the next `case` / `default`. Without it the
 // body swallows `default: ...` as a LABELED STATEMENT (default is a plain identifier here).
-NotSwEnd = :script(~~
+NotSwEnd = :script(~~ "pure";
     (function() {
         var i = 0
         var cc = c.peek(i)
@@ -729,7 +729,7 @@ CascadeAssignOp = "+=" | "-=" | "*=" | "~/=" | "/=" | "%=" | "??=" | "&=" | "|="
 CascadeValue = ThrowExpr | Assignment | CondExpr ;
 // A zero-width fast-fail in front of the two productions that begin with Target. Twin
 // of TargetOpAhead in dart-interpreter.abnf, which explains the guard and its two caps.
-TargetOpAhead = :script(~~
+TargetOpAhead = :script(~~ "pure";
     (function() {
         var i = 0
         var depth = 0
@@ -861,7 +861,7 @@ TestTypeNamed = Id [ TypeArgs ] { "." Id [ TypeArgs ] } [ NotCondQ "?" ] ;
 // same direction: what follows the "?" decides, and anything that can BEGIN an
 // expression makes it the conditional operator (`o is Shape ? a : b`), while anything
 // that cannot (")", ";", ",", "?", "&", "|", ...) leaves it on the type (`o is Shape?`).
-NotCondQ = :script(~~
+NotCondQ = :script(~~ "pure";
     (function() {
         var i = 0
         var cc = c.peek(i)
@@ -977,7 +977,7 @@ TypeLit     <~~ push(makeConst(stripWs(up.in))) ~~>
 // Whitespace is NOT skipped before a :script guard, and a refusing guard that skips too
 // little says yes - the unsafe direction - so this steps over spaces AND both comment
 // forms by hand, like every other forward-scanning guard in this tree.
-InstEnd = :script(~~
+InstEnd = :script(~~ "pure";
     (function() {
         var i = 0
         var spin = 0

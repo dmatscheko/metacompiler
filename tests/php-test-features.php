@@ -800,6 +800,11 @@ check("null-prop-read", [$npn->p, $npn->$npk, $npn->a->b, "<{$npn->p}>", "<$npn-
                          nullPropArg($npn->p), nullPropArg($npn->a->b), $npn->p ?? "d", $npn],
       [null, null, null, "<>", "<>", null, null, null, null, "d", null]);
 
+// ----- deeply nested brackets parse in linear time -----
+$dnv = [0, 1];
+check("deep-nesting", [json_encode([1, [1, [1, [1, [1, [1, [1, [1, [1, [1, [1, [1, [1, [1, [1, [1, 1]]]]]]]]]]]]]]]]), ((((((((((((((((1)))))))))))))))), $dnv[$dnv[$dnv[$dnv[$dnv[$dnv[$dnv[$dnv[$dnv[$dnv[$dnv[$dnv[$dnv[$dnv[$dnv[$dnv[0]]]]]]]]]]]]]]]]],
+      ["[1,[1,[1,[1,[1,[1,[1,[1,[1,[1,[1,[1,[1,[1,[1,[1,1]]]]]]]]]]]]]]]]", 1, 0]);
+
 // ----- done -----
 echo "features: " . $checks . " checks, " . $fails . " failures\n";
 exit($fails);

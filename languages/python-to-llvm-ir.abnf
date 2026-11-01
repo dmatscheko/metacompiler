@@ -169,7 +169,7 @@ real thing.") ;
 // KwEnd is widened the same way, so a keyword glued to a non-ASCII letter (`in<pi>`)
 // stays one identifier rather than a keyword plus a name.
 Id          = ( "a"..."z" | "A"..."Z" | "_" | "\x7f"..."\U0010ffff" ) :whitespace() { "a"..."z" | "A"..."Z" | "0"..."9" | "_" | "\x7f"..."\U0010ffff" } :whitespace(Whitespace) ;
-KwEnd = :script(~~
+KwEnd = :script(~~ "pure";
     (function() {
         var cc = c.peek(0)
         return ((cc >= 48 && cc <= 57) || (cc >= 65 && cc <= 90) || cc === 95
@@ -217,7 +217,7 @@ DotRun      = { "." } ;
 // re-enters RelName to try the bare-dots alternative. A `!"import"` lookahead is wrong
 // here because it would also reject `from .importlib import x`, so the guard checks the
 // word boundary too and only fails on `import` as a whole word.
-NotImportKw = :script(~~
+NotImportKw = :script(~~ "pure";
     (function() {
         var i = 0
         while (i < 4096) {
@@ -580,7 +580,7 @@ ParenTarget <~~ push(makeTargetList(takeAll())) ~~>
 // tuple, however few elements it has and whether or not a comma is written.
 BracketTarget <~~ push(makeListTarget(takeAll())) ~~>
             = "[" :whitespace(WhitespaceNL) [ TargetItem { "," TargetItem } [ "," <~~ push({tcomma: true}) ~~> ] ] "]" :whitespace(Whitespace) NoTgtSuffix ;
-NoTgtSuffix = :script(~~
+NoTgtSuffix = :script(~~ "pure";
     (function() {
         var i = 0
         while (i < 4096) {
@@ -603,7 +603,7 @@ ExprList    <~~ push(makeExprList(takeAll())) ~~>
             = ListItem { "," ListItem } [ "," <~~ push({tcomma: true}) ~~> ] ;
 // A zero-width guard that fails when the very next character is '=', so 'a == b'
 // is never read as an assignment head.
-NotEqSign   = :script(~~
+NotEqSign   = :script(~~ "pure";
     (function() {
         return (c.peek(0) === 61) ? abnf.newToken("\x01eq-follows", 0) : undefined
     })()
@@ -632,7 +632,7 @@ TargetName  <~~ push(sbMangle(up.in, false)) ~~> = NotPyKw Id ;
 // skips whitespace, and it would also reject a name that merely STARTS with a keyword
 // (`information`), so the guard reads the whole word and compares it. Soft keywords
 // (`match`, `case`, `type`, `_`) are real names in Python and are deliberately absent.
-NotPyKw     = :script(~~
+NotPyKw     = :script(~~ "pure";
     (function() {
         var kws = ["False", "None", "True", "and", "as", "assert", "async", "await",
                    "break", "class", "continue", "def", "del", "elif", "else", "except",
@@ -668,7 +668,7 @@ TargetExpr  <~~ push({tb: pop()}) ~~> = EmptyTuple | Grouped | ListLit | StringL
 // only with a suffix after the atom: `None = 1` stays a syntax error, as in CPython.
 TargetAtom  = ( None | True | False | EllipsisLit | DictLit | SetLit ) SfxAhead ;
 // Succeeds empty when the next character (after spaces) opens a suffix: . [ (
-SfxAhead    = :script(~~
+SfxAhead    = :script(~~ "pure";
     (function() {
         var i = 0
         while (c.peek(i) === 32 || c.peek(i) === 9) { i++ }
@@ -678,7 +678,7 @@ SfxAhead    = :script(~~
     })()
 ~~) ;
 // Its inverse: `del (x)` is a parenthesized target list, `del (1).k` is not.
-NoSfxAhead  = :script(~~
+NoSfxAhead  = :script(~~ "pure";
     (function() {
         var i = 0
         while (c.peek(i) === 32 || c.peek(i) === 9) { i++ }
@@ -701,7 +701,7 @@ TSubTup     <~~ push({idx: makeSubTuple(takeAll())}) ~~>
 // form on it leaves `a[1:2]`, `a[::2]` and `a[0, 1]` on the paths they already had.
 // The scan skips string literals whole (their contents are not brackets), tracks the
 // bracket depth, declines the walrus `:=` and is capped like every scan in this tree.
-TupSliceAhead = :script(~~
+TupSliceAhead = :script(~~ "pure";
     (function() {
         var i = 0
         // The `[` of a suffix is matched AFTER whitespace skipping, so step over it.
@@ -1184,7 +1184,7 @@ VarRef      <~~ sbRefAt = up.pos; push(makeVarRef(sbMangle(up.in, false))) ~~>
 NL          = RealNL | AtEOF ;
 RealNL      = "\n" { "\n" } ;
 
-AtEOF = :script(~~
+AtEOF = :script(~~ "pure";
     (function() {
         return (c.peek(0) === -1) ? undefined : abnf.newToken("\x01not-at-eof", 0)
     })()

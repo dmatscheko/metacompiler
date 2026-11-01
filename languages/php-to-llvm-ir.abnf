@@ -109,7 +109,7 @@ InlineHtml  <~~ push(makeHtmlOut(pop(), true)) ~~>
 // before the token the scanner returns is matched.
 HtmlText    <~~ push(up.in) ~~>
             = :whitespace() HtmlScan :whitespace(Whitespace) ;
-HtmlScan = :script(~~
+HtmlScan = :script(~~ "pure";
     (function() {
         // Everything from here to the next opening tag is literal text. '<?php' is
         // matched case-insensitively (PHP's tag is), and '<?=' is the echo shorthand,
@@ -169,7 +169,7 @@ ShortOpen   = "<?=" :whitespace(Whitespace) ;
 // so every statement that ends in ';' accepts a '?>' AHEAD of it instead - the tag
 // itself is left in place and read as the InlineHtml statement that follows.
 Semi        = ";" | CloseAhead ;
-CloseAhead  = :script(~~
+CloseAhead  = :script(~~ "pure";
     (function() {
         var i = 0
         var cc = c.peek(i)
@@ -690,7 +690,7 @@ ChainSeg    = { ChainPlain } ( MethodSfx | DynMethodSfx | CallSfx | StaticSfx ) 
 ChainPlain  = FieldSfx !"(" | DynFieldSfx !"(" | IndexSfx ;
 // Is the text ahead a call-headed TARGET? Twin of CallTgtAhead in
 // php-interpreter.abnf; see there.
-CallTgtAhead = :script(~~
+CallTgtAhead = :script(~~ "pure";
     (function() {
         // Fast refusal before any helper exists: the head must be '$', '(' or a name
         // that a '(' or '::' follows. A comment in front goes to the full walk.
@@ -868,7 +868,7 @@ BodyStmt    <~~ push({body: makeBody(takeAll())}) ~~>
             = Statement ;
 // Fails on a bare $GLOBALS (no '[' after it): that is GlobalsAll's read-only copy,
 // never a variable to bind or write.
-NotGlobalsBare = :script(~~
+NotGlobalsBare = :script(~~ "pure";
     (function() {
         var i = 0
         var cc = c.peek(i)
@@ -1052,7 +1052,7 @@ PlaceArg    <~~ push({aplace: true}) ~~>
             = "?" ArgEnd ;
 NamedPlaceArg <~~ push({aname: argLabel(up.in), aplace: true}) ~~>
             = ArgLabel "?" ArgEnd ;
-ArgEnd      = :script(~~
+ArgEnd      = :script(~~ "pure";
     (function() {
         var i = 0
         var cc = c.peek(i)
@@ -1086,7 +1086,7 @@ PosArg      <~~ push({pos: pop(), vtext: plainVarText(up.in), dyn: phpLibDynArg(
 // cannot parse it as an expression at all.
 AppendArg   <~~ pop(); push({pos: makeRaise("Cannot use [] for reading"), vtext: plainVarText(up.in)}) ~~>
             = AppendAhead TgtOnly ArgEnd ;
-AppendAhead = :script(~~
+AppendAhead = :script(~~ "pure";
     (function() {
         var i = 0
         while (c.peek(i) === 32 || c.peek(i) === 9 || c.peek(i) === 13 || c.peek(i) === 10) { i = i + 1 }
@@ -1345,7 +1345,7 @@ DollarName  <~~ push(noteVarName(up.in)) ~~>
 // a literal character (so no negative lookahead is needed).
 // b"..." / b'...' / b<<<EOT. Twin of BinStr in php-interpreter.abnf; see there.
 BinStr      = ( "b" | "B" ) BinAhead ( HeredocLit | DqStr | SqStr ) ;
-BinAhead    = :script(~~
+BinAhead    = :script(~~ "pure";
     (function() {
         var q = c.peek(0)
         if (q === 34 || q === 39) { return undefined }
@@ -1361,7 +1361,7 @@ TplDollarCurly <~~ pop(); push(dollarCurlyPiece(dollarCurlySrc(up.in.substring(2
 TplBraceExpr <~~ push({e: pop()}) ~~>
             = CurlyOpen "{" :whitespace(Whitespace) Expression "}" ;
 // Twin of CurlyOpen in php-interpreter.abnf; see there.
-CurlyOpen   = :script(~~ c.peek(1) === 36 ? undefined : abnf.newToken("\x01nocurly", 0) ~~) ;
+CurlyOpen   = :script(~~ "pure"; c.peek(1) === 36 ? undefined : abnf.newToken("\x01nocurly", 0) ~~) ;
 // The simple interpolation form: '$name', optionally followed by ONE '[key]' or
 // '->prop' step (PHP's "simple" syntax - anything richer needs the '{$...}' form).
 // The index key is an integer, a BARE word (taken as a string: "$map[key]") or
@@ -1409,7 +1409,7 @@ SqPlain     = "\x20"..."\x26" | "\x28"..."\x5b" | "\x5d"..."\U0010ffff" | @"\t" 
 // php-interpreter.abnf; see there.
 HeredocLit  <~~ push(makeHeredoc(up.in, up.start)) ~~>
             = HdScan :whitespace(Whitespace) ;
-HdScan = :script(~~
+HdScan = :script(~~ "pure";
     (function() {
         var no = abnf.newToken("\x01noheredoc", 0)
         // Whitespace is not skipped before a script, so step over it here.
@@ -1502,7 +1502,7 @@ HdScan = :script(~~
 Name        = NotKw Id ;
 // Method / property / call names after '->' may be any identifier.
 MethodName  = Id ;
-NotKw       = :script(~~
+NotKw       = :script(~~ "pure";
     (function() {
         var i = 0
         var cc = c.peek(i)

@@ -405,6 +405,11 @@ int main() {
 
     /* ----- combined pipeline ----- */
     check(pipeline() == 529);
+    /* deeply nested brackets parse in linear time */
+    {
+        int dnv[2] = {0, 1};
+        check(((((((((((((((((1)))))))))))))))) == 1 && dnv[dnv[dnv[dnv[dnv[dnv[dnv[dnv[dnv[dnv[dnv[dnv[dnv[dnv[dnv[dnv[0]]]]]]]]]]]]]]]] == 0 && (int)(int)(int)(int)(int)(int)(int)(int)(int)(int)(int)(int)(int)(int)(int)(int)1 == 1);
+    }
 
     /* putchar writes ONE BYTE: these two are the UTF-8 encoding of U+00E9, which cc
        prints as the bytes c3 a9. test.sh --cross compares the halves byte for byte. */

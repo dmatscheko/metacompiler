@@ -131,7 +131,7 @@ KId         = IdBacktick | NotHardKw Id ;
 // broken file - `val v: package`, `abstract val a : package.Int` - parses as if the
 // keyword were a type name. `this` and `super` are deliberately absent: this subset
 // reads a bare `this` as an ordinary name.
-NotHardKw   = :script(~~
+NotHardKw   = :script(~~ "pure";
     (function() {
         var kw = ["package", "class", "interface", "object", "typealias", "fun",
                   "val", "var", "if", "else", "when", "while", "do", "for", "return",
@@ -190,7 +190,7 @@ BlockComment = KDocOk "/*" :whitespace() { NestedComment | NotStar | "*" { "*" }
 //     with no link), so an empty name run is not an error.
 // Measured over the whole vendored corpus, the two patterns occur in exactly the three
 // files Kotlin rejects and nowhere else.
-KDocOk      = :script(~~
+KDocOk      = :script(~~ "pure";
     (function() {
         if (c.peek(0) !== 47 || c.peek(1) !== 42 || c.peek(2) !== 42) { return undefined }
         var tags = ["see", "throws", "exception", "sample", "param", "property"]
@@ -323,7 +323,7 @@ AnnEnumMod  = ( "annotation" | "enum" ) KwEnd NotColon NotClassW ;
 VarianceMod = ( "in" | "out" ) KwEnd ModWordAhead ;
 // A zero-width guard that fails unless the next token starts a modifier run or a
 // declaration - an `@` annotation, or one of the modifier / declaration keywords.
-ModWordAhead = :script(~~
+ModWordAhead = :script(~~ "pure";
     (function() {
         var kws = "|public|private|protected|internal|open|final|abstract|sealed|data"
                 + "|override|lateinit|const|inner|vararg|noinline|crossinline|tailrec"
@@ -373,7 +373,7 @@ ModWordAhead = :script(~~
 ~~) ;
 // A zero-width guard that fails when the next word is `class` (the twin of the guard of
 // the same name in kotlin-to-llvm-ir.abnf).
-NotClassW   = :script(~~
+NotClassW   = :script(~~ "pure";
     (function() {
         var i = 0
         var cc = c.peek(i)
@@ -441,7 +441,7 @@ AnnEntry    = KId [ SkipAngle ] { "." KId [ SkipAngle ] } [ AnnArgsOk SkipParen 
 // legal, since both are ordinary Kotlin.
 // It is a guard rather than a real argument grammar because annotation arguments are
 // parsed and dropped here; the only question asked is whether the run is well formed.
-AnnArgsOk   = :script(~~
+AnnArgsOk   = :script(~~ "pure";
     (function() {
         var i = 0
         var steps = 0
@@ -888,7 +888,7 @@ RecvFnTail  = "." "(" [ FnTypeParam ] { "," [ FnTypeParam ] } ")" "->" Type ;
 TypeAnno    = "@" [ AnnTarget ":" ] ( AnnSet | KId { "." KId } [ NoSpaceParen SkipParen NotArrow ] ) ;
 // A zero-width guard that fails unless the very next character is `(` - i.e. unless
 // the parenthesis touches what came before it, with no whitespace in between.
-NoSpaceParen = :script(~~
+NoSpaceParen = :script(~~ "pure";
     (function() {
         return (c.peek(0) === 40) ? undefined : abnf.newToken("\x01space-before-paren", 0)
     })()
@@ -986,7 +986,7 @@ Block       <~~ push(makeBlockStmt(takeAll())) ~~>
 // of input, and refuses everything else. Comments are skipped like whitespace, and a
 // comment containing a newline separates - Kotlin's parser sees the same line breaks the
 // lexer does, whether or not a comment is wrapped around them.
-NewStmtLine = :script(~~
+NewStmtLine = :script(~~ "pure";
     (function() {
         if (c.peek(-1) === 59) { return undefined }
         var i = 0
@@ -1238,7 +1238,7 @@ IsKw        = KwIs <~~ push(false) ~~> | KwNotIs <~~ push(true) ~~> ;
 AsKw        = KwAsSafe <~~ push(true) ~~> | KwAs <~~ push(false) ~~> ;
 TypeName    <~~ push(stripWs(up.in)) ~~> = Type ;
 // A zero-width guard that fails when the next non-whitespace token is `->`.
-NotArrow    = :script(~~
+NotArrow    = :script(~~ "pure";
     (function() {
         var i = 0
         var cc = c.peek(i)
@@ -1253,7 +1253,7 @@ NotArrow    = :script(~~
 // the next token): the value of a labelled return must start on the SAME line,
 // otherwise `return@lbl` followed by another statement would swallow that
 // statement as its return value (newlines are insignificant everywhere else).
-SameLine    = :script(~~
+SameLine    = :script(~~ "pure";
     (function() {
         var i = 0
         var cc = c.peek(i)
@@ -1266,7 +1266,7 @@ SameLine    = :script(~~
 
 // A zero-width guard that fails when the next non-whitespace token is `(` - used to
 // tell a visibility-only accessor (private set) from a body accessor (set(v) { ... }).
-NotParen    = :script(~~
+NotParen    = :script(~~ "pure";
     (function() {
         var i = 0
         var cc = c.peek(i)
@@ -1276,7 +1276,7 @@ NotParen    = :script(~~
 ~~) ;
 
 // A zero-width guard that fails when the next non-whitespace character is `{`.
-NotBrace    = :script(~~
+NotBrace    = :script(~~ "pure";
     (function() {
         var i = 0
         var cc = c.peek(i)
@@ -1288,7 +1288,7 @@ NotBrace    = :script(~~
 // A zero-width guard that fails when the next non-whitespace token is `:` - used so a
 // soft-keyword modifier (data/value/inner/...) that is really a parameter or property
 // NAME is not consumed as a modifier (a genuine modifier is never followed by `:`).
-NotColon    = :script(~~
+NotColon    = :script(~~ "pure";
     (function() {
         var i = 0
         var cc = c.peek(i)
@@ -1300,7 +1300,7 @@ NotColon    = :script(~~
 // A zero-width guard that fails when the next non-whitespace token is the keyword
 // `object` - it keeps the `companion` MODIFIER (companion fun / companion val) from
 // consuming the `companion` of a `companion object` declaration.
-NotObjectKw = :script(~~
+NotObjectKw = :script(~~ "pure";
     (function() {
         var i = 0
         var cc = c.peek(i)
@@ -1319,7 +1319,7 @@ NotObjectKw = :script(~~
 
 // A zero-width guard that fails when the very next character is `=` - it separates a
 // named argument's `name =` from the equality operator in `name == value`.
-NotEqSign   = :script(~~
+NotEqSign   = :script(~~ "pure";
     (function() {
         return (c.peek(0) === 61) ? abnf.newToken("\x01eq-follows", 0) : undefined
     })()
@@ -1358,7 +1358,7 @@ InfixOp     = ( "to" | "and" | "or" | "xor" | "shl" | "shr" | "ushr" ) <~~ push(
 // The VISIBILITY modifiers and `get`/`set`/`init`/`constructor`/`companion` stay out of
 // infix position: `var x = 0` followed on the SAME line by `private set` is an accessor
 // run, and an infix reading would swallow it.
-NotInfixKw  = :script(~~
+NotInfixKw  = :script(~~ "pure";
     (function() {
         var kws = ["else", "is", "as", "in", "by", "while", "catch", "finally", "where",
                    "step", "until", "downTo", "to", "and", "or", "xor", "shl", "shr",
@@ -1414,7 +1414,7 @@ PreIncDec   <~~ push(makePreIncDec(takeAll())) ~~>
 // so PreIncDec declines on the call's `(` and the chain is read whole here.
 PreCallIncDec <~~ var ch = pop(); push(makeCallAssign([ch, pop(), null], up.pos, false)) ~~>
             = ( "++" | "--" ) <~~ push(up.in) ~~> CallChain NotDblColon ;
-NoCallParen = :script(~~
+NoCallParen = :script(~~ "pure";
     (function() {
         var i = 0
         var cc = c.peek(i)
@@ -1430,7 +1430,7 @@ NoCallParen = :script(~~
 // A callable reference is not an assignable target, so the value is reported.
 PreIncRef   <~~ takeAll(); push(notImplExpr("prefix ++/-- of a callable reference", up.pos)) ~~>
             = ( "++" | "--" ) CallMember ;
-NotDblColon = :script(~~
+NotDblColon = :script(~~ "pure";
     (function() {
         if (c.peek(0) === 58 && c.peek(1) === 58) { return abnf.newToken("\x01glued-double-colon", 0) }
     })()
@@ -1505,7 +1505,7 @@ GenericSfx  = InstAhead SkipAngle ;
 // of file ) or a continuation token ( ( . == != -> ). `a < b` never reaches a closing
 // `>`; `a < b && c > d` bails on the `&`; `f(a < b, c > d)` closes but is followed by
 // `d`, so all three keep parsing as comparisons.
-InstAhead   = :script(~~
+InstAhead   = :script(~~ "pure";
     (function () {
         var i = 0
         var cc = c.peek(0)
@@ -1676,7 +1676,7 @@ ContinueExpr <~~ push(kContinueExpr()) ~~> = KwContinue NotAtLbl NoSpacedAt ;
 // own value - which is what the tree says too.
 LabeledPrim <~~ var t = pop(); pop(); push(t) ~~>
             = LabelDef Primary ;
-NotAtLbl    = :script(~~
+NotAtLbl    = :script(~~ "pure";
     (function() {
         return (c.peek(0) === 64) ? abnf.newToken("\x01labelled", 0) : undefined
     })()
@@ -1873,7 +1873,7 @@ TplName     = ( "a"..."z" | "A"..."Z" | "_" ) { "a"..."z" | "A"..."Z" | "0"..."9
 // template the way TplVar's NotHardKw intends.
 TplDollar   <~~ push({s: "$"}) ~~>
             = "$" NotTplStart ;
-NotTplStart = :script(~~
+NotTplStart = :script(~~ "pure";
     (function() {
         var c0 = c.peek(0)
         if ((c0 >= 97 && c0 <= 122) || (c0 >= 65 && c0 <= 90) || c0 === 95 || c0 === 123) {
@@ -1983,7 +1983,7 @@ ReturnAt    <~~ push(makeReturnAt(takeAll(), up.pos)) ~~>
 // labelled break, `break @loop` is a break followed by a dangling annotation and is
 // rejected (psi/newLabels/spaceBeforeLabelReference). Written as a guard rather than
 // with :whitespace() so that a failing alternative cannot leak the whitespace setting.
-AtAdjacent  = :script(~~
+AtAdjacent  = :script(~~ "pure";
     (function() {
         return (c.peek(0) === 64) ? undefined : abnf.newToken("\x01need-adjacent-at", 0)
     })()
@@ -1999,7 +1999,7 @@ AtAdjacent  = :script(~~
 // annotation. This guard therefore does the full skip (spaces, tabs, CR, LF, form
 // feed, `//` to end of line and `/* */`) the way a refusing guard must, and fails the
 // unlabelled alternative outright.
-NoSpacedAt  = :script(~~
+NoSpacedAt  = :script(~~ "pure";
     (function() {
         var i = 0
         var steps = 0
@@ -2158,7 +2158,7 @@ SuperItem   <~~ push(makeSuperItem(takeAll())) ~~>
 // spelled `super` elsewhere is unaffected.
 SuperName   <~~ push({sname: stripWs(up.in)}) ~~>
             = { TypeAnno } ( "(" Type ")" | NotThisSuper KId [ SkipAngle ] { "." KId [ SkipAngle ] } ) [ "?" ] ;
-NotThisSuper = :script(~~
+NotThisSuper = :script(~~ "pure";
     (function() {
         var i = 0
         var cc = c.peek(i)
@@ -2280,7 +2280,7 @@ EnumEntrySkip = { ( Modifier | Annotation ) NotEntryEnd } KId [ SkipParen ] [ Sk
 // entry - `,` `;` `}` - or opens its arguments or body - `(` `{`. It is what keeps the
 // modifier run from eating the entry's NAME when that name is itself a soft keyword;
 // a PEG repetition never gives a consumed word back.
-NotEntryEnd = :script(~~
+NotEntryEnd = :script(~~ "pure";
     (function() {
         var i = 0
         var cc = c.peek(i)
@@ -2446,7 +2446,7 @@ KwWhere     = "where" KwEnd ;
 // enum entry. Both start with modifiers and annotations, so it skips those first and
 // then decides on the hard declaration keyword behind them: `FIRST` and `private X()`
 // are entries, `fun foo()`, `inline fun foo()` and `@inline fun foo()` are members.
-NotMemberKw = :script(~~
+NotMemberKw = :script(~~ "pure";
     (function() {
         var hard = ["fun", "val", "var", "class", "object", "interface", "companion",
                     "init", "constructor", "typealias", "enum", "annotation"]

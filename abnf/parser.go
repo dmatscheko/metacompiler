@@ -34,11 +34,12 @@ type parser struct {
 	Sdx      int      // The current parse position inside Src (byte index).
 	agrammar *r.Rules // The a-grammar that describes the target text.
 
-	opts         *Parseropts
-	blockList    map[applyKey]bool     // Marks the applications that are currently running (-lb). Used to stop left recursions.
-	foundList    map[applyKey]*r.Rules // Caches the results of successful applications (-lf).
-	foundSdxList map[applyKey]int      // The parse position right behind each cached foundList result.
-	traceCount   int
+	opts       *Parseropts
+	blockList  map[applyKey]bool // Marks the applications that are currently running (-lb). Used to stop left recursions.
+	traceCount int
+
+	memo      map[applyKey]memoEntry // The production results by application, see applyProduction(). nil = off.
+	memoProds []bool                 // Per production index: are its applications memoized? See memoizable().
 
 	initialSpaces *r.Rule // The rule that describes skippable whitespace (nil skips nothing). Set via :whitespace(), see applyCommand().
 
@@ -80,11 +81,12 @@ func (pa *parser) setSrc(src string) {
 	pa.Src = src
 	pa.posMap = nil
 	pa.wsCache = map[*r.Rule]*wsMemo{}
-	// The found and block lists are keyed by a position in the old text, so they
-	// have to go as well (-lf / -lb). pureCache survives: it only depends on the
+	// The memo and the block list are keyed by a position in the old text, so they
+	// have to go as well. pureCache and memoProds survive: they only depend on the
 	// a-grammar.
-	pa.foundList = map[applyKey]*r.Rules{}
-	pa.foundSdxList = map[applyKey]int{}
+	if pa.memo != nil {
+		pa.memo = map[applyKey]memoEntry{}
+	}
 	pa.blockList = map[applyKey]bool{}
 }
 
@@ -123,7 +125,7 @@ var includedByGrammar = map[*r.Rules]map[string]bool{}
 
 // Parseropts are the command line options that influence the parser.
 type Parseropts struct {
-	UseBlockList, UseFoundList, TraceEnabled, PreventDefaultOutput bool
+	UseBlockList, TraceEnabled, PreventDefaultOutput bool
 	// StartRule, when non-empty, overrides the grammar's declared :startRule() for this
 	// one parse: parsing begins from the production of this name instead. Used to parse a
 	// fragment (e.g. a single Statement) of a language rather than a whole program - the
@@ -132,7 +134,7 @@ type Parseropts struct {
 }
 
 // getRulePosId maps the pair (rule, position in the target text) to one unique int,
-// used as part of the key for the block and found lists.
+// used as part of the key for the block list and the memo.
 func (pa *parser) getRulePosId(rule *r.Rule, pos int) int {
 	// Cantor pairing function.
 	a := rule.Int
@@ -140,41 +142,29 @@ func (pa *parser) getRulePosId(rule *r.Rule, pos int) int {
 	return ((ab * (ab + 1)) >> 1) + a
 }
 
-// applyKey identifies one rule application for the block and found lists. The
+// applyKey identifies one rule application for the block list and the memo. The
 // whitespace context is part of the key: the same production at the same
 // position parses differently as a whitespace-skip probe (no productions) or
-// under another :whitespace() rule, so a bare (rule, position) key let a skip
-// probe poison the cache and -lf changed what the grammar accepted.
+// under another :whitespace() rule, so a bare (rule, position) key would let a
+// skip probe poison the memo and change what the grammar accepts.
 type applyKey struct {
 	id       int     // The (rule, position) pair id from getRulePosId.
 	ws       *r.Rule // The whitespace rule in effect.
 	skipping bool    // True while parsing AS the whitespace rule.
 }
 
-func (pa *parser) ruleEnter(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool, depth int) (bool, *r.Rules, int) { // => (isBlocked, foundRule, foundSdx)
-	var isBlocked bool = false
-	var foundRule *r.Rules = nil
-	var foundSdx int = -1
+func (pa *parser) ruleEnter(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool, depth int) bool { // => isBlocked
+	isBlocked := false
 	pa.traceCount++
 
-	if rule.Operator == r.Identifier && (pa.opts.UseBlockList || pa.opts.UseFoundList) && pa.isPure(rule) {
+	if rule.Operator == r.Identifier && pa.opts.UseBlockList && pa.isPure(rule) {
 		key := applyKey{id: pa.getRulePosId(rule, pa.Sdx), ws: skipSpaceRule, skipping: skippingSpaces}
-
-		if pa.opts.UseFoundList {
-			foundRule = pa.foundList[key]
-			if foundRule != nil { // Is really only useful on massive backtracking...
-				foundSdx = pa.foundSdxList[key]
-				isBlocked = true // If the result is there already, block the apply() from trying it again.
-			}
-		}
-		if !isBlocked && pa.opts.UseBlockList {
-			isBlocked = pa.blockList[key] // True if loop, because in this case, the current rule on the current position in the text to parse is its own parent (= loop).
-			pa.blockList[key] = true      // Enter the current rule in the block list (a no-op if it was already blocked).
-		}
+		isBlocked = pa.blockList[key] // True if loop, because in this case, the current rule on the current position in the text to parse is its own parent (= loop).
+		pa.blockList[key] = true      // Enter the current rule in the block list (a no-op if it was already blocked).
 	}
 
 	if !pa.opts.TraceEnabled {
-		return isBlocked, foundRule, foundSdx
+		return isBlocked
 	}
 
 	c := "EOF"
@@ -183,9 +173,7 @@ func (pa *parser) ruleEnter(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces 
 	}
 	space := times(" ", depth)
 	msg := ""
-	if foundRule != nil {
-		msg = "\n" + space + "<INSTANT EXIT (ALREADY FOUND)\n"
-	} else if isBlocked {
+	if isBlocked {
 		msg = "\n" + space + "<INSTANT EXIT (LOOP)\n"
 	}
 	skip := "  spaces:〰️  " // Read spaces.
@@ -193,22 +181,16 @@ func (pa *parser) ruleEnter(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces 
 		skip = "  spaces:➰  " // Skip spaces.
 	}
 	fmt.Print(space, ">", depth, "  (", pa.traceCount, ")  ", LinePosFromStrPos(string(pa.Src), pa.Sdx), "  char:", c, skip, rule.ToString(), msg, "\n")
-	return isBlocked, foundRule, foundSdx
+	return isBlocked
 }
 
 // The parameter wasBlocked must be true if the corresponding ruleEnter() returned isBlocked == true.
-// Such an early exit must not touch the block and found lists: The list entries belong to the still
-// running outer invocation of the same rule at the same position, not to this blocked one.
+// Such an early exit must not touch the block list: its entry belongs to the still running outer
+// invocation of the same rule at the same position, not to this blocked one.
 func (pa *parser) ruleExit(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool, depth int, found *r.Rules, wasSdx int, wasBlocked bool) {
-	if !wasBlocked && rule.Operator == r.Identifier && (pa.opts.UseBlockList || pa.opts.UseFoundList) && pa.isPure(rule) {
+	if !wasBlocked && rule.Operator == r.Identifier && pa.opts.UseBlockList && pa.isPure(rule) {
 		key := applyKey{id: pa.getRulePosId(rule, wasSdx), ws: skipSpaceRule, skipping: skippingSpaces}
-		if pa.opts.UseBlockList {
-			pa.blockList[key] = false // Exit of the rule. It must be unblocked so it can be called again from a parent.
-		}
-		if pa.opts.UseFoundList && found != nil {
-			pa.foundList[key] = found
-			pa.foundSdxList[key] = pa.Sdx
-		}
+		pa.blockList[key] = false // Exit of the rule. It must be unblocked so it can be called again from a parent.
 	}
 
 	if !pa.opts.TraceEnabled {
@@ -292,15 +274,15 @@ func (pa *parser) matchStart(from int, ws *r.Rule, skippingSpaces bool, depth in
 
 // isPure reports whether applying rule can be reduced to a pure function of
 // (rule, position, whitespace rule, skipping): its reachable subtree contains no
-// :script(), so nothing it does depends on - or changes - parser state that is not
-// part of that key.
+// :script() other than a pure one (see pureScriptDirective), so nothing it does
+// depends on - or changes - parser state that is not part of that key.
 //
 // Everything the parser caches needs this. The whitespace memo of skipSpaces() asks
-// it about the whitespace rule, and ruleEnter()/ruleExit() ask it about every
-// production before they put it into the found list (-lf) or the block list (-lb):
-// the Python grammars track their indentation in :script() rules, so the result of
-// e.g. their Block production depends on an indentation stack, and reusing an earlier
-// result at the same position would be wrong.
+// it about the whitespace rule, memoizable() about every production before
+// applyProduction() memoizes it, and ruleEnter()/ruleExit() before they put it into
+// the block list (-lb): the Python grammars track their indentation in :script()
+// rules, so the result of e.g. their Block production depends on an indentation
+// stack, and reusing an earlier result at the same position would be wrong.
 //
 // The answer only depends on the a-grammar, which no longer changes once the parsing
 // has started (an :include() runs before it), so it is computed once per rule instead
@@ -318,16 +300,33 @@ func (pa *parser) isPure(rule *r.Rule) bool {
 	return pure
 }
 
-// hasScript searches a rule tree for a :script() command and follows the Identifier links
-// into the a-grammar while doing so. seen ends the recursion on the (very common)
-// recursive productions.
+// pureScriptDirective opens the code of a :script() that is a function of the target
+// text and the parse position alone (c.peek(), c.getSdx()), whose running or not
+// running changes nothing else (no c.setSdx(), no state another script reads; a cache
+// on the parser stack that only saves a later run work is fine), and whose returned
+// rule, if any, holds only terminals. Such a script leaves the productions around it
+// pure, so they can still be memoized (see applyProduction()). The marker is an
+// ordinary JavaScript directive, so every script engine runs the code unchanged.
+const pureScriptDirective = `"pure";`
+
+// isPureScript reports whether a :script() command declares itself pure.
+func isPureScript(rule *r.Rule) bool {
+	if rule.CodeChilds == nil || len(*rule.CodeChilds) != 1 || (*rule.CodeChilds)[0].Operator != r.Token {
+		return false
+	}
+	return strings.HasPrefix(strings.TrimLeft((*rule.CodeChilds)[0].String, " \t\r\n"), pureScriptDirective)
+}
+
+// hasScript searches a rule tree for a :script() command that is not pure and follows
+// the Identifier links into the a-grammar while doing so. seen ends the recursion on the
+// (very common) recursive productions.
 func (pa *parser) hasScript(rule *r.Rule, seen map[*r.Rule]bool) bool {
 	if rule == nil || seen[rule] {
 		return false
 	}
 	seen[rule] = true
 	if rule.Operator == r.Command && rule.String == "script" {
-		return true
+		return !isPureScript(rule)
 	}
 	if rule.Operator == r.Identifier {
 		if rule.Int < 0 || rule.Int >= len(*pa.agrammar) {
@@ -348,6 +347,175 @@ func (pa *parser) hasScript(rule *r.Rule, seen map[*r.Rule]bool) bool {
 		}
 	}
 	return false
+}
+
+// memoEntry is one remembered application of a production, see applyProduction().
+type memoEntry struct {
+	prods    *r.Rules // The productions; nil = the production did not match.
+	end      int      // pa.Sdx behind the match.
+	firstTok int      // What the application set pa.firstTok to, starting from 0 (0 = nothing).
+	furthest int      // The furthest end of a match inside it (pa.lastParsePosition), 0 = none.
+}
+
+// applyProduction applies the production an Identifier names. A memoizable one is
+// applied at most once per key (packrat parsing): without that, a grammar whose
+// alternatives share a prefix that contains a bracketed expression re-parses the
+// whole bracket body once per alternative and nesting level, which is exponential
+// in the nesting depth. The result is shared, which is safe because neither the
+// parser nor its callers ever change a production list they got back (see
+// r.AppendPossibleSequence, which copies out of it). Besides the position, an
+// application leaves two traces in the parser state that a memo hit has to repeat:
+// pa.firstTok (where an open Tag starts) and pa.lastParsePosition (error messages).
+func (pa *parser) applyProduction(rule *r.Rule, ws *r.Rule, skipping bool, depth int) *r.Rules {
+	childs := (*pa.agrammar)[rule.Int].Childs
+	if pa.memo == nil || !pa.memoizable(rule.Int) {
+		return pa.applyAsSequence(rule, childs, ws, skipping, depth+1)
+	}
+	key := applyKey{id: pa.getRulePosId(rule, pa.Sdx), ws: ws, skipping: skipping}
+	if e, ok := pa.memo[key]; ok {
+		pa.Sdx = e.end
+		if pa.firstTok == 0 {
+			pa.firstTok = e.firstTok
+		}
+		if e.furthest > pa.lastParsePosition {
+			pa.lastParsePosition = e.furthest
+		}
+		return e.prods
+	}
+	outerTok, outerFurthest := pa.firstTok, pa.lastParsePosition
+	pa.firstTok, pa.lastParsePosition = 0, 0
+	prods := pa.applyAsSequence(rule, childs, ws, skipping, depth+1)
+	pa.memo[key] = memoEntry{prods: prods, end: pa.Sdx, firstTok: pa.firstTok, furthest: pa.lastParsePosition}
+	if outerTok != 0 {
+		pa.firstTok = outerTok
+	}
+	if outerFurthest > pa.lastParsePosition {
+		pa.lastParsePosition = outerFurthest
+	}
+	return prods
+}
+
+// memoizable reports whether the applications of the production at index idx are
+// memoized: it has to be pure (see isPure), and recursive - part of a cycle of
+// productions. Only a recursive production can make the re-parsing exponential, and
+// every cycle consists of them, so memoizing just those bounds the work per position;
+// the many small leaf productions (an identifier char, a digit) are cheaper to re-parse
+// than to look up. Computed for the whole a-grammar on first use, see isPure for why
+// once is enough.
+func (pa *parser) memoizable(idx int) bool {
+	if pa.memoProds == nil {
+		pa.memoProds = pa.memoizableProductions()
+	}
+	return pa.memoProds[idx]
+}
+
+// memoizableProductions answers memoizable() for every production at once, in time
+// linear in the size of the a-grammar (asking isPure per production would walk the
+// grammar once per production). The graph has an edge from each production to every
+// production an Identifier in its rule tree names; the recursive productions are the
+// strongly connected components of two or more productions plus those naming
+// themselves (Tarjan), and the impure ones are those that can reach a production that
+// holds a :script() other than a pure one, or an unresolved name, itself.
+func (pa *parser) memoizableProductions() []bool {
+	n := len(*pa.agrammar)
+	edges := make([][]int, n)
+	impure := make([]bool, n)
+	var collect func(from int, rule *r.Rule)
+	collect = func(from int, rule *r.Rule) {
+		switch {
+		case rule.Operator == r.Identifier && rule.Int >= 0 && rule.Int < n:
+			edges[from] = append(edges[from], rule.Int)
+		case rule.Operator == r.Identifier:
+			impure[from] = true // Unresolved, see hasScript.
+		case rule.Operator == r.Command && rule.String == "script":
+			impure[from] = impure[from] || !isPureScript(rule)
+		}
+		for _, childs := range [2]*r.Rules{rule.Childs, rule.CodeChilds} {
+			if childs != nil {
+				for _, child := range *childs {
+					collect(from, child)
+				}
+			}
+		}
+	}
+	for i, prod := range *pa.agrammar {
+		if prod.Operator == r.Production {
+			collect(i, prod)
+		}
+	}
+
+	// Impurity flows backwards along the edges.
+	callers := make([][]int, n)
+	var work []int
+	for v := 0; v < n; v++ {
+		for _, w := range edges[v] {
+			callers[w] = append(callers[w], v)
+		}
+		if impure[v] {
+			work = append(work, v)
+		}
+	}
+	for len(work) > 0 {
+		w := work[len(work)-1]
+		work = work[:len(work)-1]
+		for _, v := range callers[w] {
+			if !impure[v] {
+				impure[v] = true
+				work = append(work, v)
+			}
+		}
+	}
+
+	rec := make([]bool, n)
+	index, low := make([]int, n), make([]int, n)
+	onStack := make([]bool, n)
+	var stack []int
+	next := 1 // index 0 = not visited yet
+	var visit func(v int)
+	visit = func(v int) {
+		index[v], low[v] = next, next
+		next++
+		stack = append(stack, v)
+		onStack[v] = true
+		for _, w := range edges[v] {
+			if w == v {
+				rec[v] = true
+			}
+			if index[w] == 0 {
+				visit(w)
+				if low[w] < low[v] {
+					low[v] = low[w]
+				}
+			} else if onStack[w] && index[w] < low[v] {
+				low[v] = index[w]
+			}
+		}
+		if low[v] != index[v] {
+			return
+		}
+		top := len(stack) - 1
+		for stack[top] != v {
+			top--
+		}
+		if len(stack)-top > 1 {
+			for _, w := range stack[top:] {
+				rec[w] = true
+			}
+		}
+		for _, w := range stack[top:] {
+			onStack[w] = false
+		}
+		stack = stack[:top]
+	}
+	for v := 0; v < n; v++ {
+		if index[v] == 0 {
+			visit(v)
+		}
+	}
+	for v := range rec {
+		rec[v] = rec[v] && !impure[v]
+	}
+	return rec
 }
 
 // This is only a helper for apply() and does not need ruleEnter() and ruleExit().
@@ -612,13 +780,7 @@ func (pa *parser) apply(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool
 	// back a non-nil (possibly empty) *r.Rules - see the end of this function.
 	var localProductions *r.Rules
 
-	isBlocked, foundRule, foundSdx := pa.ruleEnter(rule, skipSpaceRule, skippingSpaces, depth)
-	if isBlocked {
-		if foundRule != nil { // Reuse the cached result and continue behind it.
-			pa.Sdx = foundSdx
-			pa.ruleExit(rule, skipSpaceRule, skippingSpaces, depth, foundRule, wasSdx, true)
-			return foundRule
-		}
+	if pa.ruleEnter(rule, skipSpaceRule, skippingSpaces, depth) { // Blocked: a left recursion (-lb).
 		pa.ruleExit(rule, skipSpaceRule, skippingSpaces, depth, nil, wasSdx, true)
 		return nil
 	}
@@ -961,7 +1123,7 @@ func (pa *parser) apply(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool
 		if rule.Int < 0 || rule.Int >= len(*pa.agrammar) {
 			panic("Unknown production name '" + rule.String + "'. It is used inside the grammar but never defined.")
 		}
-		newProductions := pa.applyAsSequence(rule, (*pa.agrammar)[rule.Int].Childs, skipSpaceRule, skippingSpaces, depth+1)
+		newProductions := pa.applyProduction(rule, skipSpaceRule, skippingSpaces, depth)
 		if newProductions == nil {
 			pa.ruleExit(rule, skipSpaceRule, skippingSpaces, depth, nil, wasSdx, false)
 			pa.Sdx = wasSdx
@@ -1315,8 +1477,12 @@ func ParseWithAgrammar(agrammar *r.Rules, srcCode, fileName string, options *Par
 	pa.opts = options
 	pa.traceCount = 0
 	pa.blockList = make(map[applyKey]bool)
-	pa.foundList = make(map[applyKey]*r.Rules)
-	pa.foundSdxList = make(map[applyKey]int)
+	// A blocked left recursion fails only because of the applications still running
+	// around it (-lb), so no result computed under the block list is a function of its
+	// key; and a trace has to show every application.
+	if !options.TraceEnabled && !options.UseBlockList {
+		pa.memo = make(map[applyKey]memoEntry)
+	}
 	pa.wsCache = make(map[*r.Rule]*wsMemo)
 	pa.pureCache = make(map[*r.Rule]bool)
 	pa.lastParsePosition = 0
