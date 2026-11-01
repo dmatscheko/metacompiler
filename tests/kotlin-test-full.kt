@@ -7190,6 +7190,47 @@ fun s163() {
         UInt::class.java.kotlin.simpleName == "UInt" && P163::class.java.kotlin == P163::class && P163(listOf()).javaClass.kotlin.simpleName == "P163")
 }
 
+// ===== SECTION 164: inferred reified arguments of map / this; collection and Nothing KClasses =====
+// A reified type parameter written without type arguments is inferred from the
+// static type of an extension's `this` (`listOf(this)` in a reified extension
+// binds the caller's T) and of a map / mapIndexed / first result; a generic
+// element result such as first() is boxed, an Int extension's `this` is not. A collection
+// interface's KClass is its java interface - qualifiedName kotlin.collections.List,
+// a Mutable twin the same class, rendered "interface java.util.List" as every
+// interface's java class is - and Nothing's is java.lang.Void, whose
+// javaPrimitiveType is void (kotlinc 2.2.21 on java 24).
+inline fun <reified T> List<T>.el164() = T::class.simpleName
+inline fun <reified T> Array<out T>.ar164() = T::class.simpleName
+inline fun <reified T : Any> T.rn164() = T::class.simpleName
+inline fun <reified T> T.wrap164() = listOf(this).el164()
+inline fun <reified T> T.awrap164() = arrayOf(this).ar164()
+fun Long.lw164() = listOf(this).el164()
+fun Int.jc164() = this.javaClass.name
+interface Sh164
+interface Sub164 : Sh164
+class Sq164 : Sub164
+fun s164() {
+    check("rinf164a", 5L.wrap164() == "Long" && "s".awrap164() == "String" && 2.5.wrap164() == "Double" &&
+        7L.lw164() == "Long" && arrayOf("a").ar164() == "String" && 3.jc164() == "int")
+    check("rinf164b", listOf(1).map { it.toString() }.el164() == "String" && listOf("a").map { it.length }.el164() == "Int" &&
+        listOf(1).map { x -> x * 1.5 }.el164() == "Double" && listOf("a").mapIndexed { i, s -> i }.el164() == "Int" &&
+        arrayOf(1).map { it > 0 }.el164() == "Boolean" && listOf("x").first().rn164() == "String" &&
+        listOf(1).map { it.toString() }.last { it != "" }.rn164() == "String" &&
+        listOf(1).map { x: Int -> x.toLong() }.el164() == "Long" && listOf("a").map { it.uppercase() }.el164() == "String" &&
+        listOf(4).first().javaClass.name == "java.lang.Integer" && "7".toInt().javaClass.name == "int")
+    check("kcls164c", List::class.qualifiedName == "kotlin.collections.List" && MutableList::class.simpleName == "List" &&
+        MutableMap::class.qualifiedName == "kotlin.collections.Map" && Iterable::class.qualifiedName == "kotlin.collections.Iterable" &&
+        MutableList::class == List::class && List::class.java.kotlin.qualifiedName == "kotlin.collections.List" &&
+        "" + List::class.java == "interface java.util.List" && "" + Set::class.java == "interface java.util.Set" &&
+        "" + Comparable::class.java == "interface java.lang.Comparable" && "" + Runnable::class.java == "interface java.lang.Runnable" &&
+        "" + Sh164::class.java == "interface Sh164" && "" + Sub164::class.java == "interface Sub164" &&
+        "" + Sq164::class.java == "class Sq164" && "" + Number::class.java == "class java.lang.Number")
+    check("noth164d", Nothing::class.simpleName == "Void" && Nothing::class.qualifiedName == "java.lang.Void" &&
+        "" + Nothing::class.javaPrimitiveType == "void" && "" + Nothing::class.java == "class java.lang.Void" &&
+        "" + Nothing::class.java.kotlin.javaPrimitiveType == "void" && Nothing::class.java.kotlin == Nothing::class &&
+        Nothing::class != Unit::class)
+}
+
 fun main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -7350,6 +7391,7 @@ fun main() {
     s161() // SECTION-CALL 161
     s162() // SECTION-CALL 162
     s163() // SECTION-CALL 163
+    s164() // SECTION-CALL 164
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }

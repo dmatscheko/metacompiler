@@ -521,7 +521,7 @@ ExprBody    <~~ push(makeExprBody(pop())) ~~>
 // decoration: `inline fun <reified T> Any.isA(): Boolean = this is T` resolves `is T`
 // against the call site, exactly as the non-extension form does. TypeParams only fills
 // pendingReified, so the item list makeFun reads is unchanged.
-ExtFun      <~~ ktNoteBody(up.start, up.pos); ktNoteGeneric(c.srcSlice(up.start, up.pos), "fun"); push(makeExtFunStmt(takeAll(), retLblTop(), reifiedTop())); retLblPop(); reifiedPop() ~~>
+ExtFun      <~~ ktNoteGeneric(c.srcSlice(up.start, up.pos), "fun", up.start); ktNoteBody(up.start, up.pos); push(makeExtFunStmt(takeAll(), retLblTop(), reifiedTop())); retLblPop(); reifiedPop() ~~>
             = KwFun [ TypeParams ] ExtRecv KId <~~ push(up.in); retLblPush(up.in, "fun"); reifiedPush() ~~> ParamList [ ":" Type ] [ WhereClause ] FunBody ;
 ExtRecv     <~~ push({extRecv: up.in}) ~~>
             = AnnoRecv { RecvSeg } ;

@@ -2678,8 +2678,8 @@ function k2Obj(o, depth) {
     // .java answers the same handle. The twin is the __kclass arm of kstr.
     if (o["__kclass"] === true) {
         if (o["jprim"] === true) { return o["jname"] }
-        if (o["jname"] !== undefined) { return "class " + o["jname"] }
-        return "class " + k2Render(o["kname"], depth + 1)
+        if (o["jname"] !== undefined) { return ktKClassKw(o) + o["jname"] }
+        return ktKClassKw(o) + k2Render(o["kname"], depth + 1)
     }
     // A Regex renders as its pattern and a MatchResult as the matched text,
     // which is what their toString answers (abnf/jsrtregexkt.go); neither
@@ -7314,7 +7314,7 @@ function ktClassLit(name) {
 // KClass.qualifiedName. Twin of ktKClassFq in abnf/jsrtkotlin.go, which has the
 // rules.
 var ktBuiltinFq = {"$Int": true, "$Long": true, "$Short": true, "$Byte": true, "$Double": true,
-    "$Float": true, "$Boolean": true, "$Char": true, "$Unit": true, "$Nothing": true,
+    "$Float": true, "$Boolean": true, "$Char": true, "$Unit": true,
     "$Number": true, "$CharSequence": true, "$Comparable": true,
     "$UInt": true, "$ULong": true, "$UByte": true, "$UShort": true, "$Array": true,
     "$IntArray": true, "$LongArray": true, "$DoubleArray": true, "$FloatArray": true,
@@ -7329,9 +7329,8 @@ function ktKClassFq(o) {
         }
         return kn
     }
-    if (jn == "java.lang.String") { return "kotlin.String" }
-    if (jn == "java.lang.Object") { return "kotlin.Any" }
-    if (jn == "java.lang.Throwable") { return "kotlin.Throwable" }
+    var fq = ktJvmKotlinFq["$" + jn]
+    if (fq !== undefined) { return fq }
     var qn = ""
     var qi = 0
     while (qi < jn.length) {
@@ -7340,6 +7339,26 @@ function ktKClassFq(o) {
         qi = qi + 1
     }
     return qn
+}
+
+// The kotlin name of a java class a builtin kotlin type maps to. Twin of
+// ktJvmKotlinFq in abnf/jsrtkotlin.go.
+var ktJvmKotlinFq = {"$java.lang.String": "kotlin.String", "$java.lang.Object": "kotlin.Any",
+    "$java.lang.Throwable": "kotlin.Throwable", "$java.lang.Iterable": "kotlin.collections.Iterable",
+    "$java.util.List": "kotlin.collections.List", "$java.util.Set": "kotlin.collections.Set",
+    "$java.util.Map": "kotlin.collections.Map", "$java.util.Collection": "kotlin.collections.Collection"}
+// The word java.lang.Class.toString puts before a class's name. Twin of ktKClassKw
+// in abnf/jsrtkotlin.go, which has the rules.
+var ktJvmIfaces = {"$java.lang.Iterable": true, "$java.util.List": true, "$java.util.Set": true,
+    "$java.util.Map": true, "$java.util.Collection": true, "$java.lang.Comparable": true,
+    "$java.lang.CharSequence": true, "$java.lang.Runnable": true}
+function ktKClassKw(co) {
+    if (co["iface"] === true) { return "interface " }
+    var jn = co["jname"]
+    if (jn !== undefined) {
+        if (ktJvmIfaces["$" + jn] === true) { return "interface " }
+    }
+    return "class "
 }
 
 // `javaClass`, and a collection's KClass: a class literal that also carries the JVM
@@ -7420,8 +7439,14 @@ function ktKClassOfJava(jc) {
     return jc
 }
 // KClass.javaPrimitiveType (jsrtkotlin.go ktKClassPrim): a primitive type's
-// primitive java class (marked jprim), a reified type argument's too; null else.
+// primitive java class (marked jprim), a reified type argument's too, and
+// java.lang.Void's void; null else.
 function ktKClassPrim(co) {
+    if (co["jname"] === "java.lang.Void") {
+        var vo = ktJavaClass("void")
+        vo["jprim"] = true
+        return vo
+    }
     if (co["jname"] !== undefined) { return null }
     var i = ktPrimKNames.indexOf(co["kname"])
     if (i < 0) { return null }
@@ -7441,12 +7466,9 @@ function ktKClassHash(co) {
 var ktJavaOfType = {"$UInt": "kotlin.UInt", "$ULong": "kotlin.ULong", "$UByte": "kotlin.UByte",
     "$UShort": "kotlin.UShort", "$Unit": "kotlin.Unit", "$UIntArray": "kotlin.UIntArray",
     "$ULongArray": "kotlin.ULongArray", "$UByteArray": "kotlin.UByteArray",
-    "$UShortArray": "kotlin.UShortArray", "$Nothing": "java.lang.Void",
+    "$UShortArray": "kotlin.UShortArray",
     "$Number": "java.lang.Number", "$CharSequence": "java.lang.CharSequence",
-    "$Comparable": "java.lang.Comparable", "$Iterable": "java.lang.Iterable",
-    "$List": "java.util.List", "$MutableList": "java.util.List", "$Set": "java.util.Set",
-    "$MutableSet": "java.util.Set", "$Map": "java.util.Map", "$MutableMap": "java.util.Map",
-    "$Collection": "java.util.Collection", "$MutableCollection": "java.util.Collection",
+    "$Comparable": "java.lang.Comparable",
     "$IntArray": "[I", "$LongArray": "[J", "$DoubleArray": "[D", "$FloatArray": "[F",
     "$CharArray": "[C", "$BooleanArray": "[Z", "$ByteArray": "[B", "$ShortArray": "[S"}
 // The java primitive a one-letter array descriptor names (`[I` is int[]).
@@ -7592,18 +7614,24 @@ function js_ktctorref(v) {
     return v
 }
 
+// The stdlib types whose KClass is a java class. Twin of ktStdJvm in
+// abnf/jsrtkotlin.go, which has the rules.
+var ktStdJvm = {"$Pair": "kotlin.Pair", "$Triple": "kotlin.Triple",
+    "$StringBuilder": "java.lang.StringBuilder", "$Regex": "kotlin.text.Regex",
+    "$IntRange": "kotlin.ranges.IntRange", "$LongRange": "kotlin.ranges.LongRange",
+    "$CharRange": "kotlin.ranges.CharRange", "$Nothing": "java.lang.Void",
+    "$Iterable": "java.lang.Iterable", "$List": "java.util.List", "$MutableList": "java.util.List",
+    "$Set": "java.util.Set", "$MutableSet": "java.util.Set", "$Map": "java.util.Map",
+    "$MutableMap": "java.util.Map", "$Collection": "java.util.Collection",
+    "$MutableCollection": "java.util.Collection", "$Runnable": "java.lang.Runnable"}
 // js_ktclasslit(base) is `base::class`.
 function js_ktclasslit(base) {
     if (ktIsObj(base)) {
         if (typeof base["__kttype"] == "string") {
             var tn = base["__kttype"]
             if (ktIsBuiltinExc(tn)) { return ktClassOfDesc(ktExcHierarchy()[tn]) }
-            // The stdlib classes whose KClass is a java class: ktStdJvm in
-            // abnf/jsrtkotlin.go.
-            if (tn == "Pair" || tn == "Triple") { return ktJavaClass("kotlin." + tn) }
-            if (tn == "StringBuilder") { return ktJavaClass("java.lang.StringBuilder") }
-            if (tn == "Regex") { return ktJavaClass("kotlin.text.Regex") }
-            if (tn == "IntRange" || tn == "LongRange" || tn == "CharRange") { return ktJavaClass("kotlin.ranges." + tn) }
+            var sj = ktStdJvm["$" + tn]
+            if (sj !== undefined) { return ktJavaClass(sj) }
             return ktClassLit(tn)
         }
         if (base["__isclass"] === true) { return ktClassOfDesc(base) }
@@ -7644,6 +7672,12 @@ function ktEnumDecl(v) {
 // The KClass of a declared type, the java class its binary name names. Twin of
 // ktClassOfDesc in abnf/jsrtkotlin.go, which has the rules.
 function ktClassOfDesc(d) {
+    var o = k4bClassOfDescName(d)
+    if (d["__isiface"] === true) { o["iface"] = true }
+    return o
+}
+// The java class a declared type's binary name, else its name, names.
+function k4bClassOfDescName(d) {
     var bn = d["__bname"]
     if (typeof bn == "string") {
         if (bn.length > 0) { return ktJavaClass(bn) }

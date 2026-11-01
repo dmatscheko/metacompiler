@@ -594,7 +594,7 @@ ExprBody    <~~ push(makeExprBody(pop())) ~~>
 // against the call site, exactly as the non-extension form does. Recording them here is
 // what makes that work; TypeParams is item-neutral (it only calls tpSet), so
 // registerExtFun's positional item list is unchanged.
-ExtFun      <~~ ktNoteBody(up.start, up.pos); ktNoteGeneric(c.srcSlice(up.start, up.pos), "fun"); registerExtFun(takeAll()); retLblPop() ~~>
+ExtFun      <~~ ktNoteGeneric(c.srcSlice(up.start, up.pos), "fun", up.start); ktNoteBody(up.start, up.pos); registerExtFun(takeAll()); retLblPop() ~~>
             = KwFun <~~ tpBegin() ~~> [ TypeParams ] ExtRecv KId <~~ push(up.in); retLblPush(up.in, "fun") ~~> [ SkipAngle ] ParamList [ ":" Type ] [ WhereClause ] [ ContractClause ] [ WhereClause ] FunBody ;
 ExtRecv     <~~ push({extRecv: up.in}) ~~>
             = AnnoRecv { RecvSeg } ;
@@ -5663,10 +5663,11 @@ NotMemberKw = :script(~~ "pure";
         }
         // A class descriptor printed on its own is its name.
         if (typeof v == "object" && v.__isclass === true) { return v.__name }
-        // KClass.toString() and java.lang.Class.toString() are both "class Box"; a
-        // primitive java class is its bare name, `int`.
+        // KClass.toString() and java.lang.Class.toString() are both "class Box" (an
+        // interface's "interface Shape", kKClassKw); a primitive java class is its
+        // bare name, `int`.
         if (typeof v == "object" && v.__kclass === true && v.jprim === true) { return v.jname }
-        if (typeof v == "object" && v.__kclass === true) { return "class " + (v.jname !== undefined ? v.jname : v.kname) }
+        if (typeof v == "object" && v.__kclass === true) { return kKClassKw(v) + (v.jname !== undefined ? v.jname : v.kname) }
         // A callable reference. Real kotlin-reflect renders "val Box.v: kotlin.Int";
         // without the reflection library on the class path it prints "property v (Kotlin
         // reflection is not available)". Neither is reproducible here, so both halves
@@ -12180,13 +12181,18 @@ NotMemberKw = :script(~~ "pure";
     // `expr::class` / `Type::class`. KClass renders as "class Box" (java.lang.Class does
     // too, which is why .java answers the same value here), and for a top-level class in
     // the default package qualifiedName IS the simple name. A qualified `Outer.Inner`
-    // is the class of that nested descriptor. The stdlib classes of kStdJvm are the
-    // java classes it names (kJavaClass), as the class of such a value is
-    // (kCollJvmClass).
+    // is the class of that nested descriptor. The stdlib types of kStdJvm are the
+    // java classes it names (kJavaClass). Twin of ktStdJvm in abnf/jsrtkotlin.go,
+    // which has the rules.
     var kStdJvm = {"$Pair": "kotlin.Pair", "$Triple": "kotlin.Triple",
                    "$StringBuilder": "java.lang.StringBuilder", "$Regex": "kotlin.text.Regex",
                    "$IntRange": "kotlin.ranges.IntRange", "$LongRange": "kotlin.ranges.LongRange",
-                   "$CharRange": "kotlin.ranges.CharRange"}
+                   "$CharRange": "kotlin.ranges.CharRange", "$Nothing": "java.lang.Void",
+                   "$Iterable": "java.lang.Iterable", "$List": "java.util.List",
+                   "$MutableList": "java.util.List", "$Set": "java.util.Set",
+                   "$MutableSet": "java.util.Set", "$Map": "java.util.Map",
+                   "$MutableMap": "java.util.Map", "$Collection": "java.util.Collection",
+                   "$MutableCollection": "java.util.Collection", "$Runnable": "java.lang.Runnable"}
     function kClassLitNamed(n) {
         if (kStdJvm["$" + n] !== undefined) { return kJavaClass(kStdJvm["$" + n]) }
         if (n.indexOf(".") >= 0) {
@@ -12249,20 +12255,35 @@ NotMemberKw = :script(~~ "pure";
         return {__kclass: true, kname: n}
     }
     // KClass.qualifiedName: a builtin type's is its kotlin name (kotlin.String,
-    // kotlin.Int, kotlin.Throwable) - kotlin-stdlib's ClassReference maps the java
-    // class - and a java class's otherwise its binary name with "." for "$". Twin of
-    // ktKClassFq in abnf/jsrtkotlin.go and languages/lib/kotlin-rt.metajs.
+    // kotlin.Int, kotlin.collections.List) - kotlin-stdlib's ClassReference maps the
+    // java class (kJvmKotlinFq) - and a java class's otherwise its binary name with
+    // "." for "$". Twin of ktKClassFq in abnf/jsrtkotlin.go and
+    // languages/lib/kotlin-rt.metajs.
     function kKClassFq(o) {
         var jn = anytype
         jn = o.jname
         if (jn === undefined) { return kBuiltinFq["$" + o.kname] === true ? "kotlin." + o.kname : o.kname }
-        if (jn == "java.lang.String") { return "kotlin.String" }
-        if (jn == "java.lang.Object") { return "kotlin.Any" }
-        if (jn == "java.lang.Throwable") { return "kotlin.Throwable" }
+        if (kJvmKotlinFq["$" + jn] !== undefined) { return kJvmKotlinFq["$" + jn] }
         return jn.split("$").join(".")
     }
+    var kJvmKotlinFq = {"$java.lang.String": "kotlin.String", "$java.lang.Object": "kotlin.Any",
+                        "$java.lang.Throwable": "kotlin.Throwable",
+                        "$java.lang.Iterable": "kotlin.collections.Iterable",
+                        "$java.util.List": "kotlin.collections.List", "$java.util.Set": "kotlin.collections.Set",
+                        "$java.util.Map": "kotlin.collections.Map",
+                        "$java.util.Collection": "kotlin.collections.Collection"}
+    // The word java.lang.Class.toString puts before a class's name: "interface" for
+    // a declared interface's KClass (marked iface by kClassOfDesc) and the java
+    // interfaces a builtin type maps to. Twin of ktKClassKw in abnf/jsrtkotlin.go.
+    var kJvmIfaces = {"$java.lang.Iterable": true, "$java.util.List": true, "$java.util.Set": true,
+                      "$java.util.Map": true, "$java.util.Collection": true,
+                      "$java.lang.Comparable": true, "$java.lang.CharSequence": true,
+                      "$java.lang.Runnable": true}
+    function kKClassKw(co) {
+        return (co.iface === true || (co.jname !== undefined && kJvmIfaces["$" + co.jname] === true)) ? "interface " : "class "
+    }
     var kBuiltinFq = {"$Int": true, "$Long": true, "$Short": true, "$Byte": true, "$Double": true,
-                      "$Float": true, "$Boolean": true, "$Char": true, "$Unit": true, "$Nothing": true,
+                      "$Float": true, "$Boolean": true, "$Char": true, "$Unit": true,
                       "$Number": true, "$CharSequence": true, "$Comparable": true,
                       "$UInt": true, "$ULong": true, "$UByte": true, "$UShort": true, "$Array": true,
                       "$IntArray": true, "$LongArray": true, "$DoubleArray": true, "$FloatArray": true,
@@ -12275,18 +12296,19 @@ NotMemberKw = :script(~~ "pure";
     // package-qualified (java.lang.IllegalStateException) - kotlin-stdlib's
     // ClassReference reads all three off the java class. An anonymous object's is
     // marked anon: its simpleName and qualifiedName are null, where its java
-    // class's simpleName is "". Twin of ktClassOfDesc in
-    // abnf/jsrtkotlin.go and languages/lib/kotlin-rt.metajs.
+    // class's simpleName is ""; an interface's is marked iface (kKClassKw). Twin
+    // of ktClassOfDesc in abnf/jsrtkotlin.go and languages/lib/kotlin-rt.metajs.
     function kClassOfDesc(d) {
+        var o = anytype
         var bn = anytype
         bn = d.__bname
-        if (typeof bn == "string" && bn != "") { return kJavaClass(bn) }
-        if (typeof d.__name == "string") {
-            var o = kJavaClass(d.__name)
+        if (typeof bn == "string" && bn != "") { o = kJavaClass(bn) }
+        else if (typeof d.__name == "string") {
+            o = kJavaClass(d.__name)
             if (d.__name == "<object>") { o.anon = true }
-            return o
-        }
-        return kKClass(d.__name)
+        } else { o = kKClass(d.__name) }
+        if (d.__isiface === true) { o.iface = true }
+        return o
     }
     // A collection's KClass is its JVM class (kJavaClass): kotlin-stdlib's
     // ClassReference names a java class by the class itself. Twin of ktClassOf in
@@ -12342,9 +12364,15 @@ NotMemberKw = :script(~~ "pure";
         return jt !== undefined ? kJavaClass(jt) : co
     }
     // KClass.javaPrimitiveType: a primitive type's primitive java class (marked
-    // jprim), a reified type argument's too; null for every other KClass. Twin of
-    // ktKClassPrim in abnf/jsrtkotlin.go and languages/lib/kotlin-rt.metajs.
+    // jprim), a reified type argument's too, and java.lang.Void's (Nothing's) void;
+    // null for every other KClass. Twin of ktKClassPrim in abnf/jsrtkotlin.go and
+    // languages/lib/kotlin-rt.metajs.
     function kKClassPrim(co) {
+        if (co.jname === "java.lang.Void") {
+            var vo = kJavaClass("void")
+            vo.jprim = true
+            return vo
+        }
         if (co.jname !== undefined) { return null }
         for (var i = 0; i < kPrimKNames.length; i++) {
             if (kPrimKNames[i] == co.kname) {
@@ -12358,7 +12386,7 @@ NotMemberKw = :script(~~ "pure";
     // Class.kotlin: a primitive java class (`long`) is its kotlin type's KClass, a
     // wrapper (java.lang.Long) the same KClass marked rbox, whose .java is that
     // wrapper again; a java class kJavaOfType maps a builtin type of its simple name
-    // to (java.util.List), or a primitive array ([I), is that type's KClass; every
+    // to (java.lang.Number), or a primitive array ([I), is that type's KClass; every
     // other java class already is its KClass. Twin of ktKClassOfJava in
     // abnf/jsrtkotlin.go and languages/lib/kotlin-rt.metajs.
     function kKClassOfJava(jc) {
@@ -12382,18 +12410,15 @@ NotMemberKw = :script(~~ "pure";
         return strHash(j.jname !== undefined ? j.jname : j.kname)
     }
     // The java class of a builtin kotlin type that has no value-level JVM class here
-    // (kotlinc 2.2.21: `UInt::class.java` is kotlin.UInt, `List::class.java`
-    // java.util.List, `IntArray::class.java` [I). Twin of ktJavaOfType in
+    // (kotlinc 2.2.21: `UInt::class.java` is kotlin.UInt, `Number::class.java`
+    // java.lang.Number, `IntArray::class.java` [I). Twin of ktJavaOfType in
     // abnf/jsrtkotlin.go and languages/lib/kotlin-rt.metajs.
     var kJavaOfType = {"$UInt": "kotlin.UInt", "$ULong": "kotlin.ULong", "$UByte": "kotlin.UByte",
         "$UShort": "kotlin.UShort", "$Unit": "kotlin.Unit", "$UIntArray": "kotlin.UIntArray",
         "$ULongArray": "kotlin.ULongArray", "$UByteArray": "kotlin.UByteArray",
-        "$UShortArray": "kotlin.UShortArray", "$Nothing": "java.lang.Void",
+        "$UShortArray": "kotlin.UShortArray",
         "$Number": "java.lang.Number", "$CharSequence": "java.lang.CharSequence",
-        "$Comparable": "java.lang.Comparable", "$Iterable": "java.lang.Iterable",
-        "$List": "java.util.List", "$MutableList": "java.util.List", "$Set": "java.util.Set",
-        "$MutableSet": "java.util.Set", "$Map": "java.util.Map", "$MutableMap": "java.util.Map",
-        "$Collection": "java.util.Collection", "$MutableCollection": "java.util.Collection",
+        "$Comparable": "java.lang.Comparable",
         "$IntArray": "[I", "$LongArray": "[J", "$DoubleArray": "[D", "$FloatArray": "[F",
         "$CharArray": "[C", "$BooleanArray": "[Z", "$ByteArray": "[B", "$ShortArray": "[S"}
     // The JVM class of a List, a Set, a Map, a values view, a range, a Pair /

@@ -4250,9 +4250,9 @@ func (rt *jsrt) ktpObj(o *jsObject, depth int) (string, bool) {
 			if co.props["jprim"] == true {
 				return rt.ktpRender(jn, depth+1), true
 			}
-			return "class " + rt.ktpRender(jn, depth+1), true
+			return ktKClassKw(co) + rt.ktpRender(jn, depth+1), true
 		}
-		return "class " + rt.ktpRender(co.props["kname"], depth+1), true
+		return ktKClassKw(co) + rt.ktpRender(co.props["kname"], depth+1), true
 	}
 	// A Regex renders as its pattern and a MatchResult as the matched text, which is
 	// what their toString answers (see abnf/jsrtregexkt.go); neither carries a
@@ -5214,13 +5214,20 @@ func ktTupleName(v interface{}) string {
 	return "Pair"
 }
 
-// ktStdJvm maps the stdlib class names whose KClass is a java class to it, the
-// class a value of the type has (ktCollJvmClass). Twin of kStdJvm in
-// kotlin-interpreter.abnf and js_ktclasslit in languages/lib/kotlin-rt.metajs.
+// ktStdJvm maps the stdlib type names whose KClass is a java class to it: the
+// class a value of the type has (ktCollJvmClass), a collection interface's or
+// Runnable's java interface (a read-only one and its Mutable twin share it), and Nothing's
+// java.lang.Void (kotlinc 2.2.21: Nothing::class.simpleName is Void). Twin of
+// kStdJvm in kotlin-interpreter.abnf and js_ktclasslit in
+// languages/lib/kotlin-rt.metajs.
 var ktStdJvm = map[string]string{"Pair": "kotlin.Pair", "Triple": "kotlin.Triple",
 	"StringBuilder": "java.lang.StringBuilder", "Regex": "kotlin.text.Regex",
 	"IntRange": "kotlin.ranges.IntRange", "LongRange": "kotlin.ranges.LongRange",
-	"CharRange": "kotlin.ranges.CharRange"}
+	"CharRange": "kotlin.ranges.CharRange", "Nothing": "java.lang.Void",
+	"Iterable": "java.lang.Iterable", "List": "java.util.List", "MutableList": "java.util.List",
+	"Set": "java.util.Set", "MutableSet": "java.util.Set", "Map": "java.util.Map",
+	"MutableMap": "java.util.Map", "Collection": "java.util.Collection",
+	"MutableCollection": "java.util.Collection", "Runnable": "java.lang.Runnable"}
 
 // ktCall invokes a lambda argument.
 func (rt *jsrt) ktCall(f interface{}, args ...interface{}) interface{} {
@@ -11097,9 +11104,10 @@ func ktClassLit(name interface{}) *jsObject {
 }
 
 // ktKClassFq is KClass.qualifiedName: a builtin type's is its kotlin name
-// (kotlin.String, kotlin.Int, kotlin.Throwable) - kotlin-stdlib's ClassReference
-// maps the java class - and a java class's otherwise its binary name with "." for
-// "$". Twin of kKClassFq in kotlin-interpreter.abnf.
+// (kotlin.String, kotlin.Int, kotlin.collections.List) - kotlin-stdlib's
+// ClassReference maps the java class (ktJvmKotlinFq) - and a java class's
+// otherwise its binary name with "." for "$". Twin of kKClassFq in
+// kotlin-interpreter.abnf.
 func ktKClassFq(o *jsObject) interface{} {
 	jn, has := o.props["jname"].(string)
 	if !has {
@@ -11108,20 +11116,39 @@ func ktKClassFq(o *jsObject) interface{} {
 		}
 		return o.props["kname"]
 	}
-	switch jn {
-	case "java.lang.String":
-		return "kotlin.String"
-	case "java.lang.Object":
-		return "kotlin.Any"
-	case "java.lang.Throwable":
-		return "kotlin.Throwable"
+	if fq, mapped := ktJvmKotlinFq[jn]; mapped {
+		return fq
 	}
 	return strings.ReplaceAll(jn, "$", ".")
 }
 
+// ktJvmKotlinFq is the kotlin name of a java class a builtin kotlin type maps to.
+var ktJvmKotlinFq = map[string]string{"java.lang.String": "kotlin.String",
+	"java.lang.Object": "kotlin.Any", "java.lang.Throwable": "kotlin.Throwable",
+	"java.lang.Iterable": "kotlin.collections.Iterable", "java.util.List": "kotlin.collections.List",
+	"java.util.Set": "kotlin.collections.Set", "java.util.Map": "kotlin.collections.Map",
+	"java.util.Collection": "kotlin.collections.Collection"}
+
+// ktJvmIfaces are the java interfaces a builtin kotlin type maps to:
+// java.lang.Class renders an interface as "interface java.util.List".
+var ktJvmIfaces = map[string]bool{"java.lang.Iterable": true, "java.util.List": true,
+	"java.util.Set": true, "java.util.Map": true, "java.util.Collection": true,
+	"java.lang.Comparable": true, "java.lang.CharSequence": true, "java.lang.Runnable": true}
+
+// ktKClassKw is the word java.lang.Class.toString puts before a class's name: a
+// declared interface's KClass is marked iface (ktClassOfDesc). Twin of kKClassKw
+// in kotlin-interpreter.abnf and languages/lib/kotlin-rt.metajs.
+func ktKClassKw(co *jsObject) string {
+	jn, _ := co.props["jname"].(string)
+	if co.props["iface"] == true || ktJvmIfaces[jn] {
+		return "interface "
+	}
+	return "class "
+}
+
 var ktBuiltinFq = map[string]bool{"Int": true, "Long": true, "Short": true, "Byte": true,
 	"Double": true, "Float": true, "Boolean": true, "Char": true, "Unit": true,
-	"Nothing": true, "Number": true, "CharSequence": true, "Comparable": true,
+	"Number": true, "CharSequence": true, "Comparable": true,
 	"UInt": true, "ULong": true, "UByte": true, "UShort": true, "Array": true,
 	"IntArray": true, "LongArray": true, "DoubleArray": true, "FloatArray": true,
 	"CharArray": true, "BooleanArray": true, "ByteArray": true, "ShortArray": true,
@@ -11169,20 +11196,25 @@ func ktEnumDecl(v interface{}) *jsObject {
 // names, a top-level class's its own name (a nested one: simpleName Inner,
 // qualifiedName Outer.Inner, "class Outer$Inner"; a builtin throwable's is
 // package-qualified). An anonymous object's KClass is marked anon: its simpleName
-// and qualifiedName are null, where its java class's simpleName is "". Twin of
-// kClassOfDesc in kotlin-interpreter.abnf.
+// and qualifiedName are null, where its java class's simpleName is ""; an
+// interface's is marked iface (ktKClassKw). Twin of kClassOfDesc in
+// kotlin-interpreter.abnf.
 func ktClassOfDesc(d *jsObject) *jsObject {
+	var o *jsObject
 	if bn, ok := d.props["__bname"].(string); ok && bn != "" {
-		return ktJavaClass(bn)
-	}
-	if n, ok := d.props["__name"].(string); ok {
-		o := ktJavaClass(n)
+		o = ktJavaClass(bn)
+	} else if n, ok := d.props["__name"].(string); ok {
+		o = ktJavaClass(n)
 		if n == "<object>" {
 			o.set("anon", true)
 		}
-		return o
+	} else {
+		o = ktClassLit(d.props["__name"])
 	}
-	return ktClassLit(d.props["__name"])
+	if isf, _ := d.props["__isiface"].(bool); isf {
+		o.set("iface", true)
+	}
+	return o
 }
 
 // ktJavaClass is `javaClass`, and a collection's KClass: a class literal that also
@@ -11248,11 +11280,17 @@ func ktKClassJava(co *jsObject, wrapper bool) *jsObject {
 }
 
 // ktKClassPrim is KClass.javaPrimitiveType: a primitive type's primitive java class
-// (marked jprim), a reified type argument's too; null for every other KClass. Twin
-// of kKClassPrim in kotlin-interpreter.abnf and languages/lib/kotlin-rt.metajs.
+// (marked jprim), a reified type argument's too, and java.lang.Void's (Nothing's)
+// void; null for every other KClass. Twin of kKClassPrim in kotlin-interpreter.abnf
+// and languages/lib/kotlin-rt.metajs.
 func ktKClassPrim(co *jsObject) interface{} {
-	if _, has := co.props["jname"]; has {
-		return jsNull
+	if jn, has := co.props["jname"]; has {
+		if jn != "java.lang.Void" {
+			return jsNull
+		}
+		o := ktJavaClass("void")
+		o.set("jprim", true)
+		return o
 	}
 	kn, _ := co.props["kname"].(string)
 	for i, p := range ktPrimKNames {
@@ -11268,7 +11306,7 @@ func ktKClassPrim(co *jsObject) interface{} {
 // ktKClassOfJava is Class.kotlin: a primitive java class (`long`) is its kotlin
 // type's KClass, a wrapper (java.lang.Long) the same KClass marked rbox, whose .java
 // is that wrapper again; a java class ktJavaOfType maps a builtin type of its
-// simple name to (java.util.List), or a primitive array ([I), is that type's KClass;
+// simple name to (java.lang.Number), or a primitive array ([I), is that type's KClass;
 // every other java class already is its KClass. Twin of kKClassOfJava in
 // kotlin-interpreter.abnf and languages/lib/kotlin-rt.metajs.
 func ktKClassOfJava(jc *jsObject) *jsObject {
@@ -11309,18 +11347,14 @@ func ktKClassHash(rt *jsrt, co *jsObject) int32 {
 
 // ktJavaOfType is the java class of a builtin kotlin type that has no value-level
 // JVM class here (kotlinc 2.2.21: `UInt::class.java` is kotlin.UInt,
-// `List::class.java` java.util.List, `IntArray::class.java` [I). Twin of
+// `Number::class.java` java.lang.Number, `IntArray::class.java` [I). Twin of
 // kJavaOfType in kotlin-interpreter.abnf and languages/lib/kotlin-rt.metajs.
 var ktJavaOfType = map[string]string{"UInt": "kotlin.UInt", "ULong": "kotlin.ULong",
 	"UByte": "kotlin.UByte", "UShort": "kotlin.UShort", "Unit": "kotlin.Unit",
 	"UIntArray": "kotlin.UIntArray", "ULongArray": "kotlin.ULongArray",
 	"UByteArray": "kotlin.UByteArray", "UShortArray": "kotlin.UShortArray",
-	"Nothing": "java.lang.Void", "Number": "java.lang.Number",
-	"CharSequence": "java.lang.CharSequence", "Comparable": "java.lang.Comparable",
-	"Iterable": "java.lang.Iterable", "List": "java.util.List", "MutableList": "java.util.List",
-	"Set": "java.util.Set", "MutableSet": "java.util.Set", "Map": "java.util.Map",
-	"MutableMap": "java.util.Map", "Collection": "java.util.Collection",
-	"MutableCollection": "java.util.Collection", "IntArray": "[I", "LongArray": "[J",
+	"Number": "java.lang.Number", "CharSequence": "java.lang.CharSequence",
+	"Comparable": "java.lang.Comparable", "IntArray": "[I", "LongArray": "[J",
 	"DoubleArray": "[D", "FloatArray": "[F", "CharArray": "[C", "BooleanArray": "[Z",
 	"ByteArray": "[B", "ShortArray": "[S"}
 

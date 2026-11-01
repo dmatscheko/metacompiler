@@ -566,9 +566,11 @@ function ktLeadName(t) {
 // types of their value parameters, read off the declaration's source text, for a
 // call with explicit type arguments (`ident<Long>(5)`, `Box<Long>(3)`) - a
 // parameter declared with a type parameter adopts the argument's type. A name
-// declared generic twice answers nothing.
+// declared generic twice answers nothing. Given the declaration's offset `at`, an
+// extension's receiver type is also noted as the type of `this` there, for the
+// body's static types; the caller notes the body after it, which scopes it.
 var ktGenerics = {}
-function ktNoteGeneric(raw, kw) {
+function ktNoteGeneric(raw, kw, at) {
     var i = raw.indexOf(kw)
     if (i < 0) { return }
     i = ktSkipWs(raw, i + kw.length)
@@ -599,6 +601,12 @@ function ktNoteGeneric(raw, kw) {
         r = i
     }
     var name = raw.substring(n0, i)
+    if (recv != "" && at != undefined) {
+        var saved = ktAt
+        ktAt = at
+        ktNoteDecl("this", "", stripWs(recv))
+        ktAt = saved
+    }
     i = ktSkipWs(raw, i)
     if (raw.charAt(i) == "<") {
         var e2 = ktMatchClose(raw, i, "<", ">")
@@ -1014,8 +1022,9 @@ function ktJvmPrimSfxs(sfx) {
     ktAt = saved
 }
 // The type of the value an expression's text leaves on the JVM stack, where it
-// differs from the static type (ktStaticTy): a cast (`as Int`), a `!!` and an
-// element read off a list or an Array leave a BOXED value, while an arithmetic
+// differs from the static type (ktStaticTy): a cast (`as Int`), a `!!`, an
+// element read off a list or an Array and a generic element result
+// (`xs.first()`, ktElemFns) leave a BOXED value, while an arithmetic
 // result, a local, a property or a function result of a primitive type is
 // unboxed.
 function ktJvmTy(t) {
@@ -1024,6 +1033,7 @@ function ktJvmTy(t) {
     var ops = ktTopOps(s)
     if (ops.length == 1 && ops[0].op == "as") { return "" }
     if (ops.length == 0 && s.substring(s.length - 2) == "!!") { return "" }
+    if (ops.length == 0 && ktElemFns["$" + ktLastMethod(s)] == true) { return "" }
     if (ops.length == 0 && s.charAt(s.length - 1) == "]") {
         var lb = ktMatchOpen(s, s.length - 1, "[", "]")
         var cb = ktBaseName(ktStaticTy(s.substring(0, lb)))
@@ -1308,7 +1318,7 @@ function ktChainTy(s) {
         var w = s.substring(0, i)
         var ce = ktCallEnd(s)
         if (w == "true" || w == "false") { ty = "Boolean" }
-        else if (w == "this") { ty = ktClassAt(ktAt) }
+        else if (w == "this") { ty = ktThisTy() }
         else if (ce > 0) {
             ty = ktCallResTy(w, s.substring(0, ce))
             i = ce
@@ -1345,7 +1355,7 @@ function ktChainTy(s) {
                     k = ktSkipWs(s, ktMatchClose(s, k, s.charAt(k), s.charAt(k) == "(" ? ")" : "}") + 1)
                 }
                 if (k <= 0) { return "" }
-                ty = ktMethodTy(ty, s.substring(m, i))
+                ty = ktMethodTy(ty, s.substring(m, i), s.substring(ktSkipWs(s, i), k))
                 i = k
             } else {
                 ty = ktPropTy(ty, s.substring(m, i))
@@ -1395,12 +1405,126 @@ var ktSameElemFns = {"$filter": true, "$filterNot": true, "$sorted": true, "$sor
                      "$distinct": true, "$distinctBy": true, "$take": true, "$drop": true,
                      "$takeWhile": true, "$dropWhile": true, "$takeLast": true, "$dropLast": true,
                      "$toList": true, "$toMutableList": true, "$shuffled": true}
-function ktMethodTy(ty, name) {
+// map / mapIndexed of anything iterable give a list of the lambda's result type
+// (ktLamResTy), first / last / single (with or without a predicate) an element,
+// toString() a String, a number's or a string's toInt() and the like that number
+// type, and a string's case, trim, substring, replace, repeat and pad functions a
+// String. call is the text of the call's arguments and lambdas.
+var ktElemFns = {"$first": true, "$last": true, "$single": true}
+var ktNumConvFns = {"$toInt": "Int", "$toLong": "Long", "$toShort": "Short", "$toByte": "Byte",
+                    "$toDouble": "Double", "$toFloat": "Float"}
+var ktStrStrFns = {"$uppercase": true, "$lowercase": true, "$trim": true, "$substring": true,
+                   "$replace": true, "$repeat": true, "$padStart": true, "$padEnd": true}
+function ktMethodTy(ty, name, call) {
     var base = ktBaseName(ty)
     if (ty.charAt(ty.length - 1) == "?") { return "" }
     if (ktClassExt["$" + base] != undefined) { return ktFunRets["$" + name] != undefined ? ktFunRet(name) : "" }
+    var args = ktTrimWs(call)
+    if (name == "toString" && args == "()") { return "String" }
+    if (ktNumConvFns["$" + name] != undefined && args == "()" && (base == "String" || ktNumTy(base) != "")) { return ktNumConvFns["$" + name] }
+    if (base == "String" && ktStrStrFns["$" + name] == true && args.charAt(0) == "(") { return "String" }
     var el = ktElemOfTy(ty)
-    return (el != "" && ktSameElemFns["$" + name] == true && base != "String" && base.indexOf("Range") < 0 && base.indexOf("Progression") < 0) ? "List<" + el + ">" : ""
+    if (el == "") { return "" }
+    if (name == "map" || name == "mapIndexed") {
+        var rt = ktLamResTy(args, name == "map" ? [el] : ["Int", el])
+        return rt == "" ? "" : "List<" + rt + ">"
+    }
+    if (ktElemFns["$" + name] == true) { return (args == "()" || args.charAt(0) == "{") ? el : "" }
+    return (ktSameElemFns["$" + name] == true && base != "String" && base.indexOf("Range") < 0 && base.indexOf("Progression") < 0) ? "List<" + el + ">" : ""
+}
+// The name of the method a postfix chain's text ends by calling (`xs.first { p }`
+// is first), "" when it ends otherwise.
+function ktLastMethod(s) {
+    var k = s.length
+    while (k > 0 && (s.charAt(k - 1) == ")" || s.charAt(k - 1) == "}")) {
+        var cl = s.charAt(k - 1)
+        k = ktMatchOpen(s, k - 1, cl == ")" ? "(" : "{", cl)
+        while (k > 0 && ktIsWs(s.charAt(k - 1))) { k-- }
+    }
+    if (k <= 0 || k == s.length) { return "" }
+    var e = k
+    while (k > 0 && ktIdChar(s.charAt(k - 1))) { k-- }
+    var d = k
+    while (d > 0 && ktIsWs(s.charAt(d - 1))) { d-- }
+    return (k < e && d > 0 && s.charAt(d - 1) == ".") ? s.substring(k, e) : ""
+}
+// The type of `this` at ktAt: the receiver of the extension function around it
+// (noted by ktNoteGeneric) unless a class declared inside that function is
+// closer, else the enclosing class. Inside any brace of the function's body
+// other than its own (a lambda, which may bind another `this`), it is not told.
+function ktThisTy() {
+    var cls = ktClassAt(ktAt)
+    var d = ktDeclAt("this")
+    if (d == null || (cls != "" && ktClassExt["$" + cls].from > d.from)) { return cls }
+    var s = c.srcSlice(d.at, ktAt)
+    var paren = 0
+    var depth = 0
+    var own = -1
+    var i = 0
+    while (i < s.length) {
+        var ch = s.charAt(i)
+        if (ch == "\"" || ch == "'") {
+            var q = ktQuoteEnd(s, i)
+            if (q < 0) { return "" }
+            i = q + 1
+            continue
+        }
+        if (ch == "(") { paren++ }
+        else if (ch == ")") { paren-- }
+        else if (ch == "{") {
+            if (own < 0 && paren == 0) { own = 1 }
+            depth++
+        } else if (ch == "}") { depth-- }
+        else if (ch == "=" && own < 0 && paren == 0 && depth == 0) { own = 0 }
+        i++
+    }
+    return depth == (own < 0 ? 0 : own) ? d.lty : ""
+}
+// The result type of a lone lambda argument (`{ it * 2 }`, `({ i, s -> i })`)
+// whose parameters have the types ptys: its body's static type when the body is
+// one expression, read with each parameter (or `it`) bound to its type; "" else.
+function ktLamResTy(args, ptys) {
+    var t = args
+    if (t.charAt(0) == "(" && ktMatchClose(t, 0, "(", ")") == t.length - 1) { t = ktTrimWs(t.substring(1, t.length - 1)) }
+    if (t.charAt(0) != "{" || ktMatchClose(t, 0, "{", "}") != t.length - 1) { return "" }
+    var body = t.substring(1, t.length - 1)
+    var names = ["it"]
+    // A parameter list is names and type text up to the first arrow; an arrow
+    // after anything else belongs to a nested lambda or a `when`.
+    var arrow = body.indexOf("->")
+    var head = arrow < 0 ? "" : body.substring(0, arrow)
+    var plain = arrow >= 0
+    for (var h = 0; h < head.length && plain; h++) {
+        var hc = head.charAt(h)
+        plain = ktIdChar(hc) || ktIsWs(hc) || hc == "," || hc == ":" || hc == "<" || hc == ">" || hc == "?" || hc == "."
+    }
+    if (plain) {
+        names = ktSplitTop(head, ",")
+        body = body.substring(arrow + 2)
+    }
+    body = ktTrimWs(body)
+    if (names.length != ptys.length || body == "" || body.indexOf(";") >= 0 || body.indexOf("\n") >= 0) { return "" }
+    // Each binding sits at ktAt itself, so it is the closest declaration the body sees.
+    var bound = []
+    for (var i = 0; i < names.length; i++) {
+        var nm = ktTrimWs(names[i])
+        var ty = ptys[i]
+        var colon = nm.indexOf(":")
+        if (colon >= 0) {
+            ty = stripWs(nm.substring(colon + 1))
+            nm = ktTrimWs(nm.substring(0, colon))
+        }
+        var l = ktDecls["$" + nm]
+        if (l == undefined) {
+            l = []
+            ktDecls["$" + nm] = l
+        }
+        l.push({ty: "", lty: ty, at: ktAt, from: -1, to: -1, vr: false})
+        bound.push(l)
+    }
+    var rt = ktStaticTy(body)
+    for (var j = 0; j < bound.length; j++) { bound[j].pop() }
+    return rt
 }
 // The type property `name` of a value of type ty has: a declared class's member,
 // a collection's or array's size, a string's length, indices and lastIndex.
