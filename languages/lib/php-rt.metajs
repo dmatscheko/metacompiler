@@ -300,14 +300,83 @@ function js_phrebind(old, cell) {
     return undefined
 }
 
-// A frame returning normally stops holding the cells in its slots named in
-// the comma separated names, when it is marked under "\x00cells". Twin of
-// m["js_phleave"] in abnf/jsrtphp.go.
+// The frames of the calls in progress that a cell was made in or bound to,
+// innermost last, and the names of each one's variables. Twin of phpFrames in
+// abnf/jsrtphp.go, which says more.
+var phFrameScopes = []
+var phFrameNames = []
+// Twin of m["js_phmark"] in abnf/jsrtphp.go.
+function js_phmark(fr, names) {
+    if (scopeHas(fr, "\x00cells")) { return undefined }
+    scopeDecl(fr, "\x00cells", true)
+    phFrameScopes.push(fr)
+    phFrameNames.push(names)
+    return undefined
+}
+// Twin of m["js_phdyn"] in abnf/jsrtphp.go.
+function js_phdyn(fr, name) {
+    var d = ""
+    if (scopeHas(fr, "\x00dyn")) { d = scopeGet(fr, "\x00dyn") }
+    scopeDecl(fr, "\x00dyn", d + "," + name)
+    return undefined
+}
+// Frame fr stops holding the cells in its slots named in the comma separated
+// names and in its "\x00dyn", each name once. Twin of phpFrameRelease in
+// abnf/jsrtphp.go.
+function phFrameRelease(fr, names) {
+    var all = names
+    if (scopeHas(fr, "\x00dyn")) { all = all + scopeGet(fr, "\x00dyn") }
+    var ns = all.split(",")
+    var seen = {}
+    for (var i = 0; i < ns.length; i++) {
+        var n = ns[i]
+        if (n != "" && seen[n] !== true) {
+            seen[n] = true
+            if (scopeHas(fr, n)) { phRefAdjust(phCellOf(scopeGet(fr, n)), 0 - 1) }
+        }
+    }
+}
+// The last n frames leave phFrames: each one stops holding its cells.
+function phFramesDrop(n) {
+    var i = 0
+    while (i < n) {
+        phFrameRelease(phFrameScopes.pop(), phFrameNames.pop())
+        i = i + 1
+    }
+}
+// Twin of m["js_phleave"] in abnf/jsrtphp.go.
 function js_phleave(fr, names) {
     if (!scopeHas(fr, "\x00cells")) { return undefined }
-    var ns = names.split(",")
-    for (var i = 0; i < ns.length; i++) {
-        if (scopeHas(fr, ns[i])) { phRefAdjust(phCellOf(scopeGet(fr, ns[i])), 0 - 1) }
+    var i = phFrameScopes.length - 1
+    while (i >= 0) {
+        if (phFrameScopes[i] === fr) {
+            phFramesDrop(phFrameScopes.length - 1 - i)
+            phFrameScopes.pop()
+            phFrameNames.pop()
+            i = 0
+        }
+        i = i - 1
+    }
+    phFrameRelease(fr, names)
+    return undefined
+}
+// Twin of m["js_phtry"] in abnf/jsrtphp.go.
+function js_phtry() { return phFrameScopes.length }
+// Twin of m["js_phunwind"] in abnf/jsrtphp.go.
+function js_phunwind(n, fr) {
+    var keepS = []
+    var keepN = []
+    while (phFrameScopes.length > n) {
+        var s = phFrameScopes.pop()
+        var nm = phFrameNames.pop()
+        if (s === fr) {
+            keepS.push(s)
+            keepN.push(nm)
+        } else { phFrameRelease(s, nm) }
+    }
+    while (keepS.length > 0) {
+        phFrameScopes.push(keepS.pop())
+        phFrameNames.push(keepN.pop())
     }
     return undefined
 }

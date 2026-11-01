@@ -342,6 +342,36 @@ func phpRefAdjust(c *jsObject, d float64) {
 	}
 }
 
+// phpFrames holds the frames of the calls in progress that a cell was made in or
+// bound to, innermost last, each with the names of its variables (js_phmark); a
+// generator's frame is not among them, since it outlives the call that made it.
+// Twin of phFrames in languages/lib/php-rt.metajs and callFrames in
+// php-interpreter.abnf.
+type phpFrame struct {
+	sc    *jsScope
+	names string
+}
+
+var phpFrames = map[*jsrt][]phpFrame{}
+
+// phpFrameRelease: frame sc stops holding the cells in its slots named in the
+// comma separated names and in its "\x00dyn" (js_phdyn), each name once.
+func (rt *jsrt) phpFrameRelease(sc *jsScope, names string) {
+	if d, ok := sc.get("\x00dyn"); ok {
+		names += d.(string)
+	}
+	seen := map[string]bool{}
+	for _, n := range strings.Split(names, ",") {
+		if n == "" || seen[n] {
+			continue
+		}
+		seen[n] = true
+		if v, ok := sc.get(n); ok {
+			phpRefAdjust(phpCellOf(v), -1)
+		}
+	}
+}
+
 func phpDeref(v interface{}) interface{} {
 	if c := phpCellOf(v); c != nil {
 		return c.props["v"]
@@ -3768,23 +3798,78 @@ func init() {
 			}
 			return 0
 		}
+		// A call's frame that a cell is made in or bound to is marked under
+		// "\x00cells" and joins phpFrames with the comma separated names of its
+		// variables, once. Twin of js_phmark in languages/lib/php-rt.metajs.
+		m["js_phmark"] = func(a []uint64) uint64 {
+			sc := rt.scopeOf(a[0])
+			if sc.has("\x00cells") {
+				return 0
+			}
+			sc.put("\x00cells", true)
+			phpFrames[rt] = append(phpFrames[rt], phpFrame{sc, rt.toString(u(a[1]))})
+			return 0
+		}
+		// A frame's variable whose name was computed at run time now holds a
+		// cell. Twin of js_phdyn in languages/lib/php-rt.metajs.
+		m["js_phdyn"] = func(a []uint64) uint64 {
+			sc := rt.scopeOf(a[0])
+			d := ""
+			if v, ok := sc.get("\x00dyn"); ok {
+				d = v.(string)
+			}
+			sc.put("\x00dyn", d+","+rt.toString(u(a[1])))
+			return 0
+		}
 		// A frame returning normally stops holding the cells in its slots named in
 		// the comma separated names; a frame no cell was made in or bound to is not
-		// marked under "\x00cells" and is passed over. Twin of js_phleave in
+		// marked under "\x00cells" and is passed over. It leaves phpFrames, and the
+		// frames above it there, which an exception unwound without a catch
+		// releasing them, go with it. Twin of js_phleave in
 		// languages/lib/php-rt.metajs.
 		m["js_phleave"] = func(a []uint64) uint64 {
 			sc := rt.scopeOf(a[0])
-			if sc == nil {
+			if !sc.has("\x00cells") {
 				return 0
 			}
-			if _, ok := sc.get("\x00cells"); !ok {
-				return 0
-			}
-			for _, n := range strings.Split(rt.toString(u(a[1])), ",") {
-				if v, ok := sc.get(n); ok {
-					phpRefAdjust(phpCellOf(v), -1)
+			fs := phpFrames[rt]
+			for i := len(fs) - 1; i >= 0; i-- {
+				if fs[i].sc == sc {
+					for _, f := range fs[i+1:] {
+						rt.phpFrameRelease(f.sc, f.names)
+					}
+					phpFrames[rt] = fs[:i]
+					break
 				}
 			}
+			rt.phpFrameRelease(sc, rt.toString(u(a[1])))
+			return 0
+		}
+		// At a try's start: how many frames phpFrames holds. Twin of js_phtry in
+		// languages/lib/php-rt.metajs.
+		m["js_phtry"] = func(a []uint64) uint64 {
+			return rt.wrapNum(float64(len(phpFrames[rt])))
+		}
+		// At a catch: the frames that joined phpFrames since its try started (the
+		// count n) were unwound by the exception, all but the catching frame sc
+		// itself, and stop holding their cells. Twin of js_phunwind in
+		// languages/lib/php-rt.metajs.
+		m["js_phunwind"] = func(a []uint64) uint64 {
+			n := int(rt.toNumber(u(a[0])))
+			sc := rt.scopeOf(a[1])
+			fs := phpFrames[rt]
+			if n >= len(fs) {
+				return 0
+			}
+			kept := fs[:n]
+			for _, f := range fs[n:] {
+				if f.sc == sc {
+					kept = append(kept, f)
+				} else {
+					rt.phpFrameRelease(f.sc, f.names)
+				}
+			}
+			phpFrames[rt] = kept
 			return 0
 		}
 		m["js_phrtinit"] = func(a []uint64) uint64 {

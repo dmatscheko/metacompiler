@@ -1580,6 +1580,47 @@ function s83() {
     check("rr10", $x === 5);
 }
 
+// ===== SECTION 84: reference holders released by unwinding and by computed names =====
+// A frame an exception unwinds is destroyed like one that returns: its
+// variables stop holding their references, also when a finally's return then
+// drops the exception. So does a variable whose name is computed ('$$n = &$x',
+// 'global $$k'). An array copy then makes an element held by nothing else a
+// plain value again (zend_array_dup_element, i_free_compiled_variables).
+$s84 = [1, 1, 1, 1];
+function s84deep($i) { global $s84; $q = &$s84[$i]; throw new Exception("u"); }
+function s84mid($i) { s84deep($i); }
+function s84swallow($i) { try { s84deep($i); } finally { return 1; } }
+function s84catch() {
+    global $s84;
+    $own = &$s84[3];
+    try { s84deep(3); } catch (Exception $e) { }
+    $copy = $s84;
+    $copy[3] = 2;
+    return $s84[3];
+}
+function s84dyn() { global $s84; $n = "e"; $$n = &$s84[1]; }
+function s84glob() { $k = "s84g"; global $$k; }
+function s84() {
+    global $s84;
+    try { s84mid(0); } catch (Exception $e) { }
+    s84swallow(2);
+    s84dyn();
+    $c = $s84;
+    $c[0] = 5;
+    $c[1] = 6;
+    $c[2] = 7;
+    check("rc6", $s84[0] === 1 && $s84[1] === 1 && $s84[2] === 1);
+    check("rc7", s84catch() === 2);
+    $GLOBALS["s84g"] = 1;
+    s84glob();
+    $a = [];
+    $a[0] = &$GLOBALS["s84g"];
+    unset($GLOBALS["s84g"]);
+    $b = $a;
+    $b[0] = 9;
+    check("rc8", $a[0] === 1);
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -1608,6 +1649,7 @@ function main() {
     s81(); // SECTION-CALL 81
     s82(); // SECTION-CALL 82
     s83(); // SECTION-CALL 83
+    s84(); // SECTION-CALL 84
     echo "full: " . $checks . " checks, " . $failures . " failures\n";
     return $failures;
 }

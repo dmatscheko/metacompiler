@@ -1912,7 +1912,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     function refNameV(b, ref) {
         if (ref.gkey != undefined) {
             var g = globalsNameV(b, ref)
-            var rc = varCellIn(g.b, globalsFrameV(g.b), g.v)
+            var rc = varCellIn(g.b, globalsFrameV(g.b), g.v, false)
             var alias = callExt(rc.b, "js_phcat", [emitStr(rc.b, "\x00G"), g.v])
             callExt(rc.b, "js_scope_decl", [curScopeV, alias, rc.v])
             return {b: rc.b, v: alias}
@@ -1996,9 +1996,10 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         return mergeB
     }
     function setVar(b, name, v) { return setVarV(b, emitStr(b, name), v) }
-    // The storage cell of a variable, creating it (and the variable) on demand.
-    function varCellV(b, nameV) { return varCellIn(b, curScopeV, nameV) }
-    function varCellIn(b, scopeV, nameV) {
+    // The storage cell of a variable, creating it (and the variable) on demand;
+    // own as for bindRefIn.
+    function varCellV(b, nameV) { return varCellIn(b, curScopeV, nameV, true) }
+    function varCellIn(b, scopeV, nameV, own) {
         var raw0 = callExt(b, "js_scope_own", [scopeV, nameV])
         var raw = b.NewSelect(b.NewICmp(llvm.enum.IPredEQ, raw0, hUndef), hNull, raw0)
         var haveB = curF.NewBlock("")
@@ -2008,30 +2009,49 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         haveB.NewBr(mergeB)
         var cell = newCell(makeB, raw)
         callExt(makeB, "js_scope_decl", [scopeV, nameV, cell])
-        markCells(makeB, scopeV)
+        markCells(makeB, scopeV, own)
         makeB.NewBr(mergeB)
         return {b: mergeB, v: mergeB.NewPhi([llvm.ir.NewIncoming(raw, haveB), llvm.ir.NewIncoming(cell, makeB)])}
     }
     // A slot of scopeV under nameV now holds cell: the holder counts an array copy
-    // reads (js_phrebind, abnf/jsrtphp.go). Twin of bindRef in php-interpreter.abnf.
-    function bindRefIn(b, scopeV, nameV, cell) {
+    // reads (js_phrebind, abnf/jsrtphp.go). own: scopeV is the frame of the
+    // function being emitted (markCells). Twin of bindRef in php-interpreter.abnf.
+    function bindRefIn(b, scopeV, nameV, cell, own) {
         callExt(b, "js_phrebind", [callExt(b, "js_scope_own", [scopeV, nameV]), cell])
         callExt(b, "js_scope_decl", [scopeV, nameV, cell])
-        markCells(b, scopeV)
+        markCells(b, scopeV, own)
     }
     // A frame returning normally stops holding the cells in the slots of the
     // function being emitted named curLive (its live, cloLeave), comma separated
     // for js_phleave: before every ret of the function itself, the ones a return
     // out of a try body becomes (excDispatch) included. A frame a cell was made
     // in or bound to is marked under the slot "\x00cells", which no variable is
-    // named. Twin of frameLeave in php-interpreter.abnf.
-    function markCells(b, scopeV) { callExt(b, "js_scope_decl", [scopeV, emitStr(b, "\x00cells"), hTrue]) }
+    // named; the frame of a call that is no generator's also joins the frames a
+    // catch releases when an exception unwinds them (js_phmark, js_phunwind). A
+    // variable whose name is computed at run time is recorded with js_phdyn
+    // (dynCell). Twin of frameLeave and callFrames in php-interpreter.abnf.
+    function markCells(b, scopeV, own) {
+        if (own && curLive != null && curLive.length > 0 && !curGen) {
+            callExt(b, "js_phmark", [scopeV, emitStr(b, liveNames())])
+        } else { callExt(b, "js_scope_decl", [scopeV, emitStr(b, "\x00cells"), hTrue]) }
+    }
     var curLive = null
-    function emitFrameLeave(b) {
-        if (curLive == null || curLive.length == 0) { return }
+    var curGen = false
+    function liveNames() {
         var names = curLive[0]
         for (var i = 1; i < curLive.length; i++) { names = names + "," + curLive[i] }
-        callExt(b, "js_phleave", [curScopeV, emitStr(b, names)])
+        return names
+    }
+    function emitFrameLeave(b) {
+        if (curLive == null || curLive.length == 0) { return }
+        callExt(b, "js_phleave", [curScopeV, emitStr(b, liveNames())])
+    }
+    // A cell now in the slot of this frame's variable named nameV, which ref
+    // computes at run time.
+    function dynCell(b, ref, nameV) {
+        if (ref.nameT != null && ref.nameT != undefined && curLive != null && curLive.length > 0) {
+            callExt(b, "js_phdyn", [curScopeV, nameV])
+        }
     }
     var coreRetStmt = retStmt
     retStmt = function(b, v) {
@@ -2055,6 +2075,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         if (ref.path.length == 0) {
             if (ref.sbase != undefined) { return {b: b, v: hNull} }
             var rn0 = refNameV(b, ref)
+            dynCell(rn0.b, ref, rn0.v)
             return varCellV(rn0.b, rn0.v)
         }
         var p = emitRefPathV(b, ref, true)
@@ -2110,11 +2131,12 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         if (lhs.path.length == 0 && lhs.gkey != undefined) {
             var gn = globalsNameV(b, lhs)
             b = gn.b
-            bindRefIn(b, globalsFrameV(b), gn.v, cellV)
+            bindRefIn(b, globalsFrameV(b), gn.v, cellV, false)
         } else if (lhs.path.length == 0) {
             var rn = refNameV(b, lhs)
             b = rn.b
-            bindRefIn(b, curScopeV, rn.v, cellV)
+            dynCell(b, lhs, rn.v)
+            bindRefIn(b, curScopeV, rn.v, cellV, true)
         } else {
             var p = emitRefPathV(b, lhs, true)
             b = p.b
@@ -2152,7 +2174,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         for (var k = 0; k < byRef.length; k++) {
             var rc = varCell(b, byRef[k])
             b = rc.b
-            bindRefIn(b, env, emitStr(b, byRef[k]), rc.v)
+            bindRefIn(b, env, emitStr(b, byRef[k]), rc.v, false)
         }
         return {b: b, v: env}
     }
@@ -2171,7 +2193,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             }
             for (var k = 0; k < byRef.length; k++) {
                 var rV = emitStr(b, byRef[k])
-                bindRefIn(b, curScopeV, rV, callExt(b, "js_scope_own", [curF.Params[0], rV]))
+                bindRefIn(b, curScopeV, rV, callExt(b, "js_scope_own", [curF.Params[0], rV]), true)
             }
             return body(b)
         }
@@ -2184,11 +2206,13 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         return function(b) {
             var gV = globalsFrameV(b)
             for (var i = 0; i < names.length; i++) {
-                var nm = refNameV(b, {name: names[i].gn, nameT: names[i].gnT})
+                var gref = {name: names[i].gn, nameT: names[i].gnT}
+                var nm = refNameV(b, gref)
                 b = nm.b
-                var rc = varCellIn(b, gV, nm.v)
+                var rc = varCellIn(b, gV, nm.v, false)
                 b = rc.b
-                bindRefIn(b, curScopeV, nm.v, rc.v)
+                dynCell(b, gref, nm.v)
+                bindRefIn(b, curScopeV, nm.v, rc.v, true)
             }
             return b
         }
@@ -2319,7 +2343,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                     ri.b.NewBr(doneB)
                     b = doneB
                 }
-                bindRefIn(b, curScopeV, emitStr(b, binds[k].name), cellV)
+                bindRefIn(b, curScopeV, emitStr(b, binds[k].name), cellV, true)
             }
             return b
         }
@@ -3025,6 +3049,16 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     // All catch clauses become ONE closure: it tests each clause's type list in order,
     // binds the clause's variable and runs its body; a value that matches none is
     // re-thrown, which is what makes an outer try see it.
+    // tokName, when the program has references, holds the js_phtry count of the
+    // try: a catch or finally starts by releasing the frames that joined since
+    // then, which an exception unwound if they are still there (js_phunwind).
+    function unwindFrames(tokName, body) {
+        if (tokName == "") { return body }
+        return function(b) {
+            callExt(b, "js_phunwind", [callExt(b, "js_scope_get", [curScopeV, emitStr(b, tokName)]), curScopeV])
+            return body(b)
+        }
+    }
     function makeCatchDispatch(catches) {
         return function(b) {
             var caught = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "0caught")])
@@ -3064,15 +3098,21 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                 depthName = "0sild" + hidCount
                 callExt(b, "js_pyset_var", [curScopeV, emitStr(b, depthName), emitLibCall(b, "__mec_silenced", [emitNum(b, 2)])])
             }
+            var tokName = ""
+            if (usesRefs) {
+                hidCount++
+                tokName = "0reft" + hidCount
+                callExt(b, "js_scope_decl", [curScopeV, emitStr(b, tokName), callExt(b, "js_phtry", [])])
+            }
             var tryClo = callExt(b, "js_closure", [handle(emitFunc([], tryT, false, true)), curScopeV])
             var catchClo = hUndef
             if (catches.length > 0) {
                 catchClo = callExt(b, "js_closure",
-                                   [handle(emitFunc(["0caught"], silenceUnwind(makeCatchDispatch(catches), depthName), false, true)), curScopeV])
+                                   [handle(emitFunc(["0caught"], silenceUnwind(unwindFrames(tokName, makeCatchDispatch(catches)), depthName), false, true)), curScopeV])
             }
             var finClo = hUndef
             if (finallyT != undefined) {
-                finClo = callExt(b, "js_closure", [handle(emitFunc([], silenceUnwind(finallyT, depthName), false, true)), curScopeV])
+                finClo = callExt(b, "js_closure", [handle(emitFunc([], silenceUnwind(unwindFrames(tokName, finallyT), depthName), false, true)), curScopeV])
             }
             var ctl = callExt(b, "js_try", [tryClo, catchClo, finClo])
             return excDispatch(b, ctl)
@@ -3157,7 +3197,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         if (ref.path.length == 0 && ref.sbase == undefined && ref.headT == undefined && ref.nameT == null
             && ref.gkey == undefined) {
             if (isRef === true) {
-                bindRefIn(b, curScopeV, emitStr(b, ref.name), v)
+                bindRefIn(b, curScopeV, emitStr(b, ref.name), v, true)
                 return b
             }
             // A by-value loop variable that is a reference is assigned through it.
@@ -4694,12 +4734,12 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                 if (ref.path.length == 0 && ref.gkey != undefined) {
                     var gn = globalsNameV(b, ref)
                     b = gn.b
-                    bindRefIn(b, globalsFrameV(b), gn.v, hUndef)
+                    bindRefIn(b, globalsFrameV(b), gn.v, hUndef, false)
                 } else if (ref.path.length == 0) {
                     if (ref.sbase == undefined) {
                         var rn3 = refNameV(b, ref)
                         b = rn3.b
-                        if (usesRefs) { bindRefIn(b, curScopeV, rn3.v, hUndef) }
+                        if (usesRefs) { bindRefIn(b, curScopeV, rn3.v, hUndef, true) }
                         else { callExt(b, "js_scope_decl", [curScopeV, rn3.v, hUndef]) }
                     }
                 } else {
@@ -5291,6 +5331,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         body = cloHideThis(sc, paramDefaults(pl.defs, variadicPrologue(pl, capturePrologue(byVal, byRef, body))))
         var chk = cloArgCheck(pl, sc)
         pl.live = sc.live
+        pl.gen = isGen
         return function(b) {
             var idx = emitFunc(pl.params, body, false, false, undefined, undefined, chk, pl)
             var rc = emitCapture(b, byVal, byRef)
@@ -5322,6 +5363,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         var desc = cloDesc(sc, captured, pl)
         var chk = cloArgCheck(pl, sc)
         pl.live = sc.live
+        pl.gen = isGen
         return function(b) {
             var idx = emitFunc(pl.params, body, false, false, undefined, undefined, chk, pl)
             var rc = emitCapture(b, captured, [])
@@ -7838,7 +7880,11 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         sawYield = false
         var savedLive = curLive
         var armed = !isCtl && usesRefs && frm != undefined && frm != null
-        if (!isCtl) { curLive = armed ? frm.live : null }
+        var savedGen = curGen
+        if (!isCtl) {
+            curLive = armed ? frm.live : null
+            curGen = armed && frm.gen === true
+        }
         var savedRet = curRet
         if (!isCtl) { curRet = chk != undefined && chk != null && chk.rty != undefined && chk.rty != "" ? chk : null }
         var endB = bodyStmt(bodyB)
@@ -7860,7 +7906,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             }
             if (armed && frm.byref.indexOf(i) >= 0) {
                 callExt(b, "js_phrebind", [hUndef, argV])
-                markCells(b, curScopeV)
+                markCells(b, curScopeV, true)
             }
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, params[i]), argV])
         }
@@ -7875,6 +7921,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         if (!isCtl && curRet != null) { endB.NewRet(emitRetFit(endB, hUndef)) }
         else { endB.NewRet(hNull) }
         curLive = savedLive
+        curGen = savedGen
         curRet = savedRet
         genClosure = sawYield
         sawYield = savedSaw
@@ -8026,7 +8073,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             stmts.push(inner)
             inner = makeBody(stmts)
         }
-        return {name: name, params: params, defs: defs, byref: pl.byref, rest: pl.rest, pvis: pvis, vis: vis, st: isSt, live: sc.live,
+        return {name: name, params: params, defs: defs, byref: pl.byref, rest: pl.rest, pvis: pvis, vis: vis, st: isSt, live: sc.live, gen: isGen,
                 tys: pl.tys, rty: retTypeOf(pl.rty, isGen),
                 lib: phpLibDepth > 0 && name.substring(0, 5) != "__mec",
                 body: paramDefaults(defs, variadicPrologue(pl, inner))}

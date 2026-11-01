@@ -2079,17 +2079,46 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         scopePut(fr, name, cell)
         if (isRef(cell)) { fr[CELLS_KEY] = true }
     }
-    // A frame returning normally stops holding the cells in its slots named live
-    // (cloLeave); only a frame marked under CELLS_KEY, which no variable is named,
-    // had a cell made in or bound to a slot. Every name starts with '$', so a
-    // missing slot reads undefined. Twin of emitFrameLeave in php-to-llvm-ir.abnf.
+    // A frame that returns, or that an exception unwinds, stops holding the cells
+    // in its variables' slots, a name computed at run time ('$$n = &$x', 'global
+    // $$k') included; only a frame marked under CELLS_KEY, which no variable is
+    // named, had a cell made in or bound to a slot. Twin of emitFrameLeave and
+    // js_phleave in php-to-llvm-ir.abnf.
     var CELLS_KEY = "\x00cells"
-    function frameLeave(fr, live) {
-        if (live == undefined) { return }
-        for (var i = 0; i < live.length; i++) {
+    function frameLeave(fr) {
+        var ks = ownKeys(fr)
+        for (var i = 0; i < ks.length; i++) {
+            if (ks[i].charCodeAt(0) != 36) { continue }
             var v = anytype
-            v = fr[live[i]]
+            v = fr[ks[i]]
             if (v !== undefined && v !== null && typeof v == "object" && v.__refcell === true) { v.rc = refHolders(v) - 1 }
+        }
+    }
+    // The frames of the calls in progress, innermost last, with their depths
+    // (coreDepth); a generator's is not among them. An exception a catch takes
+    // has unwound every frame deeper than the catch's own (core.excMatches runs
+    // once the depth is restored), and a frame returning normally is the
+    // innermost one left: frames above it were unwound by an exception that a
+    // finally's return or a generator's stop then dropped.
+    var callFrames = []
+    var callDepths = []
+    function callEnter(fr, depth) {
+        callFrames.push(fr)
+        callDepths.push(depth)
+    }
+    function callLeave(fr) {
+        while (callFrames.length > 0) {
+            var top = callFrames.pop()
+            callDepths.pop()
+            if (top[CELLS_KEY] === true) { frameLeave(top) }
+            if (top === fr) { return }
+        }
+    }
+    function callsUnwound(depth) {
+        while (callDepths.length > 0 && callDepths[callDepths.length - 1] > depth) {
+            var top = callFrames.pop()
+            callDepths.pop()
+            if (top[CELLS_KEY] === true) { frameLeave(top) }
         }
     }
     // ----- Variables: local to ONE frame -----------------------------------------
@@ -5259,9 +5288,9 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // parameters, body, captured chain and generator flag, st for a static one and
     // ut for one whose body uses $this.
     var cloProbe = {probe: true}
-    function closureBody(params, body, captured, env, isGen, desc, self, st, live, ut) {
+    function closureBody(params, body, captured, env, isGen, desc, self, st, ut) {
         objHandles = objHandles + 1
-        var rec = {d: desc, i: objHandles, e: env, t: self, p: params, b: body, c: captured, g: isGen, st: st, ut: ut, lv: live}
+        var rec = {d: desc, i: objHandles, e: env, t: self, p: params, b: body, c: captured, g: isGen, st: st, ut: ut}
         var who = desc.substring(0, desc.indexOf("\n"))
         return fnMetaSet(function(argset) {
             if (argset === cloProbe) { return rec }
@@ -5272,9 +5301,9 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                 k = ctxSelf()
                 scopes = saved
                 genArgCheck(params, argset, who, k)
-                return newGen(runClosureRun(params, body, captured, env, argset, who, live))
+                return newGen(runClosureRun(params, body, captured, env, argset, who, true))
             }
-            return runClosureRun(params, body, captured, env, argset, who, live)()
+            return runClosureRun(params, body, captured, env, argset, who, false)()
         }, "closure", 0)
     }
     function cloRecOf(v) {
@@ -5295,7 +5324,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     function cloNoteAnon(pos) { cloClass = "class@anonymous"; return pos }
     function cloEnterFn(n, method) {
         var meth = (method ? cloClass + "::" : "") + stripWs(n)
-        cloScopes.push({name: meth + "()", self: method, fn: stripWs(n), meth: meth, vm: varMark()})
+        cloScopes.push({name: meth + "()", self: method, fn: stripWs(n), meth: meth})
     }
     function cloEnter(pos) {
         var top = cloScopes.length == 0 ? null : cloScopes[cloScopes.length - 1]
@@ -5304,23 +5333,17 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         // A static closure where a $this is in reach hides it (hide); st marks one
         // that no instance can be bound to (cloBind).
         cloScopes.push({name: name, self: top != null && top.self && !cloStatic, line: line,
-                        fn: name, meth: name, st: cloStatic, hide: cloStatic && top != null && top.self, vm: varMark()})
+                        fn: name, meth: name, st: cloStatic, hide: cloStatic && top != null && top.self})
         cloStatic = false
     }
-    // live: the variables the function's text names, its parameters among them,
-    // whose slots frameLeave releases. Twin of cloLeave in php-to-llvm-ir.abnf.
-    function cloLeave() {
-        var sc = cloScopes.pop()
-        sc.live = varsSince(sc.vm, ["$this"])
-        return sc
-    }
+    function cloLeave() { return cloScopes.pop() }
     // A property hook is a method named "$prop::get" / "$prop::set"
     // (zend_compile_property_hooks); cloProp is the property being declared.
     var cloProp = ""
     function cloNoteProp(n) { cloProp = stripWs(n) }
     function cloEnterHook(kind) {
         var fn = cloProp + "::" + kind
-        cloScopes.push({name: cloClass + "::" + fn + "()", self: true, fn: fn, meth: cloClass + "::" + fn, vm: varMark()})
+        cloScopes.push({name: cloClass + "::" + fn + "()", self: true, fn: fn, meth: cloClass + "::" + fn})
         return kind
     }
     // __FUNCTION__ / __METHOD__ are compile-time constants of the function being
@@ -5352,7 +5375,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         return phsCloDesc(name, file, line, statics, pn, pr, po)
     }
     // The closure's body as a zero-argument thunk, so a generator closure can defer it.
-    function runClosureRun(params, body, captured, env, argset, who, live) {
+    function runClosureRun(params, body, captured, env, argset, who, isGen) {
         return function() {
             var saved = scopes
             scopes = captured.slice(0)
@@ -5373,9 +5396,11 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             var depth = coreDepth + 1
             coreDepth = depth
             if (depth > coreDepthMax) { coreTooDeep() }
+            if (!isGen) { callEnter(fr, depth) }
             r = body()
             coreDepth = depth - 1
-            if (fr[CELLS_KEY] === true) { frameLeave(fr, live) }
+            if (!isGen) { callLeave(fr) }
+            else if (fr[CELLS_KEY] === true) { frameLeave(fr) }
             scopes = saved
             if (isSig(r) && r.ret === true) { return r.v }
             return null
@@ -5419,7 +5444,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             var env = {}
             for (var i = 0; i < byval.length; i++) { scopePut(env, byval[i], phpCopy(getVar(byval[i]))) }
             for (var j = 0; j < byref.length; j++) { bindRef(env, byref[j], varCell(byref[j])) }
-            return closureBody(params, body, captured, env, isGen, desc, cloThis(self), sc.st, sc.live, sc.ut === true)
+            return closureBody(params, body, captured, env, isGen, desc, cloThis(self), sc.st, sc.ut === true)
         }
     }
     // The scope chain a closure made here captures. A static closure written where
@@ -5483,7 +5508,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         scopePut(ov, STATIC_KEY, isObj(nthis) ? nthis.__class : (sc == null ? UNSET : sc))
         var ch = r.c.slice(0)
         ch.push(ov)
-        return closureBody(r.p, r.b, ch, r.e, r.g, r.d, isObj(nthis) ? nthis : null, r.st, r.lv)
+        return closureBody(r.p, r.b, ch, r.e, r.g, r.d, isObj(nthis) ? nthis : null, r.st)
     }
     // A closure made from a callable (zend_create_fake_closure): a method, or the
     // __call / __callStatic that stands in for one. call(t, cs, argset) runs it
@@ -5675,7 +5700,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             for (var j = 0; j < captured.length; j++) {
                 scopePut(env, captured[j], phpCopy(deref(rawSlot(captured[j]))))
             }
-            return closureBody(params, body, cloChain(sc), env, isGen, desc, cloThis(self), sc.st, sc.live, sc.ut === true)
+            return closureBody(params, body, cloChain(sc), env, isGen, desc, cloThis(self), sc.st, sc.ut === true)
         }
     }
     // The variable names the source mentions, in parse order, and the mark an arrow
@@ -6751,7 +6776,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         }
         if (vis != "") { mVisNames["$" + phsCase(name, false)] = true }
         var rec = {name: name, params: params, body: phpRetCheck(body != null ? body : makeBody([]), rtype, isGen, name),
-                   isStatic: isStatic, isGen: isGen, vis: vis, live: sc.live}
+                   isStatic: isStatic, isGen: isGen, vis: vis}
         // A library method stands for an internal one, which checks its count
         // against [required, declared] (phpLibArgCheck); a library function's
         // range is its index entry's (makeTopDef).
@@ -6899,9 +6924,12 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         var depth = coreDepth + 1
         coreDepth = depth
         if (depth > coreDepthMax) { coreTooDeep() }
+        var gen = fn.isGen === true
+        if (!gen) { callEnter(fr, depth) }
         r = fn.body()
         coreDepth = depth - 1
-        if (fr[CELLS_KEY] === true) { frameLeave(fr, fn.live) }
+        if (!gen) { callLeave(fr) }
+        else if (fr[CELLS_KEY] === true) { frameLeave(fr) }
         scopes = saved
         if (isSig(r) && r.ret === true) { return r.v }
         return null
@@ -8764,6 +8792,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // A caught value matches a clause when it is an instance of ANY of the listed
     // types; \Throwable / \Exception also catch the built-in base below.
     core.excMatches = function(v, types) {
+        callsUnwound(coreDepth)
         for (var i = 0; i < types.length; i++) {
             if (sameClassName(types[i], "Throwable")) { return true }
             if (phpIsA(v, types[i])) { return true }
