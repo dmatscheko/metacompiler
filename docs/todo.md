@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1008** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1009** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -75,12 +75,12 @@ Also tests/python-test-full.5.py peaks at ~90M steps per call (the brake is 1e8)
 
 # RB — Ruby
 
-### T-997 ruby: adding a key during hash iteration must raise at the insertion (MRI iter_lev model) · P3 · RB · IN PROGRESS (RB worker, round 35) [V]
-Found by the RB worker, round 34 (oracle ruby 2.6). `h={a:1,b:2}; h.each { h.delete(:b); h[:b]=3 }` → RuntimeError "can't add a new
-key into hash during iteration", h ends `{:a=>1}`; ours passes (the post-block key-order check sees no change). `h.each_key { h[:z]=5 }`
-(also each_value, select, map) → MRI raises; ours adds silently. `h.each { h[:c]=9; puts "after" }` → MRI raises at the insert,
-"after" never printed; ours prints it. Needs an iteration mark on the hash checked at every new-key insert in all three engines.
-Also: Module#constants order with several constants follows MRI's ID-hash order (`[:MD, :MC]`), ours source order.
+### T-1008 ruby: compiled `for k, v in hash` raises KeyError; `default_proc=`; missing Hash methods · P2 · RB · OPEN [V]
+Found by the RB worker, round 35 (oracle ruby 2.6). `for k, v in {a: 1, b: 2}; p [k, v]; end` → ruby `[:a, 1]` `[:b, 2]`; interpreter
+right, llvm.Run KeyError (makeForIn in ruby-to-llvm-ir.abnf calls js_pylen/js_pyget on the hash); `for` over a hash also does not
+raise the iteration count (MRI raises on an insert in the body). `h.default_proc = proc {..}` → the interpreter stores a key
+"default_proc", llvm.Run drops it; ruby `{:a=>1}`, 7, Proc. NoMethodError in all engines: store, transform_values!, transform_keys!,
+fetch_values, find_all, cycle, chunk_while, lazy, compare_by_identity, rehash, shift, replace. Hash#zip with a block never calls it.
 
 # JS — JavaScript and TypeScript
 
@@ -1096,6 +1096,7 @@ T-973 frozen engine: `String.prototype.lastIndexOf` missing; --full step budget 
 T-968 tooling: sweep.sh scores TypeScript files that tsc rejects with grammar errors as must-parse — DONE - sweep scores tsc-flagged TypeScript files reject? from tests/reference/typescript-tsc-flagged.txt (must-parse 99.6%)
 T-958 python: a generator's run state is not reachable from layer 2 (send to a just-started generator, gi_running) — PARTIAL - genState host (layer 2 reaches a generator's run state); python send to a just-started generator raises; gi_running filed for PY
 T-967 metajs goja leg: `[o] + ""` calls an element's own toString; other UTF-16 languages still order strings by code point — PARTIAL - goja leg's array join/ToPrimitive pinned to the floor; UTF-16 ordering gaps filed per language (java already correct)
+T-997 ruby: adding a key during hash iteration must raise at the insertion (MRI iter_lev model) — DONE - MRI iter_lev model in all three engines, new key raises at the store; Module#constants order DECLINED (MRI symbol-table order, unspecified)
 
 # Settled — do not re-open
 
