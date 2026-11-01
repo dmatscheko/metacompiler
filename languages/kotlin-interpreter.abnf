@@ -9414,7 +9414,10 @@ NotMemberKw = :script(~~ "pure";
             suffixes[0] = kAdoptMArgs(suffixes[0], ktLeadType(txt, suffixes[0].safe == true ? "?." : "."))
         } else if (suffixes[0].kind == "index") {
             kAdoptIdxSfx(suffixes[0], ktLeadType(txt, "["))
+        } else if (suffixes[0].kind == "field" && suffixes[0].name == "javaClass" && suffixes[0].safe != true) {
+            suffixes[0].jprim = ktJvmPrimRecv(txt)
         }
+        var tpsW = curTParams()
         // A call or an index after a run of member reads - `b.xs.add(3)`, `b.m[1]` -
         // takes the last member's declared type, read when it first runs (a class may
         // be declared after its use).
@@ -9446,14 +9449,18 @@ NotMemberKw = :script(~~ "pure";
                     // same here. Same stack, same rule.
                     if (s.targ != undefined && s.targ != null && s.targ != "") {
                         if (s.tjudgedArgs === undefined) { s.tjudgedArgs = kIsNames(parseTypeArgs(s.targ), s.lex) }
-                        kTypeArgsPush(s.tjudgedArgs)
+                        if (s.tkinfo === undefined) { s.tkinfo = kTypeArgInfo(parseTypeArgs(s.targ), tpsW) }
+                        kTypeArgsPush(s.tjudgedArgs, s.tkinfo)
                         try { cur = mcall(cur, s.name, spec.pos, spec) } finally { kTypeArgsPop() }
                     } else {
                         cur = mcall(cur, s.name, spec.pos, spec)
                     }
                     if (s.ktRes != undefined) { cur = kAdoptTy(cur, s.ktRes) }
                 } else if (s.kind == "field") {
-                    cur = kGetField(cur, s.name)
+                    // javaClass of a statically primitive receiver (ktJvmPrimRecv) is
+                    // the primitive class, `int`. Twin of emitSuffix in
+                    // kotlin-to-llvm-ir.abnf.
+                    cur = s.jprim === true ? kGetField(kValClass(cur), "java") : kGetField(cur, s.name)
                 } else if (s.kind == "dotanon") {
                     cur = s.t()
                 } else if (s.kind == "nn") {
@@ -9984,7 +9991,7 @@ NotMemberKw = :script(~~ "pure";
         // function type the function's results.
         var itxt = ktInitText(txt, name, dty)
         if (dty != "") { plan = kPlanOf(dty) }
-        ktNoteDecl(name, i == 2 ? dty : ktExprType(itxt))
+        ktNoteDecl(name, i == 2 ? dty : ktExprType(itxt), dty == "" ? ktLitType(itxt) : "")
         return function() {
             var v = anytype // A declaration binds a value of any type.
             // A BareDecl (`val f1: String`, filled in by a later definite assignment)
@@ -10408,10 +10415,45 @@ NotMemberKw = :script(~~ "pure";
     }
     // The type arguments of the call that is currently running, so a reified `x is T`
     // inside the callee can see them.
+    // Beside each, for a reified `T::class`, the call site's kTypeArgInfo and the
+    // entry of the call that was running there (a type argument that is the CALLER's
+    // own type parameter is that call's type argument).
     var typeArgStack = []
-    function kTypeArgsPush(a) { typeArgStack.push(a) }
-    function kTypeArgsPop() { typeArgStack.pop() }
+    var typeKlsStack = []
+    function kTypeArgsPush(a, info) {
+        typeKlsStack.push({k: info, up: typeKlsStack.length > 0 ? typeKlsStack[typeKlsStack.length - 1] : null})
+        typeArgStack.push(a)
+    }
+    function kTypeArgsPop() { typeArgStack.pop(); typeKlsStack.pop() }
     function kTypeArgsTop() { return typeArgStack.length > 0 ? typeArgStack[typeArgStack.length - 1] : null }
+    // A call site's type arguments (their texts, `<...>` stripped) for a reified
+    // `T::class`: each one's base type name, and fwd, its index among the type
+    // parameters tps of the function the call sits in, -1 when it is none.
+    function kTypeArgInfo(targs, tps) {
+        var names = []
+        var fwd = []
+        for (var i = 0; i < targs.length; i++) {
+            var n = ktTArgBase(targs[i])
+            var f = -1
+            for (var j = 0; j < tps.length; j++) { if (tps[j] == n) { f = j } }
+            names.push(n)
+            fwd.push(f)
+        }
+        return {names: names, fwd: fwd}
+    }
+    // `T::class` for the idx-th type parameter T of the running call (entry e of
+    // typeKlsStack): the class of its type argument, Any when the call gave none.
+    // Twin of the T$rk parameter in kotlin-to-llvm-ir.abnf (reifiedKSlot).
+    function kReifiedClass(e, idx) {
+        if (e === null || e.k === null || idx >= e.k.names.length) { return kClassLitNamed("Any") }
+        if (e.k.fwd[idx] >= 0) { return kReifiedClass(e.up, e.k.fwd[idx]) }
+        var n = e.k.names[idx]
+        if (kIsTypeName(n) || n.indexOf(".") >= 0) { return kClassLitNamed(n) }
+        var d = anytype
+        d = kScopeType(n)
+        if (d !== undefined && d !== null && d.__name == n) { return kClassOfDesc(d) }
+        return kClassLitNamed(n)
+    }
     // "<String, Int>" -> ["String", "Int"]
     function parseTypeArgs(text) {
         var body = stripWs(text)
@@ -11978,7 +12020,12 @@ NotMemberKw = :script(~~ "pure";
     // and whether that value is a class descriptor, so the test is made inside the
     // thunk rather than at walk time. `base::class` is neither: it is a CLASS LITERAL.
     function makePropRef(baseName, name, pos) {
+        // `T::class` of a (reified) type parameter T of the function walked here.
+        var tps = curTParams()
+        var tpIdx = -1
+        for (var ti = 0; ti < tps.length; ti++) { if (tps[ti] == baseName) { tpIdx = ti } }
         return function() {
+            if (tpIdx >= 0 && name == "class") { return kReifiedClass(typeKlsStack.length > 0 ? typeKlsStack[typeKlsStack.length - 1] : null, tpIdx) }
             var hv = hasVar(baseName)
             var base = anytype // A type name resolves to a descriptor, a value to anything.
             base = hv ? getVar(baseName) : null
@@ -12023,7 +12070,9 @@ NotMemberKw = :script(~~ "pure";
                   "UShort", "UByte", "Double", "Float", "Boolean", "Char", "Any", "Unit",
                   "Number", "Nothing", "List", "MutableList", "Set", "MutableSet", "Map",
                   "MutableMap", "Array", "Collection", "Iterable", "Comparable", "IntRange",
-                  "CharRange", "LongRange", "Regex", "StringBuilder"]
+                  "CharRange", "LongRange", "Regex", "StringBuilder",
+                  "IntArray", "LongArray", "DoubleArray", "FloatArray", "CharArray", "BooleanArray",
+                  "ByteArray", "ShortArray", "UIntArray", "ULongArray", "UByteArray", "UShortArray"]
         for (var i = 0; i < ns.length; i++) { rawSet(kTypeNames, ns[i], true) }
     }
     kInstallTypeNames()
@@ -12097,7 +12146,9 @@ NotMemberKw = :script(~~ "pure";
     // java classes it names (kJavaClass), as the class of such a value is
     // (kCollJvmClass).
     var kStdJvm = {"$Pair": "kotlin.Pair", "$Triple": "kotlin.Triple",
-                   "$StringBuilder": "java.lang.StringBuilder", "$Regex": "kotlin.text.Regex"}
+                   "$StringBuilder": "java.lang.StringBuilder", "$Regex": "kotlin.text.Regex",
+                   "$IntRange": "kotlin.ranges.IntRange", "$LongRange": "kotlin.ranges.LongRange",
+                   "$CharRange": "kotlin.ranges.CharRange"}
     function kClassLitNamed(n) {
         if (kStdJvm["$" + n] !== undefined) { return kJavaClass(kStdJvm["$" + n]) }
         if (n.indexOf(".") >= 0) {
@@ -12180,15 +12231,17 @@ NotMemberKw = :script(~~ "pure";
                       "$CharArray": true, "$BooleanArray": true, "$ByteArray": true, "$ShortArray": true,
                       "$UIntArray": true, "$ULongArray": true, "$UByteArray": true, "$UShortArray": true}
     // The KClass of a declared type: the java class its binary name names
-    // (kJavaClass). A nested one has simpleName `Inner`, qualifiedName `Outer.Inner`
-    // and renders "class Outer$Inner"; a builtin throwable's is package-qualified
-    // (java.lang.IllegalStateException) - kotlin-stdlib's ClassReference reads all
-    // three off the java class. Twin of ktClassOfDesc in abnf/jsrtkotlin.go and
-    // languages/lib/kotlin-rt.metajs.
+    // (kJavaClass), a top-level class's its own name, so `P::class.java` is
+    // `P(1).javaClass`. A nested one has simpleName `Inner`, qualifiedName
+    // `Outer.Inner` and renders "class Outer$Inner"; a builtin throwable's is
+    // package-qualified (java.lang.IllegalStateException) - kotlin-stdlib's
+    // ClassReference reads all three off the java class. Twin of ktClassOfDesc in
+    // abnf/jsrtkotlin.go and languages/lib/kotlin-rt.metajs.
     function kClassOfDesc(d) {
         var bn = anytype
         bn = d.__bname
         if (typeof bn == "string" && bn != "") { return kJavaClass(bn) }
+        if (typeof d.__name == "string") { return kJavaClass(d.__name) }
         return kKClass(d.__name)
     }
     // A collection's KClass is its JVM class (kJavaClass): kotlin-stdlib's
@@ -12202,25 +12255,32 @@ NotMemberKw = :script(~~ "pure";
     }
     // `javaClass`, and a collection's KClass: a class literal that also carries the
     // JVM binary name jc (jname), which .name and toString answer. simpleName is the
-    // part after the package and the enclosing class, an array's its element's with
-    // "[]" (`[I` is int[]). Twin of ktJavaClass in abnf/jsrtkotlin.go and
-    // languages/lib/kotlin-rt.metajs.
+    // part after the package and the enclosing class ("" for an anonymous class,
+    // Outer$1), an array's its element's with "[]" (`[I` is int[]). Twin of
+    // ktJavaClass in abnf/jsrtkotlin.go and languages/lib/kotlin-rt.metajs.
     function kJavaClass(jc) {
         var cut = -1
         for (var i = 0; i < jc.length; i++) { if (jc.charAt(i) == "." || jc.charAt(i) == "$") { cut = i } }
         var sn = jc.substring(cut + 1)
+        if (cut >= 0 && jc.charAt(cut) == "$" && kAllDigits(sn)) { sn = "" }
         if (jc.charAt(0) == "[") {
             sn = jc.length == 2 ? kJvmPrimNames["IJDFCZBS".indexOf(jc.charAt(1))] : jc.substring(cut + 1, jc.length - 1)
             sn = sn + "[]"
         }
         return {__kclass: true, kname: sn, jname: jc}
     }
+    function kAllDigits(s) {
+        if (s == "") { return false }
+        for (var i = 0; i < s.length; i++) { if (s.charAt(i) < "0" || s.charAt(i) > "9") { return false } }
+        return true
+    }
     var kJvmPrimNames = ["int", "long", "double", "float", "char", "boolean", "byte", "short"]
     var kPrimKNames = ["Int", "Long", "Double", "Float", "Char", "Boolean", "Byte", "Short"]
     var kPrimWrappers = ["Integer", "Long", "Double", "Float", "Character", "Boolean", "Byte", "Short"]
     // KClass.java (wrapper false) and .javaObjectType (true): a primitive type's two
-    // java classes, `int` (marked jprim) and java.lang.Integer; every other KClass
-    // already is its java class. Twin of ktKClassJava in abnf/jsrtkotlin.go and
+    // java classes, `int` (marked jprim) and java.lang.Integer; a builtin type of
+    // kJavaOfType the java class it maps to; every other KClass already is its java
+    // class. Twin of ktKClassJava in abnf/jsrtkotlin.go and
     // languages/lib/kotlin-rt.metajs.
     function kKClassJava(co, wrapper) {
         if (co.jname !== undefined) { return co }
@@ -12232,8 +12292,24 @@ NotMemberKw = :script(~~ "pure";
                 return o
             }
         }
-        return co
+        var jt = kJavaOfType["$" + co.kname]
+        return jt !== undefined ? kJavaClass(jt) : co
     }
+    // The java class of a builtin kotlin type that has no value-level JVM class here
+    // (kotlinc 2.2.21: `UInt::class.java` is kotlin.UInt, `List::class.java`
+    // java.util.List, `IntArray::class.java` [I). Twin of ktJavaOfType in
+    // abnf/jsrtkotlin.go and languages/lib/kotlin-rt.metajs.
+    var kJavaOfType = {"$UInt": "kotlin.UInt", "$ULong": "kotlin.ULong", "$UByte": "kotlin.UByte",
+        "$UShort": "kotlin.UShort", "$Unit": "kotlin.Unit", "$UIntArray": "kotlin.UIntArray",
+        "$ULongArray": "kotlin.ULongArray", "$UByteArray": "kotlin.UByteArray",
+        "$UShortArray": "kotlin.UShortArray", "$Nothing": "java.lang.Void",
+        "$Number": "java.lang.Number", "$CharSequence": "java.lang.CharSequence",
+        "$Comparable": "java.lang.Comparable", "$Iterable": "java.lang.Iterable",
+        "$List": "java.util.List", "$MutableList": "java.util.List", "$Set": "java.util.Set",
+        "$MutableSet": "java.util.Set", "$Map": "java.util.Map", "$MutableMap": "java.util.Map",
+        "$Collection": "java.util.Collection", "$MutableCollection": "java.util.Collection",
+        "$IntArray": "[I", "$LongArray": "[J", "$DoubleArray": "[D", "$FloatArray": "[F",
+        "$CharArray": "[C", "$BooleanArray": "[Z", "$ByteArray": "[B", "$ShortArray": "[S"}
     // The JVM class of a List, a Set, a Map, a values view, a range, a Pair /
     // Triple, a map entry, a StringBuilder or a Regex, "" for any other value. Twin
     // of ktCollJvmClass in abnf/jsrtkotlin.go and languages/lib/kotlin-rt.metajs.
@@ -12249,8 +12325,39 @@ NotMemberKw = :script(~~ "pure";
         }
         if (kIsSet(v)) { return v.__jc !== undefined ? v.__jc : "java.util.LinkedHashSet" }
         if (kIsMap(v)) { return v.__jc !== undefined ? v.__jc : "java.util.LinkedHashMap" }
+        if (kIsLazySeq(v)) { return kSeqJvmClass(kSeqShape(v).k) }
         var tup = kTupleName(v)
         return tup != "" ? "kotlin." + tup : kEntryJvmClass(v)
+    }
+    // The class of a lazy sequence - sequence { } and what its intermediate
+    // operations derive - as {k, n}: k the kotlin.sequences class (Take for
+    // TakeSequence, "" for the builder's anonymous one), n a Take / Drop / Sub's
+    // count. take and drop are DropTakeSequence's own, which merge into one Take,
+    // Drop or SubSequence, or answer the empty sequence or the receiver itself
+    // (Sequences.kt). Twin of ktSeqShape in abnf/jsrtkotlin.go and
+    // languages/lib/kotlin-rt.metajs.
+    function kSeqShape(v) {
+        var op = anytype
+        op = v.op
+        if (op === undefined) { return {k: "", n: 0} }
+        if (op == "take" || op == "drop") {
+            var n = v.n
+            var s = kSeqShape(v.src)
+            if (op == "take") {
+                if (n == 0 || s.k == "Empty") { return {k: "Empty", n: 0} }
+                if (s.k == "Take" || s.k == "Sub") { return n >= s.n ? s : {k: s.k, n: n} }
+                return {k: s.k == "Drop" ? "Sub" : "Take", n: n}
+            }
+            if (n == 0 || s.k == "Empty") { return s }
+            if (s.k == "Take" || s.k == "Sub") { return n >= s.n ? {k: "Empty", n: 0} : {k: "Sub", n: s.n - n} }
+            return {k: "Drop", n: s.k == "Drop" ? s.n + n : n}
+        }
+        if (op == "map" || op == "onEach") { return {k: "Transforming", n: 0} }
+        if (op == "takeWhile" || op == "dropWhile") { return {k: op == "takeWhile" ? "TakeWhile" : "DropWhile", n: 0} }
+        return {k: "Filtering", n: 0}
+    }
+    function kSeqJvmClass(k) {
+        return k == "" ? "kotlin.sequences.SequencesKt__SequenceBuilderKt$sequence$$inlined$Sequence$1" : "kotlin.sequences." + k + "Sequence"
     }
     // The JVM class of a map entry, "" for any other value: the node class of the
     // class of its map (__m; a LinkedHashMap without one). Twin of ktEntryJvmClass
@@ -12415,6 +12522,9 @@ NotMemberKw = :script(~~ "pure";
         if (o === undefined || o === null) {
             var ep0 = extProps["$" + name]
             if (ep0 != undefined) { return ep0(o) }
+            // Unit is the undefined value here. Twin of js_ktfget in
+            // abnf/jsrtkotlin.go and languages/lib/kotlin-rt.metajs.
+            if (o === undefined && name == "javaClass") { return kJavaClass("kotlin.Unit") }
             fail("property ." + name + " of null")
         }
         // kotlin.random.Random.Default - the companion object, which IS the default
@@ -13230,6 +13340,8 @@ NotMemberKw = :script(~~ "pure";
             if (typeof args[ai] != "function" && args[ai].spread != undefined) { argc = 0 - 1 }
         }
         var judgedT = anytype // targs resolved by kIsNames on the first call
+        var tinfo = anytype // the reified `T::class` view of targs (kTypeArgInfo)
+        tinfo = targs == null ? null : kTypeArgInfo(targs, curTParams())
         return function() {
             var spec = kevalArgs(args)
             // THE SYNTACTIC POSITION. `first` is a PROPERTY of IntProgression and a
@@ -13264,7 +13376,7 @@ NotMemberKw = :script(~~ "pure";
             kNamedVals = spec.nvals
             if (targs == null) { return f.apply(undefined, spec.pos) }
             if (judgedT === undefined) { judgedT = kIsNames(targs, lex) }
-            kTypeArgsPush(judgedT)
+            kTypeArgsPush(judgedT, tinfo)
             try { return f.apply(undefined, spec.pos) } finally { kTypeArgsPop() }
         }
     }

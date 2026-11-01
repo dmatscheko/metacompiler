@@ -2845,7 +2845,9 @@ KwContract  = "contract" KwEnd ;
         "UInt", "ULong", "UShort", "UByte", "Double", "Float", "Boolean", "Char",
         "Any", "Unit", "Number", "Nothing", "List", "MutableList", "Set",
         "MutableSet", "Map", "MutableMap", "Array", "Collection", "Iterable",
-        "Comparable", "IntRange", "CharRange", "LongRange", "Regex", "StringBuilder"]
+        "Comparable", "IntRange", "CharRange", "LongRange", "Regex", "StringBuilder",
+        "IntArray", "LongArray", "DoubleArray", "FloatArray", "CharArray", "BooleanArray",
+        "ByteArray", "ShortArray", "UIntArray", "ULongArray", "UByteArray", "UShortArray"]
     for (var ktTNI = 0; ktTNI < ktTypeNameList.length; ktTNI++) { ktTypeNameSet["$" + ktTypeNameList[ktTNI]] = true }
     // ----- the four scope-taking helpers that are PURE EXTERN CALLS -----
     //
@@ -3150,10 +3152,15 @@ KwContract  = "contract" KwEnd ;
         // - `inline fun <reified T> Any.isA() = this is T`, then
         // `"x".isA<String>()`. makeCall appends the type names for the plain
         // call form; this is the same convention for the method-suffix form:
-        // one trailing string per reified parameter, in declaration order.
+        // per reified parameter, in declaration order, its name and its class (the
+        // class literals foldCallMember prepared where the call was walked).
         var exr = reifiedExtra(s.name, s.targ)
         for (var xi = 0; xi < exr.length; xi++) {
             callExt(b, "js_arr_push", [eargsV, emitStr(b, exr[xi])])
+            var xk = (s.tkls != undefined && xi < s.tkls.length) ? s.tkls[xi] : reifiedKClass("Any")
+            var xkr = xk(b)
+            b = xkr.b
+            callExt(b, "js_arr_push", [eargsV, xkr.v])
         }
         return {b: b, v: callExt(b, "js_call", [efV, hUndef, eargsV])}
     }
@@ -3251,15 +3258,15 @@ KwContract  = "contract" KwEnd ;
     function reifiedPush() { reifiedStack.push(pendingReified); pendingReified = [] }
     function reifiedPop() { reifiedStack.pop() }
     function reifiedTop() { return reifiedStack.length > 0 ? reifiedStack[reifiedStack.length - 1] : [] }
-    // "<reifiedT,U>" (whitespace already stripped) -> ["T"]. A parameter is reified when
-    // its entry starts with the `reified` modifier; everything else is erased.
+    // "<reifiedT:Any,U>" (whitespace already stripped) -> ["T"]. A parameter is reified
+    // when its entry starts with the `reified` modifier; everything else is erased.
     function reifiedNamesOf(t) {
         var out = []
         if (t.length < 2) { return out }
         var inner = t.substring(1, t.length - 1)
         var parts = inner.split(",")
         for (var i = 0; i < parts.length; i++) {
-            if (parts[i].substring(0, 7) == "reified") { out.push(parts[i].substring(7, parts[i].length)) }
+            if (parts[i].substring(0, 7) == "reified") { out.push(parts[i].substring(7, parts[i].length).split(":")[0]) }
         }
         return out
     }
@@ -3275,6 +3282,12 @@ KwContract  = "contract" KwEnd ;
     }
     // The hidden parameter carrying a reified type parameter's name.
     function reifiedSlot(name) { return name + "$rt" }
+    // The hidden parameter after it carrying the type argument's class, `T::class`:
+    // each call site emits its type argument's own class literal (makeQualRef), so a
+    // type argument that is the caller's own reified T hands that class on. Twin of
+    // kReifiedClass in kotlin-interpreter.abnf.
+    function reifiedKSlot(name) { return name + "$rk" }
+    function reifiedKClass(t) { return makeQualRef(ktTArgBase(t), "class") }
 
     // ----- Kotlin's operator conventions -----
     // a + b is a.plus(b), -a is a.unaryMinus(), a[i] is a.get(i), a() is a.invoke(),
@@ -4499,6 +4512,18 @@ KwContract  = "contract" KwEnd ;
             suffixes[0] = ktAdoptMArgs(suffixes[0], ktLeadType(txt, suffixes[0].safe == true ? "?." : "."))
         } else if (suffixes[0].kind == "index") {
             ktAdoptIdxSfx(suffixes[0], ktLeadType(txt, "["))
+        } else if (suffixes[0].kind == "field" && suffixes[0].name == "javaClass" && suffixes[0].safe != true) {
+            suffixes[0].jprim = ktJvmPrimRecv(txt)
+        }
+        // A reified extension's type arguments as class literals, made here, where a
+        // type argument that is the enclosing function's reified T is still known.
+        for (var tk = 0; tk < suffixes.length; tk++) {
+            var tks = suffixes[tk]
+            if (tks.kind != "mcall" || tks.targ == undefined || tks.targ == null || tks.targ == "") { continue }
+            var tkn = typeArgNames(tks.targ)
+            var tkl = []
+            for (var tki = 0; tki < tkn.length; tki++) { tkl.push(reifiedKClass(tkn[tki])) }
+            tks.tkls = tkl
         }
         // A call or an index after a run of member reads - `b.xs.add(3)`, `b.m[1]` -
         // takes the last member's declared type, read at emit time (a class may be
@@ -4663,6 +4688,12 @@ KwContract  = "contract" KwEnd ;
                     var gargsV = callExt(b, "js_arr_new", [])
                     callExt(b, "js_arr_push", [gargsV, cur])
                     return {b: b, v: callExt(b, "js_call", [gV, hUndef, gargsV])}
+                }
+                // javaClass of a statically primitive receiver (ktJvmPrimRecv) is the
+                // primitive class, `int`: the value's KClass read as .java.
+                if (s.jprim == true) {
+                    var pcV = callExt(b, "js_ktvalclass", [cur])
+                    return {b: b, v: callExt(b, "js_ktfget", [pcV, emitStr(b, "java")])}
                 }
                 // `.size` is NOT rewritten to `.length` here: a user class may declare
                 // its own `size` property. js_ktfget falls back to `length` only when
@@ -5263,12 +5294,13 @@ KwContract  = "contract" KwEnd ;
         var targs = []
         if (items[at] != undefined && items[at].targs != undefined) { targs = typeArgNames(items[at].targs); at++ }
         var args = items.slice(at)
-        // A callee with reified type parameters gets the type-argument names appended as
-        // plain string arguments, in declaration order, as an `is` test judges them.
+        // A callee with reified type parameters gets each type argument appended twice,
+        // in declaration order: its name as an `is` test judges it, and its class.
         var reified = reifiedFuns["$" + name]
         if (reified != undefined) {
             for (var ri = 0; ri < reified.length; ri++) {
                 args = args.concat([{at: makeIsNameConst(targs.length > ri ? targs[ri] : "Any")}])
+                args = args.concat([{at: reifiedKClass(targs.length > ri ? targs[ri] : "Any")}])
             }
         }
         // A builder call's static type, and its elements retyped by the explicit type
@@ -5948,7 +5980,7 @@ KwContract  = "contract" KwEnd ;
         var itxt = ktInitText(txt, name, dt)
         var sp = anytype
         sp = typed ? ktAdoptPlan(dt) : null
-        ktNoteDecl(name, typed ? dt : ktExprType(itxt))
+        ktNoteDecl(name, typed ? dt : ktExprType(itxt), typed ? "" : ktLitType(itxt))
         return function(b) {
             var r = init(b)
             b = r.b
@@ -6536,16 +6568,19 @@ KwContract  = "contract" KwEnd ;
             rty = items[bodyAt].rty
             bodyAt++
         }
-        // A reified type parameter becomes a hidden trailing parameter holding the type
-        // name; the call sites append the matching type argument. Note the rebuild: a
-        // record that travelled through the tag stack hands back a FRESH array on every
-        // property read, so pushing into `sig.params` in place would be lost - the new
-        // arrays have to be assembled locally and stored in a new signature record.
+        // A reified type parameter becomes two hidden trailing parameters holding the
+        // type name and its class; the call sites append the matching type argument.
+        // Note the rebuild: a record that travelled through the tag stack hands back a
+        // FRESH array on every property read, so pushing into `sig.params` in place
+        // would be lost - the new arrays have to be assembled locally and stored in a
+        // new signature record.
         if (reified != null && reified.length > 0) {
             reifiedFuns["$" + items[0]] = reified
             var defs = sig.defs
             for (var r = 0; r < reified.length; r++) {
                 params.push(reifiedSlot(reified[r]))
+                defs.push(null)
+                params.push(reifiedKSlot(reified[r]))
                 defs.push(null)
             }
             sig = {params: params, defs: defs, tys: sig.tys, varargAt: sig.varargAt}
@@ -8147,6 +8182,10 @@ KwContract  = "contract" KwEnd ;
     // neither a binding nor a receiver member, which is what makes `String::length`
     // work without a String descriptor.
     function makeQualRef(baseName, name) {
+        // `T::class` of a reified T is the class its call site handed over.
+        if (name == "class" && isReifiedHere(baseName)) {
+            return function(b) { return {b: b, v: callExt(b, "js_scope_get", [curScopeV, emitStr(b, reifiedKSlot(baseName))])} }
+        }
         return function(b) {
             // A builtin TYPE name is decided HERE, at emit time, because the base is
             // a literal: the extern's ktTypeNames arm runs before its scope walk, so

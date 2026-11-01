@@ -148,15 +148,17 @@ function ktBuilderType(name, targs) {
 // A declaration's innermost finished body is the only one that matters (every
 // outer body that holds it holds that one too), so it is stamped on the
 // declaration when the body finishes, and ktOpen keeps the declarations no
-// finished body holds yet.
+// finished body holds yet. lty, when given, is the type of an untyped declaration's
+// literal initializer (ktLitType): read by javaClass alone (ktJvmPrimRecv), since
+// retyping by an Int or a Double would only add work to every assignment.
 var ktAt = 0
 var ktDecls = {}
 var ktOpen = []
-function ktNoteDecl(name, ty) {
+function ktNoteDecl(name, ty, lty) {
     if (name == null || name == undefined) { return }
     var l = ktDecls["$" + name]
     if (l == undefined) { l = []; ktDecls["$" + name] = l }
-    var d = {ty: ty, at: ktAt, from: -1, to: -1, vr: ktIsVarAt(ktAt)}
+    var d = {ty: ty, lty: lty == undefined ? "" : lty, at: ktAt, from: -1, to: -1, vr: ktIsVarAt(ktAt)}
     l.push(d)
     ktOpen.push(d)
 }
@@ -758,6 +760,77 @@ function ktIsLongLit(s) {
     }
     if (body.length == 0) { return false }
     return last == "L" || last == "l" || parseInt(body, radix) > 2147483647
+}
+// The type name a type argument's text names, without its own type arguments and
+// nullability: List<Int> is List, C? is C.
+function ktTArgBase(t) {
+    var lt = t.indexOf("<")
+    var s = lt < 0 ? t : t.substring(0, lt)
+    return (s.length > 0 && s.charAt(s.length - 1) == "?") ? s.substring(0, s.length - 1) : s
+}
+// The end of the number, char or boolean literal `t` starts with, or -1. A number
+// runs over letters, digits and `_` (5L, 0x1F, 1.5f, 2u), a `.` only before a digit
+// (`5.javaClass` is 5 then a member) and a sign only after a decimal exponent.
+function ktLitEnd(t) {
+    var c0 = t.charAt(0)
+    if (c0 == "'") {
+        var q = ktQuoteEnd(t, 0)
+        return q < 0 ? -1 : q + 1
+    }
+    var i = 0
+    if (!(c0 >= "0" && c0 <= "9")) {
+        while (i < t.length && ktIdChar(t.charAt(i))) { i++ }
+        var w = t.substring(0, i)
+        return (w == "true" || w == "false") ? i : -1
+    }
+    var hex = t.length > 1 && (t.charAt(1) == "x" || t.charAt(1) == "X")
+    while (i < t.length) {
+        var c = t.charAt(i)
+        var p = i > 0 ? t.charAt(i - 1) : ""
+        var d1 = t.charAt(i + 1)
+        if (ktIdChar(c)) { i++ }
+        else if (c == "." && d1 >= "0" && d1 <= "9") { i++ }
+        else if ((c == "+" || c == "-") && !hex && (p == "e" || p == "E")) { i++ }
+        else { break }
+    }
+    return i
+}
+// The static type of a literal's text: Int, Long, Double, Float, Char or Boolean,
+// "" for an unsigned literal and any other text.
+function ktLitType(t) {
+    var s = (t.length > 1 && t.charAt(0) == "-") ? t.substring(1) : t
+    if (s.length == 0 || ktLitEnd(s) != s.length) { return "" }
+    var c0 = s.charAt(0)
+    if (c0 == "'") { return "Char" }
+    if (c0 == "t" || c0 == "f") { return "Boolean" }
+    var last = s.charAt(s.length - 1)
+    if (s.indexOf("u") >= 0 || s.indexOf("U") >= 0) { return "" }
+    var radix = s.length > 1 && (s.charAt(1) == "x" || s.charAt(1) == "X" || s.charAt(1) == "b" || s.charAt(1) == "B")
+    if (!radix && (last == "f" || last == "F")) { return "Float" }
+    if (!radix && (s.indexOf(".") >= 0 || s.indexOf("e") >= 0 || s.indexOf("E") >= 0)) { return "Double" }
+    return ktIsLongLit(s) ? "Long" : "Int"
+}
+var ktJvmPrims = {"$Int": true, "$Long": true, "$Short": true, "$Byte": true, "$Double": true,
+                  "$Float": true, "$Char": true, "$Boolean": true}
+// Whether `t.javaClass...` (a postfix chain's text) reads javaClass off a receiver
+// whose STATIC type is a primitive: a literal, or a name declared with such a type
+// or with such a literal. kotlinc's javaClass is then the primitive class (`int`),
+// while a value typed Any, a nullable or a generic one is boxed (java.lang.Integer).
+function ktJvmPrimRecv(t) {
+    if (t == undefined || t.length == 0) { return false }
+    var e = ktLitEnd(t)
+    var ty = ""
+    if (e > 0) { ty = ktLitType(t.substring(0, e)) }
+    else {
+        e = 0
+        while (e < t.length && ktIdChar(t.charAt(e))) { e++ }
+        if (e == 0) { return false }
+        var d = ktDeclAt(t.substring(0, e))
+        if (d == null) { return false }
+        ty = d.ty != "" ? d.ty : d.lty
+    }
+    if (t.substring(e, e + 10) != ".javaClass" || (e + 10 < t.length && ktIdChar(t.charAt(e + 10)))) { return false }
+    return ktJvmPrims["$" + ty] == true
 }
 // The static type of an initializer's text: "Long" for a Long literal, the builder
 // type of a single builder call (mutableListOf<Long>(), LongArray(2)), the class

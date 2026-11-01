@@ -6975,6 +6975,46 @@ fun s158() {
         En158.A.f(1) == 101 && En158.B.f(2) == 102)
 }
 
+// ===== SECTION 159: javaClass by static type, declared and builtin java classes, reified T::class =====
+// javaClass of a receiver whose static type is a primitive (a literal, or a name
+// declared with that type or such a literal) is the primitive class `int`; through
+// Any, a nullable or a `!!` it is java.lang.Integer. A declared class's KClass.java
+// is the class its instances' javaClass names. UInt / Unit / List / IntArray::class.java
+// are kotlin.UInt, kotlin.Unit, java.util.List and [I; IntRange::class is the class
+// of a range. A reified T::class is the call site's type argument's class, handed on
+// through a caller's own T. A lazy sequence's class follows Sequences.kt (take and
+// drop merge into Take/Drop/SubSequence or the empty one) (kotlinc 2.2.21 on java 24).
+class C159
+data class P159(val x: Int)
+enum class E159 { A, B { override fun toString() = "b" } }
+inline fun <reified T : Any> nm159() = T::class.simpleName
+inline fun <reified T : Any> fw159() = nm159<T>() + "/" + T::class.qualifiedName
+inline fun <reified T : Any> Any.kn159() = T::class.simpleName
+fun s159() {
+    val i = 5
+    val y: Int = 6
+    val a: Any = 7
+    val n: Int? = 8
+    check("jprim159a", 5.javaClass.name == "int" && i.javaClass.name == "int" && y.javaClass.name == "int" &&
+        a.javaClass.name == "java.lang.Integer" && n!!.javaClass.name == "java.lang.Integer" &&
+        (5 as Any).javaClass.name == "java.lang.Integer" && 7L.javaClass.name == "long" && 'c'.javaClass.name == "char" &&
+        2.5.javaClass.name == "double" && i.javaClass == Int::class.java && a.javaClass != Int::class.java)
+    check("jcls159b", P159(1).javaClass == P159::class.java && E159.A.javaClass == E159::class.java &&
+        E159.B.javaClass != E159::class.java && C159()::class == C159::class && (1..2)::class == IntRange::class &&
+        IntRange::class.qualifiedName == "kotlin.ranges.IntRange")
+    check("reif159c", nm159<C159>() == "C159" && nm159<Int>() == "Int" && fw159<P159>() == "P159/P159" &&
+        fw159<String>() == "String/kotlin.String" && 5.kn159<E159>() == "E159")
+    check("bjava159d", UInt::class.java.name == "kotlin.UInt" && Unit::class.java.name == "kotlin.Unit" &&
+        Nothing::class.java.name == "java.lang.Void" && List::class.java.name == "java.util.List" &&
+        IntArray::class.java.name == "[I" && IntArray::class.simpleName == "IntArray" && UInt::class.java == 5u.javaClass &&
+        Unit.javaClass.name == "kotlin.Unit")
+    val s = sequence { yield(1); yield(2) }
+    check("seq159e", s.javaClass.name == "kotlin.sequences.SequencesKt__SequenceBuilderKt\$sequence\$\$inlined\$Sequence\$1" &&
+        s.javaClass.simpleName == "" && s.map { it }.javaClass.name == "kotlin.sequences.TransformingSequence" &&
+        s.filter { true }.javaClass.simpleName == "FilteringSequence" && s.take(1).drop(1).javaClass.simpleName == "EmptySequence" &&
+        s.drop(1).take(1).javaClass.simpleName == "SubSequence" && s.take(0).javaClass.simpleName == "EmptySequence")
+}
+
 fun main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -7130,6 +7170,7 @@ fun main() {
     s156() // SECTION-CALL 156
     s157() // SECTION-CALL 157
     s158() // SECTION-CALL 158
+    s159() // SECTION-CALL 159
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }

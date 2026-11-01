@@ -3031,6 +3031,10 @@ func init() {
 				rt.fail("member .%s of a class literal", name)
 			}
 			if name == "javaClass" {
+				// Unit is the undefined value here.
+				if _, isUnit := o.(jsUndefT); isUnit {
+					return w(ktJavaClass("kotlin.Unit"))
+				}
 				if jc, isStr := ktJvmClass(o).(string); isStr {
 					return w(ktJavaClass(jc))
 				}
@@ -5198,7 +5202,9 @@ func ktTupleName(v interface{}) string {
 // class a value of the type has (ktCollJvmClass). Twin of kStdJvm in
 // kotlin-interpreter.abnf and js_ktclasslit in languages/lib/kotlin-rt.metajs.
 var ktStdJvm = map[string]string{"Pair": "kotlin.Pair", "Triple": "kotlin.Triple",
-	"StringBuilder": "java.lang.StringBuilder", "Regex": "kotlin.text.Regex"}
+	"StringBuilder": "java.lang.StringBuilder", "Regex": "kotlin.text.Regex",
+	"IntRange": "kotlin.ranges.IntRange", "LongRange": "kotlin.ranges.LongRange",
+	"CharRange": "kotlin.ranges.CharRange"}
 
 // ktCall invokes a lambda argument.
 func (rt *jsrt) ktCall(f interface{}, args ...interface{}) interface{} {
@@ -11141,24 +11147,32 @@ func ktEnumDecl(v interface{}) *jsObject {
 }
 
 // ktClassOfDesc is the KClass of a declared type: the java class its binary name
-// names (a nested one: simpleName Inner, qualifiedName Outer.Inner, "class
-// Outer$Inner"; a builtin throwable's is package-qualified). Twin of kClassOfDesc
+// names, a top-level class's its own name (a nested one: simpleName Inner,
+// qualifiedName Outer.Inner, "class Outer$Inner"; a builtin throwable's is
+// package-qualified). Twin of kClassOfDesc
 // in kotlin-interpreter.abnf.
 func ktClassOfDesc(d *jsObject) *jsObject {
 	if bn, ok := d.props["__bname"].(string); ok && bn != "" {
 		return ktJavaClass(bn)
+	}
+	if n, ok := d.props["__name"].(string); ok {
+		return ktJavaClass(n)
 	}
 	return ktClassLit(d.props["__name"])
 }
 
 // ktJavaClass is `javaClass`, and a collection's KClass: a class literal that also
 // carries the JVM binary name jc (jname), which .name and toString answer.
-// simpleName is the part after the package and the enclosing class, an array's its
-// element's with "[]" (`[I` is int[]). Twin of kJavaClass in kotlin-interpreter.abnf
-// and ktJavaClass in languages/lib/kotlin-rt.metajs.
+// simpleName is the part after the package and the enclosing class ("" for an
+// anonymous class, Outer$1), an array's its element's with "[]" (`[I` is int[]).
+// Twin of kJavaClass in kotlin-interpreter.abnf and ktJavaClass in
+// languages/lib/kotlin-rt.metajs.
 func ktJavaClass(jc string) *jsObject {
 	cut := strings.LastIndexAny(jc, ".$")
 	sn := jc[cut+1:]
+	if cut >= 0 && jc[cut] == '$' && sn != "" && luAllDigits(sn) {
+		sn = ""
+	}
 	if strings.HasPrefix(jc, "[") {
 		if len(jc) == 2 {
 			sn = ktJvmPrimNames[strings.IndexByte("IJDFCZBS", jc[1])]
@@ -11198,8 +11212,28 @@ func ktKClassJava(co *jsObject, wrapper bool) *jsObject {
 			return o
 		}
 	}
+	if jt, has := ktJavaOfType[kn]; has {
+		return ktJavaClass(jt)
+	}
 	return co
 }
+
+// ktJavaOfType is the java class of a builtin kotlin type that has no value-level
+// JVM class here (kotlinc 2.2.21: `UInt::class.java` is kotlin.UInt,
+// `List::class.java` java.util.List, `IntArray::class.java` [I). Twin of
+// kJavaOfType in kotlin-interpreter.abnf and languages/lib/kotlin-rt.metajs.
+var ktJavaOfType = map[string]string{"UInt": "kotlin.UInt", "ULong": "kotlin.ULong",
+	"UByte": "kotlin.UByte", "UShort": "kotlin.UShort", "Unit": "kotlin.Unit",
+	"UIntArray": "kotlin.UIntArray", "ULongArray": "kotlin.ULongArray",
+	"UByteArray": "kotlin.UByteArray", "UShortArray": "kotlin.UShortArray",
+	"Nothing": "java.lang.Void", "Number": "java.lang.Number",
+	"CharSequence": "java.lang.CharSequence", "Comparable": "java.lang.Comparable",
+	"Iterable": "java.lang.Iterable", "List": "java.util.List", "MutableList": "java.util.List",
+	"Set": "java.util.Set", "MutableSet": "java.util.Set", "Map": "java.util.Map",
+	"MutableMap": "java.util.Map", "Collection": "java.util.Collection",
+	"MutableCollection": "java.util.Collection", "IntArray": "[I", "LongArray": "[J",
+	"DoubleArray": "[D", "FloatArray": "[F", "CharArray": "[C", "BooleanArray": "[Z",
+	"ByteArray": "[B", "ShortArray": "[S"}
 
 // ktCollJvmClass is the JVM class of a List, a Set, a Map, a values view, a
 // range, a Pair / Triple, a map entry, a StringBuilder or a Regex, "" for any
@@ -11224,6 +11258,13 @@ func ktCollJvmClass(v interface{}) string {
 	if _, _, isDict := dictParts(v); isDict {
 		return ktJvmTag(v, "java.util.LinkedHashMap")
 	}
+	if seq, isSeq := ktLazySeq(v); isSeq {
+		k, _ := ktSeqShape(seq)
+		if k == "" {
+			return "kotlin.sequences.SequencesKt__SequenceBuilderKt$sequence$$inlined$Sequence$1"
+		}
+		return "kotlin.sequences." + k + "Sequence"
+	}
 	if tup := ktTupleName(v); tup != "" {
 		return "kotlin." + tup
 	}
@@ -11231,6 +11272,59 @@ func ktCollJvmClass(v interface{}) string {
 		return ejc
 	}
 	return ktRangeClass(v)
+}
+
+// ktSeqShape is the class of a lazy sequence - sequence { } and what its
+// intermediate operations derive: the kotlin.sequences class k (Take for
+// TakeSequence, "" for the builder's anonymous one) and a Take / Drop / Sub's
+// count n. take and drop are DropTakeSequence's own, which merge into one Take,
+// Drop or SubSequence, or answer the empty sequence or the receiver itself
+// (Sequences.kt). Twin of kSeqShape in kotlin-interpreter.abnf and
+// languages/lib/kotlin-rt.metajs.
+func ktSeqShape(v *jsObject) (string, float64) {
+	op, has := v.props["op"].(string)
+	if !has {
+		return "", 0
+	}
+	switch op {
+	case "take", "drop":
+		n, _ := v.props["n"].(float64)
+		src, _ := v.props["src"].(*jsObject)
+		k, sn := ktSeqShape(src)
+		if op == "take" {
+			switch {
+			case n == 0 || k == "Empty":
+				return "Empty", 0
+			case k == "Take" || k == "Sub":
+				if n >= sn {
+					return k, sn
+				}
+				return k, n
+			case k == "Drop":
+				return "Sub", n
+			}
+			return "Take", n
+		}
+		switch {
+		case n == 0 || k == "Empty":
+			return k, sn
+		case k == "Take" || k == "Sub":
+			if n >= sn {
+				return "Empty", 0
+			}
+			return "Sub", sn - n
+		case k == "Drop":
+			return "Drop", sn + n
+		}
+		return "Drop", n
+	case "map", "onEach":
+		return "Transforming", 0
+	case "takeWhile":
+		return "TakeWhile", 0
+	case "dropWhile":
+		return "DropWhile", 0
+	}
+	return "Filtering", 0
 }
 
 // ktEntryJvmClass is the JVM class of a map entry, "" for any other value: the
@@ -11301,6 +11395,9 @@ var ktTypeNames = map[string]bool{
 	"Set": true, "MutableSet": true, "Map": true, "MutableMap": true, "Array": true,
 	"Collection": true, "Iterable": true, "Comparable": true, "IntRange": true,
 	"CharRange": true, "LongRange": true, "Regex": true, "StringBuilder": true,
+	"IntArray": true, "LongArray": true, "DoubleArray": true, "FloatArray": true,
+	"CharArray": true, "BooleanArray": true, "ByteArray": true, "ShortArray": true,
+	"UIntArray": true, "ULongArray": true, "UByteArray": true, "UShortArray": true,
 }
 
 // ----- sequence { ... }: kotlin.sequences' SequenceBuilder -----

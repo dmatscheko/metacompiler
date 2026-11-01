@@ -7351,6 +7351,18 @@ function ktJavaClass(jc) {
         i = i + 1
     }
     var sn = jc.substring(cut + 1, jc.length)
+    if (cut >= 0 && sn.length > 0) {
+        if (jc.charAt(cut) == "$") {
+            var dg = true
+            var di = 0
+            while (di < sn.length) {
+                var dc = sn.charAt(di)
+                if (dc < "0" || dc > "9") { dg = false }
+                di = di + 1
+            }
+            if (dg) { sn = "" }
+        }
+    }
     if (jc.charAt(0) == "[") {
         if (jc.length == 2) { sn = ktJvmPrimName(jc.charAt(1)) } else { sn = jc.substring(cut + 1, jc.length - 1) }
         sn = sn + "[]"
@@ -7377,8 +7389,23 @@ function ktKClassJava(co, wrapper) {
         }
         i = i + 1
     }
+    var jt = ktJavaOfType["$" + kn]
+    if (jt !== undefined) { return ktJavaClass(jt) }
     return co
 }
+// The java class of a builtin kotlin type that has no value-level JVM class here.
+// Twin of ktJavaOfType in abnf/jsrtkotlin.go, which has the rules.
+var ktJavaOfType = {"$UInt": "kotlin.UInt", "$ULong": "kotlin.ULong", "$UByte": "kotlin.UByte",
+    "$UShort": "kotlin.UShort", "$Unit": "kotlin.Unit", "$UIntArray": "kotlin.UIntArray",
+    "$ULongArray": "kotlin.ULongArray", "$UByteArray": "kotlin.UByteArray",
+    "$UShortArray": "kotlin.UShortArray", "$Nothing": "java.lang.Void",
+    "$Number": "java.lang.Number", "$CharSequence": "java.lang.CharSequence",
+    "$Comparable": "java.lang.Comparable", "$Iterable": "java.lang.Iterable",
+    "$List": "java.util.List", "$MutableList": "java.util.List", "$Set": "java.util.Set",
+    "$MutableSet": "java.util.Set", "$Map": "java.util.Map", "$MutableMap": "java.util.Map",
+    "$Collection": "java.util.Collection", "$MutableCollection": "java.util.Collection",
+    "$IntArray": "[I", "$LongArray": "[J", "$DoubleArray": "[D", "$FloatArray": "[F",
+    "$CharArray": "[C", "$BooleanArray": "[Z", "$ByteArray": "[B", "$ShortArray": "[S"}
 // The java primitive a one-letter array descriptor names (`[I` is int[]).
 function ktJvmPrimName(c) {
     var names = ["int", "long", "double", "float", "char", "boolean", "byte", "short"]
@@ -7398,11 +7425,49 @@ function ktCollJvmClass(v) {
     }
     if (ktIsSet(v)) { return ktJvmTag(v, "java.util.LinkedHashSet") }
     if (rtIsDictObj(v)) { return ktJvmTag(v, "java.util.LinkedHashMap") }
+    if (k4IsLazySeq(v)) {
+        var sk = ktSeqShape(v)["k"]
+        if (sk == "") { return "kotlin.sequences.SequencesKt__SequenceBuilderKt$sequence$$inlined$Sequence$1" }
+        return "kotlin.sequences." + sk + "Sequence"
+    }
     var tup = ktTupleName(v)
     if (tup != "") { return "kotlin." + tup }
     var ejc = ktEntryJvmClass(v)
     if (ejc != "") { return ejc }
     return ktRangeClass(v)
+}
+
+// The class of a lazy sequence as {k, n}. Twin of ktSeqShape in
+// abnf/jsrtkotlin.go, which has the rules.
+function ktSeqShape(v) {
+    var op = v["op"]
+    if (typeof op != "string") { return {k: "", n: 0} }
+    if (op == "take" || op == "drop") {
+        var n = ktNum(v["n"])
+        var s = ktSeqShape(v["src"])
+        var k = s["k"]
+        var sn = s["n"]
+        if (op == "take") {
+            if (n == 0 || k == "Empty") { return {k: "Empty", n: 0} }
+            if (k == "Take" || k == "Sub") {
+                if (n >= sn) { return s }
+                return {k: k, n: n}
+            }
+            if (k == "Drop") { return {k: "Sub", n: n} }
+            return {k: "Take", n: n}
+        }
+        if (n == 0 || k == "Empty") { return s }
+        if (k == "Take" || k == "Sub") {
+            if (n >= sn) { return {k: "Empty", n: 0} }
+            return {k: "Sub", n: sn - n}
+        }
+        if (k == "Drop") { return {k: "Drop", n: sn + n} }
+        return {k: "Drop", n: n}
+    }
+    if (op == "map" || op == "onEach") { return {k: "Transforming", n: 0} }
+    if (op == "takeWhile") { return {k: "TakeWhile", n: 0} }
+    if (op == "dropWhile") { return {k: "DropWhile", n: 0} }
+    return {k: "Filtering", n: 0}
 }
 
 // The JVM class of a map entry, "" for any other value. Twin of ktEntryJvmClass
@@ -7495,6 +7560,7 @@ function js_ktclasslit(base) {
             if (tn == "Pair" || tn == "Triple") { return ktJavaClass("kotlin." + tn) }
             if (tn == "StringBuilder") { return ktJavaClass("java.lang.StringBuilder") }
             if (tn == "Regex") { return ktJavaClass("kotlin.text.Regex") }
+            if (tn == "IntRange" || tn == "LongRange" || tn == "CharRange") { return ktJavaClass("kotlin.ranges." + tn) }
             return ktClassLit(tn)
         }
         if (base["__isclass"] === true) { return ktClassOfDesc(base) }
@@ -7539,7 +7605,9 @@ function ktClassOfDesc(d) {
     if (typeof bn == "string") {
         if (bn.length > 0) { return ktJavaClass(bn) }
     }
-    return ktClassLit(d["__name"])
+    var n = d["__name"]
+    if (typeof n == "string") { return ktJavaClass(n) }
+    return ktClassLit(n)
 }
 
 // js_ktnameval(v, "topFun") remembers the name a `::` spelled against the
@@ -10927,6 +10995,8 @@ function js_ktfget(o, name) {
         return undefined
     }
     if (name == "javaClass") {
+        // Unit is the undefined value here.
+        if (o === undefined) { return ktJavaClass("kotlin.Unit") }
         var cjc = jxkClass(o)
         if (typeof cjc == "string") { return ktJavaClass(cjc) }
     }
