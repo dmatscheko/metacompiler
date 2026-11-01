@@ -2229,8 +2229,8 @@ function vprintf($format, $values) {
 // number_format rounds half away from zero the way round() does - on the value
 // as 15 significant digits when the requested places lie inside them - and then
 // groups the integer digits by thousands.
-function number_format($num, int $decimals = 0, ?string $decimal_separator = ".", ?string $thousands_separator = ",") {
-    $f = (float)__mec_num("number_format", 1, "num", $num, "int|float");
+function number_format(float $num, int $decimals = 0, ?string $decimal_separator = ".", ?string $thousands_separator = ",") {
+    $f = $num;
     $decimal_separator ??= ".";
     $thousands_separator ??= ",";
     if ($decimals < 0) { $decimals = 0; }

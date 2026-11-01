@@ -2082,7 +2082,7 @@ function s93() {
 // coercive mode), with the parameter types of basic_functions.stub.php: a scalar
 // or a Stringable object converts, a numeric string reads as an int, null as the
 // type's zero, and anything else is the function's own TypeError, after its
-// argument count is checked. number_format and round take int|float (Z_PARAM_NUMBER).
+// argument count is checked. number_format takes a float, round int|float (Z_PARAM_NUMBER).
 // (int) and (float) of an object are 1 (zval_get_long_func, zval_get_double_func).
 class S94Str { function __toString(): string { return "S"; } }
 class S94O {}
@@ -2108,10 +2108,11 @@ function s94() {
         && s94m(fn() => htmlspecialchars($a)) === $te . "htmlspecialchars(): Argument #1 (\$string) must be of type string, array given"
         && s94m(fn() => strstr("abc", "b", $a)) === $te . "strstr(): Argument #3 (\$before_needle) must be of type bool, array given"
         && s94m(fn() => substr_count("aaa", "a", 0, $a)) === $te . "substr_count(): Argument #4 (\$length) must be of type ?int, array given");
-    check("lib3", s94m(fn() => number_format($a)) === $te . "number_format(): Argument #1 (\$num) must be of type int|float, array given"
+    check("lib3", s94m(fn() => number_format($a)) === $te . "number_format(): Argument #1 (\$num) must be of type float, array given"
         && s94m(fn() => number_format(1.5, $a)) === $te . "number_format(): Argument #2 (\$decimals) must be of type int, array given"
         && s94m(fn() => round(1.5, $a)) === $te . "round(): Argument #2 (\$precision) must be of type int, array given"
-        && number_format(1234.5, 1, $v[4], $v[4]) === "1,234.5" && number_format("1234.5") === "1,235");
+        && number_format(1234.5, 1, $v[4], $v[4]) === "1,234.5" && number_format("1234.5") === "1,235"
+        && number_format(5) === "5" && number_format(true) === "1");
     check("lib4", str_repeat("ab", $v[0]) === "ababab" && str_repeat(5, $v[1]) === "55" && str_repeat("a", $v[2]) === "aaa"
         && str_repeat("a", $v[3]) === "a" && str_repeat($v[4], 2) === "" && str_repeat(new S94Str, 2) === "SS"
         && explode(",", 12) === ["12"] && trim(1.5) === "1.5" && strstr("abc", "b", "1") === "a"

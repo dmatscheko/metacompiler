@@ -55,7 +55,8 @@ check("strict-lib-null", strictErr(fn() => trim($sv[2])), "trim(): Argument #1 (
 check("strict-lib-stringable", strictErr(fn() => ucfirst(new StrictStr)), "ucfirst(): Argument #1 (\$string) must be of type string, StrictStr given");
 check("strict-lib-float", strictErr(fn() => str_repeat("a", $sv[4])), "str_repeat(): Argument #2 (\$times) must be of type int, float given");
 check("strict-lib-bool", strictErr(fn() => strstr("abc", "b", 1)), "strstr(): Argument #3 (\$before_needle) must be of type bool, int given");
-check("strict-lib-ok", [str_repeat("a", $sv[3]), substr_count("aaa", "a", 0, $sv[2]), number_format(1.5, 1, $sv[2])], ["aa", 3, "1.5"]);
+check("strict-lib-ok", [str_repeat("a", $sv[3]), substr_count("aaa", "a", 0, $sv[2]), number_format(1.5, 1, $sv[2]), number_format($sv[1])], ["aa", 3, "1.5", "5"]);
+check("strict-lib-float-param", strictErr(fn() => number_format($sv[0])), "number_format(): Argument #1 (\$num) must be of type float, string given");
 check("strict-native", strictErr(fn() => strlen($sv[1])), "strlen(): Argument #1 (\$string) must be of type string, int given");
 check("strict-native-int", strictErr(fn() => substr("abc", $sv[0])), "substr(): Argument #2 (\$offset) must be of type int, string given");
 $sf = "strlen";
