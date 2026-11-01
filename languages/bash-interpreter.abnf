@@ -2667,10 +2667,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (it.pfx != undefined) { pfx = true }
             rest.push(it)
         }
-        if (indp && (bare || pfx)) { return paramCore(items, null) }
-        if (!indp) {
+        if (indp && (pfx || (bare && !hasIdx))) { return paramCore(items, null) }
+        if (!indp || bare) {
             // Through a nameref, the expansion is the same one written on the variable it
-            // names, built once per target.
+            // names, built once per target: ${!REF[@]} lists the target's keys.
             var plain = paramCore(items, null)
             var byRef = {}
             var pn = name
@@ -2697,14 +2697,16 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var cell = {v: "", ok: false}
         var scalarT = paramCore(items, cell)
         var byTarget = {}
-        var refName = name
+        var indName0 = name
         return function() {
             var tg = anytype
+            // ${!REF[SUB] OP ...} starts from the element of the array REF names.
+            var refName = (idxT != null && anyRef && attrOn(refVars, indName0)) ? splitSubscript(refTarget(indName0)).name : indName0
             if (idxT == null) { tg = indName(refName, null, null, false) }
             else { var raw = idxRaw(refName, idxT, idxAq0); var ik = subKeyAll(refName, raw, idxAll0); tg = indName(refName, ik, raw, (idxAll0 == null) ? (ik == "@" || ik == "*") : idxAll0 != "") }
             if (tg != null && (tg == "@" || tg == "*" || isElemRef(tg))) {
                 var key = "$" + tg
-                if (!hasOwn(byTarget, key)) { byTarget[key] = paramCore(targetItems(tg, "!" + refName, rest), null) }
+                if (!hasOwn(byTarget, key)) { byTarget[key] = paramCore(targetItems(tg, "!" + indName0, rest), null) }
                 return byTarget[key]()
             }
             cell.ok = (tg != null)
@@ -3212,6 +3214,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (!global || localFrames.length == 0) { declOne(k, v); return }
             onGlobal(names[k], function() { declOne(k, v) })
         }
+        // The nameref a declaration was retargeted from, which bash names when it refuses
+        // to convert or destroy an array or, with a value, to change a readonly variable.
+        var declOwn = ""
         // One name: its attributes, then its value (v, or the assignment's own literal).
         var declOne = function(k, v) {
             // Without -n a declaration of a nameref acts on what it refers to: attributes,
@@ -3224,7 +3229,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 if (tg != "" && tg != names[k]) {
                     var own = names[k]
                     names[k] = tg
+                    declOwn = own
                     declOneN(k, v)
+                    declOwn = ""
                     names[k] = own
                     return
                 }
@@ -3263,16 +3270,22 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // A second `local` of a name in the same call keeps its value, array and
             // attributes (bash 5.3: f() { local a=5; local a; echo $a; } prints 5).
             var fresh = localize && !localHere(names[k])
-            if ((asgs[k] != null || fresh || plus.indexOf("r") >= 0) && roRefused(names[k], (kw == "readonly" || kw == "export") ? "" : kw + ": ")) { roFail = true; return }
+            var roWho = (kw == "readonly" || kw == "export") ? "" : kw + ": "
+            var shown = (declOwn != "") ? declOwn : names[k]
+            if ((asgs[k] != null || fresh || plus.indexOf("r") >= 0) && attrOn(roVars, names[k])) {
+                diagErr(roWho + ((asgs[k] != null && roWho != "") ? shown : names[k]) + ": readonly variable\n")
+                roFail = true
+                return
+            }
             // +a of an indexed array, +A of an associative one, is refused. Twin of rt_arr_plus.
             if (!fresh && isArr(names[k]) && (arrs[arrKey(names[k])].assoc ? plus.indexOf("A") : plus.indexOf("a")) >= 0) {
-                diagErr(kw + ": " + names[k] + ": cannot destroy array variables in this way\n")
+                diagErr(kw + ": " + shown + ": cannot destroy array variables in this way\n")
                 roFail = true
                 return
             }
             // -A of an indexed array, -a of an associative one, is refused. Twin of rt_arr_conv.
             if (bareArr && !fresh && isArr(names[k]) && arrs[arrKey(names[k])].assoc != assoc && (asgs[k] == null || asgs[k].lit == null)) {
-                diagErr(kw + ": " + names[k] + ": cannot convert " + (assoc ? "indexed to associative" : "associative to indexed") + " array\n")
+                diagErr(kw + ": " + shown + ": cannot convert " + (assoc ? "indexed to associative" : "associative to indexed") + " array\n")
                 roFail = true
                 return
             }
@@ -3281,7 +3294,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // the function first, the builtin reports it again and fails. Twin of
             // rt_arr_convlit.
             if (bareArr && !fresh && isArr(names[k]) && arrs[arrKey(names[k])].assoc != assoc) {
-                var cmsg = names[k] + ": cannot convert " + (assoc ? "indexed to associative" : "associative to indexed") + " array\n"
+                var cmsg = shown + ": cannot convert " + (assoc ? "indexed to associative" : "associative to indexed") + " array\n"
                 if (fnDepth == 0) { diagErr(cmsg); abortSignal = {ret: 1, isExit: 1, soft: 1}; return }
                 diagErr((global ? getVarVal("FUNCNAME") + ": " : "") + cmsg)
                 if (!lateOnly) { diagErr(kw + ": " + cmsg) }
@@ -4983,10 +4996,11 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (it.lhs != undefined) { lhs = it } else { iop = it.iop; pre = it.pre }
         }
         return function() {
-            var key = arLhsKey(lhs)
-            var v = arLhsGet(lhs.lhs, key)
+            var ln = arLhsName(lhs)
+            var key = arLhsKey(lhs, ln)
+            var v = arLhsGet(ln, key)
             var nv = arOp((iop == "++") ? "+" : "-", v, 1)
-            arLhsSet(lhs.lhs, key, nv)
+            arLhsSet(ln, key, nv)
             return (pre == 1) ? nv : v
         }
     }
@@ -4997,15 +5011,16 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var t = items[2]
         var rc = arRecLa(at)
         return function() {
-            var key = arLhsKey(lhs)
+            var ln = arLhsName(lhs)
+            var key = arLhsKey(lhs, ln)
             var cur = anytype
             cur = 0
-            if (aop != "=") { cur = arLhsGet(lhs.lhs, key) }
+            if (aop != "=") { cur = arLhsGet(ln, key) }
             var nv = anytype
             nv = t()
             if (rc.ok && (aop == "/=" || aop == "%=") && arIsZero(nv)) { arFailAt(arPfx + rc.expr, "division by 0", rc.tok); nv = 0 }
             else if (aop != "=") { nv = arOp(aop.slice(0, aop.length - 1), cur, nv) }
-            arLhsSet(lhs.lhs, key, nv)
+            arLhsSet(ln, key, nv)
             return nv
         }
     }
@@ -5057,12 +5072,13 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // {aq} is the subscript's arithmetic text when a part of it is quoted (SubIdx).
     function mkArLhs(items) { return {lhs: items[0].lhs, sub: items[1], aq: items[2].aqa} }
     function mkArElem(items) {
-        var name = items[0].lhs, w = items[1], aq = items[2].aqa
-        return function() { return arEval(scGet(name, subKeyAr(name, idxRaw(name, w, aq)))) }
+        var name0 = items[0].lhs, w = items[1], aq = items[2].aqa
+        return function() { var name = arElemName(name0, true); return arEval(scGet(name, subKeyAr(name, idxRaw(name, w, aq)))) }
     }
     // The current value of an assignment target, and the store back into it; `key` is null
-    // for a plain name.
-    function arLhsKey(lhs) { return (lhs.sub != undefined) ? subKeyAr(lhs.lhs, idxRaw(lhs.lhs, lhs.sub, lhs.aq)) : null }
+    // for a plain name. arLhsName is the variable the target is in.
+    function arLhsName(lhs) { return arElemName(lhs.lhs, lhs.sub != undefined) }
+    function arLhsKey(lhs, name) { return (lhs.sub != undefined) ? subKeyAr(name, idxRaw(name, lhs.sub, lhs.aq)) : null }
     // An indexed array's subscript met by the arithmetic evaluator (or test -v) is an
     // expression of its own: its errors carry no command's prefix and abandon the command
     // line, (( )) and let included - bash 5.3 prints only the error for
@@ -5384,6 +5400,13 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         return v
     }
+    // NAME[SUB] (sub) through a nameref is the element of the array the nameref names.
+    // Twin of ar_name in lib/bash-rt.c and arrNameOf in bash-to-llvm-ir.abnf.
+    function arElemName(nm, sub) {
+        if (!sub || !anyRef || !attrOn(refVars, nm)) { return nm }
+        var t = refTarget(nm)
+        return (t == "") ? nm : splitSubscript(t).name
+    }
     function arName() {
         var s0 = arP
         while (arIdCh(arAt(0), arP == s0)) { arP = arP + 1 }
@@ -5465,7 +5488,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         if (cc >= 48 && cc <= 57) { return arNumber() }
         if (arIdCh(cc, true)) {
-            var nm = arName()
+            var nm = arElemName(arName(), arAt(0) == 91)
             var key = arSubscript(nm)
             if (arBad) { return 0 }
             // A name an `=` follows is not evaluated: it is the misplaced assignment the
@@ -5492,7 +5515,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             arP = arP + 2
             arWs()
             if (arIdCh(arAt(0), true)) {
-                var nm = arName()
+                var nm = arElemName(arName(), arAt(0) == 91)
                 var key = arSubscript(nm)
                 if (arBad) { return 0 }
                 return arStore(nm, key, arOp((cc == 43) ? "+" : "-", arValue(nm, key), 1))
@@ -5668,7 +5691,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             arP = save
         }
         if (op != "") {
-            var nm = arName()
+            var nm = arElemName(arName(), arAt(0) == 91)
             var key = arSubscript(nm)
             if (arBad) { return 0 }
             arWs()
@@ -5923,6 +5946,13 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // Is NAME readonly? Then says so (`bash: [who]NAME: readonly variable`). Twin of roRefused
     // in bash-to-llvm-ir.abnf.
     function roRefused(name, who) {
+        // A store through a nameref is refused by the variable it names, and names that.
+        if (anyRef && attrOn(refVars, name)) {
+            refQuiet = true
+            var rt = refTarget(name)
+            refQuiet = false
+            if (rt != "") { name = splitSubscript(rt).name }
+        }
         if (!attrOn(roVars, name)) { return false }
         diagErr(who + name + ": readonly variable\n")
         return true
@@ -6052,6 +6082,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // ${v:=w} store this way too. Answers the stored text. Twin of emitStoreAttr in
     // bash-to-llvm-ir.abnf.
     function storeAttr(name, v, bi) {
+        if (anyRef && isElemRef(name)) { var sr = splitSubscript(name); name = arElemName(sr.name, true) + "[" + sr.key + "]" }
         if (anyRef) { name = refTarget(name); if (name == "") { arithErr = true; return "" } }
         if (isElemRef(name)) { return elemRefSet(name, false, v, bi) }
         if (isArr(name)) { elemSet(name, "0", null, v); return arrGet(name, "0") }
@@ -7498,6 +7529,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 var sp = splitSubscript(args[ui])
                 // Without -n, unset acts on the variable a nameref names.
                 if (anyRef && sp.key == null && !un) { sp = splitSubscript(refTarget(sp.name)) }
+                else if (anyRef && !un) { sp = {name: splitSubscript(refTarget(sp.name)).name, key: sp.key} }
                 if (!uv && sp.key == null && isFunc(sp.name) && !isSetVar(sp.name) && !isArr(sp.name) && !attrOn(dclVars, sp.name)) {
                     setFunc(sp.name, null, null, null)
                     continue

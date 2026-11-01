@@ -320,6 +320,7 @@ int rt_varslot(char *n);
 int rt_varslot_new(char *n);
 int rt_setvar_byname(char *n, char *v, int app, int at);
 char *rt_nref_base(char *n);
+int rt_arr_marks(char *nm);
 int rt_indbr(char *v);
 char *rt_nref_end(char *n);
 int rt_unset_name(char *n);
@@ -1335,12 +1336,19 @@ long ar_number(void)
     return v;
 }
 
-/* The name at the cursor, cursor advanced past it. */
+/* The name at the cursor, cursor advanced past it. Followed by a subscript,
+ * a nameref's is the array it names. Twin of arElemName in
+ * bash-interpreter.abnf. */
 char *ar_name(void)
 {
     int s = ar_p;
+    char *nm;
+    char *t;
     while (ar_idch(ar_at(0), ar_p == s ? 1 : 0) != 0) ar_p = ar_p + 1;
-    return rt_substr(ar_s, s, ar_p - s);
+    nm = rt_substr(ar_s, s, ar_p - s);
+    if (ar_at(0) != 91 || (rt_arr_marks(nm) & 32) == 0) return nm;
+    t = rt_nref_base(nm);
+    return t[0] == 0 ? nm : t;
 }
 
 /* An indexed array's subscript met by the arithmetic evaluator is an expression
@@ -5483,15 +5491,16 @@ int rt_isassoc(char *nm) {
 }
 
 /* `declare -A` of an indexed array, `declare -a` of an associative one (as) is
- * refused with bash's diagnostic: 1, else 0. Twin of the same check in declOneN
- * in bash-interpreter.abnf. */
-int rt_arr_conv(char *kw, char *nm, int as)
+ * refused with bash's diagnostic, which names sh (the nameref a declaration of
+ * nm came through, else nm): 1, else 0. Twin of the same check in declOneN in
+ * bash-interpreter.abnf. */
+int rt_arr_conv(char *kw, char *nm, char *sh, int as)
 {
     int r = rt_ar_find(nm);
     if (r < 0 || (ar_n[r] == 0 && (ar_mk[r] & 4099) == 0)) return 0;
     if ((ar_mk[r] & 4096) != 0 && as != 0) return 0;
     if ((ar_mk[r] & 4096) == 0 && as == 0) return 0;
-    rt_berr(kw, nm, as != 0 ? "cannot convert indexed to associative array" : "cannot convert associative to indexed array");
+    rt_berr(kw, sh, as != 0 ? "cannot convert indexed to associative array" : "cannot convert associative to indexed array");
     return 1;
 }
 
@@ -5500,16 +5509,16 @@ int rt_arr_conv(char *kw, char *nm, int as)
  * function (infn) the builtin reports it again, unless kw is "" (the kind came
  * from an option word after an operand alone), and fails. Twin of the literal
  * check in declOneN in bash-interpreter.abnf. */
-int rt_arr_convlit(char *kw, char *nm, int as, char *fn, int infn)
+int rt_arr_convlit(char *kw, char *nm, char *sh, int as, char *fn, int infn)
 {
     int r = rt_ar_find(nm);
     char *m = as != 0 ? "cannot convert indexed to associative array" : "cannot convert associative to indexed array";
     if (r < 0 || (ar_n[r] == 0 && (ar_mk[r] & 4099) == 0)) return 0;
     if ((ar_mk[r] & 4096) != 0 && as != 0) return 0;
     if ((ar_mk[r] & 4096) == 0 && as == 0) return 0;
-    rt_berr(fn, nm, m);
+    rt_berr(fn, sh, m);
     if (infn == 0) { arith_err = 1; return 1; }
-    if (kw[0] != 0) rt_berr(kw, nm, m);
+    if (kw[0] != 0) rt_berr(kw, sh, m);
     return 1;
 }
 
@@ -6013,16 +6022,16 @@ int rt_arr_any(char *nm) {
 }
 
 /* `declare +a` of an indexed array or `+A` of an associative one is refused with
- * bash's diagnostic: 1, else 0. Twin of the same check in declOneN in
- * bash-interpreter.abnf. */
-int rt_arr_plus(char *kw, char *nm, int pa, int pA)
+ * bash's diagnostic, naming sh as rt_arr_conv does: 1, else 0. Twin of the same
+ * check in declOneN in bash-interpreter.abnf. */
+int rt_arr_plus(char *kw, char *nm, char *sh, int pa, int pA)
 {
     int as;
     int r = rt_ar_find(nm);
     if (r < 0 || (ar_n[r] == 0 && (ar_mk[r] & 3) == 0)) return 0;
     as = rt_isassoc(nm);
     if ((pa == 0 || as != 0) && (pA == 0 || as == 0)) return 0;
-    rt_berr(kw, nm, "cannot destroy array variables in this way");
+    rt_berr(kw, sh, "cannot destroy array variables in this way");
     return 1;
 }
 
@@ -6278,11 +6287,16 @@ char *rt_nref_name(char *n, int own)
     return e;
 }
 
-/* `unset NAME` of the nameref n acts on the variable its chain ends at. */
-int rt_unset_ref(char *n)
+/* `unset NAME` of the nameref n acts on the variable its chain ends at, which
+ * ro (8, picked by the emitter as for rt_setvar_byname) says is readonly. */
+int rt_unset_ref(char *n, int ro)
 {
     char *e = rt_nref_end(n);
     if (e == 0) return 1;
+    if ((ro & 8) != 0) {
+        rt_berr("unset", e, "cannot unset: readonly variable");
+        return 1;
+    }
     return rt_unset_name(e);
 }
 
@@ -8288,12 +8302,14 @@ char *rt_getvar_byname(char *n)
  * array, and abandon the line - unless a builtin stores (at & 32: read, printf -v),
  * where @ and * are keys of an associative array. With app, v is appended to the old
  * value (an element's key evaluated once); at & 7 is the attributes of the variable it
- * lands on (rt_attrv), which the emitter picks by rt_nref_base. Twin of elemRefSet and
- * storeAttr in bash-interpreter.abnf. */
+ * lands on (rt_attrv), which the emitter picks by rt_nref_base, and at & 8 says it is
+ * readonly: bash's "NAME: readonly variable", a refused store (rt_take_subbad). Twin of
+ * elemRefSet and storeAttr in bash-interpreter.abnf. */
 int rt_setvar_byname(char *n, char *v, int app, int at)
 {
     int i;
     int bi = at & 32;
+    int ro = at & 8;
     char *old;
     at = at & 7;
     if (nref_any != 0) {
@@ -8302,6 +8318,12 @@ int rt_setvar_byname(char *n, char *v, int app, int at)
             arith_err = 1;
             return 0;
         }
+    }
+    if (ro != 0) {
+        rt_berr("", rt_nref_base(n), "readonly variable");
+        arith_err = 1;
+        sub_bad = 1;
+        return 0;
     }
     i = rt_indbr(n);
     if (i > 0) {
@@ -8363,6 +8385,29 @@ char *rt_nref_base(char *n)
     i = rt_indbr(n);
     if (i > 0) return rt_substr(n, 0, i);
     return n;
+}
+
+/* The array an array store through the nameref n lands on (the end of its
+ * chain, less any [SUB]), made ready for it: a literal that replaces (lit 1)
+ * empties its rows and drops its scalar, and any other store makes a set scalar
+ * its element 0. A circular chain abandons the line. Twin of refAssign in
+ * bash-interpreter.abnf. */
+char *rt_nref_arr(char *n, int lit)
+{
+    char *t = rt_nref_end(n);
+    int i;
+    if (t == 0) {
+        arith_err = 1;
+        return empty;
+    }
+    i = rt_indbr(t);
+    if (i > 0) t = rt_substr(t, 0, i);
+    i = rt_varslot_new(t);
+    if (lit != 0) {
+        rt_arr_empty(t, 4112);
+        if (i >= 0) gvars[i] = &unset_marker[0];
+    } else if (i >= 0) rt_arr_adopt(t, i);
+    return t;
 }
 
 /* A name an indirection may land on: a NAME, NAME[SUB], a positional parameter
@@ -8763,7 +8808,7 @@ int rt_decl_word(char *w, int d, int x, int at, char *who)
         rt_local_new(id, d);
         at = 0;
     }
-    if (arr != 0 && who[0] != 0 && rt_arr_conv(who, nm, as) != 0) return 3;
+    if (arr != 0 && who[0] != 0 && rt_arr_conv(who, nm, nm, as) != 0) return 3;
     if (x != 0) rt_xmark(nm, x > 0 ? 1 : 0);
     if (as != 0 && (who[0] != 0 || w[j] != 0)) {
         if (d < 0) rt_arr_adopt(nm, id);

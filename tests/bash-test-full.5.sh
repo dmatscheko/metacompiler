@@ -775,6 +775,35 @@ k=21'
   r=$(declare -A s117m; e=$( (echo x"${s117m[[]-v}"y) 2>&1); s117h "$e" 'bad substitution: no closing `}'"' in x\"\${s117m[[]-v}\"y"; e=$( (echo ${s117m[[]-v}) 2>&1); s117h "$e" '${s117m[[]-v}: bad substitution'); check xq4 "$r" '1
 1'
 }
+# ===== SECTION 118: arrays through a nameref =====
+# NAME[SUB], NAME=(...), ${NAME[...]}, ${!NAME[@]}, ${#NAME[@]}, an arithmetic NAME[SUB], read
+# and printf -v into NAME[SUB] and unset 'NAME[SUB]' act on the array a nameref names. A
+# declaration refusing to convert or destroy that array, or to give a readonly one a value,
+# names the nameref; a store or an unset refused by a readonly target names the target and
+# abandons the line, or fails the builtin. Every expected value is bash 5.3's.
+s118h() { case $1 in *"$2"*) echo 1 ;; *) echo 0 ;; esac; }
+s118() {
+  local r
+  r=$(declare -A s118t; declare -n s118r=s118t; s118r[q]=2; s118r[z]=3; k=("${!s118r[@]}"); echo "${s118r[q]} ${s118t[z]} ${#k[@]} ${#s118r[@]}"; s118a=(1 2 3); declare -n s118s=s118a; s118s[5]=9; s118s+=(7); echo "${s118s[@]} ${#s118s[@]} ${!s118s[@]} ${s118s[1]} ${s118s[@]:1:2}"; unset 's118r[q]'; echo "${!s118t[@]}"; s118r=([k]=v); echo "${!s118t[@]}=${s118t[k]}"); check nra1 "$r" '2 3 2 2
+1 2 3 9 7 5 0 1 2 5 6 2 2 3
+z
+k=v'
+  r=$(s118f() { local -n p=$1; p=(x y); p[4]=t; echo "${!p[@]} ${p[-1]}"; }; s118f s118g; echo "${s118g[@]}"; declare -iu s118u=(); declare -n s118v=s118u; s118v[1]=3+4; s118v+=(2*3); echo "${s118u[@]}"; b=5; s118c=(b); declare -n s118w=s118c; echo "${!s118w[0]:-x} ${!s118w[1]-y}"); check nra2 "$r" '0 1 4 t
+x y t
+7 6
+5 y'
+  r=$(s118a=(10 20 30); declare -n s118r=s118a; echo $(( s118r[1] + 1 )); (( s118r[2] += 5 )); let 's118r[0]=s118r[0]*2'; z='s118r[0]+1'; echo "${s118a[*]} $(( z ))"; declare -A s118m=([k]=3); declare -n s118q=s118m; (( s118q[k]++ )); echo "${s118m[k]}"; read -r 's118r[4]' <<< hey; printf -v 's118r[5]' %s pv; echo "${s118a[4]} ${s118a[5]}"); check nra3 "$r" '21
+20 20 35 21
+4
+hey pv'
+  r=$(s118b=(1); declare -gn s118n=s118b; e=$(declare -gA s118n 2>&1); s118h "$e" "declare: s118n: cannot convert indexed to associative array"; e=$(declare -g +a s118n 2>&1); s118h "$e" "declare: s118n: cannot destroy array variables in this way"; readonly s118o=5; declare -gn s118p=s118o; e=$(declare -g s118p=8 2>&1); s118h "$e" "declare: s118p: readonly variable"; e=$( (s118p=6; echo no) 2>&1); s118h "$e" "s118o: readonly variable"; e=$( (read s118p <<< 7; echo "rc=$?") 2>&1); s118h "$e" "rc=1"; e=$(unset s118p 2>&1); s118h "$e" "unset: s118o: cannot unset: readonly variable"; echo "$s118o"); check nra4 "$r" '1
+1
+1
+1
+1
+1
+5'
+}
 # ===== END SECTIONS =====
 
 s90   # SECTION-CALL 90
@@ -805,5 +834,6 @@ s114  # SECTION-CALL 114
 s115  # SECTION-CALL 115
 s116  # SECTION-CALL 116
 s117  # SECTION-CALL 117
+s118  # SECTION-CALL 118
 echo "full: $checks checks, $fails failures"
 exit $fails

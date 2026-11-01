@@ -1514,7 +1514,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function storeVar(b, name, v) {
         var al = refAlias(name)
         if (al != null) { storeVar(b, al, v); return }
-        if (attrOn(refVars, name)) { var nv = gepStr(b, name); b.NewCall(rtSetByName, [nv, v, zero, refAttrs(b, nv, false)]); return }
+        if (attrOn(refVars, name)) { var nv = gepStr(b, name); b.NewCall(rtSetByName, [nv, v, zero, refAttrs(b, nv, true)]); return }
         b.NewStore(attrCase(b, name, v), varPtr(b, name))
         heapPin(b)
     }
@@ -1661,6 +1661,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // `varnames`; the emitter only fills that table in main's entry block.
     var rtSetByName = rtDecl("rt_setvar_byname", false, [1, 1, 0, 0])
     var rtNrefBase = rtDecl("rt_nref_base", true, [1])
+    var rtNrefArr = rtDecl("rt_nref_arr", true, [1, 0])
     var rtEvalAssign = rtDecl("rt_eval_assign", false, [1])
     // i32 rt_decl_word(i8* w, i32 d, i32 x, i32 at, i8* who): one computed operand of a
     // declaration, and i8* rt_decl_name(i8* w) the NAME it starts with (bash-rt.c).
@@ -1924,7 +1925,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var rtArrHas = rtDecl("rt_arr_has", false, [1, 1])
     var rtArrUnset = rtDecl("rt_arr_unset", false, [1, 1])
     var rtArrAny = rtDecl("rt_arr_any", false, [1])
-    var rtArrPlus = rtDecl("rt_arr_plus", false, [1, 1, 0, 0])
+    var rtArrPlus = rtDecl("rt_arr_plus", false, [1, 1, 1, 0, 0])
     var rtNrefBad = rtDecl("rt_nref_bad", false, [1, 1])
     var rtDeclNref = rtDecl("rt_decl_nref", false, [1, 1, 1, 0])
     var rtNrefSelfBad = rtDecl("rt_nref_self_bad", false, [1, 1])
@@ -1965,11 +1966,11 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var rtArrAkey = rtDecl("rt_arr_akey", true, [1, 1, 1, 0])
     var rtTakeSubbad = rtDecl("rt_take_subbad", false, [])
     var rtArrAmark = rtDecl("rt_arr_amark", false, [1])
-    var rtArrConv = rtDecl("rt_arr_conv", false, [1, 1, 0])
-    var rtArrConvLit = rtDecl("rt_arr_convlit", false, [1, 1, 0, 1, 0])
+    var rtArrConv = rtDecl("rt_arr_conv", false, [1, 1, 1, 0])
+    var rtArrConvLit = rtDecl("rt_arr_convlit", false, [1, 1, 1, 0, 1, 0])
     var rtArrEmpty = rtDecl("rt_arr_empty", false, [1, 0])
     var rtUnsetName = rtDecl("rt_unset_name", false, [1])
-    var rtUnsetRef = rtDecl("rt_unset_ref", false, [1])
+    var rtUnsetRef = rtDecl("rt_unset_ref", false, [1, 0])
     var rtNmark = rtDecl("rt_nmark", false, [1, 0])
     var rtNrefName = rtDecl("rt_nref_name", true, [1, 0])
     var rtIsAssoc = rtDecl("rt_isassoc", false, [1])
@@ -2272,9 +2273,20 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (!indp || bare || pfx) {
             var pc = paramCore(items, null)
             if (!hasIdx || pfx) { return pc }
+            // Through a nameref, NAME[SUB] is the element of the array it names, found when
+            // it runs (rt_nref_base), as an indirection's is.
+            var rcell = {tg: null, nm: null, sub: null}
+            var ritems = []
+            for (i = 0; i < items.length; i++) { ritems.push(items[i]) }
+            ritems.push({rtNm: 1})
+            var rpc = paramCore(ritems, rcell)
             var pcFn = pc.fn
             var pcName = name
-            pc.fn = function(b) { if (attrOn(refVars, pcName)) { refFail() }; return pcFn(b) }
+            pc.fn = function(b) {
+                if (!attrOn(refVars, pcName)) { return pcFn(b) }
+                rcell.nm = b.NewCall(rtNrefBase, gepStr(b, pcName))
+                return rpc.fn(b)
+            }
             return pc
         }
         var idxW = hasIdx ? wordObjs[0] : null
@@ -3257,9 +3269,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return function(b) {
             var rk = arLhsKey(b, lhs)
             b = rk.b
-            var v = arLhsGet(b, lhs.lhs, rk.k)
+            var v = arLhsGet(b, lhs.lhs, rk)
             var nv = (iop == "++") ? b.NewAdd(v, one64) : b.NewSub(v, one64)
-            b = arLhsSet(b, lhs.lhs, rk.k, nv)
+            b = arLhsSet(b, lhs.lhs, rk, nv)
             return {b: b, v: (pre == 1) ? nv : v}
         }
     }
@@ -3272,7 +3284,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var rk = arLhsKey(b, lhs)
             b = rk.b
             // Plain = does not read the target: `x=q; (( x = 5 ))` is no recursion error.
-            var cur = (aop != "=") ? arLhsGet(b, lhs.lhs, rk.k) : null
+            var cur = (aop != "=") ? arLhsGet(b, lhs.lhs, rk) : null
             var r = t(b)
             b = r.b
             var nv = r.v
@@ -3281,7 +3293,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 b = res.b
                 nv = res.v
             }
-            b = arLhsSet(b, lhs.lhs, rk.k, nv)
+            b = arLhsSet(b, lhs.lhs, rk, nv)
             return {b: b, v: nv}
         }
     }
@@ -3329,29 +3341,38 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function mkArElem(items) {
         var name = items[0].lhs, w = items[1], aq = items[2].aqa
         return function(b) {
-            var rk = subKeyOf(b, name, w, null, false, aq, true)
-            return {b: rk.b, v: rk.b.NewCall(rtArith, rk.b.NewCall(rtScGet, [gepStr(rk.b, name), rk.k]))}
+            var nmv = arrNameOf(b, name)
+            var rk = subKeyOf(b, name, w, nmv, false, aq, true)
+            return {b: rk.b, v: rk.b.NewCall(rtArith, rk.b.NewCall(rtScGet, [(nmv != null) ? nmv : gepStr(rk.b, name), rk.k]))}
         }
     }
-    // An assignment target's key ({b, k}, k null for a plain name), its value, and the store.
+    // The array NAME[SUB] is in, as an i8*, when NAME is a nameref: the array it names
+    // (rt_nref_base); else null, for the name itself. Twin of arElemName in
+    // bash-interpreter.abnf.
+    function arrNameOf(b, name) { return attrOn(refVars, name) ? b.NewCall(rtNrefBase, gepStr(b, name)) : null }
+    // An assignment target's key ({b, k, nm}: k null for a plain name, nm as arrNameOf), its
+    // value, and the store.
     function arLhsKey(b, lhs) {
-        if (lhs.sub == undefined) { return {b: b, k: null} }
-        return subKeyOf(b, lhs.lhs, lhs.sub, null, false, lhs.aq, true)
+        if (lhs.sub == undefined) { return {b: b, k: null, nm: null} }
+        var nmv = arrNameOf(b, lhs.lhs)
+        var rk = subKeyOf(b, lhs.lhs, lhs.sub, nmv, false, lhs.aq, true)
+        return {b: rk.b, k: rk.k, nm: nmv}
     }
-    function arLhsGet(b, name, k) {
-        if (k == null) { return b.NewCall(rtArith, varString(b, name)) }
-        return b.NewCall(rtArith, b.NewCall(rtScGet, [gepStr(b, name), k]))
+    function arLhsGet(b, name, rk) {
+        if (rk.k == null) { return b.NewCall(rtArith, varString(b, name)) }
+        return b.NewCall(rtArith, b.NewCall(rtScGet, [(rk.nm != null) ? rk.nm : gepStr(b, name), rk.k]))
     }
     // Nothing is stored once an error has been raised: bash abandons the whole expression,
     // so `(( w = 2, w2 = 1/0 ))` sets w alone. Twin of arLhsSet in bash-interpreter.abnf.
-    function arLhsSet(b, name, k, v) {
+    function arLhsSet(b, name, rk, v) {
+        var k = rk.k
         var st = curF.NewBlock(""), jb = curF.NewBlock("")
         b.NewCondBr(b.NewICmp(llvm.enum.IPredEQ, b.NewLoad(i32, gArithErr), zero), st, jb)
         // A readonly name is an arithmetic error: (( )) and let fail, $(( )) abandons the line.
         if (roRefused(st, name, "")) { st.NewStore(one, gArithErr) }
         else if (k == null) { storeVar(st, name, st.NewCall(rtInt2str, v)) }
         else {
-            st.NewCall(rtArrIset, [gepStr(st, name), k, st.NewCall(rtInt2str, v)])
+            st.NewCall(rtArrIset, [(rk.nm != null) ? rk.nm : gepStr(st, name), k, st.NewCall(rtInt2str, v)])
         }
         st.NewBr(jb)
         return jb
@@ -3685,8 +3706,14 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         b = emitAbortCheck(b)
         // A replacing literal drops a scalar of the name and keeps the array's kind; an
-        // appending one keeps the scalar as element 0.
-        if (!append) { b.NewCall(rtArrEmpty, [nm, llvm.constant.NewInt(i32, 4112)]); storeVarRaw(b, name, unsetPtr(b)) }
+        // appending one keeps the scalar as element 0. Through a nameref, rt_nref_arr does
+        // both to the array it names.
+        if (attrOn(refVars, name)) {
+            nm = b.NewCall(rtNrefArr, [nm, append ? zero : one])
+            b = emitAbortCheck(b)
+            assoc = 2
+        }
+        else if (!append) { b.NewCall(rtArrEmpty, [nm, llvm.constant.NewInt(i32, 4112)]); storeVarRaw(b, name, unsetPtr(b)) }
         else if (assoc != 1) { b.NewCall(rtArrAdopt, [nm, llvm.constant.NewInt(i32, getVarId(name))]) }
         // A literal makes the name a SET array even with no element (rt_arr_mark).
         b.NewCall(rtArrMark, nm)
@@ -3716,7 +3743,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var w = null
             if (!kvMode) {
                 if (vals[i].k != null) { emitAkSet(abox, name, nm, vals[i].k, vals[i].v, vals[i].src, stop); continue }
-                emitDiag(abox.b, gepStr(abox.b, name + ": " + (litDecl ? bashSq(vals[i].src) : vals[i].src) + ": must use subscript when assigning associative array\n"))
+                emitDiag(abox.b, abox.b.NewCall(rtStrcat, [nm, gepStr(abox.b, ": " + (litDecl ? bashSq(vals[i].src) : vals[i].src) + ": must use subscript when assigning associative array\n")]))
                 abox.b.NewStore(one, gArithErr)
                 abox.b.NewBr(stop)
                 ended = true
@@ -3737,8 +3764,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // (b=([3]=c [1]=a b) is 1 2 3 = a b c), so the next index is threaded through
         // rt_arr_litkey / rt_arr_litwords. Twin of applyArrayLit in bash-interpreter.abnf.
         var next = append ? b.NewCall(rtArrNext, nm) : zero64
-        var at = elemAttrs(name)
-        var atC = llvm.constant.NewInt(i32, at)
+        var atC = attrOn(refVars, name) ? refAttrs(b, gepStr(b, name), false) : llvm.constant.NewInt(i32, elemAttrs(name))
         for (i = 0; i < vals.length; i++) {
             if (vals[i].k != null) { next = b.NewCall(rtArrLitKey, [nm, vals[i].k, vals[i].v, next, atC]) }
             else { next = b.NewCall(rtArrLitWords, [nm, vals[i].v, next, atC]) }
@@ -3767,26 +3793,28 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // too. Only an assignment statement reads an indexed array's SUB as arithmetic text
     // (AsgIdx), the word it expands chosen when it runs unless the name may be associative.
     // Twin of asgKey in bash-interpreter.abnf.
-    function asgKeyOf(b, a, assoc) {
-        var r = asgSubOf(b, a, assoc)
+    // nmv: the array's name as an i8*, for a store through a nameref; else null.
+    function asgKeyOf(b, a, assoc, nmv) {
+        var r = asgSubOf(b, a, assoc, nmv)
         var whole = (a.isrc == "") ? llvm.constant.NewInt(i32, 2) : ((a.isrc == "@" || a.isrc == "*") ? one : zero)
         var lbl = (a.xl == true) ? r.b.NewCall(rtStrcat, [r.b.NewCall(rtStrcat, [gepStr(r.b, a.name + "["), r.v]), gepStr(r.b, "]")])
             : gepStr(r.b, a.name + "[" + a.isrc + "]")
-        return {b: r.b, v: r.v, k: r.b.NewCall(rtArrAkey, [gepStr(r.b, a.name), r.v, lbl, whole])}
+        return {b: r.b, v: r.v, k: r.b.NewCall(rtArrAkey, [(nmv != null) ? nmv : gepStr(r.b, a.name), r.v, lbl, whole])}
     }
     // Has an assignment statement's SUB arithmetic text of its own (AsgIdx)?
     function subAq(a, assoc) { return a.aqT != null && a.xl != true && !assoc }
-    function asgSubOf(b, a, assoc) {
+    function asgSubOf(b, a, assoc, nmv) {
         if (!subAq(a, assoc)) { return evalWord(b, a.idxT) }
-        return subTextOf(b, a.name, a.idxT, a.aqT)
+        return subTextOf(b, a.name, a.idxT, a.aqT, nmv)
     }
     // The text of subscript word w of NAME: an indexed array's arithmetic text aq when a part
     // of it is quoted (null: none), else the word. Twin of idxRaw in bash-interpreter.abnf.
-    function subTextOf(b, name, w, aq) {
+    // nmv as for asgKeyOf.
+    function subTextOf(b, name, w, aq, nmv) {
         if (aq == null) { return evalWord(b, w) }
-        if (!maybeAssoc(name)) { return evalWord(b, aq) }
+        if (nmv == null && !maybeAssoc(name)) { return evalWord(b, aq) }
         var asB = curF.NewBlock(""), ixB = curF.NewBlock(""), jB = curF.NewBlock("")
-        b.NewCondBr(b.NewICmp(llvm.enum.IPredNE, b.NewCall(rtIsAssoc, gepStr(b, name)), zero), asB, ixB)
+        b.NewCondBr(b.NewICmp(llvm.enum.IPredNE, b.NewCall(rtIsAssoc, (nmv != null) ? nmv : gepStr(b, name)), zero), asB, ixB)
         var r1 = evalWord(asB, w)
         r1.b.NewBr(jB)
         var r2 = evalWord(ixB, aq)
@@ -3800,8 +3828,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function emitAssign(b, a, assoc, mk) {
         var nm = gepStr(b, a.name)
         var viaRef = attrOn(refVars, a.name)
-        if (viaRef && (a.lit != null || a.idxT != null)) { refFail() }
-        var al = refAlias(a.name)
+        var al = (a.lit == null && a.idxT == null) ? refAlias(a.name) : null
         if (al != null) { return emitAssign(b, {name: al, op: a.op, idxT: null, lit: null, valT: a.valT}, assoc, mk) }
         if (a.lit != null) { return emitArrayLit(b, a.name, a.lit, a.op == "+=", assoc ? 1 : (maybeAssoc(a.name) ? 2 : 0)) }
         var v = emptyPtr(b)
@@ -3811,16 +3838,16 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             v = (a.valT.f == true) ? wordJoin(b, r.v) : r.v
             if (a.valT.c == undefined && a.valT.done != true) { b = emitAbortCheck(b) }
         }
-        if (viaRef) {
+        if (viaRef && a.idxT == null) {
             var tg = gepStr(b, a.name)
-            b.NewCall(rtSetByName, [tg, v, (a.op == "+=") ? one : zero, refAttrs(b, tg, false)])
+            b.NewCall(rtSetByName, [tg, v, (a.op == "+=") ? one : zero, refAttrs(b, tg, true)])
             // A builtin's store refused (rt_nref_self_bad) fails the builtin instead.
             if (a.soft != undefined) { b.NewStore(b.NewOr(b.NewLoad(i32, a.soft), b.NewCall(rtTakeSubbad)), a.soft) }
             return emitAbortCheck(b)
         }
         if (a.idxT != null) {
             // An associative key that may expand to nothing goes through rt_arr_akey.
-            var lit = a.isrc != "" && a.idxT.c != undefined && (assoc ? a.idxT.c != "" : isIndexLit(a.idxT.c) && !subAq(a, assoc))
+            var lit = !viaRef && a.isrc != "" && a.idxT.c != undefined && (assoc ? a.idxT.c != "" : isIndexLit(a.idxT.c) && !subAq(a, assoc))
             // A builtin's store (a.soft, an i32 slot: declare, local, read, printf -v): a
             // refused subscript sets the slot and stores nothing, where an assignment abandons
             // the line; the subscript's arithmetic errors carry no builtin's prefix. Twin of
@@ -3828,7 +3855,12 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var soft = a.soft != undefined && !lit
             var pfx = soft ? b.NewLoad(i8ptr, gArPfx) : null
             if (soft) { b.NewStore(emptyPtr(b), gArPfx) }
-            var rk = lit ? subKeyOf(b, a.name, a.idxT, null) : asgKeyOf(b, a, assoc)
+            // Through a nameref, the element is the named array's (rt_nref_arr).
+            if (viaRef) {
+                nm = b.NewCall(rtNrefArr, [nm, zero])
+                b = emitAbortCheck(b)
+            }
+            var rk = lit ? subKeyOf(b, a.name, a.idxT, null) : asgKeyOf(b, a, assoc, viaRef ? nm : null)
             b = rk.b
             var skipB = null
             if (soft) {
@@ -3841,7 +3873,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 b = setB
             }
             b = emitAbortCheck(b)
-            b.NewCall(rtArrAdopt, [nm, llvm.constant.NewInt(i32, getVarId(a.name))])
+            if (!viaRef) { b.NewCall(rtArrAdopt, [nm, llvm.constant.NewInt(i32, getVarId(a.name))]) }
             var ebox = {b: b}
             emitElemSet(ebox, a.name, nm, rk.k, (a.op == "+=") ? b.NewCall(rtArrGet, [nm, rk.k]) : null, v, assoc, mk)
             if (skipB == null) { return ebox.b }
@@ -3916,7 +3948,11 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function emitElemSet(box, name, nm, key, old, v, assoc, mk) {
         var b = box.b
         var at = elemAttrs(name)
-        if (at != 0) { v = b.NewCall(rtAttrv, [(old == null) ? nullStr : old, v, llvm.constant.NewInt(i32, at)]) }
+        if (attrOn(refVars, name)) {
+            v = b.NewCall(rtAttrv, [(old == null) ? nullStr : old, v, refAttrs(b, gepStr(b, name), false)])
+            b = emitAbortCheck(b)
+        }
+        else if (at != 0) { v = b.NewCall(rtAttrv, [(old == null) ? nullStr : old, v, llvm.constant.NewInt(i32, at)]) }
         else if (old != null) { v = b.NewCall(rtStrcat, [old, v]) }
         if ((at & 1) != 0) { b = emitAbortCheck(b) }
         if (mk != null) { b.NewCall(rtArrKeep, [mk.a, mk.l, nm, key, v, assoc ? one : zero]) }
@@ -3984,6 +4020,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             for (k = 0; k < as.length; k++) {
                 // A readonly name abandons the command line, as an arithmetic error does.
                 if (roRefused(b, as[k].name, "")) { b.NewStore(one, gArithErr); return emitAbortCheck(b) }
+                b = refRoAbort(b, as[k].name)
                 b = emitAssign(b, as[k], false, mk)
             }
             asgKept = kept
@@ -4235,6 +4272,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // names no variable (bashRefBad, rt_nref_bad), or +a / +A finding an array it may not
         // take apart (a fresh local is no array yet). Twin of the same checks in declOne and
         // declOneN in bash-interpreter.abnf.
+        // The nameref a declaration was retargeted from, which bash names when it refuses
+        // to convert or destroy an array or, with a value, to change a readonly variable.
+        var declOwn = ""
         var declOne = function(b, j, v) {
             var a = asgs[j]
             var refChk = isRef && a != null && a.lit == null && a.idxT == null
@@ -4254,18 +4294,21 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 var own = names[j]
                 names[j] = tg
                 if (a != null) { asgs[j] = {name: tg, op: a.op, idxT: a.idxT, lit: a.lit, valT: a.valT, isrc: a.isrc, lbl: a.lbl} }
+                declOwn = own
                 b = declOne(b, j, v)
+                declOwn = ""
                 names[j] = own
                 asgs[j] = a
                 return b
             }
             var bad = null
+            var shown = gepStr(b, (declOwn != "") ? declOwn : names[j])
             if (refChk) { bad = b.NewCall(rtNrefBad, [gepStr(b, kw), v]) }
-            else if (plusArr && !fresh) { bad = b.NewCall(rtArrPlus, [gepStr(b, kw), gepStr(b, names[j]), (plus.indexOf("a") >= 0) ? one : zero, (plus.indexOf("A") >= 0) ? one : zero]) }
-            else if (bareArr && !fresh && (a == null || a.lit == null)) { bad = b.NewCall(rtArrConv, [gepStr(b, kw), gepStr(b, names[j]), assoc ? one : zero]) }
+            else if (plusArr && !fresh) { bad = b.NewCall(rtArrPlus, [gepStr(b, kw), gepStr(b, names[j]), shown, (plus.indexOf("a") >= 0) ? one : zero, (plus.indexOf("A") >= 0) ? one : zero]) }
+            else if (bareArr && !fresh && (a == null || a.lit == null)) { bad = b.NewCall(rtArrConv, [gepStr(b, kw), gepStr(b, names[j]), shown, assoc ? one : zero]) }
             else if (bareArr && !fresh) {
                 var fnP = (global && curFrame != null) ? loadVar(b, "FUNCNAME") : emptyPtr(b)
-                bad = b.NewCall(rtArrConvLit, [gepStr(b, lateOnly ? "" : kw), gepStr(b, names[j]), assoc ? one : zero, fnP, (curFrame != null) ? one : zero])
+                bad = b.NewCall(rtArrConvLit, [gepStr(b, lateOnly ? "" : kw), gepStr(b, names[j]), shown, assoc ? one : zero, fnP, (curFrame != null) ? one : zero])
             }
             if (bad == null) { return declOneBody(b, j, v) }
             var okB = curF.NewBlock(""), badB = curF.NewBlock(""), endB = curF.NewBlock("")
@@ -4298,7 +4341,12 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     return b
                 }
             }
-            if ((asgs[j] != null || fresh || plus.indexOf("r") >= 0) && roRefused(b, names[j], (kw == "readonly" || kw == "export") ? "" : kw + ": ")) { roFail = true; return b }
+            var roWho = (kw == "readonly" || kw == "export") ? "" : kw + ": "
+            if ((asgs[j] != null || fresh || plus.indexOf("r") >= 0) && attrOn(roVars, names[j])) {
+                emitDiag(b, gepStr(b, roWho + ((asgs[j] != null && roWho != "" && declOwn != "") ? declOwn : names[j]) + ": readonly variable\n"))
+                roFail = true
+                return b
+            }
             // The attribute undo record is owed to a SUBSHELL as well as to a function body:
             // `n=5; ( declare -i n; n=2+3 )` leaves n a plain string. -g does not exempt it, which is
             // why subDepth is tested beside `localize` and not inside it.
@@ -4338,7 +4386,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (plus.indexOf("u") >= 0) { upVars["$" + names[j]] = false }
             if (plus.indexOf("l") >= 0) { loVars["$" + names[j]] = false }
             if (plus.indexOf("n") >= 0) { refVars["$" + names[j]] = false; b.NewCall(rtNmark, [gepStr(b, names[j]), zero]) }
-            if (isRef && isArray) { refFail() }
+            if (isRef && isArray) { fail("a nameref declared with -a or -A is not supported by this compiler") }
             // The value of a declaration with -n is the reference's own: the name it refers to.
             if (isRef) { refVars["$" + names[j]] = false }
             if (setRo) { roVars["$" + names[j]] = true }
@@ -4704,14 +4752,15 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // `declare -n` / `local -n`: a NAMEREF, lexical like the others. A read (varString), an
     // assignment (storeVar, emitAssign) and an unset of the name act on the variable its value
     // names, through rt_getvar_byname / rt_setvar_byname; declare -p, ${!REF} (the name),
-    // `unset -n` and a declaration with -n act on the reference itself. An array through a
-    // nameref is not supported. Twin of refTarget in bash-interpreter.abnf. The entry is the
+    // `unset -n` and a declaration with -n act on the reference itself; an element or an array
+    // literal acts on the array it names (rt_nref_base, rt_nref_arr). Twin of refTarget in
+    // bash-interpreter.abnf. The entry is the
     // target's name where the declaration wrote it literally, and an assignment through the
     // reference then is one to that name, under its attributes (refAlias).
     var refVars = {}
     function refAlias(name) {
         var t = attrOn(refVars, name)
-        if (typeof t != "string" || t == name || attrOn(refVars, t)) { return null }
+        if (typeof t != "string" || t == name || attrOn(refVars, t) || attrOn(roVars, t)) { return null }
         return t
     }
     // The variable a chain of namerefs with targets known here ends at, else null.
@@ -4726,7 +4775,24 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         return attrOn(refVars, t) ? null : t
     }
-    function refFail() { fail("an array through a nameref is not supported by this compiler") }
+    // An assignment statement through the nameref NAME to a readonly variable, which is
+    // known when it runs (refAttrs), says so naming that variable and abandons the line.
+    // Twin of the nameref arm of roRefused in bash-interpreter.abnf.
+    function refRoAbort(b, name) {
+        if (!attrOn(refVars, name)) { return b }
+        var anyRo = false
+        var k
+        for (k = 0; k < varIdList.length; k++) { if (attrOn(roVars, varIdList[k])) { anyRo = true } }
+        if (!anyRo) { return b }
+        var nv = gepStr(b, name)
+        var ro = b.NewICmp(llvm.enum.IPredNE, b.NewAnd(refAttrs(b, nv, true), llvm.constant.NewInt(i32, 8)), zero)
+        var roB = curF.NewBlock(""), okB = curF.NewBlock("")
+        b.NewCondBr(ro, roB, okB)
+        emitDiag(roB, roB.NewCall(rtStrcat, [roB.NewCall(rtNrefBase, nv), gepStr(roB, ": readonly variable\n")]))
+        roB.NewStore(one, gArithErr)
+        emitAbortCheck(roB).NewBr(okB)
+        return okB
+    }
     // Is NAME readonly here? Then the code says so on stderr. Twin of roRefused in
     // bash-interpreter.abnf.
     function roRefused(b, name, who) {
@@ -4972,9 +5038,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // met by the arithmetic evaluator, whose subscript errors abandon the line
     // (rt_arr_keyar, ar_subeval).
     function subKeyOf(b, name, w, nmv, elem, aq, ar) {
-        if (aq != undefined && nmv == null) {
-            var ra = subTextOf(b, name, w, aq)
-            return {b: ra.b, v: ra.v, k: ra.b.NewCall((ar == true) ? rtArrKeyAr : ((elem == true) ? rtArrKey1 : rtArrKey), [gepStr(ra.b, name), ra.v])}
+        if (aq != undefined) {
+            var ra = subTextOf(b, name, w, aq, nmv)
+            return {b: ra.b, v: ra.v, k: ra.b.NewCall((ar == true) ? rtArrKeyAr : ((elem == true) ? rtArrKey1 : rtArrKey), [(nmv != null) ? nmv : gepStr(ra.b, name), ra.v])}
         }
         var r = evalWord(b, w)
         var key = r.v
@@ -5738,7 +5804,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             b.NewStore(emptyPtr(b), gArPfx)
         } else {
             // A computed name is stored by name at run time (rt_setvar_byname, as a builtin).
-            b.NewCall(rtSetByName, [rdv, b.NewCall(rtPfValue, out), zero, b.NewOr(refAttrs(b, rdv, false), llvm.constant.NewInt(i32, 32))])
+            b.NewCall(rtSetByName, [rdv, b.NewCall(rtPfValue, out), zero, b.NewOr(refAttrs(b, rdv, true), llvm.constant.NewInt(i32, 32))])
             b.NewStore(b.NewCall(rtTakeSubbad), subP)
             b = emitAbortCheck(b)
         }
@@ -6759,7 +6825,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     var sp0 = splitSubscript(argTs[uk].c)
                     // Without -n, unset acts on the variable a nameref names.
                     if (sp0.key == null && !un && attrOn(refVars, sp0.name)) {
-                        ust = b.NewOr(ust, b.NewCall(rtUnsetRef, gepStr(b, sp0.name)))
+                        var urf = gepStr(b, sp0.name)
+                        ust = b.NewOr(ust, b.NewCall(rtUnsetRef, [urf, refAttrs(b, urf, true)]))
                         continue
                     }
                     if (sp0.key == null && attrOn(roVars, sp0.name)) {
@@ -6788,7 +6855,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                                                   llvm.constant.NewInt(i32, getVarId("FUNCNAME"))])
                         }
                     } else {
-                        ust = b.NewOr(ust, b.NewCall(rtArrUnset, [gepStr(b, sp0.name), gepStr(b, sp0.key)]))
+                        // Without -n, an element of the array a nameref names.
+                        var unm = gepStr(b, sp0.name)
+                        if (!un && attrOn(refVars, sp0.name)) { unm = b.NewCall(rtNrefBase, unm) }
+                        ust = b.NewOr(ust, b.NewCall(rtArrUnset, [unm, gepStr(b, sp0.key)]))
                         // An arithmetic error in the subscript abandons the line at once. Twin
                         // of the unset arm of runCommand in bash-interpreter.abnf.
                         b = emitAbortCheck(b)
