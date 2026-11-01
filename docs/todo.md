@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1084** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1085** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -150,14 +150,14 @@ Spec-only (php-src). All engines unless noted:
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-1079 bash: quoted indexed subscripts on reads; literal kind conversion; small diagnostics · P3 · SH · IN PROGRESS (SH worker, round 31) [V]
-Oracle /opt/homebrew/bin/bash 5.3; all engines:
-- reads with a quoted indexed subscript: `${ia['1']}`, `${ia[$'2']}`, `$(( ia['1'] ))` -> "'1': arithmetic syntax error: operand expected (error token is "'1'")", command fails; ours returns a value. Needs the assignment-side treatment in the parameter-expansion subscript path (PeIdxRef, subKeyAll/subKeyOf).
-- `a=(1); declare -A a=([x]=1)`: top level prints "a: cannot convert indexed to associative array" (no builtin prefix) and abandons the line; in a function the message prints twice, status 1, continues. Ours converts silently.
-- `ia[1'']=x`: bash "invalid arithmetic operator (error token is "''")"; ours "arithmetic syntax error in expression" (stderr only).
-- `read 'ia[$'"'"'0'"'"']'`: bash's error token is `$'0'` (unexpanded), ours `$0` (stderr only).
-- compiled `echo A $x B` with x empty prints "A  B" (two spaces); interpreter and bash "A B" - emitEcho's static join in bash-to-llvm-ir.abnf joins even when an unquoted word yields no field.
-- nullglob not modelled.
+### T-1084 bash: subscript leftovers (${a[@]:'1'}, [[ -v a[@] ]], quoted computed declare); option after operand · P3 · SH · OPEN [V]
+Oracle /opt/homebrew/bin/bash 5.3:
+- `${ia[@]:'1'}` -> arithmetic syntax error; ours "bad substitution" (ArOff rejects quotes).
+- `[[ -v "ia[@]" ]]`: compiled answers 1, bash 0 (true iff the array has any element); interpreter right only by accident (treats @ as index 0 - wrong for an array without element 0).
+- computed declare operand with a quoted subscript (`declare 'ia[\1]=w'`, `declare 'ia[$'0']=w'`) stores instead of erroring (bashDeclText re-spells the operand as code).
+- `declare w=7 -A e=([z]=3)`: bash still applies -A after an operand (w=7, then the conversion/assignment); ours "`-A': not a valid identifier".
+- stderr-only token wording: `$(( ia[$'1'] ))` token `'1'` vs bash `$'1'`; single-quoted part holding `$` gives `'$x'` vs bash `'1'`; `${ia["'1'"]}` bash token `\'1\'`; `${m[[]-none}` wording.
+- nullglob/failglob need a pathname-expansion model (no filesystem model in any engine) - decide scope before starting.
 POLICY (needs user decision, do not start without it): engines model a UTF-8 locale; under LC_ALL=C non-ASCII keys in declare -p are $'..'-quoted by bash; 43 ratchet checks assert UTF-8 behaviour.
 
 # C — C subset
@@ -1144,6 +1144,7 @@ T-1075 php: exception trace frames; file/line of engine-raised errors; __destruc
 T-1077 kotlin: reified type parameter as extension receiver; Class.kotlin — DONE (KT r25, b9c0859b): generic extensions recorded (ExtFun never called ktNoteGeneric); reified extension type args inferred from the receiver's static type (T., List<T>., Map<K,V>., T?.) in both engines incl. after field reads; Class.kotlin maps java classes back to KClasses in all engines; 4 legs = kotlinc
 T-1078 ruby: Lazy eager Enumerable surface; Lazy freeze/clone/dup; Enumerator-based Lazy #each value — DONE (RB r47, f9f45b06): Lazy answers MRI's eager Enumerable surface (sum/count/min/max/sort/reduce/group_by/partition/...), early-stopping scans on endless sources (find/detect/include?/any?/all?/find_index), lazy zip/uniq/flat_map/grep/drop/chunk_while/slice_when/with_index, freeze/clone/dup, #each value of Enumerator-based Lazy; 4 legs = ruby 2.6
 T-1080 php: trace frames for native builtins / generators; string callbacks in compiled traces — DONE (PHP r44, 3c4870f0): native builtins in progress get trace frames (opcode-compiled specials skipped per zend_try_compile_special_func), generator frames hang under foreach/yield-from/Generator->m() resumers, compiled string callbacks stay 'cb', cloBind keeps uses-$this; 3 legs agree with php-src; bench +0.02% paired
+T-1079 bash: quoted indexed subscripts on reads; literal kind conversion; small diagnostics — PARTIAL→split (SH r31, e639c597): quoted indexed subscripts on reads are arithmetic errors that abandon the line (${ia['1']}, $((..)), unset/test/read), nested subscripts, finer arithmetic diagnostics, literal kind-conversion error (top level vs function forms), compiled echo field join; 4 legs = bash 5.3 incl. stderr. nullglob needs a glob model (own ticket); LC_ALL=C policy carried over
 
 # Settled — do not re-open
 
