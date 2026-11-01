@@ -3044,13 +3044,15 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // a select with no arm ready. A goroutine waits forever, so it is abandoned:
     // GO_PARK unwinds it past every frame without running its defers and the drain
     // that runs it drops it, leaving the goroutine that waits on it to decide. Main
-    // lets the others run, then deadlocks. Twins: goBlock in lib/go-rt.metajs and
-    // abnf/jsrtgolang.go.
+    // lets the others run, then deadlocks: go's runtime fatal error, on stderr with
+    // exit status 2 (its goroutine trace after a blank line is not reproduced).
+    // Twins: goBlock in lib/go-rt.metajs and abnf/jsrtgolang.go.
     var GO_PARK = {__gopark: true}
     function goBlock() {
         if (goDepth > 0) { throw GO_PARK }
         goDrain()
-        fail("all goroutines are asleep - deadlock")
+        eprintln("fatal error: all goroutines are asleep - deadlock!")
+        exit(2)
     }
     // Runs every queued goroutine to completion, in spawn order. A goroutine that
     // spawns another appends to the same queue and is picked up by the same drain.

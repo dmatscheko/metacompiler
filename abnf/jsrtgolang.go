@@ -3767,11 +3767,13 @@ type goParkSignal struct{}
 // goBlock: an operation that cannot proceed with nothing left to run (a nil
 // channel, an empty one after a drain, a select with no arm ready). A goroutine
 // is abandoned, its deferred calls unrun; main lets the others run and then
-// deadlocks. Twin of goBlock in go-interpreter.abnf and lib/go-rt.metajs.
+// deadlocks with go's fatal error and exit status 2. Twin of goBlock in
+// go-interpreter.abnf and lib/go-rt.metajs.
 func (rt *jsrt) goBlock() {
 	if rt.goDepth > 0 {
 		panic(goParkSignal{})
 	}
 	rt.goDrain()
-	rt.fail("all goroutines are asleep - deadlock")
+	fmt.Fprint(warnWriter, "fatal error: all goroutines are asleep - deadlock!\n")
+	os.Exit(2)
 }

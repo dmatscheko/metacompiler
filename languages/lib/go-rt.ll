@@ -5145,7 +5145,7 @@
 @jsgc.1000784 = global [4 x i64] zeroinitializer
 @jsfdc.1000342 = global i64 -1
 @jsfde.1000342 = global i64 0
-@str.1003023 = global [36 x i8] c"all goroutines are asleep - deadlock"
+@str.1003023 = global [50 x i8] c"fatal error: all goroutines are asleep - deadlock!"
 @str.1003024 = global [7 x i8] c"goBlock"
 @str.1003025 = global [6 x i8] c"__chan"
 @jsgc.1000785 = global [4 x i64] zeroinitializer
@@ -180585,10 +180585,14 @@ dead2133:
 23:
 	%24 = phi i64 [ %20, %18 ], [ %22, %21 ]
 	%25 = call i64 @js_setret(i64 %24)
-	%26 = call i64 @js_scope_cget(i64* getelementptr ([4 x i64], [4 x i64]* @jsgc.1000020, i64 0, i64 0), i64 %env, i8* getelementptr ([4 x i8], [4 x i8]* @str.1000074, i64 0, i64 0), i64 4)
-	%27 = call i64 @js_str_mem(i8* getelementptr ([36 x i8], [36 x i8]* @str.1003023, i64 0, i64 0), i64 36)
+	%26 = call i64 @js_scope_cget(i64* getelementptr ([4 x i64], [4 x i64]* @jsgc.1000167, i64 0, i64 0), i64 %env, i8* getelementptr ([8 x i8], [8 x i8]* @str.1000531, i64 0, i64 0), i64 8)
+	%27 = call i64 @js_str_mem(i8* getelementptr ([50 x i8], [50 x i8]* @str.1003023, i64 0, i64 0), i64 50)
 	%28 = call i64 @js_call1(i64 %26, i64 %27)
 	%29 = call i64 @js_setret(i64 %28)
+	%30 = call i64 @js_scope_cget(i64* getelementptr ([4 x i64], [4 x i64]* @jsgc.1000168, i64 0, i64 0), i64 %env, i8* getelementptr ([4 x i8], [4 x i8]* @str.1000533, i64 0, i64 0), i64 4)
+	%31 = call i64 @js_num_i(i64 2)
+	%32 = call i64 @js_call1(i64 %30, i64 %31)
+	%33 = call i64 @js_setret(i64 %32)
 	ret i64 0
 }
 

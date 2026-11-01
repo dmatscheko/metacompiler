@@ -3316,6 +3316,14 @@
             "program": "${workspaceFolder}","args": ["languages/go-to-llvm-ir.abnf", "tests/go-abort-divz-test.go", "-q", "-exe", "tests/go-abort-divz.out"]
         },
         {
+            "name": "Go abort probe, select deadlock (interpreter, SHOULD FAIL)",
+            "type": "go",
+            "request": "launch",
+            "expectError": "fatal error: all goroutines are asleep - deadlock!",
+            "expectExit": 2,
+            "program": "${workspaceFolder}","args": ["languages/go-interpreter.abnf", "tests/go-abort-deadlock-test.go", "-q"]
+        },
+        {
             "name": "Go abort probe, select deadlock, native binary SHOULD ABORT, ALL HALVES (interpreter vs llvm.Run vs native)",
             "type": "go",
             "request": "launch",

@@ -1,8 +1,8 @@
 // ABORT PROBE: main waits in a select whose only arm can never become ready, with
 // no default and no goroutine able to fill it. go writes, on stderr with exit
-// status 2, `fatal error: all goroutines are asleep - deadlock!`; the engines here
-// name the same deadlock in their own abort format. See the "SHOULD ABORT" rows in
-// .vscode/launch.json.
+// status 2, `fatal error: all goroutines are asleep - deadlock!` and a goroutine
+// trace; the engines here write the same line and status without the trace. See
+// the deadlock rows in .vscode/launch.json.
 package main
 
 import "fmt"

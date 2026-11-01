@@ -3023,11 +3023,13 @@ var goParkSig = {gopark: true}
 // goBlock: an operation that cannot proceed with nothing left to run (a nil
 // channel, an empty one after a drain, a select with no arm ready). A goroutine
 // is abandoned, its deferred calls unrun; main lets the others run and then
-// deadlocks. Twin of goBlock in go-interpreter.abnf and abnf/jsrtgolang.go.
+// deadlocks with go's fatal error and exit status 2. Twin of goBlock in
+// go-interpreter.abnf and abnf/jsrtgolang.go.
 function goBlock() {
     if (goDepth > 0) { throw goParkSig }
     goDrain()
-    fail("all goroutines are asleep - deadlock")
+    eprintln("fatal error: all goroutines are asleep - deadlock!")
+    exit(2)
 }
 
 function goIsChan(v) {
