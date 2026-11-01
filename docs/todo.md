@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1009** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1011** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -168,17 +168,23 @@ is lost when the argument is copied); php's "count(): Recursion detected" and pr
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-990 bash: bad array subscripts, `for i in; do`, compiled nameref/subshell-function edge cases · P3 · SH · IN PROGRESS (SH worker, round 23) [V]
-Found by the SH worker, round 22 (oracle bash 5.3). `a[-9]=W` → bash "a[-9]: bad array subscript" and abandons the line; ours "a:
-bad array subscript". `a[@]=W` → bash "a[@]: bad array subscript" status 1; ours status 0 (also through a nameref). `for i in; do`
-(empty list) does not parse in either engine. Compiler only: `@A`/`@a` through a computed nameref chain use the reference's own
-attributes; a computed self-reference sets the nameref mark; a function that defines another function, called in a subshell, leaks
-it out (the save is lexical). rt_setvar_byname drops a write to a name the program never mentions (no slot).
-
 ### T-1006 bash interpreter: a stderr fragment without a trailing newline gets one added at exit · P3 · SH · OPEN [V]
 Found by the CORE worker, round 16. `printf 'frag' >&2` at the end of a script → bash writes `frag` with no newline; the interpreter
 buffers it (errBuf) and emits it with eprintln at exit, adding '\n'. The eprint host builtin now exists - write the fragment through.
 No assertion can see a trailing newline today; add a byte-exact stderr check.
+
+### T-1009 bash: eval does not catch an abandoned line; bad subscripts outside plain assignment; subscripted prefix assignments · P3 · SH · OPEN [V]
+Found by the SH worker, round 23 (oracle bash 5.3). `eval 'x=$((1/0)); echo in'; echo "after $?"` → bash `after 1`; ours drops the
+rest of the line (same for a readonly store in eval). `a+=([-9]=Q)` → bash `[-9]=Q: bad array subscript`, stops the literal, status 1;
+ours `a: ...` and assigns the rest; `d=([@]=R)` → "cannot assign to non-numeric index". `declare a[-9]=Q`, `read 'a[-9]'`, `printf -v
+'a[-9]'` → status 1 and continue; `unset 'a[-9]'` → `unset: [-9]: bad array subscript` status 1. `x=1 a[2]=W y=2` → bash assigns all
+three, ours runs `a[2]=W` as a command; `a[1]=Q echo hi` does not parse. `for i in a b; { ..; }` and `f() for ..` bodies do not parse.
+A function defined inside `$( )` reports line 3 where bash says 5.
+
+### T-1010 bash compiled: read/printf -v into element or computed names; attributes through a computed nameref · P3 · SH · OPEN [V]
+Found by the SH worker, round 23 (oracle bash 5.3). Compiler only: `read 'a[1]' <<< hi` and `printf -v 'a[2]' %s P` leave the array
+unchanged (bash `x hi P`); `printf -v "$n" %s v` prints `v` to stdout. With `declare -i n=1` and a computed nameref r→n, `r+=5` gives
+15 (bash 6) and `r=2+3` stores the text. `declare -n e='a[1-10]'; e+=V` prints the bad-subscript message twice (bash once).
 
 # C — C subset
 
@@ -1097,6 +1103,7 @@ T-968 tooling: sweep.sh scores TypeScript files that tsc rejects with grammar er
 T-958 python: a generator's run state is not reachable from layer 2 (send to a just-started generator, gi_running) — PARTIAL - genState host (layer 2 reaches a generator's run state); python send to a just-started generator raises; gi_running filed for PY
 T-967 metajs goja leg: `[o] + ""` calls an element's own toString; other UTF-16 languages still order strings by code point — PARTIAL - goja leg's array join/ToPrimitive pinned to the floor; UTF-16 ordering gaps filed per language (java already correct)
 T-997 ruby: adding a key during hash iteration must raise at the insertion (MRI iter_lev model) — DONE - MRI iter_lev model in all three engines, new key raises at the store; Module#constants order DECLINED (MRI symbol-table order, unspecified)
+T-990 bash: bad array subscripts, `for i in; do`, compiled nameref/subshell-function edge cases — DONE - bad subscripts quoted as written and abandon the line, computed nameref attributes/self-ref, nested function defs in subshells, run-time slots for unmentioned names; empty for-in list already worked
 
 # Settled — do not re-open
 
