@@ -99,7 +99,7 @@ foreign object).
 
 # JV — Java
 
-### T-1001 java interpreter: default method from a more specific superinterface loses to the less specific one; package-private members across packages · P3 · JV · OPEN [V]
+### T-1001 java interpreter: default method from a more specific superinterface loses to the less specific one; package-private members across packages · P3 · JV · IN PROGRESS (JV worker, round 18) [V]
 Found by the master probing round 17 (oracle java 24). `interface A { default String who() { return "A"; } } interface B extends A
 { default String who() { return "B"; } } class C implements A, B {}` → `new C().who()` java and the compiler `B`, interpreter `A`
 (jFindMember walks __ifaces in declaration order). Also (JV worker, round 17): a package-private member of a public class used from
