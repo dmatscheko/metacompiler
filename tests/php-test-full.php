@@ -4471,6 +4471,29 @@ function s80dump() {
     var_dump($c);
 }
 
+// ===== SECTION 81: count(COUNT_RECURSIVE) and print_r of a self-referencing array =====
+// COUNT_RECURSIVE adds the count of every nested array (php.net count); an array
+// reached again through a reference while it is counted adds nothing
+// (php_count_recursive), and print_r prints " *RECURSION*" after its header
+// (zend_print_zval_r_to_buf). A Countable's count() takes no mode.
+class S81C implements Countable { public function count(): int { return 42; } }
+function s81() {
+    check("cr1", count([1, [2, 3]], COUNT_RECURSIVE) === 4);
+    check("cr2", count([1, [2, [4, 5]], 3], COUNT_RECURSIVE) === 7 && sizeof([[1], [2, [3]]], 1) === 6
+        && count([1, [2, 3]], COUNT_NORMAL) === 2);
+    $msg = "";
+    try { count([1], 2); } catch (ValueError $e) { $msg = $e->getMessage(); }
+    check("cr3", $msg === "count(): Argument #2 (\$mode) must be either COUNT_NORMAL or COUNT_RECURSIVE");
+    check("cr4", count(new S81C(), COUNT_RECURSIVE) === 42 && count([new S81C(), [1]], COUNT_RECURSIVE) === 3);
+    $x = [1, [2]];
+    $x[1][] = &$x[1];
+    $y = [1];
+    $y[] = &$y;
+    check("cr5", count($x, COUNT_RECURSIVE) === 4 && count($y, COUNT_RECURSIVE) === 2);
+    check("pr1", print_r($x, true) === "Array\n(\n    [0] => 1\n    [1] => Array\n        (\n            [0] => 2\n"
+        . "            [1] => Array\n *RECURSION*\n        )\n\n)\n");
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -4563,6 +4586,7 @@ function main() {
     s79(); // SECTION-CALL 79
     s80(); // SECTION-CALL 80
     s80dump(); // SECTION-CALL 80
+    s81(); // SECTION-CALL 81
     echo "full: " . $checks . " checks, " . $failures . " failures\n";
     return $failures;
 }

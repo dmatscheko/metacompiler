@@ -2318,6 +2318,18 @@
             "program": "${workspaceFolder}","args": ["languages/php-to-llvm-ir.abnf", "tests/php-test-nolib.php", "-q"]
         },
         {
+            "name": "PHP program compiling only library constants (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/php-interpreter.abnf", "tests/php-test-libconst.php", "-q"]
+        },
+        {
+            "name": "PHP program compiling only library constants (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/php-to-llvm-ir.abnf", "tests/php-test-libconst.php", "-q"]
+        },
+        {
             "name": "Go fmt writes raw bytes (interpreter)",
             "type": "go",
             "request": "launch",

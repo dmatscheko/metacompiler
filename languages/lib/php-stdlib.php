@@ -80,8 +80,8 @@ class JsonException extends Exception {}
 interface JsonSerializable { public function jsonSerialize(): mixed; }
 
 // ----- the natives, as callable values ---------------------------------------
-function count($value, $mode = 0) { return count($value); }
-function sizeof($value, $mode = 0) { return count($value); }
+function count($value, $mode = 0) { return count($value, $mode); }
+function sizeof($value, $mode = 0) { return count($value, $mode); }
 function strlen($string) { return strlen($string); }
 function array_push(&$array, ...$values) {
     foreach ($values as $v) { $array[] = $v; }
@@ -2242,7 +2242,10 @@ function __mec_roundsig($sig, $exp, $places) {
 // zend_print_zval_r. A scalar is its string form; an array or object is a header
 // line, then "(" indented $indent spaces, each entry 4 further as "[key] => value"
 // with a nested block 8 further, then ")". An object already being printed further
-// up is " *RECURSION*" after its header.
+// up is " *RECURSION*" after its header, and so is an array reached again through
+// a reference; $seen holds those objects and the references' __mec_refid. The
+// reference $value itself was read through is not passed, so an array holding a
+// reference to itself is printed once more than php does before it is seen again.
 function print_r($value, $return = false) {
     $s = __mec_printr($value, 0, []);
     if ($return) { return $s; }
@@ -2279,12 +2282,15 @@ function __mec_printrhash($h, $indent, $isObj, $seen) {
     $pad = str_repeat(" ", $indent);
     $out = $pad . "(\n";
     foreach ($h as $k => $e) {
+        $id = is_array($e) ? __mec_refid($h, $k) : 0;
         if ($isObj && is_string($k) && $k !== "" && $k[0] === "\0") {
             $p = strpos($k, "\0", 1);
             $cls = substr($k, 1, $p - 1);
             $k = substr($k, $p + 1) . ($cls === "*" ? ":protected" : ":" . $cls . ":private");
         }
-        $out .= $pad . "    [" . $k . "] => " . __mec_printr($e, $indent + 8, $seen) . "\n";
+        if ($id !== 0 && in_array($id, $seen, true)) { $s = "Array\n *RECURSION*"; }
+        else { $s = __mec_printr($e, $indent + 8, $id === 0 ? $seen : [...$seen, $id]); }
+        $out .= $pad . "    [" . $k . "] => " . $s . "\n";
     }
     return $out . $pad . ")\n";
 }

@@ -2187,6 +2187,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         return cut == 0 ? "/" : f.substring(0, cut)
     }
     function makeConstRef(name, pos) {
+        phpLibConst(name)
         // A bare 'exit' / 'die' is the language construct exit(), not a constant.
         // Twin of makeConstRef in php-interpreter.abnf.
         var lo = name.toLowerCase()
@@ -6798,6 +6799,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         if (name == "__mec_aptr") { return "js_phaptr" }
         if (name == "__mec_precision") { return "js_phprecision" }
         if (name == "__mec_oid") { return "js_phoidof" }
+        if (name == "__mec_refid") { return "js_phrefid" }
         if (name == "__mec_bindwhy") { return "js_phbindwhy" }
         if (name == "__mec_pregc") { return "js_phpregc" }
         if (name == "__mec_pregx") { return "js_phpregx" }
@@ -6809,7 +6811,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     function phpNativeArgc(ext) {
         if (ext == "js_phsubstr" || ext == "js_phstrpos" || ext == "js_phstrrpos" || ext == "js_phfmtfloat" ||
             ext == "js_phmath" || ext == "js_phpregx") { return 3 }
-        if (ext == "js_phkeyexists" || ext == "js_phstrcmp" || ext == "js_phaptr") { return 2 }
+        if (ext == "js_phkeyexists" || ext == "js_phstrcmp" || ext == "js_phaptr" || ext == "js_phrefid") { return 2 }
         if (ext == "js_phbindwhy") { return 0 }
         return 1
     }
@@ -6835,6 +6837,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         // strlen() measures PHP's string form of the argument (true is "1", false
         // and null are ""), not the JavaScript form js_bytelen alone would measure.
         if (name == "strlen") { return {b: b, v: callExt(b, "js_phstrlen", [vs[0]])} }
+        if (name == "count" && vs.length > 1) { return {b: b, v: callExt(b, "js_phcountm", [vs[0], vs[1]])} }
         if (name == "count") { return {b: b, v: callExt(b, "js_phcount", [vs[0]])} }
         if (name == "array_push") {
             for (var pv = 1; pv < vs.length; pv++) { callExt(b, "js_phpush", [vs[0], vs[pv]]) }
@@ -7264,6 +7267,10 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         // With display_errors=1 error_reporting() sets and answers the level the
         // diagnostics read. Twin of makeCall in php-interpreter.abnf.
         if (diagOn && phpLibDepth == 0 && name == "error_reporting") { name = phpLibRef("__mec_erreport", true) }
+        // sizeof is count under another name, and the native takes the array itself,
+        // which COUNT_RECURSIVE needs to see it reached again. Twin of makeCall in
+        // php-interpreter.abnf.
+        if (name == "sizeof") { name = "count" }
         var cbAt = libCbArg["$" + phsCase(bare, false)]
         if (phpLibDynCall(phsCase(bare, false), cbAt == undefined ? 1000 : cbAt.at, args, "aname", "aspread")) { phpLibAll() }
         // call_user_func of a library function that takes a callback: that callback
@@ -8941,6 +8948,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         if (!viaCall && (lcn == "bindto" || lcn == "bind" || lcn == "call")) { cloRebind = true }
         if (phpLib == null) { phpLib = phpLibIndex(load("lib/php-stdlib.php")) }
         phpLibLoad(phpLibKey(phpLib, name))
+        if (!viaCall) { phpLibConst(name) }
         // A string naming a function that calls a callable passes it arguments
         // this site cannot see (phpLibAll).
         var cbn = libCbArg["$" + lcn]
@@ -8958,6 +8966,14 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         phpLibAllDone = true
         if (phpLib == null) { phpLib = phpLibIndex(load("lib/php-stdlib.php")) }
         for (var i = 0; i < phpLib.named.length; i++) { phpLibLoad(phpLib.named[i]) }
+    }
+    // A bareword naming one of the library's global constants compiles them, and
+    // so does a string literal that may name one to defined() or constant().
+    // Twin of phpLibConst in php-interpreter.abnf.
+    function phpLibConst(name) {
+        if (!phpLibBase) { return }
+        if (phpLib == null) { phpLib = phpLibIndex(load("lib/php-stdlib.php")) }
+        phpLibLoad(phpLibConstKey(phpLib, name))
     }
     function phpLibClasses(text) {
         if (phpLib == null) { phpLib = phpLibIndex(load("lib/php-stdlib.php")) }

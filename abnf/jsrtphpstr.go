@@ -625,6 +625,27 @@ func init() {
 			}
 			return rt.wrapNum(0)
 		}
+		// The identity of the reference slot a[1] of array a[0] holds, 0 for none.
+		// Twin of __mec_refid in php-interpreter.abnf, which says what it is for.
+		m["js_phrefid"] = func(a []uint64) uint64 {
+			keys, vals, ok := phpArrParts(u(a[0]))
+			if !ok {
+				return rt.wrapNum(0)
+			}
+			i := rt.phpKeyIndex(keys, phpNormKey(u(a[1])))
+			if i < 0 {
+				return rt.wrapNum(0)
+			}
+			c := phpCellOf(vals.elems[i])
+			if c == nil {
+				return rt.wrapNum(0)
+			}
+			if _, has := c.props["rid"]; !has {
+				phpRefIDs[rt]++
+				c.set("rid", float64(phpRefIDs[rt]))
+			}
+			return rt.wrapNum(c.props["rid"].(float64))
+		}
 		// The precision setting. Twin of __mec_precision in php-interpreter.abnf.
 		m["js_phprecision"] = func(a []uint64) uint64 {
 			old := phpPrecision

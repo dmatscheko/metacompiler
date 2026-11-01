@@ -2188,6 +2188,25 @@ func (rt *jsrt) phpAACell(av interface{}, k interface{}) interface{} {
 	return cell
 }
 
+// phpCountRec counts an array's elements and those of every array nested in it,
+// by its value list vals, which is its identity; inside holds the arrays being
+// counted. Twin of countRec in php-interpreter.abnf, which says why.
+func phpCountRec(vals *jsArray, inside []*jsArray) float64 {
+	for _, in := range inside {
+		if in == vals {
+			return 0
+		}
+	}
+	inside = append(inside, vals)
+	n := float64(len(vals.elems))
+	for _, e := range vals.elems {
+		if _, ev, ok := phpArrParts(phpDeref(e)); ok {
+			n += phpCountRec(ev, inside)
+		}
+	}
+	return n
+}
+
 // phpArrCopy is PHP's value assignment: an array is copied (deeply, since a
 // nested array is a value too), an object is not. An element that is a reference
 // some other slot holds stays that reference in the copy; one only its own slot
@@ -2609,6 +2628,9 @@ func phpIsHole(v interface{}) bool {
 // also hands a freed handle to the next object, which this model, without
 // refcounts, cannot see. Twin of objHandles in php-interpreter.abnf.
 var phpHandles = map[*jsrt]int{}
+
+// phpRefIDs counts the reference identities js_phrefid has handed out.
+var phpRefIDs = map[*jsrt]int{}
 
 // phpStamp gives o the next handle; a nil o only counts one.
 func (rt *jsrt) phpStamp(o *jsObject) {
@@ -4301,6 +4323,18 @@ func init() {
 			}
 			rt.phpRaise("TypeError", "count(): Argument #1 ($value) must be of type Countable|array, "+rt.phpValueName(v)+" given")
 			return jsHUndefined
+		}
+		// count($value, $mode). Twin of js_phcountm in languages/lib/php-rt.metajs
+		// and phpCount in php-interpreter.abnf, which says what the mode does.
+		m["js_phcountm"] = func(a []uint64) uint64 {
+			mode := rt.phpToLong(u(a[1]))
+			if mode != 0 && mode != 1 {
+				rt.phpRaise("ValueError", "count(): Argument #2 ($mode) must be either COUNT_NORMAL or COUNT_RECURSIVE")
+			}
+			if _, vals, ok := phpArrParts(u(a[0])); ok && mode == 1 {
+				return rt.wrapNum(phpCountRec(vals, nil))
+			}
+			return m["js_phcount"](a)
 		}
 		m["js_phcbfail"] = func(a []uint64) uint64 {
 			rt.phpCbFail(rt.phpStr(u(a[0])), rt.phpStr(u(a[1])))

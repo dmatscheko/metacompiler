@@ -1934,6 +1934,23 @@ function js_phoidof(v) {
     return 0
 }
 
+// The identity of the reference slot k of array a holds, 0 for none. Twin of
+// __mec_refid in php-interpreter.abnf, which says what it is for.
+var phRefIDs = 0
+function js_phrefid(a, k) {
+    var parts = phArrParts(a)
+    if (parts === undefined) { return 0 }
+    var i = phKeyIndex(parts.k, k)
+    if (i < 0) { return 0 }
+    var c = phCellOf(parts.v[i])
+    if (c === undefined) { return 0 }
+    if (c["rid"] === undefined) {
+        phRefIDs = phRefIDs + 1
+        c["rid"] = phRefIDs
+    }
+    return c["rid"]
+}
+
 // o's handle; an object made where nothing stamped it takes the next one now.
 function phDumpID(o) {
     var n = o["__oid"]
@@ -4070,6 +4087,37 @@ function js_phcount(v) {
     if (phIsObj(v) && phIsA(v, "Countable")) { return js_phmcall(v, "count", []) }
     phRaise("TypeError", "count(): Argument #1 ($value) must be of type Countable|array, " + phValueName(v) + " given")
     return undefined
+}
+// count($value, $mode). Twin of m["js_phcountm"] in abnf/jsrtphp.go and phpCount
+// in php-interpreter.abnf, which says what the mode does.
+function js_phcountm(v, mode) {
+    var m = phInt(mode)
+    if (m != 0 && m != 1) {
+        phRaise("ValueError", "count(): Argument #2 ($mode) must be either COUNT_NORMAL or COUNT_RECURSIVE")
+    }
+    var p = phArrParts(v)
+    if (p !== undefined && m == 1) { return phCountRec(p.v, []) }
+    return js_phcount(v)
+}
+// An array's elements and those of every array nested in it, by its value list
+// vs, which is its identity. Twin of countRec in php-interpreter.abnf, which
+// says why.
+function phCountRec(vs, inside) {
+    var i = 0
+    while (i < inside.length) {
+        if (inside[i] === vs) { return 0 }
+        i = i + 1
+    }
+    inside.push(vs)
+    var n = vs.length
+    var j = 0
+    while (j < vs.length) {
+        var p = phArrParts(phDeref(vs[j]))
+        if (p !== undefined) { n = n + phCountRec(p.v, inside) }
+        j = j + 1
+    }
+    inside.pop()
+    return n
 }
 
 // [...$a]: integer keys renumber, string keys stay.

@@ -5005,6 +5005,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         return cut == 0 ? "/" : f.substring(0, cut)
     }
     function makeConstRef(name, pos) {
+        phpLibConst(name)
         if (name == "__FUNCTION__" || name == "__METHOD__") {
             var magic = cloMagic(name == "__METHOD__")
             return function() { return magic }
@@ -6465,6 +6466,10 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         // diagnostics read. Twin of makeCall in php-to-llvm-ir.abnf.
         if (diagOn && phpLibDepth == 0 && name == "error_reporting") { name = phpLibRef("__mec_erreport", true) }
         var args = items.slice(1)
+        // sizeof is count under another name, and the native takes the array itself,
+        // which COUNT_RECURSIVE needs to see it reached again. Twin of makeCall in
+        // php-to-llvm-ir.abnf.
+        if (name == "sizeof") { name = "count" }
         var cbAt = libCbArg["$" + phsCase(bare, false)]
         if (phpLibDynCall(phsCase(bare, false), cbAt == undefined ? 1000 : cbAt.at, args, "argname", "argspread")) { phpLibAll() }
         // An engine native taken as a first-class callable is the library's
@@ -7380,8 +7385,9 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         for (var i = 0; i < list.length; i++) { arrPush(a, list[i]) }
         return a
     }
+    var refIds = 0
     var phpBuiltins = {
-        "count": function(a) { return phpCount(a) },
+        "count": function(a, mode) { return phpCount(a, mode) },
         // PHP strings are byte strings: strlen("\u{2764}") is 3, not 1.
         "strlen": function(s) { return phsLen(phpStr(s)) },
         "array_push": function(a) {
@@ -7440,6 +7446,22 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             if (kr != null) { return fnRecId(kr) }
             var cr = cloRecOf(o)
             return cr == null ? 0 : cr.i
+        },
+        // The identity of the reference slot k of array a holds, numbered on first
+        // ask; 0 for a slot holding none. An array can only contain itself through
+        // a reference, and the library's print_r is handed copies of arrays but
+        // the same references, so this is how it sees an array reached again.
+        // Twin of js_phrefid in abnf/jsrtphpstr.go and lib/php-rt.metajs.
+        "__mec_refid": function(a, k) {
+            if (!isArr(a)) { return 0 }
+            var i = dictFind(a, phpKey(k))
+            if (i < 0 || !isRef(a.vals[i])) { return 0 }
+            var cell = a.vals[i]
+            if (cell.rid == undefined) {
+                refIds = refIds + 1
+                cell.rid = refIds
+            }
+            return cell.rid
         },
         // The precision setting: answers the old value, and sets a new one unless p
         // is null (ini_get).
@@ -8223,10 +8245,32 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     }
     // count(): an array's element count, a Countable's count(); anything else is a
     // TypeError. Twin of js_phcount in abnf/jsrtphp.go and lib/php-rt.metajs.
-    function phpCount(v) {
+    // With mode COUNT_RECURSIVE (1) an array also adds the count of every array
+    // nested in it (php_count_recursive). Twin of js_phcountm there.
+    function phpCount(v, mode) {
+        var m = mode === undefined ? 0 : phpInt(mode)
+        if (m != 0 && m != 1) {
+            phpRaise("ValueError", "count(): Argument #2 ($mode) must be either COUNT_NORMAL or COUNT_RECURSIVE")
+        }
+        if (isArr(v) && m == 1) { return countRec(v, []) }
         if (isArr(v)) { return v.keys.length }
         if (isObj(v) && phpIsA(v, "Countable")) { return mcall(v, "count", argsOf([])) }
         phpRaise("TypeError", "count(): Argument #1 ($value) must be of type Countable|array, " + phpValueName(v) + " given")
+    }
+    // An array reached again, through a reference, while it is being counted adds
+    // nothing (php_count_recursive's "Recursion detected"); inside holds the arrays
+    // being counted. Twin of phpCountRec in abnf/jsrtphp.go and phCountRec in
+    // lib/php-rt.metajs.
+    function countRec(a, inside) {
+        for (var i = 0; i < inside.length; i++) { if (inside[i] === a) { return 0 } }
+        inside.push(a)
+        var n = a.keys.length
+        for (var j = 0; j < a.vals.length; j++) {
+            var e = deref(a.vals[j])
+            if (isArr(e)) { n = n + countRec(e, inside) }
+        }
+        inside.pop()
+        return n
     }
 
     phpBuiltins["exit"] = function(code) { exit(code === undefined ? 0 : trunc(numOf(toNumV(code)))) }
@@ -8982,6 +9026,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         if (viaCall && hasOwn(phpBuiltins, name)) { return name }
         if (phpLib == null) { phpLib = phpLibIndex(load("lib/php-stdlib.php")) }
         phpLibLoad(phpLibKey(phpLib, name))
+        if (!viaCall) { phpLibConst(name) }
         // Twin of the same test in php-to-llvm-ir.abnf's phpLibRef.
         var lcn = phsCase(name, false)
         var cbn = libCbArg["$" + lcn]
@@ -8997,6 +9042,14 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         phpLibAllDone = true
         if (phpLib == null) { phpLib = phpLibIndex(load("lib/php-stdlib.php")) }
         for (var i = 0; i < phpLib.named.length; i++) { phpLibLoad(phpLib.named[i]) }
+    }
+    // A bareword naming one of the library's global constants compiles them, and
+    // so does a string literal that may name one to defined() or constant().
+    // Twin of phpLibConst in php-to-llvm-ir.abnf.
+    function phpLibConst(name) {
+        if (!phpLibBase) { return }
+        if (phpLib == null) { phpLib = phpLibIndex(load("lib/php-stdlib.php")) }
+        phpLibLoad(phpLibConstKey(phpLib, name))
     }
     function phpLibClasses(text) {
         if (phpLib == null) { phpLib = phpLibIndex(load("lib/php-stdlib.php")) }

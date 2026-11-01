@@ -18,11 +18,14 @@
 // for a function and "#name" in lower case for a class (class names are case
 // insensitive); the class names in lower case; the key of the class each class
 // extends; for each line whether it belongs to a piece; the names of the
-// functions a program may name, lower-cased between commas; and their keys.
+// functions a program may name, lower-cased between commas; their keys; and the
+// global constants' names between commas. The key "%base" is a piece of no
+// lines: loaded before any other, it compiles the constants alone.
 function phpLibIndex(text) {
     var lines = text.split("\n")
-    var fns = {}
+    var fns = {"%base": [1, 0]}
     var names = ","
+    var consts = ","
     var named = []
     var classes = []
     var bases = {}
@@ -36,6 +39,7 @@ function phpLibIndex(text) {
             fns[cur] = [start, i - 1]
             cur = ""
         }
+        if (l.substring(0, 6) == "const ") { consts = consts + l.substring(6, l.indexOf(" ", 6)) + "," }
         if (head != "") {
             var j = head.length
             while (j < l.length && l.charAt(j) != "(" && l.charAt(j) != " ") { j = j + 1 }
@@ -57,7 +61,8 @@ function phpLibIndex(text) {
         inFn.push(cur != "")
     }
     if (cur != "") { fns[cur] = [start, lines.length - 1] }
-    return {lines: lines, fns: fns, classes: classes, bases: bases, inFn: inFn, names: names, named: named}
+    return {lines: lines, fns: fns, classes: classes, bases: bases, inFn: inFn, names: names, named: named,
+            consts: consts}
 }
 
 // The keyword that opens a piece on line l, or "".
@@ -82,6 +87,11 @@ function phpLibExtends(l) {
 function phpLibKey(ix, name) {
     var k = "$" + phsCase(name.charCodeAt(0) == 92 ? name.substring(1) : name, false)
     return ix.fns[k] !== undefined ? k : ""
+}
+
+// The key that compiles the library's global constant `name`, or "".
+function phpLibConstKey(ix, name) {
+    return name.indexOf(",") < 0 && ix.consts.indexOf("," + name + ",") >= 0 ? "%base" : ""
 }
 
 // Is lc, a lower-cased name, one of the library's functions a program may name,
