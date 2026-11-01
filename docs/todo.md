@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1017** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1018** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -166,10 +166,12 @@ is lost when the argument is copied); php's "count(): Recursion detected" and pr
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-1012 bash compiled: computed `read "$n"` and computed declare operands are compile-time limitations · P3 · SH · IN PROGRESS (SH worker, round 25) [V]
-Found by the SH worker, round 24 (oracle bash 5.3). `n=v; read "$n" <<< x` and `declare -a 'b[-8]=R'` / `declare "$spec"` work in
-the interpreter but the compiler refuses them at compile time. Also untested: `declare -f` printing of the new body forms
-(`for ..; { ..; }`, `f() for ..`, `f() if ..`) against bash's deparse.
+### T-1017 bash: `read` without -r keeps backslashes; empty subscript `b[]` accepted; `declare NAME[SUB]` without a value refused; computed operand with an attribute option · P3 · SH · OPEN [V]
+Found by the SH worker, round 25 (oracle bash 5.3). `read v <<< 'z\y'; echo "[$v]"` → bash `[zy]`, ours `[z\y]` (all engines).
+`b=(1 2); b[]=x` → "b[]: bad array subscript", line abandoned; `local b[]=y` same, status 1; `printf -v 'b[]'` → "printf: `b[]': not a
+valid identifier" status 2; ours store into [0] or a scalar named "b[]". `declare c[1]` → bash status 0, `declare -p c` prints
+`declare -a c`; ours "not a valid identifier". Compiler: `declare -a "$n"`, `declare -i "$s"`, `readonly "$s"` (-A/-n/-l/-u) are
+refused at compile time - attributes are tracked lexically per name (manual 7.9); needs a run-time attribute table (-a alone is cheap).
 
 # C — C subset
 
@@ -1086,6 +1088,7 @@ T-991 js: member store on a primitive base; `(this).x++`; compiler parse of `pri
 T-992 js: regex `\p{scx=..}` and 30 more ES binary properties; non-ASCII case folding under `iu`; private brand check in decorator access — DONE - Script_Extensions and the 30 ES binary properties (Unicode 17 tables), Unicode simple case folding under iu incl. \w/\b, private brand checks in decorator access
 T-925 parse time grows exponentially with bracket nesting in seven grammars, both halves — DONE - packrat memo for pure recursive productions in abnf/parser.go ("pure" directive for peek-only guards), Go SliceAhead guard; bracket nesting linear in all seven grammars, no measurable cost
 T-1013 java: protected receiver rule, package-private constructors, untyped receivers escape the access check — DONE - protected receiver rule, constructor access (incl. protected via super/anonymous), enclosing-class call results typed; javac messages, both halves
+T-1012 bash compiled: computed `read "$n"` and computed declare operands are compile-time limitations — PARTIAL - compiled computed read/declare operands (run-time attributes via refAttrs), declare -f of brace loop bodies, function-body redirections; computed operand + attribute option filed
 
 # Settled — do not re-open
 
