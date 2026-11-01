@@ -1233,7 +1233,8 @@ function csTypeAlias(name) {
 }
 
 // csParseInt is int.Parse / long.Parse / uint.Parse: a decimal digit run with an
-// optional sign, and a System.FormatException on anything else. The white space
+// optional sign, a System.FormatException on anything else and an OverflowException
+// outside the type's range (csxParseOverflow). The white space
 // NumberStyles.Integer admits around it is U+0009..U+000D and U+0020 only.
 function csIntWhite(c) { return c == 32 || (c >= 9 && c <= 13) }
 function csParseInt(s, w, u) {
@@ -1254,14 +1255,18 @@ function csParseInt(s, w, u) {
     if (i >= t.length) {
         csThrow("FormatException", "The input string was not in a correct format.")
     }
+    for (var j = i; j < t.length; j++) {
+        var c = t.charCodeAt(j)
+        if (c < 48 || c > 57) {
+            csThrow("FormatException", "The input string was not in a correct format.")
+        }
+    }
+    var ovf = csxParseOverflow(t.substring(i, t.length), neg, w, u)
+    if (ovf != "") { csThrow("OverflowException", ovf) }
     var acc = sintRaw(0, 0, 64, true)
     var ten = sintRaw(0, 10, 64, true)
     while (i < t.length) {
-        var d = t.charCodeAt(i) - 48
-        if (d < 0 || d > 9) {
-            csThrow("FormatException", "The input string was not in a correct format.")
-        }
-        acc = sintOp(0, sintOp(2, acc, ten), sintRaw(0, d, 64, true))
+        acc = sintOp(0, sintOp(2, acc, ten), sintRaw(0, t.charCodeAt(i) - 48, 64, true))
         i = i + 1
     }
     // The Go twin accumulates in a uint64 and then reads the result as int64, so the
@@ -2171,6 +2176,9 @@ function js_cseq(l, r, pre) {
         return pre
     }
     if (csFloPromotes(l, r)) { return rtF32Round(rtjNum(l)) == rtF32Round(rtjNum(r)) }
+    // A BCL member this model leaves unset (Exception.InnerException) reads as
+    // undefined, and C# has only null. Twin of csEq in languages/csharp-interpreter.abnf.
+    if ((l === null || l === undefined) && (r === null || r === undefined)) { return true }
     return pre
 }
 
@@ -2395,6 +2403,9 @@ function js_csargmsg(base, pname) {
     if (ps == "") { return base }
     return base + " (Parameter '" + ps + "')"
 }
+// A BCL exception's two-argument constructor (lib/csharp-strings.js's csxExcCtor2;
+// the Go twin is js_csexc2 in abnf/jsrtcsharp.go).
+function js_csexc2(eo, n, a0, a1) { return csxExcCtor2(eo, n, a0, a1) }
 
 // The rendering step of a string CONVERSION, used by '+', by an interpolation hole
 // and by .ToString(). It converts only the values whose C# string form differs from

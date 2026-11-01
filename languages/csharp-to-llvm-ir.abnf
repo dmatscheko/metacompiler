@@ -3866,6 +3866,15 @@ KwLet       = "let" KwEnd ;
                 callExt(b, "js_set", [eo, emitStr(b, "Message"), emitStr(b, csExcDefMsg(clsName))])
                 if (csExcArgFamily(clsName)) { callExt(b, "js_set", [eo, emitStr(b, "ParamName"), hNull]) }
                 var pn1 = csExcParamName1(clsName)
+                if (args.length == 2) {
+                    // Message and inner exception, or a param name and a message, by
+                    // the second argument's runtime type (js_csexc2).
+                    var r0 = args[0](b)
+                    var r1 = args[1](r0.b)
+                    b = r1.b
+                    callExt(b, "js_csexc2", [eo, emitStr(b, clsName), r0.v, r1.v])
+                    return {b: b, v: eo}
+                }
                 for (var m = 0; m < args.length; m++) {
                     var rm = args[m](b)
                     b = rm.b
@@ -6395,7 +6404,12 @@ KwLet       = "let" KwEnd ;
         if (excBase != undefined && excBase != null && !isThisInit) {
             var thisEV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "this")])
             if (csExcArgFamily(excBase)) { callExt(b, "js_set", [thisEV, emitStr(b, "ParamName"), hNull]) }
-            if (cinit != undefined && cinit != null && cinit.cargs.length > 0) {
+            if (cinit != undefined && cinit != null && cinit.cargs.length == 2) {
+                var e0 = cinit.cargs[0](b)
+                var e1 = cinit.cargs[1](e0.b)
+                b = e1.b
+                callExt(b, "js_csexc2", [thisEV, emitStr(b, excBase), e0.v, e1.v])
+            } else if (cinit != undefined && cinit != null && cinit.cargs.length > 0) {
                 var er = cinit.cargs[0](b)
                 b = er.b
                 if (csExcParamName1(excBase)) {

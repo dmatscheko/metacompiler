@@ -2098,11 +2098,18 @@ KwLet       = "let" KwEnd ;
         return szMake(i64Trunc(p, w, u), w, u)
     }
     // int.Parse / long.Parse / uint.Parse ...: a decimal digit run with an
-    // optional sign, a System.FormatException on anything else, and an
+    // optional sign, a System.FormatException on anything else, an
+    // OverflowException outside the type's range (csxParseOverflow), and an
     // ArgumentNullException for a null string, as double.Parse.
     function csParseInt(s, w, u) {
         if (s === null || s === undefined) { csThrowExc("ArgumentNullException", "Value cannot be null. (Parameter 's')") }
-        var t = stripWs("" + s)
+        // NumberStyles.Integer's white space is U+0009..U+000D and U+0020 only.
+        var t = "" + s
+        var a = 0
+        var b = t.length
+        while (a < b && csxNumWs(t.charCodeAt(a))) { a = a + 1 }
+        while (b > a && csxNumWs(t.charCodeAt(b - 1))) { b = b - 1 }
+        t = t.substring(a, b)
         var neg = false
         if (t.charAt(0) == "+" || t.charAt(0) == "-") { neg = t.charAt(0) == "-"; t = t.substring(1) }
         if (t.length == 0) { csThrowExc("FormatException", "The input string was not in a correct format.") }
@@ -2110,6 +2117,8 @@ KwLet       = "let" KwEnd ;
             var c = t.charCodeAt(i)
             if (c < 48 || c > 57) { csThrowExc("FormatException", "The input string was not in a correct format.") }
         }
+        var ovf = csxParseOverflow(t, neg, w, u)
+        if (ovf != "") { csThrowExc("OverflowException", ovf) }
         var p = i64FromStr(t)
         if (neg) { p = i64Neg(p) }
         return csNorm(p, w, u)
@@ -2243,6 +2252,10 @@ KwLet       = "let" KwEnd ;
         // boxes holding 5 are not two different objects.
         if (csIsIntegral(l) && csIsIntegral(r)) { return csCmp("<=", l, r) && csCmp(">=", l, r) }
         if (l === r) { return true }
+        // A BCL member this model leaves unset (Exception.InnerException, StackTrace)
+        // reads as undefined, and C# has only null. Twin of js_cseq in
+        // abnf/jsrtcsharp.go and lib/csharp-rt.metajs.
+        if ((l === null || l === undefined) && (r === null || r === undefined)) { return true }
         // Records and tuples compare by VALUE in C#, not by identity.
         if (csIsRecObj(l) && csIsRecObj(r)) { return csRecEq(l, r) }
         if (csIsTuple(l) && csIsTuple(r)) { return csTupEq(l, r) }
@@ -2433,11 +2446,9 @@ KwLet       = "let" KwEnd ;
     // objectName suffix is joined with Environment.NewLine, which is "\n" here and
     // "\r\n" on Windows, so there is no single right answer to converge on.
     //
-    // MULTI-ARGUMENT forms are deliberately untouched: the second argument of
-    // ArgumentNullException(string, string) is a message while that of
-    // ArgumentNullException(string, Exception) is an inner exception, and this value
-    // model has no inner-exception slot to tell them apart with. Every engine
-    // ignores arguments past the first.
+    // The TWO-argument forms are csxExcCtor2 in lib/csharp-strings.js (the second
+    // argument is a message, a param name or an inner exception by its type); every
+    // engine ignores the arguments past the first of a longer form.
     //
     // The twins are csExcParamName1 in languages/csharp-to-llvm-ir.abnf, and the
     // message join is js_csargmsg in languages/lib/csharp-rt.metajs and
@@ -3656,18 +3667,17 @@ KwLet       = "let" KwEnd ;
                 // rather than a message (csExcParamName1 above): then the default
                 // message stands and the name is appended to it.
                 var pn1 = csExcParamName1(clsName)
-                var pname = anytype
-                pname = undefined
-                for (var m = 0; m < args.length; m++) {
-                    var av = args[m]()
-                    if (m == 0) {
-                        if (pn1) { pname = av; msg = csArgParamMsg(msg, av) }
-                        else { msg = av }
-                    }
-                }
+                var avs = []
+                for (var m = 0; m < args.length; m++) { avs.push(args[m]()) }
                 var eo = {__excname: clsName, Message: msg}
-                if (pn1 && args.length > 0) { eo.ParamName = pname }
-                else if (csExcArgFamily(clsName)) { eo.ParamName = null }
+                if (csExcArgFamily(clsName)) { eo.ParamName = null }
+                // Two arguments: message and inner exception, or a param name and a
+                // message (csxExcCtor2, lib/csharp-strings.js).
+                if (avs.length == 2) { return csxExcCtor2(eo, clsName, avs[0], avs[1]) }
+                if (avs.length > 0) {
+                    if (pn1) { eo.ParamName = avs[0]; eo.Message = csArgParamMsg(msg, avs[0]) }
+                    else { eo.Message = avs[0] }
+                }
                 return eo
             }
             var cls = getVar(clsName)
@@ -6035,6 +6045,7 @@ KwLet       = "let" KwEnd ;
             // the message (ECMA-335 / System.Exception(String)).
             if (sup == null && cls.__excbase != undefined) {
                 if (csExcArgFamily(cls.__excbase)) { self.ParamName = null }
+                if (bargs.length == 2) { csxExcCtor2(self, cls.__excbase, bargs[0], bargs[1]); return }
                 if (bargs.length > 0 && csExcParamName1(cls.__excbase)) {
                     // `: base(name)` passes a PARAM NAME, as `new` does (csExcParamName1).
                     self.ParamName = bargs[0]

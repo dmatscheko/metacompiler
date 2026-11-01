@@ -501,9 +501,11 @@ var csTypeU = map[string]bool{"sbyte": false, "byte": true, "short": false, "ush
 	"int": false, "uint": true, "long": false, "ulong": true, "nint": false, "nuint": true}
 
 // csParseInt is int.Parse / long.Parse / uint.Parse: a decimal digit run with an
-// optional sign, and a System.FormatException on anything else.
+// optional sign, a System.FormatException on anything else and an
+// OverflowException outside the type's range.
 func (rt *jsrt) csParseInt(s string, w uint8, u bool) interface{} {
-	t := strings.TrimSpace(s)
+	// NumberStyles.Integer's white space is U+0009..U+000D and U+0020 only.
+	t := strings.Trim(s, " \t\n\v\f\r")
 	neg := false
 	if strings.HasPrefix(t, "+") || strings.HasPrefix(t, "-") {
 		neg = t[0] == '-'
@@ -512,11 +514,16 @@ func (rt *jsrt) csParseInt(s string, w uint8, u bool) interface{} {
 	if t == "" {
 		rt.csThrow("FormatException", "The input string was not in a correct format.")
 	}
-	var acc uint64
 	for i := 0; i < len(t); i++ {
 		if t[i] < '0' || t[i] > '9' {
 			rt.csThrow("FormatException", "The input string was not in a correct format.")
 		}
+	}
+	if m := csxParseOverflow(t, neg, w, u); m != "" {
+		rt.csThrow("OverflowException", m)
+	}
+	var acc uint64
+	for i := 0; i < len(t); i++ {
 		acc = acc*10 + uint64(t[i]-'0')
 	}
 	v := int64(acc)
@@ -524,6 +531,31 @@ func (rt *jsrt) csParseInt(s string, w uint8, u bool) interface{} {
 		v = -v
 	}
 	return csNorm(v, w, u)
+}
+
+// csxParseOverflow is the OverflowException message for a decimal magnitude outside
+// the integral type (w, u), "" when it fits. Twin of csxParseOverflow in
+// languages/lib/csharp-strings.js, which holds the specification comment.
+func csxParseOverflow(digits string, neg bool, w uint8, u bool) string {
+	m := strings.TrimLeft(digits, "0")
+	k := map[uint8]int{8: 0, 16: 1, 32: 2, 64: 3}[w]
+	var lim string
+	switch {
+	case u && !neg:
+		lim = [4]string{"255", "65535", "4294967295", "18446744073709551615"}[k]
+	case !u && neg:
+		lim = [4]string{"128", "32768", "2147483648", "9223372036854775808"}[k]
+	case !u:
+		lim = [4]string{"127", "32767", "2147483647", "9223372036854775807"}[k]
+	}
+	if len(m) < len(lim) || (len(m) == len(lim) && m <= lim) {
+		return ""
+	}
+	name := [4]string{"a signed byte", "an Int16", "an Int32", "an Int64"}[k]
+	if u {
+		name = [4]string{"an unsigned byte", "a UInt16", "a UInt32", "a UInt64"}[k]
+	}
+	return "Value was either too large or too small for " + name + "."
 }
 
 // A method of an iterator's sequence: GetEnumerator starts a fresh enumeration
@@ -1279,6 +1311,12 @@ func init() {
 			if jvmFloPromotes(l, r) {
 				return boolH(jvmFround(rt.toNumber(l)) == jvmFround(rt.toNumber(r)))
 			}
+			// A BCL member this model leaves unset (Exception.InnerException)
+			// reads as undefined, and C# has only null. Twin of csEq in
+			// languages/csharp-interpreter.abnf.
+			if isUndefOrNull(l) && isUndefOrNull(r) {
+				return boolH(true)
+			}
 			return a[2] // the js_jchareq / $valeq result the caller computed
 		}
 		// ----- method-group conversion -----
@@ -1675,6 +1713,34 @@ func init() {
 				return a[0]
 			}
 			return rt.wrapStr(base + " (Parameter '" + ps + "')")
+		}
+		// js_csexc2(eo, n, a0, a1): the two-argument constructor of BCL exception n
+		// on eo. Twin of csxExcCtor2 in languages/lib/csharp-strings.js, which holds
+		// the specification comment.
+		m["js_csexc2"] = func(a []uint64) uint64 {
+			eo, ok := u(a[0]).(*jsObject)
+			if !ok {
+				return a[0]
+			}
+			n := rt.toString(u(a[1]))
+			a0, a1 := u(a[2]), u(a[3])
+			_, s1 := a1.(string)
+			if !csExcArgFamily(n) || !(s1 || isUndefOrNull(a1)) {
+				eo.set("Message", a0)
+				eo.set("InnerException", a1)
+				return a[0]
+			}
+			msg, pn := a1, a0
+			if n == "ArgumentException" {
+				msg, pn = a0, a1
+			}
+			eo.set("ParamName", pn)
+			ms, mok := msg.(string)
+			if ps, pok := pn.(string); mok && pok && ps != "" {
+				msg = ms + " (Parameter '" + ps + "')"
+			}
+			eo.set("Message", msg)
+			return a[0]
 		}
 		// The rendering step of a string CONVERSION, used by '+', by an
 		// interpolation hole and by .ToString(). It converts only the values whose

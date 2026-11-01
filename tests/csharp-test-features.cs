@@ -164,6 +164,12 @@ namespace Demo
         public NullArgEx(string p) : base(p) { }
     }
 
+    // ArgumentOutOfRangeException(string paramName, string message) through `: base`.
+    class RangeArgEx : ArgumentOutOfRangeException
+    {
+        public RangeArgEx(string p, string m) : base(p, m) { }
+    }
+
     class OverEx : Exception
     {
         public OverEx() { }
@@ -1009,6 +1015,52 @@ namespace Demo
             try { long.Parse(noName[1]); } catch (ArgumentNullException e) { parseNull = parseNull + e.ParamName; }
             try { byte.Parse(noName[1]); } catch (ArgumentNullException e) { parseNull = parseNull + e.ParamName; }
             Program.Check("parse-int-null", parseNull == "sss");
+            // SPEC-CITED, NOT MEASURED: a value outside the type's range is an
+            // OverflowException with SR.Overflow_<Type> (Strings.resx), and a format
+            // error wins over an overflow (Number.Parsing.cs); an unsigned type
+            // admits "-0". The texts come from an ARRAY, out of the folder's reach.
+            string[] bigs = { "3000000000", "300", "-1", "-0", "99999999999999999999x", "2147483648", "-2147483648" };
+            string ovf = "";
+            try { int.Parse(bigs[0]); } catch (OverflowException e) { ovf = e.Message; }
+            Program.Check("parse-int-overflow", ovf == "Value was either too large or too small for an Int32.");
+            ovf = "";
+            try { byte.Parse(bigs[1]); } catch (OverflowException e) { ovf = e.Message; }
+            Program.Check("parse-byte-overflow", ovf == "Value was either too large or too small for an unsigned byte.");
+            ovf = "";
+            try { uint.Parse(bigs[2]); } catch (OverflowException e) { ovf = e.Message; }
+            Program.Check("parse-uint-negative", ovf == "Value was either too large or too small for a UInt32."
+                          && uint.Parse(bigs[3]) == 0);
+            ovf = "";
+            try { long.Parse(bigs[4]); } catch (FormatException) { ovf = "format"; } catch (OverflowException) { ovf = "overflow"; }
+            Program.Check("parse-format-before-overflow", ovf == "format");
+            ovf = "";
+            try { int.Parse(bigs[5]); } catch (OverflowException) { ovf = "overflow"; }
+            Program.Check("parse-int-bounds", ovf == "overflow" && int.Parse(bigs[6]) == int.MinValue);
+            // NumberStyles.Integer trims U+0009..U+000D and U+0020 only (Number.Parsing.cs
+            // IsWhite): a no-break space is a format error.
+            string[] wss = { "\v5\f", " 5" };
+            ovf = "";
+            try { int.Parse(wss[1]); } catch (FormatException) { ovf = "format"; }
+            Program.Check("parse-int-white", int.Parse(wss[0]) == 5 && ovf == "format");
+            // The two-argument constructors (dotnet/runtime System/Argument*Exception.cs):
+            // ArgumentException(message, paramName), but ArgumentNullException and
+            // ArgumentOutOfRangeException(paramName, message); and (message, inner).
+            string[] two = { "r", "too big", "m", "pn" };
+            Program.Check("exc-argrange-two-arg",
+                          new ArgumentOutOfRangeException(two[0], two[1]).Message == "too big (Parameter 'r')"
+                          && new ArgumentOutOfRangeException(two[0], two[1]).ParamName == "r"
+                          && new RangeArgEx(two[0], two[1]).Message == "too big (Parameter 'r')");
+            Program.Check("exc-argexc-two-arg",
+                          new ArgumentException(two[2], two[3]).Message == "m (Parameter 'pn')"
+                          && new ArgumentNullException(two[3], two[2]).Message == "m (Parameter 'pn')");
+            Exception innerEx = new InvalidOperationException(two[1]);
+            Exception outerEx = new ArgumentException(two[2], innerEx);
+            Program.Check("exc-inner-two-arg",
+                          outerEx.Message == "m" && outerEx.InnerException == innerEx
+                          && new Exception(two[2], innerEx).InnerException.Message == "too big");
+            // InnerException is null when no constructor set one; == null must say so.
+            Program.Check("exc-inner-null", new Exception(two[2]).InnerException == null
+                          && !(new Exception(two[2]).InnerException != null));
             // Dictionary.Add's duplicate key raises `new ArgumentException(message)`
             // with no name (ThrowHelper.ThrowAddingDuplicateWithKeyArgumentException).
             var dupKeys = new Dictionary<string, int>();

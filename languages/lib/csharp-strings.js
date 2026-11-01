@@ -513,6 +513,35 @@ function csxExcParam(msg) {
     return rest.substring(0, j)
 }
 
+// The TWO-argument constructor of BCL exception n on the object eo (dotnet/runtime,
+// System/*Exception.cs). Every type has (string? message, Exception? innerException);
+// ArgumentException adds (string? message, string? paramName), and
+// ArgumentNullException / ArgumentOutOfRangeException add (string? paramName,
+// string? message), the name FIRST as in their one-argument overload. Overload
+// resolution goes by the second argument's static type, so a string there is the
+// string overload; a null one is either (a null literal is ambiguous, and both
+// overloads leave the other slot null). ArgumentException.Message appends
+// " (Parameter '<name>')" for a non-empty name. The caller has already set
+// ParamName to null on the Argument* family. Twin of js_csexc2 in abnf/jsrtcsharp.go.
+function csxExcCtor2(eo, n, a0, a1) {
+    var named = n == "ArgumentException" || n == "ArgumentNullException" || n == "ArgumentOutOfRangeException"
+    if (!named || (a1 !== null && a1 !== undefined && typeof a1 != "string")) {
+        eo["Message"] = a0
+        eo["InnerException"] = a1
+        return eo
+    }
+    var msg = a1
+    var pn = a0
+    if (n == "ArgumentException") {
+        msg = a0
+        pn = a1
+    }
+    eo["ParamName"] = pn
+    if (typeof msg == "string" && typeof pn == "string" && pn != "") { msg = msg + " (Parameter '" + pn + "')" }
+    eo["Message"] = msg
+    return eo
+}
+
 // new string(c, count) / new string(char[]) / new string(char[], start, length).
 function csxNewString(args) {
     if (args.length == 2 && csxkIsChar(args[0])) {
@@ -604,6 +633,33 @@ function csxParseDouble(s) {
     return null
 }
 function csxNumWs(c) { return c == 32 || (c >= 9 && c <= 13) }
+
+// The System.OverflowException message int.Parse and its siblings raise when the
+// decimal magnitude `digits` (ASCII digits, leading zeros allowed) with sign `neg`
+// lies outside the integral type of width w / unsignedness u, or "" when it fits.
+// Number.Parsing.cs reports a format error before an overflow, so the caller
+// validates every digit first; an unsigned type admits a negative zero. The limits
+// are compared as digit strings, so no magnitude beyond 64 bits is ever built.
+// Messages: SR.Overflow_<Type> in System.Private.CoreLib's Strings.resx. Twin of
+// csxParseOverflow in abnf/jsrtcsharp.go.
+function csxParseOverflow(digits, neg, w, u) {
+    var a = 0
+    while (a < digits.length && digits.charCodeAt(a) == 48) { a = a + 1 }
+    var m = digits.substring(a, digits.length)
+    var k = w == 8 ? 0 : (w == 16 ? 1 : (w == 32 ? 2 : 3))
+    var lim = ""
+    if (u) {
+        lim = neg ? "" : ["255", "65535", "4294967295", "18446744073709551615"][k]
+    } else if (neg) {
+        lim = ["128", "32768", "2147483648", "9223372036854775808"][k]
+    } else {
+        lim = ["127", "32767", "2147483647", "9223372036854775807"][k]
+    }
+    if (m.length < lim.length || (m.length == lim.length && m <= lim)) { return "" }
+    var name = u ? ["an unsigned byte", "a UInt16", "a UInt32", "a UInt64"][k]
+                 : ["a signed byte", "an Int16", "an Int32", "an Int64"][k]
+    return "Value was either too large or too small for " + name + "."
+}
 
 // ----- the BCL enums a String member takes -----
 //
