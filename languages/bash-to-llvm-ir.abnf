@@ -3944,6 +3944,19 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 refChk = false
             }
             var fresh = !global && curFrame != null && (kw == "local" || kw == "declare" || kw == "typeset") && !hasOwn(curFrame.locs, "$" + names[j])
+            // Without -n a declaration of a nameref acts on its target, unless it is a
+            // function's first local of the name. One whose target is not known here (none
+            // yet, or a computed one) stays on the nameref, right for the first. Twin of
+            // declOne in bash-interpreter.abnf.
+            var tg = (!isRef && plus.indexOf("n") < 0 && attrOn(refVars, names[j]) && !fresh) ? refEnd(names[j]) : null
+            if (tg != null) {
+                if (assoc) { fail("`" + kw + " -A` of a nameref is not supported by this compiler") }
+                var own = names[j]
+                names[j] = tg
+                b = declOne(b, j, v)
+                names[j] = own
+                return b
+            }
             var bad = null
             if (refChk) { bad = b.NewCall(rtNrefBad, [gepStr(b, kw), v]) }
             else if (plusArr && !fresh) { bad = b.NewCall(rtArrPlus, [gepStr(b, kw), gepStr(b, names[j]), (plus.indexOf("a") >= 0) ? one : zero, (plus.indexOf("A") >= 0) ? one : zero]) }
@@ -4300,6 +4313,18 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var t = attrOn(refVars, name)
         if (typeof t != "string" || t == name || attrOn(refVars, t)) { return null }
         return t
+    }
+    // The variable a chain of namerefs with targets known here ends at, else null.
+    function refEnd(name) {
+        var t = name
+        var g
+        for (g = 0; g < 8 && attrOn(refVars, t); g++) {
+            var n = anytype // A known target's name, else true.
+            n = attrOn(refVars, t)
+            if (typeof n != "string") { return null }
+            t = n
+        }
+        return attrOn(refVars, t) ? null : t
     }
     function refFail() { fail("an array through a nameref is not supported by this compiler") }
     // Is NAME readonly here? Then the code says so on stderr. Twin of roRefused in

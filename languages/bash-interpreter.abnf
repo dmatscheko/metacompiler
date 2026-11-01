@@ -3097,6 +3097,21 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         // One name: its attributes, then its value (v, or the assignment's own literal).
         var declOne = function(k, v) {
+            // Without -n a declaration of a nameref acts on what it refers to: attributes,
+            // value and a new local land on the target (bash 5.3: declare -n r=t; declare -r r
+            // makes t readonly; r='a[1]' takes the array a). A function's first local of the
+            // name is a new variable instead. Twin of declOne in bash-to-llvm-ir.abnf.
+            if (!isRef && anyRef && plus.indexOf("n") < 0 && attrOn(refVars, names[k]) && !(localizes() && !localHere(names[k]))) {
+                var tg = refTarget(names[k])
+                if (tg.indexOf("[") > 0) { tg = tg.slice(0, tg.indexOf("[")) }
+                if (tg != "" && tg != names[k]) {
+                    var own = names[k]
+                    names[k] = tg
+                    declOneN(k, v)
+                    names[k] = own
+                    return
+                }
+            }
             // -n declares the reference itself, whatever it referred to before. A nameref
             // to itself is refused outside a function and nothing is declared (bash 5.3;
             // inside one bash only warns, which is not modelled). Twin of the same check in
@@ -3122,11 +3137,12 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             }
             if (plus.indexOf("n") >= 0) { refVars["$" + names[k]] = false }
         }
+        // WHICH KEYWORDS ARE LOCAL. bash 5.3: `local`, `declare` and `typeset` inside a
+        // function declare a function-local name (value AND attributes restored on return)
+        // unless -g is given; `export` and `readonly` always act on the global.
+        var localizes = function() { return !global && (kw == "local" || ((kw == "declare" || kw == "typeset") && localFrames.length > 0)) }
         var declOneN = function(k, v) {
-            // WHICH KEYWORDS ARE LOCAL. bash 5.3: `local`, `declare` and `typeset` inside a
-            // function declare a function-local name (value AND attributes restored on
-            // return) unless -g is given; `export` and `readonly` always act on the global.
-            var localize = !global && (kw == "local" || ((kw == "declare" || kw == "typeset") && localFrames.length > 0))
+            var localize = localizes()
             // A second `local` of a name in the same call keeps its value, array and
             // attributes (bash 5.3: f() { local a=5; local a; echo $a; } prints 5).
             var fresh = localize && !localHere(names[k])

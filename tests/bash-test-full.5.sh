@@ -492,6 +492,28 @@ st=1"
   check dsl3 "$r" "$0: line $l: ia[1-20]: bad array subscript
 st=1"
 }
+# ===== SECTION 104: a declaration of a nameref acts on its target =====
+# Without -n, declare, typeset, local, export and readonly of a nameref give its target the
+# attributes and the value, through a chain too. In a function (as here) the declaration
+# makes a local of the target, so `declare -r r` leaves an unset readonly t. Every expected
+# value is bash 5.3's.
+s104() {
+  local r l
+  r=$( (declare -n s104r=s104t; s104t=1; declare -r s104r; declare -p s104r s104t; s104t=2; echo no) 2>&1); l=$LINENO
+  check dnt1 "$r" "declare -n s104r=\"s104t\"
+declare -r s104t
+$0: line $l: s104t: readonly variable"
+  r=$(declare -n s104a=s104u; s104u=ab; declare -u s104a; typeset -i s104a; declare -p s104a s104u); check dnt2 "$r" 'declare -n s104a="s104u"
+declare -iu s104u'
+  r=$(declare -n s104a=s104u; s104u=ab; declare -u s104a; s104u=cd; declare -p s104u); check dnt5 "$r" 'declare -u s104u="CD"'
+  r=$(declare -n s104a=s104u; declare -a s104a; export s104a; declare -p s104u); check dnt3 "$r" 'declare -ax s104u'
+  r=$(declare -n s104c=s104d; declare -n s104d=s104e; s104e=0; readonly s104c=2; declare -p s104c s104d s104e); check dnt4 "$r" 'declare -n s104c="s104d"
+declare -n s104d="s104e"
+declare -r s104e="2"'
+  h104() { local -n s104k=s104t; local -i s104k=1+1; declare -p s104t; }
+  r=$(s104t=x; h104; declare -p s104t); check dnt6 "$r" 'declare -i s104t="2"
+declare -- s104t="x"'
+}
 # ===== END SECTIONS =====
 
 s90   # SECTION-CALL 90
@@ -508,5 +530,6 @@ s100  # SECTION-CALL 100
 s101  # SECTION-CALL 101
 s102  # SECTION-CALL 102
 s103  # SECTION-CALL 103
+s104  # SECTION-CALL 104
 echo "full: $checks checks, $fails failures"
 exit $fails
