@@ -3889,6 +3889,61 @@ b";                                                   // verbatim keeps the newl
             Program.Check("s62k1", kind == "NullReferenceException");
         }
 
+        // ===== SECTION 63: compound assignment reads the target before the right side =====
+        // `x op= y` evaluates x and reads its value before y runs (ECMA-334 12.21.4,
+        // operands left to right, 12.4.1): a right side that rewrites the target does
+        // not change the value it is combined with. For a property the get accessor
+        // runs first; for an indexer the receiver, the index, the get accessor, the
+        // right side, then the set accessor. No C# toolchain here: the values follow
+        // the specification.
+        static int S63X = 1;
+        static string S63Log = "";
+        static int S63Bump() { S63X = 100; return 5; }
+        class S63C
+        {
+            public int F = 1;
+            int p = 1;
+            public int P { get { Program.S63Log += "g"; return p; } set { Program.S63Log += "s" + value; p = value; } }
+            int[] st = { 1, 2, 3 };
+            public int this[int i] { get { Program.S63Log += "G"; return st[i]; } set { Program.S63Log += "S" + value; st[i] = value; } }
+        }
+        static S63C S63Obj = new S63C();
+        static S63C S63Get() { Program.S63Log += "c"; return Program.S63Obj; }
+        static int S63I() { Program.S63Log += "i"; return 1; }
+        static int S63J(int v) { Program.S63Log += "j"; return v; }
+        static void S63()
+        {
+            S63X += S63Bump();
+            int m = 3;
+            int[] ys = { 1 };
+            int y = ys[0];
+            Func<int> by = () => { y = 100; return 5; };
+            y -= by();
+            Program.Check("s63v1", S63X == 6 && y == -4);
+            Program.S63X = 3;
+            Program.S63X *= S63Bump();
+            Program.Check("s63v2", Program.S63X == 15);
+            var o = Program.S63Obj;
+            o.F += S63J(o.F = 100) * 0 + m;
+            Program.Check("s63f1", o.F == 4);
+            Program.S63Log = "";
+            o.P += S63J(7);
+            Program.Check("s63p1", Program.S63Log == "gjs8" && o.P == 8);
+            Program.S63Log = "";
+            S63Get()[S63I()] += S63J(7);
+            Program.Check("s63i1", Program.S63Log == "ciGjS9");
+            int[] arr = { 1, 2, 3 };
+            arr[1] += S63J(arr[1] = 100);
+            Program.Check("s63a1", arr[1] == 102);
+            var d = new Dictionary<string, int>();
+            d["k"] = 1;
+            d["k"] += S63J(d["k"] = 100);
+            string s = "a";
+            Func<string> bs = () => { s = "zzz"; return "b"; };
+            s += bs();
+            Program.Check("s63d1", d["k"] == 101 && s == "ab");
+        }
+
         static int Main()
         {
             Program.S01(); // SECTION-CALL 01
@@ -3953,6 +4008,7 @@ b";                                                   // verbatim keeps the newl
             Program.S60(); // SECTION-CALL 60
             Program.S61(); // SECTION-CALL 61
             Program.S62(); // SECTION-CALL 62
+            Program.S63(); // SECTION-CALL 63
             Console.WriteLine("full: " + Program.Checks + " checks, " + Program.Fails + " failures");
             return Program.Fails;
         }

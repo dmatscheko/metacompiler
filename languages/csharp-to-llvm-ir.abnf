@@ -3540,41 +3540,55 @@ KwLet       = "let" KwEnd ;
             }
         }
         if (ref.bprop != undefined) { return makeBaseAssign(ref, op, valT) }
+        if (op != "=") { return makeCompoundAssign(ref, op, valT, lty, elty, defClass) }
         return function(b) {
             var r = valT(b)
             b = r.b
             var v = r.v
             if (ref.path.length == 0) {
                 var mi = csMemberInfo(defClass, ref.name)
-                if (mi != null && mi.dat) {
-                    var mk = (op == "=") ? null : function(bx, oldX) { return emitCompound(bx, op, oldX, v) }
-                    return csUnqualWrite(b, ref.name, mi, v, mk, false)
-                }
-                if (op != "=") {
-                    var old = csScopeRead(b, ref.name)
-                    var rc0 = emitCompound(b, op, old, v)
-                    b = rc0.b
-                    v = rc0.v
-                }
+                if (mi != null && mi.dat) { return csUnqualWrite(b, ref.name, mi, v, null, false) }
                 if (lty != "") { var ral = emitAdoptLocal(b, lty, v); b = ral.b; v = ral.v }
                 csScopeWrite(b, ref.name, v)
             } else {
                 var p = emitRefPath(b, ref)
-                b = p.b
-                if (p.isField && (op == "+=" || op == "-=") && csEvtAcc[p.keyName] != undefined) {
-                    // An event that manages its own subscription list: the accessor takes
-                    // the handler itself, not the combined delegate.
-                    b = emitEvtCall(b, p.obj, p.keyName, op, v)
-                } else {
-                    var rhs = v
-                    var rq = csQualWrite(b, p, v, (op == "=") ? null : function(bx, oldX) {
-                        return emitCompound(bx, op, oldX, rhs)
-                    }, elty)
-                    b = rq.b
-                    v = rq.v
-                }
+                var rq = csQualWrite(p.b, p, v, null, elty)
+                b = rq.b
+                v = rq.v
             }
             return {b: b, v: v}
+        }
+    }
+    // `x op= y`: x is evaluated and its value read BEFORE y runs (ECMA-334 12.21.4),
+    // so the receiver, the index arguments and the get accessor come first, then y,
+    // then the store. Twin of makeCompoundAssign in csharp-interpreter.abnf.
+    function makeCompoundAssign(ref, op, valT, lty, elty, defClass) {
+        return function(b) {
+            if (ref.path.length == 0) {
+                var mi = csMemberInfo(defClass, ref.name)
+                var isMem = mi != null && mi.dat
+                var rd = isMem ? csEmitVarRead(b, defClass, ref.name) : {b: b, v: csScopeRead(b, ref.name)}
+                var r = valT(rd.b)
+                var rc = emitCompound(r.b, op, rd.v, r.v)
+                if (isMem) { return csUnqualWrite(rc.b, ref.name, mi, rc.v, null, false) }
+                b = rc.b
+                var v = rc.v
+                if (lty != "") { var ral = emitAdoptLocal(b, lty, v); b = ral.b; v = ral.v }
+                csScopeWrite(b, ref.name, v)
+                return {b: b, v: v}
+            }
+            var p = emitRefPath(b, ref)
+            if (p.isField && (op == "+=" || op == "-=") && csEvtAcc[p.keyName] != undefined) {
+                // An event that manages its own subscription list: the accessor takes
+                // the handler itself, not the combined delegate.
+                var re = valT(p.b)
+                return {b: emitEvtCall(re.b, p.obj, p.keyName, op, re.v), v: re.v}
+            }
+            var rq = csQualWrite(p.b, p, hUndef, function(bx, oldX) {
+                var rv = valT(bx)
+                return emitCompound(rv.b, op, oldX, rv.v)
+            }, elty)
+            return {b: rq.b, v: rq.v}
         }
     }
     // The value a qualified target `o.M` / `o[i]` holds, read as an ordinary member or

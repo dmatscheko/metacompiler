@@ -3509,28 +3509,44 @@ KwLet       = "let" KwEnd ;
             }
         }
         if (ref.bprop != undefined) { return makeBaseAssign(ref, op, valT) }
+        // A compound `x op= y` evaluates x and reads its value BEFORE y runs
+        // (ECMA-334 12.21.4, operands left to right): the receiver, the index
+        // arguments and the get accessor, then y, then the set accessor.
+        if (op != "=") { return makeCompoundAssign(ref, op, valT, lty, elty) }
         return function() {
             var v = anytype
             v = valT()
             if (ref.path.length == 0) {
-                if (op != "=") v = applyOp(op, csGetVar(ref.name), v)
                 if (lty != "") { v = csAdoptLocal(lty, v) }
                 csSetVar(ref.name, v)
             } else {
-                var p = csResolveRef(ref)
-                if ((op == "+=" || op == "-=") && p.isIndex != true && !isDict(p.obj)
-                    && csFindAcc(p.obj, csEvtKey(op) + p.key) != undefined) {
-                    // An event that manages its own subscription list: the accessor takes
-                    // the handler itself, not the combined delegate.
-                    var ev = csFindAcc(p.obj, csEvtKey(op) + p.key)
-                    if (p.obj.__isclass === true) { ev(v) } else { ev(p.obj, v) }
-                } else {
-                    var rhs = anytype
-                    rhs = v
-                    v = csQualWrite(p, v, op == "=" ? null : function(old) { return applyOp(op, old, rhs) }, elty)
-                }
+                v = csQualWrite(csResolveRef(ref), v, null, elty)
             }
             return v
+        }
+    }
+    function makeCompoundAssign(ref, op, valT, lty, elty) {
+        return function() {
+            var v = anytype
+            if (ref.path.length == 0) {
+                var old = anytype
+                old = csGetVar(ref.name)
+                v = applyOp(op, old, valT())
+                if (lty != "") { v = csAdoptLocal(lty, v) }
+                csSetVar(ref.name, v)
+                return v
+            }
+            var p = csResolveRef(ref)
+            if ((op == "+=" || op == "-=") && p.isIndex != true && !isDict(p.obj)
+                && csFindAcc(p.obj, csEvtKey(op) + p.key) != undefined) {
+                // An event that manages its own subscription list: the accessor takes
+                // the handler itself, not the combined delegate.
+                v = valT()
+                var ev = csFindAcc(p.obj, csEvtKey(op) + p.key)
+                if (p.obj.__isclass === true) { ev(v) } else { ev(p.obj, v) }
+                return v
+            }
+            return csQualWrite(p, undefined, function(old) { return applyOp(op, old, valT()) }, elty)
         }
     }
     // A store through a qualified target `o.M` / `o[i]`: a dictionary entry, a user
