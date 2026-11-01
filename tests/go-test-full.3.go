@@ -1923,6 +1923,78 @@ func s142() {
 	check("mexpr142", (*s142U).Count(&s142U{}, 1, 2)+s142U.Count(s142U{}, 5) == 3 && (*s142Q).Add(&s142Q{&s142P{100}}, 1, 2) == 103 && s142Q.Add(s142Q{&s142P{7}}, 0, 1) == 8)
 }
 
+// ===== SECTION 143: a promoted method as a method-expression value =====
+// T.M and (*T).M as values are functions taking the receiver first, also when M
+// is promoted from an embedded field, and when it is declared on a defined
+// non-struct type: its receiver is then the embedded field (its address, for a
+// pointer method of a value field). The expected values are go run's.
+type s143T []int
+
+func (t *s143T) Sum() int {
+	s := 0
+	for _, x := range *t {
+		s += x
+	}
+	return s
+}
+
+func (t *s143T) Push(xs ...int) { *t = append(*t, xs...) }
+
+func (t s143T) Len() int { return len(t) }
+
+type s143C int
+
+func (c *s143C) Inc(n int) { *c += s143C(n) }
+func (c s143C) Get() int     { return int(c) }
+
+type s143U struct{ *s143T }
+
+type s143W struct {
+	name string
+	s143T
+	s143C
+}
+
+type s143D struct {
+	tag int
+	s143W
+}
+
+type s143P struct{ v int }
+
+func (p *s143P) Add(n int) int { return p.v + n }
+func (p s143P) Twice() int     { return 2 * p.v }
+
+type s143Q struct{ *s143P }
+type s143R struct{ s143Q }
+
+func s143() {
+	ns := []int{4, 5, 6}
+	add := (*s143Q).Add
+	qadd := s143Q.Add
+	radd := (*s143R).Add
+	rtw := s143R.Twice
+	r := &s143R{s143Q{&s143P{3}}}
+	check("mexprval143", add(&s143Q{&s143P{1}}, 2) == 3 && qadd(s143Q{&s143P{20}}, ns[0]) == 24 && radd(r, ns[1]) == 8 && rtw(*r) == 6 && (*s143R).Twice(r) == 6)
+	t := s143T{ns[0], ns[1]}
+	u := &s143U{&t}
+	sum := (*s143U).Sum
+	push := (*s143U).Push
+	push(u, ns[2], 1)
+	tsum := (*s143T).Sum
+	check("mexprdt143", u.Sum() == 16 && u.Len() == 4 && (*s143U).Sum(u) == 16 && s143U.Len(*u) == 4 && sum(u) == 16 && tsum(&t) == 16 && fmt.Sprint(t) == "[4 5 6 1]")
+	w := &s143W{name: "w", s143T: s143T{1, 2, 3}, s143C: 7}
+	inc := (*s143W).Inc
+	inc(w, ns[0])
+	(*s143W).Push(w, 10)
+	get := s143W.Get
+	d := &s143D{tag: 1, s143W: s143W{s143T: s143T{9, 9}, s143C: 2}}
+	dinc := (*s143D).Inc
+	dinc(d, 40)
+	fs := []func(*s143U) int{(*s143U).Sum, (*s143U).Len}
+	check("mexprval2143", w.s143C == 11 && get(*w) == 11 && w.Sum() == 16 && (*s143W).Sum(w) == 16 && (*s143D).Sum(d) == 18 && d.Get() == 42 && s143D.Get(*d) == 42 && fs[0](u)+fs[1](u) == 20)
+}
+
 func main() {
 	s94()   // SECTION-CALL 94
 	s95()   // SECTION-CALL 95
@@ -1971,6 +2043,7 @@ func main() {
 	s140()  // SECTION-CALL 140
 	s141()  // SECTION-CALL 141
 	s142()  // SECTION-CALL 142
+	s143()  // SECTION-CALL 143
 	fmt.Println("full:", checks, "checks,", fails, "failures")
 	os.Exit(fails)
 }

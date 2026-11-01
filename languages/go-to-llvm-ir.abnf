@@ -2515,10 +2515,11 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         return callExt(b, "js_scope_get", [scV, emitStr(b, fn)])
     }
     function emitDtRecv(b, cur, s, p) {
+        if (p.via != null) { cur = emitDtVia(b, cur, p) }
         var r = cur
         var rc = s.rc
         if (p.ptr) {
-            if (!p.isPtr && !p.dyn && rc != null && rc.head != "" && rc.text == rc.head) {
+            if (p.via == null && !p.isPtr && !p.dyn && rc != null && rc.head != "" && rc.text == rc.head) {
                 var cv = cur
                 var scopeV = curScopeV
                 var nm = rc.head
@@ -2534,6 +2535,33 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             if (!p.dyn) { r = emitStoreCopy(b, r, p.ty) }
         } else { r = emitStoreCopy(b, r, p.ty) }
         return {b: b, v: r}
+    }
+    // Twin of goDtVia in go-interpreter.abnf.
+    function emitDtVia(b, cur, p) {
+        var r = cur
+        for (var i = 0; i < p.via.length; i++) {
+            var fV = emitStr(b, p.via[i])
+            if (i == p.via.length - 1 && p.ptr && !p.isPtr) { r = callExt(b, "js_goaddr", [r, fV, emitPtrClass(b), hUndef]) }
+            else { r = callExt(b, "js_gofield", [r, fV]) }
+        }
+        return r
+    }
+    // A method expression's value as an own IR function over its arguments. Twin of
+    // goMethExprFn in go-interpreter.abnf.
+    function emitMethExprFn(b, s) {
+        funcCount++
+        var idx = funcCount
+        var f = m.NewFunc("jsf_" + idx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
+        var savedF = curF
+        var savedScope = curScopeV
+        curF = f
+        curScopeV = f.Params[0]
+        var fb = f.NewBlock("entry")
+        var mc = emitMcall(fb, callExt(fb, "js_arg", [f.Params[1], handle(0)]), s, callExt(fb, "js_gorest", [f.Params[1], handle(1)]))
+        mc.b.NewRet(mc.v)
+        curF = savedF
+        curScopeV = savedScope
+        return callExt(b, "js_closure", [handle(idx), curScopeV])
     }
     // items = [(argThunk, {aty})..., {spread}?]: the '(args)' suffix of a postfix
     // chain (goSplitArgs).
@@ -2652,6 +2680,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                     var fp = goDtPlan(s.rc, s.name)
                     var fme = goDtMethExpr(s.rc, s.name)
                     if (fme != "") { cur = callExt(b, "js_scope_get", [curScopeV, emitStr(b, fme)]) }
+                    else if (goMethExprCall(s.rc, s.name)) { cur = emitMethExprFn(b, s) }
                     else if (fp != null && !fp.dyn) {
                         var fb = emitDtBind(b, cur, s, fp)
                         b = fb.b

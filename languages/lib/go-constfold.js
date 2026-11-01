@@ -3940,6 +3940,9 @@ function goDtPlan(rc, name) {
     while (i < rs.length) { if (goIsDefTy(rs[i]) && goDtForeign["$" + rs[i]] !== true) { cands.push(rs[i]) } i = i + 1 }
     if (cands.length == 0) { return null }
     var t = rc == null ? "" : stChainFrom(rc.head, rc.hty, rc.loc, rc.text)
+    // A method expression's receiver is its first argument, of the type it names.
+    var mx = goMethExprTy(rc)
+    if (mx != "") { t = rc.text.charAt(0) == "(" ? "*" + mx : mx }
     var bt = stNoTyArgs((t.length > 0 && t.charAt(0) == "*") ? t.substring(1) : t)
     var bk = goTyKey(bt)
     // A struct whose FIELD has the name holds a func value there: `l.Swap(i, j)`
@@ -3948,11 +3951,57 @@ function goDtPlan(rc, name) {
     if (bt != "" && goMethRty["$" + bk + "." + name] !== undefined) {
         if (!goIsDefTy(bt)) { return null }
         return {fn: bt + "." + name, ty: bt, ptr: goMethPtr["$" + bk + "." + name] === true, dyn: false,
-                isPtr: t.charAt(0) == "*"}
+                isPtr: t.charAt(0) == "*", via: null}
     }
-    if (cands.length != 1) { return {fn: "", ty: "", ptr: false, dyn: true, isPtr: false} }
+    var pd = (bt != "" && goStructTyName(bt) != "") ? goPromDt(bt, name) : null
+    if (pd != null) {
+        return {fn: pd.ty + "." + name, ty: pd.ty, ptr: goMethPtr["$" + goTyKey(pd.ty) + "." + name] === true,
+                dyn: false, isPtr: pd.isPtr, via: pd.via}
+    }
+    if (cands.length != 1) { return {fn: "", ty: "", ptr: false, dyn: true, isPtr: false, via: null} }
     return {fn: cands[0] + "." + name, ty: cands[0], ptr: goMethPtr["$" + cands[0] + "." + name] === true,
-            dyn: true, isPtr: false}
+            dyn: true, isPtr: false, via: null}
+}
+// The method name of a defined non-struct type promoted into struct type st (Go
+// spec "Selectors": the shallowest embedding wins): {via: the embedded field names
+// leading to it, ty: the type declaring it, isPtr: the last field is a pointer}, or
+// null - also when a struct declares it, whose instance carries its methods.
+function goPromDt(st, name) {
+    var lvl = [{t: st, via: []}]
+    var depth = 0
+    while (lvl.length > 0 && depth < 16) {
+        var next = []
+        var i = 0
+        while (i < lvl.length) {
+            var sk = goTyKey(lvl[i].t)
+            var fs = goPreFldOrd["$" + sk]
+            var j = 0
+            while (fs !== undefined && j < fs.length) {
+                var ft = goPreFld["$" + sk + "." + fs[j]]
+                var et = ft.charAt(0) == "*" ? ft.substring(1) : ft
+                if (et == fs[j]) {
+                    var via = lvl[i].via.concat([et])
+                    if (goMethRty["$" + goTyKey(et) + "." + name] !== undefined) {
+                        return goIsDefTy(et) ? {via: via, ty: et, isPtr: ft.charAt(0) == "*"} : null
+                    }
+                    if (goStructTyName(et) != "") { next.push({t: et, via: via}) }
+                }
+                j = j + 1
+            }
+            i = i + 1
+        }
+        lvl = next
+        depth = depth + 1
+    }
+    return null
+}
+// A method expression T.M or (*T).M whose value is no function of T's own: M
+// promoted from an embedded field, or a pointer method of a defined non-struct
+// type. Its value calls M on its first argument, as its call does.
+function goMethExprCall(rc, name) {
+    var t = goMethExprTy(rc)
+    if (t == "" || goDtMethExpr(rc, name) != "") { return false }
+    return goIsDefTy(t) || goMethRty["$" + goTyKey(stNoTyArgs(t)) + "." + name] === undefined
 }
 // fmt's scanning functions are a package of their own (lib/go-fmtscan.go), compiled
 // when the program's text calls one (goUsesFmtScan) and bound into the fmt object;

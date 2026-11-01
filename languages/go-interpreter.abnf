@@ -2523,7 +2523,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         var sw = goWalkPkg
         goWalkPkg = s.pkg == null ? "" : s.pkg
         s.dt = goDtPlan(s.rc, s.name)
-        if (s.kind == "field") { s.me = goDtMethExpr(s.rc, s.name) }
+        if (s.kind == "field") { s.me = goDtMethExpr(s.rc, s.name); s.mxc = goMethExprCall(s.rc, s.name) }
         if (s.kind == "mcall") { s.nilc = goNilRecvOf(s.rc, s.name); s.mx = goMethExprTy(s.rc) != "" }
         s.dtk = true
         goWalkPkg = sw
@@ -2563,6 +2563,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                     if (cur === undefined || cur === null) { goNilDeref() }
                     if (!s.dtk) { goSfxPlan(s) }
                     if (s.me != "") { cur = goDtFns[goDtKey(s.pkg, s.me)] }
+                    else if (s.mxc) { cur = goMethExprFn(s) }
                     else { cur = (s.dt === null || s.dt.dyn) ? goField(cur, s.name) : goDtBind(cur, s) }
                 }
                 else if (s.kind == "call") {
@@ -3472,10 +3473,35 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         var p = s.dt
         var r = anytype
         r = recv
+        if (p.via != null) { r = goDtVia(recv, p) }
         if (p.ptr) {
-            if (!p.isPtr && !p.dyn && !isPtr(recv) && s.rc != null && s.rc.head != "" && s.rc.text == s.rc.head) { r = varCell(s.rc.head) }
-        } else { r = goStoreTy(isPtr(recv) ? ptrGet(recv) : recv, p.ty) }
+            if (p.via == null && !p.isPtr && !p.dyn && !isPtr(recv) && s.rc != null && s.rc.head != "" && s.rc.text == s.rc.head) { r = varCell(s.rc.head) }
+        } else { r = goStoreTy(isPtr(r) ? ptrGet(r) : r, p.ty) }
         return r
+    }
+    // The embedded field a promoted method's receiver is (go-constfold.js, goPromDt):
+    // a pointer method of a value field gets the field's cell. Twin of emitDtVia in
+    // go-to-llvm-ir.abnf.
+    function goDtVia(recv, p) {
+        var r = anytype
+        r = recv
+        for (var i = 0; i < p.via.length; i++) {
+            var o = anytype
+            o = isPtr(r) ? ptrGet(r) : r
+            if (o === undefined || o === null) { goNilDeref() }
+            r = (i == p.via.length - 1 && p.ptr && !p.isPtr) ? goCellOf(o, p.via[i], "") : o[p.via[i]]
+        }
+        return r
+    }
+    // The value of a method expression whose method is no function of its type's own
+    // (go-constfold.js, goMethExprCall): it calls the method on its first argument, as
+    // the expression's call does. Twin of emitMethExprFn in go-to-llvm-ir.abnf.
+    function goMethExprFn(s) {
+        return function() {
+            var av = []
+            for (var i = 1; i < arguments.length; i++) { av.push(arguments[i]) }
+            return s.dt === null ? mcall(arguments[0], s.name, av) : goDtCall(arguments[0], s, av)
+        }
     }
     // A METHOD VALUE of a defined type (`f := c.String`): the receiver is evaluated
     // and copied NOW, as goField does for a struct. Twin of js_godtbind in
