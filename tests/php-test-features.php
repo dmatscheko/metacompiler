@@ -517,6 +517,44 @@ check("exc-tostring", str_replace(__FILE__, "F", (string) $exOut),
       "Exception: inner in F:" . $exInLine . "\nStack trace:\n#0 {main}\n\nNext RuntimeException: outer in F:"
       . $exOutLine . "\nStack trace:\n#0 {main}");
 check("exc-tostring-empty", str_replace(__FILE__, "F", "" . new LogicException()), "LogicException in F:" . __LINE__ . "\nStack trace:\n#0 {main}");
+// The trace is of the calls in progress where the Throwable is made, innermost
+// first: where each was called from, the class and call type, the function and
+// the current values of its arguments, then the variadic ones
+// (zend_fetch_debug_backtrace); getTraceAsString shows each argument as
+// _build_trace_args does. An error the engine raises takes the site of the
+// operation raising it (zend_get_executed_lineno).
+$exTrAt = __LINE__;
+class ExcTr {
+    function m($x) { return new Exception("m"); }
+    static function s($a, ...$r) { return new Exception("s"); }
+    function c() { $f = function ($z) { return new Exception("c"); }; return $f(7); }
+}
+function excTrArgs($a, $b, $c, $d, $e, $f, $g, $h) { return new Exception("a"); }
+function excTrNamed($p, $q = 2, ...$rest) { return new Exception("n"); }
+function excTrMod($v) { $v = 99;
+    return $v % 0; }
+function excTrS($e) { return str_replace(__FILE__, "F", $e->getTraceAsString()); }
+function excTrCatch() {
+    try { excTrMod(1); } catch (Error $e) { }
+    try { return new Exception("c"); } finally { }
+}
+$l = __LINE__; $exTrGot = [excTrS((new ExcTr)->m(1.5)), excTrS(ExcTr::s(1, "x", k: true)), excTrS((new ExcTr)->c())];
+check("exc-trace-frames", $exTrGot,
+      ["#0 F($l): ExcTr->m(1.5)\n#1 {main}", "#0 F($l): ExcTr::s(1, 'x', k: true)\n#1 {main}",
+       "#0 F(" . ($exTrAt + 4) . "): ExcTr->{closure:ExcTr::c():" . ($exTrAt + 4) . "}(7)\n#1 F($l): ExcTr->c()\n#2 {main}"]);
+$l = __LINE__; $exTrGot = excTrS(excTrArgs("a string past fifteen", "q\n\t\\\x01\xff", 2.0, [1], new ExcTr, null, false, 1e25));
+check("exc-trace-args", $exTrGot, "#0 F($l): excTrArgs('a string past f'..., 'q\\n\\t\\\\\\x01\\xFF', 2.0, Array, Object(ExcTr), NULL, false, 1.0E+25)\n#1 {main}");
+$l = __LINE__; $exTrGot = [excTrS(excTrNamed(1, rest: 5)), excTrS(excTrNamed(1, 3, 4, 5)), excTrS(excTrNamed(q: 3, p: 1))];
+check("exc-trace-named", $exTrGot, ["#0 F($l): excTrNamed(1, rest: 5)\n#1 {main}", "#0 F($l): excTrNamed(1, 3, 4, 5)\n#1 {main}",
+                                    "#0 F($l): excTrNamed(1, 3)\n#1 {main}"]);
+$l = __LINE__; try { excTrMod(1); } catch (DivisionByZeroError $e) { $exTrGot = [$e->getLine(), excTrS($e)]; }
+check("exc-trace-engine", $exTrGot, [$exTrAt + 9, "#0 F($l): excTrMod(99)\n#1 {main}"]);
+$l = __LINE__; try { array_map(function ($v) { throw new Exception("cb"); }, [1]); } catch (Exception $e) { $exTrGot = [$e->getLine(), excTrS($e)]; }
+check("exc-trace-internal", $exTrGot, [$l, "#0 [internal function]: {closure:F:$l}(1)\n#1 F($l): array_map(Object(Closure), Array)\n#2 {main}"]);
+$l = __LINE__; try { intdiv(1, 0); } catch (DivisionByZeroError $e) { $exTrGot = $e->getLine(); }
+check("exc-trace-native-line", $exTrGot, $l);
+$l = __LINE__; $exTrGot = [excTrS(excTrCatch()), count((new Exception)->getTrace())];
+check("exc-trace-catch", $exTrGot, ["#0 F($l): excTrCatch()\n#1 {main}", 0]);
 class ExcSub extends Exception { function __construct() { $this->line = 1; parent::__construct("sub"); } }
 check("exc-sub", [(new ExcSub)->getLine(), (new ExcSub)->getMessage(), (new ExcSub)->__toString() === (string) new ExcSub],
       [1, "sub", true]);

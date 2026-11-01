@@ -862,6 +862,17 @@ function phMkErrOf(cls, msg) {
     o["line"] = 0
     o["trace"] = phNewArr()
     o["previous"] = null
+    // The file, line and trace of the code raising it, which the module hands
+    // over as a closure answering [file, line, trace] (php-to-llvm-ir.abnf).
+    var here = phRtClasses === undefined ? undefined : phRtClasses["\x00here"]
+    if (here !== undefined) {
+        var p = phArrParts(here.apply(undefined, []))
+        if (p !== undefined && p.v.length == 3) {
+            o["file"] = p.v[0]
+            o["line"] = p.v[1]
+            o["trace"] = p.v[2]
+        }
+    }
     phStamp(o)
     return o
 }

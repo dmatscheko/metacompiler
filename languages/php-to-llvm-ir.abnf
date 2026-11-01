@@ -2058,8 +2058,215 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     }
     var coreRetStmt = retStmt
     retStmt = function(b, v) {
-        if (!inCtlBody()) { emitFrameLeave(b, v) }
+        if (!inCtlBody()) {
+            emitFrameLeave(b, v)
+            emitFramePop(b)
+        }
         return coreRetStmt(b, v)
+    }
+    // ----- the calls in progress, which a trace reports -----
+    // A call of a function, method or closure the program or the library declares
+    // (a generator's body and a __mec helper excepted) keeps a record of itself in
+    // its own stack frame, five words: the record of the call it was made from,
+    // php.site as the call left it, its descriptor (frameDescs: (index + 1) * 2,
+    // plus 1 for the library's), its frame and its argument array. The module
+    // global php.top holds the innermost record, 0 in the main program, and every
+    // return puts back the one the call was made from. A record lives on the
+    // stack, which the collector scans, so the frame and arguments it names stay
+    // alive. An exception skips those returns, so a catch or finally puts php.top
+    // back as its try found it (restoreTop); in a generator's body, which may be
+    // resumed under other calls than before, as the main program's. Twin of phpTop
+    // in php-interpreter.abnf.
+    var topG = null
+    function topGlobal() {
+        if (topG == null) { topG = m.NewGlobalDef("php.top", llvm.constant.NewInt(i64, 0)) }
+        return topG
+    }
+    var recTy = llvm.types.NewArray(5, i64)
+    var frameDescs = []
+    var curRec = null
+    var curRecF = null
+    var curGenBody = false
+    function recSlot(b, p, k) { return b.NewGetElementPtr(recTy, p, handle(0), handle(k)) }
+    // d: {name, cls, kind (0 function, 1 static method, 2 instance method, 3
+    // closure), lib, names (the parameters before a variadic one), rest, off (1 when
+    // the arguments start with the receiver)}.
+    function emitFramePush(b, d) {
+        frameDescs.push(d)
+        var rec = b.NewAlloca(recTy)
+        b.NewStore(b.NewLoad(i64, topGlobal()), recSlot(b, rec, 0))
+        b.NewStore(b.NewLoad(i64, siteGlobal()), recSlot(b, rec, 1))
+        b.NewStore(handle(frameDescs.length * 2 + (d.lib ? 1 : 0)), recSlot(b, rec, 2))
+        b.NewStore(curScopeV, recSlot(b, rec, 3))
+        b.NewStore(curF.Params[1], recSlot(b, rec, 4))
+        b.NewStore(b.NewPtrToInt(rec, i64), topGlobal())
+        return rec
+    }
+    function emitFramePop(b) {
+        if (curRec != null && curRecF === curF) { b.NewStore(b.NewLoad(i64, recSlot(b, curRec, 0)), topGlobal()) }
+    }
+    // A try keeps php.top in its frame under topName, as a number, for its catch
+    // and finally to put back; "" in a generator's body. js_gofbits answers the
+    // number's IEEE bits, and an address below 2^53 is its 53-bit significand
+    // shifted right by 1075 less the biased exponent (0 has all bits 0).
+    function saveTop(b) {
+        if (curGenBody) { return "" }
+        hidCount++
+        var topName = "0top" + hidCount
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, topName), callExt(b, "js_num_i", [b.NewLoad(i64, topGlobal())])])
+        return topName
+    }
+    function restoreTop(topName, body) {
+        return function(b) {
+            var v = handle(0)
+            if (topName != "") {
+                var bits = callExt(b, "js_gofbits", [callExt(b, "js_scope_get", [curScopeV, emitStr(b, topName)])])
+                var sig = b.NewOr(b.NewAnd(bits, handle(4503599627370495)), handle(4503599627370496))
+                var addr = b.NewLShr(sig, b.NewSub(handle(1075), b.NewLShr(bits, handle(52))))
+                v = b.NewSelect(b.NewICmp(llvm.enum.IPredEQ, bits, handle(0)), handle(0), addr)
+            }
+            b.NewStore(v, topGlobal())
+            return body(b)
+        }
+    }
+    // php_here: the site an exception the engine or the library raises stands at
+    // (zend_get_executed_lineno): the site of the innermost library call the
+    // program made, else php.site. php_trace: the records from php.top outwards,
+    // each [file, line] then what php_frame_fill adds, as __mec_trace
+    // (lib/php-stdlib.php) takes them. Their bodies are emitted once every
+    // function has been (frameBodies).
+    var hereF = null
+    var traceF = null
+    var fillF = null
+    var argsFromF = null
+    function hereSite(b) {
+        if (hereF == null) { hereF = m.NewFunc("php_here", i64) }
+        return b.NewCall(hereF, [])
+    }
+    function traceRaw(b) {
+        if (traceF == null) { traceF = m.NewFunc("php_trace", i64) }
+        return b.NewCall(traceF, [])
+    }
+    function frameBodies() {
+        if (hereF != null) {
+            var eb = hereF.NewBlock("entry")
+            var headB = hereF.NewBlock("")
+            var libB = hereF.NewBlock("")
+            var nextB = hereF.NewBlock("")
+            var siteB = hereF.NewBlock("")
+            var hitB = hereF.NewBlock("")
+            var rp = eb.NewAlloca(i64)
+            eb.NewStore(eb.NewLoad(i64, topGlobal()), rp)
+            eb.NewBr(headB)
+            var r = headB.NewLoad(i64, rp)
+            headB.NewCondBr(headB.NewICmp(llvm.enum.IPredEQ, r, handle(0)), siteB, libB)
+            var p = libB.NewIntToPtr(r, llvm.types.NewPointer(recTy))
+            var lib = libB.NewAnd(libB.NewLoad(i64, recSlot(libB, p, 2)), handle(1))
+            libB.NewCondBr(libB.NewICmp(llvm.enum.IPredEQ, lib, handle(0)), siteB, nextB)
+            var s = nextB.NewLoad(i64, recSlot(nextB, p, 1))
+            nextB.NewStore(nextB.NewLoad(i64, recSlot(nextB, p, 0)), rp)
+            nextB.NewCondBr(nextB.NewICmp(llvm.enum.IPredEQ, s, handle(0)), headB, hitB)
+            hitB.NewRet(s)
+            siteB.NewRet(siteB.NewLoad(i64, siteGlobal()))
+        }
+        if (traceF == null) { return }
+        var tb = traceF.NewBlock("entry")
+        var theadB = traceF.NewBlock("")
+        var tbodyB = traceF.NewBlock("")
+        var tdoneB = traceF.NewBlock("")
+        var outV = callExt(tb, "js_pharr", [])
+        var trp = tb.NewAlloca(i64)
+        tb.NewStore(tb.NewLoad(i64, topGlobal()), trp)
+        tb.NewBr(theadB)
+        var tr = theadB.NewLoad(i64, trp)
+        theadB.NewCondBr(theadB.NewICmp(llvm.enum.IPredEQ, tr, handle(0)), tdoneB, tbodyB)
+        var tp = tbodyB.NewIntToPtr(tr, llvm.types.NewPointer(recTy))
+        var site = tbodyB.NewLoad(i64, recSlot(tbodyB, tp, 1))
+        var itemV = callExt(tbodyB, "js_pharr", [])
+        callExt(tbodyB, "js_phpush", [itemV, tbodyB.NewCall(siteFileFn(), [site])])
+        callExt(tbodyB, "js_phpush", [itemV, callExt(tbodyB, "js_num_i", [tbodyB.NewAnd(site, handle(16777215))])])
+        tbodyB.NewCall(frameFillFn(), [itemV, tbodyB.NewLoad(i64, recSlot(tbodyB, tp, 2)),
+                                       tbodyB.NewLoad(i64, recSlot(tbodyB, tp, 3)), tbodyB.NewLoad(i64, recSlot(tbodyB, tp, 4))])
+        callExt(tbodyB, "js_phpush", [outV, itemV])
+        tbodyB.NewStore(tbodyB.NewLoad(i64, recSlot(tbodyB, tp, 0)), trp)
+        tbodyB.NewBr(theadB)
+        tdoneB.NewRet(outV)
+        frameFillBody()
+    }
+    // php_frame_fill(item, desc, frame, args) appends to item what descriptor
+    // desc tells: [function, class, kind, lib, $this, current, passed, rest]:
+    // passed stops before a variadic parameter, whose packed array is rest (null
+    // without one).
+    function frameFillFn() {
+        if (fillF == null) {
+            fillF = m.NewFunc("php_frame_fill", i64, [llvm.ir.NewParam("item", i64), llvm.ir.NewParam("desc", i64),
+                                                      llvm.ir.NewParam("frame", i64), llvm.ir.NewParam("args", i64)])
+        }
+        return fillF
+    }
+    function frameFillBody() {
+        var f = frameFillFn()
+        var itemV = f.Params[0]
+        var scopeV = f.Params[2]
+        var b = f.NewBlock("entry")
+        for (var k = 0; k < frameDescs.length; k++) {
+            var d = frameDescs[k]
+            var hitB = f.NewBlock("")
+            var nextB = f.NewBlock("")
+            b.NewCondBr(b.NewICmp(llvm.enum.IPredEQ, f.Params[1], handle((k + 1) * 2 + (d.lib ? 1 : 0))), hitB, nextB)
+            callExt(hitB, "js_phpush", [itemV, emitStr(hitB, d.name)])
+            callExt(hitB, "js_phpush", [itemV, emitStr(hitB, d.cls)])
+            callExt(hitB, "js_phpush", [itemV, emitNum(hitB, d.kind)])
+            callExt(hitB, "js_phpush", [itemV, d.lib ? hTrue : hFalse])
+            var thisV = hNull
+            if (d.kind == 3) { thisV = hitB.NewCall(scopeProbeFn(), [scopeV, emitStr(hitB, "$this"), hNull]) }
+            callExt(hitB, "js_phpush", [itemV, thisV])
+            var curV = callExt(hitB, "js_pharr", [])
+            for (var i = 0; i < d.names.length; i++) {
+                var raw = callExt(hitB, "js_scope_own", [scopeV, emitStr(hitB, d.names[i])])
+                callExt(hitB, "js_phpush", [curV, readRawV(hitB, raw).v])
+            }
+            callExt(hitB, "js_phpush", [itemV, curV])
+            var endV = handle(d.rest >= 0 ? d.off + d.rest : 4611686018427387904)
+            callExt(hitB, "js_phpush", [itemV, hitB.NewCall(argsFromFn(), [f.Params[3], handle(d.off), endV])])
+            var restV = hNull
+            if (d.rest >= 0) {
+                var rawV = callExt(hitB, "js_arg", [f.Params[3], endV])
+                restV = hitB.NewSelect(hitB.NewICmp(llvm.enum.IPredEQ, rawV, hUndef), hNull, phDeref(hitB, rawV).v)
+            }
+            callExt(hitB, "js_phpush", [itemV, restV])
+            hitB.NewRet(hUndef)
+            b = nextB
+        }
+        b.NewRet(hUndef)
+        if (argsFromF != null) {
+            var eb = argsFromF.NewBlock("entry")
+            var headB = argsFromF.NewBlock("")
+            var bodyB = argsFromF.NewBlock("")
+            var doneB = argsFromF.NewBlock("")
+            var outV = callExt(eb, "js_pharr", [])
+            var ip = eb.NewAlloca(i64)
+            eb.NewStore(argsFromF.Params[1], ip)
+            eb.NewBr(headB)
+            var iv = headB.NewLoad(i64, ip)
+            var argB = argsFromF.NewBlock("")
+            headB.NewCondBr(headB.NewICmp(llvm.enum.IPredSLT, iv, argsFromF.Params[2]), argB, doneB)
+            var v = callExt(argB, "js_arg", [argsFromF.Params[0], iv])
+            argB.NewCondBr(argB.NewICmp(llvm.enum.IPredEQ, v, hUndef), doneB, bodyB)
+            callExt(bodyB, "js_phpush", [outV, phDeref(bodyB, v).v])
+            bodyB.NewStore(bodyB.NewAdd(iv, handle(1)), ip)
+            bodyB.NewBr(headB)
+            doneB.NewRet(outV)
+        }
+    }
+    // php_args_from(args, off, end): the arguments from position off on, before
+    // end and the first absent one, as a list.
+    function argsFromFn() {
+        if (argsFromF == null) {
+            argsFromF = m.NewFunc("php_args_from", i64, [llvm.ir.NewParam("args", i64), llvm.ir.NewParam("off", i64),
+                                                         llvm.ir.NewParam("end", i64)])
+        }
+        return argsFromF
     }
     function varCell(b, name) {
         curWrites[name] = true
@@ -3126,6 +3333,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                 tokName = "0reft" + hidCount
                 callExt(b, "js_scope_decl", [curScopeV, emitStr(b, tokName), callExt(b, "js_phtry", [])])
             }
+            var topName = saveTop(b)
             var tryClo = callExt(b, "js_closure", [handle(emitFunc([], tryT, false, true)), curScopeV])
             var catchClo = hUndef
             var finClo = hUndef
@@ -3136,16 +3344,16 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                 catchClo = rethrowClo(b, function(cb, cv) {
                     callExt(cb, "js_scope_decl", [curScopeV, emitStr(cb, pendName), cv])
                 })
-                finClo = callExt(b, "js_closure", [handle(emitFunc([], silenceUnwind(unwindFrames(tokName, function(fb) {
+                finClo = callExt(b, "js_closure", [handle(emitFunc([], restoreTop(topName, silenceUnwind(unwindFrames(tokName, function(fb) {
                     var bodyClo = callExt(fb, "js_closure", [handle(emitFunc([], finallyT, false, true)), curScopeV])
                     var chainClo = rethrowClo(fb, function(cb, cv) {
                         callExt(cb, "js_phchain", [cv, callExt(cb, "js_scope_get", [curScopeV, emitStr(cb, pendName)])])
                     })
                     return excDispatch(fb, callExt(fb, "js_try", [bodyClo, chainClo, hUndef]))
-                }), depthName), false, true)), curScopeV])
+                }), depthName)), false, true)), curScopeV])
             } else if (catches.length > 0) {
                 catchClo = callExt(b, "js_closure",
-                                   [handle(emitFunc(["0caught"], silenceUnwind(unwindFrames(tokName, makeCatchDispatch(catches)), depthName), false, true)), curScopeV])
+                                   [handle(emitFunc(["0caught"], restoreTop(topName, silenceUnwind(unwindFrames(tokName, makeCatchDispatch(catches)), depthName)), false, true)), curScopeV])
             }
             var ctl = callExt(b, "js_try", [tryClo, catchClo, finClo])
             return excDispatch(b, ctl)
@@ -5269,13 +5477,13 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     function cloNoteAnon(pos) { cloClass = "class@anonymous"; return pos }
     function cloEnterFn(n, method) {
         var meth = (method ? cloClass + "::" : "") + stripWs(n)
-        cloScopes.push({name: meth + "()", self: method, fn: stripWs(n), meth: meth, vm: varMark()})
+        cloScopes.push({name: meth + "()", self: method, cls: method ? cloClass : "", fn: stripWs(n), meth: meth, vm: varMark()})
     }
     function cloEnter(pos) {
         var top = cloScopes.length == 0 ? null : cloScopes[cloScopes.length - 1]
         var line = "" + c.lineOf(pos)
-        var name = "{closure:" + (top == null ? c.file : top.name) + ":" + line + "}"
-        cloScopes.push({name: name, self: top != null && top.self && !cloStatic, line: line,
+        var name = "{closure:" + (top == null ? c.curFileAbs() : top.name) + ":" + line + "}"
+        cloScopes.push({name: name, cls: top == null ? "" : top.cls, self: top != null && top.self && !cloStatic, line: line,
                         fn: name, meth: name, st: cloStatic, hide: cloStatic && top != null && top.self, vm: varMark()})
         cloStatic = false
     }
@@ -5358,7 +5566,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     function cloNoteProp(n) { cloProp = stripWs(n) }
     function cloEnterHook(kind) {
         var fn = cloProp + "::" + kind
-        cloScopes.push({name: cloClass + "::" + fn + "()", self: true, fn: fn, meth: cloClass + "::" + fn, vm: varMark()})
+        cloScopes.push({name: cloClass + "::" + fn + "()", self: true, cls: cloClass, fn: fn, meth: cloClass + "::" + fn, vm: varMark()})
         return kind
     }
     // __FUNCTION__ / __METHOD__: twin of cloMagic in php-interpreter.abnf.
@@ -5369,7 +5577,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     }
     // The debug record (phsCloDesc) of the closure cloLeave answered sc for: its
     // static variables, then its parameter list.
-    function cloDesc(sc, statics, pl) { return fnDescOf(sc.name, c.file, sc.line, statics, pl) }
+    function cloDesc(sc, statics, pl) { return fnDescOf(sc.name, c.curFileAbs(), sc.line, statics, pl) }
     // A debug record (phsCloDesc) for parameter list pl.
     function fnDescOf(name, file, line, statics, pl) {
         var pr = []
@@ -5417,11 +5625,21 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         var chk = cloArgCheck(pl, sc)
         pl.live = sc.live
         pl.gen = isGen
+        cloFrame(pl, sc)
         return function(b) {
             var idx = emitFunc(pl.params, body, false, false, undefined, undefined, chk, pl)
             var rc = emitCapture(b, byVal, byRef)
             return {b: rc.b, v: withClosureRec(rc.b, closureV(rc.b, idx, rc.v), pl, desc, rc.v, sc, idx, byVal.concat(byRef))}
         }
+    }
+
+    // A closure's call record (emitFramePush) names it as its scope does, with the
+    // class it is written in.
+    function cloFrame(pl, sc) {
+        pl.fname = sc.name
+        pl.fcls = sc.cls == undefined ? "" : sc.cls
+        pl.clo = true
+        pl.lib = phpLibDepth > 0
     }
 
     // fn ($x) => $e is the same emitted function as a closure, with a body that
@@ -5449,6 +5667,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         var chk = cloArgCheck(pl, sc)
         pl.live = sc.live
         pl.gen = isGen
+        cloFrame(pl, sc)
         return function(b) {
             var idx = emitFunc(pl.params, body, false, false, undefined, undefined, chk, pl)
             var rc = emitCapture(b, captured, [])
@@ -7040,12 +7259,15 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         if (name == "is_numeric") { return "numeric" }
         return ""
     }
-    function emitBuiltin(b, name, args) {
+    // The call of the engine's own function name: site (callSite) is stored once
+    // the arguments are read, as for any call, for an error it raises.
+    function emitBuiltin(b, name, args, site) {
         if ((name == "array_push" || name == "array_pop") && args.length > 0 && args[0].vtext != null) {
             noteWrite(argTarget(args[0].vtext))
         }
         var vs = []
         for (var i = 0; i < args.length; i++) { var r = args[i].pos(b); b = r.b; vs.push(r.v) }
+        siteStore(b, site)
         // strlen counts BYTES (PHP strings are byte strings), count() counts elements.
         // strlen() measures PHP's string form of the argument (true is "1", false
         // and null are ""), not the JavaScript form js_bytelen alone would measure.
@@ -7554,10 +7776,10 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                 return emitPartialFor(b, pfV, name, "call", "\x00pfafn", args, sigOf(name))
             }
             if (lowered && countSite != null) {
-                var rcn = emitBuiltin(b, name, args)
+                var rcn = emitBuiltin(b, name, args, site)
                 return {b: countSite(rcn.b, []), v: rcn.v}
             }
-            if (lowered) { return emitBuiltin(b, name, args) }
+            if (lowered) { return emitBuiltin(b, name, args, site) }
             var fV = anyCase ? fk.v : callExt(b, "js_scope_get", [curScopeV, emitStr(b, name)])
             var ea = emitPhArgs(b, args, sigOf(name))
             b = ea.b
@@ -7618,9 +7840,9 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     // The file of the site php.site holds, "" for 0; php_site_file's body is
     // emitted with php_site_text's.
     var siteFileF = null
-    function siteFile(b) {
+    function siteFileFn() {
         if (siteFileF == null) { siteFileF = m.NewFunc("php_site_file", i64, [llvm.ir.NewParam("site", i64)]) }
-        return b.NewCall(siteFileF, [b.NewLoad(i64, siteGlobal())])
+        return siteFileF
     }
     function siteTextBody() {
         if (siteF != null) {
@@ -7735,16 +7957,21 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     // A run of binary operators of one level, whose operands are checked
     // (__mec_opchk) before each operation with display_errors=1; foldBinary without.
     // Twin of foldOps in php-interpreter.abnf.
+    // Each operation may raise (a TypeError, DivisionByZeroError, ...), so it
+    // stores its site first (php_here); the library's own do not.
     function foldOps(items, pos) {
-        var site = items.length > 1 ? diagSite("__mec_opchk", pos) : null
-        if (site == null) { return foldBinary(items) }
+        if (items.length == 1) { return items[0] }
+        var site = diagSite("__mec_opchk", pos)
+        var at = callSite(pos)
         return function(b) {
             var r = items[0](b)
             b = r.b
             var v = r.v
             for (var i = 1; i < items.length; i += 2) {
                 var rr = items[i + 1](b)
-                b = site(rr.b, [emitStr(rr.b, items[i]), v, rr.v])
+                b = rr.b
+                if (site != null) { b = site(b, [emitStr(b, items[i]), v, rr.v]) }
+                if (at != 0) { siteStore(b, at) }
                 v = emitBin(b, items[i], v, rr.v)
             }
             return {b: b, v: v}
@@ -7977,6 +8204,22 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, frameClsName("static")),
                                          callExt(b, "js_phlsb", [thisArg, selfV])])
         }
+        // The call's record (emitFramePush), for a function frm names.
+        var savedRec = curRec
+        var savedRecF = curRecF
+        var savedGenBody = curGenBody
+        if (!isCtl) {
+            curGenBody = frm != undefined && frm != null && frm.gen === true
+            curRec = null
+            if (frm != undefined && frm != null && frm.fname != undefined && !curGenBody) {
+                var rest = frm.rest == undefined ? -1 : frm.rest
+                curRec = emitFramePush(b, {name: frm.fname, cls: frm.fcls == undefined ? "" : frm.fcls,
+                                           kind: isMethod ? (isStatic === true ? 1 : 2) : (frm.clo === true ? 3 : 0),
+                                           lib: frm.lib === true, names: rest >= 0 ? params.slice(0, rest) : params,
+                                           rest: rest, off: isMethod ? 1 : 0})
+                curRecF = f
+            }
+        }
         var savedWrites = curWrites
         if (!isCtl) { curWrites = {} }
         var bodyB = f.NewBlock("")
@@ -8033,8 +8276,17 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         curThisOwn = savedOwn
         curThisSure = savedSure
         if (!isCtl) { emitFrameLeave(endB, hNull) }
-        if (!isCtl && curRet != null) { endB.NewRet(emitRetFit(endB, hUndef)) }
-        else { endB.NewRet(hNull) }
+        if (!isCtl && curRet != null) {
+            var fitV = emitRetFit(endB, hUndef)
+            emitFramePop(endB)
+            endB.NewRet(fitV)
+        } else {
+            if (!isCtl) { emitFramePop(endB) }
+            endB.NewRet(hNull)
+        }
+        curRec = savedRec
+        curRecF = savedRecF
+        curGenBody = savedGenBody
         curLive = savedLive
         curGen = savedGen
         curRet = savedRet
@@ -8193,6 +8445,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         return {name: name, params: params, defs: defs, byref: pl.byref, rest: pl.rest, pvis: pvis, vis: vis, st: isSt, live: sc.live, gen: isGen,
                 tys: pl.tys, rty: retTypeOf(pl.rty, isGen),
                 lib: phpLibDepth > 0 && name.substring(0, 5) != "__mec",
+                fname: phpLibDepth > 0 && name.substring(0, 5) == "__mec" ? undefined : name,
                 body: paramDefaults(defs, variadicPrologue(pl, inner))}
     }
     // mVisNames: the lower-cased names some class declares a non-public method
@@ -8912,7 +9165,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             hex = "0123456789abcdef".charAt(v % 16) + hex
             v = (v - v % 16) / 16
         }
-        return "\x00" + c.file + ":" + c.lineOf(pos) + "$" + hex
+        return "\x00" + c.curFileAbs() + ":" + c.lineOf(pos) + "$" + hex
     }
     // A class declaring __toString implements Stringable without naming it, after
     // the interfaces it names (add_stringable_interface in zend_compile.c); one
@@ -9084,6 +9337,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             var pvl = phVisList(shown, props)
             if (pvl != ",") { callExt(b, "js_set", [clsV, emitStr(b, "__pvis"), emitStr(b, pvl)]) }
             for (var k = 0; k < methods.length; k++) {
+                methods[k].fcls = shown
                 var idx = emitFunc(methods[k].params, methods[k].body, true, false, name, methods[k].st === true,
                                    argCheckOf(methods[k], shown + "::" + methods[k].name, methods[k].lib === true), methods[k])
                 // Stored under its declared name, its lower-cased name and every other
@@ -9307,24 +9561,24 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                       ["ValueError", "Error"], ["ArithmeticError", "Error"],
                       ["DivisionByZeroError", "ArithmeticError"]]
     // The instance properties of Exception and Error, in declaration order
-    // (Zend/zend_exceptions.stub.php), with their defaults. file and line are the
-    // site of the `new` creating the exception, which makeNew stores in php.site
-    // right before the __initprops call: the defaults for a site of 0, a `new` in
-    // the library. One the engine creates (phpMkErrOf) keeps the defaults too, and
-    // no call frames are recorded for trace. Twin of excProps and instantiate in
-    // php-interpreter.abnf.
+    // (Zend/zend_exceptions.stub.php), with their defaults. file and line are
+    // php_here's site as the `new` creating the exception leaves it (makeNew
+    // stores its own site right before the __initprops call), the defaults for a
+    // site of 0, and trace the calls in progress (zend_default_exception_new). One
+    // the engine creates (phpMkErrOf) takes the same three from the closure
+    // js_phrtinit hands over under "\x00here". Twin of excProps and instantiate
+    // in php-interpreter.abnf.
     function excStrInit(b) { return {b: b, v: emitStr(b, "")} }
     function excZeroInit(b) { return {b: b, v: emitNum(b, 0)} }
-    function excFileInit(b) { return {b: b, v: siteFile(b)} }
-    function excLineInit(b) {
-        return {b: b, v: callExt(b, "js_num_i", [b.NewAnd(b.NewLoad(i64, siteGlobal()), handle(16777215))])}
-    }
+    function excFileInit(b) { return {b: b, v: b.NewCall(siteFileFn(), [hereSite(b)])} }
+    function excLineInit(b) { return {b: b, v: callExt(b, "js_num_i", [b.NewAnd(hereSite(b), handle(16777215))])} }
+    function excTraceInit(b) { return {b: b, v: emitLibCall(b, "__mec_trace", [traceRaw(b)])} }
     var excProps = [{name: "message", vis: "protected", typ: "", init: excStrInit},
                     {name: "string", vis: "private", typ: "string", init: excStrInit},
                     {name: "code", vis: "protected", typ: "", init: excZeroInit},
                     {name: "file", vis: "protected", typ: "string", init: excFileInit},
                     {name: "line", vis: "protected", typ: "int", init: excLineInit},
-                    {name: "trace", vis: "private", typ: "array", init: function(b) { return {b: b, v: callExt(b, "js_pharr", [])} }},
+                    {name: "trace", vis: "private", typ: "array", init: excTraceInit},
                     {name: "previous", vis: "private", typ: "?Throwable", init: function(b) { return {b: b, v: hNull} }}]
     // Exception::__construct's parameter list, which a named argument is placed by:
     // statically for a class known to take it (ctorSigs), else through the
@@ -9381,9 +9635,11 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                 callExt(b, "js_set", [clsV, emitStr(b, getters[gi][0]),
                                       callExt(b, "js_closure", [handle(emitExcGetter(getters[gi][1])), curScopeV])])
             }
-            // No call frames are recorded, so the trace is always empty and renders
-            // as zend_trace_to_string renders an empty one.
-            var tas = emitFunc([], function(bb) { return retStmt(bb, emitStr(bb, "#0 {main}")) }, true)
+            // __mec_tracestr (lib/php-stdlib.php) renders the trace.
+            var tas = emitFunc([], function(bb) {
+                var thisV = callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, "$this")])
+                return retStmt(bb, emitLibCall(bb, "__mec_tracestr", [callExt(bb, "js_get", [thisV, emitStr(bb, "trace")])]))
+            }, true)
             callExt(b, "js_set", [clsV, emitStr(b, "getTraceAsString"), callExt(b, "js_closure", [handle(tas), curScopeV])])
             // __mec_excstr (lib/php-stdlib.php) builds the text, which is also kept in
             // the private string slot.
@@ -9539,6 +9795,22 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             cfb.NewRet(cfb.NewCall(classFindFn(), [cff.Params[0], callExt(cfb, "js_arg", [cff.Params[1], handle(0)])]))
             callExt(b, "js_phset", [regV, emitStr(b, "\x00clsfind"), callExt(b, "js_closure", [handle(cfIdx), curScopeV])])
         }
+        // The file, line and trace of an exception the runtime raises (phMkErrOf),
+        // handed over as a closure under "\x00here".
+        funcCount++
+        var hrIdx = funcCount
+        var hrf = m.NewFunc("jsf_" + hrIdx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
+        var hrb = hrf.NewBlock("entry")
+        var hrScope = curScopeV
+        curScopeV = hrf.Params[0]
+        var hrSite = hereSite(hrb)
+        var hrV = callExt(hrb, "js_pharr", [])
+        callExt(hrb, "js_phpush", [hrV, hrb.NewCall(siteFileFn(), [hrSite])])
+        callExt(hrb, "js_phpush", [hrV, callExt(hrb, "js_num_i", [hrb.NewAnd(hrSite, handle(16777215))])])
+        callExt(hrb, "js_phpush", [hrV, emitLibCall(hrb, "__mec_trace", [traceRaw(hrb)])])
+        hrb.NewRet(hrV)
+        curScopeV = hrScope
+        callExt(b, "js_phset", [regV, emitStr(b, "\x00here"), callExt(b, "js_closure", [handle(hrIdx), curScopeV])])
         callExt(b, "js_phrtinit", [regV])
         if (strictTypes) { callExt(b, "js_phstrict", []) }
         // The floor's RECOVERABLE-NAME hook: on a js_scope_get miss the floor
@@ -9584,6 +9856,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         var ucb = ucf.NewBlock("entry")
         var mainScopeV = curScopeV
         curScopeV = ucf.Params[0]
+        ucb.NewStore(handle(0), topGlobal())
         var ucText = emitLibCall(ucb, "__mec_uncaught", [callExt(ucb, "js_arg", [ucf.Params[1], handle(0)])])
         if (diagOn) {
             emitLibCall(ucb, "__mec_fatalshow", [ucText])
@@ -9610,8 +9883,11 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     // may reach. Twin of the same loads in php-interpreter.abnf.
     phpLibRef("__mec_excstr", true)
     phpLibRef("__mec_uncaught", true)
+    phpLibRef("__mec_trace", true)
+    phpLibRef("__mec_tracestr", true)
     if (diagOn) { phpLibRef("__mec_fatalshow", true) }
     c.compile(c.asg)
+    frameBodies()
     siteTextBody()
 
     // ----- the native build -----

@@ -2797,6 +2797,109 @@ function __mec_excstr($e) {
     }
     return $str;
 }
+// A Throwable's trace (zend_fetch_debug_backtrace): $raw lists the calls in
+// progress innermost first as the engines record them, each [file, line,
+// function, class, kind, lib, $this, current, passed, rest]. file and line are
+// where the call stands, "" and 0 for a call the library or the engine made. kind
+// is 0 for a function, 1 a static method, 2 an instance method, 3 a closure;
+// current holds the parameters' values now, passed the arguments as the call
+// handed them over up to a variadic parameter, and rest the variadic ones packed
+// into one array (null without one). A library function called from the library
+// is no frame of its own, as an internal function calling another is none. The
+// arguments are the parameters' current values for the arguments passed, an
+// internal function's as passed, and then the variadic ones, a named one under
+// its name (debug_backtrace_get_args).
+function __mec_trace($raw) {
+    $out = [];
+    foreach ($raw as $r) {
+        $lib = $r[5];
+        if ($lib && $r[0] === "") { continue; }
+        $f = [];
+        if ($r[0] !== "") { $f["file"] = $r[0]; $f["line"] = $r[1]; }
+        $f["function"] = $r[2];
+        $kind = $r[4];
+        if ($r[3] !== "" && $kind != 0) {
+            $f["class"] = $r[3];
+            $f["type"] = $kind == 2 || ($kind == 3 && is_object($r[6])) ? "->" : "::";
+        }
+        $cur = $r[7];
+        $passed = $r[8];
+        $args = [];
+        $n = count($passed);
+        for ($i = 0; $i < $n; $i++) {
+            $args[] = !$lib && $i < count($cur) ? $cur[$i] : $passed[$i];
+        }
+        if (is_array($r[9])) {
+            foreach ($r[9] as $k => $v) {
+                if (is_string($k)) { $args[$k] = $v; } else { $args[] = $v; }
+            }
+        }
+        $f["args"] = $args;
+        $out[] = $f;
+    }
+    return $out;
+}
+// Exception::getTraceAsString (zend_trace_to_string with {main}): one line per
+// frame, "#n file(line): " or "#n [internal function]: ", the class and call
+// type, the function and its arguments (_build_trace_args), then "#n {main}".
+function __mec_tracestr($trace) {
+    $s = "";
+    $n = 0;
+    foreach ($trace as $f) {
+        $s .= "#" . $n . " " . (isset($f["file"]) ? $f["file"] . "(" . $f["line"] . "): " : "[internal function]: ")
+            . ($f["class"] ?? "") . ($f["type"] ?? "") . $f["function"] . "(";
+        $sep = "";
+        foreach ($f["args"] ?? [] as $k => $v) {
+            $s .= $sep . (is_string($k) ? $k . ": " : "") . __mec_tracearg($v);
+            $sep = ", ";
+        }
+        $s .= ")\n";
+        $n++;
+    }
+    return $s . "#" . $n . " {main}";
+}
+// One argument as smart_str_append_zval shows it: a string quoted, its first
+// exception_string_param_max_len (15) bytes escaped and "..." after a longer
+// one, a float at precision 14 with a fraction, an enum case by name, and
+// otherwise Array or Object(class).
+function __mec_tracearg($v) {
+    if ($v === null) { return "NULL"; }
+    if (is_bool($v)) { return $v ? "true" : "false"; }
+    if (is_int($v)) { return (string)$v; }
+    if (is_float($v)) {
+        $s = (string)$v;
+        return is_finite($v) && strpos($s, ".") === false ? $s . ".0" : $s;
+    }
+    if (is_string($v)) {
+        $len = strlen($v);
+        $m = $len > 15 ? 15 : $len;
+        $out = "'";
+        $from = 0;
+        for ($i = 0; $i < $m; $i++) {
+            $c = ord($v[$i]);
+            if ($c >= 32 && $c != 92 && $c <= 126) { continue; }
+            $out .= substr($v, $from, $i - $from) . "\\" . __mec_traceesc($c);
+            $from = $i + 1;
+        }
+        return $out . substr($v, $from, $m - $from) . "'" . ($len > 15 ? "..." : "");
+    }
+    if ($v instanceof UnitEnum) { return get_class($v) . "::" . $v->name; }
+    if (is_array($v)) { return "Array"; }
+    return "Object(" . get_class($v) . ")";
+}
+// The escape of byte $c after its backslash (smart_str_append_escaped).
+function __mec_traceesc($c) {
+    switch ($c) {
+        case 10: return "n";
+        case 13: return "r";
+        case 9: return "t";
+        case 12: return "f";
+        case 11: return "v";
+        case 92: return "\\";
+        case 27: return "e";
+    }
+    return "x" . strtoupper(str_pad(dechex($c), 2, "0", STR_PAD_LEFT));
+}
 // An exception nobody caught (zend_exception_error): the fatal error
 // "Uncaught " . (string) $e . "\n  thrown" at the exception's file and line, or
 // at "Unknown" and line 0 when it has no file. The answer is the error's text

@@ -1197,6 +1197,15 @@ func (rt *jsrt) phpMkErrOf(cls interface{}, msg string) *jsObject {
 	o.set("line", float64(0))
 	o.set("trace", phpNewArr())
 	o.set("previous", jsNull)
+	// The file, line and trace of the code raising it, which the module hands
+	// over as a closure answering [file, line, trace] (php-to-llvm-ir.abnf).
+	if here := rt.phpRtClass("\x00here"); here != nil {
+		if _, vals, ok := phpArrParts(rt.call(here, jsUndef, nil)); ok && len(vals.elems) == 3 {
+			o.set("file", vals.elems[0])
+			o.set("line", vals.elems[1])
+			o.set("trace", vals.elems[2])
+		}
+	}
 	rt.phpStamp(o)
 	return o
 }

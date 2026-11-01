@@ -1702,13 +1702,129 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // Twin of callSite in php-to-llvm-ir.abnf.
     function callSite(pos) {
         if (pos == undefined || phpLibDepth > 0) { return "" }
-        return phsCallSite(c.curFileAbs(), c.lineOf(pos))
+        var file = c.curFileAbs()
+        var line = c.lineOf(pos)
+        var t = phsCallSite(file, line)
+        siteParts[t] = {file: file, line: line}
+        return t
     }
-    // Where a `new` starting at pos stands, for instantiate: null inside the
-    // library. Twin of callSite's use in makeNew in php-to-llvm-ir.abnf.
-    function newSite(pos) {
-        if (pos == undefined || phpLibDepth > 0) { return null }
-        return {file: c.curFileAbs(), line: c.lineOf(pos)}
+    // The site (callSite's text) of the call, `new` or operation that ran last,
+    // which every call sets once its arguments are read (evalArgs), a `new` before
+    // its object is made, and an operation that may raise before it runs;
+    // siteParts holds each text's file and line. Twin of php.site in
+    // php-to-llvm-ir.abnf.
+    var phpSite = ""
+    var siteParts = {}
+    function siteFileLine(t) {
+        if (t == "" || siteParts[t] === undefined) { return {file: "", line: 0} }
+        return siteParts[t]
+    }
+    // ----- the calls in progress, which a trace reports -----
+    // A call of a function, method or closure the program or the library declares
+    // (a generator's body and a __mec helper excepted) pushes a record on phpTop:
+    // the record of the call it was made from, phpSite as the call left it, the
+    // function's name, class and kind (0 function, 1 static method, 2 instance
+    // method, 3 closure), whether the library declares it, its frame and scope
+    // chain, its parameters and its arguments. A return pops it; an exception skips
+    // the returns, so a catch or finally puts phpTop back at its own call
+    // (frameBack), and in a generator's body, which may be resumed under other calls
+    // than before, as the main program's. Twin of php.top in php-to-llvm-ir.abnf.
+    var phpTop = null
+    function framePush(fn, cls, kind, lib, fr, argset) {
+        phpTop = {prev: phpTop, site: phpSite, name: fn.name, cls: cls, kind: kind, lib: lib, fr: fr, sc: scopes,
+                  params: fn.params, argset: argset}
+        return phpTop
+    }
+    // php_here: the site of the innermost library call the program made, else
+    // phpSite. Twin of php_here in php-to-llvm-ir.abnf.
+    function phpHere() {
+        for (var r = phpTop; r != null && r.lib; r = r.prev) {
+            if (r.site != "") { return r.site }
+        }
+        return phpSite
+    }
+    // The records from phpTop outwards as __mec_trace (lib/php-stdlib.php) takes
+    // them: [file, line, function, class, kind, lib, $this, current, passed,
+    // rest], passed and rest as the compiled call hands them over (framePassed,
+    // frameRest). Twin of php_trace in php-to-llvm-ir.abnf.
+    function phpTraceRaw() {
+        var out = newArr()
+        for (var r = phpTop; r != null; r = r.prev) {
+            var sp = siteFileLine(r.site)
+            var item = newArr()
+            arrPush(item, sp.file)
+            arrPush(item, sp.line)
+            arrPush(item, r.name)
+            arrPush(item, r.cls)
+            arrPush(item, r.kind)
+            arrPush(item, r.lib)
+            var me = anytype
+            me = null
+            if (r.kind == 3) {
+                var saved = scopes
+                scopes = r.sc
+                if (varExists("$this")) { me = getVar("$this") }
+                scopes = saved
+            }
+            arrPush(item, me)
+            var rest = -1
+            var cur = newArr()
+            for (var i = 0; i < r.params.length; i++) {
+                if (r.params[i].variadic === true) {
+                    rest = i
+                    break
+                }
+                var cv = anytype
+                cv = hasOwn(r.fr, r.params[i].name) ? deref(r.fr[r.params[i].name]) : null
+                arrPush(cur, cv === undefined ? null : cv)
+            }
+            arrPush(item, cur)
+            arrPush(item, framePassed(r.params, r.argset, rest))
+            arrPush(item, rest < 0 ? null : frameRest(r.params, r.argset, rest))
+            arrPush(out, item)
+        }
+        return out
+    }
+    // The arguments by position, then those named for the parameters that
+    // follow, up to the first not passed, stopping before a variadic parameter
+    // rest (-1: none).
+    function framePassed(params, argset, rest) {
+        var out = newArr()
+        var pos = argset.pos
+        var n = rest >= 0 ? rest : pos.length
+        var i = 0
+        while (i < pos.length && i < n) {
+            arrPush(out, deref(pos[i]))
+            i++
+        }
+        if (rest < 0) { n = params.length }
+        while (i < n && argset.named != null && hasOwn(argset.named, params[i].name)) {
+            arrPush(out, deref(argset.named[params[i].name]))
+            i++
+        }
+        return out
+    }
+    // The variadic arguments of parameter rest packed into one array: the
+    // positional ones from rest on, then the named ones no parameter declares.
+    function frameRest(params, argset, rest) {
+        var packed = newArr()
+        for (var k = rest; k < argset.pos.length; k++) { arrPush(packed, deref(argset.pos[k])) }
+        if (argset.named != null) {
+            var ks = ownKeys(argset.named)
+            for (var j = 0; j < ks.length; j++) {
+                var declared = false
+                for (var q = 0; q < rest; q++) { if (params[q].name == ks[j]) { declared = true } }
+                if (!declared) { arrSet(packed, ks[j].substring(1), deref(argset.named[ks[j]])) }
+            }
+        }
+        return packed
+    }
+    // The file, line and trace of a Throwable o made here (zend_default_exception_new).
+    function excHere(o) {
+        var sp = siteFileLine(phpHere())
+        dictSet(o.p, "file", sp.file)
+        dictSet(o.p, "line", sp.line)
+        dictSet(o.p, "trace", callNamed("__mec_trace", argsOf([phpTraceRaw()])))
     }
     // site is where the call stands (callSite), for the callee's count check.
     // pre is the callee's parameters when known before its arguments are read (a
@@ -1794,6 +1910,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             pos.push(av)
             tgts.push(a.argtgt == undefined ? (a.noref === true ? NOREF : null) : mkCellMaker(a.argtgt, here, {v: av}))
         }
+        phpSite = site == undefined ? "" : site
         return {pos: pos, named: hasNamed ? named : null, nkeys: nkeys, tgts: tgts, ntgts: ntgts, fcc: fcc, holes: holes, site: site,
                 pend: pend}
     }
@@ -5401,9 +5518,9 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // parameters, body, captured chain and generator flag, st for a static one and
     // ut for one whose body uses $this.
     var cloProbe = {probe: true}
-    function closureBody(params, body, captured, env, isGen, desc, self, st, ut) {
+    function closureBody(params, body, captured, env, isGen, desc, self, st, ut, fi) {
         objHandles = objHandles + 1
-        var rec = {d: desc, i: objHandles, e: env, t: self, p: params, b: body, c: captured, g: isGen, st: st, ut: ut}
+        var rec = {d: desc, i: objHandles, e: env, t: self, p: params, b: body, c: captured, g: isGen, st: st, ut: ut, f: fi}
         var who = desc.substring(0, desc.indexOf("\n"))
         return fnMetaSet(function(argset) {
             if (argset === cloProbe) { return rec }
@@ -5414,9 +5531,9 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                 k = ctxSelf()
                 scopes = saved
                 genArgCheck(params, argset, who, k)
-                return newGen(runClosureRun(params, body, captured, env, argset, who))
+                return newGen(runClosureRun(params, body, captured, env, argset, who, null))
             }
-            return runClosureRun(params, body, captured, env, argset, who)()
+            return runClosureRun(params, body, captured, env, argset, who, fi)()
         }, "closure", 0)
     }
     function cloRecOf(v) {
@@ -5437,15 +5554,15 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     function cloNoteAnon(pos) { cloClass = "class@anonymous"; return pos }
     function cloEnterFn(n, method) {
         var meth = (method ? cloClass + "::" : "") + stripWs(n)
-        cloScopes.push({name: meth + "()", self: method, fn: stripWs(n), meth: meth})
+        cloScopes.push({name: meth + "()", self: method, cls: method ? cloClass : "", fn: stripWs(n), meth: meth})
     }
     function cloEnter(pos) {
         var top = cloScopes.length == 0 ? null : cloScopes[cloScopes.length - 1]
         var line = "" + c.lineOf(pos)
-        var name = "{closure:" + (top == null ? c.file : top.name) + ":" + line + "}"
+        var name = "{closure:" + (top == null ? c.curFileAbs() : top.name) + ":" + line + "}"
         // A static closure where a $this is in reach hides it (hide); st marks one
         // that no instance can be bound to (cloBind).
-        cloScopes.push({name: name, self: top != null && top.self && !cloStatic, line: line,
+        cloScopes.push({name: name, cls: top == null ? "" : top.cls, self: top != null && top.self && !cloStatic, line: line,
                         fn: name, meth: name, st: cloStatic, hide: cloStatic && top != null && top.self})
         cloStatic = false
     }
@@ -5456,7 +5573,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     function cloNoteProp(n) { cloProp = stripWs(n) }
     function cloEnterHook(kind) {
         var fn = cloProp + "::" + kind
-        cloScopes.push({name: cloClass + "::" + fn + "()", self: true, fn: fn, meth: cloClass + "::" + fn})
+        cloScopes.push({name: cloClass + "::" + fn + "()", self: true, cls: cloClass, fn: fn, meth: cloClass + "::" + fn})
         return kind
     }
     // __FUNCTION__ / __METHOD__ are compile-time constants of the function being
@@ -5474,7 +5591,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         return null
     }
     // The debug record of the closure cloLeave answered sc for.
-    function cloDesc(sc, statics, params) { return fnDescOf(sc.name, c.file, sc.line, statics, params) }
+    function cloDesc(sc, statics, params) { return fnDescOf(sc.name, c.curFileAbs(), sc.line, statics, params) }
     // A debug record (phsCloDesc) for parameter records params.
     function fnDescOf(name, file, line, statics, params) {
         var pn = []
@@ -5488,7 +5605,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         return phsCloDesc(name, file, line, statics, pn, pr, po)
     }
     // The closure's body as a zero-argument thunk, so a generator closure can defer it.
-    function runClosureRun(params, body, captured, env, argset, who) {
+    function runClosureRun(params, body, captured, env, argset, who, fi) {
         return function() {
             var saved = scopes
             scopes = captured.slice(0)
@@ -5504,6 +5621,8 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                 }
             }
             scopes.push(fr)
+            var rec = anytype
+            rec = fi == null ? null : framePush(fi, fi.cls, 3, fi.lib, fr, argset)
             bindParams(params, argset, who, CLO_SCOPE)
             var r = anytype
             var depth = coreDepth + 1
@@ -5513,10 +5632,16 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             r = body()
             coreDepth = depth - 1
             callLeave(fr, isSig(r) && r.ret === true ? r.v : null)
+            if (rec != null) { phpTop = rec.prev }
             scopes = saved
             if (isSig(r) && r.ret === true) { return r.v }
             return null
         }
+    }
+    // What a call of the closure walked as sc pushes on phpTop (framePush). Twin of
+    // cloFrame in php-to-llvm-ir.abnf.
+    function cloFrame(sc, params) {
+        return {name: sc.name, params: params, cls: sc.cls, lib: phpLibDepth > 0}
     }
     function splitClosure(items) {
         var out = {params: [], body: null, byval: [], byref: [], rtype: ""}
@@ -5551,12 +5676,13 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         }
         var desc = cloDesc(sc, uses, params)
         var self = sc.self
+        var fi = cloFrame(sc, params)
         return function() {
             var captured = cloChain(sc)
             var env = {}
             for (var i = 0; i < byval.length; i++) { scopePut(env, byval[i], phpCopy(getVar(byval[i]))) }
             for (var j = 0; j < byref.length; j++) { bindRef(env, byref[j], varCell(byref[j])) }
-            return closureBody(params, body, captured, env, isGen, desc, cloThis(self), sc.st, sc.ut === true)
+            return closureBody(params, body, captured, env, isGen, desc, cloThis(self), sc.st, sc.ut === true, fi)
         }
     }
     // The scope chain a closure made here captures. A static closure written where
@@ -5620,7 +5746,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         scopePut(ov, STATIC_KEY, isObj(nthis) ? nthis.__class : (sc == null ? UNSET : sc))
         var ch = r.c.slice(0)
         ch.push(ov)
-        return closureBody(r.p, r.b, ch, r.e, r.g, r.d, isObj(nthis) ? nthis : null, r.st)
+        return closureBody(r.p, r.b, ch, r.e, r.g, r.d, isObj(nthis) ? nthis : null, r.st, null, r.f)
     }
     // A closure made from a callable (zend_create_fake_closure): a method, or the
     // __call / __callStatic that stands in for one. call(t, cs, argset) runs it
@@ -5807,12 +5933,13 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         var body = phpRetCheck(d.body, d.rtype, isGen, sc.name)
         var desc = cloDesc(sc, captured, params)
         var self = sc.self
+        var fi = cloFrame(sc, params)
         return function() {
             var env = {}
             for (var j = 0; j < captured.length; j++) {
                 scopePut(env, captured[j], phpCopy(deref(rawSlot(captured[j]))))
             }
-            return closureBody(params, body, cloChain(sc), env, isGen, desc, cloThis(self), sc.st, sc.ut === true)
+            return closureBody(params, body, cloChain(sc), env, isGen, desc, cloThis(self), sc.st, sc.ut === true, fi)
         }
     }
     // The variable names the source mentions, in parse order, and the mark an arrow
@@ -5881,13 +6008,12 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         var clsT = items[0].clsdyn == undefined ? null : items[0].clsdyn
         var args = items.slice(1)
         var site = callSite(start)
-        var at = newSite(start)
         return function() {
             var argset = evalArgs(args, site, null)
             var cls = anytype
             cls = clsT == null ? resolveClassName(stripWs(name)) : resolveClass(clsT())
             if (cls == undefined || cls == null || cls.__isclass !== true) { fail("new on a non-class") }
-            return instantiate(cls, argset, at)
+            return instantiate(cls, argset)
         }
     }
 
@@ -6898,7 +7024,8 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         }
         if (vis != "") { mVisNames["$" + phsCase(name, false)] = true }
         var rec = {name: name, params: params, body: phpRetCheck(body != null ? body : makeBody([]), rtype, isGen, name),
-                   isStatic: isStatic, isGen: isGen, vis: vis}
+                   isStatic: isStatic, isGen: isGen, vis: vis,
+                   lib: phpLibDepth > 0, hid: phpLibDepth > 0 && name.substring(0, 5) == "__mec"}
         // A library method stands for an internal one, which checks its count
         // against [required, declared] (phpLibArgCheck); a library function's
         // range is its index entry's (makeTopDef).
@@ -6977,6 +7104,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             main()
         } catch (e) {
             if (excIsUser(e) && phpLibDepth == 0) {
+                phpTop = null
                 var text = anytype
                 text = callNamed("__mec_uncaught", argsOf([e.v]))
                 if (diagOn) {
@@ -7027,6 +7155,12 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             declVar(STATIC_KEY, staticCls)
         }
         declVar(FN_KEY, fn.name)
+        var rec = anytype
+        rec = null
+        if (fn.isGen !== true && fn.hid !== true) {
+            var isM = defCls != undefined && defCls != null
+            rec = framePush(fn, isM ? defCls.__name : "", isM ? (fn.isStatic === true ? 1 : 2) : 0, fn.lib === true, fr, argset)
+        }
         if (fn.arity !== undefined) { phpLibArgCheck(fn, argset, defCls) }
         bindParams(fn.params, argset, fn.name, defCls)
         // Constructor property promotion: the bound parameter is ALSO written to the
@@ -7048,6 +7182,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         r = fn.body()
         coreDepth = depth - 1
         callLeave(fr, isSig(r) && r.ret === true ? r.v : null)
+        if (rec != null) { phpTop = rec.prev }
         scopes = saved
         if (isSig(r) && r.ret === true) { return r.v }
         return null
@@ -7128,23 +7263,16 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     }
     // Creating an instance: the declared property defaults are installed first (in
     // declaration order, walking the base classes first so an override wins), then
-    // the constructor runs.
-    // at is the site of the `new` ({file, line}, null in the library): a Throwable
-    // takes it as its file and line when it is created, before its constructor
-    // runs (zend_default_exception_new). Twin of the root __initprops of
-    // emitExcClass in php-to-llvm-ir.abnf.
-    function instantiate(cls, argset, at) {
+    // the constructor runs. A Throwable takes its file, line and trace when it is
+    // created, before its constructor runs (zend_default_exception_new). Twin of
+    // the root __initprops of emitExcClass in php-to-llvm-ir.abnf.
+    function instantiate(cls, argset) {
         if (cls.__ready !== true) { classInit(cls) }
         var obj = newObj(cls)
         initProps(obj, cls)
-        if (at != null) {
-            var root = cls
-            while (root.__super != undefined && root.__super != null) { root = root.__super }
-            if (root.__excroot === true) {
-                dictSet(obj.p, "file", at.file)
-                dictSet(obj.p, "line", at.line)
-            }
-        }
+        var root = cls
+        while (root.__super != undefined && root.__super != null) { root = root.__super }
+        if (root.__excroot === true) { excHere(obj) }
         var ctor = classFind(cls, "__construct")
         if (ctor != null && mVisNames["$__construct"] === true && phpMethodAccess(cls, "__construct", ctxSelf(), false) != 0) {
             phpBadMethod(cls, "__construct", ctxSelf(), true)
@@ -7543,13 +7671,12 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         anonCount = anonCount + 1
         var site = {cls: null}
         var callAt = callSite(start)
-        var at = newSite(start)
         return function() {
             if (site.cls == null) {
                 site.cls = buildClass(shown, p)
                 site.cls.__anon = sfx
             }
-            return instantiate(site.cls, evalArgs(args, callAt, null), at)
+            return instantiate(site.cls, evalArgs(args, callAt, null))
         }
     }
     // The name an anonymous class shows: its parent's, else its first interface's,
@@ -7570,7 +7697,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             hex = "0123456789abcdef".charAt(v % 16) + hex
             v = (v - v % 16) / 16
         }
-        return "\x00" + c.file + ":" + c.lineOf(pos) + "$" + hex
+        return "\x00" + c.curFileAbs() + ":" + c.lineOf(pos) + "$" + hex
     }
     function fullName(cls) { return typeof cls.__anon == "string" ? cls.__name + cls.__anon : cls.__name }
     // An interface: a class descriptor with no bodies, so instanceof and the
@@ -7660,9 +7787,12 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         fin = null
         var rest = []
         for (var i = 0; i < items.length; i++) {
-            if (items[i].finbody != undefined) { fin = items[i].finbody } else { rest.push(items[i]) }
+            if (items[i].finbody != undefined) { fin = frameBack(items[i].finbody) }
+            else if (items[i].catchbody != undefined) {
+                rest.push({catchbody: frameBack(items[i].catchbody), catchname: items[i].catchname, catchtype: items[i].catchtype})
+            } else { rest.push(items[i]) }
         }
-        if (fin == null) { return excTryTyped(items) }
+        if (fin == null) { return excTryTyped(rest) }
         var inner = rest.length > 1 ? excTryTyped(rest) : rest[0].trybody
         // No host finally: under goja a throw from a catch nested in a finally
         // does not replace the exception pending there, so the pending one is
@@ -7693,6 +7823,17 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             if (fr != undefined) { return fr }
             if (pending) { throw pend }
             return sig
+        }
+    }
+    // A catch or finally body t, run with phpTop back at the record of the call
+    // whose frame it runs in: none at the top level and in a generator's body.
+    function frameBack(t) {
+        return function() {
+            var f = scopes[scopes.length - 1]
+            var r = phpTop
+            while (r != null && r.fr !== f) { r = r.prev }
+            phpTop = r
+            return t()
         }
     }
     // zend_exception_set_previous: add goes at the end of ex's previous chain,
@@ -9009,10 +9150,9 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         return false
     }
     // The instance properties of Exception and Error, in declaration order
-    // (Zend/zend_exceptions.stub.php). file and line are filled in by a `new` in
-    // the program's own code (instantiate); one the library or the engine creates
-    // keeps the defaults, and no call frames are recorded for trace. Twin of
-    // excProps in php-to-llvm-ir.abnf.
+    // (Zend/zend_exceptions.stub.php). file, line and trace are filled in where
+    // one is created (instantiate, phpRaise: excHere). Twin of excProps in
+    // php-to-llvm-ir.abnf.
     var excProps = [{name: "message", vis: "protected", typ: ""}, {name: "string", vis: "private", typ: "string"},
                     {name: "code", vis: "protected", typ: ""}, {name: "file", vis: "protected", typ: "string"},
                     {name: "line", vis: "protected", typ: "int"}, {name: "trace", vis: "private", typ: "array"},
@@ -9061,9 +9201,8 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         cls["getLine"] = function(self, argset) { return phpExcSlot(self, "line") }
         cls["getTrace"] = function(self, argset) { return phpExcSlot(self, "trace") }
         cls["getPrevious"] = function(self, argset) { return phpExcSlot(self, "previous") }
-        // No call frames are recorded, so the trace is always empty and renders as
-        // zend_trace_to_string renders an empty one.
-        cls["getTraceAsString"] = function(self, argset) { return "#0 {main}" }
+        // __mec_tracestr (lib/php-stdlib.php) renders the trace.
+        cls["getTraceAsString"] = function(self, argset) { return callNamed("__mec_tracestr", argsOf([phpExcSlot(self, "trace")])) }
         // __mec_excstr (lib/php-stdlib.php) builds the text, which is also kept in
         // the private string slot.
         setMethod(cls, "__toString", function(self, argset) {
@@ -9105,6 +9244,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         if (!varExists(clsName)) { fail(msg) }
         var o = newObj(getVar(clsName))
         initProps(o, o.__class)
+        excHere(o)
         dictSet(o.p, "message", msg)
         throw {__exc: true, v: o}
     }
@@ -9172,15 +9312,32 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // (__mec_opchk) before each operation with display_errors=1; foldBinary without.
     // Twin of foldOps in php-to-llvm-ir.abnf.
     function foldOps(items, pos) {
-        var site = items.length > 1 ? diagSite("__mec_opchk", pos) : null
-        if (site == null) { return foldBinary(items) }
+        if (items.length == 1) { return items[0] }
+        var site = diagSite("__mec_opchk", pos)
+        var at = callSite(pos)
+        if (site == null && at == "") { return foldBinary(items) }
+        // Each operation may raise, so its site is stored first.
+        var g = items.length == 3 && site == null ? opResolve(items[1]) : null
+        if (g != null) {
+            var lt = items[0]
+            var rt = items[2]
+            return function() {
+                var l = anytype
+                l = lt()
+                var r = anytype
+                r = rt()
+                phpSite = at
+                return g(l, r)
+            }
+        }
         return function() {
             var v = anytype
             v = items[0]()
             for (var i = 1; i < items.length; i += 2) {
                 var r = anytype
                 r = items[i + 1]()
-                site([items[i], v, r])
+                if (site != null) { site([items[i], v, r]) }
+                if (at != "") { phpSite = at }
                 v = binOp(items[i], v, r)
             }
             return v
@@ -9482,6 +9639,8 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // may reach.
     phpLibRef("__mec_excstr", true)
     phpLibRef("__mec_uncaught", true)
+    phpLibRef("__mec_trace", true)
+    phpLibRef("__mec_tracestr", true)
     if (diagOn) { phpLibRef("__mec_fatalshow", true) }
     c.compile(c.asg)
 
