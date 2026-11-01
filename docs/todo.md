@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1069** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1071** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -69,13 +69,21 @@ Remainder of T-1028; each needs a table-size decision before work starts. CJK fa
 
 # RB — Ruby
 
-### T-1064 ruby: external Enumerator iteration over a user #each; Enumerator in for-in/splat · P3 · RB · IN PROGRESS (RB worker, round 45) [V]
-Oracle /usr/bin/ruby 2.6 (LC_ALL=en_US.UTF-8). All engines:
-- `e = C.new(log).each` (user #each that logs): `e.next` must run #each only up to the first yield (log [1]), a second `next` up to the second ([1, 2]); `peek` does not advance; `rewind` restarts. Ours runs #each to the end on the first next. `lazy.map{..}.next` replays #each from the start each call. Needs a suspendable #each: interpreter on coNew/coYield/coResume (cf. php-interpreter.abnf generator), compiled on the js_genfn floor; rubyCatchTags (Go twin) and js_rcatch/js_rthrow (layer 2) must become per-coroutine; never-finished enumerators must be released by the floor's close protocol.
-- `for x in [1,2,3].each_slice(2); p x; end` fails (interp "for-in needs an array or a hash", compiled TypeError / "indexing a object"); MRI iterates [1, 2], [3].
-- `p [*[1, 2].each_with_index]` -> MRI [[1, 0], [2, 1]]; ours keeps the Enumerator.
-- `yield 1, 2` into `lazy.map { |x| x }.first(1)` -> MRI [1], ours [[1, 2]].
-- Comparable included without <=>: `X.new < 1` -> MRI ArgumentError "comparison of X with 1 failed", ours NoMethodError.
+### T-1069 ruby: external Enumerator iteration (next/peek/rewind) over a user #each, to_enum/enum_for · P3 · RB · OPEN [V]
+Structural; touches the shared generator floor (Go twin jsGenerator / runtime.c gen_resume/gen_close) - coordinate as a shared-file change. Oracle /usr/bin/ruby 2.6, class whose #each logs 1,2,3,:end and yields 10,20,30 (returns :done):
+- `e.next` -> 10, log [1]; `e.peek` -> 20, log [1, 2]; after the third next, StopIteration "iteration reached an end", `result` :done. `rewind` drops the run WITHOUT running ensure (MRI runs none on rewind or at exit).
+- `lazy.map { |v| v + 1 }.next` twice -> 11, 21, log [1, 2]; `C.new(l).map.next` -> 10, log [1]; `each_slice(2).next` -> [10, 20] then [30].
+- `to_enum` / `enum_for` (NoMethodError today).
+- `for` over a user #each must interleave the body with #each's side effects (today all yields are collected first).
+Needs: interpreter coroutine running src.each(&blk) with blk = coYield, switching run state (block/self frames, rescue state) on resume; compiled: one emitted generator closure registered with the Go twin / layer 2 (js_genfn/js_yield are emitter-only externs); per-coroutine rubyCatchTags (Go) and js_rcatch/js_rthrow state (layer 2) plus the current-exception slot; close of an unfinished one must skip ensure.
+
+### T-1070 ruby: Enumerator#each value, for-over-Lazy value, user #inspect ivars, Lazy respond_to?/class · P3 · RB · OPEN [V]
+Oracle /usr/bin/ruby 2.6; all engines unless noted:
+- Enumerator#each with a block returns the Enumerator; MRI returns the underlying method's value (nil for each_slice, receiver for each/each_with_index, `[1, 2].map.each {}` -> [nil, nil]); so `for` over map/select/with_index Enumerators answers the Enumerator instead of MRI's Array.
+- `for x in (1..3).lazy.map {...}; end` answers the Lazy; MRI nil.
+- `#inspect` of a user object omits ivars: ours `#<Q>`, MRI `#<Q:0x... @a=1>` (decide a deterministic address rendering).
+- Lazy respond_to? wrong in the interpreter, incomplete compiled; layer 2's Lazy#class answers Enumerator.
+- `[7, 8].each.with_object([])` without a block crashes the interpreter ("Cannot read property 'apply' of undefined").
 
 # JS — JavaScript and TypeScript
 
@@ -1130,6 +1138,7 @@ T-1061 csharp: base property writes; System.Type ToString; typeof namespace — 
 T-1062 kotlin: javaClass/KClass leftovers (sequences, static-typed primitives, equality, reified) — PARTIAL→split (KT r22, 38b24c15): javaClass by static type for literals/declared names, KClass==java class equality, reified T::class (incl. forwarding; fixed 'T:Any' bound-in-name bug), kotlin.UInt/Unit/[I/java.util.* java names, lazy sequence{} chain classes; 4 legs = kotlinc. generateSequence class needs real lazy generators (subset limit, declined)
 T-1063 php: Exception data model - $previous/getPrevious(), real property layout — DONE (PHP r41, cf62ea41): Exception/Error declare php-src's 7-slot property table (visibility+defaults), $previous ctor arg + getPrevious(), finally-escape chaining with cycle guards; running-generator Error asserted previous-free; 3 legs agree with php-src (probe incl. protected-access error, foreach 0, (array) 7 keys)
 T-1065 csharp: `obj.P++` / `obj.P--` bypass the property setter — DONE (CS r11, 998e63fe): one csQualWrite per engine handles every qualified store (dict, user indexer, setter, Capacity, slot); ++/--/compound go through getter+setter; prefix/postfix values per ECMA-334 12.8.16; 3 legs agree with spec
+T-1064 ruby: external Enumerator iteration over a user #each; Enumerator in for-in/splat — PARTIAL→split (RB r45, 5 commits to d090f079): splat via #to_a (Enumerator/Hash/Struct/nil), multi-value yield spread into Lazy blocks, Object#<=> backs Comparable, for over Enumerators with block-style per-yield binding (sent back once for each_with_index binding); 4 legs = ruby 2.6. Suspendable #each (next/peek/rewind) filed separately
 
 # Settled — do not re-open
 
