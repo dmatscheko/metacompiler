@@ -562,6 +562,36 @@ declare -r s107c="3"'
   r=$(export s107d=4; declare -g +x s107d; echo "st=$?"; declare -p s107d); check xpl5 "$r" 'st=0
 declare -- s107d="4"'
 }
+# ===== SECTION 108: an array's kind belongs to its binding =====
+# Associative or indexed is a property of the variable in effect: a local hides a global's
+# kind, unset and a subshell end it, a computed `declare -A` names its array when it runs,
+# and -A of an indexed array (or -a of an associative one) is refused. Every expected
+# value is bash 5.3's.
+s108() {
+  local r
+  r=$(declare -A s108m=([a]=1); f() { local s108m; s108m[x]=1; s108m[y+1]=2; declare -p s108m; }; f; declare -p s108m); check akd1 "$r" 'declare -a s108m=([0]="1" [1]="2")
+declare -A s108m=([a]="1" )'
+  r=$(declare -A s108g=([a]=1); g() { local s108g[@]=z 2>/dev/null; echo "st=$? ${#s108g[@]}"; s108g[1+1]=q; echo "${!s108g[@]}"; }; g); check akd2 "$r" 'st=1 0
+2'
+  r=$(s=s108h; declare -A "$s"; s108h[k]=v; s108h[1+1]=w; echo "${s108h[k]} ${!s108h[@]}"); check akd3 "$r" 'v k 1+1'
+  r=$(t=s108i; declare -A "$t=([p]=1 [q]=2)"; s108i[r+1]=3; declare -p s108i); check akd4 "$r" 'declare -A s108i=([q]="2" [p]="1" [r+1]="3" )'
+  r=$(declare -A s108u=([p]=1); unset s108u; s108u[p+1]=2; declare -p s108u); check akd5 "$r" 'declare -a s108u=([1]="2")'
+  r=$( (declare -A s108s; s108s[a+b]=1); s108s[a+b]=1; declare -p s108s); check akd6 "$r" 'declare -a s108s=([0]="1")'
+  r=$(s108c=(1 2); declare -gA s108c 2>/dev/null; echo "st=$?"; declare -p s108c); check akd7 "$r" 'st=1
+declare -a s108c=([0]="1" [1]="2")'
+  r=$(declare -gA s108d=([x]=1); declare -ga s108d 2>/dev/null; echo "st=$?"; declare -p s108d); check akd8 "$r" 'st=1
+declare -A s108d=([x]="1" )'
+  r=$(s108e=6; declare -gA s108e; s108e[k]=1; declare -p s108e); check akd9 "$r" 'declare -A s108e=([0]="6" [k]="1" )'
+  r=$(declare -A s108f; f() { local s108f; s108f[1]=x; echo "${s108f@a}"; }; f; echo "${s108f@a}"); check akd10 "$r" 'a
+A'
+  r=$(declare -A s108k=([a]=1); f() { local s108k=(x y z); echo "${s108k[@]:1}"; s108k=([1+1]=w); echo "${!s108k[@]}"; }; f; echo "${!s108k[@]}"); check akd11 "$r" 'y z
+2
+a'
+  r=$(s=s108l; t='s108l=(one two three)'; declare -A "$s" "$t"; declare -p s108l); check akd12 "$r" 'declare -A s108l=([three]="" [one]="two" )'
+  r=$(declare -A s108o; f() { s108o[a+b]=1; }; f; g() { local -A s108p; s108p[c+d]=2; declare -p s108p; }; g; declare -p s108o); check akd13 "$r" 'declare -A s108p=([c+d]="2" )
+declare -A s108o=([a+b]="1" )'
+  r=$(n=s108n; declare -a "$n=(2*3 a?b)"; declare -p s108n); check dlit6 "$r" 'declare -a s108n=([0]="2*3" [1]="a?b")'
+}
 # ===== END SECTIONS =====
 
 s90   # SECTION-CALL 90
@@ -582,5 +612,6 @@ s104  # SECTION-CALL 104
 s105  # SECTION-CALL 105
 s106  # SECTION-CALL 106
 s107  # SECTION-CALL 107
+s108  # SECTION-CALL 108
 echo "full: $checks checks, $fails failures"
 exit $fails

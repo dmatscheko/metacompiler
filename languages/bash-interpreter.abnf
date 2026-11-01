@@ -3161,6 +3161,12 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 roFail = true
                 return
             }
+            // -A of an indexed array, -a of an associative one, is refused. Twin of rt_arr_conv.
+            if (bareArr && !fresh && isArr(names[k]) && arrs[arrKey(names[k])].assoc != assoc && (asgs[k] == null || asgs[k].lit == null)) {
+                diagErr(kw + ": " + names[k] + ": cannot convert " + (assoc ? "indexed to associative" : "associative to indexed") + " array\n")
+                roFail = true
+                return
+            }
             if (localize && !fresh) { claimLocal(names[k]) }
             // A bare `local x` whose visible x is a caller's prefix binding (`x=5 f`)
             // starts from that value, bash 5.3; any other starts unset.
@@ -3195,7 +3201,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 // when the scalar was (`declare -p` prints NAME=()).
                 var wasSet = localize && !fresh && !isArr(names[k]) && isSetVar(names[k])
                 if (localize && !isArr(names[k])) { unsetVar(names[k]) }
-                if (!assoc && !localize) { arrAdopt(names[k]) }
+                if (!localize) { arrAdopt(names[k]) }
                 arrEnsure(names[k], assoc)
                 arrs[arrKey(names[k])].decl = true
                 if (wasSet) { arrs[arrKey(names[k])].lit = true }
@@ -3903,17 +3909,14 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (!hasOwn(arrs, k)) { return false }
         return arrs[k] != null
     }
-    // IS THIS NAME ASSOCIATIVE - AND IT IS A WHOLE-PROGRAM FACT, not a property of the
-    // current binding. languages/bash-to-llvm-ir.abnf decides a subscript's normalisation
-    // from `assocArrays`, which is filled once for the whole program at walk time and
-    // never unwound. So `assoc` is sticky here too: otherwise `( declare -A m ); m[k]=v;
-    // m[j]=w` would answer "w" here and "v w" in the compiler.
-    var assocSeen = {}
+    // IS THIS NAME ASSOCIATIVE: a property of the binding in effect, so a `local m` hides a
+    // global `declare -A m` and `unset m` ends it. assoc true asks for an associative one.
+    // Twin of rt_isassoc in languages/lib/bash-rt.c.
     function assocFact(name, assoc) {
-        var k = "$" + name
-        if (assoc) { assocSeen[k] = true; return true }
-        return hasOwn(assocSeen, k)
+        if (assoc) { return true }
+        return isArr(name) && arrs[arrKey(name)].assoc
     }
+    // A new empty array of NAME, of the kind its binding already has unless assoc.
     function arrNew(name, assoc) {
         touchState(name)
         arrs[arrKey(name)] = {assoc: assocFact(name, assoc), keys: [], vals: {}, gone: {}, lit: false, decl: false, nb: 1024, hv: {}}

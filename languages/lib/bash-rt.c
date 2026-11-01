@@ -267,6 +267,7 @@ long rt_arr_nextidx(char *nm);
 int rt_arr_iset(char *nm, char *k, char *v);
 char *rt_arr_ikey(char *nm, long k);
 int rt_arr_clear(char *nm);
+int rt_arr_empty(char *nm, int keep);
 int rt_arr_adopt(char *nm, int id);
 int rt_arr_mark(char *nm);
 int rt_arr_dmark(char *nm);
@@ -323,7 +324,7 @@ char *rt_nref_end(char *n);
 int rt_unset_name(char *n);
 char *rt_subx(char *s);
 int rt_vset(char *s);
-int rt_sub_empty(char *k, char *lbl);
+int rt_sub_empty(char *nm, char *k, char *lbl);
 int rt_eval_assign(char *s);
 int rt_decl_word(char *w, int d, int x, int at, char *who);
 char *rt_decl_name(char *w);
@@ -4735,7 +4736,7 @@ int rt_bnd_opened2(int opened, char *f, int lead, int trail) {
  * bisect; any other record of 16 rows or more is looked up through ar_kh[r], an
  * open-addressing table of row + 1 by key, built on the first lookup, extended by
  * an append and dropped by anything that moves rows. ar_mk[r] holds the marks
- * (rt_arr_mark 1, rt_arr_dmark 2, rt_arr_smark 4). A record is never removed:
+ * (rt_arr_mark 1, rt_arr_dmark 2, rt_arr_smark 4, rt_arr_amark 4096). A record is never removed:
  * one with no row and no mark is an absent array. The name is copied; keys and
  * values are heap strings, held by rt_pin like any other stored value.
  */
@@ -5271,8 +5272,8 @@ int rt_arr_set(char *nm, char *k, char *v) {
 /* AN INDEXED ARRAY KEEPS ITS ROWS IN INDEX ORDER, the order bash lists ${!a[*]}
  * and ${a[@]} in whatever order the elements were assigned (a[5]=x; a[2]=y lists
  * 2 5): a new row goes in front of the first row of the same array with a greater
- * index, and a key is matched by its numeric value. An associative array's writes
- * stay on rt_arr_set (rt_as_ins). A write to bad_key is dropped. */
+ * index, and a key is matched by its numeric value. A write to an associative
+ * array (rt_isassoc) is rt_arr_set's (rt_as_ins). A write to bad_key is dropped. */
 char bad_key[1];
 int sub_bad;   /* the last rt_arr_akey refused its subscript (rt_take_subbad) */
 int rt_arr_iset(char *nm, char *k, char *v) {
@@ -5291,6 +5292,7 @@ int rt_arr_iset(char *nm, char *k, char *v) {
     }
     rt_pin();
     r = rt_ar_rec(nm);
+    if ((ar_mk[r] & 4096) != 0) return rt_arr_set(nm, k, v);
     n = ar_n[r];
     ks = ar_k[r];
     kv = rt_str2int(k);
@@ -5406,26 +5408,32 @@ char *rt_arr_ikey(char *nm, long k) {
     return rt_arr_ikeyl(nm, k, nm);
 }
 
-/* The names declared associative anywhere in the program, registered by main's
- * entry block from the emitter's whole-program list: a subscript of one of them is
- * a literal key, not arithmetic, wherever it is met at run time. */
-char *assoc_nm[256];
-int assoc_n;
-int rt_assoc_add(char *nm) {
-    if (assoc_n >= 256) {
-        rt_die("associative-array names", 1, assoc_n, 256);
-    }
-    assoc_nm[assoc_n] = nm;
-    assoc_n = assoc_n + 1;
+/* ASSOCIATIVE is mark 4096, a property of the binding in effect: `declare -A`
+ * sets it, and `unset`, a fresh `local` and a prefix binding drop it with the
+ * rows (rt_arr_clear), so a local hides a global's kind as it hides its rows. A
+ * subscript of a marked name is a literal key, not arithmetic. Twin of assocFact
+ * in bash-interpreter.abnf. */
+int rt_arr_amark(char *nm) {
+    int r = rt_ar_rec(nm);
+    ar_mk[r] = ar_mk[r] | 4096;
     return 0;
 }
 int rt_isassoc(char *nm) {
-    int i = 0;
-    while (i < assoc_n) {
-        if (rt_streq(nm, assoc_nm[i]) != 0) return 1;
-        i = i + 1;
-    }
-    return 0;
+    int r = rt_ar_find(nm);
+    return r >= 0 && (ar_mk[r] & 4096) != 0 ? 1 : 0;
+}
+
+/* `declare -A` of an indexed array, `declare -a` of an associative one (as) is
+ * refused with bash's diagnostic: 1, else 0. Twin of the same check in declOneN
+ * in bash-interpreter.abnf. */
+int rt_arr_conv(char *kw, char *nm, int as)
+{
+    int r = rt_ar_find(nm);
+    if (r < 0 || (ar_n[r] == 0 && (ar_mk[r] & 4099) == 0)) return 0;
+    if ((ar_mk[r] & 4096) != 0 && as != 0) return 0;
+    if ((ar_mk[r] & 4096) == 0 && as == 0) return 0;
+    rt_berr(kw, nm, as != 0 ? "cannot convert indexed to associative array" : "cannot convert associative to indexed array");
+    return 1;
 }
 
 /* The key a subscript's TEXT names: an associative array's is the text itself, an
@@ -6081,7 +6089,7 @@ int rt_xmark(char *nm, int on) {
         return 0;
     }
     r = rt_ar_find(nm);
-    if (r >= 0) ar_mk[r] = ar_mk[r] & 3879;
+    if (r >= 0) ar_mk[r] = ar_mk[r] & 7975;
     return 0;
 }
 
@@ -6102,7 +6110,7 @@ int rt_nmark(char *nm, int on) {
         return 0;
     }
     r = rt_ar_find(nm);
-    if (r >= 0) ar_mk[r] = ar_mk[r] & 3863;
+    if (r >= 0) ar_mk[r] = ar_mk[r] & 7959;
     return 0;
 }
 
@@ -6219,6 +6227,12 @@ char *rt_xletters(char *nm, char *at) {
 /* i32 rt_arr_clear(i8* nm): drop every row of one array, and its marks but the
  * export mark (rt_xmark). */
 int rt_arr_clear(char *nm) {
+    return rt_arr_empty(nm, 16);
+}
+
+/* The same, keeping the marks in keep: a replacing array literal keeps the
+ * array's kind (4096) as well. */
+int rt_arr_empty(char *nm, int keep) {
     int r = rt_ar_find(nm);
     int i = 0;
     if (r < 0) return 0;
@@ -6228,7 +6242,7 @@ int rt_arr_clear(char *nm) {
     }
     arr_rows = arr_rows - ar_n[r];
     ar_n[r] = 0;
-    ar_mk[r] = ar_mk[r] & 16;
+    ar_mk[r] = ar_mk[r] & keep;
     ar_srt[r] = 1;
     rt_ar_khdrop(r);
     return 0;
@@ -6860,6 +6874,15 @@ char *rt_arr_slice(char *nm, long off, long len, int haslen, char *sep, int star
     char *out = isStar ? empty : list_nil;
     int i = 0;
     long taken = 0;
+    long cnt;
+    if (rt_isassoc(nm) != 0) {
+        /* An associative array is sliced by POSITION in its listing order. */
+        out = rt_sc_list(nm, sep, 0, 0);
+        cnt = (long)rt_nfields(out);
+        if (off < 0) off = off + cnt;
+        if (off < 0) off = cnt;
+        return rt_slicefields(out, (int)off, haslen != 0 ? (int)len : (int)(cnt - off), sep, star);
+    }
     if (rt_arr_any(nm) == 0) {
         char *v = rt_getvar_byname(nm);
         long vl;
@@ -7565,7 +7588,7 @@ int rt_ls_restore(int t, int rows)
     }
     arr_rows = arr_rows - ar_n[r] + cnt;
     ar_n[r] = cnt;
-    ar_mk[r] = ls_amark[t] & 3895;
+    ar_mk[r] = ls_amark[t] & 7991;
     ar_srt[r] = (ls_amark[t] & 8) != 0 ? 0 : 1;
     rt_ar_khdrop(r);
     return 0;
@@ -8238,9 +8261,9 @@ char *rt_indpart(char *v, int sub)
 /* ${#NAME[SUB]} of an associative array whose SUB expands to nothing: bash's
  * "[SUB]: bad array subscript" (lbl, SUB as written), which abandons the line.
  * Twin of the len arm of mkParamExp in bash-interpreter.abnf. */
-int rt_sub_empty(char *k, char *lbl)
+int rt_sub_empty(char *nm, char *k, char *lbl)
 {
-    if (k[0] != 0) return 0;
+    if (k[0] != 0 || rt_isassoc(nm) == 0) return 0;
     rt_berr("", lbl, "bad array subscript");
     arith_err = 1;
     return 0;
@@ -8375,14 +8398,15 @@ char *rt_decl_name(char *w)
     return rt_substr(w, 0, rt_decl_namelen(w));
 }
 
-/* NAME=(...) of a computed -a operand (rt_decl_word): the words between the
- * parentheses, split at unquoted blanks, each VALUE or [SUB]=VALUE with its
- * quotes removed and its "$NAME"s expanded (rt_subx), stored as emitArrayLit
- * stores an indexed literal (at: 1 -i, 2 -u, 4 -l). An unquoted $, backquote,
- * glob or brace, which would need the word's splitting or expansion, is
- * refused: a diagnostic, and arith_err abandons the line. Answers 0, or 3 for
- * a literal refused. */
-int rt_decl_lit(char *nm, int id, char *v, int app, int at)
+/* NAME=(...) of a computed -a or -A (as) operand (rt_decl_word): the words
+ * between the parentheses, split at unquoted blanks, each VALUE or
+ * [SUB]=VALUE with its quotes removed and its "$NAME"s expanded (rt_subx),
+ * stored as emitArrayLit stores a literal (at: 1 -i, 2 -u, 4 -l). An unquoted
+ * glob character matches no file here and stays (bash 5.3 without nullglob);
+ * an unquoted $, backquote, brace or tilde, which would need the word's
+ * splitting or expansion, is refused: a diagnostic, and arith_err abandons the
+ * line. Answers 0, or 3 for a literal refused. */
+int rt_decl_lit(char *nm, int id, char *v, int app, int at, int as)
 {
     int n = rt_strlen(v) - 1;
     int i = 1;
@@ -8391,8 +8415,13 @@ int rt_decl_lit(char *nm, int id, char *v, int app, int at)
     int c;
     int kb;
     long next = 0;
+    int kvm = -1;
+    char *pend = 0;
+    char *psrc = 0;
+    char *src;
+    char *w;
     if (app == 0) {
-        rt_arr_clear(nm);
+        rt_arr_empty(nm, 4112);
         gvars[id] = &unset_marker[0];
     } else {
         rt_arr_adopt(nm, id);
@@ -8410,7 +8439,7 @@ int rt_decl_lit(char *nm, int id, char *v, int app, int at)
             else if (c == 92 && i + 1 < n) i = i + 1;
             else if (q == 34) { if (c == 34) q = 0; }
             else if (c == 39 || c == 34) q = c;
-            else if (c == 36 || c == 96 || c == 42 || c == 63 || c == 123 || c == 126) {
+            else if (c == 36 || c == 96 || c == 123 || c == 126) {
                 rt_berr("", nm, "a computed array literal with an expansion cannot be compiled");
                 arith_err = 1;
                 return 3;
@@ -8418,9 +8447,38 @@ int rt_decl_lit(char *nm, int id, char *v, int app, int at)
             else if (c == 93 && kb == 0 && v[s] == 91 && v[i + 1] == 61) kb = i;
             i = i + 1;
         }
-        if (kb > 0) next = rt_arr_litkey(nm, rt_subx(rt_substr(v, s + 1, kb - s - 1)), rt_subx(rt_substr(v, kb + 2, i - kb - 2)), next, at);
-        else next = rt_arr_litkey(nm, rt_int2str(next), rt_subx(rt_substr(v, s, i - s)), next, at);
+        if (as == 0) {
+            if (kb > 0) next = rt_arr_litkey(nm, rt_subx(rt_substr(v, s + 1, kb - s - 1)), rt_subx(rt_substr(v, kb + 2, i - kb - 2)), next, at);
+            else next = rt_arr_litkey(nm, rt_int2str(next), rt_subx(rt_substr(v, s, i - s)), next, at);
+            continue;
+        }
+        /* The associative arm of emitArrayLit: a first bare word makes every
+         * element a word of KEY VALUE pairs, else each must be [SUB]=VALUE. */
+        src = rt_substr(v, s, i - s);
+        if (kvm < 0) kvm = kb > 0 ? 0 : 1;
+        if (kvm == 0 && kb == 0) {
+            rt_berr("", nm, rt_strcat(rt_sq(src), ": must use subscript when assigning associative array"));
+            arith_err = 1;
+        }
+        else if (kvm == 0) {
+            pend = rt_subx(rt_substr(v, s + 1, kb - s - 1));
+            w = rt_subx(rt_substr(v, kb + 2, i - kb - 2));
+            if (rt_arr_akbad(pend, w, src, 1, 1) == 0) rt_arr_set(nm, pend, at != 0 ? rt_attrv(0, w, at) : w);
+            pend = 0;
+        }
+        else {
+            w = kb > 0 ? rt_strcat(rt_strcat(rt_strcat("[", rt_subx(rt_substr(v, s + 1, kb - s - 1))), "]="), rt_subx(rt_substr(v, kb + 2, i - kb - 2)))
+                       : rt_subx(src);
+            if (pend == 0) {
+                pend = w;
+                psrc = src;
+            } else {
+                if (rt_arr_akbad(pend, w, psrc, 1, 0) == 0) rt_arr_set(nm, pend, at != 0 ? rt_attrv(0, w, at) : w);
+                pend = 0;
+            }
+        }
     }
+    if (pend != 0 && arith_err == 0 && rt_arr_akbad(pend, empty, psrc, 1, 0) == 0) rt_arr_set(nm, pend, at != 0 ? rt_attrv(0, empty, at) : empty);
     return arith_err != 0 ? 3 : 0;
 }
 
@@ -8431,7 +8489,8 @@ int rt_decl_lit(char *nm, int id, char *v, int app, int at)
  * local of the call whose save stack starts at d, unless it already is one; a
  * fresh local takes none of the attributes at (1 -i, 2 -u, 4 -l, 8 readonly)
  * that the variable has where the declaration stands. at 16 is the
- * declaration's -a: NAME declares an array, and NAME=VALUE is NAME[0]=VALUE.
+ * declaration's -a, 48 its -A: NAME declares an array (associative, refused for
+ * an array of the other kind, rt_arr_conv), and NAME=VALUE is NAME[0]=VALUE.
  * A readonly name refuses a value or a fresh local ("WHO: NAME: readonly
  * variable"). An array literal NAME=(...) under -a is stored by rt_decl_lit.
  * export's -a (who is empty) leaves a bare NAME a scalar. Answers 0, 1 for a
@@ -8448,6 +8507,7 @@ int rt_decl_word(char *w, int d, int x, int at, char *who)
     int id;
     int fresh;
     int arr = (at & 16) != 0 ? 1 : 0;
+    int as = (at & 32) != 0 ? 1 : 0;
     int sub = 0;
     int vl;
     char *nm;
@@ -8478,8 +8538,13 @@ int rt_decl_word(char *w, int d, int x, int at, char *who)
         rt_local_new(id, d);
         at = 0;
     }
+    if (arr != 0 && who[0] != 0 && rt_arr_conv(who, nm, as) != 0) return 3;
     if (x != 0) rt_xmark(nm, x > 0 ? 1 : 0);
-    if (arr != 0 && sub == 0 && vl >= 2 && v[0] == 40 && v[vl - 1] == 41) return rt_decl_lit(nm, id, v, app, at & 7);
+    if (as != 0 && (who[0] != 0 || w[j] != 0)) {
+        if (d < 0) rt_arr_adopt(nm, id);
+        rt_arr_amark(nm);
+    }
+    if (arr != 0 && sub == 0 && vl >= 2 && v[0] == 40 && v[vl - 1] == 41) return rt_decl_lit(nm, id, v, app, at & 7, as);
     if (arr != 0 && w[j] == 0 && who[0] != 0) {
         /* A local scalar becomes an empty array, set when the scalar was, as in
          * makeDecl in bash-to-llvm-ir.abnf. */

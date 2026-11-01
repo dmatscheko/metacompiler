@@ -1903,7 +1903,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var rtArrKey1 = rtDecl("rt_arr_key1", true, [1, 1])
     var rtArrAkey = rtDecl("rt_arr_akey", true, [1, 1, 1, 0])
     var rtTakeSubbad = rtDecl("rt_take_subbad", false, [])
-    var rtAssocAdd = rtDecl("rt_assoc_add", false, [1])
+    var rtArrAmark = rtDecl("rt_arr_amark", false, [1])
+    var rtArrConv = rtDecl("rt_arr_conv", false, [1, 1, 0])
+    var rtArrEmpty = rtDecl("rt_arr_empty", false, [1, 0])
     var rtUnsetName = rtDecl("rt_unset_name", false, [1])
     var rtUnsetRef = rtDecl("rt_unset_ref", false, [1])
     var rtNmark = rtDecl("rt_nmark", false, [1, 0])
@@ -1997,7 +1999,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var rtUnsetUp = rtDecl("rt_unset_up", false, [0, 0, 0])
     var rtUnsetX = rtDecl("rt_unset_x", false, [0, 0])
     var rtSubx = rtDecl("rt_subx", true, [1])
-    var rtSubEmpty = rtDecl("rt_sub_empty", false, [1, 1])
+    var rtSubEmpty = rtDecl("rt_sub_empty", false, [1, 1, 1])
     var rtVset = rtDecl("rt_vset", false, [1])
     var rtUnsetEnv = rtDecl("rt_unset_env", false, [0, 0])
     var rtEnvEnd = rtDecl("rt_env_end", false, [0, 0])
@@ -2218,7 +2220,6 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var qn = {qname: "!" + name}
         var forms = [paramCore(items, cell),
                      paramCore(targetItems("@", qn, null, subW, rest), cell),
-                     paramCore(targetItems("", qn, {rtAssoc: 1}, subW, rest), cell),
                      paramCore(targetItems("", qn, {rtNm: 1}, subW, rest), cell)]
         return {c: undefined, f: true, fn: function(b) {
             var tg = null
@@ -2240,7 +2241,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var blks = []
             var k
             for (k = 0; k < forms.length; k++) { blks.push(curF.NewBlock("")) }
-            // cls 0..3 picks forms[cls]: a chain of tests, the last one falling through to 3
+            // cls 0 and 1 pick forms[cls], 2 and 3 (an array of either kind) the last: a chain
+            // of tests, the last one falling through
             var test = b
             for (k = 0; k < forms.length - 1; k++) {
                 var nxt = (k == forms.length - 2) ? blks[k + 1] : curF.NewBlock("")
@@ -2256,7 +2258,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }}
     }
     // The items of ${@[SUB] OP ...} / ${NAME[SUB] OP ...} for a target, around the operator's:
-    // `mark` makes the name the target's (rtNm) or also an associative array's (rtAssoc).
+    // `mark` makes the name the target's (rtNm).
     function targetItems(nm, qn, mark, subW, rest) {
         var out = [qn, {pname: nm}, {hasIdx: 1}, subW]
         if (mark != null) { out.push(mark) }
@@ -2275,7 +2277,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var wordT = null
         var hasIdx = false
         var idxIt = null
-        var rtNm = false, rtAssoc = false
+        var rtNm = false
         var errName = null
         var i
         for (i = 0; i < items.length; i++) {
@@ -2284,7 +2286,6 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             else if (it.qname != undefined) { errName = it.qname }
             else if (it.hasIdx != undefined) { hasIdx = true; idxIt = it }
             else if (it.rtNm != undefined) { rtNm = true }
-            else if (it.rtAssoc != undefined) { rtNm = true; rtAssoc = true }
             else if (it.fn != undefined) { words.push(it); wordT = it }
             else if (it.lenp != undefined) { lenp = true }
             else if (it.badsub != undefined) { badsub = it.badsub }
@@ -2363,9 +2364,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 return b.NewCall(rtXletters, [nmv, b.NewCall(rtStrcat, [arrK, pick])])
             }
             var sc = scalarAttrLetters(xfName)
-            if (rtAssoc || attrOn(assocArrays, xfName)) { return b.NewCall(rtXletters, [nmv, gepStr(b, "A" + sc)]) }
             var isArrRt = b.NewICmp(llvm.enum.IPredNE, b.NewCall(rtArrAny, nmv), zero)
-            return b.NewCall(rtXletters, [nmv, b.NewSelect(isArrRt, gepStr(b, "a" + sc), gepStr(b, sc))])
+            var isAsRt = b.NewICmp(llvm.enum.IPredNE, b.NewCall(rtIsAssoc, nmv), zero)
+            return b.NewCall(rtXletters, [nmv, b.NewSelect(isAsRt, gepStr(b, "A" + sc), b.NewSelect(isArrRt, gepStr(b, "a" + sc), gepStr(b, sc)))])
         }
         // `isset` is an i32 0/1: ${nosuch@Q} and ${nosuch@A} are EMPTY in bash 5.3.15, while
         // ${empty@Q} is ''.
@@ -2392,7 +2393,6 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var idxW = words[0]
             words = words.slice(1)
             wordT = (words.length > 0) ? words[words.length - 1] : null
-            var isAssoc = rtAssoc || attrOn(assocArrays, name)
             var nmOf = function(b) { return rtNm ? cell.nm : gepStr(b, name) }
             // The subscript, and the key it names: an associative array's is the text, an
             // indexed array's an arithmetic expression (rt_arr_key; a canonical literal index
@@ -2402,12 +2402,12 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var kindOf = function(b, sub) { return subKind(b, kindC, sub) }
             if (pe == "len") {
                 // An associative SUB that expands to nothing (rt_sub_empty).
-                var lenAs = attrOn(assocArrays, name) && !rtNm && kindC == 0 && idxIt != null
+                var lenAs = maybeAssoc(name) && !rtNm && kindC == 0 && idxIt != null
                 var lenLbl = lenAs ? peTgt.slice(peTgt.indexOf("[")) : ""
                 return {c: undefined, fn: function(b) {
                     var rs = lenAs ? subKeyOf(b, name, idxW, null, false) : subOf(b)
                     b = rs.b
-                    if (lenAs) { b.NewCall(rtSubEmpty, [rs.k, gepStr(b, lenLbl)]) }
+                    if (lenAs) { b.NewCall(rtSubEmpty, [nmOf(b), rs.k, gepStr(b, lenLbl)]) }
                     var k = kindOf(b, rs.v)
                     var whole = b.NewICmp(llvm.enum.IPredNE, k, zero)
                     return {b: b, v: b.NewSelect(whole,
@@ -2443,10 +2443,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     var rlv = null
                     if (lenT != null) { var rl = lenT(b); b = rl.b; rlv = rl.v }
                     var rsl = wholeList(b, whole, function(lb) {
-                        if (name == "@" || name == "*" || isAssoc) {
+                        if (name == "@" || name == "*") {
                             // The positional list counts from $0: "${@:1}" is $1 on.
-                            var all = (name == "@" || name == "*") ? lb.NewCall(rtParams0)
-                                                                   : lb.NewCall(rtScList, [nmOf(lb), ifsFirstValue(lb), zero, zero])
+                            var all = lb.NewCall(rtParams0)
                             var cnt = lb.NewCall(rtNFields, all)
                             var off = lb.NewSelect(lb.NewICmp(llvm.enum.IPredSLT, ro.v, zero), lb.NewAdd(cnt, ro.v), ro.v)
                             // A negative offset reaching past the start selects nothing.
@@ -2455,7 +2454,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                             if (rlv != null) { n = rlv }
                             return lb.NewCall(rtSliceFields, [all, off, n, ifsFirstValue(lb), starArg(lb, lb.NewZExt(star, i32))])
                         }
-                        // An indexed array is sliced by INDEX (rt_arr_slice), not by position.
+                        // An indexed array is sliced by INDEX (rt_arr_slice), not by position, an
+                        // associative one by position.
                         return lb.NewCall(rtArrSlice, [nmOf(lb), lb.NewSExt(ro.v, i64),
                             (rlv != null) ? lb.NewSExt(rlv, i64) : zero64, (rlv != null) ? one : zero,
                             ifsFirstValue(lb), starArg(lb, lb.NewZExt(star, i32))])
@@ -2571,7 +2571,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                             pickedE = atJ.NewPhi([llvm.ir.NewIncoming(atV, atB), llvm.ir.NewIncoming(one1, b)])
                             b = atJ
                         }
-                        b.NewCall(isAssoc ? rtArrSet : rtArrIset, [nmOf(b), kk, pickedE])
+                        b.NewCall(rtArrIset, [nmOf(b), kk, pickedE])
                     }
                     if (idxO == "?") {
                         var qmsg = gepStr(b, idxColon ? "parameter null or not set" : "parameter not set")
@@ -2595,7 +2595,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 // empty in bash and ${a[9]@A} is `declare -a a`, both of which need this
                 // and neither of which the value alone can answer.
                 var elemSet = b.NewCall(rtScHas, [nmOf(b), rs.k])
-                var assocI = llvm.constant.NewInt(i32, isAssoc ? 1 : 0)
+                var assocI = b.NewCall(rtIsAssoc, nmOf(b))
                 // ${a[@]@Q} transforms EVERY ELEMENT and stays a field list (`'pa' 'pb'`), via rt_mapf.
                 // @A, @K and @k with a @ or * subscript describe the WHOLE variable instead (a=(pa pb)):
                 //     ${a[@]@A} -> the three fields  declare  -a  a=([0]="pa" [1]="pb")
@@ -3286,8 +3286,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (roRefused(st, name, "")) { st.NewStore(one, gArithErr) }
         else if (k == null) { storeVar(st, name, st.NewCall(rtInt2str, v)) }
         else {
-            var setF = attrOn(assocArrays, name) ? rtArrSet : rtArrIset
-            st.NewCall(setF, [gepStr(st, name), k, st.NewCall(rtInt2str, v)])
+            st.NewCall(rtArrIset, [gepStr(st, name), k, st.NewCall(rtInt2str, v)])
         }
         st.NewBr(jb)
         return jb
@@ -3504,6 +3503,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // An array literal element list; a bare word contributes one element per FIELD. Every
     // word is expanded BEFORE the array is cleared: f=([5]=x "${f[@]}") reads the old f.
     // litDecl: the literal is an operand of a declaration builtin (rt_arr_akbad).
+    // assoc: 1 the array is associative, 0 indexed, 2 the binding decides when it runs.
     var litDecl = false
     function emitArrayLit(b, name, litItems, append, assoc) {
         var nm = gepStr(b, name)
@@ -3522,43 +3522,55 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             }
         }
         b = emitAbortCheck(b)
-        // A replacing literal drops a scalar of the name; an appending one keeps it as element 0.
-        if (!append) { b.NewCall(rtArrClear, nm); storeVarRaw(b, name, unsetPtr(b)) }
-        else if (!assoc) { b.NewCall(rtArrAdopt, [nm, llvm.constant.NewInt(i32, getVarId(name))]) }
+        // A replacing literal drops a scalar of the name and keeps the array's kind; an
+        // appending one keeps the scalar as element 0.
+        if (!append) { b.NewCall(rtArrEmpty, [nm, llvm.constant.NewInt(i32, 4112)]); storeVarRaw(b, name, unsetPtr(b)) }
+        else if (assoc != 1) { b.NewCall(rtArrAdopt, [nm, llvm.constant.NewInt(i32, getVarId(name))]) }
         // A literal makes the name a SET array even with no element (rt_arr_mark).
         b.NewCall(rtArrMark, nm)
+        if (assoc == 1) { return emitAssocLit(b, name, nm, vals) }
+        if (assoc == 0) { return emitIndexedLit(b, name, nm, vals, append) }
+        var asB = curF.NewBlock(""), ixB = curF.NewBlock(""), jB = curF.NewBlock("")
+        b.NewCondBr(b.NewICmp(llvm.enum.IPredNE, b.NewCall(rtIsAssoc, nm), zero), asB, ixB)
+        emitAssocLit(asB, name, nm, vals).NewBr(jB)
+        emitIndexedLit(ixB, name, nm, vals, append).NewBr(jB)
+        return jB
+    }
+    function emitAssocLit(b, name, nm, vals) {
+        var i
         // An ASSOCIATIVE array literal whose first element is a bare word is KEY VALUE pairs -
         // bash 5.3.15 reads `declare -A b=(one two three four)` as b[one]=two b[three]=four, a
         // trailing odd word takes an empty value, and a later [k]=v is the word "[k]=v". Once
         // the first element is a [k]=v, a bare word is reported as written (in single quotes
         // under litDecl), which stops the literal and abandons the line. An empty key is
         // refused (emitAkSet). Twin of applyArrayLit in bash-interpreter.abnf.
-        if (assoc) {
-            var pendKey = null
-            var pendSrc = ""
-            var abox = {b: b}
-            var stop = curF.NewBlock("")
-            var kvMode = vals.length > 0 && vals[0].k == null
-            var ended = false
-            for (i = 0; i < vals.length; i++) {
-                var w = null
-                if (!kvMode) {
-                    if (vals[i].k != null) { emitAkSet(abox, name, nm, vals[i].k, vals[i].v, vals[i].src, stop); continue }
-                    emitDiag(abox.b, gepStr(abox.b, name + ": " + (litDecl ? bashSq(vals[i].src) : vals[i].src) + ": must use subscript when assigning associative array\n"))
-                    abox.b.NewStore(one, gArithErr)
-                    abox.b.NewBr(stop)
-                    ended = true
-                    break
-                }
-                if (vals[i].k != null) {
-                    w = abox.b.NewCall(rtStrcat, [abox.b.NewCall(rtStrcat, [gepStr(abox.b, "["), vals[i].k]), abox.b.NewCall(rtStrcat, [gepStr(abox.b, "]="), vals[i].v])])
-                } else { w = wordJoin(abox.b, vals[i].v) }
-                if (pendKey == null) { pendKey = w; pendSrc = vals[i].src } else { emitAkSet(abox, name, nm, pendKey, w, pendSrc, null); pendKey = null }
+        var pendKey = null
+        var pendSrc = ""
+        var abox = {b: b}
+        var stop = curF.NewBlock("")
+        var kvMode = vals.length > 0 && vals[0].k == null
+        var ended = false
+        for (i = 0; i < vals.length; i++) {
+            var w = null
+            if (!kvMode) {
+                if (vals[i].k != null) { emitAkSet(abox, name, nm, vals[i].k, vals[i].v, vals[i].src, stop); continue }
+                emitDiag(abox.b, gepStr(abox.b, name + ": " + (litDecl ? bashSq(vals[i].src) : vals[i].src) + ": must use subscript when assigning associative array\n"))
+                abox.b.NewStore(one, gArithErr)
+                abox.b.NewBr(stop)
+                ended = true
+                break
             }
-            if (pendKey != null) { emitAkSet(abox, name, nm, pendKey, emptyPtr(abox.b), pendSrc, null) }
-            if (!ended) { abox.b.NewBr(stop) }
-            return emitAbortCheck(stop)
+            if (vals[i].k != null) {
+                w = abox.b.NewCall(rtStrcat, [abox.b.NewCall(rtStrcat, [gepStr(abox.b, "["), vals[i].k]), abox.b.NewCall(rtStrcat, [gepStr(abox.b, "]="), vals[i].v])])
+            } else { w = wordJoin(abox.b, vals[i].v) }
+            if (pendKey == null) { pendKey = w; pendSrc = vals[i].src } else { emitAkSet(abox, name, nm, pendKey, w, pendSrc, null); pendKey = null }
         }
+        if (pendKey != null) { emitAkSet(abox, name, nm, pendKey, emptyPtr(abox.b), pendSrc, null) }
+        if (!ended) { abox.b.NewBr(stop) }
+        return emitAbortCheck(stop)
+    }
+    function emitIndexedLit(b, name, nm, vals, append) {
+        var i
         // In an INDEXED literal a bare word takes the index after the element before it
         // (b=([3]=c [1]=a b) is 1 2 3 = a b c), so the next index is threaded through
         // rt_arr_litkey / rt_arr_litwords. Twin of applyArrayLit in bash-interpreter.abnf.
@@ -3600,15 +3612,15 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     // An expansion error in a value abandons the command before anything is stored:
     // `k=$(( 1/0 ))` leaves k as it was. Twin of runAssign in bash-interpreter.abnf.
-    function emitAssign(b, a, assoc0, mk) {
-        // Associative-ness is a property of the NAME (declare -A), not of this statement.
-        var assoc = assoc0 || attrOn(assocArrays, a.name)
+    // assoc: the statement is a `declare -A`; otherwise the name's binding decides when it
+    // runs (rt_isassoc), which only a literal must know beforehand (emitArrayLit).
+    function emitAssign(b, a, assoc, mk) {
         var nm = gepStr(b, a.name)
         var viaRef = attrOn(refVars, a.name)
         if (viaRef && (a.lit != null || a.idxT != null)) { refFail() }
         var al = refAlias(a.name)
-        if (al != null) { return emitAssign(b, {name: al, op: a.op, idxT: null, lit: null, valT: a.valT}, assoc0, mk) }
-        if (a.lit != null) { return emitArrayLit(b, a.name, a.lit, a.op == "+=", assoc) }
+        if (al != null) { return emitAssign(b, {name: al, op: a.op, idxT: null, lit: null, valT: a.valT}, assoc, mk) }
+        if (a.lit != null) { return emitArrayLit(b, a.name, a.lit, a.op == "+=", assoc ? 1 : (maybeAssoc(a.name) ? 2 : 0)) }
         var v = emptyPtr(b)
         if (a.valT != null) {
             var r = a.valT.fn(b)
@@ -3646,7 +3658,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 b = setB
             }
             b = emitAbortCheck(b)
-            if (!assoc) { b.NewCall(rtArrAdopt, [nm, llvm.constant.NewInt(i32, getVarId(a.name))]) }
+            b.NewCall(rtArrAdopt, [nm, llvm.constant.NewInt(i32, getVarId(a.name))])
             var ebox = {b: b}
             emitElemSet(ebox, a.name, nm, rk.k, (a.op == "+=") ? b.NewCall(rtArrGet, [nm, rk.k]) : null, v, assoc, mk)
             if (skipB == null) { return ebox.b }
@@ -3849,7 +3861,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // and no readonly.
         var fk
         var attrOpt = false
-        var dynOk = (kw == "export") ? "-+xgna" : "-+xga"
+        var dynOk = (kw == "export") ? "-+xgnaA" : "-+xgaA"
         for (fk = 0; fk < flags.length; fk++) { if (dynOk.indexOf(flags.charAt(fk)) < 0) { attrOpt = true } }
         for (fk = 0; fk < plus.length; fk++) { if ("-+xga".indexOf(plus.charAt(fk)) < 0) { attrOpt = true } }
         if (anyDyn && (kw == "readonly" || attrOpt)) {
@@ -3898,14 +3910,11 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // A readonly name the declaration would assign or make local is refused (status 1).
         var roFail = false
         var k
-        // The ASSOCIATIVE flag alone stays a walk-time, whole-program fact: it decides how a
-        // subscript is normalised at two sites that are themselves walk-time (${v@a} and the
-        // NAME[SUB] split), and a name is never both kinds in one program.
+        // Which names an array literal may find associative (maybeAssoc), from the whole program.
         for (k = 0; k < names.length; k++) {
-            var asK = assoc && !query && (bareArr || asgs[k] != null)
-            if (asK && !hasOwn(assocArrays, "$" + names[k])) { assocList.push(names[k]) }
-            if (asK) { assocArrays["$" + names[k]] = true }
+            if (assoc && !query && (bareArr || asgs[k] != null)) { assocArrays["$" + names[k]] = true }
         }
+        if (assoc && anyDyn) { assocDyn = true }
         // One name, which -g declares on its global binding even where a local hides it
         // (rt_glob_swap). For a lexical local of this function the global's attributes are
         // the ones its `local` saved for the return (the name's first undo entry here):
@@ -3964,6 +3973,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var bad = null
             if (refChk) { bad = b.NewCall(rtNrefBad, [gepStr(b, kw), v]) }
             else if (plusArr && !fresh) { bad = b.NewCall(rtArrPlus, [gepStr(b, kw), gepStr(b, names[j]), (plus.indexOf("a") >= 0) ? one : zero, (plus.indexOf("A") >= 0) ? one : zero]) }
+            else if (bareArr && !fresh && (a == null || a.lit == null)) { bad = b.NewCall(rtArrConv, [gepStr(b, kw), gepStr(b, names[j]), assoc ? one : zero]) }
             if (bad == null) { return declOneBody(b, j, v) }
             var okB = curF.NewBlock(""), badB = curF.NewBlock(""), endB = curF.NewBlock("")
             b.NewCondBr(b.NewICmp(llvm.enum.IPredNE, bad, zero), badB, okB)
@@ -4064,6 +4074,11 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 b = rokB
             }
             if (xCode != 0) { b.NewCall(rtXmark, [gepStr(b, names[j]), (xCode > 0) ? one : zero]) }
+            // -A makes the binding associative, and a global set scalar its element 0 (bash 5.3).
+            if (assoc && (bareArr || asgs[j] != null)) {
+                if (!localize) { b.NewCall(rtArrAdopt, [gepStr(b, names[j]), llvm.constant.NewInt(i32, getVarId(names[j]))]) }
+                b.NewCall(rtArrAmark, gepStr(b, names[j]))
+            }
             // A global `declare -a a` keeps a's elements; only a value or a local starts empty.
             var arrJ = bareArr || darrs[j] != null
             if (arrJ && asgs[j] == null && localize && curFrame != null) {
@@ -4139,7 +4154,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             head.NewCondBr(head.NewICmp(llvm.enum.IPredSLT, iv, n), step, done)
             var fld = step.NewCall(rtGetField, [all, iv])
             var atV = refAttrs(step, step.NewCall(rtDeclName, fld), true)
-            if (isArray) { atV = step.NewOr(atV, llvm.constant.NewInt(i32, 16)) }
+            if (isArray) { atV = step.NewOr(atV, llvm.constant.NewInt(i32, assoc ? 48 : 16)) }
             var rc = step.NewCall(rtDeclWord, [fld, localize ? step.NewLoad(i32, curFrame.depth) : llvm.constant.NewInt(i32, -1),
                                                llvm.constant.NewInt(i32, xCode), atV, gepStr(step, (kw == "export") ? "" : kw)])
             step = emitAbortCheck(step)
@@ -4188,8 +4203,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                         // The name gets its slot, which a computed operand may have stored into.
                         getVarId(names[j])
                         var lt = scalarAttrLetters(names[j])
-                        var isAs = attrOn(assocArrays, names[j]) ? one : zero
-                        var rp = b.NewCall(rtDeclp, [gepStr(b, names[j]), gepStr(b, lt), isAs])
+                        var rp = b.NewCall(rtDeclp, [gepStr(b, names[j]), gepStr(b, lt), b.NewCall(rtIsAssoc, gepStr(b, names[j]))])
                         acc = b.NewSelect(b.NewICmp(llvm.enum.IPredNE, acc, zero), acc, rp)
                     }
                     storeStatus(b, acc)
@@ -4231,7 +4245,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var vals = []
             var anyRefName = false
             for (j = 0; j < names.length; j++) { if (attrOn(refVars, names[j])) { anyRefName = true } }
-            refuseP = (isRef || plusArr || anyRefName) && !query ? slotOf(i32) : null
+            refuseP = (isRef || plusArr || bareArr || anyRefName) && !query ? slotOf(i32) : null
             if (refuseP != null) { b.NewStore(zero, refuseP) }
             for (j = 0; j < names.length && !query; j++) {
                 var a = asgs[j]
@@ -4335,8 +4349,11 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         emitDiag(b, gepStr(b, who + name + ": readonly variable\n"))
         return true
     }
-    var assocArrays = {}  // names declared with `declare -A` / `local -A`
-    var assocList = []    // the same names in order, registered with the runtime (rt_assoc_add)
+    var assocArrays = {}  // names declared with `declare -A` / `local -A` anywhere
+    var assocDyn = false  // a computed operand of a `declare -A`: any name may be associative
+    // May NAME's binding be associative when it runs (rt_isassoc)? Only an array literal and
+    // ${#NAME[SUB]} emit both kinds' code for it.
+    function maybeAssoc(name) { return assocDyn || attrOn(assocArrays, name) }
     // An attribute map holds FALSE for a name whose attribute was dropped - by `unset`, or by
     // a function body ending - so membership alone is not the answer.
     function attrOn(m, name) {
@@ -4357,8 +4374,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return out
     }
     // The undo log makeFuncDef unwinds: one entry per name declared inside a function body or a
-    // ( LIST ) / $( LIST ) (counted by subDepth). The ASSOCIATIVE flag is deliberately NOT in it:
-    // assocArrays is a whole-program fact (see makeDecl), matched by the interpreter's assocSeen.
+    // ( LIST ) / $( LIST ) (counted by subDepth). The associative kind is a run-time mark
+    // (rt_arr_amark), not in it.
     var subDepth = 0
     var attrUndo = []
     function attrPushUndo(name) {
@@ -4565,19 +4582,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var key = r.v
         var keyF = (elem == true) ? rtArrKey1 : rtArrKey
         if (nmv != null) { key = r.b.NewCall(keyF, [nmv, r.v]) }
-        else if (attrOn(assocArrays, name)) {
-            if (elem != true || (w.c != undefined && w.c != "")) { return {b: r.b, v: r.v, k: r.v} }
-            // A key that expands to nothing is reported (rt_arr_key1).
-            var eb = r.b
-            var emB = curF.NewBlock(""), okB = curF.NewBlock("")
-            eb.NewCondBr(eb.NewICmp(llvm.enum.IPredEQ, eb.NewLoad(i8, r.v), llvm.constant.NewInt(i8, 0)), emB, okB)
-            emB.NewCall(rtArrKey1, [gepStr(emB, name), r.v])
-            emB.NewBr(okB)
-            return {b: okB, v: r.v, k: r.v}
-        }
         else if (w.c != undefined && isIndexLit(w.c)) { key = gepStr(r.b, w.c) }
         else if (w.c != undefined && isIdentText(w.c)) {
-            // (a name declared associative later in the file is still a literal key)
             var bb = r.b
             var isA = bb.NewICmp(llvm.enum.IPredNE, bb.NewCall(rtIsAssoc, gepStr(bb, name)), zero)
             var ib = curF.NewBlock(""), jb = curF.NewBlock("")
@@ -4603,7 +4609,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // The same for a literal subscript text (unset 'a[k]', [[ -v a[k] ]]).
     function litKeyOf(b, name, t) {
         if (bashSubNeedsX(t)) { return b.NewCall(rtArrKey, [gepStr(b, name), b.NewCall(rtSubx, gepStr(b, t))]) }
-        if (attrOn(assocArrays, name) || isIndexLit(t)) { return gepStr(b, t) }
+        if (isIndexLit(t)) { return gepStr(b, t) }
         return b.NewCall(rtArrKey, [gepStr(b, name), gepStr(b, t)])
     }
     function splitSubscript(s0) {
@@ -7048,9 +7054,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var hn = asgs[k].aname
             if (asgs[k].bad != null || attrOn(roVars, hn)) { continue }
             b.NewCall(rtArrClear, gepStr(b, hn))
-            hid.push({n: "$" + hn, i: attrOn(intVars, hn), u: attrOn(upVars, hn), l: attrOn(loVars, hn), a: attrOn(assocArrays, hn)})
+            hid.push({n: "$" + hn, i: attrOn(intVars, hn), u: attrOn(upVars, hn), l: attrOn(loVars, hn)})
             intVars["$" + hn] = false; upVars["$" + hn] = false; loVars["$" + hn] = false
-            assocArrays["$" + hn] = false
         }
         return hid
     }
@@ -7058,7 +7063,6 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var k
         for (k = hid.length - 1; k >= 0; k--) {
             intVars[hid[k].n] = hid[k].i; upVars[hid[k].n] = hid[k].u; loVars[hid[k].n] = hid[k].l
-            assocArrays[hid[k].n] = hid[k].a
         }
     }
     // The bindings of the evals being emitted, innermost last. `unset NAME` in the string
@@ -7074,7 +7078,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var h = sc.hid[k]
             if (h.n == "$" + name && h.gone != true) {
                 b.NewCall(rtUnsetEnv, [llvm.constant.NewInt(i32, getVarId(name)), b.NewLoad(i32, sc.depth)])
-                intVars[h.n] = h.i; upVars[h.n] = h.u; loVars[h.n] = h.l; assocArrays[h.n] = h.a
+                intVars[h.n] = h.i; upVars[h.n] = h.u; loVars[h.n] = h.l
                 h.gone = true
                 return true
             }
@@ -7442,9 +7446,6 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                            entry.NewGetElementPtr(gvarsTy, gVarNames, zero, llvm.constant.NewInt(i32, i)))
         }
         entry.NewStore(llvm.constant.NewInt(i32, varIdList.length), gNvars)
-        // The run-time half of assocArrays: a subscript the runtime meets in a string
-        // (rt_arith, ${!r}) is literal for these names.
-        for (i = 0; i < assocList.length; i++) { entry.NewCall(rtAssocAdd, gepStr(entry, assocList[i])) }
         entry.NewBr(body)
     }
 
