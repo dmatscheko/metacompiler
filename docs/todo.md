@@ -70,7 +70,7 @@ languages/lib/python-codecs.js (+ Go twin abnf/jsrtpycodecs.go) is the place; ch
 
 # RB — Ruby
 
-### T-997 ruby: adding a key during hash iteration must raise at the insertion (MRI iter_lev model) · P3 · RB · OPEN [V]
+### T-997 ruby: adding a key during hash iteration must raise at the insertion (MRI iter_lev model) · P3 · RB · IN PROGRESS (RB worker, round 35) [V]
 Found by the RB worker, round 34 (oracle ruby 2.6). `h={a:1,b:2}; h.each { h.delete(:b); h[:b]=3 }` → RuntimeError "can't add a new
 key into hash during iteration", h ends `{:a=>1}`; ours passes (the post-block key-order check sees no change). `h.each_key { h[:z]=5 }`
 (also each_value, select, map) → MRI raises; ours adds silently. `h.each { h[:c]=9; puts "after" }` → MRI raises at the insert,
