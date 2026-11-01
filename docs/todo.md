@@ -110,7 +110,7 @@ strings.TrimSpace, native strips ASCII 9-13 and 32: `int.Parse(" 1 2 ")` and `in
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-1090 kotlin: class members / user extensions called inside builtin implicit receivers; List vs MutableList · P3 · KT · OPEN [V]
+### T-1090 kotlin: class members / user extensions called inside builtin implicit receivers; List vs MutableList · P3 · KT · IN PROGRESS (KT worker, round 29) [V]
 Oracle kotlinc 2.2.21:
 - class member inside a nested builtin receiver: `class Q(val n:Int){ fun tag(x:Int)="q"+(x+n); fun go()=with(listOf(1,2,3)){ tag(size) } }; Q(5).go()` -> q8 (also `with(b) { with(listOf(3,4)) { bump(size) } }` -> 3); all engines "unknown list method: tag". Needs a complete positive member table per builtin kind, and the compiler's kt_barecall (sends classMethodNames to the innermost this) to pick the declaring receiver (e.g. js_ktrecvof).
 - user extension on an implicit builtin receiver, compiled half: `fun MutableList<Int>.twice(x:Int){add(x*2)}; with(ml){ twice(5) }` -> [1, 10]; interpreter right, run/native "unknown list method 'twice'". An extension shadowing a builtin-looking name (`fun MutableList<Int>.append(x:Int){add(x*100)}; with(ml){append(5)}`) -> [1, 500]; all legs now "unknown name: append".
