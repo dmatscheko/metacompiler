@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1073** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1075** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -114,12 +114,15 @@ Spec-only. `class C { public string F; public string P { get; set; } }` then `C 
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-1066 kotlin: static-type javaClass for computed receivers; reified primitives / inference · P3 · KT · IN PROGRESS (KT worker, round 23) [V]
-Oracle kotlinc 2.2.21; all engines differ:
-- `inline fun <reified T: Any> jn() = T::class.java.name; jn<Int>()` -> java.lang.Integer (reified primitive .java is the wrapper); ours int.
-- static type Int but not a literal/declared name -> oracle `int`, ours java.lang.Integer: for-loop var (`for (i in 0..1) i.javaClass`), inline-lambda `it` (`listOf(1).forEach { it.javaClass }`), `(x + 1).javaClass`, `f().javaClass` with `fun f(): Int`, `Q(1).v.javaClass`.
-- reified T inferred without type args: `inline fun <reified T: Any> inf(x: T) = T::class.simpleName; inf(5)` -> Int, ours Any (compiler passes "Any"; interpreter reads the nearest pushed type-arg entry, so a nested arg-less call sees the outer call's args - same for reified `is T`).
-- anonymous class: `s::class.simpleName` null in oracle, ours "" (KClass and Class conflated; `javaClass.simpleName` must stay "").
+### T-1073 kotlin: compiled reified call to a function declared later crashes · P2 · KT · OPEN [V]
+Oracle kotlinc 2.2.21: `inline fun <reified T: Any> outer(x: T) = inner<String>()` followed (later in the file) by `inline fun <reified T: Any> inner() = T::class.simpleName`; `println(outer(1))` -> String. Interpreter prints String; run and native die with "js runtime error: member 'simpleName' of undefined" (also on the pre-T-1066 base). The callee only gets its hidden type-argument parameters if declared earlier; defer the reified decision to emit time (compiler) / first run (interpreter). Check reified `is T` and `T::class` through forward calls, member and extension forms.
+
+### T-1074 kotlin: KClass javaPrimitiveType/hashCode; destructured-lambda and smart-cast javaClass · P3 · KT · OPEN [V]
+Oracle kotlinc 2.2.21; all engines:
+- `Long::class.javaPrimitiveType` -> long (ours: "member .javaPrimitiveType of a class literal"); `KClass.hashCode()` missing ("method .hashCode() of a class literal"); `kc<Int>().hashCode() == Int::class.hashCode()` -> true.
+- destructured lambda params: `mapOf(1 to 2).forEach { (k, v) -> print(k.javaClass.name) }` -> int, ours java.lang.Integer.
+- smart cast: after `a as Int` (a: Any), `a.let { it.javaClass.name }` -> int; not modelled.
+(KClass toString "(Kotlin reflection is not available)" suffix stays declined as before.)
 
 # GO — Go  (oracle: `go run`)
 
@@ -1134,6 +1137,7 @@ T-1065 csharp: `obj.P++` / `obj.P--` bypass the property setter — DONE (CS r11
 T-1064 ruby: external Enumerator iteration over a user #each; Enumerator in for-in/splat — PARTIAL→split (RB r45, 5 commits to d090f079): splat via #to_a (Enumerator/Hash/Struct/nil), multi-value yield spread into Lazy blocks, Object#<=> backs Comparable, for over Enumerators with block-style per-yield binding (sent back once for each_with_index binding); 4 legs = ruby 2.6. Suspendable #each (next/peek/rewind) filed separately
 T-1068 csharp: `o.P ??= x` reads the raw slot instead of the getter — DONE (CS r12, ece96736): ??= and compound reads go through getter / indexer get (one csQualRead in the compiler); missing Dictionary key throws KeyNotFoundException in both halves (interpreter compound read was 0); user-indexer ??= no longer crashes compiled; 3 legs agree with ECMA-334 12.21.5
 T-1057 bash: assoc/declare remainder after T-1044 — PARTIAL→split (SH r29, 8 commits): eval prefix bindings, invalid declaration-builtin options, word-expanded subscripts for unset/printf -v/[[ -v ]]/${#m[$k]}, expanded-subscript labels, declarations through namerefs act on the target, $'..' keys + $'..' quoting in declare -p, computed array literals compiled (rt_decl_lit); sections 90-94 moved full.3->full.5 (step brake); 4 legs = bash 5.3. Remainder filed
+T-1066 kotlin: static-type javaClass for computed receivers; reified primitives / inference — DONE (KT r23, e3ccbe88): shared static typer (ktStaticTy/ktJvmTy) gives javaClass by JVM type for computed receivers (loop vars, lambda it, arithmetic, calls, members, array/string index) while casts/!!/List elements stay boxed; reified primitive .java is the wrapper; reified T inferred from argument types (ktInferTArgs); anonymous KClass simpleName null; 4 legs = kotlinc 2.2.21
 
 # Settled — do not re-open
 
