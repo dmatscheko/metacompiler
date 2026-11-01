@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1076** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1077** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -108,8 +108,8 @@ Found by the CORE worker, round 15. The interpreter's stripWs deletes every ASCI
 strings.TrimSpace, native strips ASCII 9-13 and 32: `int.Parse(" 1 2 ")` and `int.Parse(" 1")` give three answers.
 .NET's NumberStyles.Integer allows leading/trailing white space (U+0009-U+000D, U+0020) only; settle with a real dotnet.
 
-### T-1071 csharp: member access on null never raises a catchable NullReferenceException · P3 · CS · IN PROGRESS (CS worker, round 13) [V]
-Spec-only. `class C { public string F; public string P { get; set; } }` then `C c = null; try { string r = c.F; } catch (NullReferenceException) { Console.WriteLine("NRE F"); }` -> `NRE F`; same for `c.P`, `c.P = x`, `c.P ??= x`, `c.M()`, `c.F = x`, and `catch (Exception e)` with e.Message "Object reference not set to an instance of an object." All engines abort instead: interpreter "field .F of null", run/native "member 'F' of null" (native property: "method call '__get_P' on a null"). Route null-receiver member/method/indexer access in both grammars to a C#-level NullReferenceException raise.
+### T-1076 csharp: compound assignment evaluates the right side before reading the left · P3 · CS · OPEN [V]
+Spec-only (ECMA-334 12.21.4 + 12.4.1 left-to-right). `static int x = 1; static int Bump() { x = 100; return 5; }` then `x += Bump(); Console.WriteLine(x);` -> 6 (x read before Bump runs); all three legs print 105. Same with `c.F += BumpF()`, properties (`c.P += ...`: getter before RHS), indexers (`a[i()] += j()`: a, i(), get, j(), set), and ++/-- operands. Interpreter makeAssign evaluates valT() before applyOp(op, csGetVar(...)); csQualWrite's mk reads the old value afterwards; the compiler matches.
 
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
@@ -1139,6 +1139,7 @@ T-1068 csharp: `o.P ??= x` reads the raw slot instead of the getter — DONE (CS
 T-1057 bash: assoc/declare remainder after T-1044 — PARTIAL→split (SH r29, 8 commits): eval prefix bindings, invalid declaration-builtin options, word-expanded subscripts for unset/printf -v/[[ -v ]]/${#m[$k]}, expanded-subscript labels, declarations through namerefs act on the target, $'..' keys + $'..' quoting in declare -p, computed array literals compiled (rt_decl_lit); sections 90-94 moved full.3->full.5 (step brake); 4 legs = bash 5.3. Remainder filed
 T-1066 kotlin: static-type javaClass for computed receivers; reified primitives / inference — DONE (KT r23, e3ccbe88): shared static typer (ktStaticTy/ktJvmTy) gives javaClass by JVM type for computed receivers (loop vars, lambda it, arithmetic, calls, members, array/string index) while casts/!!/List elements stay boxed; reified primitive .java is the wrapper; reified T inferred from argument types (ktInferTArgs); anonymous KClass simpleName null; 4 legs = kotlinc 2.2.21
 T-1067 php: Exception::__toString / uncaught format; getFile/getLine/getTrace; named ctor args — PARTIAL→split (PHP r42, 97eb6ff6): Exception::__toString with Next-chain, getFile/getLine from the new site, getTrace []/getTraceAsString '#0 {main}', PHP Fatal error Uncaught format + exit 255 (display_errors rule documented), named ctor args (+ inherited-ctor named-arg drop fixed), ErrorException, throw-type check; 3 legs byte-identical, formats per php-src. Trace frames / engine-raised positions / destructor chaining filed
+T-1071 csharp: member access on null never raises a catchable NullReferenceException — DONE (CS r13, c70a8ed8): member/method/indexer/delegate access through null raises a catchable NullReferenceException (.NET message) in all engines - interpreter csNullRef, compiler via floor miss-hooks, js_csmcall/js_cslen in Go twin + layer 2, new C#-only js_cshas; ?. and extension-on-null unaffected; 3 legs agree with ECMA-335/334
 
 # Settled — do not re-open
 
