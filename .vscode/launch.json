@@ -3908,6 +3908,20 @@
             "program": "${workspaceFolder}","args": ["languages/bash-to-llvm-ir.abnf", "tests/bash-abort-test-splice.sh", "-q"]
         },
         {
+            "name": "Bash NAME[ in command position never closed is a syntax error (interpreter, SHOULD FAIL)",
+            "type": "go",
+            "request": "launch",
+            "expectError": "Not everything could be parsed. Last good parse position: (code):1:7 (EOF)",
+            "program": "${workspaceFolder}","args": ["languages/bash-interpreter.abnf", "-code", "m[[]=7", "-q"]
+        },
+        {
+            "name": "Bash NAME[ in command position never closed is a syntax error (compiler, SHOULD FAIL)",
+            "type": "go",
+            "request": "launch",
+            "expectError": "Not everything could be parsed. Last good parse position: (code):1:7 (EOF)",
+            "program": "${workspaceFolder}","args": ["languages/bash-to-llvm-ir.abnf", "-code", "m[[]=7", "-q"]
+        },
+        {
             "name": "Speed Test",
             "type": "go",
             "request": "launch",

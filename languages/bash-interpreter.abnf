@@ -713,6 +713,12 @@ DqArOffWord <~~ push(mkNsWord(takeAll())) ~~> = DqArOffSeg { DqArOffSeg } ;
 DqArOffSeg  = DqSeg | DqXqAnsi | LocSeg | ExpSeg | ArDynParen | ArOffBare ;
 DqXqAnsi    = "$'" :whitespace() DqXqAnsiB "'" ;
 DqXqAnsiB   <~~ push(makeConst(ansiC(up.in, true))) ~~> = { AnsiEsc | AnsiLit } ;
+// An offset that is a $'...' whose text starts with -, =, ? or + is read again as that text
+// written there: bash 5.3, s=hello, prints "${s:$'-1'}" as hello (the ${s:-1} default form)
+// and "${s:$'+1'}" as 1.
+DqAnsiOpForm = PeTarget DqAnsiOp DqAnsiOpWord ;
+DqAnsiOp    <~~ push({op: ":" + up.in.slice(up.in.length - 1)}) ~~> = ":$'" ( "-" | "=" | "?" | "+" ) ;
+DqAnsiOpWord <~~ push(mkBraceWord(takeAll())) ~~> = DqXqAnsiB "'" { DqBrSeg } ;
 
 // A word inside ${...}: anything up to the closing brace, expansions included. A $'...'
 // part is ANSI-C quoted there too, even inside "...": bash 5.3 prints `"${u:-$'\x41'}"` as A.
@@ -738,7 +744,7 @@ DqPeBody    = PeLen | DqPeIndForm | DqPeCore | PeLenBad | DqPeBad ;
 // closing `}' in x"${m[[]-v}"y".
 DqPeBad     <~~ push(dqBad(up.start, arSrc(up.start, up.pos))) ~~> = PeBadFirst { PeBadCh } ;
 DqPeIndForm <~~ push({indp: 1}) ~~> = "!" ( PePfxNames | DqPeCore ) ;
-DqPeCore    = PePatForm | PeCaseForm | PeReplForm | PeXform | DqPeOpForm | DqSubstrForm | PePlain ;
+DqPeCore    = PePatForm | PeCaseForm | PeReplForm | PeXform | DqPeOpForm | DqAnsiOpForm | DqSubstrForm | PePlain ;
 DqPeOpForm  = PeTarget PeOp [ DqBraceWord ] ;
 DqBraceWord <~~ push(mkBraceWord(takeAll())) ~~> = DqBrSeg { DqBrSeg } ;
 DqBrSeg     = DqBrSq | DqBrDq | AnsiSeg | LocSeg | DqBrGlue | DqExpSeg | DqBrEsc | BraceBare ;
@@ -1259,6 +1265,31 @@ NotReserved = :script(~~
             var ab = c.peek(i + 2)
             if (ab == -1 || ab == 32 || ab == 9 || ab == 10 || ab == 13) {
                 return abnf.newToken("\x01dbracket", 0)
+            }
+        }
+        // A NAME[ in command position opens an assignment's subscript, which bash reads up to
+        // its matching "]" past blanks and lines: one never closed is the syntax error
+        // "unexpected EOF while looking for matching `]'" (bash 5.3: m[[]=7).
+        var q = i
+        cc = c.peek(q)
+        if ((cc >= 97 && cc <= 122) || (cc >= 65 && cc <= 90) || cc == 95) {
+            while ((cc >= 97 && cc <= 122) || (cc >= 65 && cc <= 90) || (cc >= 48 && cc <= 57) || cc == 95) { q = q + 1; cc = c.peek(q) }
+            if (cc == 91) {
+                var depth = 0
+                var shut = false
+                while (!shut && cc != -1) {
+                    if (cc == 92) { q = q + 1 }
+                    else if (cc == 39 || cc == 34) {
+                        var qc = cc
+                        q = q + 1
+                        while (c.peek(q) != -1 && c.peek(q) != qc) { if (qc == 34 && c.peek(q) == 92) { q = q + 1 }; q = q + 1 }
+                    }
+                    else if (cc == 91) { depth = depth + 1 }
+                    else if (cc == 93) { depth = depth - 1; shut = depth == 0 }
+                    q = q + 1
+                    cc = c.peek(q)
+                }
+                if (!shut) { return abnf.newToken("\x01unclosed-subscript", 0) }
             }
         }
         var w = ""
@@ -2768,7 +2799,11 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // the badsub arm of paramCore in bash-to-llvm-ir.abnf.
         if (badsub != null) {
             var badMsg = "${" + badsub + "}: bad substitution\n"
-            return function() { diagErr((badNc != null) ? badNcMsg(badNc()) : badMsg); arithErr = true; return "" }
+            return function() {
+                if (!arithErr && abortSignal == null) { diagErr((badNc != null) ? badNcMsg(badNc()) : badMsg) }
+                arithErr = true
+                return ""
+            }
         }
         if (indp && bare && pfx == "") { pe = "ind" }
         // $@ and $* WITH AN OPERATOR are the positional parameters as a LIST, exactly as
@@ -3157,6 +3192,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (it.dname != undefined) { names.push(it.dname); asgs.push(null); darrs.push((it.darr != undefined) ? it.darr : null); lates.push("") }
             else { names.push(it.a.name); asgs.push(it.a); darrs.push(null); lates.push((it.dlate != undefined) ? it.dlate : "") }
         }
+        // export and readonly print with -p only when no name is given: bash 5.3's
+        // `export -p x` exports x and prints nothing. Twin of makeDecl in bash-to-llvm-ir.abnf.
+        if ((kw == "export" || kw == "readonly") && names.length > 0) { flags = flags.split("p").join("") }
         var isArray = (flags.indexOf("a") >= 0) || (flags.indexOf("A") >= 0)
         // -a / -A make a bare NAME an array; export's and readonly's do not (bash 5.3: export
         // -a e leaves `declare -x e`, readonly -A f on a scalar `declare -r f="5"`).
@@ -4529,6 +4567,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // a REPLY of its own. Twin of mkFunSub in bash-to-llvm-ir.abnf.
     function mkFunSub(bodyT, reply) {
         return function() {
+            if (arithErr || abortSignal != null) { return "" }
             var r = anytype
             if (reply) {
                 var sv = [{name: "REPLY", had: isSetVar("REPLY"), val: getVarVal("REPLY")}]
@@ -4549,8 +4588,12 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return stripTrailNL(out)
         }
     }
+    // After an expansion error the rest of the command is abandoned unexpanded, so a
+    // command substitution after it does not run (bash 5.3: echo $((1/0)) $(echo x >&2)
+    // prints only the error). Twin of subAfterErr in bash-to-llvm-ir.abnf.
     function mkCmdSub(bodyT, lnTab) {
         return function() {
+            if (arithErr || abortSignal != null) { return "" }
             var svLn = lnCtx
             lnCtx = {tab: lnTab, base: strToInt(vars["$LINENO"])}
             capOpen()

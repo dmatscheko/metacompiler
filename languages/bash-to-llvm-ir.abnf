@@ -658,6 +658,12 @@ DqArOffWord <~~ push(mkNsWord(takeAll())) ~~> = DqArOffSeg { DqArOffSeg } ;
 DqArOffSeg  = DqSeg | DqXqAnsi | LocSeg | ExpSeg | ArDynParen | ArOffBare ;
 DqXqAnsi    = "$'" :whitespace() DqXqAnsiB "'" ;
 DqXqAnsiB   <~~ push(ansiWord(ansiC(up.in))) ~~> = { AnsiEsc | AnsiLit } ;
+// An offset that is a $'...' whose text starts with -, =, ? or + is read again as that text
+// written there: bash 5.3, s=hello, prints "${s:$'-1'}" as hello (the ${s:-1} default form)
+// and "${s:$'+1'}" as 1.
+DqAnsiOpForm = PeTarget DqAnsiOp DqAnsiOpWord ;
+DqAnsiOp    <~~ push({op: ":" + up.in.slice(up.in.length - 1)}) ~~> = ":$'" ( "-" | "=" | "?" | "+" ) ;
+DqAnsiOpWord <~~ push(mkBraceWord(takeAll())) ~~> = DqXqAnsiB "'" { DqBrSeg } ;
 
 // A word inside ${...}: anything up to the closing brace, expansions included.
 BraceWord   <~~ push(mkBraceWord(takeAll())) ~~> = BraceWSeg { BraceWSeg } ;
@@ -679,7 +685,7 @@ DqPeBody    = PeLen | DqPeIndForm | DqPeCore | PeLenBad | DqPeBad ;
 // closing `}' in x"${m[[]-v}"y".
 DqPeBad     <~~ push(dqBad(up.start, arSrc(up.start, up.pos))) ~~> = PeBadFirst { PeBadCh } ;
 DqPeIndForm <~~ push({indp: 1}) ~~> = "!" ( PePfxNames | DqPeCore ) ;
-DqPeCore    = PePatForm | PeCaseForm | PeReplForm | PeXform | DqPeOpForm | DqSubstrForm | PePlain ;
+DqPeCore    = PePatForm | PeCaseForm | PeReplForm | PeXform | DqPeOpForm | DqAnsiOpForm | DqSubstrForm | PePlain ;
 DqPeOpForm  = PeTarget PeOp [ DqBraceWord ] ;
 DqBraceWord <~~ push(mkBraceWord(takeAll())) ~~> = DqBrSeg { DqBrSeg } ;
 DqBrSeg     = DqBrSq | DqBrDq | AnsiSeg | LocSeg | DqBrGlue | DqExpSeg | DqBrEsc | BraceBare ;
@@ -1174,6 +1180,31 @@ NotReserved = :script(~~
             var ab = c.peek(i + 2)
             if (ab == -1 || ab == 32 || ab == 9 || ab == 10 || ab == 13) {
                 return abnf.newToken("\x01dbracket", 0)
+            }
+        }
+        // A NAME[ in command position opens an assignment's subscript, which bash reads up to
+        // its matching "]" past blanks and lines: one never closed is the syntax error
+        // "unexpected EOF while looking for matching `]'" (bash 5.3: m[[]=7).
+        var q = i
+        cc = c.peek(q)
+        if ((cc >= 97 && cc <= 122) || (cc >= 65 && cc <= 90) || cc == 95) {
+            while ((cc >= 97 && cc <= 122) || (cc >= 65 && cc <= 90) || (cc >= 48 && cc <= 57) || cc == 95) { q = q + 1; cc = c.peek(q) }
+            if (cc == 91) {
+                var depth = 0
+                var shut = false
+                while (!shut && cc != -1) {
+                    if (cc == 92) { q = q + 1 }
+                    else if (cc == 39 || cc == 34) {
+                        var qc = cc
+                        q = q + 1
+                        while (c.peek(q) != -1 && c.peek(q) != qc) { if (qc == 34 && c.peek(q) == 92) { q = q + 1 }; q = q + 1 }
+                    }
+                    else if (cc == 91) { depth = depth + 1 }
+                    else if (cc == 93) { depth = depth - 1; shut = depth == 0 }
+                    q = q + 1
+                    cc = c.peek(q)
+                }
+                if (!shut) { return abnf.newToken("\x01unclosed-subscript", 0) }
             }
         }
         var w = ""
@@ -2137,7 +2168,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // a REPLY of its own (a local, undone by the save stack). Twin of mkFunSub in
     // bash-interpreter.abnf.
     function mkFunSub(bodyT, reply) {
-        return {s: true, c: undefined, fn: function(b) {
+        return {s: true, c: undefined, fn: function(b0) { return subAfterErr(b0, function(b) {
             if (!reply) {
                 b.NewCall(rtCapBegin, zero)
                 var eb = bodyT(b)
@@ -2151,10 +2182,22 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var v = loadVar(rb, "REPLY")
             rb.NewCall(rtPopLocals, rb.NewLoad(i32, depth))
             return {b: rb, v: v}
-        }}
+        }) }}
+    }
+    // After an expansion error the rest of the command is abandoned unexpanded, so a
+    // command substitution after it does not run: body(b) only while neither the abort
+    // flag nor the arithmetic error is raised, else "". Twin of the same check in mkCmdSub
+    // in bash-interpreter.abnf.
+    function subAfterErr(b, body) {
+        var runB = curF.NewBlock(""), skipB = curF.NewBlock(""), jB = curF.NewBlock("")
+        b.NewCondBr(b.NewICmp(llvm.enum.IPredEQ, b.NewOr(b.NewLoad(i32, gAbort), b.NewLoad(i32, gArithErr)), zero), runB, skipB)
+        var r = body(runB)
+        r.b.NewBr(jB)
+        skipB.NewBr(jB)
+        return {b: jB, v: jB.NewPhi([llvm.ir.NewIncoming(r.v, r.b), llvm.ir.NewIncoming(emptyPtr(skipB), skipB)])}
     }
     function mkCmdSub(bodyT, lnTab) {
-        return {s: true, c: undefined, fn: function(b) {
+        return {s: true, c: undefined, fn: function(b0) { return subAfterErr(b0, function(b) {
             var svLn = lnCtx, svLine = emitLine
             lnCtx = {tab: lnTab, base: emitLine}
             b.NewCall(rtCapBegin, zero)
@@ -2193,7 +2236,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             subEnd = fnTouchEnd(ft, subEnd)
             var v = subEnd.NewCall(rtCapEnd, one)
             return {b: subEnd, v: v}
-        }}
+        }) }}
     }
     function mkArCmdSub(sub) {
         return function(b) { var r = evalWord(b, sub); return {b: r.b, v: r.b.NewCall(rtArith, r.v)} }
@@ -2384,9 +2427,13 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (badsub != null) {
             var badMsg = "${" + badsub + "}: bad substitution\n"
             return {c: undefined, fn: function(b) {
-                emitDiag(b, gepStr(b, (badNc != null) ? badNcMsg(badNc()) : badMsg))
-                b.NewStore(one, gArithErr)
-                return {b: b, v: emptyPtr(b)}
+                // Only the first error of a command is reported.
+                var first = curF.NewBlock(""), done = curF.NewBlock("")
+                b.NewCondBr(b.NewICmp(llvm.enum.IPredEQ, b.NewOr(b.NewLoad(i32, gAbort), b.NewLoad(i32, gArithErr)), zero), first, done)
+                emitDiag(first, gepStr(first, (badNc != null) ? badNcMsg(badNc()) : badMsg))
+                first.NewBr(done)
+                done.NewStore(one, gArithErr)
+                return {b: done, v: emptyPtr(done)}
             }}
         }
         if (indp && bare && pfx == "") { pe = "ind" }
@@ -4081,6 +4128,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (it.dname != undefined) { names.push(it.dname); asgs.push(null); darrs.push((it.darr != undefined) ? it.darr : null) }
             else { names.push(it.a.name); asgs.push(it.a); darrs.push(null) }
         }
+        // export and readonly print with -p only when no name is given. Twin of makeDecl in
+        // bash-interpreter.abnf.
+        if ((kw == "export" || kw == "readonly") && order.length > 0) { flags = flags.split("p").join("") }
         // An option the builtin does not take fails it with status 2 before anything is done.
         // Twin of declBadOpt in bash-interpreter.abnf.
         if (opts != "") {

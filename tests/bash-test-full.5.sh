@@ -804,6 +804,41 @@ hey pv'
 1
 5'
 }
+# ===== SECTION 119: export -p NAME, and an expansion error ends the command =====
+# export and readonly with -p and a name give the name the attribute and print nothing. After
+# an expansion error (a bad substitution, an arithmetic error, ${v?}) the rest of the command
+# is not expanded: only the first error is reported and a later command substitution does not
+# run. In double quotes a ${NAME:$'...'} whose text starts with -, =, ? or + is read as that
+# text written there. Every expected value is bash 5.3's.
+s119c() { case $1 in *"$2"*"$2"*) echo 2 ;; *"$2"*) echo 1 ;; *) echo 0 ;; esac; }
+s119() {
+  local r e
+  r=$(export -p s119a; echo "rc=$?"; readonly -p s119b; export -p s119c=5; readonly -p s119d=x s119e; declare -p s119a s119b s119c s119d s119e); check xpp1 "$r" 'rc=0
+declare -x s119a
+declare -r s119b
+declare -x s119c="5"
+declare -r s119d="x"
+declare -r s119e'
+  e=$( (echo ${#s119x-a} ${#s119y-b}; echo no) 2>&1); r=$(s119c "$e" "bad substitution"; s119c "$e" "no")
+  e=$( (echo $((1/0)) $(echo x$((6*7)) >&2) $((2/0))) 2>&1); r="$r
+$(s119c "$e" "division by 0"; s119c "$e" "x42")"
+  e=$( (s119f() { echo "in ${#s119x-a} $(echo x$((6*7)) >&2)"; echo cont; }; s119f; echo after) 2>&1); r="$r
+$(s119c "$e" "bad substitution"; s119c "$e" "x42"; s119c "$e" "cont"; s119c "$e" "after")"
+  e=$( (echo ${s119u?gone} $(echo x$((6*7)) >&2); echo no) 2>&1); r="$r
+$(s119c "$e" "s119u: gone"; s119c "$e" "x42"; s119c "$e" "no")"
+  check xpp2 "$r" '1
+0
+1
+0
+1
+0
+0
+0
+1
+0
+0'
+  r=$(s=hello; echo "${s:$'-1'}" "${s:$'+1'}" "${s:$'-'}" "${s:$'?e'}" "${s:$'1'}" "${s:$"-1"}" "${s119u:$'-dflt'}" "${s:$'1':$'2'}"); check xpp3 "$r" 'hello 1 hello hello ello o dflt el'
+}
 # ===== END SECTIONS =====
 
 s90   # SECTION-CALL 90
@@ -835,5 +870,6 @@ s115  # SECTION-CALL 115
 s116  # SECTION-CALL 116
 s117  # SECTION-CALL 117
 s118  # SECTION-CALL 118
+s119  # SECTION-CALL 119
 echo "full: $checks checks, $fails failures"
 exit $fails
