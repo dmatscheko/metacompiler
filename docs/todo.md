@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1058** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1060** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -98,8 +98,11 @@ Found by the CORE worker, round 15. The interpreter's stripWs deletes every ASCI
 strings.TrimSpace, native strips ASCII 9-13 and 32: `int.Parse(" 1 2 ")` and `int.Parse(" 1")` give three answers.
 .NET's NumberStyles.Integer allows leading/trailing white space (U+0009-U+000D, U+0020) only; settle with a real dotnet.
 
-### T-1055 csharp: `base.Prop` / `base.Field` reads unsupported · P3 · CS · IN PROGRESS (CS worker, round 8) [V spec-only]
-`class A { public virtual string P => "A"; } class B : A { public override string P => "B" + base.P; }` then `Console.WriteLine(new B().P)` → C#: "BA". Ours: interpreter "unknown name: base", run/native "variable not defined: base" — only `base.M(...)` calls work. Also blocks `public override string Message => "x" + base.Message;` (today an override drops the stored base message, which is only safe while base.Message is unreadable — revisit js_csexcvirt when fixing). Found by CS r7.
+### T-1058 csharp: generated exception message and ToString drop the namespace · P3 · CS · OPEN [V]
+`namespace Demo { class MyEx : Exception {} }`: `new MyEx().Message` should be "Exception of type 'Demo.MyEx' was thrown." (.NET uses GetClassName() = GetType().ToString(), the fully qualified name), and `ToString()` should start "Demo.MyEx: ". All engines print the bare 'MyEx'. Likely cause: user-class FullName has no namespace. Existing assertions encode the wrong answer: tests/csharp-test-features.cs exc-default-msg-user, exc-tostring-inner-nested, maybe exc-msg-override. Spec-only (dotnet/runtime Exception.cs in $S/CS5/dl).
+
+### T-1059 csharp: virtual auto-property overridden by an accessor property is not dispatched · P3 · CS · OPEN [V]
+`class N2 { public virtual int K { get; set; } = 5; } class M3 : N2 { public override int K => 9; }` - `new M3().K` must be 9 (also through an `N2` reference), all three engines give 5: the auto-property's own field slot wins over the derived `__get_K` because getField checks hasOwn first. `base.K` must still read the backing value (5). Needs the base backing storage off the public name when a subclass overrides with an accessor; check setter overrides too.
 
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
@@ -1115,6 +1118,7 @@ T-1051 php: array refcount/COW remainder; print_r recursion depth; stale comment
 T-1049 csharp: null message on non-Argument exceptions gives "" — DONE (CS r7, 6ded3040): null message → "Exception of type 'X' was thrown." for all non-Argument exceptions (BCL + user); inner exceptions in ToString; user override of Message honoured (and no more compiler crash on __get_Message). Master spec probe + the 3 earlier exception probes: all legs agree.
 T-1047 kotlin: interpreter `Pair::class.simpleName` is null — DONE (KT r20, f4fa2bad): Pair/Triple KClass (+ is Triple, Pair::class unless user-declared); map-entry node classes; StringBuilder/Regex classes; kotlin.-qualified unsigned/array types; shared JVM-class helper; compiled unnamed companion as Owner.Companion. Master probe vs kotlinc 2.2.21 (19 lines): 4 legs agree.
 T-1044 bash: per-scope associative kind; compiled computed `declare -A`/array literals; prefix-assignment and assoc-key edge cases — PARTIAL→split (SH r28, 4 commits): prefix bindings before declaration builtins, assoc arrays in bash hash order, must-use-subscript + empty-key diagnostics, expanded @ as key, unsplit assoc literal words; probed 4 legs vs bash 5.3; remainder filed as follow-up
+T-1055 csharp: `base.Prop` / `base.Field` reads unsupported — DONE (CS r8, cb5c2c80): base.Prop/base.Field reads in both grammars, base.Message via hidden __excmsg slot in all 3 engines; probed 3 legs vs spec (multi-level base.Name/base.V chains, nested Message overrides, ArgumentException suffix)
 
 # Settled — do not re-open
 
