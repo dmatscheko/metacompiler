@@ -1,7 +1,9 @@
 // c-literals.js -- what c-interpreter.abnf and c-to-llvm-ir.abnf share (include):
 // the values of C string literals, character constants and the standard headers'
-// constants, brace-initializer items, and the block-scope name table. digVal,
-// fail, hasOwn, makeNum, ctI, ctInt and ctChar come from the including grammar.
+// constants, brace-initializer items, the block-scope name table and the integer
+// constant expression fold. digVal, fail, hasOwn, makeNum, ctI, ctInt, ctChar,
+// fieldOf, globalScope and cLitCt (an integer literal's type, C11 6.4.4.1p5) come
+// from the including grammar.
 //
 // The execution character set is UTF-8, as cc's: a narrow literal holds the
 // UTF-8 bytes of every character outside ASCII and of every \u / \U universal
@@ -130,35 +132,72 @@ function cCharConst(s) {
     return v > 127 ? v - 256 : v
 }
 
-// items = [v0, {op}, v1, {op}, v2, ...] - ONE precedence level of an integer
-// constant expression (CExpr), folded left to right as the tags walk: a comparison
-// or a logical operator answers 0 or 1, and a division by zero folds to 0.
+// An integer constant expression (CExpr) is folded as the tags walk, on TYPED
+// values {v, t}: v is the value, held exactly as a double, t its integer C type.
+// The type decides the result as C11 6.3.1.8's usual arithmetic conversions do:
+// '-1 < 0u' compares in unsigned int, where -1 is UINT_MAX.
+function cK(v, t) { return {v: v, t: t} }
+// The integer promotions (C11 6.3.1.1p2): a type narrower than int becomes int.
+// Anything else that reaches the fold (a pointer cast) counts as an unsigned long.
+function cPromote(t) {
+    if (t.k != "int") return ctI(8, true)
+    return t.w < 4 ? ctInt : t
+}
+// The common type of two operands (C11 6.3.1.8p1) on this LP64 target, where
+// ranks of equal width have equal width: the wider type wins with its own
+// signedness, and equal widths are unsigned if either operand is.
+function cCommonCt(a, b) {
+    var pa = cPromote(a)
+    var pb = cPromote(b)
+    if (pa.w != pb.w) return pa.w > pb.w ? pa : pb
+    return ctI(pa.w, pa.u == true || pb.u == true)
+}
+// items = [x0, {op}, x1, {op}, x2, ...] - ONE precedence level, folded left to
+// right. A division by zero folds to 0.
 function foldDimBin(items) {
-    var v = anytype
-    v = items[0]
+    var x = items[0]
     var i = 1
     while (i + 1 < items.length) {
-        var op = items[i].op
-        var r = items[i + 1]
-        if (op == "+") { v = v + r }
-        else if (op == "-") { v = v - r }
-        else if (op == "*") { v = v * r }
-        else if (op == "/") { v = r == 0 ? 0 : truncDiv(v, r) }
-        else if (op == "%") { v = r == 0 ? 0 : v - truncDiv(v, r) * r }
-        else if (op == "<<") { v = v * Math.pow(2, r) }
-        else if (op == ">>") { v = Math.floor(v / Math.pow(2, r)) }
-        else if (op == "<") { v = v < r ? 1 : 0 }
-        else if (op == ">") { v = v > r ? 1 : 0 }
-        else if (op == "<=") { v = v <= r ? 1 : 0 }
-        else if (op == ">=") { v = v >= r ? 1 : 0 }
-        else if (op == "==") { v = v == r ? 1 : 0 }
-        else if (op == "!=") { v = v != r ? 1 : 0 }
-        else if (op == "&&") { v = (v != 0 && r != 0) ? 1 : 0 }
-        else if (op == "||") { v = (v != 0 || r != 0) ? 1 : 0 }
-        else { v = cFoldBits(op, v, r) }
+        x = cFoldBin(items[i].op, x, items[i + 1])
         i = i + 2
     }
-    return v
+    return x
+}
+// One binary operator: a comparison or a logical operator answers an int 0 or 1, a
+// shift has its promoted left operand's type (C11 6.5.7p3), everything else the
+// common type, the result wrapped into it.
+function cFoldBin(op, a, b) {
+    if (op == "&&") return cK((a.v != 0 && b.v != 0) ? 1 : 0, ctInt)
+    if (op == "||") return cK((a.v != 0 || b.v != 0) ? 1 : 0, ctInt)
+    if (op == "<<" || op == ">>") {
+        var st = cPromote(a.t)
+        var sv = op == "<<" ? a.v * Math.pow(2, b.v) : Math.floor(a.v / Math.pow(2, b.v))
+        return cK(cFoldCast(sv, st), st)
+    }
+    var t = cCommonCt(a.t, b.t)
+    var v = cFoldCast(a.v, t)
+    var r = cFoldCast(b.v, t)
+    if (op == "<") return cK(v < r ? 1 : 0, ctInt)
+    if (op == ">") return cK(v > r ? 1 : 0, ctInt)
+    if (op == "<=") return cK(v <= r ? 1 : 0, ctInt)
+    if (op == ">=") return cK(v >= r ? 1 : 0, ctInt)
+    if (op == "==") return cK(v == r ? 1 : 0, ctInt)
+    if (op == "!=") return cK(v != r ? 1 : 0, ctInt)
+    if (op == "+") { v = v + r }
+    else if (op == "-") { v = v - r }
+    else if (op == "*") { v = v * r }
+    else if (op == "/") { v = r == 0 ? 0 : truncDiv(v, r) }
+    else if (op == "%") { v = r == 0 ? 0 : v - truncDiv(v, r) * r }
+    else { v = cFoldBits(op, v, r) }
+    return cK(cFoldCast(v, t), t)
+}
+// Unary '+', '-' and '~' on the promoted operand (C11 6.5.3.3).
+function cFoldUn(op, a) {
+    var t = cPromote(a.t)
+    var v = a.v
+    if (op == "-") { v = -v }
+    else if (op == "~") { v = -v - 1 }
+    return cK(cFoldCast(v, t), t)
 }
 // '&', '|' or '^' on two integers held exactly as doubles: the high and the low 32
 // bits are combined separately, since a script's bitwise operators see only 32.
@@ -175,8 +214,8 @@ function cFoldBits(op, a, b) {
     if (l < 0) l = l + 4294967296
     return h * 4294967296 + l
 }
-// A cast in a constant expression: the integer conversion of C11 6.3.1.3 to the
-// width and signedness of ct (a non-integer type leaves the value alone).
+// The integer conversion of C11 6.3.1.3 to the width and signedness of ct (a
+// non-integer type leaves the value alone).
 function cFoldCast(v, ct) {
     if (ct.bool == true) return v != 0 ? 1 : 0
     if (ct.k != "int") return v
@@ -185,13 +224,42 @@ function cFoldCast(v, ct) {
     if (ct.w == 2) return ct.u ? (v & 65535) : ((v << 16) >> 16)
     return ct.u ? (v >>> 0) : (v | 0)
 }
-// cond ? a : b of a constant expression: items = [cond] or [cond, a, b].
-function foldCond(items) { return items.length == 1 ? items[0] : (items[0] != 0 ? items[1] : items[2]) }
+// A cast in a constant expression: the value converted to ct, which a non-integer
+// type leaves as it was.
+function cFoldCastK(x, ct) {
+    if (ct.k != "int") return x
+    return cK(cFoldCast(x.v, ct), ct.bool == true ? ctInt : ct)
+}
+// cond ? a : b: items = [cond] or [cond, a, b]; the result has the common type of
+// a and b (C11 6.5.15p5).
+function foldCond(items) {
+    if (items.length == 1) return items[0]
+    var t = cCommonCt(items[1].t, items[2].t)
+    return cK(cFoldCast(items[0].v != 0 ? items[1].v : items[2].v, t), t)
+}
 // C integer division truncates toward zero, which Math.floor does not do for a
 // negative quotient.
 function truncDiv(a, b) {
     var q = a / b
     return q < 0 ? Math.ceil(q) : Math.floor(q)
+}
+
+// A parenthesized callee: its text (blanks already removed) and its expression
+// thunk t. When the text is one name under '(' ')' '*' '&' only, the seed is
+// {fname, t}: a FUNCTION's name stays a direct call, since '*' and '&' on a function
+// designator give back the same function (C11 6.5.3.2p3-4), and a variable's is
+// evaluated by t. Anything else is t itself.
+function makeParenCallee(text, t) {
+    var i = 0
+    var j = text.length
+    while (i < j && (text.charAt(i) == "(" || text.charAt(i) == "*" || text.charAt(i) == "&")) i = i + 1
+    while (j > i && text.charAt(j - 1) == ")") j = j - 1
+    if (i == j || (text.charCodeAt(i) >= 48 && text.charCodeAt(i) <= 57)) return t
+    for (var k = i; k < j; k++) {
+        var cc = text.charCodeAt(k)
+        if (!(cc == 95 || (cc >= 48 && cc <= 57) || (cc >= 65 && cc <= 90) || (cc >= 97 && cc <= 122))) return t
+    }
+    return {fname: text.slice(i, j), t: t}
 }
 
 // The constants of the standard headers this front end treats as built in
@@ -252,31 +320,76 @@ function cStdConst(name) {
 }
 
 // The value of a name in an integer constant expression folded while the tags walk
-// (an array dimension, an enumerator): an enumeration constant declared earlier, or
-// a constant of an included standard header. Anything else - a variable, which
-// would make a variable-length array - is refused.
+// (an array dimension, an enumerator), typed as cK: an enumeration constant
+// declared earlier, an int, or a constant of an included standard header, typed as
+// its spelling types it. Anything else - a variable, which would make a
+// variable-length array - is refused.
 function cConstOf(name) {
     var be = cBlockEnum(name)
-    if (be != undefined) return be
-    if (hasOwn(enumConsts, name)) return enumConsts[name] | 0
+    if (be != undefined) return cK(be, ctInt)
+    if (hasOwn(enumConsts, name)) return cK(enumConsts[name] | 0, ctInt)
     for (var i = 0; i < cStdIncluded.length; i++) {
         if (!hasOwn(cStdIncluded[i], name)) continue
         var s = cStdIncluded[i][name]
         if (s.charCodeAt(0) == 40) fail("not an integer constant: " + name)
         var neg = s.charCodeAt(0) == 45
         var parts = (neg ? s.slice(1) : s).split("-")
-        var v = cConstPart(name, parts[0])
-        if (neg) v = 0 - v
-        if (parts.length > 1) v = v - cConstPart(name, parts[1])
-        return v
+        var x = cConstPart(name, parts[0])
+        if (neg) x = cFoldUn("-", x)
+        if (parts.length > 1) x = cFoldBin("-", x, cConstPart(name, parts[1]))
+        return x
     }
     fail("not an integer constant: " + name)
-    return 0
+    return cK(0, ctInt)
 }
 function cConstPart(name, digits) {
     var v = parseCInt(digits)
     if (typeof v != "number" || v > 9007199254740991) fail("constant too large to fold here: " + name)
-    return v
+    return cK(v, cLitCt(digits))
+}
+
+// The type a declared object has, for 'sizeof x' in a constant expression, which
+// is folded before any declaration has run: the innermost block declaring the name
+// decides (an enumerator there is an int), then the file scope.
+function cDeclCtOf(name) {
+    for (var i = blockNames.length - 1; i >= 0; i--) {
+        if (!hasOwn(blockNames[i], name)) continue
+        var e = blockNames[i][name]
+        if (typeof e == "number") return ctInt
+        if (e.ct == undefined) fail("not an integer constant: sizeof " + name)
+        return e.ct
+    }
+    if (hasOwn(globalScope, name)) return globalScope[name].ct
+    if (hasOwn(enumConsts, name)) return ctInt
+    fail("not an integer constant: sizeof " + name)
+    return ctInt
+}
+// items = [ct, step...]: the type an object expression's '[i]', '.f' and '->f'
+// steps reach from ct; the index itself is never evaluated (C11 6.5.3.4p2).
+function cStepCt(items) {
+    var ct = items[0]
+    for (var i = 1; i < items.length; i++) {
+        var s = items[i]
+        if (s.fld != undefined) {
+            if (ct.k != "struct") fail("'.' needs a struct value: ." + s.fld)
+            ct = fieldOf(ct.s, s.fld).ct
+        } else if (s.arw != undefined) {
+            if (ct.k != "ptr" || ct.p.k != "struct") fail("'->' needs a struct pointer: ->" + s.arw)
+            ct = fieldOf(ct.p.s, s.arw).ct
+        } else {
+            ct = cDerefCt(ct)
+        }
+    }
+    return ct
+}
+// The type '*' or '[i]' reaches: an array's element, a pointer's target, and a
+// function pointer itself (C11 6.5.3.2p4).
+function cDerefCt(ct) {
+    if (ct.k == "arr") return ct.e
+    if (ct.k == "ptr") return ct.p
+    if (ct.k == "fnp") return ct
+    fail("indexing needs an array or a pointer")
+    return ct
 }
 
 // One brace-initializer item: an optional designator chain ('[i]', '.field',
@@ -538,13 +651,17 @@ var fnParams = []
 function cParamList(items) { fnParams = items; return items }
 function openFnScope() {
     openBlockScope()
-    for (var i = 0; i < fnParams.length; i++) noteBlockName(fnParams[i].name, false)
+    for (var i = 0; i < fnParams.length; i++) noteBlockName(fnParams[i].name, false, fnParams[i].ct)
 }
-function noteBlockName(name, ext) {
+// A declared object's entry is {ext, ct}: whether it was an extern declaration,
+// and its type (cDeclCtOf).
+function noteBlockName(name, ext, ct) {
     if (blockNames.length == 0) { return }
     var top = blockNames[blockNames.length - 1]
-    if (hasOwn(top, name) && !(ext && top[name] == "ext")) fail("redefinition of '" + name + "'")
-    top[name] = ext ? "ext" : "obj"
+    if (hasOwn(top, name) && !(ext && typeof top[name] != "number" && top[name].ext == true)) {
+        fail("redefinition of '" + name + "'")
+    }
+    top[name] = {ext: ext, ct: ct}
 }
 // An enumeration constant is an ordinary identifier scoped like any declaration
 // (C11 6.2.1p4, 6.7.2.2p3): a file-scope one lives in enumConsts, a block-scope one
@@ -560,7 +677,7 @@ function makeEnumerator(items) {
     if (items.length > 1) { v = items[1].val | 0 }
     enumNext = v + 1
     if (blockNames.length == 0) { enumConsts[items[0]] = v; return }
-    noteBlockName(items[0], false)
+    noteBlockName(items[0], false, ctInt)
     blockNames[blockNames.length - 1][items[0]] = v
 }
 // The value of the block-scope enumeration constant a name denotes here, or

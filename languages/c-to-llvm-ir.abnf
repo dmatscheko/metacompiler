@@ -872,7 +872,8 @@ ArrDim      = "[" { ArrQual } CExpr "]" ;
 // for it); a name must be an enumerator or a standard header's constant, so a real
 // VLA ('char t[argc]') stays an error (cConstOf). The operators are those of
 // CExpr in c-interpreter.abnf.
-CExpr       <~~ push(foldCond(takeAll())) ~~> = CELor [ "?" CExpr ":" CExpr ] ;
+CExpr       <~~ push(pop().v) ~~> = CETop ;
+CETop       <~~ push(foldCond(takeAll())) ~~> = CELor [ "?" CETop ":" CETop ] ;
 CELor       <~~ push(foldDimBin(takeAll())) ~~> = CELand { CELorOp CELand } ;
 CELorOp     <~~ push({op: up.in}) ~~> = "||" ;
 CELand      <~~ push(foldDimBin(takeAll())) ~~> = CEBor { CELandOp CEBor } ;
@@ -893,19 +894,29 @@ CEAdd       <~~ push(foldDimBin(takeAll())) ~~> = CEMul { CEAddOp CEMul } ;
 CEAddOp     <~~ push({op: up.in}) ~~> = "+" | "-" ;
 CEMul       <~~ push(foldDimBin(takeAll())) ~~> = CEUn { CEMulOp CEUn } ;
 CEMulOp     <~~ push({op: up.in}) ~~> = "*" | "/" | "%" ;
-CEUn        = Number | CECast | CEParen | CENeg | CEPos | CENot | CELNot | CEChar | CEWChar
-            | CESizeof | CEAlignof | OffsetVal | CEName ;
+CEUn        = CENum | CECast | CEParen | CENeg | CEPos | CENot | CELNot | CEChar | CEWChar
+            | CESizeof | CESizeofE | CESizeofK | CEAlignof | CEOffset | CEName ;
+CENum       <~~ push(cK(pop(), cLitCt(up.in))) ~~> = Number ;
 CEName      <~~ push(cConstOf(up.in)) ~~> = Id ;
-CEParen     = "(" CExpr ")" ;
-CECast      <~~ push(cFoldCast(pop(), pop())) ~~> = "(" TypeName ")" CEUn ;
-CENeg       <~~ push(0 - pop()) ~~> = "-" CEUn ;
-CEPos       = "+" CEUn ;
-CENot       <~~ push(0 - pop() - 1) ~~> = "~" CEUn ;
-CELNot      <~~ push(pop() == 0 ? 1 : 0) ~~> = "!" CEUn ;
-CEChar      = "'" :whitespace() CChar <~~ push(cCharConst(up.in)) ~~> "'" :whitespace(Whitespace) ;
-CEWChar     <~~ push(cCharCode(pop())) ~~> = WCPfx "'" :whitespace() WCChar "'" :whitespace(Whitespace) ;
-CESizeof    <~~ push(ctBytes(pop())) ~~> = KwSizeof "(" TypeName ")" ;
-CEAlignof   <~~ push(ctAlign(pop())) ~~> = KwAlignof "(" TypeName ")" ;
+CEParen     = "(" CETop ")" ;
+CECast      <~~ push(cFoldCastK(pop(), pop())) ~~> = "(" TypeName ")" CEUn ;
+CENeg       <~~ push(cFoldUn("-", pop())) ~~> = "-" CEUn ;
+CEPos       <~~ push(cFoldUn("+", pop())) ~~> = "+" CEUn ;
+CENot       <~~ push(cFoldUn("~", pop())) ~~> = "~" CEUn ;
+CELNot      <~~ push(cK(pop().v == 0 ? 1 : 0, ctInt)) ~~> = "!" CEUn ;
+CEChar      = "'" :whitespace() CChar <~~ push(cK(cCharConst(up.in), ctInt)) ~~> "'" :whitespace(Whitespace) ;
+CEWChar     <~~ push(cK(cCharCode(pop()), cWideCt(pop()))) ~~> = CharPfx "'" :whitespace() WCChar "'" :whitespace(Whitespace) ;
+CESizeof    <~~ push(cK(ctBytes(pop()), ctI(8, true))) ~~> = KwSizeof "(" TypeName ")" ;
+CEAlignof   <~~ push(cK(ctAlign(pop()), ctI(8, true))) ~~> = KwAlignof "(" TypeName ")" ;
+CEOffset    <~~ push(cK(pop(), ctI(8, true))) ~~> = OffsetVal ;
+// 'sizeof x' / 'sizeof a[0]' / 'sizeof *p' / 'sizeof s.f': the size of a declared
+// object's type, or of what its steps reach (cDeclCtOf, cStepCt). Over a constant
+// expression ('sizeof(1 ? 1 : 1L)'), the size of its type.
+CESizeofE   <~~ push(cK(ctBytes(pop()), ctI(8, true))) ~~> = KwSizeof CEObj ;
+CESizeofK   <~~ push(cK(ctBytes(pop().t), ctI(8, true))) ~~> = KwSizeof "(" CETop ")" ;
+CEObj       <~~ push(cStepCt(takeAll())) ~~> = ( CEObjDeref | "(" CEObj ")" | CEObjName ) { PlaceSfx } ;
+CEObjDeref  <~~ push(cDerefCt(pop())) ~~> = "*" CEObj ;
+CEObjName   <~~ push(cDeclCtOf(up.in)) ~~> = Id ;
 InferDim    <~~ push(-1) ~~> = "[" "]" ;
 ArrQual     = PtrQual | "static" KwEnd ;
 // A declaration initializer: a brace list, a string literal (which initializes a
@@ -970,10 +981,11 @@ Lvalue      = StrPlaceP | CompLitP | DerefP | Deref | ParenSfx | ParenPlace | Va
 // operand (C11 6.5.2.1p2). A name seed ('i[p]') is VarPlace's.
 ConstSubP   <~~ push(makeSubscript(takeAll())) ~~>
             = ( ParenStepAhead "(" Expression ")" | NumberLit | CharLit ) ( Index | Arrow ) { PlaceSfx } ;
-// '(' Expression ')' then '->' or '[' is a place: '(p + 2)->a = 1', '(i + 1)[p] = 2'.
-// A scan of the source for that suffix after the matching ')' guards it, so any other
-// '(' is not parsed as an expression once more on every attempt at an lvalue. A
-// :script sees the raw input, so the scan steps over blanks, comments and literals.
+// '(' Expression ')' then '->' or '[' is a place: '(p + 2)->a = 1', '(i + 1)[p] = 2';
+// then '(' it is a callee: '(&f)(1)' (ParenCallee). A scan of the source for one of
+// those after the matching ')' guards both, so any other '(' is not parsed as an
+// expression once more on every attempt at an lvalue or a call. A :script sees the
+// raw input, so the scan steps over blanks, comments and literals.
 ParenStepAhead = :script(~~
     (function() {
         var s = 0
@@ -995,7 +1007,7 @@ ParenStepAhead = :script(~~
                 continue
             }
             if (seen && depth === 0) {
-                return ((ch === 45 && c.peek(s + 1) === 62) || ch === 91) ? undefined : abnf.newToken("\x01no-paren-step", 0)
+                return ((ch === 45 && c.peek(s + 1) === 62) || ch === 91 || ch === 40) ? undefined : abnf.newToken("\x01no-paren-step", 0)
             }
             if (!seen && ch !== 40) return abnf.newToken("\x01no-paren-step", 0)
             if (ch === 34 || ch === 39) {
@@ -1297,7 +1309,7 @@ AddrName    <~~ push(makeAddrName(pop())) ~~>
             = "&" Id <~~ push(up.in) ~~> !"[" !"." !"->" ;
 AddrOf      <~~ push(makeAddrOf(pop())) ~~>
             = "&" Lvalue ;
-DerefLoad   <~~ push(makeLoadOf(makeDerefPlace(pop()))) ~~>
+DerefLoad   <~~ push(makeDerefLoad(pop())) ~~>
             = "*" UnaryExpr ;
 Neg         <~~ push(makeNeg(pop())) ~~>
             = "-" UnaryExpr ;
@@ -1317,12 +1329,12 @@ PostIncDec  <~~ push(makePostIncDec(pop(), pop())) ~~>
 // chain ('pick(1)(5)'), and suffixes may step off a call result ('mk().a', emitValStep).
 CallExpr    <~~ push(makeCallExpr(takeAll())) ~~>
             = CallSeed ArgList { ArgList | PlaceSfx } ;
-// ParenCastRef: a cast as callee ('((void (*)(void))0)()'). ParenDerefCall:
-// '(*(*p)(0, 2))(2, 2)' - '*' on a function pointer is the identity (C11 6.5.3.2p4).
-CallSeed    = ParenSfxRef | ParenDerefCall | ParenPlaceRef | PlaceRef | NameSeed | ParenCastRef ;
+// ParenDerefCall: '(*(*p)(0, 2))(2, 2)' - '*' on a function pointer is the identity
+// (C11 6.5.3.2p4). ParenCallee: any other parenthesized callee; see CallSeed in
+// c-interpreter.abnf.
+CallSeed    = ParenSfxRef | ParenDerefCall | ParenCallee | PlaceRef | NameSeed ;
 ParenDerefCall = "(" "*" CallExpr ")" ;
-ParenCastRef = "(" Cast ")" ;
-ParenPlaceRef <~~ push(makeLoadOf(pop())) ~~> = "(" Lvalue ")" ;
+ParenCallee <~~ push(makeParenCallee(up.in, pop())) ~~> = ParenStepAhead "(" Expression ")" ;
 NameSeed    <~~ push({fname: up.in}) ~~> = Id ;
 ArgList     <~~ push({args: takeAll()}) ~~>
             = "(" [ AssignExpr { "," AssignExpr } ] ")" ;
@@ -1834,7 +1846,7 @@ KwDefault   = "default" KwEnd ;
     // A _Bool declarator: the initializer is normalized to 0 or 1.
     function makeBoolDecl(items) {
         var name = items[0]
-        noteBlockName(name, false)
+        noteBlockName(name, false, ctBool)
         var opt = items[1]
         return function(b) {
             // A _Bool cell is an i8; storeTo normalizes the value (emitConv on ctBool).
@@ -3369,6 +3381,8 @@ KwDefault   = "default" KwEnd ;
         var cv = u64Num(p, ct.u == true)
         return function(b) { return {b: b, v: k, ct: ct, cv: cv, p64: p} }
     }
+    // The type of an integer literal's text. Twin of cLitCt in c-interpreter.abnf.
+    function cLitCt(text) { return intCtOf(text, parseCInt64(text)) }
     // The suffix names the smallest rank and the signedness; the type is then the
     // first one of that rank's list that holds the value. A decimal constant only ever
     // picks a signed type, a hexadecimal / octal / binary one may pick the unsigned
@@ -3598,6 +3612,15 @@ KwDefault   = "default" KwEnd ;
             var r = t(b)
             var ct = (r.ct != undefined && r.ct.k == "ptr") ? r.ct.p : ctInt
             return {b: r.b, v: r.v, ct: ct}
+        }
+    }
+    // '*e' read as a value; on a function pointer, that pointer. Twin of makeDerefLoad
+    // in c-interpreter.abnf.
+    function makeDerefLoad(t) {
+        return function(b) {
+            var r = t(b)
+            if (r.ct != undefined && r.ct.k == "fnp") return r
+            return placeValOf({b: r.b, v: r.v, ct: (r.ct != undefined && r.ct.k == "ptr") ? r.ct.p : ctInt})
         }
     }
     // The address of a place: the lvalue thunk already yields it, only the TYPE grows
@@ -4012,7 +4035,8 @@ KwDefault   = "default" KwEnd ;
         }
     }
     // items = [seed, {args}...]. The seed is either {fname} (a bare name, resolved as
-    // a function or as a variable holding a function pointer) or an expression thunk
+    // a function or as a variable holding a function pointer), {fname, t} (see
+    // makeCallExpr in c-interpreter.abnf) or an expression thunk
     // yielding a function identifier. Every further argument list calls what the
     // previous one returned, through the per-arity trampoline.
     function makeCallExpr(items) {
@@ -4030,7 +4054,7 @@ KwDefault   = "default" KwEnd ;
                 // A local or global VARIABLE shadows a function of the same name: it
                 // holds a function pointer and is called indirectly.
                 if (lookupVar(seed.fname) != undefined) {
-                    var rf = makeVarRef(seed.fname)(b)
+                    var rf = (seed.t != undefined ? seed.t : makeVarRef(seed.fname))(b)
                     b = rf.b
                     v = rf.v
                     vct = rf.ct
@@ -4137,8 +4161,10 @@ KwDefault   = "default" KwEnd ;
     // The C type that a base type plus one declarator name.
     function declCt(base, d) {
         if (d.kind == "fnptr") {
-            if (d.dims != undefined) return arrCt(d.dims, ctFn, initCount(d.init, d.dims, ctFn))
-            return ctFn
+            // 'int (**pp)(int)': each '*' past the first is a pointer to the function pointer.
+            var f = d.ptr > 1 ? ptrTo(d.ptr - 1, ctFn) : ctFn
+            if (d.dims != undefined) return arrCt(d.dims, f, initCount(d.init, d.dims, f))
+            return f
         }
         // 'int (*pa)[3]' is a POINTER TO an array, so the dimensions sit INSIDE.
         if (d.kind == "ptrarr") return ptrTo(d.ptr, arrCt(d.dims, base, 0))
@@ -4152,8 +4178,8 @@ KwDefault   = "default" KwEnd ;
         var thunks = []
         for (var i = 1; i < items.length; i++) {
             var d = items[i].dcl
-            noteBlockName(d.name, items[0].ext == true)
             var ct = declCt(base, d)
+            noteBlockName(d.name, items[0].ext == true, ct)
             if (items[0].ext == true) { thunks.push(makeExternOf(d.name, ct, d.init)); continue }
             thunks.push(isStatic ? makeStaticOf(d.name, ct, d.init) : makeDeclOf(d.name, ct, d.init))
         }

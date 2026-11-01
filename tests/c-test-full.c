@@ -2529,6 +2529,16 @@ int s61(void) {
     loc = &s61_md;
     check(6103, loc(7, 4) == 3 && &s61_md == s61_md && &s61_md != &s61_ad);
     { int s61_md = 5; int *p = &s61_md; check(6104, *p == 5); }
+    /* A parenthesized callee: a function's name under '*' and '&' is the same
+       function, '*' on a function pointer gives it back, and a pointer to a
+       function pointer is dereferenced once. */
+    int (**pp)(int, int) = &loc;
+    check(6105, (s61_ad)(1, 2) == 3 && (&s61_ad)(1, 3) == 4 && (*&s61_md)(10, 3) == 1
+                && (*s61_ad)(4, 5) == 9 && (**s61_ad)(4, 6) == 10);
+    check(6106, (*pp)(10, 4) == 2 && (**pp)(11, 4) == 3 && pp[0](12, 5) == 2
+                && (s61_g.f)(2, 7) == 9 && (*s61_g.f)(2, 8) == 10);
+    loc = *s61_ad;
+    check(6107, loc(1, 4) == 5 && (loc = *&s61_md, loc(10, 4)) == 2 && *loc == loc);
     return 0;
 }
 
@@ -2552,6 +2562,17 @@ char s62_m[(unsigned char)300];
 char s62_n[0 ? 1 : 0 ? 2 : 6];
 enum { S62_A = 1 | 4, S62_B = (3 > 1) ? 7 : 2, S62_C = 6 & 3, S62_D = 6 ^ 3,
        S62_E = !0 + (2 <= 1), S62_F = 0 || 2, S62_G = (short)70000, S62_H = u'b' - 'a' };
+/* sizeof of an object expression (C11 6.5.3.4), and the usual arithmetic
+   conversions (6.3.1.8): an operand of unsigned int turns -1 into UINT_MAX. */
+int s62_arr[10];
+struct s62_s s62_obj;
+char s62_cnt[sizeof s62_arr / sizeof s62_arr[0]];
+char s62_mem[sizeof s62_obj.i + sizeof(s62_obj) + sizeof *s62_arr + sizeof(1 ? 1 : 1L)];
+char s62_u1[(-1 < 0u) + 1];
+char s62_u2[(1 ? -1 : 0u) > 0 ? 3 : 4];
+char s62_u3[(0u - 1) / 65536 / 65536 + (-1L < 0u) + 1];
+char s62_u4[(~0u >> 28) + -1 / 2u / 1073741824 + (U'a' - 98 < 0) + (u'a' - 98 < 0)];
+enum { S62_I = sizeof s62_arr / sizeof s62_arr[0], S62_J = (-1 % 3u) + (0xFFFFFFFF > -1) };
 int s62(void) {
     int lb[1 | 2];
     char lc[sizeof(long) > 4 ? 3 : 1];
@@ -2561,6 +2582,11 @@ int s62(void) {
                 && sizeof lb == 12 && sizeof lc == 3);
     check(6204, S62_A == 5 && S62_B == 7 && S62_C == 2 && S62_D == 5 && S62_E == 1 && S62_F == 1
                 && S62_G == 4464 && S62_H == 1);
+    int ly[7];
+    char lz[sizeof ly / sizeof *ly + sizeof ly[0]];
+    check(6205, sizeof s62_cnt == 10 && sizeof s62_mem == 40 && S62_I == 10 && sizeof lz == 11);
+    check(6206, sizeof s62_u1 == 1 && sizeof s62_u2 == 3 && sizeof s62_u3 == 2
+                && sizeof s62_u4 == 17 && S62_J == 0);
     return 0;
 }
 
