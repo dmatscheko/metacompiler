@@ -133,7 +133,7 @@ ImportNamed <~~ push(makeImportAs(takeAll(), up.pos)) ~~>
             = Id <~~ push(cPoisonName(up.in)) ~~> ImportPath [ ";" ] ;
 ImportDot   <~~ push(makeImport(pop(), up.pos)); notImpl("dot import", up.pos) ~~>
             = "." ImportPath [ ";" ] ;
-ImportPath  <~~ push(up.in.slice(1, up.in.length - 1)) ~~>
+ImportPath  <~~ push(cImportPath(up.in.slice(1, up.in.length - 1))) ~~>
             = '"' :whitespace() { "\x20"..."\x21" | "\x23"..."\x7e" } '"' :whitespace(Whitespace) ;
 
 // type Point struct { x int; y int } and type Shape interface { Area() int }.
@@ -7205,6 +7205,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             stashImported(items) // emitted later under this file's own source (see compile-core)
             return
         }
+        cUndefCheck()
         var f = m.NewFunc("jsmain", i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
         curF = f
         var b = f.NewBlock("entry")

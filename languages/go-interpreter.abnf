@@ -119,7 +119,7 @@ ImportNamed <~~ importAs(takeAll(), up.pos) ~~>
             = Id <~~ push(cPoisonName(up.in)) ~~> ImportPath [ ";" ] ;
 ImportDot   <~~ resolveImport(pop(), up.pos); notImpl("dot import", up.pos) ~~>
             = "." ImportPath [ ";" ] ;
-ImportPath  <~~ push(up.in.slice(1, up.in.length - 1)) ~~>
+ImportPath  <~~ push(cImportPath(up.in.slice(1, up.in.length - 1))) ~~>
             = '"' :whitespace() { "\x20"..."\x21" | "\x23"..."\x7e" } '"' :whitespace(Whitespace) ;
 
 // type Point struct { x int; y int } and type Shape interface { Area() int }.
@@ -7164,6 +7164,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         for (var fsi = 0; fsi < goFmtScanFns.length; fsi++) { hostGlobals["fmt"][goFmtScanFns[fsi]] = fsPkg[goFmtScanFns[fsi]] }
     }
     c.compile(c.asg)
+    cUndefCheck()
 
     // Attach the collected methods to their struct descriptors. The receiver type is
     // found by name: func (p Point) dist() -- recvName pushed [name, type].

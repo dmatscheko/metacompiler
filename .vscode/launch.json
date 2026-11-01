@@ -1055,6 +1055,20 @@
             "program": "${workspaceFolder}","args": ["languages/go-to-llvm-ir.abnf", "tests/go-fail-test-break.go", "-q"]
         },
         {
+            "name": "Go interpreter undefined name SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "expectError": "go-fail-test-undefined.go:48: undefined: zz",
+            "program": "${workspaceFolder}","args": ["languages/go-interpreter.abnf", "tests/go-fail-test-undefined.go", "-q"]
+        },
+        {
+            "name": "Go compiler undefined name SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "expectError": "go-fail-test-undefined.go:48: undefined: zz",
+            "program": "${workspaceFolder}","args": ["languages/go-to-llvm-ir.abnf", "tests/go-fail-test-undefined.go", "-q"]
+        },
+        {
             "name": "Go interpreter float constant truncated SHOULD FAIL",
             "type": "go",
             "request": "launch",

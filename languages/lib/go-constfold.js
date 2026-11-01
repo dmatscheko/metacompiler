@@ -1158,6 +1158,83 @@ function cXLookup(name) {
     var b = cFind(name)
     return b == null ? null : b.f.x[b.i]
 }
+// ----- UNDEFINED NAMES -----
+// A name no binding declares is Go's compile error "undefined: x", reported before
+// anything runs, reached or not. goNameC notes a name of the main file that no frame
+// binds where it is used, and cUndefCheck decides once the whole file is walked,
+// against the package frame (package scope has no order), what the imports bind
+// and the predeclared identifiers. A local declared later in its block is not in
+// scope before it, which is Go's rule too. An imported package is not checked: its
+// files see each other's names. A keyword never names anything: one that reaches a
+// name reference is a statement the grammar misread, not an undefined name. Called
+// by each grammar's main-file walk.
+var cUndefs = []
+var cImports = {}
+var cPredecl = {}
+function cPredeclInit() {
+    var ns = ["bool", "byte", "complex64", "complex128", "error", "float32", "float64", "int", "int8",
+              "int16", "int32", "int64", "rune", "string", "uint", "uint8", "uint16", "uint32", "uint64",
+              "uintptr", "any", "comparable", "true", "false", "iota", "nil", "append", "cap", "clear",
+              "close", "complex", "copy", "delete", "imag", "len", "make", "max", "min", "new", "panic",
+              "print", "println", "real", "recover", "_",
+              "break", "case", "chan", "const", "continue", "default", "defer", "else", "fallthrough",
+              "for", "func", "go", "goto", "if", "import", "interface", "map", "package", "range",
+              "return", "select", "struct", "switch", "type", "var"]
+    var i = 0
+    while (i < ns.length) { cPredecl["$" + ns[i]] = true; i = i + 1 }
+}
+cPredeclInit()
+function cUseName(name, pos) {
+    if (goWalkPkg != "" || cPredecl["$" + name] === true || cFind(name) != null) { return }
+    var k = 0
+    while (k < goTpCur.length) { if (goTpCur[k] === name) { return }; k = k + 1 }
+    cUndefs.push({n: name, pos: pos})
+}
+// A composite literal's key that is a bare name may be a struct FIELD, which no
+// scope binds.
+function cKeyName(name, s, e) {
+    var i = cUndefs.length - 1
+    while (i >= 0 && cUndefs[i].pos >= s) {
+        if (cUndefs[i].pos <= e && cUndefs[i].n === name) { cUndefs[i].n = "" }
+        i = i - 1
+    }
+}
+// An import path: the name it binds is the package's, the path's last element
+// without a major-version element ("math/rand/v2" is rand).
+function cImportPath(path) {
+    if (goWalkPkg != "") { return path }
+    var cut = cLastSlash(path)
+    var last = path.substring(cut + 1)
+    if (cut > 0 && last.length > 1 && last.charAt(0) == "v" && cIsDigits(last.substring(1))) {
+        var head = path.substring(0, cut)
+        last = head.substring(cLastSlash(head) + 1)
+    }
+    cImports["$" + last] = true
+    return path
+}
+function cLastSlash(t) {
+    var i = t.length - 1
+    while (i >= 0 && t.charAt(i) != "/") { i = i - 1 }
+    return i
+}
+function cIsDigits(t) {
+    var i = 0
+    while (i < t.length) { var ch = t.charCodeAt(i); if (ch < 48 || ch > 57) { return false }; i = i + 1 }
+    return t.length > 0
+}
+function cUndefCheck() {
+    var f = cScopes[0]
+    var i = 0
+    while (i < cUndefs.length) {
+        var n = cUndefs[i].n
+        if (n != "" && cImports["$" + n] !== true) {
+            var k = f.n.length - 1
+            while (k >= 0 && f.n[k] !== n) { k = k - 1 }
+            if (k < 0) { fail(c.file + ":" + c.lineOf(cUndefs[i].pos) + ": undefined: " + n) }
+        }
+        i = i + 1
+    }
+}
 // ----- STATIC TYPES: which stores copy a struct -----
 // A struct and a pointer to it are ONE object in this value model, so a store
 // cannot tell a copy (b := a) from an alias (q := p) by the value. What the front
@@ -1671,7 +1748,10 @@ function goRetFlush(rtys) {
 // literal has already claimed its own - rebuilds the nesting from the ranges and
 // walks it against its type.
 var goLitPend = []
-function goLitEl(s, e, key, kt) { goLitPend.push({s: s, e: e, key: key, kt: kt, g: false, kr: goKRec(s, e), kids: []}) }
+function goLitEl(s, e, key, kt) {
+    if (key && kt != "") { cKeyName(kt, s, e) }
+    goLitPend.push({s: s, e: e, key: key, kt: kt, g: false, kr: goKRec(s, e), kids: []})
+}
 function goLitGrp(s, e) { goLitPend.push({s: s, e: e, key: false, kt: "", g: true, kr: null, kids: []}) }
 function goLitClaim(ty, s, e) {
     var mine = []
@@ -4207,6 +4287,7 @@ function goNameC(name, pos) {
         regCFn(pos, cIotaFn)
         return makeVarRef(name)
     }
+    cUseName(name, pos)
     regConst(pos, cLookup(name))
     var ty = cTyLookup(name)
     // Inside a package its own function wins, as in goCallBoxC.
