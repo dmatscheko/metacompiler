@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1062** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1063** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -108,12 +108,13 @@ Spec-only (no dotnet here). All engines:
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-1056 kotlin: member call vs receiver-lambda param name clash; companion/enum-entry classes; primitive class rendering · P3 · KT · IN PROGRESS (KT worker, round 21) [V]
-kotlinc 2.2.21 (found by KT r20, repros in scratchpad KT20/):
-- Compiled: `fun applyTwice(x: Int, f: Int.() -> Int) = x.f().f()` + `object Obj { fun f(n: Int) = n * 2 }`; `println(Obj.f(4))` → 8 (interpreter 8); run/native "unknown name: f" (recvLambdaNames branch in kotlin-to-llvm-ir.abnf; methodClasses only records class methods, so object/companion receivers take the lambda arm). Same for a companion method f.
-- `C.Companion::class.simpleName` → Companion, qualifiedName C.Companion, javaClass.name C$Companion; `N.Named::class.simpleName` → Named. Interpreter: Companion/Companion/Companion; compiled: C/C/C and N (companion merged into the class descriptor — architectural).
-- `enum class E { A, B { override fun toString() = "b" } }`: `E.B::class.simpleName` → B, qualifiedName E.B, javaClass.name E$B, `E.B::class == E::class` false; ours E/E/E/true. `E.B.declaringJavaClass` → E; ours null/undefined.
-- `println(Int::class)` → "int (Kotlin reflection is not available)" (ours "class Int"; previously declined in T-868 — keep declined unless cheap); `Int::class.javaObjectType.name` → java.lang.Integer (ours Int). `sequenceOf(1)::class.simpleName` → null (anonymous class; ours non-null).
+### T-1062 kotlin: javaClass/KClass leftovers (sequences, static-typed primitives, equality, reified) · P3 · KT · OPEN [V]
+Oracle kotlinc 2.2.21; all three engines differ:
+- `generateSequence(1){it+1}.javaClass.name` aborts (javaClass of a sequence is null); oracle kotlin.sequences.GeneratorSequence. At least must not abort.
+- `5.javaClass.name` is `int` in the oracle (static type Int), ours java.lang.Integer; `(5 as Any).javaClass.name` stays java.lang.Integer.
+- `E.A.javaClass == E::class.java` and `P(1).javaClass == P::class.java` are true in the oracle, false here (top-level KClass carries no jname).
+- `inline fun <reified T: Any> nm() = T::class.simpleName; nm<C>()` prints C, ours T.
+- `UInt::class.java.name` = kotlin.UInt, `Unit::class.java.name` = kotlin.Unit; ours bare UInt / Unit.
 
 # GO — Go  (oracle: `go run`)
 
@@ -1121,6 +1122,7 @@ T-1054 php: interpreter `(array)` cast of an object drops references; generator 
 T-1035 c: the C compiler silently merges two definitions of one function name into a corrupt module — DONE (CORE r18, 20df82c7): shared cNoteFnDef rejects a second body with clang's "redefinition of 'f'" in both engines (plain/struct/typedef/fn-ptr returns); repeated prototypes, extern/static decls before the body still legal (probed: all legs exit 19 = clang); SHOULD FAIL rows added
 T-1058 csharp: generated exception message and ToString drop the namespace — DONE (CS r9, 5bce6376): FullName = namespace + outer types (Demo.Program+Box) in 3 engines; exception Message/ToString/unhandled line and Object.ToString use it; wrong-name assertions corrected; probed vs spec
 T-1059 csharp: virtual auto-property overridden by an accessor property is not dispatched — DONE (CS r9, 74cca8ca): auto-property overridden by accessors stores under a hidden backing slot; getter/setter-only overrides dispatch, base.K reads backing; object initializers now go through set accessors; probed vs spec
+T-1056 kotlin: member call vs receiver-lambda param name clash; companion/enum-entry classes; primitive class rendering — PARTIAL→split (KT r21, 5fc41400): companion/enum-entry class identity (C$Companion, E$B, declaringJavaClass), primitive .java/.javaObjectType, member calls on objects/companions in compiled legs; 4 legs = kotlinc 2.2.21. println(Int::class) kept declined (kotlin-reflect suffix); sequence per-operation classes declined; remainder filed
 
 # Settled — do not re-open
 
