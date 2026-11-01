@@ -111,7 +111,7 @@ strings.TrimSpace, native strips ASCII 9-13 and 32: `int.Parse(" 1 2 ")` and `in
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-1085 kotlin: apply{} receiver inside an extension (compiled crash); implicit javaClass; unboxed inline-lambda it · P3 · KT · OPEN [V]
+### T-1085 kotlin: apply{} receiver inside an extension (compiled crash); implicit javaClass; unboxed inline-lambda it · P3 · KT · IN PROGRESS (KT worker, round 27) [V]
 Oracle kotlinc 2.2.21:
 - compiled crash: `fun String.sb() = StringBuilder().apply { append("x") }.toString()` -> run leg "js runtime error: unknown String method: append" (bare append resolves against the extension receiver, not the lambda receiver); interpreter OK. Check with/run/apply/also nesting inside extensions generally.
 - `fun Int.jc2() = javaClass.name` (implicit this) -> int; interpreter "unknown name: javaClass" (check all legs).
