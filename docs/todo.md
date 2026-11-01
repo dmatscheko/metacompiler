@@ -150,7 +150,7 @@ Spec-only (php-src). All engines unless noted:
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-1084 bash: subscript leftovers (${a[@]:'1'}, [[ -v a[@] ]], quoted computed declare); option after operand · P3 · SH · OPEN [V]
+### T-1084 bash: subscript leftovers (${a[@]:'1'}, [[ -v a[@] ]], quoted computed declare); option after operand · P3 · SH · IN PROGRESS (SH worker, round 32) [V]
 Oracle /opt/homebrew/bin/bash 5.3:
 - `${ia[@]:'1'}` -> arithmetic syntax error; ours "bad substitution" (ArOff rejects quotes).
 - `[[ -v "ia[@]" ]]`: compiled answers 1, bash 0 (true iff the array has any element); interpreter right only by accident (treats @ as index 0 - wrong for an array without element 0).
