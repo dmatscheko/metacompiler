@@ -725,13 +725,21 @@ function bashSubNeedsX(t) {
 // array literal (...) under -a/-A), and so is NAME[SUB] for declare, typeset and local, which
 // never evaluate SUB. Answers {text, operands, bad: [the fields that are no operand, bash's
 // "not a valid identifier"]}, or null.
-function bashDeclText(items, fieldsOf, quote) {
+//
+// The builtin reads the SUB of a computed NAME[SUB]=VALUE as it stands, as an assignment
+// statement does (AsgIdx): an associative array's as a word, an indexed array's as
+// arithmetic text, quotes and all (bash 5.3: `declare 'a[\1]=x'` is an arithmetic syntax
+// error, where the written `declare a[\1]=x` is a[1]). The second is spelled with its single
+// quotes and backslashes escaped, so it expands to them; kindOf(NAME) answers "A", "a", or "" when the kind is
+// not known yet, and then the answer is null.
+function bashDeclText(items, fieldsOf, quote, kindOf) {
     var text = items[0].dkw
     var xr = text == "export" || text == "readonly"
     var arr = false
     var opts = true
     var operands = 0
     var bad = []
+    var assoc = false
     var i
     var k
     for (i = 1; i < items.length; i++) {
@@ -739,6 +747,7 @@ function bashDeclText(items, fieldsOf, quote) {
         if (it.dflag != undefined) {
             text = text + " " + it.dflag
             if (it.dflag.charAt(0) == "-" && (it.dflag.indexOf("a") >= 0 || it.dflag.indexOf("A") >= 0)) { arr = true }
+            if (it.dflag.charAt(0) == "-" && it.dflag.indexOf("A") >= 0) { assoc = true }
             continue
         }
         if (it.dname != undefined || it.a != undefined) {
@@ -756,16 +765,71 @@ function bashDeclText(items, fieldsOf, quote) {
             if (opts && f.length > 1 && (f.charAt(0) == "-" || (f.charAt(0) == "+" && !xr)) && bashDeclFlagText(f)) {
                 text = text + " " + f
                 if (f.charAt(0) == "-" && (f.indexOf("a") >= 0 || f.indexOf("A") >= 0)) { arr = true }
+                if (f.charAt(0) == "-" && f.indexOf("A") >= 0) { assoc = true }
                 continue
             }
             opts = false
             var op = bashDeclOperand(f, arr, quote, !xr)
             if (op == "") { bad.push(f); continue }
+            var br = f.indexOf("[")
+            var cl = (br > 0) ? f.indexOf("]", br) : -1
+            if (cl > br + 1 && cl + 1 < f.length && bashSubQuoted(f.slice(br + 1, cl))) {
+                var kind = assoc ? "A" : kindOf(f.slice(0, br))
+                if (kind == "") { return null }
+                if (kind == "a") { op = bashDeclOperand(f.slice(0, br + 1) + bashSubEsc(f.slice(br + 1, cl)) + f.slice(cl), arr, quote, !xr) }
+            }
             operands = operands + 1
             text = text + " " + op
         }
     }
     return {text: text, operands: operands, bad: bad}
+}
+// AN OPTION WORD AFTER AN OPERAND. bash marks every array literal (NAME=(...), NAME+=(...))
+// that follows an unquoted word beginning with "-" for the kind its letters name - A
+// associative, else a indexed, and g global - and applies the mark as the words are expanded
+// (make_cmd.c, fix_assignment_words). The builtin itself reads such a word after an operand
+// as no option but "not a valid identifier" (bash 5.3: `declare w=7 -A e=([z]=3)` makes e
+// associative, status 1). items are a declaration's, each {dyn} carrying {dsrc}, its word as
+// written. Answers null unless a written word marks a literal (and no other operand is
+// computed, and it is no query); else {items: the declaration without those words, each
+// marked literal given {dlate: its letters}, bad: [{at: the operands before it, w: the
+// word}]}.
+function bashDeclLate(items) {
+    var marks = ""
+    var out = []
+    var bad = []
+    var operands = 0
+    var any = false
+    var i
+    for (i = 0; i < items.length; i++) {
+        var it = items[i]
+        if (it.dflag != undefined && (it.dflag.indexOf("p") >= 0 || it.dflag.indexOf("f") >= 0 || it.dflag.indexOf("F") >= 0)) { return null }
+        if (it.dyn != undefined) {
+            if (it.dsrc == undefined || !bashDeclOptWord(it.dsrc)) { return null }
+            var w = it.dsrc.slice(1)
+            if (w.indexOf("A") >= 0 && marks.indexOf("A") < 0) { marks = marks + "A" }
+            if (w.indexOf("a") >= 0 && marks.indexOf("a") < 0) { marks = marks + "a" }
+            if (w.indexOf("g") >= 0 && marks.indexOf("g") < 0) { marks = marks + "g" }
+            bad.push({at: operands, w: it.dsrc})
+            continue
+        }
+        if (it.a != undefined && it.a.lit != null && it.a.idxT == null && marks != "") {
+            any = true
+            out.push({a: it.a, src: it.src, dlate: marks})
+        } else { out.push(it) }
+        if (it.a != undefined || it.dname != undefined) { operands = operands + 1 }
+    }
+    return any ? {items: out, bad: bad} : null
+}
+// A written word that is "-" and then letters, digits or _ only.
+function bashDeclOptWord(s) {
+    var i
+    if (s.length < 2 || s.charAt(0) != "-") { return false }
+    for (i = 1; i < s.length; i++) {
+        var cc = s.charCodeAt(i)
+        if (!(cc == 95 || (cc >= 48 && cc <= 57) || (cc >= 65 && cc <= 90) || (cc >= 97 && cc <= 122))) { return false }
+    }
+    return true
 }
 function bashDeclFlagText(f) {
     var i
@@ -796,6 +860,19 @@ function bashDeclOperand(f, arr, quote, elem) {
     return f.slice(0, j + opLen) + quote(v)
 }
 
+// Has a subscript a single quote or a backslash, which arithmetic keeps and an expansion as
+// a word removes? (Arithmetic removes double quotes itself.)
+function bashSubQuoted(t) { return t.indexOf("'") >= 0 || t.indexOf("\\") >= 0 }
+// t with each single quote and backslash escaped: a word that expands to them.
+function bashSubEsc(t) {
+    var out = ""
+    var i
+    for (i = 0; i < t.length; i++) {
+        var ch = t.charAt(i)
+        out = out + ((ch == "'" || ch == "\\") ? "\\" + ch : ch)
+    }
+    return out
+}
 // v in single quotes, each ' in it spelled '\'' (bash's sh_single_quote). Twin of rt_sq in
 // lib/bash-rt.c.
 function bashSq(v) {

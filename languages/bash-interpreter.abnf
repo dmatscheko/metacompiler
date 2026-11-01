@@ -305,8 +305,8 @@ DeclArr     <~~ push({dname: up.in.slice(0, up.in.indexOf("[")), darr: up.in}) ~
             = AsgIdent :whitespace() "[" !@+" \t\r\n;&|<>()[]'\"\\$`" "]" :whitespace(Whitespace) KwEnd ;
 // Any other word is an operand known only once it is expanded (`local "$1"`,
 // `declare $v='x y'`, `typeset s${dyn}+=foo`, `declare 'q=1'`): its fields are read as
-// NAME, NAME=VALUE or an option when it runs.
-DeclDyn     <~~ push({dyn: takeAll()}) ~~> = NotIoRedir CWord ;
+// NAME, NAME=VALUE or an option when it runs. {dsrc} is the word as written (bashDeclLate).
+DeclDyn     <~~ push({dyn: takeAll(), dsrc: arSrc(up.start, up.pos)}) ~~> = NotIoRedir CWord ;
 
 // name=value : the = must stick to the name (no surrounding spaces), so the disable
 // (:whitespace()) sits in THIS sequence, right after the identifier. The value is optional
@@ -527,7 +527,10 @@ ArithSt     <~~ arClaim(up.start + 3, up.pos - 2); push(mkArith(pop())) ~~> = "$
 ArithDyn    <~~ push(mkArith(mkArDyn(pop()))) ~~> = "$((" :whitespace() ArHasExp ArDynWord "))" ;
 ArithRaw    <~~ push(mkArith(mkArDyn(pop()))) ~~> = "$((" :whitespace() ArDynWord "))" ;
 ArDynWord   <~~ push(mkNsWord(takeAll())) ~~> = { ArDynSeg } ;
-ArDynSeg    = DqSeg | ExpSeg | ArDynParen | ArDynBare ;
+ArDynSeg    = DqSeg | ArDynAnsi | ExpSeg | ArDynParen | ArDynBare ;
+// A $'...' part is its value single-quoted (sh_single_quote), which arithmetic refuses:
+// bash 5.3 reports $(( a[$'1'] )) at '1'.
+ArDynAnsi   <~~ push(makeConst(bashSq(ansiC(arSrc(up.start + 2, up.pos - 1), true)))) ~~> = "$'" :whitespace() { AnsiEsc | AnsiLit } "'" ;
 ArDynParen  = ArDynOpen { ArDynSeg } ArDynClose ;
 ArDynOpen   <~~ push(makeConst("(")) ~~> = "(" ;
 ArDynClose  <~~ push(makeConst(")")) ~~> = ")" ;
@@ -539,7 +542,7 @@ ArithBrkSt  <~~ arClaim(up.start + 2, up.pos - 1); push(mkArith(pop())) ~~> = "$
 ArithBrkDyn <~~ push(mkArith(mkArDyn(pop()))) ~~> = "$[" :whitespace() ArHasExp ArBrkWord "]" ;
 ArithBrkRaw <~~ push(mkArith(mkArDyn(pop()))) ~~> = "$[" :whitespace() ArBrkWord "]" ;
 ArBrkWord   <~~ push(mkNsWord(takeAll())) ~~> = { ArBrkSeg } ;
-ArBrkSeg    = DqSeg | ExpSeg | ArDynParen | ArBrkPair | ArBrkBare ;
+ArBrkSeg    = DqSeg | ArDynAnsi | ExpSeg | ArDynParen | ArBrkPair | ArBrkBare ;
 ArBrkPair   = ArBrkOpen { ArBrkSeg } ArBrkClose ;
 ArBrkOpen   <~~ push(makeConst("[")) ~~> = "[" ;
 ArBrkClose  <~~ push(makeConst("]")) ~~> = "]" ;
@@ -675,7 +678,13 @@ RepAnsiBody <~~ push(makeConst(repEscape(ansiC(up.in, true)))) ~~> = { AnsiEsc |
 // eaten while this production still has the Whitespace rule installed.
 PeSubstrForm <~~ push({pe: "substr"}) ~~> = PeTarget ":" :whitespace(Whitespace) ArOff [ PeSubLen ] :whitespace() PeArPad ;
 PeSubLen    = ":" ArOff ;
-ArOff       <~~ arClaim(up.start, arPastWs(up.pos)); push(arIn(peTgt + ": ", pop())) ~~> = ArList | ArEmpty ;
+ArOff       <~~ arClaim(up.start, arPastWs(up.pos)); push(arIn(peTgt + ": ", pop())) ~~> = ArList ArEndHere | ArEmpty | ArOffDyn ;
+// Any other offset is read by the run-time evaluator, as $(( )) reads one (ArithRaw): a
+// single quote is no quote there (bash 5.3: ${a[@]:'1'} is an arithmetic syntax error).
+ArOffDyn    <~~ push(mkArDyn(pop())) ~~> = ArOffWord ;
+ArOffWord   <~~ push(mkNsWord(takeAll())) ~~> = ArOffSeg { ArOffSeg } ;
+ArOffSeg    = DqSeg | ArDynAnsi | ExpSeg | ArDynParen | ArOffBare ;
+ArOffBare   <~~ push(makeConst(up.in)) ~~> = !@+"()$`\":}" ;
 ArEmpty     <~~ push(mkNum("0")) ~~> = ArEndHere ;
 PeArPad     = { PeBlank } ;
 PeBlank     = @+" \t" ;
@@ -3082,13 +3091,19 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (badOpt != "") { return declBadOpt(badOpt, redirs, ln) }
             if (opts.indexOf("I") >= 0 || opts.indexOf("t") >= 0) { fail(kw + " " + opts + " is not supported") }
         }
+        // Option words after an operand that mark array literals (bashDeclLate): each name's
+        // marks in lates, the words themselves reported in place by lateDiag.
+        var late = bashDeclLate(items)
+        var lateBad = []
+        if (late != null) { items = late.items; lateBad = late.bad; anyDyn = false }
         if (anyDyn) { return makeDeclDyn(items, redirs, ln) }
+        var lates = []
         for (i = 1; i < items.length; i++) {
             var it = items[i]
             if (it.dflag != undefined && it.dflag.charAt(0) == "+") { plus = plus + it.dflag; continue }
             if (it.dflag != undefined) { flags = flags + it.dflag; continue }
-            if (it.dname != undefined) { names.push(it.dname); asgs.push(null); darrs.push((it.darr != undefined) ? it.darr : null) }
-            else { names.push(it.a.name); asgs.push(it.a); darrs.push(null) }
+            if (it.dname != undefined) { names.push(it.dname); asgs.push(null); darrs.push((it.darr != undefined) ? it.darr : null); lates.push("") }
+            else { names.push(it.a.name); asgs.push(it.a); darrs.push(null); lates.push((it.dlate != undefined) ? it.dlate : "") }
         }
         var isArray = (flags.indexOf("a") >= 0) || (flags.indexOf("A") >= 0)
         // -a / -A make a bare NAME an array; export's and readonly's do not (bash 5.3: export
@@ -3108,6 +3123,26 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var lower = (flags.indexOf("l") >= 0)
         var integer = (flags.indexOf("i") >= 0)
         var global = (flags.indexOf("g") >= 0)
+        // The kind and scope the literal of name k is assigned under: the declaration's own,
+        // or those its marks add (k -1 restores them). lateOnly: the kind is the marks' alone,
+        // so the builtin does not report a refused conversion again. Twin of lateFor in
+        // makeDecl in bash-to-llvm-ir.abnf.
+        var ownFl = {assoc: assoc, bareArr: bareArr, global: global}
+        var lateOnly = false
+        var lateFor = function(k) {
+            var m = (k < 0) ? "" : lates[k]
+            var kind = m.indexOf("A") >= 0 || m.indexOf("a") >= 0
+            assoc = ownFl.assoc || m.indexOf("A") >= 0
+            bareArr = ownFl.bareArr || kind
+            global = ownFl.global || m.indexOf("g") >= 0
+            lateOnly = !ownFl.bareArr && kind
+        }
+        var lateDiag = function(at) {
+            var q
+            for (q = 0; q < lateBad.length; q++) {
+                if (lateBad[q].at == at) { diagErr(kw + ": `" + lateBad[q].w + "': not a valid identifier\n"); roFail = true }
+            }
+        }
         // -p/-f/-F are QUERIES, not declarations: -p with names prints (declLine), -f/-F print
         // functions (declFuncs). None of them may be read as `declare NAME`, which below would
         // make the name a fresh unset local.
@@ -3199,7 +3234,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 var cmsg = names[k] + ": cannot convert " + (assoc ? "indexed to associative" : "associative to indexed") + " array\n"
                 if (fnDepth == 0) { diagErr(cmsg); abortSignal = {ret: 1, isExit: 1, soft: 1}; return }
                 diagErr((global ? getVarVal("FUNCNAME") + ": " : "") + cmsg)
-                diagErr(kw + ": " + cmsg)
+                if (!lateOnly) { diagErr(kw + ": " + cmsg) }
                 roFail = true
                 return
             }
@@ -3312,9 +3347,24 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     roFail = true
                     continue
                 }
+                lateDiag(k)
                 if (asgs[k] == null || asgs[k].lit == null) { declAt(k, vals[k]) }
+                else if (lates[k].indexOf("g") >= 0 && localizes()) {
+                    // A literal a -g mark sent to the global still declares the name here,
+                    // unset (bash 5.3).
+                    var sa = asgs[k]
+                    asgs[k] = null
+                    declAt(k, "")
+                    asgs[k] = sa
+                }
+                // An A mark made it associative, which the builtin's own -a refuses.
+                else if (ownFl.bareArr && !ownFl.assoc && lates[k].indexOf("A") >= 0) {
+                    diagErr(kw + ": " + names[k] + ": cannot convert associative to indexed array\n")
+                    roFail = true
+                }
                 if (takeSubBad()) { roFail = true }
             }
+            lateDiag(names.length)
             var ab = takeAbort()
             if (ab != null) { return ab }
             var st = roFail ? 1 : 0
@@ -3334,7 +3384,11 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var vals = []
             for (k = 0; k < names.length && !query; k++) {
                 var a = asgs[k]
-                if (a != null && a.lit != null) { declAt(k, "") }
+                if (a != null && a.lit != null) {
+                    if (lates[k] != "") { lateFor(k) }
+                    declAt(k, "")
+                    if (lates[k] != "") { lateFor(-1) }
+                }
                 vals.push((a != null && a.lit == null && a.valT != null) ? wordJoin(a.valT()) : "")
                 var ab = takeAbort()
                 if (ab != null) { return ab }
@@ -3371,7 +3425,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var dt = bashDeclText(items, function(dyn) {
                 var fs = expandWords(dyn)
                 return (abortSignal != null || arithErr) ? null : fs
-            }, shellQuote)
+            }, shellQuote, function(n) { return assocFact(n, false) ? "A" : "a" })
             if (dt == null) { return takeAbort() }
             var text = dt.text
             var operands = dt.operands
@@ -5825,6 +5879,15 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (a == null) { return }
         var isAs = assocFact(a.name, assoc)
         if (a.idxT != null) {
+            // A declaration makes NAME an indexed array before it reads SUB, so a SUB it
+            // refuses leaves one (bash 5.3: `declare 'x[1+]=v'` leaves x=()), set unless it
+            // is an unset local of this function (`declare -a x`). Twin of rt_decl_arr.
+            if (decl && !isAs) {
+                var unsetLocal = localFrames.length > 0 && localHere(a.name) && !isSetVar(a.name)
+                arrAdopt(a.name)
+                var st = arrEnsure(a.name, assoc)
+                if (unsetLocal) { st.decl = true } else { st.lit = true }
+            }
             var key = asgKey(a, isAs, decl)
             if (arithErr || abortSignal != null) { return }
             if (!isAs) { arrAdopt(a.name) }
@@ -7133,9 +7196,24 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (op == "-z") { return (s == "") ? 0 : 1 }
         if (op == "-n") { return (s != "") ? 0 : 1 }
         if (op == "-v") {
+            // The name is read through its nameref chain; a chain ending at NAME[SUB] is no
+            // variable, so false. A plain NAME of an array asks for element 0 (key "0" of an
+            // associative one); NAME[@] / NAME[*] of a variable that
+            // is no associative array asks whether it has any element (bash: get_array_value
+            // with AV_ALLOWALL is non-NULL), while for an associative one @ and * are plain
+            // keys. Twin of rt_vset in bash-rt.c.
             var sp = splitSubscript(s)
-            if (sp.key != null) { return arrHas(sp.name, subKeyAr(sp.name, cond ? subExpand(sp.key) : subXOf(sp.name, sp.key))) ? 0 : 1 }
-            return (isSetVar(s) || isArr(s)) ? 0 : 1
+            if (sp.key == null) {
+                var vn = anyRef ? refTarget(s) : s
+                if (vn == "") { return 1 }
+                if (vn != s) { return (splitSubscript(vn).key != null) ? 1 : testUnary(op, vn, cond) }
+                return ((arrKeyList(s).length > 0) ? arrHas(s, "0") : isSetVar(s)) ? 0 : 1
+            }
+            var an = anyRef ? refTarget(sp.name) : sp.name
+            if ((sp.key == "@" || sp.key == "*") && !assocFact(an, false)) {
+                return (isSetVar(an) || arrKeyList(an).length > 0) ? 0 : 1
+            }
+            return arrHas(an, subKeyAr(an, cond ? subExpand(sp.key) : subXOf(an, sp.key))) ? 0 : 1
         }
         // See fsKind for the model and for why stat() was declined. -s is "exists and has a
         // nonzero size", which a directory has and a character device does not; -x is

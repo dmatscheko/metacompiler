@@ -269,6 +269,7 @@ char *rt_arr_ikey(char *nm, long k);
 int rt_arr_clear(char *nm);
 int rt_arr_empty(char *nm, int keep);
 int rt_arr_adopt(char *nm, int id);
+int rt_decl_arr(char *nm, int id, int set);
 int rt_arr_mark(char *nm);
 int rt_arr_dmark(char *nm);
 int rt_arr_dmarked(char *nm);
@@ -5496,7 +5497,8 @@ int rt_arr_conv(char *kw, char *nm, int as)
 
 /* The same for NAME=(...): "NAME: cannot convert ..." (FN, a -g declaration's
  * function, first), which abandons the line at top level (arith_err); in a
- * function (infn) the builtin reports it again and fails. Twin of the literal
+ * function (infn) the builtin reports it again, unless kw is "" (the kind came
+ * from an option word after an operand alone), and fails. Twin of the literal
  * check in declOneN in bash-interpreter.abnf. */
 int rt_arr_convlit(char *kw, char *nm, int as, char *fn, int infn)
 {
@@ -5507,7 +5509,7 @@ int rt_arr_convlit(char *kw, char *nm, int as, char *fn, int infn)
     if ((ar_mk[r] & 4096) == 0 && as == 0) return 0;
     rt_berr(fn, nm, m);
     if (infn == 0) { arith_err = 1; return 1; }
-    rt_berr(kw, nm, m);
+    if (kw[0] != 0) rt_berr(kw, nm, m);
     return 1;
 }
 
@@ -6327,6 +6329,20 @@ int rt_arr_empty(char *nm, int keep) {
  * appending literal makes of its name: bash 5.3 answers `abcd x` for
  * t=abcd; t[1]=x; echo "${t[*]}". Slot id is left unset, so the name reads
  * through the array from then on. Twin of arrAdopt in bash-interpreter.abnf. */
+/* A declaration makes the NAME of a NAME[SUB]=v operand an indexed array before
+ * it reads SUB, so a SUB it refuses leaves one (bash 5.3: `declare 'x[1+]=v'`
+ * leaves x=()): set, unless it is a function's local (set 0), which stays unset
+ * (`declare -a x`). An associative NAME stays as it is. Twin of the arrEnsure
+ * before asgKey in runAssignV in bash-interpreter.abnf. */
+int rt_decl_arr(char *nm, int id, int set)
+{
+    if (rt_isassoc(nm) != 0) return 0;
+    rt_arr_adopt(nm, id);
+    if (set != 0) rt_arr_mark(nm);
+    else rt_arr_dmark(nm);
+    return 0;
+}
+
 int rt_arr_adopt(char *nm, int id) {
     char *v = gvars[id];
     if (v == &unset_marker[0] || rt_arr_any(nm) != 0) return 0;
@@ -8367,22 +8383,33 @@ int rt_sub_empty(char *nm, char *k, char *lbl)
     return 0;
 }
 
-/* test -v of a computed operand: a set variable or array, or for NAME[SUB] an
- * element, SUB expanded (rt_subxa; for [[ -v ]], cond, as a word) and evaluated
- * as rt_arr_keyar does. Twin of the -v arm of testUnary in bash-interpreter.abnf. */
+/* test -v: for NAME a set variable, or element 0 of an array (key "0" of an
+ * associative one); for NAME[SUB] an element, SUB expanded (rt_subxa; for
+ * [[ -v ]], cond, as a word) and evaluated as rt_arr_keyar does, except that
+ * NAME[@] / NAME[*] of no associative array asks whether it has any element.
+ * NAME is read through its nameref chain, and one ending at NAME[SUB] is no
+ * variable: 0. Twin of the -v arm of testUnary in
+ * bash-interpreter.abnf. */
 int rt_vset(char *s, int cond)
 {
     int i = rt_indbr(s);
     char *sub;
     char *nm;
     if (i > 0) {
-        nm = rt_substr(s, 0, i);
+        nm = rt_nref_end(rt_substr(s, 0, i));
+        if (nm == 0) return 0;
         sub = rt_substr(s, i + 1, rt_strlen(s) - i - 2);
+        if (rt_strlen(sub) == 1 && (sub[0] == 64 || sub[0] == 42) && rt_isassoc(nm) == 0)
+            return (rt_isset(rt_getvar_byname(nm)) != 0 || rt_arr_any(nm) != 0) ? 1 : 0;
         sub = cond != 0 ? rt_subx(sub) : rt_subxa(nm, sub);
         if (arith_err != 0) return 0;
         return rt_arr_has(nm, rt_arr_keyar(nm, sub));
     }
-    return (rt_isset(rt_getvar_byname(s)) != 0 || rt_arr_any(s) != 0) ? 1 : 0;
+    nm = rt_nref_end(s);
+    if (nm == 0) return 0;
+    if (nm != s) return rt_indbr(nm) > 0 ? 0 : rt_vset(nm, cond);
+    if (rt_arr_any(s) != 0) return rt_arr_has(s, "0");
+    return rt_isset(rt_getvar_byname(s));
 }
 
 /* `unset WORD` where the word came out of an expansion: NAME[SUB] removes the
@@ -8657,6 +8684,7 @@ int rt_decl_word(char *w, int d, int x, int at, char *who)
         return 0;
     }
     if (w[j] == 0) return 0;
+    if (sub != 0) rt_decl_arr(nm, id, d < 0 ? 1 : 0);
     rt_setvar_byname(arr != 0 && sub == 0 ? rt_strcat(nm, "[0]") : rt_substr(w, 0, j), v, app, at & 7);
     return rt_take_subbad() != 0 ? 3 : 0;
 }

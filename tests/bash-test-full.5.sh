@@ -649,6 +649,78 @@ declare -a s110d=([0]="1")
 1
 st=1 5'
 }
+# ===== SECTION 111: -v of a whole array; a nameref operand of -v =====
+# [[ -v NAME[@] ]] (and [*]) asks whether NAME has any element unless NAME is associative,
+# where @ and * are plain keys; a plain NAME of an array asks for element 0; the operand is
+# read through its nameref chain, and a chain ending at an element is no variable. Every
+# expected value is bash 5.3's.
+s111() {
+  local r
+  r=$(s111a=(a b c); s111s=([3]=x); s111e=(); declare -a s111d; s111c=''; declare -A s111m=([k]=1) s111n=([@]=1)
+    for n in s111a s111s s111e s111d s111c s111m s111n s111u; do [[ -v "$n[@]" ]]; echo -n "$? "; [[ -v $n[*] ]]; echo -n "$? "; test -v "$n[@]"; echo -n "$?|"; done
+    [[ -v s111a[@] ]]; echo "$?"); check vat1 "$r" '0 0 0|0 0 0|1 1 1|1 1 1|0 0 0|1 1 1|0 1 0|1 1 1|0'
+  r=$(s111s=([3]=x); s111t=([0]=z); declare -A s111m=([k]=1) s111z=([0]=1); s111x=5; s111x[3]=y
+    for n in s111s s111t s111m s111z s111x; do [[ -v $n ]]; echo -n "$? "; done; unset 's111x[0]'; [[ -v s111x ]]; echo -n "$? "; test -v s111s; echo "$?"); check vat2 "$r" '1 0 1 0 0 1 1'
+  r=$(s111s=([3]=x); s111t=([0]=z); s111a=(p q); declare -n s111r=s111s s111q=s111t s111er='s111a[1]'
+    for n in s111r s111q 's111r[3]' 's111r[@]' s111er; do [[ -v $n ]]; echo -n "$? "; done
+    f() { local -a la=([4]=z); local -n lr=la; [[ -v lr ]]; echo -n "$? "; [[ -v lr[4] ]]; echo -n "$? "; [[ -v "lr[*]" ]]; echo "$?"; }; f); check vat3 "$r" '1 0 0 0 1 1 0 0'
+}
+# ===== SECTION 112: an option word after an operand =====
+# After an operand, -A is no option to the builtin ("not a valid identifier", status 1), but
+# bash still marks every array literal after an unquoted word starting with - for the kind
+# its letters name (A associative, else a indexed) and g for the global, as the words are
+# expanded. Every expected value is bash 5.3's.
+s112h() { case $1 in *"$2"*) echo 1 ;; *) echo 0 ;; esac; }
+s112() {
+  local r e
+  r=$(declare s112w=7 -A s112e=([z]=3) s112s=5 2>/dev/null; echo "st=$? $s112w"; declare -p s112e s112s; declare s112f=([z]=3) "-A" -i s112g=([y]=1+1) 2>/dev/null; declare -p s112f s112g); check dla1 "$r" 'st=1 7
+declare -A s112e=([z]="3" )
+declare -- s112s="5"
+declare -a s112f=([0]="3")
+declare -a s112g=([0]="1+1")'
+  r=$(f() { declare s112a=1 -g s112b=([a]=1) 2>/dev/null; declare -p s112b; }; f; declare -p s112b; declare -A s112m=([k]=v); declare -a s112x=(1) -A s112m=([j]=2) 2>/dev/null; echo "st=$?"; declare -p s112m); check dla2 "$r" 'declare -- s112b
+declare -a s112b=([0]="1")
+st=1
+declare -A s112m=([j]="2" )'
+  r=$(g() { local s112l=(1); declare x -A s112l=([k]=v); declare -p s112l; }; e=$(g 2>&1); s112h "$e" "s112l: cannot convert indexed to associative array"; s112h "$e" "declare: s112l: cannot"; s112h "$e" "declare -a s112l=([0]=\"1\")"; s112i=(1 2); e=$( (declare x -A s112i=([k]=v); echo no) 2>&1); s112h "$e" "s112i: cannot convert"; s112h "$e" "no"); check dla3 "$r" '1
+0
+1
+0
+1'
+}
+# ===== SECTION 113: the subscript of a computed declaration operand =====
+# A NAME[SUB]=v operand that came out of an expansion has its SUB read as an assignment
+# statement reads it - an indexed array's as arithmetic text, quotes and all, an associative
+# one's as a word - where a written operand's SUB is expanded first. A declaration makes NAME
+# an indexed array before it reads SUB, so a refused SUB leaves one: set and empty, or here,
+# a function's local, unset. Every expected value is bash 5.3's.
+s113() {
+  local r
+  r=$(s113a=(a b); (declare 's113a[\1]=w'; echo no) 2>/dev/null; echo "st=$?"; (declare "s113a['1']=w"; echo no) 2>/dev/null; echo "st=$?"; declare 's113a["1"]=x' s113a[\0]=y; echo "st=$?"; v='s113a[\1]=z'; (declare "$v"; echo no) 2>/dev/null; echo "st=$?"; declare -p s113a); check dsq1 "$r" 'st=1
+st=1
+st=0
+st=1
+declare -a s113a=([0]="y" [1]="x")'
+  r=$(declare -A s113m; declare "s113m['k']=1" 's113m[\x]=2'; v='s113m["y"]=3'; declare "$v"; declare -p s113m); check dsq2 "$r" 'declare -A s113m=([y]="3" [x]="2" [k]="1" )'
+  r=$(declare 's113b[-5]=w' 2>/dev/null; echo "st=$?"; declare -p s113b; s113f=5; declare 's113f[-5]=w' 2>/dev/null; declare -p s113f; declare -i s113c[-5]=w 2>/dev/null; declare -p s113c; declare -A s113n; declare 's113n[]=w' 2>/dev/null; declare -p s113n); check dsq3 "$r" 'st=1
+declare -a s113b
+declare -a s113f
+declare -ai s113c
+declare -A s113n'
+}
+# ===== SECTION 114: a quoted ${v:off:len} =====
+# The offset and the length are arithmetic text, read as $(( )) reads one: a double quote is
+# removed, a single quote and a backslash stay and are a syntax error. Every expected value
+# is bash 5.3's.
+s114h() { case $1 in *"$2"*) echo 1 ;; *) echo 0 ;; esac; }
+s114() {
+  local r e
+  r=$(s114a=(a b c); s114s=hello; (echo "${s114a[@]:'1'}"; echo no) 2>/dev/null; echo "st=$?"; (echo ${s114s:1:'2'}; echo no) 2>/dev/null; echo "st=$?"; echo "${s114s:"1"} ${s114a[@]:"1":1} ${s114s: 1 :"2" }"); check aoq1 "$r" 'st=1
+st=1
+ello b el'
+  r=$(s114s=hello; e=$( (echo "${s114s:1'+'1}") 2>&1); s114h "$e" "s114s: 1'+'1: arithmetic syntax error: invalid arithmetic operator (error token is \"'+'1\")"; e=$( (echo ${s114s:\1}) 2>&1); s114h "$e" "s114s: \\1: arithmetic syntax error: operand expected"); check aoq2 "$r" '1
+1'
+}
 # ===== END SECTIONS =====
 
 s90   # SECTION-CALL 90
@@ -672,5 +744,9 @@ s107  # SECTION-CALL 107
 s108  # SECTION-CALL 108
 s109  # SECTION-CALL 109
 s110  # SECTION-CALL 110
+s111  # SECTION-CALL 111
+s112  # SECTION-CALL 112
+s113  # SECTION-CALL 113
+s114  # SECTION-CALL 114
 echo "full: $checks checks, $fails failures"
 exit $fails
