@@ -3073,12 +3073,37 @@ function js_goblock() {
 // go-to-llvm-ir.abnf). Twin of js_godrain in abnf/jsrt.go.
 function js_godrain() { return goDrain() }
 
+// A select's send arm on a channel with no room is an OFFER while the select lets
+// the queued goroutines run: a receive in one of them (deeper than the select's
+// goroutine) takes the value as if the select were waiting in the send, and
+// grp.arm then names the arm that fired. Twin of goOffers in go-interpreter.abnf
+// and abnf/jsrtgolang.go.
+var goOffers = []
+var goOfferPend = []
+
+// goOfferMove moves a visible offer's value into ch's buffer: true when one was
+// taken.
+function goOfferMove(ch) {
+    var i = 0
+    while (i < goOffers.length) {
+        var of = goOffers[i]
+        if (of.ch === ch && of.grp.arm < 0 && of.depth < goDepth) {
+            of.grp.arm = of.arm
+            ch.buf.push(of.v)
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
 // goChanRecv takes one value; ok is false exactly when the channel is closed and
-// drained, and the value is then the element type's zero value.
+// drained, and the value is then the element type's zero value. A value that
+// comes off a full channel makes room for an offered one behind it.
 function goChanRecv(ch) {
     if (ch === undefined || ch === null) { goBlock() }
     if (!goIsChan(ch)) { fail("receive from a non-channel") }
-    if (ch.buf.length == 0 && ch.closed !== true) { goDrain() }
+    if (ch.buf.length == 0 && ch.closed !== true && !goOfferMove(ch)) { goDrain() }
     if (ch.buf.length == 0) {
         if (ch.closed === true) { return {v: goZeroOf(goStrOf(ch.czero)), ok: false} }
         goBlock()
@@ -3088,7 +3113,42 @@ function goChanRecv(ch) {
     var i = 1
     while (i < ch.buf.length) { rest.push(ch.buf[i]); i = i + 1 }
     ch.buf = rest
+    if (ch.buf.length < ch.cap) { goOfferMove(ch) }
     return {v: first, ok: true}
+}
+
+// Is a select's send arm ready? A nil channel never is; a closed one is (the send
+// panics); otherwise the buffer must have room. Twin of js_gochan_room in
+// abnf/jsrtgolang.go.
+function js_gochan_room(ch) {
+    if (ch === undefined || ch === null) { return false }
+    if (!goIsChan(ch)) { fail("send on a non-channel") }
+    if (ch.closed === true) { return true }
+    return ch.buf.length < ch.cap
+}
+
+// js_gosel_offer(ch, v, arm) notes a send arm that had no room; js_gosel_wait
+// offers them all while the queue runs and answers the arm a receive took, or -1
+// (with none to offer, nothing runs). Twins in abnf/jsrtgolang.go.
+function js_gosel_offer(ch, v, arm) {
+    if (goIsChan(ch)) { goOfferPend.push({ch: ch, v: v, grp: null, arm: goNum(arm), depth: goDepth}) }
+    return undefined
+}
+function js_gosel_wait() {
+    if (goOfferPend.length == 0) { return -1 }
+    var grp = {arm: -1}
+    var mark = goOffers.length
+    var i = 0
+    while (i < goOfferPend.length) {
+        var of = goOfferPend[i]
+        of.grp = grp
+        goOffers.push(of)
+        i = i + 1
+    }
+    goOfferPend = []
+    goDrain()
+    while (goOffers.length > mark) { goOffers.pop() }
+    return grp.arm
 }
 
 function goZeroOf(ty) {
@@ -3413,7 +3473,7 @@ function js_gochan_ready(ch) {
     // A nil channel is never ready: a select skips its arm.
     if (ch === undefined || ch === null) { return false }
     if (!goIsChan(ch)) { fail("receive from a non-channel") }
-    if (ch.buf.length == 0 && ch.closed !== true) { goDrain() }
+    if (ch.buf.length == 0 && ch.closed !== true && !goOfferMove(ch)) { goDrain() }
     if (ch.buf.length > 0) { return true }
     return ch.closed === true
 }

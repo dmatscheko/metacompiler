@@ -4137,7 +4137,14 @@ function goRangeC(pos) {
     var et = stElemTy(stAt(pos))
     if (cRangeNames.length > 1) { cBindTy(cRangeNames[1], et) }
     cRangeNames = []
-    return {rcopy: goStCopyTy(et), rfn: goIsSeqTy(stAt(pos)), rknown: stAt(pos) != ""}
+    return {rcopy: goStCopyTy(et), rfn: goIsSeqTy(stAt(pos)), rknown: stAt(pos) != "", rch: goIsChanTy(stAt(pos))}
+}
+// Is t a channel type? A range over a nil one blocks forever, while every other
+// nil (slice, map) ranges zero times - and the nil value cannot tell them apart.
+function goIsChanTy(t0) {
+    var t = stBare(t0)
+    if (goTyWord(t) == t && typeof definedUnder[t] == "string") { t = stBare(resolveDefined(t)) }
+    return t.indexOf("chan") == 0 || t.indexOf("<-chan") == 0
 }
 // Is t a function a range statement iterates by calling it (Go 1.23):
 // func(yield func(...) bool), directly, as iter.Seq/Seq2 or a defined type?

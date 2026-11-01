@@ -5633,6 +5633,15 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             var saved = curScopeV
             var r = lt(b)
             b = r.b
+            // A nil channel blocks forever (goRangeC's rch).
+            if (rinfo.rch === true) {
+                var nilB = curF.NewBlock("")
+                var liveB = curF.NewBlock("")
+                b.NewCondBr(b.NewICmp(llvm.enum.IPredUGT, r.v, hNull), liveB, nilB)
+                callExt(nilB, "js_goblock", [])
+                nilB.NewBr(liveB)
+                b = liveB
+            }
             // An ARRAY is ranged over a COPY when the value is bound; a pointer to one
             // ranges live. Twin of makeForRange in go-interpreter.abnf.
             var subj0 = r.v
@@ -6067,6 +6076,11 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             // An unlabelled break in an arm ends the select, as in a switch.
             var outerCont = loopStack.length > 0 ? loopStack[loopStack.length - 1].cont : null
             loopStack.push({cont: outerCont, brk: endB})
+            // A send arm is ready when its channel has room (or is closed: the send
+            // panics); one without room is offered while the queue runs, and the arm
+            // a receive took runs its body (makeSelect in go-interpreter.abnf).
+            var sendArms = []
+            var sendBodies = []
             for (var i = 0; i < arms.length; i++) {
                 var a = arms[i]
                 if (a.kind == "default") { continue }
@@ -6074,9 +6088,13 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                 var takeB = curF.NewBlock("")
                 var nextB = curF.NewBlock("")
                 if (a.kind == "send") {
-                    cur.NewCondBr(cur.NewICmp(llvm.enum.IPredUGT, chV, hNull), takeB, nextB)
+                    var sbodyB = curF.NewBlock("")
+                    cur.NewCondBr(truthy(cur, callExt(cur, "js_gochan_room", [chV])), takeB, nextB)
                     callExt(takeB, "js_gochan_send", [chV, valVs[i]])
-                    a.body(takeB).NewBr(endB)
+                    takeB.NewBr(sbodyB)
+                    a.body(sbodyB).NewBr(endB)
+                    sendArms.push(i)
+                    sendBodies.push(sbodyB)
                     cur = nextB
                     continue
                 }
@@ -6095,6 +6113,17 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                 a.body(takeB).NewBr(endB)
                 curScopeV = savedScope
                 cur = nextB
+            }
+            if (sendArms.length > 0) {
+                for (var s = 0; s < sendArms.length; s++) {
+                    callExt(cur, "js_gosel_offer", [chVs[sendArms[s]], valVs[sendArms[s]], emitNum(cur, sendArms[s])])
+                }
+                var tookV = callExt(cur, "js_gosel_wait", [])
+                for (var s2 = 0; s2 < sendArms.length; s2++) {
+                    var notB = curF.NewBlock("")
+                    cur.NewCondBr(truthy(cur, callExt(cur, "js_seq", [tookV, emitNum(cur, sendArms[s2])])), sendBodies[s2], notB)
+                    cur = notB
+                }
             }
             if (dfltArm != null) {
                 dfltArm.body(cur).NewBr(endB)

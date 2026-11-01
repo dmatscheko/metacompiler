@@ -2717,6 +2717,47 @@ func init() {
 		// A select with no arm ready after the queue ran. Twin of js_goblock in
 		// lib/go-rt.metajs.
 		m["js_goblock"] = func(a []uint64) uint64 { rt.goBlock(); return 0 }
+		// Is a select's send arm ready? A nil channel never is; a closed one is (the
+		// send panics); otherwise the buffer must have room. Twin of js_gochan_room in
+		// lib/go-rt.metajs, makeSelect in go-interpreter.abnf.
+		m["js_gochan_room"] = func(a []uint64) uint64 {
+			v := u(a[0])
+			if isUndefOrNull(v) {
+				return jsHFalse
+			}
+			o, buf, ok := goChanParts(v)
+			if !ok {
+				rt.fail("send on a non-channel")
+			}
+			if o.props["closed"] == true || float64(len(buf.elems)) < rt.toNumber(o.props["cap"]) {
+				return jsHTrue
+			}
+			return jsHFalse
+		}
+		// js_gosel_offer(ch, v, arm) notes a send arm that had no room; js_gosel_wait
+		// offers them all while the queue runs and answers the arm a receive took,
+		// or -1 (with none to offer, nothing runs). Twins in lib/go-rt.metajs.
+		m["js_gosel_offer"] = func(a []uint64) uint64 {
+			if o, _, ok := goChanParts(u(a[0])); ok {
+				rt.goOfferPend = append(rt.goOfferPend, goOffer{ch: o, v: u(a[1]), arm: int(rt.toNumber(u(a[2]))), depth: rt.goDepth})
+			}
+			return 0
+		}
+		m["js_gosel_wait"] = func(a []uint64) uint64 {
+			if len(rt.goOfferPend) == 0 {
+				return rt.wrapNum(-1)
+			}
+			grp := -1
+			mark := len(rt.goOffers)
+			for _, of := range rt.goOfferPend {
+				of.grp = &grp
+				rt.goOffers = append(rt.goOffers, of)
+			}
+			rt.goOfferPend = rt.goOfferPend[:0]
+			rt.goDrain()
+			rt.goOffers = rt.goOffers[:mark]
+			return rt.wrapNum(float64(grp))
+		}
 		baseRunDefers := m["js_rundefers"]
 		m["js_gorundefers"] = func(a []uint64) uint64 {
 			at := len(rt.goPanics) - 1
@@ -3754,6 +3795,32 @@ func (rt *jsrt) goIfEq(a, b interface{}) bool {
 func goByteElems(els []interface{}) bool {
 	for _, e := range els {
 		if g, ok := e.(jsGInt); ok && g.w == 8 && g.u {
+			return true
+		}
+	}
+	return false
+}
+
+// goOffer is a select's send arm on a channel with no room, offered while the
+// select lets the queued goroutines run: a receive in one of them (deeper than the
+// select's goroutine) takes the value as if the select were waiting in the send,
+// and *grp then names the arm that fired. Twin of goOffers in go-interpreter.abnf
+// and lib/go-rt.metajs.
+type goOffer struct {
+	ch    *jsObject
+	v     interface{}
+	grp   *int
+	arm   int
+	depth int
+}
+
+// goOfferMove moves a visible offer's value into ch's buffer: true when one was
+// taken.
+func (rt *jsrt) goOfferMove(ch *jsObject, buf *jsArray) bool {
+	for _, of := range rt.goOffers {
+		if of.ch == ch && *of.grp < 0 && of.depth < rt.goDepth {
+			*of.grp = of.arm
+			buf.elems = append(buf.elems, of.v)
 			return true
 		}
 	}

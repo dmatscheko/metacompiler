@@ -563,6 +563,9 @@ type jsrt struct {
 	goQueue []interface{}
 	// goDepth counts the goroutines running right now (drains nest), so 0 is main.
 	goDepth int
+	// goOffers / goOfferPend: a select's send offers (goOfferMove in jsrtgolang.go).
+	goOffers    []goOffer
+	goOfferPend []goOffer
 
 	// trackThis is set by attach when the module actually declares js_this or
 	// js_newtarget, i.e. when the grammar that produced it has a dynamic `this`.
@@ -2427,7 +2430,7 @@ func (rt *jsrt) goChanRecv(v interface{}) (interface{}, bool) {
 		rt.fail("receive from a non-channel")
 	}
 	// A closed channel never blocks, so nothing needs to run for it.
-	if len(buf.elems) == 0 && o.props["closed"] != true {
+	if len(buf.elems) == 0 && o.props["closed"] != true && !rt.goOfferMove(o, buf) {
 		rt.goDrain()
 	}
 	if len(buf.elems) == 0 {
@@ -2439,6 +2442,9 @@ func (rt *jsrt) goChanRecv(v interface{}) (interface{}, bool) {
 	}
 	first := buf.elems[0]
 	buf.elems = buf.elems[1:]
+	if float64(len(buf.elems)) < rt.toNumber(o.props["cap"]) {
+		rt.goOfferMove(o, buf)
+	}
 	return first, true
 }
 
@@ -17453,7 +17459,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			if !ok {
 				rt.fail("receive from a non-channel")
 			}
-			if len(buf.elems) == 0 && o.props["closed"] != true {
+			if len(buf.elems) == 0 && o.props["closed"] != true && !rt.goOfferMove(o, buf) {
 				rt.goDrain()
 			}
 			return boolH(len(buf.elems) > 0 || o.props["closed"] == true)

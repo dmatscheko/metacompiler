@@ -1717,6 +1717,98 @@ func s139() {
 	check("lit139", hdr == "iflls<nil>7")
 }
 
+// ===== SECTION 140: a select's send arm needs room or a receiver; range over a nil channel =====
+// A send arm is ready only when its channel has room or a receiver is waiting
+// (spec "Select statements", "Send statements"): on a full or unbuffered channel
+// nobody receives from, the default runs, or the select blocks forever - even
+// with a receive arm on the same channel. A goroutine receiving, directly or in a
+// select of its own, takes the value; one draining a full channel lets the send
+// in behind. A range over a nil channel blocks forever, whatever its type's name.
+// The expected values are go run's.
+type C140 chan int
+
+func s140() {
+	var nilch chan int
+	var nilc C140
+	ran, after, self := false, false, false
+	go func() {
+		for range nilch {
+			ran = true
+		}
+		after = true
+	}()
+	go func() {
+		for v := range nilc {
+			_ = v
+			ran = true
+		}
+		after = true
+	}()
+	go func() {
+		c := make(chan int)
+		select {
+		case c <- 1:
+		case <-c:
+		}
+		self = true
+	}()
+	full := make(chan int, 1)
+	full <- 1
+	got := ""
+	select {
+	case full <- 2:
+		got = "sent"
+	default:
+		got = "default"
+	}
+	ub := make(chan int)
+	select {
+	case ub <- 1:
+		got += " sent"
+	default:
+		got += " default"
+	}
+	check("selroom140", got == "default default" && len(full) == 1)
+	check("rangenil140", !ran && !after && !self)
+	res := make(chan int, 1)
+	hand := make(chan int)
+	go func() { res <- (<-hand) * 10 }()
+	got = ""
+	select {
+	case hand <- 4:
+		got += "handed"
+	}
+	got += fmt.Sprint(" ", <-res)
+	hand2 := make(chan string)
+	go func() {
+		select {
+		case s := <-hand2:
+			res <- len(s)
+		}
+	}()
+	select {
+	case hand2 <- "abc":
+		got += " handed2"
+	}
+	got += fmt.Sprint(" ", <-res)
+	go func() { res <- <-full }()
+	select {
+	case full <- 9:
+		got += " behind"
+	}
+	got += fmt.Sprint(" ", <-res, len(full), <-full)
+	a, b := make(chan int), make(chan int)
+	go func() { res <- <-b }()
+	select {
+	case a <- 1:
+		got += " a"
+	case b <- 2:
+		got += " b"
+	}
+	got += fmt.Sprint(" ", <-res)
+	check("selrecv140", got == "handed 40 handed2 3 behind 1 1 9 b 2")
+}
+
 func main() {
 	s94()   // SECTION-CALL 94
 	s95()   // SECTION-CALL 95
@@ -1762,6 +1854,7 @@ func main() {
 	s137()  // SECTION-CALL 137
 	s138()  // SECTION-CALL 138
 	s139()  // SECTION-CALL 139
+	s140()  // SECTION-CALL 140
 	fmt.Println("full:", checks, "checks,", fails, "failures")
 	os.Exit(fails)
 }

@@ -3074,6 +3074,33 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             goDepth--
         }
     }
+    // A select's send arm on a channel with no room is an OFFER while the select lets
+    // the queued goroutines run: a receive in one of them (deeper than the select's
+    // goroutine) takes the value as if the select were waiting in the send, and
+    // grp.arm then names the arm that fired. Twins: goOffers in lib/go-rt.metajs and
+    // abnf/jsrtgolang.go.
+    var goOffers = []
+    // Moves a visible offer's value into ch's buffer: true when one was taken.
+    function goOfferMove(ch) {
+        for (var i = 0; i < goOffers.length; i++) {
+            var of = goOffers[i]
+            if (of.ch === ch && of.grp.arm < 0 && of.depth < goDepth) {
+                of.grp.arm = of.arm
+                ch.buf.push(of.v)
+                return true
+            }
+        }
+        return false
+    }
+    // The receive side of goOfferMove: a value that comes off a full channel makes
+    // room for an offered one behind it.
+    function chanTake(ch) {
+        var v = ch.buf[0]
+        for (var i = 1; i < ch.buf.length; i++) { ch.buf[i - 1] = ch.buf[i] }
+        ch.buf.pop()
+        if (ch.buf.length < ch.cap) { goOfferMove(ch) }
+        return v
+    }
     function chanSend(ch, v) {
         if (ch === null || ch === undefined) { goBlock() }
         if (!isChan(ch)) fail("send on a non-channel")
@@ -3085,29 +3112,23 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     function chanRecv(ch) {
         if (ch === null || ch === undefined) { goBlock() }
         if (!isChan(ch)) fail("receive from a non-channel")
-        if (ch.buf.length == 0 && !ch.closed) { goDrain() }
+        if (ch.buf.length == 0 && !ch.closed && !goOfferMove(ch)) { goDrain() }
         if (ch.buf.length == 0) {
             if (ch.closed) { return {v: zeroOfType2(ch.czero), ok: false} }
             goBlock()
         }
-        var v = ch.buf[0]
-        for (var i = 1; i < ch.buf.length; i++) { ch.buf[i - 1] = ch.buf[i] }
-        ch.buf.pop()
-        return {v: v, ok: true}
+        return {v: chanTake(ch), ok: true}
     }
     // The `for v := range ch` form: like chanRecv, but a channel that is closed and
     // drained ENDS the loop instead of yielding a zero value.
     function chanRecvOrDone(ch) {
         if (!isChan(ch)) fail("range over a non-channel")
-        if (ch.buf.length == 0 && !ch.closed) { goDrain() }
+        if (ch.buf.length == 0 && !ch.closed && !goOfferMove(ch)) { goDrain() }
         if (ch.buf.length == 0) {
             if (ch.closed) { return {v: undefined, ok: false} }
             goBlock()
         }
-        var v = ch.buf[0]
-        for (var i = 1; i < ch.buf.length; i++) { ch.buf[i - 1] = ch.buf[i] }
-        ch.buf.pop()
-        return {v: v, ok: true}
+        return {v: chanTake(ch), ok: true}
     }
     // Whether a receive can proceed WITHOUT blocking - what a select's case arms ask
     // before falling back to the default arm.
@@ -3116,7 +3137,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     function chanReady(ch) {
         if (ch === null || ch === undefined) { return false }
         if (!isChan(ch)) fail("receive from a non-channel")
-        if (ch.buf.length == 0 && !ch.closed) { goDrain() }
+        if (ch.buf.length == 0 && !ch.closed && !goOfferMove(ch)) { goDrain() }
         return ch.buf.length > 0 || ch.closed
     }
     // Closing a nil or an already closed channel is a run-time panic. Twins:
@@ -5637,8 +5658,11 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // made in the body keeps that iteration's values.
     function makeForRange(items) {
         var bodyT = items.pop()
-        // {rcopy}: the copy a struct ELEMENT makes on its way into the value variable.
-        var rcopy = items.pop().rcopy
+        // {rcopy}: the copy a struct ELEMENT makes on its way into the value variable;
+        // rch: the range expression is a channel (goRangeC).
+        var rinfo = items.pop()
+        var rcopy = rinfo.rcopy
+        var rch = rinfo.rch === true
         var listT = items.pop()
         var lbl = items[0].lbl
         var names = []
@@ -5683,6 +5707,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         return function() {
             var arr = listT()
             if (typeof arr == "function") { return goRangeFunc(arr) }
+            if (rch && (arr === null || arr === undefined)) { goBlock() }
             // Ranging a CHANNEL yields one received value per iteration (bound to the
             // FIRST name, not an index) and ends when the channel is closed and drained.
             if (isChan(arr)) {
@@ -6256,13 +6281,18 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                 chs.push(ea.chT())
                 vals.push(ea.kind == "send" ? ea.valT() : null)
             }
+            // A send arm is ready when its channel has room (or is closed: the send
+            // panics); otherwise it is offered while the queue runs (goOffers).
             for (var pass = 0; pass < 2; pass++) {
+                var offers = 0
                 for (var i = 0; i < arms.length; i++) {
                     var a = arms[i]
                     var ch = anytype
                     ch = chs[i]
                     if (a.kind == "default" || ch === null || ch === undefined) { continue }
                     if (a.kind == "send") {
+                        if (!isChan(ch)) fail("send on a non-channel")
+                        if (!ch.closed && ch.buf.length >= ch.cap) { offers++; continue }
                         chanSend(ch, vals[i])
                         return selDone(a.body())
                     }
@@ -6275,6 +6305,19 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                         scopes.pop()
                         return selDone(res)
                     }
+                }
+                if (pass == 0 && offers > 0) {
+                    var grp = {arm: -1}
+                    var mark = goOffers.length
+                    for (var k = 0; k < arms.length; k++) {
+                        if (arms[k].kind == "send" && chs[k] !== null && chs[k] !== undefined) {
+                            goOffers.push({ch: chs[k], v: vals[k], grp: grp, arm: k, depth: goDepth})
+                        }
+                    }
+                    goDrain()
+                    while (goOffers.length > mark) { goOffers.pop() }
+                    if (grp.arm >= 0) { return selDone(arms[grp.arm].body()) }
+                    continue
                 }
                 if (dflt != null) { return selDone(dflt.body()) }
                 if (pass == 0) { goDrain() }
