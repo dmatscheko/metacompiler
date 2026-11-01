@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-974** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-976** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -95,20 +95,10 @@ re-measure with a guard like ParenUpdAhead).
 
 # JV — Java
 
-### T-909 java: `System.err.flush()` throws · P3 · JV · IN PROGRESS (JV worker, round 15) [V]
-interp NullPointerException; run and native "method call 'flush' on a undefined"; `System.out.flush()` works. Files: the
-System.err surface in both java grammars / java-rt.metajs.
-
-### T-931 java interp: unbounded recursion through a field initializer hangs instead of StackOverflowError · P1 · JV · IN PROGRESS (JV worker, round 15) [V]
-`class R1 { R1 fs = new R1(); }` with `try { new R1(); } catch (StackOverflowError e) { System.out.println("SOE"); }` → java,
-llvm.Run and native `start` / `SOE`; interp prints `start` and hangs (killed at 20 s). The recursion guard is not reached on the
-field-initializer path. Corpus: 8 javac files time out for this reason (DiamondRedundantArgs, T6951833, T7102515,
-QualifiedAccess_3, MethodReference55, …). Files: object construction in java-interpreter.abnf.
-
-### T-932 java: cyclic inheritance hangs the compiler and is accepted by the interpreter · P3 · JV · IN PROGRESS (JV worker, round 15) [V finder only]
-`interface A extends A.B { interface B {} }` → javac "cyclic inheritance involving A"; llvm.Run hangs, interp runs main. Corpus
-compiler timeouts: CyclicScoping_1/_2, ClassCycle4, CyclicInheritance, cycle/T8193561. Also accepted although javac rejects:
-`class var {}`, `yield(1, 2);`.
+### T-974 java: cyclic inheritance across files, through a redefined Object, and in type-variable bounds is not refused · P3 · JV · OPEN [V]
+Left from T-932 (oracle javac 24). Multi-file cycles (javac corpus ClassCycle1a/2a/3a and the staticImport case), the
+redefineObject cases, and `<E extends T, T extends E>` (generics/6677785) are accepted; javac "cyclic inheritance involving X" /
+"cyclic inheritance involving E".
 
 # CS — C#  (no dotnet here: spec-only, ECMA-334 and the .NET reference source)
 
@@ -250,6 +240,11 @@ a non function value: undefined". And the frozen interpreter legs of tests/java-
 tests/python-test-full.py (98M-99M) sit just under the 1e8 -max-steps budget of ./test.sh --full: the next few assertions trip
 "step limit exceeded". Decide: raise the budget for --full, split the files (the .2/.3 convention), or find what makes those
 interpreters step-hungry - measure first.
+
+### T-975 stderr: a trailing fragment without a newline is never written · P3 · CORE · OPEN [V]
+Found by the JV worker, round 15. Standard error is written a line at a time over eprintln in java (System.err), ruby ($stderr)
+and python (sys.stderr), so `System.err.print("x"); System.err.flush();` and a program ending on a partial stderr line lose the
+fragment; java / ruby / python3 write it. Flush the pending fragment on flush() and at exit, in all engines.
 
 # Closed
 
@@ -1102,6 +1097,9 @@ T-917 ruby: `local !~ /re/` with a space after the local is parsed as a call of 
 T-918 ruby: tr / count / delete / squeeze and regex positions on astral text — DONE 19fd2712
 T-919 ruby: re-adding a key deleted during `Hash#each` raises nothing — DONE 2d37280e
 T-920 ruby: an assignment target rooted at a parenthesised call does not parse; smaller gaps — PARTIAL 42bfdb3d 3a02f282 (targets rooted at a parenthesised call incl. op-assign and nil&.f = v; class_eval on builtin classes; String#succ wrap-around; endless each_slice/each_cons. inspect with ivars and address DECLINED: the engines omit the address so output stays deterministic, features t13 pins it; the kotlin item moved to T-972; new gaps T-971)
+T-909 java: `System.err.flush()` throws — DONE 2a56cc4b
+T-931 java interp: unbounded recursion through a field initializer hangs instead of StackOverflowError — DONE 24854ffb
+T-932 java: cyclic inheritance hangs the compiler and is accepted by the interpreter — DONE b4b760f2 (same-file cycles refused with javac's message in both halves, 0 false positives over 5634 corpus files; class var {} and yield(1,2) stay accepted by design - javac --release 9 only warns; the rest is T-974)
 
 # Settled — do not re-open
 
