@@ -98,7 +98,7 @@ Found by the CORE worker, round 15. The interpreter's stripWs deletes every ASCI
 strings.TrimSpace, native strips ASCII 9-13 and 32: `int.Parse(" 1 2 ")` and `int.Parse(" 1")` give three answers.
 .NET's NumberStyles.Integer allows leading/trailing white space (U+0009-U+000D, U+0020) only; settle with a real dotnet.
 
-### T-1061 csharp: base property writes; System.Type ToString; typeof namespace · P3 · CS · OPEN [V]
+### T-1061 csharp: base property writes; System.Type ToString; typeof namespace · P3 · CS · IN PROGRESS (CS worker, round 10) [V]
 Spec-only (no dotnet here). All engines:
 - `base.K = v` (and `base.K += v`, `base.K++`) fails with "unknown name: base" / "variable not defined: base"; must call the base setter non-virtually.
 - `Console.WriteLine(e.GetType())` / `e.GetType().ToString()` print `[object Object]`; .NET prints the FullName (`Demo.MyEx`).
