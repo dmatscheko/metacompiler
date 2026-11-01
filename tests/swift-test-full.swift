@@ -5887,6 +5887,83 @@ func s156() {
     check("156c", sqrt(ds[0]) == 1.4142135623730951 && sqrt(ds[1]) == ds[1].squareRoot() && "\(sqrt(f))" == "1.4142135" && "\(sqrt(16))" == "4.0")
 }
 
+// ===== SECTION 157: labelled if, do and switch; labelled jumps out of a do body =====
+enum E157: Error { case bad }
+func s157() {
+    let xs = [1, 7, -3]
+    var ifs: [Int] = []
+    for x in xs {
+        var r = 0
+        lbl: if x > 0 {
+            r += 1
+            if x > 5 { break lbl }
+            r += 10
+        } else {
+            r = -1
+        }
+        ifs.append(r)
+    }
+    let opt: Int? = xs[1]
+    var bound = 0
+    ob: if let v = opt, v > 2 {
+        bound = v
+        break ob
+    }
+    check("157a", ifs == [11, 1, -1] && bound == 7)
+    func g(_ k: Int) -> String {
+        var s = ""
+        a: do {
+            s += "a"
+            b: do {
+                s += "b"
+                do {
+                    if k == 1 { break a }
+                    if k == 2 { break b }
+                    if k == 3 { throw E157.bad }
+                } catch {
+                    s += "c"
+                    if k == 3 { break a }
+                }
+                s += "d"
+            }
+            s += "e"
+        }
+        return s + "!"
+    }
+    check("157b", g(0) + g(1) + g(2) + g(3) == "abde!ab!abe!abc!")
+    var log: [Int] = []
+    outer: for i in 0..<3 {
+        for j in 0..<3 {
+            do {
+                if j == 1 && i == 1 { break outer }
+                if j == 1 { continue outer }
+                if i == 0 { throw E157.bad }
+            } catch {
+                log.append(-1)
+            }
+            log.append(10 * i + j)
+        }
+    }
+    check("157c", log == [-1, 0, 10])
+    var out: [Int] = []
+    for i in 0..<5 {
+        do {
+            switch i {
+            case 1:
+                continue
+            case 3:
+                throw E157.bad
+            default:
+                out.append(i)
+            }
+            out.append(10 * i)
+        } catch {
+            out.append(-1)
+        }
+    }
+    check("157d", out == [0, 0, 2, 20, -1, 4, 40])
+}
+
 func main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -6044,6 +6121,7 @@ func main() {
     s154() // SECTION-CALL 154
     s155() // SECTION-CALL 155
     s156() // SECTION-CALL 156
+    s157() // SECTION-CALL 157
     print("full: \(checks) checks, \(fails) failures")
 }
 

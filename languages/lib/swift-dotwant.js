@@ -1431,15 +1431,16 @@ function swDsFlush() {
 
 // ----- break and continue need an enclosing statement -----
 // Each one is noted by its source offset; a loop claims those inside it, a switch
-// the breaks, an if or a do marks the breaks inside it (swiftc words those
-// differently), and a function body, a closure and a top-level statement reject
-// what is left: a branch cannot leave its function. A re-parse notes an offset once.
+// the breaks, an if or a do claims the breaks that name its label and marks the
+// others inside it (swiftc words those differently), and a function body, a closure
+// and a top-level statement reject what is left: a branch cannot leave its function.
+// A re-parse notes an offset once.
 var swBrPend = []
-function swBrNote(s, isBr) {
+function swBrNote(s, isBr, lbl) {
     for (var i = 0; i < swBrPend.length; i++) {
         if (swBrPend[i].s == s) { return }
     }
-    swBrPend.push({s: s, br: isBr, inIf: false})
+    swBrPend.push({s: s, br: isBr, lbl: lbl, inIf: false})
 }
 function swBrClaim(s, e, loop) {
     var rest = []
@@ -1449,10 +1450,14 @@ function swBrClaim(s, e, loop) {
     }
     swBrPend = rest
 }
-function swBrInIf(s, e) {
+function swBrInIf(s, e, lbl) {
+    var rest = []
     for (var i = 0; i < swBrPend.length; i++) {
-        if (swBrPend[i].s >= s && swBrPend[i].s < e) { swBrPend[i].inIf = true }
+        var n = swBrPend[i]
+        if (n.s < s || n.s >= e) { rest.push(n) }
+        else if (!(n.br && lbl != null && n.lbl === lbl)) { n.inIf = true; rest.push(n) }
     }
+    swBrPend = rest
 }
 function swBrCheck(s, e) {
     for (var i = 0; i < swBrPend.length; i++) {

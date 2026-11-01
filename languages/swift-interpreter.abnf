@@ -853,9 +853,10 @@ StmtSep     = :script(~~
 
 AttrDecl    = Attribute { Attribute } [ Modifiers ] ( Decl | LocalFunc | LocalType ) ;
 
-// A loop (or switch) label: `outer: for ... { ... break outer }`. It is part of the
-// loop production rather than a statement of its own, so the builder sees its own
-// label and a labelled break/continue can name the loop it leaves.
+// A statement label: `outer: for ... { ... break outer }`, and on a switch, an if or
+// a do, which a labelled break leaves. It is part of the labelled production rather
+// than a statement of its own, so the builder sees its own label and a labelled
+// break/continue can name the statement it leaves.
 LoopLabel   = Id <~~ push({lbl: swBt(up.in)}) ~~> ":" ;
 
 // A nested function declaration inside a body: a closure over the enclosing scope
@@ -872,8 +873,8 @@ LocalType   = StructDecl | ClassDecl | ActorDecl | EnumDecl ;
 // `let NAME` binds the implicit name `error`. return/break/continue inside a do still
 // propagate to the enclosing loop or function. Each part is marked so excTry can tell
 // them apart on the stack.
-Do          <~~ push(swTry(takeAll())); swBrInIf(up.start, up.pos) ~~>
-            = KwDo TryBody { CatchClause } ;
+Do          <~~ var di = takeAll(); push(swLblStmt(itemLbl(di), swTry(itemsAfterLbl(di)))); swBrInIf(up.start, up.pos, itemLbl(di)) ~~>
+            = [ LoopLabel ] KwDo TryBody { CatchClause } ;
 TryBody     <~~ push({trybody: pop()}) ~~>
             = Block ;
 // catch PATTERN[, PATTERN] [where COND] { ... }. The clause matches when one of its
@@ -909,8 +910,8 @@ Fallthrough <~~ push(makeFallthrough()) ~~>
 // A binding whose value is nil fails the whole clause; the names it binds live in
 // a fresh scope for if/while and, Swift-style, in the ENCLOSING scope for guard
 // (whose else branch is expected to leave that scope anyway).
-CplxIf      <~~ push(makeCondIf(takeAll())); swBrInIf(up.start, up.pos) ~~>
-            = KwIf CplxCondClause Block [ KwElse ElseBody ] ;
+CplxIf      <~~ var ci = takeAll(); push(swLblStmt(itemLbl(ci), makeCondIf(itemsAfterLbl(ci)))); swBrInIf(up.start, up.pos, itemLbl(ci)) ~~>
+            = [ LoopLabel ] KwIf CplxCondClause Block [ KwElse ElseBody ] ;
 CplxGuard   <~~ push(makeCondGuard(takeAll())) ~~>
             = KwGuard CplxCondClause KwElse Block ;
 CplxWhile   <~~ push(makeCondWhile(takeAll())) ~~>
@@ -1086,8 +1087,8 @@ TupLeaf     <~~ push(swBt(up.in)) ~~> = Wildcard | Id ;
 TupleAssign <~~ push(makeTupleAssign(takeAll())) ~~>
             = TupNames "=" Expression [ ";" ] ;
 
-If          <~~ push(makeIf(takeAll())); swBrInIf(up.start, up.pos) ~~>
-            = KwIf Expression Block [ KwElse ElseBody ] ;
+If          <~~ var ii = takeAll(); push(swLblStmt(itemLbl(ii), makeIf(itemsAfterLbl(ii)))); swBrInIf(up.start, up.pos, itemLbl(ii)) ~~>
+            = [ LoopLabel ] KwIf Expression Block [ KwElse ElseBody ] ;
 ElseBody    = Block | CplxIf | If ;
 
 While       <~~ push(makeWhileL(takeAll())); swBrClaim(up.start, up.pos, true) ~~>
@@ -1159,7 +1160,7 @@ CaseWhere   <~~ push({cwhere: pop()}) ~~> = KwWhere Expression ;
 
 Return      <~~ push(makeReturn(takeAll(), up.pos)) ~~>
             = KwReturn [ Expression <~~ push({itext: up.in, iat: up.start + ":" + up.pos}) ~~> ] [ ";" ] ;
-Break       <~~ push(makeBreakL(takeAll())); swBrNote(up.start, true) ~~>    = KwBreak [ SameLine BreakLbl ] [ ";" ] ;
+Break       <~~ var bi = takeAll(); push(makeBreakL(bi)); swBrNote(up.start, true, itemLbl(bi)) ~~>    = KwBreak [ SameLine BreakLbl ] [ ";" ] ;
 Continue    <~~ push(makeContinueL(takeAll())); swBrNote(up.start, false) ~~> = KwContinue [ SameLine BreakLbl ] [ ";" ] ;
 BreakLbl    <~~ push({lbl: swBt(up.in)}) ~~> = Id ;
 
@@ -6015,6 +6016,16 @@ KwContinue  = "continue" KwEnd ;
         if (items.length == 0) { return makeContinue() }
         var lbl = items[0].lbl
         return function() { return {sig: "continue", lbl: lbl} }
+    }
+    // A labelled if or do: a break naming the label ends it; every other signal
+    // passes on. Twin of swLblStmt in swift-to-llvm-ir.abnf.
+    function swLblStmt(lbl, t) {
+        if (lbl == null) { return t }
+        return function() {
+            var r = t()
+            if (r != undefined && r.sig == "break" && r.lbl === lbl) { return undefined }
+            return r
+        }
     }
     // The optional leading LoopLabel item of a loop production.
     function itemLbl(items) {

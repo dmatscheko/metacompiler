@@ -842,9 +842,10 @@ StmtSep     = :script(~~
 
 AttrDecl    = Attribute { Attribute } [ Modifiers ] ( Decl | LocalFunc | LocalType ) ;
 
-// A loop (or switch) label: `outer: for ... { ... break outer }`. It is part of the
-// loop production rather than a statement of its own, so the builder sees its own
-// label and a labelled break/continue can name the loop it leaves.
+// A statement label: `outer: for ... { ... break outer }`, and on a switch, an if or
+// a do, which a labelled break leaves. It is part of the labelled production rather
+// than a statement of its own, so the builder sees its own label and a labelled
+// break/continue can name the statement it leaves.
 LoopLabel   = Id <~~ push({lbl: swBt(up.in)}) ~~> ":" ;
 
 // A nested function declaration inside a body: a closure over the enclosing scope
@@ -862,8 +863,8 @@ LocalType   = StructDecl | ClassDecl | ActorDecl | EnumDecl ;
 // that excDispatch re-issues in the enclosing frame. A catch
 // with no `let NAME` binds the implicit name `error`. Each part is marked so makeTry
 // can tell them apart.
-Do          <~~ push(makeTry(takeAll())); swBrInIf(up.start, up.pos) ~~>
-            = KwDo TryBody { CatchClause } ;
+Do          <~~ var di = takeAll(); push(swLblStmt(itemLbl(di), makeTry(itemsAfterLbl(di)))); swBrInIf(up.start, up.pos, itemLbl(di)) ~~>
+            = [ LoopLabel ] KwDo TryBody { CatchClause } ;
 TryBody     <~~ push({trybody: pop()}) ~~>
             = Block ;
 // catch PATTERN[, PATTERN] [where COND] { ... }. The clause matches when one of its
@@ -896,8 +897,8 @@ Fallthrough <~~ push(makeFallthrough()) ~~>
 // condition item is emitted in turn and branches to the failure block; the names a
 // binding declares live in a child scope for if/while and, Swift-style, in the
 // ENCLOSING scope for guard (whose else branch is expected to leave that scope).
-CplxIf      <~~ push(makeCondIf(takeAll())); swBrInIf(up.start, up.pos) ~~>
-            = KwIf CplxCondClause Block [ KwElse ElseBody ] ;
+CplxIf      <~~ var ci = takeAll(); push(swLblStmt(itemLbl(ci), makeCondIf(itemsAfterLbl(ci)))); swBrInIf(up.start, up.pos, itemLbl(ci)) ~~>
+            = [ LoopLabel ] KwIf CplxCondClause Block [ KwElse ElseBody ] ;
 CplxGuard   <~~ push(makeCondGuard(takeAll())) ~~>
             = KwGuard CplxCondClause KwElse Block ;
 CplxWhile   <~~ push(makeCondWhile(takeAll())) ~~>
@@ -1072,8 +1073,8 @@ TupLeaf     <~~ push(swBt(up.in)) ~~> = Wildcard | Id ;
 TupleAssign <~~ push(makeTupleAssign(takeAll())) ~~>
             = TupNames "=" Expression [ ";" ] ;
 
-If          <~~ push(makeIf(takeAll())); swBrInIf(up.start, up.pos) ~~>
-            = KwIf Expression Block [ KwElse ElseBody ] ;
+If          <~~ var ii = takeAll(); push(swLblStmt(itemLbl(ii), makeIf(itemsAfterLbl(ii)))); swBrInIf(up.start, up.pos, itemLbl(ii)) ~~>
+            = [ LoopLabel ] KwIf Expression Block [ KwElse ElseBody ] ;
 ElseBody    = Block | CplxIf | If ;
 
 While       <~~ push(makeWhileL(takeAll())); swBrClaim(up.start, up.pos, true) ~~>
@@ -1141,7 +1142,7 @@ CaseWhere   <~~ push({cwhere: pop()}) ~~> = KwWhere Expression ;
 
 Return      <~~ push(makeReturn(takeAll(), up.pos)) ~~>
             = KwReturn [ Expression <~~ push({itext: up.in, iat: up.start + ":" + up.pos}) ~~> ] [ ";" ] ;
-Break       <~~ push(makeBreakL(takeAll())); swBrNote(up.start, true) ~~>    = KwBreak [ SameLine BreakLbl ] [ ";" ] ;
+Break       <~~ var bi = takeAll(); push(makeBreakL(bi)); swBrNote(up.start, true, itemLbl(bi)) ~~>    = KwBreak [ SameLine BreakLbl ] [ ";" ] ;
 Continue    <~~ push(makeContinueL(takeAll())); swBrNote(up.start, false) ~~> = KwContinue [ SameLine BreakLbl ] [ ";" ] ;
 BreakLbl    <~~ push({lbl: swBt(up.in)}) ~~> = Id ;
 
@@ -3615,20 +3616,61 @@ KwContinue  = "continue" KwEnd ;
     }
 
     // ----- Loop control with labels -----
-    // loopStack entries carry the label of their loop (null when unlabelled); a
-    // labelled break/continue branches to the named entry rather than the top one.
-    function loopFind(lbl) {
-        for (var i = loopStack.length - 1; i >= 0; i--) {
-            if (loopStack[i].lbl === lbl) { return loopStack[i] }
+    // swLblStack holds every labelled statement being emitted, {lbl, tag, brk,
+    // cont, bN, cN}; unlike loopStack it is NOT reset at a function boundary, because
+    // a do body is its own IR closure (makeTry) and a labelled break or continue
+    // inside one still names a statement of the enclosing function. Such a jump
+    // travels as compile-core's goto control signal (emitGoto), which excDispatch
+    // after each enclosing js_try forwards outwards until the function holding the
+    // block branches to it; the block is registered once, under that function's tag.
+    // A closure or nested function cannot name an outer label (swBrCheck rejects it).
+    var swLblStack = []
+    function loopPush(lbl, cont, brk) {
+        loopStack.push({cont: cont, brk: brk})
+        if (lbl != null) { swLblStack.push({lbl: lbl, tag: curFTag, brk: brk, cont: cont, bN: -1, cN: -1}) }
+    }
+    function loopPop(lbl) {
+        loopStack.pop()
+        if (lbl != null) { swLblPop() }
+    }
+    // Once its statement is emitted a label is no goto target: the excDispatch of a
+    // later do would branch into a block whose scope values do not dominate it. A
+    // tag no function has keeps excDispatch from ever branching there.
+    function swLblPop() {
+        var e = swLblStack.pop()
+        if (e.bN >= 0) { ctlLabels[e.bN].tag = -1 }
+        if (e.cN >= 0) { ctlLabels[e.cN].tag = -1 }
+    }
+    function swLblFind(lbl) {
+        for (var i = swLblStack.length - 1; i >= 0; i--) {
+            if (swLblStack[i].lbl === lbl) { return swLblStack[i] }
         }
         return null
+    }
+    // A labelled if or do: its own exit block, the target of a break naming the
+    // label. Twin of swLblStmt in swift-interpreter.abnf.
+    function swLblStmt(lbl, t) {
+        if (lbl == null) { return t }
+        return function(b) {
+            var exitB = curF.NewBlock("")
+            swLblStack.push({lbl: lbl, tag: curFTag, brk: exitB, cont: null, bN: -1, cN: -1})
+            var eb = t(b)
+            swLblPop()
+            eb.NewBr(exitB)
+            return exitB
+        }
     }
     function makeBreakL(items) {
         if (items.length == 0) { return makeBreak() }
         var lbl = items[0].lbl
         return function(b) {
-            var e = loopFind(lbl)
-            if (e != null) { b.NewBr(e.brk) } else { emitBreak(b) }
+            var e = swLblFind(lbl)
+            if (e == null) { emitBreak(b) }
+            else if (e.tag == curFTag) { b.NewBr(e.brk) }
+            else {
+                if (e.bN < 0) { e.bN = ctlLabelAt(e.tag, e.brk) }
+                emitGoto(b, e.bN)
+            }
             return deadBlock()
         }
     }
@@ -3636,10 +3678,20 @@ KwContinue  = "continue" KwEnd ;
         if (items.length == 0) { return makeContinue() }
         var lbl = items[0].lbl
         return function(b) {
-            var e = loopFind(lbl)
-            if (e != null) { b.NewBr(e.cont) } else { emitContinue(b) }
+            var e = swLblFind(lbl)
+            if (e == null || e.cont == null) { emitContinue(b) }
+            else if (e.tag == curFTag) { b.NewBr(e.cont) }
+            else {
+                if (e.cN < 0) { e.cN = ctlLabelAt(e.tag, e.cont) }
+                emitGoto(b, e.cN)
+            }
             return deadBlock()
         }
+    }
+    // compile-core's ctlLabel for a block of an ENCLOSING function (tag).
+    function ctlLabelAt(tag, blk) {
+        ctlLabels.push({tag: tag, blk: blk})
+        return ctlLabels.length - 1
     }
     // Is this value a dictionary? js_keys aborts on a string or a number, so the
     // test has to be "an object that is not an array" rather than a bare js_keys.
@@ -5472,9 +5524,9 @@ KwContinue  = "continue" KwEnd ;
             // once outside would give every closure the same cell (see makeForRange's header).
             if (condsBind(conds)) { curScopeV = callExt(headB, "js_scope_new", [saved]) }
             var bodyB = emitConds(headB, conds, exitB)
-            loopStack.push({cont: headB, brk: exitB, lbl: lbl})
+            loopPush(lbl, headB, exitB)
             bodyT(bodyB).NewBr(headB)
-            loopStack.pop()
+            loopPop(lbl)
             curScopeV = saved
             return exitB
         }
@@ -5520,7 +5572,7 @@ KwContinue  = "continue" KwEnd ;
             var loopSavedC = curScopeV
             curScopeV = callExt(bodyB, "js_scope_new", [loopSavedC])
             var innerB = emitMatchPat(bodyB, pat, elV, false, postB)
-            loopStack.push({cont: postB, brk: exitB, lbl: lbl})
+            loopPush(lbl, postB, exitB)
             if (whereT != null) {
                 var rw = whereT(innerB)
                 var runB = curF.NewBlock("")
@@ -5528,7 +5580,7 @@ KwContinue  = "continue" KwEnd ;
                 innerB = runB
             }
             bodyT(innerB).NewBr(postB)
-            loopStack.pop()
+            loopPop(lbl)
             curScopeV = loopSavedC
             var iV3 = callExt(postB, "js_scope_get", [curScopeV, emitStr(postB, iName)])
             callExt(postB, "js_scope_set", [curScopeV, emitStr(postB, iName),
@@ -8857,9 +8909,9 @@ KwContinue  = "continue" KwEnd ;
             b.NewBr(headB)
             var r = condT(headB)
             r.b.NewCondBr(truthy(r.b, r.v), bodyB, exitB)
-            loopStack.push({cont: headB, brk: exitB, lbl: lbl})
+            loopPush(lbl, headB, exitB)
             bodyT(bodyB).NewBr(headB)
-            loopStack.pop()
+            loopPop(lbl)
             return exitB
         }
     }
@@ -8874,9 +8926,9 @@ KwContinue  = "continue" KwEnd ;
             var condB = curF.NewBlock("")
             var exitB = curF.NewBlock("")
             b.NewBr(bodyB)
-            loopStack.push({cont: condB, brk: exitB, lbl: lbl})
+            loopPush(lbl, condB, exitB)
             bodyT(bodyB).NewBr(condB)
-            loopStack.pop()
+            loopPop(lbl)
             var r = condT(condB)
             r.b.NewCondBr(truthy(r.b, r.v), bodyB, exitB)
             return exitB
@@ -8939,7 +8991,7 @@ KwContinue  = "continue" KwEnd ;
                 curScopeV = callExt(bodyB, "js_scope_new", [loopSaved])
                 callExt(bodyB, "js_scope_decl", [curScopeV, emitStr(bodyB, name), iV])
             }
-            loopStack.push({cont: postB, brk: exitB, lbl: lbl})
+            loopPush(lbl, postB, exitB)
             var innerB = bodyB
             if (whereT != null) {
                 var rw = whereT(innerB)
@@ -8948,7 +9000,7 @@ KwContinue  = "continue" KwEnd ;
                 innerB = runB
             }
             bodyT(innerB).NewBr(postB)
-            loopStack.pop()
+            loopPop(lbl)
             curScopeV = loopSaved
             var iV2 = callExt(postB, "js_scope_get", [curScopeV, emitStr(postB, cName)])
             callExt(postB, "js_scope_set", [curScopeV, emitStr(postB, cName), callExt(postB, "js_jadd", [iV2, emitNum(postB, 1)])])
@@ -9056,7 +9108,7 @@ KwContinue  = "continue" KwEnd ;
             var loopSavedL = curScopeV
             if (forPatBinds(pat)) { curScopeV = callExt(bodyB, "js_scope_new", [loopSavedL]) }
             emitBindForPat(bodyB, pat, elV)
-            loopStack.push({cont: postB, brk: exitB, lbl: lbl})
+            loopPush(lbl, postB, exitB)
             var innerB = bodyB
             if (whereT != null) {
                 var rw2 = whereT(innerB)
@@ -9065,7 +9117,7 @@ KwContinue  = "continue" KwEnd ;
                 innerB = runB2
             }
             bodyT(innerB).NewBr(postB)
-            loopStack.pop()
+            loopPop(lbl)
             curScopeV = loopSavedL
             var iV3 = callExt(postB, "js_scope_get", [curScopeV, emitStr(postB, iName)])
             callExt(postB, "js_scope_set", [curScopeV, emitStr(postB, iName), callExt(postB, "js_jadd", [iV3, emitNum(postB, 1)])])
@@ -9188,8 +9240,17 @@ KwContinue  = "continue" KwEnd ;
                 }
             }
             b.NewBr(dfltB)
-            var outerCont = loopStack.length > 0 ? loopStack[loopStack.length - 1].cont : null
-            loopStack.push({cont: outerCont, brk: exitB, lbl: swLbl})
+            // A continue in a case reaches the enclosing loop. With no loop in this
+            // function it leaves a do body as a control signal, and anywhere else it
+            // is rejected before emission (swBrCheck), so the branch is unreachable;
+            // excDispatch of a do inside the case still needs a target for it.
+            var outerCont = null
+            if (loopStack.length > 0) { outerCont = loopStack[loopStack.length - 1].cont }
+            else {
+                outerCont = curF.NewBlock("")
+                if (inCtlBody()) { emitContinue(outerCont) } else { outerCont.NewUnreachable() }
+            }
+            loopPush(swLbl, outerCont, exitB)
             for (var i = 0; i < cases.length; i++) {
                 fallStack.push(i + 1 < cases.length ? bodyBs[i + 1] : exitB)
                 var bb = bodyBs[i]
@@ -9198,7 +9259,7 @@ KwContinue  = "continue" KwEnd ;
                 bb.NewBr(exitB)
                 fallStack.pop()
             }
-            loopStack.pop()
+            loopPop(swLbl)
             curScopeV = savedScope
             return exitB
         }
