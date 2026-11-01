@@ -732,7 +732,7 @@ ParenTarget = "(" Target ")" ;
 // repetition never gives a match back. The LAST suffix consumed is the place.
 // PlaceAhead is a fast-fail - without it every expression in the file is parsed
 // twice per nesting level.
-ChainTarget <~~ push(makeChainTarget(takeAll(), up.in)) ~~>
+ChainTarget <~~ push(makeChainTarget(takeAll(), up.in, up.pos)) ~~>
             = PlaceAhead Primary ChainSfx { ChainSfx } ;
 ChainSfx    = QNewSfx | MRefSfx | MethodSfx | FieldSfx | IndexSfx ;
 PlaceAhead  = :script(~~
@@ -893,7 +893,7 @@ PreIncDec   <~~ push(makePreIncDec(pop(), pop())) ~~>
 // fast-fail here is safe because this rule is only entered after a literal
 // ++/--, so the chain is parsed once per occurrence, not once per expression.
 PreTarget   = ParenTarget | PreChain | PlainTarget ;
-PreChain    <~~ push(makeChainTarget(takeAll(), up.in)) ~~>
+PreChain    <~~ push(makeChainTarget(takeAll(), up.in, up.pos)) ~~>
             = Primary ChainSfx { ChainSfx } ;
 Neg         <~~ push(makeNeg(pop())) ~~>
             = "-" UnaryExpr ;
@@ -980,7 +980,7 @@ SuperCall   <~~ push(makeSuperCall(popName(), takeAll())); jNoteCall(up.in) ~~>
 
 // A primary followed by method calls, field reads and indexing:
 // System.out.println(x), p.dist(), this.x, arr[i], Main.check(...).
-CallMember  <~~ push(foldCallMember(takeAll(), up.in)) ~~>
+CallMember  <~~ push(foldCallMember(takeAll(), up.in, up.pos)) ~~>
             = Primary { QNewSfx | MRefSfx | MethodSfx | FieldSfx | IndexSfx } ;
 // expr::m - a BOUND method reference whose receiver is an arbitrary expression:
 // `check()::ido`, `new Foo()::getA`, `((C) t)::m`. Like QNewSfx it is a SUFFIX
@@ -2270,7 +2270,7 @@ HasStatic   = :script(~~
     // The target of an assignment whose root is an arbitrary primary. The value
     // it returns is an ordinary target record with a `base` thunk in place of a
     // variable name; emitRefPath below is what lowers that thunk.
-    function makeChainTarget(items, text) {
+    function makeChainTarget(items, text, pos) {
         var head = []
         for (var i = 0; i < items.length - 1; i++) { head.push(items[i]) }
         var last = items[items.length - 1]
@@ -2282,6 +2282,7 @@ HasStatic   = :script(~~
                       tyref: ftr, tylty: ftr == null ? undefined : jTyOf(ftr.name),
                       fbty: ftr == null ? jChainBaseTy(text, last.name) : ""}
             jChainTargetRecv(head, last, text, fr)
+            jAccessChk(jAccRecv(fr.frecv), "f:", last.name, 0, pos)
             fr.base = foldCallMember(head)
             return fr
         }
@@ -3797,7 +3798,7 @@ HasStatic   = :script(~~
     for (var jsm = 0; jsm < jStrMethodList.length; jsm++) { jStrMethods["$" + jStrMethodList[jsm]] = true }
     var jUnboxNames = {"$intValue": true, "$longValue": true, "$doubleValue": true, "$floatValue": true,
                        "$shortValue": true, "$byteValue": true, "$charValue": true, "$booleanValue": true}
-    foldCallMember = function(items, text) {
+    foldCallMember = function(items, text, pos) {
         if (items.length == 1) return items[0]
         var primary = items[0]
         var suffixes = items.slice(1)
@@ -3807,6 +3808,7 @@ HasStatic   = :script(~~
         if (text != undefined && jMapStaticRecv(text)) { jMapWant = true }
         if (text != undefined) {
             jChainRecvTys(suffixes, text)
+            jAccessChkSfxs(suffixes, pos)
             for (var vi = 0; vi < suffixes.length; vi++) { if (suffixes[vi].kind == "mcall") { jVaWrapSfx(suffixes[vi]) } }
         }
         var fctx = curClassName
@@ -4616,7 +4618,8 @@ HasStatic   = :script(~~
         var body = items[3]
         var isStatic = false
         for (var i = 0; i < mods.length; i++) if (mods[i] == "static") isStatic = true
-        return {kind: "method", name: name, statik: isStatic, params: params, ptys: items[2].ptys, body: body, pos: up.start}
+        return {kind: "method", name: name, statik: isStatic, params: params, ptys: items[2].ptys, body: body, pos: up.start,
+                acc: jAccOf(mods)}
     }
     // super(args) / this(args) as the first statement of a constructor body. The
     // marker travels inside CtorBody's item list; makeCtor lifts it out.
@@ -4697,7 +4700,8 @@ HasStatic   = :script(~~
             var fty = ty + items[i].fdims
             jNoteFieldTy(items[i].fname, fty)
             push({kind: "field", name: items[i].fname, statik: isStatic, init: fieldInitOf(items[i].finit, fty),
-                  fty: fty, pure: jInitPure(items[i].ftext), sconst: isStatic && jIsConstField(mods, fty, items[i].ftext)})
+                  fty: fty, pure: jInitPure(items[i].ftext), sconst: isStatic && jIsConstField(mods, fty, items[i].ftext),
+                  acc: jAccOf(mods)})
         }
     }
     // A field initializer gets the same assignment conversion as a local
@@ -5417,18 +5421,29 @@ HasStatic   = :script(~~
                     }
                 }
             }
-            // Default methods of every implemented interface that is NOT the one on
-            // the __super chain: copied in, so a class implementing two interfaces
-            // answers both their defaults. A method the class declares itself wins.
+            // The concrete methods of the implemented interfaces are copied in, so
+            // a class implementing two interfaces answers both. A method the class
+            // or a superclass declares wins (jDefaultOwner answers null; the
+            // __super chain finds it); a default comes from the most specific
+            // interface declaring it, whichever implemented interface brought the
+            // name; any other name (a static one) from the interface itself
+            // unless that is the one on the __super chain.
+            var copied = {}
             for (i = 0; i < impls.length; i++) {
-                if (impls[i] == chained && interfaceNames["$" + name] != true) { continue }
                 var inames = interfaceMethodNames["$" + impls[i]]
                 if (inames == undefined) { continue }
-                var ifV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, impls[i])])
                 for (var w = 0; w < inames.length; w++) {
-                    if (declared["$" + inames[w]] == true) { continue }
-                    callExt(b, "js_set", [clsV, emitStr(b, inames[w]),
-                                          callExt(b, "js_get", [ifV, emitStr(b, inames[w])])])
+                    var wn = inames[w]
+                    if (declared["$" + wn] == true || copied["$" + wn] == true) { continue }
+                    var downer = jDefaultOwner(name, wn)
+                    if (downer == null) { continue }
+                    if (downer == "") {
+                        if (impls[i] == chained && interfaceNames["$" + name] != true) { continue }
+                        downer = impls[i]
+                    }
+                    copied["$" + wn] = true
+                    var ifV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, downer)])
+                    callExt(b, "js_set", [clsV, emitStr(b, wn), callExt(b, "js_get", [ifV, emitStr(b, wn)])])
                 }
             }
             // Record accessors and value equality, unless the body declares its own.
@@ -6391,6 +6406,7 @@ HasStatic   = :script(~~
         // Twin of the jCycCheck call in java-interpreter.abnf.
         var cycName = jCycCheck()
         if (cycName != "") { fail("cyclic inheritance involving " + cycName) }
+        jProtCheck()
         jLoadLibs(jUtilWant, jMapWant, jStreamWant)
         if (jLangWant) {
             jLangWant = false

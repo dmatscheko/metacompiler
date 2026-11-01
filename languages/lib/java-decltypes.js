@@ -656,6 +656,7 @@ function jOvDeclare(name, members) {
     var ctors = []
     for (var i = 0; i < members.length; i++) {
         var m = members[i]
+        if (m.acc != undefined) { jNoteMemAcc(name, m) }
         if (m.ext != undefined) {
             sup = jOvBare(m.ext)
             jOvAddSuper(name, sup)
@@ -1045,6 +1046,52 @@ function jOvIfaceDefaults(t, mname, out, seen, depth) {
             out.push(m)
         }
         jOvIfaceDefaults(sups[i], mname, out, seen, depth + 1)
+    }
+    return undefined
+}
+// The interface whose default method `mname` declared type t inherits: null
+// when t or a superclass declares an instance method of that name itself (a
+// class' method beats every default), else the most specific superinterface
+// declaring a default - one no other declaring superinterface extends (JLS
+// 8.4.8, 9.4.1) - or "" when there is none. Twin of jFindMember in
+// java-interpreter.abnf.
+function jDefaultOwner(t, mname) {
+    var chain = []
+    var c = t
+    for (var guard = 0; c != "" && guard < 64; guard++) {
+        var rec = jOvCls["$" + c]
+        if (rec == undefined) { break }
+        for (var i = 0; i < rec.ms.length; i++) {
+            if (rec.ms[i].name == mname && !rec.ms[i].statik) { return null }
+        }
+        chain.push(c)
+        c = rec.sup
+    }
+    if (chain.length == 0) { chain.push(t) }
+    var cands = []
+    for (var k = 0; k < chain.length; k++) { jDefaultCands(chain[k], mname, cands, 0) }
+    for (var a = 0; a < cands.length; a++) {
+        var beaten = false
+        for (var b = 0; b < cands.length && !beaten; b++) {
+            if (b != a && jOvExtends(cands[b], cands[a], 0)) { beaten = true }
+        }
+        if (!beaten) { return cands[a] }
+    }
+    return ""
+}
+// Every interface above type t declaring a default method mname, once each.
+function jDefaultCands(t, mname, out, depth) {
+    var sups = jOvSupers["$" + t]
+    if (sups == undefined || depth > 64) { return undefined }
+    for (var i = 0; i < sups.length; i++) {
+        var ms = jOvIfaceMs["$" + sups[i]]
+        for (var k = 0; ms != undefined && k < ms.length; k++) {
+            if (ms[k].name != mname || !ms[k].body || ms[k].statik) { continue }
+            var dup = false
+            for (var d = 0; d < out.length; d++) { if (out[d] == sups[i]) { dup = true } }
+            if (!dup) { out.push(sups[i]) }
+        }
+        jDefaultCands(sups[i], mname, out, depth + 1)
     }
     return undefined
 }
@@ -2589,6 +2636,126 @@ function jImportAccess(path, pos) {
                 + c.curFile() + ":" + c.lineOf(pos) + ")")
         }
     }
+}
+// A member's access is checked where a member chain names it (JLS 6.6.1):
+// one declared without a modifier only from its own package, a private one
+// only inside its own top-level type, a protected one from its own package
+// or the body of a subclass. The receiver's static type picks the class
+// (jChainRecvTys / jFieldRecvOn); an unknown one checks nothing, and a
+// method is refused only when no declaration of its name and arity on the
+// class chain is accessible. Members of the program's classes only: the
+// library sources are java.* and keep their own helpers.
+var jMemAccs = {}
+// The access modifier among mods: "public", "protected", "private" or "".
+function jAccOf(mods) {
+    for (var i = 0; i < mods.length; i++) {
+        if (mods[i] == "public" || mods[i] == "protected" || mods[i] == "private") { return mods[i] }
+    }
+    return ""
+}
+function jNoteMemAcc(cls, m) {
+    if (jPkgPrefix != "" || (m.kind != "method" && m.kind != "field")) { return }
+    var key = "$" + cls + (m.kind == "field" ? "#f:" : "#m:") + m.name
+    if (jMemAccs[key] == undefined) { jMemAccs[key] = [] }
+    var rec = {acc: m.acc, pkg: jFilePkg, top: jTopOf(cls), n: 0, isVar: false, sig: ""}
+    if (m.kind == "method") {
+        rec.isVar = jOvIsVar(m)
+        rec.n = m.ptys.length
+        var parts = []
+        for (var i = 0; i < m.ptys.length; i++) { parts.push(m.ptys[i] + ((rec.isVar && i == m.ptys.length - 1) ? "..." : "")) }
+        rec.sig = "(" + parts.join(",") + ")"
+    }
+    jMemAccs[key].push(rec)
+}
+// The top-level type a declared type is nested in, from its binary name;
+// "" when it has none recorded (an anonymous class).
+function jTopOf(cls) {
+    var b = jBinName["$" + cls]
+    if (b == undefined) { return "" }
+    var cut = b.indexOf("$")
+    return cut < 0 ? b : b.substring(0, cut)
+}
+function jAccessible(d) {
+    if (d.acc == "" || d.acc == "protected") { return d.pkg == jFilePkg }
+    if (d.acc == "private") {
+        var here = jTopOf(curClassName)
+        return d.top == "" || here == "" || d.top == here
+    }
+    return true
+}
+// Fails when member mname (kind "m:" or "f:", called with nargs arguments)
+// of class cls is not accessible here.
+function jAccessChk(cls, kind, mname, nargs, pos) {
+    if (cls == "") { return }
+    if (jOvCls["$" + cls] == undefined) { cls = jSimpleName(cls) }
+    var bad = null
+    var badCls = ""
+    var prot = null
+    var protCls = ""
+    var k = cls
+    for (var guard = 0; k != "" && guard < 64; guard++) {
+        var ds = jMemAccs["$" + k + "#" + kind + mname]
+        for (var i = 0; ds != undefined && i < ds.length; i++) {
+            var d = ds[i]
+            if (kind == "m:" && !(d.n == nargs || (d.isVar && nargs >= d.n - 1))) { continue }
+            if (jAccessible(d)) { return }
+            if (d.acc == "protected") {
+                if (prot == null) { prot = d; protCls = k }
+            } else if (bad == null) { bad = d; badCls = k }
+        }
+        if (kind == "f:" && ds != undefined) { break }
+        var rec = jOvCls["$" + k]
+        if (rec == undefined) { break }
+        k = rec.sup
+    }
+    var at = " (" + c.curFile() + ":" + c.lineOf(pos) + ")"
+    // Whether the enclosing types subclass the declaring one is only known once
+    // every declaration is walked (jProtCheck).
+    if (prot != null) {
+        var encl = []
+        for (var e = 0; e < jClassStack.length; e++) { if (jClassStack[e] != "" && jClassStack[e] != undefined) { encl.push(jClassStack[e]) } }
+        encl.push(curClassName)
+        jProtPend.push({cls: protCls, encl: encl, what: mname + prot.sig + " has protected access in " + jSimpleName(protCls) + at})
+        return
+    }
+    if (bad == null) { return }
+    var what = mname + bad.sig + (bad.acc == "private" ? " has private access in " + jSimpleName(badCls)
+        : " is not public in " + jSimpleName(badCls) + "; cannot be accessed from outside package")
+    fail(what + at)
+}
+// The protected accesses from another package, each with the types whose
+// bodies enclose it; one is refused unless one of them extends the member's
+// class. Called after the walk.
+var jProtPend = []
+function jProtCheck() {
+    for (var i = 0; i < jProtPend.length; i++) {
+        var p = jProtPend[i]
+        var ok = false
+        for (var k = 0; k < p.encl.length && !ok; k++) { ok = jSubclassOf(p.encl[k], jSimpleName(p.cls), 0) }
+        if (!ok) { fail(p.what) }
+    }
+}
+// Does class t extend the class simply named s, directly or further up?
+function jSubclassOf(t, s, depth) {
+    var rec = jOvCls["$" + t]
+    if (rec == undefined || rec.sup == "" || depth > 64) { return false }
+    return jSimpleName(rec.sup) == s || jSubclassOf(jSimpleName(rec.sup), s, depth + 1)
+}
+// The member accesses of a chain's suffixes, once jChainRecvTys typed them.
+function jAccessChkSfxs(sfxs, pos) {
+    for (var i = 0; i < sfxs.length; i++) {
+        var s = sfxs[i]
+        if (s.kind == "mcall" && s.rty != undefined) { jAccessChk(jAccRecv(s.rty), "m:", s.name, s.args.length, pos) }
+        if (s.kind == "field" && s.frecv != undefined) { jAccessChk(jAccRecv(s.frecv), "f:", s.name, 0, pos) }
+    }
+}
+// The class a receiver type names: a static access's type, a declared type
+// without its arguments; "" for a `super` receiver, which is never outside.
+function jAccRecv(t) {
+    if (t.length > 6 && t.substring(0, 6) == "super:") { return "" }
+    if (t.length > 7 && t.substring(0, 7) == "static:") { return jOvBare(t.substring(7)) }
+    if (t.length > 8 && t.substring(0, 8) == "static?:") { return jOvBare(t.substring(8)) }
+    return jOvBare(t)
 }
 // A type declaration entered: its path is the enclosing types' names and its
 // own, dot-joined (stack is the grammar's jClassStack).

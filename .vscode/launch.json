@@ -722,6 +722,48 @@
             "program": "${workspaceFolder}","args": ["-i", "tests/imports", "languages/java-to-llvm-ir.abnf", "tests/java-fail-test-pkg-access.java", "-q"]
         },
         {
+            "name": "Java interpreter package-private member SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "expectError": "java interpreter error: raw(int) is not public in Toolbox; cannot be accessed from outside package",
+            "program": "${workspaceFolder}","args": ["-i", "tests/imports", "languages/java-interpreter.abnf", "tests/java-fail-test-member-access.java", "-q"]
+        },
+        {
+            "name": "Java compiler package-private member SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "expectError": "java compiler error: raw(int) is not public in Toolbox; cannot be accessed from outside package",
+            "program": "${workspaceFolder}","args": ["-i", "tests/imports", "languages/java-to-llvm-ir.abnf", "tests/java-fail-test-member-access.java", "-q"]
+        },
+        {
+            "name": "Java interpreter protected member SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "expectError": "java interpreter error: scale() has protected access in Toolbox",
+            "program": "${workspaceFolder}","args": ["-i", "tests/imports", "languages/java-interpreter.abnf", "tests/java-fail-test-protected-access.java", "-q"]
+        },
+        {
+            "name": "Java compiler protected member SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "expectError": "java compiler error: scale() has protected access in Toolbox",
+            "program": "${workspaceFolder}","args": ["-i", "tests/imports", "languages/java-to-llvm-ir.abnf", "tests/java-fail-test-protected-access.java", "-q"]
+        },
+        {
+            "name": "Java interpreter private member SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "expectError": "java interpreter error: secret has private access in Inner",
+            "program": "${workspaceFolder}","args": ["languages/java-interpreter.abnf", "tests/java-fail-test-private-access.java", "-q"]
+        },
+        {
+            "name": "Java compiler private member SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "expectError": "java compiler error: secret has private access in Inner",
+            "program": "${workspaceFolder}","args": ["languages/java-to-llvm-ir.abnf", "tests/java-fail-test-private-access.java", "-q"]
+        },
+        {
             "name": "Kotlin interpreter",
             "type": "go",
             "request": "launch",

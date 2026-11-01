@@ -13,6 +13,11 @@ class Square extends PeerShape {
     int sides() { return 4; }
 }
 
+// A subclass in another package may use Toolbox's protected member.
+class Tripler extends Toolbox {
+    int triple(int v) { return v * this.scale(); }
+}
+
 class Main {
     static int fails = 0;
 
@@ -29,6 +34,7 @@ class Main {
         Main.check("imported class", p.sum() == 42);
         Square sq = new Square();
         Main.check("superclass from a peer file", sq.sides() == 4 && sq.name().equals("shape"));
+        Main.check("protected member from a subclass", new Tripler().triple(5) == 15);
 
         if (Main.fails == 0) {
             System.out.println("java multifile test passed");

@@ -752,7 +752,7 @@ ParenTarget = "(" Target ")" ;
 // The suffix run is one greedy repetition rather than "{ Sfx } LastSfx": a PEG
 // repetition never gives a match back, so the two-part spelling can never see
 // its final suffix. The LAST suffix the run consumed is the place.
-ChainTarget <~~ push(makeChainTarget(takeAll(), up.in)) ~~>
+ChainTarget <~~ push(makeChainTarget(takeAll(), up.in, up.pos)) ~~>
             = PlaceAhead Primary ChainSfx { ChainSfx } ;
 ChainSfx    = QNewSfx | MRefSfx | MethodSfx | FieldSfx | IndexSfx ;
 // Without this fast-fail every expression in the file is parsed TWICE per
@@ -920,7 +920,7 @@ PreIncDec   <~~ push(makePreIncDec(pop(), pop())) ~~>
 // fast-fail here is safe because this rule is only entered after a literal
 // ++/--, so the chain is parsed once per occurrence, not once per expression.
 PreTarget   = ParenTarget | PreChain | PlainTarget ;
-PreChain    <~~ push(makeChainTarget(takeAll(), up.in)) ~~>
+PreChain    <~~ push(makeChainTarget(takeAll(), up.in, up.pos)) ~~>
             = Primary ChainSfx { ChainSfx } ;
 Neg         <~~ push(makeNeg(pop())) ~~>
             = "-" UnaryExpr ;
@@ -1008,7 +1008,7 @@ SuperCall   <~~ push(makeSuperCall(popName(), takeAll())); jNoteCall(up.in) ~~>
 
 // A primary followed by method calls, field reads and indexing:
 // System.out.println(x), p.dist(), this.x, arr[i], Main.check(...).
-CallMember  <~~ push(foldCallMember(takeAll(), up.in)) ~~>
+CallMember  <~~ push(foldCallMember(takeAll(), up.in, up.pos)) ~~>
             = Primary { QNewSfx | MRefSfx | MethodSfx | FieldSfx | IndexSfx } ;
 // expr::m - a BOUND method reference whose receiver is an arbitrary expression:
 // `check()::ido`, `new Foo()::getA`, `((C) t)::m`, `sam.get()::get`. Like
@@ -5951,7 +5951,7 @@ HasStatic   = :script(~~
         var isStatic = false
         for (var i = 0; i < mods.length; i++) if (mods[i] == "static") isStatic = true
         return {kind: "method", name: name, statik: isStatic, params: pl.params, ptys: pl.ptys, vararg: pl.vararg,
-                body: body}
+                body: body, acc: jAccOf(mods)}
     }
     // items = [name, {params}, {cbody}]; the cbody carries the optional explicit
     // this()/super() head separately from the rest of the body.
@@ -6008,7 +6008,7 @@ HasStatic   = :script(~~
             jNoteFieldTy(items[i].fname, fty)
             push({kind: "field", name: items[i].fname, statik: isStatic, init: jFieldInit(items[i].finit, fty),
                   dflt: items[i].fdims == "" ? dflt : null, pure: jInitPure(items[i].ftext),
-                  sconst: isStatic && jIsConstField(mods, fty, items[i].ftext)})
+                  sconst: isStatic && jIsConstField(mods, fty, items[i].ftext), acc: jAccOf(mods)})
         }
     }
     // A field's initializer gets the same assignment conversion as a local
@@ -6696,21 +6696,47 @@ HasStatic   = :script(~~
         jExitClass(name, cls)
         // No return value: see buildEnum on cyclic completion values.
     }
-    // Walks a type and everything it inherits - superclasses first, then the
-    // interfaces of each - for a member. Interface DEFAULT methods therefore lose
-    // to a class' own method, exactly as in Java.
+    // A member of a type or of anything it inherits. The superclass chain is
+    // searched first, so a class' method beats every interface default; failing
+    // that, the default of the most specific superinterface declaring it wins
+    // (JLS 8.4.8, 9.4.1): one that another declaring interface extends is
+    // overridden there. Twin of jDefaultOwner in lib/java-decltypes.js.
     function jFindMember(cls, name) {
-        for (var c = cls; c != undefined && c != null; c = c.__super) {
+        var c
+        for (c = cls; c != undefined && c != null; c = c.__super) {
             if (hasOwn(c, name)) { return c[name] }
-            var ifs = c.__ifaces
-            if (ifs != undefined && ifs != null) {
-                for (var i = 0; i < ifs.length; i++) {
-                    var m = jFindMember(ifs[i], name)
-                    if (m != undefined) { return m }
-                }
+        }
+        var cands = []
+        for (c = cls; c != undefined && c != null; c = c.__super) { jIfaceCands(c.__ifaces, name, cands) }
+        for (var i = 0; i < cands.length; i++) {
+            var beaten = false
+            for (var k = 0; k < cands.length && !beaten; k++) {
+                if (k != i && jIfaceReaches(cands[k], cands[i])) { beaten = true }
             }
+            if (!beaten) { return cands[i][name] }
         }
         return undefined
+    }
+    // Every interface in ifs or above it that declares name itself, once each.
+    function jIfaceCands(ifs, name, out) {
+        if (ifs == undefined || ifs == null) { return undefined }
+        for (var i = 0; i < ifs.length; i++) {
+            var f = ifs[i]
+            var dup = false
+            for (var k = 0; k < out.length; k++) { if (out[k] === f) { dup = true } }
+            if (!dup && hasOwn(f, name)) { out.push(f) }
+            jIfaceCands(f.__ifaces, name, out)
+        }
+        return undefined
+    }
+    // Does interface a extend b, directly or further up?
+    function jIfaceReaches(a, b) {
+        var ifs = a.__ifaces
+        if (ifs == undefined || ifs == null) { return false }
+        for (var i = 0; i < ifs.length; i++) {
+            if (ifs[i] === b || jIfaceReaches(ifs[i], b)) { return true }
+        }
+        return false
     }
     // ----- enums -----
     // One constant: its name, the constructor arguments it passes, and (when it
@@ -7168,7 +7194,7 @@ HasStatic   = :script(~~
     // The target of an assignment whose root is an arbitrary primary. The value
     // it returns is an ordinary target record with a `base` thunk in place of a
     // variable name; the resolveRef override below is what reads that thunk.
-    function makeChainTarget(items, text) {
+    function makeChainTarget(items, text, pos) {
         var head = []
         for (var i = 0; i < items.length - 1; i++) { head.push(items[i]) }
         var last = items[items.length - 1]
@@ -7180,6 +7206,7 @@ HasStatic   = :script(~~
                       tyref: ftr, tylty: ftr == null ? undefined : jTyOf(ftr.name),
                       fbty: ftr == null ? jChainBaseTy(text, last.name) : ""}
             jChainTargetRecv(head, last, text, fr)
+            jAccessChk(jAccRecv(fr.frecv), "f:", last.name, 0, pos)
             fr.base = foldCallMember(head)
             return fr
         }
@@ -7230,7 +7257,7 @@ HasStatic   = :script(~~
     }
     // The shared foldCallMember knows the three ordinary suffixes; Java adds the
     // qualified-creation one, so it installs its own fold over the same shape.
-    foldCallMember = function(items, text) {
+    foldCallMember = function(items, text, pos) {
         if (items.length == 1) { return items[0] }
         var primary = items[0]
         var suffixes = items.slice(1)
@@ -7240,6 +7267,7 @@ HasStatic   = :script(~~
         if (text != undefined && jMapStaticRecv(text)) { jMapWant = true }
         if (text != undefined) {
             jChainRecvTys(suffixes, text)
+            jAccessChkSfxs(suffixes, pos)
             for (var vi = 0; vi < suffixes.length; vi++) { if (suffixes[vi].kind == "mcall") { jVaWrapSfx(suffixes[vi]) } }
         }
         return function() {
@@ -7649,6 +7677,7 @@ HasStatic   = :script(~~
     // Twin of the jCycCheck call in buildMain of java-to-llvm-ir.abnf.
     var jCycName = jCycCheck()
     if (jCycName != "") { fail("cyclic inheritance involving " + jCycName) }
+    jProtCheck()
     if (jDeferred.length > 0) { fail("unknown superclass: " + jDeferred[0].ext) }
     jLoadWanted()
     jWalkDone = true

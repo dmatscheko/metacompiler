@@ -666,8 +666,25 @@ class Both implements Greet, Greet2 {
     public String id() { return "B"; }
     public String hello() { return Greet.super.hello() + "/" + Greet2.super.hello(); }
 }
+// A class' method beats every default; among defaults the most specific
+// superinterface's wins, whatever the order of the implements clause.
+interface Who17 { default String who() { return "A"; } }
+interface WhoB17 extends Who17 { default String who() { return "B"; } }
+interface WhoI17 extends Who17 {}
+interface WhoJ17 extends WhoI17, WhoB17 {}
+class WhoAB17 implements Who17, WhoB17 {}
+class WhoBA17 implements WhoB17, Who17 {}
+class WhoCls17 { public String who() { return "S"; } }
+class WhoSub17 extends WhoCls17 implements WhoB17 {}
+class WhoUp17 implements WhoB17 {}
+class WhoDown17 extends WhoUp17 implements WhoI17 {}
+class WhoJx17 implements WhoJ17 {}
 class S17 {
     static void run() {
+        Main.check("ifc5", new WhoAB17().who().equals("B") && new WhoBA17().who().equals("B"));
+        Main.check("ifc6", new WhoSub17().who().equals("S"));
+        Who17 up = new WhoDown17();
+        Main.check("ifc7", up.who().equals("B") && new WhoJx17().who().equals("B"));
         Both b = new Both();
         Main.check("ifc1", b.hello().equals("h:B/g2"));
         Main.check("ifc2", Greet.kind().equals("iface"));
