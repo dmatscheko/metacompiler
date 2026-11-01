@@ -8,14 +8,19 @@
 // "range" (lo, lo+1, ... up to hi; hi null is endless) or "each" (the #each of
 // a user Enumerable, src) - and the OPS map / select / reject / take_while /
 // drop_while / take / slice / cons, {k, f, n}, applied to one value at a time.
-// rbaLazyFirst pulls the first n results (all of them when n < 0); call(f, v)
+// rbaLazyFirst pulls the first n results (all of them when n < 0); call(f, v, m)
 // runs a block, test(v) is Ruby truthiness. A take op ends the run once its count
 // has passed it, so nothing past it is evaluated. An "each" source is PUSHED:
-// drive(src, step) runs its #each, calls step(v) per value and leaves #each once
-// step answers true. Go twin: rubyLazyFirst in abnf/jsrtrubystr.go.
-function rbaLazyFirst(lz, n, call, test, drive) {
+// drive(src, step) runs its #each, calls step(v, m) per value and leaves #each
+// once step answers true. A multi-value yield arrives packed as an Array with m
+// true; the block of a map, take_while or drop_while gets its values spread
+// (`yield 1, 2' gives `map { |x| }' 1) and that of a select or reject the Array
+// (MRI's lazy.c), until a map or a slice makes one value of it. With emit
+// non-null each result goes to emit(v, m) instead of the answer. Go twin:
+// rubyLazyFirst in abnf/jsrtrubystr.go.
+function rbaLazyFirst(lz, n, call, test, drive, emit) {
     var ops = lz.ops
-    var st = {out: [], n: n, cnt: [], on: [], buf: [], done: n == 0, full: false, stopAt: 0 - 1}
+    var st = {out: [], n: n, cnt: [], on: [], buf: [], done: n == 0, full: false, stopAt: 0 - 1, emit: emit}
     var j = 0
     while (j < ops.length) {
         st.cnt.push(0)
@@ -24,8 +29,8 @@ function rbaLazyFirst(lz, n, call, test, drive) {
         j = j + 1
     }
     if (lz.kind == "each" && !st.done) {
-        drive(lz.src, function(v) {
-            rbaLazyRun(st, ops, v, 0, call, test)
+        drive(lz.src, function(v, m) {
+            rbaLazyRun(st, ops, v, m, 0, call, test)
             return st.done
         })
     }
@@ -41,7 +46,7 @@ function rbaLazyFirst(lz, n, call, test, drive) {
             v = lz.items[i % len]
         }
         i = i + 1
-        rbaLazyRun(st, ops, v, 0, call, test)
+        rbaLazyRun(st, ops, v, false, 0, call, test)
     }
     // A slice op still holding values hands them on as a last, short slice when
     // the run ended above it: the source ran out, or a take / take_while before
@@ -51,33 +56,36 @@ function rbaLazyFirst(lz, n, call, test, drive) {
         if (ops[j].k == "slice" && st.buf[j].length > 0 && j > st.stopAt) {
             var rest = st.buf[j]
             st.buf[j] = []
-            rbaLazyRun(st, ops, rest, j + 1, call, test)
+            rbaLazyRun(st, ops, rest, false, j + 1, call, test)
         }
         j = j + 1
     }
     return st.out
 }
-// One value through ops[from..], into st.out unless an op holds it back.
-function rbaLazyRun(st, ops, v, from, call, test) {
+// One value (m: a packed multi-value yield) through ops[from..], into the
+// result unless an op holds it back.
+function rbaLazyRun(st, ops, v, m, from, call, test) {
     var cur = anytype
     cur = v
+    var multi = m
     var j = from
     while (j < ops.length) {
         var op = ops[j]
         if (op.k == "map") {
-            cur = call(op.f, cur)
+            cur = call(op.f, cur, multi)
+            multi = false
         } else if (op.k == "select") {
-            if (!test(call(op.f, cur))) { return }
+            if (!test(call(op.f, cur, false))) { return }
         } else if (op.k == "reject") {
-            if (test(call(op.f, cur))) { return }
+            if (test(call(op.f, cur, false))) { return }
         } else if (op.k == "take_while") {
-            if (!test(call(op.f, cur))) {
+            if (!test(call(op.f, cur, multi))) {
                 rbaLazyStop(st, j)
                 return
             }
         } else if (op.k == "drop_while") {
             if (!st.on[j]) {
-                if (test(call(op.f, cur))) { return }
+                if (test(call(op.f, cur, multi))) { return }
                 st.on[j] = true
             }
         } else if (op.k == "take") {
@@ -92,13 +100,19 @@ function rbaLazyRun(st, ops, v, from, call, test) {
             if (st.buf[j].length < op.n) { return }
             cur = st.buf[j]
             st.buf[j] = []
+            multi = false
         } else if (op.k == "cons") {
             st.buf[j].push(cur)
             if (st.buf[j].length > op.n) { st.buf[j] = st.buf[j].slice(1) }
             if (st.buf[j].length < op.n) { return }
             cur = st.buf[j].slice(0)
+            multi = false
         }
         j = j + 1
+    }
+    if (st.emit !== null) {
+        st.emit(cur, multi)
+        return
     }
     st.out.push(cur)
     if (st.n >= 0 && st.out.length >= st.n) {

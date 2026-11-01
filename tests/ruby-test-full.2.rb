@@ -1742,6 +1742,31 @@ def s160
   check("spl160b", s160f(*[3, 4].each_with_index) == [[3, 0], [4, 1]] && s160f(*{k: 1}) == [[:k, 1]] &&
         s160f(*nil, 1) == [1] && s160f(*S160T.new) == [7, 8] && s160f(*(1..2).each_slice(1)) == [[1], [2]])
 end
+
+# ===== SECTION 161: a multi-value yield through a Lazy =====
+# `yield 1, 2' reaches the block of a lazy map, take_while or drop_while (and of
+# Lazy#each) as two values, so `|x|' takes 1, and that of a select or reject as
+# the Array [1, 2]; a value no map has changed comes out as that Array. Lazy#each
+# runs its block on each value as #each yields it. /usr/bin/ruby 2.6 settles each.
+class S161Y
+  include Enumerable
+  def initialize(l = []); @l = l; end
+  def each; @l << 1; yield 1, 2; @l << 2; yield 3, 4; @l << 3; yield; yield 5; end
+end
+def s161
+  y = S161Y.new
+  check("lzm161a", y.lazy.map { |x| x }.first(1) == [1] && y.lazy.map { |x| x }.to_a == [1, 3, nil, 5] &&
+        y.lazy.map { |*a| a }.to_a == [[1, 2], [3, 4], [nil], [5]] && y.lazy.map { |a, b| b }.to_a == [2, 4, nil, nil] &&
+        y.lazy.drop_while { |x| x == 1 }.to_a == [[3, 4], nil, 5] && y.lazy.take_while { |*a| a.size == 2 }.to_a == [[1, 2], [3, 4]] &&
+        y.lazy.select { |x| x == [1, 2] }.to_a == [[1, 2]] && y.lazy.reject { |x| x == [1, 2] }.to_a == [[3, 4], nil, 5] &&
+        y.lazy.select { |x| true }.map { |x| x }.to_a == [1, 3, nil, 5] && y.lazy.first(2) == [[1, 2], [3, 4]])
+  l = []
+  r = []
+  S161Y.new(l).lazy.each { |x| r << x; l << :b }
+  w = []
+  y.lazy.map { |*a| a }.each { |x| w << x }
+  check("lzm161b", r == [1, 3, nil, 5] && l == [1, :b, 2, :b, 3, :b, :b] && w == [[1, 2], [3, 4], [nil], [5]])
+end
 s122() # SECTION-CALL 122
 s123() # SECTION-CALL 123
 s124() # SECTION-CALL 124
@@ -1781,5 +1806,6 @@ s157() # SECTION-CALL 157
 s158() # SECTION-CALL 158
 s159() # SECTION-CALL 159
 s160() # SECTION-CALL 160
+s161() # SECTION-CALL 161
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

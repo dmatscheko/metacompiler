@@ -106,7 +106,11 @@ func rubyLazyCopy(t *jsObject, op *jsObject, lazy bool, desc string) *jsObject {
 	return c
 }
 
-func (rt *jsrt) rubyLazyFirst(t *jsObject, n int) []interface{} {
+func (rt *jsrt) rubyLazyFirst(t *jsObject, n int) []interface{} { return rt.rubyLazyPull(t, n, nil) }
+
+// rubyLazyPull is rbaLazyFirst with its emit argument: non-nil, each result goes
+// to emit(v, multi) instead of the answer.
+func (rt *jsrt) rubyLazyPull(t *jsObject, n int, emit func(interface{}, bool)) []interface{} {
 	ops := t.props["ops"].(*jsArray).elems
 	items := t.props["items"].(*jsArray).elems
 	kind := t.props["kind"].(string)
@@ -114,10 +118,10 @@ func (rt *jsrt) rubyLazyFirst(t *jsObject, n int) []interface{} {
 	hi, bounded := t.props["hi"].(float64)
 	excl := t.props["excl"] == true
 	st := &rubyLazyState{out: []interface{}{}, n: n, cnt: make([]int, len(ops)), on: make([]bool, len(ops)),
-		buf: make([][]interface{}, len(ops)), done: n == 0, stopAt: -1}
+		buf: make([][]interface{}, len(ops)), done: n == 0, stopAt: -1, emit: emit}
 	if kind == "each" && !st.done {
-		rt.rubyLazyDrive(t.props["src"], func(v interface{}) bool {
-			rt.rubyLazyRun(st, ops, v, 0)
+		rt.rubyLazyDrive(t.props["src"], func(v interface{}, m bool) bool {
+			rt.rubyLazyRun(st, ops, v, m, 0)
 			return st.done
 		})
 	}
@@ -135,23 +139,24 @@ func (rt *jsrt) rubyLazyFirst(t *jsObject, n int) []interface{} {
 			}
 			v = items[i%len(items)]
 		}
-		rt.rubyLazyRun(st, ops, v, 0)
+		rt.rubyLazyRun(st, ops, v, false, 0)
 	}
 	for j := 0; j < len(ops) && !st.full; j++ {
 		if ops[j].(*jsObject).props["k"] == "slice" && len(st.buf[j]) > 0 && j > st.stopAt {
 			rest := &jsArray{elems: st.buf[j]}
 			st.buf[j] = nil
-			rt.rubyLazyRun(st, ops, rest, j+1)
+			rt.rubyLazyRun(st, ops, rest, false, j+1)
 		}
 	}
 	return st.out
 }
 
 // rubyLazyDrive runs the #each of a Lazy's user source, handing step each value
-// (a multi-value yield packed as an Array), and leaves it through catch/throw once
-// step answers true - so `lazy.map { }.first(1)' runs #each only up to its first
-// value. Twin of the drive argument of rbaLazyFirst in lib/ruby-arr.js.
-func (rt *jsrt) rubyLazyDrive(src interface{}, step func(interface{}) bool) {
+// (a multi-value yield packed as an Array, m true), and leaves it through
+// catch/throw once step answers true - so `lazy.map { }.first(1)' runs #each only
+// up to its first value. Twin of the drive argument of rbaLazyFirst in
+// lib/ruby-arr.js.
+func (rt *jsrt) rubyLazyDrive(src interface{}, step func(interface{}, bool) bool) {
 	tag := newJSObject()
 	each := &hostFunc{name: "", fn: func(rt *jsrt, _ uint64, a []interface{}) interface{} {
 		var it interface{} = jsNull
@@ -162,7 +167,7 @@ func (rt *jsrt) rubyLazyDrive(src interface{}, step func(interface{}) bool) {
 		default:
 			it = &jsArray{elems: append([]interface{}{}, a...)}
 		}
-		if step(it) {
+		if step(it, len(a) > 1) {
 			rt.rubyThrow(tag, jsNull)
 		}
 		return jsNull
@@ -181,6 +186,7 @@ type rubyLazyState struct {
 	buf        [][]interface{}
 	done, full bool
 	stopAt     int
+	emit       func(interface{}, bool)
 }
 
 func (st *rubyLazyState) stop(j int) {
@@ -190,32 +196,41 @@ func (st *rubyLazyState) stop(j int) {
 	}
 }
 
-// rubyLazyRun is one value through ops[from:]. Twin of rbaLazyRun in
-// lib/ruby-arr.js.
-func (rt *jsrt) rubyLazyRun(st *rubyLazyState, ops []interface{}, v interface{}, from int) {
-	call := func(f, v interface{}) interface{} { return rt.call(f, jsUndef, []interface{}{v}) }
+// rubyLazyCall is an op's block on one value; m: v is a multi-value yield,
+// spread over the block. Twin of lazyCall in ruby-interpreter.abnf.
+func (rt *jsrt) rubyLazyCall(f, v interface{}, m bool) interface{} {
+	if m {
+		return rt.call(f, jsUndef, append([]interface{}{}, v.(*jsArray).elems...))
+	}
+	return rt.call(f, jsUndef, []interface{}{v})
+}
+
+// rubyLazyRun is one value (m: a packed multi-value yield) through ops[from:].
+// Twin of rbaLazyRun in lib/ruby-arr.js.
+func (rt *jsrt) rubyLazyRun(st *rubyLazyState, ops []interface{}, v interface{}, m bool, from int) {
 	for j := from; j < len(ops); j++ {
 		op := ops[j].(*jsObject)
 		f := op.props["f"]
 		switch op.props["k"] {
 		case "map":
-			v = call(f, v)
+			v = rt.rubyLazyCall(f, v, m)
+			m = false
 		case "select":
-			if !rubyTruthy(call(f, v)) {
+			if !rubyTruthy(rt.rubyLazyCall(f, v, false)) {
 				return
 			}
 		case "reject":
-			if rubyTruthy(call(f, v)) {
+			if rubyTruthy(rt.rubyLazyCall(f, v, false)) {
 				return
 			}
 		case "take_while":
-			if !rubyTruthy(call(f, v)) {
+			if !rubyTruthy(rt.rubyLazyCall(f, v, m)) {
 				st.stop(j)
 				return
 			}
 		case "drop_while":
 			if !st.on[j] {
-				if rubyTruthy(call(f, v)) {
+				if rubyTruthy(rt.rubyLazyCall(f, v, m)) {
 					return
 				}
 				st.on[j] = true
@@ -237,6 +252,7 @@ func (rt *jsrt) rubyLazyRun(st *rubyLazyState, ops []interface{}, v interface{},
 			}
 			v = &jsArray{elems: st.buf[j]}
 			st.buf[j] = nil
+			m = false
 		case "cons":
 			lim := int(rubyToF(op.props["n"]))
 			st.buf[j] = append(st.buf[j], v)
@@ -247,7 +263,12 @@ func (rt *jsrt) rubyLazyRun(st *rubyLazyState, ops []interface{}, v interface{},
 				return
 			}
 			v = &jsArray{elems: append([]interface{}{}, st.buf[j]...)}
+			m = false
 		}
+	}
+	if st.emit != nil {
+		st.emit(v, m)
+		return
 	}
 	st.out = append(st.out, v)
 	if st.n >= 0 && len(st.out) >= st.n {
@@ -305,9 +326,7 @@ func (rt *jsrt) rubyLazyMethod(t *jsObject, name string, args []interface{}) int
 		return &jsArray{elems: rt.rubyLazyFirst(t, -1)}
 	case "each":
 		if blk != nil {
-			for _, v := range rt.rubyLazyFirst(t, -1) {
-				rt.call(blk, jsUndef, []interface{}{v})
-			}
+			rt.rubyLazyPull(t, -1, func(v interface{}, m bool) { rt.rubyLazyCall(blk, v, m) })
 			return t
 		}
 	case "lazy":

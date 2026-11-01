@@ -6829,7 +6829,12 @@ function rbLazyCopy(t, op, lazy, desc) {
     c["src"] = t["src"]
     return c
 }
-function rbLazyFirst(t, n) { return rbaLazyFirst(t, n, rbCall1, rbTruthy, rbLazyDrive) }
+function rbLazyFirst(t, n) { return rbaLazyFirst(t, n, rbLazyCall, rbTruthy, rbLazyDrive, null) }
+// Twin of lazyCall in ruby-interpreter.abnf.
+function rbLazyCall(f, v, m) {
+    if (m) { return f.apply(undefined, v) }
+    return f.apply(undefined, [v])
+}
 // The #each of a Lazy's user source. Twin of lazyDrive in ruby-interpreter.abnf.
 function rbLazyDrive(src, step) {
     var tag = {}
@@ -6843,7 +6848,7 @@ function rbLazyDrive(src, step) {
             while (i < arguments.length) { a.push(arguments[i]); i = i + 1 }
             it = a
         }
-        if (step(it)) { js_rthrow([tag]) }
+        if (step(it, arguments.length > 1)) { js_rthrow([tag]) }
         return null
     })
     js_rcatch(tag, function() { return rbMethod(src, "each", [each]) })
@@ -6877,12 +6882,7 @@ function rbLazyMethod(t, name, args) {
     }
     if (name == "to_a" || name == "force" || name == "entries") { return rbLazyFirst(t, -1) }
     if (name == "each" && blk !== null) {
-        var all = rbLazyFirst(t, -1)
-        var i = 0
-        while (i < all.length) {
-            rbCall1(blk, all[i])
-            i = i + 1
-        }
+        rbaLazyFirst(t, -1, rbLazyCall, rbTruthy, rbLazyDrive, function(v, m) { return rbLazyCall(blk, v, m) })
         return t
     }
     if (name == "lazy") {

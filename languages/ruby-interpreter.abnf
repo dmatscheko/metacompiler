@@ -10416,10 +10416,13 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         c.src = t.src
         return c
     }
-    function lazyFirst(t, n) { return rbaLazyFirst(t, n, function(f, v) { return blockCall(f, [v]) }, rtest, lazyDrive) }
+    function lazyFirst(t, n) { return rbaLazyFirst(t, n, lazyCall, rtest, lazyDrive, null) }
+    // An op's block on one value; m: v is a multi-value yield, spread over the block.
+    function lazyCall(f, v, m) { return blockCall(f, m ? v : [v]) }
     // The #each of a Lazy's user source, each value (a multi-value yield packed as
-    // an Array) handed to step, left through catch/throw once step answers true.
-    // Twins: rubyLazyDrive in abnf/jsrtrubystr.go, rbLazyDrive in lib/ruby-rt.metajs.
+    // an Array, m true) handed to step, left through catch/throw once step answers
+    // true. Twins: rubyLazyDrive in abnf/jsrtrubystr.go, rbLazyDrive in
+    // lib/ruby-rt.metajs.
     function lazyDrive(src, step) {
         var tag = {}
         hostGlobals["catch"](tag, function() {
@@ -10427,7 +10430,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 var a = argsArray(arguments)
                 var it = anytype
                 it = a.length == 1 ? a[0] : (a.length == 0 ? null : a)
-                if (step(it)) { hostGlobals["throw"](tag, null) }
+                if (step(it, a.length > 1)) { hostGlobals["throw"](tag, null) }
                 return null
             })
         })
@@ -10456,9 +10459,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             return f1.length > 0 ? f1[0] : null
         }
         if (name == "to_a" || name == "force" || name == "entries") { return lazyFirst(t, -1) }
+        // each with a block takes each result as it is made.
         if (name == "each" && blk != null) {
-            var all = lazyFirst(t, -1)
-            for (var i = 0; i < all.length; i++) { blockCall(blk, [all[i]]) }
+            rbaLazyFirst(t, -1, lazyCall, rtest, lazyDrive, function(v, m) { return lazyCall(blk, v, m) })
             return t
         }
         if (name == "lazy") { return t.lazy ? t : lazyCopy(t, null, true, "#<Enumerator::Lazy: " + t.desc + ">") }
