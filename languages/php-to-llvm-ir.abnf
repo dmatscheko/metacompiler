@@ -3367,9 +3367,6 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         var genV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, itN)])
         return callExt(b, "js_phmcall", [genV, emitStr(b, "key"), callExt(b, "js_arr_new", [])])
     }
-    function genNext(b, genV) {
-        return callExt(b, "js_phmcall", [genV, emitStr(b, "next"), callExt(b, "js_arr_new", [])])
-    }
     // 'yield from SRC': every element of SRC is yielded in turn, WITH ITS OWN KEY -
     // PHP forwards the inner keys, which is what makes a delegating generator
     // indistinguishable from the one it delegates to. SRC may be an array or another
@@ -3400,7 +3397,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         var startA = curF.NewBlock("")
         var headB = curF.NewBlock("")
         b.NewCondBr(truthy(b, isGen), startG, startA)
-        callExt(startG, "js_scope_set", [curScopeV, emitStr(startG, stN), feStep(startG, srcV, hTrue, hTrue)])
+        callExt(startG, "js_scope_set", [curScopeV, emitStr(startG, stN), feStep(startG, srcV, true, hTrue, false)])
         startG.NewBr(headB)
         callExt(startA, "js_scope_set", [curScopeV, emitStr(startA, lnN),
                                          callExt(startA, "js_range_len", [srcV])])
@@ -3456,15 +3453,19 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         var gPost = curF.NewBlock("")
         postB.NewCondBr(truthy(postB, callExt(postB, "js_scope_get", [curScopeV, emitStr(postB, gnN)])), gPost, headB)
         var itP = callExt(gPost, "js_scope_get", [curScopeV, emitStr(gPost, itN)])
-        callExt(gPost, "js_scope_set", [curScopeV, emitStr(gPost, stN), feStep(gPost, itP, hFalse, hTrue)])
+        callExt(gPost, "js_scope_set", [curScopeV, emitStr(gPost, stN), feStep(gPost, itP, false, hTrue, false)])
         gPost.NewBr(headB)
         return exitB
     }
-    // One step of foreach's generator walk: a generator's next(), or, in a program
-    // with iterators, js_phfestep, which also drives an Iterator.
-    function feStep(b, itV, first, needKey) {
-        if (!usesIter) { return genNext(b, itV) }
-        return callExt(b, "js_phfestep", [itV, first, needKey])
+    // One step of foreach's generator walk, or, in a program with iterators,
+    // js_phfestep, which also drives an Iterator. The first step of a generator
+    // starts it, or takes the element it is parked at, and the later ones resume
+    // it; traverse is a foreach's, which may not rewind it (js_phgenstart).
+    function feStep(b, itV, first, needKey, traverse) {
+        var travV = traverse ? hTrue : hFalse
+        if (usesIter) { return callExt(b, "js_phfestep", [itV, first ? hTrue : hFalse, needKey, travV]) }
+        if (first) { return callExt(b, "js_phgenstart", [itV, travV]) }
+        return callExt(b, "js_phgenstep", [itV])
     }
     function makeForeachGen(iterT, keyName, valName, pat, body, byRef) {
         return function(b) {
@@ -3490,7 +3491,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             var startA = curF.NewBlock("")
             var headB = curF.NewBlock("")
             b.NewCondBr(truthy(b, isGen), startG, startA)
-            callExt(startG, "js_scope_set", [curScopeV, emitStr(startG, stN), feStep(startG, ir.v, hTrue, needKey)])
+            callExt(startG, "js_scope_set", [curScopeV, emitStr(startG, stN), feStep(startG, ir.v, true, needKey, true)])
             startG.NewBr(headB)
             callExt(startA, "js_scope_set", [curScopeV, emitStr(startA, lnN),
                                              callExt(startA, "js_range_len", [ir.v])])
@@ -3551,7 +3552,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             var gPost = curF.NewBlock("")
             postB.NewCondBr(truthy(postB, callExt(postB, "js_scope_get", [curScopeV, emitStr(postB, gnN)])), gPost, headB)
             var itP = callExt(gPost, "js_scope_get", [curScopeV, emitStr(gPost, itN)])
-            callExt(gPost, "js_scope_set", [curScopeV, emitStr(gPost, stN), feStep(gPost, itP, hFalse, needKey)])
+            callExt(gPost, "js_scope_set", [curScopeV, emitStr(gPost, stN), feStep(gPost, itP, false, needKey, true)])
             gPost.NewBr(headB)
             return exitB
         }
@@ -7924,7 +7925,9 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         curGen = savedGen
         curRet = savedRet
         genClosure = sawYield
-        sawYield = savedSaw
+        // A try/catch/finally body is part of its function, so a yield in it makes
+        // that function a generator.
+        sawYield = isCtl ? savedSaw || sawYield : savedSaw
         if (isCtl) { ctlLeave() }
         curF = savedF
         curScopeV = savedScope
@@ -9357,8 +9360,9 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         // "Error" is here for the METHOD and NAME misses (js_phmcall / js_phmissname
         // in languages/lib/php-rt.metajs and abnf/jsrtphp.go), which PHP 8 raises as a
         // catchable Error.
-        // "stdClass" is the class of an (object) cast (js_phcast).
-        var rtCls = ["DivisionByZeroError", "ArithmeticError", "Error", "ValueError", "TypeError", "stdClass"]
+        // "stdClass" is the class of an (object) cast (js_phcast), and "Exception"
+        // what a Generator that cannot be rewound or has not returned raises.
+        var rtCls = ["DivisionByZeroError", "ArithmeticError", "Error", "ValueError", "TypeError", "stdClass", "Exception"]
         for (var rc = 0; rc < rtCls.length; rc++) {
             callExt(b, "js_phset", [regV, emitStr(b, rtCls[rc]),
                                     callExt(b, "js_scope_get", [curScopeV, emitStr(b, rtCls[rc])])])

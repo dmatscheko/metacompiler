@@ -1621,6 +1621,61 @@ function s84() {
     check("rc8", $a[0] === 1);
 }
 
+// ===== SECTION 85: generators suspend, step by their methods, and refuse to rewind =====
+// A yield inside a try, catch or finally body makes its function a generator
+// like any other. The body is SUSPENDED at each yield: its frame keeps its
+// variables, and a reference one of them holds, while the generator is parked.
+// next() and send() first run a fresh body to its first yield, so next() lands
+// on the second and send(v) gives v to the first (Generator::next, ::send). A
+// foreach takes the element a generator is parked at, and throws when it is
+// finished ("Cannot traverse an already closed generator") or was resumed past
+// its first yield ("Cannot rewind a generator that was already run",
+// zend_generator_get_iterator, zend_generator_rewind); getReturn() of a body
+// that has not returned throws as well (Generator::getReturn).
+function s85thrower() { throw new Exception("t"); }
+function s85incatch() { try { s85thrower(); } catch (Exception $e) { yield 5; } }
+function s85intry() { try { yield 1; } finally { echo ""; } }
+function s85three() { $x = yield 1; $y = yield 2; yield $x . "," . $y; }
+function s85ref() { global $s85z; $r = &$s85z[0]; yield 1; yield 2; }
+function s85err($g, $how) {
+    try {
+        if ($how == 0) { foreach ($g as $v) { } }
+        else if ($how == 1) { $g->rewind(); }
+        else { $g->getReturn(); }
+    } catch (Exception $e) { return $e->getMessage(); }
+    return "";
+}
+function s85() {
+    global $s85z;
+    $a = "";
+    foreach (s85incatch() as $k => $v) { $a .= $k . "=" . $v; }
+    foreach (s85intry() as $v) { $a .= ";" . $v; }
+    check("gs1", $a === "0=5;1");
+    $g = s85three();
+    $g->next();
+    $n = $g->current();
+    $s = s85three();
+    $first = $s->send("a");
+    $s->next();
+    check("gs2", $n === 2 && $first === 2 && $s->current() === "a,");
+    $p = s85three();
+    $p->current();
+    $seen = "";
+    foreach ($p as $k => $v) { $seen .= $k . $v; break; }
+    foreach ($p as $k => $v) { $seen .= $k . (is_string($v) ? "s" : $v); }
+    check("gs3", $seen === "0101122s");
+    check("gs4", s85err($p, 0) === "Cannot traverse an already closed generator"
+        && s85err($g, 1) === "Cannot rewind a generator that was already run"
+        && s85err($g, 0) === "Cannot rewind a generator that was already run"
+        && s85err(s85three(), 2) === "Cannot get return value of a generator that hasn't returned");
+    $s85z = [1, 2];
+    $gen = s85ref();
+    $gen->current();
+    $w = $s85z;
+    $w[0] = 11;
+    check("gs5", $s85z[0] === 11);
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -1650,6 +1705,7 @@ function main() {
     s82(); // SECTION-CALL 82
     s83(); // SECTION-CALL 83
     s84(); // SECTION-CALL 84
+    s85(); // SECTION-CALL 85
     echo "full: " . $checks . " checks, " . $failures . " failures\n";
     return $failures;
 }

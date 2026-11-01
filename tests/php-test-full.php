@@ -31,10 +31,10 @@
 // namespaces and use-imports (single-file harness), declare(strict_types=1)
 // (it would change the semantics of every section), the standard library
 // beyond the array, string and math functions (sections 38, 39 and 42), define(),
-// superglobals other than $GLOBALS, include/require/eval, fibers, Generator
-// methods (->send() and friends live on the engine's Generator class), references
-// returned from functions, reflection (attributes are applied, never read
-// back), and the deprecation notice of the "${var}" interpolation form.
+// superglobals other than $GLOBALS, include/require/eval, fibers,
+// references returned from functions, reflection (attributes are applied,
+// never read back), and the deprecation notice of the "${var}"
+// interpolation form.
 // Expected values follow real PHP 8.3 (e.g. 7 / 2 === 3.5 and strlen counts
 // bytes); validated against the manual by hand - no local php binary.
 //
@@ -481,8 +481,8 @@ function s19() {
     $dele = "";
     foreach (s19delegate() as $k => $v) { $dele .= $k . $v . ";"; }
     check("gen6", $dele === "z0;a1;b2;"); // yield from forwards the inner KEYS
-    // The Generator object's own cursor. (send() needs a suspendable body and is
-    // deliberately out of scope - see the header.)
+    // The Generator object's own cursor: current(), key() and valid() answer
+    // without advancing it.
     $it = s19keyed();
     $seen = $it->current() . $it->key() . ($it->valid() ? "y" : "n");
     $it->next();

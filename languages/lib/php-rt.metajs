@@ -2782,12 +2782,28 @@ function phVisible(o, vis, scope) {
     return phStr(scope["__name"]) == vis
 }
 
-// One step of foreach's generator walk: a generator's next(), or an Iterator's
-// rewind (first) / next, valid, current and, when the loop binds one, key, as
-// the same {done, value} record with the key in a {__genkv, k, v}. Twin of
-// m["js_phfestep"] in abnf/jsrtphp.go.
-function js_phfestep(it, first, needKey) {
-    if (phIsGen(it)) { return js_phmcall(it, "next", []) }
+// The first step of a foreach or 'yield from' over a generator: the element it
+// is parked at, after starting it - and for a foreach (traverse) after the
+// checks that it is neither finished nor past its first yield. Twin of
+// m["js_phgenstart"] in abnf/jsrtphp.go.
+function js_phgenstart(g, traverse) {
+    if (traverse === true) { phGenRewind(g, true) } else { phGenPrime(g) }
+    return phGenAt(g)
+}
+
+// A later step: resume the body, its yield evaluating to null. Twin of
+// m["js_phgenstep"] in abnf/jsrtphp.go.
+function js_phgenstep(g) { return phGenStep(g, null) }
+
+// One step of foreach's walk over a generator (js_phgenstart, js_phgenstep), or
+// over an Iterator: rewind (first) / next, valid, current and, when the loop
+// binds one, key, as the same {done, value} record with the key in a
+// {__genkv, k, v}. Twin of m["js_phfestep"] in abnf/jsrtphp.go.
+function js_phfestep(it, first, needKey, traverse) {
+    if (phIsGen(it)) {
+        if (first === true) { return js_phgenstart(it, traverse) }
+        return phGenStep(it, null)
+    }
     if (first === true) { js_phmcall(it, "rewind", []) } else { js_phmcall(it, "next", []) }
     var st = {}
     if (!phTest(js_phmcall(it, "valid", []))) {
@@ -2972,6 +2988,7 @@ function phGenState(g) {
     st["key"] = null       // its key (key()): the yielded one, or the auto index
     st["ret"] = null       // the body's return value, once done (getReturn())
     st["auto"] = 0
+    st["moved"] = false    // resumed past its first yield: it cannot be rewound
     phGenCell.push(g)
     phGenSt.push(st)
     return st
@@ -2988,6 +3005,7 @@ function phGenStep(g, sent) {
         end["done"] = true
         return end
     }
+    if (st["started"]) { st["moved"] = true }
     st["started"] = true
     var r = g.next(sent)
     if (phTest(r["done"])) {
@@ -3025,8 +3043,7 @@ function phGenStep(g, sent) {
     return r
 }
 
-// current() and key() on a generator nobody has stepped yet run the body up to
-// its first yield first - PHP's Generator does exactly this.
+// Run an unstarted body up to its first yield (zend_generator_ensure_initialized).
 function phGenPrime(g) {
     var st = phGenState(g)
     if (!st["started"]) {
@@ -3034,49 +3051,65 @@ function phGenPrime(g) {
     }
 }
 
-// The whole of PHP's Generator surface, over that one primitive.
+// What foreach does first: a finished generator cannot be traversed again, and
+// one resumed past its first yield cannot be rewound (zend_generator_get_iterator,
+// zend_generator_rewind).
+function phGenRewind(g, traverse) {
+    var st = phGenState(g)
+    if (traverse === true) {
+        if (st["done"]) { phRaise("Exception", "Cannot traverse an already closed generator") }
+    }
+    phGenPrime(g)
+    if (st["moved"]) { phRaise("Exception", "Cannot rewind a generator that was already run") }
+}
+
+// The element a generator is parked at, as the {done, value} record a foreach
+// step answers, the key inside a {__genkv, k, v}.
+function phGenAt(g) {
+    var st = phGenState(g)
+    var r = {}
+    r["done"] = st["done"]
+    var kv = {}
+    kv["__genkv"] = true
+    kv["k"] = st["key"]
+    kv["v"] = st["last"]
+    r["value"] = kv
+    return r
+}
+
+// The whole of PHP's Generator surface, over that one primitive. next() and
+// send() initialize the body first, so on a fresh generator next() lands on the
+// SECOND yield and send(v) gives v to the first. Twin of genMethod in
+// php-interpreter.abnf and phpGenCall in abnf/jsrtphp.go.
 function phGenCall(g, name, args) {
     var a0 = anytype
-    a0 = undefined
+    a0 = null
     if (args !== undefined && args !== null) {
         if (args.length > 0) { a0 = args[0] }
     }
-    if (name == "next") { return phGenStep(g, a0) }
-    if (name == "send") {
-        // send(v) resumes with v and answers the value yielded NEXT, which is the
-        // shape PHP and Python share; the {value, done} record is next()'s. A send
-        // to a fresh generator primes it first.
-        var sst = phGenState(g)
-        if (!sst["started"]) { phGenStep(g, undefined) }
-        phGenStep(g, a0)
-        if (sst["done"]) { return null }
-        return sst["last"]
-    }
-    if (name == "return") {
-        // generator.return(v): abandon the body without resuming it.
-        var fst = phGenState(g)
-        fst["done"] = true
-        fst["ret"] = a0
-        fst["last"] = null
-        fst["key"] = null
-        var fin = {}
-        fin["value"] = a0
-        fin["done"] = true
-        return fin
-    }
-    phGenPrime(g)
     var st = phGenState(g)
-    if (name == "current") {
-        if (st["done"]) { return null }
+    if (name == "send") {
+        phGenPrime(g)
+        phGenStep(g, a0)
         return st["last"]
     }
-    if (name == "key") {
-        if (st["done"]) { return null }
-        return st["key"]
+    if (name == "next") {
+        phGenPrime(g)
+        phGenStep(g, null)
+        return null
     }
+    if (name == "rewind") {
+        phGenRewind(g, false)
+        return null
+    }
+    phGenPrime(g)
+    if (name == "current") { return st["last"] }
+    if (name == "key") { return st["key"] }
     if (name == "valid") { return !st["done"] }
-    if (name == "rewind") { return null }
-    if (name == "getReturn") { return st["ret"] }
+    if (name == "getReturn") {
+        if (!st["done"]) { phRaise("Exception", "Cannot get return value of a generator that hasn't returned") }
+        return st["ret"]
+    }
     // PHP 8 makes this the same catchable Error as any other missing method:
     // `Call to undefined method Generator::nope()`.
     phRaise("Error", "Call to undefined method Generator::" + name + "()")

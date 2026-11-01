@@ -3890,14 +3890,8 @@ func init() {
 			if !isArr {
 				rt.fail("js_phmcall args must be an array")
 			}
-			if _, isGen := recv.(*jsGenerator); isGen {
-				// The shared rt.memberCall aborts on a generator method nothing
-				// claims, and this is php's own name precisely so it can raise
-				// instead. The member test is the same one memberCall makes.
-				if !isCallable(rt.getMember(recv, name)) {
-					rt.phpRaise("Error", "Call to undefined method Generator::"+name+"()")
-				}
-				return w(rt.memberCall(recv, name, args.elems))
+			if g, isGen := recv.(*jsGenerator); isGen {
+				return w(rt.phpGenCall(g, name, args.elems))
 			}
 			if o, isObj := recv.(*jsObject); isObj {
 				if cls, has := o.props["__class"]; has && !isNullish(cls) {
@@ -5242,15 +5236,30 @@ func init() {
 			}
 			return jsHFalse
 		}
-		// js_phfestep(it, first, needKey): one step of foreach's generator walk -
-		// a generator's next(), or an Iterator's rewind (first) / next, valid,
-		// current and, when the loop binds one, key, as the same {done, value}
-		// record with the key in a {__genkv, k, v}. Twin of js_phfestep in
-		// lib/php-rt.metajs and of the Iterator loop in php-interpreter.abnf.
+		// js_phgenstart(g, traverse): the first step of a foreach or 'yield from'
+		// over a generator - the element it is parked at, after starting it, and
+		// for a foreach (traverse) after the checks that it is neither finished
+		// nor past its first yield. Twin of js_phgenstart in lib/php-rt.metajs.
+		m["js_phgenstart"] = func(a []uint64) uint64 {
+			return w(rt.phpGenStart(u(a[0]).(*jsGenerator), rt.phpTest(u(a[1]))))
+		}
+		// js_phgenstep(g): a later step, the body's yield evaluating to null.
+		m["js_phgenstep"] = func(a []uint64) uint64 {
+			return w(rt.phpGenStep(u(a[0]).(*jsGenerator), jsNull))
+		}
+		// js_phfestep(it, first, needKey, traverse): one step of foreach's walk
+		// over a generator (js_phgenstart, js_phgenstep), or over an Iterator:
+		// rewind (first) / next, valid, current and, when the loop binds one, key,
+		// as the same {done, value} record with the key in a {__genkv, k, v}. Twin
+		// of js_phfestep in lib/php-rt.metajs and of the Iterator loop in
+		// php-interpreter.abnf.
 		m["js_phfestep"] = func(a []uint64) uint64 {
 			it := u(a[0])
-			if _, isGen := it.(*jsGenerator); isGen {
-				return w(rt.memberCall(it, "next", nil))
+			if g, isGen := it.(*jsGenerator); isGen {
+				if rt.phpTest(u(a[1])) {
+					return w(rt.phpGenStart(g, rt.phpTest(u(a[3]))))
+				}
+				return w(rt.phpGenStep(g, jsNull))
 			}
 			if rt.phpTest(u(a[1])) {
 				rt.memberCall(it, "rewind", nil)
@@ -5367,4 +5376,94 @@ func init() {
 	// js_phmcall reads its argument array in position 2, exactly like the js_mcall
 	// it replaces: the handle must arrive as the array itself.
 	jsThroughArgs["js_phmcall"] = 1 << 2
+}
+
+// PHP's Generator over the shared *jsGenerator. next() and send() initialize the
+// body first, so on a fresh generator next() lands on the SECOND yield and
+// send(v) gives v to the first. Twin of phGenCall in lib/php-rt.metajs and of
+// genMethod in php-interpreter.abnf.
+func (rt *jsrt) phpGenCall(g *jsGenerator, name string, args []interface{}) interface{} {
+	var a0 interface{} = jsNull
+	if len(args) > 0 {
+		a0 = args[0]
+	}
+	switch name {
+	case "send":
+		g.prime(rt)
+		rt.phpGenStep(g, a0)
+		return phpGenCur(g, g.lastValue)
+	case "next":
+		g.prime(rt)
+		rt.phpGenStep(g, jsNull)
+		return jsNull
+	case "rewind":
+		rt.phpGenRewind(g, false)
+		return jsNull
+	case "current", "key", "valid", "getReturn":
+	default:
+		rt.phpRaise("Error", "Call to undefined method Generator::"+name+"()")
+	}
+	g.prime(rt)
+	switch name {
+	case "current":
+		return phpGenCur(g, g.lastValue)
+	case "key":
+		return phpGenCur(g, g.lastKey)
+	case "valid":
+		return !g.done
+	}
+	if !g.done {
+		rt.phpRaise("Exception", "Cannot get return value of a generator that hasn't returned")
+	}
+	if g.retValue == nil {
+		return jsNull
+	}
+	return g.retValue
+}
+
+// phpGenCur is what current() and key() answer: null once the body is done.
+func phpGenCur(g *jsGenerator, v interface{}) interface{} {
+	if g.done {
+		return jsNull
+	}
+	return v
+}
+
+// phpGenStep resumes the body with sent as the value of its yield.
+func (rt *jsrt) phpGenStep(g *jsGenerator, sent interface{}) interface{} {
+	if g.started && !g.done {
+		g.moved = true
+	}
+	return g.step(rt, sent)
+}
+
+// phpGenRewind is what foreach does first: a finished generator cannot be
+// traversed again, and one resumed past its first yield cannot be rewound
+// (zend_generator_get_iterator, zend_generator_rewind).
+func (rt *jsrt) phpGenRewind(g *jsGenerator, traverse bool) {
+	if traverse && g.done {
+		rt.phpRaise("Exception", "Cannot traverse an already closed generator")
+	}
+	g.prime(rt)
+	if g.moved {
+		rt.phpRaise("Exception", "Cannot rewind a generator that was already run")
+	}
+}
+
+// phpGenStart answers the element a generator is parked at as a foreach step's
+// {done, value} record, the key inside a {__genkv, k, v}.
+func (rt *jsrt) phpGenStart(g *jsGenerator, traverse bool) interface{} {
+	if traverse {
+		rt.phpGenRewind(g, true)
+	} else {
+		g.prime(rt)
+	}
+	kv := newJSObject()
+	kv.set("__genkv", true)
+	kv.set("k", phpGenCur(g, g.lastKey))
+	kv.set("v", phpGenCur(g, g.lastValue))
+	st := newJSObject()
+	st.set("value", kv)
+	st.set("done", g.done)
+	return st
 }

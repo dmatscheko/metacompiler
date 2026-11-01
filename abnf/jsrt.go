@@ -777,6 +777,10 @@ type jsGenerator struct {
 	lastKey   interface{}
 	retValue  interface{}
 	autoKey   float64
+
+	// PHP: the body was resumed past its first yield, so it cannot be rewound
+	// (phpGenStep in jsrtphp.go).
+	moved bool
 }
 
 // genExit is the sentinel finish() sends INTO a suspended body so that the
