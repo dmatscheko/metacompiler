@@ -1501,6 +1501,31 @@ M:
 	check("lblbrk135", n == 20 && len(c) == 1)
 }
 
+// ===== SECTION 136: a struct type holding a map of itself =====
+// The zero value of such a struct holds a nil map whose missing elements read as
+// that zero value again, at any depth. The expected values are go run's.
+type s136 struct {
+	n int
+	m map[int]s136
+}
+
+type t136 struct {
+	a [2]map[string]t136
+	l []t136
+}
+
+func s136f() {
+	var s s136
+	out := fmt.Sprint(len(s.m), s.n, s.m[1].n, len(s.m[1].m[2].m))
+	s.m = map[int]s136{}
+	s.m[1] = s136{n: 5}
+	x := s.m[2]
+	x.n = 3
+	var t t136
+	out += fmt.Sprint(" ", len(s.m), s.m[1].n, s.m[2].n, x.n, len(t.a[1]), len(t.a[0]["k"].a[1]))
+	check("selfmap136", out == "0 0 0 0 1 5 0 3 0 0")
+}
+
 func main() {
 	s94()   // SECTION-CALL 94
 	s95()   // SECTION-CALL 95
@@ -1542,6 +1567,7 @@ func main() {
 	s133()  // SECTION-CALL 133
 	s134f() // SECTION-CALL 134
 	s135()  // SECTION-CALL 135
+	s136f() // SECTION-CALL 136
 	fmt.Println("full:", checks, "checks,", fails, "failures")
 	os.Exit(fails)
 }

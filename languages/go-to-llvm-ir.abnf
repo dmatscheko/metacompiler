@@ -2937,7 +2937,10 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // as written (mty), read by fmt's %T. The twin is newMap in go-interpreter.abnf.
     function emitMapNew(b, zero, mty) {
         var mV = callExt(b, "js_dict_new", [])
-        callExt(b, "js_set", [mV, emitStr(b, "zero"), emitZero(b, zero)])
+        goZeroInMap++
+        var zV = emitZero(b, zero)
+        goZeroInMap--
+        callExt(b, "js_set", [mV, emitStr(b, "zero"), zV])
         callExt(b, "js_set", [mV, emitStr(b, "mty"), emitStr(b, mty)])
         if (goIfKeyedTy(mty)) { callExt(b, "js_set", [mV, emitStr(b, "ik"), hTrue]) }
         return mV
@@ -5040,7 +5043,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             var qu = resolveDefined(qk)
             if (qu != qk) { return emitZeroTy(b, qu) }
             var qf = structFields[qk]
-            if (qf != undefined) { return emitStructZero(b, emitPkgMember(b, qz.p, qz.n), qf, structFTypes[qk]) }
+            if (qf != undefined) { return emitStructZero(b, emitPkgMember(b, qz.p, qz.n), qf, structFTypes[qk], "") }
             return hNull
         }
         var wd = goTyWord(t)
@@ -5063,15 +5066,17 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         // An inline struct type, by the field list its text was noted with.
         if (wd == "struct") {
             var an = goAnonSt(t)
-            return an == null ? hNull : emitStructZero(b, emitAnonCls(b, an), an.f, an.t)
+            return an == null ? hNull : emitStructZero(b, emitAnonCls(b, an), an.f, an.t, "")
         }
         if (wd == "chan" || wd == "func" || wd == "interface") { return hNull }
         var flds = sFields(wd)
         if (flds != undefined && flds != null) {
             var clsV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, wd)])
             var ta = goTpArgsOf(t)
-            if (ta != "" && goGenTys["$" + wd] !== undefined) { return emitGenZero(b, clsV, flds, sFTypes(wd), goGenTys["$" + wd], goTpSplit(ta)) }
-            return emitStructZero(b, clsV, flds, sFTypes(wd))
+            var cyc = goZeroCycle(t)
+            if (cyc != null) { return cyc }
+            if (ta != "" && goGenTys["$" + wd] !== undefined) { return emitGenZero(b, clsV, flds, sFTypes(wd), goGenTys["$" + wd], goTpSplit(ta), t) }
+            return emitStructZero(b, clsV, flds, sFTypes(wd), t)
         }
         // A defined type zeroes to the zero of what it is defined over, so `var l L`
         // over `type L []int` is an empty SLICE (append/len/range all work).
@@ -5080,25 +5085,41 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         return hNull
     }
     // A zero INSTANCE of a struct: every field at the zero of its own declared type,
-    // which is what carries a field's width into an untouched slot.
-    function emitStructZero(b, clsV, fields, ftypes) {
+    // which is what carries a field's width into an untouched slot. key names the
+    // struct type for goZeroCycle ("" for none).
+    function emitStructZero(b, clsV, fields, ftypes, key) {
         var objV = callExt(b, "js_obj_new", [])
         callExt(b, "js_set", [objV, emitStr(b, "__class"), clsV])
+        goZeroSts.push({k: key, v: objV, m: goZeroInMap > 0})
         for (var z = 0; z < fields.length; z++) {
             callExt(b, "js_set", [objV, emitStr(b, fields[z]), emitZeroTy(b, ftypes[z])])
         }
+        goZeroSts.pop()
         return objV
+    }
+    // A map's zero value holds its value type's zero, which may hold the map type
+    // again (`type S struct{ m map[int]S }`): the zero of a struct type already being
+    // built as a map's zero is that same object, a cycle where the interpreter makes
+    // each level on its first read (mapZero). A map's zero is never written - an
+    // element of a map is not addressable - so the sharing is not observable.
+    var goZeroSts = []
+    var goZeroInMap = 0
+    function goZeroCycle(key) {
+        for (var i = goZeroSts.length - 1; i >= 0; i--) {
+            if (goZeroSts[i].m && goZeroSts[i].k == key) { return goZeroSts[i].v }
+        }
+        return null
     }
     // The zero of an instantiated generic struct: its fields at the type arguments
     // vals (for the struct's parameters tps), and the arguments recorded as __targs.
     // Twin of goZeroStructOf in go-interpreter.abnf.
-    function emitGenZero(b, clsV, fields, ftypes, tps, vals) {
+    function emitGenZero(b, clsV, fields, ftypes, tps, vals, key) {
         var fts = []
         for (var z = 0; z < ftypes.length; z++) {
             var fs = goTpSubst(ftypes[z], tps, vals)
             fts.push(fs != "" ? fs : ftypes[z])
         }
-        var objV = emitStructZero(b, clsV, fields, fts)
+        var objV = emitStructZero(b, clsV, fields, fts, key)
         callExt(b, "js_set", [objV, emitStr(b, "__targs"), emitTargs(b, vals)])
         return objV
     }

@@ -1456,6 +1456,21 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // languages/lib/go-rt.metajs and giIsNilMap in abnf/jsrt.go. `[]T` zeroes to an
     // empty slice HEADER carrying the same mark - see newNilSl.
     function newNilMap(zero, mty) { return {__dict: true, keys: [], vals: [], zero: zero, mty: mty, ik: goIkOf(mty), __nil: true} }
+    // The zero of a map type makes its values' zero on the first read (mapZero): the
+    // value type may hold the map type itself, `type S struct{ m map[int]S }`. Twin of
+    // the map arm of emitZeroTy in go-to-llvm-ir.abnf.
+    function goLazyNilMap(mty) {
+        var m = newNilMap(null, mty)
+        m.zl = true
+        return m
+    }
+    function mapZero(m) {
+        if (m.zl === true) {
+            m.zl = false
+            m.zero = goZeroTy(mapValText(m.mty))
+        }
+        return m.zero
+    }
     function isNilMap(v) { return isMap(v) && v.__nil == true }
     // indexOf compares with ===, like the scan it replaces. A SIZED INTEGER key is
     // a box, and two boxes holding the same value are different objects, so a
@@ -1522,7 +1537,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     }
     function mapGet(m, k) {
         var i = mapFind(m, k)
-        return i >= 0 ? m.vals[i] : m.zero
+        return i >= 0 ? m.vals[i] : mapZero(m)
     }
     function mapSet(m, k, v) {
         // Go panics on a store into a nil map, and that is the ONE thing a nil map
@@ -2891,7 +2906,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         // See goIndex: `h := &arr; h[0] = 5` writes into the array the cell points at,
         // which is the array itself - Go's whole reason for pointers to arrays.
         var o = isPtr(oIn) ? ptrGet(oIn) : oIn
-        if (isMap(o)) { mapSet(o, i, goAdoptLike(o.zero, v)); return }
+        if (isMap(o)) { mapSet(o, i, goAdoptLike(mapZero(o), v)); return }
         var ix = szIs(i) ? szNum(i) : i
         if (isSl(o)) { slSet(o, ix, slAdopt(o, ix, v)); return }
         // A nil target is a nil POINTER being written through (`p.X = 1` on a nil p),
@@ -4500,7 +4515,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         if (w == "complex64") { return newCx64(0, 0) }
         if (w == "string") { return "" }
         if (w == "bool") { return false }
-        if (w == "map") { return newNilMap(goZeroTy(mapValText(t)), t) }
+        if (w == "map") { return goLazyNilMap(t) }
         // An inline struct type, by the field list its text was noted with.
         if (w == "struct") {
             var an = goAnonSt(t)
@@ -4923,7 +4938,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             if (!isMap(m)) fail("the comma ok form needs a map")
             var k = keyT()
             var i = mapFind(m, k)
-            cokBind(isDecl, vName, i >= 0 ? m.vals[i] : m.zero)
+            cokBind(isDecl, vName, i >= 0 ? m.vals[i] : mapZero(m))
             cokBind(isDecl, okName, i >= 0)
         }
     }
