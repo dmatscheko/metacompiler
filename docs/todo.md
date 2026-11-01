@@ -120,12 +120,12 @@ strings.TrimSpace, native strips ASCII 9-13 and 32: `int.Parse(" 1 2 ")` and `in
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-994 kotlin: a binary operator at the start of a line continues the previous expression · P2 · KT · OPEN [V]
+### T-994 kotlin: a binary operator at the start of a line continues the previous expression · P2 · KT · IN PROGRESS (KT worker, round 13) [V]
 Found by the KT worker, round 12 (Kotlin grammar: no newline before an additive operator). `var i=0; var j=5` / `i++` / `--j` /
 `println("$i $j")` → Kotlin `1 4`; ours parses `i++ - (-j)` and prints `1 5`. AddExpr (probably MulExpr too) in both kotlin
 grammars lack a SameLine guard; the interpreter's `IncDec = Target ("++"|"--")` likewise, so `x` newline `++y` can read as `x++ y`.
 
-### T-995 kotlin: sortedBy/sortedWith selector call counts differ from the JDK's TimSort; held map entries are snapshots · P3 · KT · OPEN [V]
+### T-995 kotlin: sortedBy/sortedWith selector call counts differ from the JDK's TimSort; held map entries are snapshots · P3 · KT · IN PROGRESS (KT worker, round 13) [V]
 Found by the KT worker, round 12 (oracle kotlin-stdlib 2.2.21 on java 24). `listOf(3,1,2).sortedBy { n++; it }` → JDK calls the
 selector 8 times; ours 3 (sortedWith(compareBy) 6). Results are identical; matching the count needs java.util TimSort's exact
 comparison sequence (run detection, binary insertion, galloping) in all 3 engines. `val e = m.entries.first(); m[k] = v; e.value`
