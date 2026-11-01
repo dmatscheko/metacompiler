@@ -72,7 +72,7 @@ Remainder of T-1028; each needs a table-size decision before work starts. CJK fa
 
 # RB — Ruby
 
-### T-1039 ruby: missing Array Enumerable methods; each_slice block result; multi-value yields; zip/method(:map) on a user Enumerable · P3 · RB · OPEN [V]
+### T-1039 ruby: missing Array Enumerable methods; each_slice block result; multi-value yields; zip/method(:map) on a user Enumerable · P3 · RB · IN PROGRESS (RB worker, round 41) [V]
 ruby 2.6, all three engines wrong (found by RB r40):
 - Array lacks member?, grep, grep_v, minmax_by, slice_before, slice_after, chunk, chain: `[3,1,2,5].member?(2)` → true, `.grep(1..2)` → [1, 2], `.minmax_by{|x|-x}` → [5, 1], `.chunk{|x|x.odd?}.to_a` → [[true, [3, 1]], [false, [2]], [true, [5]]], `.chain([9]).to_a` → [3, 1, 2, 5, 9]. (Add them to the Enumerable row in ruby-respond.js too.)
 - `[1].each_slice(2){}` → nil in 2.6 (also Range/Hash); ours answers the receiver.
