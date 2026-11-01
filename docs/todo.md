@@ -64,11 +64,11 @@ its report; anything structural there is a CORE ticket.
 
 # PY — Python
 
-### T-983 python: codecs beyond utf-8/16/32, ascii, latin-1, cp1252 raise LookupError (utf-7, cp437, mac-roman...) · P3 · PY · OPEN [V]
+### T-983 python: codecs beyond utf-8/16/32, ascii, latin-1, cp1252 raise LookupError (utf-7, cp437, mac-roman...) · P3 · PY · IN PROGRESS (PY worker, round 19) [V]
 Found by the PY worker, round 18 (oracle python3 3.14). `"é".encode("utf-7")` → b'+AOk-'; ours LookupError: unknown encoding.
 languages/lib/python-codecs.js (+ Go twin abnf/jsrtpycodecs.go) is the place; charmap codecs are table-driven like cp1252.
 
-### T-1005 python: generator `gi_running` · P3 · PY · OPEN [V]
+### T-1005 python: generator `gi_running` · P3 · PY · IN PROGRESS (PY worker, round 19) [V]
 Found by the CORE worker, round 16. The host genState(g) (0 not started, 1 suspended, 2 done, 3 running) is now reachable from layer 2
 and the Go twin; `g.gi_running` (True only while the generator's frame executes, e.g. read from inside its own body) is not exposed.
 Also tests/python-test-full.5.py peaks at ~90M steps per call (the brake is 1e8) - split it before it trips.
