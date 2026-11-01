@@ -306,6 +306,9 @@ char *rt_getvar_byname(char *n);
 char *rt_getvar_ind(char *n);
 int rt_varslot(char *n);
 int rt_setvar_byname(char *n, char *v);
+int rt_indbr(char *v);
+char *rt_nref_end(char *n);
+int rt_unset_name(char *n);
 int rt_eval_assign(char *s);
 int rt_decl_word(char *w, int d, int x);
 int rt_xmark(char *nm, int on);
@@ -5698,8 +5701,84 @@ int rt_xmark(char *nm, int on) {
         return 0;
     }
     r = rt_ar_find(nm);
-    if (r >= 0) ar_mk[r] = ar_mk[r] & 7;
+    if (r >= 0) ar_mk[r] = ar_mk[r] & 39;
     return 0;
+}
+
+/* NAMEREF is mark 32: `declare -n` / `local -n` set it, and it goes with +n,
+ * `unset` and a fresh local (rt_arr_clear keeps only the export mark). The
+ * local save stack and the subshell snapshot carry it with the other marks.
+ * nref_any stays 0 until a nameref is declared, so the lookups through
+ * rt_nref_end cost nothing in a program without one. Twin of refVars in
+ * bash-interpreter.abnf. */
+int nref_any;
+int nref_quiet;
+int rt_nmark(char *nm, int on) {
+    int r;
+    if (on != 0) {
+        nref_any = 1;
+        r = rt_ar_rec(nm);
+        ar_mk[r] = ar_mk[r] | 32;
+        return 0;
+    }
+    r = rt_ar_find(nm);
+    if (r >= 0) ar_mk[r] = ar_mk[r] & 23;
+    return 0;
+}
+
+/* The variable a chain of namerefs from n ends at: n itself when it is no
+ * nameref or its value is unset or empty. A chain longer than 8 is bash's
+ * circular reference: its warning (unless nref_quiet), and 0. Twin of
+ * refTarget in bash-interpreter.abnf. */
+char *rt_nref_end(char *n)
+{
+    char *s = n;
+    char *v;
+    int g = 0;
+    int i;
+    if (nref_any == 0) return n;
+    while ((rt_arr_marks(n) & 32) != 0) {
+        i = rt_varslot(n);
+        if (i < 0) return n;
+        v = gvars[i];
+        if (v == &unset_marker[0] || v[0] == 0) return n;
+        if (g == 8) {
+            if (nref_quiet == 0) rt_berr("warning", s, "circular name reference");
+            return 0;
+        }
+        n = v;
+        g = g + 1;
+    }
+    return n;
+}
+
+/* ${!REF} of the nameref n: the name its chain ends at, or n's own value when
+ * that is unset or empty. A circular chain is "invalid indirect expansion"
+ * instead of the warning, which abandons the line. */
+char *rt_nref_name(char *n)
+{
+    int i = rt_varslot(n);
+    char *v = i >= 0 ? gvars[i] : &unset_marker[0];
+    char *e;
+    if (v == &unset_marker[0] || v[0] == 0) return v;
+    nref_quiet = 1;
+    e = rt_nref_end(n);
+    nref_quiet = 0;
+    if (e == 0) {
+        rt_berr("", n, "invalid indirect expansion");
+        arith_err = 1;
+        return empty;
+    }
+    if (e == n) return v;
+    return e;
+}
+
+/* `unset NAME` of the nameref n acts on the variable its chain ends at. */
+int rt_unset_ref(char *n)
+{
+    char *e = rt_nref_end(n);
+    if (e == 0) return 1;
+    return rt_unset_name(e);
 }
 
 /* The attribute letters `at` (bash's order: a/A i r x l u) with the x of an
@@ -6274,7 +6353,11 @@ int rt_declp(char *nm, char *flag, int assoc) {
     int saved;
     flag = rt_xletters(nm, flag);
     if (isarr == 0) {
-        v = rt_getvar_byname(nm);
+        /* A nameref prints its own value, the name it refers to. */
+        if ((rt_arr_marks(nm) & 32) != 0) {
+            int id = rt_varslot(nm);
+            v = id >= 0 ? gvars[id] : &unset_marker[0];
+        } else v = rt_getvar_byname(nm);
         /* Declared with -a/-A: with no value `declare -a e`; a plain assignment
          * since then is element 0, which this store keeps in the scalar slot. */
         if (rt_arr_dmarked(nm) != 0) {
@@ -7051,7 +7134,7 @@ int rt_ls_restore(int t, int rows)
     }
     arr_rows = arr_rows - ar_n[r] + cnt;
     ar_n[r] = cnt;
-    ar_mk[r] = ls_amark[t] & 23;
+    ar_mk[r] = ls_amark[t] & 55;
     ar_srt[r] = (ls_amark[t] & 8) != 0 ? 0 : 1;
     rt_ar_khdrop(r);
     return 0;
@@ -7345,7 +7428,12 @@ char *rt_getvar_byname(char *n)
     int i;
     int c0;
     int allDigits;
-    int len = rt_strlen(n);
+    int len;
+    if (nref_any != 0) {
+        n = rt_nref_end(n);
+        if (n == 0) return &unset_marker[0];
+    }
+    len = rt_strlen(n);
     /* NAME[SUB]: ${!r} with r='arr[1]' reads the element, and r='arr[@]' the joined
      * list, exactly as ${arr[1]} / ${arr[@]} would. Twin of the subscript arm of
      * getVarVal in bash-interpreter.abnf. */
@@ -7394,11 +7482,34 @@ char *rt_getvar_byname(char *n)
     return sel;
 }
 
-/* The same lookup, writing instead of reading. A name the program never
- * mentions has no slot and is silently dropped. */
+/* The same lookup, writing instead of reading; both follow a chain of namerefs
+ * (rt_nref_end), and a circular one abandons the line. A name the program
+ * never mentions has no slot and is silently dropped. NAME[SUB] - a nameref to
+ * an element - stores the element, its subscript evaluated now; NAME[@] and
+ * NAME[*] are bash's "bad array subscript". Twin of elemRefSet in
+ * bash-interpreter.abnf. */
 int rt_setvar_byname(char *n, char *v)
 {
-    int i = rt_varslot(n);
+    int i;
+    if (nref_any != 0) {
+        n = rt_nref_end(n);
+        if (n == 0) {
+            arith_err = 1;
+            return 0;
+        }
+    }
+    i = rt_indbr(n);
+    if (i > 0) {
+        char *nm = rt_substr(n, 0, i);
+        char *k = rt_arr_key(nm, rt_substr(n, i + 1, rt_strlen(n) - i - 2));
+        if (rt_streq(k, "@") != 0 || rt_streq(k, "*") != 0) return rt_berr("", n, "bad array subscript");
+        if (arith_err != 0) return 0;
+        if (rt_isassoc(nm) != 0) return rt_arr_set(nm, k, v);
+        i = rt_varslot(nm);
+        if (i >= 0) rt_arr_adopt(nm, i);
+        return rt_arr_iset(nm, k, v);
+    }
+    i = rt_varslot(n);
     if (i >= 0) gvars[i] = v;
     rt_pin();
     return 0;

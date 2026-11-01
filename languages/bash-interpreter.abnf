@@ -1483,7 +1483,13 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (!hasOwn(varsHas, "$" + name)) { varNames.push(name) }
     }
     function setVarVal(name, val) {
-        if (anyRef) { var rn = refTarget(name); if (rn != name) { setVarVal(rn, val); return } }
+        if (anyRef) {
+            var rn = refTarget(name)
+            if (rn != name) {
+                if (rn == "") { arithErr = true } else if (isElemRef(rn)) { elemRefSet(rn, false, val) } else { setVarVal(rn, val) }
+                return
+            }
+        }
         if (rawSeen) { val = normBytes(val) }
         if (isArr(name)) { arrSet(name, "0", attrCase(name, val)); return }
         touchVar(name); vars["$" + name] = attrCase(name, val); varsHas["$" + name] = true
@@ -1575,6 +1581,20 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function indVal(t) {
         if (isElemRef(t)) { var sp = splitSubscript(t); if (sp.key == "@") { return encFields(scValList(sp.name)) } }
         return getVarVal(t)
+    }
+    // A store through a nameref whose target is the element NAME[SUB]: the subscript is
+    // evaluated now, as in `NAME[SUB]=v`; NAME[@] and NAME[*] are refused. Answers the
+    // stored text. Twin of the subscript
+    // arm of rt_setvar_byname.
+    function elemRefSet(name, append, v) {
+        var sp = splitSubscript(name)
+        if (sp.key == "@" || sp.key == "*") { diagErr(name + ": bad array subscript\n"); return "" }
+        var key = subKey(sp.name, sp.key)
+        if (arithErr || abortSignal != null) { return "" }
+        if (!assocFact(sp.name, false)) { arrAdopt(sp.name) }
+        arrEnsure(sp.name, false)
+        elemSet(sp.name, key, append ? arrGet(sp.name, key) : null, v)
+        return arrGet(sp.name, key)
     }
     function unsetVar(name) { touchVar(name); vars["$" + name] = ""; varsHas["$" + name] = false }
 
@@ -1743,8 +1763,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (isElemRef(name)) { return elemRefVal(name) }
         // set -u: an unbound variable ends the (sub)shell. Expansion has no way to return a
         // status, so the abort is recorded and picked up by the command about to run.
-        // The diagnostic is bash 5.3's minus the "line N:" part, which no engine here keeps
-        // a line table for; languages/lib/bash-rt.c's rt_nounset writes the same string.
+        // languages/lib/bash-rt.c's rt_nounset writes the same diagnostic.
         if (optNounset) { diagErr(name + ": unbound variable\n"); abortSignal = {ret: 1, isExit: 1} }
         return ""
     }
@@ -2819,9 +2838,19 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         // ${#v} counts CHARACTERS in bash; .length counts UTF-16 code units.
         if (pe == "len") { return function() { return numToStr(charLen(getVarVal(name))) } }
-        // ${!REF} of a nameref answers the name it refers to.
+        // ${!REF} of a nameref answers the name its chain ends at (rt_nref_name).
         if (pe == "ind") { return function() {
-            if (anyRef && attrOn(refVars, name)) { noRef = noRef + 1; var rv = getVarVal(name); noRef = noRef - 1; return rv }
+            if (anyRef && attrOn(refVars, name)) {
+                noRef = noRef + 1
+                var rv = getVarVal(name)
+                noRef = noRef - 1
+                if (rv == "") { return rv }
+                refQuiet = true
+                var rt = refTarget(name)
+                refQuiet = false
+                if (rt == "") { diagErr(name + ": invalid indirect expansion\n"); arithErr = true }
+                return rt
+            }
             var it = indName(name, null, null)
             return (it == null) ? "" : indVal(it)
         } }
@@ -3003,9 +3032,21 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         // One name: its attributes, then its value (v, or the assignment's own literal).
         var declOne = function(k, v) {
-            // -n declares the reference itself, whatever it referred to before.
+            // -n declares the reference itself, whatever it referred to before. A nameref
+            // to itself is refused outside a function and nothing is declared (bash 5.3;
+            // inside one bash only warns, which is not modelled). Twin of the same check in
+            // makeDecl in bash-to-llvm-ir.abnf.
+            var nk = "$" + names[k]
+            var sv = {v: hasOwn(vars, nk) ? vars[nk] : null, h: hasOwn(varsHas, nk) ? varsHas[nk] : null}
             if (isRef) { noRef = noRef + 1 }
             declOneN(k, v)
+            if (isRef && localFrames.length == 0 && varsHas[nk] && vars[nk] == names[k]) {
+                noRef = noRef - 1
+                if (sv.v == null) { vars[nk] = ""; varsHas[nk] = false } else { vars[nk] = sv.v; varsHas[nk] = sv.h }
+                diagErr(kw + ": " + names[k] + ": nameref variable self references not allowed\n")
+                roFail = true
+                return
+            }
             if (isRef) {
                 noRef = noRef - 1
                 refVars["$" + names[k]] = true
@@ -3689,23 +3730,28 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var anyRef = false   // no nameref was ever declared: the hot paths skip refTarget
     var noRef = 0        // >0 while the reference itself is read or written
     // The variable a chain of namerefs ends at: NAME itself when it is none, is unset or
-    // empty, or while noRef. A target that is an array element is not modelled.
+    // empty, or while noRef. The end may be an array element, NAME[SUB] (elemRefSet). A
+    // chain longer than 8 is bash's circular reference: its warning (unless refQuiet), and
+    // "", a name that is never set (a store to it abandons the line instead). Twin of
+    // rt_nref_end.
+    var refQuiet = false
     function refTarget(name) {
         var n = name
         var g = 0
-        while (noRef == 0 && attrOn(refVars, n) && g < 8) {
+        while (noRef == 0 && attrOn(refVars, n)) {
             var k = "$" + n
             if (!hasOwn(varsHas, k) || !varsHas[k] || vars[k] == "") { return n }
+            if (g == 8) { if (!refQuiet) { diagErr("warning: " + name + ": circular name reference\n") }; return "" }
             n = vars[k]
             g = g + 1
         }
-        if (n != name && isElemRef(n)) { fail("a nameref to an array element is not supported") }
         return n
     }
-    // An assignment record retargeted through a nameref.
+    // An assignment record retargeted through a nameref; null after a circular one.
     function refAssign(a) {
         if (!anyRef) { return a }
         var rn = refTarget(a.name)
+        if (rn == "") { arithErr = true; return null }
         if (rn == a.name) { return a }
         return {name: rn, idxT: a.idxT, op: a.op, valT: a.valT, lit: a.lit}
     }
@@ -5361,6 +5407,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // `k=$(( 1/0 ))` leaves k as it was. Twin of the emitAbortCheck in emitAssign.
     function runAssign(a, assoc) {
         a = refAssign(a)
+        if (a == null) { return }
         var isAs = assocFact(a.name, assoc)
         if (a.lit != null) {
             var lv = evalArrayLit(a.lit)
@@ -5375,6 +5422,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // The same, with the value already expanded.
     function runAssignV(a, assoc, v) {
         a = refAssign(a)
+        if (a == null) { return }
         var isAs = assocFact(a.name, assoc)
         if (a.idxT != null) {
             var key = subKey(a.name, wordJoin(a.idxT()))
@@ -5385,6 +5433,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return
         }
         if (arithErr || abortSignal != null) { return }
+        if (isElemRef(a.name)) { elemRefSet(a.name, a.op == "+=", v); return }
         if (a.op == "+=") {
             // On an array name `+=` appends to element 0's text: e=(ab c); e+=d is `abd c`.
             if (isArr(a.name)) { elemSet(a.name, "0", arrGet(a.name, "0"), v) }
@@ -5400,7 +5449,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // ${v:=w} store this way too. Answers the stored text. Twin of emitStoreAttr in
     // bash-to-llvm-ir.abnf.
     function storeAttr(name, v) {
-        if (anyRef) { name = refTarget(name) }
+        if (anyRef) { name = refTarget(name); if (name == "") { arithErr = true; return "" } }
+        if (isElemRef(name)) { return elemRefSet(name, false, v) }
         if (isArr(name)) { elemSet(name, "0", null, v); return arrGet(name, "0") }
         if (attrOn(intVars, name)) {
             var iv = arEval(v)
@@ -6661,12 +6711,12 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 return 1
             }
             for (; ui < args.length; ui++) {
-                if (uf) { if (isFunc(args[ui])) { funcs["$" + args[ui]] = null }; continue }
+                if (uf) { if (isFunc(args[ui])) { setFunc(args[ui], null, null) }; continue }
                 var sp = splitSubscript(args[ui])
                 // Without -n, unset acts on the variable a nameref names.
-                if (anyRef && sp.key == null && !un) { sp = {name: refTarget(sp.name), key: null} }
+                if (anyRef && sp.key == null && !un) { sp = splitSubscript(refTarget(sp.name)) }
                 if (!uv && sp.key == null && isFunc(sp.name) && !isSetVar(sp.name) && !isArr(sp.name) && !attrOn(dclVars, sp.name)) {
-                    funcs["$" + sp.name] = null
+                    setFunc(sp.name, null, null)
                     continue
                 }
                 if (un) { noRef = noRef + 1 }
@@ -7072,11 +7122,18 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // standard input comes back only when the subshell REPLACED it: what a subshell reads of
     // an inherited input is consumed for its parent too, as from a shared file offset.
     function saveShellState() {
-        return {vars: snapshotVars(), pos: posParams, frames: localFrames, st: snapshotState(),
+        subLevels = subLevels + 1
+        return {fl: funcLog.length, vars: snapshotVars(), pos: posParams, frames: localFrames, st: snapshotState(),
                 e: optErrExit, u: optNounset, pf: optPipefail, eg: optExtglob, tr: exitTrap, ts: exitTrapSrc,
                 so: sinkOut, se: sinkErr, fd: fdTab, inb: stdinBuf, inp: stdinPos}
     }
     function restoreShellState(st) {
+        while (funcLog.length > st.fl) {
+            var fu = funcLog.pop()
+            funcs[fu.k] = fu.b
+            funcLn[fu.k] = fu.l
+        }
+        subLevels = subLevels - 1
         sinkOut = st.so
         sinkErr = st.se
         fdTab = st.fd
@@ -7677,13 +7734,23 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         })
     }
 
+    // A definition or `unset -f` inside a subshell ends with it: while subLevels > 0 each
+    // one logs the binding it replaces, which restoreShellState puts back. Twin of fnTouch
+    // in bash-to-llvm-ir.abnf.
+    var funcLog = []
+    var subLevels = 0
+    function setFunc(name, body, ln) {
+        var k = "$" + name
+        if (subLevels > 0) { funcLog.push({k: k, b: hasOwn(funcs, k) ? funcs[k] : null, l: hasOwn(funcLn, k) ? funcLn[k] : null}) }
+        funcs[k] = body
+        funcLn[k] = ln
+    }
     // items = [{fname}, bodyThunk]. Registration happens when the statement runs.
     function makeFuncDef(items) {
         var fname = items[0].fname
         var bodyT = items[1]
         return function() {
-            funcs["$" + fname] = bodyT
-            funcLn["$" + fname] = lnCtx
+            setFunc(fname, bodyT, lnCtx)
             setStatus(0)
             return 0
         }

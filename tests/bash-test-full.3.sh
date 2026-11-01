@@ -1526,6 +1526,49 @@ if 127"
 s87nosuch' EXIT; exec 2>&1); check dp7 "$r" "t 1
 $0: line 2: s87nosuch: command not found"
 }
+# ===== SECTION 88: nameref chains, element targets and cycles; functions defined in a subshell =====
+# A nameref may name an array element, read and written (its subscript evaluated at each
+# use), or another nameref: reads, writes and ${!REF} follow the chain to its end, through
+# a function's `local -n` too. A chain that comes back on itself is bash's "circular name
+# reference" warning (a store also fails the line), ${!REF} of it "invalid indirect
+# expansion" (the nameref to itself refused outside a function is in
+# tests/bash-test-features.sh, which runs at the top level). A function defined or
+# unset in ( ), $( ) or a pipeline stage is gone when it ends. Every expected value is
+# bash 5.3's.
+s88() {
+  local r
+  s88a=(x y z)
+  declare -gn s88e='s88a[1]'
+  check ne1 "$s88e|${!s88e}" "y|s88a[1]"
+  s88e=Y; s88e+=2
+  check ne2 "${s88a[*]}|${#s88e}" "x Y2 z|2"
+  declare -gA s88m=([k]=v); declare -gn s88mk='s88m[k]'; s88mk=w
+  check ne3 "${s88m[k]}" "w"
+  s88set() { local -n s88o=$1; s88o=$2; }
+  s88i=0; s88set 's88a[s88i+2]' Z
+  check ne4 "${s88a[*]}" "x Y2 Z"
+  unset s88e
+  check ne5 "${#s88a[@]}|${s88a[*]}" "2|x Z"
+  s88x=1; declare -gn s88r1=s88r2 s88r2=s88x
+  s88r1=5
+  check nc1 "$s88x|$s88r1|$s88r2|${!s88r1}" "5|5|5|s88x"
+  s88set s88r1 7
+  check nc2 "$s88x" "7"
+  declare -gn s88c1=s88c2 s88c2=s88c1
+  r=$(exec 2>&1; echo "[$s88c1]"); check nc3 "$r" "$0: line $LINENO: warning: s88c1: circular name reference
+[]"
+  r=$(exec 2>&1; s88c1=3; echo no); check nc4 "$?[$r]" "1[$0: line $LINENO: warning: s88c1: circular name reference]"
+  r=$(exec 2>&1; echo "${!s88c1}"; echo no); check nc5 "$?[$r]" "1[$0: line $LINENO: s88c1: invalid indirect expansion]"
+  ( s88f() { :; } ); s88f 2>/dev/null; r=$?
+  r="$r $(s88g() { :; }; echo in); $(s88g 2>/dev/null; echo $?)"
+  check fs1 "$r" "127 in; 127"
+  s88h() { echo outer; }
+  r=$( (s88h() { echo sub; }; s88h; (unset -f s88h; s88h 2>/dev/null; echo "$?"); s88h) ; s88h)
+  check fs2 "$r" "sub
+127
+sub
+outer"
+}
 # ===== END SECTIONS =====
 
 s47   # SECTION-CALL 47
@@ -1568,5 +1611,6 @@ s84   # SECTION-CALL 84
 s85   # SECTION-CALL 85
 s86   # SECTION-CALL 86
 s87   # SECTION-CALL 87
+s88   # SECTION-CALL 88
 echo "full: $checks checks, $fails failures"
 exit $fails

@@ -1430,7 +1430,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function storeVar(b, name, v) {
         var al = refAlias(name)
         if (al != null) { storeVar(b, al, v); return }
-        if (attrOn(refVars, name)) { b.NewCall(rtSetByName, [loadVar(b, name), v]); return }
+        if (attrOn(refVars, name)) { b.NewCall(rtSetByName, [gepStr(b, name), v]); return }
         b.NewStore(attrCase(b, name, v), varPtr(b, name))
         heapPin(b)
     }
@@ -1655,6 +1655,34 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (!hasOwn(fnSlots, key)) { fnSlots[key] = m.NewGlobalDef("fnk_" + name, zero) }
         return fnSlots[key]
     }
+    // A definition or `unset -f` run inside a ( ) or $( ) ends with it: the fnk_ slots its
+    // body stores are saved where it starts (rec.save, filled once the body is emitted) and
+    // restored where it ends. fnTouch is the record of the subshell being emitted; only the
+    // stores written inside it are seen, not one made by a function it calls. Twin of
+    // funcLog in bash-interpreter.abnf.
+    var fnTouch = null
+    function fnStore(b, v, name) {
+        if (fnTouch != null && !hasOwn(fnTouch.seen, "$" + name)) { fnTouch.seen["$" + name] = true; fnTouch.names.push(name) }
+        b.NewStore(v, fnSlot(name))
+    }
+    function fnTouchBegin(b) {
+        var rec = {save: curF.NewBlock(""), body: curF.NewBlock(""), names: [], seen: {}, prev: fnTouch}
+        b.NewBr(rec.save)
+        fnTouch = rec
+        return rec
+    }
+    function fnTouchEnd(rec, end) {
+        fnTouch = rec.prev
+        var i
+        for (i = 0; i < rec.names.length; i++) {
+            var s = fnSlot(rec.names[i])
+            var t = slotOf(i32)
+            rec.save.NewStore(rec.save.NewLoad(i32, s), t)
+            end.NewStore(end.NewLoad(i32, t), s)
+            if (fnTouch != null && !hasOwn(fnTouch.seen, "$" + rec.names[i])) { fnTouch.seen["$" + rec.names[i]] = true; fnTouch.names.push(rec.names[i]) }
+        }
+        rec.save.NewBr(rec.body)
+    }
     function fnIsDefined(b, name) {
         return b.NewICmp(llvm.enum.IPredNE, b.NewLoad(i32, fnSlot(name)), zero)
     }
@@ -1664,10 +1692,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var i
         for (i = 0; i < declaredFuncList.length; i++) {
             var fn = declaredFuncList[i]
-            if (lit != undefined) { if (fn == lit) { b.NewStore(zero, fnSlot(fn)) }; continue }
+            if (lit != undefined) { if (fn == lit) { fnStore(b, zero, fn) }; continue }
             var hit = curF.NewBlock(""), miss = curF.NewBlock("")
             b.NewCondBr(b.NewICmp(llvm.enum.IPredNE, b.NewCall(rtStreq, [nameV, gepStr(b, fn)]), zero), hit, miss)
-            hit.NewStore(zero, fnSlot(fn))
+            fnStore(hit, zero, fn)
             hit.NewBr(miss)
             b = miss
         }
@@ -1810,6 +1838,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var rtArrKey = rtDecl("rt_arr_key", true, [1, 1])
     var rtAssocAdd = rtDecl("rt_assoc_add", false, [1])
     var rtUnsetName = rtDecl("rt_unset_name", false, [1])
+    var rtUnsetRef = rtDecl("rt_unset_ref", false, [1])
+    var rtNmark = rtDecl("rt_nmark", false, [1, 0])
+    var rtNrefName = rtDecl("rt_nref_name", true, [1])
     var rtIsAssoc = rtDecl("rt_isassoc", false, [1])
     var rtArrIkey = rtDecl("rt_arr_ikey", true, [1, 3])
     var rtArrLitKey = rtDecl("rt_arr_litkey", 3, [1, 1, 1, 3, 0])
@@ -1925,7 +1956,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (idx == 0) { return gepStr(b, c.file) }
             return b.NewCall(rtParam, llvm.constant.NewInt(i32, idx))
         }
-        if (attrOn(refVars, name)) { return b.NewCall(rtGetByName, loadVar(b, name)) }
+        if (attrOn(refVars, name)) { return b.NewCall(rtGetByName, gepStr(b, name)) }
         // an array name expands to its element 0, a scalar to its slot (rt_var)
         return b.NewCall(rtVar, [gepStr(b, name), loadVar(b, name)])
     }
@@ -2003,7 +2034,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             subDepth = subDepth + 1
             var svq = uqStarEmit
             uqStarEmit = false
-            var eb = bodyT(b)
+            var ft = fnTouchBegin(b)
+            var eb = bodyT(ft.body)
             uqStarEmit = svq
             lnCtx = svLn
             emitLine = svLine
@@ -2017,6 +2049,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var myTraps = trapList
             trapList = savedTraps
             subEnd = subshellEnd(subEnd, myTraps, optSave)
+            fnTouchEnd(ft, subEnd)
             var v = subEnd.NewCall(rtCapEnd, one)
             return {b: subEnd, v: v}
         }}
@@ -2227,15 +2260,18 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // that would recreate the variable, @E decodes the $'...' escapes at run time and
         // @P is rt_prompt. -r and -x are modelled in neither half, so they are absent from
         // both.
-        var xfName = name
         // The attribute letters of the name, as an i8*: A/a for the two array kinds ahead
         // of i/l/u for the scalar ones, which is what the interpreter half answers too.
         // `nmv` is the name - a constant for a plain expansion, and the value of the
         // reference for ${!r@A}, where bash names the variable the indirection LANDED on.
         // The scalar letters come from the lexical tables, which is the compiler's
         // documented attribute scope (manual 7.9); only array-ness is asked at RUN time,
-        // because `q=(1 2)` declares nothing, hence the select.
+        // because `q=(1 2)` declares nothing, hence the select. Through a chain of namerefs
+        // whose targets are all written literally they are the last target's.
         function attrLetters(b, nmv) {
+            var xfName = name
+            var hop = 0
+            while (hop < 8 && typeof attrOn(refVars, xfName) == "string") { xfName = attrOn(refVars, xfName); hop = hop + 1 }
             var sc = scalarAttrLetters(xfName)
             if (rtAssoc || hasOwn(assocArrays, "$" + xfName)) { return b.NewCall(rtXletters, [nmv, gepStr(b, "A" + sc)]) }
             var isArrRt = b.NewICmp(llvm.enum.IPredNE, b.NewCall(rtArrAny, nmv), zero)
@@ -2520,8 +2556,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // r='arr[@]' (or '@') makes the bare ${!r} a field list, hence f.
         if (pe == "ind") {
             return {f: true, c: undefined, fn: function(b) {
-                // ${!REF} of a nameref is the name it refers to.
-                if (attrOn(refVars, name)) { return {b: b, v: loadVar(b, name)} }
+                // ${!REF} of a nameref is the name its chain ends at.
+                if (attrOn(refVars, name)) { return {b: b, v: b.NewCall(rtNrefName, gepStr(b, name))} }
                 return {b: b, v: b.NewCall(rtGetInd, b.NewCall(rtIndName, [gepStr(b, name), nullStr, varString(b, name), one]))}
             }}
         }
@@ -2529,11 +2565,12 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // indirection LANDED on (cell.tg, see mkParamExp), so every leaf below starts from
         // targetOf and reads through valOf (and `=` writes through rt_setvar_byname) instead
         // of the fixed slot.
-        // Through a nameref the target is the reference's value (refVars, asked at emit time).
+        // Through a nameref (refVars, asked at emit time) the target is the reference itself,
+        // which rt_getvar_byname and rt_setvar_byname follow.
         var indirect = indp
         function targetOf(b) {
             if (indirect) { return {b: b, v: cell.tg} }
-            if (attrOn(refVars, name)) { return {b: b, v: loadVar(b, name)} }
+            if (attrOn(refVars, name)) { return {b: b, v: gepStr(b, name)} }
             return {b: b, v: null}
         }
         function valOf(b, tg) {
@@ -2545,7 +2582,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (xf != "") {
             return {c: undefined, fn: function(b) {
                 var t0 = targetOf(b); b = t0.b
-                var nmv = (t0.v != null) ? t0.v : gepStr(b, name)
+                var nmv = (!indirect && attrOn(refVars, name)) ? b.NewCall(rtNrefName, gepStr(b, name)) : ((t0.v != null) ? t0.v : gepStr(b, name))
                 var v0 = valOf(b, t0.v)
                 return {b: b, v: applyXf(b, v0, b.NewCall(rtIsset, v0), nmv)}
             }}
@@ -3444,10 +3481,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (a.valT.c == undefined && a.valT.done != true) { b = emitAbortCheck(b) }
         }
         if (viaRef) {
-            var tg = loadVar(b, a.name)
+            var tg = gepStr(b, a.name)
             if (a.op == "+=") { v = b.NewCall(rtStrcat, [b.NewCall(rtGetByName, tg), v]) }
             b.NewCall(rtSetByName, [tg, v])
-            return b
+            return emitAbortCheck(b)
         }
         if (a.idxT != null) {
             var rk = subKeyOf(b, a.name, a.idxT, null)
@@ -3623,6 +3660,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var isPrint = (flags.indexOf("p") >= 0) && (flags.indexOf("f") < 0) && (flags.indexOf("F") < 0)
         var setRo = kw == "readonly" || flags.indexOf("r") >= 0
         var isRef = kw != "export" && flags.indexOf("n") >= 0
+        var selfBadP = null      // i32 slot: a computed nameref value named its own variable
         // 1: the declaration exports its names, -1: it takes the attribute away (rt_xmark).
         var xCode = 0
         if (kw == "export" || flags.indexOf("x") >= 0) { xCode = 1 }
@@ -3672,6 +3710,20 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // return) unless -g is given; `export` and `readonly` always act on the global.
             var localize = !global && (kw == "local" || ((kw == "declare" || kw == "typeset") && curFrame != null))
             var fresh = localize && curFrame != null && !hasOwn(curFrame.locs, "$" + names[j])
+            // A nameref to itself is refused outside a function, and nothing is declared
+            // (bash 5.3; inside one bash only warns, which is not modelled): a literal value
+            // here, a computed one when it is stored (selfRef). Twin of the same check in
+            // makeDecl in bash-interpreter.abnf.
+            var selfMsg = kw + ": " + names[j] + ": nameref variable self references not allowed\n"
+            var selfRef = isRef && curFrame == null && asgs[j] != null
+            if (selfRef && v == null && asgs[j].valT != null && asgs[j].valT.c != undefined) {
+                selfRef = false
+                if (asgs[j].valT.c == names[j]) {
+                    emitDiag(b, gepStr(b, selfMsg))
+                    roFail = true
+                    return b
+                }
+            }
             if ((asgs[j] != null || fresh || plus.indexOf("r") >= 0) && roRefused(b, names[j], (kw == "readonly" || kw == "export") ? "" : kw + ": ")) { roFail = true; return b }
             // The attribute undo record is owed to a SUBSHELL as well as to a function body:
             // `n=5; ( declare -i n; n=2+3 )` leaves n a plain string. -g does not exempt it, which is
@@ -3711,7 +3763,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (plus.indexOf("i") >= 0) { intVars["$" + names[j]] = false }
             if (plus.indexOf("u") >= 0) { upVars["$" + names[j]] = false }
             if (plus.indexOf("l") >= 0) { loVars["$" + names[j]] = false }
-            if (plus.indexOf("n") >= 0) { refVars["$" + names[j]] = false }
+            if (plus.indexOf("n") >= 0) { refVars["$" + names[j]] = false; b.NewCall(rtNmark, [gepStr(b, names[j]), zero]) }
             if (isRef && isArray) { refFail() }
             // The value of a declaration with -n is the reference's own: the name it refers to.
             if (isRef) { refVars["$" + names[j]] = false }
@@ -3728,12 +3780,23 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (asgs[j] != null) {
                 var a = asgs[j]
                 if (v != null) { a = {name: a.name, op: a.op, idxT: a.idxT, lit: null, valT: doneWord(v)} }
+                var prevV = selfRef ? loadVar(b, names[j]) : null
                 b = emitAssign(b, a, assoc, null)
+                if (selfRef) {
+                    var selfB = curF.NewBlock(""), okB = curF.NewBlock("")
+                    b.NewCondBr(b.NewICmp(llvm.enum.IPredNE, b.NewCall(rtStreq, [loadVar(b, names[j]), gepStr(b, names[j])]), zero), selfB, okB)
+                    storeVarRaw(selfB, names[j], prevV)
+                    emitDiag(selfB, gepStr(selfB, selfMsg))
+                    selfB.NewStore(one, selfBadP)
+                    selfB.NewBr(okB)
+                    b = okB
+                }
             }
             else if (localize && curFrame == null) { storeVarRaw(b, names[j], unsetPtr(b)) }
             if (isRef) {
                 var lt = (asgs[j] != null && v == null && asgs[j].valT != null) ? asgs[j].valT.c : undefined
                 refVars["$" + names[j]] = (lt != undefined && isIdentText(lt)) ? lt : true
+                b.NewCall(rtNmark, [gepStr(b, names[j]), one])
             }
             if (asgs[j] == null && !isArray && kw != "export" && kw != "readonly") { b.NewCall(rtArrSmark, gepStr(b, names[j])) }
             return b
@@ -3818,6 +3881,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             }
             var badP = anyDyn ? slotOf(i32) : null
             if (anyDyn) { b.NewStore(zero, badP) }
+            selfBadP = isRef ? slotOf(i32) : null
+            if (isRef) { b.NewStore(zero, selfBadP) }
             var o
             for (o = 0; o < order.length; o++) {
                 if (order[o].dyn != undefined) { b = emitDeclDyn(b, order[o].dyn, badP); continue }
@@ -3826,6 +3891,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             }
             storeStatusI(b, roFail ? 1 : 0)
             if (anyDyn) { storeStatus(b, b.NewOr(b.NewLoad(i32, gStatus), b.NewLoad(i32, badP))) }
+            if (isRef) { storeStatus(b, b.NewOr(b.NewLoad(i32, gStatus), b.NewLoad(i32, selfBadP))) }
             roFail = false
             return b
         }
@@ -4424,7 +4490,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             retInSub = true
             var undoBase = attrUndo.length
             subDepth = subDepth + 1
-            var eb = bodyT(b)
+            var ft = fnTouchBegin(b)
+            var eb = bodyT(ft.body)
             subDepth = subDepth - 1
             attrUnwind(undoBase)
             eb.NewBr(subEnd)
@@ -4435,6 +4502,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var myTraps = trapList
             trapList = savedTraps
             subEnd = subshellEnd(subEnd, myTraps, optSave)
+            fnTouchEnd(ft, subEnd)
             eeDone = false
             asgKept = false
             return subEnd
@@ -5676,7 +5744,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     var sp0 = splitSubscript(argTs[uk].c)
                     // Without -n, unset acts on the variable a nameref names.
                     if (sp0.key == null && !un && attrOn(refVars, sp0.name)) {
-                        ust = b.NewOr(ust, b.NewCall(rtUnsetName, loadVar(b, sp0.name)))
+                        ust = b.NewOr(ust, b.NewCall(rtUnsetRef, gepStr(b, sp0.name)))
                         continue
                     }
                     if (sp0.key == null && attrOn(roVars, sp0.name)) {
@@ -6532,14 +6600,15 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (kdef == 1) { declaredFuncList.push(fname) }
         var emitted = false
         return function(b) {
-            b.NewStore(llvm.constant.NewInt(i32, kdef), fnSlot(fname))
+            fnStore(b, llvm.constant.NewInt(i32, kdef), fname)
             storeStatusI(b, 0)
             if (emitted) { return b }
             emitted = true
             var f = defFunc(fname, kdef)
             // bash's loops do not reach into a called function: the body starts with none.
             var savedF = curF, savedEntry = curEntry, savedExit = curExit, savedFrame = curFrame, savedLoops = loopStack
-            var savedExitRd = curExitRd, savedRedirs = redirStack, savedRetSub = retInSub
+            var savedExitRd = curExitRd, savedRedirs = redirStack, savedRetSub = retInSub, savedTouch = fnTouch
+            fnTouch = null
             loopStack = []
             retInSub = false
             redirStack = []
@@ -6561,7 +6630,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var endb = bodyT(entry)
             emitFnRet(endb, endb.NewLoad(i32, gStatus))
             attrUnwind(undoBase)
-            curF = savedF; curEntry = savedEntry; curExit = savedExit; curFrame = savedFrame; loopStack = savedLoops
+            curF = savedF; curEntry = savedEntry; curExit = savedExit; curFrame = savedFrame; loopStack = savedLoops; fnTouch = savedTouch
             curExitRd = savedExitRd; redirStack = savedRedirs; retInSub = savedRetSub
             return b
         }

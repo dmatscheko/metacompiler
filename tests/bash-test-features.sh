@@ -847,6 +847,13 @@ check dyn8 "$xdd" "1"
 check nou1 "$(set -u; xuf() { local xul; xul+=q; echo "$xul"; }; xuf; xuv+=w; echo "$xuv")" "q
 w"
 
+# ----- a nameref to itself is refused outside a function, and nothing is declared -----
+xsx=1; declare -n xsr=xsx
+declare -n xsr=xsr 2>/dev/null
+check nsf1 "$?/$xsr" "1/1"
+xsv=xsq; declare -n xsq=$xsv 2>/dev/null
+check nsf2 "$?/${xsq-unset}" "1/unset"
+
 # ----- standard error is fd 2 in every leg -----
 # Not a check: ./test.sh --cross diffs the two halves' merged output, so this line and an
 # arithmetic error's message reach it from llvm.Run as they do from the interpreter.
