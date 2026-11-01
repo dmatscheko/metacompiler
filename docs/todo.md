@@ -72,7 +72,7 @@ python3 3.14: `type(range(3)).__name__` → range, `type(iter(range(3))).__name_
 
 # RB — Ruby
 
-### T-1033 ruby: Enumerable methods on classes that include Enumerable; Numeric in Integer/Float ancestry · P3 · RB · OPEN [V]
+### T-1033 ruby: Enumerable methods on classes that include Enumerable; Numeric in Integer/Float ancestry · P3 · RB · IN PROGRESS (RB worker, round 40) [V]
 ruby 2.6: `class Bag; include Enumerable; def initialize(a); @a=a; end; def each; @a.each { |x| yield x }; self; end; end` then `Bag.new([3,1]).map{|x| x*2}` → [6, 2], `.sort` → [1, 3], `.min`, `.include?`, `.to_a`, `.select` likewise; `Struct.new(:a).new(4).map { |v| v * 2 }` → [8]. Ours: NoMethodError undefined method `map' (interpreter: on `sort`) in all three engines — needs an Enumerable surface built on the user's #each. Also `Integer.superclass` → Numeric, `Float.ancestors` → [Float, Numeric, Comparable, Object, Kernel, BasicObject], `Integer < Numeric` / `Integer < Comparable` → true; ours Object / [Float, Object, Kernel, BasicObject] / nil / nil. Found by RB r39.
 
 # JS — JavaScript and TypeScript
