@@ -2073,7 +2073,9 @@ func s144() {
 // A struct VALUE in an interface has only the value-receiver methods (Go spec
 // "Method sets"), so it does not satisfy an interface needing a pointer method,
 // while a pointer to it does. A by-value embedded struct lends a value only its
-// value methods; an embedded *T lends all of T's. The expected values are go run's.
+// value methods; an embedded *T lends all of T's. An interface made by embedding
+// others (Go spec "Embedded interfaces") has all their methods. The expected
+// values are go run's.
 type s145S struct{ n int }
 
 func (s *s145S) Inc()    { s.n++ }
@@ -2089,6 +2091,33 @@ type s145Getter interface{ Get() int }
 type s145E struct{ s145S }
 
 type s145P struct{ *s145S }
+
+// Embeds an interface declared after it, and fmt's.
+type s145IG interface {
+	s145Inc
+	s145Getter
+}
+
+type s145IGS interface {
+	s145IG
+	fmt.Stringer
+}
+
+type s145Inc interface{ Inc() }
+
+func (s s145S) String() string { return "S" }
+
+func s145kind2(v interface{}) string {
+	switch v.(type) {
+	case s145IGS:
+		return "x"
+	case s145IG:
+		return "i"
+	case s145Getter:
+		return "g"
+	}
+	return "o"
+}
 
 func s145kind(v interface{}) string {
 	switch v.(type) {
@@ -2114,6 +2143,9 @@ func s145() {
 	_, ok3 := x.(s145Incer)
 	check("vmsetok145", !ok1 && ok2 && !ok3)
 	check("vmsetemb145", s145kind(s145E{})+s145kind(&s145E{})+s145kind(s145P{&s145S{}}) == "gii")
+	_, ok4 := interface{}(s145E{}).(s145IG)
+	_, ok5 := interface{}(s145P{&s145S{}}).(s145IG)
+	check("vmsetiemb145", s145kind2(s145S{})+s145kind2(&s145S{})+s145kind2(s145E{})+s145kind2(&s145E{})+s145kind2(3) == "gxgxo" && !ok4 && ok5)
 }
 
 func main() {

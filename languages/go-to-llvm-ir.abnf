@@ -172,7 +172,11 @@ TypeTag     = "`" :whitespace() { "\x00"..."\x5f" | "\x61"..."\U0010ffff" } <~~ 
 // IfaceBody in go-interpreter.abnf; see there.
 IfaceBody   <~~ push({iface: true, imeth: cIfaceMeths(takeAll())}) ~~>
             = "interface" KwEnd ( IfaceMethods | SkipBlock ) ;
-IfaceMethods = "{" { IfaceMeth } "}" ;
+IfaceMethods = "{" { IfaceEmbed | IfaceMeth } "}" ;
+// An embedded interface name (`G`, `io.Reader`): its methods are folded in where
+// the set is read (goIfaceSet).
+IfaceEmbed  = IfaceEmbNm [ ";" ] ;
+IfaceEmbNm  <~~ push({imembed: up.in}) ~~> = [ Id "." ] Id !"(" ;
 IfaceMeth   = Id <~~ push({imname: up.in}) ~~> FTParams [ SameLine FTRets ] [ ";" ] ;
 
 // A grouped type declaration (type ( A struct {...}; B int )). The whole body is
@@ -6565,12 +6569,14 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // Every type NAME the program declares, so `type A = B` can tell a user type (which
     // the alias re-binds to) from a builtin like int (which it converts to).
     // The method names of an interface body, off the {imname} markers IfaceMeth
-    // pushed. An interface whose body is not a plain method list left none, and no
-    // names means "satisfied by anything" - see the IfaceBody comment.
+    // pushed, an embedded interface E as the entry "=E" (goIfaceSet). A body that
+    // is not a plain method list left none, and no names means "satisfied by
+    // anything" - see the IfaceBody comment.
     function cIfaceMeths(items) {
         var out = []
         for (var i = 0; i < items.length; i++) {
             if (items[i] != undefined && items[i] != null && items[i].imname != undefined) { out.push(items[i].imname) }
+            if (items[i] != undefined && items[i] != null && items[i].imembed != undefined) { out.push("=" + items[i].imembed) }
         }
         return out
     }
@@ -6614,9 +6620,29 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     }
     function ifaceMethodCsv(name) {
         if (!isIface(name)) { return "" }
-        var ms = ifaceMeths["$" + name]
+        var ms = goIfaceSet(name, 0)
+        if (ms == null) { return "" }
         var out = ""
         for (var i = 0; i < ms.length; i++) { out = (i == 0) ? ms[i] : (out + "," + ms[i]) }
+        return out
+    }
+    // The method names of declared interface name with each embedded interface's
+    // ("=E", cIfaceMeths) folded in, or null when it embeds a name that is no
+    // declared interface (a constraint such as comparable): no names, "satisfied
+    // by anything". Twin of goIfaceSet in go-interpreter.abnf.
+    function goIfaceSet(name, depth) {
+        var ms = ifaceMeths["$" + name]
+        var out = []
+        for (var i = 0; i < ms.length; i++) {
+            if (ms[i].charAt(0) != "=") { out.push(ms[i]) }
+            else {
+                var e = ms[i].substring(1)
+                if (ifaceMeths["$" + e] == undefined || depth > 16) { return null }
+                var sub = goIfaceSet(e, depth + 1)
+                if (sub == null) { return null }
+                for (var j = 0; j < sub.length; j++) { out.push(sub[j]) }
+            }
+        }
         return out
     }
     var declaredTypes = {}

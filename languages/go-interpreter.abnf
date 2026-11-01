@@ -153,13 +153,17 @@ FieldTag    = RawString <~~ pop() ~~> ;
 TypeTag     = "`" :whitespace() { "\x00"..."\x5f" | "\x61"..."\U0010ffff" } <~~ push({ftag: up.in}) ~~> "`" :whitespace(Whitespace) ;
 // The method set is parsed when the body is an ordinary method list. The SkipBlock
 // alternative behind it accepts every other interface body - a constraint interface
-// (~int | ~string), an embedded interface name, a commented body - with NO method
-// names, which means "satisfied by anything". up.in is not usable for this: a captured
+// (~int | ~string), a commented body - with NO method names, which means
+// "satisfied by anything". up.in is not usable for this: a captured
 // type text arrives with its WHITESPACE ALREADY STRIPPED, so `Speak() string Fly()`
 // reads as one identifier `stringFly`.
 IfaceBody   <~~ push({iface: true, imeth: cIfaceMeths(takeAll())}) ~~>
             = "interface" KwEnd ( IfaceMethods | SkipBlock ) ;
-IfaceMethods = "{" { IfaceMeth } "}" ;
+IfaceMethods = "{" { IfaceEmbed | IfaceMeth } "}" ;
+// An embedded interface name (`G`, `io.Reader`): its methods are folded in where
+// the set is read (goIfaceSet).
+IfaceEmbed  = IfaceEmbNm [ ";" ] ;
+IfaceEmbNm  <~~ push({imembed: up.in}) ~~> = [ Id "." ] Id !"(" ;
 IfaceMeth   = Id <~~ push({imname: up.in}) ~~> FTParams [ SameLine FTRets ] [ ";" ] ;
 
 // A grouped type declaration (type ( A struct {...}; B int )): the balanced body is
@@ -5989,12 +5993,14 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         return 0
     }
     // The method names of an interface body, off the {imname} markers IfaceMeth
-    // pushed. An interface whose body is not a plain method list left none, and no
-    // names means "satisfied by anything" - see the IfaceBody comment.
+    // pushed, an embedded interface E as the entry "=E" (goIfaceSet). A body that
+    // is not a plain method list left none, and no names means "satisfied by
+    // anything" - see the IfaceBody comment.
     function cIfaceMeths(items) {
         var out = []
         for (var i = 0; i < items.length; i++) {
             if (items[i] != undefined && items[i] != null && items[i].imname != undefined) { out.push(items[i].imname) }
+            if (items[i] != undefined && items[i] != null && items[i].imembed != undefined) { out.push("=" + items[i].imembed) }
         }
         return out
     }
@@ -6002,12 +6008,23 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // IfaceBody tag, read long after by the type test and the type assertion. The
     // predeclared `error` is the interface {Error() string}.
     var ifaceMeths = {"error": ["Error"], "fmt.Stringer": ["String"]}
-    // The comma-joined method set of a declared interface, or "" for anything else.
-    function ifaceMethodCsv(name) {
-        if (name == undefined || name == null || !hasOwn(ifaceMeths, name)) { return "" }
+    // The method names of declared interface name with each embedded interface's
+    // ("=E", cIfaceMeths) folded in, or null when it embeds a name that is no
+    // declared interface (a constraint such as comparable): no names, "satisfied
+    // by anything". Twin of goIfaceSet in go-to-llvm-ir.abnf.
+    function goIfaceSet(name, depth) {
         var ms = ifaceMeths[name]
-        var out = ""
-        for (var i = 0; i < ms.length; i++) { out = (i == 0) ? ms[i] : (out + "," + ms[i]) }
+        var out = []
+        for (var i = 0; i < ms.length; i++) {
+            if (ms[i].charAt(0) != "=") { out.push(ms[i]) }
+            else {
+                var e = ms[i].substring(1)
+                if (!hasOwn(ifaceMeths, e) || depth > 16) { return null }
+                var sub = goIfaceSet(e, depth + 1)
+                if (sub == null) { return null }
+                for (var j = 0; j < sub.length; j++) { out.push(sub[j]) }
+            }
+        }
         return out
     }
     function typeMatches(want, v) {
@@ -6016,21 +6033,23 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         // when it has every method. Only a struct INSTANCE is considered: a method on
         // a defined non-struct type (`type MyInt int`) is not reachable from the value
         // in this model.
-        if (hasOwn(ifaceMeths, want)) { return goIsInstance(v) && goSatisfies(v, ifaceMeths[want]) == "" }
+        if (hasOwn(ifaceMeths, want)) { return goIsInstance(v) && goSatisfies(v, want) == "" }
         return goTypeIs(v, want) == 1
     }
     function goIsInstance(v) {
         if (v === undefined || v === null || typeof v != "object") { return false }
         return v.__class != undefined && v.__class != null
     }
-    // "" when v has every method in ms, otherwise the name of the FIRST one missing
+    // "" when v has every method of interface want, otherwise the name of the FIRST one missing
     // (which is what Go's `missing method X` panic text names). A value that is not a
     // struct INSTANCE answers "" - a method on a defined non-struct type is not
     // reachable from the value in this model, so refusing there would panic programs
     // real go accepts. typeMatches asks goIsInstance separately, because "no methods
     // findable" must read as NO MATCH for a type switch and as NO PANIC for x.(I).
-    function goSatisfies(v, ms) {
+    function goSatisfies(v, want) {
         if (!goIsInstance(v)) { return "" }
+        var ms = goIfaceSet(want, 0)
+        if (ms == null) { return "" }
         for (var i = 0; i < ms.length; i++) {
             if (!goHasMethod(v, ms[i], v.__vv === true)) { return ms[i] }
         }
@@ -6073,7 +6092,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         if (v === undefined || v === null) {
             goConvPanic("interface is nil, not " + gfQualTy(want))
         }
-        var miss = goSatisfies(v, ifaceMeths[want])
+        var miss = goSatisfies(v, want)
         if (miss == "") { return v }
         goConvPanic(goTypeText(v) + " is not " + gfQualTy(want) + ": missing method " + miss)
         return v
