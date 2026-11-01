@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1063** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1064** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -135,8 +135,13 @@ real coroutines out of the subset - decide first). Go also runs the most recentl
 ### T-1053 php: copy-on-write array identity (refcount release, print_r recursion depth) · P4 · PHP · OPEN [V spec-only] · NEEDS DESIGN
 Remainder of T-1000/T-1025/T-1036/T-1051. Engines copy arrays eagerly on assignment and have no point where an array dies, so: reference holders of overwritten / frame-local / temporary arrays and of unfinished generators are never released (counts stay correct-but-high, so `&` may survive a copy PHP would unwrap); property-hook set parameters aren't covered by the compiler's param-copy release; print_r recursion depth is wrong (`$y=[1]; $y[]=&$y; print_r($y)` → PHP *RECURSION* at [1], ours one level deeper; `$a=["k"=>[2]]; $a["k"][]=&$a;` two deeper) because the interpreter's by-value param copy loses array identity; `$w=$z; print_r($w)` differs too. Options: real per-array refcount + COW in all three engines (touches every in-place array write), or an engine-level print_r like var_dump plus targeted release points. Needs a design decision before work.
 
-### T-1060 php: Generator::throw() on a running generator · P3 · PHP · IN PROGRESS (PHP worker, round 40) [V]
-Calling `$gen->throw(new Exception("x"))` from inside the running generator `$gen`: php-src (zend_generator throw path) raises the user exception at the generator's position first, then the resume Error "Cannot resume an already running generator", with the user exception chained as previous. Unverified in all three engines. Settle the exact order/chain from php-src (Zend/zend_generators.c) and assert it. Also assert the already-fixed `foreach ((array)$t as &$v) { $v[] = 5; }` leaves `count($t->arr)` at 1.
+### T-1063 php: Exception data model - $previous/getPrevious(), real property layout · P3 · PHP · OPEN [V]
+Spec-only (php-src Zend/zend_exceptions.c). All three engines:
+- `new Exception("m", 0, $prev)` ignores the third argument; `$e->getPrevious()` is an undefined method. Implicit chaining (an exception thrown while another is pending, e.g. in finally) also needs previous.
+- `print_r(new Exception("m",3))` shows only public [message]/[code]; PHP shows message:protected, string:Exception:private, code:protected, file:protected, line:protected, trace:Exception:private, previous:Exception:private.
+- foreach over an exception from outside lists message/code; PHP lists nothing (all non-public).
+- subclass constructor not calling parent: getMessage() gives NULL, PHP "" (property default).
+previous must be a private defaulted property so print_r/var_dump/(array)/foreach of exceptions stay consistent; file/line/trace layout can be stubbed but must be visible in the right visibility. Re-check the pre-8.3.25 generator throw chain is NOT reintroduced once getPrevious exists (grun3-5).
 
 # LUA — Lua  (oracle: lua 5.5 binary, suite is 5.4)
 
@@ -1123,6 +1128,7 @@ T-1035 c: the C compiler silently merges two definitions of one function name in
 T-1058 csharp: generated exception message and ToString drop the namespace — DONE (CS r9, 5bce6376): FullName = namespace + outer types (Demo.Program+Box) in 3 engines; exception Message/ToString/unhandled line and Object.ToString use it; wrong-name assertions corrected; probed vs spec
 T-1059 csharp: virtual auto-property overridden by an accessor property is not dispatched — DONE (CS r9, 74cca8ca): auto-property overridden by accessors stores under a hidden backing slot; getter/setter-only overrides dispatch, base.K reads backing; object initializers now go through set accessors; probed vs spec
 T-1056 kotlin: member call vs receiver-lambda param name clash; companion/enum-entry classes; primitive class rendering — PARTIAL→split (KT r21, 5fc41400): companion/enum-entry class identity (C$Companion, E$B, declaringJavaClass), primitive .java/.javaObjectType, member calls on objects/companions in compiled legs; 4 legs = kotlinc 2.2.21. println(Int::class) kept declined (kotlin-reflect suffix); sequence per-operation classes declined; remainder filed
+T-1060 php: Generator::throw() on a running generator — DONE (PHP r40, tests only): premise outdated - since php-src 6fa8a25a (GH-19326, PHP 8.3.25) throw() into a running generator raises only 'Cannot resume an already running generator' with no previous and discards the user exception; all engines already did this; pinned grun3-5 + oac3
 
 # Settled — do not re-open
 
