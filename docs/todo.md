@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-976** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-977** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -119,20 +119,20 @@ strings.TrimSpace, native strips ASCII 9-13 and 32: `int.Parse(" 1 2 ")` and `in
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-955 kotlin: fail-fast iteration is missing for the other higher-order functions and for sets · P2 · KT · IN PROGRESS (KT worker, round 11) [V]
-Found by the KT worker, round 10. `val ml = mutableListOf(1,2,3); ml.filter { ml.add(9); true }` (also `any`, `count`, `all`,
-`none`, `sumOf`, `first { }` and the rest that iterate) runs to the end; the JVM throws ConcurrentModificationException for each.
-`val s = mutableSetOf(1,2); s.forEach { s.add(it + 10) }` and `s.map { … }` likewise: JVM CME, ours none. for loops, list
-forEach / forEachIndexed / map and map views already check (kIterN0 / ktIterStart / k4IterStart in the three engines).
-
-### T-956 kotlin: `map.keys.remove(k)` / `map.values.remove(v)` change only the view · P2 · KT · IN PROGRESS (KT worker, round 11) [V]
-Found by the KT worker, round 10. `val m = mutableMapOf(1 to "a", 2 to "b"); m.keys.remove(1); println(m)` → JVM `{2=b}`,
-every engine `{1=a, 2=b}`; same for `m.values.remove("a")` and `m.entries.removeIf { … }`. The view's iterator `remove()`
-already reaches the map (the `__wsrc` link); the view's own remove/removeAll/retainAll/removeIf/clear should too.
-
 ### T-972 kotlin: `rec(p, "R").w++` - an increment of a property of a call result · P3 · KT · OPEN [U]
 Moved from the ruby ticket T-920, where it was listed by mistake. `class R(var w: Int); fun rec(p: R, s: String) = p;
 val p = R(1); rec(p, "R").w++; println(p.w)` → Kotlin 2; re-probe both halves before assigning.
+
+### T-976 kotlin: `x.keys -= 2` corrupts the map; views are snapshots; lambdas see re-read elements · P2 · KT · OPEN [V]
+Found by the KT worker, round 11 (oracle: kotlin-stdlib 2.2.21 driven from java 24).
+- `val x = mutableMapOf(1 to "a", 2 to "b", 3 to "a"); x.keys -= 2; println(x)` → `{1=a, 3=a}` (keys is a val, so -= is
+  minusAssign = remove); interp `{}`, run/native `{1=a, 2=b, 3=a, keys=[1, 3]}`. ktAssignIsVal / ktMemberIsVal
+  (lib/kotlin-decltypes.js) answer "not val" for a member no class declares, and the result is written back as a field.
+- map views are snapshots: `val ks = m.keys; m[4] = "d"; ks.remove(2); println("$m $ks")` → java `{1=a, 3=a, 4=d} [1, 3, 4]`.
+- `val c = mutableListOf(1,2,3); c.filter { c[0] = 5; true }` → `[1, 2, 3]`; interp and native `[5, 2, 3]` (they re-read the
+  element after the lambda; the Go twin is right) - also filterNot, partition, first/find.
+- `single { }` / `singleOrNull { }` keep calling the predicate after a second match (Kotlin stops there).
+- sortedBy / sortedWith call the selector once per element; stdlib's comparator calls it per comparison (result identical).
 
 # GO — Go  (oracle: `go run`)
 
@@ -1100,6 +1100,8 @@ T-920 ruby: an assignment target rooted at a parenthesised call does not parse; 
 T-909 java: `System.err.flush()` throws — DONE 2a56cc4b
 T-931 java interp: unbounded recursion through a field initializer hangs instead of StackOverflowError — DONE 24854ffb
 T-932 java: cyclic inheritance hangs the compiler and is accepted by the interpreter — DONE b4b760f2 (same-file cycles refused with javac's message in both halves, 0 false positives over 5634 corpus files; class var {} and yield(1,2) stay accepted by design - javac --release 9 only warns; the rest is T-974)
+T-955 kotlin: fail-fast iteration is missing for the other higher-order functions and for sets — DONE 3d20ccad
+T-956 kotlin: `map.keys.remove(k)` / `map.values.remove(v)` change only the view — DONE 856b5f67 (view remove/removeAll/retainAll/removeIf/clear write through to the map; removeIf on lists and sets)
 
 # Settled — do not re-open
 
