@@ -3889,6 +3889,24 @@ function rbEql(a, b) {
     return rbEq(a, b)
 }
 
+// Object#<=> on a user object whose class defines no <=>: is it 0 (else nil)?
+// Twin of rubyObjCmp in abnf/jsrtruby.go.
+function rbObjCmp(l, r) {
+    if (rbIdenticalP(l, r)) { return true }
+    var m = rbFindMethod(l, "==")
+    if (m === undefined || l["__rcmpbusy"] === true) { return false }
+    l["__rcmpbusy"] = true
+    var eq = false
+    try {
+        eq = rbTruthy(m.apply(undefined, [l, r]))
+    } catch (e) {
+        l["__rcmpbusy"] = false
+        throw e
+    }
+    l["__rcmpbusy"] = false
+    return eq
+}
+
 // rubySpaceship: null when the two cannot be compared, which is Ruby's answer.
 function rbSpaceship(l, r) {
     // Two Integers (plain numbers, never NaN): the common case, answered first.
@@ -3899,7 +3917,7 @@ function rbSpaceship(l, r) {
     }
     if (rbUserObj(l)) {
         var m = rbFindMethod(l, "<=>")
-        if (m === undefined) { return null }
+        if (m === undefined) { return rbObjCmp(l, r) ? 0 : null }
         var uc = anytype
         uc = m.apply(undefined, [l, r])
         if (rtIsNil(uc)) { return null }

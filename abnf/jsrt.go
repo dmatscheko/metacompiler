@@ -10300,8 +10300,9 @@ func (rt *jsrt) rubySpaceship(l, r interface{}) (int, bool) {
 			if c := rt.call(m, jsUndef, []interface{}{l, r}); isUndefOrNull(c) != true {
 				return int(rubyToF(c)), true
 			}
+			return 0, false
 		}
-		return 0, false
+		return 0, rt.rubyObjCmp(l, r)
 	}
 	_, lb := l.(*jsRStr)
 	if _, rb := r.(*jsRStr); lb || rb {

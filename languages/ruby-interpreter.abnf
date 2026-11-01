@@ -5695,6 +5695,19 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // Object#<=>: 0 for equal values (nil <=> nil), nil otherwise.
         return rubyEq(l, r) ? 0 : null
     }
+    // Object#<=> on a user object whose class defines no <=>: 0 for the same object
+    // or when the class's #== answers true, nil otherwise. A #== that comes back
+    // here for the same receiver - Comparable's, which is built on <=> - answers
+    // false, as under MRI's recursion guard (the __rcmpbusy mark). Twins:
+    // rubyObjCmp in abnf/jsrtruby.go, rbObjCmp in lib/ruby-rt.metajs.
+    function objCmp(l, r) {
+        if (identicalP(l, r)) { return 0 }
+        if (typeof lookupMethod(l.__class, "==") != "function" || l.__rcmpbusy === true) { return null }
+        l.__rcmpbusy = true
+        var eq = false
+        try { eq = rtest(mcall(l, "==", [r], null)) } finally { l.__rcmpbusy = false }
+        return eq ? 0 : null
+    }
     function isNaNV(v) { return isFlo(v) && v.f !== v.f }
     // MRI's rb_cmperr message, which `sort`, `min`, `max` and `<` all raise on an
     // incomparable pair: the FIRST operand is named by its class, and the second by
@@ -9589,13 +9602,13 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             var m = anytype
             m = lookupMethod(target.__class, name)
             if (typeof m != "function") {
-                // Comparable's methods, built on the class's own <=>: only a class
-                // that includes Comparable has them.
-                if (typeof lookupMethod(target.__class, "<=>") == "function" && userIsA(target, hostGlobals["Comparable"])) {
-                    if (name == "between?") {
-                        return toF(mcall(target, "<=>", [args[0]], null)) >= 0
-                            && toF(mcall(target, "<=>", [args[1]], null)) <= 0
-                    }
+                // Object#<=>: 0 for the same object, nil otherwise (objCmp).
+                if (name == "<=>") { return objCmp(target, args[0]) }
+                // Comparable's methods, built on <=>: only a class that includes
+                // Comparable has them, and a nil from <=> - Object's, when the class
+                // defines none - is rcmp's ArgumentError.
+                if (userIsA(target, hostGlobals["Comparable"])) {
+                    if (name == "between?") { return rcmp(target, args[0]) >= 0 && rcmp(target, args[1]) <= 0 }
                     if (name == "clamp") {
                         if (rcmp(target, args[0]) < 0) { return args[0] }
                         if (rcmp(target, args[1]) > 0) { return args[1] }

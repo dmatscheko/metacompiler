@@ -7846,18 +7846,17 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
         return {b: b, v: v}
     }
-    // include Comparable on a class that defines <=>: the runtime already compares
-    // two such objects through their <=> (rubySpaceship in abnf/jsrt.go), so all the
-    // mixin still owes is #between?, #clamp and #== (true when <=> answers 0).
+    // include Comparable: the runtime already compares two such objects through
+    // their <=>, Object's when the class defines none (rubySpaceship in
+    // abnf/jsrt.go), so all the mixin still owes is #between?, #clamp and #== (true
+    // when <=> answers 0).
     function pushAll(dst, src) {
         for (var i = 0; i < src.length; i++) { dst.push(src[i]) }
     }
     function comparableMethods() {
         var eq = {name: "==", params: [paramDesc({param: "o"})], body: function(b) {
             var selfV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "self")])
-            var argsV = callExt(b, "js_arr_new", [])
-            callExt(b, "js_arr_push", [argsV, callExt(b, "js_scope_get", [curScopeV, emitStr(b, "o")])])
-            var cV = callExt(b, "js_rxmcall", [selfV, emitMKey(b, selfV, "<=>", false), argsV])
+            var cV = callExt(b, "js_rcmp", [selfV, callExt(b, "js_scope_get", [curScopeV, emitStr(b, "o")])])
             return {b: b, v: callExt(b, "js_seq", [cV, emitNum(b, 0)])}
         }}
         var clamp = {name: "clamp", params: [paramDesc({param: "lo"}), paramDesc({param: "hi"})], body: function(b) {

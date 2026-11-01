@@ -1767,6 +1767,24 @@ def s161
   y.lazy.map { |*a| a }.each { |x| w << x }
   check("lzm161b", r == [1, 3, nil, 5] && l == [1, :b, 2, :b, 3, :b, :b] && w == [[1, 2], [3, 4], [nil], [5]])
 end
+
+# ===== SECTION 162: Comparable over Object#<=> =====
+# Object#<=> answers 0 for the same object or one #== accepts, nil otherwise, so
+# Comparable without its own <=> compares an object only with itself and raises
+# ArgumentError "comparison of X with 1 failed" otherwise; Comparable#== guards
+# against a #== that calls back into it. /usr/bin/ruby 2.6 settles each.
+class S162X; include Comparable; end
+class S162Q; def ==(o); true; end; end
+class S162R; include Comparable; def ==(o); true; end; end
+def s162
+  x = S162X.new
+  e = begin; x < 1; rescue ArgumentError => er; er.message; end
+  c = begin; x.clamp(1, 2); rescue ArgumentError => er; er.class; end
+  check("cmp162a", e == "comparison of S162X with 1 failed" && c == ArgumentError &&
+        (x <= x) == true && (x >= x) == true && (x < x) == false && (x <=> x) == 0 && (x <=> 1).nil? && x == x && x != 1)
+  check("cmp162b", (Object.new <=> 1).nil? && (S162Q.new <=> 1) == 0 && (S162R.new <=> 1) == 0 && (S162R.new <= 1) == true &&
+        [S162X.new].max.class == S162X)
+end
 s122() # SECTION-CALL 122
 s123() # SECTION-CALL 123
 s124() # SECTION-CALL 124
@@ -1807,5 +1825,6 @@ s158() # SECTION-CALL 158
 s159() # SECTION-CALL 159
 s160() # SECTION-CALL 160
 s161() # SECTION-CALL 161
+s162() # SECTION-CALL 162
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

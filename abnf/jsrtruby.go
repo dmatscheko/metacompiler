@@ -1832,6 +1832,23 @@ func (rt *jsrt) rubyStopIter(name string, t *jsObject) {
 	panic(&jsThrown{value: e})
 }
 
+// rubyObjCmp is Object#<=> on a user object whose class defines no <=>: is it
+// 0 (else nil)? Twin of objCmp in ruby-interpreter.abnf, which states the rule,
+// and rbObjCmp in lib/ruby-rt.metajs.
+func (rt *jsrt) rubyObjCmp(l, r interface{}) bool {
+	if rubyIdenticalP(l, r) {
+		return true
+	}
+	o := l.(*jsObject)
+	m, ok := rubyFindMethod(l, "==")
+	if !ok || o.props["__rcmpbusy"] == true {
+		return false
+	}
+	o.set("__rcmpbusy", true)
+	defer o.set("__rcmpbusy", false)
+	return rubyTruthy(rt.call(m, jsUndef, []interface{}{l, r}))
+}
+
 // rubyCatch / rubyThrow are Kernel#catch / #throw. Twins: the catch / throw host
 // globals of ruby-interpreter.abnf, which state the rule, and js_rcatch /
 // js_rthrow in lib/ruby-rt.metajs. A throw to a running catch is a js_pyexc
