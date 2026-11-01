@@ -8896,13 +8896,16 @@ function jsonHRaise(t) { jbRaise(t) }
 import "./regex.js"
 import "./java-chars.js"
 import "./java-regex.js"
+import "./js-uprops.js"
 
 // rxFail is regex.js's error knob, set by assignment: the Go twin's wording.
 // rxPropHit and rxPropClsEs answer \p{..} under the u flag over java.lang.Character's
-// tables (lib/java-chars.js, lib/java-regex.js).
+// tables (lib/java-chars.js, lib/java-regex.js) and lib/js-uprops.js's, rxFoldNext
+// the case folding of the i flag.
 rxFail = function (msg) { fail("regexp: " + msg) }
-rxPropHit = function (id, c) { return jxPropHit(id, c) }
-rxPropClsEs = function (st, name) { return jxPropClsEs(st, name) }
+rxPropHit = function (id, c) { return jupPropHit(id, c) }
+rxPropClsEs = function (st, name) { return jupPropClsEs(st, name) }
+rxFoldNext = function (c, mode) { return jupFoldNext(c, mode) }
 
 // ----- flags ------------------------------------------------------------------
 //

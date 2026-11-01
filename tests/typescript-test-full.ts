@@ -6176,6 +6176,60 @@ function s153(): void {
     check("prim153c", i == 1 && a[0] == 5 && calls == 2 && o.x == 3);
 }
 
+// ===== SECTION 154: the brand check of a private member's decorator access =====
+// context.access.get and set of a private member check the receiver as o.#x does:
+// a field (static too) refuses with "Cannot read/write private member", a method,
+// an accessor or an auto-accessor (lowered to a getter and a setter) with "Receiver
+// must be an instance of class" or, when static, "Receiver must be class". An
+// auto-accessor read directly on a foreign object answers the same. Values read off
+// tsc 6 (ES2022, alwaysStrict) with node 24.
+const acc154: any = {};
+function grab154(value: any, ctx: any): any {
+    acc154[String(ctx.name)] = ctx.access;
+    return undefined;
+}
+class D154 {
+    @grab154 #p: number = 7;
+    @grab154 #m(): string { return "M"; }
+    @grab154 set #s(v: number) { }
+    @grab154 static #q: number = 1;
+    @grab154 static #sm(): number { return 6; }
+    @grab154 accessor #a: number = 2;
+    accessor #b: number = 3;
+    static readB(o: any): any { return o.#b; }
+}
+function s154(): void {
+    const err = (f: () => any): string => {
+        try { return "ok " + f(); } catch (e) { return String(e); }
+    };
+    const o: any = new D154();
+    const a = acc154;
+    check("brand154a", err(() => a["#p"].get(o)) == "ok 7" &&
+        err(() => a["#p"].get({})) == "TypeError: Cannot read private member #p from an object whose class did not declare it" &&
+        err(() => a["#p"].set({}, 1)) == "TypeError: Cannot write private member #p to an object whose class did not declare it" &&
+        err(() => a["#p"].has({})) == "ok false" &&
+        err(() => a["#q"].get({})) == "TypeError: Cannot read private member #q from an object whose class did not declare it" &&
+        err(() => a["#q"].get(D154)) == "ok 1");
+    check("brand154b", err(() => a["#m"].get({})) == "TypeError: Receiver must be an instance of class D154" &&
+        err(() => a["#s"].set({}, 1)) == "TypeError: Receiver must be an instance of class D154" &&
+        err(() => a["#sm"].get({})) == "TypeError: Receiver must be class D154" && err(() => a["#sm"].get(D154)()) == "ok 6" &&
+        err(() => a["#a"].get({})) == "TypeError: Receiver must be an instance of class D154" &&
+        err(() => a["#a"].set({}, 4)) == "TypeError: Receiver must be an instance of class D154" &&
+        err(() => a["#a"].get(o)) == "ok 2" && err(() => D154.readB(o)) == "ok 3" &&
+        err(() => D154.readB({})) == "TypeError: Receiver must be an instance of class D154");
+}
+
+// ===== SECTION 155: Script_Extensions, binary properties, case folding under i =====
+// \p{scx=..} reads Script_Extensions, Dash / Math / ID_Start Unicode's own lists, and
+// under i a character matches its whole case-fold class (simple case folding with u,
+// toUpperCase's without). Values read off tsc 6 with node 24.
+function s155(): void {
+    check("uprop155a", /^\p{scx=Deva}+$/u.test("\u0964\u0915") && !/\p{sc=Deva}/u.test("\u0964") &&
+        /^\p{Dash}\p{Math}\p{ID_Start}\p{IDC}$/u.test("-+a1") && !/\p{ID_Start}/u.test("1"));
+    check("fold155b", /\u00e9/iu.test("\u00c9") && /\u212a/iu.test("k") && !/\u212a/i.test("k") &&
+        /(\u03c3)\1/iu.test("\u03c3\u03c2") && "\u00c9t\u00e9".replace(/\u00e9/gi, "e") == "ete");
+}
+
 // ===== END SECTIONS =====
 
 function main(): number {
@@ -6320,6 +6374,8 @@ function main(): number {
     s151(); // SECTION-CALL 151
     s152(); // SECTION-CALL 152
     s153(); // SECTION-CALL 153
+    s154(); // SECTION-CALL 154
+    s155(); // SECTION-CALL 155
     println("full: " + checks + " checks, " + failures + " failures");
     return failures;
 }

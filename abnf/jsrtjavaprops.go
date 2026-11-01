@@ -64,6 +64,8 @@ func jxCharIs(name string, c int) bool {
 func rxPropHit(id int, ch rune) bool {
 	c := int(ch)
 	switch {
+	case id >= jupPBin:
+		return jupPropHit(id, c)
 	case id >= rxPBlk:
 		return jxBlock(c) == id-rxPBlk
 	case id >= rxPSc:
@@ -308,6 +310,9 @@ func (st *rxSt) propCls(name string, at int) *rxCls {
 // propClsEs is ECMAScript's reading of \p{name} under the u flag; twin of
 // jxPropClsEs in lib/java-regex.js, which describes it.
 func (st *rxSt) propClsEs(name string) *rxCls {
+	if cls := st.jupPropClsEs(name); cls != nil {
+		return cls
+	}
 	cls := rxNewCls()
 	key, val, isPair := strings.Cut(name, "=")
 	ok := false
@@ -319,17 +324,13 @@ func (st *rxSt) propClsEs(name string) *rxCls {
 	case key == "Script" || key == "sc":
 		ok = jxScriptEs(cls, val)
 	}
-	switch {
-	case ok:
-	case key == "Script_Extensions" || key == "scx" || (!isPair && strings.Contains(jxBinEsNone, " "+name+" ")):
-		st.fail("unsupported character property \\p{" + name + "}")
-	default:
+	if !ok {
 		st.fail("Invalid property name")
 	}
 	return cls
 }
 
-// Twins of JX_GC_ES and JX_BIN_ES_NONE in lib/java-regex.js.
+// Twin of JX_GC_ES in lib/java-regex.js.
 const jxGcEsNames = " Cased_Letter:LC Close_Punctuation:Pe Connector_Punctuation:Pc Control:Cc cntrl:Cc" +
 	" Currency_Symbol:Sc Dash_Punctuation:Pd Decimal_Number:Nd digit:Nd Enclosing_Mark:Me" +
 	" Final_Punctuation:Pf Format:Cf Initial_Punctuation:Pi Letter:L Letter_Number:Nl Line_Separator:Zl" +
@@ -338,14 +339,6 @@ const jxGcEsNames = " Cased_Letter:LC Close_Punctuation:Pe Connector_Punctuation
 	" Other_Punctuation:Po Other_Symbol:So Paragraph_Separator:Zp Private_Use:Co Punctuation:P punct:P" +
 	" Separator:Z Space_Separator:Zs Spacing_Mark:Mc Surrogate:Cs Symbol:S Titlecase_Letter:Lt" +
 	" Unassigned:Cn Uppercase_Letter:Lu "
-const jxBinEsNone = " Bidi_Control Bidi_C Case_Ignorable CI Changes_When_Casefolded CWCF" +
-	" Changes_When_Casemapped CWCM Changes_When_Lowercased CWL Changes_When_NFKC_Casefolded CWKCF" +
-	" Changes_When_Titlecased CWT Changes_When_Uppercased CWU Dash Default_Ignorable_Code_Point DI" +
-	" Deprecated Dep Diacritic Dia Extender Ext Grapheme_Base Gr_Base Grapheme_Extend Gr_Ext" +
-	" IDS_Binary_Operator IDSB IDS_Trinary_Operator IDST ID_Continue IDC ID_Start IDS" +
-	" Logical_Order_Exception LOE Math Pattern_Syntax Pat_Syn Quotation_Mark QMark Radical" +
-	" Sentence_Terminal STerm Soft_Dotted SD Terminal_Punctuation Term Unified_Ideograph UIdeo" +
-	" XID_Continue XIDC XID_Start XIDS "
 
 // jxGcEs is a General_Category value, long or short; twin of jxGcEs.
 func jxGcEs(cls *rxCls, v string) bool {

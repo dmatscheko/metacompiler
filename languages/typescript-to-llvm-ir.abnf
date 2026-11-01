@@ -5073,7 +5073,10 @@ NotFuncHead = :script(~~
     }
     // See the twin of this comment in js-to-llvm-ir.abnf.
     function privNote(key, field, statik) {
-        if (typeof key == "string" && key.substring(0, 3) == "__#") { privKinds["$" + key] = {field: field, statik: statik} }
+        if (typeof key != "string" || key.substring(0, 3) != "__#") { return }
+        var cn = (privStack.length > 0) ? privClassNames[privStack[privStack.length - 1]] : ""
+        if (cn == "" || cn.substring(0, 6) == "0class") { cn = "anonymous" }
+        privKinds["$" + key] = {field: field, statik: statik, cls: cn}
     }
     function privRefChk(n) {
         var st = privStack.slice()
@@ -5081,20 +5084,19 @@ NotFuncHead = :script(~~
             var key = privRefKey(st, n)
             var info = privKinds["$" + key]
             if (info == undefined) { return b }
-            var i = st.length - 1
-            while (i >= 0 && privDecls[st[i]]["$" + n] == undefined) { i = i - 1 }
-            var cn = (i >= 0) ? privClassNames[st[i]] : ""
-            if (cn == "" || cn.substring(0, 6) == "0class") { cn = "anonymous" }
-            var msg = ""
-            if (info.field) {
-                msg = write ? "TypeError: Cannot write private member #" + n + " to an object whose class did not declare it"
-                            : "TypeError: Cannot read private member #" + n + " from an object whose class did not declare it"
-            } else {
-                msg = info.statik ? "TypeError: Receiver must be class " + cn : "TypeError: Receiver must be an instance of class " + cn
-            }
-            callExt(b, "js_jsprivchk", [objV, emitStr(b, key), info.statik ? hTrue : hFalse, emitStr(b, msg)])
+            callExt(b, "js_jsprivchk", [objV, emitStr(b, key), info.statik ? hTrue : hFalse, emitStr(b, privChkMsg(info, "#" + n, write))])
             return b
         }
+    }
+    // The TypeError a failed brand check of the private member shown raises. Twin of
+    // privCheck's in typescript-interpreter.abnf.
+    function privChkMsg(info, shown, write) {
+        if (info.field) {
+            if (write) { return "TypeError: Cannot write private member " + shown + " to an object whose class did not declare it" }
+            return "TypeError: Cannot read private member " + shown + " from an object whose class did not declare it"
+        }
+        if (info.statik) { return "TypeError: Receiver must be class " + info.cls }
+        return "TypeError: Receiver must be an instance of class " + info.cls
     }
 
     // ----- Class members -----
@@ -5212,9 +5214,12 @@ NotFuncHead = :script(~~
     // items = [mods, mangledName, params, bodyThunk] for a private METHOD and
     // [mods, mangledName] / [mods, mangledName, initThunk] for a private FIELD - a method
     // is the only form that carries both a parameter list and a body, hence the length.
+    // An auto-accessor is brand-checked as the getter and setter tsc lowers it to.
     function makeClassPrivate(items) {
         var statik = isStaticMods(items[0].mods)
-        privNote(items[1], items.length <= 3, statik)
+        var auto = false
+        for (var j = 0; j < items[0].mods.length; j++) { if (items[0].mods[j] == "accessor") { auto = true } }
+        privNote(items[1], items.length <= 3 && !auto, statik)
         if (items.length > 3) {
             return {kind: "method", name: items[1], priv: true, statik: statik, params: items[2], body: items[3]}
         }
@@ -6528,7 +6533,7 @@ NotFuncHead = :script(~~
         if (kind != "class") {
             callExt(b, memSetExt(), [o, emitStr(b, "static"), statik ? hTrue : hFalse])
             callExt(b, memSetExt(), [o, emitStr(b, "private"), priv ? hTrue : hFalse])
-            callExt(b, memSetExt(), [o, emitStr(b, "access"), emitDecoAccess(b, kind, nameV != null ? nameV : emitStr(b, name), priv)])
+            callExt(b, memSetExt(), [o, emitStr(b, "access"), emitDecoAccess(b, kind, nameV != null ? nameV : emitStr(b, name), priv ? privKinds["$" + name] : undefined, shown)])
         }
         callExt(b, memSetExt(), [o, emitStr(b, "metadata"), hUndef])
         var asc = callExt(b, "js_scope_new", [curScopeV])
@@ -6538,20 +6543,27 @@ NotFuncHead = :script(~~
         return o
     }
     // A member decorator context's access object: has, and get unless a setter, set for
-    // a setter, a field and an auto-accessor, closures over the key keyV. Twin of
-    // decoAccess in typescript-interpreter.abnf.
-    function emitDecoAccess(b, kind, keyV, priv) {
+    // a setter, a field and an auto-accessor, closures over the key keyV. A private
+    // name's privKinds record pinfo puts get and set behind its brand check, read under
+    // the name shown. Twin of decoAccess in typescript-interpreter.abnf.
+    function emitDecoAccess(b, kind, keyV, pinfo, shown) {
         var fns = decoFnsGet()
         var o = callExt(b, "js_obj_new", [])
         var sc = callExt(b, "js_scope_new", [curScopeV])
+        var priv = pinfo != undefined
         callExt(b, "js_scope_decl", [sc, emitStr(b, "0dkey"), keyV])
+        if (priv) {
+            callExt(b, "js_scope_decl", [sc, emitStr(b, "0dstatic"), pinfo.statik ? hTrue : hFalse])
+            callExt(b, "js_scope_decl", [sc, emitStr(b, "0dread"), emitStr(b, privChkMsg(pinfo, shown, false))])
+            callExt(b, "js_scope_decl", [sc, emitStr(b, "0dwrite"), emitStr(b, privChkMsg(pinfo, shown, true))])
+        }
         var one = function(nm, idx, arity) {
             var clo = callExt(b, "js_jsfnmeta", [callExt(b, "js_closure", [handle(idx), sc]), emitStr(b, nm), emitNum(b, arity)])
             callExt(b, memSetExt(), [o, emitStr(b, nm), clo])
         }
         one("has", priv ? fns.hasPriv : fns.has, 1)
-        if (kind != "setter") { one("get", fns.get, 1) }
-        if (kind == "setter" || kind == "field" || kind == "accessor") { one("set", fns.set, 2) }
+        if (kind != "setter") { one("get", priv ? fns.getPriv : fns.get, 1) }
+        if (kind == "setter" || kind == "field" || kind == "accessor") { one("set", priv ? fns.setPriv : fns.set, 2) }
         return o
     }
     // Apply one evaluated decorator to a value: 'v = deco(v, ctx)'. A decorator that is
@@ -6735,14 +6747,19 @@ NotFuncHead = :script(~~
                                     callExt(ab, "js_arg", [af.Params[1], handle(0)])])
         ab.NewRet(hUndef)
         // The access functions, over the key in their scope's 0dkey: 'key in o' (with a
-        // private name's brand check), o[key], and o[key] = v.
+        // private name's brand check), o[key], and o[key] = v, those two also behind a
+        // private name's brand check (the scope's 0dstatic, 0dread and 0dwrite).
         var acc = function(body) {
             funcCount++
             var f = m.NewFunc("jsf_" + funcCount, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
             var fb = f.NewBlock("entry")
             fb.NewRet(body(fb, callExt(fb, "js_scope_get", [f.Params[0], emitStr(fb, "0dkey")]),
-                           callExt(fb, "js_arg", [f.Params[1], handle(0)]), f.Params[1]))
+                           callExt(fb, "js_arg", [f.Params[1], handle(0)]), f.Params[1], f.Params[0]))
             return funcCount
+        }
+        var brand = function(fb, k, o, env, slot) {
+            callExt(fb, "js_jsprivchk", [o, k, callExt(fb, "js_scope_get", [env, emitStr(fb, "0dstatic")]),
+                                         callExt(fb, "js_scope_get", [env, emitStr(fb, slot)])])
         }
         var hasI = acc(function(fb, k, o, args) { return callExt(fb, "js_jsin", [o, k]) })
         var hasPrivI = acc(function(fb, k, o, args) { return callExt(fb, "js_jsprivin", [o, k]) })
@@ -6751,7 +6768,17 @@ NotFuncHead = :script(~~
             callExt(fb, memSetExt(), [o, k, callExt(fb, "js_arg", [args, handle(1)])])
             return hUndef
         })
-        decoFns.push({run: rf, adder: aidx, has: hasI, hasPriv: hasPrivI, get: getI, set: setI})
+        var getPrivI = acc(function(fb, k, o, args, env) {
+            brand(fb, k, o, env, "0dread")
+            return callExt(fb, "js_jsvget", [o, k])
+        })
+        var setPrivI = acc(function(fb, k, o, args, env) {
+            brand(fb, k, o, env, "0dwrite")
+            callExt(fb, memSetExt(), [o, k, callExt(fb, "js_arg", [args, handle(1)])])
+            return hUndef
+        })
+        decoFns.push({run: rf, adder: aidx, has: hasI, hasPriv: hasPrivI, get: getI, set: setI, getPriv: getPrivI,
+                      setPriv: setPrivI})
         return decoFns[0]
     }
     // A variable reference that yields undefined instead of raising when the name is not

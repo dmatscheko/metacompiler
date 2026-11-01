@@ -167,6 +167,9 @@ type rxCls struct {
 	u, pu bool
 	// cpg marks the class of a J CharPropertyGreedy (see lib/regex.js).
 	cpg bool
+	// jf is JavaScript's i flag, 1 without u and 2 with it: the class also takes
+	// a character any member of whose case-fold orbit it holds (see lib/regex.js).
+	jf int
 }
 
 func rxNewCls() *rxCls { return &rxCls{} }
@@ -340,11 +343,63 @@ func (c *rxCls) hitX(ch rune) bool {
 func (c *rxCls) matchX(ch rune, icase bool) bool {
 	hit := c.hitX(ch)
 	if !hit && icase {
-		if alt := rxSwapCase(ch); alt >= 0 {
+		if c.jf > 0 {
+			hit = c.hitFold(ch, true)
+		} else if alt := rxSwapCase(ch); alt >= 0 {
 			hit = c.hitX(alt)
 		}
 	}
 	return hit != c.neg
+}
+
+// hitFold: does the class hold another member of ch's case-fold orbit? x asks the
+// class tree. Twin of rxClsHitFold in lib/regex.js.
+func (c *rxCls) hitFold(ch rune, x bool) bool {
+	for o, guard := jupFoldNext(ch, c.jf), 0; o != ch && guard < 8; o, guard = jupFoldNext(o, c.jf), guard+1 {
+		if (x && c.hitX(o)) || (!x && c.hit(o)) {
+			return true
+		}
+	}
+	return false
+}
+
+// wordIU: under JavaScript's i and u flags \w also holds U+017F and U+212A, whose
+// case folding is ASCII (WordCharacters), and \W does not: the class's \w and \W
+// become those ranges. Twin of rxWordIU in lib/regex.js.
+func (c *rxCls) wordIU() {
+	keep := c.sp[:0:0]
+	for _, code := range c.sp {
+		var r []rune
+		switch code {
+		case rxSW:
+			r = []rune{48, 57, 65, 90, 95, 95, 97, 122, 383, 383, 8490, 8490}
+		case rxSNW:
+			r = []rune{0, 47, 58, 64, 91, 94, 96, 96, 123, 382, 384, 8489, 8491, 0x10FFFF}
+		default:
+			keep = append(keep, code)
+		}
+		for k := 0; k < len(r); k += 2 {
+			c.add(r[k], r[k+1])
+		}
+	}
+	c.sp = keep
+}
+
+// isWordAt: is c a word character for \b, which under JavaScript's i and u flags
+// also takes U+017F and U+212A (wordIU)? Twin of rxIsWordAt in lib/regex.js.
+func (re *rxRe) isWordAt(c rune) bool {
+	return rxIsWord(c) || (re.jfold == 2 && (c == 383 || c == 8490))
+}
+
+// rxFoldSame: are code units a and b one character under JavaScript's i flag?
+// Twin of rxFoldSame in lib/regex.js.
+func rxFoldSame(a, b rune, mode int) bool {
+	for o, guard := jupFoldNext(a, mode), 0; o != a && guard < 8; o, guard = jupFoldNext(o, mode), guard+1 {
+		if o == b {
+			return true
+		}
+	}
+	return false
 }
 
 // fold adds the other case of every ASCII letter in the class's ranges. Twin of
@@ -486,7 +541,9 @@ func (c *rxCls) hitU(ch rune) bool {
 func (c *rxCls) match(ch rune, icase bool) bool {
 	hit := c.hit(ch)
 	if !hit && icase {
-		if alt := rxSwapCase(ch); alt >= 0 {
+		if c.jf > 0 {
+			hit = c.hitFold(ch, false)
+		} else if alt := rxSwapCase(ch); alt >= 0 {
 			hit = c.hit(alt)
 		}
 	}
@@ -4415,6 +4472,8 @@ type rxRe struct {
 	// jcut is re.jcut in lib/regex.js: the low surrogate a Matcher's region
 	// end splits from the text, or 0.
 	jcut rune
+	// jfold is JavaScript's i flag, 1 without u and 2 with it (rxFoldSame).
+	jfold int
 }
 
 // ===== The C dialect: PCRE2, as PHP's preg_* compile it =====
@@ -6458,6 +6517,20 @@ func rxCompile(pattern, flags string) *rxRe {
 	pg.emit(ast)
 	pg.add(rxOpSave, 1, 0, pg.dummy)
 	pg.add(rxOpMatch, 0, 0, pg.dummy)
+	// JavaScript's i flag compares case-fold orbits (jupFoldNext).
+	jfold := 0
+	if jsrep && !ere && icase {
+		jfold = 1
+		if uni {
+			jfold = 2
+		}
+		for _, fc := range pg.clss {
+			fc.jf = jfold
+			if jfold == 2 {
+				fc.wordIU()
+			}
+		}
+	}
 	if len(pg.calls) > 0 {
 		pg.emitSubs(st.gnodes)
 	}
@@ -6483,7 +6556,7 @@ func rxCompile(pattern, flags string) *rxRe {
 		supp: uni || java && (re2 || st.supp || rxSuppJ(ast) || rxHasSurr(pat)) || pcre && ucase, bfail: bfail, gflags: gflags,
 		pcre: pcre, acc: pg.acc, vmarks: tp.marks,
 		cmin: pg.cmin, cmax: pg.cmax, cgreedy: pg.cgreedy, cemp: pg.cemp, lbmin: pg.lbmin, lbmax: pg.lbmax,
-		src: pattern, flags: flags, jbegin: jbegin, jmin: jmin, ere: ere,
+		src: pattern, flags: flags, jbegin: jbegin, jmin: jmin, ere: ere, jfold: jfold,
 	}
 }
 
@@ -6647,10 +6720,10 @@ func (re *rxRe) assertOK(text []rune, kind, sp int) bool {
 	}
 	before, after := false, false
 	if sp > 0 {
-		before = rxIsWord(text[sp-1])
+		before = re.isWordAt(text[sp-1])
 	}
 	if sp < n {
-		after = rxIsWord(text[sp])
+		after = re.isWordAt(text[sp])
 	}
 	if kind == rxWordB {
 		return before != after
@@ -6963,6 +7036,10 @@ func (re *rxRe) run(text []rune, pcIn, spIn int, caps, marks []int, st *rxRunSt,
 						} else if re.bs[pc] == 3 {
 							// CPython's GROUPREF_UNI_IGNORE: equal lowercases.
 							if unicode.ToLower(lc) != unicode.ToLower(rc) {
+								mis = true
+							}
+						} else if re.jfold > 0 {
+							if !rxFoldSame(lc, rc, re.jfold) {
 								mis = true
 							}
 						} else if rxSwapCase(rc) != lc {

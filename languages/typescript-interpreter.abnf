@@ -2347,11 +2347,14 @@ NotFuncHead = :script(~~
     include("lib/regex.js")
     rxFail = function (msg) { fail("regexp: " + msg) }
     // \p{..} under the u flag reads java.lang.Character's tables (lib/java-chars.js,
-    // lib/java-regex.js) through regex.js's knobs rxPropHit and rxPropClsEs.
+    // lib/java-regex.js) and lib/js-uprops.js's, which also holds the case folding of
+    // the i flag, through regex.js's knobs rxPropHit, rxPropClsEs and rxFoldNext.
     include("lib/java-chars.js")
     include("lib/java-regex.js")
-    rxPropHit = function (id, c) { return jxPropHit(id, c) }
-    rxPropClsEs = function (st, name) { return jxPropClsEs(st, name) }
+    include("lib/js-uprops.js")
+    rxPropHit = function (id, c) { return jupPropHit(id, c) }
+    rxPropClsEs = function (st, name) { return jupPropClsEs(st, name) }
+    rxFoldNext = function (c, mode) { return jupFoldNext(c, mode) }
 
     // JSON.stringify / JSON.parse, shared with layer 2 (abnf/jsrtjson.go is the Go twin);
     // the jsonH* hooks it calls are defined beside jsJsonObj below.
@@ -9283,7 +9286,7 @@ NotFuncHead = :script(~~
     }
     // A member decorator context's access object, as tsc emits it: has(o) is 'key in o',
     // get(o) reads o[key] (not for a setter), set(o, v) writes it (for a setter, a
-    // field and an auto-accessor). A private name is not brand-checked by get and set.
+    // field and an auto-accessor), each behind a private name's brand check.
     // Twin of emitDecoAccess in typescript-to-llvm-ir.abnf.
     function decoAccess(kind, key, priv) {
         var acc = {__keys: ["has"]}
@@ -9295,11 +9298,18 @@ NotFuncHead = :script(~~
             return inOrInstanceof("in", jsKeyUnesc(key), o)
         }, "has", 1)
         if (kind != "setter") {
-            acc["get"] = fnMetaPut(function(o) { return getMember(o, key) }, "get", 1)
+            acc["get"] = fnMetaPut(function(o) {
+                if (priv) { privCheck(o, key, false) }
+                return getMember(o, key)
+            }, "get", 1)
             acc.__keys.push("get")
         }
         if (kind == "setter" || kind == "field" || kind == "accessor") {
-            acc["set"] = fnMetaPut(function(o, x) { setMember(o, key, x); return undefined }, "set", 2)
+            acc["set"] = fnMetaPut(function(o, x) {
+                if (priv) { privCheck(o, key, true) }
+                setMember(o, key, x)
+                return undefined
+            }, "set", 2)
             acc.__keys.push("set")
         }
         return acc
@@ -9524,7 +9534,7 @@ NotFuncHead = :script(~~
                 ckMembers.push(mm)
             }
             if (typeof mm.name == "string" && isPrivateKey(mm.name)) {
-                privKinds["$" + mm.name] = {field: mm.kind == "field", statik: mm.statik == true, cls: (name == "") ? "anonymous" : name}
+                privKinds["$" + mm.name] = {field: mm.kind == "field" && !mm.auto, statik: mm.statik == true, cls: (name == "") ? "anonymous" : name}
             }
             if (mm.auto === true) {
                 var store = {kind: "field", name: "__#auto#" + mm.name, statik: mm.statik, init: mm.init, di: mm.di}

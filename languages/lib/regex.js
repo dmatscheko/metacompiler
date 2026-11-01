@@ -274,11 +274,13 @@ var RX_STEPK = 4
 // uses any of the three; it compiles to RX_CLASSX, so a flat class keeps the
 // plain RX_CLASS path. u marks ranges read under Java's (?iu): they also take
 // a character whose simple uppercase, or that uppercase's lowercase, is in
-// range (Pattern.java's CIRangeU and SingleU).
+// range (Pattern.java's CIRangeU and SingleU). jf is JavaScript's i flag (1
+// without u, 2 with it): the class also takes a character any member of whose
+// case-fold orbit it holds (rxClsHitFold).
 
 function rxNewCls() {
     return {neg: false, lo: [], hi: [], sp: [], subs: [], ands: [], props: [], x: false, u: false, pu: false,
-            cpg: false}
+            cpg: false, jf: 0}
 }
 
 function rxClsAdd(cls, from, to) {
@@ -646,8 +648,11 @@ function rxCaseU(c, mode) {
 function rxClsMatch(cls, c, icase) {
     var hit = rxClsHit(cls, c)
     if (!hit && icase) {
-        var alt = rxSwapCase(c)
-        if (alt >= 0) { hit = rxClsHit(cls, alt) }
+        if (cls.jf > 0) { hit = rxClsHitFold(cls, c, false) }
+        else {
+            var alt = rxSwapCase(c)
+            if (alt >= 0) { hit = rxClsHit(cls, alt) }
+        }
     }
     if (cls.neg) { return !hit }
     return hit
@@ -656,10 +661,73 @@ function rxClsMatch(cls, c, icase) {
 function rxClsMatchX(cls, c, icase) {
     var hit = rxClsHitX(cls, c)
     if (!hit && icase) {
-        var alt = rxSwapCase(c)
-        if (alt >= 0) { hit = rxClsHitX(cls, alt) }
+        if (cls.jf > 0) { hit = rxClsHitFold(cls, c, true) }
+        else {
+            var alt = rxSwapCase(c)
+            if (alt >= 0) { hit = rxClsHitX(cls, alt) }
+        }
     }
     return hit != cls.neg
+}
+
+// rxClsHitFold: does the class hold another member of c's case-fold orbit
+// (JavaScript's CharacterSetMatcher: some member's Canonicalize is c's)? x asks
+// the class tree (rxClsHitX).
+function rxClsHitFold(cls, c, x) {
+    var o = rxFoldNext(c, cls.jf)
+    var guard = 0
+    while (o != c && guard < 8) {
+        if (x ? rxClsHitX(cls, o) : rxClsHit(cls, o)) { return true }
+        o = rxFoldNext(o, cls.jf)
+        guard = guard + 1
+    }
+    return false
+}
+
+// rxFoldNext answers the next member of code point c's case-fold orbit under
+// JavaScript's i flag (mode 2 with u, 1 without), or c when it is alone. A KNOB
+// like rxPropHit (lib/js-uprops.js's jupFoldNext); this default knows ASCII.
+var rxFoldNext = function (c, mode) {
+    var sw = rxSwapCase(c)
+    return sw < 0 ? c : sw
+}
+
+// rxWordIU: under JavaScript's i and u flags \w also holds U+017F and U+212A,
+// whose case folding is ASCII (WordCharacters), and \W does not: the class's
+// \w and \W become those ranges. Twin of wordIU in abnf/jsrtregex.go.
+var RX_WORD_IU = [48, 57, 65, 90, 95, 95, 97, 122, 383, 383, 8490, 8490]
+var RX_NWORD_IU = [0, 47, 58, 64, 91, 94, 96, 96, 123, 382, 384, 8489, 8491, 1114111]
+function rxWordIU(cls) {
+    var sp = cls.sp
+    var keep = []
+    var i = 0
+    while (i < sp.length) {
+        var r = sp[i] == RX_SW ? RX_WORD_IU : (sp[i] == RX_SNW ? RX_NWORD_IU : [])
+        if (r.length == 0) { keep.push(sp[i]) }
+        var k = 0
+        while (k < r.length) {
+            rxClsAdd(cls, r[k], r[k + 1])
+            k = k + 2
+        }
+        i = i + 1
+    }
+    cls.sp = keep
+}
+
+// rxIsWordAt: is c a word character for \b, which under JavaScript's i and u
+// flags also takes U+017F and U+212A (rxWordIU)?
+function rxIsWordAt(re, c) { return rxIsWordCode(c) || (re.jfold == 2 && (c == 383 || c == 8490)) }
+
+// rxFoldSame: are code units a and b one character under JavaScript's i flag?
+function rxFoldSame(a, b, mode) {
+    var o = rxFoldNext(a, mode)
+    var guard = 0
+    while (o != a && guard < 8) {
+        if (o == b) { return true }
+        o = rxFoldNext(o, mode)
+        guard = guard + 1
+    }
+    return false
 }
 
 
@@ -5954,7 +6022,7 @@ function rxCompile(pattern, flags) {
                 py: false, uni: false, supp: false, bfail: bfail, gflags: "",
                 cmin: [], cmax: [], cgreedy: [], cemp: [], lbmin: [], lbmax: [], vmarks: [],
                 src: pattern, flags: flags, hitEnd: false, reqEnd: false, jbegin: false, jmin: 0, jcut: 0, steps: 0,
-                ere: false, vis: []}
+                ere: false, vis: [], jfold: 0}
     }
     var pg = rxNewProg()
     pg.jsrep = jsrep
@@ -5988,6 +6056,18 @@ function rxCompile(pattern, flags) {
     rxEmit(pg, ast)
     rxAdd(pg, RX_SAVE, 1, 0, pg.dummy)
     rxAdd(pg, RX_MATCH, 0, 0, pg.dummy)
+    // JavaScript's i flag compares case-fold orbits: Unicode's simple case folding
+    // under u, toUpperCase's without (rxFoldNext).
+    var jfold = (jsrep && !ere && icase) ? (uni ? 2 : 1) : 0
+    if (jfold > 0) {
+        var fc = pg.clss
+        var fi2 = 0
+        while (fi2 < fc.length) {
+            fc[fi2].jf = jfold
+            if (jfold == 2) { rxWordIU(fc[fi2]) }
+            fi2 = fi2 + 1
+        }
+    }
     if (pg.calls.length > 0) { rxEmitSubs(pg, ast, st.gnodes) }
     if (ere) { rxMemoOps(pg) }
     var jbegin = java && rxBeginJ(ast)
@@ -6001,7 +6081,7 @@ function rxCompile(pattern, flags) {
         py: py, uni: uni, supp: supp, bfail: bfail, gflags: java ? rxFlagsGet(st) : st.gflags, pcre: pcre,
         acc: pg.acc, cmin: pg.cmin, cmax: pg.cmax, cgreedy: pg.cgreedy, cemp: pg.cemp, lbmin: pg.lbmin, lbmax: pg.lbmax,
         src: pattern, flags: flags, hitEnd: false, reqEnd: false, jbegin: jbegin, jmin: jmin, steps: 0,
-        jcut: 0, ere: ere, vis: []
+        jcut: 0, ere: ere, vis: [], jfold: jfold
     }
 }
 
@@ -6053,8 +6133,8 @@ function rxAssertOK(re, text, kind, sp) {
     if (kind >= RX_JBOL) { return rxAssertJ(re, text, kind, sp) }
     var before = false
     var after = false
-    if (sp > 0) { before = rxIsWordCode(text.charCodeAt(sp - 1)) }
-    if (sp < n) { after = rxIsWordCode(text.charCodeAt(sp)) }
+    if (sp > 0) { before = rxIsWordAt(re, text.charCodeAt(sp - 1)) }
+    if (sp < n) { after = rxIsWordAt(re, text.charCodeAt(sp)) }
     if (kind == RX_WORDB) { return before != after }
     return before == after
 }
@@ -6398,6 +6478,8 @@ function rxRun(re, text, pcIn, spIn, caps, marks, st, base, keep) {
                             } else if (bs[pc] == 3) {
                                 // CPython's GROUPREF_UNI_IGNORE: equal lowercases.
                                 if (rxPyLower(lc) != rxPyLower(rc)) { bmis = true }
+                            } else if (re.jfold > 0) {
+                                if (!rxFoldSame(lc, rc, re.jfold)) { bmis = true }
                             } else if (rxSwapCase(rc) != lc) {
                                 bmis = true
                             }

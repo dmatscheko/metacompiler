@@ -244,8 +244,8 @@ function jxPropCls(st, name, at) {
 // u flag. The name is General_Category=V or gc=V, Script=V or sc=V, or a lone
 // general category value or binary property, each spelled exactly as the
 // specification's tables spell it. Script_Extensions and the binary properties
-// java.lang.Character has no table for are reported unsupported. Twin of
-// propClsEs in abnf/jsrtjavaprops.go.
+// java.lang.Character has no table for are lib/js-uprops.js's, which asks here for
+// the rest. Twin of propClsEs in abnf/jsrtjavaprops.go.
 function jxPropClsEs(st, name) {
     var cls = rxNewCls()
     var eq = name.indexOf("=")
@@ -255,17 +255,11 @@ function jxPropClsEs(st, name) {
     if (eq < 0) { ok = jxGcEs(cls, name) || jxBinEs(cls, name) }
     else if (key == "General_Category" || key == "gc") { ok = jxGcEs(cls, val) }
     else if (key == "Script" || key == "sc") { ok = jxScriptEs(cls, val) }
-    if (ok) { return cls }
-    if (key == "Script_Extensions" || key == "scx" || (eq < 0 && JX_BIN_ES_NONE.indexOf(" " + name + " ") >= 0)) {
-        rxErr(st, "unsupported character property \\p{" + name + "}")
-    } else {
-        rxErr(st, "Invalid property name")
-    }
+    if (!ok) { rxErr(st, "Invalid property name") }
     return cls
 }
 
-// The General_Category value aliases as long:short, and the binary properties
-// with no table here, each name and alias.
+// The General_Category value aliases as long:short.
 var JX_GC_ES = " Cased_Letter:LC Close_Punctuation:Pe Connector_Punctuation:Pc Control:Cc cntrl:Cc"
     + " Currency_Symbol:Sc Dash_Punctuation:Pd Decimal_Number:Nd digit:Nd Enclosing_Mark:Me"
     + " Final_Punctuation:Pf Format:Cf Initial_Punctuation:Pi Letter:L Letter_Number:Nl Line_Separator:Zl"
@@ -274,15 +268,6 @@ var JX_GC_ES = " Cased_Letter:LC Close_Punctuation:Pe Connector_Punctuation:Pc C
     + " Other_Punctuation:Po Other_Symbol:So Paragraph_Separator:Zp Private_Use:Co Punctuation:P punct:P"
     + " Separator:Z Space_Separator:Zs Spacing_Mark:Mc Surrogate:Cs Symbol:S Titlecase_Letter:Lt"
     + " Unassigned:Cn Uppercase_Letter:Lu "
-var JX_BIN_ES_NONE = " Bidi_Control Bidi_C Case_Ignorable CI Changes_When_Casefolded CWCF"
-    + " Changes_When_Casemapped CWCM Changes_When_Lowercased CWL Changes_When_NFKC_Casefolded CWKCF"
-    + " Changes_When_Titlecased CWT Changes_When_Uppercased CWU Dash Default_Ignorable_Code_Point DI"
-    + " Deprecated Dep Diacritic Dia Extender Ext Grapheme_Base Gr_Base Grapheme_Extend Gr_Ext"
-    + " IDS_Binary_Operator IDSB IDS_Trinary_Operator IDST ID_Continue IDC ID_Start IDS"
-    + " Logical_Order_Exception LOE Math Pattern_Syntax Pat_Syn Quotation_Mark QMark Radical"
-    + " Sentence_Terminal STerm Soft_Dotted SD Terminal_Punctuation Term Unified_Ideograph UIdeo"
-    + " XID_Continue XIDC XID_Start XIDS "
-
 // A General_Category value, long or short.
 function jxGcEs(cls, v) {
     var sh = v

@@ -2004,6 +2004,41 @@ function s149() {
         ([0][0] ||= 6) === 6 && ([7][0] &&= 8) === 8 && ([0][0] &&= 8) === 0)
 }
 
+// ===== SECTION 150: Script_Extensions, the remaining binary properties, case folding =====
+// \p{scx=..} (Script_Extensions=) matches a code point whose Script_Extensions holds
+// the script, which for a shared mark is more than its Script; the binary properties
+// java.lang.Character has no table for (Dash, Math, ID_Start, ...) match by Unicode's
+// own lists. Under i a character matches every member of its case-fold class: with u
+// Unicode's simple case folding, without u toUpperCase's, which never maps a non-ASCII
+// character to an ASCII one; with both, \w and \b also take U+017F and U+212A. Values
+// read off node 24.
+function s150() {
+    var ts = ["a", "1", "-", "+", "^", "\u0964", "\u30fc", "\u4e00", "\u0301", "\u{10940}"]
+    var hits = function (src) {
+        var re = new RegExp("^" + src + "$", "u")
+        var out = ""
+        for (var i = 0; i < ts.length; i++) { out = out + (re.test(ts[i]) ? "1" : "0") }
+        return out
+    }
+    check("scx150a", hits("\\p{scx=Deva}") === "0000010000" && hits("\\p{sc=Deva}") === "0000000000" &&
+        hits("\\p{Script_Extensions=Hira}") === "0000001000" && hits("\\p{scx=Zyyy}") === "0111100000" &&
+        hits("\\p{scx=Latin}") === "1000000010" && hits("\\p{scx=Zinh}") === "0000000000" &&
+        hits("\\P{scx=Kana}") === "1111110111")
+    check("ubin150b", hits("\\p{Dash}") === "0010000000" && hits("\\p{Math}") === "0001100000" &&
+        hits("\\p{ID_Start}") === "1000001101" && hits("\\p{IDC}") === "1100001111" &&
+        hits("\\p{Dia}") === "0000101010" && hits("\\p{Unified_Ideograph}") === "0000000100" &&
+        hits("[\\p{Pat_Syn}\\p{Gr_Ext}]") === "0011100010" && hits("\\p{Changes_When_Uppercased}") === "1000000000")
+    check("fold150c", /\u00e9/iu.test("\u00c9") && /\u00e9/i.test("\u00c9") && /\u017f/iu.test("S") &&
+        !/\u017f/i.test("s") && /\u212a/iu.test("k") && !/\u212a/i.test("k") && /\u03c3/iu.test("\u03c2") &&
+        /\u03c3/i.test("\u03c2") && /\u{10428}/iu.test("\u{10400}") && !/[^\u00e9]/iu.test("\u00c9"))
+    check("fold150d", /[\u00e0-\u00f6]+/iu.exec("x\u00c4\u00d6y")[0] === "\u00c4\u00d6" && /(\u00e9)\1/iu.test("\u00e9\u00c9") &&
+        /(\u00e9)\1/i.test("\u00e9\u00c9") && /^[\u0391-\u03a9]+$/i.test("\u03b1\u03c9") &&
+        "\u00c9t\u00c9".replace(/\u00e9/giu, "e") === "ete" && /\u1e9e/iu.test("\u00df") && !/\u1e9e/i.test("\u00df"))
+    check("fold150e", !/\W/iu.test("\u017f") && !/\W/iu.test("\u212a") && !/[\W]/iu.test("S") && /\b/iu.test("\u017f") &&
+        /[^\W]/iu.test("\u212a") && /\W/i.test("\u017f") && /\W/u.test("\u017f") && !/a\b/iu.test("a\u212a") &&
+        /[\w-]+/iu.exec("\u017f\u212a-x!")[0] === "\u017f\u212a-x")
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -2070,6 +2105,7 @@ function main() {
     s147() // SECTION-CALL 147
     s148() // SECTION-CALL 148
     s149() // SECTION-CALL 149
+    s150() // SECTION-CALL 150
     println("full: " + checks + " checks, " + failures + " failures")
     return failures
 }
