@@ -1954,6 +1954,13 @@ func (rt *jsrt) cspObjStr(o *jsObject, depth int) (string, bool) {
 			return csClsFull(cls), true
 		}
 	}
+	// A System.Type token: Type.ToString() is its FullName. Twin of the same arm of
+	// csStrD in languages/csharp-interpreter.abnf.
+	if b, _ := o.props["__type"].(bool); b {
+		if f, isStr := o.props["FullName"].(string); isStr {
+			return f, true
+		}
+	}
 	return "", false
 }
 
@@ -2304,8 +2311,10 @@ func csClsFull(cls *jsObject) string {
 }
 
 // csClsType is a user type's System.Type token: the bare Name, the qualified FullName.
+// __type marks a token, which renders as its FullName (cspObjStr).
 func csClsType(cls *jsObject, name string) *jsObject {
 	o := newJSObject()
+	o.set("__type", true)
 	o.set("FullName", csClsFull(cls))
 	o.set("Name", name)
 	return o
@@ -2342,6 +2351,7 @@ func (rt *jsrt) csTypeOfVal(v interface{}) *jsObject {
 		}
 	}
 	o := newJSObject()
+	o.set("__type", true)
 	o.set("FullName", full)
 	name := full
 	if i := strings.LastIndex(full, "."); i >= 0 {

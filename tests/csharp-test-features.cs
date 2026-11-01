@@ -146,6 +146,25 @@ namespace Demo
 
     class VAutoGetSub : VAutoGet { public override int K => base.K + 100; }
 
+    class VBase                              // a property with accessor bodies
+    {
+        protected int k = 1;
+        public virtual int K { get { return k * 10; } set { k = value + 1; } }
+    }
+
+    class VBaseW : VBase                     // base.K as a target runs VBase's accessors
+    {
+        public override int K { get { return base.K + 1000; } set { base.K = value * 2; } }
+        public void Bump() { base.K += 5; base.K++; }
+    }
+
+    class VAutoMid : VBase { public override int K { get; set; } }
+
+    class VAutoMidSet : VAutoMid             // overrides only the setter; reads VAutoMid's field
+    {
+        public override int K { set { base.K = value + 100; } }
+    }
+
     class Doubler                            // a member initializer runs the set accessor
     {
         int d;
@@ -910,6 +929,20 @@ namespace Demo
             Program.Check("prop-auto-override-base-chain",
                           new VAutoGetSub().K == 109 && new VAutoGetSub().ReadK() == 109);
             Program.Check("prop-auto-not-overridden", new VAuto().K == 5 && new VAuto().ReadK() == 5);
+            // base.K as an assignment target (ECMA-334 12.8.15): the base's set accessor
+            // runs on this non-virtually, and a compound assignment or ++ reads through
+            // the base's get accessor first.
+            int[] bw = { 3, 5 };
+            VBaseW vbw = new VBaseW();
+            vbw.K = bw[0];
+            int vbw1 = vbw.K;
+            vbw.Bump();
+            Program.Check("prop-base-set", vbw1 == 1070 && vbw.K == 8620);
+            VAutoMidSet vms = new VAutoMidSet();
+            int vms0 = vms.K;
+            vms.K = bw[1];
+            VBase vmsb = vms;
+            Program.Check("prop-base-set-auto", vms0 == 0 && vms.K == 105 && vmsb.K == 105);
 
             // ----- object and collection initializers -----
             Box b1 = new Box { W = 3, H = 4 };
@@ -1057,6 +1090,15 @@ namespace Demo
             Program.Check("exc-user-type-names",
                           new DerivedEx().GetType().FullName == "Demo.DerivedEx"
                           && new DerivedEx().GetType().Name == "DerivedEx");
+            // System.Type.ToString() is the FullName, and typeof names the declared
+            // type with its namespace; a keyword type is its System type (ECMA-334 8.2.1).
+            Program.Check("type-tostring",
+                          new DerivedEx().GetType().ToString() == "Demo.DerivedEx"
+                          && ("" + new DerivedEx().GetType()) == "Demo.DerivedEx"
+                          && $"{typeof(VAuto)}" == "Demo.VAuto");
+            Program.Check("typeof-namespace",
+                          typeof(DerivedEx).FullName == "Demo.DerivedEx" && typeof(DerivedEx).Name == "DerivedEx"
+                          && typeof(int).FullName == "System.Int32" && typeof(int).Name == "Int32");
             Program.Check("exc-user-msg-unchanged", new MyEx("custom").Message == "custom");
             // A base that is not System.Exception contributes ITS message, not the
             // generated one.

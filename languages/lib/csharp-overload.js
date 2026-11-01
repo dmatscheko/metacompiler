@@ -20,6 +20,31 @@ function csxNorm(t) {
     if (al != undefined) { return al }
     return s
 }
+// The System type a keyword type (or its alias) names, ECMA-334 8.2.1: what
+// typeof(int).FullName answers. "" for any other type.
+var csxSysNames = {"$string": "String", "$object": "Object", "$int": "Int32", "$long": "Int64", "$short": "Int16",
+                   "$ushort": "UInt16", "$uint": "UInt32", "$ulong": "UInt64", "$byte": "Byte", "$sbyte": "SByte",
+                   "$double": "Double", "$float": "Single", "$char": "Char", "$bool": "Boolean", "$decimal": "Decimal"}
+function csxSysName(t) {
+    var s = csxSysNames["$" + csxNorm(t)]
+    if (s == undefined) { return "" }
+    return "System." + s
+}
+// typeof(T)'s Name and FullName: a keyword type's System name; a declared type's
+// bare and qualified names (declFull is the grammar's csFullOf of csxLastSeg(t), the
+// bare name the type is registered under); anything else as written.
+function csxTypeofNames(t, declFull) {
+    var sys = csxSysName(t)
+    if (sys != "") { return {n: csxLastSeg(sys), f: sys} }
+    var seg = csxLastSeg(t)
+    if (declFull != seg) { return {n: seg, f: declFull} }
+    return {n: t, f: t}
+}
+function csxLastSeg(t) {
+    var i = t.lastIndexOf(".")
+    if (i < 0) { return t }
+    return t.substring(i + 1, t.length)
+}
 // The implicit numeric conversions, by source type (ECMA-334 10.2.3).
 var csxNumTo = {
     "$sbyte": ",short,int,long,float,double,decimal,",

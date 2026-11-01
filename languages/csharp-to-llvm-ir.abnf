@@ -727,8 +727,11 @@ Assignment  <~~ csDfltAssign(up.start, up.pos); push(makeAssign(takeAll(), up.po
 // primary at all - `((IF) ia).Prop = 3`, `GetList().Offset += added`,
 // `t.GetMe().GetMe().bar++`, `(new Foo()).s += "A"`. ParenTarget carries no tag,
 // so exactly one target record reaches the enclosing Assignment / IncDec.
-Target      = ParenTarget | ChainTarget | GenTarget | PlainTarget ;
+Target      = ParenTarget | ChainTarget | GenTarget | BaseTarget | PlainTarget ;
 ParenTarget = "(" Target ")" ;
+// `base.P = v`, `base.P += v`, `base.P++`: P as the base class sees it (makeBaseTarget).
+BaseTarget  <~~ push(makeBaseTarget(pop())) ~~>
+            = KwBase "." Id <~~ push(up.in) ~~> !"(" ;
 // The suffix run is one greedy repetition rather than "{ Sfx } LastSfx": a PEG
 // repetition never gives a match back, so the two-part spelling could never see
 // its final suffix. The LAST suffix the run consumed is the place. PlaceAhead is
@@ -3487,6 +3490,7 @@ KwLet       = "let" KwEnd ;
     // Reads the current value of an assignment target (for '??=', which must not assign
     // when the place already holds a value).
     function makeRefRead(ref) {
+        if (ref.bprop != undefined) { return makeBaseProp(ref.bprop) }
         var defClass = curClassName
         return function(b) {
             if (ref.path.length == 0) {
@@ -3537,6 +3541,7 @@ KwLet       = "let" KwEnd ;
                 return {b: mergeB, v: mergeB.NewPhi([llvm.ir.NewIncoming(rs.v, rs.b), llvm.ir.NewIncoming(r.v, elseB)])}
             }
         }
+        if (ref.bprop != undefined) { return makeBaseAssign(ref, op, valT) }
         return function(b) {
             var r = valT(b)
             b = r.b
@@ -3621,6 +3626,7 @@ KwLet       = "let" KwEnd ;
     function makeIncDec(items, pre) {
         var ref = items[0]
         var step = (items[1] == "++") ? 1 : 0 - 1
+        if (ref.bprop != undefined) { return makeBaseIncDec(ref, step, pre) }
         var defClass = curClassName
         return function(b) {
             var oneV = emitNum(b, step)
@@ -3808,6 +3814,50 @@ KwLet       = "let" KwEnd ;
             }
             var key = (name == "Message" && csMemberInfo(sup, name) == null) ? "__excmsg" : name
             return {b: b, v: callExt(b, "js_get", [thisV, emitStr(b, key)])}
+        }
+    }
+    // The target `base.P`: a set accessor some class from the base of the defining
+    // class declares runs on `this` non-virtually (js_supercall walks to it);
+    // otherwise P is the slot on `this`. Twin of makeBaseTarget in
+    // csharp-interpreter.abnf, where the rule is cited.
+    function makeBaseTarget(name) { return {name: "", path: [], bprop: name, bdef: curClassName} }
+    function emitBaseSet(b, ref, v) {
+        var thisV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "this")])
+        var sup = csSupers[ref.bdef]
+        if (sup != undefined && csDeclaringClass(sup, "__set_" + ref.bprop) != "") {
+            var clsV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, ref.bdef)])
+            var supV = callExt(b, "js_get", [clsV, emitStr(b, "__super")])
+            var argsV = callExt(b, "js_arr_new", [])
+            callExt(b, "js_arr_push", [argsV, v])
+            callExt(b, "js_supercall", [supV, thisV, emitStr(b, "__set_" + ref.bprop), argsV])
+            return b
+        }
+        var kV = emitStr(b, ref.bprop)
+        var sv = v
+        if (csAdoptMems[ref.bprop] != undefined) { sv = callExt(b, "js_csadoptmem", [thisV, kV, v]) }
+        callExt(b, "js_set", [thisV, kV, sv])
+        return b
+    }
+    // `base.P = v` / `base.P op= v`; a compound one reads P first (ECMA-334 12.21.4).
+    function makeBaseAssign(ref, op, valT) {
+        var getT = makeBaseProp(ref.bprop)
+        return function(b) {
+            if (op == "=") {
+                var r = valT(b)
+                return {b: emitBaseSet(r.b, ref, r.v), v: r.v}
+            }
+            var g = getT(b)
+            var rv = valT(g.b)
+            var rc = emitCompound(rv.b, op, g.v, rv.v)
+            return {b: emitBaseSet(rc.b, ref, rc.v), v: rc.v}
+        }
+    }
+    function makeBaseIncDec(ref, step, pre) {
+        var getT = makeBaseProp(ref.bprop)
+        return function(b) {
+            var g = getT(b)
+            var nv = callExt(g.b, "js_csstep", [g.v, emitNum(g.b, step)])
+            return {b: emitBaseSet(g.b, ref, nv), v: pre ? nv : g.v}
         }
     }
 
@@ -4796,11 +4846,15 @@ KwLet       = "let" KwEnd ;
 
     // ----- typeof / nameof / sizeof / default -----
     // A type token: never null, and it answers .Name / .FullName like System.Type does.
+    // Named when it is emitted, after the walk has noted every declared type's
+    // FullName. Twin of makeTypeof in csharp-interpreter.abnf.
     function makeTypeof(name) {
         return function(b) {
+            var nm = csxTypeofNames(name, csFullOf(csxLastSeg(name)))
             var o = callExt(b, "js_obj_new", [])
-            callExt(b, "js_set", [o, emitStr(b, "Name"), emitStr(b, name)])
-            callExt(b, "js_set", [o, emitStr(b, "FullName"), emitStr(b, name)])
+            callExt(b, "js_set", [o, emitStr(b, "__type"), hTrue])
+            callExt(b, "js_set", [o, emitStr(b, "Name"), emitStr(b, nm.n)])
+            callExt(b, "js_set", [o, emitStr(b, "FullName"), emitStr(b, nm.f)])
             return {b: b, v: o}
         }
     }
@@ -6934,8 +6988,8 @@ KwLet       = "let" KwEnd ;
     // so every read and write dispatches to the most derived accessor and base.P reaches
     // the field. The rule is cited at the twin, csBackAuto in csharp-interpreter.abnf.
     // csBkProps is decided at walk time and read when the classes are emitted, so a
-    // base declared before its override is covered. The synthesized getter also joins
-    // csBodyMembers, which is what makeBaseProp's js_supercall needs.
+    // base declared before its override is covered. The synthesized accessors also join
+    // csBodyMembers, which is what the js_supercall of makeBaseProp and emitBaseSet needs.
     var csAutoProps = {}
     var csAccProps = {}
     var csBkProps = {}
@@ -6948,6 +7002,7 @@ KwLet       = "let" KwEnd ;
             if (au != undefined && au["$" + name] === true) {
                 csBkProps[c + "." + name] = true
                 csBodyMembers[c]["__get_" + name] = true
+                csBodyMembers[c]["__set_" + name] = true
                 return
             }
             c = csSupers[c]
@@ -7274,6 +7329,7 @@ KwLet       = "let" KwEnd ;
             if (mm.adoptTy != undefined && mm.adoptTy != "") { tys[mm.name] = mm.adoptTy }
             if (mm.kind == "method") { bodies[mm.name] = true }
             if (mm.kind == "prop" && mm.getT != null) { bodies["__get_" + mm.name] = true }
+            if (mm.kind == "prop" && mm.setT != null) { bodies["__set_" + mm.name] = true }
             if (mm.ext != undefined) { csSupers[name] = mm.ext }
         }
         csBodyMembers[name] = bodies

@@ -862,6 +862,9 @@ function cpObjStr(o, depth) {
         var n = o["__name"]
         if (typeof n == "string") { return n }
     }
+    // A System.Type token: Type.ToString() is its FullName. Twin of the same arm of
+    // csStrD in languages/csharp-interpreter.abnf.
+    if (o["__type"] === true) { return o["FullName"] }
     // An instance: GetType().ToString(), its type's FullName (csClsFull).
     var cls = o["__class"]
     if (cls === undefined) { return undefined }
@@ -1049,6 +1052,7 @@ function csTypeOfVal(v) {
         } else { full = "System.Object" }
     }
     var o = {}
+    o["__type"] = true
     o["FullName"] = full
     o["Name"] = csLastSeg(full)
     return o
@@ -1063,6 +1067,7 @@ function csClsFull(cls) {
 }
 function csClsType(cls) {
     var o = {}
+    o["__type"] = true
     o["FullName"] = csClsFull(cls)
     o["Name"] = cls["__name"]
     return o

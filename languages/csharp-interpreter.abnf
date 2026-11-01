@@ -734,8 +734,11 @@ Assignment  <~~ csDfltAssign(up.start, up.pos); push(makeAssign(takeAll(), up.po
 // primary at all - `((IF) ia).Prop = 3`, `GetList().Offset += added`,
 // `t.GetMe().GetMe().bar++`, `(new Foo()).s += "A"`. ParenTarget carries no tag,
 // so exactly one target record reaches the enclosing Assignment / IncDec.
-Target      = ParenTarget | ChainTarget | GenTarget | PlainTarget ;
+Target      = ParenTarget | ChainTarget | GenTarget | BaseTarget | PlainTarget ;
 ParenTarget = "(" Target ")" ;
+// `base.P = v`, `base.P += v`, `base.P++`: P as the base class sees it (makeBaseTarget).
+BaseTarget  <~~ push(makeBaseTarget(pop())) ~~>
+            = KwBase "." Id <~~ push(up.in) ~~> !"(" ;
 // The suffix run is one greedy repetition rather than "{ Sfx } LastSfx": a PEG
 // repetition never gives a match back, so the two-part spelling could never see
 // its final suffix. The LAST suffix the run consumed is the place. PlaceAhead is
@@ -2544,14 +2547,14 @@ KwLet       = "let" KwEnd ;
             else if (Array.isArray(v)) { full = csArrayName(v) }
             else if (v !== null && v !== undefined && typeof v == "object" && v.__class != undefined
                      && typeof v.__class.__name == "string") {
-                return {Name: v.__class.__name, FullName: csClsFull(v.__class)}
+                return {__type: true, Name: v.__class.__name, FullName: csClsFull(v.__class)}
             }
             else if (v !== null && v !== undefined && typeof v == "object" && v.__isclass === true
-                     && typeof v.__name == "string") { return {Name: v.__name, FullName: csClsFull(v)} }
+                     && typeof v.__name == "string") { return {__type: true, Name: v.__name, FullName: csClsFull(v)} }
             else { full = "System.Object" }
         }
         var parts = full.split(".")
-        return {Name: parts[parts.length - 1], FullName: full}
+        return {__type: true, Name: parts[parts.length - 1], FullName: full}
     }
     // A user type descriptor's FullName (csNoteFull): __fullname when it is qualified.
     function csClsFull(cls) { return typeof cls.__fullname == "string" ? cls.__fullname : cls.__name }
@@ -2756,6 +2759,8 @@ KwLet       = "let" KwEnd ;
             if (csIsRecObj(v)) { return csRecStr(v, d) }
             if (v.__isclass === true && typeof v.__name == "string") { return v.__name }
             if (v.__class != undefined && typeof v.__class.__name == "string") { return csClsFull(v.__class) }
+            // A System.Type token (typeof, GetType): Type.ToString() is its FullName.
+            if (v.__type === true) { return v.FullName }
         }
         return "" + v
     }
@@ -3456,6 +3461,7 @@ KwLet       = "let" KwEnd ;
     // Reads the current value of an assignment target (for '??=', which must not assign
     // when the place already holds a value).
     function makeRefRead(ref) {
+        if (ref.bprop != undefined) { return makeBaseProp(ref.bprop) }
         return function() {
             if (ref.path.length == 0) { return csGetVar(ref.name) }
             var p = csResolveRef(ref)
@@ -3496,6 +3502,7 @@ KwLet       = "let" KwEnd ;
                 return setT()
             }
         }
+        if (ref.bprop != undefined) { return makeBaseAssign(ref, op, valT) }
         return function() {
             var v = anytype
             v = valT()
@@ -3551,6 +3558,7 @@ KwLet       = "let" KwEnd ;
     function makeIncDec(items, pre) {
         var ref = items[0]
         var d = (items[1] == "++") ? 1 : -1
+        if (ref.bprop != undefined) { return makeBaseIncDec(ref, d, pre) }
         return function() {
             if (ref.path.length == 0) {
                 var n = anytype // The variable may hold a number, a char or a double.
@@ -3657,6 +3665,40 @@ KwLet       = "let" KwEnd ;
             if (name == "Message" && hasOwn(self, "__excmsg")) { return self.__excmsg }
             if (hasOwn(self, name)) { return self[name] }
             fail("unknown base member '" + name + "'")
+        }
+    }
+    // The target `base.P`: a set accessor declared from the base of the defining class
+    // runs on `this` NON-virtually, so a derived override of the setter is not
+    // reached; otherwise P is the slot on `this` (ECMA-334 12.8.15, base access).
+    // Twin of makeBaseTarget in csharp-to-llvm-ir.abnf.
+    function makeBaseTarget(name) { return {name: "", path: [], bprop: name, bdef: curClassName} }
+    function csBaseSet(ref, v) {
+        var self = getVar("this")
+        var key = "__set_" + ref.bprop
+        for (var c = getVar(ref.bdef).__super; c != undefined; c = c.__super) {
+            if (hasOwn(c, key)) { c[key](self, v); return }
+        }
+        self[ref.bprop] = (csAdoptMems[ref.bprop] != undefined) ? csAdoptMemW(self, ref.bprop, v) : v
+    }
+    // `base.P = v` and `base.P op= v`: a compound assignment reads P through the base
+    // getter BEFORE the right operand runs (ECMA-334 12.21.4).
+    function makeBaseAssign(ref, op, valT) {
+        var getT = makeBaseProp(ref.bprop)
+        return function() {
+            var v = anytype
+            if (op == "=") { v = valT() } else { var old = anytype; old = getT(); v = applyOp(op, old, valT()) }
+            csBaseSet(ref, v)
+            return v
+        }
+    }
+    function makeBaseIncDec(ref, d, pre) {
+        var getT = makeBaseProp(ref.bprop)
+        return function() {
+            var o = anytype
+            o = getT()
+            var n = csStep(o, d)
+            csBaseSet(ref, n)
+            return pre ? n : o
         }
     }
 
@@ -4880,7 +4922,19 @@ KwLet       = "let" KwEnd ;
 
     // ----- typeof / nameof / sizeof / default -----
     // A type token: never null, and it answers .Name / .FullName like System.Type does.
-    function makeTypeof(name) { return makeConst({__type: true, Name: name, FullName: name}) }
+    // Built the first time it runs, when every declared type's FullName is known (a
+    // typeof may precede the declaration it names). Twin of makeTypeof in
+    // csharp-to-llvm-ir.abnf.
+    function makeTypeof(name) {
+        var tok = null
+        return function() {
+            if (tok == null) {
+                var nm = csxTypeofNames(name, csFullOf(csxLastSeg(name)))
+                tok = {__type: true, Name: nm.n, FullName: nm.f}
+            }
+            return tok
+        }
+    }
     // nameof(a.b.C) is the last segment, decided at parse time (C# does the same).
     function makeNameof(name) {
         var t = name.split("<")[0]
