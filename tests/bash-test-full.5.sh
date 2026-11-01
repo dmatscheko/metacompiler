@@ -474,6 +474,24 @@ st=1"
   r=$( (declare -A m=([a]=1); k=''; echo "L=${#m[$k]}"; echo after) 2>&1); l=$LINENO
   check usx11 "$r" "$0: line $l: [\$k]: bad array subscript"
 }
+# ===== SECTION 103: a declaration builtin quotes the subscript it was handed =====
+# declare, local and typeset see NAME[SUB]=v after expansion, so a bad subscript is quoted
+# expanded ("m[]", "ia[1-20]"); an assignment quotes it as written. Every expected value is
+# bash 5.3's.
+s103() {
+  local r l
+  r=$( (declare -A m; k=''; declare m[$k]=v; echo "st=$?"; m[$k]=v; echo no) 2>&1); l=$LINENO
+  check dsl1 "$r" "$0: line $l: m[]: bad array subscript
+st=1
+$0: line $l: m[\$k]: bad array subscript"
+  g103() { local -A m; local m["$k"]+=v; echo "st=$?"; }
+  r=$(k=''; g103 2>&1); l=$LINENO
+  check dsl2 "$r" "$0: line $((l - 1)): m[]: bad array subscript
+st=1"
+  r=$( (declare -a ia=(1); i=1; typeset ia[$i-20]=x; echo "st=$?") 2>&1); l=$LINENO
+  check dsl3 "$r" "$0: line $l: ia[1-20]: bad array subscript
+st=1"
+}
 # ===== END SECTIONS =====
 
 s90   # SECTION-CALL 90
@@ -489,5 +507,6 @@ s99   # SECTION-CALL 99
 s100  # SECTION-CALL 100
 s101  # SECTION-CALL 101
 s102  # SECTION-CALL 102
+s103  # SECTION-CALL 103
 echo "full: $checks checks, $fails failures"
 exit $fails

@@ -3198,7 +3198,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     // The value's arithmetic errors (-i) carry the keyword; the subscript's not.
                     var svp = arPfx
                     arPfx = kw + ": "
-                    runAssignV(asgs[k], assoc, v)
+                    runAssignV(asgs[k], assoc, v, true)
                     arPfx = svp
                 }
             }
@@ -5612,7 +5612,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             applyArrayLit(a.name, lv, a.op == "+=", assoc, decl)
             return
         }
-        runAssignV(a, assoc, (a.valT != null) ? wordJoin(a.valT()) : "")
+        runAssignV(a, assoc, (a.valT != null) ? wordJoin(a.valT()) : "", decl)
     }
     // The key NAME[SUB]=v stores under, w being SUB expanded and lbl the "NAME[SUB]" an error
     // quotes as written. An indexed array's SUB is arithmetic even when it expands to @; a
@@ -5639,22 +5639,24 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return e
     }
     // Through a nameref r, `r[SUB]=v` quotes r[SUB]. An empty SUB (`b[]=x`) is a bad
-    // subscript for an associative array too.
-    function asgKey(a, isAs) {
+    // subscript for an associative array too. A declaration builtin (decl) quotes SUB
+    // expanded, as the word it was handed: k=''; declare m[$k]=v is "m[]: ...".
+    function asgKey(a, isAs, decl) {
         var none = a.isrc == ""
         var svp = arPfx
         arPfx = ""
-        var k = arrAkey(a.name, wordJoin(a.idxT()), a.lbl + "[" + a.isrc + "]", isAs && !none, none || a.isrc == "@" || a.isrc == "*")
+        var w = wordJoin(a.idxT())
+        var k = arrAkey(a.name, w, a.lbl + "[" + (decl ? w : a.isrc) + "]", isAs && !none, none || a.isrc == "@" || a.isrc == "*")
         arPfx = svp
         return k
     }
     // The same, with the value already expanded.
-    function runAssignV(a, assoc, v) {
+    function runAssignV(a, assoc, v, decl) {
         a = refAssign(a)
         if (a == null) { return }
         var isAs = assocFact(a.name, assoc)
         if (a.idxT != null) {
-            var key = asgKey(a, isAs)
+            var key = asgKey(a, isAs, decl)
             if (arithErr || abortSignal != null) { return }
             if (!isAs) { arrAdopt(a.name) }
             arrEnsure(a.name, assoc)

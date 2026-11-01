@@ -3589,12 +3589,13 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     // The key of NAME[SUB]=v for a name not declared associative: rt_arr_akey refuses a
     // written @ or * and an index still negative from the end, quoting the subscript as
-    // written, and an empty SUB for an associative array too. Twin of asgKey in
-    // bash-interpreter.abnf.
+    // written (a declaration's, a.xl, expanded), and an empty SUB for an associative array
+    // too. Twin of asgKey in bash-interpreter.abnf.
     function asgKeyOf(b, a) {
         var r = evalWord(b, a.idxT)
         var whole = (a.isrc == "") ? llvm.constant.NewInt(i32, 2) : ((a.isrc == "@" || a.isrc == "*") ? one : zero)
-        var lbl = gepStr(r.b, a.name + "[" + a.isrc + "]")
+        var lbl = (a.xl == true) ? r.b.NewCall(rtStrcat, [r.b.NewCall(rtStrcat, [gepStr(r.b, a.name + "["), r.v]), gepStr(r.b, "]")])
+            : gepStr(r.b, a.name + "[" + a.isrc + "]")
         return {b: r.b, v: r.v, k: r.b.NewCall(rtArrAkey, [gepStr(r.b, a.name), r.v, lbl, whole])}
     }
     // An expansion error in a value abandons the command before anything is stored:
@@ -4063,7 +4064,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (arrJ && asgs[j] == null) { b.NewCall(rtArrDmark, gepStr(b, names[j])) }
             if (asgs[j] != null) {
                 var a = asgs[j]
-                if (v != null || a.idxT != null) { a = {name: a.name, op: a.op, idxT: a.idxT, lit: (v != null) ? null : a.lit, valT: (v != null) ? doneWord(v) : a.valT, isrc: a.isrc, soft: subBadP} }
+                if (v != null || a.idxT != null) { a = {name: a.name, op: a.op, idxT: a.idxT, lit: (v != null) ? null : a.lit, valT: (v != null) ? doneWord(v) : a.valT, isrc: a.isrc, soft: subBadP, xl: true} }
                 var prevV = selfRef ? loadVar(b, names[j]) : null
                 // The value's arithmetic errors (-i) carry the keyword; the subscript's not.
                 if (a.lit == null) { b.NewStore(gepStr(b, kw + ": "), gArPfx) }
