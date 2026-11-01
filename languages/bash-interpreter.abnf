@@ -595,7 +595,10 @@ PeXfOp      <~~ push({xf: up.in}) ~~> = "Q" | "E" | "P" | "A" | "K" | "a" | "k" 
 PeTarget    <~~ peTgt = arSrc(up.start, up.pos) ~~> = PeIdxRef | PeName ;
 PeIdxRef    <~~ push({hasIdx: 1, idxAll: idxAllOf(arSrc(up.start, up.pos))}) ~~> = PeName "[" !"]" IdxWord "]" ;
 IdxWord     <~~ push(mkWord(takeAll())) ~~> = { IdxSeg } ;
-IdxSeg      = SqSeg | DqSeg | ExpSeg | EscSeg | IdxBare ;
+IdxSeg      = AnsiSeg | SubXSeg ;
+// The subscript of a NAME[SUB] string a builtin was handed (subExpand): no $'...' there.
+SubXWord    <~~ push(mkWord(takeAll())) ~~> = { SubXSeg } ;
+SubXSeg     = SqSeg | DqSeg | ExpSeg | EscSeg | IdxBare ;
 IdxBare     <~~ push(makeConst(up.in)) ~~> = !@+"]}\"'\\$`" ;
 PeName      <~~ push({pname: up.in}) ~~> = PeNameTok ;
 PeNameTok   = PeIdent | PeDigits | "@" | "*" | "#" | "?" | "!" | "$" | "-" ;
@@ -2305,6 +2308,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (c == 42 || c == 91 || c == 63 || c == 93) { return true }
             if (c == 94 || c == 36 || c == 96 || c == 44) { return true }
             if ((c == 126 || c == 35) && i == 0) { return true }
+            // A key needsAnsi takes is printed $'...' (declQuote).
+            if ((c < 32 || c >= 127) && needsAnsi(normBytes(k))) { return true }
         }
         return false
     }
@@ -6930,7 +6935,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function subExpand(t) {
         if (!bashSubNeedsX(t)) { return t }
         var k = "$" + t
-        if (!hasOwn(subXT, k)) { subXT[k] = arCompile(t, "IdxWord", false) }
+        if (!hasOwn(subXT, k)) { subXT[k] = arCompile(t, "SubXWord", false) }
         return wordJoin(subXT[k]())
     }
     // splitSubscript with the subscript expanded.

@@ -6484,6 +6484,8 @@ int rt_keymeta(char *k) {
         if (c == 94 || c == 36 || c == 96 || c == 44) return 1;
         if (c == 126 && i == 0) return 1;
         if (c == 35 && i == 0) return 1;
+        /* A key rt_needansi takes is printed $'...' (rt_dqs). */
+        if ((c < 32 || c >= 127) && rt_needansi(k) != 0) return 1;
         i = i + 1;
     }
     return 0;

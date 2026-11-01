@@ -554,7 +554,7 @@ PeXfOp      <~~ push({xf: up.in}) ~~> = "Q" | "E" | "P" | "A" | "K" | "a" | "k" 
 PeTarget    <~~ peTgt = arSrc(up.start, up.pos) ~~> = PeIdxRef | PeName ;
 PeIdxRef    <~~ push({hasIdx: 1, idxAll: idxAllOf(arSrc(up.start, up.pos))}) ~~> = PeName "[" !"]" IdxWord "]" ;
 IdxWord     <~~ push(mkWord(takeAll())) ~~> = { IdxSeg } ;
-IdxSeg      = SqSeg | DqSeg | ExpSeg | EscSeg | IdxBare ;
+IdxSeg      = SqSeg | DqSeg | AnsiSeg | ExpSeg | EscSeg | IdxBare ;
 IdxBare     <~~ push(makeConst(up.in)) ~~> = !@+"]}\"'\\$`" ;
 PeName      <~~ push({pname: up.in}) ~~> = PeNameTok ;
 PeNameTok   = PeIdent | PeDigits | "@" | "*" | "#" | "?" | "!" | "$" | "-" ;

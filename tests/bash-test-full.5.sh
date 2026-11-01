@@ -514,6 +514,20 @@ declare -r s104e="2"'
   r=$(s104t=x; h104; declare -p s104t); check dnt6 "$r" 'declare -i s104t="2"
 declare -- s104t="x"'
 }
+# ===== SECTION 105: $'...' in a subscript; keys declare -p prints $'...' =====
+# A subscript written in a word is a word, so $'...' in it is ANSI-C quoting, in a store,
+# an associative literal and ${a[SUB]}. A key holding a control character or a byte that is
+# no character is printed in the $'...' form, as a value is. Every expected value is bash
+# 5.3's.
+s105() {
+  local r
+  r=$(declare -A x; x[$'\xff']=1; k=$'\xff'; echo "${x[$k]-none} ${x[$'\xff']-none}"; declare -p x); check ans1 "$r" "1 1
+declare -A x=([\$'\\377']=\"1\" )"
+  r=$(declare -A z; z[$'a\tb']=3; z+=([$'c\nd']=4); declare -p z); check ans2 "$r" "declare -A z=([\$'a\\tb']=\"3\" [\$'c\\nd']=\"4\" )"
+  r=$(declare -A q=([$'\xfe']=1 [$'q\'r']=2); declare -p q); check ans3 "$r" "declare -A q=([\"q'r\"]=\"2\" [\$'\\376']=\"1\" )"
+  r=$(declare -A z; k=$'a\tb'; z[$k]=xy; declare z[$'e\tf']=7; k=$'e\tf'; echo "${#z[$'a\tb']} ${z[$k]}"); check ans4 "$r" '2 7'
+  r=$(declare -A w; w[$'\x01']=1; declare -p w); check ans5 "$r" "declare -A w=([\$'\\001']=\"1\" )"
+}
 # ===== END SECTIONS =====
 
 s90   # SECTION-CALL 90
@@ -531,5 +545,6 @@ s101  # SECTION-CALL 101
 s102  # SECTION-CALL 102
 s103  # SECTION-CALL 103
 s104  # SECTION-CALL 104
+s105  # SECTION-CALL 105
 echo "full: $checks checks, $fails failures"
 exit $fails
