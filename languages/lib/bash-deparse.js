@@ -677,6 +677,28 @@ function dpPrintCmd(c, ind, inline) {
     return ""
 }
 
+// The diagnostic for the first option letter keyword kw does not take (bash 5.3: export
+// and readonly take -aAfnp, the others -aAfFgiIlnprtux), its usage line included, or "".
+// flags are the option words joined, their signs kept; export and readonly take no +X.
+function bashDeclBadOpt(kw, flags) {
+    var xr = kw == "export" || kw == "readonly"
+    var ok = xr ? "aAfnp" : "aAfFgiIlnprtux"
+    var sign = "-"
+    var i
+    for (i = 0; i < flags.length; i++) {
+        var ch = flags.charAt(i)
+        if (ch == "-" || ch == "+") { sign = ch; continue }
+        if ((xr && sign == "+") || ok.indexOf(ch) >= 0) { continue }
+        var use = "declare [-aAfFgiIlnrtux] [name[=value] ...] or declare -p [-aAfFilnrtux] [name ...]"
+        if (kw == "typeset") { use = "typeset [-aAfFgiIlnrtux] name[=value] ... or typeset -p [-aAfFilnrtux] [name ...]" }
+        if (kw == "local") { use = "local [option] name[=value] ..." }
+        if (kw == "export") { use = "export [-fn] [name[=value] ...] or export -p [-f]" }
+        if (kw == "readonly") { use = "readonly [-aAf] [name[=value] ...] or readonly -p" }
+        return kw + ": -" + ch + ": invalid option\n" + kw + ": usage: " + use + "\n"
+    }
+    return ""
+}
+
 // THE DECLARATION A COMPUTED OPERAND SPELLS (`declare -a "$spec"`, `local 'q=1'`): bash
 // re-reads the declaration with the operand's fields in its place. items are a declaration's
 // ({dkw}, {dflag}, {dname}, {a, src}, {dyn}); fieldsOf(dyn) gives one computed operand's

@@ -283,7 +283,7 @@ DeclWord    = "local" | "declare" | "typeset" | "export" | "readonly" ;
 DeclFlag    <~~ push({dflag: up.in}) ~~> = DeclSign :whitespace() DeclFlagCh { DeclFlagCh } :whitespace(Whitespace) ;
 // -X gives an attribute, +X takes it away.
 DeclSign    = "-" | "+" ;
-DeclFlagCh  = "a" | "A" | "i" | "r" | "x" | "u" | "l" | "g" | "n" | "p" | "f" | "F" ;
+DeclFlagCh  = "a"..."z" | "A"..."Z" ;
 DeclItem    = DeclAssign | DeclArr | DeclName | DeclDyn ;
 DeclAssign  <~~ push(mkDeclItem(takeAll(), arSrc(up.start, up.pos))) ~~>
             = AsgIdent <~~ push({aname: up.in}) ~~> AsgTail ;
@@ -3805,8 +3805,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var order = []
         var anyDyn = false
         var i
+        var opts = ""
         for (i = 1; i < items.length; i++) {
             var it = items[i]
+            if (it.dflag != undefined) { opts = opts + it.dflag }
             if (it.dflag != undefined && it.dflag.charAt(0) == "+") { plus = plus + it.dflag; continue }
             if (it.dflag != undefined) { flags = flags + it.dflag; continue }
             // `--` ends the options.
@@ -3815,6 +3817,16 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             order.push({j: names.length})
             if (it.dname != undefined) { names.push(it.dname); asgs.push(null); darrs.push((it.darr != undefined) ? it.darr : null) }
             else { names.push(it.a.name); asgs.push(it.a); darrs.push(null) }
+        }
+        // An option the builtin does not take fails it with status 2 before anything is done.
+        // Twin of declBadOpt in bash-interpreter.abnf.
+        if (opts != "") {
+            var badOpt = bashDeclBadOpt(kw, opts)
+            if (badOpt != "") {
+                var boBody = function(b) { emitDiag(b, gepStr(b, badOpt)); storeStatusI(b, 2); return b }
+                return (redirs.length == 0) ? boBody : mkRedirected([boBody].concat(redirs))
+            }
+            if (opts.indexOf("I") >= 0 || opts.indexOf("t") >= 0) { fail(kw + " " + opts + " is not supported") }
         }
         // Operands that are constant words (`declare -a 'b[1]=x'`) spell a declaration known now.
         if (anyDyn) {

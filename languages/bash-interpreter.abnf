@@ -293,7 +293,7 @@ DeclWord    = "local" | "declare" | "typeset" | "export" | "readonly" ;
 DeclFlag    <~~ push({dflag: up.in}) ~~> = DeclSign :whitespace() DeclFlagCh { DeclFlagCh } :whitespace(Whitespace) ;
 // -X gives an attribute, +X takes it away.
 DeclSign    = "-" | "+" ;
-DeclFlagCh  = "a" | "A" | "i" | "r" | "x" | "u" | "l" | "g" | "n" | "p" | "f" | "F" ;
+DeclFlagCh  = "a"..."z" | "A"..."Z" ;
 DeclItem    = DeclAssign | DeclArr | DeclName | DeclDyn ;
 DeclAssign  <~~ push(mkDeclItem(takeAll(), arSrc(up.start, up.pos))) ~~>
             = AsgIdent <~~ push({aname: up.in}) ~~> AsgTail ;
@@ -3033,7 +3033,18 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // A NAME[SUB] operand as written ({darr}), else null: it declares an array.
         var darrs = []
         var i
-        for (i = 1; i < items.length; i++) { if (items[i].dyn != undefined) { return makeDeclDyn(items, redirs, ln) } }
+        var opts = ""
+        var anyDyn = false
+        for (i = 1; i < items.length; i++) {
+            if (items[i].dflag != undefined) { opts = opts + items[i].dflag }
+            else if (items[i].dyn != undefined) { anyDyn = true }
+        }
+        if (opts != "") {
+            var badOpt = bashDeclBadOpt(kw, opts)
+            if (badOpt != "") { return declBadOpt(badOpt, redirs, ln) }
+            if (opts.indexOf("I") >= 0 || opts.indexOf("t") >= 0) { fail(kw + " " + opts + " is not supported") }
+        }
+        if (anyDyn) { return makeDeclDyn(items, redirs, ln) }
         for (i = 1; i < items.length; i++) {
             var it = items[i]
             if (it.dflag != undefined && it.dflag.charAt(0) == "+") { plus = plus + it.dflag; continue }
@@ -3306,6 +3317,20 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 if (typeof st == "object") { return st }
             }
             if (errs != "") { st = 1 }
+            setStatus(st)
+            return st
+        }
+    }
+    // An option the builtin does not take (bashDeclBadOpt, diagnostic msg) fails it with
+    // status 2 before anything is done. Twin of the option check in makeDecl in
+    // bash-to-llvm-ir.abnf.
+    function declBadOpt(msg, redirs, ln) {
+        var run = mkRedirected([function() { diagErr(msg); return 2 }].concat(redirs))
+        return function() {
+            vars["$LINENO"] = lnCtx == null ? ln : lnIn(ln)
+            var st = anytype
+            st = run()
+            if (typeof st == "object") { return st }
             setStatus(st)
             return st
         }

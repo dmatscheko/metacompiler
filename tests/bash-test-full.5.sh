@@ -172,6 +172,35 @@ declare -i s100c="1"'
   h100() { s100c=3 eval 'declare s100w=8'; echo "[$s100w]"; }
   check pev8 "$(h100)" '[8]'
 }
+# ===== SECTION 101: options a declaration builtin does not take =====
+# export and readonly take -aAfnp, declare, typeset and local -aAfFgiIlnprtux; any other
+# letter is "KW: -X: invalid option" and the builtin's usage line, status 2, and nothing is
+# declared. Every expected value is bash 5.3's.
+s101() {
+  local r l
+  r=$( (export -i s101a=3; echo "st=$? [${s101a-unset}]") 2>&1); l=$LINENO
+  check dbo1 "$r" "$0: line $l: export: -i: invalid option
+export: usage: export [-fn] [name[=value] ...] or export -p [-f]
+st=2 [unset]"
+  r=$( (readonly -x s101b=1; echo "st=$? [${s101b-unset}]") 2>&1); l=$LINENO
+  check dbo2 "$r" "$0: line $l: readonly: -x: invalid option
+readonly: usage: readonly [-aAf] [name[=value] ...] or readonly -p
+st=2 [unset]"
+  r=$( (declare -i -Z s101c=1; echo "st=$? [${s101c-unset}]") 2>&1); l=$LINENO
+  check dbo3 "$r" "$0: line $l: declare: -Z: invalid option
+declare: usage: declare [-aAfFgiIlnrtux] [name[=value] ...] or declare -p [-aAfFilnrtux] [name ...]
+st=2 [unset]"
+  g101() { local -Z s101d=1; echo "st=$? [${s101d-unset}]"; }
+  r=$(g101 2>&1); l=$LINENO
+  check dbo4 "$r" "$0: line $((l - 1)): local: -Z: invalid option
+local: usage: local [option] name[=value] ...
+st=2 [unset]"
+  r=$( (export -n -r s101e=1 2>/dev/null; echo "st=$? [${s101e-unset}]") 2>&1); check dbo5 "$r" 'st=2 [unset]'
+  r=$( (typeset -Z s101f; echo "st=$?") 2>&1); l=$LINENO
+  check dbo6 "$r" "$0: line $l: typeset: -Z: invalid option
+typeset: usage: typeset [-aAfFgiIlnrtux] name[=value] ... or typeset -p [-aAfFilnrtux] [name ...]
+st=2"
+}
 # ===== END SECTIONS =====
 
 s95   # SECTION-CALL 95
@@ -180,5 +209,6 @@ s97   # SECTION-CALL 97
 s98   # SECTION-CALL 98
 s99   # SECTION-CALL 99
 s100  # SECTION-CALL 100
+s101  # SECTION-CALL 101
 echo "full: $checks checks, $fails failures"
 exit $fails
