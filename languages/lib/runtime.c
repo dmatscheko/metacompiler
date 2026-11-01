@@ -1450,6 +1450,23 @@ int str_eq_c(long x, const char *s) {
 	return s[n] == 0;
 }
 
+/* -1, 0, 1 by UTF-16 code unit, then by length. Twin of jsCompare's ecma arm in
+ * abnf/jsrt.go. */
+int str_cmp16(long x, long y) {
+	long nx = str_ulen(x);
+	long ny = str_ulen(y);
+	long n = nx < ny ? nx : ny;
+	long i = 0;
+	while (i < n) {
+		long ca = str_ucode(x, i);
+		long cb = str_ucode(y, i);
+		if (ca != cb) { return ca < cb ? -1 : 1; }
+		i = i + 1;
+	}
+	if (nx == ny) { return 0; }
+	return nx < ny ? -1 : 1;
+}
+
 /* -1, 0, 1 by byte order, then by length - Go's string comparison. */
 int str_cmp(long x, long y) {
 	long nx = str_len(x);
@@ -2452,6 +2469,44 @@ long num_to_str(long bits) {
 }
 
 int is_space(int c) { return c == 32 || c == 9 || c == 10 || c == 13 || c == 11 || c == 12; }
+/* RT_ECMA is set (js_rt_ecma) by a MetaJS program, which follows ECMAScript where
+ * every other language and the layer-2 libraries keep their own rule: two
+ * strings compare by UTF-16 code unit (IsLessThan, ECMA-262 7.2.13) and not by
+ * code point - the two differ only where a unit of an astral character meets one
+ * in U+E000..U+FFFF; Math.pow is Number::exponentiate, not C's pow; a string's
+ * number is StringToNumber and parseInt / parseFloat are ECMAScript's; and an
+ * array or object converts through ToPrimitive (to_prim). */
+long RT_ECMA;
+long js_rt_ecma(void) { RT_ECMA = 1; return 0; }
+
+/* ECMAScript WhiteSpace + LineTerminator (ECMA-262 12.2, 12.3), the set trim()
+ * strips and StringToNumber skips: Zs, TAB VT FF, ZWNBSP and LF CR LS PS. */
+int js_ws(long c) {
+	if (c < 128) { return is_space((int)c); }
+	return c == 160 || c == 5760 || (c >= 8192 && c <= 8202) || c == 8232 || c == 8233 ||
+	       c == 8239 || c == 8287 || c == 12288 || c == 65279;
+}
+/* G_BEGIN / G_END := the BYTE range of p[0:n] without leading and trailing js_ws. */
+long G_BEGIN;
+long G_END;
+void js_ws_range(const char *p, long n) {
+	long i = 0;
+	long j = n;
+	while (i < j) {
+		u_decode(p, n, i);
+		if (!js_ws(G_CP)) { j = -1; } else { i = i + G_ADV; }
+	}
+	j = n;
+	while (j > i) {
+		long k = j - 1;
+		while (k > i && ((long)p[k] & 192) == 128) { k = k - 1; }
+		u_decode(p, n, k);
+		if (!js_ws(G_CP)) { G_BEGIN = i; G_END = j; return; }
+		j = k;
+	}
+	G_BEGIN = i;
+	G_END = i;
+}
 
 /* ----- exact decimal -> double -----
  *
@@ -2667,8 +2722,13 @@ long hex_to_num(const char *s, long i, long j, long neg) {
  * hexadecimal float with its p exponent ("0x10" alone is NaN), and underscores
  * between digits; out of range is +-Inf rather than an error. Twin of
  * rt.toNumber in abnf/jsrt.go. */
+long js_str_num(long h);
+long go_str_num(long h);
+/* A string's number: StringToNumber under RT_ECMA, else Go's strconv.ParseFloat.
+ * The Go rule stays this function's own body, so the layer-2 callers inline
+ * exactly what they did before the ECMAScript rule existed. */
 long str_to_num(long h) {
-	const char *s = str_ptr(h);
+	const char *s;
 	long n = str_len(h);
 	long i = 0;
 	long j = n;
@@ -2683,6 +2743,8 @@ long str_to_num(long h) {
 	long us = 0;
 	union DB r;
 	union DB p;
+	if (RT_ECMA) { return js_str_num(h); }
+	s = str_ptr(h);
 	while (i < j && is_space((int)s[i] & 255)) { i = i + 1; }
 	while (j > i && is_space((int)s[j - 1] & 255)) { j = j - 1; }
 	if (i == j) { return DZERO; }
@@ -2767,12 +2829,23 @@ long str_to_num(long h) {
 		return dec_to_double(rev, mdig, exp10, neg);
 	}
 }
+/* str_to_num under the Go rule in either mode: the ECMAScript conversions read
+ * a decimal they have validated through it. */
+long go_str_num(long h) {
+	long mode = RT_ECMA;
+	long v;
+	RT_ECMA = 0;
+	v = str_to_num(h);
+	RT_ECMA = mode;
+	return v;
+}
 
 /* -------------------------------------------------- the value operations - */
 
 long to_string(long h);
 long fn_text(long h);
 long to_number(long h);
+long prim_to_num(long h);
 int truthy(long h);
 long js_call(long callee, long self, long args);
 long type_of(long h);
@@ -2798,6 +2871,12 @@ long to_number(long h) {
 	if (t == 1) { return DZERO; }
 	if (t == 2) { return fa(h) ? DONE : DZERO; }
 	if (t == 4) { return str_to_num(h); }
+	return RT_ECMA ? prim_to_num(h) : DNAN;
+}
+/* ToNumber of an array or object, through its ToPrimitive. */
+long prim_to_num(long h) {
+	long t = tag_of(h);
+	if (t == 5 || t == 6) { return str_to_num(to_string(h)); }
 	return DNAN;
 }
 
@@ -2917,6 +2996,10 @@ int strict_eq(long a, long b) {
 
 int is_undef_or_null(long h) { long t = tag_of(h); return t == 0 || t == 1; }
 
+long to_prim(long h);
+/* An array or object against a number or string compares its ToPrimitive. Out
+ * of loose_eq's body, so the hot callers it is inlined into stay small. */
+int loose_eq_prim(long a, long b, long ta, long tb);
 int loose_eq(long a, long b) {
 	long ta;
 	long tb;
@@ -2929,21 +3012,37 @@ int loose_eq(long a, long b) {
 	if (ta == 4 && tb == 4) { return str_eq(a, b); }
 	if (ta == 3 && tb == 4) { return d_eq(num_bits(a), str_to_num(b)); }
 	if (ta == 4 && tb == 3) { return d_eq(str_to_num(a), num_bits(b)); }
-	if ((ta == 3 || ta == 4) != (tb == 3 || tb == 4)) { return 0; }
+	if ((ta == 3 || ta == 4) != (tb == 3 || tb == 4)) { return RT_ECMA ? loose_eq_prim(a, b, ta, tb) : 0; }
 	return strict_eq(a, b);
+}
+int loose_eq_prim(long a, long b, long ta, long tb) {
+	if ((ta == 5 || ta == 6) && (tb == 3 || tb == 4)) { return loose_eq(to_prim(a), b); }
+	if ((tb == 5 || tb == 6) && (ta == 3 || ta == 4)) { return loose_eq(a, to_prim(b)); }
+	return 0;
 }
 
 /* -1, 0, 1, or 2 for "either side is NaN" - the marker abnf/jsrt.go uses. */
-int js_compare(long a, long b) {
-	long an;
-	long bn;
-	if (tag_of(a) == 4 && tag_of(b) == 4) { return str_cmp(a, b); }
-	an = to_number(a);
-	bn = to_number(b);
+int num_compare(long a, long b) {
+	long an = to_number(a);
+	long bn = to_number(b);
 	if (d_is_nan(an) || d_is_nan(bn)) { return 2; }
 	if (d_lt(an, bn)) { return -1; }
 	if (d_lt(bn, an)) { return 1; }
 	return 0;
+}
+/* Under RT_ECMA both sides go through ToPrimitive first, so two arrays or
+ * objects compare as strings, and two strings by UTF-16 unit (str_cmp16). Out of
+ * js_compare's body, so the hot callers it is inlined into stay small. */
+int js_compare_es(long a, long b) {
+	long pa = to_prim(a);
+	long pb = to_prim(b);
+	if (tag_of(pa) == 4 && tag_of(pb) == 4) { return str_cmp16(pa, pb); }
+	return num_compare(pa, pb);
+}
+int js_compare(long a, long b) {
+	if (RT_ECMA) { return js_compare_es(a, b); }
+	if (tag_of(a) == 4 && tag_of(b) == 4) { return str_cmp(a, b); }
+	return num_compare(a, b);
 }
 
 long js_add_v(long a, long b) {
@@ -3874,6 +3973,9 @@ long index_of_key(long key) {
 		if (v >= 4294967295) { return -1; }
 		return v;
 	}
+	/* undefined, null and a boolean name the properties "undefined", "null",
+	 * "true" and "false", never an index. */
+	if (key < 4 || tag_of(key) == 0) { return -1; }
 	n = to_number(key);
 	if (d_is_nan(n) || d_is_inf(n)) { return -1; }
 	if (!d_is_integral(n)) { return -1; }
@@ -4751,8 +4853,6 @@ long clamp_index(long i, long length) {
 	if (i > length) { return length; }
 	return i;
 }
-long G_BEGIN;
-long G_END;
 void slice_range(long length, long args) {
 	G_BEGIN = 0;
 	G_END = length;
@@ -4783,20 +4883,61 @@ void substring_range(long length, long args) {
 	if (G_BEGIN > G_END) { long t = G_BEGIN; G_BEGIN = G_END; G_END = t; }
 }
 
-long str_index_of(long h, long sub) {
-	long n = str_len(h);
-	long m = str_len(sub);
-	const char *p = str_ptr(h);
-	const char *q = str_ptr(sub);
-	long i = 0;
-	if (m == 0) { return 0; }
+/* The first UNIT index >= from where sub's code units occur in h, or -1. The
+ * search runs over UTF-16 units, so a lone surrogate needle finds half of a pair
+ * (String.prototype.indexOf); two ASCII strings compare their bytes. */
+long u_index_of(long h, long sub, long from) {
+	long n = str_ulen(h);
+	long m = str_ulen(sub);
+	long i = from;
+	if (fe(h) == 1 && fe(sub) == 1) {
+		const char *p = str_ptr(h);
+		const char *q = str_ptr(sub);
+		while (i + m <= n) {
+			long j = 0;
+			while (j < m && p[i + j] == q[j]) { j = j + 1; }
+			if (j == m) { return i; }
+			i = i + 1;
+		}
+		return -1;
+	}
 	while (i + m <= n) {
 		long j = 0;
-		while (j < m && p[i + j] == q[j]) { j = j + 1; }
+		while (j < m && str_ucode(h, i + j) == str_ucode(sub, j)) { j = j + 1; }
 		if (j == m) { return i; }
 		i = i + 1;
 	}
 	return -1;
+}
+
+/* GetSubstitution (ECMA-262 22.1.3.19.1) for a STRING pattern, which has no
+ * captures: $$ is $, $& the match, $` the text before it, $' the text after it,
+ * and every other $ stays as written. The match is pat at unit index at. */
+long str_substitute(long recv, long pat, long rep, long at) {
+	const char *r = str_ptr(rep);
+	long rn = str_len(rep);
+	long out = mk_cstr("");
+	long i = 0;
+	long lit = 0;
+	while (i < rn) {
+		if (r[i] == 36 && i + 1 < rn) {
+			char c = r[i + 1];
+			long piece = pat;
+			int hit = 1;
+			if (c == 36) { piece = mk_cstr("$"); }
+			else if (c == 96) { piece = u_slice(recv, 0, at); }
+			else if (c == 39) { piece = u_slice(recv, at + str_ulen(pat), str_ulen(recv)); }
+			else if (c != 38) { hit = 0; }
+			if (hit) {
+				out = str_cat(str_cat(out, str_slice(rep, lit, i)), piece);
+				i = i + 2;
+				lit = i;
+				continue;
+			}
+		}
+		i = i + 1;
+	}
+	return str_cat(out, str_slice(rep, lit, rn));
 }
 
 /* Array.prototype.sort (ECMA-262 23.1.3.30): a STABLE top-down merge sort, in
@@ -4928,11 +5069,15 @@ long builtin_method(long recv, long mid, long args) {
 				long b = arg_num(args, 1);
 				i = clamp_index(d_is_nan(b) ? 0 : d_to_long(d_trunc(b)), n);
 			}
-			while (i < n) { if (strict_eq(arr_get(recv, i), want)) { return mk_num(d_from_long(i)); } i = i + 1; }
+			while (i < n) {                   /* a hole is skipped, never undefined */
+				long e = arr_raw(recv, i);
+				if (e != H_HOLE && strict_eq(e, want)) { return mk_num(d_from_long(i)); }
+				i = i + 1;
+			}
 			return mk_num(d_from_long(-1));
 		}
 		if (mid == 8) {                                       /* join */
-			long sep = arr_len(args) > 0 ? arg_str(args, 0) : mk_cstr(",");
+			long sep = arr_len(args) > 0 && tag_of(arr_get(args, 0)) != 0 ? arg_str(args, 0) : mk_cstr(",");
 			long out = mk_cstr("");
 			long n = arr_len(recv);
 			long i = 0;
@@ -4985,50 +5130,50 @@ long builtin_method(long recv, long mid, long args) {
 		}
 		if (mid == 22) {                                      /* indexOf, in UNITS */
 			long from = arr_len(args) > 1 ? clamp_sub(arg_num(args, 1), n) : 0;
-			long hay = from > 0 ? u_slice(recv, from, n) : recv;
-			long at = str_index_of(hay, arg_str(args, 0));
-			if (at < 0) { return mk_num(d_from_long(-1)); }
-			if (at > 0) { at = str_ulen(str_slice(hay, 0, at)); }
-			return mk_num(d_from_long(from + at));
+			return mk_num(d_from_long(u_index_of(recv, arg_str(args, 0), from)));
 		}
 		if (mid == 23) {                                      /* replace, first only */
 			long pat = arg_str(args, 0);
 			long rep = arg_str(args, 1);
-			long at = str_index_of(recv, pat);
+			long at = u_index_of(recv, pat, 0);
 			if (at < 0) { return recv; }
-			return str_cat(str_cat(str_slice(recv, 0, at),
-			                       rep),
-			               str_slice(recv, at + str_len(pat), n));
+			return str_cat(str_cat(u_slice(recv, 0, at), str_substitute(recv, pat, rep, at)),
+			               u_slice(recv, at + str_ulen(pat), n));
 		}
 		if (mid == 24) { slice_range(n, args); return u_slice(recv, G_BEGIN, G_END); }
 		if (mid == 25) { substring_range(n, args); return u_slice(recv, G_BEGIN, G_END); }
 		if (mid == 26) {                                      /* split */
-			long sep = arg_str(args, 0);
+			/* String.prototype.split (ECMA-262 22.1.3.23) with a string separator:
+			 * an undefined separator gives [s], the limit is ToUint32, an empty
+			 * separator splits into code units, and "" splits into [""]. */
 			long out = mk_arr();
-			long m = str_len(sep);
+			long lim = 4294967295;
+			long sep;
+			long m;
 			long start = 0;
+			if (arr_len(args) > 1 && tag_of(arr_get(args, 1)) != 0) { lim = to_uint32(arg_num(args, 1)); }
+			if (lim == 0) { return out; }
+			if (arr_len(args) == 0 || tag_of(arr_get(args, 0)) == 0) { arr_push(out, recv); return out; }
+			sep = arg_str(args, 0);
+			m = str_ulen(sep);
 			if (m == 0) {
 				long i = 0;
-				while (i < n) { arr_push(out, u_slice(recv, i, i + 1)); i = i + 1; }
+				while (i < n && i < lim) { arr_push(out, u_slice(recv, i, i + 1)); i = i + 1; }
 				return out;
 			}
 			while (1) {
-				long rest = str_slice(recv, start, str_len(recv));
-				long at = str_index_of(rest, sep);
-				if (at < 0) { arr_push(out, rest); return out; }
-				arr_push(out, str_slice(rest, 0, at));
-				start = start + at + m;
+				long at = u_index_of(recv, sep, start);
+				if (at < 0) { arr_push(out, u_slice(recv, start, n)); return out; }
+				arr_push(out, u_slice(recv, start, at));
+				if (arr_len(out) == lim) { return out; }
+				start = at + m;
 			}
 		}
 		if (mid == 27) { return case_str(recv, 3); }          /* toUpperCase */
 		if (mid == 28) { return case_str(recv, 6); }          /* toLowerCase */
 		if (mid == 29) {                                      /* trim */
-			const char *p = str_ptr(recv);
-			long i = 0;
-			long j = str_len(recv);
-			while (i < j && is_space((int)p[i] & 255)) { i = i + 1; }
-			while (j > i && is_space((int)p[j - 1] & 255)) { j = j - 1; }
-			return str_slice(recv, i, j);
+			js_ws_range(str_ptr(recv), str_len(recv));
+			return str_slice(recv, G_BEGIN, G_END);
 		}
 	}
 	die("unknown builtin method");
@@ -6353,6 +6498,167 @@ long js_parse_float(long h) {
 	return str_to_num(str_slice(h, start, end));
 }
 
+/* The length of the StrUnsignedDecimalLiteral at s[i..j) - digits with an
+ * optional fraction, at least one digit in all, then an exponent if it has a
+ * digit - or 8 for "Infinity"; 0 when there is none. */
+long dec_lit_len(const char *s, long i, long j) {
+	long k = i;
+	long nd = 0;
+	const char *w = "Infinity";
+	while (k < j && k - i < 8 && s[k] == w[k - i]) { k = k + 1; }
+	if (k - i == 8) { return 8; }
+	k = i;
+	while (k < j && s[k] >= 48 && s[k] <= 57) { k = k + 1; nd = nd + 1; }
+	if (k < j && s[k] == 46) {
+		k = k + 1;
+		while (k < j && s[k] >= 48 && s[k] <= 57) { k = k + 1; nd = nd + 1; }
+	}
+	if (nd == 0) { return 0; }
+	if (k < j && (s[k] == 101 || s[k] == 69)) {
+		long e = k + 1;
+		long ed;
+		if (e < j && (s[e] == 43 || s[e] == 45)) { e = e + 1; }
+		ed = e;
+		while (ed < j && s[ed] >= 48 && s[ed] <= 57) { ed = ed + 1; }
+		if (ed > e) { k = ed; }
+	}
+	return k - i;
+}
+
+/* The first byte at or after i of p[0:n] that is not js_ws. */
+long js_ws_skip(const char *p, long n, long i) {
+	while (i < n) {
+		u_decode(p, n, i);
+		if (!js_ws(G_CP)) { return i; }
+		i = i + G_ADV;
+	}
+	return i;
+}
+
+/* StringToNumber (ECMA-262 7.1.4.1.1): white space trimmed, "" is 0, then a whole
+ * signed decimal literal or Infinity, or an UNSIGNED 0x / 0o / 0b integer. A
+ * validated decimal literal is exactly what go_str_num reads correctly. Twin of
+ * jsStrToNum in abnf/jsrtjsbig.go. */
+long js_str_num(long h) {
+	const char *s = str_ptr(h);
+	long i;
+	long j;
+	long at;
+	js_ws_range(s, str_len(h));
+	i = G_BEGIN;
+	j = G_END;
+	if (i == j) { return DZERO; }
+	if (j - i > 2 && s[i] == 48) {
+		long p = ((long)s[i + 1] & 255) | 32;
+		long radix = p == 120 ? 16 : (p == 111 ? 8 : (p == 98 ? 2 : 0));
+		if (radix > 0) {
+			union DB v;
+			long k = i + 2;
+			v.d = 0.0;
+			while (k < j) {
+				long d = digit_value((int)s[k] & 255);
+				if (d < 0 || d >= radix) { return DNAN; }
+				v.d = v.d * (double)radix + (double)d;
+				k = k + 1;
+			}
+			return v.l;
+		}
+	}
+	at = (s[i] == 43 || s[i] == 45) ? i + 1 : i;
+	if (dec_lit_len(s, at, j) != j - at) { return DNAN; }
+	return go_str_num(str_slice(h, i, j));
+}
+
+/* parseFloat (ECMA-262 19.2.4): leading white space skipped, then the longest
+ * signed decimal literal or Infinity; NaN when there is none. Twin of
+ * jsParseFloatJS in abnf/jsrtjsbig.go. */
+long js_parse_float_es(long h) {
+	const char *s = str_ptr(h);
+	long n = str_len(h);
+	long i = js_ws_skip(s, n, 0);
+	long at = (i < n && (s[i] == 43 || s[i] == 45)) ? i + 1 : i;
+	long m = dec_lit_len(s, at, n);
+	if (m == 0) { return DNAN; }
+	return go_str_num(str_slice(h, i, at + m));
+}
+
+/* parseInt (ECMA-262 19.2.5) with r = ToInt32(radix): white space and one sign
+ * skipped, r 0 means 10 and r outside 2..36 NaN, an 0x prefix read when r is 0
+ * or 16, then the longest run of digits below r, NaN when there is none, and the
+ * sign applies to a zero too. Base ten is exact (go_str_num), a power-of-two base
+ * rounds once over its bits, and any other base folds V8's chunks in with one
+ * fused multiply-add each. Twin of jsParseIntJS in abnf/jsrtjsbig.go. */
+long js_parse_int_es(long h, long r) {
+	const char *s = str_ptr(h);
+	long n = str_len(h);
+	long i = js_ws_skip(s, n, 0);
+	long neg = 0;
+	long radix = r;
+	long prefix = 1;
+	long start;
+	union DB v;
+	if (i < n && (s[i] == 43 || s[i] == 45)) { neg = s[i] == 45; i = i + 1; }
+	if (radix != 0) {
+		if (radix < 2 || radix > 36) { return DNAN; }
+		prefix = radix == 16;
+	} else { radix = 10; }
+	if (prefix && i + 1 < n && s[i] == 48 && (s[i + 1] == 120 || s[i + 1] == 88)) { i = i + 2; radix = 16; }
+	start = i;
+	while (i < n && digit_value((int)s[i] & 255) >= 0 && digit_value((int)s[i] & 255) < radix) { i = i + 1; }
+	if (i == start) { return DNAN; }
+	v.d = 0.0;
+	if (radix == 10) {
+		v.l = go_str_num(str_slice(h, start, i));
+	} else if (radix == 2 || radix == 4 || radix == 8 || radix == 16 || radix == 32) {
+		long nb = 0;
+		long ex = 0;
+		long rnd = 0;
+		long sticky = 0;
+		long k = start;
+		while (k < i) {
+			long d = digit_value((int)s[k] & 255);
+			long p = radix / 2;
+			while (p >= 1) {
+				long bit = 0;
+				if (d >= p) { bit = 1; d = d - p; }
+				if (nb < 53) {
+					if (nb > 0 || bit == 1) { v.d = v.d * 2.0 + (double)bit; nb = nb + 1; }
+				} else {
+					if (ex == 0) { rnd = bit; } else if (bit == 1) { sticky = 1; }
+					ex = ex + 1;
+				}
+				p = p / 2;
+			}
+			k = k + 1;
+		}
+		if (rnd == 1 && (sticky || (d_to_long(v.l) & 1) == 1)) { v.d = v.d + 1.0; }
+		if (ex > 0) { v.d = d_ldexp(v.d, ex); }
+	} else {
+		long k = start;
+		while (k < i && s[k] == 48) { k = k + 1; }
+		while (k < i) {
+			long part = 0;
+			long mult = 1;
+			while (k < i && mult * radix <= 119304647) {
+				part = part * radix + digit_value((int)s[k] & 255);
+				mult = mult * radix;
+				k = k + 1;
+			}
+			v.d = d_fma(v.d, (double)mult, (double)part);
+		}
+	}
+	if (neg) { return d_neg(v.l); }
+	return v.l;
+}
+
+/* ToPrimitive (ECMA-262 7.1.1) of an array or an object, under RT_ECMA: its
+ * string, which Array.prototype.toString and Object.prototype.toString give. */
+long to_prim(long h) {
+	long t = tag_of(h);
+	if (t == 5 || t == 6) { return to_string(h); }
+	return h;
+}
+
 long js_keys(long o);          /* the keysOf builtin below is exactly this */
 long js_del(long o, long key); /* and delKey is exactly this */
 
@@ -6378,9 +6684,13 @@ long host_call(long id, long self, long args) {
 	}
 	case 4: {
 		long r = arg_num(args, 1);
+		if (RT_ECMA) { return mk_num(js_parse_int_es(arg_str(args, 0), to_int32(r))); }
 		return mk_num(js_parse_int(arg_str(args, 0), d_is_nan(r) ? 0 : d_to_long(d_trunc(r))));
 	}
-	case 5: { return mk_num(js_parse_float(arg_str(args, 0))); }
+	case 5: {
+		if (RT_ECMA) { return mk_num(js_parse_float_es(arg_str(args, 0))); }
+		return mk_num(js_parse_float(arg_str(args, 0)));
+	}
 	case 6: {
 		long v = arg_num(args, 0);
 		exit((int)(d_is_nan(v) ? 0 : to_int32(v)));
@@ -6435,7 +6745,14 @@ long host_call(long id, long self, long args) {
 		return mk_num(d_sign(v) ? d_neg(DONE) : DONE);
 	}
 	case 19: { return mk_num(d_sqrt(arg_num(args, 0))); }
-	case 20: { return mk_num(d_pow(arg_num(args, 0), arg_num(args, 1))); }
+	case 20: {
+		/* Number::exponentiate (ECMA-262 6.1.6.1.3) differs from C's pow in two
+		 * places: a NaN exponent, and a base of +-1 with an infinite one. */
+		long x = arg_num(args, 0);
+		long y = arg_num(args, 1);
+		if (RT_ECMA && (d_is_nan(y) || (d_is_inf(y) && d_eq(d_abs(x), d_from_long(1))))) { return mk_num(DNAN); }
+		return mk_num(d_pow(x, y));
+	}
 	case 30: { return from_char_code(args); }
 	case 31: { return mk_bool(tag_of(arg_at(args, 0)) == 5); }
 	case 32: { return mk_num(d_from_long(str_len(arg_str(args, 0)))); }

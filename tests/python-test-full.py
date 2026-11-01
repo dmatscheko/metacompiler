@@ -3228,6 +3228,18 @@ def s48():
                            "Unknown format code 'd' for object of type 'complex'"])
     check("cpx10", (1.1+2.3j) ** 4 == complex(-8.957200000000004, -41.289599999999986) and str((1+2j) ** 0) == "(1+0j)")
     check("cpx11", (1e10-3j) * (1.1+2.3j) == complex(11000000006.9, 22999999996.7) and format(float("-inf"), "z") == "-inf")
+    # int(), float() and complex() strip str.isspace() less U+001C..U+001F:
+    # U+0085 and U+00A0 go, U+FEFF (no space to Python) stays and is an error.
+    oks = []
+    for c in ["\u0085", "\u00a0", "\u3000", "\ufeff", "\u001c"]:
+        row = []
+        for f in (int, float, complex):
+            try:
+                row.append(f(c + "12" + c) == 12)
+            except ValueError:
+                row.append(None)
+        oks.append(row)
+    check("cpx12", oks == [[True] * 3, [True] * 3, [True] * 3, [None] * 3, [None] * 3])
 
 # ===== SECTION 49: int / int is the exact quotient rounded once =====
 # With an arbitrary precision operand the quotient is not the quotient of the

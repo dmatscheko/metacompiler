@@ -229,6 +229,19 @@ function rbsCharAt(s, i) {
     return rbsSub(s, i, 1)
 }
 
+// String#chars: one element per CHARACTER, a surrogate pair taken whole as one
+// substring (rebuilt from its two halves it would be two U+FFFD).
+function rbsChars(s) {
+    var out = []
+    var i = 0
+    while (i < s.length) {
+        var k = rbsCharLen(s, i)
+        out.push(s.substring(i, i + k))
+        i = i + k
+    }
+    return out
+}
+
 // String#reverse, a surrogate pair kept whole.
 function rbsReverse(s) {
     var out = ""

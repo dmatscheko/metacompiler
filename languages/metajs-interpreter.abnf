@@ -107,7 +107,10 @@ Do          <~~ push(makeDo(pop(), pop())) ~~>
 // 'for (;c;)' and 'for (i=0;;)' could not be told apart on the stack.
 For         <~~ push(makeFor(takeAll())) ~~>
             = KwFor "(" [ ForInit ] ";" [ ForCond ] ";" [ ForPost ] ")" Statement ;
-ForInit     <~~ push({k:"init", t:pop()}) ~~> = ForVar | ForExpr ;
+ForInit     <~~ push({k:"init", t:pop()}) ~~> = ForLet | ForVar | ForExpr ;
+// let and const get a binding per iteration (makeFor), so the names travel to it.
+ForLet      <~~ var ns = forLetNames(); var t = makeSeq(takeAll()); push(ns); push(t) ~~>
+            = KwLet <~~ forLetMark() ~~> Declarator { "," Declarator } ;
 ForVar      = VarDeclCore ;
 ForExpr     <~~ push(exprToStmt(pop())) ~~> = Expression ;
 ForCond     <~~ push({k:"cond", t:pop()}) ~~> = Expression ;
@@ -264,6 +267,7 @@ HexDigit    = "0"..."9" | "a"..."f" | "A"..."F" ;
 // The keywords end with a negative lookahead, so that e.g. 'iffy' or 'variable' stay identifiers.
 KwImport    = "import" KwEnd ;
 KwVar       = ( "var" | "let" | "const" ) KwEnd ;
+KwLet       = ( "let" | "const" ) KwEnd ;
 KwFunction  = "function" KwEnd ;
 KwIf        = "if" KwEnd ;
 KwElse      = "else" KwEnd ;
@@ -291,8 +295,9 @@ KwDefault   = "default" KwEnd ;
     // statement builders); language-specific behavior is configured on `core` below.
     include("lib/interp-core.js")
 
-    // strNum's hexadecimal numeral.
-    include("lib/hex-float.js")
+    // ECMAScript's StringToNumber, parseInt, parseFloat and string order, shared
+    // with the js interpreters and js's layer 2.
+    include("lib/js-num.js")
 
     // The 'anytype' declaration marker of the interpreted programs: a unique
     // object a program can only obtain through the anytype global below.
@@ -1042,7 +1047,10 @@ KwDefault   = "default" KwEnd ;
         // Infinity and NaN are values, not functions, and the dialect cannot write
         // either as a literal (there is no exponent literal - manual chapter 4).
         "Infinity": Infinity, "NaN": NaN,
-        "parseInt": parseInt, "parseFloat": parseFloat, "Math": Math,
+        // ECMAScript's (19.2.5, 19.2.4), from js-num.js: goja's parseInt answers
+        // +0 for "-0", and the frozen host's are the floor's.
+        "parseInt": function(s, r) { return jsnParseInt(siStr(s), siI32(siNum(r)) | 0) },
+        "parseFloat": function(s) { return jsnParseFloat(siStr(s)) }, "Math": Math,
         "String": stringHostObj, "Array": arrayHostObj,
         // floPrec(v, n): |v| rounded to n significant digits as DIGITSeEXP. Host
         // id 70 of languages/lib/runtime.c and floPrecStr in abnf/commonscript.go
@@ -1234,7 +1242,10 @@ KwDefault   = "default" KwEnd ;
         if (v === undefined) return v
         if (typeof o == "function") return (k === "apply" || k === "call") ? v : undefined
         if (typeof o == "string") return (strMembers[k] === 1 || v !== ""[k]) ? v : undefined
-        if (Array.isArray(o)) return (arrMembers[k] === 1 || v !== emptyArr[k]) ? v : undefined
+        if (Array.isArray(o)) {
+            if (k === "sort") return sortOf(o)
+            return (arrMembers[k] === 1 || v !== emptyArr[k]) ? v : undefined
+        }
         return v !== emptyObj[k] ? v : undefined
     }
 
@@ -1244,11 +1255,20 @@ KwDefault   = "default" KwEnd ;
         return function() {
             var v = anytype
             v = t()
-            if (typeof v == "string") { return -strNum(v) }
+            if (typeof v == "string") { return -jsnStrToNum(v) }
+            if (isPlainObj(v)) { return -jsnStrToNum(objPrim(v)) }
             return -v
         }
     }
-    function makeBitNot(t) { return function() { return ~t() } }
+    function makeBitNot(t) {
+        return function() {
+            var v = anytype
+            v = t()
+            if (typeof v == "string") { return ~jsnStrToNum(v) }
+            if (isPlainObj(v)) { return ~jsnStrToNum(objPrim(v)) }
+            return ~v
+        }
+    }
     function makeTypeof(t) { return function() { return siTypeof(t()) } }
 
     function makeArray(items) {
@@ -1275,6 +1295,7 @@ KwDefault   = "default" KwEnd ;
     }
 
     function makeFunctionExpr(bodyT, params) {
+        fnTags++
         return function() { return makeClosure(params, bodyT, scopes) }
     }
 
@@ -1287,14 +1308,31 @@ KwDefault   = "default" KwEnd ;
             if (typeof l == "object" || typeof r == "object") {
                 if (szIs(l) || szIs(r)) return siBinOp(op, l, r)
                 if (flIs(l) || flIs(r)) return flBinOp(op, l, r)
+                if (objConverts(op, l, r)) return binOp(op, objPrim(l), objPrim(r))
             }
             if ((typeof l == "string" || typeof r == "string") && strConverts(op, l, r)) {
                 return binOp(op, strOperand(l), strOperand(r))
             }
+            // A function's string is "[function]" in the other engines (to_string
+            // in languages/lib/runtime.c), where goja would give its source text.
+            if (op == "+" && (typeof l == "function" || typeof r == "function")) return fnStr(l) + fnStr(r)
+            if (typeof l == "string" && typeof r == "string" && strRel[op] === 1) {
+                var c = jsnStrCmp(l, r)
+                if (op == "<") return c < 0
+                if (op == ">") return c > 0
+                if (op == "<=") return c <= 0
+                return c >= 0
+            }
         }
         if (op == "+") return l + r
         if (op == "-") return l - r
-        if (op == "*") return l * r
+        if (op == "*") {
+            // goja multiplies two integral values as integers, so -4 * 0 is +0
+            // there; the product of a zero carries the XOR of the signs.
+            var p = l * r
+            if (p === 0 && negSign(l) != negSign(r)) return 0 / (0 - 1)
+            return p
+        }
         if (op == "/") return l / r
         if (op == "%") return l % r
         if (op == "==") return l == r
@@ -1326,12 +1364,22 @@ KwDefault   = "default" KwEnd ;
         if (op == ">>") return l >> r
         if (op == ">>>") return l >>> r
     }
-    // ToNumber of a string operand is the C floor's str_to_num - Go's
-    // strconv.ParseFloat on the string trimmed of ASCII space - which the frozen
-    // host and the compiled half answer, where goja's own is ECMAScript's ("0x10"
-    // is 16 there, "1_000" NaN). Every operator converts but + and the strict
+    // Two strings compare by UTF-16 code unit (IsLessThan, ECMA-262 7.2.13) -
+    // jsnStrCmp - where both script hosts compare by code point. Twin of str_cmp16
+    // in languages/lib/runtime.c and jsCompare's ecma arm in abnf/jsrt.go.
+    var strRel = {"<": 1, ">": 1, "<=": 1, ">=": 1}
+    // The default comparator of sort() is that order over ToString of the elements.
+    function sortDefault16(x, y) { return jsnStrCmp(siStr(x), siStr(y)) }
+    function sortOf(arr) {
+        return function(cmp) { return arr.sort(cmp === undefined ? sortDefault16 : cmp) }
+    }
+
+    // ToNumber of a string operand is StringToNumber (ECMA-262 7.1.4.1.1),
+    // jsnStrToNum; both hosts' own conversions differ from it ("0x10", "1_000",
+    // the Unicode white space). Every operator converts but + and the strict
     // equalities; two strings compare and test equal as strings, and == converts
-    // a string only against a number or a boolean.
+    // a string only against a number or a boolean. Twin of str_to_num under
+    // RT_ECMA in languages/lib/runtime.c and toNumber's ecma arm in abnf/jsrt.go.
     function strConverts(op, l, r) {
         if (op == "+" || op == "===" || op == "!==") return false
         var rel = op == "==" || op == "!=" || op == "<" || op == ">" || op == "<=" || op == ">="
@@ -1344,88 +1392,34 @@ KwDefault   = "default" KwEnd ;
         return true
     }
     function strOperand(v) {
-        if (typeof v == "string") return strNum(v)
+        if (typeof v == "string") return jsnStrToNum(v)
         return v
     }
-    function strSpace(c) {
-        var cc = c.charCodeAt(0)
-        return cc == 32 || (cc >= 9 && cc <= 13)
+    function fnStr(v) {
+        if (typeof v == "function") return "[function]"
+        return siStr(v)
     }
-    // Go's underscoreOK over s: an underscore only between two digits, where a
-    // 0x prefix counts as a digit and a hex number's digits include a-f.
-    function strUnderOK(s) {
-        var i = 0
-        var saw = "^"
-        var hex = false
-        if (i < s.length && (s.charAt(i) == "+" || s.charAt(i) == "-")) i = i + 1
-        if (s.length - i >= 2 && s.charAt(i) == "0" && (s.charAt(i + 1) == "x" || s.charAt(i + 1) == "X")) {
-            i = i + 2
-            saw = "0"
-            hex = true
+    function negSign(v) { return v < 0 || (v === 0 && 1 / v < 0) }
+    // An array or object operand converts through ToPrimitive (ECMA-262 7.1.1),
+    // which is its string, for every operator but the strict equalities; ==
+    // converts it only against a primitive other than undefined and null. Twin
+    // of to_prim in languages/lib/runtime.c and isArrOrObj in abnf/jsrt.go.
+    function isPlainObj(v) { return v !== null && typeof v == "object" && !szIs(v) && !flIs(v) }
+    function objConverts(op, l, r) {
+        if (op == "===" || op == "!==" || (!isPlainObj(l) && !isPlainObj(r))) return false
+        if (op == "==" || op == "!=") {
+            var o = anytype
+            o = isPlainObj(l) ? r : l
+            return o !== null && o !== undefined && typeof o != "object" && typeof o != "function"
         }
-        while (i < s.length) {
-            var c = s.charAt(i).toLowerCase()
-            if ((c >= "0" && c <= "9") || (hex && c >= "a" && c <= "f")) {
-                saw = "0"
-            } else if (c == "_") {
-                if (saw != "0") return false
-                saw = "_"
-            } else {
-                if (saw == "_") return false
-                saw = "!"
-            }
-            i = i + 1
-        }
-        return saw != "_"
+        return true
     }
-    // Twin of str_to_num in languages/lib/runtime.c and rt.toNumber in
-    // abnf/jsrt.go: empty is 0, "nan" (unsigned) and "inf" / "infinity" (signed)
-    // in any case, a hexadecimal float whose p exponent is required, and
-    // underscores between digits; anything else NaN.
-    function strNum(src) {
-        var i = 0
-        var j = src.length
-        while (i < j && strSpace(src.charAt(i))) i = i + 1
-        while (j > i && strSpace(src.charAt(j - 1))) j = j - 1
-        var s = src.substring(i, j)
-        if (s == "") return 0
-        var k = 0
-        var neg = false
-        if (s.charAt(0) == "+" || s.charAt(0) == "-") {
-            neg = s.charAt(0) == "-"
-            k = 1
-        }
-        var w = s.substring(k, s.length).toLowerCase()
-        if (k == 0 && w == "nan") return NaN
-        if (w == "inf" || w == "infinity") return neg ? -Infinity : Infinity
-        if (s.indexOf("_") >= 0 && !strUnderOK(s)) return NaN
-        var t = ""
-        for (var q = k; q < s.length; q++) { if (s.charAt(q) != "_") t = t + s.charAt(q) }
-        if (t.length > 2 && t.charAt(0) == "0" && (t.charAt(1) == "x" || t.charAt(1) == "X")) {
-            var h = anytype
-            h = hexFloatScan(t, 2)
-            if (h === null || h.end != t.length || (t.indexOf("p") < 0 && t.indexOf("P") < 0)) return NaN
-            if (h.v == 0) return neg ? 0 / (0 - 1) : 0
-            return neg ? -h.v : h.v
-        }
-        var p = 0
-        var nd = 0
-        while (p < t.length && t.charAt(p) >= "0" && t.charAt(p) <= "9") { p = p + 1; nd = nd + 1 }
-        if (p < t.length && t.charAt(p) == ".") {
-            p = p + 1
-            while (p < t.length && t.charAt(p) >= "0" && t.charAt(p) <= "9") { p = p + 1; nd = nd + 1 }
-        }
-        if (nd == 0) return NaN
-        if (p < t.length && (t.charAt(p) == "e" || t.charAt(p) == "E")) {
-            p = p + 1
-            if (p < t.length && (t.charAt(p) == "+" || t.charAt(p) == "-")) p = p + 1
-            var e0 = p
-            while (p < t.length && t.charAt(p) >= "0" && t.charAt(p) <= "9") p = p + 1
-            if (p == e0) return NaN
-        }
-        if (p != t.length) return NaN
-        var v = parseFloat(t)
-        return neg ? -v : v
+    // An object has no prototype, so its string is "[object Object]" even where
+    // goja would call a toString or valueOf it holds.
+    function objPrim(v) {
+        if (!isPlainObj(v)) return v
+        if (Array.isArray(v)) return siStr(v)
+        return "[object Object]"
     }
 
     // items = [thunk, op, thunk, op, thunk, ...] -> one left folded thunk.
@@ -1509,16 +1503,18 @@ KwDefault   = "default" KwEnd ;
         }
         var last = ref.path[ref.path.length - 1]
         if (last.kind != "member") fail("assignment target must end in a member")
-        // The same diagnostic as the other two engines, and for the same set of
-        // targets: languages/lib/runtime.c's set_member and abnf/jsrt.go's
-        // setMember say "member assignment 'foo' on 5" for a PRIMITIVE receiver
-        // and accept exactly two tags, the object (6) and the array (5), which is
-        // `typeof v == "object"` here; the loose == catches null as well as
-        // undefined, both of which the floor rejects on its first line.
-        if (cur == undefined || typeof cur != "object") {
-            fail("member assignment '" + last.key() + "' on " + cur)
-        }
         return {obj: cur, key: last.key()}
+    }
+    // The same diagnostic as the other two engines, and for the same set of
+    // targets: languages/lib/runtime.c's set_member and abnf/jsrt.go's
+    // setMember say "member assignment 'foo' on 5" for a PRIMITIVE receiver
+    // and accept exactly two tags, the object (6) and the array (5), which is
+    // `typeof v == "object"` here; the loose == catches null as well as
+    // undefined, both of which the floor rejects on its first line.
+    function checkRef(p) {
+        if (p.obj == undefined || typeof p.obj != "object") {
+            fail("member assignment '" + p.key + "' on " + p.obj)
+        }
     }
     // A compound assignment is its plain operator, so it goes through binOp and
     // inherits the sized-integer arms with it (s += box is js_add there).
@@ -1530,22 +1526,30 @@ KwDefault   = "default" KwEnd ;
         if (op == "%=") return binOp("%", a, b)
     }
     // items = [ref, opString, valueThunk]. Returns the assigned value (assignment is an expression).
+    // The target's object and key are evaluated first, and a compound assignment
+    // reads the old value before the right-hand side runs (ECMA-262 13.15.2).
+    // Twin of makeAssign in metajs-to-llvm-ir.abnf.
     function makeAssign(items) {
         var ref = items[0]
         var op = items[1]
         var valT = items[2]
         return function() {
             var v = anytype // A compound assignment (s += n) may change the value's type.
-            v = valT()
+            var old = anytype
             if (ref.path.length == 0) {
-                if (op != "=") v = applyOp(op, getVar(ref.name), v)
+                if (op != "=") old = getVar(ref.name)
+                v = valT()
+                if (op != "=") v = applyOp(op, old, v)
                 setVar(ref.name, v)
-            } else {
-                var p = resolveRef(ref)
-                if (op != "=") v = applyOp(op, p.obj[p.key], v)
-                p.obj[p.key] = v
-                objNote(p.obj, p.key)
+                return v
             }
+            var p = resolveRef(ref)
+            if (op != "=") old = getMember(p.obj, p.key)
+            v = valT()
+            if (op != "=") v = applyOp(op, old, v)
+            checkRef(p)
+            p.obj[p.key] = v
+            objNote(p.obj, p.key)
             return v
         }
     }
@@ -1560,6 +1564,7 @@ KwDefault   = "default" KwEnd ;
                 return n
             }
             var p = resolveRef(ref)
+            checkRef(p)
             var m = p.obj[p.key] - 0
             p.obj[p.key] = m + delta
             objNote(p.obj, p.key)
@@ -1576,6 +1581,7 @@ KwDefault   = "default" KwEnd ;
                 return n
             }
             var p = resolveRef(ref)
+            checkRef(p)
             var m = p.obj[p.key] - 0 + delta
             p.obj[p.key] = m
             objNote(p.obj, p.key)
@@ -1585,9 +1591,22 @@ KwDefault   = "default" KwEnd ;
 
     // ----- Statement thunks: function() -> undefined | BRK | CONT | {isRet, v} -----
 
+    // A for header's let/const names: forLetMark notes where the header's
+    // declarators start in declLog, which every declarator appends its name to.
+    // fnTags counts the function expressions and declarations parsed so far, so a
+    // loop whose header or body made none skips the per-iteration copy.
+    var declLog = []
+    var forLetAt = []
+    var fnTags = 0
+    function forLetMark() { forLetAt.push({at: declLog.length, fns: fnTags}) }
+    function forLetNames() {
+        var m = forLetAt.pop()
+        return {k: "let", names: declLog.slice(m.at), fns: m.fns}
+    }
     // items = [name] or [name, initThunk].
     function makeDecl(items) {
         var name = items[0]
+        declLog.push(name)
         var init = items.length > 1 ? items[1] : makeConst(undefined)
         return function() { declVar(name, init()) }
     }
@@ -1604,29 +1623,47 @@ KwDefault   = "default" KwEnd ;
         }
     }
     // items = [{k:"init"|"cond"|"post", t:thunk}..., bodyThunk].
+    // A let/const header gives every iteration a binding of its own
+    // (CreatePerIterationEnvironment, ECMA-262 14.7.4.4): a copy before the first
+    // test and after each body, so a closure keeps the value of its iteration.
+    // Without a closure in the loop the copy cannot be observed and is skipped.
+    // Twin of makeFor in metajs-to-llvm-ir.abnf.
     function makeFor(items) {
         var bodyT = items.pop()
         var init = null, cond = null, post = null
+        var lets = []
         for (var i = 0; i < items.length; i++) {
             if (items[i].k == "init") init = items[i].t
             if (items[i].k == "cond") cond = items[i].t
             if (items[i].k == "post") post = items[i].t
+            if (items[i].k == "let" && items[i].fns != fnTags) lets = items[i].names
         }
         return function() {
             scopes.push({}) // The for header is its own scope (for the loop variable).
             var res = undefined
             if (init != null) init()
+            if (lets.length > 0) forIterScope(lets)
             while (cond == null || cond()) {
                 var r = bodyT()
                 if (r != undefined) {
                     if (r === BRK) break
                     if (r !== CONT) { res = r; break } // A return signal.
                 }
+                if (lets.length > 0) forIterScope(lets)
                 if (post != null) post()
             }
             scopes.pop()
             return res
         }
+    }
+    function forIterScope(names) {
+        var old = scopes[scopes.length - 1]
+        var sc = {}
+        for (var i = 0; i < names.length; i++) {
+            var rec = old[names[i]]
+            sc[names[i]] = {v: rec.v, t: rec.t}
+        }
+        scopes[scopes.length - 1] = sc
     }
     // items = [] or [exprThunk].
     function makeReturn(items) {
@@ -1731,6 +1768,7 @@ KwDefault   = "default" KwEnd ;
 
     // Local stack = [name, [paramNames...], bodyThunk] -- binds the closure when executed.
     function makeFuncDecl(bodyT, paramNames, name) {
+        fnTags++
         return function() { declVar(name, makeClosure(paramNames, bodyT, scopes)) }
     }
 

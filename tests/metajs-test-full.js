@@ -1810,30 +1810,33 @@ function s32() {
                   lu.charCodeAt(2) === 56320 && lone.toLowerCase() === lone)
 }
 
-// ===== SECTION 33: a string's number is strconv.ParseFloat's =====
-// The whole string or NaN: "inf"/"infinity" in any case, a hexadecimal float with
-// its p exponent, underscores between digits; out of range is +-Infinity.
+// ===== SECTION 33: a string's number is ECMAScript's StringToNumber =====
+// The whole string after the ECMAScript white space (the Unicode spaces, U+FEFF and
+// the line terminators, not U+0085) is a signed decimal literal, exactly "Infinity",
+// or an unsigned 0x / 0o / 0b integer; anything else is NaN - "inf", underscores
+// and hexadecimal floats included. Out of range is +-Infinity.
 function s33() {
     var xs = ["Infinitx", "-Infinitx", "Infinityy", "inf", "-INFINITY", "1e400", "-1e400",
-              "1_000", "1__0", "1_", "0x1.8p1", "0x1p-1075", "0x1.8p-1075",
-              "0x1.000000000000080000001p0", "0x1.fffffffffffff8p1023", "0x1p", "1_0.5_5e1_0"]
+              "1_000", "1__0", "1_", "0x1.8p1", "0x1p-1075", "-Infinity", "+Infinity", "Infinity",
+              "0x1p", "1_0.5_5e1_0", "nan", "NaN", "-0x10", "0x", "+-1", ".5", "5.", "-.5e-3", "e5"]
     var v = []
     for (var i = 0; i < xs.length; i++) { v.push(xs[i] * 1) }
-    check("sn01", v[0] !== v[0] && v[1] !== v[1] && v[2] !== v[2])
-    check("sn02", v[3] === Infinity && v[4] === -Infinity)
-    check("sn03", v[5] === Infinity && v[6] === -Infinity)
-    check("sn04", v[7] === 1000 && v[8] !== v[8] && v[9] !== v[9])
-    check("sn05", v[10] === 3 && v[11] === 0 && v[12] === Math.pow(2, -1074))
-    check("sn06", v[13] === 1 + Math.pow(2, -52) && v[14] === Infinity && v[15] !== v[15])
-    check("sn07", v[16] === 105500000000)
-    // JavaScript's 0x / 0b / 0o integer forms are not ParseFloat's, under every
-    // operator that converts a string.
-    var ys = ["0x10", "0b101", "0o17", "0x1p4", "inf"]
-    check("sn08", ys[0] - 0 !== ys[0] - 0 && ys[1] * 1 !== ys[1] * 1 && ys[2] / 1 !== ys[2] / 1)
-    check("sn09", !(ys[0] == 16) && !(ys[0] < 17) && -ys[3] === -16 && (ys[3] | 0) === 16 && ys[4] > 1)
-    // Only ASCII white space is trimmed: a no-break space is not.
-    var zs = [String.fromCharCode(160) + "12", String.fromCharCode(9, 11, 12, 13) + "12 "]
-    check("sn10", zs[0] * 1 !== zs[0] * 1 && zs[1] * 1 === 12)
+    check("sn01", v[0] !== v[0] && v[1] !== v[1] && v[2] !== v[2] && v[3] !== v[3] && v[4] !== v[4])
+    check("sn02", v[5] === Infinity && v[6] === -Infinity)
+    check("sn03", v[7] !== v[7] && v[8] !== v[8] && v[9] !== v[9] && v[10] !== v[10] && v[11] !== v[11])
+    check("sn04", v[12] === -Infinity && v[13] === Infinity && v[14] === Infinity)
+    check("sn05", v[15] !== v[15] && v[16] !== v[16] && v[17] !== v[17] && v[18] !== v[18])
+    check("sn06", v[19] !== v[19] && v[20] !== v[20] && v[21] !== v[21] && v[25] !== v[25])
+    check("sn07", v[22] === 0.5 && v[23] === 5 && v[24] === -0.0005)
+    // The integer forms, under every operator that converts a string.
+    var ys = ["0x10", "0b101", "0o17", "0X1f", "0B2", "-0", "", "  "]
+    check("sn08", ys[0] - 0 === 16 && ys[1] * 1 === 5 && ys[2] / 1 === 15 && -ys[3] === -31 && ys[4] * 1 !== ys[4] * 1)
+    check("sn09", ys[0] == 16 && ys[0] < 17 && (ys[3] | 0) === 31 && 1 / (ys[5] * 1) === -Infinity &&
+                  ys[6] * 1 === 0 && ys[7] * 1 === 0 && ~ys[0] === -17)
+    var zs = [String.fromCharCode(160) + "12", String.fromCharCode(9, 11, 12, 13) + "12 ",
+              String.fromCharCode(65279) + "8" + String.fromCharCode(8232), String.fromCharCode(133) + "9",
+              String.fromCharCode(12288, 8287) + "3" + String.fromCharCode(8239, 5760)]
+    check("sn10", zs[0] * 1 === 12 && zs[1] * 1 === 12 && zs[2] * 1 === 8 && zs[3] * 1 !== zs[3] * 1 && zs[4] * 1 === 3)
 }
 
 // ===== SECTION 34: the members a receiver answers =====
@@ -1857,6 +1860,160 @@ function s34() {
     var f = fs[1]
     check("rm08", f.bind === undefined && f.length === undefined && f.name === undefined)
     check("rm09", f.call(undefined) === 7 && f.apply(undefined, []) === 7)
+}
+
+// ===== SECTION 35: string methods over UTF-16 code units =====
+// indexOf, replace and split search code units, so a lone surrogate finds half of
+// a pair and the text after a non-ASCII match survives; replace expands $$, $&, $`
+// and $'; split takes a limit (ToUint32), splits "" into code units and an absent
+// separator into [s]; trim strips the ECMAScript white space.
+function s35() {
+    var e = String.fromCharCode(233)
+    var party = String.fromCharCode(55356, 57225)
+    check("sm01", (e + "a" + e + e).replace("a", "_") === e + "_" + e + e &&
+                  ("a" + party + "b" + party).replace("b", "_") === "a" + party + "_" + party)
+    var rs = ["[$&]", "[$$]", "[$`]", "[$']", "[$0]", "[$1]", "[$]", "$$$&$"]
+    var got = []
+    for (var i = 0; i < rs.length; i++) { got.push("xaby".replace("ab", rs[i])) }
+    check("sm02", got.join("|") === "x[ab]y|x[$]y|x[x]y|x[y]y|x[$0]y|x[$1]y|x[$]y|x$ab$y")
+    check("sm03", (e + "ab" + party).replace("b", "[$`|$']") === e + "a[" + e + "a|" + party + "]" + party)
+    var ns = [0, 1, 2, 5, -1, 4294967297]
+    var lens = []
+    for (var j = 0; j < ns.length; j++) { lens.push("a,b,c".split(",", ns[j]).length) }
+    check("sm04", lens.join(",") === "0,1,2,3,3,1")
+    check("sm05", "".split(",").length === 1 && "".split(",", 1).length === 1 && "".split("").length === 0 &&
+                  "a,b,c".split().length === 1 && "a,b,c".split(undefined, 0).length === 0 && "abc".split("", 2).join("|") === "a|b")
+    check("sm06", party.split("").length === 2 && ("a" + party + "b" + party).split("").length === 6 &&
+                  party.split("")[1].charCodeAt(0) === 57225)
+    var sp = "x" + party + "y"
+    var hi = String.fromCharCode(55356)
+    var lo = String.fromCharCode(57225)
+    check("sm07", sp.indexOf(lo) === 2 && sp.indexOf(hi) === 1 && sp.indexOf(lo, 3) === -1 && sp.split(hi).length === 2 &&
+                  sp.split(lo)[0] === "x" + hi && (hi + hi).split(lo).length === 1)
+    var sl = sp.replace(lo, "L")
+    check("sm08", sl.length === 4 && sl.charCodeAt(1) === 55356 && sl.charAt(2) === "L")
+    var cs = [9, 160, 8195, 65279, 5760, 8232, 8233, 8239, 8287, 12288]
+    var trimmed = true
+    for (var k = 0; k < cs.length; k++) {
+        var c = String.fromCharCode(cs[k])
+        if ((c + "x" + c).trim() !== "x") { trimmed = false }
+    }
+    check("sm09", trimmed && (String.fromCharCode(133) + "x").trim().length === 2 &&
+                  (String.fromCharCode(8203) + "x").trim().length === 2 && hi.trim().charCodeAt(0) === 55356)
+}
+
+// ===== SECTION 36: string order, Math.pow, \u{...} =====
+// Two strings compare by UTF-16 code unit, so U+FFFF and U+E000 sort ABOVE an
+// astral character; the default sort uses the same order. Math.pow is
+// Number::exponentiate: a NaN exponent, and +-1 to an infinite power, are NaN.
+// \u{X...} is one code point of any number of hex digits.
+function s36() {
+    var party = String.fromCharCode(55356, 57225)
+    var a = [String.fromCharCode(65535), party, String.fromCharCode(57344), "z"]
+    check("so01", !(a[0] < a[1]) && a[0] > a[1] && a[2] >= a[1] && !(a[2] <= a[1]) && a[3] < a[1])
+    var s = a.slice(0).sort()
+    check("so02", s[0] === "z" && s[1] === party && s[2].charCodeAt(0) === 57344 && s[3].charCodeAt(0) === 65535)
+    var inf = Math.pow(2, 1024)
+    var pw = [Math.pow(1, inf), Math.pow(-1, inf), Math.pow(1, 0 / 0), Math.pow(-1, -inf), Math.pow(0 / 0, 0), Math.pow(2, -inf)]
+    check("so03", pw[0] !== pw[0] && pw[1] !== pw[1] && pw[2] !== pw[2] && pw[3] !== pw[3] && pw[4] === 1 && pw[5] === 0)
+    check("so04", "\u{1F600}".length === 2 && "\u{1F600}".charCodeAt(0) === 55357 && "\u{1F600}".charCodeAt(1) === 56832 &&
+                  "\u{41}".charCodeAt(0) === 65 && "\u{0000e9}x".length === 2 && "\u{e9}" === String.fromCharCode(233))
+}
+
+// ===== SECTION 37: let bindings per iteration, and assignment order =====
+// A for (let ...) header gives every iteration its own binding, so a closure keeps
+// its iteration's value (var keeps one binding). An assignment evaluates its
+// target's object and key before the right-hand side, and a compound assignment
+// reads the old value first.
+function s37() {
+    var fs = []
+    for (let i = 0; i < 3; i++) { fs.push(function () { return i }) }
+    var gs = []
+    for (var j = 0; j < 3; j++) { gs.push(function () { return j }) }
+    check("lo01", "" + fs[0]() + fs[1]() + fs[2]() === "012" && "" + gs[0]() + gs[2]() === "33")
+    var hs = []
+    for (let k = 0, n = 2; k < 5; k++) {
+        if (k == 1) { continue }
+        if (k == 4) { break }
+        hs.push(function () { return k * 10 + n })
+    }
+    check("lo02", hs.length === 3 && hs[0]() === 2 && hs[1]() === 22 && hs[2]() === 32)
+    var cs = []
+    for (const c = [0]; c[0] < 2; c[0]++) { cs.push(function () { return c[0] }) }
+    check("lo03", cs[0]() === 2 && cs[1]() === 2)
+    var log = []
+    var obj = {}
+    function getX() { log.push("obj"); return obj }
+    function key() { log.push("key"); return "k" }
+    function rhs() { log.push("rhs"); return 1 }
+    getX()[key()] = rhs()
+    check("ao01", log.join(",") === "obj,key,rhs" && obj.k === 1)
+    var zz = 1
+    zz += (zz = 5) + zz
+    var s = "a"
+    s += s += "b"
+    check("ao02", zz === 11 && s === "aab")
+    var arr = [1, 2, 3]
+    var idx = 0
+    arr[idx++] = arr[idx] * 10
+    var b = [1]
+    b[0] += (b[0] = 7)
+    check("ao03", arr.join(",") === "20,2,3" && b[0] === 8)
+}
+
+// ===== SECTION 38: parseInt and parseFloat are ECMAScript's =====
+function s38() {
+    var nb = String.fromCharCode(160)
+    var pf = [parseFloat("Infinity"), parseFloat("-Infinityx"), parseFloat(nb + "12"), parseFloat(String.fromCharCode(65279) + "7"),
+              parseFloat("inf"), parseFloat("-.5e-3x"), parseFloat("1e"), parseFloat("e5"), parseFloat("0x10")]
+    check("pf01", pf[0] === Infinity && pf[1] === -Infinity && pf[2] === 12 && pf[3] === 7 && pf[4] !== pf[4])
+    check("pf02", pf[5] === -0.0005 && pf[6] === 1 && pf[7] !== pf[7] && pf[8] === 0 && 1 / parseFloat("-0") === -Infinity)
+    check("pi01", parseInt("12", 37) !== parseInt("12", 37) && parseInt("12", 1) !== parseInt("12", 1) &&
+                  parseInt("12", 36) === 38 && parseInt("12", 0) === 12 && parseInt("12", 4294967306) === 12)
+    check("pi02", 1 / parseInt("-0") === -Infinity && parseInt(nb + "12") === 12 && parseInt("0x1f") === 31 &&
+                  parseInt("0x1f", 10) === 0 && parseInt("-0x10", 16) === -16 && parseInt("11", 2.9) === 3)
+    check("pi03", parseInt("123456789012345678") === 123456789012345680 && parseInt("99999999999999999999") === 100000000000000000000 &&
+                  parseInt("12345678901234567891") === 12345678901234567000 && parseInt("9007199254740993") === 9007199254740992)
+    check("pi04", parseInt("777777777777777777777777", 8) === 4722366482869645213696 && parseInt("Z1", 36) === 1261 &&
+                  parseInt("1e3") === 1 && parseInt("0x", 16) !== parseInt("0x", 16))
+}
+
+// ===== SECTION 39: an array or object converts through ToPrimitive =====
+// Its string - Array.prototype.join(",") or "[object Object]" - is what arithmetic,
+// the relations and == against a primitive see.
+function s39() {
+    var e = []
+    var one = [1]
+    var two = [1, 2]
+    var o = {}
+    check("tp01", e - 0 === 0 && one * 1 === 1 && two - 0 !== two - 0 && -[5] === -5 && [3] * [4] === 12 && ~[1] === -2)
+    check("tp02", e == "" && e == 0 && [0] == 0 && two == "1,2" && one == true && !(e == null) && o == "[object Object]")
+    check("tp03", o <= o && !(o < o) && two >= "1" && one < 2 && [2] > "10" && [10] < "9" && !([10] < 9))
+    // An object has no prototype, so a toString or valueOf it holds is an
+    // ordinary property, never consulted (node would answer 8 and false).
+    var p = {toString: function () { return "7" }, valueOf: function () { return 8 }}
+    var pn = p * 1
+    check("tp04", pn !== pn && p == "[object Object]" && -p !== -p && "" + p === "[object Object]" &&
+                  null * 1 === 0 && null - "2" === -2 && null + null === 0 && !(null == 0) && null >= 0)
+}
+
+// ===== SECTION 40: array join, indexOf and keys; the sign of a zero product =====
+// join(undefined) joins with ","; indexOf finds no hole, since a hole is not an
+// element; true and null index an array as the properties "true" and "null",
+// which an array has not. A product of zero carries the XOR of the signs.
+function s40() {
+    var h = []
+    h[2] = 7
+    var u = undefined
+    check("ak01", [1, 2, 3].join(u) === "1,2,3" && [1, 2].join() === "1,2" && h.indexOf(u) === -1 && h.indexOf(7) === 2 &&
+                  [1, u].indexOf(u) === 1)
+    var a = [10, 20]
+    var t = true
+    var n = null
+    check("ak02", a[t] === undefined && a[n] === undefined && a[false] === undefined && a["1"] === 20 && a[1.0] === 20)
+    var z = [-4, 0, 3, -1]
+    check("ak03", 1 / (z[0] * z[1]) === -Infinity && 1 / (z[1] * z[0]) === -Infinity && 1 / (z[1] * z[3]) === -Infinity &&
+                  1 / (z[2] * z[1]) === Infinity && 1 / (z[3] * z[0] * z[1]) === Infinity)
 }
 
 function main() {
@@ -1894,6 +2051,12 @@ function main() {
     s32() // SECTION-CALL 32
     s33() // SECTION-CALL 33
     s34() // SECTION-CALL 34
+    s35() // SECTION-CALL 35
+    s36() // SECTION-CALL 36
+    s37() // SECTION-CALL 37
+    s38() // SECTION-CALL 38
+    s39() // SECTION-CALL 39
+    s40() // SECTION-CALL 40
     println("full: " + checks + " checks, " + failures + " failures")
     return failures
 }

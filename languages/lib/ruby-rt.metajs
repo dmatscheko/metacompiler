@@ -6209,7 +6209,7 @@ function rbEndsWith(target, args) {
     }
     return false
 }
-// String#strip / #chars - the interpreter half's bodies.
+// String#strip - the interpreter half's body.
 function rbStrStrip(s) {
     var a = 0
     var b = s.length
@@ -6222,18 +6222,6 @@ function rbStrStrip(s) {
 // would answer "oo bar" natively). tools/metajs-lint catches the whole class.
 function rbIsSpaceCh(c) {
     return c == " " || c == "\t" || c == "\n" || c == "\r" || c == "\u000c" || c == "\u000b" || c == "\u0000"
-}
-// One element per CHARACTER: a surrogate pair is taken whole, as one substring -
-// rebuilt from its two halves it would be two U+FFFD.
-function rbStrChars(s) {
-    var out = []
-    var i = 0
-    while (i < s.length) {
-        var n = rbPairAt(s, i) ? 2 : 1
-        out.push(s.substring(i, i + n))
-        i = i + n
-    }
-    return out
 }
 function rbPairAt(s, i) {
     var c = s.charCodeAt(i)
@@ -8681,7 +8669,7 @@ function rbMethod(target, name, args) {
         }
         if (name == "reverse") { return rbsReverse(target) }
         if (name == "strip") { return rbStrStrip(target) }
-        if (name == "chars") { return rbStrChars(target) }
+        if (name == "chars") { return rbsChars(target) }
         if (name == "split") {
             var spn = rbNPos(args)
             var spre = anytype
@@ -8701,7 +8689,7 @@ function rbMethod(target, name, args) {
         if (name == "replace") { return rbStr(rbArgAt(args, 0)) }
         if (name == "each_char") {
             var ecb = rbBlockOf(args)
-            var ecl = rbStrChars(target)
+            var ecl = rbsChars(target)
             if (ecb === null) { return rbEnumAt(rbMkEnum(ecl), target, name, args) }
             var ec = 0
             while (ec < ecl.length) { rbCall1(ecb, rbMkRStr(ecl[ec], false)); ec = ec + 1 }

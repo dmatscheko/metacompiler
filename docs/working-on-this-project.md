@@ -864,6 +864,11 @@ builds only the UTF-16 view the regex engine searches). An
 literals, 2026-08-10**: `swUnescape` was copying a literal one code unit at a time
 and handing the host a LONE SURROGATE, which UTF-8 cannot encode. All four legs
 print the character now. JS: the `d` flag builds no `m.indices`.
+MetaJS: a function's string is `[function]` in every leg, where node gives its
+source text (the goja leg is routed through `fnStr` to agree). An object has no
+prototype, so ToPrimitive of one is always `[object Object]` and of an array its
+`join(",")`: a `valueOf` or `toString` the program stores is never consulted
+(the goja leg is routed through `objPrim` to agree; SECTION 39 tp04).
 Python: integral floats render as int, `&|^` are ToInt32, `inf`/`nan` spell
 `Infinity`/`NaN`, the format mini-language is a subset.
 A plain instance prints as `<__main__.G object>`, without CPython's `at 0x...`.

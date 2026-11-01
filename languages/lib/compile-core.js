@@ -129,6 +129,15 @@ function unescapeJs(s) {
         if (e == 102) { out += String.fromCharCode(12); i += 2; continue }
         if (e == 118) { out += String.fromCharCode(11); i += 2; continue }
         if (e == 120) { out += String.fromCharCode(hexAt(s, i + 2, 2)); i += 4; continue }
+        if (e == 117 && s.charCodeAt(i + 2) == 123 && s.indexOf("}", i + 3) > 0) {
+            // \u{X...}: a code point of any number of hex digits (ECMA-262 12.9.4).
+            var close = s.indexOf("}", i + 3)
+            var cp = hexAt(s, i + 3, close - i - 3)
+            if (cp < 65536) { out += String.fromCharCode(cp) }
+            else { out += String.fromCharCode(55296 + ((cp - 65536) >> 10), 56320 + ((cp - 65536) & 1023)) }
+            i = close + 1
+            continue
+        }
         if (e == 117) { out += String.fromCharCode(hexAt(s, i + 2, 4)); i += 6; continue }
         out += String.fromCharCode(e)
         i += 2

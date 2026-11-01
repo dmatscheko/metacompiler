@@ -1226,9 +1226,15 @@ function csTypeAlias(name) {
 }
 
 // csParseInt is int.Parse / long.Parse / uint.Parse: a decimal digit run with an
-// optional sign, and a System.FormatException on anything else.
+// optional sign, and a System.FormatException on anything else. The white space
+// NumberStyles.Integer admits around it is U+0009..U+000D and U+0020 only.
+function csIntWhite(c) { return c == 32 || (c >= 9 && c <= 13) }
 function csParseInt(s, w, u) {
-    var t = s.trim()
+    var a = 0
+    var b = s.length
+    while (a < b && csIntWhite(s.charCodeAt(a))) { a = a + 1 }
+    while (b > a && csIntWhite(s.charCodeAt(b - 1))) { b = b - 1 }
+    var t = s.substring(a, b)
     var neg = false
     var i = 0
     if (t.length > 0) {

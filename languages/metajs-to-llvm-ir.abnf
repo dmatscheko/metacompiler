@@ -120,7 +120,10 @@ Do          <~~ push(makeDo(pop(), ssaCondT(pop()))) ~~>
 // 'for (;c;)' and 'for (i=0;;)' could not be told apart on the stack.
 For         <~~ push(makeFor(takeAll())) ~~>
             = KwFor "(" [ ForInit ] ";" [ ForCond ] ";" [ ForPost ] ")" Statement ;
-ForInit     <~~ push({k:"init", t:pop()}) ~~> = ForVar | ForExpr ;
+ForInit     <~~ push({k:"init", t:pop()}) ~~> = ForLet | ForVar | ForExpr ;
+// let and const get a binding per iteration (makeFor), so the names travel to it.
+ForLet      <~~ var ns = forLetNames(); var t = makeSeq(takeAll()); push(ns); push(t) ~~>
+            = KwLet <~~ forLetMark() ~~> Declarator { "," Declarator } ;
 ForVar      = VarDeclCore ;
 ForExpr     <~~ push(exprToClause(pop())) ~~> = Expression ;
 ForCond     <~~ push({k:"cond", t:pop()}) ~~> = Expression ;
@@ -277,6 +280,7 @@ HexDigit    = "0"..."9" | "a"..."f" | "A"..."F" ;
 // The keywords end with a negative lookahead, so that e.g. 'iffy' or 'variable' stay identifiers.
 KwImport    = "import" KwEnd ;
 KwVar       = ( "var" | "let" | "const" ) KwEnd ;
+KwLet       = ( "let" | "const" ) KwEnd ;
 KwFunction  = "function" KwEnd ;
 KwIf        = "if" KwEnd ;
 KwElse      = "else" KwEnd ;
@@ -535,7 +539,8 @@ KwDefault   = "default" KwEnd ;
     // True when the module is a PROGRAM: the driver sets it, so a runtime library
     // (-rt-lib), the frozen bootstrap and the tag scripts compiled under -frozen
     // keep false. A program's direct calls are then counted like js_call counts
-    // its closures (js_deep_in / js_deep_out), and jsmain registers the limit.
+    // its closures (js_deep_in / js_deep_out), and jsmain registers the limit and
+    // switches the floor to ECMAScript's string order and Math.pow (js_rt_ecma).
     var deepCount = false
     // A call with no receiver: js_call0..3 (lib/runtime.c) build the argument array
     // only when the callee can keep it.
@@ -717,31 +722,34 @@ KwDefault   = "default" KwEnd ;
         return {b: last.b, obj: cur, key: last.v}
     }
     // items = [ref, opString, valueThunk]. The value of an assignment is the assigned value.
+    // The target's object and key are evaluated first, and a compound assignment
+    // reads the old value before the right-hand side runs (ECMA-262 13.15.2).
+    // Twin of makeAssign in metajs-interpreter.abnf.
     function makeAssign(items) {
         var ref = items[0]
         var op = items[1]
         var valT = items[2]
         return function(b) {
-            var r = valT(b)
-            b = r.b
-            var v = r.v
+            var old = null
             if (ref.path.length == 0) {
                 var nameV = emitStr(b, ref.name)
-                if (op != "=") {
-                    var old = callExt(b, "js_scope_get", [curScopeV, nameV])
-                    v = callExt(b, binExt[op], [old, v])
-                }
+                if (op != "=") { old = callExt(b, "js_scope_get", [curScopeV, nameV]) }
+                var r = valT(b)
+                b = r.b
+                var v = r.v
+                if (old != null) { v = callExt(b, binExt[op], [old, v]) }
                 callExt(b, "js_tset", [curScopeV, nameV, v])
-            } else {
-                var p = emitRefPath(b, ref)
-                b = p.b
-                if (op != "=") {
-                    var oldM = callExt(b, "js_get", [p.obj, p.key])
-                    v = callExt(b, binExt[op], [oldM, v])
-                }
-                callExt(b, "js_set", [p.obj, p.key, v])
+                return {b: b, v: v}
             }
-            return {b: b, v: v}
+            var p = emitRefPath(b, ref)
+            b = p.b
+            if (op != "=") { old = callExt(b, "js_get", [p.obj, p.key]) }
+            var rm = valT(b)
+            b = rm.b
+            var vm = rm.v
+            if (old != null) { vm = callExt(b, binExt[op], [old, vm]) }
+            callExt(b, "js_set", [p.obj, p.key, vm])
+            return {b: b, v: vm}
         }
     }
     // items = [ref, "++"|"--"]. Post increment: the expression value is the old (coerced) one.
@@ -992,8 +1000,15 @@ KwDefault   = "default" KwEnd ;
         return function(b) { return t(b).b }
     }
     // items = [name] or [name, initThunk].
+    // A for header's let/const names: forLetMark notes where the header's
+    // declarators start in declLog, which every declarator appends its name to.
+    var declLog = []
+    var forLetAt = []
+    function forLetMark() { forLetAt.push(declLog.length) }
+    function forLetNames() { return {k: "let", names: declLog.slice(forLetAt.pop())} }
     function makeDecl(items) {
         var name = items[0]
+        declLog.push(name)
         if (wDeclMarks.pop() != wImpure) { wTop().asg["$" + name] = true }
         return function(b) {
             var v = hUndef
@@ -1022,26 +1037,51 @@ KwDefault   = "default" KwEnd ;
             return exitB
         }
     }
-    // items = [{k:"init"|"cond"|"post", t:thunk}..., bodyThunk].
+    // items = [{k:"init"|"cond"|"post", t:thunk}..., bodyThunk], plus {k:"let",
+    // names} for a let/const header, which gives every iteration a binding of its
+    // own (CreatePerIterationEnvironment, ECMA-262 14.7.4.4): a copy of the header
+    // scope before the first test and after each body, so a closure keeps the
+    // value of its iteration. The header scope then reaches the head and the post
+    // through phis; without a function emitted in the loop the copies cannot be
+    // observed and are left out. A var header keeps one scope and no phis.
+    // Twin of makeFor in metajs-interpreter.abnf.
     function makeFor(items) {
         var bodyT = items.pop()
         var init = null, cond = null, post = null
+        var lets = []
         for (var i = 0; i < items.length; i++) {
             if (items[i].k == "init") init = items[i].t
             if (items[i].k == "cond") cond = items[i].t
             if (items[i].k == "post") post = items[i].t
+            if (items[i].k == "let") lets = items[i].names
         }
         bodyT = ssaCondT(bodyT)
         return function(b) {
             var saved = curScopeV
+            var fnBefore = funcCount
             curScopeV = callExt(b, "js_scope_new", [curScopeV]) // The for header is its own scope.
+            var headS = curScopeV
             ssaFrames.push({})
             if (init != null) b = init(b)
+            var perIter = lets.length > 0
+            var initB = b
+            if (perIter) {
+                initB = curF.NewBlock("")
+                b.NewBr(initB)
+            }
             var headB = curF.NewBlock("")
             var bodyB = curF.NewBlock("")
             var postB = curF.NewBlock("")
+            var runB = postB
+            if (perIter) runB = curF.NewBlock("")
             var exitB = curF.NewBlock("")
-            b.NewBr(headB)
+            var headPh = null
+            if (perIter) {
+                headPh = headB.NewPhi([llvm.ir.NewIncoming(headS, initB)])
+                curScopeV = headPh
+            } else {
+                b.NewBr(headB)
+            }
             if (cond != null) {
                 var r = cond(headB)
                 r.b.NewCondBr(truthy(r.b, r.v), bodyB, exitB)
@@ -1051,13 +1091,39 @@ KwDefault   = "default" KwEnd ;
             loopStack.push({cont: postB, brk: exitB})
             bodyT(bodyB).NewBr(postB)
             loopStack.pop()
-            var pb = postB
-            if (post != null) pb = post(postB)
+            var runPh = null
+            if (perIter) {
+                runPh = runB.NewPhi([llvm.ir.NewIncoming(headPh, postB)])
+                curScopeV = runPh
+            }
+            var pb = runB
+            if (post != null) pb = post(runB)
             pb.NewBr(headB)
+            if (perIter) {
+                var firstS = headS
+                if (funcCount != fnBefore) {
+                    firstS = forIterScope(initB, saved, headS, lets)
+                    runPh.Incs = [llvm.ir.NewIncoming(forIterScope(postB, saved, headPh, lets), postB)]
+                }
+                headPh.Incs = [llvm.ir.NewIncoming(firstS, initB), llvm.ir.NewIncoming(runPh, pb)]
+                initB.NewBr(headB)
+                postB.NewBr(runB)
+            }
             ssaFrames.pop()
             curScopeV = saved
             return exitB
         }
+    }
+    // A fresh header scope holding a copy of each let/const binding of old that
+    // lives in a scope (one held in an SSA value is never assigned).
+    function forIterScope(b, parent, old, names) {
+        var ns = callExt(b, "js_scope_new", [parent])
+        for (var i = 0; i < names.length; i++) {
+            if (ssaLookup(names[i]) == undefined) {
+                callExt(b, "js_tdecl", [ns, emitStr(b, names[i]), callExt(b, "js_scope_get", [old, emitStr(b, names[i])])])
+            }
+        }
+        return ns
     }
     // items = [] or [exprThunk]. retStmt (compile-core) emits a plain ret, or a control
     // signal when this return leaves a try body. Code behind it is unreachable but
@@ -1293,6 +1359,7 @@ KwDefault   = "default" KwEnd ;
         if (deepCount) {
             callExt(bm, "js_rt_deep", [emitNum(bm, 10000),
                 emitStr(bm, "js runtime error: Maximum call stack size exceeded\n"), emitNum(bm, 1)])
+            callExt(bm, "js_rt_ecma", [])
         }
         var sc = callExt(bm, "js_scope_new", [fm.Params[0]])
         bm.NewCall(f, [sc, fm.Params[1]])

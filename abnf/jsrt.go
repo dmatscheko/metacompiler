@@ -618,6 +618,13 @@ type jsrt struct {
 	// that have no BigInt literal at all.
 	hasBigInt bool
 
+	// ecma switches string order, Math.pow, StringToNumber, parseInt /
+	// parseFloat and ToPrimitive to ECMAScript's; js_rt_ecma sets it at the
+	// start of a MetaJS program, and every other language and the tag scripts
+	// keep their own rules. Twin of RT_ECMA in languages/lib/runtime.c, where
+	// the list is.
+	ecma bool
+
 	// pyTypes memoizes the synthetic class object type() hands out for a BUILTIN
 	// Python type, so `type(1) is type(2)` holds; pyFuncNames remembers the name a
 	// `def` bound a closure under, which is what f.__name__ answers. Both stay nil
@@ -1916,6 +1923,9 @@ func (rt *jsrt) toNumber(v interface{}) float64 {
 	case float64:
 		return t
 	case string:
+		if rt.ecma {
+			return jsStrToNum(t)
+		}
 		// ASCII white space only, as str_to_num's is_space: " 12" is NaN.
 		s := strings.Trim(t, " \t\n\v\f\r")
 		if s == "" {
@@ -1928,6 +1938,11 @@ func (rt *jsrt) toNumber(v interface{}) float64 {
 			return math.NaN()
 		}
 		return f
+	case *jsArray, *jsObject:
+		if rt.ecma { // ToPrimitive, then StringToNumber.
+			return jsStrToNum(rt.toString(t))
+		}
+		return math.NaN()
 	default:
 		return math.NaN()
 	}
@@ -2596,10 +2611,28 @@ func (rt *jsrt) looseEq(a, b interface{}) bool {
 	case aIsStr && bIsNum:
 		return rt.toNumber(as) == bn
 	case (aIsNum || aIsStr) != (bIsNum || bIsStr):
-		return false // Primitive against object: not needed by the subset.
+		// An array or object against a number or string compares its
+		// ToPrimitive in a MetaJS program (rt.ecma); elsewhere it is unequal.
+		if rt.ecma && (aIsNum || aIsStr) && isArrOrObj(b) {
+			return rt.looseEq(a, rt.toString(b))
+		}
+		if rt.ecma && (bIsNum || bIsStr) && isArrOrObj(a) {
+			return rt.looseEq(rt.toString(a), b)
+		}
+		return false
 	default:
 		return rt.strictEq(a, b)
 	}
+}
+
+// isArrOrObj says whether v is an array or a plain object, whose ToPrimitive
+// (ECMA-262 7.1.1) is its string. Twin of to_prim in languages/lib/runtime.c.
+func isArrOrObj(v interface{}) bool {
+	switch v.(type) {
+	case *jsArray, *jsObject:
+		return true
+	}
+	return false
 }
 
 func boolToNum(b bool) float64 {
@@ -2614,6 +2647,9 @@ func (rt *jsrt) jsCompare(a, b interface{}) int {
 	as, aIsStr := a.(string)
 	bs, bIsStr := b.(string)
 	if aIsStr && bIsStr {
+		if rt.ecma {
+			return jsvStrCmp(as, bs)
+		}
 		switch {
 		case as < bs:
 			return -1
@@ -2622,6 +2658,17 @@ func (rt *jsrt) jsCompare(a, b interface{}) int {
 		default:
 			return 0
 		}
+	}
+	if rt.ecma && (isArrOrObj(a) || isArrOrObj(b)) {
+		// Both sides through ToPrimitive first: two arrays or objects compare as
+		// strings.
+		if isArrOrObj(a) {
+			a = rt.toString(a)
+		}
+		if isArrOrObj(b) {
+			b = rt.toString(b)
+		}
+		return rt.jsCompare(a, b)
 	}
 	if rt.hasBigInt {
 		if x, y, both := bigPair(a, b); both {
@@ -3311,8 +3358,13 @@ func (rt *jsrt) importGoValue(v interface{}) interface{} {
 // " 1", "-0" and "" name properties. Twin of index_of_key in
 // languages/lib/runtime.c.
 func (rt *jsrt) arrIndexOf(key interface{}) int {
-	if s, isStr := key.(string); isStr {
-		return canonIndex(s)
+	switch k := key.(type) {
+	case string:
+		return canonIndex(k)
+	case bool, jsUndefT, jsNullT:
+		// They name the properties "true", "false", "undefined" and "null".
+		// Twin of index_of_key in languages/lib/runtime.c.
+		return -1
 	}
 	idx := rt.toNumber(key)
 	if idx != math.Trunc(idx) || idx < 0 || idx > math.MaxInt64/2 {
@@ -14049,14 +14101,14 @@ func (rt *jsrt) builtinMethod(m *boundMethod, args []interface{}) interface{} {
 				from = clampIndex(jsToInt(argN(1)), len(recv.elems))
 			}
 			for i := from; i < len(recv.elems); i++ {
-				if rt.strictEq(recv.elems[i], argAt(args, 0)) {
+				if recv.elems[i] != jsHole && rt.strictEq(recv.elems[i], argAt(args, 0)) {
 					return float64(i)
 				}
 			}
 			return float64(-1)
 		case "join":
 			sep := ","
-			if len(args) > 0 {
+			if argAt(args, 0) != jsUndef {
 				sep = argS(0)
 			}
 			parts := make([]string, len(recv.elems))
@@ -14111,7 +14163,14 @@ func (rt *jsrt) builtinMethod(m *boundMethod, args []interface{}) interface{} {
 			}
 			return float64(rt.strIndexOf(recv, argS(0)))
 		case "replace":
-			return strings.Replace(recv, argS(0), argS(1), 1)
+			pat := argS(0)
+			at := rt.strIndexOf(recv, pat)
+			if at < 0 {
+				return recv
+			}
+			end := at + rt.strLen(pat)
+			sub := rt.strSubstitute(recv, pat, argS(1), at, end)
+			return strConcat(strConcat(rt.strRange(recv, 0, at), sub), rt.strRange(recv, end, rt.strLen(recv)))
 		case "slice":
 			begin, end := sliceRange(rt.strLen(recv), args, rt)
 			return rt.strRange(recv, begin, end)
@@ -14119,22 +14178,103 @@ func (rt *jsrt) builtinMethod(m *boundMethod, args []interface{}) interface{} {
 			begin, end := substringRange(rt.strLen(recv), args, rt)
 			return rt.strRange(recv, begin, end)
 		case "split":
-			parts := strings.Split(recv, argS(0))
-			out := &jsArray{}
-			for _, p := range parts {
-				out.elems = append(out.elems, p)
-			}
-			return out
+			return rt.strSplit(recv, argAt(args, 0), argAt(args, 1))
 		case "toUpperCase":
 			return caseMapMode(recv, caseUpper|caseFull)
 		case "toLowerCase":
 			return caseMapMode(recv, caseFull|caseSigma)
 		case "trim":
-			return strings.TrimSpace(recv)
+			return strings.TrimFunc(recv, jsWhiteSpace)
 		}
 	}
 	rt.fail("unknown method %s on %s", m.name, rt.typeOf(m.recv))
 	return nil
+}
+
+// jsWhiteSpace is ECMAScript WhiteSpace + LineTerminator (ECMA-262 12.2, 12.3),
+// the set trim() strips and StringToNumber skips. Twin of js_ws in
+// languages/lib/runtime.c.
+func jsWhiteSpace(c rune) bool {
+	switch c {
+	case 9, 10, 11, 12, 13, 32, 0xA0, 0x1680, 0x2028, 0x2029, 0x202F, 0x205F, 0x3000, 0xFEFF:
+		return true
+	}
+	return c >= 0x2000 && c <= 0x200A
+}
+
+// strSubstitute is GetSubstitution (ECMA-262 22.1.3.19.1) for a STRING pattern,
+// which has no captures: $$ is $, $& the match, $` the text before it, $' the
+// text after it, and every other $ stays as written. The match is s[at:end] in
+// code units. Twin of str_substitute in languages/lib/runtime.c.
+func (rt *jsrt) strSubstitute(s, pat, rep string, at, end int) string {
+	if strings.IndexByte(rep, '$') < 0 {
+		return rep
+	}
+	out := ""
+	lit := 0
+	for i := 0; i+1 < len(rep); i++ {
+		if rep[i] != '$' {
+			continue
+		}
+		var piece string
+		switch rep[i+1] {
+		case '$':
+			piece = "$"
+		case '&':
+			piece = pat
+		case '`':
+			piece = rt.strRange(s, 0, at)
+		case '\'':
+			piece = rt.strRange(s, end, rt.strLen(s))
+		default:
+			continue
+		}
+		out = strConcat(strConcat(out, rep[lit:i]), piece)
+		i++
+		lit = i + 1
+	}
+	return strConcat(out, rep[lit:])
+}
+
+// strSplit is String.prototype.split (ECMA-262 22.1.3.23) with a string
+// separator: an undefined separator gives [s], the limit is ToUint32, an empty
+// separator splits into code units, and "" splits into [""]. Twin of mid 26 in
+// languages/lib/runtime.c's builtin_method.
+func (rt *jsrt) strSplit(s string, sepV, limV interface{}) *jsArray {
+	out := &jsArray{}
+	lim := uint32(math.MaxUint32)
+	if limV != jsUndef {
+		lim = uint32(rt.toInt32(limV))
+	}
+	if lim == 0 {
+		return out
+	}
+	if sepV == jsUndef {
+		out.elems = append(out.elems, s)
+		return out
+	}
+	sep := rt.toString(sepV)
+	n := rt.strLen(s)
+	m := rt.strLen(sep)
+	if m == 0 {
+		for i := 0; i < n && uint32(i) < lim; i++ {
+			out.elems = append(out.elems, rt.strRange(s, i, i+1))
+		}
+		return out
+	}
+	start := 0
+	for {
+		at := rt.strIndexFrom(s, sep, start)
+		if at < 0 {
+			out.elems = append(out.elems, rt.strRange(s, start, n))
+			return out
+		}
+		out.elems = append(out.elems, rt.strRange(s, start, at))
+		if uint32(len(out.elems)) == lim {
+			return out
+		}
+		start = at + m
+	}
 }
 
 func argAt(args []interface{}, i int) interface{} {
@@ -14422,9 +14562,39 @@ func (rt *jsrt) strLen(s string) int {
 	return len(e.units)
 }
 
+// strIndexFrom is strIndexOf from the code unit index from on.
+func (rt *jsrt) strIndexFrom(s, sub string, from int) int {
+	if from == 0 {
+		return rt.strIndexOf(s, sub)
+	}
+	p := rt.strIndexOf(rt.strRange(s, from, rt.strLen(s)), sub)
+	if p < 0 {
+		return p
+	}
+	return from + p
+}
+
 // strIndexOf is the JS indexOf: the byte match position converted to a
 // code unit index (a UTF-8 substring match always lies on a rune boundary).
+// A needle that may hold a lone surrogate (its WTF-8 form starts 0xED) is
+// searched unit by unit instead, since it can match half of a pair.
 func (rt *jsrt) strIndexOf(s, sub string) int {
+	if strings.IndexByte(sub, 0xED) >= 0 {
+		hay, needle := rt.strMeta(s), strUnits(sub)
+		if hay.shape == 1 {
+			return -1
+		}
+		for i := 0; i+len(needle) <= len(hay.units); i++ {
+			j := 0
+			for j < len(needle) && hay.units[i+j] == needle[j] {
+				j++
+			}
+			if j == len(needle) {
+				return i
+			}
+		}
+		return -1
+	}
 	p := strings.Index(s, sub)
 	if p <= 0 {
 		return p // -1 and 0 are the same in both worlds.
@@ -14721,6 +14891,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		// exception in its language; one that registers nothing keeps the abort.
 		// The twins are js_rt_missvar / js_rt_missmem in languages/lib/runtime.c.
 		"js_rt_missvar": func(a []uint64) uint64 { rt.missVar = u(a[0]); return 0 },
+		"js_rt_ecma":    func(a []uint64) uint64 { rt.ecma = true; return 0 },
 		"js_rt_genbusy": func(a []uint64) uint64 { rt.genBusy = u(a[0]); return 0 },
 		"js_rt_deep": func(a []uint64) uint64 {
 			rt.deepMax = int(jsToInt(rt.toNumber(u(a[0]))))
@@ -19937,8 +20108,17 @@ func standardJSBindings() map[string]interface{} {
 		}
 		return 1
 	})
+	// Number::exponentiate (ECMA-262 6.1.6.1.3) differs from C's pow in two
+	// places: a NaN exponent, and a base of +-1 with an infinite one. Only a
+	// MetaJS program and the tag scripts reach this object, so the rule holds
+	// unconditionally; host id 20 of languages/lib/runtime.c applies it under
+	// RT_ECMA, as layer 2 calls the same host function.
 	mathObj.set("pow", jsHostFunc("pow", func(rt *jsrt, this uint64, args []interface{}) interface{} {
-		return crPow(rt.toNumber(argAt(args, 0)), rt.toNumber(argAt(args, 1)))
+		x, y := rt.toNumber(argAt(args, 0)), rt.toNumber(argAt(args, 1))
+		if y != y || (math.IsInf(y, 0) && math.Abs(x) == 1) {
+			return math.NaN()
+		}
+		return crPow(x, y)
 	}))
 	mathObj.set("atan2", jsHostFunc("atan2", func(rt *jsrt, this uint64, args []interface{}) interface{} {
 		return math.Atan2(rt.toNumber(argAt(args, 0)), rt.toNumber(argAt(args, 1)))
@@ -20135,14 +20315,14 @@ func standardJSBindings() map[string]interface{} {
 			obj.props[rt.toString(argAt(args, 1))] = argAt(args, 2)
 			return jsUndef
 		}),
+		// ECMAScript's parseInt and parseFloat (19.2.5, 19.2.4): only a MetaJS
+		// program and the tag scripts reach these bindings. Host ids 4 and 5 of
+		// languages/lib/runtime.c answer the same under RT_ECMA.
 		"parseInt": jsHostFunc("parseInt", func(rt *jsrt, this uint64, args []interface{}) interface{} {
-			// A missing radix is NaN here; jsToInt turns it into 0, which
-			// jsParseInt treats as "auto" (10, or 16 for an 0x prefix). A raw
-			// int(NaN) is minInt64 on amd64.
-			return jsParseInt(rt.toString(argAt(args, 0)), jsToInt(rt.toNumber(argAt(args, 1))))
+			return jsParseIntJS(rt.toString(argAt(args, 0)), rt.toInt32(argAt(args, 1)))
 		}),
 		"parseFloat": jsHostFunc("parseFloat", func(rt *jsrt, this uint64, args []interface{}) interface{} {
-			return jsParseFloat(rt.toString(argAt(args, 0)))
+			return jsParseFloatJS(rt.toString(argAt(args, 0)))
 		}),
 		"exit": jsHostFunc("exit", func(rt *jsrt, this uint64, args []interface{}) interface{} {
 			os.Exit(int(int32(jsToInt(rt.toNumber(argAt(args, 0))))))
@@ -20162,41 +20342,6 @@ func standardJSBindings() map[string]interface{} {
 		// frozenBaseBindings inherits it, so tag scripts get it under -frozen too.
 		"anytype": jsAnytype,
 	}
-}
-
-// jsParseInt implements the JS parseInt() prefix parsing.
-func jsParseInt(s string, radix int) float64 {
-	s = strings.TrimSpace(s)
-	sign := 1.0
-	if strings.HasPrefix(s, "-") {
-		sign = -1
-		s = s[1:]
-	} else if strings.HasPrefix(s, "+") {
-		s = s[1:]
-	}
-	if radix == 0 {
-		radix = 10
-		if strings.HasPrefix(s, "0x") || strings.HasPrefix(s, "0X") {
-			radix = 16
-			s = s[2:]
-		}
-	} else if radix == 16 && (strings.HasPrefix(s, "0x") || strings.HasPrefix(s, "0X")) {
-		s = s[2:]
-	}
-	val := 0.0
-	digits := 0
-	for i := 0; i < len(s); i++ {
-		d := digitValue(s[i])
-		if d < 0 || d >= radix {
-			break
-		}
-		val = val*float64(radix) + float64(d)
-		digits++
-	}
-	if digits == 0 {
-		return math.NaN()
-	}
-	return sign * val
 }
 
 func digitValue(c byte) int {

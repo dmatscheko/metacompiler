@@ -1494,12 +1494,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // `0 - v` (see floNegate). float("-nan") is nan, so the sign is dropped there.
     // Twin of pyStrToF in abnf/jsrt.go and languages/lib/python-rt.metajs.
     function pyStrToF(s0) {
-        var s = pyDecAscii(s0)
-        var a = 0
-        var b = s.length
-        while (a < b && pyFloSpace(s.charCodeAt(a))) { a = a + 1 }
-        while (b > a && pyFloSpace(s.charCodeAt(b - 1))) { b = b - 1 }
-        var t = s.substring(a, b)
+        var t = pyNumTrim(pyDecAscii(s0))
         var i = 0
         var sign = 1
         if (t.length > 0 && (t.charAt(0) == "+" || t.charAt(0) == "-")) {
@@ -1556,6 +1551,15 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // The whitespace float() strips: str.isspace() less U+001C..U+001F, which
     // CPython tests with its ASCII-only Py_ISSPACE.
     function pyFloSpace(c) { return (c < 28 || c > 31) && pyCpSpace(c) }
+    // s less that whitespace at both ends, as int(), float() and complex() strip
+    // it. Twin of pyNumTrim in languages/lib/python-rt.metajs.
+    function pyNumTrim(s) {
+        var a = 0
+        var b = s.length
+        while (a < b && pyFloSpace(s.charCodeAt(a))) { a = a + 1 }
+        while (b > a && pyFloSpace(s.charCodeAt(b - 1))) { b = b - 1 }
+        return s.substring(a, b)
+    }
     // Calling a builtin type object is a CONVERSION - str(x), int(x), list(x) - which
     // pyCall routes here rather than instantiating a class.
     function pyConvert(name, args, named) {
@@ -1737,7 +1741,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return out
     }
     function pyParseInt(s, base) {
-        var t = pyDecAscii(s).trim()
+        var t = pyNumTrim(pyDecAscii(s))
         var neg = false
         if (t.length > 0 && (t.charAt(0) == "+" || t.charAt(0) == "-")) {
             neg = t.charAt(0) == "-"
@@ -10514,8 +10518,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // pair of parentheses, then a real, an imaginary (`2j`), or real then signed
     // imaginary (`1-2j`); an imaginary with no digits (`j`, `-j`, `1+j`) is 1.
     function pyCplxFromStr(s0) {
-        var s = s0.trim()
-        if (s.length > 1 && s.charAt(0) == "(" && s.charAt(s.length - 1) == ")") { s = s.substring(1, s.length - 1).trim() }
+        var s = pyNumTrim(s0)
+        if (s.length > 1 && s.charAt(0) == "(" && s.charAt(s.length - 1) == ")") { s = pyNumTrim(s.substring(1, s.length - 1)) }
         var e1 = pyFloPrefix(s, 0)
         var a = 0
         if (e1 > 0) {

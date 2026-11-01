@@ -763,47 +763,43 @@ func (r *Runtime) stringproto_split(call FunctionCall) Value {
 	}
 	s := call.This.toString()
 
-	limit := -1
+	// The separator is searched in code units, so an empty one splits a
+	// surrogate pair and a lone surrogate finds half of one.
+	limit := uint32(math.MaxUint32)
 	if limitValue != _undefined {
-		limit = int(toUint32(limitValue))
+		limit = toUint32(limitValue)
 	}
-
-	separatorValue = separatorValue.ToString()
-
 	if limit == 0 {
 		return r.newArrayValues(nil)
 	}
-
 	if separatorValue == _undefined {
 		return r.newArrayValues([]Value{s})
 	}
-
-	separator := separatorValue.String()
-
-	excess := false
-	str := s.String()
-	if limit > len(str) {
-		limit = len(str)
+	separator := separatorValue.toString()
+	n, m := s.length(), separator.length()
+	var valueArray []Value
+	if m == 0 {
+		for i := 0; i < n && uint32(i) < limit; i++ {
+			valueArray = append(valueArray, s.substring(i, i+1))
+		}
+		return r.newArrayValues(valueArray)
 	}
-	splitLimit := limit
-	if limit > 0 {
-		splitLimit = limit + 1
-		excess = true
+	start := 0
+	for {
+		at := -1
+		if start+m <= n {
+			at = s.index(separator, start)
+		}
+		if at < 0 {
+			valueArray = append(valueArray, s.substring(start, n))
+			return r.newArrayValues(valueArray)
+		}
+		valueArray = append(valueArray, s.substring(start, at))
+		if uint32(len(valueArray)) == limit {
+			return r.newArrayValues(valueArray)
+		}
+		start = at + m
 	}
-
-	// TODO handle invalid UTF-16
-	split := strings.SplitN(str, separator, splitLimit)
-
-	if excess && len(split) > limit {
-		split = split[:limit]
-	}
-
-	valueArray := make([]Value, len(split))
-	for index, value := range split {
-		valueArray[index] = newStringValue(value)
-	}
-
-	return r.newArrayValues(valueArray)
 }
 
 func (r *Runtime) stringproto_startsWith(call FunctionCall) Value {
@@ -881,8 +877,15 @@ func (r *Runtime) stringproto_trim(call FunctionCall) Value {
 	r.checkObjectCoercible(call.This)
 	s := call.This.toString()
 
-	// TODO handle invalid UTF-16
-	return newStringValue(strings.Trim(s.String(), parser.WhitespaceChars))
+	// By code unit, so a lone surrogate survives (s.String() would make it U+FFFD).
+	i, j := 0, s.length()
+	for i < j && strings.ContainsRune(parser.WhitespaceChars, s.charAt(i)) {
+		i++
+	}
+	for j > i && strings.ContainsRune(parser.WhitespaceChars, s.charAt(j-1)) {
+		j--
+	}
+	return s.substring(i, j)
 }
 
 func (r *Runtime) stringproto_trimEnd(call FunctionCall) Value {

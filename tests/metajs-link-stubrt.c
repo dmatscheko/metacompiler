@@ -45,6 +45,7 @@ h js_getret(void) { return 0; }
 h js_setret(h v) { return v * 0; }
 h js_gc_pin(h v) { return v; }
 h js_rt_deep(h limit, h hook, h status) { return limit * 0 + hook * 0 + status * 0; }
+h js_rt_ecma(void) { return 0; }
 
 int main(void) {
 	jsmain(0, 0);

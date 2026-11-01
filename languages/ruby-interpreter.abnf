@@ -9357,7 +9357,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (name == "capitalize") { return target.length == 0 ? target : unicodeCase(target.charAt(0), 10) + unicodeCase(target.slice(1), 2) }
             if (name == "reverse") { return rbsReverse(target) }
             if (name == "strip") { return strStrip(target) }
-            if (name == "chars") { return target.split("") }
+            if (name == "chars") { return rbsChars(target) }
             // String#[] / #slice: one index, a Range, or start+len.
             if (name == "[]" || name == "slice") {
                 if (args.length > 1) { return rsubseq(target, args[0], args[1]) }
@@ -9376,7 +9376,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (name == "replace") { return rstr(args[0]) }
             // One CHARACTER at a time, a surrogate pair whole, as chars splits.
             if (name == "each_char") {
-                var ecs = target.split("")
+                var ecs = rbsChars(target)
                 if (blk == null) { return enumAt(mkEnum(ecs), target, name, args) }
                 for (var sc = 0; sc < ecs.length; sc++) { blockCall(blk, [mkRStr(ecs[sc])]) }
                 return target

@@ -655,8 +655,8 @@ function pyCplxArgCheck(v, what) {
 // imaginary (1-2j); an imaginary with no digits (j, -j, 1+j) is 1.
 // Go: rt.pyCplxFromStr.
 function pyCplxFromStr(s0) {
-    var s = s0.trim()
-    if (s.length > 1 && s.charAt(0) == "(" && s.charAt(s.length - 1) == ")") { s = s.substring(1, s.length - 1).trim() }
+    var s = pyNumTrim(s0)
+    if (s.length > 1 && s.charAt(0) == "(" && s.charAt(s.length - 1) == ")") { s = pyNumTrim(s.substring(1, s.length - 1)) }
     var e1 = pyFloPrefix(s, 0)
     var a = 0
     if (e1 > 0) {
@@ -5281,7 +5281,7 @@ function pyDecAscii(s) {
     return out
 }
 function pyParseInt(s, base) {
-    var t = pyDecAscii(s).trim()
+    var t = pyNumTrim(pyDecAscii(s))
     var neg = false
     if (t.length > 0 && (t.charAt(0) == "+" || t.charAt(0) == "-")) {
         neg = t.charAt(0) == "-"
@@ -5723,12 +5723,7 @@ function pyFToInt(f) {
 // float(str): CPython's float_from_string. Twin of pyStrToF in
 // languages/python-interpreter.abnf, where the reasoning is.
 function pyStrToF(s0) {
-    var s = pyDecAscii(s0)
-    var a = 0
-    var b = s.length
-    while (a < b && pyFloSpace(s.charCodeAt(a))) { a = a + 1 }
-    while (b > a && pyFloSpace(s.charCodeAt(b - 1))) { b = b - 1 }
-    var t = s.substring(a, b)
+    var t = pyNumTrim(pyDecAscii(s0))
     var i = 0
     var sign = 1
     if (t.length > 0 && (t.charAt(0) == "+" || t.charAt(0) == "-")) {
@@ -5785,6 +5780,14 @@ function pyIsDec(c) { return c >= "0" && c <= "9" }
 // The whitespace float() strips: str.isspace() less U+001C..U+001F, which
 // CPython tests with its ASCII-only Py_ISSPACE.
 function pyFloSpace(c) { return (c < 28 || c > 31) && pyCpSpace(c) }
+// s less that whitespace at both ends, as int(), float() and complex() strip it.
+function pyNumTrim(s) {
+    var a = 0
+    var b = s.length
+    while (a < b && pyFloSpace(s.charCodeAt(a))) { a = a + 1 }
+    while (b > a && pyFloSpace(s.charCodeAt(b - 1))) { b = b - 1 }
+    return s.substring(a, b)
+}
 
 // Go: js_pyfloat. A STRING goes through pyStrToF, not toNumber.
 function js_pyfloat(v0) {
