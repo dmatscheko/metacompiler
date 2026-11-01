@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1034** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1036** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -136,12 +136,14 @@ Follow-up of T-1000 (only correct-but-high counts remain, so `&` may survive a c
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-1017 bash: `read` without -r keeps backslashes; empty subscript `b[]` accepted; `declare NAME[SUB]` without a value refused; computed operand with an attribute option · P3 · SH · IN PROGRESS (SH worker, round 26) [V]
-Found by the SH worker, round 25 (oracle bash 5.3). `read v <<< 'z\y'; echo "[$v]"` → bash `[zy]`, ours `[z\y]` (all engines).
-`b=(1 2); b[]=x` → "b[]: bad array subscript", line abandoned; `local b[]=y` same, status 1; `printf -v 'b[]'` → "printf: `b[]': not a
-valid identifier" status 2; ours store into [0] or a scalar named "b[]". `declare c[1]` → bash status 0, `declare -p c` prints
-`declare -a c`; ours "not a valid identifier". Compiler: `declare -a "$n"`, `declare -i "$s"`, `readonly "$s"` (-A/-n/-l/-u) are
-refused at compile time - attributes are tracked lexically per name (manual 7.9); needs a run-time attribute table (-a alone is cheap).
+### T-1034 bash: subscript/attribute edge cases left by T-1017; read -n/-N; computed declare -A · P3 · SH · OPEN [V]
+Oracle /opt/homebrew/bin/bash 5.3, LC_ALL=C (found by SH r26, repros in scratchpad SH26/):
+- `s=5 f` with `local s+=4` in f: bash `declare -x s="54"`; ours `declare -- s="54"` (export attribute lost).
+- `read -n N` / `read -N N` ignored.
+- `unset 'b[]'`: bash status 0, no-op; ours unsets [0]. `${b[]}` → bad substitution. `b+=([]=v)` → "[]=v: bad array subscript". `declare -A m2=([]=v)` → "['']='v': bad array subscript". `let 'b[]=3'`, `(( b[]=3 ))`, `$(( b[] ))` diagnostics differ.
+- `local m[@]=z` with a global assoc m: bash makes the local indexed + bad subscript. Assoc `printf -v 'm[@]'` / `read 'm[@]'` allowed by bash; interpreter refuses, compiler refuses computed names (rt_setvar_byname).
+- `declare -n r='b[]'` → status 1. `declare +a pa[1]` → "cannot destroy array variables in this way", status 1.
+- Compiler: `declare -A "$s"` / `export -a "$s"` refused at compile time (needs a runtime attribute table); `declare -a "$n=(1 2)"` refused at run time.
 
 # C — C subset
 
@@ -152,6 +154,9 @@ A reviewer argued the VM prints `RangeError (index): Invalid value: Not in inclu
 range 0..2: 7` (a plain RangeError); the current engines print the IndexError form
 `RangeError (index): Index out of range: index should be less than 3: 7`, which is
 believed to be the modern VM's. Leave as is unless a real dart run settles it.
+
+### T-1035 C compiler silently merges two definitions of one function name into a corrupt module · P3 · CORE · OPEN [V]
+Defining the same C function twice (seen with a second `rt_isref` in languages/lib/bash-rt.c during SH r26) produces an LLVM module with "%entry already present" instead of a redefinition error. cc rejects it ("redefinition of 'rt_isref'"). The C front end should diagnose a duplicate function definition.
 
 # Closed
 
@@ -1076,6 +1081,7 @@ T-1023 go: a struct value's method set includes pointer methods in type switches
 T-1015 js: invalid regex errors are late and uncatchable; Go twin turns lone surrogates in regex text into U+FFFD; `sc=Zyyy` on Unicode 17 scripts — DONE (JS r39, b35b47a1): catchable SyntaxError for bad RegExp patterns/flags with node's texts; regex literals early-error in JS+TS; Annex B escapes; duplicate group names; String.fromCodePoint lone surrogate (Go twin); \p{} at Unicode 17 via a JS-only correction table. Master probe vs node 24 (20 patterns + \p + surrogate): 4 legs agree; full matrix 601/601 and js+python ratchets green after rebase.
 T-1024 kotlin: range type identity and function-spelled range builders — DONE (KT r16, c63345a8): range type identity (ClosedRange/OpenEndRange/IntRange/LongRange), range class names, OpenEnd{Double,Float}Range for ..< on floats, .rangeTo/.rangeUntil call spellings. Master probe vs kotlinc 2.2.21 (22 lines): 4 legs agree.
 T-1030 ruby: Proc#=== as an operator returns a boolean; Struct is not Enumerable — DONE (RB r39, 3c0648fe): === returns the call's value for Proc/Method/user #=== (case/when/rescue still truthy); builtin classes include Enumerable/Comparable in is_a?/ancestors/include?/<. Master probe vs ruby 2.6 (=== on Range/Class/Regexp/Proc/user, case/when incl. lambdas and user ===, rescue lists): 4 legs agree.
+T-1017 bash: `read` without -r keeps backslashes; empty subscript `b[]` accepted; `declare NAME[SUB]` without a value refused; computed operand with an attribute option — DONE (SH r26, c361c4ac): read without -r backslash rules + name validation; b[] bad subscript; declare/local NAME[SUB] declares an array; compiler declare -a with computed operand (-A/export -a computed still refused: runtime attribute table). Master probe vs bash 5.3: 4 legs agree.
 
 # Settled — do not re-open
 
