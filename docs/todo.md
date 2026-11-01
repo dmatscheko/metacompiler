@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1050** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1052** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -123,9 +123,11 @@ real coroutines out of the subset - decide first). Go also runs the most recentl
 
 # PHP — PHP  (no php here: spec-only, php.net / php-src behaviour)
 
-### T-1036 php: array refcount/COW for reference holders; generator eager-run and yield-in-catch bugs · P3 · PHP · IN PROGRESS (PHP worker, round 37) [V spec-only]
-Remainder of T-1025 (needs real array refcounting or COW; counts stay correct-but-high): arrays holding reference cells that die (overwritten, frame-local, temp copies) never release them; unfinished generators never release; interpreter copies by-value array params while the compiler shares them; print_r recursion depth; PHP 8 "count(): Recursion detected" warning.
-Also found by PHP r36: (1) compiler: `function g2(){ try { thrower(); } catch (Exception $e) { yield 5; } }` iterated with foreach → "yield outside of a generator" under llvm.Run and native; interpreter gives 5 (correct). (2) interpreter runs a generator to completion on `->current()`, so its frame's holders are released while PHP's generator is suspended: `$gen = g(); $gen->current(); $w = $z; $w[0] = 11; echo $z[0];` → interpreter 1, compiler and PHP 11. (3) compiler `inc($$n)` to a by-ref param probably passes by value (inferred). (4) interpreter coreDepth not restored after a generator stop-throw.
+### T-1050 php: Generator::throw(); `yield from` value and send forwarding · P3 · PHP · OPEN [V spec-only]
+PHP manual: `function thr() { try { yield 1; } catch (Exception $e) { echo "[caught ", $e->getMessage(), "]"; yield 99; } } $t = thr(); $t->current(); echo $t->throw(new Exception("boom"));` → "[caught boom]99"; ours (all engines): "Call to undefined method Generator::throw()". `function inner(){ yield 1; yield 2; return 3; } function outer(){ $r = yield from inner(); yield $r; }` → foreach prints 123; ours 12 (yield from evaluates to null; send() not forwarded to the delegate). Both currently documented as "Deviation" in the grammars — remove those notes when fixed.
+
+### T-1051 php: array refcount/COW remainder; print_r recursion depth; stale comments · P4 · PHP · OPEN [V spec-only]
+Remainder of T-1036 (counts stay correct-but-high): arrays holding reference cells that die by overwrite / frame-local / temporary never release (needs per-array refcount or COW); unfinished generators never release; frames unwound by an exception keep parameter-copy holders (js_phown not joined to phpFrames unwinding); property-hook set parameters not covered by the compiler's param-copy release. print_r: `$y=[1]; $y[]=&$y; print_r($y)` prints one level deeper than PHP 8 (*RECURSION* at [1]) because the stdlib print_r's by-value param loses identity. Housekeeping: tests/php-test-full.php header still lists "references returned from functions" as out of scope (section 83 tests them); the phpRefHolders comment in abnf/jsrtphp.go says unwinding does not release (stale).
 
 # LUA — Lua  (oracle: lua 5.5 binary, suite is 5.4)
 
@@ -1095,6 +1097,7 @@ T-1031 js: regex `v` flag class-set syntax and strictness; lookbehind; `(?i:...)
 T-1042 kotlin: exact ULong ranges past 2^53; `expr.member::class`; IntRange.EMPTY — DONE (KT r19, 57416b54): exact unsigned ULong ranges (iteration/in/step/count/for-last), ::class on member-access receivers, range companions EMPTY. Master probe vs kotlinc 2.2.21 (16 lines incl. ULong.MAX ranges): 4 legs agree.
 T-1043 ruby: all?/any?/none?/one? don't short-circuit; `[[1], nil].sum([])` escapes rescue — DONE (RB r42, d4af700b): all?/any?/none?/one? short-circuit (Array/Range/Hash); Array#+ - & | take Array/to_ary (incl. singleton) else catchable TypeError — fixes [[1], nil].sum([]). Master probe vs ruby 2.6 (sent back once for singleton to_ary in the interpreter): 4 legs agree.
 T-1045 csharp: null message in two-arg Argument* ctors; 3-argument exception ctors — DONE (CS r6, eddf9698): null message in 2-arg Argument* ctors falls back to the type default (.NET 9/10 source: message ?? SR.*; ticket text described .NET 8); 3-arg ArgumentException(message, paramName, inner) and ArgumentOutOfRangeException(paramName, actualValue, message) incl. ActualValue suffix. Master spec probe: 3 legs agree.
+T-1036 php: array refcount/COW for reference holders; generator eager-run and yield-in-catch bugs — PARTIAL→split (PHP r37, 168608a4): interpreter generators suspend (coroutines) with spec Generator methods; yield in try/catch/finally makes a generator; compiler by-ref $$n; by-value array param copies release holders; nested ref literals one temporary; count() recursion warning. Master spec probe: generator protocol (send/current/getReturn/rewind/finally/lazy start) 3 legs agree. Remainder filed.
 
 # Settled — do not re-open
 
