@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1064** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1065** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -69,11 +69,13 @@ Remainder of T-1028; each needs a table-size decision before work starts. CJK fa
 
 # RB — Ruby
 
-### T-1052 ruby: Array </>/<=/>= should be NoMethodError; blockless/lazy Enumerators over a user #each run eagerly · P3 · RB · IN PROGRESS (RB worker, round 44) [V]
-ruby 2.6 (found by RB r43), all three engines:
-- `[1] < 2` (also >, <=, >=; likely nil/true on the left) → NoMethodError "undefined method `<' for [1]:Array" (Array is not Comparable); ours ArgumentError "comparison of Array with 2 failed" (binOps["<"] → rcmp path and compiled twins).
-- user Enumerable (each logs before yield): `C.new(log).find` with no block → Enumerator, log []; ours runs #each eagerly: [1, 2, 3, :end].
-- `C.new(log).lazy.map { |x| x * 3 }.first(1)` → log [1]; ours [1, 2, 3, :end] (needs a suspendable #each — possibly via the coroutine host the PHP interpreter now uses for generators).
+### T-1064 ruby: external Enumerator iteration over a user #each; Enumerator in for-in/splat · P3 · RB · OPEN [V]
+Oracle /usr/bin/ruby 2.6 (LC_ALL=en_US.UTF-8). All engines:
+- `e = C.new(log).each` (user #each that logs): `e.next` must run #each only up to the first yield (log [1]), a second `next` up to the second ([1, 2]); `peek` does not advance; `rewind` restarts. Ours runs #each to the end on the first next. `lazy.map{..}.next` replays #each from the start each call. Needs a suspendable #each: interpreter on coNew/coYield/coResume (cf. php-interpreter.abnf generator), compiled on the js_genfn floor; rubyCatchTags (Go twin) and js_rcatch/js_rthrow (layer 2) must become per-coroutine; never-finished enumerators must be released by the floor's close protocol.
+- `for x in [1,2,3].each_slice(2); p x; end` fails (interp "for-in needs an array or a hash", compiled TypeError / "indexing a object"); MRI iterates [1, 2], [3].
+- `p [*[1, 2].each_with_index]` -> MRI [[1, 0], [2, 1]]; ours keeps the Enumerator.
+- `yield 1, 2` into `lazy.map { |x| x }.first(1)` -> MRI [1], ours [[1, 2]].
+- Comparable included without <=>: `X.new < 1` -> MRI ArgumentError "comparison of X with 1 failed", ours NoMethodError.
 
 # JS — JavaScript and TypeScript
 
@@ -1129,6 +1131,7 @@ T-1058 csharp: generated exception message and ToString drop the namespace — D
 T-1059 csharp: virtual auto-property overridden by an accessor property is not dispatched — DONE (CS r9, 74cca8ca): auto-property overridden by accessors stores under a hidden backing slot; getter/setter-only overrides dispatch, base.K reads backing; object initializers now go through set accessors; probed vs spec
 T-1056 kotlin: member call vs receiver-lambda param name clash; companion/enum-entry classes; primitive class rendering — PARTIAL→split (KT r21, 5fc41400): companion/enum-entry class identity (C$Companion, E$B, declaringJavaClass), primitive .java/.javaObjectType, member calls on objects/companions in compiled legs; 4 legs = kotlinc 2.2.21. println(Int::class) kept declined (kotlin-reflect suffix); sequence per-operation classes declined; remainder filed
 T-1060 php: Generator::throw() on a running generator — DONE (PHP r40, tests only): premise outdated - since php-src 6fa8a25a (GH-19326, PHP 8.3.25) throw() into a running generator raises only 'Cannot resume an already running generator' with no previous and discards the user exception; all engines already did this; pinned grun3-5 + oac3
+T-1052 ruby: Array </>/<=/>= should be NoMethodError; blockless/lazy Enumerators over a user #each run eagerly — PARTIAL→split (RB r44, 6febb1a8): < > <= >= dispatch as methods (NoMethodError on Array/nil/Range/..., user #<, Comparable required, Hash subset, Module ordering); blockless Enumerator over user #each deferred, Lazy over user #each stops early (first/take); 3 legs = ruby 2.6 modulo known did_you_mean/address simplifications; external next/peek remainder filed
 
 # Settled — do not re-open
 
