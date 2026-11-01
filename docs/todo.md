@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1088** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1089** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -150,15 +150,14 @@ Spec-only (php-src stubs + zend_parse_parameters). All engines:
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-1084 bash: subscript leftovers (${a[@]:'1'}, [[ -v a[@] ]], quoted computed declare); option after operand · P3 · SH · IN PROGRESS (SH worker, round 32) [V]
+### T-1088 bash: computed option words / nameref -A in compiled declare; local -p; residual stderr tokens · P3 · SH · OPEN [V]
 Oracle /opt/homebrew/bin/bash 5.3:
-- `${ia[@]:'1'}` -> arithmetic syntax error; ours "bad substitution" (ArOff rejects quotes).
-- `[[ -v "ia[@]" ]]`: compiled answers 1, bash 0 (true iff the array has any element); interpreter right only by accident (treats @ as index 0 - wrong for an array without element 0).
-- computed declare operand with a quoted subscript (`declare 'ia[\1]=w'`, `declare 'ia[$'0']=w'`) stores instead of erroring (bashDeclText re-spells the operand as code).
-- `declare w=7 -A e=([z]=3)`: bash still applies -A after an operand (w=7, then the conversion/assignment); ours "`-A': not a valid identifier".
-- stderr-only token wording: `$(( ia[$'1'] ))` token `'1'` vs bash `$'1'`; single-quoted part holding `$` gives `'$x'` vs bash `'1'`; `${ia["'1'"]}` bash token `\'1\'`; `${m[[]-none}` wording.
-- nullglob/failglob need a pathname-expansion model (no filesystem model in any engine) - decide scope before starting.
-POLICY (needs user decision, do not start without it): engines model a UTF-8 locale; under LC_ALL=C non-ASCII keys in declare -p are $'..'-quoted by bash; 43 ratchet checks assert UTF-8 behaviour.
+- compiled: a computed option word (`o=-A; declare $o x`) is a compile error; `declare -A` through a nameref unsupported.
+- `declare -- -A e=(..)`: the late-option marking must not apply after `--` (bash: `-A` is then an operand -> not a valid identifier, and e is indexed).
+- `local -p` unsupported in both engines.
+- `"${s:$'1'}"` inside double quotes: bash yields the value from offset 1 ($'..' is literal text `$'1'`? verify) - ours errors; unquoted already matches.
+- stderr-only wording: `${ia['$x']}`/`ia['$x']=q`/`${ia['$(echo 1)']}` bash token `'1'` (expands $ inside the single quotes as if double-quoted), ours `'$x'` (compiler idxQuoted needs a lazily compiled double-quoted sub-word); `$(( ia['$x'] ))` bash token `$x`, ours `'1'`; `"${m[[]-none}"` bash "bad substitution: no closing `}' in ...".
+Out of scope unless decided: nullglob/failglob (needs a pathname-expansion model); LC_ALL=C locale POLICY item (user decision).
 
 # C — C subset
 
@@ -1148,6 +1147,7 @@ T-1079 bash: quoted indexed subscripts on reads; literal kind conversion; small 
 T-1081 kotlin: static typer gaps for reified inference; List/Nothing class names — DONE (KT r26, bb472757): static typer types an extension's this, map/mapIndexed results, first/last/single, conversions and String transforms (reified inference no longer falls back to Any); collection-interface KClasses (kotlin.collections.*), interface rendering of java classes, Nothing as java.lang.Void/void; 4 legs = kotlinc
 T-1082 ruby: eager endless Enumerators answer a Lazy; to_enum on user Enumerable; Enumerator dup/clone — DONE (RB r48, ebd5ce0b): ops on eager endless Enumerators run eagerly (cycle.take_while -> [1]), Object#to_enum/enum_for (incl. receiver-less 'return to_enum unless block_given?'), Enumerator dup/clone with frozen flag and the execution-context TypeError; 4 legs = ruby 2.6
 T-1083 php: builtin argument TypeErrors; dynamic undefined-call line; opcode-compiled builtins in traces — DONE (PHP r45, eff70048): coercive argument TypeErrors for native builtins (strlen, substr, strpos, intdiv, array_key_exists offset rule, array_* ...) with stub parameter names; call-site line stored before dynamic-call/callback raises; call_user_func(_array)/strval/intval/... lowered frameless per zend_try_compile_special_func; multi-line foreach uses the expression's last leaf line; (int)/(float) of arrays fixed; 3 legs agree with php-src. Stdlib (PHP-written) builtin arg-type audit filed
+T-1084 bash: subscript leftovers (${a[@]:'1'}, [[ -v a[@] ]], quoted computed declare); option after operand — DONE (SH r32, 76ec1067): ${v:off:len} offsets fall back to run-time arithmetic (quoted offsets error like bash), [[ -v NAME[@] ]] / [*] semantics incl. assoc and nameref, quoted subscripts in computed declare operands, late option words in declare mark later literals; 4 legs = bash 5.3 incl. stderr and exit status. Stderr-only token wordings + pre-existing declare gaps filed; nullglob/locale out of scope
 
 # Settled — do not re-open
 
