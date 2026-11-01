@@ -154,7 +154,7 @@ is lost when the argument is copied); php's "count(): Recursion detected" and pr
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-990 bash: bad array subscripts, `for i in; do`, compiled nameref/subshell-function edge cases · P3 · SH · OPEN [V]
+### T-990 bash: bad array subscripts, `for i in; do`, compiled nameref/subshell-function edge cases · P3 · SH · IN PROGRESS (SH worker, round 23) [V]
 Found by the SH worker, round 22 (oracle bash 5.3). `a[-9]=W` → bash "a[-9]: bad array subscript" and abandons the line; ours "a:
 bad array subscript". `a[@]=W` → bash "a[@]: bad array subscript" status 1; ours status 0 (also through a nameref). `for i in; do`
 (empty list) does not parse in either engine. Compiler only: `@A`/`@a` through a computed nameref chain use the reference's own
