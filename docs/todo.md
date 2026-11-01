@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1012** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1013** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -169,23 +169,10 @@ is lost when the argument is copied); php's "count(): Recursion detected" and pr
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-1006 bash interpreter: a stderr fragment without a trailing newline gets one added at exit · P3 · SH · IN PROGRESS (SH worker, round 24) [V]
-Found by the CORE worker, round 16. `printf 'frag' >&2` at the end of a script → bash writes `frag` with no newline; the interpreter
-buffers it (errBuf) and emits it with eprintln at exit, adding '\n'. The eprint host builtin now exists - write the fragment through.
-No assertion can see a trailing newline today; add a byte-exact stderr check.
-
-### T-1009 bash: eval does not catch an abandoned line; bad subscripts outside plain assignment; subscripted prefix assignments · P3 · SH · IN PROGRESS (SH worker, round 24) [V]
-Found by the SH worker, round 23 (oracle bash 5.3). `eval 'x=$((1/0)); echo in'; echo "after $?"` → bash `after 1`; ours drops the
-rest of the line (same for a readonly store in eval). `a+=([-9]=Q)` → bash `[-9]=Q: bad array subscript`, stops the literal, status 1;
-ours `a: ...` and assigns the rest; `d=([@]=R)` → "cannot assign to non-numeric index". `declare a[-9]=Q`, `read 'a[-9]'`, `printf -v
-'a[-9]'` → status 1 and continue; `unset 'a[-9]'` → `unset: [-9]: bad array subscript` status 1. `x=1 a[2]=W y=2` → bash assigns all
-three, ours runs `a[2]=W` as a command; `a[1]=Q echo hi` does not parse. `for i in a b; { ..; }` and `f() for ..` bodies do not parse.
-A function defined inside `$( )` reports line 3 where bash says 5.
-
-### T-1010 bash compiled: read/printf -v into element or computed names; attributes through a computed nameref · P3 · SH · IN PROGRESS (SH worker, round 24) [V]
-Found by the SH worker, round 23 (oracle bash 5.3). Compiler only: `read 'a[1]' <<< hi` and `printf -v 'a[2]' %s P` leave the array
-unchanged (bash `x hi P`); `printf -v "$n" %s v` prints `v` to stdout. With `declare -i n=1` and a computed nameref r→n, `r+=5` gives
-15 (bash 6) and `r=2+3` stores the text. `declare -n e='a[1-10]'; e+=V` prints the bad-subscript message twice (bash once).
+### T-1012 bash compiled: computed `read "$n"` and computed declare operands are compile-time limitations · P3 · SH · OPEN [V]
+Found by the SH worker, round 24 (oracle bash 5.3). `n=v; read "$n" <<< x` and `declare -a 'b[-8]=R'` / `declare "$spec"` work in
+the interpreter but the compiler refuses them at compile time. Also untested: `declare -f` printing of the new body forms
+(`for ..; { ..; }`, `f() for ..`, `f() if ..`) against bash's deparse.
 
 # C — C subset
 
@@ -1106,6 +1093,9 @@ T-967 metajs goja leg: `[o] + ""` calls an element's own toString; other UTF-16 
 T-997 ruby: adding a key during hash iteration must raise at the insertion (MRI iter_lev model) — DONE - MRI iter_lev model in all three engines, new key raises at the store; Module#constants order DECLINED (MRI symbol-table order, unspecified)
 T-990 bash: bad array subscripts, `for i in; do`, compiled nameref/subshell-function edge cases — DONE - bad subscripts quoted as written and abandon the line, computed nameref attributes/self-ref, nested function defs in subshells, run-time slots for unmentioned names; empty for-in list already worked
 T-1008 ruby: compiled `for k, v in hash` raises KeyError; `default_proc=`; missing Hash methods — PARTIAL - for over a live Hash (iterator protocol, ensure), default/default_proc=, store/transform_*!/fetch_values/shift/replace/rehash/find_all/cycle/chunk_while/lazy, zip with block; compare_by_identity filed
+T-1006 bash interpreter: a stderr fragment without a trailing newline gets one added at exit — DONE - interpreter writes fd 2 unbuffered through eprint; native-full checks interpreter stderr bytes
+T-1009 bash: eval does not catch an abandoned line; bad subscripts outside plain assignment; subscripted prefix assignments — DONE - eval/trap catch abandoned lines (subshells end status 1), bad subscripts in literals/declare/read/printf -v/unset, subscripted prefix assignments, brace and bare-compound bodies, LINENO in $( ) functions
+T-1010 bash compiled: read/printf -v into element or computed names; attributes through a computed nameref — DONE - compiled read/printf -v into element and computed names, nameref target attributes picked at run time, single diagnostic
 
 # Settled — do not re-open
 
