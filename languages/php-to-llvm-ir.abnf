@@ -6934,6 +6934,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         if (name == "__mec_oid") { return "js_phoidof" }
         if (name == "__mec_refid") { return "js_phrefid" }
         if (name == "__mec_bindwhy") { return "js_phbindwhy" }
+        if (name == "__mec_countrecs") { return "js_phcountrecs" }
         if (name == "__mec_pregc") { return "js_phpregc" }
         if (name == "__mec_pregx") { return "js_phpregx" }
         if (name == "array_key_exists") { return "js_phkeyexists" }
@@ -6945,7 +6946,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         if (ext == "js_phsubstr" || ext == "js_phstrpos" || ext == "js_phstrrpos" || ext == "js_phfmtfloat" ||
             ext == "js_phmath" || ext == "js_phpregx") { return 3 }
         if (ext == "js_phkeyexists" || ext == "js_phstrcmp" || ext == "js_phaptr" || ext == "js_phrefid") { return 2 }
-        if (ext == "js_phbindwhy") { return 0 }
+        if (ext == "js_phbindwhy" || ext == "js_phcountrecs") { return 0 }
         return 1
     }
     // The is_* family, mapped onto the ONE js_phis extern.
@@ -7442,6 +7443,9 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         // given a named or spread argument, which the native, taking positions
         // only, cannot place. Twin of nativeRefuses in php-interpreter.abnf.
         var lowered = hasBuiltin(name)
+        // With display_errors=1 count() with a mode warns of each recursion it met
+        // (__mec_countchk). Twin of makeCall in php-interpreter.abnf.
+        var countSite = name == "count" && args.length > 1 ? diagSite("__mec_countchk", start) : null
         if (lowered && !hasFcc(args) && !hasPlace(args)) {
             if (phpLib == null) { phpLib = phpLibIndex(load("lib/php-stdlib.php")) }
             var libKey = phpLibKey(phpLib, name)
@@ -7469,6 +7473,10 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             if (hasPlace(args)) {
                 var pfV = anyCase ? fk.v : callExt(b, "js_scope_get", [curScopeV, emitStr(b, name)])
                 return emitPartialFor(b, pfV, name, "call", "\x00pfafn", args, sigOf(name))
+            }
+            if (lowered && countSite != null) {
+                var rcn = emitBuiltin(b, name, args)
+                return {b: countSite(rcn.b, []), v: rcn.v}
             }
             if (lowered) { return emitBuiltin(b, name, args) }
             var fV = anyCase ? fk.v : callExt(b, "js_scope_get", [curScopeV, emitStr(b, name)])

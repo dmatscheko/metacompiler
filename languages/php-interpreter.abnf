@@ -6709,6 +6709,9 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         var resolveCb = name == "call_user_func" || name == "call_user_func_array"
         var libCb = hasOwn(libCbArg, "$" + phsCase(name, false))
         var site = callSite(start)
+        // With display_errors=1 count() with a mode warns of each recursion it met
+        // (__mec_countchk). Twin of makeCall in php-to-llvm-ir.abnf.
+        var countSite = name == "count" && args.length > 1 ? diagSite("__mec_countchk", start) : null
         var kept = !hasOwn(phpBuiltins, name) && argsKept(args)
         var fk = fnKey(phsCase(fnName(name), false))
         return function() {
@@ -6750,6 +6753,12 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                 }
                 var df = anyCase ? fnGet(name) : getVar(name)
                 return fnFresh(df, df)
+            }
+            if (countSite != null) {
+                var cn = anytype
+                cn = callNamed(name, argset)
+                countSite([])
+                return cn
             }
             return anyCase ? callDyn(name, argset) : callNamed(name, argset)
         }
@@ -7692,6 +7701,8 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             bindWhy = ""
             return why
         },
+        // Twin of js_phcountrecs in lib/php-rt.metajs and abnf/jsrtphp.go.
+        "__mec_countrecs": function() { return countRecs },
         "__mec_callable": function(cb, where) { return phpCheckCallback(cb, phpStr(where), true, false) },
         "is_callable": function(v) { return phpIsCallable(v) },
         "__mec_ifaces": function(v) { return phpIfaceNames(v) },
@@ -8444,6 +8455,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         if (m != 0 && m != 1) {
             phpRaise("ValueError", "count(): Argument #2 ($mode) must be either COUNT_NORMAL or COUNT_RECURSIVE")
         }
+        countRecs = 0
         if (isArr(v) && m == 1) { return countRec(v, []) }
         if (isArr(v)) { return v.keys.length }
         if (isObj(v) && phpIsA(v, "Countable")) { return mcall(v, "count", argsOf([])) }
@@ -8451,10 +8463,17 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     }
     // An array reached again, through a reference, while it is being counted adds
     // nothing (php_count_recursive's "Recursion detected"); inside holds the arrays
-    // being counted. Twin of phpCountRec in abnf/jsrtphp.go and phCountRec in
-    // lib/php-rt.metajs.
+    // being counted. countRecs is how often that happened in the last count() with
+    // a mode, which __mec_countrecs answers for the warning. Twin of phpCountRec in
+    // abnf/jsrtphp.go and phCountRec in lib/php-rt.metajs.
+    var countRecs = 0
     function countRec(a, inside) {
-        for (var i = 0; i < inside.length; i++) { if (inside[i] === a) { return 0 } }
+        for (var i = 0; i < inside.length; i++) {
+            if (inside[i] === a) {
+                countRecs = countRecs + 1
+                return 0
+            }
+        }
         inside.push(a)
         var n = a.keys.length
         for (var j = 0; j < a.vals.length; j++) {

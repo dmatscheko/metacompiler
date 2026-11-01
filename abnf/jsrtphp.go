@@ -2222,12 +2222,17 @@ func (rt *jsrt) phpAACell(av interface{}, k interface{}) interface{} {
 	return cell
 }
 
+// phpCountRecs is how often phpCountRec met an array again in the last count()
+// with a mode (js_phcountrecs).
+var phpCountRecs = 0
+
 // phpCountRec counts an array's elements and those of every array nested in it,
 // by its value list vals, which is its identity; inside holds the arrays being
 // counted. Twin of countRec in php-interpreter.abnf, which says why.
 func phpCountRec(vals *jsArray, inside []*jsArray) float64 {
 	for _, in := range inside {
 		if in == vals {
+			phpCountRecs++
 			return 0
 		}
 	}
@@ -4424,6 +4429,7 @@ func init() {
 				rt.phpRaise("ValueError", "count(): Argument #2 ($mode) must be either COUNT_NORMAL or COUNT_RECURSIVE")
 			}
 			if _, vals, ok := phpArrParts(u(a[0])); ok && mode == 1 {
+				phpCountRecs = 0
 				return rt.wrapNum(phpCountRec(vals, nil))
 			}
 			return m["js_phcount"](a)

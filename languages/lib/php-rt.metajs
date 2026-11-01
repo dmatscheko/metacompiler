@@ -4224,6 +4224,7 @@ function js_phcountm(v, mode) {
     if (m != 0 && m != 1) {
         phRaise("ValueError", "count(): Argument #2 ($mode) must be either COUNT_NORMAL or COUNT_RECURSIVE")
     }
+    phCountRecs = 0
     var p = phArrParts(v)
     if (p !== undefined && m == 1) { return phCountRec(p.v, []) }
     return js_phcount(v)
@@ -4231,10 +4232,16 @@ function js_phcountm(v, mode) {
 // An array's elements and those of every array nested in it, by its value list
 // vs, which is its identity. Twin of countRec in php-interpreter.abnf, which
 // says why.
+// Twin of phpCountRecs in abnf/jsrtphp.go.
+var phCountRecs = 0
+function js_phcountrecs() { return phCountRecs }
 function phCountRec(vs, inside) {
     var i = 0
     while (i < inside.length) {
-        if (inside[i] === vs) { return 0 }
+        if (inside[i] === vs) {
+            phCountRecs = phCountRecs + 1
+            return 0
+        }
         i = i + 1
     }
     inside.push(vs)

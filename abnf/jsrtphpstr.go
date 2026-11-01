@@ -661,6 +661,8 @@ func init() {
 			phpBindWhy = ""
 			return rt.wrapStr(why)
 		}
+		// Twin of __mec_countrecs in php-interpreter.abnf.
+		m["js_phcountrecs"] = func(a []uint64) uint64 { return rt.wrapNum(float64(phpCountRecs)) }
 		m["js_phmath"] = func(a []uint64) uint64 {
 			x := phpNumOf(rt.phpToNum(u(a[1])))
 			y := phpNumOf(rt.phpToNum(u(a[2])))

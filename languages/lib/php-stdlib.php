@@ -2853,6 +2853,11 @@ function __mec_bindchk($file = null, $line = 0) {
     $why = __mec_bindwhy();
     if ($why !== "") { __mec_diag(2, $why, $file, $line); }
 }
+// After count() with a mode: php_count_recursive's warning for each array it
+// reached again (__mec_countrecs).
+function __mec_countchk($file = null, $line = 0) {
+    for ($n = __mec_countrecs(); $n > 0; $n--) { __mec_diag(2, "count(): Recursion detected", $file, $line); }
+}
 // error_reporting() under display_errors=1: the previous level.
 function __mec_erreport($error_level = null) {
     return __mec_erlevel($error_level === null ? null : (int) $error_level);

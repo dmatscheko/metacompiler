@@ -219,6 +219,15 @@ $v = $mc->bindTo($wb, Exception::class); check("bind-internal-scope-method", las
 $v = Closure::fromCallable('strlen')->bindTo(null, 'stdClass'); check("bind-internal-scope-function", lastErr(), want(E_WARNING, 'Cannot bind closure to scope of internal class stdClass', __LINE__));
 $v = (function () { return 3; })->call(new ArrayObject([])); check("call-internal-scope", [$v, lastErr()], [null, want(E_WARNING, 'Cannot bind closure to scope of internal class ArrayObject', __LINE__)]);
 
+// ----- count() with a mode: php_count_recursive (ext/standard/array.c) -----
+// An array reached again through a reference adds nothing and warns, once per
+// time it is reached; a mode-less count does not descend.
+$cr = [1];
+$cr[] = &$cr;
+$v = count($cr, COUNT_RECURSIVE); check("count-recursion", [$v, lastErr()], [2, want(E_WARNING, 'count(): Recursion detected', __LINE__)]);
+$v = count($cr); check("count-recursion-mode-0", [$v, lastErr()], [2, null]);
+$v = count([[1], [2]], COUNT_RECURSIVE); check("count-recursion-none", [$v, lastErr()], [4, null]);
+
 // ----- compile time: the deprecated "${...}" interpolation -----
 // zend_compile_encaps_list raises it while the file compiles, before any of it
 // runs, so the last one in the file is what error_get_last() answered first.
