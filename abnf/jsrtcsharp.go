@@ -1507,7 +1507,9 @@ func init() {
 					c = clsObj.props["__super"]
 				}
 			}
-			if cspIsDeleg(v) {
+			// A delegate member holding null is invoked through null, which the
+			// call site's js_call raises as a NullReferenceException.
+			if cspIsDeleg(v) || v == jsNull {
 				return w(v)
 			}
 			return w(jsUndef)
@@ -1600,6 +1602,17 @@ func init() {
 		// other language C#'s answer for these three names. js_ktsmcall and
 		// js_swmcall are the same pattern for the same reason.
 		baseCsMcall := m["js_mcall"]
+		// js_has for the emitter's "does this receiver carry a member" probes: a
+		// null receiver carries none, so the probe falls through to the access,
+		// which raises the NullReferenceException. A separate name for the reason
+		// js_csmcall is one. Twin of js_cshas in languages/lib/csharp-rt.metajs.
+		baseCsHas := m["js_has"]
+		m["js_cshas"] = func(a []uint64) uint64 {
+			if isUndefOrNull(u(a[0])) {
+				return boolH(false)
+			}
+			return baseCsHas(a)
+		}
 		m["js_csmcall"] = func(a []uint64) uint64 {
 			name := rt.toString(u(a[1]))
 			var elems []interface{}
@@ -1676,6 +1689,10 @@ func init() {
 				if rt.csUserMethod(r, name) == nil && rt.csqIsUserSeq(r) {
 					return w(rt.csqMethod(r, name, elems))
 				}
+			}
+			// A call through a null reference (ECMA-335 III.3.19 callvirt).
+			if isUndefOrNull(u(a[0])) {
+				csNullRef()
 			}
 			return baseCsMcall(a)
 		}

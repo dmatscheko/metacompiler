@@ -2818,7 +2818,7 @@ KwLet       = "let" KwEnd ;
     }
     function csLen(o) {
         if (isDict(o)) return o.keys.length
-        if (o === undefined || o === null) fail("Length/Count of null")
+        if (o === undefined || o === null) { csNullRef() }
         return o.length
     }
     function csGetIndex(o, i) {
@@ -2876,6 +2876,10 @@ KwLet       = "let" KwEnd ;
     // Distinguishing them needs a List box in the value model.
     var csIdxMsg = "Index was outside the bounds of the array."
     var csNullMsg = "Object reference not set to an instance of an object."
+    // A member, method, indexer or delegate reached through a null reference
+    // (ECMA-335 III.4.10 ldfld, III.3.19 callvirt). Twin of csNullRef in
+    // lib/csharp-rt.metajs and of the null hooks csharp-to-llvm-ir.abnf registers.
+    function csNullRef() { csThrowExc("NullReferenceException", csNullMsg) }
     var csOvfMsg = "Arithmetic operation resulted in an overflow."
     function csKeyMsg(k) { return "The given key '" + csStr(k) + "' was not present in the dictionary." }
     function csIdxChk(o, i) {
@@ -3109,6 +3113,7 @@ KwLet       = "let" KwEnd ;
             for (var i = 0; i < f.length; i++) { res = f[i].apply(undefined, argv) }
             return res
         }
+        if (f === undefined || f === null) { csNullRef() }
         if (typeof f != "function") { fail("call of a non-delegate value") }
         return f.apply(undefined, argv)
     }
@@ -3283,7 +3288,7 @@ KwLet       = "let" KwEnd ;
         if (name == "CompareTo" && args.length == 1 && (typeof target == "boolean" || csxkIsNum(target))) {
             return csxValueCompareTo(target, args)
         }
-        if (target === undefined || target === null) fail("method call ." + name + "() on null")
+        if (target === undefined || target === null) { csNullRef() }
         if (target.__class != undefined) {
             // The lookup follows the __super chain (inheritance). Own-property reads
             // only: a bare c[name] resolved inherited Object.prototype members
@@ -3317,7 +3322,7 @@ KwLet       = "let" KwEnd ;
                     var dg = csFindAcc(target, "__get_" + name)
                     if (dg != undefined) { dv = dg(target) }
                 }
-                if (csIsDelegVal(dv)) { return csDelegInvoke(dv, args) }
+                if (csIsDelegVal(dv) || dv === null) { return csDelegInvoke(dv, args) }
                 // An Enumerable extension method on a user IEnumerable<T>.
                 if (csqIsUserSeq(target)) { return csqMethod(target, name, args) }
                 fail("unknown method '" + name + "' on " + target.__class.__name)
@@ -3397,7 +3402,11 @@ KwLet       = "let" KwEnd ;
                     // declared type, not by the object's own class.
                     if (i == 0 && seedTy != "" && csHasHidden && hasOwn(csHiddenNames, s.name)) {
                         var hm = csFindFrom(seedTy, s.name)
-                        if (hm != undefined) { cur = hm.apply(undefined, concat2impl([cur], argv)); continue }
+                        if (hm != undefined) {
+                            if (cur === undefined || cur === null) { csNullRef() }
+                            cur = hm.apply(undefined, concat2impl([cur], argv))
+                            continue
+                        }
                     }
                     cur = mcall(cur, s.name, argv)
                 } else if (s.kind == "call") {
@@ -3406,7 +3415,6 @@ KwLet       = "let" KwEnd ;
                     for (var k = 0; k < cargs.length; k++) av.push(cargs[k]())
                     cur = csDelegInvoke(cur, av)
                 } else if (s.kind == "field") {
-                    if (cur === undefined || cur === null) fail("field ." + s.name + " of " + core.nullWord)
                     cur = core.getField(cur, s.name)
                 } else if (s.kind == "with") {
                     var winit = s.winits
@@ -3440,7 +3448,7 @@ KwLet       = "let" KwEnd ;
         for (var i = 0; i < ref.path.length - 1; i++) {
             var s = ref.path[i]
             if (s.key != undefined) { o = hasOwn(o, s.key) ? o[s.key] : undefined } else { o = csGetIndex(o, s.idx()) }
-            if (o === undefined || o === null) fail("null in assignment path of " + ref.name)
+            if (o === undefined || o === null) { csNullRef() }
         }
         var last = ref.path[ref.path.length - 1]
         var lk = (last.key != undefined) ? last.key : last.idx()
@@ -3533,6 +3541,7 @@ KwLet       = "let" KwEnd ;
     function csQualWrite(p, v0, mk, elty) {
         var v = anytype
         v = v0
+        if (p.obj === undefined || p.obj === null) { csNullRef() }
         if (isDict(p.obj)) {
             // The read half of `d[k] += v` / `d[k]++` is the indexer's get, which
             // throws KeyNotFoundException for a missing key.
@@ -3636,7 +3645,7 @@ KwLet       = "let" KwEnd ;
             if (kind == "instance") { return mcall(getVar("this"), name, argv) }
             if (kind == "static") { return mcall(getVar(defClass), name, argv) }
             var f = getVar(name)
-            if (typeof f != "function" && !Array.isArray(f)) { fail("call of a non-delegate value: " + name) }
+            if (f !== null && typeof f != "function" && !Array.isArray(f)) { fail("call of a non-delegate value: " + name) }
             return csDelegInvoke(f, argv)
         }
     }
@@ -6746,6 +6755,7 @@ KwLet       = "let" KwEnd ;
     }
     core.add = csAdd
     core.getField = function(o, name) {
+        if (o === undefined || o === null) { csNullRef() }
         if (name == "Current" && (csIsEnum(o) || csIsGen(o))) { return o.cur }
         // .Count / .Length of a container and a dictionary's .Keys / .Values; on an
         // instance or a class it is a user member of that name (`static int Count`).

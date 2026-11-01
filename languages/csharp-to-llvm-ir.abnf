@@ -2526,7 +2526,7 @@ KwLet       = "let" KwEnd ;
         var plainB = curF.NewBlock("")
         var accB = curF.NewBlock("")
         var mergeB = curF.NewBlock("")
-        b.NewCondBr(truthy(b, callExt(b, "js_has", [oV, emitStr(b, "__class")])), accB, plainB)
+        b.NewCondBr(truthy(b, callExt(b, "js_cshas", [oV, emitStr(b, "__class")])), accB, plainB)
         var pr = plainT(plainB)
         pr.b.NewBr(mergeB)
         var ar = accT(accB)
@@ -4612,11 +4612,14 @@ KwLet       = "let" KwEnd ;
                     }
                     // A method some class HIDES with 'new' is picked by the receiver's
                     // declared type, not by the object's own class: js_supercall starts the
-                    // search at that class rather than at the instance's own.
+                    // search at that class rather than at the instance's own. The call
+                    // is still a callvirt: reading the receiver's class raises the
+                    // NullReferenceException through the floor's member hook.
                     if (i == 0 && seedTy != "" && csHiddenNames[s.name] == true
                         && csDeclaringClass(seedTy, s.name) != "") {
                         var ha = emitArgs(b, sfxArgs[i])
                         b = ha.b
+                        callExt(b, "js_get", [cur, emitStr(b, "__class")])
                         var hclsV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, csDeclaringClass(seedTy, s.name))])
                         cur = callExt(b, "js_supercall", [hclsV, cur, emitStr(b, s.name), ha.v])
                         continue
@@ -5322,7 +5325,7 @@ KwLet       = "let" KwEnd ;
         var hitB = curF.NewBlock("")
         var missB = curF.NewBlock("")
         var mergeB = curF.NewBlock("")
-        b.NewCondBr(truthy(b, callExt(b, "js_has", [clsV, slot])), hitB, missB)
+        b.NewCondBr(truthy(b, callExt(b, "js_cshas", [clsV, slot])), hitB, missB)
         var hv = callExt(hitB, "js_get", [clsV, slot])
         hitB.NewBr(mergeB)
         var mv = callExt(missB, "js_call", [callExt(missB, "js_get", [clsV, emitStr(missB, "__mkview")]),
@@ -5985,7 +5988,7 @@ KwLet       = "let" KwEnd ;
         var plainB = curF.NewBlock("")
         var accB = curF.NewBlock("")
         var mergeB = curF.NewBlock("")
-        b.NewCondBr(truthy(b, callExt(b, "js_has", [cur, emitStr(b, name)])), plainB, accB)
+        b.NewCondBr(truthy(b, callExt(b, "js_cshas", [cur, emitStr(b, name)])), plainB, accB)
         var pr = plainT(plainB)
         pr.b.NewBr(mergeB)
         var ar = accT(accB)
@@ -6108,8 +6111,8 @@ KwLet       = "let" KwEnd ;
         var clsB = curF.NewBlock("")
         var stdB = curF.NewBlock("")
         var mergeB = curF.NewBlock("")
-        b.NewCondBr(truthy(b, callExt(b, "js_has", [cur, emitStr(b, "__class")])), userB, clsB)
-        clsB.NewCondBr(truthy(clsB, callExt(clsB, "js_has", [cur, emitStr(clsB, "__isclass")])), userB, stdB)
+        b.NewCondBr(truthy(b, callExt(b, "js_cshas", [cur, emitStr(b, "__class")])), userB, clsB)
+        clsB.NewCondBr(truthy(clsB, callExt(clsB, "js_cshas", [cur, emitStr(clsB, "__isclass")])), userB, stdB)
         var ur = {b: userB, v: hUndef}
         if (csPropAcc[name] != undefined) { ur = emitPropGet(userB, cur, name) }
         else { ur.v = callExt(userB, "js_get", [cur, emitStr(userB, name)]) }
@@ -6144,7 +6147,7 @@ KwLet       = "let" KwEnd ;
         var userB = curF.NewBlock("")
         var stdB = curF.NewBlock("")
         var mergeB = curF.NewBlock("")
-        b.NewCondBr(truthy(b, callExt(b, "js_has", [cur, emitStr(b, "__class")])), userB, stdB)
+        b.NewCondBr(truthy(b, callExt(b, "js_cshas", [cur, emitStr(b, "__class")])), userB, stdB)
         var uargs = callExt(userB, "js_arr_new", [])
         callExt(userB, "js_arr_push", [uargs, iv])
         var uv = callExt(userB, "js_csmcall", [cur, emitStr(userB, "__index"), uargs])
@@ -6158,7 +6161,7 @@ KwLet       = "let" KwEnd ;
         var userB = curF.NewBlock("")
         var stdB = curF.NewBlock("")
         var mergeB = curF.NewBlock("")
-        b.NewCondBr(truthy(b, callExt(b, "js_has", [cur, emitStr(b, "__class")])), userB, stdB)
+        b.NewCondBr(truthy(b, callExt(b, "js_cshas", [cur, emitStr(b, "__class")])), userB, stdB)
         var uargs = callExt(userB, "js_arr_new", [])
         callExt(userB, "js_arr_push", [uargs, iv])
         callExt(userB, "js_arr_push", [uargs, val])
@@ -7402,6 +7405,28 @@ KwLet       = "let" KwEnd ;
         // (exit status 134; its repeated frame list is not reproduced). Twin of
         // coreDeepHook in csharp-interpreter.abnf.
         callExt(b, "js_rt_deep", [emitNum(b, 10000), emitStr(b, "Stack overflow.\n"), emitNum(b, 134)])
+        // A field read or write through a null reference is a NullReferenceException
+        // (ECMA-335 III.4.10 ldfld / III.4.28 stfld): the floor's two member hooks
+        // answer one to throw where they would otherwise abort. A call through null
+        // raises it in js_csmcall, and so does the call of a delegate that is not a
+        // function: `d(x)` is `d.Invoke(x)` (ECMA-334 20.2), which the floor's call
+        // hook hands on. Twin of csNullRef in csharp-interpreter.abnf.
+        var nreFn = emitFunc([], function(bb) {
+            var oV = callExt(bb, "js_obj_new", [])
+            callExt(bb, "js_set", [oV, emitStr(bb, "__excname"), emitStr(bb, "NullReferenceException")])
+            callExt(bb, "js_set", [oV, emitStr(bb, "Message"), emitStr(bb, "Object reference not set to an instance of an object.")])
+            bb.NewRet(oV)
+            return deadBlock()
+        }, false, null, null, false, null)
+        var nreV = callExt(b, "js_closure", [handle(nreFn), curScopeV])
+        callExt(b, "js_rt_missmem", [nreV])
+        callExt(b, "js_rt_missset", [nreV])
+        var invFn = emitFunc([], function(bb) {
+            var calleeV = callExt(bb, "js_arg", [curF.Params[1], handle(0)])
+            bb.NewRet(callExt(bb, "js_csmcall", [calleeV, emitStr(bb, "Invoke"), callExt(bb, "js_arg", [curF.Params[1], handle(1)])]))
+            return deadBlock()
+        }, false, null, null, false, null)
+        callExt(b, "js_rt_missfn", [callExt(b, "js_closure", [handle(invFn), curScopeV])])
         // Console.WriteLine / Console.Write. NOT the shared println / print host
         // globals, which hand the raw runtime value to Go's %v. js_csconsole builds
         // the object with C#'s own value rendering - the twin of csStr in

@@ -14,7 +14,7 @@
 // THE AUTHORITATIVE SPECIFICATION IS abnf/jsrtcsharp.go, plus abnf/jsrtjvm.go for
 // the boxed double and the js_csadd / js_cslen / js_char / js_char_code /
 // js_jchareq / js_jadd / js_mcall / js_supercall / js_is_type / js_arr_new_n /
-// js_dict_new / js_pyget / js_pyset / js_pylen / js_has / js_csslice /
+// js_dict_new / js_pyget / js_pyset / js_pylen / js_csslice /
 // js_gospread block of abnf/jsrt.go. This file matches them function for
 // function; where it CANNOT, the site says so in full.
 //
@@ -1471,10 +1471,11 @@ function js_pylen(v) {
     return 0
 }
 
-// 'key in obj' / hasOwnProperty: own properties of an object, index and 'length' of
-// an array or string. csharp-to-llvm-ir emits it for exactly one probe, "does this
-// receiver carry a __class", so the object arm is the only one it reaches.
-function js_has(o, key) {
+// js_has for csharp-to-llvm-ir's "does this receiver carry a member" probes: own
+// properties of an object, index and 'length' of an array or string, and false for
+// null, so the access the probe guards raises the NullReferenceException. Twin of
+// js_cshas in abnf/jsrtcsharp.go.
+function js_cshas(o, key) {
     var k = cpToString(key)
     if (typeof o == "string") {
         if (k == "length") { return true }
@@ -1493,7 +1494,7 @@ function js_has(o, key) {
     return o[k] !== undefined
 }
 
-// js_has deliberately does NOT walk the __class chain for a '__get_<k>' /
+// js_cshas deliberately does NOT walk the __class chain for a '__get_<k>' /
 // '__set_<k>' member: abnf/jsrt.go's js_has walks the chain only through
 // findClassAccessor, which answers for a *jsAccessor (the defineProperty accessor
 // of the JS value model), and a C# property with accessor bodies is a plain
@@ -1662,8 +1663,9 @@ function js_mcall(recv, name, args) {
         if (name == "equals") { return rtjStrictEq(recv, args[0]) }
         return csxStrMethod(recv, name, args)
     }
+    // A call through a null reference (ECMA-335 III.3.19 callvirt).
     if (recv === undefined || recv === null) {
-        fail("method call '" + name + "' on a " + (recv === null ? "null" : "undefined"))
+        csNullRef()
         return undefined
     }
     if (typeof recv != "object") {
@@ -1819,7 +1821,7 @@ function js_csdfld(recv, name) {
         var g = rtFindMethod(recv["__class"], "__get_" + name)
         if (csIsFn(g)) { v = g.apply(undefined, rtPrepend(recv, [])) }
     }
-    if (csIsDelegVal(v)) { return v }
+    if (csIsDelegVal(v) || v === null) { return v }
     return undefined
 }
 
@@ -2348,6 +2350,7 @@ function js_cslen(v) {
     if (typeof v == "string") { return v.length }
     if (Array.isArray(v)) { return v.length }
     if (csIsDict(v)) { return v["keys"].length }
+    if (v === undefined || v === null) { csNullRef() }
     fail("Length/Count of a " + typeof v)
     return 0
 }

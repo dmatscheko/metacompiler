@@ -3836,6 +3836,59 @@ b";                                                   // verbatim keeps the newl
             Program.Check("s61i1", i0 == 1 && x[1] == 3 && i1 == 2 && i2 == 3 && i3 == 2 && x[2] == 3 && x.Writes == 4);
         }
 
+        // ===== SECTION 62: member access through a null reference =====
+        // A field, property, method, indexer or delegate reached through null raises
+        // NullReferenceException (ECMA-335 III.4.10 ldfld, III.4.28 stfld, III.3.19
+        // callvirt; ECMA-334 12.8.10.4 for a delegate invocation), which a catch
+        // clause takes like any other. The rhs of an assignment is evaluated before
+        // the store faults; `?.` and an extension method on null do not fault. The
+        // message is .NET BCL text. Every null is read out of an array.
+        class S62C
+        {
+            public string F;
+            public string P { get; set; }
+            public S62C Next;
+            public Func<int, int> D;
+            public string M() { return "m"; }
+            public int this[int i] { get { return i; } set { } }
+        }
+        static string S62Ext(this S62C c) { return c == null ? "ext-null" : "ext"; }
+        static int S62Rhs = 0;
+        static string S62Side() { S62Rhs++; return "v"; }
+        static string S62Try(Action a)
+        {
+            try { a(); return "none"; }
+            catch (NullReferenceException e) { return "NRE:" + e.Message; }
+        }
+        static void S62()
+        {
+            S62C[] cs = { null, new S62C() };
+            S62C c = cs[0];
+            string nre = "NRE:Object reference not set to an instance of an object.";
+            Program.Check("s62f1", S62Try(() => { string r = c.F; }) == nre);
+            Program.Check("s62f2", S62Try(() => { c.F = "x"; }) == nre);
+            Program.Check("s62p1", S62Try(() => { string r = c.P; }) == nre);
+            Program.Check("s62p2", S62Try(() => { c.P = "x"; }) == nre);
+            Program.Check("s62p3", S62Try(() => { c.P ??= "x"; }) == nre);
+            Program.Check("s62m1", S62Try(() => { c.M(); }) == nre);
+            Program.Check("s62i1", S62Try(() => { int r = c[1]; }) == nre);
+            Program.Check("s62i2", S62Try(() => { c[1] = 2; }) == nre);
+            Program.Check("s62n1", S62Try(() => { cs[1].Next.F = S62Side(); }) == nre && S62Rhs == 1);
+            Program.Check("s62n2", S62Try(() => { int r = cs[1].Next.F.Length; }) == nre);
+            Program.Check("s62d1", S62Try(() => { cs[1].D(1); }) == nre);
+            Func<int, int>[] fs = { null };
+            Program.Check("s62d2", S62Try(() => { fs[0](1); }) == nre);
+            string[] ss = { null };
+            Program.Check("s62s1", S62Try(() => { int r = ss[0].Length; }) == nre);
+            Program.Check("s62s2", S62Try(() => { ss[0].ToUpper(); }) == nre);
+            List<int>[] ls = { null };
+            Program.Check("s62l1", S62Try(() => { ls[0].Add(1); }) == nre);
+            Program.Check("s62e1", c.S62Ext() == "ext-null" && c?.F == null && c?.M() == null);
+            string kind = "";
+            try { string r = c.F; } catch (SystemException e) { kind = e.GetType().Name; }
+            Program.Check("s62k1", kind == "NullReferenceException");
+        }
+
         static int Main()
         {
             Program.S01(); // SECTION-CALL 01
@@ -3899,6 +3952,7 @@ b";                                                   // verbatim keeps the newl
             Program.S59(); // SECTION-CALL 59
             Program.S60(); // SECTION-CALL 60
             Program.S61(); // SECTION-CALL 61
+            Program.S62(); // SECTION-CALL 62
             Console.WriteLine("full: " + Program.Checks + " checks, " + Program.Fails + " failures");
             return Program.Fails;
         }

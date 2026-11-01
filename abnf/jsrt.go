@@ -17113,6 +17113,9 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			if keys, _, ok := dictParts(u(a[0])); ok {
 				return rt.wrapNum(float64(len(keys.elems)))
 			}
+			if isUndefOrNull(u(a[0])) {
+				rt.csThrow("NullReferenceException", "Object reference not set to an instance of an object.")
+			}
 			rt.fail("Length/Count of a %s", rt.typeOf(u(a[0])))
 			return 0
 		},
