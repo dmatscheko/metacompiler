@@ -202,6 +202,7 @@ char *rt_ansic(char *ac);
 int rt_utf8put(char *d, long cp);
 char *rt_unraw(char *s);
 int rt_haschar(char *s, int ch);
+int rt_inwords(char *w, char *list);
 char *rt_read_line(int u);
 char *rt_field(char *l, char *ifs, int idx, int rest);
 int rt_nifs(char *l, char *ifs);
@@ -2850,6 +2851,25 @@ int rt_haschar(char *s, int ch) {
         int c0 = (int)(unsigned char)s[i];
         if (c0 == 0) return 0;
         if (c0 == ch) return 1;
+        i = i + 1;
+    }
+    return 0;
+}
+
+/* rt_inwords: is w one of the words of list, which starts and ends with a
+ * newline and separates its words with one? `command -v` asks it of the names
+ * the shell knows. */
+int rt_inwords(char *w, char *list) {
+    int n = rt_strlen(w);
+    int i = 0;
+    int k;
+    if (n == 0) return 0;
+    while (list[i] != 0) {
+        if (list[i] == 10) {
+            k = 0;
+            while (k < n && list[i + 1 + k] == w[k]) k = k + 1;
+            if (k == n && list[i + 1 + n] == 10) return 1;
+        }
         i = i + 1;
     }
     return 0;

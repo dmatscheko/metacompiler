@@ -1495,6 +1495,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // `varnames`; the emitter only fills that table in main's entry block.
     var rtSetByName = rtDecl("rt_setvar_byname", false, [1, 1])
     var rtEvalAssign = rtDecl("rt_eval_assign", false, [1])
+    // i32 rt_inwords(i8* w, i8* list): 1 when w is one of the newline-separated words of list.
+    var rtInWords = rtDecl("rt_inwords", false, [1, 1])
     var rtGetByName = rtDecl("rt_getvar_byname", true, [1])
     var rtGetInd = rtDecl("rt_getvar_ind", true, [1])
     // i8* rt_indsub(i8* nm, i8* k, i32 kind) / i8* rt_indname(i8* nm, i8* sub, i8* v, i32 strict):
@@ -4825,7 +4827,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // (printf, test/[, read, eval, set, trap, unset, declare, control flow) reach the
     // `command not found` fallback here, where the interpreter runs them.
     // subs: a word or prefix assignment holds a command substitution.
-    function emitComputedCommand(b, cmdT, argTs, subs) {
+    // noFn: reached through `builtin` / `command`, which pass over the user functions.
+    function emitComputedCommand(b, cmdT, argTs, subs, noFn) {
         var listP = slotOf(i8ptr)
         b.NewStore(nilList(b), listP)
         var rw = cmdT.fn(b)
@@ -4851,23 +4854,18 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (!subs) { storeStatusI(noneB, 0) }
         noneB.NewBr(done)
         b = haveB
-        var cands = ["echo", ":", "true", "false", "wait"]
-        for (i = 0; i < declaredFuncList.length; i++) { cands.push(declaredFuncList[i]) }
+        var cands = []
+        if (!noFn) { for (i = 0; i < declaredFuncList.length; i++) { cands.push(declaredFuncList[i]) } }
+        cands = cands.concat(["echo", ":", "true", "false", "wait"])
         var ci
         for (ci = 0; ci < cands.length; ci++) {
             var cname = cands[ci]
             var hit = curF.NewBlock(""), miss = curF.NewBlock("")
-            b.NewCondBr(b.NewICmp(llvm.enum.IPredNE,
-                                  b.NewCall(rtStreq, [nameV, gepStr(b, cname)]), zero), hit, miss)
+            var same = b.NewCall(rtStreq, [nameV, gepStr(b, cname)])
+            if (ci < cands.length - 5 && hasOwn(shellBuiltins, "$" + cname)) { same = b.NewAnd(same, b.NewLoad(i32, fnDefFlag(cname))) }
+            b.NewCondBr(b.NewICmp(llvm.enum.IPredNE, same, zero), hit, miss)
             var hb = hit
-            if (cname == "echo") {
-                hb.NewCall(rtEcho, [restV, one, zero])
-                storeStatusI(hb, 0)
-            } else if (cname == "false") {
-                storeStatusI(hb, 1)
-            } else if (cname == ":" || cname == "true" || cname == "wait") {
-                storeStatusI(hb, 0)
-            } else {
+            if (ci < cands.length - 5) {
                 var f = funcFor(cname)
                 var savedTop = slotOf(i32)
                 var savedBase = slotOf(i32)
@@ -4884,6 +4882,13 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 hb.NewStore(hb.NewLoad(i32, savedN), gFrameN)
                 hb.NewStore(hb.NewLoad(i32, savedTop), gArgvTop)
                 hb = emitExitCheck(hb)
+            } else if (cname == "echo") {
+                hb.NewCall(rtEcho, [restV, one, zero])
+                storeStatusI(hb, 0)
+            } else if (cname == "false") {
+                storeStatusI(hb, 1)
+            } else {
+                storeStatusI(hb, 0)
             }
             hb.NewBr(done)
             b = miss
@@ -4912,6 +4917,96 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         return out
     }
+    // `builtin NAME ARGS` and `command NAME ARGS` run NAME passing over the user functions.
+    // With a literal NAME the wrapper word is dropped here, at compile time; `command -p` and
+    // `--` mean nothing without a PATH search. No compiled program runs external programs, so
+    // `command` of a name that is not a builtin is not found, and `builtin` of one is bash's
+    // "not a shell builtin" (status 1). Twin of runWrapper in bash-interpreter.abnf.
+    var shellBuiltins = {}
+    var shellKnownWords = ". : [ alias bg bind break builtin caller cd command compgen complete compopt continue declare dirs disown echo enable eval exec exit export false fc fg getopts hash help history jobs kill let local logout mapfile popd printf pushd pwd read readarray readonly return set shift shopt source suspend test times trap true type typeset ulimit umask unalias unset wait".split(" ")
+    var shellKwWords = "if then else elif fi case esac for select while until do done in function time { } ! [[ ]] coproc".split(" ")
+    var swi
+    for (swi = 0; swi < shellKnownWords.length; swi++) { shellBuiltins["$" + shellKnownWords[swi]] = true }
+    // i32 fndef_NAME: 1 once the definition of a function named like a builtin has run.
+    var fnDefFlags = {}
+    function fnDefFlag(name) {
+        var key = "$" + name
+        if (!hasOwn(fnDefFlags, key)) { fnDefFlags[key] = m.NewGlobalDef("fndef_" + name, zero) }
+        return fnDefFlags[key]
+    }
+    function wrapperWords(w) {
+        var out = {cmdT: w.cmdT, argTs: w.argTs, noFn: false, notBuiltin: null}
+        while ((out.cmdT.c == "builtin" || out.cmdT.c == "command") && out.argTs.length > 0 && out.argTs[0].c != undefined) {
+            var a = out.argTs[0].c
+            if (out.cmdT.c == "command" && (a == "-p" || a == "--")) { out.argTs = out.argTs.slice(1); continue }
+            if (a.length > 1 && a.charAt(0) == "-") { break }
+            if (out.cmdT.c == "builtin" && !hasOwn(shellBuiltins, "$" + a)) { out.notBuiltin = a; break }
+            out.noFn = true
+            out.cmdT = out.argTs[0]
+            out.argTs = out.argTs.slice(1)
+        }
+        return out
+    }
+    // `command -v NAME...` (the forms wrapperWords leaves): each NAME that is a builtin, a
+    // keyword or a function is printed; the status is 1 when none is. A computed NAME
+    // after the wrapper is dispatched at run time.
+    function emitWrapper(b, cmd, argTs, subs) {
+        var i = 0
+        var query = false
+        while (i < argTs.length && argTs[i].c != undefined && argTs[i].c.length > 1 && argTs[i].c.charAt(0) == "-") {
+            var opt = argTs[i].c
+            i = i + 1
+            if (opt == "--") { break }
+            if (cmd == "builtin" || opt.indexOf("V") >= 0) { fail(cmd + " " + opt + " is not supported") }
+            if (opt.indexOf("v") >= 0) { query = true }
+        }
+        if (i >= argTs.length) { storeStatusI(b, 0); return b }
+        if (!query) { return emitComputedCommand(b, argTs[i], argTs.slice(i + 1), subs, true) }
+        var known = "\n" + shellKnownWords.join("\n") + "\n" + shellKwWords.join("\n") + "\n"
+        var k
+        for (k = 0; k < declaredFuncList.length; k++) { known = known + declaredFuncList[k] + "\n" }
+        var st = one
+        for (; i < argTs.length; i++) {
+            var r = evalWord(b, argTs[i])
+            b = r.b
+            var hit = b.NewCall(rtInWords, [r.v, gepStr(b, known)])
+            var yes = curF.NewBlock(""), next = curF.NewBlock("")
+            b.NewCondBr(b.NewICmp(llvm.enum.IPredNE, hit, zero), yes, next)
+            yes.NewCall(rtPrints, yes.NewCall(rtStrcat, [r.v, gepStr(yes, "\n")]))
+            yes.NewBr(next)
+            b = next
+            st = b.NewAnd(st, b.NewXor(hit, one))
+        }
+        storeStatus(b, st)
+        return b
+    }
+    // The call of user function f with argTs: every ARGUMENT FIELD is pushed and made this
+    // call's frame. The stack top, base and count are all restored afterwards, so recursion
+    // nests correctly. tdp: the prefix bindings' save-stack depth (tmpDepth), or null.
+    function emitUserCall(b, f, argTs, tdp) {
+        var savedTop = slotOf(i32)
+        var savedBase = slotOf(i32)
+        var savedN = slotOf(i32)
+        b.NewStore(b.NewLoad(i32, gArgvTop), savedTop)
+        b.NewStore(b.NewLoad(i32, gFrameBase), savedBase)
+        b.NewStore(b.NewLoad(i32, gFrameN), savedN)
+        var i
+        for (i = 0; i < argTs.length; i++) {
+            var ra = argTs[i].fn(b)
+            b = ra.b
+            b.NewCall(rtArgCall, ra.v)
+        }
+        b = emitAbortCheck(b)
+        var base = b.NewLoad(i32, savedTop)
+        b.NewStore(base, gFrameBase)
+        b.NewStore(b.NewSub(b.NewLoad(i32, gArgvTop), base), gFrameN)
+        if (tdp != null) { b.NewStore(b.NewAdd(b.NewLoad(i32, tdp), one), gLsTb) }
+        emitFnCall(b, f)
+        b.NewStore(b.NewLoad(i32, savedBase), gFrameBase)
+        b.NewStore(b.NewLoad(i32, savedN), gFrameN)
+        b.NewStore(b.NewLoad(i32, savedTop), gArgvTop)
+        return emitExitCheck(b)
+    }
     // words[0] is the command word (a literal, or an expansion - see emitComputedCommand),
     // the rest are arguments. asgs: the {aname,val} prefix assignments (`x=1 cmd`), or null.
     function makeSimpleCommand(items0, asgs) {
@@ -4923,6 +5018,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var it0 = items0[ri]
             if (it0.rd != undefined) { redirs.push(it0) } else { argTs.push(it0) }
         }
+        var ww = wrapperWords({cmdT: cmdT, argTs: argTs})
+        cmdT = ww.cmdT
+        argTs = ww.argTs
+        var noFn = ww.noFn
         var inner = function(b) {
             var cmk = cmdMark
             var tdp = tmpDepth
@@ -4930,7 +5029,33 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             tmpDepth = null
             b = emitAbortCheck(b)
             var cmd = cmdT.c
-            if (cmd == undefined) { return emitComputedCommand(b, cmdT, argTs, hasCmdSub(cmdT, argTs, asgs)) }
+            if (ww.notBuiltin != null) {
+                var nbox = {b: b}
+                evalArgs(nbox, argTs)
+                b = emitAbortCheck(nbox.b)
+                emitOnStderr(b, gepStr(b, "bash: builtin: " + ww.notBuiltin + ": not a shell builtin\n"))
+                storeStatusI(b, 1)
+                return b
+            }
+            if (cmd == undefined) { return emitComputedCommand(b, cmdT, argTs, hasCmdSub(cmdT, argTs, asgs), noFn) }
+            // A function hides the builtin of its name (`echo() { builtin echo "<$*>"; }`).
+            var f = noFn ? null : funcFor(cmd)
+            // A function of a builtin's name hides the builtin from the moment its definition
+            // has run (fnDefFlag); before that, and inside `builtin` / `command`, the builtin
+            // runs. Twin of the function arm at the start of runCommand.
+            if (f != null && hasOwn(shellBuiltins, "$" + cmd)) {
+                var callB = curF.NewBlock(""), bltB = curF.NewBlock(""), join = curF.NewBlock("")
+                b.NewCondBr(b.NewICmp(llvm.enum.IPredNE, b.NewLoad(i32, fnDefFlag(cmd)), zero), callB, bltB)
+                emitUserCall(callB, f, argTs, tdp).NewBr(join)
+                noFn = true
+                cmdMark = cmk
+                tmpDepth = tdp
+                inner(bltB).NewBr(join)
+                noFn = false
+                return join
+            }
+            if (f != null) { return emitUserCall(b, f, argTs, tdp) }
+            if (cmd == "builtin" || cmd == "command") { return emitWrapper(b, cmd, argTs, hasCmdSub(cmdT, argTs, asgs)) }
             if (cmd == "echo") { return emitEcho(b, argTs) }
             if (cmd == "[" || cmd == "test") { return emitTest(b, cmd, argTs) }
             // `cmd &` already ran to completion (see mkAsync), so there is never anything
@@ -5118,33 +5243,6 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 storeStatus(b, ust)
                 return b
             }
-            var f = funcFor(cmd)
-            if (f != null) {
-                // Push every ARGUMENT FIELD, then make them this call's frame. The stack top,
-                // base and count are all restored afterwards, so recursion nests correctly.
-                var savedTop = slotOf(i32)
-                var savedBase = slotOf(i32)
-                var savedN = slotOf(i32)
-                b.NewStore(b.NewLoad(i32, gArgvTop), savedTop)
-                b.NewStore(b.NewLoad(i32, gFrameBase), savedBase)
-                b.NewStore(b.NewLoad(i32, gFrameN), savedN)
-                var i
-                for (i = 0; i < argTs.length; i++) {
-                    var ra = argTs[i].fn(b)
-                    b = ra.b
-                    b.NewCall(rtArgCall, ra.v)
-                }
-                b = emitAbortCheck(b)
-                var base = b.NewLoad(i32, savedTop)
-                b.NewStore(base, gFrameBase)
-                b.NewStore(b.NewSub(b.NewLoad(i32, gArgvTop), base), gFrameN)
-                if (tdp != null) { b.NewStore(b.NewAdd(b.NewLoad(i32, tdp), one), gLsTb) }
-                emitFnCall(b, f)
-                b.NewStore(b.NewLoad(i32, savedBase), gFrameBase)
-                b.NewStore(b.NewLoad(i32, savedN), gFrameN)
-                b.NewStore(b.NewLoad(i32, savedTop), gArgvTop)
-                return emitExitCheck(b)
-            }
             var bbox2 = {b: b}
             evalArgs(bbox2, argTs)
             b = bbox2.b
@@ -5211,7 +5309,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // For a function the bindings begin the call's frame (tmpDepth, rt_fn_enter),
             // marked as prefix bindings (rt_push_tmp), and each hides an array of its name.
             // Twin of applyPrefix and runPrefixed.
-            var isFn = cmd0.c != undefined && funcFor(cmd0.c) != null
+            var isFn = cmd0.c != undefined && !noFn && funcFor(cmd0.c) != null
             var vals = []
             for (k = 0; k < asgs.length; k++) {
                 var r = prefixVal(b, asgs[k])
@@ -6000,6 +6098,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             attrUnwind(undoBase)
             curF = savedF; curEntry = savedEntry; curExit = savedExit; curFrame = savedFrame; loopStack = savedLoops
             curExitRd = savedExitRd; redirStack = savedRedirs; retInSub = savedRetSub
+            if (hasOwn(shellBuiltins, key)) { b.NewStore(one, fnDefFlag(fname)) }
             storeStatusI(b, 0)
             return b
         }

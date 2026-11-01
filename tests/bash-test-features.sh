@@ -758,6 +758,29 @@ check lo1 "$xlr/$xly" "1/0"
 xlr=$( { local; echo "$?"; } 2>/dev/null )
 check lo2 "$xlr" 1
 
+# ----- builtin and command run the builtin, passing over a function of its name -----
+xbfn() { echo "fn"; }
+check bic1 "$(xbv=9 builtin echo hi)" hi
+check bic2 "$(xbv=3 command eval 'printf %s $xbv')" 3
+check bic3 "$(command -v printf eval xbfn if; echo "st=$?")" "printf
+eval
+xbfn
+if
+st=0"
+check bic4 "$(command -v xb_no_such_cmd; echo "st=$?"; command -v xb_no_such_cmd echo; echo "st=$?")" "st=1
+echo
+st=0"
+check bic5 "$(builtin xb_no_such_cmd 2>/dev/null; echo "st=$?")" "st=1"
+xbo=$(true a; echo "st=$?")
+true() { builtin echo "T:$*"; return 3; }
+check bic6 "$xbo/$(true a b; echo "st=$?"; command true x; echo "st=$?")" "st=0/T:a b
+st=3
+st=0"
+xbc=true
+check bic7 "$($xbc c)" "T:c"
+xbo=$(xbfn; command xbfn 2>/dev/null)
+check bic8 "$?/$xbo" "127/fn"
+
 # ----- standard error is fd 2 in every leg -----
 # Not a check: ./test.sh --cross diffs the two halves' merged output, so this line and an
 # arithmetic error's message reach it from llvm.Run as they do from the interpreter.

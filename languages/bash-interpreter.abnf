@@ -6216,7 +6216,18 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // Dispatch a command by its (already expanded) name. Returns an int status, or {ret: n}
     // for the return builtin; exit terminates the whole run immediately.
     function runCommand(cmd, args) {
+        // A function hides the builtin of its name (`echo() { builtin echo "<$*>"; }`).
+        var noFn = skipFuncs
+        skipFuncs = false
+        if (!noFn && hasOwn(funcs, "$" + cmd)) {
+            var st2 = anytype
+            st2 = callFunc(cmd, args)
+            if (typeof st2 == "object") { return st2 }
+            setStatus(st2)
+            return st2
+        }
         if (cmd == "echo") { echoCmd(args); setStatus(0); return 0 }
+        if (cmd == "builtin" || cmd == "command") { return runWrapper(cmd, args) }
         if (cmd == "[" || cmd == "test") { var st = testBuiltin(cmd, args); setStatus(st); return st }
         if (cmd == "true" || cmd == ":") { setStatus(0); return 0 }
         // `cmd &` already ran to completion (see mkAsync), so there is never anything left
@@ -6340,14 +6351,6 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var rc = (args.length > 0) ? (arPair(arStr(args[0])).l & 255) : lastStatus
             return {ret: rc}
         }
-        var key = "$" + cmd
-        if (hasOwn(funcs, key)) {
-            var st2 = anytype
-            st2 = callFunc(cmd, args)
-            if (typeof st2 == "object") { return st2 }
-            setStatus(st2)
-            return st2
-        }
         // A SHELL DIAGNOSTIC, NOT AN ENGINE DIAGNOSTIC: all three engines write
         // `<script>: command not found: NAME` on the standard error channel and exit the
         // current shell with 127 - a ( ) or $( ) ends there, the parent carries on. The word
@@ -6356,6 +6359,54 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // where bash would carry on with the next command.
         emitErr(scriptName + ": command not found: " + cmd + "\n")
         return {ret: 127, isExit: 1}
+    }
+
+    // `builtin NAME ARGS` and `command NAME ARGS` run NAME passing over shell functions
+    // (skipFuncs, read once by the next runCommand). No engine here runs external programs,
+    // so `command` of a name that is not a builtin is not found, and `builtin` of one is
+    // bash's "not a shell builtin" (status 1). `command -v NAME...` prints each NAME that is
+    // a builtin, a keyword or a function; the status is 1 when none is. Twin of
+    // wrapperWords and emitCommandV in bash-to-llvm-ir.abnf.
+    var skipFuncs = false
+    var shellBuiltins = {}
+    var shellKnownWords = ". : [ alias bg bind break builtin caller cd command compgen complete compopt continue declare dirs disown echo enable eval exec exit export false fc fg getopts hash help history jobs kill let local logout mapfile popd printf pushd pwd read readarray readonly return set shift shopt source suspend test times trap true type typeset ulimit umask unalias unset wait".split(" ")
+    var swi
+    for (swi = 0; swi < shellKnownWords.length; swi++) { shellBuiltins["$" + shellKnownWords[swi]] = true }
+    var shellKeywords = {}
+    var shellKwWords = "if then else elif fi case esac for select while until do done in function time { } ! [[ ]] coproc".split(" ")
+    for (swi = 0; swi < shellKwWords.length; swi++) { shellKeywords["$" + shellKwWords[swi]] = true }
+    function runWrapper(cmd, args) {
+        var i = 0
+        var query = false
+        while (cmd == "command" && i < args.length && args[i].length > 1 && args[i].charAt(0) == "-") {
+            var opt = args[i]
+            i = i + 1
+            if (opt == "--") { break }
+            if (opt.indexOf("V") >= 0) { fail("command -V is not supported") }
+            if (opt.indexOf("v") >= 0) { query = true }
+        }
+        if (i >= args.length) { setStatus(0); return 0 }
+        if (query) {
+            var qst = 1
+            for (; i < args.length; i++) {
+                var qk = "$" + args[i]
+                if (hasOwn(shellBuiltins, qk) || hasOwn(shellKeywords, qk) || hasOwn(funcs, qk)) { emitOut(args[i] + "\n"); qst = 0 }
+            }
+            setStatus(qst)
+            return qst
+        }
+        var name = args[i]
+        if (!hasOwn(shellBuiltins, "$" + name)) {
+            if (cmd == "builtin") {
+                emitErr("bash: builtin: " + name + ": not a shell builtin\n")
+                setStatus(1)
+                return 1
+            }
+            emitErr(scriptName + ": command not found: " + name + "\n")
+            return {ret: 127, isExit: 1}
+        }
+        skipFuncs = true
+        return runCommand(name, args.slice(i + 1))
     }
 
     // Call a user function: bind $1.. to args, run the body, restore, return its status.
