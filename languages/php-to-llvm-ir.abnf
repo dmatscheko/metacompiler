@@ -1297,8 +1297,8 @@ RefItem     <~~ push({er: pop()}) ~~>
 KeyedItem   <~~ var v = pop(); v.hk = pop(); push(v) ~~>
             = Expression "=>" ( KeyedRef | KeyedVal ) ;
 KeyedRef    <~~ push({hr: pop()}) ~~> = RefAmp Target ;
-KeyedVal    <~~ push({hv: pop()}) ~~> = Expression ;
-PlainItem   <~~ push({elem: pop()}) ~~>
+KeyedVal    <~~ push({hv: pop(), rl: refLitAt[0] == up.start && refLitAt[1] == up.pos}) ~~> = Expression ;
+PlainItem   <~~ push({elem: pop(), rl: refLitAt[0] == up.start && refLitAt[1] == up.pos}) ~~>
             = Expression ;
 
 // f(args): a top-level function or builtin call.
@@ -3894,9 +3894,13 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     var litCells = []
     function makeArray(items, start, end) {
         var refs = false
-        for (var r = 0; r < items.length; r++) { if (items[r].hr != undefined || items[r].er != undefined) { refs = true } }
-        if (refs) { refLitAt = [start, end] }
-        return function(b) {
+        var nested = []
+        for (var r = 0; r < items.length; r++) {
+            if (items[r].hr != undefined || items[r].er != undefined) { refs = true }
+            nested.push(items[r].rl === true)
+            if (nested[r]) { refs = true }
+        }
+        var t = function(b) {
             var d = callExt(b, "js_pharr", [])
             var cells = []
             for (var k = 0; k < items.length; k++) {
@@ -3904,6 +3908,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                     // The key is evaluated before a by-reference target (zend_compile_array).
                     var rk = items[k].hk(b); b = rk.b
                     var rv = items[k].hr != undefined ? targetCell(b, items[k].hr) : items[k].hv(b); b = rv.b
+                    if (nested[k]) { for (var c = 0; c < litCells.length; c++) { cells.push(litCells[c]) } }
                     if (items[k].hr != undefined) {
                         callExt(b, "js_phrebind", [hUndef, rv.v])
                         cells.push(rv.v)
@@ -3919,12 +3924,15 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                     callExt(b, "js_phmerge", [d, rs.v])
                 } else {
                     var re = items[k].elem(b); b = re.b
+                    if (nested[k]) { for (var c2 = 0; c2 < litCells.length; c2++) { cells.push(litCells[c2]) } }
                     callExt(b, "js_phpush", [d, re.v])
                 }
             }
             if (refs) { litCells = cells }
             return {b: b, v: d}
         }
+        if (refs) { refLitAt = [start, end] }
+        return t
     }
 
     // An interpolated value is checked as a string (__mec_strchk) with

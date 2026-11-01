@@ -1736,6 +1736,22 @@ function s87() {
     check("pc2", $az[0] === 9 && $aw[0] === 9);
 }
 
+// ===== SECTION 88: an array literal nested in another is no holder of its own =====
+// A literal nested as an element of another is built straight into it, so its
+// '&' elements are held by its slots and the referenced variables and nothing
+// else; an array copy then makes one only its own slot holds a plain value
+// (zend_array_dup_element).
+function s88() {
+    $a = 1;
+    $b = 2;
+    $m = [[[&$a]], "k" => [&$b, 5]];
+    unset($a);
+    $c = $m;
+    $c[0][0][0] = 9;
+    $c["k"][0] = 8;
+    check("nl1", $m[0][0][0] === 1 && $m["k"][0] === 8 && $b === 8);
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -1768,6 +1784,7 @@ function main() {
     s85(); // SECTION-CALL 85
     s86(); // SECTION-CALL 86
     s87(); // SECTION-CALL 87
+    s88(); // SECTION-CALL 88
     echo "full: " . $checks . " checks, " . $failures . " failures\n";
     return $failures;
 }

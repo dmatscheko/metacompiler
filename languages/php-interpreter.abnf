@@ -1236,8 +1236,8 @@ SpreadItem  <~~ push({spread: pop()}) ~~>
 KeyedItem   <~~ var v = pop(); v.hk = pop(); push(v) ~~>
             = Expression "=>" ( KeyedRef | KeyedVal ) ;
 KeyedRef    <~~ push({hr: pop()}) ~~> = "&" !"&" Target ;
-KeyedVal    <~~ push({hv: pop()}) ~~> = Expression ;
-PlainItem   <~~ push({elem: pop()}) ~~>
+KeyedVal    <~~ push({hv: pop(), rl: refLitAt[0] == up.start && refLitAt[1] == up.pos}) ~~> = Expression ;
+PlainItem   <~~ push({elem: pop(), rl: refLitAt[0] == up.start && refLitAt[1] == up.pos}) ~~>
             = Expression ;
 
 // f(args): a top-level function or builtin call.
@@ -3565,19 +3565,39 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // storage cell; the key is evaluated before the target (zend_compile_array).
     // The source span of the last literal with such elements parsed is refLitAt
     // (AssignRhs), and the cells an evaluated one bound are left in litCells for
-    // makeAssign. Twin of makeArray in php-to-llvm-ir.abnf.
+    // makeAssign. A literal with such elements nested as an element value (rl,
+    // its span is refLitAt) is one too: the outer one takes the inner one as it is,
+    // a temporary nothing else holds, and its cells with it. Twin of makeArray in
+    // php-to-llvm-ir.abnf.
     var refLitAt = [-1, -1]
     var litCells = []
     function makeArray(items, start, end) {
         var refs = false
-        for (var r = 0; r < items.length; r++) { if (items[r].hr != undefined || items[r].er != undefined) { refs = true } }
+        var nested = []
+        for (var r = 0; r < items.length; r++) {
+            if (items[r].hr != undefined || items[r].er != undefined) { refs = true }
+            nested.push(items[r].rl === true)
+            if (nested[r]) { refs = true }
+        }
         var t = function() {
             var d = newArr()
-            var cells = anytype
-            cells = refs ? [] : litCells
+            var cells = []
             for (var k = 0; k < items.length; k++) {
                 var it = items[k]
-                if (it.hr != undefined) { cells.push(arrRefAt(d, phpKey(it.hk()), it.hr)) }
+                if (nested[k]) {
+                    var nv = anytype
+                    if (it.hk != undefined) {
+                        var nk = anytype
+                        nk = it.hk()
+                        nv = it.hv()
+                        arrSet(d, nk, nv)
+                    } else {
+                        nv = it.elem()
+                        arrPush(d, nv)
+                    }
+                    for (var c = 0; c < litCells.length; c++) { cells.push(litCells[c]) }
+                }
+                else if (it.hr != undefined) { cells.push(arrRefAt(d, phpKey(it.hk()), it.hr)) }
                 else if (it.er != undefined) { cells.push(arrRefAt(d, undefined, it.er)) }
                 else if (it.hk != undefined) { arrSet(d, it.hk(), phpCopy(it.hv())) }
                 else if (it.spread != undefined) {
