@@ -4067,7 +4067,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             else if (items[i].body != undefined) { body = items[i].body }
             else if (items[i].ftgt == undefined) { collT = items[i] }
         }
-        // The loop runs over js_rforit's iterator (see abnf/jsrtruby.go), inside an
+        // The loop runs over js_rforit's iterator (see abnf/jsrtruby.go; it is told
+        // whether one variable takes each whole yield), inside an
         // ensure that closes it, so a Hash's iteration count drops however the loop
         // is left: a break, a raise, a return or a throw.
         return function(b) {
@@ -4076,7 +4077,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             hidCount++
             var itName = "$forit" + hidCount
             var valName = "$forv" + hidCount
-            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, itName), callExt(b, "js_rforit", [rc.v])])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, itName), callExt(b, "js_rforit", [rc.v, whole ? hTrue : hFalse])])
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, valName),
                 callExt(b, "js_rforval", [callExt(b, "js_scope_get", [curScopeV, emitStr(b, itName)])])])
             var loopT = function(lb) {

@@ -1789,9 +1789,32 @@ end
 # ===== SECTION 163: for over an Enumerator =====
 # `for' over an Enumerator runs over its elements, and answers what the
 # Enumerator's #each does: nil after each_slice / each_cons, the receiver after
-# the other each* methods; a break still answers its value. /usr/bin/ruby 2.6
-# settles each.
+# the other each* methods; a break still answers its value. It binds each yield
+# as a block parameter list would: one loop variable takes the first value of a
+# multi-value yield (each_with_index, with_index, a user `yield 1, 2' through
+# map), several destructure. /usr/bin/ruby 2.6 settles each.
+class S163Y
+  include Enumerable
+  def each; yield 1, 2; yield 3; yield [4, 5]; yield; end
+end
 def s163
+  y = []
+  for v in [5, 6].each_with_index; y << v; end
+  for v in [7, 8].each.with_index(1); y << v; end
+  for v in [7, 8].each_with_object([]); y << v; end
+  for v in [1, 2, 3, 4].each_slice(2); y << v; end
+  for a, b in [1, 2, 3, 4].each_slice(2); y << b; end
+  for a, b in [7, 8].map.with_index; y << b; end
+  check("for163c", y == [5, 6, 7, 8, 7, 8, [1, 2], [3, 4], 2, 4, 0, 1])
+  z = []
+  for v in S163Y.new.map; z << v; end
+  for v in S163Y.new.select; z << v; end
+  for a, b in S163Y.new.map; z << [a, b]; end
+  for v in S163Y.new.each_with_index; z << v; end
+  for v, i in S163Y.new.each_with_index; z << i; end
+  check("for163d", z == [1, 3, [4, 5], nil, [1, 2], 3, [4, 5], nil, [1, 2], [3, nil], [4, 5], [nil, nil],
+                         [1, 2], 3, [4, 5], nil, 0, 1, 2, 3])
+
   r = []
   v = for x in [1, 2, 3].each_slice(2); r << x; end
   w = []

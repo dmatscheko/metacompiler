@@ -3136,7 +3136,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             else if (isRange(coll)) { seq = rangeToA(coll) }
             else if (isEnum(coll)) {
                 val = forEnumVal(coll)
-                seq = mcall(coll, "to_a", [], null)
+                seq = forEnumItems(coll, whole)
             }
             else { fail("for-in needs an array or a hash") }
             for (var i = 0; i < seq.length; i++) {
@@ -3147,7 +3147,32 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             return val
         }
     }
-    // `for` over an Enumerator runs over its elements (#to_a). The loop answers what
+    // `for` over an Enumerator binds each yield the way a block parameter list does:
+    // `for a, b' destructures what #to_a packs, and a single loop variable takes
+    // the FIRST of a multi-value yield. with_index, with_object, each_with_index
+    // and each_with_object always yield two values; each / map / flat_map over a
+    // user #each yield what that #each does, so it is driven directly (lazyDrive)
+    // to see each yield's count. Every other Enumerator yields one value. Twins:
+    // rubyForEnumItems in abnf/jsrtruby.go, rbForEnumItems in lib/ruby-rt.metajs.
+    function forEnumItems(e, whole) {
+        var all = []
+        if (whole && e.__rdefer === true && rbaForPassMeth(e.meth)) {
+            lazyDrive(e.src, function(v, multi) {
+                all.push(multi ? v[0] : v)
+                return false
+            })
+            return all
+        }
+        all = mcall(e, "to_a", [], null)
+        if (!whole) { return all }
+        if (rbaForPairMeth(e.meth)) {
+            var firsts = []
+            for (var i = 0; i < all.length; i++) { firsts.push(Array.isArray(all[i]) ? all[i][0] : all[i]) }
+            return firsts
+        }
+        return all
+    }
+    // The loop answers what
     // the Enumerator's #each would: nil after each_slice / each_cons, the receiver
     // after the other each* methods (a user #each answers its own value, so that one
     // and every other Enumerator answer the Enumerator). Twins: js_rforit in

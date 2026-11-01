@@ -265,6 +265,16 @@ function rbaEnumDefers(n, nargs) {
         || n == "minmax_by" || n == "sort_by" || n == "take_while" || n == "drop_while"
         || n == "each_with_index" || n == "each_entry" || n == "reverse_each"
 }
+// For `for` over an Enumerator (forEnumItems in ruby-interpreter.abnf): does the
+// method m always yield two values (the element and an index or memo)? And does
+// it, made without a block over a user #each, yield what that #each yields? Go
+// twins: rubyForPairMeth / rubyForPassMeth in abnf/jsrtruby.go.
+function rbaForPairMeth(m) {
+    return m == "each_with_index" || m == "each_with_object" || m == "with_index" || m == "with_object"
+}
+function rbaForPassMeth(m) {
+    return m == "each" || m == "map" || m == "collect" || m == "flat_map" || m == "collect_concat"
+}
 
 // Enumerable#slice_before / #slice_after, given whether each element matched:
 // a match opens a new slice before it, or closes the current one after it.

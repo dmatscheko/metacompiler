@@ -10189,12 +10189,12 @@ function js_rattrw(o, k, v, sk, mk) {
 }
 // for VARS in COLL: open, step and close the loop. Twin of js_rforit in
 // abnf/jsrtruby.go, which states the rule.
-function js_rforit(c) {
+function js_rforit(c, whole) {
     var v = anytype
     v = c
     if (rbIsEnum(c)) {
         v = rbForEnumVal(c)
-        c = rbMethod(c, "to_a", [])
+        c = rbForEnumItems(c, whole === true)
     }
     var it = {c: c, i: 0, h: false, ks: false, k: null, lev: 0, n: 0, v: v}
     if (rbIsDict(c)) {
@@ -10228,6 +10228,28 @@ function js_rfornext(it) {
     if (i >= it["n"]) { return undefined }
     it["i"] = i + 1
     return js_pyget(c, i)
+}
+// What `for` over an Enumerator binds, one entry per yield. Twin of
+// rubyForEnumItems in abnf/jsrtruby.go and forEnumItems in
+// ruby-interpreter.abnf, which states the rule.
+function rbForEnumItems(e, whole) {
+    var all = []
+    if (whole && e["__rdefer"] === true && rbaForPassMeth(e["meth"])) {
+        rbLazyDrive(e["src"], function(v, multi) {
+            if (multi) { all.push(v[0]) } else { all.push(v) }
+            return false
+        })
+        return all
+    }
+    all = rbMethod(e, "to_a", [])
+    if (!whole || !rbaForPairMeth(e["meth"])) { return all }
+    var firsts = []
+    var i = 0
+    while (i < all.length) {
+        if (rbIsArr(all[i])) { firsts.push(all[i][0]) } else { firsts.push(all[i]) }
+        i = i + 1
+    }
+    return firsts
 }
 // The loop's value when it runs to its end. Twin of js_rforval in
 // abnf/jsrtruby.go.

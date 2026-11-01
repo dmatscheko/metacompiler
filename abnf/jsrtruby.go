@@ -463,7 +463,7 @@ func (rt *jsrt) addRubyFmtExterns(m map[string]func(args []uint64) uint64) {
 		it.set("v", c)
 		if rubyIsEnum(c) {
 			it.set("v", rubyForEnumVal(c.(*jsObject)))
-			c = rt.rubyMethod(c, "to_a", nil)
+			c = rt.rubyForEnumItems(c.(*jsObject), len(a) > 1 && u(a[1]) == true)
 		}
 		it.set("c", c)
 		it.set("i", float64(0))
@@ -1846,6 +1846,46 @@ func (rt *jsrt) rubyStopIter(name string, t *jsObject) {
 // rubyObjCmp is Object#<=> on a user object whose class defines no <=>: is it
 // 0 (else nil)? Twin of objCmp in ruby-interpreter.abnf, which states the rule,
 // and rbObjCmp in lib/ruby-rt.metajs.
+// rubyForEnumItems: what `for` over an Enumerator binds, one entry per yield.
+// Twin of forEnumItems in ruby-interpreter.abnf, which states the rule, and
+// rbForEnumItems in languages/lib/ruby-rt.metajs.
+func (rt *jsrt) rubyForEnumItems(e *jsObject, whole bool) interface{} {
+	meth, _ := e.props["meth"].(string)
+	if whole && e.props["__rdefer"] == true && rubyForPassMeth(meth) {
+		all := &jsArray{}
+		rt.rubyLazyDrive(e.props["src"], func(v interface{}, multi bool) bool {
+			if multi {
+				v = v.(*jsArray).elems[0]
+			}
+			all.elems = append(all.elems, v)
+			return false
+		})
+		return all
+	}
+	all := rt.rubyMethod(e, "to_a", nil)
+	arr, isArr := all.(*jsArray)
+	if !whole || !isArr || !rubyForPairMeth(meth) {
+		return all
+	}
+	firsts := &jsArray{}
+	for _, x := range arr.elems {
+		if xa, ok := x.(*jsArray); ok && len(xa.elems) > 0 {
+			x = xa.elems[0]
+		}
+		firsts.elems = append(firsts.elems, x)
+	}
+	return firsts
+}
+
+// Twins of rbaForPairMeth / rbaForPassMeth in languages/lib/ruby-arr.js.
+func rubyForPairMeth(m string) bool {
+	return m == "each_with_index" || m == "each_with_object" || m == "with_index" || m == "with_object"
+}
+
+func rubyForPassMeth(m string) bool {
+	return m == "each" || m == "map" || m == "collect" || m == "flat_map" || m == "collect_concat"
+}
+
 // rubyForEnumVal: what `for` over an Enumerator answers. Twin of forEnumVal in
 // ruby-interpreter.abnf, which states the rule, and rbForEnumVal in
 // languages/lib/ruby-rt.metajs.
