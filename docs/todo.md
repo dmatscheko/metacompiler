@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1048** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1049** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -69,8 +69,11 @@ Remainder of T-1028; each needs a table-size decision before work starts. CJK fa
 
 # RB — Ruby
 
-### T-1043 ruby: all?/any?/none?/one? don't short-circuit; `[[1], nil].sum([])` escapes rescue · P3 · RB · IN PROGRESS (RB worker, round 42) [V]
-ruby 2.6 (found by RB r41), all three engines: `s=[]; [1,2,3].any?{|x| s<<x; true}; p s` → [1]; ours [1, 2, 3] (same for all?/none?, one? should stop at the 2nd true; also on Range). `[[1], nil].sum([])` → catchable TypeError "no implicit conversion of nil into Array"; interpreter dies with host error "not a number in '+'" that `rescue TypeError` cannot catch (check compiled legs).
+### T-1048 ruby: Enumerable over a user #each doesn't stop early; Array#* / #/ #% #** with bad operands · P3 · RB · OPEN [V]
+ruby 2.6 (found by RB r42), all three engines:
+- `class C; include Enumerable; def initialize(l);@l=l;end; def each; [1,2,3].each{|x| @l<<x; yield x}; end; end`; `log=[]; C.new(log).any?{|x| x==1}; p log` → [1]; ours [1, 2, 3]. Same for first, find, include? (→ [1]) and first(2) (→ [1, 2]), take_while. The to_a delegation runs #each to the end; needs a break out of the user's each from the collecting block.
+- `[1] * nil` → TypeError "no implicit conversion from nil to integer"; `[1] * :a` → "no implicit conversion of Symbol into Integer" (Hash/true/objects alike). Ours returns [].
+- `[1] / x`, `[1] % x` → NoMethodError "undefined method `/' for [1]:Array" (`**` adds "Did you mean?  *"); ours aborts with "not a number in '/'".
 
 # JS — JavaScript and TypeScript
 
@@ -1090,6 +1093,7 @@ T-1034 bash: subscript/attribute edge cases left by T-1017; read -n/-N; computed
 T-1037 csharp: Parse overflow; two-arg Argument* ctors; absent members == null — DONE (CS r5, 61eb7cf3): integral Parse overflow per type (format errors win, -0 ok for unsigned, .NET IsWhite set); two-arg Argument*/inner-exception ctors incl. : base(a,b); undefined == null in C# equality. Master spec probe (ctor messages, field/member == null, overflow, bounds): 3 legs agree.
 T-1031 js: regex `v` flag class-set syntax and strictness; lookbehind; `(?i:...)` modifiers — DONE (JS r40, 680aacaa): lookbehind (backward emission, node-identical captures), (?ims-ims:) modifiers, v-flag class sets/strictness with V8 texts; also \r/U+2028/9 line terminators, \P{} under i, v-mode surrogate advancement. Properties of strings declined (no emoji-sequence data). Master probe vs node 24 (22 lines): 4 legs agree; dart+js rows green.
 T-1042 kotlin: exact ULong ranges past 2^53; `expr.member::class`; IntRange.EMPTY — DONE (KT r19, 57416b54): exact unsigned ULong ranges (iteration/in/step/count/for-last), ::class on member-access receivers, range companions EMPTY. Master probe vs kotlinc 2.2.21 (16 lines incl. ULong.MAX ranges): 4 legs agree.
+T-1043 ruby: all?/any?/none?/one? don't short-circuit; `[[1], nil].sum([])` escapes rescue — DONE (RB r42, d4af700b): all?/any?/none?/one? short-circuit (Array/Range/Hash); Array#+ - & | take Array/to_ary (incl. singleton) else catchable TypeError — fixes [[1], nil].sum([]). Master probe vs ruby 2.6 (sent back once for singleton to_ary in the interpreter): 4 legs agree.
 
 # Settled — do not re-open
 
