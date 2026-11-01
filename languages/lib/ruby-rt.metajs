@@ -12317,12 +12317,15 @@ function js_rargrest(args, i_raw) {
 //             "2" splat.
 //   wantsKw - the method declares keyword parameters, so a trailing Hash is the
 //             keyword hash and NOT a positional value.
+//   mode_raw - 0 a method or lambda (arity-checked), 1 a block (loose: a missing
+//             argument is nil, an extra one is dropped), 2 a block that also
+//             auto-splats a single Array argument.
 //
 // The answer is one value per character: undefined for an optional that was not
 // given (so the emitter's js_rundef default branch still fires), an Array for the
 // splat, nil for a required one that was not passed. Mirrors bindParams of
 // ruby-interpreter.abnf.
-function js_rposbind(args, off_raw, kinds, wantsKw) {
+function js_rposbind(args, off_raw, kinds, wantsKw, mode_raw) {
     var out = []
     var pos = []
     if (rbIsArr(args)) {
@@ -12350,6 +12353,14 @@ function js_rposbind(args, off_raw, kinds, wantsKw) {
     // `def m(f = 3); end; m(some_proc)' needs.
     var npos = pos.length
     if (npos > 0 && rbIsBlk(pos[npos - 1])) { npos = npos - 1 }
+    // An absent value (a group whose element was not passed) is nil.
+    var mode = mode_raw
+    if (mode == 2 && npos == 1) {
+        if (rbIsArr(pos[0])) {
+            pos = pos[0]
+            npos = pos.length
+        } else if (pos[0] === undefined) { pos = [null] }
+    }
     var required = 0
     var i = 0
     while (i < kinds.length) {
@@ -12358,10 +12369,9 @@ function js_rposbind(args, off_raw, kinds, wantsKw) {
     }
     // Too few positional arguments is an ArgumentError in MRI, and this is the
     // general shape of the check; the all-required fast path skips js_rposbind
-    // entirely and asks it separately, through js_rargchk. A BLOCK never reaches
-    // here - the emitter binds one with js_rblockarg, and Ruby arity-checks
-    // methods and lambdas only.
-    if (npos < required) { rbArgCountErr(npos, kinds, true) }
+    // entirely and asks it separately, through js_rargchk. A block is not checked:
+    // Ruby arity-checks methods and lambdas only.
+    if (mode == 0 && npos < required) { rbArgCountErr(npos, kinds, true) }
     // TOO MANY IS AN ERROR TOO, and only a *splat lifts the ceiling. MRI raises for
     // `->(x, y = 2) { }.call(1, 2, 3)' exactly as it does for too few.
     // bindParams of ruby-interpreter.abnf and js_rargchk's fast path ask the same
@@ -12372,7 +12382,7 @@ function js_rposbind(args, off_raw, kinds, wantsKw) {
         if (kinds.charAt(s0) == "2") { star = true }
         s0 = s0 + 1
     }
-    if (!star && npos > kinds.length) { rbArgCountErr(npos, kinds, true) }
+    if (mode == 0 && !star && npos > kinds.length) { rbArgCountErr(npos, kinds, true) }
     var spare = npos - required
     var ai = 0
     var k = 0
@@ -12451,18 +12461,20 @@ function js_rblock(args) {
     return null
 }
 
-// A BLOCK parameter read: Ruby auto-splats a single Array argument over a block
-// that declares more than one parameter. Both counts are RAW parameters.
-function js_rblockarg(args, i_raw, n_raw) {
+// A BLOCK parameter read on the all-required fast path: when the block's shape
+// auto-splats (splat, decided by blkAutoSplat of the emitter) a single Array
+// argument spreads. i is a RAW parameter.
+function js_rblockarg(args, i_raw, splat) {
     if (!rbIsArr(args)) { return undefined }
     var i = i_raw
-    var n = n_raw
-    if (n > 1 && args.length == 1 && rbIsArr(args[0])) {
+    var npos = args.length
+    if (npos == 2 && rbIsBlk(args[1])) { npos = 1 }
+    if (rbTruthy(splat) && npos == 1 && rbIsArr(args[0])) {
         var inner = args[0]
         if (i < inner.length) { return inner[i] }
         return undefined
     }
-    if (i < args.length) { return args[i] }
+    if (i < npos) { return args[i] }
     return undefined
 }
 
@@ -12512,14 +12524,20 @@ function js_rlambda(f) {
 // `kinds' is js_rposbind's encoding, recorded at the block LITERAL by the emitter -
 // the arity registry could not supply it, being armed only when the program names
 // `arity'. The registry entry, if there is one, is re-registered onto the wrapper so
-// Proc#arity still answers.
-function js_rlamchk(f, kinds) {
+// Proc#arity still answers. A lambda never auto-splats, and a block whose shape
+// does (splat) is handed a single Array argument wrapped once more, so the spread
+// yields the Array itself.
+function js_rlamchk(f, kinds, splat) {
     if (!rbIsFn(f)) { return f }
+    var spreads = rbTruthy(splat)
     var w = function() {
         var av = []
         var i = 0
         while (i < arguments.length) { av.push(arguments[i]); i = i + 1 }
         rbLamArity(av, kinds)
+        var npos = av.length
+        if (npos > 0 && rbIsBlk(av[npos - 1])) { npos = npos - 1 }
+        if (spreads && npos == 1 && rbIsArr(av[0])) { av[0] = [av[0]] }
         return f.apply(undefined, av)
     }
     var rec = rtPairGet(rbArityFns, rbArityRec, f)

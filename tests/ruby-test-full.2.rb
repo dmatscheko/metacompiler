@@ -2101,6 +2101,51 @@ def s167
   check("ext167g", g == [1, "uncaught throw :t", "boom", nil])
 end
 
+# ===== SECTION 168: block parameter auto-splat and binding shapes =====
+# A proc called with ONE Array argument spreads it over its parameters when the
+# list has a required parameter, more than one optional or a keyword one, unless
+# the list is a lone name (`|a|`; `|a, |` with a trailing comma does spread, and
+# `|a, &b|` does not). The spread values bind as a method's do: after a *rest
+# from the end, an optional only with spares, but loosely. A group `(b, c)`
+# destructures its element the same way (a non-Array is its one element), and
+# block-locals after `;` take no argument. A lambda never spreads.
+# /usr/bin/ruby 2.6 settles each.
+def s168y; yield [4, 5, 6]; end
+def s168y4; yield 4; end
+def s168
+  a = []
+  [[1, 2, 3]].each { |m, *r| a << [m, r] }
+  s168y { |m, *r| a << [m, r] }
+  [[1, [2, 3], 4, 5]].each { |m, (x, y), *r| a << [m, x, y, r] }
+  [[1, 2, 3]].each { |*r| a << r }
+  {k: 1}.each { |k, *v| a << [k, v] }
+  check("blk168a", a == [[1, [2, 3]], [4, [5, 6]], [1, 2, 3, [4, 5]], [[1, 2, 3]], [:k, [1]]])
+  b = []
+  s168y { |x, | b << x }
+  s168y { |x, &f| b << x }
+  s168y { |x = 1| b << x }
+  s168y { |x = 1, y = 2| b << [x, y] }
+  s168y { |x = 1, *r| b << [x, r] }
+  s168y { |*r, k: 1| b << [r, k] }
+  s168y { |*r, z| b << [r, z] }
+  s168y { |x; t| b << [x, t] }
+  check("blk168b", b == [4, [4, 5, 6], [4, 5, 6], [4, 5], [[4, 5, 6], []], [[4, 5, 6], 1], [[4, 5], 6], [[4, 5, 6], nil]])
+  c = []
+  s168y { |x, (y, z)| c << [x, y, z] }
+  s168y4 { |x, (y, *z)| c << [x, y, z] }
+  s168y { |x, y = 9, *r, z| c << [x, y, r, z] }
+  s168y4 { |x, y = 9, *r, z| c << [x, y, r, z] }
+  [[[1, 2], 3]].each { |(x, y)| c << [x, y] }
+  check("blk168c", c == [[4, 5, nil], [4, nil, []], [4, 5, [], 6], [4, 9, [], nil], [[1, 2], 3]])
+  d = []
+  l = lambda { |m, *r| d << [m, r] }
+  l.call([7, 8])
+  [[1, 2]].each(&l)
+  pr = proc { |m, *r| d << [m, r] }
+  pr.call([7, 8])
+  check("blk168d", d == [[[7, 8], []], [[1, 2], []], [7, [8]]])
+end
+
 s122() # SECTION-CALL 122
 s123() # SECTION-CALL 123
 s124() # SECTION-CALL 124
@@ -2147,5 +2192,6 @@ s164() # SECTION-CALL 164
 s165() # SECTION-CALL 165
 s166() # SECTION-CALL 166
 s167() # SECTION-CALL 167
+s168() # SECTION-CALL 168
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

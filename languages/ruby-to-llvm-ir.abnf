@@ -1138,13 +1138,13 @@ GuardedBlockBody <~~ push({body: makeGuardedBody(takeAll()), btext: up.in}) ~~>
             = GuardedItems ;
 BlockParams <~~ push({bparams: takeAll()}) ~~>
 // The trailing comma is legal and meaningful: `{ |a, | ... }` forces the single
-// argument to be DESTRUCTURED rather than taken whole.
-            = "|" [ BParam { "," BParam } [ "," ] ] [ ";" BLocal { "," BLocal } ] "|" ;
+// argument to be DESTRUCTURED rather than taken whole (XComma marks it).
+            = "|" [ BParam { "," BParam } [ XComma ] ] [ ";" BLocal { "," BLocal } ] "|" ;
+XComma      = "," <~~ push({blocal: true, xcomma: true}) ~~> ;
 // After a `;` come the block-LOCAL variables: names that are fresh in the block even
-// when the enclosing scope has one of the same name. They are ordinary parameters here
-// (a block is always called with fewer arguments than it has names, and the extra ones
-// arrive as nil, which is exactly what a block-local starts as).
-BLocal      = Name <~~ push({param: up.in}) ~~> ;
+// when the enclosing scope has one of the same name. They start as nil and take no
+// argument.
+BLocal      = Name <~~ push({param: up.in, blocal: true}) ~~> ;
 // A block parameter may be a parenthesized group that destructures one element:
 // `[[1, [2, 3]]].each { |a, (b, c)| ... }`.
 // A default value inside |...| may NOT be a full expression: `{ |a=5, b=4| ... }`
@@ -3658,9 +3658,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             return {name: "$grp" + hidCount, pgroup: subs}
         }
         var pn = it.param
-        if (pn == null || pn == undefined) { pn = "$rest" }
+        if (pn == null || pn == undefined) { pn = it.xcomma === true ? "$xcomma" : "$rest" }
         return {name: pn, defT: it.defT, splat: it.splat === true, kw: it.kw === true,
-                kwrest: it.kwrest === true, blockp: it.blockp === true}
+                kwrest: it.kwrest === true, blockp: it.blockp === true,
+                blocal: it.blocal === true, xcomma: it.xcomma === true}
     }
     function blockParams(items) {
         var params = []
@@ -3718,12 +3719,39 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         for (var i = 0; i < params.length; i++) {
             var p = anytype
             if (typeof params[i] == "string") { p = {name: params[i]} } else { p = params[i] }
-            if (p.blockp === true || p.kw === true || p.kwrest === true) { continue }
+            if (!isPosParam(p)) { continue }
             if (p.splat === true) { kinds = kinds + "2" }
             else if (p.defT != undefined && p.defT != null) { kinds = kinds + "1" }
             else { kinds = kinds + "0" }
         }
         return kinds
+    }
+    // Whether a parameter takes a positional argument: keyword, **rest, &blk and
+    // block-local ones do not.
+    function isPosParam(p) {
+        return p.kw !== true && p.kwrest !== true && p.blockp !== true && p.blocal !== true
+    }
+    // MRI's block auto-splat (setup_parameters_complex): a proc called with ONE
+    // Array argument spreads it over its parameters when it has a required one,
+    // more than one optional or a keyword one - unless its list is a lone required
+    // name (`|a|`, the "ambiguous" shape; `|a, |` with its trailing comma is not).
+    // A &blk parameter does not make the list unambiguous. Twin of blkAutoSplat in
+    // ruby-interpreter.abnf.
+    function blkAutoSplat(params) {
+        var req = 0
+        var opt = 0
+        var kw = false
+        var other = false
+        for (var i = 0; i < params.length; i++) {
+            var p = anytype
+            if (typeof params[i] == "string") { p = {name: params[i]} } else { p = params[i] }
+            if (p.kw === true || p.kwrest === true) { kw = true }
+            if (p.xcomma === true || p.splat === true || kw) { other = true }
+            if (!isPosParam(p) || p.splat === true) { continue }
+            if (p.defT != undefined && p.defT != null) { opt = opt + 1 } else { req = req + 1 }
+        }
+        if (req == 1 && opt == 0 && !other) { return false }
+        return req > 0 || opt > 1 || kw
     }
     // Proc#arity needs a closure's PARAMETER SHAPE, and no function value carries one
     // in either engine. Both halves therefore keep a registry keyed by function
@@ -3741,7 +3769,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         for (var i = 0; i < params.length; i++) {
             var p = anytype
             if (typeof params[i] == "string") { p = {name: params[i]} } else { p = params[i] }
-            if (p.kw === true || p.kwrest === true || p.blockp === true) { continue }
+            if (!isPosParam(p)) { continue }
             if (p.splat === true) { star = true }
             else if (p.defT != undefined && p.defT != null) { opt = opt + 1 }
             else { req = req + 1 }
@@ -3767,7 +3795,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // the one place it is free.
         // blkMethT emits the same block in the METHOD convention (the receiver is
         // argument 0 and binds self), for a define_method body (dmArgs).
-        return {blkKinds: paramKinds(params), blkFrom: from, blkTo: to, blkT: function(b) {
+        return {blkKinds: paramKinds(params), blkSplat: blkAutoSplat(params), blkFrom: from, blkTo: to, blkT: function(b) {
             curBlkDepth++
             var idx = emitFunc(params, bodyStmt, false, false, true)
             curBlkDepth--
@@ -3850,7 +3878,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 var ea = args[ei]
                 if (ea != null && ea != undefined && typeof ea != "function" && ea.blkMethT != undefined) {
                     evalDefsOut(ea.blkFrom, ea.blkTo)
-                    eo.push({blkKinds: ea.blkKinds, blkT: evalBlockT(ea.blkMethT), blkSelf: true})
+                    eo.push({blkKinds: ea.blkKinds, blkSplat: ea.blkSplat, blkT: evalBlockT(ea.blkMethT), blkSelf: true})
                 } else { eo.push(ea) }
             }
             return eo
@@ -3871,8 +3899,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             var a = args[i]
             if (a != null && a != undefined && typeof a != "function" && a.blkMethT != undefined) {
                 lit = true
-                if (dm) { out.push({blkKinds: a.blkKinds, blkT: a.blkMethT, blkSelf: true}) }
-                else { out.push({blkKinds: a.blkKinds, blkT: a.blkT, blkMethT: a.blkMethT, twinCall: name}) }
+                if (dm) { out.push({blkKinds: a.blkKinds, blkSplat: a.blkSplat, blkT: a.blkMethT, blkSelf: true}) }
+                else { out.push({blkKinds: a.blkKinds, blkSplat: a.blkSplat, blkT: a.blkT, blkMethT: a.blkMethT, twinCall: name}) }
             } else { out.push(a) }
         }
         if (dm) {
@@ -5448,12 +5476,13 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if ((name == "lambda" || name == "proc") && args.length > 0) {
             var blkT = null
             var blkKinds = null
+            var blkSplat = false
             var blkMethT = null
             for (var q = 0; q < args.length; q++) {
                 if (args[q] != undefined && typeof args[q] != "function" && args[q].blkT != undefined) {
                     blkT = args[q].blkT
                     blkMethT = args[q].blkMethT != undefined ? args[q].blkMethT : null
-                    if (typeof args[q].blkKinds == "string") { blkKinds = args[q].blkKinds }
+                    if (typeof args[q].blkKinds == "string") { blkKinds = args[q].blkKinds; blkSplat = args[q].blkSplat === true }
                 }
             }
             if (blkT != null) {
@@ -5484,9 +5513,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                     // entry is re-registered onto it (js_rlamchk does that) and two
                     // `lambda' calls on the SAME block object answer two different
                     // Procs. Neither is observable in Ruby - a block literal is not a
-                    // Procs. Neither is observable in Ruby - a block literal is not a value there at all.
+                    // value there at all. The wrapper also keeps the block from
+                    // auto-splatting (blkSplat), which a lambda never does.
                     var lv = r.v
-                    if (blkKinds != null) { lv = callExt(r.b, "js_rlamchk", [lv, emitStr(r.b, blkKinds)]) }
+                    if (blkKinds != null) { lv = callExt(r.b, "js_rlamchk", [lv, emitStr(r.b, blkKinds), blkSplat ? hTrue : hFalse]) }
                     var lamV = callExt(r.b, "js_rlambda", [lv])
                     if (twin) { return {b: emitMethTwin(r.b, lamV, blkMethT), v: lamV} }
                     return {b: r.b, v: lamV}
@@ -5778,6 +5808,17 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
         return out
     }
+    // The local names a parameter list declares, with the names inside a
+    // parenthesized group (`|m, (x, y)|`) as well: they shadow a method of the same
+    // name in the body.
+    function paramLocals(ps, out) {
+        for (var i = 0; i < ps.length; i++) {
+            if (typeof ps[i] == "string") { out.push(ps[i]); continue }
+            out.push(ps[i].name)
+            if (ps[i].pgroup != undefined) { paramLocals(ps[i].pgroup, out) }
+        }
+        return out
+    }
     // emitParams binds one function's parameters in its entry block. A parameter is
     // either a plain name or a descriptor {name, defT, splat, kw, kwrest, blockp}:
     //   - the positional ones (including *rest) are bound in one step by
@@ -5804,31 +5845,32 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // ones beyond what the required parameters need, and a trailing keyword Hash
         // is not a positional value at all. `kinds' is that whole shape - one
         // character per positional parameter, "0" required, "1" optional, "2" splat -
-        // and bindV[k] is the k-th positional parameter's value. A BLOCK keeps
-        // js_rblockarg: a block auto-splats a single Array argument and blkBind of
-        // ruby-interpreter.abnf binds its parameters left to right, so the two halves
-        // agree there already.
+        // and bindV[k] is the k-th positional parameter's value. A BLOCK binds the
+        // same way but loosely (mode 1: no arity error), and auto-splats a single
+        // Array argument when its shape asks for that (mode 2, blkAutoSplat).
         var kinds = ""
         var wantsKw = false
         for (i = 0; i < params.length; i++) {
             var pk = anytype
             if (typeof params[i] == "string") { pk = {name: params[i]} } else { pk = params[i] }
-            if (pk.blockp === true) { continue }
+            if (pk.blockp === true || pk.blocal === true) { continue }
             if (pk.kw === true || pk.kwrest === true) { wantsKw = true; continue }
             if (pk.splat === true) { kinds = kinds + "2" }
             else if (pk.defT != undefined && pk.defT != null) { kinds = kinds + "1" }
             else { kinds = kinds + "0" }
         }
         // The COMMON shape - every positional parameter required, no keywords - is
-        // emitted as one js_arg per index, because js_rposbind's answer is then
-        // provably args[off + k] for every k and the call would allocate one Array
-        // per invocation for nothing.
+        // emitted as one js_arg (a block: js_rblockarg) per index, because
+        // js_rposbind's answer is then provably args[off + k] for every k and the
+        // call would allocate one Array per invocation for nothing.
         var simple = !wantsKw
         for (i = 0; i < kinds.length; i++) { if (kinds.charAt(i) != "0") { simple = false } }
+        var splats = isBlock === true && blkAutoSplat(params)
         var bindV = null
-        if (isBlock !== true && kinds.length > 0 && !simple) {
+        if (kinds.length > 0 && !simple) {
+            var mode = isBlock !== true ? 0 : (splats ? 2 : 1)
             bindV = callExt(b, "js_rposbind", [argsV, handle(off), emitStr(b, kinds),
-                                               wantsKw ? hTrue : hFalse])
+                                               wantsKw ? hTrue : hFalse, handle(mode)])
         }
         // TOO FEW POSITIONAL ARGUMENTS IS AN ARGUMENT ERROR, and the check has to be
         // in TWO places because the fast path above skips js_rposbind entirely;
@@ -5854,6 +5896,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 callExt(b, "js_scope_decl", [curScopeV, nameV, callExt(b, "js_rblock", [argsV])])
                 continue
             }
+            if (p.blocal === true) {
+                callExt(b, "js_scope_decl", [curScopeV, nameV, hNull])
+                continue
+            }
             if (p.splat === true) {
                 var splV = anytype
                 if (bindV != null) { splV = callExt(b, "js_rget", [bindV, emitNum(b, pi)]); pi = pi + 1 }
@@ -5876,17 +5922,16 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 b = emitParamDefault(b, p, "js_seq")
                 continue
             }
-            // A method or lambda parameter takes its value from the js_rposbind
-            // answer above. Inside a BLOCK js_rblockarg still reads the argument list
-            // directly, so that a single Array argument auto-splats over several
-            // parameters. js_arg is the remaining fallback (a block's positional
-            // read when kinds is empty).
+            // A parameter takes its value from the js_rposbind answer above, or on
+            // the fast path straight from the argument list: js_rblockarg in a
+            // block, which auto-splats a single Array argument when the shape asks
+            // for it, js_arg otherwise.
             var argV = anytype
             if (bindV != null) {
                 argV = callExt(b, "js_rget", [bindV, emitNum(b, pi)])
                 pi = pi + 1
             } else if (isBlock === true) {
-                argV = callExt(b, "js_rblockarg", [argsV, handle(pos), handle(params.length)])
+                argV = callExt(b, "js_rblockarg", [argsV, handle(pos), splats ? hTrue : hFalse])
             } else {
                 argV = callExt(b, "js_arg", [argsV, handle(pos)])
             }
@@ -5898,17 +5943,28 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             }
             pos = pos + 1
             if (p.pgroup != undefined) {
-                // |a, (b, c)|: the element is destructured positionally into the group.
-                var gV = callExt(b, "js_scope_get", [curScopeV, nameV])
-                for (var g = 0; g < p.pgroup.length; g++) {
-                    callExt(b, "js_scope_decl", [curScopeV, emitStr(b, p.pgroup[g].name),
-                        callExt(b, "js_rget", [gV, emitNum(b, g)])])
-                }
+                b = emitGroupBind(b, callExt(b, "js_scope_get", [curScopeV, nameV]), p.pgroup)
                 continue
             }
             b = emitParamDefault(b, p, "js_rundef")
         }
         return emitKwMissing(b, argsV, params, kwhV)
+    }
+    // |a, (b, *c)|: a group destructures its value as a block binds its arguments,
+    // with the auto-splat unconditional - an Array spreads over the group, anything
+    // else is its one element. Twin of the pgroup case of bindPosParams in
+    // ruby-interpreter.abnf.
+    function emitGroupBind(b, gV, subs) {
+        var oneV = callExt(b, "js_arr_new", [])
+        callExt(b, "js_arr_push", [oneV, gV])
+        var bindV = callExt(b, "js_rposbind", [oneV, handle(0), emitStr(b, paramKinds(subs)), hFalse, handle(2)])
+        for (var g = 0; g < subs.length; g++) {
+            var sV = callExt(b, "js_rget", [bindV, emitNum(b, g)])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, subs[g].name), sV])
+            if (subs[g].pgroup != undefined) { b = emitGroupBind(b, sV, subs[g].pgroup) }
+            else { b = emitParamDefault(b, subs[g], "js_rundef") }
+        }
+        return b
     }
     // A required keyword absent from the call is MRI's ArgumentError, naming every
     // missing one: `missing keyword: a', `missing keywords: a, b'. Twin of the
@@ -6024,13 +6080,13 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             for (var dk = 0; dk < outer.l.length; dk++) { defLocalAdd(outer.l[dk]) }
         }
         if (curDefLocals != null) {
-            var pn = paramNames(params)
+            var pn = paramLocals(params, [])
             for (var pi = 0; pi < pn.length; pi++) { if (typeof pn[pi] == "string") { defLocalAdd(pn[pi]) } }
         } else if (isCtl !== true) {
             var outerT = curTopLocals
             curTopLocals = {m: {}, l: []}
             for (var tk = 0; tk < outerT.l.length; tk++) { topLocalAdd(outerT.l[tk]) }
-            var tpn = paramNames(params)
+            var tpn = paramLocals(params, [])
             for (var tpi = 0; tpi < tpn.length; tpi++) { if (typeof tpn[tpi] == "string") { topLocalAdd(tpn[tpi]) } }
         }
         // A def (or a method in a class body) is the frame a block's `return' leaves;

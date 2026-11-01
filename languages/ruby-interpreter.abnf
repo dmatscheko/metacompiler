@@ -1100,14 +1100,14 @@ BlockBody   <~~ var bb = pop(); push({body: bb.body, btext: up.in}) ~~>
 GuardedBlockBody <~~ push({body: makeGuardedBody(takeAll()), btext: up.in}) ~~>
             = GuardedItems ;
 // The trailing comma is legal and meaningful: `{ |a, | ... }` forces the single
-// argument to be DESTRUCTURED rather than taken whole.
+// argument to be DESTRUCTURED rather than taken whole (XComma marks it).
 // After a `;` come the block-LOCAL variables: names that are fresh in the block even
-// when the enclosing scope has one of the same name. They are ordinary parameters here
-// (a block is always called with fewer arguments than it has names, and the extra ones
-// arrive as nil, which is exactly what a block-local starts as).
+// when the enclosing scope has one of the same name. They start as nil and take no
+// argument.
 BlockParams <~~ push({bparams: takeAll()}) ~~>
-            = "|" [ BParam { "," BParam } [ "," ] ] [ ";" BLocal { "," BLocal } ] "|" ;
-BLocal      = Name <~~ push({param: up.in}) ~~> ;
+            = "|" [ BParam { "," BParam } [ XComma ] ] [ ";" BLocal { "," BLocal } ] "|" ;
+XComma      = "," <~~ push({blocal: true, xcomma: true}) ~~> ;
+BLocal      = Name <~~ push({param: up.in, blocal: true}) ~~> ;
 // A block parameter may be a parenthesized group that destructures one element:
 // `[[1, [2, 3]]].each { |a, (b, c)| ... }`.
 // A default value inside |...| may NOT be a full expression: `{ |a=5, b=4| ... }`
@@ -11917,25 +11917,73 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // returning a value to the iterating method (which would just see a block result),
     // so both leave the block as a host throw that the call site (blockCall / makeCall /
     // foldCallMember) intercepts. `next` is local and simply ends this block run.
-    function blkBind(params, args) {
-        for (var i = 0; i < params.length; i++) {
-            if (params[i].kw === true || params[i].kwrest === true) { continue }
-            var av = anytype
-            av = i < args.length ? args[i] : null
-            if (params[i].pgroup != undefined) {
-                var vv = []
-                if (Array.isArray(av)) { vv = av } else { vv = [av] }
-                blkBind(params[i].pgroup, vv)
-            } else if (params[i].defT != undefined && i >= args.length) {
-                declVar(params[i].param, params[i].defT())
-            } else if (params[i].splat === true) {
-                var rest = []
-                for (var j = i; j < args.length; j++) { rest.push(args[j]) }
-                if (params[i].param != null && params[i].param != undefined) { declVar(params[i].param, rest) }
-            } else {
-                declVar(params[i].param, av)
+    // A block binds its positional parameters (posParams) as a method does
+    // (bindPosParams) but loosely: a missing argument is nil, an extra one is
+    // dropped. Block-local names start as nil, and &blk takes the block the block
+    // itself was called with. `simple' is a list of plain required names only,
+    // bound in place because it is the shape of nearly every block call.
+    function blkBind(params, posParams, simple, args) {
+        var i
+        if (simple) {
+            for (i = 0; i < posParams.length; i++) { declVar(posParams[i].param, i < args.length ? args[i] : null) }
+            return
+        }
+        for (i = 0; i < params.length; i++) {
+            var p = params[i]
+            if (p.blocal === true && p.xcomma !== true) { declVar(p.param, null) }
+            else if (p.blockp === true) {
+                var last = args.length > 0 ? args[args.length - 1] : null
+                declVar(p.param, isBlkArg(last) ? last.__rblk : null)
             }
         }
+        var npos = args.length
+        if (npos > 0 && isBlkArg(args[npos - 1])) { npos = npos - 1 }
+        bindPosParams(posParams, args, npos)
+    }
+    // The positional parameters of a list, and whether the list is plain required
+    // names and nothing else (blkBind's fast path).
+    function posParamsOf(params) {
+        var out = []
+        for (var i = 0; i < params.length; i++) { if (isPosParam(params[i])) { out.push(params[i]) } }
+        return out
+    }
+    function plainParams(params) {
+        for (var i = 0; i < params.length; i++) {
+            var p = params[i]
+            if (!isPosParam(p) || p.splat === true || p.defT != undefined || p.pgroup != undefined) { return false }
+        }
+        return true
+    }
+    // Whether a parameter takes a positional argument: keyword, **rest, &blk and
+    // block-local ones do not.
+    function isPosParam(p) {
+        return p.kw !== true && p.kwrest !== true && p.blockp !== true && p.blocal !== true
+    }
+    // MRI's block auto-splat (setup_parameters_complex): a proc called with ONE
+    // Array argument spreads it over its parameters when it has a required one,
+    // more than one optional or a keyword one - unless its list is a lone required
+    // name (`|a|`, the "ambiguous" shape; `|a, |` with its trailing comma is not).
+    // A &blk parameter does not make the list unambiguous. Twin of blkAutoSplat in
+    // ruby-to-llvm-ir.abnf.
+    function blkAutoSplat(params) {
+        var req = 0
+        var opt = 0
+        var kw = false
+        var other = false
+        for (var i = 0; i < params.length; i++) {
+            var p = params[i]
+            if (p.kw === true || p.kwrest === true) { kw = true }
+            if (p.xcomma === true || p.splat === true || kw) { other = true }
+            if (!isPosParam(p) || p.splat === true) { continue }
+            if (p.defT != undefined) { opt = opt + 1 } else { req = req + 1 }
+        }
+        if (req == 1 && opt == 0 && !other) { return false }
+        return req > 0 || opt > 1 || kw
+    }
+    // Whether a call has the shape a proc auto-splats: exactly one positional
+    // argument (a trailing block is not one), an Array.
+    function blkSplatsArg(args) {
+        return (args.length == 1 || (args.length == 2 && isBlkArg(args[1]))) && Array.isArray(args[0])
     }
     // The function values `method(:x)' / `obj.method(:x)' handed out, with the
     // OWNER and NAME each one was built from. MRI's Method is a class of its own -
@@ -12103,7 +12151,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         var star = false
         for (var i = 0; i < params.length; i++) {
             var p = params[i]
-            if (p.kw === true || p.kwrest === true || p.blockp === true) { continue }
+            if (!isPosParam(p)) { continue }
             if (p.splat === true) { star = true }
             else if (p.defT != undefined) { opt = opt + 1 }
             else { req = req + 1 }
@@ -12126,10 +12174,14 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // lib/ruby-rt.metajs and abnf/jsrt.go are the compiled halves' twins.
     function lamArityWrap(f, params) {
         if (typeof f != "function" || params == undefined || params == null) { return f }
+        var splats = blkAutoSplat(params)
         return wrapNote(function() {
             var av = []
             for (var i = 0; i < arguments.length; i++) { av.push(arguments[i]) }
             lamArity(av, params)
+            // A lambda never auto-splats, and its block would: hand the block the
+            // Array wrapped once more, so the spread yields the Array itself.
+            if (splats && blkSplatsArg(av)) { av[0] = [av[0]] }
             return f.apply(undefined, av)
         }, f)
     }
@@ -12152,7 +12204,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         var i
         for (i = 0; i < params.length; i++) {
             var p = params[i]
-            if (p.kw === true || p.kwrest === true || p.blockp === true) { continue }
+            if (!isPosParam(p)) { continue }
             posParams.push(p)
         }
         var npos = av.length
@@ -12264,6 +12316,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             for (var p = 1; p <= np; p++) { params.push({param: "_" + p}) }
         }
         var hasKw = takesKw(params)
+        var splats = blkAutoSplat(params)
+        var posParams = posParamsOf(params)
+        var simple = plainParams(params)
         // blkParams travels beside the block so that Kernel#lambda can arity-check
         // it (makeCall below). The arity REGISTRY cannot carry it: it is armed only
         // when the program names `arity', and behaviour must not depend on that.
@@ -12276,9 +12331,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 // and binds its arguments as a method does: counted, never spread.
                 var dm = blkSelfFor === f
                 if (dm) { lamArity(args, params) }
-                // A single array argument spreads over several block parameters
+                // A single array argument spreads over the block's parameters
                 // (`hash.each { |k, v| }`, `[[1, 2]].each { |a, b| }`).
-                else if (args.length == 1 && params.length > 1 && Array.isArray(args[0])) { args = args[0] }
+                else if (splats && blkSplatsArg(args)) { args = args[0] }
                 // Keyword parameters take the trailing keyword Hash, as a method's do.
                 var kw = null
                 if (hasKw) {
@@ -12292,7 +12347,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                     scopes.push({self: blkSelf})
                 }
                 scopes.push({})
-                blkBind(params, args)
+                blkBind(params, posParams, simple, args)
                 if (hasKw) { bindKw(params, kw) }
                 var site = rbSitePos
                 var depth = coreDepth + 1
@@ -13208,8 +13263,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
         var posParams = []
         for (i = 0; i < params.length; i++) {
-            if (params[i].kw === true || params[i].kwrest === true || params[i].blockp === true) { continue }
-            posParams.push(params[i])
+            if (isPosParam(params[i])) { posParams.push(params[i]) }
         }
         var required = 0
         for (i = 0; i < posParams.length; i++) {
@@ -13237,6 +13291,31 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         var hasStar = false
         for (i = 0; i < posParams.length; i++) { if (posParams[i].splat === true) { hasStar = true } }
         if (!hasStar && npos > posParams.length) { argCountErr(npos, posParams, true) }
+        // All required (the checks above made npos exactly that many): bound in
+        // place, the shape of nearly every method call.
+        if (required == posParams.length) {
+            for (i = 0; i < npos; i++) {
+                if (posParams[i].pgroup == undefined) { declVar(posParams[i].param, pos[i]) }
+                else { bindPosParams([posParams[i]], [pos[i]], 1) }
+            }
+        } else { bindPosParams(posParams, pos, npos) }
+        bindKw(params, kw)
+        for (i = 0; i < params.length; i++) {
+            if (params[i].blockp === true) { declVar(params[i].param, currentBlock()) }
+        }
+    }
+    // Binds the positional parameters from the first npos values of pos. Everything
+    // after a *splat is counted from the END, and an optional parameter only takes
+    // a value when there are spare ones beyond what the required parameters need.
+    // A parenthesized group destructures its value the same way: an Array spreads,
+    // anything else is its one element. js_rposbind of lib/ruby-rt.metajs and
+    // abnf/jsrt.go is the compiled halves' twin.
+    function bindPosParams(posParams, pos, npos) {
+        var i
+        var required = 0
+        for (i = 0; i < posParams.length; i++) {
+            if (posParams[i].splat !== true && posParams[i].defT == undefined) { required = required + 1 }
+        }
         var spare = npos - required
         var ai = 0
         for (i = 0; i < posParams.length; i++) {
@@ -13256,12 +13335,16 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 else { declVar(pp.param, pp.defT()) }
                 continue
             }
-            declVar(pp.param, ai < npos ? pos[ai] : null)
+            var av = anytype
+            av = ai < npos ? pos[ai] : null
             ai = ai + 1
-        }
-        bindKw(params, kw)
-        for (i = 0; i < params.length; i++) {
-            if (params[i].blockp === true) { declVar(params[i].param, currentBlock()) }
+            if (pp.pgroup != undefined) {
+                var gv = []
+                if (Array.isArray(av)) { gv = av } else { gv = [av] }
+                bindPosParams(pp.pgroup, gv, gv.length)
+                continue
+            }
+            declVar(pp.param, av)
         }
     }
     // The keyword Hash is the last argument BEFORE the trailing block slot, not the

@@ -16375,6 +16375,9 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		//           optional, "2" splat.
 		//   wantsKw - the method declares keyword parameters, so a trailing Hash is
 		//           the keyword hash and NOT a positional value.
+		//   mode  - 0 a method or lambda (arity-checked), 1 a block (loose: a
+		//           missing argument is nil, an extra one is dropped), 2 a block
+		//           that also auto-splats a single Array argument.
 		//
 		// The answer is one value per character: undefined for an optional that was
 		// not given (so the emitter's js_rundef default branch still fires), an
@@ -16410,6 +16413,15 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			if npos > 0 && rubyIsBlkArg(pos[npos-1]) {
 				npos--
 			}
+			// An absent value (a group whose element was not passed) is nil.
+			mode := int(a[4])
+			if mode == 2 && npos == 1 {
+				if inner, isArr := pos[0].(*jsArray); isArr {
+					pos, npos = inner.elems, len(inner.elems)
+				} else if _, absent := pos[0].(jsUndefT); absent {
+					pos = []interface{}{jsNull}
+				}
+			}
 			required := 0
 			for i := 0; i < len(kinds); i++ {
 				if kinds[i] == '0' {
@@ -16419,16 +16431,15 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			// Too few positional arguments is an ArgumentError in MRI, and this
 			// is the general shape of the check; the all-required fast path skips
 			// js_rposbind entirely and asks it separately, through js_rargchk. A
-			// BLOCK never reaches here - the emitter binds one with js_rblockarg,
-			// and Ruby arity-checks methods and lambdas only.
-			if npos < required {
+			// block is not checked: Ruby arity-checks methods and lambdas only.
+			if mode == 0 && npos < required {
 				rt.rubyArgCountErr(npos, kinds, true)
 			}
 			// TOO MANY IS AN ERROR TOO, and only a *splat lifts the ceiling. MRI
 			// raises for `->(x, y = 2) { }.call(1, 2, 3)` exactly as it does for
 			// too few. bindParams of ruby-interpreter.abnf and js_rargchk's fast
 			// path ask the same question.
-			if !strings.ContainsRune(kinds, '2') && npos > len(kinds) {
+			if mode == 0 && !strings.ContainsRune(kinds, '2') && npos > len(kinds) {
 				rt.rubyArgCountErr(npos, kinds, true)
 			}
 			spare := npos - required
@@ -16564,17 +16575,21 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		"js_rsymproc": func(a []uint64) uint64 {
 			return w(rt.rubyToProc(u(a[0])))
 		},
-		// A BLOCK parameter read: Ruby auto-splats a single Array argument over a
-		// block that declares more than one parameter, so `[[1, [2, 3]]].each { |a,
-		// (b, c)| }` sees a=1 rather than the whole pair. A lambda is strict and uses
-		// js_arg instead.
+		// A BLOCK parameter read on the all-required fast path: when the block's
+		// shape auto-splats (splat, decided by blkAutoSplat of the emitter) a single
+		// Array argument spreads, so `[[1, [2, 3]]].each { |a, (b, c)| }` sees a=1
+		// rather than the whole pair. A lambda is strict and uses js_arg instead.
 		"js_rblockarg": func(a []uint64) uint64 {
 			arr, ok := u(a[0]).(*jsArray)
 			if !ok {
 				return jsHUndefined
 			}
-			i, n := int(a[1]), int(a[2])
-			if n > 1 && len(arr.elems) == 1 {
+			i := int(a[1])
+			npos := len(arr.elems)
+			if npos == 2 && rubyIsBlkArg(arr.elems[1]) {
+				npos = 1
+			}
+			if rubyTruthy(u(a[2])) && npos == 1 {
 				if inner, isArr := arr.elems[0].(*jsArray); isArr {
 					if i < len(inner.elems) {
 						return w(inner.elems[i])
@@ -16582,7 +16597,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 					return jsHUndefined
 				}
 			}
-			if i < len(arr.elems) {
+			if i < npos {
 				return w(arr.elems[i])
 			}
 			return jsHUndefined
@@ -16602,15 +16617,27 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		// encoding, recorded at the block LITERAL by the emitter - the arity
 		// registry cannot supply it, being armed only when the program names
 		// `arity`. The registry entry, if there is one, is re-registered onto the
-		// wrapper so Proc#arity still answers.
+		// wrapper so Proc#arity still answers. A lambda never auto-splats, and a
+		// block whose shape does (splat) is handed a single Array argument wrapped
+		// once more, so the spread yields the Array itself.
 		"js_rlamchk": func(a []uint64) uint64 {
 			inner := u(a[0])
 			if !isCallable(inner) {
 				return a[0]
 			}
 			kinds, _ := u(a[1]).(string)
+			splat := rubyTruthy(u(a[2]))
 			wrap := jsHostFunc("lambda", func(rt *jsrt, this uint64, args []interface{}) interface{} {
 				rt.rubyLamArity(args, kinds)
+				npos := len(args)
+				if npos > 0 && rubyIsBlkArg(args[npos-1]) {
+					npos--
+				}
+				if splat && npos == 1 {
+					if _, isArr := args[0].(*jsArray); isArr {
+						args = append([]interface{}{&jsArray{elems: []interface{}{args[0]}}}, args[1:]...)
+					}
+				}
 				return rt.call(inner, jsUndef, args)
 			})
 			if rt.rubyArities != nil {
