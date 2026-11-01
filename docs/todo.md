@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1061** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1062** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -98,11 +98,12 @@ Found by the CORE worker, round 15. The interpreter's stripWs deletes every ASCI
 strings.TrimSpace, native strips ASCII 9-13 and 32: `int.Parse(" 1 2 ")` and `int.Parse(" 1")` give three answers.
 .NET's NumberStyles.Integer allows leading/trailing white space (U+0009-U+000D, U+0020) only; settle with a real dotnet.
 
-### T-1058 csharp: generated exception message and ToString drop the namespace · P3 · CS · IN PROGRESS (CS worker, round 9) [V]
-`namespace Demo { class MyEx : Exception {} }`: `new MyEx().Message` should be "Exception of type 'Demo.MyEx' was thrown." (.NET uses GetClassName() = GetType().ToString(), the fully qualified name), and `ToString()` should start "Demo.MyEx: ". All engines print the bare 'MyEx'. Likely cause: user-class FullName has no namespace. Existing assertions encode the wrong answer: tests/csharp-test-features.cs exc-default-msg-user, exc-tostring-inner-nested, maybe exc-msg-override. Spec-only (dotnet/runtime Exception.cs in $S/CS5/dl).
-
-### T-1059 csharp: virtual auto-property overridden by an accessor property is not dispatched · P3 · CS · IN PROGRESS (CS worker, round 9) [V]
-`class N2 { public virtual int K { get; set; } = 5; } class M3 : N2 { public override int K => 9; }` - `new M3().K` must be 9 (also through an `N2` reference), all three engines give 5: the auto-property's own field slot wins over the derived `__get_K` because getField checks hasOwn first. `base.K` must still read the backing value (5). Needs the base backing storage off the public name when a subclass overrides with an accessor; check setter overrides too.
+### T-1061 csharp: base property writes; System.Type ToString; typeof namespace · P3 · CS · OPEN [V]
+Spec-only (no dotnet here). All engines:
+- `base.K = v` (and `base.K += v`, `base.K++`) fails with "unknown name: base" / "variable not defined: base"; must call the base setter non-virtually.
+- `Console.WriteLine(e.GetType())` / `e.GetType().ToString()` print `[object Object]`; .NET prints the FullName (`Demo.MyEx`).
+- `typeof(MyEx).FullName` inside `namespace Demo` gives `MyEx`; must be `Demo.MyEx` (token built from the bare name at compile time).
+- Limit: A declares K with accessors, B overrides it as an auto-property, C overrides only the setter; C's getter must read B's backing value, currently reaches A's getter.
 
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
@@ -1118,6 +1119,8 @@ T-1044 bash: per-scope associative kind; compiled computed `declare -A`/array li
 T-1055 csharp: `base.Prop` / `base.Field` reads unsupported — DONE (CS r8, cb5c2c80): base.Prop/base.Field reads in both grammars, base.Message via hidden __excmsg slot in all 3 engines; probed 3 legs vs spec (multi-level base.Name/base.V chains, nested Message overrides, ArgumentException suffix)
 T-1054 php: interpreter `(array)` cast of an object drops references; generator self-resume message — DONE (PHP r39, 485ec76e): (array) of an object copies the property table at cast time keeping references (3 engines); self-resume of a running generator raises 'Cannot resume an already running generator' and stays resumable; also unset($o->p) releases the reference holder (typed+untyped); probed 3 legs vs php-src semantics. Lazy stdClass table sharing after a cast is T-1053 (COW) territory
 T-1035 c: the C compiler silently merges two definitions of one function name into a corrupt module — DONE (CORE r18, 20df82c7): shared cNoteFnDef rejects a second body with clang's "redefinition of 'f'" in both engines (plain/struct/typedef/fn-ptr returns); repeated prototypes, extern/static decls before the body still legal (probed: all legs exit 19 = clang); SHOULD FAIL rows added
+T-1058 csharp: generated exception message and ToString drop the namespace — DONE (CS r9, 5bce6376): FullName = namespace + outer types (Demo.Program+Box) in 3 engines; exception Message/ToString/unhandled line and Object.ToString use it; wrong-name assertions corrected; probed vs spec
+T-1059 csharp: virtual auto-property overridden by an accessor property is not dispatched — DONE (CS r9, 74cca8ca): auto-property overridden by accessors stores under a hidden backing slot; getter/setter-only overrides dispatch, base.K reads backing; object initializers now go through set accessors; probed vs spec
 
 # Settled — do not re-open
 
