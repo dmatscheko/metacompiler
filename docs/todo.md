@@ -98,7 +98,7 @@ Found by the CORE worker, round 15. The interpreter's stripWs deletes every ASCI
 strings.TrimSpace, native strips ASCII 9-13 and 32: `int.Parse(" 1 2 ")` and `int.Parse(" 1")` give three answers.
 .NET's NumberStyles.Integer allows leading/trailing white space (U+0009-U+000D, U+0020) only; settle with a real dotnet.
 
-### T-1049 csharp: null message on non-Argument exceptions gives "" · P3 · CS · OPEN [V spec-only]
+### T-1049 csharp: null message on non-Argument exceptions gives "" · P3 · CS · IN PROGRESS (CS worker, round 7) [V spec-only]
 Exception.cs (all .NET versions): Message is `_message ?? SR.Format(Exception_WasThrown, GetClassName())`. `string[] s={null}; new Exception(s[0]).Message` → "Exception of type 'System.Exception' was thrown."; `new InvalidOperationException(s[0]).Message` → "Exception of type 'System.InvalidOperationException' was thrown."; user `MyEx : Exception` with `: base(m)` → "Exception of type 'MyEx' was thrown." Ours "" in all engines. Found by CS r6.
 
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
