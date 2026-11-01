@@ -1,0 +1,61 @@
+// UpdateAhead: the guard in front of a postfix '++'/'--' whose operand is not a
+// name, '(a)++', '[1].a++', '"s".length--', 'new C().n++', 'function () {}().n++'.
+// Such an operand can only be recognised by parsing a whole primary expression,
+// so trying that form in front of the plain expression would parse every primary
+// twice, and twice again at every nesting level. The guard scans ahead instead
+// and succeeds only when the operand really is followed by the operator: a
+// bracketed group, a string or template literal, or the word 'new' or
+// 'function', then any run of brackets, names, dots and blanks on the same line,
+// then '++' or '--'. Strings inside are skipped whole. Anything it cannot decide
+// fails, which only gives the operand back to the ordinary expression.
+// Returns the impossible token to FAIL, undefined to succeed.
+
+UpdateAhead = :script(~~
+    (function() {
+        var no = abnf.newToken("\x01no-update", 0)
+        var i = 0
+        while (c.peek(i) === 32 || c.peek(i) === 9 || c.peek(i) === 10 || c.peek(i) === 13) { i = i + 1 }
+        var cc = c.peek(i)
+        var word = function (w) {
+            for (var k = 0; k < w.length; k++) {
+                if (c.peek(i + k) !== w.charCodeAt(k)) { return false }
+            }
+            var after = c.peek(i + w.length)
+            return !((after >= 48 && after <= 57) || (after >= 65 && after <= 90) || (after >= 97 && after <= 122)
+                || after === 95 || after === 36)
+        }
+        if (cc !== 40 && cc !== 91 && cc !== 123 && cc !== 34 && cc !== 39 && cc !== 96
+            && !word("new") && !word("function")) { return no }
+        var depth = 0
+        var seen = false
+        while (true) {
+            cc = c.peek(i)
+            if (cc < 0) { return no }
+            if (cc === 34 || cc === 39 || cc === 96) {
+                i = i + 1
+                while (true) {
+                    var sc = c.peek(i)
+                    if (sc < 0) { return no }
+                    if (sc === 92) { i = i + 2; continue }
+                    i = i + 1
+                    if (sc === cc) { break }
+                }
+                seen = true
+                continue
+            }
+            if (cc === 40 || cc === 91 || cc === 123) { depth = depth + 1; i = i + 1; continue }
+            if (cc === 41 || cc === 93 || cc === 125) {
+                depth = depth - 1
+                i = i + 1
+                if (depth < 0) { return no }
+                seen = true
+                continue
+            }
+            if (depth > 0) { i = i + 1; continue }
+            if (cc === 32 || cc === 9 || cc === 46 || cc === 35 || (cc >= 48 && cc <= 57) || (cc >= 65 && cc <= 90)
+                || (cc >= 97 && cc <= 122) || cc === 95 || cc === 36) { i = i + 1; continue }
+            if (seen && (cc === 43 || cc === 45) && c.peek(i + 1) === cc) { return undefined }
+            return no
+        }
+    })()
+~~) ;

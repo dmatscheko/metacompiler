@@ -165,6 +165,7 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
 :include("lib/numbers.abnf") ;
 :include("lib/bools.abnf") ;
 :include("lib/ident-unicode.abnf") ;
+:include("lib/js-update-ahead.abnf") ;
 
 :startRule(Program) ;
 :whitespace(Whitespace) ;
@@ -576,66 +577,14 @@ TypeofExpr  <~~ push(makeUnary(pop(), typeofExt())) ~~>
 
 // The postfix forms: i++ evaluates to the old value.
 PostfixExpr = IncDec | SuperCall | CallMember ;
-// The postfix target is the NAME form, plus the PARENTHESIZED form behind ParenUpdAhead,
-// not the whole Target. IncDec is tried in front of CallMember, so a wider target here
-// would parse every primary expression twice - once as a target that then finds no '++',
-// once as the expression it really was - and that doubles at every nesting level, which
-// is what made '((((((...1...))))))' explode. ParenUpdAhead lets '(a)++' and '(o.n)--'
-// through only when the operator really follows the parenthesized operand. The form this
-// gives up, '[1].a++', is assignable only in the same contrived way.
+// The postfix target is the NAME form; every other target ('(a)++', '[1].a++') sits behind
+// UpdateAhead (lib/js-update-ahead.abnf), which keeps IncDec, tried in front of
+// CallMember, from parsing every primary expression twice.
 // A POSTFIX '++'/'--' is a restricted production too: no line terminator may sit between
 // the operand and the operator, so 'a' + newline + '--b' is 'a;' followed by the prefix
 // decrement of b, not 'a--' followed by 'b'.
 IncDec      <~~ push(makeIncDec(takeAll())) ~~>
-            = ( TargetNamed | ParenUpdAhead TargetParen ) SameLine ( "++" | "--" ) <~~ push(up.in) ~~> ;
-// Succeeds when the input is a parenthesized group, then any member/call suffixes, then
-// '++' or '--'. Strings inside the brackets are skipped whole; anything it cannot decide
-// (an unterminated bracket or string, a comment in front of the group) fails, which only
-// gives the operand back to CallMember.
-ParenUpdAhead = :script(~~
-    (function() {
-        // The pending whitespace in front of the operand has not been skipped yet.
-        var i = 0
-        while (c.peek(i) === 32 || c.peek(i) === 9 || c.peek(i) === 10 || c.peek(i) === 13) { i = i + 1 }
-        if (c.peek(i) !== 40) { return abnf.newToken("\x01no-update", 0) }
-        var depth = 0
-        while (true) {
-            var cc = c.peek(i)
-            if (cc < 0) { return abnf.newToken("\x01no-update", 0) }
-            if (cc === 34 || cc === 39 || cc === 96) {
-                var q = cc
-                i = i + 1
-                while (true) {
-                    var sc = c.peek(i)
-                    if (sc < 0) { return abnf.newToken("\x01no-update", 0) }
-                    if (sc === 92) { i = i + 2; continue }
-                    if (sc === q) { i = i + 1; break }
-                    i = i + 1
-                }
-                continue
-            }
-            if (cc === 40 || cc === 91) { depth = depth + 1; i = i + 1; continue }
-            if (cc === 41 || cc === 93) {
-                depth = depth - 1
-                i = i + 1
-                if (depth > 0) { continue }
-                // '.name' suffixes are stepped over here, a bracket suffix by the outer loop.
-                while (true) {
-                    var ic = c.peek(i)
-                    if (ic === 32 || ic === 9 || ic === 46 || (ic >= 48 && ic <= 57) || (ic >= 65 && ic <= 90)
-                        || (ic >= 97 && ic <= 122) || ic === 95 || ic === 36 || ic === 35) { i = i + 1; continue }
-                    break
-                }
-                var oc = c.peek(i)
-                if (oc === 40 || oc === 91) { continue }
-                if ((oc === 43 || oc === 45) && c.peek(i + 1) === oc) { return undefined }
-                return abnf.newToken("\x01no-update", 0)
-            }
-            if (depth === 0) { return abnf.newToken("\x01no-update", 0) }
-            i = i + 1
-        }
-    })()
-~~) ;
+            = ( TargetNamed | UpdateAhead ( TargetParen | TargetBased ) ) SameLine ( "++" | "--" ) <~~ push(up.in) ~~> ;
 
 // super(args) delegates to the parent constructor; super.m(args) invokes the parent's
 // method on 'this'. popName pulls the optional '.m' out, leaving the argument thunks.

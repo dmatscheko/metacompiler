@@ -77,6 +77,7 @@ The same language is compiled to LLVM IR by typescript-to-llvm-ir.abnf.") ;
 :include("lib/numbers.abnf") ;
 :include("lib/bools.abnf") ;
 :include("lib/ident-unicode.abnf") ;
+:include("lib/js-update-ahead.abnf") ;
 
 :startRule(Program) ;
 :whitespace(Whitespace) ;
@@ -380,6 +381,9 @@ LhsAssign   <~~ push(makeLhsAssign(takeAll())) ~~>
 LhsPlace    = LhsHead LhsSuffixes | "(" LhsPlace ")" [ LhsSuffixes ] ;
 LhsHead     <~~ push({lhsprim: pop(), ptxt: cpTxt(up.in, up.pos)}) ~~>
             = Primary ;
+// A based place as one reference, for the update operators.
+LhsTarget   <~~ push(lhsPlaceRef(takeAll())) ~~>
+            = LhsPlace ;
 // Zero or more calls, then a member, then optionally more of the same - so whatever the
 // path does in between, the LAST suffix is always a member and the place exists.
 // A non-null '!' may stand anywhere in the path ('o!.n = 5', 'o.a!.k += 3'); it erases.
@@ -509,7 +513,7 @@ Await       <~~ push(makeAwait(pop())) ~~>
             = KwAwait UnaryExpr ;
 // Prefix ++/--: the expression value is the new one.
 PreIncDec   <~~ push(makePreIncDec(pop(), pop())) ~~>
-            = ( "++" | "--" ) <~~ push(up.in) ~~> Target NotSuffix ;
+            = ( "++" | "--" ) <~~ push(up.in) ~~> ( Target | LhsTarget ) NotSuffix ;
 // '++1', '++{}', '++[0]', '++obj?.a', '++new Foo()', '--(E.A + E.B)': an update
 // expression whose operand is not a valid target. That is an EARLY error in the spec,
 // not a syntax error - tsc builds the tree and then complains - so it has to parse here
@@ -537,7 +541,7 @@ Typeof      <~~ push(makeTypeof(pop())) ~~>
             = KwTypeof UnaryExpr ;
 
 // See the twin of this comment in js-interpreter.abnf.
-PostfixExpr = SuperPostUpdate | IncDec | SuperCall | CallMemberUpdate ;
+PostfixExpr = SuperPostUpdate | IncDec | LhsIncDec | SuperCall | CallMemberUpdate ;
 // 'super.x++' / 'super[i]--'. The value form reaches CallMemberUpdate through Primary,
 // but the update tail there has no structure left to store through (makeMaybeUpdate can
 // only refuse it), so the postfix super form is taken here instead, where the SuperKey
@@ -550,6 +554,9 @@ UpdateOp    <~~ push({upd: up.in}) ~~>
             = NoLineBreak ( "++" | "--" ) ;
 IncDec      <~~ push(makeIncDec(takeAll())) ~~>
             = Target NoLineBreak ( "++" | "--" ) <~~ push(up.in) ~~> ;
+// See the twin of this comment in js-interpreter.abnf.
+LhsIncDec   <~~ push(makeIncDec(takeAll())) ~~>
+            = UpdateAhead LhsTarget NoLineBreak ( "++" | "--" ) <~~ push(up.in) ~~> ;
 
 // super(args) delegates to the parent constructor; super.m(args) invokes the parent's
 // method on 'this'. popName pulls the optional '.m' out, leaving the argument thunks.
@@ -9218,22 +9225,25 @@ NotFuncHead = :script(~~
     // first. An AUTO-ACCESSOR's value is {get, set}, the cell {g, s} holds, and its
     // decorators answer {get, set, init}: a get or a set replaces the cell's, an init
     // is an initializer of the hidden field. ctx.addInitializer appends to extras. The
-    // context carries kind, name, static, private (a private name reads "#x") and
-    // addInitializer; a class's has no static or private (ClassDecoratorContext).
-    // Twin of decoApplyAll in typescript-to-llvm-ir.abnf.
+    // context carries kind, name, static, private (a private name reads "#x"), access,
+    // metadata and addInitializer; a class's has no static, private or access
+    // (ClassDecoratorContext). metadata is undefined: tsc's emit makes it an object only
+    // where Symbol.metadata exists, and node has none. Twin of emitDecoCtx in
+    // typescript-to-llvm-ir.abnf.
     function decoApply(vals, value, kind, name, statik, extras) {
         var v = anytype // The decorated value: a class descriptor, a function or an accessor cell.
         v = value
         var finits = []
-        var adder = fnMetaPut(function(f) { extras.push(f); return undefined }, "addInitializer", 1)
+        var adder = fnMetaPut(function(f) { extras.push(f); return undefined }, "", 1)
         for (var i = vals.length - 1; i >= 0; i--) {
             var priv = typeof name == "string" && isPrivateKey(name)
-            var ctx = {kind: kind, name: priv ? privShown(name) : name, addInitializer: adder,
-                       __keys: ["kind", "name", "addInitializer"]}
+            var ctx = {kind: kind, name: priv ? privShown(name) : name, metadata: undefined, addInitializer: adder,
+                       __keys: ["kind", "name", "metadata", "addInitializer"]}
             if (kind != "class") {
-                ctx["__keys"] = ["kind", "name", "static", "private", "addInitializer"]
+                ctx["__keys"] = ["kind", "name", "static", "private", "access", "metadata", "addInitializer"]
                 ctx["static"] = statik == true
                 ctx["private"] = priv
+                ctx["access"] = decoAccess(kind, name, priv)
             }
             var d = anytype // The decorator.
             d = vals[i]
@@ -9253,6 +9263,29 @@ NotFuncHead = :script(~~
         var outer = []
         for (var j = finits.length - 1; j >= 0; j--) { outer.push(finits[j]) }
         return outer
+    }
+    // A member decorator context's access object, as tsc emits it: has(o) is 'key in o',
+    // get(o) reads o[key] (not for a setter), set(o, v) writes it (for a setter, a
+    // field and an auto-accessor). A private name is not brand-checked by get and set.
+    // Twin of emitDecoAccess in typescript-to-llvm-ir.abnf.
+    function decoAccess(kind, key, priv) {
+        var acc = {__keys: ["has"]}
+        acc["has"] = fnMetaPut(function(o) {
+            if (priv && !(jsIsObjLike(o) || typeof o == "function")) {
+                biRaise("TypeError: Cannot use 'in' operator to search for '" + privShown(key) + "' in " + jsStr(o))
+            }
+            if (priv) { return propIn(key, o) }
+            return inOrInstanceof("in", jsKeyUnesc(key), o)
+        }, "has", 1)
+        if (kind != "setter") {
+            acc["get"] = fnMetaPut(function(o) { return getMember(o, key) }, "get", 1)
+            acc.__keys.push("get")
+        }
+        if (kind == "setter" || kind == "field" || kind == "accessor") {
+            acc["set"] = fnMetaPut(function(o, x) { setMember(o, key, x); return undefined }, "set", 2)
+            acc.__keys.push("set")
+        }
+        return acc
     }
     // An auto-accessor decorator's answer r: its get and set replace the cell's, its init
     // joins the initializers.
@@ -10998,8 +11031,13 @@ NotFuncHead = :script(~~
         return {prim: items[0].lhsprim, ptxt: items[0].ptxt, path: items.slice(1)}
     }
     // See the twin of this comment in js-interpreter.abnf.
+    // items = [{lhsprim, ptxt}, suffix marker...]: the reference of a place whose base
+    // is an arbitrary primary expression.
+    function lhsPlaceRef(items) {
+        return {prim: items[0].lhsprim, ptxt: items[0].ptxt, path: items.slice(1, items.length)}
+    }
     function makeLhsAssign(items) {
-        var ref = {prim: items[0].lhsprim, ptxt: items[0].ptxt, path: items.slice(1, items.length - 2)}
+        var ref = lhsPlaceRef(items.slice(0, items.length - 2))
         var op = items[items.length - 2]
         var valT = items[items.length - 1]
         return function() {

@@ -6094,6 +6094,50 @@ function s150(): void {
     check("newtag150d", (new tag150`hi`).v === "hi")
 }
 
+// ===== SECTION 151: a decorator context's access and metadata, based update targets =====
+// A member decorator's context carries access: has(o) is 'key in o', get(o) reads the
+// member (not for a setter) and set(o, v) writes it (for a setter, a field and an
+// auto-accessor). Every context has an own metadata property, undefined where there is
+// no Symbol.metadata (tsc's emit on node 24). addInitializer is an anonymous function
+// of one parameter. '++' and '--' take a member place with any base. Values read off
+// tsc 6 with node 24.
+const acc151: any = {};
+const keys151: string[] = [];
+function grab151(value: any, ctx: any): any {
+    acc151[String(ctx.name)] = ctx.access;
+    keys151.push(Object.keys(ctx).join(","));
+    return undefined;
+}
+function cgrab151(value: any, ctx: any): any {
+    keys151.push(Object.keys(ctx).join(",") + ":" + ("metadata" in ctx) + ":" + typeof ctx.metadata +
+        ":" + ctx.addInitializer.name + ctx.addInitializer.length);
+    return undefined;
+}
+@cgrab151
+class Da151 {
+    @grab151 m(): string { return "M"; }
+    @grab151 x: number = 1;
+    @grab151 set w(v: number) { this.x = v; }
+    @grab151 #p: number = 7;
+    peek(): number { return this.#p; }
+}
+function s151(): void {
+    const o: any = new Da151();
+    const m = acc151["m"], x = acc151["x"], w = acc151["w"], p = acc151["#p"];
+    check("decoacc1", Object.keys(m).join() == "has,get" && Object.keys(w).join() == "has,set" &&
+        Object.keys(x).join() == "has,get,set" && m.has.name == "has" && x.set.length == 2);
+    x.set(o, 5);
+    w.set(o, 6);
+    p.set(o, 8);
+    check("decoacc2", m.has(o) && !m.has({}) && m.get(o).call(o) == "M" && o.x == 6 && p.get(o) == 8 && o.peek() == 8);
+    check("decometa1", keys151[0] == "kind,name,static,private,access,metadata,addInitializer" &&
+        keys151[keys151.length - 1] == "kind,name,metadata,addInitializer:true:undefined:1");
+    const q: any = {a: 1};
+    const r1 = [q][0].a++;
+    const r2 = ++[q][0]["a"];
+    check("upd151", r1 == 1 && r2 == 3 && q.a == 3);
+}
+
 // ===== END SECTIONS =====
 
 function main(): number {
@@ -6235,6 +6279,7 @@ function main(): number {
     s148(); // SECTION-CALL 148
     s149(); // SECTION-CALL 149
     s150(); // SECTION-CALL 150
+    s151(); // SECTION-CALL 151
     println("full: " + checks + " checks, " + failures + " failures");
     return failures;
 }

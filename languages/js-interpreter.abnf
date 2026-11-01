@@ -125,6 +125,7 @@ The same language is compiled to LLVM IR by js-to-llvm-ir.abnf.") ;
 :include("lib/numbers.abnf") ;
 :include("lib/bools.abnf") ;
 :include("lib/ident-unicode.abnf") ;
+:include("lib/js-update-ahead.abnf") ;
 
 :startRule(Program) ;
 :whitespace(Whitespace) ;
@@ -361,6 +362,9 @@ LhsAssign   <~~ push(makeLhsAssign(takeAll())) ~~>
 LhsPlace    = LhsHead LhsSuffixes | "(" LhsPlace ")" [ LhsSuffixes ] ;
 LhsHead     <~~ push({lhsprim: pop(), ptxt: cpTxt(up.in, up.pos)}) ~~>
             = Primary ;
+// A based place as one reference, for the update operators.
+LhsTarget   <~~ push(lhsPlaceRef(takeAll())) ~~>
+            = LhsPlace ;
 // Zero or more calls, then a member, then optionally more of the same - so whatever the
 // path does in between, the LAST suffix is always a member and the place exists.
 LhsSuffixes = ( DotSuffix | IndexSuffix ) [ LhsSuffixes ] | CallSuffix LhsSuffixes ;
@@ -506,7 +510,7 @@ Await       <~~ push(makeAwait(pop())) ~~>
             = KwAwait UnaryExpr ;
 // Prefix ++/--: the expression value is the new one.
 PreIncDec   <~~ push(makePreIncDec(pop(), pop())) ~~>
-            = ( "++" | "--" ) <~~ push(up.in) ~~> Target ;
+            = ( "++" | "--" ) <~~ push(up.in) ~~> ( Target | LhsTarget ) ;
 // The two signs refuse to be doubled: '++1' and '--1' are update expressions on a
 // literal, which is a syntax error, and without the lookahead they would quietly parse as
 // '+(+1)' and '-(-1)'. A SPACE between them is fine ('- -1' is negation twice), because
@@ -534,7 +538,7 @@ Typeof      <~~ push(makeTypeof(pop())) ~~>
 // as an OPTIONAL tail of the ordinary call/member expression rather than as a separate
 // alternative in front of it - an alternative would re-parse every postfix expression in
 // the language twice, since it can only fail after consuming the whole operand.
-PostfixExpr = IncDec | SuperCall | CallMemberUpdate ;
+PostfixExpr = IncDec | LhsIncDec | SuperCall | CallMemberUpdate ;
 CallMemberUpdate <~~ push(makeMaybeUpdate(takeAll(), up.pos)) ~~>
             = CallMember [ UpdateOp ] ;
 // A POSTFIX '++'/'--' is a restricted production: no line terminator may sit between the
@@ -544,6 +548,11 @@ UpdateOp    <~~ push({upd: up.in}) ~~>
             = NoLineBreak ( "++" | "--" ) ;
 IncDec      <~~ push(makeIncDec(takeAll())) ~~>
             = Target NoLineBreak ( "++" | "--" ) <~~ push(up.in) ~~> ;
+// An update of a place with an arbitrary base, '[1].a++', 'f().x--', stores through the
+// reference LhsAssign builds; UpdateAhead (lib/js-update-ahead.abnf) admits it only
+// when the operator really follows, so other expressions are not parsed twice.
+LhsIncDec   <~~ push(makeIncDec(takeAll())) ~~>
+            = UpdateAhead LhsTarget NoLineBreak ( "++" | "--" ) <~~ push(up.in) ~~> ;
 
 // super(args) delegates to the parent constructor; super.m(args) invokes the parent's
 // method on 'this'. popName pulls the optional '.m' out, leaving the argument thunks.
@@ -12492,8 +12501,13 @@ NotFuncHead = :script(~~
     function makeLhsRef(items) {
         return {prim: items[0].lhsprim, ptxt: items[0].ptxt, path: items.slice(1)}
     }
+    // items = [{lhsprim, ptxt}, suffix marker...]: the reference of a place whose base
+    // is an arbitrary primary expression.
+    function lhsPlaceRef(items) {
+        return {prim: items[0].lhsprim, ptxt: items[0].ptxt, path: items.slice(1, items.length)}
+    }
     function makeLhsAssign(items) {
-        var ref = {prim: items[0].lhsprim, ptxt: items[0].ptxt, path: items.slice(1, items.length - 2)}
+        var ref = lhsPlaceRef(items.slice(0, items.length - 2))
         var op = items[items.length - 2]
         var valT = items[items.length - 1]
         return function() {

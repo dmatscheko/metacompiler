@@ -1917,6 +1917,23 @@ c++
     check("newtag146d", (new tag146`hi`).v === "hi")
 }
 
+// ===== SECTION 147: update expressions on a place with an arbitrary base =====
+// '++' and '--' take any member place as their operand, whatever its base: an array or
+// object literal, a parenthesised expression, a 'new' or a called function expression.
+// The postfix form answers the old value, the prefix form the new one. Values read off
+// node 24.
+function s147() {
+    var o = {a: 1}
+    var r1 = [o][0].a++
+    var r2 = ++[o][0]["a"]
+    var r3 = (1, [o])[0].a--
+    check("upd147a", r1 === 1 && r2 === 3 && r3 === 3 && o.a === 2)
+    check("upd147b", isNaN([1].a++) && {x: 4}.x-- === 4 && --{x: 4}.x === 3)
+    function C147() { this.n = 5 }
+    var box = {v: 7}
+    check("upd147c", new C147().n++ === 5 && function () { return box }().v++ === 7 && box.v === 8)
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -1980,6 +1997,7 @@ function main() {
     s144() // SECTION-CALL 144
     s145() // SECTION-CALL 145
     s146() // SECTION-CALL 146
+    s147() // SECTION-CALL 147
     println("full: " + checks + " checks, " + failures + " failures")
     return failures
 }

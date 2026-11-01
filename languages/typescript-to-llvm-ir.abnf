@@ -6508,8 +6508,9 @@ NotFuncHead = :script(~~
     // (decoPhases); the initializers they registered run last, at class definition
     // (static and class ones) or per instance (emitFieldInits).
     // The context object a decorator is handed: kind, name, static, private (a private
-    // name reads "#x") and addInitializer, which appends to listV; a class's has no
-    // static or private (ClassDecoratorContext). nameV, when given, is
+    // name reads "#x"), access, metadata (undefined, see decoApply in
+    // typescript-interpreter.abnf) and addInitializer, which appends to listV; a class's
+    // has no static, private or access (ClassDecoratorContext). nameV, when given, is
     // a computed key's value. Twin of the ctx in decoApply in typescript-interpreter.abnf.
     function emitDecoCtx(b, kind, name, statik, listV, nameV) {
         var o = callExt(b, "js_obj_new", [])
@@ -6527,10 +6528,30 @@ NotFuncHead = :script(~~
         if (kind != "class") {
             callExt(b, memSetExt(), [o, emitStr(b, "static"), statik ? hTrue : hFalse])
             callExt(b, memSetExt(), [o, emitStr(b, "private"), priv ? hTrue : hFalse])
+            callExt(b, memSetExt(), [o, emitStr(b, "access"), emitDecoAccess(b, kind, nameV != null ? nameV : emitStr(b, name), priv)])
         }
+        callExt(b, memSetExt(), [o, emitStr(b, "metadata"), hUndef])
         var asc = callExt(b, "js_scope_new", [curScopeV])
         callExt(b, "js_scope_decl", [asc, emitStr(b, "0dlist"), listV])
-        callExt(b, memSetExt(), [o, emitStr(b, "addInitializer"), callExt(b, "js_closure", [handle(decoFnsGet().adder), asc])])
+        var adder = callExt(b, "js_closure", [handle(decoFnsGet().adder), asc])
+        callExt(b, memSetExt(), [o, emitStr(b, "addInitializer"), callExt(b, "js_jsfnmeta", [adder, emitStr(b, ""), emitNum(b, 1)])])
+        return o
+    }
+    // A member decorator context's access object: has, and get unless a setter, set for
+    // a setter, a field and an auto-accessor, closures over the key keyV. Twin of
+    // decoAccess in typescript-interpreter.abnf.
+    function emitDecoAccess(b, kind, keyV, priv) {
+        var fns = decoFnsGet()
+        var o = callExt(b, "js_obj_new", [])
+        var sc = callExt(b, "js_scope_new", [curScopeV])
+        callExt(b, "js_scope_decl", [sc, emitStr(b, "0dkey"), keyV])
+        var one = function(nm, idx, arity) {
+            var clo = callExt(b, "js_jsfnmeta", [callExt(b, "js_closure", [handle(idx), sc]), emitStr(b, nm), emitNum(b, arity)])
+            callExt(b, memSetExt(), [o, emitStr(b, nm), clo])
+        }
+        one("has", priv ? fns.hasPriv : fns.has, 1)
+        if (kind != "setter") { one("get", fns.get, 1) }
+        if (kind == "setter" || kind == "field" || kind == "accessor") { one("set", fns.set, 2) }
         return o
     }
     // Apply one evaluated decorator to a value: 'v = deco(v, ctx)'. A decorator that is
@@ -6713,7 +6734,24 @@ NotFuncHead = :script(~~
         callExt(ab, "js_arr_push", [callExt(ab, "js_scope_get", [af.Params[0], emitStr(ab, "0dlist")]),
                                     callExt(ab, "js_arg", [af.Params[1], handle(0)])])
         ab.NewRet(hUndef)
-        decoFns.push({run: rf, adder: aidx})
+        // The access functions, over the key in their scope's 0dkey: 'key in o' (with a
+        // private name's brand check), o[key], and o[key] = v.
+        var acc = function(body) {
+            funcCount++
+            var f = m.NewFunc("jsf_" + funcCount, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
+            var fb = f.NewBlock("entry")
+            fb.NewRet(body(fb, callExt(fb, "js_scope_get", [f.Params[0], emitStr(fb, "0dkey")]),
+                           callExt(fb, "js_arg", [f.Params[1], handle(0)]), f.Params[1]))
+            return funcCount
+        }
+        var hasI = acc(function(fb, k, o, args) { return callExt(fb, "js_jsin", [o, k]) })
+        var hasPrivI = acc(function(fb, k, o, args) { return callExt(fb, "js_jsprivin", [o, k]) })
+        var getI = acc(function(fb, k, o, args) { return callExt(fb, "js_jsvget", [o, k]) })
+        var setI = acc(function(fb, k, o, args) {
+            callExt(fb, memSetExt(), [o, k, callExt(fb, "js_arg", [args, handle(1)])])
+            return hUndef
+        })
+        decoFns.push({run: rf, adder: aidx, has: hasI, hasPriv: hasPrivI, get: getI, set: setI})
         return decoFns[0]
     }
     // A variable reference that yields undefined instead of raising when the name is not
