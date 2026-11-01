@@ -114,10 +114,10 @@ Spec-only. `class C { public string F; public string P { get; set; } }` then `C 
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-1073 kotlin: compiled reified call to a function declared later crashes · P2 · KT · OPEN [V]
+### T-1073 kotlin: compiled reified call to a function declared later crashes · P2 · KT · IN PROGRESS (KT worker, round 24) [V]
 Oracle kotlinc 2.2.21: `inline fun <reified T: Any> outer(x: T) = inner<String>()` followed (later in the file) by `inline fun <reified T: Any> inner() = T::class.simpleName`; `println(outer(1))` -> String. Interpreter prints String; run and native die with "js runtime error: member 'simpleName' of undefined" (also on the pre-T-1066 base). The callee only gets its hidden type-argument parameters if declared earlier; defer the reified decision to emit time (compiler) / first run (interpreter). Check reified `is T` and `T::class` through forward calls, member and extension forms.
 
-### T-1074 kotlin: KClass javaPrimitiveType/hashCode; destructured-lambda and smart-cast javaClass · P3 · KT · OPEN [V]
+### T-1074 kotlin: KClass javaPrimitiveType/hashCode; destructured-lambda and smart-cast javaClass · P3 · KT · IN PROGRESS (KT worker, round 24) [V]
 Oracle kotlinc 2.2.21; all engines:
 - `Long::class.javaPrimitiveType` -> long (ours: "member .javaPrimitiveType of a class literal"); `KClass.hashCode()` missing ("method .hashCode() of a class literal"); `kc<Int>().hashCode() == Int::class.hashCode()` -> true.
 - destructured lambda params: `mapOf(1 to 2).forEach { (k, v) -> print(k.javaClass.name) }` -> int, ours java.lang.Integer.
