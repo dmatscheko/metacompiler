@@ -69,7 +69,7 @@ Remainder of T-1028; each needs a table-size decision before work starts. CJK fa
 
 # RB — Ruby
 
-### T-1043 ruby: all?/any?/none?/one? don't short-circuit; `[[1], nil].sum([])` escapes rescue · P3 · RB · OPEN [V]
+### T-1043 ruby: all?/any?/none?/one? don't short-circuit; `[[1], nil].sum([])` escapes rescue · P3 · RB · IN PROGRESS (RB worker, round 42) [V]
 ruby 2.6 (found by RB r41), all three engines: `s=[]; [1,2,3].any?{|x| s<<x; true}; p s` → [1]; ours [1, 2, 3] (same for all?/none?, one? should stop at the 2nd true; also on Range). `[[1], nil].sum([])` → catchable TypeError "no implicit conversion of nil into Array"; interpreter dies with host error "not a number in '+'" that `rescue TypeError` cannot catch (check compiled legs).
 
 # JS — JavaScript and TypeScript
