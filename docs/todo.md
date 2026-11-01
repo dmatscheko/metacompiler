@@ -104,7 +104,7 @@ strings.TrimSpace, native strips ASCII 9-13 and 32: `int.Parse(" 1 2 ")` and `in
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-1056 kotlin: member call vs receiver-lambda param name clash; companion/enum-entry classes; primitive class rendering · P3 · KT · OPEN [V]
+### T-1056 kotlin: member call vs receiver-lambda param name clash; companion/enum-entry classes; primitive class rendering · P3 · KT · IN PROGRESS (KT worker, round 21) [V]
 kotlinc 2.2.21 (found by KT r20, repros in scratchpad KT20/):
 - Compiled: `fun applyTwice(x: Int, f: Int.() -> Int) = x.f().f()` + `object Obj { fun f(n: Int) = n * 2 }`; `println(Obj.f(4))` → 8 (interpreter 8); run/native "unknown name: f" (recvLambdaNames branch in kotlin-to-llvm-ir.abnf; methodClasses only records class methods, so object/companion receivers take the lambda arm). Same for a companion method f.
 - `C.Companion::class.simpleName` → Companion, qualifiedName C.Companion, javaClass.name C$Companion; `N.Named::class.simpleName` → Named. Interpreter: Companion/Companion/Companion; compiled: C/C/C and N (companion merged into the class descriptor — architectural).
