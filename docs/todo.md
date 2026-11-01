@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-977** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-978** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -152,9 +152,9 @@ returns); interp and run abort with "send on a non-channel". A nil channel block
 
 # SW — Swift  (oracle: swiftc 6.1.2)
 
-### T-962 swift: a labelled `if` does not parse · P2 · SW · IN PROGRESS (SW worker, round 11) [V]
-Found by the GO worker, round 16. `lbl: if x > 0 { print(1); break lbl }` → swiftc accepts it (break leaves the if); both halves
-"Not everything could be parsed". Labelled `do` likewise (Swift reference, Labeled Statement).
+### T-977 swift: "cannot find label" and "continue cannot target an if label" are not diagnosed · P3 · SW · OPEN [V]
+Found by the SW worker, round 11 (oracle swiftc 6.1.2). `break nope` with no such label → swiftc "cannot find label 'nope' in
+scope"; `lbl: if c { continue lbl }` → "'continue' cannot be used with if statements". Neither half refuses them.
 
 # DA — Dart  (no dart here: spec-only)
 
@@ -1102,6 +1102,7 @@ T-931 java interp: unbounded recursion through a field initializer hangs instead
 T-932 java: cyclic inheritance hangs the compiler and is accepted by the interpreter — DONE b4b760f2 (same-file cycles refused with javac's message in both halves, 0 false positives over 5634 corpus files; class var {} and yield(1,2) stay accepted by design - javac --release 9 only warns; the rest is T-974)
 T-955 kotlin: fail-fast iteration is missing for the other higher-order functions and for sets — DONE 3d20ccad
 T-956 kotlin: `map.keys.remove(k)` / `map.values.remove(v)` change only the view — DONE 856b5f67 (view remove/removeAll/retainAll/removeIf/clear write through to the map; removeIf on lists and sets)
+T-962 swift: a labelled `if` does not parse — DONE d58d5902 (labelled if / if-let / do in both halves; also fixed: compiled labelled break/continue leaving a do body, and a do in a switch without an enclosing loop broke the native build)
 
 # Settled — do not re-open
 
