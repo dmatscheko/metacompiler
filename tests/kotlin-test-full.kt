@@ -6914,9 +6914,10 @@ fun s156() {
 // A map entry is no Pair: its class is its map's node class (LinkedHashMap$Entry,
 // HashMap$Node, TreeMap$Entry, a singleton map's AbstractMap$SimpleImmutableEntry).
 // StringBuilder and Regex are java.lang.StringBuilder / kotlin.text.Regex; an
-// unsigned type and an array type are qualified in package kotlin (kotlinc 2.2.21
-// on java 24).
+// unsigned type and an array type are qualified in package kotlin. An unnamed
+// companion object is reachable as Owner.Companion (kotlinc 2.2.21 on java 24).
 fun cn157(v: Any): String = "" + v::class.simpleName + " " + v::class.qualifiedName + " " + v.javaClass.name
+class Cmp157 { companion object { val k = 5; fun inc157(n: Int) = n + k } }
 fun s157() {
     val ps = listOf<Any>(1L to 2, Pair("a", 'b'), Triple(1, 2, 3))
     check("kcls157a", ps.map { it::class.simpleName } == listOf("Pair", "Pair", "Triple") &&
@@ -6940,6 +6941,7 @@ fun s157() {
     check("kcls157f", listOf(5u::class.qualifiedName, 5uL::class.qualifiedName, arrayOf("a")::class.qualifiedName,
         intArrayOf(1)::class.qualifiedName, uintArrayOf(1u)::class.qualifiedName, booleanArrayOf(true)::class.qualifiedName) ==
         listOf("kotlin.UInt", "kotlin.ULong", "kotlin.Array", "kotlin.IntArray", "kotlin.UIntArray", "kotlin.BooleanArray"))
+    check("comp157g", Cmp157.Companion.k == 5 && Cmp157.Companion.inc157(1) == 6 && Cmp157.inc157(2) == 7)
 }
 
 fun main() {

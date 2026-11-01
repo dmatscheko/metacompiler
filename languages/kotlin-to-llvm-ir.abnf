@@ -8518,11 +8518,11 @@ KwContract  = "contract" KwEnd ;
             callExt(b, "js_set", [clsV, emitStr(b, delegField(cparts.accprops[cd].name)), rcd.v])
         }
         curScopeV = saved
-        // A NAMED companion (companion object Maker) is also reachable through its own
-        // name - Cls.Maker.SEED and Cls.Maker.of(...). The class descriptor already
+        // A companion is also reachable through its own name - Cls.Maker.SEED,
+        // Cls.Companion.of(...) for an unnamed one. The class descriptor already
         // carries the properties and (via __class) the methods, so the name is simply
         // bound to the descriptor itself rather than to a second copy.
-        if (compName != null) { callExt(b, "js_set", [clsV, emitStr(b, compName), clsV]) }
+        callExt(b, "js_set", [clsV, emitStr(b, compName != null ? compName : "Companion"), clsV])
         emitClassNames.pop()
         return b
     }
