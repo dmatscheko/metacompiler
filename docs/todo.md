@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1037** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1038** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -98,9 +98,12 @@ Found by the CORE worker, round 15. The interpreter's stripWs deletes every ASCI
 strings.TrimSpace, native strips ASCII 9-13 and 32: `int.Parse(" 1 2 ")` and `int.Parse(" 1")` give three answers.
 .NET's NumberStyles.Integer allows leading/trailing white space (U+0009-U+000D, U+0020) only; settle with a real dotnet.
 
-### T-1027 csharp: ParamName is "" (not null) when unset; `int.Parse(null)` throws FormatException · P3 · CS · IN PROGRESS (CS worker, round 4) [V spec-only]
-`new ArgumentException("bad").ParamName == null` — .NET: True (ParamName is null when no name is passed); ours (all three engines): False, it prints as "". Same for ArgumentOutOfRangeException etc. constructed without a param name.
-`string s = null; int.Parse(s);` — .NET docs: ArgumentNullException with ParamName "s"; ours: FormatException "The input string was not in a correct format." in all legs (double.Parse already does the null check; csParseInt and its Go / layer-2 twins lack it; check long/short/byte/uint Parse too).
+### T-1037 csharp: Parse overflow; two-arg Argument* ctors; absent members == null · P3 · CS · OPEN [V spec-only]
+Per .NET docs/reference source, ours wrong in all three engines:
+- `int.Parse("3000000000")` → OverflowException "Value was either too large or too small for an Int32."; `byte.Parse("300")` → "...for an unsigned byte." Ours: -1294967296 / 44 (csParseInt wraps via csNorm, no range check).
+- `new ArgumentOutOfRangeException("r", "too big").Message` → "too big (Parameter 'r')"; ours uses the default text. `new ArgumentException("m", "pn").Message` → "m (Parameter 'pn')"; ours "m".
+- `new Exception("x").InnerException == null` → True; ours False (C# ==/!= treat an absent member, read as undefined, as unequal to null; `is null` / `??` already work — js_cseq/csEq/js_jchareq).
+Found by CS r4 + master probe.
 
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
@@ -1082,6 +1085,7 @@ T-1030 ruby: Proc#=== as an operator returns a boolean; Struct is not Enumerable
 T-1017 bash: `read` without -r keeps backslashes; empty subscript `b[]` accepted; `declare NAME[SUB]` without a value refused; computed operand with an attribute option — DONE (SH r26, c361c4ac): read without -r backslash rules + name validation; b[] bad subscript; declare/local NAME[SUB] declares an array; compiler declare -a with computed operand (-A/export -a computed still refused: runtime attribute table). Master probe vs bash 5.3: 4 legs agree.
 T-1026 php: return-by-reference functions; static property assignment copy — DONE (PHP r36, 5c2f0c64): function &f / &m with =&, by-ref returns of elements/properties/statics; static property assignment copies in the compiler; $$n = &$x binds the computed name. Master spec probe: 3 legs agree.
 T-1025 php: reference counts: remaining release points — PARTIAL→split (PHP r36, 5c2f0c64): holders released on exception unwinding (catch/finally/finally-return) and for computed names. Dying arrays, unfinished generators, by-value param sharing, print_r depth, count() recursion warning need COW/array refcounting — filed as follow-up.
+T-1027 csharp: ParamName is "" (not null) when unset; `int.Parse(null)` throws FormatException — DONE (CS r4, b11a4fd7): ParamName null when unset (Argument*/user subclasses, : base(p) as param name); integral Parse(null) throws ArgumentNullException 's'. Master spec probe: 3 legs agree.
 
 # Settled — do not re-open
 
