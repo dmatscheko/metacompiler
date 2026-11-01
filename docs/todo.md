@@ -145,11 +145,11 @@ go/test/typeparam/slices.go: interpreter `panic: _Max([]) = %!q(<nil>), want ""`
 
 # SW — Swift  (oracle: swiftc 6.1.2)
 
-### T-977 swift: "cannot find label" and "continue cannot target an if label" are not diagnosed · P3 · SW · OPEN [V]
+### T-977 swift: "cannot find label" and "continue cannot target an if label" are not diagnosed · P3 · SW · IN PROGRESS (SW worker, round 12) [V]
 Found by the SW worker, round 11 (oracle swiftc 6.1.2). `break nope` with no such label → swiftc "cannot find label 'nope' in
 scope"; `lbl: if c { continue lbl }` → "'continue' cannot be used with if statements". Neither half refuses them.
 
-### T-987 swift: undefined names need scope tables (out-of-scope uses, upper-case names, members of open types); `#if DEBUG`; MemoryLayout · P3 · SW · OPEN [V]
+### T-987 swift: undefined names need scope tables (out-of-scope uses, upper-case names, members of open types); `#if DEBUG`; MemoryLayout · P3 · SW · IN PROGRESS (SW worker, round 12) [V]
 Found by the GO worker, round 17 (oracle swiftc 6.1.2). T-959's swift check is flow-insensitive: a name declared somewhere but used
 out of its scope, an upper-case name, or a use inside a type that may inherit members is still caught only at run time. Needs
 lexical scope tables in both swift grammars. Also `#if DEBUG` keeps its first branch (swiftc without -D DEBUG drops it) and
