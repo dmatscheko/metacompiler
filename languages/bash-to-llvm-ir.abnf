@@ -1996,6 +1996,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var rtLocalNew = rtDecl("rt_local_new", false, [0, 0])
     var rtUnsetUp = rtDecl("rt_unset_up", false, [0, 0, 0])
     var rtUnsetX = rtDecl("rt_unset_x", false, [0, 0])
+    var rtUnsetEnv = rtDecl("rt_unset_env", false, [0, 0])
+    var rtEnvEnd = rtDecl("rt_env_end", false, [0, 0])
     var rtGlobSwap = rtDecl("rt_glob_swap", false, [0])
 
     // ===================================================================================
@@ -2358,7 +2360,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 return b.NewCall(rtXletters, [nmv, b.NewCall(rtStrcat, [arrK, pick])])
             }
             var sc = scalarAttrLetters(xfName)
-            if (rtAssoc || hasOwn(assocArrays, "$" + xfName)) { return b.NewCall(rtXletters, [nmv, gepStr(b, "A" + sc)]) }
+            if (rtAssoc || attrOn(assocArrays, xfName)) { return b.NewCall(rtXletters, [nmv, gepStr(b, "A" + sc)]) }
             var isArrRt = b.NewICmp(llvm.enum.IPredNE, b.NewCall(rtArrAny, nmv), zero)
             return b.NewCall(rtXletters, [nmv, b.NewSelect(isArrRt, gepStr(b, "a" + sc), gepStr(b, sc))])
         }
@@ -2387,7 +2389,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var idxW = words[0]
             words = words.slice(1)
             wordT = (words.length > 0) ? words[words.length - 1] : null
-            var isAssoc = rtAssoc || hasOwn(assocArrays, "$" + name)
+            var isAssoc = rtAssoc || attrOn(assocArrays, name)
             var nmOf = function(b) { return rtNm ? cell.nm : gepStr(b, name) }
             // The subscript, and the key it names: an associative array's is the text, an
             // indexed array's an arithmetic expression (rt_arr_key; a canonical literal index
@@ -3276,7 +3278,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (roRefused(st, name, "")) { st.NewStore(one, gArithErr) }
         else if (k == null) { storeVar(st, name, st.NewCall(rtInt2str, v)) }
         else {
-            var setF = hasOwn(assocArrays, "$" + name) ? rtArrSet : rtArrIset
+            var setF = attrOn(assocArrays, name) ? rtArrSet : rtArrIset
             st.NewCall(setF, [gepStr(st, name), k, st.NewCall(rtInt2str, v)])
         }
         st.NewBr(jb)
@@ -3591,7 +3593,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // `k=$(( 1/0 ))` leaves k as it was. Twin of runAssign in bash-interpreter.abnf.
     function emitAssign(b, a, assoc0, mk) {
         // Associative-ness is a property of the NAME (declare -A), not of this statement.
-        var assoc = assoc0 || hasOwn(assocArrays, "$" + a.name)
+        var assoc = assoc0 || attrOn(assocArrays, a.name)
         var nm = gepStr(b, a.name)
         var viaRef = attrOn(refVars, a.name)
         if (viaRef && (a.lit != null || a.idxT != null)) { refFail() }
@@ -3874,7 +3876,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // subscript is normalised at two sites that are themselves walk-time (${v@a} and the
         // NAME[SUB] split), and a name is never both kinds in one program.
         for (k = 0; k < names.length; k++) {
-            if (assoc && !query && !hasOwn(assocArrays, "$" + names[k])) { assocArrays["$" + names[k]] = true; assocList.push(names[k]) }
+            if (assoc && !query && !hasOwn(assocArrays, "$" + names[k])) { assocList.push(names[k]) }
+            if (assoc && !query) { assocArrays["$" + names[k]] = true }
         }
         // One name, which -g declares on its global binding even where a local hides it
         // (rt_glob_swap). For a lexical local of this function the global's attributes are
@@ -4148,7 +4151,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                         // The name gets its slot, which a computed operand may have stored into.
                         getVarId(names[j])
                         var lt = scalarAttrLetters(names[j])
-                        var isAs = hasOwn(assocArrays, "$" + names[j]) ? one : zero
+                        var isAs = attrOn(assocArrays, names[j]) ? one : zero
                         var rp = b.NewCall(rtDeclp, [gepStr(b, names[j]), gepStr(b, lt), isAs])
                         acc = b.NewSelect(b.NewICmp(llvm.enum.IPredNE, acc, zero), acc, rp)
                     }
@@ -4513,7 +4516,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var key = r.v
         var keyF = (elem == true) ? rtArrKey1 : rtArrKey
         if (nmv != null) { key = r.b.NewCall(keyF, [nmv, r.v]) }
-        else if (hasOwn(assocArrays, "$" + name)) {
+        else if (attrOn(assocArrays, name)) {
             if (elem != true || (w.c != undefined && w.c != "")) { return {b: r.b, v: r.v, k: r.v} }
             // A key that expands to nothing is reported (rt_arr_key1).
             var eb = r.b
@@ -4550,7 +4553,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     // The same for a literal subscript text (unset 'a[k]', [[ -v a[k] ]]).
     function litKeyOf(b, name, t) {
-        if (hasOwn(assocArrays, "$" + name) || isIndexLit(t)) { return gepStr(b, t) }
+        if (attrOn(assocArrays, name) || isIndexLit(t)) { return gepStr(b, t) }
         return b.NewCall(rtArrKey, [gepStr(b, name), gepStr(b, t)])
     }
     function splitSubscript(s0) {
@@ -6292,6 +6295,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                         emitDiag(b, gepStr(b, "unset: " + sp0.name + ": cannot unset: readonly variable\n"))
                         ust = one
                     }
+                    else if (sp0.key == null && unsetEvalBinding(b, sp0.name)) { }
                     else if (sp0.key == null) {
                         storeVarRaw(b, sp0.name, unsetPtr(b))
                         b.NewCall(rtArrClear, gepStr(b, sp0.name))
@@ -6417,11 +6421,19 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (cmdT.pv != undefined && cmd0.f == true) { empty = b.NewICmp(llvm.enum.IPredEQ, b.NewCall(rtNFields, cmdT.pv), zero) }
             cmdMark = mk0
             tmpDepth = isFn ? depth : null
+            // eval runs its string with each binding hiding its name's array and attributes,
+            // as a function body does. Twin of runPrefixed in bash-interpreter.abnf.
+            var hid = (!isFn && cmd0.c == "eval") ? hidePrefix(b, asgs) : []
+            if (hid.length > 0) { evalScopes.push({hid: hid, depth: depth, fr: curFrame}) }
             b = run(b)
+            if (hid.length > 0) { evalScopes.pop() }
+            unhidePrefix(hid)
             cmdT = cmd0
             argTs = args0
             redirs = redirs0
-            b.NewCall(rtPopLocals, b.NewLoad(i32, depth))
+            // The string's own declarations outlive the bindings (rt_env_end).
+            if (hid.length > 0) { b.NewCall(rtEnvEnd, [b.NewLoad(i32, depth), llvm.constant.NewInt(i32, hid.length)]) }
+            else { b.NewCall(rtPopLocals, b.NewLoad(i32, depth)) }
             if (empty == null) { return b }
             var keepB = curF.NewBlock(""), done = curF.NewBlock("")
             b.NewCondBr(empty, keepB, done)
@@ -6962,16 +6974,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // A refused (readonly) prefix name leaves the declaration as written.
             if (!whole || (!keeps && !(inFn && curFrame != null))) {
                 // -g reaches past the bindings to the global variables.
-                var hid = []
-                for (k = 0; k < asgs.length && flags.indexOf("g") < 0; k++) {
-                    var hn = asgs[k].aname
-                    if (asgs[k].bad != null || attrOn(roVars, hn)) { continue }
-                    b.NewCall(rtArrClear, gepStr(b, hn))
-                    hid.push({n: "$" + hn, i: attrOn(intVars, hn), u: attrOn(upVars, hn), l: attrOn(loVars, hn)})
-                    intVars["$" + hn] = false; upVars["$" + hn] = false; loVars["$" + hn] = false
-                }
+                var hid = (flags.indexOf("g") < 0) ? hidePrefix(b, asgs) : []
                 b = plain(b)
-                for (k = hid.length - 1; k >= 0; k--) { intVars[hid[k].n] = hid[k].i; upVars[hid[k].n] = hid[k].u; loVars[hid[k].n] = hid[k].l }
+                unhidePrefix(hid)
                 b.NewCall(rtPopLocals, b.NewLoad(i32, depth))
                 return b
             }
@@ -6982,6 +6987,49 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             }
             return b
         }
+    }
+    // Hide each bound name behind its prefix binding: no array (at run time) and no
+    // attribute (here, while the command is emitted) until unhidePrefix. Twin of hidePrefix
+    // in bash-interpreter.abnf.
+    function hidePrefix(b, asgs) {
+        var hid = []
+        var k
+        for (k = 0; k < asgs.length; k++) {
+            var hn = asgs[k].aname
+            if (asgs[k].bad != null || attrOn(roVars, hn)) { continue }
+            b.NewCall(rtArrClear, gepStr(b, hn))
+            hid.push({n: "$" + hn, i: attrOn(intVars, hn), u: attrOn(upVars, hn), l: attrOn(loVars, hn), a: attrOn(assocArrays, hn)})
+            intVars["$" + hn] = false; upVars["$" + hn] = false; loVars["$" + hn] = false
+            assocArrays["$" + hn] = false
+        }
+        return hid
+    }
+    function unhidePrefix(hid) {
+        var k
+        for (k = hid.length - 1; k >= 0; k--) {
+            intVars[hid[k].n] = hid[k].i; upVars[hid[k].n] = hid[k].u; loVars[hid[k].n] = hid[k].l
+            assocArrays[hid[k].n] = hid[k].a
+        }
+    }
+    // The bindings of the evals being emitted, innermost last. `unset NAME` in the string
+    // itself removes NAME's binding (rt_unset_env), so the name's own array and attributes
+    // are in effect again. Twin of unsetEvalBinding in bash-interpreter.abnf.
+    var evalScopes = []
+    function unsetEvalBinding(b, name) {
+        if (evalScopes.length == 0) { return false }
+        var sc = evalScopes[evalScopes.length - 1]
+        if (sc.fr != curFrame) { return false }
+        var k
+        for (k = 0; k < sc.hid.length; k++) {
+            var h = sc.hid[k]
+            if (h.n == "$" + name && h.gone != true) {
+                b.NewCall(rtUnsetEnv, [llvm.constant.NewInt(i32, getVarId(name)), b.NewLoad(i32, sc.depth)])
+                intVars[h.n] = h.i; upVars[h.n] = h.u; loVars[h.n] = h.l; assocArrays[h.n] = h.a
+                h.gone = true
+                return true
+            }
+        }
+        return false
     }
     function prefixListed(decl, nm) {
         var k

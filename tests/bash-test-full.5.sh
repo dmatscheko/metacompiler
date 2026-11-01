@@ -150,6 +150,28 @@ declare -A s99m=([k]="v" )'
   g99() { local s99s=1; s99s=6 declare s99s; declare -p s99s; }
   check pfd9 "$(g99)" 'declare -x s99s="6"'
 }
+# ===== SECTION 100: prefix assignments before eval =====
+# The string runs under the bindings as a function body does: each is an exported scalar
+# hiding the name's array and attributes, what the string assigns to it is undone
+# afterwards, `unset` in the string brings back the binding it hid for good, and the
+# string's own declarations outlive the bindings. Every expected value is bash 5.3's.
+s100() {
+  local r
+  r=$(s100d=(1 2); s100d=7 eval 's100d[1]=x; declare -p s100d'; declare -p s100d); check pev1 "$r" 'declare -ax s100d=([0]="7" [1]="x")
+declare -a s100d=([0]="1" [1]="2")'
+  r=$(declare -i s100c=1; s100c=2+3 eval 's100c=4+4; declare -p s100c'; declare -p s100c); check pev2 "$r" 'declare -x s100c="4+4"
+declare -i s100c="1"'
+  r=$(declare -u s100u=x; s100u=b builtin eval 'declare -p s100u'); check pev3 "$r" 'declare -x s100u="b"'
+  r=$(s100d=(1 2); s100d=7 command eval 'echo "${s100d[1]-none} ${#s100d[@]}"'); check pev4 "$r" 'none 1'
+  r=$(declare -A s100m=([k]=v); s100m=5 eval 'declare -p s100m'); check pev5 "$r" 'declare -x s100m="5"'
+  r=$(s100c=1; s100c=2 eval 'unset s100c; echo "[${s100c-unset}]"; s100c=5'; echo "$s100c"); check pev6 "$r" '[1]
+5'
+  g100() { local s100c=7; s100c=3 eval 'unset s100c; echo "[${s100c-unset}]"'; echo "[$s100c]"; }
+  check pev7 "$(g100)" '[7]
+[7]'
+  h100() { s100c=3 eval 'declare s100w=8'; echo "[$s100w]"; }
+  check pev8 "$(h100)" '[8]'
+}
 # ===== END SECTIONS =====
 
 s95   # SECTION-CALL 95
@@ -157,5 +179,6 @@ s96   # SECTION-CALL 96
 s97   # SECTION-CALL 97
 s98   # SECTION-CALL 98
 s99   # SECTION-CALL 99
+s100  # SECTION-CALL 100
 echo "full: $checks checks, $fails failures"
 exit $fails

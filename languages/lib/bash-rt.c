@@ -309,6 +309,8 @@ int rt_pop_locals(int d);
 int rt_glob_swap(int id);
 int rt_unset_up(int id, int d, int fn);
 int rt_ls_drop(int id, int low, int from, int to);
+int rt_unset_env(int id, int d);
+int rt_env_end(int d, int n);
 int rt_fskind(char *p);
 char *rt_getvar_byname(char *n);
 char *rt_getvar_ind(char *n);
@@ -7772,6 +7774,36 @@ int rt_unset_up(int id, int d, int fn)
         t = t - 1;
     }
     return 0;
+}
+
+/* `unset NAME` in the string of an eval run under a binding of NAME (`c=2 eval
+ * 'unset c'`), whose entries start at depth d: the binding goes and the one it
+ * hid is in effect again. Twin of unsetEvalBinding in bash-interpreter.abnf. */
+int rt_unset_env(int id, int d)
+{
+    int t = d;
+    while (t < ls_top) {
+        if (ls_id[t] == id) return rt_ls_drop(id, t, d, ls_top);
+        t = t + 1;
+    }
+    return 0;
+}
+
+/* The end of an eval run under n bindings saved from depth d: each goes, and the
+ * entries the string's own declarations pushed above them stay for the function
+ * they belong to (`f() { x=1 eval 'local w=8'; echo $w; }` prints 8). */
+int rt_env_end(int d, int n)
+{
+    int t = d;
+    while (t < d + n) {
+        if (ls_id[t] >= 0) rt_ls_drop(ls_id[t], t, t, t + 1);
+        t = t + 1;
+    }
+    while (t < ls_top) {
+        if (ls_id[t] >= 0) return 0;
+        t = t + 1;
+    }
+    return rt_pop_locals(d);
 }
 
 /* Restore entry `low`, the first of `id` in the frame [from, to), and retire

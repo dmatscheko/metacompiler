@@ -5750,10 +5750,66 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var adoptFrame = false
     function runPrefixed(cmd, args, saved) {
         adoptFrame = saved.length > 0 && saved[0].tmp == true
+        // eval runs its string under the bindings the way a function runs its body: each is a
+        // plain scalar hiding the name's array and attributes, and what the string assigns to
+        // it is undone afterwards (bash 5.3: `d=(1 2); d=7 eval 'declare -p d'` prints
+        // declare -x d="7"). Twin of the eval arm of makeSimpleCommand in bash-to-llvm-ir.abnf.
         var st = anytype
+        if (saved.length == 0 || adoptFrame || !evalCmd(cmd, args)) {
+            st = runCommand(cmd, args)
+            adoptFrame = false
+            return st
+        }
+        var hid = hidePrefix(saved)
+        evalScopes.push({hid: hid, saved: saved, fd: localFrames.length})
         st = runCommand(cmd, args)
-        adoptFrame = false
+        evalScopes.pop()
+        unhidePrefix(hid)
         return st
+    }
+    // The bindings of the evals running, innermost last. `unset NAME` in the string itself
+    // removes NAME's binding, so the one it hid is in effect again, for good: bash 5.3's
+    // `c=1; c=2 eval 'unset c; echo $c; c=5'; echo $c` prints 1, then 5. Answers whether
+    // NAME was such a binding. Twin of rt_unset_env in bash-rt.c.
+    var evalScopes = []
+    function unsetEvalBinding(name) {
+        if (evalScopes.length == 0) { return false }
+        var sc = evalScopes[evalScopes.length - 1]
+        if (sc.fd != localFrames.length) { return false }
+        var k
+        for (k = 0; k < sc.hid.length; k++) {
+            if (sc.hid[k].name == name && sc.hid[k].gone != true) {
+                restoreLocal(sc.hid[k])
+                vars["$" + name] = sc.saved[k].val
+                varsHas["$" + name] = sc.saved[k].had
+                exVars["$" + name] = sc.saved[k].ex
+                sc.hid[k].gone = true
+                sc.saved[k].gone = true
+                return true
+            }
+        }
+        return false
+    }
+    function evalCmd(cmd, args) {
+        if (cmd == "eval") { return true }
+        return (cmd == "builtin" || cmd == "command") && args.length > 0 && args[0] == "eval"
+    }
+    // Hide the names applyPrefix bound behind their bindings: each is an exported scalar
+    // with no array and no other attribute until unhidePrefix.
+    function hidePrefix(saved) {
+        var hid = []
+        var k
+        for (k = 0; k < saved.length; k++) {
+            hid.push(bindingOf(saved[k].name))
+            dropAttrs(saved[k].name)
+            exVars["$" + saved[k].name] = true
+            arrs[arrKey(saved[k].name)] = null
+        }
+        return hid
+    }
+    function unhidePrefix(hid) {
+        var k
+        for (k = hid.length - 1; k >= 0; k--) { if (hid[k].gone != true) { restoreLocal(hid[k]) } }
     }
     // Performs the prefix assignments left to right, each seeing the ones before it. With
     // undo, answers what restorePrefix needs to put the names back after the command - which
@@ -5809,11 +5865,12 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (saved.length > 0 && saved[0].tmp == true) { popLocalFrame(); return }
         restoreVals(saved)
         var k
-        for (k = saved.length - 1; k >= 0; k--) { exVars["$" + saved[k].name] = saved[k].ex }
+        for (k = saved.length - 1; k >= 0; k--) { if (saved[k].gone != true) { exVars["$" + saved[k].name] = saved[k].ex } }
     }
     function restoreVals(saved) {
         var k
         for (k = saved.length - 1; k >= 0; k--) {
+            if (saved[k].gone == true) { continue }
             vars["$" + saved[k].name] = saved[k].val
             varsHas["$" + saved[k].name] = saved[k].had
         }
@@ -6997,6 +7054,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     diagErr("unset: " + sp.name + ": cannot unset: readonly variable\n")
                     ust = 1
                 }
+                else if (sp.key == null && unsetEvalBinding(sp.name)) { }
                 else if (sp.key == null) {
                     if ((localHere(sp.name) && !tmpHere(sp.name)) || !unsetCallerLocal(sp.name)) {
                         // A local made of the call's prefix binding keeps its export (bash's
@@ -7921,16 +7979,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var k
             if (!keeps && !(inFn && localFrames.length > 0)) {
                 // -g reaches past the bindings to the global variables.
-                var hid = []
-                for (k = 0; k < saved.length && flags.indexOf("g") < 0; k++) {
-                    hid.push(bindingOf(saved[k].name))
-                    dropAttrs(saved[k].name)
-                    exVars["$" + saved[k].name] = true
-                    arrs[arrKey(saved[k].name)] = null
-                }
+                var hid = (flags.indexOf("g") < 0) ? hidePrefix(saved) : noPrefix
                 var r = anytype
                 r = plain()
-                for (k = hid.length - 1; k >= 0; k--) { restoreLocal(hid[k]) }
+                unhidePrefix(hid)
                 restorePrefix(saved)
                 return r
             }
