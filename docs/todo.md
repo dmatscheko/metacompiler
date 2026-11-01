@@ -170,21 +170,21 @@ value: `$x = 5; $a = [&$x, 1]; var_dump($a);` → php `&int(5)`, ours `int(5)` (
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-978 bash: `type`, `declare -f`/`-F`, `command -V` of a function · P3 · SH · OPEN [V]
+### T-978 bash: `type`, `declare -f`/`-F`, `command -V` of a function · P3 · SH · IN PROGRESS (SH worker, round 22) [V]
 Found by the SH worker, round 21 (oracle bash 5.3). `f(){ :; }; type f` → bash "f is a function" plus the body; `declare -F f` →
 `f`; `declare -f f` prints the normalised body; `command -V f` → "f is a function". Not built in either half (round 21 added
 command -V only for builtins and keywords).
 
-### T-979 bash: diagnostics lack bash's "file: line N:" prefix (incl. `${!v}` bad substitution) · P3 · SH · OPEN [V]
+### T-979 bash: diagnostics lack bash's "file: line N:" prefix (incl. `${!v}` bad substitution) · P3 · SH · IN PROGRESS (SH worker, round 22) [V]
 Found by the SH worker, round 21. bash prefixes runtime errors with the script name and line, e.g. `t.sh: line 3: ${!v}: bad
 substitution`; ours prints the message alone, so stderr differs from the oracle on every diagnostic.
 
-### T-980 bash: nameref limits and function definitions leaking out of subshells · P3 · SH · OPEN [V]
+### T-980 bash: nameref limits and function definitions leaking out of subshells · P3 · SH · IN PROGRESS (SH worker, round 22) [V]
 Found by the SH worker, round 21. Namerefs (round 21) do not cover array-element targets (`declare -n r=a[1]`), `${!r}` (the
 target name) or circular-reference diagnostics; rt_setvar_byname drops writes through some indirect paths. Also `( f(){ :; } ); f`
 - bash: f is not defined outside the subshell; ours keeps it.
 
-### T-981 bash: "command not found" aborts the script with 127; bash continues · P2 · SH · OPEN [V]
+### T-981 bash: "command not found" aborts the script with 127; bash continues · P2 · SH · IN PROGRESS (SH worker, round 22) [V]
 Found by the master probing round 21. `nosuchcmd; echo after` → bash prints the error and `after` (the status is 127 and the
 script goes on); both halves stop at the first unknown command with exit 127.
 
