@@ -64,7 +64,7 @@ its report; anything structural there is a CORE ticket.
 
 # PY — Python
 
-### T-957 python: remainder of the data-model gaps · P3 · PY · OPEN [V]
+### T-957 python: remainder of the data-model gaps · P3 · PY · IN PROGRESS (PY worker, round 18) [V]
 Left from T-954, plus one found by the PY worker, round 17 (oracle python3 3.14):
 - bound-method equality: `a.m == a.m` → True, every engine False (bound methods are plain closures; needs `__self__` / `__func__` equality).
 - `pow(2, 3, int)` (any non-number, non-instance modulus) → CPython "unsupported operand type(s) for ** or pow(): 'int', 'int', 'type'",
