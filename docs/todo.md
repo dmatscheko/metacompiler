@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-997** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-998** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -70,15 +70,12 @@ languages/lib/python-codecs.js (+ Go twin abnf/jsrtpycodecs.go) is the place; ch
 
 # RB — Ruby
 
-### T-971 ruby: smaller gaps found in round 33 · P3 · RB · IN PROGRESS (RB worker, round 34) [V]
-Found by the RB worker, round 33 (oracle /usr/bin/ruby 2.6, LC_ALL=en_US.UTF-8):
-- compiler: a constant assigned inside begin/rescue in a class or module body is invisible to that class's methods ("variable not
-  defined: KC") and missing from Module#constants - `class Ka; begin; KC=3; rescue; end; def g; KC; end; end; p Ka.new.g` → 3.
-  lexNote / emitConstNames only look at top-level body statements.
-- `"a,b".split(/,/); p $~` → nil (the final failed search); ours keeps the last match.
-- `class String; def shout; end; end; String.instance_methods(false)` → MRI the whole own list; ours `[:shout]`.
-- Hash#each: deleting the LAST key and adding it back during iteration raises nothing (key order cannot show it).
-- `15 =~ /5/` → nil in 2.6 (Object#=~), ours 1 (3.2+ raises NoMethodError; follow 2.6).
+### T-997 ruby: adding a key during hash iteration must raise at the insertion (MRI iter_lev model) · P3 · RB · OPEN [V]
+Found by the RB worker, round 34 (oracle ruby 2.6). `h={a:1,b:2}; h.each { h.delete(:b); h[:b]=3 }` → RuntimeError "can't add a new
+key into hash during iteration", h ends `{:a=>1}`; ours passes (the post-block key-order check sees no change). `h.each_key { h[:z]=5 }`
+(also each_value, select, map) → MRI raises; ours adds silently. `h.each { h[:c]=9; puts "after" }` → MRI raises at the insert,
+"after" never printed; ours prints it. Needs an iteration mark on the hash checked at every new-key insert in all three engines.
+Also: Module#constants order with several constants follows MRI's ID-hash order (`[:MD, :MC]`), ours source order.
 
 # JS — JavaScript and TypeScript
 
@@ -1109,6 +1106,7 @@ T-972 kotlin: `rec(p, "R").w++` - an increment of a property of a call result �
 T-976 kotlin: `x.keys -= 2` corrupts the map; views are snapshots; lambdas see re-read elements — PARTIAL - keys/values -= write through, live map views, lambdas read elements once, single stops at the 2nd match; sort selector counts filed
 T-982 c compiled: an indirect call through a function pointer loses the return type — DONE - function-pointer types carry their signature; indirect calls convert arguments and unpack the result type
 T-996 c compiled: a function whose return type is a typedef name loses it on a direct call — DONE - typedef'd return types (scalar, pointer, struct by value, function pointer) honoured in both engines
+T-971 ruby: smaller gaps found in round 33 — PARTIAL - nested class-body consts, $~ after split, =~ dispatch/TypeError, builtin own instance_methods; Hash iteration insert check filed
 
 # Settled — do not re-open
 
