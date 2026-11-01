@@ -84,9 +84,33 @@ s96() {
   unset 's96g[k1698]'; s96g[k1698]=x
   r="${!s96g[*]}"; check asg2 "${r:0:29}" 'k1698 k1699 k1696 k1697 k1694'
 }
+# ===== SECTION 97: bare words of an associative literal =====
+# An associative literal whose first element is a bare word is key value pairs: a word is
+# not field-split, and a later [k]=v is the word "[k]=v". Once the first element is a
+# [k]=v, a bare word is "must use subscript", quoted as written (in single quotes under a
+# declaration builtin), and the line is abandoned (a subshell, whole). Every expected
+# value is bash 5.3's.
+s97() {
+  local r w='p q r s' l
+  declare -A s97a=($w); check alw1 "$(declare -p s97a)" 'declare -A s97a=(["p q r s"]="" )'
+  declare -A s97b=($w x); check alw2 "$(declare -p s97b)" 'declare -A s97b=(["p q r s"]="x" )'
+  declare -A s97c=(a b [x]=1 c); check alw3 "$(declare -p s97c)" 'declare -A s97c=([a]="b" ["[x]=1"]="c" )'
+  r=$( (declare -A s97d=([x]=0 [y]=2 a [z]=3); echo "no") 2>&1; echo "st=$?"); l=$LINENO
+  check alw4 "$r" "$0: line $l: s97d: 'a': must use subscript when assigning associative array
+st=1"
+  r=$( (declare -A s97e; s97e=([x]=0 a 1) ; echo "no"; declare -p s97e) 2>&1); l=$LINENO
+  check alw5 "$r" "$0: line $l: s97e: a: must use subscript when assigning associative array"
+  r=$( (declare -A s97e; s97e=([x]=0 a 1)
+        declare -p s97e) 2>&1); l=$LINENO
+  check alw6 "$r" "$0: line $l: s97e: a: must use subscript when assigning associative array"
+  r=$( (declare -A s97f=([x]=0 'a b' 1)) 2>&1); l=$LINENO
+  check alw7 "$r" "$0: line $l: s97f: ''\\''a b'\\''': must use subscript when assigning associative array"
+  declare -A s97g; s97g[x]=1; s97g+=(a); check alw8 "$(declare -p s97g)" 'declare -A s97g=([x]="1" [a]="" )'
+}
 # ===== END SECTIONS =====
 
 s95   # SECTION-CALL 95
 s96   # SECTION-CALL 96
+s97   # SECTION-CALL 97
 echo "full: $checks checks, $fails failures"
 exit $fails

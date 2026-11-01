@@ -3517,21 +3517,36 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         else if (!assoc) { b.NewCall(rtArrAdopt, [nm, llvm.constant.NewInt(i32, getVarId(name))]) }
         // A literal makes the name a SET array even with no element (rt_arr_mark).
         b.NewCall(rtArrMark, nm)
-        // Bare words in an ASSOCIATIVE array literal are KEY VALUE pairs - bash 5.3.15 reads
-        // `declare -A b=(one two three four)` as b[one]=two b[three]=four, and a trailing odd word
-        // takes an empty value. An empty key is refused (emitAkSet).
+        // An ASSOCIATIVE array literal whose first element is a bare word is KEY VALUE pairs -
+        // bash 5.3.15 reads `declare -A b=(one two three four)` as b[one]=two b[three]=four, a
+        // trailing odd word takes an empty value, and a later [k]=v is the word "[k]=v". Once
+        // the first element is a [k]=v, a bare word is reported as written (in single quotes
+        // under litDecl), which stops the literal and abandons the line. An empty key is
+        // refused (emitAkSet). Twin of applyArrayLit in bash-interpreter.abnf.
         if (assoc) {
             var pendKey = null
             var pendSrc = ""
             var abox = {b: b}
             var stop = curF.NewBlock("")
+            var kvMode = vals.length > 0 && vals[0].k == null
+            var ended = false
             for (i = 0; i < vals.length; i++) {
-                if (vals[i].k != null) { emitAkSet(abox, name, nm, vals[i].k, vals[i].v, vals[i].src, stop); continue }
-                var w = wordJoin(abox.b, vals[i].v)
+                var w = null
+                if (!kvMode) {
+                    if (vals[i].k != null) { emitAkSet(abox, name, nm, vals[i].k, vals[i].v, vals[i].src, stop); continue }
+                    emitDiag(abox.b, gepStr(abox.b, name + ": " + (litDecl ? bashSq(vals[i].src) : vals[i].src) + ": must use subscript when assigning associative array\n"))
+                    abox.b.NewStore(one, gArithErr)
+                    abox.b.NewBr(stop)
+                    ended = true
+                    break
+                }
+                if (vals[i].k != null) {
+                    w = abox.b.NewCall(rtStrcat, [abox.b.NewCall(rtStrcat, [gepStr(abox.b, "["), vals[i].k]), abox.b.NewCall(rtStrcat, [gepStr(abox.b, "]="), vals[i].v])])
+                } else { w = wordJoin(abox.b, vals[i].v) }
                 if (pendKey == null) { pendKey = w; pendSrc = vals[i].src } else { emitAkSet(abox, name, nm, pendKey, w, pendSrc, null); pendKey = null }
             }
             if (pendKey != null) { emitAkSet(abox, name, nm, pendKey, emptyPtr(abox.b), pendSrc, null) }
-            abox.b.NewBr(stop)
+            if (!ended) { abox.b.NewBr(stop) }
             return emitAbortCheck(stop)
         }
         // In an INDEXED literal a bare word takes the index after the element before it

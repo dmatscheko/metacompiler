@@ -5424,14 +5424,15 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return {name: name, idxT: idxT, op: op, valT: valT, lit: lit, isrc: isrc, lbl: name}
     }
     // Evaluate an array literal into a list of (key, value) pairs; a bare word contributes
-    // one element per FIELD, so a=($x) with x="a b c" really is three elements.
-    function evalArrayLit(litItems) {
+    // one element per FIELD, so a=($x) with x="a b c" really is three elements - but not in
+    // an associative literal (isAs), where bash 5.3 keeps declare -A m=($x) one word.
+    function evalArrayLit(litItems, isAs) {
         var out = []
         var i
         for (i = 0; i < litItems.length; i++) {
             var it = litItems[i]
             if (it.aw != undefined) {
-                var f = wordFields(it.aw())
+                var f = isAs ? [wordJoin(it.aw())] : wordFields(it.aw())
                 var k
                 for (k = 0; k < f.length; k++) { out.push({k: null, v: f[k], src: it.src}) }
             } else {
@@ -5473,17 +5474,26 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             }
             return
         }
-        // Bare words in an ASSOCIATIVE array literal are KEY VALUE PAIRS - bash 5.3.15
-        // reads `declare -A b=(one two three four)` as b[one]=two b[three]=four, and a
-        // trailing odd word takes an empty value, so `a+=(zz)` gives a["zz"]="".
+        // An ASSOCIATIVE array literal whose first element is a bare word is KEY VALUE
+        // PAIRS - bash 5.3.15 reads `declare -A b=(one two three four)` as b[one]=two
+        // b[three]=four, a trailing odd word takes an empty value, so `a+=(zz)` gives
+        // a["zz"]="", and a later [k]=v is the word "[k]=v". Once the first element is a
+        // [k]=v, a bare word is reported as written (as a declaration builtin re-spells it,
+        // in single quotes, under decl), which stops the literal and abandons the line.
         //
         // An EMPTY KEY is a bad array subscript, reported quoting the element: as written in
         // an assignment (`[$k]=v`), and as a declaration builtin re-spells it (decl) - each
         // part in single quotes, `['']='v'`. A [k]=v so stops the literal and abandons the
         // line; a pair so (`"" v`) is skipped. Twin of rt_arr_akbad in lib/bash-rt.c.
         var plain = []
+        var kvMode = pairs.length > 0 && pairs[0].k == null
         for (i = 0; i < pairs.length; i++) {
-            if (pairs[i].k == null) { plain.push(pairs[i]); continue }
+            if (kvMode) { plain.push((pairs[i].k == null) ? pairs[i] : {k: null, v: "[" + pairs[i].k + "]=" + pairs[i].v, src: pairs[i].src}); continue }
+            if (pairs[i].k == null) {
+                diagErr(name + ": " + (decl ? bashSq(pairs[i].src) : pairs[i].src) + ": must use subscript when assigning associative array\n")
+                arithErr = true
+                return
+            }
             if (pairs[i].k == "") {
                 diagErr((decl ? "[" + bashSq("") + "]=" + bashSq(pairs[i].v) : pairs[i].src) + ": bad array subscript\n")
                 arithErr = true
@@ -5554,7 +5564,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (a == null) { return }
         var isAs = assocFact(a.name, assoc)
         if (a.lit != null) {
-            var lv = evalArrayLit(a.lit)
+            var lv = evalArrayLit(a.lit, isAs)
             if (arithErr || abortSignal != null) { return }
             // A replacing literal drops a scalar of the name; an appending one keeps it as element 0.
             if (a.op != "+=") { unsetVar(a.name) } else if (!isAs) { arrAdopt(a.name) }
