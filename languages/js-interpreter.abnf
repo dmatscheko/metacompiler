@@ -422,7 +422,11 @@ YieldStar   <~~ push({ystar: true}) ~~> = NoLineBreak "*" ;
 // enforces the "ends in a member" shape (see LhsAssign); a bare name has no suffixes at
 // all, which is why the whole run is optional.
 Target      <~~ push(makeTargetRef(takeAll())) ~~>
-            = TargetHead [ LhsSuffixes ] ;
+            = ParenThis LhsSuffixes | TargetHead [ LhsSuffixes ] ;
+// A parenthesized 'this' heads a member path like the bare word does: '[(this).a] = v'.
+// Alone it is no place, which is why the suffixes above are not optional.
+// Twin: ParenThis in js-to-llvm-ir.abnf.
+ParenThis   = "(" ( ParenThis | "this" KwEnd <~~ push("this") ~~> ) ")" ;
 // Parentheses around a target are transparent: '(a) = 1', '((a)) = 1' and '(a.b).c = 1'
 // all assign exactly where the unparenthesized form would. The inner reference is passed
 // out whole and whatever suffixes follow the ')' are appended to its path.
@@ -5344,6 +5348,19 @@ NotFuncHead = :script(~~
     function jsRoText(o, key) { return "Cannot assign to read only property '" + jsKeyText(key) + "' of object '" + jsObjText(o) + "'" }
     // V8 names a function in a refused write by its String(f).
     function jsFnRoText(f, key) { return "Cannot assign to read only property '" + jsKeyText(key) + "' of function '" + fsElide(jsStr(f)) + "'" }
+    // A write onto a PRIMITIVE base makes no property (OrdinarySet on the wrapper,
+    // ECMA-262 10.1.9.2): sloppy code drops it, strict code raises this. A string's
+    // `length` and its in-range indices are read-only; any other key cannot be created.
+    // Twins: jsvPrimWriteText in abnf/jsrtjsprint.go, jvPrimWriteText in
+    // languages/lib/js-rt.metajs.
+    function jsPrimWriteText(o, key) {
+        var recv = jsTypeofVal(o) + " '" + (jsIsSym(o) ? jsSymStr(o) : jsStr(o)) + "'"
+        var ix = jsArrIndexKey(key)
+        if (typeof o == "string" && ("" + key === "length" || (ix >= 0 && ix < o.length))) {
+            return "Cannot assign to read only property '" + jsKeyText(key) + "' of " + recv
+        }
+        return "Cannot create property '" + jsKeyText(key) + "' on " + recv
+    }
     function jsAddText(key) { return "Cannot add property " + jsKeyText(key) + ", object is not extensible" }
     function jsDelText(o, key) { return "Cannot delete property '" + jsKeyText(key) + "' of " + jsObjText(o) }
     // A write of a numeric key a typed array has no element for (lib/js-builtins.js's
@@ -7413,6 +7430,7 @@ NotFuncHead = :script(~~
     // Writing a member goes through the SETTER when there is one, which is what makes
     // 'o.v = 2' run the accessor instead of shadowing it with a plain slot.
     function setMember(o, k, v) {
+        if (typeof o == "string" || typeof o == "number" || typeof o == "boolean") { jsRefuse(jsPrimWriteText(o, k)); return }
         // A member write on a class DESCRIPTOR is a write to its static namespace, for
         // the same reason the read is.
         if (isStaticSide(o, k)) {
@@ -7440,6 +7458,7 @@ NotFuncHead = :script(~~
             }
         }
         if (o != undefined && o != null && typeof o == "object" && !Array.isArray(o)) {
+            if (isBigInt(o) || jsIsSym(o)) { jsRefuse(jsPrimWriteText(o, k)); return }
             var ah = anytype // The object or class descriptor holding k's accessor.
             ah = accHolder(o, k)
             if (ah !== undefined) {
@@ -12487,17 +12506,28 @@ NotFuncHead = :script(~~
         var valT = items[2]
         return function() {
             var cur = anytype // The current value may be of any type.
-            cur = refGet(ref)
-            var assign = false
-            if (op == "&&=") { assign = jsTruthy(cur) }
-            else if (op == "||=") { assign = !jsTruthy(cur) }
-            else { assign = (cur === null || cur === undefined) }
-            if (!assign) { return cur }
             var v = anytype // So may the new one.
+            if (ref.path.length == 0) {
+                cur = refGet(ref)
+                if (!jsLogicalAssigns(op, cur)) { return cur }
+                v = valT()
+                refSet(ref, v)
+                return v
+            }
+            // The place is evaluated once, for the read and the write alike.
+            var p = resolveRef(ref)
+            cur = getMember(p.obj, p.key)
+            if (!jsLogicalAssigns(op, cur)) { return cur }
             v = valT()
-            refSet(ref, v)
+            setMember(p.obj, p.key, v)
+            jsArgPut(p.obj, p.key, v, false)
             return v
         }
+    }
+    function jsLogicalAssigns(op, cur) {
+        if (op == "&&=") { return jsTruthy(cur) }
+        if (op == "||=") { return !jsTruthy(cur) }
+        return cur === null || cur === undefined
     }
     // items = [{lhsprim}, suffix marker..., opString, valueThunk]. The left side is an
     // arbitrary expression reached through at least one member access, so the reference
@@ -12516,6 +12546,7 @@ NotFuncHead = :script(~~
         var ref = lhsPlaceRef(items.slice(0, items.length - 2))
         var op = items[items.length - 2]
         var valT = items[items.length - 1]
+        if (op == "&&=" || op == "||=" || op == "??=") { return makeLogicalAssign([ref, op, valT]) }
         return function() {
             var p = resolveRef(ref, op == "=")
             var v = anytype // A compound assignment may change the value's type.

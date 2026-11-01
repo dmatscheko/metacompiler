@@ -1020,6 +1020,31 @@ func (rt *jsrt) jsvRoText(o interface{}, key string) string {
 	return "Cannot assign to read only property '" + jsvKeyText(key) + "' of object '" + rt.jsvObjText(o) + "'"
 }
 
+// jsvPrimWriteText is the refusal of a write onto a primitive base, or "" when o is
+// no primitive. Twin of jsPrimWriteText in js-interpreter.abnf, which states the rule.
+func (rt *jsrt) jsvPrimWriteText(o, key interface{}) string {
+	kind := ""
+	switch t := o.(type) {
+	case string, float64, bool, *jsBigInt:
+		kind = rt.typeOf(o)
+	case *jsObject:
+		if !jsvIsSym(t) {
+			return ""
+		}
+		kind = "symbol"
+	default:
+		return ""
+	}
+	ks := jsvKeyText(rt.toString(key))
+	recv := kind + " '" + rt.jsvString(o) + "'"
+	if s, isStr := o.(string); isStr {
+		if ix := rt.arrIndexOf(key); ks == "length" || (ix >= 0 && ix < len(strUnits(s))) {
+			return "Cannot assign to read only property '" + ks + "' of " + recv
+		}
+	}
+	return "Cannot create property '" + ks + "' on " + recv
+}
+
 // jsvFnRoText is V8's text for a refused write to a function's `name` or `length`,
 // which names the function by its String(f). Twin of jsFnRoText in both
 // *-interpreter.abnf.
@@ -7195,6 +7220,10 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 				return boolH(false)
 			}
 			return 0
+		}
+		if msg := rt.jsvPrimWriteText(u(a[0]), u(a[1])); msg != "" {
+			jsvRefused = msg
+			return boolH(false)
 		}
 		// `name` and `length` are NON-WRITABLE: node drops `f.name = "q"` in sloppy
 		// code and raises a TypeError in strict code - unless a definition made one

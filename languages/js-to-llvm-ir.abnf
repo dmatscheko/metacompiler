@@ -1082,7 +1082,12 @@ ATargetElem <~~ push(withDefault(takeAll())) ~~>
             = ATargetRef [ "=" WExpr ] ;
 ATargetRef  = ATargetSuper | ATargetPlain ;
 ATargetPlain <~~ push({dtype: "target", ref: pop()}) ~~>
-            = TargetParen | TargetSuffixed ;
+            = TargetParen | TargetParenThis | TargetSuffixed ;
+// A parenthesized 'this' heads a member path like the bare word does: '[(this).a] = v'.
+// Twin: ParenThis in js-interpreter.abnf.
+TargetParenThis <~~ push(jsTargetRef(takeAll(), up.start)) ~~>
+            = ParenThis TargetTail ;
+ParenThis   = "(" ( ParenThis | "this" KwEnd <~~ push("this") ~~> ) ")" ;
 // A super PROPERTY as a destructuring target: 'class a extends b { c() { [super.d] = e } }'
 // and '({d: super[e]} = f)' are valid JavaScript. TargetSuffixed starts at 'NotReserved Id',
 // which refuses the reserved word 'super', so the shape needs its own production - exactly

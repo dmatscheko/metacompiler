@@ -4153,6 +4153,15 @@ NotFuncHead = :script(~~
     function jsRoText(o, key) { return "Cannot assign to read only property '" + jsKeyText(key) + "' of object '" + jsObjText(o) + "'" }
     // See the twin of this comment in js-interpreter.abnf.
     function jsFnRoText(f, key) { return "Cannot assign to read only property '" + jsKeyText(key) + "' of function '" + jsStr(f) + "'" }
+    // See the twin of this comment in js-interpreter.abnf.
+    function jsPrimWriteText(o, key) {
+        var recv = jsTypeofVal(o) + " '" + (jsIsSym(o) ? jsSymStr(o) : jsStr(o)) + "'"
+        var ix = jsArrIndexKey(key)
+        if (typeof o == "string" && ("" + key === "length" || (ix >= 0 && ix < o.length))) {
+            return "Cannot assign to read only property '" + jsKeyText(key) + "' of " + recv
+        }
+        return "Cannot create property '" + jsKeyText(key) + "' on " + recv
+    }
     function jsAddText(key) { return "Cannot add property " + jsKeyText(key) + ", object is not extensible" }
     function jsDelText(o, key) { return "Cannot delete property '" + jsKeyText(key) + "' of " + jsObjText(o) }
     // Twin of jsTypedDrop in js-interpreter.abnf.
@@ -5941,6 +5950,7 @@ NotFuncHead = :script(~~
     // Writing a member goes through the SETTER when there is one, which is what makes
     // 'o.v = 2' run the accessor instead of shadowing it with a plain slot.
     function setMember(o, k, v) {
+        if (typeof o == "string" || typeof o == "number" || typeof o == "boolean") { jsRefuse(jsPrimWriteText(o, k)); return }
         // A member write on a class DESCRIPTOR is a write to its static namespace, for
         // the same reason the read is.
         if (isStaticSide(o, k)) {
@@ -5967,6 +5977,7 @@ NotFuncHead = :script(~~
             }
         }
         if (o != undefined && o != null && typeof o == "object" && !Array.isArray(o)) {
+            if (isBigInt(o) || jsIsSym(o)) { jsRefuse(jsPrimWriteText(o, k)); return }
             var ah = anytype // The object or class descriptor holding k's accessor.
             ah = accHolder(o, k)
             if (ah !== undefined) {
@@ -11015,17 +11026,28 @@ NotFuncHead = :script(~~
         var valT = items[2]
         return nsTracked(function() {
             var cur = anytype // The current value may be of any type.
-            cur = refGet(ref)
-            var assign = false
-            if (op == "&&=") { assign = jsTruthy(cur) }
-            else if (op == "||=") { assign = !jsTruthy(cur) }
-            else { assign = (cur === null || cur === undefined) }
-            if (!assign) { return cur }
             var v = anytype // So may the new one.
+            if (ref.path.length == 0) {
+                cur = refGet(ref)
+                if (!jsLogicalAssigns(op, cur)) { return cur }
+                v = valT()
+                refSet(ref, v)
+                return v
+            }
+            // The place is evaluated once, for the read and the write alike.
+            var p = resolveRef(ref)
+            cur = getMember(p.obj, p.key)
+            if (!jsLogicalAssigns(op, cur)) { return cur }
             v = valT()
-            refSet(ref, v)
+            setMember(p.obj, p.key, v)
+            jsArgPut(p.obj, p.key, v, false)
             return v
         }, refNames(ref))
+    }
+    function jsLogicalAssigns(op, cur) {
+        if (op == "&&=") { return jsTruthy(cur) }
+        if (op == "||=") { return !jsTruthy(cur) }
+        return cur === null || cur === undefined
     }
     // The bare name a target reference stores to, as nsTracked's list.
     function refNames(ref) {
@@ -11046,25 +11068,10 @@ NotFuncHead = :script(~~
         var ref = lhsPlaceRef(items.slice(0, items.length - 2))
         var op = items[items.length - 2]
         var valT = items[items.length - 1]
+        // The three LOGICAL assignments short circuit, so they cannot be folded through
+        // applyOp like the compound operators LhsAssign lists them alongside.
+        if (op == "&&=" || op == "||=" || op == "??=") { return makeLogicalAssign([ref, op, valT]) }
         return function() {
-            // The three LOGICAL assignments SHORT CIRCUIT: the right side is evaluated,
-            // and the store happens, only when the current value asks for it - so they
-            // cannot be folded through applyOp like the compound operators LhsAssign
-            // lists them alongside.
-            if (op == "&&=" || op == "||=" || op == "??=") {
-                var p0 = resolveRef(ref)
-                var cur = anytype // The current value may be of any type.
-                cur = getMember(p0.obj, p0.key)
-                var assign = false
-                if (op == "&&=") { assign = jsTruthy(cur) }
-                else if (op == "||=") { assign = !jsTruthy(cur) }
-                else { assign = (cur === null || cur === undefined) }
-                if (!assign) { return cur }
-                var lv = anytype // So may the new one.
-                lv = valT()
-                setMember(p0.obj, p0.key, lv)
-                return lv
-            }
             var p = resolveRef(ref, op == "=")
             var v = anytype // A compound assignment may change the value's type.
             if (op != "=") { v = getMember(p.obj, p.key); v = applyOp(op, v, valT()) } else { v = valT() }

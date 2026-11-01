@@ -3592,6 +3592,20 @@ function js_jsmset(o, key, v) {
         if (typeof key == "object") { if (jvIsSym(key)) { return js_jsmset(o, key["__symkey"], v) } }
         if (jvIsSymKey(key)) { if (jvIsObj(o)) { jvSymTrack(o, key) } }
     }
+    // A primitive base makes no property (jvPrimWriteText); one typeof keeps the
+    // object case to a single compare.
+    var ot = typeof o
+    if (ot !== "object") {
+        if (ot !== "function") {
+            if (ot !== "undefined") {
+                jvRefused = jvPrimWriteText(o, key)
+                return false
+            }
+        }
+    } else {
+        if (jvSymN > 0) { if (jvIsSym(o)) { jvRefused = jvPrimWriteText(o, key); return false } }
+        if (jbPool.length !== 0) { if (jbIsBig(o)) { jvRefused = jvPrimWriteText(o, key); return false } }
+    }
     // A member write on a class DESCRIPTOR is a write to its static namespace, and a
     // setter anywhere on the static chain wins over a fresh own slot - the same rule
     // js_set follows for an ordinary object.
@@ -6587,6 +6601,19 @@ function jvCtorText(nm) {
     if (typeof nm != "string") { return "#<Object>" }
     if (nm == "") { return "#<Object>" }
     return "#<" + nm + ">"
+}
+// The refusal of a write onto a primitive base o. Twin of jsPrimWriteText in
+// js-interpreter.abnf, which states the rule.
+function jvPrimWriteText(o, key) {
+    var ks = jvKeyText(jvStr(key))
+    var recv = js_jstypeof(o) + " '" + jvStr(o) + "'"
+    if (typeof o == "string") {
+        var ix = jvKeyIndex(key)
+        if (ks == "length" || (ix >= 0 && ix < o.length)) {
+            return "Cannot assign to read only property '" + ks + "' of " + recv
+        }
+    }
+    return "Cannot create property '" + ks + "' on " + recv
 }
 function jvRoText(o, key) { return "Cannot assign to read only property '" + jvKeyText(key) + "' of object '" + jvObjText(o) + "'" }
 // V8 names a function in a refused write by its String(f). Twin of jsFnRoText in

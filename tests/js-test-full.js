@@ -1958,6 +1958,52 @@ function s148() {
     check("uprop148d", /\p{L}/.test("p{L}") && !/\p{L}/.test("a"))
 }
 
+// ===== SECTION 149: a write onto a primitive, `(this)` in a pattern, a based `??=` =====
+// A member write on a string, number, boolean, BigInt or symbol makes no property:
+// sloppy code drops it (the expression still answers the value), strict code raises a
+// TypeError naming the key and the value. A parenthesised `this` heads a destructuring
+// target like the bare word, and a logical assignment through a place with any base
+// evaluates the place once and assigns only when the test says so. Values read off
+// node 24.
+function s149() {
+    var s = "abc", n = 3, b = true, big = 10n, sym = Symbol("d")
+    s.x = 5
+    n.x = 5
+    b.x += 1
+    big.x = 5
+    sym.x = 5
+    check("prim149a", s.x === undefined && n.x === undefined && b.x === undefined && big.x === undefined &&
+        sym.x === undefined && ("s".y = 6) === 6 && s.length++ === 3 && ++s.length === 4 && s.length === 3)
+    s[1] = "z"
+    check("prim149b", s === "abc" && (s[1] = "q") === "q" && s[1] === "b")
+    var strictErr = function (f) {
+        try { f() } catch (e) { return String(e) }
+        return "none"
+    }
+    check("prim149c", strictErr(function () { "use strict"; s.x = 1 }) === "TypeError: Cannot create property 'x' on string 'abc'" &&
+        strictErr(function () { "use strict"; s.length = 1 }) === "TypeError: Cannot assign to read only property 'length' of string 'abc'" &&
+        strictErr(function () { "use strict"; s[1] = 1 }) === "TypeError: Cannot assign to read only property '1' of string 'abc'" &&
+        strictErr(function () { "use strict"; s[7] = 1 }) === "TypeError: Cannot create property '7' on string 'abc'")
+    check("prim149d", strictErr(function () { "use strict"; n.foo = 1 }) === "TypeError: Cannot create property 'foo' on number '3'" &&
+        strictErr(function () { "use strict"; big.foo = 1 }) === "TypeError: Cannot create property 'foo' on bigint '10'" &&
+        strictErr(function () { "use strict"; sym.foo = 1 }) === "TypeError: Cannot create property 'foo' on symbol 'Symbol(d)'" &&
+        strictErr(function () { "use strict"; b.foo++ }) === "TypeError: Cannot create property 'foo' on boolean 'true'")
+    function P149() {
+        [(this).v] = [7];
+        ({ w: ((this)).w } = { w: 8 });
+        (this).y ??= 9
+    }
+    var p = new P149()
+    check("prim149e", p.v === 7 && p.w === 8 && p.y === 9)
+    var i = 0, a = [null, 1], calls = 0, o = {}
+    var f = function () { calls++; return o }
+    a[i++] ??= 5
+    f().x ||= 3
+    f().x ||= 4
+    check("prim149f", i === 1 && a[0] === 5 && calls === 2 && o.x === 3 && ([1].a ??= 2) === 2 &&
+        ([0][0] ||= 6) === 6 && ([7][0] &&= 8) === 8 && ([0][0] &&= 8) === 0)
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -2023,6 +2069,7 @@ function main() {
     s146() // SECTION-CALL 146
     s147() // SECTION-CALL 147
     s148() // SECTION-CALL 148
+    s149() // SECTION-CALL 149
     println("full: " + checks + " checks, " + failures + " failures")
     return failures
 }

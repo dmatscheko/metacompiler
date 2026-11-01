@@ -6148,6 +6148,34 @@ function s152(): void {
     check("uprop152b", "a1\u03b2".replace(/\p{L}/gu, "_") == "_1_" && /\p{L}/.test("p{L}"));
 }
 
+// ===== SECTION 153: a write onto a primitive, a based logical assignment =====
+// Strict code refuses a member write on a string, number, boolean, BigInt or symbol
+// with a TypeError naming the key and the value; a string's length and in-range
+// indices are read-only. A logical assignment through a member place evaluates the
+// place once. Values read off tsc 6 (alwaysStrict) with node 24.
+function s153(): void {
+    const s: any = "abc", n: any = 3, b: any = true, big: any = 10n, sym: any = Symbol("d");
+    const err = (f: () => void): string => {
+        try { f(); } catch (e) { return String(e); }
+        return "none";
+    };
+    check("prim153a", err(() => { s.x = 1; }) == "TypeError: Cannot create property 'x' on string 'abc'" &&
+        err(() => { s.length = 1; }) == "TypeError: Cannot assign to read only property 'length' of string 'abc'" &&
+        err(() => { s[1] = 1; }) == "TypeError: Cannot assign to read only property '1' of string 'abc'" &&
+        err(() => { s[7] = 1; }) == "TypeError: Cannot create property '7' on string 'abc'");
+    check("prim153b", err(() => { n.foo = 1; }) == "TypeError: Cannot create property 'foo' on number '3'" &&
+        err(() => { big.foo = 1; }) == "TypeError: Cannot create property 'foo' on bigint '10'" &&
+        err(() => { sym.foo = 1; }) == "TypeError: Cannot create property 'foo' on symbol 'Symbol(d)'" &&
+        err(() => { b.foo++; }) == "TypeError: Cannot create property 'foo' on boolean 'true'");
+    let i = 0, calls = 0;
+    const a: any[] = [null, 1], o: any = {};
+    const f = (): any => { calls++; return o; };
+    a[i++] ??= 5;
+    f().x ||= 3;
+    f().x ||= 4;
+    check("prim153c", i == 1 && a[0] == 5 && calls == 2 && o.x == 3);
+}
+
 // ===== END SECTIONS =====
 
 function main(): number {
@@ -6291,6 +6319,7 @@ function main(): number {
     s150(); // SECTION-CALL 150
     s151(); // SECTION-CALL 151
     s152(); // SECTION-CALL 152
+    s153(); // SECTION-CALL 153
     println("full: " + checks + " checks, " + failures + " failures");
     return failures;
 }
