@@ -168,12 +168,12 @@ is lost when the argument is copied); php's "count(): Recursion detected" and pr
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-1006 bash interpreter: a stderr fragment without a trailing newline gets one added at exit · P3 · SH · OPEN [V]
+### T-1006 bash interpreter: a stderr fragment without a trailing newline gets one added at exit · P3 · SH · IN PROGRESS (SH worker, round 24) [V]
 Found by the CORE worker, round 16. `printf 'frag' >&2` at the end of a script → bash writes `frag` with no newline; the interpreter
 buffers it (errBuf) and emits it with eprintln at exit, adding '\n'. The eprint host builtin now exists - write the fragment through.
 No assertion can see a trailing newline today; add a byte-exact stderr check.
 
-### T-1009 bash: eval does not catch an abandoned line; bad subscripts outside plain assignment; subscripted prefix assignments · P3 · SH · OPEN [V]
+### T-1009 bash: eval does not catch an abandoned line; bad subscripts outside plain assignment; subscripted prefix assignments · P3 · SH · IN PROGRESS (SH worker, round 24) [V]
 Found by the SH worker, round 23 (oracle bash 5.3). `eval 'x=$((1/0)); echo in'; echo "after $?"` → bash `after 1`; ours drops the
 rest of the line (same for a readonly store in eval). `a+=([-9]=Q)` → bash `[-9]=Q: bad array subscript`, stops the literal, status 1;
 ours `a: ...` and assigns the rest; `d=([@]=R)` → "cannot assign to non-numeric index". `declare a[-9]=Q`, `read 'a[-9]'`, `printf -v
@@ -181,7 +181,7 @@ ours `a: ...` and assigns the rest; `d=([@]=R)` → "cannot assign to non-numeri
 three, ours runs `a[2]=W` as a command; `a[1]=Q echo hi` does not parse. `for i in a b; { ..; }` and `f() for ..` bodies do not parse.
 A function defined inside `$( )` reports line 3 where bash says 5.
 
-### T-1010 bash compiled: read/printf -v into element or computed names; attributes through a computed nameref · P3 · SH · OPEN [V]
+### T-1010 bash compiled: read/printf -v into element or computed names; attributes through a computed nameref · P3 · SH · IN PROGRESS (SH worker, round 24) [V]
 Found by the SH worker, round 23 (oracle bash 5.3). Compiler only: `read 'a[1]' <<< hi` and `printf -v 'a[2]' %s P` leave the array
 unchanged (bash `x hi P`); `printf -v "$n" %s v` prints `v` to stdout. With `declare -i n=1` and a computed nameref r→n, `r+=5` gives
 15 (bash 6) and `r=2+3` stores the text. `declare -n e='a[1-10]'; e+=V` prints the bad-subscript message twice (bash once).
