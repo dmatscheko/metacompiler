@@ -450,6 +450,30 @@ st=2 [unset]"
 typeset: usage: typeset [-aAfFgiIlnrtux] name[=value] ... or typeset -p [-aAfFilnrtux] [name ...]
 st=2"
 }
+# ===== SECTION 102: the subscript of a NAME[SUB] operand is a word =====
+# unset, printf -v, read, test -v, a nameref's target and ${!r} expand SUB before it names
+# an element; an associative SUB that expands to nothing is "[SUB]: bad array subscript"
+# with SUB as written. Every expected value is bash 5.3's.
+s102() {
+  local r l
+  r=$(declare -A m=([a]=1 [b]=2 ['$k']=3 [q]=4); k=b; unset 'm[$k]'; echo "$? ${m[b]-none} ${#m[@]} ${m['$k']}"); check usx1 "$r" '0 none 3 3'
+  r=$( (declare -A m=([a]=1); k=''; unset 'm[$k]'; echo "st=$? ${!m[*]}") 2>&1); l=$LINENO
+  check usx2 "$r" "$0: line $l: unset: [\$k]: bad array subscript
+st=1 a"
+  r=$( (declare -A m=([a]=1 [q]=2); unset 'm[]'; echo "st=$?"; unset 'm["q"]'; echo "st=$? ${!m[*]}") 2>&1); check usx3 "$r" 'st=0
+st=0 a'
+  r=$(declare -a ia=(0 1 2 3); i=2; unset 'ia[$i]'; unset 'ia[""]'; echo "${!ia[*]}"); check usx4 "$r" '1 3'
+  r=$(declare -A m; k=b; printf -v 'm[$k]' '%s' hi; printf -v 'm["z"]' '%s' zz; echo "${m[b]} ${m[z]}"); check usx5 "$r" 'hi zz'
+  r=$( (declare -A m; k=''; printf -v 'm[$k]' '%s' hi; echo "st=$?") 2>&1); l=$LINENO
+  check usx6 "$r" "$0: line $l: m[\$k]: bad array subscript
+st=1"
+  r=$(declare -A m; k=w; read 'm[$k]' <<< rr; echo "${m[w]-none} ${m['$k']-none}"); check usx7 "$r" 'rr none'
+  r=$(declare -A m=([b]=7); k=b; declare -n nr='m[$k]'; s='m[$k]'; echo "$nr ${!s}"); check usx8 "$r" '7 7'
+  r=$(declare -A m=([b]=7); k=b; x=b; [[ -v 'm[$k]' ]]; a=$?; [[ -v m[$x] ]]; echo "$a $?"); check usx9 "$r" '0 0'
+  r=$(declare -a ia=(5 6); j=1; [[ -v 'ia[$j]' ]]; a=$?; j=4; [[ -v 'ia[$j]' ]]; echo "$a $?"); check usx10 "$r" '0 1'
+  r=$( (declare -A m=([a]=1); k=''; echo "L=${#m[$k]}"; echo after) 2>&1); l=$LINENO
+  check usx11 "$r" "$0: line $l: [\$k]: bad array subscript"
+}
 # ===== END SECTIONS =====
 
 s90   # SECTION-CALL 90
@@ -464,5 +488,6 @@ s98   # SECTION-CALL 98
 s99   # SECTION-CALL 99
 s100  # SECTION-CALL 100
 s101  # SECTION-CALL 101
+s102  # SECTION-CALL 102
 echo "full: $checks checks, $fails failures"
 exit $fails

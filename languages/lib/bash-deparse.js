@@ -699,6 +699,14 @@ function bashDeclBadOpt(kw, flags) {
     return ""
 }
 
+// Does the subscript text of a NAME[SUB] string need expanding (a $, a quote, a backslash or
+// a backquote)? Without one it is its own expansion.
+function bashSubNeedsX(t) {
+    var i
+    for (i = 0; i < t.length; i++) { if ("$'\"\\`".indexOf(t.charAt(i)) >= 0) { return true } }
+    return false
+}
+
 // THE DECLARATION A COMPUTED OPERAND SPELLS (`declare -a "$spec"`, `local 'q=1'`): bash
 // re-reads the declaration with the operand's fields in its place. items are a declaration's
 // ({dkw}, {dflag}, {dname}, {a, src}, {dyn}); fieldsOf(dyn) gives one computed operand's

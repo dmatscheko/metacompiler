@@ -321,6 +321,9 @@ char *rt_nref_base(char *n);
 int rt_indbr(char *v);
 char *rt_nref_end(char *n);
 int rt_unset_name(char *n);
+char *rt_subx(char *s);
+int rt_vset(char *s);
+int rt_sub_empty(char *k, char *lbl);
 int rt_eval_assign(char *s);
 int rt_decl_word(char *w, int d, int x, int at, char *who);
 char *rt_decl_name(char *w);
@@ -5885,23 +5888,30 @@ int rt_arr_del(char *nm, char *k) {
 int rt_arr_unset(char *nm, char *sub) {
     int r = rt_ar_find(nm);
     char *k;
+    char *x;
     long kv;
     if (sub[0] == 0) return 0;
+    x = rt_subx(sub);
+    if (arith_err != 0) return 1;
     if ((r >= 0 && (ar_n[r] > 0 || (ar_mk[r] & 3) != 0)) || rt_isassoc(nm) != 0) {
-        /* An index still negative from the end is "unset: [SUB]: bad array
-         * subscript", status 1. */
-        k = sub;
+        /* An index still negative from the end, or an associative key that
+         * expands to nothing, is "unset: [SUB]: bad array subscript", status 1. */
+        k = x;
         if (rt_streq(sub, "@") == 0 && rt_streq(sub, "*") == 0 && rt_isassoc(nm) == 0) {
-            kv = rt_arith(sub);
+            kv = rt_arith(x);
             if (arith_err != 0) return 1;
             k = rt_arr_ikeyl(nm, kv, rt_strcat(rt_strcat("unset: [", sub), "]"));
+        }
+        if (k[0] == 0 && k != &bad_key[0]) {
+            rt_berr("unset", rt_strcat(rt_strcat("[", sub), "]"), "bad array subscript");
+            return 1;
         }
         if (k == &bad_key[0]) return 1;
         rt_arr_del(nm, k);
         return 0;
     }
     if (rt_getvar_byname(nm) == &unset_marker[0] && rt_arr_smarked(nm) == 0) return 0;
-    if (rt_streq(sub, "@") == 0 && rt_streq(sub, "*") == 0 && rt_arith(sub) == 0) {
+    if (rt_streq(sub, "@") == 0 && rt_streq(sub, "*") == 0 && rt_arith(x) == 0) {
         rt_setvar_byname(nm, &unset_marker[0], 0, 0);
         return 0;
     }
@@ -7913,6 +7923,81 @@ char *rt_getvar_ind(char *n)
     return rt_getvar_byname(n);
 }
 
+/* THE SUBSCRIPT OF A NAME[SUB] STRING IS A WORD: a builtin handed one (unset,
+ * printf -v, read, test -v), a nameref's target and ${!r} expand SUB before it
+ * names an element (bash 5.3: k=b; unset 'm[$k]' unsets m[b]). This expands what
+ * such a string can hold here - '...', "...", backslashes, $NAME, ${NAME} and the
+ * special parameters - and refuses a command substitution, a backquote, $(( ))
+ * or a ${ } with an operator: a diagnostic, and arith_err abandons the line.
+ * A text with none of $ ' " \ ` is its own expansion. Twin of subExpand in
+ * bash-interpreter.abnf, which expands any word. */
+char *rt_subx(char *s)
+{
+    int i = 0;
+    int dq = 0;
+    int c;
+    int st;
+    char *out = empty;
+    char *nm;
+    while (s[i] != 0 && s[i] != 36 && s[i] != 39 && s[i] != 34 && s[i] != 92 && s[i] != 96) i = i + 1;
+    if (s[i] == 0) return s;
+    i = 0;
+    while (s[i] != 0) {
+        c = (int)(unsigned char)s[i];
+        st = i;
+        if (c == 39 && dq == 0) {
+            i = i + 1;
+            while (s[i] != 0 && s[i] != 39) i = i + 1;
+            out = rt_strcat(out, rt_substr(s, st + 1, i - st - 1));
+            if (s[i] != 0) i = i + 1;
+            continue;
+        }
+        if (c == 34) { dq = 1 - dq; i = i + 1; continue; }
+        if (c == 92 && s[i + 1] != 0 && (dq == 0 || s[i + 1] == 36 || s[i + 1] == 96 || s[i + 1] == 34 || s[i + 1] == 92)) {
+            out = rt_strcat(out, rt_substr(s, i + 1, 1));
+            i = i + 2;
+            continue;
+        }
+        if (c == 96) break;
+        if (c != 36) {
+            while (s[i] != 0 && s[i] != 36 && s[i] != 39 && s[i] != 34 && s[i] != 92 && s[i] != 96) i = i + 1;
+            if (i == st) i = i + 1;
+            out = rt_strcat(out, rt_substr(s, st, i - st));
+            continue;
+        }
+        /* $ */
+        i = i + 1;
+        c = (int)(unsigned char)s[i];
+        if (c == 123) {
+            int ns = i + 1;
+            i = ns;
+            while (s[i] == 95 || (s[i] >= 65 && s[i] <= 90) || (s[i] >= 97 && s[i] <= 122) || (s[i] >= 48 && s[i] <= 57)) i = i + 1;
+            if (i == ns && s[i] != 0 && s[i] != 125 && s[i + 1] == 125) i = i + 1;
+            if (s[i] != 125 || i == ns) break;
+            nm = rt_substr(s, ns, i - ns);
+            i = i + 1;
+        } else if (c == 95 || (c >= 65 && c <= 90) || (c >= 97 && c <= 122)) {
+            int ns = i;
+            while (s[i] == 95 || (s[i] >= 65 && s[i] <= 90) || (s[i] >= 97 && s[i] <= 122) || (s[i] >= 48 && s[i] <= 57)) i = i + 1;
+            nm = rt_substr(s, ns, i - ns);
+        } else if ((c >= 48 && c <= 57) || c == 63 || c == 35 || c == 64 || c == 42 || c == 36 || c == 33 || c == 45) {
+            nm = rt_substr(s, i, 1);
+            i = i + 1;
+        } else if (c == 40) {
+            break;
+        } else {
+            out = rt_strcat(out, "$");
+            continue;
+        }
+        nm = rt_getvar_byname(nm);
+        if (nm != &unset_marker[0]) out = rt_strcat(out, nm);
+    }
+    if (s[i] == 0) return out;
+    rt_berr("", s, "this subscript cannot be expanded in a compiled program");
+    arith_err = 1;
+    return empty;
+}
+
 char *rt_getvar_byname(char *n)
 {
     char *sel;
@@ -7936,7 +8021,7 @@ char *rt_getvar_byname(char *n)
             char *sub = rt_substr(n, i + 1, len - i - 2);
             char *k;
             if (rt_streq(sub, "@") != 0 || rt_streq(sub, "*") != 0) return rt_sc_list(nm, rt_ifsfirst(), 1, 0);
-            k = rt_arr_key(nm, sub);
+            k = rt_arr_key(nm, rt_subx(sub));
             if (rt_sc_has(nm, k) == 0) return &unset_marker[0];
             return rt_sc_get(nm, k);
         }
@@ -8007,6 +8092,8 @@ int rt_setvar_byname(char *n, char *v, int app, int at)
             sub_bad = 1;
             return 0;
         }
+        sub = rt_subx(sub);
+        if (arith_err != 0) return 0;
         k = rt_arr_akey(nm, sub, n, 0);
         if (arith_err != 0) return 0;
         old = app != 0 ? rt_arr_get(nm, k) : 0;
@@ -8144,6 +8231,32 @@ char *rt_indpart(char *v, int sub)
     if (br < 0) return v;
     if (sub != 0) return rt_substr(v, br + 1, rt_strlen(v) - br - 2);
     return rt_substr(v, 0, br);
+}
+
+/* ${#NAME[SUB]} of an associative array whose SUB expands to nothing: bash's
+ * "[SUB]: bad array subscript" (lbl, SUB as written), which abandons the line.
+ * Twin of the len arm of mkParamExp in bash-interpreter.abnf. */
+int rt_sub_empty(char *k, char *lbl)
+{
+    if (k[0] != 0) return 0;
+    rt_berr("", lbl, "bad array subscript");
+    arith_err = 1;
+    return 0;
+}
+
+/* test -v of a computed operand: a set variable or array, or for NAME[SUB] an
+ * element, SUB expanded (rt_subx). Twin of the -v arm of testUnary in
+ * bash-interpreter.abnf. */
+int rt_vset(char *s)
+{
+    int i = rt_indbr(s);
+    char *sub;
+    if (i > 0) {
+        sub = rt_subx(rt_substr(s, i + 1, rt_strlen(s) - i - 2));
+        if (arith_err != 0) return 0;
+        return rt_arr_has(rt_substr(s, 0, i), rt_arr_key(rt_substr(s, 0, i), sub));
+    }
+    return (rt_isset(rt_getvar_byname(s)) != 0 || rt_arr_any(s) != 0) ? 1 : 0;
 }
 
 /* `unset WORD` where the word came out of an expansion: NAME[SUB] removes the

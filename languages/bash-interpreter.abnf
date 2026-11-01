@@ -1575,7 +1575,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // $1.. is set up to $#, and $0 always is: ${2-word}, ${1+word}.
         if (allDigits(name)) { var ix = strToInt(name); return ix == 0 || ix <= posParams.length }
         if (anyRef) { var rn = refTarget(name); if (rn != name) { return isSetVar(rn) } }
-        if (isElemRef(name)) { var sp = splitSubscript(name); return scHas(sp.name, subKey(sp.name, sp.key)) }
+        if (isElemRef(name)) { var sp = splitSubX(name); return scHas(sp.name, subKey(sp.name, sp.key)) }
         if (!hasOwn(varsHas, key)) { return false }
         return varsHas[key]
     }
@@ -1583,7 +1583,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // element and r='arr[@]' the joined list. Twin of the same arm of rt_getvar_byname.
     function isElemRef(name) { return name.length > 2 && name.charAt(name.length - 1) == "]" }
     function elemRefVal(name) {
-        var sp = splitSubscript(name)
+        var sp = splitSubX(name)
         if (sp.key == "@" || sp.key == "*") { return starJoin(scValList(sp.name)) }
         return scGet(sp.name, subKey(sp.name, sp.key))
     }
@@ -1599,7 +1599,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // are keys of one. Answers the stored text. Twin of the subscript arm of
     // rt_setvar_byname.
     function elemRefSet(name, append, v, bi) {
-        var sp = splitSubscript(name)
+        var sp = splitSubX(name)
         var whole = sp.key == "" || ((sp.key == "@" || sp.key == "*") && !(bi && assocFact(sp.name, false)))
         // The subscript's arithmetic errors carry no builtin's prefix (arPfx is for the value).
         var svp = arPfx
@@ -2714,7 +2714,16 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             }
             var isWhole = function(sub) { return (idxAll == null) ? (sub == "@" || sub == "*") : idxAll != "" }
             if (pe == "len") {
+                // ${#NAME[SUB]} of an associative array whose SUB expands to nothing is bash's
+                // "[SUB]: bad array subscript" (SUB as written), and abandons the line. Twin of
+                // rt_sub_empty in bash-rt.c.
+                var lenTgt = peTgt
                 return function() {
+                    if (idxAll == "" && assocFact(name, false)) {
+                        var lraw = wordJoin(idxT())
+                        if (lraw == "") { diagErr(lenTgt.slice(lenTgt.indexOf("[")) + ": bad array subscript\n"); arithErr = true; return "" }
+                        return numToStr(charLen(scGet(name, lraw)))
+                    }
                     var sub = readIdx()
                     if (isWhole(sub)) { return numToStr(scKeyList(name).length) }
                     return numToStr(charLen(scGet(name, sub)))
@@ -4029,22 +4038,24 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // variable at all is left alone, and so is every variable for an empty SUB (`unset 'b[]'`
     // is status 0). Twin of rt_arr_unset.
     // An index still negative from the end is "unset: [SUB]: bad array subscript", status 1.
-    function unsetElem(name, sub) {
-        if (sub == "") { return 0 }
+    // sub is the subscript expanded (subExpand), raw as written.
+    function unsetElem(name, sub, raw) {
+        if (raw == "") { return 0 }
         if (isArr(name)) {
             var key = sub
-            if (sub != "@" && sub != "*" && !assocFact(name, false)) {
+            if (raw != "@" && raw != "*" && !assocFact(name, false)) {
                 var kv = arEval(sub)
                 if (arithErr) { return 1 }
-                key = arrIdxKey(name, kv, "unset: [" + sub + "]")
+                key = arrIdxKey(name, kv, "unset: [" + raw + "]")
             }
             if (key == BAD_KEY) { return 1 }
+            if (key == "") { diagErr("unset: [" + raw + "]: bad array subscript\n"); return 1 }
             arrDel(name, key)
             return 0
         }
         if (assocFact(name, false)) { return 0 }
         if (!isSetVar(name) && !attrOn(dclVars, name)) { return 0 }
-        if (sub != "@" && sub != "*" && numToStr(arEval(sub)) == "0") { unsetVar(name); return 0 }
+        if (raw != "@" && raw != "*" && numToStr(arEval(sub)) == "0") { unsetVar(name); return 0 }
         diagErr("unset: " + name + ": not an array variable\n")
         return 1
     }
@@ -6893,6 +6904,23 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return 0
     }
 
+    // THE SUBSCRIPT OF A NAME[SUB] STRING IS A WORD: a builtin handed one (unset, printf -v,
+    // read, test -v), a nameref's target and ${!r} expand SUB before it names an element
+    // (bash 5.3: k=b; unset 'm[$k]' unsets m[b]). Each text is parsed once. Twin of rt_subx
+    // in bash-rt.c, which expands only quotes, $NAME, ${NAME} and the special parameters.
+    var subXT = {}
+    function subExpand(t) {
+        if (!bashSubNeedsX(t)) { return t }
+        var k = "$" + t
+        if (!hasOwn(subXT, k)) { subXT[k] = arCompile(t, "IdxWord", false) }
+        return wordJoin(subXT[k]())
+    }
+    // splitSubscript with the subscript expanded.
+    function splitSubX(s0) {
+        var sp = splitSubscript(s0)
+        if (sp.key == null) { return sp }
+        return {name: sp.name, key: subExpand(sp.key)}
+    }
     // "name" or "name[key]" - the form `unset a[0]` and `[[ -v a[k] ]]` use.
     function splitSubscript(s0) {
         var i
@@ -6920,7 +6948,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (op == "-z") { return (s == "") ? 0 : 1 }
         if (op == "-n") { return (s != "") ? 0 : 1 }
         if (op == "-v") {
-            var sp = splitSubscript(s)
+            var sp = splitSubX(s)
             if (sp.key != null) { return arrHas(sp.name, subKey(sp.name, sp.key)) ? 0 : 1 }
             return (isSetVar(s) || isArr(s)) ? 0 : 1
         }
@@ -7090,7 +7118,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                         exVars["$" + sp.name] = keepX
                     }
                 }
-                else if (unsetElem(sp.name, sp.key) != 0) { ust = 1 }
+                else if (unsetElem(sp.name, subExpand(sp.key), sp.key) != 0) { ust = 1 }
                 if (un) { noRef = noRef - 1 }
             }
             setStatus(ust)

@@ -1996,6 +1996,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var rtLocalNew = rtDecl("rt_local_new", false, [0, 0])
     var rtUnsetUp = rtDecl("rt_unset_up", false, [0, 0, 0])
     var rtUnsetX = rtDecl("rt_unset_x", false, [0, 0])
+    var rtSubx = rtDecl("rt_subx", true, [1])
+    var rtSubEmpty = rtDecl("rt_sub_empty", false, [1, 1])
+    var rtVset = rtDecl("rt_vset", false, [1])
     var rtUnsetEnv = rtDecl("rt_unset_env", false, [0, 0])
     var rtEnvEnd = rtDecl("rt_env_end", false, [0, 0])
     var rtGlobSwap = rtDecl("rt_glob_swap", false, [0])
@@ -2398,8 +2401,13 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var subOf = function(b) { return subKeyOf(b, name, idxW, rtNm ? cell.nm : null, kindC == 0) }
             var kindOf = function(b, sub) { return subKind(b, kindC, sub) }
             if (pe == "len") {
+                // An associative SUB that expands to nothing (rt_sub_empty).
+                var lenAs = attrOn(assocArrays, name) && !rtNm && kindC == 0 && idxIt != null
+                var lenLbl = lenAs ? peTgt.slice(peTgt.indexOf("[")) : ""
                 return {c: undefined, fn: function(b) {
-                    var rs = subOf(b); b = rs.b
+                    var rs = lenAs ? subKeyOf(b, name, idxW, null, false) : subOf(b)
+                    b = rs.b
+                    if (lenAs) { b.NewCall(rtSubEmpty, [rs.k, gepStr(b, lenLbl)]) }
                     var k = kindOf(b, rs.v)
                     var whole = b.NewICmp(llvm.enum.IPredNE, k, zero)
                     return {b: b, v: b.NewSelect(whole,
@@ -3695,7 +3703,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var bi = name.indexOf("[")
         if (bi > 0 && name.charAt(name.length - 1) == "]") {
             var sub = name.slice(bi + 1, name.length - 1)
-            return {name: name.slice(0, bi), op: "=", idxT: makeConst(sub), isrc: sub, lit: null, valT: doneWord(v), soft: subP}
+            // The subscript is a word, expanded when the builtin stores (rt_subx).
+            var subT = bashSubNeedsX(sub) ? {fn: function(b) { return {b: b, v: b.NewCall(rtSubx, gepStr(b, sub))} }, c: undefined} : makeConst(sub)
+            return {name: name.slice(0, bi), op: "=", idxT: subT, isrc: sub, lit: null, valT: doneWord(v), soft: subP}
         }
         return {name: name, op: "=", idxT: null, lit: null, valT: doneWord(v), soft: subP}
     }
@@ -4565,6 +4575,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     // The same for a literal subscript text (unset 'a[k]', [[ -v a[k] ]]).
     function litKeyOf(b, name, t) {
+        if (bashSubNeedsX(t)) { return b.NewCall(rtArrKey, [gepStr(b, name), b.NewCall(rtSubx, gepStr(b, t))]) }
         if (attrOn(assocArrays, name) || isIndexLit(t)) { return gepStr(b, t) }
         return b.NewCall(rtArrKey, [gepStr(b, name), gepStr(b, t)])
     }
@@ -4599,7 +4610,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (op == "-z") { return boolStatus(b, isEmptyStr(b, arg.v)) }
         if (op == "-n") { return boolStatus(b, isNonEmptyStr(b, arg.v)) }
         if (op == "-v") {
-            if (arg.c == undefined) { fail("test -v needs a literal variable name in this compiler") }
+            if (arg.c == undefined) { return boolStatus(b, b.NewICmp(llvm.enum.IPredNE, b.NewCall(rtVset, arg.v), zero)) }
             var sv = splitSubscript(arg.c)
             if (sv.key != null) {
                 return boolStatus(b, b.NewICmp(llvm.enum.IPredNE,
