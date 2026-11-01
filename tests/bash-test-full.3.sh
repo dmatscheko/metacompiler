@@ -1463,6 +1463,44 @@ declare -- s85w="2"'
 declare -x s85l="1"
 st=1'
 }
+# ===== SECTION 86: namerefs (declare -n, local -n) =====
+# A read, an assignment and an unset of a nameref act on the variable its value names;
+# ${!REF}, declare -p, `unset -n` and a declaration with -n act on the reference itself. +n
+# makes it a plain variable again, and a nameref for-loop variable refers to each word in
+# turn. Every expected value is bash 5.3's.
+s86() {
+  local r
+  s86x=foo; s86p=s86x
+  declare -gn s86p
+  check nr1 "$s86p|${!s86p}" "foo|s86x"
+  s86x=bar; s86p=baz
+  check nr2 "$s86x|$s86p|${#s86p}|${s86p^^}|${s86p/a/A}" "baz|baz|3|BAZ|bAz"
+  declare -g +n s86p
+  check nr3 "$s86p" "s86x"
+  s86set() { local -n s86o=$1; s86o="set:$2"; }
+  s86set s86v hello
+  check nr4 "$s86v" "set:hello"
+  s86inc() { local -n s86c=$1; (( s86c++ )); s86c+=0; }
+  s86n=5; s86inc s86n
+  check nr5 "$s86n" "60"
+  declare -n s86r=s86u
+  check nr6 "[${s86r-unset}] [${s86r:-dflt}] [${s86r:=new}] [$s86u]" "[unset] [dflt] [new] [new]"
+  r=$(declare -p s86r)
+  check nr7 "$r" 'declare -n s86r="s86u"'
+  unset s86r
+  check nr8 "[${s86u-gone}]|${!s86r}" "[gone]|s86u"
+  unset -n s86r; r=$(declare -p s86r 2>&1)
+  check nr9 "$r|${s86r-none}" "declare -- s86r|none"
+  declare -n s86q=s86y; declare -n s86q=s86z; s86q=7
+  check nr10 "[${s86y-}]|$s86z" "[]|7"
+  declare -i s86i; declare -n s86ri=s86i; s86ri=2+3
+  check nr11 "$s86i" "5"
+  read -r s86ri <<< 9; printf -v s86q '%s' 11
+  check nr12 "$s86i|$s86z" "9|11"
+  r=""
+  for s86ri in s86x s86n; do r="$r $s86ri"; done
+  check nr13 "$r|${!s86ri}" " baz 60|s86n"
+}
 # ===== END SECTIONS =====
 
 s47   # SECTION-CALL 47
@@ -1503,5 +1541,6 @@ s82   # SECTION-CALL 82
 s83   # SECTION-CALL 83
 s84   # SECTION-CALL 84
 s85   # SECTION-CALL 85
+s86   # SECTION-CALL 86
 echo "full: $checks checks, $fails failures"
 exit $fails

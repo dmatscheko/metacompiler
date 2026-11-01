@@ -1427,7 +1427,13 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // upper/lower-cases every later write to the name, including one made by `read` or a
     // `for` head, so the case call belongs on the store funnel. It costs nothing for a name
     // with no case attribute - the maps are compile-time and the call is simply not emitted.
-    function storeVar(b, name, v) { b.NewStore(attrCase(b, name, v), varPtr(b, name)); heapPin(b) }
+    function storeVar(b, name, v) {
+        var al = refAlias(name)
+        if (al != null) { storeVar(b, al, v); return }
+        if (attrOn(refVars, name)) { b.NewCall(rtSetByName, [loadVar(b, name), v]); return }
+        b.NewStore(attrCase(b, name, v), varPtr(b, name))
+        heapPin(b)
+    }
     // The one store that must NOT be transformed: the unset marker is an identity, and
     // rt_case would hand back a fresh string that no longer compares equal to it.
     function storeVarRaw(b, name, v) { b.NewStore(v, varPtr(b, name)) }
@@ -1918,6 +1924,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (idx == 0) { return gepStr(b, c.file) }
             return b.NewCall(rtParam, llvm.constant.NewInt(i32, idx))
         }
+        if (attrOn(refVars, name)) { return b.NewCall(rtGetByName, loadVar(b, name)) }
         // an array name expands to its element 0, a scalar to its slot (rt_var)
         return b.NewCall(rtVar, [gepStr(b, name), loadVar(b, name)])
     }
@@ -2087,7 +2094,14 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             }
             rest.push(it)
         }
-        if (!indp || bare || pfx) { return paramCore(items, null) }
+        if (!indp || bare || pfx) {
+            var pc = paramCore(items, null)
+            if (!hasIdx || pfx) { return pc }
+            var pcFn = pc.fn
+            var pcName = name
+            pc.fn = function(b) { if (attrOn(refVars, pcName)) { refFail() }; return pcFn(b) }
+            return pc
+        }
         var idxW = hasIdx ? wordObjs[0] : null
         for (i = hasIdx ? 1 : 0; i < wordObjs.length; i++) { rest.push(wordObjs[i]) }
         var cell = {tg: null, nm: null, sub: null}
@@ -2505,6 +2519,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // r='arr[@]' (or '@') makes the bare ${!r} a field list, hence f.
         if (pe == "ind") {
             return {f: true, c: undefined, fn: function(b) {
+                // ${!REF} of a nameref is the name it refers to.
+                if (attrOn(refVars, name)) { return {b: b, v: loadVar(b, name)} }
                 return {b: b, v: b.NewCall(rtGetInd, b.NewCall(rtIndName, [gepStr(b, name), nullStr, varString(b, name), one]))}
             }}
         }
@@ -2512,13 +2528,15 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // indirection LANDED on (cell.tg, see mkParamExp), so every leaf below starts from
         // targetOf and reads through valOf (and `=` writes through rt_setvar_byname) instead
         // of the fixed slot.
+        // Through a nameref the target is the reference's value (refVars, asked at emit time).
         var indirect = indp
         function targetOf(b) {
-            if (!indirect) { return {b: b, v: null} }
-            return {b: b, v: cell.tg}
+            if (indirect) { return {b: b, v: cell.tg} }
+            if (attrOn(refVars, name)) { return {b: b, v: loadVar(b, name)} }
+            return {b: b, v: null}
         }
         function valOf(b, tg) {
-            if (indirect) { return b.NewCall(rtGetByName, tg) }
+            if (tg != null) { return b.NewCall(rtGetByName, tg) }
             return varString(b, name)
         }
         // The @-transforms (see applyXf above). The value is read ONCE and rt_isset asks whether
@@ -2526,7 +2544,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (xf != "") {
             return {c: undefined, fn: function(b) {
                 var t0 = targetOf(b); b = t0.b
-                var nmv = indirect ? t0.v : gepStr(b, name)
+                var nmv = (t0.v != null) ? t0.v : gepStr(b, name)
                 var v0 = valOf(b, t0.v)
                 return {b: b, v: applyXf(b, v0, b.NewCall(rtIsset, v0), nmv)}
             }}
@@ -2634,8 +2652,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 return {b: b, v: b.NewCall(rtPcheck, [v, b.NewZExt(blank, i32), gepStr(b, indirect ? "!" + name : name), msg])}
             }
             var picked = b.NewSelect(blank, d, v)
-            if (o == "=" && indirect) { b.NewCall(rtSetByName, [t6.v, picked]) }
-            if (o == "=" && !indirect) {
+            if (o == "=" && t6.v != null) { b.NewCall(rtSetByName, [t6.v, picked]) }
+            if (o == "=" && t6.v == null) {
                 // the default is stored under the name's attributes, and expands as stored
                 var setB = curF.NewBlock(""), joinB = curF.NewBlock("")
                 b.NewCondBr(blank, setB, joinB)
@@ -3412,6 +3430,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // Associative-ness is a property of the NAME (declare -A), not of this statement.
         var assoc = assoc0 || hasOwn(assocArrays, "$" + a.name)
         var nm = gepStr(b, a.name)
+        var viaRef = attrOn(refVars, a.name)
+        if (viaRef && (a.lit != null || a.idxT != null)) { refFail() }
+        var al = refAlias(a.name)
+        if (al != null) { return emitAssign(b, {name: al, op: a.op, idxT: null, lit: null, valT: a.valT}, assoc0, mk) }
         if (a.lit != null) { return emitArrayLit(b, a.name, a.lit, a.op == "+=", assoc) }
         var v = emptyPtr(b)
         if (a.valT != null) {
@@ -3419,6 +3441,12 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             b = r.b
             v = (a.valT.f == true) ? wordJoin(b, r.v) : r.v
             if (a.valT.c == undefined && a.valT.done != true) { b = emitAbortCheck(b) }
+        }
+        if (viaRef) {
+            var tg = loadVar(b, a.name)
+            if (a.op == "+=") { v = b.NewCall(rtStrcat, [b.NewCall(rtGetByName, tg), v]) }
+            b.NewCall(rtSetByName, [tg, v])
+            return b
         }
         if (a.idxT != null) {
             var rk = subKeyOf(b, a.name, a.idxT, null)
@@ -3593,6 +3621,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var query = (flags.indexOf("p") >= 0) || (flags.indexOf("f") >= 0) || (flags.indexOf("F") >= 0)
         var isPrint = (flags.indexOf("p") >= 0) && (flags.indexOf("f") < 0) && (flags.indexOf("F") < 0)
         var setRo = kw == "readonly" || flags.indexOf("r") >= 0
+        var isRef = kw != "export" && flags.indexOf("n") >= 0
         // 1: the declaration exports its names, -1: it takes the attribute away (rt_xmark).
         var xCode = 0
         if (kw == "export" || flags.indexOf("x") >= 0) { xCode = 1 }
@@ -3619,7 +3648,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             for (u = curFrame.undo; u < attrUndo.length && ge == null; u++) {
                 if (attrUndo[u].name == nm) { ge = attrUndo[u] }
             }
-            var sv = {name: nm, i: attrOn(intVars, nm), u: attrOn(upVars, nm), l: attrOn(loVars, nm), r: attrOn(roVars, nm)}
+            var sv = {name: nm, i: attrOn(intVars, nm), u: attrOn(upVars, nm), l: attrOn(loVars, nm), r: attrOn(roVars, nm), n: attrOn(refVars, nm)}
             if (ge != null && hasOwn(curFrame.locs, "$" + nm)) {
                 attrUndo.push(ge)
                 attrUnwind(attrUndo.length - 1)
@@ -3629,7 +3658,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             b = declOne(b, j, v)
             b.NewCall(rtGlobSwap, id)
             if (ge != null) {
-                ge.i = attrOn(intVars, nm); ge.u = attrOn(upVars, nm); ge.l = attrOn(loVars, nm); ge.r = attrOn(roVars, nm)
+                ge.i = attrOn(intVars, nm); ge.u = attrOn(upVars, nm); ge.l = attrOn(loVars, nm); ge.r = attrOn(roVars, nm); ge.n = attrOn(refVars, nm)
                 attrUndo.push(sv)
                 attrUnwind(attrUndo.length - 1)
             }
@@ -3661,6 +3690,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     intVars[key] = false
                     upVars[key] = false
                     loVars[key] = false
+                    refVars[key] = false
                 }
                 // Lexically first and in no loop, it is the first at run time too; otherwise
                 // rt_local_here asks.
@@ -3676,10 +3706,14 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (integer) { intVars["$" + names[j]] = true }
             if (upper) { upVars["$" + names[j]] = true; loVars["$" + names[j]] = false }
             if (lower) { loVars["$" + names[j]] = true; upVars["$" + names[j]] = false }
-            // +i +u +l take the attribute away (+x +a +A +n change nothing here).
+            // +i +u +l +n take the attribute away (+x +a +A change nothing here).
             if (plus.indexOf("i") >= 0) { intVars["$" + names[j]] = false }
             if (plus.indexOf("u") >= 0) { upVars["$" + names[j]] = false }
             if (plus.indexOf("l") >= 0) { loVars["$" + names[j]] = false }
+            if (plus.indexOf("n") >= 0) { refVars["$" + names[j]] = false }
+            if (isRef && isArray) { refFail() }
+            // The value of a declaration with -n is the reference's own: the name it refers to.
+            if (isRef) { refVars["$" + names[j]] = false }
             if (setRo) { roVars["$" + names[j]] = true }
             if (xCode != 0) { b.NewCall(rtXmark, [gepStr(b, names[j]), (xCode > 0) ? one : zero]) }
             // A global `declare -a a` keeps a's elements; only a value or a local starts empty.
@@ -3696,6 +3730,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 b = emitAssign(b, a, assoc, null)
             }
             else if (localize && curFrame == null) { storeVarRaw(b, names[j], unsetPtr(b)) }
+            if (isRef) {
+                var lt = (asgs[j] != null && v == null && asgs[j].valT != null) ? asgs[j].valT.c : undefined
+                refVars["$" + names[j]] = (lt != undefined && isIdentText(lt)) ? lt : true
+            }
             if (asgs[j] == null && !isArray && kw != "export" && kw != "readonly") { b.NewCall(rtArrSmark, gepStr(b, names[j])) }
             return b
         }
@@ -3845,6 +3883,20 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var upVars = {}       // `declare -u`
     var loVars = {}       // `declare -l`
     var roVars = {}       // `readonly` / -r: an assignment, `local` or `unset` fails (roRefused)
+    // `declare -n` / `local -n`: a NAMEREF, lexical like the others. A read (varString), an
+    // assignment (storeVar, emitAssign) and an unset of the name act on the variable its value
+    // names, through rt_getvar_byname / rt_setvar_byname; declare -p, ${!REF} (the name),
+    // `unset -n` and a declaration with -n act on the reference itself. An array through a
+    // nameref is not supported. Twin of refTarget in bash-interpreter.abnf. The entry is the
+    // target's name where the declaration wrote it literally, and an assignment through the
+    // reference then is one to that name, under its attributes (refAlias).
+    var refVars = {}
+    function refAlias(name) {
+        var t = attrOn(refVars, name)
+        if (typeof t != "string" || t == name || attrOn(refVars, t)) { return null }
+        return t
+    }
+    function refFail() { fail("an array through a nameref is not supported by this compiler") }
     // Is NAME readonly here? Then the code says so on stderr. Twin of roRefused in
     // bash-interpreter.abnf.
     function roRefused(b, name, who) {
@@ -3863,10 +3915,11 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     // The SCALAR attribute letters of a name, in bash's own order (i, l, u; the array letter
     // goes in front of them): `declare -iu n` prints `declare -iu`.
-    // In bash's order, i r l u; rt_xletters puts in the x of an exported name.
+    // In bash's order, i n r l u; rt_xletters puts in the x of an exported name.
     function scalarAttrLetters(name) {
         var out = ""
         if (attrOn(intVars, name)) { out = out + "i" }
+        if (attrOn(refVars, name)) { out = out + "n" }
         if (attrOn(roVars, name)) { out = out + "r" }
         if (attrOn(loVars, name)) { out = out + "l" }
         if (attrOn(upVars, name)) { out = out + "u" }
@@ -3878,7 +3931,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var subDepth = 0
     var attrUndo = []
     function attrPushUndo(name) {
-        attrUndo.push({name: name, i: attrOn(intVars, name), u: attrOn(upVars, name), l: attrOn(loVars, name), r: attrOn(roVars, name)})
+        attrUndo.push({name: name, i: attrOn(intVars, name), u: attrOn(upVars, name), l: attrOn(loVars, name), r: attrOn(roVars, name),
+                       n: attrOn(refVars, name)})
     }
     function attrUnwind(base) {
         while (attrUndo.length > base) {
@@ -3887,6 +3941,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             upVars["$" + e.name] = e.u
             loVars["$" + e.name] = e.l
             roVars["$" + e.name] = e.r
+            refVars["$" + e.name] = e.n
         }
     }
 
@@ -5546,7 +5601,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // arm of runCommand in bash-interpreter.abnf.
             if (cmd == "unset") {
                 var uk = 0
-                var uf = false, uv = false, ubad = ""
+                var uf = false, uv = false, un = false, ubad = ""
                 while (uk < argTs.length && argTs[uk].c != undefined && argTs[uk].c.length > 1 && argTs[uk].c.charAt(0) == "-") {
                     var uo = argTs[uk].c
                     uk = uk + 1
@@ -5556,7 +5611,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                         var ul = uo.charAt(uc)
                         if (ul == "f") { uf = true }
                         else if (ul == "v") { uv = true }
-                        else if (ul != "n") { ubad = ul }
+                        else if (ul == "n") { un = true }
+                        else { ubad = ul }
                     }
                 }
                 if (ubad != "" || (uf && uv)) {
@@ -5602,6 +5658,11 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                         continue
                     }
                     var sp0 = splitSubscript(argTs[uk].c)
+                    // Without -n, unset acts on the variable a nameref names.
+                    if (sp0.key == null && !un && attrOn(refVars, sp0.name)) {
+                        ust = b.NewOr(ust, b.NewCall(rtUnsetName, loadVar(b, sp0.name)))
+                        continue
+                    }
                     if (sp0.key == null && attrOn(roVars, sp0.name)) {
                         emitOnStderr(b, gepStr(b, "bash: unset: " + sp0.name + ": cannot unset: readonly variable\n"))
                         ust = one
@@ -5614,6 +5675,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                         intVars["$" + sp0.name] = false
                         upVars["$" + sp0.name] = false
                         loVars["$" + sp0.name] = false
+                        refVars["$" + sp0.name] = false
                         // A local unset in the function that declared it stays declared
                         // (rt_arr_smark). Twin of localHere in bash-interpreter.abnf.
                         if (curFrame != null && hasOwn(curFrame.locs, "$" + sp0.name)) { b.NewCall(rtArrSmark, gepStr(b, sp0.name)) }
@@ -6421,7 +6483,13 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // A readonly name ends the loop at its first pass, status 1. Twin of makeFor in
             // bash-interpreter.abnf.
             if (roRefused(body, fname, "")) { body.NewStore(one, lst); body.NewBr(ex); body = deadBlock() }
-            var body2 = emitStoreAttr(body, fname, body.NewCall(rtFAt, [list, i]))
+            // A nameref control variable refers to each word in turn: the store is its own.
+            var body2 = body
+            if (attrOn(refVars, fname)) {
+                refVars["$" + fname] = true
+                storeVarRaw(body, fname, body.NewCall(rtFAt, [list, i]))
+            }
+            else { body2 = emitStoreAttr(body, fname, body.NewCall(rtFAt, [list, i])) }
             loopStack.push({brk: ex, cont: step, lst: lst, rd: redirStack.length})
             var bb = bodyT(body2)
             loopStack.pop()
