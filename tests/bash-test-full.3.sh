@@ -1664,6 +1664,87 @@ s89e ()
     echo ev
 }"
 }
+# ===== SECTION 90: computed operands of declare and read =====
+# An operand of a declaration that is quoted or comes out of an expansion is re-read as the
+# declaration its fields spell: NAME[SUB]=VALUE stores an element (a refused subscript fails
+# the builtin with status 1), the value lands under the variable's attributes, a readonly
+# variable refuses it, and an attribute option applies to a quoted operand as to a written
+# one. A `read` whose operands come out of an expansion stores the same way; -a leaves its
+# array set even when the line is empty, and a store by name into an array is to element 0.
+# Every expected value is bash 5.3's.
+s90() {
+  local r s n a
+  a=(1 2 3); s='a[-1]=R'; declare "$s"; check cdo1 "${a[*]}" "1 2 R"
+  s='a[1]+=Z'; declare "$s" 's90c=2'; check cdo2 "$?|${a[*]}|$s90c" "0|1 2Z R|2"
+  s='a[-8]=Q'; r=$(declare "$s" 2>&1); check cdo3 "$?|$r" "1|$0: line $LINENO: a[-8]: bad array subscript"
+  declare -i s90i; s='s90i=2*21'; declare "$s"; check cdo4 "$s90i" 42
+  s90g() { local s='s90i=3*3'; local "$s"; echo "$s90i"; }
+  check cdo5 "$(s90g)|$s90i" "3*3|42"
+  readonly s90ro=1
+  s='s90ro=2'; r=$(declare "$s" 2>&1); check cdo6 "$?|$r|$s90ro" "1|$0: line $LINENO: declare: s90ro: readonly variable|1"
+  declare -a 's90e[2]=x'; check cdo7 "$(declare -p s90e)" 'declare -a s90e=([2]="x")'
+  declare -i 's90n=1+2' s90m; check cdo8 "$s90n" 3
+  r=$(declare 'x y' 's90z=1' 2>&1); check cdo9 "$?|$r" "1|$0: line $LINENO: declare: \`x y': not a valid identifier"
+  n=s90v; read "$n" <<< 'p q'; check crd1 "$s90v" "p q"
+  n='s90a s90b'; read $n <<< ' 1  2  3 '; check crd2 "$s90a|$s90b" "1|2  3"
+  declare -i s90k; n=s90k; read "$n" <<< '6*7'; check crd3 "$s90k" 42
+  n=s90ro; read s90x "$n" <<< 'q r' 2>/dev/null; check crd4 "$?|$s90x|$s90ro" "1|q|1"
+  n='s90el[2]'; read "$n" <<< elem; check crd5 "$(declare -p s90el)" 'declare -a s90el=([2]="elem")'
+  n=s90arr; read -a "$n" <<< 'e f'; check crd6 "${s90arr[*]}" "e f"
+  s90w=(1 2 3); n=s90w; read "$n" <<< new; check crd7 "${s90w[*]}" "new 2 3"
+  printf -v "$n" %s pv; check crd8 "${s90w[*]}" "pv 2 3"
+  read -a s90y <<< ''; check crd9 "$(declare -p s90y)" 'declare -a s90y=()'
+}
+# ===== SECTION 91: a function's own redirections, and loop bodies in braces =====
+# Redirections written after a function's body belong to the body: they apply at every call
+# and `declare -f` prints them after it. A for, select or for (( )) loop may have its body in
+# braces, which `declare -f` prints as do ... done. Every expected value is bash 5.3's.
+s91() {
+  local r
+  s91a() { echo a; } >/dev/null; check fr1 "[$(s91a)]" "[]"
+  s91b() { read x; echo "got $x"; } <<< hi; check fr2 "$(s91b; s91b)" "got hi
+got hi"
+  s91c() if true; then echo b; fi >/dev/null; check fr3 "[$(s91c)]" "[]"
+  r=$(declare -f s91b s91c); check fr4 "$r" "s91b () 
+{ 
+    read x;
+    echo \"got \$x\"
+} <<< hi
+s91c () 
+{ 
+    if true; then
+        echo b;
+    fi > /dev/null
+}"
+  s91d() { for x in 1 2; { echo "$x"; }; }
+  s91e() for ((i=0; i<2; i++)) { echo $i; }
+  s91f() { select s in p q; { break; }; }
+  check fr5 "$(s91d; s91e)" "1
+2
+0
+1"
+  r=$(declare -f s91d s91e s91f); check fr6 "$r" "s91d () 
+{ 
+    for x in 1 2;
+    do
+        echo \"\$x\";
+    done
+}
+s91e () 
+{ 
+    for ((i=0; i<2; i++))
+    do
+        echo \$i;
+    done
+}
+s91f () 
+{ 
+    select s in p q;
+    do
+        break;
+    done
+}"
+}
 # ===== END SECTIONS =====
 
 s47   # SECTION-CALL 47
@@ -1708,5 +1789,7 @@ s86   # SECTION-CALL 86
 s87   # SECTION-CALL 87
 s88   # SECTION-CALL 88
 s89   # SECTION-CALL 89
+s90   # SECTION-CALL 90
+s91   # SECTION-CALL 91
 echo "full: $checks checks, $fails failures"
 exit $fails

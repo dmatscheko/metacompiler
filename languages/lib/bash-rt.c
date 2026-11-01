@@ -314,7 +314,8 @@ int rt_indbr(char *v);
 char *rt_nref_end(char *n);
 int rt_unset_name(char *n);
 int rt_eval_assign(char *s);
-int rt_decl_word(char *w, int d, int x);
+int rt_decl_word(char *w, int d, int x, int at, char *who);
+char *rt_decl_name(char *w);
 int rt_xmark(char *nm, int on);
 char *rt_xletters(char *nm, char *at);
 int putchar(int c);
@@ -7633,6 +7634,11 @@ int rt_setvar_byname(char *n, char *v, int app, int at)
     if (at != 0) v = rt_attrv(old, v, at);
     else if (old != 0) v = rt_strcat(old, v);
     if (arith_err != 0) return 0;
+    /* An array name stores its element 0, as NAME=VALUE does. */
+    if (rt_arr_any(n) != 0) {
+        if (rt_isassoc(n) != 0) return rt_arr_set(n, "0", v);
+        return rt_arr_iset(n, "0", v);
+    }
     i = rt_varslot_new(n);
     if (i >= 0) gvars[i] = v;
     rt_pin();
@@ -7849,36 +7855,188 @@ int rt_eval_assign(char *s)
     return 0;
 }
 
-/* One operand of a declaration that came out of an expansion (`local "$1"`,
- * `declare $v='x y'`): NAME, NAME=VALUE or NAME+=VALUE, the value taken as it
- * is. With d >= 0 the name is made a local of the call whose save stack starts
- * at d, unless it already is one. Answers 0, 1 for a word that is no name
- * (bash's "not a valid identifier"), 2 for one that starts with - or +: an
- * option, which only the emitter could apply. Twin of the computed operands of
- * makeDecl in bash-interpreter.abnf. x > 0 exports the name, x < 0 takes the
- * export attribute away (rt_xmark). */
-int rt_decl_word(char *w, int d, int x)
+/* The length of the NAME an operand of a declaration starts with (0: none). */
+int rt_decl_namelen(char *w)
 {
     int i = 0;
-    int app = 0;
-    int id;
-    char *nm;
-    char *v;
-    if (w[0] == 45 || w[0] == 43) return 2;
     while (w[i] == 95 || (w[i] >= 65 && w[i] <= 90) || (w[i] >= 97 && w[i] <= 122)
            || (i > 0 && w[i] >= 48 && w[i] <= 57)) i = i + 1;
+    return i;
+}
+
+char *rt_decl_name(char *w)
+{
+    return rt_substr(w, 0, rt_decl_namelen(w));
+}
+
+/* One operand of a declaration that came out of an expansion (`local "$1"`,
+ * `declare $v='x y'`): NAME, NAME=VALUE, NAME+=VALUE or NAME[SUB]= / +=, the
+ * value taken as it is. With d >= 0 the name is made a local of the call whose
+ * save stack starts at d, unless it already is one; a fresh local takes none of
+ * the attributes at (1 -i, 2 -u, 4 -l, 8 readonly) that the variable has where
+ * the declaration stands. A readonly name refuses a value or a fresh local
+ * ("WHO: NAME: readonly variable"). Answers 0, 1 for a word that is no name
+ * (bash's "not a valid identifier"), 2 for one that starts with - or +: an
+ * option, which only the emitter could apply, 3 for a store refused and
+ * reported (an arithmetic error is left in arith_err, which abandons the
+ * line). x > 0 exports the name, x < 0 takes the export attribute away
+ * (rt_xmark). Twin of makeDeclDyn in bash-interpreter.abnf. */
+int rt_decl_word(char *w, int d, int x, int at, char *who)
+{
+    int i = rt_decl_namelen(w);
+    int j;
+    int app = 0;
+    int id;
+    int fresh;
+    char *nm;
+    if (w[0] == 45 || w[0] == 43) return 2;
     if (i == 0) return 1;
-    if (w[i] == 43 && w[i + 1] == 61) app = 1;
-    else if (w[i] != 61 && w[i] != 0) return 1;
+    j = i;
+    if (w[j] == 91) {
+        while (w[j] != 0 && w[j] != 93) j = j + 1;
+        if (w[j] == 0) return 1;
+        j = j + 1;
+        if (w[j] == 0) return 1;
+    }
+    if (w[j] == 43 && w[j + 1] == 61) app = 1;
+    else if (w[j] != 61 && w[j] != 0) return 1;
     nm = rt_substr(w, 0, i);
     id = rt_varslot_new(nm);
-    if (d >= 0 && id >= 0 && rt_local_here(id, d) == 0) rt_local_new(id, d, w[i] == 0 ? 1 : 0);
+    fresh = d >= 0 && id >= 0 && rt_local_here(id, d) == 0 ? 1 : 0;
+    if ((at & 8) != 0 && (fresh != 0 || w[j] != 0)) {
+        rt_berr(who, nm, "readonly variable");
+        return 3;
+    }
+    if (fresh != 0) {
+        rt_local_new(id, d, w[j] == 0 ? 1 : 0);
+        at = 0;
+    }
     if (x != 0) rt_xmark(nm, x > 0 ? 1 : 0);
-    if (w[i] == 0) return 0;
-    v = rt_substr(w, i + 1 + app, -1);
-    if (app != 0) v = rt_strcat(rt_getvar_byname(nm), v);
-    rt_setvar_byname(nm, v, 0, 0);
+    if (w[j] == 0) return 0;
+    rt_setvar_byname(rt_substr(w, 0, j), rt_substr(w, j + 1 + app, -1), app, at & 7);
+    return rt_take_subbad() != 0 ? 3 : 0;
+}
+
+/* A `read` with an operand that came out of an expansion (`read "$n"`), in the
+ * three steps the emitter runs. rt_rd_parse reads the operand fields as
+ * readBuiltin in bash-interpreter.abnf does and answers how many variables the
+ * read may store: the names, then the -a array or, with neither, REPLY; the
+ * emitter hands rt_rd_at the attributes (1 -i, 2 -u, 4 -l, 8 readonly) of each
+ * rt_rd_name(k), and rt_rd_run reads the line, stores it and answers the
+ * status. Twin of emitRead in bash-to-llvm-ir.abnf, for literal names. */
+char *rd_vars;
+int rd_names;
+int rd_arr;
+char *rd_ats;
+
+int rt_rd_parse(char *list)
+{
+    int n = rt_nfields(list);
+    int i = 0;
+    char *arr = 0;
+    char *f;
+    rd_vars = &list_nil[0];
+    rd_names = 0;
+    while (i < n) {
+        f = rt_getfield(list, i);
+        if (rt_streq(f, "-a") != 0) {
+            i = i + 1;
+            if (i < n) arr = rt_getfield(list, i);
+        } else if (rt_streq(f, "-d") != 0 || rt_streq(f, "-n") != 0 || rt_streq(f, "-N") != 0
+                   || rt_streq(f, "-p") != 0 || rt_streq(f, "-t") != 0 || rt_streq(f, "-u") != 0) {
+            i = i + 1;
+        } else if (f[0] != 45 || f[1] == 0) {
+            rd_vars = rt_fadd(rd_vars, f);
+            rd_names = rd_names + 1;
+        }
+        i = i + 1;
+    }
+    rd_arr = arr != 0 ? 1 : 0;
+    if (arr != 0) rd_vars = rt_fadd(rd_vars, arr);
+    else if (rd_names == 0) rd_vars = rt_fadd(rd_vars, "REPLY");
+    n = rd_names + (rd_names == 0 || arr != 0 ? 1 : 0);
+    rd_ats = rt_bump(n + 1);
+    return n;
+}
+
+char *rt_rd_name(int k)
+{
+    return rt_getfield(rd_vars, k);
+}
+
+int rt_rd_at(int k, int at)
+{
+    rd_ats[k] = (char)at;
     return 0;
+}
+
+int rt_rd_run(void)
+{
+    char *arr = rd_arr != 0 ? rt_getfield(rd_vars, rd_names) : 0;
+    int bad = arr != 0 && rt_isname(arr) == 0 ? 1 : 0;
+    int last = rd_names - 1;
+    char *line;
+    char *ifs;
+    int k;
+    if (bad != 0) rt_berr("read", rt_strcat(rt_strcat("`", arr), "'"), "not a valid identifier");
+    line = rt_read_line(0);
+    if (bad != 0) return 1;
+    if (arr != 0 && (rd_ats[rd_names] & 8) != 0) {
+        rt_berr("", arr, "readonly variable");
+        return 1;
+    }
+    if (arr == 0 && rd_names == 0 && (rd_ats[0] & 8) != 0) {
+        rt_berr("", "REPLY", "readonly variable");
+        return 2;
+    }
+    if (read_eof != 0) {
+        for (k = 0; k < rd_names; k = k + 1) {
+            if ((rd_ats[k] & 8) != 0) {
+                rt_berr("", rt_getfield(rd_vars, k), "readonly variable");
+                return k < last ? 2 : 1;
+            }
+            rt_setvar_byname(rt_getfield(rd_vars, k), empty, 0, rd_ats[k] & 7);
+        }
+        if (arr != 0) {
+            rt_arr_clear(arr);
+            rt_arr_mark(arr);
+        } else if (rd_names == 0) rt_setvar_byname("REPLY", empty, 0, 0);
+        return 1;
+    }
+    ifs = rt_getvar_byname("IFS");
+    if (ifs == &unset_marker[0]) ifs = " \t\n";
+    if (arr != 0) {
+        char *sv = ar_pfx_s;
+        rt_arr_clear(arr);
+        rt_arr_mark(arr);
+        ar_pfx_s = "read: ";
+        rt_arr_litwords(arr, rt_splitifs(line, ifs), (long)0, rd_ats[rd_names] & 7);
+        ar_pfx_s = sv;
+        return 0;
+    }
+    if (rd_names == 0) {
+        rt_setvar_byname("REPLY", line, 0, 0);
+        return 0;
+    }
+    {
+        char *sv2 = ar_pfx_s;
+        int rst = 0;
+        ar_pfx_s = "read: ";
+        for (k = 0; k < rd_names && arith_err == 0; k = k + 1) {
+            if ((rd_ats[k] & 8) != 0) {
+                rt_berr("", rt_getfield(rd_vars, k), "readonly variable");
+                rst = k < last ? 2 : 1;
+                break;
+            }
+            rt_setvar_byname(rt_getfield(rd_vars, k), rt_field(line, ifs, k, k == last ? 1 : 0), 0, rd_ats[k] & 7);
+            if (rt_take_subbad() != 0) {
+                rst = k < last ? 2 : 1;
+                break;
+            }
+        }
+        ar_pfx_s = sv2;
+        return rst;
+    }
 }
 
 /* There is no real filesystem behind a compiled run, so the file predicates go

@@ -439,10 +439,7 @@ function dpFor(st) {
         for (k = 0; k < parts.length; k++) { parts[k] = dpTrim(parts[k]) }
         var t = dpPeek(st)
         if (dpIsOp(t, ";")) { dpNext(st) }
-        dpExpectWord(st, "do")
-        var ab = dpList(st, ["done"])
-        dpExpectWord(st, "done")
-        return {k: "afor", parts: parts, body: ab}
+        return {k: "afor", parts: parts, body: dpLoopBody(st)}
     }
     var nm = dpNext(st)
     if (nm.t != "w") { st.err = "a for variable"; return null }
@@ -455,10 +452,16 @@ function dpFor(st) {
     }
     var sep = dpPeek(st)
     if (dpIsOp(sep, ";") || sep.t == "nl") { dpNext(st) }
-    dpExpectWord(st, "do")
-    var body = dpList(st, ["done"])
-    dpExpectWord(st, "done")
-    return {k: "for", kw: kw, name: nm.v, words: words, body: body}
+    return {k: "for", kw: kw, name: nm.v, words: words, body: dpLoopBody(st)}
+}
+// A for or select body: `do LIST done`, or `{ LIST }`, which prints as the former.
+function dpLoopBody(st) {
+    dpSkipNl(st)
+    var close = dpIsWord(dpPeek(st), "{") ? "}" : "done"
+    dpExpectWord(st, (close == "}") ? "{" : "do")
+    var body = dpList(st, [close])
+    dpExpectWord(st, close)
+    return body
 }
 function dpCase(st) {
     dpNext(st)
@@ -672,4 +675,80 @@ function dpPrintCmd(c, ind, inline) {
         return cs + ind + "esac" + rds
     }
     return ""
+}
+
+// THE DECLARATION A COMPUTED OPERAND SPELLS (`declare -a "$spec"`, `local 'q=1'`): bash
+// re-reads the declaration with the operand's fields in its place. items are a declaration's
+// ({dkw}, {dflag}, {dname}, {a, src}, {dyn}); fieldsOf(dyn) gives one computed operand's
+// fields, or null to give up; quote(v) spells v as one shell word. A leading -X/+X field is an
+// option, NAME or NAME[SUB]=VALUE / NAME+=VALUE an operand (the value quoted, or kept as an
+// array literal (...) under -a/-A). Answers {text, operands, bad: [the fields that are no
+// operand, bash's "not a valid identifier"]}, or null.
+function bashDeclText(items, fieldsOf, quote) {
+    var text = items[0].dkw
+    var arr = false
+    var opts = true
+    var operands = 0
+    var bad = []
+    var i
+    var k
+    for (i = 1; i < items.length; i++) {
+        var it = items[i]
+        if (it.dflag != undefined) {
+            text = text + " " + it.dflag
+            if (it.dflag.charAt(0) == "-" && (it.dflag.indexOf("a") >= 0 || it.dflag.indexOf("A") >= 0)) { arr = true }
+            continue
+        }
+        if (it.dname != undefined || it.a != undefined) {
+            if (it.dname == undefined && it.src == undefined) { return null }
+            opts = false
+            operands = operands + 1
+            text = text + " " + ((it.dname != undefined) ? it.dname : it.src)
+            continue
+        }
+        var fs = fieldsOf(it.dyn)
+        if (fs == null) { return null }
+        for (k = 0; k < fs.length; k++) {
+            var f = fs[k]
+            if (opts && f == "--") { opts = false; continue }
+            if (opts && f.length > 1 && (f.charAt(0) == "-" || f.charAt(0) == "+") && bashDeclFlagText(f)) {
+                text = text + " " + f
+                if (f.charAt(0) == "-" && (f.indexOf("a") >= 0 || f.indexOf("A") >= 0)) { arr = true }
+                continue
+            }
+            opts = false
+            var op = bashDeclOperand(f, arr, quote)
+            if (op == "") { bad.push(f); continue }
+            operands = operands + 1
+            text = text + " " + op
+        }
+    }
+    return {text: text, operands: operands, bad: bad}
+}
+function bashDeclFlagText(f) {
+    var i
+    for (i = 1; i < f.length; i++) { if ("aAirxulgnpfF".indexOf(f.charAt(i)) < 0) { return false } }
+    return true
+}
+// One operand field as declaration text; "" when it is no operand.
+function bashDeclOperand(f, arr, quote) {
+    var i = 0
+    while (i < f.length) {
+        var cc = f.charCodeAt(i)
+        if (cc == 95 || (cc >= 65 && cc <= 90) || (cc >= 97 && cc <= 122) || (i > 0 && cc >= 48 && cc <= 57)) { i = i + 1 }
+        else { break }
+    }
+    if (i == 0) { return "" }
+    if (i == f.length) { return f }
+    var j = i
+    if (f.charAt(j) == "[") {
+        j = f.indexOf("]", j)
+        if (j < 0) { return "" }
+        j = j + 1
+    }
+    var opLen = (f.charAt(j) == "+" && f.charAt(j + 1) == "=") ? 2 : 1
+    if (f.charAt(j) != "=" && opLen == 1) { return "" }
+    var v = f.slice(j + opLen)
+    if (arr && v.length >= 2 && v.charAt(0) == "(" && v.charAt(v.length - 1) == ")") { return f.slice(0, j + opLen) + v }
+    return f.slice(0, j + opLen) + quote(v)
 }

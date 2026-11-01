@@ -175,7 +175,9 @@ ForWords    <~~ push({words: takeAll()}) ~~>
 
 // NAME() { LIST; }, and the `function NAME [()]  { LIST; }` keyword form.
 FuncDef     <~~ push(makeFuncDef(takeAll(), arSrc(up.start, up.pos))) ~~>
-            = FuncDefHead OptSep FuncBody ;
+            = FuncDefHead OptSep FuncBody [ RedirList ] ;
+// The redirections after the body belong to it: they apply at every call (`f() { echo a; }
+// >/dev/null; f` prints nothing).
 // A function body may be ANY compound command; { LIST; } and ( LIST ) are the two that
 // appear in the wild ( `f() ( cd /tmp; pwd )` runs the body in a subshell ).
 FuncBody    = FuncBraceBody | Subshell | IfStmt | CForStmt | ForStmt | WhileStmt | UntilStmt | CaseStmt | ArithCmd | CondCmd ;
@@ -3172,10 +3174,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
     }
     // A declaration with a computed operand ({dyn}) runs as the declaration its words spell
-    // once expanded: the written items as written, each leading -X/+X field an option, each
-    // NAME or NAME=VALUE field that operand (the value quoted, or kept as an array literal
-    // under -a/-A, as bash re-reads it). A field that is no name is bash's "not a valid
-    // identifier" and makes the status 1. Twin of the dyn arm of makeDecl in
+    // once expanded (bashDeclText in lib/bash-deparse.js). A field that is no name is bash's
+    // "not a valid identifier" and makes the status 1. Twin of the dyn arm of makeDecl in
     // bash-to-llvm-ir.abnf.
     function makeDeclDyn(items, redirs, ln) {
         var kw = items[0].dkw
@@ -3195,44 +3195,16 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (redirs.length > 0) { run = mkRedirected([body].concat(redirs)) }
         return function() {
             vars["$LINENO"] = lnCtx == null ? ln : lnIn(ln)
-            var text = kw
-            var arr = false
-            var opts = true
-            var operands = 0
+            var dt = bashDeclText(items, function(dyn) {
+                var fs = expandWords(dyn)
+                return (abortSignal != null || arithErr) ? null : fs
+            }, shellQuote)
+            if (dt == null) { return takeAbort() }
+            var text = dt.text
+            var operands = dt.operands
             var errs = ""
-            var i
             var k
-            for (i = 1; i < items.length; i++) {
-                var it = items[i]
-                if (it.dflag != undefined) {
-                    text = text + " " + it.dflag
-                    if (it.dflag.charAt(0) == "-" && (it.dflag.indexOf("a") >= 0 || it.dflag.indexOf("A") >= 0)) { arr = true }
-                    continue
-                }
-                if (it.dname != undefined || it.a != undefined) {
-                    opts = false
-                    operands = operands + 1
-                    text = text + " " + ((it.dname != undefined) ? it.dname : it.src)
-                    continue
-                }
-                var fs = expandWords(it.dyn)
-                var ab = takeAbort()
-                if (ab != null) { return ab }
-                for (k = 0; k < fs.length; k++) {
-                    var f = fs[k]
-                    if (opts && f == "--") { opts = false; continue }
-                    if (opts && f.length > 1 && (f.charAt(0) == "-" || f.charAt(0) == "+") && declFlagText(f)) {
-                        text = text + " " + f
-                        if (f.charAt(0) == "-" && (f.indexOf("a") >= 0 || f.indexOf("A") >= 0)) { arr = true }
-                        continue
-                    }
-                    opts = false
-                    var op = declOperand(f, arr)
-                    if (op == "") { errs = errs + diagPfx() + kw + ": `" + f + "': not a valid identifier\n"; continue }
-                    operands = operands + 1
-                    text = text + " " + op
-                }
-            }
+            for (k = 0; k < dt.bad.length; k++) { errs = errs + diagPfx() + kw + ": `" + dt.bad[k] + "': not a valid identifier\n" }
             var st = anytype
             st = 0
             if (operands > 0 || errs != "") {
@@ -3250,36 +3222,6 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             setStatus(st)
             return st
         }
-    }
-    // -X / +X: an option word of a declaration builtin.
-    function declFlagText(f) {
-        var i
-        for (i = 1; i < f.length; i++) { if ("aAirxulgnpfF".indexOf(f.charAt(i)) < 0) { return false } }
-        return true
-    }
-    // A computed operand as the declaration text that spells it: NAME, or NAME[SUB]=VALUE /
-    // NAME+=VALUE with VALUE quoted (left as an array literal (...) when arr); "" when the
-    // field is no such operand.
-    function declOperand(f, arr) {
-        var i = 0
-        while (i < f.length) {
-            var cc = f.charCodeAt(i)
-            if (cc == 95 || (cc >= 65 && cc <= 90) || (cc >= 97 && cc <= 122) || (i > 0 && cc >= 48 && cc <= 57)) { i = i + 1 }
-            else { break }
-        }
-        if (i == 0) { return "" }
-        if (i == f.length) { return f }
-        var j = i
-        if (f.charAt(j) == "[") {
-            j = f.indexOf("]", j)
-            if (j < 0) { return "" }
-            j = j + 1
-        }
-        var opLen = (f.charAt(j) == "+" && f.charAt(j + 1) == "=") ? 2 : 1
-        if (f.charAt(j) != "=" && opLen == 1) { return "" }
-        var v = f.slice(j + opLen)
-        if (arr && v.length >= 2 && v.charAt(0) == "(" && v.charAt(v.length - 1) == ")") { return f.slice(0, j + opLen) + v }
-        return f.slice(0, j + opLen) + shellQuote(v)
     }
     // A declaration CARRYING ITS OWN redirections. The declaration items are the ones
     // makeDecl understands; anything else on the stack is a redirection record.
@@ -6416,7 +6358,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // At end of file bash CLEARS what it would have set, REPLY included:
             // `REPLY=keep; read -r </dev/null; echo "[$REPLY]"` prints [].
             if (arrName == null && names.length == 0) { setVarVal("REPLY", "") }
-            if (arrName != null) { arrFromList(arrName, false, []) }
+            // The array is left set and empty: `declare -p` prints NAME=().
+            if (arrName != null) { arrFromList(arrName, false, []); arrs[arrKey(arrName)].lit = true }
             return 1
         }
         var e = stdinPos
@@ -6432,6 +6375,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var svp = arPfx
             arPfx = "read: "
             arrFromList(arrName, false, fields)
+            arrs[arrKey(arrName)].lit = true
             arPfx = svp
             return 0
         }
@@ -7915,7 +7859,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // the statement runs.
     function makeFuncDef(items, src) {
         var fname = items[0].fname
-        var bodyT = items[1]
+        var bodyT = mkRedirected(items.slice(1))
         return function() {
             setFunc(fname, bodyT, lnCtx, src)
             setStatus(0)

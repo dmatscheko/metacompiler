@@ -166,7 +166,9 @@ ForWords    <~~ push({words: takeAll()}) ~~>
 
 // NAME() { LIST; }, and the `function NAME [()]  { LIST; }` keyword form.
 FuncDef     <~~ push(makeFuncDef(takeAll(), arSrc(up.start, up.pos))) ~~>
-            = FuncDefHead OptSep FuncBody ;
+            = FuncDefHead OptSep FuncBody [ RedirList ] ;
+// The redirections after the body belong to it: they apply at every call (`f() { echo a; }
+// >/dev/null; f` prints nothing).
 // A function body may be any compound command; { LIST; } and ( LIST ) are the two that
 // appear in the wild ( `f() ( cd /tmp; pwd )` runs the body in a subshell ).
 FuncBody    = FuncBraceBody | Subshell | IfStmt | CForStmt | ForStmt | WhileStmt | UntilStmt | CaseStmt | ArithCmd | CondCmd ;
@@ -1439,7 +1441,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function storeVar(b, name, v) {
         var al = refAlias(name)
         if (al != null) { storeVar(b, al, v); return }
-        if (attrOn(refVars, name)) { var nv = gepStr(b, name); b.NewCall(rtSetByName, [nv, v, zero, refAttrs(b, nv)]); return }
+        if (attrOn(refVars, name)) { var nv = gepStr(b, name); b.NewCall(rtSetByName, [nv, v, zero, refAttrs(b, nv, false)]); return }
         b.NewStore(attrCase(b, name, v), varPtr(b, name))
         heapPin(b)
     }
@@ -1587,8 +1589,15 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var rtSetByName = rtDecl("rt_setvar_byname", false, [1, 1, 0, 0])
     var rtNrefBase = rtDecl("rt_nref_base", true, [1])
     var rtEvalAssign = rtDecl("rt_eval_assign", false, [1])
-    // i32 rt_decl_word(i8* w, i32 d, i32 x): one computed operand of a declaration (bash-rt.c).
-    var rtDeclWord = rtDecl("rt_decl_word", false, [1, 0, 0])
+    // i32 rt_decl_word(i8* w, i32 d, i32 x, i32 at, i8* who): one computed operand of a
+    // declaration, and i8* rt_decl_name(i8* w) the NAME it starts with (bash-rt.c).
+    var rtDeclWord = rtDecl("rt_decl_word", false, [1, 0, 0, 0, 1])
+    var rtDeclName = rtDecl("rt_decl_name", true, [1])
+    // A read with a computed operand (rt_rd_parse in bash-rt.c).
+    var rtRdParse = rtDecl("rt_rd_parse", false, [1])
+    var rtRdName = rtDecl("rt_rd_name", true, [0])
+    var rtRdAt = rtDecl("rt_rd_at", false, [0, 0])
+    var rtRdRun = rtDecl("rt_rd_run", false, [])
     // The export attribute is the one the runtime keeps per name (rt_xmark), because a
     // computed operand can export a name no lexical table sees.
     var rtXmark = rtDecl("rt_xmark", false, [1, 0])
@@ -2736,7 +2745,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 return {b: b, v: b.NewCall(rtPcheck, [v, b.NewZExt(blank, i32), gepStr(b, indirect ? "!" + name : name), msg])}
             }
             var picked = b.NewSelect(blank, d, v)
-            if (o == "=" && t6.v != null) { b.NewCall(rtSetByName, [t6.v, picked, zero, refAttrs(b, t6.v)]) }
+            if (o == "=" && t6.v != null) { b.NewCall(rtSetByName, [t6.v, picked, zero, refAttrs(b, t6.v, false)]) }
             if (o == "=" && t6.v == null) {
                 // the default is stored under the name's attributes, and expands as stored
                 var setB = curF.NewBlock(""), joinB = curF.NewBlock("")
@@ -3532,7 +3541,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         if (viaRef) {
             var tg = gepStr(b, a.name)
-            b.NewCall(rtSetByName, [tg, v, (a.op == "+=") ? one : zero, refAttrs(b, tg)])
+            b.NewCall(rtSetByName, [tg, v, (a.op == "+=") ? one : zero, refAttrs(b, tg, false)])
             return emitAbortCheck(b)
         }
         if (a.idxT != null) {
@@ -3638,13 +3647,14 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     // The attributes of the variable a store through the name nv (an i8*) lands on, picked at
     // run time (rt_nref_base) from every name the tables know: they are lexical here (manual
-    // 7.9), and a nameref's or a computed name's target is known only when it runs.
-    function refAttrs(b, nv) {
+    // 7.9), and a nameref's or a computed name's target is known only when it runs. With ro,
+    // a readonly variable adds 8.
+    function refAttrs(b, nv, ro) {
         var land = null
         var at = zero
         var k
         for (k = 0; k < varIdList.length; k++) {
-            var bits = elemAttrs(varIdList[k])
+            var bits = elemAttrs(varIdList[k]) + ((ro && attrOn(roVars, varIdList[k])) ? 8 : 0)
             if (bits == 0) { continue }
             if (land == null) { land = b.NewCall(rtNrefBase, nv) }
             at = b.NewSelect(b.NewICmp(llvm.enum.IPredNE, b.NewCall(rtStreq, [land, gepStr(b, varIdList[k])]), zero), llvm.constant.NewInt(i32, bits), at)
@@ -3732,6 +3742,11 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             order.push({j: names.length})
             if (it.dname != undefined) { names.push(it.dname); asgs.push(null) }
             else { names.push(it.a.name); asgs.push(it.a) }
+        }
+        // Operands that are constant words (`declare -a 'b[1]=x'`) spell a declaration known now.
+        if (anyDyn) {
+            var dt = bashDeclText(items, constFields, sqQuote)
+            if (dt != null) { return makeDeclSpelled(kw, dt, redirs) }
         }
         // A computed operand names its variable only at run time, where this compiler keeps
         // no attributes: it takes no attribute option and no readonly.
@@ -3871,6 +3886,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // The value of a declaration with -n is the reference's own: the name it refers to.
             if (isRef) { refVars["$" + names[j]] = false }
             if (setRo) { roVars["$" + names[j]] = true }
+            // A name with an attribute has a slot, where refAttrs looks for it.
+            if (integer || upper || lower || setRo) { getVarId(names[j]) }
             if (xCode != 0) { b.NewCall(rtXmark, [gepStr(b, names[j]), (xCode > 0) ? one : zero]) }
             // A global `declare -a a` keeps a's elements; only a value or a local starts empty.
             // `declare -a b[3]=x` stores one element and keeps the rest.
@@ -3908,10 +3925,11 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (asgs[j] == null && !isArray && kw != "export" && kw != "readonly") { b.NewCall(rtArrSmark, gepStr(b, names[j])) }
             return b
         }
-        // The fields of a computed operand, each NAME, NAME=VALUE or NAME+=VALUE (rt_decl_word),
-        // a local of the call where the keyword makes one. A field that is no name is bash's
-        // "not a valid identifier" (*badP = 1); one that is an option stops the shell, which
-        // cannot apply it here. Twin of makeDeclDyn in bash-interpreter.abnf.
+        // The fields of a computed operand, each NAME, NAME=VALUE, NAME+=VALUE or NAME[SUB]= /
+        // += (rt_decl_word), a local of the call where the keyword makes one, stored under the
+        // attributes its variable has here. A field that is no name is bash's "not a valid
+        // identifier", and a refused store fails too (*badP = 1); one that is an option stops
+        // the shell, which cannot apply it here. Twin of makeDeclDyn in bash-interpreter.abnf.
         var emitDeclDyn = function(b, words, badP) {
             var listP = slotOf(i8ptr)
             b.NewStore(nilList(b), listP)
@@ -3933,10 +3951,16 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             head.NewCondBr(head.NewICmp(llvm.enum.IPredSLT, iv, n), step, done)
             var fld = step.NewCall(rtGetField, [all, iv])
             var rc = step.NewCall(rtDeclWord, [fld, localize ? step.NewLoad(i32, curFrame.depth) : llvm.constant.NewInt(i32, -1),
-                                               llvm.constant.NewInt(i32, xCode)])
+                                               llvm.constant.NewInt(i32, xCode), refAttrs(step, step.NewCall(rtDeclName, fld), true),
+                                               gepStr(step, (kw == "export") ? "" : kw)])
+            step = emitAbortCheck(step)
             var badB = curF.NewBlock(""), optB = curF.NewBlock(""), nextB = curF.NewBlock(""), okB = curF.NewBlock("")
+            var notIdB = curF.NewBlock(""), subB = curF.NewBlock("")
             step.NewCondBr(step.NewICmp(llvm.enum.IPredEQ, rc, zero), nextB, okB)
-            okB.NewCondBr(okB.NewICmp(llvm.enum.IPredEQ, rc, one), badB, optB)
+            okB.NewCondBr(okB.NewICmp(llvm.enum.IPredEQ, rc, one), badB, notIdB)
+            notIdB.NewCondBr(notIdB.NewICmp(llvm.enum.IPredEQ, rc, llvm.constant.NewInt(i32, 2)), optB, subB)
+            subB.NewStore(one, badP)
+            subB.NewBr(nextB)
             emitDiag(badB, badB.NewCall(rtStrcat, [badB.NewCall(rtStrcat, [gepStr(badB, kw + ": `"), fld]),
                                                        gepStr(badB, "': not a valid identifier\n")]))
             badB.NewStore(one, badP)
@@ -4033,6 +4057,38 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             pre.vals = saved
             return b
         }
+    }
+    // The fields of a computed declaration operand whose words are all constant; null otherwise.
+    function constFields(dyn) {
+        var fs = []
+        var i
+        for (i = 0; i < dyn.length; i++) {
+            if (dyn[i].c == undefined) { return null }
+            fs.push(dyn[i].c)
+        }
+        return fs
+    }
+    function sqQuote(v) {
+        var out = "'"
+        var i
+        for (i = 0; i < v.length; i++) {
+            var ch = v.charAt(i)
+            if (ch == "'") { out = out + "'\\''" } else { out = out + ch }
+        }
+        return out + "'"
+    }
+    // The declaration dt (bashDeclText) spells, its bad fields reported first, under the
+    // redirections. Twin of makeDeclDyn in bash-interpreter.abnf.
+    function makeDeclSpelled(kw, dt, redirs) {
+        var body = function(b) {
+            var k
+            for (k = 0; k < dt.bad.length; k++) { emitDiag(b, gepStr(b, kw + ": `" + dt.bad[k] + "': not a valid identifier\n")) }
+            if (dt.operands > 0) { b = compileSnippet(dt.text, 0)(b) }
+            if (dt.bad.length > 0 || dt.operands == 0) { storeStatusI(b, (dt.bad.length > 0) ? 1 : 0) }
+            return b
+        }
+        if (redirs.length == 0) { return body }
+        return mkRedirected([body].concat(redirs))
     }
     // A declaration CARRYING ITS OWN redirections. The declaration items are the ones
     // makeDecl understands; anything else on the stack is a redirection record.
@@ -5024,7 +5080,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // A computed name is stored by name at run time (rt_setvar_byname).
             var rd = evalWord(b, destW)
             b = rd.b
-            b.NewCall(rtSetByName, [rd.v, b.NewCall(rtPfValue, out), zero, refAttrs(b, rd.v)])
+            b.NewCall(rtSetByName, [rd.v, b.NewCall(rtPfValue, out), zero, refAttrs(b, rd.v, false)])
             b.NewStore(b.NewCall(rtTakeSubbad), subP)
             b = emitAbortCheck(b)
         }
@@ -5038,9 +5094,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var names = []
         var arrName = null
         var i = 0
+        for (i = 0; i < args.length; i++) { if (args[i].c == undefined) { return emitReadDyn(b, args) } }
+        i = 0
         while (i < args.length) {
             var a = args[i].c
-            if (a == undefined) { fail("read needs literal variable names in this compiler") }
             if (a == "-a") { i = i + 1; if (i < args.length) { arrName = args[i].c }; i = i + 1; continue }
             if (a == "-d" || a == "-n" || a == "-N" || a == "-p" || a == "-t" || a == "-u") { i = i + 1 }
             else if (a.length > 1 && a.charAt(0) == "-") { }
@@ -5082,13 +5139,15 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         for (k = 0; k < roK; k++) { eofB = emitAssign(eofB, namedAsg(names[k], emptyPtr(eofB), subP), false, null) }
         if (roK < names.length) { roRefused(eofB, names[roK], "") }
         if (rawReply) { storeVar(eofB, "REPLY", emptyPtr(eofB)) }
-        if (arrName != null) { eofB.NewCall(rtArrClear, gepStr(eofB, arrName)) }
+        // The array is left set and empty: `declare -p` prints NAME=().
+        if (arrName != null) { eofB.NewCall(rtArrClear, gepStr(eofB, arrName)); eofB.NewCall(rtArrMark, gepStr(eofB, arrName)) }
         storeStatusI(eofB, (roK < names.length - 1) ? 2 : 1)
         eofB.NewBr(merge)
         var ifsRaw = loadVar(okB, "IFS")
         var ifs = okB.NewSelect(okB.NewICmp(llvm.enum.IPredEQ, ifsRaw, unsetPtr(okB)), gepStr(okB, " \t\n"), ifsRaw)
         if (arrName != null) {
             okB.NewCall(rtArrClear, gepStr(okB, arrName))
+            okB.NewCall(rtArrMark, gepStr(okB, arrName))
             // An element that is an -i arithmetic error abandons the line.
             var rat = elemAttrs(arrName)
             if ((rat & 1) != 0) { okB.NewStore(gepStr(okB, "read: "), gArPfx) }
@@ -5128,6 +5187,34 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         storeStatusI(okB, (roK == names.length) ? 0 : ((roK < names.length - 1) ? 2 : 1))
         okB.NewBr(merge)
         return merge
+    }
+
+    // A read with a computed operand: the operands as one field list, read and stored at run
+    // time by rt_rd_parse / rt_rd_run, each variable under the attributes it has here
+    // (refAttrs).
+    function emitReadDyn(b, args) {
+        var listV = nilList(b)
+        var i
+        for (i = 0; i < args.length; i++) {
+            var rw = args[i].fn(b)
+            b = rw.b
+            listV = b.NewCall(rtCatFields, [listV, rw.v])
+        }
+        b = emitAbortCheck(b)
+        var n = b.NewCall(rtRdParse, listV)
+        var iP = slotOf(i32)
+        b.NewStore(zero, iP)
+        var head = curF.NewBlock(""), step = curF.NewBlock(""), done = curF.NewBlock("")
+        b.NewBr(head)
+        var iv = head.NewLoad(i32, iP)
+        head.NewCondBr(head.NewICmp(llvm.enum.IPredSLT, iv, n), step, done)
+        step.NewCall(rtRdAt, [iv, refAttrs(step, step.NewCall(rtRdName, iv), true)])
+        step.NewStore(step.NewAdd(iv, one), iP)
+        step.NewBr(head)
+        var st = done.NewCall(rtRdRun)
+        done = emitAbortCheck(done)
+        storeStatus(done, st)
+        return done
     }
 
     // mapfile / readarray (see mapfileBuiltin in bash-interpreter.abnf). The options and the
@@ -6885,7 +6972,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // body is emitted the first time the definition is.
     function makeFuncDef(items, src) {
         var fname = items[0].fname
-        var bodyT = items[1]
+        var bodyT = mkRedirected(items.slice(1))
         var kdef = hasOwn(funcDefs, "$" + fname) ? funcDefs["$" + fname] + 1 : 1
         funcDefs["$" + fname] = kdef
         funcTexts["$" + fname + "#" + kdef] = bashDeparse(src)
