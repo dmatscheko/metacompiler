@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1015** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1016** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -85,17 +85,12 @@ type Integer (expected Proc)"; ours stores it. `for a, (b, c) in [[1, [2, 3]]]; 
 
 # JS — JavaScript and TypeScript
 
-### T-991 js: member store on a primitive base; `(this).x++`; compiler parse of `println("s".x = 5)` · P3 · JS · IN PROGRESS (JS worker, round 38) [V]
-Found by the JS worker, round 37 (oracle node 24). `"s".x = 5` / `"s".length++` raise "member assignment 'x' on s" in both engines;
-node (sloppy) ignores the store (`"s".length++` → 1). `(this).x++` fails in both engines (inner Target rejects bare `this`; node
-NaN). js compiler only: `println("s".x = 5)` and `println(new RegExp("\p{l}","u").test(..))` do not parse as an argument though
-the same expression parses as a statement.
-
-### T-992 js: regex `\p{scx=..}` and 30 more ES binary properties; non-ASCII case folding under `iu`; private brand check in decorator access · P3 · JS · IN PROGRESS (JS worker, round 38) [V]
-Found by the JS worker, round 37 (oracle node 24). Script_Extensions and the ES binary properties without a Java table (Dash, Math,
-ID_Start, ID_Continue, ...) raise "unsupported character property" (needs Unicode tables). Under `iu` case folding is ASCII-only:
-`/é/iu.test("É")` → node true. Decorator `context.access.get/set` do not brand-check private names (tsc's obj.#x throws on a
-foreign object).
+### T-1015 js: invalid regex errors are late and uncatchable; Go twin turns lone surrogates in regex text into U+FFFD; `sc=Zyyy` on Unicode 17 scripts · P3 · JS · OPEN [V]
+Found by the JS worker, round 38 (oracle node 24). A bad pattern only fails when matched, and then aborts instead of raising a
+catchable SyntaxError at construction: `new RegExp("\\p{scx=Foo}","u")` → node SyntaxError "Invalid property name", ours "ok" then
+an uncatchable abort at .test; `new RegExp("p{l}","u").test("p{l}")` → node SyntaxError "Incomplete quantifier", ours true; the literal
+`/\p{scx=Foo}/u` aborts at run time instead of an early SyntaxError. The llvm.Run leg (Go twin) seems to map lone surrogates in regex
+text to U+FFFD (U+D800 matches \p{Grapheme_Base}). `\p{sc=Zyyy}` matches Unicode 17 script code points (Java 24 tables are Unicode 16).
 
 # JV — Java
 
@@ -1101,6 +1096,8 @@ T-1009 bash: eval does not catch an abandoned line; bad subscripts outside plain
 T-1010 bash compiled: read/printf -v into element or computed names; attributes through a computed nameref — DONE - compiled read/printf -v into element and computed names, nameref target attributes picked at run time, single diagnostic
 T-1001 java interpreter: default method from a more specific superinterface loses to the less specific one; package-private members across packages — DONE - most specific default method wins (class chain first) in both halves; package-private/private/protected member access refused with javac's messages
 T-1007 c#: `string.CompareOrdinal` of an astral character vs an ASCII one has the wrong sign — DECLINED: not reproducible - csxCompareOrdinal already compares UTF-16 code units in all legs; regression assertion s48o2 added (fails under code-point order)
+T-991 js: member store on a primitive base; `(this).x++`; compiler parse of `println("s".x = 5)` — DONE - member writes on primitives dropped (sloppy) / TypeError (strict) in all engines, (this) targets, logical-assignment places evaluated once
+T-992 js: regex `\p{scx=..}` and 30 more ES binary properties; non-ASCII case folding under `iu`; private brand check in decorator access — DONE - Script_Extensions and the 30 ES binary properties (Unicode 17 tables), Unicode simple case folding under iu incl. \w/\b, private brand checks in decorator access
 
 # Settled — do not re-open
 
