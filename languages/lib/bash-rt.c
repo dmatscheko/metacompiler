@@ -205,9 +205,9 @@ int rt_utf8put(char *d, long cp);
 char *rt_unraw(char *s);
 int rt_haschar(char *s, int ch);
 int rt_inwords(char *w, char *list);
-char *rt_read_line(int u);
-char *rt_field(char *l, char *ifs, int idx, int rest);
-int rt_nifs(char *l, char *ifs);
+char *rt_read_line(int raw, int dlm);
+char *rt_rd_val(char *l, int s, int e, int q);
+char *rt_rd_fields(char *l, char *ifs, int q, int n);
 char *rt_radix(char *s, int base, int upper, int alt);
 char *rt_pfq(char *s);
 int rt_nfields(char *v);
@@ -276,6 +276,8 @@ char *rt_eown(char *old, char *v, int n);
 int rt_release(long m, long lm);
 int rt_mf_next(void);
 int rt_isname(char *t);
+int rt_isasgref(char *t);
+int rt_rd_badname(char *nm);
 char *rt_slicefields(char *f, int off, int n, char *sep, int star);
 char *rt_globescape(char *s);
 char *rt_catfields(char *a, char *b);
@@ -2898,101 +2900,130 @@ int rt_inwords(char *w, char *list) {
     return 0;
 }
 
-/* rt_read_line: the next line of stdin_buf (without its newline), advancing
- * stdin_pos. Returns a null-marked empty string and leaves the position at the
- * end when there is nothing left - a null stdin_buf, when nothing was
- * redirected, holds nothing; read_eof answers whether that happened. */
-char *rt_read_line(int u) {
+/* rt_read_line: the next record of stdin_buf for `read`, up to the delimiter
+ * byte dlm (0, from -d '', never occurs), advancing stdin_pos past it.
+ * read_eof is 1 when no delimiter ended the record: the end of the input, or
+ * nothing left at all (a null stdin_buf, when nothing was redirected, holds
+ * nothing), which is an empty record.
+ *
+ * Without -r (raw == 0) a backslash quotes the byte after it and is dropped,
+ * and a backslash-newline is dropped whole, the record going on past it, with
+ * any delimiter; a backslash that ends the input is dropped. A quoted byte
+ * delimits no field, which the record keeps by a 0x01 before it, as bash's
+ * CTLESC; a 0x01 of the input is quoted the same way so rt_rd_val can take
+ * every one away. Twin of readRec in bash-interpreter.abnf. */
+char *rt_read_line(int raw, int dlm) {
     char *buf = stdin_buf;
     int pos = stdin_pos;
     int len = buf != 0 ? rt_strlen(buf) : 0;
-    read_eof = 0;
-    if (pos >= len) {
-        read_eof = 1;
-        return empty;
-    }
     int k = pos;
-    while (1) {
-        int atEnd = k >= len;
-        char ch = buf[k];
-        int isNL = ch == 10;
-        if (atEnd || isNL) break;
+    int o = 0;
+    char *dst;
+    read_eof = 1;
+    if (pos >= len) return empty;
+    while (k < len && (int)(unsigned char)buf[k] != dlm) {
+        if (raw == 0 && buf[k] == 92 && k + 1 < len) k = k + 1;
         k = k + 1;
     }
-    char *line = rt_substr(buf, pos, k - pos);
-    stdin_pos = (k < len) ? k + 1 : k;
-    return line;
+    if (k < len) read_eof = 0;
+    stdin_pos = k < len ? k + 1 : k;
+    if (raw != 0) return rt_substr(buf, pos, k - pos);
+    dst = rt_bump(2 * (k - pos) + 1);
+    while (pos < k) {
+        int ch = (int)(unsigned char)buf[pos];
+        pos = pos + 1;
+        if (ch == 92) {
+            if (pos >= k) break;
+            ch = (int)(unsigned char)buf[pos];
+            pos = pos + 1;
+            if (ch == 10) continue;
+            dst[o] = 1;
+            o = o + 1;
+        } else if (ch == 1) {
+            dst[o] = 1;
+            o = o + 1;
+        }
+        dst[o] = (char)ch;
+        o = o + 1;
+    }
+    dst[o] = 0;
+    return dst;
 }
 
 /* ---- fields, padding, escapes, field lists -------------------------------- */
 
-/* rt_nifs: how many fields `l` splits into under the POSIX delimiter rule (the
- * one rt_splitifs walks and bash-interpreter.abnf's splitIFS mirrors). Only
- * rt_field needs it, to tell "one field left" from "several". */
-int rt_nifs(char *l, char *ifs) {
-    int len = rt_strlen(l);
-    int i = 0;
-    int n = 0;
-    while (i < len && rt_ifsws(ifs, (int)(unsigned char)l[i]) != 0) { i = i + 1; }
-    while (i < len) {
-        while (i < len && rt_haschar(ifs, (int)(unsigned char)l[i]) == 0) { i = i + 1; }
-        n = n + 1;
-        while (i < len && rt_ifsws(ifs, (int)(unsigned char)l[i]) != 0) { i = i + 1; }
-        if (i < len && rt_haschar(ifs, (int)(unsigned char)l[i]) != 0) {
-            i = i + 1;
-            while (i < len && rt_ifsws(ifs, (int)(unsigned char)l[i]) != 0) { i = i + 1; }
-        }
+/* l[s, e) as a value: with q, each 0x01 rt_read_line put before a quoted byte
+ * taken away. */
+char *rt_rd_val(char *l, int s, int e, int q) {
+    char *dst;
+    int o = 0;
+    if (q == 0) return rt_substr(l, s, e - s);
+    dst = rt_bump(e - s + 1);
+    while (s < e) {
+        if (l[s] == 1 && s + 1 < e) s = s + 1;
+        dst[o] = l[s];
+        o = o + 1;
+        s = s + 1;
     }
-    return n;
+    dst[o] = 0;
+    return dst;
 }
 
-/* rt_field: field `idx` of line `l` under the POSIX delimiter rule; with
- * rest != 0 what the LAST name of a `read` gets, which is not the same thing.
+/* THE VALUES A `read` STORES, as a field list: with n names, field k under the
+ * POSIX delimiter rule (rt_splitifs) for each name but the last, which takes
+ * the rest of the record; with n == 0 every field, for -a. With q the record
+ * is rt_read_line's quoted form, and a quoted byte delimits nothing and is no
+ * leading whitespace.
  *
  * Empty fields count (`IFS=: read -r a b <<< ":x:"` leaves a empty and gives b
- * "x"). Per bash 5.3.15, the remainder has three arms:
+ * "x"). Per bash 5.3.15, the rest has three arms:
  *
  *   no field there      ""
  *   EXACTLY ONE left    that field - no delimiters, no whitespace, so
  *                       `IFS=: read -r a b <<< "p:q:"` gives b "q"
  *   TWO OR MORE left    the RAW text from that field's start to the end of the
- *                       line, less trailing IFS WHITESPACE only, so
- *                       `IFS=: read -r a b <<< ":a:b:"` gives b "a:b:" and
- *                       `read -r a b <<< "  x   y   z  "` gives b "y   z"
+ *                       record, less trailing IFS WHITESPACE only (quoted or
+ *                       not), so `IFS=: read -r a b <<< ":a:b:"` gives b "a:b:"
+ *                       and `read -r a b <<< "  x   y   z  "` gives b "y   z"
  *
- * bash-interpreter.abnf's readRest is the same three arms. */
-char *rt_field(char *l, char *ifs, int idx, int rest) {
+ * Twin of readFields in bash-interpreter.abnf. */
+char *rt_rd_fields(char *l, char *ifs, int q, int n) {
     int len = rt_strlen(l);
-    int i = 0;      /* scan index          */
-    int n = 0;      /* field number        */
-    int s = 0;      /* current field start */
-    int e = 0;      /* current field end   */
-    int t = 0;
-    int left = 0;
-    if (rest != 0) left = rt_nifs(l, ifs) - idx;
+    int i = 0;
+    int nf = 0;
+    int s;
+    int e;
+    char *out = &list_nil[0];
     while (i < len && rt_ifsws(ifs, (int)(unsigned char)l[i]) != 0) { i = i + 1; }
-    while (i < len) {
+    while (i < len && (n == 0 || nf < n)) {
         s = i;
-        while (i < len && rt_haschar(ifs, (int)(unsigned char)l[i]) == 0) { i = i + 1; }
-        e = i;
-        if (n == idx) {
-            if (rest == 0) return rt_substr(l, s, e - s);
-            if (left <= 1) return rt_substr(l, s, e - s);
-            t = len;
-            while (t > s) {
-                if (rt_ifsws(ifs, (int)(unsigned char)l[t - 1]) == 0) break;
-                t = t - 1;
-            }
-            return rt_substr(l, s, t - s);
+        while (i < len && (q != 0 && l[i] == 1 || rt_haschar(ifs, (int)(unsigned char)l[i]) == 0)) {
+            if (q != 0 && l[i] == 1 && i + 1 < len) i = i + 1;
+            i = i + 1;
         }
-        n = n + 1;
+        e = i;
         while (i < len && rt_ifsws(ifs, (int)(unsigned char)l[i]) != 0) { i = i + 1; }
         if (i < len && rt_haschar(ifs, (int)(unsigned char)l[i]) != 0) {
             i = i + 1;
             while (i < len && rt_ifsws(ifs, (int)(unsigned char)l[i]) != 0) { i = i + 1; }
         }
+        if (nf == n - 1 && i < len) {
+            e = s;
+            i = s;
+            while (i < len) {
+                if (q != 0 && l[i] == 1 && i + 1 < len) i = i + 1;
+                i = i + 1;
+                if (rt_ifsws(ifs, (int)(unsigned char)l[i - 1]) == 0) e = i;
+            }
+        }
+        out = rt_fadd(out, rt_rd_val(l, s, e, q));
+        nf = nf + 1;
     }
-    return &empty[0];
+    while (nf < n) {
+        out = rt_fadd(out, empty);
+        nf = nf + 1;
+    }
+    return out;
 }
 
 /* rt_radix: printf's %x / %X / %o / %u - the operand as an UNSIGNED 64-bit
@@ -5248,14 +5279,14 @@ char *rt_arr_key(char *nm, char *sub) {
 
 /* The key of the assignment NAME[SUB]=v, lbl being "NAME[SUB]" as written. An
  * indexed array's SUB is arithmetic even when it expands to @; a written @ or *
- * (whole) and an index still negative from the end are bash's "bad array
- * subscript", which abandons the command line. Twin of asgKey in
- * bash-interpreter.abnf. */
+ * (whole 1) and an index still negative from the end are bash's "bad array
+ * subscript", which abandons the command line, and an empty SUB (whole 2) is one
+ * for an associative array too. Twin of asgKey in bash-interpreter.abnf. */
 char *rt_arr_akey(char *nm, char *sub, char *lbl, int whole) {
     long k;
     char *key;
     sub_bad = 0;
-    if (rt_isassoc(nm) != 0) return sub;
+    if (whole != 2 && rt_isassoc(nm) != 0) return sub;
     key = &bad_key[0];
     if (whole != 0) rt_berr("", lbl, "bad array subscript");
     else {
@@ -5524,6 +5555,32 @@ int rt_isname(char *t)
         i = i + 1;
     }
     return 1;
+}
+
+/* A name a builtin may store into (read, printf -v): a NAME, or NAME[SUB] with
+ * SUB not empty and its brackets balanced up to the last byte, as bash's
+ * valid_array_reference. Twin of bashIsRef in lib/bash-deparse.js. */
+int rt_isasgref(char *t)
+{
+    int i = 0;
+    int d = 0;
+    int c;
+    while (t[i] != 0 && t[i] != 91) {
+        c = (int)(unsigned char)t[i];
+        if (!((c >= 97 && c <= 122) || (c >= 65 && c <= 90) || c == 95 || (i > 0 && c >= 48 && c <= 57))) return 0;
+        i = i + 1;
+    }
+    if (t[i] == 0) return i > 0 ? 1 : 0;
+    if (i == 0 || t[i + 1] == 93) return 0;
+    while (t[i] != 0) {
+        if (t[i] == 91) d = d + 1;
+        if (t[i] == 93) {
+            d = d - 1;
+            if (d == 0) return t[i + 1] == 0 ? 1 : 0;
+        }
+        i = i + 1;
+    }
+    return 0;
 }
 
 /* The callback's two arguments, the index and the record, as a field list. */
@@ -6980,12 +7037,12 @@ int rt_cap_begin(int u)
     return 0;
 }
 
-/* Close the innermost buffer and answer a COPY of it (the buffer is reused) with
- * its trailing newlines dropped. Copied here, not by rt_substr: that answers its
- * argument itself for a whole-string slice, and this buffer is not immutable.
- * cmdsub is 1 for a command substitution, which warns about a dropped NUL as
- * bash 5.3 does; a pipeline stage passes 0. Twin of mkCmdSub in
- * bash-interpreter.abnf. */
+/* Close the innermost buffer and answer a COPY of it (the buffer is reused).
+ * Copied here, not by rt_substr: that answers its argument itself for a
+ * whole-string slice, and this buffer is not immutable. cmdsub is 1 for a
+ * command substitution, which drops the trailing newlines and warns about a
+ * dropped NUL as bash 5.3 does; a pipeline stage passes 0 and hands its output
+ * on byte for byte. Twin of mkCmdSub in bash-interpreter.abnf. */
 char *rt_cap_end(int cmdsub)
 {
     int d2;
@@ -7006,7 +7063,7 @@ char *rt_cap_end(int cmdsub)
     }
     buf = cap_buf[d2];
     l = cap_len[d2];
-    while (l > 0) {
+    while (cmdsub != 0 && l > 0) {
         if (buf[l - 1] != (char)10) {
             break;
         }
@@ -7255,12 +7312,13 @@ int rt_tmp_vis(int id)
 }
 
 /* `local NAME`, its first in a call whose frame starts at depth d: a fresh
- * binding saved for the return, without an array, and when bare, unset - or
- * holding the value of a caller's prefix binding it hides (bash 5.3). The
+ * binding saved for the return, without an array, and unset - or holding the
+ * value of a caller's prefix binding it hides (bash 5.3), which is where a
+ * NAME+=VALUE of the declaration appends. The
  * call's own prefix binding of NAME is already its local: it is claimed
  * (unset then leaves it in place), value kept. Twin of the fresh arm of
  * makeDecl in bash-interpreter.abnf. */
-int rt_local_new(int id, int d, int bare)
+int rt_local_new(int id, int d)
 {
     int t = d;
     char *old = gvars[id];
@@ -7275,7 +7333,7 @@ int rt_local_new(int id, int d, int bare)
     inh = rt_tmp_vis(id);
     rt_push_local(id);
     rt_arr_clear(varnames[id]);
-    if (bare != 0) gvars[id] = inh != 0 ? old : unset_marker;
+    gvars[id] = inh != 0 ? old : unset_marker;
     return 0;
 }
 
@@ -7590,9 +7648,9 @@ char *rt_getvar_byname(char *n)
 /* The same lookup, writing instead of reading; both follow a chain of namerefs
  * (rt_nref_end), and a circular one abandons the line. A name the program
  * never mentions gets a slot now. NAME[SUB] - a nameref to
- * an element - stores the element, its subscript evaluated now; NAME[@] and
- * NAME[*] are bash's "bad array subscript" even for an associative array, and
- * abandon the line. With app, v is appended to the old value (an element's key
+ * an element - stores the element, its subscript evaluated now; NAME[@],
+ * NAME[*] and NAME[] are bash's "bad array subscript" even for an associative
+ * array, and abandon the line. With app, v is appended to the old value (an element's key
  * evaluated once); at is the attributes of the variable it lands on (rt_attrv),
  * which the emitter picks by rt_nref_base. Twin of elemRefSet and storeAttr in
  * bash-interpreter.abnf. */
@@ -7612,7 +7670,7 @@ int rt_setvar_byname(char *n, char *v, int app, int at)
         char *nm = rt_substr(n, 0, i);
         char *sub = rt_substr(n, i + 1, rt_strlen(n) - i - 2);
         char *k;
-        if (rt_streq(sub, "@") != 0 || rt_streq(sub, "*") != 0) {
+        if (rt_streq(sub, "@") != 0 || rt_streq(sub, "*") != 0 || sub[0] == 0) {
             rt_berr("", n, "bad array subscript");
             arith_err = 1;
             sub_bad = 1;
@@ -7722,12 +7780,13 @@ char *rt_indname(char *nm, char *sub, char *v, int strict)
     return &unset_marker[0];
 }
 
-/* The '[' of a NAME[SUB] that rt_isref accepted, or -1 for any other target. */
+/* The '[' of a NAME[SUB] that rt_isref accepted, or of a NAME[] a store by
+ * name refuses (rt_setvar_byname), or -1 for any other target. */
 int rt_indbr(char *v)
 {
     int len = rt_strlen(v);
     int i = 0;
-    if (len < 4 || v[len - 1] != 93) return -1;
+    if (len < 3 || v[len - 1] != 93) return -1;
     while (i < len && v[i] != 91) i = i + 1;
     return i < len ? i : -1;
 }
@@ -7871,16 +7930,20 @@ char *rt_decl_name(char *w)
 
 /* One operand of a declaration that came out of an expansion (`local "$1"`,
  * `declare $v='x y'`): NAME, NAME=VALUE, NAME+=VALUE or NAME[SUB]= / +=, the
- * value taken as it is. With d >= 0 the name is made a local of the call whose
- * save stack starts at d, unless it already is one; a fresh local takes none of
- * the attributes at (1 -i, 2 -u, 4 -l, 8 readonly) that the variable has where
- * the declaration stands. A readonly name refuses a value or a fresh local
- * ("WHO: NAME: readonly variable"). Answers 0, 1 for a word that is no name
- * (bash's "not a valid identifier"), 2 for one that starts with - or +: an
- * option, which only the emitter could apply, 3 for a store refused and
- * reported (an arithmetic error is left in arith_err, which abandons the
- * line). x > 0 exports the name, x < 0 takes the export attribute away
- * (rt_xmark). Twin of makeDeclDyn in bash-interpreter.abnf. */
+ * value taken as it is, or NAME[SUB] alone, which declare, typeset and local
+ * (who) read as `-a NAME`, SUB never evaluated. With d >= 0 the name is made a
+ * local of the call whose save stack starts at d, unless it already is one; a
+ * fresh local takes none of the attributes at (1 -i, 2 -u, 4 -l, 8 readonly)
+ * that the variable has where the declaration stands. at 16 is the
+ * declaration's -a: NAME declares an array, and NAME=VALUE is NAME[0]=VALUE.
+ * A readonly name refuses a value or a fresh local ("WHO: NAME: readonly
+ * variable"). Answers 0, 1 for a word that is no name (bash's "not a valid
+ * identifier"), 2 for one that starts with - or +: an option, which only the
+ * emitter could apply, 3 for a store refused and reported (an arithmetic error
+ * is left in arith_err, which abandons the line), 4 for an array literal
+ * NAME=(...) under -a, which only the emitter could parse. x > 0 exports the
+ * name, x < 0 takes the export attribute away (rt_xmark). Twin of makeDeclDyn
+ * in bash-interpreter.abnf. */
 int rt_decl_word(char *w, int d, int x, int at, char *who)
 {
     int i = rt_decl_namelen(w);
@@ -7888,7 +7951,11 @@ int rt_decl_word(char *w, int d, int x, int at, char *who)
     int app = 0;
     int id;
     int fresh;
+    int arr = (at & 16) != 0 ? 1 : 0;
+    int sub = 0;
+    int vl;
     char *nm;
+    char *v;
     if (w[0] == 45 || w[0] == 43) return 2;
     if (i == 0) return 1;
     j = i;
@@ -7896,10 +7963,15 @@ int rt_decl_word(char *w, int d, int x, int at, char *who)
         while (w[j] != 0 && w[j] != 93) j = j + 1;
         if (w[j] == 0) return 1;
         j = j + 1;
-        if (w[j] == 0) return 1;
+        if (w[j] == 0 && (j == i + 2 || who[0] == 0 || rt_streq(who, "readonly") != 0)) return 1;
+        if (w[j] == 0) arr = 1;
+        sub = 1;
     }
     if (w[j] == 43 && w[j + 1] == 61) app = 1;
     else if (w[j] != 61 && w[j] != 0) return 1;
+    v = w[j] != 0 ? rt_substr(w, j + 1 + app, -1) : empty;
+    vl = rt_strlen(v);
+    if (arr != 0 && sub == 0 && vl >= 2 && v[0] == 40 && v[vl - 1] == 41) return 4;
     nm = rt_substr(w, 0, i);
     id = rt_varslot_new(nm);
     fresh = d >= 0 && id >= 0 && rt_local_here(id, d) == 0 ? 1 : 0;
@@ -7908,12 +7980,22 @@ int rt_decl_word(char *w, int d, int x, int at, char *who)
         return 3;
     }
     if (fresh != 0) {
-        rt_local_new(id, d, w[j] == 0 ? 1 : 0);
+        rt_local_new(id, d);
         at = 0;
     }
     if (x != 0) rt_xmark(nm, x > 0 ? 1 : 0);
+    if (arr != 0 && w[j] == 0) {
+        /* A local scalar becomes an empty array, set when the scalar was, as in
+         * makeDecl in bash-to-llvm-ir.abnf. */
+        if (d >= 0 && id >= 0 && rt_arr_any(nm) == 0) {
+            if (gvars[id] != &unset_marker[0]) rt_arr_mark(nm);
+            gvars[id] = &unset_marker[0];
+        }
+        rt_arr_dmark(nm);
+        return 0;
+    }
     if (w[j] == 0) return 0;
-    rt_setvar_byname(rt_substr(w, 0, j), rt_substr(w, j + 1 + app, -1), app, at & 7);
+    rt_setvar_byname(arr != 0 && sub == 0 ? rt_strcat(nm, "[0]") : rt_substr(w, 0, j), v, app, at & 7);
     return rt_take_subbad() != 0 ? 3 : 0;
 }
 
@@ -7922,33 +8004,55 @@ int rt_decl_word(char *w, int d, int x, int at, char *who)
  * readBuiltin in bash-interpreter.abnf does and answers how many variables the
  * read may store: the names, then the -a array or, with neither, REPLY; the
  * emitter hands rt_rd_at the attributes (1 -i, 2 -u, 4 -l, 8 readonly) of each
- * rt_rd_name(k), and rt_rd_run reads the line, stores it and answers the
+ * rt_rd_name(k), and rt_rd_run reads the record, stores it and answers the
  * status. Twin of emitRead in bash-to-llvm-ir.abnf, for literal names. */
 char *rd_vars;
 int rd_names;
 int rd_arr;
 char *rd_ats;
+int rd_raw;
+int rd_dlm;
 
 int rt_rd_parse(char *list)
 {
     int n = rt_nfields(list);
     int i = 0;
+    int j;
     char *arr = 0;
     char *f;
     rd_vars = &list_nil[0];
     rd_names = 0;
+    rd_raw = 0;
+    rd_dlm = 10;
+    /* getopt's "ad:ei:n:N:p:rst:u:": letters bundle, and a value is the rest
+     * of its word or the next word. */
     while (i < n) {
         f = rt_getfield(list, i);
-        if (rt_streq(f, "-a") != 0) {
-            i = i + 1;
-            if (i < n) arr = rt_getfield(list, i);
-        } else if (rt_streq(f, "-d") != 0 || rt_streq(f, "-n") != 0 || rt_streq(f, "-N") != 0
-                   || rt_streq(f, "-p") != 0 || rt_streq(f, "-t") != 0 || rt_streq(f, "-u") != 0) {
-            i = i + 1;
-        } else if (f[0] != 45 || f[1] == 0) {
-            rd_vars = rt_fadd(rd_vars, f);
-            rd_names = rd_names + 1;
+        if (f[0] != 45 || f[1] == 0) break;
+        i = i + 1;
+        if (rt_streq(f, "--") != 0) break;
+        j = 1;
+        while (f[j] != 0) {
+            int o = (int)(unsigned char)f[j];
+            char *v;
+            if (o == 114) rd_raw = 1;
+            if (rt_haschar("adinNptu", o) == 0) {
+                j = j + 1;
+                continue;
+            }
+            v = f + j + 1;
+            if (v[0] == 0 && i < n) {
+                v = rt_getfield(list, i);
+                i = i + 1;
+            }
+            if (o == 97) arr = v;
+            if (o == 100) rd_dlm = (int)(unsigned char)v[0];
+            break;
         }
+    }
+    while (i < n) {
+        rd_vars = rt_fadd(rd_vars, rt_getfield(list, i));
+        rd_names = rd_names + 1;
         i = i + 1;
     }
     rd_arr = arr != 0 ? 1 : 0;
@@ -7970,16 +8074,27 @@ int rt_rd_at(int k, int at)
     return 0;
 }
 
+/* "read: `NAME': not a valid identifier", status 1. */
+int rt_rd_badname(char *nm)
+{
+    rt_berr("read", rt_strcat(rt_strcat("`", nm), "'"), "not a valid identifier");
+    return 1;
+}
+
 int rt_rd_run(void)
 {
     char *arr = rd_arr != 0 ? rt_getfield(rd_vars, rd_names) : 0;
     int bad = arr != 0 && rt_isname(arr) == 0 ? 1 : 0;
     int last = rd_names - 1;
+    int q = rd_raw == 0 ? 1 : 0;
     char *line;
     char *ifs;
+    char *vs;
     int k;
+    /* The first name is checked before anything is read, the others as they are stored. */
+    if (rd_names > 0 && rt_isasgref(rt_getfield(rd_vars, 0)) == 0) return rt_rd_badname(rt_getfield(rd_vars, 0));
     if (bad != 0) rt_berr("read", rt_strcat(rt_strcat("`", arr), "'"), "not a valid identifier");
-    line = rt_read_line(0);
+    line = rt_read_line(rd_raw, rd_dlm);
     if (bad != 0) return 1;
     if (arr != 0 && (rd_ats[rd_names] & 8) != 0) {
         rt_berr("", arr, "readonly variable");
@@ -7989,20 +8104,6 @@ int rt_rd_run(void)
         rt_berr("", "REPLY", "readonly variable");
         return 2;
     }
-    if (read_eof != 0) {
-        for (k = 0; k < rd_names; k = k + 1) {
-            if ((rd_ats[k] & 8) != 0) {
-                rt_berr("", rt_getfield(rd_vars, k), "readonly variable");
-                return k < last ? 2 : 1;
-            }
-            rt_setvar_byname(rt_getfield(rd_vars, k), empty, 0, rd_ats[k] & 7);
-        }
-        if (arr != 0) {
-            rt_arr_clear(arr);
-            rt_arr_mark(arr);
-        } else if (rd_names == 0) rt_setvar_byname("REPLY", empty, 0, 0);
-        return 1;
-    }
     ifs = rt_getvar_byname("IFS");
     if (ifs == &unset_marker[0]) ifs = " \t\n";
     if (arr != 0) {
@@ -8010,25 +8111,31 @@ int rt_rd_run(void)
         rt_arr_clear(arr);
         rt_arr_mark(arr);
         ar_pfx_s = "read: ";
-        rt_arr_litwords(arr, rt_splitifs(line, ifs), (long)0, rd_ats[rd_names] & 7);
+        rt_arr_litwords(arr, rt_rd_fields(line, ifs, q, 0), (long)0, rd_ats[rd_names] & 7);
         ar_pfx_s = sv;
-        return 0;
+        return read_eof;
     }
+    /* REPLY is the whole record, split by nothing. */
     if (rd_names == 0) {
-        rt_setvar_byname("REPLY", line, 0, 0);
-        return 0;
+        rt_setvar_byname("REPLY", rt_getfield(rt_rd_fields(line, empty, q, 1), 0), 0, 0);
+        return read_eof;
     }
+    vs = rt_rd_fields(line, ifs, q, rd_names);
     {
         char *sv2 = ar_pfx_s;
-        int rst = 0;
+        int rst = read_eof;
         ar_pfx_s = "read: ";
         for (k = 0; k < rd_names && arith_err == 0; k = k + 1) {
+            if (rt_isasgref(rt_getfield(rd_vars, k)) == 0) {
+                rst = rt_rd_badname(rt_getfield(rd_vars, k));
+                break;
+            }
             if ((rd_ats[k] & 8) != 0) {
                 rt_berr("", rt_getfield(rd_vars, k), "readonly variable");
                 rst = k < last ? 2 : 1;
                 break;
             }
-            rt_setvar_byname(rt_getfield(rd_vars, k), rt_field(line, ifs, k, k == last ? 1 : 0), 0, rd_ats[k] & 7);
+            rt_setvar_byname(rt_getfield(rd_vars, k), rt_getfield(vs, k), 0, rd_ats[k] & 7);
             if (rt_take_subbad() != 0) {
                 rst = k < last ? 2 : 1;
                 break;

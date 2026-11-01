@@ -292,10 +292,15 @@ DeclFlag    <~~ push({dflag: up.in}) ~~> = DeclSign :whitespace() DeclFlagCh { D
 // -X gives an attribute, +X takes it away.
 DeclSign    = "-" | "+" ;
 DeclFlagCh  = "a" | "A" | "i" | "r" | "x" | "u" | "l" | "g" | "n" | "p" | "f" | "F" ;
-DeclItem    = DeclAssign | DeclName | DeclDyn ;
+DeclItem    = DeclAssign | DeclArr | DeclName | DeclDyn ;
 DeclAssign  <~~ push(mkDeclItem(takeAll(), arSrc(up.start, up.pos))) ~~>
             = AsgIdent <~~ push({aname: up.in}) ~~> AsgTail ;
 DeclName    <~~ push({dname: up.in}) ~~> = Name KwEnd ;
+// NAME[SUB] without a value declares NAME an array, the subscript never evaluated (bash 5.3:
+// `declare c[1/0]` is status 0 and `declare -p c` prints `declare -a c`); {darr} is the
+// operand as written. An empty SUB is no operand ("not a valid identifier").
+DeclArr     <~~ push({dname: up.in.slice(0, up.in.indexOf("[")), darr: up.in}) ~~>
+            = AsgIdent :whitespace() "[" !@+" \t\r\n;&|<>()[]'\"\\$`" "]" :whitespace(Whitespace) KwEnd ;
 // Any other word is an operand known only once it is expanded (`local "$1"`,
 // `declare $v='x y'`, `typeset s${dyn}+=foo`, `declare 'q=1'`): its fields are read as
 // NAME, NAME=VALUE or an option when it runs.
@@ -1574,12 +1579,12 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return getVarVal(t)
     }
     // A store through a nameref whose target is the element NAME[SUB]: the subscript is
-    // evaluated now, as in `NAME[SUB]=v`, and NAME[@] and NAME[*] are refused even for an
-    // associative array. Answers the stored text. Twin of the subscript arm of
+    // evaluated now, as in `NAME[SUB]=v`, and NAME[@], NAME[*] and NAME[] are refused even
+    // for an associative array. Answers the stored text. Twin of the subscript arm of
     // rt_setvar_byname.
     function elemRefSet(name, append, v) {
         var sp = splitSubscript(name)
-        var whole = sp.key == "@" || sp.key == "*"
+        var whole = sp.key == "@" || sp.key == "*" || sp.key == ""
         // The subscript's arithmetic errors carry no builtin's prefix (arPfx is for the value).
         var svp = arPfx
         arPfx = ""
@@ -2996,16 +3001,27 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var plus = ""
         var names = []
         var asgs = []
+        // A NAME[SUB] operand as written ({darr}), else null: it declares an array.
+        var darrs = []
         var i
         for (i = 1; i < items.length; i++) { if (items[i].dyn != undefined) { return makeDeclDyn(items, redirs, ln) } }
         for (i = 1; i < items.length; i++) {
             var it = items[i]
             if (it.dflag != undefined && it.dflag.charAt(0) == "+") { plus = plus + it.dflag; continue }
             if (it.dflag != undefined) { flags = flags + it.dflag; continue }
-            if (it.dname != undefined) { names.push(it.dname); asgs.push(null) }
-            else { names.push(it.a.name); asgs.push(it.a) }
+            if (it.dname != undefined) { names.push(it.dname); asgs.push(null); darrs.push((it.darr != undefined) ? it.darr : null) }
+            else { names.push(it.a.name); asgs.push(it.a); darrs.push(null) }
         }
         var isArray = (flags.indexOf("a") >= 0) || (flags.indexOf("A") >= 0)
+        // Under -a or -A, NAME=VALUE is NAME[0]=VALUE: the other elements stay, and += appends
+        // to element 0 (bash 5.3: `y=(1 2); declare -a y=7` leaves y=(7 2)). Twin of the same
+        // rewrite in makeDecl in bash-to-llvm-ir.abnf.
+        for (i = 0; i < asgs.length; i++) {
+            var a0 = asgs[i]
+            if (isArray && a0 != null && a0.idxT == null && a0.lit == null) {
+                asgs[i] = {name: a0.name, idxT: makeConst("0"), op: a0.op, valT: a0.valT, lit: null, isrc: "0", lbl: a0.lbl}
+            }
+        }
         var assoc = (flags.indexOf("A") >= 0)
         var upper = (flags.indexOf("u") >= 0)
         var lower = (flags.indexOf("l") >= 0)
@@ -3068,6 +3084,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // starts from that value, bash 5.3; any other starts unset.
             var inherit = fresh && asgs[k] == null && tmpVisible(names[k])
             var inhV = inherit ? getVarVal(names[k]) : ""
+            // The same holds for a value: `s=3; f() { local s+=4; }` gives s=4, `s=5 f` s=54.
+            var clean = fresh && asgs[k] != null && !tmpVisible(names[k])
             touchState(names[k])
             if (fresh) {
                 declareLocal(names[k])
@@ -3080,6 +3098,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 dropAttrs(names[k])
                 exVars["$" + names[k]] = wasX
                 arrs[arrKey(names[k])] = null
+                if (clean) { unsetVar(names[k]) }
             }
             if (integer) { intVars["$" + names[k]] = true }
             if (upper) { upVars["$" + names[k]] = true; loVars["$" + names[k]] = false }
@@ -3089,16 +3108,17 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (plus.indexOf("u") >= 0) { upVars["$" + names[k]] = false }
             if (plus.indexOf("l") >= 0) { loVars["$" + names[k]] = false }
             // A global `declare -a a` keeps a's elements; only a value or a local starts empty.
-            if (isArray && asgs[k] == null) {
-                // A local scalar declared an array again becomes an empty one (bash 5.3).
+            if ((isArray || darrs[k] != null) && asgs[k] == null) {
+                // A local scalar declared an array again becomes an empty one (bash 5.3), set
+                // when the scalar was (`declare -p` prints NAME=()).
+                var wasSet = localize && !fresh && !isArr(names[k]) && isSetVar(names[k])
                 if (localize && !isArr(names[k])) { unsetVar(names[k]) }
                 if (!assoc && !localize) { arrAdopt(names[k]) }
                 arrEnsure(names[k], assoc)
                 arrs[arrKey(names[k])].decl = true
+                if (wasSet) { arrs[arrKey(names[k])].lit = true }
             }
             if (asgs[k] != null) {
-                // `declare -a b[3]=x` stores one element and keeps the rest.
-                if (isArray && asgs[k].idxT == null) { arrNew(names[k], assoc) }
                 if (asgs[k].lit != null) { runAssign(asgs[k], assoc) } else { runAssignV(asgs[k], assoc, v) }
             }
             else if (inherit) { setVarVal(names[k], inhV) }
@@ -3107,7 +3127,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (kw == "export" && flags.indexOf("n") >= 0) { exVars["$" + names[k]] = false }
             else if (kw == "export" || flags.indexOf("x") >= 0) { exVars["$" + names[k]] = true }
             if (plus.indexOf("x") >= 0) { exVars["$" + names[k]] = false }
-            if (asgs[k] == null && !isArray && kw != "export" && kw != "readonly") { dclVars["$" + names[k]] = true }
+            if (asgs[k] == null && !isArray && darrs[k] == null && kw != "export" && kw != "readonly") { dclVars["$" + names[k]] = true }
         }
         // The expanded values, one array per running declaration: the expansion of a value can
         // run this same declaration again (`local x=$(f)` inside a recursive f).
@@ -3139,6 +3159,12 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 setStatus(0); return 0
             }
             for (k = 0; k < names.length; k++) {
+                // export and readonly take no NAME[SUB].
+                if (darrs[k] != null && (kw == "export" || kw == "readonly")) {
+                    diagErr(kw + ": `" + darrs[k] + "': not a valid identifier\n")
+                    roFail = true
+                    continue
+                }
                 if (asgs[k] == null || asgs[k].lit == null) { declAt(k, vals[k]) }
                 if (takeSubBad()) { roFail = true }
             }
@@ -5398,9 +5424,11 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         subBad = false
         return e
     }
-    // Through a nameref r, `r[SUB]=v` quotes r[SUB].
+    // Through a nameref r, `r[SUB]=v` quotes r[SUB]. An empty SUB (`b[]=x`) is a bad
+    // subscript for an associative array too.
     function asgKey(a, isAs) {
-        return arrAkey(a.name, wordJoin(a.idxT()), a.lbl + "[" + a.isrc + "]", isAs, a.isrc == "@" || a.isrc == "*")
+        var none = a.isrc == ""
+        return arrAkey(a.name, wordJoin(a.idxT()), a.lbl + "[" + a.isrc + "]", isAs && !none, none || a.isrc == "@" || a.isrc == "*")
     }
     // The same, with the value already expanded.
     function runAssignV(a, assoc, v) {
@@ -6090,6 +6118,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var dest = null
         var a = args
         if (a.length >= 2 && a[0] == "-v") { dest = a[1]; a = a.slice(2) }
+        // A name that is no NAME or NAME[SUB] fails printf with status 2 before the format is
+        // looked at.
+        if (dest != null && !bashIsRef(dest)) { diagErr("printf: `" + dest + "': not a valid identifier\n"); return 2 }
         if (a.length > 0 && a[0] == "--") { a = a.slice(1) }
         if (a.length == 0) { return 0 }
         var fmt = a[0]
@@ -6327,94 +6358,148 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return true
     }
 
-    // read [-r] [-a NAME] NAME... : one line of standard input, split on IFS, the last name
-    // taking the rest. Returns 1 at end of file, exactly like the shell.
+    // read [-r] [-a NAME] [-d DELIM] NAME... : one record of standard input (readRec), split
+    // on IFS, the last name taking the rest (readFields). The status is 1 when no delimiter
+    // ended the record - at the end of the input the names are still stored, and with nothing
+    // left at all they are CLEARED, REPLY included (`REPLY=keep; read -r </dev/null` leaves it
+    // empty) and an -a array is left set and empty. A name that is no NAME or NAME[SUB]
+    // (bashIsRef) is "not a valid identifier", status 1: the first before anything is read,
+    // the others when their turn to be stored comes. Twin of emitRead in bash-to-llvm-ir.abnf.
     function readBuiltin(args) {
-        var names = []
-        var arrName = null
-        var i = 0
-        while (i < args.length) {
-            var a = args[i]
-            if (a == "-a") { i = i + 1; if (i < args.length) { arrName = args[i] } }
-            else if (a == "-d" || a == "-n" || a == "-N" || a == "-p" || a == "-t" || a == "-u") { i = i + 1 }
-            else if (a.length > 1 && a.charAt(0) == "-") { }
-            else { names.push(a) }
-            i = i + 1
-        }
-        // A readonly target, once the line is read: the array or the last name fails the
+        var o = bashReadOpts(args)
+        var names = o.names
+        var arrName = o.arr
+        if (names.length > 0 && !bashIsRef(names[0])) { diagErr("read: `" + names[0] + "': not a valid identifier\n"); return 1 }
+        // A readonly target, once the record is read: the array or the last name fails the
         // read (status 1), REPLY or an earlier name stops it there (2), bash 5.3.
-        // An -a name that is no NAME (`read -a 'b[1]'`) fails the read, its line consumed.
+        // An -a name that is no NAME (`read -a 'b[1]'`) fails the read, its record consumed.
         var badArr = arrName != null && !isIdentText(arrName)
         if (badArr) { diagErr("read: `" + arrName + "': not a valid identifier\n") }
-        if (stdinPos >= stdinBuf.length) {
-            if (badArr) { return 1 }
-            if (arrName != null && roRefused(arrName, "")) { return 1 }
-            if (arrName == null && names.length == 0 && roRefused("REPLY", "")) { return 2 }
-            var z
-            for (z = 0; z < names.length; z++) {
-                if (roRefused(names[z], "")) { return (z < names.length - 1) ? 2 : 1 }
-                storeAttr(names[z], "")
-            }
-            // At end of file bash CLEARS what it would have set, REPLY included:
-            // `REPLY=keep; read -r </dev/null; echo "[$REPLY]"` prints [].
-            if (arrName == null && names.length == 0) { setVarVal("REPLY", "") }
-            // The array is left set and empty: `declare -p` prints NAME=().
-            if (arrName != null) { arrFromList(arrName, false, []); arrs[arrKey(arrName)].lit = true }
-            return 1
-        }
-        var e = stdinPos
-        while (e < stdinBuf.length && stdinBuf.charAt(e) != "\n") { e = e + 1 }
-        var line = stdinBuf.slice(stdinPos, e)
-        stdinPos = (e < stdinBuf.length) ? (e + 1) : e
+        var rec = readRec(o.raw, o.dlm)
         if (badArr) { return 1 }
         if (arrName != null && roRefused(arrName, "")) { return 1 }
         if (arrName == null && names.length == 0 && roRefused("REPLY", "")) { return 2 }
-        var rec = splitIFSRec(line)
-        var fields = rec.f
+        var st = rec.eof ? 1 : 0
+        var seps = isSetVar("IFS") ? vars["$IFS"] : " \t\n"
         if (arrName != null) {
             var svp = arPfx
             arPfx = "read: "
-            arrFromList(arrName, false, fields)
+            arrFromList(arrName, false, readFields(rec.t, seps, !o.raw, 0))
             arrs[arrKey(arrName)].lit = true
             arPfx = svp
-            return 0
+            return st
         }
-        if (names.length == 0) { setVarVal("REPLY", line); return 0 }
+        // REPLY is the whole record, split by nothing.
+        if (names.length == 0) { setVarVal("REPLY", readFields(rec.t, "", !o.raw, 1)[0]); return st }
+        var vs = readFields(rec.t, seps, !o.raw, names.length)
         // An -i name's arithmetic error leaves it and the names after it as they were.
         var svp2 = arPfx
         arPfx = "read: "
         var k
-        var rst = 0
         for (k = 0; k < names.length && !arithErr; k++) {
-            if (roRefused(names[k], "")) { rst = (k < names.length - 1) ? 2 : 1; break }
-            storeAttr(names[k], (k == names.length - 1) ? readRest(line, rec, k) : ((k < fields.length) ? fields[k] : ""))
+            if (!bashIsRef(names[k])) { diagErr("read: `" + names[k] + "': not a valid identifier\n"); st = 1; break }
+            if (roRefused(names[k], "")) { st = (k < names.length - 1) ? 2 : 1; break }
+            storeAttr(names[k], vs[k])
             // A refused subscript, like a readonly name: 2 and the rest unset, 1 for the last.
-            if (takeSubBad()) { rst = (k < names.length - 1) ? 2 : 1; break }
+            if (takeSubBad()) { st = (k < names.length - 1) ? 2 : 1; break }
         }
         arPfx = svp2
-        return rst
+        return st
     }
-    // WHAT THE LAST NAME OF A `read` GETS, which is not "the remaining fields joined":
-    // `IFS=: read -r a b <<< "p::q:r:"` gives b=":q:r:" and `read -r a b <<< "  x   y   z  "`
-    // gives b="y   z". The rule, checked against bash 5.3.15:
+    // One record of standard input for `read`, up to the delimiter dlm ("" for -d '', which
+    // never occurs), the input moving past it: {t: the record, eof: no delimiter ended it}.
+    // Nothing left at all is an empty record.
+    //
+    // Without -r a backslash quotes the character after it and is dropped, and a
+    // backslash-newline is dropped whole, the record going on past it, with any delimiter;
+    // a backslash that ends the input is dropped. A quoted character delimits no field,
+    // which the record keeps by a "\x01" before it, as bash's CTLESC; a "\x01" of the input
+    // is quoted the same way, so that readFields can take every one away. Twin of
+    // rt_read_line in languages/lib/bash-rt.c.
+    function readRec(raw, dlm) {
+        var n = stdinBuf.length
+        var p = stdinPos
+        var t = ""
+        var seg = p
+        var eof = true
+        while (p < n) {
+            var ch = stdinBuf.charAt(p)
+            if (ch == dlm) { eof = false; break }
+            if (raw || (ch != "\\" && ch != "\x01")) { p = p + 1; continue }
+            t = t + stdinBuf.slice(seg, p)
+            p = p + 1
+            if (ch == "\\") {
+                if (p >= n) { seg = p; break }
+                ch = stdinBuf.charAt(p)
+                p = p + 1
+                if (ch == "\n") { seg = p; continue }
+            }
+            t = t + "\x01" + ch
+            seg = p
+        }
+        t = t + stdinBuf.slice(seg, p)
+        stdinPos = eof ? p : p + 1
+        return {t: t, eof: eof}
+    }
+    // THE VALUES A `read` STORES: with n names, field k under the POSIX delimiter rule
+    // (splitIFS) for each name but the last, which takes the rest of the record; with n == 0
+    // every field, for -a. With q the record is readRec's quoted form, and a quoted
+    // character delimits nothing and is no leading whitespace.
+    //
+    // What the last name gets is not "the remaining fields joined": `IFS=: read -r a b <<<
+    // "p::q:r:"` gives b=":q:r:" and `read -r a b <<< "  x   y   z  "` gives b="y   z". The
+    // rule, checked against bash 5.3.15:
     //
     //   - EXACTLY ONE field left: that field, delimiters and all whitespace gone.
     //     `read -r a <<< "  only  "` is "only"; `IFS=: read -r a b <<< "p:q:"` is "q".
-    //   - TWO OR MORE: the RAW text from the start of that field to the end of the line,
-    //     less trailing IFS WHITESPACE only. `IFS=: read -r a <<< "p:q:"` keeps its
-    //     trailing colon; `IFS=: read -r a b <<< ":a:b:"` is "a:b:"; and an IFS that does
-    //     not contain the space leaves a trailing space alone ("a::: " -> ":: ").
+    //   - TWO OR MORE: the RAW text from the start of that field to the end of the record,
+    //     less trailing IFS WHITESPACE only, quoted or not. `IFS=: read -r a <<< "p:q:"`
+    //     keeps its trailing colon; `IFS=: read -r a b <<< ":a:b:"` is "a:b:"; and an IFS
+    //     that does not contain the space leaves a trailing space alone ("a::: " -> ":: ").
     //   - NONE: the empty string.
     //
-    // Twin: rt_field in languages/lib/bash-rt.c.
-    function readRest(line, rec, k) {
-        if (k >= rec.f.length) { return "" }
-        if (rec.f.length - k <= 1) { return rec.f[k] }
-        var seps = isSetVar("IFS") ? vars["$IFS"] : " \t\n"
-        var s = rec.s[k]
-        var t = line.length
-        while (t > s && ifsIsWs(seps, line.charAt(t - 1))) { t = t - 1 }
-        return line.slice(s, t)
+    // Twin: rt_rd_fields in languages/lib/bash-rt.c.
+    function readFields(l, seps, q, n) {
+        var out = []
+        var len = l.length
+        var i = 0
+        while (i < len && ifsIsWs(seps, l.charAt(i))) { i = i + 1 }
+        while (i < len && (n == 0 || out.length < n)) {
+            var s = i
+            while (i < len && ((q && l.charAt(i) == "\x01") || !ifsHas(seps, chunkAt(l, i)))) {
+                if (q && l.charAt(i) == "\x01" && i + 1 < len) { i = i + 1 }
+                i = i + chunkAt(l, i).length
+            }
+            var e = i
+            while (i < len && ifsIsWs(seps, l.charAt(i))) { i = i + 1 }
+            if (i < len && ifsHas(seps, chunkAt(l, i))) {
+                i = i + chunkAt(l, i).length
+                while (i < len && ifsIsWs(seps, l.charAt(i))) { i = i + 1 }
+            }
+            if (out.length == n - 1 && i < len) {
+                e = s
+                i = s
+                while (i < len) {
+                    if (q && l.charAt(i) == "\x01" && i + 1 < len) { i = i + 1 }
+                    i = i + 1
+                    if (!ifsIsWs(seps, l.charAt(i - 1))) { e = i }
+                }
+            }
+            out.push(q ? readVal(l.slice(s, e)) : l.slice(s, e))
+        }
+        while (out.length < n) { out.push("") }
+        return out
+    }
+    // A quoted value with each "\x01" readRec put before a character taken away.
+    function readVal(v) {
+        var out = ""
+        var seg = 0
+        var i = 0
+        while (i < v.length) {
+            if (v.charAt(i) == "\x01" && i + 1 < v.length) { out = out + v.slice(seg, i); seg = i + 1; i = i + 1 }
+            i = i + 1
+        }
+        return out + v.slice(seg)
     }
     // FIELD SPLITTING, with the POSIX delimiter rule (POSIX 2.6.5): `IFS=:` on "a:b::c" is
     // FOUR fields (the third empty), ":a:" is two, and `IFS=" :"` on "a : b::c" is four.
@@ -6437,19 +6522,13 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         for (j = 0; j < seps.length; j++) { if (seps.charAt(j) == ch) { return true } }
         return false
     }
-    function splitIFS(line) { return splitIFSRec(line).f }
-    // The same walk, also reporting where each field STARTS in the line. `read`'s last name
-    // needs the raw text from one field's start (readRest), and nothing else does, so the
-    // offsets ride along rather than being recomputed by a second walk.
-    function splitIFSRec(line) {
+    function splitIFS(line) {
         var seps = isSetVar("IFS") ? vars["$IFS"] : " \t\n"
         var out = []
-        var starts = []
         var i = 0
         while (i < line.length && ifsIsWs(seps, chunkAt(line, i))) { i = i + chunkAt(line, i).length }
         while (i < line.length) {
             var cur = ""
-            starts.push(i)
             while (i < line.length && !ifsHas(seps, chunkAt(line, i))) {
                 var ch = chunkAt(line, i)
                 cur = cur + ch
@@ -6462,7 +6541,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 while (i < line.length && ifsIsWs(seps, chunkAt(line, i))) { i = i + chunkAt(line, i).length }
             }
         }
-        return {f: out, s: starts}
+        return out
     }
 
     // An echo option word is "-" and one or more of n e E (`-en` = `-e -n`); answers its

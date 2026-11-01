@@ -682,8 +682,9 @@ function dpPrintCmd(c, ind, inline) {
 // ({dkw}, {dflag}, {dname}, {a, src}, {dyn}); fieldsOf(dyn) gives one computed operand's
 // fields, or null to give up; quote(v) spells v as one shell word. A leading -X/+X field is an
 // option, NAME or NAME[SUB]=VALUE / NAME+=VALUE an operand (the value quoted, or kept as an
-// array literal (...) under -a/-A). Answers {text, operands, bad: [the fields that are no
-// operand, bash's "not a valid identifier"]}, or null.
+// array literal (...) under -a/-A), and so is NAME[SUB] for declare, typeset and local, which
+// never evaluate SUB. Answers {text, operands, bad: [the fields that are no operand, bash's
+// "not a valid identifier"]}, or null.
 function bashDeclText(items, fieldsOf, quote) {
     var text = items[0].dkw
     var arr = false
@@ -703,7 +704,7 @@ function bashDeclText(items, fieldsOf, quote) {
             if (it.dname == undefined && it.src == undefined) { return null }
             opts = false
             operands = operands + 1
-            text = text + " " + ((it.dname != undefined) ? it.dname : it.src)
+            text = text + " " + ((it.dname == undefined) ? it.src : ((it.darr != undefined) ? it.darr : it.dname))
             continue
         }
         var fs = fieldsOf(it.dyn)
@@ -717,7 +718,7 @@ function bashDeclText(items, fieldsOf, quote) {
                 continue
             }
             opts = false
-            var op = bashDeclOperand(f, arr, quote)
+            var op = bashDeclOperand(f, arr, quote, items[0].dkw != "export" && items[0].dkw != "readonly")
             if (op == "") { bad.push(f); continue }
             operands = operands + 1
             text = text + " " + op
@@ -730,8 +731,8 @@ function bashDeclFlagText(f) {
     for (i = 1; i < f.length; i++) { if ("aAirxulgnpfF".indexOf(f.charAt(i)) < 0) { return false } }
     return true
 }
-// One operand field as declaration text; "" when it is no operand.
-function bashDeclOperand(f, arr, quote) {
+// One operand field as declaration text; "" when it is no operand. elem: NAME[SUB] alone is one.
+function bashDeclOperand(f, arr, quote, elem) {
     var i = 0
     while (i < f.length) {
         var cc = f.charCodeAt(i)
@@ -745,10 +746,63 @@ function bashDeclOperand(f, arr, quote) {
         j = f.indexOf("]", j)
         if (j < 0) { return "" }
         j = j + 1
+        if (j == f.length) { return (elem && j > i + 2) ? f.slice(0, i) + "[0]" : "" }
     }
     var opLen = (f.charAt(j) == "+" && f.charAt(j + 1) == "=") ? 2 : 1
     if (f.charAt(j) != "=" && opLen == 1) { return "" }
     var v = f.slice(j + opLen)
     if (arr && v.length >= 2 && v.charAt(0) == "(" && v.charAt(v.length - 1) == ")") { return f.slice(0, j + opLen) + v }
     return f.slice(0, j + opLen) + quote(v)
+}
+
+// THE OPERANDS OF `read`, as getopt reads "ad:ei:n:N:p:rst:u:": letters bundle (`-ra arr`), a
+// value is the rest of its word or the next word, and the first word that is no option ends
+// them - every word after it is a name, even one starting with "-". Answers {raw: -r,
+// arr: the -a name or null, dlm: the -d delimiter ("" for -d '', "\n" without -d), names}.
+// Twin of rt_rd_parse in lib/bash-rt.c.
+function bashReadOpts(words) {
+    var o = {raw: false, arr: null, dlm: "\n", names: []}
+    var i = 0
+    while (i < words.length) {
+        var f = words[i]
+        if (f.length < 2 || f.charAt(0) != "-") { break }
+        i = i + 1
+        if (f == "--") { break }
+        var j = 1
+        while (j < f.length) {
+            var ch = f.charAt(j)
+            if (ch == "r") { o.raw = true }
+            if ("adinNptu".indexOf(ch) < 0) { j = j + 1; continue }
+            var v = f.slice(j + 1)
+            if (v == "" && i < words.length) { v = words[i]; i = i + 1 }
+            if (ch == "a") { o.arr = v }
+            if (ch == "d") { o.dlm = v.charAt(0) }
+            j = f.length
+        }
+    }
+    while (i < words.length) { o.names.push(words[i]); i = i + 1 }
+    return o
+}
+// A name read and printf -v may store into: a NAME, or NAME[SUB] with SUB not empty and its
+// brackets balanced up to the last character, as bash's valid_array_reference (`b[]` and
+// `b[1]x` are "not a valid identifier"). Twin of rt_isasgref in lib/bash-rt.c.
+function bashIsRef(t) {
+    var i = 0
+    while (i < t.length && t.charAt(i) != "[") {
+        var cc = t.charCodeAt(i)
+        if (!(cc == 95 || (cc >= 65 && cc <= 90) || (cc >= 97 && cc <= 122) || (i > 0 && cc >= 48 && cc <= 57))) { return false }
+        i = i + 1
+    }
+    if (i == t.length) { return i > 0 }
+    if (i == 0 || t.charAt(i + 1) == "]") { return false }
+    var d = 0
+    while (i < t.length) {
+        if (t.charAt(i) == "[") { d = d + 1 }
+        if (t.charAt(i) == "]") {
+            d = d - 1
+            if (d == 0) { return i == t.length - 1 }
+        }
+        i = i + 1
+    }
+    return false
 }

@@ -1745,6 +1745,70 @@ s91f ()
     done
 }"
 }
+# ===== SECTION 92: read's backslashes, empty subscripts, NAME[SUB] alone, -a with a value =====
+# Without -r, read takes a backslash as quoting the next byte and drops it, joins a line ended
+# by a backslash with the next, and drops one at the end of the input; an escaped separator
+# stays in its field. The last name takes the rest of the record less its trailing
+# separators, escaped or not. A name that is no identifier fails read (status 1) and
+# printf -v (status 2); read reports the first before it reads. An empty subscript `b[]` is
+# a bad array subscript. declare, typeset and local read NAME[SUB] alone as `-a NAME`;
+# export and readonly refuse it. Under -a, NAME=VALUE and NAME+=VALUE store into element 0,
+# and a local starts from no value, whatever the name held outside. Every expected value is
+# bash 5.3's.
+s92() {
+  local r n x y a b l
+  read x <<< 'a\b\\c'; check rbs1 "$x" 'ab\c'
+  read -r x <<< 'a\b'; check rbs2 "$x" 'a\b'
+  read a b <<< 'p\ q r'; check rbs3 "$a|$b" "p q|r"
+  r=$(printf 'ab\\' | { read x; echo "$?|$x"; }); check rbs4 "$r" "1|ab"
+  r=$(printf 'a\\\nb\n' | { read x; echo "$x"; }); check rbs5 "$r" "ab"
+  read a b <<< 'x y\  '; check rbs6 "$a|$b" "x|y "
+  read a b <<< 'x y z\ '; check rbs7 "$a|$b" "x|y z"
+  read -rd , x <<< 'p\,q'; check rbs8 "$x" 'p\'
+  r=$(printf 'a\nb' | { read -d '' x; echo "$?|$x"; }); check rbs9 "$r" "1|a
+b"
+  r=$(printf 'abc' | { read x; echo "$?|$x"; }); check rbs10 "$r" "1|abc"
+  r=$(printf 'c\nd\n' | while read l; do echo "[$l]"; done); check rbs11 "$r" "[c]
+[d]"
+  r=$(read 1x <<< q 2>&1); check rnm1 "$?|$r" "1|$0: line $LINENO: read: \`1x': not a valid identifier"
+  r=$({ read 1x; read y; echo "$y"; } <<< L 2>/dev/null); check rnm2 "$r" "L"
+  r=$(read y 'z z' <<< 'a b' 2>&1; echo "$?|$y"); check rnm3 "$r" "$0: line $LINENO: read: \`z z': not a valid identifier
+1|a"
+  r=$(printf -v 1x %s q 2>&1); check rnm4 "$?|$r" "2|$0: line $LINENO: printf: \`1x': not a valid identifier"
+  r=$(printf -v 'b[' %s q 2>&1); check rnm5 "$?|$r" "2|$0: line $LINENO: printf: \`b[': not a valid identifier"
+  b=(1 2)
+  r=$(exec 2>&1; b[]=x; echo "$?"); check esb1 "$r" "$0: line $LINENO: b[]: bad array subscript"
+  g92() { local b[]=y; }
+  r=$(g92 2>&1; echo "$?"); check esb2 "${r#*: line *: }" "b[]: bad array subscript
+1"
+  r=$(printf -v 'b[]' %s z 2>&1; echo "$?|${b[*]}"); check esb3 "$r" "$0: line $LINENO: printf: \`b[]': not a valid identifier
+2|1 2"
+  r=$(read 'b[]' <<< w 2>&1; echo "$?|${b[*]}"); check esb4 "$r" "$0: line $LINENO: read: \`b[]': not a valid identifier
+1|1 2"
+  declare s92d[5]; check dsb1 "$(declare -p s92d)" "declare -a s92d"
+  declare 's92e[1]'; check dsb2 "$(declare -p s92e)" "declare -a s92e"
+  n='s92f[x y]'; declare "$n"; check dsb3 "$(declare -p s92f)" "declare -a s92f"
+  g92() { local s=1 t; local s[2] t[1]; declare -p s t; }
+  check dsb4 "$(g92)" "declare -a s=()
+declare -a t"
+  r=$(readonly 's92g[1]' 2>&1); check dsb5 "$?|$r" "1|$0: line $LINENO: readonly: \`s92g[1]': not a valid identifier"
+  r=$(export s92h[1] 2>&1); check dsb6 "$?|$r" "1|$0: line $LINENO: export: \`s92h[1]': not a valid identifier"
+  r=$(declare 's92i[]' 2>&1); check dsb7 "$?|$r" "1|$0: line $LINENO: declare: \`s92i[]': not a valid identifier"
+  declare -a s92x=5; check dav1 "$(declare -p s92x)" 'declare -a s92x=([0]="5")'
+  s92w=(1 2); declare -a s92w=7; check dav2 "$(declare -p s92w)" 'declare -a s92w=([0]="7")'
+  s92y=3; declare -a s92y+=4; check dav3 "$(declare -p s92y)" 'declare -a s92y=([0]="4")'
+  g92() { local s=1; local -a s; declare -p s; local u; local -a u; declare -p u; }
+  check dav4 "$(g92)" "declare -a s=()
+declare -a u"
+  s92s=3; g92() { local s92s+=4; local -i s92t+=5; declare -p s92s s92t; }
+  check dav5 "$(g92)" 'declare -- s92s="4"
+declare -i s92t="5"'
+  g92() { local s92s+=4; echo "$s92s"; }; check dav6 "$(s92s=5 g92)" 54
+  n=s92c; declare -a "$n"; check dac1 "$(declare -p s92c)" "declare -a s92c"
+  declare -a "$n=5"; check dac2 "$(declare -p s92c)" 'declare -a s92c=([0]="5")'
+  s92v=(1 2); n=s92v; declare -a "$n+=8"; check dac3 "$(declare -p s92v)" 'declare -a s92v=([0]="8")'
+  g92() { local s=1; local -a "$1"; declare -p s; }; check dac4 "$(g92 s)" "declare -a s=()"
+}
 # ===== END SECTIONS =====
 
 s47   # SECTION-CALL 47
@@ -1791,5 +1855,6 @@ s88   # SECTION-CALL 88
 s89   # SECTION-CALL 89
 s90   # SECTION-CALL 90
 s91   # SECTION-CALL 91
+s92   # SECTION-CALL 92
 echo "full: $checks checks, $fails failures"
 exit $fails

@@ -10,7 +10,7 @@
 # bash's layer 2 is the C runtime languages/lib/bash-rt.c, and this file is written
 # to hit its entry points on purpose: rt_strip / rt_replace / rt_case for
 # ${v#p} ${v/p/r} ${v^^}, rt_glob and rt_eg for pattern and extended-glob matching,
-# the re_* regex builder for [[ =~ ]], rt_arr_* for both array kinds, rt_field /
+# the re_* regex builder for [[ =~ ]], rt_arr_* for both array kinds, rt_rd_fields /
 # rt_splitifs / rt_wordjoin for IFS work, rt_pad for printf widths, rt_unescape for
 # echo -e, rt_ansic for $'...', rt_shquote for ${v@Q}, rt_cap_begin/rt_cap_end for
 # command substitution, rt_ss_save/rt_ss_restore for subshells,
@@ -531,7 +531,7 @@ check prf14 "$(printf '%s\n' a b c)" "a
 b
 c"
 
-# ----- read: rt_read_line and rt_field -----
+# ----- read: rt_read_line and rt_rd_fields -----
 readline() {
   local l
   read -r l <<< "one two three"
