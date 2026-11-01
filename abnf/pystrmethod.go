@@ -31,7 +31,6 @@ package abnf
 import (
 	"fmt"
 	"strconv"
-	"strings"
 )
 
 // pyStrEnv carries the two externs the port needs to reach: js_pyget (a format
@@ -1224,11 +1223,9 @@ func (rt *jsrt) pysKwArgs(name string, args []interface{}, kw interface{}) []int
 }
 
 // pysEncode is str.encode(encoding="utf-8", errors="strict"): the bytes - a list
-// of byte values in this value model - in UTF-8, ASCII or Latin-1. A run of
-// characters the codec cannot encode raises CPython's UnicodeEncodeError under
-// "strict"; "ignore", "replace", "backslashreplace" and "xmlcharrefreplace"
-// substitute. Twin of pyStrEncode in languages/python-interpreter.abnf and in
-// lib/python-rt.metajs.
+// of byte values in this value model - under the codecs and error handlers of
+// pycdEncode, and LookupError for any other codec. Twin of pyStrEncode in
+// languages/python-interpreter.abnf and in lib/python-rt.metajs.
 func (rt *jsrt) pysEncode(s string, encV, errV interface{}) interface{} {
 	enc, errs := "utf-8", "strict"
 	if encV != nil && encV != jsUndef && encV != jsNull {
@@ -1237,14 +1234,8 @@ func (rt *jsrt) pysEncode(s string, encV, errV interface{}) interface{} {
 	if errV != nil && errV != jsUndef && errV != jsNull {
 		errs = rt.toString(errV)
 	}
-	limit, codec := 0, "utf-8"
-	switch strings.ReplaceAll(strings.ToLower(enc), "_", "-") {
-	case "latin-1", "latin1", "iso-8859-1", "iso8859-1":
-		limit, codec = 256, "latin-1"
-	case "ascii", "us-ascii":
-		limit, codec = 128, "ascii"
-	case "utf-8", "utf8":
-	default:
+	codec := pycdLookup(enc)
+	if codec == "" {
 		panic(&jsThrown{value: rt.pyExcInstance("LookupError", "unknown encoding: "+enc)})
 	}
 	units := strUnits(s)
@@ -1257,70 +1248,13 @@ func (rt *jsrt) pysEncode(s string, encV, errV interface{}) interface{} {
 		}
 		cps = append(cps, c)
 	}
-	bad := func(cp int) bool {
-		if limit == 0 {
-			return cp >= 0xd800 && cp <= 0xdfff
-		}
-		return cp >= limit
+	bs, exc, msg := pycdEncode(cps, codec, errs)
+	if exc != "" {
+		panic(&jsThrown{value: rt.pyExcInstance(exc, msg)})
 	}
-	out := &jsArray{kind: pyBytesKind}
-	push := func(b int) { out.elems = append(out.elems, float64(b)) }
-	ascii := func(t string) {
-		for i := 0; i < len(t); i++ {
-			push(int(t[i]))
-		}
-	}
-	for k := 0; k < len(cps); {
-		cp := cps[k]
-		if !bad(cp) {
-			switch {
-			case limit != 0 || cp < 0x80:
-				push(cp)
-			case cp < 0x800:
-				push(0xc0 | cp>>6)
-				push(0x80 | cp&63)
-			case cp < 0x10000:
-				push(0xe0 | cp>>12)
-				push(0x80 | cp>>6&63)
-				push(0x80 | cp&63)
-			default:
-				push(0xf0 | cp>>18)
-				push(0x80 | cp>>12&63)
-				push(0x80 | cp>>6&63)
-				push(0x80 | cp&63)
-			}
-			k++
-			continue
-		}
-		j := k
-		for j < len(cps) && bad(cps[j]) {
-			j++
-		}
-		if errs == "strict" {
-			where := fmt.Sprintf("character '%s' in position %d", pysEncEsc(cp), k)
-			if j-k > 1 {
-				where = fmt.Sprintf("characters in position %d-%d", k, j-1)
-			}
-			why := fmt.Sprintf("ordinal not in range(%d)", limit)
-			if limit == 0 {
-				why = "surrogates not allowed"
-			}
-			panic(&jsThrown{value: rt.pyExcInstance("UnicodeEncodeError", "'"+codec+"' codec can't encode "+where+": "+why)})
-		}
-		for q := k; q < j; q++ {
-			switch errs {
-			case "replace":
-				push('?')
-			case "backslashreplace":
-				ascii(pysEncEsc(cps[q]))
-			case "xmlcharrefreplace":
-				ascii(fmt.Sprintf("&#%d;", cps[q]))
-			case "ignore":
-			default:
-				panic(&jsThrown{value: rt.pyExcInstance("LookupError", "unknown error handler name '"+errs+"'")})
-			}
-		}
-		k = j
+	out := &jsArray{kind: pyBytesKind, elems: make([]interface{}, len(bs))}
+	for i, b := range bs {
+		out.elems[i] = float64(b)
 	}
 	return out
 }

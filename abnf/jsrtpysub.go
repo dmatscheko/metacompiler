@@ -957,9 +957,9 @@ func (rt *jsrt) pyExt(name string, args ...interface{}) interface{} {
 }
 
 // pyBytesDecode is bytes.decode(encoding="utf-8", errors="strict") of a list
-// of byte values: UTF-8, ASCII or Latin-1, and LookupError for any other codec.
-// Each undecodable run [from, to) - CPython's UnicodeDecodeError start and end -
-// goes to the error handler (bad).
+// of byte values: the codecs and error handlers of pycdDecode, and LookupError
+// for any other codec. Twin of pyBytesDecode in
+// languages/python-interpreter.abnf and lib/python-rt.metajs.
 func (rt *jsrt) pyBytesDecode(bs []interface{}, encV, errV interface{}) string {
 	enc, errs := "utf-8", "strict"
 	if !isUndefOrNull(encV) {
@@ -968,108 +968,19 @@ func (rt *jsrt) pyBytesDecode(bs []interface{}, encV, errV interface{}) string {
 	if !isUndefOrNull(errV) {
 		errs = rt.pyString(errV)
 	}
-	e := strings.ReplaceAll(strings.ToLower(enc), "_", "-")
+	codec := pycdLookup(enc)
+	if codec == "" {
+		panic(&jsThrown{value: rt.pyExcInstance("LookupError", "unknown encoding: "+enc)})
+	}
 	b := make([]int, len(bs))
 	for i, x := range bs {
 		b[i] = int(rt.toNumber(x))
 	}
-	var sb strings.Builder
-	// bad writes what the handler puts in place of b[from:to]; "strict"
-	// raises. A handler name is only looked up once it is needed, as CPython
-	// does.
-	bad := func(codec string, from, to int, why string) {
-		switch errs {
-		case "strict":
-			where := fmt.Sprintf("byte 0x%02x in position %d", b[from], from)
-			if to-from > 1 {
-				where = fmt.Sprintf("bytes in position %d-%d", from, to-1)
-			}
-			panic(&jsThrown{value: rt.pyExcInstance("UnicodeDecodeError",
-				"'"+codec+"' codec can't decode "+where+": "+why)})
-		case "ignore":
-		case "replace":
-			sb.WriteRune(0xFFFD)
-		case "backslashreplace":
-			for _, c := range b[from:to] {
-				fmt.Fprintf(&sb, "\\x%02x", c)
-			}
-		default:
-			panic(&jsThrown{value: rt.pyExcInstance("LookupError", "unknown error handler name '"+errs+"'")})
-		}
+	units, exc, msg := pycdDecode(b, codec, errs)
+	if exc != "" {
+		panic(&jsThrown{value: rt.pyExcInstance(exc, msg)})
 	}
-	switch e {
-	case "latin-1", "latin1", "iso-8859-1", "iso8859-1":
-		for _, c := range b {
-			sb.WriteRune(rune(c))
-		}
-		return sb.String()
-	case "ascii", "us-ascii":
-		for i, c := range b {
-			if c > 127 {
-				bad("ascii", i, i+1, "ordinal not in range(128)")
-			} else {
-				sb.WriteRune(rune(c))
-			}
-		}
-		return sb.String()
-	case "utf-8", "utf8":
-	default:
-		panic(&jsThrown{value: rt.pyExcInstance("LookupError", "unknown encoding: "+enc)})
-	}
-	for i := 0; i < len(b); {
-		b0 := b[i]
-		need := 0
-		switch {
-		case b0 < 0x80:
-			sb.WriteRune(rune(b0))
-			i++
-			continue
-		case b0 >= 0xC2 && b0 <= 0xDF:
-			need = 1
-		case b0 >= 0xE0 && b0 <= 0xEF:
-			need = 2
-		case b0 >= 0xF0 && b0 <= 0xF4:
-			need = 3
-		}
-		why, to := "", i+1
-		if need == 0 {
-			why = "invalid start byte"
-		}
-		cp := b0 & (0x3F >> need)
-		for k := 1; why == "" && k <= need; k++ {
-			if i+k >= len(b) {
-				why, to = "unexpected end of data", len(b)
-				break
-			}
-			c := b[i+k]
-			lo, hi := 0x80, 0xBF
-			if k == 1 {
-				switch b0 {
-				case 0xE0:
-					lo = 0xA0
-				case 0xED:
-					hi = 0x9F
-				case 0xF0:
-					lo = 0x90
-				case 0xF4:
-					hi = 0x8F
-				}
-			}
-			if c < lo || c > hi {
-				why, to = "invalid continuation byte", i+k
-				break
-			}
-			cp = cp<<6 | c&0x3F
-		}
-		if why != "" {
-			bad("utf-8", i, to, why)
-			i = to
-			continue
-		}
-		sb.WriteRune(rune(cp))
-		i += need + 1
-	}
-	return sb.String()
+	return strFromUnits(units)
 }
 
 // pyBytesNew is bytes(source, encoding, errors), with the keywords already in

@@ -3913,6 +3913,9 @@ func (rt *jsrt) dictKeyEq(a, b interface{}) bool {
 		if pyIsFlo(a) || pyIsFlo(b) {
 			return rt.pyEqual(a, b)
 		}
+		if ba, bb := pyBoundOf(a), pyBoundOf(b); ba != nil && bb != nil {
+			return rt.pyBoundEq(ba, bb)
+		}
 		// PYTHON: a TUPLE key hashes by its CONTENTS, so `{(1,2): "x"}[(1,2)]` is
 		// a hit off two different objects, and the comparison is Python's == (as
 		// on the set side: pySetHas -> pyEqual). Neither operand is dictKeyable, so every such lookup already
@@ -19789,16 +19792,12 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			args := rt.argArray(u(a[0]))
 			l, r := argAt(args, 0), argAt(args, 1)
 			if len(args) > 2 && !isUndefOrNull(args[2]) {
-				if v, ok := rt.pyUserPow3(l, r, args[2]); ok {
+				if v, intPath := rt.pyPow3(l, r, args[2]); !intPath {
 					return w(v)
 				}
-				bl, ok1 := pyBigOperand(l)
-				br, ok2 := pyBigOperand(r)
-				bm, ok3 := pyBigOperand(args[2])
-				if !ok1 || !ok2 || !ok3 {
-					panic(&jsThrown{value: rt.pyExcInstance("TypeError",
-						"pow() 3rd argument not allowed unless all arguments are integers")})
-				}
+				bl, _ := pyBigOperand(l)
+				br, _ := pyBigOperand(r)
+				bm, _ := pyBigOperand(args[2])
 				if bm.Sign() == 0 {
 					panic(&jsThrown{value: rt.pyExcInstance("ValueError", "pow() 3rd argument cannot be 0")})
 				}
@@ -21114,7 +21113,24 @@ func (rt *jsrt) pyEqual(x, y interface{}) bool {
 	if re, im, ok := pyComplexParts(y); ok {
 		return im == 0 && re == rt.toNumber(x)
 	}
+	if bx, by := pyBoundOf(x), pyBoundOf(y); bx != nil && by != nil {
+		return rt.pyBoundEq(bx, by)
+	}
 	return rt.strictEq(x, y)
+}
+
+// pyBoundEq is == of two bound methods, CPython's method_richcompare: the same
+// kind, the same receiver by identity, and equal functions - for a builtin
+// method, the same name. Twin of pyBMEq in languages/python-interpreter.abnf
+// and lib/python-rt.metajs.
+func (rt *jsrt) pyBoundEq(a, b *pyBoundInfo) bool {
+	if a.kind != b.kind || !rt.strictEq(a.self, b.self) {
+		return false
+	}
+	if a.fn == nil || b.fn == nil {
+		return a.fn == nil && b.fn == nil && a.name == b.name
+	}
+	return rt.pyEqual(a.fn, b.fn)
 }
 
 // pyExitCode is SystemExit.code: None for no argument, the argument for one,
@@ -24018,23 +24034,21 @@ func (rt *jsrt) pyListMethod(arr *jsArray, name string, args []interface{}, kw i
 	return nil
 }
 
-// pySortList is list.sort(*, key=None, reverse=False), in place. CPython's is
-// STABLE and its two parameters are KEYWORD-ONLY - a positional argument is a
+// pySortList is list.sort(*, key=None, reverse=False), in place: CPython's
+// timsort (pySort), both parameters KEYWORD-ONLY - a positional argument is a
 // TypeError there, so it is one here too rather than being read as the key.
-// reverse= is done by reversing, sorting ascending and reversing again, which is
-// how CPython keeps equal elements in their original order under it; sorting
-// with an inverted comparison would not. sorted() is this same function run on
-// a copy, as in CPython, which is why its unknown-keyword error names sort().
-// As in CPython the list is EMPTY while it sorts, a list the key function grew
-// is ValueError (its additions dropped), and an exception leaves the items as
-// they were.
+// sorted() is this same function run on a copy, as in CPython, which is why its
+// unknown-keyword error names sort(). As in CPython the list is EMPTY while it
+// sorts, and whatever it holds afterwards is dropped: a list the key function
+// grew is ValueError, a raising key function leaves the items as they were and
+// a raising comparison some permutation of them.
 func (rt *jsrt) pySortList(arr *jsArray, args []interface{}, kw interface{}) {
 	if len(args) > 0 {
 		panic(&jsThrown{value: rt.pyExcInstance("TypeError",
 			"sort() takes no positional arguments")})
 	}
 	rt.pyKwOnly(kw, "sort", "key", "reverse")
-	items := arr.elems
+	items := append([]interface{}{}, arr.elems...)
 	arr.dropIdx()
 	arr.elems = []interface{}{}
 	done := false
@@ -24044,45 +24058,36 @@ func (rt *jsrt) pySortList(arr *jsArray, args []interface{}, kw interface{}) {
 			arr.elems = items
 		}
 	}()
-	out := rt.pySortItems(items, kw)
+	rt.pySortItems(items, kw)
 	grown := len(arr.elems) > 0
 	arr.dropIdx()
-	arr.elems = out
+	arr.elems = items
 	done = true
 	if grown {
 		rt.pyRaise("ValueError", "list modified during sort")
 	}
 }
 
-func (rt *jsrt) pySortItems(elems []interface{}, kw interface{}) []interface{} {
+// pySortItems sorts items in place: the keys are computed first, in order;
+// reverse= reverses before and after a stable ascending sort, which keeps equal
+// elements in their original order, as CPython does.
+func (rt *jsrt) pySortItems(items []interface{}, kw interface{}) {
 	key := rt.pyKwArg(kw, "key")
 	rev := rt.pyTruthyOf(rt.pyKwArg(kw, "reverse"))
-	type pySortPair struct{ k, v interface{} }
-	pairs := make([]pySortPair, len(elems))
-	for i := range elems {
-		j := i
-		if rev {
-			j = len(elems) - 1 - i
+	keys := make([]interface{}, len(items))
+	for i, e := range items {
+		if isUndefOrNull(key) {
+			keys[i] = e
+		} else {
+			keys[i] = rt.callPyValue(key, []interface{}{e}, jsUndef)
 		}
-		e := elems[j]
-		k := e
-		if !isUndefOrNull(key) {
-			k = rt.callPyValue(key, []interface{}{e}, jsUndef)
-		}
-		pairs[i] = pySortPair{k: k, v: e}
 	}
-	// The same comparison js_pysorted uses, so sort() and sorted() can never
-	// disagree inside one engine.
-	sort.SliceStable(pairs, func(i, j int) bool { return rt.pyOrder("<", pairs[i].k, pairs[j].k) })
-	out := make([]interface{}, len(pairs))
-	for i, p := range pairs {
-		j := i
-		if rev {
-			j = len(pairs) - 1 - i
-		}
-		out[j] = p.v
+	if rev {
+		pySortRev(items, 0, len(items))
+		pySortRev(keys, 0, len(keys))
+		defer pySortRev(items, 0, len(items))
 	}
-	return out
+	pySort(keys, items, func(a, b interface{}) bool { return rt.pyOrder("<", a, b) })
 }
 
 // pyKwOnly raises CPython's TypeError for a keyword argument other than a or b.
@@ -27049,27 +27054,44 @@ func (rt *jsrt) pyExcInstance(name string, msg string) interface{} {
 	return inst
 }
 
-// pyUserPow3 is pow(a, b, m) with an instance among them: a's __pow__(b, m),
-// then b's __rpow__(a, m); ok is false when none is an instance. Twin of
-// pyUserPow3 in languages/python-interpreter.abnf and lib/python-rt.metajs.
-func (rt *jsrt) pyUserPow3(a, b, m interface{}) (interface{}, bool) {
+// pyPow3 is pow(a, b, m) as CPython's ternary_op: each operand's type offers
+// its nb_power slot in turn, a type already offered skipped (bool shares
+// int's). int computes only when all three are ints, which pyPow3 answers with
+// intPath; float refuses any modulus; complex refuses one once a and b are
+// numbers; an instance's __pow__(b, m) at a, __rpow__(a, m) at b. Twin of
+// pyPow3 in languages/python-interpreter.abnf and lib/python-rt.metajs.
+func (rt *jsrt) pyPow3(a, b, m interface{}) (v interface{}, intPath bool) {
+	ops := [3]interface{}{a, b, m}
 	_, acls, aInst := pyInstance(a)
-	_, bcls, bInst := pyInstance(b)
-	_, _, mInst := pyInstance(m)
-	if !aInst && !bInst && !mInst {
-		return nil, false
-	}
-	if aInst {
-		if f, found := pyLookup(acls, "__pow__"); found && isCallable(f) {
-			if v := rt.call(f, jsUndef, []interface{}{a, b, m}); v != pyNotImplemented {
-				return v, true
+	for i, x := range ops {
+		if _, cls, inst := pyInstance(x); inst {
+			name, args := "__pow__", []interface{}{a, b, m}
+			if i == 1 && !(aInst && acls == cls) {
+				name, args = "__rpow__", []interface{}{b, a, m}
+			} else if i != 0 {
+				continue
 			}
+			if f, found := pyLookup(cls, name); found && isCallable(f) {
+				if v := rt.call(f, jsUndef, args); v != pyNotImplemented {
+					return v, false
+				}
+			}
+			continue
 		}
-	}
-	if bInst && !(aInst && acls == bcls) {
-		if g, found := pyLookup(bcls, "__rpow__"); found && isCallable(g) {
-			if v := rt.call(g, jsUndef, []interface{}{b, a, m}); v != pyNotImplemented {
-				return v, true
+		k := pyNumTypeName(x)
+		if k == "" || (i > 0 && pyNumTypeName(ops[0]) == k) || (i > 1 && pyNumTypeName(ops[1]) == k) {
+			continue
+		}
+		switch k {
+		case "int":
+			if pyNumTypeName(a) == "int" && pyNumTypeName(b) == "int" && pyNumTypeName(m) == "int" {
+				return nil, true
+			}
+		case "float":
+			rt.pyRaise("TypeError", "pow() 3rd argument not allowed unless all arguments are integers")
+		case "complex":
+			if pyNumTypeName(a) != "" && pyNumTypeName(b) != "" {
+				rt.pyRaise("ValueError", "complex modulo")
 			}
 		}
 	}

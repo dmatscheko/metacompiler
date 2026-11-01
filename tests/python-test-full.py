@@ -10,6 +10,7 @@
 #   tests/python-test-full.3.py   the library-module sections 131, 134, 136, 138, 143-145
 #   tests/python-test-full.4.py   the library-module sections 148-150
 #   tests/python-test-full.5.py   section 151, random's str seed
+#   tests/python-test-full.7.py   sections 199-202, beside the step brake
 #
 # The section NUMBERS are global, the two files together run the assertions, and
 # ./test.sh --full reports them as the units python and python2. Add a new section

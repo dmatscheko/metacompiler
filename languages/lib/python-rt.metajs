@@ -110,6 +110,10 @@ import "./python-suggest.js"
 import "./python-dir.js"
 // Unicode printability: repr() of a str and str.isprintable().
 import "./python-printable.js"
+// list.sort's timsort.
+import "./python-sort.js"
+// str.encode's and bytes.decode's codecs and error handlers.
+import "./python-codecs.js"
 // str.isalpha / isdecimal / isdigit / isnumeric, over java.lang.Character's table.
 import "./java-chars.js"
 import "./python-chars.js"
@@ -195,7 +199,6 @@ function pyIsCallable(v) { return typeof v == "function" }
 function pyIsDict(v) { return rtTag(v, "__dict") }
 function pyIsCplx(v) { return rtTag(v, "__cplx") }
 function pyIsBig(v) { return rtTag(v, "__pybig") }
-function pyIsIntOrBool(v) { return typeof v == "number" || typeof v == "boolean" || pyIsBig(v) }
 
 // Python's float: a boxed double (abnf/jsrt.go's jsPyFlo, python-interpreter.abnf's
 // pyFlo). int and float are two DIFFERENT Python types - they print differently
@@ -435,6 +438,8 @@ function pyDictFind(keys, k) {
         if (typeof k == "object") {
             pyHashCheck(k, false)
             if (pyInstClassOf(k) !== null) { return pyUserKeyFind(keys, k) }
+        } else if (typeof k == "function") {
+            if (pyBMFind(k) >= 0) { return pyBMKeyFind(keys, k) }
         }
     }
     for (var i = 0; i < keys.length; i++) {
@@ -1331,6 +1336,7 @@ function pyEqual(x, y) {
         if (!pyIsNumeric(x) || !pyIsNumeric(y)) { return false }
         return pyNum(x) == pyNum(y)
     }
+    if (typeof x == "function" && typeof y == "function" && x !== y) { return pyBMEq(x, y) }
     return x === y
 }
 
@@ -5437,112 +5443,18 @@ function pyBytesNew(bound, name) {
 }
 
 // Go: rt.pyBytesDecode. bytes.decode(encoding="utf-8", errors="strict") of a
-// list of byte values: UTF-8, ASCII or Latin-1, and LookupError for any other
-// codec; each undecodable run goes to the error handler (pyDecodeBad).
+// list of byte values: the codecs and error handlers of python-codecs.js, and
+// LookupError for any other codec.
 function pyBytesDecode(bs, encV, errV) {
     var enc = "utf-8"
     if (encV !== undefined && encV !== null) { enc = pyToStr(encV) }
     var err = "strict"
     if (errV !== undefined && errV !== null) { err = pyToStr(errV) }
-    var e = ""
-    var ei = 0
-    while (ei < enc.length) {
-        var ec = enc.charAt(ei)
-        if (ec == "_") { e = e + "-" } else { e = e + ec.toLowerCase() }
-        ei = ei + 1
-    }
-    var out = ""
-    var n = bs.length
-    var i = 0
-    if (e == "latin-1" || e == "latin1" || e == "iso-8859-1" || e == "iso8859-1") {
-        while (i < n) {
-            out = out + js_pychr(bs[i])
-            i = i + 1
-        }
-        return out
-    }
-    if (e == "ascii" || e == "us-ascii") {
-        while (i < n) {
-            if (bs[i] > 127) { out = out + pyDecodeBad("ascii", bs, i, i + 1, "ordinal not in range(128)", err) }
-            else { out = out + js_pychr(bs[i]) }
-            i = i + 1
-        }
-        return out
-    }
-    if (e != "utf-8" && e != "utf8") { pyRaiseExc("LookupError", "unknown encoding: " + enc) }
-    while (i < n) {
-        var b0 = bs[i]
-        if (b0 < 128) {
-            out = out + js_pychr(b0)
-            i = i + 1
-            continue
-        }
-        var need = 0
-        var cp = 0
-        if (b0 >= 194 && b0 <= 223) { need = 1; cp = b0 % 32 }
-        else if (b0 >= 224 && b0 <= 239) { need = 2; cp = b0 % 16 }
-        else if (b0 >= 240 && b0 <= 244) { need = 3; cp = b0 % 8 }
-        var why = ""
-        if (need == 0) { why = "invalid start byte" }
-        var to = i + 1
-        var k = 1
-        while (why == "" && k <= need) {
-            if (i + k >= n) {
-                why = "unexpected end of data"
-                to = n
-            } else {
-                var c = bs[i + k]
-                var lo = 128
-                var hi = 191
-                if (k == 1 && b0 == 224) { lo = 160 }
-                if (k == 1 && b0 == 237) { hi = 159 }
-                if (k == 1 && b0 == 240) { lo = 144 }
-                if (k == 1 && b0 == 244) { hi = 143 }
-                if (c < lo || c > hi) {
-                    why = "invalid continuation byte"
-                    to = i + k
-                } else {
-                    cp = cp * 64 + c % 64
-                    k = k + 1
-                }
-            }
-        }
-        if (why != "") {
-            out = out + pyDecodeBad("utf-8", bs, i, to, why, err)
-            i = to
-            continue
-        }
-        out = out + js_pychr(cp)
-        i = i + need + 1
-    }
-    return out
-}
-// Go: pyBytesDecode's bad. What the error handler errs puts in place of the
-// undecodable bytes [from, to); "strict" raises.
-function pyDecodeBad(codec, bs, from, to, why, errs) {
-    if (errs == "strict") { pyDecodeErr(codec, bs, from, to, why) }
-    if (errs == "ignore") { return "" }
-    if (errs == "replace") { return js_pychr(65533) }
-    if (errs == "backslashreplace") {
-        var hx = "0123456789abcdef"
-        var out = ""
-        var i = from
-        while (i < to) {
-            out = out + "\\x" + hx.charAt(Math.floor(bs[i] / 16) % 16) + hx.charAt(bs[i] % 16)
-            i = i + 1
-        }
-        return out
-    }
-    pyRaiseExc("LookupError", "unknown error handler name '" + errs + "'")
-    return ""
-}
-function pyDecodeErr(codec, bs, from, to, why) {
-    var hx = "0123456789abcdef"
-    var b = bs[from]
-    var where = "byte 0x" + hx.charAt(Math.floor(b / 16) % 16) + hx.charAt(b % 16) + " in position " + pyIntStr(from)
-    if (to - from > 1) { where = "bytes in position " + pyIntStr(from) + "-" + pyIntStr(to - 1) }
-    pyRaiseExc("UnicodeDecodeError", "'" + codec + "' codec can't decode " + where + ": " + why)
-    return undefined
+    var codec = pycdLookup(enc)
+    if (codec == "") { pyRaiseExc("LookupError", "unknown encoding: " + enc) }
+    var r = pycdDecode(bs, codec, err)
+    if (r["err"] != "") { pyRaiseExc(r["err"], r["msg"]) }
+    return r["s"]
 }
 
 // Go: rt.pyKwPos. A builtin's arguments as positionals: the keyword arguments
@@ -5904,6 +5816,10 @@ function pyHashW(v0) {
         if (how == 2) { pyRaiseExc("TypeError", "unhashable type: '" + pyTypeName(v) + "'") }
         if (how == 3) { return pyHashW(pyUnwrapBuiltin(v)) }
     }
+    if (typeof v == "function") {
+        var bmi = pyBMFind(v)
+        if (bmi >= 0) { return pyBMHash(bmi) }
+    }
     return pyHashId(v)
 }
 // How instances of cls hash, as the first class on its resolution order that
@@ -5947,6 +5863,15 @@ function pyUserKeyFind(keys, k) {
     var i = 0
     while (i < keys.length) {
         if (keys[i] === k || pyUserKeyEq(keys[i], k)) { return i }
+        i = i + 1
+    }
+    return 0 - 1
+}
+// A bound method key: pyBMEq against every stored bound method.
+function pyBMKeyFind(keys, k) {
+    var i = 0
+    while (i < keys.length) {
+        if (keys[i] === k || (typeof keys[i] == "function" && pyBMEq(keys[i], k))) { return i }
         i = i + 1
     }
     return 0 - 1
@@ -6940,18 +6865,34 @@ function pyARoundTens(i, k, sticky) {
 
 // pow(a, b[, m]): the ** operator, plus CPython's three-argument MODULAR form
 // (pynPowMod in python-num.js, over js_pybin). Go: js_pypow.
-// Go: rt.pyUserPow3. pow(a, b, m) with an instance among them: a's
-// __pow__(b, m), then b's __rpow__(a, m).
-function pyUserPow3(a, b, m) {
+// Go: rt.pyPow3. pow(a, b, m) as CPython's ternary_op: each operand's type
+// offers its nb_power slot in turn, a type already offered skipped (bool shares
+// int's). int computes only when all three are ints, answered as pyPow3IntPath;
+// float refuses any modulus; complex refuses one once a and b are numbers; an
+// instance's __pow__(b, m) at a, __rpow__(a, m) at b.
+var pyPow3IntPath = {}
+function pyPow3(a, b, m) {
+    var ops = [a, b, m]
     var acls = pyInstClassOf(a)
-    var bcls = pyInstClassOf(b)
-    if (acls !== null && pyLookupHas(acls, "__pow__")) {
-        var v = pyCallSelf(pyLookupVal(acls, "__pow__"), a, [b, m])
-        if (v !== pyNotImpl) { return v }
-    }
-    if (bcls !== null && acls !== bcls && pyLookupHas(bcls, "__rpow__")) {
-        var w = pyCallSelf(pyLookupVal(bcls, "__rpow__"), b, [a, m])
-        if (w !== pyNotImpl) { return w }
+    for (var i = 0; i < 3; i++) {
+        var x = ops[i]
+        var cls = pyInstClassOf(x)
+        if (cls !== null) {
+            var name = ""
+            if (i == 0) { name = "__pow__" }
+            if (i == 1 && acls !== cls) { name = "__rpow__" }
+            if (name != "" && pyLookupHas(cls, name)) {
+                var v = anytype
+                if (i == 0) { v = pyCallSelf(pyLookupVal(cls, name), a, [b, m]) } else { v = pyCallSelf(pyLookupVal(cls, name), b, [a, m]) }
+                if (v !== pyNotImpl) { return v }
+            }
+            continue
+        }
+        var k = pyNumTName(x)
+        if (k == "" || (i > 0 && pyNumTName(a) == k) || (i > 1 && pyNumTName(b) == k)) { continue }
+        if (k == "int" && pyNumTName(a) == "int" && pyNumTName(b) == "int" && pyNumTName(m) == "int") { return pyPow3IntPath }
+        if (k == "float") { pyRaiseExc("TypeError", "pow() 3rd argument not allowed unless all arguments are integers") }
+        if (k == "complex" && pyNumTName(a) != "" && pyNumTName(b) != "") { pyRaiseExc("ValueError", "complex modulo") }
     }
     pyRaiseExc("TypeError", "unsupported operand type(s) for ** or pow(): '" + pyTypeName(a) + "', '"
         + pyTypeName(b) + "', '" + pyTypeName(m) + "'")
@@ -6963,10 +6904,9 @@ function js_pypow(args) {
     var r = pyEArgAt(args, 1)
     if (args.length > 2 && args[2] !== undefined && args[2] !== null) {
         var m = args[2]
-        if (pyInstClassOf(l) !== null || pyInstClassOf(r) !== null || pyInstClassOf(m) !== null) { return pyUserPow3(l, r, m) }
-        if (!pyIsIntOrBool(l) || !pyIsIntOrBool(r) || !pyIsIntOrBool(m)) {
-            pyRaiseExc("TypeError", "pow() 3rd argument not allowed unless all arguments are integers")
-        }
+        var u = anytype
+        u = pyPow3(l, r, m)
+        if (u !== pyPow3IntPath) { return u }
         if (js_pybin("==", m, 0) === true) { pyRaiseExc("ValueError", "pow() 3rd argument cannot be 0") }
         var res = anytype
         res = pynPowMod(l, r, m, js_pybin)
@@ -9251,6 +9191,28 @@ function pyBMFind(f) {
     return 0 - 1
 }
 
+// Go: pyBoundEq. == of two bound methods, CPython's method_richcompare: the
+// same kind, the same receiver by identity, and equal functions - for a builtin
+// method, the same name.
+function pyBMEq(a, b) {
+    var i = pyBMFind(a)
+    var j = pyBMFind(b)
+    if (i < 0 || j < 0) { return false }
+    if (pyBMTab[i + 4] != pyBMTab[j + 4] || pyBMTab[i + 2] !== pyBMTab[j + 2]) { return false }
+    if (pyBMTab[i + 3] === null || pyBMTab[j + 3] === null) {
+        return pyBMTab[i + 3] === pyBMTab[j + 3] && pyBMTab[i + 1] == pyBMTab[j + 1]
+    }
+    return pyEqual(pyBMTab[i + 3], pyBMTab[j + 3])
+}
+
+// hash() of a bound method, consistent with pyBMEq: the receiver's identity and
+// the function's hash (a builtin method's name), as one tuple.
+function pyBMHash(i) {
+    var f = pyBMTab[i + 3]
+    if (f === null) { return pynHashTuple([pyHashId(pyBMTab[i + 2]), pyHashW(pyBMTab[i + 1])]) }
+    return pynHashTuple([pyHashId(pyBMTab[i + 2]), pyHashW(f)])
+}
+
 // The type name a bound method's __qualname__ and repr are prefixed with: an
 // INSTANCE names its class, everything else its builtin type.
 function pyBMOwner(self) {
@@ -10663,15 +10625,14 @@ function pyListClamp(v, dflt, n) {
     return i
 }
 
-// list.sort(*, key=None, reverse=False), in place. CPython's is STABLE and both
-// parameters are KEYWORD-ONLY - a positional argument is a TypeError there, so
-// it is one here rather than being read as the key. reverse= is done by
-// reversing, sorting ascending and reversing again, which is how CPython keeps
-// equal elements in their original order under it; an inverted comparison would
-// not. sorted() is this same function run on a copy, as in CPython, which is
-// why its unknown-keyword error names sort(). As in CPython the list is EMPTY
-// while it sorts, a list the key function grew is ValueError (its additions
-// dropped), and an exception leaves the items as they were.
+// list.sort(*, key=None, reverse=False), in place: CPython's timsort
+// (python-sort.js), both parameters KEYWORD-ONLY - a positional argument is a
+// TypeError there, so it is one here rather than being read as the key.
+// sorted() is this same function run on a copy, as in CPython, which is why its
+// unknown-keyword error names sort(). As in CPython the list is EMPTY while it
+// sorts, and whatever it holds afterwards is dropped: a list the key function
+// grew is ValueError, a raising key function leaves the items as they were and
+// a raising comparison some permutation of them.
 function pySortList(xs, args, kw) {
     if (args.length > 0) {
         throw pyExcInstance("TypeError", "sort() takes no positional arguments")
@@ -10679,60 +10640,46 @@ function pySortList(xs, args, kw) {
     pyKwOnly(kw, "sort", "key", "reverse")
     var items = pyCCopyArr(xs)
     pyCReplaceArr(xs, [])
-    var vals = []
     try {
-        vals = pySortItems(items, kw)
+        pySortItems(items, kw)
     } catch (e) {
         pyCReplaceArr(xs, items)
         throw e
     }
     var grown = xs.length > 0
-    pyCReplaceArr(xs, vals)
+    pyCReplaceArr(xs, items)
     if (grown) { pyRaiseExc("ValueError", "list modified during sort") }
     return undefined
 }
-function pySortItems(xs, kw) {
+// Sort items in place: the keys are computed first, in order; reverse= reverses
+// before and after a stable ascending sort, which keeps equal elements in their
+// original order, as CPython does.
+function pySortItems(items, kw) {
     var key = pyKwArg(kw, "key")
-    var noKey = key === undefined || key === null
     var rev = pyDTruthy(pyKwArg(kw, "reverse"))
-    var vals = []
-    var keys = []
-    var i = 0
-    while (i < xs.length) {
-        var j = i
-        if (rev) { j = xs.length - 1 - i }
-        var e = anytype
-        e = xs[j]
-        vals.push(e)
-        if (noKey) { keys.push(e) } else { keys.push(pyDCallPyValue(key, [e], undefined)) }
-        i = i + 1
-    }
-    // Insertion sort, which is STABLE.
-    var s = 1
-    while (s < vals.length) {
-        var kx = anytype
-        kx = keys[s]
-        var vx = anytype
-        vx = vals[s]
-        var p = s - 1
-        while (p >= 0 && pyAOrder("<", kx, keys[p])) {
-            keys[p + 1] = keys[p]
-            vals[p + 1] = vals[p]
-            p = p - 1
+    var keys = items
+    if (key !== undefined && key !== null) {
+        keys = []
+        var i = 0
+        while (i < items.length) {
+            keys.push(pyDCallPyValue(key, [items[i]], undefined))
+            i = i + 1
         }
-        keys[p + 1] = kx
-        vals[p + 1] = vx
-        s = s + 1
     }
-    if (!rev) { return vals }
-    var out = []
-    var w = vals.length - 1
-    while (w >= 0) {
-        out.push(vals[w])
-        w = w - 1
+    if (rev) {
+        pysoRev(items, 0, items.length)
+        if (keys !== items) { pysoRev(keys, 0, keys.length) }
     }
-    return out
+    try {
+        pysoSort(keys, items, pySortLt)
+    } catch (e) {
+        if (rev) { pysoRev(items, 0, items.length) }
+        throw e
+    }
+    if (rev) { pysoRev(items, 0, items.length) }
+    return undefined
 }
+function pySortLt(a, b) { return pyAOrder("<", a, b) }
 
 // CPython's TypeError for a keyword argument other than a or b.
 function pyKwOnly(kw, fname, a, b) {
@@ -14482,27 +14429,16 @@ function pyStrKwArgs(name, args, kw) {
     pyRaiseExc("TypeError", "str." + name + "() takes no keyword arguments")
     return args
 }
-// str.encode(encoding="utf-8", errors="strict"): the bytes in UTF-8, ASCII or
-// Latin-1. A run of characters
-// the codec cannot encode raises CPython's UnicodeEncodeError under "strict";
-// "ignore", "replace", "backslashreplace" and "xmlcharrefreplace" substitute.
-// Go: rt.pysEncode in abnf/pystrmethod.go.
+// str.encode(encoding="utf-8", errors="strict"): the codecs and error handlers
+// of python-codecs.js, and LookupError for any other codec. Go: rt.pysEncode in
+// abnf/pystrmethod.go.
 function pyStrEncode(s, encV, errV) {
     var enc = "utf-8"
     if (encV !== undefined && encV !== null) { enc = pyStr(encV) }
     var errs = "strict"
     if (errV !== undefined && errV !== null) { errs = pyStr(errV) }
-    var e = ""
-    for (var ei = 0; ei < enc.length; ei++) { e = e + (enc.charAt(ei) == "_" ? "-" : enc.charAt(ei).toLowerCase()) }
-    var limit = 0
-    var codec = "utf-8"
-    if (e == "latin-1" || e == "latin1" || e == "iso-8859-1" || e == "iso8859-1") {
-        limit = 256
-        codec = "latin-1"
-    } else if (e == "ascii" || e == "us-ascii") {
-        limit = 128
-        codec = "ascii"
-    } else if (e != "utf-8" && e != "utf8") { pyRaiseExc("LookupError", "unknown encoding: " + enc) }
+    var codec = pycdLookup(enc)
+    if (codec == "") { pyRaiseExc("LookupError", "unknown encoding: " + enc) }
     var cps = []
     var i = 0
     while (i < s.length) {
@@ -14517,74 +14453,9 @@ function pyStrEncode(s, encV, errV) {
         cps.push(c)
         i = i + 1
     }
-    var out = []
-    var k = 0
-    while (k < cps.length) {
-        if (!pyEncBad(cps[k], limit)) {
-            pyEncPush(out, cps[k], limit)
-            k = k + 1
-            continue
-        }
-        var j = k
-        while (j < cps.length && pyEncBad(cps[j], limit)) { j = j + 1 }
-        if (errs == "strict") {
-            var where = "character '" + pyEncEsc(cps[k]) + "' in position " + k
-            if (j - k > 1) { where = "characters in position " + k + "-" + (j - 1) }
-            var why = limit == 0 ? "surrogates not allowed" : "ordinal not in range(" + limit + ")"
-            pyRaiseExc("UnicodeEncodeError", "'" + codec + "' codec can't encode " + where + ": " + why)
-        }
-        for (var q = k; q < j; q++) {
-            if (errs == "replace") { out.push(63) }
-            else if (errs == "backslashreplace") { pyEncAscii(out, pyEncEsc(cps[q])) }
-            else if (errs == "xmlcharrefreplace") { pyEncAscii(out, "&#" + cps[q] + ";") }
-            else if (errs != "ignore") { pyRaiseExc("LookupError", "unknown error handler name '" + errs + "'") }
-        }
-        k = j
-    }
-    return arrKindSet(out, 17)
-}
-// A code point the codec cannot encode: past the limit, or (UTF-8, limit 0) a
-// lone surrogate.
-function pyEncBad(cp, limit) {
-    if (limit == 0) { return cp >= 55296 && cp <= 57343 }
-    return cp >= limit
-}
-function pyEncPush(out, cp, limit) {
-    if (limit != 0 || cp < 128) { out.push(cp) }
-    else if (cp < 2048) {
-        out.push(192 + Math.floor(cp / 64))
-        out.push(128 + cp % 64)
-    } else if (cp < 65536) {
-        out.push(224 + Math.floor(cp / 4096))
-        out.push(128 + Math.floor(cp / 64) % 64)
-        out.push(128 + cp % 64)
-    } else {
-        out.push(240 + Math.floor(cp / 262144))
-        out.push(128 + Math.floor(cp / 4096) % 64)
-        out.push(128 + Math.floor(cp / 64) % 64)
-        out.push(128 + cp % 64)
-    }
-}
-function pyEncAscii(out, txt) { for (var i = 0; i < txt.length; i++) { out.push(txt.charCodeAt(i)) } }
-// A code point as repr spells it inside a string.
-function pyEncEsc(cp) {
-    var w = 8
-    var head = "\\U"
-    if (cp < 256) {
-        w = 2
-        head = "\\x"
-    } else if (cp < 65536) {
-        w = 4
-        head = "\\u"
-    }
-    var d = "0123456789abcdef"
-    var hex = ""
-    var v = cp
-    for (var i = 0; i < w; i++) {
-        hex = d.charAt(v % 16) + hex
-        v = Math.floor(v / 16)
-    }
-    return head + hex
+    var r = pycdEncode(cps, codec, errs)
+    if (r["err"] != "") { pyRaiseExc(r["err"], r["msg"]) }
+    return arrKindSet(r["b"], 17)
 }
 
 // Go: pyStrEnv.isIdent. str.isidentifier: an XID_Start code point or "_"

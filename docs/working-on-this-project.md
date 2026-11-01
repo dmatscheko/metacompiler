@@ -1135,6 +1135,12 @@ python-suggest.js         <- python-rt.metajs, python interpreter (the "Did you
 python-dir.js             <- python-rt.metajs, python interpreter (the fixed
                              names dir() of a user class answers; Go twin:
                              pyDirObject in abnf/jsrt.go)
+python-sort.js            <- python-rt.metajs, python interpreter (list.sort's
+                             timsort, comparison for comparison; Go twin:
+                             abnf/jsrtpysort.go)
+python-codecs.js          <- python-rt.metajs, python interpreter (str.encode's
+                             and bytes.decode's codecs and error handlers; Go
+                             twin: abnf/jsrtpycodecs.go)
 python-printable.js       <- python-rt.metajs, python interpreter (Unicode
                              printability for repr() and str.isprintable(), and
                              XID_Start/XID_Continue for str.isidentifier(); Go

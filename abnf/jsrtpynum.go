@@ -562,6 +562,15 @@ func (rt *jsrt) pyHashW(v interface{}) uint64 {
 			return rt.pyHashW(pyUnwrapBuiltin(v))
 		}
 	}
+	// A bound method hashes consistently with pyBoundEq: the receiver's identity
+	// and the function's hash (a builtin method's name), as one tuple.
+	if bm := pyBoundOf(v); bm != nil {
+		var f interface{} = bm.name
+		if bm.fn != nil {
+			f = bm.fn
+		}
+		return pyHashTuple([]uint64{rt.pyHashId(bm.self), rt.pyHashW(f)}, false)
+	}
 	return rt.pyHashId(v)
 }
 
