@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-978** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-982** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -174,17 +174,23 @@ value: `$x = 5; $a = [&$x, 1]; var_dump($a);` → php `&int(5)`, ours `int(5)` (
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-963 bash compiled: `${x:-word}` expands word eagerly; a function can be called before its definition ran · P2 · SH · IN PROGRESS (SH worker, round 21) [V]
-Found by the SH worker, round 20 (oracle bash 5.3). With x set, `${x:-$(echo side >&2)}` prints "side" and `${x:-$((1/0))}`
-raises a division error in llvm.Run and native; bash and the interpreter expand nothing (the word is expanded only when used;
-same for :=, :?, :+ and their colon-less forms). And `f; f(){ echo f; }` → bash "f: command not found", 127; the compiler
-resolves f statically and runs it.
+### T-978 bash: `type`, `declare -f`/`-F`, `command -V` of a function · P3 · SH · OPEN [V]
+Found by the SH worker, round 21 (oracle bash 5.3). `f(){ :; }; type f` → bash "f is a function" plus the body; `declare -F f` →
+`f`; `declare -f f` prints the normalised body; `command -V f` → "f is a function". Not built in either half (round 21 added
+command -V only for builtins and keywords).
 
-### T-964 bash: `unset -f`, `command -V`, namerefs in the interpreter, `declare -p` of a computed export · P3 · SH · IN PROGRESS (SH worker, round 21) [V]
-Found by the SH worker, round 20 (oracle bash 5.3). `unset -f f` unsupported in both engines; `command -V echo` → bash "echo is a
-shell builtin", ours status 1; `declare -n r=v` unsupported in the interpreter (oils nameref/005); after `export "${d[@]}"`,
-`declare -p foo2` lacks -x (oils nix-idioms/005). Also: an error from `${!v}` with an invalid name prints "bash: z=9: invalid
-variable name" where bash prefixes "<file>: line N:".
+### T-979 bash: diagnostics lack bash's "file: line N:" prefix (incl. `${!v}` bad substitution) · P3 · SH · OPEN [V]
+Found by the SH worker, round 21. bash prefixes runtime errors with the script name and line, e.g. `t.sh: line 3: ${!v}: bad
+substitution`; ours prints the message alone, so stderr differs from the oracle on every diagnostic.
+
+### T-980 bash: nameref limits and function definitions leaking out of subshells · P3 · SH · OPEN [V]
+Found by the SH worker, round 21. Namerefs (round 21) do not cover array-element targets (`declare -n r=a[1]`), `${!r}` (the
+target name) or circular-reference diagnostics; rt_setvar_byname drops writes through some indirect paths. Also `( f(){ :; } ); f`
+- bash: f is not defined outside the subshell; ours keeps it.
+
+### T-981 bash: "command not found" aborts the script with 127; bash continues · P2 · SH · OPEN [V]
+Found by the master probing round 21. `nosuchcmd; echo after` → bash prints the error and `after` (the status is 127 and the
+script goes on); both halves stop at the first unknown command with exit 127.
 
 # C — C subset
 
@@ -1103,6 +1109,8 @@ T-932 java: cyclic inheritance hangs the compiler and is accepted by the interpr
 T-955 kotlin: fail-fast iteration is missing for the other higher-order functions and for sets — DONE 3d20ccad
 T-956 kotlin: `map.keys.remove(k)` / `map.values.remove(v)` change only the view — DONE 856b5f67 (view remove/removeAll/retainAll/removeIf/clear write through to the map; removeIf on lists and sets)
 T-962 swift: a labelled `if` does not parse — DONE d58d5902 (labelled if / if-let / do in both halves; also fixed: compiled labelled break/continue leaving a do body, and a do in a switch without an enclosing loop broke the native build)
+T-963 bash compiled: `${x:-word}` expands word eagerly; a function can be called before its definition ran — DONE - lazy ${v-w} words and call-time function lookup through fnk_ slots, both engines
+T-964 bash: `unset -f`, `command -V`, namerefs in the interpreter, `declare -p` of a computed export — PARTIAL - unset -f/-v/-n, command -V for builtins/keywords, export/readonly in declare -p, namerefs; rest filed as follow-ups
 
 # Settled — do not re-open
 
