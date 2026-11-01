@@ -92,12 +92,6 @@ text to U+FFFD (U+D800 matches \p{Grapheme_Base}). `\p{sc=Zyyy}` matches Unicode
 
 # JV — Java
 
-### T-1016 java: overload resolution still counts inaccessible constructors (and probably methods) as candidates · P3 · JV · IN PROGRESS (JV worker, round 20) [V]
-Found by the JV worker, round 19 (oracle java 24). `package r; public class K { public int v; private K(int a,int b){v=a+b;} public
-K(double d,int b){v=b;} }`, then from another package `new K(1,2).v` → java 2 (the private ctor is not a candidate, JLS 15.12.2.1);
-interpreter, compiler and native 3. jOvCtorSig needs the call site's package and top-level type to filter candidates; check private
-and package-private method overloads the same way.
-
 # CS — C#  (no dotnet here: spec-only, ECMA-334 and the .NET reference source)
 
 ### T-112 csharp: `Single` exponent-notation threshold is unverified · P3 · CS · BLOCKED - needs dotnet
@@ -1096,6 +1090,7 @@ T-1014 c#: 5-arg `CompareOrdinal`, method group → `Comparison<string>`, `Compa
 T-1021 go: interface dispatch to a method promoted from a defined non-struct type; `%T` of a method expression — DONE - methods promoted from embedded defined non-struct types join the struct's descriptor (interface dispatch, promoted String), %T of method expressions
 T-1019 kotlin: toSortedSet(comparator) ignored; String range crashes llvm.Run; String coerceAtLeast/AtMost/In — DONE (KT r15, a18ed20e): TreeSet for toSortedSet(cmp)/sortedSetOf(cmp,..)/TreeSet ctor; ComparableRange/OpenEndRange values; String+Comparable coerceAtLeast/AtMost/In; user operator rangeTo/rangeUntil. Master probe vs kotlinc 2.2.21: 4 legs agree.
 T-1000 php: reference counts are never decremented (var_dump `&`, copy of an array holding a dead frame's reference) — PARTIAL→split (PHP r35, fb7351b2): refs released at normal frame exit, =& rebinding, ref-literal temporaries; var_dump & from refcount. Remainder filed as follow-up. Master spec probe (zend_array_dup_element rule): 3 legs agree.
+T-1016 java: overload resolution still counts inaccessible constructors (and probably methods) as candidates — DONE (JV r20, 2480267f): private/package-private/protected-for-new overloads and ctors dropped from static picks (JLS 6.6); pinned in java-test-multifile + imports/util/Gauge.java; master ran it under javac/java 24: passed. Runtime dispatcher (js_jvovcall) still context-blind when static types are unknown — no probe reached it.
 
 # Settled — do not re-open
 
