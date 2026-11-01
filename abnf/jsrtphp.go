@@ -312,12 +312,16 @@ func phpCellOf(v interface{}) *jsObject {
 
 // phpRefHolders is how many slots hold a reference cell, its "rc"; absent is the
 // one slot that made it. It is counted where a reference is bound or unbound - '=&',
-// foreach by reference, use (&$v), [&$v], global, unset() and an array copy keeping
-// the cell - but not when a frame returns or an array (an array literal assigned
-// and copied, too) is discarded, so it can only run high. A by-reference argument
-// is not counted: its binding ends with the call; a by-reference variadic's array
-// is a holder. The count is read when the copy is made, at the assignment; PHP
-// reads it at the copy's first write, so `$a = [&$x]; $b = $a; unset($x);
+// foreach by reference, use (&$v) and a closure call's frame, [&$v], global,
+// static, a by-reference parameter, unset() and an array copy keeping the cell -
+// and a frame returning normally releases the slots its text names (frameLeave in
+// php-interpreter.abnf); an array literal with '&' elements releases its cells once
+// assigned and copied. It is not released when another array holding the cell is
+// discarded, nor by a frame an exception unwinds or a generator left unfinished,
+// so it can only run high. A by-reference variadic's array is a holder. var_dump
+// prints a cell held more than once as &value. The count is read when the copy
+// is made, at the assignment; PHP reads it at the copy's first write, so
+// `$a = [&$x]; $b = $a; unset($x);
 // $b[0] = 5;` writes $x's cell here and not in PHP. Sharing an array's storage
 // until a write would move the read there without a cost on reads, but every
 // in-place write in the three engines would have to separate first, and with no
@@ -2801,45 +2805,16 @@ func (rt *jsrt) phpDump(v interface{}, ind int) string {
 // lib/php-rt.metajs.
 var phpDumping = map[*jsrt][]interface{}{}
 
-// phpDumpShared counts the slots of the value being dumped that hold each
-// reference cell: one held by more than one prints as &value (php_var_dump's
-// COMMON, Z_REFCOUNT > 1), except as *RECURSION*. Twin of dumpSlot and
-// dumpSharedCells in php-interpreter.abnf, phDumpSlot / phDumpCells in
+// phpDumpSlot is an element or property slot: a reference held by more than
+// one slot prints as &value (php_var_dump's COMMON, Z_REFCOUNT > 1), except as
+// *RECURSION*. Twin of dumpSlot in php-interpreter.abnf and phDumpSlot in
 // lib/php-rt.metajs.
-var phpDumpShared = map[*jsrt]map[*jsObject]int{}
-
 func (rt *jsrt) phpDumpSlot(x interface{}, ind int) string {
 	s := rt.phpDump(phpDeref(x), ind)
-	if c := phpCellOf(x); c != nil && phpDumpShared[rt][c] > 1 && s[ind] != '*' {
+	if c := phpCellOf(x); c != nil && phpRefHolders(c) > 1 && s[ind] != '*' {
 		return s[:ind] + "&" + s[ind:]
 	}
 	return s
-}
-
-func phpDumpCells(v interface{}, cells map[*jsObject]int, seen map[interface{}]bool) {
-	var vals []interface{}
-	if _, vs, ok := phpArrParts(v); ok {
-		vals = vs.elems
-	} else if phpIsObj(v) {
-		o := v.(*jsObject)
-		for _, k := range o.keys {
-			if !phpHiddenProp(k) {
-				vals = append(vals, o.props[k])
-			}
-		}
-	} else {
-		return
-	}
-	if seen[v] {
-		return
-	}
-	seen[v] = true
-	for _, x := range vals {
-		if c := phpCellOf(x); c != nil {
-			cells[c]++
-		}
-		phpDumpCells(phpDeref(x), cells, seen)
-	}
 }
 
 func (rt *jsrt) phpDumpObj(v interface{}, ind int, pad string) string {
@@ -3790,6 +3765,25 @@ func init() {
 			if co != cn {
 				phpRefAdjust(co, -1)
 				phpRefAdjust(cn, 1)
+			}
+			return 0
+		}
+		// A frame returning normally stops holding the cells in its slots named in
+		// the comma separated names; a frame no cell was made in or bound to is not
+		// marked under "\x00cells" and is passed over. Twin of js_phleave in
+		// languages/lib/php-rt.metajs.
+		m["js_phleave"] = func(a []uint64) uint64 {
+			sc := rt.scopeOf(a[0])
+			if sc == nil {
+				return 0
+			}
+			if _, ok := sc.get("\x00cells"); !ok {
+				return 0
+			}
+			for _, n := range strings.Split(rt.toString(u(a[1])), ",") {
+				if v, ok := sc.get(n); ok {
+					phpRefAdjust(phpCellOf(v), -1)
+				}
 			}
 			return 0
 		}
@@ -4798,8 +4792,6 @@ func init() {
 		m["js_phsetchk"] = propChk("assign")
 		m["js_phmodchk"] = propChk("modify")
 		m["js_phdump"] = func(a []uint64) uint64 {
-			phpDumpShared[rt] = map[*jsObject]int{}
-			phpDumpCells(u(a[0]), phpDumpShared[rt], map[interface{}]bool{})
 			return rt.wrapStr(rt.phpDump(u(a[0]), 0))
 		}
 		// The slow halves of a property access, for a name some class restricts or

@@ -20,3 +20,15 @@ echo "\xC8\xFF", substr("é", 0, 1), "\n";
 // evaluated, so what b's evaluation writes lands between a and b.
 function bytesSide($s) { echo "[", $s, "]"; return $s; }
 echo "a", bytesSide("b"), "c\n";
+// var_dump marks a slot holding a reference with & while more than one slot
+// holds it (php_var_dump's COMMON, Z_REFCOUNT > 1): a function's locals stop
+// holding theirs when it returns, and foreach by reference leaves its variable
+// on the last element.
+$brx = 5;
+$bra = [&$brx, 1];
+var_dump($bra);
+function bytesRefs() { $x = 1; $a = [&$x]; return $a; }
+var_dump(bytesRefs());
+$brl = [1, 2];
+foreach ($brl as &$brv) { }
+var_dump($brl);

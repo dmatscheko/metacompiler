@@ -624,7 +624,11 @@ Coalesce    <~~ push(makeCoalesce(takeAll())) ~~>
             = OrExpr { "??" OrExpr } ;
 
 Assignment  <~~ push(makeAssign(takeAll(), up.start)) ~~>
-            = Target AssignOp <~~ push(up.in) ~~> ExprCore ;
+            = Target AssignOp <~~ push(up.in) ~~> AssignRhs ;
+// The right side, followed by whether it is exactly an array literal with '&'
+// elements (refLitAt, makeArray).
+AssignRhs   <~~ var e = pop(); push(e); push({rlit: refLitAt[0] == up.start && refLitAt[1] == up.pos}) ~~>
+            = ExprCore ;
 // Longest first (ordered choice): '**=' before '*=', '<<=' before '<='. The plain
 // '=' declines '==' (a comparison) and '=>' (an array key), neither of which is an
 // assignment - without the lookaheads it matches their first character and the rest
@@ -988,7 +992,7 @@ PostfixExpr = TgtOperand | CallMember ;
 TgtOperand  <~~ var it = takeAll(); push(it.length == 2 ? makeIncDec(it, up.start) : makeAssign(it, up.start)) ~~>
             = Target ( IncDecOp | OpAssign ) ;
 IncDecOp    <~~ push(up.in) ~~> = "++" | "--" ;
-OpAssign    = AssignOp <~~ push(up.in) ~~> ExprCore ;
+OpAssign    = AssignOp <~~ push(up.in) ~~> AssignRhs ;
 
 // A primary followed by any mix of ->method(args), ->field, [index], (call), ::static.
 CallMember  <~~ push(foldCallMember(takeAll(), up.start)) ~~>
@@ -1221,7 +1225,7 @@ UseRef      <~~ push({useref: pop()}) ~~> = "&" DollarName ;
 
 // [1, 2] / [k => v] / array(1, 2). '=>' entries make an associative array
 // (ordered map); plain entries make an indexed array.
-ArrayLit    <~~ push(makeArray(takeAll())) ~~>
+ArrayLit    <~~ push(makeArray(takeAll(), up.start, up.pos)) ~~>
             = "[" [ ArrayItem { "," ArrayItem } [ "," ] ] "]"
             | KwArray "(" [ ArrayItem { "," ArrayItem } [ "," ] ] ")" ;
 ArrayItem   = SpreadItem | RefItem | KeyedItem | PlainItem ;
@@ -2031,11 +2035,11 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             if (p.byref === true && i < argset.tgts.length && argset.tgts[i] != null) {
                 var bc = argset.tgts[i]()
                 if (p.typ != "") { bc.v = phpArgFit(p, i + 1, bc.v, argset, who, cls) }
-                scopePut(scopes[scopes.length - 1], p.name, bc)
+                bindRef(scopes[scopes.length - 1], p.name, bc)
                 continue
             }
             if (p.byref === true && i >= pos.length && named != null && argset.ntgts != undefined && hasOwn(argset.ntgts, p.name)) {
-                scopePut(scopes[scopes.length - 1], p.name, argset.ntgts[p.name]())
+                bindRef(scopes[scopes.length - 1], p.name, argset.ntgts[p.name]())
                 continue
             }
             var have = false
@@ -2073,6 +2077,20 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     function bindRef(fr, name, cell) {
         rebind(hasOwn(fr, name) ? fr[name] : undefined, cell)
         scopePut(fr, name, cell)
+        if (isRef(cell)) { fr[CELLS_KEY] = true }
+    }
+    // A frame returning normally stops holding the cells in its slots named live
+    // (cloLeave); only a frame marked under CELLS_KEY, which no variable is named,
+    // had a cell made in or bound to a slot. Every name starts with '$', so a
+    // missing slot reads undefined. Twin of emitFrameLeave in php-to-llvm-ir.abnf.
+    var CELLS_KEY = "\x00cells"
+    function frameLeave(fr, live) {
+        if (live == undefined) { return }
+        for (var i = 0; i < live.length; i++) {
+            var v = anytype
+            v = fr[live[i]]
+            if (v !== undefined && v !== null && typeof v == "object" && v.__refcell === true) { v.rc = refHolders(v) - 1 }
+        }
     }
     // ----- Variables: local to ONE frame -----------------------------------------
     // PHP has no lexical variable scope: a `$name` lives in the frame of the function
@@ -2143,10 +2161,12 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             if (isRef(cur)) { return cur }
             var cell = {__refcell: true, v: cur === UNSET ? null : cur}
             scopePut(fr, name, cell)
+            fr[CELLS_KEY] = true
             return cell
         }
         var fresh = {__refcell: true, v: null}
         scopePut(fr, name, fresh)
+        fr[CELLS_KEY] = true
         return fresh
     }
     // global $a, $b: the local name binds the main frame's storage cell.
@@ -3418,14 +3438,22 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
 
     // A by-reference element (er, or hr under the key hk) holds its target's
     // storage cell; the key is evaluated before the target (zend_compile_array).
-    // Twin of makeArray in php-to-llvm-ir.abnf.
-    function makeArray(items) {
-        return function() {
+    // The source span of the last literal with such elements parsed is refLitAt
+    // (AssignRhs), and the cells an evaluated one bound are left in litCells for
+    // makeAssign. Twin of makeArray in php-to-llvm-ir.abnf.
+    var refLitAt = [-1, -1]
+    var litCells = []
+    function makeArray(items, start, end) {
+        var refs = false
+        for (var r = 0; r < items.length; r++) { if (items[r].hr != undefined || items[r].er != undefined) { refs = true } }
+        var t = function() {
             var d = newArr()
+            var cells = anytype
+            cells = refs ? [] : litCells
             for (var k = 0; k < items.length; k++) {
                 var it = items[k]
-                if (it.hr != undefined) { arrRefAt(d, phpKey(it.hk()), it.hr) }
-                else if (it.er != undefined) { arrRefAt(d, undefined, it.er) }
+                if (it.hr != undefined) { cells.push(arrRefAt(d, phpKey(it.hk()), it.hr)) }
+                else if (it.er != undefined) { cells.push(arrRefAt(d, undefined, it.er)) }
                 else if (it.hk != undefined) { arrSet(d, it.hk(), phpCopy(it.hv())) }
                 else if (it.spread != undefined) {
                     var sv = it.spread()
@@ -3438,8 +3466,11 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                 }
                 else { arrPush(d, phpCopy(it.elem())) }
             }
+            if (refs) { litCells = cells }
             return d
         }
+        if (refs) { refLitAt = [start, end] }
+        return t
     }
     // Puts ref's cell into d's slot for key, appended when key is undefined; a
     // slot already there is replaced, not written through.
@@ -3455,6 +3486,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         var vs = d.vals
         vs[at] = cell
         d.vals = vs
+        return cell
     }
 
     // ----- string coercion and concatenation (PHP '.') -----
@@ -5079,7 +5111,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                     cells.push({__refcell: true, v: decls[j].init == null ? null : decls[j].init()})
                 }
             }
-            for (var k = 0; k < decls.length; k++) { scopePut(scopes[scopes.length - 1], decls[k].name, cells[k]) }
+            for (var k = 0; k < decls.length; k++) { bindRef(scopes[scopes.length - 1], decls[k].name, cells[k]) }
             return null
         }
     }
@@ -5183,9 +5215,9 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // parameters, body, captured chain and generator flag, st for a static one and
     // ut for one whose body uses $this.
     var cloProbe = {probe: true}
-    function closureBody(params, body, captured, env, isGen, desc, self, st, ut) {
+    function closureBody(params, body, captured, env, isGen, desc, self, st, live, ut) {
         objHandles = objHandles + 1
-        var rec = {d: desc, i: objHandles, e: env, t: self, p: params, b: body, c: captured, g: isGen, st: st, ut: ut}
+        var rec = {d: desc, i: objHandles, e: env, t: self, p: params, b: body, c: captured, g: isGen, st: st, ut: ut, lv: live}
         var who = desc.substring(0, desc.indexOf("\n"))
         return fnMetaSet(function(argset) {
             if (argset === cloProbe) { return rec }
@@ -5196,9 +5228,9 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                 k = ctxSelf()
                 scopes = saved
                 genArgCheck(params, argset, who, k)
-                return newGen(runClosureRun(params, body, captured, env, argset, who))
+                return newGen(runClosureRun(params, body, captured, env, argset, who, live))
             }
-            return runClosureRun(params, body, captured, env, argset, who)()
+            return runClosureRun(params, body, captured, env, argset, who, live)()
         }, "closure", 0)
     }
     function cloRecOf(v) {
@@ -5219,7 +5251,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     function cloNoteAnon(pos) { cloClass = "class@anonymous"; return pos }
     function cloEnterFn(n, method) {
         var meth = (method ? cloClass + "::" : "") + stripWs(n)
-        cloScopes.push({name: meth + "()", self: method, fn: stripWs(n), meth: meth})
+        cloScopes.push({name: meth + "()", self: method, fn: stripWs(n), meth: meth, vm: varMark()})
     }
     function cloEnter(pos) {
         var top = cloScopes.length == 0 ? null : cloScopes[cloScopes.length - 1]
@@ -5228,17 +5260,23 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         // A static closure where a $this is in reach hides it (hide); st marks one
         // that no instance can be bound to (cloBind).
         cloScopes.push({name: name, self: top != null && top.self && !cloStatic, line: line,
-                        fn: name, meth: name, st: cloStatic, hide: cloStatic && top != null && top.self})
+                        fn: name, meth: name, st: cloStatic, hide: cloStatic && top != null && top.self, vm: varMark()})
         cloStatic = false
     }
-    function cloLeave() { return cloScopes.pop() }
+    // live: the variables the function's text names, its parameters among them,
+    // whose slots frameLeave releases. Twin of cloLeave in php-to-llvm-ir.abnf.
+    function cloLeave() {
+        var sc = cloScopes.pop()
+        sc.live = varsSince(sc.vm, ["$this"])
+        return sc
+    }
     // A property hook is a method named "$prop::get" / "$prop::set"
     // (zend_compile_property_hooks); cloProp is the property being declared.
     var cloProp = ""
     function cloNoteProp(n) { cloProp = stripWs(n) }
     function cloEnterHook(kind) {
         var fn = cloProp + "::" + kind
-        cloScopes.push({name: cloClass + "::" + fn + "()", self: true, fn: fn, meth: cloClass + "::" + fn})
+        cloScopes.push({name: cloClass + "::" + fn + "()", self: true, fn: fn, meth: cloClass + "::" + fn, vm: varMark()})
         return kind
     }
     // __FUNCTION__ / __METHOD__ are compile-time constants of the function being
@@ -5270,13 +5308,21 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         return phsCloDesc(name, file, line, statics, pn, pr, po)
     }
     // The closure's body as a zero-argument thunk, so a generator closure can defer it.
-    function runClosureRun(params, body, captured, env, argset, who) {
+    function runClosureRun(params, body, captured, env, argset, who, live) {
         return function() {
             var saved = scopes
             scopes = captured.slice(0)
             var fr = {}
             var ks = ownKeys(env)
-            for (var i = 0; i < ks.length; i++) { scopePut(fr, ks[i], phpCopy(env[ks[i]])) }
+            for (var i = 0; i < ks.length; i++) {
+                var ev = anytype
+                ev = phpCopy(env[ks[i]])
+                scopePut(fr, ks[i], ev)
+                if (isRef(ev)) {
+                    rebind(undefined, ev)
+                    fr[CELLS_KEY] = true
+                }
+            }
             scopes.push(fr)
             bindParams(params, argset, who, CLO_SCOPE)
             var r = anytype
@@ -5285,6 +5331,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             if (depth > coreDepthMax) { coreTooDeep() }
             r = body()
             coreDepth = depth - 1
+            if (fr[CELLS_KEY] === true) { frameLeave(fr, live) }
             scopes = saved
             if (isSig(r) && r.ret === true) { return r.v }
             return null
@@ -5328,7 +5375,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             var env = {}
             for (var i = 0; i < byval.length; i++) { scopePut(env, byval[i], phpCopy(getVar(byval[i]))) }
             for (var j = 0; j < byref.length; j++) { bindRef(env, byref[j], varCell(byref[j])) }
-            return closureBody(params, body, captured, env, isGen, desc, cloThis(self), sc.st, sc.ut === true)
+            return closureBody(params, body, captured, env, isGen, desc, cloThis(self), sc.st, sc.live, sc.ut === true)
         }
     }
     // The scope chain a closure made here captures. A static closure written where
@@ -5392,7 +5439,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         scopePut(ov, STATIC_KEY, isObj(nthis) ? nthis.__class : (sc == null ? UNSET : sc))
         var ch = r.c.slice(0)
         ch.push(ov)
-        return closureBody(r.p, r.b, ch, r.e, r.g, r.d, isObj(nthis) ? nthis : null, r.st)
+        return closureBody(r.p, r.b, ch, r.e, r.g, r.d, isObj(nthis) ? nthis : null, r.st, r.lv)
     }
     // A closure made from a callable (zend_create_fake_closure): a method, or the
     // __call / __callStatic that stands in for one. call(t, cs, argset) runs it
@@ -5584,7 +5631,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             for (var j = 0; j < captured.length; j++) {
                 scopePut(env, captured[j], phpCopy(deref(rawSlot(captured[j]))))
             }
-            return closureBody(params, body, cloChain(sc), env, isGen, desc, cloThis(self), sc.st, sc.ut === true)
+            return closureBody(params, body, cloChain(sc), env, isGen, desc, cloThis(self), sc.st, sc.live, sc.ut === true)
         }
     }
     // The variable names the source mentions, in parse order, and the mark an arrow
@@ -5993,9 +6040,13 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         if (op == "??=") { return function() { return coalesceAssign(ref, valT) } }
         var rw = op == "=" ? null : rwSite(ref, pos)
         var oc = op == "=" ? null : diagSite("__mec_opchk", pos)
+        // An array literal with '&' elements is a temporary: once copied it no
+        // longer holds their cells. Twin of makeAssign in php-to-llvm-ir.abnf.
+        var lit = op == "=" && items.length > 3 && items[3].rlit === true
         return function() {
             var v = anytype
             v = phpCopy(valT())          // arrays assign BY VALUE
+            if (lit) { for (var lc = 0; lc < litCells.length; lc++) { rebind(litCells[lc], undefined) } }
             if (ref.path.length == 0 && ref.sref != null) {
                 var cell = ref.sref()
                 if (op != "=") { v = compoundOp(oc, op, deref(cell.v), v) }
@@ -6613,7 +6664,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // because a static method must run with no $this.
     function makeFun(items) {
         fnLeave()
-        cloLeave()
+        var sc = cloLeave()
         var isGen = genPop()
         var name = ""
         var params = []
@@ -6635,7 +6686,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         }
         if (vis != "") { mVisNames["$" + phsCase(name, false)] = true }
         var rec = {name: name, params: params, body: phpRetCheck(body != null ? body : makeBody([]), rtype, isGen, name),
-                   isStatic: isStatic, isGen: isGen, vis: vis}
+                   isStatic: isStatic, isGen: isGen, vis: vis, live: sc.live}
         // A library method stands for an internal one, which checks its count
         // against [required, declared] (phpLibArgCheck); a library function's
         // range is its index entry's (makeTopDef).
@@ -6758,7 +6809,8 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     }
     function invokePhpCls(fn, self, argset, defCls, staticCls) {
         var saved = scopes
-        scopes = [globalScope, {}]
+        var fr = {}
+        scopes = [globalScope, fr]
         if (self !== undefined && self !== null) { declVar("$this", self) }
         if (defCls != undefined && defCls != null) {
             declVar(SELF_KEY, defCls)
@@ -6784,6 +6836,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         if (depth > coreDepthMax) { coreTooDeep() }
         r = fn.body()
         coreDepth = depth - 1
+        if (fr[CELLS_KEY] === true) { frameLeave(fr, fn.live) }
         scopes = saved
         if (isSig(r) && r.ret === true) { return r.v }
         return null
@@ -7595,7 +7648,6 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         "get_debug_type": function(v) { return phpDebugType(v) },
         "var_dump": function() {
             for (var i = 0; i < arguments.length; i++) {
-                dumpShared = dumpSharedCells(arguments[i])
                 phsEcho(dumpOf(arguments[i], 0))
             }
             return null
@@ -8177,34 +8229,12 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // of phDumping in lib/php-rt.metajs and phpDumping in abnf/jsrtphp.go.
     var dumping = []
     // An element or property slot. A reference held by more than one slot prints
-    // as &value (php_var_dump's COMMON: Z_REFCOUNT > 1), but not *RECURSION*. No
-    // engine counts a reference's holders, so the count is taken over the dumped
-    // value alone (dumpSharedCells): a lower bound that misses a holder outside it.
+    // as &value (php_var_dump's COMMON: Z_REFCOUNT > 1), but not *RECURSION*.
+    // Twin of phDumpSlot in lib/php-rt.metajs and phpDumpSlot in abnf/jsrtphp.go.
     function dumpSlot(x, ind) {
         var s = dumpOf(deref(x), ind)
-        if (!isRef(x) || s.substring(ind, ind + 1) == "*") { return s }
-        var n = 0
-        for (var k = 0; k < dumpShared.length; k++) { if (dumpShared[k] === x) { n++ } }
-        return n < 2 ? s : s.substring(0, ind) + "&" + s.substring(ind)
-    }
-    // The reference cells held by the slots of v's arrays and objects, each
-    // container walked once. Twin of phDumpCells in lib/php-rt.metajs and
-    // phpDumpCells in abnf/jsrtphp.go.
-    var dumpShared = []
-    function dumpSharedCells(v) {
-        var cells = []
-        dumpCells(v, cells, [])
-        return cells
-    }
-    function dumpCells(v, cells, seen) {
-        var vals = isArr(v) ? v.vals : isObj(v) ? v.p.vals : null
-        if (vals == null) { return }
-        for (var i = 0; i < seen.length; i++) { if (seen[i] === v) { return } }
-        seen.push(v)
-        for (var j = 0; j < vals.length; j++) {
-            if (isRef(vals[j])) { cells.push(vals[j]) }
-            dumpCells(deref(vals[j]), cells, seen)
-        }
+        if (!isRef(x) || refHolders(x) < 2 || s.substring(ind, ind + 1) == "*") { return s }
+        return s.substring(0, ind) + "&" + s.substring(ind)
     }
     function dumpObj(v, ind, pad) {
         if (isObj(v)) {

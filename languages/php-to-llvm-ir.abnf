@@ -656,7 +656,11 @@ Coalesce    <~~ push(makeCoalesce(takeAll())) ~~>
             = OrExpr { "??" OrExpr } ;
 
 Assignment  <~~ push(makeAssign(takeAll(), up.start)) ~~>
-            = Target AssignOp <~~ push(up.in) ~~> ExprCore ;
+            = Target AssignOp <~~ push(up.in) ~~> AssignRhs ;
+// The right side, followed by whether it is exactly an array literal with '&'
+// elements (refLitAt, makeArray). Twin of AssignRhs in php-interpreter.abnf.
+AssignRhs   <~~ var e = pop(); push(e); push({rlit: refLitAt[0] == up.start && refLitAt[1] == up.pos}) ~~>
+            = ExprCore ;
 // Longest first (ordered choice): '**=' before '*=', '<<=' before '<='. The plain
 // '=' declines '==' (a comparison) and '=>' (an array key), neither of which is an
 // assignment - without the lookaheads it matches their first character and the rest
@@ -1008,7 +1012,7 @@ PostfixExpr = TgtOperand | CallMember ;
 TgtOperand  <~~ var it = takeAll(); push(it.length == 2 ? makeIncDec(it, up.start) : makeAssign(it, up.start)) ~~>
             = Target ( IncDecOp | OpAssign ) ;
 IncDecOp    <~~ push(up.in) ~~> = "++" | "--" ;
-OpAssign    = AssignOp <~~ push(up.in) ~~> ExprCore ;
+OpAssign    = AssignOp <~~ push(up.in) ~~> AssignRhs ;
 
 // A primary followed by any mix of ->method(args), ->field, [index], (call), ::static.
 CallMember  <~~ push(foldCallMember(takeAll(), phThisHead(up.in), up.start)) ~~>
@@ -1278,7 +1282,7 @@ UseRef      <~~ push({useref: true}) ~~> = "&" ;
 
 // [1, 2] / [k => v] / array(1, 2). '=>' entries make an associative array
 // (ordered map); plain entries make an indexed array.
-ArrayLit    <~~ push(makeArray(takeAll())) ~~>
+ArrayLit    <~~ push(makeArray(takeAll(), up.start, up.pos)) ~~>
             = "[" [ ArrayItem { "," ArrayItem } [ "," ] ] "]"
             | KwArray "(" [ ArrayItem { "," ArrayItem } [ "," ] ] ")" ;
 ArrayItem   = SpreadItem | RefItem | KeyedItem | PlainItem ;
@@ -2004,6 +2008,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         haveB.NewBr(mergeB)
         var cell = newCell(makeB, raw)
         callExt(makeB, "js_scope_decl", [scopeV, nameV, cell])
+        markCells(makeB, scopeV)
         makeB.NewBr(mergeB)
         return {b: mergeB, v: mergeB.NewPhi([llvm.ir.NewIncoming(raw, haveB), llvm.ir.NewIncoming(cell, makeB)])}
     }
@@ -2012,6 +2017,26 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     function bindRefIn(b, scopeV, nameV, cell) {
         callExt(b, "js_phrebind", [callExt(b, "js_scope_own", [scopeV, nameV]), cell])
         callExt(b, "js_scope_decl", [scopeV, nameV, cell])
+        markCells(b, scopeV)
+    }
+    // A frame returning normally stops holding the cells in the slots of the
+    // function being emitted named curLive (its live, cloLeave), comma separated
+    // for js_phleave: before every ret of the function itself, the ones a return
+    // out of a try body becomes (excDispatch) included. A frame a cell was made
+    // in or bound to is marked under the slot "\x00cells", which no variable is
+    // named. Twin of frameLeave in php-interpreter.abnf.
+    function markCells(b, scopeV) { callExt(b, "js_scope_decl", [scopeV, emitStr(b, "\x00cells"), hTrue]) }
+    var curLive = null
+    function emitFrameLeave(b) {
+        if (curLive == null || curLive.length == 0) { return }
+        var names = curLive[0]
+        for (var i = 1; i < curLive.length; i++) { names = names + "," + curLive[i] }
+        callExt(b, "js_phleave", [curScopeV, emitStr(b, names)])
+    }
+    var coreRetStmt = retStmt
+    retStmt = function(b, v) {
+        if (!inCtlBody()) { emitFrameLeave(b) }
+        return coreRetStmt(b, v)
     }
     function varCell(b, name) {
         curWrites[name] = true
@@ -2108,13 +2133,18 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     // (the function's env parameter) into the call's frame - a fresh copy per call, so
     // a by-value capture the body modifies starts out as captured on the next call.
     // A cell (by-reference capture) is shared, since js_phcopy copies only arrays.
-    function capturePrologue(names, body) {
-        if (names.length == 0) { return body }
+    // The frame is a holder of a by-reference capture's cell.
+    function capturePrologue(byVal, byRef, body) {
+        if (byVal.length == 0 && byRef.length == 0) { return body }
         return function(b) {
-            for (var i = 0; i < names.length; i++) {
-                var nV = emitStr(b, names[i])
+            for (var i = 0; i < byVal.length; i++) {
+                var nV = emitStr(b, byVal[i])
                 callExt(b, "js_scope_decl", [curScopeV, nV,
                         callExt(b, "js_phcopy", [callExt(b, "js_scope_own", [curF.Params[0], nV])])])
+            }
+            for (var k = 0; k < byRef.length; k++) {
+                var rV = emitStr(b, byRef[k])
+                bindRefIn(b, curScopeV, rV, callExt(b, "js_scope_own", [curF.Params[0], rV]))
             }
             return body(b)
         }
@@ -2262,7 +2292,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                     ri.b.NewBr(doneB)
                     b = doneB
                 }
-                callExt(b, "js_scope_decl", [curScopeV, emitStr(b, binds[k].name), cellV])
+                bindRefIn(b, curScopeV, emitStr(b, binds[k].name), cellV)
             }
             return b
         }
@@ -3751,19 +3781,32 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     // next automatic integer key - exactly like the interpreter's newArr/arrPush.
     // A '...$a' spread merges another array in: its INTEGER keys are renumbered and its
     // string keys are kept, PHP's rule for the array-unpacking operator.
-    function makeArray(items) {
+    // The source span of the last literal with '&' elements parsed is refLitAt
+    // (AssignRhs), and the cells an emitted one binds are left in litCells for
+    // makeAssign. Twin of makeArray in php-interpreter.abnf.
+    var refLitAt = [-1, -1]
+    var litCells = []
+    function makeArray(items, start, end) {
+        var refs = false
+        for (var r = 0; r < items.length; r++) { if (items[r].hr != undefined || items[r].er != undefined) { refs = true } }
+        if (refs) { refLitAt = [start, end] }
         return function(b) {
             var d = callExt(b, "js_pharr", [])
+            var cells = []
             for (var k = 0; k < items.length; k++) {
                 if (items[k].hk != undefined) {
                     // The key is evaluated before a by-reference target (zend_compile_array).
                     var rk = items[k].hk(b); b = rk.b
                     var rv = items[k].hr != undefined ? targetCell(b, items[k].hr) : items[k].hv(b); b = rv.b
-                    if (items[k].hr != undefined) { callExt(b, "js_phrebind", [hUndef, rv.v]) }
+                    if (items[k].hr != undefined) {
+                        callExt(b, "js_phrebind", [hUndef, rv.v])
+                        cells.push(rv.v)
+                    }
                     callExt(b, "js_phset", [d, rk.v, rv.v])
                 } else if (items[k].er != undefined) {
                     var rc = targetCell(b, items[k].er); b = rc.b
                     callExt(b, "js_phrebind", [hUndef, rc.v])
+                    cells.push(rc.v)
                     callExt(b, "js_phpush", [d, rc.v])
                 } else if (items[k].spread != undefined) {
                     var rs = items[k].spread(b); b = rs.b
@@ -3773,6 +3816,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                     callExt(b, "js_phpush", [d, re.v])
                 }
             }
+            if (refs) { litCells = cells }
             return {b: b, v: d}
         }
     }
@@ -5037,17 +5081,23 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     function cloNoteAnon(pos) { cloClass = "class@anonymous"; return pos }
     function cloEnterFn(n, method) {
         var meth = (method ? cloClass + "::" : "") + stripWs(n)
-        cloScopes.push({name: meth + "()", self: method, fn: stripWs(n), meth: meth})
+        cloScopes.push({name: meth + "()", self: method, fn: stripWs(n), meth: meth, vm: varMark()})
     }
     function cloEnter(pos) {
         var top = cloScopes.length == 0 ? null : cloScopes[cloScopes.length - 1]
         var line = "" + c.lineOf(pos)
         var name = "{closure:" + (top == null ? c.file : top.name) + ":" + line + "}"
         cloScopes.push({name: name, self: top != null && top.self && !cloStatic, line: line,
-                        fn: name, meth: name, st: cloStatic, hide: cloStatic && top != null && top.self})
+                        fn: name, meth: name, st: cloStatic, hide: cloStatic && top != null && top.self, vm: varMark()})
         cloStatic = false
     }
-    function cloLeave() { return cloScopes.pop() }
+    // live: the variables the function's text names, its parameters among them,
+    // whose slots emitFrameLeave releases. Twin of cloLeave in php-interpreter.abnf.
+    function cloLeave() {
+        var sc = cloScopes.pop()
+        sc.live = varsSince(sc.vm, ["$this"])
+        return sc
+    }
     // A static closure written where a $this is in reach (cloEnter's hide) sees
     // none: its frame declares $this undefined, as a static method's has none.
     // Twin of cloChain in php-interpreter.abnf.
@@ -5120,7 +5170,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     function cloNoteProp(n) { cloProp = stripWs(n) }
     function cloEnterHook(kind) {
         var fn = cloProp + "::" + kind
-        cloScopes.push({name: cloClass + "::" + fn + "()", self: true, fn: fn, meth: cloClass + "::" + fn})
+        cloScopes.push({name: cloClass + "::" + fn + "()", self: true, fn: fn, meth: cloClass + "::" + fn, vm: varMark()})
         return kind
     }
     // __FUNCTION__ / __METHOD__: twin of cloMagic in php-interpreter.abnf.
@@ -5175,10 +5225,11 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             }
         }
         var desc = cloDesc(sc, uses, pl)
-        body = cloHideThis(sc, paramDefaults(pl.defs, variadicPrologue(pl, capturePrologue(byVal.concat(byRef), body))))
+        body = cloHideThis(sc, paramDefaults(pl.defs, variadicPrologue(pl, capturePrologue(byVal, byRef, body))))
         var chk = cloArgCheck(pl, sc)
+        pl.live = sc.live
         return function(b) {
-            var idx = emitFunc(pl.params, body, false, false, undefined, undefined, chk)
+            var idx = emitFunc(pl.params, body, false, false, undefined, undefined, chk, pl)
             var rc = emitCapture(b, byVal, byRef)
             return {b: rc.b, v: withClosureRec(rc.b, closureV(rc.b, idx, rc.v), pl, desc, rc.v, sc, idx, byVal.concat(byRef))}
         }
@@ -5204,11 +5255,12 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         // resolves through the defining scope, as in every closure.
         var captured = varsSince(mark, pl.params.concat(["$this"]))
         var sc = cloLeave()
-        var body = cloHideThis(sc, paramDefaults(pl.defs, variadicPrologue(pl, capturePrologue(captured, makeBody([makeReturn([bodyT])])))))
+        var body = cloHideThis(sc, paramDefaults(pl.defs, variadicPrologue(pl, capturePrologue(captured, [], makeBody([makeReturn([bodyT])])))))
         var desc = cloDesc(sc, captured, pl)
         var chk = cloArgCheck(pl, sc)
+        pl.live = sc.live
         return function(b) {
-            var idx = emitFunc(pl.params, body, false, false, undefined, undefined, chk)
+            var idx = emitFunc(pl.params, body, false, false, undefined, undefined, chk, pl)
             var rc = emitCapture(b, captured, [])
             return {b: rc.b, v: withClosureRec(rc.b, closureV(rc.b, idx, rc.v), pl, desc, rc.v, sc, idx, captured)}
         }
@@ -5577,10 +5629,15 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         if (op == "??=") { return function(b) { return emitCoalesceAssign(b, ref, valT) } }
         var rw = op == "=" ? null : rwSite(ref, pos)
         var oc = op == "=" ? null : diagSite("__mec_opchk", pos)
+        // An array literal with '&' elements is a temporary: once copied it no
+        // longer holds their cells. A static property keeps the literal itself.
+        // Twin of makeAssign in php-interpreter.abnf.
+        var lit = op == "=" && items.length > 3 && items[3].rlit === true && !(ref.sbase != undefined && ref.path.length == 0)
         return function(b) {
             var r = valT(b)
             b = r.b
             var v = r.v
+            var cells = lit ? litCells : []
             if (ref.sbase != undefined && ref.path.length == 0) {
                 var rb = ref.sbase(b)
                 b = rb.b
@@ -5638,6 +5695,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                 }
                 b = writeRefSlot(b, p, v)
             }
+            for (var lc = 0; lc < cells.length; lc++) { callExt(b, "js_phrebind", [cells[lc], hUndef]) }
             return {b: b, v: v}
         }
     }
@@ -7700,7 +7758,10 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         }
         failB.NewBr(bodyB) // never taken: both raise
     }
-    function emitFunc(params, bodyStmt, isMethod, isCtl, selfName, isStatic, chk) {
+    // A function's own record (frm: live, byref) arms its frame's reference
+    // bookkeeping: a by-reference parameter's frame holds the argument's cell, and
+    // every return releases the live slots (emitFrameLeave).
+    function emitFunc(params, bodyStmt, isMethod, isCtl, selfName, isStatic, chk, frm) {
         funcCount++
         var idx = funcCount
         var savedTag = curFTag
@@ -7753,6 +7814,9 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             curThisSure = isMethod && isStatic !== true
         }
         sawYield = false
+        var savedLive = curLive
+        var armed = !isCtl && usesRefs && frm != undefined && frm != null
+        if (!isCtl) { curLive = armed ? frm.live : null }
         var savedRet = curRet
         if (!isCtl) { curRet = chk != undefined && chk != null && chk.rty != undefined && chk.rty != "" ? chk : null }
         var endB = bodyStmt(bodyB)
@@ -7772,6 +7836,10 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             if (sawYield || curWrites["*"] === true || curWrites[params[i]] === true) {
                 argV = callExt(b, "js_phcopy", [argV])
             }
+            if (armed && frm.byref.indexOf(i) >= 0) {
+                callExt(b, "js_phrebind", [hUndef, argV])
+                markCells(b, curScopeV)
+            }
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, params[i]), argV])
         }
         var genChk = sawYield && chk != undefined && chk != null
@@ -7781,8 +7849,10 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         curSelfName = savedSelf
         curThisOwn = savedOwn
         curThisSure = savedSure
+        if (!isCtl) { emitFrameLeave(endB) }
         if (!isCtl && curRet != null) { endB.NewRet(emitRetFit(endB, hUndef)) }
         else { endB.NewRet(hNull) }
+        curLive = savedLive
         curRet = savedRet
         genClosure = sawYield
         sawYield = savedSaw
@@ -7866,7 +7936,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     function makeFun(raw) {
         var isGen = genPop()
         fnLeave()
-        cloLeave()
+        var sc = cloLeave()
         // A method's modifiers come first; only its visibility and 'static' are kept.
         var vis = ""
         var isSt = false
@@ -7934,7 +8004,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             stmts.push(inner)
             inner = makeBody(stmts)
         }
-        return {name: name, params: params, defs: defs, byref: pl.byref, rest: pl.rest, pvis: pvis, vis: vis, st: isSt,
+        return {name: name, params: params, defs: defs, byref: pl.byref, rest: pl.rest, pvis: pvis, vis: vis, st: isSt, live: sc.live,
                 tys: pl.tys, rty: retTypeOf(pl.rty, isGen),
                 lib: phpLibDepth > 0 && name.substring(0, 5) != "__mec",
                 body: paramDefaults(defs, variadicPrologue(pl, inner))}
@@ -8105,7 +8175,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         noteSig(fn.name, fn)
         var chk = fn.chk != undefined ? fn.chk : argCheckOf(fn, fn.name, false)
         return function(b) {
-            var idx = emitFunc(fn.params, fn.body, false, false, undefined, undefined, chk)
+            var idx = emitFunc(fn.params, fn.body, false, false, undefined, undefined, chk, fn)
             var gV = globalsFrameV(b)
             // Its record shows the function by name and parameters as a Closure
             // (js_phfnrec), and carries the signature withSig would record.
@@ -8827,7 +8897,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             if (pvl != ",") { callExt(b, "js_set", [clsV, emitStr(b, "__pvis"), emitStr(b, pvl)]) }
             for (var k = 0; k < methods.length; k++) {
                 var idx = emitFunc(methods[k].params, methods[k].body, true, false, name, methods[k].st === true,
-                                   argCheckOf(methods[k], shown + "::" + methods[k].name, methods[k].lib === true))
+                                   argCheckOf(methods[k], shown + "::" + methods[k].name, methods[k].lib === true), methods[k])
                 // Stored under its declared name, its lower-cased name and every other
                 // spelling an ancestor declared (setMethod in php-interpreter.abnf).
                 callExt(b, "js_phmset", [clsV, emitStr(b, methods[k].name), withSig(b, closureV(b, idx, curScopeV), methods[k])])

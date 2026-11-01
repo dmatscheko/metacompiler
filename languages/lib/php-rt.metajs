@@ -300,6 +300,18 @@ function js_phrebind(old, cell) {
     return undefined
 }
 
+// A frame returning normally stops holding the cells in its slots named in
+// the comma separated names, when it is marked under "\x00cells". Twin of
+// m["js_phleave"] in abnf/jsrtphp.go.
+function js_phleave(fr, names) {
+    if (!scopeHas(fr, "\x00cells")) { return undefined }
+    var ns = names.split(",")
+    for (var i = 0; i < ns.length; i++) {
+        if (scopeHas(fr, ns[i])) { phRefAdjust(phCellOf(scopeGet(fr, ns[i])), 0 - 1) }
+    }
+    return undefined
+}
+
 function phDeref(v) {
     var c = phCellOf(v)
     if (c !== undefined) { return c["v"] }
@@ -2008,50 +2020,14 @@ function phDumpArr(p, ind, pad) {
 // dumping in php-interpreter.abnf and phpDumping in abnf/jsrtphp.go.
 var phDumping = []
 
-// An element or property slot: a reference held by more than one slot of the
-// dumped value prints as &value. Twin of dumpSlot in php-interpreter.abnf.
+// An element or property slot: a reference held by more than one slot prints
+// as &value. Twin of dumpSlot in php-interpreter.abnf.
 function phDumpSlot(x, ind) {
     var s = phDump(phDeref(x), ind)
-    if (phCellOf(x) === undefined || s.substring(ind, ind + 1) == "*") { return s }
-    var n = 0
-    var k = 0
-    while (k < phDumpShared.length) {
-        if (phDumpShared[k] === x) { n = n + 1 }
-        k = k + 1
-    }
-    if (n < 2) { return s }
+    var c = phCellOf(x)
+    if (c === undefined || s.substring(ind, ind + 1) == "*") { return s }
+    if (phRefHolders(c) < 2) { return s }
     return s.substring(0, ind) + "&" + s.substring(ind)
-}
-
-// The reference cells held by the slots of the value being dumped, each
-// container walked once. Twin of dumpSharedCells in php-interpreter.abnf.
-var phDumpShared = []
-
-function phDumpCells(v, cells, seen) {
-    var vals = []
-    var p = phArrParts(v)
-    if (p !== undefined) { vals = p.v }
-    else if (phIsObj(v)) {
-        var names = keysOf(v)
-        var j = 0
-        while (j < names.length) {
-            vals.push(v[names[j]])
-            j = j + 1
-        }
-    }
-    else { return }
-    var i = 0
-    while (i < seen.length) {
-        if (seen[i] === v) { return }
-        i = i + 1
-    }
-    seen.push(v)
-    var e = 0
-    while (e < vals.length) {
-        if (phCellOf(vals[e]) !== undefined) { cells.push(vals[e]) }
-        phDumpCells(phDeref(vals[e]), cells, seen)
-        e = e + 1
-    }
 }
 
 function phDumpObj(v, ind, pad) {
@@ -3629,11 +3605,7 @@ function phPropChk(verb, o, k) {
 }
 function js_phsetchk(o, k) { return phPropChk("assign", o, k) }
 function js_phmodchk(o, k) { return phPropChk("modify", o, k) }
-function js_phdump(v) {
-    phDumpShared = []
-    phDumpCells(v, phDumpShared, [])
-    return phDump(v, 0)
-}
+function js_phdump(v) { return phDump(v, 0) }
 
 // method_exists over the __mlc lists of the class chain; v is an object, a class
 // descriptor or null. Twin of phpMethodExists in languages/php-interpreter.abnf.
