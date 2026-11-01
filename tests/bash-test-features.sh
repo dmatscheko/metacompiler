@@ -787,6 +787,12 @@ xe8=2")
 for xec in "${xeas[@]}"; do eval "$xec"; done
 check eva1 "$xe1|$xe2|$xe3|$xe4|$xe5|$xe6|$xe7|$xe8" '5|a b|q"r|a b|2|a#b|1|2'
 
+# ----- inside backquotes \$ \` \\ (and \" in double quotes) lose the backslash -----
+check bq1 "[1 `echo \ `][2 `echo \\ `][3 `echo \\\\ `]" "[1  ][2  ][3 \]"
+check bq2 "`echo \\(` `echo \"q\"` `echo \$xe5`" '( q 2'
+check bq3 `echo \`echo nested\``-`echo \\(` 'nested-('
+check bq4 "$(echo \ x)|"\ y " x| y"
+
 # ----- standard error is fd 2 in every leg -----
 # Not a check: ./test.sh --cross diffs the two halves' merged output, so this line and an
 # arithmetic error's message reach it from llvm.Run as they do from the interpreter.

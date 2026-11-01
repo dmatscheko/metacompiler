@@ -422,8 +422,9 @@ DqEsc       <~~ push(makeConst(dqEsc(up.in))) ~~>
             = "\\" AnyCh ;
 
 // An unquoted \x escape: the backslash is dropped, the next char is literal (\  -> space).
+// No blank is skipped after the backslash, also where the escape begins a word.
 EscSeg      <~~ push(makeConst(escChar(up.in))) ~~>
-            = "\\" AnyCh ;
+            = "\\" :whitespace() AnyCh ;
 
 // The extended globs @(a|b) ?(a|b) *(a|b) +(a|b) !(a|b). Only PatSeg - the right hand
 // side of == / != inside [[ ]] - refers to ExtGlob, on purpose: there bash needs no shopt,
@@ -469,8 +470,14 @@ ExpSeg      = ArithExp | CmdSub | BackSub | DollarBrace | DollarName | DollarDig
 // state is restored automatically when the production returns.
 CmdSub      <~~ push(mkCmdSub(pop(), bashCsLines(arSrc(up.start + 2, up.pos - 1), srcLine(up.start)))) ~~>
             = "$(" :whitespace(Whitespace) CompoundList ")" ;
-BackSub     <~~ push(mkCmdSub(pop(), {first: srcLine(up.start), skips: []})) ~~>
-            = "`" :whitespace(Whitespace) CompoundList "`" ;
+// Inside `...` a backslash before $, ` or \ (and before " when the `...` stands in double
+// quotes) is removed first, and the remaining text is then parsed as the list (POSIX 2.6.3):
+// "`echo \\ `" runs `echo \ `. mkBackBody parses it when it first runs.
+BackSub     <~~ push(mkCmdSub(mkBackBody(arSrc(up.start + 1, up.pos - 1), false), {first: srcLine(up.start), skips: []})) ~~>
+            = "`" :whitespace() BqText "`" ;
+DqBackSub   <~~ push(mkCmdSub(mkBackBody(arSrc(up.start + 1, up.pos - 1), true), {first: srcLine(up.start), skips: []})) ~~>
+            = "`" :whitespace() BqText "`" ;
+BqText      = { "\\" ( AnyCh | "\n" ) | !@+"`\\" } ;
 
 // $(( expr )) : whitespace IS allowed inside; the value is the decimal string of the result.
 // bash EXPANDS the expression's text first and only then parses it, so an expansion can
@@ -623,7 +630,7 @@ BraceBare   <~~ push(makeConst(up.in)) ~~> = !@+"}\"'\\$`" ;
 // ordinary character that is KEPT, though it still hides a "}" from the brace match, and the
 // text between two of them is expanded. Backslash follows the double-quote rule, plus \}.
 // bash 5.3, u unset:  "${u:-'a}b'}" -> 'a}b'   "${u:-'$x'}" -> 'abc'   "${u:-\'}" -> \'
-DqExpSeg    = ArithExp | CmdSub | BackSub | DqDollarBrace | DollarName | DollarDigit | DollarSpecial | DollarLit ;
+DqExpSeg    = ArithExp | CmdSub | DqBackSub | DqDollarBrace | DollarName | DollarDigit | DollarSpecial | DollarLit ;
 DqDollarBrace <~~ push(mkParamExp(takeAll())) ~~>
             = "${" :whitespace() DqPeBody "}" ;
 DqPeBody    = PeLen | DqPeIndForm | DqPeCore | PeLenBad ;
@@ -792,7 +799,7 @@ RegexSeg    = RxSq | RxDq | ExpSeg | RxEsc | RxGroup | RegexBare ;
 RxSq        = "'" :whitespace() { !@+"'" } <~~ push(makeConst(regexEscape(up.in))) ~~> "'" ;
 RxDq        <~~ push(mkQuotedRx(mkDqWord(takeAll()))) ~~>
             = '"' :whitespace() { DqExpSeg | DqEsc | DqLit } '"' ;
-RxEsc       <~~ push(makeConst(regexEscape(escChar(up.in)))) ~~> = "\\" AnyCh ;
+RxEsc       <~~ push(makeConst(regexEscape(escChar(up.in)))) ~~> = "\\" :whitespace() AnyCh ;
 RegexBare   <~~ push(makeConst(up.in)) ~~> = !@+" \t\n\r;&<>$'\"\\`(" ;
 // Inside ( ) blanks and ; & < > are ordinary characters as well: bash 5.3 reads
 // [[ $s =~ ^([^ ]+)(a;b) ]] as one regex word.
@@ -814,7 +821,7 @@ PatDq       <~~ push(mkQuotedPat(mkDqWord(takeAll()))) ~~>
             = '"' :whitespace() { DqExpSeg | DqEsc | DqLit } '"' ;
 PatAnsi     = "$'" :whitespace() PatAnsiBody "'" ;
 PatAnsiBody <~~ push(makeConst(globEscape(ansiC(up.in, true)))) ~~> = { AnsiEsc | AnsiLit } ;
-PatEsc      <~~ push(makeConst(globEscape(escChar(up.in)))) ~~> = "\\" AnyCh ;
+PatEsc      <~~ push(makeConst(globEscape(escChar(up.in)))) ~~> = "\\" :whitespace() AnyCh ;
 CondBinOp   <~~ push({cop: up.in}) ~~> = CondBinTok ;
 CondBinTok  = "==" | "!=" | "-eq" | "-ne" | "-lt" | "-le" | "-gt" | "-ge" | "-nt" | "-ot" | "-ef" | "=" | "<" | ">" ;
 // A lone word is not followed by a newline: bash reads the next token as a binary operator.
@@ -3761,6 +3768,32 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     // A dropped NUL byte is warned about, as bash 5.3 does. Twin of rt_cap_end. Unlike ( ),
     // the substitution sees the loops around it: `break` there ends it with the status 0.
+    // The text between the backquotes with the backslash removed from \$ \` \\ (and \" when
+    // the backquotes stand in double quotes).
+    function bqUnescape(text, inDq) {
+        var out = ""
+        var i = 0
+        while (i < text.length) {
+            var ch = text.charAt(i)
+            if (ch == "\\" && i + 1 < text.length) {
+                var nx = text.charAt(i + 1)
+                if (nx == "$" || nx == "`" || nx == "\\" || (inDq && nx == '"')) { out = out + nx; i = i + 2; continue }
+            }
+            out = out + ch
+            i = i + 1
+        }
+        return out
+    }
+    // The body of a `...` command substitution, parsed the first time it runs. Twin of
+    // mkBackBody in bash-to-llvm-ir.abnf.
+    function mkBackBody(text, inDq) {
+        var src = bqUnescape(text, inDq)
+        var once = []
+        return function() {
+            if (once.length == 0) { once.push(compileSnippet(src)) }
+            return once[0]()
+        }
+    }
     function mkCmdSub(bodyT, lnTab) {
         return function() {
             var svLn = lnCtx
