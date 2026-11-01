@@ -177,13 +177,13 @@ Also confirm whether `(string)[1]` with display_errors=1 warns "Array to string 
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-1096 bash: array element through a nameref in the compiler (`declare -n r=t; r[z]=3`) · P3 · SH · OPEN [V]
+### T-1096 bash: array element through a nameref in the compiler (`declare -n r=t; r[z]=3`) · P3 · SH · IN PROGRESS (SH worker, round 34) [V]
 
 The compiler aborts with "an array through a nameref is not supported by this compiler" on `declare -n r=tt; r[q]=2`, and also on reads like `${r[q]}`, `${!r[@]}` and `${#r[@]}`. The interpreter handles them. Resolve the nameref at run time through the same slot lookup that rt_decl_opt uses for computed options.
 
 Related, both engines: in diagnostics about a nameref (cannot convert, readonly variable, cannot destroy), bash names the nameref itself, but ours name its target.
 
-### T-1097 bash: export -p / readonly -p NAME set the attribute; bad substitution aborts the command line · P3 · SH · OPEN [V]
+### T-1097 bash: export -p / readonly -p NAME set the attribute; bad substitution aborts the command line · P3 · SH · IN PROGRESS (SH worker, round 34) [V]
 
 Oracle: /opt/homebrew/bin/bash 5.3.
 - `export -p nope` and `readonly -p nope` with a name give that name the attribute and print nothing. Afterwards `typeset -p nope` prints `declare -rx nope`. Ours treat them as queries, print "not found" and return 1.
@@ -191,7 +191,7 @@ Oracle: /opt/homebrew/bin/bash 5.3.
 - `"${s:$'-1'}"`: bash re-reads this as `${s:-1}` and prints `hello`; ours prints `o`.
 - `m[[]=7` should be a syntax error ("unexpected EOF while looking for matching `]'", exit 2); ours accepts it.
 
-### T-1098 bash: subscript quote rule for run-time arithmetic text (variable values, let) + token cosmetics · P3 · SH · OPEN [V]
+### T-1098 bash: subscript quote rule for run-time arithmetic text (variable values, let) + token cosmetics · P3 · SH · IN PROGRESS (SH worker, round 34) [V]
 
 When arithmetic text comes from a variable's value or a `let` argument, bash expands a subscript in it as if inside double quotes. For `z="iv['\$x']"; $(( z ))` and `let 'w=iv['\''$x'\'']'` the error token is `'1'`. Ours prints `'$x'`, and something odd for `let`.
 
