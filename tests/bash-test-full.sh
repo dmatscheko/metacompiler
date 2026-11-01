@@ -8,9 +8,9 @@
 #
 #   tests/bash-test-full.sh     sections 01 to 32
 #   tests/bash-test-full.2.sh   sections 33 to 46
-#   tests/bash-test-full.3.sh   sections 47 to 60 and 62 to 94
+#   tests/bash-test-full.3.sh   sections 47 to 60 and 62 to 89
 #   tests/bash-test-full.4.sh   section 61
-#   tests/bash-test-full.5.sh   sections 95 on, and every newer section
+#   tests/bash-test-full.5.sh   sections 90 on, and every newer section
 #
 # The section NUMBERS are global, and ./test.sh --full reports the files as the
 # units bash, bash2, bash3, bash4 and bash5.
