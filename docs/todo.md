@@ -133,13 +133,13 @@ coerceAtMost, coerceIn → "unknown String method" in all engines.
 
 # GO — Go  (oracle: `go run`)
 
-### T-1002 go: goroutines cannot suspend, so a send inside a goroutine never blocks · P3 · GO · OPEN [V design]
+### T-1002 go: goroutines cannot suspend, so a send inside a goroutine never blocks · P3 · GO · IN PROGRESS (GO worker, round 20) [V design]
 Found by the GO worker, round 19 (oracle go run). Goroutines run to completion; a send inside a goroutine, or from main while others
 are queued, buffers past capacity instead of blocking. go/test/chan powser1/2, sieve1, select8 (endless producers) and goroutines
 (10000 nested drains overflow the stack) still fail. Needs a suspension mechanism that works in all three engines (the manual calls
 real coroutines out of the subset - decide first). Go also runs the most recently spawned goroutine first; we run spawn order.
 
-### T-1003 go: a promoted method used as a method-expression value · P3 · GO · OPEN [V]
+### T-1003 go: a promoted method used as a method-expression value · P3 · GO · IN PROGRESS (GO worker, round 20) [V]
 Found by the GO worker, round 19 (oracle go run). `f := (*Q).Add` (Add promoted from embedded *P), `f(&Q{&P{1}}, 2)` → go 3; both
 halves "call of a non function: f". Same for `(*U).Sum` promoted through an embedded *T over a defined non-struct type. The call form
 `(*Q).Add(&Q{..}, 2)` works; the value form needs a closure taking the receiver from its first argument, in all three engines.
@@ -152,7 +152,7 @@ halves "call of a non function: f". Same for `(*U).Sum` promoted through an embe
 
 # PHP — PHP  (no php here: spec-only, php.net / php-src behaviour)
 
-### T-1000 php: reference counts are never decremented (var_dump `&`, copy of an array holding a dead frame's reference) · P3 · PHP · OPEN [V spec-only]
+### T-1000 php: reference counts are never decremented (var_dump `&`, copy of an array holding a dead frame's reference) · P3 · PHP · IN PROGRESS (PHP worker, round 35) [V spec-only]
 Found by the PHP worker, round 34 (php-src php_var_dump / zend_array_dup_element). Cells' `rc` only rises: nothing decrements it at
 frame exit (incl. exception unwinding, generators), array overwrite/discard, or for temporary literals. Effects: `$x=5; $a=[&$x,1];
 var_dump($a);` → php `&int(5)`, ours `int(5)`; `function f(){ $x=1; $a=[&$x]; return $a; } $r=f(); $r2=$r; $r2[0]=9; echo $r[0];`
