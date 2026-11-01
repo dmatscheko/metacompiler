@@ -163,17 +163,17 @@ refused by the interpreter only (a halves divergence; see T-210 for the declined
 
 # JV — Java
 
-### T-909 java: `System.err.flush()` throws · P3 · JV · OPEN [V]
+### T-909 java: `System.err.flush()` throws · P3 · JV · IN PROGRESS (JV worker, round 15) [V]
 interp NullPointerException; run and native "method call 'flush' on a undefined"; `System.out.flush()` works. Files: the
 System.err surface in both java grammars / java-rt.metajs.
 
-### T-931 java interp: unbounded recursion through a field initializer hangs instead of StackOverflowError · P1 · JV · OPEN [V]
+### T-931 java interp: unbounded recursion through a field initializer hangs instead of StackOverflowError · P1 · JV · IN PROGRESS (JV worker, round 15) [V]
 `class R1 { R1 fs = new R1(); }` with `try { new R1(); } catch (StackOverflowError e) { System.out.println("SOE"); }` → java,
 llvm.Run and native `start` / `SOE`; interp prints `start` and hangs (killed at 20 s). The recursion guard is not reached on the
 field-initializer path. Corpus: 8 javac files time out for this reason (DiamondRedundantArgs, T6951833, T7102515,
 QualifiedAccess_3, MethodReference55, …). Files: object construction in java-interpreter.abnf.
 
-### T-932 java: cyclic inheritance hangs the compiler and is accepted by the interpreter · P3 · JV · OPEN [V finder only]
+### T-932 java: cyclic inheritance hangs the compiler and is accepted by the interpreter · P3 · JV · IN PROGRESS (JV worker, round 15) [V finder only]
 `interface A extends A.B { interface B {} }` → javac "cyclic inheritance involving A"; llvm.Run hangs, interp runs main. Corpus
 compiler timeouts: CyclicScoping_1/_2, ClassCycle4, CyclicInheritance, cycle/T8193561. Also accepted although javac rejects:
 `class var {}`, `yield(1, 2);`.
