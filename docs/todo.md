@@ -190,7 +190,7 @@ range 0..2: 7` (a plain RangeError); the current engines print the IndexError fo
 `RangeError (index): Index out of range: index should be less than 3: 7`, which is
 believed to be the modern VM's. Leave as is unless a real dart run settles it.
 
-### T-925 parse time grows exponentially with bracket nesting in seven grammars, both halves · P1 · CORE · OPEN [V]
+### T-925 parse time grows exponentially with bracket nesting in seven grammars, both halves · P1 · CORE · IN PROGRESS (CORE worker, round 17) [V]
 Found by the corpus sweep (go torture.go, swift structure_overflow.swift, dart deep_nesting_expression_test.dart time out).
 Measured on an idle machine, interpreter half (the compiler halves grow the same):
 kotlin `println((((((1))))))`: depth 6 1.85 s, 7 6.99 s, 8 27.2 s (x4/level); the real-shaped
