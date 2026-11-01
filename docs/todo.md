@@ -123,17 +123,6 @@ strings.TrimSpace, native strips ASCII 9-13 and 32: `int.Parse(" 1 2 ")` and `in
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-994 kotlin: a binary operator at the start of a line continues the previous expression · P2 · KT · IN PROGRESS (KT worker, round 13) [V]
-Found by the KT worker, round 12 (Kotlin grammar: no newline before an additive operator). `var i=0; var j=5` / `i++` / `--j` /
-`println("$i $j")` → Kotlin `1 4`; ours parses `i++ - (-j)` and prints `1 5`. AddExpr (probably MulExpr too) in both kotlin
-grammars lack a SameLine guard; the interpreter's `IncDec = Target ("++"|"--")` likewise, so `x` newline `++y` can read as `x++ y`.
-
-### T-995 kotlin: sortedBy/sortedWith selector call counts differ from the JDK's TimSort; held map entries are snapshots · P3 · KT · IN PROGRESS (KT worker, round 13) [V]
-Found by the KT worker, round 12 (oracle kotlin-stdlib 2.2.21 on java 24). `listOf(3,1,2).sortedBy { n++; it }` → JDK calls the
-selector 8 times; ours 3 (sortedWith(compareBy) 6). Results are identical; matching the count needs java.util TimSort's exact
-comparison sequence (run detection, binary insertion, galloping) in all 3 engines. `val e = m.entries.first(); m[k] = v; e.value`
-→ java sees the new value (live entry); ours the old one.
-
 # GO — Go  (oracle: `go run`)
 
 ### T-988 go: a plain send on an unbuffered or full channel never blocks (cooperative channel model) · P3 · GO · OPEN [V]
@@ -1114,6 +1103,8 @@ T-982 c compiled: an indirect call through a function pointer loses the return t
 T-996 c compiled: a function whose return type is a typedef name loses it on a direct call — DONE - typedef'd return types (scalar, pointer, struct by value, function pointer) honoured in both engines
 T-971 ruby: smaller gaps found in round 33 — PARTIAL - nested class-body consts, $~ after split, =~ dispatch/TypeError, builtin own instance_methods; Hash iteration insert check filed
 T-974 java: cyclic inheritance across files, through a redefined Object, and in type-variable bounds is not refused — DONE - cyclic inheritance across files (implicit source path), via redeclared java.lang.Object, and in type-variable bounds; javac's message, both halves
+T-994 kotlin: a binary operator at the start of a line continues the previous expression — DONE - OpSameLine: a newline outside ()/[]/${} ends the statement before + - * / % and postfix ++/--; kotlinc 2.2.21 verified
+T-995 kotlin: sortedBy/sortedWith selector call counts differ from the JDK's TimSort; held map entries are snapshots — DONE - JDK 24 TimSort port (call counts and contract violation match), comparator call order, live map entry nodes with setValue
 
 # Settled — do not re-open
 
