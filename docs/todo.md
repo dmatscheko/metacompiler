@@ -146,17 +146,17 @@ real coroutines out of the subset - decide first). Go also runs the most recentl
 ### T-1053 php: copy-on-write array identity (refcount release, print_r recursion depth) · P4 · PHP · OPEN [V spec-only] · NEEDS DESIGN
 Remainder of T-1000/T-1025/T-1036/T-1051. Engines copy arrays eagerly on assignment and have no point where an array dies, so: reference holders of overwritten / frame-local / temporary arrays and of unfinished generators are never released (counts stay correct-but-high, so `&` may survive a copy PHP would unwrap); property-hook set parameters aren't covered by the compiler's param-copy release; print_r recursion depth is wrong (`$y=[1]; $y[]=&$y; print_r($y)` → PHP *RECURSION* at [1], ours one level deeper; `$a=["k"=>[2]]; $a["k"][]=&$a;` two deeper) because the interpreter's by-value param copy loses array identity; `$w=$z; print_r($w)` differs too. Options: real per-array refcount + COW in all three engines (touches every in-place array write), or an engine-level print_r like var_dump plus targeted release points. Needs a design decision before work.
 
-### T-1101 php: callable-typed parameters validated by shape only; static compound callables to non-static methods · P3 · PHP · OPEN [V]
+### T-1101 php: callable-typed parameters validated by shape only; static compound callables to non-static methods · P3 · PHP · IN PROGRESS (PHP worker, round 48) [V]
 
 Spec: zend_is_callable_ex, which zend_verify_arg_type calls for a `callable` parameter, and Zend/tests/callable_self_parent_static_deprecation.phpt, section "Test callable type hint".
 - A `callable` parameter must run the full validity check, not a shape test, and must raise the self/parent/static and compound-form deprecations, as the call_user_func sites already do. An invalid callable must raise the TypeError "must be of type callable, array given".
 - `['K', 'parent::m']` naming a non-static method from a static context must be rejected with "non-static method K::m() cannot be called statically".
 
-### T-1102 php: uncaught "Undefined constant" Error reports the caller's line · P3 · PHP · OPEN [V]
+### T-1102 php: uncaught "Undefined constant" Error reports the caller's line · P3 · PHP · IN PROGRESS (PHP worker, round 48) [V]
 
 In both engines, an uncaught Error 'Undefined constant "X"' reports the line of the enclosing call rather than the line where the constant is used. The r47 worker's repro is scratchpad/PHP47/ln2.php: PHP reports :4, ours :6. Check the getLine() of a caught Error too.
 
-### T-1103 php: htmlspecialchars double_encode / ENT_SUBSTITUTE / HTML5 names; array_key_exists float key via callable or named args · P3 · PHP · OPEN [V]
+### T-1103 php: htmlspecialchars double_encode / ENT_SUBSTITUTE / HTML5 names; array_key_exists float key via callable or named args · P3 · PHP · IN PROGRESS (PHP worker, round 48) [V]
 
 Spec: ext/standard/html.c.
 - `double_encode=false` must leave existing entities (`&amp;`, `&#39;`, `&eacute;`) alone. It is currently ignored.
