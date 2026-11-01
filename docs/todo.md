@@ -74,7 +74,7 @@ Left from T-954, plus one found by the PY worker, round 17 (oracle python3 3.14)
 
 # RB — Ruby
 
-### T-916 ruby interp: an exception leaving a class or module body leaks that class's lexical scope · P1 · RB · OPEN [V]
+### T-916 ruby interp: an exception leaving a class or module body leaks that class's lexical scope · P1 · RB · IN PROGRESS (RB worker, round 33) [V]
 `begin; class Gate; raise ArgumentError, "in body" if $f; end; rescue ArgumentError => e; end`, then `class Other; end;
 p Other.name` → ruby, run, native `"Other"`; interp `"Gate::Other"` (and `Gate::Mo`, `Gate::Gm::After` for later modules after a
 raise out of a module body). Knock-ons in the interpreter: a later `class String; def shout2…` defines Gate::String (NoMethodError
@@ -82,24 +82,24 @@ on `"a".shout2`), errors say `uninitialized constant Gate::Zq`, inspect prints `
 leaks fixed in T-850: the nesting pop is skipped on the exception path. Files: class/module body evaluation in
 ruby-interpreter.abnf.
 
-### T-917 ruby: `local !~ /re/` with a space after the local is parsed as a call of the local · P1 · RB · OPEN [V]
+### T-917 ruby: `local !~ /re/` with a space after the local is parsed as a call of the local · P1 · RB · IN PROGRESS (RB worker, round 33) [V]
 Neighbour of T-823. `s = ["abc"][0]; z = s !~/z/; p z` and `p n !~ /5/`, `[s].map { |t| t !~ /q/ }` → ruby `true` …; interp
 "call of a non function: s", run "call of a non function value: abc", native "… [object Object]". `s[0] !~ /z/`, `s =~ /b/`,
 `s != "q"` are right. Files: the command-call / juxtaposition rule in both ruby grammars (a known local followed by `!~` is the
 operator).
 
-### T-918 ruby: tr / count / delete / squeeze and regex positions on astral text · P2 · RB · OPEN [V finder only]
+### T-918 ruby: tr / count / delete / squeeze and regex positions on astral text · P2 · RB · IN PROGRESS (RB worker, round 33) [V finder only]
 Incomplete part of T-830 / T-839. t = "x😀😀y": `t.tr("😀","o")` ruby `"xooy"`, interp `"xooooy"`, run `"x����y"`, native
 unchanged; `t.count("😀")` ruby 2, interp 4, run/native 0; `t.delete("😀")` ruby `"xy"`, run `"x����y"`, native unchanged;
 `t.squeeze` ruby `"x😀y"`, run bytes broken, interp/native unchanged; `t.scan(/./).size` ruby 4, interp/native 6;
 `t =~ /y/` ruby 3, interp/native 5 (UTF-16 offsets). Files: rbStrTr / count / delete / squeeze and the match index in
 lib/ruby-rt.metajs, abnf/jsrtruby.go, the interpreter.
 
-### T-919 ruby: re-adding a key deleted during `Hash#each` raises nothing · P2 · RB · OPEN [V finder only]
+### T-919 ruby: re-adding a key deleted during `Hash#each` raises nothing · P2 · RB · IN PROGRESS (RB worker, round 33) [V finder only]
 Incomplete part of T-822. `h = {a: 1, b: 2}; h.each { |k, v| h.delete(:a); h[:a] = 3 }` → ruby RuntimeError "can't add a new key
 into hash during iteration", h `{:b=>2}`; all legs no error, `{:b=>2, :a=>3}`. The new-key test must look at the live key set.
 
-### T-920 ruby: an assignment target rooted at a parenthesised call does not parse; smaller gaps · P2 · RB · OPEN [V finder only]
+### T-920 ruby: an assignment target rooted at a parenthesised call does not parse; smaller gaps · P2 · RB · IN PROGRESS (RB worker, round 33) [V finder only]
 `def arr(i); A[i]; end; arr(0)[1] = 5; obj(1).f = 7; arr(0)[0] += 1` → interp and run "Not everything could be parsed" at the
 first; ruby runs it. (`H.new.get(0)[0][0] = 9` works.) Kotlin has the same shape: `rec(p, "R").w++` does not parse. Smaller, loud
 or cosmetic, all with ruby 2.6 as the oracle: `(1..).each_slice(2).first(2)` "cannot convert an endless range to an array" (ruby
