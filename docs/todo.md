@@ -133,7 +133,7 @@ coerceAtMost, coerceIn → "unknown String method" in all engines.
 
 # GO — Go  (oracle: `go run`)
 
-### T-1002 go: goroutines cannot suspend, so a send inside a goroutine never blocks · P3 · GO · IN PROGRESS (GO worker, round 20) [V design]
+### T-1002 go: goroutines cannot suspend, so a send inside a goroutine never blocks · P3 · GO · OPEN [V design]
 Found by the GO worker, round 19 (oracle go run). Goroutines run to completion; a send inside a goroutine, or from main while others
 are queued, buffers past capacity instead of blocking. go/test/chan powser1/2, sieve1, select8 (endless producers) and goroutines
 (10000 nested drains overflow the stack) still fail. Needs a suspension mechanism that works in all three engines (the manual calls
