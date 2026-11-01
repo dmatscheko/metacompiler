@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1011** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1012** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -75,12 +75,13 @@ Also tests/python-test-full.5.py peaks at ~90M steps per call (the brake is 1e8)
 
 # RB — Ruby
 
-### T-1008 ruby: compiled `for k, v in hash` raises KeyError; `default_proc=`; missing Hash methods · P2 · RB · IN PROGRESS (RB worker, round 36) [V]
-Found by the RB worker, round 35 (oracle ruby 2.6). `for k, v in {a: 1, b: 2}; p [k, v]; end` → ruby `[:a, 1]` `[:b, 2]`; interpreter
-right, llvm.Run KeyError (makeForIn in ruby-to-llvm-ir.abnf calls js_pylen/js_pyget on the hash); `for` over a hash also does not
-raise the iteration count (MRI raises on an insert in the body). `h.default_proc = proc {..}` → the interpreter stores a key
-"default_proc", llvm.Run drops it; ruby `{:a=>1}`, 7, Proc. NoMethodError in all engines: store, transform_values!, transform_keys!,
-fetch_values, find_all, cycle, chunk_while, lazy, compare_by_identity, rehash, shift, replace. Hash#zip with a block never calls it.
+### T-1011 ruby: `compare_by_identity`; `default_proc=` type check; nested `for` destructure; value of `for`; `lazy.class` · P3 · RB · OPEN [V]
+Found by the RB worker, round 36 (oracle ruby 2.6). `compare_by_identity`/`compare_by_identity?` → NoMethodError; needs an identity
+flag on the dict passed into the shared lookups (dictFind in lib/interp-core.js, rubyDictFind/dictAppend in abnf/jsrt.go, layer 2
+rbDictFind/rbDictSet) and string keys kept as objects - a CORE-shared change. `h.default_proc = 5` → TypeError "wrong default_proc
+type Integer (expected Proc)"; ours stores it. `for a, (b, c) in [[1, [2, 3]]]; p [a, b, c]; end` → ruby `[1, 2, 3]`, interpreter
+`[1, [2, 3], nil]`, compiled IndexError. `p(for e in [] do end)` → `[]`; ours nil. `[1].lazy.class` → `Enumerator::Lazy`; ours
+`Enumerator`.
 
 # JS — JavaScript and TypeScript
 
@@ -1104,6 +1105,7 @@ T-958 python: a generator's run state is not reachable from layer 2 (send to a j
 T-967 metajs goja leg: `[o] + ""` calls an element's own toString; other UTF-16 languages still order strings by code point — PARTIAL - goja leg's array join/ToPrimitive pinned to the floor; UTF-16 ordering gaps filed per language (java already correct)
 T-997 ruby: adding a key during hash iteration must raise at the insertion (MRI iter_lev model) — DONE - MRI iter_lev model in all three engines, new key raises at the store; Module#constants order DECLINED (MRI symbol-table order, unspecified)
 T-990 bash: bad array subscripts, `for i in; do`, compiled nameref/subshell-function edge cases — DONE - bad subscripts quoted as written and abandon the line, computed nameref attributes/self-ref, nested function defs in subshells, run-time slots for unmentioned names; empty for-in list already worked
+T-1008 ruby: compiled `for k, v in hash` raises KeyError; `default_proc=`; missing Hash methods — PARTIAL - for over a live Hash (iterator protocol, ensure), default/default_proc=, store/transform_*!/fetch_values/shift/replace/rehash/find_all/cycle/chunk_while/lazy, zip with block; compare_by_identity filed
 
 # Settled — do not re-open
 
