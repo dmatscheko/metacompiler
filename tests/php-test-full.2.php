@@ -1878,6 +1878,48 @@ function s90() {
         && $s90a->current() === 2 && $s90b->current() === "b:Cannot resume an already running generator");
 }
 
+// ===== SECTION 91: Generator::throw on a running generator =====
+// throw(e) on a generator whose body (or the body it delegates to) is running
+// discards e and throws only the Error "Cannot resume an already running
+// generator" at the caller; the body is not resumed (zend_generator_throw_exception
+// fails when ZEND_GENERATOR_CURRENTLY_RUNNING is set, php-src
+// Zend/tests/gh19326.phpt). foreach by reference over an (array) cast writes
+// the copy, not the object's property.
+function s91self() {
+    global $s91g;
+    yield 1;
+    $log = "";
+    try { $s91g->throw(new Exception("x")); $log = "none"; }
+    catch (Exception $e) { $log = "Exception:" . $e->getMessage(); }
+    catch (Error $e) { $log = get_class($e) . ":" . $e->getMessage(); }
+    yield $log;
+    yield 3;
+}
+function s91inner() { global $s91o; yield 10; try { $s91o->throw(new LogicException("y")); } catch (Error $e) { yield "in:" . $e->getMessage(); } yield 12; }
+function s91outer() { yield from s91inner(); yield 20; }
+function s91esc() { global $s91u; yield 1; $s91u->throw(new Exception("z")); yield 2; }
+function s91() {
+    global $s91g, $s91o, $s91u;
+    $s91g = s91self();
+    $seen = [];
+    foreach ($s91g as $k => $v) { $seen[] = $k . "=" . $v; }
+    check("grun3", $seen === ["0=1", "1=Error:Cannot resume an already running generator", "2=3"]);
+    $s91o = s91outer();
+    $seen = [];
+    foreach ($s91o as $k => $v) { $seen[] = $k . "=" . $v; }
+    check("grun4", $seen === ["0=10", "1=in:Cannot resume an already running generator", "2=12", "0=20"]);
+    $s91u = s91esc();
+    $s91u->current();
+    $m = "";
+    try { $s91u->next(); } catch (Throwable $e) { $m = get_class($e) . ":" . $e->getMessage(); }
+    check("grun5", $m === "Error:Cannot resume an already running generator" && !$s91u->valid());
+    $t = new stdClass;
+    $t->arr = [1];
+    foreach ((array)$t as &$v) { $v[] = 5; }
+    unset($v);
+    check("oac3", count($t->arr) === 1);
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -1913,6 +1955,7 @@ function main() {
     s88(); // SECTION-CALL 88
     s89(); // SECTION-CALL 89
     s90(); // SECTION-CALL 90
+    s91(); // SECTION-CALL 91
     echo "full: " . $checks . " checks, " . $failures . " failures\n";
     return $failures;
 }
