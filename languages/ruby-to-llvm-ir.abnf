@@ -3011,7 +3011,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             r.b.NewCondBr(truthy(r.b, r.v), bodyB, exitB)
             var lp = {cont: headB, brk: exitB, bv: ""}
             loopStack.push(lp)
-            var rb = bodyT(bodyB)
+            var rb = emitLoopBody(bodyT, bodyB)
             rb.b.NewBr(headB)
             loopStack.pop()
             return loopValue(b, lp, headB, exitB)
@@ -3026,11 +3026,22 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             r.b.NewCondBr(truthy(r.b, r.v), exitB, bodyB)
             var lp = {cont: headB, brk: exitB, bv: ""}
             loopStack.push(lp)
-            var rb = bodyT(bodyB)
+            var rb = emitLoopBody(bodyT, bodyB)
             rb.b.NewBr(headB)
             loopStack.pop()
             return loopValue(b, lp, headB, exitB)
         }
+    }
+    // A loop body, emitted from startB, which is also where a `redo' in it (not in
+    // a block or closure of its own) branches back to: it re-runs the body without
+    // re-testing the condition or advancing. Twin of runLoopBody in
+    // ruby-interpreter.abnf.
+    function emitLoopBody(bodyT, startB) {
+        var savedRedo = curRedoB
+        curRedoB = startB
+        var rb = bodyT(startB)
+        curRedoB = savedRedo
+        return rb
     }
     // The value of a while / until loop: nil, or the value of the `break' that
     // ended it. A loop with a valued break keeps it in a hidden local (lp.bv,
@@ -4071,7 +4082,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // block emitFunc opened right after binding the parameters.
     function makeRedo(pos) {
         return function(b) {
-            if (curRedoB == null) { notImpl("redo outside of a block", pos); return {b: b, v: hUndef} }
+            if (curRedoB == null) { notImpl("redo outside of a block or loop", pos); return {b: b, v: hUndef} }
             b.NewBr(curRedoB)
             return {b: deadBlock(), v: hNull}
         }
@@ -4129,9 +4140,12 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                     var w = emitAsArray(bodyB, elV)
                     bodyB = emitDestructure(w.b, tgts, w.v)
                 }
-                // A bare break writes its nil to the value slot.
+                // A bare break writes its nil to the value slot; redo re-enters
+                // after the loop variables were bound.
                 loopStack.push({cont: headB, brk: exitB, bv: valName, bareNil: true, nv: resName})
-                var rb = body(bodyB)
+                var redoB = curF.NewBlock("")
+                bodyB.NewBr(redoB)
+                var rb = emitLoopBody(body, redoB)
                 callExt(rb.b, "js_scope_set", [curScopeV, emitStr(rb.b, resName), rb.v])
                 rb.b.NewBr(headB)
                 loopStack.pop()
@@ -5003,7 +5017,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             else { r.b.NewCondBr(truthy(r.b, r.v), exitB, bodyB) }
             var lp = {cont: headB, brk: exitB, bv: ""}
             loopStack.push(lp)
-            var rb = stmt(bodyB)
+            var rb = emitLoopBody(stmt, bodyB)
             rb.b.NewBr(headB)
             loopStack.pop()
             return loopValue(b, lp, headB, exitB)
@@ -5023,7 +5037,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             var exitB = curF.NewBlock("")
             var lp = {cont: condB, brk: exitB, bv: ""}
             loopStack.push(lp)
-            var rb = body(bodyB)
+            var rb = emitLoopBody(body, bodyB)
             rb.b.NewBr(condB)
             loopStack.pop()
             var rc = cond(condB)

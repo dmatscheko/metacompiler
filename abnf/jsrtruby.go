@@ -449,7 +449,8 @@ func (rt *jsrt) addRubyFmtExterns(m map[string]func(args []uint64) uint64) {
 		return m["js_rattrset"](a[:4])
 	}
 	// for VARS in COLL: js_rforit opens the loop (an Enumerator runs over its #to_a,
-	// see rubyForEnumVal), js_rfornext answers the next
+	// see rubyForEnumVal; any other object is `c.each { }`, run as its to_enum
+	// Enumerator, whose loop answers what #each returned), js_rfornext answers the next
 	// element or undefined when the loop is done, js_rforend closes it (from the
 	// loop's ensure). A Hash yields its live entries as [key, value] pairs inside
 	// an iteration over it (rubyHashIter's count), so an insertion in the body
@@ -467,6 +468,9 @@ func (rt *jsrt) addRubyFmtExterns(m map[string]func(args []uint64) uint64) {
 		c := u(a[0])
 		it := newJSObject()
 		it.set("v", c)
+		if rubyUserObj(c) && !rubyIsEnum(c) {
+			c = rt.rubyToEnum(c, nil)
+		}
 		if e, isObj := c.(*jsObject); isObj && rubyIsEnum(c) && rubyRunnable(e) {
 			it.set("e", c)
 			it.set("res", &jsArray{})
@@ -497,7 +501,8 @@ func (rt *jsrt) addRubyFmtExterns(m map[string]func(args []uint64) uint64) {
 		return w(it)
 	}
 	// js_rfornext(it, prev): prev is the value the body produced on the previous
-	// pass, kept for an Enumerator's loop value (rubyForEnumVal).
+	// pass, kept for an Enumerator's loop value (rubyForEnumVal) and, over a run,
+	// what the block call the run is suspended in answers.
 	m["js_rfornext"] = func(a []uint64) uint64 {
 		it := u(a[0]).(*jsObject)
 		c := it.props["c"]
@@ -506,7 +511,7 @@ func (rt *jsrt) addRubyFmtExterns(m map[string]func(args []uint64) uint64) {
 			res.elems = append(res.elems, u(a[1]))
 		}
 		if r, isRun := it.props["run"].(*rubyRun); isRun {
-			args, done := rt.rubyRunStep(r)
+			args, done := rt.rubyRunStep(r, u(a[1]))
 			if done {
 				return jsHUndefined
 			}
@@ -550,6 +555,12 @@ func (rt *jsrt) addRubyFmtExterns(m map[string]func(args []uint64) uint64) {
 	// Enumerator rubyForEnumVal's answer.
 	m["js_rforval"] = func(a []uint64) uint64 {
 		it := u(a[0]).(*jsObject)
+		if r, isRun := it.props["run"].(*rubyRun); isRun && r.t.props["__rcall"] == true {
+			if r.g == nil || r.g.retValue == nil {
+				return jsHNull
+			}
+			return w(r.g.retValue)
+		}
 		if e, isEnum := it.props["e"].(*jsObject); isEnum {
 			items, _ := it.props["c"].(*jsArray)
 			return w(rt.rubyForEnumVal(e, items, it.props["res"].(*jsArray).elems))
@@ -2556,18 +2567,19 @@ func (rt *jsrt) rubyRunSwap(r *rubyRun, on bool) {
 }
 
 // rubyRunStep steps the run: the next block call's arguments, or done once the
-// method has returned (its answer in the generator's retValue). A body that
-// raises is done and the exception propagates.
-func (rt *jsrt) rubyRunStep(r *rubyRun) ([]interface{}, bool) {
+// method has returned (its answer in the generator's retValue). sent is what the
+// block call the run is suspended in answers (nil for Enumerator#next). A body
+// that raises is done and the exception propagates.
+func (rt *jsrt) rubyRunStep(r *rubyRun, sent interface{}) ([]interface{}, bool) {
 	if r.done {
 		return nil, true
 	}
 	if r.g == nil {
 		drv := &hostFunc{name: "", fn: func(rt *jsrt, _ uint64, a []interface{}) interface{} {
 			y := argAt(a, 0)
-			return rt.rubyRunBody(r.t, func(args []interface{}) {
+			return rt.rubyRunBody(r.t, func(args []interface{}) interface{} {
 				rt.rubyRunSwap(r, false)
-				rt.call(y, jsUndef, args)
+				return rt.call(y, jsUndef, args)
 			})
 		}}
 		r.g = rt.call(rt.rubyRunFn, jsUndef, []interface{}{drv}).(*jsGenerator)
@@ -2582,7 +2594,7 @@ func (rt *jsrt) rubyRunStep(r *rubyRun) ([]interface{}, bool) {
 				panic(p)
 			}
 		}()
-		res = r.g.step(rt, jsUndef).(*jsObject)
+		res = r.g.step(rt, sent).(*jsObject)
 	}()
 	rt.rubyRunSwap(r, false)
 	if res.props["done"] == true {
@@ -2607,7 +2619,7 @@ func (rt *jsrt) rubyRunClose(r *rubyRun) {
 // rubyRunBody is the run's body: t's method over its source, every block call
 // handed to out; answers StopIteration#result. Twin of rbRunBody in
 // ruby-interpreter.abnf.
-func (rt *jsrt) rubyRunBody(t *jsObject, out func([]interface{})) interface{} {
+func (rt *jsrt) rubyRunBody(t *jsObject, out func([]interface{}) interface{}) interface{} {
 	src := t.props["src"]
 	meth, _ := t.props["meth"].(string)
 	var margs []interface{}
@@ -2617,8 +2629,7 @@ func (rt *jsrt) rubyRunBody(t *jsObject, out func([]interface{})) interface{} {
 	nilBlk := rubyBlkWrap(&hostFunc{name: "", fn: func(*jsrt, uint64, []interface{}) interface{} { return jsNull }})
 	if t.props["__rcall"] == true {
 		blk := &hostFunc{name: "", fn: func(rt *jsrt, _ uint64, a []interface{}) interface{} {
-			out(append([]interface{}{}, a...))
-			return jsNull
+			return out(append([]interface{}{}, a...))
 		}}
 		return rt.rubyMethod(src, meth, append(margs, rubyBlkWrap(blk)))
 	}
@@ -2650,7 +2661,7 @@ func (rt *jsrt) rubyRunBody(t *jsObject, out func([]interface{})) interface{} {
 			n = int(math.Trunc(rt.rubyImplicitInt(meth, memo, "")))
 		}
 	}
-	items := rubyEnumPump(meth, n, memo, func(step func(interface{}, bool) bool) { rt.rubyLazyDrive(src, step) }, out)
+	items := rubyEnumPump(meth, n, memo, func(step func(interface{}, bool) bool) { rt.rubyLazyDrive(src, step) }, func(a []interface{}) { out(a) })
 	switch meth {
 	case "each", "each_entry", "each_with_index", "reverse_each":
 		return src
@@ -2726,7 +2737,7 @@ func (rt *jsrt) rubyRunNext(t *jsObject, name string) interface{} {
 			r = &rubyRun{t: t, bang: jsNull}
 			t.set("__rrun", r)
 		}
-		args, done := rt.rubyRunStep(r)
+		args, done := rt.rubyRunStep(r, jsNull)
 		if done {
 			var res interface{} = jsNull
 			if r.g != nil {

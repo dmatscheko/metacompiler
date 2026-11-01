@@ -2146,6 +2146,69 @@ def s168
   check("blk168d", d == [[[7, 8], []], [[1, 2], []], [7, [8]]])
 end
 
+# ===== SECTION 169: `for` over any object with #each; redo in loops =====
+# `for x in obj` is `obj.each { |x| ... }` without a new scope, for any object
+# that has #each: the body runs between #each's own steps, its value is what the
+# yield answers, the loop answers what #each returned, and break, return and a
+# raise leave #each through its ensure. The loop variable outlives the loop. A
+# single variable takes the first value of a multi-value yield. redo re-runs a
+# loop body (for, while, until) without re-testing or advancing.
+# /usr/bin/ruby 2.6 settles each.
+class S169C
+  def initialize(l); @l = l; end
+  def each
+    @l << :start
+    r = yield 10
+    @l << r
+    yield 20
+    @l << -20
+    :done
+  ensure
+    @l << :ensure
+  end
+end
+class S169D; def each; yield 1; yield 2; end; end
+class S169P; def each; yield 1, 2; yield [3, 4]; end; end
+def s169ret(l)
+  for v in S169C.new(l)
+    return [:ret, v] if v == 20
+  end
+  :no
+end
+def s169
+  a = []
+  for x in S169D.new; a << x; end
+  l = []
+  for v in S169C.new(l)
+    l << v
+    break if v == 20
+  end
+  w = for v in S169C.new([]); break 7 if v == 20; end
+  check("for169a", a == [1, 2] && x == 2 && l == [:start, 10, nil, 20, :ensure] && w == 7)
+  l = []
+  r = for v in S169C.new(l); l << v; next v * 2 if v == 10; end
+  q = for y in S169D.new; y * 10; end
+  m = []
+  e = begin; for v in S169C.new(m); raise "boom" if v == 20; end; rescue => ex; ex.message; end
+  check("for169b", r == :done && l == [:start, 10, 20, 20, -20, :ensure] && q == 20 && y == 2 &&
+    e == "boom" && m == [:start, nil, :ensure])
+  l = []
+  p1 = []
+  for g, h in S169P.new; p1 << [g, h]; end
+  for g in S169P.new; p1 << g; end
+  check("for169c", s169ret(l) == [:ret, 20] && l == [:start, nil, :ensure] && p1 == [[1, 2], [3, 4], 1, [3, 4]])
+  c = []
+  n = 0
+  for v in [1, 2]; n += 1; redo if n == 2; c << [v, n]; end
+  i = 0
+  while i < 2; i += 1; n += 1; redo if n == 4; c << [:w, i, n]; end
+  k = 0
+  until k > 0; k += 1; n += 1; redo if n == 6; c << [:u, k, n]; end
+  l = []
+  for v in S169C.new(l); n += 1; redo if n == 8; l << v; nil; end
+  check("for169d", c == [[1, 1], [2, 3], [:w, 2, 5], [:u, 2, 7]] && l == [:start, 10, nil, 20, -20, :ensure])
+end
+
 s122() # SECTION-CALL 122
 s123() # SECTION-CALL 123
 s124() # SECTION-CALL 124
@@ -2193,5 +2256,6 @@ s165() # SECTION-CALL 165
 s166() # SECTION-CALL 166
 s167() # SECTION-CALL 167
 s168() # SECTION-CALL 168
+s169() # SECTION-CALL 169
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

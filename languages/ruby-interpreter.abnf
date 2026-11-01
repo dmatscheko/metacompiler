@@ -2737,6 +2737,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     function runLoopBody(bodyT) {
         var r = bodyT()
         if (isSig(r)) {
+            // redo re-runs the body without re-testing the condition or advancing.
+            while (r.redo === true) {
+                r = bodyT()
+                if (!isSig(r)) { return {stop: false, v: r} }
+            }
             if (r.brk === true) { return {stop: true, v: r.v} }
             if (r.cont === true) { return {stop: false, v: r.v} }
             return {stop: true, sig: r}         // a return propagates out
@@ -3109,7 +3114,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // for VARS in COLL ... end. The loop variables are {ftgt} multiple-assignment
     // targets (see ForVarList); the value of the loop is COLL, as Array#each
     // answers its receiver (an Enumerator: what its #each answers given the body's
-    // values, see forEnumVal), or the value of the `break` that ended it.
+    // values, see forEnumVal; any other object: what its own #each answers), or
+    // the value of the `break` that ended it.
     function forTargets(items) {
         var ts = []
         for (var i = 0; i < items.length; i++) { if (items[i].ftgt != undefined) { ts.push(items[i].ftgt) } }
@@ -3130,6 +3136,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             coll = collT()
             if (isDict(coll)) { return forInHash(coll, tgts, whole, body) }
             if (isEnum(coll) && rbRunnable(coll)) { return forInRun(coll, tgts, whole, body) }
+            // Any other object is `coll.each { body }`: its own #each, run as its
+            // to_enum Enumerator one yield at a time.
+            if (isUserObj(coll)) { return forInRun(toEnum(coll, []), tgts, whole, body) }
             var seq = []
             var en = isEnum(coll)
             if (Array.isArray(coll)) { seq = coll }
@@ -3175,16 +3184,21 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         return enumFinish(e, items, results)
     }
     // `for` over an Enumerator a run serves: each pass takes the next block call
-    // as #each makes it, so the body runs between #each's own steps. One loop
-    // variable takes the first argument, several destructure them packed. Twins:
-    // js_rforit / js_rfornext in abnf/jsrtruby.go and lib/ruby-rt.metajs.
+    // as #each makes it, so the body runs between #each's own steps, and the
+    // body's value is what that block call answers. One loop variable takes the
+    // first argument, several destructure them packed. Over a method called for
+    // its yields (to_enum) the loop answers what the method returned. Twins:
+    // js_rforit / js_rfornext / js_rforval in abnf/jsrtruby.go and
+    // lib/ruby-rt.metajs.
     function forInRun(e, tgts, whole, body) {
         var c = rbRunNew(e)
         var items = []
         var res = []
+        var prev = anytype
+        prev = null
         try {
             while (true) {
-                var r = rbRunStep(c, false)
+                var r = rbRunStep(c, false, prev)
                 if (r.done) { break }
                 var a = r.value
                 var el = anytype
@@ -3200,11 +3214,13 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                     return st.v
                 }
                 res.push(st.v)
+                prev = st.v
             }
         } catch (ex) {
             rbRunClose(c)
             throw ex
         }
+        if (e.__rcall === true) { return c.ret }
         return forEnumVal(e, items, res)
     }
     // One pass of a for body with el bound to the loop variables.
@@ -8618,20 +8634,23 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         c.bang = bang
     }
     // Inside a run's body: hand a to the step that resumed it and wait for the
-    // next one. A close resumes it with true, which unwinds the body.
+    // next one, whose sent value is what this block call answers. A close
+    // resumes it with rbRunExit, which unwinds the body.
+    var rbRunExit = {}
     function rbRunYield(a) {
         var c = rbRuns[rbRuns.length - 1]
         rbRuns.pop()
         rbRunSwap(c)
         var s = anytype
         s = coYield(a)
-        if (s === true) { throw {__rrunexit: true} }
-        return null
+        if (s === rbRunExit) { throw {__rrunexit: true} }
+        return s
     }
     // One step: {done: false, value: the block call's arguments} or, once the
-    // method has returned, {done: true, value: what it answered}. A body that
-    // raises is done and the exception propagates.
-    function rbRunStep(c, close) {
+    // method has returned, {done: true, value: what it answered}. sent is what
+    // the block call the run is suspended in answers (nil for Enumerator#next).
+    // A body that raises is done and the exception propagates.
+    function rbRunStep(c, close, sent) {
         if (c.done) { return {done: true, value: c.ret} }
         if (c.busy) { fail("generator already running") }
         if (c.co === null) {
@@ -8649,7 +8668,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         rbRuns.push(c)
         c.busy = true
         var r = anytype
-        try { r = coResume(c.co, close) }
+        try { r = coResume(c.co, close ? rbRunExit : sent) }
         catch (e) {
             c.busy = false
             c.done = true
@@ -8675,7 +8694,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             c.done = true
             return
         }
-        rbRunStep(c, true)
+        rbRunStep(c, true, null)
         c.done = true
     }
     // Enumerator#next / #peek on a run: the value peeked last, or the next one
@@ -8683,7 +8702,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     function rbRunNext(t, name) {
         if (t.pkHas !== true) {
             if (t.run === undefined || t.run === null) { t.run = rbRunNew(t) }
-            var r = rbRunStep(t.run, false)
+            var r = rbRunStep(t.run, false, null)
             if (r.done) {
                 var si = anytype
                 si = mkExc(hostGlobals["StopIteration"], "iteration reached an end")

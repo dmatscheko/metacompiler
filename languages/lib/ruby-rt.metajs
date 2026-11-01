@@ -10373,6 +10373,7 @@ function js_rattrw(o, k, v, sk, mk) {
 // abnf/jsrtruby.go, which states the rule.
 function js_rforit(c, whole) {
     var it = {c: c, i: 0, h: false, ks: false, k: null, lev: 0, n: 0, e: null, res: null, run: null, whole: whole === true}
+    if (rbUserObj(c) && !rbIsEnum(c)) { c = rbToEnum(c, []) }
     if (rbIsEnum(c) && rbRunnable(c)) {
         it["e"] = c
         it["res"] = []
@@ -10404,7 +10405,7 @@ function js_rfornext(it, prev) {
     var i = it["i"]
     if (it["res"] !== null && i > 0) { it["res"].push(prev) }
     if (it["run"] !== null) {
-        var a = rbRunStep(it["run"])
+        var a = rbRunStep(it["run"], prev)
         if (a === null) { return undefined }
         it["i"] = i + 1
         c.push(rbRunPack(a))
@@ -10449,6 +10450,7 @@ function rbForEnumItems(e, whole) {
 // The loop's value when it runs to its end. Twin of js_rforval in
 // abnf/jsrtruby.go.
 function js_rforval(it) {
+    if (it["run"] !== null && it["run"]["t"]["__rcall"] === true) { return it["run"]["ret"] }
     if (it["e"] === null) { return it["c"] }
     return rbForEnumVal(it["e"], it["c"], it["res"])
 }
@@ -11039,20 +11041,19 @@ function rbRunSwap(r, on) {
 }
 // The next block call's arguments, or null once the method has returned (its
 // answer in ret). A body that raises is done and the exception propagates.
-function rbRunStep(r) {
+function rbRunStep(r, sent) {
     if (r["done"] === true) { return null }
     if (r["g"] === null) {
         r["g"] = rbRunFns[0](function(y) {
             return rbRunBody(r["t"], function(a) {
                 rbRunSwap(r, false)
-                y.apply(undefined, a)
-                return null
+                return y.apply(undefined, a)
             })
         })
     }
     rbRunSwap(r, true)
     var res = anytype
-    try { res = r["g"].next(undefined) }
+    try { res = r["g"].next(sent) }
     catch (e) {
         r["done"] = true
         rbRunSwap(r, false)
@@ -11097,8 +11098,7 @@ function rbRunBody(t, out) {
             var a = []
             var i = 0
             while (i < arguments.length) { a.push(arguments[i]); i = i + 1 }
-            out(a)
-            return null
+            return out(a)
         }))
         return rbMethod(src, m, margs)
     }
@@ -11131,7 +11131,7 @@ function rbRunNext(t, name) {
             r = rbRunNew(t)
             t["__rrun"] = r
         }
-        var a = rbRunStep(r)
+        var a = rbRunStep(r, null)
         if (a === null) {
             var e = rbExc(rbBuiltinClass("StopIteration"), ["iteration reached an end"])
             e["__rframe"] = name
