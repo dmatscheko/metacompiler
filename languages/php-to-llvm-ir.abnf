@@ -2042,9 +2042,11 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         for (var i = 1; i < curLive.length; i++) { names = names + "," + curLive[i] }
         return names
     }
-    function emitFrameLeave(b) {
+    // retV is what the function returns, which may carry its parameters' array
+    // copies out of the frame (js_phown).
+    function emitFrameLeave(b, retV) {
         if (curLive == null || curLive.length == 0) { return }
-        callExt(b, "js_phleave", [curScopeV, emitStr(b, liveNames())])
+        callExt(b, "js_phleave", [curScopeV, emitStr(b, liveNames()), retV])
     }
     // A cell now in the slot of this frame's variable named nameV, which ref
     // computes at run time.
@@ -2055,7 +2057,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     }
     var coreRetStmt = retStmt
     retStmt = function(b, v) {
-        if (!inCtlBody()) { emitFrameLeave(b) }
+        if (!inCtlBody()) { emitFrameLeave(b, v) }
         return coreRetStmt(b, v)
     }
     function varCell(b, name) {
@@ -7902,14 +7904,14 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                 b = fit.b
                 argV = fit.v
             }
-            if (sawYield || curWrites["*"] === true || curWrites[params[i]] === true) {
-                argV = callExt(b, "js_phcopy", [argV])
-            }
+            var copied = sawYield || curWrites["*"] === true || curWrites[params[i]] === true
+            if (copied) { argV = callExt(b, "js_phcopy", [argV]) }
             if (armed && frm.byref.indexOf(i) >= 0) {
                 callExt(b, "js_phrebind", [hUndef, argV])
                 markCells(b, curScopeV, true)
             }
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, params[i]), argV])
+            if (copied && armed) { callExt(b, "js_phown", [curScopeV, emitStr(b, params[i]), argV]) }
         }
         var genChk = sawYield && chk != undefined && chk != null
         if (chk != undefined && chk != null) { emitArgCheck(b, chk, argVs, off, bodyB) }
@@ -7918,7 +7920,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         curSelfName = savedSelf
         curThisOwn = savedOwn
         curThisSure = savedSure
-        if (!isCtl) { emitFrameLeave(endB) }
+        if (!isCtl) { emitFrameLeave(endB, hNull) }
         if (!isCtl && curRet != null) { endB.NewRet(emitRetFit(endB, hUndef)) }
         else { endB.NewRet(hNull) }
         curLive = savedLive

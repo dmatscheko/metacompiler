@@ -3829,6 +3829,7 @@ func init() {
 		// languages/lib/php-rt.metajs.
 		m["js_phleave"] = func(a []uint64) uint64 {
 			sc := rt.scopeOf(a[0])
+			rt.phpOwnLeave(sc, u(a[2]))
 			if !sc.has("\x00cells") {
 				return 0
 			}
@@ -3843,6 +3844,24 @@ func init() {
 				}
 			}
 			rt.phpFrameRelease(sc, rt.toString(u(a[1])))
+			return 0
+		}
+		// js_phown(fr, name, copy): parameter name of frame fr holds copy, the
+		// frame's own copy of an array argument; one that kept references is
+		// recorded for phpOwnLeave. Twin of js_phown in languages/lib/php-rt.metajs.
+		m["js_phown"] = func(a []uint64) uint64 {
+			v := u(a[2])
+			if !phpArrHolds(v) {
+				return 0
+			}
+			sc := rt.scopeOf(a[0])
+			name := rt.toString(u(a[1]))
+			d := ""
+			if o, ok := sc.get("\x00own"); ok {
+				d = o.(string)
+			}
+			sc.put("\x00own", d+","+name)
+			sc.put("\x00own:"+name, v)
 			return 0
 		}
 		// At a try's start: how many frames phpFrames holds. Twin of js_phtry in
@@ -5466,4 +5485,68 @@ func (rt *jsrt) phpGenStart(g *jsGenerator, traverse bool) interface{} {
 	st.set("value", kv)
 	st.set("done", g.done)
 	return st
+}
+
+// A by-value array parameter is the frame's own copy of the argument, and the
+// references that copy kept each gained a holder. PHP shares the caller's array
+// until the callee writes it and frees its separated copy when the frame ends,
+// so either way the holders are back to what they were once the call returns:
+// phpOwnLeave gives them back (js_phown). Only two things can carry the copy
+// itself out of the frame, every other store copying it again: ret, what the
+// call returns, when that is no scalar, and a reference bound to the parameter,
+// which leaves a cell in its slot; either keeps the holders, as does a frame an
+// exception unwinds. Twin of
+// frameOwnLeave in php-interpreter.abnf and phOwnLeave in lib/php-rt.metajs.
+func (rt *jsrt) phpOwnLeave(sc *jsScope, ret interface{}) {
+	d, ok := sc.get("\x00own")
+	if !ok || !phpScalarOrNull(rt, ret) {
+		return
+	}
+	for _, n := range strings.Split(d.(string), ",") {
+		if n == "" {
+			continue
+		}
+		cp, _ := sc.get("\x00own:" + n)
+		if v, has := sc.get(n); !has || phpCellOf(v) == nil {
+			phpArrRelease(cp)
+		}
+	}
+}
+
+// phpScalarOrNull: v is null or a scalar, gettype() of no array or object.
+func phpScalarOrNull(rt *jsrt, v interface{}) bool {
+	t := rt.phpTypeName(v)
+	return t != "array" && t != "object" && t != "unknown type"
+}
+
+// phpArrHolds reports whether array v holds a reference, in a slot of its own or
+// of an array nested in it by value.
+func phpArrHolds(v interface{}) bool {
+	_, vals, ok := phpArrParts(v)
+	if !ok {
+		return false
+	}
+	for _, e := range vals.elems {
+		if phpCellOf(e) != nil || phpArrHolds(e) {
+			return true
+		}
+	}
+	return false
+}
+
+// phpArrRelease: array v is gone and stops holding the references in its slots,
+// and so do the arrays nested in it by value. Twin of arrRelease in
+// php-interpreter.abnf and phArrRelease in lib/php-rt.metajs.
+func phpArrRelease(v interface{}) {
+	_, vals, ok := phpArrParts(v)
+	if !ok {
+		return
+	}
+	for _, e := range vals.elems {
+		if c := phpCellOf(e); c != nil {
+			phpRefAdjust(c, -1)
+		} else {
+			phpArrRelease(e)
+		}
+	}
 }

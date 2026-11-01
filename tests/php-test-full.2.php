@@ -1694,6 +1694,48 @@ function s86() {
     check("vr1", $a === 3 && $fresh === 1 && $arr[0] === 6);
 }
 
+// ===== SECTION 87: a by-value array parameter holds no reference after the call =====
+// A by-value array parameter shares the caller's array until the callee writes
+// it, and the copy that write separates is freed with the frame, so once the
+// call has returned the references in the array have the holders they had
+// before it; an array copy then makes one only its own slot holds a plain value
+// (zend_array_dup_element). A copy the call returns, or that a closure it
+// returns captured, lives on and keeps holding them.
+function s87read($a) { return count($a); }
+function s87write($a) { $a[] = 2; $a["n"][] = 3; return 0; }
+function s87swap($a) { $a = [7]; return 0; }
+function s87ret($a) { $a[] = 2; return $a; }
+function s87clo($a) { $a[] = 1; return function () use ($a) { return count($a); }; }
+function s87() {
+    $x = 1;
+    $ax = [&$x];
+    s87read($ax);
+    s87swap($ax);
+    unset($x);
+    $cx = $ax;
+    $cx[0] = 9;
+    $y = 1;
+    $ay = [];
+    $ay["n"][0] = &$y;
+    s87write($ay);
+    unset($y);
+    $cy = $ay;
+    $cy["n"][0] = 9;
+    check("pc1", $ax[0] === 1 && $ay["n"][0] === 1);
+    $z = 1;
+    $az = [&$z];
+    $kept = s87ret($az);
+    $w = 1;
+    $aw = [&$w];
+    $k = s87clo($aw);
+    unset($z, $w);
+    $cz = $az;
+    $cz[0] = 9;
+    $cw = $aw;
+    $cw[0] = 9;
+    check("pc2", $az[0] === 9 && $aw[0] === 9);
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -1725,6 +1767,7 @@ function main() {
     s84(); // SECTION-CALL 84
     s85(); // SECTION-CALL 85
     s86(); // SECTION-CALL 86
+    s87(); // SECTION-CALL 87
     echo "full: " . $checks . " checks, " . $failures . " failures\n";
     return $failures;
 }

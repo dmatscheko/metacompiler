@@ -345,7 +345,8 @@ function phFramesDrop(n) {
     }
 }
 // Twin of m["js_phleave"] in abnf/jsrtphp.go.
-function js_phleave(fr, names) {
+function js_phleave(fr, names, ret) {
+    phOwnLeave(fr, ret)
     if (!scopeHas(fr, "\x00cells")) { return undefined }
     var i = phFrameScopes.length - 1
     while (i >= 0) {
@@ -358,6 +359,60 @@ function js_phleave(fr, names) {
         i = i - 1
     }
     phFrameRelease(fr, names)
+    return undefined
+}
+// Parameter name of frame fr holds copy, the frame's own copy of an array
+// argument; one that kept references is recorded for phOwnLeave. Twin of
+// m["js_phown"] in abnf/jsrtphp.go.
+function js_phown(fr, name, copy) {
+    if (!phArrHolds(copy)) { return undefined }
+    var d = ""
+    if (scopeHas(fr, "\x00own")) { d = scopeGet(fr, "\x00own") }
+    scopeDecl(fr, "\x00own", d + "," + name)
+    scopeDecl(fr, "\x00own:" + name, copy)
+    return undefined
+}
+// The holders a frame's own parameter copies kept go back when it returns. Twin
+// of phpOwnLeave in abnf/jsrtphp.go, which says when.
+function phOwnLeave(fr, ret) {
+    if (!scopeHas(fr, "\x00own")) { return undefined }
+    var t = phTypeName(ret)
+    if (t == "array" || t == "object" || t == "unknown type") { return undefined }
+    var ns = scopeGet(fr, "\x00own").split(",")
+    for (var i = 0; i < ns.length; i++) {
+        var n = ns[i]
+        if (n != "") {
+            var cp = scopeGet(fr, "\x00own:" + n)
+            if (!scopeHas(fr, n)) { phArrRelease(cp) }
+            else if (phCellOf(scopeGet(fr, n)) === undefined) { phArrRelease(cp) }
+        }
+    }
+    return undefined
+}
+// The values of an array, or undefined for anything else.
+function phArrVals(v) {
+    if (phIsDict(v)) { return v["vals"] }
+    if (phIsList(v)) { return v }
+    return undefined
+}
+// Twin of phpArrHolds in abnf/jsrtphp.go.
+function phArrHolds(v) {
+    var vs = phArrVals(v)
+    if (vs === undefined) { return false }
+    for (var i = 0; i < vs.length; i++) {
+        if (phCellOf(vs[i]) !== undefined) { return true }
+        if (phArrHolds(vs[i])) { return true }
+    }
+    return false
+}
+// Twin of phpArrRelease in abnf/jsrtphp.go.
+function phArrRelease(v) {
+    var vs = phArrVals(v)
+    if (vs === undefined) { return undefined }
+    for (var i = 0; i < vs.length; i++) {
+        var c = phCellOf(vs[i])
+        if (c !== undefined) { phRefAdjust(c, 0 - 1) } else { phArrRelease(vs[i]) }
+    }
     return undefined
 }
 // Twin of m["js_phtry"] in abnf/jsrtphp.go.

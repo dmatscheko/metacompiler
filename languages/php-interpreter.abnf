@@ -2045,7 +2045,11 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             if (!have && (p.def == null || (named != null && phpReqAfter(params, i)))) { phpMissArg(params, i, argset, who, cls) }
             if (!have) { v = p.def() }
             else if (p.typ != "") { v = phpArgFit(p, i + 1, v, argset, who, cls) }
-            declVar(p.name, phpCopy(v))
+            var kept = keptCells
+            var pv = anytype
+            pv = phpCopy(v)
+            declVar(p.name, pv)
+            if (keptCells != kept) { frameOwn(scopes[scopes.length - 1], p.name, pv) }
         }
     }
 
@@ -2090,23 +2094,67 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         }
     }
     // The frames of the calls in progress, innermost last, with their depths
-    // (coreDepth); a generator's is not among them. An exception a catch takes
-    // has unwound every frame deeper than the catch's own (core.excMatches runs
-    // once the depth is restored), and a frame returning normally is the
-    // innermost one left: frames above it were unwound by an exception that a
-    // finally's return or a generator's stop then dropped.
+    // (coreDepth). A generator's body keeps a stack of its own (genStep swaps it
+    // in), its own frame at the bottom. An exception a catch takes has unwound
+    // every frame deeper than the catch's own (core.excMatches runs once the depth
+    // is restored), and a frame returning normally is the innermost one left:
+    // frames above it were unwound by an exception that a finally's return then
+    // dropped.
     var callFrames = []
     var callDepths = []
     function callEnter(fr, depth) {
         callFrames.push(fr)
         callDepths.push(depth)
     }
-    function callLeave(fr) {
+    function callLeave(fr, ret) {
         while (callFrames.length > 0) {
             var top = callFrames.pop()
             callDepths.pop()
             if (top[CELLS_KEY] === true) { frameLeave(top) }
-            if (top === fr) { return }
+            if (top === fr) {
+                if (top[OWN_KEY] !== undefined) { frameOwnLeave(top, ret) }
+                return
+            }
+        }
+    }
+    // A by-value array parameter is the frame's own copy of the argument, and the
+    // references that copy kept (copySlot) each gained a holder. PHP shares the
+    // caller's array until the callee writes it and frees its separated copy when
+    // the frame ends, so either way the holders are back to what they were once
+    // the call returns: frameOwnLeave gives them back. Only two things can carry
+    // the copy itself out of the frame, every other store copying it again: what
+    // the call returns, when that is no scalar, and a reference bound to the
+    // parameter, which leaves a cell in its slot; either keeps the holders, as
+    // does a frame an exception unwinds. Twin of js_phown and js_phleave in lib/php-rt.metajs and
+    // abnf/jsrtphp.go. keptCells counts the references copies have kept.
+    var OWN_KEY = "\x00own"
+    var keptCells = 0
+    function frameOwn(fr, name, copy) {
+        if (fr[OWN_KEY] === undefined) { fr[OWN_KEY] = [] }
+        fr[OWN_KEY].push({n: name, a: copy})
+    }
+    function frameOwnLeave(fr, ret) {
+        if (!phpScalarOrNull(ret)) { return }
+        var own = fr[OWN_KEY]
+        for (var i = 0; i < own.length; i++) {
+            if (!hasOwn(fr, own[i].n) || !isRef(fr[own[i].n])) { arrRelease(own[i].a) }
+        }
+    }
+    // Twin of phpScalarOrNull in abnf/jsrtphp.go and phScalarOrNull in
+    // lib/php-rt.metajs.
+    function phpScalarOrNull(v) {
+        var t = phpTypeName(v)
+        return t != "array" && t != "object" && t != "unknown type"
+    }
+    // An array that is gone stops holding the references in its slots, and so do
+    // the arrays nested in it by value.
+    function arrRelease(a) {
+        var vs = a.vals
+        for (var i = 0; i < vs.length; i++) {
+            var e = anytype
+            e = vs[i]
+            if (isRef(e)) { e.rc = refHolders(e) - 1 }
+            else if (isArr(e)) { arrRelease(e) }
         }
     }
     function callsUnwound(depth) {
@@ -3505,7 +3553,11 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // One element of an array copy: a reference some other slot holds stays that
     // reference, one only its own slot holds becomes its value (zend_array_dup_element).
     function copySlot(e) {
-        if (isRef(e) && refHolders(e) > 1) { e.rc = e.rc + 1; return e }
+        if (isRef(e) && refHolders(e) > 1) {
+            e.rc = e.rc + 1
+            keptCells = keptCells + 1
+            return e
+        }
         return phpCopy(deref(e))
     }
 
@@ -5301,9 +5353,9 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                 k = ctxSelf()
                 scopes = saved
                 genArgCheck(params, argset, who, k)
-                return newGen(runClosureRun(params, body, captured, env, argset, who, true))
+                return newGen(runClosureRun(params, body, captured, env, argset, who))
             }
-            return runClosureRun(params, body, captured, env, argset, who, false)()
+            return runClosureRun(params, body, captured, env, argset, who)()
         }, "closure", 0)
     }
     function cloRecOf(v) {
@@ -5375,7 +5427,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         return phsCloDesc(name, file, line, statics, pn, pr, po)
     }
     // The closure's body as a zero-argument thunk, so a generator closure can defer it.
-    function runClosureRun(params, body, captured, env, argset, who, isGen) {
+    function runClosureRun(params, body, captured, env, argset, who) {
         return function() {
             var saved = scopes
             scopes = captured.slice(0)
@@ -5399,7 +5451,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             callEnter(fr, depth)
             r = body()
             coreDepth = depth - 1
-            callLeave(fr)
+            callLeave(fr, isSig(r) && r.ret === true ? r.v : null)
             scopes = saved
             if (isSig(r) && r.ret === true) { return r.v }
             return null
@@ -6926,7 +6978,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         callEnter(fr, depth)
         r = fn.body()
         coreDepth = depth - 1
-        callLeave(fr)
+        callLeave(fr, isSig(r) && r.ret === true ? r.v : null)
         scopes = saved
         if (isSig(r) && r.ret === true) { return r.v }
         return null
