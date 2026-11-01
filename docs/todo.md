@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1086** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1087** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -78,12 +78,11 @@ Structural; touches the shared generator floor (Go twin jsGenerator / runtime.c 
 - `for` over a user #each must interleave the body with #each's side effects (today all yields are collected first).
 Needs: interpreter coroutine running src.each(&blk) with blk = coYield, switching run state (block/self frames, rescue state) on resume; compiled: one emitted generator closure registered with the Go twin / layer 2 (js_genfn/js_yield are emitter-only externs); per-coroutine rubyCatchTags (Go) and js_rcatch/js_rthrow state (layer 2) plus the current-exception slot; close of an unfinished one must skip ensure.
 
-### T-1082 ruby: eager endless Enumerators answer a Lazy; to_enum on user Enumerable; Enumerator dup/clone · P3 · RB · IN PROGRESS (RB worker, round 48) [V]
-Oracle /usr/bin/ruby 2.6; all engines unless noted:
-- `[1, 2].cycle.take_while { |x| x < 2 }` -> [1]; ours a Lazy (the block-op path ignores the `lazy` flag). Same for blockless `.with_index`, uniq, zip on eager endless Enumerators (cycle, endless each_slice): MRI answers an Enumerator or runs eagerly.
-- `C.new.to_enum` on a user Enumerable: interpreter NoMethodError; MRI an Enumerator, `.lazy.each {}` on it -> :done. (to_enum/enum_for with external next is T-1069's scope; this item is the eager/each side only.)
-- `C.new.each_entry.lazy.each {}` -> the C instance; interpreter nil.
-- dup/clone of an eager Enumerator answer an Array; MRI an Enumerator.
+### T-1086 ruby: deferred Enumerator size after forcing; with_index value on to_enum; top-level to_enum · P3 · RB · OPEN [V]
+Oracle /usr/bin/ruby 2.6; interpreter seen, Go twin / layer 2 share the logic:
+- a deferred Enumerator over a user #each (`C.new.each_slice(1)`) answers `.size` as its element count once forced (`to_a`); MRI nil.
+- `with_index` / `with_object` with a block on a forced to_enum Enumerator answer the receiver; MRI the underlying method's value (e.g. :done).
+- `to_enum` at the top level (self is main) is not handled.
 
 # JS — JavaScript and TypeScript
 
@@ -1146,6 +1145,7 @@ T-1078 ruby: Lazy eager Enumerable surface; Lazy freeze/clone/dup; Enumerator-ba
 T-1080 php: trace frames for native builtins / generators; string callbacks in compiled traces — DONE (PHP r44, 3c4870f0): native builtins in progress get trace frames (opcode-compiled specials skipped per zend_try_compile_special_func), generator frames hang under foreach/yield-from/Generator->m() resumers, compiled string callbacks stay 'cb', cloBind keeps uses-$this; 3 legs agree with php-src; bench +0.02% paired
 T-1079 bash: quoted indexed subscripts on reads; literal kind conversion; small diagnostics — PARTIAL→split (SH r31, e639c597): quoted indexed subscripts on reads are arithmetic errors that abandon the line (${ia['1']}, $((..)), unset/test/read), nested subscripts, finer arithmetic diagnostics, literal kind-conversion error (top level vs function forms), compiled echo field join; 4 legs = bash 5.3 incl. stderr. nullglob needs a glob model (own ticket); LC_ALL=C policy carried over
 T-1081 kotlin: static typer gaps for reified inference; List/Nothing class names — DONE (KT r26, bb472757): static typer types an extension's this, map/mapIndexed results, first/last/single, conversions and String transforms (reified inference no longer falls back to Any); collection-interface KClasses (kotlin.collections.*), interface rendering of java classes, Nothing as java.lang.Void/void; 4 legs = kotlinc
+T-1082 ruby: eager endless Enumerators answer a Lazy; to_enum on user Enumerable; Enumerator dup/clone — DONE (RB r48, ebd5ce0b): ops on eager endless Enumerators run eagerly (cycle.take_while -> [1]), Object#to_enum/enum_for (incl. receiver-less 'return to_enum unless block_given?'), Enumerator dup/clone with frozen flag and the execution-context TypeError; 4 legs = ruby 2.6
 
 # Settled — do not re-open
 
