@@ -318,7 +318,7 @@ AsgTail     = [ AsgIdx ] :whitespace() AsgOp2 :whitespace() AsgRhs ;
 // (bash 5.3: `a[$'1']=5` and `a[\1]=5` are arithmetic syntax errors), while the key of an
 // associative one is the word: mkAsgIdx makes both.
 AsgIdx      <~~ push(mkAsgIdx(takeAll(), arSrc(up.start + 1, up.pos - 1))) ~~> = "[" :whitespace() { AsgIdxSeg } "]" ;
-AsgIdxSeg   = AsgIdxQ | DqSeg | ExpSeg | IdxBare ;
+AsgIdxSeg   = AsgIdxQ | DqSeg | ExpSeg | IdxPair | IdxBare ;
 AsgIdxQ     <~~ push(idxQuoted(pop(), arSrc(up.start, up.pos))) ~~> = AnsiSeg | SqSeg | EscSeg ;
 AsgOp2      <~~ push({aop2: up.in}) ~~> = "+=" | AsgEq ;
 AsgRhs      = ArrayLit | AsgWord ;
@@ -558,10 +558,19 @@ PeXfOp      <~~ push({xf: up.in}) ~~> = "Q" | "E" | "P" | "A" | "K" | "a" | "k" 
 // An empty SUBSCRIPT is no target: `${b[]}` is the run-time "bad substitution" (PeBad).
 // peTgt: the target as written, the prefix of an arithmetic error in ${v:off} (ArOff).
 PeTarget    <~~ peTgt = arSrc(up.start, up.pos) ~~> = PeIdxRef | PeName ;
-PeIdxRef    <~~ push({hasIdx: 1, idxAll: idxAllOf(arSrc(up.start, up.pos))}) ~~> = PeName "[" !"]" IdxWord "]" ;
+// An indexed array's SUB is arithmetic text that keeps a quoted part's quotes, as an
+// assignment's does (AsgIdx); SubIdx pushes the word, then the {aiw, aqw, aqd, aqa} record
+// PeIdxRef, ArLhsElem and ArElem take back. Twin of SubIdx in bash-interpreter.abnf.
+PeIdxRef    <~~ push(peIdxItem(pop(), arSrc(up.start, up.pos))) ~~> = PeName "[" !"]" SubIdx "]" ;
+SubIdx      <~~ pushSubIdx(mkAsgIdx(takeAll(), "")) ~~> = { AsgIdxSeg } ;
 IdxWord     <~~ push(mkWord(takeAll())) ~~> = { IdxSeg } ;
-IdxSeg      = SqSeg | DqSeg | AnsiSeg | ExpSeg | EscSeg | IdxBare ;
-IdxBare     <~~ push(makeConst(up.in)) ~~> = !@+"]}\"'\\$`" ;
+IdxSeg      = SqSeg | DqSeg | AnsiSeg | ExpSeg | EscSeg | IdxPair | IdxBare ;
+// A subscript holds brackets in pairs, so one may nest: ${a[j[0]]}, a[j[1]]=x. Twin of
+// IdxPair in bash-interpreter.abnf.
+IdxPair     = IdxOpen { IdxSeg } IdxClose ;
+IdxOpen     <~~ push(makeConst("[")) ~~> = "[" ;
+IdxClose    <~~ push(makeConst("]")) ~~> = "]" ;
+IdxBare     <~~ push(makeConst(up.in)) ~~> = !@+"[]}\"'\\$`" ;
 PeName      <~~ push({pname: up.in}) ~~> = PeNameTok ;
 PeNameTok   = PeIdent | PeDigits | "@" | "*" | "#" | "?" | "!" | "$" | "-" ;
 PeIdent     = ( "a"..."z" | "A"..."Z" | "_" ) { "a"..."z" | "A"..."Z" | "0"..."9" | "_" } ;
@@ -627,7 +636,7 @@ BraceBare   <~~ push(makeConst(up.in)) ~~> = !@+"}\"'\\$`" ;
 // The expansions of a double-quoted context: a ' in the word of ${v-w} is kept, and the
 // text between two of them expanded. Twin of DqExpSeg in bash-interpreter.abnf; see there.
 DqExpSeg    = ArithExp | CmdSub | DqBackSub | FunSub | ReplySub | DqDollarBrace | DollarName | DollarDigit | DollarSpecial | DollarLit ;
-DqDollarBrace <~~ push(mkParamExp(takeAll())) ~~>
+DqDollarBrace <~~ push(mkParamExp(dqIdxItems(takeAll()))) ~~>
             = "${" :whitespace() DqPeBody "}" ;
 DqPeBody    = PeLen | DqPeIndForm | DqPeCore | PeLenBad | PeBad ;
 DqPeIndForm <~~ push({indp: 1}) ~~> = "!" ( PePfxNames | DqPeCore ) ;
@@ -678,10 +687,10 @@ ArAssignForm <~~ push(mkArAssign(takeAll(), up.pos)) ~~> = ArLhs ArAsgOp ArAssig
 // NAME[SUBSCRIPT] is an array element, an operand and an assignment target alike. Twin of
 // ArLhs / ArElem in bash-interpreter.abnf.
 ArLhs       = ArLhsElem | ArLhsName ;
-ArLhsElem   <~~ push(mkArLhs(takeAll())) ~~> = ArElemName "[" !"]" IdxWord "]" ;
+ArLhsElem   <~~ push(mkArLhs(takeAll())) ~~> = ArElemName "[" !"]" SubIdx "]" ;
 ArElemName  <~~ push({lhs: up.in}) ~~> = ArName ;
 ArLhsName   <~~ push({lhs: up.in}) ~~> = ArName ;
-ArElem      <~~ push(mkArElem(takeAll())) ~~> = ArElemName "[" !"]" IdxWord "]" ;
+ArElem      <~~ push(mkArElem(takeAll())) ~~> = ArElemName "[" !"]" SubIdx "]" ;
 ArAsgOp     <~~ push({aop: up.in}) ~~>
             = "+=" | "-=" | "*=" | "/=" | "%=" | "<<=" | ">>=" | "&=" | "^=" | "|=" | ArPlainAsg ;
 ArPlainAsg  = "=" NotEq ;
@@ -1907,10 +1916,13 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var rtArrIset = rtDecl("rt_arr_iset", false, [1, 1, 1])
     var rtArrKey = rtDecl("rt_arr_key", true, [1, 1])
     var rtArrKey1 = rtDecl("rt_arr_key1", true, [1, 1])
+    var rtArrKeyAr = rtDecl("rt_arr_keyar", true, [1, 1])
+    var rtSubEval = rtDecl("ar_subeval", 3, [1])
     var rtArrAkey = rtDecl("rt_arr_akey", true, [1, 1, 1, 0])
     var rtTakeSubbad = rtDecl("rt_take_subbad", false, [])
     var rtArrAmark = rtDecl("rt_arr_amark", false, [1])
     var rtArrConv = rtDecl("rt_arr_conv", false, [1, 1, 0])
+    var rtArrConvLit = rtDecl("rt_arr_convlit", false, [1, 1, 0, 1, 0])
     var rtArrEmpty = rtDecl("rt_arr_empty", false, [1, 0])
     var rtUnsetName = rtDecl("rt_unset_name", false, [1])
     var rtUnsetRef = rtDecl("rt_unset_ref", false, [1])
@@ -2006,7 +2018,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var rtUnsetX = rtDecl("rt_unset_x", false, [0, 0])
     var rtSubx = rtDecl("rt_subx", true, [1])
     var rtSubEmpty = rtDecl("rt_sub_empty", false, [1, 1, 1])
-    var rtVset = rtDecl("rt_vset", false, [1])
+    var rtVset = rtDecl("rt_vset", false, [1, 0])
+    var rtSubxa = rtDecl("rt_subxa", true, [1, 1])
     var rtUnsetEnv = rtDecl("rt_unset_env", false, [0, 0])
     var rtEnvEnd = rtDecl("rt_env_end", false, [0, 0])
     var rtGlobSwap = rtDecl("rt_glob_swap", false, [0])
@@ -2233,7 +2246,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 tg = b.NewCall(rtIndName, [gepStr(b, name), nullStr, varString(b, name), one])
             } else {
                 var ikind = idxKind(idxIt, idxW)
-                var rs = subKeyOf(b, name, idxW, null, ikind == 0)
+                var rs = subKeyOf(b, name, idxW, null, ikind == 0, idxAqOf(idxIt))
                 b = rs.b
                 var sv = b.NewCall(rtIndSub, [gepStr(b, name), rs.k, subKind(b, ikind, rs.v)])
                 tg = b.NewCall(rtIndName, [gepStr(b, name), rs.v, sv, zero])
@@ -2404,14 +2417,14 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // indexed array's an arithmetic expression (rt_arr_key; a canonical literal index
             // needs no evaluation). Computed ONCE per expansion, so `${a[i++]}` steps i once.
             var kindC = idxKind(idxIt, idxW)
-            var subOf = function(b) { return subKeyOf(b, name, idxW, rtNm ? cell.nm : null, kindC == 0) }
+            var subOf = function(b) { return subKeyOf(b, name, idxW, rtNm ? cell.nm : null, kindC == 0, idxAqOf(idxIt)) }
             var kindOf = function(b, sub) { return subKind(b, kindC, sub) }
             if (pe == "len") {
                 // An associative SUB that expands to nothing (rt_sub_empty).
                 var lenAs = maybeAssoc(name) && !rtNm && kindC == 0 && idxIt != null
                 var lenLbl = lenAs ? peTgt.slice(peTgt.indexOf("[")) : ""
                 return {c: undefined, fn: function(b) {
-                    var rs = lenAs ? subKeyOf(b, name, idxW, null, false) : subOf(b)
+                    var rs = lenAs ? subKeyOf(b, name, idxW, null, false, idxAqOf(idxIt)) : subOf(b)
                     b = rs.b
                     if (lenAs) { b.NewCall(rtSubEmpty, [nmOf(b), rs.k, gepStr(b, lenLbl)]) }
                     var k = kindOf(b, rs.v)
@@ -3266,18 +3279,18 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function mkArVar(name) { return function(b) { return {b: b, v: b.NewCall(rtArith, varString(b, name))} } }
     // NAME[SUB]: items = [{lhs}, subscriptWord]. Twin of mkArLhs / mkArElem in
     // bash-interpreter.abnf.
-    function mkArLhs(items) { return {lhs: items[0].lhs, sub: items[1]} }
+    function mkArLhs(items) { return {lhs: items[0].lhs, sub: items[1], aq: items[2].aqa} }
     function mkArElem(items) {
-        var name = items[0].lhs, w = items[1]
+        var name = items[0].lhs, w = items[1], aq = items[2].aqa
         return function(b) {
-            var rk = subKeyOf(b, name, w, null)
+            var rk = subKeyOf(b, name, w, null, false, aq, true)
             return {b: rk.b, v: rk.b.NewCall(rtArith, rk.b.NewCall(rtScGet, [gepStr(rk.b, name), rk.k]))}
         }
     }
     // An assignment target's key ({b, k}, k null for a plain name), its value, and the store.
     function arLhsKey(b, lhs) {
         if (lhs.sub == undefined) { return {b: b, k: null} }
-        return subKeyOf(b, lhs.lhs, lhs.sub, null)
+        return subKeyOf(b, lhs.lhs, lhs.sub, null, false, lhs.aq, true)
     }
     function arLhsGet(b, name, k) {
         if (k == null) { return b.NewCall(rtArith, varString(b, name)) }
@@ -3504,21 +3517,46 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         return {name: name, idxT: idxT, aqT: aqT, op: op, valT: valT, lit: lit, isrc: isrc}
     }
-    // A quoted part SEG of an assignment's subscript, written as SRC, and {aq} the part it is in an
-    // indexed array's arithmetic (AsgIdx). Twin of idxQuoted in bash-interpreter.abnf.
-    function idxQuoted(seg, src) { return {seg: seg, aq: (src.charAt(0) == "$") ? ansiWord(bashSq(ansiC(src.slice(2, src.length - 1)))) : makeConst(src)} }
-    // NAME[SUB]'s subscript: {aidx} as written, {aiw} the word, {aqw} an indexed array's
-    // arithmetic text when a part of SUB is quoted, else null. Twin of mkAsgIdx in
+    // A quoted part SEG of a subscript, written as SRC, and the part it is in an indexed
+    // array's arithmetic text: {aq} for an assignment and ${NAME[SUB]}, {aqd} for ${NAME[SUB]}
+    // in double quotes, {aqa} in an arithmetic expression. Twin of idxQuoted in
     // bash-interpreter.abnf.
+    function idxQuoted(seg, src) {
+        var c0 = src.charAt(0)
+        var aq = (c0 == "$") ? ansiWord(bashSq(ansiC(src.slice(2, src.length - 1)))) : makeConst((c0 == "\\") ? dqEsc(src) : src)
+        var bare = c0 == "'" && (src.indexOf("$") >= 0 || src.indexOf("`") >= 0)
+        return {seg: seg, ansi: c0 == "$", aq: aq, aqd: (c0 == "$") ? seg : aq, aqa: bare ? seg : aq}
+    }
+    // NAME[SUB]'s subscript: {aidx} as written, {aiw} the word, {aqw} {aqd} {aqa} an indexed
+    // array's arithmetic text (idxQuoted) when a part of SUB is quoted, else null. Twin of
+    // mkAsgIdx in bash-interpreter.abnf.
     function mkAsgIdx(items, src) {
-        var w = [], q = [], anyQ = false
+        var w = [], q = [], qd = [], qa = []
+        var anyQ = false, anyQd = false
         var i
         for (i = 0; i < items.length; i++) {
             var it = items[i]
-            if (it.aq != undefined) { w.push(it.seg); q.push(it.aq); anyQ = true }
-            else { w.push(it); q.push(it) }
+            if (it.aq != undefined) {
+                w.push(it.seg); q.push(it.aq); qd.push(it.aqd); qa.push(it.aqa)
+                anyQ = true
+                if (!it.ansi) { anyQd = true }
+            }
+            else { w.push(it); q.push(it); qd.push(it); qa.push(it) }
         }
-        return {aidx: src, aiw: mkWord(w), aqw: anyQ ? mkWord(q) : null}
+        return {aidx: src, aiw: mkWord(w), aqw: anyQ ? mkWord(q) : null, aqd: anyQd ? mkWord(qd) : null, aqa: anyQ ? mkWord(qa) : null}
+    }
+    function pushSubIdx(x) { push(x.aiw); push(x) }
+    function peIdxItem(x, src) { return {hasIdx: 1, idxAll: idxAllOf(src), idxAq: x.aqw, idxAqd: x.aqd} }
+    // ${NAME[SUB]} inside double quotes takes SUB's double-quoted arithmetic text.
+    function dqIdxItems(items) {
+        var out = []
+        var i
+        for (i = 0; i < items.length; i++) {
+            var it = items[i]
+            if (typeof it != "function" && it.hasIdx != undefined) { out.push({hasIdx: 1, idxAll: it.idxAll, idxAq: (it.idxAqd != undefined) ? it.idxAqd : null}) }
+            else { out.push(it) }
+        }
+        return out
     }
     // An array literal element list; a bare word contributes one element per FIELD. Every
     // word is expanded BEFORE the array is cleared: f=([5]=x "${f[@]}") reads the old f.
@@ -3636,12 +3674,18 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function subAq(a, assoc) { return a.aqT != null && a.xl != true && !assoc }
     function asgSubOf(b, a, assoc) {
         if (!subAq(a, assoc)) { return evalWord(b, a.idxT) }
-        if (!maybeAssoc(a.name)) { return evalWord(b, a.aqT) }
+        return subTextOf(b, a.name, a.idxT, a.aqT)
+    }
+    // The text of subscript word w of NAME: an indexed array's arithmetic text aq when a part
+    // of it is quoted (null: none), else the word. Twin of idxRaw in bash-interpreter.abnf.
+    function subTextOf(b, name, w, aq) {
+        if (aq == null) { return evalWord(b, w) }
+        if (!maybeAssoc(name)) { return evalWord(b, aq) }
         var asB = curF.NewBlock(""), ixB = curF.NewBlock(""), jB = curF.NewBlock("")
-        b.NewCondBr(b.NewICmp(llvm.enum.IPredNE, b.NewCall(rtIsAssoc, gepStr(b, a.name)), zero), asB, ixB)
-        var r1 = evalWord(asB, a.idxT)
+        b.NewCondBr(b.NewICmp(llvm.enum.IPredNE, b.NewCall(rtIsAssoc, gepStr(b, name)), zero), asB, ixB)
+        var r1 = evalWord(asB, w)
         r1.b.NewBr(jB)
-        var r2 = evalWord(ixB, a.aqT)
+        var r2 = evalWord(ixB, aq)
         r2.b.NewBr(jB)
         return {b: jB, v: jB.NewPhi([llvm.ir.NewIncoming(r1.v, r1.b), llvm.ir.NewIncoming(r2.v, r2.b)])}
     }
@@ -3751,8 +3795,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var bi = name.indexOf("[")
         if (bi > 0 && name.charAt(name.length - 1) == "]") {
             var sub = name.slice(bi + 1, name.length - 1)
-            // The subscript is a word, expanded when the builtin stores (rt_subx).
-            var subT = bashSubNeedsX(sub) ? {fn: function(b) { return {b: b, v: b.NewCall(rtSubx, gepStr(b, sub))} }, c: undefined} : makeConst(sub)
+            // The subscript is expanded when the builtin stores (rt_subxa).
+            var anm = name.slice(0, bi)
+            var subT = bashSubNeedsX(sub) ? {fn: function(b) { return {b: b, v: b.NewCall(rtSubxa, [gepStr(b, anm), gepStr(b, sub)])} }, c: undefined} : makeConst(sub)
             return {name: name.slice(0, bi), op: "=", idxT: subT, isrc: sub, lit: null, valT: doneWord(v), soft: subP}
         }
         return {name: name, op: "=", idxT: null, lit: null, valT: doneWord(v), soft: subP}
@@ -4009,10 +4054,15 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (refChk) { bad = b.NewCall(rtNrefBad, [gepStr(b, kw), v]) }
             else if (plusArr && !fresh) { bad = b.NewCall(rtArrPlus, [gepStr(b, kw), gepStr(b, names[j]), (plus.indexOf("a") >= 0) ? one : zero, (plus.indexOf("A") >= 0) ? one : zero]) }
             else if (bareArr && !fresh && (a == null || a.lit == null)) { bad = b.NewCall(rtArrConv, [gepStr(b, kw), gepStr(b, names[j]), assoc ? one : zero]) }
+            else if (bareArr && !fresh) {
+                var fnP = (global && curFrame != null) ? loadVar(b, "FUNCNAME") : emptyPtr(b)
+                bad = b.NewCall(rtArrConvLit, [gepStr(b, kw), gepStr(b, names[j]), assoc ? one : zero, fnP, (curFrame != null) ? one : zero])
+            }
             if (bad == null) { return declOneBody(b, j, v) }
             var okB = curF.NewBlock(""), badB = curF.NewBlock(""), endB = curF.NewBlock("")
             b.NewCondBr(b.NewICmp(llvm.enum.IPredNE, bad, zero), badB, okB)
             badB.NewStore(one, refuseP)
+            badB = emitAbortCheck(badB)
             badB.NewBr(endB)
             okB = declOneBody(okB, j, v)
             okB.NewBr(endB)
@@ -4527,8 +4577,13 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // A flag can come out of an expansion (`opts="-n"; echo $opts x`). When the scan stops on a
         // non-constant word, the flag scan happens at RUN time over the fields (rt_echo); the constant
         // path stays because it is the common case and emits no call. `echo -e` always goes to
-        // rt_echo: its \c ends all further output.
-        if (runtimeFlags || escapes) {
+        // rt_echo: its \c ends all further output. So do two or more words when one is a
+        // field list: one that yields no field takes no separating blank (x=; echo A $x B is
+        // "A B"), and the static join below cannot see that.
+        var fieldWords = false
+        var fi
+        for (fi = start; fi < args.length && args.length - start > 1; fi++) { if (args[fi].f == true) { fieldWords = true } }
+        if (runtimeFlags || escapes || fieldWords) {
             var ei
             var acc = nilList(b)
             // NOT evalWord: that JOINS a field list into one word, and the whole point
@@ -4593,6 +4648,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var s0 = t.slice(t.indexOf("[") + 1, t.length - 1)
         return (s0 == "@" || s0 == "*") ? s0 : ""
     }
+    function idxAqOf(it) { return (it != null && it.idxAq != undefined) ? it.idxAq : null }
     // The subscript kind a PeIdxRef item fixes (subKindC's numbers), or the word's own.
     function idxKind(it, w) {
         if (it == null || it.idxAll == undefined) { return subKindC(w) }
@@ -4612,10 +4668,17 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // plain variable name reads that variable's slot directly.
     // nmv, when not null, is the array's name as a run-time value (an indirection's target).
     // elem: the subscript names an element even when it expands to @ or * (rt_arr_key1).
-    function subKeyOf(b, name, w, nmv, elem) {
+    // aq: SUB's arithmetic text when a part of it is quoted (SubIdx). ar: the subscript is
+    // met by the arithmetic evaluator, whose subscript errors abandon the line
+    // (rt_arr_keyar, ar_subeval).
+    function subKeyOf(b, name, w, nmv, elem, aq, ar) {
+        if (aq != undefined && nmv == null) {
+            var ra = subTextOf(b, name, w, aq)
+            return {b: ra.b, v: ra.v, k: ra.b.NewCall((ar == true) ? rtArrKeyAr : ((elem == true) ? rtArrKey1 : rtArrKey), [gepStr(ra.b, name), ra.v])}
+        }
         var r = evalWord(b, w)
         var key = r.v
-        var keyF = (elem == true) ? rtArrKey1 : rtArrKey
+        var keyF = (ar == true) ? rtArrKeyAr : ((elem == true) ? rtArrKey1 : rtArrKey)
         if (nmv != null) { key = r.b.NewCall(keyF, [nmv, r.v]) }
         else if (w.c != undefined && isIndexLit(w.c)) { key = gepStr(r.b, w.c) }
         else if (w.c != undefined && isIdentText(w.c)) {
@@ -4623,7 +4686,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var isA = bb.NewICmp(llvm.enum.IPredNE, bb.NewCall(rtIsAssoc, gepStr(bb, name)), zero)
             var ib = curF.NewBlock(""), jb = curF.NewBlock("")
             bb.NewCondBr(isA, jb, ib)
-            var ik = ib.NewCall(rtArrIkey, [gepStr(ib, name), ib.NewCall(rtArith, varString(ib, w.c))])
+            var ik = ib.NewCall(rtArrIkey, [gepStr(ib, name), ib.NewCall((ar == true) ? rtSubEval : rtArith, varString(ib, w.c))])
             ib.NewBr(jb)
             key = jb.NewPhi([llvm.ir.NewIncoming(r.v, bb), llvm.ir.NewIncoming(ik, ib)])
             return {b: jb, v: r.v, k: key}
@@ -4641,11 +4704,15 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         return true
     }
-    // The same for a literal subscript text (unset 'a[k]', [[ -v a[k] ]]).
-    function litKeyOf(b, name, t) {
-        if (bashSubNeedsX(t)) { return b.NewCall(rtArrKey, [gepStr(b, name), b.NewCall(rtSubx, gepStr(b, t))]) }
+    // The same for the literal subscript text of test -v / [[ -v ]] (cond) a[k], evaluated
+    // as rt_vset does.
+    function litKeyOf(b, name, t, cond) {
+        if (bashSubNeedsX(t)) {
+            var x = cond ? b.NewCall(rtSubx, gepStr(b, t)) : b.NewCall(rtSubxa, [gepStr(b, name), gepStr(b, t)])
+            return b.NewCall(rtArrKeyAr, [gepStr(b, name), x])
+        }
         if (isIndexLit(t)) { return gepStr(b, t) }
-        return b.NewCall(rtArrKey, [gepStr(b, name), gepStr(b, t)])
+        return b.NewCall(rtArrKeyAr, [gepStr(b, name), gepStr(b, t)])
     }
     function splitSubscript(s0) {
         var i
@@ -4674,15 +4741,16 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function isNonEmptyStr(b, v) { return b.NewICmp(llvm.enum.IPredNE, b.NewCall(rtStrlen, v), zero) }
     function boolStatus(b, i1) { return b.NewSelect(i1, zero, one) }
 
-    function testUnaryIR(b, op, arg) {
+    // cond: the operand of [[ -v ]], whose SUB is expanded as a word (rt_vset).
+    function testUnaryIR(b, op, arg, cond) {
         if (op == "-z") { return boolStatus(b, isEmptyStr(b, arg.v)) }
         if (op == "-n") { return boolStatus(b, isNonEmptyStr(b, arg.v)) }
         if (op == "-v") {
-            if (arg.c == undefined) { return boolStatus(b, b.NewICmp(llvm.enum.IPredNE, b.NewCall(rtVset, arg.v), zero)) }
+            if (arg.c == undefined) { return boolStatus(b, b.NewICmp(llvm.enum.IPredNE, b.NewCall(rtVset, [arg.v, cond ? one : zero]), zero)) }
             var sv = splitSubscript(arg.c)
             if (sv.key != null) {
                 return boolStatus(b, b.NewICmp(llvm.enum.IPredNE,
-                    b.NewCall(rtArrHas, [gepStr(b, sv.name), litKeyOf(b, sv.name, sv.key)]), zero))
+                    b.NewCall(rtArrHas, [gepStr(b, sv.name), litKeyOf(b, sv.name, sv.key, cond)]), zero))
             }
             var setScalar = b.NewICmp(llvm.enum.IPredNE, loadVar(b, arg.c), unsetPtr(b))
             var setArray = b.NewICmp(llvm.enum.IPredNE, b.NewCall(rtArrAny, gepStr(b, arg.c)), zero)
@@ -4754,7 +4822,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (isTestUnary(t) && st.i + 1 < a.length && !isTestBinary(tcNext(a, st))) {
             var opnd = a[st.i + 1]
             st.i = st.i + 2
-            return testUnaryIR(b, t, opnd)
+            return testUnaryIR(b, t, opnd, false)
         }
         var lhs = a[st.i]
         st.i = st.i + 1
@@ -4798,7 +4866,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         var st = {i: 0}
         storeStatus(b, tcOr(b, vals, st))
-        return b
+        // An arithmetic error in a -v subscript abandons the line. Twin of the test arm of
+        // runCommand in bash-interpreter.abnf.
+        return emitAbortCheck(b)
     }
 
     // ---- pipelines, subshells, groups, (( )), [[ ]], redirections ----
@@ -4957,7 +5027,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             b = r.b
             var st = b.NewSelect(b.NewICmp(llvm.enum.IPredNE, r.v, zero64), zero, one)
             storeStatus(b, b.NewSelect(takeArithErr(b), one, st))
-            return b
+            return emitAbortCheck(b)
         }
     }
     // let EXPR ... : status from the LAST expression; the first error stops the command. The
@@ -5021,7 +5091,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             b.NewStore(emptyPtr(b), gArPfx)
             var st = b.NewSelect(b.NewICmp(llvm.enum.IPredNE, last, zero64), zero, one)
             storeStatus(b, b.NewSelect(takeArithErr(b), one, st))
-            return b
+            return emitAbortCheck(b)
         }
         var wrapped = [core]
         for (i = 0; i < redirs.length; i++) { wrapped.push(redirs[i]) }
@@ -5039,7 +5109,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var tf = b.NewSelect(b.NewICmp(llvm.enum.IPredNE, r.v, zero), zero, one)
             tf = b.NewSelect(takeArithErr(b), one, tf)
             storeStatus(b, b.NewSelect(err, llvm.constant.NewInt(i32, 2), tf))
-            return b
+            return emitAbortCheck(b)
         }
     }
     function foldCondOr(items) {
@@ -5075,7 +5145,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return function(b) {
             var r = evalWord(b, w)
             b = r.b
-            var st = testUnaryIR(b, op, {v: r.v, c: w.c})
+            var st = testUnaryIR(b, op, {v: r.v, c: w.c}, true)
             return {b: b, v: b.NewZExt(b.NewICmp(llvm.enum.IPredEQ, st, zero), i32)}
         }
     }
@@ -5677,9 +5747,13 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     // A command that evaluates arithmetic ITSELF ((( )), let, [[ -eq ]], for (( ))) fails
     // with status 1 on an error instead: this answers whether one was raised, and clears it.
+    // An error in a subscript (arith_err 2, ar_subeval) stays raised, and the caller's
+    // emitAbortCheck then abandons the line. Twin of takeArithErr in bash-interpreter.abnf.
     function takeArithErr(b) {
-        var e = b.NewICmp(llvm.enum.IPredNE, b.NewLoad(i32, gArithErr), zero)
-        b.NewStore(zero, gArithErr)
+        var ae = b.NewLoad(i32, gArithErr)
+        var e = b.NewICmp(llvm.enum.IPredNE, ae, zero)
+        var two = llvm.constant.NewInt(i32, 2)
+        b.NewStore(b.NewSelect(b.NewICmp(llvm.enum.IPredEQ, ae, two), two, zero), gArithErr)
         return e
     }
     // set -e: leave on a failing command, unless it is running as a condition.
@@ -6374,6 +6448,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                         var ru = evalWord(b, argTs[uk])
                         b = ru.b
                         ust = b.NewOr(ust, b.NewCall(rtUnsetName, ru.v))
+                        b = emitAbortCheck(b)
                         continue
                     }
                     var sp0 = splitSubscript(argTs[uk].c)
@@ -6409,6 +6484,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                         }
                     } else {
                         ust = b.NewOr(ust, b.NewCall(rtArrUnset, [gepStr(b, sp0.name), gepStr(b, sp0.key)]))
+                        // An arithmetic error in the subscript abandons the line at once. Twin
+                        // of the unset arm of runCommand in bash-interpreter.abnf.
+                        b = emitAbortCheck(b)
                     }
                 }
                 storeStatus(b, ust)
@@ -7269,8 +7347,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             bb.NewBr(step)
             var rs = stepT(heapRelease(step, mk))
             rs.b.NewCondBr(takeArithErr(rs.b), bad, head)
-            bad.NewStore(one, lst)
-            bad.NewBr(ex)
+            var bad2 = emitAbortCheck(bad)
+            bad2.NewStore(one, lst)
+            bad2.NewBr(ex)
             var xb = heapRelease(ex, mk)
             storeStatus(xb, xb.NewLoad(i32, lst))
             return xb

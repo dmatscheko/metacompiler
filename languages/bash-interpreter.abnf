@@ -599,13 +599,29 @@ PeXfOp      <~~ push({xf: up.in}) ~~> = "Q" | "E" | "P" | "A" | "K" | "a" | "k" 
 // An empty SUBSCRIPT is no target: `${b[]}` is the run-time "bad substitution" (PeBad).
 // peTgt: the target as written, the prefix of an arithmetic error in ${v:off} (ArOff).
 PeTarget    <~~ peTgt = arSrc(up.start, up.pos) ~~> = PeIdxRef | PeName ;
-PeIdxRef    <~~ push({hasIdx: 1, idxAll: idxAllOf(arSrc(up.start, up.pos))}) ~~> = PeName "[" !"]" IdxWord "]" ;
+// An indexed array's SUB is arithmetic text that keeps a quoted part's quotes, as an
+// assignment's does (AsgIdx): bash 5.3 answers ${a['1']} and $(( a[\1] )) with an
+// arithmetic syntax error. A $'...' part is re-quoted outside double quotes and is its
+// value inside them ("${a[$'1']}" is a[1]). SubIdx pushes the word, then the {aiw, aqw,
+// aqd} record PeIdxRef, ArLhsElem and ArElem take back.
+PeIdxRef    <~~ push(peIdxItem(pop(), arSrc(up.start, up.pos))) ~~> = PeName "[" !"]" SubIdx "]" ;
+SubIdx      <~~ pushSubIdx(mkAsgIdx(takeAll(), "")) ~~> = { AsgIdxSeg } ;
 IdxWord     <~~ push(mkWord(takeAll())) ~~> = { IdxSeg } ;
 IdxSeg      = AnsiSeg | SubXSeg ;
 // The subscript of a NAME[SUB] string a builtin was handed (subExpand): no $'...' there.
 SubXWord    <~~ push(mkWord(takeAll())) ~~> = { SubXSeg } ;
-SubXSeg     = SqSeg | DqSeg | ExpSeg | EscSeg | IdxBare ;
-IdxBare     <~~ push(makeConst(up.in)) ~~> = !@+"]}\"'\\$`" ;
+SubXSeg     = SqSeg | DqSeg | ExpSeg | EscSeg | IdxPair | IdxBare ;
+// A subscript holds brackets in pairs, so one may nest: ${a[j[0]]}, a[j[1]]=x.
+IdxPair     = IdxOpen { IdxSeg } IdxClose ;
+IdxOpen     <~~ push(makeConst("[")) ~~> = "[" ;
+IdxClose    <~~ push(makeConst("]")) ~~> = "]" ;
+// The same subscript of an indexed array: expanded as in double quotes, where a ' is a
+// character and a " is removed (subExpandDq).
+SubDqWord   <~~ push(mkWord(takeAll())) ~~> = SubDqSeg :whitespace() { SubDqSeg } ;
+SubDqSeg    = DqExpSeg | DqEsc | SubDqQuote | SubDqLit ;
+SubDqQuote  <~~ push(makeConst("")) ~~> = '"' ;
+SubDqLit    <~~ push(makeConst(up.in)) ~~> = !@+"\"$\\`" ;
+IdxBare     <~~ push(makeConst(up.in)) ~~> = !@+"[]}\"'\\$`" ;
 PeName      <~~ push({pname: up.in}) ~~> = PeNameTok ;
 PeNameTok   = PeIdent | PeDigits | "@" | "*" | "#" | "?" | "!" | "$" | "-" ;
 PeIdent     = ( "a"..."z" | "A"..."Z" | "_" ) { "a"..."z" | "A"..."Z" | "0"..."9" | "_" } ;
@@ -680,7 +696,7 @@ BraceBare   <~~ push(makeConst(up.in)) ~~> = !@+"}\"'\\$`" ;
 // text between two of them is expanded. Backslash follows the double-quote rule, plus \}.
 // bash 5.3, u unset:  "${u:-'a}b'}" -> 'a}b'   "${u:-'$x'}" -> 'abc'   "${u:-\'}" -> \'
 DqExpSeg    = ArithExp | CmdSub | DqBackSub | FunSub | ReplySub | DqDollarBrace | DollarName | DollarDigit | DollarSpecial | DollarLit ;
-DqDollarBrace <~~ push(mkParamExp(takeAll())) ~~>
+DqDollarBrace <~~ push(mkParamExp(dqIdxItems(takeAll()))) ~~>
             = "${" :whitespace() DqPeBody "}" ;
 DqPeBody    = PeLen | DqPeIndForm | DqPeCore | PeLenBad | PeBad ;
 DqPeIndForm <~~ push({indp: 1}) ~~> = "!" ( PePfxNames | DqPeCore ) ;
@@ -736,10 +752,10 @@ ArAssignForm <~~ push(mkArAssign(takeAll(), up.pos)) ~~> = ArLhs ArAsgOp ArAssig
 // `$(( nums[0] + nums[2] ))`, `(( m[p]++ ))`, `(( a[i] += 2 ))`. An empty SUBSCRIPT leaves
 // the expression to the run-time evaluator, which has bash's errors for it (arSubscript).
 ArLhs       =ArLhsElem | ArLhsName ;
-ArLhsElem   <~~ push(mkArLhs(takeAll())) ~~> = ArElemName "[" !"]" IdxWord "]" ;
+ArLhsElem   <~~ push(mkArLhs(takeAll())) ~~> = ArElemName "[" !"]" SubIdx "]" ;
 ArElemName  <~~ push({lhs: up.in}) ~~> = ArName ;
 ArLhsName   <~~ push({lhs: up.in}) ~~> = ArName ;
-ArElem      <~~ push(mkArElem(takeAll())) ~~> = ArElemName "[" !"]" IdxWord "]" ;
+ArElem      <~~ push(mkArElem(takeAll())) ~~> = ArElemName "[" !"]" SubIdx "]" ;
 ArAsgOp     <~~ push({aop: up.in}) ~~>
             = "+=" | "-=" | "*=" | "/=" | "%=" | "<<=" | ">>=" | "&=" | "^=" | "|=" | ArPlainAsg ;
 ArPlainAsg  = "=" NotEq ;
@@ -2579,6 +2595,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var name = "", indp = false, hasIdx = false, bare = true, pfx = false
         var idxAll0 = anytype
         idxAll0 = null
+        var idxAq0 = null
         var fns = []
         var rest = []
         var i
@@ -2587,7 +2604,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (typeof it == "function") { fns.push(it); continue }
             if (it.indp != undefined) { indp = true; continue }
             if (it.pname != undefined) { name = it.pname; continue }
-            if (it.hasIdx != undefined) { hasIdx = true; idxAll0 = idxAllItem(it); continue }
+            if (it.hasIdx != undefined) { hasIdx = true; idxAll0 = idxAllItem(it); idxAq0 = idxAqItem(it); continue }
             if (it.op != undefined || it.pe != undefined || it.xf != undefined) { bare = false }
             if (it.pfx != undefined) { pfx = true }
             rest.push(it)
@@ -2626,7 +2643,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return function() {
             var tg = anytype
             if (idxT == null) { tg = indName(refName, null, null, false) }
-            else { var raw = wordJoin(idxT()); var ik = subKeyAll(refName, raw, idxAll0); tg = indName(refName, ik, raw, (idxAll0 == null) ? (ik == "@" || ik == "*") : idxAll0 != "") }
+            else { var raw = idxRaw(refName, idxT, idxAq0); var ik = subKeyAll(refName, raw, idxAll0); tg = indName(refName, ik, raw, (idxAll0 == null) ? (ik == "@" || ik == "*") : idxAll0 != "") }
             if (tg != null && (tg == "@" || tg == "*" || isElemRef(tg))) {
                 var key = "$" + tg
                 if (!hasOwn(byTarget, key)) { byTarget[key] = paramCore(targetItems(tg, "!" + refName, rest), null) }
@@ -2664,12 +2681,13 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var errName = null
         var idxAll = anytype
         idxAll = null
+        var idxAq = null
         var i
         for (i = 0; i < items.length; i++) {
             var it = items[i]
             if (typeof it == "function") { args.push(it); wordT = it }
             else if (it.qname != undefined) { errName = it.qname }
-            else if (it.hasIdx != undefined) { hasIdx = true; idxAll = idxAllItem(it) }
+            else if (it.hasIdx != undefined) { hasIdx = true; idxAll = idxAllItem(it); idxAq = idxAqItem(it) }
             else if (it.lenp != undefined) { lenp = true }
             else if (it.badsub != undefined) { badsub = it.badsub }
             else if (it.indp != undefined) { indp = true }
@@ -2721,7 +2739,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // ${!a[@]} / ${!a[*]} list the keys.
         if (idxT != null && !(indp && !bare)) {
             var readIdx = function() {
-                return subKeyAll(name, wordJoin(idxT()), idxAll)
+                return subKeyAll(name, idxRaw(name, idxT, idxAq), idxAll)
             }
             var isWhole = function(sub) { return (idxAll == null) ? (sub == "@" || sub == "*") : idxAll != "" }
             if (pe == "len") {
@@ -2742,7 +2760,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             }
             if (pe == "ind") {
                 return function() {
-                    var raw = wordJoin(idxT())
+                    var raw = idxRaw(name, idxT, idxAq)
                     var sub = subKeyAll(name, raw, idxAll)
                     if (isWhole(sub)) {
                         var ks = scKeyList(name)
@@ -3170,6 +3188,18 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // -A of an indexed array, -a of an associative one, is refused. Twin of rt_arr_conv.
             if (bareArr && !fresh && isArr(names[k]) && arrs[arrKey(names[k])].assoc != assoc && (asgs[k] == null || asgs[k].lit == null)) {
                 diagErr(kw + ": " + names[k] + ": cannot convert " + (assoc ? "indexed to associative" : "associative to indexed") + " array\n")
+                roFail = true
+                return
+            }
+            // So is it with a literal, which runs with the words (bash 5.3): "NAME: cannot
+            // convert ..." abandons the line at top level; in a function, where a -g one names
+            // the function first, the builtin reports it again and fails. Twin of
+            // rt_arr_convlit.
+            if (bareArr && !fresh && isArr(names[k]) && arrs[arrKey(names[k])].assoc != assoc) {
+                var cmsg = names[k] + ": cannot convert " + (assoc ? "indexed to associative" : "associative to indexed") + " array\n"
+                if (fnDepth == 0) { diagErr(cmsg); abortSignal = {ret: 1, isExit: 1, soft: 1}; return }
+                diagErr((global ? getVarVal("FUNCNAME") + ": " : "") + cmsg)
+                diagErr(kw + ": " + cmsg)
                 roFail = true
                 return
             }
@@ -4284,6 +4314,26 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return arrIdxKey(name, arEval(sub), name)
     }
     function idxAllItem(it) { return (it.idxAll != undefined) ? it.idxAll : null }
+    function idxAqItem(it) { return (it.idxAq != undefined) ? it.idxAq : null }
+    // The text of subscript word w: an indexed array's arithmetic text aq when a part of it
+    // is quoted (SubIdx), else the word.
+    function idxRaw(name, w, aq) {
+        if (aq != null && !assocFact(name, false)) { return wordJoin(aq()) }
+        return wordJoin(w())
+    }
+    function pushSubIdx(x) { push(x.aiw); push(x) }
+    function peIdxItem(x, src) { return {hasIdx: 1, idxAll: idxAllOf(src), idxAq: x.aqw, idxAqd: x.aqd} }
+    // ${NAME[SUB]} inside double quotes takes SUB's double-quoted arithmetic text.
+    function dqIdxItems(items) {
+        var out = []
+        var i
+        for (i = 0; i < items.length; i++) {
+            var it = items[i]
+            if (typeof it != "function" && it.hasIdx != undefined) { out.push({hasIdx: 1, idxAll: it.idxAll, idxAq: (it.idxAqd != undefined) ? it.idxAqd : null}) }
+            else { out.push(it) }
+        }
+        return out
+    }
     function subKey(name, sub) {
         if (sub == "@" || sub == "*" || assocFact(name, false)) { return sub }
         return arrIdxKey(name, arEval(sub), name)
@@ -4876,14 +4926,32 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // A name's value is itself an expression: x=010 is 8, r=a reads a.
     function mkArVar(name) { return function() { return arEval(getVarVal(name)) } }
     // NAME[SUB]: items = [{lhs}, subscriptWordThunk].
-    function mkArLhs(items) { return {lhs: items[0].lhs, sub: items[1]} }
+    // {aq} is the subscript's arithmetic text when a part of it is quoted (SubIdx).
+    function mkArLhs(items) { return {lhs: items[0].lhs, sub: items[1], aq: items[2].aqa} }
     function mkArElem(items) {
-        var name = items[0].lhs, w = items[1]
-        return function() { return arEval(scGet(name, subKey(name, wordJoin(w())))) }
+        var name = items[0].lhs, w = items[1], aq = items[2].aqa
+        return function() { return arEval(scGet(name, subKeyAr(name, idxRaw(name, w, aq)))) }
     }
     // The current value of an assignment target, and the store back into it; `key` is null
     // for a plain name.
-    function arLhsKey(lhs) { return (lhs.sub != undefined) ? subKey(lhs.lhs, wordJoin(lhs.sub())) : null }
+    function arLhsKey(lhs) { return (lhs.sub != undefined) ? subKeyAr(lhs.lhs, idxRaw(lhs.lhs, lhs.sub, lhs.aq)) : null }
+    // An indexed array's subscript met by the arithmetic evaluator (or test -v) is an
+    // expression of its own: its errors carry no command's prefix and abandon the command
+    // line, (( )) and let included - bash 5.3 prints only the error for
+    // `(( a[1+] )); echo $?` (takeArithErr). Twin of ar_subeval in lib/bash-rt.c.
+    var arSubErr = false
+    function arSubEval(sub) {
+        var svp = arPfx
+        arPfx = ""
+        var k = arEval(sub)
+        arPfx = svp
+        if (arithErr) { arSubErr = true }
+        return k
+    }
+    function subKeyAr(name, sub) {
+        if (sub == "@" || sub == "*" || assocFact(name, false)) { return sub }
+        return arrIdxKey(name, arSubEval(sub), name)
+    }
     function arLhsGet(name, key) { return arEval((key != null) ? scGet(name, key) : getVarVal(name)) }
     function arLhsSet(name, key, v) {
         if (arithErr) { return }
@@ -5156,12 +5224,25 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             arP = arP + 1
             return arS.slice(s0, arP - 1)
         }
-        // A blank subscript, `b[ ]`, is element 0. Twin of ar_subscript.
-        arWs()
-        var k = (arAt(0) == 93) ? 0 : arComma()
-        arWs()
-        if (arAt(0) != 93) { arErr("missing `]'"); return null }
+        // An indexed array's subscript runs to the matching "]" and is an expression of its
+        // own, whose errors name it alone: bash 5.3, let "y=a[1+]" is `1+: arithmetic syntax
+        // error: operand expected`, and a subscript without its "]" is "bad array subscript"
+        // at the name. A blank subscript, `b[ ]`, is element 0. Twin of ar_subscript.
+        var n0 = arP - 1 - nm.length
+        var s1 = arP
+        var depth = 0
+        while (arP < arLen && !(arAt(0) == 93 && depth == 0)) {
+            if (arAt(0) == 91) { depth = depth + 1 }
+            if (arAt(0) == 93) { depth = depth - 1 }
+            arP = arP + 1
+        }
+        if (arP >= arLen) { arP = n0; arErr("bad array subscript"); return null }
+        var sub = arS.slice(s1, arP)
         arP = arP + 1
+        // A skipped operand's subscript is not evaluated at all: (( 0 && a[1+] )) is 1.
+        if (arNoeval > 0) { return "0" }
+        var k = arSubEval(sub)
+        if (arBad) { return null }
         return arrIdxKey(nm, k, nm)
     }
     // A variable's value as an operand: empty is 0, anything else is itself an expression.
@@ -5356,6 +5437,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         arWs()
         if (arBad || arAt(0) != 63) { return cv }
         arP = arP + 1
+        // An operand missing after "?" or ":" is bash's "expression expected", which has no
+        // "arithmetic syntax error" prefix. Twin of ar_cond.
+        arWs()
+        if (arP >= arLen || arAt(0) == 58) { return arErr("expression expected") }
         var taken = !arIsZero(cv)
         if (!taken) { arNoeval = arNoeval + 1 }
         var a = arComma()
@@ -5364,6 +5449,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (arBad) { return 0 }
         if (arAt(0) != 58) { return arErr("`:' expected for conditional expression") }
         arP = arP + 1
+        arWs()
+        if (arP >= arLen) { return arErr("expression expected") }
         if (taken) { arNoeval = arNoeval + 1 }
         var b = arCondS()
         if (taken) { arNoeval = arNoeval - 1 }
@@ -5435,6 +5522,13 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (c1 == 61) { return c0 == 43 || c0 == 45 || c0 == 42 || c0 == 47 || c0 == 37 || c0 == 38 || c0 == 94 || c0 == 124 }
         return (c0 == 60 || c0 == 62) && c1 == c0 && arAt(2) == 61
     }
+    // Can cc begin an arithmetic token (an operand or an operator)? What is left after a
+    // whole expression is "syntax error in expression" when it can, else bash's "invalid
+    // arithmetic operator" (`1 '1'`, `1 @`). Twin of ar_tokstart.
+    function arTokStart(cc) {
+        if (arIdCh(cc, false)) { return true }
+        return "=<>!&|^+-*/%~?:,()".indexOf(String.fromCharCode(cc)) >= 0
+    }
     function arEval(s) {
         var i = 0
         var n = s.length
@@ -5458,7 +5552,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             v = arComma()
             arWs()
             if (!arBad && arP < arLen) {
-                if (arAt(0) == 41) { arErr("arithmetic syntax error: invalid arithmetic operator") }
+                if (!arTokStart(arAt(0))) { arErr("arithmetic syntax error: invalid arithmetic operator") }
                 else if (arAsgOpHere()) { arErr("attempted assignment to non-variable") }
                 else { arErr("arithmetic syntax error in expression") }
             }
@@ -5498,23 +5592,36 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         return {name: name, idxT: idxT, aqT: aqT, op: op, valT: valT, lit: lit, isrc: isrc, lbl: name}
     }
-    // A quoted part SEG of an assignment's subscript, written as SRC, and {aq} the part it is in an
-    // indexed array's arithmetic (AsgIdx). Twin of idxQuoted in bash-to-llvm-ir.abnf.
-    function idxQuoted(seg, src) { return {seg: seg, aq: makeConst((src.charAt(0) == "$") ? bashSq(seg()) : src)} }
-    // NAME[SUB]'s subscript: {aidx} as written, {aiw} the word, {aqw} an indexed array's
-    // arithmetic text when a part of SUB is quoted, else null. Twin of mkAsgIdx in
-    // bash-to-llvm-ir.abnf.
+    // A quoted part SEG of a subscript, written as SRC, and the part it is in an indexed
+    // array's arithmetic text, which bash expands as in double quotes: {aq} for an assignment
+    // and ${NAME[SUB]} ($'...' re-quoted, \x as in double quotes), {aqd} for ${NAME[SUB]} in
+    // double quotes ($'...' its value), {aqa} in an arithmetic expression, where a
+    // single-quoted part holding a $ or ` loses its quotes (bash 5.3: $(( a['$x'] )) is an
+    // error at "$x"). Twin of idxQuoted in bash-to-llvm-ir.abnf.
+    function idxQuoted(seg, src) {
+        var c0 = src.charAt(0)
+        var aq = (c0 == "$") ? bashSq(seg()) : ((c0 == "\\") ? dqEsc(src) : src)
+        var bare = c0 == "'" && (src.indexOf("$") >= 0 || src.indexOf("`") >= 0)
+        return {seg: seg, ansi: c0 == "$", aq: makeConst(aq), aqd: (c0 == "$") ? seg : makeConst(aq), aqa: bare ? seg : makeConst(aq)}
+    }
+    // NAME[SUB]'s subscript: {aidx} as written, {aiw} the word, {aqw} {aqd} {aqa} an indexed
+    // array's arithmetic text (idxQuoted) when a part of SUB is quoted, else null. Twin of
+    // mkAsgIdx in bash-to-llvm-ir.abnf.
     function mkAsgIdx(items, src) {
         var w = []
-        var q = []
-        var anyQ = false
+        var q = [], qd = [], qa = []
+        var anyQ = false, anyQd = false
         var i
         for (i = 0; i < items.length; i++) {
             var it = items[i]
-            if (typeof it != "function" && it.aq != undefined) { w.push(it.seg); q.push(it.aq); anyQ = true }
-            else { w.push(it); q.push(it) }
+            if (typeof it != "function" && it.aq != undefined) {
+                w.push(it.seg); q.push(it.aq); qd.push(it.aqd); qa.push(it.aqa)
+                anyQ = true
+                if (!it.ansi) { anyQd = true }
+            }
+            else { w.push(it); q.push(it); qd.push(it); qa.push(it) }
         }
-        return {aidx: src, aiw: mkWord(w), aqw: anyQ ? mkWord(q) : null}
+        return {aidx: src, aiw: mkWord(w), aqw: anyQ ? mkWord(q) : null, aqd: anyQd ? mkWord(qd) : null, aqa: anyQ ? mkWord(qa) : null}
     }
     // Evaluate an array literal into a list of (key, value) pairs; a bare word contributes
     // one element per FIELD, so a=($x) with x="a b c" really is three elements - but not in
@@ -5641,13 +5748,22 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // subshell treats it as any exit, a top-level line catches it (runProgram). Both leave
     // status 1. Twin of emitAbortCheck in bash-to-llvm-ir.abnf.
     function takeAbort() {
-        if (abortSignal != null) { var ab = abortSignal; abortSignal = null; arithErr = false; return ab }
-        if (arithErr) { arithErr = false; subBad = false; return {ret: 1, isExit: 1, soft: 1} }
+        if (abortSignal != null) { var ab = abortSignal; abortSignal = null; arithErr = false; arSubErr = false; return ab }
+        if (arithErr) { arithErr = false; arSubErr = false; subBad = false; return {ret: 1, isExit: 1, soft: 1} }
         return null
     }
     // A command that evaluates arithmetic ITSELF ((( )), let, [[ -eq ]], for (( ))) fails
     // with status 1 on an error instead: this answers whether one was raised, and clears it.
-    function takeArithErr() { var e = arithErr; arithErr = false; subBad = false; return e }
+    // An error in a subscript (arSubEval) stays raised, and the caller abandons the line
+    // (subErrAbort). Twin of takeArithErr in bash-to-llvm-ir.abnf.
+    function takeArithErr() {
+        var e = arithErr
+        if (!arSubErr) { arithErr = false }
+        arSubErr = false
+        subBad = false
+        return e
+    }
+    function subErrAbort() { return arithErr ? takeAbort() : null }
     // An expansion error in a value abandons the command before anything is stored:
     // `k=$(( 1/0 ))` leaves k as it was. decl: an operand of a declaration builtin, whose
     // array literal reports an element as applyArrayLit says. Twin of the emitAbortCheck in
@@ -6970,12 +7086,24 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (!hasOwn(subXT, k)) { subXT[k] = arCompile(t, "SubXWord", false) }
         return wordJoin(subXT[k]())
     }
+    // An INDEXED array's subscript in such a string is arithmetic text expanded as in double
+    // quotes, which keeps a quote character, a $'...' unexpanded and a backslash before any
+    // but $ ` " \: bash 5.3 answers unset "a['1']" with an arithmetic syntax error at '1'.
+    // Twin of rt_subxa.
+    var subXTd = {}
+    function subExpandDq(t) {
+        if (!bashSubNeedsX(t)) { return t }
+        var k = "$" + t
+        if (!hasOwn(subXTd, k)) { subXTd[k] = arCompile(t, "SubDqWord", false) }
+        return wordJoin(subXTd[k]())
+    }
     // splitSubscript with the subscript expanded.
     function splitSubX(s0) {
         var sp = splitSubscript(s0)
         if (sp.key == null) { return sp }
-        return {name: sp.name, key: subExpand(sp.key)}
+        return {name: sp.name, key: subXOf(sp.name, sp.key)}
     }
+    function subXOf(name, raw) { return assocFact(name, false) ? subExpand(raw) : subExpandDq(raw) }
     // "name" or "name[key]" - the form `unset a[0]` and `[[ -v a[k] ]]` use.
     function splitSubscript(s0) {
         var i
@@ -6999,12 +7127,14 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (t == "-nt" || t == "-ot" || t == "-ef") { return true }
         return false
     }
-    function testUnary(op, s) {
+    // cond: the operand of [[ -v ]], whose SUB bash expands as a word even for an indexed
+    // array ([[ -v "a['1']" ]] is a[1]); an error in SUB abandons the line either way.
+    function testUnary(op, s, cond) {
         if (op == "-z") { return (s == "") ? 0 : 1 }
         if (op == "-n") { return (s != "") ? 0 : 1 }
         if (op == "-v") {
-            var sp = splitSubX(s)
-            if (sp.key != null) { return arrHas(sp.name, subKey(sp.name, sp.key)) ? 0 : 1 }
+            var sp = splitSubscript(s)
+            if (sp.key != null) { return arrHas(sp.name, subKeyAr(sp.name, cond ? subExpand(sp.key) : subXOf(sp.name, sp.key))) ? 0 : 1 }
             return (isSetVar(s) || isArr(s)) ? 0 : 1
         }
         // See fsKind for the model and for why stat() was declined. -s is "exists and has a
@@ -7046,7 +7176,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (isTestUnary(t) && st.i + 1 < a.length && !isTestBinary(a[st.i + 1])) {
             var opnd = a[st.i + 1]
             st.i = st.i + 2
-            return testUnary(t, opnd)
+            return testUnary(t, opnd, false)
         }
         st.i = st.i + 1
         if (st.i + 1 < a.length + 0 && isTestBinary(tstAt(a, st))) {
@@ -7097,7 +7227,14 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (cmd == "echo") { echoCmd(args); setStatus(0); return 0 }
         if (cmd == "builtin" || cmd == "command") { return runWrapper(cmd, args) }
         if (cmd == "type") { return typeCmd(args) }
-        if (cmd == "[" || cmd == "test") { var st = testBuiltin(cmd, args); setStatus(st); return st }
+        if (cmd == "[" || cmd == "test") {
+            var st = testBuiltin(cmd, args)
+            // An arithmetic error in a -v subscript abandons the line.
+            var tab = takeAbort()
+            if (tab != null) { setStatus(1); return tab }
+            setStatus(st)
+            return st
+        }
         if (cmd == "true" || cmd == ":") { setStatus(0); return 0 }
         // `cmd &` already ran to completion (see mkAsync), so there is never anything left
         // to wait for and no job list to print. LIMIT: `wait PID` answers 0 rather than the
@@ -7173,8 +7310,12 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                         exVars["$" + sp.name] = keepX
                     }
                 }
-                else if (unsetElem(sp.name, subExpand(sp.key), sp.key) != 0) { ust = 1 }
+                else if (unsetElem(sp.name, subXOf(sp.name, sp.key), sp.key) != 0) { ust = 1 }
                 if (un) { noRef = noRef - 1 }
+                // An arithmetic error in a subscript abandons the line at once (bash 5.3:
+                // the operands after it are not unset). Twin of the emitAbortCheck after rt_arr_unset.
+                var uab = takeAbort()
+                if (uab != null) { setStatus(1); return uab }
             }
             setStatus(ust)
             return ust
@@ -7736,6 +7877,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             vars["$LINENO"] = lnCtx == null ? ln : lnIn(ln)
             var st = !arIsZero(exprT()) ? 0 : 1
             if (takeArithErr()) { st = 1 }
+            var sab = subErrAbort()
+            if (sab != null) { return sab }
             setStatus(st)
             return st
         }
@@ -7783,6 +7926,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             arPfx = svp
             var st = !arIsZero(v) ? 0 : 1
             if (takeArithErr()) { st = 1 }
+            var sab = subErrAbort()
+            if (sab != null) { return sab }
             setStatus(st)
             return st
         }
@@ -7800,6 +7945,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var v = t()
             var st = (condErr != 0) ? condErr : (v ? 0 : 1)
             if (takeArithErr() && condErr == 0) { st = 1 }
+            var sab = subErrAbort()
+            if (sab != null) { return sab }
             setStatus(st)
             return st
         }
@@ -7825,7 +7972,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function mkCondUn(items) {
         var op = items[0].cop
         var w = items[1]
-        return function() { return testUnary(op, wordJoin(w())) == 0 }
+        return function() { return testUnary(op, wordJoin(w()), true) == 0 }
     }
     // [[ STR =~ ERE ]] : a successful match fills BASH_REMATCH with the whole match and the
     // capture groups, and a failed one empties it (bash).
@@ -8184,6 +8331,13 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return last
         })
     }
+    // An arithmetic error in a for (( )) part: status 1, or the line abandoned (subErrAbort).
+    function cforErr() {
+        var ab = subErrAbort()
+        if (ab != null) { return ab }
+        setStatus(1)
+        return 1
+    }
     // items = [initExpr, condExpr, stepExpr, bodyThunk]
     function makeCFor(items, ln) {
         var initT = arIn("((: ", items[0]), condT = arIn("((: ", items[1]), stepT = arIn("((: ", items[2]), bodyT = items[3]
@@ -8193,11 +8347,11 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var last = 0
             var r = anytype
             initT()
-            if (takeArithErr()) { setStatus(1); return 1 }
+            if (takeArithErr()) { return cforErr() }
             var go = true
             while (go) {
                 var cv = condT()
-                if (takeArithErr()) { setStatus(1); return 1 }
+                if (takeArithErr()) { return cforErr() }
                 if (arIsZero(cv)) { go = false; continue }
                 r = bodyT()
                 if (typeof r == "object") {
@@ -8206,7 +8360,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     last = sigStatus(r)
                     if (sg == 1) { go = false }
                 } else { last = r }
-                if (go) { stepT(); if (takeArithErr()) { setStatus(1); return 1 } }
+                if (go) { stepT(); if (takeArithErr()) { return cforErr() } }
             }
             setStatus(last)
             return last

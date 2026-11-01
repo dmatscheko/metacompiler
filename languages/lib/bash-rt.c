@@ -323,7 +323,8 @@ int rt_indbr(char *v);
 char *rt_nref_end(char *n);
 int rt_unset_name(char *n);
 char *rt_subx(char *s);
-int rt_vset(char *s);
+char *rt_subxa(char *nm, char *s);
+int rt_vset(char *s, int cond);
 int rt_sub_empty(char *nm, char *k, char *lbl);
 int rt_eval_assign(char *s);
 int rt_decl_word(char *w, int d, int x, int at, char *who);
@@ -1241,6 +1242,19 @@ int ar_idch(int c, int first)
     return 0;
 }
 
+/* Can c begin an arithmetic token? Twin of arTokStart in bash-interpreter.abnf. */
+int ar_tokstart(int c)
+{
+    char *ops = "=<>!&|^+-*/%~?:,()";
+    int i = 0;
+    if (ar_idch(c, 0) != 0) return 1;
+    while (ops[i] != 0) {
+        if ((int)ops[i] == c) return 1;
+        i = i + 1;
+    }
+    return 0;
+}
+
 /* An error at the cursor: bash names the rest of the expression as the token. */
 long ar_err(char *msg)
 {
@@ -1328,6 +1342,28 @@ char *ar_name(void)
     return rt_substr(ar_s, s, ar_p - s);
 }
 
+/* An indexed array's subscript met by the arithmetic evaluator is an expression
+ * of its own: its errors carry no command's prefix, and arith_err 2 marks them,
+ * which the emitter's takeArithErr leaves raised so that (( )), let, [[ ]] and
+ * for (( )) abandon the line. Twin of arSubEval in bash-interpreter.abnf. */
+long ar_subeval(char *sub)
+{
+    char *svp = ar_pfx_s;
+    long k;
+    ar_pfx_s = 0;
+    k = rt_arith(sub);
+    ar_pfx_s = svp;
+    if (arith_err != 0) arith_err = 2;
+    return k;
+}
+
+/* The same as rt_arr_key, for NAME[SUB] in an arithmetic expression. */
+char *rt_arr_keyar(char *nm, char *sub) {
+    if (rt_streq(sub, "@") != 0 || rt_streq(sub, "*") != 0) return sub;
+    if (rt_isassoc(nm) != 0) return sub;
+    return rt_arr_ikey(nm, ar_subeval(sub));
+}
+
 /* [ EXPR ] after a name, or 0 when the name has no subscript. An associative
  * array's subscript is the literal text up to the "]". An empty one, `b[]`, is
  * ar_nosub, which names no element: reading it and storing to it are bash's
@@ -1337,6 +1373,10 @@ char ar_nosub[1];
 char *ar_subscript(char *nm)
 {
     long k;
+    int n0;
+    int s1;
+    int depth = 0;
+    char *sub;
     if (ar_at(0) != 91) return 0;
     ar_p = ar_p + 1;
     if (ar_at(0) == 93) {
@@ -1350,11 +1390,23 @@ char *ar_subscript(char *nm)
         ar_p = ar_p + 1;
         return rt_substr(ar_s, s0, ar_p - s0 - 1);
     }
-    ar_ws();
-    k = ar_at(0) == 93 ? 0 : ar_comma();
-    ar_ws();
-    if (ar_at(0) != 93) { ar_err("missing `]'"); return 0; }
+    /* An indexed array's subscript runs to the matching "]" and is an expression of
+     * its own, whose errors name it alone; without its "]" it is "bad array
+     * subscript" at the name. Twin of arSubscript. */
+    n0 = ar_p - 1 - rt_strlen(nm);
+    s1 = ar_p;
+    while (ar_p < ar_len && !(ar_at(0) == 93 && depth == 0)) {
+        if (ar_at(0) == 91) depth = depth + 1;
+        if (ar_at(0) == 93) depth = depth - 1;
+        ar_p = ar_p + 1;
+    }
+    if (ar_p >= ar_len) { ar_p = n0; ar_err("bad array subscript"); return 0; }
+    sub = rt_substr(ar_s, s1, ar_p - s1);
     ar_p = ar_p + 1;
+    /* A skipped operand's subscript is not evaluated at all. */
+    if (ar_noeval > 0) return "0";
+    k = ar_subeval(sub);
+    if (ar_bad != 0) return 0;
     return rt_arr_ikey(nm, k);
 }
 
@@ -1614,6 +1666,10 @@ long ar_cond(void)
     ar_ws();
     if (ar_bad != 0 || ar_at(0) != 63) return c;
     ar_p = ar_p + 1;
+    /* A missing operand after "?" or ":" is "expression expected" (no "arithmetic
+     * syntax error" prefix). Twin of arCondS in bash-interpreter.abnf. */
+    ar_ws();
+    if (ar_p >= ar_len || ar_at(0) == 58) return ar_err("expression expected");
     if (c == 0) ar_noeval = ar_noeval + 1;
     a = ar_comma();
     if (c == 0) ar_noeval = ar_noeval - 1;
@@ -1621,6 +1677,8 @@ long ar_cond(void)
     if (ar_bad != 0) return 0;
     if (ar_at(0) != 58) return ar_err("`:' expected for conditional expression");
     ar_p = ar_p + 1;
+    ar_ws();
+    if (ar_p >= ar_len) return ar_err("expression expected");
     if (c != 0) ar_noeval = ar_noeval + 1;
     b = ar_cond();
     if (c != 0) ar_noeval = ar_noeval - 1;
@@ -1739,7 +1797,7 @@ long rt_arith(char *s)
         v = ar_comma();
         ar_ws();
         if (ar_bad == 0 && ar_p < ar_len) {
-            if (ar_at(0) == 41) ar_err("arithmetic syntax error: invalid arithmetic operator");
+            if (ar_tokstart(ar_at(0)) == 0) ar_err("arithmetic syntax error: invalid arithmetic operator");
             else if (ar_asgop_here() != 0) ar_err("attempted assignment to non-variable");
             else ar_err("arithmetic syntax error in expression");
         }
@@ -5436,6 +5494,23 @@ int rt_arr_conv(char *kw, char *nm, int as)
     return 1;
 }
 
+/* The same for NAME=(...): "NAME: cannot convert ..." (FN, a -g declaration's
+ * function, first), which abandons the line at top level (arith_err); in a
+ * function (infn) the builtin reports it again and fails. Twin of the literal
+ * check in declOneN in bash-interpreter.abnf. */
+int rt_arr_convlit(char *kw, char *nm, int as, char *fn, int infn)
+{
+    int r = rt_ar_find(nm);
+    char *m = as != 0 ? "cannot convert indexed to associative array" : "cannot convert associative to indexed array";
+    if (r < 0 || (ar_n[r] == 0 && (ar_mk[r] & 4099) == 0)) return 0;
+    if ((ar_mk[r] & 4096) != 0 && as != 0) return 0;
+    if ((ar_mk[r] & 4096) == 0 && as == 0) return 0;
+    rt_berr(fn, nm, m);
+    if (infn == 0) { arith_err = 1; return 1; }
+    rt_berr(kw, nm, m);
+    return 1;
+}
+
 /* The key a subscript's TEXT names: an associative array's is the text itself, an
  * indexed array's the value of the text as an arithmetic expression; "@" and "*"
  * name the whole array and pass through. Twin of subKey in bash-interpreter.abnf. */
@@ -5899,7 +5974,7 @@ int rt_arr_unset(char *nm, char *sub) {
     char *x;
     long kv;
     if (sub[0] == 0) return 0;
-    x = rt_subx(sub);
+    x = rt_subxa(nm, sub);
     if (arith_err != 0) return 1;
     if ((r >= 0 && (ar_n[r] > 0 || (ar_mk[r] & 3) != 0)) || rt_isassoc(nm) != 0) {
         /* An index still negative from the end, or an associative key that
@@ -7955,11 +8030,12 @@ char *rt_getvar_ind(char *n)
  * special parameters - and refuses a command substitution, a backquote, $(( ))
  * or a ${ } with an operator: a diagnostic, and arith_err abandons the line.
  * A text with none of $ ' " \ ` is its own expansion. Twin of subExpand in
- * bash-interpreter.abnf, which expands any word. */
-char *rt_subx(char *s)
+ * bash-interpreter.abnf, which expands any word. ar: expand as in double quotes,
+ * where a ' is a character and a " is removed (rt_subxa). */
+char *rt_subxm(char *s, int ar)
 {
     int i = 0;
-    int dq = 0;
+    int dq = ar;
     int c;
     int st;
     char *out = empty;
@@ -7977,7 +8053,11 @@ char *rt_subx(char *s)
             if (s[i] != 0) i = i + 1;
             continue;
         }
-        if (c == 34) { dq = 1 - dq; i = i + 1; continue; }
+        if (c == 34) {
+            if (ar == 0) dq = 1 - dq;
+            i = i + 1;
+            continue;
+        }
         if (c == 92 && s[i + 1] != 0 && (dq == 0 || s[i + 1] == 36 || s[i + 1] == 96 || s[i + 1] == 34 || s[i + 1] == 92)) {
             out = rt_strcat(out, rt_substr(s, i + 1, 1));
             i = i + 2;
@@ -8022,6 +8102,19 @@ char *rt_subx(char *s)
     arith_err = 1;
     return empty;
 }
+char *rt_subx(char *s)
+{
+    return rt_subxm(s, 0);
+}
+
+/* An INDEXED array's subscript in such a string is arithmetic text expanded as in
+ * double quotes, which keeps a quote character, a $'...' unexpanded and a
+ * backslash before any but $ ` " \: bash 5.3 answers unset "a['1']" with an
+ * arithmetic syntax error at '1'. Twin of subXOf in bash-interpreter.abnf. */
+char *rt_subxa(char *nm, char *s)
+{
+    return rt_subxm(s, rt_isassoc(nm) != 0 ? 0 : 1);
+}
 
 char *rt_getvar_byname(char *n)
 {
@@ -8046,7 +8139,7 @@ char *rt_getvar_byname(char *n)
             char *sub = rt_substr(n, i + 1, len - i - 2);
             char *k;
             if (rt_streq(sub, "@") != 0 || rt_streq(sub, "*") != 0) return rt_sc_list(nm, rt_ifsfirst(), 1, 0);
-            k = rt_arr_key(nm, rt_subx(sub));
+            k = rt_arr_key(nm, rt_subxa(nm, sub));
             if (rt_sc_has(nm, k) == 0) return &unset_marker[0];
             return rt_sc_get(nm, k);
         }
@@ -8111,15 +8204,20 @@ int rt_setvar_byname(char *n, char *v, int app, int at)
         char *nm = rt_substr(n, 0, i);
         char *sub = rt_substr(n, i + 1, rt_strlen(n) - i - 2);
         char *k;
+        char *svp;
         if (sub[0] == 0 || ((rt_streq(sub, "@") != 0 || rt_streq(sub, "*") != 0) && (bi == 0 || rt_isassoc(nm) == 0))) {
             rt_berr("", n, "bad array subscript");
             arith_err = 1;
             sub_bad = 1;
             return 0;
         }
-        sub = rt_subx(sub);
+        sub = rt_subxa(nm, sub);
         if (arith_err != 0) return 0;
+        /* The subscript's arithmetic errors carry no builtin's prefix. */
+        svp = ar_pfx_s;
+        ar_pfx_s = 0;
         k = rt_arr_akey(nm, sub, n, 0);
+        ar_pfx_s = svp;
         if (arith_err != 0) return 0;
         old = app != 0 ? rt_arr_get(nm, k) : 0;
         if (at != 0) v = rt_attrv(old, v, at);
@@ -8270,16 +8368,19 @@ int rt_sub_empty(char *nm, char *k, char *lbl)
 }
 
 /* test -v of a computed operand: a set variable or array, or for NAME[SUB] an
- * element, SUB expanded (rt_subx). Twin of the -v arm of testUnary in
- * bash-interpreter.abnf. */
-int rt_vset(char *s)
+ * element, SUB expanded (rt_subxa; for [[ -v ]], cond, as a word) and evaluated
+ * as rt_arr_keyar does. Twin of the -v arm of testUnary in bash-interpreter.abnf. */
+int rt_vset(char *s, int cond)
 {
     int i = rt_indbr(s);
     char *sub;
+    char *nm;
     if (i > 0) {
-        sub = rt_subx(rt_substr(s, i + 1, rt_strlen(s) - i - 2));
+        nm = rt_substr(s, 0, i);
+        sub = rt_substr(s, i + 1, rt_strlen(s) - i - 2);
+        sub = cond != 0 ? rt_subx(sub) : rt_subxa(nm, sub);
         if (arith_err != 0) return 0;
-        return rt_arr_has(rt_substr(s, 0, i), rt_arr_key(rt_substr(s, 0, i), sub));
+        return rt_arr_has(nm, rt_arr_keyar(nm, sub));
     }
     return (rt_isset(rt_getvar_byname(s)) != 0 || rt_arr_any(s) != 0) ? 1 : 0;
 }

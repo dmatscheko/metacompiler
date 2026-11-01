@@ -609,6 +609,46 @@ a 6 c'
   r=$(f() { local s109c[\0]=F; echo "${s109c[*]}"; }; f; (s109u[$'0']=1) 2>/dev/null; echo "st=$?"); check aqs3 "$r" 'F
 st=1'
 }
+# ===== SECTION 110: a quoted part of an indexed subscript stays quoted on a read =====
+# Reading NAME[SUB] of an indexed array evaluates SUB as its own arithmetic expression,
+# with a quoted part's quotes kept, so ${a['1']} and $(( a['1'] )) are arithmetic syntax
+# errors; an error in a subscript abandons the line even under (( )), let and [[ ]]. In a
+# function an array literal for an array of the other kind is reported twice and fails.
+# Every expected value is bash 5.3's.
+s110h() { case $1 in *"$2"*) echo 1 ;; *) echo 0 ;; esac; }
+s110() {
+  local r e
+  r=$(s110x=; echo A $s110x B; echo A $s110x; echo $s110x B); check ecf1 "$r" 'A B
+A
+B'
+  r=$(s110a=(a b c); (echo "${s110a['1']}"; echo no) 2>/dev/null; echo "st=$?"; (echo ${s110a[$'2']}) 2>/dev/null; echo "st=$?"; (echo $(( s110a['1'] ))) 2>/dev/null; echo "st=$?"; (echo ${#s110a[\1]}) 2>/dev/null; echo "st=$?"; echo "${s110a["1"]} ${s110a[$'2']}"); check qrd1 "$r" 'st=1
+st=1
+st=1
+st=1
+b c'
+  r=$(s110a=(a b c); f() { (( s110a[1+] )); echo no; }; (f; echo no) 2>/dev/null; echo "st=$?"; (let "y=s110a[1+]" || echo no; echo no) 2>/dev/null; echo "st=$?"; ([[ s110a[1+] -eq 0 ]]; echo no) 2>/dev/null; echo "st=$?"; (( 0 && s110a[1+] )); echo "st=$?"; echo "$(( 0 ? s110a[1+] : 2 ))"); check qrd2 "$r" 'st=1
+st=1
+st=1
+st=1
+2'
+  r=$(e=$( (( 1 ? : 2 )) 2>&1); s110h "$e" ": expression expected"; e=$( (( 1 2 )) 2>&1); s110h "$e" "syntax error in expression"; e=$( (( 1 @ )) 2>&1); s110h "$e" "invalid arithmetic operator"); check qrd3 "$r" '1
+1
+1'
+  r=$(s110n=(0 1 2 3); s110j=(2 1); echo "${s110n[s110j[0]]} ${s110n[ s110n[s110j[1]] ]} $(( s110n[s110j[0]] + 1 ))"; s110n[s110j[1]]=x; unset 's110n[s110j[0]]'; echo "${s110n[*]}"); check qrd4 "$r" '2 1 3
+0 x 3'
+  r=$(s110a=(a b c); (unset "s110a['1']"; echo no) 2>/dev/null; echo "st=$?"; (test -v "s110a['1']"; echo no) 2>/dev/null; echo "st=$?"; [[ -v "s110a['1']" ]]; echo "st=$?"; e=$( (read 's110a[$'"'"'0'"'"']' <<< v; echo no) 2>&1); s110h "$e" "error token is \"\$'0'\""); check qrd5 "$r" 'st=1
+st=1
+st=0
+1'
+  r=$(s110a=(a b c); exec 2>/dev/null; (unset "s110a['1']"); echo "st=$?"; (test -v "s110a[\1]"); echo "st=$?"); check qrd7 "$r" 'st=1
+st=1'
+  r=$(e=$( (s110b=(1); s110b[1'']=x) 2>&1); s110h "$e" "invalid arithmetic operator (error token is \"''\")"); check qrd6 "$r" '1'
+  r=$(s110c=(1); f() { local s110d=(1) s110v=0; declare -A s110d=([y]=2) s110v=9; echo "st=$? $s110v"; declare -p s110d; }; f 2>/dev/null; g() { declare -gA s110c=([x]=1) s110w=5; echo "st=$? $s110w"; }; e=$(g 2>&1); s110h "$e" "g: s110c: cannot convert indexed to associative array"; s110h "$e" "declare: s110c: cannot convert"; echo "${e##*$'\n'}"); check acv1 "$r" 'st=1 9
+declare -a s110d=([0]="1")
+1
+1
+st=1 5'
+}
 # ===== END SECTIONS =====
 
 s90   # SECTION-CALL 90
@@ -631,5 +671,6 @@ s106  # SECTION-CALL 106
 s107  # SECTION-CALL 107
 s108  # SECTION-CALL 108
 s109  # SECTION-CALL 109
+s110  # SECTION-CALL 110
 echo "full: $checks checks, $fails failures"
 exit $fails
