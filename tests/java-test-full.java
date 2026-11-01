@@ -194,6 +194,7 @@ class Main {
         S96.run(); // SECTION-CALL 96
         S100.run(); // SECTION-CALL 100
         S101.run(); // SECTION-CALL 101
+        S102.run(); // SECTION-CALL 102
         System.out.println("full: " + Main.checks + " checks, " + Main.failures + " failures");
         System.exit(Main.failures);
     }
@@ -1648,6 +1649,32 @@ class S101 {
         Main.check("flush101err", System.err != null);
     }
 }
+
+// ===== SECTION 102: the near side of cyclic inheritance =====
+//
+// A type that depends on itself through its extends / implements clauses, or
+// through a qualifier in them (`interface A extends A.B`), is refused
+// (tests/java-fail-test-cycle.java). These shapes sit one step away and are
+// legal: a member type extending its enclosing type, a sibling member named
+// through the enclosing type, and a supertype named through an inherited
+// member type.
+class S102 {
+    class A { class B extends A {} }
+    class P extends Q {}
+    class Q { class R extends P {} }
+    static class M implements S102.N {}
+    interface N {}
+    static void run() {
+        S102 o = new S102();
+        S102.A a = o.new A();
+        Object b = a.new B();
+        Object r = o.new Q().new R();
+        Main.check("cyc102a", b instanceof A && r instanceof P && r instanceof Q);
+        Main.check("cyc102b", new M() instanceof N && new S102I.J() instanceof S102H.K);
+    }
+}
+class S102H { interface K {} }
+class S102I extends S102H { static class J implements K {} }
 
 // ===== END SECTIONS =====
 

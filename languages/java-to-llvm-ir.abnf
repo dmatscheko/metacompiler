@@ -314,7 +314,7 @@ ModProvides = "provides" KwEnd ModName "with" KwEnd ModName { "," ModName } ";" 
 // resolves the dotted path too. QualName also accepts a trailing '.*' wildcard.
 // Neither Package nor Import pushes a statement, so buildMain never sees them.
 // package-info.java carries its annotations on the package declaration.
-Package     <~~ pop() ~~> = LeadMods KwPackage QualName ";" ;
+Package     <~~ jCycNotePkg(pop()) ~~> = LeadMods KwPackage QualName ";" ;
 // `import module java.base;` (JEP 476) imports every package a module exports.
 // It is the SECOND alternative on purpose: `module` is a restricted keyword, so
 // `import module.foo.Bar;` is still a legal ordinary import of a package called
@@ -331,7 +331,7 @@ ClassDecl   <~~ push(makeClassStmt(takeAll())) ~~>
 // A supertype may be qualified and generic (`extends Outer.Super`, `extends
 // A<B>.C`). Nested types are hoisted under their SIMPLE name, so the qualifier
 // only has to be accepted - the last segment names the descriptor.
-ExtRef      <~~ push({ext: jLastSeg(takeAll())}) ~~>
+ExtRef      <~~ var ps = takeAll(); jCycSuper(ps.join(".")); push({ext: jLastSeg(ps)}) ~~>
             = { Annotation } Id <~~ push(stripWs(up.in)) ~~> [ SkipAngle ] { "." { Annotation } Id <~~ push(stripWs(up.in)) ~~> [ SkipAngle ] } ;
 
 // record Pair(int a, int b) { } -- generates fields, a constructor and accessors.
@@ -1338,7 +1338,7 @@ LeadMods    = { Annotation | ModKw } ;
 // work), and every further one is listed on __ifaces and has its default
 // methods copied in.
 ImplementsSkip <~~ push(jNoteImpls(takeAll())) ~~> = KwImplements IType { "," IType } ;
-IType       <~~ push(stripWs(up.in)) ~~> = Type ;
+IType       <~~ push(jCycSuper(stripWs(up.in))) ~~> = Type ;
 Throws      = KwThrows Type { "," Type } ;
 CatchType   = { Annotation } Type { "|" { Annotation } Type } ;
 
@@ -4904,6 +4904,7 @@ HasStatic   = :script(~~
         jCurBin = (jCurBin == "") ? jPkgPrefix + n : jCurBin + "$" + jNrSimple(n)
         jBinName["$" + n] = jCurBin
         curClassName = n
+        jCycEnter(jClassStack, n)
     }
     function jExitClass() {
         curClassName = jClassStack.pop()
@@ -6365,6 +6366,9 @@ HasStatic   = :script(~~
             stashImported(items) // stashed with its file; emitted later (compile-core)
             return
         }
+        // Twin of the jCycCheck call in java-interpreter.abnf.
+        var cycName = jCycCheck()
+        if (cycName != "") { fail("cyclic inheritance involving " + cycName) }
         jLoadLibs(jUtilWant, jMapWant, jStreamWant)
         if (jLangWant) {
             jLangWant = false

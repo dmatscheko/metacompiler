@@ -336,7 +336,7 @@ ModProvides = "provides" KwEnd ModName "with" KwEnd ModName { "," ModName } ";" 
 // dotted path too. QualName also accepts a trailing '.*' wildcard. Neither Package
 // nor Import leaves a value on the stack.
 // package-info.java carries its annotations on the package declaration.
-Package     <~~ pop() ~~> = LeadMods KwPackage QualName ";" ;
+Package     <~~ jCycNotePkg(pop()) ~~> = LeadMods KwPackage QualName ";" ;
 // `import module java.base;` (JEP 476) imports every package a module exports.
 // It is the SECOND alternative on purpose: `module` is a restricted keyword, so
 // `import module.foo.Bar;` is still a legal ordinary import of a package called
@@ -354,7 +354,7 @@ ClassDecl   <~~ buildClass(takeAll()) ~~>
 // A supertype may be qualified and generic (`extends Outer.Super`, `extends
 // A<B>.C`). The type arguments are dropped and the dotted name is kept whole -
 // jResolveClass tries it, then falls back to the last segment.
-ExtRef      <~~ push({ext: jJoinDots(takeAll())}) ~~>
+ExtRef      <~~ push({ext: jCycSuper(jJoinDots(takeAll()))}) ~~>
             = { Annotation } Id <~~ push(stripWs(up.in)) ~~> [ SkipAngle ] { "." { Annotation } Id <~~ push(stripWs(up.in)) ~~> [ SkipAngle ] } ;
 
 // record Pair(int a, int b) { } -- generates fields, a constructor and accessors.
@@ -1349,7 +1349,7 @@ ModKw       = ( "public" | "private" | "protected" | "static" | "final" | "abstr
               | "non-sealed" | "sealed" | "default" ) KwEnd ;
 LeadMods    = { Annotation | ModKw } ;
 ImplementsSkip = KwImplements ImplRef { "," ImplRef } ;
-ImplRef     <~~ push({impl: jNoteUtilType(jJoinDots(takeAll()))}) ~~>
+ImplRef     <~~ push({impl: jNoteUtilType(jCycSuper(jJoinDots(takeAll())))}) ~~>
             = { Annotation } Id <~~ push(stripWs(up.in)) ~~> [ SkipAngle ] { "." { Annotation } Id <~~ push(stripWs(up.in)) ~~> [ SkipAngle ] } ;
 Throws      = KwThrows Type { "," Type } ;
 CatchType   = Type { "|" Type } ;
@@ -1361,7 +1361,7 @@ UnsupType   = AnnotationDecl | Interface | EnumDecl ;
 // and `private` instance methods and `static` methods. `sealed ... permits` is
 // accepted and dropped - the hierarchy is not checked, only parsed.
 Permits     = "permits" KwEnd Type { "," Type } ;
-IfaceExt    <~~ push({iext: jNoteUtilType(jJoinDots(takeAll()))}) ~~>
+IfaceExt    <~~ push({iext: jNoteUtilType(jCycSuper(jJoinDots(takeAll())))}) ~~>
             = { Annotation } Id <~~ push(stripWs(up.in)) ~~> [ SkipAngle ] { "." { Annotation } Id <~~ push(stripWs(up.in)) ~~> [ SkipAngle ] } ;
 // An annotation TYPE is pure metadata - nothing in this model reads it at run
 // time - so the declaration is parsed and dropped, like the annotations themselves.
@@ -7028,6 +7028,7 @@ HasStatic   = :script(~~
         jCurBin = (jCurBin == "") ? jPkgPrefix + n : jCurBin + "$" + jNrSimple(n)
         jBinName["$" + n] = jCurBin
         curClassName = n
+        jCycEnter(jClassStack, n)
     }
     // A descriptor built without a declaration walk (a built-in exception, an
     // anonymous class body) keeps the name it was created with.
@@ -7642,6 +7643,9 @@ HasStatic   = :script(~~
     }
 
     c.compile(jMainAsg())
+    // Twin of the jCycCheck call in buildMain of java-to-llvm-ir.abnf.
+    var jCycName = jCycCheck()
+    if (jCycName != "") { fail("cyclic inheritance involving " + jCycName) }
     if (jDeferred.length > 0) { fail("unknown superclass: " + jDeferred[0].ext) }
     jLoadWanted()
     jWalkDone = true

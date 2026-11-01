@@ -2479,3 +2479,128 @@ function jNrInherited(nr, name, d, depth) {
     if (sd < 0 || sd == d || nr.dBody[sd] < 0) { return -1 }
     return jNrMember(nr, name, sd, depth + 1)
 }
+// ----- cyclic inheritance (JLS 8.1.4, 9.1.3) -----
+//
+// A type DEPENDS on every type its extends / implements clauses name, and on
+// every type that qualifies such a name (`A extends A.B` depends on A itself);
+// a type that depends on itself, directly or through others, is a compile-time
+// error, "cyclic inheritance involving A". The walk records each declaration
+// and its clauses as the tags run (jCycEnter, jCycSuper), and jCycCheck tests
+// the whole program before it runs. A clause naming a type this program does
+// not declare adds no dependency. The library files (jPkgPrefix) are not
+// recorded.
+var jCycDecls = {}
+var jCycOrder = []
+var jCycCur = ""
+var jCycPkg = ""
+// The user's `package p.q;`, which a clause may spell out (`p.q.A.B`).
+function jCycNotePkg(p) {
+    if (jPkgPrefix == "" && jCycPkg == "") { jCycPkg = p }
+}
+// A type declaration entered: its path is the enclosing types' names and its
+// own, dot-joined (stack is the grammar's jClassStack).
+function jCycEnter(stack, n) {
+    jCycCur = ""
+    if (jPkgPrefix != "") { return }
+    var p = ""
+    for (var i = 0; i < stack.length; i++) {
+        var s = stack[i]
+        if (s != "" && s != undefined) { p = p == "" ? s : p + "." + s }
+    }
+    p = p == "" ? n : p + "." + n
+    if (jCycDecls["$" + p] == undefined) {
+        jCycDecls["$" + p] = []
+        jCycOrder.push(p)
+    }
+    jCycCur = p
+}
+// One name of the current declaration's extends / implements clause, its type
+// arguments included; answers the name. The clauses come before the body, so
+// no nested declaration has been entered since jCycEnter.
+function jCycSuper(name) {
+    if (jCycCur == "") { return name }
+    var out = ""
+    var depth = 0
+    for (var i = 0; i < name.length; i++) {
+        var ch = name.charAt(i)
+        if (ch == "<") { depth++ } else if (ch == ">") { depth-- } else if (depth == 0) { out = out + ch }
+    }
+    jCycDecls["$" + jCycCur].push(out)
+    return name
+}
+function jCycParent(p) {
+    var k = p.length - 1
+    while (k >= 0 && p.charAt(k) != ".") { k-- }
+    return k < 0 ? "" : p.substring(0, k)
+}
+// The types a clause name of declaration `from` depends on: each resolved
+// qualifier, then the named type. busy guards the inherited-member lookups of
+// a program that is cyclic.
+function jCycResolve(from, name, busy) {
+    var out = []
+    var segs = name.split(".")
+    var k = 0
+    if (jCycPkg != "" && name.indexOf(jCycPkg + ".") == 0) { k = jCycPkg.split(".").length }
+    if (k >= segs.length) { return out }
+    var cur = ""
+    var e = jCycParent(from)
+    while (cur == "" && e != "") {
+        cur = jCycMember(e, segs[k], busy)
+        e = jCycParent(e)
+    }
+    if (cur == "" && jCycDecls["$" + segs[k]] != undefined) { cur = segs[k] }
+    while (cur != "") {
+        out.push(cur)
+        k++
+        cur = k < segs.length ? jCycMember(cur, segs[k], busy) : ""
+    }
+    return out
+}
+// Member type `s` of type t: its own, or one its supertypes declare.
+function jCycMember(t, s, busy) {
+    if (jCycDecls["$" + t + "." + s] != undefined) { return t + "." + s }
+    if (busy["$" + t] == true) { return "" }
+    busy["$" + t] = true
+    var refs = jCycDecls["$" + t]
+    var found = ""
+    for (var i = 0; refs != undefined && i < refs.length && found == ""; i++) {
+        var deps = jCycResolve(t, refs[i], busy)
+        if (deps.length > 0) { found = jCycMember(deps[deps.length - 1], s, busy) }
+    }
+    busy["$" + t] = false
+    return found
+}
+// The first declaration, in source order, that depends on itself: its
+// qualified name for the diagnostic, or "".
+function jCycCheck() {
+    var edges = {}
+    for (var i = 0; i < jCycOrder.length; i++) {
+        var d = jCycOrder[i]
+        var refs = jCycDecls["$" + d]
+        var deps = []
+        for (var j = 0; j < refs.length; j++) {
+            var r = jCycResolve(d, refs[j], {})
+            for (var q = 0; q < r.length; q++) { deps.push(r[q]) }
+        }
+        edges["$" + d] = deps
+    }
+    for (var a = 0; a < jCycOrder.length; a++) {
+        var start = jCycOrder[a]
+        var seen = {}
+        var work = edges["$" + start].slice(0)
+        while (work.length > 0) {
+            var t = work.pop()
+            if (t == start) {
+                var parts = start.split(".")
+                for (var p = 0; p < parts.length; p++) { parts[p] = jNrSimple(parts[p]) }
+                return (jCycPkg == "" ? "" : jCycPkg + ".") + parts.join(".")
+            }
+            if (seen["$" + t] != true) {
+                seen["$" + t] = true
+                var more = edges["$" + t]
+                for (var m = 0; more != undefined && m < more.length; m++) { work.push(more[m]) }
+            }
+        }
+    }
+    return ""
+}
