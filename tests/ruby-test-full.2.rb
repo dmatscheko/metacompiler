@@ -1516,8 +1516,9 @@ end
 # ===== SECTION 156: all? / any? / none? / one? stop early; Array#+ - & | operand =====
 # Each predicate stops at the element that decides it (one? at the second hit),
 # over an Array, a Range and a Hash. Array#+, #-, #& and #| take an Array or a
-# #to_ary object; anything else is a TypeError, so `[[1], nil].sum([])` is
-# rescuable. /usr/bin/ruby 2.6 settles each.
+# #to_ary object, a singleton one too (as String#+ takes a singleton #to_str);
+# anything else is a TypeError, so `[[1], nil].sum([])` is rescuable.
+# /usr/bin/ruby 2.6 settles each.
 class S156A; def to_ary; [9]; end; end
 def s156
   r = []
@@ -1541,6 +1542,11 @@ def s156
                    w == [["no implicit conversion of nil into Array", [1, 9]], ["no implicit conversion of nil into Array", [1]],
                          ["no implicit conversion of nil into Array", []], ["no implicit conversion of nil into Array", [1, 9]]] &&
                    [[1], [2]].sum([]) == [1, 2])
+  o = Object.new
+  def o.to_ary; [7]; end
+  t = Object.new
+  def t.to_str; "zz"; end
+  check("ary156c", [[1] + o, [1, 7] - o, [1, 7] & o, [1] | o, "a" + t] == [[1, 7], [1], [7], [1, 7], "azz"])
 end
 s122() # SECTION-CALL 122
 s123() # SECTION-CALL 123

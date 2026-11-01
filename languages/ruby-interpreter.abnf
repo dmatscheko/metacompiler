@@ -6912,9 +6912,13 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // when obj answers to_int. Same find-then-call shape rstr already uses for #to_s.
     function fmtUserConv(v, n1, n2) {
         if (!isUserObj(v)) { return null }
-        if (typeof lookupMethod(v.__class, n1) == "function") { return rsText(mcall(v, n1, [], null)) }
-        if (n2 != "" && typeof lookupMethod(v.__class, n2) == "function") { return rsText(mcall(v, n2, [], null)) }
+        if (fmtHasConv(v, n1)) { return rsText(mcall(v, n1, [], null)) }
+        if (n2 != "" && fmtHasConv(v, n2)) { return rsText(mcall(v, n2, [], null)) }
         return null
+    }
+    // A conversion method is found on the object's singleton first, then its class.
+    function fmtHasConv(v, n) {
+        return typeof singFind(v, n) == "function" || typeof lookupMethod(v.__class, n) == "function"
     }
     function fmtIntOperand(v) {
         if (fmtIsNumV(v)) { return v }
