@@ -134,12 +134,6 @@ go/test/typeparam/slices.go: interpreter `panic: _Max([]) = %!q(<nil>), want ""`
 
 # SW — Swift  (oracle: swiftc 6.1.2)
 
-### T-993 swift: local func called before its declaration; body-less `@_silgen_name` func; if-let binding used in its else branch · P3 · SW · IN PROGRESS (SW worker, round 13) [V]
-Found by the SW worker, round 12 (oracle swiftc 6.1.2). `let r = helper(2); func helper(_ x: Int) -> Int {..}` inside one body →
-swiftc accepts; interpreter "unknown name: helper" at run time. `@_silgen_name("puts") func cputs(_: UnsafePointer<CChar>) -> Int32`
-(no body) does not parse in the interpreter. `if let x = o { } else { print(x) }` → swiftc "cannot find 'x' in scope"; ours only at
-run time (the if's scope covers both branches - needs the then-block's extent).
-
 # DA — Dart  (no dart here: spec-only)
 
 ---
@@ -1106,6 +1100,7 @@ T-995 kotlin: sortedBy/sortedWith selector call counts differ from the JDK's Tim
 T-970 php: `print_r` of a self-referencing array never terminates; `count($x, COUNT_RECURSIVE)`; `&` marker needs reference counts — PARTIAL - count COUNT_RECURSIVE (+ValueError, sizeof), print_r *RECURSION*, library constants without a library piece; var_dump & needs exact refcounts, filed
 T-998 java compiled: an interface extending `Comparable<T>` fails with "variable not defined: Comparable" — DONE - library interfaces as supertypes get stub descriptors; instanceof Comparable/Runnable/Iterable true for user classes; all legs
 T-999 java: package access is not checked; tests/java-test-multifile.java imports non-public classes — DONE - import of a non-public type from another package refused with javac's message; multifile test fixed; constructor type-variable cycles checked
+T-993 swift: local func called before its declaration; body-less `@_silgen_name` func; if-let binding used in its else branch — DONE - local funcs hoisted per statement list, if-let binding scoped to condition+then; body-less @_silgen_name parses and is refused loudly (calling C needs an FFI, out of scope)
 
 # Settled — do not re-open
 
