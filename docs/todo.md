@@ -142,7 +142,7 @@ Calling `$gen->throw(new Exception("x"))` from inside the running generator `$ge
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-1057 bash: assoc/declare remainder after T-1044 · P3 · SH · OPEN [V]
+### T-1057 bash: assoc/declare remainder after T-1044 · P3 · SH · IN PROGRESS (SH worker, round 29) [V]
 Left over from T-1044 (verify each vs /opt/homebrew/bin/bash 5.3, LC_ALL=C):
 - per-scope assoc kind: `local m[@]=z` inside a function shadowing a global assoc
 - compiled half: `declare -A "$s"`, `export -a "$s"`, `declare -a "$n=(1 2)"` (word-expanded declaration operands)
