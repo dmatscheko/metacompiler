@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1085** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1086** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -111,12 +111,12 @@ strings.TrimSpace, native strips ASCII 9-13 and 32: `int.Parse(" 1 2 ")` and `in
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-1081 kotlin: static typer gaps for reified inference; List/Nothing class names · P3 · KT · IN PROGRESS (KT worker, round 26) [V]
-Oracle kotlinc 2.2.21; all engines:
-- ktStaticTy cannot type: `arrayOf("a")` without type args (`arrayOf("a").arrName()` -> String, ours Any), `listOf(this)` inside a reified extension (-> Long, ours Any), a `map {}` result (`listOf(1).map { it.toString() }.elName()` -> String, ours Any).
-- `List::class.qualifiedName` -> kotlin.collections.List (ours List); `"" + List::class.java` -> "interface java.util.List" (ours "class java.util.List"); interfaces print as "interface" generally.
-- `Nothing::class`: simpleName Void, qualifiedName java.lang.Void, javaPrimitiveType void (ours Nothing / kotlin.Nothing / null); `Nothing::class.java.kotlin.javaPrimitiveType` -> void.
-(KClass toString "(Kotlin reflection is not available)" suffix stays declined.)
+### T-1085 kotlin: apply{} receiver inside an extension (compiled crash); implicit javaClass; unboxed inline-lambda it · P3 · KT · OPEN [V]
+Oracle kotlinc 2.2.21:
+- compiled crash: `fun String.sb() = StringBuilder().apply { append("x") }.toString()` -> run leg "js runtime error: unknown String method: append" (bare append resolves against the extension receiver, not the lambda receiver); interpreter OK. Check with/run/apply/also nesting inside extensions generally.
+- `fun Int.jc2() = javaClass.name` (implicit this) -> int; interpreter "unknown name: javaClass" (check all legs).
+- `fun Long.jc3() = listOf(this).map { it.javaClass.name }` -> [long] (inline-lambda `it` stays unboxed); ours [java.lang.Long] in all engines.
+- untyped lambda bodies: a `when` body and method references (`map(Int::toString)`) leave reified T as Any; oracle String.
 
 # GO — Go  (oracle: `go run`)
 
@@ -1145,6 +1145,7 @@ T-1077 kotlin: reified type parameter as extension receiver; Class.kotlin — DO
 T-1078 ruby: Lazy eager Enumerable surface; Lazy freeze/clone/dup; Enumerator-based Lazy #each value — DONE (RB r47, f9f45b06): Lazy answers MRI's eager Enumerable surface (sum/count/min/max/sort/reduce/group_by/partition/...), early-stopping scans on endless sources (find/detect/include?/any?/all?/find_index), lazy zip/uniq/flat_map/grep/drop/chunk_while/slice_when/with_index, freeze/clone/dup, #each value of Enumerator-based Lazy; 4 legs = ruby 2.6
 T-1080 php: trace frames for native builtins / generators; string callbacks in compiled traces — DONE (PHP r44, 3c4870f0): native builtins in progress get trace frames (opcode-compiled specials skipped per zend_try_compile_special_func), generator frames hang under foreach/yield-from/Generator->m() resumers, compiled string callbacks stay 'cb', cloBind keeps uses-$this; 3 legs agree with php-src; bench +0.02% paired
 T-1079 bash: quoted indexed subscripts on reads; literal kind conversion; small diagnostics — PARTIAL→split (SH r31, e639c597): quoted indexed subscripts on reads are arithmetic errors that abandon the line (${ia['1']}, $((..)), unset/test/read), nested subscripts, finer arithmetic diagnostics, literal kind-conversion error (top level vs function forms), compiled echo field join; 4 legs = bash 5.3 incl. stderr. nullglob needs a glob model (own ticket); LC_ALL=C policy carried over
+T-1081 kotlin: static typer gaps for reified inference; List/Nothing class names — DONE (KT r26, bb472757): static typer types an extension's this, map/mapIndexed results, first/last/single, conversions and String transforms (reified inference no longer falls back to Any); collection-interface KClasses (kotlin.collections.*), interface rendering of java classes, Nothing as java.lang.Void/void; 4 legs = kotlinc
 
 # Settled — do not re-open
 
