@@ -796,6 +796,67 @@ def s141
   check("cn141e", S141M::Obj.new.d == 6 && S141M::Obj.new.h == 3 && S141M::Obj.superclass == Object)
 end
 
+# ===== SECTION 142: an exception leaving a class or module body =====
+# A raise out of a class, module or `class << self' body ends that body: the
+# definitions after it are written where the statement itself was, not inside
+# the class whose body raised. /usr/bin/ruby 2.6 settles each.
+S142F = [true]
+S142R = []
+begin
+  class S142G
+    raise ArgumentError, "in body" if S142F[0]
+  end
+rescue ArgumentError => e
+  S142R << e.message
+end
+class S142O; end
+begin
+  module S142M
+    module In
+      raise "x" if S142F[0]
+    end
+  end
+rescue => e
+  S142R << e.message
+end
+module S142Mo; end
+class S142H
+  begin
+    class << self
+      raise "y" if S142F[0]
+    end
+  rescue => e
+    S142R << e.message
+  end
+  def self.k; 4; end
+end
+class S142P; end
+# A constant, class or module written in a block or a begin clause is bound in
+# the class body or top level around it (its cref), not in the block.
+begin
+  S142K1 = 1
+  class S142B1; end
+rescue
+end
+[2].each { |v| S142K2 = v }
+1.times { module S142B2; end }
+class S142Q
+  [3].each { |v| K3 = v }
+  begin
+    K4 = 4
+    class In; end
+  rescue
+  end
+  1.times { class In2; end }
+end
+def s142
+  check("cb142a", S142O.name == "S142O" && S142Mo.name == "S142Mo" && S142P.new.inspect.start_with?("#<S142P") &&
+        S142R == ["in body", "x", "y"] && S142H.k == 4 && S142M::In.name == "S142M::In")
+  check("cb142b", S142K1 == 1 && S142B1.name == "S142B1" && S142K2 == 2 && S142B2.name == "S142B2" &&
+        S142Q::K3 == 3 && S142Q::K4 == 4 && S142Q::In.name == "S142Q::In" && S142Q::In2.name == "S142Q::In2" &&
+        defined?(K3).nil?)
+end
+
 s122() # SECTION-CALL 122
 s123() # SECTION-CALL 123
 s124() # SECTION-CALL 124
@@ -816,5 +877,6 @@ s138() # SECTION-CALL 138
 s139() # SECTION-CALL 139
 s140() # SECTION-CALL 140
 s141() # SECTION-CALL 141
+s142() # SECTION-CALL 142
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

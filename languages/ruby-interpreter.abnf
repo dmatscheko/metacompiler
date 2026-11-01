@@ -11791,10 +11791,14 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // the scope chain) or creates a new one in the innermost scope. Inside a method
     // the top level's locals (globalScope) are out of reach, so a local name found
     // only there is a NEW local of the method.
+    // A NEW constant is bound in its cref - the innermost class or module body, or
+    // the top level - through the blocks written between. Twin of curCrefDepth in
+    // ruby-to-llvm-ir.abnf.
     function rubySet(name, value) {
         var loc = isLocalName(name)
         var c0 = name.charCodeAt(0)
-        if (c0 >= 65 && c0 <= 90 && curClass !== null && hasOwn(scopes[scopes.length - 1], "$cgate")) {
+        var isConst = c0 >= 65 && c0 <= 90
+        if (isConst && curClass !== null && crefIndex() > 0) {
             bodyConst(name, value)
             return
         }
@@ -11806,10 +11810,16 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             }
             if (loc && hasOwn(scopes[i], "$cgate")) { break }
         }
-        scopeBind(name, value)
+        if (isConst && curClass === null) { scopeBindIn(scopes[0], name, value) } else { scopeBind(name, value) }
     }
-    function scopeBind(name, value) {
-        var sc = scopes[scopes.length - 1]
+    // The innermost class or module body scope, 0 when there is none.
+    function crefIndex() {
+        var k = scopes.length - 1
+        while (k > 0 && !hasOwn(scopes[k], "$cgate")) { k = k - 1 }
+        return k
+    }
+    function scopeBind(name, value) { scopeBindIn(scopes[scopes.length - 1], name, value) }
+    function scopeBindIn(sc, name, value) {
         // The name trail a module body needs (see publishModuleScope) - the frozen
         // engine cannot enumerate an object's keys.
         if (!hasOwn(sc, "__names")) { sc["__names"] = [] }
@@ -11825,7 +11835,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // top-level K) and a member of the class at once, so a method the body
     // calls already finds it (lexConst).
     function bodyConst(name, value) {
-        scopeBind(name, value)
+        var k = crefIndex()
+        scopeBindIn(scopes[k > 0 ? k : scopes.length - 1], name, value)
         scopePut(curClass, "$c$" + name, value)
     }
     // A `.name' step before the last is a zero-argument method call, read as a
@@ -12241,19 +12252,24 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
               }
               return null
             }
-            if (guards.length > 0) {
-                var titems = [{trybody: runItems}]
-                for (var g = 0; g < guards.length; g++) { titems.push(guards[g]) }
-                makeTry(titems, pos)()
-            } else {
-                runItems()
+            // The nesting is restored on the exception path too, so a raise out of
+            // the body does not leave later definitions inside this module.
+            try {
+                if (guards.length > 0) {
+                    var titems = [{trybody: runItems}]
+                    for (var g = 0; g < guards.length; g++) { titems.push(guards[g]) }
+                    makeTry(titems, pos)()
+                } else {
+                    runItems()
+                }
+            } finally {
+                // Publish the module scope: constants and nested definitions become
+                // members of the module AND stay visible where the module was written.
+                scopes = saved
+                curClass = savedClass
+                curVis = savedVis
+                publishModuleScope(mod, modScope)
             }
-            // Publish the module scope: constants and nested definitions become
-            // members of the module AND stay visible where the module was written.
-            scopes = saved
-            curClass = savedClass
-            curVis = savedVis
-            publishModuleScope(mod, modScope)
             return null
         }
     }
@@ -13362,17 +13378,21 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
               }
               return null
             }
-            if (guards.length > 0) {
-                var titems = [{trybody: runItems}]
-                for (var g = 0; g < guards.length; g++) { titems.push(guards[g]) }
-                makeTry(titems, pos)()
-            } else {
-                runItems()
+            // As in a module body, the nesting is restored on the exception path too.
+            try {
+                if (guards.length > 0) {
+                    var titems = [{trybody: runItems}]
+                    for (var g = 0; g < guards.length; g++) { titems.push(guards[g]) }
+                    makeTry(titems, pos)()
+                } else {
+                    runItems()
+                }
+            } finally {
+                scopes = saved
+                curClass = savedClass
+                curVis = savedVis
+                publishModuleScope(cls, clsScope)
             }
-            scopes = saved
-            curClass = savedClass
-            curVis = savedVis
-            publishModuleScope(cls, clsScope)
             // A class body is an EXPRESSION: its value is its last statement's.
             return lastVal
         }
@@ -13431,16 +13451,19 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
               }
               return null
             }
-            if (guards.length > 0) {
-                var titems = [{trybody: runItems}]
-                for (var g = 0; g < guards.length; g++) { titems.push(guards[g]) }
-                makeTry(titems, pos)()
-            } else {
-                runItems()
+            try {
+                if (guards.length > 0) {
+                    var titems = [{trybody: runItems}]
+                    for (var g = 0; g < guards.length; g++) { titems.push(guards[g]) }
+                    makeTry(titems, pos)()
+                } else {
+                    runItems()
+                }
+            } finally {
+                scopes = saved
+                curClass = savedClass
+                curVis = savedVis
             }
-            scopes = saved
-            curClass = savedClass
-            curVis = savedVis
             return last
         }
     }

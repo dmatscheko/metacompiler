@@ -4251,8 +4251,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), v])
         } else if (local && (inDefFrame(name) || (curDefLocals == null && curCtlDepth > 0))) {
             callExt(b, "js_rlset", [curScopeV, emitStr(b, name), v, emitNum(b, curCtlDepth)])
-        } else if (!local && curClsBodyFn) {
+        } else if (!local && curCrefCls) {
             b = emitBodyConst(b, name, v)
+        } else if (!local && curCrefDepth > 0) {
+            callExt(b, "js_rlset", [curScopeV, emitStr(b, name), v, emitNum(b, curCrefDepth)])
         } else {
             callExt(b, "js_pyset_var", [curScopeV, emitStr(b, name), v])
         }
@@ -4264,8 +4266,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // A parenthesised head is only ever a target THROUGH a path ((...).a = 1).
         if (ref.texpr != undefined) { fail("cannot assign to a parenthesized expression") }
         if (ref.sconst != undefined) {
-            if (curClsBodyFn) { return emitBodyConst(b, ref.sconst, v) }
-            callExt(b, "js_pyset_var", [curScopeV, emitStr(b, ref.sconst), v])
+            if (curCrefCls) { return emitBodyConst(b, ref.sconst, v) }
+            if (curCrefDepth > 0) { callExt(b, "js_rlset", [curScopeV, emitStr(b, ref.sconst), v, emitNum(b, curCrefDepth)]) }
+            else { callExt(b, "js_pyset_var", [curScopeV, emitStr(b, ref.sconst), v]) }
             return b
         }
         if (ref.ivar != undefined) {
@@ -5991,8 +5994,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         var savedSiteSave = curSiteSave
         var savedBlkDepth = curBlkDepth
         if (declBlk === true || isMethod === true) { curBlkDepth = 0 }
-        var savedClsBodyFn = curClsBodyFn
-        if (isCtl !== true) { curClsBodyFn = false }
+        var savedCrefDepth = curCrefDepth
+        var savedCrefCls = curCrefCls
+        curCrefDepth = curCrefDepth + 1
+        if (isMethod === true || declBlk === true) { curCrefCls = false }
         curDefFn = declBlk === true
         curCtlDepth = isCtl === true ? curCtlDepth + 1 : 0
         var savedFrame = curFrame
@@ -6101,7 +6106,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         curCtlDepth = savedCtlDepth
         curSiteSave = savedSiteSave
         curBlkDepth = savedBlkDepth
-        curClsBodyFn = savedClsBodyFn
+        curCrefDepth = savedCrefDepth
+        curCrefCls = savedCrefCls
         curFrame = savedFrame
         return idx
     }
@@ -8475,8 +8481,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 baseV = rsx.v
                 baseSet = true
             }
-            if (curClsBodyFn) { b = emitNestedBind(b, name, clsV) }
-            else { callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), clsV]) }
+            b = emitDeclBind(b, name, clsV)
             // A new class is announced to its superclass's #inherited once it is
             // named, before its mixins, methods and body. Twin of makeClassStmt in
             // ruby-interpreter.abnf.
@@ -8645,9 +8650,15 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // them, and on the class under $c$ at once, which is what makes Outer::Inner
     // and C::CONST resolve and what a method reads (lexConstPath). Twin of
     // bodyConst in ruby-interpreter.abnf.
-    var curClsBodyFn = false
+    //
+    // Every constant, class or module is bound in its CREF - the class body or the
+    // top level it is written in - however many blocks and begin / rescue closures
+    // lie between: curCrefDepth counts those scopes, and curCrefCls says the cref
+    // is a class or module body.
+    var curCrefDepth = 0
+    var curCrefCls = false
     function emitBodyConst(b, name, v) {
-        callExt(b, "js_rlset", [curScopeV, emitStr(b, name), v, emitNum(b, curCtlDepth)])
+        callExt(b, "js_rlset", [curScopeV, emitStr(b, name), v, emitNum(b, curCrefDepth)])
         callExt(b, "js_set", [callExt(b, "js_scope_get", [curScopeV, emitStr(b, "self")]), emitStr(b, "$c$" + name), v])
         return b
     }
@@ -8658,15 +8669,23 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     function emitNestedBind(b, name, v) {
         var selfV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "self")])
         callExt(b, "js_set", [selfV, emitStr(b, "$c$" + name), v])
-        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), v])
+        callExt(b, "js_rlset", [curScopeV, emitStr(b, name), v, emitNum(b, curCrefDepth)])
+        return b
+    }
+    // A class or module statement's binding of its name, in the body or top level
+    // that is its cref.
+    function emitDeclBind(b, name, v) {
+        if (curCrefCls) { return emitNestedBind(b, name, v) }
+        if (curCrefDepth > 0) { callExt(b, "js_rlset", [curScopeV, emitStr(b, name), v, emitNum(b, curCrefDepth)]) }
+        else { callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), v]) }
         return b
     }
     // In a body the reopened object is bound in the body scope as well, which is
     // where the body's names are published from.
     function emitOwnConst(b, name) {
-        if (!curClsBodyFn) { return callExt(b, "js_scope_get", [curScopeV, emitStr(b, name)]) }
+        if (!curCrefCls) { return callExt(b, "js_scope_get", [curScopeV, emitStr(b, name)]) }
         var v = callExt(b, "js_get", [callExt(b, "js_scope_get", [curScopeV, emitStr(b, "self")]), emitStr(b, "$c$" + name)])
-        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), v])
+        callExt(b, "js_rlset", [curScopeV, emitStr(b, name), v, emitNum(b, curCrefDepth)])
         return v
     }
     function emitClassBody(b, clsV, r) {
@@ -8676,7 +8695,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         var body = makeBody(bodyTs)
         nextSelfIsCls = true
         var cbIdx = emitFunc([], function(bb) {
-            curClsBodyFn = true
+            curCrefDepth = 0
+            curCrefCls = true
             // The body is a new local scope, as a def is: its local set starts empty
             // (cls marks it a body, not a method) and the $blk slot is the frame
             // js_rlvar / js_rlset stop at, so the enclosing locals are out of reach.
@@ -8934,8 +8954,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 callExt(b, "js_set", [modV, emitStr(b, "__name"), emitStr(b, qn)])
                 b = emitNameList(b, modV, emittedModules[mkey], "__imn")
                 b = emitNameList(b, modV, [], "__incl")
-                if (curClsBodyFn) { b = emitNestedBind(b, name, modV) }
-                else { callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), modV]) }
+                b = emitDeclBind(b, name, modV)
             }
             if (ipn.length > ipn0.length) { b = emitNameList(b, modV, ipn, "__ipn") }
             b = emitMixRecord(b, modV, modAnc, "$mix$", "__mixorder")
@@ -9207,8 +9226,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // The body's closure scope IS the top level's own scope (curCtlDepth 0 inside),
         // not a begin clause Ruby would see through.
         curCtlDepth = -1
+        curCrefDepth = -1
         var topTryClo = callExt(b, "js_closure", [handle(emitFunc([], bodyT, false, true)), curScopeV])
         curCtlDepth = 0
+        curCrefDepth = 0
         var topCatchClo = callExt(b, "js_closure", [handle(emitFunc(["$exc"], topCatchT, false, true)), curScopeV])
         callExt(b, "js_try", [topTryClo, topCatchClo, hUndef])
         b.NewRet(handle(0))
