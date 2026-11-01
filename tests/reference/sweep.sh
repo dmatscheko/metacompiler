@@ -415,8 +415,15 @@ expectations_for() {
             #       types/conditional/conditionalTypes1.ts:167 writes
             #       'T extends { a: string, b: number }' in a file expected to
             #       parse.
-            awk -v marked="$neg_ts" '
-                BEGIN { while ((getline l < marked) > 0) mark[l] = 1 }
+
+            # (d) Whatever (a)-(c) leave as 'parse' but tsc itself refuses, with
+            # a parse diagnostic or a checker grammar error, is 'reject?': the
+            # list in typescript-tsc-flagged.txt was derived from tsc, whose
+            # header gives the recipe.
+            awk -v marked="$neg_ts" -v flagged="$ROOT/typescript-tsc-flagged.txt" -v base="$dir/" '
+                BEGIN { while ((getline l < marked) > 0) mark[l] = 1
+                        while ((getline l < flagged) > 0)
+                            if (l !~ /^#/ && l != "") { split(l, f, "\t"); tsc[base f[1]] = 1 } }
                 {
                   bad = ($0 ~ /\/(ErrorRecovery|SkippedTokens)\//) \
                      || ($0 ~ /\/decorators\/invalid\//) \
@@ -443,7 +450,7 @@ expectations_for() {
                       || ($0 ~ /\/parserVariableStatement[1-4]\.ts$/) \
                       || ($0 ~ /parserErrorRecovery_IncompleteMemberVariable1\.ts$/) \
                       || ($0 ~ /parserCommaInTypeMemberList[12]\.ts$/)
-                  print ((bad && !good) ? "reject|" : "parse|") $0 }' "$all"
+                  print ((bad && !good) ? "reject|" : ($0 in tsc ? "reject?|" : "parse|")) $0 }' "$all"
             return ;;
         python)
             # CPython's suite has no negative-test convention to read, so the
