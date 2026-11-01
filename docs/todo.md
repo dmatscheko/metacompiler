@@ -64,10 +64,10 @@ its report; anything structural there is a CORE ticket.
 
 # PY — Python
 
-### T-1028 python: CJK multibyte codecs, `\N{...}` escapes, idna nameprep · P3 · PY · OPEN [V]
+### T-1028 python: CJK multibyte codecs, `\N{...}` escapes, idna nameprep · P3 · PY · IN PROGRESS (PY worker, round 21) [V]
 Remainder of T-1020. Refused with NotImplementedError today: shift_jis, gbk, gb18030, big5, euc_jp/euc_kr, iso2022_*, cp932/949/950, hz, johab; the `\N{NAME}` escape in unicode_escape (needs the Unicode name DB); idna for labels needing nameprep (python3: `'bücher.de'.encode('idna')` → b'xn--bcher-kva.de', `b'xn--bcher-kva.de'.decode('idna')` → 'bücher.de'). unicode_escape decode should also emit CPython's DeprecationWarning on stderr for invalid escapes.
 
-### T-1029 python: range/reversed type identity; dotted codec names accepted · P3 · PY · OPEN [V]
+### T-1029 python: range/reversed type identity; dotted codec names accepted · P3 · PY · IN PROGRESS (PY worker, round 21) [V]
 python3 3.14: `type(range(3)).__name__` → range, `type(iter(range(3))).__name__` → range_iterator, `type(reversed([1])).__name__` → list_reverseiterator. Ours: list, list_iterator, reversed. `"x".encode("unicode.escape")` → CPython LookupError: unknown encoding; ours accepts it ('.'→'_' normalisation). Found by PY r20.
 
 # RB — Ruby
