@@ -176,7 +176,7 @@ function byRef(&$x) { return 0; }
 class WarnArgs { public function val($x) { return $x; } public function ref(&$x) { return 0; } }
 $v = byVal($argA); check("arg-by-value", lastErr(), want(E_WARNING, 'Undefined variable $argA', __LINE__));
 $v = byRef($argB); check("arg-by-ref", [$argB, lastErr()], [null, null]);
-$v = strlen($argC); check("arg-native", lastErr(), want(E_WARNING, 'Undefined variable $argC', __LINE__));
+$v = gettype($argC); check("arg-native", lastErr(), want(E_WARNING, 'Undefined variable $argC', __LINE__));
 $v = byVal($a["missing"]); check("arg-by-value-key", lastErr(), want(E_WARNING, 'Undefined array key "missing"', __LINE__));
 preg_match('/a/', "a", $argD); check("arg-native-by-ref", [count($argD), lastErr()], [1, null]);
 $wa = new WarnArgs();
@@ -236,6 +236,22 @@ $dcLine = __LINE__ + 1;
 function dollarCurly($v) { return "${v}"; }
 check("dollar-curly", [dollarCurly("v"), dollarCurlyVarVar("x"), array_values($compileErr ?? [])],
       ["v", "1", want(E_DEPRECATED, 'Using ${var} in strings is deprecated, use {$var} instead', $dcLine)]);
+
+// ----- arguments of the library's functions, as zpp reads them (zend_API.c) -----
+// null for a parameter that is not nullable (zend_null_arg_deprecated), and a
+// float or float-string that is not an integer for an int one
+// (zend_parse_arg_long_weak), for a function written in PHP and for a native.
+$zn = [null, 1.5, "2.5"];
+$v = str_repeat($zn[0], 2); check("zpp-null", [$v, lastErr()], ["", want(E_DEPRECATED, 'str_repeat(): Passing null to parameter #1 ($string) of type string is deprecated', __LINE__)]);
+$v = str_repeat("a", $zn[1]); check("zpp-float", [$v, lastErr()], ["a", want(E_DEPRECATED, 'Implicit conversion from float 1.5 to int loses precision', __LINE__)]);
+$v = str_repeat("a", $zn[2]); check("zpp-float-string", [$v, lastErr()], ["aa", want(E_DEPRECATED, 'Implicit conversion from float-string "2.5" to int loses precision', __LINE__)]);
+$v = strstr("abc", "b", $zn[0]); check("zpp-bool-null", [$v, lastErr()], ["bc", want(E_DEPRECATED, 'strstr(): Passing null to parameter #3 ($before_needle) of type bool is deprecated', __LINE__)]);
+$v = substr_count("aa", "a", 0, $zn[0]); check("zpp-nullable", [$v, lastErr()], [2, null]);
+$v = str_repeat("a", 2.0); check("zpp-float-integral", [$v, lastErr()], ["aa", null]);
+$v = strlen($zn[0]); check("zpp-native-null", [$v, lastErr()], [0, want(E_DEPRECATED, 'strlen(): Passing null to parameter #1 ($string) of type string is deprecated', __LINE__)]);
+$v = substr("abc", $zn[1]); check("zpp-native-float", [$v, lastErr()], ["bc", want(E_DEPRECATED, 'Implicit conversion from float 1.5 to int loses precision', __LINE__)]);
+$zf = "strtoupper";
+$v = $zf($zn[0]); check("zpp-native-dynamic", [$v, lastErr()], ["", want(E_DEPRECATED, 'strtoupper(): Passing null to parameter #1 ($string) of type string is deprecated', __LINE__)]);
 
 // ----- done -----
 echo "warnings: " . $checks . " checks, " . $fails . " failures\n";

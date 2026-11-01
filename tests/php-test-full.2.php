@@ -2076,6 +2076,56 @@ function s93() {
     check("fe1", $g === [true, true]);
 }
 
+// ===== SECTION 94: argument types of the library functions written in PHP; (int) of an object =====
+// The functions lib/php-stdlib.php implements read their arguments as zpp does
+// for the internal ones they stand for (zend_parse_arg_{str,long,bool}_slow,
+// coercive mode), with the parameter types of basic_functions.stub.php: a scalar
+// or a Stringable object converts, a numeric string reads as an int, null as the
+// type's zero, and anything else is the function's own TypeError, after its
+// argument count is checked. number_format and round take int|float (Z_PARAM_NUMBER).
+// (int) and (float) of an object are 1 (zval_get_long_func, zval_get_double_func).
+class S94Str { function __toString(): string { return "S"; } }
+class S94O {}
+function s94m($f) {
+    try { return $f(); } catch (Throwable $e) { return get_class($e) . ": " . $e->getMessage(); }
+}
+function s94() {
+    $te = "TypeError: ";
+    $a = [1];
+    $v = ["3", 2.0, " 3 ", true, null, "x", 1e20, []];
+    check("lib1", s94m(fn() => str_repeat($a, 2)) === $te . "str_repeat(): Argument #1 (\$string) must be of type string, array given"
+        && s94m(fn() => str_repeat("x", $a)) === $te . "str_repeat(): Argument #2 (\$times) must be of type int, array given"
+        && s94m(fn() => str_repeat("a", $v[5])) === $te . "str_repeat(): Argument #2 (\$times) must be of type int, string given"
+        && s94m(fn() => str_repeat("a", $v[6])) === $te . "str_repeat(): Argument #2 (\$times) must be of type int, float given"
+        && s94m(fn() => str_repeat(new S94O, 1)) === $te . "str_repeat(): Argument #1 (\$string) must be of type string, S94O given");
+    check("lib2", s94m(fn() => trim($a)) === $te . "trim(): Argument #1 (\$string) must be of type string, array given"
+        && s94m(fn() => explode(",", $a)) === $te . "explode(): Argument #2 (\$string) must be of type string, array given"
+        && s94m(fn() => strrev($a)) === $te . "strrev(): Argument #1 (\$string) must be of type string, array given"
+        && s94m(fn() => str_pad($a, 3)) === $te . "str_pad(): Argument #1 (\$string) must be of type string, array given"
+        && s94m(fn() => ucfirst($a)) === $te . "ucfirst(): Argument #1 (\$string) must be of type string, array given"
+        && s94m(fn() => str_contains($a, "x")) === $te . "str_contains(): Argument #1 (\$haystack) must be of type string, array given"
+        && s94m(fn() => wordwrap($a)) === $te . "wordwrap(): Argument #1 (\$string) must be of type string, array given"
+        && s94m(fn() => htmlspecialchars($a)) === $te . "htmlspecialchars(): Argument #1 (\$string) must be of type string, array given"
+        && s94m(fn() => strstr("abc", "b", $a)) === $te . "strstr(): Argument #3 (\$before_needle) must be of type bool, array given"
+        && s94m(fn() => substr_count("aaa", "a", 0, $a)) === $te . "substr_count(): Argument #4 (\$length) must be of type ?int, array given");
+    check("lib3", s94m(fn() => number_format($a)) === $te . "number_format(): Argument #1 (\$num) must be of type int|float, array given"
+        && s94m(fn() => number_format(1.5, $a)) === $te . "number_format(): Argument #2 (\$decimals) must be of type int, array given"
+        && s94m(fn() => round(1.5, $a)) === $te . "round(): Argument #2 (\$precision) must be of type int, array given"
+        && number_format(1234.5, 1, $v[4], $v[4]) === "1,234.5" && number_format("1234.5") === "1,235");
+    check("lib4", str_repeat("ab", $v[0]) === "ababab" && str_repeat(5, $v[1]) === "55" && str_repeat("a", $v[2]) === "aaa"
+        && str_repeat("a", $v[3]) === "a" && str_repeat($v[4], 2) === "" && str_repeat(new S94Str, 2) === "SS"
+        && explode(",", 12) === ["12"] && trim(1.5) === "1.5" && strstr("abc", "b", "1") === "a"
+        && substr_count("aaa", "a", 0, $v[4]) === 3 && str_split(123, "2") === ["12", "3"] && strrev(1.5) === "5.1");
+    $f = "str_repeat";
+    check("lib5", s94m(fn() => str_repeat($a, 1, 2)) === "ArgumentCountError: str_repeat() expects exactly 2 arguments, 3 given"
+        && str_repeat(times: "2", string: "x") === "xx"
+        && s94m(fn() => $f($a, 1)) === $te . "str_repeat(): Argument #1 (\$string) must be of type string, array given"
+        && s94m(fn() => array_map("trim", [" a", $v[7]])) === $te . "trim(): Argument #1 (\$string) must be of type string, array given");
+    $o = [new S94O, function () {}];
+    check("objcast", (int)$o[0] === 1 && (float)$o[0] === 1.0 && intval($o[0]) === 1 && floatval($o[0]) === 1.0
+        && (int)$o[1] === 1 && (integer)$o[0] === 1 && (boolean)$o[0] === true);
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -2114,6 +2164,7 @@ function main() {
     s91(); // SECTION-CALL 91
     s92(); // SECTION-CALL 92
     s93(); // SECTION-CALL 93
+    s94(); // SECTION-CALL 94
     echo "full: " . $checks . " checks, " . $failures . " failures\n";
     return $failures;
 }

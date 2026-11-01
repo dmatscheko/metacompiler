@@ -2311,13 +2311,15 @@ func (rt *jsrt) phpLen(v interface{}) float64 {
 // ----- casts -----------------------------------------------------------------
 
 func (rt *jsrt) phpCast(kind string, v interface{}) interface{} {
-	// An array casts to int or float as 1 when it has elements, else 0
-	// (zval_get_long_func, zval_get_double_func). Twin of phpCast in
+	// An array casts to int or float as 1 when it has elements, else 0, and an
+	// object as 1 (zval_get_long_func, zval_get_double_func). Twin of phpCast in
 	// php-interpreter.abnf and phCast in lib/php-rt.metajs.
-	if keys, _, ok := phpArrParts(v); ok && (kind == "int" || kind == "integer" || kind == "float" || kind == "double" || kind == "real") {
-		n := float64(0)
-		if len(keys.elems) > 0 {
-			n = 1
+	keys, _, isArr := phpArrParts(v)
+	obj := phpIsObj(v) || phpIsGenOrClosure(v)
+	if (isArr || obj) && (kind == "int" || kind == "integer" || kind == "float" || kind == "double" || kind == "real") {
+		n := float64(1)
+		if isArr && len(keys.elems) == 0 {
+			n = 0
 		}
 		if kind == "int" || kind == "integer" {
 			return phpMkInt(int64(n))
@@ -4859,6 +4861,15 @@ func init() {
 			}
 			return jsHFalse
 		}
+		// The exact-type tests of a library parameter's prologue (emitZppFit in
+		// php-to-llvm-ir.abnf). Twins of js_phzpps / js_phzppi / js_phzppf in
+		// lib/php-rt.metajs.
+		m["js_phzpps"] = func(a []uint64) uint64 {
+			_, ok := u(a[0]).(string)
+			return boolH(ok)
+		}
+		m["js_phzppi"] = func(a []uint64) uint64 { return boolH(phpIsInt(u(a[0]))) }
+		m["js_phzppf"] = func(a []uint64) uint64 { return boolH(phpIsFlo(u(a[0]))) }
 		// PHP 8.5 PARTIAL FUNCTION APPLICATION. `foo(1, ?, 3)` binds what is
 		// there and leaves a hole per `?`; the compiler stores the bound run in
 		// one PHP array with the sentinel below in each hole, and js_phpfa fills

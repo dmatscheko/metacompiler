@@ -427,7 +427,7 @@ Throw       <~~ push(phpThrow(pop())) ~~>
 // its body where it stands.
 Declare     <~~ push(makeDeclare(takeAll())) ~~>
             = KwDeclare "(" DeclDirective { "," DeclDirective } [ "," ] ")" ( Semi | Block ) ;
-DeclDirective <~~ takeAll(); if (stripWs(up.in) == "strict_types=1") { strictTypes = true } ~~> = Id "=" Expression ;
+DeclDirective <~~ takeAll(); if (stripWs(up.in) == "strict_types=1") { strictTypes = true; strictFiles[c.curFileAbs()] = true } ~~> = Id "=" Expression ;
 // const NAME = expr; at file level: a global constant. Unlike a class constant it
 // takes no type, and its initializer is evaluated once, where the declaration stands.
 // A top-level 'const' may carry an attribute group, exactly as a class constant
@@ -938,7 +938,7 @@ PowExpr     <~~ push(foldPow(takeAll())) ~~>
             = PostfixExpr [ "**" UnaryExpr ] ;
 // (int)$x / (string)$y / (array)$z ...: a type cast. A parenthesized group '($x)'
 // is not a cast (the inner is not a cast keyword) and falls through to Primary.
-Cast        <~~ push(makeCast(takeAll())) ~~>
+Cast        <~~ push(makeCast(takeAll(), up.start)) ~~>
             = "(" CastKw <~~ push({cast: up.in}) ~~> ")" UnaryExpr ;
 CastKw      = ( "integer" | "int" | "boolean" | "bool" | "float" | "double" | "real"
               | "string" | "array" | "object" | "unset" | "binary" ) KwEnd ;
@@ -1711,18 +1711,18 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         if (phpLibDepth > 0) { return "" }
         var file = c.curFileAbs()
         var t = phsCallSite(file, line)
-        siteParts[t] = {file: file, line: line}
+        siteParts[t] = {file: file, line: line, strict: strictFiles[file] === true}
         return t
     }
     // The site (callSite's text) of the call, `new` or operation that ran last,
     // which every call sets once its arguments are read (evalArgs), a `new` before
     // its object is made, and an operation that may raise before it runs;
-    // siteParts holds each text's file and line. Twin of php.site in
+    // siteParts holds each text's file, line and strict_types. Twin of php.site in
     // php-to-llvm-ir.abnf.
     var phpSite = ""
     var siteParts = {}
     function siteFileLine(t) {
-        if (t == "" || siteParts[t] === undefined) { return {file: "", line: 0} }
+        if (t == "" || siteParts[t] === undefined) { return {file: "", line: 0, strict: false} }
         return siteParts[t]
     }
     // ----- the calls in progress, which a trace reports -----
@@ -1990,6 +1990,38 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         k = cls === CLO_SCOPE ? ctxSelf() : cls
         return k != null && k != undefined && k.__isclass === true ? k.__name + "::" + who : who
     }
+    // The type zpp reads a library parameter declaring typ as (nullable: its
+    // default is null): string, int, float or bool, "?" in front if nullable; ""
+    // for any other type. Twin of zppType in php-to-llvm-ir.abnf.
+    function phpZppType(typ, nullable) {
+        var lc = phsCase(typ, false)
+        if (lc.charAt(0) == "?") {
+            lc = lc.substring(1)
+            nullable = true
+        }
+        if (lc != "string" && lc != "int" && lc != "float" && lc != "bool") { return "" }
+        phpLibRef(diagOn ? "__mec_zppd" : "__mec_zpp", true)
+        return nullable ? "?" + lc : lc
+    }
+    // Argument n (1-based) v of the library parameter p, which declares p.zpp: v
+    // itself if it is of that type, else as __mec_zpp reads it for the call's
+    // site, whose file decides strict_types. Twin of emitZppFit in
+    // php-to-llvm-ir.abnf.
+    function phpZppFit(p, n, v, argset, who, cls) {
+        var t = p.zpp
+        var nullable = t.charAt(0) == "?"
+        var base = nullable ? t.substring(1) : t
+        if (v === null || v === undefined ? nullable
+            : base == "string" ? typeof v == "string" : base == "int" ? isInt(v) : base == "float" ? isFlo(v) : typeof v == "boolean") { return v }
+        var site = argset.site == undefined ? "" : argset.site
+        var at = siteFileLine(site)
+        var args = [v, t, phpFnShown(who, cls), n, p.name.substring(1), at.strict === true]
+        if (diagOn && diagLines && at.file != "") {
+            args.push(at.file)
+            args.push(at.line)
+        }
+        return callNamed(diagOn ? "__mec_zppd" : "__mec_zpp", argsOf(args))
+    }
     // Argument n (1-based) v of the parameter p as its declared type takes it, or
     // zend_verify_arg_error's TypeError, which names the caller's site when the
     // program made the call. The coercions are a typed property's (phpTypeFit), the
@@ -2179,6 +2211,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             if (!have && (p.def == null || (named != null && phpReqAfter(params, i)))) { phpMissArg(params, i, argset, who, cls) }
             if (!have) { v = p.def() }
             else if (p.typ != "") { v = phpArgFit(p, i + 1, v, argset, who, cls) }
+            else if (p.zpp != undefined && p.zpp != "") { v = phpZppFit(p, i + 1, v, argset, who, cls) }
             var kept = keptCells
             var pv = anytype
             pv = phpCopy(v)
@@ -4840,12 +4873,16 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     }
     // Does native lc refuse this call? Its library declaration is then called
     // instead: a count it refuses raises there (phpLibArityBad), and named arguments
-    // are placed there, a native taking positions only. makeCall has compiled the
-    // declaration for a call it names; a callable reaches only a compiled one
+    // are placed there, a native taking positions only; and a call from a
+    // strict_types file, or any call with display_errors=1, of one whose
+    // arguments zpp reads for the site (phpLibZppNative). makeCall has compiled
+    // the declaration for a call it names; a callable reaches only a compiled one
     // (phpLibRef).
     function nativeRefuses(lc, argset) {
         if (phpLib == null || !varExists(fnKey(lc))) { return false }
-        return argset.named != null || phpLibArityBad(phpLib, lc, argset.pos.length)
+        if (argset.named != null || phpLibArityBad(phpLib, lc, argset.pos.length)) { return true }
+        var site = argset.site == undefined ? "" : argset.site
+        return site != "" && phpLibZppNative(lc) && (diagOn || siteFileLine(site).strict === true)
     }
     // The user function named n in any letter case.
     function fnGet(n) {
@@ -6949,6 +6986,11 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         var resolveCb = name == "call_user_func" || name == "call_user_func_array"
         var libCb = hasOwn(libCbArg, "$" + phsCase(name, false))
         var site = callSite(start)
+        // A native whose arguments zpp reads for this site is called as its
+        // library declaration too (nativeRefuses).
+        if (site != "" && hasOwn(phpBuiltins, name) && !fccLib && phpLibZppNative(name) && (diagOn || strictFiles[c.curFileAbs()] === true)) {
+            phpLibLoad(phpLibKey(phpLib, name))
+        }
         // With display_errors=1 count() with a mode warns of each recursion it met
         // (__mec_countchk). Twin of makeCall in php-to-llvm-ir.abnf.
         var countSite = name == "count" && args.length > 1 ? diagSite("__mec_countchk", start) : null
@@ -6972,11 +7014,15 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         // so no frame of the library's is in progress. Twin of makeCall in
         // php-to-llvm-ir.abnf.
         var opCast = site != "" && args.length == 1 && phpArgsPlain(args) ? phpOpCast(name) : ""
+        var castSite = opCast != "" ? castChkSite(opCast, start) : null
         var cufOp = site != "" && phpArgsPlain(args)
             && ((name == "call_user_func" && args.length > 0) || (name == "call_user_func_array" && args.length == 2))
         return function() {
             var argset = evalArgs(args, site, kept && varExists(fk) ? calleeParams(getVar(fk)) : null)
-            if (opCast != "") { return phpCast(opCast, argset.pos[0]) }
+            if (opCast != "") {
+                if (castSite != null) { castSite([opCast, argset.pos[0]]) }
+                return phpCast(opCast, argset.pos[0])
+            }
             if (resolveCb && argset.pos.length > 0) {
                 argset.pos[0] = callerCallable(argset.pos[0], name)
                 // call_user_func of a library function that takes a callback: that
@@ -7117,7 +7163,9 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         }
         if (vis != "") { visNames[nm] = true }
         if (def == null && !variadic) { phpLibArgErr() }
-        // A library parameter stands for an internal one, whose types are not checked here.
+        // A library parameter stands for an internal one: zpp reads it (phpZppFit)
+        // if it declares a scalar type, else nothing checks it.
+        var zpp = phpLibDepth > 0 ? phpZppType(typ, dnull) : ""
         if (phpLibDepth > 0) { typ = "" }
         // A promoted parameter declares a property of its type as written: a null
         // default does not widen it (zend_compile_params). A hooked one keeps no
@@ -7125,7 +7173,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         var ptyp = hooks.length > 0 ? "" : typ
         if (promote && ptyp != "") { typedNames[nm] = true }
         if (dnull) { typ = phpTypeOrNull(typ) }
-        return {name: nm, byref: byref, variadic: variadic, def: def, promote: promote, vis: vis, typ: typ, ptyp: ptyp, pnull: dnull, rel: phpTypeRel(typ), hooks: hooks}
+        return {name: nm, byref: byref, variadic: variadic, def: def, promote: promote, vis: vis, typ: typ, ptyp: ptyp, pnull: dnull, rel: phpTypeRel(typ), hooks: hooks, zpp: zpp}
     }
     // The name is not always items[0]: a method may carry captured modifiers in front
     // of it, so the string is looked for rather than indexed. 'static' is remembered
@@ -8565,6 +8613,9 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // declare(strict_types=1): a typed slot then takes only its own types, and an
     // int for a float.
     var strictTypes = false
+    // The files that declare strict_types=1, which decides a library function's
+    // arguments by the file of the call (phpZppFit).
+    var strictFiles = {}
     // The names some class declares a typed instance property under: only a write
     // of one of them pays for the type check (phpPropFit).
     var typedNames = {}
@@ -9284,21 +9335,36 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         }
     }
     // items = [{cast}, operandThunk]
-    function makeCast(items) {
+    // (kind) of t at pos; with display_errors=1 an (int) or (float) is checked
+    // first (__mec_castchk). Twin of makeCast in php-to-llvm-ir.abnf.
+    function makeCast(items, pos) {
         var kind = items[0].cast
         var t = items[1]
-        return function() { return phpCast(kind, t()) }
+        var site = castChkSite(kind, pos)
+        if (site == null) { return function() { return phpCast(kind, t()) } }
+        return function() {
+            var v = anytype
+            v = t()
+            site([kind, v])
+            return phpCast(kind, v)
+        }
+    }
+    function castChkSite(kind, pos) {
+        var num = kind == "int" || kind == "integer" || kind == "float" || kind == "double" || kind == "real"
+        return num ? diagSite("__mec_castchk", pos) : null
     }
     function phpCast(kind, v) {
         // (int) of an out-of-range float WRAPS modulo 2^64 rather than saturating:
         // (int)(PHP_INT_MAX * 2 + 4) is int(0). Corpus: tests/int_overflow_64bit.phpt
         // and tests/int_underflow_64bit.phpt.
-        // An array casts to int or float as 1 when it has elements, else 0
-        // (zval_get_long_func, zval_get_double_func). Twin of phpCast in
-        // abnf/jsrtphp.go and phCast in lib/php-rt.metajs.
-        if (kind == "int" || kind == "integer") { return isArr(v) ? (v.keys.length > 0 ? 1 : 0) : toLong(v) }
+        // An array casts to int or float as 1 when it has elements, else 0, and
+        // an object as 1 (zval_get_long_func, zval_get_double_func), which
+        // __mec_castchk warns of. Twin of phpCast in abnf/jsrtphp.go and phCast in
+        // lib/php-rt.metajs.
+        var obj = isObj(v) || typeof v == "function" || isGen(v)
+        if (kind == "int" || kind == "integer") { return isArr(v) ? (v.keys.length > 0 ? 1 : 0) : (obj ? 1 : toLong(v)) }
         if (kind == "float" || kind == "double" || kind == "real") {
-            return mkFlo(isArr(v) ? (v.keys.length > 0 ? 1 : 0) : numOf(toNumV(v)))
+            return mkFlo(isArr(v) ? (v.keys.length > 0 ? 1 : 0) : (obj ? 1 : numOf(toNumV(v))))
         }
         if (kind == "string" || kind == "binary") { return phpStr(v) }
         if (kind == "bool" || kind == "boolean") { return phptest(v) }

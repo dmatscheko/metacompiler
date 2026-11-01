@@ -44,5 +44,22 @@ check("strict-arg", $msg, "strictArg(): Argument #1 (\$i) must be of type int, s
 $at = __FILE__ . " on line " . __LINE__; $msg = strictErr(fn() => strictArg(true));
 check("strict-arg-bool", $msg, "strictArg(): Argument #1 (\$i) must be of type int, true given, called in " . $at);
 check("strict-ret", strictErr(fn() => strictRet(5.0)), "strictRet(): Return value must be of type int, float returned");
+// The library's functions: the calling file's strict_types decides their
+// arguments too (zend_parse_arg_*_slow), an int still widening to a float; a
+// callback an internal function calls is called coercively.
+class StrictStr { public function __toString(): string { return "s"; } }
+$sv = ["3", 5, null, 2, 1.5];
+check("strict-lib-int", strictErr(fn() => str_repeat("a", $sv[0])), "str_repeat(): Argument #2 (\$times) must be of type int, string given");
+check("strict-lib-string", strictErr(fn() => str_repeat($sv[1], 2)), "str_repeat(): Argument #1 (\$string) must be of type string, int given");
+check("strict-lib-null", strictErr(fn() => trim($sv[2])), "trim(): Argument #1 (\$string) must be of type string, null given");
+check("strict-lib-stringable", strictErr(fn() => ucfirst(new StrictStr)), "ucfirst(): Argument #1 (\$string) must be of type string, StrictStr given");
+check("strict-lib-float", strictErr(fn() => str_repeat("a", $sv[4])), "str_repeat(): Argument #2 (\$times) must be of type int, float given");
+check("strict-lib-bool", strictErr(fn() => strstr("abc", "b", 1)), "strstr(): Argument #3 (\$before_needle) must be of type bool, int given");
+check("strict-lib-ok", [str_repeat("a", $sv[3]), substr_count("aaa", "a", 0, $sv[2]), number_format(1.5, 1, $sv[2])], ["aa", 3, "1.5"]);
+check("strict-native", strictErr(fn() => strlen($sv[1])), "strlen(): Argument #1 (\$string) must be of type string, int given");
+check("strict-native-int", strictErr(fn() => substr("abc", $sv[0])), "substr(): Argument #2 (\$offset) must be of type int, string given");
+$sf = "strlen";
+check("strict-native-dynamic", strictErr(fn() => $sf($sv[1])), "strlen(): Argument #1 (\$string) must be of type string, int given");
+check("strict-callback", [array_map("str_repeat", ["a"], ["2"]), array_map("strlen", [12])], [["aa"], [2]]);
 echo "strict: " . $fails . " failures\n";
 exit($fails);

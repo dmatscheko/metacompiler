@@ -98,26 +98,26 @@ class ErrorException extends Exception {
 // ----- the natives, as callable values ---------------------------------------
 function count($value, $mode = 0) { return count($value, $mode); }
 function sizeof($value, $mode = 0) { return count($value, $mode); }
-function strlen($string) { return strlen($string); }
+function strlen(string $string) { return strlen($string); }
 function array_push(&$array, ...$values) {
     foreach ($values as $v) { $array[] = $v; }
     return count($array);
 }
 function array_values($array) { return array_values($array); }
 function abs($num) { return abs($num); }
-function intdiv($num1, $num2) { return intdiv($num1, $num2); }
+function intdiv(int $num1, int $num2) { return intdiv($num1, $num2); }
 function array_key_exists($key, $array) { return array_key_exists($key, $array); }
 function key_exists($key, $array) { return array_key_exists($key, $array); }
 function array_key_last($array) { return array_key_last($array); }
 function array_pop(&$array) { return array_pop($array); }
-function substr($string, $offset, $length = null) { return substr($string, $offset, $length); }
-function strpos($haystack, $needle, $offset = 0) { return strpos($haystack, $needle, $offset); }
-function strrpos($haystack, $needle, $offset = 0) { return strrpos($haystack, $needle, $offset); }
-function strcmp($string1, $string2) { return strcmp($string1, $string2); }
-function ord($character) { return ord($character); }
-function chr($codepoint) { return chr($codepoint); }
-function strtolower($string) { return strtolower($string); }
-function strtoupper($string) { return strtoupper($string); }
+function substr(string $string, int $offset, ?int $length = null) { return substr($string, $offset, $length); }
+function strpos(string $haystack, string $needle, int $offset = 0) { return strpos($haystack, $needle, $offset); }
+function strrpos(string $haystack, string $needle, int $offset = 0) { return strrpos($haystack, $needle, $offset); }
+function strcmp(string $string1, string $string2) { return strcmp($string1, $string2); }
+function ord(string $character) { return ord($character); }
+function chr(int $codepoint) { return chr($codepoint); }
+function strtolower(string $string) { return strtolower($string); }
+function strtoupper(string $string) { return strtoupper($string); }
 function is_int($value) { return is_int($value); }
 function is_integer($value) { return is_int($value); }
 function is_long($value) { return is_int($value); }
@@ -163,6 +163,45 @@ function __mec_arrarg($v, $fname, $obj) {
     if (!is_array($v) && !($obj && is_object($v))) {
         throw new TypeError($fname . "(): Argument #1 (\$array) must be of type array, " . __mec_vname($v) . " given");
     }
+}
+// Argument $n of library function $fn, whose parameter $name declares $type
+// (string, int, float or bool, "?" in front if nullable), as zpp reads one the
+// prologue's exact-type test refused (zend_parse_arg_{str,long,double,bool}_slow):
+// [the value, the text of its Deprecated or ""]. A strict call ($strict) takes
+// only an int for a float; a coercive one reads null as the type's zero, a
+// scalar or a Stringable object as the type, and a float that is not an integer
+// as an int, the first and the last deprecated. Anything else is the TypeError.
+function __mec_zppr($v, $type, $fn, $n, $name, $strict) {
+    $t = $type[0] === "?" ? substr($type, 1) : $type;
+    if ($v === null && !$strict) {
+        return [$t === "string" ? "" : ($t === "int" ? 0 : ($t === "float" ? 0.0 : false)),
+                $fn . "(): Passing null to parameter #" . $n . " (\$" . $name . ") of type " . $type . " is deprecated"];
+    }
+    if ($t === "float" && is_int($v)) { return [(float) $v, ""]; }
+    if (!$strict) {
+        if ($t === "string" && (is_int($v) || is_float($v) || is_bool($v) || (is_object($v) && method_exists($v, "__toString")))) { return [(string) $v, ""]; }
+        if ($t === "bool" && (is_int($v) || is_float($v) || is_string($v))) { return [(bool) $v, ""]; }
+        if ($t === "float" && (is_bool($v) || (is_string($v) && is_numeric($v)))) { return [(float) $v, ""]; }
+        if ($t === "int" && is_bool($v)) { return [(int) $v, ""]; }
+        if ($t === "int" && (is_float($v) || (is_string($v) && is_numeric($v)))) {
+            $d = is_float($v) ? $v : $v + 0;
+            if (is_int($d)) { return [$d, ""]; }
+            if ($d == $d && $d >= -9.2233720368547758E18 && $d < 9.2233720368547758E18) {
+                if ((float) (int) $d === $d) { return [(int) $d, ""]; }
+                return [(int) $d, is_float($v) ? "Implicit conversion from float " . __mec_serfloat($v, "E") . " to int loses precision"
+                    : "Implicit conversion from float-string \"" . $v . "\" to int loses precision"];
+            }
+        }
+    }
+    throw new TypeError($fn . "(): Argument #" . $n . " (\$" . $name . ") must be of type " . $type . ", " . __mec_vname($v) . " given");
+}
+function __mec_zpp($v, $type, $fn, $n, $name, $strict) { return __mec_zppr($v, $type, $fn, $n, $name, $strict)[0]; }
+// __mec_zpp with display_errors=1: the Deprecated is displayed at the call's
+// $file and $line.
+function __mec_zppd($v, $type, $fn, $n, $name, $strict, $file = null, $line = 0) {
+    $r = __mec_zppr($v, $type, $fn, $n, $name, $strict);
+    if ($r[1] !== "") { __mec_diag(8192, $r[1], $file, $line); }
+    return $r[0];
 }
 
 // ----- comparison helpers ----------------------------------------------------
@@ -767,9 +806,7 @@ function implode($separator, $array = null) {
     return $out;
 }
 function join($separator, $array = null) { return implode($separator, $array); }
-function explode($separator, $string, $limit = PHP_INT_MAX) {
-    $separator = (string)$separator;
-    $string = (string)$string;
+function explode(string $separator, string $string, int $limit = PHP_INT_MAX) {
     if ($separator === "") { throw new ValueError("explode(): Argument #1 (\$separator) cannot be empty"); }
     $parts = [];
     $at = 0;
@@ -788,17 +825,17 @@ function explode($separator, $string, $limit = PHP_INT_MAX) {
     if ($limit == 0) { return [implode($separator, $parts)]; }
     return array_slice($parts, 0, $limit);
 }
-function str_split($string, $length = 1) {
+function str_split(string $string, int $length = 1) {
     if ($length < 1) { throw new ValueError("str_split(): Argument #2 (\$length) must be greater than 0"); }
     $out = [];
     $n = strlen($string);
     for ($i = 0; $i < $n; $i += $length) { $out[] = substr($string, $i, $length); }
     return $out;
 }
-function str_repeat($string, $times) {
+function str_repeat(string $string, int $times) {
     if ($times < 0) { throw new ValueError("str_repeat(): Argument #2 (\$times) must be greater than or equal to 0"); }
     $out = "";
-    $piece = (string)$string;
+    $piece = $string;
     while ($times > 0) {
         if ($times % 2 == 1) { $out .= $piece; }
         $piece .= $piece;
@@ -806,7 +843,7 @@ function str_repeat($string, $times) {
     }
     return $out;
 }
-function str_pad($string, $length, $pad_string = " ", $pad_type = STR_PAD_RIGHT) {
+function str_pad(string $string, int $length, string $pad_string = " ", int $pad_type = STR_PAD_RIGHT) {
     if ($pad_string === "") { throw new ValueError("str_pad(): Argument #3 (\$pad_string) must be a non-empty string"); }
     if ($pad_type != STR_PAD_LEFT && $pad_type != STR_PAD_RIGHT && $pad_type != STR_PAD_BOTH) {
         throw new ValueError("str_pad(): Argument #4 (\$pad_type) must be STR_PAD_LEFT, STR_PAD_RIGHT, or STR_PAD_BOTH");
@@ -819,21 +856,20 @@ function str_pad($string, $length, $pad_string = " ", $pad_type = STR_PAD_RIGHT)
     $fill = str_repeat($pad_string, intdiv($n, strlen($pad_string)) + 1);
     return substr($fill, 0, $left) . $string . substr($fill, 0, $n - $left);
 }
-function chunk_split($string, $length = 76, $separator = "\r\n") {
+function chunk_split(string $string, int $length = 76, string $separator = "\r\n") {
     if ($length < 1) { throw new ValueError("chunk_split(): Argument #2 (\$length) must be greater than 0"); }
     $out = "";
     foreach (str_split($string, $length) as $p) { $out .= $p . $separator; }
     return $out;
 }
-function strrev($string) {
+function strrev(string $string) {
     $out = "";
     for ($i = strlen($string) - 1; $i >= 0; $i--) { $out .= substr($string, $i, 1); }
     return $out;
 }
-function bin2hex($string) {
+function bin2hex(string $string) {
     $hex = "0123456789abcdef";
     $out = "";
-    $string = (string)$string;
     $n = strlen($string);
     for ($i = 0; $i < $n; $i++) {
         $b = ord(substr($string, $i, 1));
@@ -843,44 +879,44 @@ function bin2hex($string) {
 }
 
 // ----- strings: searching ----------------------------------------------------
-function str_contains($haystack, $needle) { return strpos($haystack, $needle) !== false; }
-function str_starts_with($haystack, $needle) { return substr($haystack, 0, strlen($needle)) === (string)$needle; }
-function str_ends_with($haystack, $needle) {
+function str_contains(string $haystack, string $needle) { return strpos($haystack, $needle) !== false; }
+function str_starts_with(string $haystack, string $needle) { return substr($haystack, 0, strlen($needle)) === $needle; }
+function str_ends_with(string $haystack, string $needle) {
     $n = strlen($needle);
-    return $n == 0 || substr($haystack, -$n) === (string)$needle;
+    return $n == 0 || substr($haystack, -$n) === $needle;
 }
-function stripos($haystack, $needle, $offset = 0) {
+function stripos(string $haystack, string $needle, int $offset = 0) {
     try {
         return strpos(strtolower($haystack), strtolower($needle), $offset);
     } catch (ValueError $e) {
         throw new ValueError("stripos(): Argument #3 (\$offset) must be contained in argument #1 (\$haystack)");
     }
 }
-function strripos($haystack, $needle, $offset = 0) {
+function strripos(string $haystack, string $needle, int $offset = 0) {
     try {
         return strrpos(strtolower($haystack), strtolower($needle), $offset);
     } catch (ValueError $e) {
         throw new ValueError("strripos(): Argument #3 (\$offset) must be contained in argument #1 (\$haystack)");
     }
 }
-function strstr($haystack, $needle, $before_needle = false) {
+function strstr(string $haystack, string $needle, bool $before_needle = false) {
     $p = strpos($haystack, $needle);
     if ($p === false) { return false; }
     return $before_needle ? substr($haystack, 0, $p) : substr($haystack, $p);
 }
-function strchr($haystack, $needle, $before_needle = false) { return strstr($haystack, $needle, $before_needle); }
-function stristr($haystack, $needle, $before_needle = false) {
+function strchr(string $haystack, string $needle, bool $before_needle = false) { return strstr($haystack, $needle, $before_needle); }
+function stristr(string $haystack, string $needle, bool $before_needle = false) {
     $p = stripos($haystack, $needle);
     if ($p === false) { return false; }
     return $before_needle ? substr($haystack, 0, $p) : substr($haystack, $p);
 }
-function strrchr($haystack, $needle, $before_needle = false) {
-    $p = strrpos($haystack, substr((string)$needle, 0, 1));
+function strrchr(string $haystack, string $needle, bool $before_needle = false) {
+    $p = strrpos($haystack, substr($needle, 0, 1));
     if ($p === false) { return false; }
     return $before_needle ? substr($haystack, 0, $p) : substr($haystack, $p);
 }
-function substr_count($haystack, $needle, $offset = 0, $length = null) {
-    if ((string)$needle === "") { throw new ValueError("substr_count(): Argument #2 (\$needle) cannot be empty"); }
+function substr_count(string $haystack, string $needle, int $offset = 0, ?int $length = null) {
+    if ($needle === "") { throw new ValueError("substr_count(): Argument #2 (\$needle) cannot be empty"); }
     $s = substr($haystack, $offset, $length);
     $n = 0;
     $at = 0;
@@ -894,20 +930,20 @@ function substr_count($haystack, $needle, $offset = 0, $length = null) {
 
 // ----- strings: comparing ----------------------------------------------------
 // strcmp is the native (byte order, -1 / 0 / 1); the rest are written on it.
-function strcasecmp($string1, $string2) { return strcmp(strtolower($string1), strtolower($string2)); }
-function strncmp($string1, $string2, $length) {
+function strcasecmp(string $string1, string $string2) { return strcmp(strtolower($string1), strtolower($string2)); }
+function strncmp(string $string1, string $string2, int $length) {
     if ($length < 0) { throw new ValueError("strncmp(): Argument #3 (\$length) must be greater than or equal to 0"); }
     return strcmp(substr($string1, 0, $length), substr($string2, 0, $length));
 }
-function strncasecmp($string1, $string2, $length) {
+function strncasecmp(string $string1, string $string2, int $length) {
     if ($length < 0) { throw new ValueError("strncasecmp(): Argument #3 (\$length) must be greater than or equal to 0"); }
     return strcmp(strtolower(substr($string1, 0, $length)), strtolower(substr($string2, 0, $length)));
 }
 // strnatcmp_ex: leading zeros skipped once, whitespace skipped, a run of digits
 // compared by value (or left-aligned when either starts with 0), anything else
 // byte by byte - folding ASCII case for strnatcasecmp.
-function strnatcmp($string1, $string2) { return __mec_natcmp($string1, $string2, false); }
-function strnatcasecmp($string1, $string2) { return __mec_natcmp($string1, $string2, true); }
+function strnatcmp(string $string1, string $string2) { return __mec_natcmp($string1, $string2, false); }
+function strnatcasecmp(string $string1, string $string2) { return __mec_natcmp($string1, $string2, true); }
 // The one-byte piece at $i, "" past the end (C's terminating NUL).
 function __mec_byte($s, $i, $n) { return $i < $n ? substr($s, $i, 1) : ""; }
 function __mec_isdigit($c) { return $c !== "" && strpos("0123456789", $c) !== false; }
@@ -1033,10 +1069,9 @@ function similar_text($string1, $string2, &$percent = null) {
 }
 
 // ----- strings: case and whitespace ------------------------------------------
-function ucfirst($string) { return strtoupper(substr($string, 0, 1)) . substr($string, 1); }
-function lcfirst($string) { return strtolower(substr($string, 0, 1)) . substr($string, 1); }
-function ucwords($string, $separators = " \t\r\n\f\v") {
-    $string = (string)$string;
+function ucfirst(string $string) { return strtoupper(substr($string, 0, 1)) . substr($string, 1); }
+function lcfirst(string $string) { return strtolower(substr($string, 0, 1)) . substr($string, 1); }
+function ucwords(string $string, string $separators = " \t\r\n\f\v") {
     $out = "";
     $at = 0;
     $up = true;
@@ -1080,10 +1115,10 @@ function __mec_trim($string, $characters, $left, $right) {
     if ($right) { while ($b > $a && isset($set[substr($string, $b - 1, 1)])) { $b--; } }
     return substr($string, $a, $b - $a);
 }
-function trim($string, $characters = " \n\r\t\v\x00") { return __mec_trim($string, $characters, true, true); }
-function ltrim($string, $characters = " \n\r\t\v\x00") { return __mec_trim($string, $characters, true, false); }
-function rtrim($string, $characters = " \n\r\t\v\x00") { return __mec_trim($string, $characters, false, true); }
-function chop($string, $characters = " \n\r\t\v\x00") { return __mec_trim($string, $characters, false, true); }
+function trim(string $string, string $characters = " \n\r\t\v\x00") { return __mec_trim($string, $characters, true, true); }
+function ltrim(string $string, string $characters = " \n\r\t\v\x00") { return __mec_trim($string, $characters, true, false); }
+function rtrim(string $string, string $characters = " \n\r\t\v\x00") { return __mec_trim($string, $characters, false, true); }
+function chop(string $string, string $characters = " \n\r\t\v\x00") { return __mec_trim($string, $characters, false, true); }
 
 // ----- strings: paths ---------------------------------------------------------
 // php_basename and zend_dirname on a POSIX system: '/' is the only separator,
@@ -1234,8 +1269,7 @@ function strtr($string, $from, $to = null) {
     }
     return $out . substr($string, $at);
 }
-function nl2br($string, $use_xhtml = true) {
-    $string = (string)$string;
+function nl2br(string $string, bool $use_xhtml = true) {
     $br = $use_xhtml ? "<br />" : "<br>";
     $out = "";
     $at = 0;
@@ -1252,7 +1286,7 @@ function nl2br($string, $use_xhtml = true) {
     }
     return $out . substr($string, $at);
 }
-function htmlspecialchars($string, $flags = 11, $encoding = null, $double_encode = true) {
+function htmlspecialchars(string $string, int $flags = 11, ?string $encoding = null, bool $double_encode = true) {
     $map = ["&" => "&amp;", "\"" => "&quot;", "<" => "&lt;", ">" => "&gt;"];
     if (($flags & 3) == 3) { $map["'"] = "&#039;"; }
     if (($flags & 2) == 0) { unset($map["\""]); }
@@ -1283,7 +1317,7 @@ function stripslashes($string) {
 // A word is a run of ASCII letters, ' and - and the bytes $characters lists; the
 // string's first byte cannot open one with ' or -, nor its last byte end one with
 // -, unless $characters lists it (php_str_word_count).
-function str_word_count($string, $format = 0, $characters = null) {
+function str_word_count(string $string, int $format = 0, ?string $characters = null) {
     $words = [];
     $p = 0;
     $e = strlen($string);
@@ -1307,8 +1341,8 @@ function str_word_count($string, $format = 0, $characters = null) {
 }
 // php_wordwrap's two loops: a one-byte break without cutting rewrites spaces in
 // place; anything else copies line by line, cutting a long word when asked.
-function wordwrap($string, $width = 75, $break = "\n", $cut_long_words = false) {
-    $text = (string)$string;
+function wordwrap(string $string, int $width = 75, string $break = "\n", bool $cut_long_words = false) {
+    $text = $string;
     if ($text === "") { return ""; }
     if ($break === "") { throw new ValueError("wordwrap(): Argument #3 (\$break) cannot be empty"); }
     if ($width == 0 && $cut_long_words) { throw new ValueError("wordwrap(): Argument #4 (\$cut_long_words) cannot be true when argument #2 (\$width) is 0"); }
@@ -2040,12 +2074,12 @@ const PHP_ROUND_HALF_ODD = 4;
 // part corrected when the next integer scales back to the value itself, then
 // __mec_roundedge decides the last step against the UNSCALED value. An int with
 // no negative precision only converts.
-function round($num, $precision = 0, $mode = PHP_ROUND_HALF_UP) {
+function round($num, int $precision = 0, $mode = PHP_ROUND_HALF_UP) {
     $v = __mec_num("round", 1, "num", $num, "int|float");
     if ($mode < 1 || $mode > 4) {
         throw new ValueError("round(): Argument #3 (\$mode) must be a valid rounding mode (RoundingMode::*)");
     }
-    $places = (int)$precision;
+    $places = $precision;
     if (is_int($v) && $places >= 0) { return (float)$v; }
     $value = (float)$v;
     if (!is_finite($value) || $value == 0.0) { return $value; }
@@ -2195,8 +2229,10 @@ function vprintf($format, $values) {
 // number_format rounds half away from zero the way round() does - on the value
 // as 15 significant digits when the requested places lie inside them - and then
 // groups the integer digits by thousands.
-function number_format($num, $decimals = 0, $decimal_separator = ".", $thousands_separator = ",") {
-    $f = (float)$num;
+function number_format($num, int $decimals = 0, ?string $decimal_separator = ".", ?string $thousands_separator = ",") {
+    $f = (float)__mec_num("number_format", 1, "num", $num, "int|float");
+    $decimal_separator ??= ".";
+    $thousands_separator ??= ",";
     if ($decimals < 0) { $decimals = 0; }
     $neg = $f < 0;
     $a = $neg ? -$f : $f;
@@ -3091,6 +3127,15 @@ function __mec_numchk($v, $file = null, $line = 0) {
     if (is_string($v) && !is_numeric($v)
         && preg_match('/^[ \t\n\r\v\f]*[+-]?([0-9]+(\.[0-9]*)?|\.[0-9]+)/', $v) === 1) {
         __mec_diag(2, "A non-numeric value encountered", $file, $line);
+    }
+}
+// The operand of an (int) or (float) cast ($kind as written), intval or
+// floatval: an object, which no cast handler converts (convert_object_to_type),
+// reads as 1.
+function __mec_castchk($kind, $v, $file = null, $line = 0) {
+    if (is_object($v)) {
+        $to = $kind === "int" || $kind === "integer" ? "int" : "float";
+        __mec_diag(2, "Object of class " . get_class($v) . " could not be converted to " . $to, $file, $line);
     }
 }
 // A value echo, print, an interpolation or '.' converts to a string: an array

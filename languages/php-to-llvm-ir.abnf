@@ -462,7 +462,7 @@ Throw       <~~ push(makeThrow(pop())) ~~>
 // its body where it stands. Twin of Declare in php-interpreter.abnf; see there.
 Declare     <~~ push(makeDeclare(takeAll())) ~~>
             = KwDeclare "(" DeclDirective { "," DeclDirective } [ "," ] ")" ( Semi | Block ) ;
-DeclDirective <~~ takeAll(); if (stripWs(up.in) == "strict_types=1") { strictTypes = true } ~~> = Id "=" Expression ;
+DeclDirective <~~ takeAll(); if (stripWs(up.in) == "strict_types=1") { strictTypes = true; strictFiles[c.curFileAbs()] = true } ~~> = Id "=" Expression ;
 // const NAME = expr; -- a global constant. Constants live in the same flat name space
 // as classes and functions here (they carry no '$' sigil, so no PHP variable can
 // collide with one), which is what lets ConstRef resolve them with a plain scope read.
@@ -975,10 +975,10 @@ PrintExpr   <~~ push(makePrintExpr(pop(), up.start)) ~~>
 // conversion table php-interpreter.abnf's phpCast has, so (int)3.9 is 3, (float)5 is
 // the boxed 5.0 and (array)5 is [5]. A parenthesized group '($x)' is not a cast (the
 // inner is not a cast keyword) and falls through to Primary.
-Cast        <~~ push(makeCast(takeAll())) ~~>
+Cast        <~~ push(makeCast(takeAll(), up.start)) ~~>
             = "(" CastKw ")" UnaryExpr ;
 CastKw      <~~ push({cast: stripWs(up.in)}) ~~>
-            = ( "int" | "integer" | "bool" | "boolean" | "float" | "double" | "real"
+            = ( "integer" | "int" | "boolean" | "bool" | "float" | "double" | "real"
               | "string" | "array" | "object" | "unset" | "binary" ) KwEnd ;
 // clone $o / clone($o): a copy of the instance whose __clone hook, when the class
 // has one, runs on the COPY. Array properties are values, so they are copied along.
@@ -5154,12 +5154,17 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         }
     }
     // items = [{cast}, operandThunk]
-    function makeCast(items) {
+    // (kind) of t at pos; with display_errors=1 an (int) or (float) is checked
+    // first (__mec_castchk). Twin of makeCast in php-interpreter.abnf.
+    function makeCast(items, pos) {
         var kind = items[0].cast
         var t = items[1]
+        var num = kind == "int" || kind == "integer" || kind == "float" || kind == "double" || kind == "real"
+        var site = num ? diagSite("__mec_castchk", pos) : null
         return function(b) {
             var r = t(b)
-            return {b: r.b, v: callExt(r.b, "js_phcast", [emitStr(r.b, kind), r.v])}
+            var cb = site == null ? r.b : site(r.b, [emitStr(r.b, kind), r.v])
+            return {b: cb, v: callExt(cb, "js_phcast", [emitStr(cb, kind), r.v])}
         }
     }
     // ----- '::' : class constants, static properties, static dispatch -----------
@@ -7907,7 +7912,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                 var rc = castArg.pos(b)
                 siteStore(rc.b, site)
                 return rc
-            }])
+            }], start)
         }
         var cufOp = site != 0 && argsArePlain(args)
             && ((name == "call_user_func" && args.length > 0) || (name == "call_user_func_array" && args.length == 2))
@@ -7948,7 +7953,8 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         // A native given a count it refuses is called as its library declaration,
         // whose entry raises the ArgumentCountError (phpLibArityBad); so is one
         // given a named or spread argument, which the native, taking positions
-        // only, cannot place. Twin of nativeRefuses in php-interpreter.abnf.
+        // only, cannot place; and so is one whose arguments zpp reads for this
+        // site (phpLibZppNative). Twin of nativeRefuses in php-interpreter.abnf.
         var lowered = hasBuiltin(name)
         // With display_errors=1 count() with a mode warns of each recursion it met
         // (__mec_countchk). Twin of makeCall in php-interpreter.abnf.
@@ -7956,7 +7962,8 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         if (lowered && !hasFcc(args) && !hasPlace(args)) {
             if (phpLib == null) { phpLib = phpLibIndex(load("lib/php-stdlib.php")) }
             var libKey = phpLibKey(phpLib, name)
-            if (libKey != "" && (!argsArePlain(args) || phpLibArityBad(phpLib, name, args.length))) {
+            var zppNat = site != 0 && phpLibZppNative(name) && (diagOn || strictFiles[c.curFileAbs()] === true)
+            if (libKey != "" && (zppNat || !argsArePlain(args) || phpLibArityBad(phpLib, name, args.length))) {
                 phpLibLoad(libKey)
                 lowered = false
             }
@@ -8057,21 +8064,33 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         if (siteFileF == null) { siteFileF = m.NewFunc("php_site_file", i64, [llvm.ir.NewParam("site", i64)]) }
         return siteFileF
     }
+    // Whether the file of a site declares strict_types=1 (false for 0, a call in
+    // the library); php_site_strict's body is emitted with php_site_text's.
+    var siteStrictF = null
+    function siteStrictFn() {
+        if (siteStrictF == null) { siteStrictF = m.NewFunc("php_site_strict", i64, [llvm.ir.NewParam("site", i64)]) }
+        return siteStrictF
+    }
     function siteTextBody() {
+        var none = function(b) { return emitStr(b, "") }
         if (siteF != null) {
             var b = siteF.NewBlock("entry")
             var lineV = callExt(b, "js_phstr", [callExt(b, "js_num_i", [b.NewAnd(siteF.Params[0], handle(16777215))])])
             siteSwitch(b, siteF, function(hitB, k) {
                 return callExt(hitB, "js_phcat", [emitStr(hitB, phsCallSite(siteFiles[k], "")), lineV])
-            })
+            }, none)
         }
         if (siteFileF != null) {
-            siteSwitch(siteFileF.NewBlock("entry"), siteFileF, function(hitB, k) { return emitStr(hitB, siteFiles[k]) })
+            siteSwitch(siteFileF.NewBlock("entry"), siteFileF, function(hitB, k) { return emitStr(hitB, siteFiles[k]) }, none)
+        }
+        if (siteStrictF != null) {
+            siteSwitch(siteStrictF.NewBlock("entry"), siteStrictF, function(hitB, k) { return strictFiles[siteFiles[k]] === true ? hTrue : hFalse },
+                       function(b) { return hFalse })
         }
     }
     // The body of f(site): the value hit(block, k) for the site's file siteFiles[k],
-    // else "".
-    function siteSwitch(b, f, hit) {
+    // else none(block).
+    function siteSwitch(b, f, hit, none) {
         var fileV = b.NewLShr(f.Params[0], handle(24))
         for (var k = 0; k < siteFiles.length; k++) {
             var hitB = f.NewBlock("")
@@ -8080,7 +8099,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             hitB.NewRet(hit(hitB, k))
             b = nextB
         }
-        b.NewRet(emitStr(b, ""))
+        b.NewRet(none(b))
     }
     // ----- diagnostics: the display_errors and lines compiler flags -----
     // With display_errors=1 every site PHP diagnoses calls a check of
@@ -8288,12 +8307,61 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         var max = fn.rest >= 0 ? -1 : fn.params.length
         var tys = fn.tys == undefined ? [] : fn.tys
         var rty = fn.rty == undefined ? "" : fn.rty
-        var typed = rty != ""
+        var typed = rty != "" || zppAny(fn.zpps)
         for (var t = 0; t < tys.length; t++) { if (tys[t] != "") { typed = true } }
         if (!lib && req == 0 && !typed) { return null }
-        if (lib && req == 0 && max < 0) { return null }
+        if (lib && req == 0 && max < 0 && !typed) { return null }
         return {req: req, max: max, rest: fn.rest, who: who, sig: sigText(fn.params, fn.rest), clo: false, lib: lib,
-                tys: tys, rty: rty, names: fn.params}
+                tys: tys, rty: rty, names: fn.params, zpps: fn.zpps}
+    }
+    function zppAny(zpps) {
+        if (zpps == undefined) { return false }
+        for (var i = 0; i < zpps.length; i++) { if (zpps[i] != "") { return true } }
+        return false
+    }
+    // The type zpp reads a library parameter declaring typ as (nullable: its
+    // default is null): string, int, float or bool, "?" in front if nullable; ""
+    // for any other type. Twin of phpZppType in php-interpreter.abnf.
+    function zppType(typ, nullable) {
+        var lc = phsCase(typ, false)
+        if (lc.charAt(0) == "?") {
+            lc = lc.substring(1)
+            nullable = true
+        }
+        if (lc != "string" && lc != "int" && lc != "float" && lc != "bool") { return "" }
+        phpLibRef(diagOn ? "__mec_zppd" : "__mec_zpp", true)
+        return nullable ? "?" + lc : lc
+    }
+    // Library parameter i's argument argV, which declares chk.zpps[i]: itself if
+    // it is of that type (a bool and null are told by the handle, the rest by
+    // js_phzpps / js_phzppi / js_phzppf), else as __mec_zpp reads it for the call's
+    // site, whose file decides strict_types (php_site_strict). An argument not
+    // passed is left to the default. Twin of phpZppFit in php-interpreter.abnf.
+    function emitZppFit(b, chk, i, argV) {
+        var t = chk.zpps[i]
+        var base = t.charAt(0) == "?" ? t.substring(1) : t
+        var slowB = curF.NewBlock("")
+        var joinB = curF.NewBlock("")
+        var ok = b.NewICmp(llvm.enum.IPredEQ, argV, hUndef)
+        if (t != base) { ok = b.NewOr(ok, b.NewICmp(llvm.enum.IPredEQ, argV, hNull)) }
+        if (base == "bool") {
+            ok = b.NewOr(ok, b.NewOr(b.NewICmp(llvm.enum.IPredEQ, argV, hTrue), b.NewICmp(llvm.enum.IPredEQ, argV, hFalse)))
+        } else {
+            var isV = callExt(b, base == "string" ? "js_phzpps" : (base == "int" ? "js_phzppi" : "js_phzppf"), [argV])
+            ok = b.NewOr(ok, b.NewICmp(llvm.enum.IPredEQ, isV, hTrue))
+        }
+        b.NewCondBr(ok, joinB, slowB)
+        var siteV = slowB.NewLoad(i64, siteGlobal())
+        var vals = [argV, emitStr(slowB, t), emitStr(slowB, chk.who), emitNum(slowB, i + 1), emitStr(slowB, chk.names[i].substring(1)),
+                    slowB.NewCall(siteStrictFn(), [siteV])]
+        if (diagOn && diagLines) {
+            var inLib = slowB.NewICmp(llvm.enum.IPredEQ, siteV, handle(0))
+            vals.push(slowB.NewSelect(inLib, hNull, slowB.NewCall(siteFileFn(), [siteV])))
+            vals.push(callExt(slowB, "js_num_i", [slowB.NewAnd(siteV, handle(16777215))]))
+        }
+        var r = emitLibCall(slowB, diagOn ? "__mec_zppd" : "__mec_zpp", vals)
+        slowB.NewBr(joinB)
+        return {b: joinB, v: joinB.NewPhi([llvm.ir.NewIncoming(argV, b), llvm.ir.NewIncoming(r, slowB)])}
     }
     // The declared return type a function's returns are checked against: none for
     // a generator's and a void function's.
@@ -8466,13 +8534,29 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         // frame outlives the call.
         var argVs = []
         var tys = chk != undefined && chk != null && chk.tys != undefined ? chk.tys : []
+        // An internal function checks its argument count before any type (zpp).
+        var zppFirst = chk != undefined && chk != null && zppAny(chk.zpps)
+        if (zppFirst) {
+            for (var a = 0; a < params.length; a++) { argVs.push(callExt(b, "js_arg", [f.Params[1], handle(a + off)])) }
+            var countedB = curF.NewBlock("")
+            emitArgCheck(b, chk, argVs, off, countedB)
+            b = countedB
+        }
         for (var i = 0; i < params.length; i++) {
-            var argV = callExt(b, "js_arg", [f.Params[1], handle(i + off)])
-            argVs.push(argV)
+            var argV = anytype
+            if (zppFirst) { argV = argVs[i] }
+            else {
+                argV = callExt(b, "js_arg", [f.Params[1], handle(i + off)])
+                argVs.push(argV)
+            }
             if (i < tys.length && tys[i] != "") {
                 var fit = emitArgFit(b, chk, i, argV)
                 b = fit.b
                 argV = fit.v
+            } else if (chk != undefined && chk != null && chk.zpps != undefined && i < chk.zpps.length && chk.zpps[i] != "") {
+                var zfit = emitZppFit(b, chk, i, argV)
+                b = zfit.b
+                argV = zfit.v
             }
             var copied = sawYield || curWrites["*"] === true || curWrites[params[i]] === true
             if (copied) { argV = callExt(b, "js_phcopy", [argV]) }
@@ -8484,7 +8568,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             if (copied && armed) { callExt(b, "js_phown", [curScopeV, emitStr(b, params[i]), argV]) }
         }
         var genChk = sawYield && chk != undefined && chk != null
-        if (chk != undefined && chk != null) { emitArgCheck(b, chk, argVs, off, bodyB) }
+        if (chk != undefined && chk != null && !zppFirst) { emitArgCheck(b, chk, argVs, off, bodyB) }
         else { b.NewBr(bodyB) }
         curWrites = savedWrites
         curSelfName = savedSelf
@@ -8557,6 +8641,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         var pendingRef = false
         var pendingRest = false
         var tys = []
+        var zpps = []
         var pendingType = ""
         var rty = ""
         for (var i = 0; i < items.length; i++) {
@@ -8569,7 +8654,10 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                 if (pendingRef) { byref.push(params.length) }
                 if (pendingRest) { rest = params.length }
                 params.push(items[i].param)
+                // A library parameter stands for an internal one: zpp reads it
+                // (emitZppFit) if it declares a scalar type, else nothing checks it.
                 tys.push(phpLibDepth > 0 ? "" : pendingType)
+                zpps.push(phpLibDepth > 0 && !pendingRef && !pendingRest ? pendingType : "")
                 pendingType = ""
                 pendingRef = false
                 pendingRest = false
@@ -8577,11 +8665,13 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             else if (items[i].pdef != undefined && params.length > 0) {
                 defs.push({name: params[params.length - 1], init: items[i].pdef})
                 if (items[i].pnull) { tys[tys.length - 1] = phpTypeOrNull(tys[tys.length - 1]) }
+                zpps[zpps.length - 1] = zppType(zpps[zpps.length - 1], items[i].pnull)
             }
         }
+        for (var z = 0; z < zpps.length; z++) { zpps[z] = zppType(zpps[z], false) }
         if (rest >= 0) { dynPlaceVariadic = true }
         if (defs.length < params.length - (rest >= 0 ? 1 : 0)) { phpLibArgErr() }
-        return {params: params, defs: defs, byref: byref, rest: rest, tys: tys, rty: phpLibDepth > 0 ? "" : rty}
+        return {params: params, defs: defs, byref: byref, rest: rest, tys: tys, rty: phpLibDepth > 0 ? "" : rty, zpps: zpps}
     }
     // 'function f(...$rest)': the variadic parameter arrives as one argument holding
     // the collected PHP array (emitPhArgs packs the tail), so no prologue is needed -
@@ -8659,7 +8749,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             inner = makeBody(stmts)
         }
         return {name: name, params: params, defs: defs, byref: pl.byref, rest: pl.rest, pvis: pvis, vis: vis, st: isSt, live: sc.live, gen: isGen,
-                tys: pl.tys, rty: retTypeOf(pl.rty, isGen),
+                tys: pl.tys, rty: retTypeOf(pl.rty, isGen), zpps: pl.zpps,
                 lib: phpLibDepth > 0 && name.substring(0, 5) != "__mec",
                 fname: phpLibDepth > 0 && name.substring(0, 5) == "__mec" ? undefined : name,
                 body: paramDefaults(defs, variadicPrologue(pl, inner))}
@@ -8853,8 +8943,9 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     function makeTopDef(fn) {
         if (phpLibDepth > 0 && fn.name.substring(0, 5) != "__mec") {
             var ar = phpLibArity(phpLib, phpLibKey(phpLib, fn.name))
-            fn.chk = ar[0] == 0 && ar[1] < 0 ? null
-                : {req: ar[0], max: ar[1], rest: fn.rest, who: fn.name, sig: sigText(fn.params, fn.rest), clo: false, lib: true}
+            fn.chk = ar[0] == 0 && ar[1] < 0 && !zppAny(fn.zpps) ? null
+                : {req: ar[0], max: ar[1], rest: fn.rest, who: fn.name, sig: sigText(fn.params, fn.rest), clo: false, lib: true,
+                   zpps: fn.zpps, names: fn.params}
         }
         var t = makeDefStmt(fn)
         // The hoisted closure is created away from its declaration, so defPos names
@@ -9011,6 +9102,9 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     var typedNames = {}
     // declare(strict_types=1) somewhere in the program (js_phstrict).
     var strictTypes = false
+    // The files that declare strict_types=1, which decides a library function's
+    // arguments by the file of the call (php_site_strict).
+    var strictFiles = {}
     var anyVis = false
     var anyTyped = false
     var classDecl = {}

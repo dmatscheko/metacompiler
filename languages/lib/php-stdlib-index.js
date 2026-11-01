@@ -364,3 +364,12 @@ function phpLibArityBad(ix, name, n) {
     var ar = phpLibArity(ix, key)
     return n < ar[0] || (ar[1] >= 0 && n > ar[1])
 }
+
+// Does the library's declaration of engine native `name` declare scalar
+// parameter types, which zpp reads for the call's site (__mec_zpp)? A program's
+// direct call of one from a strict_types file, or with display_errors=1, goes to
+// that declaration, so that the file decides the coercions and a null argument's
+// deprecation is displayed; the native itself reads any argument coercively.
+function phpLibZppNative(name) {
+    return ",strlen,intdiv,substr,strpos,strrpos,strcmp,ord,chr,strtolower,strtoupper,".indexOf("," + name + ",") >= 0
+}

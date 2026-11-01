@@ -3020,14 +3020,18 @@ function phObjCast(v) {
 }
 
 function phCast(kind, v) {
-    // An array casts to int or float as 1 when it has elements, else 0. Twin of
-    // phpCast in abnf/jsrtphp.go.
+    // An array casts to int or float as 1 when it has elements, else 0, and an
+    // object as 1. Twin of phpCast in abnf/jsrtphp.go.
     if (kind == "int" || kind == "integer") {
+        if (phIsNum(v) || typeof v == "string") { return phToLong(v) }
         if (phIsArr(v)) { return phArrParts(v).k.length > 0 ? 1 : 0 }
+        if (phIsObj(v) || typeof v == "function" || phIsGen(v)) { return 1 }
         return phToLong(v)
     }
     if (kind == "float" || kind == "double" || kind == "real") {
+        if (phIsNum(v) || typeof v == "string") { return phMkFlo(phNumOf(phToNum(v))) }
         if (phIsArr(v)) { return phMkFlo(phArrParts(v).k.length > 0 ? 1 : 0) }
+        if (phIsObj(v) || typeof v == "function" || phIsGen(v)) { return phMkFlo(1) }
         return phMkFlo(phNumOf(phToNum(v)))
     }
     if (kind == "string" || kind == "binary") { return phStr(v) }
@@ -3849,6 +3853,11 @@ function phHexDigit(c) {
 
 // The type predicates: the whole point of the boxes is that the int / float
 // distinction is OBSERVABLE.
+// The exact-type tests of a library parameter's prologue (emitZppFit in
+// php-to-llvm-ir.abnf). Twins of the same names in abnf/jsrtphp.go.
+function js_phzpps(v) { return typeof v == "string" }
+function js_phzppi(v) { return phIsInt(v) }
+function js_phzppf(v) { return phIsFlo(v) }
 function js_phis(kind, v) {
     if (kind == "int") { return phIsInt(v) }
     if (kind == "float") { return phIsFlo(v) }
