@@ -168,7 +168,7 @@ range 0..2: 7` (a plain RangeError); the current engines print the IndexError fo
 `RangeError (index): Index out of range: index should be less than 3: 7`, which is
 believed to be the modern VM's. Leave as is unless a real dart run settles it.
 
-### T-1035 c: the C compiler silently merges two definitions of one function name into a corrupt module · P3 · CORE · OPEN [V]
+### T-1035 c: the C compiler silently merges two definitions of one function name into a corrupt module · P3 · CORE · IN PROGRESS (CORE worker, round 18) [V]
 Defining the same C function twice (seen with a second `rt_isref` in languages/lib/bash-rt.c during SH r26) produces an LLVM module with "%entry already present" instead of a redefinition error. cc rejects it ("redefinition of 'rt_isref'"). The C front end should diagnose a duplicate function definition.
 
 # Closed
