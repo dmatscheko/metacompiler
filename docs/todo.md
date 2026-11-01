@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1032** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1033** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -105,11 +105,8 @@ strings.TrimSpace, native strips ASCII 9-13 and 32: `int.Parse(" 1 2 ")` and `in
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-1024 kotlin: range type identity and function-spelled range builders · P3 · KT · IN PROGRESS (KT worker, round 16) [V]
-`val a: Any = 1..5; a is ClosedRange<*>` / `a is OpenEndRange<*>` — kotlinc: true / true; ours (all three engines): false / false.
-`("a".."c")::class.simpleName` — kotlinc `ComparableRange`; ours `null`.
-`"a".rangeTo("c")` / `"a".rangeUntil("c")` — kotlinc `a..c` / `a..<c`; ours aborts.
-Repro: scratchpad KT15/p5.kt (from KT r15). Oracle: kotlinc 2.2.21.
+### T-1032 kotlin: enum compareTo/ranges, Boolean ranges, IntRange.endExclusive · P3 · KT · OPEN [V]
+kotlinc 2.2.21 (repros: scratchpad KT16/q3.kt, q4.kt): `enum class Col{A,B,C}; Col.B.compareTo(Col.C)` → -1; ours aborts in all engines ("unknown method 'compareTo'"). `Col.B in Col.A.rangeTo(Col.C)` → true; interpreter says false (run/native true). `false..true` / `false.rangeTo(true)` → prints `false..true`, `true in false..true` → true; run/native abort "method call 'rangeTo' on a boolean". `(1..5).endExclusive` → 6; interpreter prints kotlin.Unit, compiled legs wrong too. Found by KT r16.
 
 # GO — Go  (oracle: `go run`)
 
@@ -1077,6 +1074,7 @@ T-1020 python: CJK/idna/punycode/escape codecs; dir() of a generator; new attrib
 T-1018 ruby: an Enumerator is not Enumerable; Hash#to_proc; `lazy.instance_of?(Enumerator)`; default_proc lambda arity — DONE (RB r38, 28b9c6e8): Enumerator/Lazy Enumerable, Symbol Comparable, exact instance_of?, Hash#to_proc and &hash, default_proc= conversion + lambda arity TypeError (2.6 rules). Master probe vs ruby 2.6: 4 legs agree.
 T-1023 go: a struct value's method set includes pointer methods in type switches/assertions; embedding another package's defined non-struct type — DONE (GO r22, 1ac92568): value method sets exclude pointer methods in type switches/assertions (incl. embedded fields); embedded-interface bodies now parse (goIfaceSet); imported defined non-struct types promote methods. Master probe (sent back once for interface{G;S}) vs go run: 4 legs agree.
 T-1015 js: invalid regex errors are late and uncatchable; Go twin turns lone surrogates in regex text into U+FFFD; `sc=Zyyy` on Unicode 17 scripts — DONE (JS r39, b35b47a1): catchable SyntaxError for bad RegExp patterns/flags with node's texts; regex literals early-error in JS+TS; Annex B escapes; duplicate group names; String.fromCodePoint lone surrogate (Go twin); \p{} at Unicode 17 via a JS-only correction table. Master probe vs node 24 (20 patterns + \p + surrogate): 4 legs agree; full matrix 601/601 and js+python ratchets green after rebase.
+T-1024 kotlin: range type identity and function-spelled range builders — DONE (KT r16, c63345a8): range type identity (ClosedRange/OpenEndRange/IntRange/LongRange), range class names, OpenEnd{Double,Float}Range for ..< on floats, .rangeTo/.rangeUntil call spellings. Master probe vs kotlinc 2.2.21 (22 lines): 4 legs agree.
 
 # Settled — do not re-open
 
