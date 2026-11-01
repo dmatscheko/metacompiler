@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1036** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1037** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -124,11 +124,9 @@ real coroutines out of the subset - decide first). Go also runs the most recentl
 
 # PHP — PHP  (no php here: spec-only, php.net / php-src behaviour)
 
-### T-1025 php: reference counts: remaining release points · P3 · PHP · IN PROGRESS (PHP worker, round 36) [V spec-only]
-Follow-up of T-1000 (only correct-but-high counts remain, so `&` may survive a copy that PHP would unwrap). Not yet released: arrays that hold reference cells and die (overwritten, frame-local, temporaries passed as args); frames unwound by an exception; unfinished generators; dynamic names (`$$n`, extract, `global $$k`). Interpreter copies by-value array params counting kept cells while the compiler shares unwritten params, so the engines can differ once the original holder dies. Also: print_r recursion depth and the "Recursion detected" warnings for count/print_r/var_dump. Spec: zend_array_dup_element keeps a ref only while refcount > 1.
-
-### T-1026 php: return-by-reference functions; static property assignment copy · P3 · PHP · IN PROGRESS (PHP worker, round 36) [V spec-only]
-`function &counter() { static $c = 0; $c++; return $c; } $c1 = &counter(); $c1 += 100; echo counter();` — PHP: 102; ours: 2 (`=&` of a by-ref return degrades to a value copy). Unverified: the compiler may not copy on `C::$p = $a`, aliasing `$a`'s array (check `$a=[1]; C::$p=$a; $a[0]=2; echo C::$p[0];` → 1). Found by PHP r35; spec-only oracle.
+### T-1036 php: array refcount/COW for reference holders; generator eager-run and yield-in-catch bugs · P3 · PHP · OPEN [V spec-only]
+Remainder of T-1025 (needs real array refcounting or COW; counts stay correct-but-high): arrays holding reference cells that die (overwritten, frame-local, temp copies) never release them; unfinished generators never release; interpreter copies by-value array params while the compiler shares them; print_r recursion depth; PHP 8 "count(): Recursion detected" warning.
+Also found by PHP r36: (1) compiler: `function g2(){ try { thrower(); } catch (Exception $e) { yield 5; } }` iterated with foreach → "yield outside of a generator" under llvm.Run and native; interpreter gives 5 (correct). (2) interpreter runs a generator to completion on `->current()`, so its frame's holders are released while PHP's generator is suspended: `$gen = g(); $gen->current(); $w = $z; $w[0] = 11; echo $z[0];` → interpreter 1, compiler and PHP 11. (3) compiler `inc($$n)` to a by-ref param probably passes by value (inferred). (4) interpreter coreDepth not restored after a generator stop-throw.
 
 # LUA — Lua  (oracle: lua 5.5 binary, suite is 5.4)
 
@@ -1082,6 +1080,8 @@ T-1015 js: invalid regex errors are late and uncatchable; Go twin turns lone sur
 T-1024 kotlin: range type identity and function-spelled range builders — DONE (KT r16, c63345a8): range type identity (ClosedRange/OpenEndRange/IntRange/LongRange), range class names, OpenEnd{Double,Float}Range for ..< on floats, .rangeTo/.rangeUntil call spellings. Master probe vs kotlinc 2.2.21 (22 lines): 4 legs agree.
 T-1030 ruby: Proc#=== as an operator returns a boolean; Struct is not Enumerable — DONE (RB r39, 3c0648fe): === returns the call's value for Proc/Method/user #=== (case/when/rescue still truthy); builtin classes include Enumerable/Comparable in is_a?/ancestors/include?/<. Master probe vs ruby 2.6 (=== on Range/Class/Regexp/Proc/user, case/when incl. lambdas and user ===, rescue lists): 4 legs agree.
 T-1017 bash: `read` without -r keeps backslashes; empty subscript `b[]` accepted; `declare NAME[SUB]` without a value refused; computed operand with an attribute option — DONE (SH r26, c361c4ac): read without -r backslash rules + name validation; b[] bad subscript; declare/local NAME[SUB] declares an array; compiler declare -a with computed operand (-A/export -a computed still refused: runtime attribute table). Master probe vs bash 5.3: 4 legs agree.
+T-1026 php: return-by-reference functions; static property assignment copy — DONE (PHP r36, 5c2f0c64): function &f / &m with =&, by-ref returns of elements/properties/statics; static property assignment copies in the compiler; $$n = &$x binds the computed name. Master spec probe: 3 legs agree.
+T-1025 php: reference counts: remaining release points — PARTIAL→split (PHP r36, 5c2f0c64): holders released on exception unwinding (catch/finally/finally-return) and for computed names. Dying arrays, unfinished generators, by-value param sharing, print_r depth, count() recursion warning need COW/array refcounting — filed as follow-up.
 
 # Settled — do not re-open
 
