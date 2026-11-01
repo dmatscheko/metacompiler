@@ -69,7 +69,7 @@ Remainder of T-1028; each needs a table-size decision before work starts. CJK fa
 
 # RB — Ruby
 
-### T-1069 ruby: external Enumerator iteration (next/peek/rewind) over a user #each, to_enum/enum_for · P3 · RB · OPEN [V]
+### T-1069 ruby: external Enumerator iteration (next/peek/rewind) over a user #each, to_enum/enum_for · P3 · RB · IN PROGRESS (RB worker, round 46) [V]
 Structural; touches the shared generator floor (Go twin jsGenerator / runtime.c gen_resume/gen_close) - coordinate as a shared-file change. Oracle /usr/bin/ruby 2.6, class whose #each logs 1,2,3,:end and yields 10,20,30 (returns :done):
 - `e.next` -> 10, log [1]; `e.peek` -> 20, log [1, 2]; after the third next, StopIteration "iteration reached an end", `result` :done. `rewind` drops the run WITHOUT running ensure (MRI runs none on rewind or at exit).
 - `lazy.map { |v| v + 1 }.next` twice -> 11, 21, log [1, 2]; `C.new(l).map.next` -> 10, log [1]; `each_slice(2).next` -> [10, 20] then [30].
@@ -77,7 +77,7 @@ Structural; touches the shared generator floor (Go twin jsGenerator / runtime.c 
 - `for` over a user #each must interleave the body with #each's side effects (today all yields are collected first).
 Needs: interpreter coroutine running src.each(&blk) with blk = coYield, switching run state (block/self frames, rescue state) on resume; compiled: one emitted generator closure registered with the Go twin / layer 2 (js_genfn/js_yield are emitter-only externs); per-coroutine rubyCatchTags (Go) and js_rcatch/js_rthrow state (layer 2) plus the current-exception slot; close of an unfinished one must skip ensure.
 
-### T-1070 ruby: Enumerator#each value, for-over-Lazy value, user #inspect ivars, Lazy respond_to?/class · P3 · RB · OPEN [V]
+### T-1070 ruby: Enumerator#each value, for-over-Lazy value, user #inspect ivars, Lazy respond_to?/class · P3 · RB · IN PROGRESS (RB worker, round 46) [V]
 Oracle /usr/bin/ruby 2.6; all engines unless noted:
 - Enumerator#each with a block returns the Enumerator; MRI returns the underlying method's value (nil for each_slice, receiver for each/each_with_index, `[1, 2].map.each {}` -> [nil, nil]); so `for` over map/select/with_index Enumerators answers the Enumerator instead of MRI's Array.
 - `for x in (1..3).lazy.map {...}; end` answers the Lazy; MRI nil.
@@ -108,7 +108,7 @@ Found by the CORE worker, round 15. The interpreter's stripWs deletes every ASCI
 strings.TrimSpace, native strips ASCII 9-13 and 32: `int.Parse(" 1 2 ")` and `int.Parse(" 1")` give three answers.
 .NET's NumberStyles.Integer allows leading/trailing white space (U+0009-U+000D, U+0020) only; settle with a real dotnet.
 
-### T-1071 csharp: member access on null never raises a catchable NullReferenceException · P3 · CS · OPEN [V]
+### T-1071 csharp: member access on null never raises a catchable NullReferenceException · P3 · CS · IN PROGRESS (CS worker, round 13) [V]
 Spec-only. `class C { public string F; public string P { get; set; } }` then `C c = null; try { string r = c.F; } catch (NullReferenceException) { Console.WriteLine("NRE F"); }` -> `NRE F`; same for `c.P`, `c.P = x`, `c.P ??= x`, `c.M()`, `c.F = x`, and `catch (Exception e)` with e.Message "Object reference not set to an instance of an object." All engines abort instead: interpreter "field .F of null", run/native "member 'F' of null" (native property: "method call '__get_P' on a null"). Route null-receiver member/method/indexer access in both grammars to a C#-level NullReferenceException raise.
 
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
