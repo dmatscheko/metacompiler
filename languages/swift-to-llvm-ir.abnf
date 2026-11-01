@@ -863,7 +863,7 @@ LocalType   = StructDecl | ClassDecl | ActorDecl | EnumDecl ;
 // that excDispatch re-issues in the enclosing frame. A catch
 // with no `let NAME` binds the implicit name `error`. Each part is marked so makeTry
 // can tell them apart.
-Do          <~~ var di = takeAll(); push(swLblStmt(itemLbl(di), makeTry(itemsAfterLbl(di)))); swBrInIf(up.start, up.pos, itemLbl(di)) ~~>
+Do          <~~ var di = takeAll(); push(swLblStmt(itemLbl(di), makeTry(itemsAfterLbl(di)), true)); swBrClaim(up.start, up.pos, "do", itemLbl(di)) ~~>
             = [ LoopLabel ] KwDo TryBody { CatchClause } ;
 TryBody     <~~ push({trybody: pop()}) ~~>
             = Block ;
@@ -897,11 +897,11 @@ Fallthrough <~~ push(makeFallthrough()) ~~>
 // condition item is emitted in turn and branches to the failure block; the names a
 // binding declares live in a child scope for if/while and, Swift-style, in the
 // ENCLOSING scope for guard (whose else branch is expected to leave that scope).
-CplxIf      <~~ var ci = takeAll(); push(swLblStmt(itemLbl(ci), makeCondIf(itemsAfterLbl(ci)))); swBrInIf(up.start, up.pos, itemLbl(ci)) ~~>
+CplxIf      <~~ var ci = takeAll(); push(swLblStmt(itemLbl(ci), makeCondIf(itemsAfterLbl(ci)), false)); swBrClaim(up.start, up.pos, "if", itemLbl(ci)) ~~>
             = [ LoopLabel ] KwIf CplxCondClause Block [ KwElse ElseBody ] ;
 CplxGuard   <~~ push(makeCondGuard(takeAll())) ~~>
             = KwGuard CplxCondClause KwElse Block ;
-CplxWhile   <~~ push(makeCondWhile(takeAll())) ~~>
+CplxWhile   <~~ var li = takeAll(); swBrClaim(up.start, up.pos, "loop", itemLbl(li)); push(makeCondWhile(li)) ~~>
             = [ LoopLabel ] KwWhile CplxCondClause Block ;
 // A complex clause requires either a comma (2+ conditions) or a leading binding.
 CplxCondClause <~~ push({conds: takeAll()}) ~~>
@@ -1073,14 +1073,14 @@ TupLeaf     <~~ push(swBt(up.in)) ~~> = Wildcard | Id ;
 TupleAssign <~~ push(makeTupleAssign(takeAll())) ~~>
             = TupNames "=" Expression [ ";" ] ;
 
-If          <~~ var ii = takeAll(); push(swLblStmt(itemLbl(ii), makeIf(itemsAfterLbl(ii)))); swBrInIf(up.start, up.pos, itemLbl(ii)) ~~>
+If          <~~ var ii = takeAll(); push(swLblStmt(itemLbl(ii), makeIf(itemsAfterLbl(ii)), false)); swBrClaim(up.start, up.pos, "if", itemLbl(ii)) ~~>
             = [ LoopLabel ] KwIf Expression Block [ KwElse ElseBody ] ;
 ElseBody    = Block | CplxIf | If ;
 
-While       <~~ push(makeWhileL(takeAll())); swBrClaim(up.start, up.pos, true) ~~>
+While       <~~ var li = takeAll(); swBrClaim(up.start, up.pos, "loop", itemLbl(li)); push(makeWhileL(li)) ~~>
             = [ LoopLabel ] KwWhile Expression Block ;
 
-Repeat      <~~ push(makeRepeat(takeAll())); swBrClaim(up.start, up.pos, true) ~~>
+Repeat      <~~ var li = takeAll(); swBrClaim(up.start, up.pos, "loop", itemLbl(li)); push(makeRepeat(li)) ~~>
             = [ LoopLabel ] KwRepeat Block KwWhile Expression [ ";" ] ;
 
 // `for case PAT in xs` filters: only the elements the pattern matches run the body
@@ -1089,21 +1089,21 @@ Repeat      <~~ push(makeRepeat(takeAll())); swBrClaim(up.start, up.pos, true) ~
 For         = ForCase | ForRange | ForList | ForAwait ;
 // `for await x in seq` / `for try await` walk an AsyncSequence, which needs an
 // executor this runtime does not have: recognized, reported as not implemented.
-ForAwait    <~~ takeAll(); push(notImplStmt("for await", up.start)); swBrClaim(up.start, up.pos, true) ~~>
+ForAwait    <~~ var li = takeAll(); swBrClaim(up.start, up.pos, "loop", itemLbl(li)); push(notImplStmt("for await", up.start)) ~~>
             = [ LoopLabel ] KwFor [ KwTry ] KwAwait [ "var" KwEnd ] ForPat [ ForPatType ] KwIn
               Expression [ ForWhere ] Block ;
-ForCase     <~~ push(makeForCase(takeAll())); swBrClaim(up.start, up.pos, true) ~~>
+ForCase     <~~ var li = takeAll(); swBrClaim(up.start, up.pos, "loop", itemLbl(li)); push(makeForCase(li)) ~~>
             = [ LoopLabel ] KwFor KwCase Pattern KwIn Expression [ ForWhere ] Block ;
 // The bounds are read at AddExpr level, BELOW RangeExpr, so the loop keeps its own
 // range operator instead of receiving one range value.
 // `for var x in xs` only makes x mutable, which every loop variable here already is.
 // The inline tags hand the loop variable's annotation to the body (swForSeq).
-ForRange    <~~ push(makeForRange(takeAll())); swBrClaim(up.start, up.pos, true) ~~>
+ForRange    <~~ var li = takeAll(); swBrClaim(up.start, up.pos, "loop", itemLbl(li)); push(makeForRange(li)) ~~>
             = [ LoopLabel ] KwFor [ "var" KwEnd ] ForPat <~~ swForPat(up.in) ~~> KwIn AddExpr RangeOp
               AddExpr <~~ swForSeq("") ~~> [ ForWhere ] Block ;
 RangeOp     = "..." <~~ push({rop: "..."}) ~~>
             | "..<" <~~ push({rop: "..<"}) ~~> ;
-ForList     <~~ push(makeForList(takeAll())); swBrClaim(up.start, up.pos, true) ~~>
+ForList     <~~ var li = takeAll(); swBrClaim(up.start, up.pos, "loop", itemLbl(li)); push(makeForList(li)) ~~>
             = [ LoopLabel ] KwFor [ "var" KwEnd ] ForPat <~~ swForPat(up.in) ~~> [ ForPatType ] KwIn
               Expression <~~ swForSeq(up.in) ~~> [ ForWhere ] Block ;
 // The loop variable: a name, _ , or a tuple pattern (for (k, v) in aDictionary).
@@ -1126,7 +1126,7 @@ Guard       <~~ push(makeGuard(takeAll())) ~~>
 // fallthrough. Body parsed FLAT (labels before Statement, a bare 'case' is a valid
 // identifier); the builder groups statements under the label they follow. break in
 // a case leaves the switch (loop stack), continue reaches the enclosing loop.
-Switch      <~~ push(makeSwitch(takeAll())); swBrClaim(up.start, up.pos, false) ~~>
+Switch      <~~ var li = takeAll(); swBrClaim(up.start, up.pos, "switch", itemLbl(li)); push(makeSwitch(li)) ~~>
             = [ LoopLabel ] KwSwitch SwitchSubj "{" { PoundIfCase | CaseLabel | Statement } "}" ;
 SwitchSubj  <~~ push({subj: pop()}) ~~>
             = Expression ;
@@ -1143,7 +1143,7 @@ CaseWhere   <~~ push({cwhere: pop()}) ~~> = KwWhere Expression ;
 Return      <~~ push(makeReturn(takeAll(), up.pos)) ~~>
             = KwReturn [ Expression <~~ push({itext: up.in, iat: up.start + ":" + up.pos}) ~~> ] [ ";" ] ;
 Break       <~~ var bi = takeAll(); push(makeBreakL(bi)); swBrNote(up.start, true, itemLbl(bi)) ~~>    = KwBreak [ SameLine BreakLbl ] [ ";" ] ;
-Continue    <~~ push(makeContinueL(takeAll())); swBrNote(up.start, false) ~~> = KwContinue [ SameLine BreakLbl ] [ ";" ] ;
+Continue    <~~ var ci = takeAll(); swBrNote(up.start, false, itemLbl(ci)); push(makeContinueL(ci)) ~~> = KwContinue [ SameLine BreakLbl ] [ ";" ] ;
 BreakLbl    <~~ push({lbl: swBt(up.in)}) ~~> = Id ;
 
 // A zero-width guard that fails at end of line (a newline or a // comment before the
@@ -1547,7 +1547,7 @@ NoTrailCtx  = :script(~~
             var cc = c.peek(k)
             while (cc === 32 || cc === 9 || cc === 10 || cc === 13) { k++; cc = c.peek(k) }
             w = ""
-            while ((cc >= 97 && cc <= 122) || (cc >= 65 && cc <= 90)) {
+            while ((cc >= 97 && cc <= 122) || (cc >= 65 && cc <= 90) || cc === 95 || (w !== "" && cc >= 48 && cc <= 57)) {
                 w = w + String.fromCharCode(cc); k++; cc = c.peek(k)
             }
             // A loop LABEL is not the statement's word: `outer: for x in xs {`.
@@ -3648,13 +3648,20 @@ KwContinue  = "continue" KwEnd ;
         return null
     }
     // A labelled if or do: its own exit block, the target of a break naming the
-    // label. Twin of swLblStmt in swift-interpreter.abnf.
-    function swLblStmt(lbl, t) {
+    // label; on a do (restart) its entry block is the target of a continue naming
+    // it, which runs the statement again, as swiftc compiles it. Twin of swLblStmt
+    // in swift-interpreter.abnf.
+    function swLblStmt(lbl, t, restart) {
         if (lbl == null) { return t }
         return function(b) {
             var exitB = curF.NewBlock("")
-            swLblStack.push({lbl: lbl, tag: curFTag, brk: exitB, cont: null, bN: -1, cN: -1})
-            var eb = t(b)
+            var startB = null
+            if (restart) {
+                startB = curF.NewBlock("")
+                b.NewBr(startB)
+            }
+            swLblStack.push({lbl: lbl, tag: curFTag, brk: exitB, cont: startB, bN: -1, cN: -1})
+            var eb = t(restart ? startB : b)
             swLblPop()
             eb.NewBr(exitB)
             return exitB

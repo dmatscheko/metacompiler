@@ -5964,6 +5964,53 @@ func s157() {
     check("157d", out == [0, 0, 2, 20, -1, 4, 40])
 }
 
+// ===== SECTION 158: continue on a labelled do; labelled while-let; label spellings =====
+// swiftc 6.1.2 accepts `continue L` naming a labelled do and runs the do again.
+enum E158: Error { case bad }
+func s158() {
+    var n = 0
+    var seen: [Int] = []
+    again: do {
+        let m = n * 10
+        n += 1
+        seen.append(m)
+        if n < 3 { continue again }
+    }
+    check("158a", seen == [0, 10, 20])
+    var k = 0
+    var got: [Int] = []
+    retry: do {
+        k += 1
+        if k == 2 { throw E158.bad }
+        got.append(k)
+        for i in 0..<3 where i == 1 && k < 4 { continue retry }
+    } catch {
+        got.append(-k)
+    }
+    check("158b", got == [1, -2])
+    var a = [1, 2, 3, 4]
+    var popped: [Int] = []
+    w1: while let x = a.popLast() {
+        if x == 3 { continue w1 }
+        if x == 2 { break w1 }
+        popped.append(x)
+    }
+    var b = [5, 6]
+    while let y = b.popLast(), y > 0 {
+        if y == 6 { continue }
+        popped.append(y)
+        break
+    }
+    check("158c", popped == [4, 5])
+    let go = true
+    var steps = 0
+    spin_2: while go {
+        steps += 1
+        if steps == 2 { break spin_2 }
+    }
+    check("158d", steps == 2)
+}
+
 func main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -6122,6 +6169,7 @@ func main() {
     s155() // SECTION-CALL 155
     s156() // SECTION-CALL 156
     s157() // SECTION-CALL 157
+    s158() // SECTION-CALL 158
     print("full: \(checks) checks, \(fails) failures")
 }
 

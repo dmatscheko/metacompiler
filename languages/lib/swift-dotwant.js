@@ -1430,10 +1430,13 @@ function swDsFlush() {
 }
 
 // ----- break and continue need an enclosing statement -----
-// Each one is noted by its source offset; a loop claims those inside it, a switch
-// the breaks, an if or a do claims the breaks that name its label and marks the
-// others inside it (swiftc words those differently), and a function body, a closure
-// and a top-level statement reject what is left: a branch cannot leave its function.
+// Each one is noted by its source offset. An unlabelled one is claimed by the
+// nearest loop, or by a switch when it is a break; an if or a do marks the
+// unlabelled ones inside it (swiftc words those differently). A labelled one is
+// claimed only by the statement carrying its label, and a continue naming an if or
+// a switch is an error there (swiftc lets one naming a do restart it). A function
+// body, a closure and a top-level statement reject what is left: a branch cannot
+// leave its function, nor name a label that does not enclose it.
 // A re-parse notes an offset once.
 var swBrPend = []
 function swBrNote(s, isBr, lbl) {
@@ -1442,20 +1445,20 @@ function swBrNote(s, isBr, lbl) {
     }
     swBrPend.push({s: s, br: isBr, lbl: lbl, inIf: false})
 }
-function swBrClaim(s, e, loop) {
-    var rest = []
-    for (var i = 0; i < swBrPend.length; i++) {
-        var n = swBrPend[i]
-        if (n.s < s || n.s >= e || !(loop || n.br)) { rest.push(n) }
-    }
-    swBrPend = rest
-}
-function swBrInIf(s, e, lbl) {
+// kind is "loop", "switch", "if" or "do"; lbl is the statement's label or null.
+function swBrClaim(s, e, kind, lbl) {
     var rest = []
     for (var i = 0; i < swBrPend.length; i++) {
         var n = swBrPend[i]
         if (n.s < s || n.s >= e) { rest.push(n) }
-        else if (!(n.br && lbl != null && n.lbl === lbl)) { n.inIf = true; rest.push(n) }
+        else if (n.lbl != null) {
+            if (n.lbl !== lbl) { rest.push(n) }
+            else if (!n.br && (kind == "if" || kind == "switch")) {
+                fail(c.curFile() + ":" + c.lineOf(n.s) + ": 'continue' cannot be used with " + kind + " statements")
+            }
+        }
+        else if (kind == "if" || kind == "do") { n.inIf = true; rest.push(n) }
+        else if (kind == "switch" && !n.br) { rest.push(n) }
     }
     swBrPend = rest
 }
@@ -1464,7 +1467,8 @@ function swBrCheck(s, e) {
         var n = swBrPend[i]
         if (n.s >= s && n.s < e) {
             var msg = "'continue' is only allowed inside a loop"
-            if (n.br) { msg = n.inIf ? "unlabeled 'break' is only allowed inside a loop or switch, a labeled break is required to exit an if or do" : "'break' is only allowed inside a loop, if, do, or switch" }
+            if (n.lbl != null) { msg = "cannot find label '" + n.lbl + "' in scope" }
+            else if (n.br) { msg = n.inIf ? "unlabeled 'break' is only allowed inside a loop or switch, a labeled break is required to exit an if or do" : "'break' is only allowed inside a loop, if, do, or switch" }
             fail(c.curFile() + ":" + c.lineOf(n.s) + ": " + msg)
         }
     }

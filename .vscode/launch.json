@@ -386,6 +386,34 @@
             "program": "${workspaceFolder}","args": ["languages/swift-to-llvm-ir.abnf", "tests/swift-fail-test-break.swift", "-q"]
         },
         {
+            "name": "Swift interpreter break to a label out of scope SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "expectError": "swift-fail-test-label.swift:8: cannot find label 'outer' in scope",
+            "program": "${workspaceFolder}","args": ["languages/swift-interpreter.abnf", "tests/swift-fail-test-label.swift", "-q"]
+        },
+        {
+            "name": "Swift compiler break to a label out of scope SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "expectError": "swift-fail-test-label.swift:8: cannot find label 'outer' in scope",
+            "program": "${workspaceFolder}","args": ["languages/swift-to-llvm-ir.abnf", "tests/swift-fail-test-label.swift", "-q"]
+        },
+        {
+            "name": "Swift interpreter continue to an if label SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "expectError": "swift-fail-test-continue-if.swift:9: 'continue' cannot be used with if statements",
+            "program": "${workspaceFolder}","args": ["languages/swift-interpreter.abnf", "tests/swift-fail-test-continue-if.swift", "-q"]
+        },
+        {
+            "name": "Swift compiler continue to an if label SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "expectError": "swift-fail-test-continue-if.swift:9: 'continue' cannot be used with if statements",
+            "program": "${workspaceFolder}","args": ["languages/swift-to-llvm-ir.abnf", "tests/swift-fail-test-continue-if.swift", "-q"]
+        },
+        {
             "name": "CSharp to LLVM IR -qq, a compile error still shows SHOULD FAIL",
             "type": "go",
             "request": "launch",
