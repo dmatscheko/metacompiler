@@ -79,13 +79,13 @@ Also: Module#constants order with several constants follows MRI's ID-hash order 
 
 # JS — JavaScript and TypeScript
 
-### T-991 js: member store on a primitive base; `(this).x++`; compiler parse of `println("s".x = 5)` · P3 · JS · OPEN [V]
+### T-991 js: member store on a primitive base; `(this).x++`; compiler parse of `println("s".x = 5)` · P3 · JS · IN PROGRESS (JS worker, round 38) [V]
 Found by the JS worker, round 37 (oracle node 24). `"s".x = 5` / `"s".length++` raise "member assignment 'x' on s" in both engines;
 node (sloppy) ignores the store (`"s".length++` → 1). `(this).x++` fails in both engines (inner Target rejects bare `this`; node
 NaN). js compiler only: `println("s".x = 5)` and `println(new RegExp("\p{l}","u").test(..))` do not parse as an argument though
 the same expression parses as a statement.
 
-### T-992 js: regex `\p{scx=..}` and 30 more ES binary properties; non-ASCII case folding under `iu`; private brand check in decorator access · P3 · JS · OPEN [V]
+### T-992 js: regex `\p{scx=..}` and 30 more ES binary properties; non-ASCII case folding under `iu`; private brand check in decorator access · P3 · JS · IN PROGRESS (JS worker, round 38) [V]
 Found by the JS worker, round 37 (oracle node 24). Script_Extensions and the ES binary properties without a Java table (Dash, Math,
 ID_Start, ID_Continue, ...) raise "unsupported character property" (needs Unicode tables). Under `iu` case folding is ASCII-only:
 `/é/iu.test("É")` → node true. Decorator `context.access.get/set` do not brand-check private names (tsc's obj.#x throws on a
