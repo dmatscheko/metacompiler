@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-966** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-967** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -220,24 +220,11 @@ variable name" where bash prefixes "<file>: line N:".
 
 # C — C subset
 
-### T-906 c: `u"…"` holds an astral character as one unit; non-ASCII character constants do not parse · P1 · C · IN PROGRESS (C worker, round 13) [V]
-Neighbour of T-758. `pl(u"\U0001F600"[0]); pl(u"\U0001F600"[1]); pl(sizeof(u"\U0001F600"))` (pl = putchar-based print) → cc
-`55357 56832 6`; all legs `128512 0 8` (a char16_t string must hold a UTF-16 surrogate pair). Indexing `u"😀"[2]` crashes the
-interpreter with "invalid load at address 16". `U"😀"`, `L"€"`, `u"é"`, `u8"é"` are right. Loud companion: `L'é'`, `u'€'`,
-`U'😀'` do not parse in either half (cc 233, 8364, 128512). Files: languages/lib/c-literals.js (u-prefix encoding, character
-constants), CharConst in both C grammars.
-
-### T-907 c: `&function` is rejected - "variable not defined" · P2 · C · IN PROGRESS (C worker, round 13) [V]
-Neighbour of T-755. `int md(int a,int b){return a%b;}` / `int (*single)(int,int) = &md;` at file scope → every leg fails with
-"variable not defined: md" (cc prints 1 for `single(9,4)`); inside a function the interpreter accepts it, run and native fail
-the same way. Without the `&` it works. Files: makeAddr in c-to-llvm-ir.abnf (local and global), the global initializer in
-c-interpreter.abnf.
-
-### T-940 c: array dimensions and enumerators accept only + - * / % << >> - no `sizeof`, `?:`, comparisons, `| & ^`, char constants · P2 · C · IN PROGRESS (C worker, round 13) [V]
-`int b[1 | 2]; int c[2 ? 3 : 1]; int d[(3 > 1) + 1]; int f[4 == 4];` → cc `12 12 8 8 4`; both halves fail at the first.
-Finder, same cause: `int s[sizeof(int)];`, `char u['A' - 60];`, `enum { A = 1 | 4, B = (3 > 1) ? 7 : 2 };`. `sizeof` in a dimension
-is ordinary C. The DimShift chain in c-interpreter.abnf (and the compiler's) should be the full integer constant expression.
-Corpus: 00207.c (`int a[1 && 1]`).
+### T-966 c: a parenthesised function name as callee; `sizeof expr` in a constant expression; unsigned rules in the fold · P2 · C · OPEN [V]
+Found by the C worker, round 13 (oracle cc -std=c11). `(ad)(1,2)` → cc 3, both halves "variable not defined: ad"; `(&ad)(1,2)` and
+`(*&md)(10,3)` do not parse. `int a[10]; char b[sizeof a / sizeof a[0]];` (also in an enumerator) does not parse - the fold runs at
+tag time without the declaration's type. The constant fold has no types: `char x[(-1 < 0u) + 1]` is 2 with us, 1 with cc
+(usual arithmetic conversions: -1 becomes UINT_MAX).
 
 # CORE — MetaJS, the engines, shared runtime, tooling
 
@@ -1190,6 +1177,9 @@ T-937 ts: an arrow with an untyped parameter and a return annotation `(x): T =>`
 T-938 ts compiler: parses 90 fewer must-parse corpus files than the interpreter — DONE bb0b453d
 T-939 js: halves disagree on line terminators, NUL in strings, parenthesised update targets — DONE bb0b453d
 T-915 ts/js: smaller leftovers - toStringTag of Symbol/BigInt, class-decorator context, Annex-B `\u{…}`, `\p{L}` — PARTIAL bb0b453d (Symbol/BigInt toStringTag, class-decorator context keys, Annex-B incomplete \x \u; \p{} is T-965)
+T-906 c: `u"…"` holds an astral character as one unit; non-ASCII character constants do not parse — DONE 153bd4c8
+T-907 c: `&function` is rejected - "variable not defined" — DONE 153bd4c8
+T-940 c: array dimensions and enumerators accept only + - * / % << >> - no `sizeof`, `?:`, comparisons, `| & ^`, char constants — DONE 153bd4c8 (one CExpr chain for dimensions, enumerators, designators, offsetof: ?: || && | ^ & == != relational, shifts, casts, char constants, sizeof/_Alignof(type); >> of a negative rounds down; sizeof of an expression is T-966)
 
 # Settled — do not re-open
 
