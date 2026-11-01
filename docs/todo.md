@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1039** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1040** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -72,8 +72,14 @@ python3 3.14: `type(range(3)).__name__` → range, `type(iter(range(3))).__name_
 
 # RB — Ruby
 
-### T-1033 ruby: Enumerable methods on classes that include Enumerable; Numeric in Integer/Float ancestry · P3 · RB · IN PROGRESS (RB worker, round 40) [V]
-ruby 2.6: `class Bag; include Enumerable; def initialize(a); @a=a; end; def each; @a.each { |x| yield x }; self; end; end` then `Bag.new([3,1]).map{|x| x*2}` → [6, 2], `.sort` → [1, 3], `.min`, `.include?`, `.to_a`, `.select` likewise; `Struct.new(:a).new(4).map { |v| v * 2 }` → [8]. Ours: NoMethodError undefined method `map' (interpreter: on `sort`) in all three engines — needs an Enumerable surface built on the user's #each. Also `Integer.superclass` → Numeric, `Float.ancestors` → [Float, Numeric, Comparable, Object, Kernel, BasicObject], `Integer < Numeric` / `Integer < Comparable` → true; ours Object / [Float, Object, Kernel, BasicObject] / nil / nil. Found by RB r39.
+### T-1039 ruby: missing Array Enumerable methods; each_slice block result; multi-value yields; zip/method(:map) on a user Enumerable · P3 · RB · OPEN [V]
+ruby 2.6, all three engines wrong (found by RB r40):
+- Array lacks member?, grep, grep_v, minmax_by, slice_before, slice_after, chunk, chain: `[3,1,2,5].member?(2)` → true, `.grep(1..2)` → [1, 2], `.minmax_by{|x|-x}` → [5, 1], `.chunk{|x|x.odd?}.to_a` → [[true, [3, 1]], [false, [2]], [true, [5]]], `.chain([9]).to_a` → [3, 1, 2, 5, 9]. (Add them to the Enumerable row in ruby-respond.js too.)
+- `[1].each_slice(2){}` → nil in 2.6 (also Range/Hash); ours answers the receiver.
+- user Enumerable with `yield 1, 2`: `map { |x| x }` → [1, 3, nil]; ours [[1, 2], [3, 4], nil] (map unpacks, select/to_a pack).
+- `b.zip(b)` with a user Enumerable → [[3, 3], [1, 1], [2, 2]]; ours [[3, nil], ...].
+- include Enumerable without #each: `NoEach.new.map` → undefined method `each'; ours names `map`.
+- `obj.method(:map)` / `Bag.instance_method(:map)` → #<Method: Bag(Enumerable)#map>; ours NameError/NoMethodError.
 
 # JS — JavaScript and TypeScript
 
@@ -1087,6 +1093,7 @@ T-1026 php: return-by-reference functions; static property assignment copy — D
 T-1025 php: reference counts: remaining release points — PARTIAL→split (PHP r36, 5c2f0c64): holders released on exception unwinding (catch/finally/finally-return) and for computed names. Dying arrays, unfinished generators, by-value param sharing, print_r depth, count() recursion warning need COW/array refcounting — filed as follow-up.
 T-1027 csharp: ParamName is "" (not null) when unset; `int.Parse(null)` throws FormatException — DONE (CS r4, b11a4fd7): ParamName null when unset (Argument*/user subclasses, : base(p) as param name); integral Parse(null) throws ArgumentNullException 's'. Master spec probe: 3 legs agree.
 T-1032 kotlin: enum compareTo/ranges, Boolean ranges, IntRange.endExclusive — DONE (KT r17, e394af8c): kotlin.Enum.compareTo (ordinal) → <, ranges, sorted, coerce; Boolean rangeTo/coerce; endExclusive for Int/Long/Char ranges with MAX_VALUE throw; when-in compares with Kotlin ordering. Master probe vs kotlinc 2.2.21 (20 lines): 4 legs agree.
+T-1033 ruby: Enumerable methods on classes that include Enumerable; Numeric in Integer/Float ancestry — DONE (RB r40, dc3bbb43): Enumerable surface on a user #each (and Struct) via to_a delegation, respond_to? agrees; Integer/Float/Rational/Complex under Numeric incl. methods added to Numeric. Master probe vs ruby 2.6 (40 lines: 30+ Enumerable methods, Struct, Numeric ancestry, Numeric#twice): 4 legs agree.
 
 # Settled — do not re-open
 
