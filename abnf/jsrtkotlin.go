@@ -1492,34 +1492,44 @@ func init() {
 		// no engine here has a call-site line table. This is java's js_jvtop,
 		// ruby's js_rtop and go's js_gotop, one language further on.
 		m["js_kttop"] = func(a []uint64) uint64 { return jvmUncaught(rt.ktExcTopLine(u(a[0]))) }
-		// js_ktthisat(this, "Outer") is Kotlin's labelled `this@Outer`: walk the
-		// __outer chain for an instance whose class is named `Outer`, and fall back to
-		// the receiver itself when there is none - which is what makeThisAt does in
-		// kotlin-interpreter.abnf (thisAtIn, then findThis). `__outer` is not set
-		// when an inner class is constructed from inside its outer's own method, so
-		// it is not read blindly.
+		// js_ktthisat(env, "Outer") is Kotlin's labelled `this@Outer`: every implicit
+		// receiver in scope, innermost first, and along each one's __outer chain, the
+		// first instance of a class named `Outer` (or derived from it); else the
+		// innermost receiver - which is what makeThisAt does in
+		// kotlin-interpreter.abnf (thisAtIn over findThisChain, then findThis). A
+		// scope function's receiver (`with(xs) { this@Box.size }` in a member of Box)
+		// is passed over this way. `__outer` is not set when an inner class is
+		// constructed from inside its outer's own method, so it is not read blindly.
+		// Twin of js_ktthisat in languages/lib/kotlin-rt.metajs.
 		m["js_ktthisat"] = func(a []uint64) uint64 {
 			want := rt.toString(u(a[1]))
-			cur := u(a[0])
-			for i := 0; i < 64; i++ {
-				o, isObj := cur.(*jsObject)
-				if !isObj {
-					break
+			var first interface{} = jsUndef
+			seen := false
+			for s := rt.scopeOf(a[0]); s != nil; s = s.parent {
+				t, ok := s.get("this")
+				if !ok {
+					continue
 				}
-				if cls, ok := o.props["__class"]; ok {
-					if co, isCls := cls.(*jsObject); isCls {
-						if n, ok := co.props["__name"]; ok && rt.toString(n) == want {
-							return w(cur)
-						}
+				if !seen {
+					first, seen = t, true
+				}
+				cur := t
+				for i := 0; i < 64; i++ {
+					o, isObj := cur.(*jsObject)
+					if !isObj {
+						break
 					}
+					if _, isInst := o.props["__class"]; isInst && ktIsType(cur, want) {
+						return w(cur)
+					}
+					nxt, ok := o.props["__outer"]
+					if !ok || isUndefOrNull(nxt) {
+						break
+					}
+					cur = nxt
 				}
-				nxt, ok := o.props["__outer"]
-				if !ok || isUndefOrNull(nxt) {
-					break
-				}
-				cur = nxt
 			}
-			return a[0]
+			return w(first)
 		}
 		// ktIsType is js_ktis as a plain Go call, installed here so the collection
 		// builtins (filterIsInstance) can ask the same question the `is` operator asks.
@@ -2322,7 +2332,19 @@ func init() {
 
 		// js_ktglobal(name) is the VALUE of one global builder; buildMain declares
 		// one per name. See the block above ktRecvStack.
-		m["js_ktglobal"] = func(a []uint64) uint64 { return w(ktGlobalFn(rt, rt.toString(u(a[0])))) }
+		// "this" is the innermost receiver ktWithRecv has pushed, which is how a scope
+		// function's lambda tells it was called as one (bindRecvThis in
+		// kotlin-to-llvm-ir.abnf). Twin of js_ktglobal in languages/lib/kotlin-rt.metajs.
+		m["js_ktglobal"] = func(a []uint64) uint64 {
+			name := rt.toString(u(a[0]))
+			if name == "this" {
+				if len(ktRecvStack) == 0 {
+					return w(jsUndef)
+				}
+				return w(ktRecvStack[len(ktRecvStack)-1])
+			}
+			return w(ktGlobalFn(rt, name))
+		}
 		// js_ktadoptel(coll, vty, kty): see ktAdoptEl.
 		m["js_ktadoptel"] = func(a []uint64) uint64 {
 			rt.ktAdoptEl(u(a[0]), rt.toString(u(a[1])), rt.toString(u(a[2])))
@@ -2851,7 +2873,11 @@ func init() {
 			// findThisChain / core.varMiss in kotlin-interpreter.abnf.
 			for s := sc; s != nil; s = s.parent {
 				if t, ok := s.get("this"); ok {
-					if obj, isObj := t.(*jsObject); isObj {
+					// An object-shaped BUILTIN receiver (a StringBuilder, a Map, a
+					// Set) answers through its Kotlin member surface below, exactly
+					// as a String does, so `append` inside sb.apply { } written in a
+					// `fun String.f()` is the builder's, the innermost receiver.
+					if obj, isObj := t.(*jsObject); isObj && !ktIsBuiltinRecv(t) {
 						if v, ok := obj.props[name]; ok {
 							// An unqualified read of a `lateinit var` throws
 							// too - see ktLateinitCheck.
@@ -9253,14 +9279,18 @@ func (rt *jsrt) ktRecvMember(recv interface{}, name string, iscall bool) (interf
 	if ktRecvProp(name) && ktRefRead != nil {
 		return ktRefRead(recv, name), true
 	}
-	// VALUE POSITION on a builtin receiver: the field read is TRIED, and only a miss
-	// falls through to the bound method below - which is where every name that is not
-	// a property of this receiver still lands, so nothing that resolved stops
-	// resolving. This is the arm that answers `with(1..7 step 2) { first }`.
-	if !iscall && ktRefRead != nil {
-		if v := ktRefRead(recv, name); !isUndefOrNull(v) {
-			return v, true
+	// VALUE POSITION on a builtin receiver is a field read and nothing else (this is
+	// the arm that answers `with(1..7 step 2) { first }`). A miss is a MISS: Kotlin
+	// has no unqualified value that means a bound method, so the name belongs to an
+	// outer receiver - `append(n)` inside sb.apply { } in a member of a class with a
+	// property n. Only a call binds the method below.
+	if !iscall {
+		if ktRefRead != nil {
+			if v := ktRefRead(recv, name); !isUndefOrNull(v) {
+				return v, true
+			}
 		}
+		return nil, false
 	}
 	self := recv
 	return jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
@@ -11019,7 +11049,14 @@ func (rt *jsrt) ktRefApply(info *ktRefInfo, args []interface{}) interface{} {
 			}
 		}
 	}
-	return ktRefRead(recv, info.name)
+	// A builtin member that is no property the receiver answers is a FUNCTION
+	// reference: `Int::toString`, `String::uppercase`. Twin of kRefApply in
+	// kotlin-interpreter.abnf and ktRefApply in languages/lib/kotlin-rt.metajs.
+	v := ktRefRead(recv, info.name)
+	if _, isUndef := v.(jsUndefT); isUndef && !ktRecvProp(info.name) {
+		return ktMemberCall(recv, info.name, ktRefRest(info, args))
+	}
+	return v
 }
 
 // ktRefRead / ktRefWrite are KProperty.get and KProperty.set: the property READ and

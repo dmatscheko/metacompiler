@@ -162,6 +162,21 @@ function ktNoteDecl(name, ty, lty) {
     var d = {ty: ty, lty: lty == undefined ? "" : lty, at: ktAt, from: -1, to: -1, vr: ktIsVarAt(ktAt)}
     l.push(d)
     ktOpen.push(d)
+    return d
+}
+// A declaration's javaClass type (lty). A lambda parameter's is judged on first
+// use, not when the lambda is walked: the lambda's receiver text may read `this`
+// of an extension function whose receiver is noted only once its body is walked.
+function ktDeclLty(d) {
+    if (d.lfn !== undefined) {
+        var f = d.lfn
+        d.lfn = undefined
+        var saved = ktAt
+        ktAt = d.at
+        d.lty = f()
+        ktAt = saved
+    }
+    return d.lty
 }
 // Whether the declaration at source offset `at` is spelled `var`: a word `var`
 // before its name ends (modifiers may precede it, `private var x: T`). A `val`, a
@@ -187,7 +202,8 @@ function ktIsVarAt(at) {
 function ktNoteLamParam(name, at) {
     var saved = ktAt
     ktAt = at
-    ktNoteDecl(name, "", ktLamOneParamTy(at, name.length))
+    var d = ktNoteDecl(name, "", "")
+    d.lfn = function() { return ktLamOneParamTy(at, name.length) }
     ktAt = saved
 }
 function ktNoteLamIt(items, at) {
@@ -196,7 +212,8 @@ function ktNoteLamIt(items, at) {
     }
     var saved = ktAt
     ktAt = at
-    ktNoteDecl("it", "", ktLamParamTy(at, -1))
+    var d = ktNoteDecl("it", "", "")
+    d.lfn = function() { return ktLamParamTy(at, -1) }
     ktAt = saved
 }
 // The static type of the lambda parameter at offset at (its name n characters
@@ -1011,6 +1028,16 @@ function ktNoteJavaClassRecvs(sfx, txt) {
     }
     return any
 }
+// Whether a postfix chain's text (whitespace stripped) LEADS with an unqualified
+// `javaClass` that nothing declares: the extension property read off the implicit
+// receiver, which each grammar's foldCallMember rewrites to `this.javaClass` so its
+// primitive receiver is judged like any other (`fun Int.f() = javaClass.name` is int).
+function ktImplicitJavaClass(txt) {
+    if (txt == undefined || txt.substring(0, 9) != "javaClass") { return false }
+    var n = txt.charAt(9)
+    if (ktIdChar(n) || n == "(" || n == "{" || n == "<") { return false }
+    return ktDeclAt("javaClass") == null
+}
 function ktJvmPrimSfxs(sfx) {
     var saved = ktAt
     for (var k = 0; k < sfx.length; k++) {
@@ -1061,6 +1088,7 @@ function ktStaticTy(t) {
     if (s.length == 0) { return "" }
     if (s.charAt(0) == "(" && ktMatchClose(s, 0, "(", ")") == s.length - 1) { return ktStaticTy(s.substring(1, s.length - 1)) }
     if (s.substring(0, 2) == "if" && ktSkipWs(s, 2) < s.length && s.charAt(ktSkipWs(s, 2)) == "(") { return ktIfTy(s) }
+    if (s.substring(0, 4) == "when" && !ktIdChar(s.charAt(4))) { return ktWhenTy(s) }
     var ops = ktTopOps(s)
     if (ops.length == 0) { return ktChainTy(s) }
     for (var i = 0; i < ops.length; i++) {
@@ -1135,6 +1163,78 @@ function ktIfTy(s) {
     if (ktBranchEnd(s, b) != s.length) { return "" }
     var ta = ktStaticTy(ktUnbrace(s.substring(i, a)))
     return ta == ktStaticTy(ktUnbrace(s.substring(b))) ? ta : ""
+}
+// The type of a `when` expression whose every arm's value has the same static type,
+// "" else. An arm ends at a line break or `;`, or before the word `else` of the last
+// arm (`when (it) { 1 -> "a" else -> "b" }`); an arm the cut leaves without its
+// `->`, or whose value is not one expression, is not told.
+function ktWhenTy(s) {
+    var i = ktSkipWs(s, 4)
+    if (s.charAt(i) == "(") {
+        var ce = ktMatchClose(s, i, "(", ")")
+        if (ce < 0) { return "" }
+        i = ktSkipWs(s, ce + 1)
+    }
+    if (s.charAt(i) != "{" || ktMatchClose(s, i, "{", "}") != s.length - 1) { return "" }
+    var body = s.substring(i + 1, s.length - 1)
+    var arms = []
+    var from = 0
+    var depth = 0
+    var k = 0
+    while (k < body.length) {
+        var ch = body.charAt(k)
+        if (ch == "\"" || ch == "'") {
+            var q = ktQuoteEnd(body, k)
+            if (q < 0) { return "" }
+            k = q + 1
+            continue
+        }
+        if (ch == "(" || ch == "[" || ch == "{") { depth++ }
+        else if (ch == ")" || ch == "]" || ch == "}") { depth-- }
+        else if (depth == 0 && (ch == "\n" || ch == ";" ||
+                 (ktIsWs(ch) && body.substring(k + 1, k + 5) == "else" && !ktIdChar(body.charAt(k + 5))))) {
+            arms.push(body.substring(from, k))
+            from = k + 1
+        }
+        k++
+    }
+    arms.push(body.substring(from))
+    var ty = ""
+    for (var a = 0; a < arms.length; a++) {
+        var t = ktTrimWs(arms[a])
+        if (t == "") { continue }
+        var ar = ktTopArrow(t)
+        if (ar < 0) { return "" }
+        var at = ktStaticTy(ktUnbrace(t.substring(ar + 2)))
+        if (at == "" || (ty != "" && at != ty)) { return "" }
+        ty = at
+    }
+    return ty
+}
+// Whether t is one plain identifier.
+function ktIsIdent(t) {
+    if (t.length == 0 || (t.charAt(0) >= "0" && t.charAt(0) <= "9")) { return false }
+    for (var i = 0; i < t.length; i++) { if (!ktIdChar(t.charAt(i))) { return false } }
+    return true
+}
+// The first `->` of t outside brackets and quotes, or -1.
+function ktTopArrow(t) {
+    var depth = 0
+    var k = 0
+    while (k < t.length) {
+        var ch = t.charAt(k)
+        if (ch == "\"" || ch == "'") {
+            var q = ktQuoteEnd(t, k)
+            if (q < 0) { return -1 }
+            k = q + 1
+            continue
+        }
+        if (ch == "(" || ch == "[" || ch == "{") { depth++ }
+        else if (ch == ")" || ch == "]" || ch == "}") { depth-- }
+        else if (depth == 0 && ch == "-" && t.charAt(k + 1) == ">") { return k }
+        k++
+    }
+    return -1
 }
 // Where an if-branch starting at i ends: its braces' close, else the word `else`
 // at bracket depth 0 (or the text's end); -1 when it cannot be told.
@@ -1324,7 +1424,7 @@ function ktChainTy(s) {
             i = ce
         } else {
             var d = ktDeclAt(w)
-            ty = d == null ? "" : (d.ty != "" ? d.ty : d.lty)
+            ty = d == null ? "" : (d.ty != "" ? d.ty : ktDeclLty(d))
         }
     } else {
         return ""
@@ -1486,6 +1586,14 @@ function ktThisTy() {
 function ktLamResTy(args, ptys) {
     var t = args
     if (t.charAt(0) == "(" && ktMatchClose(t, 0, "(", ")") == t.length - 1) { t = ktTrimWs(t.substring(1, t.length - 1)) }
+    // An unbound reference to a member of the parameter's own type (`Int::toString`,
+    // `String::length`) is `{ it.member() }` / `{ it.member }`.
+    var cc = t.indexOf("::")
+    if (cc > 0 && ptys.length == 1 && ktIsIdent(t.substring(0, cc)) && ktIsIdent(t.substring(cc + 2))
+        && t.substring(0, cc) == ktBaseName(ptys[0])) {
+        var mt = ktMethodTy(ptys[0], t.substring(cc + 2), "()")
+        return mt != "" ? mt : ktPropTy(ptys[0], t.substring(cc + 2))
+    }
     if (t.charAt(0) != "{" || ktMatchClose(t, 0, "{", "}") != t.length - 1) { return "" }
     var body = t.substring(1, t.length - 1)
     var names = ["it"]

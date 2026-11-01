@@ -1755,7 +1755,7 @@ ObjVis      = ( "private" | "protected" | "internal" | "public" ) KwEnd ;
 // Bare `this` is a plain VarRef; this rule must precede Call/VarRef so `this` is not
 // read as an identifier before the `@Label` is seen.
 ThisExpr    <~~ push(makeThisAt(pop())) ~~>
-            = "this" KwEnd "@" KId <~~ push(up.in) ~~> ;
+            = "this" KwEnd "@" KId <~~ kThisLblUsed["$this@" + up.in] = true; push(up.in) ~~> ;
 
 // A lambda: { it * 2 }, { x -> x * 2 }, { a: Int, b: Int -> a + b }. The body is
 // one expression; without parameters the single argument is bound to 'it'.
@@ -1970,8 +1970,9 @@ SkipParenItem = "\x00"..."\x27" | "\x2a"..."\U0010ffff" ;
 // `abstract @a class F {}` as the label `abstract@` on the statement `a`. Kotlin lexes
 // `abstract` as a modifier and `@a` as an annotation there; its tree for
 // psi/LocalDeclarations.kt and for psi/newLabels/oldSyntaxExpressions.kt records both
-// files as ONE declaration per line.
-LabelDef    = KId <~~ push({lbl: up.in}) ~~> AtAdjacent "@" ;
+// files as ONE declaration per line. Nor is the name `this` / `super`:
+// `this@ext.length` in statement position is a labelled receiver.
+LabelDef    = NotThisSuper KId <~~ push({lbl: up.in}) ~~> AtAdjacent "@" ;
 BreakAt     <~~ push(makeBreakTo(pop().lbl)) ~~>
             = KwBreak AtAdjacent "@" KId <~~ push({lbl: up.in}) ~~> [ ";" ] ;
 ContinueAt  <~~ push(makeContinueTo(pop().lbl)) ~~>
@@ -4484,19 +4485,19 @@ NotMemberKw = :script(~~ "pure";
         return kJvmTagged(out, "java.util.TreeMap")
     }
     hostGlobals["emptyMap"] = function() { return kJvmTagged(kMakeMap(), "kotlin.collections.EmptyMap") }
-    // buildMap { put(k, v) } - the builder lambda takes the fresh map as `it`. The
+    // buildMap { put(k, v) } - the builder lambda takes the fresh map as `this`. The
     // builders also take an optional capacity first, so the lambda is the LAST
     // argument.
     hostGlobals["buildMap"] = function() {
         var f = arguments[arguments.length - 1]
         var m = kMakeMap()
-        if (typeof f == "function") { kSetRecv({v: m}); f(m) }
+        if (typeof f == "function") { kSetRecv({v: m, noit: true}); f(m) }
         return m
     }
     hostGlobals["buildList"] = function() {
         var f = arguments[arguments.length - 1]
         var l = []
-        if (typeof f == "function") { kSetRecv({v: l}); f(l) }
+        if (typeof f == "function") { kSetRecv({v: l, noit: true}); f(l) }
         return l
     }
     hostGlobals["Pair"] = function(a, b) { return {first: a, second: b} }
@@ -4504,7 +4505,7 @@ NotMemberKw = :script(~~ "pure";
     // with(receiver) { ... }: the scope function that is a top-level FUNCTION rather
     // than an extension. Same receiver channel as `run` - the receiver arrives as the
     // lambda's single parameter.
-    hostGlobals["with"] = function(recv, f) { kSetRecv({v: recv}); return f(recv) }
+    hostGlobals["with"] = function(recv, f) { kSetRecv({v: recv, noit: true}); return f(recv) }
     hostGlobals["run"] = function(f) { return f() }
     hostGlobals["repeat"] = function(n, f) {
         for (var i = 0; i < kNum(n); i++) { f(i) }
@@ -4944,7 +4945,7 @@ NotMemberKw = :script(~~ "pure";
     hostGlobals["buildString"] = function() {
         var f = arguments[arguments.length - 1]
         var b = {__sb: true, s: ""}
-        if (typeof f == "function") { kSetRecv({v: b}); f(b) }
+        if (typeof f == "function") { kSetRecv({v: b, noit: true}); f(b) }
         return b.s
     }
     hostGlobals["Regex"] = function() {
@@ -5750,8 +5751,11 @@ NotMemberKw = :script(~~ "pure";
         var ty = ktExtRecvTy(items[0].extRecv)
         var params = items[2].params
         var body = items[3]
+        var thisAt = "this@" + items[1]
         var fn = function() {
-            return runFrame([globalScope, {}], arguments[0], true, params, arguments, 1, body)
+            var fr = {}
+            if (kThisLblUsed["$" + thisAt] === true) { scopePut(fr, thisAt, arguments[0]) }
+            return runFrame([globalScope, fr], arguments[0], true, params, arguments, 1, body)
         }
         extFuns["$" + items[1]] = fn
         var old = extTyped["$" + items[1]]
@@ -6118,8 +6122,8 @@ NotMemberKw = :script(~~ "pure";
         // lambda resolves against it; the receiver also arrives as `it`, which `let`
         // and `also` are defined to do.
         if (name == "let") { return {v: f(target)} }
-        if (name == "run") { kSetRecv({v: target}); return {v: f(target)} }
-        if (name == "apply") { kSetRecv({v: target}); f(target); return {v: target} }
+        if (name == "run") { kSetRecv({v: target, noit: true}); return {v: f(target)} }
+        if (name == "apply") { kSetRecv({v: target, noit: true}); f(target); return {v: target} }
         if (name == "also") { f(target); return {v: target} }
         if (name == "takeIf") { return {v: f(target) ? target : null} }
         return {v: f(target) ? null : target}
@@ -9411,6 +9415,11 @@ NotMemberKw = :script(~~ "pure";
 
     // raw is the chain's source as written when it reads javaClass, "" else.
     foldCallMember = function(items, txt, raw) {
+        if (raw != "" && ktImplicitJavaClass(txt)) {
+            items = concat2impl([makeVarRef("this"), {kind: "field", name: "javaClass"}], items.slice(1))
+            txt = "this." + txt
+            raw = "this." + raw
+        }
         if (items.length == 1) return items[0]
         var primary = items[0]
         var suffixes = items.slice(1)
@@ -9548,7 +9557,10 @@ NotMemberKw = :script(~~ "pure";
                 var saved = scopes
                 scopes = captured.slice(0)
                 scopes.push({})
-                if (rcv != null) { declVar("this", rcv.v) }
+                if (rcv != null) {
+                    declVar("this", rcv.v)
+                    if (myLbl != null && kThisLblUsed["$this@" + myLbl] === true) { declVar("this@" + myLbl, rcv.v) }
+                }
                 // The argument list, as a plain array. A lambda-WITH-RECEIVER that still
                 // declares a parameter (or reads `it`) is offered the receiver in that
                 // slot as well. Real Kotlin gives a receiver lambda no parameter and no
@@ -9565,7 +9577,11 @@ NotMemberKw = :script(~~ "pure";
                     lav = lav2
                 }
                 if (params == null) {
-                    declVar("it", lav.length > 0 ? lav[0] : undefined)
+                    // A scope function's lambda (noit: apply, run, with, buildString,
+                    // buildList, buildMap) has no `it`, so an enclosing lambda's shows
+                    // through: `xs.map { sb.apply { append(it) } }`. Twin of
+                    // recvLamOf in kotlin-to-llvm-ir.abnf.
+                    if (rcv == null || rcv.noit !== true) { declVar("it", lav.length > 0 ? lav[0] : undefined) }
                 } else {
                     for (var i = 0; i < params.length; i++) {
                         var p = params[i]
@@ -11965,9 +11981,22 @@ NotMemberKw = :script(~~ "pure";
     }
     // this@Outer: walk out along the __outer chain of an inner-class instance until the
     // instance's class (or one of its parents) is named by the label.
+    // The labels some `this@L` names, keyed "$this@L". An extension function and a
+    // scope function's lambda bind their receiver under "this@<name>" too, but only
+    // when it is named, and the innermost binding answers. Twin of thisLblUsed in
+    // kotlin-to-llvm-ir.abnf.
+    var kThisLblUsed = {}
     function makeThisAt(label) {
+        var key = "this@" + label
         return function() {
-            var hit = thisAtIn(findThis(), label)
+            for (var si = scopes.length - 1; si >= 0; si--) {
+                if (hasOwn(scopes[si], key)) { return scopes[si][key] }
+            }
+            // A class label passes over a scope function's receiver
+            // (`with(xs) { this@Box.size }` in a member of Box). Twin of js_ktthisat.
+            var chain = findThisChain()
+            var hit = null
+            for (var ci = 0; ci < chain.length && hit == null; ci++) { hit = thisAtIn(chain[ci], label) }
             if (hit != null) { return hit.v }
             hit = thisAtIn(findDispatch(), label)
             if (hit != null) { return hit.v }
@@ -12144,7 +12173,13 @@ NotMemberKw = :script(~~ "pure";
         var rxf = extFor(r.pname, recv)
         if (rxf != null) { return rxf.apply(undefined, concat2impl([recv], kRefRest(r, args))) }
         if (recvFn(r.pname) != null) { return mcall(recv, r.pname, kRefRest(r, args)) }
-        return kGetField(recv, r.pname)
+        // A builtin member that is no property the receiver answers is a FUNCTION
+        // reference: `Int::toString`, `String::uppercase`. Twin of ktRefApply in
+        // abnf/jsrtkotlin.go.
+        var fv = anytype
+        fv = kGetField(recv, r.pname)
+        if (fv === undefined && kRecvProps["$" + r.pname] !== true) { return mcall(recv, r.pname, kRefRest(r, args)) }
+        return fv
     }
     // A reference (or a class descriptor - ::Box is a constructor reference) used AS a
     // function value. The builtins that take a lambda apply their argument directly, so
@@ -13822,14 +13857,23 @@ NotMemberKw = :script(~~ "pure";
                 (Array.isArray(cur) || kIsMap(cur) || kIsSet(cur) || cur.__sb === true ||
                  isRange(cur) || isKRegex(cur) || isKMatch(cur) || kIsResult(cur) ||
                  kIsChar(cur))) {
-                if (kRecvProps["$" + name] === true) { return {v: kGetField(cur, name)} }
-                // VALUE POSITION: the field read is TRIED for any name, and only a miss
-                // falls through to the bound method below - so nothing that resolved
-                // stops resolving. `first`/`last`/`step` on a progression land here.
+                // A property this receiver does not have (a StringBuilder's `size`)
+                // misses like any other value, as js_ktget's caller treats it.
+                if (kRecvProps["$" + name] === true) {
+                    var rpv = anytype
+                    rpv = kGetField(cur, name)
+                    if (rpv !== undefined || iscall) { return {v: rpv} }
+                    return null
+                }
+                // VALUE POSITION is a field read and nothing else (`first`/`last`/
+                // `step` on a progression). A miss belongs to an outer receiver:
+                // Kotlin has no unqualified value that means a bound method. Twin of
+                // ktRecvMember in abnf/jsrtkotlin.go.
                 if (!iscall) {
                     var bv = anytype
                     bv = kGetField(cur, name)
                     if (bv !== undefined) { return {v: bv} }
+                    return null
                 }
                 // A name the RUNTIME provides as a global is not a member of the
                 // receiver: `buildList { addAll(listOf(2, 3)) }` must not bind `listOf`

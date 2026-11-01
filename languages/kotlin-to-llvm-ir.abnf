@@ -1453,9 +1453,9 @@ RefName     = KId <~~ push(up.in) ~~> | "class" KwEnd <~~ push("class") ~~> ;
 MTypeArgs   <~~ push({mtargs: up.in}) ~~>
             = SkipAngle ;
 MethodSfx   <~~ var mc = popMCall(); push({kind:"mcall", name: mc.name, targ: mc.targ, args: takeAll(), at: up.start}); retLblPop() ~~>
-            = "." KId <~~ push({mname: up.in}); retLblPush(up.in, "lam") ~~> [ MTypeArgs ] MArgs ;
+            = "." KId <~~ push({mname: up.in}); retLblCallee(up.in, up.pos, true) ~~> [ MTypeArgs ] MArgs ;
 SafeMethodSfx <~~ var mcs = popMCall(); push({kind:"mcall", name: mcs.name, targ: mcs.targ, args: takeAll(), safe: true, at: up.start}); retLblPop() ~~>
-            = "?." KId <~~ push({mname: up.in}); retLblPush(up.in, "lam") ~~> [ MTypeArgs ] MArgs ;
+            = "?." KId <~~ push({mname: up.in}); retLblCallee(up.in, up.pos, true) ~~> [ MTypeArgs ] MArgs ;
 FieldSfx    = "." KId <~~ push({kind:"field", name: up.in}) ~~> ;
 SafeFieldSfx = "?." KId <~~ push({kind:"field", name: up.in, safe: true}) ~~> ;
 // An EXPLICIT TYPE ARGUMENT LIST in expression position that is NOT followed by a call:
@@ -1741,14 +1741,14 @@ ObjVis      = ( "private" | "protected" | "internal" | "public" ) KwEnd ;
 // `this` is a plain VarRef; this must precede Call/VarRef so `this` is not read as an
 // identifier before the `@Label` is seen.
 ThisExpr    <~~ push(makeThisAt(pop().tlbl)) ~~>
-            = "this" KwEnd "@" KId <~~ push({tlbl: up.in}) ~~> ;
+            = "this" KwEnd "@" KId <~~ thisLblUsed["$" + up.in] = true; push({tlbl: up.in}) ~~> ;
 
 // A lambda: { it * 2 }, { x -> x * 2 }, { a: Int, b: Int -> a + b }. The body is
 // one expression; without parameters the single argument is bound to 'it'.
 // A lambda may carry its own LABEL - exec lab@{ ... return@lab } - which becomes the
 // target of a return@lab inside it (instead of the callee's implicit label). LamLabel
 // registers it on the walk-time return-target stack; makeLambda pops it again.
-Lambda      <~~ var lam = takeAll(); ktNoteLamIt(lam, up.start); ktNoteBody(up.start, up.pos); push(makeLambda(lam)) ~~>
+Lambda      <~~ var lam = takeAll(); ktNoteLamIt(lam, up.start); ktNoteBody(up.start, up.pos); push(makeLambda(lam, up.start)) ~~>
             = [ LamLabel ] "{" [ LambdaParams ] { LamStmt } "}" ;
 LamLabel    = KId <~~ push({lamlbl: up.in}); retLblPush(up.in, "lam") ~~> AtAdjacent "@" ;
 // A { ... } in value position (an if / when arm) is a BLOCK, not a lambda: it runs its
@@ -1796,7 +1796,7 @@ DestructLParam <~~ ktNoteLamDestruct(up.start, up.pos); push({destruct: takeAll(
 // works as a Primary anywhere, including as an argument to an outer call
 // (modules(module(createdAtStart = true) { ... }, module { ... }, ...)).
 Call        <~~ push(makeCall(takeAll(), up.start, up.pos)); retLblPop() ~~>
-            = NotHardKw KId <~~ push(up.in); retLblPush(up.in, "lam") ~~> [ TypeArgs ] ( SameLine "(" [ CallArgs ] ")" { TrailLambda } | TrailLambda { TrailLambda } ) ;
+            = NotHardKw KId <~~ push(up.in); retLblCallee(up.in, up.pos, false) ~~> [ TypeArgs ] ( SameLine "(" [ CallArgs ] ")" { TrailLambda } | TrailLambda { TrailLambda } ) ;
 // Explicit type arguments at a call site. Erased, except when the callee has a reified
 // type parameter: then the argument's NAME is what fills the callee's hidden parameter.
 TypeArgs    <~~ push({targs: stripWs(up.in)}) ~~>
@@ -1918,8 +1918,25 @@ SkipParenItem = "\x00"..."\x27" | "\x2a"..."\U0010ffff" ;
 // the label `fun@` followed by the collection literal `[a]`, and the parse would die on
 // the `.` of `T.()` two tokens later (psi/FunctionExpressions.kt).
 // The `@` must be GLUED to the name; twin of LabelDef in kotlin-interpreter.abnf, see
-// there.
-LabelDef    = NotHardKw KId <~~ push({lbl: up.in}) ~~> AtAdjacent "@" ;
+// there. Nor is it `this` / `super`: `this@ext.length` in statement position is a
+// labelled receiver, not the statement `ext.length` under the label `this`.
+LabelDef    = NotHardKw NotThisSuper KId <~~ push({lbl: up.in}) ~~> AtAdjacent "@" ;
+NotThisSuper = :script(~~ "pure";
+    (function() {
+        var i = 0
+        var cc = c.peek(i)
+        while (cc === 32 || cc === 9 || cc === 10 || cc === 13 || cc === 12) { i++; cc = c.peek(i) }
+        var w = ""
+        var n = 0
+        while (((cc >= 97 && cc <= 122) || (cc >= 65 && cc <= 90) || cc === 95 || (cc >= 48 && cc <= 57)) && n < 6) {
+            w = w + String.fromCharCode(cc)
+            i++
+            n++
+            cc = c.peek(i)
+        }
+        if (w === "this" || w === "super") { return abnf.newToken("\x01this-or-super", 0) }
+    })()
+~~) ;
 BreakAt     <~~ push(makeBreakTo(pop().lbl, up.pos)) ~~>
             = KwBreak AtAdjacent "@" KId <~~ push({lbl: up.in}) ~~> [ ";" ] ;
 ContinueAt  <~~ push(makeContinueTo(pop().lbl, up.pos)) ~~>
@@ -2636,13 +2653,16 @@ KwContract  = "contract" KwEnd ;
             var fgB = curF.NewBlock("")
             probeB.NewCondBr(truthy(probeB, clsV), instB, bltB)
             // A receiver that is not an object at all - a String, a Long, a Char - has
-            // no member js_get can answer, so it takes Kotlin's field read for EVERY
-            // name, which is what `fun String.f() = length` has always needed. Only
-            // the object-shaped builtins are gated, because only they have properties
-            // js_get can plausibly answer.
+            // no member js_get can answer, so in VALUE position it takes Kotlin's field
+            // read for every name, which is what `fun String.f() = length` needs. A
+            // CALL on it goes to js_ktget like an object builtin's: natively the field
+            // probe would answer the C floor's own string method, so `split("")`
+            // inside `"abc".run { }` would drop Kotlin's empty edge elements.
             var rpB = curF.NewBlock("")
+            var npB = curF.NewBlock("")
             bltB.NewCondBr(truthy(bltB, callExt(bltB, "js_seq",
-                [callExt(bltB, "js_typeof", [thV]), emitStr(bltB, "object")])), rpB, fgB)
+                [callExt(bltB, "js_typeof", [thV]), emitStr(bltB, "object")])), rpB, npB)
+            npB.NewCondBr(truthy(npB, ps[2]), dispB, fgB)
             // kt_recvprop decides for a CALL - `first()` must stay a bound method.
             // In VALUE position there is nothing to decide: Kotlin has no unqualified
             // name that means a method, so the field read is simply tried, and a MISS
@@ -4360,10 +4380,10 @@ KwContract  = "contract" KwEnd ;
                 // qualified by ktLexType: its binary name is the path from the first
                 // declared type on.
                 var simple = baseTypeName(base)
-                dest = (classNames[simple] == 1 || interfaceNames["$" + simple] == true) ? ktBinKey(simple) : ""
+                dest = (classNames["$" + simple] == 1 || interfaceNames["$" + simple] == true) ? ktBinKey(simple) : ""
                 var segs = qb.split(".")
                 for (var sg = 0; sg < segs.length - 1 && dest != ""; sg++) {
-                    if (classNames[segs[sg]] == 1 || interfaceNames["$" + segs[sg]] == true) {
+                    if (classNames["$" + segs[sg]] == 1 || interfaceNames["$" + segs[sg]] == true) {
                         dest = segs.slice(sg).join("$")
                         break
                     }
@@ -4529,6 +4549,13 @@ KwContract  = "contract" KwEnd ;
 
     // raw is the chain's source as written when it reads javaClass, "" else.
     foldCallMember = function(items, txt, raw) {
+        // An unqualified `javaClass` is the implicit receiver's (ktImplicitJavaClass).
+        // Twin of foldCallMember in kotlin-interpreter.abnf.
+        if (raw != "" && ktImplicitJavaClass(txt)) {
+            items = [makeVarRef("this"), {kind: "field", name: "javaClass"}].concat(items.slice(1))
+            txt = "this." + txt
+            raw = "this." + raw
+        }
         if (items.length == 1) return items[0]
         var primary = items[0]
         var suffixes = items.slice(1)
@@ -4656,7 +4683,7 @@ KwContract  = "contract" KwEnd ;
                 var cbin = s.tpath != undefined ? ktQualCtorBin(s.tpath, s.name) : null
                 // `outer.Inner(y = 5, x = 6)` on an instance: no method has the name and
                 // one class does.
-                if (cbin == null && classNames[s.name] == 1 && methodParams["$" + s.name] == undefined) {
+                if (cbin == null && classNames["$" + s.name] == 1 && methodParams["$" + s.name] == undefined) {
                     ktDeclIndex()
                     var sbs = simpleBins["$" + s.name]
                     if (sbs != undefined && sbs.length == 1 && ctorParamNames["$" + sbs[0]] != undefined) { cbin = sbs[0] }
@@ -4791,9 +4818,10 @@ KwContract  = "contract" KwEnd ;
     // function closed over the current scope (js_closure); the body is a sequence of
     // statements and its value is the last expression (a trailing non-expression
     // yields Unit). Without a parameter list the single argument is bound to 'it'.
-    function makeLambda(items) {
+    function makeLambda(items, at) {
         var params = ["it"]
         var start = 0
+        var rlam = recvLamOf(retLblTop(), at)
         // The label this lambda ANSWERS TO, so a `return@lbl` aimed at it - from any
         // depth, not only from its own body - is absorbed here and nowhere else. An
         // explicit label (lab@{ ... }) pushed its entry when it was seen and the body
@@ -4867,10 +4895,73 @@ KwContract  = "contract" KwEnd ;
             lamBody = wrapLamRet(bodyStmt, myLbl)
         }
         return function(b) {
-            var idx = emitFunc(argNames, lamBody, withRecv)
+            var names = argNames
+            if (rlam != null) {
+                lamBody = bindRecvThis(lamBody, rlam, start == 0)
+                if (start == 0) { names = [] }
+            }
+            var idx = emitFunc(names, lamBody, withRecv)
             return {b: b, v: callExt(b, "js_closure", [handle(idx), curScopeV])}
         }
     }
+    // THE SCOPE FUNCTIONS' RECEIVER LAMBDAS. `x.apply { }`, `x.run { }`, `with(x) { }`,
+    // buildString / buildList / buildMap { } bind their receiver as the lambda's `this`,
+    // the INNERMOST implicit receiver, so it must shadow an enclosing extension's or
+    // member's `this` (`fun String.f() = StringBuilder().apply { append(length) }` reads
+    // the builder's length). The runtime keeps the receiver on ktRecvStack, which the
+    // name lookup reaches only after every scope `this`, and layer 2 cannot open a scope
+    // to bind it; but every one of these passes the receiver as the lambda's first
+    // argument (ktWithRecv), so the lambda itself binds it. Twin of the scope ktWithRecv
+    // opens in abnf/jsrtkotlin.go and of kSetRecv in kotlin-interpreter.abnf.
+    //
+    // Whether it WAS called as one is the runtime's to say: a user function or member of
+    // the name (`fun run(f: (Int) -> Int)` on some class) calls it as a plain lambda.
+    // ktWithRecv pushes the receiver on ktRecvStack before the call, which js_ktglobal
+    // ("this") reads, so the binding is made only when the first argument IS that
+    // receiver; otherwise the lambda binds `it` as any other does. Kotlin gives a
+    // receiver lambda no `it`, so an enclosing lambda's shows through.
+    //
+    // The lambda must BE that call's argument, not one nested in its body that shares
+    // the callee's label entry: only blanks or the call's own `(...)` / `<...>` lie
+    // between the callee name and the lambda.
+    var recvLamMember = {"$apply": true, "$run": true}
+    var recvLamGlobal = {"$with": 2, "$buildString": 1, "$buildList": 1, "$buildMap": 1}
+    function recvLamOf(entry, at) {
+        if (entry == null || entry.kind != "lam" || entry.end === undefined || at === undefined) { return null }
+        var k = "$" + entry.lbl
+        if (entry.msfx ? recvLamMember[k] != true : recvLamGlobal[k] == undefined) { return null }
+        var s = stripWs(c.srcSlice(entry.end, at))
+        if (s.charAt(0) == "<") {
+            var ta = ktMatchClose(s, 0, "<", ">")
+            if (ta < 0) { return null }
+            s = s.substring(ta + 1)
+        }
+        if (s == "") { return entry.lbl == "with" ? null : {lbl: entry.lbl, msfx: entry.msfx} }
+        if (s.charAt(0) != "(" || ktMatchClose(s, 0, "(", ")") != s.length - 1) { return null }
+        if (entry.lbl == "with" && s == "()") { return null }
+        return {lbl: entry.lbl, msfx: entry.msfx}
+    }
+    function bindRecvThis(body, rl, implicitIt) {
+        return function(b) {
+            var rV = callExt(b, "js_arg", [curF.Params[1], handle(0)])
+            var topV = callExt(b, "js_ktglobal", [emitStr(b, "this"), hFalse])
+            var recvB = curF.NewBlock("")
+            var plainB = curF.NewBlock("")
+            var goB = curF.NewBlock("")
+            b.NewCondBr(truthy(b, callExt(b, "js_seq", [topV, rV])), recvB, plainB)
+            callExt(recvB, "js_scope_decl", [curScopeV, emitStr(recvB, "this"), rV])
+            if (thisLblUsed["$" + rl.lbl] == true) {
+                callExt(recvB, "js_scope_decl", [curScopeV, emitStr(recvB, "this@" + rl.lbl), rV])
+            }
+            recvB.NewBr(goB)
+            if (implicitIt) { callExt(plainB, "js_scope_decl", [curScopeV, emitStr(plainB, "it"), rV]) }
+            plainB.NewBr(goB)
+            return body(goB)
+        }
+    }
+    // The labels some `this@L` names. An extension function and a scope function's
+    // lambda bind their receiver under `this@<name>` too, but only when it is named.
+    var thisLblUsed = {}
     // A { ... } block in value position (an if / when arm): emit its statements inline in a
     // fresh scope; the value is the last expression (Unit if it ends in a statement).
     function makeValueBlock(items) {
@@ -5087,7 +5178,7 @@ KwContract  = "contract" KwEnd ;
     function resolvedTypeName(name) {
         var t = baseTypeName(stripWs(name))
         for (var s = 0; s < 8; s++) {
-            if (classNames[t] == 1 || interfaceNames["$" + t] == true) { return t }
+            if (classNames["$" + t] == 1 || interfaceNames["$" + t] == true) { return t }
             if (typeAliases["$" + t] == undefined) { return null }
             t = baseTypeName(typeAliases["$" + t])
         }
@@ -5112,7 +5203,7 @@ KwContract  = "contract" KwEnd ;
         for (var j = 0; j < supers.length; j++) {
             if (supers[j].deleg != null) { continue }
             var r = resolvedTypeName(supers[j].name)
-            if (r != null && classNames[r] == 1) { return j }
+            if (r != null && classNames["$" + r] == 1) { return j }
         }
         return supers.length > 0 ? 0 : -1
     }
@@ -5337,7 +5428,7 @@ KwContract  = "contract" KwEnd ;
         var args = items.slice(at)
         // A builder call's static type, and its elements retyped by the explicit type
         // arguments (listOf<Long>(1, 2)).
-        var bty = (classNames[name] == undefined && funNames["$" + name] != true) ? ktBuilderType(name, targs) : ""
+        var bty = (classNames["$" + name] == undefined && funNames["$" + name] != true) ? ktBuilderType(name, targs) : ""
         var direct = makeCallBody(name, args)
         // The callee's reified type arguments, and a generic's literals retyped by its
         // explicit type arguments - ident<Long>(5) - are read at emit time, because
@@ -5444,13 +5535,13 @@ KwContract  = "contract" KwEnd ;
             // arguments arrives as `undefined` and prints "kotlin.Unit" natively. That is
             // a reference, not a call of the name, so no emitter can count its arguments.
             if (ktNativeBuild && args.length == 0 && (name == "println" || name == "print")
-                && classNames[name] == undefined && funNames["$" + name] != true) {
+                && classNames["$" + name] == undefined && funNames["$" + name] != true) {
                 var pfV = b.NewCall(rtKtGetP(), [curScopeV, emitStr(b, name), hTrue])
                 var pfA = callExt(b, "js_arr_new", [])
                 callExt(b, "js_arr_push", [pfA, emitStr(b, "")])
                 return {b: b, v: callExt(b, "js_call", [pfV, hUndef, pfA])}
             }
-            if (name == "Regex" && classNames[name] == undefined && funNames["$" + name] != true) {
+            if (name == "Regex" && classNames["$" + name] == undefined && funNames["$" + name] != true) {
                 var rp = args[0].at(b)
                 b = rp.b
                 var roV = hUndef
@@ -5481,7 +5572,7 @@ KwContract  = "contract" KwEnd ;
             // installThrowables registers them as real descriptors); the hierarchy lives
             // in abnf/jsrtkotlin.go. A program that declares its own class or function of
             // the name keeps it, exactly like the Regex branch.
-            if (excBuiltins["$" + name] == true && classNames[name] == undefined
+            if (excBuiltins["$" + name] == true && classNames["$" + name] == undefined
                 && funNames["$" + name] != true && interfaceNames["$" + name] != true) {
                 var emV = hNull
                 if (args.length > 0) {
@@ -5512,14 +5603,14 @@ KwContract  = "contract" KwEnd ;
             // classOwnProps' header), so the choice is deferred to kt_barecall, which is
             // the same two-step scope probe rtKtGetP makes on its miss path and costs
             // nothing at a site with no local.
-            if ((emitClassTop() != null || emitExtDepth > 0) && classNames[name] == undefined
+            if ((emitClassTop() != null || emitExtDepth > 0) && classNames["$" + name] == undefined
                 && topFunNames["$" + name] != true && classMethodNames["$" + name] == true) {
                 var ma = emitArgs(b, orderArgs(args, paramsFor(name, args)))
                 return {b: ma.b, v: ma.b.NewCall(rtBareCall(), [curScopeV, emitStr(ma.b, name), ma.v])}
             }
             // A top-level function beats a nested class of its name outside that
             // class's owner, where Kotlin cannot see the class (ktMirrorNested).
-            if (classNames[name] == 1 && !(topFunNames["$" + name] == true && !ktTopType(name) && ktLexType(name) == name)) {
+            if (classNames["$" + name] == 1 && !(topFunNames["$" + name] == true && !ktTopType(name) && ktLexType(name) == name)) {
                 var clsV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, name)])
                 var objV = callExt(b, "js_obj_new", [])
                 callExt(b, "js_set", [objV, emitStr(b, "__class"), clsV])
@@ -5555,7 +5646,7 @@ KwContract  = "contract" KwEnd ;
             var fV = b.NewCall(rtKtGetP(), [curScopeV, emitStr(b, name), hTrue])
             // `Char(code)` is kotlin's Char FUNCTION and the bare name the companion,
             // which carries the function as its `invoke` (js_kttype).
-            if (name == "Char" && classNames[name] == undefined && funNames["$" + name] != true) {
+            if (name == "Char" && classNames["$" + name] == undefined && funNames["$" + name] != true) {
                 fV = callExt(b, "js_get", [fV, emitStr(b, "invoke")])
             }
             var ea = emitArgs(b, orderArgs(args, funParams["$" + name]))
@@ -6110,6 +6201,9 @@ KwContract  = "contract" KwEnd ;
     // Anything else is non-local: recognised, not implemented.
     var retLabels = []
     function retLblPush(name, kind) { retLabels.push({lbl: name, kind: kind, nl: false}) }
+    // A callee's entry also records where its name ends and whether it is a member
+    // call (`x.apply`), which is what recvLamOf reads.
+    function retLblCallee(name, end, msfx) { retLabels.push({lbl: name, kind: "lam", nl: false, end: end, msfx: msfx}) }
     function retLblPop() { retLabels.pop() }
     function retLblTop() { return retLabels.length > 0 ? retLabels[retLabels.length - 1] : null }
     // True when the innermost return target is a lambda's (implicit or explicit) label -
@@ -6685,7 +6779,15 @@ KwContract  = "contract" KwEnd ;
         extRecvTys["$" + f.name] = l
         return function(b) {
             emitExtDepth++
-            var idx = emitFunc(f.params, f.body, true, false, f.sig)
+            var body = f.body
+            if (thisLblUsed["$" + f.name] == true) {
+                body = function(fb) {
+                    callExt(fb, "js_scope_decl", [curScopeV, emitStr(fb, "this@" + f.name),
+                                                  callExt(fb, "js_scope_get", [curScopeV, emitStr(fb, "this")])])
+                    return f.body(fb)
+                }
+            }
+            var idx = emitFunc(f.params, body, true, false, f.sig)
             emitExtDepth--
             defPos(b, f.pos)
             var clV = callExt(b, "js_closure", [handle(idx), curScopeV])
@@ -6894,7 +6996,7 @@ KwContract  = "contract" KwEnd ;
             argVs.push(r.v)
         }
         var rn = resolvedTypeName(sup.name)
-        if (rn != null && classNames[rn] == 1) {
+        if (rn != null && classNames["$" + rn] == 1) {
             var supV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, rn)])
             var ctorV = callExt(b, "js_get", [supV, emitStr(b, "__ctor")])
             var argsV = callExt(b, "js_arr_new", [])
@@ -7229,7 +7331,7 @@ KwContract  = "contract" KwEnd ;
         return function(b) {
             // `RegexOption` (its entries are their own names) and `Regex` used as a
             // value, which is only ever its companion - Regex.escape(s) and friends.
-            if ((name == "RegexOption" || name == "Regex") && classNames[name] == undefined
+            if ((name == "RegexOption" || name == "Regex") && classNames["$" + name] == undefined
                 && funNames["$" + name] != true) {
                 return {b: b, v: callExt(b, "js_rxktglobal", [emitStr(b, name)])}
             }
@@ -8195,21 +8297,21 @@ KwContract  = "contract" KwEnd ;
     var innerOwner = {}
     function makeThisAt(lbl) {
         return function(b) {
-            var thisV = b.NewCall(rtKtGet(), [curScopeV, emitStr(b, "this")])
-            var top = emitClassTop()
-            // A label naming an ENCLOSING class is the inner instance's outer receiver.
-            // js_ktthisat walks the __outer chain BY NAME and falls back to the receiver
-                // when nothing matches; `__outer` is not set for an inner class
-                // constructed inside its outer's own method, so it is not read blindly.
             // Inside a MEMBER extension, `this` is the EXTENSION receiver, so
             // `this@DeclaringClass` is the dispatch receiver rather than `this`.
             if (emitMemberExtOf != null && emitMemberExtOf == lbl) {
                 return {b: b, v: b.NewCall(rtKtGet(), [curScopeV, emitStr(b, "__dispatch")])}
             }
-            if (top != null && top != lbl) {
-                return {b: b, v: callExt(b, "js_ktthisat", [thisV, emitStr(b, lbl)])}
+            // An extension function's or a scope function lambda's receiver, bound
+            // under this name (bindRecvThis, makeExtFunStmt) unless a class owns it.
+            if (classNames["$" + lbl] == undefined && (extFunNames["$" + lbl] == true || recvLamMember["$" + lbl] == true ||
+                                                 recvLamGlobal["$" + lbl] != undefined)) {
+                return {b: b, v: b.NewCall(rtKtGet(), [curScopeV, emitStr(b, "this@" + lbl)])}
             }
-            return {b: b, v: thisV}
+            // A CLASS label: the innermost receiver in scope that is an instance of it,
+            // or an inner instance whose __outer chain reaches one - js_ktthisat walks
+            // both, past a scope function's receiver, and falls back to `this`.
+            return {b: b, v: callExt(b, "js_ktthisat", [curScopeV, emitStr(b, lbl)])}
         }
     }
     // items = [base?, {irname}]. See the IsInitRef production for the rule this
@@ -8256,7 +8358,7 @@ KwContract  = "contract" KwEnd ;
             // it cannot be lowered under the walk. Everything else goes through the
             // kt_refbase helper (see rtRefBase). Pair and Triple are kotlin's tuple
             // classes unless the program declares a class of the name.
-            var isTup = (baseName == "Pair" || baseName == "Triple") && classNames[baseName] != 1 &&
+            var isTup = (baseName == "Pair" || baseName == "Triple") && classNames["$" + baseName] != 1 &&
                         interfaceNames["$" + baseName] != true
             var baseV = ktTypeNameSet["$" + baseName] == true || isTup
                 ? callExt(b, "js_ktrefbase", [curScopeV, emitStr(b, baseName), hTrue])
@@ -8271,7 +8373,7 @@ KwContract  = "contract" KwEnd ;
                 var segs = baseName.split(".")
                 var from = -1
                 for (var j = 0; j < segs.length - 1 && from < 0; j++) {
-                    if (classNames[segs[j]] != undefined || interfaceNames["$" + segs[j]] == true) { from = j }
+                    if (classNames["$" + segs[j]] != undefined || interfaceNames["$" + segs[j]] == true) { from = j }
                 }
                 if (from < 0 && segs.length > 1) {
                     if (segs[0] == "kotlin" || segs[0] == "java") { return makeQualRef(segs[segs.length - 1], name)(b) }
@@ -8284,7 +8386,7 @@ KwContract  = "contract" KwEnd ;
                 // A last segment that names no type is a VALUE (`C.Companion::class`,
                 // `c::class`), whose class js_ktvalclass answers.
                 var last = segs[segs.length - 1]
-                var isType = isTup || classNames[last] != undefined || interfaceNames["$" + last] == true || ktTypeNameSet["$" + last] == true
+                var isType = isTup || classNames["$" + last] != undefined || interfaceNames["$" + last] == true || ktTypeNameSet["$" + last] == true
                 return {b: b, v: callExt(b, isType ? "js_ktclasslit" : "js_ktvalclass", [baseV])}
             }
             return {b: b, v: emitRefValue(b, baseV, name)}
@@ -8332,7 +8434,7 @@ KwContract  = "contract" KwEnd ;
         var parts = splitMembers(items, hdr.i)
         var methods = parts.methods
         var comp = parts.companion
-        classNames[name] = 1
+        classNames["$" + name] = 1
         lastDeclaredClass = name
         var drec = noteDecl(name, hdr.supers, parts.nested)
         drec.ctor = ctorSig(hdr.cparams).params
@@ -8462,7 +8564,7 @@ KwContract  = "contract" KwEnd ;
         while (i < items.length && items[i] != undefined && items[i].ename != undefined) { entries.push(items[i]); i++ }
         var parts = splitMembers(items, i)
         var methods = parts.methods
-        classNames[name] = 1
+        classNames["$" + name] = 1
         lastDeclaredType = name
         var drec = noteDecl(name, hdr.supers, parts.nested)
         drec.ctor = ctorSig(hdr.cparams).params
@@ -8666,7 +8768,7 @@ KwContract  = "contract" KwEnd ;
         var parts = splitMembers(items, hdr.i)
         var props = parts.props
         var methods = parts.methods
-        classNames[name] = 2   // A singleton: named like a class, but never constructed.
+        classNames["$" + name] = 2   // A singleton: named like a class, but never constructed.
         lastDeclaredType = name
         noteDecl(name, hdr.supers, parts.nested)
             // noteParams as well as the name, so orderArgs has the parameter list for
@@ -8996,7 +9098,7 @@ KwContract  = "contract" KwEnd ;
         var ktSeqFns = [["sequence", libSeqBuild], ["yield", libSeqYield], ["yieldAll", libSeqYieldAll]]
         for (var ksf = 0; ksf < ktSeqFns.length; ksf++) {
             var sfn = ktSeqFns[ksf][0]
-            if ((ktVarSeen["$" + sfn] == true || ktCallSeen["$" + sfn] == true) && classNames[sfn] == undefined
+            if ((ktVarSeen["$" + sfn] == true || ktCallSeen["$" + sfn] == true) && classNames["$" + sfn] == undefined
                 && funNames["$" + sfn] != true) {
                 callExt(b, "js_scope_decl", [curScopeV, emitStr(b, sfn),
                                              callExt(b, "js_closure", [handle(emitKtLib(ktSeqFns[ksf][1])), curScopeV])])
@@ -9019,13 +9121,13 @@ KwContract  = "contract" KwEnd ;
         var ktOnDemand = ["Math", "ArrayList", "HashSet", "LinkedHashSet", "HashMap", "LinkedHashMap", "TreeSet", "TreeMap"]
         for (var kd = 0; kd < ktOnDemand.length; kd++) {
             var odn = ktOnDemand[kd]
-            if (ktVarSeen["$" + odn] == true && classNames[odn] == undefined) {
+            if (ktVarSeen["$" + odn] == true && classNames["$" + odn] == undefined) {
                 callExt(b, "js_scope_decl", [curScopeV, emitStr(b, odn), callExt(b, "js_ktglobal", [emitStr(b, odn), hFalse])])
             }
         }
         // java.lang.System's two clocks, declared only for a program that names System
         // and does not declare it. Each member is a closure over js_ktclock(kind, us).
-        if (ktVarSeen["$System"] == true && classNames["System"] == undefined) {
+        if (ktVarSeen["$System"] == true && classNames["$System"] == undefined) {
             var sysV = callExt(b, "js_obj_new", [])
             var clocks = ["currentTimeMillis", "nanoTime"]
             for (var ck = 0; ck < clocks.length; ck++) {

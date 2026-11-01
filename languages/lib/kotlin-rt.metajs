@@ -7116,26 +7116,39 @@ function js_ktexcmatch(thrown, tname) {
     return ktIsType(thrown, t)
 }
 
-// js_ktthisat(this, "Outer") is Kotlin's labelled `this@Outer`: walk the __outer
-// chain for an instance whose class is named `Outer`, and fall back to the
-// receiver itself when there is none. `__outer` is not set when an inner class
-// is constructed from inside its outer's own method, so it is not read blindly.
-function js_ktthisat(self, want) {
+// js_ktthisat(env, "Outer") is Kotlin's labelled `this@Outer`: every implicit
+// receiver in scope, innermost first, and along each one's __outer chain, the
+// first instance of a class named `Outer` (or derived from it); else the
+// innermost receiver. jsrtkotlin.go's js_ktthisat has the rules.
+function js_ktthisat(env, want) {
+    var s = anytype
     var cur = anytype
-    cur = self
-    var i = 0
-    while (i < 64) {
-        i = i + 1
-        if (!ktIsObj(cur)) { i = 99 } else {
-            var cls = cur["__class"]
-            if (ktIsObj(cls)) {
-                if (cls["__name"] === want) { return cur }
+    var first = anytype
+    first = undefined
+    var seen = false
+    s = env
+    while (s !== undefined && s !== null) {
+        if (scopeHas(s, "this")) {
+            cur = scopeGet(s, "this")
+            if (!seen) {
+                first = cur
+                seen = true
             }
-            var nxt = cur["__outer"]
-            if (rtIsNil(nxt)) { i = 99 } else { cur = nxt }
+            var i = 0
+            while (i < 64) {
+                i = i + 1
+                if (!ktIsObj(cur)) { i = 99 } else {
+                    if (ktIsObj(cur["__class"]) && ktIsType(cur, want)) { return cur }
+                    var nxt = cur["__outer"]
+                    if (rtIsNil(nxt)) { i = 99 } else { cur = nxt }
+                }
+            }
         }
+        s = scopeParent(s)
     }
-    return self
+    // No scope binds one: a receiver lambda's `this` lives on ktRecvStack only.
+    if (!seen) { return js_ktglobal("this", false) }
+    return first
 }
 
 // ==================================== callable references and class literals ==
@@ -7243,7 +7256,12 @@ function ktRefApply(info, args) {
             i = i + 2
         }
     }
-    return ktRefRead(recv, info["name"])
+    // A builtin member that is no property the receiver answers is a FUNCTION
+    // reference: `Int::toString`, `String::uppercase`.
+    var v = anytype
+    v = ktRefRead(recv, info["name"])
+    if (v === undefined && !k4RecvProp(info["name"])) { return ktSmcall(recv, info["name"], k4bRefRest(info, args)) }
+    return v
 }
 
 // ktRefRead (jsrtkotlin.go:1337) is KProperty.get: the property READ, never the
@@ -8568,13 +8586,14 @@ function ktRecvMember(recv, name, iscall) {
     // `with(list) { lastIndex }` must work. kRecvProps in kotlin-interpreter.abnf
     // reads kGetField the same way.
     if (k4RecvProp(name)) { return js_ktfget(recv, name) }
-    // VALUE POSITION on a builtin receiver: the field read is TRIED, and only a miss
-    // falls through to the bound method - so nothing that resolved stops resolving.
-    // This is the arm that answers `with(1..7 step 2) { first }`.
+    // VALUE POSITION on a builtin receiver is a field read and nothing else (`with(1..7
+    // step 2) { first }`); a miss belongs to an outer receiver, since Kotlin has no
+    // unqualified value that means a bound method. Only a call binds.
     if (!iscall) {
         var fv = anytype
         fv = js_ktfget(recv, name)
         if (!rtIsNil(fv)) { return fv }
+        return KT_MISS
     }
     return k4Bound(recv, name)
 }

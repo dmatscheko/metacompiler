@@ -7231,6 +7231,61 @@ fun s164() {
         Nothing::class != Unit::class)
 }
 
+// ===== SECTION 165: scope function receivers inside extensions and members =====
+// apply / run / with / buildString bind their receiver as the INNERMOST implicit
+// receiver, so inside an extension or a member its members shadow the enclosing
+// `this`'s, while a name it does not have (a value it has no property of) still
+// reaches the outer receiver. `this@ext` names the extension's receiver, also as
+// the first word of a statement, `this@apply` the scope function's, and
+// `this@Class` passes over a scope function's receiver. A scope function's lambda
+// has no `it`, so an enclosing lambda's shows through. An unqualified call on a
+// String receiver is Kotlin's member, whose split keeps the empty edge elements
+// (kotlinc 2.2.21).
+fun String.sp165() = split("")
+fun String.sb165() = StringBuilder().apply { append("x"); append(this@sb165) }.toString()
+fun String.len165() = StringBuilder().apply { append(length) }.toString()
+fun String.w165() = with(StringBuilder()) { append("y"); append(length); toString() }
+fun String.r165() = StringBuilder().run { append(this@r165.length); append(length); toString() }
+fun String.bs165() = buildString { append(this@bs165); append(length) }
+fun String.st165() = listOf(7, 8).run { this@st165.length * 10 + size }
+fun String.ap165() = StringBuilder().apply { append(this@apply.length); append(length) }.toString()
+class Bx165(val n: Int) {
+    val size = 99
+    fun q() = StringBuilder().apply { append(n) }.toString()
+    fun sz() = StringBuilder().apply { append(size) }.toString()
+    fun out() = with(listOf(5)) { size + this@Bx165.size }
+}
+fun s165() {
+    check("rcv165a", "ab".sb165() == "xab")
+    check("rcv165b", "abc".len165() == "0" && "ab".w165() == "y1" && "ab".r165() == "21" && "abc".bs165() == "abc3")
+    check("rcv165c", Bx165(7).q() == "7" && Bx165(1).sz() == "99")
+    check("rcv165d", Bx165(1).out() == 100)
+    check("rcv165e", "abc".st165() == 32 && "abc".ap165() == "01")
+    check("rcv165f", listOf(1, 2).map { StringBuilder().apply { append(it) }.toString() } == listOf("1", "2") &&
+        listOf(3).map { buildString { append(it) } } == listOf("3"))
+    check("rcv165g", "ab".sp165() == listOf("", "a", "b", "") && "ab".run { split("") }.size == 4)
+}
+
+// ===== SECTION 166: implicit javaClass, unboxed lambda parameters, member references =====
+// An unqualified `javaClass` is the implicit receiver's, primitive for an Int
+// extension; an inline collection lambda's parameter typed Long by `listOf(this)`
+// in a Long extension is unboxed (long). A reified T is inferred from a map whose
+// lambda is a `when` or an unbound member reference, and `Int::toString` /
+// `String::uppercase` passed as a lambda CALL the member (kotlinc 2.2.21).
+inline fun <reified T> List<T>.el166() = T::class.simpleName
+fun Int.jc166() = javaClass.name
+fun Long.jl166() = listOf(this).map { it.javaClass.name }
+class K166 { fun n() = javaClass.simpleName }
+fun s166() {
+    check("jc166a", 3.jc166() == "int" && K166().n() == "K166")
+    check("jc166b", 5L.jl166() == listOf("long"))
+    check("rinf166c", listOf(1, 2).map { when (it) { 1 -> "a" else -> "b" } }.el166() == "String" &&
+        listOf(1, 2).map(Int::toString).el166() == "String" && listOf("a").map(String::length).el166() == "Int")
+    val f = Int::toString
+    check("ref166d", listOf(1, 2).map(Int::toString) == listOf("1", "2") &&
+        listOf("ab").map(String::uppercase) == listOf("AB") && listOf(1).map(Int::inc) == listOf(2) && f(5) == "5")
+}
+
 fun main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -7392,6 +7447,8 @@ fun main() {
     s162() // SECTION-CALL 162
     s163() // SECTION-CALL 163
     s164() // SECTION-CALL 164
+    s165() // SECTION-CALL 165
+    s166() // SECTION-CALL 166
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }
