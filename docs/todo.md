@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1079** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1080** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -149,14 +149,15 @@ Trap: loading library code with `static` vars arms usesRefs for the whole progra
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-1072 bash: assoc kind per scope / computed `declare -A`; small declaration leftovers · P3 · SH · IN PROGRESS (SH worker, round 30) [V]
-Oracle /opt/homebrew/bin/bash 5.3:
-- assoc-ness is a whole-program fact in both engines (assocArrays, rt_isassoc registry): `local m[@]=z` in a function shadowing a global assoc, and compiled `declare -A "$s"` (computed name) are wrong/refused. Needs a per-variable runtime kind.
-- `export +x px=1`: bash prints "export: `+x': not a valid identifier", status 1, and still exports px.
-- `ia[$'1']=5` on an indexed array: bash 5.3 "'1': arithmetic syntax error"; ours stores [1].
-- compiled computed array literal with an unquoted glob char (`declare -a "$n=(2*3)"`) is refused; bash globs it (no match -> literal).
-- POLICY (needs user decision, do not start without it): engines model a UTF-8 locale; under LC_ALL=C non-ASCII keys in declare -p are $'..'-quoted by bash. 43 ratchet checks assert UTF-8 behaviour.
-Note: `-max-steps N` must precede the grammar on the mec command line (after the program file it becomes a program argument).
+### T-1079 bash: quoted indexed subscripts on reads; literal kind conversion; small diagnostics · P3 · SH · OPEN [V]
+Oracle /opt/homebrew/bin/bash 5.3; all engines:
+- reads with a quoted indexed subscript: `${ia['1']}`, `${ia[$'2']}`, `$(( ia['1'] ))` -> "'1': arithmetic syntax error: operand expected (error token is "'1'")", command fails; ours returns a value. Needs the assignment-side treatment in the parameter-expansion subscript path (PeIdxRef, subKeyAll/subKeyOf).
+- `a=(1); declare -A a=([x]=1)`: top level prints "a: cannot convert indexed to associative array" (no builtin prefix) and abandons the line; in a function the message prints twice, status 1, continues. Ours converts silently.
+- `ia[1'']=x`: bash "invalid arithmetic operator (error token is "''")"; ours "arithmetic syntax error in expression" (stderr only).
+- `read 'ia[$'"'"'0'"'"']'`: bash's error token is `$'0'` (unexpanded), ours `$0` (stderr only).
+- compiled `echo A $x B` with x empty prints "A  B" (two spaces); interpreter and bash "A B" - emitEcho's static join in bash-to-llvm-ir.abnf joins even when an unquoted word yields no field.
+- nullglob not modelled.
+POLICY (needs user decision, do not start without it): engines model a UTF-8 locale; under LC_ALL=C non-ASCII keys in declare -p are $'..'-quoted by bash; 43 ratchet checks assert UTF-8 behaviour.
 
 # C — C subset
 
@@ -1137,6 +1138,7 @@ T-1073 kotlin: compiled reified call to a function declared later crashes — DO
 T-1074 kotlin: KClass javaPrimitiveType/hashCode; destructured-lambda and smart-cast javaClass — DONE (KT r24, 377b9b84): KClass javaPrimitiveType/hashCode, KClass keys in sets/maps compare by name (run/native), destructured lambda/for/val components and let-after-cast smart cast typed; 4 legs = kotlinc
 T-1076 csharp: compound assignment evaluates the right side before reading the left — DONE (CS r14, 4 commits to 318d9fc6): compound assignment reads the target before the RHS for every target kind; also fixed: simple assignment evaluates receiver+indices before the RHS, ??= evaluates its target once, prefix ++/-- on member chains parses, bare-named static-field path roots compiled; 3 legs agree with ECMA-334 12.21
 T-1070 ruby: Enumerator#each value, for-over-Lazy value, user #inspect ivars, Lazy respond_to?/class — DONE (RB r46, 2ca7d081): Enumerator#each answers the underlying method's value, for over map/select/with_index Enumerators and Lazy answers MRI's value, user #inspect/#to_s carry address (2*object_id, 16 hex) + ivars with cycle cut, Lazy class/respond_to?, blockless with_object; 4 legs = ruby 2.6
+T-1072 bash: assoc kind per scope / computed `declare -A`; small declaration leftovers — PARTIAL→split (SH r30, 3 commits): assoc kind per binding at run time (interp var field, C runtime array mark; computed declare -A compiled; cannot-convert refusal), export/readonly +X are non-identifier operands, quoted indexed subscripts in assignments are arithmetic errors, computed literals accept glob chars; 4 legs = bash 5.3. Reads with quoted subscripts + small items filed; LC_ALL=C policy item carried over
 
 # Settled — do not re-open
 
