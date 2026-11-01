@@ -1676,6 +1676,24 @@ function s85() {
     check("gs5", $s85z[0] === 11);
 }
 
+// ===== SECTION 86: variable variables passed by reference =====
+// '$$n' and '${expr}' name a variable like '$name' does, so a by-reference
+// parameter binds that variable, creating it when missing (ZEND_FETCH_W of a
+// computed name, ZEND_SEND_REF).
+function s86inc(&$x) { $x++; }
+function s86() {
+    $a = 1;
+    $n = "a";
+    s86inc($$n);
+    s86inc(${"a"});
+    $m = "fresh";
+    s86inc($$m);
+    $arr = [5];
+    $an = "arr";
+    s86inc(${$an}[0]);
+    check("vr1", $a === 3 && $fresh === 1 && $arr[0] === 6);
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -1706,6 +1724,7 @@ function main() {
     s83(); // SECTION-CALL 83
     s84(); // SECTION-CALL 84
     s85(); // SECTION-CALL 85
+    s86(); // SECTION-CALL 86
     echo "full: " . $checks . " checks, " . $failures . " failures\n";
     return $failures;
 }

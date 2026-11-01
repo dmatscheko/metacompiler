@@ -161,47 +161,61 @@ function phpLibDynArg(t) {
     return true
 }
 
-// The text t, trimmed, when it spells a storage location - '$name' followed by any
-// run of '[...]' and '->name' steps, brackets balanced and quoted text skipped -
-// and null otherwise. A bare $GLOBALS is a read-only copy, no variable. The
-// grammars re-parse such a text as a Target, which a text failing to parse as one
-// would abort, so nothing else passes.
+// The text t, trimmed, when it spells a storage location - a variable ('$name',
+// or a variable variable '$$name' / '${expr}') followed by any run of '[...]' and
+// '->name' steps, brackets balanced and quoted text skipped - and null otherwise.
+// A bare $GLOBALS is a read-only copy, no variable. The grammars re-parse such a
+// text as a Target, which a text failing to parse as one would abort, so nothing
+// else passes.
 function phpLibVarText(t) {
     var a = 0
     var z = t.length
     while (a < z && phpLibSpace(t.charCodeAt(a))) { a = a + 1 }
     while (z > a && phpLibSpace(t.charCodeAt(z - 1))) { z = z - 1 }
     var w = t.substring(a, z)
-    if (w.length < 2 || w.charAt(0) != "$" || !phpLibNameStart(w, 1) || w == "$GLOBALS") { return null }
-    var i = 2
-    while (i < w.length && phpLibNameChar(w, i)) { i = i + 1 }
+    if (w.length < 2 || w.charAt(0) != "$" || w == "$GLOBALS") { return null }
+    var i = 1
+    while (i < w.length && w.charAt(i) == "$") { i = i + 1 }
+    if (i < w.length && w.charAt(i) == "{") {
+        i = phpLibSkipBracket(w, i, "{", "}")
+        if (i < 0) { return null }
+    } else {
+        if (i >= w.length || !phpLibNameStart(w, i)) { return null }
+        while (i < w.length && phpLibNameChar(w, i)) { i = i + 1 }
+    }
     while (i < w.length) {
         if (w.charAt(i) == "[") {
-            var depth = 0
-            while (i < w.length) {
-                var ch = w.charAt(i)
-                if (ch == "'" || ch == "\"") {
-                    var q = ch
-                    i = i + 1
-                    while (i < w.length && w.charAt(i) != q) {
-                        if (w.charAt(i) == "\\") { i = i + 1 }
-                        i = i + 1
-                    }
-                    if (i >= w.length) { return null }
-                } else if (ch == "[") { depth = depth + 1 }
-                else if (ch == "]") {
-                    depth = depth - 1
-                    if (depth == 0) { i = i + 1; break }
-                }
-                i = i + 1
-            }
-            if (depth != 0) { return null }
+            i = phpLibSkipBracket(w, i, "[", "]")
+            if (i < 0) { return null }
         } else if (w.charAt(i) == "-" && i + 2 < w.length && w.charAt(i + 1) == ">" && phpLibNameStart(w, i + 2)) {
             i = i + 2
             while (i < w.length && phpLibNameChar(w, i)) { i = i + 1 }
         } else { return null }
     }
     return w
+}
+// The index just past the bracket that closes the one opening at i of w, quoted
+// text skipped; -1 when it is not closed.
+function phpLibSkipBracket(w, i, open, close) {
+    var depth = 0
+    while (i < w.length) {
+        var ch = w.charAt(i)
+        if (ch == "'" || ch == "\"") {
+            var q = ch
+            i = i + 1
+            while (i < w.length && w.charAt(i) != q) {
+                if (w.charAt(i) == "\\") { i = i + 1 }
+                i = i + 1
+            }
+            if (i >= w.length) { return -1 }
+        } else if (ch == open) { depth = depth + 1 }
+        else if (ch == close) {
+            depth = depth - 1
+            if (depth == 0) { return i + 1 }
+        }
+        i = i + 1
+    }
+    return -1
 }
 // An ASCII letter or '_' / one or a digit, at i of s.
 function phpLibNameStart(s, i) {
