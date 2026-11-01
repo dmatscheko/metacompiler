@@ -67,7 +67,7 @@ its report; anything structural there is a CORE ticket.
 ### T-1040 python: `type(x) is range` (and enumerate/zip/map/filter/reversed) is False · P3 · PY · IN PROGRESS (PY worker, round 22) [V]
 python3 3.14: `type(range(3)) is range` → True; same for enumerate, zip, map, filter, reversed. Ours False in all engines: the builtin name is bound to a function while type() answers a separate class object (`__name__` and isinstance are already right). Found by PY r21.
 
-### T-1041 python: CJK multibyte codecs, `\N{NAME}` escapes, DeprecationWarning for invalid escapes — large data · P4 · PY · IN PROGRESS (PY worker, round 22) [V] · NEEDS SIZE DECISION
+### T-1041 python: CJK multibyte codecs, `\N{NAME}` escapes, DeprecationWarning for invalid escapes — large data · P4 · PY · OPEN [V] · NEEDS SIZE DECISION
 Remainder of T-1028; each needs a table-size decision before work starts. CJK families (shift_jis 15888 two-byte mappings, cp932 19520, euc_jp 6942, gbk 21791, gb2312 7445, gb18030 23940, big5 13710, cp950 13752, big5hkscs 18402, euc_kr 8225, cp949 17048, johab 17065, shift_jis_2004 20240, euc_jis_2004 8860; ~75K unique) ≈ 150–500 KB shared table text + per-family state machines. `\N{NAME}` needs the Unicode name DB (34137 non-algorithmic names, ~215 KB zlib / ~450 KB word-compressed). The DeprecationWarning (`<file>:<line>: DeprecationWarning: "\q" is an invalid escape sequence...` + source line, once per location, only from __main__) needs warnings machinery and call-site source lines (CORE plumbing). Tables would follow the nameprep pattern: one shared file, linked only when the program names the codec.
 
 # RB — Ruby
