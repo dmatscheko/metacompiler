@@ -11605,6 +11605,23 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 					return d
 				}
 				return jsNull
+			// A Hash keeps ONE default, a value or a proc. Twin of hashMethod in
+			// ruby-interpreter.abnf, which states the rule.
+			case "default_proc":
+				if p, has := o.props["__hdefp"]; has {
+					return p
+				}
+				return jsNull
+			case "default=", "default_proc=":
+				o.del("__hdef")
+				o.del("__hdefp")
+				v := argAt(args, 0)
+				if name == "default=" {
+					o.set("__hdef", v)
+				} else if v != jsNull {
+					o.set("__hdefp", v)
+				}
+				return v
 			case "fetch":
 				// Hash#fetch DELIBERATELY ignores the default: MRI raises
 				// KeyError for a missing key unless a second argument or a
@@ -12505,7 +12522,8 @@ func rubyHashEnumName(n string) bool {
 		"each_with_index", "each_with_object", "inject", "reduce", "all?",
 		"any?", "none?", "one?", "first", "take", "drop", "take_while",
 		"drop_while", "each_slice", "each_cons", "empty?", "tally", "zip",
-		"each_entry", "assoc", "uniq", "reverse", "freeze", "itself":
+		"each_entry", "assoc", "uniq", "reverse", "freeze", "itself",
+		"find_all", "cycle", "chunk_while", "lazy":
 		return true
 	}
 	return false
@@ -12667,6 +12685,87 @@ func (rt *jsrt) rubyHashMethod(o *jsObject, keys, vals *jsArray, name string, ar
 			ovals.elems = append(ovals.elems, vals.elems[i])
 		}
 		return out, true
+	// The in-place and remaining Hash methods. Twin of hashMethod in
+	// ruby-interpreter.abnf, which states each rule.
+	case "transform_values!":
+		for i := range vals.elems {
+			vals.elems[i] = rt.call(blk, jsUndef, []interface{}{vals.elems[i]})
+		}
+		return o, true
+	case "transform_keys!":
+		pairs := rt.rubyHashPairs(keys, vals)
+		keys.elems = nil
+		vals.elems = nil
+		keys.dropIdx()
+		for _, pr := range pairs.elems {
+			row := pr.(*jsArray).elems
+			nk := rt.call(blk, jsUndef, []interface{}{row[0]})
+			if j := rt.rubyDictFind(keys, nk); j >= 0 {
+				vals.elems[j] = row[1]
+				continue
+			}
+			dictAppend(keys, vals, rubySV(nk), row[1])
+		}
+		return o, true
+	case "store":
+		k, v := argAt(pos, 0), argAt(pos, 1)
+		if i := rt.rubyDictFind(keys, k); i >= 0 {
+			vals.elems[i] = v
+			return v, true
+		}
+		rt.rubyHashAddCheck(o, name)
+		dictAppend(keys, vals, k, v)
+		return v, true
+	case "fetch_values":
+		out := &jsArray{}
+		for _, k := range pos {
+			switch i := rt.rubyDictFind(keys, k); {
+			case i >= 0:
+				out.elems = append(out.elems, vals.elems[i])
+			case blk != nil:
+				out.elems = append(out.elems, rt.call(blk, jsUndef, []interface{}{k}))
+			default:
+				rt.rubyRaiseErr(name, "KeyError", "key not found: "+rt.rubyInspect(k))
+			}
+		}
+		return out, true
+	case "shift":
+		if len(keys.elems) == 0 {
+			return jsNull, true
+		}
+		pr := &jsArray{elems: []interface{}{rt.rubyKeyOut(keys.elems[0]), vals.elems[0]}}
+		keys.elems = append([]interface{}{}, keys.elems[1:]...)
+		vals.elems = append([]interface{}{}, vals.elems[1:]...)
+		keys.dropIdx()
+		return pr, true
+	case "replace":
+		src, _ := argAt(pos, 0).(*jsObject)
+		skeys, svals, _ := dictParts(src)
+		keys.elems = append([]interface{}{}, skeys.elems...)
+		vals.elems = append([]interface{}{}, svals.elems...)
+		keys.dropIdx()
+		o.del("__hdef")
+		o.del("__hdefp")
+		if d, has := src.props["__hdef"]; has {
+			o.set("__hdef", d)
+		}
+		if d, has := src.props["__hdefp"]; has {
+			o.set("__hdefp", d)
+		}
+		return o, true
+	case "rehash":
+		rk, rv := keys.elems, vals.elems
+		keys.elems = nil
+		vals.elems = nil
+		keys.dropIdx()
+		for i, k := range rk {
+			if j := rt.rubyDictFind(keys, k); j >= 0 {
+				vals.elems[j] = rv[i]
+				continue
+			}
+			dictAppend(keys, vals, k, rv[i])
+		}
+		return o, true
 	}
 	if !rubyHashEnumName(name) {
 		return nil, false
@@ -12847,7 +12946,7 @@ func rubyEnumFinish(t *jsObject, items *jsArray, results []interface{}) interfac
 	// each_with_object's items are [element, memo] pairs, and it answers the memo.
 	case "each_with_object":
 		return t.props["margs"].(*jsArray).elems[0]
-	case "select", "filter", "reject":
+	case "select", "filter", "find_all", "reject":
 		out := &jsArray{}
 		for i := range items.elems {
 			hit := rubyTruthy(results[i])
@@ -12960,7 +13059,7 @@ func (rt *jsrt) rubyEnumMethod(t *jsObject, name string, args []interface{}) int
 // rbArrWantsBlock of lib/ruby-rt.metajs.
 func rubyArrWantsBlock(n string) bool {
 	switch n {
-	case "map", "collect", "map!", "collect!", "select", "filter", "select!",
+	case "map", "collect", "map!", "collect!", "select", "filter", "find_all", "select!",
 		"filter!", "reject", "reject!", "keep_if", "delete_if", "sort_by",
 		"sort_by!", "group_by", "partition", "flat_map", "collect_concat",
 		"find", "detect", "min_by", "max_by", "take_while", "drop_while":
@@ -13151,7 +13250,7 @@ func (rt *jsrt) rubyArrayMethod(t *jsArray, name string, args []interface{}) int
 			out.elems = append(out.elems, rt.call(blk, jsUndef, []interface{}{e}))
 		}
 		return out
-	case "select", "filter":
+	case "select", "filter", "find_all":
 		out := &jsArray{}
 		for _, e := range t.elems {
 			if rubyTruthy(rt.call(blk, jsUndef, []interface{}{e})) {
@@ -13425,6 +13524,13 @@ func (rt *jsrt) rubyArrayMethod(t *jsArray, name string, args []interface{}) int
 			}
 			out.elems = append(out.elems, row)
 		}
+		// With a block each tuple is yielded instead, and zip answers nil.
+		if blk != nil {
+			for _, row := range out.elems {
+				rt.call(blk, jsUndef, []interface{}{row})
+			}
+			return jsNull
+		}
 		return out
 	// each_slice / each_cons: with a block they yield each group and answer SELF
 	// (Ruby 3.1 changed this from nil, and this project's corpus is Ruby 3); with
@@ -13480,7 +13586,7 @@ func (rt *jsrt) rubyArrayMethod(t *jsArray, name string, args []interface{}) int
 	case "shuffle!":
 		return t
 	case "lazy":
-		return rubyMkLazy("arr", &jsArray{elems: append([]interface{}{}, t.elems...)}, 0, jsNull, false, true, "#<Enumerator::Lazy: "+rt.rubyInspect(t)+">")
+		return rubyMkLazy("arr", &jsArray{elems: append([]interface{}{}, t.elems...)}, 0, jsNull, false, true, "#<Enumerator::Lazy: "+rt.rubyInspect(rt.rubyEnumSrc(t))+">")
 	// cycle(n) { } runs the block over the whole array n times; cycle { } with no
 	// count repeats FOREVER, and the way out is the block's own `break'.
 	case "cycle":
@@ -13490,7 +13596,7 @@ func (rt *jsrt) rubyArrayMethod(t *jsArray, name string, args []interface{}) int
 		}
 		if blk == nil {
 			if len(pos) == 0 {
-				return rubyMkLazy("cycle", &jsArray{elems: append([]interface{}{}, t.elems...)}, 0, jsNull, false, false, "#<Enumerator: "+rt.rubyInspect(t)+":cycle>")
+				return rubyMkLazy("cycle", &jsArray{elems: append([]interface{}{}, t.elems...)}, 0, jsNull, false, false, "#<Enumerator: "+rt.rubyInspect(rt.rubyEnumSrc(t))+":cycle>")
 			}
 			cyc := &jsArray{}
 			for i := 0; i < n; i++ {

@@ -3122,26 +3122,52 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         return function() {
             var coll = anytype
             coll = collT()
+            if (isDict(coll)) { return forInHash(coll, names, refs, body) }
             var seq = []
             if (Array.isArray(coll)) { seq = coll }
             else if (isRange(coll)) { seq = rangeToA(coll) }
-            else if (isDict(coll)) { for (var d = 0; d < coll.keys.length; d++) { seq.push([coll.keys[d], coll.vals[d]]) } }
             else { fail("for-in needs an array or a hash") }
             for (var i = 0; i < seq.length; i++) {
-                if (names.length == 1) { forOneSet(names[0], refs[0], seq[i]) }
-                else {
-                    var el = anytype
-                    el = seq[i]
-                    for (var j = 0; j < names.length; j++) {
-                        forOneSet(names[j], refs[j], Array.isArray(el) && j < el.length ? el[j] : null)
-                    }
-                }
-                var st = runLoopBody(body)
+                var st = forStep(names, refs, body, seq[i])
                 if (st.sig != undefined) { return st.sig }
                 if (st.stop) { return st.v }
             }
             return null
         }
+    }
+    // One pass of a for body with el bound to the loop variables: one variable
+    // takes el whole, several destructure it.
+    function forStep(names, refs, body, el) {
+        if (names.length == 1) { forOneSet(names[0], refs[0], el) }
+        else {
+            for (var j = 0; j < names.length; j++) {
+                forOneSet(names[j], refs[j], Array.isArray(el) && j < el.length ? el[j] : null)
+            }
+        }
+        return runLoopBody(body)
+    }
+    // `for` over a Hash is Hash#each: the live entries as [key, value] pairs, run
+    // inside an iteration over the Hash (hashIter), so an insertion in the body
+    // raises. Twin of js_rforit / js_rfornext in abnf/jsrtrubystr.go and
+    // lib/ruby-rt.metajs.
+    function forInHash(d, names, refs, body) {
+        var lev = d.__iter == undefined ? 0 : d.__iter
+        d.__iter = lev + 1
+        var r = anytype
+        r = null
+        try {
+            var i = 0
+            var going = true
+            while (going && i < d.keys.length) {
+                var k = anytype
+                k = d.keys[i]
+                var st = forStep(names, refs, body, [keyOut(k), d.vals[i]])
+                if (st.sig != undefined) { r = st.sig; going = false }
+                else if (st.stop) { r = st.v; going = false }
+                else if (i < d.keys.length && d.keys[i] === k) { i = i + 1 }
+            }
+        } finally { d.__iter = lev }
+        return r
     }
 
     // ----- Symbols -----
@@ -9664,6 +9690,21 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             hdv = target.__hdef
             return hdv == undefined ? null : hdv
         }
+        // A Hash keeps ONE default, a value or a proc: setting either drops the
+        // other, and `default_proc = nil` leaves neither. Twin of the Hash arm of
+        // rubyMethod in abnf/jsrt.go and rbMethod in lib/ruby-rt.metajs.
+        if (name == "default_proc") {
+            var hdp = anytype
+            hdp = target.__hdefp
+            return hdp == undefined ? null : hdp
+        }
+        if (name == "default=" || name == "default_proc=") {
+            target.__hdef = undefined
+            target.__hdefp = undefined
+            if (name == "default=") { target.__hdef = args[0] }
+            else if (args[0] !== null) { target.__hdefp = args[0] }
+            return args[0]
+        }
         // Hash#fetch DELIBERATELY ignores the default: MRI raises KeyError for a
         // missing key unless a second argument or a block supplies the answer.
         if (name == "fetch") {
@@ -9762,6 +9803,63 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             for (var tj = 0; tj < target.keys.length; tj++) { dictSet(tk, rsText(blockCall(blk, [keyOut(target.keys[tj])])), target.vals[tj]) }
             return tk
         }
+        if (name == "transform_values!") {
+            for (var tw = 0; tw < target.vals.length; tw++) { target.vals[tw] = blockCall(blk, [target.vals[tw]]) }
+            return target
+        }
+        // MRI 2.6 empties the Hash and stores every pair again under its new key,
+        // so a key that collides keeps the first one's place and the last value.
+        if (name == "transform_keys!") {
+            var tkp = hashPairs(target)
+            arrReplace(target.keys, [])
+            arrReplace(target.vals, [])
+            for (var tq = 0; tq < tkp.length; tq++) { dictSet(target, rsText(blockCall(blk, [tkp[tq][0]])), tkp[tq][1]) }
+            return target
+        }
+        if (name == "store") {
+            hashPut(target, rsText(args[0]), args[1], name)
+            return args[1]
+        }
+        // fetch for each key: a missing one is the block's answer, else KeyError.
+        if (name == "fetch_values") {
+            var fvs = []
+            for (var fv = 0; fv < args.length; fv++) {
+                var ff = dictFind(target, args[fv])
+                if (ff >= 0) { fvs.push(target.vals[ff]) }
+                else if (blk != null) { fvs.push(blockCall(blk, [args[fv]])) }
+                else { raiseErr(name, "KeyError", "key not found: " + rinspect(args[fv])) }
+            }
+            return fvs
+        }
+        // shift: the first pair, removed; an empty Hash answers nil (Ruby 3.2 and
+        // later; 2.6 answered the default).
+        if (name == "shift") {
+            if (target.keys.length == 0) { return null }
+            var sp = [keyOut(target.keys[0]), target.vals[0]]
+            arrReplace(target.keys, target.keys.slice(1))
+            arrReplace(target.vals, target.vals.slice(1))
+            return sp
+        }
+        // replace takes the other Hash's entries AND its default.
+        if (name == "replace") {
+            var rsrc = anytype
+            rsrc = args[0]
+            arrReplace(target.keys, rsrc.keys.slice(0))
+            arrReplace(target.vals, rsrc.vals.slice(0))
+            target.__hdef = rsrc.__hdef
+            target.__hdefp = rsrc.__hdefp
+            return target
+        }
+        // rehash stores every pair again: keys that have become equal merge into
+        // the first one's place with the last value.
+        if (name == "rehash") {
+            var rk = target.keys.slice(0)
+            var rv = target.vals.slice(0)
+            arrReplace(target.keys, [])
+            arrReplace(target.vals, [])
+            for (var rq = 0; rq < rk.length; rq++) { dictSet(target, rk[rq], rv[rq]) }
+            return target
+        }
         // Everything else Enumerable is answered over the [key, value] PAIRS,
         // which is what MRI's Hash does (Hash includes Enumerable and yields a
         // pair). select / filter / reject answer a HASH again, everything else
@@ -9793,7 +9891,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     function hashIterates(n, args) {
         if (n == "sort" || ((n == "min" || n == "max") && args.length > 0)) { return false }
         return n == "each" || n == "each_pair" || n == "each_key" || n == "each_value"
-            || n == "transform_values" || n == "transform_keys" || n == "to_h" || hashEnumName(n)
+            || n == "transform_values" || n == "transform_keys" || n == "transform_values!"
+            || n == "to_h" || hashEnumName(n)
     }
     // recv is the Hash d itself, or an Enumerator over d run with a block.
     function hashIter(d, recv, name, args, blk) {
@@ -10021,6 +10120,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             || n == "take_while" || n == "drop_while" || n == "each_slice"
             || n == "each_cons" || n == "empty?" || n == "tally" || n == "zip" || n == "each_entry"
             || n == "assoc" || n == "uniq" || n == "reverse" || n == "freeze" || n == "itself"
+            || n == "find_all" || n == "cycle" || n == "chunk_while" || n == "lazy"
     }
     // The Array/Enumerable names that REQUIRE a block; called without one MRI hands
     // back an Enumerator over the receiver. Names that are legal blockless (sort,
@@ -10028,7 +10128,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // here, and each / each_with_index answer their own Enumerator.
     function arrWantsBlock(n) {
         return n == "map" || n == "collect" || n == "map!" || n == "collect!"
-            || n == "select" || n == "filter" || n == "select!" || n == "filter!"
+            || n == "select" || n == "filter" || n == "find_all" || n == "select!" || n == "filter!"
             || n == "reject" || n == "reject!" || n == "keep_if" || n == "delete_if"
             || n == "sort_by" || n == "sort_by!" || n == "group_by" || n == "partition"
             || n == "flat_map" || n == "collect_concat" || n == "find" || n == "detect"
@@ -10085,7 +10185,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
         // each_with_object's items are [element, memo] pairs, and it answers the memo.
         if (op == "each_with_object") { return t.margs[0] }
-        if (op == "select" || op == "filter" || op == "reject") {
+        if (op == "select" || op == "filter" || op == "find_all" || op == "reject") {
             var keep = []
             for (var k = 0; k < items.length; k++) {
                 var hit = rtest(results[k])
@@ -10362,7 +10462,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             for (i = 0; i < t.length; i++) { out.push(blockCall(blk, [t[i]])) }
             return out
         }
-        if (name == "select" || name == "filter") {
+        if (name == "select" || name == "filter" || name == "find_all") {
             out = []
             for (i = 0; i < t.length; i++) { if (rtest(blockCall(blk, [t[i]]))) { out.push(t[i]) } }
             return out
@@ -10542,6 +10642,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 }
                 zout.push(row)
             }
+            // With a block each tuple is yielded instead, and zip answers nil.
+            if (blk != null) {
+                for (i = 0; i < zout.length; i++) { blockCall(blk, [zout[i]]) }
+                return null
+            }
             return zout
         }
         // each_slice / each_cons: with a block they yield each group and answer SELF
@@ -10578,10 +10683,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (name == "shuffle!") { return t }
         // cycle(n) { } runs the block over the whole array n times; cycle { } with no
         // count repeats FOREVER, and the way out is the block's own `break'.
-        if (name == "lazy") { return mkLazy("arr", t.slice(0), 0, null, false, true, "#<Enumerator::Lazy: " + rinspect(t) + ">") }
+        if (name == "lazy") { return mkLazy("arr", t.slice(0), 0, null, false, true, "#<Enumerator::Lazy: " + rinspect(enumSrc(t)) + ">") }
         if (name == "cycle") {
             if (blk == null) {
-                if (args.length == 0) { return mkLazy("cycle", t.slice(0), 0, null, false, false, "#<Enumerator: " + rinspect(t) + ":cycle>") }
+                if (args.length == 0) { return mkLazy("cycle", t.slice(0), 0, null, false, false, "#<Enumerator: " + rinspect(enumSrc(t)) + ":cycle>") }
                 var cyc = []
                 var cn = Math.trunc(toF(args[0]))
                 for (i = 0; i < cn; i++) { for (var cj = 0; cj < t.length; cj++) { cyc.push(t[cj]) } }
@@ -11847,7 +11952,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             ivarPut(o, k, v)
             return
         }
-        if (o === null || o === undefined || typeof o != "object" || Array.isArray(o) || isRStr(o)) { mcall(o, k + "=", [v], null); return }
+        if (o === null || o === undefined || typeof o != "object" || Array.isArray(o) || isRStr(o) || isDict(o)) { mcall(o, k + "=", [v], null); return }
         rsetIndex(o, k, v)
     }
     // The index-assignment tail, shared by every write site. rsetSlice answers the

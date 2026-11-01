@@ -1087,6 +1087,100 @@ def s149
   check("hi149d", e5 == ms && e6 == ms && z == {a: 1} && e7 == ms && d == {a: 1})
 end
 
+# ===== SECTION 150: for over a Hash; Hash#default= / #default_proc=; more Hash methods =====
+# `for k, v in h` is h.each: the live [key, value] pairs, a deleted entry skipped,
+# a new key refused while the loop runs and allowed again however it was left.
+# default= and default_proc= each replace the other. store, fetch_values, shift,
+# replace (which takes the default too), rehash, transform_values! /
+# transform_keys! (2.6: the Hash is emptied and refilled, so a collision keeps
+# the first place and the last value), find_all / cycle / chunk_while / lazy over
+# the pairs, and zip with a block, which yields each tuple and answers nil.
+# /usr/bin/ruby 2.6 settles each.
+def s150try
+  yield
+  nil
+rescue RuntimeError => e
+  e.message
+end
+def s150ret(h)
+  for k, v in h
+    return k
+  end
+end
+def s150
+  ms = "can't add a new key into hash during iteration"
+  h = {a: 1, b: 2, c: 3}
+  seen = []
+  for k, v in h
+    h.delete(:b) if k == :a
+    h[:c] = 30 if k == :a
+    seen << [k, v]
+  end
+  whole = []
+  for kv in {x: 1}
+    whole << kv
+  end
+  check("fh150a", seen == [[:a, 1], [:c, 30]] && whole == [[:x, 1]] && k == :c && v == 30)
+  g = {a: 1}
+  e1 = s150try { for k in g; g[:n] = 1; end }
+  for k in g
+    break
+  end
+  g[:b] = 2
+  s150try { for k in g; raise "out"; end }
+  g[:c] = 3
+  r = s150ret(g)
+  g[:d] = 4
+  check("fh150b", e1 == ms && r == :a && g == {a: 1, b: 2, c: 3, d: 4})
+  q = {a: 1}
+  q.default = 5
+  d1 = [q[:zz], q.default, q.default_proc]
+  q.default_proc = proc { |hh, kk| hh[kk] = kk.to_s * 2 }
+  d2 = [q[:ab], q.default, q.default_proc.class, q]
+  q.default_proc = nil
+  d3 = [q[:nn], q.default, q.default_proc]
+  w = Hash.new { |hh, kk| kk }
+  w.default = 9
+  check("fh150c", d1 == [5, 5, nil] && d2 == ["abab", nil, Proc, {a: 1, ab: "abab"}] && d3 == [nil, nil, nil] &&
+        w.default_proc.nil? && w[:x] == 9 && q.send(:default=, 4) == 4 && q[:m] == 4)
+  s = {a: 1}
+  sk = "key"
+  st = [s.store(:b, 2), s.store(sk, 3)]
+  sk << "x"
+  fv = [s.fetch_values(:a, :b), s.fetch_values(:a, :zz) { |kk| kk.to_s }]
+  fe = begin; s.fetch_values(:zz); rescue KeyError => err; err.message; end
+  check("fh150d", st == [2, 3] && s == {a: 1, b: 2, "key" => 3} && fv == [[1, 2], [1, "zz"]] && fe == "key not found: :zz" &&
+        s150try { s.each { s.store(:new, 1) } } == ms)
+  t = {a: 1, b: 2}
+  sh = [t.shift, t, {}.shift]
+  dflt = Hash.new(7)
+  dflt[:a] = 1
+  rp = {z: 0}
+  rp2 = rp.replace(dflt)
+  rk = [[1], [2]]
+  rh = {rk[0] => :one, rk[1] => :two}
+  rk[1][0] = 1
+  rh.rehash
+  check("fh150e", sh == [[:a, 1], {b: 2}, nil] && rp2.equal?(rp) && rp == {a: 1} && rp[:q] == 7 &&
+        rh == {[1] => :two} && rh.size == 1)
+  tv = {a: 1, b: 2}
+  tv2 = tv.transform_values! { |x| x * 10 }
+  tk = {a: 1, b: 2}
+  tk.transform_keys! { |kk| kk == :a ? :b : :a }
+  tc = {a: 1, b: 2}.transform_keys! { |kk| :same }
+  check("fh150f", tv2.equal?(tv) && tv == {a: 10, b: 20} && tk == {b: 1, a: 2} && tc == {same: 2})
+  e = {a: 1, b: 2, c: 4}
+  cy = []
+  zy = []
+  zr = e.zip([7, 8]) { |row| zy << row }
+  check("fh150g", e.find_all { |kk, x| x > 1 } == [[:b, 2], [:c, 4]] && e.cycle.first(4) == [[:a, 1], [:b, 2], [:c, 4], [:a, 1]] &&
+        e.cycle(2) { |kk, x| cy << kk }.nil? && cy == [:a, :b, :c, :a, :b, :c] &&
+        e.chunk_while { |p1, p2| p2[1] == p1[1] + 1 }.to_a == [[[:a, 1], [:b, 2]], [[:c, 4]]] &&
+        e.lazy.map { |kk, x| x }.first(2) == [1, 2] && e.lazy.inspect == "#<Enumerator::Lazy: {:a=>1, :b=>2, :c=>4}>" &&
+        zr.nil? && zy == [[[:a, 1], 7], [[:b, 2], 8], [[:c, 4], nil]] && [1, 2].zip([3]) { } .nil? &&
+        [1, 2, 3].find_all(&:odd?) == [1, 3])
+end
+
 s122() # SECTION-CALL 122
 s123() # SECTION-CALL 123
 s124() # SECTION-CALL 124
@@ -1115,5 +1209,6 @@ s146() # SECTION-CALL 146
 s147() # SECTION-CALL 147
 s148() # SECTION-CALL 148
 s149() # SECTION-CALL 149
+s150() # SECTION-CALL 150
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

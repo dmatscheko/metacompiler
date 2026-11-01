@@ -381,15 +381,16 @@ func (rt *jsrt) addRubyFmtExterns(m map[string]func(args []uint64) uint64) {
 	}
 	// obj.name = v where a setter may exist: (object, slot key, value, setter key).
 	// The setter is called when the object (or its class, for a class object) has
-	// one; an instance without one, or a value that is not an object (`5.x = 1'),
-	// takes the call anyway, which is MRI's NoMethodError (or its method_missing);
-	// anything else has the slot written. Twin of js_rattrset in
+	// one; an instance without one, a Hash, or a value that is not an object
+	// (`5.x = 1'), takes the call anyway, which is MRI's NoMethodError (or its
+	// method_missing); anything else has the slot written. Twin of js_rattrset in
 	// languages/lib/ruby-rt.metajs and attrSet in ruby-interpreter.abnf.
 	m["js_rattrset"] = func(a []uint64) uint64 {
 		o, ok := u(a[0]).(*jsObject)
 		if ok {
 			_, isCls := o.props["__isclass"]
-			ok = !rubySingRespond(o, rt.toString(u(a[3]))) && (!rubyUserObj(o) || isCls)
+			_, _, isDict := dictParts(o)
+			ok = !isDict && !rubySingRespond(o, rt.toString(u(a[3]))) && (!rubyUserObj(o) || isCls)
 		}
 		if !ok {
 			m["js_rxmcall"]([]uint64{a[0], a[3], w(&jsArray{elems: []interface{}{u(a[2])}})})
@@ -419,6 +420,68 @@ func (rt *jsrt) addRubyFmtExterns(m map[string]func(args []uint64) uint64) {
 			}
 		}
 		return m["js_rattrset"](a[:4])
+	}
+	// for VARS in COLL: js_rforit opens the loop, js_rfornext answers the next
+	// element or undefined when the loop is done, js_rforend closes it (from the
+	// loop's ensure). A Hash yields its live entries as [key, value] pairs inside
+	// an iteration over it (rubyHashIter's count), so an insertion in the body
+	// raises and an entry deleted before it is reached is skipped; an Array is
+	// re-measured every pass; anything else is counted once by js_pylen and
+	// indexed by js_pyget. Twin of forInHash in ruby-interpreter.abnf and
+	// js_rforit in languages/lib/ruby-rt.metajs.
+	m["js_rforit"] = func(a []uint64) uint64 {
+		c := u(a[0])
+		it := newJSObject()
+		it.set("c", c)
+		it.set("i", float64(0))
+		if d, isObj := c.(*jsObject); isObj {
+			if _, _, isDict := dictParts(d); isDict {
+				lev, _ := d.props["__iter"].(float64)
+				d.set("__iter", lev+1)
+				it.set("lev", lev)
+				return w(it)
+			}
+		}
+		if _, isArr := c.(*jsArray); !isArr {
+			it.set("n", u(pylen(a[:1])))
+		}
+		return w(it)
+	}
+	m["js_rfornext"] = func(a []uint64) uint64 {
+		it := u(a[0]).(*jsObject)
+		c := it.props["c"]
+		i := int(it.props["i"].(float64))
+		if _, isHash := it.props["lev"]; isHash {
+			keys, vals, _ := dictParts(c)
+			if k, has := it.props["k"]; has && i < len(keys.elems) && keys.elems[i] == k {
+				i++
+			}
+			if i >= len(keys.elems) {
+				return jsHUndefined
+			}
+			it.set("i", float64(i))
+			it.set("k", keys.elems[i])
+			return w(&jsArray{elems: []interface{}{rt.rubyKeyOut(keys.elems[i]), vals.elems[i]}})
+		}
+		if arr, isArr := c.(*jsArray); isArr {
+			if i >= len(arr.elems) {
+				return jsHUndefined
+			}
+			it.set("i", float64(i+1))
+			return w(arr.elems[i])
+		}
+		if float64(i) >= rubyToF(it.props["n"]) {
+			return jsHUndefined
+		}
+		it.set("i", float64(i+1))
+		return m["js_pyget"]([]uint64{w(c), w(float64(i))})
+	}
+	m["js_rforend"] = func(a []uint64) uint64 {
+		it := u(a[0]).(*jsObject)
+		if lev, isHash := it.props["lev"]; isHash {
+			it.props["c"].(*jsObject).set("__iter", lev)
+		}
+		return jsHUndefined
 	}
 	// (proc, method twin): see needsMethTwin in ruby-to-llvm-ir.abnf. Twin of
 	// js_rmtwin in languages/lib/ruby-rt.metajs.

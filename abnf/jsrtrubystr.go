@@ -901,7 +901,8 @@ func rubyKahan(f, c, x float64) (float64, float64) {
 // the Hash. Twin of hashIterates in ruby-interpreter.abnf, which states the rule.
 func rubyHashIterates(name string, args []interface{}) bool {
 	switch name {
-	case "each", "each_pair", "each_key", "each_value", "transform_values", "transform_keys", "to_h":
+	case "each", "each_pair", "each_key", "each_value", "transform_values", "transform_keys",
+		"transform_values!", "to_h":
 	case "sort":
 		return false
 	default:

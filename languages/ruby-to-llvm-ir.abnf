@@ -4080,41 +4080,45 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             else if (items[i].body != undefined) { body = items[i].body }
             else { collT = items[i] }
         }
+        // The loop runs over js_rforit's iterator (see abnf/jsrtruby.go), inside an
+        // ensure that closes it, so a Hash's iteration count drops however the loop
+        // is left: a break, a raise, a return or a throw.
         return function(b) {
             var rc = collT(b)
             b = rc.b
-            var seqV = rc.v
-            var lenV = callExt(b, "js_pylen", [seqV])
             hidCount++
-            var iName = "$for" + hidCount
-            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, iName), emitNum(b, 0)])
+            var itName = "$forit" + hidCount
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, itName), callExt(b, "js_rforit", [rc.v])])
             for (var k = 0; k < names.length; k++) {
                 if (names[k] == "" || names[k].charAt(0) == "@" || names[k].charAt(0) == "$") { continue }
                 emitLocalSet(b, names[k], hNull)
             }
-            var headB = curF.NewBlock("")
-            var bodyB = curF.NewBlock("")
-            var exitB = curF.NewBlock("")
-            b.NewBr(headB)
-            var iV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, iName)])
-            headB.NewCondBr(truthy(headB, callExt(headB, "js_lt", [iV, lenV])), bodyB, exitB)
-            var iV2 = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, iName)])
-            var elV = callExt(bodyB, "js_pyget", [seqV, iV2])
-            if (names.length == 1) {
-                bodyB = forOneSet(bodyB, names[0], refs[0], elV)
-            } else {
-                for (var j = 0; j < names.length; j++) {
-                    bodyB = forOneSet(bodyB, names[j], refs[j], callExt(bodyB, "js_pyget", [elV, emitNum(bodyB, j)]))
+            var loopT = function(lb) {
+                var headB = curF.NewBlock("")
+                var bodyB = curF.NewBlock("")
+                var exitB = curF.NewBlock("")
+                lb.NewBr(headB)
+                var itV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, itName)])
+                var elV = callExt(headB, "js_rfornext", [itV])
+                headB.NewCondBr(headB.NewICmp(llvm.enum.IPredEQ, elV, hUndef), exitB, bodyB)
+                if (names.length == 1) {
+                    bodyB = forOneSet(bodyB, names[0], refs[0], elV)
+                } else {
+                    for (var j = 0; j < names.length; j++) {
+                        bodyB = forOneSet(bodyB, names[j], refs[j], callExt(bodyB, "js_pyget", [elV, emitNum(bodyB, j)]))
+                    }
                 }
+                loopStack.push({cont: headB, brk: exitB})
+                var rb = body(bodyB)
+                rb.b.NewBr(headB)
+                loopStack.pop()
+                return {b: exitB, v: hNull}
             }
-            loopStack.push({cont: headB, brk: exitB})
-            var rb = body(bodyB)
-            var curIV = callExt(rb.b, "js_scope_get", [curScopeV, emitStr(rb.b, iName)])
-            var nextIV = intWrap(rb.b, callExt(rb.b, "js_jadd", [curIV, emitNum(rb.b, 1)]))
-            callExt(rb.b, "js_scope_set", [curScopeV, emitStr(rb.b, iName), nextIV])
-            rb.b.NewBr(headB)
-            loopStack.pop()
-            return {b: exitB, v: hNull}
+            var endT = function(eb) {
+                callExt(eb, "js_rforend", [callExt(eb, "js_scope_get", [curScopeV, emitStr(eb, itName)])])
+                return {b: eb, v: hNull}
+            }
+            return makeTry([{trybody: loopT}, {finalbody: endT}], -1)(b)
         }
     }
 
