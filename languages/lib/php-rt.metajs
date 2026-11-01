@@ -865,6 +865,13 @@ function phMkErrOf(cls, msg) {
     phStamp(o)
     return o
 }
+// The end of a program at a fatal error: its log line, if any, on stderr and
+// exit status 255. Twin of m["js_phfatal"] in abnf/jsrtphp.go.
+function js_phfatal(text) {
+    if (text != "") { eprintln(text) }
+    exit(255)
+    return undefined
+}
 // An exception escaping a finally body while add was pending:
 // zend_exception_set_previous appends add at the end of ex's previous chain,
 // unless add is ex, is reached along that chain, or has the node being looked at

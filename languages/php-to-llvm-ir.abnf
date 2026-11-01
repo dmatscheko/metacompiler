@@ -1651,7 +1651,8 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         if (!c.tracing) { return t }
         if (typeof t != "function") { return t }
         var pos = items[0]
-        if (pos == undefined) { return t }
+        // The library stands for internal code, and its positions are not the file's.
+        if (pos == undefined || phpLibDepth > 0) { return t }
         return function(b) {
             callExt(b, "js_srcpos", [handle(pos)])
             return t(b)
@@ -3154,10 +3155,26 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     function makeThrow(e) {
         return function(b) {
             var r = e(b)
+            r.b = throwCheck(r.b, r.v)
             callExt(r.b, "js_throw", [r.v])
             r.b.NewRet(hUndef) // Never reached: js_throw unwinds on the host side.
             return deadBlock()
         }
+    }
+    // ZEND_THROW throws only a Throwable: anything else raises Error instead.
+    // Twin of phpThrow in php-interpreter.abnf.
+    function throwCheck(b, v) {
+        var okB = curF.NewBlock("")
+        var badB = curF.NewBlock("")
+        b.NewCondBr(truthy(b, callExt(b, "js_phisa", [v, emitStr(b, "Throwable")])), okB, badB)
+        var objB = curF.NewBlock("")
+        var scalarB = curF.NewBlock("")
+        badB.NewCondBr(truthy(badB, callExt(badB, "js_phis", [emitStr(badB, "object"), v])), objB, scalarB)
+        makeRaise("Cannot throw objects that do not implement Throwable")(objB)
+        objB.NewBr(okB) // never taken: js_phraise throws
+        makeRaise("Can only throw objects")(scalarB)
+        scalarB.NewBr(okB) // never taken: js_phraise throws
+        return okB
     }
     // if / elseif / else -- a statement; each branch body is a statement thunk.
     makeIf = function(items) {
@@ -3923,6 +3940,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     function makeThrowExpr(e) {
         return function(b) {
             var r = e(b)
+            r.b = throwCheck(r.b, r.v)
             callExt(r.b, "js_throw", [r.v])
             r.b.NewRet(hUndef) // Never reached: js_throw unwinds on the host side.
             return {b: deadBlock(), v: hUndef}
@@ -5519,9 +5537,14 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             var objV = callExt(b, "js_obj_new", [])
             callExt(b, "js_set", [objV, emitStr(b, "__class"), clsV])
             callExt(b, "js_phoid", [objV])
+            // The root __initprops of an exception takes its file and line from here.
+            siteStore(b, site)
             callExt(b, "js_phscall", [clsV, emitStr(b, "__initprops"), objV, callExt(b, "js_pharr", []), hUndef])
             if (needsMVis("__construct")) { callExt(b, "js_phmvis", [clsV, emitStr(b, "__construct"), visScope(b), hFalse]) }
-            var ean = emitPhArgs(b, args, ctorSig(target.cls))
+            // A constructor not known here (inherited, or a class named at run time) is
+            // the method __construct the object reaches, placed as a method call is.
+            var cs = ctorSig(target.cls)
+            var ean = cs != null ? emitPhArgs(b, args, cs) : emitMethArgs(b, objV, emitStr(b, "__construct"), "__construct", args)
             b = ean.b
             var argsV = ean.v
             // The constructor is resolved through the __super chain, not read off the
@@ -7592,17 +7615,34 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         if (siteF == null) { siteF = m.NewFunc("php_site_text", i64, [llvm.ir.NewParam("site", i64)]) }
         return b.NewCall(siteF, [b.NewLoad(i64, siteGlobal())])
     }
+    // The file of the site php.site holds, "" for 0; php_site_file's body is
+    // emitted with php_site_text's.
+    var siteFileF = null
+    function siteFile(b) {
+        if (siteFileF == null) { siteFileF = m.NewFunc("php_site_file", i64, [llvm.ir.NewParam("site", i64)]) }
+        return b.NewCall(siteFileF, [b.NewLoad(i64, siteGlobal())])
+    }
     function siteTextBody() {
-        if (siteF == null) { return }
-        var b = siteF.NewBlock("entry")
-        var site = siteF.Params[0]
-        var fileV = b.NewLShr(site, handle(24))
-        var lineV = callExt(b, "js_phstr", [callExt(b, "js_num_i", [b.NewAnd(site, handle(16777215))])])
+        if (siteF != null) {
+            var b = siteF.NewBlock("entry")
+            var lineV = callExt(b, "js_phstr", [callExt(b, "js_num_i", [b.NewAnd(siteF.Params[0], handle(16777215))])])
+            siteSwitch(b, siteF, function(hitB, k) {
+                return callExt(hitB, "js_phcat", [emitStr(hitB, phsCallSite(siteFiles[k], "")), lineV])
+            })
+        }
+        if (siteFileF != null) {
+            siteSwitch(siteFileF.NewBlock("entry"), siteFileF, function(hitB, k) { return emitStr(hitB, siteFiles[k]) })
+        }
+    }
+    // The body of f(site): the value hit(block, k) for the site's file siteFiles[k],
+    // else "".
+    function siteSwitch(b, f, hit) {
+        var fileV = b.NewLShr(f.Params[0], handle(24))
         for (var k = 0; k < siteFiles.length; k++) {
-            var hitB = siteF.NewBlock("")
-            var nextB = siteF.NewBlock("")
+            var hitB = f.NewBlock("")
+            var nextB = f.NewBlock("")
             b.NewCondBr(b.NewICmp(llvm.enum.IPredEQ, fileV, handle(k + 1)), hitB, nextB)
-            hitB.NewRet(callExt(hitB, "js_phcat", [emitStr(hitB, phsCallSite(siteFiles[k], "")), lineV]))
+            hitB.NewRet(hit(hitB, k))
             b = nextB
         }
         b.NewRet(emitStr(b, ""))
@@ -8349,11 +8389,13 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         }
         var t = makeDefStmt(fn)
         // The hoisted closure is created away from its declaration, so defPos names
-        // the declaration line: phTopPos fills in where it starts.
+        // the declaration line: phTopPos fills in where it starts. A library
+        // function has none (phStmtPos).
         var at = {pos: undefined}
+        var lib = phpLibDepth > 0
         topDefAt = at
         topDefs.push(function(b) {
-            defPos(b, at.pos)
+            if (!lib) { defPos(b, at.pos) }
             return t(b)
         })
         return function(b) { return b }
@@ -9265,27 +9307,42 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                       ["ValueError", "Error"], ["ArithmeticError", "Error"],
                       ["DivisionByZeroError", "ArithmeticError"]]
     // The instance properties of Exception and Error, in declaration order
-    // (Zend/zend_exceptions.stub.php), with their defaults. file, line and trace are
-    // never filled in: there is no call-site line table to fill them from. Twin of
-    // excProps in php-interpreter.abnf.
+    // (Zend/zend_exceptions.stub.php), with their defaults. file and line are the
+    // site of the `new` creating the exception, which makeNew stores in php.site
+    // right before the __initprops call: the defaults for a site of 0, a `new` in
+    // the library. One the engine creates (phpMkErrOf) keeps the defaults too, and
+    // no call frames are recorded for trace. Twin of excProps and instantiate in
+    // php-interpreter.abnf.
     function excStrInit(b) { return {b: b, v: emitStr(b, "")} }
     function excZeroInit(b) { return {b: b, v: emitNum(b, 0)} }
+    function excFileInit(b) { return {b: b, v: siteFile(b)} }
+    function excLineInit(b) {
+        return {b: b, v: callExt(b, "js_num_i", [b.NewAnd(b.NewLoad(i64, siteGlobal()), handle(16777215))])}
+    }
     var excProps = [{name: "message", vis: "protected", typ: "", init: excStrInit},
                     {name: "string", vis: "private", typ: "string", init: excStrInit},
                     {name: "code", vis: "protected", typ: "", init: excZeroInit},
-                    {name: "file", vis: "protected", typ: "string", init: excStrInit},
-                    {name: "line", vis: "protected", typ: "int", init: excZeroInit},
+                    {name: "file", vis: "protected", typ: "string", init: excFileInit},
+                    {name: "line", vis: "protected", typ: "int", init: excLineInit},
                     {name: "trace", vis: "private", typ: "array", init: function(b) { return {b: b, v: callExt(b, "js_pharr", [])} }},
                     {name: "previous", vis: "private", typ: "?Throwable", init: function(b) { return {b: b, v: hNull} }}]
+    // Exception::__construct's parameter list, which a named argument is placed by:
+    // statically for a class known to take it (ctorSigs), else through the
+    // signature recorded on the closure (withSig).
+    var excCtorPl = {name: "__construct", params: ["$message", "$code", "$previous"],
+                     defs: [{name: "$message"}, {name: "$code"}, {name: "$previous"}], byref: [], rest: -1}
+    noteMethodSig(excCtorPl)
     for (var exr = 0; exr < excRoots.length; exr++) {
         srcClasses["$" + excRoots[exr]] = true
         engineClasses["$" + phsCase(excRoots[exr], false)] = true
         noteClassProps(excRoots[exr], "", excProps)
+        ctorSigs["$" + excRoots[exr]] = excCtorPl
     }
     for (var exd = 0; exd < excDerived.length; exd++) {
         srcClasses["$" + excDerived[exd][0]] = true
         engineClasses["$" + phsCase(excDerived[exd][0], false)] = true
         noteClassProps(excDerived[exd][0], excDerived[exd][1], [])
+        ctorSigs["$" + excDerived[exd][0]] = excCtorPl
     }
     // $this->name = args[idx] when that argument was passed and is not null (js_ne is
     // loose, so null == undefined) over the property default, as
@@ -9317,14 +9374,28 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                 return emitExcArg(bb, 3, "previous")
             }, true)
             callExt(b, "js_set", [clsV, emitStr(b, "__construct"),
-                                  callExt(b, "js_closure", [handle(ctor), curScopeV])])
-            callExt(b, "js_set", [clsV, emitStr(b, "getMessage"),
-                                  callExt(b, "js_closure", [handle(emitExcGetter("message")), curScopeV])])
-            callExt(b, "js_set", [clsV, emitStr(b, "getCode"),
-                                  callExt(b, "js_closure", [handle(emitExcGetter("code")), curScopeV])])
-            callExt(b, "js_set", [clsV, emitStr(b, "getPrevious"),
-                                  callExt(b, "js_closure", [handle(emitExcGetter("previous")), curScopeV])])
-            callExt(b, "js_set", [clsV, emitStr(b, "__mlc"), emitStr(b, ",__construct,getmessage,getcode,getprevious,")])
+                                  withSig(b, callExt(b, "js_closure", [handle(ctor), curScopeV]), excCtorPl)])
+            var getters = [["getMessage", "message"], ["getCode", "code"], ["getFile", "file"], ["getLine", "line"],
+                           ["getTrace", "trace"], ["getPrevious", "previous"]]
+            for (var gi = 0; gi < getters.length; gi++) {
+                callExt(b, "js_set", [clsV, emitStr(b, getters[gi][0]),
+                                      callExt(b, "js_closure", [handle(emitExcGetter(getters[gi][1])), curScopeV])])
+            }
+            // No call frames are recorded, so the trace is always empty and renders
+            // as zend_trace_to_string renders an empty one.
+            var tas = emitFunc([], function(bb) { return retStmt(bb, emitStr(bb, "#0 {main}")) }, true)
+            callExt(b, "js_set", [clsV, emitStr(b, "getTraceAsString"), callExt(b, "js_closure", [handle(tas), curScopeV])])
+            // __mec_excstr (lib/php-stdlib.php) builds the text, which is also kept in
+            // the private string slot.
+            var tos = emitFunc([], function(bb) {
+                var thisV = callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, "$this")])
+                var sV = emitLibCall(bb, "__mec_excstr", [thisV])
+                callExt(bb, "js_set", [thisV, emitStr(bb, "string"), sV])
+                return retStmt(bb, sV)
+            }, true)
+            callExt(b, "js_phmset", [clsV, emitStr(b, "__toString"), callExt(b, "js_closure", [handle(tos), curScopeV])])
+            callExt(b, "js_set", [clsV, emitStr(b, "__mlc"),
+                                  emitStr(b, ",__construct,getmessage,getcode,getfile,getline,gettrace,getprevious,gettraceasstring,__tostring,")])
             callExt(b, "js_set", [clsV, emitStr(b, "__pvis"), emitStr(b, phVisList(name, excProps))])
             // Both roots implement Throwable, listed as the bare name js_phisa matches.
             var ifV = callExt(b, "js_pharr", [])
@@ -9502,6 +9573,30 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         callExt(b, "js_rt_deep", [emitNum(b, 10000),
             emitStr(b, "PHP Fatal error:  Allowed memory size of 134217728 bytes exhausted (tried to allocate 262144 bytes)\n"),
             emitNum(b, 255)])
+        // An exception nobody catches is PHP's fatal error (__mec_uncaught in
+        // lib/php-stdlib.php, then js_phfatal): the program runs as the try body
+        // of one js_try whose catch hands the value over. The body is a function
+        // of its own reading the main scope straight from its env, so the top
+        // level gains no scope level. Twin of runProgram in php-interpreter.abnf.
+        funcCount++
+        var ucIdx = funcCount
+        var ucf = m.NewFunc("jsf_" + ucIdx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
+        var ucb = ucf.NewBlock("entry")
+        var mainScopeV = curScopeV
+        curScopeV = ucf.Params[0]
+        var ucText = emitLibCall(ucb, "__mec_uncaught", [callExt(ucb, "js_arg", [ucf.Params[1], handle(0)])])
+        if (diagOn) {
+            emitLibCall(ucb, "__mec_fatalshow", [ucText])
+            callExt(ucb, "js_phfatal", [emitStr(ucb, "")])
+        } else { callExt(ucb, "js_phfatal", [callExt(ucb, "js_phcat", [emitStr(ucb, "PHP Fatal error:  "), ucText])]) }
+        ucb.NewRet(hUndef)
+        funcCount++
+        var topIdx = funcCount
+        b.NewRet(callExt(b, "js_try", [callExt(b, "js_closure", [handle(topIdx), mainScopeV]),
+                                       callExt(b, "js_closure", [handle(ucIdx), mainScopeV]), hUndef]))
+        curF = m.NewFunc("jsf_" + topIdx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
+        b = curF.NewBlock("entry")
+        curScopeV = curF.Params[0]
         b = emitStaticSlots(b) // one reference cell per 'static $x' declaration site
         b = emitImported(b)   // imported files' items, each under its own source
         b = makeBody(all)(b) // a statement list like any body: labels work here too
@@ -9511,6 +9606,11 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     core.scopeGetExt = "js_scope_get"
 
     phpLibClasses(c.srcSlice(0, 2147483647))
+    // Exception::__toString and the uncaught-exception handler, which any program
+    // may reach. Twin of the same loads in php-interpreter.abnf.
+    phpLibRef("__mec_excstr", true)
+    phpLibRef("__mec_uncaught", true)
+    if (diagOn) { phpLibRef("__mec_fatalshow", true) }
     c.compile(c.asg)
     siteTextBody()
 

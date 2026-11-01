@@ -418,7 +418,7 @@ CatchClause <~~ push(phpCatch(takeAll())) ~~>
             = KwCatch "(" CatchType [ DollarName ] ")" Block <~~ push(pop().body) ~~> ;
 FinallyClause <~~ push({finbody: finBody(finLeave(pop().body))}) ~~>
             = KwFinally <~~ finEnter() ~~> Block ;
-Throw       <~~ push(excThrow(pop())) ~~>
+Throw       <~~ push(phpThrow(pop())) ~~>
             = KwThrow Expression Semi ;
 // declare(strict_types=1); / declare(ticks=1) { ... }. strict_types=1 turns off the
 // scalar coercion of a write to a typed property, an argument and a return value
@@ -949,7 +949,7 @@ ClonePlain  <~~ push(makeClone(pop())) ~~>
 CloneWith   <~~ var w = pop(); push(makeCloneWith(pop(), w)) ~~>
             = KwClone "(" Expression "," Expression ")" ;
 // throw is an EXPRESSION since PHP 8 ($x ?? throw new E, fn() => throw new E).
-ThrowExpr   <~~ push(excThrow(pop())) ~~>
+ThrowExpr   <~~ push(phpThrow(pop())) ~~>
             = KwThrow ExprCore ;
 // print is an EXPRESSION whose value is always 1 ('$ok ?: print "x"', a match arm,
 // an argument). As a statement it is EchoStmt's, which is tried first.
@@ -1703,6 +1703,12 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     function callSite(pos) {
         if (pos == undefined || phpLibDepth > 0) { return "" }
         return phsCallSite(c.curFileAbs(), c.lineOf(pos))
+    }
+    // Where a `new` starting at pos stands, for instantiate: null inside the
+    // library. Twin of callSite's use in makeNew in php-to-llvm-ir.abnf.
+    function newSite(pos) {
+        if (pos == undefined || phpLibDepth > 0) { return null }
+        return {file: c.curFileAbs(), line: c.lineOf(pos)}
     }
     // site is where the call stands (callSite), for the callee's count check.
     // pre is the callee's parameters when known before its arguments are read (a
@@ -5875,12 +5881,13 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         var clsT = items[0].clsdyn == undefined ? null : items[0].clsdyn
         var args = items.slice(1)
         var site = callSite(start)
+        var at = newSite(start)
         return function() {
             var argset = evalArgs(args, site, null)
             var cls = anytype
             cls = clsT == null ? resolveClassName(stripWs(name)) : resolveClass(clsT())
             if (cls == undefined || cls == null || cls.__isclass !== true) { fail("new on a non-class") }
-            return instantiate(cls, argset)
+            return instantiate(cls, argset, at)
         }
     }
 
@@ -6921,43 +6928,25 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         }
         return notImplStmt("namespace", pos)
     }
-    // The text an uncaught throw is reported with: twin of exc_text in
-    // languages/lib/runtime.c (the native binary) and excText in abnf/jsrt.go
-    // (llvm.Run).
-    //
-    // phpStr is deliberately NOT the stringifier used: an object with no
-    // __toString is a fatal in phpStr ("could not be converted to string"), which
-    // is right for `echo $e` and wrong for a diagnostic. The compiled halves read
-    // the two RAW slots instead, so this reads the same two, raw - no __get hook,
-    // no getMessage() - and combines them by exc_text's own rule: a string
-    // `message` wins, prefixed by `name` when that is a non-empty string, and the
-    // name alone when the message is empty.
-    //
-    // exc_text's third arm (`args[0]` when `args` is a floor ARRAY) is deliberately
-    // not ported: a PHP array is an ordered dict, never a floor array, so the arm is
-    // unreachable in both compiled halves and porting it would MAKE a divergence.
+    // throw e. ZEND_THROW throws only a Throwable: anything else raises Error
+    // instead. Twin of throwCheck in php-to-llvm-ir.abnf.
+    function phpThrow(t) {
+        return function() {
+            var v = anytype
+            v = t()
+            if (!phpIsA(v, "Throwable")) {
+                var isObject = phpBuiltins["is_object"](v)
+                phpRaise("Error", isObject ? "Cannot throw objects that do not implement Throwable" : "Can only throw objects")
+            }
+            throw {__exc: true, v: v}
+        }
+    }
+    // A slot of an exception object, read raw: no __get hook, as the getters of
+    // zend_exceptions.c read it.
     function phpExcSlot(o, name) {
         var i = dictFind(o.p, phpKey(name))
         if (i >= 0) { return deref(o.p.vals[i]) }
         return undefined
-    }
-    function phpExcText(v) {
-        if (isObj(v)) {
-            var msg = phpExcSlot(v, "message")
-            if (typeof msg == "string") {
-                var nm = phpExcSlot(v, "name")
-                if (typeof nm == "string" && nm.length > 0) {
-                    if (msg.length == 0) { return nm }
-                    return nm + ": " + msg
-                }
-                return msg
-            }
-        }
-        // Everything else falls through to the host's own text, which is what
-        // to_string()/jsvString() give the compiled halves for a scalar. A FLOAT
-        // (a {__flo} box here) prints differently, and is left alone: `throw 1.5` is
-        // "Can only throw objects" in real PHP, so no valid program reaches it.
-        return "" + v
     }
     // The top level is a statement list like any body, so a label and a `goto` work
     // there too.
@@ -6976,18 +6965,34 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         hoisted = {}
         for (var di = 0; di < defs.length; di++) { declFn(defs[di]) }
         for (var ci = 0; ci < early.length; ci++) { early[ci]() }
-        // A user exception (throw) that escapes the whole program is reported like any
-        // other runtime error. The wrap sits here, not around c.compile, because the
-        // program runs as a side effect of executing the statement thunks (unlike Java,
-        // whose main() is called explicitly), so this is where the throw actually
-        // propagates. excIsUser lives in lib/interp-core.js.
+        // A user exception (throw) that escapes the whole program is PHP's fatal error
+        // (__mec_uncaught in lib/php-stdlib.php), exit status 255. The wrap sits here,
+        // not around c.compile, because the program runs as a side effect of
+        // executing the statement thunks (unlike Java, whose main() is called
+        // explicitly), so this is where the throw actually propagates. excIsUser
+        // lives in lib/interp-core.js. Twin of the top-level js_try in buildMain in
+        // php-to-llvm-ir.abnf.
         try {
             for (var cd = 0; cd < diags.length; cd++) { callNamed("__mec_diag", argsOf(diags[cd])) }
             main()
         } catch (e) {
-            if (excIsUser(e)) { fail("uncaught exception: " + phpExcText(e.v)) }
+            if (excIsUser(e) && phpLibDepth == 0) {
+                var text = anytype
+                text = callNamed("__mec_uncaught", argsOf([e.v]))
+                if (diagOn) {
+                    callNamed("__mec_fatalshow", argsOf([text]))
+                    phpFatal("")
+                }
+                phpFatal("PHP Fatal error:  " + text)
+            }
             throw e
         }
+    }
+    // The end of a program at a fatal error: its log line, if any, on stderr.
+    // Twin of js_phfatal in abnf/jsrtphp.go and lib/php-rt.metajs.
+    function phpFatal(text) {
+        if (text != "") { eprintln(text) }
+        exit(255)
     }
     function invokePhp(fn, self, argset) { return invokePhpCls(fn, self, argset, null, null) }
     // A library function (or method of class cls) stands for an internal one. A
@@ -7124,10 +7129,22 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // Creating an instance: the declared property defaults are installed first (in
     // declaration order, walking the base classes first so an override wins), then
     // the constructor runs.
-    function instantiate(cls, argset) {
+    // at is the site of the `new` ({file, line}, null in the library): a Throwable
+    // takes it as its file and line when it is created, before its constructor
+    // runs (zend_default_exception_new). Twin of the root __initprops of
+    // emitExcClass in php-to-llvm-ir.abnf.
+    function instantiate(cls, argset, at) {
         if (cls.__ready !== true) { classInit(cls) }
         var obj = newObj(cls)
         initProps(obj, cls)
+        if (at != null) {
+            var root = cls
+            while (root.__super != undefined && root.__super != null) { root = root.__super }
+            if (root.__excroot === true) {
+                dictSet(obj.p, "file", at.file)
+                dictSet(obj.p, "line", at.line)
+            }
+        }
         var ctor = classFind(cls, "__construct")
         if (ctor != null && mVisNames["$__construct"] === true && phpMethodAccess(cls, "__construct", ctxSelf(), false) != 0) {
             phpBadMethod(cls, "__construct", ctxSelf(), true)
@@ -7526,12 +7543,13 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         anonCount = anonCount + 1
         var site = {cls: null}
         var callAt = callSite(start)
+        var at = newSite(start)
         return function() {
             if (site.cls == null) {
                 site.cls = buildClass(shown, p)
                 site.cls.__anon = sfx
             }
-            return instantiate(site.cls, evalArgs(args, callAt, null))
+            return instantiate(site.cls, evalArgs(args, callAt, null), at)
         }
     }
     // The name an anonymous class shows: its parent's, else its first interface's,
@@ -8991,9 +9009,10 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         return false
     }
     // The instance properties of Exception and Error, in declaration order
-    // (Zend/zend_exceptions.stub.php). file, line and trace are never filled in:
-    // there is no call-site line table to fill them from. Twin of excProps in
-    // php-to-llvm-ir.abnf.
+    // (Zend/zend_exceptions.stub.php). file and line are filled in by a `new` in
+    // the program's own code (instantiate); one the library or the engine creates
+    // keeps the defaults, and no call frames are recorded for trace. Twin of
+    // excProps in php-to-llvm-ir.abnf.
     var excProps = [{name: "message", vis: "protected", typ: ""}, {name: "string", vis: "private", typ: "string"},
                     {name: "code", vis: "protected", typ: ""}, {name: "file", vis: "protected", typ: "string"},
                     {name: "line", vis: "protected", typ: "int"}, {name: "trace", vis: "private", typ: "array"},
@@ -9002,6 +9021,8 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         visNames["$" + excProps[exq].name] = true
         if (excProps[exq].typ != "") { typedNames["$" + excProps[exq].name] = true }
     }
+    // Exception::__construct's parameters, which a named argument is placed by.
+    var excCtorParams = [{name: "$message"}, {name: "$code"}, {name: "$previous"}]
     // The engine's exception hierarchy, far enough for user classes to extend it.
     // Only the two roots name Throwable; a derived engine class names nothing and
     // takes its parent's interfaces from the end, as a user class does
@@ -9015,22 +9036,42 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             cls.__props = excProps
             cls.__pvis = phpVisList(name, excProps)
             cls.__pdefs = [{v: ""}, {v: ""}, {v: 0}, {v: ""}, {v: 0}, {v: newArr()}, {v: null}]
-            cls.__mlc = ",__construct,getmessage,getcode,getprevious,"
+            cls.__mlc = ",__construct,getmessage,getcode,getfile,getline,gettrace,getprevious,gettraceasstring,__tostring,"
+            cls.__excroot = true
         }
         // Exception::__construct(string $message = "", int $code = 0, ?Throwable
-        // $previous = null) writes only what was passed, and not null, over the
-        // defaults; the getters read the slots raw, in the base class's scope
-        // (zend_exceptions.c).
+        // $previous = null) writes only what was passed, by position or by name, and
+        // not null, over the defaults; the getters read the slots raw, in the base
+        // class's scope (zend_exceptions.c).
         cls["__construct"] = function(self, argset) {
-            var names = ["message", "code", "previous"]
-            for (var i = 0; i < names.length && i < argset.pos.length; i++) {
-                if (argset.pos[i] !== null && argset.pos[i] !== undefined) { dictSet(self.p, names[i], argset.pos[i]) }
+            if (argset.named != null) { checkNamedArgs(excCtorParams, argset) }
+            for (var i = 0; i < excCtorParams.length; i++) {
+                var v = anytype
+                v = i < argset.pos.length ? argset.pos[i] : undefined
+                if (i >= argset.pos.length && argset.named != null && hasOwn(argset.named, excCtorParams[i].name)) {
+                    v = argset.named[excCtorParams[i].name]
+                }
+                if (v !== null && v !== undefined) { dictSet(self.p, excCtorParams[i].name.substring(1), v) }
             }
             return null
         }
         cls["getMessage"] = function(self, argset) { return phpExcSlot(self, "message") }
         cls["getCode"] = function(self, argset) { return phpExcSlot(self, "code") }
+        cls["getFile"] = function(self, argset) { return phpExcSlot(self, "file") }
+        cls["getLine"] = function(self, argset) { return phpExcSlot(self, "line") }
+        cls["getTrace"] = function(self, argset) { return phpExcSlot(self, "trace") }
         cls["getPrevious"] = function(self, argset) { return phpExcSlot(self, "previous") }
+        // No call frames are recorded, so the trace is always empty and renders as
+        // zend_trace_to_string renders an empty one.
+        cls["getTraceAsString"] = function(self, argset) { return "#0 {main}" }
+        // __mec_excstr (lib/php-stdlib.php) builds the text, which is also kept in
+        // the private string slot.
+        setMethod(cls, "__toString", function(self, argset) {
+            var s = anytype
+            s = callNamed("__mec_excstr", argsOf([self]))
+            dictSet(self.p, "string", s)
+            return s
+        })
         scopePut(globalScope, name, cls)
         scopePut(globalScope, classKey(name), cls)
         engineClasses[classKey(name)] = true
@@ -9437,6 +9478,11 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     }
 
     phpLibClasses(c.srcSlice(0, 2147483647))
+    // Exception::__toString and the uncaught-exception handler, which any program
+    // may reach.
+    phpLibRef("__mec_excstr", true)
+    phpLibRef("__mec_uncaught", true)
+    if (diagOn) { phpLibRef("__mec_fatalshow", true) }
     c.compile(c.asg)
 
     println("php interpreter: program finished")

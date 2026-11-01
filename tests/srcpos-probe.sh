@@ -216,7 +216,7 @@ done
 EDGE_CASES=(
     "python:py:<module>->m m->g g->h !<module>->py_getvar !g->py_getvar !<module>->main !<module>->py_clsfill1"
     "ruby:rb:<module>->m m->g g->h"
-    "php:php:(top)->m m->g g->h"
+    "php:php:<module>->m m->g g->h"
     "js:js:(top)->main main->m m->g g->h"
     "typescript:ts:(top)->main main->m m->g g->h"
     "metajs:metajs:main->g g->h"

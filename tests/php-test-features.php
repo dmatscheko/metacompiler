@@ -504,6 +504,40 @@ function withFinally($doThrow) {
 check("finally-both-paths", withFinally(false) . withFinally(true), "okcaught");
 check("finally-run-count", $finRuns, 2);
 
+// ----- the exception object: site, getters, __toString, constructor -----
+// file and line are where the `new` stands, set before the constructor runs; the
+// text walks the previous chain innermost first (Exception::__toString).
+$exIn = new Exception("inner", 3); $exInLine = __LINE__;
+$exOut = new RuntimeException(previous: $exIn, message: "outer"); $exOutLine = __LINE__;
+check("exc-site", [$exIn->getFile(), $exIn->getLine(), $exOut->getLine()], [__FILE__, $exInLine, $exOutLine]);
+check("exc-named-ctor", [$exOut->getMessage(), $exOut->getCode(), $exOut->getPrevious() === $exIn,
+                         (new LogicException(code: 7))->getCode()], ["outer", 0, true, 7]);
+check("exc-trace", [$exIn->getTrace(), $exIn->getTraceAsString()], [[], "#0 {main}"]);
+check("exc-tostring", str_replace(__FILE__, "F", (string) $exOut),
+      "Exception: inner in F:" . $exInLine . "\nStack trace:\n#0 {main}\n\nNext RuntimeException: outer in F:"
+      . $exOutLine . "\nStack trace:\n#0 {main}");
+check("exc-tostring-empty", str_replace(__FILE__, "F", "" . new LogicException()), "LogicException in F:" . __LINE__ . "\nStack trace:\n#0 {main}");
+class ExcSub extends Exception { function __construct() { $this->line = 1; parent::__construct("sub"); } }
+check("exc-sub", [(new ExcSub)->getLine(), (new ExcSub)->getMessage(), (new ExcSub)->__toString() === (string) new ExcSub],
+      [1, "sub", true]);
+$exNamed = [];
+foreach ([fn() => new Exception(foo: 1), fn() => new Exception("a", message: "b"), fn() => throw 5,
+          fn() => throw new ArrayObject()] as $exF) {
+    try { $exF(); } catch (Error $e) { $exNamed[] = $e->getMessage(); }
+}
+check("exc-ctor-errors", $exNamed, ["Unknown named parameter \$foo", "Named parameter \$message overwrites previous argument",
+                                    "Can only throw objects", "Cannot throw objects that do not implement Throwable"]);
+$exEe = new ErrorException("ee", 1, E_WARNING, "x.php", 9);
+$exEe2 = new ErrorException("ee2", filename: "y.php");
+check("exc-errorexception", [$exEe->getSeverity(), $exEe->getFile(), $exEe->getLine(), $exEe2->getSeverity(),
+                             $exEe2->getFile(), $exEe2->getLine(), (new ErrorException())->getLine() === __LINE__],
+      [E_WARNING, "x.php", 9, E_ERROR, "y.php", 0, true]);
+// A constructor the class inherits takes named arguments by its own parameters.
+class ExcCtorBase { public $v; function __construct($x = 1, $y = 2) { $this->v = [$x, $y]; } }
+class ExcCtorKid extends ExcCtorBase {}
+$exKidName = "ExcCtorKid";
+check("inherited-ctor-named", [(new ExcCtorKid(y: 5))->v, (new $exKidName(y: 6))->v], [[1, 5], [1, 6]]);
+
 // ----- everything combined in one small pipeline (3-element data flow) -----
 function transform($list) {
     $out = "";

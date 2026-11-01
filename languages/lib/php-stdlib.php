@@ -78,6 +78,22 @@ const JSON_ERROR_NON_BACKED_ENUM = 11;
 class ArgumentCountError extends TypeError {}
 class JsonException extends Exception {}
 interface JsonSerializable { public function jsonSerialize(): mixed; }
+// ErrorException (Zend/zend_exceptions.c): message, code and previous as
+// Exception takes them; a filename replaces the file the exception was created
+// in, and the line it was created on is replaced by $line, else by 0 when a
+// filename was given. $severity defaults to E_ERROR.
+class ErrorException extends Exception {
+    protected int $severity = 1;
+    public function __construct(string $message = "", int $code = 0, int $severity = 1,
+                                ?string $filename = null, ?int $line = null, ?Throwable $previous = null) {
+        parent::__construct($message, $code, $previous);
+        $this->severity = $severity;
+        if ($filename !== null) { $this->file = $filename; }
+        if ($line !== null) { $this->line = $line; }
+        elseif ($filename !== null) { $this->line = 0; }
+    }
+    final public function getSeverity(): int { return $this->severity; }
+}
 
 // ----- the natives, as callable values ---------------------------------------
 function count($value, $mode = 0) { return count($value, $mode); }
@@ -2761,6 +2777,41 @@ function __mec_jhex4($s, $i, $n) {
         $v = $v * 16 + $d;
     }
     return $v;
+}
+
+// ----- exceptions ------------------------------------------------------------
+// Exception::__toString (Zend/zend_exceptions.c), which Error's aliases: $e and
+// then each previous one, as "Class: message in file:line\nStack trace:\n" and the
+// trace, without ": message" when the message is empty. Each link goes in front
+// of the text so far, joined by "\n\nNext ", so the innermost prints first; a
+// link the walk already met ends it.
+function __mec_excstr($e) {
+    $str = "";
+    $seen = [];
+    while ($e instanceof Throwable && !in_array($e, $seen, true)) {
+        $seen[] = $e;
+        $message = (string) $e->getMessage();
+        $str = get_class($e) . ($message === "" ? "" : ": " . $message) . " in " . $e->getFile() . ":" . $e->getLine()
+             . "\nStack trace:\n" . $e->getTraceAsString() . ($str === "" ? "" : "\n\nNext " . $str);
+        $e = $e->getPrevious();
+    }
+    return $str;
+}
+// An exception nobody caught (zend_exception_error): the fatal error
+// "Uncaught " . (string) $e . "\n  thrown" at the exception's file and line, or
+// at "Unknown" and line 0 when it has no file. The answer is the error's text
+// with its location, which php_error_cb (main/main.c) logs on stderr as
+// "PHP Fatal error:  " . $text, or, with display_errors=1 (php-cli's defaults),
+// displays through __mec_fatalshow instead.
+function __mec_uncaught($e) {
+    $file = $e->getFile();
+    $line = $e->getLine();
+    if ($file === "") { $file = "Unknown"; $line = 0; }
+    return "Uncaught " . $e->__toString() . "\n  thrown in " . $file . " on line " . $line;
+}
+// A fatal error's text displayed on stdout, if error_reporting has E_ERROR.
+function __mec_fatalshow($text) {
+    if ((__mec_erlevel() & 1) != 0) { echo "\nFatal error: ", $text, "\n"; }
 }
 
 // ----- objects ---------------------------------------------------------------

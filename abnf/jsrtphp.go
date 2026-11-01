@@ -20,6 +20,7 @@ package abnf
 
 import (
 	"errors"
+	"fmt"
 	"math"
 	"os"
 	"strconv"
@@ -4731,6 +4732,16 @@ func init() {
 			}
 			rt.phpUnpackCheck(u(a[1]))
 			rt.phpMergeArgs(u(a[0]), u(a[1]), rt.phpSigOf(f), jsvFnMeta(f).length)
+			return 0
+		}
+		// js_phfatal(text): the end of a program at a fatal error, its log line, if
+		// any, on stderr and exit status 255. Twin of phpFatal in
+		// php-interpreter.abnf and js_phfatal in languages/lib/php-rt.metajs.
+		m["js_phfatal"] = func(a []uint64) uint64 {
+			if s := rt.phpStr(u(a[0])); s != "" {
+				fmt.Fprintln(warnWriter, s)
+			}
+			os.Exit(255)
 			return 0
 		}
 		m["js_phplacesig"] = func(a []uint64) uint64 {
