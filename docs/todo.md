@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-982** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-983** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -194,11 +194,10 @@ script goes on); both halves stop at the first unknown command with exit 127.
 
 # C — C subset
 
-### T-966 c: a parenthesised function name as callee; `sizeof expr` in a constant expression; unsigned rules in the fold · P2 · C · IN PROGRESS (C worker, round 14) [V]
-Found by the C worker, round 13 (oracle cc -std=c11). `(ad)(1,2)` → cc 3, both halves "variable not defined: ad"; `(&ad)(1,2)` and
-`(*&md)(10,3)` do not parse. `int a[10]; char b[sizeof a / sizeof a[0]];` (also in an enumerator) does not parse - the fold runs at
-tag time without the declaration's type. The constant fold has no types: `char x[(-1 < 0u) + 1]` is 2 with us, 1 with cc
-(usual arithmetic conversions: -1 becomes UINT_MAX).
+### T-982 c compiled: an indirect call through a function pointer loses the return type · P2 · C · OPEN [V]
+Found by the C worker, round 14 (oracle cc). `double dh(double x){return x/2;} double (*fp)(double)=dh; (int)(fp(9.0)*10)` → cc
+and the interpreter 45, llvm.Run and native 0; `long (*bp)(long)` returning x*2^32 likewise. emitIndirectCall always answers ctInt
+through the i32 trampoline because a function-pointer ct ({k:"fnp"}) carries no signature.
 
 # CORE — MetaJS, the engines, shared runtime, tooling
 
@@ -1111,6 +1110,7 @@ T-956 kotlin: `map.keys.remove(k)` / `map.values.remove(v)` change only the view
 T-962 swift: a labelled `if` does not parse — DONE d58d5902 (labelled if / if-let / do in both halves; also fixed: compiled labelled break/continue leaving a do body, and a do in a switch without an enclosing loop broke the native build)
 T-963 bash compiled: `${x:-word}` expands word eagerly; a function can be called before its definition ran — DONE - lazy ${v-w} words and call-time function lookup through fnk_ slots, both engines
 T-964 bash: `unset -f`, `command -V`, namerefs in the interpreter, `declare -p` of a computed export — PARTIAL - unset -f/-v/-n, command -V for builtins/keywords, export/readonly in declare -p, namerefs; rest filed as follow-ups
+T-966 c: a parenthesised function name as callee; `sizeof expr` in a constant expression; unsigned rules in the fold — DONE - parenthesised callees, sizeof expr in constant expressions, typed (unsigned) constant fold; both halves
 
 # Settled — do not re-open
 
