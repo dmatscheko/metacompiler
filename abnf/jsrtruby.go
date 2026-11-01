@@ -127,10 +127,10 @@ func (rt *jsrt) addRubyFmtExterns(m map[string]func(args []uint64) uint64) {
 		default:
 			_, _, isDict := dictParts(v)
 			_, isRng := rubyIsRange(v)
-			// A deferred Enumerator's #size, to_enum's, and a Lazy's over a user
-			// #each, is nil: rubyEnumMethod answers it.
-			counted = isDict || isRng || (rubyIsEnum(v) && v.(*jsObject).props["__rdefer"] != true &&
-				v.(*jsObject).props["__rcall"] != true && v.(*jsObject).props["kind"] != "each")
+			// The #size of an Enumerator over a user #each (deferred or
+			// to_enum's), and a Lazy's over one, is nil: rubyEnumMethod answers it.
+			counted = isDict || isRng || (rubyIsEnum(v) && v.(*jsObject).props["__rco"] != true &&
+				v.(*jsObject).props["kind"] != "each")
 		}
 		if counted {
 			return pylen(a[:1])
@@ -352,6 +352,31 @@ func (rt *jsrt) addRubyFmtExterns(m map[string]func(args []uint64) uint64) {
 			}
 		}
 		return w(rt.rubyMethod(u(a[1]), "send", u(a[2]).(*jsArray).elems))
+	}
+	// A receiver-less to_enum / enum_for: the Enumerator self's #to_enum answers,
+	// running a top-level def of the method's name when self has no such method
+	// (only the scope knows the defs; rubyRcall calls it). Twin of js_rselfenum in
+	// languages/lib/ruby-rt.metajs.
+	m["js_rselfenum"] = func(a []uint64) uint64 {
+		self := u(a[1])
+		var args []interface{}
+		if arr, ok := u(a[2]).(*jsArray); ok {
+			args = arr.elems
+		}
+		e, isEnum := rt.rubyMethod(self, "to_enum", args).(*jsObject)
+		if !isEnum || e.props["__rcall"] != true {
+			return w(e)
+		}
+		meth, _ := e.props["meth"].(string)
+		if _, found := rubyFindMethod(self, meth); !found {
+			for sc := rt.scopeOf(a[0]); sc != nil; sc = sc.parent {
+				if v, ok := sc.get("$d$" + meth); ok && isCallable(v) {
+					e.set("__rfn", v)
+					break
+				}
+			}
+		}
+		return w(e)
 	}
 	// The callee of a bare `name(args)` that names no def: the chain walk of
 	// js_scope_get, then a method of the implicit self the emitter could not see
@@ -2631,7 +2656,7 @@ func (rt *jsrt) rubyRunBody(t *jsObject, out func([]interface{}) interface{}) in
 		blk := &hostFunc{name: "", fn: func(rt *jsrt, _ uint64, a []interface{}) interface{} {
 			return out(append([]interface{}{}, a...))
 		}}
-		return rt.rubyMethod(src, meth, append(margs, rubyBlkWrap(blk)))
+		return rt.rubyRcall(t, rubyBlkWrap(blk))
 	}
 	if t.props["__rlazy"] == true {
 		rt.rubyLazyPull(t, -1, func(v interface{}, m bool) bool {
@@ -2787,10 +2812,27 @@ func (rt *jsrt) rubyEnumCopy(t *jsObject, clone bool) *jsObject {
 			c.set(k, true)
 		}
 	}
+	if fn, has := t.props["__rfn"]; has {
+		c.set("__rfn", fn)
+	}
 	if clone && t.props["__fz"] == true {
 		c.set("__fz", true)
 	}
 	return c
+}
+
+// rubyRcall calls a to_enum Enumerator's method with blk (a block marker). It
+// may be private, so it is reached the way #__send__ does, or it is the
+// top-level def js_rselfenum found (__rfn). Twin of rcallRun in
+// ruby-interpreter.abnf.
+func (rt *jsrt) rubyRcall(t *jsObject, blk interface{}) interface{} {
+	margs := append([]interface{}{}, t.props["margs"].(*jsArray).elems...)
+	if fn, has := t.props["__rfn"]; has {
+		return rt.call(fn, jsUndef, append(margs, blk))
+	}
+	meth, _ := t.props["meth"].(string)
+	sa := append([]interface{}{jsSym{s: meth}}, margs...)
+	return rt.rubyMethod(t.props["src"], "__send__", append(sa, blk))
 }
 
 // rubyEnumForce runs a deferred Enumerator's method, once, and takes over the
@@ -2813,7 +2855,7 @@ func (rt *jsrt) rubyEnumForce(t *jsObject) {
 			}
 			return jsNull
 		}}
-		rt.rubyMethod(t.props["src"], meth, append(margs, rubyBlkWrap(collect)))
+		rt.rubyRcall(t, rubyBlkWrap(collect))
 		t.set("items", its)
 		return
 	}

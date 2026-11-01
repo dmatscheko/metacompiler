@@ -13226,28 +13226,34 @@ func (rt *jsrt) rubyEnumMethod(t *jsObject, name string, args []interface{}) int
 	if t.props["__rco"] == true && name == "rewind" {
 		return rt.rubyRunRewind(t)
 	}
-	// Twin of the to_enum arm of enumMethod in ruby-interpreter.abnf.
-	if t.props["__rcall"] == true {
-		if _, blk := rubyBlockArgs(args); name == "each" && blk != nil {
-			meth, _ := t.props["meth"].(string)
-			return rt.rubyMethod(t.props["src"], meth, append(append([]interface{}{}, t.props["margs"].(*jsArray).elems...), args[len(args)-1]))
-		}
-		if name == "size" {
-			return jsNull
+	// Twin of the size and to_enum arms of enumMethod in ruby-interpreter.abnf.
+	if t.props["__rco"] == true && name == "size" {
+		return jsNull
+	}
+	if pos, blk := rubyBlockArgs(args); t.props["__rcall"] == true && blk != nil {
+		switch name {
+		case "each":
+			return rt.rubyRcall(t, args[len(args)-1])
+		case "with_index", "each_with_index":
+			ix := 0
+			if name == "with_index" && len(pos) > 0 {
+				ix = int(math.Trunc(rubyToF(pos[0])))
+			}
+			return rt.rubyRcall(t, rubyBlkWrap(&hostFunc{name: "", fn: func(rt *jsrt, _ uint64, a []interface{}) interface{} {
+				r := rt.call(blk, jsUndef, []interface{}{rubyRunPack(a), float64(ix)})
+				ix++
+				return r
+			}}))
 		}
 	}
 	// A deferred Enumerator over a user #each: #each with a block IS its method
-	// with that block (so `find.each { }' stops #each early, as MRI's does), and
-	// its size is nil - there is no #size to ask. Anything but #inspect
-	// runs the method first. Twins: enumMethod in ruby-interpreter.abnf,
-	// rbEnumMethod in lib/ruby-rt.metajs.
+	// with that block (so `find.each { }' stops #each early, as MRI's does).
+	// Anything but #inspect runs the method first. Twins: enumMethod in
+	// ruby-interpreter.abnf, rbEnumMethod in lib/ruby-rt.metajs.
 	if t.props["__rdefer"] == true {
 		meth, _ := t.props["meth"].(string)
 		if _, blk := rubyBlockArgs(args); name == "each" && blk != nil {
 			return rt.rubyEnumRun(t.props["src"], meth, append(append([]interface{}{}, t.props["margs"].(*jsArray).elems...), args[len(args)-1]))
-		}
-		if name == "size" {
-			return jsNull
 		}
 		if name != "inspect" && name != "to_s" && name != "class" {
 			rt.rubyEnumForce(t)

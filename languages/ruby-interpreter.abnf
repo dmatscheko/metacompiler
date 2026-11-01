@@ -7974,15 +7974,13 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (isDict(v)) { return v.keys.length }
         // An Enumerator's length is its element count. A bare `.size' / `.length'
         // is lowered to this shortcut in BOTH halves rather than to a method call.
-        // A deferred one's #size is nil, as is a Lazy's over a user #each, and
-        // iterating a deferred one runs its method. to_enum's #size stays nil.
+        // One over a user #each (deferred or to_enum's) has a nil #size, before
+        // and after it ran, as does a Lazy over one; iterating a deferred one runs
+        // its method.
         if (isEnum(v)) {
             if (v.__rlazy === true && v.kind == "each") { return null }
-            if (v.__rcall === true && name != null) { return null }
-            if (v.__rdefer === true) {
-                if (name != null) { return null }
-                enumForce(v)
-            }
+            if (v.__rco === true && name != null) { return null }
+            if (v.__rdefer === true) { enumForce(v) }
             return v.items.length
         }
         // A Range's size is its element COUNT; a Range object here has no .length.
@@ -8529,6 +8527,14 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         e.__rco = true
         return e
     }
+    // A to_enum Enumerator's method called with blk. It may be private (a
+    // top-level def on main), so it is reached the way #__send__ does. Twins:
+    // rubyRcall in abnf/jsrtruby.go, rbRcall in lib/ruby-rt.metajs.
+    function rcallRun(t, blk) {
+        var sa = [mkSym(t.meth)]
+        for (var i = 0; i < t.margs.length; i++) { sa.push(t.margs[i]) }
+        return mcall(t.src, "__send__", sa, blk)
+    }
     // Enumerator#dup / #clone: a copy that runs the same method; #clone keeps the
     // frozen flag. One whose external iteration has begun (next) is MRI's
     // TypeError, its execution context being uncopyable. Twins: rubyEnumCopy in
@@ -8549,7 +8555,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         t.__rdefer = false
         if (t.__rcall === true) {
             var its = []
-            mcall(t.src, t.meth, t.margs.slice(0), function() {
+            rcallRun(t, function() {
                 var a = argsArray(arguments)
                 its.push(a.length == 1 ? a[0] : (a.length == 0 ? null : a))
                 return null
@@ -8589,7 +8595,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // block gives nil.
     function rbRunBody(t) {
         var out = function(a) { return rbRunYield(a) }
-        if (t.__rcall === true) { return mcall(t.src, t.meth, t.margs.slice(0), function() { return out(argsArray(arguments)) }) }
+        if (t.__rcall === true) { return rcallRun(t, function() { return out(argsArray(arguments)) }) }
         if (t.__rlazy === true) {
             rbaLazyFirst(t, -1, lazyCall, rtest, arrEql, lazyDrive, function(v, m) {
                 out(m ? v : [v])
@@ -9460,7 +9466,15 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             }
             var tdf = anytype
             tdf = recvSendDef(target, sname)
-            if (tdf !== undefined) { return tdf.apply(undefined, args.slice(1)) }
+            if (tdf !== undefined && (blk == null || rubyMethods["$" + sname] !== true)) { return tdf.apply(undefined, args.slice(1)) }
+            // A top-level def takes the block as a bare call hands it over (makeCall).
+            if (tdf !== undefined) {
+                blockStack.push(blk)
+                var sr = anytype
+                try { sr = tdf.apply(undefined, concat2impl(args.slice(1), [mkBlkArg(blk)])) }
+                finally { blockStack.pop() }
+                return sr
+            }
             // public_send keeps to what an explicit receiver may call.
             if (name == "public_send") { visCheck(target, sname) }
             return mcall(target, sname, args.slice(1), blk)
@@ -10950,20 +10964,31 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (name == "dup" || name == "clone") { return enumCopy(t, name == "clone") }
         if (t.__rco === true && (name == "next" || name == "peek")) { return rbRunNext(t, name) }
         if (t.__rco === true && name == "rewind") { return rbRunRewind(t) }
+        // An Enumerator over a user #each (deferred or to_enum's) has no size to
+        // ask, before it ran its method or after.
+        if (t.__rco === true && name == "size") { return null }
         // Object#to_enum's Enumerator: #each with a block calls the method with it,
-        // and there is no size to ask.
-        if (t.__rcall === true) {
-            if (name == "each" && blk != null) { return mcall(t.src, t.meth, t.margs.slice(0), blk) }
-            if (name == "size") { return null }
+        // and so does with_index / each_with_index, numbering the values; each
+        // answers what the method returned.
+        if (t.__rcall === true && blk != null) {
+            if (name == "each") { return rcallRun(t, blk) }
+            if (name == "with_index" || name == "each_with_index") {
+                var ix = 0
+                if (name == "with_index" && args.length > 0) { ix = Math.trunc(toF(args[0])) }
+                return rcallRun(t, function() {
+                    var wr = anytype
+                    wr = blockCall(blk, [rbRunPack(argsArray(arguments)), ix])
+                    ix = ix + 1
+                    return wr
+                })
+            }
         }
         // A deferred Enumerator over a user #each: #each with a block IS its method
-        // with that block (so `find.each { }' stops #each early, as MRI's does), and
-        // its size is nil - there is no #size to ask. Anything but #inspect
-        // runs the method first. Twins: rubyEnumMethod in abnf/jsrt.go,
-        // rbEnumMethod in lib/ruby-rt.metajs.
+        // with that block (so `find.each { }' stops #each early, as MRI's does).
+        // Anything but #inspect runs the method first. Twins: rubyEnumMethod in
+        // abnf/jsrt.go, rbEnumMethod in lib/ruby-rt.metajs.
         if (t.__rdefer === true) {
             if (name == "each" && blk != null) { return enumRun(t.src, t.meth, t.margs.slice(0), blk) }
-            if (name == "size") { return null }
             if (name != "inspect" && name != "to_s" && name != "class") { enumForce(t) }
         }
         var items = t.items

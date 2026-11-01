@@ -5766,10 +5766,14 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         return false
     }
     // A call on the implicit self. A receiver-less send also reaches a top-level
-    // def, which needs the scope (js_rselfsend; selfSendDef in the interpreter).
+    // def, which needs the scope (js_rselfsend; selfSendDef in the interpreter),
+    // and so does the method a receiver-less to_enum names (js_rselfenum).
     function emitSelfMcall(b, selfV, name, argsV) {
         if ((name == "send" || name == "__send__") && isSelfCall(name)) {
             return callExt(b, "js_rselfsend", [curScopeV, selfV, argsV])
+        }
+        if ((name == "to_enum" || name == "enum_for") && isSelfCall(name)) {
+            return callExt(b, "js_rselfenum", [curScopeV, selfV, argsV])
         }
         if (name == "new" && curSelfIsCls && !isSRestricted(curClsName, "new")) { return emitClassNew(b, selfV, argsV) }
         return callExt(b, "js_rxmcall", [selfV, emitMKey(b, selfV, name, true), argsV])

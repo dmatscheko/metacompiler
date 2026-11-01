@@ -2209,6 +2209,40 @@ def s169
   check("for169d", c == [[1, 1], [2, 3], [:w, 2, 5], [:u, 2, 7]] && l == [:start, 10, nil, 20, -20, :ensure])
 end
 
+# ===== SECTION 170: Enumerators over a user #each: size, with_index, top-level to_enum =====
+# An Enumerator over a user #each (a deferred Enumerable method, or to_enum's)
+# has no size to ask, before or after it ran its method. with_index /
+# each_with_index with a block on a to_enum Enumerator run the method, the
+# values numbered, and answer what it returned. to_enum / enum_for at the top
+# level (self is main) run the private top-level def of that name.
+# /usr/bin/ruby 2.6 settles each.
+class S170C
+  include Enumerable
+  def each; yield 1; yield 2; yield 3; :done; end
+  def pairs; yield 1, 2; yield 3, 4; :pd; end
+end
+def s170each; yield 7; yield 8; :top; end
+def s170two(a); yield a; yield a * 2; :two; end
+def s170
+  e = S170C.new.each_slice(1)
+  m = S170C.new.map
+  t = S170C.new.to_enum
+  a = [e.size, e.to_a, e.size, m.size, m.to_a.size, m.size, t.size, t.to_a, t.size]
+  check("enu170a", a == [nil, [[1], [2], [3]], nil, nil, 3, nil, nil, [1, 2, 3], nil])
+  w = []
+  r1 = t.with_index { |x, i| w << [x, i] }
+  r2 = S170C.new.to_enum.with_index(1) { |x, i| w << [x, i] }
+  r3 = S170C.new.to_enum.each_with_index { |x, i| w << i }
+  r4 = S170C.new.to_enum(:pairs).with_index { |x, i| w << [x, i] }
+  r5 = S170C.new.to_enum.with_index { |x, i| break x * 10 if i == 1 }
+  check("enu170b", [r1, r2, r3, r4, r5] == [:done, :done, :done, :pd, 20] &&
+    w == [[1, 0], [2, 1], [3, 2], [1, 1], [2, 2], [3, 3], 0, 1, 2, [[1, 2], 0], [[3, 4], 1]])
+  te = to_enum(:s170each)
+  ef = enum_for(:s170two, 5)
+  b = [te.to_a, te.next, te.each { |x| }, ef.to_a, ef.with_index { |x, i| }, te.size]
+  check("enu170c", b == [[7, 8], 7, :top, [5, 10], :two, nil])
+end
+
 s122() # SECTION-CALL 122
 s123() # SECTION-CALL 123
 s124() # SECTION-CALL 124
@@ -2257,5 +2291,6 @@ s166() # SECTION-CALL 166
 s167() # SECTION-CALL 167
 s168() # SECTION-CALL 168
 s169() # SECTION-CALL 169
+s170() # SECTION-CALL 170
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

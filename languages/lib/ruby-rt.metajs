@@ -7080,6 +7080,56 @@ function rbLazyMethod(t, name, args) {
     return null
 }
 
+// A to_enum Enumerator's method called with blk (a block marker), reached the
+// way #__send__ does or the top-level def js_rselfenum found. Twin of rubyRcall
+// in abnf/jsrtruby.go.
+function rbRcall(t, blk) {
+    var margs = rtCopyArr(t["margs"])
+    margs.push(blk)
+    var fn = t["__rfn"]
+    if (typeof fn == "function") { return fn.apply(undefined, margs) }
+    var sa = [rbSym(t["meth"])]
+    var i = 0
+    while (i < margs.length) { sa.push(margs[i]); i = i + 1 }
+    return rbMethod(t["src"], "__send__", sa)
+}
+// A receiver-less to_enum - see js_rselfenum in abnf/jsrtruby.go.
+function js_rselfenum(scope, self, args) {
+    var e = rbMethod(self, "to_enum", args)
+    if (!rbIsEnum(e) || e["__rcall"] !== true) { return e }
+    var n = e["meth"]
+    if (rbFindMethod(self, n) !== undefined) { return e }
+    var s = anytype
+    s = scope
+    while (s !== undefined && s !== null) {
+        if (scopeHas(s, "$d$" + n)) {
+            var f = scopeGet(s, "$d$" + n)
+            if (typeof f == "function") {
+                e["__rfn"] = f
+                return e
+            }
+        }
+        s = scopeParent(s)
+    }
+    return e
+}
+// with_index / each_with_index with a block on a to_enum Enumerator: the method
+// runs, its values numbered. Twin of the arm in enumMethod of
+// ruby-interpreter.abnf.
+function rbRcallIndexed(t, name, args) {
+    var blk = rbBlockOf(args)
+    var nPos = rbNPos(args)
+    var ix = 0
+    if (name == "with_index" && nPos > 0) { ix = Math.trunc(rbToF(rbPosAt(args, nPos, 0))) }
+    return rbRcall(t, js_rblkwrap(function() {
+        var a = []
+        var i = 0
+        while (i < arguments.length) { a.push(arguments[i]); i = i + 1 }
+        var r = rbCall2(blk, rbRunPack(a), ix)
+        ix = ix + 1
+        return r
+    }))
+}
 function rbEnumMethod(t, name, args) {
     // Twin of the freeze arm of enumMethod in ruby-interpreter.abnf.
     if (name == "freeze") {
@@ -7090,14 +7140,11 @@ function rbEnumMethod(t, name, args) {
     if (name == "dup" || name == "clone") { return rbEnumCopy(t, name == "clone") }
     if (t["__rco"] === true && (name == "next" || name == "peek")) { return rbRunNext(t, name) }
     if (t["__rco"] === true && name == "rewind") { return rbRunRewind(t) }
-    // Twin of the to_enum arm of enumMethod in ruby-interpreter.abnf.
-    if (t["__rcall"] === true) {
-        if (name == "each" && rbBlockOf(args) !== null) {
-            var cargs = rtCopyArr(t["margs"])
-            cargs.push(args[args.length - 1])
-            return rbMethod(t["src"], t["meth"], cargs)
-        }
-        if (name == "size") { return null }
+    // Twin of the size and to_enum arms of enumMethod in ruby-interpreter.abnf.
+    if (t["__rco"] === true && name == "size") { return null }
+    if (t["__rcall"] === true && rbBlockOf(args) !== null) {
+        if (name == "each") { return rbRcall(t, args[args.length - 1]) }
+        if (name == "with_index" || name == "each_with_index") { return rbRcallIndexed(t, name, args) }
     }
     // A deferred Enumerator over a user #each. Twin of the arm in rubyEnumMethod in
     // abnf/jsrt.go, which states the rule.
@@ -7107,7 +7154,6 @@ function rbEnumMethod(t, name, args) {
             dargs.push(args[args.length - 1])
             return rbEnumRun(t["src"], t["meth"], dargs)
         }
-        if (name == "size") { return null }
         if (name != "inspect" && name != "to_s" && name != "class") { rbEnumForce(t) }
     }
     var items = t["items"]
@@ -9637,16 +9683,13 @@ function js_rlen(v, name) {
     if (typeof v == "string") { return rbCharCount(v) }
     if (rbIsArr(v)) { return v.length }
     if (rbIsDict(v)) { return v["keys"].length }
-    // An Enumerator's length is its element count; a deferred one's #size is nil,
-    // as are to_enum's and a Lazy's over a user #each, and iterating a deferred
-    // one runs its method.
+    // An Enumerator's length is its element count; one over a user #each
+    // (deferred or to_enum's) has a nil #size, before and after it ran, as does a
+    // Lazy over one, and iterating a deferred one runs its method.
     if (rbIsEnum(v)) {
         if (name !== null && v["__rlazy"] === true && v["kind"] == "each") { return null }
-        if (name !== null && v["__rcall"] === true) { return null }
-        if (v["__rdefer"] === true) {
-            if (name !== null) { return null }
-            rbEnumForce(v)
-        }
+        if (name !== null && v["__rco"] === true) { return null }
+        if (v["__rdefer"] === true) { rbEnumForce(v) }
         return v["items"].length
     }
     // A Range's length is its ELEMENT COUNT, computed arithmetically rather than by
@@ -11094,13 +11137,12 @@ function rbRunBody(t, out) {
     var margs = rtCopyArr(t["margs"])
     var nilBlk = js_rblkwrap(function() { return null })
     if (t["__rcall"] === true) {
-        margs.push(js_rblkwrap(function() {
+        return rbRcall(t, js_rblkwrap(function() {
             var a = []
             var i = 0
             while (i < arguments.length) { a.push(arguments[i]); i = i + 1 }
             return out(a)
         }))
-        return rbMethod(src, m, margs)
     }
     var n = 0
     var memo = anytype
@@ -11165,6 +11207,7 @@ function rbEnumCopy(t, clone) {
     if (t["__rdefer"] === true) { c["__rdefer"] = true }
     if (t["__rcall"] === true) { c["__rcall"] = true }
     if (t["__rco"] === true) { c["__rco"] = true }
+    if (t["__rfn"] !== undefined) { c["__rfn"] = t["__rfn"] }
     if (clone && t["__fz"] === true) { c["__fz"] = true }
     return c
 }
@@ -11172,8 +11215,7 @@ function rbEnumForce(t) {
     t["__rdefer"] = false
     if (t["__rcall"] === true) {
         var its = []
-        var cargs = rtCopyArr(t["margs"])
-        cargs.push(js_rblkwrap(function() {
+        rbRcall(t, js_rblkwrap(function() {
             if (arguments.length == 1) { its.push(arguments[0]) }
             else if (arguments.length == 0) { its.push(null) }
             else {
@@ -11184,7 +11226,6 @@ function rbEnumForce(t) {
             }
             return null
         }))
-        rbMethod(t["src"], t["meth"], cargs)
         t["items"] = its
         return
     }
