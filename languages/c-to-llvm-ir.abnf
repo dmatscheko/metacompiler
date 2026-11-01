@@ -83,18 +83,7 @@ Enumerator  <~~ makeEnumerator(takeAll()) ~~>
             = Id <~~ push(up.in) ~~> [ "=" EnumInit ] ;
 // A constant expression folded as the tags walk; it may name an earlier enum constant
 // or a standard header's (cConstOf).
-EnumInit    <~~ push({val: pop()}) ~~> = ECShift ;
-ECShift     <~~ push(foldDimBin(takeAll())) ~~> = ECAdd { DimShOp ECAdd } ;
-ECAdd       <~~ push(foldDimBin(takeAll())) ~~> = ECMul { DimAddOp ECMul } ;
-ECMul       <~~ push(foldDimBin(takeAll())) ~~> = ECUn { DimMulOp ECUn } ;
-ECUn        = Number | ECParen | ECNeg | ECPos | ECNot | ECChar | OffsetVal | ECName ;
-ECParen     = "(" ECShift ")" ;
-ECNeg       <~~ push(0 - pop()) ~~> = "-" ECUn ;
-ECPos       = "+" ECUn ;
-ECNot       <~~ push(0 - pop() - 1) ~~> = "~" ECUn ;
-ECName      <~~ push(cConstOf(up.in)) ~~> = Id ;
-// A character constant ('enum { X = 'x' }').
-ECChar      = "'" :whitespace() CChar <~~ push(cCharConst(up.in)) ~~> "'" :whitespace(Whitespace) ;
+EnumInit    <~~ push({val: pop()}) ~~> = CExpr ;
 
 // union: an LLVM struct holding its LARGEST member, which every member selects;
 // its tag is keyed 'u:'+name in the struct table (see uKey).
@@ -878,22 +867,45 @@ ArrDims     <~~ push({dims: takeAll()}) ~~> = ( ArrDim | StarDim | InferDim ) { 
 // 'int x[const *]' - a VLA of UNSPECIFIED size, which C11 6.7.6.2 allows only in a
 // prototype, where nothing may read the bound anyway. Treated exactly like '[]'.
 StarDim     <~~ push(-1) ~~> = "[" { ArrQual } "*" "]" ;
-ArrDim      = "[" { ArrQual } DimShift "]" ;
+ArrDim      = "[" { ArrQual } CExpr "]" ;
 // A dimension is a constant EXPRESSION folded as the tags walk (no code is emitted
 // for it); a name must be an enumerator or a standard header's constant, so a real
-// VLA ('char t[argc]') stays an error (cConstOf).
-DimShift    <~~ push(foldDimBin(takeAll())) ~~> = DimAdd { DimShOp DimAdd } ;
-DimShOp     <~~ push({op: up.in}) ~~> = "<<" | ">>" ;
-DimAdd      <~~ push(foldDimBin(takeAll())) ~~> = DimMul { DimAddOp DimMul } ;
-DimAddOp    <~~ push({op: up.in}) ~~> = "+" | "-" ;
-DimMul      <~~ push(foldDimBin(takeAll())) ~~> = DimUn { DimMulOp DimUn } ;
-DimMulOp    <~~ push({op: up.in}) ~~> = "*" | "/" | "%" ;
-DimUn       = Number | DimParen | DimNeg | DimPos | DimNot | OffsetVal | DimName ;
-DimName     <~~ push(cConstOf(up.in)) ~~> = Id ;
-DimParen    = "(" DimShift ")" ;
-DimNeg      <~~ push(0 - pop()) ~~> = "-" DimUn ;
-DimPos      = "+" DimUn ;
-DimNot      <~~ push(0 - pop() - 1) ~~> = "~" DimUn ;
+// VLA ('char t[argc]') stays an error (cConstOf). The operators are those of
+// CExpr in c-interpreter.abnf.
+CExpr       <~~ push(foldCond(takeAll())) ~~> = CELor [ "?" CExpr ":" CExpr ] ;
+CELor       <~~ push(foldDimBin(takeAll())) ~~> = CELand { CELorOp CELand } ;
+CELorOp     <~~ push({op: up.in}) ~~> = "||" ;
+CELand      <~~ push(foldDimBin(takeAll())) ~~> = CEBor { CELandOp CEBor } ;
+CELandOp    <~~ push({op: up.in}) ~~> = "&&" ;
+CEBor       <~~ push(foldDimBin(takeAll())) ~~> = CEXor { CEBorOp CEXor } ;
+CEBorOp     <~~ push({op: up.in}) ~~> = "|" !"|" ;
+CEXor       <~~ push(foldDimBin(takeAll())) ~~> = CEBand { CEXorOp CEBand } ;
+CEXorOp     <~~ push({op: up.in}) ~~> = "^" ;
+CEBand      <~~ push(foldDimBin(takeAll())) ~~> = CEEq { CEBandOp CEEq } ;
+CEBandOp    <~~ push({op: up.in}) ~~> = "&" !"&" ;
+CEEq        <~~ push(foldDimBin(takeAll())) ~~> = CERel { CEEqOp CERel } ;
+CEEqOp      <~~ push({op: up.in}) ~~> = "==" | "!=" ;
+CERel       <~~ push(foldDimBin(takeAll())) ~~> = CEShift { CERelOp CEShift } ;
+CERelOp     <~~ push({op: up.in}) ~~> = "<=" | ">=" | "<" | ">" ;
+CEShift     <~~ push(foldDimBin(takeAll())) ~~> = CEAdd { CEShOp CEAdd } ;
+CEShOp      <~~ push({op: up.in}) ~~> = "<<" | ">>" ;
+CEAdd       <~~ push(foldDimBin(takeAll())) ~~> = CEMul { CEAddOp CEMul } ;
+CEAddOp     <~~ push({op: up.in}) ~~> = "+" | "-" ;
+CEMul       <~~ push(foldDimBin(takeAll())) ~~> = CEUn { CEMulOp CEUn } ;
+CEMulOp     <~~ push({op: up.in}) ~~> = "*" | "/" | "%" ;
+CEUn        = Number | CECast | CEParen | CENeg | CEPos | CENot | CELNot | CEChar | CEWChar
+            | CESizeof | CEAlignof | OffsetVal | CEName ;
+CEName      <~~ push(cConstOf(up.in)) ~~> = Id ;
+CEParen     = "(" CExpr ")" ;
+CECast      <~~ push(cFoldCast(pop(), pop())) ~~> = "(" TypeName ")" CEUn ;
+CENeg       <~~ push(0 - pop()) ~~> = "-" CEUn ;
+CEPos       = "+" CEUn ;
+CENot       <~~ push(0 - pop() - 1) ~~> = "~" CEUn ;
+CELNot      <~~ push(pop() == 0 ? 1 : 0) ~~> = "!" CEUn ;
+CEChar      = "'" :whitespace() CChar <~~ push(cCharConst(up.in)) ~~> "'" :whitespace(Whitespace) ;
+CEWChar     <~~ push(cCharCode(pop())) ~~> = WCPfx "'" :whitespace() WCChar "'" :whitespace(Whitespace) ;
+CESizeof    <~~ push(ctBytes(pop())) ~~> = KwSizeof "(" TypeName ")" ;
+CEAlignof   <~~ push(ctAlign(pop())) ~~> = KwAlignof "(" TypeName ")" ;
 InferDim    <~~ push(-1) ~~> = "[" "]" ;
 ArrQual     = PtrQual | "static" KwEnd ;
 // A declaration initializer: a brace list, a string literal (which initializes a
@@ -933,7 +945,7 @@ DItem       <~~ push(makeDItem(takeAll())) ~~> = [ Desig { Desig } "=" ] DInit ;
 // The array designator '[2] = value' (a constant expression, like a dimension) and
 // the struct/union form '.field = value'.
 Desig       = ArrDesig | FldDesig ;
-ArrDesig    <~~ push({at: pop()}) ~~> = "[" DimShift "]" ;
+ArrDesig    <~~ push({at: pop()}) ~~> = "[" CExpr "]" ;
 FldDesig    = "." Id <~~ push({fld: up.in}) ~~> ;
 
 Empty       <~~ push(function(b) { return b }) ~~>
@@ -1102,7 +1114,7 @@ MulExpr     <~~ push(foldBinary(takeAll())) ~~>
 
 // AlignOf comes before PostfixExpr: '_Alignof(int)' looks exactly like a call of a
 // function named _Alignof, and the general call seed would claim it first.
-UnaryExpr   = PreIncDec | AddrOf | DerefLoad | Neg | Pos | Not | BitNot | Sizeof | AlignOf | OffsetOf | GenericCall | Generic | Cast | PostfixExpr ;
+UnaryExpr   = PreIncDec | AddrName | AddrOf | DerefLoad | Neg | Pos | Not | BitNot | Sizeof | AlignOf | OffsetOf | GenericCall | Generic | Cast | PostfixExpr ;
 
 // A cast '(Type)expr'. TypeName needs a type keyword, so '(expr)' stays a parenthesis.
 Cast        <~~ push(makeCast(takeAll())) ~~>
@@ -1130,7 +1142,7 @@ OffsetOf    <~~ push(makeNum(pop(), ctSizeT)) ~~> = OffsetVal ;
 OffsetVal   <~~ var s = takeAll(); push(cOffsetOf(s[0], s.slice(1))) ~~>
             = KwOffsetof "(" TypeName "," OffMember { "." OffMember | "[" OffIndex "]" } ")" ;
 OffMember   <~~ push({fld: up.in}) ~~> = Id ;
-OffIndex    <~~ push({at: pop()}) ~~> = DimShift ;
+OffIndex    <~~ push({at: pop()}) ~~> = CExpr ;
 // A type name: base plus '*'s, optionally an abstract function-pointer declarator
 // (every function pointer type is the same ctFn) or an array declarator.
 TypeName    <~~ push(makeTypeName(takeAll())) ~~>
@@ -1279,6 +1291,10 @@ ScalarKw    = "char" KwEnd | "short" KwEnd | "int" KwEnd | "long" KwEnd
             | "const" KwEnd | "volatile" KwEnd ;
 PreIncDec   <~~ push(makePreIncDec(pop(), pop())) ~~>
             = ( "++" | "--" ) <~~ push(up.in) ~~> Lvalue ;
+// '&name' with no suffix: the name may be a function (C11 6.5.3.2p3), whose
+// address is the function pointer value the bare name also yields.
+AddrName    <~~ push(makeAddrName(pop())) ~~>
+            = "&" Id <~~ push(up.in) ~~> !"[" !"." !"->" ;
 AddrOf      <~~ push(makeAddrOf(pop())) ~~>
             = "&" Lvalue ;
 DerefLoad   <~~ push(makeLoadOf(makeDerefPlace(pop()))) ~~>
@@ -1342,15 +1358,22 @@ PlaceRef    <~~ push(makeLoadOf(makeVarPlace(takeAll()))) ~~>
 NumberLit   <~~ push(makeNumLit(pop(), up.in)) ~~>
             = Number ;
 // A character constant has type int (C11 6.4.4.4p10) and the value of a char, which
-// is signed here ('\377' is -1); a wide one (L, u, U) has the width of its wide
-// type, which this model pins at 4 like int, and an unsigned value.
-CharLit     = CharPfx "'" :whitespace() CChar <~~ push(makeNum(cCharCode(up.in), ctInt)) ~~> "'" :whitespace(Whitespace)
+// is signed here ('\377' is -1); an L / u / U one has the type wchar_t / char16_t /
+// char32_t and the code point as its value (6.4.4.4p11), and may hold any character.
+CharLit     = WCharLit
             | "'" :whitespace() CChar <~~ push(makeNum(cCharConst(up.in), ctInt)) ~~> "'" :whitespace(Whitespace) ;
-CharPfx     = "L" | "u8" | "u" | "U" ;
+WCharLit    <~~ push(cWideChar(pop(), pop())) ~~>
+            = CharPfx "'" :whitespace() WCChar "'" :whitespace(Whitespace) ;
+CharPfx     <~~ push(up.in) ~~> = WCPfx ;
+WCPfx       = "L" | "u8" | "u" | "U" ;
+WCChar      <~~ push(up.in) ~~> = CChar | "\x7f"..."\U0010ffff" ;
 // One character constant body: a hex escape (backslash x plus hex digits), an octal
-// escape (backslash plus one to three octal digits), a simple escape, or a plain
-// character. The hex and octal forms come first so their digits are not cut short.
+// escape (backslash plus one to three octal digits), a universal character name, a
+// simple escape, or a plain character. The hex, octal and universal forms come first
+// so their digits are not cut short.
 CChar       = "\\" "x" HexDig { HexDig } | "\\" OctDig [ OctDig [ OctDig ] ]
+            | "\\" "u" HexDig HexDig HexDig HexDig
+            | "\\" "U" HexDig HexDig HexDig HexDig HexDig HexDig HexDig HexDig
             | "\\" "\x20"..b"\x7e" | "\x20"..."\x26" | "\x28"..."\x5b" | "\x5d"..."\x7e" ;
 VarRef      <~~ push(makeVarRef(up.in)) ~~>
             = Id ;
@@ -1452,32 +1475,6 @@ KwDefault   = "default" KwEnd ;
         if (cc >= 97 && cc <= 102) return cc - 87
         if (cc >= 65 && cc <= 70) return cc - 55
         return -1
-    }
-    // items = [v0, {op}, v1, {op}, v2, ...] - ONE precedence level of a constant array
-    // dimension or enum initializer, folded left to right as the tags walk (see ArrDim).
-    function foldDimBin(items) {
-        var v = anytype
-        v = items[0]
-        var i = 1
-        while (i + 1 < items.length) {
-            var op = items[i].op
-            var r = items[i + 1]
-            if (op == "+") { v = v + r }
-            else if (op == "-") { v = v - r }
-            else if (op == "*") { v = v * r }
-            else if (op == "/") { v = r == 0 ? 0 : truncDiv(v, r) }
-            else if (op == "%") { v = r == 0 ? 0 : v - truncDiv(v, r) * r }
-            else if (op == "<<") { v = v * Math.pow(2, r) }
-            else if (op == ">>") { v = truncDiv(v, Math.pow(2, r)) }
-            i = i + 2
-        }
-        return v
-    }
-    // C integer division truncates toward zero, which Math.floor does not do for a
-    // negative quotient.
-    function truncDiv(a, b) {
-        var q = a / b
-        return q < 0 ? Math.ceil(q) : Math.floor(q)
     }
     // A C integer constant: 0x hex, 0b binary, leading-0 octal, or decimal; the u/U/l/L
     // suffix run ends the digits.
@@ -3527,7 +3524,7 @@ KwDefault   = "default" KwEnd ;
     // address however often the literal is evaluated.
     var strSeq = 0
     function strLitPlace(d) {
-        var ct = ctArr(d.str.length, d.wide ? ctInt : ctChar)
+        var ct = ctArr(d.str.length, cWideCt(d.kind))
         var aty = ctLTy(ct)
         strSeq = strSeq + 1
         var g = m.NewGlobalDef(".str." + strSeq, llvm.constant.NewZeroInitializer(aty))
@@ -3605,6 +3602,13 @@ KwDefault   = "default" KwEnd ;
     }
     // The address of a place: the lvalue thunk already yields it, only the TYPE grows
     // one pointer level.
+    // '&name': a function's id unless a variable of that name is in scope. Twin of
+    // makeAddrName in c-interpreter.abnf.
+    function makeAddrName(name) {
+        var fnT = makeVarRef(name)
+        var addrT = makeAddrOf(makeVarPlace([name]))
+        return function(b) { return (lookupVar(name) == undefined && hasOwn(userFuncs, name)) ? fnT(b) : addrT(b) }
+    }
     function makeAddrOf(placeT) {
         return function(b) {
             var p = placeT(b)

@@ -1,11 +1,13 @@
 // c-literals.js -- what c-interpreter.abnf and c-to-llvm-ir.abnf share (include):
 // the values of C string literals, character constants and the standard headers'
 // constants, brace-initializer items, and the block-scope name table. digVal,
-// fail and hasOwn come from the including grammar.
+// fail, hasOwn, makeNum, ctI, ctInt and ctChar come from the including grammar.
 //
 // The execution character set is UTF-8, as cc's: a narrow literal holds the
 // UTF-8 bytes of every character outside ASCII and of every \u / \U universal
-// character name (C11 6.4.3), and a wide one (L, u, U) one element per code point.
+// character name (C11 6.4.3); a u literal holds UTF-16 code units (a code point
+// above U+FFFF is a surrogate pair, C11 6.4.5p6 with __STDC_UTF_16__), and an L or
+// U literal one element per code point.
 
 // The code point that starts at text[i]: a UTF-16 surrogate pair joins into one.
 function cCodePointAt(text, i) {
@@ -16,9 +18,15 @@ function cCodePointAt(text, i) {
     }
     return hi
 }
-// Append one code point: its UTF-8 bytes to a narrow literal, itself to a wide one.
-function cPushCodePoint(bytes, cp, wide) {
-    if (wide || cp < 128) { bytes.push(cp); return }
+// Append one code point in the encoding of the literal's prefix k ("" or "u8"
+// narrow, "u" UTF-16, "L" / "U" the code point itself).
+function cPushCodePoint(bytes, cp, k) {
+    if (k == "u" && cp > 65535) {
+        bytes.push(55296 + ((cp - 65536) >> 10))
+        bytes.push(56320 + ((cp - 65536) & 1023))
+        return
+    }
+    if (k == "u" || k == "L" || k == "U" || cp < 128) { bytes.push(cp); return }
     if (cp < 2048) {
         bytes.push(192 + (cp >> 6))
     } else if (cp < 65536) {
@@ -32,22 +40,22 @@ function cPushCodePoint(bytes, cp, wide) {
     bytes.push(128 + (cp & 63))
 }
 // The bytes of a string-literal RUN (adjacent literals concatenate, C11 6.4.5p5),
-// with the C escape sequences decoded and the terminating null appended. An
-// L / u / U prefix makes the elements wide.
+// with the C escape sequences decoded and the terminating null appended. kind is
+// the run's prefix ("" for none); an L / u / U prefix makes the elements wide.
 function cStrBytes(text) {
     var bytes = []
-    var wide = false
+    var kind = ""
     var i = 0
     while (i < text.length) {
         var cc = text.charCodeAt(i)
         if (cc == 117 && i + 1 < text.length && text.charCodeAt(i + 1) == 56) { i = i + 2; continue }
-        if (cc == 76 || cc == 117 || cc == 85) { wide = true; i = i + 1; continue }
+        if (cc == 76 || cc == 117 || cc == 85) { kind = text.charAt(i); i = i + 1; continue }
         if (cc != 34) { i = i + 1; continue }
         i = i + 1
         while (i < text.length && text.charCodeAt(i) != 34) {
             if (text.charCodeAt(i) != 92) {
                 var cp = cCodePointAt(text, i)
-                cPushCodePoint(bytes, cp, wide)
+                cPushCodePoint(bytes, cp, kind)
                 i = i + (cp > 65535 ? 2 : 1)
                 continue
             }
@@ -67,21 +75,30 @@ function cStrBytes(text) {
             } else {
                 j = j + 1
             }
-            if (e == 117 || e == 85) { cPushCodePoint(bytes, cCharCode(text.slice(i, j)), wide) }
+            if (e == 117 || e == 85) { cPushCodePoint(bytes, cCharCode(text.slice(i, j)), kind) }
             else { bytes.push(cCharCode(text.slice(i, j))) }
             i = j
         }
         i = i + 1
     }
     bytes.push(0)
-    return {str: bytes, wide: wide}
+    return {str: bytes, kind: kind}
+}
+// The element type of a string literal (C11 6.4.5p6): char, char16_t, char32_t or
+// wchar_t, the last an int on this target. Also the type of a character constant
+// with the same prefix (6.4.4.4p11); an unprefixed one is an int instead.
+function cWideCt(kind) {
+    if (kind == "u") return ctI(2, true)
+    if (kind == "U") return ctI(4, true)
+    if (kind == "L") return ctInt
+    return ctChar
 }
 // The value of one character-constant body, including the C escape sequences:
 // backslash x with hex digits, backslash with up to three octal digits, the
 // universal character names \u and \U (a code point), and the simple escapes. A
 // byte is answered unsigned; cCharConst gives it the type of a constant.
 function cCharCode(s) {
-    if (s.charCodeAt(0) != 92) return s.charCodeAt(0)
+    if (s.charCodeAt(0) != 92) return cCodePointAt(s, 0)
     var e = s.charCodeAt(1)
     if (e == 120 || e == 88 || e == 117 || e == 85) {
         var hv = 0
@@ -103,11 +120,78 @@ function cCharCode(s) {
     if (e == 101) return 27
     return e   // backslash, single quote, double quote, question mark: itself.
 }
+// A prefixed character constant from its body and its prefix k, which WCharLit pops
+// in that order. A u8 one (a C23 form) stays an int.
+function cWideChar(body, k) { return makeNum(cCharCode(body), k == "u8" ? ctInt : cWideCt(k)) }
 // An integer character constant is an int holding the value of a char (C11
 // 6.4.4.4p10), and char is signed on this target: '\377' is -1.
 function cCharConst(s) {
     var v = cCharCode(s)
     return v > 127 ? v - 256 : v
+}
+
+// items = [v0, {op}, v1, {op}, v2, ...] - ONE precedence level of an integer
+// constant expression (CExpr), folded left to right as the tags walk: a comparison
+// or a logical operator answers 0 or 1, and a division by zero folds to 0.
+function foldDimBin(items) {
+    var v = anytype
+    v = items[0]
+    var i = 1
+    while (i + 1 < items.length) {
+        var op = items[i].op
+        var r = items[i + 1]
+        if (op == "+") { v = v + r }
+        else if (op == "-") { v = v - r }
+        else if (op == "*") { v = v * r }
+        else if (op == "/") { v = r == 0 ? 0 : truncDiv(v, r) }
+        else if (op == "%") { v = r == 0 ? 0 : v - truncDiv(v, r) * r }
+        else if (op == "<<") { v = v * Math.pow(2, r) }
+        else if (op == ">>") { v = Math.floor(v / Math.pow(2, r)) }
+        else if (op == "<") { v = v < r ? 1 : 0 }
+        else if (op == ">") { v = v > r ? 1 : 0 }
+        else if (op == "<=") { v = v <= r ? 1 : 0 }
+        else if (op == ">=") { v = v >= r ? 1 : 0 }
+        else if (op == "==") { v = v == r ? 1 : 0 }
+        else if (op == "!=") { v = v != r ? 1 : 0 }
+        else if (op == "&&") { v = (v != 0 && r != 0) ? 1 : 0 }
+        else if (op == "||") { v = (v != 0 || r != 0) ? 1 : 0 }
+        else { v = cFoldBits(op, v, r) }
+        i = i + 2
+    }
+    return v
+}
+// '&', '|' or '^' on two integers held exactly as doubles: the high and the low 32
+// bits are combined separately, since a script's bitwise operators see only 32.
+function cFoldBits(op, a, b) {
+    var ah = Math.floor(a / 4294967296)
+    var bh = Math.floor(b / 4294967296)
+    var al = a - ah * 4294967296
+    var bl = b - bh * 4294967296
+    var h = 0
+    var l = 0
+    if (op == "&") { h = ah & bh; l = al & bl }
+    else if (op == "|") { h = ah | bh; l = al | bl }
+    else { h = ah ^ bh; l = al ^ bl }
+    if (l < 0) l = l + 4294967296
+    return h * 4294967296 + l
+}
+// A cast in a constant expression: the integer conversion of C11 6.3.1.3 to the
+// width and signedness of ct (a non-integer type leaves the value alone).
+function cFoldCast(v, ct) {
+    if (ct.bool == true) return v != 0 ? 1 : 0
+    if (ct.k != "int") return v
+    if (ct.w >= 8) return (ct.u == true && v < 0) ? v + Math.pow(2, 64) : v
+    if (ct.w == 1) return ct.u ? (v & 255) : ((v << 24) >> 24)
+    if (ct.w == 2) return ct.u ? (v & 65535) : ((v << 16) >> 16)
+    return ct.u ? (v >>> 0) : (v | 0)
+}
+// cond ? a : b of a constant expression: items = [cond] or [cond, a, b].
+function foldCond(items) { return items.length == 1 ? items[0] : (items[0] != 0 ? items[1] : items[2]) }
+// C integer division truncates toward zero, which Math.floor does not do for a
+// negative quotient.
+function truncDiv(a, b) {
+    var q = a / b
+    return q < 0 ? Math.ceil(q) : Math.floor(q)
 }
 
 // The constants of the standard headers this front end treats as built in

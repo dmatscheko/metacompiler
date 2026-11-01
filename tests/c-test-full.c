@@ -26,7 +26,7 @@
 // (the byte/address family IS in scope - see SECTION 50 and the note below - and
 // nothing else is), variadic functions (need the stdarg.h macros),
 // VLAs (optional in C11), flexible array members, _Atomic and threads, setjmp,
-// wide-character semantics (wide literals appear via sizeof only), K&R-style
+// the wide-character library (wide literals are SECTION 60), K&R-style
 // declarations, and anything undefined or implementation-defined - except the
 // two pins the feature-matrix file already relies on: the LP64 data model -
 // 32-bit int, 64-bit long, long long and pointer (sizeof checks, and sections
@@ -2489,6 +2489,81 @@ int s59(void) {
     return 0;
 }
 
+// ===== SECTION 60: wide string literals and character constants =====
+/* A u"..." literal is an array of char16_t holding UTF-16, so a code point above
+   U+FFFF takes a surrogate pair; a U"..." or L"..." literal holds one char32_t or
+   wchar_t per code point (C11 6.4.5p6). A prefixed character constant has the
+   prefix's type and the code point as its value, and may be any character
+   (6.4.4.4p11). char16_t is unsigned short and char32_t unsigned int here, spelled
+   so because <uchar.h> is not one of the built-in headers. Every expected value
+   was printed by cc. */
+int s60(void) {
+    const unsigned short *q = u"a\U0001F600";
+    unsigned short s[] = u"\U0001F600x";
+    check(6001, u"\U0001F600"[0] == 55357 && u"\U0001F600"[1] == 56832 && u"\U0001F600"[2] == 0
+                && sizeof(u"\U0001F600") == 6 && u"a😀b"[2] == 0xDE00);
+    check(6002, q[1] == 0xD83D && q[2] == 0xDE00 && q[3] == 0 && sizeof s == 8 && s[2] == 'x');
+    check(6003, sizeof(U"\U0001F600") == 8 && U"z\U0001F600"[1] == 128512 && L"€q"[0] == 8364
+                && sizeof(u"é") == 4 && sizeof(u8"é") == 3);
+    check(6004, L'é' == 233 && u'€' == 8364 && U'😀' == 128512 && U'\U0001F600' == 128512
+                && L'é' == 233 && u'€' - 1 == 8363);
+    check(6005, sizeof(u'a') == 2 && sizeof(U'a') == 4 && sizeof(L'a') == 4 && u'\xffff' > 0
+                && sizeof(u'a' + 0) == 4 && -u'a' == -97);
+    return 0;
+}
+
+// ===== SECTION 61: the address of a function =====
+/* '&f' is the same function pointer as the bare name 'f' (C11 6.5.3.2p3,
+   6.3.2.1p4), at file scope and in a block, unless a variable of that name is in
+   scope. Every expected value was printed by cc. */
+int s61_md(int a, int b) { return a % b; }
+int s61_ad(int a, int b) { return a + b; }
+int (*s61_single)(int, int) = &s61_md;
+struct s61_ops { int (*f)(int, int); int k; } s61_g = { &s61_ad, 3 };
+int (*s61_tab[])(int, int) = { &s61_md, &s61_ad, s61_md };
+int s61(void) {
+    int (*loc)(int, int) = &s61_ad;
+    check(6101, s61_single(9, 4) == 1 && (*s61_single)(11, 4) == 3 && loc(2, 3) == 5);
+    check(6102, s61_g.f(2, 3) == 5 && s61_tab[0](9, 5) == 4 && s61_tab[1](9, 5) == 14
+                && s61_tab[2](9, 5) == 4);
+    loc = &s61_md;
+    check(6103, loc(7, 4) == 3 && &s61_md == s61_md && &s61_md != &s61_ad);
+    { int s61_md = 5; int *p = &s61_md; check(6104, *p == 5); }
+    return 0;
+}
+
+// ===== SECTION 62: integer constant expressions =====
+/* An array dimension and an enumerator's value are integer constant expressions
+   (C11 6.6p6): the conditional, logical, bitwise, relational and equality
+   operators, casts, character constants, sizeof(type) and _Alignof(type) all fold
+   there. Every expected value was printed by cc. */
+struct s62_s { char c; double d; int i; };
+int s62_b[1 | 2];
+int s62_c[2 ? 3 : 1];
+int s62_d[(3 > 1) + 1];
+int s62_f[4 == 4];
+int s62_z[sizeof(int)];
+char s62_u['A' - 60];
+int s62_a[1 && 1];
+char s62_g[sizeof(struct s62_s) + _Alignof(double)];
+char s62_h[(0x100000000 | 1) - 0xFFFFFFF0];
+char s62_k[(-8 >> 1) + 10];
+char s62_m[(unsigned char)300];
+char s62_n[0 ? 1 : 0 ? 2 : 6];
+enum { S62_A = 1 | 4, S62_B = (3 > 1) ? 7 : 2, S62_C = 6 & 3, S62_D = 6 ^ 3,
+       S62_E = !0 + (2 <= 1), S62_F = 0 || 2, S62_G = (short)70000, S62_H = u'b' - 'a' };
+int s62(void) {
+    int lb[1 | 2];
+    char lc[sizeof(long) > 4 ? 3 : 1];
+    check(6201, sizeof s62_b == 12 && sizeof s62_c == 12 && sizeof s62_d == 8 && sizeof s62_f == 4);
+    check(6202, sizeof s62_z == 16 && sizeof s62_u == 5 && sizeof s62_a == 4 && sizeof s62_g == 32);
+    check(6203, sizeof s62_h == 17 && sizeof s62_k == 6 && sizeof s62_m == 44 && sizeof s62_n == 6
+                && sizeof lb == 12 && sizeof lc == 3);
+    check(6204, S62_A == 5 && S62_B == 7 && S62_C == 2 && S62_D == 5 && S62_E == 1 && S62_F == 1
+                && S62_G == 4464 && S62_H == 1);
+    return 0;
+}
+
 // ===== END SECTIONS =====
 
 int main() {
@@ -2551,6 +2626,9 @@ int main() {
     s57(); // SECTION-CALL 57
     s58(); // SECTION-CALL 58
     s59(); // SECTION-CALL 59
+    s60(); // SECTION-CALL 60
+    s61(); // SECTION-CALL 61
+    s62(); // SECTION-CALL 62
     /* summary: "full: <checks> checks, <failures> failures" */
     putchar('f'); putchar('u'); putchar('l'); putchar('l'); putchar(':'); putchar(' ');
     print_num(nchecks);
