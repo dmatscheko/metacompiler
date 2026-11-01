@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-984** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-988** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -132,25 +132,31 @@ Found by the KT worker, round 11 (oracle: kotlin-stdlib 2.2.21 driven from java 
 
 # GO — Go  (oracle: `go run`)
 
-### T-959 go, swift: an undefined name is a run-time error, not a compile error · P3 · GO · IN PROGRESS (GO worker, round 17) [V]
-Remainder of T-910. `if false { fmt.Println(zz) }` → gc "undefined: zz" at compile time; every engine runs and exits 0, and a
-reached undefined name fails at run time as "js runtime error: variable not defined". Needs a static name-resolution pass in
-both compilers and interpreters (locals, params, package members, builtins, imports; swift likewise, swiftc "cannot find 'zz' in
-scope"). A false positive breaks a valid program: measure against the whole matrix and the go/swift corpora before landing.
+### T-984 go: an unbuffered or full-channel send never blocks; range over a nil channel runs zero times · P2 · GO · OPEN [V]
+Found by the GO worker, round 17 (oracle go run). `c := make(chan int); select { case c <- 1: case <-c: }` blocks in go (no
+receiver); ours takes the send arm, and a send on a full buffered channel proceeds (chan/select3.go, 1 of 23 sub-tests).
+`for range nilch {}` in a goroutine runs zero iterations; go blocks forever (needs the static type: the value is untyped nil).
 
-### T-960 go compiled: a select with no ready case and no default does not deadlock · P2 · GO · IN PROGRESS (GO worker, round 17) [V]
-Found by the GO worker, round 16. go test dir fixedbugs/gcc61253.go: go run and our interpreter print "fatal error: all
-goroutines are asleep - deadlock!" (exit 2); llvm.Run and native exit 0 with no output, the select continuing silently.
+### T-985 go: empty init statements misparse (`if ; cond`, `switch ; {}`); compiler reads a keyword as a variable · P2 · GO · OPEN [V]
+Found by the GO worker, round 17 (gc accepts all). `if ; false {}` / `switch ; {}` → both halves "unknown name: if"/"switch"
+(fixedbugs/bug002-004, issue12413, bigmap.go, ddd.go, typeparam/maps, sets, slices, metrics, ifaceconv, issue46472). Compiler
+only: `if a("1")("2"); cond`, `for ; false; c <- false {}`, type-switch `case [0]string:` (bug294, gcc61273, gcc61244, reorder2.go).
 
-### T-961 go: a send on a nil channel inside a goroutine aborts with "send on a non-channel" instead of blocking · P2 · GO · IN PROGRESS (GO worker, round 17) [V]
-Found by the GO worker, round 16. go test dir chan/select3.go: go run exits 0 with no output (the goroutine blocks forever, main
-returns); interp and run abort with "send on a non-channel". A nil channel blocks on send and receive (spec, Send statements).
+### T-986 go: deadlock message and exit status differ from the runtime's · P3 · GO · OPEN [V]
+Found by the GO worker, round 17. go prints `fatal error: all goroutines are asleep - deadlock!` plus a goroutine trace and exits 2;
+ours prints "all goroutines are asleep - deadlock" and exits 1 (all three engines).
 
 # SW — Swift  (oracle: swiftc 6.1.2)
 
 ### T-977 swift: "cannot find label" and "continue cannot target an if label" are not diagnosed · P3 · SW · OPEN [V]
 Found by the SW worker, round 11 (oracle swiftc 6.1.2). `break nope` with no such label → swiftc "cannot find label 'nope' in
 scope"; `lbl: if c { continue lbl }` → "'continue' cannot be used with if statements". Neither half refuses them.
+
+### T-987 swift: undefined names need scope tables (out-of-scope uses, upper-case names, members of open types); `#if DEBUG`; MemoryLayout · P3 · SW · OPEN [V]
+Found by the GO worker, round 17 (oracle swiftc 6.1.2). T-959's swift check is flow-insensitive: a name declared somewhere but used
+out of its scope, an upper-case name, or a use inside a type that may inherit members is still caught only at run time. Needs
+lexical scope tables in both swift grammars. Also `#if DEBUG` keeps its first branch (swiftc without -D DEBUG drops it) and
+`MemoryLayout<Int>.size` → "unknown name: MemoryLayout".
 
 # DA — Dart  (no dart here: spec-only)
 
@@ -1108,6 +1114,9 @@ T-963 bash compiled: `${x:-word}` expands word eagerly; a function can be called
 T-964 bash: `unset -f`, `command -V`, namerefs in the interpreter, `declare -p` of a computed export — PARTIAL - unset -f/-v/-n, command -V for builtins/keywords, export/readonly in declare -p, namerefs; rest filed as follow-ups
 T-966 c: a parenthesised function name as callee; `sizeof expr` in a constant expression; unsigned rules in the fold — DONE - parenthesised callees, sizeof expr in constant expressions, typed (unsigned) constant fold; both halves
 T-957 python: remainder of the data-model gaps — DONE - bound-method ==/hash, pow 3-arg slot walk, CPython listsort port, utf-16/32/cp1252 codecs with all error handlers
+T-960 go compiled: a select with no ready case and no default does not deadlock — DONE - compiled select evaluates operands once, drains, then blocks/deadlocks like go
+T-961 go: a send on a nil channel inside a goroutine aborts with "send on a non-channel" instead of blocking — DONE - goBlock in all engines; nil send/recv park the goroutine, a nil send arm is never chosen
+T-959 go, swift: an undefined name is a run-time error, not a compile error — PARTIAL - Go: undefined names are compile errors, reached or not; Swift: flow-insensitive check only, scope-correct remainder filed
 
 # Settled — do not re-open
 
