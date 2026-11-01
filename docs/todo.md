@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-971** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-974** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -74,38 +74,15 @@ Left from T-954, plus one found by the PY worker, round 17 (oracle python3 3.14)
 
 # RB — Ruby
 
-### T-916 ruby interp: an exception leaving a class or module body leaks that class's lexical scope · P1 · RB · IN PROGRESS (RB worker, round 33) [V]
-`begin; class Gate; raise ArgumentError, "in body" if $f; end; rescue ArgumentError => e; end`, then `class Other; end;
-p Other.name` → ruby, run, native `"Other"`; interp `"Gate::Other"` (and `Gate::Mo`, `Gate::Gm::After` for later modules after a
-raise out of a module body). Knock-ons in the interpreter: a later `class String; def shout2…` defines Gate::String (NoMethodError
-on `"a".shout2`), errors say `uninitialized constant Gate::Zq`, inspect prints `#<Gate::Pt>`. Same family as the scope-chain
-leaks fixed in T-850: the nesting pop is skipped on the exception path. Files: class/module body evaluation in
-ruby-interpreter.abnf.
-
-### T-917 ruby: `local !~ /re/` with a space after the local is parsed as a call of the local · P1 · RB · IN PROGRESS (RB worker, round 33) [V]
-Neighbour of T-823. `s = ["abc"][0]; z = s !~/z/; p z` and `p n !~ /5/`, `[s].map { |t| t !~ /q/ }` → ruby `true` …; interp
-"call of a non function: s", run "call of a non function value: abc", native "… [object Object]". `s[0] !~ /z/`, `s =~ /b/`,
-`s != "q"` are right. Files: the command-call / juxtaposition rule in both ruby grammars (a known local followed by `!~` is the
-operator).
-
-### T-918 ruby: tr / count / delete / squeeze and regex positions on astral text · P2 · RB · IN PROGRESS (RB worker, round 33) [V finder only]
-Incomplete part of T-830 / T-839. t = "x😀😀y": `t.tr("😀","o")` ruby `"xooy"`, interp `"xooooy"`, run `"x����y"`, native
-unchanged; `t.count("😀")` ruby 2, interp 4, run/native 0; `t.delete("😀")` ruby `"xy"`, run `"x����y"`, native unchanged;
-`t.squeeze` ruby `"x😀y"`, run bytes broken, interp/native unchanged; `t.scan(/./).size` ruby 4, interp/native 6;
-`t =~ /y/` ruby 3, interp/native 5 (UTF-16 offsets). Files: rbStrTr / count / delete / squeeze and the match index in
-lib/ruby-rt.metajs, abnf/jsrtruby.go, the interpreter.
-
-### T-919 ruby: re-adding a key deleted during `Hash#each` raises nothing · P2 · RB · IN PROGRESS (RB worker, round 33) [V finder only]
-Incomplete part of T-822. `h = {a: 1, b: 2}; h.each { |k, v| h.delete(:a); h[:a] = 3 }` → ruby RuntimeError "can't add a new key
-into hash during iteration", h `{:b=>2}`; all legs no error, `{:b=>2, :a=>3}`. The new-key test must look at the live key set.
-
-### T-920 ruby: an assignment target rooted at a parenthesised call does not parse; smaller gaps · P2 · RB · IN PROGRESS (RB worker, round 33) [V finder only]
-`def arr(i); A[i]; end; arr(0)[1] = 5; obj(1).f = 7; arr(0)[0] += 1` → interp and run "Not everything could be parsed" at the
-first; ruby runs it. (`H.new.get(0)[0][0] = 9` works.) Kotlin has the same shape: `rec(p, "R").w++` does not parse. Smaller, loud
-or cosmetic, all with ruby 2.6 as the oracle: `(1..).each_slice(2).first(2)` "cannot convert an endless range to an array" (ruby
-`[[1, 2], [3, 4]]`); `String.class_eval { def shout; upcase + "!"; end }` then `"hi".shout` → NoMethodError (ruby `"HI!"`, the
-same for Integer/Array); default `inspect` omits instance variables (`#<Pt>` vs `#<Pt:0x… @a=3, @b="s">`); `"\x7f".succ.bytes`
-→ `[194, 128]` (ruby `[1, 0]`). Shared: kotlin grammars for the `rec(p).w++` target.
+### T-971 ruby: smaller gaps found in round 33 · P3 · RB · OPEN [V]
+Found by the RB worker, round 33 (oracle /usr/bin/ruby 2.6, LC_ALL=en_US.UTF-8):
+- compiler: a constant assigned inside begin/rescue in a class or module body is invisible to that class's methods ("variable not
+  defined: KC") and missing from Module#constants - `class Ka; begin; KC=3; rescue; end; def g; KC; end; end; p Ka.new.g` → 3.
+  lexNote / emitConstNames only look at top-level body statements.
+- `"a,b".split(/,/); p $~` → nil (the final failed search); ours keeps the last match.
+- `class String; def shout; end; end; String.instance_methods(false)` → MRI the whole own list; ours `[:shout]`.
+- Hash#each: deleting the LAST key and adding it back during iteration raises nothing (key order cannot show it).
+- `15 =~ /5/` → nil in 2.6 (Object#=~), ours 1 (3.2+ raises NoMethodError; follow 2.6).
 
 # JS — JavaScript and TypeScript
 
@@ -162,6 +139,10 @@ forEach / forEachIndexed / map and map views already check (kIterN0 / ktIterStar
 Found by the KT worker, round 10. `val m = mutableMapOf(1 to "a", 2 to "b"); m.keys.remove(1); println(m)` → JVM `{2=b}`,
 every engine `{1=a, 2=b}`; same for `m.values.remove("a")` and `m.entries.removeIf { … }`. The view's iterator `remove()`
 already reaches the map (the `__wsrc` link); the view's own remove/removeAll/retainAll/removeIf/clear should too.
+
+### T-972 kotlin: `rec(p, "R").w++` - an increment of a property of a call result · P3 · KT · OPEN [U]
+Moved from the ruby ticket T-920, where it was listed by mistake. `class R(var w: Int); fun rec(p: R, s: String) = p;
+val p = R(1); rec(p, "R").w++; println(p.w)` → Kotlin 2; re-probe both halves before assigning.
 
 # GO — Go  (oracle: `go run`)
 
@@ -262,6 +243,13 @@ Left from T-926. typescript's directory rule scores 219 interpreter / 251 compil
 grammar errors (TS1xxx / TS17xxx / TS18xxx via getSemanticDiagnostics) for them; the honest interp ceiling is about 5303/5527.
 Decision for the worker: derive a checked-in reject list once from a real tsc (VS Code ships one, manual ch. 5) rather than
 running tsc on every sweep.
+
+### T-973 frozen engine: `String.prototype.lastIndexOf` missing; --full step budget nearly exhausted · P2 · CORE · OPEN [V]
+Found by the JV and PY workers, rounds 15 / 17. `"abcb".lastIndexOf("b")` in a tag script or layer 2 → goja 3, -frozen "call of
+a non function value: undefined". And the frozen interpreter legs of tests/java-test-full.java (90M-100M IR steps) and
+tests/python-test-full.py (98M-99M) sit just under the 1e8 -max-steps budget of ./test.sh --full: the next few assertions trip
+"step limit exceeded". Decide: raise the budget for --full, split the files (the .2/.3 convention), or find what makes those
+interpreters step-hungry - measure first.
 
 # Closed
 
@@ -1109,6 +1097,11 @@ T-901 metajs: the goja interpreter leg diverges from -frozen and node — DONE 6
 T-926 tooling: sweep.sh misclassifications; probe.sh builds the native leg with no timeout — PARTIAL 35b11722 (jtreg compile/fail, bash extglob, find -L, probe build watchdog; TypeScript reclassification is T-968)
 T-929 php: `var_dump` of an array that holds a reference to itself never terminates — DONE eb07899c (*RECURSION* for arrays in all engines; & marker by holders within the dumped value, matching bug35163/_2/_3 EXPECT)
 T-930 php: parse gaps the corpus lost or never had — DONE 25325436 (xor operator, hooks on promoted parameters, ?->{expr} in the interp, qualified trait adaptations; also fixed: interp ||/&&/or/and used JS truthiness)
+T-916 ruby interp: an exception leaving a class or module body leaks that class's lexical scope — DONE 1897f02b
+T-917 ruby: `local !~ /re/` with a space after the local is parsed as a call of the local — DONE 6b7e0ed8
+T-918 ruby: tr / count / delete / squeeze and regex positions on astral text — DONE 19fd2712
+T-919 ruby: re-adding a key deleted during `Hash#each` raises nothing — DONE 2d37280e
+T-920 ruby: an assignment target rooted at a parenthesised call does not parse; smaller gaps — PARTIAL 42bfdb3d 3a02f282 (targets rooted at a parenthesised call incl. op-assign and nil&.f = v; class_eval on builtin classes; String#succ wrap-around; endless each_slice/each_cons. inspect with ivars and address DECLINED: the engines omit the address so output stays deterministic, features t13 pins it; the kotlin item moved to T-972; new gaps T-971)
 
 # Settled — do not re-open
 
