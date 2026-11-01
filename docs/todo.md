@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-959** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-963** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -205,36 +205,25 @@ already reaches the map (the `__wsrc` link); the view's own remove/removeAll/ret
 
 # GO — Go  (oracle: `go run`)
 
-### T-904 go: a variable typed by a conversion loses its type when an untyped constant is assigned later · P1 · GO · IN PROGRESS (GO worker, round 16) [V]
-`c := float64(3); c = 7; fmt.Println(c/2)` → go 3.5, all legs 3. `var u = uint8(3); u = 255; u++` → go 0, ours 256.
-`i := int8(1); i = 127; i++` → go -128, ours 128. `h := complex128(3); h = 6` → go `(6+0i)`, ours `6` (complex64 and
-float32 `g = 16777217` the same). `var a float64 = 3; a = 7`, `d := 3.0; d = 7` and the un-reassigned `float64(3)/2` are right:
-the conversion's type is not recorded as the variable's declared type for `:=` / `var x = T(…)`, so the later constant
-assignment is untyped. Also the remaining form of T-869 (4): `var c = complex64(complex(1,2)); q := &c; *q = 2` prints `2`.
-Files: declared-type recording for `:=` and `var x = expr` in go-interpreter.abnf and go-to-llvm-ir.abnf.
+### T-959 go, swift: an undefined name is a run-time error, not a compile error · P3 · GO · OPEN [V]
+Remainder of T-910. `if false { fmt.Println(zz) }` → gc "undefined: zz" at compile time; every engine runs and exits 0, and a
+reached undefined name fails at run time as "js runtime error: variable not defined". Needs a static name-resolution pass in
+both compilers and interpreters (locals, params, package members, builtins, imports; swift likewise, swiftc "cannot find 'zz' in
+scope"). A false positive breaks a valid program: measure against the whole matrix and the go/swift corpora before landing.
 
-### T-905 go compiler: a store through a pointer to a complex struct field or slice element is lost · P1 · GO · IN PROGRESS (GO worker, round 16) [V]
-`type S struct{x int; c complex128}`; `s := S{}; pc := &s.c; *pc = 4; fmt.Println(s, *pc)` → go and interp `{0 (4+0i)} (4+0i)`,
-run and native `{0 (0+0i)} (4+0i)`. `ca := []complex128{1,2}; pca := &ca[0]; *pca = 5; fmt.Println(ca)` → go `[(5+0i) (2+0i)]`,
-run/native `[(1+0i) (2+0i)]`. complex64 the same; int and float fields through `&s.x` are right, so the pointer addresses a
-copy of the complex box. Files: go-to-llvm-ir.abnf, address-of a field / index of complex type (the goRefTy deref path).
+### T-960 go compiled: a select with no ready case and no default does not deadlock · P2 · GO · OPEN [V]
+Found by the GO worker, round 16. go test dir fixedbugs/gcc61253.go: go run and our interpreter print "fatal error: all
+goroutines are asleep - deadlock!" (exit 2); llvm.Run and native exit 0 with no output, the select continuing silently.
 
-### T-910 go and swift compilers accept `break` outside a loop; compile errors say "js runtime error:" · P3 · GO · IN PROGRESS (GO worker, round 16) [V] (break; the error prefix is [V finder only])
-`break` at function level compiles and exits 0 in both compilers; gc and swiftc reject it. The go and swift compile-time
-"variable not defined" errors carry the prefix `js runtime error:`. Shared: swift-to-llvm-ir.abnf.
-
-### T-927 go: a struct type with a map of itself hangs every engine before main · P1 · GO · IN PROGRESS (GO worker, round 16) [V]
-`type S struct { n int; m map[int]S }`; `func main() { var s S; fmt.Println("len", len(s.m), s.n) }` → go `len 0 0`; interp and
-llvm.Run produce nothing and hang (killed at 20 s), the native `-exe` build never finishes. `[]S` of itself is right. Also
-fixedbugs/bug190.go. Files: zero-value / type registration for map element types in both go grammars.
-
-### T-928 go: `*p` / `x.a` as the target of a select-case receive or a for-range assignment does not parse · P2 · GO · IN PROGRESS (GO worker, round 16) [V]
-`for *p, *q = range arr { … }` → go `sum 17 i 2 v 6`, both halves "Not everything could be parsed" at the `=`.
-`case *p = <-c:`, `case x.a = <-c:`, `case (<-c):` → interp parse failure, compiler "composite literal not implemented" (finder).
-Corpus: chan/select4, fixedbugs/gcc61253, fixedbugs/issue20923 (all three parsed in the July sweep: lost since), chan/select3,
-fixedbugs/issue6847, range.go.
+### T-961 go: a send on a nil channel inside a goroutine aborts with "send on a non-channel" instead of blocking · P2 · GO · OPEN [V]
+Found by the GO worker, round 16. go test dir chan/select3.go: go run exits 0 with no output (the goroutine blocks forever, main
+returns); interp and run abort with "send on a non-channel". A nil channel blocks on send and receive (spec, Send statements).
 
 # SW — Swift  (oracle: swiftc 6.1.2)
+
+### T-962 swift: a labelled `if` does not parse · P2 · SW · OPEN [V]
+Found by the GO worker, round 16. `lbl: if x > 0 { print(1); break lbl }` → swiftc accepts it (break leaves the if); both halves
+"Not everything could be parsed". Labelled `do` likewise (Swift reference, Labeled Statement).
 
 # DA — Dart  (no dart here: spec-only)
 
@@ -1246,6 +1235,11 @@ T-951 python: int / float subclass instances rejected by %-formatting and `forma
 T-952 python: an unknown method on a str or list is an uncatchable host error, not AttributeError — DONE a05a3996
 T-953 python interp: slice assignment with a start below -len never terminates — DONE a05a3996
 T-954 python: smaller data-model gaps — PARTIAL a05a3996 (__bool__/__len__ result checks, 3-arg pow dispatch, MRO error, KeyboardInterrupt, chain truth; rest is T-957, generator state T-958)
+T-904 go: a variable typed by a conversion loses its type when an untyped constant is assigned later — DONE 7cc6df40
+T-905 go compiler: a store through a pointer to a complex struct field or slice element is lost — DONE cd8aad41
+T-927 go: a struct type with a map of itself hangs every engine before main — DONE b47cdc69
+T-928 go: `*p` / `x.a` as the target of a select-case receive or a for-range assignment does not parse — DONE 9bea877a
+T-910 go and swift compilers accept `break` outside a loop; compile errors say "js runtime error:" — PARTIAL 22c1cfa6 (break/continue outside a loop rejected with gc's / swiftc's messages in all four halves; select break and labelled switch/select break fixed; undefined names are T-959)
 
 # Settled — do not re-open
 
