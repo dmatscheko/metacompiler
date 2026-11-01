@@ -123,14 +123,6 @@ are queued, buffers past capacity instead of blocking. go/test/chan powser1/2, s
 (10000 nested drains overflow the stack) still fail. Needs a suspension mechanism that works in all three engines (the manual calls
 real coroutines out of the subset - decide first). Go also runs the most recently spawned goroutine first; we run spawn order.
 
-### T-1023 go: a struct value's method set includes pointer methods in type switches/assertions; embedding another package's defined non-struct type · P3 · GO · IN PROGRESS (GO worker, round 22) [V]
-Found by the GO worker, round 21 (oracle go run). `type S struct{n int}; func (s *S) Inc(){}; func (s S) Get() int {..}`; with
-interfaces Incer{Inc();Get()} and Getter{Get()}, `switch v.(type){case Incer: ..; case Getter: ..}` for v = S{1}, and `var g Getter =
-S{3}; _, ok := g.(Incer)` → go `getter`, false; ours `incer`, true (goHasMethod/goSatisfies ignore __ptr$ for a __vv struct value, in
-the interpreter, abnf/jsrtgolang.go and go-rt.metajs). Package dtbox `type L []int` with Push/Len, main `type Mine struct{ dtbox.L;
-tag string }; m := &Mine{}; m.Push(4); fmt.Println(m.Len(), m.L)` → go `1 [4]`; interpreter "append() needs a slice", compiler "len()
-of a object" (goPromDt matches only when the field's type text equals its name).
-
 # SW — Swift  (oracle: swiftc 6.1.2)
 
 # DA — Dart  (no dart here: spec-only)
@@ -1087,6 +1079,7 @@ T-1016 java: overload resolution still counts inaccessible constructors (and pro
 T-1022 c#: `ParamName` empty on runtime-thrown exceptions; unknown member of a BCL type fails late — DONE (CS r3, 9c4811dc): runtime throws set ParamName from the '(Parameter ..)' clause in all 3 engines; reading an unknown static member of Math/MathF/string/char/Enumerable fails at the read. Master spec probe: Substring(-1)/(1,5) ParamName, valid method groups Math.Abs/Sqrt/string.IsNullOrEmpty/Select(Math.Abs) all agree on 3 legs.
 T-1020 python: CJK/idna/punycode/escape codecs; dir() of a generator; new attribute on an iterator; python-test-full.5.py near the step brake — PARTIAL→split (PY r20, 4a64d854): generator dir(); no-__dict__ AttributeError for iterators; unicode_escape/raw_unicode_escape/punycode/ASCII idna codecs; random.seed bit ops 3x cheaper with identical sequences. Master probe vs python3 3.14 (7 seeds incl. bignum/neg/str/bytes, big & | ^ << >>, codecs, dir): 4 legs agree. CJK codecs, \N{}, idna nameprep remain.
 T-1018 ruby: an Enumerator is not Enumerable; Hash#to_proc; `lazy.instance_of?(Enumerator)`; default_proc lambda arity — DONE (RB r38, 28b9c6e8): Enumerator/Lazy Enumerable, Symbol Comparable, exact instance_of?, Hash#to_proc and &hash, default_proc= conversion + lambda arity TypeError (2.6 rules). Master probe vs ruby 2.6: 4 legs agree.
+T-1023 go: a struct value's method set includes pointer methods in type switches/assertions; embedding another package's defined non-struct type — DONE (GO r22, 1ac92568): value method sets exclude pointer methods in type switches/assertions (incl. embedded fields); embedded-interface bodies now parse (goIfaceSet); imported defined non-struct types promote methods. Master probe (sent back once for interface{G;S}) vs go run: 4 legs agree.
 
 # Settled — do not re-open
 
