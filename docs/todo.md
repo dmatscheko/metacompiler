@@ -95,7 +95,7 @@ Found by the CORE worker, round 15. The interpreter's stripWs deletes every ASCI
 strings.TrimSpace, native strips ASCII 9-13 and 32: `int.Parse(" 1 2 ")` and `int.Parse(" 1")` give three answers.
 .NET's NumberStyles.Integer allows leading/trailing white space (U+0009-U+000D, U+0020) only; settle with a real dotnet.
 
-### T-1045 csharp: null message in two-arg Argument* ctors; 3-argument exception ctors · P3 · CS · OPEN [V spec-only]
+### T-1045 csharp: null message in two-arg Argument* ctors; 3-argument exception ctors · P3 · CS · IN PROGRESS (CS worker, round 6) [V spec-only]
 Per dotnet/runtime source (found by CS r5), all three engines: `new ArgumentException(null, "pn").Message` → "Value does not fall within the expected range. (Parameter 'pn')"; `new ArgumentNullException("pn", null)` / `ArgumentOutOfRangeException("pn", null)` → "Exception of type 'System.X' was thrown. (Parameter 'pn')". Ours: Message null. 3-arg forms `ArgumentException(message, paramName, inner)` and `ArgumentOutOfRangeException(paramName, actualValue, message)` (appends "\nActual value was …") read only the first argument.
 
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
@@ -130,7 +130,7 @@ Also found by PHP r36: (1) compiler: `function g2(){ try { thrower(); } catch (E
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-1044 bash: per-scope associative kind; compiled computed `declare -A`/array literals; prefix-assignment and assoc-key edge cases · P3 · SH · OPEN [V]
+### T-1044 bash: per-scope associative kind; compiled computed `declare -A`/array literals; prefix-assignment and assoc-key edge cases · P3 · SH · IN PROGRESS (SH worker, round 28) [V]
 Oracle bash 5.3, LC_ALL=C (remainder of T-1034 + finds of SH r27, repros in scratchpad SH27/):
 - `local m[@]=z` with a global assoc m: bash makes the local indexed (needs a per-scope "is associative" fact; ours is one fact per name).
 - Compiler: `declare -A "$s"` / `export -a "$s"` refused at compile time (needs a run-time associative table); `declare -a "$n=(1 2)"` refused at run time (needs a run-time array-literal parser); bare words in an assoc literal are joined instead of field-split.
