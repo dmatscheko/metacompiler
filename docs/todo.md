@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1044** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1045** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -137,14 +137,14 @@ Also found by PHP r36: (1) compiler: `function g2(){ try { thrower(); } catch (E
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-1034 bash: subscript/attribute edge cases left by T-1017; read -n/-N; computed declare -A · P3 · SH · IN PROGRESS (SH worker, round 27) [V]
-Oracle /opt/homebrew/bin/bash 5.3, LC_ALL=C (found by SH r26, repros in scratchpad SH26/):
-- `s=5 f` with `local s+=4` in f: bash `declare -x s="54"`; ours `declare -- s="54"` (export attribute lost).
-- `read -n N` / `read -N N` ignored.
-- `unset 'b[]'`: bash status 0, no-op; ours unsets [0]. `${b[]}` → bad substitution. `b+=([]=v)` → "[]=v: bad array subscript". `declare -A m2=([]=v)` → "['']='v': bad array subscript". `let 'b[]=3'`, `(( b[]=3 ))`, `$(( b[] ))` diagnostics differ.
-- `local m[@]=z` with a global assoc m: bash makes the local indexed + bad subscript. Assoc `printf -v 'm[@]'` / `read 'm[@]'` allowed by bash; interpreter refuses, compiler refuses computed names (rt_setvar_byname).
-- `declare -n r='b[]'` → status 1. `declare +a pa[1]` → "cannot destroy array variables in this way", status 1.
-- Compiler: `declare -A "$s"` / `export -a "$s"` refused at compile time (needs a runtime attribute table); `declare -a "$n=(1 2)"` refused at run time.
+### T-1044 bash: per-scope associative kind; compiled computed `declare -A`/array literals; prefix-assignment and assoc-key edge cases · P3 · SH · OPEN [V]
+Oracle bash 5.3, LC_ALL=C (remainder of T-1034 + finds of SH r27, repros in scratchpad SH27/):
+- `local m[@]=z` with a global assoc m: bash makes the local indexed (needs a per-scope "is associative" fact; ours is one fact per name).
+- Compiler: `declare -A "$s"` / `export -a "$s"` refused at compile time (needs a run-time associative table); `declare -a "$n=(1 2)"` refused at run time (needs a run-time array-literal parser); bare words in an assoc literal are joined instead of field-split.
+- Prefix assignment before a builtin should make a temporary -x variable: `n=2+3 declare -p n` → `declare -x n="2+3"`; `a=5 declare -p a` hides the array. `y=5 export -n y` / `z=5 declare +x z` should restore the old value.
+- `${m[$x]}` with x='@' on an assoc expands everything instead of key "@". `m=([x]=0 a 1)` → "must use subscript when assigning associative array". Empty assoc key via expansion (`m[$k]=v`, `${m[$k]}`, `unset 'm[$k]'`) lacks bash's diagnostics. `unset 'b[""]'` → bash unsets b[0]; ours arithmetic syntax error.
+- `$(( 0 && b[]=4 ))` → "attempted assignment to non-variable". `declare -n r7; r7='b[]'` → "`b[]': not a valid identifier"; ours binds r7 to b[]. `declare +a` of an empty declared array isn't refused.
+- Assoc `declare -p` key order differs from bash.
 
 # C — C subset
 
@@ -1093,6 +1093,7 @@ T-1028 python: CJK multibyte codecs, `\N{...}` escapes, idna nameprep — PARTIA
 T-1038 kotlin: unsigned ranges lose their type — DONE (KT r18, 43324a36): ranges carry an unsigned width (UIntRange/ULongRange identity, UInt/ULong elements, unsigned MAX for endExclusive) through step/reversed/downTo; until at MIN_VALUE answers EMPTY. Master probe vs kotlinc 2.2.21 (24 lines): 4 legs agree.
 T-1040 python: `type(x) is range` (and enumerate/zip/map/filter/reversed) is False — DONE (PY r22, fa60d906): type(v)/v.__class__ of range/enumerate/zip/map/filter/reversed return the builtin itself. Master probe vs python3 3.14 (is/==/dict keys/constructing via type(v)): 4 legs agree.
 T-1039 ruby: missing Array Enumerable methods; each_slice block result; multi-value yields; zip/method(:map) on a user Enumerable — DONE (RB r41, d270d298): member?/grep/grep_v/minmax_by/slice_before/slice_after/chunk/chain; each_slice/each_cons block → nil (2.6); multi-value yields per-method (13 unpack, rest pack); zip via to_a; each-less Enumerable fails on each; method(:map)/instance_method/UnboundMethod. Master probe vs ruby 2.6 (27 lines): 4 legs agree.
+T-1034 bash: subscript/attribute edge cases left by T-1017; read -n/-N; computed declare -A — PARTIAL→split (SH r27, 92e1b3da): prefix-binding export through local, read -n/-N, empty-subscript diagnostics (unset/${b[]}/+=/assoc literal/let/((...))), assoc @/* keys via read/printf -v, nameref value checks, declare +a/+A refusal. Master probe vs bash 5.3: 4 legs agree (external-command pipelines excluded). Per-scope assoc kind and compiler computed declare -A/array literal filed as follow-up.
 
 # Settled — do not re-open
 
