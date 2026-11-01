@@ -3915,7 +3915,32 @@ function goRecvC(start, at) {
         i = i + 1
     }
     var h = t.substring(0, stHeadLen(t))
-    return {head: h, hty: h == "" ? "" : cTyLookup(h), loc: h != "" && cIsLocal(h), text: t}
+    return {head: h, hty: h == "" ? "" : cTyLookup(h), loc: h != "" && cIsLocal(h), text: t,
+            ty: (t.charAt(0) == "(" || t.charAt(h.length) == "{") ? goChainTyNow(t) : ""}
+}
+// The static type of a stripped chain text, read with the bindings in scope now:
+// besides a named head, a parenthesised operand (`(&U{..}).M`, `(s[i]).M`) and a
+// composite literal of a named type (`U{..}.M`) lead it.
+function goChainTyNow(t) {
+    var h = t.substring(0, stHeadLen(t))
+    var lead = ""
+    var ty = ""
+    if (t.charAt(0) == "(") {
+        var e = stClose(t, 0)
+        if (e < 0) { return "" }
+        var inner = t.substring(1, e)
+        var amp = inner.charAt(0) == "&"
+        ty = goChainTyNow(amp ? inner.substring(1) : inner)
+        if (ty != "" && amp) { ty = "*" + ty }
+        lead = t.substring(0, e + 1)
+    } else if (h != "" && t.charAt(h.length) == "{" && !cIsLocal(h) && cTyLookup(h) == ""
+               && (goStructTyName(h) != "" || goIsDefTy(h))) {
+        var b = stClose(t, h.length)
+        if (b < 0) { return "" }
+        ty = h
+        lead = t.substring(0, b + 1)
+    } else { return stChainFrom(h, h == "" ? "" : cTyLookup(h), h != "" && cIsLocal(h), t) }
+    return ty == "" ? "" : stChainFrom(lead, ty, true, t)
 }
 // The type T of a method expression `T.M` or `(*T).M` whose receiver text is rc,
 // or "": its call T.M(r, args) is r.M(args) (Go spec "Method expressions").
@@ -3943,6 +3968,7 @@ function goDtPlan(rc, name) {
     // A method expression's receiver is its first argument, of the type it names.
     var mx = goMethExprTy(rc)
     if (mx != "") { t = rc.text.charAt(0) == "(" ? "*" + mx : mx }
+    else if (t == "" && rc != null) { t = rc.ty }
     var bt = stNoTyArgs((t.length > 0 && t.charAt(0) == "*") ? t.substring(1) : t)
     var bk = goTyKey(bt)
     // A struct whose FIELD has the name holds a func value there: `l.Swap(i, j)`

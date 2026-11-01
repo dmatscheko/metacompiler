@@ -1993,6 +1993,10 @@ func s143() {
 	dinc(d, 40)
 	fs := []func(*s143U) int{(*s143U).Sum, (*s143U).Len}
 	check("mexprval2143", w.s143C == 11 && get(*w) == 11 && w.Sum() == 16 && (*s143W).Sum(w) == 16 && (*s143D).Sum(d) == 18 && d.Get() == 42 && s143D.Get(*d) == 42 && fs[0](u)+fs[1](u) == 20)
+	ws := []s143W{{s143T: s143T{2, 2}, s143C: 9}}
+	(&ws[0]).Inc(100)
+	check("promrecv143", (&s143U{&t}).Sum() == 16 && s143U{&t}.Len() == 4 && (s143W{s143T: s143T{1}, s143C: 4}).Get() == 4 &&
+		s143W{s143T: s143T{1, 1}}.Len() == 2 && (ws[0]).Len() == 2 && ws[0].Get() == 109 && (ws[0]).Sum() == 4)
 }
 
 func main() {
