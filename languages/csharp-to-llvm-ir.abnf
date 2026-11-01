@@ -2484,6 +2484,11 @@ KwLet       = "let" KwEnd ;
         }}
     }
     function makeIndexedInit(valT, keyT) { return {mindex: keyT, mval: valT} }
+    // A member initializer is an assignment to the field or property (ECMA-334
+    // 12.8.17.3): a name some class declares with accessor bodies goes through them
+    // on a class instance (emitPropSet / emitPropGet, which tell a plain slot of the
+    // same name apart); an anonymous object or a collection holds no accessors.
+    // Twin of csApplyInits in csharp-interpreter.abnf.
     function emitInits(b, oV, ms) {
         for (var i = 0; i < ms.length; i++) {
             var m = ms[i]
@@ -2496,15 +2501,34 @@ KwLet       = "let" KwEnd ;
                 continue
             }
             if (m.mnest != undefined) {
-                b = emitInits(b, callExt(b, "js_get", [oV, emitStr(b, m.mfield)]), m.mnest)
+                var nr = csInitAcc(b, oV, m.mfield, csPlainGetT(oV, m.mfield), csInitGetT(oV, m.mfield))
+                b = emitInits(nr.b, nr.v, m.mnest)
                 continue
             }
             if (m.mcoll != undefined) { b = m.mcoll(b, oV); continue }
             var r = m.mval(b)
             b = r.b
-            callExt(b, "js_set", [oV, emitStr(b, m.mfield), r.v])
+            b = csInitAcc(b, oV, m.mfield, csPlainSetT(oV, m.mfield, r.v), csInitSetT(oV, m.mfield, r.v)).b
         }
         return b
+    }
+    function csInitGetT(cur, name) {
+        return function(ab) { return emitPropGet(ab, cur, name) }
+    }
+    function csInitSetT(cur, name, v) {
+        return function(ab) { return {b: emitPropSet(ab, cur, name, v), v: v} }
+    }
+    function csInitAcc(b, oV, name, plainT, accT) {
+        if (csPropAcc[name] != "instance") { return plainT(b) }
+        var plainB = curF.NewBlock("")
+        var accB = curF.NewBlock("")
+        var mergeB = curF.NewBlock("")
+        b.NewCondBr(truthy(b, callExt(b, "js_has", [oV, emitStr(b, "__class")])), accB, plainB)
+        var pr = plainT(plainB)
+        pr.b.NewBr(mergeB)
+        var ar = accT(accB)
+        ar.b.NewBr(mergeB)
+        return {b: mergeB, v: mergeB.NewPhi([llvm.ir.NewIncoming(pr.v, pr.b), llvm.ir.NewIncoming(ar.v, ar.b)])}
     }
 
     // ----- tuples and deconstruction -----
@@ -5949,9 +5973,11 @@ KwLet       = "let" KwEnd ;
         csDfltMember(name, ty)
         var isStatic = false
         var isPub = false
+        var isOvr = false
         for (var k = 0; k < mods.length; k++) {
             if (mods[k] == "static") { isStatic = true }
             if (mods[k] == "public") { isPub = true }
+            if (mods[k] == "override") { isOvr = true }
         }
         if (auto) { return csAutoField(name, isStatic, isPub, init, ty) }
         if (getT != null || setT != null) { csPropAcc[name] = isStatic ? "static" : "instance" }
@@ -5962,7 +5988,8 @@ KwLet       = "let" KwEnd ;
         // `public double Get => 3;` answers 3.0 and Get / 2 is 1.5. Its SETTER's
         // `value` parameter is not adopted - the value arrives from the assignment.
         return {kind: "prop", name: name, statik: isStatic, pub: isPub, getT: getT, setT: setT,
-                getTy: ty, addT: addT, remT: remT, adoptTy: csNoteAdoptMem(name, csWriteTy(ty)), expl: expl}
+                getTy: ty, addT: addT, remT: remT, adoptTy: csNoteAdoptMem(name, csWriteTy(ty)), expl: expl,
+                ovr: isOvr}
     }
     // An automatic property IS a field: same record, so every field path (the instance
     // initializers, the static slot, the member table) applies to it unchanged.
@@ -5977,7 +6004,7 @@ KwLet       = "let" KwEnd ;
         if (isInt) { dfltH = 0 }
         // The declared type adopts the initializer.
         return {kind: "field", name: name, statik: isStatic, pub: isPub, init: csAdoptInit(ty, init),
-                dfltH: dfltH, isInt: isInt, adoptTy: csNoteAdoptMem(name, csWriteTy(ty))}
+                dfltH: dfltH, isInt: isInt, adoptTy: csNoteAdoptMem(name, csWriteTy(ty)), autop: true}
     }
     function makeIndexer(items) {
         var getT = null
@@ -6450,7 +6477,9 @@ KwLet       = "let" KwEnd ;
                 } else {
                     fv = fieldDefault(b, fields[k])
                 }
-                callExt(b, "js_set", [thisV, emitStr(b, fields[k].name), fv])
+                // An automatic property an accessor overrides lives in its backing slot.
+                var fslot = fields[k].bkslot != undefined ? fields[k].bkslot : fields[k].name
+                callExt(b, "js_set", [thisV, emitStr(b, fslot), fv])
             }
         }
         if (superName != undefined && superName != null && !isThisInit) {
@@ -6900,6 +6929,44 @@ KwLet       = "let" KwEnd ;
         }
         return out
     }
+    // AN ACCESSOR PROPERTY THAT OVERRIDES AN AUTOMATIC ONE: the declaring class keeps
+    // the automatic property under __bk_<name> and gets an accessor pair over that slot,
+    // so every read and write dispatches to the most derived accessor and base.P reaches
+    // the field. The rule is cited at the twin, csBackAuto in csharp-interpreter.abnf.
+    // csBkProps is decided at walk time and read when the classes are emitted, so a
+    // base declared before its override is covered. The synthesized getter also joins
+    // csBodyMembers, which is what makeBaseProp's js_supercall needs.
+    var csAutoProps = {}
+    var csAccProps = {}
+    var csBkProps = {}
+    function csBackAuto(sup, name) {
+        var c = sup
+        for (var n = 0; n < 32 && c != "" && c != undefined; n++) {
+            var ac = csAccProps[c]
+            if (ac != undefined && ac["$" + name] === true) { return }
+            var au = csAutoProps[c]
+            if (au != undefined && au["$" + name] === true) {
+                csBkProps[c + "." + name] = true
+                csBodyMembers[c]["__get_" + name] = true
+                return
+            }
+            c = csSupers[c]
+        }
+    }
+    // The getter and setter csBackAuto gives the declaring class.
+    function csBkGetBody(slot) {
+        return function(b) {
+            var t = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "this")])
+            return retStmt(b, callExt(b, "js_get", [t, emitStr(b, slot)]))
+        }
+    }
+    function csBkSetBody(slot) {
+        return function(b) {
+            var t = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "this")])
+            callExt(b, "js_set", [t, emitStr(b, slot), callExt(b, "js_scope_get", [curScopeV, emitStr(b, "value")])])
+            return b
+        }
+    }
     function buildClassStmt(name, members, kind, primary, isRecord) {
         var full = csFullOf(name)
         return function(b) {
@@ -6966,6 +7033,13 @@ KwLet       = "let" KwEnd ;
                         }
                         callExt(b, "js_set", [clsV, emitStr(b, mm.name), sv])
                     } else {
+                        if (csBkProps[name + "." + mm.name] === true) {
+                            mm.bkslot = "__bk_" + mm.name
+                            var bgi = emitFunc([], csBkGetBody(mm.bkslot), true, null, undefined, false, null)
+                            callExt(b, "js_set", [clsV, emitStr(b, "__get_" + mm.name), callExt(b, "js_closure", [handle(bgi), curScopeV])])
+                            var bsi = emitFunc(["value"], csBkSetBody(mm.bkslot), true, null, undefined, false, null)
+                            callExt(b, "js_set", [clsV, emitStr(b, "__set_" + mm.name), callExt(b, "js_closure", [handle(bsi), curScopeV])])
+                        }
                         fields.push(mm)
                     }
                 }
@@ -7214,6 +7288,21 @@ KwLet       = "let" KwEnd ;
         csMemberTys[name] = tys
         csDataMembers[name] = dat
         csNoteMethodSigs(name, members)
+        var autos = {}
+        var accs = {}
+        for (var ka = 0; ka < members.length; ka++) {
+            var ma = members[ka]
+            if (ma.statik === true) { continue }
+            if (ma.kind == "field" && ma.autop === true && kind != "interface") { autos["$" + ma.name] = true }
+            if (ma.kind == "prop") { accs["$" + ma.name] = true }
+        }
+        csAutoProps[name] = autos
+        csAccProps[name] = accs
+        for (var kb = 0; kb < members.length; kb++) {
+            if (members[kb].kind == "prop" && members[kb].ovr === true && members[kb].statik !== true) {
+                csBackAuto(csSupers[name], members[kb].name)
+            }
+        }
         // A record is built exactly like the class / struct it names; what it adds is value
         // equality (registered as its 'operator ==' / '!=', so the ordinary operator
         // dispatch reaches it) and deconstruction.

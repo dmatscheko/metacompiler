@@ -4549,13 +4549,22 @@ KwLet       = "let" KwEnd ;
         }}
     }
     function makeIndexedInit(valT, keyT) { return {mindex: keyT, mval: valT} }
+    // A member initializer is an assignment to the field or property (ECMA-334
+    // 12.8.17.3), so a property with a set accessor body runs it, and a nested one
+    // reads the member through its get accessor. Twin of emitInits in
+    // csharp-to-llvm-ir.abnf.
     function csApplyInits(o, ms) {
         for (var i = 0; i < ms.length; i++) {
             var m = ms[i]
             if (m.mindex != undefined) { csSetIndex(o, m.mindex(), m.mval()); continue }
-            if (m.mnest != undefined) { csApplyInits(o[m.mfield], m.mnest); continue }
+            if (m.mnest != undefined) { csApplyInits(core.getField(o, m.mfield), m.mnest); continue }
             if (m.mcoll != undefined) { m.mcoll(o); continue }
-            o[m.mfield] = m.mval()
+            var v = m.mval()
+            if (!hasOwn(o, m.mfield)) {
+                var st = csFindAcc(o, "__set_" + m.mfield)
+                if (st != undefined) { st(o, v); continue }
+            }
+            o[m.mfield] = v
         }
     }
     function csSetIndex(o, k, v) {
@@ -5960,9 +5969,11 @@ KwLet       = "let" KwEnd ;
         csDfltMember(name, ty)
         var isStatic = false
         var isPub = false
+        var isOvr = false
         for (var k = 0; k < mods.length; k++) {
             if (mods[k] == "static") { isStatic = true }
             if (mods[k] == "public") { isPub = true }
+            if (mods[k] == "override") { isOvr = true }
         }
         if (auto) { return csAutoField(name, isStatic, isPub, init, ty) }
         // A computed property's GETTER carries a declared type too, so
@@ -5970,7 +5981,8 @@ KwLet       = "let" KwEnd ;
         // `value` parameter is not adopted - the value arrives from the assignment.
         return {kind: "prop", name: name, statik: isStatic, pub: isPub,
                 getT: getT == null ? getT : csAdoptRet(ty, getT), setT: setT,
-                addT: addT, remT: remT, adoptTy: csNoteAdoptMem(name, csWriteTy(ty)), expl: expl}
+                addT: addT, remT: remT, adoptTy: csNoteAdoptMem(name, csWriteTy(ty)), expl: expl,
+                ovr: isOvr}
     }
     // An automatic property IS a field: same record, so every field path (the instance
     // initializers, the static slot, the member table) applies to it unchanged.
@@ -5985,7 +5997,7 @@ KwLet       = "let" KwEnd ;
         // declaration: `public double A { get; set; } = 3;` holds 3.0.
         return {kind: "field", name: name, statik: isStatic, pub: isPub,
                 init: init == null ? init : csAdoptThunk(ty, init), dflt: dflt,
-                adoptTy: csNoteAdoptMem(name, csWriteTy(ty))}
+                adoptTy: csNoteAdoptMem(name, csWriteTy(ty)), autop: true}
     }
     function makeIndexer(items) {
         var getT = null
@@ -6119,7 +6131,14 @@ KwLet       = "let" KwEnd ;
                         : ((mm.adoptTy != undefined && mm.adoptTy != "" && mm.dflt !== null)
                            ? csAdoptVal(mm.adoptTy, mm.dflt) : mm.dflt)
                 }
-                else if (kind != "interface") { fields.push(mm) }
+                else if (kind != "interface") {
+                    fields.push(mm)
+                    if (mm.autop === true) {
+                        if (cls.__autop == undefined) { cls.__autop = {} }
+                        cls.__autop["$" + mm.name] = mm
+                        if (mm.bkslot != undefined) { csBkAccs(cls, mm) }
+                    }
+                }
             }
             if (mm.kind == "prop" && mm.statik) { sfld[mm.name] = true }
             if (mm.adoptTy != undefined && mm.adoptTy != "") { mty[mm.name] = mm.adoptTy }
@@ -6167,11 +6186,15 @@ KwLet       = "let" KwEnd ;
         function initOwn(self) {
             for (var k = 0; k < fields.length; k++) {
                 var fk = fields[k]
-                if (fk.init != null && fk.init != undefined) { self[fk.name] = fk.init(); continue }
+                // An automatic property an accessor overrides lives in its backing
+                // slot (csBackAuto).
+                var slot = fk.name
+                if (fk.bkslot != undefined) { slot = fk.bkslot }
+                if (fk.init != null && fk.init != undefined) { self[slot] = fk.init(); continue }
                 // A field with no initializer starts at its declared type's zero,
                 // and THE WIDTH IS ON THE VALUE: `public double U;` holds 0.0, not
                 // the int 0.
-                self[fk.name] = (fk.adoptTy != undefined && fk.adoptTy != "" && fk.dflt !== null)
+                self[slot] = (fk.adoptTy != undefined && fk.adoptTy != "" && fk.dflt !== null)
                     ? csAdoptVal(fk.adoptTy, fk.dflt) : fk.dflt
             }
         }
@@ -6236,6 +6259,7 @@ KwLet       = "let" KwEnd ;
             }
             // A property with accessor bodies: '__get_X' / '__set_X' members.
             if (m2.kind == "prop") {
+                if (m2.ovr === true && !m2.statik) { csBackAuto(sup, m2.name) }
                 if (m2.getT != null) { cls["__get_" + m2.name] = csAccClosure(m2.statik, csGetPI, m2.getT, cls) }
                 if (m2.setT != null) { cls["__set_" + m2.name] = csAccClosure(m2.statik, csSetPI, m2.setT, cls) }
                 // An event's own subscription accessors: 'E += h' calls add(h).
@@ -6533,6 +6557,34 @@ KwLet       = "let" KwEnd ;
         return csMethodDispatch(fns, csCtorSigs(infos), true, null)
     }
     // An accessor closure: the same shape as a method, so it is called like one.
+    // AN ACCESSOR PROPERTY THAT OVERRIDES AN AUTOMATIC ONE. An automatically
+    // implemented property is an accessor pair over a hidden backing field (ECMA-334
+    // 15.7.4), so `override int K => 9` replaces the getter on every read, through a
+    // base reference and from the base's own code alike, while an accessor the
+    // override does not declare stays the automatic one and base.K reads the field.
+    // Here an automatic property is a plain own slot, which would win over any
+    // accessor (core.getField reads an own slot first). So when an override is
+    // built, the class that declares the automatic property - the nearest one in the
+    // chain declaring that name, if it declares no accessors - stores it under
+    // __bk_<name> instead (initOwn) and gets the accessor pair over that slot.
+    // Twin of csBackAuto in csharp-to-llvm-ir.abnf.
+    function csBackAuto(sup, name) {
+        for (var c = sup; c != undefined && c != null; c = c.__super) {
+            if (hasOwn(c, "__get_" + name) || hasOwn(c, "__set_" + name)) { return }
+            var ap = c.__autop
+            if (ap != undefined && hasOwn(ap, "$" + name)) {
+                var rec = ap["$" + name]
+                rec.bkslot = "__bk_" + name
+                csBkAccs(c, rec)
+                return
+            }
+        }
+    }
+    function csBkAccs(cls, rec) {
+        var slot = rec.bkslot
+        cls["__get_" + rec.name] = function(self) { return self[slot] }
+        cls["__set_" + rec.name] = function(self, v) { self[slot] = v }
+    }
     function csAccClosure(isStatic, pinfo, body, cls) {
         var m = {pinfo: pinfo, body: body}
         return isStatic ? makeStaticClosure(m, cls) : makeInstanceClosure(m)

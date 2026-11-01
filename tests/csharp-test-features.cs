@@ -123,6 +123,35 @@ namespace Demo
         }
     }
 
+    class VAuto                              // an automatic property an accessor overrides
+    {
+        public virtual int K { get; set; } = 5;
+        public int Seen;
+        public VAuto() { Seen = K; }         // a virtual read: the override's getter runs
+        public int ReadK() { return K; }
+        public void WriteK(int v) { K = v; }
+    }
+
+    class VAutoGet : VAuto                   // overrides the getter, inherits the setter
+    {
+        public override int K => 9;
+        public int BaseK() { return base.K; }
+    }
+
+    class VAutoSet : VAuto                   // overrides the setter, inherits the getter
+    {
+        public int Log;
+        public override int K { set { Log = value; } }
+    }
+
+    class VAutoGetSub : VAutoGet { public override int K => base.K + 100; }
+
+    class Doubler                            // a member initializer runs the set accessor
+    {
+        int d;
+        public int D { get { return d; } set { d = value * 2; } }
+    }
+
     class Labeled                            // ctor arguments plus member initializer
     {
         public int Id;
@@ -860,6 +889,27 @@ namespace Demo
             Program.Check("class-base-prop",
                           bird.Kind == "bird<animal" && chick.Kind == "chick<bird<animal"
                           && new Chick().BaseLegs == 2);
+            // An automatic property is an accessor pair over a hidden field (ECMA-334
+            // 15.7.4), so an accessor that overrides it wins on every read - through a
+            // base reference and from the base's own code, its constructor included -
+            // the accessor the override does not declare is the automatic one, and
+            // base.K reads the field.
+            int[] kv = { 11, 13, 31 };
+            VAuto va = new VAutoGet();
+            Program.Check("prop-auto-override-get",
+                          va.K == 9 && new VAutoGet().K == 9 && va.ReadK() == 9 && va.Seen == 9
+                          && ((VAutoGet)va).BaseK() == 5);
+            va.K = kv[0];
+            string vk1 = va.K + " " + ((VAutoGet)va).BaseK();
+            va.WriteK(kv[1]);
+            Program.Check("prop-auto-override-inherited-set",
+                          vk1 == "9 11" && va.K == 9 && ((VAutoGet)va).BaseK() == 13);
+            VAutoSet vset = new VAutoSet();
+            vset.K = kv[2];
+            Program.Check("prop-auto-override-set", vset.K == 5 && vset.Log == 31 && vset.Seen == 5);
+            Program.Check("prop-auto-override-base-chain",
+                          new VAutoGetSub().K == 109 && new VAutoGetSub().ReadK() == 109);
+            Program.Check("prop-auto-not-overridden", new VAuto().K == 5 && new VAuto().ReadK() == 5);
 
             // ----- object and collection initializers -----
             Box b1 = new Box { W = 3, H = 4 };
@@ -870,6 +920,12 @@ namespace Demo
             Program.Check("ctor-plus-initializer", lab.Id == 7 && lab.Extra == 9);
             Labeled plainLab = new Labeled(3);
             Program.Check("ctor-no-initializer", plainLab.Extra == 1);
+            // A member initializer is an assignment (ECMA-334 12.8.17.3): it runs a set
+            // accessor, the overriding one's or the automatic one it inherits.
+            Doubler dbl = new Doubler { D = kv[0] };
+            Program.Check("object-init-setter", dbl.D == 22);
+            VAutoGet vinit = new VAutoGet { K = kv[1] };
+            Program.Check("object-init-auto-override", vinit.K == 9 && vinit.BaseK() == 13);
 
             // ----- statics, recursion, generics -----
             Program.Check("fn-early-return", Program.Sign(-9) == -1 && Program.Sign(9) == 1);
