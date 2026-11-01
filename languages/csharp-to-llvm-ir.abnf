@@ -3550,22 +3550,25 @@ KwLet       = "let" KwEnd ;
         }
         if (ref.bprop != undefined) { return makeBaseAssign(ref, op, valT) }
         if (op != "=") { return makeCompoundAssign(ref, op, valT, lty, elty, defClass) }
+        // A simple `x = y` on a member or element evaluates the receiver and the
+        // index arguments before y (ECMA-334 12.21.2); the store's own null and
+        // bounds faults come after y. Twin of the same closure in
+        // csharp-interpreter.abnf.
         return function(b) {
-            var r = valT(b)
-            b = r.b
-            var v = r.v
             if (ref.path.length == 0) {
+                var r = valT(b)
+                b = r.b
+                var v = r.v
                 var mi = csMemberInfo(defClass, ref.name)
                 if (mi != null && mi.dat) { return csUnqualWrite(b, ref.name, mi, v, null, false) }
                 if (lty != "") { var ral = emitAdoptLocal(b, lty, v); b = ral.b; v = ral.v }
                 csScopeWrite(b, ref.name, v)
-            } else {
-                var p = emitRefPath(b, ref)
-                var rq = csQualWrite(p.b, p, v, null, elty)
-                b = rq.b
-                v = rq.v
+                return {b: b, v: v}
             }
-            return {b: b, v: v}
+            var p = emitRefPath(b, ref)
+            var rv = valT(p.b)
+            var rq = csQualWrite(rv.b, p, rv.v, null, elty)
+            return {b: rq.b, v: rq.v}
         }
     }
     // `x op= y`: x is evaluated and its value read BEFORE y runs (ECMA-334 12.21.4),

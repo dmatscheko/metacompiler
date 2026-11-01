@@ -3446,8 +3446,9 @@ KwLet       = "let" KwEnd ;
 
     // A member/index target: obj[key] / obj.field. Dict-aware for Dictionary targets.
     // A target record may carry a `base` thunk instead of a variable name (see
-    // makeChainTarget); everything after the root resolves as usual.
-    function csResolveRef(ref) {
+    // makeChainTarget); everything after the root resolves as usual. A `late`
+    // caller makes the element bounds check itself, at the store.
+    function csResolveRef(ref, late) {
         var o = anytype // The containers along the path may be of mixed types.
         if (ref.base != undefined) { o = ref.base() } else { o = csGetVar(ref.name) }
         for (var i = 0; i < ref.path.length - 1; i++) {
@@ -3468,7 +3469,7 @@ KwLet       = "let" KwEnd ;
         // The WRITE half of the bounds check: `a[3] = 5` on an int[3] throws. A
         // dictionary write INSERTS and must not be checked, and a user indexer is
         // not an array, so the Array.isArray guard is exactly right.
-        if (last.key == undefined && Array.isArray(o)) { csIdxChk(o, lk) }
+        if (!late && last.key == undefined && Array.isArray(o)) { csIdxChk(o, lk) }
         return {obj: o, key: lk, isIndex: last.key == undefined}
     }
     // Reads the current value of an assignment target (for '??=', which must not assign
@@ -3479,7 +3480,7 @@ KwLet       = "let" KwEnd ;
         if (ref.bprop != undefined) { return makeBaseProp(ref.bprop) }
         return function() {
             if (ref.path.length == 0) { return csGetVar(ref.name) }
-            var p = csResolveRef(ref)
+            var p = csResolveRef(ref, false)
             return p.isIndex == true ? csGetIndex(p.obj, p.key) : core.getField(p.obj, p.key)
         }
     }
@@ -3518,16 +3519,21 @@ KwLet       = "let" KwEnd ;
         // (ECMA-334 12.21.4, operands left to right): the receiver, the index
         // arguments and the get accessor, then y, then the set accessor.
         if (op != "=") { return makeCompoundAssign(ref, op, valT, lty, elty) }
+        // A simple `x = y` on a member or element evaluates the receiver and the
+        // index arguments before y (ECMA-334 12.21.2); a null receiver or an index
+        // out of range faults at the store, after y has run.
         return function() {
             var v = anytype
-            v = valT()
             if (ref.path.length == 0) {
+                v = valT()
                 if (lty != "") { v = csAdoptLocal(lty, v) }
                 csSetVar(ref.name, v)
-            } else {
-                v = csQualWrite(csResolveRef(ref), v, null, elty)
+                return v
             }
-            return v
+            var p = csResolveRef(ref, true)
+            v = valT()
+            if (p.isIndex == true && Array.isArray(p.obj)) { csIdxChk(p.obj, p.key) }
+            return csQualWrite(p, v, null, elty)
         }
     }
     function makeCompoundAssign(ref, op, valT, lty, elty) {
@@ -3541,7 +3547,7 @@ KwLet       = "let" KwEnd ;
                 csSetVar(ref.name, v)
                 return v
             }
-            var p = csResolveRef(ref)
+            var p = csResolveRef(ref, false)
             if ((op == "+=" || op == "-=") && p.isIndex != true && !isDict(p.obj)
                 && csFindAcc(p.obj, csEvtKey(op) + p.key) != undefined) {
                 // An event that manages its own subscription list: the accessor takes
@@ -3615,7 +3621,7 @@ KwLet       = "let" KwEnd ;
             }
             var old = anytype
             var nv = anytype
-            nv = csQualWrite(csResolveRef(ref), undefined, function(o) { old = o; return csStep(o, d) }, "")
+            nv = csQualWrite(csResolveRef(ref, false), undefined, function(o) { old = o; return csStep(o, d) }, "")
             return pre ? nv : old
         }
     }
@@ -3982,7 +3988,7 @@ KwLet       = "let" KwEnd ;
                 if (csIsRefBox(cur)) { return cur }
                 return csNameBox(fr, ref.name)
             }
-            var p = csResolveRef(ref)
+            var p = csResolveRef(ref, false)
             return csPlaceBox(p.obj, p.key, p.isIndex)
         }
     }

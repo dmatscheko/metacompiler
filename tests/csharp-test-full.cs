@@ -3950,19 +3950,64 @@ b";                                                   // verbatim keeps the newl
         // parenthesised variable is still that variable (12.8.5). A bare-named root is
         // a member of the enclosing class when no local hides it. No C# toolchain here:
         // the values follow the specification.
+        static string S64Log = "";
+        class S64C
+        {
+            int[] st = { 1, 9, 3 };
+            public int this[int i] { get { Program.S64Log += "G"; return st[i]; } set { Program.S64Log += "S" + value; st[i] = value; } }
+        }
+        static S64C S64Obj = new S64C();
         static int[] S64Arr = { 1, 2, 3 };
-        static S63C S64Get() { Program.S63Log += "c"; return Program.S63Obj; }
+        static S64C S64Get() { Program.S64Log += "c"; return Program.S64Obj; }
+        static int S64I() { Program.S64Log += "i"; return 1; }
         static void S64()
         {
-            Program.S63Obj[1] = 9;
-            Program.S63Log = "";
-            int a = --S64Get()[S63I()];
-            Program.Check("s64c1", a == 8 && Program.S63Log == "ciGS8");
+            int a = --S64Get()[S64I()];
+            Program.Check("s64c1", a == 8 && Program.S64Log == "ciGS8");
             int b = ++S64Arr[1];
             (S64Arr[0]) = 20;
             (S64Arr[2]) += 5;
             int e = ++(S64Arr[2]);
             Program.Check("s64s1", b == 3 && S64Arr[0] == 20 && S64Arr[1] == 3 && e == 9 && S64Arr[2] == 9);
+        }
+
+        // ===== SECTION 65: simple assignment evaluates the target before the right side =====
+        // `x = y` on an element or member evaluates the receiver and the index
+        // arguments first, then y (ECMA-334 12.21.2, 12.4.1); the store itself - and
+        // so a null receiver's or an out-of-range index's fault - comes after y, as
+        // stelem / stfld do (ECMA-335 III.4.26, III.4.28). No C# toolchain here.
+        static string S65Log = "";
+        class S65C
+        {
+            int[] st = { 1, 2, 3 };
+            public int this[int i] { get { return st[i]; } set { Program.S65Log += "S" + value; st[i] = value; } }
+        }
+        static S65C S65Get() { Program.S65Log += "c"; return new S65C(); }
+        static int[] S65A(int[] a) { Program.S65Log += "a"; return a; }
+        static int S65I() { Program.S65Log += "i"; return 1; }
+        static int S65J(int v) { Program.S65Log += "j"; return v; }
+        static void S65()
+        {
+            S65Get()[S65I()] = S65J(7);
+            Program.Check("s65i1", Program.S65Log == "cijS7");
+            int[][] hold = { new int[] { 1, 2 }, null };
+            Program.S65Log = "";
+            try { S65A(hold[0])[S65I() + 4] = S65J(7); } catch (IndexOutOfRangeException) { Program.S65Log += "X"; }
+            string l1 = Program.S65Log;
+            Program.S65Log = "";
+            try { S65A(hold[1])[S65I()] = S65J(7); } catch (NullReferenceException) { Program.S65Log += "N"; }
+            Program.Check("s65f1", l1 == "aijX" && Program.S65Log == "aijN");
+            var d = new Dictionary<int, int>();
+            Program.S65Log = "";
+            d[S65I()] = S65J(7);
+            Program.Check("s65d1", Program.S65Log == "ij" && d[1] == 7);
+            int[] arr = { 1, 2 };
+            int k = 0;
+            arr[k] = k = 1;
+            int[] b2 = { 0, 0, 0 };
+            int m = 0;
+            b2[m++] = m;
+            Program.Check("s65o1", arr[0] == 1 && arr[1] == 2 && k == 1 && b2[0] == 1 && b2[1] == 0 && m == 1);
         }
 
         static int Main()
@@ -4031,6 +4076,7 @@ b";                                                   // verbatim keeps the newl
             Program.S62(); // SECTION-CALL 62
             Program.S63(); // SECTION-CALL 63
             Program.S64(); // SECTION-CALL 64
+            Program.S65(); // SECTION-CALL 65
             Console.WriteLine("full: " + Program.Checks + " checks, " + Program.Fails + " failures");
             return Program.Fails;
         }
