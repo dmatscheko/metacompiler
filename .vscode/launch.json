@@ -750,6 +750,48 @@
             "program": "${workspaceFolder}","args": ["-i", "tests/imports", "languages/java-to-llvm-ir.abnf", "tests/java-fail-test-protected-access.java", "-q"]
         },
         {
+            "name": "Java interpreter protected member on a supertype receiver SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "expectError": "java interpreter error: scale() has protected access in Toolbox",
+            "program": "${workspaceFolder}","args": ["-i", "tests/imports", "languages/java-interpreter.abnf", "tests/java-fail-test-protected-recv.java", "-q"]
+        },
+        {
+            "name": "Java compiler protected member on a supertype receiver SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "expectError": "java compiler error: scale() has protected access in Toolbox",
+            "program": "${workspaceFolder}","args": ["-i", "tests/imports", "languages/java-to-llvm-ir.abnf", "tests/java-fail-test-protected-recv.java", "-q"]
+        },
+        {
+            "name": "Java interpreter package-private constructor SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "expectError": "java interpreter error: Toolbox(int) is not public in Toolbox; cannot be accessed from outside package",
+            "program": "${workspaceFolder}","args": ["-i", "tests/imports", "languages/java-interpreter.abnf", "tests/java-fail-test-ctor-access.java", "-q"]
+        },
+        {
+            "name": "Java compiler package-private constructor SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "expectError": "java compiler error: Toolbox(int) is not public in Toolbox; cannot be accessed from outside package",
+            "program": "${workspaceFolder}","args": ["-i", "tests/imports", "languages/java-to-llvm-ir.abnf", "tests/java-fail-test-ctor-access.java", "-q"]
+        },
+        {
+            "name": "Java interpreter package-private field of a call result SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "expectError": "java interpreter error: hits is not public in Toolbox; cannot be accessed from outside package",
+            "program": "${workspaceFolder}","args": ["-i", "tests/imports", "languages/java-interpreter.abnf", "tests/java-fail-test-untyped-recv.java", "-q"]
+        },
+        {
+            "name": "Java compiler package-private field of a call result SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "expectError": "java compiler error: hits is not public in Toolbox; cannot be accessed from outside package",
+            "program": "${workspaceFolder}","args": ["-i", "tests/imports", "languages/java-to-llvm-ir.abnf", "tests/java-fail-test-untyped-recv.java", "-q"]
+        },
+        {
             "name": "Java interpreter private member SHOULD FAIL",
             "type": "go",
             "request": "launch",

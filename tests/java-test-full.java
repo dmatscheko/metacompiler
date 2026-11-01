@@ -2660,8 +2660,9 @@ class S43 {
 // variable holding a String still calls f(Object), an Integer takes the
 // boxed overload ahead of a widening, and a cast or a conditional decides
 // the type. An enum's and an anonymous class' own overloads resolve the same
-// way, and so does a call through an interface. Every expected string is java
-// 24.0.2's output.
+// way, and so does a call through an interface, and a call's result named
+// through the enclosing class (S44.mk()) has its declared type. Every
+// expected string is java 24.0.2's output.
 class S44A { String who() { return "A"; } }
 class S44B extends S44A { String who() { return "B"; } }
 interface S44I { String q(Object o); String q(String s); }
@@ -2705,6 +2706,7 @@ class S44 {
         Main.check("sov6", (anon.q(o) + anon.q(s) + t(rn) + t(() -> { }) + t("z")).equals("qOqStRtRtO"));
         Main.check("sov7", (new S44P(o).tag + new S44P(s).tag + new S44P(boxed).tag + new S44P(prim).tag
             + new S44Q(s).tag + new S44P((Object) "x").tag).equals("OSIntegerlongOO"));
+        Main.check("sov8", (f(S44.mk()) + S44.f(S44.mk()) + new S44().m(S44.mk())).equals("OOmO"));
     }
 }
 class S44P {

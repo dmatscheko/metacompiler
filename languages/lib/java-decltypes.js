@@ -1682,7 +1682,7 @@ function jMemberRetTy(ty, mn) {
     var b = jOvBare(ty)
     var lib = jLibRetTys["$" + b + "." + mn]
     if (lib != undefined) { return lib }
-    if (jOvCls["$" + b] != undefined || jOvIfaces["$" + b] == true) {
+    if (jIsClassName(b)) {
         var rt = jClsMethodTyOf(b, mn)
         var tps = jClsTyParams["$" + b]
         if (tps != undefined) {
@@ -1695,10 +1695,11 @@ function jMemberRetTy(ty, mn) {
     }
     return ""
 }
-// A type name a static access can start with: a declared type, or a
+// A type name a static access can start with: a declared type (one whose
+// declaration the walk has entered, an enclosing one included), or a
 // java.lang one this subset provides.
 function jIsClassName(nm) {
-    if (jOvCls["$" + nm] != undefined || jOvIfaces["$" + nm] == true) { return true }
+    if (jOvCls["$" + nm] != undefined || jOvIfaces["$" + nm] == true || jBinName["$" + nm] != undefined) { return true }
     return ",String,Integer,Long,Double,Float,Short,Byte,Character,Boolean,Math,StrictMath,System,".indexOf("," + nm + ",") >= 0
 }
 // Is `t` the text of a type: a (qualified) name with optional type
@@ -2653,17 +2654,20 @@ function jAccOf(mods) {
     }
     return ""
 }
+// A constructor is kept under kind "c:" and no name.
 function jNoteMemAcc(cls, m) {
-    if (jPkgPrefix != "" || (m.kind != "method" && m.kind != "field")) { return }
-    var key = "$" + cls + (m.kind == "field" ? "#f:" : "#m:") + m.name
+    if (jPkgPrefix != "" || (m.kind != "method" && m.kind != "field" && m.kind != "ctor")) { return }
+    var key = "$" + cls + (m.kind == "field" ? "#f:" + m.name : m.kind == "ctor" ? "#c:" : "#m:" + m.name)
     if (jMemAccs[key] == undefined) { jMemAccs[key] = [] }
-    var rec = {acc: m.acc, pkg: jFilePkg, top: jTopOf(cls), n: 0, isVar: false, sig: ""}
-    if (m.kind == "method") {
+    var rec = {acc: m.acc, pkg: jFilePkg, top: jTopOf(cls), n: 0, isVar: false, sig: "", raw: "", ptys: [], statik: m.statik == true}
+    if (m.kind != "field") {
         rec.isVar = jOvIsVar(m)
         rec.n = m.ptys.length
         var parts = []
         for (var i = 0; i < m.ptys.length; i++) { parts.push(m.ptys[i] + ((rec.isVar && i == m.ptys.length - 1) ? "..." : "")) }
         rec.sig = "(" + parts.join(",") + ")"
+        rec.raw = jOvRawOf(m.ptys, rec.isVar)
+        rec.ptys = m.ptys
     }
     jMemAccs[key].push(rec)
 }
@@ -2675,12 +2679,11 @@ function jTopOf(cls) {
     var cut = b.indexOf("$")
     return cut < 0 ? b : b.substring(0, cut)
 }
-function jAccessible(d) {
-    if (d.acc == "" || d.acc == "protected") { return d.pkg == jFilePkg }
-    if (d.acc == "private") {
-        var here = jTopOf(curClassName)
-        return d.top == "" || here == "" || d.top == here
-    }
+// Is declaration d accessible from package pkg inside top-level type top,
+// a protected one only from its own package?
+function jAccessible(d, pkg, top) {
+    if (d.acc == "" || d.acc == "protected") { return d.pkg == pkg }
+    if (d.acc == "private") { return d.top == "" || top == "" || d.top == top }
     return true
 }
 // Fails when member mname (kind "m:" or "f:", called with nargs arguments)
@@ -2698,7 +2701,7 @@ function jAccessChk(cls, kind, mname, nargs, pos) {
         for (var i = 0; ds != undefined && i < ds.length; i++) {
             var d = ds[i]
             if (kind == "m:" && !(d.n == nargs || (d.isVar && nargs >= d.n - 1))) { continue }
-            if (jAccessible(d)) { return }
+            if (jAccessible(d, jFilePkg, jTopOf(curClassName))) { return }
             if (d.acc == "protected") {
                 if (prot == null) { prot = d; protCls = k }
             } else if (bad == null) { bad = d; badCls = k }
@@ -2710,28 +2713,99 @@ function jAccessChk(cls, kind, mname, nargs, pos) {
     }
     var at = " (" + c.curFile() + ":" + c.lineOf(pos) + ")"
     // Whether the enclosing types subclass the declaring one is only known once
-    // every declaration is walked (jProtCheck).
+    // every declaration is walked (jAccessPostCheck).
     if (prot != null) {
         var encl = []
         for (var e = 0; e < jClassStack.length; e++) { if (jClassStack[e] != "" && jClassStack[e] != undefined) { encl.push(jClassStack[e]) } }
         encl.push(curClassName)
-        jProtPend.push({cls: protCls, encl: encl, what: mname + prot.sig + " has protected access in " + jSimpleName(protCls) + at})
+        jAccPend.push({cls: protCls, encl: encl, recv: prot.statik ? "" : cls,
+                       what: mname + prot.sig + " has protected access in " + jSimpleName(protCls) + at})
         return
     }
-    if (bad == null) { return }
-    var what = mname + bad.sig + (bad.acc == "private" ? " has private access in " + jSimpleName(badCls)
-        : " is not public in " + jSimpleName(badCls) + "; cannot be accessed from outside package")
-    fail(what + at)
+    if (bad != null) { fail(jAccRefusal(mname, bad, badCls) + at) }
 }
-// The protected accesses from another package, each with the types whose
-// bodies enclose it; one is refused unless one of them extends the member's
-// class. Called after the walk.
-var jProtPend = []
-function jProtCheck() {
-    for (var i = 0; i < jProtPend.length; i++) {
-        var p = jProtPend[i]
+// javac's refusal of inaccessible declaration d of member mname in class cls.
+function jAccRefusal(mname, d, cls) {
+    return mname + d.sig + (d.acc == "private" ? " has private access in " + jSimpleName(cls)
+        : d.acc == "protected" ? " has protected access in " + jSimpleName(cls)
+        : " is not public in " + jSimpleName(cls) + "; cannot be accessed from outside package")
+}
+// A constructor use with nargs arguments of static types atys: `new
+// cls(...)` (how "new"), `new cls(...) {...}` ("anon"), or super(...) in a
+// constructor of cls ("super"). The constructors and superclass of a class
+// declared further down are only known once the walk is complete, so it is
+// checked then.
+function jCtorUse(cls, nargs, atys, how, pos) {
+    if (jPkgPrefix != "" || pos == undefined) { return }
+    jAccPend.push({cls: cls, encl: null, n: nargs, atys: atys, how: how, pkg: jFilePkg,
+                   top: jTopOf(curClassName), what: " (" + c.curFile() + ":" + c.lineOf(pos) + ")"})
+}
+// An inaccessible constructor is no candidate (JLS 15.12.2.1), so a use is
+// refused when the argument types pick an inaccessible constructor of its
+// class and no accessible one applies - or, when an argument type is
+// unknown, when every constructor of that arity is inaccessible. A protected
+// one is accessible from another package to super(...) and to an anonymous
+// class's creation only (JLS 6.6.2.2).
+function jCtorAccessChk(p) {
+    var cls = p.cls
+    if (p.how == "super") {
+        var own = jOvCls["$" + cls]
+        cls = own == undefined ? "" : own.sup
+    }
+    if (cls == "") { return }
+    if (jOvCls["$" + cls] == undefined) { cls = jSimpleName(cls) }
+    var ds = jMemAccs["$" + cls + "#c:"]
+    var all = []
+    var ok = []
+    var no = []
+    for (var i = 0; ds != undefined && i < ds.length; i++) {
+        var d = ds[i]
+        if (!(d.n == p.n || (d.isVar && p.n >= d.n - 1))) { continue }
+        all.push(d)
+        if (jAccessible(d, p.pkg, p.top) || (d.acc == "protected" && p.how != "new")) { ok.push(d) } else { no.push(d) }
+    }
+    if (no.length == 0) { return }
+    var known = p.atys != null
+    var stoks = []
+    for (var k = 0; known && k < p.atys.length; k++) {
+        stoks.push(jOvSTok(p.atys[k]))
+        if (stoks[k] == "") { known = false }
+    }
+    var bad = no[0]
+    if (known) {
+        if (ok.length > 0 && jOvPickStatic(jOvSpec(ok), stoks) != "") { return }
+        var pick = jOvPickStatic(jOvSpec(all), stoks)
+        var hit = false
+        for (var j = 0; j < no.length; j++) {
+            if (no[j].raw == pick) {
+                bad = no[j]
+                hit = true
+            }
+        }
+        if (!hit) { return }
+    } else if (ok.length > 0) { return }
+    fail(jAccRefusal(jSimpleName(cls), bad, cls) + p.what)
+}
+// The accesses checked after the walk, in source order: constructor uses
+// (jCtorUse) and protected member accesses from another package, each with
+// the types whose bodies enclose it and, for an instance member, the
+// receiver's class. A protected access is refused unless an enclosing type
+// S extends the member's class and the receiver is S or a subclass of S
+// (JLS 6.6.2.1).
+var jAccPend = []
+function jAccessPostCheck() {
+    for (var i = 0; i < jAccPend.length; i++) {
+        var p = jAccPend[i]
+        if (p.encl == null) {
+            jCtorAccessChk(p)
+            continue
+        }
         var ok = false
-        for (var k = 0; k < p.encl.length && !ok; k++) { ok = jSubclassOf(p.encl[k], jSimpleName(p.cls), 0) }
+        for (var k = 0; k < p.encl.length && !ok; k++) {
+            var s = p.encl[k]
+            ok = jSubclassOf(s, jSimpleName(p.cls), 0)
+                && (p.recv == "" || jSimpleName(p.recv) == s || jSubclassOf(p.recv, s, 0))
+        }
         if (!ok) { fail(p.what) }
     }
 }

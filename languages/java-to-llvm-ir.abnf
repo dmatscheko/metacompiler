@@ -386,7 +386,7 @@ AbstractMethod <~~ jTyPop(); push(makeAbstract(takeAll())); jRetPop() ~~>
 // no-argument super call, and a `this(args)` also suppresses the field initializers
 // (they run once, in the constructor that finally reaches super).
 Ctor        <~~ jTyPop(); push(makeCtor(takeAll())) ~~>
-            = [ LeadMods ] [ MTyParams ] Id <~~ push(up.in) ~~> ParamList [ Throws ] CtorBody ;
+            = Mods [ MTyParams ] Id <~~ push(up.in) ~~> ParamList [ Throws ] CtorBody ;
 // A record's COMPACT constructor - `Range { ... }`, no parameter list: the record
 // components are the parameters, the body may reassign them, and the fields are
 // assigned from them afterwards (see buildClassStmt).
@@ -394,7 +394,7 @@ CompactCtor <~~ push(makeCompactCtor(takeAll())) ~~>
             = [ LeadMods ] Id <~~ push(up.in) ~~> CtorBody ;
 CtorBody    <~~ push({cbody: takeAll()}) ~~>
             = "{" [ CtorDelegate ] { Statement } "}" ;
-CtorDelegate <~~ push(makeCtorDelegate(takeAll(), up.in)) ~~>
+CtorDelegate <~~ push(makeCtorDelegate(takeAll(), up.in, up.pos)) ~~>
             = ( KwSuper <~~ push("super") ~~> | KwThis <~~ push("this") ~~> )
               "(" [ Expression { "," Expression } ] ")" ";" ;
 
@@ -943,7 +943,7 @@ IncDec      <~~ push(makeIncDec(takeAll())) ~~>
 NewExpr     = NewAnon | NewObject | NewArrLit | NewArrSize ;
 // `new Outer.Nested()`: nested types are hoisted under their simple name, so the
 // qualifier only has to be accepted - the last segment names the descriptor.
-NewObject   <~~ push(makeNew(takeAll(), up.in)) ~~>
+NewObject   <~~ push(makeNew(takeAll(), up.in, up.pos)) ~~>
             = KwNew [ SkipAngle ] { Annotation } Id <~~ push(up.in) ~~> [ SkipAngle ]
               { "." { Annotation } Id <~~ push(up.in) ~~> [ SkipAngle ] } "(" [ Expression { "," Expression } ] ")" ;
 // An anonymous class `new Base(args) { members }`: a real, uniquely named class
@@ -3277,7 +3277,7 @@ HasStatic   = :script(~~
             return {b: b, v: callExt(b, "js_jouterthis", [thisV, emitStr(b, nm)])}
         }
     }
-    function makeNew(items, text) {
+    function makeNew(items, text, pos) {
         var clsName = ""
         var qual = ""
         var args = []
@@ -3294,6 +3294,7 @@ HasStatic   = :script(~~
         if (jUtilWants(qual)) { jUtilWant = true }
         if (jMapWants(clsName) || jMapWants(qual)) { jMapWant = true }
         var atys = text == undefined ? null : jCallArgTys(text, args.length)
+        jCtorUse(qual, args.length, atys, "new", pos)
         // new String(...) can throw StringIndexOutOfBoundsException (js_jvnewstr).
         if (clsName == "String") { jUsesStrIdx = true }
         var ctx = curClassName
@@ -4623,9 +4624,11 @@ HasStatic   = :script(~~
     }
     // super(args) / this(args) as the first statement of a constructor body. The
     // marker travels inside CtorBody's item list; makeCtor lifts it out.
-    function makeCtorDelegate(items, text) {
+    function makeCtorDelegate(items, text, pos) {
         var dargs = items.slice(1)
-        return {deleg: items[0], dargs: dargs, atys: jCallArgTys(text, dargs.length)}
+        var atys = jCallArgTys(text, dargs.length)
+        if (items[0] == "super") { jCtorUse(curClassName, dargs.length, atys, "super", pos) }
+        return {deleg: items[0], dargs: dargs, atys: atys}
     }
     // Splits a CtorBody item list into the optional leading delegate and the rest.
     function splitCtorBody(cbody) {
@@ -4644,9 +4647,9 @@ HasStatic   = :script(~~
         return {kind: "abstract", name: items[1], params: items[2].params, ptys: items[2].ptys, ret: jRetTy()}
     }
     function makeCtor(items) {
-        var parts = splitCtorBody(items[2].cbody)
-        return {kind: "ctor", name: items[0], params: items[1].params, ptys: items[1].ptys,
-                body: parts.body, deleg: parts.deleg}
+        var parts = splitCtorBody(items[3].cbody)
+        return {kind: "ctor", name: items[1], params: items[2].params, ptys: items[2].ptys,
+                body: parts.body, deleg: parts.deleg, acc: jAccOf(items[0].mods)}
     }
     // `Range { ... }` in a record: the parameters are filled in by buildClassStmt,
     // which alone knows the record's component list.
@@ -6301,6 +6304,8 @@ HasStatic   = :script(~~
             else if (typeof items[i] == "function") { args.push(items[i]) }
             else { members.push(items[i]) }
         }
+        var atys = jCallArgTys(text, args.length)
+        jCtorUse(baseName, args.length, atys, "anon", pos)
         jRegAnonFields(members)
         anonCount++
         var aname = "Anon$" + anonCount
@@ -6319,7 +6324,7 @@ HasStatic   = :script(~~
                 dargs.push(makeVarRef("$a" + k))
             }
             mem.push({kind: "ctor", name: aname, params: ps, body: null,
-                      deleg: {deleg: "super", dargs: dargs, atys: jCallArgTys(text, args.length)}})
+                      deleg: {deleg: "super", dargs: dargs, atys: atys}})
         }
         for (var j = 0; j < members.length; j++) { mem.push(members[j]) }
         jOvDeclare(aname, mem)
@@ -6406,7 +6411,7 @@ HasStatic   = :script(~~
         // Twin of the jCycCheck call in java-interpreter.abnf.
         var cycName = jCycCheck()
         if (cycName != "") { fail("cyclic inheritance involving " + cycName) }
-        jProtCheck()
+        jAccessPostCheck()
         jLoadLibs(jUtilWant, jMapWant, jStreamWant)
         if (jLangWant) {
             jLangWant = false

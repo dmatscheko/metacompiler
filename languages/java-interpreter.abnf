@@ -398,7 +398,7 @@ InstInit    <~~ push({kind: "iinit", body: pop()}) ~~>
 // invocation may only stand first, and it decides what initializes the object, so it
 // is parsed as a separate head rather than as an ordinary statement.
 Ctor        <~~ jTyPop(); push(makeCtor(takeAll())) ~~>
-            = [ LeadMods ] [ MTyParams ] Id <~~ push(up.in) ~~> ParamList [ Throws ] CtorBody ;
+            = Mods [ MTyParams ] Id <~~ push(up.in) ~~> ParamList [ Throws ] CtorBody ;
 CtorBody    <~~ push(makeCtorBody(takeAll())) ~~>
             = "{" [ CtorCall ] { Statement } "}" ;
 // A record's COMPACT constructor: no parameter list at all - it receives the record
@@ -694,7 +694,7 @@ Throw       <~~ push(jThrowStmt(pop())) ~~>
 // An explicit constructor invocation (super(args) or this(args)). It may only
 // stand first in a constructor body; makeCtorHead lifts it out and
 // makeCtorClosure decides what it initializes.
-CtorCall    <~~ push(makeCtorHead(takeAll(), up.in)) ~~>
+CtorCall    <~~ push(makeCtorHead(takeAll(), up.in, up.pos)) ~~>
             = [ SkipAngle ] CtorWhich "(" [ Expression { "," Expression } ] ")" ";" ;
 CtorWhich   <~~ push({cwhich: stripWs(up.in)}) ~~>
             = KwSuper | "this" KwEnd ;
@@ -967,7 +967,7 @@ IncDec      <~~ push(makeIncDec(takeAll())) ~~>
 
 // new Point(1, 2) | new int[]{1, 2, 3} | new int[n] | new Foo() { ... } (anonymous)
 NewExpr     = NewAnon | NewObject | NewArrLit | NewArrSize ;
-NewObject   <~~ push(makeNew(takeAll(), up.in)) ~~>
+NewObject   <~~ push(makeNew(takeAll(), up.in, up.pos)) ~~>
             = KwNew [ SkipAngle ] NewName [ SkipAngle ] "(" [ Expression { "," Expression } ] ")" ;
 // The type of a `new` may be qualified (new Outer.Nested()), carry a TYPE
 // ANNOTATION on any segment (`new @TA Object()`, `new Outer.@TA Inner()`,
@@ -978,7 +978,7 @@ NewName     <~~ push(jJoinDots(takeAll())) ~~>
               { "." { Annotation } Id <~~ push(stripWs(up.in)) ~~> [ SkipAngle ] } ;
 // new Type(args) { members } - an anonymous subclass (of a class OR an interface),
 // built once on first evaluation and instantiated like any other class.
-NewAnon     <~~ push(makeNewAnon(takeAll(), up.in)) ~~>
+NewAnon     <~~ push(makeNewAnon(takeAll(), up.in, up.pos)) ~~>
             = KwNew [ SkipAngle ] NewName [ SkipAngle ] "(" [ Expression { "," Expression } ] ")" AnonBody ;
 AnonBody    <~~ push({anonmembers: takeAll()}) ~~>
             = "{" { Member } "}" ;
@@ -4796,7 +4796,7 @@ HasStatic   = :script(~~
         }
         return out
     }
-    function makeNew(items, text) {
+    function makeNew(items, text, pos) {
         var clsName = items[0]
         var simple = jSimpleName(clsName)
         if (jLangWants(simple)) { jLangWant = true }
@@ -4804,6 +4804,7 @@ HasStatic   = :script(~~
         if (jMapWants(simple) || jMapWants(clsName)) { jMapWant = true }
         var args = items.slice(1)
         var atys = text == undefined ? null : jCallArgTys(text, args.length)
+        jCtorUse(clsName, args.length, atys, "new", pos)
         var sig = anytype // the static constructor signature, resolved at the first run
         return function() {
             var cls = jResolveClass(clsName)
@@ -4897,7 +4898,7 @@ HasStatic   = :script(~~
     // first evaluation (its supertype must already exist) and then reused, so a
     // lambda-like anonymous class inside a loop does not rebuild per iteration.
     var jAnonSeq = 0
-    function makeNewAnon(items, text) {
+    function makeNewAnon(items, text, pos) {
         var superName = items[0]
         var args = []
         var members = []
@@ -4907,6 +4908,7 @@ HasStatic   = :script(~~
             else { args.push(it) }
         }
         var atys = jCallArgTys(text, args.length)
+        jCtorUse(superName, args.length, atys, "anon", pos)
         var built = null
         return function() {
             if (built == null) {
@@ -5956,9 +5958,9 @@ HasStatic   = :script(~~
     // items = [name, {params}, {cbody}]; the cbody carries the optional explicit
     // this()/super() head separately from the rest of the body.
     function makeCtor(items) {
-        var b = items[2]
-        return {kind: "ctor", name: items[0], params: items[1].params, ptys: items[1].ptys, vararg: items[1].vararg,
-                body: b.cbody, head: b.head}
+        var b = items[3]
+        return {kind: "ctor", name: items[1], params: items[2].params, ptys: items[2].ptys, vararg: items[2].vararg,
+                body: b.cbody, head: b.head, acc: jAccOf(items[0].mods)}
     }
     // A record's compact constructor: no declared parameters - it is handed the
     // record components, and its body may reassign them.
@@ -5979,10 +5981,12 @@ HasStatic   = :script(~~
     // NOTE the unique name: two `function` declarations sharing a name inside this
     // script silently rebind TAGS to the wrong productions (a Method node then runs
     // the Ctor tag). Keep names unique.
-    function makeCtorHead(items, text) {
+    function makeCtorHead(items, text, pos) {
         var which = items[0].cwhich
         var args = items.slice(1)
-        return {ctorhead: true, which: which, args: args, atys: jCallArgTys(text, args.length)}
+        var atys = jCallArgTys(text, args.length)
+        if (which == "super") { jCtorUse(curClassName, args.length, atys, "super", pos) }
+        return {ctorhead: true, which: which, args: args, atys: atys}
     }
     function makeFieldVar(items, text) {
         var dims = ""
@@ -7677,7 +7681,7 @@ HasStatic   = :script(~~
     // Twin of the jCycCheck call in buildMain of java-to-llvm-ir.abnf.
     var jCycName = jCycCheck()
     if (jCycName != "") { fail("cyclic inheritance involving " + jCycName) }
-    jProtCheck()
+    jAccessPostCheck()
     if (jDeferred.length > 0) { fail("unknown superclass: " + jDeferred[0].ext) }
     jLoadWanted()
     jWalkDone = true
