@@ -58,11 +58,9 @@ package abnf
 //     and System.Object[] there.
 //   - A List<T> is the same plain array in this runtime, so it renders like an
 //     array. Real C# prints "System.Collections.Generic.List`1[System.Int32]".
-//   - An INSTANCE prints its BARE declared name. Real C# prints the fully
-//     qualified name, which for a nested class in a namespace would be
-//     `Demo.Program+Box`; this runtime has no namespace and no nesting concept at
-//     all, so the bare name is the reproducible part of that answer. (The same
-//     simplification abnf/jsrtswift.go records for Swift's module qualification.)
+//   - An INSTANCE prints its type's FullName, as Object.ToString() does: the
+//     namespace and enclosing types the emitter stores as __fullname
+//     (`Demo.Program+Box`), else the bare declared name.
 //   - A RECORD prints its type name like any other instance. Real C# synthesizes
 //     a `Box { X = 1 }` ToString for a record.
 //   - A Dictionary and a tuple render as the generic "[object Object]", because
@@ -1950,10 +1948,10 @@ func (rt *jsrt) cspObjStr(o *jsObject, depth int) (string, bool) {
 			return n, true
 		}
 	}
-	// An instance: its type's name (see the simplification note in the header).
+	// An instance: its type's FullName (see the note in the header).
 	if cls, ok := o.props["__class"].(*jsObject); ok {
 		if n, ok := cls.props["__name"].(string); ok && n != "" {
-			return n, true
+			return csClsFull(cls), true
 		}
 	}
 	return "", false
@@ -2294,6 +2292,25 @@ func csExcFullName(n string) string {
 	return "System." + n
 }
 
+// csClsFull is a user type descriptor's FullName: __fullname, which the emitter
+// stores when the namespace or an enclosing type qualifies it, else __name.
+// Twin of csClsFull in languages/lib/csharp-rt.metajs.
+func csClsFull(cls *jsObject) string {
+	if f, isStr := cls.props["__fullname"].(string); isStr {
+		return f
+	}
+	n, _ := cls.props["__name"].(string)
+	return n
+}
+
+// csClsType is a user type's System.Type token: the bare Name, the qualified FullName.
+func csClsType(cls *jsObject, name string) *jsObject {
+	o := newJSObject()
+	o.set("FullName", csClsFull(cls))
+	o.set("Name", name)
+	return o
+}
+
 // GetType(): a System.Type token with the same two members typeof(T) answers.
 func (rt *jsrt) csTypeOfVal(v interface{}) *jsObject {
 	full := cspElemName(v)
@@ -2309,13 +2326,13 @@ func (rt *jsrt) csTypeOfVal(v interface{}) *jsObject {
 			}
 			if c, isObj := t.props["__class"].(*jsObject); isObj && full == "" {
 				if n, isStr := c.props["__name"].(string); isStr {
-					full = n
+					return csClsType(c, n)
 				}
 			}
 			if full == "" {
 				if b, _ := t.props["__isclass"].(bool); b {
 					if n, isStr := t.props["__name"].(string); isStr {
-						full = n
+						return csClsType(t, n)
 					}
 				}
 			}

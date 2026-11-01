@@ -155,14 +155,17 @@ TypeDecl    = ClassDecl | EnumDecl ;
 // A standalone attribute section at file scope ('[assembly: ...]' / '[module: ...]'):
 // accepted and ignored (it pushes no declaration thunk).
 TopAttr     = AttrSection ;
-// A file scoped namespace ('namespace X.Y;'): a no-op marker; the declarations that
-// follow it are treated as top level (matching how a block namespace is unwrapped). The
-// name QualName pushes is discarded so it never reaches buildMain as a declaration.
-FileNs      <~~ pop() ~~> = KwNamespace QualName ";" ;
+// A file scoped namespace ('namespace X.Y;'): the declarations that follow it are treated
+// as top level (matching how a block namespace is unwrapped); its name only qualifies
+// their FullName, to the end of the file (csNsFile).
+FileNs      <~~ csNsFile(pop()) ~~> = KwNamespace QualName ";" ;
 
 // namespace X.Y { ... }: the inner declaration thunks are collected into one sequence.
-Namespace   <~~ push(makeNamespace(takeAll())) ~~>
-            = KwNamespace QualName "{" { Using | TopDecl } "}" ;
+Namespace   <~~ push(makeNamespace(takeAll())); csNsLeave() ~~>
+            = KwNamespace NsName "{" { Using | TopDecl } "}" ;
+// The namespace's name, entered before the body's declarations are walked (it pushes
+// nothing): a declared type's FullName is qualified with it (csNoteFull).
+NsName      <~~ csNsEnter(pop()) ~~> = QualName ;
 
 ClassDecl   <~~ push(makeClassStmt(takeAll())) ~~>
             = [ ClassMods ] ClassKw ClassName [ ClassTPs ] [ PrimaryCtor ]
@@ -199,7 +202,7 @@ ClassKw     <~~ push({ckind: stripWs(up.in)}) ~~>
 RecordKw    = "record" KwEnd [ ( "class" | "struct" ) KwEnd ] ;
 // The class name, and the class the enclosing member bodies belong to (curClassName, for
 // 'base.M()'): pushed on a stack so a nested class restores its outer name when it ends.
-ClassName   <~~ push(up.in); classStack.push(curClassName); curClassName = up.in ~~>
+ClassName   <~~ push(up.in); csNoteFull(up.in); classStack.push(curClassName); curClassName = up.in ~~>
             = Id ;
 
 // A delegate declaration is legal at file scope AND in a class body; it is listed here
@@ -1693,7 +1696,11 @@ KwLet       = "let" KwEnd ;
             var asg = c.parse(c.agrammar, text, null, file)
             c.pushSource(file, text)
             importDepth = importDepth + 1
+            // An imported file starts outside any namespace (csNsFile lasts to its end).
+            var nsOuter = csNsCur
+            csNsCur = ""
             c.compile(asg)
+            csNsCur = nsOuter
             importDepth = importDepth - 1
             c.popSource()
             return true
@@ -6273,6 +6280,29 @@ KwLet       = "let" KwEnd ;
     // restores the outer name when a nested class ends.
     var curClassName = ""
     var classStack = []
+    // A declared type's .NET FullName: the enclosing namespace joined with ".", a nested
+    // type's enclosing type with "+". The rule is cited at the twin in
+    // csharp-interpreter.abnf; a descriptor whose FullName differs from its bare
+    // __name carries it as __fullname (buildClassStmt).
+    var csNsCur = ""
+    var csNsStack = []
+    var csClassFull = {}
+    function csNsEnter(n) {
+        csNsStack.push(csNsCur)
+        csNsCur = csNsCur == "" ? n : csNsCur + "." + n
+    }
+    function csNsLeave() { csNsCur = csNsStack.pop() }
+    function csNsFile(n) { csNsCur = n }
+    function csNoteFull(n) {
+        var full = n
+        if (curClassName != "") { full = csFullOf(curClassName) + "+" + n }
+        else if (csNsCur != "") { full = csNsCur + "." + n }
+        csClassFull["$" + n] = full
+    }
+    function csFullOf(n) {
+        var f = csClassFull["$" + n]
+        return typeof f == "string" ? f : n
+    }
     // The class makeClassStmt built last: a nested declaration has already been walked
     // when its marker reaches the enclosing class body, so its name is the one just built.
     var lastBuiltClass = ""
@@ -6871,6 +6901,7 @@ KwLet       = "let" KwEnd ;
         return out
     }
     function buildClassStmt(name, members, kind, primary, isRecord) {
+        var full = csFullOf(name)
         return function(b) {
             csKnownClasses[name] = true
             var clsV = callExt(b, "js_obj_new", [])
@@ -6878,6 +6909,7 @@ KwLet       = "let" KwEnd ;
             if (kind == "struct" || kind == "recordstruct") { callExt(b, "js_set", [clsV, emitStr(b, "__isstruct"), hTrue]) }
             if (isRecord) { callExt(b, "js_set", [clsV, emitStr(b, "__isrecord"), hTrue]) }
             callExt(b, "js_set", [clsV, emitStr(b, "__name"), emitStr(b, name)])
+            if (full != name) { callExt(b, "js_set", [clsV, emitStr(b, "__fullname"), emitStr(b, full)]) }
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), clsV])
             var fields = []
             var ctorInfo = null

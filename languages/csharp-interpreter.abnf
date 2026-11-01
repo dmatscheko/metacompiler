@@ -164,15 +164,18 @@ TypeDecl    = ClassDecl | EnumDecl ;
 // A standalone attribute section at file scope ('[assembly: ...]' / '[module: ...]'):
 // accepted and ignored (it pushes no declaration).
 TopAttr     = AttrSection ;
-// A file scoped namespace ('namespace X.Y;'): a no-op marker; the declarations that
-// follow it register themselves at top level (like a block namespace, which is unwrapped).
-// The name QualName pushes is discarded so it never lands in a later declaration.
-FileNs      <~~ pop() ~~> = KwNamespace QualName ";" ;
+// A file scoped namespace ('namespace X.Y;'): the declarations that follow it register
+// themselves at top level (like a block namespace, which is unwrapped); its name only
+// qualifies their FullName, to the end of the file (csNsFile).
+FileNs      <~~ csNsFile(pop()) ~~> = KwNamespace QualName ";" ;
 
 // namespace X.Y { ... }: unwrapped. The inner declarations register themselves
-// (their tags run during the match); the namespace tag just clears its own name.
-Namespace   <~~ takeAll() ~~>
-            = KwNamespace QualName "{" { Using | TopDecl } "}" ;
+// (their tags run during the match); the namespace tag leaves the name's scope.
+Namespace   <~~ takeAll(); csNsLeave() ~~>
+            = KwNamespace NsName "{" { Using | TopDecl } "}" ;
+// The namespace's name, entered before the body's declarations are walked (it pushes
+// nothing): a declared type's FullName is qualified with it (csNoteFull).
+NsName      <~~ csNsEnter(pop()) ~~> = QualName ;
 
 ClassDecl   <~~ buildClass(takeAll()) ~~>
             = [ ClassMods ] ClassKw ClassName [ ClassTPs ] [ PrimaryCtor ]
@@ -209,7 +212,7 @@ ClassKw     <~~ push({ckind: stripWs(up.in)}) ~~>
 RecordKw    = "record" KwEnd [ ( "class" | "struct" ) KwEnd ] ;
 // The class name, and the class the enclosing member bodies belong to (curClassName, for
 // 'base.M()'): pushed on a stack so a nested class restores its outer name when it ends.
-ClassName   <~~ push(up.in); classStack.push(curClassName); curClassName = up.in ~~>
+ClassName   <~~ push(up.in); csNoteFull(up.in); classStack.push(curClassName); curClassName = up.in ~~>
             = Id ;
 
 // MemberSemi is the stray ';' between members - after a nested type declaration
@@ -1801,6 +1804,31 @@ KwLet       = "let" KwEnd ;
     // restores the outer name when a nested class ends.
     var curClassName = ""
     var classStack = []
+    // A declared type's .NET FullName (Type.FullName, which GetType().ToString(),
+    // Object.ToString() and Exception's generated message print): the enclosing
+    // namespace joined with ".", a nested type's enclosing type with "+"
+    // (Demo.Outer+Inner). Types are still registered under their bare name; csNsCur is
+    // the namespace whose body is being walked. Twin of the same functions in
+    // csharp-to-llvm-ir.abnf.
+    var csNsCur = ""
+    var csNsStack = []
+    var csClassFull = {}
+    function csNsEnter(n) {
+        csNsStack.push(csNsCur)
+        csNsCur = csNsCur == "" ? n : csNsCur + "." + n
+    }
+    function csNsLeave() { csNsCur = csNsStack.pop() }
+    function csNsFile(n) { csNsCur = n }
+    function csNoteFull(n) {
+        var full = n
+        if (curClassName != "") { full = csFullOf(curClassName) + "+" + n }
+        else if (csNsCur != "") { full = csNsCur + "." + n }
+        csClassFull["$" + n] = full
+    }
+    function csFullOf(n) {
+        var f = csClassFull["$" + n]
+        return typeof f == "string" ? f : n
+    }
     // The class buildClassFrom registered last: a nested declaration has already run when
     // its marker reaches the enclosing class body, so its name is the one just built.
     var lastBuiltClass = ""
@@ -2515,14 +2543,18 @@ KwLet       = "let" KwEnd ;
                 && typeof v.__excname == "string") { full = csExcFullName(v.__excname) }
             else if (Array.isArray(v)) { full = csArrayName(v) }
             else if (v !== null && v !== undefined && typeof v == "object" && v.__class != undefined
-                     && typeof v.__class.__name == "string") { full = v.__class.__name }
+                     && typeof v.__class.__name == "string") {
+                return {Name: v.__class.__name, FullName: csClsFull(v.__class)}
+            }
             else if (v !== null && v !== undefined && typeof v == "object" && v.__isclass === true
-                     && typeof v.__name == "string") { full = v.__name }
+                     && typeof v.__name == "string") { return {Name: v.__name, FullName: csClsFull(v)} }
             else { full = "System.Object" }
         }
         var parts = full.split(".")
         return {Name: parts[parts.length - 1], FullName: full}
     }
+    // A user type descriptor's FullName (csNoteFull): __fullname when it is qualified.
+    function csClsFull(cls) { return typeof cls.__fullname == "string" ? cls.__fullname : cls.__name }
     // System.Exception.ToString(), as far as this engine can honestly go. .NET's is
     //     string s = GetClassName();
     //     if (!string.IsNullOrEmpty(message)) s += ": " + message;
@@ -2638,16 +2670,15 @@ KwLet       = "let" KwEnd ;
     //   array    "System.Int32[]" System.Object.ToString() answers the fully qualified type
     //                             name (ECMA-334 8.2.3: every type inherits ToString from
     //                             object); an array type's name is the element type's plus "[]".
-    //   instance "Box"            System.Object.ToString() answers GetType().ToString().
+    //   instance "Demo.Box"       System.Object.ToString() answers GetType().ToString(),
+    //                             the FullName (csNoteFull).
     // A user ToString() override wins over all of them, because object.ToString is virtual.
     //
-    // Deliberate simplifications, both shared with the compiled half:
+    // Deliberate simplification, shared with the compiled half:
     //   - the array ELEMENT type is inferred from the elements (the declared type is not on
     //     the value); empty or mixed answers System.Object[], and a List<T> - the same plain
     //     array in this model - renders like an array rather than as
     //     "System.Collections.Generic.List`1[System.Int32]".
-    //   - an instance prints its BARE declared name; real C# qualifies it with the namespace
-    //     and the enclosing type (Demo.Program+Box), neither of which this runtime models.
     function csElemName(e) {
         if (e === true || e === false) return "System.Boolean"
         if (typeof e == "string") return "System.String"
@@ -2724,7 +2755,7 @@ KwLet       = "let" KwEnd ;
             if (csExcBase(v) != "") { return csExcToStr(v, d) }
             if (csIsRecObj(v)) { return csRecStr(v, d) }
             if (v.__isclass === true && typeof v.__name == "string") { return v.__name }
-            if (v.__class != undefined && typeof v.__class.__name == "string") { return v.__class.__name }
+            if (v.__class != undefined && typeof v.__class.__name == "string") { return csClsFull(v.__class) }
         }
         return "" + v
     }
@@ -6030,6 +6061,7 @@ KwLet       = "let" KwEnd ;
         var isStruct = (kind == "struct" || kind == "recordstruct")
         var isRecord = (kind == "record" || kind == "recordclass" || kind == "recordstruct")
         var cls = {__isclass: true, __name: name, __isstruct: isStruct, __isrecord: isRecord}
+        if (csFullOf(name) != name) { cls.__fullname = csFullOf(name) }
         if (tparams != undefined && tparams != null && tparams.length > 0) { csClassTParams[name] = tparams }
         var fields = []
         var ctorInfo = null
@@ -7033,7 +7065,11 @@ KwLet       = "let" KwEnd ;
             var text = c.readFile(file)
             var asg = c.parse(c.agrammar, text, null, file)
             c.pushSource(file, text)
+            // An imported file starts outside any namespace (csNsFile lasts to its end).
+            var nsOuter = csNsCur
+            csNsCur = ""
             c.compile(asg)
+            csNsCur = nsOuter
             c.popSource()
             return true
         }
@@ -7066,9 +7102,7 @@ KwLet       = "let" KwEnd ;
     // measured for java, documented for .NET, and the two really do differ.
     //
     // NOT reproduced: the "   at Program.Main()" frames (no call-site line table
-    // in any engine here - manual 7.9), the namespace qualification of a user
-    // exception type (this subset flattens `namespace N { }` away, so a declared
-    // MyExc is "MyExc" where .NET would say "N.MyExc"), and the exit status: .NET
+    // in any engine here - manual 7.9), and the exit status: .NET
     // on Unix aborts the process, which a shell reports as 134, but that is the
     // CoreCLR host calling abort(), not a language property, and this engine has
     // no abort() - it exits 1, as every other uncaught-exception path here does.

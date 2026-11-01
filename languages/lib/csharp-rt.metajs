@@ -862,14 +862,13 @@ function cpObjStr(o, depth) {
         var n = o["__name"]
         if (typeof n == "string") { return n }
     }
-    // An instance: its type's BARE name (see the header of abnf/jsrtcsharp.go -
-    // real C# prints the fully qualified name, which this runtime has no concept of).
+    // An instance: GetType().ToString(), its type's FullName (csClsFull).
     var cls = o["__class"]
     if (cls === undefined) { return undefined }
     if (cls === null) { return undefined }
     if (typeof cls != "object") { return undefined }
     var cn = cls["__name"]
-    if (typeof cn == "string") { if (cn.length > 0) { return cn } }
+    if (typeof cn == "string") { if (cn.length > 0) { return csClsFull(cls) } }
     return undefined
 }
 
@@ -1044,14 +1043,28 @@ function csTypeOfVal(v) {
             var en = v["__excname"]
             var c = v["__class"]
             if (typeof en == "string") { full = csExcFullName(en) }
-            else if (c !== undefined && c !== null && typeof c["__name"] == "string") { full = c["__name"] }
-            else if (v["__isclass"] === true && typeof v["__name"] == "string") { full = v["__name"] }
+            else if (c !== undefined && c !== null && typeof c["__name"] == "string") { return csClsType(c) }
+            else if (v["__isclass"] === true && typeof v["__name"] == "string") { return csClsType(v) }
             else { full = "System.Object" }
         } else { full = "System.Object" }
     }
     var o = {}
     o["FullName"] = full
     o["Name"] = csLastSeg(full)
+    return o
+}
+// A user type's System.Type token: Name is the bare declared name, FullName the
+// qualified one (Demo.Outer+Inner) the emitter stores as __fullname when it differs.
+// Twin of csClsFull in languages/csharp-interpreter.abnf.
+function csClsFull(cls) {
+    var f = cls["__fullname"]
+    if (typeof f == "string") { return f }
+    return cls["__name"]
+}
+function csClsType(cls) {
+    var o = {}
+    o["FullName"] = csClsFull(cls)
+    o["Name"] = cls["__name"]
     return o
 }
 function csLastSeg(s) {
@@ -1081,9 +1094,8 @@ function csLastSeg(s) {
 // where java prints it; that difference is real and both sides of it are asserted.
 //
 // Not reproduced: the "   at ..." frames (no call-site line table in any engine
-// here - manual 7.9), the namespace of a user exception type (this subset
-// flattens namespaces away), and .NET's abort()-derived 134 exit status, which is
-// a property of the CoreCLR host rather than of the language.
+// here - manual 7.9), and .NET's abort()-derived 134 exit status, which is a
+// property of the CoreCLR host rather than of the language.
 //
 // Twins: csExcTopLine in languages/csharp-interpreter.abnf and js_cstop in
 // abnf/jsrtcsharp.go. The shape - the entry call inside one js_try whose catch

@@ -886,9 +886,9 @@ b";                                                   // verbatim keeps the newl
         //     which answers GetType().ToString() - the fully qualified type name,
         //     and for an array the element type's name plus "[]" (ECMA-334 8.2.3
         //     lists ToString among the members every type inherits from object).
-        //     The bare name is asserted here because this runtime models neither
-        //     namespaces nor nested-type qualification; the element type is
-        //     inferred from the elements for the same reason.
+        //     A nested type's FullName joins it to its enclosing type with "+".
+        //     The array element type is inferred from the elements, as the
+        //     declared type is not on the value.
         //   - a user ToString() override wins everywhere, because
         //     System.Object.ToString is virtual.
         class S24Box { public int X; }
@@ -927,10 +927,10 @@ b";                                                   // verbatim keeps the newl
             Program.Check("str10", dbls.ToString() == "System.Double[]");
             bool[] bools = new bool[] { true };
             Program.Check("str11", bools.ToString() == "System.Boolean[]");
-            // An instance renders as its type name.
+            // An instance renders as its type's FullName.
             S24Box box = new S24Box();
-            Program.Check("str12", box.ToString() == "S24Box" && ("b=" + box) == "b=S24Box");
-            Program.Check("str13", $"{box}" == "S24Box");
+            Program.Check("str12", box.ToString() == "Demo.Program+S24Box" && ("b=" + box) == "b=Demo.Program+S24Box");
+            Program.Check("str13", $"{box}" == "Demo.Program+S24Box");
             // A user override wins over the type name, and is inherited.
             S24Named named = new S24Named();
             Program.Check("str14", named.ToString() == "NAMED" && ("n=" + named) == "n=NAMED");

@@ -990,13 +990,17 @@ namespace Demo
                              == "Operation is not valid due to the state of the object."
                           && new FormatException().Message == "One of the identified items was in an invalid format."
                           && new KeyNotFoundException().Message == "The given key was not present in the dictionary.");
-            // The generated sentence names the RUN-TIME type, so a user class names
-            // itself - and a class derived from it names the derived one, even though
-            // the constructor that writes the message belongs to the base.
+            // The generated sentence names the RUN-TIME type by GetType().ToString(),
+            // its namespace-qualified FullName, so a user class names itself - and a
+            // class derived from it names the derived one, even though the
+            // constructor that writes the message belongs to the base.
             Program.Check("exc-default-msg-user",
-                          new MyEx().Message == "Exception of type 'MyEx' was thrown."
-                          && new BareEx().Message == "Exception of type 'BareEx' was thrown."
-                          && new DerivedEx().Message == "Exception of type 'DerivedEx' was thrown.");
+                          new MyEx().Message == "Exception of type 'Demo.MyEx' was thrown."
+                          && new BareEx().Message == "Exception of type 'Demo.BareEx' was thrown."
+                          && new DerivedEx().Message == "Exception of type 'Demo.DerivedEx' was thrown.");
+            Program.Check("exc-user-type-names",
+                          new DerivedEx().GetType().FullName == "Demo.DerivedEx"
+                          && new DerivedEx().GetType().Name == "DerivedEx");
             Program.Check("exc-user-msg-unchanged", new MyEx("custom").Message == "custom");
             // A base that is not System.Exception contributes ITS message, not the
             // generated one.
@@ -1011,10 +1015,9 @@ namespace Demo
             Program.Check("exc-tostring-default",
                           new Exception().ToString()
                           == "System.Exception: Exception of type 'System.Exception' was thrown.");
-            // A user type has no namespace in this subset, so its FullName is its name.
-            Program.Check("exc-tostring-user", new MyEx("c").ToString() == "MyEx: c");
+            Program.Check("exc-tostring-user", new MyEx("c").ToString() == "Demo.MyEx: c");
             // String concatenation and Console.Write go through the same conversion.
-            Program.Check("exc-tostring-implicit", ("" + new MyEx("c")) == "MyEx: c");
+            Program.Check("exc-tostring-implicit", ("" + new MyEx("c")) == "Demo.MyEx: c");
             // A user ToString() override still wins over System.Exception's, exactly
             // as the virtual dispatch says.
             Program.Check("exc-tostring-override", new OverEx().ToString() == "over!");
@@ -1034,8 +1037,8 @@ namespace Demo
                           && new Exception(nmsg[0], new Exception(nmsg[2])).Message
                              == "Exception of type 'System.Exception' was thrown.");
             Program.Check("exc-null-msg-user",
-                          new MyEx(nmsg[0]).Message == "Exception of type 'MyEx' was thrown."
-                          && new MyEx(nmsg[0]).ToString() == "MyEx: Exception of type 'MyEx' was thrown.");
+                          new MyEx(nmsg[0]).Message == "Exception of type 'Demo.MyEx' was thrown."
+                          && new MyEx(nmsg[0]).ToString() == "Demo.MyEx: Exception of type 'Demo.MyEx' was thrown.");
             Program.Check("exc-null-msg-arg-family",
                           new ArgumentException(nmsg[0]).Message == "Value does not fall within the expected range.");
             Program.Check("exc-empty-msg-kept",
@@ -1048,14 +1051,14 @@ namespace Demo
                           == "System.Exception: outer\n ---> System.InvalidOperationException: hi\n   --- End of inner exception stack trace ---");
             Program.Check("exc-tostring-inner-nested",
                           new MyEx(nmsg[3], new MyEx(nmsg[0], new Exception(nmsg[1]))).ToString()
-                          == "MyEx: outer\n ---> MyEx: Exception of type 'MyEx' was thrown.\n ---> System.Exception"
+                          == "Demo.MyEx: outer\n ---> Demo.MyEx: Exception of type 'Demo.MyEx' was thrown.\n ---> System.Exception"
                              + "\n   --- End of inner exception stack trace ---\n   --- End of inner exception stack trace ---");
             // Message is VIRTUAL: an override answers every read of it, ToString()'s
             // included, through a base reference and in a derived class; a BCL
             // exception's Message in the same program is still its stored one.
             Exception mo = new MsgOverEx(nmsg[2], nmsg[3]);
             Program.Check("exc-msg-override",
-                          mo.Message == "msg:outer" && mo.ToString() == "MsgOverEx: msg:outer"
+                          mo.Message == "msg:outer" && mo.ToString() == "Demo.MsgOverEx: msg:outer"
                           && new MsgOverSub().Message == "msg:sub"
                           && new Exception(nmsg[2]).Message == "hi");
             // base.Message is System.Exception's own, the message the constructor
