@@ -507,6 +507,9 @@ type jsrt struct {
 	// rubyOids is Object#object_id's table: the values numbered so far, in order
 	// (see rubyObjectId in jsrtruby.go).
 	rubyOids []interface{}
+	// rubyInspecting holds the objects whose default #inspect is running (see
+	// rubyObjInspect in jsrtruby.go).
+	rubyInspecting []*jsObject
 
 	// pyHashIds is Python's identity hash table: the values hash() numbered so
 	// far, in order (see pyHashId in jsrtpynum.go).
@@ -9671,12 +9674,9 @@ func (rt *jsrt) rubyStr(v interface{}) string {
 		if _, isUM := t.props["__rubm"]; isUM {
 			return rt.rubyInspect(t)
 		}
-		// A plain instance with no #to_s of its own. MRI writes
-		// `#<A:0x00007f... @x=1>'; the address is its own and cannot be matched,
-		// so the address and the instance variables are left off rather than
-		// invented - the same rule the Proc renderer above follows.
+		// A plain instance with no #to_s of its own: `#<A:0x...>'.
 		if n := rubyInstClassName(t); n != "" {
-			return "#<" + n + ">"
+			return rt.rubyObjToS(t, n)
 		}
 		if rxIsRegexObj(t) || rxIsMatchObj(t) {
 			if s, ok := rt.rxRegexMethod(t, "to_s", nil); ok {
@@ -9986,11 +9986,10 @@ func (rt *jsrt) rubyInspect(v interface{}) string {
 				return rt.toString(s)
 			}
 		}
-		// Object#inspect never calls a user #to_s: MRI's default form, with the
-		// address and instance variables left off as in rubyStr.
+		// Object#inspect never calls a user #to_s.
 		if _, isCls := t.props["__isclass"]; !isCls {
 			if n := rubyInstClassName(t); n != "" {
-				return "#<" + n + ">"
+				return rt.rubyObjInspect(t, n)
 			}
 		}
 	}
@@ -13150,7 +13149,30 @@ func rubyEnumFinish(t *jsObject, items *jsArray, results []interface{}) interfac
 		}
 		return out
 	}
-	return t
+	return rubyEnumEachVal(t, results)
+}
+
+// rubyEnumEachVal is what a plain iteration answers once it ran with a block.
+// Twin of enumEachVal in ruby-interpreter.abnf, which states the rule, and
+// rbEnumEachVal in lib/ruby-rt.metajs.
+func rubyEnumEachVal(t *jsObject, results []interface{}) interface{} {
+	m, isStr := t.props["meth"].(string)
+	if !isStr || m == "step" {
+		return t
+	}
+	switch m {
+	case "each_slice", "each_cons", "cycle":
+		return jsNull
+	case "with_index", "each_with_index":
+		if src, isObj := t.props["src"].(*jsObject); isObj && rubyIsEnum(src) {
+			items, _ := src.props["items"].(*jsArray)
+			if items == nil {
+				items = &jsArray{}
+			}
+			return rubyEnumFinish(src, items, results)
+		}
+	}
+	return t.props["src"]
 }
 
 func rubyIsEnum(v interface{}) bool {
@@ -13250,6 +13272,13 @@ func (rt *jsrt) rubyEnumMethod(t *jsObject, name string, args []interface{}) int
 		return rubyEnumFinish(t, items, wres)
 	case "with_object", "each_with_object":
 		memo := argAt(pos, 0)
+		if blk == nil {
+			pairs := &jsArray{}
+			for _, e := range items.elems {
+				pairs.elems = append(pairs.elems, &jsArray{elems: []interface{}{e, memo}})
+			}
+			return rubyEnumAt(rubyMkEnumOp(pairs, "each_with_object"), t, name, pos)
+		}
 		for _, e := range items.elems {
 			rt.call(blk, jsUndef, []interface{}{e, memo})
 		}
@@ -13801,7 +13830,9 @@ func (rt *jsrt) rubyArrayMethod(t *jsArray, name string, args []interface{}) int
 	case "shuffle!":
 		return t
 	case "lazy":
-		return rubyMkLazy("arr", &jsArray{elems: append([]interface{}{}, t.elems...)}, 0, jsNull, false, true, "#<Enumerator::Lazy: "+rt.rubyInspect(rt.rubyEnumSrc(t))+">")
+		lz := rubyMkLazy("arr", &jsArray{elems: append([]interface{}{}, t.elems...)}, 0, jsNull, false, true, "#<Enumerator::Lazy: "+rt.rubyInspect(rt.rubyEnumSrc(t))+">")
+		lz.set("ev", rt.rubyEnumSrc(t))
+		return lz
 	// cycle(n) { } runs the block over the whole array n times; cycle { } with no
 	// count repeats FOREVER, and the way out is the block's own `break'.
 	case "cycle":

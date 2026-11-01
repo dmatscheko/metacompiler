@@ -2235,12 +2235,9 @@ function rbStr(v) {
         if (rbIsRange(v)) { return rbRangeText(v, false) }
         if (typeof v["__renc"] == "string") { return v["__renc"] }
         if (v["__rubm"] !== undefined) { return rbInspect(v) }
-        // A plain instance with no #to_s of its own. MRI writes
-        // `#<A:0x00007f... @x=1>'; the address is its own and cannot be matched, so
-        // the address and the instance variables are left off rather than invented -
-        // the same rule rbFuncRender below follows.
+        // A plain instance with no #to_s of its own: `#<A:0x...>'.
         var cn = rbInstClassName(v)
-        if (cn != "") { return "#<" + cn + ">" }
+        if (cn != "") { return rbObjToS(v, cn) }
         if (rbRxIsRegex(v) || rbRxIsMatch(v)) { return rbStr(rbRxMethod(v, "to_s", [])) }
         if (rbIsEnum(v)) { return "#<Enumerator>" }
     }
@@ -2401,11 +2398,10 @@ function rbInspect(v) {
         }
         // A Regexp / MatchData answers from the regexp half's own table.
         if (rbRxIsRegex(v) || rbRxIsMatch(v)) { return rbStr(rbRxMethod(v, "inspect", [])) }
-        // Object#inspect never calls a user #to_s: MRI's default form, with the
-        // address and instance variables left off as in rbStr.
+        // Object#inspect never calls a user #to_s.
         if (v["__isclass"] !== true) {
             var icn = rbInstClassName(v)
-            if (icn != "") { return "#<" + icn + ">" }
+            if (icn != "") { return rbObjInspect(v, icn) }
         }
     }
     return rbStr(v)
@@ -6752,7 +6748,18 @@ function rbEnumFinish(t, items, results) {
         }
         return keep
     }
-    return t
+    return rbEnumEachVal(t, results)
+}
+// What a plain iteration answers once it ran with a block. Twin of enumEachVal
+// in ruby-interpreter.abnf, which states the rule, and rubyEnumEachVal in
+// abnf/jsrt.go.
+function rbEnumEachVal(t, results) {
+    var m = t["meth"]
+    if (typeof m != "string" || m == "step") { return t }
+    if (m == "each_slice" || m == "each_cons" || m == "cycle") { return null }
+    var src = t["src"]
+    if ((m == "with_index" || m == "each_with_index") && rbIsEnum(src)) { return rbEnumFinish(src, src["items"], results) }
+    return src
 }
 // Enumerator#next past the end: StopIteration, whose #result is what the
 // iteration answered, every yield having given nil - the receiver of an each, and
@@ -6838,7 +6845,13 @@ function rbIsEnum(v) {
 // ruby-interpreter.abnf, which state the rules.
 function rbMkLazy(kind, items, lo, hi, excl, lazy, desc) {
     return {__renum: true, __rlazy: true, items: items, pos: 0, op: "each", kind: kind, lo: lo, hi: hi, excl: excl,
-            ops: [], lazy: lazy, desc: desc, src: null}
+            ops: [], lazy: lazy, desc: desc, src: null, ev: null}
+}
+// What Lazy#each answers after its run. Twin of lazyEachVal in
+// ruby-interpreter.abnf, which states the rule.
+function rbLazyEachVal(t) {
+    if (t["ops"].length > 0) { return null }
+    return t["ev"]
 }
 function rbLazyCopy(t, op, lazy, desc) {
     var c = rbMkLazy(t["kind"], t["items"], t["lo"], t["hi"], t["excl"], lazy, desc)
@@ -6876,10 +6889,14 @@ function rbRangeLazy(r) {
     var hi = anytype
     hi = rtIsNil(r["end"]) ? null : r["end"]
     if (rbIsFlo(hi) && rbToF(hi) > 0 && rbToF(hi) - rbToF(hi) != 0) { hi = null }
+    var lz = anytype
     if (typeof r["begin"] == "number" && (hi === null || typeof hi == "number")) {
-        return rbMkLazy("range", [], r["begin"], hi, r["excl"] === true, true, d)
+        lz = rbMkLazy("range", [], r["begin"], hi, r["excl"] === true, true, d)
+    } else {
+        lz = rbMkLazy("arr", rbRangeToArr(r), 0, null, false, true, d)
     }
-    return rbMkLazy("arr", rbRangeToArr(r), 0, null, false, true, d)
+    lz["ev"] = r
+    return lz
 }
 function rbLazyMethod(t, name, args) {
     var blk = rbBlockOf(args)
@@ -6900,8 +6917,9 @@ function rbLazyMethod(t, name, args) {
     }
     if (name == "to_a" || name == "force" || name == "entries") { return rbLazyFirst(t, -1) }
     if (name == "each" && blk !== null) {
+        if (t["kind"] == "each" && t["ops"].length == 0) { return rbMethod(t["src"], "each", args) }
         rbaLazyFirst(t, -1, rbLazyCall, rbTruthy, rbLazyDrive, function(v, m) { return rbLazyCall(blk, v, m) })
-        return t
+        return rbLazyEachVal(t)
     }
     if (name == "lazy") {
         if (t["lazy"] === true) { return t }
@@ -6935,7 +6953,7 @@ function rbLazyMethod(t, name, args) {
         return null
     }
     if (name == "inspect" || name == "to_s") { return desc }
-    if (name == "class") { return rbBuiltinClass("Enumerator") }
+    if (name == "class") { return rbBuiltinClass(t["lazy"] === true ? "Enumerator::Lazy" : "Enumerator") }
     rbNoMethod(t, name)
     return null
 }
@@ -6995,6 +7013,12 @@ function rbEnumMethod(t, name, args) {
     }
     if (name == "with_object" || name == "each_with_object") {
         var memo = rbPosAt(args, nPos, 0)
+        if (blk === null) {
+            var mpairs = []
+            var mp = 0
+            while (mp < items.length) { mpairs.push([items[mp], memo]); mp = mp + 1 }
+            return rbEnumAt(rbMkEnumOp(mpairs, "each_with_object"), t, name, args)
+        }
         var w = 0
         while (w < items.length) { rbCall2(blk, items[w], memo); w = w + 1 }
         return memo
@@ -7815,7 +7839,11 @@ function rbArrayMethod(t, name, args) {
     if (name == "shuffle!") { return t }
     // cycle(n) { } runs the block over the whole array n times; cycle { } with no
     // count repeats FOREVER, and the way out is the block's own `break'.
-    if (name == "lazy") { return rbMkLazy("arr", rtCopyArr(t), 0, null, false, true, "#<Enumerator::Lazy: " + rbInspect(rbEnumSrc(t)) + ">") }
+    if (name == "lazy") {
+        var alz = rbMkLazy("arr", rtCopyArr(t), 0, null, false, true, "#<Enumerator::Lazy: " + rbInspect(rbEnumSrc(t)) + ">")
+        alz["ev"] = rbEnumSrc(t)
+        return alz
+    }
     if (name == "cycle") {
         var cn = 0
         if (nPos > 0) { cn = Math.trunc(rbToF(rbPosAt(args, nPos, 0))) }
@@ -8443,6 +8471,7 @@ function rbRespondClass(v) {
     if (rbRxIsRegex(v)) { return "Regexp" }
     if (rbRxIsMatch(v)) { return "MatchData" }
     if (rbIsObj(v) && (v["__isclass"] === true || v["__class"] !== undefined)) { return "" }
+    if (rbIsObj(v) && v["__rlazy"] === true && v["lazy"] === true) { return "Enumerator::Lazy" }
     return rbClassName(v)
 }
 
@@ -8535,7 +8564,8 @@ function rbSuperBuiltin(self, name, args) {
         return null
     }
     if (name == "to_s" && rbExcInst(self)) { return rbExcMessage(self) }
-    if (name == "to_s" || name == "inspect") { return "#<" + self["__class"]["__name"] + ">" }
+    if (name == "to_s") { return rbObjToS(self, self["__class"]["__name"]) }
+    if (name == "inspect") { return rbObjInspect(self, self["__class"]["__name"]) }
     if (name == "message" && rbExcInst(self)) { return rbStr(self) }
     if (name == "hash") { return rbStrHash("o" + rbInspect(rbObjectId(self))) }
     if (name == "object_id") { return rbObjectId(self) }
@@ -10190,13 +10220,13 @@ function js_rattrw(o, k, v, sk, mk) {
 // for VARS in COLL: open, step and close the loop. Twin of js_rforit in
 // abnf/jsrtruby.go, which states the rule.
 function js_rforit(c, whole) {
-    var v = anytype
-    v = c
+    var it = {c: c, i: 0, h: false, ks: false, k: null, lev: 0, n: 0, e: null, res: null}
     if (rbIsEnum(c)) {
-        v = rbForEnumVal(c)
+        it["e"] = c
+        it["res"] = []
         c = rbForEnumItems(c, whole === true)
+        it["c"] = c
     }
-    var it = {c: c, i: 0, h: false, ks: false, k: null, lev: 0, n: 0, v: v}
     if (rbIsDict(c)) {
         var lev = c["__iter"]
         if (lev === undefined) { lev = 0 }
@@ -10208,9 +10238,12 @@ function js_rforit(c, whole) {
     if (!rbIsArr(c)) { it["n"] = js_pylen(c) }
     return it
 }
-function js_rfornext(it) {
+// prev is the value the body produced on the previous pass (see js_rfornext in
+// abnf/jsrtruby.go).
+function js_rfornext(it, prev) {
     var c = it["c"]
     var i = it["i"]
+    if (it["res"] !== null && i > 0) { it["res"].push(prev) }
     if (it["h"]) {
         var keys = c["keys"]
         if (it["ks"] && i < keys.length && keys[i] === it["k"]) { i = i + 1 }
@@ -10253,15 +10286,15 @@ function rbForEnumItems(e, whole) {
 }
 // The loop's value when it runs to its end. Twin of js_rforval in
 // abnf/jsrtruby.go.
-function js_rforval(it) { return it["v"] }
+function js_rforval(it) {
+    if (it["e"] === null) { return it["c"] }
+    return rbForEnumVal(it["e"], it["c"], it["res"])
+}
 // What `for` over an Enumerator answers. Twin of rubyForEnumVal in
 // abnf/jsrtruby.go and forEnumVal in ruby-interpreter.abnf, which states the rule.
-function rbForEnumVal(e) {
-    var m = e["meth"]
-    if (typeof m != "string") { return e }
-    if (m == "each_slice" || m == "each_cons") { return null }
-    if (m.indexOf("each") != 0 || (m == "each" && e["__rdefer"] === true)) { return e }
-    return e["src"]
+function rbForEnumVal(e, items, results) {
+    if (e["__rlazy"] === true) { return rbLazyEachVal(e) }
+    return rbEnumFinish(e, items, results)
 }
 function js_rforend(it) {
     if (it["h"]) { it["c"]["__iter"] = it["lev"] }
@@ -10661,6 +10694,31 @@ function rbObjectId(v) {
     }
     rbOids.push(v)
     return 8 + 8 * rbOids.length
+}
+
+// Object#to_s and #inspect of an instance of class cn. Twins of objToS /
+// objInspect in ruby-interpreter.abnf, which state the rule.
+function rbObjToS(o, cn) { return "#<" + cn + ":" + rbaObjAddr(rbObjectId(o)) + ">" }
+var rbObjInspecting = []
+function rbObjInspect(o, cn) {
+    var head = "#<" + cn + ":" + rbaObjAddr(rbObjectId(o))
+    var ks = keysOf(o)
+    if (ks.length == 0) { return head + ">" }
+    var i = 0
+    while (i < rbObjInspecting.length) {
+        if (rbObjInspecting[i] === o) { return head + " ...>" }
+        i = i + 1
+    }
+    rbObjInspecting.push(o)
+    var parts = []
+    try {
+        var k = 0
+        while (k < ks.length) {
+            parts.push("@" + ks[k] + "=" + rbInspect(o[ks[k]]))
+            k = k + 1
+        }
+    } finally { rbObjInspecting.pop() }
+    return head + " " + parts.join(", ") + ">"
 }
 
 function rbStrHash(s) {

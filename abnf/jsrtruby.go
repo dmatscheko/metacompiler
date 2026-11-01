@@ -462,7 +462,8 @@ func (rt *jsrt) addRubyFmtExterns(m map[string]func(args []uint64) uint64) {
 		it := newJSObject()
 		it.set("v", c)
 		if rubyIsEnum(c) {
-			it.set("v", rubyForEnumVal(c.(*jsObject)))
+			it.set("e", c)
+			it.set("res", &jsArray{})
 			c = rt.rubyForEnumItems(c.(*jsObject), len(a) > 1 && u(a[1]) == true)
 		}
 		it.set("c", c)
@@ -480,10 +481,15 @@ func (rt *jsrt) addRubyFmtExterns(m map[string]func(args []uint64) uint64) {
 		}
 		return w(it)
 	}
+	// js_rfornext(it, prev): prev is the value the body produced on the previous
+	// pass, kept for an Enumerator's loop value (rubyForEnumVal).
 	m["js_rfornext"] = func(a []uint64) uint64 {
 		it := u(a[0]).(*jsObject)
 		c := it.props["c"]
 		i := int(it.props["i"].(float64))
+		if res, isEnum := it.props["res"].(*jsArray); isEnum && i > 0 {
+			res.elems = append(res.elems, u(a[1]))
+		}
 		if _, isHash := it.props["lev"]; isHash {
 			keys, vals, _ := dictParts(c)
 			if k, has := it.props["k"]; has && i < len(keys.elems) && keys.elems[i] == k {
@@ -512,7 +518,12 @@ func (rt *jsrt) addRubyFmtExterns(m map[string]func(args []uint64) uint64) {
 	// js_rforval: the loop's value when it runs to its end - COLL, or for an
 	// Enumerator rubyForEnumVal's answer.
 	m["js_rforval"] = func(a []uint64) uint64 {
-		return w(u(a[0]).(*jsObject).props["v"])
+		it := u(a[0]).(*jsObject)
+		if e, isEnum := it.props["e"].(*jsObject); isEnum {
+			items, _ := it.props["c"].(*jsArray)
+			return w(rt.rubyForEnumVal(e, items, it.props["res"].(*jsArray).elems))
+		}
+		return w(it.props["v"])
 	}
 	m["js_rforend"] = func(a []uint64) uint64 {
 		it := u(a[0]).(*jsObject)
@@ -1886,21 +1897,17 @@ func rubyForPassMeth(m string) bool {
 	return m == "each" || m == "map" || m == "collect" || m == "flat_map" || m == "collect_concat"
 }
 
-// rubyForEnumVal: what `for` over an Enumerator answers. Twin of forEnumVal in
-// ruby-interpreter.abnf, which states the rule, and rbForEnumVal in
-// languages/lib/ruby-rt.metajs.
-func rubyForEnumVal(e *jsObject) interface{} {
-	m, isStr := e.props["meth"].(string)
-	if !isStr {
-		return e
+// rubyForEnumVal: what `for` over an Enumerator answers, given the body's value
+// for each item. Twin of forEnumVal in ruby-interpreter.abnf, which states the
+// rule, and rbForEnumVal in languages/lib/ruby-rt.metajs.
+func (rt *jsrt) rubyForEnumVal(e *jsObject, items *jsArray, results []interface{}) interface{} {
+	if e.props["__rlazy"] == true {
+		return rubyLazyEachVal(e)
 	}
-	if m == "each_slice" || m == "each_cons" {
-		return jsNull
+	if items == nil {
+		items = &jsArray{}
 	}
-	if !strings.HasPrefix(m, "each") || (m == "each" && e.props["__rdefer"] == true) {
-		return e
-	}
-	return e.props["src"]
+	return rubyEnumFinish(e, items, results)
 }
 
 func (rt *jsrt) rubyObjCmp(l, r interface{}) bool {
@@ -2222,6 +2229,10 @@ var rubyRespondNames = map[string][]string{
 		"public_send", "reduce", "reject", "reverse_each", "rewind", "select", "send", "size",
 		"slice_after", "slice_before", "sort", "sort_by", "sum", "take", "take_while", "tally", "to_a", "uniq", "with_index",
 		"with_object", "zip"},
+	"Enumerator::Lazy": {"<=>", "collect", "drop_while", "each", "each_cons", "each_slice", "entries",
+		"eql?", "equal?", "filter", "first", "force", "frozen?", "instance_of?", "instance_variables",
+		"is_a?", "itself", "kind_of?", "lazy", "map", "next", "nil?", "peek", "public_send", "reject",
+		"rewind", "select", "send", "size", "take", "take_while", "to_a"},
 	"Enumerable": {"all?", "any?", "chain", "chunk", "chunk_while", "collect", "collect_concat", "count",
 		"cycle", "detect", "drop", "drop_while", "each_cons", "each_entry", "each_slice",
 		"each_with_index", "each_with_object", "entries", "filter", "find", "find_all",
@@ -2905,6 +2916,9 @@ func (rt *jsrt) rubyRespondClass(v interface{}) string {
 			return ""
 		}
 	}
+	if rubyIsLazyEnum(v) {
+		return "Enumerator::Lazy"
+	}
 	return rt.rubyClassNameRT(v)
 }
 
@@ -3482,7 +3496,10 @@ func (rt *jsrt) rubySuperBuiltin(self interface{}, name string, args []interface
 			return msg
 		}
 		cn, _ := o.props["__class"].(*jsObject).props["__name"].(string)
-		return "#<" + cn + ">"
+		if name == "to_s" {
+			return rt.rubyObjToS(o, cn)
+		}
+		return rt.rubyObjInspect(o, cn)
 	case "message":
 		if rubyExcInst(o) {
 			return rt.rubyStr(o)
@@ -3604,6 +3621,40 @@ func (rt *jsrt) rubyObjectId(v interface{}) interface{} {
 	}
 	rt.rubyOids = append(rt.rubyOids, v)
 	return float64(8 + 8*len(rt.rubyOids))
+}
+
+// rubyObjAddr is the address Object#to_s and #inspect print. Twin of rbaObjAddr
+// in lib/ruby-arr.js, which states the rule.
+func rubyObjAddr(id interface{}) string {
+	return fmt.Sprintf("0x%016x", int64(rubyToF(id))*2)
+}
+
+// rubyObjToS / rubyObjInspect are Object#to_s and #inspect of an instance of
+// class cn. Twins of objToS / objInspect in ruby-interpreter.abnf, which state
+// the rule.
+func (rt *jsrt) rubyObjToS(o *jsObject, cn string) string {
+	return "#<" + cn + ":" + rubyObjAddr(rt.rubyObjectId(o)) + ">"
+}
+
+func (rt *jsrt) rubyObjInspect(o *jsObject, cn string) string {
+	head := "#<" + cn + ":" + rubyObjAddr(rt.rubyObjectId(o))
+	names := rubyIvarNames(o).elems
+	if len(names) == 0 {
+		return head + ">"
+	}
+	for _, p := range rt.rubyInspecting {
+		if p == o {
+			return head + " ...>"
+		}
+	}
+	rt.rubyInspecting = append(rt.rubyInspecting, o)
+	defer func() { rt.rubyInspecting = rt.rubyInspecting[:len(rt.rubyInspecting)-1] }()
+	parts := make([]string, len(names))
+	for i, n := range names {
+		s := n.(jsSym).s
+		parts[i] = s + "=" + rt.rubyInspect(o.props[s[1:]])
+	}
+	return head + " " + strJoin(parts, ", ") + ">"
 }
 
 // rubyStrHash is the 31-bit polynomial hash over a string's UTF-16 units.

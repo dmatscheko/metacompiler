@@ -2738,10 +2738,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         var r = bodyT()
         if (isSig(r)) {
             if (r.brk === true) { return {stop: true, v: r.v} }
-            if (r.cont === true) { return {stop: false, v: null} }
+            if (r.cont === true) { return {stop: false, v: r.v} }
             return {stop: true, sig: r}         // a return propagates out
         }
-        return {stop: false, v: null}
+        return {stop: false, v: r}
     }
     makeWhile = function(bodyT, condT) {
         return function() {
@@ -3107,9 +3107,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     }
 
     // for VARS in COLL ... end. The loop variables are {ftgt} multiple-assignment
-    // targets (see ForVarList); the value of the loop is COLL (an Enumerator: see
-    // forEnumVal), as Array#each answers
-    // its receiver, or the value of the `break` that ended it.
+    // targets (see ForVarList); the value of the loop is COLL, as Array#each
+    // answers its receiver (an Enumerator: what its #each answers given the body's
+    // values, see forEnumVal), or the value of the `break` that ended it.
     function forTargets(items) {
         var ts = []
         for (var i = 0; i < items.length; i++) { if (items[i].ftgt != undefined) { ts.push(items[i].ftgt) } }
@@ -3130,21 +3130,20 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             coll = collT()
             if (isDict(coll)) { return forInHash(coll, tgts, whole, body) }
             var seq = []
-            var val = anytype
-            val = coll
+            var en = isEnum(coll)
             if (Array.isArray(coll)) { seq = coll }
             else if (isRange(coll)) { seq = rangeToA(coll) }
-            else if (isEnum(coll)) {
-                val = forEnumVal(coll)
-                seq = forEnumItems(coll, whole)
-            }
+            else if (en) { seq = forEnumItems(coll, whole) }
             else { fail("for-in needs an array or a hash") }
+            var res = []
             for (var i = 0; i < seq.length; i++) {
                 var st = forStep(tgts, whole, body, seq[i])
                 if (st.sig != undefined) { return st.sig }
                 if (st.stop) { return st.v }
+                if (en) { res.push(st.v) }
             }
-            return val
+            if (en) { return forEnumVal(coll, seq, res) }
+            return coll
         }
     }
     // `for` over an Enumerator binds each yield the way a block parameter list does:
@@ -3172,17 +3171,13 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
         return all
     }
-    // The loop answers what
-    // the Enumerator's #each would: nil after each_slice / each_cons, the receiver
-    // after the other each* methods (a user #each answers its own value, so that one
-    // and every other Enumerator answer the Enumerator). Twins: js_rforit in
+    // The loop answers what the Enumerator's #each would with the body as its
+    // block: enumFinish over the values the body produced (each yield's `next`
+    // value or last expression), and for a Lazy lazyEachVal. Twins: js_rforval in
     // abnf/jsrtruby.go and lib/ruby-rt.metajs.
-    function forEnumVal(e) {
-        var m = e.meth
-        if (typeof m != "string") { return e }
-        if (m == "each_slice" || m == "each_cons") { return null }
-        if (m.indexOf("each") != 0 || (m == "each" && e.__rdefer === true)) { return e }
-        return e.src
+    function forEnumVal(e, items, results) {
+        if (e.__rlazy === true) { return lazyEachVal(e) }
+        return enumFinish(e, items, results)
     }
     // One pass of a for body with el bound to the loop variables.
     function forStep(tgts, whole, body, el) {
@@ -6183,12 +6178,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // to_s may be a singleton (`def o.to_s`) or inherited (Exception#to_s lives on
         // the base class): singRespond searches both, as mcall dispatches.
         if (isUserObj(v) && singRespond(v, "to_s")) { return rstr(mcall(v, "to_s", [], null)) }
-        // A plain instance with no #to_s of its own. MRI writes
-        // `#<A:0x00007f... @x=1>'; the address is its own and cannot be matched, so
-        // the address and the instance variables are left off rather than invented -
-        // the same rule the Proc renderer below follows.
+        // A plain instance with no #to_s of its own: `#<A:0x...>' (objToS).
         if (isUserObj(v) && v.__rubm !== undefined) { return rinspect(v) }
-        if (isUserObj(v)) { return v.__renc !== undefined ? v.__renc : "#<" + v.__class.__name + ">" }
+        if (isUserObj(v)) { return v.__renc !== undefined ? v.__renc : objToS(v) }
         // Enumerator#to_s is Object#to_s, the address left off the same way.
         if (isEnum(v)) { return "#<Enumerator>" }
         // A CLASS object stringifies as its name, not as "[object Object]", unless a
@@ -6324,9 +6316,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (v.__rio !== undefined) { return "#<IO:<" + (v.__rio == 2 ? "STDERR" : "STDOUT") + ">>" }
             if (v.__renc !== undefined) { return "#<Encoding:" + v.__renc + ">" }
             if (v.__rubm !== undefined) { return "#<UnboundMethod: " + v.__rown + "#" + v.__rubm + ">" }
-            // Object#inspect never calls a user #to_s: MRI's default form, with the
-            // address and instance variables left off as in rstr.
-            return "#<" + v.__class.__name + ">"
+            // Object#inspect never calls a user #to_s.
+            return objInspect(v)
         }
         // Module#inspect is the NAME even when the class defines #to_s, since MRI
         // binds the alias to the original Module#to_s.
@@ -8362,6 +8353,27 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         nameErr("NoMethodError", "super: no superclass method `" + name + "' for " + noMethodDesc(t), name, t)
     }
     // A super that no user class or module above answers reaches the builtin
+    // Object#to_s and #inspect: the class name and the address (rbaObjAddr), and
+    // for #inspect each @ivar's inspect in assignment order - `#<A:0x... @x=1,
+    // @y="s">' - or ` ...' for an object whose #inspect is already running, as
+    // MRI cuts a cycle. Twins: rubyObjToS / rubyObjInspect in abnf/jsrtruby.go,
+    // rbObjToS / rbObjInspect in lib/ruby-rt.metajs.
+    function objToS(v) { return "#<" + v.__class.__name + ":" + rbaObjAddr(objectId(v)) + ">" }
+    var objInspecting = []
+    function objInspect(v) {
+        var head = "#<" + v.__class.__name + ":" + rbaObjAddr(objectId(v))
+        if (v.__ivn == undefined || v.__ivn.length == 0) { return head + ">" }
+        for (var i = 0; i < objInspecting.length; i++) { if (objInspecting[i] === v) { return head + " ...>" } }
+        objInspecting.push(v)
+        var parts = []
+        try {
+            for (var k = 0; k < v.__ivn.length; k++) {
+                var n = v.__ivn[k]
+                parts.push("@" + n + "=" + rinspect(hasOwn(v, n) ? v[n] : null))
+            }
+        } finally { objInspecting.pop() }
+        return head + " " + parts.join(", ") + ">"
+    }
     // Object / Kernel / Comparable method of that name on a user instance.
     // Object#initialize takes no arguments; #to_s and #inspect are the default
     // forms rstr / rinspect give a class defining neither. Twins:
@@ -8372,7 +8384,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (args.length > 0) { raiseErr(name, "ArgumentError", "wrong number of arguments (given " + args.length + ", expected 0)") }
             return null
         }
-        if (name == "to_s" || name == "inspect") { return "#<" + self.__class.__name + ">" }
+        if (name == "to_s") { return objToS(self) }
+        if (name == "inspect") { return objInspect(self) }
         if (name == "hash") { return strHash("o" + intText(objectId(self))) }
         if (name == "object_id") { return objectId(self) }
         if (name == "equal?" || name == "eql?") { return identicalP(self, args[0]) }
@@ -10445,7 +10458,21 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             }
             return keep
         }
-        return t
+        return enumEachVal(t, results)
+    }
+    // What a plain iteration answers once it ran with a block, as MRI's
+    // Enumerator#each answers the value of the method that made it: nil after
+    // each_slice / each_cons / cycle(n), the pending op of the Enumerator a
+    // with_index / each_with_index was made from, and otherwise the receiver
+    // (each, each_with_index, times, each_char, combination, ...). step stays
+    // the Enumerator, which stands for MRI's ArithmeticSequence. Twins:
+    // rubyEnumEachVal in abnf/jsrt.go, rbEnumEachVal in lib/ruby-rt.metajs.
+    function enumEachVal(t, results) {
+        var m = t.meth
+        if (typeof m != "string" || m == "step") { return t }
+        if (m == "each_slice" || m == "each_cons" || m == "cycle") { return null }
+        if (isEnum(t.src) && (m == "with_index" || m == "each_with_index")) { return enumFinish(t.src, t.src.items, results) }
+        return t.src
     }
     // StopIteration#result is what the iteration answered, every yield having given
     // nil: the receiver of an each, and otherwise the method run again with a block
@@ -10465,6 +10492,14 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     function mkLazy(kind, items, lo, hi, excl, lazy, desc) {
         return {__renum: true, __rlazy: true, items: items, pos: 0, op: "each", kind: kind, lo: lo, hi: hi, excl: excl,
                 ops: [], lazy: lazy, desc: desc, src: null}
+    }
+    // What Lazy#each answers after its run: nil once an op is pending (MRI runs
+    // the ops in a generator), else the receiver #lazy was called on, which ev
+    // holds. Twins: rbLazyEachVal in lib/ruby-rt.metajs, rubyLazyEachVal in
+    // abnf/jsrtrubystr.go.
+    function lazyEachVal(t) {
+        if (t.ops.length > 0 || t.ev === undefined) { return null }
+        return t.ev
     }
     function lazyCopy(t, op, lazy, desc) {
         var c = mkLazy(t.kind, t.items, t.lo, t.hi, t.excl, lazy, desc)
@@ -10499,8 +10534,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         var hi = anytype
         hi = r.hi === undefined ? null : r.hi
         if (isFlo(hi) && toF(hi) > 0 && toF(hi) - toF(hi) != 0) { hi = null }
-        if (typeof r.lo == "number" && (hi === null || typeof hi == "number")) { return mkLazy("range", [], r.lo, hi, r.excl === true, true, d) }
-        return mkLazy("arr", rangeToA(r), 0, null, false, true, d)
+        var lz = anytype
+        if (typeof r.lo == "number" && (hi === null || typeof hi == "number")) { lz = mkLazy("range", [], r.lo, hi, r.excl === true, true, d) }
+        else { lz = mkLazy("arr", rangeToA(r), 0, null, false, true, d) }
+        lz.ev = r
+        return lz
     }
     function lazyMethod(t, name, args, blk) {
         var lop = rbaLazyOp(name)
@@ -10516,10 +10554,12 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             return f1.length > 0 ? f1[0] : null
         }
         if (name == "to_a" || name == "force" || name == "entries") { return lazyFirst(t, -1) }
-        // each with a block takes each result as it is made.
+        // each with a block takes each result as it is made, and answers what the
+        // source's #each does - nil once an op is pending (lazyEachVal).
         if (name == "each" && blk != null) {
+            if (t.kind == "each" && t.ops.length == 0) { return mcall(t.src, "each", [], blk) }
             rbaLazyFirst(t, -1, lazyCall, rtest, lazyDrive, function(v, m) { return lazyCall(blk, v, m) })
-            return t
+            return lazyEachVal(t)
         }
         if (name == "lazy") { return t.lazy ? t : lazyCopy(t, null, true, "#<Enumerator::Lazy: " + t.desc + ">") }
         // each_slice(n) / each_cons(n) without a block stay one value at a time.
@@ -10600,6 +10640,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
         if (name == "with_object" || name == "each_with_object") {
             var memo = args[0]
+            if (blk == null) {
+                var mpairs = []
+                for (var mp = 0; mp < items.length; mp++) { mpairs.push([items[mp], memo]) }
+                return enumAt(mkEnumOp(mpairs, "each_with_object"), t, name, args)
+            }
             for (var w = 0; w < items.length; w++) { blockCall(blk, [items[w], memo]) }
             return memo
         }
@@ -10968,7 +11013,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (name == "shuffle!") { return t }
         // cycle(n) { } runs the block over the whole array n times; cycle { } with no
         // count repeats FOREVER, and the way out is the block's own `break'.
-        if (name == "lazy") { return mkLazy("arr", t.slice(0), 0, null, false, true, "#<Enumerator::Lazy: " + rinspect(enumSrc(t)) + ">") }
+        if (name == "lazy") {
+            var alz = mkLazy("arr", t.slice(0), 0, null, false, true, "#<Enumerator::Lazy: " + rinspect(enumSrc(t)) + ">")
+            alz.ev = enumSrc(t)
+            return alz
+        }
         if (name == "cycle") {
             if (blk == null) {
                 if (args.length == 0) { return mkLazy("cycle", t.slice(0), 0, null, false, false, "#<Enumerator: " + rinspect(enumSrc(t)) + ":cycle>") }

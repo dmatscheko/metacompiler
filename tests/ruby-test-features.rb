@@ -1172,7 +1172,7 @@ check("t13-message-is-to-s", T13Sub.new("m").message, "TS")
 check("t13-inspect-noarg", StandardError.new.inspect, "#<StandardError: StandardError>")
 class T13Plain
 end
-check("t13-obj-to-s", T13Plain.new.to_s, "#<T13Plain>")
+check("t13-obj-to-s", T13Plain.new.to_s.sub(/:0x[0-9a-f]{16}>\z/, ">"), "#<T13Plain>")
 
 # The modifier rescue. It binds TIGHTER than `=' (so the FALLBACK is assigned),
 # and it applies to a whole statement, so `raise "a" rescue 7' is caught.

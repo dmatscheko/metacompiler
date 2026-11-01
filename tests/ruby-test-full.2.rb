@@ -1826,6 +1826,59 @@ def s163
   b = for x in [1, 2].each_slice(1); break 7; end
   check("for163b", c == [[1, 2, 3], [2, 3, 4], "a", "b"] && t.nil? && s == "ab" && b == 7)
 end
+# ===== SECTION 164: Enumerator#each's value; for over an Enumerator; Object#inspect =====
+# Enumerator#each with a block answers what the method that made it answers: the
+# receiver of each / each_with_index / times / each_char, nil of each_slice, the
+# mapped Array of map, the memo of with_object, and through with_index the
+# pending op beneath it. `for' is #each with the body as the block, so its value
+# is the same, built from the body's values (`next v' included); a Lazy answers
+# nil once an op is pending. Object#inspect lists the @ivars after the address
+# (twice the object_id here, as in MRI 2.6) and cuts a cycle with ` ...'; a Lazy
+# is an Enumerator::Lazy, and respond_to? names what it dispatches. /usr/bin/ruby
+# 2.6 settles each.
+class S164E
+  include Enumerable
+  def each; yield 1; yield 2; :done; end
+end
+class S164Q
+  def initialize(a); @a = a; @b = "x"; end
+end
+class S164R
+  def initialize; @me = self; end
+end
+class S164N; end
+def s164
+  v = [5, 6]
+  check("ev164a", v.each.each { |x| } == v && v.each_slice(1).each { |x| }.nil? && v.each_with_index.each { |x, i| } == v &&
+        v.each.with_index.each { |x, i| } == v && v.map.with_index.each { |x, i| x * i } == [0, 6] &&
+        3.times.each { |x| } == 3 && "ab".each_char.each { |c| } == "ab" && (1..4).each_slice(2).each { |x| }.nil?)
+  w = v.each.with_object([])
+  check("ev164b", w.inspect == "#<Enumerator: #<Enumerator: [5, 6]:each>:with_object([])>" && w.to_a == [[5, []], [6, []]] &&
+        w.each { |x, m| m << x } == [5, 6] && v.each.with_object([]) { |x, m| m << x * 2 } == [10, 12])
+  r1 = for x in v.map; x * 2; end
+  r2 = for x in v.select; x > 5; end
+  r3 = for x, i in v.map.with_index; x * i; end
+  r4 = for x in v.map; next 9 if x == 5; x; end
+  r5 = for x in v.each_slice(1); x; end
+  r6 = for x in S164E.new.map; x * 3; end
+  check("ev164c", r1 == [10, 12] && r2 == [6] && r3 == [0, 6] && r4 == [9, 6] && r5.nil? && r6 == [3, 6])
+  l = (1..3).lazy
+  r7 = for x in l.map { |y| y * 2 }; end
+  r8 = for x in l; end
+  check("ev164d", r7.nil? && r8 == (1..3) && l.map { |y| y }.each { |y| }.nil? && v.lazy.each { |y| } == v &&
+        S164E.new.lazy.each { |y| } == :done)
+  check("ev164e", l.class == Enumerator::Lazy && [l].map(&:class) == [Enumerator::Lazy] && l.respond_to?(:force) &&
+        l.respond_to?(:map) && l.respond_to?(:next) && !l.respond_to?(:zork) && !v.each.respond_to?(:force))
+  q = S164Q.new(1)
+  hx = "0x" + format("%016x", q.object_id * 2)
+  check("in164a", q.inspect == "#<S164Q:#{hx} @a=1, @b=\"x\">" && q.to_s == "#<S164Q:#{hx}>" && [q].inspect == "[#{q.inspect}]")
+  rr = S164R.new
+  rx = "0x" + format("%016x", rr.object_id * 2)
+  n = S164N.new
+  check("in164b", rr.inspect == "#<S164R:#{rx} @me=#<S164R:#{rx} ...>>" &&
+        n.inspect == "#<S164N:0x" + format("%016x", n.object_id * 2) + ">" && n.inspect == n.to_s)
+end
+
 s122() # SECTION-CALL 122
 s123() # SECTION-CALL 123
 s124() # SECTION-CALL 124
@@ -1868,5 +1921,6 @@ s160() # SECTION-CALL 160
 s161() # SECTION-CALL 161
 s162() # SECTION-CALL 162
 s163() # SECTION-CALL 163
+s164() # SECTION-CALL 164
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

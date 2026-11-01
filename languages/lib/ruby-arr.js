@@ -353,3 +353,20 @@ function rbaFillSpan(n, beg, hasBeg, len, hasLen) {
     if (l < 0) { return null }
     return {b: b, e: b + l}
 }
+
+// The address Object#to_s and #inspect print for an object whose object_id is
+// id: MRI 2.6's is twice the object_id, in sixteen hex digits, so ours is twice
+// ours ("0x0000000000000020" for id 16). Go twin: rubyObjAddr in
+// abnf/jsrtruby.go.
+function rbaObjAddr(id) {
+    var n = id * 2
+    var out = ""
+    var i = 0
+    while (i < 16) {
+        var q = Math.trunc(n / 16)
+        out = "0123456789abcdef".charAt(n - q * 16) + out
+        n = q
+        i = i + 1
+    }
+    return "0x" + out
+}

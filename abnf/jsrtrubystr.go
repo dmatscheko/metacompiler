@@ -72,6 +72,16 @@ func rubyIsLazyEnum(v interface{}) bool {
 	return lz
 }
 
+// rubyLazyEachVal is what Lazy#each answers after its run. Twin of lazyEachVal
+// in ruby-interpreter.abnf, which states the rule.
+func rubyLazyEachVal(t *jsObject) interface{} {
+	ev, has := t.props["ev"]
+	if !has || len(t.props["ops"].(*jsArray).elems) > 0 {
+		return jsNull
+	}
+	return ev
+}
+
 // rubyMkLazy is an Enumerator::Lazy or the endless Enumerator of Array#cycle.
 // Twins: mkLazy in ruby-interpreter.abnf (which states the rules), rbMkLazy in
 // lib/ruby-rt.metajs; the run itself is rubyLazyFirst, twin of rbaLazyFirst in
@@ -287,9 +297,13 @@ func (rt *jsrt) rubyRangeLazy(r *jsObject) interface{} {
 	lo, loNum := r.props["begin"].(float64)
 	_, hiNum := hi.(float64)
 	if loNum && (hi == jsNull || hiNum) {
-		return rubyMkLazy("range", &jsArray{}, lo, hi, r.props["excl"] == true, true, d)
+		lz := rubyMkLazy("range", &jsArray{}, lo, hi, r.props["excl"] == true, true, d)
+		lz.set("ev", r)
+		return lz
 	}
-	return rubyMkLazy("arr", rt.rubyRangeToArr(r), 0, jsNull, false, true, d)
+	lz := rubyMkLazy("arr", rt.rubyRangeToArr(r), 0, jsNull, false, true, d)
+	lz.set("ev", r)
+	return lz
 }
 
 func (rt *jsrt) rubyLazyMethod(t *jsObject, name string, args []interface{}) interface{} {
@@ -326,8 +340,11 @@ func (rt *jsrt) rubyLazyMethod(t *jsObject, name string, args []interface{}) int
 		return &jsArray{elems: rt.rubyLazyFirst(t, -1)}
 	case "each":
 		if blk != nil {
+			if t.props["kind"] == "each" && len(t.props["ops"].(*jsArray).elems) == 0 {
+				return rt.rubyMethod(t.props["src"], "each", args)
+			}
 			rt.rubyLazyPull(t, -1, func(v interface{}, m bool) { rt.rubyLazyCall(blk, v, m) })
-			return t
+			return rubyLazyEachVal(t)
 		}
 	case "lazy":
 		if lazy {
@@ -365,6 +382,9 @@ func (rt *jsrt) rubyLazyMethod(t *jsObject, name string, args []interface{}) int
 	case "inspect", "to_s":
 		return desc
 	case "class":
+		if lazy {
+			return rt.rubyBuiltinClass("Enumerator::Lazy")
+		}
 		return rt.rubyBuiltinClass("Enumerator")
 	}
 	rt.rubyNoMethod(t, name)

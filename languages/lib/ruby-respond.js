@@ -13,7 +13,8 @@
 // methods every object has, which respond_to? reports only with include_all.
 // Row "Enumerable" holds what an instance of a class that includes Enumerable and
 // defines #each answers: MRI 2.6's Enumerable methods, run on the Array of what
-// #each yields.
+// #each yields. Row "Enumerator::Lazy" is not Enumerator's: a Lazy dispatches
+// only its own one-value-at-a-time surface, not the eager Enumerable one.
 //
 // Included by ruby-interpreter.abnf (include("lib/ruby-respond.js")) and
 // imported by lib/ruby-rt.metajs. The Go twin's copy is rubyRespondNames in
@@ -148,6 +149,10 @@ function rbRespondRows() {
          "partition", "peek", "public_send", "reduce", "reject", "reverse_each", "rewind",
          "select", "send", "size", "slice_after", "slice_before", "sort", "sort_by", "sum", "take", "take_while", "tally",
          "to_a", "uniq", "with_index", "with_object", "zip"],
+        ["Enumerator::Lazy", "<=>", "collect", "drop_while", "each", "each_cons", "each_slice", "entries",
+         "eql?", "equal?", "filter", "first", "force", "frozen?", "instance_of?", "instance_variables",
+         "is_a?", "itself", "kind_of?", "lazy", "map", "next", "nil?", "peek", "public_send", "reject",
+         "rewind", "select", "send", "size", "take", "take_while", "to_a"],
         ["Enumerable", "all?", "any?", "chain", "chunk", "chunk_while", "collect", "collect_concat", "count",
          "cycle", "detect", "drop", "drop_while", "each_cons", "each_entry", "each_slice",
          "each_with_index", "each_with_object", "entries", "filter", "find", "find_all",

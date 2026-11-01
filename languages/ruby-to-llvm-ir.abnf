@@ -2927,6 +2927,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 return {b: deadBlock(), v: hNull}
             }
             if (loopStack.length == 0 && curBlkCtl) { callExt(b, "js_scope_set", [curScopeV, emitStr(b, blkNextName), v]) }
+            var nlp = loopStack.length > 0 ? loopStack[loopStack.length - 1] : null
+            if (nlp !== null && nlp.nv !== undefined) { callExt(b, "js_scope_set", [curScopeV, emitStr(b, nlp.nv), v]) }
             emitContinue(b)
             return {b: deadBlock(), v: hNull}
         }
@@ -4070,32 +4072,39 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // The loop runs over js_rforit's iterator (see abnf/jsrtruby.go; it is told
         // whether one variable takes each whole yield), inside an
         // ensure that closes it, so a Hash's iteration count drops however the loop
-        // is left: a break, a raise, a return or a throw.
+        // is left: a break, a raise, a return or a throw. Each pass hands
+        // js_rfornext the value the previous one produced (its last expression or
+        // its `next' value, the slot nv), which an Enumerator's loop value needs.
         return function(b) {
             var rc = collT(b)
             b = rc.b
             hidCount++
             var itName = "$forit" + hidCount
             var valName = "$forv" + hidCount
+            var resName = "$forr" + hidCount
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, itName), callExt(b, "js_rforit", [rc.v, whole ? hTrue : hFalse])])
-            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, valName),
-                callExt(b, "js_rforval", [callExt(b, "js_scope_get", [curScopeV, emitStr(b, itName)])])])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, valName), hNull])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, resName), hNull])
             var loopT = function(lb) {
                 var headB = curF.NewBlock("")
                 var bodyB = curF.NewBlock("")
+                var doneB = curF.NewBlock("")
                 var exitB = curF.NewBlock("")
                 lb.NewBr(headB)
                 var itV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, itName)])
-                var elV = callExt(headB, "js_rfornext", [itV])
-                headB.NewCondBr(headB.NewICmp(llvm.enum.IPredEQ, elV, hUndef), exitB, bodyB)
+                var elV = callExt(headB, "js_rfornext", [itV, callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, resName)])])
+                headB.NewCondBr(headB.NewICmp(llvm.enum.IPredEQ, elV, hUndef), doneB, bodyB)
+                callExt(doneB, "js_scope_set", [curScopeV, emitStr(doneB, valName), callExt(doneB, "js_rforval", [itV])])
+                doneB.NewBr(exitB)
                 if (whole) { bodyB = emitAssignOne(bodyB, tgts[0], elV) }
                 else {
                     var w = emitAsArray(bodyB, elV)
                     bodyB = emitDestructure(w.b, tgts, w.v)
                 }
-                // The value slot starts as COLL, so a bare break must write its nil too.
-                loopStack.push({cont: headB, brk: exitB, bv: valName, bareNil: true})
+                // A bare break writes its nil to the value slot.
+                loopStack.push({cont: headB, brk: exitB, bv: valName, bareNil: true, nv: resName})
                 var rb = body(bodyB)
+                callExt(rb.b, "js_scope_set", [curScopeV, emitStr(rb.b, resName), rb.v])
                 rb.b.NewBr(headB)
                 loopStack.pop()
                 return {b: exitB, v: hNull}
