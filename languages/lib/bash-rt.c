@@ -7467,20 +7467,83 @@ int rt_unset_name(char *n)
     return 0;
 }
 
-/* `NAME=VALUE` as one string (what `export` / `declare` / `eval` hand over):
- * split at the FIRST '=' and assign. No '=' at all assigns nothing. */
+/* The string of a computed `eval`, run when it is nothing but assignments:
+ * NAME=VALUE words separated by blanks, `;` and newlines, with comments. A
+ * VALUE takes the shell's quoting - '...', "...", backslashes - and stops at
+ * the first unquoted blank, `;` or newline; a `#` starting a word starts a
+ * comment. Answers 0 when the whole string ran, 1 at the first thing that is
+ * not an assignment or would need an expansion ($, a backquote, a leading
+ * `~`, an operator), which the emitter reports. */
 int rt_eval_assign(char *s)
 {
-    int len;
-    int i;
-    len = rt_strlen(s);
-    i = 0;
-    while (i < len) {
-        if (s[i] == 61) {
-            rt_setvar_byname(rt_substr(s, 0, i), rt_substr(s, i + 1, -1));
-            return 0;
+    int len = rt_strlen(s);
+    int i = 0;
+    int start;
+    int vs;
+    int o;
+    int c;
+    char *v;
+    while (1) {
+        while (s[i] == 32 || s[i] == 9 || s[i] == 10) i = i + 1;
+        if (s[i] == 0) return 0;
+        if (s[i] == 35) {
+            while (s[i] != 0 && s[i] != 10) i = i + 1;
+            continue;
         }
+        start = i;
+        while (s[i] == 95 || (s[i] >= 65 && s[i] <= 90) || (s[i] >= 97 && s[i] <= 122)
+               || (i > start && s[i] >= 48 && s[i] <= 57)) i = i + 1;
+        if (i == start || s[i] != 61) return 1;
         i = i + 1;
+        vs = i;
+        v = rt_bump(len - i + 1);
+        o = 0;
+        while (1) {
+            c = (int)(unsigned char)s[i];
+            if (c == 0 || c == 32 || c == 9 || c == 10 || c == 59) break;
+            if (c == 39) {
+                i = i + 1;
+                while (s[i] != 39) {
+                    if (s[i] == 0) return 1;
+                    v[o] = s[i];
+                    o = o + 1;
+                    i = i + 1;
+                }
+                i = i + 1;
+                continue;
+            }
+            if (c == 34) {
+                i = i + 1;
+                while (s[i] != 34) {
+                    c = (int)(unsigned char)s[i];
+                    if (c == 0 || c == 36 || c == 96) return 1;
+                    if (c == 92 && rt_haschar("$`\"\\\n", (int)(unsigned char)s[i + 1]) != 0) {
+                        i = i + 1;
+                        if (s[i] == 10) { i = i + 1; continue; }
+                    }
+                    v[o] = s[i];
+                    o = o + 1;
+                    i = i + 1;
+                }
+                i = i + 1;
+                continue;
+            }
+            if (c == 92 && s[i + 1] != 0) {
+                i = i + 1;
+                if (s[i] == 10) { i = i + 1; continue; }
+            } else if (rt_haschar("$`&|<>()", c) != 0) {
+                return 1;
+            } else if (c == 126 && (i == vs || s[i - 1] == 58)) {
+                return 1;
+            }
+            v[o] = s[i];
+            o = o + 1;
+            i = i + 1;
+        }
+        v[o] = 0;
+        rt_setvar_byname(rt_substr(s, start, vs - 1 - start), v);
+        while (s[i] == 32 || s[i] == 9) i = i + 1;
+        if (s[i] == 59) i = i + 1;
     }
     return 0;
 }

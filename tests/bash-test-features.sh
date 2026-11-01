@@ -781,6 +781,12 @@ check bic7 "$($xbc c)" "T:c"
 xbo=$(xbfn; command xbfn 2>/dev/null)
 check bic8 "$?/$xbo" "127/fn"
 
+# ----- a computed eval of assignments: quoting, comments, several per string -----
+xeas=('xe1=5 # t; echo no' "xe2='a b'" 'xe3="q\"r"' 'xe4=a\ b;xe5=2' 'xe6=a#b # c' "xe7=1
+xe8=2")
+for xec in "${xeas[@]}"; do eval "$xec"; done
+check eva1 "$xe1|$xe2|$xe3|$xe4|$xe5|$xe6|$xe7|$xe8" '5|a b|q"r|a b|2|a#b|1|2'
+
 # ----- standard error is fd 2 in every leg -----
 # Not a check: ./test.sh --cross diffs the two halves' merged output, so this line and an
 # arithmetic error's message reach it from llvm.Run as they do from the interpreter.

@@ -33,7 +33,8 @@ the emitter's exit target so an `exit` inside it ends only the subshell. A varia
 never assigned holds a distinct empty string, the unset marker, which is how ${v-default} tells
 unset from empty and how set -u recognises an unbound read. eval and `trap ... EXIT` re-parse
 their argument with THIS grammar and emit it inline; a computed eval is lowered only for the
-assignment form NAME=VALUE, through a runtime name-to-slot dispatch.
+assignment form NAME=VALUE, through a runtime name-to-slot dispatch, and any other string
+stops the program with a diagnostic.
 
 The program plus its runtime needs no extern but libc: putchar/getchar, malloc/free and
 strlen/memmove (and, in a native build only, write and fflush for standard error), so -exe links
@@ -5175,8 +5176,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     return compileSnippet(esrc)(b)
                 }
                 // A COMPUTED eval cannot be compiled in general. The one shape a compiler can
-                // still honour is the assignment `eval "NAME=VALUE"`, which becomes a runtime
-                // name -> slot dispatch over the variable names the program mentions.
+                // still honour is a string of assignments, `eval "NAME=VALUE"`, which becomes a
+                // runtime name -> slot dispatch over the variable names the program mentions
+                // (rt_eval_assign). Any other string stops the shell with a diagnostic and
+                // status 2 rather than being skipped.
                 var acc = emptyPtr(b)
                 for (ei = 0; ei < argTs.length; ei++) {
                     var re2 = evalWord(b, argTs[ei])
@@ -5184,9 +5187,16 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     if (ei > 0) { acc = b.NewCall(rtStrcat, [acc, gepStr(b, " ")]) }
                     acc = b.NewCall(rtStrcat, [acc, re2.v])
                 }
-                b.NewCall(rtEvalAssign, acc)
-                storeStatusI(b, 0)
-                return b
+                b = emitAbortCheck(b)
+                var evBad = curF.NewBlock(""), evOk = curF.NewBlock("")
+                b.NewCondBr(b.NewICmp(llvm.enum.IPredNE, b.NewCall(rtEvalAssign, acc), zero), evBad, evOk)
+                emitOnStderr(evBad, evBad.NewCall(rtStrcat, [evBad.NewCall(rtStrcat, [gepStr(evBad, c.file + ": eval: only assignments can be compiled from a computed string: "), acc]),
+                                                             gepStr(evBad, "\n")]))
+                evBad.NewStore(llvm.constant.NewInt(i32, 2), gExitCode)
+                evBad.NewStore(one, gExited)
+                evBad.NewBr(viaUnwind(curExit, curExitRd))
+                storeStatusI(evOk, 0)
+                return evOk
             }
             if (cmd == "read") { return emitRead(b, argTs, cmk) }
             if (cmd == "mapfile" || cmd == "readarray") { return emitMapfile(b, cmd, argTs) }
