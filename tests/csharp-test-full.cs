@@ -4010,6 +4010,37 @@ b";                                                   // verbatim keeps the newl
             Program.Check("s65o1", arr[0] == 1 && arr[1] == 2 && k == 1 && b2[0] == 1 && b2[1] == 0 && m == 1);
         }
 
+        // ===== SECTION 66: `??=` evaluates its target once =====
+        // `x ??= y` is `x ?? (x = y)` with x evaluated only once (ECMA-334 12.21.5):
+        // the receiver and the index run once, y and the store only when x is null.
+        // No C# toolchain here: the values follow the specification.
+        static string S66Log = "";
+        class S66C
+        {
+            string p = null;
+            public string P { get { Program.S66Log += "g"; return p; } set { Program.S66Log += "s"; p = value; } }
+        }
+        static S66C S66Obj = new S66C();
+        static string[] S66Arr = { null, "x" };
+        static string[] S66A() { Program.S66Log += "a"; return Program.S66Arr; }
+        static S66C S66Get() { Program.S66Log += "c"; return Program.S66Obj; }
+        static int S66I(int v) { Program.S66Log += "i"; return v; }
+        static string S66J() { Program.S66Log += "j"; return "y"; }
+        static void S66()
+        {
+            string r0 = S66A()[S66I(0)] ??= S66J();
+            string l0 = Program.S66Log;
+            Program.S66Log = "";
+            string r1 = S66A()[S66I(1)] ??= S66J();
+            Program.Check("s66a1", l0 == "aij" && r0 == "y" && Program.S66Log == "ai" && r1 == "x" && S66Arr[0] == "y");
+            Program.S66Log = "";
+            S66Get().P ??= S66J();
+            string l2 = Program.S66Log;
+            Program.S66Log = "";
+            S66Get().P ??= S66J();
+            Program.Check("s66p1", l2 == "cgjs" && Program.S66Log == "cg");
+        }
+
         static int Main()
         {
             Program.S01(); // SECTION-CALL 01
@@ -4077,6 +4108,7 @@ b";                                                   // verbatim keeps the newl
             Program.S63(); // SECTION-CALL 63
             Program.S64(); // SECTION-CALL 64
             Program.S65(); // SECTION-CALL 65
+            Program.S66(); // SECTION-CALL 66
             Console.WriteLine("full: " + Program.Checks + " checks, " + Program.Fails + " failures");
             return Program.Fails;
         }

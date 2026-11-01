@@ -3472,16 +3472,18 @@ KwLet       = "let" KwEnd ;
         if (!late && last.key == undefined && Array.isArray(o)) { csIdxChk(o, lk) }
         return {obj: o, key: lk, isIndex: last.key == undefined}
     }
-    // Reads the current value of an assignment target (for '??=', which must not assign
-    // when the place already holds a value). The read is an ordinary member or element
-    // access (ECMA-334 12.21.5): a property's get accessor, a user indexer's, and a
-    // dictionary's, which throws KeyNotFoundException for a missing key.
-    function makeRefRead(ref) {
-        if (ref.bprop != undefined) { return makeBaseProp(ref.bprop) }
+    // `x ??= y` on a member or element target: x is evaluated ONCE (ECMA-334
+    // 12.21.5), read as an ordinary member or element access - a property's get
+    // accessor, a user indexer's, a dictionary's, which throws KeyNotFoundException
+    // for a missing key - and y runs and is stored only when that read is null.
+    // Twin of makeCoalesceAssign in csharp-to-llvm-ir.abnf.
+    function makeCoalesceAssign(ref, valT, elty) {
         return function() {
-            if (ref.path.length == 0) { return csGetVar(ref.name) }
             var p = csResolveRef(ref, false)
-            return p.isIndex == true ? csGetIndex(p.obj, p.key) : core.getField(p.obj, p.key)
+            var cur = anytype
+            cur = p.isIndex == true ? csGetIndex(p.obj, p.key) : core.getField(p.obj, p.key)
+            if (cur !== undefined && cur !== null) { return cur }
+            return csQualWrite(p, valT(), null, elty)
         }
     }
     function makeAssign(items, pos) {
@@ -3506,7 +3508,8 @@ KwLet       = "let" KwEnd ;
         }
         // 'a ??= b' assigns only when a is null, and yields a's value either way.
         if (op == "??=") {
-            var readT = makeRefRead(ref)
+            if (ref.path.length > 0 && ref.bprop == undefined) { return makeCoalesceAssign(ref, valT, elty) }
+            var readT = (ref.bprop != undefined) ? makeBaseProp(ref.bprop) : function() { return csGetVar(ref.name) }
             var setT = makeAssign([ref, "=", valT], pos)
             return function() {
                 var cur = readT()

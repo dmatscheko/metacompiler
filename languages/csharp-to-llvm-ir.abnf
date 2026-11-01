@@ -3496,17 +3496,29 @@ KwLet       = "let" KwEnd ;
         var kr = last.idx(b)
         return {b: kr.b, obj: o, key: kr.v, isField: false}
     }
-    // Reads the current value of an assignment target (for '??=', which must not assign
-    // when the place already holds a value), through csQualRead for a qualified one.
-    function makeRefRead(ref) {
-        if (ref.bprop != undefined) { return makeBaseProp(ref.bprop) }
+    // `x ??= y` reads x and runs y and the store only when that read is null; a
+    // member or element target is evaluated ONCE (ECMA-334 12.21.5), its read through
+    // csQualRead. Twin of makeCoalesceAssign in csharp-interpreter.abnf.
+    function makeCoalesceAssign(ref, valT, pos) {
+        var qual = ref.path.length > 0 && ref.bprop == undefined
         var defClass = curClassName
+        var readT = (ref.bprop != undefined) ? makeBaseProp(ref.bprop) : function(b) { return csEmitVarRead(b, defClass, ref.name) }
+        var setT = makeAssign([ref, "=", valT], pos)
+        var elty = (ref.ety != undefined) ? ref.ety : ""
         return function(b) {
-            if (ref.path.length == 0) {
-                return csEmitVarRead(b, defClass, ref.name)
-            }
-            var p = emitRefPath(b, ref)
-            return csQualRead(p.b, p)
+            var p = anytype
+            var r = anytype
+            if (qual) { p = emitRefPath(b, ref); r = csQualRead(p.b, p) } else { r = readT(b) }
+            b = r.b
+            var thenB = curF.NewBlock("")
+            var elseB = curF.NewBlock("")
+            var mergeB = curF.NewBlock("")
+            b.NewCondBr(truthy(b, callExt(b, "js_eq", [r.v, hNull])), thenB, elseB)
+            var rs = anytype
+            if (qual) { var rv = valT(thenB); rs = csQualWrite(rv.b, p, rv.v, null, elty) } else { rs = setT(thenB) }
+            rs.b.NewBr(mergeB)
+            elseB.NewBr(mergeB)
+            return {b: mergeB, v: mergeB.NewPhi([llvm.ir.NewIncoming(rs.v, rs.b), llvm.ir.NewIncoming(r.v, elseB)])}
         }
     }
     function makeAssign(items, pos) {
@@ -3532,22 +3544,7 @@ KwLet       = "let" KwEnd ;
             elty = ref.ety
         }
         // 'a ??= b' assigns only when a is null, and yields a's value either way.
-        if (op == "??=") {
-            var readT = makeRefRead(ref)
-            var setT = makeAssign([ref, "=", valT], pos)
-            return function(b) {
-                var r = readT(b)
-                b = r.b
-                var thenB = curF.NewBlock("")
-                var elseB = curF.NewBlock("")
-                var mergeB = curF.NewBlock("")
-                b.NewCondBr(truthy(b, callExt(b, "js_eq", [r.v, hNull])), thenB, elseB)
-                var rs = setT(thenB)
-                rs.b.NewBr(mergeB)
-                elseB.NewBr(mergeB)
-                return {b: mergeB, v: mergeB.NewPhi([llvm.ir.NewIncoming(rs.v, rs.b), llvm.ir.NewIncoming(r.v, elseB)])}
-            }
-        }
+        if (op == "??=") { return makeCoalesceAssign(ref, valT, pos) }
         if (ref.bprop != undefined) { return makeBaseAssign(ref, op, valT) }
         if (op != "=") { return makeCompoundAssign(ref, op, valT, lty, elty, defClass) }
         // A simple `x = y` on a member or element evaluates the receiver and the
@@ -3606,7 +3603,7 @@ KwLet       = "let" KwEnd ;
     // The value a qualified target `o.M` / `o[i]` holds, read as an ordinary member or
     // element access reads it: List<T>.Capacity, a property's get accessor, the member
     // slot, a user indexer's get accessor, or the built-in element (a dictionary's
-    // throws KeyNotFoundException). Twin of the read in makeRefRead in
+    // throws KeyNotFoundException). Twin of the read in makeCoalesceAssign in
     // csharp-interpreter.abnf.
     function csQualRead(b, p) {
         if (p.isField && p.keyName == "Capacity" && csPropAcc[p.keyName] == undefined) {
