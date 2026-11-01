@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1025** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1027** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -152,13 +152,11 @@ of a object" (goPromDt matches only when the field's type text equals its name).
 
 # PHP — PHP  (no php here: spec-only, php.net / php-src behaviour)
 
-### T-1000 php: reference counts are never decremented (var_dump `&`, copy of an array holding a dead frame's reference) · P3 · PHP · IN PROGRESS (PHP worker, round 35) [V spec-only]
-Found by the PHP worker, round 34 (php-src php_var_dump / zend_array_dup_element). Cells' `rc` only rises: nothing decrements it at
-frame exit (incl. exception unwinding, generators), array overwrite/discard, or for temporary literals. Effects: `$x=5; $a=[&$x,1];
-var_dump($a);` → php `&int(5)`, ours `int(5)`; `function f(){ $x=1; $a=[&$x]; return $a; } $r=f(); $r2=$r; $r2[0]=9; echo $r[0];`
-→ php 1 (refcount 1 after f returns, the copy drops the ref), ours 9. An undercount would break phpArrCopy's sharing, so all three
-engines must decrement exactly. Also: `$b=[1]; $b[]=&$b; print_r($b)` prints one level more before *RECURSION* (the root's identity
-is lost when the argument is copied); php's "count(): Recursion detected" and print_r/var_dump warnings are not emitted.
+### T-1025 · PHP · OPEN · reference counts: remaining release points
+Follow-up of T-1000 (only correct-but-high counts remain, so `&` may survive a copy that PHP would unwrap). Not yet released: arrays that hold reference cells and die (overwritten, frame-local, temporaries passed as args); frames unwound by an exception; unfinished generators; dynamic names (`$$n`, extract, `global $$k`). Interpreter copies by-value array params counting kept cells while the compiler shares unwritten params, so the engines can differ once the original holder dies. Also: print_r recursion depth and the "Recursion detected" warnings for count/print_r/var_dump. Spec: zend_array_dup_element keeps a ref only while refcount > 1.
+
+### T-1026 · PHP · OPEN · return-by-reference functions; static property assignment copy
+`function &counter() { static $c = 0; $c++; return $c; } $c1 = &counter(); $c1 += 100; echo counter();` — PHP: 102; ours: 2 (`=&` of a by-ref return degrades to a value copy). Unverified: the compiler may not copy on `C::$p = $a`, aliasing `$a`'s array (check `$a=[1]; C::$p=$a; $a[0]=2; echo C::$p[0];` → 1). Found by PHP r35; spec-only oracle.
 
 # LUA — Lua  (oracle: lua 5.5 binary, suite is 5.4)
 
@@ -1097,6 +1095,7 @@ T-1003 go: a promoted method used as a method-expression value — DONE - promot
 T-1014 c#: 5-arg `CompareOrdinal`, method group → `Comparison<string>`, `CompareTo` on strings, `char.ConvertFromUtf32` — DONE - 5-arg CompareOrdinal with .NET's range checks, BCL static method groups as delegates, String.CompareTo refused as culture collation, char.ConvertFromUtf32
 T-1021 go: interface dispatch to a method promoted from a defined non-struct type; `%T` of a method expression — DONE - methods promoted from embedded defined non-struct types join the struct's descriptor (interface dispatch, promoted String), %T of method expressions
 T-1019 kotlin: toSortedSet(comparator) ignored; String range crashes llvm.Run; String coerceAtLeast/AtMost/In — DONE (KT r15, a18ed20e): TreeSet for toSortedSet(cmp)/sortedSetOf(cmp,..)/TreeSet ctor; ComparableRange/OpenEndRange values; String+Comparable coerceAtLeast/AtMost/In; user operator rangeTo/rangeUntil. Master probe vs kotlinc 2.2.21: 4 legs agree.
+T-1000 php: reference counts are never decremented (var_dump `&`, copy of an array holding a dead frame's reference) — PARTIAL→split (PHP r35, fb7351b2): refs released at normal frame exit, =& rebinding, ref-literal temporaries; var_dump & from refcount. Remainder filed as follow-up. Master spec probe (zend_array_dup_element rule): 3 legs agree.
 
 # Settled — do not re-open
 
