@@ -7053,6 +7053,8 @@ function rbLazyMethod(t, name, args) {
         return rbLazyCopy(t, {k: rbaSliceOp(name), f: null, n: sn}, lz,
             (lz ? "#<Enumerator::Lazy: " : "#<Enumerator: ") + desc + ":" + name + "(" + sn + ")>")
     }
+    if (t["kind"] == "each" && (name == "next" || name == "peek")) { return rbRunNext(t, name) }
+    if (t["kind"] == "each" && name == "rewind") { return rbRunRewind(t) }
     if (name == "next" || name == "peek") {
         var pos = Math.trunc(rbToF(t["pos"]))
         var got = rbLazyFirst(t, pos + 1)
@@ -7086,6 +7088,8 @@ function rbEnumMethod(t, name, args) {
     }
     if (t["__rlazy"] === true) { return rbLazyMethod(t, name, args) }
     if (name == "dup" || name == "clone") { return rbEnumCopy(t, name == "clone") }
+    if (t["__rco"] === true && (name == "next" || name == "peek")) { return rbRunNext(t, name) }
+    if (t["__rco"] === true && name == "rewind") { return rbRunRewind(t) }
     // Twin of the to_enum arm of enumMethod in ruby-interpreter.abnf.
     if (t["__rcall"] === true) {
         if (name == "each" && rbBlockOf(args) !== null) {
@@ -8543,6 +8547,13 @@ function rbArrayMethod(t, name, args) {
         if (nPos > 1) { return rbArgAt(args, 1) }
         if (blk !== null) { return rbCall1(blk, rbArgAt(args, 0)) }
         rbRaiseErr(name, "IndexError", "index " + fx + " outside of array bounds: " + (0 - t.length) + "..." + t.length)
+    }
+    // Object#to_enum / #enum_for. Twin of arrayMethod in ruby-interpreter.abnf.
+    if (name == "to_enum" || name == "enum_for") {
+        var tpos = rbPosArgs(args)
+        var tmeth = "each"
+        if (tpos.length > 0) { tmeth = rbStr(tpos[0]) }
+        return rbArrayMethod(t, tmeth, rbArgsFrom(tpos, 1))
     }
     rbNoMethod(t, name)
     return null
@@ -10361,7 +10372,14 @@ function js_rattrw(o, k, v, sk, mk) {
 // for VARS in COLL: open, step and close the loop. Twin of js_rforit in
 // abnf/jsrtruby.go, which states the rule.
 function js_rforit(c, whole) {
-    var it = {c: c, i: 0, h: false, ks: false, k: null, lev: 0, n: 0, e: null, res: null}
+    var it = {c: c, i: 0, h: false, ks: false, k: null, lev: 0, n: 0, e: null, res: null, run: null, whole: whole === true}
+    if (rbIsEnum(c) && rbRunnable(c)) {
+        it["e"] = c
+        it["res"] = []
+        it["c"] = []
+        it["run"] = rbRunNew(c)
+        return it
+    }
     if (rbIsEnum(c)) {
         it["e"] = c
         it["res"] = []
@@ -10385,6 +10403,17 @@ function js_rfornext(it, prev) {
     var c = it["c"]
     var i = it["i"]
     if (it["res"] !== null && i > 0) { it["res"].push(prev) }
+    if (it["run"] !== null) {
+        var a = rbRunStep(it["run"])
+        if (a === null) { return undefined }
+        it["i"] = i + 1
+        c.push(rbRunPack(a))
+        if (it["whole"] === true) {
+            if (a.length == 0) { return null }
+            return a[0]
+        }
+        return rbRunPack(a)
+    }
     if (it["h"]) {
         var keys = c["keys"]
         if (it["ks"] && i < keys.length && keys[i] === it["k"]) { i = i + 1 }
@@ -10407,15 +10436,7 @@ function js_rfornext(it, prev) {
 // rubyForEnumItems in abnf/jsrtruby.go and forEnumItems in
 // ruby-interpreter.abnf, which states the rule.
 function rbForEnumItems(e, whole) {
-    var all = []
-    if (whole && e["__rdefer"] === true && rbaForPassMeth(e["meth"])) {
-        rbLazyDrive(e["src"], function(v, multi) {
-            if (multi) { all.push(v[0]) } else { all.push(v) }
-            return false
-        })
-        return all
-    }
-    all = rbMethod(e, "to_a", [])
+    var all = rbMethod(e, "to_a", [])
     if (!whole || !rbaForPairMeth(e["meth"])) { return all }
     var firsts = []
     var i = 0
@@ -10439,6 +10460,7 @@ function rbForEnumVal(e, items, results) {
     return rbEnumFinish(e, items, results)
 }
 function js_rforend(it) {
+    if (it["run"] !== null) { rbRunClose(it["run"]) }
     if (it["h"]) { it["c"]["__iter"] = it["lev"] }
     return undefined
 }
@@ -10964,6 +10986,7 @@ function rbEnumMixin(t, name, args) {
         if (rbaEnumDefers(name, rbNPos(args))) {
             var de = rbEnumAt(rbMkEnumOp([], name), t, name, args)
             de["__rdefer"] = true
+            de["__rco"] = true
             return de
         }
     }
@@ -10980,7 +11003,158 @@ function rbToEnum(t, args) {
     var e = rbEnumAt(rbMkEnumOp([], "each"), t, meth, rbArgsFrom(pos, 1))
     e["__rdefer"] = true
     e["__rcall"] = true
+    e["__rco"] = true
     return e
+}
+// ----- An Enumerator's run on a generator -----
+// Enumerator#next / #peek over a user #each and `for` over such an Enumerator
+// step its method on a generator made from the function js_rcoreg registered
+// (ruby-to-llvm-ir.abnf's buildMain). on: the run's catch tags and $! are
+// installed, and tags / bang hold the other side's. Twins: the run machinery of
+// ruby-interpreter.abnf (rbRunNew ...), which states the rules, and rubyRun* in
+// abnf/jsrtruby.go.
+var rbRunFns = []
+function js_rcoreg(gf) {
+    rbRunFns.push(gf)
+    return undefined
+}
+function rbRunNew(t) { return {t: t, g: null, on: false, tags: [], bang: null, done: false, ret: null} }
+function rbRunnable(t) { return t["__rco"] === true || (t["__rlazy"] === true && t["kind"] == "each") }
+function rbRunPack(a) {
+    if (a.length == 1) { return a[0] }
+    if (a.length == 0) { return null }
+    return a
+}
+function rbRunSwap(r, on) {
+    if (r["on"] === on) { return }
+    r["on"] = on
+    var bang = anytype
+    bang = rbGlobals["$!"]
+    if (bang === undefined) { bang = null }
+    rbGlobals["$!"] = r["bang"]
+    r["bang"] = bang
+    var tags = rbCatchTags
+    rbCatchTags = r["tags"]
+    r["tags"] = tags
+}
+// The next block call's arguments, or null once the method has returned (its
+// answer in ret). A body that raises is done and the exception propagates.
+function rbRunStep(r) {
+    if (r["done"] === true) { return null }
+    if (r["g"] === null) {
+        r["g"] = rbRunFns[0](function(y) {
+            return rbRunBody(r["t"], function(a) {
+                rbRunSwap(r, false)
+                y.apply(undefined, a)
+                return null
+            })
+        })
+    }
+    rbRunSwap(r, true)
+    var res = anytype
+    try { res = r["g"].next(undefined) }
+    catch (e) {
+        r["done"] = true
+        rbRunSwap(r, false)
+        throw e
+    }
+    rbRunSwap(r, false)
+    if (res["done"] === true) {
+        r["done"] = true
+        r["ret"] = res["value"]
+        return null
+    }
+    return res["value"]
+}
+function rbRunClose(r) {
+    if (r["done"] === true || r["g"] === null) {
+        r["done"] = true
+        return
+    }
+    r["done"] = true
+    rbRunSwap(r, true)
+    try { r["g"]["return"](undefined) }
+    catch (e) {
+        rbRunSwap(r, false)
+        throw e
+    }
+    rbRunSwap(r, false)
+}
+function rbRunBody(t, out) {
+    var src = t["src"]
+    if (t["__rlazy"] === true) {
+        rbaLazyFirst(t, -1, rbLazyCall, rbTruthy, rbEql, rbLazyDrive, function(v, multi) {
+            if (multi) { out(v) } else { out([v]) }
+            return false
+        })
+        return rbLazyEachVal(t)
+    }
+    var m = t["meth"]
+    var margs = rtCopyArr(t["margs"])
+    var nilBlk = js_rblkwrap(function() { return null })
+    if (t["__rcall"] === true) {
+        margs.push(js_rblkwrap(function() {
+            var a = []
+            var i = 0
+            while (i < arguments.length) { a.push(arguments[i]); i = i + 1 }
+            out(a)
+            return null
+        }))
+        return rbMethod(src, m, margs)
+    }
+    var n = 0
+    var memo = anytype
+    memo = null
+    if (margs.length > 0) { memo = margs[0] }
+    if (m == "each_slice" || m == "each_cons") {
+        n = Math.trunc(rbImplicitInt(m, memo, ""))
+        if (n <= 0) {
+            margs.push(nilBlk)
+            return rbDelegArr([], src, m, margs)
+        }
+    }
+    if (m == "cycle") {
+        n = 0 - 1
+        if (memo !== null) { n = Math.trunc(rbImplicitInt(m, memo, "")) }
+    }
+    var items = rbaEnumPump(m, n, memo, function(step) { return rbLazyDrive(src, step) }, out)
+    if (m == "each" || m == "each_entry" || m == "each_with_index" || m == "reverse_each") { return src }
+    if (m == "each_slice" || m == "each_cons" || m == "cycle") { return null }
+    if (m == "each_with_object") { return memo }
+    margs.push(nilBlk)
+    return rbDelegArr(items, src, m, margs)
+}
+function rbRunNext(t, name) {
+    if (t["__rpkhas"] !== true) {
+        var r = t["__rrun"]
+        if (r === undefined || r === null) {
+            r = rbRunNew(t)
+            t["__rrun"] = r
+        }
+        var a = rbRunStep(r)
+        if (a === null) {
+            var e = rbExc(rbBuiltinClass("StopIteration"), ["iteration reached an end"])
+            e["__rframe"] = name
+            e["__rresult"] = r["ret"]
+            js_rraise(e, undefined)
+        }
+        t["__rpk"] = a
+        t["__rpkhas"] = true
+    }
+    var v = rbRunPack(t["__rpk"])
+    if (name == "next") {
+        t["__rpkhas"] = false
+        t["pos"] = rbToF(t["pos"]) + 1
+    }
+    return v
+}
+function rbRunRewind(t) {
+    var r = t["__rrun"]
+    if (r !== undefined && r !== null && r["g"] !== null && r["done"] !== true) { r["g"]["__gendrop"]() }
+    t["__rrun"] = null
+    t["__rpkhas"] = false
+    t["pos"] = 0
+    return t
 }
 // Enumerator#dup / #clone. Twin of enumCopy in ruby-interpreter.abnf, which
 // states the rule.
@@ -10990,6 +11164,7 @@ function rbEnumCopy(t, clone) {
     if (t["meth"] !== undefined) { rbEnumAt(c, t["src"], t["meth"], t["margs"]) }
     if (t["__rdefer"] === true) { c["__rdefer"] = true }
     if (t["__rcall"] === true) { c["__rcall"] = true }
+    if (t["__rco"] === true) { c["__rco"] = true }
     if (clone && t["__fz"] === true) { c["__fz"] = true }
     return c
 }

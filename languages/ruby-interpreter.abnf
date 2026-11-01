@@ -3129,6 +3129,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             var coll = anytype
             coll = collT()
             if (isDict(coll)) { return forInHash(coll, tgts, whole, body) }
+            if (isEnum(coll) && rbRunnable(coll)) { return forInRun(coll, tgts, whole, body) }
             var seq = []
             var en = isEnum(coll)
             if (Array.isArray(coll)) { seq = coll }
@@ -3149,19 +3150,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // `for` over an Enumerator binds each yield the way a block parameter list does:
     // `for a, b' destructures what #to_a packs, and a single loop variable takes
     // the FIRST of a multi-value yield. with_index, with_object, each_with_index
-    // and each_with_object always yield two values; each / map / flat_map over a
-    // user #each yield what that #each does, so it is driven directly (lazyDrive)
-    // to see each yield's count. Every other Enumerator yields one value. Twins:
-    // rubyForEnumItems in abnf/jsrtruby.go, rbForEnumItems in lib/ruby-rt.metajs.
+    // and each_with_object always yield two values; every other Enumerator not
+    // over a user #each (forInRun) yields one value. Twins: rubyForEnumItems in
+    // abnf/jsrtruby.go, rbForEnumItems in lib/ruby-rt.metajs.
     function forEnumItems(e, whole) {
-        var all = []
-        if (whole && e.__rdefer === true && rbaForPassMeth(e.meth)) {
-            lazyDrive(e.src, function(v, multi) {
-                all.push(multi ? v[0] : v)
-                return false
-            })
-            return all
-        }
+        var all = anytype
         all = mcall(e, "to_a", [], null)
         if (!whole) { return all }
         if (rbaForPairMeth(e.meth)) {
@@ -3180,6 +3173,39 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (e.__rlazy === true && e.en !== undefined && e.ops.length == 0) { return enumFinish(e.en, items, results) }
         if (e.__rlazy === true) { return lazyEachVal(e) }
         return enumFinish(e, items, results)
+    }
+    // `for` over an Enumerator a run serves: each pass takes the next block call
+    // as #each makes it, so the body runs between #each's own steps. One loop
+    // variable takes the first argument, several destructure them packed. Twins:
+    // js_rforit / js_rfornext in abnf/jsrtruby.go and lib/ruby-rt.metajs.
+    function forInRun(e, tgts, whole, body) {
+        var c = rbRunNew(e)
+        var items = []
+        var res = []
+        try {
+            while (true) {
+                var r = rbRunStep(c, false)
+                if (r.done) { break }
+                var a = r.value
+                var el = anytype
+                el = whole ? (a.length == 0 ? null : a[0]) : rbRunPack(a)
+                items.push(rbRunPack(a))
+                var st = forStep(tgts, whole, body, el)
+                if (st.sig != undefined) {
+                    rbRunClose(c)
+                    return st.sig
+                }
+                if (st.stop) {
+                    rbRunClose(c)
+                    return st.v
+                }
+                res.push(st.v)
+            }
+        } catch (ex) {
+            rbRunClose(c)
+            throw ex
+        }
+        return forEnumVal(e, items, res)
     }
     // One pass of a for body with el bound to the loop variables.
     function forStep(tgts, whole, body, el) {
@@ -8471,6 +8497,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (blk == null && rbaEnumDefers(name, args.length)) {
             var de = enumAt(mkEnumOp([], name), t, name, args)
             de.__rdefer = true
+            de.__rco = true
             return de
         }
         return enumRun(t, name, args, blk)
@@ -8483,6 +8510,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         var e = enumAt(mkEnumOp([], "each"), t, meth, args.slice(1))
         e.__rdefer = true
         e.__rcall = true
+        e.__rco = true
         return e
     }
     // Enumerator#dup / #clone: a copy that runs the same method; #clone keeps the
@@ -8495,6 +8523,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (t.meth !== undefined) { enumAt(c, t.src, t.meth, t.margs) }
         if (t.__rdefer === true) { c.__rdefer = true }
         if (t.__rcall === true) { c.__rcall = true }
+        if (t.__rco === true) { c.__rco = true }
         if (clone && t.__fz === true) { c.__fz = true }
         return c
     }
@@ -8518,6 +8547,166 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             t.items = e.items
             t.op = e.op
         }
+    }
+    // ----- External iteration: an Enumerator's run on a coroutine -----
+    // Enumerator#next / #peek over a user #each, and a `for` over such an
+    // Enumerator, run its method on a coroutine (coNew / coResume / coYield,
+    // manual 7.14), so each value is taken as #each yields it and nothing past it
+    // runs, as with MRI's fiber. A run has its own scope chain, statement site,
+    // block stack, rescued-exception stack ($! too) and catch tags, MRI's
+    // per-fiber state: a step installs them and a yield files them back. rewind
+    // drops a run unresumed, so no ensure runs (MRI runs none); a `for` left
+    // early CLOSES its run, which unwinds #each through its ensure clauses as a
+    // break out of its block would. Twins: rubyRun* in abnf/jsrtruby.go, rbRun*
+    // in lib/ruby-rt.metajs.
+    var rbRuns = []
+    function rbRunNew(t) {
+        return {t: t, co: null, sc: null, site: -1, blk: [], exc: [], tags: [], bang: null, done: false, ret: null, busy: false}
+    }
+    // Is t an Enumerator whose values a run takes from a user #each?
+    function rbRunnable(t) { return t.__rco === true || (t.__rlazy === true && t.kind == "each") }
+    // The block call's arguments as Enumerator#next answers them: one value
+    // itself, none nil, several an Array.
+    function rbRunPack(a) { return a.length == 1 ? a[0] : (a.length == 0 ? null : a) }
+    // The run's body: t's method over its source, every block call handed to
+    // rbRunYield; answers StopIteration#result - what the method answers when its
+    // block gives nil.
+    function rbRunBody(t) {
+        var out = function(a) { return rbRunYield(a) }
+        if (t.__rcall === true) { return mcall(t.src, t.meth, t.margs.slice(0), function() { return out(argsArray(arguments)) }) }
+        if (t.__rlazy === true) {
+            rbaLazyFirst(t, -1, lazyCall, rtest, arrEql, lazyDrive, function(v, m) {
+                out(m ? v : [v])
+                return false
+            })
+            return lazyEachVal(t)
+        }
+        var m = t.meth
+        var n = 0
+        var memo = anytype
+        memo = t.margs.length > 0 ? t.margs[0] : null
+        if (m == "each_slice" || m == "each_cons") {
+            n = Math.trunc(implicitInt(m, memo, ""))
+            if (n <= 0) { return delegArr([], t.src, m, t.margs, function() { return null }) }
+        }
+        if (m == "cycle") { n = memo === null ? -1 : Math.trunc(implicitInt(m, memo, "")) }
+        var items = rbaEnumPump(m, n, memo, function(step) { return lazyDrive(t.src, step) }, out)
+        if (m == "each" || m == "each_entry" || m == "each_with_index" || m == "reverse_each") { return t.src }
+        if (m == "each_slice" || m == "each_cons" || m == "cycle") { return null }
+        if (m == "each_with_object") { return memo }
+        return delegArr(items, t.src, m, t.margs, function() { return null })
+    }
+    function rbRunSwap(c) {
+        var sc = scopes
+        var site = rbSitePos
+        var blk = blockStack
+        var exc = curExc
+        var tags = catchTags
+        var bang = anytype
+        bang = hasOwn(rubyGlobals, "!") ? rubyGlobals["!"] : null
+        scopes = c.sc
+        rbSitePos = c.site
+        blockStack = c.blk
+        curExc = c.exc
+        catchTags = c.tags
+        scopePut(rubyGlobals, "!", c.bang)
+        c.sc = sc
+        c.site = site
+        c.blk = blk
+        c.exc = exc
+        c.tags = tags
+        c.bang = bang
+    }
+    // Inside a run's body: hand a to the step that resumed it and wait for the
+    // next one. A close resumes it with true, which unwinds the body.
+    function rbRunYield(a) {
+        var c = rbRuns[rbRuns.length - 1]
+        rbRuns.pop()
+        rbRunSwap(c)
+        var s = anytype
+        s = coYield(a)
+        if (s === true) { throw {__rrunexit: true} }
+        return null
+    }
+    // One step: {done: false, value: the block call's arguments} or, once the
+    // method has returned, {done: true, value: what it answered}. A body that
+    // raises is done and the exception propagates.
+    function rbRunStep(c, close) {
+        if (c.done) { return {done: true, value: c.ret} }
+        if (c.busy) { fail("generator already running") }
+        if (c.co === null) {
+            c.sc = scopes.slice(0)
+            c.co = coNew(function() {
+                try { return rbRunBody(c.t) }
+                catch (e) {
+                    if (e !== null && e !== undefined && e.__rrunexit === true) { return null }
+                    throw e
+                }
+            })
+        }
+        var depth = coreDepth
+        rbRunSwap(c)
+        rbRuns.push(c)
+        c.busy = true
+        var r = anytype
+        try { r = coResume(c.co, close) }
+        catch (e) {
+            c.busy = false
+            c.done = true
+            coreDepth = depth
+            rbRuns.pop()
+            rbRunSwap(c)
+            throw e
+        }
+        c.busy = false
+        coreDepth = depth
+        if (r.done) {
+            rbRuns.pop()
+            rbRunSwap(c)
+            c.done = true
+            c.ret = r.value
+            return {done: true, value: r.value}
+        }
+        return {done: false, value: r.value}
+    }
+    // Leave a run early, running the ensure clauses its body is inside.
+    function rbRunClose(c) {
+        if (c.co === null || c.done) {
+            c.done = true
+            return
+        }
+        rbRunStep(c, true)
+        c.done = true
+    }
+    // Enumerator#next / #peek on a run: the value peeked last, or the next one
+    // the run makes; past the end StopIteration, carrying the method's answer.
+    function rbRunNext(t, name) {
+        if (t.pkHas !== true) {
+            if (t.run === undefined || t.run === null) { t.run = rbRunNew(t) }
+            var r = rbRunStep(t.run, false)
+            if (r.done) {
+                var si = anytype
+                si = mkExc(hostGlobals["StopIteration"], "iteration reached an end")
+                rawSet(si, "__rresult", r.value)
+                si.__rframe = name
+                throw {__exc: true, v: si}
+            }
+            t.pk = r.value
+            t.pkHas = true
+        }
+        var v = anytype
+        v = rbRunPack(t.pk)
+        if (name == "next") {
+            t.pkHas = false
+            t.pos = t.pos + 1
+        }
+        return v
+    }
+    function rbRunRewind(t) {
+        t.run = null
+        t.pkHas = false
+        t.pos = 0
+        return t
     }
     function enumRun(t, name, args, blk) {
         var items = []
@@ -10716,6 +10905,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             return lazyCopy(t, {k: rbaSliceOp(name), f: null, n: sn}, t.lazy,
                 (t.lazy ? "#<Enumerator::Lazy: " : "#<Enumerator: ") + t.desc + ":" + name + "(" + sn + ")>")
         }
+        if (t.kind == "each" && (name == "next" || name == "peek")) { return rbRunNext(t, name) }
+        if (t.kind == "each" && name == "rewind") { return rbRunRewind(t) }
         if (name == "next" || name == "peek") {
             var got = lazyFirst(t, t.pos + 1)
             if (got.length <= t.pos) {
@@ -10738,6 +10929,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (name == "freeze") { t.__fz = true; return t }
         if (t.__rlazy === true) { return lazyMethod(t, name, args, blk) }
         if (name == "dup" || name == "clone") { return enumCopy(t, name == "clone") }
+        if (t.__rco === true && (name == "next" || name == "peek")) { return rbRunNext(t, name) }
+        if (t.__rco === true && name == "rewind") { return rbRunRewind(t) }
         // Object#to_enum's Enumerator: #each with a block calls the method with it,
         // and there is no size to ask.
         if (t.__rcall === true) {
@@ -11594,6 +11787,12 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (args.length > 1) { return args[1] }
             if (blk != null) { return blockCall(blk, [args[0]]) }
             raiseErr(name, "IndexError", "index " + fx + " outside of array bounds: " + (0 - t.length) + "..." + t.length)
+        }
+        // Object#to_enum / #enum_for(meth = :each, *args): the Enumerator the
+        // method answers called without a block. Twins: rubyArrayMethod in
+        // abnf/jsrt.go, rbArrayMethod in lib/ruby-rt.metajs.
+        if (name == "to_enum" || name == "enum_for") {
+            return arrayMethod(t, args.length > 0 ? rstr(args[0]) : "each", args.slice(1), null)
         }
         noMethod(t, name)
     }

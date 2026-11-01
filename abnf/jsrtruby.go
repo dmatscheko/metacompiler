@@ -457,10 +457,25 @@ func (rt *jsrt) addRubyFmtExterns(m map[string]func(args []uint64) uint64) {
 	// re-measured every pass; anything else is counted once by js_pylen and
 	// indexed by js_pyget. Twin of forInHash in ruby-interpreter.abnf and
 	// js_rforit in languages/lib/ruby-rt.metajs.
+	// js_rcoreg(gf): the generator function an Enumerator's run steps its method
+	// on (rubyRunStep), which ruby-to-llvm-ir.abnf's buildMain registers once.
+	m["js_rcoreg"] = func(a []uint64) uint64 {
+		rt.rubyRunFn = u(a[0])
+		return jsHUndefined
+	}
 	m["js_rforit"] = func(a []uint64) uint64 {
 		c := u(a[0])
 		it := newJSObject()
 		it.set("v", c)
+		if e, isObj := c.(*jsObject); isObj && rubyIsEnum(c) && rubyRunnable(e) {
+			it.set("e", c)
+			it.set("res", &jsArray{})
+			it.set("c", &jsArray{})
+			it.set("i", float64(0))
+			it.set("whole", len(a) > 1 && u(a[1]) == true)
+			it.set("run", &rubyRun{t: e, bang: jsNull})
+			return w(it)
+		}
 		if rubyIsEnum(c) {
 			it.set("e", c)
 			it.set("res", &jsArray{})
@@ -489,6 +504,22 @@ func (rt *jsrt) addRubyFmtExterns(m map[string]func(args []uint64) uint64) {
 		i := int(it.props["i"].(float64))
 		if res, isEnum := it.props["res"].(*jsArray); isEnum && i > 0 {
 			res.elems = append(res.elems, u(a[1]))
+		}
+		if r, isRun := it.props["run"].(*rubyRun); isRun {
+			args, done := rt.rubyRunStep(r)
+			if done {
+				return jsHUndefined
+			}
+			it.set("i", float64(i+1))
+			items := c.(*jsArray)
+			items.elems = append(items.elems, rubyRunPack(args))
+			if it.props["whole"] == true && len(args) > 0 {
+				return w(args[0])
+			}
+			if it.props["whole"] == true {
+				return w(jsNull)
+			}
+			return w(rubyRunPack(args))
 		}
 		if _, isHash := it.props["lev"]; isHash {
 			keys, vals, _ := dictParts(c)
@@ -527,6 +558,9 @@ func (rt *jsrt) addRubyFmtExterns(m map[string]func(args []uint64) uint64) {
 	}
 	m["js_rforend"] = func(a []uint64) uint64 {
 		it := u(a[0]).(*jsObject)
+		if r, isRun := it.props["run"].(*rubyRun); isRun {
+			rt.rubyRunClose(r)
+		}
 		if lev, isHash := it.props["lev"]; isHash {
 			it.props["c"].(*jsObject).set("__iter", lev)
 		}
@@ -1862,17 +1896,6 @@ func (rt *jsrt) rubyStopIter(name string, t *jsObject) {
 // rbForEnumItems in languages/lib/ruby-rt.metajs.
 func (rt *jsrt) rubyForEnumItems(e *jsObject, whole bool) interface{} {
 	meth, _ := e.props["meth"].(string)
-	if whole && e.props["__rdefer"] == true && rubyForPassMeth(meth) {
-		all := &jsArray{}
-		rt.rubyLazyDrive(e.props["src"], func(v interface{}, multi bool) bool {
-			if multi {
-				v = v.(*jsArray).elems[0]
-			}
-			all.elems = append(all.elems, v)
-			return false
-		})
-		return all
-	}
 	all := rt.rubyMethod(e, "to_a", nil)
 	arr, isArr := all.(*jsArray)
 	if !whole || !isArr || !rubyForPairMeth(meth) {
@@ -2442,6 +2465,7 @@ func (rt *jsrt) rubyEnumMixin(t interface{}, name string, args []interface{}) in
 		if rubyEnumDefers(name, len(pos)) {
 			e := rubyEnumAt(rubyMkEnumOp(&jsArray{}, name), t, name, pos)
 			e.set("__rdefer", true)
+			e.set("__rco", true)
 			return e
 		}
 	}
@@ -2476,7 +2500,263 @@ func (rt *jsrt) rubyToEnum(t interface{}, args []interface{}) *jsObject {
 	e := rubyEnumAt(rubyMkEnumOp(&jsArray{}, "each"), t, meth, pos)
 	e.set("__rdefer", true)
 	e.set("__rcall", true)
+	e.set("__rco", true)
 	return e
+}
+
+// rubyRun is one run of an Enumerator's method on a generator (rubyRunFn's), for
+// Enumerator#next / #peek over a user #each and `for` over such an Enumerator.
+// on: the run's catch tags, rescued exception and $! are installed, and tags /
+// cur / bang hold the other side's. Twin of the run machinery of
+// ruby-interpreter.abnf (rbRunNew ...), which states the rules, and rbRun* in
+// lib/ruby-rt.metajs.
+type rubyRun struct {
+	t    *jsObject
+	g    *jsGenerator
+	on   bool
+	tags []interface{}
+	cur  interface{}
+	bang interface{}
+	done bool
+}
+
+// rubyRunnable: does a run take t's values from a user #each?
+func rubyRunnable(t *jsObject) bool {
+	return t.props["__rco"] == true || (t.props["__rlazy"] == true && t.props["kind"] == "each")
+}
+
+// rubyRunPack is a block call's arguments as Enumerator#next answers them.
+func rubyRunPack(a []interface{}) interface{} {
+	switch len(a) {
+	case 0:
+		return jsNull
+	case 1:
+		return a[0]
+	}
+	return &jsArray{elems: append([]interface{}{}, a...)}
+}
+
+// rubyRunSwap installs the run's state (on) or puts the other side's back.
+func (rt *jsrt) rubyRunSwap(r *rubyRun, on bool) {
+	if r.on == on {
+		return
+	}
+	r.on = on
+	if rt.rubyGlobals == nil {
+		rt.rubyGlobals = map[string]interface{}{}
+	}
+	bang, has := rt.rubyGlobals["!"]
+	if !has {
+		bang = jsNull
+	}
+	rt.rubyGlobals["!"] = r.bang
+	r.bang = bang
+	rt.rubyCatchTags, r.tags = r.tags, rt.rubyCatchTags
+	rt.rubyCurExc, r.cur = r.cur, rt.rubyCurExc
+}
+
+// rubyRunStep steps the run: the next block call's arguments, or done once the
+// method has returned (its answer in the generator's retValue). A body that
+// raises is done and the exception propagates.
+func (rt *jsrt) rubyRunStep(r *rubyRun) ([]interface{}, bool) {
+	if r.done {
+		return nil, true
+	}
+	if r.g == nil {
+		drv := &hostFunc{name: "", fn: func(rt *jsrt, _ uint64, a []interface{}) interface{} {
+			y := argAt(a, 0)
+			return rt.rubyRunBody(r.t, func(args []interface{}) {
+				rt.rubyRunSwap(r, false)
+				rt.call(y, jsUndef, args)
+			})
+		}}
+		r.g = rt.call(rt.rubyRunFn, jsUndef, []interface{}{drv}).(*jsGenerator)
+	}
+	rt.rubyRunSwap(r, true)
+	var res *jsObject
+	func() {
+		defer func() {
+			if p := recover(); p != nil {
+				r.done = true
+				rt.rubyRunSwap(r, false)
+				panic(p)
+			}
+		}()
+		res = r.g.step(rt, jsUndef).(*jsObject)
+	}()
+	rt.rubyRunSwap(r, false)
+	if res.props["done"] == true {
+		r.done = true
+		return nil, true
+	}
+	return res.props["value"].(*jsArray).elems, false
+}
+
+// rubyRunClose leaves a run early, running the ensure clauses its body is in.
+func (rt *jsrt) rubyRunClose(r *rubyRun) {
+	if r.done || r.g == nil {
+		r.done = true
+		return
+	}
+	r.done = true
+	rt.rubyRunSwap(r, true)
+	defer rt.rubyRunSwap(r, false)
+	r.g.closeBody(rt)
+}
+
+// rubyRunBody is the run's body: t's method over its source, every block call
+// handed to out; answers StopIteration#result. Twin of rbRunBody in
+// ruby-interpreter.abnf.
+func (rt *jsrt) rubyRunBody(t *jsObject, out func([]interface{})) interface{} {
+	src := t.props["src"]
+	meth, _ := t.props["meth"].(string)
+	var margs []interface{}
+	if ma, isArr := t.props["margs"].(*jsArray); isArr {
+		margs = append(margs, ma.elems...)
+	}
+	nilBlk := rubyBlkWrap(&hostFunc{name: "", fn: func(*jsrt, uint64, []interface{}) interface{} { return jsNull }})
+	if t.props["__rcall"] == true {
+		blk := &hostFunc{name: "", fn: func(rt *jsrt, _ uint64, a []interface{}) interface{} {
+			out(append([]interface{}{}, a...))
+			return jsNull
+		}}
+		return rt.rubyMethod(src, meth, append(margs, rubyBlkWrap(blk)))
+	}
+	if t.props["__rlazy"] == true {
+		rt.rubyLazyPull(t, -1, func(v interface{}, m bool) bool {
+			if m {
+				out(append([]interface{}{}, v.(*jsArray).elems...))
+			} else {
+				out([]interface{}{v})
+			}
+			return false
+		})
+		return rubyLazyEachVal(t)
+	}
+	n := 0
+	var memo interface{} = jsNull
+	if len(margs) > 0 {
+		memo = margs[0]
+	}
+	switch meth {
+	case "each_slice", "each_cons":
+		n = int(math.Trunc(rt.rubyImplicitInt(meth, memo, "")))
+		if n <= 0 {
+			return rt.rubyDelegArr(&jsArray{}, src, meth, append(margs, nilBlk))
+		}
+	case "cycle":
+		n = -1
+		if memo != jsNull {
+			n = int(math.Trunc(rt.rubyImplicitInt(meth, memo, "")))
+		}
+	}
+	items := rubyEnumPump(meth, n, memo, func(step func(interface{}, bool) bool) { rt.rubyLazyDrive(src, step) }, out)
+	switch meth {
+	case "each", "each_entry", "each_with_index", "reverse_each":
+		return src
+	case "each_slice", "each_cons", "cycle":
+		return jsNull
+	case "each_with_object":
+		return memo
+	}
+	return rt.rubyDelegArr(&jsArray{elems: items}, src, meth, append(margs, nilBlk))
+}
+
+// rubyEnumPump is one run of an Enumerable method over a user #each, handing on
+// each block call's arguments. Twin of rbaEnumPump in lib/ruby-arr.js, which
+// states the rule.
+func rubyEnumPump(m string, n int, memo interface{}, drive func(func(interface{}, bool) bool), out func([]interface{})) []interface{} {
+	items := []interface{}{}
+	var buf []interface{}
+	i := 0
+	dropped := false
+	if m == "cycle" && n == 0 {
+		return items
+	}
+	drive(func(it interface{}, multi bool) bool {
+		items = append(items, it)
+		switch {
+		case m == "each_with_index":
+			out([]interface{}{it, float64(i)})
+			i++
+		case m == "each_with_object":
+			out([]interface{}{it, memo})
+		case m == "each_slice" || m == "each_cons":
+			buf = append(buf, it)
+			if m == "each_cons" && len(buf) > n {
+				buf = append([]interface{}{}, buf[1:]...)
+			}
+			if len(buf) == n {
+				out([]interface{}{&jsArray{elems: append([]interface{}{}, buf...)}})
+				if m == "each_slice" {
+					buf = nil
+				}
+			}
+		case m != "reverse_each" && !(m == "drop_while" && dropped):
+			dropped = true
+			if multi && rubyForPassMeth(m) {
+				out(append([]interface{}{}, it.(*jsArray).elems...))
+			} else {
+				out([]interface{}{it})
+			}
+			return m == "take_while"
+		}
+		return false
+	})
+	if m == "each_slice" && len(buf) > 0 {
+		out([]interface{}{&jsArray{elems: buf}})
+	}
+	for r := len(items) - 1; m == "reverse_each" && r >= 0; r-- {
+		out([]interface{}{items[r]})
+	}
+	for pass := 1; m == "cycle" && len(items) > 0 && (n < 0 || pass < n); pass++ {
+		for _, x := range items {
+			out([]interface{}{x})
+		}
+	}
+	return items
+}
+
+// rubyRunNext is Enumerator#next / #peek on a run. Twin of rbRunNext in
+// ruby-interpreter.abnf.
+func (rt *jsrt) rubyRunNext(t *jsObject, name string) interface{} {
+	if t.props["__rpkhas"] != true {
+		r, _ := t.props["__rrun"].(*rubyRun)
+		if r == nil {
+			r = &rubyRun{t: t, bang: jsNull}
+			t.set("__rrun", r)
+		}
+		args, done := rt.rubyRunStep(r)
+		if done {
+			var res interface{} = jsNull
+			if r.g != nil {
+				res = r.g.retValue
+			}
+			e := rt.rubyExc(rt.rubyBuiltinClass("StopIteration"), []interface{}{"iteration reached an end"})
+			e.set("__rframe", name)
+			e.set("__rresult", res)
+			panic(&jsThrown{value: e})
+		}
+		t.set("__rpk", &jsArray{elems: args})
+		t.set("__rpkhas", true)
+	}
+	v := rubyRunPack(t.props["__rpk"].(*jsArray).elems)
+	if name == "next" {
+		t.set("__rpkhas", false)
+		t.set("pos", rubyToF(t.props["pos"])+1)
+	}
+	return v
+}
+
+// rubyRunRewind is Enumerator#rewind on a run: the run is dropped unresumed.
+func (rt *jsrt) rubyRunRewind(t *jsObject) interface{} {
+	if r, _ := t.props["__rrun"].(*rubyRun); r != nil && r.g != nil && !r.done {
+		r.g.drop(rt)
+	}
+	t.set("__rrun", jsNull)
+	t.set("__rpkhas", false)
+	t.set("pos", float64(0))
+	return t
 }
 
 // rubyEnumCopy is Enumerator#dup / #clone. Twin of enumCopy in
@@ -2491,7 +2771,7 @@ func (rt *jsrt) rubyEnumCopy(t *jsObject, clone bool) *jsObject {
 	if meth, has := t.props["meth"].(string); has {
 		rubyEnumAt(c, t.props["src"], meth, t.props["margs"].(*jsArray).elems)
 	}
-	for _, k := range []string{"__rdefer", "__rcall"} {
+	for _, k := range []string{"__rdefer", "__rcall", "__rco"} {
 		if t.props[k] == true {
 			c.set(k, true)
 		}

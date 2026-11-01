@@ -2005,6 +2005,101 @@ def s166
         (1..3).each_slice(2).dup.inspect == "#<Enumerator: 1..3:each_slice(2)>" && cx == "can't copy execution context" &&
         e.clone.to_a == [1, 2, 3])
 end
+# ===== SECTION 167: external iteration over a user #each: Enumerator#next / #peek / #rewind, Lazy#next, for =====
+# Enumerator#next and #peek over a user #each run the method on a fiber, so each
+# value is taken as #each yields it and #each runs no further: its side effects
+# interleave with the caller's. Past the end StopIteration ("iteration reached an
+# end") carries what the method answered with nil from its block (#result).
+# rewind drops the fiber without running ensure, and next starts over. A Lazy
+# over a user #each is pulled the same way, map / each_slice / with_index made
+# without a block yield as their method would, to_enum / enum_for (an Array's
+# too) take the method's own yields, and `for` over such an Enumerator runs its
+# body between #each's steps, a break unwinding #each through its ensure. The
+# fiber has its own catch tags and $!. /usr/bin/ruby 2.6 settles each.
+class S167C
+  include Enumerable
+  def initialize(l); @l = l; end
+  def each
+    @l << 1; yield 10
+    @l << 2; yield 20
+    @l << 3; yield 30
+    @l << :end
+    :done
+  end
+end
+class S167E
+  include Enumerable
+  def initialize(l); @l = l; end
+  def each
+    begin
+      yield 1
+      yield 2
+    ensure
+      @l << :ens
+    end
+  end
+end
+class S167T
+  def each
+    catch(:t) { yield 1 }
+    begin
+      raise "boom"
+    rescue => e
+      yield e.message
+    end
+    :t
+  end
+end
+def s167
+  l = []
+  e = S167C.new(l).each_entry
+  a = [e.next, l.dup, e.peek, l.dup, e.next, e.next]
+  r = begin; e.next; rescue StopIteration => x; [x.message, x.result.class, l.dup]; end
+  check("ext167a", a == [10, [1], 20, [1, 2], 20, 30] && r == ["iteration reached an end", S167C, [1, 2, 3, :end]])
+  l = []
+  e = S167E.new(l).map
+  b = [e.next, e.next]
+  e.rewind
+  b << l.dup << e.next
+  r = begin; e.next; e.next; rescue StopIteration => x; x.result; end
+  check("ext167b", b == [1, 2, [], 1] && r == [nil, nil] && l == [:ens])
+  l = []
+  z = S167C.new(l).lazy.map { |v| v + 1 }
+  c = [z.next, z.next, l.dup]
+  z2 = S167C.new([]).lazy
+  3.times { z2.next }
+  r = begin; z2.next; rescue StopIteration => x; x.result; end
+  check("ext167c", c == [11, 21, [1, 2]] && r == :done)
+  l = []
+  d = [S167C.new(l).map.next, l.dup, S167C.new([]).each_slice(2).next, S167C.new([]).each_with_index.next]
+  sl = S167C.new([]).each_slice(2)
+  d << sl.next << sl.next
+  cy = S167C.new([]).cycle
+  d << (1..5).map { cy.next }
+  l = []
+  tw = S167C.new(l).take_while
+  d << tw.next << (begin; tw.next; rescue StopIteration => x; x.result; end) << l
+  check("ext167d", d == [10, [1], [10, 20], [10, 0], [10, 20], [30], [10, 20, 30, 10, 20], 10, [], [1]])
+  l = []
+  te = S167C.new(l).to_enum
+  ef = S167C.new([]).enum_for(:each)
+  f = [te.next, l.dup, ef.next, ef.next, [1, 2].to_enum.next, [3, 4].enum_for(:each_slice, 2).next]
+  3.times { ef.next } rescue f << $!.class
+  r = begin; te.next; te.next; te.next; rescue StopIteration => x; x.result; end
+  check("ext167e", f == [10, [1], 10, 20, 1, [3, 4], StopIteration] && r == :done)
+  l = []
+  for v in S167C.new(l).each_entry; l << v; end
+  m = []
+  w = for v in S167E.new(m).each_entry; m << v; break 7; end
+  k = []
+  for v in S167C.new(k).lazy.map { |x| x + 1 }; k << v; end
+  check("ext167f", l == [1, 10, 2, 20, 3, 30, :end] && m == [1, :ens] && w == 7 && k == [1, 11, 2, 21, 3, 31, :end])
+  t = S167T.new.to_enum
+  g = [t.next]
+  g << (begin; throw :t; rescue UncaughtThrowError => x; x.message; end)
+  g << t.next << $!
+  check("ext167g", g == [1, "uncaught throw :t", "boom", nil])
+end
 
 s122() # SECTION-CALL 122
 s123() # SECTION-CALL 123
@@ -2051,5 +2146,6 @@ s163() # SECTION-CALL 163
 s164() # SECTION-CALL 164
 s165() # SECTION-CALL 165
 s166() # SECTION-CALL 166
+s167() # SECTION-CALL 167
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

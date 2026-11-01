@@ -4016,6 +4016,8 @@ long get_member(long obj, long key) {
 	 * That is what makes it per-coroutine by construction rather than by care
 	 * (a per-PROGRAM depth stack does not work). See gen_throw. */
 	if (t == 15 && tag_of(key) == 4 && str_eq_c(key, "throw")) { return mk_bound(obj, 62); }
+	/* g.__gendrop(): see gen_drop. */
+	if (t == 15 && tag_of(key) == 4 && str_eq_c(key, "__gendrop")) { return mk_bound(obj, 63); }
 	if (t == 5) {
 		if (tag_of(key) == 4) {
 			long mid;
@@ -4743,6 +4745,29 @@ void gen_close(long g) {
 	sd(g, H_UNDEF);
 }
 
+/* gen_drop(g): abandon a generator WITHOUT resuming it, so none of the finally
+ * clauses around its suspended yield run - Ruby's Enumerator#rewind, for which
+ * MRI runs no ensure. A suspended body's stack goes back to the C heap and stops
+ * being a root, as a finished one's does. The twin of abnf/jsrt.go's
+ * (*jsGenerator).drop. */
+void gen_drop(long g) {
+	long *cb;
+	if (fe(g) != 0) { return; }
+	if (fc(g) != 0) {
+		cb = (long *)fc(g);
+		if (cb[1] == 3) { gen_busy(cb); }
+		cb[1] = 2;
+		if (cb[8] != 0) {
+			mprotect((void *)cb[8], 16384, 3);
+			free((void *)cb[8]);
+			cb[8] = 0;
+		}
+	}
+	se(g, 1);
+	sd(g, H_UNDEF);
+	sf(g, H_UNDEF);
+}
+
 /* js_yield: suspend the body, hand v to the pending next() and answer the value
  * the FOLLOWING next(x) sends in. The twin of abnf/jsrt.go's js_yield. */
 long js_yield(long v) {
@@ -4997,6 +5022,7 @@ long builtin_method(long recv, long mid, long args) {
 	if (mid == 60) { return gen_next(recv, args); }   /* generator.next(v) */
 	if (mid == 61) { return gen_return(recv, args); } /* generator.return(v) */
 	if (mid == 62) { return gen_throw(recv, args); }  /* generator.throw(v) */
+	if (mid == 63) { gen_drop(recv); return H_UNDEF; } /* generator.__gendrop() */
 	if (mid == 40) {          /* fn.apply(this, argsArray) */
 		long a = arg_at(args, 1);
 		if (tag_of(a) != 5) { a = mk_arr(); }

@@ -9260,6 +9260,24 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         rdSetB.NewBr(rdEndB)
         rdEndB.NewRet(rdExc)
         callExt(b, "js_rt_deep", [emitNum(b, 10000), callExt(b, "js_closure", [handle(rdIdx), curScopeV]), emitNum(b, 0)])
+        // The generator an Enumerator's run (Enumerator#next over a user #each, a
+        // `for` over one) steps its method on, registered with js_rcoreg: its body
+        // calls the runtime's driver (the generator's one argument) with a function
+        // that YIELDS its argument list. js_genfn / js_yield are emitter-only
+        // externs, which is why the runtimes cannot make it themselves.
+        funcCount++
+        var cyIdx = funcCount
+        var cyf = m.NewFunc("jsf_" + cyIdx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
+        var cyb = cyf.NewBlock("entry")
+        cyb.NewRet(callExt(cyb, "js_yield", [cyf.Params[1]]))
+        funcCount++
+        var cbIdx = funcCount
+        var cbf = m.NewFunc("jsf_" + cbIdx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
+        var cbb = cbf.NewBlock("entry")
+        var cbArgs = callExt(cbb, "js_arr_new", [])
+        callExt(cbb, "js_arr_push", [cbArgs, callExt(cbb, "js_closure", [handle(cyIdx), cbf.Params[0]])])
+        cbb.NewRet(callExt(cbb, "js_call", [callExt(cbb, "js_arg", [cbf.Params[1], handle(0)]), hUndef, cbArgs]))
+        callExt(b, "js_rcoreg", [callExt(b, "js_genfn", [callExt(b, "js_closure", [handle(cbIdx), curScopeV])])])
         // THE WHOLE PROGRAM RUNS INSIDE ONE js_try, so an exception nobody rescued
         // is reported BY THE PROGRAM (js_rtop), in MRI's spelling, instead of
         // escaping the module to the generic uncaught-throw handler. This is the

@@ -491,6 +491,9 @@ type jsrt struct {
 	rubyGlobals map[string]interface{}
 	// rubyCatchTags: the tags of the Kernel#catch calls running, innermost last.
 	rubyCatchTags []interface{}
+	// rubyRunFn: the generator function js_rcoreg registered, which an
+	// Enumerator's run (rubyRunStep in jsrtruby.go) steps its method on.
+	rubyRunFn interface{}
 
 	// ktRndDef is kotlin.random.Random.Default - the one generator every unseeded
 	// `random()` draws from. Built lazily by ktRndDefault (abnf/jsrtkotlin.go);
@@ -969,6 +972,19 @@ func (g *jsGenerator) closeBody(rt *jsrt) {
 	if st.panicVal != nil && st.panicVal != genExit {
 		panic(st.panicVal)
 	}
+}
+
+// drop abandons the body WITHOUT resuming it, so none of the finally clauses
+// around its suspended yield run - Ruby's Enumerator#rewind, for which MRI runs
+// no ensure. Its goroutine stays parked, as any abandoned generator's does.
+// Twin of runtime.c's gen_drop.
+func (g *jsGenerator) drop(rt *jsrt) {
+	if g.running {
+		g.enter(rt)
+	}
+	g.done = true
+	g.lastValue = jsUndef
+	g.lastKey = jsUndef
 }
 
 // finish is generator.return(v): close the body and answer the record the
@@ -3233,6 +3249,11 @@ func (rt *jsrt) getMember(obj interface{}, key interface{}) interface{} {
 		case "throw":
 			return jsHostFunc("throw", func(rt *jsrt, this uint64, args []interface{}) interface{} {
 				return o.throwInto(rt, argAt(args, 0))
+			})
+		case "__gendrop":
+			return jsHostFunc("__gendrop", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+				o.drop(rt)
+				return jsUndef
 			})
 		// The INSPECTION half of the iterator protocol, which JavaScript's
 		// {value, done} record folds into next() but most other languages expose as
@@ -13199,6 +13220,12 @@ func (rt *jsrt) rubyEnumMethod(t *jsObject, name string, args []interface{}) int
 	if name == "dup" || name == "clone" {
 		return rt.rubyEnumCopy(t, name == "clone")
 	}
+	if t.props["__rco"] == true && (name == "next" || name == "peek") {
+		return rt.rubyRunNext(t, name)
+	}
+	if t.props["__rco"] == true && name == "rewind" {
+		return rt.rubyRunRewind(t)
+	}
 	// Twin of the to_enum arm of enumMethod in ruby-interpreter.abnf.
 	if t.props["__rcall"] == true {
 		if _, blk := rubyBlockArgs(args); name == "each" && blk != nil {
@@ -14413,6 +14440,14 @@ func (rt *jsrt) rubyArrayMethod(t *jsArray, name string, args []interface{}) int
 			return rt.call(blk, jsUndef, []interface{}{argAt(pos, 0)})
 		}
 		rt.rubyRaiseErr(name, "IndexError", fmt.Sprintf("index %d outside of array bounds: %d...%d", fx, -n, n))
+	// Object#to_enum / #enum_for. Twin of arrayMethod in ruby-interpreter.abnf.
+	case "to_enum", "enum_for":
+		meth := "each"
+		if len(pos) > 0 {
+			meth = rt.rubyStr(pos[0])
+			pos = pos[1:]
+		}
+		return rt.rubyArrayMethod(t, meth, pos)
 	}
 	rt.rubyNoMethod(t, name)
 	return nil

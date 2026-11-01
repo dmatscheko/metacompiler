@@ -590,6 +590,9 @@ func (rt *jsrt) rubyLazyMethod(t *jsObject, name string, args []interface{}) int
 			return rubySliceEnum(t, name, sn, false, "#<Enumerator: "+desc+":"+sd)
 		}
 	case "next", "peek":
+		if t.props["kind"] == "each" {
+			return rt.rubyRunNext(t, name)
+		}
 		cur := int(rubyToF(t.props["pos"]))
 		got := rt.rubyLazyFirst(t, cur+1)
 		if len(got) <= cur {
@@ -602,6 +605,9 @@ func (rt *jsrt) rubyLazyMethod(t *jsObject, name string, args []interface{}) int
 		}
 		return got[len(got)-1]
 	case "rewind":
+		if t.props["kind"] == "each" {
+			return rt.rubyRunRewind(t)
+		}
 		t.set("pos", float64(0))
 		return t
 	case "size":

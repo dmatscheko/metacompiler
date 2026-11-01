@@ -377,6 +377,72 @@ function rbaForPassMeth(m) {
     return m == "each" || m == "map" || m == "collect" || m == "flat_map" || m == "collect_concat"
 }
 
+// One run of the Enumerable method m that rbaEnumDefers names, made without a
+// block over a user #each, handing on each block call's arguments as MRI's
+// method makes it - what Enumerator#next answers one at a time, and what a `for`
+// over the Enumerator binds. drive(step) runs #each, calls step(it, multi) per
+// yield (a multi-value one packed as an Array) and leaves #each once step answers
+// true; out(a) takes one call's argument list. n is each_slice / each_cons's
+// width or cycle's count (-1: for ever), memo each_with_object's. The block
+// answers nil, so take_while stops after one element and drop_while hands on
+// only its first; reverse_each and cycle's later passes need the whole run.
+// Answers the packed values #each yielded. Go twin: rubyEnumPump in
+// abnf/jsrtruby.go.
+function rbaEnumPump(m, n, memo, drive, out) {
+    var st = {items: [], buf: [], i: 0, dropped: false}
+    if (m == "cycle" && n == 0) { return st.items }
+    drive(function(it, multi) {
+        st.items.push(it)
+        if (m == "each_with_index") {
+            out([it, st.i])
+            st.i = st.i + 1
+        } else if (m == "each_with_object") {
+            out([it, memo])
+        } else if (m == "each_slice" || m == "each_cons") {
+            st.buf.push(it)
+            if (m == "each_cons" && st.buf.length > n) {
+                var w = []
+                var k = 1
+                while (k < st.buf.length) { w.push(st.buf[k]); k = k + 1 }
+                st.buf = w
+            }
+            if (st.buf.length == n) {
+                if (m == "each_slice") {
+                    out([st.buf])
+                    st.buf = []
+                } else {
+                    var c = []
+                    var j = 0
+                    while (j < n) { c.push(st.buf[j]); j = j + 1 }
+                    out([c])
+                }
+            }
+        } else if (m != "reverse_each" && !(m == "drop_while" && st.dropped)) {
+            st.dropped = true
+            if (multi && rbaForPassMeth(m)) { out(it) }
+            else { out([it]) }
+            return m == "take_while"
+        }
+        return false
+    })
+    if (m == "each_slice" && st.buf.length > 0) { out([st.buf]) }
+    var r = st.items.length - 1
+    while (m == "reverse_each" && r >= 0) {
+        out([st.items[r]])
+        r = r - 1
+    }
+    var pass = 1
+    while (m == "cycle" && st.items.length > 0 && (n < 0 || pass < n)) {
+        var q = 0
+        while (q < st.items.length) {
+            out([st.items[q]])
+            q = q + 1
+        }
+        pass = pass + 1
+    }
+    return st.items
+}
+
 // Enumerable#slice_before / #slice_after, given whether each element matched:
 // a match opens a new slice before it, or closes the current one after it.
 function rbaSliceAt(t, hit, after) {
