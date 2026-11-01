@@ -1185,10 +1185,17 @@ func (rt *jsrt) phpMkErr(clsName, msg string) *jsObject {
 // phpMkErrOf is phpMkErr of a class descriptor in hand. Twin of phMkErrOf in
 // languages/lib/php-rt.metajs.
 func (rt *jsrt) phpMkErrOf(cls interface{}, msg string) *jsObject {
+	// The property table of Exception and Error with its defaults, in declaration
+	// order (excProps in php-to-llvm-ir.abnf).
 	o := newJSObject()
 	o.set("__class", cls)
 	o.set("message", msg)
+	o.set("string", "")
 	o.set("code", float64(0))
+	o.set("file", "")
+	o.set("line", float64(0))
+	o.set("trace", phpNewArr())
+	o.set("previous", jsNull)
 	rt.phpStamp(o)
 	return o
 }
@@ -3872,6 +3879,38 @@ func init() {
 			sc.put("\x00own", d+","+name)
 			sc.put("\x00own:"+name, v)
 			return 0
+		}
+		// An exception escaping a finally body while add was pending:
+		// zend_exception_set_previous appends add at the end of ex's previous
+		// chain, unless add is ex, is reached along that chain, or has the node
+		// being looked at on its own chain. Twin of js_phchain in
+		// languages/lib/php-rt.metajs and phpChainPrev in php-interpreter.abnf.
+		m["js_phchain"] = func(a []uint64) uint64 {
+			if !phpIsObj(u(a[0])) || !phpIsObj(u(a[1])) || u(a[0]) == u(a[1]) {
+				return 0
+			}
+			ex, add := u(a[0]).(*jsObject), u(a[1]).(*jsObject)
+			prev := func(o *jsObject) *jsObject {
+				if p := phpDeref(o.props["previous"]); phpIsObj(p) {
+					return p.(*jsObject)
+				}
+				return nil
+			}
+			for x := ex; ; {
+				for p := prev(add); p != nil; p = prev(p) {
+					if p == x {
+						return 0
+					}
+				}
+				p := prev(x)
+				if p == nil {
+					x.set("previous", add)
+					return 0
+				}
+				if x = p; x == add {
+					return 0
+				}
+			}
 		}
 		// At a try's start: how many frames phpFrames holds. Twin of js_phtry in
 		// languages/lib/php-rt.metajs.

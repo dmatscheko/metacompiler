@@ -410,7 +410,7 @@ LabelName   <~~ push(stripWs(up.in)) ~~> = Name ;
 // through: a normally-completing finally yields null (which excTry ignores), while a
 // return/break/continue OUT OF the finally overrides the try/catch completion and cancels
 // a pending rethrow - the same semantics js_try gives the compiler.
-Try         <~~ push(excTryTyped(takeAll())) ~~>
+Try         <~~ push(phpTry(takeAll())) ~~>
             = KwTry TryBody { CatchClause } [ FinallyClause ] ;
 TryBody     <~~ push({trybody: pop().body}) ~~>
             = Block ;
@@ -7632,6 +7632,71 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         }
         return {catchbody: body, catchname: nm, catchtype: types}
     }
+    // A try with a finally: an exception escaping the finally body while another
+    // one is pending gets the pending one chained onto it as previous
+    // (zend_dispatch_try_catch_finally_helper in Zend/zend_vm_def.h). The try and
+    // its catches run as one excTryTyped inside, so the pending exception is
+    // whatever leaves them. Twin of makeTry in php-to-llvm-ir.abnf.
+    function phpTry(items) {
+        var fin = anytype
+        fin = null
+        var rest = []
+        for (var i = 0; i < items.length; i++) {
+            if (items[i].finbody != undefined) { fin = items[i].finbody } else { rest.push(items[i]) }
+        }
+        if (fin == null) { return excTryTyped(items) }
+        var inner = rest.length > 1 ? excTryTyped(rest) : rest[0].trybody
+        // No host finally: under goja a throw from a catch nested in a finally
+        // does not replace the exception pending there, so the pending one is
+        // held and re-thrown by hand.
+        return function() {
+            var savedChain = scopes.slice()
+            var savedDepth = coreDepth
+            var pend = anytype
+            pend = null
+            var pending = false
+            var sig = anytype
+            sig = undefined
+            try {
+                sig = inner()
+            } catch (e) {
+                coreDepth = savedDepth
+                pend = e
+                pending = true
+            }
+            scopes = savedChain.slice()
+            var fr = anytype
+            try { fr = fin() } catch (e2) {
+                if (pending && excIsUser(e2) && excIsUser(pend)) { phpChainPrev(e2.v, pend.v) }
+                throw e2
+            }
+            // A return out of the finally overrides the completion and cancels the
+            // pending exception, as in excTryTyped.
+            if (fr != undefined) { return fr }
+            if (pending) { throw pend }
+            return sig
+        }
+    }
+    // zend_exception_set_previous: add goes at the end of ex's previous chain,
+    // unless it is ex itself, is reached along that chain, or has the node being
+    // looked at on its own chain. Twin of js_phchain in abnf/jsrtphp.go and
+    // lib/php-rt.metajs.
+    function phpChainPrev(ex, add) {
+        if (ex === add) { return }
+        var x = ex
+        while (true) {
+            for (var a = phpExcSlot(add, "previous"); isObj(a); a = phpExcSlot(a, "previous")) {
+                if (a === x) { return }
+            }
+            var p = phpExcSlot(x, "previous")
+            if (!isObj(p)) {
+                dictSet(x.p, "previous", add)
+                return
+            }
+            x = p
+            if (x === add) { return }
+        }
+    }
 
     // ----- builtins -----
     function derefAll(list) {
@@ -8925,6 +8990,18 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         }
         return false
     }
+    // The instance properties of Exception and Error, in declaration order
+    // (Zend/zend_exceptions.stub.php). file, line and trace are never filled in:
+    // there is no call-site line table to fill them from. Twin of excProps in
+    // php-to-llvm-ir.abnf.
+    var excProps = [{name: "message", vis: "protected", typ: ""}, {name: "string", vis: "private", typ: "string"},
+                    {name: "code", vis: "protected", typ: ""}, {name: "file", vis: "protected", typ: "string"},
+                    {name: "line", vis: "protected", typ: "int"}, {name: "trace", vis: "private", typ: "array"},
+                    {name: "previous", vis: "private", typ: "?Throwable"}]
+    for (var exq = 0; exq < excProps.length; exq++) {
+        visNames["$" + excProps[exq].name] = true
+        if (excProps[exq].typ != "") { typedNames["$" + excProps[exq].name] = true }
+    }
     // The engine's exception hierarchy, far enough for user classes to extend it.
     // Only the two roots name Throwable; a derived engine class names nothing and
     // takes its parent's interfaces from the end, as a user class does
@@ -8932,14 +9009,28 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     function declBuiltinClass(name, superName) {
         var sup = superName == null ? null : getVar(superName)
         var cls = {__isclass: true, __isinternal: true, __name: name, __super: sup, __props: [], __ifaces: sup == null ? ["Throwable"] : []}
+        if (sup == null) {
+            // A root declares the property table every Throwable has, defaults
+            // already evaluated (initProps takes __pdefs as given).
+            cls.__props = excProps
+            cls.__pvis = phpVisList(name, excProps)
+            cls.__pdefs = [{v: ""}, {v: ""}, {v: 0}, {v: ""}, {v: 0}, {v: newArr()}, {v: null}]
+            cls.__mlc = ",__construct,getmessage,getcode,getprevious,"
+        }
+        // Exception::__construct(string $message = "", int $code = 0, ?Throwable
+        // $previous = null) writes only what was passed, and not null, over the
+        // defaults; the getters read the slots raw, in the base class's scope
+        // (zend_exceptions.c).
         cls["__construct"] = function(self, argset) {
-            dictSet(self.p, "message", argset.pos.length > 0 ? argset.pos[0] : "")
-            dictSet(self.p, "code", argset.pos.length > 1 ? argset.pos[1] : 0)
+            var names = ["message", "code", "previous"]
+            for (var i = 0; i < names.length && i < argset.pos.length; i++) {
+                if (argset.pos[i] !== null && argset.pos[i] !== undefined) { dictSet(self.p, names[i], argset.pos[i]) }
+            }
             return null
         }
-        cls["getMessage"] = function(self, argset) { return phpGetProp(self, "message") }
-        cls["getCode"] = function(self, argset) { return phpGetProp(self, "code") }
-        if (sup == null) { cls.__mlc = ",__construct,getmessage,getcode," }
+        cls["getMessage"] = function(self, argset) { return phpExcSlot(self, "message") }
+        cls["getCode"] = function(self, argset) { return phpExcSlot(self, "code") }
+        cls["getPrevious"] = function(self, argset) { return phpExcSlot(self, "previous") }
         scopePut(globalScope, name, cls)
         scopePut(globalScope, classKey(name), cls)
         engineClasses[classKey(name)] = true
@@ -8972,8 +9063,8 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     function phpRaise(clsName, msg) {
         if (!varExists(clsName)) { fail(msg) }
         var o = newObj(getVar(clsName))
+        initProps(o, o.__class)
         dictSet(o.p, "message", msg)
-        dictSet(o.p, "code", 0)
         throw {__exc: true, v: o}
     }
 

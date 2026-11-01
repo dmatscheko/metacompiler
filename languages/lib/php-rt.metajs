@@ -851,12 +851,42 @@ function phMkErr(clsName, msg) {
 }
 // phMkErr of a class descriptor in hand. Twin of phpMkErrOf in abnf/jsrtphp.go.
 function phMkErrOf(cls, msg) {
+    // The property table of Exception and Error with its defaults, in
+    // declaration order (excProps in php-to-llvm-ir.abnf).
     var o = {}
     o["__class"] = cls
     o["message"] = msg
+    o["string"] = ""
     o["code"] = 0
+    o["file"] = ""
+    o["line"] = 0
+    o["trace"] = phNewArr()
+    o["previous"] = null
     phStamp(o)
     return o
+}
+// An exception escaping a finally body while add was pending:
+// zend_exception_set_previous appends add at the end of ex's previous chain,
+// unless add is ex, is reached along that chain, or has the node being looked at
+// on its own chain. Twin of m["js_phchain"] in abnf/jsrtphp.go.
+function js_phchain(ex, add) {
+    if (!phIsObj(ex) || !phIsObj(add) || ex === add) { return undefined }
+    var x = ex
+    while (true) {
+        var a = phDeref(add["previous"])
+        while (phIsObj(a)) {
+            if (a === x) { return undefined }
+            a = phDeref(a["previous"])
+        }
+        var p = phDeref(x["previous"])
+        if (!phIsObj(p)) {
+            x["previous"] = add
+            return undefined
+        }
+        x = p
+        if (x === add) { return undefined }
+    }
+    return undefined
 }
 
 // phArith: an int stays an int unless the exact 64 bit answer does not FIT, and

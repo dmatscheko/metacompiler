@@ -3085,14 +3085,33 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             return endB
         }
     }
+    // A catch closure that runs pre(b, caught) and throws the caught value on.
+    function rethrowClo(b, pre) {
+        return callExt(b, "js_closure", [handle(emitFunc(["0caught"], function(cb) {
+            var cv = callExt(cb, "js_scope_get", [curScopeV, emitStr(cb, "0caught")])
+            pre(cb, cv)
+            callExt(cb, "js_throw", [cv])
+            cb.NewRet(hUndef) // Never reached: js_throw unwinds on the host side.
+            return deadBlock()
+        }, false, true)), curScopeV])
+    }
+    // A try with a finally runs the try and its catches as one inner try, so the
+    // exception pending in the finally is the one that left them, which the catch
+    // clause of the outer js_try records (0pendN). An exception escaping the
+    // finally body gets that one chained on as previous (js_phchain), as
+    // zend_dispatch_try_catch_finally_helper does (Zend/zend_vm_def.h). Twin of
+    // phpTry in php-interpreter.abnf.
     function makeTry(items) {
         var tryT = anytype, finallyT = anytype
         var catches = []
+        var rest = []
         for (var i = 0; i < items.length; i++) {
             if (items[i].trybody != undefined) { tryT = items[i].trybody }
             else if (items[i].catchbody != undefined) { catches.push(items[i]) }
             else if (items[i].finbody != undefined) { finallyT = items[i].finbody }
+            if (items[i].finbody == undefined) { rest.push(items[i]) }
         }
+        if (finallyT != undefined && catches.length > 0) { tryT = makeTry(rest) }
         return function(b) {
             var depthName = ""
             if (diagOn && silenceUsed) {
@@ -3108,13 +3127,24 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             }
             var tryClo = callExt(b, "js_closure", [handle(emitFunc([], tryT, false, true)), curScopeV])
             var catchClo = hUndef
-            if (catches.length > 0) {
-                catchClo = callExt(b, "js_closure",
-                                   [handle(emitFunc(["0caught"], silenceUnwind(unwindFrames(tokName, makeCatchDispatch(catches)), depthName), false, true)), curScopeV])
-            }
             var finClo = hUndef
             if (finallyT != undefined) {
-                finClo = callExt(b, "js_closure", [handle(emitFunc([], silenceUnwind(unwindFrames(tokName, finallyT), depthName), false, true)), curScopeV])
+                hidCount++
+                var pendName = "0pend" + hidCount
+                callExt(b, "js_scope_decl", [curScopeV, emitStr(b, pendName), hNull])
+                catchClo = rethrowClo(b, function(cb, cv) {
+                    callExt(cb, "js_scope_decl", [curScopeV, emitStr(cb, pendName), cv])
+                })
+                finClo = callExt(b, "js_closure", [handle(emitFunc([], silenceUnwind(unwindFrames(tokName, function(fb) {
+                    var bodyClo = callExt(fb, "js_closure", [handle(emitFunc([], finallyT, false, true)), curScopeV])
+                    var chainClo = rethrowClo(fb, function(cb, cv) {
+                        callExt(cb, "js_phchain", [cv, callExt(cb, "js_scope_get", [curScopeV, emitStr(cb, pendName)])])
+                    })
+                    return excDispatch(fb, callExt(fb, "js_try", [bodyClo, chainClo, hUndef]))
+                }), depthName), false, true)), curScopeV])
+            } else if (catches.length > 0) {
+                catchClo = callExt(b, "js_closure",
+                                   [handle(emitFunc(["0caught"], silenceUnwind(unwindFrames(tokName, makeCatchDispatch(catches)), depthName), false, true)), curScopeV])
             }
             var ctl = callExt(b, "js_try", [tryClo, catchClo, finClo])
             return excDispatch(b, ctl)
@@ -9234,28 +9264,42 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                       ["InvalidArgumentException", "LogicException"], ["TypeError", "Error"],
                       ["ValueError", "Error"], ["ArithmeticError", "Error"],
                       ["DivisionByZeroError", "ArithmeticError"]]
+    // The instance properties of Exception and Error, in declaration order
+    // (Zend/zend_exceptions.stub.php), with their defaults. file, line and trace are
+    // never filled in: there is no call-site line table to fill them from. Twin of
+    // excProps in php-interpreter.abnf.
+    function excStrInit(b) { return {b: b, v: emitStr(b, "")} }
+    function excZeroInit(b) { return {b: b, v: emitNum(b, 0)} }
+    var excProps = [{name: "message", vis: "protected", typ: "", init: excStrInit},
+                    {name: "string", vis: "private", typ: "string", init: excStrInit},
+                    {name: "code", vis: "protected", typ: "", init: excZeroInit},
+                    {name: "file", vis: "protected", typ: "string", init: excStrInit},
+                    {name: "line", vis: "protected", typ: "int", init: excZeroInit},
+                    {name: "trace", vis: "private", typ: "array", init: function(b) { return {b: b, v: callExt(b, "js_pharr", [])} }},
+                    {name: "previous", vis: "private", typ: "?Throwable", init: function(b) { return {b: b, v: hNull} }}]
     for (var exr = 0; exr < excRoots.length; exr++) {
         srcClasses["$" + excRoots[exr]] = true
         engineClasses["$" + phsCase(excRoots[exr], false)] = true
+        noteClassProps(excRoots[exr], "", excProps)
     }
     for (var exd = 0; exd < excDerived.length; exd++) {
         srcClasses["$" + excDerived[exd][0]] = true
         engineClasses["$" + phsCase(excDerived[exd][0], false)] = true
+        noteClassProps(excDerived[exd][0], excDerived[exd][1], [])
     }
-    // $this->name = args[idx] when that argument was passed, else the default. PHP's
-    // Exception::__construct($message = "", $code = 0), written out as a branch because
+    // $this->name = args[idx] when that argument was passed and is not null (js_ne is
+    // loose, so null == undefined) over the property default, as
+    // Exception::__construct(string $message = "", int $code = 0, ?Throwable
+    // $previous = null) does in zend_exceptions.c; written out as a branch because
     // the parameter binding here has no default-value model.
-    function emitExcArg(b, idx, name, dflt) {
+    function emitExcArg(b, idx, name) {
         var thisV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "$this")])
         var argV = callExt(b, "js_arg", [curF.Params[1], handle(idx)])
         var gotB = curF.NewBlock("")
-        var defB = curF.NewBlock("")
         var endB = curF.NewBlock("")
-        b.NewCondBr(truthy(b, callExt(b, "js_ne", [argV, hUndef])), gotB, defB)
+        b.NewCondBr(truthy(b, callExt(b, "js_ne", [argV, hUndef])), gotB, endB)
         callExt(gotB, "js_set", [thisV, emitStr(gotB, name), argV])
         gotB.NewBr(endB)
-        callExt(defB, "js_set", [thisV, emitStr(defB, name), dflt(defB)])
-        defB.NewBr(endB)
         return endB
     }
     function emitExcClass(b, name, superName) {
@@ -9268,9 +9312,9 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                                   callExt(b, "js_scope_get", [curScopeV, emitStr(b, superName)])])
         } else {
             var ctor = emitFunc([], function(bb) {
-                bb = emitExcArg(bb, 1, "message", function(x) { return emitStr(x, "") })
-                bb = emitExcArg(bb, 2, "code", function(x) { return emitNum(x, 0) })
-                return bb
+                bb = emitExcArg(bb, 1, "message")
+                bb = emitExcArg(bb, 2, "code")
+                return emitExcArg(bb, 3, "previous")
             }, true)
             callExt(b, "js_set", [clsV, emitStr(b, "__construct"),
                                   callExt(b, "js_closure", [handle(ctor), curScopeV])])
@@ -9278,14 +9322,17 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                                   callExt(b, "js_closure", [handle(emitExcGetter("message")), curScopeV])])
             callExt(b, "js_set", [clsV, emitStr(b, "getCode"),
                                   callExt(b, "js_closure", [handle(emitExcGetter("code")), curScopeV])])
-            callExt(b, "js_set", [clsV, emitStr(b, "__mlc"), emitStr(b, ",__construct,getmessage,getcode,")])
+            callExt(b, "js_set", [clsV, emitStr(b, "getPrevious"),
+                                  callExt(b, "js_closure", [handle(emitExcGetter("previous")), curScopeV])])
+            callExt(b, "js_set", [clsV, emitStr(b, "__mlc"), emitStr(b, ",__construct,getmessage,getcode,getprevious,")])
+            callExt(b, "js_set", [clsV, emitStr(b, "__pvis"), emitStr(b, phVisList(name, excProps))])
             // Both roots implement Throwable, listed as the bare name js_phisa matches.
             var ifV = callExt(b, "js_pharr", [])
             callExt(b, "js_phpush", [ifV, emitStr(b, "Throwable")])
             callExt(b, "js_set", [clsV, emitStr(b, "__ifaces"), ifV])
-            // The root of the chain also carries the empty __initprops every `new`
-            // calls, so a user class extending Exception reaches one.
-            b = emitInitProps(b, clsV, name, "", [])
+            // The root of the chain carries the __initprops every `new` calls, so a
+            // user class extending Exception reaches it.
+            b = emitInitProps(b, clsV, name, "", excProps)
         }
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), clsV])
         declClassAlias(b, name, clsV)

@@ -1883,7 +1883,7 @@ function s90() {
 // discards e and throws only the Error "Cannot resume an already running
 // generator" at the caller; the body is not resumed (zend_generator_throw_exception
 // fails when ZEND_GENERATOR_CURRENTLY_RUNNING is set, php-src
-// Zend/tests/gh19326.phpt). foreach by reference over an (array) cast writes
+// Zend/tests/gh19326.phpt), so the Error has no previous. foreach by reference over an (array) cast writes
 // the copy, not the object's property.
 function s91self() {
     global $s91g;
@@ -1891,11 +1891,11 @@ function s91self() {
     $log = "";
     try { $s91g->throw(new Exception("x")); $log = "none"; }
     catch (Exception $e) { $log = "Exception:" . $e->getMessage(); }
-    catch (Error $e) { $log = get_class($e) . ":" . $e->getMessage(); }
+    catch (Error $e) { $log = get_class($e) . ":" . $e->getMessage() . ($e->getPrevious() === null ? "" : "+prev"); }
     yield $log;
     yield 3;
 }
-function s91inner() { global $s91o; yield 10; try { $s91o->throw(new LogicException("y")); } catch (Error $e) { yield "in:" . $e->getMessage(); } yield 12; }
+function s91inner() { global $s91o; yield 10; try { $s91o->throw(new LogicException("y")); } catch (Error $e) { yield "in:" . $e->getMessage() . ($e->getPrevious() === null ? "" : "+prev"); } yield 12; }
 function s91outer() { yield from s91inner(); yield 20; }
 function s91esc() { global $s91u; yield 1; $s91u->throw(new Exception("z")); yield 2; }
 function s91() {
@@ -1911,13 +1911,89 @@ function s91() {
     $s91u = s91esc();
     $s91u->current();
     $m = "";
-    try { $s91u->next(); } catch (Throwable $e) { $m = get_class($e) . ":" . $e->getMessage(); }
+    try { $s91u->next(); } catch (Throwable $e) { $m = get_class($e) . ":" . $e->getMessage() . ($e->getPrevious() === null ? "" : "+prev"); }
     check("grun5", $m === "Error:Cannot resume an already running generator" && !$s91u->valid());
     $t = new stdClass;
     $t->arr = [1];
     foreach ((array)$t as &$v) { $v[] = 5; }
     unset($v);
     check("oac3", count($t->arr) === 1);
+}
+
+// ===== SECTION 92: the exception data model =====
+// Exception and Error declare message:protected, string:private, code:protected,
+// file:protected, line:protected, trace:private, previous:private in that order
+// (Zend/zend_exceptions.stub.php); (array) mangles the non-public names and a
+// foreach from outside sees none of them. __construct's third argument is
+// getPrevious(); a subclass constructor that never calls the parent's still has
+// the defaults. An exception escaping a finally body while another is pending
+// gets that one appended to its previous chain, unless the two chains already
+// meet (zend_dispatch_try_catch_finally_helper, zend_exception_set_previous).
+function s92keys($o) {
+    $r = [];
+    foreach (array_keys((array)$o) as $k) { $r[] = str_replace("\0", "|", $k); }
+    return implode(",", $r);
+}
+class S92Quiet extends Exception { function __construct() {} }
+class S92Pub extends Exception { public $code; function __construct($c) { $this->code = $c; } }
+class S92Dflt extends RuntimeException { protected $message = "dflt"; public $extra = 1; }
+function s92fin() { try { throw new Exception("a"); } finally { throw new Exception("b"); } }
+function s92catch() {
+    try { throw new Exception("a"); }
+    catch (Exception $x) { throw new Exception("b"); }
+    finally { throw new Exception("c", 0, new Exception("p")); }
+}
+function s92inner() { try { throw new Exception("a"); } finally { try { throw new Exception("b"); } catch (Exception $z) {} } }
+function s92none() { try { } finally { throw new Exception("n"); } }
+function s92nest() { try { try { throw new Exception("i1"); } finally { throw new Exception("i2"); } } finally { throw new Exception("o"); } }
+function s92ret() { try { throw new Exception("r"); } finally { return "ret"; } }
+function s92chain($e) {
+    $s = "";
+    for ($p = $e; $p !== null; $p = $p->getPrevious()) { $s .= $p->getMessage() . ","; }
+    return $s;
+}
+function s92() {
+    $a = new Exception("a");
+    $b = new Exception("b", 7, $a);
+    check("exm1", $b->getPrevious() === $a && $a->getPrevious() === null && $b->getCode() === 7
+        && method_exists($a, "getPrevious"));
+    check("exm2", s92keys($b) === "|*|message,|Exception|string,|*|code,|*|file,|*|line,|Exception|trace,|Exception|previous");
+    check("exm3", s92keys(new DivisionByZeroError("z")) === "|*|message,|Error|string,|*|code,|*|file,|*|line,|Error|trace,|Error|previous");
+    $n = 0;
+    foreach ($b as $k => $v) { $n++; }
+    check("exm4", $n === 0);
+    $q = new S92Quiet();
+    check("exm5", $q->getMessage() === "" && $q->getCode() === 0 && $q->getPrevious() === null);
+    check("exm6", s92keys(new S92Pub(4)) === "|*|message,|Exception|string,code,|*|file,|*|line,|Exception|trace,|Exception|previous");
+    $e = null;
+    try { s92fin(); } catch (Exception $x) { $e = $x; }
+    check("exm7", s92chain($e) === "b,a,");
+    try { s92catch(); } catch (Exception $x) { $e = $x; }
+    check("exm8", s92chain($e) === "c,p,b,");
+    try { s92inner(); } catch (Exception $x) { $e = $x; }
+    check("exm9", s92chain($e) === "a,");
+    try { s92none(); } catch (Exception $x) { $e = $x; }
+    check("exm10", s92chain($e) === "n,");
+    try { s92nest(); } catch (Exception $x) { $e = $x; }
+    check("exm11", s92chain($e) === "o,i2,i1," && s92ret() === "ret");
+    $ca = new Exception("ca");
+    $cb = new Exception("cb", 0, $ca);
+    try { try { throw $cb; } finally { throw $ca; } } catch (Exception $x) { $e = $x; }
+    check("exm12", s92chain($e) === "ca,");
+    try { try { throw $ca; } finally { throw $cb; } } catch (Exception $x) { $e = $x; }
+    check("exm13", s92chain($e) === "cb,ca,");
+    try { try { throw $ca; } finally { throw $ca; } } catch (Exception $x) { $e = $x; }
+    check("exm14", s92chain($e) === "ca,");
+    $z = 0;
+    try { try { throw new Exception("q"); } finally { $z = 1 % $z; } } catch (Error $x) { $e = $x; }
+    check("exm15", get_class($e) === "DivisionByZeroError" && s92chain($e) === "Modulo by zero,q,");
+    $err = new Error("x", 0, $a);
+    check("exm16", $err->getPrevious() === $a);
+    $d = new S92Dflt();
+    $m = "";
+    try { $m = $d->message; } catch (Error $x) { $m = $x->getMessage(); }
+    check("exm17", $d->getMessage() === "dflt" && $m === "Cannot access protected property S92Dflt::\$message"
+        && s92keys($d) === "|*|message,|Exception|string,|*|code,|*|file,|*|line,|Exception|trace,|Exception|previous,extra");
 }
 
 // ===== END SECTIONS =====
@@ -1956,6 +2032,7 @@ function main() {
     s89(); // SECTION-CALL 89
     s90(); // SECTION-CALL 90
     s91(); // SECTION-CALL 91
+    s92(); // SECTION-CALL 92
     echo "full: " . $checks . " checks, " . $failures . " failures\n";
     return $failures;
 }
