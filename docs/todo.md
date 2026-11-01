@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1080** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1081** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -136,12 +136,12 @@ real coroutines out of the subset - decide first). Go also runs the most recentl
 ### T-1053 php: copy-on-write array identity (refcount release, print_r recursion depth) · P4 · PHP · OPEN [V spec-only] · NEEDS DESIGN
 Remainder of T-1000/T-1025/T-1036/T-1051. Engines copy arrays eagerly on assignment and have no point where an array dies, so: reference holders of overwritten / frame-local / temporary arrays and of unfinished generators are never released (counts stay correct-but-high, so `&` may survive a copy PHP would unwrap); property-hook set parameters aren't covered by the compiler's param-copy release; print_r recursion depth is wrong (`$y=[1]; $y[]=&$y; print_r($y)` → PHP *RECURSION* at [1], ours one level deeper; `$a=["k"=>[2]]; $a["k"][]=&$a;` two deeper) because the interpreter's by-value param copy loses array identity; `$w=$z; print_r($w)` differs too. Options: real per-array refcount + COW in all three engines (touches every in-place array write), or an engine-level print_r like var_dump plus targeted release points. Needs a design decision before work.
 
-### T-1075 php: exception trace frames; file/line of engine-raised errors; __destruct · P3 · PHP · IN PROGRESS (PHP worker, round 43) [V]
-Spec-only (php-src). All engines:
-- trace frames: an exception thrown inside a function should render `#0 FILE(23): thrower()\n#1 {main}` in getTraceAsString/__toString/uncaught output, and getTrace() should list the frames; ours always `#0 {main}` / []. Needs a shadow call stack (function, call line, args) in all three engines - hot-path cost; measure with tests/bench.sh and keep it within noise, or propose a cheaper scheme (e.g. only for functions that can throw) before building it.
-- engine-raised errors (DivisionByZeroError from %, "Undefined constant", TypeErrors) have file "" / line 0 -> "in :0", "thrown in Unknown on line 0"; PHP gives the current opline's line. Needs one "current position" register all engines keep identically.
-- __destruct is not implemented; once it is, zend_throw_exception_internal chaining (exception thrown while another is pending outside finally) becomes reachable.
-Trap: loading library code with `static` vars arms usesRefs for the whole program (+59% bench) - keep unconditionally-loaded stdlib code free of statics/references.
+### T-1080 php: trace frames for native builtins / generators; string callbacks in compiled traces · P3 · PHP · OPEN [V]
+Spec-only (php-src). All engines unless noted:
+- native builtins and generator bodies get no trace frame: PHP shows `#0 F(30): intdiv(1, 0)` and a `gen()` frame; ours `#0 {main}` (line is already right).
+- compiled only: a string callback bound by a library function at the call site shows as `Object(Closure)` in the trace (`array_map(Object(Closure), Array)`); PHP and our interpreter show `'cb'`. libChecks replaces the argument in place.
+- pre-existing: cloBind drops the closure's `ut` flag when it rebuilds a closure - check whether it is observable and fix or document.
+Keep the per-call cost within bench noise (paired runs against HEAD).
 
 # LUA — Lua  (oracle: lua 5.5 binary, suite is 5.4)
 
@@ -1139,6 +1139,7 @@ T-1074 kotlin: KClass javaPrimitiveType/hashCode; destructured-lambda and smart-
 T-1076 csharp: compound assignment evaluates the right side before reading the left — DONE (CS r14, 4 commits to 318d9fc6): compound assignment reads the target before the RHS for every target kind; also fixed: simple assignment evaluates receiver+indices before the RHS, ??= evaluates its target once, prefix ++/-- on member chains parses, bare-named static-field path roots compiled; 3 legs agree with ECMA-334 12.21
 T-1070 ruby: Enumerator#each value, for-over-Lazy value, user #inspect ivars, Lazy respond_to?/class — DONE (RB r46, 2ca7d081): Enumerator#each answers the underlying method's value, for over map/select/with_index Enumerators and Lazy answers MRI's value, user #inspect/#to_s carry address (2*object_id, 16 hex) + ivars with cycle cut, Lazy class/respond_to?, blockless with_object; 4 legs = ruby 2.6
 T-1072 bash: assoc kind per scope / computed `declare -A`; small declaration leftovers — PARTIAL→split (SH r30, 3 commits): assoc kind per binding at run time (interp var field, C runtime array mark; computed declare -A compiled; cannot-convert refusal), export/readonly +X are non-identifier operands, quoted indexed subscripts in assignments are arithmetic errors, computed literals accept glob chars; 4 legs = bash 5.3. Reads with quoted subscripts + small items filed; LC_ALL=C policy item carried over
+T-1075 php: exception trace frames; file/line of engine-raised errors; __destruct — PARTIAL→split (PHP r43, 72cd7678): getTrace/getTraceAsString list calls in progress (functions, methods, closures, [internal function]; args per php-src escaping/15-char cut/float .0), engine-raised errors carry file/line/trace (php_here); closure/anon-class names use the absolute path; cost +0.68% paired bench / ~20 insns per call (within noise); 3 legs agree with php-src. __destruct DECLINED: refcount-timed destructors cannot be modelled faithfully without refcounting (docs 7.8); remaining trace gaps filed
 
 # Settled — do not re-open
 
