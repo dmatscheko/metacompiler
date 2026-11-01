@@ -69,13 +69,13 @@ Remainder of T-1028; each needs a table-size decision before work starts. CJK fa
 
 # RB — Ruby
 
-### T-1086 ruby: deferred Enumerator size after forcing; with_index value on to_enum; top-level to_enum · P3 · RB · OPEN [V]
+### T-1086 ruby: deferred Enumerator size after forcing; with_index value on to_enum; top-level to_enum · P3 · RB · IN PROGRESS (RB worker, round 50) [V]
 Oracle /usr/bin/ruby 2.6; interpreter seen, Go twin / layer 2 share the logic:
 - a deferred Enumerator over a user #each (`C.new.each_slice(1)`) answers `.size` as its element count once forced (`to_a`); MRI nil.
 - `with_index` / `with_object` with a block on a forced to_enum Enumerator answer the receiver; MRI the underlying method's value (e.g. :done).
 - `to_enum` at the top level (self is main) is not handled.
 
-### T-1091 ruby: compiled block splat param `|m, *a|` does not auto-splat a single array arg · P3 · RB · OPEN [V]
+### T-1091 ruby: compiled block splat param `|m, *a|` does not auto-splat a single array arg · P3 · RB · IN PROGRESS (RB worker, round 50) [V]
 
 The interpreter matches ruby 2.6. llvm.Run and native do not:
 - `[[1,2,3]].each { |m, *a| p [m, a] }` should print `[1, [2, 3]]`; the compiled legs print `[1, []]`.
@@ -83,7 +83,7 @@ The interpreter matches ruby 2.6. llvm.Run and native do not:
 
 Ruby rule: a proc/block with more than one declared parameter, or with a rest parameter after a leading one, auto-splats a lone Array argument (vm_callee_setup_block_arg / arg_setup_block). Lambdas never auto-splat. Also cover `|m, (x, y), *r|` and `|*a|` (no splat: a == [[1,2,3]]).
 
-### T-1092 ruby: `for x in obj` over any object with #each (user Enumerable) · P3 · RB · OPEN [V]
+### T-1092 ruby: `for x in obj` over any object with #each (user Enumerable) · P3 · RB · IN PROGRESS (RB worker, round 50) [V]
 
 `for` accepts only Array, Hash, Range and Enumerator. Ruby's `for x in e` is `e.each { |x| ... }` without a new scope, so it works on any object that responds to #each. On every leg, `class D; def each; yield 1; yield 2; end; end; for x in D.new; p x; end` fails:
 - interpreter: "for-in needs an array or a hash";
