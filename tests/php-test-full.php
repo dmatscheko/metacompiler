@@ -4403,6 +4403,52 @@ function s79() {
         && preg_match('/aaa|(?R)/', 'b') === false && preg_match_all('/(*ACCEPT)(?>(*PRUNE)x)/', 'abab') === 5);
 }
 
+// ===== SECTION 80: word operators, promoted hooks, nullsafe dynamic names, recursive var_dump =====
+// 'and' binds tighter than 'xor', which binds tighter than 'or' (all three looser
+// than '='), each answering a bool by PHP truthiness: "0", 0.0 and [] are false.
+// php-src's constexpr/constant_expressions EXPECT gives T_15 = 1 xor 1 as
+// bool(false) and T_16 = 1 xor 0 as bool(true).
+const S80X1 = 1 xor 1;
+const S80X2 = 1 xor 0;
+const S80X3 = 1 xor 1 or 1;
+const S80X4 = 1 xor 1 and 0;
+trait S80TA { function hi() { return "A"; } }
+trait S80TB { function hi() { return "B"; } }
+// A trait adaptation may name the trait fully qualified (grammar/semi_reserved_006).
+class S80U { use S80TA, S80TB { \S80TA::hi insteadof S80TB; \S80TB::hi as bhi; } }
+// A promoted constructor parameter may carry hooks; promotion writes through
+// the set hook (property_hooks/property_promotion: "set(42)" then "get").
+class S80H {
+    public function __construct(
+        public int $x = 3 { set => $value * 2; get => $this->x + 1; },
+        public $log = "",
+    ) {}
+}
+function s80() {
+    $vs = ["0", 0.0, [], "", "a", 1];
+    $got = "";
+    foreach ($vs as $v) {
+        $got .= ($v || false ? "1" : "0") . ($v && true ? "1" : "0") . (($v or false) ? "1" : "0") . (($v and true) ? "1" : "0");
+    }
+    check("wo1", $got === "0000000000000000" . "11111111");
+    check("wo2", S80X1 === false && S80X2 === true && S80X3 === true && S80X4 === true);
+    $a = true xor true;
+    check("wo3", $a === true && (true xor true) === false && (0 xor "a") === true);
+    $n = 0;
+    $r = (false xor ($n = 5));
+    check("wo4", $r === true && $n === 5);
+    $u = new S80U();
+    check("tq1", $u->hi() === "A" && $u->bhi() === "B");
+    $h = new S80H(5);
+    check("ph1", $h->x === 11);
+    $h->x = 1;
+    check("ph2", $h->x === 3 && (new S80H())->x === 7);
+    $o = new stdClass;
+    $o->foobar = 7;
+    $s = "foo";
+    $z = null;
+    check("ns1", $o?->{$s . "bar"} === 7 && $z?->{$s . "bar"} === null && $z?->{$s}() === null);
+}
 // ===== END SECTIONS =====
 
 function main() {
@@ -4493,6 +4539,7 @@ function main() {
     s77(); // SECTION-CALL 77
     s78(); // SECTION-CALL 78
     s79(); // SECTION-CALL 79
+    s80(); // SECTION-CALL 80
     echo "full: " . $checks . " checks, " . $failures . " failures\n";
     return $failures;
 }

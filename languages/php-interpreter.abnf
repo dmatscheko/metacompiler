@@ -202,9 +202,11 @@ DefAmp      <~~ defAmp = true ~~> = "&" ;
 ParamList   = "(" [ Param { "," Param } [ "," ] ] ")" ;
 // A parameter accepts real-world surface: promotion modifiers (public/readonly...),
 // a type, by-reference '&', variadic '...', and a default value; makeParam folds
-// them into one record. A default spelled null makes the type nullable.
+// them into one record. A default spelled null makes the type nullable. A
+// promoted parameter may carry property hooks (PHP 8.4), as a property
+// declaration does.
 Param       <~~ push({param: makeParam(takeAll())}) ~~>
-            = [ AttrGrp ] { PropMod } [ ParamType ] [ PByRef ] [ PVariadic ] DollarName [ ParamDefault ] ;
+            = [ AttrGrp ] { PropMod } [ ParamType ] [ PByRef ] [ PVariadic ] DollarName <~~ cloNoteProp(up.in) ~~> [ ParamDefault ] [ PropHooks ] ;
 ParamType   <~~ push({ptype: propTypeText(up.in)}) ~~> = TypeHint ;
 PByRef      <~~ push({pbyref: true}) ~~> = "&" ;
 PVariadic   <~~ push({pvariadic: true}) ~~> = "..." ;
@@ -261,7 +263,8 @@ TraitAs     <~~ push({tas: takeAll()}) ~~>
 // The qualified form has to come first: 'T::m' starts exactly like the bare 'm'.
 TraitRef    = TraitQual | TraitMeth ;
 TraitQual   = TraitOwner "::" TraitMeth ;
-TraitOwner  <~~ push({towner: stripWs(up.in)}) ~~> = Name ;
+// The trait may be named qualified, '\T::m' or 'namespace\T::m'.
+TraitOwner  <~~ push({towner: lastSeg(stripWs(up.in))}) ~~> = ExtName ;
 TraitMeth   <~~ push({tmeth: stripWs(up.in)}) ~~> = MemberName ;
 TraitVis    <~~ push({tvis: stripWs(up.in)}) ~~>
             = ( "public" | "private" | "protected" ) KwEnd ;
@@ -544,12 +547,14 @@ JumpLevel   <~~ push({lvl: phpSmallInt(up.in)}) ~~>
             = "0"..."9" :whitespace() { "0"..."9" } :whitespace(Whitespace) ;
 
 // Every expression pushes exactly one thunk: function() -> value.
-// The word operators 'or' and 'and' are the LOOSEST of all, below assignment,
-// print and yield: '$a = f() or g()' assigns first, and 'yield "a" or die' yields
-// "a" (Zend/tests/generators/yield_precedence). '||' and '&&' keep their own levels
-// (OrExpr, AndExpr). Twin of Expression in php-to-llvm-ir.abnf.
+// The word operators 'or', 'xor' and 'and' (loosest first) are the LOOSEST of
+// all, below assignment, print and yield: '$a = f() or g()' assigns first, and
+// 'yield "a" or die' yields "a" (Zend/tests/generators/yield_precedence). '||' and
+// '&&' keep their own levels (OrExpr, AndExpr). Twin of Expression in php-to-llvm-ir.abnf.
 Expression  <~~ push(makeOrAnd(takeAll(), true)) ~~>
-            = WordAnd { "or" KwEnd WordAnd } ;
+            = WordXor { "or" KwEnd WordXor } ;
+WordXor     <~~ push(makeXor(takeAll())) ~~>
+            = WordAnd { "xor" KwEnd WordAnd } ;
 WordAnd     <~~ push(makeOrAnd(takeAll(), false)) ~~>
             = ExprCore { "and" KwEnd ExprCore } ;
 ExprCore    = SuppressExpr | RefAssign | RefAssignVal | DestructAssign | Assignment | Ternary ;
@@ -657,7 +662,7 @@ ChainExpr   <~~ push(foldCallMember(takeAll(), up.start)) ~~>
             = Primary ChainSeg { ChainSeg } | ChainCall0 { ChainSeg } ;
 ChainCall0  = Call | StaticExpr | "(" Expression ")" ;
 ChainSeg    = { ChainPlain } ( MethodSfx | DynMethodSfx | CallSfx | StaticSfx ) ;
-ChainPlain  = PlFieldSfx !"(" | DynFieldSfx !"(" | IndexSfx ;
+ChainPlain  = PlFieldSfx !"(" | PlDynFldSfx !"(" | IndexSfx ;
 // Is the text ahead a call-headed TARGET? Without this, 'Assignment = Target ...'
 // parses every ordinary call statement twice - once speculatively as a target, once
 // for real - which is 2^depth on nested calls (the documented Dart trap). The guard
@@ -996,8 +1001,11 @@ PlMethodSfx <~~ push({kind: "mcall", ns: false, name: popName(), args: takeAll()
 NsMethodSfx <~~ push({kind: "mcall", ns: true, name: popName(), args: takeAll()}) ~~>
             = "?->" MemberName <~~ push({mname: up.in}) ~~> "(" [ ArgList ] ")" ;
 // $o->$meth(...) and $o->{"add"}(...): the method name is computed at run time.
-DynMethodSfx <~~ push({kind: "dmcall", name: popDyn(), args: takeAll()}) ~~>
+DynMethodSfx = NsDynMethSfx | PlDynMethSfx ;
+PlDynMethSfx <~~ push({kind: "dmcall", ns: false, name: popDyn(), args: takeAll()}) ~~>
             = "->" DynName "(" [ ArgList ] ")" ;
+NsDynMethSfx <~~ push({kind: "dmcall", ns: true, name: popDyn(), args: takeAll()}) ~~>
+            = "?->" DynName "(" [ ArgList ] ")" ;
 DynName     <~~ push({dname: pop()}) ~~>
             = VarRef | "{" Expression "}" ;
 FieldSfx    = NsFieldSfx | PlFieldSfx ;
@@ -1006,8 +1014,11 @@ NsFieldSfx  = "?->" MemberName <~~ push({kind: "field", ns: true, name: up.in}) 
 // '$o->$n' and '$o->{expr}': a property READ whose name is computed. The braced form
 // has to be here as well as in DynMethodSfx, or '$o->{1234}' parses on the write side
 // and not on the read side (DynMethodSfx only matches when a '(' follows).
-DynFieldSfx <~~ push({kind: "dfield", name: pop()}) ~~>
+DynFieldSfx = NsDynFldSfx | PlDynFldSfx ;
+PlDynFldSfx <~~ push({kind: "dfield", ns: false, name: pop()}) ~~>
             = "->" ( VarRef | "{" Expression "}" ) ;
+NsDynFldSfx <~~ push({kind: "dfield", ns: true, name: pop()}) ~~>
+            = "?->" ( VarRef | "{" Expression "}" ) ;
 IndexSfx    <~~ push({kind: "index", idx: pop()}) ~~>
             = "[" Expression "]" ;
 CallSfx     <~~ push(makeCallSfx(takeAll())) ~~>
@@ -6560,6 +6571,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         var vis = ""
         var typ = ""
         var dnull = false
+        var hooks = []
         for (var i = 0; i < items.length; i++) {
             var it = items[i]
             if (typeof it == "string") { nm = it }
@@ -6567,6 +6579,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             else if (it.ptype != undefined) { typ = it.ptype }
             else if (it.pbyref != undefined) { byref = true }
             else if (it.pvariadic != undefined) { variadic = true }
+            else if (it.hooks != undefined) { hooks = it.hooks }
             else if (it.pdefault != undefined) {
                 def = it.pdefault
                 dnull = it.pnull
@@ -6583,11 +6596,12 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         // A library parameter stands for an internal one, whose types are not checked here.
         if (phpLibDepth > 0) { typ = "" }
         // A promoted parameter declares a property of its type as written: a null
-        // default does not widen it (zend_compile_params).
-        var ptyp = typ
-        if (promote && typ != "") { typedNames[nm] = true }
+        // default does not widen it (zend_compile_params). A hooked one keeps no
+        // type on its slot, as makeProps does for a declared property.
+        var ptyp = hooks.length > 0 ? "" : typ
+        if (promote && ptyp != "") { typedNames[nm] = true }
         if (dnull) { typ = phpTypeOrNull(typ) }
-        return {name: nm, byref: byref, variadic: variadic, def: def, promote: promote, vis: vis, typ: typ, ptyp: ptyp, pnull: dnull, rel: phpTypeRel(typ)}
+        return {name: nm, byref: byref, variadic: variadic, def: def, promote: promote, vis: vis, typ: typ, ptyp: ptyp, pnull: dnull, rel: phpTypeRel(typ), hooks: hooks}
     }
     // The name is not always items[0]: a method may carry captured modifiers in front
     // of it, so the string is looked for rather than indexed. 'static' is remembered
@@ -6749,11 +6763,14 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         if (fn.arity !== undefined) { phpLibArgCheck(fn, argset, defCls) }
         bindParams(fn.params, argset, fn.name, defCls)
         // Constructor property promotion: the bound parameter is ALSO written to the
-        // object, after binding, so a default value promotes exactly like a passed one.
+        // object, after binding, so a default value promotes exactly like a passed one;
+        // a hooked one through its set hook.
         if (self !== undefined && self !== null && isObj(self)) {
             for (var pi = 0; pi < fn.params.length; pi++) {
                 var pp = fn.params[pi]
-                if (pp.promote === true) { dictSet(self.p, pp.name.substring(1), getVar(pp.name)) }
+                if (pp.promote !== true) { continue }
+                if (pp.hooks.length > 0) { phpSetProp(self, pp.name.substring(1), getVar(pp.name)) }
+                else { dictSet(self.p, pp.name.substring(1), getVar(pp.name)) }
             }
         }
         var r = anytype
@@ -6903,7 +6920,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                     for (var pq = 0; pq < cps.length; pq++) {
                         if (cps[pq].promote === true) {
                             promoted.push(cps[pq])
-                            p.props.push({name: cps[pq].name.substring(1), init: null, isStatic: false, hooks: [], vis: cps[pq].vis, typ: cps[pq].ptyp})
+                            p.props.push({name: cps[pq].name.substring(1), init: null, isStatic: false, hooks: cps[pq].hooks, vis: cps[pq].vis, typ: cps[pq].ptyp})
                         }
                     }
                 }
@@ -8452,6 +8469,27 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // PHP compiles +$x as $x * 1: "5" becomes int(5) and "abc" is a TypeError.
     function makePos(t) { return function() { return phpArith("*", t(), 1) } }
     makeNot = function(t) { return function() { return !phptest(t()) } }
+    // '||' / 'or' and '&&' / 'and' short-circuit on PHP truthiness and answer a
+    // bool. Twin of makeOrAnd in php-to-llvm-ir.abnf.
+    makeOrAnd = function(items, isOr) {
+        if (items.length == 1) { return items[0] }
+        return function() {
+            var v = phptest(items[0]())
+            for (var i = 1; i < items.length && v != isOr; i++) { v = phptest(items[i]()) }
+            return v
+        }
+    }
+    // 'a xor b' evaluates both operands (it cannot short-circuit) and is true when
+    // exactly one is truthy; left associative. Twin of makeXor in
+    // php-to-llvm-ir.abnf.
+    function makeXor(items) {
+        if (items.length == 1) { return items[0] }
+        return function() {
+            var v = phptest(items[0]())
+            for (var i = 1; i < items.length; i++) { v = v != phptest(items[i]()) }
+            return v
+        }
+    }
     // ~e, its operand checked (__mec_opchk) with display_errors=1. Twin of
     // makeBitNot in php-to-llvm-ir.abnf.
     function makeBitNot(t, pos) {

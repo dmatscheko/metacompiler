@@ -198,7 +198,9 @@ ParamList   = "(" [ Param { "," Param } [ "," ] ] ")" ;
 // ('__construct(public int $x)' declares and assigns $this->x), so it is captured
 // rather than skipped; makeFun turns each promoted parameter into one prologue
 // assignment. On any other function a modifier is meaningless and simply ignored.
-Param       = [ AttrGrp ] { ParamMod } [ ParamType ] [ ParamRef ] [ ParamRest ] DollarName <~~ push({param: pop()}) ~~> [ ParamDefault ] ;
+// A promoted parameter may carry property hooks (PHP 8.4), as a property
+// declaration does.
+Param       = [ AttrGrp ] { ParamMod } [ ParamType ] [ ParamRef ] [ ParamRest ] DollarName <~~ cloNoteProp(up.in); push({param: pop()}) ~~> [ ParamDefault ] [ PropHooks ] ;
 ParamType   <~~ push({ptype: propTypeText(up.in)}) ~~> = TypeHint ;
 // 'function f(&$n)': the argument is passed by REFERENCE. The callee simply keeps the
 // cell in its parameter slot (every read dereferences, every write writes through);
@@ -275,7 +277,8 @@ TraitInsteadof <~~ push(makeInsteadof(takeAll())) ~~>
             = TraitRef KwInsteadof ImplNames ";" ;
 TraitAs     <~~ push(makeTraitAs(takeAll())) ~~>
             = TraitRef KwAs [ TraitVis ] [ TraitAlias ] ";" ;
-TraitRef    <~~ push({tref: stripWs(up.in)}) ~~> = Id [ "::" Id ] ;
+// The trait may be named qualified, '\T::m' or 'namespace\T::m'.
+TraitRef    <~~ push({tref: stripWs(up.in)}) ~~> = ExtName [ "::" Id ] ;
 TraitAlias  <~~ push({alias: up.in}) ~~> = Id ;
 TraitVis    <~~ push({tvis: up.in}) ~~> = ( "public" | "private" | "protected" ) KwEnd ;
 KwInsteadof = CiI :whitespace() CiN CiS CiT CiE CiA CiD CiO CiF :whitespace(Whitespace) KwEnd ;
@@ -573,12 +576,14 @@ JumpLevel   <~~ push({lvl: phpSmallInt(up.in)}) ~~>
 // operand pushed. It is needed at TWO levels because PHP reads '@$ar[0] = "v"' as
 // '@($ar[0] = "v")': the Expression-level form covers the assignment, the UnaryExpr
 // one covers '@foo()' inside a larger expression.
-// The word operators 'or' and 'and' are the LOOSEST of all, below assignment,
-// print and yield: '$a = f() or g()' assigns first, and 'yield "a" or die' yields
-// "a" (Zend/tests/generators/yield_precedence). '||' and '&&' keep their own levels
-// (OrExpr, AndExpr). Twin of Expression in php-interpreter.abnf.
+// The word operators 'or', 'xor' and 'and' (loosest first) are the LOOSEST of
+// all, below assignment, print and yield: '$a = f() or g()' assigns first, and
+// 'yield "a" or die' yields "a" (Zend/tests/generators/yield_precedence). '||' and
+// '&&' keep their own levels (OrExpr, AndExpr). Twin of Expression in php-interpreter.abnf.
 Expression  <~~ push(makeOrAnd(takeAll(), true)) ~~>
-            = WordAnd { "or" KwEnd WordAnd } ;
+            = WordXor { "or" KwEnd WordXor } ;
+WordXor     <~~ push(makeXor(takeAll())) ~~>
+            = WordAnd { "xor" KwEnd WordAnd } ;
 WordAnd     <~~ push(makeOrAnd(takeAll(), false)) ~~>
             = ExprCore { "and" KwEnd ExprCore } ;
 ExprCore    = SuppressExpr | RefAssign | RefAssignVal | DestructAssign | Assignment | Ternary ;
@@ -3561,6 +3566,23 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             }
             var boolV = callExt(b, "js_phbool", [v])
             return {b: b, v: boolV}
+        }
+    }
+
+    // ----- xor : both operands evaluated, true when exactly one is truthy -----
+    // Twin of makeXor in php-interpreter.abnf.
+    function makeXor(items) {
+        if (items.length == 1) { return items[0] }
+        return function(b) {
+            var r = items[0](b)
+            b = r.b
+            var t = truthy(b, r.v)
+            for (var i = 1; i < items.length; i++) {
+                var r2 = items[i](b)
+                b = r2.b
+                t = b.NewXor(t, truthy(b, r2.v))
+            }
+            return {b: b, v: b.NewSelect(t, hTrue, hFalse)}
         }
     }
 
@@ -7871,12 +7893,22 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             else if (items[i].pdef != undefined && items[i].pnull && pvis.length > 0 && pvis[pvis.length - 1].at == seen - 1) {
                 pvis[pvis.length - 1].pnull = true
             }
+            // A hooked promoted property keeps no type on its slot, as makeProps
+            // does for a declared one, and its promotion writes through the hook.
+            else if (items[i].hooks != undefined && pvis.length > 0 && pvis[pvis.length - 1].at == seen - 1) {
+                var hpv = pvis[pvis.length - 1]
+                hpv.hooks = items[i].hooks
+                hpv.typ = ""
+                for (var hk = 0; hk < hpv.hooks.length; hk++) {
+                    if (hpv.hooks[hk].hempty != true) { noteHooked(hpv.name) }
+                }
+            }
             else if (items[i].param != undefined) {
                 // A promoted parameter declares a property of its type as written:
                 // a null default does not widen it (zend_compile_params).
                 if (pendingMod) {
                     promoted.push(items[i].param)
-                    pvis.push({name: items[i].param.substring(1), vis: pendingVis, typ: phpLibDepth > 0 ? "" : pendingType, at: seen, pnull: false})
+                    pvis.push({name: items[i].param.substring(1), vis: pendingVis, typ: phpLibDepth > 0 ? "" : pendingType, at: seen, pnull: false, hooks: []})
                 }
                 pendingMod = false
                 pendingVis = ""
@@ -7971,8 +8003,9 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         var pn = nm.substring(1)
         return function(b) {
             var thisV = phThis(b)
-            callExt(b, "js_set", [thisV, propKey(b, pn),
-                                  callExt(b, "js_scope_get", [curScopeV, emitStr(b, nm)])])
+            var valV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, nm)])
+            if (isHooked(pn)) { return emitPropSet(b, thisV, propKey(b, pn), valV, pn, true) }
+            callExt(b, "js_set", [thisV, propKey(b, pn), valV])
             return b
         }
     }
@@ -8390,7 +8423,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     function traitRefParts(t) {
         for (var i = 0; i + 1 < t.length; i++) {
             if (t.charAt(i) == ":" && t.charAt(i + 1) == ":") {
-                return {trait: t.substring(0, i), member: t.substring(i + 2)}
+                return {trait: lastSeg(t.substring(0, i)), member: t.substring(i + 2)}
             }
         }
         return {trait: "", member: t}
@@ -8677,7 +8710,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                     // constructor stands in the body: PHP's slot order is body order.
                     var pvs = items[i].method.pvis
                     for (var pq = 0; pq < pvs.length; pq++) {
-                        props.push({name: pvs[pq].name, init: null, isStatic: false, hooks: [], vis: pvs[pq].vis, typ: pvs[pq].typ})
+                        props.push({name: pvs[pq].name, init: null, isStatic: false, hooks: pvs[pq].hooks, vis: pvs[pq].vis, typ: pvs[pq].typ})
                     }
                 }
             }
