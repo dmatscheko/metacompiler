@@ -3849,13 +3849,16 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // and no readonly.
         var fk
         var attrOpt = false
-        var dynOk = (kw == "export") ? "-+xgn" : "-+xga"
+        var dynOk = (kw == "export") ? "-+xgna" : "-+xga"
         for (fk = 0; fk < flags.length; fk++) { if (dynOk.indexOf(flags.charAt(fk)) < 0) { attrOpt = true } }
         for (fk = 0; fk < plus.length; fk++) { if ("-+xga".indexOf(plus.charAt(fk)) < 0) { attrOpt = true } }
         if (anyDyn && (kw == "readonly" || attrOpt)) {
             fail("a computed operand of `" + kw + " " + flags + plus + "` is not supported by this compiler")
         }
         var isArray = (flags.indexOf("a") >= 0) || (flags.indexOf("A") >= 0)
+        // -a / -A make a bare NAME an array; export's and readonly's do not. Twin of bareArr
+        // in makeDecl in bash-interpreter.abnf.
+        var bareArr = isArray && kw != "export" && kw != "readonly"
         // Under -a or -A, NAME=VALUE is NAME[0]=VALUE: the other elements stay, and += appends
         // to element 0 (bash 5.3). Twin of the same rewrite in makeDecl in
         // bash-interpreter.abnf.
@@ -3899,8 +3902,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // subscript is normalised at two sites that are themselves walk-time (${v@a} and the
         // NAME[SUB] split), and a name is never both kinds in one program.
         for (k = 0; k < names.length; k++) {
-            if (assoc && !query && !hasOwn(assocArrays, "$" + names[k])) { assocList.push(names[k]) }
-            if (assoc && !query) { assocArrays["$" + names[k]] = true }
+            var asK = assoc && !query && (bareArr || asgs[k] != null)
+            if (asK && !hasOwn(assocArrays, "$" + names[k])) { assocList.push(names[k]) }
+            if (asK) { assocArrays["$" + names[k]] = true }
         }
         // One name, which -g declares on its global binding even where a local hides it
         // (rt_glob_swap). For a lexical local of this function the global's attributes are
@@ -4061,7 +4065,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             }
             if (xCode != 0) { b.NewCall(rtXmark, [gepStr(b, names[j]), (xCode > 0) ? one : zero]) }
             // A global `declare -a a` keeps a's elements; only a value or a local starts empty.
-            var arrJ = isArray || darrs[j] != null
+            var arrJ = bareArr || darrs[j] != null
             if (arrJ && asgs[j] == null && localize && curFrame != null) {
                 // A local scalar declared an array again becomes an empty one (bash 5.3), set
                 // when the scalar was (rt_arr_mark: `declare -p` prints NAME=()).
@@ -4143,17 +4147,14 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var notIdB = curF.NewBlock(""), subB = curF.NewBlock("")
             step.NewCondBr(step.NewICmp(llvm.enum.IPredEQ, rc, zero), nextB, okB)
             okB.NewCondBr(okB.NewICmp(llvm.enum.IPredEQ, rc, one), badB, notIdB)
-            var isOpt = notIdB.NewICmp(llvm.enum.IPredEQ, rc, llvm.constant.NewInt(i32, 2))
-            notIdB.NewCondBr(notIdB.NewOr(isOpt, notIdB.NewICmp(llvm.enum.IPredEQ, rc, llvm.constant.NewInt(i32, 4))), optB, subB)
+            notIdB.NewCondBr(notIdB.NewICmp(llvm.enum.IPredEQ, rc, llvm.constant.NewInt(i32, 2)), optB, subB)
             subB.NewStore(one, badP)
             subB.NewBr(nextB)
             emitDiag(badB, badB.NewCall(rtStrcat, [badB.NewCall(rtStrcat, [gepStr(badB, kw + ": `"), fld]),
                                                        gepStr(badB, "': not a valid identifier\n")]))
             badB.NewStore(one, badP)
             badB.NewBr(nextB)
-            var what = optB.NewSelect(isOpt, gepStr(optB, c.file + ": " + kw + ": a computed option cannot be compiled: "),
-                                      gepStr(optB, c.file + ": " + kw + ": a computed array literal cannot be compiled: "))
-            emitOnStderr(optB, optB.NewCall(rtStrcat, [optB.NewCall(rtStrcat, [what, fld]), gepStr(optB, "\n")]))
+            emitOnStderr(optB, optB.NewCall(rtStrcat, [optB.NewCall(rtStrcat, [gepStr(optB, c.file + ": " + kw + ": a computed option cannot be compiled: "), fld]), gepStr(optB, "\n")]))
             optB.NewStore(llvm.constant.NewInt(i32, 2), gExitCode)
             optB.NewStore(one, gExited)
             optB.NewBr(viaUnwind(curExit, curExitRd))

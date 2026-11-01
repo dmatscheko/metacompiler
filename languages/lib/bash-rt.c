@@ -8375,6 +8375,55 @@ char *rt_decl_name(char *w)
     return rt_substr(w, 0, rt_decl_namelen(w));
 }
 
+/* NAME=(...) of a computed -a operand (rt_decl_word): the words between the
+ * parentheses, split at unquoted blanks, each VALUE or [SUB]=VALUE with its
+ * quotes removed and its "$NAME"s expanded (rt_subx), stored as emitArrayLit
+ * stores an indexed literal (at: 1 -i, 2 -u, 4 -l). An unquoted $, backquote,
+ * glob or brace, which would need the word's splitting or expansion, is
+ * refused: a diagnostic, and arith_err abandons the line. Answers 0, or 3 for
+ * a literal refused. */
+int rt_decl_lit(char *nm, int id, char *v, int app, int at)
+{
+    int n = rt_strlen(v) - 1;
+    int i = 1;
+    int s;
+    int q;
+    int c;
+    int kb;
+    long next = 0;
+    if (app == 0) {
+        rt_arr_clear(nm);
+        gvars[id] = &unset_marker[0];
+    } else {
+        rt_arr_adopt(nm, id);
+        next = rt_arr_nextidx(nm);
+    }
+    rt_arr_mark(nm);
+    while (i < n && arith_err == 0) {
+        if (v[i] == 32 || v[i] == 9 || v[i] == 10) { i = i + 1; continue; }
+        s = i;
+        q = 0;
+        kb = 0;
+        while (i < n && (q != 0 || (v[i] != 32 && v[i] != 9 && v[i] != 10))) {
+            c = (int)(unsigned char)v[i];
+            if (q == 39) { if (c == 39) q = 0; }
+            else if (c == 92 && i + 1 < n) i = i + 1;
+            else if (q == 34) { if (c == 34) q = 0; }
+            else if (c == 39 || c == 34) q = c;
+            else if (c == 36 || c == 96 || c == 42 || c == 63 || c == 123 || c == 126) {
+                rt_berr("", nm, "a computed array literal with an expansion cannot be compiled");
+                arith_err = 1;
+                return 3;
+            }
+            else if (c == 93 && kb == 0 && v[s] == 91 && v[i + 1] == 61) kb = i;
+            i = i + 1;
+        }
+        if (kb > 0) next = rt_arr_litkey(nm, rt_subx(rt_substr(v, s + 1, kb - s - 1)), rt_subx(rt_substr(v, kb + 2, i - kb - 2)), next, at);
+        else next = rt_arr_litkey(nm, rt_int2str(next), rt_subx(rt_substr(v, s, i - s)), next, at);
+    }
+    return arith_err != 0 ? 3 : 0;
+}
+
 /* One operand of a declaration that came out of an expansion (`local "$1"`,
  * `declare $v='x y'`): NAME, NAME=VALUE, NAME+=VALUE or NAME[SUB]= / +=, the
  * value taken as it is, or NAME[SUB] alone, which declare, typeset and local
@@ -8384,13 +8433,13 @@ char *rt_decl_name(char *w)
  * that the variable has where the declaration stands. at 16 is the
  * declaration's -a: NAME declares an array, and NAME=VALUE is NAME[0]=VALUE.
  * A readonly name refuses a value or a fresh local ("WHO: NAME: readonly
- * variable"). Answers 0, 1 for a word that is no name (bash's "not a valid
- * identifier"), 2 for one that starts with - or +: an option, which only the
- * emitter could apply, 3 for a store refused and reported (an arithmetic error
- * is left in arith_err, which abandons the line), 4 for an array literal
- * NAME=(...) under -a, which only the emitter could parse. x > 0 exports the
- * name, x < 0 takes the export attribute away (rt_xmark). Twin of makeDeclDyn
- * in bash-interpreter.abnf. */
+ * variable"). An array literal NAME=(...) under -a is stored by rt_decl_lit.
+ * export's -a (who is empty) leaves a bare NAME a scalar. Answers 0, 1 for a
+ * word that is no name (bash's "not a valid identifier"), 2 for one that
+ * starts with - or +: an option, which only the emitter could apply, 3 for a
+ * store refused and reported (an arithmetic error is left in arith_err, which
+ * abandons the line). x > 0 exports the name, x < 0 takes the export attribute
+ * away (rt_xmark). Twin of makeDeclDyn in bash-interpreter.abnf. */
 int rt_decl_word(char *w, int d, int x, int at, char *who)
 {
     int i = rt_decl_namelen(w);
@@ -8418,7 +8467,6 @@ int rt_decl_word(char *w, int d, int x, int at, char *who)
     else if (w[j] != 61 && w[j] != 0) return 1;
     v = w[j] != 0 ? rt_substr(w, j + 1 + app, -1) : empty;
     vl = rt_strlen(v);
-    if (arr != 0 && sub == 0 && vl >= 2 && v[0] == 40 && v[vl - 1] == 41) return 4;
     nm = rt_substr(w, 0, i);
     id = rt_varslot_new(nm);
     fresh = d >= 0 && id >= 0 && rt_local_here(id, d) == 0 ? 1 : 0;
@@ -8431,7 +8479,8 @@ int rt_decl_word(char *w, int d, int x, int at, char *who)
         at = 0;
     }
     if (x != 0) rt_xmark(nm, x > 0 ? 1 : 0);
-    if (arr != 0 && w[j] == 0) {
+    if (arr != 0 && sub == 0 && vl >= 2 && v[0] == 40 && v[vl - 1] == 41) return rt_decl_lit(nm, id, v, app, at & 7);
+    if (arr != 0 && w[j] == 0 && who[0] != 0) {
         /* A local scalar becomes an empty array, set when the scalar was, as in
          * makeDecl in bash-to-llvm-ir.abnf. */
         if (d >= 0 && id >= 0 && rt_arr_any(nm) == 0) {

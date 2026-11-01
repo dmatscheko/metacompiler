@@ -3067,6 +3067,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             else { names.push(it.a.name); asgs.push(it.a); darrs.push(null) }
         }
         var isArray = (flags.indexOf("a") >= 0) || (flags.indexOf("A") >= 0)
+        // -a / -A make a bare NAME an array; export's and readonly's do not (bash 5.3: export
+        // -a e leaves `declare -x e`, readonly -A f on a scalar `declare -r f="5"`).
+        var bareArr = isArray && kw != "export" && kw != "readonly"
         // Under -a or -A, NAME=VALUE is NAME[0]=VALUE: the other elements stay, and += appends
         // to element 0 (bash 5.3: `y=(1 2); declare -a y=7` leaves y=(7 2)). Twin of the same
         // rewrite in makeDecl in bash-to-llvm-ir.abnf.
@@ -3187,7 +3190,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (plus.indexOf("u") >= 0) { upVars["$" + names[k]] = false }
             if (plus.indexOf("l") >= 0) { loVars["$" + names[k]] = false }
             // A global `declare -a a` keeps a's elements; only a value or a local starts empty.
-            if ((isArray || darrs[k] != null) && asgs[k] == null) {
+            if ((bareArr || darrs[k] != null) && asgs[k] == null) {
                 // A local scalar declared an array again becomes an empty one (bash 5.3), set
                 // when the scalar was (`declare -p` prints NAME=()).
                 var wasSet = localize && !fresh && !isArr(names[k]) && isSetVar(names[k])

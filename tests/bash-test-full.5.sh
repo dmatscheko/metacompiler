@@ -528,6 +528,24 @@ declare -A x=([\$'\\377']=\"1\" )"
   r=$(declare -A z; k=$'a\tb'; z[$k]=xy; declare z[$'e\tf']=7; k=$'e\tf'; echo "${#z[$'a\tb']} ${z[$k]}"); check ans4 "$r" '2 7'
   r=$(declare -A w; w[$'\x01']=1; declare -p w); check ans5 "$r" "declare -A w=([\$'\\001']=\"1\" )"
 }
+# ===== SECTION 106: -a and -A of export and readonly; a computed array literal =====
+# export's and readonly's -a / -A leave a bare name what it was (an array literal or a value
+# still makes one). A computed operand NAME=(...) under -a is an array literal: its words are
+# split at blanks, quotes removed and "$NAME" expanded; in a function (as here) += starts
+# from the declaration's new local. Every expected value is bash 5.3's.
+s106() {
+  local r t
+  r=$(export -a s106a; declare -p s106a); check xab1 "$r" 'declare -x s106a'
+  r=$(s106f=5; readonly -A s106f; declare -p s106f); check xab2 "$r" 'declare -r s106f="5"'
+  r=$(s106g=(1); readonly -A s106g; declare -p s106g); check xab3 "$r" 'declare -ar s106g=([0]="1")'
+  r=$(n=s106r; declare -a "$n=(1 2)"; declare -p s106r); check dlit1 "$r" 'declare -a s106r=([0]="1" [1]="2")'
+  t='s106e=([3]=c [1]=a b "x y" '"'"'q r'"'"')'
+  r=$(declare -a "$t"; declare -p s106e); check dlit2 "$r" 'declare -a s106e=([1]="a" [2]="b" [3]="x y" [4]="q r")'
+  r=$(s=s106n; t='s106x=(1 2)'; export -a "$s" "$t"; declare -p s106n s106x); check dlit3 "$r" 'declare -x s106n
+declare -ax s106x=([0]="1" [1]="2")'
+  r=$(s106p=(9 8); x=V; t='s106p+=(7 "a\"b" "$x" [7]="k$x")'; declare -a "$t"; declare -p s106p); check dlit4 "$r" 'declare -a s106p=([0]="7" [1]="a\"b" [2]="V" [7]="kV")'
+  r=$(declare -i s106i; t='s106i=(1+1 [4]=2+4)'; declare -a "$t"; declare -p s106i); check dlit5 "$r" 'declare -ai s106i=([0]="2" [4]="6")'
+}
 # ===== END SECTIONS =====
 
 s90   # SECTION-CALL 90
@@ -546,5 +564,6 @@ s102  # SECTION-CALL 102
 s103  # SECTION-CALL 103
 s104  # SECTION-CALL 104
 s105  # SECTION-CALL 105
+s106  # SECTION-CALL 106
 echo "full: $checks checks, $fails failures"
 exit $fails
