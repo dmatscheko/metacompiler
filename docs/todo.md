@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1043** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1044** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -69,14 +69,8 @@ Remainder of T-1028; each needs a table-size decision before work starts. CJK fa
 
 # RB — Ruby
 
-### T-1039 ruby: missing Array Enumerable methods; each_slice block result; multi-value yields; zip/method(:map) on a user Enumerable · P3 · RB · IN PROGRESS (RB worker, round 41) [V]
-ruby 2.6, all three engines wrong (found by RB r40):
-- Array lacks member?, grep, grep_v, minmax_by, slice_before, slice_after, chunk, chain: `[3,1,2,5].member?(2)` → true, `.grep(1..2)` → [1, 2], `.minmax_by{|x|-x}` → [5, 1], `.chunk{|x|x.odd?}.to_a` → [[true, [3, 1]], [false, [2]], [true, [5]]], `.chain([9]).to_a` → [3, 1, 2, 5, 9]. (Add them to the Enumerable row in ruby-respond.js too.)
-- `[1].each_slice(2){}` → nil in 2.6 (also Range/Hash); ours answers the receiver.
-- user Enumerable with `yield 1, 2`: `map { |x| x }` → [1, 3, nil]; ours [[1, 2], [3, 4], nil] (map unpacks, select/to_a pack).
-- `b.zip(b)` with a user Enumerable → [[3, 3], [1, 1], [2, 2]]; ours [[3, nil], ...].
-- include Enumerable without #each: `NoEach.new.map` → undefined method `each'; ours names `map`.
-- `obj.method(:map)` / `Bag.instance_method(:map)` → #<Method: Bag(Enumerable)#map>; ours NameError/NoMethodError.
+### T-1043 ruby: all?/any?/none?/one? don't short-circuit; `[[1], nil].sum([])` escapes rescue · P3 · RB · OPEN [V]
+ruby 2.6 (found by RB r41), all three engines: `s=[]; [1,2,3].any?{|x| s<<x; true}; p s` → [1]; ours [1, 2, 3] (same for all?/none?, one? should stop at the 2nd true; also on Range). `[[1], nil].sum([])` → catchable TypeError "no implicit conversion of nil into Array"; interpreter dies with host error "not a number in '+'" that `rescue TypeError` cannot catch (check compiled legs).
 
 # JS — JavaScript and TypeScript
 
@@ -1098,6 +1092,7 @@ T-1029 python: range/reversed type identity; dotted codec names accepted — DON
 T-1028 python: CJK multibyte codecs, `\N{...}` escapes, idna nameprep — PARTIAL→split (PY r21, 07577a53): idna nameprep (RFC 3491 over Unicode 3.2, shared python-nameprep.txt; tables linked when the program names 'idna'). CJK codecs (~75K mappings), \N{} (name DB ~450 KB), DeprecationWarning (needs warnings plumbing) filed as follow-up.
 T-1038 kotlin: unsigned ranges lose their type — DONE (KT r18, 43324a36): ranges carry an unsigned width (UIntRange/ULongRange identity, UInt/ULong elements, unsigned MAX for endExclusive) through step/reversed/downTo; until at MIN_VALUE answers EMPTY. Master probe vs kotlinc 2.2.21 (24 lines): 4 legs agree.
 T-1040 python: `type(x) is range` (and enumerate/zip/map/filter/reversed) is False — DONE (PY r22, fa60d906): type(v)/v.__class__ of range/enumerate/zip/map/filter/reversed return the builtin itself. Master probe vs python3 3.14 (is/==/dict keys/constructing via type(v)): 4 legs agree.
+T-1039 ruby: missing Array Enumerable methods; each_slice block result; multi-value yields; zip/method(:map) on a user Enumerable — DONE (RB r41, d270d298): member?/grep/grep_v/minmax_by/slice_before/slice_after/chunk/chain; each_slice/each_cons block → nil (2.6); multi-value yields per-method (13 unpack, rest pack); zip via to_a; each-less Enumerable fails on each; method(:map)/instance_method/UnboundMethod. Master probe vs ruby 2.6 (27 lines): 4 legs agree.
 
 # Settled — do not re-open
 
