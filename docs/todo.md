@@ -98,10 +98,10 @@ Found by the CORE worker, round 15. The interpreter's stripWs deletes every ASCI
 strings.TrimSpace, native strips ASCII 9-13 and 32: `int.Parse(" 1 2 ")` and `int.Parse(" 1")` give three answers.
 .NET's NumberStyles.Integer allows leading/trailing white space (U+0009-U+000D, U+0020) only; settle with a real dotnet.
 
-### T-1058 csharp: generated exception message and ToString drop the namespace · P3 · CS · OPEN [V]
+### T-1058 csharp: generated exception message and ToString drop the namespace · P3 · CS · IN PROGRESS (CS worker, round 9) [V]
 `namespace Demo { class MyEx : Exception {} }`: `new MyEx().Message` should be "Exception of type 'Demo.MyEx' was thrown." (.NET uses GetClassName() = GetType().ToString(), the fully qualified name), and `ToString()` should start "Demo.MyEx: ". All engines print the bare 'MyEx'. Likely cause: user-class FullName has no namespace. Existing assertions encode the wrong answer: tests/csharp-test-features.cs exc-default-msg-user, exc-tostring-inner-nested, maybe exc-msg-override. Spec-only (dotnet/runtime Exception.cs in $S/CS5/dl).
 
-### T-1059 csharp: virtual auto-property overridden by an accessor property is not dispatched · P3 · CS · OPEN [V]
+### T-1059 csharp: virtual auto-property overridden by an accessor property is not dispatched · P3 · CS · IN PROGRESS (CS worker, round 9) [V]
 `class N2 { public virtual int K { get; set; } = 5; } class M3 : N2 { public override int K => 9; }` - `new M3().K` must be 9 (also through an `N2` reference), all three engines give 5: the auto-property's own field slot wins over the derived `__get_K` because getField checks hasOwn first. `base.K` must still read the backing value (5). Needs the base backing storage off the public name when a subclass overrides with an accessor; check setter overrides too.
 
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
