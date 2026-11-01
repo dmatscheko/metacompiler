@@ -517,7 +517,9 @@ ArDynClose  <~~ push(makeConst(")")) ~~> = ")" ;
 ArDynSub    = ArDynSubOpen { ArDynSubSeg } ArDynSubClose ;
 ArDynSubOpen <~~ push(makeConst("[")) ~~> = "[" ;
 ArDynSubClose <~~ push(makeConst("]")) ~~> = "]" ;
-ArDynSubSeg = ArDynSq | LocSeg | DqSeg | ArDynSubAnsi | ExpSeg | ArDynParen | ArDynSub | ArDynSubBare ;
+ArDynSubSeg = ArDynSq | ArDynSubDq | ArDynSubAnsi | ArDynSubExp | ArDynParen | ArDynSub | ArDynSubBare ;
+ArDynSubDq  <~~ push(arSubProt(up.start, pop())) ~~> = LocSeg | DqSeg ;
+ArDynSubExp <~~ push(arSubProt(up.start, pop())) ~~> = ExpSeg ;
 ArDynSq     <~~ push(arSqPart(up.start, up.in, arSrc(up.start + 1, up.pos - 1))) ~~> = "'" { !@+"'" } "'" ;
 ArDynSubAnsi <~~ push(arSqAnsi(up.start, ansiC(arSrc(up.start + 2, up.pos - 1)))) ~~> = "$'" :whitespace() { AnsiEsc | AnsiLit } "'" ;
 ArDynSubBare <~~ push(makeConst(up.in)) ~~> = !@+"()[]$`\"'" ;
@@ -575,7 +577,7 @@ PeTarget    <~~ peTgt = arSrc(up.start, up.pos) ~~> = PeIdxRef | PeName ;
 // assignment's does (AsgIdx); SubIdx pushes the word, then the {aiw, aqw, aqd, aqa} record
 // PeIdxRef, ArLhsElem and ArElem take back. Twin of SubIdx in bash-interpreter.abnf.
 PeIdxRef    <~~ push(peIdxItem(pop(), arSrc(up.start, up.pos))) ~~> = PeName "[" !"]" SubIdx "]" ;
-SubIdx      <~~ pushSubIdx(mkAsgIdx(takeAll(), "")) ~~> = { AsgIdxSeg } ;
+SubIdx      <~~ pushSubIdx(mkAsgIdx(takeAll(), "")) ~~> = :whitespace() { AsgIdxSeg } ;
 IdxWord     <~~ push(mkWord(takeAll())) ~~> = { IdxSeg } ;
 IdxSeg      = SqSeg | DqSeg | AnsiSeg | ExpSeg | EscSeg | IdxPair | IdxBare ;
 // A subscript holds brackets in pairs, so one may nest: ${a[j[0]]}, a[j[1]]=x. Twin of
@@ -2031,6 +2033,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var rtFinList = rtDecl("rt_finlist", true, [1])
     var rtSliceFields = rtDecl("rt_slicefields", true, [1, 0, 0, 1, 0])
     var rtGlobEsc = rtDecl("rt_globescape", true, [1])
+    var rtArSubQ = rtDecl("rt_arsubq", true, [1])
     var rtRxEsc = rtDecl("rt_rxescape", true, [1])
     var rtRepEsc = rtDecl("rt_repescape", true, [1])
     // [[ == ]] matches with the extended globs on whatever shopt says (rt_glob_x).
@@ -3530,9 +3533,36 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function arSqPart(at, q, raw) {
         var r = {at: at, strip: false}
         arSqRecs.push(r)
-        return {c: undefined, fn: function(b) { return ansiWord(r.strip ? raw : q).fn(b) }}
+        return {c: undefined, fn: function(b) { return ansiWord(r.strip ? arSubEsc(raw) : q).fn(b) }}
     }
     function arSqAnsi(at, v) { return arSqPart(at, bashSq(v), v) }
+    // An expansion's or a quoted part's value in such a subscript is not expanded
+    // again: bash backslash-quotes its \ $ ` " and ', and the subscript's own expansion,
+    // as in double quotes, removes each of those backslashes but the one before a '.
+    // bash 5.3, x=1 and d='$x': $(( a[$d] )) is an error at "$x", $(( a["'1'"] + $x ))
+    // one at "\'1\'". Twin of arSubProt in bash-interpreter.abnf; rt_arsubq is arSubEsc.
+    function arSubProt(at, sg0) {
+        var r = {at: at, strip: false}
+        arSqRecs.push(r)
+        var sg = sg0
+        if (sg.sp != undefined) { sg = sg.sp }
+        return {c: undefined, fn: function(b) {
+            if (!r.strip) { return evalWord(b, sg) }
+            if (sg.c != undefined) { return makeConst(arSubEsc(sg.c)).fn(b) }
+            var x = evalWord(b, sg)
+            return {b: x.b, v: x.b.NewCall(rtArSubQ, x.v)}
+        }}
+    }
+    function arSubEsc(s) {
+        var out = ""
+        var i
+        for (i = 0; i < s.length; i++) {
+            var ch = s.charAt(i)
+            if (ch == "\\" || ch == "$" || ch == "`" || ch == "\"" || ch == "'") { out = out + "\\" }
+            out = out + ch
+        }
+        return out
+    }
     function arSqClaim(from, to) {
         var t = arSrc(from, to)
         var strip = false
@@ -3567,7 +3597,41 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             }
         }
     }
-    function badNcMsg(r) { return "bad substitution: no closing `}' in " + ((r.word != "") ? r.word : r.dq) + "\n" }
+    function badNcMsg(r) { return "bad substitution: no closing `}' in " + badShow((r.word != "") ? r.word : r.dq) + "\n" }
+    // The word as bash shows it there: a $'...' that is a quote, outside double quotes or
+    // inside a ${...}, is decoded, and single-quoted again outside double quotes (bash 5.3
+    // shows x"${m[$'x'[]-v}"y as x"${m[x[]-v}"y). Twin of badShow in bash-interpreter.abnf.
+    function badShow(t) {
+        var out = ""
+        var i = 0
+        var dq = false
+        var depth = 0
+        while (i < t.length) {
+            var ch = t.charAt(i)
+            if (ch == "\\") { out = out + t.slice(i, i + 2); i = i + 2; continue }
+            if (ch == "'" && !dq) {
+                var e = i + 1
+                while (e < t.length && t.charAt(e) != "'") { e = e + 1 }
+                out = out + t.slice(i, e + 1)
+                i = e + 1
+                continue
+            }
+            if (ch == "$" && t.charAt(i + 1) == "'" && (!dq || depth > 0)) {
+                var j = i + 2
+                while (j < t.length && t.charAt(j) != "'") { if (t.charAt(j) == "\\") { j = j + 1 }; j = j + 1 }
+                var v = ansiC(t.slice(i + 2, j))
+                out = out + (dq ? v : bashSq(v))
+                i = j + 1
+                continue
+            }
+            if (ch == "\"") { dq = !dq }
+            if (ch == "$" && t.charAt(i + 1) == "{") { depth = depth + 1 }
+            if (ch == "}" && depth > 0) { depth = depth - 1 }
+            out = out + ch
+            i = i + 1
+        }
+        return out
+    }
     function arRec(at) { var r = {ok: false, la: false, at: at, expr: "", tok: ""}; arRecs.push(r); return r }
     function arRecLa(at) { var r = arRec(at); r.la = true; return r }
     function arIsWs(ch) { return ch == " " || ch == "\t" || ch == "\n" }

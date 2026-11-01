@@ -1414,6 +1414,12 @@ char *ar_subscript(char *nm)
     ar_p = ar_p + 1;
     /* A skipped operand's subscript is not evaluated at all. */
     if (ar_noeval > 0) return "0";
+    /* The subscript text is expanded again, as in double quotes: z='a[$x]' makes
+     * $(( z )) read a[1] when x=1, and a quote character stays in the text. Twin of
+     * arSubscript. */
+    s1 = arith_err;
+    sub = rt_subxa(nm, sub);
+    if (arith_err != 0 && s1 == 0) { ar_bad = 1; return 0; }
     k = ar_subeval(sub);
     if (ar_bad != 0) return 0;
     return rt_arr_ikey(nm, k);
@@ -7056,6 +7062,28 @@ char *rt_globescape(char *s) {
         int ch = (int)(unsigned char)s[i];
         int meta = ch == 42 || ch == 63 || ch == 91 || ch == 93 || ch == 92;
         if (meta) {
+            dst[o] = 92;
+            o = o + 1;
+        }
+        dst[o] = (char)ch;
+        o = o + 1;
+        i = i + 1;
+    }
+    dst[o] = 0;
+    return dst;
+}
+
+/* i8* rt_arsubq(i8* s): an expansion's value in a subscript of an arithmetic text
+ * that holds an expansion, with a backslash before each \ $ ` " and ', so the
+ * subscript's own expansion does not expand it again. Twin of arSubEsc in
+ * bash-interpreter.abnf. */
+char *rt_arsubq(char *s) {
+    int len = rt_strlen(s);
+    char *dst = rt_bump(len * 2 + 1);
+    int i = 0, o = 0;
+    while (i < len) {
+        int ch = (int)(unsigned char)s[i];
+        if (ch == 92 || ch == 36 || ch == 96 || ch == 34 || ch == 39) {
             dst[o] = 92;
             o = o + 1;
         }

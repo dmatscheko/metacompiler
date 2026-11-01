@@ -839,6 +839,44 @@ $(s119c "$e" "s119u: gone"; s119c "$e" "x42"; s119c "$e" "no")"
 0'
   r=$(s=hello; echo "${s:$'-1'}" "${s:$'+1'}" "${s:$'-'}" "${s:$'?e'}" "${s:$'1'}" "${s:$"-1"}" "${s119u:$'-dflt'}" "${s:$'1':$'2'}"); check xpp3 "$r" 'hello 1 hello hello ello o dflt el'
 }
+# ===== SECTION 120: the subscript of an arithmetic text read at run time =====
+# A variable's value or a let argument used as arithmetic expands an indexed subscript as in
+# double quotes, where a ' is a character. In a $(( )) text that holds an expansion, what an
+# expansion or a double-quoted part puts into a subscript is not expanded again, and a ' it
+# holds is shown with a backslash. An error inside a subscript names the subscript text with
+# its trailing blanks, and a "no closing }" message shows a $'...' decoded. Every expected
+# value is bash 5.3's.
+s120m() { local e=${1#*line }; e=${e#*: }; printf '%s\n' "$e"; }
+s120() {
+  local r e s120v=(10 20 30) x=1 z
+  r=$(z='s120v[$x]'; echo $(( z )); z="s120v[\$x+1]"; echo $(( z )); z="s120v[\"\$x\"]"; echo $(( z )); let 'z=s120v[$x]'; echo "$z")
+  check sbq1 "$r" '20
+30
+20
+20'
+  e=$( (z="s120v['\$x']"; echo $(( z ))) 2>&1); r=$(s120m "$e")
+  e=$( (let 's120w=s120v['\''$x'\'']') 2>&1); r="$r
+$(s120m "$e")"
+  e=$( (echo $(( s120v[ '1' ] ))) 2>&1); r="$r
+$(s120m "$e")"
+  check sbq2 "$r" "'1': arithmetic syntax error: operand expected (error token is \"'1'\")
+'1': arithmetic syntax error: operand expected (error token is \"'1'\")
+'1' : arithmetic syntax error: operand expected (error token is \"'1' \")"
+  e=$( (echo $(( s120v["'1'"] + $x ))) 2>&1); r=$(s120m "$e")
+  e=$( (d='$x'; echo $(( s120v[$d] ))) 2>&1); r="$r
+$(s120m "$e")"
+  r="$r
+$(echo $(( s120v[ "1" ] + $x )))"
+  e=$( (echo $(( s120v["'1'"] ))) 2>&1); r="$r
+$(s120m "$e")"
+  check sbq3 "$r" "\\'1\\': arithmetic syntax error: operand expected (error token is \"\\'1\\'\")
+\$x: arithmetic syntax error: operand expected (error token is \"\$x\")
+21
+'1': arithmetic syntax error: operand expected (error token is \"'1'\")"
+  local -A s120a
+  e=$( (echo x"${s120a[$'x'[]-v}"y) 2>&1); r=$(s120m "$e")
+  check sbq4 "$r" "bad substitution: no closing \`}' in x\"\${s120a[x[]-v}\"y"
+}
 # ===== END SECTIONS =====
 
 s90   # SECTION-CALL 90
@@ -871,5 +909,6 @@ s116  # SECTION-CALL 116
 s117  # SECTION-CALL 117
 s118  # SECTION-CALL 118
 s119  # SECTION-CALL 119
+s120  # SECTION-CALL 120
 echo "full: $checks checks, $fails failures"
 exit $fails
