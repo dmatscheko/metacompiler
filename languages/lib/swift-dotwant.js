@@ -1469,3 +1469,113 @@ function swBrCheck(s, e) {
         }
     }
 }
+
+// ----- a name nothing declares: "cannot find 'x' in scope" -----
+// swiftc rejects a reference to a name no declaration in scope binds, reached or
+// not. This front end has no scope tables, so the check is FLOW-INSENSITIVE and
+// errs only on the safe side: a name counts as declared when it occurs anywhere
+// in the walked source other than as a reference (a binder, a parameter, a member,
+// a label or a type position), and only a lower-case name is checked, since an
+// upper-case one is a type the stdlib may declare. A reference inside a type that
+// may inherit members (an inheritance clause, an extension, a protocol, or a type
+// some extension adds conformances to) is exempt: an implicit `self.member` there
+// can come from the stdlib, and so is one inside an #if (swnSkip). What remains
+// must be a stdlib or C library function or an implicit binding (swnKnown). The Id rule notes every identifier (swnId), each
+// reference rule notes its own (swnUse), and Program calls swnCheck.
+var swnIds = []
+var swnUses = []
+var swnUseAt = {}
+var swnTypes = []
+var swnOpenNames = {}
+var swnKnown = {}
+function swnKnownInit() {
+    var ns = ["self", "super", "newValue", "oldValue", "error", "_",
+              "print", "debugPrint", "dump", "min", "max", "abs", "zip", "stride", "sequence",
+              "repeatElement", "fatalError", "precondition", "preconditionFailure", "assert",
+              "assertionFailure", "numericCast", "swap", "type", "readLine", "withExtendedLifetime",
+              "unsafeBitCast", "unsafeDowncast", "withUnsafePointer", "withUnsafeMutablePointer",
+              "withUnsafeBytes", "withUnsafeMutableBytes", "withUnsafeTemporaryAllocation",
+              "isKnownUniquelyReferenced", "exit", "withVaList", "getVaList", "transcode",
+              "withTaskGroup", "withThrowingTaskGroup", "withCheckedContinuation",
+              "withCheckedThrowingContinuation", "withUnsafeContinuation", "withUnsafeThrowingContinuation",
+              "sqrt", "cbrt", "pow", "exp", "exp2", "expm1", "log", "log2", "log10", "log1p", "sin", "cos",
+              "tan", "asin", "acos", "atan", "atan2", "sinh", "cosh", "tanh", "asinh", "acosh", "atanh",
+              "floor", "ceil", "round", "trunc", "fmod", "remainder", "hypot", "fabs", "fmin", "fmax",
+              "copysign", "nextafter", "ldexp", "frexp", "modf", "lgamma", "tgamma", "erf", "erfc", "rint",
+              "lrint", "lround", "nearbyint", "scalbn", "ilogb", "logb", "fdim", "fma",
+              "arc4random", "arc4random_uniform", "random", "srand", "rand", "srandom", "drand48", "time",
+              "clock", "usleep", "sleep", "getenv", "strlen", "strcmp", "memcpy", "memset", "malloc", "free",
+              "putchar", "puts", "printf", "fflush", "stdout", "stderr", "stdin", "fputs", "fgets", "abort",
+              "atoi", "atof", "strtol",
+              "if", "else", "for", "in", "while", "repeat", "switch", "case", "default", "break", "continue",
+              "return", "throw", "throws", "rethrows", "do", "catch", "try", "await", "async", "let", "var",
+              "func", "class", "struct", "enum", "protocol", "extension", "init", "deinit", "subscript",
+              "import", "typealias", "associatedtype", "static", "where", "as", "is", "guard", "defer",
+              "inout", "operator", "fallthrough", "some", "any", "get", "set", "willSet", "didSet", "lazy",
+              "weak", "unowned", "mutating", "nonmutating", "override", "final", "open", "public",
+              "private", "internal", "fileprivate", "convenience", "required", "dynamic", "optional",
+              "indirect", "prefix", "postfix", "infix", "nil", "true", "false"]
+    var i = 0
+    while (i < ns.length) { swnKnown["$" + ns[i]] = true; i = i + 1 }
+}
+swnKnownInit()
+function swnId(name, pos) { swnIds.push({n: swBt(name), pos: pos}) }
+// Returns the name, so a reference rule can note it where it pushes it.
+function swnUse(name, pos) {
+    swnUses.push({n: name, pos: pos})
+    swnUseAt["p" + pos + "$" + name] = true
+    return name
+}
+// A type declaration's text and extent: it is open when its header, before the
+// body's brace, has an inheritance clause, or when it is a protocol or an
+// extension, which also opens the type it extends.
+function swnType(text, s, e) {
+    var b = text.indexOf("{")
+    var head = b < 0 ? text : text.substring(0, b)
+    var kw = ["extension", "protocol", "struct", "class", "actor", "enum"]
+    var k = 0
+    while (k < kw.length && head.substring(0, kw[k].length) != kw[k]) { k = k + 1 }
+    var rest = k < kw.length ? head.substring(kw[k].length) : head
+    var n = 0
+    while (n < rest.length && rest.charAt(n) != ":" && rest.charAt(n) != "<" && rest.charAt(n) != "." && rest.charAt(n) != "{") { n = n + 1 }
+    var name = rest.substring(0, n)
+    var open = k < 2 || head.indexOf(":") >= 0
+    if (k == 0 && open) { swnOpenNames["$" + name] = true }
+    swnTypes.push({n: name, s: s, e: e, open: open})
+}
+// An #if region: the walk keeps a branch without evaluating its condition, and
+// swiftc does not type-check an inactive one.
+function swnSkip(s, e) { swnTypes.push({n: "", s: s, e: e, open: true}) }
+function swnChecked(n) {
+    if (n == "" || swnKnown["$" + n] === true) { return false }
+    var ch = n.charCodeAt(0)
+    return (ch >= 97 && ch <= 122) || ch == 95
+}
+function swnCheck() {
+    var declared = {}
+    var i = 0
+    while (i < swnIds.length) {
+        var d = swnIds[i]
+        if (swnUseAt["p" + d.pos + "$" + d.n] !== true) { declared["$" + d.n] = true }
+        i = i + 1
+    }
+    var u = 0
+    while (u < swnUses.length) {
+        var r = swnUses[u]
+        // `_x` is the storage of a property-wrapped x.
+        var wrapped = r.n.charAt(0) == "_" && declared["$" + r.n.substring(1)] === true
+        if (swnChecked(r.n) && declared["$" + r.n] !== true && !wrapped && !swnInOpen(r.pos)) {
+            fail(c.curFile() + ":" + c.lineOf(r.pos) + ": cannot find '" + r.n + "' in scope")
+        }
+        u = u + 1
+    }
+}
+function swnInOpen(pos) {
+    var i = 0
+    while (i < swnTypes.length) {
+        var t = swnTypes[i]
+        if (pos > t.s && pos <= t.e && (t.open || swnOpenNames["$" + t.n] === true)) { return true }
+        i = i + 1
+    }
+    return false
+}

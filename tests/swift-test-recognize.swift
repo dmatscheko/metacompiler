@@ -133,6 +133,11 @@ func rank(_ n: Int) -> Int {
     return score
 }
 
+// The state and helpers classify, fetch and load use.
+var pending: [Int] = []
+func read(_ name: String) throws -> String { return name }
+func clean(_ raw: String) throws -> String { return raw }
+
 // Top level stays benign so a -warn-unsupported run exits 0.
 let cache = Cache()
 print("swift recognition test compiled")

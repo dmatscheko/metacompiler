@@ -121,7 +121,7 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
 // IdBacktick are the lib file verbatim.
 // A backtick-quoted name (`protocol`, `self`) is the same name as the bare word;
 // every site that records a name's text strips the quotes with swBt.
-Id          = IdBacktick | IdPlain ;
+Id          <~~ swnId(up.in, up.pos) ~~> = IdBacktick | IdPlain ;
 IdPlain     = ( "a"..."z" | "A"..."Z" | "_" | IdUni ) :whitespace()
               { "a"..."z" | "A"..."Z" | "0"..."9" | "_" | IdUni } :whitespace(Whitespace) ;
 // The scalars Swift reserves for OPERATORS (OpUni) are cut out as well, so the
@@ -163,7 +163,7 @@ IdBtChar    = "\x20"..."\x5f" | "\x61"..."\U0010ffff" ;
 // parked in a script-side list as its statement runs and drained here. swiftc
 // runs them at the end of the top level, LIFO, and only on the normal path - see
 // swRunTop.
-Program     <~~ swBrCheck(up.start, up.pos); swRunQueued(); swRunTopDefers() ~~>
+Program     <~~ swBrCheck(up.start, up.pos); swnCheck(); swRunQueued(); swRunTopDefers() ~~>
             = [ Hashbang ] { TopExec } ;
 TopExec     <~~ swRunTop(takeAll()) ~~>
             = TopItem ;
@@ -190,27 +190,27 @@ TopStmt     = Statement ;
 // real condition like os(macOS) or canImport(Foo) is always the FIRST branch.
 // The kept branch's items are spliced into the enclosing list, so a declaration
 // made under #if is visible after the #endif, as in Swift.
-PoundIfTop  <~~ var xs = poundPick(takeAll()); for (var i = 0; i < xs.length; i++) { push(xs[i]) } ~~>
+PoundIfTop  <~~ swnSkip(up.start, up.pos); var xs = poundPick(takeAll()); for (var i = 0; i < xs.length; i++) { push(xs[i]) } ~~>
             = PoundIf PoundCond PoundBodyTop { PoundElseIf PoundCond PoundBodyTop }
               [ PoundElse PoundBodyTop ] PoundEndif ;
 PoundBodyTop <~~ push({branch: takeAll()}) ~~> = PoundSkip | { TopItem } ;
 // A statement-level #if lives in the item list of a block (and of a switch body),
 // not in Statement itself, because it can contribute more than one statement.
-PoundIfStmt <~~ var xs = poundPick(takeAll()); for (var i = 0; i < xs.length; i++) { push(xs[i]) } ~~>
+PoundIfStmt <~~ swnSkip(up.start, up.pos); var xs = poundPick(takeAll()); for (var i = 0; i < xs.length; i++) { push(xs[i]) } ~~>
             = PoundIf PoundCond PoundBodyStmt { PoundElseIf PoundCond PoundBodyStmt }
               [ PoundElse PoundBodyStmt ] PoundEndif ;
 PoundBodyStmt <~~ push({branch: takeAll()}) ~~> = PoundSkip | { PoundIfStmt | Statement } ;
-PoundIfMember <~~ var xs = poundPick(takeAll()); for (var i = 0; i < xs.length; i++) { push(xs[i]) } ~~>
+PoundIfMember <~~ swnSkip(up.start, up.pos); var xs = poundPick(takeAll()); for (var i = 0; i < xs.length; i++) { push(xs[i]) } ~~>
             = PoundIf PoundCond PoundBodyMember { PoundElseIf PoundCond PoundBodyMember }
               [ PoundElse PoundBodyMember ] PoundEndif ;
 PoundBodyMember <~~ push({branch: takeAll()}) ~~> = PoundSkip | { Member } ;
 // A #if around case labels of a switch: its branches hold labels AND statements.
-PoundIfCase <~~ var xs = poundPick(takeAll()); for (var i = 0; i < xs.length; i++) { push(xs[i]) } ~~>
+PoundIfCase <~~ swnSkip(up.start, up.pos); var xs = poundPick(takeAll()); for (var i = 0; i < xs.length; i++) { push(xs[i]) } ~~>
             = PoundIf PoundCond PoundBodyCase { PoundElseIf PoundCond PoundBodyCase }
               [ PoundElse PoundBodyCase ] PoundEndif ;
 PoundBodyCase <~~ push({branch: takeAll()}) ~~> = PoundSkip | { PoundIfCase | CaseLabel | Statement } ;
 // A #if inside a closure body, whose items are the {stmt} / {expr} lambda records.
-PoundIfLam  <~~ var xs = poundPick(takeAll()); for (var i = 0; i < xs.length; i++) { push(xs[i]) } ~~>
+PoundIfLam  <~~ swnSkip(up.start, up.pos); var xs = poundPick(takeAll()); for (var i = 0; i < xs.length; i++) { push(xs[i]) } ~~>
             = PoundIf PoundCond PoundBodyLam { PoundElseIf PoundCond PoundBodyLam }
               [ PoundElse PoundBodyLam ] PoundEndif ;
 PoundBodyLam <~~ push({branch: takeAll()}) ~~> = PoundSkip | { PoundIfLam | LamStmt } ;
@@ -566,9 +566,9 @@ ParamAttr   = "@" ( "isolated" NoSpaceParen "(" "any" KwEnd ")"
 ArgAttrName = ( "convention" | "differentiable" | "_opaqueReturnTypeOf" ) KwEnd ;
 
 // class / struct with stored properties, methods and an explicit init.
-StructDecl  <~~ push(makeStructStmt(takeAll())) ~~>
+StructDecl  <~~ swnType(up.in, up.start, up.pos); push(makeStructStmt(takeAll())) ~~>
             = KwStruct Id <~~ push(swBt(up.in)) ~~> [ TypeGenParams ] [ ":" InheritList ] [ GenWhere ] "{" { Member } "}" ;
-ClassDecl   <~~ push(makeClassStmt(takeAll())) ~~>
+ClassDecl   <~~ swnType(up.in, up.start, up.pos); push(makeClassStmt(takeAll())) ~~>
             = KwClass Id <~~ push(swBt(up.in)) ~~> [ TypeGenParams ] [ ":" InheritList ] [ GenWhere ] "{" { Member } "}" ;
 // A generic function's parameter names, open while its declaration is walked
 // (swGenOpen in lib/swift-dotwant.js; makeFun closes them).
@@ -585,7 +585,7 @@ InheritList = InheritName { "," InheritName } ;
 InheritName <~~ push({inherit: stripWs(up.in)}) ~~> = [ "~" ] Type ;
 // An actor is a class with an isolation domain. There is no executor in this
 // runtime (async functions are defined, never awaited), so it lowers like a class.
-ActorDecl   <~~ push(makeClassStmt(takeAll())) ~~>
+ActorDecl   <~~ swnType(up.in, up.start, up.pos); push(makeClassStmt(takeAll())) ~~>
             = KwActor Id <~~ push(swBt(up.in)) ~~> [ TypeGenParams ] [ ":" InheritList ] [ GenWhere ] "{" { Member } "}" ;
 KwActor     = "actor" KwEnd ;
 TypeList    = Type { "," Type } ;
@@ -659,7 +659,7 @@ ImplicitGetter <~~ push(makeImplicitGetter(pop())) ~~> = FnBody ;
 // like a struct, methods / computed properties / static members. Its body is the
 // SAME Member list a struct has plus CaseDecl, so an enum method is built by the
 // very machinery a struct method is.
-EnumDecl    <~~ push(makeEnumStmt(takeAll())) ~~>
+EnumDecl    <~~ swnType(up.in, up.start, up.pos); push(makeEnumStmt(takeAll())) ~~>
             = KwEnum Id <~~ push(swBt(up.in)) ~~> [ TypeGenParams ] [ ":" EnumConform ] [ GenWhere ] "{" { Member } "}" ;
 // The FIRST entry of an enum's inheritance clause may be its raw-value type
 // (`: Int`, `: String`); every entry there may equally be a PROTOCOL.
@@ -703,7 +703,7 @@ ImportKind  = ( "typealias" | "struct" | "class" | "enum" | "protocol"
 // a call made from inside a protocol extension DYNAMICALLY only for a name the
 // protocol declares. A member the extension alone introduces is bound statically to
 // the extension's own implementation even when the conforming type declares one.
-ProtocolDecl <~~ push(makeProtocolStmt(takeAll())) ~~>
+ProtocolDecl <~~ swnType(up.in, up.start, up.pos); push(makeProtocolStmt(takeAll())) ~~>
             = KwProtocol Id <~~ push(swBt(up.in)) ~~> [ SkipAngle ] [ ":" InheritList ] [ GenWhere ]
               "{" { ProtoMember } "}" ;
 // A requirement has no body, so it is matched BEFORE the member forms: `var name:
@@ -712,7 +712,7 @@ ProtocolDecl <~~ push(makeProtocolStmt(takeAll())) ~~>
 ProtoMember = PoundIfProto | ProtoReq | Member ;
 // A #if inside a PROTOCOL body. PoundIfMember (reached through Member) collects
 // only Members, and a protocol REQUIREMENT is not one.
-PoundIfProto <~~ var xs = poundPick(takeAll()); for (var i = 0; i < xs.length; i++) { push(xs[i]) } ~~>
+PoundIfProto <~~ swnSkip(up.start, up.pos); var xs = poundPick(takeAll()); for (var i = 0; i < xs.length; i++) { push(xs[i]) } ~~>
             = PoundIf PoundCond PoundBodyProto { PoundElseIf PoundCond PoundBodyProto }
               [ PoundElse PoundBodyProto ] PoundEndif ;
 PoundBodyProto <~~ push({branch: takeAll()}) ~~> = PoundSkip | { PoundIfProto | ProtoReq | Member } ;
@@ -735,7 +735,7 @@ ProtoSubscript <~~ push({}) ~~>
 // protocol (whose members become the defaults of every conforming type) or a
 // builtin (Int, String, Array, ...), which keeps its members in a side table.
 // `extension T: P` additionally adopts P.
-ExtensionDecl <~~ push(makeExtensionStmt(takeAll())) ~~>
+ExtensionDecl <~~ swnType(up.in, up.start, up.pos); push(makeExtensionStmt(takeAll())) ~~>
             = KwExtension ExtType [ ":" InheritList ] [ GenWhere ] "{" { Member } "}" ;
 ExtType     <~~ push({extname: stripWs(up.in)}) ~~> = Type ;
 // typealias: an alias needs nothing at run time; its target text is recorded for
@@ -1205,7 +1205,7 @@ Assignment  <~~ push(makeAssign(takeAll(), up.start)) ~~>
 // `= b` and silently become an assignment. A `!` here is otherwise a no-op - an
 // Optional IS its value in this model - so it pushes nothing.
 Target      <~~ push(swNoteWrite(swOptEndRef(makeTargetRef(takeAll())))) ~~>
-            = ( Id <~~ push(swBt(up.in)) ~~> | "$" :whitespace() TShort :whitespace(Whitespace) )
+            = ( Id <~~ push(swnUse(swBt(up.in), up.pos)) ~~> | "$" :whitespace() TShort :whitespace(Whitespace) )
               { TOpt | "." Id <~~ push({key: swBt(up.in)}) ~~> | "." TTupIdx | TForce | TIndex } [ TOptEnd ] ;
 // `counts[w]? += 1` / `x? = v`: a trailing `?` makes the whole assignment skip,
 // right-hand side included, when the target itself is nil (swOptEndRef).
@@ -1612,7 +1612,7 @@ ArgLabel    = Id <~~ push({alabel: swBt(up.in)}) ~~> ":" ;
 // character of a && operator. A PATH after the name (`&p.a`, `&xs[i]`,
 // `&b.inner.n`) is the place an assignment target names, and travels as {apath}.
 InoutArg    <~~ var ir = makeTargetRef(takeAll()); push(ir.path.length == 0 ? {aref: ir.name} : {aref: ir.name, apath: ir}) ~~>
-            = "&" !"&" Id <~~ push(swBt(up.in)) ~~> { "." Id <~~ push({key: swBt(up.in)}) ~~> | "." TTupIdx | TIndex } ;
+            = "&" !"&" Id <~~ push(swnUse(swBt(up.in), up.pos)) ~~> { "." Id <~~ push({key: swBt(up.in)}) ~~> | "." TTupIdx | TIndex } ;
 
 Primary     = Paren | OpParen | MultiStr | RawStrN | RawStr3 | RawStr2 | RawStr1 | Template | NumberLit
             | True | False | Nil
@@ -1741,7 +1741,7 @@ ClRetTy     <~~ push({rtype: stripWs(up.in)}) ~~> = Type ;
 // moment the closure is created.
 CaptureList <~~ push({caps: takeAll()}) ~~>
             = "[" [ CapItem { "," CapItem } ] "]" ;
-CapItem     = [ CapMode ] Id <~~ push(swBt(up.in)) ~~> [ "=" DiscardExpr ] ;
+CapItem     = [ CapMode ] Id <~~ push(swnUse(swBt(up.in), up.pos)) ~~> [ "=" DiscardExpr ] ;
 CapMode     = ( "weak" | "unowned" ) KwEnd ;
 LamStmt     = LamCtrl StmtSep | LamExpr StmtSep ;
 // A closure body is an ordinary body: every statement form except the bare
@@ -1816,7 +1816,7 @@ GenCall     <~~ push(swGenCall(takeAll())) ~~>
 // type named with its generic arguments, whose result adopts them (swGenMember).
 GenMember   <~~ push(swGenMember(takeAll(), up.in)) ~~> = GenName ( MethodSfx | FieldSfx ) ;
 GenRef      <~~ push(swVarRef(takeAll()[0])) ~~> = GenName ;
-GenName     = Id <~~ push(swBt(up.in)) ~~> NoSpace GenArgs GenFollow ;
+GenName     = Id <~~ push(swnUse(swBt(up.in), up.pos)) ~~> NoSpace GenArgs GenFollow ;
 GenArgs     = "<" GenArgList ">" ;
 GenArgList  <~~ push({gargs: stripWs(up.in)}) ~~> = Type { "," Type } ;
 GenFollow   = :script(~~
@@ -1828,12 +1828,12 @@ GenFollow   = :script(~~
 
 // f(args): a global function or a struct/class constructor (calls init).
 Call        <~~ var ci = takeAll(); swDsNoteCall(ci[0], up.start, up.pos); push(makeCall(ci)) ~~>
-            = Id <~~ push(swBt(up.in)) ~~> SameLineParen "(" [ CallArg { "," CallArg } ] ")" [ NoTrailCtx TrailArg { LabTrail } ] ;
+            = Id <~~ push(swnUse(swBt(up.in), up.pos)) ~~> SameLineParen "(" [ CallArg { "," CallArg } ] ")" [ NoTrailCtx TrailArg { LabTrail } ] ;
 // f { ... } label: { ... }: a call written with only trailing closures, in any
 // expression position (`return filter { $0 > 1 }`). NoTrailCtx is what keeps
 // `if cond { ... }` from reading as a call of cond.
 TrailCall   <~~ var ci = takeAll(); swDsNoteCall(ci[0], up.start, up.pos); push(makeCall(ci)) ~~>
-            = Id <~~ push(swBt(up.in)) ~~> NoTrailCtx TrailArg { LabTrail } ;
+            = Id <~~ push(swnUse(swBt(up.in), up.pos)) ~~> NoTrailCtx TrailArg { LabTrail } ;
 
 // String interpolation: "sum = \(a + b)".
 Template    <~~ push(makeTemplate(takeAll())) ~~>
@@ -1986,7 +1986,7 @@ Raw1Chunk   <~~ push({s: up.in}) ~~> = Raw1Char { Raw1Char } ;
 Raw1Char    = !'"#' !"\\#(" "\x00"..."\U0010ffff" ;
 
 Nil         <~~ push(makeConst(null)) ~~>  = "nil" KwEnd ;
-VarRef      <~~ push(swVarRef(swBt(up.in))) ~~> = Id ;
+VarRef      <~~ push(swVarRef(swnUse(swBt(up.in), up.pos))) ~~> = Id ;
 
 // ----- Widened surface: a balanced { ... } / < ... > run consumed but ignored -----
 SkipBlock   = "{" { SkipItem } "}" ;

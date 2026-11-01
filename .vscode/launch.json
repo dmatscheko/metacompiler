@@ -358,6 +358,20 @@
             "program": "${workspaceFolder}","args": ["languages/swift-to-llvm-ir.abnf", "tests/swift-test-recognize.swift", "-qq"]
         },
         {
+            "name": "Swift interpreter undefined name SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "expectError": "swift-fail-test-undefined.swift:32: cannot find 'zz' in scope",
+            "program": "${workspaceFolder}","args": ["languages/swift-interpreter.abnf", "tests/swift-fail-test-undefined.swift", "-q"]
+        },
+        {
+            "name": "Swift compiler undefined name SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "expectError": "swift-fail-test-undefined.swift:32: cannot find 'zz' in scope",
+            "program": "${workspaceFolder}","args": ["languages/swift-to-llvm-ir.abnf", "tests/swift-fail-test-undefined.swift", "-q"]
+        },
+        {
             "name": "Swift interpreter break outside a loop SHOULD FAIL",
             "type": "go",
             "request": "launch",
