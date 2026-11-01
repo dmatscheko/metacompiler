@@ -114,7 +114,7 @@ Found by CS r4 + master probe.
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
 
-### T-1038 kotlin: unsigned ranges lose their type · P3 · KT · OPEN [V]
+### T-1038 kotlin: unsigned ranges lose their type · P3 · KT · IN PROGRESS (KT worker, round 18) [V]
 kotlinc 2.2.21: `val r = 1u..4000000000u; println(r is UIntRange)` → true; ours false in all three engines (the range value has no unsigned marker). Consequence: endExclusive on UIntRange/ULongRange checks the signed MAX_VALUE — `(1u..2147483647u).endExclusive` wrongly throws, `(1u..UInt.MAX_VALUE).endExclusive` does not throw. Found by KT r17.
 
 # GO — Go  (oracle: `go run`)
