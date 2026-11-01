@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-988** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-990** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -132,19 +132,16 @@ Found by the KT worker, round 11 (oracle: kotlin-stdlib 2.2.21 driven from java 
 
 # GO — Go  (oracle: `go run`)
 
-### T-984 go: an unbuffered or full-channel send never blocks; range over a nil channel runs zero times · P2 · GO · IN PROGRESS (GO worker, round 18) [V]
-Found by the GO worker, round 17 (oracle go run). `c := make(chan int); select { case c <- 1: case <-c: }` blocks in go (no
-receiver); ours takes the send arm, and a send on a full buffered channel proceeds (chan/select3.go, 1 of 23 sub-tests).
-`for range nilch {}` in a goroutine runs zero iterations; go blocks forever (needs the static type: the value is untyped nil).
+### T-988 go: a plain send on an unbuffered or full channel never blocks (cooperative channel model) · P3 · GO · OPEN [V]
+Found by the GO worker, round 18 (oracle go run). Select send arms now wait for room or a receiver, but a send statement outside a
+select still proceeds: `c := make(chan int, 1); c <- 1; c <- 2` → go deadlocks (fatal error, exit 2); ours goes on. Unbuffered
+sends hand off without waiting for a receiver. go/test/chan fifo, powser1/2, sendstmt, goroutines, select8, sieve1 still fail.
 
-### T-985 go: empty init statements misparse (`if ; cond`, `switch ; {}`); compiler reads a keyword as a variable · P2 · GO · IN PROGRESS (GO worker, round 18) [V]
-Found by the GO worker, round 17 (gc accepts all). `if ; false {}` / `switch ; {}` → both halves "unknown name: if"/"switch"
-(fixedbugs/bug002-004, issue12413, bigmap.go, ddd.go, typeparam/maps, sets, slices, metrics, ifaceconv, issue46472). Compiler
-only: `if a("1")("2"); cond`, `for ; false; c <- false {}`, type-switch `case [0]string:` (bug294, gcc61273, gcc61244, reorder2.go).
-
-### T-986 go: deadlock message and exit status differ from the runtime's · P3 · GO · IN PROGRESS (GO worker, round 18) [V]
-Found by the GO worker, round 17. go prints `fatal error: all goroutines are asleep - deadlock!` plus a goroutine trace and exits 2;
-ours prints "all goroutines are asleep - deadlock" and exits 1 (all three engines).
+### T-989 go: an empty array literal loses its element type; promoted method on embedded slice type (compiler); typeparam/slices.go · P3 · GO · OPEN [V]
+Found by the GO worker, round 18 (oracle go run). `var v interface{} = [0]string{}` → `%T` gives `[0]interface {}` (go `[0]string`)
+and `case [0]string:` does not match - arrays carry no element type, gfCommonTy falls back with no elements. Compiler only:
+go/test/ddd.go `(*U).Sum(&U{}, ...)` (Sum promoted from embedded *T, T = []T) prints `(*U).Sum 0[object Object]1352` and panics.
+go/test/typeparam/slices.go: interpreter `panic: _Max([]) = %!q(<nil>), want ""`, compiler "variable not defined: Elem".
 
 # SW — Swift  (oracle: swiftc 6.1.2)
 
@@ -1117,6 +1114,9 @@ T-957 python: remainder of the data-model gaps — DONE - bound-method ==/hash, 
 T-960 go compiled: a select with no ready case and no default does not deadlock — DONE - compiled select evaluates operands once, drains, then blocks/deadlocks like go
 T-961 go: a send on a nil channel inside a goroutine aborts with "send on a non-channel" instead of blocking — DONE - goBlock in all engines; nil send/recv park the goroutine, a nil send arm is never chosen
 T-959 go, swift: an undefined name is a run-time error, not a compile error — PARTIAL - Go: undefined names are compile errors, reached or not; Swift: flow-insensitive check only, scope-correct remainder filed
+T-985 go: empty init statements misparse (`if ; cond`, `switch ; {}`); compiler reads a keyword as a variable — DONE - empty/call init statements in if/switch/type-switch/for headers, literals inside header indexes/calls; both halves
+T-986 go: deadlock message and exit status differ from the runtime's — DONE - fatal error: all goroutines are asleep - deadlock! on stderr, exit 2, all engines (trace omitted: addresses)
+T-984 go: an unbuffered or full-channel send never blocks; range over a nil channel runs zero times — PARTIAL - select send arms need room or a receiver, range over a nil chan blocks; a plain send outside select still never blocks, filed
 
 # Settled — do not re-open
 
