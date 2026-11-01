@@ -1570,6 +1570,73 @@ func s137() {
 	check("seltgt137", i == 7 && x.a == 8 && n == 9 && ok && len(c) == 0 && cc == nil)
 }
 
+// ===== SECTION 138: a goroutine blocked forever, and selects that never fire =====
+// A send or a receive on a nil channel blocks forever (spec "Send statements",
+// "Receive operator"), so does `select {}`, a select whose arms are all on nil
+// channels, and a select or receive with nothing that could ever be ready: the
+// goroutine stops there, its deferred calls never run, and main goes on. A nil
+// channel's arm is never chosen, so the default runs. Every arm's channel and sent
+// value is evaluated once on entering a select, the chosen arm's or not. The
+// expected values are go run's.
+func s138() {
+	var nilch chan int
+	empty := make(chan int)
+	var sent, deferred, recvd, sel1, sel2, sel3, sel4 bool
+	done := make(chan bool, 1)
+	go func() {
+		defer func() { deferred = true; recover() }()
+		nilch <- 7
+		sent = true
+	}()
+	go func() {
+		<-nilch
+		recvd = true
+	}()
+	go func() {
+		select {}
+		sel1 = true
+	}()
+	go func() {
+		select {
+		case nilch <- 1:
+		case <-nilch:
+		}
+		sel2 = true
+	}()
+	go func() {
+		select {
+		case v := <-empty:
+			_ = v
+		}
+		sel3 = true
+	}()
+	go func() {
+		<-empty
+		sel4 = true
+	}()
+	dflt := false
+	go func() {
+		select {
+		case nilch <- 1:
+		default:
+			dflt = true
+		}
+		done <- true
+	}()
+	<-done
+	check("nilblk138", !sent && !deferred && !recvd && dflt)
+	check("selblk138", !sel1 && !sel2 && !sel3 && !sel4)
+	cnt := 0
+	val := func() int { cnt++; return cnt }
+	a1 := make(chan int, 1)
+	select {
+	case a1 <- val():
+	case nilch <- val():
+	default:
+	}
+	check("seleval138", cnt == 2 && <-a1 == 1)
+}
+
 func main() {
 	s94()   // SECTION-CALL 94
 	s95()   // SECTION-CALL 95
@@ -1613,6 +1680,7 @@ func main() {
 	s135()  // SECTION-CALL 135
 	s136f() // SECTION-CALL 136
 	s137()  // SECTION-CALL 137
+	s138()  // SECTION-CALL 138
 	fmt.Println("full:", checks, "checks,", fails, "failures")
 	os.Exit(fails)
 }

@@ -2714,6 +2714,9 @@ func init() {
 			}
 			return basePanic(a)
 		}
+		// A select with no arm ready after the queue ran. Twin of js_goblock in
+		// lib/go-rt.metajs.
+		m["js_goblock"] = func(a []uint64) uint64 { rt.goBlock(); return 0 }
 		baseRunDefers := m["js_rundefers"]
 		m["js_gorundefers"] = func(a []uint64) uint64 {
 			at := len(rt.goPanics) - 1
@@ -3755,4 +3758,20 @@ func goByteElems(els []interface{}) bool {
 		}
 	}
 	return false
+}
+
+// goParkSignal unwinds a goroutine that blocks forever (goBlock) past every frame,
+// its deferred calls included; goRun drops it.
+type goParkSignal struct{}
+
+// goBlock: an operation that cannot proceed with nothing left to run (a nil
+// channel, an empty one after a drain, a select with no arm ready). A goroutine
+// is abandoned, its deferred calls unrun; main lets the others run and then
+// deadlocks. Twin of goBlock in go-interpreter.abnf and lib/go-rt.metajs.
+func (rt *jsrt) goBlock() {
+	if rt.goDepth > 0 {
+		panic(goParkSignal{})
+	}
+	rt.goDrain()
+	rt.fail("all goroutines are asleep - deadlock")
 }

@@ -2402,6 +2402,14 @@ function js_gotry(fn) {
     try {
         res = fn()
     } catch (e) {
+        if (e === goParkSig) {
+            goPanics.pop()
+            goPanicSet.pop()
+            goPanicFresh.pop()
+            goPanicChain.pop()
+            goPanicChainSet.pop()
+            throw e
+        }
         goPanics[goPanics.length - 1] = e
         goPanicSet[goPanicSet.length - 1] = true
         goPanicFresh[goPanicFresh.length - 1] = goCaughtFresh(e)
@@ -3007,6 +3015,20 @@ function js_gorundefers(list) {
 // closed channel yields its zero value.
 
 var goQueue = []
+// goDepth counts the goroutines running right now (drains nest), so 0 is main.
+var goDepth = 0
+// Thrown to unwind a goroutine that blocks forever past every frame (goBlock).
+var goParkSig = {gopark: true}
+
+// goBlock: an operation that cannot proceed with nothing left to run (a nil
+// channel, an empty one after a drain, a select with no arm ready). A goroutine
+// is abandoned, its deferred calls unrun; main lets the others run and then
+// deadlocks. Twin of goBlock in go-interpreter.abnf and abnf/jsrtgolang.go.
+function goBlock() {
+    if (goDepth > 0) { throw goParkSig }
+    goDrain()
+    fail("all goroutines are asleep - deadlock")
+}
 
 function goIsChan(v) {
     if (!goIsObj(v)) { return false }
@@ -3026,8 +3048,23 @@ function goDrain() {
         var i = 1
         while (i < goQueue.length) { rest.push(goQueue[i]); i = i + 1 }
         goQueue = rest
-        t.apply(undefined, [])
+        goDepth = goDepth + 1
+        try {
+            t.apply(undefined, [])
+        } catch (e) {
+            if (e !== goParkSig) {
+                goDepth = goDepth - 1
+                throw e
+            }
+        }
+        goDepth = goDepth - 1
     }
+    return undefined
+}
+// A select with no arm ready after the queue ran. Twin of js_goblock in
+// abnf/jsrtgolang.go.
+function js_goblock() {
+    goBlock()
     return undefined
 }
 // A select with no arm ready and no default runs the queue once (makeSelect in
@@ -3037,11 +3074,12 @@ function js_godrain() { return goDrain() }
 // goChanRecv takes one value; ok is false exactly when the channel is closed and
 // drained, and the value is then the element type's zero value.
 function goChanRecv(ch) {
+    if (ch === undefined || ch === null) { goBlock() }
     if (!goIsChan(ch)) { fail("receive from a non-channel") }
-    if (ch.buf.length == 0) { goDrain() }
+    if (ch.buf.length == 0 && ch.closed !== true) { goDrain() }
     if (ch.buf.length == 0) {
         if (ch.closed === true) { return {v: goZeroOf(goStrOf(ch.czero)), ok: false} }
-        fail("all goroutines are asleep - deadlock")
+        goBlock()
     }
     var first = ch.buf[0]
     var rest = []
@@ -3352,6 +3390,7 @@ function js_gocap(v) {
 }
 
 function js_gochan_send(ch, v) {
+    if (ch === undefined || ch === null) { goBlock() }
     if (!goIsChan(ch)) { fail("send on a non-channel") }
     if (ch.closed === true) { throw goRTErr("runtime.plainError", "send on closed channel") }
     ch.buf.push(v)

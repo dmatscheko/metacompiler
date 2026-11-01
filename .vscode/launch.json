@@ -3288,6 +3288,12 @@
             "program": "${workspaceFolder}","args": ["languages/go-to-llvm-ir.abnf", "tests/go-abort-divz-test.go", "-q", "-exe", "tests/go-abort-divz.out"]
         },
         {
+            "name": "Go abort probe, select deadlock, native binary SHOULD ABORT, ALL HALVES (interpreter vs llvm.Run vs native)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/go-to-llvm-ir.abnf", "tests/go-abort-deadlock-test.go", "-q", "-exe", "tests/go-abort-deadlock.out"]
+        },
+        {
             "name": "Go abort probe, unbounded recursion (interpreter, SHOULD FAIL)",
             "type": "go",
             "request": "launch",

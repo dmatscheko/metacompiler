@@ -5990,31 +5990,58 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             return afterB
         }
     }
+    // Every channel operand and sent value is evaluated once, in source order, on
+    // entering the select (spec "Select statements"); the arms are then tested in a
+    // loop that runs at most twice: with no arm ready and no default it runs the
+    // goroutine queue, tests them once more and then blocks (js_goblock). A nil
+    // channel (handle 0 or 1) is never ready, for a send arm too. Twin of
+    // makeSelect in go-interpreter.abnf.
     function makeSelect(arms) {
         return function(b) {
             var endB = curF.NewBlock("")
-            var cur = b
             var dfltArm = null
+            var chVs = []
+            var valVs = []
+            for (var e = 0; e < arms.length; e++) {
+                var ea = arms[e]
+                if (ea.kind == "default") { dfltArm = ea; chVs.push(null); valVs.push(null); continue }
+                var rc = ea.chT(b)
+                b = rc.b
+                chVs.push(rc.v)
+                if (ea.kind == "send") {
+                    var rv = ea.valT(b)
+                    b = rv.b
+                    valVs.push(rv.v)
+                } else { valVs.push(null) }
+            }
+            var cur = b
+            var retryB = null
+            var passV = null
+            if (dfltArm == null) {
+                cur = curF.NewBlock("")
+                retryB = curF.NewBlock("")
+                b.NewBr(cur)
+                passV = cur.NewPhi([llvm.ir.NewIncoming(hFalse, b), llvm.ir.NewIncoming(hTrue, retryB)])
+            }
+            var topB = cur
             // An unlabelled break in an arm ends the select, as in a switch.
             var outerCont = loopStack.length > 0 ? loopStack[loopStack.length - 1].cont : null
             loopStack.push({cont: outerCont, brk: endB})
             for (var i = 0; i < arms.length; i++) {
                 var a = arms[i]
-                if (a.kind == "default") { dfltArm = a; continue }
-                var rc = a.chT(cur)
-                cur = rc.b
-                if (a.kind == "send") {
-                    var rv = a.valT(cur)
-                    cur = rv.b
-                    callExt(cur, "js_gochan_send", [rc.v, rv.v])
-                    a.body(cur).NewBr(endB)
-                    cur = deadBlock()
-                    continue
-                }
+                if (a.kind == "default") { continue }
+                var chV = chVs[i]
                 var takeB = curF.NewBlock("")
                 var nextB = curF.NewBlock("")
-                cur.NewCondBr(truthy(cur, callExt(cur, "js_gochan_ready", [rc.v])), takeB, nextB)
-                var pairV = callExt(takeB, "js_gochan_recvok", [rc.v])
+                if (a.kind == "send") {
+                    cur.NewCondBr(cur.NewICmp(llvm.enum.IPredUGT, chV, hNull), takeB, nextB)
+                    callExt(takeB, "js_gochan_send", [chV, valVs[i]])
+                    a.body(takeB).NewBr(endB)
+                    cur = nextB
+                    continue
+                }
+                cur.NewCondBr(truthy(cur, callExt(cur, "js_gochan_ready", [chV])), takeB, nextB)
+                var pairV = callExt(takeB, "js_gochan_recvok", [chV])
                 var savedScope = curScopeV
                 curScopeV = callExt(takeB, "js_scope_new", [curScopeV])
                 if (a.vName != null && a.vName != "_") {
@@ -6032,9 +6059,12 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             if (dfltArm != null) {
                 dfltArm.body(cur).NewBr(endB)
             } else {
-                // Nothing ready and no default: run the queue once, then give up.
-                callExt(cur, "js_godrain", [])
-                cur.NewBr(endB)
+                var blockB = curF.NewBlock("")
+                cur.NewCondBr(cur.NewICmp(llvm.enum.IPredEQ, passV, hTrue), blockB, retryB)
+                callExt(retryB, "js_godrain", [])
+                retryB.NewBr(topB)
+                callExt(blockB, "js_goblock", [])
+                blockB.NewBr(endB)
             }
             loopStack.pop()
             return endB

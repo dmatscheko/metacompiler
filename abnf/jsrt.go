@@ -561,6 +561,8 @@ type jsrt struct {
 	// goSpawn/goDrain in go-interpreter.abnf): `go f()` queues f, and a receive
 	// that finds its channel empty runs the queue until one fills it.
 	goQueue []interface{}
+	// goDepth counts the goroutines running right now (drains nest), so 0 is main.
+	goDepth int
 
 	// trackThis is set by attach when the module actually declares js_this or
 	// js_newtarget, i.e. when the grammar that produced it has a dynamic `this`.
@@ -2356,7 +2358,7 @@ func (rt *jsrt) goValueEq(a, b interface{}) bool {
 // no blocking send, `go f()` only QUEUES f, and a receive that finds nothing runs
 // the queued goroutines until one of them fills the channel. That makes the whole
 // handshake deterministic on a single thread; a receive that still finds nothing
-// with nothing left to run is a deadlock, exactly as in Go.
+// with nothing left to run blocks (goBlock in jsrtgolang.go).
 func goChanParts(v interface{}) (*jsObject, *jsArray, bool) {
 	o, ok := v.(*jsObject)
 	if !ok {
@@ -2396,18 +2398,36 @@ func (rt *jsrt) goDrain() {
 		guard++
 		t := rt.goQueue[0]
 		rt.goQueue = rt.goQueue[1:]
-		rt.call(t, jsUndef, nil)
+		rt.goRun(t)
 	}
+}
+
+// goRun runs one goroutine; one that parked (goBlock) is dropped.
+func (rt *jsrt) goRun(t interface{}) {
+	rt.goDepth++
+	defer func() {
+		rt.goDepth--
+		if caught := recover(); caught != nil {
+			if _, park := caught.(goParkSignal); !park {
+				panic(caught)
+			}
+		}
+	}()
+	rt.call(t, jsUndef, nil)
 }
 
 // goChanRecv takes one value; ok is false exactly when the channel is closed and
 // drained, and the value is then the element type's zero value.
 func (rt *jsrt) goChanRecv(v interface{}) (interface{}, bool) {
+	if isUndefOrNull(v) {
+		rt.goBlock()
+	}
 	o, buf, ok := goChanParts(v)
 	if !ok {
 		rt.fail("receive from a non-channel")
 	}
-	if len(buf.elems) == 0 {
+	// A closed channel never blocks, so nothing needs to run for it.
+	if len(buf.elems) == 0 && o.props["closed"] != true {
 		rt.goDrain()
 	}
 	if len(buf.elems) == 0 {
@@ -2415,7 +2435,7 @@ func (rt *jsrt) goChanRecv(v interface{}) (interface{}, bool) {
 			ty, _ := o.props["czero"].(string)
 			return goZeroOf(ty), false
 		}
-		rt.fail("all goroutines are asleep - deadlock")
+		rt.goBlock()
 	}
 	first := buf.elems[0]
 	buf.elems = buf.elems[1:]
@@ -17291,6 +17311,11 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 						if s, isFail := caught.(string); isFail && strings.HasPrefix(s, "js runtime error: ") {
 							panic(caught)
 						}
+						// A parked goroutine unwinds past every frame (goBlock).
+						if _, park := caught.(goParkSignal); park {
+							rt.goPanics = rt.goPanics[:len(rt.goPanics)-1]
+							panic(caught)
+						}
 						if rt.trackThis {
 							if len(rt.thisStack) > depth {
 								rt.thisStack = rt.thisStack[:depth]
@@ -17395,6 +17420,9 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			return w(o)
 		},
 		"js_gochan_send": func(a []uint64) uint64 {
+			if isUndefOrNull(u(a[0])) {
+				rt.goBlock()
+			}
 			o, buf, ok := goChanParts(u(a[0]))
 			if !ok {
 				rt.fail("send on a non-channel")

@@ -2995,7 +2995,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // send never blocks (an unbuffered channel behaves as one with room), which is what
     // makes a single-threaded interpreter able to run the handshake at all: the sender
     // hands its value over and the receiver picks it up when it drains the queue.
-    // A receive on a channel that stays empty with nothing left to run is a deadlock.
+    // A receive on a channel that stays empty with nothing left to run blocks (goBlock).
     // cap is the buffer size of make(chan T, n). Twin of js_gochan_new in
     // lib/go-rt.metajs and abnf/jsrt.go.
     function newChan(n, zero) { return {__chan: true, buf: [], closed: false, czero: zero, cap: n} }
@@ -3005,6 +3005,21 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     function isChan(v) { return v != undefined && v != null && typeof v == "object" && v.__chan == true }
     var goQueue = []
     function goSpawn(t) { goQueue.push(t) }
+    // goDepth counts the goroutines running right now (drains nest), so 0 is main.
+    var goDepth = 0
+    // An operation that cannot proceed with nothing left to run: a nil channel (Go
+    // spec "Send statements", "Receive operator"), an empty channel after a drain,
+    // a select with no arm ready. A goroutine waits forever, so it is abandoned:
+    // GO_PARK unwinds it past every frame without running its defers and the drain
+    // that runs it drops it, leaving the goroutine that waits on it to decide. Main
+    // lets the others run, then deadlocks. Twins: goBlock in lib/go-rt.metajs and
+    // abnf/jsrtgolang.go.
+    var GO_PARK = {__gopark: true}
+    function goBlock() {
+        if (goDepth > 0) { throw GO_PARK }
+        goDrain()
+        fail("all goroutines are asleep - deadlock")
+    }
     // Runs every queued goroutine to completion, in spawn order. A goroutine that
     // spawns another appends to the same queue and is picked up by the same drain.
     function goDrain() {
@@ -3014,10 +3029,19 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             var t = goQueue[0]
             for (var i = 1; i < goQueue.length; i++) { goQueue[i - 1] = goQueue[i] }
             goQueue.pop()
-            t()
+            var sc = scopes
+            goDepth++
+            try {
+                t()
+            } catch (e) {
+                if (e !== GO_PARK) { goDepth--; throw e }
+                scopes = sc
+            }
+            goDepth--
         }
     }
     function chanSend(ch, v) {
+        if (ch === null || ch === undefined) { goBlock() }
         if (!isChan(ch)) fail("send on a non-channel")
         if (ch.closed) { goPlainPanic("send on closed channel") }
         ch.buf.push(v)
@@ -3025,11 +3049,12 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // {v, ok}: ok is false exactly when the channel is closed and drained, and then
     // v is the element type's zero value (Go's `v, open := <-ch`).
     function chanRecv(ch) {
+        if (ch === null || ch === undefined) { goBlock() }
         if (!isChan(ch)) fail("receive from a non-channel")
-        if (ch.buf.length == 0) { goDrain() }
+        if (ch.buf.length == 0 && !ch.closed) { goDrain() }
         if (ch.buf.length == 0) {
             if (ch.closed) { return {v: zeroOfType2(ch.czero), ok: false} }
-            fail("all goroutines are asleep - deadlock")
+            goBlock()
         }
         var v = ch.buf[0]
         for (var i = 1; i < ch.buf.length; i++) { ch.buf[i - 1] = ch.buf[i] }
@@ -3040,10 +3065,10 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // drained ENDS the loop instead of yielding a zero value.
     function chanRecvOrDone(ch) {
         if (!isChan(ch)) fail("range over a non-channel")
-        if (ch.buf.length == 0) { goDrain() }
+        if (ch.buf.length == 0 && !ch.closed) { goDrain() }
         if (ch.buf.length == 0) {
             if (ch.closed) { return {v: undefined, ok: false} }
-            fail("all goroutines are asleep - deadlock")
+            goBlock()
         }
         var v = ch.buf[0]
         for (var i = 1; i < ch.buf.length; i++) { ch.buf[i - 1] = ch.buf[i] }
@@ -6169,7 +6194,8 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // select { case v := <-ch: ...; case ch <- x: ...; default: ... }: the arms are
     // tried in source order and the FIRST ready one runs; without a ready arm the
     // default runs, and without a default the select waits by draining the goroutine
-    // queue once more (a still-empty channel is then a deadlock, as in Go).
+    // queue once more and then blocks (goBlock). An arm on a nil channel is never
+    // ready.
     // `break L` of the switch or select labelled L (goSwLbl) ends it. Twin of
     // goSwLblC in go-to-llvm-ir.abnf.
     function goSwLblC(t, lbl) {
@@ -6185,14 +6211,29 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     function makeSelect(items) {
         var arms = items
         return function() {
+            // Every channel operand and sent value is evaluated once, in source
+            // order, on entering the select (spec "Select statements").
             var dflt = null
+            var chs = []
+            var vals = []
+            for (var e = 0; e < arms.length; e++) {
+                var ea = arms[e]
+                if (ea.kind == "default") { dflt = ea; chs.push(null); vals.push(null); continue }
+                chs.push(ea.chT())
+                vals.push(ea.kind == "send" ? ea.valT() : null)
+            }
             for (var pass = 0; pass < 2; pass++) {
                 for (var i = 0; i < arms.length; i++) {
                     var a = arms[i]
-                    if (a.kind == "default") { dflt = a; continue }
-                    if (a.kind == "send") { chanSend(a.chT(), a.valT()); return selDone(a.body()) }
-                    if (chanReady(a.chT())) {
-                        var r = chanRecv(a.chT())
+                    var ch = anytype
+                    ch = chs[i]
+                    if (a.kind == "default" || ch === null || ch === undefined) { continue }
+                    if (a.kind == "send") {
+                        chanSend(ch, vals[i])
+                        return selDone(a.body())
+                    }
+                    if (chanReady(ch)) {
+                        var r = chanRecv(ch)
                         scopes.push({})
                         if (a.vName != null && a.vName != "_") { declVar(a.vName, r.v) }
                         if (a.okName != null && a.okName != "_") { declVar(a.okName, r.ok) }
@@ -6204,7 +6245,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                 if (dflt != null) { return selDone(dflt.body()) }
                 if (pass == 0) { goDrain() }
             }
-            fail("all goroutines are asleep - deadlock")
+            goBlock()
         }
     }
     function makeSelRecv(items) {
