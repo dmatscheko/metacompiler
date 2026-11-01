@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1082** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1083** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -78,13 +78,12 @@ Structural; touches the shared generator floor (Go twin jsGenerator / runtime.c 
 - `for` over a user #each must interleave the body with #each's side effects (today all yields are collected first).
 Needs: interpreter coroutine running src.each(&blk) with blk = coYield, switching run state (block/self frames, rescue state) on resume; compiled: one emitted generator closure registered with the Go twin / layer 2 (js_genfn/js_yield are emitter-only externs); per-coroutine rubyCatchTags (Go) and js_rcatch/js_rthrow state (layer 2) plus the current-exception slot; close of an unfinished one must skip ensure.
 
-### T-1078 ruby: Lazy eager Enumerable surface; Lazy freeze/clone/dup; Enumerator-based Lazy #each value · P3 · RB · IN PROGRESS (RB worker, round 47) [V]
-Oracle /usr/bin/ruby 2.6; all engines raise NoMethodError where MRI answers:
-- eager on a Lazy: `(1..3).lazy.sum` -> 6; count/include?/min/max/sort/reduce/inject/find/detect/group_by/partition/min_by/each_with_index/each_with_object/with_index answer eagerly; find and include? must stop early on an endless source (`(1..Float::INFINITY).lazy.map { _1 * 2 }.find { |x| x > 10 }` -> 12 - use a block param in 2.6).
-- lazy-returning: zip/uniq/flat_map/grep/drop/chunk_while answer a Lazy.
-- freeze/clone/dup of a Lazy.
-- `[1,2].each.lazy.each{}` -> [1, 2] (ours nil); `for x in C.new.lazy; end` -> the user #each's value (ours nil): record the source #each value for an Enumerator-based Lazy.
-Note: ruby-test-full.rb's -frozen interpreter leg is at ~95-100M of the 100M step brake; new sections go in full.2.
+### T-1082 ruby: eager endless Enumerators answer a Lazy; to_enum on user Enumerable; Enumerator dup/clone · P3 · RB · OPEN [V]
+Oracle /usr/bin/ruby 2.6; all engines unless noted:
+- `[1, 2].cycle.take_while { |x| x < 2 }` -> [1]; ours a Lazy (the block-op path ignores the `lazy` flag). Same for blockless `.with_index`, uniq, zip on eager endless Enumerators (cycle, endless each_slice): MRI answers an Enumerator or runs eagerly.
+- `C.new.to_enum` on a user Enumerable: interpreter NoMethodError; MRI an Enumerator, `.lazy.each {}` on it -> :done. (to_enum/enum_for with external next is T-1069's scope; this item is the eager/each side only.)
+- `C.new.each_entry.lazy.each {}` -> the C instance; interpreter nil.
+- dup/clone of an eager Enumerator answer an Array; MRI an Enumerator.
 
 # JS — JavaScript and TypeScript
 
@@ -1143,6 +1142,7 @@ T-1070 ruby: Enumerator#each value, for-over-Lazy value, user #inspect ivars, La
 T-1072 bash: assoc kind per scope / computed `declare -A`; small declaration leftovers — PARTIAL→split (SH r30, 3 commits): assoc kind per binding at run time (interp var field, C runtime array mark; computed declare -A compiled; cannot-convert refusal), export/readonly +X are non-identifier operands, quoted indexed subscripts in assignments are arithmetic errors, computed literals accept glob chars; 4 legs = bash 5.3. Reads with quoted subscripts + small items filed; LC_ALL=C policy item carried over
 T-1075 php: exception trace frames; file/line of engine-raised errors; __destruct — PARTIAL→split (PHP r43, 72cd7678): getTrace/getTraceAsString list calls in progress (functions, methods, closures, [internal function]; args per php-src escaping/15-char cut/float .0), engine-raised errors carry file/line/trace (php_here); closure/anon-class names use the absolute path; cost +0.68% paired bench / ~20 insns per call (within noise); 3 legs agree with php-src. __destruct DECLINED: refcount-timed destructors cannot be modelled faithfully without refcounting (docs 7.8); remaining trace gaps filed
 T-1077 kotlin: reified type parameter as extension receiver; Class.kotlin — DONE (KT r25, b9c0859b): generic extensions recorded (ExtFun never called ktNoteGeneric); reified extension type args inferred from the receiver's static type (T., List<T>., Map<K,V>., T?.) in both engines incl. after field reads; Class.kotlin maps java classes back to KClasses in all engines; 4 legs = kotlinc
+T-1078 ruby: Lazy eager Enumerable surface; Lazy freeze/clone/dup; Enumerator-based Lazy #each value — DONE (RB r47, f9f45b06): Lazy answers MRI's eager Enumerable surface (sum/count/min/max/sort/reduce/group_by/partition/...), early-stopping scans on endless sources (find/detect/include?/any?/all?/find_index), lazy zip/uniq/flat_map/grep/drop/chunk_while/slice_when/with_index, freeze/clone/dup, #each value of Enumerator-based Lazy; 4 legs = ruby 2.6
 
 # Settled — do not re-open
 
