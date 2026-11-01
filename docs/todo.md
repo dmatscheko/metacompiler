@@ -136,7 +136,7 @@ real coroutines out of the subset - decide first). Go also runs the most recentl
 ### T-1053 php: copy-on-write array identity (refcount release, print_r recursion depth) · P4 · PHP · OPEN [V spec-only] · NEEDS DESIGN
 Remainder of T-1000/T-1025/T-1036/T-1051. Engines copy arrays eagerly on assignment and have no point where an array dies, so: reference holders of overwritten / frame-local / temporary arrays and of unfinished generators are never released (counts stay correct-but-high, so `&` may survive a copy PHP would unwrap); property-hook set parameters aren't covered by the compiler's param-copy release; print_r recursion depth is wrong (`$y=[1]; $y[]=&$y; print_r($y)` → PHP *RECURSION* at [1], ours one level deeper; `$a=["k"=>[2]]; $a["k"][]=&$a;` two deeper) because the interpreter's by-value param copy loses array identity; `$w=$z; print_r($w)` differs too. Options: real per-array refcount + COW in all three engines (touches every in-place array write), or an engine-level print_r like var_dump plus targeted release points. Needs a design decision before work.
 
-### T-1087 php: argument-type checks for PHP-written stdlib builtins; object casts; deprecations · P3 · PHP · OPEN [V]
+### T-1087 php: argument-type checks for PHP-written stdlib builtins; object casts; deprecations · P3 · PHP · IN PROGRESS (PHP worker, round 46) [V]
 Spec-only (php-src stubs + zend_parse_parameters). All engines:
 - builtins implemented in PHP in lib/php-stdlib.php have no argument-type checks: they coerce an array to "Array" or raise a TypeError naming an inner native ("strlen()"). Affected: str_repeat, trim/ltrim/rtrim, explode, strrev, str_pad, ucfirst, lcfirst, ucwords, str_contains, str_starts_with, str_ends_with, str_split, stripos, strstr, substr_count, str_word_count, nl2br, htmlspecialchars, wordwrap; number_format and round with an array crash ("array used as a number"). Library parameter types are erased inside the stdlib - find a scheme with no per-call cost on the hot path (e.g. checks only on the cold coercion branch), measure with paired bench runs.
 - (int)/(float) of an object: PHP 1 plus warning "Object of class X could not be converted to int"; ours 0, no warning.
@@ -150,7 +150,7 @@ Spec-only (php-src stubs + zend_parse_parameters). All engines:
 
 # SH — bash / batch  (oracle: /opt/homebrew/bin/bash 5.3; no cmd.exe)
 
-### T-1088 bash: computed option words / nameref -A in compiled declare; local -p; residual stderr tokens · P3 · SH · OPEN [V]
+### T-1088 bash: computed option words / nameref -A in compiled declare; local -p; residual stderr tokens · P3 · SH · IN PROGRESS (SH worker, round 33) [V]
 Oracle /opt/homebrew/bin/bash 5.3:
 - compiled: a computed option word (`o=-A; declare $o x`) is a compile error; `declare -A` through a nameref unsupported.
 - `declare -- -A e=(..)`: the late-option marking must not apply after `--` (bash: `-A` is then an operand -> not a valid identifier, and e is indexed).
