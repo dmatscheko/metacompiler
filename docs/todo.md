@@ -69,7 +69,7 @@ Remainder of T-1028; each needs a table-size decision before work starts. CJK fa
 
 # RB — Ruby
 
-### T-1064 ruby: external Enumerator iteration over a user #each; Enumerator in for-in/splat · P3 · RB · OPEN [V]
+### T-1064 ruby: external Enumerator iteration over a user #each; Enumerator in for-in/splat · P3 · RB · IN PROGRESS (RB worker, round 45) [V]
 Oracle /usr/bin/ruby 2.6 (LC_ALL=en_US.UTF-8). All engines:
 - `e = C.new(log).each` (user #each that logs): `e.next` must run #each only up to the first yield (log [1]), a second `next` up to the second ([1, 2]); `peek` does not advance; `rewind` restarts. Ours runs #each to the end on the first next. `lazy.map{..}.next` replays #each from the start each call. Needs a suspendable #each: interpreter on coNew/coYield/coResume (cf. php-interpreter.abnf generator), compiled on the js_genfn floor; rubyCatchTags (Go twin) and js_rcatch/js_rthrow (layer 2) must become per-coroutine; never-finished enumerators must be released by the floor's close protocol.
 - `for x in [1,2,3].each_slice(2); p x; end` fails (interp "for-in needs an array or a hash", compiled TypeError / "indexing a object"); MRI iterates [1, 2], [3].
@@ -134,7 +134,7 @@ real coroutines out of the subset - decide first). Go also runs the most recentl
 ### T-1053 php: copy-on-write array identity (refcount release, print_r recursion depth) · P4 · PHP · OPEN [V spec-only] · NEEDS DESIGN
 Remainder of T-1000/T-1025/T-1036/T-1051. Engines copy arrays eagerly on assignment and have no point where an array dies, so: reference holders of overwritten / frame-local / temporary arrays and of unfinished generators are never released (counts stay correct-but-high, so `&` may survive a copy PHP would unwrap); property-hook set parameters aren't covered by the compiler's param-copy release; print_r recursion depth is wrong (`$y=[1]; $y[]=&$y; print_r($y)` → PHP *RECURSION* at [1], ours one level deeper; `$a=["k"=>[2]]; $a["k"][]=&$a;` two deeper) because the interpreter's by-value param copy loses array identity; `$w=$z; print_r($w)` differs too. Options: real per-array refcount + COW in all three engines (touches every in-place array write), or an engine-level print_r like var_dump plus targeted release points. Needs a design decision before work.
 
-### T-1063 php: Exception data model - $previous/getPrevious(), real property layout · P3 · PHP · OPEN [V]
+### T-1063 php: Exception data model - $previous/getPrevious(), real property layout · P3 · PHP · IN PROGRESS (PHP worker, round 41) [V]
 Spec-only (php-src Zend/zend_exceptions.c). All three engines:
 - `new Exception("m", 0, $prev)` ignores the third argument; `$e->getPrevious()` is an undefined method. Implicit chaining (an exception thrown while another is pending, e.g. in finally) also needs previous.
 - `print_r(new Exception("m",3))` shows only public [message]/[code]; PHP shows message:protected, string:Exception:private, code:protected, file:protected, line:protected, trace:Exception:private, previous:Exception:private.
