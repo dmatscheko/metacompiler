@@ -188,7 +188,7 @@ variable name" where bash prefixes "<file>: line N:".
 
 # C — C subset
 
-### T-966 c: a parenthesised function name as callee; `sizeof expr` in a constant expression; unsigned rules in the fold · P2 · C · OPEN [V]
+### T-966 c: a parenthesised function name as callee; `sizeof expr` in a constant expression; unsigned rules in the fold · P2 · C · IN PROGRESS (C worker, round 14) [V]
 Found by the C worker, round 13 (oracle cc -std=c11). `(ad)(1,2)` → cc 3, both halves "variable not defined: ad"; `(&ad)(1,2)` and
 `(*&md)(10,3)` do not parse. `int a[10]; char b[sizeof a / sizeof a[0]];` (also in an enumerator) does not parse - the fold runs at
 tag time without the declaration's type. The constant fold has no types: `char x[(-1 < 0u) + 1]` is 2 with us, 1 with cc
