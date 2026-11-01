@@ -130,7 +130,7 @@ are queued, buffers past capacity instead of blocking. go/test/chan powser1/2, s
 (10000 nested drains overflow the stack) still fail. Needs a suspension mechanism that works in all three engines (the manual calls
 real coroutines out of the subset - decide first). Go also runs the most recently spawned goroutine first; we run spawn order.
 
-### T-1023 go: a struct value's method set includes pointer methods in type switches/assertions; embedding another package's defined non-struct type · P3 · GO · OPEN [V]
+### T-1023 go: a struct value's method set includes pointer methods in type switches/assertions; embedding another package's defined non-struct type · P3 · GO · IN PROGRESS (GO worker, round 22) [V]
 Found by the GO worker, round 21 (oracle go run). `type S struct{n int}; func (s *S) Inc(){}; func (s S) Get() int {..}`; with
 interfaces Incer{Inc();Get()} and Getter{Get()}, `switch v.(type){case Incer: ..; case Getter: ..}` for v = S{1}, and `var g Getter =
 S{3}; _, ok := g.(Incer)` → go `getter`, false; ours `incer`, true (goHasMethod/goSatisfies ignore __ptr$ for a __vv struct value, in
