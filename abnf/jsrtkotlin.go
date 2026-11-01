@@ -6720,20 +6720,22 @@ func (rt *jsrt) ktSeqMethodK(o *jsArray, name string, args []interface{}, kind s
 		}
 		return jsUndef, true
 	case "clear":
+		rt.ktViewWrite(o, o.elems)
 		o.dropIdx()
 		o.elems = nil
 		o.mod++
 		return jsUndef, true
-	case "removeAll", "retainAll":
+	case "removeAll", "retainAll", "removeIf":
 		// Kotlin has TWO overloads of each: one takes a collection of elements, the
-		// other a PREDICATE (`l.removeAll { it % 2 == 0 }`). The twin is the same
-		// branch of kMutListMethod in languages/kotlin-interpreter.abnf.
+		// other a PREDICATE (`l.removeAll { it % 2 == 0 }`); java's removeIf takes a
+		// predicate. The twin is the same branch of kMutListMethod in
+		// languages/kotlin-interpreter.abnf.
 		isPred := isCallable(f)
 		var drop []interface{}
 		if !isPred {
 			drop = ktElems(rt, f)
 		}
-		keep := []interface{}{}
+		keep, gone := []interface{}{}, []interface{}{}
 		for _, e := range es {
 			hit := false
 			if isPred {
@@ -6748,15 +6750,17 @@ func (rt *jsrt) ktSeqMethodK(o *jsArray, name string, args []interface{}, kind s
 			}
 			if hit == (name == "retainAll") {
 				keep = append(keep, e)
+			} else {
+				gone = append(gone, e)
 			}
 		}
-		changed := len(keep) != len(es)
 		o.dropIdx()
 		o.elems = keep
-		if changed {
+		if len(gone) > 0 {
 			o.mod++
+			rt.ktViewWrite(o, gone)
 		}
-		return changed, true
+		return len(gone) > 0, true
 	case "removeFirst", "removeLast":
 		if len(o.elems) == 0 {
 			rt.ktNoElem("List is empty.")
@@ -6816,6 +6820,7 @@ func (rt *jsrt) ktSeqMethodK(o *jsArray, name string, args []interface{}, kind s
 					o.dropIdx()
 					o.elems = append(o.elems[:i], o.elems[i+1:]...)
 					o.mod++
+					rt.ktViewWrite(o, []interface{}{e})
 					return true, true
 				}
 			}
@@ -6997,34 +7002,41 @@ func (rt *jsrt) ktSetMethod(s *jsObject, name string, args []interface{}) (inter
 			keys.mod++
 		}
 		return grew, true
-	case "remove", "removeAll", "retainAll":
+	// removeAll / retainAll take elements or a predicate, removeIf a predicate.
+	case "remove", "removeAll", "retainAll", "removeIf":
+		isPred := name != "remove" && isCallable(f)
 		gone := []interface{}{f}
-		if name != "remove" {
+		if name != "remove" && !isPred {
 			gone = ktElems(rt, f)
 		}
-		kept := []interface{}{}
-		changed := false
+		kept, dropped := []interface{}{}, []interface{}{}
 		for _, e := range keys.elems {
 			hit := false
-			for _, g := range gone {
-				if rt.ktEqVals(g, e) {
-					hit = true
-					break
+			if isPred {
+				hit = rt.truthy(rt.call(f, jsUndef, []interface{}{e}))
+			} else {
+				for _, g := range gone {
+					if rt.ktEqVals(g, e) {
+						hit = true
+						break
+					}
 				}
 			}
 			if hit == (name == "retainAll") {
 				kept = append(kept, e)
 			} else {
-				changed = true
+				dropped = append(dropped, e)
 			}
 		}
 		keys.dropIdx()
 		keys.elems = kept
-		if changed {
+		if len(dropped) > 0 {
 			keys.mod++
+			rt.ktViewWrite(s, dropped)
 		}
-		return changed, true
+		return len(dropped) > 0, true
 	case "clear":
+		rt.ktViewWrite(s, keys.elems)
 		keys.dropIdx()
 		keys.elems = nil
 		keys.mod++
@@ -8264,6 +8276,49 @@ func ktViewOf(a *jsArray, owner interface{}) *jsArray {
 	p.set("__wsrc", owner)
 	a.props = p
 	return a
+}
+
+// ktViewWrite: a map's keys / values / entries view writes through - each
+// element its own remove / removeAll / retainAll / removeIf / clear dropped
+// (gone) takes its entry out of the map: the entry with that key, the first with
+// that value, the entry equal to that entry. Anything that is no view is left
+// alone. Twin of kViewWrite in kotlin-interpreter.abnf and
+// languages/lib/kotlin-rt.metajs.
+func (rt *jsrt) ktViewWrite(view interface{}, gone []interface{}) {
+	owner, linked := ktViewOwner(view)
+	mk, mv, isDict := dictParts(owner)
+	if !linked || !isDict {
+		return
+	}
+	a, isVals := view.(*jsArray)
+	if isVals && a.kind != ktArrVals {
+		return
+	}
+	isEnt := !isVals && strings.Contains(ktJvmTag(view, ""), "EntrySet")
+	for _, g := range gone {
+		at := -1
+		switch {
+		case isVals:
+			for j, v := range mv.elems {
+				if rt.ktEqVals(v, g) {
+					at = j
+					break
+				}
+			}
+		case isEnt:
+			if e, ok := g.(*jsObject); ok {
+				at = rt.ktMapFind(mk, e.props["key"])
+				if at >= 0 && !rt.ktEqVals(mv.elems[at], e.props["value"]) {
+					at = -1
+				}
+			}
+		default:
+			at = rt.ktMapFind(mk, g)
+		}
+		if at >= 0 {
+			ktMapDropAt(mk, mv, at)
+		}
+	}
 }
 
 // ktViewOwner is the collection a map view (ktMapView) or a linked array

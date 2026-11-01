@@ -4542,6 +4542,31 @@ NotMemberKw = :script(~~
         s.__wsrc = m
         return kJvmTagged(s, kMapViewClass(m, view))
     }
+    // A map's keys / values / entries view writes through: each element its own
+    // remove / removeAll / retainAll / removeIf / clear dropped (gone) takes its
+    // entry out of the map - the entry with that key, the first with that value,
+    // the entry equal to that entry. Anything that is no view is left alone. Twin
+    // of ktViewWrite in abnf/jsrtkotlin.go and languages/lib/kotlin-rt.metajs.
+    function kViewWrite(view, gone) {
+        var m = anytype
+        m = kViewOwner(view)
+        if (!kIsMap(m)) { return }
+        var isVals = Array.isArray(view)
+        if (isVals && arrKind(view) != 3) { return }
+        var isEnt = !isVals && view.__jc.indexOf("EntrySet") >= 0
+        for (var g = 0; g < gone.length; g++) {
+            var at = 0 - 1
+            if (isVals) {
+                for (var j = 0; j < m.vals.length && at < 0; j++) { if (kEqVals(m.vals[j], gone[g])) { at = j } }
+            } else if (isEnt) {
+                at = kMapFind(m, gone[g].key)
+                if (at >= 0 && !kEqVals(m.vals[at], gone[g].value)) { at = 0 - 1 }
+            } else {
+                at = kMapFind(m, gone[g])
+            }
+            if (at >= 0) { kMapDropAt(m, at) }
+        }
+    }
     // A snapshot array (a map's values, xs.withIndex()) linked to the collection
     // it reads, and the collection a view or such an array reads, else v. Twins
     // of ktViewOf / ktViewOwner in abnf/jsrtkotlin.go.
@@ -7656,7 +7681,7 @@ NotMemberKw = :script(~~
         }
         if (name == "remove") {
             for (i = 0; i < es.length; i++) {
-                if (kEqVals(es[i], f)) { kSeqMethod(es, "removeAt", [i]); return {v: true} }
+                if (kEqVals(es[i], f)) { kSeqMethod(es, "removeAt", [i]); kViewWrite(es, [f]); return {v: true} }
             }
             return {v: false}
         }
@@ -7714,28 +7739,30 @@ NotMemberKw = :script(~~
             return {v: undefined}
         }
         if (name == "clear") {
+            kViewWrite(es, es.slice())
             while (es.length > 0) { es.pop() }
             arrModBump(es)
             return {v: undefined}
         }
-        if (name == "removeAll" || name == "retainAll") {
+        if (name == "removeAll" || name == "retainAll" || name == "removeIf") {
             // Kotlin has TWO overloads of each: one takes a collection of elements, the
-            // other a PREDICATE (`l.removeAll { it % 2 == 0 }`). The twin is the same
-            // branch of ktMutListMethod in abnf/jsrtkotlin.go.
+            // other a PREDICATE (`l.removeAll { it % 2 == 0 }`); java's removeIf takes
+            // a predicate. The twin is the same branch of ktMutListMethod in
+            // abnf/jsrtkotlin.go.
             var isPred = (typeof f == "function")
             var drop = isPred ? [] : kElems(f)
             var keep = []
+            var lgone = []
             for (i = 0; i < es.length; i++) {
                 var hit = false
                 if (isPred) { hit = f(es[i]) === true }
                 else { for (var di = 0; di < drop.length; di++) { if (kEqVals(drop[di], es[i])) { hit = true } } }
-                if (hit == (name == "retainAll")) { keep.push(es[i]) }
+                if (hit == (name == "retainAll")) { keep.push(es[i]) } else { lgone.push(es[i]) }
             }
-            var changed2 = keep.length != es.length
             while (es.length > keep.length) { es.pop() }
             for (i = 0; i < keep.length; i++) { es[i] = keep[i] }
-            if (changed2) { arrModBump(es) }
-            return {v: changed2}
+            if (lgone.length > 0) { arrModBump(es); kViewWrite(es, lgone) }
+            return {v: lgone.length > 0}
         }
         return null
     }
@@ -7887,21 +7914,24 @@ NotMemberKw = :script(~~
             if (grew) { arrModBump(s.keys) }
             return {v: grew}
         }
-        if (name == "remove" || name == "removeAll" || name == "retainAll") {
+        // removeAll / retainAll take elements or a predicate, removeIf a predicate.
+        if (name == "remove" || name == "removeAll" || name == "retainAll" || name == "removeIf") {
+            var isPred = name != "remove" && typeof f == "function"
             var gone = anytype
-            gone = (name == "remove") ? [f] : kElems(f)
+            gone = (name == "remove") ? [f] : (isPred ? [] : kElems(f))
             var nk = []
-            var changed = false
+            var dropped = []
             for (i = 0; i < s.keys.length; i++) {
                 var hit = false
-                for (var g = 0; g < gone.length; g++) { if (kEqVals(gone[g], s.keys[i])) { hit = true } }
-                if (hit == (name == "retainAll")) { nk.push(s.keys[i]) } else { changed = true }
+                if (isPred) { hit = f(s.keys[i]) === true }
+                else { for (var g = 0; g < gone.length; g++) { if (kEqVals(gone[g], s.keys[i])) { hit = true } } }
+                if (hit == (name == "retainAll")) { nk.push(s.keys[i]) } else { dropped.push(s.keys[i]) }
             }
             kArrSetTo(s.keys, nk)
-            if (changed) { arrModBump(s.keys) }
-            return {v: changed}
+            if (dropped.length > 0) { arrModBump(s.keys); kViewWrite(s, dropped) }
+            return {v: dropped.length > 0}
         }
-        if (name == "clear") { kArrSetTo(s.keys, []); arrModBump(s.keys); return {v: undefined} }
+        if (name == "clear") { kViewWrite(s, s.keys.slice()); kArrSetTo(s.keys, []); arrModBump(s.keys); return {v: undefined} }
         if (name == "hashCode") { return {v: kHash(s)} }
         if (name == "equals") { return {v: kEq(s, f, false)} }
         // The Set-valued operators. plus/union add, minus/subtract remove and

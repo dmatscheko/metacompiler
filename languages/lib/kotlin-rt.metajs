@@ -5464,17 +5464,19 @@ function ktSeqMethodK(arr, name, args, kind) {
         return undefined
     }
     if (name == "clear") {
+        k4ViewWrite(arr, k3Copy(arr))
         k3Clear(arr)
         arrModBump(arr)
         return undefined
     }
     if (k3IsRemoveAll(name)) {
         // Kotlin has TWO overloads of each: one takes a collection of elements,
-        // the other a PREDICATE.
+        // the other a PREDICATE; java's removeIf takes a predicate.
         b2 = ktIsFn(f)
         oth = []
         if (!b2) { oth = ktElems(f) }
         d = name == "retainAll"
+        keys = []
         for (i = 0; i < es.length; i = i + 1) {
             b = false
             if (b2) { b = k3Truthy(ktCall1(f, es[i])) }
@@ -5483,12 +5485,14 @@ function ktSeqMethodK(arr, name, args, kind) {
                     if (ktEqVals(oth[j], es[i])) { b = true }
                 }
             }
-            if (b === d) { out.push(es[i]) }
+            if (b === d) { out.push(es[i]) } else { keys.push(es[i]) }
         }
-        n = es.length
         k3Replace(arr, out)
-        if (out.length != n) { arrModBump(arr) }
-        return out.length != n
+        if (keys.length > 0) {
+            arrModBump(arr)
+            k4ViewWrite(arr, keys)
+        }
+        return keys.length > 0
     }
     if (name == "removeFirst") {
         if (arr.length == 0) { ktNoElem("List is empty.") }
@@ -5544,6 +5548,7 @@ function ktSeqMethodK(arr, name, args, kind) {
             if (ktEqVals(arr[i], f)) {
                 k3RemoveAt(arr, i)
                 arrModBump(arr)
+                k4ViewWrite(arr, [f])
                 return true
             }
         }
@@ -5639,6 +5644,7 @@ function k3IsSortOp(name) {
 
 function k3IsRemoveAll(name) {
     if (name == "removeAll") { return true }
+    if (name == "removeIf") { return true }
     return name == "retainAll"
 }
 
@@ -5783,22 +5789,32 @@ function ktSetMethod(s, name, args) {
         if (b) { arrModBump(keys) }
         return b
     }
+    // removeAll / retainAll take elements or a predicate, removeIf a predicate.
     if (k3IsSetRemove(name)) {
+        changed = name != "remove" && ktIsFn(f)
         oth = [f]
-        if (name != "remove") { oth = ktElems(f) }
+        if (name != "remove" && !changed) { oth = ktElems(f) }
         d = name == "retainAll"
+        var dropped = []
         for (i = 0; i < keys.length; i = i + 1) {
             b = false
-            for (j = 0; j < oth.length; j = j + 1) {
-                if (ktEqVals(oth[j], keys[i])) { b = true }
+            if (changed) { b = k3Truthy(ktCall1(f, keys[i])) }
+            else {
+                for (j = 0; j < oth.length; j = j + 1) {
+                    if (ktEqVals(oth[j], keys[i])) { b = true }
+                }
             }
-            if (b === d) { kept.push(keys[i]) } else { changed = true }
+            if (b === d) { kept.push(keys[i]) } else { dropped.push(keys[i]) }
         }
         k3Replace(keys, kept)
-        if (changed) { arrModBump(keys) }
-        return changed
+        if (dropped.length > 0) {
+            arrModBump(keys)
+            k4ViewWrite(s, dropped)
+        }
+        return dropped.length > 0
     }
     if (name == "clear") {
+        k4ViewWrite(s, k3Copy(keys))
         k3Clear(keys)
         arrModBump(keys)
         return undefined
@@ -5853,6 +5869,7 @@ function ktSetMethod(s, name, args) {
 function k3IsSetRemove(name) {
     if (name == "remove") { return true }
     if (name == "removeAll") { return true }
+    if (name == "removeIf") { return true }
     return name == "retainAll"
 }
 
@@ -6267,6 +6284,37 @@ function k4ViewOf(a, owner) {
     p["__wsrc"] = owner
     arrPropsSet(a, p)
     return a
+}
+// kViewWrite (kotlin-interpreter.abnf): a map's keys / values / entries view
+// writes through.
+function k4ViewWrite(view, gone) {
+    var m = k4ViewOwner(view)
+    var mk = ktMapKeys(m)
+    if (mk === undefined) { return }
+    var mv = ktMapVals(m)
+    var isVals = ktIsArr(view)
+    if (isVals && arrKind(view) != 3) { return }
+    var isEnt = false
+    if (!isVals) { isEnt = ktJvmTag(view, "").indexOf("EntrySet") >= 0 }
+    var g = 0
+    var j = 0
+    var at = 0
+    var e = anytype
+    for (g = 0; g < gone.length; g = g + 1) {
+        e = gone[g]
+        at = -1
+        if (isVals) {
+            for (j = 0; j < mv.length && at < 0; j = j + 1) {
+                if (ktEqVals(mv[j], e)) { at = j }
+            }
+        } else if (isEnt) {
+            at = ktMapFind(mk, e["key"])
+            if (at >= 0 && !ktEqVals(mv[at], e["value"])) { at = -1 }
+        } else {
+            at = ktMapFind(mk, e)
+        }
+        if (at >= 0) { ktMapDropAt(mk, mv, at) }
+    }
 }
 function k4ViewOwner(v) {
     if (!ktIsObj(v)) { return v }

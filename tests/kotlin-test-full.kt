@@ -6462,6 +6462,42 @@ fun sec144() {
     check("cme144d", m.joinToString(" ") == "cme1 cme1 cme1")
 }
 
+// ===== SECTION 145: a map's views write through, and removeIf =====
+// A map's keys / values / entries are views: their own remove / removeAll /
+// retainAll / removeIf / clear take the entries out of the map - by key, the
+// first entry with the value, the equal entry. removeAll / retainAll also take a
+// predicate on a set, and java's removeIf works on lists and sets. Every row is
+// java 24's LinkedHashMap / ArrayList / LinkedHashSet, the predicate forms
+// kotlin-stdlib 2.2.21's.
+fun m145(): MutableMap<Int, String> = mutableMapOf(1 to "a", 2 to "b", 3 to "a")
+fun sec145() {
+    val r = mutableListOf<String>()
+    var x = m145(); r.add("" + x.keys.remove(1) + x)
+    x = m145(); r.add("" + x.keys.remove(9) + x)
+    x = m145(); r.add("" + x.values.remove("a") + x)
+    x = m145(); r.add("" + x.entries.removeIf { it.key == 1 } + x)
+    check("view145a", r.joinToString(" ") == "true{2=b, 3=a} false{1=a, 2=b, 3=a} true{2=b, 3=a} true{2=b, 3=a}")
+    r.clear()
+    x = m145(); r.add("" + x.keys.removeAll(listOf(1, 3)) + x)
+    x = m145(); r.add("" + x.keys.retainAll(listOf(2)) + x)
+    x = m145(); r.add("" + x.keys.removeIf { it > 1 } + x)
+    x = m145(); x.keys.clear(); r.add("" + x)
+    x = m145(); r.add("" + x.values.removeAll(listOf("a")) + x)
+    x = m145(); r.add("" + x.values.retainAll(listOf("a")) + x)
+    x = m145(); x.values.clear(); r.add("" + x)
+    check("view145b", r.joinToString(" ") == "true{2=b} true{2=b} true{1=a} {} true{2=b} true{1=a, 3=a} {}")
+    r.clear()
+    x = m145(); val e = x.entries.first(); r.add("" + x.entries.remove(e) + x)
+    x = m145(); r.add("" + x.keys.removeAll { it == 2 } + x)
+    x = m145(); r.add("" + x.values.retainAll { it == "a" } + x)
+    x = m145(); r.add("" + x.entries.removeAll { it.value == "a" } + x)
+    check("view145c", r.joinToString(" ") == "true{2=b, 3=a} true{1=a, 3=a} true{1=a, 3=a} true{2=b}")
+    val s = mutableSetOf(1, 2, 3, 4)
+    val l = mutableListOf(1, 2, 3, 4)
+    check("view145d", s.removeAll { it > 3 } && s.retainAll { it > 1 } && !s.removeIf { it > 5 } && s.toString() == "[2, 3]" &&
+                      l.removeIf { it % 2 == 0 } && l.toString() == "[1, 3]")
+}
+
 fun main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -6603,6 +6639,7 @@ fun main() {
     sec142() // SECTION-CALL 142
     sec143() // SECTION-CALL 143
     sec144() // SECTION-CALL 144
+    sec145() // SECTION-CALL 145
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }
