@@ -2760,7 +2760,7 @@ function pyNoDictAttr(obj, name) {
     }
     if (tn == "NoneType" || tn == "int" || tn == "float" || tn == "bool" || tn == "str" ||
         tn == "list" || tn == "tuple" || tn == "dict" || tn == "set" || tn == "frozenset" || tn == "complex" ||
-        tn == "generator") {
+        tn == "generator" || pyIsIter(obj)) {
         pyRaiseExc("AttributeError", "'" + tn + "' object has no attribute '" + name +
                    "' and no __dict__ for setting new attributes")
     }
@@ -3188,14 +3188,16 @@ function js_pyvars(o) {
 
 // dir(o) of a user class or of its instance: the instance's attributes, the
 // own members of every class on the resolution order and the fixed names of
-// lib/python-dir.js, sorted. Refused: dir() without an argument (it needs the
-// calling scope's names) and dir() of any other value, or of a class with
+// lib/python-dir.js, sorted; of object or a generator, its fixed names.
+// Refused: dir() without an argument (it needs the calling scope's names) and
+// dir() of any other value, or of a class with
 // __slots__ or a builtin base (they need every builtin type's member table).
 // Go: rt.pyDir.
 function js_pydir(args) {
     if (args.length == 0) { pyRaiseExc("NotImplementedError", "dir() without an argument is not supported") }
     var o = args[0]
     if (o === pyBuiltinClass("object")) { return pyCCopyArr(pydirObject) }
+    if (pyIsGen(o)) { return pydirSorted(pydirObject.concat(pydirGenerator)) }
     var names = []
     var cls = o
     if (!pyIsClass(o)) {
@@ -9472,7 +9474,13 @@ function js_pydel_attr(obj, name) {
 function pyDDelAttr(obj, name) {
     if (typeof obj == "function") {
         var dn = pyToStr(name)
-        var fd = pyFnAttrs(pyFnOwner(obj), false)
+        // Only a plain function has a __dict__ to delete from.
+        var dtn = pyTypeName(obj)
+        if (dtn != "function") {
+            pyRaiseExc("AttributeError", "'" + dtn + "' object has no attribute '" + dn +
+                       "' and no __dict__ for setting new attributes")
+        }
+        var fd = pyFnAttrs(obj, false)
         var fi = 0 - 1
         if (fd !== undefined) { fi = pyDictFind(fd["keys"], dn) }
         if (fi < 0) { pyRaiseExc("AttributeError", "'" + pyTypeName(obj) + "' object has no attribute '" + dn + "'") }

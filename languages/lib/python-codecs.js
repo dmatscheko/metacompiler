@@ -1,8 +1,9 @@
 // python-codecs.js -- str.encode and bytes.decode for CPython 3.14's text
-// codecs other than the multibyte CJK ones, idna, punycode and the escape
-// codecs: utf-8, utf-8-sig, utf-7, ascii, latin-1, utf-16 and utf-32 (each with
-// -le and -be), undefined, and every single-byte charmap codec (cp437,
-// mac_roman, koi8_r, iso8859_2 ...), with the strict, ignore, replace,
+// codecs other than the multibyte CJK ones: utf-8, utf-8-sig, utf-7, ascii,
+// latin-1, utf-16 and utf-32 (each with -le and -be), undefined,
+// unicode_escape, raw_unicode_escape, punycode, idna (its ASCII labels), and
+// every single-byte charmap
+// codec (cp437, mac_roman, koi8_r, iso8859_2 ...), with the strict, ignore, replace,
 // backslashreplace, xmlcharrefreplace and surrogateescape error handlers, for
 // python-interpreter.abnf (include) and languages/lib/python-rt.metajs
 // (import). Go twin: abnf/jsrtpycodecs.go.
@@ -66,6 +67,10 @@ var pycdNames = [
     "utf-32-le", ["utf_32_le", "utf_32le"],
     "utf-32-be", ["utf_32_be", "utf_32be"],
     "undefined", ["undefined"],
+    "unicode-escape", ["unicode_escape"],
+    "raw-unicode-escape", ["raw_unicode_escape"],
+    "punycode", ["punycode"],
+    "idna", ["idna"],
     "binary", ["base64_codec", "base64", "base_64", "bz2_codec", "bz2", "hex_codec", "hex", "quopri_codec",
         "quopri", "quoted_printable", "quotedprintable", "rot_13", "rot13", "uu_codec", "uu", "zlib_codec",
         "zip", "zlib"]]
@@ -340,6 +345,18 @@ function pycdEncode(cps, enc, errs) {
         pycdEncodeUtf7(cps, out)
         return r
     }
+    if (codec == "unicode-escape" || codec == "raw-unicode-escape") {
+        pycdEncodeEscape(cps, out, codec == "raw-unicode-escape")
+        return r
+    }
+    if (codec == "punycode") {
+        pycdEncodePuny(cps, out)
+        return r
+    }
+    if (codec == "idna") {
+        pycdEncodeIdna(r, cps, errs)
+        return r
+    }
     if (codec == "utf-8-sig") {
         out.push(239)
         out.push(187)
@@ -517,11 +534,25 @@ function pycdChr(cp) {
 
 // Decode the byte values bs0 under the encoding named enc. Each undecodable
 // range [from, to) - CPython's UnicodeDecodeError start and end - goes to
-// pycdBad.
+// pycdBad. No bytes decode to "" under any name, as in CPython, which looks
+// no codec up for them.
 function pycdDecode(bs0, enc, errs) {
     var r = {err: "", msg: "", b: [], s: ""}
+    if (bs0.length == 0) { return r }
     var codec = pycdLookup(enc)
     if (pycdRefuse(r, enc, codec, "decode")) { return r }
+    if (codec == "unicode-escape" || codec == "raw-unicode-escape") {
+        pycdDecodeEscape(r, bs0, codec == "raw-unicode-escape", errs)
+        return r
+    }
+    if (codec == "punycode") {
+        pycdDecodePuny(r, bs0, errs)
+        return r
+    }
+    if (codec == "idna") {
+        pycdDecodeIdna(r, bs0, errs)
+        return r
+    }
     var bs = bs0
     if (codec == "utf-8-sig") {
         // A leading BOM goes, and positions count from after it.
@@ -792,4 +823,619 @@ function pycdBad(r, codec, bs, from, to, why, errs) {
         r.msg = "unknown error handler name '" + errs + "'"
     }
     return to
+}
+
+// unicode_escape writes a backslash, tab, newline and carriage return as
+// their escapes, the other code points below 32 and from 127 to 255 as \xhh
+// and everything above as \uhhhh or \Uhhhhhhhh; raw_unicode_escape writes
+// every code point below 256 as its byte and only the rest escaped. Neither
+// can fail, so the error handler is never asked.
+function pycdEncodeEscape(cps, out, raw) {
+    for (var k = 0; k < cps.length; k++) {
+        var c = cps[k]
+        var esc = ""
+        if (c >= 65536) { esc = "\\U" + pycdHex(c, 8) }
+        else if (c >= 256) { esc = "\\u" + pycdHex(c, 4) }
+        else if (raw) { out.push(c) }
+        else if (c == 92) { esc = "\\\\" }
+        else if (c == 9) { esc = "\\t" }
+        else if (c == 10) { esc = "\\n" }
+        else if (c == 13) { esc = "\\r" }
+        else if (c < 32 || c >= 127) { esc = "\\x" + pycdHex(c, 2) }
+        else { out.push(c) }
+        for (var i = 0; i < esc.length; i++) { out.push(esc.charCodeAt(i)) }
+    }
+}
+
+// The value of a hexadecimal digit byte, or -1.
+function pycdHexVal(c) {
+    if (c >= 48 && c <= 57) { return c - 48 }
+    if (c >= 97 && c <= 102) { return c - 87 }
+    if (c >= 65 && c <= 70) { return c - 55 }
+    return 0 - 1
+}
+
+// The two escape decoders. Every byte stands for the code point of its value
+// except a backslash: raw_unicode_escape reads only \uhhhh and \Uhhhhhhhh,
+// unicode_escape also Python's string-literal escapes - an unknown one stays
+// as written, an octal one takes up to three digits, and backslash-newline is
+// nothing. A malformed escape spans from its backslash to the first byte that
+// is not a hex digit. \N{name} needs the Unicode name database, which is not
+// here, and is refused.
+function pycdDecodeEscape(r, bs, raw, errs) {
+    var codec = raw ? "rawunicodeescape" : "unicodeescape"
+    var n = bs.length
+    var i = 0
+    while (i < n) {
+        var c = bs[i]
+        if (c != 92 || (raw && i + 1 >= n)) {
+            r.s = r.s + String.fromCharCode(c)
+            i = i + 1
+            continue
+        }
+        var start = i
+        if (i + 1 >= n) {
+            i = pycdBad(r, codec, bs, i, n, "\\ at end of string", errs)
+            if (r.err != "") { return }
+            continue
+        }
+        var e = bs[i + 1]
+        i = i + 2
+        var count = 0
+        var why = ""
+        if (e == 117) {
+            count = 4
+            why = "truncated \\uXXXX escape"
+        } else if (e == 85) {
+            count = 8
+            why = "truncated \\UXXXXXXXX escape"
+        } else if (e == 120 && !raw) {
+            count = 2
+            why = "truncated \\xXX escape"
+        }
+        if (count == 0) {
+            i = pycdSimpleEscape(r, bs, raw, e, i)
+            if (r.err != "") { return }
+            continue
+        }
+        var v = 0
+        var k = 0
+        while (k < count && i < n && pycdHexVal(bs[i]) >= 0) {
+            v = v * 16 + pycdHexVal(bs[i])
+            i = i + 1
+            k = k + 1
+        }
+        if (k == count && v > 1114111) {
+            why = raw ? "\\Uxxxxxxxx out of range" : "illegal Unicode character"
+            k = 0
+        }
+        if (k < count) {
+            i = pycdBad(r, codec, bs, start, i, why, errs)
+            if (r.err != "") { return }
+            continue
+        }
+        r.s = r.s + pycdChr(v)
+    }
+}
+
+// A backslash and the byte e that is not u, U or x, followed by bs[at]: its
+// text appended to r.s; the answer is where decoding resumes.
+function pycdSimpleEscape(r, bs, raw, e, at) {
+    var simple = [92, 39, 34, 97, 98, 102, 110, 114, 116, 118]
+    var means = [92, 39, 34, 7, 8, 12, 10, 13, 9, 11]
+    var si = 0 - 1
+    for (var q = 0; q < simple.length; q++) {
+        if (simple[q] == e) { si = q }
+    }
+    var i = at
+    if (raw || (si < 0 && e != 10 && e != 78 && (e < 48 || e > 55))) {
+        r.s = r.s + "\\" + String.fromCharCode(e)
+    } else if (si >= 0) {
+        r.s = r.s + String.fromCharCode(means[si])
+    } else if (e >= 48 && e <= 55) {
+        var v = e - 48
+        var k = 1
+        while (k < 3 && i < bs.length && bs[i] >= 48 && bs[i] <= 55) {
+            v = v * 8 + bs[i] - 48
+            i = i + 1
+            k = k + 1
+        }
+        r.s = r.s + String.fromCharCode(v)
+    } else if (e == 78) {
+        r.err = "NotImplementedError"
+        r.msg = "the unicode_escape codec's \\N{...} escapes are not supported"
+    }
+    return i
+}
+
+// Punycode (RFC 3492) as CPython's encodings.punycode writes it: the basic
+// code points in order, a "-" when there were any, then each other code
+// point's insertion delta as a generalized variable-length integer, smallest
+// code point first and for one code point left to right.
+function pycdEncodePuny(cps, out) {
+    var ext = []
+    for (var i = 0; i < cps.length; i++) {
+        var c = cps[i]
+        var at = ext.length
+        while (at > 0 && ext[at - 1] > c) { at = at - 1 }
+        if (c < 128) {
+            out.push(c)
+        } else if (at == 0 || ext[at - 1] != c) {
+            ext.push(c)
+            for (var m = ext.length - 1; m > at; m = m - 1) { ext[m] = ext[m - 1] }
+            ext[at] = c
+        }
+    }
+    var baselen = out.length
+    if (baselen > 0) { out.push(45) }
+    var oldchar = 128
+    var oldindex = 0 - 1
+    var bias = 72
+    var points = 0
+    for (var e = 0; e < ext.length; e++) {
+        var ch = ext[e]
+        var below = 0
+        for (var j = 0; j < cps.length; j++) {
+            if (cps[j] < ch) { below = below + 1 }
+        }
+        var delta = (below + 1) * (ch - oldchar)
+        var index = 0 - 1
+        for (var p = 0; p < cps.length; p++) {
+            if (cps[p] < ch) { index = index + 1 }
+            if (cps[p] == ch) {
+                index = index + 1
+                delta = delta + index - oldindex
+                pycdPunyDigits(out, delta - 1, bias)
+                bias = pycdPunyAdapt(pycdBnOf(delta - 1), points == 0, baselen + points + 1)
+                points = points + 1
+                oldindex = index
+                delta = 0
+            }
+        }
+        oldchar = ch
+    }
+}
+
+// RFC 3492's threshold t(j) for tmin 1, tmax 26, base 36.
+function pycdPunyT(j, bias) {
+    var t = 36 * (j + 1) - bias
+    if (t < 1) { return 1 }
+    if (t > 26) { return 26 }
+    return t
+}
+
+function pycdPunyDigits(out, n0, bias) {
+    var digits = "abcdefghijklmnopqrstuvwxyz0123456789"
+    var n = n0
+    var j = 0
+    var t = pycdPunyT(0, bias)
+    while (n >= t) {
+        out.push(digits.charCodeAt(t + (n - t) % (36 - t)))
+        n = Math.floor((n - t) / (36 - t))
+        j = j + 1
+        t = pycdPunyT(j, bias)
+    }
+    out.push(digits.charCodeAt(n))
+}
+
+// The bias after a delta (a pycdBn, which a malformed string makes arbitrarily
+// large) of the first or a later code point, numchars code points in.
+function pycdPunyAdapt(delta, first, numchars) {
+    var d = pycdBnDiv(delta, first ? 700 : 2).q
+    d = pycdBnAdd(d, pycdBnDiv(d, numchars).q)
+    var divisions = 0
+    while (pycdBnCmp(d, 455) > 0) {
+        d = pycdBnDiv(d, 35).q
+        divisions = divisions + 36
+    }
+    var v = pycdBnNum(d)
+    return divisions + Math.floor(36 * v / (v + 38))
+}
+
+// Decode punycode: the basic code points are the ASCII text before the last
+// "-" (decoded under errs, the ascii codec's errors), the rest the deltas,
+// case-insensitively. Only strict, replace and ignore are handled; the last
+// two stop at the first malformed delta and answer the text so far, and turn
+// a code point past U+10FFFF into "?". A delta is unbounded, so the
+// arithmetic is on pycdBn values.
+function pycdDecodePuny(r, bs, errs) {
+    if (errs != "strict" && errs != "replace" && errs != "ignore") {
+        r.err = "UnicodeError"
+        r.msg = "Unsupported error handling: " + errs
+        return
+    }
+    pycdPunyRun(r, bs, 0, bs.length, errs, "punycode")
+}
+
+// Decode the punycode bs[lo:hi], whose errors name codec and count positions in
+// the whole of bs; the basic code points' error names the ascii codec when
+// codec is punycode itself.
+function pycdPunyRun(r, bs, lo, hi, errs, codec) {
+    var dash = 0 - 1
+    for (var i = lo; i < hi; i++) {
+        if (bs[i] == 45) { dash = i }
+    }
+    var base = []
+    for (var b = lo; b < dash; b++) {
+        if (bs[b] < 128) {
+            base.push(bs[b])
+        } else if (errs == "strict") {
+            r.err = "UnicodeDecodeError"
+            r.msg = "'" + (codec == "punycode" ? "ascii" : codec) + "' codec can't decode byte 0x" + pycdHex(bs[b], 2) +
+                    " in position " + b + ": ordinal not in range(128)"
+            return
+        } else if (errs == "replace") {
+            base.push(65533)
+        }
+    }
+    var xs = dash < 0 ? lo : dash + 1
+    var ext = []
+    for (var x = xs; x < hi; x++) {
+        var u = bs[x]
+        if (u >= 97 && u <= 122) { u = u - 32 }
+        ext.push(u)
+    }
+    var ch = pycdBnOf(128)
+    var pos = pycdBnOf(0)
+    var first = true
+    var bias = 72
+    var extpos = 0
+    var why = ""
+    while (extpos < ext.length && why == "") {
+        var delta = pycdBnOf(0)
+        var w = pycdBnOf(1)
+        var j = 0
+        var done = false
+        var from = extpos
+        while (!done && why == "") {
+            if (extpos >= ext.length) {
+                why = "incomplete punycode string"
+                from = extpos
+            } else {
+                var c = ext[extpos]
+                extpos = extpos + 1
+                var digit = 0 - 1
+                if (c >= 65 && c <= 90) { digit = c - 65 }
+                if (c >= 48 && c <= 57) { digit = c - 22 }
+                if (digit < 0) {
+                    why = "Invalid extended code point '" + c + "'"
+                    from = extpos - 1
+                } else {
+                    var t = pycdPunyT(j, bias)
+                    delta = pycdBnAdd(delta, pycdBnMul(w, digit))
+                    if (digit < t) { done = true }
+                    w = pycdBnMul(w, 36 - t)
+                    j = j + 1
+                }
+            }
+        }
+        if (why != "") {
+            if (errs == "strict") { pycdPunyErr(r, bs, pycdBnOf(xs + from), why, codec) }
+            break
+        }
+        pos = pycdBnAdd(pos, delta)
+        if (!first) { pos = pycdBnAdd(pos, pycdBnOf(1)) }
+        var qr = pycdBnDiv(pos, base.length + 1)
+        ch = pycdBnAdd(ch, qr.q)
+        if (pycdBnCmp(ch, 1114111) > 0) {
+            if (errs == "strict") {
+                var start = xs < 1 ? pycdBnPred(pos) : pycdBnAdd(pos, pycdBnOf(xs - 1))
+                pycdPunyErr(r, bs, start, "Invalid character U+" + pycdBnHex(ch), codec)
+                break
+            }
+            ch = pycdBnOf(63)
+        }
+        var at = qr.r
+        base.push(0)
+        for (var m = base.length - 1; m > at; m = m - 1) { base[m] = base[m - 1] }
+        base[at] = pycdBnNum(ch)
+        bias = pycdPunyAdapt(delta, first, base.length)
+        pos = pycdBnOf(at)
+        first = false
+    }
+    if (r.err != "") { return }
+    for (var k = 0; k < base.length; k++) { r.s = r.s + pycdChr(base[k]) }
+}
+
+// The UnicodeDecodeError of a punycode string at position at (a pycdBn),
+// which the incomplete-string error places one past the last byte. An end
+// position past a C ssize_t is CPython's OverflowError instead.
+function pycdPunyErr(r, bs, at, why, codec) {
+    var s = pycdBnDec(at)
+    var end = pycdBnDec(pycdBnAdd(at, pycdBnOf(1)))
+    if (end.length > 19 || (end.length == 19 && end > "9223372036854775807")) {
+        r.err = "OverflowError"
+        r.msg = "Python int too large to convert to C ssize_t"
+        return
+    }
+    r.err = "UnicodeDecodeError"
+    if (pycdBnCmp(at, bs.length - 1) <= 0) {
+        r.msg = "'" + codec + "' codec can't decode byte 0x" + pycdHex(bs[pycdBnNum(at)], 2) + " in position " + s + ": " + why
+    } else {
+        r.msg = "'" + codec + "' codec can't decode bytes in position " + s + "-" + s + ": " + why
+    }
+}
+
+// A non-negative integer of any size as little-endian base-10^7 limbs, worked
+// on only by small numbers, so every intermediate stays exact.
+function pycdBnOf(v0) {
+    var out = []
+    var v = v0
+    while (v > 0) {
+        out.push(v % 10000000)
+        v = Math.floor(v / 10000000)
+    }
+    return out
+}
+function pycdBnAdd(a, b) {
+    var out = []
+    var carry = 0
+    var n = a.length > b.length ? a.length : b.length
+    for (var i = 0; i < n; i++) {
+        var s = (i < a.length ? a[i] : 0) + (i < b.length ? b[i] : 0) + carry
+        carry = s >= 10000000 ? 1 : 0
+        out.push(s - carry * 10000000)
+    }
+    if (carry > 0) { out.push(carry) }
+    return out
+}
+function pycdBnMul(a, m) {
+    var out = []
+    var carry = 0
+    for (var i = 0; i < a.length; i++) {
+        var p = a[i] * m + carry
+        carry = Math.floor(p / 10000000)
+        out.push(p - carry * 10000000)
+    }
+    while (carry > 0) {
+        out.push(carry % 10000000)
+        carry = Math.floor(carry / 10000000)
+    }
+    if (m == 0) { return [] }
+    return out
+}
+// a - 1, for a of at least 1.
+function pycdBnPred(a) {
+    var out = []
+    var borrow = 1
+    for (var i = 0; i < a.length; i++) {
+        var d = a[i] - borrow
+        borrow = d < 0 ? 1 : 0
+        out.push(d + borrow * 10000000)
+    }
+    while (out.length > 0 && out[out.length - 1] == 0) { out.pop() }
+    return out
+}
+// {q, r}: the quotient (a pycdBn) and remainder of a by the small m.
+function pycdBnDiv(a, m) {
+    var q = []
+    for (var z = 0; z < a.length; z++) { q.push(0) }
+    var rem = 0
+    for (var i = a.length - 1; i >= 0; i = i - 1) {
+        var cur = rem * 10000000 + a[i]
+        var d = Math.floor(cur / m)
+        q[i] = d
+        rem = cur - d * m
+    }
+    while (q.length > 0 && q[q.length - 1] == 0) { q.pop() }
+    return {q: q, r: rem}
+}
+// The sign of a - v, for a small v.
+function pycdBnCmp(a, v) {
+    if (a.length > 2) { return 1 }
+    var x = pycdBnNum(a)
+    if (x > v) { return 1 }
+    if (x < v) { return 0 - 1 }
+    return 0
+}
+// The value of a pycdBn of at most two limbs.
+function pycdBnNum(a) {
+    var v = 0
+    for (var i = a.length - 1; i >= 0; i = i - 1) { v = v * 10000000 + a[i] }
+    return v
+}
+function pycdBnDec(a) {
+    if (a.length == 0) { return "0" }
+    var s = "" + a[a.length - 1]
+    for (var i = a.length - 2; i >= 0; i = i - 1) {
+        var d = "" + a[i]
+        while (d.length < 7) { d = "0" + d }
+        s = s + d
+    }
+    return s
+}
+function pycdBnHex(a0) {
+    var a = a0
+    var s = ""
+    while (a.length > 0) {
+        var qr = pycdBnDiv(a, 16)
+        s = "0123456789abcdef".charAt(qr.r) + s
+        a = qr.q
+    }
+    return s
+}
+
+// IDNA (RFC 3490) as CPython's encodings.idna applies it, strict errors only.
+// A label that is all ASCII is exact; a label that is not, and a decoded xn--
+// label that is not ASCII, needs nameprep (RFC 3491) over Unicode 3.2's
+// tables, which are not here, and is refused. Encoding an ASCII name checks
+// its labels between "." only; any other name splits at the four IDNA dots.
+function pycdEncodeIdna(r, cps, errs) {
+    if (errs != "strict") {
+        r.err = "UnicodeError"
+        r.msg = "Unsupported error handling: " + errs
+        return
+    }
+    var ascii = true
+    for (var i = 0; i < cps.length; i++) {
+        if (cps[i] >= 128) { ascii = false }
+    }
+    var labels = pycdIdnaSplit(cps, ascii)
+    var last = labels.length - 2
+    if (!ascii && labels[last + 1] - labels[last] == 0 && labels.length > 2) { last = last - 2 }
+    for (var e = 0; e <= last && ascii; e = e + 2) {
+        if (e < last && labels[e + 1] == labels[e]) {
+            pycdIdnaEncErr(r, cps, labels[e], labels[e] + 1, "label empty")
+            return
+        }
+    }
+    for (var k = 0; k <= last; k = k + 2) {
+        var from = labels[k]
+        var to = labels[k + 1]
+        for (var j = from; j < to; j++) {
+            if (cps[j] >= 128) {
+                pycdIdnaRefuse(r)
+                return
+            }
+        }
+        if (!ascii && to == from) {
+            pycdIdnaEncErr(r, cps, from, from + 1, "label empty")
+            return
+        }
+        if (to - from >= 64) {
+            pycdIdnaEncErr(r, cps, from, to, "label too long")
+            return
+        }
+    }
+    for (var c = 0; c < cps.length; c++) {
+        if (ascii || c < labels[last + 1]) { r.b.push(pycdIdnaDot(cps[c]) ? 46 : cps[c]) }
+    }
+    if (last < labels.length - 2) { r.b.push(46) }
+}
+
+// The labels of a name as [from, to) pairs of positions: split at "." only
+// (ascii), or at any of the four IDNA dots.
+function pycdIdnaSplit(cps, ascii) {
+    var out = [0]
+    for (var i = 0; i < cps.length; i++) {
+        if (cps[i] == 46 || (!ascii && pycdIdnaDot(cps[i]))) {
+            out.push(i)
+            out.push(i + 1)
+        }
+    }
+    out.push(cps.length)
+    return out
+}
+
+function pycdIdnaDot(c) {
+    return c == 46 || c == 12290 || c == 65294 || c == 65377
+}
+
+function pycdIdnaRefuse(r) {
+    r.err = "NotImplementedError"
+    r.msg = "the idna codec's nameprep of a non-ASCII label is not supported"
+}
+
+function pycdIdnaEncErr(r, cps, from, to, why) {
+    var where = "characters in position " + from + "-" + (to - 1)
+    if (to - from == 1) { where = "character '" + pycdEsc(cps[from]) + "' in position " + from }
+    r.err = "UnicodeEncodeError"
+    r.msg = "'idna' codec can't encode " + where + ": " + why
+}
+
+function pycdIdnaDecErr(r, bs, from, to, why) {
+    var where = "bytes in position " + from + "-" + (to - 1)
+    if (to - from == 1 && from < bs.length) { where = "byte 0x" + pycdHex(bs[from], 2) + " in position " + from }
+    r.err = "UnicodeDecodeError"
+    r.msg = "'idna' codec can't decode " + where + ": " + why
+}
+
+// Decoding: a name without "xn--" anywhere is plain ASCII; otherwise each
+// label between "." is ASCII text, or an "xn--" label whose punycode must
+// encode back to it.
+function pycdDecodeIdna(r, bs, errs) {
+    if (errs != "strict") {
+        r.err = "UnicodeError"
+        r.msg = "Unsupported error handling: " + errs
+        return
+    }
+    var ace = false
+    var ascii = true
+    for (var i = 0; i < bs.length; i++) {
+        if (pycdIdnaAce(bs, i)) { ace = true }
+        if (bs[i] >= 128) { ascii = false }
+    }
+    if (!ace && ascii) {
+        for (var a = 0; a < bs.length; a++) { r.s = r.s + String.fromCharCode(bs[a]) }
+        return
+    }
+    var labels = pycdIdnaSplit(bs, true)
+    var last = labels.length - 2
+    var dot = labels[last + 1] == labels[last] && labels.length > 2
+    if (dot) { last = last - 2 }
+    for (var k = 0; k <= last; k = k + 2) {
+        var from = labels[k]
+        var to = labels[k + 1]
+        if (k > 0) { r.s = r.s + "." }
+        if (to - from > 1024) {
+            pycdIdnaDecErr(r, bs, from, to, "label way too long")
+            return
+        }
+        if (to - from < 4 || !pycdIdnaAce(bs, from)) {
+            for (var j = from; j < to; j++) {
+                if (bs[j] >= 128) {
+                    pycdIdnaDecErr(r, bs, j, j + 1, "ordinal not in range(128)")
+                    return
+                }
+                r.s = r.s + String.fromCharCode(bs[j])
+            }
+            continue
+        }
+        var pr = {err: "", msg: "", b: [], s: ""}
+        pycdPunyRun(pr, bs, from + 4, to, "strict", "idna")
+        if (pr.err != "") {
+            r.err = pr.err
+            r.msg = pr.msg
+            return
+        }
+        for (var u = 0; u < pr.s.length; u++) {
+            if (pr.s.charCodeAt(u) >= 128) {
+                pycdIdnaRefuse(r)
+                return
+            }
+        }
+        if (pr.s.length == 0) {
+            pycdIdnaDecErr(r, bs, from, from + 1, "label empty")
+            return
+        }
+        if (pr.s.length >= 64) {
+            pycdIdnaDecErr(r, bs, from, from + pr.s.length, "label too long")
+            return
+        }
+        var lab = []
+        for (var q = from; q < to; q++) { lab.push(bs[q]) }
+        var back = []
+        for (var v = 0; v < pr.s.length; v++) { back.push(pr.s.charCodeAt(v)) }
+        pycdIdnaDecErr(r, bs, from, to, "IDNA does not round-trip, '" + pycdBytesRepr(lab) + "' != '" + pycdBytesRepr(back) + "'")
+        return
+    }
+    if (dot) { r.s = r.s + "." }
+}
+
+// Whether bs[i..] starts with "xn--", in any case.
+function pycdIdnaAce(bs, i) {
+    if (i + 4 > bs.length) { return false }
+    return (bs[i] == 120 || bs[i] == 88) && (bs[i + 1] == 110 || bs[i + 1] == 78) && bs[i + 2] == 45 && bs[i + 3] == 45
+}
+
+// repr() of ASCII bytes.
+function pycdBytesRepr(bs) {
+    var sq = false
+    var dq = false
+    for (var i = 0; i < bs.length; i++) {
+        if (bs[i] == 39) { sq = true }
+        if (bs[i] == 34) { dq = true }
+    }
+    var quote = sq && !dq ? 34 : 39
+    var out = "b" + String.fromCharCode(quote)
+    for (var j = 0; j < bs.length; j++) {
+        var c = bs[j]
+        if (c == 92 || c == quote) { out = out + "\\" + String.fromCharCode(c) }
+        else if (c == 9) { out = out + "\\t" }
+        else if (c == 10) { out = out + "\\n" }
+        else if (c == 13) { out = out + "\\r" }
+        else if (c < 32 || c >= 127) { out = out + "\\x" + pycdHex(c, 2) }
+        else { out = out + String.fromCharCode(c) }
+    }
+    return out + String.fromCharCode(quote)
 }

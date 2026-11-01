@@ -1590,6 +1590,10 @@ func (rt *jsrt) pyDelAttr(obj interface{}, name string) {
 // pyDelAttrRaw is object.__delattr__.
 func (rt *jsrt) pyDelAttrRaw(obj interface{}, name string) {
 	if isCallable(obj) {
+		// Only a plain function has a __dict__ to delete from.
+		if tn := pyTypeName(rt, obj); tn != "function" {
+			rt.pyRaise("AttributeError", "'"+tn+"' object has no attribute '"+name+"' and no __dict__ for setting new attributes")
+		}
 		d, i := rt.pyFuncAttrIdx(obj, name)
 		if i < 0 {
 			rt.pyRaise("AttributeError", "'"+pyTypeName(rt, obj)+"' object has no attribute '"+name+"'")

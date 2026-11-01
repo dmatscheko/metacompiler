@@ -2761,6 +2761,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (arguments.length == 0) { pyRaise(pyMakeExc("NotImplementedError", ["dir() without an argument is not supported"])) }
         var o = arguments[0]
         if (o === hostGlobals["object"]) { return pydirObject.slice(0) }
+        if (isGen(o)) { return pydirSorted(pydirObject.concat(pydirGenerator)) }
         var names = []
         var cls = o
         if (!(typeof o == "object" && o !== null && o.__isclass === true)) {
@@ -8973,74 +8974,85 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     //   -a & -b == -(((a-1) | (b-1)) + 1) -a | -b == -(((a-1) & (b-1)) + 1)
     //   -a ^ b  == -(((a-1) ^ b) + 1)     -a ^ -b == (a-1) ^ (b-1)
     //
-    // pyABitBin in languages/lib/python-rt.metajs is this same body over that
-    // engine's base-10000 limbs, and abnf/jsrt.go's pyBitBin is math/big's
+    // pyABitBin in languages/lib/python-rt.metajs is these identities over that
+    // engine's magnitude bits, and abnf/jsrt.go's pyBitBin is math/big's
     // And/Or/Xor/Lsh/Rsh, which implement exactly this.
     var bitShiftMax = 1048576
-    // The magnitude as little-endian BITS, by repeated halving of a copy.
-    function bitsTrim(bits) {
-        var n = bits.length
-        while (n > 0 && bits[n - 1] === 0) { n = n - 1 }
+    // A magnitude is worked on as little-endian 16-bit WORDS (pynLimbsToWords in
+    // lib/python-num.js), so every word, and a word times 2^16, is an exact
+    // small int the tag engine's own operators take whole.
+    function wordsTrim(w) {
+        var n = w.length
+        while (n > 0 && w[n - 1] === 0) { n = n - 1 }
         var out = []
-        for (var i = 0; i < n; i++) { out.push(bits[i]) }
+        for (var i = 0; i < n; i++) { out.push(w[i]) }
         return out
     }
-    // bits - 1; the caller only hands this a magnitude of at least 1.
-    function bitsDec(bits) {
+    // w - 1; the caller only hands this a magnitude of at least 1.
+    function wordsDec(w) {
         var out = []
-        for (var i = 0; i < bits.length; i++) { out.push(bits[i]) }
+        for (var i = 0; i < w.length; i++) { out.push(w[i]) }
         var k = 0
-        while (k < out.length && out[k] == 0) { out[k] = 1 ; k = k + 1 }
-        if (k < out.length) { out[k] = 0 }
-        return bitsTrim(out)
+        while (k < out.length && out[k] == 0) { out[k] = 65535 ; k = k + 1 }
+        if (k < out.length) { out[k] = out[k] - 1 }
+        return wordsTrim(out)
     }
-    function bitsInc(bits) {
+    function wordsInc(w) {
         var out = []
-        for (var i = 0; i < bits.length; i++) { out.push(bits[i]) }
+        for (var i = 0; i < w.length; i++) { out.push(w[i]) }
         var k = 0
-        while (k < out.length && out[k] == 1) { out[k] = 0 ; k = k + 1 }
-        if (k == out.length) { out.push(1) } else { out[k] = 1 }
+        while (k < out.length && out[k] == 65535) { out[k] = 0 ; k = k + 1 }
+        if (k == out.length) { out.push(1) } else { out[k] = out[k] + 1 }
         return out
     }
     // kind: 0 AND, 1 OR, 2 XOR, 3 ANDNOT.
-    function bitsOp(kind, a, b) {
+    function wordsOp(kind, a, b) {
         var n = a.length > b.length ? a.length : b.length
         var out = []
         for (var i = 0; i < n; i++) {
             var x = i < a.length ? a[i] : 0
             var y = i < b.length ? b[i] : 0
-            var r = 0
-            if (kind == 0) { if (x == 1 && y == 1) { r = 1 } }
-            else if (kind == 1) { if (x == 1 || y == 1) { r = 1 } }
-            else if (kind == 2) { if (x != y) { r = 1 } }
-            else { if (x == 1 && y == 0) { r = 1 } }
-            out.push(r)
+            if (kind == 0) { out.push(x & y) }
+            else if (kind == 1) { out.push(x | y) }
+            else if (kind == 2) { out.push(x ^ y) }
+            else { out.push(x & (65535 ^ y)) }
         }
-        return bitsTrim(out)
+        return wordsTrim(out)
     }
-    function bitsShl(bits, k) {
-        if (bits.length == 0) { return [] }
+    function wordsShl(w, k) {
+        if (w.length == 0) { return [] }
+        var q = Math.floor(k / 16)
+        var m = pow2(k - q * 16)
         var out = []
-        for (var i = 0; i < k; i++) { out.push(0) }
-        for (var j = 0; j < bits.length; j++) { out.push(bits[j]) }
+        for (var i = 0; i < q; i++) { out.push(0) }
+        var carry = 0
+        for (var j = 0; j < w.length; j++) {
+            var v = w[j] * m + carry
+            var lo = v % 65536
+            out.push(lo)
+            carry = (v - lo) / 65536
+        }
+        if (carry > 0) { out.push(carry) }
         return out
     }
-    function bitsShr(bits, k) {
+    function wordsShr(w, k) {
+        var q = Math.floor(k / 16)
+        var r = k - q * 16
+        var d = pow2(r)
+        var up = pow2(16 - r)
         var out = []
-        for (var i = k; i < bits.length; i++) { out.push(bits[i]) }
-        return bitsTrim(out)
-    }
-    // A bit array back to a big.
-    function bigFromBits(sign, bits) { return bigOb(sign, pynBitsToLimbs(bits, bigBase)) }
-    // A shift count as a plain number; anything absurd answers past the cap.
-    function bitsToNum(bits) {
-        if (bits.length > 40) { return bitShiftMax + 1 }
-        var acc = 0
-        var p = 1
-        for (var i = 0; i < bits.length; i++) {
-            if (bits[i] == 1) { acc = acc + p }
-            p = p * 2
+        for (var i = q; i < w.length; i++) {
+            var next = i + 1 < w.length ? w[i + 1] : 0
+            out.push(Math.floor(w[i] / d) + (next % d) * up)
         }
+        return wordsTrim(out)
+    }
+    function bigFromWords(sign, w) { return bigOb(sign, pynWordsToLimbs(w, bigBase)) }
+    // A shift count as a plain number; anything absurd answers past the cap.
+    function wordsToNum(w) {
+        if (w.length > 3) { return bitShiftMax + 1 }
+        var acc = 0
+        for (var i = w.length - 1; i >= 0; i = i - 1) { acc = acc * 65536 + w[i] }
         return acc
     }
     // Python's |, &, ^, << and >> over two boxed ints. A negative shift count is
@@ -9050,46 +9062,65 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function bigBitBin(op, x, y) {
         var an = x.sign < 0 && !bigIsZero(x)
         var bn = y.sign < 0 && !bigIsZero(y)
-        var a = pynLimbsToBits(x.limbs, bigBase)
-        var b = pynLimbsToBits(y.limbs, bigBase)
+        var a = pynLimbsToWords(x.limbs, bigBase)
+        var b = pynLimbsToWords(y.limbs, bigBase)
         if (op == "<<" || op == ">>") {
             if (bn) { pyListErr("ValueError", "negative shift count") }
-            var k = bitsToNum(b)
+            var k = wordsToNum(b)
             if (k > bitShiftMax) {
                 if (op == ">>") { return bigFromNum(an ? -1 : 0) }
                 if (bigIsZero(x)) { return bigFromNum(0) }
                 pyListErr("OverflowError", "too many digits in integer")
             }
-            if (op == "<<") { return bigFromBits(an ? -1 : 1, bitsShl(a, k)) }
-            if (!an) { return bigFromBits(1, bitsShr(a, k)) }
+            if (op == "<<") { return bigFromWords(an ? -1 : 1, wordsShl(a, k)) }
+            if (!an) { return bigFromWords(1, wordsShr(a, k)) }
             // floor(-a / 2^k) is -(((a-1) >> k) + 1): -5 >> 1 is -3.
-            return bigFromBits(-1, bitsInc(bitsShr(bitsDec(a), k)))
+            return bigFromWords(-1, wordsInc(wordsShr(wordsDec(a), k)))
         }
         if (op == "&") {
-            if (!an && !bn) { return bigFromBits(1, bitsOp(0, a, b)) }
-            if (an && !bn) { return bigFromBits(1, bitsOp(3, b, bitsDec(a))) }
-            if (!an && bn) { return bigFromBits(1, bitsOp(3, a, bitsDec(b))) }
-            return bigFromBits(-1, bitsInc(bitsOp(1, bitsDec(a), bitsDec(b))))
+            if (!an && !bn) { return bigFromWords(1, wordsOp(0, a, b)) }
+            if (an && !bn) { return bigFromWords(1, wordsOp(3, b, wordsDec(a))) }
+            if (!an && bn) { return bigFromWords(1, wordsOp(3, a, wordsDec(b))) }
+            return bigFromWords(-1, wordsInc(wordsOp(1, wordsDec(a), wordsDec(b))))
         }
         if (op == "|") {
-            if (!an && !bn) { return bigFromBits(1, bitsOp(1, a, b)) }
-            if (an && !bn) { return bigFromBits(-1, bitsInc(bitsOp(3, bitsDec(a), b))) }
-            if (!an && bn) { return bigFromBits(-1, bitsInc(bitsOp(3, bitsDec(b), a))) }
-            return bigFromBits(-1, bitsInc(bitsOp(0, bitsDec(a), bitsDec(b))))
+            if (!an && !bn) { return bigFromWords(1, wordsOp(1, a, b)) }
+            if (an && !bn) { return bigFromWords(-1, wordsInc(wordsOp(3, wordsDec(a), b))) }
+            if (!an && bn) { return bigFromWords(-1, wordsInc(wordsOp(3, wordsDec(b), a))) }
+            return bigFromWords(-1, wordsInc(wordsOp(0, wordsDec(a), wordsDec(b))))
         }
         if (op == "^") {
-            if (!an && !bn) { return bigFromBits(1, bitsOp(2, a, b)) }
-            if (an && bn) { return bigFromBits(1, bitsOp(2, bitsDec(a), bitsDec(b))) }
-            if (an) { return bigFromBits(-1, bitsInc(bitsOp(2, bitsDec(a), b))) }
-            return bigFromBits(-1, bitsInc(bitsOp(2, a, bitsDec(b))))
+            if (!an && !bn) { return bigFromWords(1, wordsOp(2, a, b)) }
+            if (an && bn) { return bigFromWords(1, wordsOp(2, wordsDec(a), wordsDec(b))) }
+            if (an) { return bigFromWords(-1, wordsInc(wordsOp(2, wordsDec(a), b))) }
+            return bigFromWords(-1, wordsInc(wordsOp(2, a, wordsDec(b))))
         }
         return null
     }
-    // 2^k as an exact double; the dialect has no exponent literal.
+    // 2^k as an exact double, from a table grown by doubling: the dialect has no
+    // exponent literal, and the tag engine's integral Math.pow wraps.
+    var bitPow2 = [1]
     function pow2(k) {
-        var v = 1
-        for (var i = 0; i < k; i++) { v = v * 2 }
-        return v
+        while (bitPow2.length <= k) { bitPow2.push(bitPow2[bitPow2.length - 1] * 2) }
+        return bitPow2[k]
+    }
+    // Below 2^53 in magnitude an int is hi * 2^32 + lo, lo in [0, 2^32) and hi
+    // inside int32, so the tag engine's own operator on each word is the infinite
+    // two's complement answer; a low word that comes back as a negative int32 is
+    // the same 32 bits, corrected by 2^32.
+    var bitWord = 4294967296
+    function bitWords(op, l, r) {
+        var lh = Math.floor(l / bitWord)
+        var rh = Math.floor(r / bitWord)
+        var ll = l - lh * bitWord
+        var rl = r - rh * bitWord
+        var h = 0
+        var lo = 0
+        if (op == "&") { h = lh & rh; lo = ll & rl }
+        else if (op == "|") { h = lh | rh; lo = ll | rl }
+        else { h = lh ^ rh; lo = ll ^ rl }
+        if (lo < 0) { lo = lo + bitWord }
+        return h * bitWord + lo
     }
     // Inside int32 the tag engine's own |, & and ^ ARE the infinite two's
     // complement answer - the sign bit stands for exactly the endless run of 1s
@@ -9125,6 +9156,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 if (op == "|") { return {v: l | r} }
                 if (op == "&") { return {v: l & r} }
                 return {v: l ^ r}
+            }
+            if (bitIsExactInt(l) && bitIsExactInt(r) && l != bigMaxNum && l != -bigMaxNum && r != bigMaxNum && r != -bigMaxNum) {
+                return {v: bitWords(op, l, r)}
             }
         }
         if ((op == "<<" || op == ">>") && bitIsExactInt(l) && bitIsExactInt(r) && r >= 0) {
@@ -11910,7 +11944,13 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (typeof o == "function") {
             var fa = pyFnAttrs(o, false)
             var fi = fa == null ? -1 : dictFind(fa, name)
-            if (fi < 0) { pyRaise(pyMakeExc("AttributeError", ["'" + pyTypeOf(o).__name + "' object has no attribute '" + name + "'"])) }
+            // Only a plain function has a __dict__ to delete from.
+            var ftn = pyTypeOf(o).__name
+            if (ftn != "function") {
+                pyRaise(pyMakeExc("AttributeError", ["'" + ftn + "' object has no attribute '" + name +
+                                                     "' and no __dict__ for setting new attributes"]))
+            }
+            if (fi < 0) { pyRaise(pyMakeExc("AttributeError", ["'" + ftn + "' object has no attribute '" + name + "'"])) }
             listRemoveAt(fa.keys, fi)
             listRemoveAt(fa.vals, fi)
             fa.__idx = null
@@ -13098,8 +13138,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // Writing an attribute: a data descriptor's __set__ takes over, and __slots__
     // (when the class declares them) restricts which names an instance may carry.
     // A builtin value with no __dict (None, a number, a str, a list, a tuple, a
-    // dict, a set, a generator, an object()) refuses a new attribute, and its
-    // deletion, with a catchable AttributeError; a generator's read-only
+    // dict, a set, a generator, an iterator, an object()) refuses a new
+    // attribute, and its deletion, with a catchable AttributeError; a generator's read-only
     // gi_running says so. Twin of pyNoDictAttr in abnf/jsrt.go and
     // languages/lib/python-rt.metajs.
     function pyNoDictAttr(o, name) {
@@ -13110,7 +13150,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         if (tn == "NoneType" || tn == "object" || tn == "int" || tn == "float" || tn == "bool" || tn == "str" ||
             tn == "list" || tn == "tuple" || tn == "dict" || tn == "set" || tn == "frozenset" || tn == "complex" ||
-            tn == "generator") {
+            tn == "generator" || isPyIt(o)) {
             pyRaise(pyMakeExc("AttributeError", ["'" + tn + "' object has no attribute '" + name +
                                                  "' and no __dict__ for setting new attributes"]))
         }
@@ -13482,7 +13522,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var n = floVal(v)
         return {neg: n < 0, bits: pynNumBits(n)}
     }
-    function pyIntOfBits(neg, bits) { return bigOut(bigFromBits(neg ? -1 : 1, bits)) }
+    function pyIntOfBits(neg, bits) { return bigOut(bigOb(neg ? -1 : 1, pynBitsToLimbs(bits, bigBase))) }
     function pyNumMethod(o, name, args, kw) {
         if (isFlo(o)) {
             var f = o.__flo

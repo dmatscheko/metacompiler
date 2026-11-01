@@ -23477,14 +23477,17 @@ func (rt *jsrt) pyClassAnnotations(cls *jsObject) interface{} {
 	return d
 }
 
-// pyDirObject and pyDirUserClass are lib/python-dir.js's pydirObject and
-// pydirUserClass: what object and a class statement give a user class's dir().
+// pyDirObject, pyDirUserClass and pyDirGenerator are lib/python-dir.js's
+// pydirObject, pydirUserClass and pydirGenerator: what object and a class
+// statement give a user class's dir(), and what a generator adds to object's.
 var pyDirObject = []string{"__class__", "__delattr__", "__dir__", "__doc__", "__eq__", "__format__", "__ge__",
 	"__getattribute__", "__getstate__", "__gt__", "__hash__", "__init__",
 	"__init_subclass__", "__le__", "__lt__", "__ne__", "__new__", "__reduce__",
 	"__reduce_ex__", "__repr__", "__setattr__", "__sizeof__", "__str__",
 	"__subclasshook__"}
 var pyDirUserClass = []string{"__dict__", "__firstlineno__", "__module__", "__static_attributes__", "__weakref__"}
+var pyDirGenerator = []string{"__class_getitem__", "__del__", "__iter__", "__name__", "__next__", "__qualname__", "close",
+	"gi_code", "gi_frame", "gi_running", "gi_suspended", "gi_yieldfrom", "send", "throw"}
 
 // pyDir is dir(o) of a user class or of its instance. Twin of js_pydir in
 // lib/python-rt.metajs, which explains what it answers and what it refuses.
@@ -23499,6 +23502,9 @@ func (rt *jsrt) pyDir(args []interface{}) interface{} {
 			out.elems = append(out.elems, n)
 		}
 		return out
+	}
+	if _, isGen := o.(*jsGenerator); isGen {
+		return pyDirList(append(append([]string{}, pyDirObject...), pyDirGenerator...))
 	}
 	refuse := func() {
 		panic(&jsThrown{value: rt.pyExcInstance("NotImplementedError",
@@ -23544,6 +23550,11 @@ func (rt *jsrt) pyDir(args []interface{}) interface{} {
 	if read {
 		names = append(names, "__annotations_cache__")
 	}
+	return pyDirList(names)
+}
+
+// pyDirList is NAMES sorted and without repeats, as dir() answers them.
+func pyDirList(names []string) *jsArray {
 	sort.Strings(names)
 	out := &jsArray{}
 	for i, n := range names {
@@ -23756,8 +23767,12 @@ func (rt *jsrt) pyNoDictAttr(obj interface{}, name string) {
 	if tn == "generator" && name == "gi_running" {
 		panic(&jsThrown{value: rt.pyExcInstance("AttributeError", "attribute 'gi_running' of 'generator' objects is not writable")})
 	}
+	refuse := pyIterName(rt, obj) != ""
 	switch tn {
 	case "NoneType", "int", "float", "bool", "str", "list", "tuple", "dict", "set", "frozenset", "complex", "generator":
+		refuse = true
+	}
+	if refuse {
 		panic(&jsThrown{value: rt.pyExcInstance("AttributeError",
 			"'"+tn+"' object has no attribute '"+name+"' and no __dict__ for setting new attributes")})
 	}

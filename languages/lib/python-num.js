@@ -25,12 +25,13 @@ function pynNumBits(n) {
 }
 
 // A bigint magnitude crosses between its DECIMAL limbs (little-endian, base
-// LB: 10000 in python-rt.metajs, 1e7 in the interpreter) and its bits sixteen
-// bits per pass over the limbs: one short division by 2^16, or one
-// multiply-add by it, keeps every intermediate below 2^53 for either base.
+// LB: 10000 in python-rt.metajs, 1e7 in the interpreter) and its little-endian
+// 16-bit WORDS: one short division by 2^16, or one multiply-add by it, keeps
+// every intermediate below 2^53 for either base. Bits are words split up.
 
-// The magnitude bits of LIMBS (left untouched); zero answers the empty array.
-function pynLimbsToBits(limbs, lb) {
+// The magnitude's 16-bit words of LIMBS (left untouched), with no zero top
+// word; zero answers the empty array.
+function pynLimbsToWords(limbs, lb) {
     var ls = []
     var i = 0
     while (i < limbs.length) {
@@ -38,7 +39,7 @@ function pynLimbsToBits(limbs, lb) {
         i = i + 1
     }
     while (ls.length > 0 && ls[ls.length - 1] == 0) { ls.pop() }
-    var bits = []
+    var words = []
     while (ls.length > 0) {
         var rem = 0
         var j = ls.length - 1
@@ -50,6 +51,18 @@ function pynLimbsToBits(limbs, lb) {
             j = j - 1
         }
         while (ls.length > 0 && ls[ls.length - 1] == 0) { ls.pop() }
+        words.push(rem)
+    }
+    return words
+}
+
+// The magnitude bits of LIMBS (left untouched); zero answers the empty array.
+function pynLimbsToBits(limbs, lb) {
+    var words = pynLimbsToWords(limbs, lb)
+    var bits = []
+    var i = 0
+    while (i < words.length) {
+        var rem = words[i]
         var k = 0
         while (k < 16) {
             var b = rem % 2
@@ -57,6 +70,7 @@ function pynLimbsToBits(limbs, lb) {
             rem = (rem - b) / 2
             k = k + 1
         }
+        i = i + 1
     }
     while (bits.length > 0 && bits[bits.length - 1] == 0) { bits.pop() }
     return bits
@@ -78,6 +92,17 @@ function pynLimbsMulAdd(ls, m, a, lb) {
         ls.push(carry - q2 * lb)
         carry = q2
     }
+}
+
+// The decimal limbs of a magnitude given as 16-bit WORDS; zero answers [].
+function pynWordsToLimbs(words, lb) {
+    var ls = []
+    var j = words.length - 1
+    while (j >= 0) {
+        pynLimbsMulAdd(ls, 65536, words[j], lb)
+        j = j - 1
+    }
+    return ls
 }
 
 // The decimal limbs of a magnitude given as BITS; zero answers [].

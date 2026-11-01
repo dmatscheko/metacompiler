@@ -1,5 +1,5 @@
-// python-dir.js -- the fixed part of CPython 3.14's dir() of a user class or
-// of its instance, for python-interpreter.abnf (include) and
+// python-dir.js -- the fixed part of CPython 3.14's dir() of a user class, of
+// its instance and of a generator, for python-interpreter.abnf (include) and
 // languages/lib/python-rt.metajs (import). Go twin: pyDirObject and
 // pyDirUserClass in abnf/jsrt.go.
 //
@@ -15,6 +15,9 @@ var pydirObject = ["__class__", "__delattr__", "__dir__", "__doc__", "__eq__", "
                    "__reduce_ex__", "__repr__", "__setattr__", "__sizeof__", "__str__",
                    "__subclasshook__"]
 var pydirUserClass = ["__dict__", "__firstlineno__", "__module__", "__static_attributes__", "__weakref__"]
+// What the generator type adds to object's names.
+var pydirGenerator = ["__class_getitem__", "__del__", "__iter__", "__name__", "__next__", "__qualname__", "close",
+                      "gi_code", "gi_frame", "gi_running", "gi_suspended", "gi_yieldfrom", "send", "throw"]
 
 // The names sorted by code unit and without repeats, as sorted(set(...)).
 function pydirSorted(names) {

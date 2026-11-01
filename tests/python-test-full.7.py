@@ -1,7 +1,9 @@
-# Full-syntax test: Python (3.12 core grammar) - part 7, sections 199-204 and
+# Full-syntax test: Python (3.12 core grammar) - part 7, sections 199-206 and
 # 152: the data model's bound-method equality, three-argument pow's operand
 # protocol, list.sort's timsort, the codecs with the surrogateescape handler,
-# statistics' paired measures and a generator's gi_running. A file of its own
+# statistics' paired measures, a generator's gi_running and dir(), the
+# attributes an iterator or a builtin refuses, and the escape, punycode and
+# idna codecs. A file of its own
 # because tests/python-test-full.py is close to the step brake (-max-steps, 100M
 # per call) of the -frozen interpreter leg; see tests/python-test-full.py for
 # the conventions.
@@ -235,6 +237,94 @@ def s204():
                            "'generator' object has no attribute 'nope' and no __dict__ for setting new attributes",
                            "'tuple' object has no attribute 'nope' and no __dict__ for setting new attributes"])
 
+# ===== SECTION 205: dir() of a generator; an iterator and a builtin have no __dict__ =====
+# dir() of a generator is object's names and the generator type's own, sorted.
+# An iterator refuses a new attribute and its deletion like any builtin value,
+# and so does a builtin or a bound method; only a plain function has a __dict__.
+# Rows from CPython 3.14.
+def s205():
+    def gen():
+        yield 1
+    names = dir(gen())
+    check("gendir", len(names) == 38 and names[:3] == ["__class__", "__class_getitem__", "__del__"]
+          and [n for n in names if not n.startswith("__")]
+          == ["close", "gi_code", "gi_frame", "gi_running", "gi_suspended", "gi_yieldfrom", "send", "throw"])
+    def err(f):
+        try:
+            f()
+        except AttributeError as e:
+            return str(e)
+        return "none"
+    def setfoo(o):
+        o.foo = 1
+    def delfoo(o):
+        del o.foo
+    msgs = [err(lambda: setfoo(o)) for o in [iter([1]), iter("ab"), iter({1: 2}), zip([1]), enumerate([1])]]
+    check("itattr", msgs == ["'" + n + "' object has no attribute 'foo' and no __dict__ for setting new attributes"
+                             for n in ["list_iterator", "str_ascii_iterator", "dict_keyiterator", "zip", "enumerate"]])
+    check("itdel", err(lambda: delfoo(iter((1,))))
+          == "'tuple_iterator' object has no attribute 'foo' and no __dict__ for setting new attributes")
+    def f():
+        pass
+    f.foo = 1
+    xs = []
+    check("fndel", err(lambda: delfoo(abs))
+          == "'builtin_function_or_method' object has no attribute 'foo' and no __dict__ for setting new attributes"
+          and err(lambda: delfoo(xs.append))
+          == "'builtin_function_or_method' object has no attribute 'foo' and no __dict__ for setting new attributes"
+          and err(lambda: delfoo(f)) == "none" and err(lambda: delfoo(f)) == "'function' object has no attribute 'foo'")
+
+# ===== SECTION 206: unicode_escape, raw_unicode_escape, punycode and idna =====
+# The escape codecs write what a string literal reads back and read Python's
+# escapes (raw: only \u and \U); punycode is RFC 3492 with CPython's error
+# positions, at any delta size; idna checks an ASCII name's labels. No bytes
+# decode to "" under any encoding name. Rows from CPython 3.14.
+def s206():
+    def err(f):
+        try:
+            f()
+        except Exception as e:
+            return type(e).__name__ + ": " + str(e)
+        return "none"
+    check("cdesc", "a\\\t\x00\x7f\xe9€\U0001f600'".encode("unicode_escape")
+          == b"a\\\\\\t\\x00\\x7f\\xe9\\u20ac\\U0001f600'"
+          and "\xe9€\ud800".encode("Raw-Unicode-Escape", "bogus") == b"\xe9\\u20ac\\ud800"
+          and b"\\x41\\101\\u00e9\\U0001F600\\q\\\n\\a".decode("unicode_escape") == "AA\xe9\U0001f600\\q\x07"
+          and b"\\u0041\\\\u0041\\x41\xe9".decode("raw_unicode_escape") == "A\\\\u0041\\x41\xe9")
+    check("cdescerr", err(lambda: b"x\\x4g".decode("unicode_escape"))
+          == "UnicodeDecodeError: 'unicodeescape' codec can't decode bytes in position 1-3: truncated \\xXX escape"
+          and err(lambda: b"\\U00110000".decode("raw_unicode_escape"))
+          == "UnicodeDecodeError: 'rawunicodeescape' codec can't decode bytes in position 0-9: \\Uxxxxxxxx out of range"
+          and err(lambda: b"a\\".decode("unicode_escape"))
+          == "UnicodeDecodeError: 'unicodeescape' codec can't decode byte 0x5c in position 1: \\ at end of string"
+          and b"x\\u12zz".decode("unicode_escape", "replace") == "x�zz"
+          and b"\\x4".decode("unicode_escape", "backslashreplace") == "\\x5c\\x78\\x34")
+    check("cdpuny", "b\xfccher".encode("punycode") == b"bcher-kva" and "他们".encode("punycode") == b"8mqxb"
+          and "\U0001f600x".encode("punycode") == b"x-iv3s" and "abc".encode("punycode") == b"abc-"
+          and b"bcher-KVA".decode("punycode") == "b\xfccher" and b"b\xffcher-kva".decode("punycode", "replace") == "b�c\xeaher"
+          and b"x-99999999999a".decode("punycode", "replace") == "x?")
+    check("cdpunyerr", err(lambda: b"bcher-kv!".decode("punycode"))
+          == "UnicodeDecodeError: 'punycode' codec can't decode byte 0x21 in position 8: Invalid extended code point '33'"
+          and err(lambda: b"bcher-kv".decode("punycode"))
+          == "UnicodeDecodeError: 'punycode' codec can't decode bytes in position 8-8: incomplete punycode string"
+          and err(lambda: b"x-99999999999a".decode("punycode"))
+          == "UnicodeDecodeError: 'punycode' codec can't decode bytes in position 4763888885386-4763888885386: Invalid character U+22a96f3cfc4"
+          and err(lambda: b"999999999999999999a".decode("punycode")) == "OverflowError: Python int too large to convert to C ssize_t"
+          and err(lambda: b"a".decode("punycode", "backslashreplace")) == "UnicodeError: Unsupported error handling: backslashreplace")
+    check("cdidna", "Example.COM.".encode("idna") == b"Example.COM." and "a。b．c｡".encode("IDNA") == b"a.b.c."
+          and b"a..b".decode("idna") == "a..b"
+          and err(lambda: "a..b".encode("idna"))
+          == "UnicodeEncodeError: 'idna' codec can't encode character '\\x2e' in position 2: label empty"
+          and err(lambda: ("a." + "y" * 70).encode("idna"))
+          == "UnicodeEncodeError: 'idna' codec can't encode characters in position 2-71: label too long"
+          and err(lambda: b"xn--abc-.x".decode("idna"))
+          == "UnicodeDecodeError: 'idna' codec can't decode bytes in position 0-7: IDNA does not round-trip, 'b'xn--abc-'' != 'b'abc''"
+          and err(lambda: b"ok.xn--zzz9!".decode("idna"))
+          == "UnicodeDecodeError: 'idna' codec can't decode byte 0x21 in position 11: Invalid extended code point '33'"
+          and err(lambda: "x".encode("idna", "replace")) == "UnicodeError: Unsupported error handling: replace")
+    check("cdempty", b"".decode("nonexistent") == "" and b"".decode("punycode", "bogus") == ""
+          and err(lambda: "".encode("nonexistent")) == "LookupError: unknown encoding: nonexistent")
+
 def main():
     s199() # SECTION-CALL 199
     s200() # SECTION-CALL 200
@@ -243,5 +333,7 @@ def main():
     s152() # SECTION-CALL 152
     s203() # SECTION-CALL 203
     s204() # SECTION-CALL 204
+    s205() # SECTION-CALL 205
+    s206() # SECTION-CALL 206
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]

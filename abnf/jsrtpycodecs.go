@@ -2,6 +2,7 @@ package abnf
 
 import (
 	"fmt"
+	"math/big"
 	"strings"
 )
 
@@ -29,6 +30,10 @@ var pycdNames = []struct {
 	{"utf-32-le", []string{"utf_32_le", "utf_32le"}},
 	{"utf-32-be", []string{"utf_32_be", "utf_32be"}},
 	{"undefined", []string{"undefined"}},
+	{"unicode-escape", []string{"unicode_escape"}},
+	{"raw-unicode-escape", []string{"raw_unicode_escape"}},
+	{"punycode", []string{"punycode"}},
+	{"idna", []string{"idna"}},
 	{"binary", []string{"base64_codec", "base64", "base_64", "bz2_codec", "bz2", "hex_codec", "hex", "quopri_codec",
 		"quopri", "quoted_printable", "quotedprintable", "rot_13", "rot13", "uu_codec", "uu", "zlib_codec",
 		"zip", "zlib"}},
@@ -333,6 +338,12 @@ func pycdEncode(cps []int, enc, errs string) (out []int, exc, msg string) {
 	switch codec {
 	case "utf-7":
 		return pycdEncodeUtf7(cps), "", ""
+	case "unicode-escape", "raw-unicode-escape":
+		return pycdEncodeEscape(cps, codec == "raw-unicode-escape"), "", ""
+	case "punycode":
+		return pycdEncodePuny(cps), "", ""
+	case "idna":
+		return pycdEncodeIdna(cps, errs)
 	case "utf-8-sig":
 		out, codec = []int{0xef, 0xbb, 0xbf}, "utf-8"
 	}
@@ -468,10 +479,20 @@ func pycdEncodeUtf7(cps []int) []int {
 
 // pycdDecode decodes the byte values bs under the encoding named enc into
 // UTF-16 code units; a non-empty exc names the exception to raise with msg.
+// No bytes decode to "" under any name (no codec is looked up for them).
 func pycdDecode(bs []int, enc, errs string) (out []uint16, exc, msg string) {
+	if len(bs) == 0 {
+		return nil, "", ""
+	}
 	codec := pycdLookup(enc)
 	if exc, msg := pycdRefuse(enc, codec, "decode"); exc != "" {
 		return nil, exc, msg
+	}
+	switch codec {
+	case "punycode":
+		return pycdDecodePuny(bs, errs)
+	case "idna":
+		return pycdDecodeIdna(bs, errs)
 	}
 	if codec == "utf-8-sig" {
 		if len(bs) >= 3 && bs[0] == 0xef && bs[1] == 0xbb && bs[2] == 0xbf {
@@ -624,6 +645,72 @@ func pycdDecode(bs []int, enc, errs string) (out []uint16, exc, msg string) {
 			}
 		}
 		return out, "", ""
+	case codec == "unicode-escape" || codec == "raw-unicode-escape":
+		raw := codec == "raw-unicode-escape"
+		name := strings.ReplaceAll(codec, "-", "")
+		for i := 0; i < n; {
+			c := bs[i]
+			if c != '\\' || (raw && i+1 >= n) {
+				push(c)
+				i++
+				continue
+			}
+			start := i
+			if i+1 >= n {
+				if bad(name, i, n, "\\ at end of string"); exc != "" {
+					return nil, exc, msg
+				}
+				break
+			}
+			e := bs[i+1]
+			i += 2
+			count, why := 0, ""
+			switch {
+			case e == 'u':
+				count, why = 4, "truncated \\uXXXX escape"
+			case e == 'U':
+				count, why = 8, "truncated \\UXXXXXXXX escape"
+			case e == 'x' && !raw:
+				count, why = 2, "truncated \\xXX escape"
+			}
+			if count == 0 {
+				if j := strings.IndexByte("\\'\"abfnrtv", byte(e)); !raw && j >= 0 {
+					push(int("\\'\"\a\b\f\n\r\t\v"[j]))
+				} else if !raw && e >= '0' && e <= '7' {
+					v := e - '0'
+					for k := 1; k < 3 && i < n && bs[i] >= '0' && bs[i] <= '7'; k++ {
+						v = v*8 + bs[i] - '0'
+						i++
+					}
+					push(v)
+				} else if !raw && e == 'N' {
+					return nil, "NotImplementedError", "the unicode_escape codec's \\N{...} escapes are not supported"
+				} else if raw || e != '\n' {
+					push('\\')
+					push(e)
+				}
+				continue
+			}
+			v, k := 0, 0
+			for ; k < count && i < n && pycdHexVal(bs[i]) >= 0; k++ {
+				v = v*16 + pycdHexVal(bs[i])
+				i++
+			}
+			if k == count && v > 0x10ffff {
+				why, k = "illegal Unicode character", 0
+				if raw {
+					why = "\\Uxxxxxxxx out of range"
+				}
+			}
+			if k < count {
+				if i = bad(name, start, i, why); exc != "" {
+					return nil, exc, msg
+				}
+				continue
+			}
+			push(v)
+		}
+		return out, "", ""
 	case codec == "utf-8":
 		for i := 0; i < n; {
 			b0 := bs[i]
@@ -751,6 +838,411 @@ func pycdDecode(bs []int, enc, errs string) (out []uint16, exc, msg string) {
 		if exc != "" {
 			return nil, exc, msg
 		}
+	}
+	return out, "", ""
+}
+
+// pycdEncodeEscape is unicode_escape (raw: raw_unicode_escape) encoding.
+func pycdEncodeEscape(cps []int, raw bool) []int {
+	var out []int
+	for _, c := range cps {
+		esc := ""
+		switch {
+		case c >= 0x10000:
+			esc = fmt.Sprintf("\\U%08x", c)
+		case c >= 0x100:
+			esc = fmt.Sprintf("\\u%04x", c)
+		case raw:
+			out = append(out, c)
+		case c == '\\':
+			esc = "\\\\"
+		case c == '\t':
+			esc = "\\t"
+		case c == '\n':
+			esc = "\\n"
+		case c == '\r':
+			esc = "\\r"
+		case c < 0x20 || c >= 0x7f:
+			esc = fmt.Sprintf("\\x%02x", c)
+		default:
+			out = append(out, c)
+		}
+		for i := 0; i < len(esc); i++ {
+			out = append(out, int(esc[i]))
+		}
+	}
+	return out
+}
+
+func pycdHexVal(c int) int {
+	switch {
+	case c >= '0' && c <= '9':
+		return c - '0'
+	case c >= 'a' && c <= 'f':
+		return c - 'a' + 10
+	case c >= 'A' && c <= 'F':
+		return c - 'A' + 10
+	}
+	return -1
+}
+
+func pycdPunyT(j, bias int) int {
+	t := 36*(j+1) - bias
+	if t < 1 {
+		return 1
+	}
+	if t > 26 {
+		return 26
+	}
+	return t
+}
+
+// pycdPunyAdapt is the bias after delta, numchars code points in.
+func pycdPunyAdapt(delta *big.Int, first bool, numchars int) int {
+	d := new(big.Int).Set(delta)
+	if first {
+		d.Quo(d, big.NewInt(700))
+	} else {
+		d.Quo(d, big.NewInt(2))
+	}
+	d.Add(d, new(big.Int).Quo(d, big.NewInt(int64(numchars))))
+	divisions := 0
+	for d.Cmp(big.NewInt(455)) > 0 {
+		d.Quo(d, big.NewInt(35))
+		divisions += 36
+	}
+	v := int(d.Int64())
+	return divisions + 36*v/(v+38)
+}
+
+// pycdEncodePuny is punycode encoding.
+func pycdEncodePuny(cps []int) []int {
+	var out, ext []int
+	for _, c := range cps {
+		at := len(ext)
+		for at > 0 && ext[at-1] > c {
+			at--
+		}
+		if c < 0x80 {
+			out = append(out, c)
+		} else if at == 0 || ext[at-1] != c {
+			ext = append(ext[:at], append([]int{c}, ext[at:]...)...)
+		}
+	}
+	baselen := len(out)
+	if baselen > 0 {
+		out = append(out, '-')
+	}
+	const digits = "abcdefghijklmnopqrstuvwxyz0123456789"
+	oldchar, oldindex, bias, points := 0x80, -1, 72, 0
+	for _, ch := range ext {
+		below := 0
+		for _, c := range cps {
+			if c < ch {
+				below++
+			}
+		}
+		delta, index := (below+1)*(ch-oldchar), -1
+		for _, c := range cps {
+			if c < ch {
+				index++
+			}
+			if c != ch {
+				continue
+			}
+			index++
+			delta += index - oldindex
+			n, j := delta-1, 0
+			for t := pycdPunyT(0, bias); n >= t; t = pycdPunyT(j, bias) {
+				out = append(out, int(digits[t+(n-t)%(36-t)]))
+				n = (n - t) / (36 - t)
+				j++
+			}
+			out = append(out, int(digits[n]))
+			bias = pycdPunyAdapt(big.NewInt(int64(delta-1)), points == 0, baselen+points+1)
+			points++
+			oldindex, delta = index, 0
+		}
+		oldchar = ch
+	}
+	return out
+}
+
+// pycdDecodePuny is punycode decoding, over math/big as a malformed string's
+// deltas are unbounded.
+func pycdDecodePuny(bs []int, errs string) (out []uint16, exc, msg string) {
+	if errs != "strict" && errs != "replace" && errs != "ignore" {
+		return nil, "UnicodeError", "Unsupported error handling: " + errs
+	}
+	return pycdPunyRun(bs, 0, len(bs), errs, "punycode")
+}
+
+// pycdPunyRun decodes the punycode bs[lo:hi], its errors naming codec and
+// counting positions in the whole of bs.
+func pycdPunyRun(bs []int, lo, hi int, errs, codec string) (out []uint16, exc, msg string) {
+	dash := -1
+	for i := lo; i < hi; i++ {
+		if bs[i] == '-' {
+			dash = i
+		}
+	}
+	var base []int
+	for i := lo; i < dash; i++ {
+		switch {
+		case bs[i] < 0x80:
+			base = append(base, bs[i])
+		case errs == "strict":
+			name := codec
+			if codec == "punycode" {
+				name = "ascii"
+			}
+			return nil, "UnicodeDecodeError", fmt.Sprintf("'%s' codec can't decode byte 0x%02x in position %d: ordinal not in range(128)", name, bs[i], i)
+		case errs == "replace":
+			base = append(base, 0xfffd)
+		}
+	}
+	xs := lo
+	if dash >= 0 {
+		xs = dash + 1
+	}
+	var ext []int
+	for _, c := range bs[xs:hi] {
+		if c >= 'a' && c <= 'z' {
+			c -= 32
+		}
+		ext = append(ext, c)
+	}
+	fail := func(at *big.Int, why string) ([]uint16, string, string) {
+		if !new(big.Int).Add(at, big.NewInt(1)).IsInt64() {
+			return nil, "OverflowError", "Python int too large to convert to C ssize_t"
+		}
+		if at.Cmp(big.NewInt(int64(len(bs)))) < 0 {
+			i := int(at.Int64())
+			return nil, "UnicodeDecodeError", fmt.Sprintf("'%s' codec can't decode byte 0x%02x in position %d: %s", codec, bs[i], i, why)
+		}
+		return nil, "UnicodeDecodeError", "'" + codec + "' codec can't decode bytes in position " + at.String() + "-" + at.String() + ": " + why
+	}
+	ch, pos := big.NewInt(0x80), big.NewInt(0)
+	bias, extpos, first := 72, 0, true
+	for extpos < len(ext) {
+		delta, w := big.NewInt(0), big.NewInt(1)
+		why, from := "", extpos
+		for j := 0; why == ""; j++ {
+			if extpos >= len(ext) {
+				why, from = "incomplete punycode string", extpos
+				break
+			}
+			c := ext[extpos]
+			extpos++
+			digit := -1
+			switch {
+			case c >= 'A' && c <= 'Z':
+				digit = c - 'A'
+			case c >= '0' && c <= '9':
+				digit = c - 22
+			}
+			if digit < 0 {
+				why, from = fmt.Sprintf("Invalid extended code point '%d'", c), extpos-1
+				break
+			}
+			t := pycdPunyT(j, bias)
+			delta.Add(delta, new(big.Int).Mul(w, big.NewInt(int64(digit))))
+			if digit < t {
+				break
+			}
+			w.Mul(w, big.NewInt(int64(36-t)))
+		}
+		if why != "" {
+			if errs == "strict" {
+				return fail(big.NewInt(int64(xs+from)), why)
+			}
+			break
+		}
+		pos.Add(pos, delta)
+		if !first {
+			pos.Add(pos, big.NewInt(1))
+		}
+		q, r := new(big.Int).QuoRem(pos, big.NewInt(int64(len(base)+1)), new(big.Int))
+		ch.Add(ch, q)
+		if ch.Cmp(big.NewInt(0x10ffff)) > 0 {
+			if errs == "strict" {
+				return fail(new(big.Int).Add(pos, big.NewInt(int64(xs-1))), fmt.Sprintf("Invalid character U+%x", ch))
+			}
+			ch.SetInt64('?')
+		}
+		at := int(r.Int64())
+		base = append(base[:at], append([]int{int(ch.Int64())}, base[at:]...)...)
+		bias = pycdPunyAdapt(delta, first, len(base))
+		pos.SetInt64(int64(at))
+		first = false
+	}
+	for _, c := range base {
+		if c >= 0x10000 {
+			out = append(out, uint16(0xd800+(c-0x10000)>>10), uint16(0xdc00+(c-0x10000)&0x3ff))
+		} else {
+			out = append(out, uint16(c))
+		}
+	}
+	return out, "", ""
+}
+
+// pycdIdnaRefused is the error of a label that needs nameprep (Unicode 3.2
+// tables, which are not here).
+const pycdIdnaRefused = "the idna codec's nameprep of a non-ASCII label is not supported"
+
+func pycdIdnaDot(c int) bool {
+	return c == '.' || c == 0x3002 || c == 0xff0e || c == 0xff61
+}
+
+// pycdIdnaSplit is the labels of a name as [from, to) pairs: split at "."
+// only (ascii), or at any of the four IDNA dots.
+func pycdIdnaSplit(cps []int, ascii bool) []int {
+	out := []int{0}
+	for i, c := range cps {
+		if c == '.' || (!ascii && pycdIdnaDot(c)) {
+			out = append(out, i, i+1)
+		}
+	}
+	return append(out, len(cps))
+}
+
+func pycdIdnaEncErr(cps []int, from, to int, why string) ([]int, string, string) {
+	where := fmt.Sprintf("characters in position %d-%d", from, to-1)
+	if to-from == 1 {
+		where = fmt.Sprintf("character '%s' in position %d", pysEncEsc(cps[from]), from)
+	}
+	return nil, "UnicodeEncodeError", "'idna' codec can't encode " + where + ": " + why
+}
+
+func pycdIdnaDecErr(bs []int, from, to int, why string) ([]uint16, string, string) {
+	where := fmt.Sprintf("bytes in position %d-%d", from, to-1)
+	if to-from == 1 && from < len(bs) {
+		where = fmt.Sprintf("byte 0x%02x in position %d", bs[from], from)
+	}
+	return nil, "UnicodeDecodeError", "'idna' codec can't decode " + where + ": " + why
+}
+
+// pycdEncodeIdna is idna encoding. Twin of pycdEncodeIdna in
+// languages/lib/python-codecs.js, which states the rules.
+func pycdEncodeIdna(cps []int, errs string) ([]int, string, string) {
+	if errs != "strict" {
+		return nil, "UnicodeError", "Unsupported error handling: " + errs
+	}
+	ascii := true
+	for _, c := range cps {
+		if c >= 0x80 {
+			ascii = false
+		}
+	}
+	labels := pycdIdnaSplit(cps, ascii)
+	last := len(labels) - 2
+	if !ascii && labels[last+1] == labels[last] && len(labels) > 2 {
+		last -= 2
+	}
+	for e := 0; ascii && e < last; e += 2 {
+		if labels[e+1] == labels[e] {
+			return pycdIdnaEncErr(cps, labels[e], labels[e]+1, "label empty")
+		}
+	}
+	for k := 0; k <= last; k += 2 {
+		from, to := labels[k], labels[k+1]
+		for _, c := range cps[from:to] {
+			if c >= 0x80 {
+				return nil, "NotImplementedError", pycdIdnaRefused
+			}
+		}
+		if !ascii && to == from {
+			return pycdIdnaEncErr(cps, from, from+1, "label empty")
+		}
+		if to-from >= 64 {
+			return pycdIdnaEncErr(cps, from, to, "label too long")
+		}
+	}
+	var out []int
+	for i, c := range cps {
+		if ascii || i < labels[last+1] {
+			if pycdIdnaDot(c) {
+				c = '.'
+			}
+			out = append(out, c)
+		}
+	}
+	if last < len(labels)-2 {
+		out = append(out, '.')
+	}
+	return out, "", ""
+}
+
+func pycdIdnaAce(bs []int, i int) bool {
+	return i+4 <= len(bs) && (bs[i] == 'x' || bs[i] == 'X') && (bs[i+1] == 'n' || bs[i+1] == 'N') && bs[i+2] == '-' && bs[i+3] == '-'
+}
+
+// pycdDecodeIdna is idna decoding. Twin of pycdDecodeIdna in
+// languages/lib/python-codecs.js.
+func pycdDecodeIdna(bs []int, errs string) (out []uint16, exc, msg string) {
+	if errs != "strict" {
+		return nil, "UnicodeError", "Unsupported error handling: " + errs
+	}
+	ace, ascii := false, true
+	for i, c := range bs {
+		ace = ace || pycdIdnaAce(bs, i)
+		ascii = ascii && c < 0x80
+	}
+	if !ace && ascii {
+		for _, c := range bs {
+			out = append(out, uint16(c))
+		}
+		return out, "", ""
+	}
+	labels := pycdIdnaSplit(bs, true)
+	last := len(labels) - 2
+	dot := labels[last+1] == labels[last] && len(labels) > 2
+	if dot {
+		last -= 2
+	}
+	for k := 0; k <= last; k += 2 {
+		from, to := labels[k], labels[k+1]
+		if k > 0 {
+			out = append(out, '.')
+		}
+		if to-from > 1024 {
+			return pycdIdnaDecErr(bs, from, to, "label way too long")
+		}
+		if to-from < 4 || !pycdIdnaAce(bs, from) {
+			for j := from; j < to; j++ {
+				if bs[j] >= 0x80 {
+					return pycdIdnaDecErr(bs, j, j+1, "ordinal not in range(128)")
+				}
+				out = append(out, uint16(bs[j]))
+			}
+			continue
+		}
+		res, exc, msg := pycdPunyRun(bs, from+4, to, "strict", "idna")
+		if exc != "" {
+			return nil, exc, msg
+		}
+		for _, u := range res {
+			if u >= 0x80 {
+				return nil, "NotImplementedError", pycdIdnaRefused
+			}
+		}
+		switch {
+		case len(res) == 0:
+			return pycdIdnaDecErr(bs, from, from+1, "label empty")
+		case len(res) >= 64:
+			return pycdIdnaDecErr(bs, from, from+len(res), "label too long")
+		}
+		lab, back := &jsArray{}, &jsArray{}
+		for _, c := range bs[from:to] {
+			lab.elems = append(lab.elems, float64(c))
+		}
+		for _, u := range res {
+			back.elems = append(back.elems, float64(u))
+		}
+		return pycdIdnaDecErr(bs, from, to, "IDNA does not round-trip, '"+pyBytesRepr(lab)+"' != '"+pyBytesRepr(back)+"'")
+	}
+	if dot {
+		out = append(out, '.')
 	}
 	return out, "", ""
 }
