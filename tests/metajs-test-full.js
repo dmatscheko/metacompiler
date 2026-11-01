@@ -1995,6 +1995,11 @@ function s39() {
     var pn = p * 1
     check("tp04", pn !== pn && p == "[object Object]" && -p !== -p && "" + p === "[object Object]" &&
                   null * 1 === 0 && null - "2" === -2 && null + null === 0 && !(null == 0) && null >= 0)
+    // The same holds for an ELEMENT: an array's string and join render it as
+    // "[object Object]" (node would answer "7,7" and "7-x").
+    var pf = function (a) { return a }
+    check("tp05", [p, [p, null], undefined] + "" === "[object Object],[object Object],," &&
+                  [p, "x"].join("-") === "[object Object]-x" && [pf, 1].join() === "[function],1")
 }
 
 // ===== SECTION 40: array join, indexOf and keys; the sign of a zero product =====

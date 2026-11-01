@@ -1244,6 +1244,7 @@ KwDefault   = "default" KwEnd ;
         if (typeof o == "string") return (strMembers[k] === 1 || v !== ""[k]) ? v : undefined
         if (Array.isArray(o)) {
             if (k === "sort") return sortOf(o)
+            if (k === "join") return joinOf(o)
             return (arrMembers[k] === 1 || v !== emptyArr[k]) ? v : undefined
         }
         return v !== emptyObj[k] ? v : undefined
@@ -1418,8 +1419,30 @@ KwDefault   = "default" KwEnd ;
     // goja would call a toString or valueOf it holds.
     function objPrim(v) {
         if (!isPlainObj(v)) return v
-        if (Array.isArray(v)) return siStr(v)
+        if (Array.isArray(v)) return arrJoin(v, ",")
         return "[object Object]"
+    }
+    // join and an array's ToPrimitive render each element as to_string in
+    // languages/lib/runtime.c does (rt.toString in abnf/jsrt.go): undefined and
+    // null are empty, and an element's own toString is never called, where
+    // goja's Array.prototype.join would call it.
+    function arrJoin(a, sep) {
+        var out = ""
+        for (var i = 0; i < a.length; i++) {
+            if (i > 0) out = out + sep
+            var e = anytype
+            e = a[i]
+            if (e === undefined || e === null) continue
+            if (szIs(e)) out = out + siStr(e)
+            else if (flIs(e)) out = out + flStr(e)
+            else if (typeof e == "function") out = out + "[function]"
+            else if (isPlainObj(e)) out = out + objPrim(e)
+            else out = out + e
+        }
+        return out
+    }
+    function joinOf(arr) {
+        return function(sep) { return arrJoin(arr, sep === undefined ? "," : siStr(sep)) }
     }
 
     // items = [thunk, op, thunk, op, thunk, ...] -> one left folded thunk.
