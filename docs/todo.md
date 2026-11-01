@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1020** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1021** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -64,14 +64,13 @@ its report; anything structural there is a CORE ticket.
 
 # PY — Python
 
-### T-983 python: codecs beyond utf-8/16/32, ascii, latin-1, cp1252 raise LookupError (utf-7, cp437, mac-roman...) · P3 · PY · IN PROGRESS (PY worker, round 19) [V]
-Found by the PY worker, round 18 (oracle python3 3.14). `"é".encode("utf-7")` → b'+AOk-'; ours LookupError: unknown encoding.
-languages/lib/python-codecs.js (+ Go twin abnf/jsrtpycodecs.go) is the place; charmap codecs are table-driven like cp1252.
-
-### T-1005 python: generator `gi_running` · P3 · PY · IN PROGRESS (PY worker, round 19) [V]
-Found by the CORE worker, round 16. The host genState(g) (0 not started, 1 suspended, 2 done, 3 running) is now reachable from layer 2
-and the Go twin; `g.gi_running` (True only while the generator's frame executes, e.g. read from inside its own body) is not exposed.
-Also tests/python-test-full.5.py peaks at ~90M steps per call (the brake is 1e8) - split it before it trips.
+### T-1020 python: CJK/idna/punycode/escape codecs; dir() of a generator; new attribute on an iterator; python-test-full.5.py near the step brake · P3 · PY · OPEN [V]
+Found by the PY worker, round 19 (oracle python3 3.14). Still "unknown encoding": shift_jis, gbk, big5, euc_*, iso2022_*, cp932/949/950,
+hz, johab, gb18030 (large tables), raw_unicode_escape, idna, punycode (feasible); unicode_escape decode needs \N{name} (unsupported by
+design). `dir(g)` on a generator → NotImplementedError in interpreter and Go twin; python lists gi_running etc. `iter([1]).foo = 1` →
+python AttributeError "'list_iterator' object has no attribute 'foo' and no __dict__ ..."; interpreter and Go twin accept it.
+tests/python-test-full.5.py's -frozen leg is at 90M of the 100M brake: one `random.seed("é")` costs ~88M (SHA-512 + MT19937 seeding
+in languages/lib/python-random.py) - make the seeding cheaper.
 
 # RB — Ruby
 
@@ -1091,6 +1090,8 @@ T-1013 java: protected receiver rule, package-private constructors, untyped rece
 T-1012 bash compiled: computed `read "$n"` and computed declare operands are compile-time limitations — PARTIAL - compiled computed read/declare operands (run-time attributes via refAttrs), declare -f of brace loop bodies, function-body redirections; computed operand + attribute option filed
 T-1011 ruby: `compare_by_identity`; `default_proc=` type check; nested `for` destructure; value of `for`; `lazy.class` — DONE - for-loop targets destructure and the loop has a value, compare_by_identity (string keys by content, deliberate), default_proc= TypeError, Enumerator::Lazy class
 T-1004 kotlin: string `<`/`>`, sorted, sortedDescending, maxOf, toSortedSet order by code point instead of UTF-16 — DONE - String <,>,<=,>= and the natural-order key compare (max/min/maxOf/TreeSet/PriorityQueue) use UTF-16 order in all engines; kotlinc-verified
+T-983 python: codecs beyond utf-8/16/32, ascii, latin-1, cp1252 raise LookupError (utf-7, cp437, mac-roman...) — PARTIAL - utf-7, utf-8-sig, all 69 charmap codecs, undefined, 'not a text encoding' refusals; CJK multibyte, idna/punycode, escape codecs filed
+T-1005 python: generator `gi_running` — DONE - gi_running in all engines, read-only; generator/tuple new-attribute errors; full.5 split only gained 1.6M steps (random.seed costs 88M), filed
 
 # Settled — do not re-open
 
