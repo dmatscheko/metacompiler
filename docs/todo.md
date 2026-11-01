@@ -165,17 +165,17 @@ already reaches the map (the `__wsrc` link); the view's own remove/removeAll/ret
 
 # GO — Go  (oracle: `go run`)
 
-### T-959 go, swift: an undefined name is a run-time error, not a compile error · P3 · GO · OPEN [V]
+### T-959 go, swift: an undefined name is a run-time error, not a compile error · P3 · GO · IN PROGRESS (GO worker, round 17) [V]
 Remainder of T-910. `if false { fmt.Println(zz) }` → gc "undefined: zz" at compile time; every engine runs and exits 0, and a
 reached undefined name fails at run time as "js runtime error: variable not defined". Needs a static name-resolution pass in
 both compilers and interpreters (locals, params, package members, builtins, imports; swift likewise, swiftc "cannot find 'zz' in
 scope"). A false positive breaks a valid program: measure against the whole matrix and the go/swift corpora before landing.
 
-### T-960 go compiled: a select with no ready case and no default does not deadlock · P2 · GO · OPEN [V]
+### T-960 go compiled: a select with no ready case and no default does not deadlock · P2 · GO · IN PROGRESS (GO worker, round 17) [V]
 Found by the GO worker, round 16. go test dir fixedbugs/gcc61253.go: go run and our interpreter print "fatal error: all
 goroutines are asleep - deadlock!" (exit 2); llvm.Run and native exit 0 with no output, the select continuing silently.
 
-### T-961 go: a send on a nil channel inside a goroutine aborts with "send on a non-channel" instead of blocking · P2 · GO · OPEN [V]
+### T-961 go: a send on a nil channel inside a goroutine aborts with "send on a non-channel" instead of blocking · P2 · GO · IN PROGRESS (GO worker, round 17) [V]
 Found by the GO worker, round 16. go test dir chan/select3.go: go run exits 0 with no output (the goroutine blocks forever, main
 returns); interp and run abort with "send on a non-channel". A nil channel blocks on send and receive (spec, Send statements).
 
