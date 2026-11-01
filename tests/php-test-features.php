@@ -555,6 +555,43 @@ $l = __LINE__; try { intdiv(1, 0); } catch (DivisionByZeroError $e) { $exTrGot =
 check("exc-trace-native-line", $exTrGot, $l);
 $l = __LINE__; $exTrGot = [excTrS(excTrCatch()), count((new Exception)->getTrace())];
 check("exc-trace-catch", $exTrGot, ["#0 F($l): excTrCatch()\n#1 {main}", 0]);
+// An internal function in progress is a frame with its arguments as passed; one
+// PHP compiles to an opcode of the caller (count/strlen with one argument,
+// zend_try_compile_special_func) is none. A string callback a library function
+// takes is shown as passed.
+function excTrNat($a) { return intdiv($a, 0); }
+class ExcTrCnt implements Countable { function count(): int { throw new Exception("n"); } }
+$l = __LINE__; try { excTrNat(7); } catch (DivisionByZeroError $e) { $exTrGot = [excTrS($e)]; }
+try { strlen("ab", 3); } catch (ArgumentCountError $e) { $exTrGot[] = excTrS($e); }
+try { count(new ExcTrCnt); } catch (Exception $e) { $exTrGot[] = excTrS($e); }
+function excTrCb($v) { throw new Exception("cb"); }
+try { array_map('excTrCb', [5]); } catch (Exception $e) { $exTrGot[] = excTrS($e); }
+check("exc-trace-native", $exTrGot, ["#0 F(" . ($l - 2) . "): intdiv(7, 0)\n#1 F($l): excTrNat(7)\n#2 {main}",
+                                     "#0 F(" . ($l + 1) . "): strlen('ab', 3)\n#1 {main}",
+                                     "#0 F(" . ($l + 2) . "): ExcTrCnt->count()\n#1 {main}",
+                                     "#0 [internal function]: excTrCb(5)\n#1 F(" . ($l + 4) . "): array_map('excTrCb', Array)\n#2 {main}"]);
+// A generator's body runs as called from whatever resumes it (zend_generator_resume):
+// the loop, the body delegating to it, or a Generator method, which is internal.
+function excTrGen($n) { yield 1; throw new Exception("g"); }
+function excTrOuter() { yield 0;
+    yield from excTrGen(2); }
+function excTrIn() { try { yield 1; } catch (Exception $e) { yield excTrS(new Exception("in")); } }
+class ExcTrG { function gm($p) { yield $p; yield excTrS(new Exception("m")); }
+               static function gs() { yield excTrS(new Exception("s")); } }
+$l = __LINE__; try { foreach (excTrGen(1) as $v) {} } catch (Exception $e) { $exTrGot = [excTrS($e)]; }
+try { foreach (excTrOuter() as $v) {} } catch (Exception $e) { $exTrGot[] = excTrS($e); }
+try { $g = excTrGen(3); $g->current(); $g->next(); } catch (Exception $e) { $exTrGot[] = excTrS($e); }
+$g = excTrIn(); $g->current(); $exTrGot[] = $g->throw(new Exception("t"));
+try { (new ExcTrG)->gm("p")->getReturn(); } catch (Exception $e) { $exTrGot[] = excTrS($e); }
+foreach ((new ExcTrG)->gm("q") as $v) { $exTrGen = $v; } $exTrGot[] = $exTrGen;
+foreach (ExcTrG::gs() as $v) { $exTrGot[] = $v; }
+check("exc-trace-gen", $exTrGot, ["#0 F($l): excTrGen(1)\n#1 {main}",
+                                  "#0 F(" . ($l - 4) . "): excTrGen(2)\n#1 F(" . ($l + 1) . "): excTrOuter()\n#2 {main}",
+                                  "#0 [internal function]: excTrGen(3)\n#1 F(" . ($l + 2) . "): Generator->next()\n#2 {main}",
+                                  "#0 [internal function]: excTrIn()\n#1 F(" . ($l + 3) . "): Generator->throw(Object(Exception))\n#2 {main}",
+                                  "#0 F(" . ($l + 4) . "): Generator->getReturn()\n#1 {main}",
+                                  "#0 F(" . ($l + 5) . "): ExcTrG->gm('q')\n#1 {main}",
+                                  "#0 F(" . ($l + 6) . "): ExcTrG::gs()\n#1 {main}"]);
 class ExcSub extends Exception { function __construct() { $this->line = 1; parent::__construct("sub"); } }
 check("exc-sub", [(new ExcSub)->getLine(), (new ExcSub)->getMessage(), (new ExcSub)->__toString() === (string) new ExcSub],
       [1, "sub", true]);

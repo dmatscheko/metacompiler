@@ -439,6 +439,10 @@ function s68() {
         && $p->viaIsset()->bindTo(null) === null && $p->nested()->bindTo(null)()() === 2
         && $p->nestedThis()->bindTo(null) !== null && $p->plainUse()->bindTo(null)() === 5
         && $p->arrowUse()->bindTo(new S68Q)() === 2);
+    // A rebound closure still uses $this (ZEND_ACC_USES_THIS is the function's).
+    check("ubt2", $p->arrowUse()->bindTo(new S68Q)->bindTo(null) === null
+        && Closure::bind($p->arrowUse(), new S68Q, 'S68Q')->bindTo(null) === null
+        && $p->plainUse()->bindTo(new S68Q)->bindTo(null)() === 5);
 }
 
 // ===== SECTION 69: callbacks naming Closure methods and missing methods, array references =====

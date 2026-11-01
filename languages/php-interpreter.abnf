@@ -512,7 +512,7 @@ ForCond     <~~ push({k: "cond", t: seqExprs(takeAll())}) ~~> = Expression { ","
 ForPost     <~~ push({k: "post", t: exprToStmt(seqExprs(takeAll()))}) ~~> = Expression { "," Expression } ;
 
 // foreach ($arr as $v) / foreach ($arr as $k => $v)
-ForEach     <~~ loopLeave(); push(makeForeach(takeAll())) ~~>
+ForEach     <~~ loopLeave(); push(makeForeach(takeAll(), up.start)) ~~>
             = KwForeach <~~ loopEnter() ~~> "(" Expression KwAs ForeachVars ")" ( AltForeachBody | Body ) ;
 AltForeachBody = ":" AltBody KwEndforeach Semi ;
 ForeachVars = DestructPat | ForeachKV ;
@@ -562,7 +562,7 @@ SuppressExpr <~~ push(makeSilence(pop(), up.start)) ~~>
 // 'yield from' must be tried first: 'from' would otherwise parse as a bare constant.
 // It is a UnaryExpr, not an Expression form, so a BARE yield is an operand like any
 // other ('yield * -1', '$gen + yield', 'yield yield').
-YieldExpr   <~~ push(makeYield(takeAll())) ~~>
+YieldExpr   <~~ push(makeYield(takeAll(), up.start)) ~~>
             = KwYield ( YieldFrom | [ YieldVal [ "=>" YieldVal ] ] ) ;
 YieldFrom   <~~ push({yfrom: pop()}) ~~>
             = KwFrom ExprCore ;
@@ -1721,18 +1721,23 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     }
     // ----- the calls in progress, which a trace reports -----
     // A call of a function, method or closure the program or the library declares
-    // (a generator's body and a __mec helper excepted) pushes a record on phpTop:
-    // the record of the call it was made from, phpSite as the call left it, the
-    // function's name, class and kind (0 function, 1 static method, 2 instance
-    // method, 3 closure), whether the library declares it, its frame and scope
-    // chain, its parameters and its arguments. A return pops it; an exception skips
-    // the returns, so a catch or finally puts phpTop back at its own call
-    // (frameBack), and in a generator's body, which may be resumed under other calls
-    // than before, as the main program's. Twin of php.top in php-to-llvm-ir.abnf.
+    // (a __mec helper excepted), and a call the program makes of an engine native or
+    // a Generator method, pushes a record on phpTop: the record of the call it was made from, phpSite
+    // as the call left it, the function's name, class and kind (0 function, 1
+    // static method, 2 instance method, 3 closure), whether it is the library's or
+    // the engine's, its frame and scope chain, its parameters (none for a native)
+    // and its arguments. A return pops it; an exception skips the returns, so a
+    // catch or finally puts phpTop back at its own call (frameBack). A generator
+    // keeps one record, which each resume of its body pushes (genStep): the body
+    // runs as if called from whatever resumed it (zend_generator_resume). Twin of
+    // php.top in php-to-llvm-ir.abnf.
     var phpTop = null
+    function frameRec(fn, cls, kind, lib, fr, argset) {
+        return {prev: phpTop, site: phpSite, name: fn.name, cls: cls, kind: kind, lib: lib, fr: fr, sc: scopes,
+                params: fn.params, argset: argset}
+    }
     function framePush(fn, cls, kind, lib, fr, argset) {
-        phpTop = {prev: phpTop, site: phpSite, name: fn.name, cls: cls, kind: kind, lib: lib, fr: fr, sc: scopes,
-                  params: fn.params, argset: argset}
+        phpTop = frameRec(fn, cls, kind, lib, fr, argset)
         return phpTop
     }
     // php_here: the site of the innermost library call the program made, else
@@ -3055,7 +3060,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         }
         writeTargetVal(ref, phpCopy(v))
     }
-    function makeForeach(items) {
+    function makeForeach(items, start) {
         var iterT = items[0]
         var keyRef = null
         var valRef = null
@@ -3076,9 +3081,13 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         else if (keyRefs.length == 1) { keyRef = keyRefs[0] }
         else if (keyRefs.length > 1) { keyRef = keyRefs[0]; valRef = keyRefs[1] }
         var byref = byrefs.length > 0
+        // A generator's body, and an iterator's methods, run as called from the loop
+        // (ZEND_FE_RESET, ZEND_FE_FETCH). Twin of feStep in php-to-llvm-ir.abnf.
+        var site = callSite(start)
         return function() {
             var it = anytype
             it = iterT()
+            phpSite = site
             // An IteratorAggregate hands over its iterator. A generator is stepped
             // one element at a time, the loop body running between two steps, so a
             // 'break' leaves it parked where it is.
@@ -3092,6 +3101,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                     var gs = runLoopBody(body)
                     if (gs.sig != undefined) { return gs.sig }
                     if (gs.stop) { return null }
+                    phpSite = site
                     genStep(it, null)
                 }
                 return null
@@ -3100,6 +3110,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             // / next. Twin of js_phfeobj and js_phfestep in abnf/jsrtphp.go and
             // lib/php-rt.metajs.
             if (isObj(it) && classIs(it.__class, "Iterator")) {
+                phpSite = site
                 mcall(it, "rewind", argsOf([]))
                 while (phptest(mcall(it, "valid", argsOf([])))) {
                     var iv = anytype
@@ -3109,6 +3120,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                     var isg = runLoopBody(body)
                     if (isg.sig != undefined) { return isg.sig }
                     if (isg.stop) { return null }
+                    phpSite = site
                     mcall(it, "next", argsOf([]))
                 }
                 return null
@@ -3157,10 +3169,21 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     function genMark() { if (genFlags.length > 0) { genFlags[genFlags.length - 1] = true } }
     // cur/key are the element the body is parked at, auto the next automatic key
     // (PHP's largest_used_integer_key + 1), moved whether the body was resumed
-    // past its first yield, which is what makes it impossible to rewind.
-    function newGen(runT) {
+    // past its first yield, which is what makes it impossible to rewind. rec is
+    // the body's call record (frameRec), null for a __mec helper's.
+    function newGen(runT, rec) {
         return {__gen: true, run: runT, co: null, started: false, done: false, moved: false,
-                cur: null, key: null, ret: null, auto: 0, sc: null, dep: 0, cf: [], cd: []}
+                cur: null, key: null, ret: null, auto: 0, sc: null, dep: 0, cf: [], cd: [], rec: rec}
+    }
+    // The body's frame fr, which its record reads the arguments from, once the
+    // body has made it.
+    function genFrame(fr) {
+        if (genCur.length == 0) { return }
+        var rec = genCur[genCur.length - 1].rec
+        if (rec != null) {
+            rec.fr = fr
+            rec.sc = scopes
+        }
     }
     function isGen(v) { return v !== null && v !== undefined && typeof v == "object" && v.__gen === true }
     // One resume of the body, with sendv as the value of the yield it is parked at.
@@ -3186,6 +3209,11 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         callDepths = g.cd
         g.started = true
         genCur.push(g)
+        if (g.rec != null) {
+            g.rec.prev = phpTop
+            g.rec.site = phpSite
+            phpTop = g.rec
+        }
         var r = anytype
         try { r = coResume(g.co, sendv) }
         catch (e) {
@@ -3203,6 +3231,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             throw e
         }
         genCur.pop()
+        if (g.rec != null) { phpTop = g.rec.prev }
         scopes = sc
         coreDepth = dep
         callFrames = cf
@@ -3226,6 +3255,26 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         if (traverse && g.done) { phpRaise("Exception", "Cannot traverse an already closed generator") }
         genPrime(g)
         if (g.moved) { phpRaise("Exception", "Cannot rewind a generator that was already run") }
+    }
+    // A Generator method is an internal one: its call has a record, and the body it
+    // resumes runs as called from internal code (site "", the call's again after).
+    // Twin of genMcall in php-to-llvm-ir.abnf.
+    var genMethods = {}
+    var genMethodNames = ["current", "key", "next", "send", "valid", "rewind", "throw", "getReturn"]
+    for (var gmi = 0; gmi < genMethodNames.length; gmi++) {
+        genMethods["$" + genMethodNames[gmi]] = {name: genMethodNames[gmi], params: []}
+    }
+    function genMethodCall(g, name, args) {
+        var gm = anytype
+        gm = genMethods["$" + name]
+        if (gm === undefined) { return genMethod(g, name, args) }
+        var rec = framePush(gm, "Generator", 2, true, null, args)
+        phpSite = ""
+        var r = anytype
+        r = genMethod(g, name, args)
+        phpTop = rec.prev
+        phpSite = rec.site
+        return r
     }
     // The Generator object's own methods. next() and send() initialize the body
     // first, so on a fresh generator next() lands on the SECOND yield and send(v)
@@ -3290,7 +3339,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         genStep(g, {genThrow: e})
     }
     // items = [{yval}?, {yval}?, {yfrom}?]. Two {yval}s mean 'yield $k => $v'.
-    function makeYield(items) {
+    function makeYield(items, start) {
         genMark()
         var vals = []
         var from = null
@@ -3301,6 +3350,9 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         }
         var keyT = vals.length > 1 ? vals[0] : null
         var valT = vals.length > 1 ? vals[1] : (vals.length == 1 ? vals[0] : null)
+        // A generator delegated to, and an iterator's methods, run as called from
+        // here (ZEND_YIELD_FROM). Twin of emitYieldFrom in php-to-llvm-ir.abnf.
+        var site = from == null ? "" : callSite(start)
         return function() {
             if (genCur.length == 0) { fail("yield outside a generator") }
             if (from != null) {
@@ -3309,6 +3361,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                 // generator is continued from where it is parked.
                 var src = anytype
                 src = from()
+                phpSite = site
                 // What the outer generator is sent, or has thrown into it, goes on
                 // to the inner one, and the inner one's return value is the value
                 // of the expression (ZEND_YIELD_FROM, zend_generator_get_current).
@@ -3317,6 +3370,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                     while (!src.done) {
                         var sent = anytype
                         sent = genPark(src.key, src.cur, false)
+                        phpSite = site
                         if (isGenThrow(sent)) { genThrowTo(src, sent.genThrow) }
                         else { genStep(src, sent === undefined ? null : sent) }
                     }
@@ -3326,11 +3380,13 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                 // one (an IteratorAggregate hands over its iterator first).
                 while (isObj(src) && classIs(src.__class, "IteratorAggregate")) { src = mcall(src, "getIterator", argsOf([])) }
                 if (isObj(src) && classIs(src.__class, "Iterator")) {
+                    phpSite = site
                     mcall(src, "rewind", argsOf([]))
                     while (phptest(mcall(src, "valid", argsOf([])))) {
                         var cv = anytype
                         cv = mcall(src, "current", argsOf([]))
                         genYield(mcall(src, "key", argsOf([])), cv, false)
+                        phpSite = site
                         mcall(src, "next", argsOf([]))
                     }
                     return null
@@ -4556,7 +4612,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             if (mc != null) { return mc(target, argsOf([name, arrOf(args.pos)])) }
             phpRaise("Error", "Call to undefined method " + target.__class.__name + "::" + name + "()")
         }
-        if (isGen(target)) { return genMethod(target, name, args) }
+        if (isGen(target)) { return genMethodCall(target, name, args) }
         if (typeof target == "function") { return cloMethod(target, name, args) }
         phpMissMethod(target, name)
     }
@@ -5531,9 +5587,10 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                 k = ctxSelf()
                 scopes = saved
                 genArgCheck(params, argset, who, k)
-                return newGen(runClosureRun(params, body, captured, env, argset, who, null))
+                return newGen(runClosureRun(params, body, captured, env, argset, who, null, true),
+                              fi == null ? null : frameRec(fi, fi.cls, 3, fi.lib, {}, argset))
             }
-            return runClosureRun(params, body, captured, env, argset, who, fi)()
+            return runClosureRun(params, body, captured, env, argset, who, fi, false)()
         }, "closure", 0)
     }
     function cloRecOf(v) {
@@ -5604,8 +5661,9 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         }
         return phsCloDesc(name, file, line, statics, pn, pr, po)
     }
-    // The closure's body as a zero-argument thunk, so a generator closure can defer it.
-    function runClosureRun(params, body, captured, env, argset, who, fi) {
+    // The closure's body as a zero-argument thunk, so a generator closure (gen) can
+    // defer it; a generator keeps the body's record itself.
+    function runClosureRun(params, body, captured, env, argset, who, fi, gen) {
         return function() {
             var saved = scopes
             scopes = captured.slice(0)
@@ -5622,7 +5680,9 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             }
             scopes.push(fr)
             var rec = anytype
-            rec = fi == null ? null : framePush(fi, fi.cls, 3, fi.lib, fr, argset)
+            rec = null
+            if (gen) { genFrame(fr) }
+            else if (fi != null) { rec = framePush(fi, fi.cls, 3, fi.lib, fr, argset) }
             bindParams(params, argset, who, CLO_SCOPE)
             var r = anytype
             var depth = coreDepth + 1
@@ -5746,7 +5806,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         scopePut(ov, STATIC_KEY, isObj(nthis) ? nthis.__class : (sc == null ? UNSET : sc))
         var ch = r.c.slice(0)
         ch.push(ov)
-        return closureBody(r.p, r.b, ch, r.e, r.g, r.d, isObj(nthis) ? nthis : null, r.st, null, r.f)
+        return closureBody(r.p, r.b, ch, r.e, r.g, r.d, isObj(nthis) ? nthis : null, r.st, r.ut, r.f)
     }
     // A closure made from a callable (zend_create_fake_closure): a method, or the
     // __call / __callStatic that stands in for one. call(t, cs, argset) runs it
@@ -6882,6 +6942,12 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         var countSite = name == "count" && args.length > 1 ? diagSite("__mec_countchk", start) : null
         var kept = !hasOwn(phpBuiltins, name) && argsKept(args)
         var fk = fnKey(phsCase(fnName(name), false))
+        // The program's call of an engine native has a record, with the arguments
+        // as passed, unless PHP compiles it to an opcode (natInline). Twin of
+        // emitBuiltin in php-to-llvm-ir.abnf.
+        var natFn = anytype
+        natFn = site != "" && hasOwn(phpBuiltins, name) && name.substring(0, 5) != "__mec" && !natInline(name, args.length)
+            ? {name: name, params: []} : null
         return function() {
             var argset = evalArgs(args, site, kept && varExists(fk) ? calleeParams(getVar(fk)) : null)
             if (resolveCb && argset.pos.length > 0) {
@@ -6922,14 +6988,24 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                 var df = anyCase ? fnGet(name) : getVar(name)
                 return fnFresh(df, df)
             }
-            if (countSite != null) {
-                var cn = anytype
-                cn = callNamed(name, argset)
-                countSite([])
-                return cn
-            }
-            return anyCase ? callDyn(name, argset) : callNamed(name, argset)
+            var rec = anytype
+            rec = natFn != null && !nativeRefuses(name, argset) ? framePush(natFn, "", 0, true, null, argset) : null
+            var cn = anytype
+            cn = anyCase ? callDyn(name, argset) : callNamed(name, argset)
+            if (rec != null) { phpTop = rec.prev }
+            if (countSite != null) { countSite([]) }
+            return cn
         }
+    }
+    // Is a call of native name with n arguments one PHP compiles to an opcode of the
+    // calling frame (zend_try_compile_special_func), so that no frame of its own
+    // is in progress while it runs? Twin of natInline in php-to-llvm-ir.abnf.
+    function natInline(name, n) {
+        if (name == "get_class") { return n <= 1 }
+        if (name == "array_key_exists") { return n == 2 }
+        return n == 1 && (name == "strlen" || name == "count" || name == "gettype" || name == "is_null" || name == "is_bool"
+                          || name == "is_int" || name == "is_integer" || name == "is_long" || name == "is_float"
+                          || name == "is_double" || name == "is_string" || name == "is_array" || name == "is_object")
     }
     // call_user_func_array(f, $args) of a library function that takes a callback:
     // that callback is judged in this frame too, on a copy of $args whose
@@ -7157,7 +7233,8 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         declVar(FN_KEY, fn.name)
         var rec = anytype
         rec = null
-        if (fn.isGen !== true && fn.hid !== true) {
+        if (fn.isGen === true) { genFrame(fr) }
+        else if (fn.hid !== true) {
             var isM = defCls != undefined && defCls != null
             rec = framePush(fn, isM ? defCls.__name : "", isM ? (fn.isStatic === true ? 1 : 2) : 0, fn.lib === true, fr, argset)
         }
@@ -7192,7 +7269,8 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         return function(argset) {
             if (fn.isGen === true) {
                 genArgCheck(fn.params, argset, fn.name, null)
-                return newGen(function() { return invokePhp(fn, null, argset) })
+                return newGen(function() { return invokePhp(fn, null, argset) },
+                              fn.hid === true ? null : frameRec(fn, "", 0, fn.lib === true, {}, argset))
             }
             return invokePhp(fn, null, argset)
         }
@@ -7220,7 +7298,8 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             if (fn.isGen === true) {
                 var gst = st
                 genArgCheck(fn.params, argset, fn.name, defCls)
-                return newGen(function() { return invokePhpCls(fn, me, argset, defCls, gst) })
+                return newGen(function() { return invokePhpCls(fn, me, argset, defCls, gst) },
+                              fn.hid === true ? null : frameRec(fn, defCls.__name, stat ? 1 : 2, fn.lib === true, {}, argset))
             }
             return invokePhpCls(fn, me, argset, defCls, st)
         }, "m:" + (mRecs.length - 1), 0)
@@ -7826,7 +7905,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         }
     }
     // A catch or finally body t, run with phpTop back at the record of the call
-    // whose frame it runs in: none at the top level and in a generator's body.
+    // whose frame it runs in: none at the top level.
     function frameBack(t) {
         return function() {
             var f = scopes[scopes.length - 1]

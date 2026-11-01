@@ -537,7 +537,7 @@ ForCond     <~~ push({k: "cond", t: seqExprs(takeAll())}) ~~> = Expression { ","
 ForPost     <~~ push({k: "post", t: exprToStmt(seqExprs(takeAll()))}) ~~> = Expression { "," Expression } ;
 
 // foreach ($arr as $v) / foreach ($arr as $k => $v)
-ForEach     <~~ loopLeave(); push(makeForeach(takeAll())) ~~>
+ForEach     <~~ loopLeave(); push(makeForeach(takeAll(), up.start)) ~~>
             = KwForeach <~~ loopEnter() ~~> "(" Expression KwAs ForeachVars ")" ( AltForeachBody | Body ) ;
 AltForeachBody = ":" AltBody KwEndforeach Semi ;
 // 'as [$k, $v]' destructures each element; the pattern is the same one list()/[] uses
@@ -595,7 +595,7 @@ SuppressExpr <~~ push(makeSilence(pop(), up.start)) ~~>
 // (js_genfn), and each yield suspends the body on its own goroutine - so these are
 // real generators, not a replayed list. A keyed yield hands its key over inside a
 // small marker record, since the runtime's yield protocol carries a value only.
-YieldExpr   <~~ push(makeYield(takeAll())) ~~>
+YieldExpr   <~~ push(makeYield(takeAll(), up.start)) ~~>
             = KwYield YieldFrom | KwYield YieldArg | KwYield ;
 YieldFrom   <~~ push({yfrom: pop()}) ~~> = KwFrom ExprCore ;
 YieldArg    <~~ push(makeYieldArg(takeAll())) ~~> = Ternary [ "=>" Ternary ] ;
@@ -2066,17 +2066,19 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     }
     // ----- the calls in progress, which a trace reports -----
     // A call of a function, method or closure the program or the library declares
-    // (a generator's body and a __mec helper excepted) keeps a record of itself in
-    // its own stack frame, five words: the record of the call it was made from,
-    // php.site as the call left it, its descriptor (frameDescs: (index + 1) * 2,
-    // plus 1 for the library's), its frame and its argument array. The module
-    // global php.top holds the innermost record, 0 in the main program, and every
-    // return puts back the one the call was made from. A record lives on the
-    // stack, which the collector scans, so the frame and arguments it names stay
-    // alive. An exception skips those returns, so a catch or finally puts php.top
-    // back as its try found it (restoreTop); in a generator's body, which may be
-    // resumed under other calls than before, as the main program's. Twin of phpTop
-    // in php-interpreter.abnf.
+    // (a __mec helper excepted), and a call the program makes of an engine native
+    // or of a Generator method, keeps a record of itself in its own stack frame:
+    // the record of the call it was made from, php.site as the call left it, its
+    // descriptor (frameDescs: (index + 1) * 2, plus 1 for the library's or the
+    // engine's), then its frame and its argument array, or a native's arguments
+    // one word each. The module global php.top holds the innermost record, 0 in
+    // the main program, and every return puts back the one the call was made from.
+    // A record lives on the stack, which the collector scans, so what it names
+    // stays alive. An exception skips those returns, so a catch or finally puts
+    // php.top back as its try found it (restoreTop). A generator's body keeps its
+    // record on its own stack and runs as called from whatever resumes it
+    // (zend_generator_resume): each yield unlinks it and each resume links it
+    // again (genSuspend). Twin of phpTop in php-interpreter.abnf.
     var topG = null
     function topGlobal() {
         if (topG == null) { topG = m.NewGlobalDef("php.top", llvm.constant.NewInt(i64, 0)) }
@@ -2084,38 +2086,75 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     }
     var recTy = llvm.types.NewArray(5, i64)
     var frameDescs = []
+    var frameDescKeys = {}
     var curRec = null
     var curRecF = null
     var curGenBody = false
+    // Whether the generator body being emitted keeps a record (its try bodies
+    // included).
+    var curGenRec = false
     function recSlot(b, p, k) { return b.NewGetElementPtr(recTy, p, handle(0), handle(k)) }
+    // The descriptor number of d, one per key when key is not "".
+    function frameDesc(d, key) {
+        if (key != "" && frameDescKeys["$" + key] !== undefined) { return frameDescKeys["$" + key] }
+        frameDescs.push(d)
+        var n = frameDescs.length * 2 + (d.lib ? 1 : 0)
+        if (key != "") { frameDescKeys["$" + key] = n }
+        return n
+    }
+    // A record of descriptor desc and its words after the first three, in the
+    // function's entry block, linked as the innermost; answers {rec, prev}.
+    function emitRecPush(b, desc, siteV, words) {
+        var ty = words.length == 2 ? recTy : llvm.types.NewArray(3 + words.length, i64)
+        var rec = curF.Blocks[0].NewAlloca(ty)
+        var prevV = b.NewLoad(i64, topGlobal())
+        b.NewStore(prevV, b.NewGetElementPtr(ty, rec, handle(0), handle(0)))
+        b.NewStore(siteV, b.NewGetElementPtr(ty, rec, handle(0), handle(1)))
+        b.NewStore(handle(desc), b.NewGetElementPtr(ty, rec, handle(0), handle(2)))
+        for (var i = 0; i < words.length; i++) { b.NewStore(words[i], b.NewGetElementPtr(ty, rec, handle(0), handle(3 + i))) }
+        b.NewStore(b.NewPtrToInt(rec, i64), topGlobal())
+        return {rec: rec, prev: prevV}
+    }
     // d: {name, cls, kind (0 function, 1 static method, 2 instance method, 3
     // closure), lib, names (the parameters before a variadic one), rest, off (1 when
-    // the arguments start with the receiver)}.
+    // the arguments start with the receiver)}; a native's: {name, nat: its
+    // argument count, lib: true}.
     function emitFramePush(b, d) {
-        frameDescs.push(d)
-        var rec = b.NewAlloca(recTy)
-        b.NewStore(b.NewLoad(i64, topGlobal()), recSlot(b, rec, 0))
-        b.NewStore(b.NewLoad(i64, siteGlobal()), recSlot(b, rec, 1))
-        b.NewStore(handle(frameDescs.length * 2 + (d.lib ? 1 : 0)), recSlot(b, rec, 2))
-        b.NewStore(curScopeV, recSlot(b, rec, 3))
-        b.NewStore(curF.Params[1], recSlot(b, rec, 4))
-        b.NewStore(b.NewPtrToInt(rec, i64), topGlobal())
-        return rec
+        return emitRecPush(b, frameDesc(d, ""), b.NewLoad(i64, siteGlobal()), [curScopeV, curF.Params[1]]).rec
     }
     function emitFramePop(b) {
         if (curRec != null && curRecF === curF) { b.NewStore(b.NewLoad(i64, recSlot(b, curRec, 0)), topGlobal()) }
     }
+    // A yield of v in a generator body with a record: the body's record leaves
+    // php.top while it is parked, its first word 1 meaning unlinked, and is linked
+    // under the resumer's top and site when the yield answers. A resume that throws
+    // in raises at the yield instead, and the catch links it (restoreTop).
+    function genSuspend(b, v) {
+        if (!curGenRec) { return callExt(b, "js_yield", [v]) }
+        var recV = b.NewLoad(i64, topGlobal())
+        var p = b.NewIntToPtr(recV, llvm.types.NewPointer(recTy))
+        b.NewStore(b.NewLoad(i64, recSlot(b, p, 0)), topGlobal())
+        b.NewStore(handle(1), recSlot(b, p, 0))
+        var sent = callExt(b, "js_yield", [v])
+        b.NewStore(b.NewLoad(i64, topGlobal()), recSlot(b, p, 0))
+        b.NewStore(b.NewLoad(i64, siteGlobal()), recSlot(b, p, 1))
+        b.NewStore(recV, topGlobal())
+        return sent
+    }
     // A try keeps php.top in its frame under topName, as a number, for its catch
-    // and finally to put back; "" in a generator's body. js_gofbits answers the
-    // number's IEEE bits, and an address below 2^53 is its 53-bit significand
-    // shifted right by 1075 less the biased exponent (0 has all bits 0).
+    // and finally to put back; "" in a generator's body without a record. js_gofbits
+    // answers the number's IEEE bits, and an address below 2^53 is its 53-bit
+    // significand shifted right by 1075 less the biased exponent (0 has all bits 0).
     function saveTop(b) {
-        if (curGenBody) { return "" }
+        if (curGenBody && !curGenRec) { return "" }
         hidCount++
         var topName = "0top" + hidCount
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, topName), callExt(b, "js_num_i", [b.NewLoad(i64, topGlobal())])])
         return topName
     }
+    // In a generator's body the top put back is the body's own record, which a
+    // throw-in leaves unlinked (genSuspend): it is linked under the top and site
+    // the exception left.
     function restoreTop(topName, body) {
         return function(b) {
             var v = handle(0)
@@ -2124,6 +2163,14 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                 var sig = b.NewOr(b.NewAnd(bits, handle(4503599627370495)), handle(4503599627370496))
                 var addr = b.NewLShr(sig, b.NewSub(handle(1075), b.NewLShr(bits, handle(52))))
                 v = b.NewSelect(b.NewICmp(llvm.enum.IPredEQ, bits, handle(0)), handle(0), addr)
+            }
+            if (curGenRec) {
+                var p = b.NewIntToPtr(v, llvm.types.NewPointer(recTy))
+                var prevP = recSlot(b, p, 0)
+                var siteP = recSlot(b, p, 1)
+                var unl = b.NewICmp(llvm.enum.IPredEQ, b.NewLoad(i64, prevP), handle(1))
+                b.NewStore(b.NewSelect(unl, b.NewLoad(i64, topGlobal()), b.NewLoad(i64, prevP)), prevP)
+                b.NewStore(b.NewSelect(unl, b.NewLoad(i64, siteGlobal()), b.NewLoad(i64, siteP)), siteP)
             }
             b.NewStore(v, topGlobal())
             return body(b)
@@ -2185,35 +2232,51 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         var itemV = callExt(tbodyB, "js_pharr", [])
         callExt(tbodyB, "js_phpush", [itemV, tbodyB.NewCall(siteFileFn(), [site])])
         callExt(tbodyB, "js_phpush", [itemV, callExt(tbodyB, "js_num_i", [tbodyB.NewAnd(site, handle(16777215))])])
-        tbodyB.NewCall(frameFillFn(), [itemV, tbodyB.NewLoad(i64, recSlot(tbodyB, tp, 2)),
-                                       tbodyB.NewLoad(i64, recSlot(tbodyB, tp, 3)), tbodyB.NewLoad(i64, recSlot(tbodyB, tp, 4))])
+        tbodyB.NewCall(frameFillFn(), [itemV, tbodyB.NewLoad(i64, recSlot(tbodyB, tp, 2)), tr])
         callExt(tbodyB, "js_phpush", [outV, itemV])
         tbodyB.NewStore(tbodyB.NewLoad(i64, recSlot(tbodyB, tp, 0)), trp)
         tbodyB.NewBr(theadB)
         tdoneB.NewRet(outV)
         frameFillBody()
     }
-    // php_frame_fill(item, desc, frame, args) appends to item what descriptor
-    // desc tells: [function, class, kind, lib, $this, current, passed, rest]:
+    // php_frame_fill(item, desc, rec) appends to item what descriptor desc tells
+    // of record rec: [function, class, kind, lib, $this, current, passed, rest]:
     // passed stops before a variadic parameter, whose packed array is rest (null
-    // without one).
+    // without one). A native's passed are its words, as the call handed them over.
     function frameFillFn() {
         if (fillF == null) {
             fillF = m.NewFunc("php_frame_fill", i64, [llvm.ir.NewParam("item", i64), llvm.ir.NewParam("desc", i64),
-                                                      llvm.ir.NewParam("frame", i64), llvm.ir.NewParam("args", i64)])
+                                                      llvm.ir.NewParam("rec", i64)])
         }
         return fillF
     }
     function frameFillBody() {
         var f = frameFillFn()
         var itemV = f.Params[0]
-        var scopeV = f.Params[2]
         var b = f.NewBlock("entry")
         for (var k = 0; k < frameDescs.length; k++) {
             var d = frameDescs[k]
             var hitB = f.NewBlock("")
             var nextB = f.NewBlock("")
             b.NewCondBr(b.NewICmp(llvm.enum.IPredEQ, f.Params[1], handle((k + 1) * 2 + (d.lib ? 1 : 0))), hitB, nextB)
+            b = nextB
+            if (d.nat !== undefined) {
+                var nty = llvm.types.NewArray(3 + d.nat, i64)
+                var np = hitB.NewIntToPtr(f.Params[2], llvm.types.NewPointer(nty))
+                var passedV = callExt(hitB, "js_pharr", [])
+                for (var ni = 0; ni < d.nat; ni++) {
+                    var wV = hitB.NewLoad(i64, hitB.NewGetElementPtr(nty, np, handle(0), handle(3 + ni)))
+                    callExt(hitB, "js_phpush", [passedV, phDeref(hitB, wV).v])
+                }
+                var natVals = [emitStr(hitB, d.name), emitStr(hitB, ""), emitNum(hitB, 0), hTrue, hNull,
+                               callExt(hitB, "js_pharr", []), passedV, hNull]
+                for (var nv = 0; nv < natVals.length; nv++) { callExt(hitB, "js_phpush", [itemV, natVals[nv]]) }
+                hitB.NewRet(hUndef)
+                continue
+            }
+            var rp = hitB.NewIntToPtr(f.Params[2], llvm.types.NewPointer(recTy))
+            var scopeV = hitB.NewLoad(i64, recSlot(hitB, rp, 3))
+            var argsV = hitB.NewLoad(i64, recSlot(hitB, rp, 4))
             callExt(hitB, "js_phpush", [itemV, emitStr(hitB, d.name)])
             callExt(hitB, "js_phpush", [itemV, emitStr(hitB, d.cls)])
             callExt(hitB, "js_phpush", [itemV, emitNum(hitB, d.kind)])
@@ -2228,15 +2291,14 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             }
             callExt(hitB, "js_phpush", [itemV, curV])
             var endV = handle(d.rest >= 0 ? d.off + d.rest : 4611686018427387904)
-            callExt(hitB, "js_phpush", [itemV, hitB.NewCall(argsFromFn(), [f.Params[3], handle(d.off), endV])])
+            callExt(hitB, "js_phpush", [itemV, hitB.NewCall(argsFromFn(), [argsV, handle(d.off), endV])])
             var restV = hNull
             if (d.rest >= 0) {
-                var rawV = callExt(hitB, "js_arg", [f.Params[3], endV])
+                var rawV = callExt(hitB, "js_arg", [argsV, endV])
                 restV = hitB.NewSelect(hitB.NewICmp(llvm.enum.IPredEQ, rawV, hUndef), hNull, phDeref(hitB, rawV).v)
             }
             callExt(hitB, "js_phpush", [itemV, restV])
             hitB.NewRet(hUndef)
-            b = nextB
         }
         b.NewRet(hUndef)
         if (argsFromF != null) {
@@ -3468,9 +3530,11 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         var p = emitRefPathV(b, ref, true)
         return writeRefSlot(p.b, p, v)
     }
-    function makeForeach(items) {
+    function makeForeach(items, start) {
         // An object is iterated over the properties visible from the class scope
-        // the loop is in (js_phfeobj).
+        // the loop is in (js_phfeobj), whose getIterator runs as called from the
+        // loop. Twin of makeForeach in php-interpreter.abnf.
+        var site = callSite(start)
         var srcT = items[0]
         var refT = false
         for (var ri = 1; ri < items.length; ri++) { if (items[ri].feref != undefined) { refT = true } }
@@ -3479,6 +3543,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             if (refT) { curWrites["*"] = true }
             var r = srcT(b)
             var scope = scopeProbe(r.b, emitStr(r.b, frameClsName("self")), hNull)
+            siteStore(r.b, site)
             return {b: r.b, v: callExt(r.b, "js_phfeobj", [r.v, scope, refT ? hTrue : hFalse])}
         }
         var keyName = null
@@ -3502,7 +3567,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         // Which loop shape to emit is decided at EMIT time, not here: usesYield is only
         // final once the whole program has been walked, and a foreach written BEFORE the
         // first generator function in the file would otherwise get the plain index loop.
-        var genT = makeForeachGen(iterT, keyName, valName, pat, body, byRef)
+        var genT = makeForeachGen(iterT, keyName, valName, pat, body, byRef, site)
         return function(b) {
             if (usesYield || usesIter) { return genT(b) }
             var ir = iterT(b)
@@ -3573,7 +3638,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         if (items.length == 1) { return {yval: items[0]} }
         return {ykey: items[0], yval: items[1]}
     }
-    function makeYield(items) {
+    function makeYield(items, start) {
         usesYield = true
         if (genFlags.length > 0) { genFlags[genFlags.length - 1] = true }
         var fromT = null
@@ -3584,11 +3649,12 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             if (items[i].yfrom != undefined) { fromT = items[i].yfrom }
             else if (items[i].yval != undefined) { valT = items[i].yval; keyT = items[i].ykey }
         }
+        var site = fromT == null ? 0 : callSite(start)
         return function(b) {
             sawYield = true
             if (fromT != null) {
                 var rf = fromT(b)
-                return emitYieldFrom(rf.b, rf.v)
+                return emitYieldFrom(rf.b, rf.v, site)
             }
             var v = hNull
             if (valT != null) { var rv = valT(b); b = rv.b; v = rv.v }
@@ -3603,7 +3669,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             }
             // The value sent in, null when the generator was resumed without one
             // (next(), foreach) - which js_yield answers as undefined.
-            var sent = callExt(b, "js_yield", [v])
+            var sent = genSuspend(b, v)
             return {b: b, v: b.NewSelect(b.NewICmp(llvm.enum.IPredEQ, sent, hUndef), hNull, sent)}
         }
     }
@@ -3633,9 +3699,10 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     // Over a GENERATOR, what this generator is sent goes on to it (a throw() as
     // the {__phgthrow} record js_phgenstep takes, since the yield's own record
     // says __gendel), and its return value is the value of the expression; over
-    // anything else the value is null (ZEND_YIELD_FROM). Twin of makeYield in
-    // php-interpreter.abnf.
-    function emitYieldFrom(b, srcV) {
+    // anything else the value is null (ZEND_YIELD_FROM). A generator delegated to,
+    // and an iterator's methods, run as called from here: site is stored before
+    // each step. Twin of makeYield in php-interpreter.abnf.
+    function emitYieldFrom(b, srcV, site) {
         hidCount++
         var itN = "\x00yi" + hidCount
         var ixN = "\x00yx" + hidCount
@@ -3643,6 +3710,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         var gnN = "\x00yg" + hidCount
         var lnN = "\x00yl" + hidCount
         var gdN = "\x00yd" + hidCount
+        siteStore(b, site)
         if (usesIter) { srcV = callExt(b, "js_phfeobj", [srcV, hNull, hFalse]) }
         var isGen = callExt(b, "js_phisa", [srcV, emitStr(b, "Generator")])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, gdN), isGen])
@@ -3658,7 +3726,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         var startA = curF.NewBlock("")
         var headB = curF.NewBlock("")
         b.NewCondBr(truthy(b, isGen), startG, startA)
-        callExt(startG, "js_scope_set", [curScopeV, emitStr(startG, stN), feStep(startG, srcV, true, hTrue, false)])
+        callExt(startG, "js_scope_set", [curScopeV, emitStr(startG, stN), feStep(startG, srcV, true, hTrue, false, site)])
         startG.NewBr(headB)
         callExt(startA, "js_scope_set", [curScopeV, emitStr(startA, lnN),
                                          callExt(startA, "js_range_len", [srcV])])
@@ -3708,7 +3776,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         callExt(bindB, "js_set", [pair, emitStr(bindB, "v"), valV])
         callExt(bindB, "js_set", [pair, emitStr(bindB, "__gendel"),
                                   callExt(bindB, "js_scope_get", [curScopeV, emitStr(bindB, gdN)])])
-        var sentV = callExt(bindB, "js_yield", [pair])
+        var sentV = genSuspend(bindB, pair)
         bindB.NewBr(postB)
         var ixP = callExt(postB, "js_scope_get", [curScopeV, emitStr(postB, ixN)])
         callExt(postB, "js_scope_set", [curScopeV, emitStr(postB, ixN),
@@ -3721,9 +3789,10 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             sendB = curF.NewBlock("")
             var iterB = curF.NewBlock("")
             gPost.NewCondBr(truthy(gPost, callExt(gPost, "js_scope_get", [curScopeV, emitStr(gPost, gdN)])), sendB, iterB)
-            callExt(iterB, "js_scope_set", [curScopeV, emitStr(iterB, stN), feStep(iterB, itP, false, hTrue, false)])
+            callExt(iterB, "js_scope_set", [curScopeV, emitStr(iterB, stN), feStep(iterB, itP, false, hTrue, false, site)])
             iterB.NewBr(headB)
         }
+        siteStore(sendB, site)
         callExt(sendB, "js_scope_set", [curScopeV, emitStr(sendB, stN), callExt(sendB, "js_phgenstep", [itP, sentV])])
         sendB.NewBr(headB)
         var retB = curF.NewBlock("")
@@ -3737,14 +3806,17 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
     // One step of foreach's generator walk, or, in a program with iterators,
     // js_phfestep, which also drives an Iterator. The first step of a generator
     // starts it, or takes the element it is parked at, and the later ones resume
-    // it; traverse is a foreach's, which may not rewind it (js_phgenstart).
-    function feStep(b, itV, first, needKey, traverse) {
+    // it; traverse is a foreach's, which may not rewind it (js_phgenstart). site is
+    // where the step stands, which a generator's body or an iterator's method runs
+    // as called from.
+    function feStep(b, itV, first, needKey, traverse, site) {
+        siteStore(b, site)
         var travV = traverse ? hTrue : hFalse
         if (usesIter) { return callExt(b, "js_phfestep", [itV, first ? hTrue : hFalse, needKey, travV]) }
         if (first) { return callExt(b, "js_phgenstart", [itV, travV]) }
         return callExt(b, "js_phgenstep", [itV, hNull])
     }
-    function makeForeachGen(iterT, keyName, valName, pat, body, byRef) {
+    function makeForeachGen(iterT, keyName, valName, pat, body, byRef, site) {
         return function(b) {
             var ir = iterT(b)
             b = ir.b
@@ -3768,7 +3840,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             var startA = curF.NewBlock("")
             var headB = curF.NewBlock("")
             b.NewCondBr(truthy(b, isGen), startG, startA)
-            callExt(startG, "js_scope_set", [curScopeV, emitStr(startG, stN), feStep(startG, ir.v, true, needKey, true)])
+            callExt(startG, "js_scope_set", [curScopeV, emitStr(startG, stN), feStep(startG, ir.v, true, needKey, true, site)])
             startG.NewBr(headB)
             callExt(startA, "js_scope_set", [curScopeV, emitStr(startA, lnN),
                                              callExt(startA, "js_range_len", [ir.v])])
@@ -3829,7 +3901,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             var gPost = curF.NewBlock("")
             postB.NewCondBr(truthy(postB, callExt(postB, "js_scope_get", [curScopeV, emitStr(postB, gnN)])), gPost, headB)
             var itP = callExt(gPost, "js_scope_get", [curScopeV, emitStr(gPost, itN)])
-            callExt(gPost, "js_scope_set", [curScopeV, emitStr(gPost, stN), feStep(gPost, itP, false, needKey, true)])
+            callExt(gPost, "js_scope_set", [curScopeV, emitStr(gPost, stN), feStep(gPost, itP, false, needKey, true, site)])
             gPost.NewBr(headB)
             return exitB
         }
@@ -4858,7 +4930,28 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
             ea = emitMethArgs(b, recv, emitStr(b, s.name), s.name, s.args)
         }
         siteStore(ea.b, site)
+        if (usesYield && site != 0 && genMethodNames.indexOf(s.name) >= 0) { return genMcall(ea.b, recv, s.name, ea.v, site) }
         return emitMethodCall(ea.b, recv, emitStr(ea.b, s.name), ea.v, s.name)
+    }
+    // A Generator method is an internal one: its call has a record, and the body it
+    // resumes runs as called from internal code (site 0, the call's again after).
+    // Twin of genMethodCall in php-interpreter.abnf.
+    var genMethodNames = ["current", "key", "next", "send", "valid", "rewind", "throw", "getReturn"]
+    function genMcall(b, recv, name, argsV, site) {
+        var genB = curF.NewBlock("")
+        var othB = curF.NewBlock("")
+        var mergeB = curF.NewBlock("")
+        b.NewCondBr(truthy(b, callExt(b, "js_phisa", [recv, emitStr(b, "Generator")])), genB, othB)
+        var desc = frameDesc({name: name, cls: "Generator", kind: 2, lib: true, names: [], rest: -1, off: 0}, "Generator::" + name)
+        var nr = emitRecPush(genB, desc, handle(site), [handle(0), argsV])
+        siteStore(genB, 0)
+        var gv = emitMethodCall(genB, recv, emitStr(genB, name), argsV, name)
+        gv.b.NewStore(nr.prev, topGlobal())
+        siteStore(gv.b, site)
+        gv.b.NewBr(mergeB)
+        var ov = emitMethodCall(othB, recv, emitStr(othB, name), argsV, name)
+        ov.b.NewBr(mergeB)
+        return {b: mergeB, v: mergeB.NewPhi([llvm.ir.NewIncoming(gv.v, gv.b), llvm.ir.NewIncoming(ov.v, ov.b)])}
     }
     // $c->fromCallable($cb) on a closure is the static Closure::fromCallable($cb),
     // which a static method's call through an instance reaches; on anything else it
@@ -7247,6 +7340,14 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         if (ext == "js_phbindwhy" || ext == "js_phcountrecs") { return 0 }
         return 1
     }
+    // Is a call of native name with n arguments one PHP compiles to an opcode of the
+    // calling frame (zend_try_compile_special_func), so that no frame of its own
+    // is in progress while it runs? Twin of natInline in php-interpreter.abnf.
+    function natInline(name, n) {
+        if (name == "get_class") { return n <= 1 }
+        if (name == "array_key_exists") { return n == 2 }
+        return n == 1 && (name == "strlen" || name == "count" || name == "gettype" || (phpIsKind(name) != "" && name != "is_numeric"))
+    }
     // The is_* family, mapped onto the ONE js_phis extern.
     function phpIsKind(name) {
         if (name == "is_int" || name == "is_integer" || name == "is_long") { return "int" }
@@ -7260,7 +7361,10 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         return ""
     }
     // The call of the engine's own function name: site (callSite) is stored once
-    // the arguments are read, as for any call, for an error it raises.
+    // the arguments are read, as for any call, for an error it raises. The
+    // program's call (not the library's, nor of a __mec helper) has a record
+    // holding the arguments as passed, unless PHP compiles it to an opcode
+    // (natInline). Twin of makeCall in php-interpreter.abnf.
     function emitBuiltin(b, name, args, site) {
         if ((name == "array_push" || name == "array_pop") && args.length > 0 && args[0].vtext != null) {
             noteWrite(argTarget(args[0].vtext))
@@ -7268,6 +7372,13 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         var vs = []
         for (var i = 0; i < args.length; i++) { var r = args[i].pos(b); b = r.b; vs.push(r.v) }
         siteStore(b, site)
+        if (site == 0 || name.substring(0, 5) == "__mec" || natInline(name, vs.length)) { return emitBuiltinOp(b, name, vs) }
+        var nr = emitRecPush(b, frameDesc({name: name, nat: vs.length, lib: true}, name + "/" + vs.length), handle(site), vs)
+        var res = emitBuiltinOp(b, name, vs)
+        res.b.NewStore(nr.prev, topGlobal())
+        return res
+    }
+    function emitBuiltinOp(b, name, vs) {
         // strlen counts BYTES (PHP strings are byte strings), count() counts elements.
         // strlen() measures PHP's string form of the argument (true is "1", false
         // and null are ""), not the JavaScript form js_bytelen alone would measure.
@@ -7536,7 +7647,16 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         var joinB = curF.NewBlock("")
         if (cb.nul) { b.NewCondBr(b.NewICmp(llvm.enum.IPredEQ, cbV, hNull), joinB, bindB) } else { b.NewBr(bindB) }
         var whereV = pa == undefined ? emitStr(bindB, libCbWhere(name, cb, at)) : pa.where
-        var bound = callableV(bindB, cbCheckV(bindB, cbV, whereV, true, false), true, false)
+        var chkV = cbCheckV(bindB, cbV, whereV, true, false)
+        // A function's name stays as it is, for the library to call by name and
+        // its trace to show; any other callable is bound here. Twin of cbResolve in
+        // php-interpreter.abnf.
+        var strB = curF.NewBlock("")
+        var setB = curF.NewBlock("")
+        bindB.NewCondBr(truthy(bindB, callExt(bindB, "js_phis", [emitStr(bindB, "string"), chkV])), strB, setB)
+        var colonsV = callExt(strB, "js_phstrpos", [chkV, emitStr(strB, "::"), hNull])
+        strB.NewCondBr(truthy(strB, callExt(strB, "js_phis", [emitStr(strB, "int"), colonsV])), setB, joinB)
+        var bound = callableV(setB, chkV, true, false)
         callExt(bound.b, pa == undefined ? "js_set" : "js_phset", [argsV, atK, bound.v])
         bound.b.NewBr(joinB)
         return joinB
@@ -8208,10 +8328,11 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         var savedRec = curRec
         var savedRecF = curRecF
         var savedGenBody = curGenBody
+        var savedGenRec = curGenRec
         if (!isCtl) {
             curGenBody = frm != undefined && frm != null && frm.gen === true
             curRec = null
-            if (frm != undefined && frm != null && frm.fname != undefined && !curGenBody) {
+            if (frm != undefined && frm != null && frm.fname != undefined) {
                 var rest = frm.rest == undefined ? -1 : frm.rest
                 curRec = emitFramePush(b, {name: frm.fname, cls: frm.fcls == undefined ? "" : frm.fcls,
                                            kind: isMethod ? (isStatic === true ? 1 : 2) : (frm.clo === true ? 3 : 0),
@@ -8219,6 +8340,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
                                            rest: rest, off: isMethod ? 1 : 0})
                 curRecF = f
             }
+            curGenRec = curGenBody && curRec != null
         }
         var savedWrites = curWrites
         if (!isCtl) { curWrites = {} }
@@ -8287,6 +8409,7 @@ KwInstanceof = CiI :whitespace() CiN CiS CiT CiA CiN CiC CiE CiO CiF :whitespace
         curRec = savedRec
         curRecF = savedRecF
         curGenBody = savedGenBody
+        curGenRec = savedGenRec
         curLive = savedLive
         curGen = savedGen
         curRet = savedRet

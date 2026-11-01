@@ -2801,8 +2801,9 @@ function __mec_excstr($e) {
 // progress innermost first as the engines record them, each [file, line,
 // function, class, kind, lib, $this, current, passed, rest]. file and line are
 // where the call stands, "" and 0 for a call the library or the engine made. kind
-// is 0 for a function, 1 a static method, 2 an instance method, 3 a closure;
-// current holds the parameters' values now, passed the arguments as the call
+// is 0 for a function, 1 a static method, 2 an instance method, 3 a closure; lib
+// marks an internal function: the library's, an engine native or a Generator
+// method. current holds the parameters' values now, passed the arguments as the call
 // handed them over up to a variadic parameter, and rest the variadic ones packed
 // into one array (null without one). A library function called from the library
 // is no frame of its own, as an internal function calling another is none. The
