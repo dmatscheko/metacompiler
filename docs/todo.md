@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1014** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1015** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -122,9 +122,12 @@ Found by the CORE worker, round 15. The interpreter's stripWs deletes every ASCI
 strings.TrimSpace, native strips ASCII 9-13 and 32: `int.Parse(" 1 2 ")` and `int.Parse(" 1")` give three answers.
 .NET's NumberStyles.Integer allows leading/trailing white space (U+0009-U+000D, U+0020) only; settle with a real dotnet.
 
-### T-1007 c#: `string.CompareOrdinal` of an astral character vs an ASCII one has the wrong sign · P3 · CS · IN PROGRESS (CS worker, round 1) [V spec-only]
-Found by the CORE worker, round 16 (.NET: ordinal = UTF-16 code-unit order). `string.CompareOrdinal("😀", "a")` must be positive
-(0xD83D > 0x61); all legs give the wrong sign (matrix row `-0--`, expected `-0-+`). Use the UTF-16 comparison (str_cmp16).
+### T-1014 c#: 5-arg `CompareOrdinal`, method group → `Comparison<string>`, `CompareTo` on strings, `char.ConvertFromUtf32` · P3 · CS · OPEN [V spec-only]
+Found by the CS worker, round 1 (.NET reference docs). `string.CompareOrdinal(a, ia, b, ib, len)` → "unknown string method" (compares
+Min(len, len-index) units; ArgumentOutOfRangeException on bad ranges). `list.Sort(string.CompareOrdinal)` → our "culture's collation
+not modelled" error; the method group must convert to Comparison<string> (C# spec, method group conversion). `"x".CompareTo("a")` →
+"unknown method: CompareTo"; it is a culture comparison, so give the same deliberate not-modelled error as string.Compare(a,b).
+`char.ConvertFromUtf32` → "unknown char method".
 
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
@@ -1097,6 +1100,7 @@ T-1006 bash interpreter: a stderr fragment without a trailing newline gets one a
 T-1009 bash: eval does not catch an abandoned line; bad subscripts outside plain assignment; subscripted prefix assignments — DONE - eval/trap catch abandoned lines (subshells end status 1), bad subscripts in literals/declare/read/printf -v/unset, subscripted prefix assignments, brace and bare-compound bodies, LINENO in $( ) functions
 T-1010 bash compiled: read/printf -v into element or computed names; attributes through a computed nameref — DONE - compiled read/printf -v into element and computed names, nameref target attributes picked at run time, single diagnostic
 T-1001 java interpreter: default method from a more specific superinterface loses to the less specific one; package-private members across packages — DONE - most specific default method wins (class chain first) in both halves; package-private/private/protected member access refused with javac's messages
+T-1007 c#: `string.CompareOrdinal` of an astral character vs an ASCII one has the wrong sign — DECLINED: not reproducible - csxCompareOrdinal already compares UTF-16 code units in all legs; regression assertion s48o2 added (fails under code-point order)
 
 # Settled — do not re-open
 
