@@ -8700,7 +8700,7 @@ func (rt *jsrt) rubySetSlice(o, k1, k2, v interface{}) interface{} {
 }
 
 // ===== the String surface shared with lib/ruby-rt.metajs and ==================
-// ruby-interpreter.abnf (smMethod / smUtf8Bytes / smSetExpand / ...).
+// ruby-interpreter.abnf (smMethod / smUtf8Bytes / rbsSetExpand / ...).
 
 // The receiver as a list of UTF-16-unit characters, which is what rt.strAt hands
 // out and therefore what the other two engines see.
@@ -8713,8 +8713,19 @@ func (rt *jsrt) rubySmChars(o string) []string {
 	return out
 }
 
+// The receiver's characters, a surrogate pair whole: what tr / count / delete /
+// squeeze work on. Twin of rbsChars in lib/ruby-str.js.
+func rubySmCps(o string) []string {
+	out := []string{}
+	for _, r := range o {
+		out = append(out, string(r))
+	}
+	return out
+}
+
 // MRI's character-set notation, shared by tr / tr_s / count / delete / squeeze:
 // a leading ^ negates, `a-z` is a range, a backslash escapes the next character.
+// Twin of rbsSetExpand in lib/ruby-str.js.
 func rubySmSetExpand(spec string) (bool, []string) {
 	cs := []rune(spec)
 	neg := false
@@ -8777,7 +8788,7 @@ func (rt *jsrt) rubySmTr(o, from, to string, sq bool) string {
 	}
 	out := ""
 	prev := ""
-	for _, ch := range rt.rubySmChars(o) {
+	for _, ch := range rubySmCps(o) {
 		k := rubySmHas(fchars, ch)
 		rep := ch
 		did := false
@@ -8816,7 +8827,7 @@ func (rt *jsrt) rubySmTr(o, from, to string, sq bool) string {
 func (rt *jsrt) rubySmSqueeze(o string, specs []string) string {
 	out := ""
 	prev := ""
-	for _, ch := range rt.rubySmChars(o) {
+	for _, ch := range rubySmCps(o) {
 		if ch == prev && (len(specs) == 0 || rubySmInSets(specs, ch)) {
 			continue
 		}
@@ -9010,7 +9021,7 @@ func (rt *jsrt) rubySmMethod(o, name string, sargs []string, nargs []float64) (i
 		return rt.rubySmSqueeze(o, sargs), true
 	case "count":
 		n := 0.0
-		for _, ch := range rt.rubySmChars(o) {
+		for _, ch := range rubySmCps(o) {
 			if rubySmInSets(sargs, ch) {
 				n++
 			}
@@ -9018,7 +9029,7 @@ func (rt *jsrt) rubySmMethod(o, name string, sargs []string, nargs []float64) (i
 		return n, true
 	case "delete", "delete!":
 		out := ""
-		for _, ch := range rt.rubySmChars(o) {
+		for _, ch := range rubySmCps(o) {
 			if !rubySmInSets(sargs, ch) {
 				out += ch
 			}

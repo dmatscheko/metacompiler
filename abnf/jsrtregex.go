@@ -8112,7 +8112,7 @@ func (rt *jsrt) rxRegexMethod(target interface{}, name string, args []interface{
 				if name != "match" && name != "match?" && name != "=~" {
 					src = rxQuoteText(src)
 				}
-				reObj = rxNewRegexObj(src, "mpnO")
+				reObj = rxNewRegexObj(src, "mpnOU")
 			}
 			switch name {
 			case "match":
@@ -8292,7 +8292,7 @@ func rubyReDescSrc(src string) string {
 // rubyReOptBits is Regexp#options from the engine flags: IGNORECASE 1, EXTENDED
 // 2, MULTILINE 4. Twin of reOptBits in ruby-interpreter.abnf.
 func rubyReOptBits(flags string) int {
-	flags = strings.TrimPrefix(flags, "mpnO")
+	flags = strings.TrimPrefix(flags, "mpnOU")
 	n := 0
 	if strings.Contains(flags, "i") {
 		n += 1
@@ -8319,7 +8319,7 @@ func (rt *jsrt) rubyRegexNew(args []interface{}) interface{} {
 	} else if rubyTruthy(argAt(args, 1)) {
 		bits = 1
 	}
-	flags := "mpnO"
+	flags := "mpnOU"
 	if bits&1 != 0 {
 		flags += "i"
 	}
@@ -8337,10 +8337,10 @@ func (rt *jsrt) rubyRegexNew(args []interface{}) interface{} {
 }
 
 // rubyReOpts is a Ruby Regexp's options as MRI writes them, from the engine flags
-// the ruby grammars compile with ("mpnO" then i, s for Ruby's m, x). Twin of reOpts
+// the ruby grammars compile with ("mpnOU" then i, s for Ruby's m, x). Twin of reOpts
 // in languages/ruby-interpreter.abnf, which states the rule.
 func rubyReOpts(flags string, embed bool) string {
-	flags = strings.TrimPrefix(flags, "mpnO")
+	flags = strings.TrimPrefix(flags, "mpnOU")
 	m, i, x := strings.Contains(flags, "s"), strings.Contains(flags, "i"), strings.Contains(flags, "x")
 	on, off := "", ""
 	for _, o := range []struct {

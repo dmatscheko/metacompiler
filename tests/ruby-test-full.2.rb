@@ -869,6 +869,22 @@ def s143
   check("nm143a", z == true && w == false && m == [true] && (s !~ /a/) == false && (s143m !~ /z/) == true)
 end
 
+# ===== SECTION 144: tr / count / delete / squeeze and regexp positions on astral text =====
+# A character outside the Basic Multilingual Plane is ONE character to the
+# character-set methods, to a regexp (`.` matches it whole) and to every
+# position a match reports. /usr/bin/ruby 2.6 settles each.
+def s144
+  t = ["x😀😀y"][0]
+  check("as144a", t.tr("😀", "o") == "xooy" && t.tr("x", "😀") == "😀😀😀y" && t.tr("^😀", "-") == "-😀😀-" &&
+        t.tr_s("😀", "o") == "xoy" && "aé😀".tr("a-z", "A-Z") == "Aé😀")
+  check("as144b", t.count("😀") == 2 && t.count("^😀") == 2 && t.delete("😀") == "xy" && t.delete("^😀") == "😀😀" &&
+        t.squeeze == "x😀y" && t.squeeze("😀") == "x😀y" && "aé😀".count("é😀") == 2)
+  m = "😀a😀".match(/a(😀)/)
+  check("as144c", t.scan(/./).size == 4 && (t =~ /y/) == 3 && t.match(/y/).begin(0) == 3 && m.begin(0) == 1 &&
+        m.end(1) == 3 && m.pre_match == "😀" && "x😀y".scan(//) == ["", "", "", ""] && "x😀y".gsub(//, "-") == "-x-😀-y-" &&
+        "a😀b".sub(/[^a]/, "Z") == "aZb")
+end
+
 s122() # SECTION-CALL 122
 s123() # SECTION-CALL 123
 s124() # SECTION-CALL 124
@@ -891,5 +907,6 @@ s140() # SECTION-CALL 140
 s141() # SECTION-CALL 141
 s142() # SECTION-CALL 142
 s143() # SECTION-CALL 143
+s144() # SECTION-CALL 144
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

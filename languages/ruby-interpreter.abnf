@@ -4380,118 +4380,6 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         return out
     }
 
-    // MRI's character-set notation, shared by tr / tr_s / count / delete / squeeze:
-    // a leading ^ negates, `a-z` is a range, and a backslash escapes the next
-    // character. Answers {neg, chars} with every range expanded.
-    function smSetExpand(spec) {
-        var neg = false
-        var i = 0
-        if (spec.length > 1 && spec.charAt(0) == "^") { neg = true; i = 1 }
-        var chars = ""
-        while (i < spec.length) {
-            var ch = spec.charAt(i)
-            if (ch == "\\" && i + 1 < spec.length) {
-                chars = chars + spec.charAt(i + 1)
-                i = i + 2
-                continue
-            }
-            if (i + 2 < spec.length && spec.charAt(i + 1) == "-") {
-                var a = spec.charCodeAt(i)
-                var b = spec.charCodeAt(i + 2)
-                var k = a
-                while (k <= b) { chars = chars + String.fromCharCode(k); k = k + 1 }
-                i = i + 3
-                continue
-            }
-            chars = chars + ch
-            i = i + 1
-        }
-        return {neg: neg, chars: chars}
-    }
-
-    // Is ch in EVERY one of the given set specs? MRI intersects the sets of
-    // count / delete / squeeze when more than one is given.
-    function smInSets(specs, ch) {
-        var i = 0
-        while (i < specs.length) {
-            var st = smSetExpand(specs[i])
-            var found = st["chars"].indexOf(ch) >= 0
-            if (st["neg"]) { found = !found }
-            if (!found) { return false }
-            i = i + 1
-        }
-        return specs.length > 0
-    }
-
-    // String#tr / #tr_s. An empty `to` DELETES; a shorter one repeats its last
-    // character; a negated `from` maps everything outside the set to that last
-    // character. tr_s additionally squeezes the runs it produced.
-    function smTr(s, from, to, sq) {
-        var f = smSetExpand(from)
-        var t = smSetExpand(to)
-        var last = t["chars"].length > 0 ? t["chars"].charAt(t["chars"].length - 1) : ""
-        var out = ""
-        var prev = ""
-        var i = 0
-        while (i < s.length) {
-            var ch = s.charAt(i)
-            i = i + 1
-            var hit = f["chars"].indexOf(ch) >= 0
-            var rep = ch
-            var did = false
-            if (f["neg"]) {
-                if (!hit) { rep = last; did = true }
-            } else if (hit) {
-                var k = f["chars"].indexOf(ch)
-                if (t["chars"].length == 0) { rep = "" } else if (k >= t["chars"].length) { rep = last }
-                else { rep = t["chars"].charAt(k) }
-                did = true
-            }
-            if (rep == "") { prev = ""; continue }
-            if (sq && did && rep == prev) { continue }
-            out = out + rep
-            prev = did ? rep : ""
-        }
-        return out
-    }
-
-    // String#squeeze: collapse a run of the same character, restricted to the sets
-    // when any are given.
-    function smSqueeze(s, specs) {
-        var out = ""
-        var prev = ""
-        var i = 0
-        while (i < s.length) {
-            var ch = s.charAt(i)
-            i = i + 1
-            if (ch == prev && (specs.length == 0 || smInSets(specs, ch))) { continue }
-            out = out + ch
-            prev = ch
-        }
-        return out
-    }
-
-    function smCount(s, specs) {
-        var n = 0
-        var i = 0
-        while (i < s.length) {
-            if (smInSets(specs, s.charAt(i))) { n = n + 1 }
-            i = i + 1
-        }
-        return n
-    }
-
-    function smDelete(s, specs) {
-        var out = ""
-        var i = 0
-        while (i < s.length) {
-            var ch = s.charAt(i)
-            if (!smInSets(specs, ch)) { out = out + ch }
-            i = i + 1
-        }
-        return out
-    }
-
     // String#center / #ljust / #rjust. mode 0 centres, 1 pads on the right, 2 on the
     // left. MRI counts CHARACTERS here (unlike printf's %10s, which counts bytes),
     // and a width at or below the receiver's length answers the receiver.
@@ -4588,11 +4476,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             return {ok: true, v: acc}
         }
         if (name == "codepoints") { return {ok: true, v: smCodePoints(s)} }
-        if (name == "tr" || name == "tr!") { return {ok: true, v: smTr(s, sargs[0], sargs[1], false)} }
-        if (name == "tr_s" || name == "tr_s!") { return {ok: true, v: smTr(s, sargs[0], sargs[1], true)} }
-        if (name == "squeeze" || name == "squeeze!") { return {ok: true, v: smSqueeze(s, sargs)} }
-        if (name == "count") { return {ok: true, v: smCount(s, sargs)} }
-        if (name == "delete" || name == "delete!") { return {ok: true, v: smDelete(s, sargs)} }
+        if (name == "tr" || name == "tr!") { return {ok: true, v: rbsTr(s, sargs[0], sargs[1], false)} }
+        if (name == "tr_s" || name == "tr_s!") { return {ok: true, v: rbsTr(s, sargs[0], sargs[1], true)} }
+        if (name == "squeeze" || name == "squeeze!") { return {ok: true, v: rbsSqueeze(s, sargs)} }
+        if (name == "count") { return {ok: true, v: rbsCount(s, sargs)} }
+        if (name == "delete" || name == "delete!") { return {ok: true, v: rbsDelete(s, sargs)} }
         if (name == "center") { return {ok: true, v: rbsPad(s, Math.trunc(nargs[0]), sargs.length > 1 ? sargs[1] : " ", 0)} }
         if (name == "ljust") { return {ok: true, v: rbsPad(s, Math.trunc(nargs[0]), sargs.length > 1 ? sargs[1] : " ", 1)} }
         if (name == "rjust") { return {ok: true, v: rbsPad(s, Math.trunc(nargs[0]), sargs.length > 1 ? sargs[1] : " ", 2)} }
@@ -8052,7 +7940,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // bracket, all of which the engine's whole-dialect "e" letter would remove.
         // "n": a backreference to a group that did not take part fails. "O": a
         // pattern that names a group captures only the named ones (Onigmo).
-        var neutral = "mpnO"
+        // "U": the text is code points, a surrogate pair one character, as MRI's
+        // String is; a position handed to the program is a character index
+        // (rbsCharIdx).
+        var neutral = "mpnOU"
         for (var i = 0; i < rflags.length; i++) {
             var f = rflags.charAt(i)
             if (f == "i") { neutral += "i" }
@@ -8164,7 +8055,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (s === null) { setLastMatch(null); return null }
         var md = reMatch(rv, s, 0)
         if (md === null) { return null }
-        return md.m.begin
+        return rbsCharIdx(s, md.m.begin)
     }
     function mdGet(md, k) {
         if (typeof k == "number") { return rxGroup(md.rev.prog, md.text, md.m, k) }
@@ -8192,7 +8083,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             var item = anytype
             item = rv.prog.ngroups == 0 ? rxGroup(rv.prog, s, m, 0) : mdCaptures(md, false)
             if (blk !== null && blk !== undefined) { blockCall(blk, [item]) } else { out.push(item) }
-            at = m.end == m.begin ? m.end + 1 : m.end
+            at = m.end == m.begin ? m.end + rbsCharLen(s, m.end) : m.end
         }
         return out
     }
@@ -8233,8 +8124,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             }
             out += s.slice(last, m.begin) + rep
             last = m.end
-            at = m.end == m.begin ? m.end + 1 : m.end
-            if (m.end == m.begin && m.begin < s.length) { out += s.charAt(m.begin); last = m.begin + 1 }
+            at = m.end == m.begin ? m.end + rbsCharLen(s, m.end) : m.end
+            if (m.end == m.begin && m.begin < s.length) { out += s.slice(m.begin, at); last = at }
             if (!all) { break }
         }
         return out + s.slice(last)
@@ -9236,8 +9127,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (name == "names") { return target.rev.prog.names.slice(0) }
             if (name == "pre_match") { return target.text.slice(0, target.m.begin) }
             if (name == "post_match") { return target.text.slice(target.m.end) }
-            if (name == "begin") { return target.m.caps[2 * (args.length > 0 ? toF(args[0]) : 0)] }
-            if (name == "end") { return target.m.caps[2 * (args.length > 0 ? toF(args[0]) : 0) + 1] }
+            if (name == "begin" || name == "end") {
+                var mbu = target.m.caps[2 * (args.length > 0 ? toF(args[0]) : 0) + (name == "end" ? 1 : 0)]
+                return mbu < 0 ? mbu : rbsCharIdx(target.text, mbu)
+            }
             if (name == "size" || name == "length") { return target.rev.prog.ngroups + 1 }
             if (name == "to_s") { return rstr(target) }
             if (name == "inspect") { return rinspect(target) }

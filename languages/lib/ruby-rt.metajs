@@ -5278,7 +5278,7 @@ function rbRxScan(reObj, s) {
         } else {
             out.push(rbRxCaptureArray(re, s, m, false))
         }
-        if (m["end"] == m["begin"]) { at = m["end"] + 1 } else { at = m["end"] }
+        if (m["end"] == m["begin"]) { at = m["end"] + rbsCharLen(s, m["end"]) } else { at = m["end"] }
     }
     return out
 }
@@ -5321,9 +5321,10 @@ function rbRxReplace(reObj, s, blk, repl, all) {
         }
         out = out + s.substring(last, m["begin"]) + rep
         if (m["end"] == m["begin"]) {
-            if (m["end"] < s.length) { out = out + s.charAt(m["end"]) }
-            last = m["end"] + 1
-            at = m["end"] + 1
+            var step = rbsCharLen(s, m["end"])
+            if (m["end"] < s.length) { out = out + s.substring(m["end"], m["end"] + step) }
+            last = m["end"] + step
+            at = m["end"] + step
         } else {
             last = m["end"]
             at = m["end"]
@@ -5355,7 +5356,7 @@ function rbRxMatchOp(l, r) {
     var md = rbRxRunMatch(reObj, rbStr(subj), 0)
     if (md === null) { return null }
     var mo = rbRxMatchOf(md)
-    return mo["m"]["begin"]
+    return rbsCharIdx(mo["text"], mo["m"]["begin"])
 }
 
 // rxRegexMethod answers a method call whose RECEIVER is a Regexp or a MatchData
@@ -5367,7 +5368,7 @@ function rbRxMatchOp(l, r) {
 // abnf/jsrtregex.go, which states the rule.
 function rbReOpts(flags, embed) {
     var f = flags
-    if (f.substring(0, 4) == "mpnO") { f = f.substring(4, f.length) }
+    if (f.substring(0, 5) == "mpnOU") { f = f.substring(5, f.length) }
     var m = f.indexOf("s") >= 0
     var i = f.indexOf("i") >= 0
     var x = f.indexOf("x") >= 0
@@ -5399,7 +5400,7 @@ function rbReDescSrc(src) {
 // abnf/jsrtregex.go.
 function rbReOptBits(flags) {
     var f = flags
-    if (f.substring(0, 4) == "mpnO") { f = f.substring(4, f.length) }
+    if (f.substring(0, 5) == "mpnOU") { f = f.substring(5, f.length) }
     var n = 0
     if (f.indexOf("i") >= 0) { n = n + 1 }
     if (f.indexOf("x") >= 0) { n = n + 2 }
@@ -5415,7 +5416,7 @@ function rbRegexNew(argv) {
     var bits = 0
     if (typeof o == "number") { bits = Math.floor(o) }
     else if (!rtIsNil(o) && o !== false) { bits = 1 }
-    var f = "mpnO"
+    var f = "mpnOU"
     if (bits % 2 == 1) { f = f + "i" }
     if (Math.floor(bits / 4) % 2 == 1) { f = f + "s" }
     if (Math.floor(bits / 2) % 2 == 1) { f = f + "x" }
@@ -5471,7 +5472,7 @@ function rbRxMethod(target, name, args) {
             var slot = 2 * g
             if (name == "end") { slot = slot + 1 }
             var caps = m["caps"]
-            if (slot < caps.length) { return caps[slot] }
+            if (slot < caps.length) { return caps[slot] < 0 ? caps[slot] : rbsCharIdx(text, caps[slot]) }
             return null
         }
         if (name == "size" || name == "length") { return mre["ngroups"] + 1 }
@@ -5504,7 +5505,7 @@ function rbRxMethod(target, name, args) {
             // it LITERALLY ("a.c".gsub(".", "-") is "a-c").
             var psrc = rbStr(args[0])
             if (name != "match" && name != "match?" && name != "=~") { psrc = rbRxQuoteLit(psrc) }
-            pat = rbRxNewRegex(psrc, "mpnO")
+            pat = rbRxNewRegex(psrc, "mpnOU")
         }
         if (name == "sub" || name == "sub!" || name == "gsub" || name == "gsub!") {
             // sub! / gsub! answer nil when the pattern does not match at all.
@@ -10486,119 +10487,6 @@ function smCodePoints(s) {
     return out
 }
 
-// MRI's character-set notation, shared by tr / tr_s / count / delete / squeeze:
-// a leading ^ negates, `a-z` is a range, and a backslash escapes the next
-// character. Answers {neg, chars} with every range expanded.
-function smSetExpand(spec) {
-    var neg = false
-    var i = 0
-    if (spec.length > 1 && spec.charAt(0) == "^") { neg = true; i = 1 }
-    var chars = ""
-    while (i < spec.length) {
-        var ch = spec.charAt(i)
-        if (ch == "\\" && i + 1 < spec.length) {
-            chars = chars + spec.charAt(i + 1)
-            i = i + 2
-            continue
-        }
-        if (i + 2 < spec.length && spec.charAt(i + 1) == "-") {
-            var a = spec.charCodeAt(i)
-            var b = spec.charCodeAt(i + 2)
-            var k = a
-            while (k <= b) { chars = chars + String.fromCharCode(k); k = k + 1 }
-            i = i + 3
-            continue
-        }
-        chars = chars + ch
-        i = i + 1
-    }
-    return {neg: neg, chars: chars}
-}
-
-// Is ch in EVERY one of the given set specs? MRI intersects the sets of
-// count / delete / squeeze when more than one is given.
-function smInSets(specs, ch) {
-    var i = 0
-    while (i < specs.length) {
-        var st = smSetExpand(specs[i])
-        var found = st["chars"].indexOf(ch) >= 0
-        if (st["neg"]) { found = !found }
-        if (!found) { return false }
-        i = i + 1
-    }
-    return specs.length > 0
-}
-
-// String#tr / #tr_s. An empty `to` DELETES; a shorter one repeats its last
-// character; a negated `from` maps everything outside the set to that last
-// character. tr_s additionally squeezes the runs it produced.
-function smTr(s, from, to, sq) {
-    var f = smSetExpand(from)
-    var t = smSetExpand(to)
-    var last = t["chars"].length > 0 ? t["chars"].charAt(t["chars"].length - 1) : ""
-    var out = ""
-    var prev = ""
-    var i = 0
-    while (i < s.length) {
-        var ch = s.charAt(i)
-        i = i + 1
-        var hit = f["chars"].indexOf(ch) >= 0
-        var rep = ch
-        var did = false
-        if (f["neg"]) {
-            if (!hit) { rep = last; did = true }
-        } else if (hit) {
-            var k = f["chars"].indexOf(ch)
-            if (t["chars"].length == 0) { rep = "" } else if (k >= t["chars"].length) { rep = last }
-            else { rep = t["chars"].charAt(k) }
-            did = true
-        }
-        if (rep == "") { prev = ""; continue }
-        if (sq && did && rep == prev) { continue }
-        out = out + rep
-        prev = did ? rep : ""
-    }
-    return out
-}
-
-// String#squeeze: collapse a run of the same character, restricted to the sets
-// when any are given.
-function smSqueeze(s, specs) {
-    var out = ""
-    var prev = ""
-    var i = 0
-    while (i < s.length) {
-        var ch = s.charAt(i)
-        i = i + 1
-        if (ch == prev && (specs.length == 0 || smInSets(specs, ch))) { continue }
-        out = out + ch
-        prev = ch
-    }
-    return out
-}
-
-function smCount(s, specs) {
-    var n = 0
-    var i = 0
-    while (i < s.length) {
-        if (smInSets(specs, s.charAt(i))) { n = n + 1 }
-        i = i + 1
-    }
-    return n
-}
-
-function smDelete(s, specs) {
-    var out = ""
-    var i = 0
-    while (i < s.length) {
-        var ch = s.charAt(i)
-        if (!smInSets(specs, ch)) { out = out + ch }
-        i = i + 1
-    }
-    return out
-}
-
-
 function smSwapcase(s) {
     var out = ""
     var i = 0
@@ -10690,11 +10578,11 @@ function smMethod(s, name, sargs, nargs) {
         return {ok: true, v: acc}
     }
     if (name == "codepoints") { return {ok: true, v: smCodePoints(s)} }
-    if (name == "tr" || name == "tr!") { return {ok: true, v: smTr(s, sargs[0], sargs[1], false)} }
-    if (name == "tr_s" || name == "tr_s!") { return {ok: true, v: smTr(s, sargs[0], sargs[1], true)} }
-    if (name == "squeeze" || name == "squeeze!") { return {ok: true, v: smSqueeze(s, sargs)} }
-    if (name == "count") { return {ok: true, v: smCount(s, sargs)} }
-    if (name == "delete" || name == "delete!") { return {ok: true, v: smDelete(s, sargs)} }
+    if (name == "tr" || name == "tr!") { return {ok: true, v: rbsTr(s, sargs[0], sargs[1], false)} }
+    if (name == "tr_s" || name == "tr_s!") { return {ok: true, v: rbsTr(s, sargs[0], sargs[1], true)} }
+    if (name == "squeeze" || name == "squeeze!") { return {ok: true, v: rbsSqueeze(s, sargs)} }
+    if (name == "count") { return {ok: true, v: rbsCount(s, sargs)} }
+    if (name == "delete" || name == "delete!") { return {ok: true, v: rbsDelete(s, sargs)} }
     if (name == "center") { return {ok: true, v: rbsPad(s, Math.trunc(nargs[0]), sargs.length > 1 ? sargs[1] : " ", 0)} }
     if (name == "ljust") { return {ok: true, v: rbsPad(s, Math.trunc(nargs[0]), sargs.length > 1 ? sargs[1] : " ", 1)} }
     if (name == "rjust") { return {ok: true, v: rbsPad(s, Math.trunc(nargs[0]), sargs.length > 1 ? sargs[1] : " ", 2)} }

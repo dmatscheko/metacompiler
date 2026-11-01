@@ -242,6 +242,145 @@ function rbsChars(s) {
     return out
 }
 
+// The index of character ch in the list, or -1.
+function rbsListIdx(list, ch) {
+    var i = 0
+    while (i < list.length) {
+        if (list[i] == ch) { return i }
+        i = i + 1
+    }
+    return -1
+}
+
+// MRI's character-set notation, shared by tr / tr_s / count / delete / squeeze
+// (tr_setup_table in string.c): a leading ^ negates, `a-z` is a range of code
+// points, and a backslash escapes the next character. Answers {neg, chars} with
+// every range expanded, one character per entry.
+function rbsSetExpand(spec) {
+    var cs = rbsChars(spec)
+    var neg = false
+    var i = 0
+    if (cs.length > 1 && cs[0] == "^") { neg = true; i = 1 }
+    var chars = []
+    while (i < cs.length) {
+        if (cs[i] == "\\" && i + 1 < cs.length) {
+            chars.push(cs[i + 1])
+            i = i + 2
+            continue
+        }
+        if (i + 2 < cs.length && cs[i + 1] == "-") {
+            var k = rbsOrd(cs[i])
+            var b = rbsOrd(cs[i + 2])
+            while (k <= b) {
+                if (k < 65536) { chars.push(String.fromCharCode(k)) }
+                else { chars.push(String.fromCharCode(55296 + Math.floor((k - 65536) / 1024), 56320 + ((k - 65536) % 1024))) }
+                k = k + 1
+            }
+            i = i + 3
+            continue
+        }
+        chars.push(cs[i])
+        i = i + 1
+    }
+    return {neg: neg, chars: chars}
+}
+
+// Is ch in EVERY one of the expanded sets? MRI intersects the sets of count /
+// delete / squeeze when more than one is given.
+function rbsInSets(sets, ch) {
+    var i = 0
+    while (i < sets.length) {
+        var found = rbsListIdx(sets[i].chars, ch) >= 0
+        if (sets[i].neg) { found = !found }
+        if (!found) { return false }
+        i = i + 1
+    }
+    return sets.length > 0
+}
+function rbsSetsOf(specs) {
+    var out = []
+    var i = 0
+    while (i < specs.length) {
+        out.push(rbsSetExpand(specs[i]))
+        i = i + 1
+    }
+    return out
+}
+
+// String#tr / #tr_s. An empty `to` DELETES; a shorter one repeats its last
+// character; a negated `from` maps everything outside the set to that last
+// character. tr_s additionally squeezes the runs it produced.
+function rbsTr(s, from, to, sq) {
+    var f = rbsSetExpand(from)
+    var t = rbsSetExpand(to)
+    var tc = t.chars
+    var last = tc.length > 0 ? tc[tc.length - 1] : ""
+    var cs = rbsChars(s)
+    var out = ""
+    var prev = ""
+    var i = 0
+    while (i < cs.length) {
+        var ch = cs[i]
+        i = i + 1
+        var k = rbsListIdx(f.chars, ch)
+        var rep = ch
+        var did = false
+        if (f.neg) {
+            if (k < 0) { rep = last; did = true }
+        } else if (k >= 0) {
+            if (tc.length == 0) { rep = "" } else if (k >= tc.length) { rep = last } else { rep = tc[k] }
+            did = true
+        }
+        if (rep == "") { prev = ""; continue }
+        if (sq && did && rep == prev) { continue }
+        out = out + rep
+        prev = did ? rep : ""
+    }
+    return out
+}
+
+// String#squeeze: collapse a run of the same character, restricted to the sets
+// when any are given.
+function rbsSqueeze(s, specs) {
+    var sets = rbsSetsOf(specs)
+    var cs = rbsChars(s)
+    var out = ""
+    var prev = ""
+    var i = 0
+    while (i < cs.length) {
+        var ch = cs[i]
+        i = i + 1
+        if (ch == prev && (sets.length == 0 || rbsInSets(sets, ch))) { continue }
+        out = out + ch
+        prev = ch
+    }
+    return out
+}
+
+// String#count / #delete: the characters in every set, counted or removed.
+function rbsCount(s, specs) {
+    var sets = rbsSetsOf(specs)
+    var cs = rbsChars(s)
+    var n = 0
+    var i = 0
+    while (i < cs.length) {
+        if (rbsInSets(sets, cs[i])) { n = n + 1 }
+        i = i + 1
+    }
+    return n
+}
+function rbsDelete(s, specs) {
+    var sets = rbsSetsOf(specs)
+    var cs = rbsChars(s)
+    var out = ""
+    var i = 0
+    while (i < cs.length) {
+        if (!rbsInSets(sets, cs[i])) { out = out + cs[i] }
+        i = i + 1
+    }
+    return out
+}
+
 // String#reverse, a surrogate pair kept whole.
 function rbsReverse(s) {
     var out = ""
