@@ -1648,6 +1648,21 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function fnIsDefined(b, name) {
         return b.NewICmp(llvm.enum.IPredNE, b.NewLoad(i32, fnSlot(name)), zero)
     }
+    // `unset -f`: the function named nameV is no longer defined. lit: the name when it is a
+    // literal word; a computed one is compared with every name the program defines.
+    function emitUnsetFn(b, nameV, lit) {
+        var i
+        for (i = 0; i < declaredFuncList.length; i++) {
+            var fn = declaredFuncList[i]
+            if (lit != undefined) { if (fn == lit) { b.NewStore(zero, fnSlot(fn)) }; continue }
+            var hit = curF.NewBlock(""), miss = curF.NewBlock("")
+            b.NewCondBr(b.NewICmp(llvm.enum.IPredNE, b.NewCall(rtStreq, [nameV, gepStr(b, fn)]), zero), hit, miss)
+            hit.NewStore(zero, fnSlot(fn))
+            hit.NewBr(miss)
+            b = miss
+        }
+        return b
+    }
 
     // ===================================================================================
     //  The string runtime: one `declare` per helper (see rtDecl), in this emitter's own i8*
@@ -1806,6 +1821,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var rtArrMark = rtDecl("rt_arr_mark", false, [1])
     var rtArrDmark = rtDecl("rt_arr_dmark", false, [1])
     var rtArrSmark = rtDecl("rt_arr_smark", false, [1])
+    var rtArrSmarked = rtDecl("rt_arr_smarked", false, [1])
     var rtFinList = rtDecl("rt_finlist", true, [1])
     var rtSliceFields = rtDecl("rt_slicefields", true, [1, 0, 0, 1, 0])
     var rtGlobEsc = rtDecl("rt_globescape", true, [1])
@@ -5197,38 +5213,78 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         return out
     }
-    // `command -v NAME...` (the forms wrapperWords leaves): each NAME that is a builtin, a
-    // keyword or a function is printed; the status is 1 when none is. A computed NAME
-    // after the wrapper is dispatched at run time.
+    // `command -v NAME...` / `command -V NAME...` (the forms wrapperWords leaves): -v prints
+    // each NAME that is a builtin, a keyword or a defined function, -V says which of keyword
+    // or builtin it is or that it is not found; the status is 1 when no NAME is anything.
+    // bash's -V reprints a function's body, which is not modelled: a literal function name
+    // is refused, and so is a computed NAME in a program that defines functions. A computed
+    // NAME after the bare wrapper is dispatched at run time. Twin of runWrapper in
+    // bash-interpreter.abnf.
     function emitWrapper(b, cmd, argTs, subs) {
         var i = 0
-        var query = false
+        var query = ""
         while (i < argTs.length && argTs[i].c != undefined && argTs[i].c.length > 1 && argTs[i].c.charAt(0) == "-") {
             var opt = argTs[i].c
             i = i + 1
             if (opt == "--") { break }
-            if (cmd == "builtin" || opt.indexOf("V") >= 0) { fail(cmd + " " + opt + " is not supported") }
-            if (opt.indexOf("v") >= 0) { query = true }
+            if (cmd == "builtin") { fail(cmd + " " + opt + " is not supported") }
+            var oc
+            for (oc = 1; oc < opt.length; oc++) { if (opt.charAt(oc) == "v" || opt.charAt(oc) == "V") { query = opt.charAt(oc) } }
         }
         if (i >= argTs.length) { storeStatusI(b, 0); return b }
-        if (!query) { return emitComputedCommand(b, argTs[i], argTs.slice(i + 1), subs, true) }
-        var known = "\n" + shellKnownWords.join("\n") + "\n" + shellKwWords.join("\n") + "\n"
-        var k
-        for (k = 0; k < declaredFuncList.length; k++) { known = known + declaredFuncList[k] + "\n" }
+        if (query == "") { return emitComputedCommand(b, argTs[i], argTs.slice(i + 1), subs, true) }
+        var kwWords = gepStr(b, "\n" + shellKwWords.join("\n") + "\n")
+        var bltWords = gepStr(b, "\n" + shellKnownWords.join("\n") + "\n")
         var st = one
         for (; i < argTs.length; i++) {
+            var lit = argTs[i].c
+            if (query == "V" && ((lit != undefined && funcFor(lit) != null) || (lit == undefined && declaredFuncList.length > 0))) {
+                fail("command -V of a function is not supported")
+            }
             var r = evalWord(b, argTs[i])
             b = r.b
-            var hit = b.NewCall(rtInWords, [r.v, gepStr(b, known)])
+            var isKw = b.NewCall(rtInWords, [r.v, kwWords])
+            var isBl = b.NewCall(rtInWords, [r.v, bltWords])
+            var hit = b.NewOr(isKw, isBl)
+            if (query == "v") {
+                var rf = emitIsFnName(b, r.v, lit)
+                b = rf.b
+                hit = b.NewOr(hit, rf.v)
+            }
             var yes = curF.NewBlock(""), next = curF.NewBlock("")
-            b.NewCondBr(b.NewICmp(llvm.enum.IPredNE, hit, zero), yes, next)
-            yes.NewCall(rtPrints, yes.NewCall(rtStrcat, [r.v, gepStr(yes, "\n")]))
+            var no = (query == "V") ? curF.NewBlock("") : next
+            b.NewCondBr(b.NewICmp(llvm.enum.IPredNE, hit, zero), yes, no)
+            var line = r.v
+            if (query == "V") {
+                line = yes.NewCall(rtStrcat, [r.v, yes.NewSelect(yes.NewICmp(llvm.enum.IPredNE, isKw, zero),
+                                                                gepStr(yes, " is a shell keyword"), gepStr(yes, " is a shell builtin"))])
+            }
+            yes.NewCall(rtPrints, yes.NewCall(rtStrcat, [line, gepStr(yes, "\n")]))
             yes.NewBr(next)
+            if (query == "V") {
+                emitOnStderr(no, no.NewCall(rtStrcat, [no.NewCall(rtStrcat, [gepStr(no, "bash: command: "), r.v]), gepStr(no, ": not found\n")]))
+                no.NewBr(next)
+            }
             b = next
             st = b.NewAnd(st, b.NewXor(hit, one))
         }
         storeStatus(b, st)
         return b
+    }
+    // An i32: 1 when nameV names a function whose definition is in force. lit: the name when
+    // it is a literal word.
+    function emitIsFnName(b, nameV, lit) {
+        if (lit != undefined) {
+            if (funcFor(lit) == null) { return {b: b, v: zero} }
+            return {b: b, v: b.NewZExt(fnIsDefined(b, lit), i32)}
+        }
+        var acc = zero
+        var i
+        for (i = 0; i < declaredFuncList.length; i++) {
+            var fn = declaredFuncList[i]
+            acc = b.NewOr(acc, b.NewAnd(b.NewCall(rtStreq, [nameV, gepStr(b, fn)]), b.NewZExt(fnIsDefined(b, fn), i32)))
+        }
+        return {b: b, v: acc}
     }
     // The call of user function f with argTs: every ARGUMENT FIELD is pushed and made this
     // call's frame. The stack top, base and count are all restored afterwards, so recursion
@@ -5472,11 +5528,57 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 storeStatusI(b, 0)
                 return b
             }
+            // unset [-f] [-v] [-n] NAME...: the options are literal words. Twin of the unset
+            // arm of runCommand in bash-interpreter.abnf.
             if (cmd == "unset") {
-                var uk
+                var uk = 0
+                var uf = false, uv = false, ubad = ""
+                while (uk < argTs.length && argTs[uk].c != undefined && argTs[uk].c.length > 1 && argTs[uk].c.charAt(0) == "-") {
+                    var uo = argTs[uk].c
+                    uk = uk + 1
+                    if (uo == "--") { break }
+                    var uc
+                    for (uc = 1; uc < uo.length && ubad == ""; uc++) {
+                        var ul = uo.charAt(uc)
+                        if (ul == "f") { uf = true }
+                        else if (ul == "v") { uv = true }
+                        else if (ul != "n") { ubad = ul }
+                    }
+                }
+                if (ubad != "" || (uf && uv)) {
+                    var ubox = {b: b}
+                    evalArgs(ubox, argTs)
+                    b = emitAbortCheck(ubox.b)
+                    emitOnStderr(b, gepStr(b, (ubad != "")
+                        ? "bash: unset: -" + ubad + ": invalid option\nunset: usage: unset [-f] [-v] [-n] [name ...]\n"
+                        : "bash: unset: cannot simultaneously unset a function and a variable\n"))
+                    storeStatusI(b, (ubad != "") ? 2 : 1)
+                    return b
+                }
+                if (uf) {
+                    for (; uk < argTs.length; uk++) {
+                        var rf = evalWord(b, argTs[uk])
+                        b = rf.b
+                        b = emitUnsetFn(b, rf.v, argTs[uk].c)
+                    }
+                    storeStatusI(b, 0)
+                    return b
+                }
                 // The status: 1 when an operand failed (rt_arr_unset), else 0.
                 var ust = zero
-                for (uk = 0; uk < argTs.length; uk++) {
+                for (; uk < argTs.length; uk++) {
+                    // A name that is no variable (unset, no array, not declared) unsets the
+                    // function of that name instead.
+                    if (!uv && (argTs[uk].c == undefined || funcFor(argTs[uk].c) != null)) {
+                        var rn = evalWord(b, argTs[uk])
+                        b = rn.b
+                        var noVar = b.NewAnd(b.NewICmp(llvm.enum.IPredEQ, b.NewCall(rtIsset, b.NewCall(rtGetByName, rn.v)), zero),
+                                             b.NewICmp(llvm.enum.IPredEQ, b.NewOr(b.NewCall(rtArrAny, rn.v), b.NewCall(rtArrSmarked, rn.v)), zero))
+                        var fnB = curF.NewBlock(""), varB = curF.NewBlock("")
+                        b.NewCondBr(noVar, fnB, varB)
+                        emitUnsetFn(fnB, rn.v, argTs[uk].c).NewBr(varB)
+                        b = varB
+                    }
                     // A name built by expansion (`unset "d[$((i+1))]"`) is resolved at run time;
                     // the attribute and local bookkeeping below needs a literal one.
                     if (argTs[uk].c == undefined) {

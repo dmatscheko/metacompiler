@@ -1309,7 +1309,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
 
     var vars = {}        // variables:  vars["$" + name] = string value
     var varsHas = {}     // set-ness:   varsHas["$" + name] = true|false (unset keeps the key)
-    var funcs = {}       // functions:  funcs["$" + name] = body thunk
+    var funcs = {}       // functions:  funcs["$" + name] = body thunk, null once unset
     var funcLn = {}      // and the lnCtx each was defined under
     var posParams = []   // current positional parameters $1.. (an array of strings)
     var lastStatus = 0   // $? : exit status of the most recent command
@@ -5348,7 +5348,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             // (`x=1; x=2 echo $x` prints 1), and before the redirections.
             var saved = noPrefix
             if (asgs != null) {
-                saved = applyPrefix(asgs, all.length > 0, all.length > 0 && hasOwn(funcs, "$" + all[0]))
+                saved = applyPrefix(asgs, all.length > 0, all.length > 0 && isFunc(all[0]))
                 var ab3 = takeAbort()
                 if (ab3 != null) { restorePrefix(saved); return ab3 }
             }
@@ -6491,7 +6491,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // A function hides the builtin of its name (`echo() { builtin echo "<$*>"; }`).
         var noFn = skipFuncs
         skipFuncs = false
-        if (!noFn && hasOwn(funcs, "$" + cmd)) {
+        if (!noFn && isFunc(cmd)) {
             var st2 = anytype
             st2 = callFunc(cmd, args)
             if (typeof st2 == "object") { return st2 }
@@ -6522,11 +6522,41 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             setStatus(sst)
             return sst
         }
+        // unset [-f] [-v] [-n] NAME...: -f removes functions; with neither -f nor -v a name
+        // that is no variable removes the function of that name. -n acts as -v (no namerefs).
+        // Twin of the unset arm of makeSimpleCommand in bash-to-llvm-ir.abnf.
         if (cmd == "unset") {
-            var ui
+            var ui = 0
             var ust = 0
-            for (ui = 0; ui < args.length; ui++) {
+            var uf = false, uv = false
+            while (ui < args.length && args[ui].length > 1 && args[ui].charAt(0) == "-") {
+                var uo = args[ui]
+                ui = ui + 1
+                if (uo == "--") { break }
+                var uc
+                for (uc = 1; uc < uo.length; uc++) {
+                    var ul = uo.charAt(uc)
+                    if (ul == "f") { uf = true }
+                    else if (ul == "v") { uv = true }
+                    else if (ul != "n") {
+                        emitErr("bash: unset: -" + ul + ": invalid option\nunset: usage: unset [-f] [-v] [-n] [name ...]\n")
+                        setStatus(2)
+                        return 2
+                    }
+                }
+            }
+            if (uf && uv) {
+                emitErr("bash: unset: cannot simultaneously unset a function and a variable\n")
+                setStatus(1)
+                return 1
+            }
+            for (; ui < args.length; ui++) {
+                if (uf) { if (isFunc(args[ui])) { funcs["$" + args[ui]] = null }; continue }
                 var sp = splitSubscript(args[ui])
+                if (!uv && sp.key == null && isFunc(sp.name) && !isSetVar(sp.name) && !isArr(sp.name) && !attrOn(dclVars, sp.name)) {
+                    funcs["$" + sp.name] = null
+                    continue
+                }
                 if (sp.key == null && attrOn(roVars, sp.name)) {
                     emitErr("bash: unset: " + sp.name + ": cannot unset: readonly variable\n")
                     ust = 1
@@ -6642,8 +6672,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // (skipFuncs, read once by the next runCommand). No engine here runs external programs,
     // so `command` of a name that is not a builtin is not found, and `builtin` of one is
     // bash's "not a shell builtin" (status 1). `command -v NAME...` prints each NAME that is
-    // a builtin, a keyword or a function; the status is 1 when none is. Twin of
-    // wrapperWords and emitCommandV in bash-to-llvm-ir.abnf.
+    // a builtin, a keyword or a function, and `command -V` says which one it is (bash's
+    // reprinted function body is not modelled) or that it is not found; the status is 1 when
+    // none is anything. Of -v and -V the last one given counts. Twin of wrapperWords and
+    // emitWrapper in bash-to-llvm-ir.abnf.
     var skipFuncs = false
     var shellBuiltins = {}
     var shellKnownWords = ". : [ alias bg bind break builtin caller cd command compgen complete compopt continue declare dirs disown echo enable eval exec exit export false fc fg getopts hash help history jobs kill let local logout mapfile popd printf pushd pwd read readarray readonly return set shift shopt source suspend test times trap true type typeset ulimit umask unalias unset wait".split(" ")
@@ -6654,20 +6686,25 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     for (swi = 0; swi < shellKwWords.length; swi++) { shellKeywords["$" + shellKwWords[swi]] = true }
     function runWrapper(cmd, args) {
         var i = 0
-        var query = false
+        var query = ""
         while (cmd == "command" && i < args.length && args[i].length > 1 && args[i].charAt(0) == "-") {
             var opt = args[i]
             i = i + 1
             if (opt == "--") { break }
-            if (opt.indexOf("V") >= 0) { fail("command -V is not supported") }
-            if (opt.indexOf("v") >= 0) { query = true }
+            var oc
+            for (oc = 1; oc < opt.length; oc++) { if (opt.charAt(oc) == "v" || opt.charAt(oc) == "V") { query = opt.charAt(oc) } }
         }
         if (i >= args.length) { setStatus(0); return 0 }
-        if (query) {
+        if (query != "") {
             var qst = 1
             for (; i < args.length; i++) {
                 var qk = "$" + args[i]
-                if (hasOwn(shellBuiltins, qk) || hasOwn(shellKeywords, qk) || hasOwn(funcs, qk)) { emitOut(args[i] + "\n"); qst = 0 }
+                var kind = hasOwn(shellKeywords, qk) ? "a shell keyword" : (isFunc(args[i]) ? "f" : (hasOwn(shellBuiltins, qk) ? "a shell builtin" : ""))
+                if (kind == "") { if (query == "V") { emitErr("bash: command: " + args[i] + ": not found\n") }; continue }
+                if (query == "v") { emitOut(args[i] + "\n") }
+                else if (kind == "f") { fail("command -V of a function is not supported") }
+                else { emitOut(args[i] + " is " + kind + "\n") }
+                qst = 0
             }
             setStatus(qst)
             return qst
@@ -6686,6 +6723,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return runCommand(name, args.slice(i + 1))
     }
 
+    function isFunc(name) { return hasOwn(funcs, "$" + name) && funcs["$" + name] != null }
     // Call a user function: bind $1.. to args, run the body, restore, return its status.
     function callFunc(name, args) {
         var body = funcs["$" + name]

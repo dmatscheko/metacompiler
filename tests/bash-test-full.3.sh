@@ -1397,6 +1397,39 @@ s83() {
   r=$(s83q 2>/dev/null)
   check fnl3 "$?[$r]" "127[]"
 }
+# ===== SECTION 84: unset -f, unset of a name that is only a function, command -V =====
+# `unset -f NAME` removes a function, by a literal or a computed name; a plain `unset NAME`
+# removes the function only when no variable of that name exists; -f with -v is an error
+# (status 1) and an unknown option a usage error (status 2). `command -V` says whether a
+# name is a keyword or a builtin, or that it is not found (on standard error); its status,
+# like -v's, is 1 only when no name is anything. A local unset in the function that declared
+# it is still a variable there. Every expected value is bash 5.3's.
+s84() {
+  local r st n=s84c
+  s84a() { echo a; }; s84b() { echo b; }; s84c() { echo c; }; s84d() { echo d; }
+  unset -f s84a; st=$?
+  r=$(s84a 2>/dev/null); check uf1 "$st $?[$r]" "0 127[]"
+  unset -f "$n"; r=$(s84c 2>/dev/null); check uf2 "$?[$r]" "127[]"
+  r=$(command -v s84a s84b); check uf3 "$r" "s84b"
+  local s84b=1
+  unset s84b; r=$(s84b); check uf4 "$r|${s84b-gone}" "b|gone"
+  unset s84b; r=$(s84b); check uf5 "$r" "b"
+  s84e() { echo e; }
+  r=$(s84e=1; unset s84e; echo "${s84e-gone}"; unset s84e; s84e 2>/dev/null); check uf9 "$?[$r]" "127[gone]"
+  r=$( { unset -fv s84d; echo "st=$?"; } 2>&1 )
+  [[ $r == *"unset: cannot simultaneously unset a function and a variable"*st=1 ]]; check uf6 "$?" 0
+  r=$( { unset -q s84d; echo "st=$?"; } 2>/dev/null ); check uf7 "$r|$(s84d)" "st=2|d"
+  unset -f s84nosuch; check uf8 "$?" 0
+  r=$(command -V echo if '[' true); check cv1 "$r" "echo is a shell builtin
+if is a shell keyword
+[ is a shell builtin
+true is a shell builtin"
+  r=$(command -V s84nosuch 2>/dev/null); check cv2 "$?[$r]" "1[]"
+  r=$(command -V s84nosuch echo 2>/dev/null); check cv3 "$?[$r]" "0[echo is a shell builtin]"
+  r=$(command -V s84nosuch 2>&1); [[ $r == *": command: s84nosuch: not found" ]]; check cv4 "$?" 0
+  r=$(command -vV echo; command -Vv echo); check cv5 "$r" "echo is a shell builtin
+echo"
+}
 # ===== END SECTIONS =====
 
 s47   # SECTION-CALL 47
@@ -1435,5 +1468,6 @@ s80   # SECTION-CALL 80
 s81   # SECTION-CALL 81
 s82   # SECTION-CALL 82
 s83   # SECTION-CALL 83
+s84   # SECTION-CALL 84
 echo "full: $checks checks, $fails failures"
 exit $fails
