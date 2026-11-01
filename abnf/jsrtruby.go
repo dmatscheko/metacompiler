@@ -2055,39 +2055,39 @@ var rubyRespondNames = map[string][]string{
 		"name", "next", "nil?", "public_send", "send", "size", "succ", "swapcase", "to_proc",
 		"to_sym", "upcase"},
 	"Array": {"&", "*", "+", "-", "<<", "<=>", "[]", "all?", "any?", "append", "assoc",
-		"clear", "clone", "collect", "collect!", "collect_concat", "combination", "compact",
+		"chain", "chunk", "clear", "clone", "collect", "collect!", "collect_concat", "combination", "compact",
 		"compact!", "concat", "count", "cycle", "delete", "delete_at", "delete_if", "detect",
 		"drop", "drop_while", "dup", "each", "each_cons", "each_index", "each_slice",
 		"each_with_index", "each_with_object", "empty?", "entries", "equal?", "fetch", "fill",
 		"filter", "filter!", "find", "find_index", "first", "flat_map", "flatten", "flatten!",
-		"freeze", "frozen?", "group_by", "include?", "index", "inject", "insert", "instance_of?",
+		"freeze", "frozen?", "grep", "grep_v", "group_by", "include?", "index", "inject", "insert", "instance_of?",
 		"instance_variables", "is_a?", "itself", "join", "keep_if", "kind_of?", "last", "lazy", "length",
-		"map", "map!", "max", "max_by", "min", "min_by", "minmax", "nil?", "none?", "one?",
+		"map", "map!", "max", "max_by", "member?", "min", "min_by", "minmax", "minmax_by", "nil?", "none?", "one?",
 		"partition", "permutation", "pop", "prepend", "product", "public_send", "push", "reduce",
 		"reject", "reject!", "reverse", "reverse!", "reverse_each", "rindex", "rotate", "sample",
-		"select", "select!", "send", "shift", "shuffle", "shuffle!", "size", "slice", "sort",
+		"select", "select!", "send", "shift", "shuffle", "shuffle!", "size", "slice", "slice_after", "slice_before", "sort",
 		"sort!", "sort_by", "sort_by!", "sum", "take", "take_while", "tally", "to_a", "to_h", "uniq",
 		"uniq!", "unshift", "values_at", "zip", "|"},
-	"Hash": {"<", "<=", "<=>", ">", ">=", "[]", "all?", "any?", "assoc", "clear", "clone",
+	"Hash": {"<", "<=", "<=>", ">", ">=", "[]", "all?", "any?", "assoc", "chain", "chunk", "clear", "clone",
 		"collect", "collect_concat", "count", "default", "delete", "delete_if", "detect", "drop",
 		"drop_while", "dup", "each", "each_cons", "each_key", "each_pair", "each_slice",
 		"each_value", "each_with_index", "each_with_object", "empty?", "entries", "equal?",
 		"fetch", "filter", "filter!", "find", "find_index", "first", "flat_map", "freeze",
-		"frozen?", "group_by", "has_key?", "include?", "inject", "instance_of?",
+		"frozen?", "grep", "grep_v", "group_by", "has_key?", "include?", "inject", "instance_of?",
 		"instance_variables", "invert", "is_a?", "itself", "keep_if", "key", "key?", "keys",
-		"kind_of?", "length", "map", "max", "max_by", "merge", "merge!", "min", "min_by",
-		"minmax", "nil?", "none?", "one?", "partition", "public_send", "reduce", "reject",
-		"reject!", "select", "select!", "send", "size", "sort", "sort_by", "sum", "take",
+		"kind_of?", "length", "map", "max", "max_by", "member?", "merge", "merge!", "min", "min_by",
+		"minmax", "minmax_by", "nil?", "none?", "one?", "partition", "public_send", "reduce", "reject",
+		"reject!", "select", "select!", "send", "size", "slice_after", "slice_before", "sort", "sort_by", "sum", "take",
 		"take_while", "tally", "to_a", "to_h", "transform_keys", "transform_values", "uniq",
 		"update", "values", "values_at", "zip"},
-	"Range": {"<=>", "all?", "any?", "begin", "clone", "collect", "collect_concat", "count",
+	"Range": {"<=>", "all?", "any?", "begin", "chain", "chunk", "clone", "collect", "collect_concat", "count",
 		"cover?", "cycle", "detect", "drop", "drop_while", "dup", "each", "each_cons",
 		"each_slice", "each_with_index", "each_with_object", "end", "entries", "eql?", "equal?",
 		"exclude_end?", "filter", "find", "find_index", "first", "flat_map", "freeze", "frozen?",
-		"group_by", "hash", "include?", "inject", "instance_of?", "instance_variables", "is_a?",
+		"grep", "grep_v", "group_by", "hash", "include?", "inject", "instance_of?", "instance_variables", "is_a?",
 		"itself", "kind_of?", "last", "lazy", "map", "max", "max_by", "member?", "min", "min_by",
-		"minmax", "nil?", "none?", "object_id", "one?", "partition", "public_send", "reduce",
-		"reject", "reverse_each", "select", "send", "size", "sort", "sort_by", "step", "sum",
+		"minmax", "minmax_by", "nil?", "none?", "object_id", "one?", "partition", "public_send", "reduce",
+		"reject", "reverse_each", "select", "send", "size", "slice_after", "slice_before", "sort", "sort_by", "step", "sum",
 		"take", "take_while", "tally", "to_a", "uniq", "zip"},
 	"NilClass": {"&", "<=>", "^", "equal?", "frozen?", "instance_of?", "instance_variables",
 		"is_a?", "kind_of?", "nil?", "public_send", "send", "to_a", "to_f", "to_i", "|"},
@@ -2107,21 +2107,21 @@ var rubyRespondNames = map[string][]string{
 	"MatchData": {"<=>", "[]", "begin", "captures", "end", "equal?", "frozen?", "instance_of?",
 		"instance_variables", "is_a?", "kind_of?", "length", "named_captures", "names", "nil?",
 		"post_match", "pre_match", "public_send", "send", "size", "to_a"},
-	"Enumerator": {"<=>", "all?", "any?", "clone", "collect", "collect_concat", "count",
+	"Enumerator": {"<=>", "all?", "any?", "chain", "chunk", "clone", "collect", "collect_concat", "count",
 		"cycle", "detect", "drop", "drop_while", "dup", "each", "each_cons", "each_slice",
 		"each_with_index", "each_with_object", "entries", "equal?", "filter", "find",
-		"find_index", "first", "flat_map", "freeze", "frozen?", "group_by", "include?", "inject",
+		"find_index", "first", "flat_map", "freeze", "frozen?", "grep", "grep_v", "group_by", "include?", "inject",
 		"instance_of?", "instance_variables", "is_a?", "itself", "kind_of?", "lazy", "map", "max",
-		"max_by", "min", "min_by", "minmax", "next", "nil?", "none?", "one?", "partition", "peek",
+		"max_by", "member?", "min", "min_by", "minmax", "minmax_by", "next", "nil?", "none?", "one?", "partition", "peek",
 		"public_send", "reduce", "reject", "reverse_each", "rewind", "select", "send", "size",
-		"sort", "sort_by", "sum", "take", "take_while", "tally", "to_a", "uniq", "with_index",
+		"slice_after", "slice_before", "sort", "sort_by", "sum", "take", "take_while", "tally", "to_a", "uniq", "with_index",
 		"with_object", "zip"},
-	"Enumerable": {"all?", "any?", "chunk_while", "collect", "collect_concat", "count",
+	"Enumerable": {"all?", "any?", "chain", "chunk", "chunk_while", "collect", "collect_concat", "count",
 		"cycle", "detect", "drop", "drop_while", "each_cons", "each_entry", "each_slice",
 		"each_with_index", "each_with_object", "entries", "filter", "find", "find_all",
-		"find_index", "first", "flat_map", "group_by", "include?", "inject", "lazy", "map",
-		"max", "max_by", "min", "min_by", "minmax", "none?", "one?", "partition", "reduce",
-		"reject", "reverse_each", "select", "slice_when", "sort", "sort_by", "sum", "take",
+		"find_index", "first", "flat_map", "grep", "grep_v", "group_by", "include?", "inject", "lazy", "map",
+		"max", "max_by", "member?", "min", "min_by", "minmax", "minmax_by", "none?", "one?", "partition", "reduce",
+		"reject", "reverse_each", "select", "slice_after", "slice_before", "slice_when", "sort", "sort_by", "sum", "take",
 		"take_while", "to_a", "to_h", "uniq", "zip"},
 	"Class": {"<", "<=", ">", ">=", "ancestors", "class_eval", "constants", "equal?",
 		"frozen?", "include?", "instance_methods", "instance_of?",
@@ -2292,23 +2292,24 @@ func rubyClassRow(o *jsObject) string {
 
 // rubyRespondsPrivate: is n a private method every object has?
 // rubyEnumAnswers: an Enumerable method on an instance of a class that includes
-// Enumerable and defines #each. Twins: enumAnswers in ruby-interpreter.abnf,
+// Enumerable. An includer without #each still answers them, and the call fails
+// on each, as MRI's does. Twins: enumAnswers in ruby-interpreter.abnf,
 // rbEnumAnswers in lib/ruby-rt.metajs.
 func (rt *jsrt) rubyEnumAnswers(t interface{}, name string) bool {
 	if !rubyRespondSet["Enumerable#"+name] || !rubyUserObj(t) {
-		return false
-	}
-	if _, has := rubyFindMethod(t, "each"); !has {
 		return false
 	}
 	return rt.rubyIsA(t, rt.rubyBuiltinClass("Enumerable"))
 }
 
 // rubyEnumMixin answers such a method: the values #each yields, packed as
-// Enumerable#to_a packs them, run as an Array. Twins: enumMixin in
+// Enumerable#to_a packs them, run as an Array. The methods rubyEnumSpreads names
+// get a multi-value yield's values as their block's arguments; the k-th call of
+// each of them is for the k-th element. Twins: enumMixin in
 // ruby-interpreter.abnf, rbEnumMixin in lib/ruby-rt.metajs.
 func (rt *jsrt) rubyEnumMixin(t interface{}, name string, args []interface{}) interface{} {
 	items := &jsArray{}
+	var multi []bool
 	collect := &hostFunc{name: "", fn: func(_ *jsrt, _ uint64, a []interface{}) interface{} {
 		switch len(a) {
 		case 0:
@@ -2318,10 +2319,85 @@ func (rt *jsrt) rubyEnumMixin(t interface{}, name string, args []interface{}) in
 		default:
 			items.elems = append(items.elems, &jsArray{elems: append([]interface{}{}, a...)})
 		}
+		multi = append(multi, len(a) > 1)
 		return jsNull
 	}}
 	rt.rubyMethod(t, "each", []interface{}{rubyBlkWrap(collect)})
+	if n := len(args); n > 0 && rubyEnumSpreads(name) {
+		if blk, isBlk := rubyBlkOf(args[n-1]); isBlk {
+			k := 0
+			spread := &hostFunc{name: "", fn: func(rt *jsrt, _ uint64, a []interface{}) interface{} {
+				it := k
+				k++
+				if it < len(items.elems) && multi[it] && len(a) == 1 {
+					if got, isArr := a[0].(*jsArray); isArr && got == items.elems[it].(*jsArray) {
+						return rt.call(blk, jsUndef, got.elems)
+					}
+				}
+				return rt.call(blk, jsUndef, a)
+			}}
+			args = append(append([]interface{}{}, args[:n-1]...), rubyBlkWrap(spread))
+		}
+	}
 	return rt.rubyDelegArr(items, t, name, args)
+}
+
+// rubyMkUnbound is Module#instance_method on a user class: an UnboundMethod
+// carrying __rubm (the name), __rown (the owner text of its #inspect) and __rcls
+// (the class). Twins: mkUnbound in ruby-interpreter.abnf, rbMkUnbound in
+// lib/ruby-rt.metajs.
+func (rt *jsrt) rubyMkUnbound(cls *jsObject, n string) *jsObject {
+	probe := newJSObject()
+	probe.set("__class", cls)
+	name, _ := cls.props["__name"].(string)
+	own := ""
+	if _, found := rubyFindMethod(probe, n); found {
+		own = name
+	} else if rubyRespondSet["Enumerable#"+n] && rt.rubyAncestorHas(cls, rt.rubyBuiltinClass("Enumerable")) {
+		own = name + "(Enumerable)"
+	}
+	if own == "" {
+		rt.rubyNameErr("NameError", "undefined method `"+n+"' for class `"+name+"'", n, cls)
+	}
+	u := newJSObject()
+	u.set("__class", rt.rubyBuiltinClass("UnboundMethod"))
+	u.set("__rubm", n)
+	u.set("__rown", own)
+	u.set("__rmod", own != name)
+	u.set("__rcls", cls)
+	return u
+}
+
+// rubyUnboundMethod: #name, #to_s and #bind, which answers the Method the
+// receiver's #method would. A class's method binds only to an instance of it; a
+// module's binds to any value, and then the Method keeps the UnboundMethod's
+// owner. Twins: unboundMethod in ruby-interpreter.abnf, rbUnboundMethod in
+// lib/ruby-rt.metajs.
+func (rt *jsrt) rubyUnboundMethod(u *jsObject, name string, args []interface{}) interface{} {
+	n, _ := u.props["__rubm"].(string)
+	switch name {
+	case "name":
+		return jsSym{s: n}
+	case "to_s":
+		return rt.rubyInspect(u)
+	case "bind":
+		pos, _ := rubyBlockArgs(args)
+		cls := u.props["__rcls"].(*jsObject)
+		recv := argAt(pos, 0)
+		if u.props["__rmod"] == true && !rt.rubyEnumAnswers(recv, n) {
+			return rt.rubyMarkMethodVal(&hostFunc{name: "method:" + n,
+				fn: func(rt *jsrt, this uint64, a []interface{}) interface{} {
+					return rt.rubyMethod(recv, n, a)
+				}}, rt.rubyStr(u.props["__rown"]), n)
+		}
+		if !rt.rubyIsA(recv, cls) {
+			cn, _ := cls.props["__name"].(string)
+			rt.rubyRaiseErr(name, "TypeError", "bind argument must be an instance of "+cn)
+		}
+		return rt.rubyMethod(argAt(pos, 0), "method", []interface{}{jsSym{s: n}})
+	}
+	rt.rubyNoMethod(u, name)
+	return nil
 }
 
 func (rt *jsrt) rubyRespondsPrivate(n string) bool {

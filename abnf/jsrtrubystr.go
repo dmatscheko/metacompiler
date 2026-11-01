@@ -2230,3 +2230,147 @@ func rubyBinOpName(n string) bool {
 	}
 	return false
 }
+
+// rubyEnumSpreads names the Enumerable methods whose block MRI 2.6 hands a
+// multi-value `yield a, b` of #each as the values themselves rather than packed
+// into one Array. Twin of rbaEnumSpreads in languages/lib/ruby-arr.js.
+func rubyEnumSpreads(n string) bool {
+	switch n {
+	case "map", "collect", "flat_map", "collect_concat", "find_index", "all?", "any?",
+		"none?", "one?", "count", "take_while", "uniq", "to_h":
+		return true
+	}
+	return false
+}
+
+// rubyGrepHit is Enumerable#grep's pattern === element. Twin of caseEq in
+// ruby-interpreter.abnf and js_rxwhen in lib/ruby-rt.metajs.
+func (rt *jsrt) rubyGrepHit(pat, v interface{}) bool {
+	if isCallable(pat) {
+		return rubyTruthy(rt.call(pat, jsUndef, []interface{}{v}))
+	}
+	if rubyUserObj(pat) {
+		if m, ok := rubyFindMethod(pat, "==="); ok {
+			return rubyTruthy(rt.call(m, jsUndef, []interface{}{pat, v}))
+		}
+	}
+	return rt.rubyCaseEqv(pat, v)
+}
+
+// rubyEnumArgArr is a zip / chain argument as an Array: itself, or what #to_a
+// answers for a value that responds to each; nil for anything else. Twin of
+// enumArgArr in ruby-interpreter.abnf.
+func (rt *jsrt) rubyEnumArgArr(v interface{}) *jsArray {
+	if a, isArr := v.(*jsArray); isArr {
+		return a
+	}
+	if isUndefOrNull(v) || rt.rubyRespond(v, []interface{}{jsSym{s: "each"}}) != true {
+		return nil
+	}
+	a, _ := rt.rubyMethod(v, "to_a", nil).(*jsArray)
+	return a
+}
+
+// rubyArrEnumMore is Array's grep / grep_v / minmax_by / slice_before /
+// slice_after / chunk / chain; the last four answer an Enumerator over the
+// groups. Twin of the arms of arrayMethod in ruby-interpreter.abnf and of
+// rbArrayMethod in lib/ruby-rt.metajs (rbaSliceAt / rbaChunk / rbaMinMaxBy in
+// lib/ruby-arr.js).
+func (rt *jsrt) rubyArrEnumMore(t *jsArray, name string, pos []interface{}, blk interface{}) interface{} {
+	switch name {
+	case "grep", "grep_v":
+		out := &jsArray{}
+		for _, e := range t.elems {
+			if rt.rubyGrepHit(argAt(pos, 0), e) != (name == "grep_v") {
+				if blk != nil {
+					e = rt.call(blk, jsUndef, []interface{}{e})
+				}
+				out.elems = append(out.elems, e)
+			}
+		}
+		return out
+	case "minmax_by":
+		kp := rt.rubyArrKeyed(t, blk)
+		if len(kp) == 0 {
+			return &jsArray{elems: []interface{}{jsNull, jsNull}}
+		}
+		key := func(i int) interface{} { return kp[i].(*jsArray).elems[0] }
+		lo, hi := 0, 0
+		for i := 1; i < len(kp); i++ {
+			if rt.rubyCmp(key(i), key(lo)) < 0 {
+				lo = i
+			}
+			if rt.rubyCmp(key(i), key(hi)) > 0 {
+				hi = i
+			}
+		}
+		return &jsArray{elems: []interface{}{kp[lo].(*jsArray).elems[1], kp[hi].(*jsArray).elems[1]}}
+	case "slice_before", "slice_after":
+		out := &jsArray{}
+		cur := &jsArray{}
+		for _, e := range t.elems {
+			var hit bool
+			if blk != nil {
+				hit = rubyTruthy(rt.call(blk, jsUndef, []interface{}{e}))
+			} else {
+				hit = rt.rubyGrepHit(argAt(pos, 0), e)
+			}
+			if name == "slice_before" && hit && len(cur.elems) > 0 {
+				out.elems = append(out.elems, cur)
+				cur = &jsArray{}
+			}
+			cur.elems = append(cur.elems, e)
+			if name == "slice_after" && hit {
+				out.elems = append(out.elems, cur)
+				cur = &jsArray{}
+			}
+		}
+		if len(cur.elems) > 0 {
+			out.elems = append(out.elems, cur)
+		}
+		return rubyMkEnum(out)
+	case "chunk":
+		// A nil or :_separator key drops the element, :_alone makes it a chunk of
+		// its own, and any other Symbol starting with `_' is reserved.
+		out := &jsArray{}
+		var cur *jsArray
+		for _, e := range t.elems {
+			k := rt.call(blk, jsUndef, []interface{}{e})
+			drop, alone := isUndefOrNull(k), false
+			if sy, isSym := k.(jsSym); isSym && strings.HasPrefix(sy.s, "_") {
+				switch sy.s {
+				case "_separator":
+					drop = true
+				case "_alone":
+					alone = true
+				default:
+					rt.rubyRaiseErr(name, "RuntimeError", "symbols beginning with an underscore are reserved")
+				}
+			}
+			switch {
+			case drop:
+				cur = nil
+			case alone:
+				out.elems = append(out.elems, &jsArray{elems: []interface{}{k, &jsArray{elems: []interface{}{e}}}})
+				cur = nil
+			case cur != nil && rt.rubyEq(cur.elems[0], k):
+				g := cur.elems[1].(*jsArray)
+				g.elems = append(g.elems, e)
+			default:
+				cur = &jsArray{elems: []interface{}{k, &jsArray{elems: []interface{}{e}}}}
+				out.elems = append(out.elems, cur)
+			}
+		}
+		return rubyMkEnum(out)
+	}
+	// chain
+	out := &jsArray{elems: append([]interface{}{}, t.elems...)}
+	for _, a := range pos {
+		arr := rt.rubyEnumArgArr(a)
+		if arr == nil {
+			rt.rubyNoMethod(a, "each")
+		}
+		out.elems = append(out.elems, arr.elems...)
+	}
+	return rubyMkEnum(out)
+}

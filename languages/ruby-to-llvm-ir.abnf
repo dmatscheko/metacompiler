@@ -9177,7 +9177,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // Math is a MODULE, and it belongs here for the same reason the classes do:
         // without it the name falls through to the ROOT scope's JavaScript Math, and
         // Math.sqrt(4) has to answer 2.0, not 2.
-        "Math", "Struct", "IO", "Encoding",
+        "Math", "Struct", "IO", "Encoding", "UnboundMethod",
         "Exception", "StandardError", "RuntimeError", "ArgumentError", "TypeError",
         "NameError", "NoMethodError", "IndexError", "KeyError", "RangeError",
         "ZeroDivisionError", "StopIteration", "FrozenError", "NotImplementedError", "UncaughtThrowError",

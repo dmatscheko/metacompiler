@@ -6129,6 +6129,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // `#<A:0x00007f... @x=1>'; the address is its own and cannot be matched, so
         // the address and the instance variables are left off rather than invented -
         // the same rule the Proc renderer below follows.
+        if (isUserObj(v) && v.__rubm !== undefined) { return rinspect(v) }
         if (isUserObj(v)) { return v.__renc !== undefined ? v.__renc : "#<" + v.__class.__name + ">" }
         // Enumerator#to_s is Object#to_s, the address left off the same way.
         if (isEnum(v)) { return "#<Enumerator>" }
@@ -6264,6 +6265,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             // abnf/jsrt.go and rbInspect of lib/ruby-rt.metajs.
             if (v.__rio !== undefined) { return "#<IO:<" + (v.__rio == 2 ? "STDERR" : "STDOUT") + ">>" }
             if (v.__renc !== undefined) { return "#<Encoding:" + v.__renc + ">" }
+            if (v.__rubm !== undefined) { return "#<UnboundMethod: " + v.__rown + "#" + v.__rubm + ">" }
             // Object#inspect never calls a user #to_s: MRI's default form, with the
             // address and instance variables left off as in rstr.
             return "#<" + v.__class.__name + ">"
@@ -8338,19 +8340,47 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     }
     // An Enumerable method on an instance of a class that includes Enumerable: the
     // values #each yields, packed as Enumerable#to_a packs them, answer it as an
-    // Array would. Twins: rubyEnumMixin in abnf/jsrtruby.go, rbEnumMixin in
-    // lib/ruby-rt.metajs.
+    // Array would. An includer without #each still answers them, and the call
+    // fails on each, as MRI's does. The methods rbaEnumSpreads names hand a
+    // multi-value yield to their block as the values themselves (`yield 1, 2`
+    // gives `map { |x| }` 1), so their block is called with the packed Array's
+    // elements; the k-th call of each of them is for the k-th element. Twins:
+    // rubyEnumMixin in abnf/jsrtruby.go, rbEnumMixin in lib/ruby-rt.metajs.
     function enumAnswers(t, name) {
-        return rbEnumName(name) && userIsA(t, hostGlobals["Enumerable"]) && typeof lookupMethod(t.__class, "each") == "function"
+        return rbEnumName(name) && userIsA(t, hostGlobals["Enumerable"])
     }
     function enumMixin(t, name, args, blk) {
         var items = []
+        var multi = []
         mcall(t, "each", [], function() {
             var a = argsArray(arguments)
             if (a.length == 1) { items.push(a[0]) } else { items.push(a.length == 0 ? null : a) }
+            multi.push(a.length > 1)
             return null
         })
-        return delegArr(items, t, name, args, blk)
+        var b = anytype
+        b = blk
+        if (blk != null && rbaEnumSpreads(name)) {
+            var k = [0]
+            b = function() {
+                var a = argsArray(arguments)
+                var it = k[0]
+                k[0] = it + 1
+                if (it < items.length && multi[it] && a.length == 1 && a[0] === items[it]) { return blk.apply(undefined, items[it]) }
+                return blk.apply(undefined, a)
+            }
+        }
+        return delegArr(items, t, name, args, b)
+    }
+    // A zip / chain argument as an Array: itself, or what #to_a answers for a
+    // value that responds to each; null for anything else. Twins: rubyEnumArgArr
+    // in abnf/jsrtrubystr.go, rbEnumArgArr in lib/ruby-rt.metajs.
+    function enumArgArr(v) {
+        if (Array.isArray(v)) { return v }
+        if (v === null || v === undefined || !rtest(mcall(v, "respond_to?", [mkSym("each")], null))) { return null }
+        var r = anytype
+        r = mcall(v, "to_a", [], null)
+        return Array.isArray(r) ? r : null
     }
     function noMethodDesc(t) {
         var cn = classOf(t).__name
@@ -9020,7 +9050,12 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // A Proc / block closure: Proc#call, and the two call shorthands p.(x) and p[x].
         if (typeof target == "function") {
             if (name == "call" || name == "()" || name == "[]" || name == "yield") {
-                return blockCall(target, args)
+                if (blk == null || !isMethodVal(target)) { return blockCall(target, args) }
+                methodValBlk = blk
+                var mvr = anytype
+                mvr = blockCall(target, args)
+                methodValBlk = null
+                return mvr
             }
             // Method#to_proc answers a PROC, and a LAMBDA one: MRI's
             // `method(:foo).to_proc' is `#<Proc (lambda)>' with the Method's own
@@ -9093,7 +9128,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (!rbResponds(bcn, bmn)) { raiseErr(name, "NameError", "undefined method `" + bmn + "' for class `" + bcn + "'") }
             var brecv = anytype
             brecv = target
-            return markMethodVal(function() { return mcall(brecv, bmn, argsArray(arguments), null) }, bcn, bmn)
+            return markMethodVal(function() { return mcall(brecv, bmn, argsArray(arguments), takeMethodValBlk()) }, bcn, bmn)
         }
         if (name == "is_a?" || name == "kind_of?" || name == "instance_of?") {
             if (name == "instance_of?") { return classOf(target) === args[0] }
@@ -9428,6 +9463,15 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 var bm = anytype
                 bm = singFind(target, rstr(args[0]))
                 if (typeof bm != "function") { bm = lookupMethod(target.__class, rstr(args[0])) }
+                // An Enumerable method the class takes from the module: MRI's owner
+                // is written `Bag(Enumerable)'.
+                if (typeof bm != "function" && enumAnswers(target, rstr(args[0]))) {
+                    var emn = rstr(args[0])
+                    var erecv = anytype
+                    erecv = target
+                    return markMethodVal(function() { return mcall(erecv, emn, argsArray(arguments), takeMethodValBlk()) },
+                                         target.__class.__name + "(Enumerable)", emn)
+                }
                 if (typeof bm != "function") {
                     throw {__exc: true, v: mkExc(hostGlobals["NameError"],
                                                  "undefined method `" + rstr(args[0]) + "' for class `" + target.__class.__name + "'")}
@@ -9478,6 +9522,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 }
                 if (name == "instance_variables") { return ivarNames(target) }
                 if (target.__rio !== undefined) { return ioMethod(target, name, args) }
+                if (target.__rubm !== undefined) { return unboundMethod(target, name, args) }
                 if (target.__renc !== undefined) {
                     if (name == "name" || name == "to_s") { return target.__renc }
                     if (name == "ascii_compatible?") { return true }
@@ -9544,6 +9589,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 return hostGlobals["Object"]
             }
             if (name == "instance_methods") { return args.length > 0 && !rtest(args[0]) ? ownInstanceMethods(target) : allInstanceMethods(target) }
+            if (name == "instance_method" && target.__builtin !== true) { return mkUnbound(target, rstr(args[0])) }
             if (name == "public_instance_methods") {
                 return publicOnly(target, args.length > 0 && !rtest(args[0]) ? ownInstanceMethods(target) : allInstanceMethods(target))
             }
@@ -9694,7 +9740,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // Hash#[] as a METHOD (h.send(:[], k)); the subscript itself goes through
         // rindex. String and Array answer it too.
         if (name == "[]") { return rindex(target, args[0]) }
-        if (name == "include?" || name == "has_key?" || name == "key?") { return dictFind(target, args[0]) >= 0 }
+        if (name == "include?" || name == "member?" || name == "has_key?" || name == "key?") { return dictFind(target, args[0]) >= 0 }
         if (name == "each" || name == "each_pair") {
             if (blk == null) { return enumAt(mkEnum(hashPairs(target)), target, name, args) }
             hashEach(target, blk)
@@ -10162,6 +10208,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             || n == "each_cons" || n == "empty?" || n == "tally" || n == "zip" || n == "each_entry"
             || n == "assoc" || n == "uniq" || n == "reverse" || n == "freeze" || n == "itself"
             || n == "find_all" || n == "cycle" || n == "chunk_while" || n == "lazy"
+            || n == "grep" || n == "grep_v" || n == "minmax_by" || n == "slice_before"
+            || n == "slice_after" || n == "chunk" || n == "chain"
     }
     // The Array/Enumerable names that REQUIRE a block; called without one MRI hands
     // back an Enumerator over the receiver. Names that are legal blockless (sort,
@@ -10174,6 +10222,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             || n == "sort_by" || n == "sort_by!" || n == "group_by" || n == "partition"
             || n == "flat_map" || n == "collect_concat" || n == "find" || n == "detect"
             || n == "min_by" || n == "max_by" || n == "take_while" || n == "drop_while"
+            || n == "minmax_by" || n == "chunk"
     }
     // A blockless each / each_slice / each_cons / each_with_index / combination /
     // permutation answers an Enumerator in MRI.
@@ -10431,7 +10480,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // Array#include? / #index / #find_index are ==, not === and not eql?:
         // `[[1]].include?([1])` and `[1].include?(1.0)` are both true in MRI. rubyEq
         // also equates two Integers past 2^53, which are different objects here.
-        if (name == "include?" || name == "contains") {
+        if (name == "include?" || name == "member?" || name == "contains") {
             for (i = 0; i < t.length; i++) { if (rubyEq(t[i], args[0])) { return true } }
             return false
         }
@@ -10675,11 +10724,17 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // short one with nil; the result is always as long as the RECEIVER.
         if (name == "zip") {
             var zout = []
+            var zargs = []
+            for (var zk = 0; zk < args.length; zk++) {
+                zargs.push(enumArgArr(args[zk]))
+                if (zargs[zk] === null) { raiseErr(name, "TypeError", "wrong argument type " + classOf(args[zk]).__name + " (must respond to :each)") }
+            }
             for (i = 0; i < t.length; i++) {
                 var row = [t[i]]
                 for (var zj = 0; zj < args.length; zj++) {
-                    var za = args[zj]
-                    row.push(Array.isArray(za) && i < za.length ? za[i] : null)
+                    var za = anytype
+                    za = zargs[zj]
+                    row.push(za !== null && i < za.length ? za[i] : null)
                 }
                 zout.push(row)
             }
@@ -10690,10 +10745,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             }
             return zout
         }
-        // each_slice / each_cons: with a block they yield each group and answer SELF
-        // (Ruby 3.1 changed this from nil, and this project's corpus is Ruby 3);
-        // with no block MRI answers an Enumerator, which has no value here, so they
-        // answer the array of groups - what .to_a on that Enumerator would give.
+        // each_slice / each_cons: with a block they yield each group and answer nil
+        // (MRI 2.6; 3.1 answers the receiver); with no block, an Enumerator over the
+        // groups.
         if (name == "each_slice" || name == "each_cons") {
             var gn = Math.trunc(toF(args[0]))
             if (gn < 1) { raiseErr(name, "ArgumentError", name == "each_slice" ? "invalid slice size" : "invalid size") }
@@ -10705,7 +10759,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             }
             if (blk == null) { return enumAt(mkEnum(groups), enumSrc(t), name, args) }
             for (i = 0; i < groups.length; i++) { blockCall(blk, [groups[i]]) }
-            return t
+            return null
         }
         // sample / shuffle. There is no random source in this project and there cannot
         // be one the engines agree on byte-for-byte (see Kernel#rand, which is
@@ -11050,6 +11104,50 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             }
             return rbaChunks(t, ckeep)
         }
+        // grep / grep_v keep the elements the pattern's === accepts (rejects),
+        // mapped through the block when there is one.
+        if (name == "grep" || name == "grep_v") {
+            var gout = []
+            for (i = 0; i < t.length; i++) {
+                if (rtest(caseEq(args[0], t[i])) != (name == "grep_v")) { gout.push(blk == null ? t[i] : blockCall(blk, [t[i]])) }
+            }
+            return gout
+        }
+        if (name == "minmax_by") { return rbaMinMaxBy(arrKeyed(t, blk), rcmp) }
+        // slice_before / slice_after / chunk / chain answer an Enumerator over the
+        // groups. The pattern of slice_before(pat) is matched with ===.
+        if (name == "slice_before" || name == "slice_after") {
+            var sflag = []
+            for (i = 0; i < t.length; i++) { sflag.push(rtest(blk == null ? caseEq(args[0], t[i]) : blockCall(blk, [t[i]]))) }
+            return mkEnum(rbaSliceAt(t, sflag, name == "slice_after"))
+        }
+        if (name == "chunk") {
+            var ckeys = []
+            var ckinds = []
+            for (i = 0; i < t.length; i++) {
+                var ck = anytype
+                ck = blockCall(blk, [t[i]])
+                var ckind = ck === null || ck === undefined ? 1 : 0
+                if (isSym(ck) && ck.s.slice(0, 1) == "_") {
+                    if (ck.s == "_separator") { ckind = 1 }
+                    else if (ck.s == "_alone") { ckind = 2 }
+                    else { raiseErr(name, "RuntimeError", "symbols beginning with an underscore are reserved") }
+                }
+                ckeys.push(ck)
+                ckinds.push(ckind)
+            }
+            return mkEnum(rbaChunk(t, ckeys, ckinds, rubyEq))
+        }
+        if (name == "chain") {
+            var chn = t.slice(0)
+            for (var chi = 0; chi < args.length; chi++) {
+                var cha = anytype
+                cha = enumArgArr(args[chi])
+                if (cha === null) { noMethod(args[chi], "each") }
+                chn = concat2impl(chn, cha)
+            }
+            return mkEnum(chn)
+        }
         if (name == "assoc") {
             for (i = 0; i < t.length; i++) {
                 if (Array.isArray(t[i]) && t[i].length > 0 && rubyEq(t[i][0], args[0])) { return t[i] }
@@ -11256,6 +11354,17 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     var methodFns = []
     var methodOwners = []
     var methodNames = []
+    // The block of a Method#call, handed to the method the wrapper re-dispatches
+    // to: a block travels beside the arguments in this half, not among them as in
+    // the compiled one, so the wrapper takes it from here on entry.
+    var methodValBlk = anytype
+    methodValBlk = null
+    function takeMethodValBlk() {
+        var b = anytype
+        b = methodValBlk
+        methodValBlk = null
+        return b
+    }
     function markMethodVal(f, owner, name) {
         methodFns.push(f)
         methodOwners.push(owner)
@@ -11815,6 +11924,39 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             return
         }
         ioWrite(io, putsLine(rstr(v)), isBin(v))
+    }
+    // Module#instance_method on a user class: an UnboundMethod, {__rubm: name,
+    // __rown: the owner text of its #inspect, __rmod: owned by Enumerable,
+    // __rcls: the class}, of a method the class defines or inherits or of an
+    // Enumerable method it includes (owner `Bag(Enumerable)'). An inherited
+    // method's owner is the class itself, as for a Method (rbOwnerName), and a
+    // method of Object or Kernel is not reachable this way. Twins: rubyMkUnbound /
+    // rubyUnboundMethod in abnf/jsrtruby.go, rbMkUnbound / rbUnboundMethod in
+    // lib/ruby-rt.metajs.
+    function mkUnbound(cls, n) {
+        var own = ""
+        if (typeof lookupMethod(cls, n) == "function") { own = cls.__name }
+        else if (rbEnumName(n) && rtest(ancestorHas(cls, hostGlobals["Enumerable"]))) { own = cls.__name + "(Enumerable)" }
+        if (own == "") { nameErr("NameError", "undefined method `" + n + "' for class `" + cls.__name + "'", n, cls) }
+        return {__class: hostGlobals["UnboundMethod"], __rubm: n, __rown: own, __rmod: own != cls.__name, __rcls: cls}
+    }
+    // UnboundMethod#bind answers the Method the receiver's #method would. A
+    // class's method binds only to an instance of it; a module's binds to any
+    // value, and then the Method keeps the UnboundMethod's owner.
+    function unboundMethod(u, name, args) {
+        if (name == "name") { return mkSym(u.__rubm) }
+        if (name == "to_s") { return rinspect(u) }
+        if (name == "bind") {
+            var brv = anytype
+            brv = args[0]
+            var bn = u.__rubm
+            if (u.__rmod && !(isUserObj(brv) && enumAnswers(brv, bn))) {
+                return markMethodVal(function() { return mcall(brv, bn, argsArray(arguments), takeMethodValBlk()) }, u.__rown, bn)
+            }
+            if (!valueIsA(brv, u.__rcls)) { raiseErr(name, "TypeError", "bind argument must be an instance of " + u.__rcls.__name) }
+            return mcall(brv, "method", [mkSym(bn)], null)
+        }
+        noMethod(u, name)
     }
     function ioMethod(io, name, args) {
         if (name == "puts") {
@@ -14905,7 +15047,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                              "Comparable", "Enumerable", "Enumerator", "Math", "Struct",
                              // Class and Module are what a class object and a module
                              // object answer to #class.
-                             "Class", "Module", "IO", "Encoding"]
+                             "Class", "Module", "IO", "Encoding", "UnboundMethod"]
     // The builtin names that are modules, not classes: their #class is Module. Twins:
     // rubyBuiltinClass in abnf/jsrt.go, rbBuiltinClass in languages/lib/ruby-rt.metajs.
     function isBuiltinModule(n) { return n == "Kernel" || n == "Comparable" || n == "Enumerable" || n == "Math" }
@@ -15353,7 +15495,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         var w = function() {
             var args = []
             for (var i = 0; i < arguments.length; i++) { args.push(arguments[i]) }
-            return mcall(self, name, args, null)
+            return mcall(self, name, args, takeMethodValBlk())
         }
         return markMethodVal(copyArity(w, m), classOf(self).__name, name)
     }

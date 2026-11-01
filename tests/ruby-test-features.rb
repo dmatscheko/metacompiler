@@ -934,7 +934,7 @@ check("enum-with-index-offset", ea.each.with_index(1).to_a.first.inspect, "[1, 1
 eacc = []
 ea.each.with_index(1) { |v, i| eacc << (v * i) }
 check("enum-with-index-block", eacc.inspect, "[1, 4, 9, 16, 25]")
-check("enum-block-still-yields", ea.each_slice(2) { |g| }.inspect, "[1, 2, 3, 4, 5]")
+check("enum-block-still-yields", ea.each_slice(2) { |g| }.inspect, "nil")
 
 # ----- sample / shuffle / cycle / combination / permutation -----
 # sample and shuffle are asserted on INVARIANTS ONLY - the length, membership, and

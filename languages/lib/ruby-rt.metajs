@@ -2234,6 +2234,7 @@ function rbStr(v) {
         }
         if (rbIsRange(v)) { return rbRangeText(v, false) }
         if (typeof v["__renc"] == "string") { return v["__renc"] }
+        if (v["__rubm"] !== undefined) { return rbInspect(v) }
         // A plain instance with no #to_s of its own. MRI writes
         // `#<A:0x00007f... @x=1>'; the address is its own and cannot be matched, so
         // the address and the instance variables are left off rather than invented -
@@ -2396,6 +2397,7 @@ function rbInspect(v) {
             if (rbExcInst(v)) { return rbExcInspect(rbInstClassName(v), rbStr(v)) }
             if (v["__rio"] !== undefined) { return "#<IO:<" + (v["__rio"] == 2 ? "STDERR" : "STDOUT") + ">>" }
             if (v["__renc"] !== undefined) { return "#<Encoding:" + v["__renc"] + ">" }
+            if (v["__rubm"] !== undefined) { return "#<UnboundMethod: " + v["__rown"] + "#" + v["__rubm"] + ">" }
         }
         // A Regexp / MatchData answers from the regexp half's own table.
         if (rbRxIsRegex(v) || rbRxIsMatch(v)) { return rbStr(rbRxMethod(v, "inspect", [])) }
@@ -7049,6 +7051,8 @@ function rbHashEnumName(n) {
         || n == "each_cons" || n == "empty?" || n == "tally" || n == "zip" || n == "each_entry"
         || n == "assoc" || n == "uniq" || n == "reverse" || n == "freeze" || n == "itself"
         || n == "find_all" || n == "cycle" || n == "chunk_while" || n == "lazy"
+        || n == "grep" || n == "grep_v" || n == "minmax_by" || n == "slice_before"
+        || n == "slice_after" || n == "chunk" || n == "chain"
 }
 
 function rbHashMethod(o, keys, vals, name, args) {
@@ -7279,6 +7283,7 @@ function rbArrWantsBlock(n) {
         || n == "sort_by" || n == "sort_by!" || n == "group_by" || n == "partition"
         || n == "flat_map" || n == "collect_concat" || n == "find" || n == "detect"
         || n == "min_by" || n == "max_by" || n == "take_while" || n == "drop_while"
+        || n == "minmax_by" || n == "chunk"
 }
 function rbArrayMethod(t, name, args) {
     var blk = rbBlockOf(args)
@@ -7361,7 +7366,7 @@ function rbArrayMethod(t, name, args) {
     // `[[1]].include?([1])` and `[1].include?(1.0)` are both true in MRI. A plain
     // scan and not the dict index: an ordinary data array must not grow a key
     // index to be searched.
-    if (name == "include?" || name == "contains") { return rbArrIndex(t, rbPosAt(args, nPos, 0)) >= 0 }
+    if (name == "include?" || name == "member?" || name == "contains") { return rbArrIndex(t, rbPosAt(args, nPos, 0)) >= 0 }
     // inspect / index / find_index / rindex / uniq. index and uniq compare BY
     // VALUE - `[[1]].index([1])` is 0 in MRI - which is what rbDictFind says.
     if (name == "inspect") { return rbInspect(t) }
@@ -7687,13 +7692,20 @@ function rbArrayMethod(t, name, args) {
     // short one with nil; the result is always as long as the RECEIVER.
     if (name == "zip") {
         var zout = []
+        var zargs = []
         var zi = 0
+        while (zi < nPos) {
+            zargs.push(rbEnumArgArr(args[zi]))
+            if (zargs[zi] === null) { rbRaiseErr(name, "TypeError", "wrong argument type " + rbOwnerName(args[zi]) + " (must respond to :each)") }
+            zi = zi + 1
+        }
+        zi = 0
         while (zi < t.length) {
             var row = [t[zi]]
             var zj = 0
             while (zj < nPos) {
-                var za = args[zj]
-                if (rbIsArr(za) && zi < za.length) { row.push(za[zi]) } else { row.push(null) }
+                var za = zargs[zj]
+                if (za !== null && zi < za.length) { row.push(za[zi]) } else { row.push(null) }
                 zj = zj + 1
             }
             zout.push(row)
@@ -7710,10 +7722,9 @@ function rbArrayMethod(t, name, args) {
         }
         return zout
     }
-    // each_slice / each_cons: with a block they yield each group and answer SELF
-    // (Ruby 3.1 changed this from nil, and this project's corpus is Ruby 3); with
-    // no block MRI answers an Enumerator, which has no value here, so they answer
-    // the array of groups - what .to_a on that Enumerator would give.
+    // each_slice / each_cons: with a block they yield each group and answer nil
+    // (MRI 2.6; 3.1 answers the receiver); with no block, an Enumerator over the
+    // groups.
     if (name == "each_slice" || name == "each_cons") {
         var gn = Math.trunc(rbToF(rbPosAt(args, nPos, 0)))
         if (gn < 1) { rbRaiseErr(name, "ArgumentError", name == "each_slice" ? "invalid slice size" : "invalid size") }
@@ -7736,7 +7747,7 @@ function rbArrayMethod(t, name, args) {
             rbCall1(blk, groups[gk])
             gk = gk + 1
         }
-        return t
+        return null
     }
     // sample / shuffle. There is no random source in this project and there cannot be
     // one the engines agree on byte-for-byte (see rbRand, which is deterministically
@@ -8204,6 +8215,69 @@ function rbArrayMethod(t, name, args) {
         }
         return rbaChunks(t, ckeep)
     }
+    // grep / grep_v keep the elements the pattern's === accepts (rejects), mapped
+    // through the block when there is one.
+    if (name == "grep" || name == "grep_v") {
+        var gout = []
+        var gi2 = 0
+        while (gi2 < t.length) {
+            if (rbTruthy(js_rxwhen(rbPosAt(args, nPos, 0), t[gi2])) != (name == "grep_v")) {
+                if (blk === null) { gout.push(t[gi2]) } else { gout.push(rbCall1(blk, t[gi2])) }
+            }
+            gi2 = gi2 + 1
+        }
+        return gout
+    }
+    if (name == "minmax_by") { return rbaMinMaxBy(rbArrKeyed(t, blk), rbCmp) }
+    // slice_before / slice_after / chunk / chain answer an Enumerator over the
+    // groups. The pattern of slice_before(pat) is matched with ===.
+    if (name == "slice_before" || name == "slice_after") {
+        var sflag = []
+        var shi = 0
+        while (shi < t.length) {
+            if (blk === null) { sflag.push(rbTruthy(js_rxwhen(rbPosAt(args, nPos, 0), t[shi]))) } else { sflag.push(rbTruthy(rbCall1(blk, t[shi]))) }
+            shi = shi + 1
+        }
+        return rbMkEnum(rbaSliceAt(t, sflag, name == "slice_after"))
+    }
+    if (name == "chunk") {
+        var ckeys = []
+        var ckinds = []
+        var cki = 0
+        while (cki < t.length) {
+            var ck = rbCall1(blk, t[cki])
+            var ckind = 0
+            if (rtIsNil(ck)) { ckind = 1 }
+            if (rbIsSym(ck) && ck["s"].slice(0, 1) == "_") {
+                if (ck["s"] == "_separator") {
+                    ckind = 1
+                } else if (ck["s"] == "_alone") {
+                    ckind = 2
+                } else {
+                    rbRaiseErr(name, "RuntimeError", "symbols beginning with an underscore are reserved")
+                }
+            }
+            ckeys.push(ck)
+            ckinds.push(ckind)
+            cki = cki + 1
+        }
+        return rbMkEnum(rbaChunk(t, ckeys, ckinds, rbEq))
+    }
+    if (name == "chain") {
+        var chn = rtCopyArr(t)
+        var chi = 0
+        while (chi < nPos) {
+            var cha = rbEnumArgArr(args[chi])
+            if (cha === null) { rbNoMethod(args[chi], "each") }
+            var chj = 0
+            while (chj < cha.length) {
+                chn.push(cha[chj])
+                chj = chj + 1
+            }
+            chi = chi + 1
+        }
+        return rbMkEnum(chn)
+    }
     if (name == "assoc") {
         var si2 = 0
         while (si2 < t.length) {
@@ -8283,6 +8357,7 @@ function rbMemberCall(target, name, args) {
                 cls = cls["__super"]
             }
             if (target["__rio"] !== undefined) { return rbIOMethod(target, name, args) }
+            if (target["__rubm"] !== undefined) { return rbUnboundMethod(target, name, args) }
             if (target["__renc"] !== undefined) {
                 if (name == "name" || name == "to_s") { return target["__renc"] }
                 if (name == "ascii_compatible?") { return true }
@@ -8966,7 +9041,7 @@ function rbMethod(target, name, args) {
             // Hash#[] as a METHOD (h.send(:[], k)); the subscript itself goes through
             // js_rget. String and Array answer it too.
             if (name == "[]") { return js_rget(target, rbArgAt(args, 0)) }
-            if (name == "include?" || name == "has_key?" || name == "key?") { return rbDictFind(keys, rbArgAt(args, 0)) >= 0 }
+            if (name == "include?" || name == "member?" || name == "has_key?" || name == "key?") { return rbDictFind(keys, rbArgAt(args, 0)) >= 0 }
             if (rbHashIterates(name, args)) { return rbHashIter(target, target, name, args) }
             if (name == "each") { return rbEnumAt(rbMkEnum(rbHashPairs(keys, vals)), target, name, args) }
             // Hash#default is the value Hash.new(v) recorded; a hash built with a
@@ -9100,6 +9175,9 @@ function rbMethod(target, name, args) {
                 }
                 return target
             }
+            if (name == "instance_method" && target["__isclass"] === true && target["__rbuiltin"] === undefined) {
+                return rbMkUnbound(target, rbStr(rbArgAt(args, 0)))
+            }
             if (name == "instance_methods" && target["__isclass"] === true) {
                 if (rbNPos(args) > 0 && !rbTruthy(rbArgAt(args, 0))) { return rbOwnIMethods(target) }
                 return rbAllIMethods(target)
@@ -9113,6 +9191,9 @@ function rbMethod(target, name, args) {
             if (name == "method" && rbFindMethod(target, "method") === undefined) {
                 var mnm = rbStr(rbArgAt(args, 0))
                 var mm = rbFindMethod(target, mnm)
+                // An Enumerable method the class takes from the module: MRI's
+                // owner is written `Bag(Enumerable)'.
+                if (mm === undefined && rbEnumAnswers(target, mnm)) { return rbEnumMethodVal(target, mnm) }
                 if (mm === undefined) { rbRaiseErr(name, "NameError", "undefined method `" + mnm + "' for class `" + rbOwnerName(target) + "'") }
                 return rbBindMethod(target, mnm, mm)
             }
@@ -10509,17 +10590,21 @@ function rbDelegArr(arr, recv, name, args) {
     return v
 }
 
-// An Enumerable method on an instance of a class that includes Enumerable and
-// defines #each. Twins: enumAnswers in ruby-interpreter.abnf, rubyEnumAnswers in
+// An Enumerable method on an instance of a class that includes Enumerable. An
+// includer without #each still answers them, and the call fails on each, as
+// MRI's does. Twins: enumAnswers in ruby-interpreter.abnf, rubyEnumAnswers in
 // abnf/jsrtruby.go.
 function rbEnumAnswers(t, name) {
-    return rbEnumName(name) && rbUserObj(t) && rbFindMethod(t, "each") !== undefined && rbIsA(t, rbBuiltinClass("Enumerable"))
+    return rbEnumName(name) && rbUserObj(t) && rbIsA(t, rbBuiltinClass("Enumerable"))
 }
 // Such a method is answered by the values #each yields, packed as Enumerable#to_a
-// packs them, run as an Array. Twins: enumMixin in ruby-interpreter.abnf,
+// packs them, run as an Array. The methods rbaEnumSpreads names get a
+// multi-value yield's values as their block's arguments; the k-th call of each
+// of them is for the k-th element. Twins: enumMixin in ruby-interpreter.abnf,
 // rubyEnumMixin in abnf/jsrtruby.go.
 function rbEnumMixin(t, name, args) {
     var items = []
+    var multi = []
     rbMethod(t, "each", [js_rblkwrap(function() {
         if (arguments.length == 1) {
             items.push(arguments[0])
@@ -10531,9 +10616,86 @@ function rbEnumMixin(t, name, args) {
             while (i < arguments.length) { a.push(arguments[i]); i = i + 1 }
             items.push(a)
         }
+        multi.push(arguments.length > 1)
         return null
     })])
+    var blk = rbBlockOf(args)
+    if (blk !== null && rbaEnumSpreads(name)) {
+        var k = [0]
+        var spread = js_rblkwrap(function() {
+            var it = k[0]
+            k[0] = it + 1
+            var b = []
+            var i = 0
+            while (i < arguments.length) { b.push(arguments[i]); i = i + 1 }
+            if (it < items.length && multi[it] && b.length == 1 && b[0] === items[it]) { return blk.apply(undefined, items[it]) }
+            return blk.apply(undefined, b)
+        })
+        var sargs = rbPosArgs(args)
+        sargs.push(spread)
+        return rbDelegArr(items, t, name, sargs)
+    }
     return rbDelegArr(items, t, name, args)
+}
+// obj.method(name) for such a method. Twin of the Enumerable arm of the
+// "method" case in abnf/jsrt.go and of mcall in ruby-interpreter.abnf.
+function rbEnumMethodVal(recv, name) {
+    var w = function() {
+        var args = []
+        var i = 0
+        while (i < arguments.length) { args.push(arguments[i]); i = i + 1 }
+        return rbMethod(recv, name, args)
+    }
+    return rbMarkMethodVal(w, rbOwnerName(recv) + "(Enumerable)", name)
+}
+// Module#instance_method on a user class: an UnboundMethod carrying __rubm (the
+// name), __rown (the owner text of its #inspect) and __rcls (the class). Twins:
+// mkUnbound in ruby-interpreter.abnf, rubyMkUnbound in abnf/jsrtruby.go.
+function rbMkUnbound(cls, n) {
+    var own = ""
+    var nm = rbStr(cls["__name"])
+    if (rbFindMethod({__class: cls}, n) !== undefined) {
+        own = nm
+    } else if (rbEnumName(n) && rbAncestorHas(cls, rbBuiltinClass("Enumerable"))) {
+        own = nm + "(Enumerable)"
+    }
+    if (own == "") { rbNameErr("NameError", "undefined method `" + n + "' for class `" + nm + "'", n, cls) }
+    return {__class: rbBuiltinClass("UnboundMethod"), __rubm: n, __rown: own, __rmod: own != nm, __rcls: cls}
+}
+// #name, #to_s and #bind, which answers the Method the receiver's #method would.
+// A class's method binds only to an instance of it; a module's binds to any
+// value, and then the Method keeps the UnboundMethod's owner. Twins:
+// unboundMethod in ruby-interpreter.abnf, rubyUnboundMethod in abnf/jsrtruby.go.
+function rbUnboundMethod(u, name, args) {
+    if (name == "name") { return rbSym(u["__rubm"]) }
+    if (name == "to_s") { return rbInspect(u) }
+    if (name == "bind") {
+        var recv = rbArgAt(args, 0)
+        var bn = u["__rubm"]
+        if (u["__rmod"] === true && !rbEnumAnswers(recv, bn)) {
+            var w = function() {
+                var wa = []
+                var i = 0
+                while (i < arguments.length) { wa.push(arguments[i]); i = i + 1 }
+                return rbMethod(recv, bn, wa)
+            }
+            return rbMarkMethodVal(w, u["__rown"], bn)
+        }
+        if (!rbIsA(recv, u["__rcls"])) { rbRaiseErr(name, "TypeError", "bind argument must be an instance of " + rbStr(u["__rcls"]["__name"])) }
+        return rbMethod(recv, "method", [rbSym(u["__rubm"])])
+    }
+    rbNoMethod(u, name)
+    return null
+}
+// A zip / chain argument as an Array: itself, or what #to_a answers for a value
+// that responds to each; null for anything else. Twins: enumArgArr in
+// ruby-interpreter.abnf, rubyEnumArgArr in abnf/jsrtrubystr.go.
+function rbEnumArgArr(v) {
+    if (rbIsArr(v)) { return v }
+    if (rtIsNil(v) || js_rrespond(v, [rbSym("each")]) !== true) { return null }
+    var r = rbMethod(v, "to_a", [])
+    if (rbIsArr(r)) { return r }
+    return null
 }
 
 // The receiver as a NoMethodError / NameError message names it. Twin of

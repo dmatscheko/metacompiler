@@ -1416,6 +1416,103 @@ def s154
   end
   check("num154c", h == [1.5, 1.25, true])
 end
+# ===== SECTION 155: Enumerable's grep / chunk / slice / chain; multi-value yields; Enumerable Methods =====
+# Array, Range, Hash and an includer of Enumerable answer member?, grep, grep_v,
+# minmax_by, slice_before / slice_after, chunk and chain; each_slice / each_cons
+# with a block answer nil (MRI 2.6); zip takes any value that responds to each.
+# A `yield a, b` reaches the block of map / flat_map / count / find_index /
+# take_while / uniq / all? as two values and the block of select / reject /
+# partition as one Array. An includer without #each fails on each; a Method or
+# UnboundMethod of an Enumerable method is owned by `C(Enumerable)'.
+class P155
+  include Enumerable
+  def each
+    yield 1, 2
+    yield 3, 4
+    yield
+  end
+end
+class B155
+  include Enumerable
+  def initialize(*a); @a = a; end
+  def each
+    @a.each { |x| yield x }
+    self
+  end
+end
+class N155
+  include Enumerable
+end
+def s155
+  a = [3, 1, 2, 5]
+  r = begin
+    [a.member?(2), a.member?(7), a.grep(1..2), a.grep(1..2) { |x| x * 10 }, a.grep_v(1..2),
+     %w[ab cd ax].grep(/a/), [1, "a", :b, 2.0].grep(Integer), a.minmax_by { |x| -x }, [].minmax_by { |x| x },
+     [[1, :a], [1, :b], [2, :c], [2, :d]].minmax_by { |x| x[0] },
+     a.slice_before { |x| x.even? }.to_a, a.slice_before(2).to_a, a.slice_after { |x| x.even? }.to_a,
+     a.slice_after(1).to_a, a.chunk { |x| x.odd? }.to_a, a.chain([9]).to_a, a.chain([9], 7..8).to_a]
+  rescue NoMethodError
+    nil
+  end
+  check("ary155a", r == [true, false, [1, 2], [10, 20], [3, 5], ["ab", "ax"], [1], [5, 1], [nil, nil], [[1, :a], [2, :c]],
+                         [[3, 1], [2, 5]], [[3, 1], [2, 5]], [[3, 1, 2], [5]], [[3, 1], [2, 5]],
+                         [[true, [3, 1]], [false, [2]], [true, [5]]], [3, 1, 2, 5, 9], [3, 1, 2, 5, 9, 7, 8]])
+  c = begin
+    [[3, 1, 4].chunk { |v| v == 1 ? :_alone : true }.to_a, [3, 1, 4].chunk { |v| v == 1 ? :_separator : v.odd? }.to_a,
+     [3, 1, 4].chunk { |v| v == 1 ? nil : true }.to_a, (begin; [1].chunk { :_x }.to_a; rescue RuntimeError => e; e.message; end),
+     (1..4).grep(2..3), (1..4).minmax_by { |x| -x }, (1..4).slice_before(&:odd?).to_a, {a: 1, b: 2}.grep(Array),
+     {a: 1}.member?(:a), [3, 1].chunk { |v| v }.class, [1, 2].chain([3]).map { |x| x * 2 }, [1, 2].chain([3]).size,
+     [1].respond_to?(:grep_v), (1..2).respond_to?(:chain), {}.respond_to?(:slice_after)]
+  rescue NoMethodError
+    nil
+  end
+  check("ary155b", c == [[[true, [3]], [:_alone, [1]], [true, [4]]], [[true, [3]], [false, [4]]], [[true, [3]], [true, [4]]],
+                         "symbols beginning with an underscore are reserved", [2, 3], [4, 1], [[1, 2], [3, 4]],
+                         [[:a, 1], [:b, 2]], true, Enumerator, [2, 4, 6], 3, true, true, true])
+  check("ary155c", [1].each_slice(2) {}.nil? && (1..3).each_slice(2) {}.nil? && {a: 1}.each_slice(2) {}.nil? &&
+                   [1, 2].each_cons(1) {}.nil? && (1..3).each_cons(2) {}.nil?)
+  b = B155.new(3, 1, 2)
+  z = begin
+    [b.zip(b), b.zip([4, 5, 6], b), [1, 2].zip(3..4), [1, 2].zip({a: 1}), [1, 2].zip([5].each), [1, 2].zip(b),
+     (begin; [1].zip(7); rescue TypeError => e; e.message; end), b.member?(2), b.grep(1..2), b.minmax_by { |x| -x },
+     b.chunk { |x| x.odd? }.to_a, b.chain([9]).to_a, b.slice_before { |x| x == 1 }.to_a, b.each_slice(2) {}]
+  rescue NoMethodError
+    nil
+  end
+  check("enm155a", z == [[[3, 3], [1, 1], [2, 2]], [[3, 4, 3], [1, 5, 1], [2, 6, 2]], [[1, 3], [2, 4]], [[1, [:a, 1]], [2, nil]],
+                         [[1, 5], [2, nil]], [[1, 3], [2, 1]], "wrong argument type Integer (must respond to :each)",
+                         true, [1, 2], [3, 1], [[true, [3, 1]], [false, [2]]], [3, 1, 2, 9], [[3], [1, 2]], nil])
+  pr = P155.new
+  y = [pr.map { |x| x }, pr.map { |x, w| w }, pr.select { |x| x }, pr.to_a, pr.flat_map { |x| [x] }, pr.count { |x| x == 3 },
+       pr.find_index { |x| x == 3 }, pr.take_while { |x| x }, pr.uniq { |x| x }, pr.reject { |x| x.nil? },
+       pr.each_with_object([]) { |x, acc| acc << x }, pr.partition { |x| x }, pr.all? { |x| x.is_a?(Integer) },
+       pr.to_h { |x| [x, 0] }]
+  check("enm155b", y == [[1, 3, nil], [2, 4, nil], [[1, 2], [3, 4]], [[1, 2], [3, 4], nil], [1, 3, nil], 1, 1,
+                         [[1, 2], [3, 4]], [[1, 2], [3, 4], nil], [[1, 2], [3, 4]], [[1, 2], [3, 4], nil],
+                         [[[1, 2], [3, 4]], [nil]], false, {1 => 0, 3 => 0, nil => 0}])
+  ne = begin
+    N155.new.map { |x| x }
+    nil
+  rescue NoMethodError => e
+    [e.name, e.message.start_with?("undefined method `each' for #<N155")]
+  end
+  check("enm155c", ne == [:each, true] && N155.new.respond_to?(:map))
+  u = begin
+    um = B155.instance_method(:map)
+    [b.method(:map).inspect, b.method(:map).call { |x| x * 2 }, b.method(:map).name, b.method(:each_slice).call(2).to_a,
+     um.inspect, um.to_s, um.name, um.class, um.bind(b).call { |x| x + 1 }, B155.instance_method(:each).inspect,
+     (begin; B155.instance_method(:nope); rescue NameError => e; [e.name, e.message]; end),
+     (begin; B155.instance_method(:each).bind(5); rescue TypeError => e; e.message; end), um.bind(5).inspect,
+     [1, 2].method(:map).call { |x| x * 3 },
+     B155.instance_method(:each).bind(b).call { |x| x }.equal?(b)]
+  rescue NameError
+    nil
+  end
+  check("mth155a", u == ["#<Method: B155(Enumerable)#map>", [6, 2, 4], :map, [[3, 1], [2]],
+                         "#<UnboundMethod: B155(Enumerable)#map>", "#<UnboundMethod: B155(Enumerable)#map>", :map,
+                         UnboundMethod, [4, 2, 3], "#<UnboundMethod: B155#each>", [:nope, "undefined method `nope' for class `B155'"],
+                         "bind argument must be an instance of B155", "#<Method: B155(Enumerable)#map>", [3, 6], true])
+end
 s122() # SECTION-CALL 122
 s123() # SECTION-CALL 123
 s124() # SECTION-CALL 124
@@ -1449,5 +1546,6 @@ s151() # SECTION-CALL 151
 s152() # SECTION-CALL 152
 s153() # SECTION-CALL 153
 s154() # SECTION-CALL 154
+s155() # SECTION-CALL 155
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

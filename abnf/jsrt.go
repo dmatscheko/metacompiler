@@ -8146,6 +8146,9 @@ func (rt *jsrt) rubyMemberCall(target interface{}, name string, args []interface
 			if fd, isIO := o.props["__rio"].(float64); isIO {
 				return rt.rubyIOMethod(o, int(fd), name, args)
 			}
+			if _, isUM := o.props["__rubm"]; isUM {
+				return rt.rubyUnboundMethod(o, name, args)
+			}
 			if n, isEnc := o.props["__renc"].(string); isEnc {
 				switch name {
 				case "name", "to_s":
@@ -9597,6 +9600,9 @@ func (rt *jsrt) rubyStr(v interface{}) string {
 		if n, isEnc := t.props["__renc"].(string); isEnc {
 			return n
 		}
+		if _, isUM := t.props["__rubm"]; isUM {
+			return rt.rubyInspect(t)
+		}
 		// A plain instance with no #to_s of its own. MRI writes
 		// `#<A:0x00007f... @x=1>'; the address is its own and cannot be matched,
 		// so the address and the instance variables are left off rather than
@@ -9902,6 +9908,9 @@ func (rt *jsrt) rubyInspect(v interface{}) string {
 		}
 		if n, isEnc := t.props["__renc"].(string); isEnc {
 			return "#<Encoding:" + n + ">"
+		}
+		if n, isUM := t.props["__rubm"].(string); isUM {
+			return "#<UnboundMethod: " + rt.rubyStr(t.props["__rown"]) + "#" + n + ">"
 		}
 		// A Regexp / MatchData answers from the regexp half's own table.
 		if rxIsRegexObj(t) || rxIsMatchObj(t) {
@@ -11644,7 +11653,7 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 					return vals.elems[i]
 				}
 				return rt.rubyHashDefault(o, argAt(args, 0))
-			case "include?", "has_key?", "key?":
+			case "include?", "member?", "has_key?", "key?":
 				return rt.rubyDictFind(keys, argAt(args, 0)) >= 0
 			case "each":
 				epos, eblk := rubyBlockArgs(args)
@@ -11774,6 +11783,10 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 					rt.rubyHook(o, "method_added", jsSym{s: nm})
 					return jsSym{s: nm}
 				}
+			case "instance_method":
+				if _, builtin := o.props["__rbuiltin"]; objIsCls && !builtin {
+					return rt.rubyMkUnbound(o, rt.rubyStr(argAt(args, 0)))
+				}
 			case "instance_methods":
 				if pos, _ := rubyBlockArgs(args); objIsCls && len(pos) > 0 && !rubyTruthy(pos[0]) {
 					return rubyOwnIMethods(o)
@@ -11793,10 +11806,18 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 				if _, userHas := rubyFindMethod(o, "method"); !userHas {
 					nm := rt.rubyStr(argAt(args, 0))
 					m, found := rubyFindMethod(o, nm)
+					recv := interface{}(o)
+					// An Enumerable method the class takes from the module: MRI's
+					// owner is written `Bag(Enumerable)'.
+					if !found && rt.rubyEnumAnswers(o, nm) {
+						return rt.rubyMarkMethodVal(&hostFunc{name: "method:" + nm,
+							fn: func(rt *jsrt, this uint64, a []interface{}) interface{} {
+								return rt.rubyMethod(recv, nm, a)
+							}}, rubyOwnerName(recv)+"(Enumerable)", nm)
+					}
 					if !found {
 						rt.rubyRaiseErr(name, "NameError", "undefined method `"+nm+"' for class `"+rubyOwnerName(o)+"'")
 					}
-					recv := interface{}(o)
 					f := &hostFunc{name: "method:" + nm,
 						fn: func(rt *jsrt, this uint64, a []interface{}) interface{} {
 							return rt.rubyMethod(recv, nm, a)
@@ -12636,7 +12657,8 @@ func rubyHashEnumName(n string) bool {
 		"any?", "none?", "one?", "first", "take", "drop", "take_while",
 		"drop_while", "each_slice", "each_cons", "empty?", "tally", "zip",
 		"each_entry", "assoc", "uniq", "reverse", "freeze", "itself",
-		"find_all", "cycle", "chunk_while", "lazy":
+		"find_all", "cycle", "chunk_while", "lazy", "grep", "grep_v", "minmax_by",
+		"slice_before", "slice_after", "chunk", "chain":
 		return true
 	}
 	return false
@@ -13181,7 +13203,7 @@ func rubyArrWantsBlock(n string) bool {
 	case "map", "collect", "map!", "collect!", "select", "filter", "find_all", "select!",
 		"filter!", "reject", "reject!", "keep_if", "delete_if", "sort_by",
 		"sort_by!", "group_by", "partition", "flat_map", "collect_concat",
-		"find", "detect", "min_by", "max_by", "take_while", "drop_while":
+		"find", "detect", "min_by", "max_by", "take_while", "drop_while", "minmax_by", "chunk":
 		return true
 	}
 	return false
@@ -13277,7 +13299,7 @@ func (rt *jsrt) rubyArrayMethod(t *jsArray, name string, args []interface{}) int
 		return v
 	case "unshift", "prepend":
 		return rubyArrReplace(t, append(append([]interface{}{}, pos...), t.elems...))
-	case "include?", "contains":
+	case "include?", "member?", "contains":
 		// Array#include? is ==, not === and not eql?: `[[1]].include?([1])` and
 		// `[1].include?(1.0)` are both true in MRI. A plain scan and not the dict
 		// index, because an ordinary data array must not grow a key index just to
@@ -13632,10 +13654,16 @@ func (rt *jsrt) rubyArrayMethod(t *jsArray, name string, args []interface{}) int
 	// short one with nil; the result is always as long as the RECEIVER.
 	case "zip":
 		out := &jsArray{}
+		zargs := make([]*jsArray, len(pos))
+		for j, a := range pos {
+			if zargs[j] = rt.rubyEnumArgArr(a); zargs[j] == nil {
+				rt.rubyRaiseErr(name, "TypeError", "wrong argument type "+rubyOwnerName(a)+" (must respond to :each)")
+			}
+		}
 		for i, e := range t.elems {
 			row := &jsArray{elems: []interface{}{e}}
-			for _, a := range pos {
-				if za, isArr := a.(*jsArray); isArr && i < len(za.elems) {
+			for _, za := range zargs {
+				if za != nil && i < len(za.elems) {
 					row.elems = append(row.elems, za.elems[i])
 				} else {
 					row.elems = append(row.elems, jsNull)
@@ -13651,10 +13679,9 @@ func (rt *jsrt) rubyArrayMethod(t *jsArray, name string, args []interface{}) int
 			return jsNull
 		}
 		return out
-	// each_slice / each_cons: with a block they yield each group and answer SELF
-	// (Ruby 3.1 changed this from nil, and this project's corpus is Ruby 3); with
-	// no block MRI answers an Enumerator, which has no value here, so they answer
-	// the array of groups - what .to_a on that Enumerator would give.
+	// each_slice / each_cons: with a block they yield each group and answer nil
+	// (MRI 2.6; 3.1 answers the receiver); with no block, an Enumerator over the
+	// groups.
 	case "each_slice", "each_cons":
 		n := int(math.Trunc(rubyToF(argAt(pos, 0))))
 		if n < 1 {
@@ -13680,7 +13707,9 @@ func (rt *jsrt) rubyArrayMethod(t *jsArray, name string, args []interface{}) int
 		for _, g := range groups.elems {
 			rt.call(blk, jsUndef, []interface{}{g})
 		}
-		return t
+		return jsNull
+	case "grep", "grep_v", "minmax_by", "slice_before", "slice_after", "chunk", "chain":
+		return rt.rubyArrEnumMore(t, name, pos, blk)
 	// sample / shuffle. There is no random source in this project and there cannot
 	// be one the engines agree on byte-for-byte (see rubyRand, which is
 	// deterministically zero), so these are the DETERMINISTIC draw: sample takes

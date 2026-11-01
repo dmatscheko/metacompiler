@@ -197,6 +197,79 @@ function rbaChunks(t, keep) {
     return out
 }
 
+// The Enumerable methods whose block MRI 2.6 hands a multi-value `yield a, b` of
+// #each as the values themselves rather than packed into one Array: `map { |x| }`
+// sees a, `select { |x| }` sees [a, b]. Measured against /usr/bin/ruby per method.
+// Go twin: rubyEnumSpreads in abnf/jsrtrubystr.go.
+function rbaEnumSpreads(n) {
+    return n == "map" || n == "collect" || n == "flat_map" || n == "collect_concat"
+        || n == "find_index" || n == "all?" || n == "any?" || n == "none?" || n == "one?"
+        || n == "count" || n == "take_while" || n == "uniq" || n == "to_h"
+}
+
+// Enumerable#slice_before / #slice_after, given whether each element matched:
+// a match opens a new slice before it, or closes the current one after it.
+function rbaSliceAt(t, hit, after) {
+    var out = []
+    var cur = []
+    var i = 0
+    while (i < t.length) {
+        if (!after && hit[i] && cur.length > 0) {
+            out.push(cur)
+            cur = []
+        }
+        cur.push(t[i])
+        if (after && hit[i]) {
+            out.push(cur)
+            cur = []
+        }
+        i = i + 1
+    }
+    if (cur.length > 0) { out.push(cur) }
+    return out
+}
+
+// Enumerable#chunk, given each element's block value and its kind: 0 an ordinary
+// key, 1 dropped (nil or :_separator), 2 a chunk of its own (:_alone). Runs of
+// ordinary keys that eq calls equal share one [key, [elements]] chunk; a dropped
+// element ends the run.
+function rbaChunk(t, keys, kinds, eq) {
+    var out = []
+    var cur = anytype
+    cur = null
+    var i = 0
+    while (i < t.length) {
+        if (kinds[i] == 1) {
+            cur = null
+        } else if (kinds[i] == 2) {
+            out.push([keys[i], [t[i]]])
+            cur = null
+        } else if (cur !== null && eq(cur[0], keys[i])) {
+            cur[1].push(t[i])
+        } else {
+            cur = [keys[i], [t[i]]]
+            out.push(cur)
+        }
+        i = i + 1
+    }
+    return out
+}
+
+// Enumerable#minmax_by over [key, element] pairs: the first element of the least
+// key and the first of the greatest, as cmp orders keys.
+function rbaMinMaxBy(kp, cmp) {
+    if (kp.length == 0) { return [null, null] }
+    var lo = 0
+    var hi = 0
+    var i = 1
+    while (i < kp.length) {
+        if (cmp(kp[i][0], kp[lo][0]) < 0) { lo = i }
+        if (cmp(kp[i][0], kp[hi][0]) > 0) { hi = i }
+        i = i + 1
+    }
+    return [kp[lo][1], kp[hi][1]]
+}
+
 // The [begin, end) Array#fill writes on an array of n (rb_ary_fill): a negative
 // start counts from the end (clamped to 0), an absent one is 0, an absent length
 // runs to the end; null when the length is negative. end may lie past n, which
