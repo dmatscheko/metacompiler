@@ -1311,6 +1311,7 @@ func init() {
 		}
 		m["js_ktfill"] = func(a []uint64) uint64 {
 			dst, src := u(a[0]), u(a[1])
+			gone := rt.ktViewGone(dst, src)
 			if da, ok := dst.(*jsArray); ok {
 				if sa, ok := src.(*jsArray); ok {
 					if len(da.elems) != len(sa.elems) || rt.truthy(u(a[2])) {
@@ -1318,6 +1319,7 @@ func init() {
 					}
 					da.elems = append([]interface{}{}, sa.elems...)
 					da.dropIdx()
+					rt.ktViewWrite(dst, gone)
 					return a[0]
 				}
 			}
@@ -1333,6 +1335,7 @@ func init() {
 					if len(dk.elems) != n {
 						dk.mod++
 					}
+					rt.ktViewWrite(dst, gone)
 					return a[0]
 				}
 			}
@@ -5694,17 +5697,18 @@ func (rt *jsrt) ktSeqMethodK(o *jsArray, name string, args []interface{}, kind s
 		if len(args) == 1 && isCallable(f) {
 			var hit interface{} = jsUndef
 			n := 0
+			// The second match ends the walk: the predicate is not called again.
 			for i := 0; rt.ktIterMore(ck, o, i); i++ {
 				e := o.elems[i]
 				if rt.truthy(rt.ktCall(f, e)) {
+					if n > 0 {
+						rt.ktRaise("IllegalArgumentException", ktPredWord(kind)+" contains more than one matching element.")
+					}
 					hit, n = e, n+1
 				}
 			}
 			if n == 0 {
 				rt.ktNoMatch(ktPredWord(kind))
-			}
-			if n > 1 {
-				rt.ktRaise("IllegalArgumentException", ktPredWord(kind)+" contains more than one matching element.")
 			}
 			return hit, true
 		}
@@ -5716,13 +5720,16 @@ func (rt *jsrt) ktSeqMethodK(o *jsArray, name string, args []interface{}, kind s
 		}
 		return es[0], true
 	// singleOrNull: the one element (matching the predicate), or null for none or
-	// more than one.
+	// more than one; the second match ends the walk.
 	case "singleOrNull":
 		var one interface{} = jsNull
 		n := 0
 		for i := 0; rt.ktIterMore(ck, o, i); i++ {
 			e := o.elems[i]
 			if len(args) == 0 || rt.truthy(rt.ktCall(f, e)) {
+				if n > 0 {
+					return jsNull, true
+				}
 				one, n = e, n+1
 			}
 		}
@@ -8319,6 +8326,39 @@ func (rt *jsrt) ktViewWrite(view interface{}, gone []interface{}) {
 			ktMapDropAt(mk, mv, at)
 		}
 	}
+}
+
+// ktViewGone is the elements of a map's view dst that src lacks, counted as a
+// multiset, which js_ktfill takes out of the map; nil when dst is no map view. A
+// view cannot grow: its add is java's AbstractCollection.add, an
+// UnsupportedOperationException. Twin of kViewGone in kotlin-interpreter.abnf and
+// ktViewGone in languages/lib/kotlin-rt.metajs.
+func (rt *jsrt) ktViewGone(dst, src interface{}) []interface{} {
+	owner, linked := ktViewOwner(dst)
+	if _, _, isDict := dictParts(owner); !linked || !isDict {
+		return nil
+	}
+	rest := append([]interface{}{}, ktElems(rt, src)...)
+	gone := []interface{}{}
+	for _, e := range ktElems(rt, dst) {
+		at := -1
+		for j, r := range rest {
+			if rt.ktEqVals(r, e) {
+				at = j
+				break
+			}
+		}
+		if at < 0 {
+			gone = append(gone, e)
+		} else {
+			rest[at] = rest[len(rest)-1]
+			rest = rest[:len(rest)-1]
+		}
+	}
+	if len(rest) > 0 {
+		rt.ktRaiseV("UnsupportedOperationException", jsNull)
+	}
+	return gone
 }
 
 // ktViewOwner is the collection a map view (ktMapView) or a linked array

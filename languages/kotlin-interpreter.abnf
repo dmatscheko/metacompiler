@@ -1402,13 +1402,25 @@ AddExpr     <~~ push(foldBinary(kAdoptPlus(takeAll(), up.in, up.start))) ~~>
 MulExpr     <~~ push(foldBinary(takeAll())) ~~>
             = UnaryExpr { ( "*" | "/" | "%" ) <~~ push(up.in) ~~> UnaryExpr } ;
 
-UnaryExpr   = { Annotation } ( PreIncDec | PreIncRef | Neg | Not | PostfixExpr ) ;
+UnaryExpr   = { Annotation } ( PreIncDec | PreCallIncDec | PreIncRef | Neg | Not | PostfixExpr ) ;
 // PREFIX ++x / --x. Kotlin has both fixities and they differ in their VALUE: the postfix
 // form yields the old value, the prefix form the new one (`var i = 1; println(++i)`
 // prints 2, `println(i++)` prints 1). It must precede Neg, or `--a` reads as a double
 // negation - which quietly gives the right answer for a number and never assigns.
 PreIncDec   <~~ push(makePreIncDec(takeAll())) ~~>
-            = ( "++" | "--" ) <~~ push(up.in) ~~> Target NotDblColon ;
+            = ( "++" | "--" ) <~~ push(up.in) ~~> Target NotDblColon NoCallParen ;
+// `++f(x).w` - the operand is a postfix chain through a call, which Target cannot root,
+// so PreIncDec declines on the call's `(` and the chain is read whole here.
+PreCallIncDec <~~ var ch = pop(); push(makeCallAssign([ch, pop(), null], up.pos, false)) ~~>
+            = ( "++" | "--" ) <~~ push(up.in) ~~> CallChain NotDblColon ;
+NoCallParen = :script(~~
+    (function() {
+        var i = 0
+        var cc = c.peek(i)
+        while (cc === 32 || cc === 9) { i++; cc = c.peek(i) }
+        return (cc === 40) ? abnf.newToken("\x01call-paren-follows", 0) : undefined
+    })()
+~~) ;
 // `++a::b` is a prefix operator applied to a CALLABLE REFERENCE, not to the target `a`
 // with a stray `::b` after it - psi/DoubleColon.txt makes it one PREFIX_EXPRESSION over
 // a CALLABLE_REFERENCE_EXPRESSION. Target would happily match the `a` and leave the
@@ -1437,8 +1449,11 @@ IncDec      <~~ push(makeIncDec(takeAll())) ~~>
 // trailing lambda - list.map { it * 2 } - which becomes the last argument.
 // A trailing "!!" (non-null assertion) is the identity on a non-null value and throws
 // NullPointerException on null (NnSfx; x!!.m() still chains).
-CallMember  <~~ ktAt = up.start; push(foldCallMember(takeAll(), up.in)) ~~>
-            = Primary { MethodSfx | SafeMethodSfx | FieldSfx | SafeFieldSfx | IndexSfx | GenericSfx | DotAnonSfx | InvokeSfx | RefSfx | NnSfx } ;
+// A trailing `++`/`--` on the chain's line steps its last slot - `f(x).w++`, which
+// IncDec's Target cannot root (kFoldPostfix hands it to makeCallAssign).
+CallMember  <~~ ktAt = up.start; push(kFoldPostfix(takeAll(), up.in, up.pos)) ~~>
+            = Primary { MethodSfx | SafeMethodSfx | FieldSfx | SafeFieldSfx | IndexSfx | GenericSfx | DotAnonSfx | InvokeSfx | RefSfx | NnSfx }
+              [ SameLine ( "++" | "--" ) <~~ push({incdec: up.in}) ~~> ] ;
 NnSfx       <~~ push({kind: "nn"}) ~~>
             = "!!" ;
 // A callable reference or class literal whose RECEIVER is an arbitrary expression:
@@ -4604,11 +4619,12 @@ NotMemberKw = :script(~~
     function kLastBy(es, f, n0, kind) {
         var hit = anytype
         hit = null
+        var le = anytype
         if (kind == "Collection") {
-            for (var i = 0; kForNext(es, i, n0); i++) { if (f(es[i])) { hit = {i: i, v: es[i]} } }
+            for (var i = 0; kForNext(es, i, n0); i++) { le = es[i]; if (f(le)) { hit = {i: i, v: le} } }
             return hit
         }
-        for (var j = es.length - 1; kForPrev(j, n0); j--) { if (f(es[j])) { return {i: j, v: es[j]} } }
+        for (var j = es.length - 1; kForPrev(j, n0); j--) { le = es[j]; if (f(le)) { return {i: j, v: le} } }
         return hit
     }
     function kForAt(src, i) { return kIsCursor(src) ? src.cur : src[i] }
@@ -6932,6 +6948,9 @@ NotMemberKw = :script(~~
         var f = args.length > 0 ? args[0] : null
         var i
         var out
+        // A lambda's element is read ONCE, before the call (kotlin-stdlib's
+        // `for (element in this)`), so a lambda that writes the list does not change it.
+        var ke = anytype
         // A member taking a lambda runs the receiver's iterator, which fails fast
         // when the lambda changes the collection (kForNext / kForPrev).
         var n0 = anytype
@@ -6956,7 +6975,7 @@ NotMemberKw = :script(~~
         }
         if (name == "filter") {
             out = []
-            for (i = 0; kForNext(es, i, n0); i++) { if (f(es[i])) { out.push(es[i]) } }
+            for (i = 0; kForNext(es, i, n0); i++) { ke = es[i]; if (f(ke)) { out.push(ke) } }
             return {v: out}
         }
         if (name == "forEach") {
@@ -6979,7 +6998,7 @@ NotMemberKw = :script(~~
         }
         if (name == "first") {
             if (args.length == 1 && typeof f == "function") {
-                for (i = 0; kForNext(es, i, n0); i++) { if (f(es[i])) { return {v: es[i]} } }
+                for (i = 0; kForNext(es, i, n0); i++) { ke = es[i]; if (f(ke)) { return {v: ke} } }
                 kNoMatch(kPredWord(kind))
             }
             if (es.length == 0) { kNoElemKind(kind) }
@@ -6999,9 +7018,16 @@ NotMemberKw = :script(~~
                 var hit = anytype
                 hit = undefined
                 var nhit = 0
-                for (i = 0; kForNext(es, i, n0); i++) { if (f(es[i])) { hit = es[i]; nhit++ } }
+                // The second match ends the walk: the predicate is not called again.
+                for (i = 0; kForNext(es, i, n0); i++) {
+                    ke = es[i]
+                    if (f(ke)) {
+                        if (nhit > 0) { kRaise("IllegalArgumentException", kPredWord(kind) + " contains more than one matching element.") }
+                        hit = ke
+                        nhit++
+                    }
+                }
                 if (nhit == 0) { kNoMatch(kPredWord(kind)) }
-                if (nhit > 1) { kRaise("IllegalArgumentException", kPredWord(kind) + " contains more than one matching element.") }
                 return {v: hit}
             }
             if (es.length == 0) { kNoElemKind(kind) }
@@ -7010,19 +7036,24 @@ NotMemberKw = :script(~~
         }
         if (name == "firstOrNull") {
             if (args.length == 1 && typeof f == "function") {
-                for (i = 0; kForNext(es, i, n0); i++) { if (f(es[i])) { return {v: es[i]} } }
+                for (i = 0; kForNext(es, i, n0); i++) { ke = es[i]; if (f(ke)) { return {v: ke} } }
                 return {v: null}
             }
             return {v: es.length == 0 ? null : es[0]}
         }
         // singleOrNull: the one element (matching the predicate), or null for none or
-        // more than one.
+        // more than one; the second match ends the walk.
         if (name == "singleOrNull") {
             var one = anytype
             one = null
             var none = 0
             for (i = 0; kForNext(es, i, n0); i++) {
-                if (args.length == 0 || f(es[i])) { one = es[i]; none++ }
+                ke = es[i]
+                if (args.length == 0 || f(ke)) {
+                    if (none > 0) { return {v: null} }
+                    one = ke
+                    none++
+                }
             }
             return {v: none == 1 ? one : null}
         }
@@ -7037,7 +7068,7 @@ NotMemberKw = :script(~~
             return {v: es.length == 0 ? null : es[es.length - 1]}
         }
         if (name == "find") {
-            for (i = 0; kForNext(es, i, n0); i++) { if (f(es[i])) { return {v: es[i]} } }
+            for (i = 0; kForNext(es, i, n0); i++) { ke = es[i]; if (f(ke)) { return {v: ke} } }
             return {v: null}
         }
         if (name == "all") {
@@ -7134,13 +7165,13 @@ NotMemberKw = :script(~~
         }
         if (name == "filterNot") {
             out = []
-            for (i = 0; kForNext(es, i, n0); i++) { if (!f(es[i])) { out.push(es[i]) } }
+            for (i = 0; kForNext(es, i, n0); i++) { ke = es[i]; if (!f(ke)) { out.push(ke) } }
             return {v: out}
         }
         if (name == "partition") {
             var yes = []
             var no = []
-            for (i = 0; kForNext(es, i, n0); i++) { if (f(es[i])) { yes.push(es[i]) } else { no.push(es[i]) } }
+            for (i = 0; kForNext(es, i, n0); i++) { ke = es[i]; if (f(ke)) { yes.push(ke) } else { no.push(ke) } }
             return {v: kPair(yes, no)}
         }
         // unzip: a list of Pairs into the Pair of its firsts and its seconds.
@@ -7326,7 +7357,7 @@ NotMemberKw = :script(~~
             var am = kMakeMap()
             for (i = 0; kForNext(es, i, n0); i++) {
                 if (name == "associateWith") { kMapPut(am, es[i], f(es[i])); continue }
-                if (name == "associateBy") { kMapPut(am, f(es[i]), kValueOf(args, es[i])); continue }
+                if (name == "associateBy") { ke = es[i]; kMapPut(am, f(ke), kValueOf(args, ke)); continue }
                 var pr = anytype
                 pr = (name == "toMap") ? es[i] : f(es[i])
                 if (!kIsPair(pr)) { fail(name + "() needs a Pair") }
@@ -7393,7 +7424,7 @@ NotMemberKw = :script(~~
         if (name == "filterIndexed" || name == "filterNotIndexed") {
             out = []
             for (i = 0; kForNext(es, i, n0); i++) {
-                if (f(i, es[i]) != (name == "filterNotIndexed")) { out.push(es[i]) }
+                ke = es[i]; if (f(i, ke) != (name == "filterNotIndexed")) { out.push(ke) }
             }
             return {v: out}
         }
@@ -8503,7 +8534,9 @@ NotMemberKw = :script(~~
             if (name == "filter") {
                 out = []
                 var ln0 = kIterN0(tgt, tgtKind)
-                for (i = 0; kForNext(tgt, i, ln0); i++) { if (args[0](tgt[i])) out.push(tgt[i]) }
+                // The element is read once, before the lambda runs (kSeqMethodK).
+                var fe = anytype
+                for (i = 0; kForNext(tgt, i, ln0); i++) { fe = tgt[i]; if (args[0](fe)) out.push(fe) }
                 return kKindOut(tgt, name, out, tgtKind)
             }
             if (name == "forEach") {
@@ -9370,15 +9403,17 @@ NotMemberKw = :script(~~
     // calls stay observable; the left side is evaluated first (as Kotlin evaluates
     // the receiver of a plusAssign before its argument).
     // items = [{chain}, op, rhs]. The chain is the unfolded postfix expression, so the
-    // last step can be split off as the slot to write.
-    function makeCallAssign(items, pos) {
+    // last step can be split off as the slot to write. An increment `f(x).w++` arrives
+    // with op "++"/"--" and no rhs; `post` says it yields the old value, not the new one.
+    function makeCallAssign(items, pos, post) {
         var chain = items[0].chain
         var op = items[1]
         var rhsT = items[2]
+        var step = (rhsT == null) ? ((op == "++") ? 1 : -1) : 0
         var last = chain[chain.length - 1]
         if (chain.length > 1 && last != undefined && last != null && (last.kind == "field" || last.kind == "index")) {
             var baseT = foldCallMember(chain.slice(0, chain.length - 1))
-            var valSt = (op == "=" || last.kind != "field") ? 0 : 0 - 1
+            var valSt = (op == "=" || step != 0 || last.kind != "field") ? 0 : 0 - 1
             return function() {
                 if (valSt < 0) { valSt = ktMemberIsVal("", last.name) ? 1 : 0 }
                 // makeAssign's order: receiver, index, the slot's current value for
@@ -9391,19 +9426,29 @@ NotMemberKw = :script(~~
                 var old = anytype
                 if (last.kind == "field") {
                     if (op != "=") { old = kGetField(obj, last.name) }
-                    v = rhsT()
-                    if (op != "=") { v = kCompoundOp(op, old, v, valSt == 1) }
+                    if (step != 0) { v = kStep(old, step) } else {
+                        v = rhsT()
+                        if (op != "=") { v = kCompoundOp(op, old, v, valSt == 1) }
+                    }
+                    // A val changed in place is not assigned (makeAssign).
+                    if (valSt == 1 && v === old && old !== null && typeof old == "object") { return v }
                     kSetField(obj, last.name, v)
                 } else {
                     var ix = anytype
                     ix = last.idx()
                     if (op != "=") { old = kIndex(obj, ix) }
-                    v = rhsT()
-                    if (op != "=") { v = kCompoundOp(op, old, v, false) }
+                    if (step != 0) { v = kStep(old, step) } else {
+                        v = rhsT()
+                        if (op != "=") { v = kCompoundOp(op, old, v, false) }
+                    }
                     kSetIndex(obj, ix, v)
                 }
-                return v
+                return (post === true) ? old : v
             }
+        }
+        if (step != 0) {
+            notImpl("increment of a computed target", pos)
+            return foldCallMember(chain)
         }
         // The chain ends in a CALL, so it is not a slot. A compound operator is then
         // Kotlin's plusAssign/minusAssign/... convention on the resulting object; a
@@ -9433,6 +9478,16 @@ NotMemberKw = :script(~~
             }
             return m.apply(undefined, [recv, rv])
         }
+    }
+    // CallMember's fold: a trailing {incdec} item makes the chain before it an
+    // increment target, everything else is an ordinary member chain.
+    function kFoldPostfix(items, txt, pos) {
+        var n = items.length
+        var lastIt = items[n - 1]
+        if (n > 1 && lastIt != null && typeof lastIt == "object" && lastIt.incdec != undefined) {
+            return makeCallAssign([{chain: items.slice(0, n - 1)}, lastIt.incdec, null], pos, true)
+        }
+        return foldCallMember(items, txt)
     }
     function assignConv(op) {
         if (op == "+=") { return "plusAssign" }
@@ -11303,33 +11358,51 @@ NotMemberKw = :script(~~
     // ArrayList.addAll counts even an empty addition; a set's moves when its size
     // does. Twin of js_ktfill in abnf/jsrtkotlin.go and languages/lib/kotlin-rt.metajs.
     function kFill(dst, src, add) {
+        var gone = kViewGone(dst, src)
         if (Array.isArray(dst) && Array.isArray(src)) {
             var es = src.slice(0)
             if (es.length != dst.length || add) { arrModBump(dst) }
             kArrSetTo(dst, es)
-            return dst
-        }
-        if (kIsSet(dst) && kIsSet(src)) {
+        } else if (kIsSet(dst) && kIsSet(src)) {
             var ks = src.keys.slice(0)
             var n = dst.keys.length
             kArrSetTo(dst.keys, [])
             for (var j = 0; j < ks.length; j++) { kSetAdd(dst, ks[j]) }
             if (dst.keys.length != n) { arrModBump(dst.keys) }
-            return dst
-        }
-        // A map drops the keys src lacks and puts src's entries, so its
-        // modification count moves only for a structural change (java.util's
-        // remove / putAll).
-        if (kIsMap(dst) && kIsMap(src)) {
+        } else if (kIsMap(dst) && kIsMap(src)) {
+            // A map drops the keys src lacks and puts src's entries, so its
+            // modification count moves only for a structural change (java.util's
+            // remove / putAll).
             var mk = src.keys.slice(0)
             var mv = src.vals.slice(0)
             for (var d = dst.keys.length - 1; d >= 0; d--) {
                 if (kMapFind(src, dst.keys[d]) < 0) { kMapDropAt(dst, d) }
             }
             for (var k = 0; k < mk.length; k++) { kMapPut(dst, mk[k], mv[k]) }
-            return dst
+        } else {
+            return src
         }
-        return src
+        if (gone !== null) { kViewWrite(dst, gone) }
+        return dst
+    }
+    // The elements of a map's view dst that src lacks, counted as a multiset, which
+    // kFill takes out of the map; null when dst is no map view. A view cannot grow:
+    // its add is java's AbstractCollection.add, an UnsupportedOperationException.
+    // Twin of ktViewGone in abnf/jsrtkotlin.go and languages/lib/kotlin-rt.metajs.
+    function kViewGone(dst, src) {
+        var ow = anytype
+        ow = kViewOwner(dst)
+        if (ow === dst || !kIsMap(ow)) { return null }
+        var rest = kElems(src).slice(0)
+        var de = kElems(dst)
+        var gone = []
+        for (var i = 0; i < de.length; i++) {
+            var at = 0 - 1
+            for (var j = 0; j < rest.length && at < 0; j++) { if (kEqVals(rest[j], de[i])) { at = j } }
+            if (at < 0) { gone.push(de[i]) } else { rest[at] = rest[rest.length - 1]; rest.pop() }
+        }
+        if (rest.length > 0) { kThrowExc("UnsupportedOperationException", null) }
+        return gone
     }
     // Write a plain (path-less) assignment target, delegate-aware, in one scope walk.
     function kSetName(name, op, v, isVal) {
@@ -12857,6 +12930,9 @@ NotMemberKw = :script(~~
             if (op != "=") { old = kReadSlot(p) }
             v = valT()
             if (op != "=") { v = kCompoundOp(op, old, v, valSt == 1) }
+            // A val changed in place (plusAssign / minusAssign) is not assigned: a map's
+            // keys view written back would land as a field of the map.
+            if (valSt == 1 && v === old && old !== null && typeof old == "object") { return v }
             if (p.isIndex) { kSetIndex(p.obj, p.key, v) } else { kSetField(p.obj, p.key, v) }
             return v
         }

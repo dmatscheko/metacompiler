@@ -252,10 +252,12 @@ function ktAssignIsVal(ref, at) {
     return ktMemberIsVal(ktBaseName(ktFieldChainType(ref.name, at, names)), key)
 }
 // Whether property `name` of class `cls` is a val; for a class not known here, or
-// one that inherits the property, whether every property of that name is.
+// one that inherits the property, whether every property of that name is. A
+// property no class here declares belongs to a library type - Map.keys / values /
+// entries - and those are vals, so `m.keys -= k` is minusAssign (a remove).
 function ktMemberIsVal(cls, name) {
     var l = ktMemberVars["$" + name]
-    if (l == undefined) { return false }
+    if (l == undefined) { return true }
     var e = cls == "" ? undefined : ktClassExt["$" + cls]
     if (e != undefined) {
         for (var i = 0; i < l.length; i++) { if (e.from <= l[i].at && l[i].at <= e.to) { return !l[i].vr } }

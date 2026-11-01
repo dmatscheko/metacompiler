@@ -6498,6 +6498,66 @@ fun sec145() {
                       l.removeIf { it % 2 == 0 } && l.toString() == "[1, 3]")
 }
 
+// ===== SECTION 146: ++ / -- of a slot reached through a call =====
+// `rec(p).w++` steps the property of the call's result: the call runs once, the
+// postfix form yields the old value and the prefix form the new one, and an index
+// slot or a `?.` step (skipped on null) works the same way.
+class R146(var w: Int, var c: Char = 'a')
+var calls146 = 0
+fun rec146(p: R146, s: String): R146 { calls146++; return p }
+fun arr146(a: IntArray) = a
+fun nul146(p: R146?): R146? = p
+fun sec146() {
+    val p = R146(1)
+    rec146(p, "R").w++
+    check("inc146a", p.w == 2 && calls146 == 1)
+    val y = 10 + rec146(p, "R").w--
+    val z = ++rec146(p, "R").w
+    check("inc146b", y == 12 && z == 2 && p.w == 2 && calls146 == 3)
+    val a = intArrayOf(5, 6)
+    arr146(a)[1]++
+    val q = --arr146(a)[0]
+    check("inc146c", a.joinToString() == "4, 7" && q == 4)
+    nul146(null)?.w++
+    nul146(p)?.w++
+    rec146(p, "c").c++
+    check("inc146d", p.w == 3 && p.c == 'b')
+}
+
+// ===== SECTION 147: compound assignment to a view, and lambdas over a changing list =====
+// `m.keys -= k` is minusAssign on the val keys view: a remove that writes through to
+// the map, and `m.keys += k` is the view's add, an UnsupportedOperationException. A
+// lambda's element is read before the lambda runs, so a lambda that writes the list
+// does not change what filter / partition / first answer, and single /
+// singleOrNull stop at the second match. Every row is java 24's LinkedHashMap /
+// ArrayList driven through kotlin-stdlib 2.2.21.
+fun sec147() {
+    val x = m145()
+    x.keys -= 2
+    val x2 = m145()
+    x2.values -= "a"
+    var uoe = ""
+    try { x2.keys += 7 } catch (e: UnsupportedOperationException) { uoe = "UOE " + e.message }
+    check("view147a", "$x $x2 $uoe" == "{1=a, 3=a} {2=b, 3=a} UOE null")
+    val c = mutableListOf(1, 2, 3)
+    val r = mutableListOf<String>()
+    r.add("" + c.filter { c[0] = 5; true }); c[0] = 1
+    r.add("" + c.filterNot { c[0] = 5; false }); c[0] = 1
+    r.add("" + c.partition { c[0] = 5; true }); c[0] = 1
+    r.add("" + c.first { c[0] = 5; true }); c[0] = 1
+    r.add("" + c.find { c[0] = 5; true }); c[0] = 1
+    r.add("" + c.filterIndexed { _, _ -> c[0] = 5; true }); c[0] = 1
+    r.add("" + c.associateBy({ c[0] = 5; it }, { it })); c[0] = 1
+    r.add("" + c.last { c[2] = 9; true })
+    check("lam147b", r.joinToString(" ") == "[1, 2, 3] [1, 2, 3] ([1, 2, 3], []) 1 1 [1, 2, 3] {1=1, 2=2, 3=3} 3")
+    var n = 0
+    var msg = ""
+    try { listOf(1, 2, 3, 4).single { n++; it > 1 } } catch (e: IllegalArgumentException) { msg = "" + e.message }
+    var n2 = 0
+    val so = listOf(1, 2, 3, 4).singleOrNull { n2++; it > 1 }
+    check("one147c", n == 3 && msg == "Collection contains more than one matching element." && so == null && n2 == 3)
+}
+
 fun main() {
     s01() // SECTION-CALL 01
     s02() // SECTION-CALL 02
@@ -6640,6 +6700,8 @@ fun main() {
     sec143() // SECTION-CALL 143
     sec144() // SECTION-CALL 144
     sec145() // SECTION-CALL 145
+    sec146() // SECTION-CALL 146
+    sec147() // SECTION-CALL 147
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }

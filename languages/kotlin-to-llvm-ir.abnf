@@ -1384,7 +1384,7 @@ AsExpr      <~~ push(applyTypeOp(takeAll())) ~~> = UnaryExpr { AsSfx } ;
 // A leading annotation on an EXPRESSION - when (@Ann "") { ... }, @Ann x += f() -
 // is legal wherever an expression starts. Annotations are erased, so an annotated
 // expression IS the expression; AnnExpr pushes nothing of its own.
-UnaryExpr   = AnnExpr | PreIncDecRef | PreIncDec | Neg | Not | PostfixExpr ;
+UnaryExpr   = AnnExpr | PreIncDecRef | PreIncDec | PreCallIncDec | Neg | Not | PostfixExpr ;
 // `++a::b` is `++(a::b)` - `::` binds tighter than the prefix operator - so the operand
 // is a callable reference, not the assignable Target that PreIncDec wants.
 // psi/DoubleColon.kt spells it next to `-a::b` and `a+b::c`; the reference has no
@@ -1397,8 +1397,19 @@ PreIncDecRef <~~ takeAll(); push(notImplExpr("callable reference on an increment
 // reads as a double negation - which quietly gives the right answer for a number and
 // never assigns. The twin of PreIncDec in kotlin-interpreter.abnf.
 PreIncDec   <~~ push(makePreIncDec(takeAll())) ~~>
-            = ( "++" | "--" ) <~~ push(up.in) ~~> Target ;
-AnnExpr     = Annotation { Annotation } UnaryExpr ;
+            = ( "++" | "--" ) <~~ push(up.in) ~~> Target NoCallParen ;
+// `++f(x).w` - a chain through a call. Twin of PreCallIncDec in kotlin-interpreter.abnf.
+PreCallIncDec <~~ var ch = pop(); push(makeCallAssign([ch, pop(), null], up.pos, false)) ~~>
+            = ( "++" | "--" ) <~~ push(up.in) ~~> CallChain ;
+NoCallParen = :script(~~
+    (function() {
+        var i = 0
+        var cc = c.peek(i)
+        while (cc === 32 || cc === 9) { i++; cc = c.peek(i) }
+        return (cc === 40) ? abnf.newToken("\x01call-paren-follows", 0) : undefined
+    })()
+~~) ;
+AnnExpr    = Annotation { Annotation } UnaryExpr ;
 Neg         <~~ push(kNegFold(pop(), up.in)) ~~>
             = "-" UnaryExpr ;
 // The operand of a prefix `!` must be on the `!`'s own line. Kotlin ends the statement
@@ -1420,8 +1431,11 @@ IncDec      <~~ push(makeIncDec(takeAll())) ~~>
 // trailing lambda - list.map { it * 2 } - which becomes the last argument.
 // A trailing "!!" (non-null assertion) is the identity on a non-null value and throws
 // NullPointerException on null (NnSfx; x!!.m() still chains).
-CallMember  <~~ ktAt = up.start; push(foldCallMember(takeAll(), up.in)) ~~>
-            = Primary { MethodSfx | SafeMethodSfx | FieldSfx | SafeFieldSfx | IndexSfx | GenericSfx | DotAnonSfx | InvokeSfx | RefSfx | NnSfx } ;
+// A trailing `++`/`--` steps the chain's last slot - `f(x).w++`. Twin of CallMember in
+// kotlin-interpreter.abnf.
+CallMember  <~~ ktAt = up.start; push(kFoldPostfix(takeAll(), up.in, up.pos)) ~~>
+            = Primary { MethodSfx | SafeMethodSfx | FieldSfx | SafeFieldSfx | IndexSfx | GenericSfx | DotAnonSfx | InvokeSfx | RefSfx | NnSfx }
+              [ SameLine ( "++" | "--" ) <~~ push({incdec: up.in}) ~~> ] ;
 // A callable reference or class literal whose RECEIVER is an arbitrary expression:
 // `X()::class`, `object {}::class`, `foo()::bar`. CallableRef in Primary covers only a
 // dotted NAME on the left (`a.b::c`), so these three lines of psi/DoubleColon.kt need
@@ -5558,6 +5572,16 @@ KwContract  = "contract" KwEnd ;
         callExt(b, "js_ktset", [p.obj, p.key, v])
         return b
     }
+    // A val changed in place (plusAssign / minusAssign) is not assigned: the write is
+    // skipped when the compound answered the old value itself. Twin of the `v === old`
+    // test in makeAssign of kotlin-interpreter.abnf.
+    function emitValWrite(b, p, v, old) {
+        var wB = curF.NewBlock("")
+        var jB = curF.NewBlock("")
+        b.NewCondBr(b.NewICmp(llvm.enum.IPredNE, v, old), wB, jB)
+        emitSlotWrite(wB, p, v).NewBr(jB)
+        return jB
+    }
     // The path step naming the member an assignment writes through: the last step
     // when it is `.name`, the one before a final `[i]` when that is; -1 otherwise.
     function ktAssignMemberAt(ref) {
@@ -5692,7 +5716,7 @@ KwContract  = "contract" KwEnd ;
                     }
                     nr = emitNewVal(b, oldM, isVal)
                     v = nr.v
-                    b = emitSlotWrite(nr.b, p, v)
+                    b = isVal ? emitValWrite(nr.b, p, v, oldM) : emitSlotWrite(nr.b, p, v)
                 }
                 var sj = emitSafeJoin(b, v, p)
                 b = sj.b
@@ -5705,11 +5729,13 @@ KwContract  = "contract" KwEnd ;
     // items = [{chain}, op, rhs]. The chain is UNFOLDED, so the last step can be split
     // off as the slot to write. The twin of makeCallAssign in kotlin-interpreter.abnf,
     // including the evaluation ORDER of makeAssign: receiver, index, the slot's
-    // current value for `op=`, then the right-hand side.
-    function makeCallAssign(items, pos) {
+    // current value for `op=`, then the right-hand side. An increment arrives with op
+    // "++"/"--" and no rhs; `post` says it yields the old value, not the new one.
+    function makeCallAssign(items, pos, post) {
         var chain = items[0].chain
         var op = items[1]
         var rhsT = items[2]
+        var step = (rhsT == null) ? ((op == "++") ? 1 : 0 - 1) : 0
         var last = chain[chain.length - 1]
         if (chain.length > 1 && last != undefined && last != null && (last.kind == "field" || last.kind == "index")) {
             var baseT = foldCallMember(chain.slice(0, chain.length - 1))
@@ -5732,6 +5758,7 @@ KwContract  = "contract" KwEnd ;
                     keyVs = ir.vs
                 }
                 var emitNewVal = function(b2, old, isV) {
+                    if (step != 0) { return {b: b2, v: callExt(b2, "js_ktstep", [old, emitNum(b2, step)])} }
                     var rv = rhsT(b2)
                     if (op == "=") { return rv }
                     return emitCompound(rv.b, op, old, rv.v, isV)
@@ -5739,11 +5766,12 @@ KwContract  = "contract" KwEnd ;
                 var v = hUndef
                 var nr = null
                 if (isField && memberExtPropResolves(fname)) {
-                    nr = emitNewVal(bb, (op != "=") ? bb.NewCall(rtMextGet(), [curScopeV, objV, keyV]) : hUndef, false)
+                    var oldX = (op != "=") ? bb.NewCall(rtMextGet(), [curScopeV, objV, keyV]) : hUndef
+                    nr = emitNewVal(bb, oldX, false)
                     bb = nr.b
                     v = nr.v
                     bb.NewCall(rtMextSet(), [curScopeV, objV, keyV, v])
-                    return emitSafeJoin(bb, v, sp)
+                    return emitSafeJoin(bb, (post === true) ? oldX : v, sp)
                 }
                 // A top-level extension property's SETTER - a computed `set(v) { ... }`
                 // or a delegated extension property's setValue forwarder. Without this
@@ -5765,7 +5793,7 @@ KwContract  = "contract" KwEnd ;
                     callExt(bb, "js_arr_push", [sargsV, objV])
                     callExt(bb, "js_arr_push", [sargsV, v])
                     callExt(bb, "js_call", [sV, hUndef, sargsV])
-                    return emitSafeJoin(bb, v, sp)
+                    return emitSafeJoin(bb, (post === true) ? oldE : v, sp)
                 }
                 var slot = {obj: objV, key: keyV, keys: keyVs, isIndex: !isField}
                 var oldM = hUndef
@@ -5774,10 +5802,16 @@ KwContract  = "contract" KwEnd ;
                     bb = rm.b
                     oldM = rm.v
                 }
-                nr = emitNewVal(bb, oldM, isField && ktMemberIsVal("", fname))
+                var isV = isField && op != "=" && step == 0 && ktMemberIsVal("", fname)
+                nr = emitNewVal(bb, oldM, isV)
                 v = nr.v
-                return emitSafeJoin(emitSlotWrite(nr.b, slot, v), v, sp)
+                var wb = isV ? emitValWrite(nr.b, slot, v, oldM) : emitSlotWrite(nr.b, slot, v)
+                return emitSafeJoin(wb, (post === true) ? oldM : v, sp)
             }
+        }
+        if (step != 0) {
+            notImpl("increment of a computed target", pos)
+            return foldCallMember(chain)
         }
         // The chain ends in a CALL, so it is not a slot: not implemented as a write,
         // but both sides are emitted so their calls stay observable, and the left side
@@ -5790,6 +5824,16 @@ KwContract  = "contract" KwEnd ;
             var r1 = rhsT(r0.b)
             return {b: r1.b, v: r1.v}
         }
+    }
+    // CallMember's fold: a trailing {incdec} item makes the chain before it an
+    // increment target. Twin of kFoldPostfix in kotlin-interpreter.abnf.
+    function kFoldPostfix(items, txt, pos) {
+        var n = items.length
+        var lastIt = items[n - 1]
+        if (n > 1 && lastIt != null && typeof lastIt == "object" && lastIt.incdec != undefined) {
+            return makeCallAssign([{chain: items.slice(0, n - 1)}, lastIt.incdec, null], pos, true)
+        }
+        return foldCallMember(items, txt)
     }
     // ++ / -- keep the type of what they step (js_ktstep): a Double stays a Double,
     // a Char stays a Char, and a sized integer steps at its own WIDTH - which is what

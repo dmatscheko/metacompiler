@@ -2331,9 +2331,12 @@ function js_ktinv(v) {
 // TreeSet / TreeMap re-sorts as it fills), and answers dst; any other dst
 // answers src. The modification count moves as jsrtkotlin.go's comment says.
 function js_ktfill(dst, src, add) {
+    var gone = anytype
+    gone = ktViewGone(dst, src)
     if (ktIsArr(dst) && ktIsArr(src)) {
         if (dst.length != src.length || add === true) { arrModBump(dst) }
         k3Replace(dst, src)
+        if (gone !== undefined) { k4ViewWrite(dst, gone) }
         return dst
     }
     var dk = ktSetElems(dst)
@@ -2345,6 +2348,7 @@ function js_ktfill(dst, src, add) {
         var i = 0
         for (i = 0; i < es.length; i = i + 1) { ktSetAdd(dst, es[i]) }
         if (dk.length != n) { arrModBump(dk) }
+        if (gone !== undefined) { k4ViewWrite(dst, gone) }
         return dst
     }
     var mk = ktMapKeys(dst)
@@ -2362,6 +2366,29 @@ function js_ktfill(dst, src, add) {
         return dst
     }
     return src
+}
+
+// ktViewGone (jsrtkotlin.go): the elements of a map's view dst that src lacks, as a
+// multiset, or undefined when dst is no map view; a view cannot grow
+// (UnsupportedOperationException).
+function ktViewGone(dst, src) {
+    var ow = k4ViewOwner(dst)
+    if (ow === dst || ktMapKeys(ow) === undefined) { return undefined }
+    var rest = k3Copy(ktElems(src))
+    var de = ktElems(dst)
+    var gone = []
+    var i = 0
+    var j = 0
+    var at = 0
+    for (i = 0; i < de.length; i = i + 1) {
+        at = -1
+        for (j = 0; j < rest.length && at < 0; j = j + 1) {
+            if (ktEqVals(rest[j], de[i])) { at = j }
+        }
+        if (at < 0) { gone.push(de[i]) } else { rest[at] = rest[rest.length - 1]; rest.pop() }
+    }
+    if (rest.length > 0) { ktRaise("UnsupportedOperationException", null) }
+    return gone
 }
 
 // jsrtkotlin.go js_ktstep (880). ++ / -- keep the type of what they step, which
@@ -4656,7 +4683,8 @@ function ktSeqMethodK(arr, name, args, kind) {
     }
     if (name == "filter") {
         for (i = 0; k4IterMore(ck, es, i); i = i + 1) {
-            if (k3Truthy(ktCall1(f, es[i]))) { out.push(es[i]) }
+            e = es[i]
+            if (k3Truthy(ktCall1(f, e))) { out.push(e) }
         }
         return out
     }
@@ -4694,7 +4722,8 @@ function ktSeqMethodK(arr, name, args, kind) {
         if (args.length == 1) {
             if (ktIsFn(f)) {
                 for (i = 0; k4IterMore(ck, es, i); i = i + 1) {
-                    if (k3Truthy(ktCall1(f, es[i]))) { return es[i] }
+                    e = es[i]
+                    if (k3Truthy(ktCall1(f, e))) { return e }
                 }
                 ktNoMatch(ktPredWord(kind))
             }
@@ -4720,14 +4749,16 @@ function ktSeqMethodK(arr, name, args, kind) {
             if (ktIsFn(f)) {
                 best = undefined
                 n = 0
+                // The second match ends the walk: the predicate is not called again.
                 for (i = 0; k4IterMore(ck, es, i); i = i + 1) {
-                    if (k3Truthy(ktCall1(f, es[i]))) {
-                        best = es[i]
+                    e = es[i]
+                    if (k3Truthy(ktCall1(f, e))) {
+                        if (n > 0) { ktRaise("IllegalArgumentException", ktPredWord(kind) + " contains more than one matching element.") }
+                        best = e
                         n = n + 1
                     }
                 }
                 if (n == 0) { ktNoMatch(ktPredWord(kind)) }
-                if (n > 1) { ktRaise("IllegalArgumentException", ktPredWord(kind) + " contains more than one matching element.") }
                 return best
             }
         }
@@ -4736,13 +4767,15 @@ function ktSeqMethodK(arr, name, args, kind) {
         return es[0]
     }
     // singleOrNull: the one element (matching the predicate), or null for none or
-    // more than one.
+    // more than one; the second match ends the walk.
     if (name == "singleOrNull") {
         best = null
         n = 0
         for (i = 0; k4IterMore(ck, es, i); i = i + 1) {
-            if (args.length == 0 || k3Truthy(ktCall1(f, es[i]))) {
-                best = es[i]
+            e = es[i]
+            if (args.length == 0 || k3Truthy(ktCall1(f, e))) {
+                if (n > 0) { return null }
+                best = e
                 n = n + 1
             }
         }
@@ -4753,7 +4786,8 @@ function ktSeqMethodK(arr, name, args, kind) {
         if (args.length == 1) {
             if (ktIsFn(f)) {
                 for (i = 0; k4IterMore(ck, es, i); i = i + 1) {
-                    if (k3Truthy(ktCall1(f, es[i]))) { return es[i] }
+                    e = es[i]
+                    if (k3Truthy(ktCall1(f, e))) { return e }
                 }
                 return null
             }
@@ -4777,7 +4811,8 @@ function ktSeqMethodK(arr, name, args, kind) {
     }
     if (name == "find") {
         for (i = 0; k4IterMore(ck, es, i); i = i + 1) {
-            if (k3Truthy(ktCall1(f, es[i]))) { return es[i] }
+            e = es[i]
+            if (k3Truthy(ktCall1(f, e))) { return e }
         }
         return null
     }
@@ -4889,14 +4924,16 @@ function ktSeqMethodK(arr, name, args, kind) {
     }
     if (name == "filterNot") {
         for (i = 0; k4IterMore(ck, es, i); i = i + 1) {
-            if (!k3Truthy(ktCall1(f, es[i]))) { out.push(es[i]) }
+            e = es[i]
+            if (!k3Truthy(ktCall1(f, e))) { out.push(e) }
         }
         return out
     }
     if (name == "partition") {
         oth = []
         for (i = 0; k4IterMore(ck, es, i); i = i + 1) {
-            if (k3Truthy(ktCall1(f, es[i]))) { out.push(es[i]) } else { oth.push(es[i]) }
+            e = es[i]
+            if (k3Truthy(ktCall1(f, e))) { out.push(e) } else { oth.push(e) }
         }
         return {first: out, second: oth}
     }
@@ -5079,7 +5116,7 @@ function ktSeqMethodK(arr, name, args, kind) {
     }
     if (name == "associateBy") {
         mp = ktMakeMap()
-        for (i = 0; k4IterMore(ck, es, i); i = i + 1) { ktMapPut(mp, ktCall1(f, es[i]), k3ValueOf(args, es[i])) }
+        for (i = 0; k4IterMore(ck, es, i); i = i + 1) { e = es[i]; ktMapPut(mp, ktCall1(f, e), k3ValueOf(args, e)) }
         return mp
     }
     if (name == "toMap") {
@@ -5676,8 +5713,10 @@ function k3FilterNotNull(es, req) {
 function k3FilterIndexed(es, f, invert, ck) {
     var out = []
     var i = 0
+    var e = anytype
     for (i = 0; k4IterMore(ck, es, i); i = i + 1) {
-        if (k3Truthy(ktCall2(f, i, es[i])) !== invert) { out.push(es[i]) }
+        e = es[i]
+        if (k3Truthy(ktCall2(f, i, e)) !== invert) { out.push(e) }
     }
     return out
 }
@@ -6378,14 +6417,17 @@ function k4LastBy(es, f, ck, kind) {
     var hit = anytype
     hit = null
     var i = 0
+    var e = anytype
     if (kind == "Collection") {
         for (i = 0; k4IterMore(ck, es, i); i = i + 1) {
-            if (k3Truthy(ktCall1(f, es[i]))) { hit = {i: i, v: es[i]} }
+            e = es[i]
+            if (k3Truthy(ktCall1(f, e))) { hit = {i: i, v: e} }
         }
         return hit
     }
     for (i = es.length - 1; k4IterPrev(ck, i); i = i - 1) {
-        if (k3Truthy(ktCall1(f, es[i]))) { return {i: i, v: es[i]} }
+        e = es[i]
+        if (k3Truthy(ktCall1(f, e))) { return {i: i, v: e} }
     }
     return hit
 }
