@@ -33,7 +33,7 @@ tickets and adds new ones.
   start probing, never as a specification: tickets have understated their defect
   and named the wrong fix before. Probe the fix as well as the defect.
 
-Next free ID: **T-1027** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
+Next free ID: **T-1028** · Last verified: `17e73c7`; round tickets filed since are [V] at the commit that filed them (all [V] tickets were probed
 against the oracle at or shortly before this commit).
 
 ## Groups and file ownership
@@ -108,10 +108,9 @@ Found by the CORE worker, round 15. The interpreter's stripWs deletes every ASCI
 strings.TrimSpace, native strips ASCII 9-13 and 32: `int.Parse(" 1 2 ")` and `int.Parse(" 1")` give three answers.
 .NET's NumberStyles.Integer allows leading/trailing white space (U+0009-U+000D, U+0020) only; settle with a real dotnet.
 
-### T-1022 c#: `ParamName` empty on runtime-thrown exceptions; unknown member of a BCL type fails late · P3 · CS · IN PROGRESS (CS worker, round 3) [V spec-only]
-Found by the CS worker, round 2 (.NET reference source). `try { char.ConvertFromUtf32(-1); } catch (ArgumentOutOfRangeException e)
-{ Console.WriteLine(e.ParamName); }` → .NET "utf32"; ours "" (every runtime throw site carries the name only inside Message).
-`string.NoSuch` / `Math.NoSuch` read as a value → C# compile error; ours a delegate that fails when called.
+### T-1027 csharp: ParamName is "" (not null) when unset; `int.Parse(null)` throws FormatException · P3 · CS · OPEN [V spec-only]
+`new ArgumentException("bad").ParamName == null` — .NET: True (ParamName is null when no name is passed); ours (all three engines): False, it prints as "". Same for ArgumentOutOfRangeException etc. constructed without a param name.
+`string s = null; int.Parse(s);` — .NET docs: ArgumentNullException with ParamName "s"; ours: FormatException "The input string was not in a correct format." in all legs (double.Parse already does the null check; csParseInt and its Go / layer-2 twins lack it; check long/short/byte/uint Parse too).
 
 # KT — Kotlin  (no kotlinc; the real stdlib jar can be driven from java:
 `~/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.21/*/kotlin-stdlib-2.2.21.jar`)
@@ -1091,6 +1090,7 @@ T-1021 go: interface dispatch to a method promoted from a defined non-struct typ
 T-1019 kotlin: toSortedSet(comparator) ignored; String range crashes llvm.Run; String coerceAtLeast/AtMost/In — DONE (KT r15, a18ed20e): TreeSet for toSortedSet(cmp)/sortedSetOf(cmp,..)/TreeSet ctor; ComparableRange/OpenEndRange values; String+Comparable coerceAtLeast/AtMost/In; user operator rangeTo/rangeUntil. Master probe vs kotlinc 2.2.21: 4 legs agree.
 T-1000 php: reference counts are never decremented (var_dump `&`, copy of an array holding a dead frame's reference) — PARTIAL→split (PHP r35, fb7351b2): refs released at normal frame exit, =& rebinding, ref-literal temporaries; var_dump & from refcount. Remainder filed as follow-up. Master spec probe (zend_array_dup_element rule): 3 legs agree.
 T-1016 java: overload resolution still counts inaccessible constructors (and probably methods) as candidates — DONE (JV r20, 2480267f): private/package-private/protected-for-new overloads and ctors dropped from static picks (JLS 6.6); pinned in java-test-multifile + imports/util/Gauge.java; master ran it under javac/java 24: passed. Runtime dispatcher (js_jvovcall) still context-blind when static types are unknown — no probe reached it.
+T-1022 c#: `ParamName` empty on runtime-thrown exceptions; unknown member of a BCL type fails late — DONE (CS r3, 9c4811dc): runtime throws set ParamName from the '(Parameter ..)' clause in all 3 engines; reading an unknown static member of Math/MathF/string/char/Enumerable fails at the read. Master spec probe: Substring(-1)/(1,5) ParamName, valid method groups Math.Abs/Sqrt/string.IsNullOrEmpty/Select(Math.Abs) all agree on 3 legs.
 
 # Settled — do not re-open
 
