@@ -69,7 +69,7 @@ Remainder of T-1028; each needs a table-size decision before work starts. CJK fa
 
 # RB — Ruby
 
-### T-1048 ruby: Enumerable over a user #each doesn't stop early; Array#* / #/ #% #** with bad operands · P3 · RB · OPEN [V]
+### T-1048 ruby: Enumerable over a user #each doesn't stop early; Array#* / #/ #% #** with bad operands · P3 · RB · IN PROGRESS (RB worker, round 43) [V]
 ruby 2.6 (found by RB r42), all three engines:
 - `class C; include Enumerable; def initialize(l);@l=l;end; def each; [1,2,3].each{|x| @l<<x; yield x}; end; end`; `log=[]; C.new(log).any?{|x| x==1}; p log` → [1]; ours [1, 2, 3]. Same for first, find, include? (→ [1]) and first(2) (→ [1, 2]), take_while. The to_a delegation runs #each to the end; needs a break out of the user's each from the collecting block.
 - `[1] * nil` → TypeError "no implicit conversion from nil to integer"; `[1] * :a` → "no implicit conversion of Symbol into Integer" (Hash/true/objects alike). Ours returns [].
