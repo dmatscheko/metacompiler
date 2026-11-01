@@ -1,9 +1,9 @@
-# Full-syntax test: Python (3.12 core grammar) - part 7, sections 199-202: the
+# Full-syntax test: Python (3.12 core grammar) - part 7, sections 199-203: the
 # data model's bound-method equality, three-argument pow's operand protocol,
-# list.sort's timsort and the utf-16, utf-32 and cp1252 codecs with the
-# surrogateescape handler. A file of its own because tests/python-test-full.py is
-# close to the step brake (-max-steps, 100M per call) of the -frozen interpreter
-# leg; see tests/python-test-full.py for the conventions.
+# list.sort's timsort and the codecs with the surrogateescape handler. A file of
+# its own because tests/python-test-full.py is close to the step brake
+# (-max-steps, 100M per call) of the -frozen interpreter leg; see
+# tests/python-test-full.py for the conventions.
 
 fails = [0]
 checks = [0]
@@ -129,10 +129,57 @@ def s202():
           and err(lambda: b"\xff".decode("utf-8", "xmlcharrefreplace"))
           == "TypeError: don't know how to handle UnicodeDecodeError in error callback")
 
+# ===== SECTION 203: utf-7, utf-8-sig, the charmap codecs and the refused names =====
+# utf-7 is RFC 2152 as CPython writes and reads it (its errors name the codec
+# "utf7"), every single-byte charmap codec decodes through its table and
+# encodes through the inverse (of two bytes for one character the higher), and
+# a codec that is not a text encoding is a LookupError naming the encoding as
+# given. Rows from CPython 3.14.
+def s203():
+    def err(f):
+        try:
+            f()
+        except Exception as e:
+            return type(e).__name__ + ": " + str(e)
+        return "none"
+    check("cdu7", "\xe9".encode("utf-7") == b"+AOk-"
+          and "a+b-c~\\ \xe9€\U0001f600 x".encode("UTF7") == b"a+-b-c+AH4AXA +AOkgrNg93gA x"
+          and b"+AOk-x+-".decode("utf-7") == "\xe9x+" and b"+2D3cAA-".decode("u7") == "\U0001f400"
+          and b"+AOk.x".decode("utf-7") == "\xe9.x" and b"a\x80b".decode("utf-7", "replace") == "a�b")
+    check("cdu7err", err(lambda: b"+AOl-".decode("utf-7"))
+          == "UnicodeDecodeError: 'utf7' codec can't decode bytes in position 0-4: non-zero padding bits in shift sequence"
+          and err(lambda: b"x+A".decode("utf-7"))
+          == "UnicodeDecodeError: 'utf7' codec can't decode bytes in position 1-2: unterminated shift sequence"
+          and err(lambda: b"+A-".decode("utf-7"))
+          == "UnicodeDecodeError: 'utf7' codec can't decode bytes in position 0-2: partial character in shift sequence"
+          and err(lambda: b"+!".decode("utf-7"))
+          == "UnicodeDecodeError: 'utf7' codec can't decode bytes in position 0-1: ill-formed sequence")
+    check("cdmap", "\xe9".encode("cp437") == b"\x82" and "\xe9".encode("mac-roman") == b"\x8e"
+          and b"\xff".decode("IBM437") == "\xa0" and "Жж".encode("koi8-r") == b"\xf6\xd6"
+          and b"\xc1".decode("cp037") == "A" and " ".encode("mac_arabic") == b"\xa0"
+          and "Ωπ".encode("greek") == b"\xd9\xf0"
+          and "ab€Ā".encode("latin2", "xmlcharrefreplace") == b"ab&#8364;&#256;")
+    check("cdmaperr", err(lambda: "€".encode("cp437"))
+          == "UnicodeEncodeError: 'charmap' codec can't encode character '\\u20ac' in position 0: character maps to <undefined>"
+          and err(lambda: b"\xa5".decode("iso8859_3"))
+          == "UnicodeDecodeError: 'charmap' codec can't decode byte 0xa5 in position 0: character maps to <undefined>"
+          and b"\x80\xa5x".decode("iso8859-3", "backslashreplace") == "\x80\\xa5x")
+    check("cdsig", "\xe9".encode("utf-8-sig") == b"\xef\xbb\xbf\xc3\xa9"
+          and b"\xef\xbb\xbf\xc3\xa9".decode("utf_8_sig") == "\xe9" and b"x\xef\xbb\xbf".decode("utf-8-sig") == "x﻿"
+          and err(lambda: b"\xef\xbb\xbf\xff".decode("utf-8-sig"))
+          == "UnicodeDecodeError: 'utf-8' codec can't decode byte 0xff in position 0: invalid start byte")
+    check("cdrefuse", err(lambda: "x".encode("Base-64"))
+          == "LookupError: 'Base-64' is not a text encoding; use codecs.encode() to handle arbitrary codecs"
+          and err(lambda: b"x".decode("hex"))
+          == "LookupError: 'hex' is not a text encoding; use codecs.decode() to handle arbitrary codecs"
+          and err(lambda: "x".encode("undefined")) == "UnicodeError: undefined encoding"
+          and err(lambda: "x".encode("utf8-sig")) == "LookupError: unknown encoding: utf8-sig")
+
 def main():
     s199() # SECTION-CALL 199
     s200() # SECTION-CALL 200
     s201() # SECTION-CALL 201
     s202() # SECTION-CALL 202
+    s203() # SECTION-CALL 203
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]

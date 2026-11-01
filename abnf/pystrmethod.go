@@ -1234,10 +1234,6 @@ func (rt *jsrt) pysEncode(s string, encV, errV interface{}) interface{} {
 	if errV != nil && errV != jsUndef && errV != jsNull {
 		errs = rt.toString(errV)
 	}
-	codec := pycdLookup(enc)
-	if codec == "" {
-		panic(&jsThrown{value: rt.pyExcInstance("LookupError", "unknown encoding: "+enc)})
-	}
 	units := strUnits(s)
 	var cps []int
 	for i := 0; i < len(units); i++ {
@@ -1248,7 +1244,7 @@ func (rt *jsrt) pysEncode(s string, encV, errV interface{}) interface{} {
 		}
 		cps = append(cps, c)
 	}
-	bs, exc, msg := pycdEncode(cps, codec, errs)
+	bs, exc, msg := pycdEncode(cps, enc, errs)
 	if exc != "" {
 		panic(&jsThrown{value: rt.pyExcInstance(exc, msg)})
 	}

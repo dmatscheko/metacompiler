@@ -968,15 +968,11 @@ func (rt *jsrt) pyBytesDecode(bs []interface{}, encV, errV interface{}) string {
 	if !isUndefOrNull(errV) {
 		errs = rt.pyString(errV)
 	}
-	codec := pycdLookup(enc)
-	if codec == "" {
-		panic(&jsThrown{value: rt.pyExcInstance("LookupError", "unknown encoding: "+enc)})
-	}
 	b := make([]int, len(bs))
 	for i, x := range bs {
 		b[i] = int(rt.toNumber(x))
 	}
-	units, exc, msg := pycdDecode(b, codec, errs)
+	units, exc, msg := pycdDecode(b, enc, errs)
 	if exc != "" {
 		panic(&jsThrown{value: rt.pyExcInstance(exc, msg)})
 	}

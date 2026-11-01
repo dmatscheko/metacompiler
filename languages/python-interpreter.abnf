@@ -6650,8 +6650,6 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (encV !== undefined && encV !== null) { enc = pstr(encV) }
         var errs = "strict"
         if (errV !== undefined && errV !== null) { errs = pstr(errV) }
-        var codec = pycdLookup(enc)
-        if (codec == "") { pyListErr("LookupError", "unknown encoding: " + enc) }
         var cps = []
         var i = 0
         while (i < s.length) {
@@ -6666,7 +6664,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             cps.push(c)
             i = i + 1
         }
-        var r = pycdEncode(cps, codec, errs)
+        var r = pycdEncode(cps, enc, errs)
         if (r.err != "") { pyListErr(r.err, r.msg) }
         return pyBytes(r.b)
     }
@@ -7363,9 +7361,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (encV !== undefined && encV !== null) { enc = pstr(encV) }
         var err = "strict"
         if (errV !== undefined && errV !== null) { err = pstr(errV) }
-        var codec = pycdLookup(enc)
-        if (codec == "") { pyListErr("LookupError", "unknown encoding: " + enc) }
-        var r = pycdDecode(bs, codec, err)
+        var r = pycdDecode(bs, enc, err)
         if (r.err != "") { pyListErr(r.err, r.msg) }
         return r.s
     }

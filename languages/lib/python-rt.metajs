@@ -5450,9 +5450,7 @@ function pyBytesDecode(bs, encV, errV) {
     if (encV !== undefined && encV !== null) { enc = pyToStr(encV) }
     var err = "strict"
     if (errV !== undefined && errV !== null) { err = pyToStr(errV) }
-    var codec = pycdLookup(enc)
-    if (codec == "") { pyRaiseExc("LookupError", "unknown encoding: " + enc) }
-    var r = pycdDecode(bs, codec, err)
+    var r = pycdDecode(bs, enc, err)
     if (r["err"] != "") { pyRaiseExc(r["err"], r["msg"]) }
     return r["s"]
 }
@@ -14442,8 +14440,6 @@ function pyStrEncode(s, encV, errV) {
     if (encV !== undefined && encV !== null) { enc = pyStr(encV) }
     var errs = "strict"
     if (errV !== undefined && errV !== null) { errs = pyStr(errV) }
-    var codec = pycdLookup(enc)
-    if (codec == "") { pyRaiseExc("LookupError", "unknown encoding: " + enc) }
     var cps = []
     var i = 0
     while (i < s.length) {
@@ -14458,7 +14454,7 @@ function pyStrEncode(s, encV, errV) {
         cps.push(c)
         i = i + 1
     }
-    var r = pycdEncode(cps, codec, errs)
+    var r = pycdEncode(cps, enc, errs)
     if (r["err"] != "") { pyRaiseExc(r["err"], r["msg"]) }
     return arrKindSet(r["b"], 17)
 }
